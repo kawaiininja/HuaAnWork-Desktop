@@ -15,13 +15,15 @@ const workspace = readJson('package.json')
 const upstream = readJson('upstream.json')
 const stablePlugin = readJson('dsh-plugin-desktop/package.json')
 const betaPlugin = readJson('dsh-plugin-desktop-beta/package.json')
+const huaanworkPlugin = readJson('dsh-plugin-huaanwork/package.json')
 const fabric = readJson('dsh-community-fabric/package.json')
 const market = readJson('dsh-community-market/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
 
 if (stablePlugin.name !== 'dsh-plugin-desktop') fail('the stable Desktop workspace must retain dsh-plugin-desktop')
 if (betaPlugin.name !== 'dsh-plugin-desktop-beta') fail('the Beta Desktop workspace must publish as dsh-plugin-desktop-beta')
-if (!['stable', 'beta'].includes(upstream.activeChannel)) fail('the pinned upstream checkout must follow a declared release channel')
+if (huaanworkPlugin.name !== 'dsh-plugin-huaanwork') fail('the HuaAnWork Desktop workspace must publish as dsh-plugin-huaanwork')
+if (!['stable', 'beta', 'huaanwork'].includes(upstream.activeChannel)) fail('the pinned upstream checkout must follow a declared release channel')
 const activeUpstream = upstream.channels?.[upstream.activeChannel]
 if (activeUpstream === undefined) fail('the active upstream channel is missing')
 
@@ -31,6 +33,7 @@ if (workspace.packageManager !== 'yarn@4.18.0') {
 if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'dsh-plugin-desktop',
   'dsh-plugin-desktop-beta',
+  'dsh-plugin-huaanwork',
   'dsh-community-fabric',
   'dsh-community-market',
 ])) {
@@ -39,6 +42,7 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', stablePlugin],
   ['dsh-plugin-desktop-beta', betaPlugin],
+  ['dsh-plugin-huaanwork', huaanworkPlugin],
   ['dsh-community-fabric', fabric],
   ['dsh-community-market', market],
 ]) {
@@ -63,6 +67,8 @@ for (const legacyFile of [
   'dsh-plugin-desktop/pnpm-workspace.yaml',
   'dsh-plugin-desktop-beta/pnpm-lock.yaml',
   'dsh-plugin-desktop-beta/pnpm-workspace.yaml',
+  'dsh-plugin-huaanwork/pnpm-lock.yaml',
+  'dsh-plugin-huaanwork/pnpm-workspace.yaml',
   'dsh-community-fabric/pnpm-lock.yaml',
   'dsh-community-fabric/pnpm-workspace.yaml',
   'dsh-community-market/pnpm-lock.yaml',
@@ -84,6 +90,7 @@ for (const [owner, manifest] of [
   ['root', workspace],
   ['stable desktop', stablePlugin],
   ['beta desktop', betaPlugin],
+  ['huaanwork desktop', huaanworkPlugin],
   ['fabric', fabric],
   ['market', market],
 ]) {
@@ -115,7 +122,7 @@ if (run('git', ['remote', 'get-url', 'origin'], upstreamDir) !== upstream.reposi
 if (upstreamPackage.version !== activeUpstream.sourceVersion) {
   fail('deepseek-harness package version differs from upstream.json')
 }
-for (const [channel, plugin] of [['stable', stablePlugin], ['beta', betaPlugin]]) {
+for (const [channel, plugin] of [['stable', stablePlugin], ['beta', betaPlugin], ['huaanwork', huaanworkPlugin]]) {
   const metadata = upstream.channels?.[channel]
   if (metadata?.package !== plugin.name) fail(`${channel} upstream metadata points at the wrong package`)
   for (const name of Object.keys(plugin.dependencies).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))) {
@@ -125,4 +132,4 @@ for (const [channel, plugin] of [['stable', stablePlugin], ['beta', betaPlugin]]
   }
 }
 
-process.stdout.write(`verify-layout: dual Desktop workspaces and upstream ${activeUpstream.commit.slice(0, 10)} are consistent\n`)
+process.stdout.write(`verify-layout: all Desktop workspaces and upstream ${activeUpstream.commit.slice(0, 10)} are consistent\n`)
