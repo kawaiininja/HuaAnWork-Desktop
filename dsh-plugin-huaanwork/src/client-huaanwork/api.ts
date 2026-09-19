@@ -20,6 +20,8 @@ const settingsFixture = {
   agents_catalog_token: '',
 }
 
+let currentSettings = { ...settingsFixture }
+
 type Stub = (params: any) => unknown
 
 const stubs: Record<string, Stub> = {
@@ -30,8 +32,11 @@ const stubs: Record<string, Stub> = {
   'auth.login': (p) => ({ state: 'logged-in', username: p?.username ?? 'dev' }),
   'auth.logout': () => ({}),
   'auth.changePassword': () => ({}),
-  'settings.get': () => ({ ...settingsFixture, models: settingsFixture.models.map((m) => ({ ...m })) }),
-  'settings.set': (p) => ({ ...settingsFixture, ...(p ?? {}), models: p?.models ?? settingsFixture.models }),
+  'settings.get': () => ({ ...currentSettings, models: currentSettings.models.map((m) => ({ ...m })) }),
+  'settings.set': (p) => {
+    currentSettings = { ...currentSettings, ...(p ?? {}), models: p?.models ?? currentSettings.models }
+    return { ...currentSettings, models: currentSettings.models.map((m) => ({ ...m })) }
+  },
   // -- 读操作:空集合 fixture(视图渲染空态) --
   'session.list': () => [],
   'session.new': () => ({ sessionId: 'huaanwork-stub' }),
@@ -68,7 +73,9 @@ const handlers = new Set<(event: RpcEvent) => void>()
 
 export async function onSidecarEvent(handler: (event: RpcEvent) => void): Promise<() => void> {
   handlers.add(handler)
-  queueMicrotask(() => handler({ event: 'sidecar/status', ready: true }))
+  queueMicrotask(() => {
+    if (handlers.has(handler)) handler({ event: 'sidecar/status', ready: true })
+  })
   return () => { handlers.delete(handler) }
 }
 

@@ -53,10 +53,12 @@ describe('api stub', () => {
     }
   })
 
-  test('settings.set 合并回显(组件从返回值重读字段)', async () => {
+  test('settings.set 合并回显且持久化至内存', async () => {
     const next = await rpcCall<any>('settings.set', { allow_network: true })
     expect(next.allow_network).toBe(true)
     expect(next.guard_mode).toBe('ask')
+    const fetched = await rpcCall<any>('settings.get')
+    expect(fetched.allow_network).toBe(true)
   })
 
   test('auth.logout / auth.changePassword 静默成功', async () => {
