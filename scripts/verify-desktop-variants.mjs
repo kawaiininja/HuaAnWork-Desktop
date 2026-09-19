@@ -6,9 +6,26 @@ const root = resolve(import.meta.dirname, '..')
 
 // oneSided 判定:huaanwork-only 的文件必须显式声明——精确路径放 oneSidedPaths,
 // 整目录/整前缀放 oneSidedPrefixes(以前缀字符串 endsWith('/') 或子串语义匹配)。
-export function isOneSided(path, oneSidedPaths, oneSidedPrefixes) {
-  if (oneSidedPaths.has(path)) return true
-  return oneSidedPrefixes.some((prefix) => path.startsWith(prefix))
+export function isOneSided(path, oneSidedPaths = [], oneSidedPrefixes = []) {
+  const hasExact = oneSidedPaths instanceof Set
+    ? oneSidedPaths.has(path)
+    : Array.isArray(oneSidedPaths)
+      ? oneSidedPaths.includes(path)
+      : false
+  if (hasExact) return true
+  const prefixes = Array.isArray(oneSidedPrefixes)
+    ? oneSidedPrefixes
+    : (oneSidedPrefixes instanceof Set ? [...oneSidedPrefixes] : [])
+  return prefixes.some((prefix) => path.startsWith(prefix))
+}
+
+export function filterDirOneSided(oneSidedPaths, dir, dirs = [dir]) {
+  const paths = oneSidedPaths instanceof Set || Array.isArray(oneSidedPaths)
+    ? [...oneSidedPaths]
+    : []
+  return paths
+    .filter((p) => dirs.length === 1 || p.startsWith(`${dir}/`))
+    .map((p) => (p.startsWith(`${dir}/`) ? p.slice(dir.length + 1) : p))
 }
 
 const PAIRS = [
@@ -63,36 +80,44 @@ const PAIRS = [
 
 function files(directory, base = directory) {
   const result = []
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name)
-    if (entry.isDirectory()) result.push(...files(path, base))
-    else if (entry.isFile()) result.push(relative(base, path).split(sep).join('/'))
+  try {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) result.push(...files(path, base))
+      else if (entry.isFile()) result.push(relative(base, path).split(sep).join('/'))
+    }
+  } catch {
+    // directory doesn't exist
   }
   return result
 }
 
-export function verifyDesktopVariants() {
+export function verifyDesktopVariants(pairs = PAIRS, baseRoot = root) {
   const differences = []
   const summary = []
 
-  for (const pair of PAIRS) {
+  for (const pair of pairs) {
     const allowedDifferences = new Set(pair.allowedDifferences)
     const oneSidedPaths = new Set(pair.oneSidedPaths)
     for (const dir of pair.dirs) {
-      const leftRoot = join(root, pair.left, dir)
-      const rightRoot = join(root, pair.right, dir)
-      const sharedPaths = new Set([...files(leftRoot), ...files(rightRoot), ...oneSidedPaths])
+      const leftRoot = join(baseRoot, pair.left, dir)
+      const rightRoot = join(baseRoot, pair.right, dir)
+      const dirOneSided = filterDirOneSided(oneSidedPaths, dir, pair.dirs)
+      const sharedPaths = new Set([...files(leftRoot), ...files(rightRoot), ...dirOneSided])
+      let excludedCount = 0
 
       for (const path of [...sharedPaths].sort()) {
         const key = `${dir}/${path}`
-        // 单目录配对(stable↔beta)保持裸文件名键;多目录配对一律用带目录前缀的键。
-        const keyed = pair.dirs.length === 1 ? path : key
-        if (allowedDifferences.has(keyed)) continue
+        if (allowedDifferences.has(key) || allowedDifferences.has(path)) {
+          excludedCount++
+          continue
+        }
         let left
         let right
         try { left = readFileSync(join(leftRoot, path), 'utf8') } catch { left = undefined }
         try { right = readFileSync(join(rightRoot, path), 'utf8') } catch { right = undefined }
-        if (isOneSided(keyed, oneSidedPaths, pair.oneSidedPrefixes)) {
+        if (isOneSided(key, oneSidedPaths, pair.oneSidedPrefixes) || isOneSided(path, oneSidedPaths, pair.oneSidedPrefixes)) {
+          excludedCount++
           if (left !== undefined || right === undefined) {
             differences.push(`[${pair.name}] ${key} (must exist only in ${pair.right})`)
           }
@@ -103,10 +128,7 @@ export function verifyDesktopVariants() {
         }
       }
 
-      const declared = pair.dirs.length === 1
-        ? allowedDifferences.size + oneSidedPaths.size
-        : [...allowedDifferences, ...oneSidedPaths].filter((entry) => entry.startsWith(`${dir}/`)).length
-      summary.push(`${pair.name} ${dir} (${String(sharedPaths.size - declared)} files)`)
+      summary.push(`${pair.name} ${dir} (${String(sharedPaths.size - excludedCount)} files)`)
     }
   }
 
@@ -115,6 +137,7 @@ export function verifyDesktopVariants() {
   }
 
   process.stdout.write(`verify-desktop-variants: ${summary.join(', ')} shared source files are aligned; all editions use isolated Host and chrome\n`)
+  return summary
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
