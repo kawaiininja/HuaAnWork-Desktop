@@ -68,10 +68,14 @@ const PAIRS = [
       // 多目录配对一律带目录前缀(见下方语义说明 1);裸文件名会导致
       // allowedDifferences.has('src/product-identity.ts') 恒为 false。
       'src/product-identity.ts',
+      'src/index.ts',
+      'src/profile.ts',
+      'src/client/index.ts',
       // huaanwork 的 portable 制品名用产品名 HuaAnWork(与其 package.json 的
       // artifactName 一致),beta 用连字符 slug DSH-Desktop-Beta;normalize 的
       // 'HuaAnWork'→'DSH Desktop Beta'(带空格)无法归一这两种形态。
       'scripts/verify-win-portable.ts',
+      'scripts/verify-profile-boot.mjs',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: ['src/client-huaanwork/', 'scripts/gen-'],

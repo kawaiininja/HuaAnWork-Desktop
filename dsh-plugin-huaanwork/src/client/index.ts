@@ -8,7 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-import { applyAdvancedShell } from './advanced-shell.ts'
+import { applyHuaanworkShell } from '../client-huaanwork/shell.ts'
 import { startRendererBootReporter } from './boot-health.ts'
 import { applyDesktopSettings } from './desktop-settings.ts'
 import { installDesktopDirectoryPickerBridge } from './directory-picker.ts'
@@ -17,6 +17,7 @@ import { applyExtendedShell } from './extended-shell.ts'
 import { installSidebarFooterStyles } from './sidebar-footer-styles.ts'
 import { desktopWindowService, provideDesktopWindow } from './window-service.ts'
 
+export { applyHuaanworkShell } from '../client-huaanwork/shell.ts'
 export { applyAdvancedShell } from './advanced-shell.ts'
 export { applyDesktopSettings } from './desktop-settings.ts'
 export { applyExtendedShell, applyFramedShell } from './extended-shell.ts'
@@ -105,6 +106,6 @@ export function apply(ctx: ClientContext): void {
       'dsh-plugin-desktop: native directory picker bridge',
     )
   }
-  if (environment.mode === 'advanced') applyAdvancedShell(ctx, environment)
+  if (environment.mode === 'advanced') applyHuaanworkShell(ctx, environment)
   if (environment.mode === 'extended') applyExtendedShell(ctx, environment, desktopSettings)
 }

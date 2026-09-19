@@ -226,11 +226,11 @@ function createHarness(
 }
 
 describe('desktop Host plugin', () => {
-  it('defaults to compatibility mode and validates both schemas', () => {
+  it('defaults the desktop settings schema to advanced and validates both schemas', () => {
     expect(Config({} as DesktopConfig)).toEqual(config)
     expect(Config({ mode: 'advanced' } as DesktopConfig)).toEqual({ ...config, mode: 'advanced' })
     expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({
-      mode: 'compatibility',
+      mode: 'advanced',
       macosMaterial: 'transparent',
       windowsMaterial: 'off',
       port: 43_120,

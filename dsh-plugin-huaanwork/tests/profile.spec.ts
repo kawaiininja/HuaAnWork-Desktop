@@ -300,8 +300,9 @@ virtualStoreDirMaxLength: 60
     expect(() => ensureDesktopProfile(home)).toThrow('dsh.profile.bundles must be an array')
   })
 
-  it('assembles the Host shell without replacing the upstream client shell', () => {
+  it('assembles the Host shell without replacing the upstream client shell in compatibility mode', () => {
     const home = temporaryHome()
+    writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: compatibility\n')
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')
     const patches = prepared.patches as Array<Record<string, unknown>>
     const inserted = patches.flatMap((patch) => {
@@ -397,6 +398,17 @@ virtualStoreDirMaxLength: 60
     expect(rows.find(row => row.id === 'desktop-profiles')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-huaanwork/profiles',
     }))
+  })
+
+  it('defaults a fresh install to advanced mode and disables the official UI rows', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const rows = composeEntries([prepared.patches])
+
+    expect(prepared.mode).toBe('advanced')
+    expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
   })
 
   it('merges a frozen LAN IPv4 snapshot into existing Web runtime trust', () => {
@@ -697,7 +709,7 @@ virtualStoreDirMaxLength: 60
     })
     expect(rows.find(row => row.id === 'desktop-shell')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-huaanwork',
-      config: expect.objectContaining({ mode: 'compatibility' }),
+      config: expect.objectContaining({ mode: 'advanced' }),
     }))
   })
 
@@ -738,8 +750,8 @@ virtualStoreDirMaxLength: 60
       config: expect.objectContaining({ dshHome: home }),
     }))
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
-    expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(false)
-    expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(false)
+    expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
   })
 
   it('keeps legacy browser intent but clamps LAN exposure when compatibility mode is selected', () => {
@@ -799,7 +811,7 @@ virtualStoreDirMaxLength: 60
     }))
   })
 
-  it('reads JSON settings and defaults an absent desktop namespace to compatibility', () => {
+  it('reads JSON settings and defaults an absent desktop namespace to advanced', () => {
     const home = temporaryHome()
     const path = join(home, 'desktop-settings.json')
     writeFileSync(path, JSON.stringify({ 'dsh-desktop': { mode: 'advanced' } }))
@@ -821,7 +833,7 @@ virtualStoreDirMaxLength: 60
       openBrowser: false,
       networkExposure: 'loopback',
     })
-    expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe('compatibility')
+    expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe('advanced')
   })
 
   it('treats legacy LAN exposure as browser access only in compatibility mode', () => {
