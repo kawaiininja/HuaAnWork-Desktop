@@ -10,6 +10,7 @@
   "workspaces": [
     "dsh-plugin-desktop",
     "dsh-plugin-desktop-beta",
+    "dsh-plugin-huaanwork",
     "dsh-community-fabric",
     "dsh-community-market"
   ],
