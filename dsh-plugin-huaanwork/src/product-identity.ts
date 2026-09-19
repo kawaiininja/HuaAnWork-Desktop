@@ -1,4 +1,4 @@
-/** Stable and Beta identities used to locate each edition's private app data. */
+/** Stable, Beta, and HuaAnWork identities used to locate each edition's private app data. */
 export const DESKTOP_RELEASE_IDENTITIES = Object.freeze({
   stable: Object.freeze({
     releaseChannel: 'stable' as const,

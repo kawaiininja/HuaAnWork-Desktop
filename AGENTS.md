@@ -28,3 +28,17 @@ This repository owns the desktop product around an unmodified DeepSeek Harness c
 - Keep graphical application launch explicit. Builds, typechecks, unit tests, and Loader smokes must remain headless-safe.
 - Commit before major changes of direction and keep the submodule pin update separate from desktop behavior changes.
 - Keep the repository topology and package-manager split consistent with the [owning Agent Note](.agents/notes/implemented/process/2026-08-15-pinned-upstream-and-isolated-yarn-workspace.md).
+
+## HuaAnWork variant (`dsh-plugin-huaanwork`)
+
+- Derived from `dsh-plugin-desktop-beta` at M1 (2026-09-19). Identity source of truth: `dsh-plugin-huaanwork/src/product-identity.ts`.
+- **Zero-touch rule**: never edit `dsh-plugin-desktop/src/` or `dsh-plugin-desktop-beta/src/` when working on the huaanwork variant; changes to shared logic go into the originating package and are then reviewed via `corepack yarn check:desktop-variants`.
+- `dsh-community-market` DSH deps are synced exclusively via the beta channel vendored runtime; `sync-vendored-runtime.mjs` intentionally skips it for the `huaanwork` channel.
+
+## Known tech debt
+
+| Item | File | Milestone |
+|------|------|-----------|
+| NSIS `artifactName` still reads `DSH-Desktop-Beta-*` | `dsh-plugin-huaanwork/package.json` L417; test pinned with `TODO(M6)` | M6 |
+| `verify:aa` concurrent process race: running `corepack yarn check` in parallel across all three workspaces occasionally causes the beta `verify:aa` step to fail (AA Host services conflict). Each workspace passes in isolation; CI strips `verify:aa` via the AA-skip step. Pre-dates M1. | `dsh-plugin-desktop-beta/scripts/verify-profile-boot.mjs` L333 | Pre-existing upstream flakiness |
+| README 仍自述为「DSH Desktop Beta 通道」并声称提供 `dsh-desktop-beta` bin 别名(事实性错误,该别名已随派生移除) | `dsh-plugin-huaanwork/README.md`, `README.zh.md` | M6 |

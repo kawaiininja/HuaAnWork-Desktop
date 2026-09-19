@@ -55,6 +55,8 @@ const otherVersions = [...new Set(
 )]
 const pluginPaths = [
   join(root, upstream.package, 'package.json'),
+  // dsh-community-market DSH deps are governed by the beta channel's vendored runtime;
+  // huaanwork inherits from the same resolved vendor tree via upstream.channels.huaanwork.
   ...(channel === 'beta' ? [join(root, 'dsh-community-market', 'package.json')] : []),
 ]
 

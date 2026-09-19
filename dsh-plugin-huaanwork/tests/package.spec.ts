@@ -892,6 +892,7 @@ describe('published package surface', () => {
       differentialPackage: false,
       shortcutName: 'HuaAnWork',
       useZip: false,
+      // TODO(M6): rename to 'HuaAnWork-${version}-${arch}-Setup.${ext}' once the Windows installer is wired up
       artifactName: 'DSH-Desktop-Beta-${version}-${arch}-Setup.${ext}',
     })
     expect(manifest.build?.linux?.icon).toBe('build/app-icon.png')
