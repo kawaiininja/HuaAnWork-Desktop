@@ -5,7 +5,7 @@ the package names, versions, and licenses for transparency.
 | Package | Version | License |
 | --- | --- | --- |
 | @agentclientprotocol/sdk | 1.4.0 | Apache-2.0 |
-| @agents-anywhere/dsh-bridge-next | 0.1.0-dev.0.desktop.ce53016f05be0.re9c8ad00 | MIT |
+| @agents-anywhere/dsh-bridge-next | 0.1.0-dev.0.desktop.ca022d9286dd0.rc4b2a1d2 | MIT |
 | @anthropic-ai/sdk | 0.123.0 | MIT |
 | @aws-crypto/sha256-browser | 5.2.0 | Apache-2.0 |
 | @aws-crypto/sha256-js | 5.2.0 | Apache-2.0 |
