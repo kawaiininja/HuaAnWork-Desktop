@@ -1,6 +1,6 @@
 import type { RpcEvent } from './rpc-types.ts'
 
-export type TreeNode = { name: string; path: string; kind: 'dir' | 'file'; children?: TreeNode[] }
+export type TreeNode = { name: string; path: string; isDir: boolean; children?: TreeNode[] }
 
 const NOT_WIRED = 'M2 打桩:此功能在 M3 接入 Host route 后可用'
 
