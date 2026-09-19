@@ -75,6 +75,8 @@ const PAIRS = [
       // artifactName 一致),beta 用连字符 slug DSH-Desktop-Beta;normalize 的
       // 'HuaAnWork'→'DSH Desktop Beta'(带空格)无法归一这两种形态。
       'scripts/verify-win-portable.ts',
+      // Task 3 复盘登记:huaanwork 在 advanced 模式禁用 ui-sidebar 与 ui-conversation,
+      // verify-profile-boot.mjs 断言组装后的 advanced Web 图,必须断言这两项不包含,与 beta 产生合法差异。
       'scripts/verify-profile-boot.mjs',
     ],
     oneSidedPaths: [],
