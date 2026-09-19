@@ -19,4 +19,7 @@ test('rejects Market imports of Desktop implementation', () => {
   assert.throws(() => verifyMarketDependencyDirection([
     ['dsh-community-market/src/index.ts', "export { runtime } from '../../dsh-plugin-desktop/src/runtime.js'\n"],
   ]), /must not import Desktop implementation/u)
+  assert.throws(() => verifyMarketDependencyDirection([
+    ['dsh-community-market/src/huaanwork.ts', "import type { DesktopRuntime } from 'dsh-plugin-huaanwork/runtime'\n"],
+  ]), /must not import Desktop implementation/u)
 })
