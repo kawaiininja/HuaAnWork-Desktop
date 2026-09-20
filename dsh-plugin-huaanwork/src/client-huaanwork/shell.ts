@@ -2,6 +2,7 @@ import React from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '../client/contracts.ts'
 import type { DesktopClientEnvironment } from '../client/environment.ts'
 import { DesktopLayoutState } from '../client/layout-state.ts'
 import { installDesktopLayout } from '../client/layout-service.ts'
@@ -49,7 +50,7 @@ export function applyHuaanworkShell(ctx: ClientContext, environment: DesktopClie
             layout: desktopLayout,
             platform: environment.platform,
             tree: React.createElement(App),
-            dragRegion: (ctx as any).desktopWindow?.dragRegion,
+            dragRegion: ctx.desktopWindow?.dragRegion,
           }),
         },
         HuaanworkApp,
