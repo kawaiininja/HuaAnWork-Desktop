@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'tsdown'
 
 const PACKAGE_NAME = 'dsh-plugin-huaanwork'
@@ -83,6 +84,17 @@ export default defineConfig([
       '@deepseek-ai/dsh-client-ui-primitives',
     ],
     noExternal: (id: string) => id.startsWith('@deepseek-ai/') ? undefined : true,
+    plugins: [
+      {
+        name: 'png-loader',
+        load(id: string) {
+          if (id.endsWith('.png')) {
+            const data = readFileSync(id).toString('base64')
+            return { code: `export default "data:image/png;base64,${data}";` }
+          }
+        },
+      },
+    ],
     outputOptions: {
       entryFileNames: 'client.js',
       banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PACKAGE_NAME)}, factory: (require) => {`,

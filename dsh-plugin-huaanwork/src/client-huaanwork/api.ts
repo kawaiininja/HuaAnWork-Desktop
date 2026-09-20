@@ -1,4 +1,5 @@
 import type { RpcEvent } from './rpc-types.ts'
+export type { RpcEvent }
 
 export type TreeNode = { name: string; path: string; isDir: boolean; children?: TreeNode[] }
 

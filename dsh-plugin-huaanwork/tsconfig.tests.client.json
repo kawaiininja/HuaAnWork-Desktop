@@ -16,6 +16,8 @@
     "tests/client-layout-service.spec.ts",
     "tests/client-sidebar-dom-anchor.spec.ts",
     "tests/theme-presenter.spec.ts",
-    "tests/client-huaanwork/**/*.spec.ts"
+    "tests/client-huaanwork-shell.spec.ts",
+    "tests/client-huaanwork/**/*.spec.ts",
+    "src/client-huaanwork"
   ]
 }

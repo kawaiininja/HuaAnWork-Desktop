@@ -35,6 +35,12 @@ export function HuaanworkFrame(props: HuaanworkFrameProps) {
   )
 }
 
-export function HuaanworkApp(props: { dragRegion?: HuaanworkFrameProps['dragRegion'], tree: ReactNode }) {
+export type HuaanworkAppProps = HuaanworkFrameProps & {
+  tree?: ReactNode
+  layout?: unknown
+  platform?: unknown
+}
+
+export function HuaanworkApp(props: HuaanworkAppProps) {
   return <HuaanworkFrame dragRegion={props.dragRegion}>{props.tree}</HuaanworkFrame>
 }
