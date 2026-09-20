@@ -14,6 +14,10 @@ const currentProvenance = existsSync(provenancePath) ? JSON.parse(readFileSync(p
 let desktopVersion
 let artifactName
 const peerPackages = ['@deepseek-ai/dsh-typert-protocol', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session']
+// Desktop variant manifests pinning the vendored bridge (stable, beta, huaanwork);
+// shared by peer-range collection and manifest rewriting so a new variant cannot
+// be silently skipped the way huaanwork was at M2.
+const desktopPackagePaths = ['dsh-plugin-desktop/package.json', 'dsh-plugin-desktop-beta/package.json', 'dsh-plugin-huaanwork/package.json']
 
 function invocation(name, args) {
   if (name === 'corepack') {
@@ -64,7 +68,7 @@ function readJson(path) {
 
 function runtimePeerRanges() {
   const values = new Map(peerPackages.map(name => [name, new Set()]))
-  for (const packagePath of ['dsh-plugin-desktop/package.json', 'dsh-plugin-desktop-beta/package.json']) {
+  for (const packagePath of desktopPackagePaths) {
     const manifest = readJson(resolve(root, packagePath))
     for (const name of peerPackages) {
       const range = manifest.dependencies?.[name]
@@ -123,7 +127,7 @@ function prepare() {
     console.log(commit === currentProvenance.commit ? 'AA is up to date.' : `Bundled AA is ${currentProvenance.commit}; an update is available.`)
     return
   }
-  const packagePaths = ['dsh-plugin-desktop/package.json', 'dsh-plugin-desktop-beta/package.json']
+  const packagePaths = desktopPackagePaths
   const peerRanges = runtimePeerRanges()
   if (currentProvenance.commit === commit && JSON.stringify(currentProvenance.runtimePeers) === JSON.stringify(peerRanges)
     && packagePaths.every(path => readJson(join(root, path)).dependencies?.['@agents-anywhere/dsh-bridge-next'] === `file:../vendor/agents-anywhere/${currentProvenance.artifact}`)
