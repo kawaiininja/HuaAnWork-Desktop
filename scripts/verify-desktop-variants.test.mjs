@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { isOneSided, filterDirOneSided, verifyDesktopVariants } from './verify-desktop-variants.mjs'
 
 test('isOneSided: 支持 Set 和 Array 类型的 oneSidedPaths', () => {
@@ -130,7 +130,9 @@ test('verifyDesktopVariants: 统计计数与差异检测 (单测模拟 fixture)'
 
 test('verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位', () => {
   const out = execFileSync(process.execPath, ['scripts/verify-desktop-variants.mjs'], {
-    cwd: new URL('..', import.meta.url).pathname,
+    // 用 import.meta.dirname 而非 new URL(...).pathname:后者对含非 ASCII 字符的
+    // 仓库路径返回百分号编码串,会让 spawnSync 因 cwd 不存在而 ENOENT。
+    cwd: resolve(import.meta.dirname, '..'),
     encoding: 'utf8',
   })
   assert.match(out, /stable↔beta src \(\d+ files\)/)
