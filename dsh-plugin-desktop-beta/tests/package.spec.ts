@@ -87,7 +87,7 @@ describe('published package surface', () => {
 
   it('runs desktop and community market tests from the root command', () => {
     expect(workspaceManifest.scripts?.test)
-      .toBe('yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test')
+      .toBe('yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test')
   })
 
   it('registers both npm launcher names', () => {
