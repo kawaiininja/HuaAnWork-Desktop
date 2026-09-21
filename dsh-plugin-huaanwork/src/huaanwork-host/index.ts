@@ -7,7 +7,7 @@ import { installNetworkGate } from './net-gate.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
 
 export const name = 'huaanwork-host'
-export const inject = ['webServer']
+export const inject = ['webServer', 'agents', 'subagents']
 
 export interface HuaanworkHostConfig {
   dshHome: string
