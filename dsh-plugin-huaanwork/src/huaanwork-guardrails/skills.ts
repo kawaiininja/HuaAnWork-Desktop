@@ -1,0 +1,429 @@
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
+
+export const name = "huaanwork-skills";
+export const inject = ["skills", "agents", "tools", "subagents"];
+
+export { EXPLORE_TOOLS };
+export const TEST_FIX_BASE_TOOLS = [
+  "read",
+  "read_file",
+  "glob",
+  "grep",
+  "edit",
+  "write",
+  "str_replace_editor",
+] as const;
+
+export type SkillKind = "explore" | "test-fix";
+
+type ToolsService = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:485(ToolRestriction)
+  restrict?(filter: { allow: readonly string[] }): () => void;
+  schemas?(): readonly { name?: string }[];
+  guard?(listener: (execution: { name: string; arguments: unknown }) => string | undefined): () => void;
+};
+
+type Agent = {
+  ctx?: {
+    get?(name: string): ToolsService | undefined;
+  };
+};
+
+type SkillRegistration = {
+  name: string;
+  description: string;
+  content: string;
+  source: "runtime" | "bundled";
+  resourceBase?: { kind: "directory"; path: string };
+};
+
+type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨 skills/agents/tools/subagents 四服务,无统一类型导出
+  skills: {
+    register(skill: SkillRegistration): () => void;
+  };
+  agents?: {
+    get?(id: string): Agent | undefined;
+    list?(): readonly Agent[];
+  };
+  subagents?: {
+    start(...args: never[]): Promise<{ localAgent?: Agent }>;
+  };
+  huaanworkAgentRequest?: {
+    current?: {
+      name: string;
+      allow: string[];
+      persona: string;
+    } | undefined;
+  };
+  on(
+    event: "tools/pre-execute" | "agent/created" | "subagent/start" | "tools/change",
+    listener: (...args: never[]) => unknown,
+    prepend?: boolean,
+  ): void;
+};
+
+const kinds = new WeakMap<object, SkillKind>();
+
+export function skillKindOf(agent: object | undefined): SkillKind | undefined {
+  return agent ? kinds.get(agent) : undefined;
+}
+
+export function shellToolName(platform = process.platform): "pwsh" | "bash" {
+  return platform === "win32" ? "pwsh" : "bash";
+}
+
+export function exploreAllowList(existing: readonly string[]): string[] {
+  return EXPLORE_TOOLS.filter((name) => existing.includes(name));
+}
+
+export function testFixAllowList(existing: readonly string[], platform = process.platform): string[] {
+  return [...TEST_FIX_BASE_TOOLS, shellToolName(platform)].filter((name) => existing.includes(name));
+}
+
+export function wantedTools(kind: SkillKind, platform = process.platform): readonly string[] {
+  return kind === "explore" ? EXPLORE_TOOLS : [...TEST_FIX_BASE_TOOLS, shellToolName(platform)];
+}
+
+export function apply(ctx: Context): void {
+  const pendingByAgent = new WeakMap<object, SkillKind>();
+  const tracked = new Set<Agent>();
+  const lifted = new WeakMap<Agent, () => void>();
+  let pendingSpawn: SkillKind | undefined;
+  let restricting = false;
+
+  ctx.skills.register(loadSkill("explore.md"));
+  ctx.skills.register(loadSkill("test-fix.md"));
+
+  const rememberSkill = (execution: { name: string; arguments: unknown; agent?: object }) => {
+    if (execution.name !== "skill" || !execution.agent) return;
+    const skillName = stringArg(execution.arguments, "name");
+    if (skillName === "explore" || skillName === "test-fix") {
+      pendingByAgent.set(execution.agent, skillName);
+    }
+  };
+
+  const rememberSubagentSpawn = (execution: { name: string; arguments: unknown; agent?: object }) => {
+    if (execution.name !== "subagent" || !execution.agent) return;
+    const kind = pendingByAgent.get(execution.agent);
+    if (kind) pendingSpawn = kind;
+  };
+
+  const restrictKind = (agent: Agent, kind: SkillKind) => {
+    const tools = agent.ctx?.get?.("tools");
+    if (!tools) return;
+    lifted.get(agent)?.();
+    const existing = (tools.schemas?.() ?? []).flatMap((schema) => (schema.name ? [schema.name] : []));
+    const allow = kind === "explore" ? exploreAllowList(existing) : testFixAllowList(existing);
+    if (allow.length === 0) return;
+    lifted.set(agent, tools.restrict?.({ allow }) ?? (() => undefined));
+  };
+
+  const applyKind = (agent: Agent, kind: SkillKind) => {
+    if (kinds.has(agent)) return;
+    kinds.set(agent, kind);
+    tracked.add(agent);
+    restrictKind(agent, kind);
+    const tools = agent.ctx?.get?.("tools");
+    const allowed = new Set(wantedTools(kind));
+    tools?.guard?.((execution) => (allowed.has(execution.name) ? undefined : `huaanwork-${kind}`));
+  };
+
+  const consumePendingSpawn = (agent: Agent) => {
+    if (!pendingSpawn) return;
+    if (pendingByAgent.has(agent)) return;
+    applyKind(agent, pendingSpawn);
+    pendingSpawn = undefined;
+  };
+
+  ctx.on(
+    "tools/pre-execute",
+    (async (
+      execution: { name: string; arguments: unknown; agent?: object },
+      next: () => Promise<{ kind: string; reason?: string }>,
+    ) => {
+      rememberSkill(execution);
+      rememberSubagentSpawn(execution);
+      const kind = skillKindOf(execution.agent);
+      if (kind && !wantedTools(kind).includes(execution.name)) {
+        return { kind: "deny", reason: `huaanwork-${kind}` };
+      }
+      return next();
+    }) as never,
+    true,
+  );
+
+  ctx.on("agent/created", (({ agent }: { agent: Agent }) => {
+    consumePendingSpawn(agent);
+  }) as never);
+
+  ctx.on("subagent/start", ((info: { id?: string }) => {
+    if (!info.id) return;
+    const child = ctx.agents?.get?.(info.id);
+    if (child) consumePendingSpawn(child);
+  }) as never);
+
+  ctx.on("tools/change", (() => {
+    if (restricting) return;
+    restricting = true;
+    try {
+      for (const agent of tracked) {
+        const kind = kinds.get(agent);
+        if (kind) restrictKind(agent, kind);
+      }
+    } finally {
+      restricting = false;
+    }
+  }) as never);
+
+  const start = ctx.subagents?.start;
+  if (start && ctx.subagents) {
+    const original = start.bind(ctx.subagents);
+    ctx.subagents.start = async (...args: never[]) => {
+      try {
+        const current = ctx.huaanworkAgentRequest?.current;
+        if (current) {
+          if (!current.persona || current.persona.trim() === "") {
+            throw new Error("智能体人设为空");
+          }
+        }
+        // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写
+        const run: any = await original(...args);
+        if (current && run?.localAgent) {
+          const tools = run.localAgent.ctx?.get?.("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
+          const allow = current.allow.filter((name) => existing.includes(name));
+          tools?.restrict?.({ allow });
+        }
+        if (run?.localAgent) {
+          consumePendingSpawn(run.localAgent);
+        }
+        if (run && typeof run.result?.then === "function") {
+          await run.result;
+        }
+        return run;
+      } finally {
+        if (ctx.huaanworkAgentRequest) {
+          ctx.huaanworkAgentRequest.current = undefined;
+        }
+      }
+    };
+  }
+}
+
+export type BundledSkillInfo = { name: string; description: string };
+
+/** List bundled skills (name + description from frontmatter) for the 技能中心 UI. */
+export function listBundledSkills(): BundledSkillInfo[] {
+  const skills: BundledSkillInfo[] = [];
+  for (const entry of scanBundledSkillEntries()) {
+    try {
+      const parsed = parseSkillMarkdown(readFileSync(entry.path, "utf8"));
+      if (!parsed.name || !parsed.description) continue;
+      skills.push({ name: parsed.name, description: parsed.description });
+    } catch {
+      // 不可读条目跳过（与 skills-host 的 warn+skip 语义对齐）
+    }
+  }
+  return skills.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function loadSkill(fileName: string): SkillRegistration {
+  const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills", fileName), "utf8");
+  const parsed = parseSkillMarkdown(raw);
+  return {
+    name: parsed.name || fileName.replace(/\.md$/, ""),
+    description: parsed.description,
+    content: parsed.content,
+    source: "runtime",
+  };
+}
+
+function stringArg(value: unknown, key: string): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const candidate = (value as Record<string, unknown>)[key];
+  return typeof candidate === "string" ? candidate : "";
+}
+
+/** dsh 的技能名语法（与 @deepseek-ai/dsh-skill 的 SKILL_NAME 一致）。 */
+export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+const MANAGED_KEYS = new Set(["name", "description", "whenToUse", "disable-model-invocation", "user-invocable"]);
+
+export type ParsedSkillMarkdown = {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  disableModelInvocation?: boolean;
+  userInvocable?: boolean;
+  content: string;
+  /** 非管理字段的 frontmatter 原始行（含 metadata 等多行块），按原顺序保留，编辑时不得丢弃。 */
+  extraLines: string[];
+};
+
+function parseFrontmatterBool(value: string): boolean | undefined {
+  switch (value.trim().toLowerCase()) {
+    case "true": case "1": case "yes": case "on": return true;
+    case "false": case "0": case "no": case "off": return false;
+    default: return undefined;
+  }
+}
+
+export function parseSkillMarkdown(raw: string): ParsedSkillMarkdown {
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
+  const body = (match?.[2] ?? raw).trim();
+  const known = new Map<string, string>();
+  const extraLines: string[] = [];
+  for (const line of (match?.[1] ?? "").split("\n")) {
+    // 缩进行是多行值（如 metadata 块）的延续，原样保留
+    if (/^[ \t]/.test(line)) { extraLines.push(line); continue; }
+    const index = line.indexOf(":");
+    if (index === -1) { if (line.trim()) extraLines.push(line); continue; }
+    const key = line.slice(0, index).trim();
+    const value = line.slice(index + 1).trim();
+    if (MANAGED_KEYS.has(key)) known.set(key, value);
+    else extraLines.push(line);
+  }
+  const disableModelInvocation = known.has("disable-model-invocation")
+    ? parseFrontmatterBool(known.get("disable-model-invocation")!)
+    : undefined;
+  const userInvocable = known.has("user-invocable")
+    ? parseFrontmatterBool(known.get("user-invocable")!)
+    : undefined;
+  return {
+    name: known.get("name") ?? "",
+    description: known.get("description") ?? "",
+    ...(known.get("whenToUse") ? { whenToUse: known.get("whenToUse")! } : {}),
+    ...(disableModelInvocation !== undefined ? { disableModelInvocation } : {}),
+    ...(userInvocable !== undefined ? { userInvocable } : {}),
+    content: body,
+    extraLines,
+  };
+}
+
+export function serializeSkillMarkdown(skill: ParsedSkillMarkdown): string {
+  const lines = [`name: ${skill.name}`, `description: ${skill.description}`];
+  if (skill.whenToUse) lines.push(`whenToUse: ${skill.whenToUse}`);
+  if (skill.disableModelInvocation !== undefined) lines.push(`disable-model-invocation: ${String(skill.disableModelInvocation)}`);
+  if (skill.userInvocable !== undefined) lines.push(`user-invocable: ${String(skill.userInvocable)}`);
+  lines.push(...skill.extraLines);
+  return `---\n${lines.join("\n")}\n---\n\n${skill.content.trim()}\n`;
+}
+
+const BUNDLED_SKILLS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
+
+export type BundledSkillEntry = { path: string; kind: "bundle" | "flat" };
+
+/** 扫描内置技能根：目录包（<dir>/SKILL.md）与扁平 <name>.md 双形态；跳过点开头条目。 */
+export function scanBundledSkillEntries(): BundledSkillEntry[] {
+  const found: BundledSkillEntry[] = [];
+  for (const entry of readdirSync(BUNDLED_SKILLS_ROOT, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    if (entry.isDirectory()) {
+      const skillFile = join(BUNDLED_SKILLS_ROOT, entry.name, "SKILL.md");
+      if (existsSync(skillFile)) found.push({ path: skillFile, kind: "bundle" });
+    } else if (entry.isFile() && entry.name.endsWith(".md")) {
+      found.push({ path: join(BUNDLED_SKILLS_ROOT, entry.name), kind: "flat" });
+    }
+  }
+  return found;
+}
+
+/** 按 frontmatter name 找内置条目（name 是唯一事实来源，与文件/目录名无关）。 */
+export function findBundledEntry(name: string): BundledSkillEntry | undefined {
+  if (!SKILL_NAME_RE.test(name)) return undefined;
+  for (const entry of scanBundledSkillEntries()) {
+    try {
+      if (parseSkillMarkdown(readFileSync(entry.path, "utf8")).name === name) return entry;
+    } catch {
+      // 跳过不可读条目
+    }
+  }
+  return undefined;
+}
+
+/** 技能的 resourceBase 目录：目录形态为技能目录，扁平形态为内置技能根。 */
+export function bundledSkillDir(name: string): string | undefined {
+  const entry = findBundledEntry(name);
+  if (!entry) return undefined;
+  return entry.kind === "bundle" ? dirname(entry.path) : BUNDLED_SKILLS_ROOT;
+}
+
+/** 系统技能：始终启用，不参与开关（承载 explore/test-fix 的 restrict/guard 机制）。 */
+export const SYSTEM_SKILLS: ReadonlySet<string> = new Set(["explore", "test-fix"]);
+
+export function readSkillToggles(dshHome: string): Record<string, boolean> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(join(dshHome, "skill-toggles.json"), "utf8"));
+  } catch {
+    return {}; // 缺失/损坏：全部禁用
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const toggles: Record<string, boolean> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (SKILL_NAME_RE.test(key) && value === true) toggles[key] = true;
+  }
+  return toggles;
+}
+
+/** enable 写 true、disable 删键（与"缺省=禁用"严格单态）；同目录 .tmp + rename 原子写。 */
+export function setSkillToggle(dshHome: string, name: string, enabled: boolean): void {
+  const toggles = readSkillToggles(dshHome);
+  if (enabled) toggles[name] = true;
+  else delete toggles[name];
+  const target = join(dshHome, "skill-toggles.json");
+  const tmp = `${target}.tmp`;
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(tmp, `${JSON.stringify(toggles, null, 2)}\n`, "utf8");
+  renameSync(tmp, target);
+}
+
+/** 注册一个内置技能到运行时（带目录 resourceBase，模型可解析 scripts/ 相对路径）。 */
+export function registerBundledSkill(
+  ctx: { skills?: { register(skill: SkillRegistration): () => void } },
+  name: string,
+): (() => void) | undefined {
+  const entry = findBundledEntry(name); // SKILL_NAME_RE 校验已内含
+  if (!entry) return undefined;
+  let parsed: ParsedSkillMarkdown;
+  try {
+    parsed = parseSkillMarkdown(readFileSync(entry.path, "utf8"));
+  } catch {
+    return undefined;
+  }
+  if (!parsed.name || !parsed.description) return undefined;
+  return ctx.skills?.register({
+    name: parsed.name,
+    description: parsed.description,
+    content: parsed.content,
+    source: "bundled",
+    resourceBase: { kind: "directory", path: entry.kind === "bundle" ? dirname(entry.path) : BUNDLED_SKILLS_ROOT },
+  });
+}
+
+/** 读取内置技能完整内容（供 skill.get）。name 不合规直接返回 undefined，防路径穿越。 */
+export function getBundledSkill(
+  name: string,
+): { name: string; description: string; content: string; disableModelInvocation?: boolean; userInvocable?: boolean } | undefined {
+  const entry = findBundledEntry(name);
+  if (!entry) return undefined;
+  let raw: string;
+  try {
+    raw = readFileSync(entry.path, "utf8");
+  } catch {
+    return undefined;
+  }
+  const parsed = parseSkillMarkdown(raw);
+  return {
+    name: parsed.name || name,
+    description: parsed.description,
+    content: parsed.content,
+    ...(parsed.disableModelInvocation !== undefined ? { disableModelInvocation: parsed.disableModelInvocation } : {}),
+    ...(parsed.userInvocable !== undefined ? { userInvocable: parsed.userInvocable } : {}),
+  };
+}
+

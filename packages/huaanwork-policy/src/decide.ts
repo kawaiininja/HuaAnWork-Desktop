@@ -61,7 +61,7 @@ export function preExecuteExplained(input: ToolCall, mode: GuardMode = "ask"): E
 /** 与 guard 判定一致，deny 时附带原因（含 would-be-ask 的「未获批准」）。 */
 export function guardExplained(input: ToolCall, mode: GuardMode = "ask"): ExplainedGuard {
   const { result, reason } = decide(input, mode, "guard");
-  return result === "allow" ? { decision: "allow" } : { decision: "deny", reason };
+  return result === "allow" ? { decision: "allow" } : { decision: "deny", ...(reason !== undefined ? { reason } : {}) };
 }
 
 type Internal = { result: "allow" | "ask" | "deny"; reason?: string };

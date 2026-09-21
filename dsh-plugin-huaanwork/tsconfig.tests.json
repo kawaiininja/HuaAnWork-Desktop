@@ -5,7 +5,13 @@
     "noEmit": true,
     "emitDeclarationOnly": false
   },
-  "include": ["scripts/**/*.ts", "src/*.ts", "tests/**/*.ts", "tests/**/*.tsx"],
+  "include": [
+    "scripts/**/*.ts",
+    "src/*.ts",
+    "src/huaanwork-guardrails/**/*.ts",
+    "tests/**/*.ts",
+    "tests/**/*.tsx"
+  ],
   "exclude": [
     "tests/client-boot-health.spec.ts",
     "tests/client-aa-settings.spec.ts",
@@ -15,6 +21,7 @@
     "tests/client-sidebar-dom-anchor.spec.ts",
     "tests/theme-presenter.spec.ts",
     "tests/client-huaanwork/**",
-    "tests/client-huaanwork-shell.spec.ts"
+    "tests/client-huaanwork-shell.spec.ts",
+    "tests/huaanwork-guardrails/**"
   ]
 }

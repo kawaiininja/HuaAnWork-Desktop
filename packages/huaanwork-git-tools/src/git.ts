@@ -33,7 +33,7 @@ export type GitTools = {
 
 export function createGitTools(workspaceRoot: string, options: GitToolsOptions = {}): GitTools {
   const run: GitRun =
-    options.run ?? ((argv) => spawnGit(argv, { cwd: workspaceRoot, env: options.env }));
+    options.run ?? ((argv) => spawnGit(argv, { cwd: workspaceRoot, ...(options.env !== undefined ? { env: options.env } : {}) }));
 
   const git = (argv: readonly string[]) => run(argv, { cwd: workspaceRoot });
 

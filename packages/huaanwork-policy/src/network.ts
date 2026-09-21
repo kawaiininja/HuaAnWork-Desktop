@@ -36,7 +36,7 @@ function endpointHostname(baseUrl: string): string | null {
 /** IPv4-mapped IPv6（::ffff:a.b.c.d）还原为 IPv4，便于走同一套网段表。 */
 function mappedIpv4(hostname: string): string | null {
   const match = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(hostname);
-  return match ? match[1] : null;
+  return match?.[1] ?? null;
 }
 
 /** 判定 OpenAI 兼容端点是否指向本机回环地址（localhost / 127.0.0.0/8 / ::1）。 */

@@ -7,7 +7,7 @@ function trimIncompleteUtf8(bytes: Uint8Array): Uint8Array {
   let i = bytes.length - 1;
   let back = 0;
   while (back < 4 && i >= 0) {
-    const b = bytes[i];
+    const b = bytes[i]!;
     if ((b & 0x80) === 0) {
       return bytes;
     }
@@ -89,7 +89,7 @@ export async function readCappedText(
   }
 
   if (truncated) {
-    merged = trimIncompleteUtf8(merged);
+    merged = trimIncompleteUtf8(merged) as Uint8Array<ArrayBuffer>;
   }
 
   const text = new TextDecoder("utf-8").decode(merged);

@@ -9629,7 +9629,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@huaanwork/git-tools@workspace:packages/huaanwork-git-tools":
+"@huaanwork/git-tools@npm:*, @huaanwork/git-tools@workspace:packages/huaanwork-git-tools":
   version: 0.0.0-use.local
   resolution: "@huaanwork/git-tools@workspace:packages/huaanwork-git-tools"
   dependencies:
@@ -9638,7 +9638,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@huaanwork/model@workspace:packages/huaanwork-model":
+"@huaanwork/model@npm:*, @huaanwork/model@workspace:packages/huaanwork-model":
   version: 0.0.0-use.local
   resolution: "@huaanwork/model@workspace:packages/huaanwork-model"
   dependencies:
@@ -9647,7 +9647,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@huaanwork/policy@workspace:packages/huaanwork-policy":
+"@huaanwork/policy@npm:*, @huaanwork/policy@workspace:packages/huaanwork-policy":
   version: 0.0.0-use.local
   resolution: "@huaanwork/policy@workspace:packages/huaanwork-policy"
   dependencies:
@@ -13846,6 +13846,9 @@ __metadata:
     "@electron/asar": "npm:3.4.1"
     "@electron/fuses": "npm:1.8.0"
     "@fontsource-variable/inter": "npm:^5.3.0"
+    "@huaanwork/git-tools": "npm:*"
+    "@huaanwork/model": "npm:*"
+    "@huaanwork/policy": "npm:*"
     "@tailwindcss/vite": "npm:^4"
     "@types/js-yaml": "npm:^4.0.9"
     "@types/mdast": "npm:^4.0.4"

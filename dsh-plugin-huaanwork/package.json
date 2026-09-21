@@ -71,7 +71,51 @@
       "types": "./lib/types/updates.d.ts",
       "default": "./lib/updates.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./huaanwork-guardrails/policy": {
+      "types": "./lib/types/huaanwork-guardrails/policy.d.ts",
+      "default": "./lib/huaanwork-guardrails/policy.js"
+    },
+    "./huaanwork-guardrails/approval": {
+      "types": "./lib/types/huaanwork-guardrails/approval.d.ts",
+      "default": "./lib/huaanwork-guardrails/approval.js"
+    },
+    "./huaanwork-guardrails/limits": {
+      "types": "./lib/types/huaanwork-guardrails/limits.d.ts",
+      "default": "./lib/huaanwork-guardrails/limits.js"
+    },
+    "./huaanwork-guardrails/sandbox-cwd": {
+      "types": "./lib/types/huaanwork-guardrails/sandbox-cwd.d.ts",
+      "default": "./lib/huaanwork-guardrails/sandbox-cwd.js"
+    },
+    "./huaanwork-guardrails/present-as": {
+      "types": "./lib/types/huaanwork-guardrails/present-as.d.ts",
+      "default": "./lib/huaanwork-guardrails/present-as.js"
+    },
+    "./huaanwork-guardrails/model": {
+      "types": "./lib/types/huaanwork-guardrails/model.d.ts",
+      "default": "./lib/huaanwork-guardrails/model.js"
+    },
+    "./huaanwork-guardrails/git": {
+      "types": "./lib/types/huaanwork-guardrails/git.d.ts",
+      "default": "./lib/huaanwork-guardrails/git.js"
+    },
+    "./huaanwork-guardrails/skills": {
+      "types": "./lib/types/huaanwork-guardrails/skills.d.ts",
+      "default": "./lib/huaanwork-guardrails/skills.js"
+    },
+    "./huaanwork-guardrails/agent-tool": {
+      "types": "./lib/types/huaanwork-guardrails/agent-tool.d.ts",
+      "default": "./lib/huaanwork-guardrails/agent-tool.js"
+    },
+    "./huaanwork-guardrails/agent-mcp": {
+      "types": "./lib/types/huaanwork-guardrails/agent-mcp.d.ts",
+      "default": "./lib/huaanwork-guardrails/agent-mcp.js"
+    },
+    "./huaanwork-guardrails/bridge": {
+      "types": "./lib/types/huaanwork-guardrails/bridge.d.ts",
+      "default": "./lib/huaanwork-guardrails/bridge.js"
+    }
   },
   "files": [
     "build/app-icon.png",
@@ -87,7 +131,8 @@
     "README.md",
     "README.zh.md",
     "README.i18n.yaml",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "skills/"
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
@@ -306,6 +351,9 @@
     "@electron/asar": "3.4.1",
     "@electron/fuses": "1.8.0",
     "@fontsource-variable/inter": "^5.3.0",
+    "@huaanwork/git-tools": "*",
+    "@huaanwork/model": "*",
+    "@huaanwork/policy": "*",
     "@tailwindcss/vite": "^4",
     "@types/js-yaml": "^4.0.9",
     "@types/mdast": "^4.0.4",
