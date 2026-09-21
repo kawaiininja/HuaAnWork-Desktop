@@ -3,6 +3,7 @@ import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
 import { emptyAttachments, type AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
 import type { HuaanworkEventHub } from './events.ts'
 import type { RouteContext } from './routes.ts'
+import type { SessionRuntimeContext } from './sessions.ts'
 
 export interface HuaanworkHostConfig {
   dshHome: string
@@ -99,5 +100,6 @@ export function installHuaanworkHolders(
     logger: (message: string) => {
       ctx.logger?.info?.(message) ?? console.log(message)
     },
+    runtimeCtx: ctx as unknown as SessionRuntimeContext,
   }
 }

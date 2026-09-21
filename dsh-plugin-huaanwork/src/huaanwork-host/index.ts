@@ -3,6 +3,7 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
+import { installNetworkGate } from './net-gate.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
 
 export const name = 'huaanwork-host'
@@ -23,6 +24,8 @@ export const Config: z<HuaanworkHostConfig> = z.object({
 export function apply(ctx: Context, config: HuaanworkHostConfig) {
   const hub = createHuaanworkEventHub()
   const routeCtx = installHuaanworkHolders(ctx, config, hub)
+  // 统一网络门禁第二层(llm/stream 前置全局监听;AGENTS.md 不变式 9)。
+  installNetworkGate(ctx, routeCtx)
   ctx.effect(() => {
     const disposeRoute = registerHuaanworkRoutes(ctx, routeCtx)
     const disposeUpgrade = ctx.webServer.registerUpgrade({

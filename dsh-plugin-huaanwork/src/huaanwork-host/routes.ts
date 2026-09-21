@@ -17,6 +17,17 @@ import {
   authRegister,
   authStatus,
 } from './auth.ts'
+import {
+  sessionAnswerApproval,
+  sessionCancel,
+  sessionList,
+  sessionNew,
+  sessionOpen,
+  sessionRemove,
+  sessionResume,
+  sessionSend,
+  type SessionRuntimeContext,
+} from './sessions.ts'
 
 export interface RouteRequest {
   params: Record<string, string>
@@ -30,6 +41,8 @@ export interface RouteContext {
   workspaceRoot: { current: string }
   emit(event: RpcEvent): void
   logger(message: string): void
+  /** cordis 运行时 ctx(agents/subagents/huaanworkApprovals 等 holders);Task 7 session 域消费。 */
+  runtimeCtx?: SessionRuntimeContext
   expectedOrigin?: string
 }
 
@@ -46,6 +59,31 @@ export const routeKey = (http: string, path: string): string => `${http} ${path}
 
 const notImplemented = (method: string): RouteHandler => async () => {
   throw new RouteError(501, 'not-implemented', `M4 接入:${method}`)
+}
+
+/**
+ * session 域错误映射:旧 sidecar 的 RPC 错误面把用户可读消息(跨工作区拒绝、
+ * 网络门禁文案、not found 等)直传前端;新 HTTP 面对非 RouteError 只回 500 通用
+ * 文案、消息不可达。这里把 session 域的 Error 映射为 400 + 原文,保留旧语义;
+ * 非 Error 抛出仍走 500 + 服务端日志。
+ */
+const sessionRoute = (fn: (req: RouteRequest, ctx: RouteContext) => unknown): RouteHandler => {
+  return async (req, ctx) => {
+    try {
+      return await fn(req, ctx)
+    } catch (err) {
+      if (err instanceof RouteError) throw err
+      if (err instanceof Error) throw new RouteError(400, 'session-error', err.message)
+      throw err
+    }
+  }
+}
+
+const requireRuntime = (ctx: RouteContext): SessionRuntimeContext => {
+  if (!ctx.runtimeCtx) {
+    throw new RouteError(503, 'runtime-unavailable', 'host runtime context is not available')
+  }
+  return ctx.runtimeCtx
 }
 
 export interface RouteTableEntry {
@@ -67,15 +105,15 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { method: 'workspace.close', http: 'POST', path: '/huaanwork/workspace/close', handler: notImplemented('workspace.close') }, // Task 9
 
   // session
-  { method: 'session.send', http: 'POST', path: '/huaanwork/session/send', handler: notImplemented('session.send') }, // Task 7
-  { method: 'session.cancel', http: 'POST', path: '/huaanwork/session/cancel', handler: notImplemented('session.cancel') }, // Task 7
-  { method: 'session.approve', http: 'POST', path: '/huaanwork/session/approve', handler: notImplemented('session.approve') }, // Task 8
-  { method: 'session.reject', http: 'POST', path: '/huaanwork/session/reject', handler: notImplemented('session.reject') }, // Task 8
-  { method: 'session.list', http: 'GET', path: '/huaanwork/session/list', handler: notImplemented('session.list') }, // Task 7
-  { method: 'session.open', http: 'POST', path: '/huaanwork/session/open', handler: notImplemented('session.open') }, // Task 7
-  { method: 'session.remove', http: 'POST', path: '/huaanwork/session/remove', handler: notImplemented('session.remove') }, // Task 7
-  { method: 'session.new', http: 'POST', path: '/huaanwork/session/new', handler: notImplemented('session.new') }, // Task 7
-  { method: 'session.resume', http: 'POST', path: '/huaanwork/session/resume', handler: notImplemented('session.resume') }, // Task 7
+  { method: 'session.send', http: 'POST', path: '/huaanwork/session/send', handler: sessionRoute(async (req, ctx) => sessionSend(requireRuntime(ctx), ctx, req.body)) }, // Task 7
+  { method: 'session.cancel', http: 'POST', path: '/huaanwork/session/cancel', handler: sessionRoute(async (req, ctx) => sessionCancel(requireRuntime(ctx), ctx, req.body)) }, // Task 7
+  { method: 'session.approve', http: 'POST', path: '/huaanwork/session/approve', handler: sessionRoute(async (req, ctx) => sessionAnswerApproval(requireRuntime(ctx), ctx, req.body, 'allowed-once')) }, // Task 7
+  { method: 'session.reject', http: 'POST', path: '/huaanwork/session/reject', handler: sessionRoute(async (req, ctx) => sessionAnswerApproval(requireRuntime(ctx), ctx, req.body, 'rejected')) }, // Task 7
+  { method: 'session.list', http: 'GET', path: '/huaanwork/session/list', handler: async (req, ctx) => sessionList(ctx, req.query.get('root') ?? undefined) }, // Task 7
+  { method: 'session.open', http: 'POST', path: '/huaanwork/session/open', handler: sessionRoute(async (req, ctx) => sessionOpen(ctx, req.body)) }, // Task 7
+  { method: 'session.remove', http: 'POST', path: '/huaanwork/session/remove', handler: sessionRoute(async (req, ctx) => sessionRemove(ctx, req.body)) }, // Task 7
+  { method: 'session.new', http: 'POST', path: '/huaanwork/session/new', handler: async (req, ctx) => sessionNew(ctx, req.body) }, // Task 7
+  { method: 'session.resume', http: 'POST', path: '/huaanwork/session/resume', handler: sessionRoute(async (req, ctx) => sessionResume(requireRuntime(ctx), ctx, req.body)) }, // Task 7
 
   // settings
   { method: 'settings.get', http: 'GET', path: '/huaanwork/settings', handler: async (_req, ctx) => readHuaanworkSettings(ctx.profileDir) },
