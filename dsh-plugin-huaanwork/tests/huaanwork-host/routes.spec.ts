@@ -12,6 +12,7 @@ import {
   type RouteContext,
 } from '../../src/huaanwork-host/routes.ts'
 import { hasGit, listTree } from '../../src/huaanwork-host/native.ts'
+import { sessionSendBlockers } from '../../src/huaanwork-host/sessions.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 
 const ALL_METHODS = [
@@ -316,6 +317,45 @@ describe('HTTP dispatch & security checks', () => {
     expect(res.json).toEqual({
       error: { code: 'payload-too-large', message: 'Payload Too Large' },
     })
+  })
+
+  test('workspace.open 同根短路:200 返回 { workspaceRoot },不触发重启', async () => {
+    const current = join(profileTempDir, 'workspace')
+    mkdirSync(current, { recursive: true })
+    const res = await fetch(`${baseUrl}/huaanwork/workspace/open`, {
+      method: 'POST',
+      headers: {
+        Host: host,
+        Origin: baseUrl,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ root: current }),
+    })
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json).toEqual({ workspaceRoot: current })
+  })
+
+  test('workspace 域非 RouteError 错误以 400 + 原文信封抵达客户端(automation-idle)', async () => {
+    sessionSendBlockers.agentAutomationQueued = 1
+    try {
+      const res = await fetch(`${baseUrl}/huaanwork/workspace/close`, {
+        method: 'POST',
+        headers: {
+          Host: host,
+          Origin: baseUrl,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      })
+      expect(res.status).toBe(400)
+      const json = await res.json()
+      expect(json).toEqual({
+        error: { code: 'workspace-error', message: '后台自动化任务运行中，请稍候再试' },
+      })
+    } finally {
+      sessionSendBlockers.agentAutomationQueued = 0
+    }
   })
 
   test('原生 git 路由分发', async () => {

@@ -89,6 +89,23 @@ const requireRuntime = (ctx: RouteContext): SessionRuntimeContext => {
   return ctx.runtimeCtx
 }
 
+/**
+ * workspace 域错误映射:与 sessionRoute 同理由——非 RouteError 的 Error(如
+ * assertAutomationIdle 的「后台自动化任务运行中」)必须带着原文到客户端,
+ * 否则 HTTP 面只回 500 通用文案,旧 sidecar 的用户可读错误面丢失。
+ */
+const workspaceRoute = (fn: (req: RouteRequest, ctx: RouteContext) => unknown): RouteHandler => {
+  return async (req, ctx) => {
+    try {
+      return await fn(req, ctx)
+    } catch (err) {
+      if (err instanceof RouteError) throw err
+      if (err instanceof Error) throw new RouteError(400, 'workspace-error', err.message)
+      throw err
+    }
+  }
+}
+
 export interface RouteTableEntry {
   method: string
   http: 'GET' | 'POST' | 'PUT'
@@ -103,17 +120,18 @@ export interface NativeRouteEntry {
 }
 
 export const ROUTE_TABLE: readonly RouteTableEntry[] = [
-  // workspace(Task 9:写 pendingRoot → generation 重启;重启期连接中断,客户端 waitForReady 承接)
+  // workspace(Task 9:写 pendingRoot → generation 重启;重启期连接中断,客户端 waitForReady 承接;
+  // 已在目标根短路返回 { workspaceRoot },旧 host.ts:1013-1023 语义)
   {
     method: 'workspace.open',
     http: 'POST',
     path: '/huaanwork/workspace/open',
-    handler: async (req, ctx) => {
+    handler: workspaceRoute(async (req, ctx) => {
       const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
       return openWorkspace(ctx, typeof body.root === 'string' ? body.root : '')
-    },
+    }),
   },
-  { method: 'workspace.close', http: 'POST', path: '/huaanwork/workspace/close', handler: async (_req, ctx) => closeWorkspace(ctx) },
+  { method: 'workspace.close', http: 'POST', path: '/huaanwork/workspace/close', handler: workspaceRoute(async (_req, ctx) => closeWorkspace(ctx)) },
 
   // session
   { method: 'session.send', http: 'POST', path: '/huaanwork/session/send', handler: sessionRoute(async (req, ctx) => sessionSend(requireRuntime(ctx), ctx, req.body)) }, // Task 7

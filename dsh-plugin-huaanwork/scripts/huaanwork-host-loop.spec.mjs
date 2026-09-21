@@ -487,4 +487,13 @@ test('workspace pendingRoot:二次组合 + boot 模拟 generation 重启(不触�
   // huaanwork-host 首个 effect:pendingRoot 已清(文件保留 {} 占位,不删除)。
   const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8'))
   assert.deepEqual(state, {}, 'pendingRoot cleared by first apply effect')
+
+  // open 同根短路(旧 host.ts:1013 语义):不重启、不写 pendingRoot,服务端仍活着应答 200。
+  const reopened = await post('/huaanwork/workspace/open', { root: repo2 })
+  assert.deepEqual(reopened, { workspaceRoot: repo2 }, 'open short-circuits on same root')
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')),
+    {},
+    'short-circuit must not write pendingRoot',
+  )
 })

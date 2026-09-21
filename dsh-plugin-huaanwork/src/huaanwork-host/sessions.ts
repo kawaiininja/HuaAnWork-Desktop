@@ -65,8 +65,8 @@ export const sessionSendBlockers = {
   agentAutomationActive: 0,
 }
 
-/** 旧 host.ts:484。 */
-const assertAutomationIdle = (): void => {
+/** 旧 host.ts:484。workspace.open/close 与 session.new 共用;M4 调度器接入后写入 blockers。 */
+export const assertAutomationIdle = (): void => {
   if (sessionSendBlockers.agentAutomationQueued > 0 || sessionSendBlockers.workspaceDisplaced) {
     throw new Error('后台自动化任务运行中，请稍候再试')
   }
