@@ -12,10 +12,10 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, before, test } from 'node:test'
 import { WebSocket } from 'ws'
@@ -76,6 +76,7 @@ let mountedSpec
 let webPort
 let origin
 let previousDshHome
+let profileDir
 
 /** @type {unknown[]} 进程内直接可达的 WS 事件帧(bridge/approval 经 hub 广播)。 */
 const events = []
@@ -139,6 +140,7 @@ async function bootSharedHost() {
   // pending workspace root:组合期消费一次(agent-loop cwd + fs-sandbox),boot 后清除。
   writeFileSync(join(prepared.profile.dir, 'huaanwork-workspace.json'), `${JSON.stringify({ pendingRoot: repo })}\n`)
   prepared = prepareDesktopProfile('1', home, 'win32')
+  profileDir = prepared.profile.dir
   // session.send 的联网门禁(Task 5)读 profileDir/huaanwork-settings.json;loopback 端点天然放行。
   writeFileSync(join(prepared.profile.dir, 'huaanwork-settings.json'), `${JSON.stringify({
     base_url: stub.url,
@@ -163,6 +165,60 @@ async function bootSharedHost() {
     environment: process.env,
   })
   releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
+  ctx = await bootPrepared(prepared)
+
+  webPort = ctx.webServer.port
+  origin = `http://127.0.0.1:${String(webPort)}`
+  const desktopSettings = ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE)
+  assert.equal(desktopSettings?.mode, 'advanced')
+
+  ws = new WebSocket(`ws://127.0.0.1:${String(webPort)}/huaanwork/events`, {
+    headers: { [rendererHeader.name]: rendererHeader.value },
+  })
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve)
+    ws.once('error', reject)
+  })
+  ws.on('message', (data) => {
+    let event
+    try {
+      event = JSON.parse(data.toString())
+    } catch {
+      event = { event: 'unparseable', raw: data.toString() }
+    }
+    events.push(event)
+    if (process.env.LOOP_DEBUG) console.error(`[loop-spec] ws event: ${data.toString()}`)
+  })
+}
+
+after(async () => {
+  try {
+    try { ws?.close() } catch { /* socket 可能已被服务端重启侧关闭 */ }
+    try { await ctx?.fiber.dispose() } catch { /* 二次 dispose(workspace 用例已 dispose 旧 ctx)容忍幂等 */ }
+  } finally {
+    releasePackageResolver?.()
+    pnpmRuntime?.dispose()
+    await stub?.close()
+    if (previousDshHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousDshHome
+    if (base !== undefined) rmSync(base, { recursive: true, force: true })
+  }
+})
+
+function fileURLToPathLocal(url) {
+  return fileURLToPath(url)
+}
+
+/**
+ * 进程内组合 + boot(Workspace 用例的「generation 重启」即再调本函数一次)。
+ * 复用同一 pnpmRuntime / BROWSER_ACCESS;每次 boot 新铸 desktopRuntime stub。
+ */
+async function bootPrepared(prepared) {
+  const packageRoot = new URL('../', import.meta.url)
+  const pnpmBinPath = fileURLToPathLocal(new URL('node_modules/pnpm/bin/pnpm.mjs', packageRoot))
+  const electronVersion = JSON.parse(
+    readFileText(new URL('node_modules/electron/package.json', packageRoot)),
+  ).version
   const runtime = {
     platform: 'win32',
     windowsBuild: 22_631,
@@ -196,7 +252,7 @@ async function bootSharedHost() {
     async requestRestart() {},
     prepareToQuit() {},
   }
-  ctx = await boot(
+  const nextCtx = await boot(
     BIN_NAME,
     prepared.rootConfig,
     [...prepared.patches],
@@ -241,47 +297,7 @@ async function bootSharedHost() {
     prepared.bareModuleBaseUrl,
   )
   await runtime.mountScheduled()
-
-  webPort = ctx.webServer.port
-  origin = `http://127.0.0.1:${String(webPort)}`
-  const desktopSettings = ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE)
-  assert.equal(desktopSettings?.mode, 'advanced')
-
-  ws = new WebSocket(`ws://127.0.0.1:${String(webPort)}/huaanwork/events`, {
-    headers: { [rendererHeader.name]: rendererHeader.value },
-  })
-  await new Promise((resolve, reject) => {
-    ws.once('open', resolve)
-    ws.once('error', reject)
-  })
-  ws.on('message', (data) => {
-    let event
-    try {
-      event = JSON.parse(data.toString())
-    } catch {
-      event = { event: 'unparseable', raw: data.toString() }
-    }
-    events.push(event)
-    if (process.env.LOOP_DEBUG) console.error(`[loop-spec] ws event: ${data.toString()}`)
-  })
-}
-
-after(async () => {
-  try {
-    ws?.close()
-    await ctx?.fiber.dispose()
-  } finally {
-    releasePackageResolver?.()
-    pnpmRuntime?.dispose()
-    await stub?.close()
-    if (previousDshHome === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = previousDshHome
-    if (base !== undefined) rmSync(base, { recursive: true, force: true })
-  }
-})
-
-function fileURLToPathLocal(url) {
-  return fileURLToPath(url)
+  return nextCtx
 }
 
 function readFileText(url) {
@@ -448,4 +464,27 @@ test('presentAs("ptc") 防线:主 agent scope 抛 disabled by HuaAnWork', { time
     () => tools.presentAs('ptc'),
     /disabled by HuaAnWork/,
   )
+})
+
+test('workspace pendingRoot:二次组合 + boot 模拟 generation 重启(不触发真实 relaunch)', { timeout: BOOT_WATCHDOG_MS }, async () => {
+  // workspace.open 的写文件半边:钉新根,随后由测试进程内重新组合 + boot 消费。
+  const repo2 = join(base, 'repo2')
+  mkdirSync(repo2, { recursive: true })
+  writeFileSync(join(repo2, 'README.md'), '# second workspace\n')
+  writeFileSync(join(profileDir, 'huaanwork-workspace.json'), `${JSON.stringify({ pendingRoot: repo2 })}\n`)
+
+  const reprepared = prepareDesktopProfile('1', home, 'win32')
+  await ctx.fiber.dispose()
+  ctx = await bootPrepared(reprepared)
+
+  // 组合期消费 pendingRoot:holder 钉新根,agent-loop cwd / 会话 id 按新根铸造。
+  assert.equal(ctx.huaanworkWorkspaceRoot.current, repo2, 'workspace root holder pinned to pendingRoot')
+  const agent = mainAgent()
+  assert.equal(agent.session?.header?.cwd, repo2, 'agent-loop cwd follows pendingRoot')
+  const expectedSessionId = `huaanwork-${createHash('sha256').update(resolvePath(repo2)).digest('hex').slice(0, 16)}`
+  assert.equal(agent.session?.id, expectedSessionId, 'session id minted from pendingRoot')
+
+  // huaanwork-host 首个 effect:pendingRoot 已清(文件保留 {} 占位,不删除)。
+  const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8'))
+  assert.deepEqual(state, {}, 'pendingRoot cleared by first apply effect')
 })

@@ -73,7 +73,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除 Task 4/5/7 实现的 17 个方法外其余 37 个方法均返回 501', async () => {
+  test('除 Task 4/5/7/9 实现的 19 个方法外其余 35 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -92,6 +92,8 @@ describe('ROUTE_TABLE registry', () => {
       'session.remove',
       'session.new',
       'session.resume',
+      'workspace.open',
+      'workspace.close',
     ])
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -162,6 +164,7 @@ describe('HTTP dispatch & security checks', () => {
       logger: (msg: string) => {
         lastLogged = msg
       },
+      requestRestart: async () => {},
     }
 
     server = createServer((req, res) => {

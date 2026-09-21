@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { sessionIdFor } from '../src/huaanwork-host/session-id.ts'
-import { neutralWorkspaceRoot, readPendingWorkspaceRoot, writePendingWorkspaceRoot } from '../src/huaanwork-host/workspace-state.ts'
+import { neutralWorkspaceRoot, readPendingWorkspaceRoot, writePendingWorkspaceRoot, clearPendingWorkspaceRoot } from '../src/huaanwork-host/workspace-state.ts'
 import { assertHuaanworkRowIdsHit, HUAANWORK_ROW_ASSERTIONS, type RowLike } from '../src/huaanwork-host/row-assertions.ts'
 
 describe('sessionIdFor', () => {
@@ -25,7 +25,8 @@ describe('pendingRoot 生命周期', () => {
     expect(readPendingWorkspaceRoot(dir)).toBeNull()
     writePendingWorkspaceRoot(dir, '/tmp/somewhere')
     expect(readPendingWorkspaceRoot(dir)).toBe('/tmp/somewhere')
-    writePendingWorkspaceRoot(dir, null)
+    // clearPendingWorkspaceRoot 是 huaanwork-host 首个 effect 用的别名:与写 null 等价。
+    clearPendingWorkspaceRoot(dir)
     expect(readPendingWorkspaceRoot(dir)).toBeNull()
     expect(existsSync(join(dir, 'huaanwork-workspace.json'))).toBe(true)
     const neutral = neutralWorkspaceRoot(dir)

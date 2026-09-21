@@ -28,6 +28,7 @@ function makeRouteCtx(root: string, opts?: { workspace?: string }): RouteContext
     workspaceRoot: { current: opts?.workspace ?? join(root, 'workspace') },
     emit: () => undefined,
     logger: () => undefined,
+    requestRestart: async () => {},
   }
 }
 

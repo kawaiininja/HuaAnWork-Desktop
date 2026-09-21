@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { ROUTES, hasGit, listTree, onSidecarEvent, onSidecarExit, pickDirectory, rpcCall, setKeepAwake } from '../../src/client-huaanwork/api.ts'
+import { ROUTES, hasGit, listTree, onSidecarEvent, onSidecarExit, pickDirectory, rpcCall, setKeepAwake, waitForReady } from '../../src/client-huaanwork/api.ts'
 
 // —— 最小 fake fetch / WebSocket:记录调用,可编程应答与事件 ——
 class FakeWebSocket {
@@ -253,6 +253,47 @@ describe('rpcCall 错误处理', () => {
   test('非中止类网络错误原样抛出', async () => {
     fetchMock.mockRejectedValue(new TypeError('fetch failed'))
     await expect(rpcCall('status.get')).rejects.toThrow('fetch failed')
+  })
+})
+
+describe('workspace.open/close 的 generation 重启语义', () => {
+  test('open 中途连接 reset → waitForReady 轮询 → status 200 后 resolve { restarting: true }', async () => {
+    // 第 1 次 POST workspace/open 撞上 webServer 关闭;随后 status 先 503 再 200。
+    fetchMock
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(new Response('down', { status: 503 }))
+      .mockResolvedValueOnce(jsonResponse({ ready: true }))
+    await expect(rpcCall('workspace.open', { root: '/tmp/x' })).resolves.toEqual({ restarting: true })
+    const calls = fetchMock.mock.calls.map((call) => `${call[1].method} ${call[0]}`)
+    expect(calls).toEqual([
+      'POST /huaanwork/workspace/open',
+      'GET /huaanwork/status',
+      'GET /huaanwork/status',
+    ])
+  })
+
+  test('close 中途连接 reset → 同样 resolve { restarting: true }', async () => {
+    fetchMock
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(jsonResponse({ ready: true }))
+    await expect(rpcCall('workspace.close')).resolves.toEqual({ restarting: true })
+  })
+
+  test('重启等待超时 → reject(60s 无 200)', async () => {
+    vi.useFakeTimers()
+    fetchMock.mockRejectedValue(new TypeError('fetch failed'))
+    const promise = rpcCall('workspace.open', { root: '/tmp/x' })
+    // 先挂 assertion 再推进定时器,避免 rejection 在挂载前被记为 unhandled。
+    const assertion = expect(promise).rejects.toThrow('等待服务重启超时(60s)')
+    await vi.advanceTimersByTimeAsync(61_000)
+    await assertion
+  })
+
+  test('waitForReady:已是 200 时立即返回,不发额外请求之外的重试', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ready: true }))
+    await expect(waitForReady(5_000)).resolves.toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(lastFetchCall().url).toBe('/huaanwork/status')
   })
 })
 

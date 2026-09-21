@@ -22,6 +22,11 @@ export function readPendingWorkspaceRoot(profileDir: string): string | null {
   }
 }
 
+/** 组合期已消费 pendingRoot:huaanwork-host apply 的首个 effect 调用本别名清除(不删文件,留 `{}` 占位)。 */
+export function clearPendingWorkspaceRoot(profileDir: string): void {
+  writePendingWorkspaceRoot(profileDir, null)
+}
+
 export function writePendingWorkspaceRoot(profileDir: string, root: string | null): void {
   const file = join(profileDir, STATE_FILENAME)
   const tmp = `${file}.tmp`

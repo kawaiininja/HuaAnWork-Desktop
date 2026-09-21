@@ -99,6 +99,32 @@ export const ROUTES: Record<string, RouteDef> = {
 
 interface ErrorEnvelope { error?: { code?: string; message?: string } }
 
+// —— workspace.open/close 的 generation 重启语义 ——
+// 两方法会触发整代重启:fetch 撞上 webServer 关闭(连接 reset),不可能收到 HTTP 应答。
+// 客户端特例:网络错误(非超时)→ 轮询 /huaanwork/status 至 200 → 按 { restarting: true } resolve,
+// 与旧 sidecar 的 re-boot 等待等价;onSidecarExit 已驱动 UI 的「切换中」态。
+const RESTART_METHODS = new Set(['workspace.open', 'workspace.close'])
+const READY_POLL_INTERVAL_MS = 500
+
+/** 轮询 GET /huaanwork/status 至 200 或超时;generation 重启后的就绪等待。 */
+export async function waitForReady(timeoutMs = 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastError: unknown
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(ROUTES['status.get'].path, { method: 'GET' })
+      if (response.ok) return
+      lastError = new Error(`HTTP ${response.status}`)
+    } catch (err) {
+      lastError = err
+    }
+    await new Promise((done) => setTimeout(done, READY_POLL_INTERVAL_MS))
+  }
+  throw new Error(
+    `等待服务重启超时(${timeoutMs / 1000}s):${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  )
+}
+
 export async function rpcCall<T>(method: string, params?: unknown): Promise<T> {
   const route = ROUTES[method]
   if (!route) throw new Error(`unknown method: ${method}`)
@@ -114,6 +140,11 @@ export async function rpcCall<T>(method: string, params?: unknown): Promise<T> {
     const name = (err as { name?: string } | null)?.name
     if (name === 'AbortError' || name === 'TimeoutError') {
       throw new Error(`请求超时(${REQUEST_TIMEOUT_MS / 1000}s)`)
+    }
+    if (RESTART_METHODS.has(method)) {
+      // generation 重启:连接中断是预期路径,等服务就绪后按重启语义 resolve。
+      await waitForReady()
+      return { restarting: true } as T
     }
     throw err
   }

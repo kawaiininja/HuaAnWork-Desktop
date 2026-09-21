@@ -28,6 +28,7 @@ import {
   sessionSend,
   type SessionRuntimeContext,
 } from './sessions.ts'
+import { closeWorkspace, openWorkspace } from './workspace.ts'
 
 export interface RouteRequest {
   params: Record<string, string>
@@ -43,6 +44,8 @@ export interface RouteContext {
   logger(message: string): void
   /** cordis 运行时 ctx(agents/subagents/huaanworkApprovals 等 holders);Task 7 session 域消费。 */
   runtimeCtx?: SessionRuntimeContext
+  /** workspace.open/close 的 generation 重启注入(index.ts 以 desktopRuntime.requestRestart 提供)。 */
+  requestRestart(): Promise<void>
   expectedOrigin?: string
 }
 
@@ -100,9 +103,17 @@ export interface NativeRouteEntry {
 }
 
 export const ROUTE_TABLE: readonly RouteTableEntry[] = [
-  // workspace
-  { method: 'workspace.open', http: 'POST', path: '/huaanwork/workspace/open', handler: notImplemented('workspace.open') }, // Task 9
-  { method: 'workspace.close', http: 'POST', path: '/huaanwork/workspace/close', handler: notImplemented('workspace.close') }, // Task 9
+  // workspace(Task 9:写 pendingRoot → generation 重启;重启期连接中断,客户端 waitForReady 承接)
+  {
+    method: 'workspace.open',
+    http: 'POST',
+    path: '/huaanwork/workspace/open',
+    handler: async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      return openWorkspace(ctx, typeof body.root === 'string' ? body.root : '')
+    },
+  },
+  { method: 'workspace.close', http: 'POST', path: '/huaanwork/workspace/close', handler: async (_req, ctx) => closeWorkspace(ctx) },
 
   // session
   { method: 'session.send', http: 'POST', path: '/huaanwork/session/send', handler: sessionRoute(async (req, ctx) => sessionSend(requireRuntime(ctx), ctx, req.body)) }, // Task 7

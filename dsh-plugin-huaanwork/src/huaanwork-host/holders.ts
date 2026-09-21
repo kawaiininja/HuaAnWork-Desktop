@@ -75,6 +75,7 @@ export function installHuaanworkHolders(
   ctx: Context,
   config: HuaanworkHostConfig,
   hub: HuaanworkEventHub,
+  requestRestart: () => Promise<void>,
 ): RouteContext {
   installContextHolders()
 
@@ -101,5 +102,6 @@ export function installHuaanworkHolders(
       ctx.logger?.info?.(message) ?? console.log(message)
     },
     runtimeCtx: ctx as unknown as SessionRuntimeContext,
+    requestRestart,
   }
 }
