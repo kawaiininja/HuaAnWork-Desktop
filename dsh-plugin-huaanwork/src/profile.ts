@@ -65,6 +65,10 @@ import {
   type DesktopMarketProvider,
   type DesktopMarketSnapshot,
 } from './desktop-market.ts'
+import { neutralWorkspaceRoot, readPendingWorkspaceRoot } from './huaanwork-host/workspace-state.ts'
+import { sessionIdFor } from './huaanwork-host/session-id.ts'
+import { assertHuaanworkRowIdsHit } from './huaanwork-host/row-assertions.ts'
+import './huaanwork-host/holders.ts'
 
 /** Persistent profile managed by the desktop launcher and the ordinary dsh plugin command. */
 export const DESKTOP_PROFILE_NAME = 'desktop'
@@ -951,6 +955,46 @@ export function prepareDesktopProfile(
     }
   }
   const patches: PatchOptions[] = [...ordinary.patches, ...aaPatches]
+  // HuaAnWork guardrail 锁层(M3):disable/config 行与 insert 行全部走内存组合,
+  // 与 ui-layout 禁用同层——应用锁在所有用户 bundle 之后生效(spec §6 第 2 条)。
+  const workspaceRoot = readPendingWorkspaceRoot(profile.dir) ?? neutralWorkspaceRoot(profile.dir)
+  patches.push(
+    { id: 'llm-deepseek', disabled: true },
+    { id: 'approval', config: { policy: 'ask' } },
+    { id: 'tools', config: { mode: 'native' } },
+    { id: 'agent-loop', config: { agents: [{ id: 'huaanwork', sessionId: sessionIdFor(workspaceRoot), cwd: workspaceRoot, provider: 'deepseek-official', model: 'local' }] } },
+    { id: 'hmr', disabled: true },
+    { id: 'jobs', disabled: true },
+    { id: 'tool-jobs', disabled: true },
+    { id: 'web', disabled: true },
+    { id: 'web-search-deepseek', disabled: true },
+    { id: 'tool-web', disabled: true },
+    // D2:workflow-worker-thread 在 0.1.6-alpha.2 已不存在,继任者 workflow-ptc 禁用(row-id 清单 §2 裁定)。
+    { id: 'workflow-ptc', disabled: true },
+    { id: 'tool-workflow', disabled: true },
+    { id: 'tool-ralph', disabled: true },
+    { id: 'user-questions', disabled: true },
+    { id: 'fs-sandbox', config: { cwd: workspaceRoot } },
+    { id: 'sandbox-policy', config: { workspaceRoot, mode: 'workspace-write' } },
+    {
+      insert: [
+        { id: 'huaanwork-host', name: 'dsh-plugin-huaanwork/huaanwork-host', config: { dshHome: home, profileDir: profile.dir, workspaceRoot } },
+        // 插入顺序契约(旧 cordis.patch.yml:43-65,load-order 即安全边界):不得重排。
+        { id: 'huaanwork-model', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/model' },
+        { id: 'huaanwork-policy', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/policy' },
+        { id: 'huaanwork-sandbox-cwd', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/sandbox-cwd' },
+        { id: 'huaanwork-git', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/git' },
+        { id: 'huaanwork-agent-tool', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/agent-tool' },
+        { id: 'huaanwork-agent-mcp', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/agent-mcp' },
+        { id: 'huaanwork-approval', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/approval' },
+        { id: 'huaanwork-present-as', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/present-as' },
+        { id: 'huaanwork-skills', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/skills' },
+        { id: 'huaanwork-limits', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/limits' },
+        { id: 'huaanwork-bridge', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/bridge' },
+        { id: 'huaanwork-gates', name: 'dsh-plugin-huaanwork/huaanwork-host/gates' },
+      ],
+    },
+  )
   const composedRows = composeEntries([patches])
   assertUniqueEntryIds(composedRows)
   assertEffectiveMarketRows(composedRows, effectiveMarket)
@@ -958,6 +1002,7 @@ export function prepareDesktopProfile(
   for (const row of composedRows) {
     if (typeof row.id === 'string') rows.set(row.id, row)
   }
+  assertHuaanworkRowIdsHit(rows)
   const settings = rows.get('settings')
   if (settings?.name !== SETTINGS_FILE_PACKAGE) {
     throw new Error(`${BIN_NAME}: desktop profile must use ${SETTINGS_FILE_PACKAGE} in the settings row`)

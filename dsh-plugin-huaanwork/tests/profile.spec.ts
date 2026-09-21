@@ -28,6 +28,9 @@ import {
   validateDshMarketBundlePatches,
 } from '../src/profile.ts'
 import { DESKTOP_MARKET_IDENTITIES } from '../src/desktop-market.ts'
+import { writePendingWorkspaceRoot } from '../src/huaanwork-host/workspace-state.ts'
+import { sessionIdFor } from '../src/huaanwork-host/session-id.ts'
+import { assertHuaanworkRowIdsHit } from '../src/huaanwork-host/row-assertions.ts'
 
 const homes: string[] = []
 
@@ -1158,6 +1161,111 @@ virtualStoreDirMaxLength: 60
       name: 'third-party-subprocess',
     }))
     expect(rows.map(row => row.id)).not.toContain('desktop-windows-subprocess')
+  })
+
+  it('composes the guardrail lock layer and every declared row id hits (M3 gate)', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile('1', home)
+    const composedRows = composeEntries([prepared.patches])
+    const rows = new Map(composedRows.map(row => [row.id!, row]))
+
+    expect(() => assertHuaanworkRowIdsHit(rows)).not.toThrow()
+
+    expect(rows.get('llm-deepseek')?.disabled).toBe(true)
+    expect(rows.get('approval')?.config).toMatchObject({ policy: 'ask' })
+    expect(rows.get('tools')?.config).toMatchObject({ mode: 'native' })
+    expect(rows.get('agent-loop')?.config).toMatchObject({
+      agents: [
+        expect.objectContaining({
+          id: 'huaanwork',
+          provider: 'deepseek-official',
+          model: 'local',
+        }),
+      ],
+    })
+    for (const id of [
+      'hmr',
+      'jobs',
+      'tool-jobs',
+      'web',
+      'web-search-deepseek',
+      'tool-web',
+      'workflow-ptc',
+      'tool-workflow',
+      'tool-ralph',
+      'user-questions',
+    ]) {
+      expect(rows.get(id)?.disabled).toBe(true)
+    }
+
+    const insertedIds = composedRows.map(row => row.id)
+    const expectedOrder = [
+      'huaanwork-host',
+      'huaanwork-model',
+      'huaanwork-policy',
+      'huaanwork-sandbox-cwd',
+      'huaanwork-git',
+      'huaanwork-agent-tool',
+      'huaanwork-agent-mcp',
+      'huaanwork-approval',
+      'huaanwork-present-as',
+      'huaanwork-skills',
+      'huaanwork-limits',
+      'huaanwork-bridge',
+      'huaanwork-gates',
+    ]
+    const indices = expectedOrder.map(id => insertedIds.indexOf(id))
+    expect(indices.every(idx => idx !== -1)).toBe(true)
+    for (let i = 1; i < indices.length; i++) {
+      expect(indices[i]!).toBeGreaterThan(indices[i - 1]!)
+    }
+
+    const hostRow = rows.get('huaanwork-host')
+    expect(hostRow?.name).toBe('dsh-plugin-huaanwork/huaanwork-host')
+    expect(hostRow?.config).toMatchObject({
+      dshHome: home,
+      profileDir: prepared.profile.dir,
+      workspaceRoot: join(prepared.profile.dir, 'workspace'),
+    })
+  })
+
+  it('pins the pending workspace root into agent-loop and sandbox rows', () => {
+    const home = temporaryHome()
+    const profileDir = ensureDesktopProfile(home)
+    const customRoot = '/custom/pinned/workspace'
+    writePendingWorkspaceRoot(profileDir, customRoot)
+
+    const prepared = prepareDesktopProfile('1', home)
+    const composedRows = composeEntries([prepared.patches])
+    const rows = new Map(composedRows.map(row => [row.id!, row]))
+
+    expect(rows.get('agent-loop')?.config).toMatchObject({
+      agents: [
+        expect.objectContaining({
+          id: 'huaanwork',
+          sessionId: sessionIdFor(customRoot),
+          cwd: customRoot,
+        }),
+      ],
+    })
+    expect(rows.get('fs-sandbox')?.config).toMatchObject({ cwd: customRoot })
+    expect(rows.get('sandbox-policy')?.config).toMatchObject({
+      workspaceRoot: customRoot,
+      mode: 'workspace-write',
+    })
+    expect(rows.get('huaanwork-host')?.config).toMatchObject({
+      workspaceRoot: customRoot,
+    })
+  })
+
+  it('负例(真实组合):旧 id workflow-worker-thread 必须报 miss', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile('1', home)
+    const composedRows = composeEntries([prepared.patches])
+    const rows = new Map(composedRows.map(row => [row.id!, row]))
+
+    expect(() => assertHuaanworkRowIdsHit(rows, [{ id: 'workflow-worker-thread', intent: 'disable' }]))
+      .toThrow(/workflow-worker-thread: declared disable but the id does not exist in the composed profile/)
   })
 })
 

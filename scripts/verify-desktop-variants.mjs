@@ -80,7 +80,13 @@ const PAIRS = [
       'scripts/verify-profile-boot.mjs',
     ],
     oneSidedPaths: [],
-    oneSidedPrefixes: ['src/client-huaanwork/', 'scripts/gen-'],
+    oneSidedPrefixes: [
+      'src/client-huaanwork/',
+      'src/huaanwork-host/',
+      'src/huaanwork-guardrails/',
+      'scripts/gen-',
+      'scripts/huaanwork-',
+    ],
   },
 ]
 

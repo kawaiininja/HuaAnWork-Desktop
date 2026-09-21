@@ -115,6 +115,14 @@
     "./huaanwork-guardrails/bridge": {
       "types": "./lib/types/huaanwork-guardrails/bridge.d.ts",
       "default": "./lib/huaanwork-guardrails/bridge.js"
+    },
+    "./huaanwork-host": {
+      "types": "./lib/types/huaanwork-host/index.d.ts",
+      "default": "./lib/huaanwork-host/index.js"
+    },
+    "./huaanwork-host/gates": {
+      "types": "./lib/types/huaanwork-host/gates.d.ts",
+      "default": "./lib/huaanwork-host/gates.js"
     }
   },
   "files": [

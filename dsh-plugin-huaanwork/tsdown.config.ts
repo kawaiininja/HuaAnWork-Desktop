@@ -44,6 +44,8 @@ export default defineConfig([
       'huaanwork-guardrails/agent-tool': 'src/huaanwork-guardrails/agent-tool.ts',
       'huaanwork-guardrails/agent-mcp': 'src/huaanwork-guardrails/agent-mcp.ts',
       'huaanwork-guardrails/bridge': 'src/huaanwork-guardrails/bridge.ts',
+      'huaanwork-host/index': 'src/huaanwork-host/index.ts',
+      'huaanwork-host/gates': 'src/huaanwork-host/gates.ts',
     },
     outDir: 'lib',
     format: 'esm',

@@ -232,7 +232,7 @@ export function listBundledSkills(): BundledSkillInfo[] {
 }
 
 function loadSkill(fileName: string): SkillRegistration {
-  const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills", fileName), "utf8");
+  const raw = readFileSync(join(BUNDLED_SKILLS_ROOT, fileName), "utf8");
   const parsed = parseSkillMarkdown(raw);
   return {
     name: parsed.name || fileName.replace(/\.md$/, ""),
@@ -313,7 +313,16 @@ export function serializeSkillMarkdown(skill: ParsedSkillMarkdown): string {
   return `---\n${lines.join("\n")}\n---\n\n${skill.content.trim()}\n`;
 }
 
-const BUNDLED_SKILLS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
+function resolveBundledSkillsRoot(): string {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const oneUp = join(dir, "..", "skills");
+  if (existsSync(oneUp)) return oneUp;
+  const twoUp = join(dir, "..", "..", "skills");
+  if (existsSync(twoUp)) return twoUp;
+  return oneUp;
+}
+
+const BUNDLED_SKILLS_ROOT = resolveBundledSkillsRoot();
 
 export type BundledSkillEntry = { path: string; kind: "bundle" | "flat" };
 
