@@ -42,3 +42,6 @@ This repository owns the desktop product around an unmodified DeepSeek Harness c
 | NSIS `artifactName` still reads `DSH-Desktop-Beta-*` | `dsh-plugin-huaanwork/package.json` L417; test pinned with `TODO(M6)` | M6 |
 | `verify:aa` concurrent process race: running `corepack yarn check` in parallel across all three workspaces occasionally causes the beta `verify:aa` step to fail (AA Host services conflict). Each workspace passes in isolation; CI strips `verify:aa` via the AA-skip step. Pre-dates M1. | `dsh-plugin-desktop-beta/scripts/verify-profile-boot.mjs` L333 | Pre-existing upstream flakiness |
 | README 仍自述为「DSH Desktop Beta 通道」并声称提供 `dsh-desktop-beta` bin 别名(事实性错误,该别名已随派生移除) | `dsh-plugin-huaanwork/README.md`, `README.zh.md` | M6 |
+| `setKeepAwake` 无 Host 实现(Desktop 无 powerSaveBlocker 桥),客户端 501 降级为 false;需新增 main↔Host 桥(参照 runtime.notifyAttention) | `dsh-plugin-huaanwork/src/client-huaanwork/api.ts` | M4 |
+| 16 个 M4 域写 route 为诚实 501(automation 写×5、skill 写×6、agent 写×3、plugin 写×2) | `dsh-plugin-huaanwork/src/huaanwork-host/routes.ts` | M4 |
+| macOS 无原生目录选择(`MacPlatformStrategy.canPickDirectory = false`),picker route 保持 win32-only,客户端非 2xx(实测为 405)降级为 null;启用需改能力位并扩 variant 白名单,或改走上游 `dsh-host-directory-picker-native`(评审 P1-4 裁决) | `dsh-plugin-huaanwork/src/electron-platform.ts` | M4 |

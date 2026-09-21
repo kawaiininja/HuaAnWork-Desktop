@@ -387,6 +387,11 @@ export function setAgentsDirectory(directory: AgentsHost): void {
   agentsDirectory = directory
 }
 
+/** agent.list/get/refresh 路由与 @agent 分发共用同一目录实例(index.ts 注入)。 */
+export function getAgentsDirectory(): AgentsHost {
+  return agentsDirectory
+}
+
 // M4:automation run 归因 —— 旧 host.ts:315-326 的 runPendingApprovals(approval/asked
 // 事件带运行会话 id 时记入该 runId 的集合,运行结束只拒绝本运行自己产生的审批)
 // 属自动化引擎,M4 随 automations 域移植;此处为事件归因挂点。

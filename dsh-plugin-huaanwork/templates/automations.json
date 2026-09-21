@@ -1,0 +1,38 @@
+[
+  {
+    "name": "每日投研早报",
+    "kind": "agent",
+    "schedule": { "kind": "daily", "time": "08:00" },
+    "prompt": "请生成今日投研早报，涵盖市场概览、行业动态与两条重点关注事项，用简洁要点呈现。"
+  },
+  {
+    "name": "周报草稿",
+    "kind": "agent",
+    "schedule": { "kind": "weekly", "days": [1], "time": "10:00" },
+    "prompt": "请基于本周项目进展生成一份周报草稿，包含本周完成事项、进行中事项与下周计划三部分。"
+  },
+  {
+    "name": "目录整理",
+    "kind": "script",
+    "schedule": { "kind": "interval", "minutes": 1440 },
+    "command": "node scripts/clean-dir.mjs"
+  },
+  {
+    "name": "数据巡检",
+    "kind": "script",
+    "schedule": { "kind": "hourly", "minute": 0 },
+    "command": "node scripts/data-check.mjs"
+  },
+  {
+    "name": "CI 状态汇总",
+    "kind": "agent",
+    "schedule": { "kind": "interval", "minutes": 30 },
+    "prompt": "请汇总最近一次 CI 运行状态，列出失败的检查项及可能原因，用简洁列表呈现。"
+  },
+  {
+    "name": "下载归档",
+    "kind": "script",
+    "schedule": { "kind": "daily", "time": "22:00" },
+    "command": "node scripts/archive-downloads.mjs"
+  }
+]

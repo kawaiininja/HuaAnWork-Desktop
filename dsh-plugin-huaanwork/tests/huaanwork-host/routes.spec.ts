@@ -53,15 +53,14 @@ describe('ROUTE_TABLE registry', () => {
     ])
   })
 
-  test('M4 域写操作诚实 501,不静默假成功', async () => {
+  test('M4 域写操作诚实 501,不静默假成功(恰 16 个,测试即口径文档)', async () => {
     const notWired = [
-      'project.create', 'project.open', 'project.remove', 'project.rename',
-      'task.create', 'task.remove', 'task.bindSession', 'task.rename',
       'automation.create', 'automation.update', 'automation.remove', 'automation.run', 'automation.pruneSessions',
       'skill.create', 'skill.update', 'skill.remove', 'skill.import', 'skill.importPreview', 'skill.setEnabled',
       'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
       'plugin.add', 'plugin.remove',
     ]
+    expect(notWired).toHaveLength(16)
     for (const method of notWired) {
       const route = ROUTE_TABLE.find((r) => r.method === method)!
       expect(route).toBeDefined()
@@ -74,7 +73,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除 Task 4/5/7/9 实现的 19 个方法外其余 35 个方法均返回 501', async () => {
+  test('除 Task 4/5/7/9/10 实现的 38 个方法外其余 16 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -95,15 +94,39 @@ describe('ROUTE_TABLE registry', () => {
       'session.resume',
       'workspace.open',
       'workspace.close',
+      // Task 10:M4 域读路径 + projects/tasks 低复杂度写
+      'plugin.list',
+      'skill.list',
+      'skill.get',
+      'agent.list',
+      'agent.get',
+      'agent.refresh',
+      'project.list',
+      'project.create',
+      'project.open',
+      'project.remove',
+      'project.rename',
+      'automation.list',
+      'automation.runs',
+      'automation.templates',
+      'task.list',
+      'task.create',
+      'task.remove',
+      'task.bindSession',
+      'task.rename',
     ])
+    expect(implemented).toHaveLength(38)
+    let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
+      notImplementedCount += 1
       await expect(route.handler({ params: {}, body: undefined, query: new URLSearchParams() } as any, {} as any))
         .rejects.toMatchObject({
           status: 501,
           code: 'not-implemented',
         })
     }
+    expect(notImplementedCount).toBe(16)
   })
 })
 
@@ -212,7 +235,7 @@ describe('HTTP dispatch & security checks', () => {
   })
 
   test('M4 501 路由返回统一信封 { error: { code, message } }', async () => {
-    const res = await fetch(`${baseUrl}/huaanwork/project/create`, {
+    const res = await fetch(`${baseUrl}/huaanwork/automation/create`, {
       method: 'POST',
       headers: {
         Host: host,
@@ -224,7 +247,7 @@ describe('HTTP dispatch & security checks', () => {
     expect(res.status).toBe(501)
     const json = await res.json()
     expect(json).toEqual({
-      error: { code: 'not-implemented', message: 'M4 接入:project.create' },
+      error: { code: 'not-implemented', message: 'M4 接入:automation.create' },
     })
   })
 
@@ -529,5 +552,311 @@ describe('HTTP dispatch & security checks', () => {
     } finally {
       routeCtx.profileDir = originalProfile
     }
+  })
+})
+
+describe('M4 域读路径路由(Task 10 真实化)', () => {
+  let server: Server
+  let baseUrl: string
+  let host: string
+  let routeCtx: RouteContext
+  let profileTempDir: string
+
+  const authed = (init: RequestInit = {}): RequestInit => ({
+    ...init,
+    headers: { Host: host, Origin: baseUrl, ...(init.headers ?? {}) },
+  })
+
+  beforeAll(async () => {
+    profileTempDir = mkdtempSync(join(tmpdir(), 'hw-route-m4-'))
+    routeCtx = {
+      dshHome: join(profileTempDir, 'dsh'),
+      profileDir: profileTempDir,
+      workspaceRoot: { current: join(profileTempDir, 'workspace') },
+      emit: (_event: RpcEvent) => {},
+      logger: () => {},
+      requestRestart: async () => {},
+    }
+    mkdirSync(routeCtx.workspaceRoot.current, { recursive: true })
+
+    server = createServer((req, res) => {
+      void handleHuaanworkRequest(req, res, routeCtx)
+    })
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const port = (server.address() as AddressInfo).port
+    host = `127.0.0.1:${port}`
+    baseUrl = `http://${host}`
+  })
+
+  afterAll(async () => {
+    rmSync(profileTempDir, { recursive: true, force: true })
+    await new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()))
+    })
+  })
+
+  test('project 域:list → create → rename → open(同根短路)→ remove 级联', async () => {
+    // list 初始空表。
+    const list0 = await fetch(`${baseUrl}/huaanwork/project/list`, authed())
+    expect(list0.status).toBe(200)
+    expect(await list0.json()).toEqual({ projects: [] })
+
+    // create:新目录入库;重复 root 400 + 旧中文文案。
+    const projectRoot = join(profileTempDir, 'repo-x')
+    mkdirSync(projectRoot, { recursive: true })
+    const created = await fetch(`${baseUrl}/huaanwork/project/create`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root: projectRoot }),
+    }))
+    expect(created.status).toBe(200)
+    const { project } = await created.json()
+    expect(project.name).toBe('repo-x')
+
+    const dup = await fetch(`${baseUrl}/huaanwork/project/create`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root: projectRoot }),
+    }))
+    expect(dup.status).toBe(400)
+    expect(await dup.json()).toEqual({
+      error: { code: 'store-error', message: '该目录已是项目：repo-x' },
+    })
+
+    // rename。
+    const renamed = await fetch(`${baseUrl}/huaanwork/project/rename`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: project.id, name: '投研平台' }),
+    }))
+    expect(renamed.status).toBe(200)
+    expect((await renamed.json()).project.name).toBe('投研平台')
+
+    // open:当前工作区即项目根时短路 { workspaceRoot, project },不触发重启。
+    routeCtx.workspaceRoot.current = projectRoot
+    const opened = await fetch(`${baseUrl}/huaanwork/project/open`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: project.id }),
+    }))
+    expect(opened.status).toBe(200)
+    const openedJson = await opened.json()
+    expect(openedJson.workspaceRoot).toBe(projectRoot)
+    expect(openedJson.project.id).toBe(project.id)
+
+    // open 不存在项目:400 + 原文。
+    const missing = await fetch(`${baseUrl}/huaanwork/project/open`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: 'nope' }),
+    }))
+    expect(missing.status).toBe(400)
+    expect(await missing.json()).toEqual({
+      error: { code: 'workspace-error', message: 'project nope was not found' },
+    })
+
+    // remove 级联:项目下任务与自动化一并清理。
+    writeFileSync(join(profileTempDir, 'tasks.json'), JSON.stringify({
+      tasks: [
+        { id: 't1', projectId: project.id, name: '子任务', createdAt: 1 },
+        { id: 't2', projectId: 'other', name: '保留', createdAt: 2 },
+      ],
+    }))
+    writeFileSync(join(profileTempDir, 'automations.json'), JSON.stringify({
+      automations: [{
+        id: 'a1', projectId: project.id, name: '自动化', kind: 'agent',
+        schedule: { kind: 'manual' }, widget: false, enabled: true, createdAt: 1,
+      }],
+    }))
+    mkdirSync(join(profileTempDir, 'automations'), { recursive: true })
+    writeFileSync(join(profileTempDir, 'automations', 'a1.runs.jsonl'), `${JSON.stringify({
+      runId: 'r1', startedAt: 1, endedAt: 2, ok: true, output: 'x',
+    })}\n`)
+
+    const removed = await fetch(`${baseUrl}/huaanwork/project/remove`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: project.id }),
+    }))
+    expect(removed.status).toBe(200)
+    expect(await removed.json()).toMatchObject({ removed: true })
+
+    const list1 = await (await fetch(`${baseUrl}/huaanwork/project/list`, authed())).json()
+    expect(list1.projects).toEqual([])
+    const tasks1 = await (await fetch(`${baseUrl}/huaanwork/task/list`, authed())).json()
+    expect(tasks1.tasks.map((t: { id: string }) => t.id)).toEqual(['t2'])
+    const auto1 = await (await fetch(`${baseUrl}/huaanwork/automation/list`, authed())).json()
+    expect(auto1.automations).toEqual([])
+  })
+
+  test('task 域:list 支持 projectId query;create 校验项目存在;bindSession/rename/remove', async () => {
+    writeFileSync(join(profileTempDir, 'projects.json'), JSON.stringify({
+      projects: [{ id: 'p1', name: 'P1', root: '/tmp/p1', createdAt: 1 }],
+    }))
+
+    const created = await fetch(`${baseUrl}/huaanwork/task/create`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: 'p1', name: '任务甲' }),
+    }))
+    expect(created.status).toBe(200)
+    const { task } = await created.json()
+
+    // list?projectId= 过滤(query contract 的服务端直读)。
+    const scoped = await fetch(`${baseUrl}/huaanwork/task/list?projectId=p1`, authed())
+    expect((await scoped.json()).tasks.map((t: { id: string }) => t.id)).toEqual([task.id])
+    const empty = await fetch(`${baseUrl}/huaanwork/task/list?projectId=no-such-project`, authed())
+    expect((await empty.json()).tasks).toEqual([])
+
+    // create 挂在不存在的项目:400 + 原文。
+    const bad = await fetch(`${baseUrl}/huaanwork/task/create`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: 'missing', name: 'x' }),
+    }))
+    expect(bad.status).toBe(400)
+    expect(await bad.json()).toEqual({
+      error: { code: 'store-error', message: 'project missing was not found' },
+    })
+
+    // bindSession 幂等 + rename + remove。
+    const bound = await fetch(`${baseUrl}/huaanwork/task/bindSession`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId: task.id, sessionId: 'sess-1' }),
+    }))
+    expect((await bound.json()).task.sessionId).toBe('sess-1')
+    const rebound = await fetch(`${baseUrl}/huaanwork/task/bindSession`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId: task.id, sessionId: 'sess-1' }),
+    }))
+    expect(rebound.status).toBe(200)
+
+    const renamed = await fetch(`${baseUrl}/huaanwork/task/rename`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId: task.id, name: '新任务名' }),
+    }))
+    expect((await renamed.json()).task.name).toBe('新任务名')
+
+    const removed = await fetch(`${baseUrl}/huaanwork/task/remove`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: task.id }),
+    }))
+    expect(await removed.json()).toEqual({ removed: true })
+  })
+
+  test('automation 域:list(带 runs/missed 汇总)→ runs(query id/limit/status)→ templates', async () => {
+    writeFileSync(join(profileTempDir, 'automations.json'), JSON.stringify({
+      automations: [{
+        id: 'a1', projectId: null, name: '巡检', kind: 'agent',
+        schedule: { kind: 'hourly', minute: 0 }, widget: false, enabled: true, createdAt: 1,
+      }],
+    }))
+    mkdirSync(join(profileTempDir, 'automations'), { recursive: true })
+    const runsFixture = [
+      { runId: 'r1', startedAt: 1, endedAt: 2, ok: true, output: 'fine' },
+      { runId: 'r2', startedAt: 3, endedAt: 4, ok: false, output: 'boom', status: 'missed' },
+      { runId: 'r3', startedAt: 5, endedAt: 6, ok: false, output: 'late', status: 'missed' },
+    ]
+    writeFileSync(join(profileTempDir, 'automations', 'a1.runs.jsonl'), `${runsFixture.map((r) => JSON.stringify(r)).join('\n')}\n`)
+
+    // list:runs 带最近 5 条;missed 从全量筛。
+    const listed = await fetch(`${baseUrl}/huaanwork/automation/list`, authed())
+    const listJson = await listed.json()
+    expect(listJson.automations).toHaveLength(1)
+    expect(listJson.runs.a1.map((r: { runId: string }) => r.runId)).toEqual(['r1', 'r2', 'r3'])
+    expect(listJson.missed.a1.map((r: { runId: string }) => r.runId)).toEqual(['r2', 'r3'])
+
+    // runs?id= 全量;limit 截尾;status 筛选。
+    const all = await fetch(`${baseUrl}/huaanwork/automation/runs?id=a1`, authed())
+    expect((await all.json()).runs).toHaveLength(3)
+    const limited = await fetch(`${baseUrl}/huaanwork/automation/runs?id=a1&limit=2`, authed())
+    expect((await limited.json()).runs.map((r: { runId: string }) => r.runId)).toEqual(['r2', 'r3'])
+    const missedOnly = await fetch(`${baseUrl}/huaanwork/automation/runs?id=a1&status=missed`, authed())
+    expect((await missedOnly.json()).runs.map((r: { runId: string }) => r.runId)).toEqual(['r2', 'r3'])
+
+    // 缺 id:400。
+    const noId = await fetch(`${baseUrl}/huaanwork/automation/runs`, authed())
+    expect(noId.status).toBe(400)
+    expect(await noId.json()).toEqual({
+      error: { code: 'store-error', message: 'automation.runs requires params.id' },
+    })
+
+    // templates:随包模板数组。
+    const templates = await fetch(`${baseUrl}/huaanwork/automation/templates`, authed())
+    expect(templates.status).toBe(200)
+    const templateJson = await templates.json()
+    expect(Array.isArray(templateJson.templates)).toBe(true)
+    expect(templateJson.templates.length).toBeGreaterThan(0)
+  })
+
+  test('skill 域:list 三源合并(bundled 带 enabled)→ get 按 name/source query', async () => {
+    // 用户技能直接落盘(写路径 M4,这里只准备读 fixture)。
+    mkdirSync(join(profileTempDir, 'skills', 'demo'), { recursive: true })
+    writeFileSync(join(profileTempDir, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: 演示\n---\n\n正文\n')
+
+    const listed = await fetch(`${baseUrl}/huaanwork/skill/list`, authed())
+    const { skills } = await listed.json()
+    const byName = (name: string) => skills.find((s: { name: string }) => s.name === name)
+    // bundled 系统技能始终启用;用户技能入列;全局按名排序。
+    expect(byName('explore').source).toBe('bundled')
+    expect(byName('explore').enabled).toBe(true)
+    expect(byName('demo')).toMatchObject({ source: 'user', description: '演示' })
+    const names = skills.map((s: { name: string }) => s.name)
+    expect([...names].sort((a: string, b: string) => a.localeCompare(b))).toEqual(names)
+
+    // get:source 定向 + 未找到 400 原文。
+    const got = await fetch(`${baseUrl}/huaanwork/skill/get?name=demo&source=user`, authed())
+    expect(got.status).toBe(200)
+    expect((await got.json()).skill.content).toBe('正文')
+
+    const bundledGot = await fetch(`${baseUrl}/huaanwork/skill/get?name=explore&source=bundled`, authed())
+    expect((await bundledGot.json()).skill.source).toBe('bundled')
+
+    const missing = await fetch(`${baseUrl}/huaanwork/skill/get?name=missing`, authed())
+    expect(missing.status).toBe(400)
+    expect(await missing.json()).toEqual({
+      error: { code: 'store-error', message: 'skill missing was not found' },
+    })
+
+    const noName = await fetch(`${baseUrl}/huaanwork/skill/get`, authed())
+    expect(noName.status).toBe(400)
+    expect(await noName.json()).toEqual({
+      error: { code: 'store-error', message: 'skill.get requires params.name' },
+    })
+  })
+
+  test('agent 域:未配置 agents_host 时 list/get 均为空(占位目录语义)', async () => {
+    const listed = await fetch(`${baseUrl}/huaanwork/agent/list`, authed())
+    expect(await listed.json()).toEqual({ items: [] })
+
+    const got = await fetch(`${baseUrl}/huaanwork/agent/get?name=anyone`, authed())
+    expect(got.status).toBe(200)
+    expect(await got.json()).toBeNull()
+
+    const refreshed = await fetch(`${baseUrl}/huaanwork/agent/refresh`, authed({ method: 'POST' }))
+    expect(await refreshed.json()).toEqual({ items: [] })
+  })
+
+  test('plugin.list:manifest 缺失时回落 REQUIRED_BUNDLES(web 模板前导)', async () => {
+    const listed = await fetch(`${baseUrl}/huaanwork/plugin/list`, authed())
+    expect(listed.status).toBe(200)
+    expect(await listed.json()).toEqual({ bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] })
+  })
+
+  test('IMMUTABLE_BUNDLES 与 desktop-plugins.ts 同口径:含 web carrier;回落清单不含 dsh-plugin-huaanwork', async () => {
+    const { IMMUTABLE_BUNDLES, fallbackProfileBundles } = await import('../../src/huaanwork-host/plugins-host.ts')
+    // 真实的 dsh.profile.bundles composition(REQUIRED_BUNDLES 前导)必须不可移除。
+    expect(IMMUTABLE_BUNDLES.has('@deepseek-ai/dsh-base')).toBe(true)
+    expect(IMMUTABLE_BUNDLES.has('@deepseek-ai/dsh-web-app')).toBe(true)
+    // 回落 bundle 清单 = REQUIRED_BUNDLES;dsh-plugin-huaanwork 是 DESKTOP_PACKAGE_NAME
+    // (走 patch 行组合),不得伪装成 bundle 清单成员(IMMUTABLE 集含它是桌面包名语义)。
+    expect(fallbackProfileBundles()).toEqual(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
+    expect(fallbackProfileBundles()).not.toContain('dsh-plugin-huaanwork')
   })
 })

@@ -140,7 +140,8 @@
     "README.zh.md",
     "README.i18n.yaml",
     "THIRD_PARTY_NOTICES.md",
-    "skills/"
+    "skills/",
+    "templates/"
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

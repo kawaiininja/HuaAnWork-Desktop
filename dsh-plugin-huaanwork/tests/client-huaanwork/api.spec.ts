@@ -209,6 +209,33 @@ describe('rpcCall 路由映射', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  test('GET query contract:params 编码为 query string(undefined 跳过,空对象无 query)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}))
+    await rpcCall('skill.get', { name: 'demo', source: 'user' })
+    expect(lastFetchCall().url).toBe('/huaanwork/skill/get?name=demo&source=user')
+
+    await rpcCall('automation.list', { projectId: 'p1' })
+    expect(lastFetchCall().url).toBe('/huaanwork/automation/list?projectId=p1')
+
+    await rpcCall('automation.runs', { id: 'a1', limit: 5, status: 'missed' })
+    expect(lastFetchCall().url).toBe('/huaanwork/automation/runs?id=a1&limit=5&status=missed')
+
+    await rpcCall('task.list', { projectId: 'p2' })
+    expect(lastFetchCall().url).toBe('/huaanwork/task/list?projectId=p2')
+
+    await rpcCall('session.list', { root: '/tmp/ws' })
+    expect(lastFetchCall().url).toBe(`/huaanwork/session/list?root=${encodeURIComponent('/tmp/ws')}`)
+
+    await rpcCall('agent.get', { name: 'pdf-extract' })
+    expect(lastFetchCall().url).toBe('/huaanwork/agent/get?name=pdf-extract')
+
+    // 空对象与 undefined:path 不带 query。
+    await rpcCall('automation.list', {})
+    expect(lastFetchCall().url).toBe('/huaanwork/automation/list')
+    await rpcCall('skill.get')
+    expect(lastFetchCall().url).toBe('/huaanwork/skill/get')
+  })
+
   test('2xx 返回 JSON payload', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ state: 'logged-in', username: 'dev' }))
     await expect(rpcCall('auth.login', { username: 'dev', password: 'password1' })).resolves.toEqual({

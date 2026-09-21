@@ -9,15 +9,30 @@ const DIRECTORY_PICKER_PATH = '/_dsh/desktop/pick-directory'
 
 // —— 54 方法 → route 映射(与 huaanwork-host/routes.ts 的 ROUTE_TABLE 互为唯一事实源)——
 // Task 4 的 GET route 均不取 query 参数,故 path 为常量;写类 route body 透传 params。
+// Task 10 起 GET 类 route 定义 query contract:params 对象的键值编码为 query string
+// (undefined 值跳过;空对象 → 无 query,path 不变)。服务端 routes.ts 同名参数直读。
 type RouteHttp = 'GET' | 'POST' | 'PUT'
 interface RouteDef {
   http: RouteHttp
   path: string
   body?: (params?: unknown) => unknown
+  query?: (params?: unknown) => string
 }
 
 const post = (path: string): RouteDef => ({ http: 'POST', path, body: (params) => params })
-const get = (path: string): RouteDef => ({ http: 'GET', path })
+const get = (path: string, query?: (params?: unknown) => string): RouteDef => ({ http: 'GET', path, query })
+
+/** params 对象 → query string;非对象/空对象返回 ''。 */
+function objectQuery(params?: unknown): string {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return ''
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+    if (value === undefined || value === null) continue
+    search.set(key, String(value))
+  }
+  const encoded = search.toString()
+  return encoded ? `?${encoded}` : ''
+}
 
 export const ROUTES: Record<string, RouteDef> = {
   // workspace
@@ -29,7 +44,7 @@ export const ROUTES: Record<string, RouteDef> = {
   'session.cancel': post('/huaanwork/session/cancel'),
   'session.approve': post('/huaanwork/session/approve'),
   'session.reject': post('/huaanwork/session/reject'),
-  'session.list': get('/huaanwork/session/list'),
+  'session.list': get('/huaanwork/session/list', objectQuery),
   'session.open': post('/huaanwork/session/open'),
   'session.remove': post('/huaanwork/session/remove'),
   'session.new': post('/huaanwork/session/new'),
@@ -53,7 +68,7 @@ export const ROUTES: Record<string, RouteDef> = {
 
   // skill
   'skill.list': get('/huaanwork/skill/list'),
-  'skill.get': get('/huaanwork/skill/get'),
+  'skill.get': get('/huaanwork/skill/get', objectQuery),
   'skill.create': post('/huaanwork/skill/create'),
   'skill.update': post('/huaanwork/skill/update'),
   'skill.remove': post('/huaanwork/skill/remove'),
@@ -63,7 +78,7 @@ export const ROUTES: Record<string, RouteDef> = {
 
   // agent
   'agent.list': get('/huaanwork/agent/list'),
-  'agent.get': get('/huaanwork/agent/get'),
+  'agent.get': get('/huaanwork/agent/get', objectQuery),
   'agent.refresh': post('/huaanwork/agent/refresh'),
   'agent.setEnabled': post('/huaanwork/agent/setEnabled'),
   'agent.addEndpoint': post('/huaanwork/agent/addEndpoint'),
@@ -80,17 +95,17 @@ export const ROUTES: Record<string, RouteDef> = {
   'project.rename': post('/huaanwork/project/rename'),
 
   // automation
-  'automation.list': get('/huaanwork/automation/list'),
+  'automation.list': get('/huaanwork/automation/list', objectQuery),
   'automation.create': post('/huaanwork/automation/create'),
   'automation.update': post('/huaanwork/automation/update'),
   'automation.remove': post('/huaanwork/automation/remove'),
   'automation.run': post('/huaanwork/automation/run'),
-  'automation.runs': get('/huaanwork/automation/runs'),
+  'automation.runs': get('/huaanwork/automation/runs', objectQuery),
   'automation.pruneSessions': post('/huaanwork/automation/pruneSessions'),
   'automation.templates': get('/huaanwork/automation/templates'),
 
   // task
-  'task.list': get('/huaanwork/task/list'),
+  'task.list': get('/huaanwork/task/list', objectQuery),
   'task.create': post('/huaanwork/task/create'),
   'task.remove': post('/huaanwork/task/remove'),
   'task.bindSession': post('/huaanwork/task/bindSession'),
@@ -130,7 +145,8 @@ export async function rpcCall<T>(method: string, params?: unknown): Promise<T> {
   if (!route) throw new Error(`unknown method: ${method}`)
   let response: Response
   try {
-    response = await fetch(route.path, {
+    const queryString = route.query ? route.query(params) : ''
+    response = await fetch(route.path + queryString, {
       method: route.http,
       headers: route.body ? { 'content-type': 'application/json' } : undefined,
       body: route.body ? JSON.stringify(route.body(params) ?? null) : undefined,

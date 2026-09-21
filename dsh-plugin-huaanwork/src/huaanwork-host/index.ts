@@ -5,6 +5,9 @@ import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
 import { installNetworkGate } from './net-gate.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
+import { createAgentsHost } from './agents-host.ts'
+import { setAgentsDirectory } from './sessions.ts'
+import { readHuaanworkSettingsSync } from './settings.ts'
 import { clearPendingWorkspaceRoot } from './workspace-state.ts'
 
 export const name = 'huaanwork-host'
@@ -31,6 +34,24 @@ export function apply(ctx: Context, config: HuaanworkHostConfig) {
   }, 'huaanwork: clear pending workspace root')
   const hub = createHuaanworkEventHub()
   const routeCtx = installHuaanworkHolders(ctx, config, hub, () => ctx.desktopRuntime.requestRestart())
+  // 智能体目录真实接线(Task 10):fetch 公用机目录 + 本地 endpoints,存储根 = profileDir;
+  // 目录快照同步进 huaanworkAgentCatalog holder(agent-invoke 的 @agent 分发消费)。
+  const agentsHost = createAgentsHost({
+    storageRoot: config.profileDir,
+    readSettings: () => {
+      const settings = readHuaanworkSettingsSync(config.profileDir)
+      return {
+        agents_host: settings.agents_host,
+        agents_port: settings.agents_port,
+        agents_catalog_token: settings.agents_catalog_token,
+      }
+    },
+    onCatalogChange: () => {
+      ctx.huaanworkAgentCatalog.current = agentsHost.snapshotForRuntime()
+    },
+  })
+  setAgentsDirectory(agentsHost)
+  ctx.huaanworkAgentCatalog.current = agentsHost.snapshotForRuntime()
   // 统一网络门禁第二层(llm/stream 前置全局监听;AGENTS.md 不变式 9)。
   installNetworkGate(ctx, routeCtx)
   ctx.effect(() => {
