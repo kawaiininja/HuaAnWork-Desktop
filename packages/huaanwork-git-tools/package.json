@@ -1,0 +1,17 @@
+{
+  "name": "@huaanwork/git-tools",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/git.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check": "yarn test && yarn typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "~5.6.3"
+  }
+}

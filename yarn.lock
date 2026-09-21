@@ -9629,6 +9629,33 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@huaanwork/git-tools@workspace:packages/huaanwork-git-tools":
+  version: 0.0.0-use.local
+  resolution: "@huaanwork/git-tools@workspace:packages/huaanwork-git-tools"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:~5.6.3"
+  languageName: unknown
+  linkType: soft
+
+"@huaanwork/model@workspace:packages/huaanwork-model":
+  version: 0.0.0-use.local
+  resolution: "@huaanwork/model@workspace:packages/huaanwork-model"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:~5.6.3"
+  languageName: unknown
+  linkType: soft
+
+"@huaanwork/policy@workspace:packages/huaanwork-policy":
+  version: 0.0.0-use.local
+  resolution: "@huaanwork/policy@workspace:packages/huaanwork-policy"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:~5.6.3"
+  languageName: unknown
+  linkType: soft
+
 "@img/colour@npm:^1.1.0":
   version: 1.1.0
   resolution: "@img/colour@npm:1.1.0"
@@ -18659,6 +18686,16 @@ __metadata:
   languageName: node
   linkType: hard
 
+"typescript@npm:~5.6.3":
+  version: 5.6.3
+  resolution: "typescript@npm:5.6.3"
+  bin:
+    tsc: bin/tsc
+    tsserver: bin/tsserver
+  checksum: 10c0/44f61d3fb15c35359bc60399cb8127c30bae554cd555b8e2b46d68fa79d680354b83320ad419ff1b81a0bdf324197b29affe6cc28988cd6a74d4ac60c94f9799
+  languageName: node
+  linkType: hard
+
 "typescript@patch:typescript@npm%3A6.0.3#optional!builtin<compat/typescript>":
   version: 6.0.3
   resolution: "typescript@patch:typescript@npm%3A6.0.3#optional!builtin<compat/typescript>::version=6.0.3&hash=5786d5"
@@ -18666,6 +18703,16 @@ __metadata:
     tsc: bin/tsc
     tsserver: bin/tsserver
   checksum: 10c0/2f25c74e65663c248fa1ade2b8459d9ce5372ff9dad07067310f132966ebec1d93f6c42f0baf77a6b6a7a91460463f708e6887013aaade22111037457c6b25df
+  languageName: node
+  linkType: hard
+
+"typescript@patch:typescript@npm%3A~5.6.3#optional!builtin<compat/typescript>":
+  version: 5.6.3
+  resolution: "typescript@patch:typescript@npm%3A5.6.3#optional!builtin<compat/typescript>::version=5.6.3&hash=8c6c40"
+  bin:
+    tsc: bin/tsc
+    tsserver: bin/tsserver
+  checksum: 10c0/7c9d2e07c81226d60435939618c91ec2ff0b75fbfa106eec3430f0fcf93a584bc6c73176676f532d78c3594fe28a54b36eb40b3d75593071a7ec91301533ace7
   languageName: node
   linkType: hard
 

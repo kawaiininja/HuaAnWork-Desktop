@@ -1,0 +1,24 @@
+{
+  "name": "@huaanwork/policy",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/decide.ts",
+    "./agent-catalog": "./src/agent-catalog.ts",
+    "./channels": "./src/channels.ts",
+    "./http-cap": "./src/http-cap.ts",
+    "./network": "./src/network.ts",
+    "./paths": "./src/paths.ts",
+    "./shell": "./src/shell.ts",
+    "./truncate": "./src/truncate.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check": "yarn test && yarn typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "~5.6.3"
+  }
+}
