@@ -37,7 +37,7 @@ test("policy plugin lets pre-execute approval calls through its Cordis guard", a
     | undefined;
 
   apply({
-    huaanworkWorkspaceRoot: process.cwd(),
+    huaanworkWorkspaceRoot: { current: process.cwd() },
     on(event: string, listener: PreExecute) {
       if (event === "tools/pre-execute") preExecute = listener;
     },
@@ -75,7 +75,7 @@ test("policy plugin asks before checking out a dirty workspace", async () => {
     let preExecute: PreExecute | undefined;
     let guard: ((execution: { name: string; arguments: Record<string, unknown> }) => string | undefined) | undefined;
     apply({
-      huaanworkWorkspaceRoot: workspaceRoot,
+      huaanworkWorkspaceRoot: { current: workspaceRoot },
       on(event: string, listener: PreExecute) {
         if (event === "tools/pre-execute") preExecute = listener;
       },
@@ -102,7 +102,7 @@ test("policy plugin treats a non-repo workspace as clean for git_checkout", asyn
     let preExecute: PreExecute | undefined;
     let guard: ((execution: { name: string; arguments: Record<string, unknown> }) => string | undefined) | undefined;
     apply({
-      huaanworkWorkspaceRoot: workspaceRoot,
+      huaanworkWorkspaceRoot: { current: workspaceRoot },
       on(event: string, listener: PreExecute) {
         if (event === "tools/pre-execute") preExecute = listener;
       },
@@ -136,7 +136,7 @@ test("Cordis guard allows git_push once after allowed-once and denies without ap
   let executions = 0;
 
   const ctx = {
-    huaanworkWorkspaceRoot: process.cwd(),
+    huaanworkWorkspaceRoot: { current: process.cwd() },
     huaanworkApprovals: approvals,
     huaanworkEmit(event: unknown) {
       events.push(event);
@@ -196,7 +196,7 @@ function applyPolicyWithUnattended(ctx: Record<string, unknown>) {
   const preExecuteListeners: PreExecute[] = [];
   let guard: ((execution: { name: string; arguments: Record<string, unknown>; callId?: string }) => string | undefined) | undefined;
   const merged = {
-    huaanworkWorkspaceRoot: process.cwd(),
+    huaanworkWorkspaceRoot: { current: process.cwd() },
     ...ctx,
     on(event: string, listener: PreExecute) {
       if (event === "tools/pre-execute") preExecuteListeners.push(listener);
@@ -536,7 +536,7 @@ function applyPolicyWithHome(home: string | undefined) {
     | ((execution: { name: string; arguments: Record<string, unknown>; callId?: string }) => string | undefined)
     | undefined;
   const ctx = {
-    huaanworkWorkspaceRoot: process.cwd(),
+    huaanworkWorkspaceRoot: { current: process.cwd() },
     ...(home === undefined ? {} : { huaanworkDshHome: home }),
     on(event: string, listener: PreExecute) {
       if (event === "tools/pre-execute") preExecuteListeners.push(listener);
@@ -656,7 +656,7 @@ test("toToolCall is fail-closed without execution.agent", async () => {
     | undefined;
 
   apply({
-    huaanworkWorkspaceRoot: process.cwd(),
+    huaanworkWorkspaceRoot: { current: process.cwd() },
     huaanworkAttachments: attachments,
     on(event: string, listener: PreExecute) {
       if (event === "tools/pre-execute") preExecute = listener;

@@ -31,7 +31,7 @@ type ToolResult = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/
 };
 
 type Context = {
-  huaanworkWorkspaceRoot?: string;
+  huaanworkWorkspaceRoot?: { current: string };
   huaanworkEmit?: (event: RpcEvent) => void;
   on(event: string, listener: (...args: never[]) => unknown, prepend?: boolean): void;
 };
@@ -128,7 +128,7 @@ function capResult(result: ToolResult): { text: string; truncated: boolean } {
 }
 
 function emitGitDiff(ctx: Context, sessionId: string | undefined): void {
-  const root = ctx.huaanworkWorkspaceRoot ?? process.cwd();
+  const root = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd();
   try {
     const text = workspaceDiff(root);
     if (text === undefined) return;

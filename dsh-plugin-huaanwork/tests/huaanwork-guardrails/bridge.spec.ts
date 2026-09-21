@@ -25,7 +25,7 @@ function createCtx(workspaceRoot = "/tmp/pinned") {
   const listeners: Record<string, ((...args: never[]) => unknown)[]> = {};
   const emitted: unknown[] = [];
   const ctx = {
-    huaanworkWorkspaceRoot: workspaceRoot,
+    huaanworkWorkspaceRoot: { current: workspaceRoot },
     huaanworkEmit(event: unknown) {
       emitted.push(event);
     },

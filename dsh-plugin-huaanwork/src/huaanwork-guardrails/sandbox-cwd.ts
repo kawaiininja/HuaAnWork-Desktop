@@ -16,7 +16,7 @@ type SessionLike = {
 };
 
 type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/session/src/index.ts(SessionService 无单独 ctx 类型导出)
-  huaanworkWorkspaceRoot?: string;
+  huaanworkWorkspaceRoot?: { current: string };
   sessions: {
     create: (id?: string, options?: SessionOptions) => unknown;
     prepare: (id?: string, options?: SessionOptions) => unknown;
@@ -49,8 +49,8 @@ export function apply(ctx: Context): void {
   ctx.sandboxPolicy.workspaceRoot = pinnedCwd(ctx);
 }
 
-export function pinnedCwd(ctx: { huaanworkWorkspaceRoot?: string }, requested?: string): string {
-  const opened = ctx.huaanworkWorkspaceRoot;
+export function pinnedCwd(ctx: { huaanworkWorkspaceRoot?: { current: string } }, requested?: string): string {
+  const opened = ctx.huaanworkWorkspaceRoot?.current;
   if (!opened) return requested && requested.length > 0 ? requested : process.cwd();
   if (!requested) return opened;
   if (samePath(requested, process.cwd()) && !samePath(opened, process.cwd())) return opened;
@@ -58,7 +58,7 @@ export function pinnedCwd(ctx: { huaanworkWorkspaceRoot?: string }, requested?: 
   return opened;
 }
 
-function withPinnedCwd(ctx: { huaanworkWorkspaceRoot?: string }, options?: SessionOptions): SessionOptions {
+function withPinnedCwd(ctx: { huaanworkWorkspaceRoot?: { current: string } }, options?: SessionOptions): SessionOptions {
   // Persistence resume already has a durable log keyed by header.cwd. Rewriting
   // cwd here makes jsonl look for a file under the new project directory.
   if (options?.seedSource === "persistence") return options;

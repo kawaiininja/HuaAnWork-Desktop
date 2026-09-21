@@ -31,7 +31,7 @@ type UnattendedScope = { runId: string; automationId: string; allow: Set<string>
 type UnattendedHolder = { current?: UnattendedScope };
 
 type Context = {
-  huaanworkWorkspaceRoot?: string;
+  huaanworkWorkspaceRoot?: { current: string };
   huaanworkAllowedOnce?: Set<string>;
   /** `$DSH_HOME`：写无人值守降级审计行用。未注入时静默跳过审计（不阻断工具执行）。 */
   huaanworkDshHome?: string;
@@ -170,7 +170,7 @@ function readExistingAuditLines(path: string): string[] {
 }
 
 function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
-  const workspaceRoot = ctx.huaanworkWorkspaceRoot ?? process.cwd();
+  const workspaceRoot = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd();
   const args = objectArgs(execution.arguments);
   let attached: boolean | undefined = undefined;
   if (execution.name === "call_host_tool") {

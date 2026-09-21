@@ -19,7 +19,7 @@ type GitOutput = {
 };
 
 type Context = {
-  huaanworkWorkspaceRoot?: string;
+  huaanworkWorkspaceRoot?: { current: string };
   on(
     event: "tools/pre-execute",
     listener: (execution: ToolExecution, next: () => Promise<PreExecuteDecision>) => Promise<PreExecuteDecision>,
@@ -168,7 +168,7 @@ export function apply(ctx: Context): void {
 }
 
 function workspaceRoot(ctx: Context): string {
-  return ctx.huaanworkWorkspaceRoot ?? process.cwd();
+  return ctx.huaanworkWorkspaceRoot?.current ?? process.cwd();
 }
 
 function toOutput(result: GitCommandResult): GitOutput {

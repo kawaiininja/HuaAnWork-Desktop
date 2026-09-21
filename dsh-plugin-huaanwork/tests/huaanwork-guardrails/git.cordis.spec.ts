@@ -38,7 +38,7 @@ function createCtx(workspaceRoot: string) {
   const approvals = new Map<string, (result: string) => void>();
 
   const ctx = {
-    huaanworkWorkspaceRoot: workspaceRoot,
+    huaanworkWorkspaceRoot: { current: workspaceRoot },
     huaanworkApprovals: approvals,
     huaanworkEmit(event: unknown) {
       emitted.push(event);

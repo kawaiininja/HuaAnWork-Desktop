@@ -10,7 +10,7 @@ function createCtx(opened: string) {
   const created: unknown[] = [];
   const prepared: unknown[] = [];
   const ctx = {
-    huaanworkWorkspaceRoot: opened,
+    huaanworkWorkspaceRoot: { current: opened },
     sessions: {
       create(_id?: string, options?: { meta?: { cwd?: string } }) {
         created.push(options);
@@ -70,7 +70,7 @@ test("cwd inside the opened folder is kept for nested work", () => {
   const opened = mkdtempSync(join(tmpdir(), "huaanwork-sandbox-nested-"));
   const nested = join(opened, "packages", "app");
   try {
-    assert.equal(pinnedCwd({ huaanworkWorkspaceRoot: opened }, nested), nested);
+    assert.equal(pinnedCwd({ huaanworkWorkspaceRoot: { current: opened } }, nested), nested);
     const { ctx, created } = createCtx(opened);
     ctx.sessions.create("child", { meta: { cwd: nested } });
     assert.equal((created[0] as { meta: { cwd: string } }).meta.cwd, nested);
@@ -83,10 +83,25 @@ test("cwd outside the opened folder is jailed back to the opened folder", () => 
   const opened = mkdtempSync(join(tmpdir(), "huaanwork-sandbox-jail-"));
   const outside = mkdtempSync(join(tmpdir(), "huaanwork-sandbox-out-"));
   try {
-    assert.equal(pinnedCwd({ huaanworkWorkspaceRoot: opened }, outside), opened);
+    assert.equal(pinnedCwd({ huaanworkWorkspaceRoot: { current: opened } }, outside), opened);
   } finally {
     rmSync(opened, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("pinnedCwd reads huaanworkWorkspaceRoot.current live (holder contract)", () => {
+  const first = mkdtempSync(join(tmpdir(), "huaanwork-sandbox-holder-a-"));
+  const second = mkdtempSync(join(tmpdir(), "huaanwork-sandbox-holder-b-"));
+  const holder = { current: first };
+  try {
+    assert.notEqual(resolveSame(first), resolveSame(second));
+    assert.equal(pinnedCwd({ huaanworkWorkspaceRoot: holder }), first);
+    holder.current = second;
+    assert.equal(pinnedCwd({ huaanworkWorkspaceRoot: holder }), second);
+  } finally {
+    rmSync(first, { recursive: true, force: true });
+    rmSync(second, { recursive: true, force: true });
   }
 });
 
