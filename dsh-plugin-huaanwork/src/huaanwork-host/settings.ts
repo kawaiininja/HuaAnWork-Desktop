@@ -6,7 +6,6 @@ import { join } from 'node:path'
 import type { GuardMode } from '@huaanwork/policy'
 import { catalogRootUrl } from '@huaanwork/policy/agent-catalog'
 import { isLanEndpoint } from '@huaanwork/policy/network'
-import { RouteError } from './routes.ts'
 
 export type ThemePref = 'light' | 'dark' | 'system'
 
@@ -288,7 +287,9 @@ export async function readHuaanworkSettings(profileDir: string): Promise<AppSett
     const content = await readFile(filePath, 'utf8')
     return parseSettings(JSON.parse(content))
   } catch (error: unknown) {
-    if ((error as { code?: string }).code === 'ENOENT') return emptySettings()
+    if ((error as { code?: string }).code === 'ENOENT' || error instanceof SyntaxError) {
+      return emptySettings()
+    }
     throw error
   }
 }
@@ -299,7 +300,9 @@ export function readHuaanworkSettingsSync(profileDir: string): AppSettings {
     const content = readFileSync(filePath, 'utf8')
     return parseSettings(JSON.parse(content))
   } catch (error: unknown) {
-    if ((error as { code?: string }).code === 'ENOENT') return emptySettings()
+    if ((error as { code?: string }).code === 'ENOENT' || error instanceof SyntaxError) {
+      return emptySettings()
+    }
     throw error
   }
 }
@@ -308,13 +311,6 @@ export async function writeHuaanworkSettings(profileDir: string, patch: unknown)
   const filePath = join(profileDir, 'huaanwork-settings.json')
   const current = await readHuaanworkSettings(profileDir)
   const next = mergeSettings(current, patch)
-  const paramObj = typeof patch === 'object' && patch !== null ? (patch as Record<string, unknown>) : {}
-  if ('agents_host' in paramObj || 'agents_port' in paramObj) {
-    const fieldErrors = agentsDirectoryErrors(next)
-    if (fieldErrors.length > 0) {
-      throw new RouteError(400, 'validation', fieldErrors.map((e) => e.message).join('; '))
-    }
-  }
   await mkdir(profileDir, { recursive: true })
   await writeFile(filePath, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
   return next

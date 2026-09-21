@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'node:http'
+import { createServer, request as httpRequest, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -260,6 +260,48 @@ describe('HTTP dispatch & security checks', () => {
     expect(res.status).toBe(413)
     const json = await res.json()
     expect(json).toEqual({
+      error: { code: 'payload-too-large', message: 'Payload Too Large' },
+    })
+  })
+
+  test('分块流式传输超 1 MiB 载荷返回 413 信封 (Transfer-Encoding: chunked)', async () => {
+    const chunk = 'x'.repeat(64 * 1024)
+    const res = await new Promise<{ status: number; json: any }>((resolve, reject) => {
+      const clientReq = httpRequest(
+        `${baseUrl}/huaanwork/workspace/open`,
+        {
+          method: 'POST',
+          headers: {
+            Host: host,
+            Origin: baseUrl,
+            'Content-Type': 'application/json',
+            'Transfer-Encoding': 'chunked',
+          },
+        },
+        (clientRes) => {
+          let data = ''
+          clientRes.on('data', (c) => {
+            data += c
+          })
+          clientRes.on('end', () => {
+            try {
+              resolve({ status: clientRes.statusCode ?? 0, json: JSON.parse(data) })
+            } catch (err) {
+              reject(err)
+            }
+          })
+        },
+      )
+      clientReq.on('error', reject)
+      // Send 17 chunks of 64KB = 1088KB > 1024KB
+      for (let i = 0; i < 17; i++) {
+        clientReq.write(chunk)
+      }
+      clientReq.end()
+    })
+
+    expect(res.status).toBe(413)
+    expect(res.json).toEqual({
       error: { code: 'payload-too-large', message: 'Payload Too Large' },
     })
   })

@@ -270,18 +270,19 @@ describe('settings disk storage in profileDir', () => {
     }
   })
 
-  test('writeHuaanworkSettings with invalid public agents_host throws RouteError 400 validation', async () => {
+  test('corrupted huaanwork-settings.json gracefully falls back to emptySettings() and allows subsequent write', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'hw-settings-test-'))
     try {
-      await expect(
-        writeHuaanworkSettings(dir, {
-          agents_host: '8.8.8.8',
-          agents_port: 8080,
-        }),
-      ).rejects.toMatchObject({
-        status: 400,
-        code: 'validation',
-      })
+      writeFileSync(join(dir, 'huaanwork-settings.json'), '{ "broken": ', 'utf8')
+      const fallback = await readHuaanworkSettings(dir)
+      expect(fallback).toEqual(emptySettings())
+      expect(readHuaanworkSettingsSync(dir)).toEqual(emptySettings())
+
+      // 允许后续正常写盘
+      const updated = await writeHuaanworkSettings(dir, { theme: 'dark' })
+      expect(updated.theme).toBe('dark')
+      const readBack = await readHuaanworkSettings(dir)
+      expect(readBack.theme).toBe('dark')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

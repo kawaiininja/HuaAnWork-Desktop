@@ -4,7 +4,12 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
 import { isSameOriginLoopbackRequest } from './loopback.ts'
 import { hasGit, listTree } from './native.ts'
-import { readHuaanworkSettings, writeHuaanworkSettings } from './settings.ts'
+import {
+  agentsDirectoryErrors,
+  mergeSettings,
+  readHuaanworkSettings,
+  writeHuaanworkSettings,
+} from './settings.ts'
 import {
   authChangePassword,
   authLogin,
@@ -74,7 +79,23 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
 
   // settings
   { method: 'settings.get', http: 'GET', path: '/huaanwork/settings', handler: async (_req, ctx) => readHuaanworkSettings(ctx.profileDir) },
-  { method: 'settings.set', http: 'PUT', path: '/huaanwork/settings', handler: async (req, ctx) => writeHuaanworkSettings(ctx.profileDir, req.body) },
+  {
+    method: 'settings.set',
+    http: 'PUT',
+    path: '/huaanwork/settings',
+    handler: async (req, ctx) => {
+      const paramObj = typeof req.body === 'object' && req.body !== null ? (req.body as Record<string, unknown>) : {}
+      if ('agents_host' in paramObj || 'agents_port' in paramObj) {
+        const current = await readHuaanworkSettings(ctx.profileDir)
+        const next = mergeSettings(current, req.body)
+        const fieldErrors = agentsDirectoryErrors(next)
+        if (fieldErrors.length > 0) {
+          throw new RouteError(400, 'validation', fieldErrors.map((e) => e.message).join('; '))
+        }
+      }
+      return writeHuaanworkSettings(ctx.profileDir, req.body)
+    },
+  },
 
   // auth
   { method: 'auth.status', http: 'POST', path: '/huaanwork/auth/status', handler: async (_req, ctx) => authStatus(ctx.profileDir) },
@@ -231,7 +252,7 @@ async function readJsonBody(
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array)
     size += buffer.byteLength
     if (size > MAX_BODY_BYTES) {
-      req.destroy()
+      req.resume()
       throw new RouteError(413, 'payload-too-large', 'Payload Too Large')
     }
     chunks.push(buffer)
