@@ -1,0 +1,248 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-host-webserver'
+import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
+import { isSameOriginLoopbackRequest } from './loopback.ts'
+import { hasGit, listTree } from './native.ts'
+
+export interface RouteRequest {
+  params: Record<string, string>
+  body: unknown
+  query: URLSearchParams
+}
+
+export interface RouteContext {
+  dshHome: string
+  profileDir: string
+  workspaceRoot: { current: string }
+  emit(event: RpcEvent): void
+  logger(message: string): void
+  expectedOrigin?: string
+}
+
+export type RouteHandler = (req: RouteRequest, ctx: RouteContext) => Promise<unknown>
+
+export class RouteError extends Error {
+  constructor(public status: number, public code: string, message: string) {
+    super(message)
+    this.name = 'RouteError'
+  }
+}
+
+export const routeKey = (http: string, path: string): string => `${http} ${path}`
+
+const notImplemented = (method: string): RouteHandler => async () => {
+  throw new RouteError(501, 'not-implemented', `M4 接入:${method}`)
+}
+
+export interface RouteTableEntry {
+  method: string
+  http: 'GET' | 'POST' | 'PUT'
+  path: string
+  handler: RouteHandler
+}
+
+export interface NativeRouteEntry {
+  http: 'GET' | 'POST' | 'PUT'
+  path: string
+  handler: RouteHandler
+}
+
+export const ROUTE_TABLE: readonly RouteTableEntry[] = [
+  // workspace
+  { method: 'workspace.open', http: 'POST', path: '/huaanwork/workspace/open', handler: notImplemented('workspace.open') }, // Task 9
+  { method: 'workspace.close', http: 'POST', path: '/huaanwork/workspace/close', handler: notImplemented('workspace.close') }, // Task 9
+
+  // session
+  { method: 'session.send', http: 'POST', path: '/huaanwork/session/send', handler: notImplemented('session.send') }, // Task 7
+  { method: 'session.cancel', http: 'POST', path: '/huaanwork/session/cancel', handler: notImplemented('session.cancel') }, // Task 7
+  { method: 'session.approve', http: 'POST', path: '/huaanwork/session/approve', handler: notImplemented('session.approve') }, // Task 8
+  { method: 'session.reject', http: 'POST', path: '/huaanwork/session/reject', handler: notImplemented('session.reject') }, // Task 8
+  { method: 'session.list', http: 'GET', path: '/huaanwork/session/list', handler: notImplemented('session.list') }, // Task 7
+  { method: 'session.open', http: 'POST', path: '/huaanwork/session/open', handler: notImplemented('session.open') }, // Task 7
+  { method: 'session.remove', http: 'POST', path: '/huaanwork/session/remove', handler: notImplemented('session.remove') }, // Task 7
+  { method: 'session.new', http: 'POST', path: '/huaanwork/session/new', handler: notImplemented('session.new') }, // Task 7
+  { method: 'session.resume', http: 'POST', path: '/huaanwork/session/resume', handler: notImplemented('session.resume') }, // Task 7
+
+  // settings
+  { method: 'settings.get', http: 'GET', path: '/huaanwork/settings', handler: notImplemented('settings.get') }, // Task 5
+  { method: 'settings.set', http: 'PUT', path: '/huaanwork/settings', handler: notImplemented('settings.set') }, // Task 5
+
+  // auth
+  { method: 'auth.status', http: 'POST', path: '/huaanwork/auth/status', handler: notImplemented('auth.status') }, // Task 5
+  { method: 'auth.register', http: 'POST', path: '/huaanwork/auth/register', handler: notImplemented('auth.register') }, // Task 5
+  { method: 'auth.login', http: 'POST', path: '/huaanwork/auth/login', handler: notImplemented('auth.login') }, // Task 5
+  { method: 'auth.logout', http: 'POST', path: '/huaanwork/auth/logout', handler: notImplemented('auth.logout') }, // Task 5
+  { method: 'auth.changePassword', http: 'POST', path: '/huaanwork/auth/changePassword', handler: notImplemented('auth.changePassword') }, // Task 5
+
+  // plugin
+  { method: 'plugin.add', http: 'POST', path: '/huaanwork/plugin/add', handler: notImplemented('plugin.add') }, // Task 10
+  { method: 'plugin.remove', http: 'POST', path: '/huaanwork/plugin/remove', handler: notImplemented('plugin.remove') }, // Task 10
+  { method: 'plugin.list', http: 'GET', path: '/huaanwork/plugin/list', handler: notImplemented('plugin.list') }, // Task 10
+
+  // skill
+  { method: 'skill.list', http: 'GET', path: '/huaanwork/skill/list', handler: notImplemented('skill.list') }, // Task 10
+  { method: 'skill.get', http: 'GET', path: '/huaanwork/skill/get', handler: notImplemented('skill.get') }, // Task 10
+  { method: 'skill.create', http: 'POST', path: '/huaanwork/skill/create', handler: notImplemented('skill.create') }, // Task 10
+  { method: 'skill.update', http: 'POST', path: '/huaanwork/skill/update', handler: notImplemented('skill.update') }, // Task 10
+  { method: 'skill.remove', http: 'POST', path: '/huaanwork/skill/remove', handler: notImplemented('skill.remove') }, // Task 10
+  { method: 'skill.importPreview', http: 'POST', path: '/huaanwork/skill/importPreview', handler: notImplemented('skill.importPreview') }, // Task 10
+  { method: 'skill.import', http: 'POST', path: '/huaanwork/skill/import', handler: notImplemented('skill.import') }, // Task 10
+  { method: 'skill.setEnabled', http: 'POST', path: '/huaanwork/skill/setEnabled', handler: notImplemented('skill.setEnabled') }, // Task 10
+
+  // agent
+  { method: 'agent.list', http: 'GET', path: '/huaanwork/agent/list', handler: notImplemented('agent.list') }, // Task 10
+  { method: 'agent.get', http: 'GET', path: '/huaanwork/agent/get', handler: notImplemented('agent.get') }, // Task 10
+  { method: 'agent.refresh', http: 'POST', path: '/huaanwork/agent/refresh', handler: notImplemented('agent.refresh') }, // Task 10
+  { method: 'agent.setEnabled', http: 'POST', path: '/huaanwork/agent/setEnabled', handler: notImplemented('agent.setEnabled') }, // Task 10
+  { method: 'agent.addEndpoint', http: 'POST', path: '/huaanwork/agent/addEndpoint', handler: notImplemented('agent.addEndpoint') }, // Task 10
+  { method: 'agent.removeEndpoint', http: 'POST', path: '/huaanwork/agent/removeEndpoint', handler: notImplemented('agent.removeEndpoint') }, // Task 10
+
+  // status
+  { method: 'status.get', http: 'GET', path: '/huaanwork/status', handler: async () => ({ ready: true }) }, // Task 4
+
+  // project
+  { method: 'project.list', http: 'GET', path: '/huaanwork/project/list', handler: notImplemented('project.list') }, // Task 10
+  { method: 'project.create', http: 'POST', path: '/huaanwork/project/create', handler: notImplemented('project.create') }, // Task 10
+  { method: 'project.open', http: 'POST', path: '/huaanwork/project/open', handler: notImplemented('project.open') }, // Task 10
+  { method: 'project.remove', http: 'POST', path: '/huaanwork/project/remove', handler: notImplemented('project.remove') }, // Task 10
+  { method: 'project.rename', http: 'POST', path: '/huaanwork/project/rename', handler: notImplemented('project.rename') }, // Task 10
+
+  // automation
+  { method: 'automation.list', http: 'GET', path: '/huaanwork/automation/list', handler: notImplemented('automation.list') }, // Task 10
+  { method: 'automation.create', http: 'POST', path: '/huaanwork/automation/create', handler: notImplemented('automation.create') }, // Task 10
+  { method: 'automation.update', http: 'POST', path: '/huaanwork/automation/update', handler: notImplemented('automation.update') }, // Task 10
+  { method: 'automation.remove', http: 'POST', path: '/huaanwork/automation/remove', handler: notImplemented('automation.remove') }, // Task 10
+  { method: 'automation.run', http: 'POST', path: '/huaanwork/automation/run', handler: notImplemented('automation.run') }, // Task 10
+  { method: 'automation.runs', http: 'GET', path: '/huaanwork/automation/runs', handler: notImplemented('automation.runs') }, // Task 10
+  { method: 'automation.pruneSessions', http: 'POST', path: '/huaanwork/automation/pruneSessions', handler: notImplemented('automation.pruneSessions') }, // Task 10
+  { method: 'automation.templates', http: 'GET', path: '/huaanwork/automation/templates', handler: notImplemented('automation.templates') }, // Task 10
+
+  // task
+  { method: 'task.list', http: 'GET', path: '/huaanwork/task/list', handler: notImplemented('task.list') }, // Task 10
+  { method: 'task.create', http: 'POST', path: '/huaanwork/task/create', handler: notImplemented('task.create') }, // Task 10
+  { method: 'task.remove', http: 'POST', path: '/huaanwork/task/remove', handler: notImplemented('task.remove') }, // Task 10
+  { method: 'task.bindSession', http: 'POST', path: '/huaanwork/task/bindSession', handler: notImplemented('task.bindSession') }, // Task 10
+  { method: 'task.rename', http: 'POST', path: '/huaanwork/task/rename', handler: notImplemented('task.rename') }, // Task 10
+]
+
+export const NATIVE_ROUTES: readonly NativeRouteEntry[] = [
+  {
+    http: 'GET',
+    path: '/huaanwork/git/has-git',
+    handler: async (req) => {
+      const root = req.query.get('root') ?? ''
+      return hasGit(root)
+    },
+  },
+  {
+    http: 'GET',
+    path: '/huaanwork/git/tree',
+    handler: async (req) => {
+      const root = req.query.get('root') ?? ''
+      const depthParam = req.query.get('depth')
+      const depth = depthParam !== null ? parseInt(depthParam, 10) : 2
+      return listTree(root, Number.isNaN(depth) ? 2 : depth)
+    },
+  },
+]
+
+const MAX_BODY_BYTES = 1024 * 1024 // 1 MiB
+
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(payload))
+}
+
+function sendError(res: ServerResponse, status: number, code: string, message: string): void {
+  sendJson(res, status, { error: { code, message } })
+}
+
+async function readJsonBody(
+  req: IncomingMessage,
+): Promise<{ body: unknown; error?: { status: number; code: string; message: string } }> {
+  const declaredLength = req.headers['content-length']
+  if (declaredLength !== undefined) {
+    if (!/^\d+$/.test(declaredLength)) {
+      return { body: undefined, error: { status: 400, code: 'bad-request', message: 'Invalid Content-Length' } }
+    }
+    if (Number(declaredLength) > MAX_BODY_BYTES) {
+      return { body: undefined, error: { status: 413, code: 'payload-too-large', message: 'Payload Too Large' } }
+    }
+  }
+
+  let size = 0
+  const chunks: Buffer[] = []
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array)
+    size += buffer.byteLength
+    if (size > MAX_BODY_BYTES) {
+      return { body: undefined, error: { status: 413, code: 'payload-too-large', message: 'Payload Too Large' } }
+    }
+    chunks.push(buffer)
+  }
+
+  if (chunks.length === 0) return { body: undefined }
+  const raw = Buffer.concat(chunks).toString('utf8').trim()
+  if (raw.length === 0) return { body: undefined }
+  try {
+    return { body: JSON.parse(raw) as unknown }
+  } catch {
+    return { body: undefined, error: { status: 400, code: 'bad-request', message: 'Invalid JSON' } }
+  }
+}
+
+export async function handleHuaanworkRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RouteContext,
+): Promise<void> {
+  const expectedOrigin = ctx.expectedOrigin ?? (req.headers.host ? `http://${req.headers.host}` : 'http://127.0.0.1')
+  const isMutating = req.method !== 'GET' && req.method !== 'HEAD'
+  if (!isSameOriginLoopbackRequest(req, expectedOrigin, isMutating)) {
+    sendError(res, 403, 'forbidden', 'Forbidden')
+    return
+  }
+
+  const parsedUrl = new URL(req.url ?? '/', 'http://127.0.0.1')
+  const pathname = parsedUrl.pathname
+  const query = parsedUrl.searchParams
+
+  let body: unknown
+  if (req.method === 'POST' || req.method === 'PUT') {
+    const parseResult = await readJsonBody(req)
+    if (parseResult.error !== undefined) {
+      sendError(res, parseResult.error.status, parseResult.error.code, parseResult.error.message)
+      return
+    }
+    body = parseResult.body
+  }
+
+  const matched = ROUTE_TABLE.find((entry) => entry.http === req.method && entry.path === pathname)
+    ?? NATIVE_ROUTES.find((entry) => entry.http === req.method && entry.path === pathname)
+
+  if (matched === undefined) {
+    sendError(res, 404, 'not-found', 'Not Found')
+    return
+  }
+
+  try {
+    const result = await matched.handler({ params: {}, body, query }, ctx)
+    sendJson(res, 200, result)
+  } catch (err) {
+    if (err instanceof RouteError) {
+      sendError(res, err.status, err.code, err.message)
+    } else {
+      ctx.logger(`Internal error handling ${req.method ?? ''} ${pathname}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
+      sendError(res, 500, 'internal', 'Internal Server Error')
+    }
+  }
+}
+
+export function registerHuaanworkRoutes(ctx: Context, routeCtx: RouteContext): () => void {
+  return ctx.webServer.register({
+    kind: 'prefix',
+    path: '/huaanwork',
+    handler: (req, res) => void handleHuaanworkRequest(req, res, routeCtx),
+  })
+}

@@ -11500,6 +11500,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/ws@npm:^8.18.1":
+  version: 8.18.1
+  resolution: "@types/ws@npm:8.18.1"
+  dependencies:
+    "@types/node": "npm:*"
+  checksum: 10c0/61aff1129143fcc4312f083bc9e9e168aa3026b7dd6e70796276dcfb2c8211c4292603f9c4864fae702f2ed86e4abd4d38aa421831c2fd7f856c931a481afbab
+  languageName: node
+  linkType: hard
+
 "@vitejs/plugin-react@npm:^6":
   version: 6.1.0
   resolution: "@vitejs/plugin-react@npm:6.1.0"
@@ -13856,6 +13865,7 @@ __metadata:
     "@types/react": "npm:^18"
     "@types/react-dom": "npm:^18"
     "@types/semver": "npm:^7.7.1"
+    "@types/ws": "npm:^8.18.1"
     "@vitejs/plugin-react": "npm:^6"
     adm-zip: "npm:^0.6.0"
     builder-util: "npm:26.15.3"
@@ -13887,6 +13897,7 @@ __metadata:
     typescript: "npm:6.0.3"
     vite: "npm:8.2.1"
     vitest: "npm:4.1.8"
+    ws: "npm:^8.21.0"
     yaml: "npm:^2.9.0"
   peerDependencies:
     electron: 44.0.0

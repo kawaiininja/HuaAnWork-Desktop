@@ -26,7 +26,7 @@ export const HUAANWORK_ROW_ASSERTIONS: readonly RowHitAssertion[] = [
   { id: 'tool-ralph', intent: 'disable' },
   { id: 'user-questions', intent: 'disable' },
   { id: 'fs-sandbox', intent: 'override' },
-  { id: 'sandbox-policy', intent: 'override' },
+  { id: 'sandbox-policy', intent: 'override', expectConfig: { mode: 'workspace-write' } },
 ]
 
 function deepGet(value: unknown, path: string): unknown {
@@ -51,6 +51,9 @@ export function assertHuaanworkRowIdsHit(
     }
     if (intent === 'disable' && row.disabled !== true) {
       problems.push(`${id}: expected disabled, but the composed row is enabled`)
+    }
+    if (intent === 'override' && row.disabled === true) {
+      problems.push(`${id}: expected enabled with override, but the composed row is disabled`)
     }
     if (intent === 'override' && expectConfig) {
       for (const [path, want] of Object.entries(expectConfig)) {

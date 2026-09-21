@@ -61,6 +61,12 @@ describe('row-id 命中断言', () => {
     expect(() => assertHuaanworkRowIdsHit(tampered)).toThrow(/workflow-ptc: expected disabled/)
   })
 
+  test('负例 D:命中但状态不符(应启被禁)必须抛', () => {
+    const tampered = new Map(composed)
+    tampered.set('sandbox-policy', { disabled: true, config: { mode: 'workspace-write' } })
+    expect(() => assertHuaanworkRowIdsHit(tampered)).toThrow(/sandbox-policy: expected enabled with override/)
+  })
+
   test('正例:修正后的 16 条全命中不抛', () => {
     expect(() => assertHuaanworkRowIdsHit(composed)).not.toThrow()
   })
