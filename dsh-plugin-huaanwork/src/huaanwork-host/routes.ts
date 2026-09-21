@@ -4,6 +4,14 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
 import { isSameOriginLoopbackRequest } from './loopback.ts'
 import { hasGit, listTree } from './native.ts'
+import { readHuaanworkSettings, writeHuaanworkSettings } from './settings.ts'
+import {
+  authChangePassword,
+  authLogin,
+  authLogout,
+  authRegister,
+  authStatus,
+} from './auth.ts'
 
 export interface RouteRequest {
   params: Record<string, string>
@@ -65,15 +73,60 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { method: 'session.resume', http: 'POST', path: '/huaanwork/session/resume', handler: notImplemented('session.resume') }, // Task 7
 
   // settings
-  { method: 'settings.get', http: 'GET', path: '/huaanwork/settings', handler: notImplemented('settings.get') }, // Task 5
-  { method: 'settings.set', http: 'PUT', path: '/huaanwork/settings', handler: notImplemented('settings.set') }, // Task 5
+  { method: 'settings.get', http: 'GET', path: '/huaanwork/settings', handler: async (_req, ctx) => readHuaanworkSettings(ctx.profileDir) },
+  { method: 'settings.set', http: 'PUT', path: '/huaanwork/settings', handler: async (req, ctx) => writeHuaanworkSettings(ctx.profileDir, req.body) },
 
   // auth
-  { method: 'auth.status', http: 'POST', path: '/huaanwork/auth/status', handler: notImplemented('auth.status') }, // Task 5
-  { method: 'auth.register', http: 'POST', path: '/huaanwork/auth/register', handler: notImplemented('auth.register') }, // Task 5
-  { method: 'auth.login', http: 'POST', path: '/huaanwork/auth/login', handler: notImplemented('auth.login') }, // Task 5
-  { method: 'auth.logout', http: 'POST', path: '/huaanwork/auth/logout', handler: notImplemented('auth.logout') }, // Task 5
-  { method: 'auth.changePassword', http: 'POST', path: '/huaanwork/auth/changePassword', handler: notImplemented('auth.changePassword') }, // Task 5
+  { method: 'auth.status', http: 'POST', path: '/huaanwork/auth/status', handler: async (_req, ctx) => authStatus(ctx.profileDir) },
+  {
+    method: 'auth.register',
+    http: 'POST',
+    path: '/huaanwork/auth/register',
+    handler: async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const username = typeof body.username === 'string' ? body.username : ''
+      const password = typeof body.password === 'string' ? body.password : ''
+      try {
+        return await authRegister(ctx.profileDir, username, password)
+      } catch (err) {
+        if (err instanceof RouteError) throw err
+        throw new RouteError(400, 'auth-failed', err instanceof Error ? err.message : String(err))
+      }
+    },
+  },
+  {
+    method: 'auth.login',
+    http: 'POST',
+    path: '/huaanwork/auth/login',
+    handler: async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const username = typeof body.username === 'string' ? body.username : ''
+      const password = typeof body.password === 'string' ? body.password : ''
+      try {
+        return await authLogin(ctx.profileDir, username, password)
+      } catch (err) {
+        if (err instanceof RouteError) throw err
+        throw new RouteError(400, 'auth-failed', err instanceof Error ? err.message : String(err))
+      }
+    },
+  },
+  { method: 'auth.logout', http: 'POST', path: '/huaanwork/auth/logout', handler: async (_req, ctx) => authLogout(ctx.profileDir) },
+  {
+    method: 'auth.changePassword',
+    http: 'POST',
+    path: '/huaanwork/auth/changePassword',
+    handler: async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const current = typeof body.current === 'string' ? body.current : ''
+      const next = typeof body.next === 'string' ? body.next : ''
+      try {
+        return await authChangePassword(ctx.profileDir, current, next)
+      } catch (err) {
+        if (err instanceof RouteError) throw err
+        throw new RouteError(400, 'auth-failed', err instanceof Error ? err.message : String(err))
+      }
+    },
+  },
 
   // plugin
   { method: 'plugin.add', http: 'POST', path: '/huaanwork/plugin/add', handler: notImplemented('plugin.add') }, // Task 10
@@ -160,14 +213,15 @@ function sendError(res: ServerResponse, status: number, code: string, message: s
 
 async function readJsonBody(
   req: IncomingMessage,
-): Promise<{ body: unknown; error?: { status: number; code: string; message: string } }> {
+): Promise<unknown> {
   const declaredLength = req.headers['content-length']
   if (declaredLength !== undefined) {
     if (!/^\d+$/.test(declaredLength)) {
-      return { body: undefined, error: { status: 400, code: 'bad-request', message: 'Invalid Content-Length' } }
+      throw new RouteError(400, 'bad-request', 'Invalid Content-Length')
     }
     if (Number(declaredLength) > MAX_BODY_BYTES) {
-      return { body: undefined, error: { status: 413, code: 'payload-too-large', message: 'Payload Too Large' } }
+      req.resume()
+      throw new RouteError(413, 'payload-too-large', 'Payload Too Large')
     }
   }
 
@@ -177,18 +231,19 @@ async function readJsonBody(
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array)
     size += buffer.byteLength
     if (size > MAX_BODY_BYTES) {
-      return { body: undefined, error: { status: 413, code: 'payload-too-large', message: 'Payload Too Large' } }
+      req.destroy()
+      throw new RouteError(413, 'payload-too-large', 'Payload Too Large')
     }
     chunks.push(buffer)
   }
 
-  if (chunks.length === 0) return { body: undefined }
+  if (chunks.length === 0) return undefined
   const raw = Buffer.concat(chunks).toString('utf8').trim()
-  if (raw.length === 0) return { body: undefined }
+  if (raw.length === 0) return undefined
   try {
-    return { body: JSON.parse(raw) as unknown }
+    return JSON.parse(raw) as unknown
   } catch {
-    return { body: undefined, error: { status: 400, code: 'bad-request', message: 'Invalid JSON' } }
+    throw new RouteError(400, 'bad-request', 'Invalid JSON')
   }
 }
 
@@ -210,12 +265,15 @@ export async function handleHuaanworkRequest(
 
   let body: unknown
   if (req.method === 'POST' || req.method === 'PUT') {
-    const parseResult = await readJsonBody(req)
-    if (parseResult.error !== undefined) {
-      sendError(res, parseResult.error.status, parseResult.error.code, parseResult.error.message)
-      return
+    try {
+      body = await readJsonBody(req)
+    } catch (err) {
+      if (err instanceof RouteError) {
+        sendError(res, err.status, err.code, err.message)
+        return
+      }
+      throw err
     }
-    body = parseResult.body
   }
 
   const matched = ROUTE_TABLE.find((entry) => entry.http === req.method && entry.path === pathname)

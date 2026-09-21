@@ -22,6 +22,7 @@ export function createHuaanworkEventHub(): HuaanworkEventHub {
 
   wss.on('connection', (socket) => {
     sockets.add(socket)
+    socket.on('error', () => { sockets.delete(socket) })
     socket.on('close', () => sockets.delete(socket))
     socket.send(JSON.stringify({ event: 'sidecar/status', ready: true } satisfies RpcEvent))
   })

@@ -1,4 +1,4 @@
-import { readdirSync } from 'node:fs'
+import { readdirSync, type Dirent } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
@@ -21,7 +21,13 @@ export type TreeNode = {
 /** 原 Rust list_tree 命令;深度缺省 2,目录优先排序,跳过 .git/node_modules。 */
 export function listTree(root: string, depth = 2): TreeNode[] {
   const walk = (dir: string, level: number): TreeNode[] => {
-    const entries = readdirSync(dir, { withFileTypes: true })
+    let dirents: Dirent[]
+    try {
+      dirents = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return []
+    }
+    const entries = dirents
       .filter((e) => e.name !== '.git' && e.name !== 'node_modules' && e.name !== '.DS_Store')
       .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
     return entries.map((e) => {

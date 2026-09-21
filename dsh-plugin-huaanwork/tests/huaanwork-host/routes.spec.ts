@@ -10,7 +10,6 @@ import {
   routeKey,
   handleHuaanworkRequest,
   type RouteContext,
-  RouteError,
 } from '../../src/huaanwork-host/routes.ts'
 import { hasGit, listTree } from '../../src/huaanwork-host/native.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
@@ -74,11 +73,24 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除 status.get 外其余 53 个方法均返回 501', async () => {
+  test('除 Task 4 & Task 5 实现的 8 个方法外其余 46 个方法均返回 501', async () => {
+    const implemented = new Set([
+      'status.get',
+      'settings.get',
+      'settings.set',
+      'auth.status',
+      'auth.register',
+      'auth.login',
+      'auth.logout',
+      'auth.changePassword',
+    ])
     for (const route of ROUTE_TABLE) {
-      if (route.method === 'status.get') continue
+      if (implemented.has(route.method)) continue
       await expect(route.handler({ params: {}, body: undefined, query: new URLSearchParams() } as any, {} as any))
-        .rejects.toThrow(RouteError)
+        .rejects.toMatchObject({
+          status: 501,
+          code: 'not-implemented',
+        })
     }
   })
 })
@@ -128,14 +140,19 @@ describe('HTTP dispatch & security checks', () => {
   let baseUrl: string
   let host: string
   let routeCtx: RouteContext
+  let profileTempDir: string
+  let lastLogged = ''
 
   beforeAll(async () => {
+    profileTempDir = mkdtempSync(join(tmpdir(), 'hw-route-profile-'))
     routeCtx = {
-      dshHome: '/tmp/dsh-home',
-      profileDir: '/tmp/profile',
-      workspaceRoot: { current: '/tmp/workspace' },
+      dshHome: join(profileTempDir, 'dsh'),
+      profileDir: profileTempDir,
+      workspaceRoot: { current: join(profileTempDir, 'workspace') },
       emit: (_event: RpcEvent) => {},
-      logger: (_msg: string) => {},
+      logger: (msg: string) => {
+        lastLogged = msg
+      },
     }
 
     server = createServer((req, res) => {
@@ -152,6 +169,7 @@ describe('HTTP dispatch & security checks', () => {
   })
 
   afterAll(async () => {
+    rmSync(profileTempDir, { recursive: true, force: true })
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()))
     })
@@ -266,5 +284,156 @@ describe('HTTP dispatch & security checks', () => {
     const tree = await treeRes.json()
     expect(Array.isArray(tree)).toBe(true)
     expect(tree.length).toBeGreaterThan(0)
+  })
+
+  test('GET /huaanwork/settings 返回缺省配置', async () => {
+    const res = await fetch(`${baseUrl}/huaanwork/settings`, {
+      headers: { Host: host, Origin: baseUrl },
+    })
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json.theme).toBe('system')
+    expect(json.allow_network).toBe(false)
+    expect(json.guard_mode).toBe('ask')
+    expect(json.models).toHaveLength(1)
+  })
+
+  test('PUT /huaanwork/settings 遇到公网公用机地址返回 400 validation', async () => {
+    const res = await fetch(`${baseUrl}/huaanwork/settings`, {
+      method: 'PUT',
+      headers: {
+        Host: host,
+        Origin: baseUrl,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ agents_host: '8.8.8.8', agents_port: 8080 }),
+    })
+    expect(res.status).toBe(400)
+    const json = await res.json()
+    expect(json).toEqual({
+      error: {
+        code: 'validation',
+        message: '公用机地址必须是本机或局域网（含 .local），禁止公网主机名',
+      },
+    })
+  })
+
+  test('PUT /huaanwork/settings 有效设置更新并返回最新配置', async () => {
+    const res = await fetch(`${baseUrl}/huaanwork/settings`, {
+      method: 'PUT',
+      headers: {
+        Host: host,
+        Origin: baseUrl,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ theme: 'dark', allow_network: true }),
+    })
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json.theme).toBe('dark')
+    expect(json.allow_network).toBe(true)
+
+    const getRes = await fetch(`${baseUrl}/huaanwork/settings`, {
+      headers: { Host: host, Origin: baseUrl },
+    })
+    const getJson = await getRes.json()
+    expect(getJson.theme).toBe('dark')
+    expect(getJson.allow_network).toBe(true)
+  })
+
+  test('auth 域全生命周期: 状态 -> 注册 -> 登出 -> 错密拒绝 -> 正确登录 -> 改密', async () => {
+    // 1. 初始状态 needs-register
+    const status1 = await fetch(`${baseUrl}/huaanwork/auth/status`, {
+      method: 'POST',
+      headers: { Host: host, Origin: baseUrl },
+    })
+    expect(status1.status).toBe(200)
+    expect(await status1.json()).toEqual({ state: 'needs-register' })
+
+    // 2. 注册
+    const regRes = await fetch(`${baseUrl}/huaanwork/auth/register`, {
+      method: 'POST',
+      headers: { Host: host, Origin: baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'password123' }),
+    })
+    expect(regRes.status).toBe(200)
+    expect(await regRes.json()).toEqual({ state: 'logged-in', username: 'alice' })
+
+    // 3. 登出
+    const logoutRes = await fetch(`${baseUrl}/huaanwork/auth/logout`, {
+      method: 'POST',
+      headers: { Host: host, Origin: baseUrl },
+    })
+    expect(logoutRes.status).toBe(200)
+    expect(await logoutRes.json()).toEqual({ state: 'logged-out', username: 'alice' })
+
+    // 4. 错误密码登录返回 400 auth-failed
+    const failLogin = await fetch(`${baseUrl}/huaanwork/auth/login`, {
+      method: 'POST',
+      headers: { Host: host, Origin: baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'wrongpassword' }),
+    })
+    expect(failLogin.status).toBe(400)
+    expect(await failLogin.json()).toEqual({
+      error: { code: 'auth-failed', message: '用户名或密码错误' },
+    })
+
+    // 5. 正确密码登录
+    const okLogin = await fetch(`${baseUrl}/huaanwork/auth/login`, {
+      method: 'POST',
+      headers: { Host: host, Origin: baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'password123' }),
+    })
+    expect(okLogin.status).toBe(200)
+    expect(await okLogin.json()).toEqual({ state: 'logged-in', username: 'alice' })
+
+    // 6. 修改密码
+    const changeRes = await fetch(`${baseUrl}/huaanwork/auth/changePassword`, {
+      method: 'POST',
+      headers: { Host: host, Origin: baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current: 'password123', next: 'newpassword456' }),
+    })
+    expect(changeRes.status).toBe(200)
+    expect(await changeRes.json()).toEqual({ state: 'logged-in', username: 'alice' })
+
+    // 登出后用新密码验证
+    await fetch(`${baseUrl}/huaanwork/auth/logout`, {
+      method: 'POST',
+      headers: { Host: host, Origin: baseUrl },
+    })
+    const newLogin = await fetch(`${baseUrl}/huaanwork/auth/login`, {
+      method: 'POST',
+      headers: { Host: host, Origin: baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'newpassword456' }),
+    })
+    expect(newLogin.status).toBe(200)
+    expect(await newLogin.json()).toEqual({ state: 'logged-in', username: 'alice' })
+  })
+
+  test('非 RouteError 异常触发 500 internal 回退并记录日志', async () => {
+    const originalProfile = routeCtx.profileDir
+    const conflictFile = join(profileTempDir, 'conflict-file')
+    writeFileSync(conflictFile, 'blocking file', 'utf8')
+    routeCtx.profileDir = conflictFile
+
+    try {
+      const res = await fetch(`${baseUrl}/huaanwork/settings`, {
+        method: 'PUT',
+        headers: {
+          Host: host,
+          Origin: baseUrl,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ theme: 'dark' }),
+      })
+      expect(res.status).toBe(500)
+      const json = await res.json()
+      expect(json).toEqual({
+        error: { code: 'internal', message: 'Internal Server Error' },
+      })
+      expect(lastLogged).toContain('Internal error handling PUT /huaanwork/settings')
+    } finally {
+      routeCtx.profileDir = originalProfile
+    }
   })
 })
