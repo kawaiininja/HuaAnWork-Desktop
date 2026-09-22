@@ -34,11 +34,12 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   return chunks;
 }
 
-test("loadSettings reads sibling HuaAnWork/settings.json and allows empty api_key", () => {
+test("loadSettings reads profiles/desktop/huaanwork-settings.json and allows empty api_key", () => {
   const root = mkdtempSync(join(tmpdir(), "huaanwork-settings-"));
   const dshHome = join(root, "dsh");
-  mkdirSync(dshHome);
-  writeFileSync(join(root, "settings.json"), JSON.stringify({ base_url: "http://127.0.0.1:9/v1", model: "qwen", api_key: "" }));
+  const profileDir = join(dshHome, "profiles", "desktop");
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, "huaanwork-settings.json"), JSON.stringify({ base_url: "http://127.0.0.1:9/v1", model: "qwen", api_key: "" }));
   try {
     assert.deepEqual(loadSettings(dshHome), {
       base_url: "http://127.0.0.1:9/v1",
@@ -53,9 +54,10 @@ test("loadSettings reads sibling HuaAnWork/settings.json and allows empty api_ke
 test("loadSettings prefers the active entry in models", () => {
   const root = mkdtempSync(join(tmpdir(), "huaanwork-settings-"));
   const dshHome = join(root, "dsh");
-  mkdirSync(dshHome);
+  const profileDir = join(dshHome, "profiles", "desktop");
+  mkdirSync(profileDir, { recursive: true });
   writeFileSync(
-    join(root, "settings.json"),
+    join(profileDir, "huaanwork-settings.json"),
     JSON.stringify({
       base_url: "http://stale/v1",
       model: "stale",
@@ -235,8 +237,8 @@ test("POST chat/completions is streamed with 120s timeout and empty api_key is v
   const originalTimeout = AbortSignal.timeout;
   const dshHome = process.env.DSH_HOME;
   const root = mkdtempSync(join(tmpdir(), "huaanwork-llm-"));
-  mkdirSync(join(root, "dsh"));
-  writeFileSync(join(root, "settings.json"), JSON.stringify({ api_key: "", model: "qwen" }));
+  mkdirSync(join(root, "dsh", "profiles", "desktop"), { recursive: true });
+  writeFileSync(join(root, "dsh", "profiles", "desktop", "huaanwork-settings.json"), JSON.stringify({ api_key: "", model: "qwen" }));
   process.env.DSH_HOME = join(root, "dsh");
 
   let timeoutMs: number | undefined;

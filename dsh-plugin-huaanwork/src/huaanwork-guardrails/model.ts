@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -28,6 +28,13 @@ import {
 const PROVIDER = "deepseek-official";
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
 const REQUEST_TIMEOUT_MS = 120_000;
+
+// Desktop 布局(spec §14 第五轮修订第 14 条):应用设置落 `<DSH_HOME>/profiles/desktop/
+// huaanwork-settings.json`。profile 名与 ../profile.ts 的 DESKTOP_PROFILE_NAME 保持一致;
+// 不再沿用 Tauri 时代的 `dirname(DSH_HOME)/settings.json` 兄弟文件布局。
+function resolveSettingsPath(dshHome: string): string {
+  return join(dshHome, "profiles", "desktop", "huaanwork-settings.json");
+}
 /**
  * 调用方未指定时的 max_tokens 默认值。思考模式端点（deepseek 思考系）把 reasoning
  * 计入完成预算：不填时服务端默认预算（如 4096）会被长思考吃光，正文为空、回合死于
@@ -203,7 +210,7 @@ function parseStoredEntry(raw: unknown): StoredModelEntry | null {
 }
 
 export function loadModelEntries(dshHome = process.env.DSH_HOME ?? join(homedir(), ".dsh")): StoredModelEntry[] {
-  const path = join(dirname(dshHome), "settings.json");
+  const path = resolveSettingsPath(dshHome);
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
     if (!Array.isArray(parsed.models)) return [];
@@ -215,7 +222,7 @@ export function loadModelEntries(dshHome = process.env.DSH_HOME ?? join(homedir(
 }
 
 export function loadSettings(dshHome = process.env.DSH_HOME ?? join(homedir(), ".dsh")): ModelSettings {
-  const path = join(dirname(dshHome), "settings.json");
+  const path = resolveSettingsPath(dshHome);
   const defaults: ModelSettings = { base_url: DEFAULT_BASE_URL, model: "", api_key: "" };
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;

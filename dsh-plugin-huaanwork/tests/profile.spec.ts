@@ -412,6 +412,9 @@ virtualStoreDirMaxLength: 60
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
+    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run']) {
+      expect(rows.find(row => row.id === id)?.disabled).toBe(true)
+    }
   })
 
   it('merges a frozen LAN IPv4 snapshot into existing Web runtime trust', () => {
@@ -755,6 +758,9 @@ virtualStoreDirMaxLength: 60
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
+    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run']) {
+      expect(rows.find(row => row.id === id)?.disabled).toBe(true)
+    }
   })
 
   it('keeps legacy browser intent but clamps LAN exposure when compatibility mode is selected', () => {

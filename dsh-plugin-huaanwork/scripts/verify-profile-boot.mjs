@@ -353,6 +353,14 @@ try {
     '@deepseek-ai/dsh-client-ui-layout',
     '@deepseek-ai/dsh-client-ui-sidebar',
     '@deepseek-ai/dsh-client-ui-conversation',
+    // uiConversation dependents — hang the renderer web boot if left enabled
+    // without the conversation row (0.1.6-alpha.2 owner split).
+    '@deepseek-ai/dsh-client-ui-chat',
+    '@deepseek-ai/dsh-client-ui-goal',
+    '@deepseek-ai/dsh-client-ui-plan',
+    '@deepseek-ai/dsh-client-ui-trajectory',
+    '@deepseek-ai/dsh-client-ui-deliverables',
+    '@deepseek-ai/dsh-client-ui-workflow-run',
     '@deepseek-ai/dsh-client-ui-directory-picker-native',
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
