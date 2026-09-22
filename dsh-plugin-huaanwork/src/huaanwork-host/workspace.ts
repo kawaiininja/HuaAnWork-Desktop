@@ -5,11 +5,13 @@ import { assertAutomationIdle } from './sessions.ts'
 import { clearPendingWorkspaceRoot, neutralWorkspaceRoot, writePendingWorkspaceRoot } from './workspace-state.ts'
 
 /**
- * workspace.open/close 应答:确认重启后主进程立即 relaunch,fetch 与 teardown
- * 竞争——多数时候 200 + `{ restarting: true, workspaceRoot }` 正常写出(评审 D1:
- * workspaceRoot 恒在,客户端契约以此为准);偶尔连接被掐断,客户端由 api.ts
- * waitForReady 按 `{ restarting: true }` 承接。用户在确认框取消时返回当前根
- * `{ workspaceRoot }`(与「已在目标根」短路同形),不应答 restarting(评审 D2-③)。
+ * workspace.open/close 应答:确认重启后主进程下一拍才 relaunch,HTTP 应答与
+ * teardown 无先后保证,两条时序都可能(评审 R6:不按概率描述):200 +
+ * `{ restarting: true, workspaceRoot }` 正常写出(评审 D1:workspaceRoot 恒在,
+ * 客户端契约以此为准);或连接被掐断,由 api.ts waitForReady 按
+ * `{ restarting: true }` 承接——两条路径客户端都必须承接。用户在确认框取消时
+ * 返回当前根 `{ workspaceRoot }`(与「已在目标根」短路同形),不应答 restarting
+ * (评审 D2-③)。
  */
 export type WorkspaceResult = { restarting: true; workspaceRoot: string } | { workspaceRoot: string }
 

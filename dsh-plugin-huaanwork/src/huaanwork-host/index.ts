@@ -34,8 +34,16 @@ export function apply(ctx: Context, config: HuaanworkHostConfig) {
     return () => {}
   }, 'huaanwork: clear pending workspace root')
   const hub = createHuaanworkEventHub()
-  const routeCtx = installHuaanworkHolders(ctx, config, hub,
-    () => (ctx.desktopRuntime as ConfirmedRestartRuntime).requestConfirmedRestart())
+  // 评审 R3:能力守卫——非 ElectronDesktopRuntime 提供的 desktopRuntime(测试桩/
+  // 第三方 Host)缺确认回传方法时,抛出可定位的具名错误,而不是裸 TypeError
+  // 「requestConfirmedRestart is not a function」。
+  const routeCtx = installHuaanworkHolders(ctx, config, hub, () => {
+    const runtime = ctx.desktopRuntime as ConfirmedRestartRuntime
+    if (typeof runtime.requestConfirmedRestart !== 'function') {
+      throw new Error('huaanwork-host: desktopRuntime 缺少 requestConfirmedRestart()(工作区切换需要原生确认回传能力;请使用 ElectronDesktopRuntime)')
+    }
+    return runtime.requestConfirmedRestart()
+  })
   // 智能体目录真实接线(Task 10):fetch 公用机目录 + 本地 endpoints,存储根 = profileDir;
   // 目录快照同步进 huaanworkAgentCatalog holder(agent-invoke 的 @agent 分发消费)。
   const agentsHost = createAgentsHost({

@@ -250,6 +250,9 @@ async function bootPrepared(prepared) {
     setLocalePreference(preference) { runtime.locale = preference ?? 'en' },
     setThemeSource() {},
     async requestRestart() {},
+    // 评审 R2:workspace 切换走 requestConfirmedRestart 确认回传,桩须具备该能力,
+    // 否则经 route 驱动 workspace/project 用例会以「is not a function」崩。
+    async requestConfirmedRestart() { return true },
     prepareToQuit() {},
   }
   const nextCtx = await boot(
@@ -466,12 +469,25 @@ test('presentAs("ptc") 防线:主 agent scope 抛 disabled by HuaAnWork', { time
   )
 })
 
-test('workspace pendingRoot:二次组合 + boot 模拟 generation 重启(不触发真实 relaunch)', { timeout: BOOT_WATCHDOG_MS }, async () => {
-  // workspace.open 的写文件半边:钉新根,随后由测试进程内重新组合 + boot 消费。
+test('workspace pendingRoot:project.open 经 route 驱动写盘,二次组合 + boot 模拟 generation 重启(不触发真实 relaunch)', { timeout: BOOT_WATCHDOG_MS }, async () => {
+  // 评审 R2:M3 唯一的真 boot 整合证据改走与 UI 相同的 route——注册项目后经
+  // POST /huaanwork/project/open 钉新根(runtime 桩确认重启),覆盖
+  // assertAutomationIdle → 写 pendingRoot → 确认回传应答全链;此前此处直接写
+  // huaanwork-workspace.json,完全绕过 route,D2 修复涉及的逻辑均不在覆盖内。
   const repo2 = join(base, 'repo2')
   mkdirSync(repo2, { recursive: true })
   writeFileSync(join(repo2, 'README.md'), '# second workspace\n')
-  writeFileSync(join(profileDir, 'huaanwork-workspace.json'), `${JSON.stringify({ pendingRoot: repo2 })}\n`)
+  const created = await post('/huaanwork/project/create', { root: repo2, name: 'repo2' })
+  assert.equal(created.project.root, repo2, 'project.create pins repo2 root')
+  const opened = await post('/huaanwork/project/open', { projectId: created.project.id })
+  assert.equal(opened.restarting, true, 'stub confirms restart, route answers restarting')
+  assert.equal(opened.workspaceRoot, repo2, 'project.open response carries workspaceRoot (评审 D1)')
+  assert.equal(opened.project.id, created.project.id, 'project.open response carries project')
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')),
+    { pendingRoot: repo2 },
+    'project.open wrote pendingRoot via route',
+  )
 
   const reprepared = prepareDesktopProfile('1', home, 'win32')
   await ctx.fiber.dispose()

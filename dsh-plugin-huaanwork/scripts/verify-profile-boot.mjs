@@ -150,6 +150,9 @@ try {
     setLocalePreference(preference) { runtime.locale = preference ?? 'en' },
     setThemeSource(source) { nativeThemeSource = source },
     async requestRestart() {},
+    // 评审 R2:与 loop spec 桩同因——huaanwork-host 经 route 切换工作区时
+    // desktopRuntime 须具备确认回传能力。
+    async requestConfirmedRestart() { return true },
     prepareToQuit() {},
   }
   ctx = await boot(
