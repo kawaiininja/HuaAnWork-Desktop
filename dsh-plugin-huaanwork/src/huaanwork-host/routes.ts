@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { AgentSource, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
@@ -74,8 +74,13 @@ export interface RouteContext {
   logger(message: string): void
   /** cordis 运行时 ctx(agents/subagents/huaanworkApprovals 等 holders);Task 7 session 域消费。 */
   runtimeCtx?: SessionRuntimeContext
-  /** workspace.open/close 的 generation 重启注入(index.ts 以 desktopRuntime.requestRestart 提供)。 */
-  requestRestart(): Promise<void>
+  /**
+   * workspace.open/close 的 generation 重启注入(index.ts 以 desktopRuntime 的
+   * requestConfirmedRestart 提供)。回传原生确认框裁决:true = 已确认且 relaunch
+   * 即将发生;false = 用户取消/正在退出,调用方必须清掉已写的 pendingRoot 且
+   * 不得按重启语义应答(评审 D2)。
+   */
+  requestRestart(): Promise<boolean>
   expectedOrigin?: string
 }
 
@@ -180,7 +185,8 @@ export interface NativeRouteEntry {
 }
 
 export const ROUTE_TABLE: readonly RouteTableEntry[] = [
-  // workspace(Task 9:写 pendingRoot → generation 重启;重启期连接中断,客户端 waitForReady 承接;
+  // workspace(Task 9:写 pendingRoot → 确认框;确认 → generation 重启,200 + restarting 与
+  // 连接中断都可能,客户端两条路径都承接;取消 → 清 pendingRoot 返回当前根;
   // 已在目标根短路返回 { workspaceRoot },旧 host.ts:1013-1023 语义)
   {
     method: 'workspace.open',
@@ -365,13 +371,18 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     http: 'POST',
     path: '/huaanwork/project/open',
     // 旧 host.ts:1033-1042 语义:assertAutomationIdle(openWorkspace 内)→ 查项目 →
-    // 切工作区 → touchProject 排序戳。真重启路径 fetch 必然中断,客户端按重启承接。
+    // 切工作区 → touchProject 排序戳。评审 D1:应答恒带 workspaceRoot(重启路径也带,
+    // 客户端立即对齐根);评审 D2-③:确认框取消时 openWorkspace 回当前根,与 project.root
+    // 不符即「取消」——诚实报错,客户端四调用点各有 catch,不留半切换状态。
     handler: workspaceRoute(async (req, ctx) => {
       const projectId = bodyParam(req.body, 'projectId')
       if (!projectId) throw new Error('project.open requires params.projectId')
       const project = (await listProjects(ctx.profileDir)).find((item) => item.id === projectId)
       if (!project) throw new Error(`project ${projectId} was not found`)
       const result = await openWorkspace(ctx, project.root)
+      if (!('restarting' in result) && resolve(result.workspaceRoot) !== resolve(project.root)) {
+        throw new RouteError(400, 'restart-cancelled', '已取消工作区切换,项目未打开')
+      }
       await touchProject(ctx.profileDir, projectId)
       return { ...result, project }
     }),

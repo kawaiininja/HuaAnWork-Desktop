@@ -25,8 +25,8 @@ afterEach(() => {
   rmSync(profileDir, { recursive: true, force: true })
 })
 
-function makeRouteCtx(): { ctx: RouteContext; requestRestart: ReturnType<typeof vi.fn> } {
-  const requestRestart = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+function makeRouteCtx(): { ctx: RouteContext; requestRestart: ReturnType<typeof vi.fn<() => Promise<boolean>>> } {
+  const requestRestart = vi.fn<() => Promise<boolean>>().mockResolvedValue(true)
   return {
     requestRestart,
     ctx: {
@@ -41,13 +41,25 @@ function makeRouteCtx(): { ctx: RouteContext; requestRestart: ReturnType<typeof 
 }
 
 describe('openWorkspace', () => {
-  test('合法目录:写 pendingRoot(绝对路径)+ 调 requestRestart + 返回 { restarting: true }', async () => {
+  test('合法目录:写 pendingRoot(绝对路径)+ 调 requestRestart + 返回 { restarting: true, workspaceRoot }', async () => {
     const target = mkdtempSync(join(tmpdir(), 'hw-ws-target-'))
     const { ctx, requestRestart } = makeRouteCtx()
-    await expect(openWorkspace(ctx, target)).resolves.toEqual({ restarting: true })
+    await expect(openWorkspace(ctx, target)).resolves.toEqual({ restarting: true, workspaceRoot: resolve(target) })
     expect(readPendingWorkspaceRoot(profileDir)).toBe(resolve(target))
     expect(JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')))
       .toEqual({ pendingRoot: resolve(target) })
+    expect(requestRestart).toHaveBeenCalledTimes(1)
+    rmSync(target, { recursive: true, force: true })
+  })
+
+  test('确认框取消:清除已写 pendingRoot + 返回当前根(不应答 restarting)(评审 D2)', async () => {
+    const target = mkdtempSync(join(tmpdir(), 'hw-ws-cancel-'))
+    const { ctx, requestRestart } = makeRouteCtx()
+    requestRestart.mockResolvedValue(false)
+    await expect(openWorkspace(ctx, target)).resolves.toEqual({ workspaceRoot: profileDir })
+    // pendingRoot 先写后清:文件留 `{}` 占位,读回 null——下次冷启动不会静默切换。
+    expect(readPendingWorkspaceRoot(profileDir)).toBeNull()
+    expect(JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8'))).toEqual({})
     expect(requestRestart).toHaveBeenCalledTimes(1)
     rmSync(target, { recursive: true, force: true })
   })
@@ -123,14 +135,22 @@ describe('openWorkspace', () => {
 })
 
 describe('closeWorkspace', () => {
-  test('写 pendingRoot=中立根(非删文件)+ 调 requestRestart', async () => {
+  test('写 pendingRoot=中立根(非删文件)+ 调 requestRestart,确认后返回中立根', async () => {
     const { ctx, requestRestart } = makeRouteCtx()
-    await expect(closeWorkspace(ctx)).resolves.toEqual({ restarting: true })
     const neutral = neutralWorkspaceRoot(profileDir)
+    await expect(closeWorkspace(ctx)).resolves.toEqual({ restarting: true, workspaceRoot: neutral })
     expect(readPendingWorkspaceRoot(profileDir)).toBe(neutral)
     // 旧语义钉中立根:文件保留 `{}` 以外的可读状态,不删除。
     expect(JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')))
       .toEqual({ pendingRoot: neutral })
+    expect(requestRestart).toHaveBeenCalledTimes(1)
+  })
+
+  test('确认框取消:清除 pendingRoot + 返回当前根(评审 D2)', async () => {
+    const { ctx, requestRestart } = makeRouteCtx()
+    requestRestart.mockResolvedValue(false)
+    await expect(closeWorkspace(ctx)).resolves.toEqual({ workspaceRoot: profileDir })
+    expect(readPendingWorkspaceRoot(profileDir)).toBeNull()
     expect(requestRestart).toHaveBeenCalledTimes(1)
   })
 

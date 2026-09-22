@@ -5,6 +5,15 @@ import { HostRpc } from './host-rpc.ts'
 export type RuntimeSnapshot = Pick<DesktopRuntime, 'platform' | 'windowsBuild' | 'locale'> & {
   updates: Omit<DesktopUpdateAdapter, 'request' | 'confirmDownload' | 'showManualCheckResult' | 'downloadAndOpen' | 'notify'>
 }
+
+/**
+ * huaanwork workspace 切换扩展(M3 评审 D2 修复):Electron 侧把原生确认框的裁决
+ * 回传 Host——确认 = true(relaunch 在应答之后才发起),取消/退出中 = false。
+ * 不并入 DesktopRuntime 接口:既有实现/stub 零改动,Host 侧由 huaanwork-host 显式窄化。
+ */
+export interface ConfirmedRestartRuntime extends DesktopRuntime {
+  requestConfirmedRestart(): Promise<boolean>
+}
 export function runtimeSnapshot(runtime: DesktopRuntime): RuntimeSnapshot {
   const { isPackaged, canDownload, currentVersion, releaseChannel, statePath, installationId } = runtime.updates
   return { platform: runtime.platform, windowsBuild: runtime.windowsBuild, locale: runtime.locale,
@@ -24,7 +33,7 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Desk
   const shellSpecs = new Map<string, DesktopShellSpec>()
   const send = <T = void>(method: string, args: unknown[] = [], signal?: AbortSignal): Promise<T> => {
     const interactive = ['update:confirmDownload', 'update:showManualCheckResult', 'update:downloadAndOpen',
-      'native:pickDirectory', 'native:exportDiagnostics'].includes(method)
+      'native:pickDirectory', 'native:exportDiagnostics', 'native:requestConfirmedRestart'].includes(method)
     const task = rpc.call<T>(method, args, signal, interactive ? 0 : undefined)
     calls.add(task)
     // Report fire-and-forget failures without creating an unhandled rejection.
@@ -36,7 +45,7 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Desk
     const releases = Object.entries(handlers).map(([name, handler]) => rpc.handle(`${id}:${name}`, args => handler(...args)))
     return { id, release: () => releases.forEach(dispose => dispose()) }
   }
-  const runtime: DesktopRuntime = {
+  const runtime: ConfirmedRestartRuntime = {
     platform: snapshot.platform, windowsBuild: snapshot.windowsBuild,
     get locale() { return locale },
     updates: {
@@ -103,6 +112,7 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Desk
     setThemeSource(source) { void send('native:setThemeSource', [source]) },
     requestRestart: () => send('native:requestRestart'),
     requestRecoveryRestart: () => send('native:requestRecoveryRestart'),
+    requestConfirmedRestart: () => send<boolean>('native:requestConfirmedRestart'),
     prepareToQuit() { void send('native:prepareToQuit') },
     openProfileCreateWindow(options) {
       const callback = callbacks({
@@ -133,6 +143,9 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): () => 
   for (const method of ['requestRestart', 'requestRecoveryRestart'] as const) {
     handle(`native:${method}`, () => { setImmediate(() => report(runtime[method]())) })
   }
+  // 确认回传型重启:ElectronDesktopRuntime 把 relaunch 推迟到本应答之后,可直接 await。
+  handle('native:requestConfirmedRestart', () =>
+    (runtime as ConfirmedRestartRuntime).requestConfirmedRestart())
   handle('native:openProfileCreateWindow', ([id]) => runtime.openProfileCreateWindow({
     onSubmit: name => callback(`${id}:submit`, [name]), onCancel: () => report(callback(`${id}:cancel`)),
   }))

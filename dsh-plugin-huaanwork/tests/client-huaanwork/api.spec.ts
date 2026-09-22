@@ -284,6 +284,14 @@ describe('rpcCall 错误处理', () => {
 })
 
 describe('workspace.open/close 的 generation 重启语义', () => {
+  test('确认后 200 正常返回:restarting 应答(含 workspaceRoot)直传,不触发 waitForReady 轮询', async () => {
+    // 多数时候应答先于 teardown 写出(评审 D5:这才是真实主路径)。
+    fetchMock.mockResolvedValueOnce(jsonResponse({ restarting: true, workspaceRoot: '/tmp/x' }))
+    await expect(rpcCall('workspace.open', { root: '/tmp/x' }))
+      .resolves.toEqual({ restarting: true, workspaceRoot: '/tmp/x' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   test('open 中途连接 reset → waitForReady 轮询 → status 200 后 resolve { restarting: true }', async () => {
     // 第 1 次 POST workspace/open 撞上 webServer 关闭;随后 status 先 503 再 200。
     fetchMock

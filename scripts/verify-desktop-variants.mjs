@@ -78,6 +78,12 @@ const PAIRS = [
       // Task 3 复盘登记:huaanwork 在 advanced 模式禁用 ui-sidebar 与 ui-conversation,
       // verify-profile-boot.mjs 断言组装后的 advanced Web 图,必须断言这两项不包含,与 beta 产生合法差异。
       'scripts/verify-profile-boot.mjs',
+      // M3 实现评审 D2 修复:workspace.open/close 需要原生重启确认框的裁决回传 Host
+      // (取消路径清 pendingRoot)。两文件均为纯增量差异——electron-runtime.ts 新增
+      // requestConfirmedRestart(既有方法逐字不动),host-runtime-bridge.ts 新增
+      // ConfirmedRestartRuntime 接口与 native:requestConfirmedRestart 绑定。
+      'src/electron-runtime.ts',
+      'src/host-runtime-bridge.ts',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [

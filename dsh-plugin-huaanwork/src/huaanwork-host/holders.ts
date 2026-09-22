@@ -75,7 +75,7 @@ export function installHuaanworkHolders(
   ctx: Context,
   config: HuaanworkHostConfig,
   hub: HuaanworkEventHub,
-  requestRestart: () => Promise<void>,
+  requestRestart: () => Promise<boolean>,
 ): RouteContext {
   installContextHolders()
 

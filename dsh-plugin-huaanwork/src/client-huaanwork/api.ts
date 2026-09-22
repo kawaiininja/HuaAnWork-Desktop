@@ -115,9 +115,14 @@ export const ROUTES: Record<string, RouteDef> = {
 interface ErrorEnvelope { error?: { code?: string; message?: string } }
 
 // —— workspace.open/close 的 generation 重启语义 ——
-// 两方法会触发整代重启:fetch 撞上 webServer 关闭(连接 reset),不可能收到 HTTP 应答。
-// 客户端特例:网络错误(非超时)→ 轮询 /huaanwork/status 至 200 → 按 { restarting: true } resolve,
-// 与旧 sidecar 的 re-boot 等待等价;onSidecarExit 已驱动 UI 的「切换中」态。
+// 两方法会触发整代重启。原生确认框(M3 评审 D2 修复后)先出结果再 relaunch:
+// 确认 → 多数时候 HTTP 200 + `{ restarting: true, workspaceRoot }` 正常写出
+// (应答先于 teardown);少数时候 teardown 抢先、fetch 撞上 webServer 关闭
+// (连接 reset)——此分支真实可达,故网络错误(非超时)→ 轮询 /huaanwork/status
+// 至 200 → 按 { restarting: true } resolve;取消 → 200 返回当前根,走普通应答。
+// onSidecarExit 已驱动 UI 的「切换中」态。
+// project.open 不在此列:它的应答携带 project/workspaceRoot,连接中断时客户端
+// 无法凭本地信息合成,只能原样抛错(窗口极窄且应用随即 relaunch,评审 D5 口径)。
 const RESTART_METHODS = new Set(['workspace.open', 'workspace.close'])
 const READY_POLL_INTERVAL_MS = 500
 

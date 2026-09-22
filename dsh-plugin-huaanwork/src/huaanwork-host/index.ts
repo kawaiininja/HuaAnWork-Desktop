@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type { ConfirmedRestartRuntime } from '../host-runtime-bridge.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
 import { installNetworkGate } from './net-gate.ts'
@@ -33,7 +34,8 @@ export function apply(ctx: Context, config: HuaanworkHostConfig) {
     return () => {}
   }, 'huaanwork: clear pending workspace root')
   const hub = createHuaanworkEventHub()
-  const routeCtx = installHuaanworkHolders(ctx, config, hub, () => ctx.desktopRuntime.requestRestart())
+  const routeCtx = installHuaanworkHolders(ctx, config, hub,
+    () => (ctx.desktopRuntime as ConfirmedRestartRuntime).requestConfirmedRestart())
   // 智能体目录真实接线(Task 10):fetch 公用机目录 + 本地 endpoints,存储根 = profileDir;
   // 目录快照同步进 huaanworkAgentCatalog holder(agent-invoke 的 @agent 分发消费)。
   const agentsHost = createAgentsHost({

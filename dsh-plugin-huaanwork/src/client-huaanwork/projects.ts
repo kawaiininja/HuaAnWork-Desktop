@@ -23,7 +23,12 @@ export function createProject(params: { root: string; name?: string }): Promise<
   return rpcCall("project.create", params);
 }
 
-export function openProject(projectId: string): Promise<{ workspaceRoot: string; project: ProjectInfo }> {
+/**
+ * 打开项目:应答恒带 workspaceRoot(评审 D1)——同根短路是项目当前根;确认重启
+ * 也是项目根(重启后组合期即切到它,客户端可立即对齐 UI)。restarting 为 true 时
+ * 应用随即 relaunch。用户在重启确认框取消时服务端回 400 restart-cancelled。
+ */
+export function openProject(projectId: string): Promise<{ workspaceRoot: string; project: ProjectInfo; restarting?: true }> {
   return rpcCall("project.open", { projectId });
 }
 

@@ -2256,6 +2256,86 @@ describe('Electron desktop runtime', () => {
     expect(restart).toHaveBeenCalledWith('recovery')
   })
 
+  it('requestConfirmedRestart resolves false on cancel without touching restart', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const restart = vi.fn(async () => {})
+    const runtime = new ElectronDesktopRuntime(restart)
+
+    await expect(runtime.requestConfirmedRestart()).resolves.toBe(false)
+    expect(restart).not.toHaveBeenCalled()
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'question', title: 'Restart DSH Desktop', defaultId: 1, cancelId: 1,
+    }))
+
+    // 取消后可重试:下一次调用重新弹框。
+    electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+    await expect(runtime.requestConfirmedRestart()).resolves.toBe(false)
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(2)
+  })
+
+  it('requestConfirmedRestart resolves true on confirm and defers relaunch past the ack', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const restart = vi.fn(async () => {})
+    const runtime = new ElectronDesktopRuntime(restart)
+
+    // 确认后应答先于 teardown:await 返回时 restart 尚未发起(下一拍 setImmediate)。
+    await expect(runtime.requestConfirmedRestart()).resolves.toBe(true)
+    await vi.waitFor(() => { expect(restart).toHaveBeenCalledOnce() })
+    expect(restart).toHaveBeenCalledWith(undefined)
+
+    // 确认后不再弹框:teardown 期间的后续调用同答 true。
+    await expect(runtime.requestConfirmedRestart()).resolves.toBe(true)
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(1)
+    expect(restart).toHaveBeenCalledOnce()
+  })
+
+  it('requestConfirmedRestart coalesces concurrent calls into one dialog', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const restart = vi.fn(async () => {})
+    const runtime = new ElectronDesktopRuntime(restart)
+
+    const [first, second] = await Promise.all([
+      runtime.requestConfirmedRestart(),
+      runtime.requestConfirmedRestart(),
+    ])
+    expect(first).toBe(true)
+    expect(second).toBe(true)
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => { expect(restart).toHaveBeenCalledOnce() })
+  })
+
+  it('requestConfirmedRestart resolves false while quitting without a dialog', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const restart = vi.fn(async () => {})
+    const runtime = new ElectronDesktopRuntime(restart)
+
+    runtime.prepareToQuit()
+    await expect(runtime.requestConfirmedRestart()).resolves.toBe(false)
+    expect(electron.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(restart).not.toHaveBeenCalled()
+  })
+
+  it('requestConfirmedRestart allows retry when the relaunch itself fails', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const restart = vi.fn(async () => {}).mockRejectedValueOnce(new Error('shutdown coordinator is not ready'))
+    const runtime = new ElectronDesktopRuntime(restart)
+
+    await expect(runtime.requestConfirmedRestart()).resolves.toBe(true)
+    await vi.waitFor(() => { expect(restart).toHaveBeenCalledOnce() })
+    // 等 setImmediate 回调里的 rejection → catch 清字段,再重试应重新弹框。
+    await new Promise(done => setImmediate(done))
+    await new Promise(done => setImmediate(done))
+    await expect(runtime.requestConfirmedRestart()).resolves.toBe(true)
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(2)
+    await vi.waitFor(() => { expect(restart).toHaveBeenCalledTimes(2) })
+  })
+
   it.each([
     { platform: 'win32', surface: 'tray' },
     { platform: 'darwin', surface: 'tray' },

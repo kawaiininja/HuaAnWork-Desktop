@@ -115,6 +115,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private rendererBootHealthy = false
   private profileCreateWindow: ProfileCreateWindow | undefined
   private restartRequest: Promise<void> | undefined
+  /** requestConfirmedRestart 的在途去重字段;确认后不清理(进程将进入 teardown)。 */
+  private confirmedRestartRequest: Promise<boolean> | undefined
 
   constructor(
     private readonly restart: (target?: 'recovery' | 'safe-mode') => Promise<void>,
@@ -507,6 +509,35 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     await request
   }
 
+  /**
+   * huaanwork workspace 切换专用(M3 评审 D2 修复):与 requestRestart 同一个
+   * 原生确认框,但把用户裁决回传调用方——确认则先 resolve true(让 RPC 应答与
+   * HTTP 响应先于 teardown 写出),下一拍才发起 relaunch;取消/退出中 resolve
+   * false,不产生任何状态变更。确认后字段不再清除:teardown 期间的后续调用
+   * 同答 true、不再弹框;relaunch 失败则清除字段允许重试。与 restartRequest
+   * 互不去重:两类对话框并发需要「重启框挂起时再切工作区」,概率极低且各自语义
+   * 独立,不为它耦合并发状态。
+   */
+  async requestConfirmedRestart(): Promise<boolean> {
+    if (this.quitting) return false
+    if (this.confirmedRestartRequest !== undefined) return await this.confirmedRestartRequest
+    const request = this.confirmRestartIntent('normal')
+    this.confirmedRestartRequest = request
+    const confirmed = await request
+    if (this.confirmedRestartRequest !== request) return confirmed
+    if (!confirmed) {
+      this.confirmedRestartRequest = undefined
+      return false
+    }
+    setImmediate(() => {
+      void this.restart(undefined).catch((cause: unknown) => {
+        this.logError(`Confirmed restart failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+        if (this.confirmedRestartRequest === request) this.confirmedRestartRequest = undefined
+      })
+    })
+    return true
+  }
+
   async requestSafeModeRestart(): Promise<void> {
     if (this.quitting) return
     if (this.restartRequest !== undefined) return await this.restartRequest
@@ -518,6 +549,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   private async confirmAndRestart(target: 'normal' | 'recovery' | 'safe-mode'): Promise<void> {
+    if (await this.confirmRestartIntent(target)) await this.restart(target === 'normal' ? undefined : target)
+  }
+
+  /** 弹原生重启确认框,只回传用户裁决;是否/何时 restart 由调用方决定。 */
+  private async confirmRestartIntent(target: 'normal' | 'recovery' | 'safe-mode'): Promise<boolean> {
     const copy = desktopRestartConfirmationCopy(this.currentLocale, target)
     const options: Electron.MessageBoxOptions = {
       type: 'question',
@@ -530,7 +566,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       noLink: true,
     }
     const result = await this.showDesktopMessageBox(options)
-    if (result.response === 0) await this.restart(target === 'normal' ? undefined : target)
+    return result.response === 0
   }
 
   /** @inheritdoc */

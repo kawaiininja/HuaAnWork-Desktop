@@ -13,6 +13,7 @@ import {
 } from '../../src/huaanwork-host/routes.ts'
 import { hasGit, listTree } from '../../src/huaanwork-host/native.ts'
 import { sessionSendBlockers } from '../../src/huaanwork-host/sessions.ts'
+import { readPendingWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 
 const ALL_METHODS = [
@@ -188,7 +189,7 @@ describe('HTTP dispatch & security checks', () => {
       logger: (msg: string) => {
         lastLogged = msg
       },
-      requestRestart: async () => {},
+      requestRestart: async () => true,
     }
 
     server = createServer((req, res) => {
@@ -575,7 +576,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
       workspaceRoot: { current: join(profileTempDir, 'workspace') },
       emit: (_event: RpcEvent) => {},
       logger: () => {},
-      requestRestart: async () => {},
+      requestRestart: async () => true,
     }
     mkdirSync(routeCtx.workspaceRoot.current, { recursive: true })
 
@@ -656,6 +657,49 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     expect(await missing.json()).toEqual({
       error: { code: 'workspace-error', message: 'project nope was not found' },
     })
+
+    // open 异根 + 确认重启:200 恒带 workspaceRoot(评审 D1),pendingRoot 落盘。
+    const otherRoot = join(profileTempDir, 'repo-y')
+    mkdirSync(otherRoot, { recursive: true })
+    const createdY = await fetch(`${baseUrl}/huaanwork/project/create`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root: otherRoot }),
+    }))
+    const { project: projectY } = await createdY.json()
+    routeCtx.workspaceRoot.current = join(profileTempDir, 'workspace')
+    routeCtx.requestRestart = async () => true
+    const openedY = await fetch(`${baseUrl}/huaanwork/project/open`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: projectY.id }),
+    }))
+    expect(openedY.status).toBe(200)
+    const openedYJson = await openedY.json()
+    expect(openedYJson).toMatchObject({ restarting: true, workspaceRoot: otherRoot })
+    expect(openedYJson.project.id).toBe(projectY.id)
+    expect(readPendingWorkspaceRoot(profileTempDir)).toBe(otherRoot)
+
+    // open 异根 + 确认框取消:400 restart-cancelled,pendingRoot 已清(评审 D2)。
+    routeCtx.requestRestart = async () => false
+    const cancelled = await fetch(`${baseUrl}/huaanwork/project/open`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: projectY.id }),
+    }))
+    expect(cancelled.status).toBe(400)
+    expect(await cancelled.json()).toEqual({
+      error: { code: 'restart-cancelled', message: '已取消工作区切换,项目未打开' },
+    })
+    expect(readPendingWorkspaceRoot(profileTempDir)).toBeNull()
+    routeCtx.requestRestart = async () => true
+
+    // 清理 repo-y,不影响下方级联删除的空表断言。
+    await fetch(`${baseUrl}/huaanwork/project/remove`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: projectY.id }),
+    }))
 
     // remove 级联:项目下任务与自动化一并清理。
     writeFileSync(join(profileTempDir, 'tasks.json'), JSON.stringify({

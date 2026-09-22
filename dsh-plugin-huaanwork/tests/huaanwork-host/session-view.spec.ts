@@ -269,7 +269,7 @@ describe('session.list fixture directory (旧 session-view.test.ts 存储段)', 
       workspaceRoot: { current: '/repo' },
       emit: () => undefined,
       logger: () => undefined,
-      requestRestart: async () => {},
+      requestRestart: async () => true,
     }
     const listed = (await sessionList(routeCtx, undefined)) as SessionSummary[]
     expect(listed).toHaveLength(2)

@@ -2,20 +2,25 @@ import { existsSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { RouteError, type RouteContext } from './routes.ts'
 import { assertAutomationIdle } from './sessions.ts'
-import { neutralWorkspaceRoot, writePendingWorkspaceRoot } from './workspace-state.ts'
+import { clearPendingWorkspaceRoot, neutralWorkspaceRoot, writePendingWorkspaceRoot } from './workspace-state.ts'
 
 /**
- * workspace.open/close 应答:真重启路径 fetch 必然中断,客户端由 api.ts
- * waitForReady 按 `{ restarting: true }` 承接;短路路径(已在目标根)返回
- * `{ workspaceRoot }`,与旧 sidecar 应答同形(host.ts:1017/1023),
- * App.tsx 的工作区对齐早退(`workspaceRef.current === root`)靠它。
+ * workspace.open/close 应答:确认重启后主进程立即 relaunch,fetch 与 teardown
+ * 竞争——多数时候 200 + `{ restarting: true, workspaceRoot }` 正常写出(评审 D1:
+ * workspaceRoot 恒在,客户端契约以此为准);偶尔连接被掐断,客户端由 api.ts
+ * waitForReady 按 `{ restarting: true }` 承接。用户在确认框取消时返回当前根
+ * `{ workspaceRoot }`(与「已在目标根」短路同形),不应答 restarting(评审 D2-③)。
  */
-export type WorkspaceResult = { restarting: true } | { workspaceRoot: string }
+export type WorkspaceResult = { restarting: true; workspaceRoot: string } | { workspaceRoot: string }
 
 /**
- * workspace.open:写 pendingRoot → 请求 generation 重启;组合期由 profile.ts 消费。
+ * workspace.open:写 pendingRoot → 弹确认框;确认 → generation 重启,组合期由
+ * profile.ts 消费;取消 → 立即清除 pendingRoot,workspace 维持当前根(评审 D2-②:
+ * 残留 pendingRoot 会在下次冷启动被静默消费)。
  * 旧 host.ts:1013-1019 语义:assertAutomationIdle 先于一切;已在目标根时短路
  * (不写 pendingRoot、不重启),消除同根发送时的整窗重载。
+ * 已知残余窗口:确认框挂起期间进程被杀(⌘Q),pendingRoot 已落盘而无裁决可回传,
+ * 下次启动仍会消费——main 侧不回传该事件,属可接受的极端边角。
  */
 export async function openWorkspace(routeCtx: RouteContext, root: string): Promise<WorkspaceResult> {
   assertAutomationIdle()
@@ -30,15 +35,20 @@ export async function openWorkspace(routeCtx: RouteContext, root: string): Promi
     return { workspaceRoot: routeCtx.workspaceRoot.current }
   }
   writePendingWorkspaceRoot(routeCtx.profileDir, target)
-  await routeCtx.requestRestart()
-  return { restarting: true }
+  const confirmed = await routeCtx.requestRestart()
+  if (!confirmed) {
+    clearPendingWorkspaceRoot(routeCtx.profileDir)
+    return { workspaceRoot: routeCtx.workspaceRoot.current }
+  }
+  return { restarting: true, workspaceRoot: target }
 }
 
 /**
  * workspace.close:回到中立根(未归属项目的「任务」会话工作目录)。
  * 旧 host.ts:1019-1023 语义:已在中立根时短路(`workspaceRoot !== defaultWorkspaceRoot`
  * 才切换),App.tsx ensureNeutralWorkspace 因此不会每次发送都触发整窗 relaunch。
- * 真切换写 pendingRoot=中立根(不删文件,钉中立根 sandbox 且状态可读)。
+ * 真切换写 pendingRoot=中立根(不删文件,钉中立根 sandbox 且状态可读);
+ * 取消与确认的处理同 openWorkspace。
  */
 export async function closeWorkspace(routeCtx: RouteContext): Promise<WorkspaceResult> {
   assertAutomationIdle()
@@ -47,6 +57,10 @@ export async function closeWorkspace(routeCtx: RouteContext): Promise<WorkspaceR
     return { workspaceRoot: routeCtx.workspaceRoot.current }
   }
   writePendingWorkspaceRoot(routeCtx.profileDir, neutral)
-  await routeCtx.requestRestart()
-  return { restarting: true }
+  const confirmed = await routeCtx.requestRestart()
+  if (!confirmed) {
+    clearPendingWorkspaceRoot(routeCtx.profileDir)
+    return { workspaceRoot: routeCtx.workspaceRoot.current }
+  }
+  return { restarting: true, workspaceRoot: neutral }
 }
