@@ -76,7 +76,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'loop.test.ts',
     title: '@agent persona catalog: bridged tokens, session.list single tab, and clean cancel',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:190',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:191',
   },
   {
     file: 'loop.test.ts',
