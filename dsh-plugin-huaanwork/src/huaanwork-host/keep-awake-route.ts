@@ -86,9 +86,9 @@ export async function handleKeepAwakeRequest(
   try {
     await callSetKeepAwake(runtime, hold)
   } catch (cause) {
-    if (cause instanceof KeepAwakeUnavailableError) {
-      return finishJson(res, 501, { error: { message: KEEP_AWAKE_UNAVAILABLE_MESSAGE } })
-    }
+    const named = cause instanceof KeepAwakeUnavailableError
+      || (cause instanceof Error && cause.message === KEEP_AWAKE_UNAVAILABLE_MESSAGE)
+    if (named) return finishJson(res, 501, { error: { message: KEEP_AWAKE_UNAVAILABLE_MESSAGE } })
     return finishJson(res, 500, { error: { message: 'keep-awake unavailable' } })
   }
   finishJson(res, 200, hold)
