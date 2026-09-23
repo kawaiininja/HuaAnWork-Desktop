@@ -220,6 +220,16 @@ function stripModelThinking(text: string): string {
   return open >= 0 ? closed.slice(0, open) : closed
 }
 
+/** 只取消这一条自动化会话,不回落到通道 agent,也不顺带取消其它 live agent。 */
+function cancelAutomationSession(ctx: AutomationRuntime, sessionId: string): void {
+  const direct = ctx.agents?.get?.(sessionId)
+  const agent =
+    direct && (direct.id === sessionId || direct.session?.id === sessionId)
+      ? direct
+      : ctx.agents?.list?.().find((item) => item.id === sessionId || item.session?.id === sessionId)
+  agent?.cancel?.({ kind: 'user' })
+}
+
 async function mergedRunPrefix(routeCtx: RouteContext, automation: AutomationInfo): Promise<string | undefined> {
   if (automation.taskShape !== 'merged') return undefined
   const runs = await recentRuns(routeCtx.profileDir, automation.id)
@@ -251,9 +261,10 @@ async function runAgentTurn(
       ? { runId, automationId: automation.id, allow: new Set(allow), sessionId }
       : undefined
   }
+  const turn = sendToAgent(ctx, routeCtx, { text: prompt, sessionId })
   try {
     await Promise.race([
-      sendToAgent(ctx, routeCtx, { text: prompt, sessionId }),
+      turn,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           timedOut = true
@@ -264,7 +275,11 @@ async function runAgentTurn(
     ])
     return stripModelThinking(automationCollector.get(sessionId)?.text ?? '').trim()
   } catch (error: unknown) {
-    if (timedOut) throw new AutomationRunTimeoutError(error instanceof Error ? error.message : String(error))
+    if (timedOut) {
+      cancelAutomationSession(ctx, sessionId)
+      await turn.catch(() => undefined)
+      throw new AutomationRunTimeoutError(error instanceof Error ? error.message : String(error))
+    }
     throw error
   } finally {
     if (timer) clearTimeout(timer)
@@ -342,6 +357,7 @@ async function finishAutomation(
   if (coalescedCount !== undefined) summary.coalescedCount = coalescedCount
   if (run.sessionId !== undefined) summary.sessionId = run.sessionId
   await appendRun(routeCtx.profileDir, automation.id, summary)
+  // 完成时不再推进 nextRunAt:进入 running 时已经按 startedAt 算过一次。
   await markAutomation(routeCtx.profileDir, automation.id, {
     lastRunAt: endedAt,
     lastStatus: run.ok ? 'ok' : 'error',
@@ -469,11 +485,14 @@ export function enqueueAgentAutomation(automation: AutomationInfo, meta: Automat
   sessionSendBlockers.agentAutomationQueued += 1
   sessionSendBlockers.agentAutomationActive += 1
   const run = automationTail.then(() => runBound(automation, meta))
-  automationTail = run.catch((error: unknown) => logFailure(error)).then(() => {
+  const settled = run.catch((error: unknown) => {
+    logFailure(error)
+  })
+  automationTail = settled.then(() => {
     sessionSendBlockers.agentAutomationQueued -= 1
     sessionSendBlockers.agentAutomationActive -= 1
   })
-  return run
+  return settled
 }
 
 /** script 不位移、不占 agent 计数,排空后也不恢复工作区。 */

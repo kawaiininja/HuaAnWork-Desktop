@@ -385,7 +385,11 @@ export function clipOutput(output: string): string {
   return output.length <= OUTPUT_MAX_CHARS ? output : `${output.slice(0, OUTPUT_MAX_CHARS)}…（已截断）`
 }
 
-/** 一次运行结束后回写任务状态;非 manual 无论成败都推进 nextRunAt。任务不存在时静默返回。 */
+/**
+ * 回写 lastRunAt / lastStatus。nextRunAt 只在进入 running 时按 lastRunAt 推进一次。
+ * 完成时再按 endedAt 算会跨过运行期间的下一次触发,把那一档跳掉。
+ * 调用方显式传入 nextRunAt 时仍按该值写入。任务不存在时静默返回。
+ */
 export async function markAutomation(
   storageRoot: string,
   automationId: string,
@@ -401,8 +405,10 @@ export async function markAutomation(
     if (!automation) return
     automation.lastRunAt = status.lastRunAt
     automation.lastStatus = status.lastStatus
-    if (automation.schedule.kind !== 'manual') {
-      const next = status.nextRunAt ?? nextFireAfter(automation.schedule, status.lastRunAt)
+    if (status.nextRunAt !== undefined) {
+      automation.nextRunAt = status.nextRunAt
+    } else if (automation.schedule.kind !== 'manual' && status.lastStatus === 'running') {
+      const next = nextFireAfter(automation.schedule, status.lastRunAt)
       if (next === undefined) delete automation.nextRunAt
       else automation.nextRunAt = next
     }
@@ -410,14 +416,29 @@ export async function markAutomation(
   })
 }
 
+/** 同一任务的运行记录读改写串行;两个 script 同时结束不能互相覆盖丢掉一条。 */
+const appendRunTail = new Map<string, Promise<unknown>>()
+
+function withAppendRunLock<T>(storageRoot: string, automationId: string, fn: () => Promise<T>): Promise<T> {
+  const key = `${storageRoot}\0${automationId}`
+  const prev = appendRunTail.get(key) ?? Promise.resolve()
+  const run = prev.then(fn, () => fn())
+  appendRunTail.set(key, run.then(() => undefined, () => undefined))
+  return run
+}
+
 /** 追加一条运行记录;超过 RUNS_LIMIT 时丢弃最旧的(整文件重写)。 */
 export async function appendRun(storageRoot: string, automationId: string, run: RunSummary): Promise<void> {
-  const path = runsFile(storageRoot, automationId)
-  const existing = await recentRuns(storageRoot, automationId)
-  const clipped: RunSummary = { ...run, output: clipOutput(run.output) }
-  const lines = [...existing, clipped].slice(-RUNS_LIMIT).map((entry) => JSON.stringify(entry))
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `${lines.join('\n')}\n`, 'utf8')
+  return withAppendRunLock(storageRoot, automationId, async () => {
+    const path = runsFile(storageRoot, automationId)
+    const existing = await recentRuns(storageRoot, automationId)
+    // 读和写之间让出一次。锁外并发会在这里互相盖掉;锁内下一笔要等这一笔写完再读。
+    await Promise.resolve()
+    const clipped: RunSummary = { ...run, output: clipOutput(run.output) }
+    const lines = [...existing, clipped].slice(-RUNS_LIMIT).map((entry) => JSON.stringify(entry))
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, `${lines.join('\n')}\n`, 'utf8')
+  })
 }
 
 /**

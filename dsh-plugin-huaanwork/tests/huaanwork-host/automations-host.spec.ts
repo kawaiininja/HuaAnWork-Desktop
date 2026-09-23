@@ -23,7 +23,7 @@ import { createAutomation, normalizeAutomationInput, updateAutomation } from '..
 import { ROUTE_TABLE, type RouteContext, type RouteHandler, type RouteRequest } from '../../src/huaanwork-host/routes.ts'
 import { sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import { sessionSendBlockers, type ListedAgent } from '../../src/huaanwork-host/sessions.ts'
-import { createProject, recentRuns } from '../../src/huaanwork-host/stores.ts'
+import { createProject, listAutomations, recentRuns } from '../../src/huaanwork-host/stores.ts'
 import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 
 type Mode = 'immediate' | 'hang' | 'throw'
@@ -36,7 +36,14 @@ type Harness = {
   followups: { sessionId: string; text: string }[]
   runtime: AutomationRuntime
   routeCtx: RouteContext
-  state: { mode: Mode; reply: string }
+  state: {
+    mode: Mode
+    reply: string
+    cancelDelayMs: number
+    cancels: string[]
+    inFlight: number
+    maxInFlight: number
+  }
   release: (sessionId?: string) => void
   installUserAgent: (sessionId: string, whenIdle?: () => Promise<void>) => void
   userFollowups: unknown[]
@@ -56,7 +63,14 @@ function makeHarness(current?: string): Harness {
   const userFollowups: unknown[] = []
   const releases = new Map<string, () => void>()
   const agents = new Map<string, ListedAgent>()
-  const state = { mode: 'immediate' as Mode, reply: 'stub-output' }
+  const state = {
+    mode: 'immediate' as Mode,
+    reply: 'stub-output',
+    cancelDelayMs: 0,
+    cancels: [] as string[],
+    inFlight: 0,
+    maxInFlight: 0,
+  }
   const box: { routeCtx: RouteContext | undefined } = { routeCtx: undefined }
 
   const runtime = {
@@ -79,10 +93,25 @@ function makeHarness(current?: string): Harness {
               box.routeCtx?.emit({ event: 'token', text: state.reply, sessionId })
             }
             if (state.mode === 'hang') {
+              state.inFlight += 1
+              state.maxInFlight = Math.max(state.maxInFlight, state.inFlight)
+              let settled = false
               idle = new Promise<void>((resolve) => {
-                releases.set(sessionId, resolve)
+                releases.set(sessionId, () => {
+                  if (settled) return
+                  settled = true
+                  state.inFlight -= 1
+                  resolve()
+                })
               })
             }
+          },
+          cancel() {
+            state.cancels.push(sessionId)
+            const finish = releases.get(sessionId)
+            if (!finish) return
+            if (state.cancelDelayMs > 0) setTimeout(finish, state.cancelDelayMs)
+            else finish()
           },
           whenIdle: () => idle,
         }
@@ -666,4 +695,63 @@ test('agentIdle rejects a manual run while the user agent is busy', async () => 
     /当前对话仍在进行/,
   )
   expect(h.events.some((event) => event.event === 'automation/run-start')).toBe(false)
+}, 15_000)
+
+test('interval run keeps the nextRunAt computed at start', async () => {
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '间隔' })
+  const automation = await scriptTask(
+    h.profileDir,
+    nodeEval('Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,40)'),
+    { projectId: project.id, name: '间隔脚本', schedule: { kind: 'interval', minutes: 1 } },
+  )
+  await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  await waitRunEnd(h.events, automation.id)
+  const run = (await recentRuns(h.profileDir, automation.id))[0]
+  const stored = (await listAutomations(h.profileDir)).find((item) => item.id === automation.id)
+  expect(run?.endedAt).toBeGreaterThan(run?.startedAt ?? 0)
+  expect(stored?.nextRunAt).toBe((run?.startedAt ?? 0) + 60_000)
+})
+
+test('agent enqueue resolves when the run record cannot be written', async () => {
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '磁盘' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '写盘失败' })
+  writeFileSync(join(h.profileDir, 'automations'), 'not-a-directory')
+  const rejections: unknown[] = []
+  const onRejection = (error: unknown) => {
+    rejections.push(error)
+  }
+  process.on('unhandledRejection', onRejection)
+  try {
+    await expect(enqueueAutomation(automation, { trigger: 'manual', runId: 'disk-1' })).resolves.toBeUndefined()
+    await automationTail
+    expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
+    expect(sessionSendBlockers.agentAutomationActive).toBe(0)
+    const queued = await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+    expect(queued).toMatchObject({ queued: true })
+    await automationTail
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(rejections).toEqual([])
+  } finally {
+    process.off('unhandledRejection', onRejection)
+  }
+})
+
+test('agent timeout cancels the session and settles the turn before the next agent starts', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  h.state.cancelDelayMs = 40
+  writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ automation_timeout_ms: 180 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '超时串行' })
+  const first = await agentTask(h.profileDir, { projectId: project.id, name: '先超时' })
+  const second = await agentTask(h.profileDir, { projectId: project.id, name: '后超时' })
+  const firstRun = enqueueAutomation(first, { trigger: 'manual', runId: 'timeout-1' })
+  await poll(() => h.followups.length === 1)
+  const secondRun = enqueueAutomation(second, { trigger: 'manual', runId: 'timeout-2' })
+  await firstRun
+  await secondRun
+  expect(h.state.maxInFlight).toBe(1)
+  expect(h.state.cancels).toEqual([h.followups[0]?.sessionId, h.followups[1]?.sessionId])
+  expect(h.state.inFlight).toBe(0)
 }, 15_000)

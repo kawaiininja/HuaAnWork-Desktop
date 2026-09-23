@@ -7,7 +7,9 @@ import {
   MAX_AUTOMATIONS,
   MISSED_GRACE_MS,
   advanceNextRunAt,
+  appendRun,
   createAutomation,
+  markAutomation,
   dueAutomations,
   expiredAutomations,
   missedAutomations,
@@ -614,6 +616,50 @@ describe('automations-store 写路径与纯函数', () => {
     )
     expect(removed).toEqual({ removed: true })
     expect(await listAutomations(home)).toEqual([])
+  })
+
+  test('markAutomation advances nextRunAt only when entering running', async () => {
+    const home = makeHome()
+    const created = await createAutomation(
+      home,
+      normalizeAutomationInput(
+        agentInput({ kind: 'script', command: 'true', schedule: { kind: 'interval', minutes: 1 } }),
+        T0,
+      ),
+      T0,
+    )
+    const startedAt = T0 + 10_000
+    await markAutomation(home, created.id, { lastRunAt: startedAt, lastStatus: 'running' })
+    const afterStart = (await listAutomations(home)).find((item) => item.id === created.id)
+    expect(afterStart?.nextRunAt).toBe(startedAt + 60_000)
+
+    const endedAt = startedAt + 90_000
+    await markAutomation(home, created.id, { lastRunAt: endedAt, lastStatus: 'ok' })
+    const afterEnd = (await listAutomations(home)).find((item) => item.id === created.id)
+    expect(afterEnd?.lastRunAt).toBe(endedAt)
+    expect(afterEnd?.lastStatus).toBe('ok')
+    expect(afterEnd?.nextRunAt).toBe(startedAt + 60_000)
+  })
+
+  test('concurrent appendRun calls keep every record for one automation', async () => {
+    const home = makeHome()
+    const created = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const count = 24
+    await Promise.all(
+      Array.from({ length: count }, (_, index) =>
+        appendRun(home, created.id, {
+          runId: `r${index}`,
+          startedAt: T0 + index,
+          endedAt: T0 + index + 1,
+          ok: true,
+          output: `out-${index}`,
+          status: 'ok',
+          trigger: 'manual',
+        }),
+      ),
+    )
+    const runs = await recentRuns(home, created.id, count)
+    expect(runs.map((run) => run.runId).sort()).toEqual(Array.from({ length: count }, (_, index) => `r${index}`).sort())
   })
 })
 
