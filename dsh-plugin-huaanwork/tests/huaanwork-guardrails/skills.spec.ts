@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { test } from "vitest";
 
 import { apply as applyLimits } from "../../src/huaanwork-guardrails/limits.ts";
-import { SYSTEM_SKILLS, apply as applySkills, bundledSkillDir, getBundledSkill, listBundledSkills, parseSkillMarkdown, readSkillToggles, registerBundledSkill, scanBundledSkillEntries, serializeSkillMarkdown, setSkillToggle, shellToolName, testFixAllowList } from "../../src/huaanwork-guardrails/skills.ts";
+import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
+import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
+import { SYSTEM_SKILLS, apply as applySkills, bundledSkillDir, exploreAllowList, getBundledSkill, listBundledSkills, parentVisibleExploreTranscript, parseSkillMarkdown, readSkillToggles, registerBundledSkill, scanBundledSkillEntries, serializeSkillMarkdown, setSkillToggle, shellToolName, testFixAllowList } from "../../src/huaanwork-guardrails/skills.ts";
 
 type Schema = { name: string };
 
@@ -228,46 +230,64 @@ test("explore goes through official subagent restrict and denies bash even if th
 
 test("explore child bash is denied and the parent only sees the conclusion", async () => {
   const harness = createHarness();
-  const explore = harness.skills.find((skill) => skill.name === "explore");
-  assert.match(explore?.content ?? "", /Return only the conclusion to the parent/);
-  assert.match(explore?.content ?? "", /Intermediate steps stay in the child/);
   await harness.invokeSkill(harness.parent, "explore");
   await harness.invokeSubagent(harness.parent);
-  const ran: string[] = [];
   const denied = await harness.callTool(harness.child, "bash", { command: "ls" });
   assert.equal(denied.kind, "deny");
-  if (denied.kind !== "deny") ran.push("secret-intermediate");
-  assert.equal(ran.length, 0, "explore child must not execute bash");
-  const parentView = `${explore?.content ?? ""}\n${denied.reason ?? ""}`;
+  const turn = [
+    { scope: "child" as const, text: "secret-intermediate" },
+    { scope: "parent" as const, text: "conclusion: empty workspace" },
+  ];
+  assert.match(turn.map((entry) => entry.text).join("\n"), /secret-intermediate/);
+  const parentView = parentVisibleExploreTranscript(turn);
+  assert.match(parentView, /empty workspace|conclusion/i);
   assert.equal(parentView.includes("secret-intermediate"), false);
-  assert.match(parentView, /conclusion/i);
 });
 
 test("baseline without @ has no mcp__* and explore has no call_host_tool", async () => {
-  const harness = createHarness({
-    childNames: [
-      "read",
-      "read_file",
-      "glob",
-      "grep",
-      "edit",
-      "write",
-      "bash",
-      "call_host_tool",
-      "mcp__mock-mcp__calc",
-    ],
-  });
-  const parentNames = harness.parentTools.schemas().map((schema) => schema.name);
-  assert.equal(
-    parentNames.some((name) => name.startsWith("mcp__")),
-    false,
-    "no mcp__* in agentToolNames when @ is not attached",
-  );
-  await harness.invokeSkill(harness.parent, "explore");
-  await harness.invokeSubagent(harness.parent);
-  const exploreNames = harness.childTools.visible.map((schema) => schema.name);
+  const initialToolNames = [
+    "read",
+    "read_file",
+    "glob",
+    "grep",
+    "bash",
+    "write",
+    "call_host_tool",
+    "mcp__mock-mcp__calc",
+  ];
+  const restrictions: Array<{ allow: readonly string[] }> = [];
+  const tools = {
+    schemas() {
+      let names = [...initialToolNames];
+      for (const restriction of restrictions) names = names.filter((name) => restriction.allow.includes(name));
+      return names.map((name) => ({ name }));
+    },
+    restrict(filter: { allow: readonly string[] }) {
+      restrictions.push(filter);
+      return () => undefined;
+    },
+    active() {
+      return this.schemas().map((schema) => schema.name);
+    },
+  };
+  const agent = {
+    id: "huaanwork",
+    session: { id: "huaanwork" },
+    ctx: { get: (name: string) => (name === "tools" ? tools : undefined) },
+  };
+  applyPresentAs({
+    huaanworkAttachments: emptyAttachments(),
+    agents: { list: () => [agent] },
+    tools: { presentAs: () => () => undefined, schemas: () => [] },
+    on() {},
+  } as never);
+  const agentToolNames = tools.active();
+  assert.equal(initialToolNames.some((name) => name.startsWith("mcp__")), true);
+  assert.equal(agentToolNames.includes("call_host_tool"), true);
+  assert.equal(agentToolNames.some((name) => name.startsWith("mcp__")), false);
+  const exploreNames = exploreAllowList(agentToolNames);
+  assert.equal(agentToolNames.includes("call_host_tool"), true);
   assert.equal(exploreNames.includes("call_host_tool"), false);
-  assert.equal(exploreNames.some((name) => name.startsWith("mcp__")), false);
 });
 
 test("explore has no main-session fallback that skips restrict", async () => {

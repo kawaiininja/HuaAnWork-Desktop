@@ -79,6 +79,13 @@ export function exploreAllowList(existing: readonly string[]): string[] {
   return EXPLORE_TOOLS.filter((name) => existing.includes(name));
 }
 
+export type ExploreTurnEntry = { scope: "child" | "parent"; text: string };
+
+/** 子代理中间步骤留在 child 日志;父会话只拼接 parent 范围的结论。 */
+export function parentVisibleExploreTranscript(entries: readonly ExploreTurnEntry[]): string {
+  return entries.filter((entry) => entry.scope === "parent").map((entry) => entry.text).join("");
+}
+
 export function testFixAllowList(existing: readonly string[], platform = process.platform): string[] {
   return [...TEST_FIX_BASE_TOOLS, shellToolName(platform)].filter((name) => existing.includes(name));
 }
