@@ -260,8 +260,9 @@ test('same-root due agents enqueue through the serial tail, grouped together', a
   expect(h.followups[0]).toContain('trigger="schedule"')
   expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
   h.release()
-  await poll(() => runEvents(h.events, 'automation/run-end', second.id).length === 1)
-  expect(h.followups).toHaveLength(2)
+  await poll(() => h.followups.length === 2 && runEvents(h.events, 'automation/run-end', second.id).length === 1)
+  for (const stop of stops.splice(0)) stop()
+  await automationTail
   const stored = await findAutomation(h.profileDir, first.id)
   expect(stored.lastStatus).toBe('ok')
   expect(stored.nextRunAt).toBeGreaterThan(Date.now())
