@@ -68,9 +68,6 @@ export function startAutomationScheduler(
   const hostStartedAt = Date.now()
   let automationTicking = false
   let automationRecoveredResidual = false
-  // 跨根 run-once 顺延期间按 automationId + nextRunAt 只广播一次。
-  // 不推进 nextRunAt、不入队。新 generation 是新的 Set,切到该根后仍能补跑。
-  const deferredCatchup = new Set<string>()
 
   const recoverResidualRunningRuns = async (): Promise<void> => {
     const now = Date.now()
@@ -120,20 +117,8 @@ export function startAutomationScheduler(
       const activeList = expired.length > 0 ? list.filter((item) => !expiredIds.has(item.id)) : list
       for (const { automation, nextRunAt, disable, policy, coalescedCount } of missedAutomations(activeList, now)) {
         if (policy === 'run-once' && !disable && nextRunAt !== undefined) {
-          if ((await automationRootDecision(routeCtx, automation)).kind === 'cross') {
-            // 键用注册表上的过期 nextRunAt。missed 算出的下一档随 now 变,不能当闩。
-            const key = `${automation.id}\0${String(automation.nextRunAt)}`
-            if (deferredCatchup.has(key)) continue
-            deferredCatchup.add(key)
-            emitAutomation(ctx, routeCtx, {
-              event: 'automation/missed',
-              automationId: automation.id,
-              projectId: automation.projectId,
-              coalescedCount,
-              missedAt: now,
-            })
-            continue
-          }
+          // 一律先广播。跨根同样顺延不入队:不推进 nextRunAt,下一 tick 再记 missed,
+          // 切到该根后仍能补跑。advanceNextRunAt 只配合同根入队。
           emitAutomation(ctx, routeCtx, {
             event: 'automation/missed',
             automationId: automation.id,
@@ -141,6 +126,7 @@ export function startAutomationScheduler(
             coalescedCount,
             missedAt: now,
           })
+          if ((await automationRootDecision(routeCtx, automation)).kind === 'cross') continue
           await advanceNextRunAt(routeCtx.profileDir, automation.id, nextRunAt)
           void enqueueAutomation(automation, { trigger: 'catchup', coalescedCount }).catch(logEnqueueFailure)
           continue

@@ -320,11 +320,11 @@ test('missed skip records a run, run-once catchup enqueues, cross-root catchup d
   expect(runEvents(h.events, 'automation/run-start', remote.id)).toHaveLength(0)
   expect(await recentRuns(h.profileDir, remote.id)).toEqual([])
   expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBe(stale)
-  expect(runEvents(h.events, 'automation/missed', remote.id)).toHaveLength(1)
+  expect(runEvents(h.events, 'automation/missed', remote.id).length).toBeGreaterThan(1)
   expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
 })
 
-test('cross-root run-once catchup emits missed once per scheduler and does not advance or enqueue', async () => {
+test('cross-root run-once catchup stays pending, re-emits missed, and runs after the workspace matches', async () => {
   useTick(20)
   const h = makeHarness()
   const elsewhere = mkdtempSync(join(tmpdir(), 'hw-sched-other-'))
@@ -335,20 +335,11 @@ test('cross-root run-once catchup emits missed once per scheduler and does not a
   await arm(h.profileDir, remote.id, stale)
   start(h)
 
-  await poll(() => runEvents(h.events, 'automation/missed', remote.id).length === 1)
+  await poll(() => runEvents(h.events, 'automation/missed', remote.id).length >= 1)
   await new Promise((resolve) => setTimeout(resolve, 80))
-  expect(runEvents(h.events, 'automation/missed', remote.id)).toHaveLength(1)
+  expect(runEvents(h.events, 'automation/missed', remote.id).length).toBeGreaterThan(1)
   expect(runEvents(h.events, 'automation/run-start', remote.id)).toHaveLength(0)
   expect(await recentRuns(h.profileDir, remote.id)).toEqual([])
-  expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBe(stale)
-
-  for (const stop of stops.splice(0)) stop()
-  h.events.length = 0
-  start(h)
-  await poll(() => runEvents(h.events, 'automation/missed', remote.id).length === 1)
-  await new Promise((resolve) => setTimeout(resolve, 80))
-  expect(runEvents(h.events, 'automation/missed', remote.id)).toHaveLength(1)
-  expect(runEvents(h.events, 'automation/run-start', remote.id)).toHaveLength(0)
   expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBe(stale)
 
   for (const stop of stops.splice(0)) stop()
