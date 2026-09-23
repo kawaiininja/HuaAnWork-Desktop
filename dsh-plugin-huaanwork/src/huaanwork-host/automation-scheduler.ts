@@ -68,6 +68,9 @@ export function startAutomationScheduler(
   const hostStartedAt = Date.now()
   let automationTicking = false
   let automationRecoveredResidual = false
+  // 跨根 run-once 顺延期间按 automationId + nextRunAt 只广播一次。
+  // 不推进 nextRunAt、不入队。新 generation 是新的 Set,切到该根后仍能补跑。
+  const deferredCatchup = new Set<string>()
 
   const recoverResidualRunningRuns = async (): Promise<void> => {
     const now = Date.now()
@@ -116,7 +119,33 @@ export function startAutomationScheduler(
       const expiredIds = new Set(expired.map((item) => item.id))
       const activeList = expired.length > 0 ? list.filter((item) => !expiredIds.has(item.id)) : list
       for (const { automation, nextRunAt, disable, policy, coalescedCount } of missedAutomations(activeList, now)) {
-        // 错过记录与根无关:先广播。执行(catchup 入队)才受同根限定。
+        if (policy === 'run-once' && !disable && nextRunAt !== undefined) {
+          if ((await automationRootDecision(routeCtx, automation)).kind === 'cross') {
+            // 键用注册表上的过期 nextRunAt。missed 算出的下一档随 now 变,不能当闩。
+            const key = `${automation.id}\0${String(automation.nextRunAt)}`
+            if (deferredCatchup.has(key)) continue
+            deferredCatchup.add(key)
+            emitAutomation(ctx, routeCtx, {
+              event: 'automation/missed',
+              automationId: automation.id,
+              projectId: automation.projectId,
+              coalescedCount,
+              missedAt: now,
+            })
+            continue
+          }
+          emitAutomation(ctx, routeCtx, {
+            event: 'automation/missed',
+            automationId: automation.id,
+            projectId: automation.projectId,
+            coalescedCount,
+            missedAt: now,
+          })
+          await advanceNextRunAt(routeCtx.profileDir, automation.id, nextRunAt)
+          void enqueueAutomation(automation, { trigger: 'catchup', coalescedCount }).catch(logEnqueueFailure)
+          continue
+        }
+        // 错过记录与根无关。skip / once 自停照常写 runs;执行才受同根限定。
         emitAutomation(ctx, routeCtx, {
           event: 'automation/missed',
           automationId: automation.id,
@@ -124,14 +153,6 @@ export function startAutomationScheduler(
           coalescedCount,
           missedAt: now,
         })
-        if (policy === 'run-once' && !disable && nextRunAt !== undefined) {
-          // 先推进 nextRunAt,同一档不会在下一 tick 再记 missed。跨根只跳过入队。
-          await advanceNextRunAt(routeCtx.profileDir, automation.id, nextRunAt)
-          if ((await automationRootDecision(routeCtx, automation)).kind !== 'cross') {
-            void enqueueAutomation(automation, { trigger: 'catchup', coalescedCount }).catch(logEnqueueFailure)
-          }
-          continue
-        }
         await appendRun(routeCtx.profileDir, automation.id, {
           runId: randomUUID(),
           startedAt: now,
