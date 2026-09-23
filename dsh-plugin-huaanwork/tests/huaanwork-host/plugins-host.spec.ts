@@ -11,6 +11,7 @@ import {
   removePlugin,
   type PluginMutationContext,
 } from '../../src/huaanwork-host/plugins-host.ts'
+import { ROUTE_TABLE, RouteError, type RouteContext } from '../../src/huaanwork-host/routes.ts'
 
 const BASE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 
@@ -172,8 +173,42 @@ describe('plugin add/remove', () => {
 
     const result = await addPlugin(ctx, pluginDir)
 
-    expect(result).toEqual({ bundles: [...BASE_BUNDLES, 'demo-plugin'], restarting: true })
+    expect(result).toEqual({
+      bundles: [...BASE_BUNDLES, 'demo-plugin'],
+      restarting: true,
+      message: 'could not read a non-empty installed bundle list; inferred the added package onto the previous list',
+    })
     expect(result.bundles).not.toEqual([])
+  })
+
+  test('route plugin.add 把单并发冲突映成 409,不排队', async () => {
+    const profileDir = makeHome()
+    writeProfile(profileDir, BASE_BUNDLES)
+    const pluginDir = writePluginDir(makeHome())
+    const route = ROUTE_TABLE.find((entry) => entry.method === 'plugin.add')!
+    const ctx = {
+      dshHome: profileDir,
+      profileDir,
+      workspaceRoot: { current: profileDir },
+      emit: () => {},
+      logger: () => {},
+      requestRestart: async () => true,
+      desktopPnpm: {
+        runPlugin: () => {
+          throw new Error('dsh-plugin-desktop: another desktop pnpm operation is already running')
+        },
+      },
+    } satisfies RouteContext
+    await expect(route.handler({
+      params: {},
+      body: { source: pluginDir },
+      query: new URLSearchParams(),
+    }, ctx)).rejects.toBeInstanceOf(RouteError)
+    await expect(route.handler({
+      params: {},
+      body: { source: pluginDir },
+      query: new URLSearchParams(),
+    }, ctx)).rejects.toMatchObject({ status: 409, code: 'pnpm-busy' })
   })
 
   test('runPlugin 失败时不重启,profile 不被本函数改写', async () => {

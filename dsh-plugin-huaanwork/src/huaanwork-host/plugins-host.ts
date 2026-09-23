@@ -249,8 +249,11 @@ function bundlesAfterAdd(
 ): { bundles: string[]; message?: string } {
   const after = readBundlesAfter(routeCtx, 'add')
   if (after !== undefined && after.length > 0) return { bundles: after }
-  const inferred = packageName !== undefined && !before.includes(packageName) ? [...before, packageName] : before
-  const message = 'could not read a non-empty installed bundle list; returning the previous list'
+  const appended = packageName !== undefined && !before.includes(packageName)
+  const inferred = appended && packageName !== undefined ? [...before, packageName] : before
+  const message = appended
+    ? 'could not read a non-empty installed bundle list; inferred the added package onto the previous list'
+    : 'could not read a non-empty installed bundle list; returning the previous list'
   routeCtx.logger(`plugin add: ${message}`)
   return { bundles: nonEmptyBundles(routeCtx, inferred, before, 'add'), message }
 }
