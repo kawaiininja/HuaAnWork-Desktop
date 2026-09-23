@@ -125,10 +125,11 @@ export function startAutomationScheduler(
           missedAt: now,
         })
         if (policy === 'run-once' && !disable && nextRunAt !== undefined) {
-          // 跨根顺延:不推进 nextRunAt、不入队,保持 missed,待用户切到该根后由新 generation 补跑。
-          if ((await automationRootDecision(routeCtx, automation)).kind === 'cross') continue
+          // 先推进 nextRunAt,同一档不会在下一 tick 再记 missed。跨根只跳过入队。
           await advanceNextRunAt(routeCtx.profileDir, automation.id, nextRunAt)
-          void enqueueAutomation(automation, { trigger: 'catchup', coalescedCount }).catch(logEnqueueFailure)
+          if ((await automationRootDecision(routeCtx, automation)).kind !== 'cross') {
+            void enqueueAutomation(automation, { trigger: 'catchup', coalescedCount }).catch(logEnqueueFailure)
+          }
           continue
         }
         await appendRun(routeCtx.profileDir, automation.id, {

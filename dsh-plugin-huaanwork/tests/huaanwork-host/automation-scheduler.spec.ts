@@ -319,7 +319,29 @@ test('missed skip records a run, run-once catchup enqueues, cross-root catchup d
 
   expect(runEvents(h.events, 'automation/run-start', remote.id)).toHaveLength(0)
   expect(await recentRuns(h.profileDir, remote.id)).toEqual([])
-  expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBe(stale)
+  expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBeGreaterThan(stale)
+  expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
+})
+
+test('cross-root run-once catchup emits missed once, advances nextRunAt, and does not enqueue', async () => {
+  useTick(20)
+  const h = makeHarness()
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hw-sched-other-'))
+  dirs.push(elsewhere)
+  const other = await createProject(h.profileDir, { root: elsewhere, name: '别处' })
+  const remote = await makeTask(h.profileDir, { projectId: other.id, name: '跨根补跑一次', missedPolicy: 'run-once' })
+  const stale = Date.now() - MISSED_GRACE_MS - 5_000
+  await arm(h.profileDir, remote.id, stale)
+  start(h)
+
+  await poll(() => runEvents(h.events, 'automation/missed', remote.id).length === 1)
+  const advanced = (await findAutomation(h.profileDir, remote.id)).nextRunAt
+  expect(advanced).toBeGreaterThan(stale)
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(runEvents(h.events, 'automation/missed', remote.id)).toHaveLength(1)
+  expect(runEvents(h.events, 'automation/run-start', remote.id)).toHaveLength(0)
+  expect(await recentRuns(h.profileDir, remote.id)).toEqual([])
+  expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBe(advanced)
   expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
 })
 
