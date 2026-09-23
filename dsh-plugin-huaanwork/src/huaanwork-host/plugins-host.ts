@@ -75,7 +75,8 @@ export interface PluginMutationContext {
 
 /**
  * `{ bundles }` 必含。`restarting` 只在用户确认重启时出现。
- * 读不到安装后清单时仍回上一份非空 bundles,并用 `message` 注明,不静默交空数组。
+ * 目录安装能从 package.json name 推断出新清单时,确认体只有这份清单,不带 message。
+ * message 只在确认体确实是未改过的上一份清单(tarball,或名字已经在清单里)或档案回落清单时出现。
  */
 export type PluginMutationResult = { bundles: string[]; restarting?: true; message?: string }
 
@@ -249,13 +250,22 @@ function bundlesAfterAdd(
 ): { bundles: string[]; message?: string } {
   const after = readBundlesAfter(routeCtx, 'add')
   if (after !== undefined && after.length > 0) return { bundles: after }
-  const appended = packageName !== undefined && !before.includes(packageName)
-  const inferred = appended && packageName !== undefined ? [...before, packageName] : before
-  const message = appended
-    ? 'could not read a non-empty installed bundle list; inferred the added package onto the previous list'
-    : 'could not read a non-empty installed bundle list; returning the previous list'
-  routeCtx.logger(`plugin add: ${message}`)
-  return { bundles: nonEmptyBundles(routeCtx, inferred, before, 'add'), message }
+  if (packageName !== undefined && !before.includes(packageName)) {
+    routeCtx.logger('plugin add: post-install bundle list empty; inferred the added package onto the previous list')
+    return { bundles: [...before, packageName] }
+  }
+  if (before.length > 0) {
+    const message = 'could not read a non-empty installed bundle list; returning the previous list'
+    routeCtx.logger(`plugin add: ${message}`)
+    return { bundles: [...before], message }
+  }
+  const fallback = fallbackProfileBundles()
+  if (fallback.length > 0) {
+    const message = 'could not read a non-empty installed bundle list; returning the profile fallback'
+    routeCtx.logger(`plugin add: ${message}`)
+    return { bundles: fallback, message }
+  }
+  throw new PluginCommandError(500, 'plugin-error', 'plugin add: bundle list is empty')
 }
 
 function bundlesAfterRemove(

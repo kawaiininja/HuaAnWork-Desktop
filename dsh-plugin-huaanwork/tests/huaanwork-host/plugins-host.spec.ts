@@ -162,7 +162,7 @@ describe('plugin add/remove', () => {
     expect(result).toEqual({ bundles: [...BASE_BUNDLES, 'demo-plugin'], restarting: true })
   })
 
-  test('确认时读不到新清单则回安装前清单,不回空数组', async () => {
+  test('目录安装推断出新名字时确认体不带 message', async () => {
     const profileDir = makeHome()
     writeProfile(profileDir, BASE_BUNDLES)
     const pluginDir = writePluginDir(makeHome(), 'demo-plugin')
@@ -173,12 +173,48 @@ describe('plugin add/remove', () => {
 
     const result = await addPlugin(ctx, pluginDir)
 
-    expect(result).toEqual({
-      bundles: [...BASE_BUNDLES, 'demo-plugin'],
-      restarting: true,
-      message: 'could not read a non-empty installed bundle list; inferred the added package onto the previous list',
-    })
-    expect(result.bundles).not.toEqual([])
+    expect(result).toEqual({ bundles: [...BASE_BUNDLES, 'demo-plugin'], restarting: true })
+    expect(result).not.toHaveProperty('message')
+  })
+
+  test('读不到新清单且无法推断时注明 message,不回空数组', async () => {
+    const profileDir = makeHome()
+    writeProfile(profileDir, BASE_BUNDLES)
+    const tarball = join(makeHome(), 'demo.tgz')
+    writeFileSync(tarball, 'not-a-real-tarball')
+    const previous = makeCtx(profileDir, () => {
+      writeProfile(profileDir, [])
+      return completedHandle()
+    }, true)
+
+    const unchanged = await addPlugin(previous, tarball)
+
+    expect(unchanged.restarting).toBe(true)
+    expect(unchanged.bundles).toEqual(BASE_BUNDLES)
+    expect(unchanged.message).toBe('could not read a non-empty installed bundle list; returning the previous list')
+
+    writeProfile(profileDir, BASE_BUNDLES)
+    const alreadyNamed = writePluginDir(makeHome(), '@deepseek-ai/dsh-base')
+    const already = makeCtx(profileDir, () => {
+      writeProfile(profileDir, [])
+      return completedHandle()
+    }, true)
+    const present = await addPlugin(already, alreadyNamed)
+
+    expect(present.restarting).toBe(true)
+    expect(present.bundles).toEqual(BASE_BUNDLES)
+    expect(present.message).toBe('could not read a non-empty installed bundle list; returning the previous list')
+
+    writeProfile(profileDir, [])
+    const emptyBefore = makeCtx(profileDir, () => {
+      writeProfile(profileDir, [])
+      return completedHandle()
+    }, true)
+    const fallback = await addPlugin(emptyBefore, tarball)
+
+    expect(fallback.restarting).toBe(true)
+    expect(fallback.bundles).toEqual(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
+    expect(fallback.message).toBe('could not read a non-empty installed bundle list; returning the profile fallback')
   })
 
   test('route plugin.add 把单并发冲突映成 409,不排队', async () => {
