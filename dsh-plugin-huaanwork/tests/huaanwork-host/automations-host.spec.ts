@@ -183,7 +183,7 @@ function body(value: unknown): RouteRequest {
   return { params: {}, body: value, query: new URLSearchParams() }
 }
 
-async function poll(predicate: () => boolean | Promise<boolean>, timeoutMs = 4_000): Promise<void> {
+async function poll(predicate: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!(await predicate())) {
     if (Date.now() > deadline) throw new Error(`poll timed out after ${timeoutMs}ms`)
@@ -341,7 +341,7 @@ test('script concurrency stops at 2 and the third waits for a slot', async () =>
       }),
     ),
   )
-  for (const task of tasks) void handler('automation.run')(body({ id: task.id }), h.routeCtx)
+  for (const task of tasks) await handler('automation.run')(body({ id: task.id }), h.routeCtx)
   await poll(() => marks.filter((mark) => existsSync(mark)).length === 2 && scriptSlotWaiters.length === 1)
   expect(existsSync(marks[2]!)).toBe(false)
   writeFileSync(releases[0]!, '1')

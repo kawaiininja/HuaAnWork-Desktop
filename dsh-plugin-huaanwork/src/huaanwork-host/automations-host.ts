@@ -509,6 +509,8 @@ export function enqueueScriptAutomation(automation: AutomationInfo, meta: Automa
   })()
 }
 
+let enqueueGate: Promise<void> = Promise.resolve()
+
 /**
  * 手动触发与调度触发的唯一分派入口。
  * schedule/catchup 跨根:不入队、不执行(保持 due 由调用方负责)。manual 不再次判定。
@@ -519,10 +521,16 @@ export function enqueueAutomation(
 ): Promise<void> {
   if (meta.trigger !== 'manual') {
     const { routeCtx } = requireBound()
-    return automationRootDecision(routeCtx, automation).then((decision) => {
+    let runPromise: Promise<void> | undefined
+    const step = enqueueGate.then(async () => {
+      const decision = await automationRootDecision(routeCtx, automation)
       if (decision.kind === 'cross') return
-      return dispatchEnqueue(automation, meta)
+      runPromise = dispatchEnqueue(automation, meta)
     })
+    enqueueGate = step.catch((error: unknown) => {
+      logFailure(error)
+    })
+    return step.then(() => runPromise)
   }
   return dispatchEnqueue(automation, meta)
 }
@@ -530,3 +538,4 @@ export function enqueueAutomation(
 function dispatchEnqueue(automation: AutomationInfo, meta: AutomationRunMeta): Promise<void> {
   return automation.kind === 'agent' ? enqueueAgentAutomation(automation, meta) : enqueueScriptAutomation(automation, meta)
 }
+
