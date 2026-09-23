@@ -52,20 +52,22 @@ export type SessionRuntimeContext = {
 }
 
 /**
- * 发送侧阻塞源(旧 host.ts:464-501 的 workspaceRoot/userRoot 位移与
- * agentAutomationActive/agentAutomationQueued 计数)。M3 无后台自动化引擎,
- * 各源恒为初始值;检查逻辑逐字保留,M4 调度器接入后由 automation 域写入这里。
+ * 发送侧阻塞源。agent 两源由 automations-host 入队/链尾写入;
+ * workspaceDisplaced 恒 false(方案①,无进程内位移)。
  */
 export const sessionSendBlockers = {
-  /** 旧 `workspaceRoot !== userRoot || restoringUserRoot`(后台任务位移/恢复中)。 */
+  /**
+   * 恒 false。非 P1-4 未收口的恒假死检查,而是 Desktop 无进程内位移的必然结果(方案①,评审 P1-7)。
+   * 自动化执行体不写此源。
+   */
   workspaceDisplaced: false,
-  /** 旧 agentAutomationQueued(入队即 +1,restore 完成后 -1)。 */
+  /** agent 任务入队即 +1,本次 run 链尾完成时 -1。script 不动。 */
   agentAutomationQueued: 0,
-  /** 旧 agentAutomationActive(agent 任务占用运行时的计数)。 */
+  /** agent 任务入队即 +1,本次 run 链尾完成时 -1。script 不动。 */
   agentAutomationActive: 0,
 }
 
-/** 旧 host.ts:484。workspace.open/close 与 session.new 共用;M4 调度器接入后写入 blockers。 */
+/** 旧 host.ts:484。workspace.open/close 与 session.new 共用;agent 队列计数由 automations-host 写入。 */
 export const assertAutomationIdle = (): void => {
   if (sessionSendBlockers.agentAutomationQueued > 0 || sessionSendBlockers.workspaceDisplaced) {
     throw new Error('后台自动化任务运行中，请稍候再试')
@@ -83,7 +85,7 @@ const assertSessionSendable = (): void => {
   if (sessionSendBlockers.agentAutomationActive > 0) throw new Error('后台自动化任务运行中，请稍候再试')
 }
 
-async function sendToAgent(
+export async function sendToAgent(
   ctx: SessionRuntimeContext,
   routeCtx: RouteContext,
   params: unknown,
@@ -412,9 +414,9 @@ export function getAgentsDirectory(): AgentsHost {
   return agentsDirectory
 }
 
-// M4:automation run 归因 —— 旧 host.ts:315-326 的 runPendingApprovals(approval/asked
-// 事件带运行会话 id 时记入该 runId 的集合,运行结束只拒绝本运行自己产生的审批)
-// 属自动化引擎,M4 随 automations 域移植;此处为事件归因挂点。
+// 审批归因在 automations-host.ingestAutomationEvent(approval/asked 的 sessionId → runId)。
+// sendToAgent 不调用 assertSessionSendable:用户 session.send/cancel 在 handler 上把关,
+// 自动化执行体直调本函数以绕过该门。
 
 // —— route handlers(旧 host.ts:978-1012 的 case 语义;错误消息逐字)——
 

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { readdir, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 
-import type { AutomationInfo, AutomationSchedule } from '../client-huaanwork/rpc-types.ts'
+import type { AutomationInfo, AutomationSchedule, RunSummary } from '../client-huaanwork/rpc-types.ts'
 import { isAutomationSessionEntry } from './automation-session-ids.ts'
 import { nextFireAfter, parseCron, periodOf } from './schedule.ts'
 import {
@@ -376,6 +376,48 @@ export async function advanceNextRunAt(storageRoot: string, automationId: string
     automation.nextRunAt = nextRunAt
     await writeAutomationRegistry(storageRoot, registry)
   })
+}
+
+/** 产出截断:入库前统一上限(旧 automations.ts OUTPUT_MAX_CHARS)。 */
+export const OUTPUT_MAX_CHARS = 32 * 1024
+
+export function clipOutput(output: string): string {
+  return output.length <= OUTPUT_MAX_CHARS ? output : `${output.slice(0, OUTPUT_MAX_CHARS)}…（已截断）`
+}
+
+/** 一次运行结束后回写任务状态;非 manual 无论成败都推进 nextRunAt。任务不存在时静默返回。 */
+export async function markAutomation(
+  storageRoot: string,
+  automationId: string,
+  status: {
+    lastRunAt: number
+    lastStatus: 'ok' | 'error' | 'running'
+    nextRunAt?: number
+  },
+): Promise<void> {
+  return withAutomationRegistryLock(async () => {
+    const registry = await readAutomationRegistry(storageRoot)
+    const automation = registry.automations.find((item) => item.id === automationId)
+    if (!automation) return
+    automation.lastRunAt = status.lastRunAt
+    automation.lastStatus = status.lastStatus
+    if (automation.schedule.kind !== 'manual') {
+      const next = status.nextRunAt ?? nextFireAfter(automation.schedule, status.lastRunAt)
+      if (next === undefined) delete automation.nextRunAt
+      else automation.nextRunAt = next
+    }
+    await writeAutomationRegistry(storageRoot, registry)
+  })
+}
+
+/** 追加一条运行记录;超过 RUNS_LIMIT 时丢弃最旧的(整文件重写)。 */
+export async function appendRun(storageRoot: string, automationId: string, run: RunSummary): Promise<void> {
+  const path = runsFile(storageRoot, automationId)
+  const existing = await recentRuns(storageRoot, automationId)
+  const clipped: RunSummary = { ...run, output: clipOutput(run.output) }
+  const lines = [...existing, clipped].slice(-RUNS_LIMIT).map((entry) => JSON.stringify(entry))
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, `${lines.join('\n')}\n`, 'utf8')
 }
 
 /**

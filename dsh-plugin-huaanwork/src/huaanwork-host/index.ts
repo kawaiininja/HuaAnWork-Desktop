@@ -5,6 +5,7 @@ import type { ConfirmedRestartRuntime } from '../host-runtime-bridge.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
 import { installNetworkGate } from './net-gate.ts'
+import { bindAutomationRuntime, type AutomationRuntime } from './automations-host.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
 import { createAgentsHost } from './agents-host.ts'
 import { setAgentsDirectory } from './sessions.ts'
@@ -44,6 +45,8 @@ export function apply(ctx: Context, config: HuaanworkHostConfig) {
     }
     return runtime.requestConfirmedRestart()
   })
+  // 执行体与 collector 接线。调度 tick 不在本任务启动;Task 5 调用同一 enqueueAutomation。
+  bindAutomationRuntime(ctx as unknown as AutomationRuntime, routeCtx)
   // 智能体目录真实接线(Task 10):fetch 公用机目录 + 本地 endpoints,存储根 = profileDir;
   // 目录快照同步进 huaanworkAgentCatalog holder(agent-invoke 的 @agent 分发消费)。
   const agentsHost = createAgentsHost({

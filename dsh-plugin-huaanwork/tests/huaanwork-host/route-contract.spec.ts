@@ -65,8 +65,6 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
 export const METHODS_501 = new Set([
   'plugin.add',
   'plugin.remove',
-  'automation.run',
-  'automation.pruneSessions',
 ])
 
 /** 客户端 54 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
@@ -163,9 +161,9 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.create': ['automation'],
   'automation.update': ['automation'],
   'automation.remove': ['removed'],
-  'automation.run': ['queued', 'runId'], // 501
+  'automation.run': ['queued', 'runId'],
   'automation.runs': ['runs'],
-  'automation.pruneSessions': ['removed'], // 501
+  'automation.pruneSessions': ['removed'],
   'automation.templates': ['templates'],
 
   // task
@@ -274,9 +272,9 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'automation.create': ['automation'],
   'automation.update': ['automation'],
   'automation.remove': ['removed'],
-  'automation.run': ['error'],
+  'automation.run': ['queued', 'runId'],
   'automation.runs': ['runs'],
-  'automation.pruneSessions': ['error'],
+  'automation.pruneSessions': ['removed'],
   'automation.templates': ['templates'],
 
   // task
@@ -335,11 +333,11 @@ describe('Route Contract Cross-Test (D6)', () => {
     expect(clientMethods).toEqual(serverMethods)
   })
 
-  test('50 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
+  test('52 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const [method, clientRoute] of Object.entries(ROUTES)) {
-      if (METHODS_501.has(method)) continue // 7 条 501 在专用测试中检验
+      if (METHODS_501.has(method)) continue // 2 条 501 在专用测试中检验
 
       const serverRoute = serverRouteMap.get(method)
       expect(serverRoute).toBeDefined()
@@ -363,7 +361,7 @@ describe('Route Contract Cross-Test (D6)', () => {
     }
   })
 
-  test('4 条 501 路由契约比对: 服务端返回 error 信封, 客户端真实必含键与 TARGET_BUSINESS_REQUIRED_KEYS 严格双向相等', () => {
+  test('2 条 501 路由契约比对: 服务端返回 error 信封, 客户端真实必含键与 TARGET_BUSINESS_REQUIRED_KEYS 严格双向相等', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const method of METHODS_501) {
@@ -389,7 +387,7 @@ describe('Route Contract Cross-Test (D6)', () => {
 
   test('16 个 501 路由预留业务键 TARGET_BUSINESS_REQUIRED_KEYS 精确核验 (评审 P3-4 / 旧 host.ts 口径)', () => {
     expect(Object.keys(TARGET_BUSINESS_REQUIRED_KEYS).length).toBe(16)
-    expect(METHODS_501.size).toBe(4)
+    expect(METHODS_501.size).toBe(2)
 
     // 逐项严格断言评审审查要求的真实键名:
     expect(TARGET_BUSINESS_REQUIRED_KEYS['plugin.add']).toEqual(['bundles'])

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -26,6 +27,7 @@ import { listBundledSkills, readSkillToggles, SYSTEM_SKILLS } from '../huaanwork
 import {
   RUNS_LIMIT,
   RUN_STATUSES,
+  findAutomation,
   listAutomations,
   listProjects,
   listTasks,
@@ -56,6 +58,7 @@ import {
   authStatus,
 } from './auth.ts'
 import {
+  assertAutomationIdle,
   sessionAnswerApproval,
   sessionCancel,
   sessionList,
@@ -70,9 +73,11 @@ import { closeWorkspace, openWorkspace } from './workspace.ts'
 import {
   createAutomation,
   normalizeAutomationInput,
+  pruneAutomationSessions,
   removeAutomation,
   updateAutomation,
 } from './automations-store.ts'
+import { agentIdle, automationCollector, automationRootDecision, enqueueAutomation } from './automations-host.ts'
 
 export interface RouteRequest {
   params: Record<string, string>
@@ -509,7 +514,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     }),
   }, // Task 10
 
-  // automation(读路径与 create/update/remove 真实;run/pruneSessions 仍属后续任务)
+  // automation(读路径、注册表写、手动 run 与 pruneSessions 真实;调度 tick 属 Task 5)
   {
     method: 'automation.list',
     http: 'GET',
@@ -574,7 +579,25 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { removed: true }
     }),
   }, // Task 3 (M4)
-  { method: 'automation.run', http: 'POST', path: '/huaanwork/automation/run', handler: notImplemented('automation.run') }, // M4
+  {
+    method: 'automation.run',
+    http: 'POST',
+    path: '/huaanwork/automation/run',
+    // 旧 host.ts:1100-1114,方案①替换跨项目热切换。
+    // fire-and-forget:不得 await 执行体,否则堵住 handler 并绕过 automationTail。
+    handler: workspaceRoute(async (req, ctx) => {
+      assertAutomationIdle()
+      if (!(await agentIdle(ctx))) throw new Error('当前对话仍在进行，请先完成或停止后再运行任务')
+      const id = bodyParam(req.body, 'id')
+      if (!id) throw new Error('automation.run requires params.id')
+      const automation = await findAutomation(ctx.profileDir, id)
+      const decision = await automationRootDecision(ctx, automation)
+      if (decision.kind === 'cross') throw new Error(decision.message)
+      const runId = randomUUID()
+      void enqueueAutomation(automation, { trigger: 'manual', runId })
+      return { queued: true, runId }
+    }),
+  }, // Task 4 (M4)
   {
     method: 'automation.runs',
     http: 'GET',
@@ -594,7 +617,21 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { runs: filtered.slice(-limit) }
     }),
   }, // Task 10 (文件 I/O 读任务运行日志)
-  { method: 'automation.pruneSessions', http: 'POST', path: '/huaanwork/automation/pruneSessions', handler: notImplemented('automation.pruneSessions') }, // M4
+  {
+    method: 'automation.pruneSessions',
+    http: 'POST',
+    path: '/huaanwork/automation/pruneSessions',
+    // keep = collector 中的在途会话 ∪ 每任务最近 50 条 runs 的 sessionId
+    // (runs 侧由 pruneAutomationSessions 并入)。会话目录在 dshHome/sessions。
+    handler: storeRoute(async (_req, ctx) => {
+      const removed = await pruneAutomationSessions(
+        ctx.profileDir,
+        new Set(automationCollector.keys()),
+        join(ctx.dshHome, 'sessions'),
+      )
+      return { removed }
+    }),
+  }, // Task 4 (M4)
   { method: 'automation.templates', http: 'GET', path: '/huaanwork/automation/templates', handler: storeRoute(async () => ({ templates: await readAutomationTemplates() })) }, // Task 10 (文件 I/O 读模板文件)
 
   // task
