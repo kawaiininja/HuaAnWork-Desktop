@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
@@ -165,6 +165,27 @@ test("bridge diff snapshot includes untracked new files", async () => {
     assert.equal(writes.length, 0);
   } finally {
     process.stdout.write = originalWrite;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("write lands on disk and the diff snapshot is nonempty", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const root = mkdtempSync(join(tmpdir(), "huaanwork-bridge-write-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "-q", "--template=/dev/null"], { cwd: root }).status, 0);
+    const { ctx, listeners, emitted } = createCtx(root);
+    apply(ctx as never);
+    const execute = listeners["tools/execute"]?.[0] as Execute;
+    await execute({ name: "write", callId: "w-land", arguments: { path: "a.txt", content: "hi" } }, async () => {
+      writeFileSync(join(root, "a.txt"), "hi");
+      return { isError: false, content: [{ type: "text", text: "ok" }] };
+    });
+    assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "hi");
+    const diff = emitted.find((event) => (event as { event?: string }).event === "diff") as { text?: string };
+    assert.ok(diff?.text && diff.text.length > 0, "diff snapshot must be nonempty");
+    assert.ok(diff.text.includes("a.txt"), diff.text);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

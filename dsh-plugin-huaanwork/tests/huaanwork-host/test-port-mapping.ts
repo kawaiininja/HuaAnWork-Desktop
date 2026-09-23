@@ -15,8 +15,8 @@ export const testPortMapping: TestPortRow[] = [
   {
     file: 'loop.test.ts',
     title: 'write lands and diff is nonempty',
-    label: '已覆盖',
-    evidence: 'tests/huaanwork-guardrails/bridge.spec.ts:138',
+    label: '本任务补',
+    evidence: 'tests/huaanwork-guardrails/bridge.spec.ts:186',
   },
   {
     file: 'loop.test.ts',
@@ -39,8 +39,8 @@ export const testPortMapping: TestPortRow[] = [
   {
     file: 'loop.test.ts',
     title: 'explore subagent bash is denied and parent only sees the conclusion',
-    label: '已覆盖',
-    evidence: 'tests/huaanwork-guardrails/skills.spec.ts:213',
+    label: '本任务补',
+    evidence: 'tests/huaanwork-guardrails/skills.spec.ts:243',
   },
   {
     file: 'loop.test.ts',
@@ -81,8 +81,8 @@ export const testPortMapping: TestPortRow[] = [
   {
     file: 'loop.test.ts',
     title: 'baseline without @: no mcp__* in agentToolNames and explore subagent has no call_host_tool',
-    label: '已覆盖',
-    evidence: 'tests/huaanwork-guardrails/skills.spec.ts:213',
+    label: '本任务补',
+    evidence: 'tests/huaanwork-guardrails/skills.spec.ts:269',
   },
   {
     file: 'loop.test.ts',
@@ -129,8 +129,8 @@ export const testPortMapping: TestPortRow[] = [
   {
     file: 'automations-host.test.ts',
     title: 'automation.templates returns the six built-in templates and each creates successfully',
-    label: '已覆盖',
-    evidence: 'tests/huaanwork-host/stores.spec.ts:303',
+    label: '本任务补',
+    evidence: 'tests/huaanwork-host/automation-templates.spec.ts:21',
   },
   {
     file: 'automations-host.test.ts',
@@ -237,8 +237,8 @@ export const testPortMapping: TestPortRow[] = [
   {
     file: 'automations-host.test.ts',
     title: 'stream network gate blocks public endpoints unless allow_network is on',
-    label: '已覆盖',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:135',
+    label: '本任务补',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:373',
   },
   {
     file: 'automations-host.test.ts',

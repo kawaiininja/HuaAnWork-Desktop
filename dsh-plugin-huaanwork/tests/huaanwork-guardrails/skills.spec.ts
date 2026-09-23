@@ -51,24 +51,26 @@ function createTools(names: readonly string[]): ToolsService & { visible: Schema
   return tools;
 }
 
-function createHarness(options?: { childNames?: readonly string[] }) {
+function createHarness(options?: { childNames?: readonly string[]; parentNames?: readonly string[] }) {
   const skills: SkillRegistration[] = [];
   const events: Record<string, ((payload: never, next?: () => Promise<unknown>, extra?: unknown) => unknown)[]> = {};
-  const parentTools = createTools([
-    "read",
-    "read_file",
-    "glob",
-    "grep",
-    "edit",
-    "write",
-    "str_replace_editor",
-    "bash",
-    "pwsh",
-    "skill",
-    "subagent",
-    "git_push",
-    "web_search",
-  ]);
+  const parentTools = createTools(
+    options?.parentNames ?? [
+      "read",
+      "read_file",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "str_replace_editor",
+      "bash",
+      "pwsh",
+      "skill",
+      "subagent",
+      "git_push",
+      "web_search",
+    ],
+  );
   const childTools = createTools(
     options?.childNames ?? [
       "read",
@@ -222,6 +224,50 @@ test("explore goes through official subagent restrict and denies bash even if th
   assert.equal((await harness.callTool(harness.child, "bash", { command: "npm test" })).kind, "deny");
   assert.equal((await harness.callTool(harness.child, "bash", { command: "ls" })).kind, "deny");
   assert.ok(harness.guardReason(harness.childTools, "bash", { command: "npm test" }));
+});
+
+test("explore child bash is denied and the parent only sees the conclusion", async () => {
+  const harness = createHarness();
+  const explore = harness.skills.find((skill) => skill.name === "explore");
+  assert.match(explore?.content ?? "", /Return only the conclusion to the parent/);
+  assert.match(explore?.content ?? "", /Intermediate steps stay in the child/);
+  await harness.invokeSkill(harness.parent, "explore");
+  await harness.invokeSubagent(harness.parent);
+  const ran: string[] = [];
+  const denied = await harness.callTool(harness.child, "bash", { command: "ls" });
+  assert.equal(denied.kind, "deny");
+  if (denied.kind !== "deny") ran.push("secret-intermediate");
+  assert.equal(ran.length, 0, "explore child must not execute bash");
+  const parentView = `${explore?.content ?? ""}\n${denied.reason ?? ""}`;
+  assert.equal(parentView.includes("secret-intermediate"), false);
+  assert.match(parentView, /conclusion/i);
+});
+
+test("baseline without @ has no mcp__* and explore has no call_host_tool", async () => {
+  const harness = createHarness({
+    childNames: [
+      "read",
+      "read_file",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "bash",
+      "call_host_tool",
+      "mcp__mock-mcp__calc",
+    ],
+  });
+  const parentNames = harness.parentTools.schemas().map((schema) => schema.name);
+  assert.equal(
+    parentNames.some((name) => name.startsWith("mcp__")),
+    false,
+    "no mcp__* in agentToolNames when @ is not attached",
+  );
+  await harness.invokeSkill(harness.parent, "explore");
+  await harness.invokeSubagent(harness.parent);
+  const exploreNames = harness.childTools.visible.map((schema) => schema.name);
+  assert.equal(exploreNames.includes("call_host_tool"), false);
+  assert.equal(exploreNames.some((name) => name.startsWith("mcp__")), false);
 });
 
 test("explore has no main-session fallback that skips restrict", async () => {
