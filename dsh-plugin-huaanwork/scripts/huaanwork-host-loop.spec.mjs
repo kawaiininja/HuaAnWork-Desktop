@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -76,6 +76,7 @@ let mountedSpec
 let webPort
 let origin
 let previousDshHome
+let previousTickMs
 let profileDir
 
 /** @type {unknown[]} 进程内直接可达的 WS 事件帧(bridge/approval 经 hub 广播)。 */
@@ -150,6 +151,9 @@ async function bootSharedHost() {
 
   previousDshHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
+  // test-only:毫秒级 tick。after() 与 DSH_HOME 一起清回。值为 0 才会关掉调度器。
+  previousTickMs = process.env.HUAANWORK_AUTOMATION_TICK_MS
+  process.env.HUAANWORK_AUTOMATION_TICK_MS = '50'
 
   const packageRoot = new URL('../', import.meta.url)
   const pnpmBinPath = fileURLToPathLocal(new URL('node_modules/pnpm/bin/pnpm.mjs', packageRoot))
@@ -179,16 +183,19 @@ async function bootSharedHost() {
     ws.once('open', resolve)
     ws.once('error', reject)
   })
-  ws.on('message', (data) => {
-    let event
-    try {
-      event = JSON.parse(data.toString())
-    } catch {
-      event = { event: 'unparseable', raw: data.toString() }
-    }
-    events.push(event)
-    if (process.env.LOOP_DEBUG) console.error(`[loop-spec] ws event: ${data.toString()}`)
-  })
+  trackEventSocket(ws)
+  // 无 due 任务时 tick 只读注册表:boot 后 1s 内不应有 automation 事件或注册表写入。
+  await sleep(1_000)
+  assert.equal(
+    events.some((event) => typeof event?.event === 'string' && event.event.startsWith('automation/')),
+    false,
+    'boot 后 1s 内无 automation tick 副作用',
+  )
+  const registryPath = join(profileDir, 'automations.json')
+  if (existsSync(registryPath)) {
+    const registry = JSON.parse(readFileSync(registryPath, 'utf8'))
+    assert.deepEqual(registry.automations ?? [], [], 'boot 后 1s 内 tick 不得写入自动化注册表')
+  }
 }
 
 after(async () => {
@@ -201,6 +208,8 @@ after(async () => {
     await stub?.close()
     if (previousDshHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousDshHome
+    if (previousTickMs === undefined) delete process.env.HUAANWORK_AUTOMATION_TICK_MS
+    else process.env.HUAANWORK_AUTOMATION_TICK_MS = previousTickMs
     if (base !== undefined) rmSync(base, { recursive: true, force: true })
   }
 })
@@ -359,6 +368,102 @@ function sleep(ms) {
   return new Promise((done) => setTimeout(done, ms))
 }
 
+function trackEventSocket(socket) {
+  socket.on('message', (data) => {
+    let event
+    try {
+      event = JSON.parse(data.toString())
+    } catch {
+      event = { event: 'unparseable', raw: data.toString() }
+    }
+    events.push(event)
+    if (process.env.LOOP_DEBUG) console.error(`[loop-spec] ws event: ${data.toString()}`)
+  })
+}
+
+/** generation 重启后旧 WS 已死。调度用例重连到当前 ctx,并刷新 origin。 */
+async function reconnectEvents() {
+  try { ws?.close() } catch { /* 旧 socket 可能已随 fiber dispose 关闭 */ }
+  webPort = ctx.webServer.port
+  origin = `http://127.0.0.1:${String(webPort)}`
+  const socket = new WebSocket(`ws://127.0.0.1:${String(webPort)}/huaanwork/events`, {
+    headers: { [rendererHeader.name]: rendererHeader.value },
+  })
+  await new Promise((resolve, reject) => {
+    socket.once('open', resolve)
+    socket.once('error', reject)
+  })
+  trackEventSocket(socket)
+  ws = socket
+  drainEvents()
+}
+
+function writeAutomations(automations) {
+  const path = join(profileDir, 'automations.json')
+  const tmp = `${path}.tmp-${randomBytes(4).toString('hex')}`
+  writeFileSync(tmp, `${JSON.stringify({ automations }, null, 2)}\n`)
+  renameSync(tmp, path)
+}
+
+async function automationRow(id) {
+  const listed = await get('/huaanwork/automation/list')
+  return {
+    automation: listed.automations.find((item) => item.id === id),
+    runs: listed.runs?.[id] ?? [],
+  }
+}
+
+async function pollAutomation(id, predicate, label) {
+  const deadline = Date.now() + EVENT_WAIT_MS
+  let last
+  while (Date.now() < deadline) {
+    last = await automationRow(id)
+    if (predicate(last)) return last
+    await sleep(25)
+  }
+  throw new Error(`timed out waiting for ${label}; row=${JSON.stringify(last).slice(0, 2_000)}`)
+}
+
+function stubSaw(pattern) {
+  return stub.requests.some((body) => {
+    const messages = Array.isArray(body?.messages) ? body.messages : []
+    return messages.some((message) => typeof message?.content === 'string' && pattern.test(message.content))
+  })
+}
+
+async function otherProject(currentRoot) {
+  const listed = await get('/huaanwork/project/list')
+  const found = listed.projects.find((item) => item.root !== currentRoot)
+  if (found) return found
+  const otherRoot = join(base, 'scheduler-other')
+  mkdirSync(otherRoot, { recursive: true })
+  const created = await post('/huaanwork/project/create', { root: otherRoot, name: 'scheduler-other' })
+  return created.project
+}
+
+function automationFixture(fields) {
+  const now = Date.now()
+  const kind = fields.kind ?? 'script'
+  return {
+    id: fields.id,
+    projectId: fields.projectId ?? null,
+    name: fields.name ?? fields.id,
+    kind,
+    schedule: fields.schedule ?? { kind: 'interval', minutes: 1 },
+    ...(kind === 'agent'
+      ? { prompt: fields.prompt ?? '请自我介绍' }
+      : { command: fields.command ?? 'echo ok' }),
+    widget: false,
+    enabled: fields.enabled !== false,
+    createdAt: fields.createdAt ?? now - 60_000,
+    ...(fields.nextRunAt !== undefined ? { nextRunAt: fields.nextRunAt } : {}),
+    ...(fields.lastRunAt !== undefined ? { lastRunAt: fields.lastRunAt } : {}),
+    ...(fields.lastStatus !== undefined ? { lastStatus: fields.lastStatus } : {}),
+    ...(fields.expiresAt !== undefined ? { expiresAt: fields.expiresAt } : {}),
+    ...(fields.missedPolicy !== undefined ? { missedPolicy: fields.missedPolicy } : {}),
+  }
+}
+
 function mainAgent() {
   const agents = typeof ctx.agents?.list === 'function' ? ctx.agents.list() : []
   const agent = agents.find((entry) => entry?.id === 'huaanwork') ?? agents[0]
@@ -512,4 +617,328 @@ test('workspace pendingRoot:project.open 经 route 驱动写盘,二次组合 + b
     {},
     'short-circuit must not write pendingRoot',
   )
+})
+
+test('scheduler:due 任务由 tick 经执行体跑完(stub LLM)', { timeout: TEST_TIMEOUT_MS }, async () => {
+  await reconnectEvents()
+  const root = ctx.huaanworkWorkspaceRoot.current
+  const listed = await get('/huaanwork/project/list')
+  const project = listed.projects.find((item) => item.root === root)
+  assert.ok(project, `current workspace ${root} is not a project`)
+  const now = Date.now()
+  writeAutomations([
+    automationFixture({
+      id: 'due-agent',
+      projectId: project.id,
+      kind: 'agent',
+      prompt: '请自我介绍',
+      nextRunAt: now - 1_000,
+      createdAt: now - 120_000,
+    }),
+  ])
+  try {
+    const ended = await waitForEvent(
+      (event) => event?.event === 'automation/run-end' && event.automationId === 'due-agent',
+      'due-agent run-end',
+    )
+    assert.equal(ended.ok, true)
+    const row = await automationRow('due-agent')
+    assert.equal(row.automation?.lastStatus, 'ok')
+    assert.equal(row.runs.at(-1)?.trigger, 'schedule')
+    assert.equal(row.runs.at(-1)?.status, 'ok')
+    assert.ok(stubSaw(/<automation-fire[^>]*trigger="schedule"/), 'stub LLM saw the schedule envelope')
+    assert.equal(ctx.huaanworkWorkspaceRoot.current, root, 'tick must not switch workspace')
+  } finally {
+    writeAutomations([])
+  }
+})
+
+test('scheduler:错过宽限记 missed 并推进,不执行', { timeout: TEST_TIMEOUT_MS }, async () => {
+  await reconnectEvents()
+  const root = ctx.huaanworkWorkspaceRoot.current
+  const listed = await get('/huaanwork/project/list')
+  const project = listed.projects.find((item) => item.root === root)
+  assert.ok(project)
+  const other = await otherProject(root)
+  const now = Date.now()
+  const sameNext = now - 11 * 60_000
+  const crossNext = now - 11 * 60_000
+  writeAutomations([
+    automationFixture({
+      id: 'missed-same',
+      projectId: project.id,
+      nextRunAt: sameNext,
+      createdAt: now - 86_400_000,
+    }),
+    automationFixture({
+      id: 'missed-cross',
+      projectId: other.id,
+      nextRunAt: crossNext,
+      createdAt: now - 86_400_000 + 1,
+    }),
+  ])
+  try {
+    await waitForEvent(
+      (event) => event?.event === 'automation/missed' && event.automationId === 'missed-same',
+      'missed-same event',
+    )
+    await waitForEvent(
+      (event) => event?.event === 'automation/missed' && event.automationId === 'missed-cross',
+      'missed-cross event',
+    )
+    const same = await pollAutomation(
+      'missed-same',
+      (row) => row.runs.some((run) => run.status === 'missed') && row.automation?.nextRunAt > Date.now(),
+      'same-root missed record',
+    )
+    const cross = await pollAutomation(
+      'missed-cross',
+      (row) => row.runs.some((run) => run.status === 'missed') && row.automation?.nextRunAt > Date.now(),
+      'cross-root missed record',
+    )
+    assert.equal(same.runs.filter((run) => run.status === 'missed').length, 1)
+    assert.equal(same.automation.enabled, true)
+    assert.ok(same.automation.nextRunAt > Date.now())
+    assert.equal(cross.runs.filter((run) => run.status === 'missed').length, 1)
+    assert.equal(
+      events.filter((event) => event?.event === 'automation/run-start' && (event.automationId === 'missed-same' || event.automationId === 'missed-cross')).length,
+      0,
+      'skip policy must not execute',
+    )
+  } finally {
+    writeAutomations([])
+  }
+})
+
+test('scheduler:run-once catchup 同根入队,跨根顺延不入队', { timeout: TEST_TIMEOUT_MS }, async () => {
+  await reconnectEvents()
+  const root = ctx.huaanworkWorkspaceRoot.current
+  const listed = await get('/huaanwork/project/list')
+  const project = listed.projects.find((item) => item.root === root)
+  assert.ok(project)
+  const other = await otherProject(root)
+  const now = Date.now()
+  const stale = now - 3 * 86_400_000 + 60_000
+  writeAutomations([
+    automationFixture({
+      id: 'catchup-same',
+      projectId: project.id,
+      kind: 'agent',
+      prompt: '请自我介绍',
+      schedule: { kind: 'daily', time: '09:00' },
+      missedPolicy: 'run-once',
+      nextRunAt: stale,
+      createdAt: now - 4 * 86_400_000,
+    }),
+    automationFixture({
+      id: 'catchup-cross',
+      projectId: other.id,
+      kind: 'script',
+      command: 'echo should-not-run',
+      schedule: { kind: 'daily', time: '09:00' },
+      missedPolicy: 'run-once',
+      nextRunAt: stale,
+      createdAt: now - 4 * 86_400_000 + 1,
+    }),
+  ])
+  try {
+    const ended = await waitForEvent(
+      (event) => event?.event === 'automation/run-end' && event.automationId === 'catchup-same',
+      'catchup-same run-end',
+    )
+    assert.equal(ended.ok, true)
+    const same = await automationRow('catchup-same')
+    const run = same.runs.at(-1)
+    assert.equal(run?.trigger, 'catchup')
+    assert.equal(run?.coalescedCount, 3)
+    assert.equal(run?.status, 'ok')
+    assert.ok(same.automation?.nextRunAt > Date.now(), 'catchup advances nextRunAt')
+    assert.ok(stubSaw(/trigger="catchup"/), 'stub LLM saw the catchup envelope')
+    await waitForEvent(
+      (event) => event?.event === 'automation/missed' && event.automationId === 'catchup-cross',
+      'cross-root catchup still emits missed',
+    )
+    await sleep(200)
+    const cross = await automationRow('catchup-cross')
+    assert.equal(cross.runs.length, 0, 'cross-root catchup must not run')
+    assert.equal(cross.automation?.nextRunAt, stale, 'cross-root catchup stays missed')
+    assert.equal(cross.automation?.enabled, true)
+    assert.equal(
+      events.filter((event) => event?.event === 'automation/run-start' && event.automationId === 'catchup-cross').length,
+      0,
+    )
+  } finally {
+    writeAutomations([])
+  }
+})
+
+test('scheduler:expired 置停且不执行', { timeout: TEST_TIMEOUT_MS }, async () => {
+  await reconnectEvents()
+  const root = ctx.huaanworkWorkspaceRoot.current
+  const listed = await get('/huaanwork/project/list')
+  const project = listed.projects.find((item) => item.root === root)
+  assert.ok(project)
+  const now = Date.now()
+  writeAutomations([
+    automationFixture({
+      id: 'expired-1',
+      projectId: project.id,
+      command: 'echo expired',
+      nextRunAt: now - 1_000,
+      expiresAt: now - 1_000,
+      createdAt: now - 120_000,
+    }),
+  ])
+  try {
+    const row = await pollAutomation('expired-1', (item) => item.automation?.enabled === false, 'expired disabled')
+    assert.equal(row.runs.length, 0)
+    assert.equal(
+      events.filter((event) => event?.event === 'automation/run-start' && event.automationId === 'expired-1').length,
+      0,
+    )
+  } finally {
+    writeAutomations([])
+  }
+})
+
+test('scheduler:once 错过宽限后自停', { timeout: TEST_TIMEOUT_MS }, async () => {
+  await reconnectEvents()
+  const root = ctx.huaanworkWorkspaceRoot.current
+  const listed = await get('/huaanwork/project/list')
+  const project = listed.projects.find((item) => item.root === root)
+  assert.ok(project)
+  const now = Date.now()
+  const at = now - 11 * 60_000
+  writeAutomations([
+    automationFixture({
+      id: 'once-missed',
+      projectId: project.id,
+      schedule: { kind: 'once', at },
+      nextRunAt: at,
+      createdAt: now - 86_400_000,
+    }),
+  ])
+  try {
+    const row = await pollAutomation(
+      'once-missed',
+      (item) => item.automation?.enabled === false && item.runs.some((run) => run.status === 'missed'),
+      'once missed disables itself',
+    )
+    assert.match(row.runs.at(-1).output, /已自动停用/)
+    assert.equal(
+      events.filter((event) => event?.event === 'automation/run-start' && event.automationId === 'once-missed').length,
+      0,
+    )
+  } finally {
+    writeAutomations([])
+  }
+})
+
+test('scheduler:同根 due 按 projectId 分组,跨根与中立顺延,项目已删除仍执行', { timeout: TEST_TIMEOUT_MS }, async () => {
+  await reconnectEvents()
+  const root = ctx.huaanworkWorkspaceRoot.current
+  const listed = await get('/huaanwork/project/list')
+  const project = listed.projects.find((item) => item.root === root)
+  assert.ok(project)
+  const other = await otherProject(root)
+  const now = Date.now()
+  const dueAt = now - 2_000
+  const crossNext = dueAt
+  const neutralNext = dueAt
+  writeAutomations([
+    automationFixture({ id: 'a-1', projectId: project.id, command: 'echo a-1', nextRunAt: dueAt, createdAt: now - 40_000 }),
+    automationFixture({ id: 'm-1', projectId: 'deleted-project', command: 'echo missing', nextRunAt: dueAt, createdAt: now - 30_000 }),
+    automationFixture({ id: 'a-2', projectId: project.id, command: 'echo a-2', nextRunAt: dueAt, createdAt: now - 20_000 }),
+    automationFixture({ id: 'b-1', projectId: other.id, command: 'echo cross', nextRunAt: crossNext, createdAt: now - 10_000 }),
+    automationFixture({ id: 'n-1', projectId: null, command: 'echo neutral', nextRunAt: neutralNext, createdAt: now - 5_000 }),
+  ])
+  try {
+    await pollAutomation('a-1', (row) => row.runs.some((run) => run.ok), 'a-1 ran')
+    await pollAutomation('a-2', (row) => row.runs.some((run) => run.ok), 'a-2 ran')
+    const missing = await pollAutomation(
+      'm-1',
+      (row) => row.runs.some((run) => run.output.includes('任务所属项目不存在')),
+      'deleted project still executes',
+    )
+    assert.equal(missing.runs.at(-1).ok, false)
+    await sleep(250)
+    const cross = await automationRow('b-1')
+    const neutral = await automationRow('n-1')
+    assert.equal(cross.runs.length, 0, 'cross-root due stays queued')
+    assert.equal(cross.automation.nextRunAt, crossNext)
+    assert.equal(cross.automation.enabled, true)
+    assert.equal(neutral.runs.length, 0, 'neutral task defers while workspace is a project root')
+    assert.equal(neutral.automation.nextRunAt, neutralNext)
+    const started = events.flatMap((event) => (
+      event?.event === 'automation/run-start' ? [event.automationId] : []
+    ))
+    const grouped = started.filter((id) => id === 'a-1' || id === 'a-2' || id === 'm-1')
+    const firstA1 = grouped.indexOf('a-1')
+    const firstA2 = grouped.indexOf('a-2')
+    const firstM1 = grouped.indexOf('m-1')
+    assert.ok(firstA1 >= 0 && firstA2 >= 0 && firstM1 >= 0, `expected a-1, a-2, m-1 to start, got ${grouped.join(',')}`)
+    assert.ok(Math.max(firstA1, firstA2) < firstM1, `same project must enqueue as one group before the next, got ${grouped.join(',')}`)
+    assert.equal(started.includes('b-1') || started.includes('n-1'), false)
+  } finally {
+    writeAutomations([])
+  }
+})
+
+test('scheduler:generation 重启补 cancelled,中立根上的中立任务会执行', { timeout: BOOT_WATCHDOG_MS }, async () => {
+  const root = ctx.huaanworkWorkspaceRoot.current
+  const listed = await get('/huaanwork/project/list')
+  const project = listed.projects.find((item) => item.root === root)
+  assert.ok(project)
+  const now = Date.now()
+  const projectDueAt = now - 2_000
+  writeAutomations([
+    automationFixture({
+      id: 'residual-1',
+      projectId: project.id,
+      lastStatus: 'running',
+      lastRunAt: now - 60_000,
+      nextRunAt: now + 3_600_000,
+      createdAt: now - 120_000,
+    }),
+    automationFixture({
+      id: 'neutral-due',
+      projectId: null,
+      command: 'echo neutral-due',
+      nextRunAt: now - 2_000,
+      createdAt: now - 90_000,
+    }),
+    automationFixture({
+      id: 'project-due',
+      projectId: project.id,
+      command: 'echo project-due',
+      nextRunAt: projectDueAt,
+      createdAt: now - 80_000,
+    }),
+  ])
+  const reprepared = prepareDesktopProfile('1', home, 'win32')
+  await ctx.fiber.dispose()
+  ctx = await bootPrepared(reprepared)
+  await reconnectEvents()
+  try {
+    assert.notEqual(ctx.huaanworkWorkspaceRoot.current, root, 'reboot without pendingRoot returns to the neutral root')
+    const residual = await pollAutomation(
+      'residual-1',
+      (row) => row.automation?.lastStatus === 'error' && row.runs.some((run) => run.status === 'cancelled'),
+      'residual cancelled',
+    )
+    assert.match(residual.runs.at(-1).output, /上次运行被中断/)
+    const neutral = await pollAutomation(
+      'neutral-due',
+      (row) => row.runs.some((run) => run.ok),
+      'neutral task runs on the neutral root',
+    )
+    assert.match(neutral.runs.at(-1).output, /neutral-due/)
+    await sleep(250)
+    const projectDue = await automationRow('project-due')
+    assert.equal(projectDue.runs.length, 0, 'project task defers on the neutral root')
+    assert.equal(projectDue.automation.nextRunAt, projectDueAt)
+    assert.equal(projectDue.automation.enabled, true)
+  } finally {
+    writeAutomations([])
+  }
 })

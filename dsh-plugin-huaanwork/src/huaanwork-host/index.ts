@@ -5,6 +5,7 @@ import type { ConfirmedRestartRuntime } from '../host-runtime-bridge.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
 import { installNetworkGate } from './net-gate.ts'
+import { startAutomationScheduler } from './automation-scheduler.ts'
 import { bindAutomationRuntime, type AutomationRuntime } from './automations-host.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
 import { createAgentsHost } from './agents-host.ts'
@@ -19,12 +20,19 @@ export interface HuaanworkHostConfig {
   dshHome: string
   profileDir: string
   workspaceRoot: string
+  /** profile 行 / profile-boot 桩可关调度器。测试缝是 HUAANWORK_AUTOMATION_TICK_MS,不是这个开关。 */
+  automationScheduler?: {
+    disabled?: boolean
+  }
 }
 
 export const Config: z<HuaanworkHostConfig> = z.object({
   dshHome: z.string(),
   profileDir: z.string(),
   workspaceRoot: z.string(),
+  automationScheduler: z.object({
+    disabled: z.boolean().default(false),
+  }).default({ disabled: false }),
 })
 
 export function apply(ctx: Context, config: HuaanworkHostConfig) {
@@ -45,8 +53,16 @@ export function apply(ctx: Context, config: HuaanworkHostConfig) {
     }
     return runtime.requestConfirmedRestart()
   })
-  // 执行体与 collector 接线。调度 tick 不在本任务启动;Task 5 调用同一 enqueueAutomation。
-  bindAutomationRuntime(ctx as unknown as AutomationRuntime, routeCtx)
+  // 执行体与 collector 接线。调度 tick 走同一 enqueueAutomation,不直接调 executeRun。
+  const runtime = ctx as unknown as AutomationRuntime
+  bindAutomationRuntime(runtime, routeCtx)
+  // ticker 不是 TCP/UDP listener,不进 post-boot listener 门禁。
+  // effect 在 compose 之后首次执行,与 gates 的 listener 基线窗口错开。
+  ctx.effect(() => {
+    return startAutomationScheduler(runtime, routeCtx, {
+      disabled: config.automationScheduler?.disabled === true,
+    })
+  }, 'huaanwork: automation scheduler')
   // 智能体目录真实接线(Task 10):fetch 公用机目录 + 本地 endpoints,存储根 = profileDir;
   // 目录快照同步进 huaanworkAgentCatalog holder(agent-invoke 的 @agent 分发消费)。
   const agentsHost = createAgentsHost({
