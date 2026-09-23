@@ -240,7 +240,7 @@ test("explore child bash is denied and the parent only sees the conclusion", asy
   ];
   assert.match(turn.map((entry) => entry.text).join("\n"), /secret-intermediate/);
   const parentView = parentVisibleExploreTranscript(turn);
-  assert.match(parentView, /empty workspace|conclusion/i);
+  assert.equal(parentView, "conclusion: empty workspace");
   assert.equal(parentView.includes("secret-intermediate"), false);
 });
 
@@ -285,9 +285,10 @@ test("baseline without @ has no mcp__* and explore has no call_host_tool", async
   assert.equal(initialToolNames.some((name) => name.startsWith("mcp__")), true);
   assert.equal(agentToolNames.includes("call_host_tool"), true);
   assert.equal(agentToolNames.some((name) => name.startsWith("mcp__")), false);
-  const exploreNames = exploreAllowList(agentToolNames);
-  assert.equal(agentToolNames.includes("call_host_tool"), true);
+  const exploreNames = exploreAllowList(initialToolNames);
+  assert.equal(initialToolNames.includes("call_host_tool"), true);
   assert.equal(exploreNames.includes("call_host_tool"), false);
+  assert.equal(exploreNames.some((name) => name.startsWith("mcp__")), false);
 });
 
 test("explore has no main-session fallback that skips restrict", async () => {
@@ -312,6 +313,22 @@ test("test-fix restrict denies git_push and web_search", async () => {
   assert.equal((await harness.callTool(harness.child, "subagent", { prompt: "nested" })).kind, "deny");
   assert.ok(harness.guardReason(harness.childTools, "git_push"));
   assert.ok(harness.guardReason(harness.childTools, "web_search"));
+});
+
+test("test-fix fails then write then pass without git tools", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "test-fix")).kind, "allow");
+  await harness.invokeSubagent(harness.parent);
+  const shell = shellToolName();
+  const testArgs = { command: "npm test" };
+  assert.equal((await harness.callTool(harness.child, shell, testArgs)).kind, "allow");
+  harness.result(harness.child, shell, testArgs, true, "failing: test_a");
+  assert.equal((await harness.callTool(harness.child, "write", { path: "src/a.ts", content: "fix" })).kind, "allow");
+  assert.equal((await harness.callTool(harness.child, shell, testArgs)).kind, "allow");
+  harness.result(harness.child, shell, testArgs, false, "pass");
+  assert.equal(harness.cancelled.includes("child"), false);
+  assert.equal(harness.childTools.visible.some((schema) => schema.name.startsWith("git_")), false);
+  assert.equal((await harness.callTool(harness.child, "git_push", {})).kind, "deny");
 });
 
 test("test-fix allow-list uses pwsh on win32 and bash otherwise", () => {
