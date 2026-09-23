@@ -14,6 +14,31 @@ export type RuntimeSnapshot = Pick<DesktopRuntime, 'platform' | 'windowsBuild' |
 export interface ConfirmedRestartRuntime extends DesktopRuntime {
   requestConfirmedRestart(): Promise<boolean>
 }
+
+/**
+ * keep-awake 扩展:方法可选,不并入 DesktopRuntime。非 Electron Host 靠
+ * typeof === 'function' 判空后抛 KeepAwakeUnavailableError,而不是裸 TypeError。
+ */
+export interface KeepAwakeRuntime extends DesktopRuntime {
+  setKeepAwake?(hold: boolean): Promise<void>
+}
+
+export const KEEP_AWAKE_UNAVAILABLE_MESSAGE = 'huaanwork-host: desktopRuntime 缺少 setKeepAwake()(保持唤醒需要 Electron powerSaveBlocker;请使用 ElectronDesktopRuntime)'
+
+export class KeepAwakeUnavailableError extends Error {
+  constructor() {
+    super(KEEP_AWAKE_UNAVAILABLE_MESSAGE)
+    this.name = 'KeepAwakeUnavailableError'
+  }
+}
+
+/** 窄化后调用 setKeepAwake;缺方法时抛具名错误,而不是裸 TypeError。 */
+export function callSetKeepAwake(runtime: DesktopRuntime, hold: boolean): Promise<void> {
+  const setKeepAwake = (runtime as KeepAwakeRuntime).setKeepAwake
+  if (typeof setKeepAwake !== 'function') throw new KeepAwakeUnavailableError()
+  return setKeepAwake.call(runtime, hold)
+}
+
 export function runtimeSnapshot(runtime: DesktopRuntime): RuntimeSnapshot {
   const { isPackaged, canDownload, currentVersion, releaseChannel, statePath, installationId } = runtime.updates
   return { platform: runtime.platform, windowsBuild: runtime.windowsBuild, locale: runtime.locale,
@@ -45,7 +70,7 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Desk
     const releases = Object.entries(handlers).map(([name, handler]) => rpc.handle(`${id}:${name}`, args => handler(...args)))
     return { id, release: () => releases.forEach(dispose => dispose()) }
   }
-  const runtime: ConfirmedRestartRuntime = {
+  const runtime: ConfirmedRestartRuntime & KeepAwakeRuntime = {
     platform: snapshot.platform, windowsBuild: snapshot.windowsBuild,
     get locale() { return locale },
     updates: {
@@ -113,6 +138,8 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Desk
     requestRestart: () => send('native:requestRestart'),
     requestRecoveryRestart: () => send('native:requestRecoveryRestart'),
     requestConfirmedRestart: () => send<boolean>('native:requestConfirmedRestart'),
+    // 不进 interactive 名单:powerSaveBlocker 是即时调用,沿用默认 RPC 超时。
+    setKeepAwake: hold => send('native:setKeepAwake', [hold]),
     prepareToQuit() { void send('native:prepareToQuit') },
     openProfileCreateWindow(options) {
       const callback = callbacks({
@@ -146,6 +173,10 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): () => 
   // 确认回传型重启:ElectronDesktopRuntime 把 relaunch 推迟到本应答之后,可直接 await。
   handle('native:requestConfirmedRestart', () =>
     (runtime as ConfirmedRestartRuntime).requestConfirmedRestart())
+  handle('native:setKeepAwake', async ([hold]) => {
+    if (typeof hold !== 'boolean') throw new Error('native:setKeepAwake requires a boolean hold')
+    return callSetKeepAwake(runtime, hold)
+  })
   handle('native:openProfileCreateWindow', ([id]) => runtime.openProfileCreateWindow({
     onSubmit: name => callback(`${id}:submit`, [name]), onCancel: () => report(callback(`${id}:cancel`)),
   }))

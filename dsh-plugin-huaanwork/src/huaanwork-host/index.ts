@@ -7,6 +7,7 @@ import { installHuaanworkHolders } from './holders.ts'
 import { installNetworkGate } from './net-gate.ts'
 import { startAutomationScheduler } from './automation-scheduler.ts'
 import { bindAutomationRuntime, type AutomationRuntime } from './automations-host.ts'
+import { registerKeepAwakeRoute } from './keep-awake-route.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
 import { createAgentsHost } from './agents-host.ts'
 import { setAgentsDirectory } from './sessions.ts'
@@ -85,6 +86,7 @@ export function apply(ctx: Context, config: HuaanworkHostConfig) {
   installNetworkGate(ctx, routeCtx)
   ctx.effect(() => {
     const disposeRoute = registerHuaanworkRoutes(ctx, routeCtx)
+    const disposeKeepAwake = registerKeepAwakeRoute(ctx)
     const disposeUpgrade = ctx.webServer.registerUpgrade({
       path: HUAANWORK_EVENTS_PATH,
       handler: (req, socket, head) =>
@@ -92,6 +94,7 @@ export function apply(ctx: Context, config: HuaanworkHostConfig) {
     })
     return () => {
       disposeRoute()
+      disposeKeepAwake()
       disposeUpgrade()
       hub.dispose()
     }

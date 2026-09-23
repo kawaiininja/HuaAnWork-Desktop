@@ -492,9 +492,25 @@ describe('原生桥', () => {
     await expect(pickDirectory()).resolves.toBeNull()
   })
 
-  test('setKeepAwake 诚实降级:resolve false 且不打请求', async () => {
-    await expect(setKeepAwake(true)).resolves.toBe(false)
+  test('setKeepAwake posts { hold } and returns the boolean', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(true))
+    await expect(setKeepAwake(true)).resolves.toBe(true)
+    const held = lastFetchCall()
+    expect(held.url).toBe('/huaanwork/keep-awake')
+    expect(held.init.method).toBe('POST')
+    expect(held.init.headers).toEqual({ 'content-type': 'application/json' })
+    expect(held.init.body).toBe(JSON.stringify({ hold: true }))
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(false))
     await expect(setKeepAwake(false)).resolves.toBe(false)
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(lastFetchCall().init.body).toBe(JSON.stringify({ hold: false }))
+  })
+
+  test('setKeepAwake 非 2xx 抛出服务端 message', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(
+      { error: { code: 'keep-awake-unavailable', message: '缺少 setKeepAwake()' } },
+      { status: 503 },
+    ))
+    await expect(setKeepAwake(true)).rejects.toThrow('缺少 setKeepAwake()')
   })
 })

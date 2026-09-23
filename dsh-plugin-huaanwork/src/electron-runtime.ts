@@ -6,6 +6,7 @@ import {
   nativeTheme,
   net,
   Notification,
+  powerSaveBlocker,
   shell,
 } from 'electron'
 import { spawn } from 'node:child_process'
@@ -117,6 +118,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private restartRequest: Promise<void> | undefined
   /** requestConfirmedRestart 的在途去重字段;确认后不清理(进程将进入 teardown)。 */
   private confirmedRestartRequest: Promise<boolean> | undefined
+  /** powerSaveBlocker.start 返回的 id;未持有时为 undefined。重复 hold/release 幂等。 */
+  private keepAwakeBlockerId: number | undefined
 
   constructor(
     private readonly restart: (target?: 'recovery' | 'safe-mode') => Promise<void>,
@@ -536,6 +539,22 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       })
     })
     return true
+  }
+
+  /**
+   * 保持唤醒(M4):hold=true 且当前未持有则 powerSaveBlocker.start('prevent-display-sleep');
+   * hold=false 释放。重复调用幂等。不在 DesktopRuntime 上——Host 经 KeepAwakeRuntime 窄化。
+   */
+  async setKeepAwake(hold: boolean): Promise<void> {
+    if (hold) {
+      if (this.keepAwakeBlockerId !== undefined && powerSaveBlocker.isStarted(this.keepAwakeBlockerId)) return
+      this.keepAwakeBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+      return
+    }
+    const id = this.keepAwakeBlockerId
+    if (id === undefined) return
+    this.keepAwakeBlockerId = undefined
+    if (powerSaveBlocker.isStarted(id)) powerSaveBlocker.stop(id)
   }
 
   async requestSafeModeRestart(): Promise<void> {

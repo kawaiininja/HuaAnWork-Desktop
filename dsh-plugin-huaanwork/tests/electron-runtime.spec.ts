@@ -287,6 +287,25 @@ const electron = vi.hoisted(() => {
       openPath: vi.fn(async () => ''),
       showItemInFolder: vi.fn(),
     },
+    powerSaveBlocker: (() => {
+      const started = new Set<number>()
+      let next = 1
+      return {
+        start: vi.fn((type: string) => {
+          if (type !== 'prevent-display-sleep') throw new Error(type)
+          const id = next
+          next += 1
+          started.add(id)
+          return id
+        }),
+        stop: vi.fn((id: number) => started.delete(id)),
+        isStarted: vi.fn((id: number) => started.has(id)),
+        reset() {
+          started.clear()
+          next = 1
+        },
+      }
+    })(),
     templateIcon,
     Tray,
     trays,
@@ -317,6 +336,7 @@ vi.mock('electron', () => ({
   nativeImage: electron.nativeImage,
   nativeTheme: electron.nativeTheme,
   net: electron.net,
+  powerSaveBlocker: electron.powerSaveBlocker,
   Notification: electron.Notification,
   screen: electron.screen,
   shell: electron.shell,
@@ -387,6 +407,7 @@ describe('Electron desktop runtime', () => {
     electron.dialog.showSaveDialog.mockResolvedValue({ canceled: true, filePath: undefined })
     electron.shell.openPath.mockResolvedValue('')
     electron.nativeTheme.themeSource = 'system'
+    electron.powerSaveBlocker.reset()
     electron.resetZoomLevel()
     electron.resetDevTools()
   })
@@ -2889,5 +2910,19 @@ describe('Electron desktop runtime', () => {
     expect(electron.webRequest.onBeforeSendHeaders).toHaveBeenLastCalledWith(null)
     await expect(release()).rejects.toThrow('renderer unavailable')
     expect(electron.nativeTheme.themeSource).toBe('light')
+  })
+
+  it('holds prevent-display-sleep once and releases it once', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    await runtime.setKeepAwake(true)
+    await runtime.setKeepAwake(true)
+    expect(electron.powerSaveBlocker.start).toHaveBeenCalledTimes(1)
+    expect(electron.powerSaveBlocker.start).toHaveBeenCalledWith('prevent-display-sleep')
+    await runtime.setKeepAwake(false)
+    await runtime.setKeepAwake(false)
+    expect(electron.powerSaveBlocker.stop).toHaveBeenCalledTimes(1)
+    const id = electron.powerSaveBlocker.start.mock.results[0]?.value as number
+    expect(electron.powerSaveBlocker.isStarted(id)).toBe(false)
   })
 })

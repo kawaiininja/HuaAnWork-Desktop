@@ -240,9 +240,19 @@ export async function listTree(root: string, depth = 2): Promise<TreeNode[]> {
   return (await response.json().catch(() => [])) as TreeNode[]
 }
 
-export async function setKeepAwake(_hold: boolean): Promise<boolean> {
-  // M3 未注册 keep-awake route,诚实降级为 false(不发起请求);技术债见 Task 10 Step 5。
-  return false
+export async function setKeepAwake(hold: boolean): Promise<boolean> {
+  const response = await fetch('/huaanwork/keep-awake', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hold }),
+  })
+  const payload = await response.json().catch(() => undefined) as { error?: { message?: string } } | boolean | undefined
+  if (!response.ok) {
+    const message = typeof payload === 'object' && payload !== null ? payload.error?.message : undefined
+    throw new Error(message ?? `HTTP ${response.status}`)
+  }
+  if (payload !== true && payload !== false) throw new Error('invalid keep-awake response')
+  return payload
 }
 
 export async function pickDirectory(): Promise<string | null> {
