@@ -1,7 +1,12 @@
-/** 自动化运行会话 id 前缀（与 sidecar automations.ts 的 AUTO_SESSION_PREFIX 保持一致）。 */
+/**
+ * 自动化运行会话 id 前缀。
+ * 客户端与宿主进程隔离, 保持独立声明; 值与 src/huaanwork-host/automation-session-ids.ts 保持同步。
+ */
 export const AUTO_SESSION_PREFIX = "huaanwork-auto-";
-/** 旧 chat 通道自动化运行会话前缀（与 sidecar automations.ts 的 LEGACY_CHAT_AUTO_SESSION_PREFIX 保持一致）。
- *  sidecar 启动时一次性清扫删除该前缀目录，这里仅过滤清扫失败（如 Windows 文件占用）的残留。 */
+/**
+ * 旧 chat 通道自动化运行会话前缀（与 src/huaanwork-host/automation-session-ids.ts 的 LEGACY_CHAT_AUTO_SESSION_PREFIX 保持同步）。
+ * sidecar 启动时一次性清扫删除该前缀目录，这里仅过滤清扫失败（如 Windows 文件占用）的残留。
+ */
 export const LEGACY_CHAT_AUTO_SESSION_PREFIX = "huaanwork-chat-auto-";
 
 /**

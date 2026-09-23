@@ -81,7 +81,6 @@ export interface RouteContext {
    * 不得按重启语义应答(评审 D2)。
    */
   requestRestart(): Promise<boolean>
-  expectedOrigin?: string
 }
 
 export type RouteHandler = (req: RouteRequest, ctx: RouteContext) => Promise<unknown>
@@ -100,22 +99,26 @@ const notImplemented = (method: string): RouteHandler => async () => {
 }
 
 /**
- * session 域错误映射:旧 sidecar 的 RPC 错误面把用户可读消息(跨工作区拒绝、
- * 网络门禁文案、not found 等)直传前端;新 HTTP 面对非 RouteError 只回 500 通用
- * 文案、消息不可达。这里把 session 域的 Error 映射为 400 + 原文,保留旧语义;
- * 非 Error 抛出仍走 500 + 服务端日志。
+ * 统一错误映射 wrapper 工厂 (N1 修复):
+ * 旧 sidecar 的 RPC 错误面把用户可读消息(跨工作区拒绝、网络门禁文案、not found、
+ * 校验失败等)直传前端;新 HTTP 面对非 RouteError 缺省只回 500 通用文案、
+ * 真实错误消息对客户端不可达。
+ * 该工厂把底层非 RouteError 的 Error 映射为 HTTP 400 + 指定业务错误码 + 原文字面量,
+ * 确保旧用户可读错误面不丢失。非 Error 对象抛出仍放行至 dispatch 500 兜底。
  */
-const sessionRoute = (fn: (req: RouteRequest, ctx: RouteContext) => unknown): RouteHandler => {
+export const errorRoute = (code: string) => (fn: (req: RouteRequest, ctx: RouteContext) => unknown): RouteHandler => {
   return async (req, ctx) => {
     try {
       return await fn(req, ctx)
     } catch (err) {
       if (err instanceof RouteError) throw err
-      if (err instanceof Error) throw new RouteError(400, 'session-error', err.message)
+      if (err instanceof Error) throw new RouteError(400, code, err.message)
       throw err
     }
   }
 }
+
+export const sessionRoute = errorRoute('session-error')
 
 const requireRuntime = (ctx: RouteContext): SessionRuntimeContext => {
   if (!ctx.runtimeCtx) {
@@ -124,39 +127,8 @@ const requireRuntime = (ctx: RouteContext): SessionRuntimeContext => {
   return ctx.runtimeCtx
 }
 
-/**
- * workspace 域错误映射:与 sessionRoute 同理由——非 RouteError 的 Error(如
- * assertAutomationIdle 的「后台自动化任务运行中」)必须带着原文到客户端,
- * 否则 HTTP 面只回 500 通用文案,旧 sidecar 的用户可读错误面丢失。
- */
-const workspaceRoute = (fn: (req: RouteRequest, ctx: RouteContext) => unknown): RouteHandler => {
-  return async (req, ctx) => {
-    try {
-      return await fn(req, ctx)
-    } catch (err) {
-      if (err instanceof RouteError) throw err
-      if (err instanceof Error) throw new RouteError(400, 'workspace-error', err.message)
-      throw err
-    }
-  }
-}
-
-/**
- * M4 域(项目/任务/自动化/技能/插件/智能体)错误映射:与 sessionRoute 同理——
- * 旧 RPC 面把用户可读消息(not found、校验文案等)直传前端;非 RouteError 的
- * Error 映射为 400 + 原文,保留旧语义。
- */
-const storeRoute = (fn: (req: RouteRequest, ctx: RouteContext) => unknown): RouteHandler => {
-  return async (req, ctx) => {
-    try {
-      return await fn(req, ctx)
-    } catch (err) {
-      if (err instanceof RouteError) throw err
-      if (err instanceof Error) throw new RouteError(400, 'store-error', err.message)
-      throw err
-    }
-  }
-}
+export const workspaceRoute = errorRoute('workspace-error')
+export const storeRoute = errorRoute('store-error')
 
 /** GET query 参数直读(旧 host.ts case 语义的 params 直读平移;query contract 见 api.ts)。 */
 function queryParam(req: RouteRequest, key: string): string | undefined {
@@ -204,13 +176,14 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { method: 'session.cancel', http: 'POST', path: '/huaanwork/session/cancel', handler: sessionRoute(async (req, ctx) => sessionCancel(requireRuntime(ctx), ctx, req.body)) }, // Task 7
   { method: 'session.approve', http: 'POST', path: '/huaanwork/session/approve', handler: sessionRoute(async (req, ctx) => sessionAnswerApproval(requireRuntime(ctx), ctx, req.body, 'allowed-once')) }, // Task 7
   { method: 'session.reject', http: 'POST', path: '/huaanwork/session/reject', handler: sessionRoute(async (req, ctx) => sessionAnswerApproval(requireRuntime(ctx), ctx, req.body, 'rejected')) }, // Task 7
-  { method: 'session.list', http: 'GET', path: '/huaanwork/session/list', handler: async (req, ctx) => sessionList(ctx, req.query.get('root') ?? undefined) }, // Task 7
+  { method: 'session.list', http: 'GET', path: '/huaanwork/session/list', handler: sessionRoute(async (req, ctx) => sessionList(ctx, req.query.get('root') ?? undefined)) }, // Task 7 (文件 I/O 读会话列表)
   { method: 'session.open', http: 'POST', path: '/huaanwork/session/open', handler: sessionRoute(async (req, ctx) => sessionOpen(ctx, req.body)) }, // Task 7
   { method: 'session.remove', http: 'POST', path: '/huaanwork/session/remove', handler: sessionRoute(async (req, ctx) => sessionRemove(ctx, req.body)) }, // Task 7
+  // 纯内存 handler: 仅根据 workspaceRoot 字符串生成或复用 session ID, 无 I/O
   { method: 'session.new', http: 'POST', path: '/huaanwork/session/new', handler: async (req, ctx) => sessionNew(ctx, req.body) }, // Task 7
   { method: 'session.resume', http: 'POST', path: '/huaanwork/session/resume', handler: sessionRoute(async (req, ctx) => sessionResume(requireRuntime(ctx), ctx, req.body)) }, // Task 7
 
-  // settings
+  // settings (纯配置读/写: 读路径内部已容错 ENOENT/SyntaxError 回退 emptySettings; 写路径先手抛校验后持久化)
   { method: 'settings.get', http: 'GET', path: '/huaanwork/settings', handler: async (_req, ctx) => readHuaanworkSettings(ctx.profileDir) },
   {
     method: 'settings.set',
@@ -230,7 +203,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     },
   },
 
-  // auth
+  // auth (认证探测与清除内部已捕获 ENOENT; 注册/登录/改密显式 try-catch 映射 auth-failed)
   { method: 'auth.status', http: 'POST', path: '/huaanwork/auth/status', handler: async (_req, ctx) => authStatus(ctx.profileDir) },
   {
     method: 'auth.register',
@@ -264,6 +237,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       }
     },
   },
+  // 纯状态清除: 仅 unlink 会话文件并读取状态, 内部已捕获 ENOENT
   { method: 'auth.logout', http: 'POST', path: '/huaanwork/auth/logout', handler: async (_req, ctx) => authLogout(ctx.profileDir) },
   {
     method: 'auth.changePassword',
@@ -285,14 +259,14 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   // plugin
   { method: 'plugin.add', http: 'POST', path: '/huaanwork/plugin/add', handler: notImplemented('plugin.add') }, // M4
   { method: 'plugin.remove', http: 'POST', path: '/huaanwork/plugin/remove', handler: notImplemented('plugin.remove') }, // M4
-  { method: 'plugin.list', http: 'GET', path: '/huaanwork/plugin/list', handler: async (_req, ctx) => listPlugins(ctx.profileDir) }, // Task 10
+  { method: 'plugin.list', http: 'GET', path: '/huaanwork/plugin/list', handler: storeRoute(async (_req, ctx) => listPlugins(ctx.profileDir)) }, // Task 10 (文件 I/O 读 package.json bundles)
 
   // skill
   {
     method: 'skill.list',
     http: 'GET',
     path: '/huaanwork/skill/list',
-    handler: async (_req, ctx) => {
+    handler: storeRoute(async (_req, ctx) => {
       // 旧 host.ts:1182-1195 语义:toggles 只作用于内置技能,三源合并全局按名排序、同名不去重。
       const toggles = readSkillToggles(ctx.profileDir)
       const bundled = listBundledSkills().map((skill) => ({
@@ -306,8 +280,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const skills = [...bundled, ...user, ...external]
       skills.sort((a, b) => a.name.localeCompare(b.name))
       return { skills }
-    },
-  }, // Task 10
+    }),
+  }, // Task 10 (文件 I/O 读技能目录与配置)
   {
     method: 'skill.get',
     http: 'GET',
@@ -336,7 +310,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { method: 'skill.setEnabled', http: 'POST', path: '/huaanwork/skill/setEnabled', handler: notImplemented('skill.setEnabled') }, // M4
 
   // agent
-  { method: 'agent.list', http: 'GET', path: '/huaanwork/agent/list', handler: async () => getAgentsDirectory().list() }, // Task 10
+  { method: 'agent.list', http: 'GET', path: '/huaanwork/agent/list', handler: storeRoute(async () => getAgentsDirectory().list()) }, // Task 10 (文件 I/O 读智能体快照)
   { method: 'agent.get', http: 'GET', path: '/huaanwork/agent/get', handler: storeRoute(async (req) => {
     const name = queryParam(req, 'name')
     if (!name) throw new Error('agent.get requires params.name')
@@ -344,16 +318,16 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     // 旧 RPC 面 undefined 序列化为 null;HTTP JSON 面显式落 null(空 body 无法解析)。
     return (await getAgentsDirectory().get(name, source)) ?? null
   }) }, // Task 10
-  { method: 'agent.refresh', http: 'POST', path: '/huaanwork/agent/refresh', handler: async () => getAgentsDirectory().refresh() }, // Task 10
+  { method: 'agent.refresh', http: 'POST', path: '/huaanwork/agent/refresh', handler: storeRoute(async () => getAgentsDirectory().refresh()) }, // Task 10 (网络请求拉取目录 + 本地扫描)
   { method: 'agent.setEnabled', http: 'POST', path: '/huaanwork/agent/setEnabled', handler: notImplemented('agent.setEnabled') }, // M4
   { method: 'agent.addEndpoint', http: 'POST', path: '/huaanwork/agent/addEndpoint', handler: notImplemented('agent.addEndpoint') }, // M4
   { method: 'agent.removeEndpoint', http: 'POST', path: '/huaanwork/agent/removeEndpoint', handler: notImplemented('agent.removeEndpoint') }, // M4
 
-  // status
+  // status (纯内存 handler: 恒返回 { ready: true }, 无 I/O 或异常路径)
   { method: 'status.get', http: 'GET', path: '/huaanwork/status', handler: async () => ({ ready: true }) }, // Task 4
 
   // project
-  { method: 'project.list', http: 'GET', path: '/huaanwork/project/list', handler: async (_req, ctx) => ({ projects: await listProjects(ctx.profileDir) }) }, // Task 10
+  { method: 'project.list', http: 'GET', path: '/huaanwork/project/list', handler: storeRoute(async (_req, ctx) => ({ projects: await listProjects(ctx.profileDir) })) }, // Task 10 (文件 I/O 读 projects.json)
   {
     method: 'project.create',
     http: 'POST',
@@ -423,7 +397,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     path: '/huaanwork/automation/list',
     // 旧 host.ts:1060-1075 语义:list 带最近 5 条运行,missed 汇总从全量(RUNS_LIMIT)筛,
     // 避免 missed 被「最近 5 条」窗口悄悄截掉。
-    handler: async (req, ctx) => {
+    handler: storeRoute(async (req, ctx) => {
       const projectId = queryParam(req, 'projectId')
       const automations = await listAutomations(ctx.profileDir, projectId)
       const runs: Record<string, RunSummary[]> = {}
@@ -436,8 +410,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         }),
       )
       return { automations, runs, missed }
-    },
-  }, // Task 10
+    }),
+  }, // Task 10 (文件 I/O 读自动化表与运行历史)
   { method: 'automation.create', http: 'POST', path: '/huaanwork/automation/create', handler: notImplemented('automation.create') }, // M4
   { method: 'automation.update', http: 'POST', path: '/huaanwork/automation/update', handler: notImplemented('automation.update') }, // M4
   { method: 'automation.remove', http: 'POST', path: '/huaanwork/automation/remove', handler: notImplemented('automation.remove') }, // M4
@@ -448,7 +422,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     path: '/huaanwork/automation/runs',
     // 旧 host.ts:1116-1127 语义:limit 缺省/非法回 RUNS_LIMIT;status 非法忽略;
     // 全量读 RUNS_LIMIT 条再筛再截尾。
-    handler: async (req, ctx) => {
+    handler: storeRoute(async (req, ctx) => {
       const id = queryParam(req, 'id')
       if (!id) throw new RouteError(400, 'store-error', 'automation.runs requires params.id')
       const limitRaw = req.query.get('limit')
@@ -459,13 +433,13 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const all = await recentRuns(ctx.profileDir, id, RUNS_LIMIT)
       const filtered = status === undefined ? all : all.filter((run) => run.status === status)
       return { runs: filtered.slice(-limit) }
-    },
-  }, // Task 10
+    }),
+  }, // Task 10 (文件 I/O 读任务运行日志)
   { method: 'automation.pruneSessions', http: 'POST', path: '/huaanwork/automation/pruneSessions', handler: notImplemented('automation.pruneSessions') }, // M4
-  { method: 'automation.templates', http: 'GET', path: '/huaanwork/automation/templates', handler: async () => ({ templates: await readAutomationTemplates() }) }, // Task 10
+  { method: 'automation.templates', http: 'GET', path: '/huaanwork/automation/templates', handler: storeRoute(async () => ({ templates: await readAutomationTemplates() })) }, // Task 10 (文件 I/O 读模板文件)
 
   // task
-  { method: 'task.list', http: 'GET', path: '/huaanwork/task/list', handler: async (req, ctx) => ({ tasks: await listTasks(ctx.profileDir, queryParam(req, 'projectId')) }) }, // Task 10
+  { method: 'task.list', http: 'GET', path: '/huaanwork/task/list', handler: storeRoute(async (req, ctx) => ({ tasks: await listTasks(ctx.profileDir, queryParam(req, 'projectId')) })) }, // Task 10 (文件 I/O 读 tasks.json)
   {
     method: 'task.create',
     http: 'POST',
@@ -595,10 +569,12 @@ export async function handleHuaanworkRequest(
   req: IncomingMessage,
   res: ServerResponse,
   ctx: RouteContext,
+  expectedOrigin: string | (() => string) = () => 'http://127.0.0.1',
 ): Promise<void> {
-  const expectedOrigin = ctx.expectedOrigin ?? (req.headers.host ? `http://${req.headers.host}` : 'http://127.0.0.1')
+  // [::1] 等回环形式由 expectedLoopbackOrigin 放行,不再经 Host 头推导
+  const origin = typeof expectedOrigin === 'function' ? expectedOrigin() : expectedOrigin
   const isMutating = req.method !== 'GET' && req.method !== 'HEAD'
-  if (!isSameOriginLoopbackRequest(req, expectedOrigin, isMutating)) {
+  if (!isSameOriginLoopbackRequest(req, origin, isMutating)) {
     sendError(res, 403, 'forbidden', 'Forbidden')
     return
   }
@@ -642,9 +618,10 @@ export async function handleHuaanworkRequest(
 }
 
 export function registerHuaanworkRoutes(ctx: Context, routeCtx: RouteContext): () => void {
+  const expectedOrigin = () => `http://127.0.0.1:${ctx.webServer.port}`
   return ctx.webServer.register({
     kind: 'prefix',
     path: '/huaanwork',
-    handler: (req, res) => void handleHuaanworkRequest(req, res, routeCtx),
+    handler: (req, res) => void handleHuaanworkRequest(req, res, routeCtx, expectedOrigin),
   })
 }

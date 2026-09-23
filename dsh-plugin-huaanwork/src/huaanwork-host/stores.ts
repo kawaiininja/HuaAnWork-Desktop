@@ -9,6 +9,7 @@ import type {
   RunSummary,
   TaskInfo,
 } from '../client-huaanwork/rpc-types.ts'
+import { AUTO_SESSION_PREFIX } from './automation-session-ids.ts'
 
 /**
  * M4 域存储读路径(Task 10):projects / tasks / automations 的注册表与运行历史,
@@ -250,8 +251,8 @@ export async function removeTasksOfProject(storageRoot: string, projectId: strin
 
 /** 每个任务保留的运行历史条数。 */
 export const RUNS_LIMIT = 50
-/** 自动化运行会话 id 前缀(级联删除用):`huaanwork-auto-<automationId>-<suffix>`。 */
-export const AUTO_SESSION_PREFIX = 'huaanwork-auto-'
+/** 自动化运行会话 id 前缀(级联删除用):`huaanwork-auto-<automationId>-<suffix>`(统一从 automation-session-ids.ts 引入并重新导出)。 */
+export { AUTO_SESSION_PREFIX }
 
 type AutomationRegistry = { automations: AutomationInfo[] }
 

@@ -9,6 +9,8 @@ import {
   NATIVE_ROUTES,
   routeKey,
   handleHuaanworkRequest,
+  errorRoute,
+  RouteError,
   type RouteContext,
 } from '../../src/huaanwork-host/routes.ts'
 import { hasGit, listTree } from '../../src/huaanwork-host/native.ts'
@@ -193,7 +195,7 @@ describe('HTTP dispatch & security checks', () => {
     }
 
     server = createServer((req, res) => {
-      void handleHuaanworkRequest(req, res, routeCtx)
+      void handleHuaanworkRequest(req, res, routeCtx, () => baseUrl)
     })
 
     await new Promise<void>((resolve) => {
@@ -233,6 +235,56 @@ describe('HTTP dispatch & security checks', () => {
     expect(res.status).toBe(200)
     const json = await res.json()
     expect(json).toEqual({ ready: true })
+  })
+
+  test('Host 为回环别名放行 / 非回环域名 403', async () => {
+    const port = (server.address() as AddressInfo).port
+
+    // 1. 非回环域名 Host 头 -> 403 Forbidden (使用 mockReq 避开 fetch 禁止自定义 Host 头限制)
+    const badHostReq = {
+      method: 'GET',
+      url: '/huaanwork/status',
+      headers: {
+        host: 'evil.attacker.com',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any
+    const badChunks: Buffer[] = []
+    let badResStatus = 200
+    const badMockRes = {
+      statusCode: 200,
+      setHeader: () => {},
+      writeHead: (status: number) => { badResStatus = status },
+      end: (data?: string) => { if (data) badChunks.push(Buffer.from(data)) },
+    } as any
+    await handleHuaanworkRequest(badHostReq, badMockRes, routeCtx, () => baseUrl)
+    expect(badResStatus).toBe(403)
+    expect(JSON.parse(Buffer.concat(badChunks).toString('utf8'))).toEqual({ error: { code: 'forbidden', message: 'Forbidden' } })
+
+    // 2. [::1] 回环别名放行 (expectedLoopbackOrigin 放行 [::1], 不再经 Host 头推导)
+    const mockReq = {
+      method: 'GET',
+      url: '/huaanwork/status',
+      headers: {
+        host: `[::1]:${port}`,
+        origin: `http://[::1]:${port}`,
+        'sec-fetch-site': 'same-origin',
+      },
+      socket: { remoteAddress: '::1' },
+    } as any
+    const chunks: Buffer[] = []
+    let resStatus = 200
+    const mockRes = {
+      statusCode: 200,
+      setHeader: () => {},
+      writeHead: (status: number) => { resStatus = status },
+      end: (data?: string) => { if (data) chunks.push(Buffer.from(data)) },
+    } as any
+    await handleHuaanworkRequest(mockReq, mockRes, routeCtx, () => `http://[::1]:${port}`)
+    expect(resStatus).toBe(200)
+    expect(JSON.parse(Buffer.concat(chunks).toString('utf8'))).toEqual({ ready: true })
   })
 
   test('M4 501 路由返回统一信封 { error: { code, message } }', async () => {
@@ -581,7 +633,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     mkdirSync(routeCtx.workspaceRoot.current, { recursive: true })
 
     server = createServer((req, res) => {
-      void handleHuaanworkRequest(req, res, routeCtx)
+      void handleHuaanworkRequest(req, res, routeCtx, () => baseUrl)
     })
     await new Promise<void>((resolve) => {
       server.listen(0, '127.0.0.1', () => resolve())
@@ -902,5 +954,127 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     // (走 patch 行组合),不得伪装成 bundle 清单成员(IMMUTABLE 集含它是桌面包名语义)。
     expect(fallbackProfileBundles()).toEqual(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
     expect(fallbackProfileBundles()).not.toContain('dsh-plugin-huaanwork')
+  })
+})
+
+describe('errorRoute wrapper factory & handler error injection (N1)', () => {
+  test('errorRoute 工厂将普通 Error 映射为 400 + code + err.message', async () => {
+    const wrapped = errorRoute('custom-error')(async () => {
+      throw new Error('something crashed')
+    })
+    await expect(wrapped({ params: {}, body: undefined, query: new URLSearchParams() }, {} as any))
+      .rejects.toMatchObject({
+        status: 400,
+        code: 'custom-error',
+        message: 'something crashed',
+      })
+  })
+
+  test('errorRoute 工厂透传已有的 RouteError', async () => {
+    const wrapped = errorRoute('custom-error')(async () => {
+      throw new RouteError(404, 'not-found', 'item not found')
+    })
+    await expect(wrapped({ params: {}, body: undefined, query: new URLSearchParams() }, {} as any))
+      .rejects.toMatchObject({
+        status: 404,
+        code: 'not-found',
+        message: 'item not found',
+      })
+  })
+
+  test('errorRoute 工厂对非 Error 抛出原样抛出', async () => {
+    const wrapped = errorRoute('custom-error')(async () => {
+      throw 'string error'
+    })
+    await expect(wrapped({ params: {}, body: undefined, query: new URLSearchParams() }, {} as any))
+      .rejects.toBe('string error')
+  })
+
+  test('包裹的读/网络 handler 在底层抛错时均返回 400 + 业务 code + 原文字面量', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'hw-wrap-test-'))
+    try {
+      // 准备一个 dsh 文件(非目录)导致 readdir 报 ENOTDIR
+      const dshFile = join(tempDir, 'dsh-file')
+      writeFileSync(dshFile, 'file-not-dir')
+
+      const failCtx: RouteContext = {
+        dshHome: dshFile,
+        profileDir: tempDir,
+        workspaceRoot: { current: tempDir },
+        emit: () => {},
+        logger: () => {},
+        requestRestart: async () => true,
+      }
+
+      // 1. session.list (session-error)
+      const sessionListRoute = ROUTE_TABLE.find((r) => r.method === 'session.list')!
+      await expect(sessionListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
+        .rejects.toMatchObject({ status: 400, code: 'session-error' })
+
+      // 2. plugin.list (store-error) - package.json 语法损坏
+      writeFileSync(join(tempDir, 'package.json'), '{ invalid json')
+      const pluginListRoute = ROUTE_TABLE.find((r) => r.method === 'plugin.list')!
+      await expect(pluginListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
+        .rejects.toMatchObject({ status: 400, code: 'store-error' })
+
+      // 3. skill.list (store-error) - skills 为普通文件导致 readdir 报 ENOTDIR
+      writeFileSync(join(tempDir, 'skills'), 'file-not-dir')
+      const skillListRoute = ROUTE_TABLE.find((r) => r.method === 'skill.list')!
+      await expect(skillListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
+        .rejects.toMatchObject({ status: 400, code: 'store-error' })
+
+      // 4. project.list (store-error) - projects.json 语法损坏
+      writeFileSync(join(tempDir, 'projects.json'), '{ invalid json')
+      const projectListRoute = ROUTE_TABLE.find((r) => r.method === 'project.list')!
+      await expect(projectListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
+        .rejects.toMatchObject({ status: 400, code: 'store-error' })
+
+      // 5. task.list (store-error) - tasks.json 语法损坏
+      writeFileSync(join(tempDir, 'tasks.json'), '{ invalid json')
+      const taskListRoute = ROUTE_TABLE.find((r) => r.method === 'task.list')!
+      await expect(taskListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
+        .rejects.toMatchObject({ status: 400, code: 'store-error' })
+
+      // 6. automation.list (store-error) - automations.json 为目录导致 readFile 报 EISDIR (规格点名必测)
+      mkdirSync(join(tempDir, 'automations.json'), { recursive: true })
+      const automationListRoute = ROUTE_TABLE.find((r) => r.method === 'automation.list')!
+      await expect(automationListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
+        .rejects.toMatchObject({ status: 400, code: 'store-error' })
+      const autoErr = await automationListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx).catch((e: unknown) => e)
+      expect(autoErr).toBeInstanceOf(RouteError)
+      if (autoErr instanceof RouteError) {
+        expect(autoErr.status).toBe(400)
+        expect(autoErr.code).toBe('store-error')
+        expect(autoErr.message).toMatch(/EISDIR|illegal operation/)
+      }
+
+      // 7. agent.list (store-error)
+      const { setAgentsDirectory } = await import('../../src/huaanwork-host/sessions.ts')
+      const origDirectory = (await import('../../src/huaanwork-host/sessions.ts')).getAgentsDirectory()
+      setAgentsDirectory({
+        list: () => { throw new Error('catalog disk corrupted') },
+        refresh: async () => { throw new Error('network timeout fetching catalog') },
+        get: async () => undefined,
+        setEnabled: () => {},
+        addEndpoint: () => ({ ok: true }),
+        removeEndpoint: () => {},
+        snapshotForRuntime: () => ({ items: [] }),
+      } as any)
+
+      try {
+        const agentListRoute = ROUTE_TABLE.find((r) => r.method === 'agent.list')!
+        await expect(agentListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
+          .rejects.toMatchObject({ status: 400, code: 'store-error', message: 'catalog disk corrupted' })
+
+        // 7. agent.refresh (store-error)
+        const agentRefreshRoute = ROUTE_TABLE.find((r) => r.method === 'agent.refresh')!
+        await expect(agentRefreshRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
+          .rejects.toMatchObject({ status: 400, code: 'store-error', message: 'network timeout fetching catalog' })
+      } finally {
+        setAgentsDirectory(origDirectory)
+      }
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
   })
 })

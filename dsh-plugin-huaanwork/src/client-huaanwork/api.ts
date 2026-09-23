@@ -20,7 +20,11 @@ interface RouteDef {
 }
 
 const post = (path: string): RouteDef => ({ http: 'POST', path, body: (params) => params })
-const get = (path: string, query?: (params?: unknown) => string): RouteDef => ({ http: 'GET', path, query })
+const get = (path: string, query?: (params?: unknown) => string): RouteDef => ({
+  http: 'GET',
+  path,
+  ...(query ? { query } : {}),
+})
 
 /** params 对象 → query string;非对象/空对象返回 ''。 */
 function objectQuery(params?: unknown): string {
@@ -133,7 +137,9 @@ export async function waitForReady(timeoutMs = 60_000): Promise<void> {
   let lastError: unknown
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(ROUTES['status.get'].path, { method: 'GET' })
+      const statusRoute = ROUTES['status.get']
+      if (!statusRoute) throw new Error('missing status.get route')
+      const response = await fetch(statusRoute.path, { method: 'GET' })
       if (response.ok) return
       lastError = new Error(`HTTP ${response.status}`)
     } catch (err) {
@@ -152,12 +158,15 @@ export async function rpcCall<T>(method: string, params?: unknown): Promise<T> {
   let response: Response
   try {
     const queryString = route.query ? route.query(params) : ''
-    response = await fetch(route.path + queryString, {
+    const init: RequestInit = {
       method: route.http,
-      headers: route.body ? { 'content-type': 'application/json' } : undefined,
-      body: route.body ? JSON.stringify(route.body(params) ?? null) : undefined,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    })
+    }
+    if (route.body) {
+      init.headers = { 'content-type': 'application/json' }
+      init.body = JSON.stringify(route.body(params) ?? null)
+    }
+    response = await fetch(route.path + queryString, init)
   } catch (err) {
     const name = (err as { name?: string } | null)?.name
     if (name === 'AbortError' || name === 'TimeoutError') {
@@ -174,7 +183,9 @@ export async function rpcCall<T>(method: string, params?: unknown): Promise<T> {
   if (!response.ok) {
     const message = payload?.error?.message ?? `HTTP ${response.status}`
     const error = new Error(message) as Error & { code?: string }
-    error.code = payload?.error?.code
+    if (payload?.error?.code !== undefined) {
+      error.code = payload.error.code
+    }
     throw error
   }
   return payload as T
