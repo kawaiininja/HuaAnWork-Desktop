@@ -275,12 +275,15 @@ function bundlesAfterRemove(
 ): { bundles: string[]; message?: string } {
   const after = readBundlesAfter(routeCtx, 'remove')
   if (after !== undefined && after.length > 0) return { bundles: after }
-  const message = 'could not read a non-empty installed bundle list; returning the previous list'
+  const filtered = before.filter((bundle) => bundle !== name)
+  const bundles = nonEmptyBundles(routeCtx, filtered, before, 'remove')
+  // nonEmptyBundles 在过滤结果为空时交回 prior(即 before)。只有载荷真的去掉了 name 才称推断。
+  const inferred = before.includes(name) && !bundles.includes(name)
+  const message = inferred
+    ? 'could not read a non-empty installed bundle list; inferred the removed package from the previous list'
+    : 'could not read a non-empty installed bundle list; returning the previous list'
   routeCtx.logger(`plugin remove: ${message}`)
-  return {
-    bundles: nonEmptyBundles(routeCtx, before.filter((bundle) => bundle !== name), before, 'remove'),
-    message,
-  }
+  return { bundles, message }
 }
 
 /** 不把空数组静默交回客户端。读不到新清单时回上一份非空清单,并记一条日志。 */

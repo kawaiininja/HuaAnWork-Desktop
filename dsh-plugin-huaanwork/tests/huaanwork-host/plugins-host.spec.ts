@@ -359,4 +359,41 @@ describe('plugin add/remove', () => {
     const confirmed = await removePlugin(ctx, 'demo-plugin')
     expect(confirmed).toEqual({ bundles: BASE_BUNDLES, restarting: true })
   })
+
+  test('确认卸载读到空清单时注明推断移除,不回空数组', async () => {
+    const profileDir = makeHome()
+    const before = [...BASE_BUNDLES, 'demo-plugin']
+    writeProfile(profileDir, before)
+    const ctx = makeCtx(profileDir, () => {
+      writeProfile(profileDir, [])
+      return completedHandle()
+    }, true)
+
+    const result = await removePlugin(ctx, 'demo-plugin')
+
+    expect(result).toEqual({
+      bundles: BASE_BUNDLES,
+      restarting: true,
+      message: 'could not read a non-empty installed bundle list; inferred the removed package from the previous list',
+    })
+    expect(result.bundles).not.toContain('demo-plugin')
+    expect(result.bundles).not.toEqual([])
+  })
+
+  test('确认卸载过滤后为空时仍回上一份清单,不称推断', async () => {
+    const profileDir = makeHome()
+    writeProfile(profileDir, ['demo-plugin'])
+    const ctx = makeCtx(profileDir, () => {
+      writeProfile(profileDir, [])
+      return completedHandle()
+    }, true)
+
+    const result = await removePlugin(ctx, 'demo-plugin')
+
+    expect(result).toEqual({
+      bundles: ['demo-plugin'],
+      restarting: true,
+      message: 'could not read a non-empty installed bundle list; returning the previous list',
+    })
+  })
 })
