@@ -57,12 +57,12 @@ describe('ROUTE_TABLE registry', () => {
     ])
   })
 
-  test('M4 域写操作诚实 501,不静默假成功(恰 7 个,测试即口径文档)', async () => {
+  test('M4 域写操作诚实 501,不静默假成功(恰 4 个,测试即口径文档)', async () => {
     const notWired = [
-      'automation.create', 'automation.update', 'automation.remove', 'automation.run', 'automation.pruneSessions',
+      'automation.run', 'automation.pruneSessions',
       'plugin.add', 'plugin.remove',
     ]
-    expect(notWired).toHaveLength(7)
+    expect(notWired).toHaveLength(4)
     for (const method of notWired) {
       const route = ROUTE_TABLE.find((r) => r.method === method)!
       expect(route).toBeDefined()
@@ -75,7 +75,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 47 个方法外其余 7 个方法均返回 501', async () => {
+  test('除已实现的 50 个方法外其余 4 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -109,6 +109,9 @@ describe('ROUTE_TABLE registry', () => {
       'project.remove',
       'project.rename',
       'automation.list',
+      'automation.create',
+      'automation.update',
+      'automation.remove',
       'automation.runs',
       'automation.templates',
       'task.list',
@@ -128,7 +131,7 @@ describe('ROUTE_TABLE registry', () => {
       'agent.addEndpoint',
       'agent.removeEndpoint',
     ])
-    expect(implemented).toHaveLength(47)
+    expect(implemented).toHaveLength(50)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -139,7 +142,7 @@ describe('ROUTE_TABLE registry', () => {
           code: 'not-implemented',
         })
     }
-    expect(notImplementedCount).toBe(7)
+    expect(notImplementedCount).toBe(4)
   })
 })
 
@@ -302,7 +305,7 @@ describe('HTTP dispatch & security checks', () => {
   })
 
   test('M4 501 路由返回统一信封 { error: { code, message } }', async () => {
-    const res = await fetch(`${baseUrl}/huaanwork/automation/create`, {
+    const res = await fetch(`${baseUrl}/huaanwork/automation/run`, {
       method: 'POST',
       headers: {
         Host: host,
@@ -314,7 +317,7 @@ describe('HTTP dispatch & security checks', () => {
     expect(res.status).toBe(501)
     const json = await res.json()
     expect(json).toEqual({
-      error: { code: 'not-implemented', message: 'M4 接入:automation.create' },
+      error: { code: 'not-implemented', message: 'M4 接入:automation.run' },
     })
   })
 

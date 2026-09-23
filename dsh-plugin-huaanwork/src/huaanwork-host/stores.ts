@@ -18,7 +18,8 @@ import { AUTO_SESSION_PREFIX } from './automation-session-ids.ts'
  * 存储根:旧 sidecar 传 $DSH_HOME;Desktop 组合下这些文件存于 profileDir
  * (与 settings.json 同目录,文件名与旧布局一致:projects.json / tasks.json /
  * automations.json / automations/<id>.runs.jsonl)。automations 的写路径
- * (create/update/remove/run/pruneSessions 与调度器)是 M4 重活,刻意不移植。
+ * (create/update/remove 与纯函数)在 automations-store.ts,与本文件共用同一把
+ * automationRegistryLock;run / pruneSessions 路由与调度器仍属后续任务。
  */
 
 // —— projects(旧 projects.ts 逐字;参数 dshHome → storageRoot)——
@@ -247,7 +248,8 @@ export async function removeTasksOfProject(storageRoot: string, projectId: strin
   })
 }
 
-// —— automations 读路径(旧 automations.ts:376-525,658-754 逐字;写路径不移植)——
+// —— automations 读路径(旧 automations.ts:376-387,713-754 逐字)。
+// 写路径在 automations-store.ts,必须复用下面这把锁,禁止再造第二把。——
 
 /** 每个任务保留的运行历史条数。 */
 export const RUNS_LIMIT = 50
@@ -263,7 +265,7 @@ type AutomationRegistry = { automations: AutomationInfo[] }
  */
 let automationRegistryLock: Promise<unknown> = Promise.resolve()
 
-function withAutomationRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
+export function withAutomationRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = automationRegistryLock.then(fn)
   // 操作抛错不能弄断链:吞掉错误后链继续。
   automationRegistryLock = run.catch(() => undefined)
@@ -289,7 +291,7 @@ function isAutomationInfo(value: unknown): value is AutomationInfo {
   )
 }
 
-async function readAutomationRegistry(storageRoot: string): Promise<AutomationRegistry> {
+export async function readAutomationRegistry(storageRoot: string): Promise<AutomationRegistry> {
   const path = automationRegistryPath(storageRoot)
   let text: string
   try {
@@ -317,7 +319,7 @@ async function readAutomationRegistry(storageRoot: string): Promise<AutomationRe
   }
 }
 
-async function writeAutomationRegistry(storageRoot: string, registry: AutomationRegistry): Promise<void> {
+export async function writeAutomationRegistry(storageRoot: string, registry: AutomationRegistry): Promise<void> {
   const path = automationRegistryPath(storageRoot)
   await mkdir(dirname(path), { recursive: true })
   // 先写临时文件再原子 rename:进程在写入中途崩溃也不会留下截断的注册表。
@@ -353,7 +355,7 @@ function runsPath(storageRoot: string, automationId: string): string {
  * 读取失败都不炸(删除路径的容错优先于清理彻底)。
  * 注意:Desktop 组合下会话日志在 dshHome/sessions(不在 profileDir 下),调用方显式传根。
  */
-async function removeAutomationSessions(sessionsRoot: string, automationId: string): Promise<void> {
+export async function removeAutomationSessions(sessionsRoot: string, automationId: string): Promise<void> {
   const wantedPrefixes = [`${AUTO_SESSION_PREFIX}${automationId}-`]
   let cwds: string[]
   try {
@@ -393,6 +395,12 @@ export async function removeAutomationsOfProject(
     await writeAutomationRegistry(storageRoot, registry)
     await Promise.all(
       doomed.map((automation) => rm(runsPath(storageRoot, automation.id), { force: true }).catch(() => undefined)),
+    )
+    // Phase 2:无人值守降级审计行随项目级联一并清理(与 removeAutomation 同口径)。
+    await Promise.all(
+      doomed.map((automation) =>
+        rm(join(runsDir(storageRoot), `${automation.id}.audit.jsonl`), { force: true }).catch(() => undefined),
+      ),
     )
     await Promise.all(doomed.map((automation) => removeAutomationSessions(sessionsRoot, automation.id)))
   })

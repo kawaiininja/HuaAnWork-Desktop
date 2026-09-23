@@ -67,6 +67,12 @@ import {
   type SessionRuntimeContext,
 } from './sessions.ts'
 import { closeWorkspace, openWorkspace } from './workspace.ts'
+import {
+  createAutomation,
+  normalizeAutomationInput,
+  removeAutomation,
+  updateAutomation,
+} from './automations-store.ts'
 
 export interface RouteRequest {
   params: Record<string, string>
@@ -503,7 +509,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     }),
   }, // Task 10
 
-  // automation(读路径真实;写路径 create/update/remove/run/pruneSessions 牵动调度器,M4)
+  // automation(读路径与 create/update/remove 真实;run/pruneSessions 仍属后续任务)
   {
     method: 'automation.list',
     http: 'GET',
@@ -525,9 +531,49 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { automations, runs, missed }
     }),
   }, // Task 10 (文件 I/O 读自动化表与运行历史)
-  { method: 'automation.create', http: 'POST', path: '/huaanwork/automation/create', handler: notImplemented('automation.create') }, // M4
-  { method: 'automation.update', http: 'POST', path: '/huaanwork/automation/update', handler: notImplemented('automation.update') }, // M4
-  { method: 'automation.remove', http: 'POST', path: '/huaanwork/automation/remove', handler: notImplemented('automation.remove') }, // M4
+  {
+    method: 'automation.create',
+    http: 'POST',
+    path: '/huaanwork/automation/create',
+    // 旧 host.ts:1078-1087:规范化入参;仅显式绑定时校验项目存在,null(中立)直接放行。
+    handler: storeRoute(async (req, ctx) => {
+      if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        throw new Error('automation.create requires an object params')
+      }
+      const input = normalizeAutomationInput(req.body as Record<string, unknown>)
+      if (input.projectId !== null) {
+        const projects = await listProjects(ctx.profileDir)
+        if (!projects.some((project) => project.id === input.projectId)) {
+          throw new Error(`project ${input.projectId} was not found`)
+        }
+      }
+      return { automation: await createAutomation(ctx.profileDir, input) }
+    }),
+  }, // Task 3 (M4)
+  {
+    method: 'automation.update',
+    http: 'POST',
+    path: '/huaanwork/automation/update',
+    handler: storeRoute(async (req, ctx) => {
+      if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        throw new Error('automation.update requires an object params')
+      }
+      const id = bodyParam(req.body, 'id')
+      if (!id) throw new Error('automation.update requires params.id')
+      return { automation: await updateAutomation(ctx.profileDir, id, req.body as Record<string, unknown>) }
+    }),
+  }, // Task 3 (M4)
+  {
+    method: 'automation.remove',
+    http: 'POST',
+    path: '/huaanwork/automation/remove',
+    handler: storeRoute(async (req, ctx) => {
+      const id = bodyParam(req.body, 'id')
+      if (!id) throw new Error('automation.remove requires params.id')
+      await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'))
+      return { removed: true }
+    }),
+  }, // Task 3 (M4)
   { method: 'automation.run', http: 'POST', path: '/huaanwork/automation/run', handler: notImplemented('automation.run') }, // M4
   {
     method: 'automation.runs',
