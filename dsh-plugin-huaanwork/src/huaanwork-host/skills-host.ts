@@ -1,16 +1,25 @@
 import type { Dirent } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import {
   SKILL_NAME_RE,
+  SYSTEM_SKILLS,
   getBundledSkill,
+  getBundledSkillRegistrar,
+  listBundledSkills,
   parseSkillMarkdown,
+  registerBundledSkill,
+  serializeSkillMarkdown,
+  setSkillToggle,
 } from '../huaanwork-guardrails/skills.ts'
 import type {
   SkillDetail,
+  SkillFieldError,
+  SkillImportPreview,
   SkillInfo,
+  SkillWriteResult,
 } from '../client-huaanwork/rpc-types.ts'
 
 /**
@@ -140,3 +149,270 @@ export async function getSkill(
   const bundled = getBundledSkill(name)
   return bundled ? { ...bundled, source: 'bundled' as const } : undefined
 }
+
+export const MAX_SKILL_NAME_LENGTH = 64
+export const MAX_SKILL_DESCRIPTION_LENGTH = 1024
+export const MAX_SKILL_CONTENT_BYTES = 64 * 1024
+
+export type SkillInput = {
+  name: string
+  description: string
+  whenToUse?: string
+  disableModelInvocation?: boolean
+  userInvocable?: boolean
+  content: string
+}
+export type SkillUpdateInput = Omit<SkillInput, 'name'>
+
+/** 已占用名:内置 + 用户技能(外部技能允许被用户同名遮蔽——这是 dsh rank 的设计行为)。 */
+export async function takenNames(storageRoot: string): Promise<Set<string>> {
+  const names = new Set(listBundledSkills().map((skill) => skill.name))
+  for (const skill of await listUserSkills(storageRoot)) names.add(skill.name)
+  return names
+}
+
+function validateSkillFields(input: SkillInput, taken: ReadonlySet<string>): SkillFieldError[] {
+  const errors: SkillFieldError[] = []
+  if (!SKILL_NAME_RE.test(input.name)) {
+    errors.push({ field: 'name', message: '名称需为小写字母/数字/连字符（kebab-case）' })
+  } else if (input.name.length > MAX_SKILL_NAME_LENGTH) {
+    errors.push({ field: 'name', message: `名称不超过 ${MAX_SKILL_NAME_LENGTH} 字符` })
+  } else if (taken.has(input.name)) {
+    errors.push({ field: 'name', message: '已存在同名技能（含内置技能）' })
+  }
+  if (!input.description?.trim()) {
+    errors.push({ field: 'description', message: '描述必填' })
+  } else if (input.description.length > MAX_SKILL_DESCRIPTION_LENGTH) {
+    errors.push({ field: 'description', message: `描述不超过 ${MAX_SKILL_DESCRIPTION_LENGTH} 字符` })
+  }
+  if (!input.content?.trim()) {
+    errors.push({ field: 'content', message: '正文必填' })
+  } else if (Buffer.byteLength(input.content, 'utf8') > MAX_SKILL_CONTENT_BYTES) {
+    errors.push({ field: 'content', message: '正文不超过 64 KiB' })
+  }
+  return errors
+}
+
+/** 同目录 <target>.tmp + rename:对 watch 与 discovery 均不可见。 */
+async function atomicWrite(targetPath: string, content: string): Promise<void> {
+  const tmp = `${targetPath}.tmp`
+  await fs.mkdir(dirname(targetPath), { recursive: true })
+  await fs.writeFile(tmp, content, 'utf8')
+  await fs.rename(tmp, targetPath)
+}
+
+export async function createSkill(storageRoot: string, input: SkillInput): Promise<SkillWriteResult> {
+  const errors = validateSkillFields(input, await takenNames(storageRoot))
+  if (errors.length > 0) return { ok: false, fieldErrors: errors }
+  // 与 update 对称:invocation 布尔只在非默认值时落键,不给每个新技能写默认键
+  await atomicWrite(
+    join(userSkillsRoot(storageRoot), input.name, 'SKILL.md'),
+    serializeSkillMarkdown({
+      name: input.name,
+      description: input.description,
+      ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
+      ...(input.disableModelInvocation ? { disableModelInvocation: true } : {}),
+      ...(input.userInvocable === false ? { userInvocable: false } : {}),
+      content: input.content,
+      extraLines: [],
+    }),
+  )
+  return {
+    ok: true,
+    skill: {
+      name: input.name,
+      description: input.description,
+      source: 'user',
+      ...(input.whenToUse ? { whenToUse: input.whenToUse } : {}),
+    },
+  }
+}
+
+/** 合并式更新:读原文件,只覆盖表单管理字段,metadata 等未知键经 extraLines 原样保留。 */
+export async function updateSkill(
+  storageRoot: string,
+  name: string,
+  input: SkillUpdateInput,
+): Promise<SkillWriteResult> {
+  const entry = await findEntry(userSkillsRoot(storageRoot), name)
+  if (!entry) {
+    return { ok: false, fieldErrors: [{ field: 'name', message: `用户技能 ${name} 不存在（内置与外部技能不可编辑）` }] }
+  }
+  const errors = validateSkillFields({ ...input, name }, new Set())
+  if (errors.length > 0) return { ok: false, fieldErrors: errors }
+  const original = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
+  await atomicWrite(
+    entry.path,
+    serializeSkillMarkdown({
+      name: original.name,
+      description: input.description,
+      // 缺省即默认(模型可调用/用户可调用),只在非默认值时落键
+      ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
+      ...(input.disableModelInvocation ? { disableModelInvocation: true } : {}),
+      ...(input.userInvocable === false ? { userInvocable: false } : {}),
+      content: input.content,
+      extraLines: original.extraLines,
+    }),
+  )
+  return {
+    ok: true,
+    skill: {
+      name,
+      description: input.description,
+      source: 'user',
+      ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
+    },
+  }
+}
+
+export async function removeSkill(storageRoot: string, name: string): Promise<void> {
+  if (!SKILL_NAME_RE.test(name)) throw new Error(`invalid skill name: ${name}`)
+  const entry = await findEntry(userSkillsRoot(storageRoot), name)
+  if (!entry) throw new Error(`用户技能 ${name} 不存在（内置与外部技能不可删除）`)
+  if (entry.kind === 'bundle') await fs.rm(dirname(entry.path), { recursive: true })
+  else await fs.unlink(entry.path)
+}
+
+const remoteSource = /github:|git\+|https?:\/\//i
+
+async function containsSymlink(dir: string): Promise<boolean> {
+  for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) return true
+    if (entry.isDirectory() && (await containsSymlink(join(dir, entry.name)))) return true
+  }
+  return false
+}
+
+async function copyDir(source: string, target: string): Promise<void> {
+  await fs.mkdir(target, { recursive: true })
+  for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+    const from = join(source, entry.name)
+    const to = join(target, entry.name)
+    if (entry.isDirectory()) await copyDir(from, to)
+    else if (entry.isFile()) await fs.copyFile(from, to)
+    // symlink 已在 preview 拒绝;此处防御性跳过
+  }
+}
+
+export async function previewSkillImport(
+  storageRoot: string,
+  params: { path: string } | string,
+): Promise<SkillImportPreview> {
+  const sourcePath = typeof params === 'string' ? params : params?.path
+  const fail = (message: string): SkillImportPreview => ({ ok: false, fieldErrors: [{ field: 'path', message }] })
+  if (!sourcePath || typeof sourcePath !== 'string') return fail('路径必填')
+  if (remoteSource.test(sourcePath)) return fail('不允许远程来源')
+  const stat = await fs.stat(sourcePath).catch(() => undefined)
+  if (!stat) return fail('路径不存在')
+  let raw: string
+  let kind: 'file' | 'directory'
+  let sourceName: string
+  if (stat.isDirectory()) {
+    kind = 'directory'
+    sourceName = basename(sourcePath)
+    if (await containsSymlink(sourcePath)) return fail('目录包含符号链接，已拒绝导入')
+    raw = await fs.readFile(join(sourcePath, 'SKILL.md'), 'utf8').catch(() => '')
+    if (!raw) return fail('目录中未找到 SKILL.md')
+  } else {
+    kind = 'file'
+    if (!sourcePath.endsWith('.md')) return fail('仅支持 .md 文件或含 SKILL.md 的目录')
+    sourceName = basename(sourcePath).replace(/\.md$/, '')
+    raw = await fs.readFile(sourcePath, 'utf8')
+  }
+  const parsed = parseSkillMarkdown(raw)
+  const errors = validateSkillFields(
+    { name: parsed.name, description: parsed.description, content: parsed.content },
+    await takenNames(storageRoot),
+  )
+  if (errors.length > 0) return { ok: false, fieldErrors: errors }
+  return {
+    ok: true,
+    preview: {
+      name: parsed.name,
+      description: parsed.description,
+      source: 'user',
+      ...(parsed.whenToUse ? { whenToUse: parsed.whenToUse } : {}),
+      content: parsed.content,
+      targetName: parsed.name,
+      sourceName,
+      nameMismatch: sourceName !== parsed.name,
+      kind,
+    },
+  }
+}
+
+export const previewImport = previewSkillImport
+
+export async function importSkill(
+  storageRoot: string,
+  params: { path: string } | string,
+): Promise<SkillWriteResult> {
+  const sourcePath = typeof params === 'string' ? params : params?.path
+  if (!sourcePath || typeof sourcePath !== 'string') {
+    return { ok: false, fieldErrors: [{ field: 'path', message: '路径必填' }] }
+  }
+  const preview = await previewSkillImport(storageRoot, sourcePath)
+  if (!preview.ok) return preview
+  const { targetName, kind } = preview.preview
+  const root = userSkillsRoot(storageRoot)
+  await fs.mkdir(root, { recursive: true })
+  if (kind === 'file') {
+    // 原始文件原样落盘(保留未知 frontmatter 键),目录名以 frontmatter name 为准
+    await atomicWrite(join(root, targetName, 'SKILL.md'), await fs.readFile(sourcePath, 'utf8'))
+  } else {
+    const tmp = join(storageRoot, `.skill-import-${targetName}`)
+    await fs.rm(tmp, { recursive: true, force: true })
+    try {
+      await copyDir(sourcePath, tmp)
+      await fs.rename(tmp, join(root, targetName))
+    } catch (err) {
+      await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined)
+      throw err
+    }
+  }
+  return {
+    ok: true,
+    skill: {
+      name: targetName,
+      description: preview.preview.description,
+      source: 'user',
+      ...(preview.preview.whenToUse ? { whenToUse: preview.preview.whenToUse } : {}),
+    },
+  }
+}
+
+const skillHandles = new Map<string, () => void>()
+
+export function getSkillHandlesForTest(): Map<string, () => void> {
+  return skillHandles
+}
+
+export async function setSkillEnabled(
+  storageRoot: string,
+  name: string,
+  enabled: boolean,
+): Promise<{ ok: true }> {
+  if (!name) throw new Error('skill.setEnabled requires params.name')
+  if (SYSTEM_SKILLS.has(name)) throw new Error(`skill ${name} 为系统技能，始终启用`)
+  if (!listBundledSkills().some((skill) => skill.name === name)) {
+    throw new Error(`skill ${name} is not a bundled skill`)
+  }
+  setSkillToggle(storageRoot, name, enabled)
+
+  // 运行时即时生效:dispose-then-register 保证幂等
+  const disposeOld = skillHandles.get(name)
+  if (disposeOld) {
+    disposeOld()
+    skillHandles.delete(name)
+  }
+  if (enabled) {
+    const registrar = getBundledSkillRegistrar()
+    if (registrar?.skills) {
+      const dispose = registerBundledSkill(registrar, name)
+      if (!dispose) throw new Error(`skill ${name} failed to register`)
+      skillHandles.set(name, dispose)
+    }
+  }
+  return { ok: true }
+}
+

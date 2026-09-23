@@ -9,10 +9,18 @@ import { listPlugins } from './plugins-host.ts'
 import { getAgentsDirectory } from './sessions.ts'
 import { removeSessionFilesById } from './session-sweep.ts'
 import {
-  listUserSkills,
-  listExternalSkills,
+  createSkill,
   getSkill,
+  importSkill,
+  listExternalSkills,
+  listUserSkills,
+  previewSkillImport,
+  removeSkill,
+  setSkillEnabled,
+  updateSkill,
+  type SkillInput,
   type SkillSourceFilter,
+  type SkillUpdateInput,
 } from './skills-host.ts'
 import { listBundledSkills, readSkillToggles, SYSTEM_SKILLS } from '../huaanwork-guardrails/skills.ts'
 import {
@@ -302,12 +310,79 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { skill }
     }),
   }, // Task 10
-  { method: 'skill.create', http: 'POST', path: '/huaanwork/skill/create', handler: notImplemented('skill.create') }, // M4
-  { method: 'skill.update', http: 'POST', path: '/huaanwork/skill/update', handler: notImplemented('skill.update') }, // M4
-  { method: 'skill.remove', http: 'POST', path: '/huaanwork/skill/remove', handler: notImplemented('skill.remove') }, // M4
-  { method: 'skill.importPreview', http: 'POST', path: '/huaanwork/skill/importPreview', handler: notImplemented('skill.importPreview') }, // M4
-  { method: 'skill.import', http: 'POST', path: '/huaanwork/skill/import', handler: notImplemented('skill.import') }, // M4
-  { method: 'skill.setEnabled', http: 'POST', path: '/huaanwork/skill/setEnabled', handler: notImplemented('skill.setEnabled') }, // M4
+  {
+    method: 'skill.create',
+    http: 'POST',
+    path: '/huaanwork/skill/create',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const name = typeof body.name === 'string' ? body.name : undefined
+      if (!name) throw new RouteError(400, 'bad-request', 'skill.create requires params.name')
+      return await createSkill(ctx.profileDir, body as unknown as SkillInput)
+    }),
+  },
+  {
+    method: 'skill.update',
+    http: 'POST',
+    path: '/huaanwork/skill/update',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const name = typeof body.name === 'string' ? body.name : undefined
+      if (!name) throw new RouteError(400, 'bad-request', 'skill.update requires params.name')
+      return await updateSkill(ctx.profileDir, name, body as unknown as SkillUpdateInput)
+    }),
+  },
+  {
+    method: 'skill.remove',
+    http: 'POST',
+    path: '/huaanwork/skill/remove',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const name = typeof body.name === 'string' ? body.name : undefined
+      if (!name) throw new RouteError(400, 'bad-request', 'skill.remove requires params.name')
+      await removeSkill(ctx.profileDir, name)
+      return { removed: true }
+    }),
+  },
+  {
+    method: 'skill.importPreview',
+    http: 'POST',
+    path: '/huaanwork/skill/importPreview',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const path = typeof body.path === 'string' ? body.path : undefined
+      if (!path) throw new RouteError(400, 'bad-request', 'skill.importPreview requires params.path')
+      const preview = await previewSkillImport(ctx.profileDir, body as { path: string })
+      if (!preview.ok) return preview
+      return {
+        ...preview,
+        ...preview.preview,
+      }
+    }),
+  },
+  {
+    method: 'skill.import',
+    http: 'POST',
+    path: '/huaanwork/skill/import',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const path = typeof body.path === 'string' ? body.path : undefined
+      if (!path) throw new RouteError(400, 'bad-request', 'skill.import requires params.path')
+      return await importSkill(ctx.profileDir, body as { path: string })
+    }),
+  },
+  {
+    method: 'skill.setEnabled',
+    http: 'POST',
+    path: '/huaanwork/skill/setEnabled',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const name = typeof body.name === 'string' ? body.name : undefined
+      if (!name) throw new RouteError(400, 'bad-request', 'skill.setEnabled requires params.name')
+      const enabled = body.enabled === true
+      return await setSkillEnabled(ctx.profileDir, name, enabled)
+    }),
+  },
 
   // agent
   { method: 'agent.list', http: 'GET', path: '/huaanwork/agent/list', handler: storeRoute(async () => getAgentsDirectory().list()) }, // Task 10 (文件 I/O 读智能体快照)

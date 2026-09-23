@@ -87,7 +87,18 @@ export function wantedTools(kind: SkillKind, platform = process.platform): reado
   return kind === "explore" ? EXPLORE_TOOLS : [...TEST_FIX_BASE_TOOLS, shellToolName(platform)];
 }
 
+let bundledSkillContext: Context | null = null;
+
+export function getBundledSkillRegistrar(): Context | null {
+  return bundledSkillContext;
+}
+
+export function setBundledSkillRegistrar(ctx: Context | null): void {
+  bundledSkillContext = ctx;
+}
+
 export function apply(ctx: Context): void {
+  bundledSkillContext = ctx;
   const pendingByAgent = new WeakMap<object, SkillKind>();
   const tracked = new Set<Agent>();
   const lifted = new WeakMap<Agent, () => void>();

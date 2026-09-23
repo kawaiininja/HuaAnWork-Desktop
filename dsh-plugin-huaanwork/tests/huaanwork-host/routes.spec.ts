@@ -56,14 +56,13 @@ describe('ROUTE_TABLE registry', () => {
     ])
   })
 
-  test('M4 域写操作诚实 501,不静默假成功(恰 16 个,测试即口径文档)', async () => {
+  test('M4 域写操作诚实 501,不静默假成功(恰 10 个,测试即口径文档)', async () => {
     const notWired = [
       'automation.create', 'automation.update', 'automation.remove', 'automation.run', 'automation.pruneSessions',
-      'skill.create', 'skill.update', 'skill.remove', 'skill.import', 'skill.importPreview', 'skill.setEnabled',
       'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
       'plugin.add', 'plugin.remove',
     ]
-    expect(notWired).toHaveLength(16)
+    expect(notWired).toHaveLength(10)
     for (const method of notWired) {
       const route = ROUTE_TABLE.find((r) => r.method === method)!
       expect(route).toBeDefined()
@@ -76,7 +75,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除 Task 4/5/7/9/10 实现的 38 个方法外其余 16 个方法均返回 501', async () => {
+  test('除已实现的 44 个方法外其余 10 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -117,8 +116,15 @@ describe('ROUTE_TABLE registry', () => {
       'task.remove',
       'task.bindSession',
       'task.rename',
+      // Task 1 (M4): skill 写路径 ×6
+      'skill.create',
+      'skill.update',
+      'skill.remove',
+      'skill.importPreview',
+      'skill.import',
+      'skill.setEnabled',
     ])
-    expect(implemented).toHaveLength(38)
+    expect(implemented).toHaveLength(44)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -129,7 +135,7 @@ describe('ROUTE_TABLE registry', () => {
           code: 'not-implemented',
         })
     }
-    expect(notImplementedCount).toBe(16)
+    expect(notImplementedCount).toBe(10)
   })
 })
 
@@ -925,6 +931,199 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     expect(await noName.json()).toEqual({
       error: { code: 'store-error', message: 'skill.get requires params.name' },
     })
+  })
+
+  test('skill 写域 (Task 1): create -> update -> importPreview -> import -> setEnabled -> remove 闭环与 400 校验', async () => {
+    // 1. skill.create 缺少 name 返回 400
+    const createNoName = await fetch(`${baseUrl}/huaanwork/skill/create`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }))
+    expect(createNoName.status).toBe(400)
+    expect(await createNoName.json()).toMatchObject({
+      error: { code: 'bad-request', message: 'skill.create requires params.name' },
+    })
+
+    // 2. skill.create 成功创建
+    const createRes = await fetch(`${baseUrl}/huaanwork/skill/create`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'route-created-skill',
+        description: '路由创建技能',
+        content: '路由创建正文',
+        whenToUse: '测试路由时',
+      }),
+    }))
+    expect(createRes.status).toBe(200)
+    const createJson = await createRes.json()
+    expect(createJson).toEqual({
+      ok: true,
+      skill: {
+        name: 'route-created-skill',
+        description: '路由创建技能',
+        source: 'user',
+        whenToUse: '测试路由时',
+      },
+    })
+
+    // 3. skill.update 缺少 name 返回 400
+    const updateNoName = await fetch(`${baseUrl}/huaanwork/skill/update`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: '新描述' }),
+    }))
+    expect(updateNoName.status).toBe(400)
+    expect(await updateNoName.json()).toMatchObject({
+      error: { code: 'bad-request', message: 'skill.update requires params.name' },
+    })
+
+    // 4. skill.update 成功更新
+    const updateRes = await fetch(`${baseUrl}/huaanwork/skill/update`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'route-created-skill',
+        description: '已更新技能描述',
+        content: '已更新技能正文',
+      }),
+    }))
+    expect(updateRes.status).toBe(200)
+    const updateJson = await updateRes.json()
+    expect(updateJson).toEqual({
+      ok: true,
+      skill: {
+        name: 'route-created-skill',
+        description: '已更新技能描述',
+        source: 'user',
+      },
+    })
+
+    // 5. skill.importPreview 缺少 path 返回 400
+    const previewNoPath = await fetch(`${baseUrl}/huaanwork/skill/importPreview`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }))
+    expect(previewNoPath.status).toBe(400)
+    expect(await previewNoPath.json()).toMatchObject({
+      error: { code: 'bad-request', message: 'skill.importPreview requires params.path' },
+    })
+
+    // 准备导入文件
+    const importSourceFile = join(profileTempDir, 'import-candidate.md')
+    writeFileSync(
+      importSourceFile,
+      '---\nname: imported-via-route\ndescription: 路由导入技能\n---\n\n导入正文\n',
+    )
+
+    // 6. skill.importPreview 正常预览
+    const previewRes = await fetch(`${baseUrl}/huaanwork/skill/importPreview`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: importSourceFile }),
+    }))
+    expect(previewRes.status).toBe(200)
+    const previewJson = await previewRes.json()
+    expect(previewJson.ok).toBe(true)
+    expect(previewJson.targetName).toBe('imported-via-route')
+    expect(previewJson.nameMismatch).toBe(true)
+    expect(previewJson.kind).toBe('file')
+    expect(previewJson.preview).toBeDefined()
+    expect(previewJson.preview.targetName).toBe('imported-via-route')
+
+    // 7. skill.import 缺少 path 返回 400
+    const importNoPath = await fetch(`${baseUrl}/huaanwork/skill/import`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }))
+    expect(importNoPath.status).toBe(400)
+    expect(await importNoPath.json()).toMatchObject({
+      error: { code: 'bad-request', message: 'skill.import requires params.path' },
+    })
+
+    // 8. skill.import 成功导入
+    const importRes = await fetch(`${baseUrl}/huaanwork/skill/import`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: importSourceFile }),
+    }))
+    expect(importRes.status).toBe(200)
+    const importJson = await importRes.json()
+    expect(importJson.ok).toBe(true)
+    expect(importJson.skill.name).toBe('imported-via-route')
+
+    // 9. skill.setEnabled 缺少 name 返回 400
+    const setEnabledNoName = await fetch(`${baseUrl}/huaanwork/skill/setEnabled`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    }))
+    expect(setEnabledNoName.status).toBe(400)
+    expect(await setEnabledNoName.json()).toMatchObject({
+      error: { code: 'bad-request', message: 'skill.setEnabled requires params.name' },
+    })
+
+    // 10. skill.setEnabled 系统技能 (explore) 拒绝
+    const setEnabledSys = await fetch(`${baseUrl}/huaanwork/skill/setEnabled`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'explore', enabled: false }),
+    }))
+    expect(setEnabledSys.status).toBe(400)
+    expect(await setEnabledSys.json()).toMatchObject({
+      error: { code: 'store-error', message: 'skill explore 为系统技能，始终启用' },
+    })
+
+    // 11. skill.setEnabled 正常内置技能 (pdf) 开关
+    const setEnabledRes = await fetch(`${baseUrl}/huaanwork/skill/setEnabled`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'pdf', enabled: true }),
+    }))
+    expect(setEnabledRes.status).toBe(200)
+    expect(await setEnabledRes.json()).toEqual({ ok: true })
+
+    // 12. skill.remove 缺少 name 返回 400
+    const removeNoName = await fetch(`${baseUrl}/huaanwork/skill/remove`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }))
+    expect(removeNoName.status).toBe(400)
+    expect(await removeNoName.json()).toMatchObject({
+      error: { code: 'bad-request', message: 'skill.remove requires params.name' },
+    })
+
+    // 13. skill.remove 内置技能拒绝返回 400
+    const removeBuiltin = await fetch(`${baseUrl}/huaanwork/skill/remove`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'explore' }),
+    }))
+    expect(removeBuiltin.status).toBe(400)
+    expect(await removeBuiltin.json()).toMatchObject({
+      error: { code: 'store-error' },
+    })
+
+    // 14. skill.remove 成功删除刚才创建与导入的技能
+    const removeCreatedRes = await fetch(`${baseUrl}/huaanwork/skill/remove`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'route-created-skill' }),
+    }))
+    expect(removeCreatedRes.status).toBe(200)
+    expect(await removeCreatedRes.json()).toEqual({ removed: true })
+
+    const removeImportedRes = await fetch(`${baseUrl}/huaanwork/skill/remove`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'imported-via-route' }),
+    }))
+    expect(removeImportedRes.status).toBe(200)
+    expect(await removeImportedRes.json()).toEqual({ removed: true })
   })
 
   test('agent 域:未配置 agents_host 时 list/get 均为空(占位目录语义)', async () => {
