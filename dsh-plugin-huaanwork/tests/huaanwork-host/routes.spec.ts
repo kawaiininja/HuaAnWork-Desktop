@@ -57,11 +57,9 @@ describe('ROUTE_TABLE registry', () => {
     ])
   })
 
-  test('M4 域写操作诚实 501,不静默假成功(恰 2 个,测试即口径文档)', async () => {
-    const notWired = [
-      'plugin.add', 'plugin.remove',
-    ]
-    expect(notWired).toHaveLength(2)
+  test('M4 域写操作诚实 501,不静默假成功(恰 0 个,测试即口径文档)', async () => {
+    const notWired: string[] = []
+    expect(notWired).toHaveLength(0)
     for (const method of notWired) {
       const route = ROUTE_TABLE.find((r) => r.method === method)!
       expect(route).toBeDefined()
@@ -74,7 +72,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 52 个方法外其余 2 个方法均返回 501', async () => {
+  test('除已实现的 54 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -131,8 +129,11 @@ describe('ROUTE_TABLE registry', () => {
       'agent.setEnabled',
       'agent.addEndpoint',
       'agent.removeEndpoint',
+      // Task 6 (M4): plugin 写路径 ×2
+      'plugin.add',
+      'plugin.remove',
     ])
-    expect(implemented).toHaveLength(52)
+    expect(implemented).toHaveLength(54)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -143,7 +144,7 @@ describe('ROUTE_TABLE registry', () => {
           code: 'not-implemented',
         })
     }
-    expect(notImplementedCount).toBe(2)
+    expect(notImplementedCount).toBe(0)
   })
 })
 
@@ -305,7 +306,7 @@ describe('HTTP dispatch & security checks', () => {
     expect(JSON.parse(Buffer.concat(chunks).toString('utf8'))).toEqual({ ready: true })
   })
 
-  test('M4 501 路由返回统一信封 { error: { code, message } }', async () => {
+  test('plugin.add 缺少 source 时返回 400 信封,不再是 501', async () => {
     const res = await fetch(`${baseUrl}/huaanwork/plugin/add`, {
       method: 'POST',
       headers: {
@@ -315,10 +316,10 @@ describe('HTTP dispatch & security checks', () => {
       },
       body: JSON.stringify({ name: 'test' }),
     })
-    expect(res.status).toBe(501)
+    expect(res.status).toBe(400)
     const json = await res.json()
     expect(json).toEqual({
-      error: { code: 'not-implemented', message: 'M4 接入:plugin.add' },
+      error: { code: 'bad-request', message: 'plugin.add requires params.source' },
     })
   })
 

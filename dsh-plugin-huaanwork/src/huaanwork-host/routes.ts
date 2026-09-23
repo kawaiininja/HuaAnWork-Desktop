@@ -4,9 +4,10 @@ import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { AgentSource, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
+import type { DesktopPnpm } from '../pnpm.ts'
 import { isSameOriginLoopbackRequest } from './loopback.ts'
 import { hasGit, listTree } from './native.ts'
-import { listPlugins } from './plugins-host.ts'
+import { addPlugin, listPlugins, PluginCommandError, removePlugin } from './plugins-host.ts'
 import { getAgentsDirectory } from './sessions.ts'
 import { removeSessionFilesById } from './session-sweep.ts'
 import {
@@ -100,6 +101,11 @@ export interface RouteContext {
    * 不得按重启语义应答(评审 D2)。
    */
   requestRestart(): Promise<boolean>
+  /**
+   * 插件安装/卸载的 CLI 执行器(pnpm.ts runPlugin)。holders 在 desktopPnpm
+   * 已提供时挂上;缺席时写路径再向 runtimeCtx 查一次,仍没有则 503。
+   */
+  desktopPnpm?: Pick<DesktopPnpm, 'runPlugin'>
 }
 
 export type RouteHandler = (req: RouteRequest, ctx: RouteContext) => Promise<unknown>
@@ -112,10 +118,6 @@ export class RouteError extends Error {
 }
 
 export const routeKey = (http: string, path: string): string => `${http} ${path}`
-
-const notImplemented = (method: string): RouteHandler => async () => {
-  throw new RouteError(501, 'not-implemented', `M4 接入:${method}`)
-}
 
 /**
  * 统一错误映射 wrapper 工厂 (N1 修复):
@@ -148,6 +150,14 @@ const requireRuntime = (ctx: RouteContext): SessionRuntimeContext => {
 
 export const workspaceRoute = errorRoute('workspace-error')
 export const storeRoute = errorRoute('store-error')
+const pluginRoute = errorRoute('plugin-error')
+
+function rethrowPluginCommand(error: unknown): never {
+  if (error instanceof PluginCommandError) {
+    throw new RouteError(error.status, error.code, error.message)
+  }
+  throw error
+}
 
 /** GET query 参数直读(旧 host.ts case 语义的 params 直读平移;query contract 见 api.ts)。 */
 function queryParam(req: RouteRequest, key: string): string | undefined {
@@ -276,8 +286,37 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   },
 
   // plugin
-  { method: 'plugin.add', http: 'POST', path: '/huaanwork/plugin/add', handler: notImplemented('plugin.add') }, // M4
-  { method: 'plugin.remove', http: 'POST', path: '/huaanwork/plugin/remove', handler: notImplemented('plugin.remove') }, // M4
+  // 安装/卸载走 desktopPnpm.runPlugin,确认后 generation 重启。boot 失败不是自动回滚:
+  // routeDesktopStartupFailure(main.ts:1776-1812)转入启动恢复窗口,用户选 slot 还原
+  // (profile-checkpoint.ts:642 restoreSlot;健康快照 captureHealthy 在 profile-checkpoint.ts:564)。
+  {
+    method: 'plugin.add',
+    http: 'POST',
+    path: '/huaanwork/plugin/add',
+    handler: pluginRoute(async (req, ctx) => {
+      const source = bodyParam(req.body, 'source')
+      if (!source) throw new RouteError(400, 'bad-request', 'plugin.add requires params.source')
+      try {
+        return await addPlugin(ctx, source)
+      } catch (error) {
+        rethrowPluginCommand(error)
+      }
+    }),
+  },
+  {
+    method: 'plugin.remove',
+    http: 'POST',
+    path: '/huaanwork/plugin/remove',
+    handler: pluginRoute(async (req, ctx) => {
+      const name = bodyParam(req.body, 'name')
+      if (!name) throw new RouteError(400, 'bad-request', 'plugin.remove requires params.name')
+      try {
+        return await removePlugin(ctx, name)
+      } catch (error) {
+        rethrowPluginCommand(error)
+      }
+    }),
+  },
   { method: 'plugin.list', http: 'GET', path: '/huaanwork/plugin/list', handler: storeRoute(async (_req, ctx) => listPlugins(ctx.profileDir)) }, // Task 10 (文件 I/O 读 package.json bundles)
 
   // skill

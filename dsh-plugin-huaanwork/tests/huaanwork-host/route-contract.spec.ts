@@ -61,11 +61,8 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.pruneSessions': ['removed'],
 }
 
-/** 54 个方法中处于 501 notImplemented 状态的方法集合 (M4 逐步接入)。 */
-export const METHODS_501 = new Set([
-  'plugin.add',
-  'plugin.remove',
-])
+/** 54 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
+export const METHODS_501 = new Set<string>([])
 
 /** 客户端 54 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
 export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
@@ -124,8 +121,8 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'auth.changePassword': ['ok'],
 
   // plugin
-  'plugin.add': ['bundles'], // 501
-  'plugin.remove': ['bundles'], // 501
+  'plugin.add': ['bundles'],
+  'plugin.remove': ['bundles'],
   'plugin.list': ['plugins'],
 
   // skill
@@ -176,8 +173,9 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
 
 /**
  * 服务端各方法 handler 真实返回载荷的已知字段集合。
- * 38 条已实现路由为其真实载荷键 (含白名单内的可选字段);
- * 16 条 501 路由在当前 Task 0 阶段期望为 ['error'] 信封。
+ * 已实现路由为其真实载荷键 (含白名单内的可选字段)。
+ * 仍处 501 的方法期望为 ['error'] 信封;Task 6 之后该集合为空。
+ * plugin.add/remove 的必含键是 bundles;restarting 只在 OPTIONAL_KEYS_WHITELIST,不进必含集合。
  */
 export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   // workspace
@@ -235,8 +233,8 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'auth.changePassword': ['ok'],
 
   // plugin
-  'plugin.add': ['error'],
-  'plugin.remove': ['error'],
+  'plugin.add': ['bundles'],
+  'plugin.remove': ['bundles'],
   'plugin.list': ['plugins'],
 
   // skill
@@ -333,11 +331,11 @@ describe('Route Contract Cross-Test (D6)', () => {
     expect(clientMethods).toEqual(serverMethods)
   })
 
-  test('52 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
+  test('54 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const [method, clientRoute] of Object.entries(ROUTES)) {
-      if (METHODS_501.has(method)) continue // 2 条 501 在专用测试中检验
+      if (METHODS_501.has(method)) continue
 
       const serverRoute = serverRouteMap.get(method)
       expect(serverRoute).toBeDefined()
@@ -361,33 +359,38 @@ describe('Route Contract Cross-Test (D6)', () => {
     }
   })
 
-  test('2 条 501 路由契约比对: 服务端返回 error 信封, 客户端真实必含键与 TARGET_BUSINESS_REQUIRED_KEYS 严格双向相等', () => {
+  test('零 501: plugin.add/remove 必含键为 bundles, restarting 不在必含集合', () => {
+    expect(METHODS_501.size).toBe(0)
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
-    for (const method of METHODS_501) {
+    for (const method of ['plugin.add', 'plugin.remove'] as const) {
+      expect(METHODS_501.has(method)).toBe(false)
+      expect(SERVER_EXPECTED_KEYS[method]).toEqual(['bundles'])
+      const optionalKeys = OPTIONAL_KEYS_WHITELIST[method] ?? []
+      expect(optionalKeys).toEqual(['restarting'])
+      const requiredKeys = (SERVER_EXPECTED_KEYS[method] ?? []).filter((key) => !optionalKeys.includes(key))
+      expect(requiredKeys).toEqual(['bundles'])
+      expect(requiredKeys).not.toContain('restarting')
+
       const clientRoute = ROUTES[method]
       const serverRoute = serverRouteMap.get(method)
       expect(clientRoute).toBeDefined()
       expect(serverRoute).toBeDefined()
       if (!clientRoute || !serverRoute) continue
-
-      // 1. HTTP 动词与 Path 严格匹配
-      expect(clientRoute.http).toBe(serverRoute.http)
-      expect(clientRoute.path).toBe(serverRoute.path)
-
-      // 2. 服务端当前期望键恒为 ['error']
-      expect(SERVER_EXPECTED_KEYS[method]).toEqual(['error'])
-
-      // 3. 客户端真实期望必含键与 TARGET_BUSINESS_REQUIRED_KEYS 严格双向相等 (无缝切换保证)
-      const clientKeys = CLIENT_REQUIRED_KEYS[method] ?? []
-      const targetKeys = TARGET_BUSINESS_REQUIRED_KEYS[method] ?? []
-      expect(new Set(clientKeys)).toEqual(new Set(targetKeys))
+      verifyMethodContract(
+        method,
+        clientRoute,
+        serverRoute,
+        CLIENT_REQUIRED_KEYS[method] ?? [],
+        SERVER_EXPECTED_KEYS[method] ?? [],
+        optionalKeys,
+      )
     }
   })
 
   test('16 个 501 路由预留业务键 TARGET_BUSINESS_REQUIRED_KEYS 精确核验 (评审 P3-4 / 旧 host.ts 口径)', () => {
     expect(Object.keys(TARGET_BUSINESS_REQUIRED_KEYS).length).toBe(16)
-    expect(METHODS_501.size).toBe(2)
+    expect(METHODS_501.size).toBe(0)
 
     // 逐项严格断言评审审查要求的真实键名:
     expect(TARGET_BUSINESS_REQUIRED_KEYS['plugin.add']).toEqual(['bundles'])

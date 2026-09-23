@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
+import type { DesktopPnpm } from '../pnpm.ts'
 import { emptyAttachments, type AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
 import type { HuaanworkEventHub } from './events.ts'
 import type { RouteContext } from './routes.ts'
@@ -122,6 +123,7 @@ export function installHuaanworkHolders(
     )
   }
 
+  const desktopPnpm = lookupDesktopPnpm(ctx)
   return {
     dshHome: config.dshHome,
     profileDir: config.profileDir,
@@ -132,5 +134,16 @@ export function installHuaanworkHolders(
     },
     runtimeCtx: ctx as unknown as SessionRuntimeContext,
     requestRestart,
+    ...(desktopPnpm ? { desktopPnpm } : {}),
   }
+}
+
+function lookupDesktopPnpm(ctx: Context): Pick<DesktopPnpm, 'runPlugin'> | undefined {
+  try {
+    const service = ctx.get('desktopPnpm') as Pick<DesktopPnpm, 'runPlugin'> | undefined
+    if (service && typeof service.runPlugin === 'function') return service
+  } catch {
+    // desktop-pnpm 尚未挂上时保持缺席;写路径请求期再查 runtimeCtx,仍没有则 503。
+  }
+  return undefined
 }
