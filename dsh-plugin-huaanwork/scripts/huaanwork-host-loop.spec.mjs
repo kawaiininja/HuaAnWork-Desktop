@@ -604,6 +604,7 @@ test('workspace pendingRoot:project.open 经 route 驱动写盘,二次组合 + b
   assert.equal(agent.session?.header?.cwd, repo2, 'agent-loop cwd follows pendingRoot')
   const expectedSessionId = `huaanwork-${createHash('sha256').update(resolvePath(repo2)).digest('hex').slice(0, 16)}`
   assert.equal(agent.session?.id, expectedSessionId, 'session id minted from pendingRoot')
+  assert.equal(String(agent.session?.id).startsWith('huaanwork-chat'), false, 'new session ids do not use the legacy huaanwork-chat prefix')
 
   // huaanwork-host 首个 effect:pendingRoot 已清(文件保留 {} 占位,不删除)。
   const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8'))

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -16,7 +16,9 @@ import {
   type SessionRuntimeContext,
 } from '../../src/huaanwork-host/sessions.ts'
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
-import { readHuaanworkSettings, writeHuaanworkSettings } from '../../src/huaanwork-host/settings.ts'
+import { emptySettings, readHuaanworkSettings, writeHuaanworkSettings } from '../../src/huaanwork-host/settings.ts'
+import { assertStreamNetworkAllowed } from '../../src/huaanwork-host/net-gate.ts'
+import { sweepProjectLegacySessions } from '../../src/huaanwork-host/session-sweep.ts'
 
 // —— 用例移植自旧 sidecar session-history.test.ts(L61-69 / L115-153 / L220-241)
 // 与 host.ts 会话 case 语义;存储 fixture 钉死读路径 <dshHome>/sessions ——
@@ -362,5 +364,44 @@ describe('settings 读取一致性', () => {
     const settings = await readHuaanworkSettings(root)
     expect(settings.allow_network).toBe(false)
     expect(settings.base_url).toBe('http://127.0.0.1:11434/v1')
+  })
+})
+
+describe('stream network gate (旧 automations-host.test.ts 模型流层)', () => {
+  test('blocks public endpoints unless allow_network is on', () => {
+    const remote = { ...emptySettings(), base_url: 'https://api.example.com/v1', allow_network: false }
+    expect(() => assertStreamNetworkAllowed(remote)).toThrow(/公网/)
+    expect(() => assertStreamNetworkAllowed({ ...remote, allow_network: true })).not.toThrow()
+  })
+})
+
+describe('session-sweep dual prefix (旧 unified-channel.test.ts:463)', () => {
+  test('project sweep keeps huaanwork-auto- and huaanwork-chat-auto- sessions', async () => {
+    const root = freshTmp()
+    const project = join(root, 'project')
+    mkdirSync(project, { recursive: true })
+    const sessionsRoot = join(root, 'dsh', 'sessions')
+    const chatAuto = 'huaanwork-chat-auto-legacy-run1'
+    const currentAuto = 'huaanwork-auto-legacy-run2'
+    const ordinary = 'plain-user-session'
+    const userChat = 'huaanwork-chat-feedfacecafebeef'
+    const elsewhere = join(root, 'elsewhere')
+    mkdirSync(elsewhere, { recursive: true })
+    writePersistedSession(join(root, 'dsh'), chatAuto, project)
+    writePersistedSession(join(root, 'dsh'), currentAuto, project)
+    writePersistedSession(join(root, 'dsh'), ordinary, project)
+    const userDir = join(sessionsRoot, 'user-bucket', userChat)
+    mkdirSync(userDir, { recursive: true })
+    writeFileSync(
+      join(userDir, 'session.jsonl'),
+      sessionLog([{ type: 'session', version: 0, id: userChat, createdAt: 1_000, cwd: elsewhere, delegationDepth: 0 }]),
+    )
+
+    const swept = await sweepProjectLegacySessions(sessionsRoot, [project], new Set())
+    expect(swept.removed).toBe(1)
+    expect(existsSync(join(sessionsRoot, 'repo', chatAuto))).toBe(true)
+    expect(existsSync(join(sessionsRoot, 'repo', currentAuto))).toBe(true)
+    expect(existsSync(join(sessionsRoot, 'repo', ordinary))).toBe(false)
+    expect(existsSync(userDir)).toBe(true)
   })
 })

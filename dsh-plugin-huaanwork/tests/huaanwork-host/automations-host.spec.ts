@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 
 import type { AutomationInfo, RpcEvent, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
@@ -754,4 +754,122 @@ test('agent timeout cancels the session and settles the turn before the next age
   expect(h.state.maxInFlight).toBe(1)
   expect(h.state.cancels).toEqual([h.followups[0]?.sessionId, h.followups[1]?.sessionId])
   expect(h.state.inFlight).toBe(0)
+}, 15_000)
+
+test('manual agent run events carry runId, sessionId, trigger, status and durationMs, and thinking is stripped', async () => {
+  const h = makeHarness()
+  h.state.reply = '<think>先想一下</think>今日早报：市场上涨 1.2%'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '事件' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '每日早报', prompt: '生成今日早报' })
+  const accepted = (await handler('automation.run')(body({ id: automation.id }), h.routeCtx)) as {
+    queued: boolean
+    runId: string
+  }
+  expect(accepted.queued).toBe(true)
+  expect(typeof accepted.runId).toBe('string')
+
+  const ended = await waitRunEnd(h.events, automation.id)
+  const started = h.events.find((event) => event.event === 'automation/run-start' && event.automationId === automation.id)
+  expect(started).toMatchObject({
+    runId: accepted.runId,
+    trigger: 'manual',
+    sessionId: `huaanwork-auto-${automation.id}-${accepted.runId}`,
+  })
+  expect(ended).toMatchObject({
+    runId: accepted.runId,
+    status: 'ok',
+    ok: true,
+    sessionId: `huaanwork-auto-${automation.id}-${accepted.runId}`,
+  })
+  expect(typeof (ended as { durationMs?: number }).durationMs).toBe('number')
+
+  const run = (await recentRuns(h.profileDir, automation.id))[0]
+  expect(run?.output).toBe('今日早报：市场上涨 1.2%')
+  expect(run?.status).toBe('ok')
+  expect(run?.trigger).toBe('manual')
+  expect(run?.durationMs).toBe((run?.endedAt ?? 0) - (run?.startedAt ?? 0))
+})
+
+test('two parallel script tasks do not lock workspace.open', async () => {
+  const h = makeHarness()
+  const other = mkdtempSync(join(tmpdir(), 'hw-auto-open-'))
+  dirs.push(other)
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '并行' })
+  const marks = [0, 1].map((index) => join(h.neutral, `open-mark-${index}`))
+  const releases = [0, 1].map((index) => join(h.neutral, `open-release-${index}`))
+  h.releaseFiles.push(...releases)
+  const tasks = await Promise.all(
+    marks.map((mark, index) =>
+      scriptTask(h.profileDir, holdCommand(mark, releases[index]!), {
+        projectId: project.id,
+        name: `并行脚本-${index}`,
+      }),
+    ),
+  )
+  for (const task of tasks) void handler('automation.run')(body({ id: task.id }), h.routeCtx)
+  await poll(() => marks.every((mark) => existsSync(mark)) && h.events.filter((event) => event.event === 'automation/run-start').length === 2)
+  expect(h.events.some((event) => event.event === 'automation/run-end')).toBe(false)
+
+  h.routeCtx.requestRestart = async () => true
+  const opened = await handler('workspace.open')(body({ root: other }), h.routeCtx)
+  expect(opened).toEqual({ restarting: true, workspaceRoot: resolve(other) })
+
+  for (const release of releases) writeFileSync(release, '1')
+  for (const task of tasks) await waitRunEnd(h.events, task.id)
+}, 15_000)
+
+test('agent output drops a closed think block', async () => {
+  const h = makeHarness()
+  h.state.reply = '<think>先想一下</think>今日早报：市场上涨 1.2%'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '早报' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '每日早报', prompt: '生成今日早报' })
+  await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  await waitRunEnd(h.events, automation.id)
+  expect((await recentRuns(h.profileDir, automation.id))[0]?.output).toBe('今日早报：市场上涨 1.2%')
+})
+
+test('a once task disables itself after it fires and does not record missed', async () => {
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '一次' })
+  const automation = await scriptTask(h.profileDir, nodeEval('process.stdout.write("once-ok")'), {
+    projectId: project.id,
+    name: '一次性任务',
+    schedule: { kind: 'once', at: Date.now() + 60_000 },
+  })
+  await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  await waitRunEnd(h.events, automation.id)
+  const stored = (await listAutomations(h.profileDir)).find((item) => item.id === automation.id)
+  expect(stored?.enabled).toBe(false)
+  const runs = await recentRuns(h.profileDir, automation.id)
+  expect(runs).toHaveLength(1)
+  expect(runs[0]).toMatchObject({ status: 'ok', output: 'once-ok' })
+  expect(runs.some((run) => run.status === 'missed')).toBe(false)
+})
+
+test('two parallel script tasks do not lock workspace.open', async () => {
+  const h = makeHarness()
+  const other = mkdtempSync(join(tmpdir(), 'hw-auto-open-'))
+  dirs.push(other)
+  mkdirSync(h.neutral, { recursive: true })
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '并行' })
+  const marks = [0, 1].map((index) => join(h.neutral, `open-mark-${index}`))
+  const releases = [0, 1].map((index) => join(h.neutral, `open-release-${index}`))
+  h.releaseFiles.push(...releases)
+  const tasks = await Promise.all(
+    marks.map((mark, index) =>
+      scriptTask(h.profileDir, holdCommand(mark, releases[index]!), {
+        projectId: project.id,
+        name: `并行脚本-${index}`,
+      }),
+    ),
+  )
+  for (const task of tasks) void handler('automation.run')(body({ id: task.id }), h.routeCtx)
+  await poll(() => marks.every((mark) => existsSync(mark)) && runEnds(h.events, tasks[0]!.id).length === 0)
+  expect(runEnds(h.events, tasks[1]!.id)).toHaveLength(0)
+  expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
+  h.routeCtx.requestRestart = async () => true
+  const opened = await handler('workspace.open')(body({ root: other }), h.routeCtx)
+  expect(opened).toEqual({ restarting: true, workspaceRoot: other })
+  for (const release of releases) writeFileSync(release, '1')
+  for (const task of tasks) await waitRunEnd(h.events, task.id)
 }, 15_000)

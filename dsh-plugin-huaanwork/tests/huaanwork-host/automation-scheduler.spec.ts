@@ -2,7 +2,7 @@
  * 调度器 tick(Task 5)。间隔只走 HUAANWORK_AUTOMATION_TICK_MS,不睡 60 秒。
  * agent 回合用进程内 double,不 boot lib/。
  */
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -13,6 +13,7 @@ import {
   MISSING_PROJECT_OUTPUT,
   automationTail,
   bindAutomationRuntime,
+  enqueueAutomation,
   type AutomationRuntime,
 } from '../../src/huaanwork-host/automations-host.ts'
 import {
@@ -146,6 +147,12 @@ function start(h: Harness, opts?: { disabled?: boolean }): void {
 
 function useTick(ms: number): void {
   process.env.HUAANWORK_AUTOMATION_TICK_MS = String(ms)
+}
+
+function holdCommand(mark: string, release: string): string {
+  const script =
+    'const fs=require("node:fs"); fs.writeFileSync(process.env.MARK,"1"); const end=Date.now()+8000; while(!fs.existsSync(process.env.RELEASE)&&Date.now()<end){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,40)}'
+  return `MARK=${quote(mark)} RELEASE=${quote(release)} ${quote(process.execPath)} -e ${quote(script)}`
 }
 
 async function poll(predicate: () => boolean | Promise<boolean>, timeoutMs = 4_000): Promise<void> {
@@ -437,4 +444,61 @@ test('neutral tasks run when the current root is the neutral root', async () => 
   await poll(() => runEvents(h.events, 'automation/run-end', task.id).length === 1)
   expect((await recentRuns(h.profileDir, task.id))[0]?.output).toBe('tick-ok')
   expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
+})
+
+test('a due agent still enqueues while a script task is running', async () => {
+  useTick(20)
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '同根' })
+  const mark = join(h.neutral, 'script-mark')
+  const release = join(h.neutral, 'script-release')
+  const script = await makeTask(h.profileDir, {
+    projectId: project.id,
+    name: '慢脚本',
+    schedule: { kind: 'manual' },
+    command: holdCommand(mark, release),
+  })
+  const agent = await makeTask(h.profileDir, {
+    projectId: project.id,
+    kind: 'agent',
+    prompt: '生成产出',
+    name: '到期 agent',
+  })
+  await arm(h.profileDir, agent.id, Date.now() - 1_000)
+  bindAutomationRuntime(h.runtime, h.routeCtx)
+  try {
+    void enqueueAutomation(script, { trigger: 'manual' })
+    await poll(() => existsSync(mark) && runEvents(h.events, 'automation/run-start', script.id).length === 1)
+    start(h)
+
+    await poll(() => runEvents(h.events, 'automation/run-end', agent.id).length === 1)
+    expect(runEvents(h.events, 'automation/run-end', script.id)).toHaveLength(0)
+    expect((await recentRuns(h.profileDir, agent.id))[0]?.trigger).toBe('schedule')
+  } finally {
+    writeFileSync(release, '1')
+  }
+  await poll(() => runEvents(h.events, 'automation/run-end', script.id).length === 1)
+}, 15_000)
+
+test('a due once task disables itself after firing and does not record missed', async () => {
+  useTick(20)
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '一次' })
+  const at = Date.now() + 80
+  const once = await makeTask(h.profileDir, {
+    projectId: project.id,
+    name: '一次性',
+    schedule: { kind: 'once', at },
+    command: `${quote(process.execPath)} -e ${quote('process.stdout.write("once-ok")')}`,
+  })
+  await arm(h.profileDir, once.id, at)
+  start(h)
+
+  await poll(() => runEvents(h.events, 'automation/run-end', once.id).length === 1)
+  expect(runEvents(h.events, 'automation/run-end', once.id)[0]).toMatchObject({ ok: true })
+  const stored = await findAutomation(h.profileDir, once.id)
+  expect(stored.enabled).toBe(false)
+  expect(stored.nextRunAt).toBeUndefined()
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect((await recentRuns(h.profileDir, once.id)).some((run) => run.status === 'missed')).toBe(false)
 })
