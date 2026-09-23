@@ -521,6 +521,7 @@ export function createAgentsHost(opts: {
           delete map[key]
         }
         writeEnabledMap(enabledPath, map)
+        opts.onCatalogChange?.()
         return
       }
 
@@ -617,6 +618,7 @@ export function createAgentsHost(opts: {
       })
 
       writeEndpoints(endpointsPath, entries)
+      opts.onCatalogChange?.()
       return { ok: true }
     },
 
@@ -624,6 +626,7 @@ export function createAgentsHost(opts: {
       const entries = readEndpoints(endpointsPath)
       const nextEntries = entries.filter((e) => e.name !== name)
       writeEndpoints(endpointsPath, nextEntries)
+      opts.onCatalogChange?.()
     },
 
     snapshotForRuntime(): AgentCatalogSnapshot {
@@ -668,30 +671,5 @@ export function createAgentsHost(opts: {
 
       return { items: snapshotItems }
     },
-  }
-}
-
-/**
- * M3 占位目录:空 catalog。行为与旧 sidecar「agents_host 未配置/拉取失败」一致——
- * @agent 分发对任意名字抛「智能体「x」未启用或不存在」,不静默假成功。
- * index.ts 在 boot 时以 createAgentsHost(...) 替换并经 setAgentsDirectory() 注入。
- */
-export function createUnavailableAgentsDirectory(): AgentsHost {
-  const empty = { items: [] }
-  return {
-    list: () => empty,
-    refresh: async () => empty,
-    get: async () => undefined,
-    setEnabled: (name) => {
-      throw new Error(`智能体「${name}」目录不可用(M4 接入)`)
-    },
-    addEndpoint: (input) => ({
-      ok: false as const,
-      fieldErrors: [{ field: 'name', message: `智能体「${input.name}」目录不可用(M4 接入)` }],
-    }),
-    removeEndpoint: (name) => {
-      throw new Error(`智能体「${name}」目录不可用(M4 接入)`)
-    },
-    snapshotForRuntime: () => ({ items: [] }),
   }
 }

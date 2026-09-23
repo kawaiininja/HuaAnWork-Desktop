@@ -14,7 +14,8 @@ import {
   type RouteContext,
 } from '../../src/huaanwork-host/routes.ts'
 import { hasGit, listTree } from '../../src/huaanwork-host/native.ts'
-import { sessionSendBlockers } from '../../src/huaanwork-host/sessions.ts'
+import { getAgentsDirectory, sessionSendBlockers, setAgentsDirectory } from '../../src/huaanwork-host/sessions.ts'
+import { createAgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 import { readPendingWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 
@@ -56,13 +57,12 @@ describe('ROUTE_TABLE registry', () => {
     ])
   })
 
-  test('M4 域写操作诚实 501,不静默假成功(恰 10 个,测试即口径文档)', async () => {
+  test('M4 域写操作诚实 501,不静默假成功(恰 7 个,测试即口径文档)', async () => {
     const notWired = [
       'automation.create', 'automation.update', 'automation.remove', 'automation.run', 'automation.pruneSessions',
-      'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
       'plugin.add', 'plugin.remove',
     ]
-    expect(notWired).toHaveLength(10)
+    expect(notWired).toHaveLength(7)
     for (const method of notWired) {
       const route = ROUTE_TABLE.find((r) => r.method === method)!
       expect(route).toBeDefined()
@@ -75,7 +75,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 44 个方法外其余 10 个方法均返回 501', async () => {
+  test('除已实现的 47 个方法外其余 7 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -123,8 +123,12 @@ describe('ROUTE_TABLE registry', () => {
       'skill.importPreview',
       'skill.import',
       'skill.setEnabled',
+      // Task 2 (M4): agent 写路径 ×3
+      'agent.setEnabled',
+      'agent.addEndpoint',
+      'agent.removeEndpoint',
     ])
-    expect(implemented).toHaveLength(44)
+    expect(implemented).toHaveLength(47)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -135,7 +139,7 @@ describe('ROUTE_TABLE registry', () => {
           code: 'not-implemented',
         })
     }
-    expect(notImplementedCount).toBe(10)
+    expect(notImplementedCount).toBe(7)
   })
 })
 
@@ -189,6 +193,10 @@ describe('HTTP dispatch & security checks', () => {
 
   beforeAll(async () => {
     profileTempDir = mkdtempSync(join(tmpdir(), 'hw-route-profile-'))
+    setAgentsDirectory(createAgentsHost({
+      storageRoot: profileTempDir,
+      readSettings: () => ({ agents_host: '', agents_port: '', agents_catalog_token: '' }),
+    }))
     routeCtx = {
       dshHome: join(profileTempDir, 'dsh'),
       profileDir: profileTempDir,
@@ -1136,6 +1144,132 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
 
     const refreshed = await fetch(`${baseUrl}/huaanwork/agent/refresh`, authed({ method: 'POST' }))
     expect(await refreshed.json()).toEqual({ items: [] })
+  })
+
+  test('agent 写路由 (Task 2 M4): setEnabled / addEndpoint / removeEndpoint 正常与 400 校验', async () => {
+    // 1. addEndpoint 校验: 非对象 body 返回 400 bad-request
+    const addBadBody = await fetch(`${baseUrl}/huaanwork/agent/addEndpoint`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify('not-an-object'),
+    }))
+    expect(addBadBody.status).toBe(400)
+    expect(await addBadBody.json()).toMatchObject({
+      error: { code: 'bad-request', message: 'agent.addEndpoint requires object body' },
+    })
+
+    // 2. addEndpoint 校验: 参数不合法 (如 kind: 'agent') 返回 200 { ok: false, fieldErrors }
+    const addInvalidRes = await fetch(`${baseUrl}/huaanwork/agent/addEndpoint`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'my-agent', kind: 'agent' }),
+    }))
+    expect(addInvalidRes.status).toBe(200)
+    const addInvalidJson = await addInvalidRes.json()
+    expect(addInvalidJson.ok).toBe(false)
+    expect(addInvalidJson.fieldErrors).toBeDefined()
+    expect(addInvalidJson.fieldErrors.length).toBeGreaterThan(0)
+
+    // 3. addEndpoint 成功添加本地工具端点 (200 { ok: true })
+    const addValidRes = await fetch(`${baseUrl}/huaanwork/agent/addEndpoint`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'route-test-tool',
+        kind: 'tool',
+        entrypoint: { kind: 'http', url: 'http://127.0.0.1:9000/invoke' },
+        description: '路由测试工具',
+      }),
+    }))
+    expect(addValidRes.status).toBe(200)
+    expect(await addValidRes.json()).toEqual({ ok: true })
+
+    // 验证在 agent/list 中能读到该条目
+    const listRes = await fetch(`${baseUrl}/huaanwork/agent/list`, authed())
+    expect(listRes.status).toBe(200)
+    const listJson = await listRes.json()
+    expect(listJson.items.some((i: any) => i.name === 'route-test-tool' && i.source === 'local')).toBe(true)
+
+    // 4. setEnabled 校验: 缺少 name 返回 400 bad-request
+    const setNoName = await fetch(`${baseUrl}/huaanwork/agent/setEnabled`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }))
+    expect(setNoName.status).toBe(400)
+    expect(await setNoName.json()).toMatchObject({
+      error: { code: 'bad-request', message: 'agent.setEnabled requires params.name' },
+    })
+
+    // 5. setEnabled 校验: 对本地端点尝试修改返回 400 store-error
+    const setLocalRes = await fetch(`${baseUrl}/huaanwork/agent/setEnabled`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'route-test-tool', enabled: true }),
+    }))
+    expect(setLocalRes.status).toBe(400)
+    expect(await setLocalRes.json()).toMatchObject({
+      error: { code: 'store-error', message: '不能手动更改本地调试入口的启用状态' },
+    })
+
+    // 6. setEnabled 校验: 对不存在的条目返回 400 store-error
+    const setNotFound = await fetch(`${baseUrl}/huaanwork/agent/setEnabled`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'non-existent-agent', enabled: true }),
+    }))
+    expect(setNotFound.status).toBe(400)
+    expect(await setNotFound.json()).toMatchObject({
+      error: { code: 'store-error' },
+    })
+
+    // 7. setEnabled 正常成功分支验证 (200 { ok: true })
+    const origDirectory = getAgentsDirectory()
+    try {
+      let enabledCall: any = null
+      setAgentsDirectory({
+        ...origDirectory,
+        setEnabled: (name: string, enabled: boolean, confirmPermissions: boolean) => {
+          enabledCall = { name, enabled, confirmPermissions }
+        },
+      } as any)
+
+      const setSuccessRes = await fetch(`${baseUrl}/huaanwork/agent/setEnabled`, authed({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'catalog-agent', enabled: true, confirmPermissions: true }),
+      }))
+      expect(setSuccessRes.status).toBe(200)
+      expect(await setSuccessRes.json()).toEqual({ ok: true })
+      expect(enabledCall).toEqual({ name: 'catalog-agent', enabled: true, confirmPermissions: true })
+    } finally {
+      setAgentsDirectory(origDirectory)
+    }
+
+    // 8. removeEndpoint 校验: 缺少 name 返回 400 bad-request
+    const removeNoName = await fetch(`${baseUrl}/huaanwork/agent/removeEndpoint`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }))
+    expect(removeNoName.status).toBe(400)
+    expect(await removeNoName.json()).toMatchObject({
+      error: { code: 'bad-request', message: 'agent.removeEndpoint requires params.name' },
+    })
+
+    // 9. removeEndpoint 成功删除本地端点 (200 { ok: true })
+    const removeRes = await fetch(`${baseUrl}/huaanwork/agent/removeEndpoint`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'route-test-tool' }),
+    }))
+    expect(removeRes.status).toBe(200)
+    expect(await removeRes.json()).toEqual({ ok: true })
+
+    // 验证已从 agent/list 中移除
+    const afterListRes = await fetch(`${baseUrl}/huaanwork/agent/list`, authed())
+    const afterListJson = await afterListRes.json()
+    expect(afterListJson.items.some((i: any) => i.name === 'route-test-tool')).toBe(false)
   })
 
   test('plugin.list:manifest 缺失时回落 REQUIRED_BUNDLES(web 模板前导)', async () => {

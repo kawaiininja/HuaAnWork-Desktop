@@ -6,7 +6,7 @@ import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { invokeSkillText } from './skill-invoke.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
-import { createUnavailableAgentsDirectory, type AgentsHost } from './agents-host.ts'
+import type { AgentsHost } from './agents-host.ts'
 import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog } from './session-view.ts'
@@ -136,7 +136,7 @@ async function sendToAgent(
             ? text
             : (parsedAt?.remainder ?? '')
       const dispatched = await dispatchAt({
-        host: agentsDirectory,
+        host: agentsDirectory ?? EMPTY_AGENTS_HOST,
         ctx,
         sessionId,
         name: atName,
@@ -378,17 +378,37 @@ function objectBool(params: unknown, key: string): boolean {
   )
 }
 
-// —— agents 目录(Task 10 真实接线前为空目录占位,见 agents-host.ts)——
+// —— agents 目录(与 agent.list/get/refresh 路由及 @agent 分发共用同一实例,由 index.ts 注入)——
 
-let agentsDirectory: AgentsHost = createUnavailableAgentsDirectory()
+const EMPTY_AGENTS_HOST: AgentsHost = {
+  list: () => ({ items: [] }),
+  refresh: async () => ({ items: [] }),
+  get: async () => undefined,
+  setEnabled: () => {
+    throw new Error('agentsDirectory is not initialized')
+  },
+  addEndpoint: () => ({
+    ok: false,
+    fieldErrors: [{ field: 'name', message: 'agentsDirectory is not initialized' }],
+  }),
+  removeEndpoint: () => {
+    throw new Error('agentsDirectory is not initialized')
+  },
+  snapshotForRuntime: () => ({ items: [] }),
+}
 
-/** Task 10 的 agents-host 真实实现接线时调用(与 agent.list/get 路由同一实例)。 */
+let agentsDirectory: AgentsHost | null = null
+
+/** agents-host 真实实现接线时调用(与 agent.list/get 路由同一实例)。 */
 export function setAgentsDirectory(directory: AgentsHost): void {
   agentsDirectory = directory
 }
 
 /** agent.list/get/refresh 路由与 @agent 分发共用同一目录实例(index.ts 注入)。 */
 export function getAgentsDirectory(): AgentsHost {
+  if (!agentsDirectory) {
+    throw new Error('agentsDirectory is not initialized')
+  }
   return agentsDirectory
 }
 

@@ -394,9 +394,47 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     return (await getAgentsDirectory().get(name, source)) ?? null
   }) }, // Task 10
   { method: 'agent.refresh', http: 'POST', path: '/huaanwork/agent/refresh', handler: storeRoute(async () => getAgentsDirectory().refresh()) }, // Task 10 (网络请求拉取目录 + 本地扫描)
-  { method: 'agent.setEnabled', http: 'POST', path: '/huaanwork/agent/setEnabled', handler: notImplemented('agent.setEnabled') }, // M4
-  { method: 'agent.addEndpoint', http: 'POST', path: '/huaanwork/agent/addEndpoint', handler: notImplemented('agent.addEndpoint') }, // M4
-  { method: 'agent.removeEndpoint', http: 'POST', path: '/huaanwork/agent/removeEndpoint', handler: notImplemented('agent.removeEndpoint') }, // M4
+  {
+    method: 'agent.setEnabled',
+    http: 'POST',
+    path: '/huaanwork/agent/setEnabled',
+    handler: storeRoute(async (req) => {
+      if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        throw new RouteError(400, 'bad-request', 'agent.setEnabled requires object body')
+      }
+      const body = req.body as Record<string, unknown>
+      const name = typeof body.name === 'string' && body.name ? body.name : undefined
+      if (!name) throw new RouteError(400, 'bad-request', 'agent.setEnabled requires params.name')
+      getAgentsDirectory().setEnabled(name, Boolean(body.enabled), Boolean(body.confirmPermissions))
+      return { ok: true }
+    }),
+  }, // Task 2 (M4)
+  {
+    method: 'agent.addEndpoint',
+    http: 'POST',
+    path: '/huaanwork/agent/addEndpoint',
+    handler: storeRoute(async (req) => {
+      if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        throw new RouteError(400, 'bad-request', 'agent.addEndpoint requires object body')
+      }
+      return getAgentsDirectory().addEndpoint(req.body as Parameters<ReturnType<typeof getAgentsDirectory>['addEndpoint']>[0])
+    }),
+  }, // Task 2 (M4)
+  {
+    method: 'agent.removeEndpoint',
+    http: 'POST',
+    path: '/huaanwork/agent/removeEndpoint',
+    handler: storeRoute(async (req) => {
+      if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        throw new RouteError(400, 'bad-request', 'agent.removeEndpoint requires object body')
+      }
+      const body = req.body as Record<string, unknown>
+      const name = typeof body.name === 'string' && body.name ? body.name : undefined
+      if (!name) throw new RouteError(400, 'bad-request', 'agent.removeEndpoint requires params.name')
+      getAgentsDirectory().removeEndpoint(name)
+      return { ok: true }
+    }),
+  }, // Task 2 (M4)
 
   // status (纯内存 handler: 恒返回 { ready: true }, 无 I/O 或异常路径)
   { method: 'status.get', http: 'GET', path: '/huaanwork/status', handler: async () => ({ ready: true }) }, // Task 4

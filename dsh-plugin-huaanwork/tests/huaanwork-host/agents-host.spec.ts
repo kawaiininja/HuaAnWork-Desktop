@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -248,5 +248,191 @@ describe('agents-host TTL / LAN 复检 / addEndpoint(旧用例 14、19、20)', (
       expect(result.fieldErrors.some((e) => e.field === 'kind')).toBe(true)
     }
     expect(host.list().items).toEqual([])
+  })
+
+  test('8. setEnabled: 对 local 报错; catalog 启用需确认权限; 未确认抛错', async () => {
+    const storageRoot = makeTempDir()
+    const catalogItem = {
+      name: 'pdf-extract',
+      version: '1.0.0',
+      kind: 'tool',
+      description: 'PDF',
+      permissions: ['network'],
+      entrypoint: { kind: 'http', url: 'http://127.0.0.1:9000/invoke' },
+    }
+
+    const { port } = await startTestServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ items: [catalogItem] }))
+    })
+
+    const host = createAgentsHost({
+      storageRoot,
+      readSettings: () => ({
+        agents_host: '127.0.0.1',
+        agents_port: port,
+        agents_catalog_token: '',
+      }),
+    })
+
+    await host.refresh()
+    host.addEndpoint({
+      name: 'my-local',
+      kind: 'tool',
+      entrypoint: { kind: 'http', url: 'http://127.0.0.1:9000/invoke' },
+    })
+
+    // 对 local 报错
+    expect(() => host.setEnabled('my-local', true, true)).toThrow(/不能手动更改本地调试入口的启用状态/)
+    expect(() => host.setEnabled('my-local', false, false)).toThrow(/不能手动更改本地调试入口的启用状态/)
+
+    // 不存在的条目报错
+    expect(() => host.setEnabled('non-existent', true, true)).toThrow(/条目不存在/)
+
+    // catalog 启用未确认权限报错
+    expect(() => host.setEnabled('pdf-extract', true, false)).toThrow(/启用智能体必须确认权限/)
+
+    // catalog 确认权限后启用成功
+    host.setEnabled('pdf-extract', true, true)
+    expect(host.list().items.find((i) => i.name === 'pdf-extract')?.enabled).toBe(true)
+
+    // 禁用无需确认权限
+    host.setEnabled('pdf-extract', false, false)
+    expect(host.list().items.find((i) => i.name === 'pdf-extract')?.enabled).toBe(false)
+
+    // 检查 agents-enabled.json
+    host.setEnabled('pdf-extract', true, true)
+    const enabledRaw = JSON.parse(readFileSync(join(storageRoot, 'agents-enabled.json'), 'utf8'))
+    expect(enabledRaw['catalog:pdf-extract']).toBe(true)
+
+    host.setEnabled('pdf-extract', false, false)
+    const disabledRaw = JSON.parse(readFileSync(join(storageRoot, 'agents-enabled.json'), 'utf8'))
+    expect(disabledRaw['catalog:pdf-extract']).toBeUndefined()
+  })
+
+  test('7. addEndpoint 校验矩阵: AGENT_NAME_RE/kind/URL/重名校验与合法写入', () => {
+    const storageRoot = makeTempDir()
+    const host = createAgentsHost({ storageRoot, readSettings: unconfigured })
+
+    // AGENT_NAME_RE 校验: 非法字符、大写字母、超长、空名称
+    const invalidNameRes = host.addEndpoint({
+      name: 'Invalid_Name',
+      kind: 'tool',
+      entrypoint: { kind: 'http', url: 'http://127.0.0.1:9000/invoke' },
+    })
+    expect(invalidNameRes.ok).toBe(false)
+    if (!invalidNameRes.ok) {
+      expect(invalidNameRes.fieldErrors.some((e) => e.field === 'name')).toBe(true)
+    }
+
+    const longMcpRes = host.addEndpoint({
+      name: 'a-very-long-mcp-tool-name-exceeding-thirty-two-chars',
+      kind: 'tool',
+      entrypoint: { kind: 'mcp', url: 'http://127.0.0.1:9000/mcp' },
+    })
+    expect(longMcpRes.ok).toBe(false)
+    if (!longMcpRes.ok) {
+      expect(longMcpRes.fieldErrors.some((e) => e.field === 'name' && /MCP 工具名称不能超过 32 字符/.test(e.message))).toBe(true)
+    }
+
+    // kind === 'agent' 拒绝
+    const agentKindRes = host.addEndpoint({
+      name: 'my-agent',
+      kind: 'agent',
+      entrypoint: { kind: 'http', url: 'http://127.0.0.1:9000/invoke' },
+    })
+    expect(agentKindRes.ok).toBe(false)
+    if (!agentKindRes.ok) {
+      expect(agentKindRes.fieldErrors.some((e) => e.field === 'kind' && /本地入口仅支持小工具/.test(e.message))).toBe(true)
+    }
+
+    // URL 协议与局域网校验: 公网 URL 拒绝, 非 http/https 协议拒绝, 非法 URL 拒绝
+    const publicUrlRes = host.addEndpoint({
+      name: 'public-tool',
+      kind: 'tool',
+      entrypoint: { kind: 'http', url: 'https://api.openai.com/v1' },
+    })
+    expect(publicUrlRes.ok).toBe(false)
+    if (!publicUrlRes.ok) {
+      expect(publicUrlRes.fieldErrors.some((e) => e.field === 'url' && /局域网/.test(e.message))).toBe(true)
+    }
+
+    const badProtocolRes = host.addEndpoint({
+      name: 'bad-proto',
+      kind: 'tool',
+      entrypoint: { kind: 'http' as any, url: 'ftp://127.0.0.1:9000/invoke' },
+    })
+    expect(badProtocolRes.ok).toBe(false)
+    if (!badProtocolRes.ok) {
+      expect(badProtocolRes.fieldErrors.some((e) => e.field === 'url' && /http 或 https/.test(e.message))).toBe(true)
+    }
+
+    const badUrlRes = host.addEndpoint({
+      name: 'bad-url',
+      kind: 'tool',
+      entrypoint: { kind: 'http', url: 'not-a-valid-url' },
+    })
+    expect(badUrlRes.ok).toBe(false)
+    if (!badUrlRes.ok) {
+      expect(badUrlRes.fieldErrors.some((e) => e.field === 'url' && /合法 URL/.test(e.message))).toBe(true)
+    }
+
+    // 合法写入
+    const validRes = host.addEndpoint({
+      name: 'my-local-tool',
+      kind: 'tool',
+      entrypoint: { kind: 'http', url: 'http://127.0.0.1:9000/invoke' },
+      description: '本地测试工具',
+    })
+    expect(validRes.ok).toBe(true)
+
+    // 同名重名拒绝
+    const dupRes = host.addEndpoint({
+      name: 'my-local-tool',
+      kind: 'tool',
+      entrypoint: { kind: 'http', url: 'http://127.0.0.1:9000/invoke' },
+    })
+    expect(dupRes.ok).toBe(false)
+    if (!dupRes.ok) {
+      expect(dupRes.fieldErrors.some((e) => e.field === 'name' && /同名本地入口已存在/.test(e.message))).toBe(true)
+    }
+
+    // 验证 list() 与文件持久化
+    const list = host.list()
+    expect(list.items).toHaveLength(1)
+    expect(list.items[0]!.name).toBe('my-local-tool')
+    expect(list.items[0]!.source).toBe('local')
+    expect(list.items[0]!.enabled).toBe(true)
+
+    const raw = JSON.parse(readFileSync(join(storageRoot, 'agents-endpoints.json'), 'utf8'))
+    expect(raw.entries).toHaveLength(1)
+    expect(raw.entries[0].name).toBe('my-local-tool')
+  })
+
+  test('12. removeEndpoint: 删除本地入口并持久化更新', () => {
+    const storageRoot = makeTempDir()
+    const host = createAgentsHost({ storageRoot, readSettings: unconfigured })
+
+    host.addEndpoint({
+      name: 'tool-a',
+      kind: 'tool',
+      entrypoint: { kind: 'http', url: 'http://127.0.0.1:9001/invoke' },
+    })
+    host.addEndpoint({
+      name: 'tool-b',
+      kind: 'tool',
+      entrypoint: { kind: 'http', url: 'http://127.0.0.1:9002/invoke' },
+    })
+
+    expect(host.list().items).toHaveLength(2)
+
+    host.removeEndpoint('tool-a')
+    expect(host.list().items).toHaveLength(1)
+    expect(host.list().items[0]!.name).toBe('tool-b')
+
+    // 验证持久化
+    const raw = JSON.parse(readFileSync(join(storageRoot, 'agents-endpoints.json'), 'utf8'))
+    expect(raw.entries).toHaveLength(1)
+    expect(raw.entries[0].name).toBe('tool-b')
   })
 })

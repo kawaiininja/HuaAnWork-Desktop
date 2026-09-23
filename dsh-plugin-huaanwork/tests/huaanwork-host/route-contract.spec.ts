@@ -52,7 +52,7 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
   'skill.import': ['skill'],
   'skill.setEnabled': ['ok'],
   'agent.setEnabled': ['ok'],
-  'agent.addEndpoint': ['agent'],
+  'agent.addEndpoint': ['ok'],
   'agent.removeEndpoint': ['ok'],
   'automation.create': ['automation'],
   'automation.update': ['automation'],
@@ -65,9 +65,6 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
 export const METHODS_501 = new Set([
   'plugin.add',
   'plugin.remove',
-  'agent.setEnabled',
-  'agent.addEndpoint',
-  'agent.removeEndpoint',
   'automation.create',
   'automation.update',
   'automation.remove',
@@ -150,9 +147,9 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'agent.list': ['items'],
   'agent.get': [], // returns AgentInfo | null
   'agent.refresh': ['items'],
-  'agent.setEnabled': ['ok'], // 501
-  'agent.addEndpoint': ['agent'], // 501
-  'agent.removeEndpoint': ['ok'], // 501
+  'agent.setEnabled': ['ok'],
+  'agent.addEndpoint': ['ok'],
+  'agent.removeEndpoint': ['ok'],
 
   // status
   'status.get': ['ready'],
@@ -261,9 +258,9 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'agent.list': ['items', 'catalogError'],
   'agent.get': [],
   'agent.refresh': ['items', 'catalogError'],
-  'agent.setEnabled': ['error'],
-  'agent.addEndpoint': ['error'],
-  'agent.removeEndpoint': ['error'],
+  'agent.setEnabled': ['ok'],
+  'agent.addEndpoint': ['ok'],
+  'agent.removeEndpoint': ['ok'],
 
   // status
   'status.get': ['ready'],
@@ -341,11 +338,11 @@ describe('Route Contract Cross-Test (D6)', () => {
     expect(clientMethods).toEqual(serverMethods)
   })
 
-  test('44 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
+  test('47 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const [method, clientRoute] of Object.entries(ROUTES)) {
-      if (METHODS_501.has(method)) continue // 10 条 501 在专用测试中检验
+      if (METHODS_501.has(method)) continue // 7 条 501 在专用测试中检验
 
       const serverRoute = serverRouteMap.get(method)
       expect(serverRoute).toBeDefined()
@@ -369,7 +366,7 @@ describe('Route Contract Cross-Test (D6)', () => {
     }
   })
 
-  test('10 条 501 路由契约比对: 服务端返回 error 信封, 客户端真实必含键与 TARGET_BUSINESS_REQUIRED_KEYS 严格双向相等', () => {
+  test('7 条 501 路由契约比对: 服务端返回 error 信封, 客户端真实必含键与 TARGET_BUSINESS_REQUIRED_KEYS 严格双向相等', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const method of METHODS_501) {
@@ -395,7 +392,7 @@ describe('Route Contract Cross-Test (D6)', () => {
 
   test('16 个 501 路由预留业务键 TARGET_BUSINESS_REQUIRED_KEYS 精确核验 (评审 P3-4 / 旧 host.ts 口径)', () => {
     expect(Object.keys(TARGET_BUSINESS_REQUIRED_KEYS).length).toBe(16)
-    expect(METHODS_501.size).toBe(10)
+    expect(METHODS_501.size).toBe(7)
 
     // 逐项严格断言评审审查要求的真实键名:
     expect(TARGET_BUSINESS_REQUIRED_KEYS['plugin.add']).toEqual(['bundles'])
@@ -406,7 +403,7 @@ describe('Route Contract Cross-Test (D6)', () => {
     expect(TARGET_BUSINESS_REQUIRED_KEYS['skill.create']).toEqual(['skill'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['skill.update']).toEqual(['skill'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['skill.import']).toEqual(['skill'])
-    expect(TARGET_BUSINESS_REQUIRED_KEYS['agent.addEndpoint']).toEqual(['agent'])
+    expect(TARGET_BUSINESS_REQUIRED_KEYS['agent.addEndpoint']).toEqual(['ok'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['skill.setEnabled']).toEqual(['ok'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['agent.setEnabled']).toEqual(['ok'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['agent.removeEndpoint']).toEqual(['ok'])
