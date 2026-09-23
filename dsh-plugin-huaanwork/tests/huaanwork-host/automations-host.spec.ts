@@ -845,31 +845,3 @@ test('a once task disables itself after it fires and does not record missed', as
   expect(runs[0]).toMatchObject({ status: 'ok', output: 'once-ok' })
   expect(runs.some((run) => run.status === 'missed')).toBe(false)
 })
-
-test('two parallel script tasks do not lock workspace.open', async () => {
-  const h = makeHarness()
-  const other = mkdtempSync(join(tmpdir(), 'hw-auto-open-'))
-  dirs.push(other)
-  mkdirSync(h.neutral, { recursive: true })
-  const project = await createProject(h.profileDir, { root: h.neutral, name: '并行' })
-  const marks = [0, 1].map((index) => join(h.neutral, `open-mark-${index}`))
-  const releases = [0, 1].map((index) => join(h.neutral, `open-release-${index}`))
-  h.releaseFiles.push(...releases)
-  const tasks = await Promise.all(
-    marks.map((mark, index) =>
-      scriptTask(h.profileDir, holdCommand(mark, releases[index]!), {
-        projectId: project.id,
-        name: `并行脚本-${index}`,
-      }),
-    ),
-  )
-  for (const task of tasks) void handler('automation.run')(body({ id: task.id }), h.routeCtx)
-  await poll(() => marks.every((mark) => existsSync(mark)) && runEnds(h.events, tasks[0]!.id).length === 0)
-  expect(runEnds(h.events, tasks[1]!.id)).toHaveLength(0)
-  expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
-  h.routeCtx.requestRestart = async () => true
-  const opened = await handler('workspace.open')(body({ root: other }), h.routeCtx)
-  expect(opened).toEqual({ restarting: true, workspaceRoot: other })
-  for (const release of releases) writeFileSync(release, '1')
-  for (const task of tasks) await waitRunEnd(h.events, task.id)
-}, 15_000)

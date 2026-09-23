@@ -274,13 +274,13 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'two parallel script tasks do not lock workspace.open',
     label: '本任务补',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:787',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:815',
   },
   {
     file: 'automations-host.test.ts',
     title: 'scheduler tick still enqueues a due agent task while a script task runs',
     label: '本任务补',
-    evidence: 'tests/huaanwork-host/automation-scheduler.spec.ts:443',
+    evidence: 'tests/huaanwork-host/automation-scheduler.spec.ts:449',
   },
   {
     file: 'automations-host.test.ts',
@@ -298,7 +298,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'once automation disables itself after firing and never records missed',
     label: '本任务补',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:769',
+    evidence: 'tests/huaanwork-host/automation-scheduler.spec.ts:500',
   },
   {
     file: 'automations-host.test.ts',
@@ -328,19 +328,19 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'issue #2: unbound agent automation runs without any project existing',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:620',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:631',
   },
   {
     file: 'automations-host.test.ts',
     title: 'issue #2: unbound script automation runs with the neutral default root as cwd',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:620',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:636',
   },
   {
     file: 'automations-host.test.ts',
     title: 'issue #2: automation bound to a vanished project still fails with the missing-project message',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:620',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:648',
   },
   {
     file: 'unified-channel.test.ts',
@@ -376,6 +376,6 @@ export const testPortMapping: TestPortRow[] = [
     file: 'unified-channel.test.ts',
     title: 'startHost sweeps legacy chat-auto run sessions and leaves user chat sessions',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:370',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:405',
   },
 ]
