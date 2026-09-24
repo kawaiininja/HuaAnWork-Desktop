@@ -103,7 +103,9 @@ export class PluginCommandError extends Error {
  * requestConfirmedRestart 确认后用 setImmediate 安排 relaunch,CLI 未结束就被掐会留下半成品。
  *
  * 取消不置 restarting,应答安装前的 listPlugins 快照(评审 P1-2)。本函数不改写 profile,
- * 也不自造回滚。CLI 若已写入声明式清单,取消只是不重启。
+ * 也不自造回滚。CLI 若已写入声明式清单,取消只是不重启——取消应答以 message 诚实告知
+ * 「已写入清单,下次启动生效」(M4 评审 D3 处置:remove 侧无原始来源可对称回滚,
+ * 主推荐「profile 变更挪到确认之后」因 setImmediate relaunch 不可实施,均见附录 D-3)。
  *
  * 安装后 boot 失败(bad bundle 触发 row-id 断言失败等)不是自动回滚。Desktop 由
  * routeDesktopStartupFailure(main.ts:1776-1812)转入启动恢复窗口(openStartupRecoveryWindow),
@@ -120,13 +122,17 @@ export async function addPlugin(routeCtx: PluginMutationContext, source: string)
   const before = listPlugins(routeCtx.profileDir).bundles
   await runDesktopPlugin(routeCtx, ['add', resolved])
   if (!await routeCtx.requestRestart()) {
-    return { bundles: [...before] }
+    return {
+      bundles: [...before],
+      message: '已取消重启：插件已写入清单，下次启动时生效',
+    }
   }
   const listed = bundlesAfterAdd(routeCtx, before, packageName)
   return { bundles: listed.bundles, restarting: true, ...(listed.message ? { message: listed.message } : {}) }
 }
 
-/** remove 与 add 同构:无来源校验,IMMUTABLE_BUNDLES 直接拒绝。恢复口径见 addPlugin。 */
+/** remove 与 add 同构:无来源校验,IMMUTABLE_BUNDLES 直接拒绝。取消应答同样
+ * 以 message 诚实告知清单已写入(恢复口径见 addPlugin,M4 评审 D3)。 */
 export async function removePlugin(routeCtx: PluginMutationContext, name: string): Promise<PluginMutationResult> {
   if (!name) throw new Error('plugin.remove requires name')
   if (IMMUTABLE_BUNDLES.has(name)) {
@@ -135,7 +141,10 @@ export async function removePlugin(routeCtx: PluginMutationContext, name: string
   const before = listPlugins(routeCtx.profileDir).bundles
   await runDesktopPlugin(routeCtx, ['remove', name])
   if (!await routeCtx.requestRestart()) {
-    return { bundles: [...before] }
+    return {
+      bundles: [...before],
+      message: '已取消重启：插件已从清单移除，下次启动时不再加载',
+    }
   }
   const listed = bundlesAfterRemove(routeCtx, before, name)
   return { bundles: listed.bundles, restarting: true, ...(listed.message ? { message: listed.message } : {}) }

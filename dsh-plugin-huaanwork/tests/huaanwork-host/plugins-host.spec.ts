@@ -131,7 +131,7 @@ describe('plugin add/remove', () => {
     expect(ctx.desktopPnpm.runPlugin).toHaveBeenCalledWith(['add', resolve(tarball)], resolve(profileDir))
   })
 
-  test('取消路径应答的 bundles 与安装前一致,且不置 restarting', async () => {
+  test('取消路径应答的 bundles 与安装前一致,不置 restarting,并诚实告知下次启动生效', async () => {
     const profileDir = makeHome()
     writeProfile(profileDir, BASE_BUNDLES)
     const pluginDir = writePluginDir(makeHome(), 'demo-plugin')
@@ -142,7 +142,8 @@ describe('plugin add/remove', () => {
 
     const result = await addPlugin(ctx, pluginDir)
 
-    expect(result).toEqual({ bundles: BASE_BUNDLES })
+    expect(result.bundles).toEqual(BASE_BUNDLES)
+    expect(result.message).toBe('已取消重启：插件已写入清单，下次启动时生效')
     expect(result).not.toHaveProperty('restarting')
     expect(ctx.requestRestart).toHaveBeenCalledOnce()
   })
@@ -316,7 +317,10 @@ describe('plugin add/remove', () => {
       requestRestart: async () => false,
       runtimeCtx: { get: (name: string) => (name === 'desktopPnpm' ? { runPlugin } : undefined) },
     }
-    await expect(addPlugin(ctx, pluginDir)).resolves.toEqual({ bundles: BASE_BUNDLES })
+    await expect(addPlugin(ctx, pluginDir)).resolves.toMatchObject({
+      bundles: BASE_BUNDLES,
+      message: expect.stringContaining('下次启动时生效'),
+    })
     expect(runPlugin).toHaveBeenCalledWith(['add', resolve(pluginDir)], resolve(profileDir))
   })
 
@@ -350,7 +354,8 @@ describe('plugin add/remove', () => {
     }, false)
 
     const cancelled = await removePlugin(ctx, 'demo-plugin')
-    expect(cancelled).toEqual({ bundles: before })
+    expect(cancelled.bundles).toEqual(before)
+    expect(cancelled.message).toBe('已取消重启：插件已从清单移除，下次启动时不再加载')
     expect(cancelled).not.toHaveProperty('restarting')
     expect(ctx.desktopPnpm.runPlugin).toHaveBeenCalledWith(['remove', 'demo-plugin'], resolve(profileDir))
 

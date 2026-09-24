@@ -417,9 +417,11 @@ export default function Settings({
     const source = confirming;
     setConfirming(null);
     try {
-      const listed = await rpcCall<{ bundles: string[] }>("plugin.add", { source });
+      // 取消重启时 message 诚实告知「已写入清单,下次启动生效」(M4 评审 D3);
+      // 确认路径应用随即 relaunch,应答常不可达,保持原「插件已安装」缺省。
+      const listed = await rpcCall<{ bundles: string[]; message?: string }>("plugin.add", { source });
       setBundles(listed.bundles ?? []);
-      setStatus("插件已安装");
+      setStatus(listed.message ?? "插件已安装");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       onPluginApplyFail(PLUGIN_APPLY_FAIL);
@@ -429,8 +431,9 @@ export default function Settings({
 
   async function remove(name: string) {
     try {
-      const listed = await rpcCall<{ bundles: string[] }>("plugin.remove", { name });
+      const listed = await rpcCall<{ bundles: string[]; message?: string }>("plugin.remove", { name });
       setBundles(listed.bundles ?? []);
+      if (listed.message) setStatus(listed.message);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       onPluginApplyFail(PLUGIN_APPLY_FAIL);
