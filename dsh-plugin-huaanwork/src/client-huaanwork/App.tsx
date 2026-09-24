@@ -85,7 +85,7 @@ import {
   type RpcEvent,
   type TreeNode,
 } from "./api.ts";
-import { shouldHoldKeepAwake } from "./logic/keepAwake.ts";
+import { createKeepAwakeDriver, shouldHoldKeepAwake } from "./logic/keepAwake.ts";
 import { missedBannerView, nextMissedCount } from "./logic/missedBanner.ts";
 import { parseSchedulePhrase } from "./logic/schedulePhrase.ts";
 import {
@@ -345,8 +345,13 @@ export default function App() {
   const automationActiveRef = useRef(false);
   /** Task 11：run-end 通知要拼任务名，事件监听 effect 依赖数组是 []，用 ref 避免闭包读到旧 automations。 */
   const automationsRef = useRef<AutomationInfo[]>([]);
-  /** Task 10：上一次发给 Rust command 的 hold 值，值不变时跳过重复 invoke。 */
-  const keepAwakeHoldRef = useRef<boolean | null>(null);
+  /** Task 10：keep-awake 断言驱动（M4 评审 D4）。成功才提交 confirmed、失败不提交，
+   * 期望比较替代 cancelled 标志；懒初始化一次，refresh 由下方 effect 驱动。 */
+  const keepAwakeDriverRef = useRef<ReturnType<typeof createKeepAwakeDriver> | null>(null);
+  if (keepAwakeDriverRef.current === null) {
+    keepAwakeDriverRef.current = createKeepAwakeDriver(invokeSetKeepAwake, setKeepAwakeUnavailable);
+  }
+  const keepAwakeDriver = keepAwakeDriverRef.current;
   const activeProjectIdRef = useRef<string | null>(null);
   const workspaceRef = useRef<string | null>(null);
   const nextId = useRef(1);
@@ -683,25 +688,12 @@ export default function App() {
     }
   }
 
-  /** Task 10：判定驱动在前端——automation.list 每次刷新后重算是否应持有系统防睡眠断言，
-   * 值不变时跳过重复的 Rust invoke。sidecar 无法 invoke Tauri command，只能由这里发起。 */
+  /** Task 10：判定驱动在前端——automation.list 每次刷新后重算期望的 hold 并交给驱动。
+   * sidecar 无法 invoke Tauri command，只能由这里发起。断言/重试/过期结果丢弃的
+   * 状态机在 logic/keepAwake.ts（M4 评审 D4：失败不提交、同值刷新不丢成功回调）。 */
   useEffect(() => {
-    const hold = shouldHoldKeepAwake(keepAwake, automations);
-    if (keepAwakeHoldRef.current === hold) return;
-    keepAwakeHoldRef.current = hold;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const held = await invokeSetKeepAwake(hold);
-        if (!cancelled) setKeepAwakeUnavailable(hold && !held);
-      } catch {
-        if (!cancelled) setKeepAwakeUnavailable(hold);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [keepAwake, automations]);
+    keepAwakeDriver.refresh(shouldHoldKeepAwake(keepAwake, automations));
+  }, [keepAwake, automations, keepAwakeDriver]);
 
   useEffect(() => {
     let cancelled = false;
