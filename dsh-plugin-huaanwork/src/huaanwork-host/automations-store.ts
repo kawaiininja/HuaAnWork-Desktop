@@ -7,9 +7,11 @@ import { isAutomationSessionEntry } from './automation-session-ids.ts'
 import { nextFireAfter, parseCron, periodOf } from './schedule.ts'
 import {
   RUNS_LIMIT,
+  auditPath,
   readAutomationRegistry,
   recentRuns,
   removeAutomationSessions,
+  runsPath,
   withAutomationRegistryLock,
   writeAutomationRegistry,
 } from './stores.ts'
@@ -339,14 +341,6 @@ export async function updateAutomation(
   })
 }
 
-function runsFile(storageRoot: string, automationId: string): string {
-  return join(storageRoot, 'automations', `${automationId}.runs.jsonl`)
-}
-
-function auditFile(storageRoot: string, automationId: string): string {
-  return join(storageRoot, 'automations', `${automationId}.audit.jsonl`)
-}
-
 export async function removeAutomation(
   storageRoot: string,
   automationId: string,
@@ -358,8 +352,8 @@ export async function removeAutomation(
     if (index < 0) throw new Error(`automation ${automationId} was not found`)
     registry.automations.splice(index, 1)
     await writeAutomationRegistry(storageRoot, registry)
-    await rm(runsFile(storageRoot, automationId), { force: true }).catch(() => undefined)
-    await rm(auditFile(storageRoot, automationId), { force: true }).catch(() => undefined)
+    await rm(runsPath(storageRoot, automationId), { force: true }).catch(() => undefined)
+    await rm(auditPath(storageRoot, automationId), { force: true }).catch(() => undefined)
     await removeAutomationSessions(sessionsRoot, automationId)
   })
 }
@@ -430,7 +424,7 @@ function withAppendRunLock<T>(storageRoot: string, automationId: string, fn: () 
 /** 追加一条运行记录;超过 RUNS_LIMIT 时丢弃最旧的(整文件重写)。 */
 export async function appendRun(storageRoot: string, automationId: string, run: RunSummary): Promise<void> {
   return withAppendRunLock(storageRoot, automationId, async () => {
-    const path = runsFile(storageRoot, automationId)
+    const path = runsPath(storageRoot, automationId)
     const existing = await recentRuns(storageRoot, automationId)
     // 读和写之间让出一次。锁外并发会在这里互相盖掉;锁内下一笔要等这一笔写完再读。
     await Promise.resolve()

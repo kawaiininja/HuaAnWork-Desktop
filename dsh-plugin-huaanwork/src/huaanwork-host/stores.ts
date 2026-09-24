@@ -341,12 +341,16 @@ export async function findAutomation(storageRoot: string, automationId: string):
   return automation
 }
 
-function runsDir(storageRoot: string): string {
+export function runsDir(storageRoot: string): string {
   return join(storageRoot, 'automations')
 }
 
-function runsPath(storageRoot: string, automationId: string): string {
+export function runsPath(storageRoot: string, automationId: string): string {
   return join(runsDir(storageRoot), `${automationId}.runs.jsonl`)
+}
+
+export function auditPath(storageRoot: string, automationId: string): string {
+  return join(runsDir(storageRoot), `${automationId}.audit.jsonl`)
 }
 
 /**
@@ -399,7 +403,7 @@ export async function removeAutomationsOfProject(
     // Phase 2:无人值守降级审计行随项目级联一并清理(与 removeAutomation 同口径)。
     await Promise.all(
       doomed.map((automation) =>
-        rm(join(runsDir(storageRoot), `${automation.id}.audit.jsonl`), { force: true }).catch(() => undefined),
+        rm(auditPath(storageRoot, automation.id), { force: true }).catch(() => undefined),
       ),
     )
     await Promise.all(doomed.map((automation) => removeAutomationSessions(sessionsRoot, automation.id)))
