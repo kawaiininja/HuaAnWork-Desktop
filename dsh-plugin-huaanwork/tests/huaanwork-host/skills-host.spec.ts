@@ -11,6 +11,7 @@ import {
   listUserSkills,
   previewSkillImport,
   removeSkill,
+  restoreEnabledBundledSkills,
   setSkillEnabled,
   updateSkill,
 } from '../../src/huaanwork-host/skills-host.ts'
@@ -448,6 +449,104 @@ describe('skills-host 写路径 (Task 1)', () => {
     } finally {
       setBundledSkillRegistrar(null)
     }
+  })
+})
+
+describe('restoreEnabledBundledSkills boot 恢复(M4 评审 D2)', () => {
+  test('按 toggles 恢复已启用技能:跳过系统技能、未知名容错、handles 记账', () => {
+    const home = makeHome()
+    // pdf 真实存在于 bundled 目录;explore 是系统技能(由 guardrails 注册,恢复须跳过);
+    // not-a-bundled-skill 不存在——registerBundledSkill 返回 undefined,静默跳过不抛。
+    writeFileSync(
+      join(home, 'skill-toggles.json'),
+      JSON.stringify({ pdf: true, explore: true, 'not-a-bundled-skill': true }),
+    )
+    const registered: string[] = []
+    const mockRegistrar = {
+      skills: {
+        register: (skill: { name: string }) => {
+          registered.push(skill.name)
+          return () => {}
+        },
+      },
+    }
+
+    restoreEnabledBundledSkills(home, mockRegistrar)
+
+    expect(registered).toEqual(['pdf'])
+    expect(getSkillHandlesForTest().has('pdf')).toBe(true)
+  })
+
+  test('启用 → 重启(新 registrar)→ 仍注册,且之后 disable 仍生效', async () => {
+    const home = makeHome()
+    const registeredA: string[] = []
+    const registrarA = {
+      skills: {
+        register: (skill: { name: string }) => {
+          registeredA.push(skill.name)
+          return () => {}
+        },
+      },
+    }
+
+    // 第一代:用户启用 pdf(即时注册 + 落盘)。
+    setBundledSkillRegistrar(registrarA as any)
+    try {
+      await setSkillEnabled(home, 'pdf', true)
+      expect(registeredA).toEqual(['pdf'])
+    } finally {
+      setBundledSkillRegistrar(null)
+    }
+
+    // 模拟 generation 重启:模块态(handles)随新进程归零,boot 恢复用新 registrar 重放
+    // (等价 index.ts 内联 skills 插件在 skills 服务就绪后执行的行为)。
+    getSkillHandlesForTest().clear()
+    const registeredB: string[] = []
+    let disposedB = false
+    const registrarB = {
+      skills: {
+        register: (skill: { name: string }) => {
+          registeredB.push(skill.name)
+          return () => {
+            disposedB = true
+          }
+        },
+      },
+    }
+
+    restoreEnabledBundledSkills(home, registrarB)
+
+    // D2 修复目标:重启后模型目录里仍能发现该技能(收到注册)。
+    expect(registeredB).toEqual(['pdf'])
+    expect(getSkillHandlesForTest().has('pdf')).toBe(true)
+
+    // 回归断言:恢复进了 skillHandles 记账,后续 disable 才能真正 dispose——
+    // harness register 同层 first-wins,不记账则 disable 半残。
+    await setSkillEnabled(home, 'pdf', false)
+    expect(disposedB).toBe(true)
+    expect(readSkillToggles(home)['pdf']).toBeUndefined()
+  })
+
+  test('同进程重复 restore 幂等:dispose-then-register,handles 不膨胀', () => {
+    const home = makeHome()
+    writeFileSync(join(home, 'skill-toggles.json'), JSON.stringify({ pdf: true }))
+    const registered: string[] = []
+    const disposed: string[] = []
+    const mockRegistrar = {
+      skills: {
+        register: (skill: { name: string }) => {
+          registered.push(skill.name)
+          return () => disposed.push(skill.name)
+        },
+      },
+    }
+
+    restoreEnabledBundledSkills(home, mockRegistrar)
+    restoreEnabledBundledSkills(home, mockRegistrar)
+
+    expect(registered).toEqual(['pdf', 'pdf'])
+    expect(disposed).toEqual(['pdf'])
+    expect(getSkillHandlesForTest().size).toBe(1)
   })
 })
 

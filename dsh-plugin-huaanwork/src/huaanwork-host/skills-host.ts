@@ -10,6 +10,7 @@ import {
   getBundledSkillRegistrar,
   listBundledSkills,
   parseSkillMarkdown,
+  readSkillToggles,
   registerBundledSkill,
   serializeSkillMarkdown,
   setSkillToggle,
@@ -414,5 +415,31 @@ export async function setSkillEnabled(
     }
   }
   return { ok: true }
+}
+
+/** registerBundledSkill 的 registrar 参数形状(结构性类型,避免再引 SkillRegistration)。 */
+export type BundledSkillRegistrar = Parameters<typeof registerBundledSkill>[0]
+
+/**
+ * boot/generation 重启后按 skill-toggles.json 恢复已启用 bundled skills 的运行时注册
+ * (M4 评审 D2;legacy host.ts:411-421 同构)。guardrails apply 只注册 explore/test-fix
+ * 两个系统技能,用户启用的技能若不在 boot 期重注册,重启后 skill.list 仍显示
+ * enabled:true 但模型目录(ctx.skills)取不到。dispose-then-register 与 setSkillEnabled
+ * 共用 skillHandles 记账:harness register 同层 first-wins,重复注册拿 no-op
+ * disposer——boot 注册不进本表,后续 setEnabled(false) 将无法 dispose、禁用半残。
+ * 注册失败(dispose 为 undefined)静默跳过,不让技能恢复拖垮 boot(legacy 容错语义)。
+ */
+export function restoreEnabledBundledSkills(storageRoot: string, registrar: BundledSkillRegistrar): void {
+  for (const name of Object.keys(readSkillToggles(storageRoot))) {
+    if (SYSTEM_SKILLS.has(name)) continue
+    const disposeOld = skillHandles.get(name)
+    if (disposeOld) {
+      disposeOld()
+      skillHandles.delete(name)
+    }
+    const dispose = registerBundledSkill(registrar, name)
+    if (!dispose) continue
+    skillHandles.set(name, dispose)
+  }
 }
 

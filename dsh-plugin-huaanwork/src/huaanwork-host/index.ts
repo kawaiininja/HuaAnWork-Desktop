@@ -9,6 +9,7 @@ import { startAutomationScheduler } from './automation-scheduler.ts'
 import { bindAutomationRuntime, type AutomationRuntime } from './automations-host.ts'
 import { registerKeepAwakeRoute } from './keep-awake-route.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
+import { restoreEnabledBundledSkills } from './skills-host.ts'
 import { createAgentsHost } from './agents-host.ts'
 import { setAgentsDirectory } from './sessions.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
@@ -99,4 +100,13 @@ export function apply(ctx: Context, config: HuaanworkHostConfig) {
       hub.dispose()
     }
   }, 'huaanwork: routes and events')
+  // D2 修复:boot/generation 重启后按 skill-toggles.json 恢复已启用 bundled skills
+  // 的运行时注册(legacy host.ts:411-421 同构)。内联插件等 skills 服务就绪后激活,
+  // 不把 'skills' 加进本插件 inject——避免隔离挂载 huaanwork-host 的环境被依赖楔死。
+  ctx.plugin({
+    inject: ['skills'],
+    apply: (pc: Context) => {
+      restoreEnabledBundledSkills(config.profileDir, pc)
+    },
+  })
 }
