@@ -210,6 +210,15 @@ export async function automationRootDecision(
 const automationTimeout = (routeCtx: RouteContext): number =>
   readHuaanworkSettingsSync(routeCtx.profileDir).automation_timeout_ms
 
+/**
+ * test-only:超时后等待被取消 turn settle 的 drain 截止,单测注入毫秒级值。
+ * 缺省 120s,与 guardrails approval.ts 的 APPROVAL_TIMEOUT_MS 同量级——审批卡点是
+ * 取消生效前合法的有界延迟上限(见 M4 评审附录 D-1)。
+ */
+function timedOutTurnDrainMs(): number {
+  return Number(process.env.HUAANWORK_TIMED_OUT_TURN_DRAIN_MS ?? 120_000)
+}
+
 function escapeXmlAttr(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 }
@@ -277,7 +286,20 @@ async function runAgentTurn(
   } catch (error: unknown) {
     if (timedOut) {
       cancelAutomationSession(ctx, sessionId)
-      await turn.catch(() => undefined)
+      // D1(出口级):超时后的 settle 等待必须有自身截止。取消未命中(agent 尚未建成、
+      // 或卡在不可取消的回合)时 turn 可能永不 settle——无截止会把 automationTail
+      // 楔死、sessionSendBlockers 计数悬挂、collector/unattended holder 泄漏。
+      // 截止内 settle 保住「超时 turn 结束前下一个 agent 不启动」的串行意图;
+      // 到期放弃 turn(其晚期 settle 因 collector 已清而为 no-op)并按 legacy 语义抛超时。
+      let drainTimer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        turn.catch(() => undefined),
+        new Promise<undefined>((resolve) => {
+          drainTimer = setTimeout(() => resolve(undefined), timedOutTurnDrainMs())
+          drainTimer.unref?.()
+        }),
+      ])
+      if (drainTimer) clearTimeout(drainTimer)
       throw new AutomationRunTimeoutError(error instanceof Error ? error.message : String(error))
     }
     throw error

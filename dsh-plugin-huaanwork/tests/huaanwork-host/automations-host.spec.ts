@@ -40,6 +40,7 @@ type Harness = {
     mode: Mode
     reply: string
     cancelDelayMs: number
+    ignoreCancel: boolean
     cancels: string[]
     inFlight: number
     maxInFlight: number
@@ -52,6 +53,12 @@ type Harness = {
 
 const dirs: string[] = []
 const live: Harness[] = []
+const previousDrain = process.env.HUAANWORK_TIMED_OUT_TURN_DRAIN_MS
+
+/** 注入超时后 turn settle 的 drain 截止(M4 评审 D1 用例)。 */
+function useDrain(ms: number): void {
+  process.env.HUAANWORK_TIMED_OUT_TURN_DRAIN_MS = String(ms)
+}
 
 function makeHarness(current?: string): Harness {
   const profileDir = mkdtempSync(join(tmpdir(), 'hw-auto-profile-'))
@@ -67,6 +74,7 @@ function makeHarness(current?: string): Harness {
     mode: 'immediate' as Mode,
     reply: 'stub-output',
     cancelDelayMs: 0,
+    ignoreCancel: false,
     cancels: [] as string[],
     inFlight: 0,
     maxInFlight: 0,
@@ -108,6 +116,9 @@ function makeHarness(current?: string): Harness {
           },
           cancel() {
             state.cancels.push(sessionId)
+            // ignoreCancel:模拟「取消被调用但对回合无效」(生产对应:agent 尚未建成、
+            // 或卡在不可取消的工具调用里)——cancel 记录在案,release 不触发。
+            if (state.ignoreCancel) return
             const finish = releases.get(sessionId)
             if (!finish) return
             if (state.cancelDelayMs > 0) setTimeout(finish, state.cancelDelayMs)
@@ -264,6 +275,8 @@ afterEach(async () => {
     const dir = dirs.pop()
     if (dir) rmSync(dir, { recursive: true, force: true })
   }
+  if (previousDrain === undefined) delete process.env.HUAANWORK_TIMED_OUT_TURN_DRAIN_MS
+  else process.env.HUAANWORK_TIMED_OUT_TURN_DRAIN_MS = previousDrain
 }, 15_000)
 
 test('script task emits widget between run-start and run-end', async () => {
@@ -754,6 +767,41 @@ test('agent timeout cancels the session and settles the turn before the next age
   expect(h.state.maxInFlight).toBe(1)
   expect(h.state.cancels).toEqual([h.followups[0]?.sessionId, h.followups[1]?.sessionId])
   expect(h.state.inFlight).toBe(0)
+}, 15_000)
+
+test('agent timeout with an ineffective cancel drains the turn, returns blockers, and cleans up', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  h.state.ignoreCancel = true
+  useDrain(80)
+  writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ automation_timeout_ms: 180 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '取消未命中' })
+  const shell = shellName()
+  const first = await agentTask(h.profileDir, {
+    projectId: project.id,
+    name: '取消无效',
+    unattended: { enabled: true, allow: [shell, 'read'] },
+  })
+  const second = await agentTask(h.profileDir, { projectId: project.id, name: '取消无效后' })
+  const firstRun = enqueueAutomation(first, { trigger: 'manual', runId: 'drain-1' })
+  await poll(() => h.followups.length === 1)
+  const secondRun = enqueueAutomation(second, { trigger: 'manual', runId: 'drain-2' })
+  await firstRun
+  await secondRun
+  await automationTail
+
+  // cancel 都被调用过(取消路径确实走过),但 turn 从未被 settle——release 不触发。
+  expect(h.state.cancels).toEqual([h.followups[0]?.sessionId, h.followups[1]?.sessionId])
+  expect(h.state.inFlight).toBeGreaterThan(0)
+  // drain 截止到期 → 仍按超时收尾:run 记录、计数归还、collector/holder 清理。
+  const firstRuns = await recentRuns(h.profileDir, first.id)
+  expect(firstRuns[0]?.status).toBe('timeout')
+  const secondRuns = await recentRuns(h.profileDir, second.id)
+  expect(secondRuns[0]?.status).toBe('timeout')
+  expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
+  expect(sessionSendBlockers.agentAutomationActive).toBe(0)
+  expect(automationCollector.size).toBe(0)
+  expect(h.runtime.huaanworkUnattended?.current).toBeUndefined()
 }, 15_000)
 
 test('manual agent run events carry runId, sessionId, trigger, status and durationMs, and thinking is stripped', async () => {
