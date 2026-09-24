@@ -765,8 +765,8 @@ test('scheduler:run-once catchup 同根入队,跨根顺延不入队', { timeout:
     assert.equal(cross.automation?.nextRunAt, stale, 'cross-root catchup stays pending')
     assert.equal(cross.automation?.enabled, true)
     assert.ok(
-      events.filter((event) => event?.event === 'automation/missed' && event.automationId === 'catchup-cross').length > 1,
-      'cross-root catchup emits missed again on a later tick',
+      events.filter((event) => event?.event === 'automation/missed' && event.automationId === 'catchup-cross').length === 1,
+      'cross-root catchup emits missed once',
     )
     assert.equal(
       events.filter((event) => event?.event === 'automation/run-start' && event.automationId === 'catchup-cross').length,
