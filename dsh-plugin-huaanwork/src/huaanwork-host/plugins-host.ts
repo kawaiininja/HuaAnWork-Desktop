@@ -46,6 +46,16 @@ export function listPlugins(storageRoot: string): { bundles: string[] } {
 }
 
 function readBundleList(storageRoot: string): string[] {
+  return readBundleManifest(storageRoot) ?? fallbackProfileBundles()
+}
+
+/**
+ * 读取档案声明式清单;package.json 缺失(ENOENT)返回 undefined,其余错误照抛。
+ * readBundleList 由此回落模板兜底(plugin.list 路由语义不变);post-change 的
+ * 权威读取(bundlesAfterAdd/Remove)必须走本函数——ENOENT 时返回 undefined,
+ * 不得把模板兜底当作安装结果(M4 评审 P2)。
+ */
+function readBundleManifest(storageRoot: string): string[] | undefined {
   const path = join(storageRoot, 'package.json')
   try {
     const manifest = JSON.parse(readFileSync(path, 'utf8')) as {
@@ -54,7 +64,7 @@ function readBundleList(storageRoot: string): string[] {
     const bundles = manifest.dsh?.profile?.bundles
     return Array.isArray(bundles) ? bundles.filter((bundle): bundle is string => typeof bundle === 'string') : []
   } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallbackProfileBundles()
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
 }
@@ -244,7 +254,14 @@ function resumePipe(stream: { resume?: () => void } | undefined): void {
 
 function readBundlesAfter(routeCtx: PluginMutationContext, phase: string): string[] | undefined {
   try {
-    return listPlugins(routeCtx.profileDir).bundles
+    // P2(M4 评审):post-change 清单必须权威可读——ENOENT 返回 undefined 走推断/诚实
+    // 应答分支,不得把 readBundleList 的模板兜底当作安装结果(新装/既有 bundles 会
+    // 从客户端插件列表静默消失)。
+    const read = readBundleManifest(routeCtx.profileDir)
+    if (read === undefined) {
+      routeCtx.logger(`plugin ${phase}: post-change bundle list unreadable (profile manifest missing); not treated as the installed list`)
+    }
+    return read
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     routeCtx.logger(`plugin ${phase}: post-change bundle list unreadable (${detail}); returning the previous list`)

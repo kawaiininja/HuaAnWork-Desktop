@@ -324,6 +324,40 @@ describe('plugin add/remove', () => {
     expect(runPlugin).toHaveBeenCalledWith(['add', resolve(pluginDir)], resolve(profileDir))
   })
 
+  test('P2: add 后清单不可读(ENOENT)时,不把模板兜底当作安装结果', async () => {
+    const profileDir = makeHome()
+    // before 含自定义 bundle,与 fallbackProfileBundles() 模板必然可区分。
+    const before = ['@deepseek-ai/dsh-base', 'custom-bundle']
+    writeProfile(profileDir, before)
+    const pluginDir = writePluginDir(makeHome())
+    const ctx = makeCtx(profileDir, () => {
+      // pnpm add 成功但重读时 <profileDir>/package.json 缺失:ENOENT。
+      rmSync(join(profileDir, 'package.json'))
+      return completedHandle()
+    }, true)
+
+    const result = await addPlugin(ctx, pluginDir)
+
+    // 推断分支:上份清单 + 推断出的新包——模板兜底不得混入。
+    expect(result.bundles).toEqual([...before, 'demo-plugin'])
+    expect(result.bundles).not.toContain('@deepseek-ai/dsh-web-app')
+  })
+
+  test('P2: remove 后清单不可读(ENOENT)时,回过滤后的上份清单而非模板', async () => {
+    const profileDir = makeHome()
+    const before = ['@deepseek-ai/dsh-base', 'custom-bundle', 'demo-plugin']
+    writeProfile(profileDir, before)
+    const ctx = makeCtx(profileDir, () => {
+      rmSync(join(profileDir, 'package.json'))
+      return completedHandle()
+    }, true)
+
+    const result = await removePlugin(ctx, 'demo-plugin')
+
+    expect(result.bundles).toEqual(['@deepseek-ai/dsh-base', 'custom-bundle'])
+    expect(result.bundles).not.toContain('@deepseek-ai/dsh-web-app')
+  })
+
   test('IMMUTABLE_BUNDLES 拒绝卸载,不调用 runPlugin,profile 不改', async () => {
     const profileDir = makeHome()
     writeProfile(profileDir, BASE_BUNDLES)
