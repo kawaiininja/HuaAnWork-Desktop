@@ -63,7 +63,7 @@ describe('POST /huaanwork/keep-awake', () => {
     const out = capture()
     await handleKeepAwakeRequest(request({ hold: true }), out.res, ORIGIN, {} as DesktopRuntime)
     expect(out.status()).toBe(501)
-    expect(out.json()).toEqual({ error: { message: KEEP_AWAKE_UNAVAILABLE_MESSAGE } })
+    expect(out.json()).toEqual({ error: { code: 'keep-awake-unavailable', message: KEEP_AWAKE_UNAVAILABLE_MESSAGE } })
   })
 
   test('跨源与非 POST 被拒绝', async () => {

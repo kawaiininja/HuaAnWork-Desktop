@@ -764,7 +764,12 @@ function sendError(res: ServerResponse, status: number, code: string, message: s
   sendJson(res, status, { error: { code, message } })
 }
 
-async function readJsonBody(
+/**
+ * 读取 JSON 请求体:上限 1 MiB,超限(声明长度/流式)先 `req.resume()` drain 再抛
+ * 413;JSON 不可解析抛 400 bad-request。keep-awake-route 等 54 表外路由复用
+ * (M4 评审 C1:body 处理只此一份,上限与 drain 语义随之统一)。
+ */
+export async function readJsonBody(
   req: IncomingMessage,
 ): Promise<unknown> {
   const declaredLength = req.headers['content-length']

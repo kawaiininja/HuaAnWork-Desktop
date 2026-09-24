@@ -10,13 +10,15 @@ import {
   callSetKeepAwake,
 } from '../host-runtime-bridge.ts'
 import { isSameOriginLoopbackRequest } from './loopback.ts'
+import { readJsonBody, RouteError } from './routes.ts'
 
 export const KEEP_AWAKE_PATH = '/huaanwork/keep-awake'
 
-const MAX_BODY_BYTES = 4 * 1024
-
-class BodyTooLargeError extends Error {}
-
+/**
+ * 响应保持本路由更严的响应头(no-store/nosniff/allow,审计 D-9:统一助手时
+ * 不得反向退化);body 读取与错误 envelope(code+message)复用 routes.ts 的
+ * 单一实现(M4 评审 C1)。
+ */
 function finishJson(res: ServerResponse, statusCode: number, value: unknown, allow?: 'POST'): void {
   res.statusCode = statusCode
   res.setHeader('cache-control', 'no-store')
@@ -26,25 +28,12 @@ function finishJson(res: ServerResponse, statusCode: number, value: unknown, all
   res.end(JSON.stringify(value))
 }
 
-function isJsonRequest(req: IncomingMessage): boolean {
-  return req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() === 'application/json'
+function sendRouteError(res: ServerResponse, error: RouteError, allow?: 'POST'): void {
+  finishJson(res, error.status, { error: { code: error.code, message: error.message } }, allow)
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
-  const declaredLength = req.headers['content-length']
-  if (declaredLength !== undefined) {
-    if (!/^\d+$/.test(declaredLength)) throw new SyntaxError('invalid content length')
-    if (Number(declaredLength) > MAX_BODY_BYTES) throw new BodyTooLargeError()
-  }
-  let size = 0
-  const chunks: Buffer[] = []
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array)
-    size += buffer.byteLength
-    if (size > MAX_BODY_BYTES) throw new BodyTooLargeError()
-    chunks.push(buffer)
-  }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+function isJsonRequest(req: IncomingMessage): boolean {
+  return req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() === 'application/json'
 }
 
 function parseHold(value: unknown): boolean | undefined {
@@ -64,32 +53,30 @@ export async function handleKeepAwakeRequest(
   expectedOrigin: string | (() => string),
   runtime: DesktopRuntime,
 ): Promise<void> {
-  if (req.method !== 'POST') return finishJson(res, 405, { error: { message: 'method not allowed' } }, 'POST')
+  if (req.method !== 'POST') return sendRouteError(res, new RouteError(405, 'method-not-allowed', 'method not allowed'), 'POST')
   const origin = typeof expectedOrigin === 'function' ? expectedOrigin() : expectedOrigin
   if (!isSameOriginLoopbackRequest(req, origin, true)) {
-    return finishJson(res, 403, { error: { message: 'forbidden' } })
+    return sendRouteError(res, new RouteError(403, 'forbidden', 'forbidden'))
   }
   if (!isJsonRequest(req)) {
-    return finishJson(res, 415, { error: { message: 'content type must be application/json' } })
+    return sendRouteError(res, new RouteError(415, 'unsupported-media-type', 'content type must be application/json'))
   }
   let value: unknown
   try {
-    value = await readJson(req)
+    value = await readJsonBody(req)
   } catch (cause) {
-    const tooLarge = cause instanceof BodyTooLargeError
-    return finishJson(res, tooLarge ? 413 : 400, {
-      error: { message: tooLarge ? 'request body is too large' : 'invalid JSON request' },
-    })
+    if (cause instanceof RouteError) return sendRouteError(res, cause)
+    throw cause
   }
   const hold = parseHold(value)
-  if (hold === undefined) return finishJson(res, 400, { error: { message: 'invalid keep-awake request' } })
+  if (hold === undefined) return sendRouteError(res, new RouteError(400, 'bad-request', 'invalid keep-awake request'))
   try {
     await callSetKeepAwake(runtime, hold)
   } catch (cause) {
     const named = cause instanceof KeepAwakeUnavailableError
       || (cause instanceof Error && cause.message === KEEP_AWAKE_UNAVAILABLE_MESSAGE)
-    if (named) return finishJson(res, 501, { error: { message: KEEP_AWAKE_UNAVAILABLE_MESSAGE } })
-    return finishJson(res, 500, { error: { message: 'keep-awake unavailable' } })
+    if (named) return sendRouteError(res, new RouteError(501, 'keep-awake-unavailable', KEEP_AWAKE_UNAVAILABLE_MESSAGE))
+    return sendRouteError(res, new RouteError(500, 'internal-error', 'keep-awake unavailable'))
   }
   finishJson(res, 200, hold)
 }
