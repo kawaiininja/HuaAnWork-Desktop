@@ -124,13 +124,33 @@ export class PluginCommandError extends Error {
  * 健康启动的声明式清单。这是需人工介入的恢复。compose gate 的 Desktop 等价是 boot 期
  * row-id 启动断言,重启即被覆盖,此处不另造检查。
  */
-export async function addPlugin(routeCtx: PluginMutationContext, source: string): Promise<PluginMutationResult> {
+/** addPlugin 的可选选项。M5 市场远程安装传 offline:true;本地调用方不传(M4 语义不变)。 */
+export interface AddPluginOptions {
+  /**
+   * 市场远程安装路径专用:true 时 pnpm 恒带 --offline --ignore-scripts。
+   * --offline 把「零依赖断言失准」从静默拉公网字节变成确定性失败;
+   * --ignore-scripts 机械封死 lifecycle 脚本(即使 profile workspace 被自加
+   * allowBuilds,市场制品脚本也永不执行)。flags 经 dsh plugin CLI 直通 pnpm
+   * (其 plugin 子命令 allowUnknownOption + verbatim 转发,anchorPathSpec 只
+   * 改写 . / .. 相对路径,不影响 flags)。
+   */
+  readonly offline?: boolean
+}
+
+export async function addPlugin(
+  routeCtx: PluginMutationContext,
+  source: string,
+  opts?: AddPluginOptions,
+): Promise<PluginMutationResult> {
   if (!source) throw new Error('plugin.add requires source')
   assertNotRemote(source)
   const resolved = resolve(source)
   const packageName = isTarballFile(resolved) ? undefined : validatedDirectoryPackage(resolved)
   const before = listPlugins(routeCtx.profileDir).bundles
-  await runDesktopPlugin(routeCtx, ['add', resolved])
+  const argv: readonly [string, string, ...string[]] = opts?.offline === true
+    ? ['add', resolved, '--offline', '--ignore-scripts']
+    : ['add', resolved]
+  await runDesktopPlugin(routeCtx, argv)
   if (!await routeCtx.requestRestart()) {
     return {
       bundles: [...before],
@@ -218,7 +238,14 @@ function asPnpmBusy(error: unknown): PluginCommandError | undefined {
   return undefined
 }
 
-async function runDesktopPlugin(routeCtx: PluginMutationContext, argv: readonly [string, string]): Promise<void> {
+/**
+ * argv 形如 [command, target, ...flags]:M5 起允许追加 pnpm flags(市场远程安装
+ * 的 --offline --ignore-scripts);flags 经 dsh plugin CLI 直通 pnpm。
+ */
+async function runDesktopPlugin(
+  routeCtx: PluginMutationContext,
+  argv: readonly [string, string, ...string[]],
+): Promise<void> {
   const invokingDir = resolve(routeCtx.profileDir)
   let handle: DesktopPnpmHandle
   try {

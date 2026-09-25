@@ -131,6 +131,25 @@ describe('plugin add/remove', () => {
     expect(ctx.desktopPnpm.runPlugin).toHaveBeenCalledWith(['add', resolve(tarball)], resolve(profileDir))
   })
 
+  test('add offline:true 追加 --offline --ignore-scripts;不传时 argv 不变(M4 语义不变)', async () => {
+    const profileDir = makeHome()
+    writeProfile(profileDir, BASE_BUNDLES)
+    const pluginDir = writePluginDir(makeHome())
+    const seen: string[][] = []
+    const ctx = makeCtx(profileDir, (argv) => {
+      seen.push([...argv])
+      return completedHandle()
+    })
+
+    await addPlugin(ctx, pluginDir, { offline: true })
+    await addPlugin(ctx, pluginDir)
+
+    expect(seen).toEqual([
+      ['add', resolve(pluginDir), '--offline', '--ignore-scripts'],
+      ['add', resolve(pluginDir)],
+    ])
+  })
+
   test('取消路径应答的 bundles 与安装前一致,不置 restarting,并诚实告知下次启动生效', async () => {
     const profileDir = makeHome()
     writeProfile(profileDir, BASE_BUNDLES)
