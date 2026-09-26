@@ -84,9 +84,11 @@ export function isArtifactReferenced(profileDir: string, artifactPath: string): 
  * `@x/plugin-a` 的 safeName `x-plugin-a` 是 `@x/plugin-a-extra` 制品名
  * `x-plugin-a-extra-<version>-<sha12>.tgz` 的前缀,裸前缀匹配会删掉仍在装的
  * 相邻包的制品 ⇒ 悬空 `file:` 引用 ⇒ 后续任何 pnpm 操作 ENOENT(实验 C)。
- * 故候选必须同时满足:① 严格结构 `<safeName>-<semver>-<sha12>.tgz`
- * (版本以数字起头,npm version 必为 semver,`extra-1.0.0` 之类的残余不可能
- * 伪造成版本);② **该制品当前无 `file:` 引用指向**(双保险:即便命名边界被
+ * 故候选必须同时满足:① 严格结构 `<safeName>-<version>-<sha12>.tgz`
+ * (版本以数字起头、点分 1–3 段 + 可选 prerelease/build 连字符/加号后缀——
+ * 发布侧门(gate.ts)只要求 filename-safe 版本,`1.0` 之类两段版合法可发布,
+ * 故 GC 不得限死三段 semver;`extra-1.0.0` 之类的残余不可能伪造成版本);
+ * ② **该制品当前无 `file:` 引用指向**(双保险:即便命名边界被
  * 未来命名规则突破,有引用者永不删)。漏删(伪阴性)无害——启动惰性清扫兜底。
  * best-effort:任何失败只记日志,绝不阻断卸载;不存在的目录直接返回。
  */
@@ -94,8 +96,9 @@ export function gcRemovedPackageArtifacts(profileDir: string, packageName: strin
   const dir = marketArtifactsDir(profileDir)
   if (!existsSync(dir)) return
   const escaped = safeArtifactName(packageName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  // 版本:semver 核心 + prerelease/build(连字符/加号后缀);sha12 恰 12 位小写 hex。
-  const exactName = new RegExp(`^${escaped}-(\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?)-([0-9a-f]{12})\\.tgz$`, 'u')
+  // 版本:数字起头、点分 1–3 段(对齐 gate.ts 的 filename-safe 版本面,`1.0` 可 GC)
+  // + prerelease/build(连字符/加号后缀);sha12 恰 12 位小写 hex。
+  const exactName = new RegExp(`^${escaped}-(\\d+(?:\\.\\d+){0,2}(?:[-+][0-9A-Za-z.-]+)?)-([0-9a-f]{12})\\.tgz$`, 'u')
   const referenced = referencedArtifactPaths(profileDir)
   for (const entry of readdirSync(dir)) {
     if (!exactName.test(entry)) continue

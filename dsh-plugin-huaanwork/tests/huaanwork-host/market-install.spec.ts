@@ -264,6 +264,25 @@ describe('artifact GC (N1)', () => {
     expect(existsSync(join(profileDir, '.market-artifacts', 'x-pkg-notsemver-' + '3'.repeat(12) + '.tgz'))).toBe(true)
   })
 
+  test('GC version span: publish gate accepts filename-safe versions, so 1.0/1 two-segment artifacts are GC-able too', () => {
+    // gate.ts PACKAGE_VERSION_PATTERN 只要求 filename-safe(`1.0` 合法可发布);
+    // GC 版本面必须对齐,否则卸载后制品漏删(只能等下次启动孤儿清扫)。
+    const profileDir = tempProfile()
+    const one = artifact(profileDir, '@x/pkg', '1.0', '4'.repeat(64))
+    const bare = artifact(profileDir, '@x/pkg', '1', '5'.repeat(64))
+    const fourSegment = artifact(profileDir, '@x/pkg', '1.0.0.1', '6'.repeat(64))
+    const logs: string[] = []
+
+    gcRemovedPackageArtifacts(profileDir, '@x/pkg', (m) => logs.push(m))
+
+    expect(existsSync(one)).toBe(false)
+    expect(existsSync(bare)).toBe(false)
+    // 四段 `1.0.0.1` 超出点分 1–3 段面(也非合法发布版本形态)⇒ 保守不删。
+    expect(existsSync(fourSegment)).toBe(true)
+    expect(logs.some(m => m.includes('x-pkg-1.0-') && m.includes('removed artifact'))).toBe(true)
+    expect(logs.some(m => m.includes('x-pkg-1-') && m.includes('removed artifact'))).toBe(true)
+  })
+
   test('boot sweep deletes only orphans without a file: reference', () => {
     const profileDir = tempProfile()
     const referenced = artifact(profileDir, '@huaanwork/plugin-a', '1.0.0', 'a'.repeat(64))
