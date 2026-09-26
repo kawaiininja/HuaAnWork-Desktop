@@ -16058,6 +16058,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"market-server@workspace:market-server":
+  version: 0.0.0-use.local
+  resolution: "market-server@workspace:market-server"
+  dependencies:
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  languageName: unknown
+  linkType: soft
+
 "matcher@npm:^3.0.0":
   version: 3.0.0
   resolution: "matcher@npm:3.0.0"

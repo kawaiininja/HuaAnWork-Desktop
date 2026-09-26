@@ -1,0 +1,21 @@
+{
+  "name": "market-server",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "description": "Intranet plugin market server for HuaAnWork Desktop (signed catalog manifest + artifact hosting)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "echo \"market-server: TypeScript sources run directly; no build output\"",
+    "typecheck": "test ! -f tsconfig.json || tsc --noEmit",
+    "test": "vitest run tests --passWithNoTests",
+    "check": "yarn run typecheck && yarn run test"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

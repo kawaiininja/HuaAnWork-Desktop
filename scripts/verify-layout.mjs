@@ -39,6 +39,7 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'packages/huaanwork-policy',
   'packages/huaanwork-model',
   'packages/huaanwork-git-tools',
+  'market-server',
 ])) {
   fail('the root Yarn workspace must contain the desktop, community-fabric, and community-market packages')
 }

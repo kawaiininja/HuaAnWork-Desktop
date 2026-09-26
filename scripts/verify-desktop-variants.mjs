@@ -84,6 +84,29 @@ const PAIRS = [
       // ConfirmedRestartRuntime 接口与 native:requestConfirmedRestart 绑定。
       'src/electron-runtime.ts',
       'src/host-runtime-bridge.ts',
+      // M5 Task 0 复盘登记(D2 + round3 R8/R7 + round4 X2 终值):variant 白名单 8→17。
+      // 下列 9 个 shared 文件是 round3 R7 裁定的 provider 联合类型全量镜像面(8 文件 13 处
+      // 校验点,守则 6)——Task 3 接入 huaanwork-market 第四 provider 时必然产生共享文件
+      // 差异,一次性预登记,免得 Task 3 逐文件突破;不含 src/pnpm.ts(解法 A 后零改动,
+      // round3 R8)。oneSidedPrefixes 保持恰好 5(wrapper 落 src/huaanwork-host/,不占预算)。
+      // desktop-market.ts:DesktopMarketProvider 联合类型第四成员 + DESKTOP_MARKET_IDENTITIES 条目。
+      'src/desktop-market.ts',
+      // profile-preferences.ts:provider 偏好读写校验镜像(profile-preferences.ts:133-134)。
+      'src/profile-preferences.ts',
+      // setup-wizard-contract.ts:向导契约 provider 校验镜像(:8,94;向导不加选项,校验器仍同步)。
+      'src/setup-wizard-contract.ts',
+      // desktop-settings-route.ts:设置 route 的 isMarketProvider 校验镜像(:141-144)。
+      'src/desktop-settings-route.ts',
+      // setup-wizard-window.ts:向导窗口 provider 联合类型镜像(:73)。
+      'src/setup-wizard-window.ts',
+      // client/desktop-settings-api.ts:客户端 settings API provider 类型镜像(:32,102)。
+      'src/client/desktop-settings-api.ts',
+      // native-ui/setup-wizard/App.tsx:向导 UI provider 校验镜像(:355)。
+      'src/native-ui/setup-wizard/App.tsx',
+      // client/DesktopSettingsSection.tsx:设置面 market provider 选项表入口(:274,285,292)。
+      'src/client/DesktopSettingsSection.tsx',
+      // client/desktop-settings-locales.ts:设置面 provider 选项标签文案。
+      'src/client/desktop-settings-locales.ts',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [
