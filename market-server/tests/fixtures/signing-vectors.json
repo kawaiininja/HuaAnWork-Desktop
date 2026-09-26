@@ -1,0 +1,816 @@
+{
+  "fixtureVersion": 1,
+  "comment": "Shared signing test vectors (round3 R10). Consumed by market-server tests now and by the wrapper-side verifier test (dsh-plugin-huaanwork) later — the wrapper re-implements the same semantics over node:crypto and must reproduce every verdict. The private keys below are THROWAWAY test material, never reuse them as real signing keys. Regenerate with: node scripts/gen-test-vectors.mjs",
+  "domain": "http://market.intranet.example:8787",
+  "keys": {
+    "slot1": {
+      "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIJXy5nPEpd50VLgNVIxSGhZfpwncD6S7UDPnNb9JVPiD\n-----END PRIVATE KEY-----\n",
+      "fingerprint": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c"
+    },
+    "slot2": {
+      "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINVBQmX+fT4JBpNm4sOs3yFUskUulQRPB2iOi1+h3rez\n-----END PRIVATE KEY-----\n",
+      "fingerprint": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5"
+    },
+    "unknown": {
+      "publicKeyHex": "b6ca81fb41c864fc03a71553e0e9fa34968c601af28fcb37498b77deccfda023",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIEZE50YfDtqALDmmZ74t04QUzN0sIXh19cQOm4UO5+hc\n-----END PRIVATE KEY-----\n",
+      "fingerprint": "b2e6c40bb2396177d40bd261b11e2f8f404e8b89ca8432602eb6b46cad46addc"
+    }
+  },
+  "vectors": [
+    {
+      "name": "valid-current-slot",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": true,
+        "slot": 1
+      }
+    },
+    {
+      "name": "valid-previous-slot-within-retired-at",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+        "slot": 2,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "L+0hOTd1vJib7wR95KDz3uk9/mvfX3NB0ebHWucUpb52/Ya+DhHpcFhLoYfFZ5dVQNB05+b7xj+ZTKxCOdKtDQ=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": true,
+        "slot": 2
+      }
+    },
+    {
+      "name": "missing-not-after",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "7GVFbPk8a5XuejEPcN37ReL7S7aQsQm2rlqUACxwYwhpgouUj6y+4yXkcGhfCKVSnq1JFWjIsfusYCKUCBJpAQ=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "missing-field"
+      }
+    },
+    {
+      "name": "revision-regression",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 5
+      },
+      "expect": {
+        "ok": false,
+        "reason": "revision-regression"
+      }
+    },
+    {
+      "name": "expired-not-after",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-10-02T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "expired"
+      }
+    },
+    {
+      "name": "domain-mismatch",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://evil.intranet.example:9999",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "domain-mismatch"
+      }
+    },
+    {
+      "name": "not-yet-valid",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-27T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "JvvRWR9srsNlDxCAmm5xLSh1eCzTqVoEonSS/IBgY7zATO40jMEEUoEUXcIDI+j6DLUGN6JFC4KztV2PN3j1AA=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "not-yet-valid"
+      }
+    },
+    {
+      "name": "ttl-exceeds-cap",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-03T00:00:01Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "cS+Ujr/Kh4kQD3nkYhfluBRkB1bYsBe69x2I83KiI5Y9oU2w8+DWYL73vuuXqKkjS19zUZs3zh4F0T+0u/BTAA=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "ttl-exceeds-cap"
+      }
+    },
+    {
+      "name": "slot-retired",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+        "slot": 2,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "L+0hOTd1vJib7wR95KDz3uk9/mvfX3NB0ebHWucUpb52/Ya+DhHpcFhLoYfFZ5dVQNB05+b7xj+ZTKxCOdKtDQ=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-09-20T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "slot-retired"
+      }
+    },
+    {
+      "name": "unknown-key",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "b2e6c40bb2396177d40bd261b11e2f8f404e8b89ca8432602eb6b46cad46addc",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "LloU6Rw/G6Gdg5yvBzJxK5ZKefAXglgQdVrIohZxQJvWenTO5tiWEOrG1nvtp75R+zTR/MzZUq/P1dJJLwRTAg=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "unknown-key"
+      }
+    },
+    {
+      "name": "slot-key-mismatch",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "L+0hOTd1vJib7wR95KDz3uk9/mvfX3NB0ebHWucUpb52/Ya+DhHpcFhLoYfFZ5dVQNB05+b7xj+ZTKxCOdKtDQ=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "slot-key-mismatch"
+      }
+    },
+    {
+      "name": "tampered-manifest",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "invalid-signature"
+      }
+    },
+    {
+      "name": "unsupported-signature-version",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "packages": [
+            {
+              "name": "@huaanwork/sample-plugin",
+              "version": "1.2.3",
+              "description": "fixture package"
+            }
+          ]
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 2,
+        "algorithm": "Ed25519",
+        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+        },
+        {
+          "slot": 2,
+          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 4
+      },
+      "expect": {
+        "ok": false,
+        "reason": "invalid-signature"
+      }
+    }
+  ]
+}

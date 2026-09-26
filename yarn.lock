@@ -16062,6 +16062,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "market-server@workspace:market-server"
   dependencies:
+    "@types/node": "npm:^22.20.0"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
   languageName: unknown
