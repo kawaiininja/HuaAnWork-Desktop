@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { ThemePref } from "./logic/accountStatus.ts";
-import { pickDirectory, rpcCall } from "./api.ts";
+import { rpcCall } from "./api.ts";
 
 export const PLUGIN_CONFIRM =
   "该包将在 sidecar 内执行 apply(ctx)，权限与本机用户相同；护栏只约束模型工具调用，不沙箱化插件代码。\n\napply(ctx) runs as the user, not sandboxed.";
@@ -63,7 +63,6 @@ type Draft = {
 
 type Props = {
   onClose: () => void;
-  onPluginApplyFail: (message: string) => void;
   section: SettingsSection;
   onSectionChange: (section: SettingsSection) => void;
   theme: ThemePref;
@@ -283,7 +282,6 @@ function emptyDraft(baseUrl: string): Draft {
 
 export default function Settings({
   onClose,
-  onPluginApplyFail,
   section,
   onSectionChange,
   theme,
@@ -296,11 +294,9 @@ export default function Settings({
   const [models, setModels] = useState<ModelEntry[]>([]);
   const [activeId, setActiveId] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [bundles, setBundles] = useState<string[]>([]);
   const [status, setStatus] = useState("");
   const [workAllowNetwork, setWorkAllowNetwork] = useState(false);
   const [keepAwake, setKeepAwakeSetting] = useState(true);
-  const [confirming, setConfirming] = useState<string | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -321,8 +317,6 @@ export default function Settings({
         setActiveId(next.activeId);
         setWorkAllowNetwork(payload.allow_network === true);
         setKeepAwakeSetting(payload.keep_awake !== false);
-        const listed = await rpcCall<{ bundles: string[] }>("plugin.list");
-        setBundles(listed.bundles ?? []);
       } catch (error) {
         setStatus(error instanceof Error ? error.message : String(error));
       }
@@ -403,41 +397,6 @@ export default function Settings({
       setStatus(nextModels.length === 0 ? "已删除，请添加模型" : "已删除");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function pickPlugin(_kind: "dir" | "tgz") {
-    const selected = await pickDirectory();
-    if (!selected) return;
-    setConfirming(selected);
-  }
-
-  async function confirmAdd() {
-    if (!confirming) return;
-    const source = confirming;
-    setConfirming(null);
-    try {
-      // 取消重启时 message 诚实告知「已写入清单,下次启动生效」(M4 评审 D3);
-      // 确认路径应用随即 relaunch,应答常不可达,保持原「插件已安装」缺省。
-      const listed = await rpcCall<{ bundles: string[]; message?: string }>("plugin.add", { source });
-      setBundles(listed.bundles ?? []);
-      setStatus(listed.message ?? "插件已安装");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      onPluginApplyFail(PLUGIN_APPLY_FAIL);
-      setStatus(`${PLUGIN_APPLY_FAIL}：${message}`);
-    }
-  }
-
-  async function remove(name: string) {
-    try {
-      const listed = await rpcCall<{ bundles: string[]; message?: string }>("plugin.remove", { name });
-      setBundles(listed.bundles ?? []);
-      if (listed.message) setStatus(listed.message);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      onPluginApplyFail(PLUGIN_APPLY_FAIL);
-      setStatus(`${PLUGIN_APPLY_FAIL}：${message}`);
     }
   }
 
@@ -591,25 +550,9 @@ export default function Settings({
                   </button>
                 )}
                 <h3>插件</h3>
-                <p className="hint">仅本地目录或 .tgz。拒绝 GitHub / URL。</p>
-                <div className="row">
-                  <button type="button" onClick={() => void pickPlugin("dir")}>
-                    添加目录
-                  </button>
-                  <button type="button" onClick={() => void pickPlugin("tgz")}>
-                    添加 .tgz
-                  </button>
-                </div>
-                <ul className="plugin-list">
-                  {bundles.map((name) => (
-                    <li key={name}>
-                      <span>{name}</span>
-                      <button type="button" onClick={() => void remove(name)}>
-                        移除
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+                <p className="hint">
+                  插件的安装与卸载已移至「插件市场」页的「本地安装」页签（仅本地目录或 .tgz；内网市场宕机时仍可用）。
+                </p>
               </>
             ) : null}
             {section === "appearance" ? (
@@ -717,20 +660,6 @@ export default function Settings({
         </div>
         {status ? <p className="status">{status}</p> : null}
       </div>
-      {confirming ? (
-        <div className="confirm-modal">
-          <p>{PLUGIN_CONFIRM}</p>
-          <p className="hint">{confirming}</p>
-          <div className="row">
-            <button type="button" onClick={() => void confirmAdd()}>
-              安装
-            </button>
-            <button type="button" onClick={() => setConfirming(null)}>
-              取消
-            </button>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }

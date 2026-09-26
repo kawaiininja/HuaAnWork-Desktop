@@ -7,7 +7,7 @@
  * ③ 制品 sha256 不符 —— fail-closed，无旁路。
  *
  * R23 收窄：验签/sha 失败**远程流程内绝不提供「仍要安装」绕过**；本地安装 tab
- * 是用户自主路径（Task 7 落地），文案仅指路，不由本模块提供绕过按钮。
+ * 是用户自主路径（Task 7 已并入 MarketView「本地安装」页签），unreachable 文案指路该页签。
  */
 
 /** 分类后的错误种类。 */
@@ -24,7 +24,7 @@ export interface MarketErrorPresentation {
 const UNREACHABLE_PRESENTATION: MarketErrorPresentation = {
   kind: "unreachable",
   title: "内网市场不可达",
-  body: "无法连接内网市场服务（宕机或网络不可达）。可稍后重试，或改用本地安装：在「来源」页查看当前源地址，确认内网连通后再回到本页。",
+  body: "无法连接内网市场服务（宕机或网络不可达），远程安装暂不可用。可稍后重试，或切换到「本地安装」页签安装本地目录或 .tgz 插件（不经签名与 sha256 校验，风险披露见该页确认框）。",
   canBypass: true,
 };
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { rpcCall } from "./api.ts";
+import { rpcCall, pickDirectory } from "./api.ts";
+import { PLUGIN_APPLY_FAIL, PLUGIN_CONFIRM } from "./Settings.tsx";
 import {
   catalogItemLabel,
   filterCatalogItems,
@@ -26,6 +27,8 @@ import { presentMarketError, type MarketErrorPresentation } from "./logic/market
  * - discover/installable 目录与可安装列表；installed 复用 M4 plugin.remove 卸载；
  * - 安装走 preview → execute 链（Task 5），execute 期间防连点（wrapper 亦单飞 409）；
  * - 错误态三类区分（不可达/验签失败/sha 不符），fail-closed 类不提供绕过（R23）；
+ * - 「本地安装」tab（Task 7）：目录/.tgz 经 M4 plugin.add/remove 本地 RPC，不经内网——
+ *   内网宕机时 remote tab 诚实报错、本 tab 仍可用（spec §13 单点缓解旁路）；
  * - 切走再回来即重新挂载并重新拉取（installations 回来自恢复）。
  */
 
@@ -84,6 +87,9 @@ export default function MarketView() {
   const [previewError, setPreviewError] = useState<MarketErrorPresentation | null>(null);
   const [executing, setExecuting] = useState(false);
   const [notice, setNotice] = useState("");
+
+  const [localConfirming, setLocalConfirming] = useState<string | null>(null);
+  const [localBusy, setLocalBusy] = useState(false);
 
   const loadCatalogSide = useCallback(async () => {
     setCatalogLoad("loading");
@@ -180,6 +186,32 @@ export default function MarketView() {
       await loadCatalogSide();
     } catch (error) {
       setNotice(`移除失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** 本地安装（Task 7）：目录/.tgz 选择复用 M4 pickDirectory（取消/平台不可用同语义 null）。 */
+  async function pickLocalPlugin() {
+    const selected = await pickDirectory();
+    if (!selected) return;
+    setNotice("");
+    setLocalConfirming(selected);
+  }
+
+  /** 确认本地安装：M4 confirmAdd 同构——取消重启时 message 诚实告知，失败给 PLUGIN_APPLY_FAIL。 */
+  async function confirmLocalAdd() {
+    if (!localConfirming || localBusy) return;
+    const source = localConfirming;
+    setLocalConfirming(null);
+    setLocalBusy(true);
+    try {
+      const listed = await rpcCall<{ bundles?: string[]; message?: string }>("plugin.add", { source });
+      setBundles(Array.isArray(listed.bundles) ? listed.bundles : []);
+      setNotice(listed.message ?? "插件已安装");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setNotice(`${PLUGIN_APPLY_FAIL}：${message}`);
+    } finally {
+      setLocalBusy(false);
     }
   }
 
@@ -296,9 +328,34 @@ export default function MarketView() {
             ))}
           </ul>
         )
+      ) : tab === "local" ? (
+        <LocalPanel
+          bundles={bundles}
+          localBusy={localBusy}
+          executing={executing}
+          onPick={() => void pickLocalPlugin()}
+          onRemove={(name) => void removeBundle(name)}
+        />
       ) : (
         <SourcesPanel state={state} stateLoad={stateLoad} />
       )}
+
+      {localConfirming ? (
+        <div className="settings-overlay" role="dialog" aria-label="本地安装确认">
+          <div className="confirm-modal">
+            <p>{PLUGIN_CONFIRM}</p>
+            <p className="hint">{localConfirming}</p>
+            <div className="row">
+              <button type="button" className="btn primary" disabled={localBusy} onClick={() => void confirmLocalAdd()}>
+                {localBusy ? "安装中…" : "安装"}
+              </button>
+              <button type="button" className="btn" disabled={localBusy} onClick={() => setLocalConfirming(null)}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {preview ? (
         <div className="settings-overlay" role="dialog" aria-label="安装确认">
@@ -326,13 +383,62 @@ export default function MarketView() {
   );
 }
 
+/** 「本地安装」tab：纯本地 plugin.add/remove RPC（不经内网，宕机旁路）。已装列表与 installed tab 同口径。 */
+function LocalPanel({
+  bundles,
+  localBusy,
+  executing,
+  onPick,
+  onRemove,
+}: {
+  bundles: string[];
+  localBusy: boolean;
+  executing: boolean;
+  onPick: () => void;
+  onRemove: (name: string) => void;
+}) {
+  return (
+    <div className="market-local">
+      <p className="hint">
+        仅本地目录或 .tgz，拒绝 GitHub / URL；本地安装不经签名与 sha256 校验（与内网市场远程安装不同），风险披露见安装确认框。
+      </p>
+      <div className="row">
+        <button type="button" className="btn primary" disabled={localBusy || executing} onClick={onPick}>
+          添加目录 / .tgz
+        </button>
+      </div>
+      {bundles.length === 0 ? (
+        <p className="panel-empty">尚未安装任何插件</p>
+      ) : (
+        <ul className="market-list">
+          {bundles.map((name) => (
+            <li key={name} className="market-item">
+              <span className="recent-title">{name}</span>
+              <button
+                type="button"
+                className="btn market-install"
+                disabled={localBusy || executing}
+                onClick={() => onRemove(name)}
+              >
+                移除
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /** 三类错误态展示：不可达给本地安装旁路提示，验签/sha 失败 fail-closed 无绕过（R23）。 */
 function ErrorPanel({ presentation }: { presentation: MarketErrorPresentation }) {
   return (
     <div className="market-error" role="alert">
       <p className="market-error-title">{presentation.title}</p>
       <p className="hint">{presentation.body}</p>
-      {presentation.canBypass ? <p className="hint">本地安装（无签名旁路）入口将在后续版本并入本页。</p> : null}
+      {presentation.canBypass ? (
+        <p className="hint">旁路：切换到「本地安装」页签，可安装本地目录或 .tgz 插件（不经签名与 sha256 校验，风险披露见该页确认框）。</p>
+      ) : null}
     </div>
   );
 }

@@ -9,15 +9,17 @@
  * 所有函数保持纯（无副作用、可 node 测试），承 M4 keepAwake/missedBanner 惯例。
  */
 
-/** MarketView 页内 tab 联合（形态参照 dsh-community-market MarketSettingsTab，重写为 renderer 实现）。 */
-export type MarketTab = "discover" | "installable" | "installed" | "sources";
+/** MarketView 页内 tab 联合（形态参照 dsh-community-market MarketSettingsTab，重写为 renderer 实现）。
+ * 「local」为 M5 有意偏离（spec §12 本地安装 tab 合并）：内网宕机旁路，走纯本地 plugin.add/remove。 */
+export type MarketTab = "discover" | "installable" | "installed" | "local" | "sources";
 
-export const MARKET_TABS: readonly MarketTab[] = ["discover", "installable", "installed", "sources"];
+export const MARKET_TABS: readonly MarketTab[] = ["discover", "installable", "installed", "local", "sources"];
 
 export const MARKET_TAB_LABELS: Record<MarketTab, string> = {
   discover: "发现",
   installable: "可安装",
   installed: "已安装",
+  local: "本地安装",
   sources: "来源",
 };
 

@@ -20,10 +20,13 @@ test("classifyMarketError maps wrapper codes to the three distinguished states",
   assert.equal(classifyMarketError("internal"), "unknown");
 });
 
-test("unreachable presentation offers the local-install bypass hint", () => {
+test("unreachable presentation offers the local-install bypass hint (Task 7: tab now exists)", () => {
   const presentation = marketErrorPresentation("unreachable");
   assert.equal(presentation.canBypass, true);
   assert.match(presentation.body, /本地安装/);
+  assert.match(presentation.body, /本地目录或 \.tgz/);
+  // Task 6 的占位口径（「将在后续版本并入本页」）不得回潮。
+  assert.doesNotMatch(presentation.body, /后续版本/);
 });
 
 test("verification failure is fail-closed with the mandated copy", () => {

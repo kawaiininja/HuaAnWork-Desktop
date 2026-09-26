@@ -2356,7 +2356,6 @@ export default function App() {
       {settingsOpen ? (
         <Settings
           onClose={() => { setSettingsOpen(false); void refreshModelLabel(); }}
-          onPluginApplyFail={setPluginFail}
           onModelsChange={hydrateModels}
           section={settingsSection}
           onSectionChange={setSettingsSection}

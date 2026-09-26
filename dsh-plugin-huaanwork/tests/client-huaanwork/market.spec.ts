@@ -7,6 +7,8 @@ import {
   filterInstallable,
   formatMarketSize,
   installableLabel,
+  MARKET_TAB_LABELS,
+  MARKET_TABS,
   shortSha256,
   type MarketInstallableItem,
 } from "../../src/client-huaanwork/logic/market.ts";
@@ -71,4 +73,14 @@ test("formatMarketSize renders B/KB/MB/GB", () => {
 test("shortSha256 truncates to 12 chars", () => {
   assert.equal(shortSha256("a".repeat(64)), "a".repeat(12));
   assert.equal(shortSha256("abc"), "abc");
+});
+
+test("MARKET_TABS pins the upstream-shaped union plus the M5 'local' offline-bypass tab", () => {
+  // Task 7：'local' 为 M5 有意偏离（spec §12 本地安装 tab 合并），落位 installed 与 sources 之间。
+  assert.deepEqual([...MARKET_TABS], ["discover", "installable", "installed", "local", "sources"]);
+  for (const tab of MARKET_TABS) {
+    assert.equal(typeof MARKET_TAB_LABELS[tab], "string");
+    assert.ok(MARKET_TAB_LABELS[tab].length > 0, tab);
+  }
+  assert.equal(MARKET_TAB_LABELS.local, "本地安装");
 });
