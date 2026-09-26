@@ -1,8 +1,8 @@
 /**
- * huaanwork-market wrapper bundle 入口(M5 Task 4 骨架)。
+ * huaanwork-market wrapper bundle 入口(M5 Task 4 骨架 → Task 5 消费面)。
  *
- * 消费面本体(catalog-client/verify/routes/install)由 Task 5 落位;本骨架
- * 固化注入面与能力守卫,保证 package.json 的 ./huaanwork-market subpath export
+ * 消费面本体(catalog-client/verify/routes/install)由 Task 5 落位;本模块固化
+ * 注入面与能力守卫,保证 package.json 的 ./huaanwork-market subpath export
  * 与 tsdown entry 有真实可加载产物(build/verify:closure 不空转),且
  * 选中 huaanwork-market provider 时组合出的 canonical row 能被 Loader 加载。
  *
@@ -18,10 +18,12 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { ConfirmedRestartRuntime } from '../../host-runtime-bridge.ts'
 import type { DesktopPnpm } from '../../pnpm.ts'
 import type { DesktopProfiles } from '../../profile-service.ts'
+import { sweepOrphanMarketArtifacts } from './artifacts.ts'
 import {
   HUAANWORK_MARKET_BUNDLE_NAME,
   resolveMarketOrigin,
 } from './config.ts'
+import { MARKET_ROUTE_LIST, registerMarketRoutes } from './routes.ts'
 
 export {
   HUAANWORK_MARKET_BUNDLE_NAME,
@@ -44,11 +46,10 @@ export const name = HUAANWORK_MARKET_BUNDLE_NAME
 export const inject = ['webServer', 'desktopProfiles', 'desktopPnpm', 'desktopRuntime']
 
 /**
- * 表外 routes 可测枚举清单(round3 R19 / 守则 5):Task 4 仅落占位(空数组),
- * catalog/install 消费面(Task 5)把 7 条路径补进这里,routes spec 断言逐一
+ * 表外 routes 可测枚举清单(round3 R19 / 守则 5):恰 7 条,spec 断言逐一
  * 经 ctx.webServer 注册且总量恰 7。不进 ROUTE_TABLE / NATIVE_ROUTES(54 不破)。
  */
-export const HUAANWORK_MARKET_ROUTES: readonly string[] = Object.freeze([])
+export const HUAANWORK_MARKET_ROUTES: readonly string[] = MARKET_ROUTE_LIST
 
 export function apply(ctx: Context): void {
   // 能力守卫(参照 huaanwork-host/index.ts:51-57):inject 之外再窄化方法面——
@@ -67,7 +68,20 @@ export function apply(ctx: Context): void {
   if (pnpm === null || typeof pnpm !== 'object' || typeof pnpm.runPlugin !== 'function') {
     throw new Error('huaanwork-market: desktopPnpm 缺少 runPlugin()(市场安装执行需要 Desktop pnpm 能力;请使用 Desktop 提供的 desktopPnpm 能力)')
   }
-  // Task 4 骨架:只固化配置解析(非法 origin 具名错误 fail-closed);
-  // routes 占位不注册,catalog-client/verify/routes/install 由 Task 5 落位。
-  resolveMarketOrigin()
+  // 配置解析(非法 origin 具名错误 fail-closed)。
+  const origin = resolveMarketOrigin()
+  const logger = (message: string) => { ctx.logger?.info(message) }
+  ctx.effect(() => {
+    // 启动时惰性清扫孤儿制品(N1 GC:只删无 file: 引用者;有引用者删了必坏)。
+    sweepOrphanMarketArtifacts(profiles.current.dir, logger)
+    // 7 条表外 market routes(守则 5;ROUTE_TABLE 54 不破)。
+    const disposeRoutes = registerMarketRoutes(ctx, {
+      profileDir: profiles.current.dir,
+      origin,
+      logger,
+    })
+    return () => {
+      disposeRoutes()
+    }
+  }, 'huaanwork-market: routes and artifact sweep')
 }

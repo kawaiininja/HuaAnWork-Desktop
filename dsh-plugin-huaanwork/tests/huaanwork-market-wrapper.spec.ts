@@ -105,13 +105,29 @@ describe('huaanwork-market bundle surface', () => {
   it('declares the canonical bundle identity and the four-capability inject surface', () => {
     expect(name).toBe(HUAANWORK_MARKET_BUNDLE_NAME)
     expect(inject).toEqual(['webServer', 'desktopProfiles', 'desktopPnpm', 'desktopRuntime'])
-    // Task 4 占位:routes 清单为空,Task 5 补 7 条表外 routes(守则 5)。
-    expect(HUAANWORK_MARKET_ROUTES).toEqual([])
+    // Task 5:恰 7 条表外 routes(守则 5);routes spec 断言逐一注册且总量恰 7。
+    expect(HUAANWORK_MARKET_ROUTES).toEqual([
+      '/api/huaanwork-market/state',
+      '/api/huaanwork-market/catalog',
+      '/api/huaanwork-market/installable',
+      '/api/huaanwork-market/installations',
+      '/api/huaanwork-market/operations/preview',
+      '/api/huaanwork-market/operations/execute',
+      '/api/huaanwork-market/desktop/request-restart',
+    ])
     expect(HUAANWORK_MARKET_SUBPATH_EXPORT).toBe('./huaanwork-market')
   })
 
   function fakeCtx(overrides: Record<string, unknown>): Context {
-    return overrides as unknown as Context
+    return {
+      effect: () => {},
+      logger: { info: () => {} },
+      webServer: {
+        port: 9,
+        register: () => () => {},
+      },
+      ...overrides,
+    } as unknown as Context
   }
 
   it('apply throws named capability errors fail-closed on narrow hosts', () => {

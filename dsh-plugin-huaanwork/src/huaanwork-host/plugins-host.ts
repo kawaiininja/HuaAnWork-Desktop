@@ -5,6 +5,7 @@ import { PROFILE_TEMPLATES } from '@deepseek-ai/dsh-app-boot'
 
 import type { DesktopPnpm, DesktopPnpmHandle } from '../pnpm.ts'
 import { DESKTOP_PACKAGE_NAMES } from '../product-identity.ts'
+import { gcRemovedPackageArtifacts } from './market/artifacts.ts'
 import { HUAANWORK_MARKET_BUNDLE_NAME } from './market/config.ts'
 
 /**
@@ -167,7 +168,9 @@ export async function addPlugin(
 }
 
 /** remove 与 add 同构:无来源校验,IMMUTABLE_BUNDLES 直接拒绝。取消应答同样
- * 以 message 诚实告知清单已写入(恢复口径见 addPlugin,M4 评审 D3)。 */
+ * 以 message 诚实告知清单已写入(恢复口径见 addPlugin,M4 评审 D3)。
+ * M5(N1 GC):pnpm remove 成功后清理 `.market-artifacts/` 里该包的制品
+ * (其 `file:` 引用已被移除;best-effort,绝不阻断卸载)。 */
 export async function removePlugin(routeCtx: PluginMutationContext, name: string): Promise<PluginMutationResult> {
   if (!name) throw new Error('plugin.remove requires name')
   if (IMMUTABLE_BUNDLES.has(name)) {
@@ -175,6 +178,7 @@ export async function removePlugin(routeCtx: PluginMutationContext, name: string
   }
   const before = listPlugins(routeCtx.profileDir).bundles
   await runDesktopPlugin(routeCtx, ['remove', name])
+  gcRemovedPackageArtifacts(routeCtx.profileDir, name, routeCtx.logger)
   if (!await routeCtx.requestRestart()) {
     return {
       bundles: [...before],
