@@ -22,7 +22,7 @@ const STATE_FILE_MODE = 0o600
 const MAX_STATE_BYTES = 4 * 1024
 
 /** Market implementation selected for the next Desktop generation. */
-export type DesktopMarketProvider = 'disabled' | 'community-market' | 'dsh-market'
+export type DesktopMarketProvider = 'disabled' | 'community-market' | 'dsh-market' | 'huaanwork-market'
 
 /** Canonical Loader identities owned by the Desktop provider switch. */
 export const DESKTOP_MARKET_IDENTITIES = Object.freeze({
@@ -35,6 +35,13 @@ export const DESKTOP_MARKET_IDENTITIES = Object.freeze({
     provider: 'dsh-market' as const,
     rowId: 'dsh-market',
     packageName: 'dshmarket',
+  }),
+  // M5:内网 market wrapper 的 identity 只固化 {provider,rowId,packageName} 三字段;
+  // 内网源 URL 不落 identity,由 wrapper 配置层(src/huaanwork-host/market/config.ts)持有。
+  huaanworkMarket: Object.freeze({
+    provider: 'huaanwork-market' as const,
+    rowId: 'huaanwork-market',
+    packageName: 'dsh-plugin-huaanwork/huaanwork-market',
   }),
 })
 
@@ -87,6 +94,7 @@ export function desktopMarketSnapshotWithEffective(
 
 function isProvider(value: unknown): value is DesktopMarketProvider {
   return value === 'disabled' || value === 'community-market' || value === 'dsh-market'
+    || value === 'huaanwork-market'
 }
 
 function invalidState(message: string): Error {

@@ -352,7 +352,8 @@ function MarketOptions({
     aria-orientation="vertical"
     name="setup-plugin-market"
     onValueChange={value => {
-      if (value === 'disabled' || value === 'community-market' || value === 'dsh-market') {
+      if (value === 'disabled' || value === 'community-market' || value === 'dsh-market'
+        || value === 'huaanwork-market') {
         update({ ...selection, market: value })
       }
     }}

@@ -141,6 +141,7 @@ function parseProfileRequest(value: unknown): DesktopProfileCreateRequest | unde
 
 function isMarketProvider(value: unknown): value is DesktopMarketProvider {
   return value === 'disabled' || value === 'community-market' || value === 'dsh-market'
+    || value === 'huaanwork-market'
 }
 
 function parseMarketRequest(value: unknown): DesktopMarketSelectRequest | undefined {

@@ -46,6 +46,9 @@ export default defineConfig([
       'huaanwork-guardrails/bridge': 'src/huaanwork-guardrails/bridge.ts',
       'huaanwork-host/index': 'src/huaanwork-host/index.ts',
       'huaanwork-host/gates': 'src/huaanwork-host/gates.ts',
+      // M5 Task 3:占位 entry(Task 4 落 wrapper 消费面本体);
+      // exports map 的 ./huaanwork-market 指向本产物,占位保证 build/closure 不空转。
+      'huaanwork-host/market/index': 'src/huaanwork-host/market/index.ts',
     },
     outDir: 'lib',
     format: 'esm',

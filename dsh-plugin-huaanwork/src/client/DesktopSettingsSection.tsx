@@ -272,6 +272,9 @@ const MARKET_OPTIONS: readonly {
   { id: 'disabled', title: 'marketDisabled', body: 'marketDisabledBody' },
   { id: 'community-market', title: 'communityMarket', body: 'communityMarketBody' },
   { id: 'dsh-market', title: 'dshMarket', body: 'dshMarketBody' },
+  // M5:内网 market 的入口只开在设置面(向导保持三选);无仓库外链——
+  // 内网源 URL 由 wrapper 配置层持有,不渲染 RepositoryLink。
+  { id: 'huaanwork-market', title: 'huaanworkMarket', body: 'huaanworkMarketBody' },
 ]
 
 const COMMUNITY_MARKET_URL = 'https://github.com/anywhere-labs/deepseek-harness-desktop/tree/master/dsh-community-market'
@@ -285,10 +288,13 @@ function marketTitle(option: (typeof MARKET_OPTIONS)[number], t: Translate): Rea
   if (option.id === 'dsh-market') {
     return <RepositoryLink href={DSH_MARKET_URL}>{t(option.title)}</RepositoryLink>
   }
+  // huaanwork-market 刻意落入默认分支:纯文本标题(内网源无公开仓库链接)。
   return t(option.title)
 }
 
 function marketBody(option: (typeof MARKET_OPTIONS)[number], t: Translate): ReactNode {
+  // huaanwork-market 与 disabled/community-market 同走纯文本 body;
+  // 仅 dsh-market 追加 awesome-dsh-plugin 外链。
   if (option.id !== 'dsh-market') return t(option.body)
   return (
     <>

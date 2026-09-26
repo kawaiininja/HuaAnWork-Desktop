@@ -123,6 +123,10 @@
     "./huaanwork-host/gates": {
       "types": "./lib/types/huaanwork-host/gates.d.ts",
       "default": "./lib/huaanwork-host/gates.js"
+    },
+    "./huaanwork-market": {
+      "types": "./lib/types/huaanwork-host/market/index.d.ts",
+      "default": "./lib/huaanwork-host/market/index.js"
     }
   },
   "files": [

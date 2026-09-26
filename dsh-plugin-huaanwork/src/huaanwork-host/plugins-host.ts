@@ -30,15 +30,19 @@ export function fallbackProfileBundles(): string[] {
 }
 
 /**
- * 不可移除的 bundle(与 src/desktop-plugins.ts IMMUTABLE_BUNDLES 同口径:
- * web 模板 bundle + 桌面包名(DESKTOP_PACKAGE_NAMES)+ 历史/市场固定项;
- * M4 plugin.remove 写路径消费,防止把随包 carrier 标为可移除)。
+ * 不可移除的 bundle(plugin.remove 写路径的权威判定,M4):
+ * web 模板 bundle + 桌面包名(DESKTOP_PACKAGE_NAMES)+ 历史/市场固定项。
+ * 注意(round3 R20 订正):本集与 src/desktop-plugins.ts 的 IMMUTABLE_BUNDLES
+ * **不同口径、各自维护**——后者只服务 DesktopPluginsService 的卸载预览,
+ * wrapper 消费面不经由它;两边的增删互不要求同步。
+ * M5:内网 market wrapper bundle(huaanwork-market)随包 carrier,防被 remove。
  */
 export const IMMUTABLE_BUNDLES: ReadonlySet<string> = new Set([
   ...fallbackProfileBundles(),
   '@deepseek-ai/dsh-desktop-app',
   ...DESKTOP_PACKAGE_NAMES,
   'dsh-community-market',
+  'huaanwork-market',
 ])
 
 export function listPlugins(storageRoot: string): { bundles: string[] } {
