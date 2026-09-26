@@ -5,6 +5,7 @@ import { PROFILE_TEMPLATES } from '@deepseek-ai/dsh-app-boot'
 
 import type { DesktopPnpm, DesktopPnpmHandle } from '../pnpm.ts'
 import { DESKTOP_PACKAGE_NAMES } from '../product-identity.ts'
+import { HUAANWORK_MARKET_BUNDLE_NAME } from './market/config.ts'
 
 /**
  * 插件清单读路径(Task 10):读 profileDir package.json 的 `dsh.profile.bundles`,
@@ -42,7 +43,7 @@ export const IMMUTABLE_BUNDLES: ReadonlySet<string> = new Set([
   '@deepseek-ai/dsh-desktop-app',
   ...DESKTOP_PACKAGE_NAMES,
   'dsh-community-market',
-  'huaanwork-market',
+  HUAANWORK_MARKET_BUNDLE_NAME,
 ])
 
 export function listPlugins(storageRoot: string): { bundles: string[] } {

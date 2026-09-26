@@ -31,7 +31,7 @@ import FileSettingsProvider, {
   type Config as SettingsFileConfig,
 } from '@deepseek-ai/dsh-settings-file'
 import { parseAllDocuments, parseDocument } from 'yaml'
-import { findOverlayPackage, resolveOverlayPackage } from './package-overlay.ts'
+import { findOverlayPackage, packageNameFromSpecifier, resolveOverlayPackage } from './package-overlay.ts'
 import { DESKTOP_DEFAULT_WEB_PORT } from './desktop-port.ts'
 import {
   desktopBrowserAccessEnabled,
@@ -66,6 +66,7 @@ import {
   type DesktopMarketSnapshot,
 } from './desktop-market.ts'
 import { neutralWorkspaceRoot, readPendingWorkspaceRoot } from './huaanwork-host/workspace-state.ts'
+import { HUAANWORK_MARKET_SUBPATH_EXPORT } from './huaanwork-host/market/config.ts'
 import { sessionIdFor } from './huaanwork-host/session-id.ts'
 import { assertHuaanworkRowIdsHit } from './huaanwork-host/row-assertions.ts'
 import './huaanwork-host/holders.ts'
@@ -118,10 +119,12 @@ const DEFAULT_DESKTOP_MARKET_SNAPSHOT: DesktopMarketSnapshot = Object.freeze({
 const MARKET_ROW_IDS: ReadonlySet<string> = new Set([
   DESKTOP_MARKET_IDENTITIES.community.rowId,
   DESKTOP_MARKET_IDENTITIES.dshMarket.rowId,
+  DESKTOP_MARKET_IDENTITIES.huaanworkMarket.rowId,
 ])
 const MARKET_PACKAGE_NAMES: ReadonlySet<string> = new Set([
   DESKTOP_MARKET_IDENTITIES.community.packageName,
   DESKTOP_MARKET_IDENTITIES.dshMarket.packageName,
+  DESKTOP_MARKET_IDENTITIES.huaanworkMarket.packageName,
 ])
 
 /**
@@ -755,6 +758,37 @@ function validateMarketPackage(name: string, profilePackageUrl: string): string 
   }
 }
 
+/**
+ * Ensure the carried intranet wrapper subpath resolves through the selected
+ * profile fallback. `validateMarketPackage` only accepts exact npm package
+ * names; the huaanwork-market row is a subpath of the Desktop package itself
+ * (`dsh-plugin-huaanwork/huaanwork-market`), so resolve the base package
+ * overlay and then require the `./huaanwork-market` export on the winner.
+ */
+function validateHuaanworkMarketPackage(profilePackageUrl: string): string | undefined {
+  const identity = DESKTOP_MARKET_IDENTITIES.huaanworkMarket
+  const baseName = packageNameFromSpecifier(identity.packageName)
+  if (baseName === undefined) {
+    return `${BIN_NAME}: invalid huaanwork-market package identity ${JSON.stringify(identity.packageName)}`
+  }
+  try {
+    const selection = resolveOverlayPackage(baseName, {
+      installPackageUrl: pathToFileURL(INSTALL_ANCHOR).href,
+      profilePackageUrl,
+    })
+    const manifest = JSON.parse(readFileSync(selection.selected.manifestPath, 'utf8')) as {
+      exports?: unknown
+    }
+    const exportsMap = manifest.exports
+    if (exportsMap === null || typeof exportsMap !== 'object' || Array.isArray(exportsMap)
+      || !Object.prototype.hasOwnProperty.call(exportsMap, HUAANWORK_MARKET_SUBPATH_EXPORT)) {
+      return `${BIN_NAME}: selected Desktop package does not export ${identity.packageName}`
+    }
+  } catch (cause) {
+    return `${BIN_NAME}: cannot resolve huaanwork-market wrapper: ${marketFailureMessage(cause)}`
+  }
+}
+
 /** Assert the final graph contains only the provider selected by the launcher. */
 function assertEffectiveMarketRows(
   rows: readonly EntryOptions[],
@@ -765,9 +799,13 @@ function assertEffectiveMarketRows(
     if (providers.length !== 0) throw new Error(`${BIN_NAME}: disabled Market provider leaked into the Loader graph`)
     return
   }
+  // 三向 identity 解析(round3 R5/R6):community / dshMarket / huaanwork-market
+  // 各对应恰一 canonical row;默认 disabled 在上面已按「零 market row」收口。
   const identity = effective === DESKTOP_MARKET_IDENTITIES.community.provider
     ? DESKTOP_MARKET_IDENTITIES.community
-    : DESKTOP_MARKET_IDENTITIES.dshMarket
+    : effective === DESKTOP_MARKET_IDENTITIES.dshMarket.provider
+      ? DESKTOP_MARKET_IDENTITIES.dshMarket
+      : DESKTOP_MARKET_IDENTITIES.huaanworkMarket
   if (providers.length !== 1 || providers[0]?.id !== identity.rowId
     || providers[0]?.name !== identity.packageName) {
     throw new Error(`${BIN_NAME}: selected Market provider did not compose to one canonical Loader row`)
@@ -910,6 +948,19 @@ export function prepareDesktopProfile(
           }],
         })
         effectiveMarket = DESKTOP_MARKET_IDENTITIES.community.provider
+      }
+    } else if (marketSelection.requested === DESKTOP_MARKET_IDENTITIES.huaanworkMarket.provider) {
+      // M5:内网 wrapper 随 Desktop 包 carrier 的 canonical row——落位在
+      // providerPatches 分支(组合顺序不变量),绝不进下方 guardrail 锁 insert 块。
+      marketFailure = validateHuaanworkMarketPackage(bareModuleBaseUrl)
+      if (marketFailure === undefined) {
+        providerPatches.push({
+          insert: [{
+            id: DESKTOP_MARKET_IDENTITIES.huaanworkMarket.rowId,
+            name: DESKTOP_MARKET_IDENTITIES.huaanworkMarket.packageName,
+          }],
+        })
+        effectiveMarket = DESKTOP_MARKET_IDENTITIES.huaanworkMarket.provider
       }
     } else if (loadedProfile.dshMarketFailure !== undefined) {
       marketFailure = loadedProfile.dshMarketFailure

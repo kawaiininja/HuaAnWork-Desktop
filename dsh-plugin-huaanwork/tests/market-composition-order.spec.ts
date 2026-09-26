@@ -6,12 +6,13 @@ import { prepareDesktopProfile } from '../src/profile.ts'
 import { DESKTOP_MARKET_IDENTITIES } from '../src/desktop-market.ts'
 
 // M5 Task 0 组合顺序断言(§13 风险,round3 R5 按层判据):
-// provider 层 patches 并入(profile.ts 的 providerPatches 分支,~:906-927)必须先于
-// guardrail 锁层 push(~:961-997)——应用写锁必须在第三方 market bundle 之后生效
+// provider 层 patches 并入(profile.ts 的 providerPatches 分支)必须先于
+// guardrail 锁层 push——应用写锁必须在第三方 market bundle 之后生效
 // (spec §6 第 2 条,后层覆盖用户安装 bundle)。market row 的正确落位是 providerPatches
 // 分支,塞进 guardrail 锁 insert 块 = 反转分层。
-// 真实 `huaanwork-market` row 在 Task 4 才接入组合,负例用注入 fixture 构造;
-// Task 4 接入时须补一条对真实组合输出的断言,并删去对应 fixture 负例。
+// Task 4 已把真实 `huaanwork-market` row 接入组合:正例对真实组合输出断言
+// (provider 层先于锁层);负例继续用注入 fixture 构造「market row 出现在锁层
+// 之后/夹进锁层中段」,按设计恒红(守卫函数自身的负例覆盖)。
 
 /** Minimal structural view of one composed patch entry. */
 interface CompositionPatch {
@@ -42,10 +43,10 @@ const GUARDRAIL_LOCK_IDS: ReadonlySet<string> = new Set([
   'sandbox-policy',
 ])
 
-/** Task 4 将落地的 canonical market row(DESKTOP_MARKET_IDENTITIES 第四成员)。 */
+/** Task 4 落地的 canonical market row(DESKTOP_MARKET_IDENTITIES 第四成员)。 */
 const HUAANWORK_MARKET_ROW = Object.freeze({
-  id: 'huaanwork-market',
-  name: 'dsh-plugin-huaanwork/huaanwork-market',
+  id: DESKTOP_MARKET_IDENTITIES.huaanworkMarket.rowId,
+  name: DESKTOP_MARKET_IDENTITIES.huaanworkMarket.packageName,
 })
 
 function isGuardrailFinalInsert(patch: CompositionPatch): boolean {
@@ -169,6 +170,27 @@ describe('market composition order (provider layer before guardrail lock layer)'
     expect(providerInsertIndex).not.toBe(-1)
 
     const order = assertMarketCompositionOrder(patches)
+    expect(order.marketPatchCount).toBe(1)
+    expect(providerInsertIndex).toBeLessThan(order.lockLayerStart)
+  })
+
+  it('merges the huaanwork-market provider row before the guardrail lock layer', () => {
+    const home = temporaryHome()
+
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin', 'desktop', undefined, {
+      requested: DESKTOP_MARKET_IDENTITIES.huaanworkMarket.provider,
+      effective: DESKTOP_MARKET_IDENTITIES.huaanworkMarket.provider,
+      legacyDefaulted: false,
+    })
+    expect(prepared.market.effective).toBe(DESKTOP_MARKET_IDENTITIES.huaanworkMarket.provider)
+    expect(prepared.marketFailure).toBeUndefined()
+
+    const patches = prepared.patches as CompositionPatch[]
+    const providerInsertIndex = patches.findIndex(patch => Array.isArray(patch.insert)
+      && patch.insert.some(row => row.id === DESKTOP_MARKET_IDENTITIES.huaanworkMarket.rowId))
+
+    const order = assertMarketCompositionOrder(patches)
+    expect(providerInsertIndex).not.toBe(-1)
     expect(order.marketPatchCount).toBe(1)
     expect(providerInsertIndex).toBeLessThan(order.lockLayerStart)
   })

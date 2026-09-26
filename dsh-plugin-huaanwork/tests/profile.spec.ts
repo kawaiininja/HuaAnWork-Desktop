@@ -478,7 +478,7 @@ virtualStoreDirMaxLength: 60
     )).toThrow('LAN address "desktop.internal" is not an IPv4 literal')
   })
 
-  it('keeps both Market providers absent until the user explicitly enables one', () => {
+  it('keeps every Market provider absent until the user explicitly enables one', () => {
     const home = temporaryHome()
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')
     const rows = composeEntries([prepared.patches])
@@ -488,6 +488,26 @@ virtualStoreDirMaxLength: 60
       effective: 'disabled',
       legacyDefaulted: true,
     })
+    expect(rows.some(row => row.id === DESKTOP_MARKET_IDENTITIES.community.rowId
+      || row.id === DESKTOP_MARKET_IDENTITIES.dshMarket.rowId
+      || row.id === DESKTOP_MARKET_IDENTITIES.huaanworkMarket.rowId)).toBe(false)
+  })
+
+  it('inserts the huaanwork-market wrapper row only after explicit selection', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin', 'desktop', undefined, {
+      requested: 'huaanwork-market',
+      effective: 'huaanwork-market',
+      legacyDefaulted: false,
+    })
+    const rows = composeEntries([prepared.patches])
+
+    expect(prepared.market.effective).toBe('huaanwork-market')
+    expect(prepared.marketFailure).toBeUndefined()
+    expect(rows.filter(row => row.id === DESKTOP_MARKET_IDENTITIES.huaanworkMarket.rowId)).toEqual([{
+      id: DESKTOP_MARKET_IDENTITIES.huaanworkMarket.rowId,
+      name: DESKTOP_MARKET_IDENTITIES.huaanworkMarket.packageName,
+    }])
     expect(rows.some(row => row.id === DESKTOP_MARKET_IDENTITIES.community.rowId
       || row.id === DESKTOP_MARKET_IDENTITIES.dshMarket.rowId)).toBe(false)
   })
@@ -676,6 +696,23 @@ virtualStoreDirMaxLength: 60
     expect(prepared.marketFailure).toContain('conflicting Market provider Loader identity')
     expect(rows.some(row => row.id === DESKTOP_MARKET_IDENTITIES.community.rowId
       || row.id === DESKTOP_MARKET_IDENTITIES.dshMarket.rowId)).toBe(false)
+    expect(rows.some(row => row.id === 'webserver')).toBe(true)
+  })
+
+  it('fails a conflicting huaanwork-market identity closed without blocking the core profile', () => {
+    const home = temporaryHome()
+    writeFileSync(join(home, 'cordis.patch.yml'), `- insert:\n    - id: huaanwork-market\n      name: dsh-plugin-huaanwork/huaanwork-market\n`)
+
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin', 'desktop', undefined, {
+      requested: 'huaanwork-market',
+      effective: 'huaanwork-market',
+      legacyDefaulted: false,
+    })
+    const rows = composeEntries([prepared.patches])
+
+    expect(prepared.market.effective).toBe('disabled')
+    expect(prepared.marketFailure).toContain('conflicting Market provider Loader identity')
+    expect(rows.some(row => row.id === DESKTOP_MARKET_IDENTITIES.huaanworkMarket.rowId)).toBe(false)
     expect(rows.some(row => row.id === 'webserver')).toBe(true)
   })
 
