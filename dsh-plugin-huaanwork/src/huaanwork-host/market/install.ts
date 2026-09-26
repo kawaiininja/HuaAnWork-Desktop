@@ -4,7 +4,9 @@
  * 安装链(〈安装入口边界〉,被校验顶层制品字节 = 被安装字节):
  * ① 从**已验签清单**取 `name@version` 的 tarballPath + sha256;URL 经
  *    catalog-client.resolveSameOriginUrl 同源钉扎(X1,fail-closed)。
- * ② 自有 HTTP client 拉取 .tgz,**边下边算 sha256**(流式逐 chunk 更新 hash)。
+ * ② 自有 HTTP client 拉取 .tgz,**全量缓冲**(上限 MARKET_ARTIFACT_MAX_BYTES)
+ *    后一次性 sha256 比对清单——**非流式**(评审 D6:流式下载留待后续批次,
+ *    届时改为边收边 hash.update(chunk) 边写 tmp)。
  * ③ 与清单 sha256 比对:不符即拒——temp 清理,**不落盘、不安装、诚实报错**。
  * ④ **零依赖与无脚本预检**(round4 裁定 (c),安装侧门,与发布侧门同口径):
  *    dependencies/optionalDependencies 非空即拒;scripts 含 preinstall/install/
@@ -188,8 +190,10 @@ export interface PreparedMarketArtifact {
 }
 
 /**
- * 流式下载 .tgz + 边下边算 sha256 + 比对清单 + 零依赖无脚本预检 + 落制品。
- * 任何一步失败:temp 清理(不落盘)、不安装、抛具名错误。
+ * 下载 .tgz(全量缓冲,上限 MARKET_ARTIFACT_MAX_BYTES)+ 对缓冲字节一次性
+ * 算 sha256 并比对清单 + 零依赖无脚本预检 + 落制品(评审 D6:当前**非流式**,
+ * 流式下载边收边 hash 留待后续批次)。任何一步失败:temp 清理(不落盘)、
+ * 不安装、抛具名错误。
  */
 export async function downloadAndStageArtifact(options: {
   readonly origin: string

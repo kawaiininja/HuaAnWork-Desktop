@@ -123,7 +123,7 @@ function requestBuffer(url: string, maxBytes: number, label: string): Promise<Bu
 export interface MarketHttpClient {
   /** 拉 JSON 文本(GET);非 2xx/超时/超限 → MarketFetchError(诚实报错)。 */
   fetchText(url: string, label: string): Promise<string>
-  /** 流式拉字节(供 install.ts 边下边算 sha256;默认实现这里一次收齐,hash 更新仍在 install 侧逐 chunk)。 */
+  /** 拉字节(GET;全量缓冲,上限 maxBytes)——评审 D6:当前**非流式**,「流式拉字节」是后续批次目标;install 侧对返回的缓冲一次性算 sha256。非 2xx/超时/超限 → MarketFetchError(诚实报错)。 */
   fetchBuffer(url: string, label: string, maxBytes: number): Promise<Buffer>
 }
 
