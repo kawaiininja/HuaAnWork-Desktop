@@ -91,7 +91,7 @@ function gnuLongNameOverride(data: Buffer): string {
 
 interface TarWalkState {
   pendingName: string | null
-  /** All depth-1 package.json candidates; the shallowest name wins below. */
+  /** All depth-1 package.json candidates; exactly one is required (see below). */
   packageJsonCandidates: { readonly name: string; readonly data: Buffer }[]
 }
 
@@ -121,10 +121,17 @@ function walkEntries(tar: Buffer, state: TarWalkState): void {
       state.pendingName = gnuLongNameOverride(data)
       continue
     }
-    if (type !== 'file') continue
+    if (type !== 'file' && type !== 'directory') continue
 
     const name = (state.pendingName ?? headerName(block)).replace(/^\.\//u, '')
     state.pendingName = null
+    // Fail closed on path traversal (review D1): a ".." segment must never
+    // appear in any entry name — it would otherwise match the depth-1
+    // manifest regex below (".." is a valid [^/]+ segment).
+    if (name.split('/').includes('..')) {
+      throw new TarballError('invalid-tarball', `tar entry name contains a ".." segment: ${JSON.stringify(name)}`)
+    }
+    if (type !== 'file') continue
     // Pax metadata header entries (node-tar/npm convention: a PaxHeaders
     // path segment) masquerade as files; never treat them as the manifest.
     const isPaxMetadata = name.split('/').some(segment => segment.startsWith('PaxHeaders'))
@@ -147,15 +154,22 @@ export function extractPackageManifest(tgzBytes: Buffer): Record<string, unknown
   }
   const state: TarWalkState = { pendingName: null, packageJsonCandidates: [] }
   walkEntries(tar, state)
-  // The shallowest depth-1 package.json is the package manifest; longer
-  // candidates are tooling headers (e.g. PaxHeaders/... entries).
-  const winner = state.packageJsonCandidates.reduce<(typeof state.packageJsonCandidates)[number] | null>(
-    (best, candidate) => (best === null || candidate.name.length < best.name.length ? candidate : best),
-    null,
-  )
-  if (winner === null) {
+  // Manifest selection rule (review D1, identical on the wrapper install
+  // side): exactly ONE depth-1 <dir>/package.json is acceptable. npm-packed
+  // artifacts always carry exactly one package/package.json; more than one
+  // candidate is an ambiguous tarball and must be rejected, not tie-broken —
+  // otherwise a clean decoy manifest can smuggle a dirty one past the gate.
+  if (state.packageJsonCandidates.length === 0) {
     throw new TarballError('missing-package-json', 'tarball has no <dir>/package.json entry')
   }
+  if (state.packageJsonCandidates.length > 1) {
+    const names = state.packageJsonCandidates.map(candidate => candidate.name).sort()
+    throw new TarballError(
+      'invalid-tarball',
+      `tarball is ambiguous: ${String(state.packageJsonCandidates.length)} depth-1 package.json entries (${names.join(', ')}); expected exactly one`,
+    )
+  }
+  const winner = state.packageJsonCandidates[0]!
   let parsed: unknown
   try {
     parsed = JSON.parse(winner.data.toString('utf8'))

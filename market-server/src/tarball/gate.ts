@@ -23,10 +23,19 @@ export type PublishGateResult =
   | { readonly ok: true; readonly name: string; readonly version: string }
   | { readonly ok: false; readonly rejection: PublishRejection }
 
-/** npm package-name shape (`@scope/name` or `name`). Intentionally strict. */
-const PACKAGE_NAME_PATTERN = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/iu
-/** Version must be filename-safe and single-line. */
-const PACKAGE_VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9.+-]{0,127}$/u
+/**
+ * npm package-name shape (`@scope/name` or `name`). Intentionally strict and
+ * lowercase-only: the contract `package.name` pattern
+ * (docs/schemas/catalog-provider-page.schema.json) has no `i` flag, so an
+ * uppercase name would publish fine and then poison every provider page
+ * (review D4).
+ */
+const PACKAGE_NAME_PATTERN = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
+/**
+ * Version must be filename-safe and single-line, and at most 64 characters in
+ * total — the contract `latestVersion.maxLength` is 64 (review D4).
+ */
+const PACKAGE_VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9.+-]{0,63}$/u
 
 /** Lifecycle scripts that must never appear in a market artifact. */
 export const FORBIDDEN_LIFECYCLE_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare'] as const
@@ -68,7 +77,7 @@ export function checkPublishGate(packageManifest: Record<string, unknown>): Publ
       ok: false,
       rejection: {
         code: 'invalid-package-identity',
-        message: `package.json "version" must be a non-empty filename-safe string, got ${JSON.stringify(version)}.`,
+        message: `package.json "version" must be a non-empty filename-safe string of at most 64 characters, got ${JSON.stringify(version)}.`,
       },
     }
   }

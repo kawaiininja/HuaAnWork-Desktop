@@ -226,11 +226,24 @@ async function publishArtifact(request: IncomingMessage, response: ServerRespons
     }
 
     const fileName = artifactFileName(gateResult.name, gateResult.version, staged.sha256)
+    const entryId = catalogEntryId(gateResult.name, gateResult.version)
+    // The catalog id becomes a contract `identifier` (maxLength 160, review
+    // D4): a long-but-valid name+version pair must be rejected here, not
+    // silently stored as a provider page that fails self-validation.
+    if (entryId.length > 160) {
+      sendError(
+        response,
+        422,
+        'invalid-package-identity',
+        `catalog entry id for ${gateResult.name}@${gateResult.version} exceeds the contract identifier maximum of 160 characters`,
+      )
+      return
+    }
     await ctx.artifacts.commit(staged.tempName, fileName)
     staged.tempName = '' // committed; skip discard
 
     const entry: CatalogEntry = {
-      id: catalogEntryId(gateResult.name, gateResult.version),
+      id: entryId,
       packageName: gateResult.name,
       version: gateResult.version,
       displayName: displayName.trim(),
