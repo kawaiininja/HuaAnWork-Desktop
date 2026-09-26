@@ -129,11 +129,29 @@ describe('admin entry management (publish / edit / unpublish)', () => {
     expect(((await response.json()) as { error: { code: string } }).error.code).toBe('invalid-tarball')
   })
 
-  it('rejects re-publishing the same name@version with a 409', async () => {
-    expect((await publishTgz(market.baseUrl, 'test-admin-token')).status).toBe(201)
+  it('re-publishing identical bytes returns 409 and leaves the published artifact intact (D2)', async () => {
+    const first = await publishTgz(market.baseUrl, 'test-admin-token')
+    expect(first.status).toBe(201)
+    const { entry } = first.body as { entry: { id: string; tarball: string } }
+    const artifactUrl = `${market.baseUrl}/artifacts/${entry.tarball}`
+    expect((await fetch(artifactUrl)).status).toBe(200)
+
     const again = await publishTgz(market.baseUrl, 'test-admin-token')
     expect(again.status).toBe(409)
     expect(((again.body as { error: { code: string } }).error.code)).toBe('already-published')
+
+    // The artifact the existing entry references must still download.
+    const download = await fetch(artifactUrl)
+    expect(download.status).toBe(200)
+
+    // The catalog page is still contract-valid and the release pipeline still works.
+    const page = await (await fetch(`${market.baseUrl}/v1/plugins`)).json()
+    expect(() => parseCatalogProviderPage(page)).not.toThrow()
+    const prepare = await fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(prepare.status).toBe(200)
   })
 
   it('edits display fields and surfaces them in the provider page', async () => {
@@ -251,5 +269,131 @@ describe('admin entry management (publish / edit / unpublish)', () => {
       body: JSON.stringify({ displayName: 'X' }),
     })
     expect(missing.status).toBe(404)
+  })
+})
+
+describe('write-side contract validation + read-side poisoning (D3/D4)', () => {
+  let market: TestMarket
+
+  beforeEach(async () => {
+    market = await bootTestMarket()
+  })
+
+  afterEach(async () => {
+    await market.close()
+  })
+
+  async function catalogHealth(): Promise<void> {
+    const page = await fetch(`${market.baseUrl}/v1/plugins`)
+    expect(page.status).toBe(200)
+    const body: unknown = await page.json()
+    expect(() => parseCatalogProviderPage(body)).not.toThrow()
+    const prepare = await fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(prepare.status).toBe(200)
+  }
+
+  it('rejects a contract-violating displayName at publish time (400) and keeps the catalog healthy', async () => {
+    const result = await publishTgz(
+      market.baseUrl,
+      'test-admin-token',
+      cleanPackageManifest(),
+      { displayName: 'x'.repeat(200) },
+    )
+    expect(result.status).toBe(400)
+    const { error } = result.body as { error: { code: string; message: string } }
+    expect(error.code).toBe('invalid-entry-contract')
+    expect(error.message).toContain('displayName')
+    await catalogHealth()
+  })
+
+  it('rejects a contract-violating PATCH (over-long displayName, bad capability/category, bad updatedAt) and keeps the stored entry intact', async () => {
+    const published = await publishTgz(market.baseUrl, 'test-admin-token')
+    const { entry } = published.body as { entry: { id: string } }
+    const id = encodeURIComponent(entry.id)
+    const patch = async (body: unknown): Promise<unknown> => {
+      const response = await fetch(`${market.baseUrl}/v1/admin/entries/${id}`, {
+        method: 'PATCH',
+        headers: { ...adminHeaders('test-admin-token'), 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      return response.json()
+    }
+
+    for (const [label, body, hint] of [
+      ['over-long displayName', { displayName: 'x'.repeat(200) }, 'displayName'],
+      ['control character in summary', { summary: 'line1\nline2' }, 'summary'],
+      ['capability without dot', { capabilities: ['nodot'] }, 'capabilities'],
+      ['uppercase category', { categories: ['Utility'] }, 'categories'],
+      ['non-date updatedAt', { updatedAt: 'yesterday' }, 'updatedAt'],
+    ] as const) {
+      const parsed = await patch(body) as { error: { code: string; message: string } }
+      expect(parsed.error.code, label).toBe('invalid-entry-contract')
+      expect(parsed.error.message, label).toContain(hint)
+    }
+
+    // The stored entry is untouched and the whole catalog still serves.
+    const page = (await (await fetch(`${market.baseUrl}/v1/plugins`)).json()) as {
+      items: Array<{ displayName: string; summary: string }>
+    }
+    expect(page.items[0]).toMatchObject({ displayName: 'Sample Plugin', summary: 'A sample plugin' })
+    await catalogHealth()
+  })
+
+  it('rejects https URIs with userinfo, port, or fragment at write time (D3a)', async () => {
+    const published = await publishTgz(market.baseUrl, 'test-admin-token')
+    const { entry } = published.body as { entry: { id: string } }
+    const id = encodeURIComponent(entry.id)
+    for (const [field, value] of [
+      ['homepage', 'https://user:pass@example.internal/docs'],
+      ['homepage', 'https://example.internal:8443/docs'],
+      ['homepage', 'https://example.internal/docs#frag'],
+      ['publisherUrl', 'https://user:pass@example.internal'],
+      ['repositoryUrl', 'https://example.internal:8443/repo.git'],
+    ] as const) {
+      const rejected = await fetch(`${market.baseUrl}/v1/admin/entries/${id}`, {
+        method: 'PATCH',
+        headers: { ...adminHeaders('test-admin-token'), 'content-type': 'application/json' },
+        body: JSON.stringify({ [field]: value }),
+      })
+      expect(rejected.status, `${field}=${value}`).toBe(400)
+      const parsed = await rejected.json() as { error: { code: string } }
+      expect(parsed.error.code, `${field}=${value}`).toBe('invalid-entry-patch')
+    }
+    await catalogHealth()
+  })
+
+  it('read-side self-validation failure of stored state answers 500 invalid-stored-catalog without ajv internals (D3b)', async () => {
+    // Seed corrupt state directly (bypasses the write-side guards, simulating
+    // an operator-edited state file): a control character in displayName.
+    await market.store.replaceEntries([
+      {
+        id: 'poisoned@1.0.0',
+        packageName: 'poisoned',
+        version: '1.0.0',
+        displayName: 'bad\u0007name',
+        summary: 'A poisoned entry',
+      },
+    ])
+    const response = await fetch(`${market.baseUrl}/v1/plugins`)
+    expect(response.status).toBe(500)
+    const text = await response.text()
+    const parsed = JSON.parse(text) as { error: { code: string; message: string } }
+    expect(parsed.error.code).toBe('invalid-stored-catalog')
+    expect(parsed.error.message).toBe('stored catalog state cannot produce a valid provider page')
+    // The ajv instancePath/pattern internals must NOT leak to the client.
+    expect(text).not.toContain('instancePath')
+    expect(text).not.toContain('must match pattern')
+    expect(text).not.toContain('/items/0')
+  })
+
+  it('rejects a publish whose catalog entry id would exceed the contract identifier maxLength of 160 (D4)', async () => {
+    const result = await publishTgz(market.baseUrl, 'test-admin-token', cleanPackageManifest({ name: 'a'.repeat(155) }))
+    expect(result.status).toBe(422)
+    const { error } = result.body as { error: { code: string; message: string } }
+    expect(error.code).toBe('invalid-package-identity')
+    await catalogHealth()
   })
 })

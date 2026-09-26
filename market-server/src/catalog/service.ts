@@ -78,7 +78,7 @@ function queryKey(query: CatalogQuery): string {
   return JSON.stringify(rest)
 }
 
-function entryToItem(entry: CatalogEntry): Record<string, unknown> {
+export function entryToItem(entry: CatalogEntry): Record<string, unknown> {
   const item: Record<string, unknown> = {
     id: entry.id,
     name: entry.packageName,

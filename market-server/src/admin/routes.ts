@@ -28,6 +28,7 @@
 import { readFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { authenticateAdmin } from '../auth.ts'
+import { EntryContractError, formatContractIssues, validateCatalogEntryContract } from '../catalog/entry-contract.ts'
 import type { CatalogService } from '../catalog/service.ts'
 import { DuplicateEntryError, EntryNotFoundError, ManifestActivationConflictError } from '../catalog/store.ts'
 import type { CatalogEntry, CatalogEntryPatch, CatalogStore } from '../catalog/store.ts'
@@ -85,12 +86,18 @@ async function readJsonBody(request: IncomingMessage, cap: number = MAX_JSON_BOD
 const URL_TYPED_FIELDS = ['homepage', 'publisherUrl', 'repositoryUrl'] as const
 type UrlTypedField = (typeof URL_TYPED_FIELDS)[number]
 
+/**
+ * The exact contract httpsUri pattern (docs/schemas/catalog-provider-page.schema.json
+ * $defs.httpsUri), mirrored because the contracts package does not export it.
+ * A bare `new URL(v).protocol === 'https:'` check is weaker: it accepts
+ * userinfo, a non-default port, and a fragment, all of which the contract
+ * forbids (review D3a).
+ */
+const HTTPS_URI_PATTERN = /^https:\/\/(?![^/?#]*@)(?![^/?#]*:)[^#]+$/u
+const HTTPS_URI_MAX_LENGTH = 2048
+
 function isHttpsUri(value: string): boolean {
-  try {
-    return new URL(value).protocol === 'https:'
-  } catch {
-    return false
-  }
+  return value.length <= HTTPS_URI_MAX_LENGTH && HTTPS_URI_PATTERN.test(value)
 }
 
 function optionalStringField(body: Record<string, unknown>, key: string): string | undefined {
@@ -239,9 +246,19 @@ async function publishArtifact(request: IncomingMessage, response: ServerRespons
       )
       return
     }
-    await ctx.artifacts.commit(staged.tempName, fileName)
-    staged.tempName = '' // committed; skip discard
-
+    // Duplicate detection BEFORE commit() (review D2): the artifact file name
+    // is content-derived, so re-publishing identical bytes maps to the very
+    // file an existing entry still references. commit() rename-overwrites it
+    // and addEntry would then throw — deleting the in-use artifact. Detect
+    // the duplicate up front and touch nothing on disk; the staged temp file
+    // is discarded by the finally path below.
+    if (
+      ctx.store.entry(entryId) !== null
+      || ctx.store.entries().some(existing => existing.tarball === fileName)
+    ) {
+      sendError(response, 409, 'already-published', `${gateResult.name}@${gateResult.version} is already published; unpublish it first to re-release`)
+      return
+    }
     const entry: CatalogEntry = {
       id: entryId,
       packageName: gateResult.name,
@@ -252,11 +269,31 @@ async function publishArtifact(request: IncomingMessage, response: ServerRespons
       sha256: staged.sha256,
       tarball: fileName,
     }
+    // Write-side contract validation (review D3): the assembled entry must
+    // already satisfy the provider-page contract. Checked BEFORE commit() so
+    // a violating publish leaves no orphan artifact on disk, and again inside
+    // the locked addEntry write as defense in depth.
     try {
-      await ctx.store.addEntry(entry)
+      validateCatalogEntryContract(entry)
+    } catch (cause) {
+      if (cause instanceof EntryContractError) {
+        sendError(response, 400, 'invalid-entry-contract', formatContractIssues(cause.issues))
+        return
+      }
+      throw cause
+    }
+    await ctx.artifacts.commit(staged.tempName, fileName)
+    staged.tempName = '' // committed; skip discard
+
+    try {
+      await ctx.store.addEntry(entry, validateCatalogEntryContract)
     } catch (cause) {
       if (cause instanceof DuplicateEntryError) {
-        await ctx.artifacts.remove(fileName)
+        // Defense in depth: unreachable in the single-process server because
+        // the pre-commit duplicate check above serializes against addEntry.
+        // NEVER remove the on-disk artifact here — another entry may still
+        // reference it (review D2); the old remove() turned a harmless
+        // re-publish into data loss plus a frozen release pipeline.
         sendError(response, 409, 'already-published', `${gateResult.name}@${gateResult.version} is already published; unpublish it first to re-release`)
         return
       }
@@ -413,11 +450,18 @@ export async function handleAdminRequest(
           return true
         }
         try {
-          const entry = await ctx.store.updateEntry(id, patch)
+          // The merged entry is validated INSIDE the locked write (review
+          // D3): a contract-violating patch aborts the update, so the stored
+          // catalog can never reach a state the read side must reject.
+          const entry = await ctx.store.updateEntry(id, patch, validateCatalogEntryContract)
           sendJson(response, 200, { entry })
         } catch (cause) {
           if (cause instanceof EntryNotFoundError) {
             sendError(response, 404, 'entry-not-found', cause.message)
+            return true
+          }
+          if (cause instanceof EntryContractError) {
+            sendError(response, 400, 'invalid-entry-contract', formatContractIssues(cause.issues))
             return true
           }
           throw cause

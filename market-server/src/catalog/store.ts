@@ -302,19 +302,30 @@ export class CatalogStore {
     this.#state = next
   }
 
-  /** Append one entry (admin publish; identity+gate checks happened upstream). */
-  async addEntry(entry: CatalogEntry): Promise<void> {
+  /**
+   * Append one entry (admin publish; identity+gate checks happened upstream).
+   * `validate`, when given, runs on the assembled state INSIDE the locked
+   * write (review D3): throwing aborts the write, so a contract-violating
+   * entry can never reach the state document.
+   */
+  async addEntry(entry: CatalogEntry, validate?: (entry: CatalogEntry) => void): Promise<void> {
     const next = await this.#store.update(current => {
       if (current.entries.some(candidate => candidate.id === entry.id)) {
         throw new DuplicateEntryError(entry.id)
       }
+      if (validate !== undefined) validate(entry)
       return { ...current, entries: [...current.entries, entry] }
     })
     this.#state = next
   }
 
-  /** Patch display fields of one entry (admin edit). Throws EntryNotFoundError. */
-  async updateEntry(id: string, patch: CatalogEntryPatch): Promise<CatalogEntry> {
+  /**
+   * Patch display fields of one entry (admin edit). Throws EntryNotFoundError.
+   * `validate`, when given, runs on the MERGED entry inside the locked write
+   * (review D3): throwing aborts the write, so a contract-violating patch
+   * can never poison the stored catalog.
+   */
+  async updateEntry(id: string, patch: CatalogEntryPatch, validate?: (entry: CatalogEntry) => void): Promise<CatalogEntry> {
     let updated: CatalogEntry | undefined
     const next = await this.#store.update(current => {
       const existing = current.entries.find(candidate => candidate.id === id)
@@ -328,6 +339,7 @@ export class CatalogStore {
         else merged[key] = value
       }
       updated = merged as unknown as CatalogEntry
+      if (validate !== undefined) validate(updated)
       const entries = [...current.entries]
       entries[index] = updated
       return { ...current, entries }

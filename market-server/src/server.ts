@@ -136,6 +136,18 @@ export function createMarketServer(config: MarketServerConfig, store: CatalogSto
           sendJson(response, 200, page)
         } catch (cause) {
           if (cause instanceof CatalogContractError) {
+            if (cause.contract === 'provider-page') {
+              // Read-side SELF-validation failure: the stored catalog violates
+              // the contract, so this is a server-side data fault, not a bad
+              // query. Fail closed with a generic client message; the ajv
+              // instancePath/pattern details go to the operator log only
+              // (review D3b — the contract doc security boundary says error
+              // bodies never leak internals to unauthenticated clients).
+              console.error('[market-server] stored catalog failed provider-page self-validation:', cause)
+              sendError(response, 500, 'invalid-stored-catalog', 'stored catalog state cannot produce a valid provider page')
+              return
+            }
+            // Genuine request-side query contract violation.
             sendError(response, 400, 'invalid-query', cause.message)
             return
           }
