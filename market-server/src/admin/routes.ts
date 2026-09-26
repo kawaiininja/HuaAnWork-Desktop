@@ -29,7 +29,7 @@ import { readFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { authenticateAdmin } from '../auth.ts'
 import type { CatalogService } from '../catalog/service.ts'
-import { DuplicateEntryError, EntryNotFoundError } from '../catalog/store.ts'
+import { DuplicateEntryError, EntryNotFoundError, ManifestActivationConflictError } from '../catalog/store.ts'
 import type { CatalogEntry, CatalogEntryPatch, CatalogStore } from '../catalog/store.ts'
 import type { MarketServerConfig } from '../config.ts'
 import { intakeSignature, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
@@ -335,7 +335,19 @@ export async function handleAdminRequest(
         sendError(response, 400, 'invalid-json', cause instanceof Error ? cause.message : 'invalid JSON body')
         return true
       }
-      const verdict: IntakeVerdict = await intakeSignature({ store: ctx.store, config: ctx.config, signatureRecord: body })
+      let verdict: IntakeVerdict
+      try {
+        verdict = await intakeSignature({ store: ctx.store, config: ctx.config, signatureRecord: body })
+      } catch (cause) {
+        // Concurrent double-intake race: a second activate() lost the locked
+        // update because the max revision already advanced — an honest 409
+        // conflict, not a bare 500 (final review finding 2).
+        if (cause instanceof ManifestActivationConflictError) {
+          sendError(response, 409, 'manifest-activation-conflict', cause.message)
+          return true
+        }
+        throw cause
+      }
       if (!verdict.ok) {
         sendJson(response, 400, { activated: false, reason: verdict.reason })
         return true
@@ -406,7 +418,10 @@ export async function handleAdminRequest(
 
     sendError(response, 404, 'not-found', 'unknown admin route')
     return true
-  } catch {
+  } catch (cause) {
+    // Never swallow silently: the 500 body stays generic (contract security
+    // boundary), but the caught error must reach the operator's log.
+    console.error('[market-server] unhandled admin route error:', cause)
     if (!response.headersSent) sendError(response, 500, 'internal-error', 'internal error')
     else response.destroy()
     return true

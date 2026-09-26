@@ -174,7 +174,10 @@ export function createMarketServer(config: MarketServerConfig, store: CatalogSto
       }
 
       sendError(response, 404, 'not-found', 'unknown route')
-    })().catch(() => {
+    })().catch((cause) => {
+      // Never swallow silently: the 500 body stays generic (contract security
+      // boundary), but the caught error must reach the operator's log.
+      console.error('[market-server] unhandled route error:', cause)
       if (!response.headersSent) sendError(response, 500, 'internal-error', 'internal error')
       else response.destroy()
     })

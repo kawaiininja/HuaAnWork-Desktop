@@ -111,6 +111,24 @@ export class DuplicateEntryError extends Error {
   }
 }
 
+/**
+ * Concurrent-activation conflict: two intakes raced on the same pending
+ * manifest and the locked update observed that the persisted max revision
+ * already advanced past the revision being activated. Surfaced by the
+ * intake route as an honest 409 (final review finding 2), never a bare 500.
+ */
+export class ManifestActivationConflictError extends Error {
+  readonly revision: number
+  readonly maxRevision: number
+
+  constructor(revision: number, maxRevision: number) {
+    super(`activation revision ${String(revision)} does not advance maxRevision ${String(maxRevision)}`)
+    this.name = 'ManifestActivationConflictError'
+    this.revision = revision
+    this.maxRevision = maxRevision
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -344,7 +362,10 @@ export class CatalogStore {
   async activate(manifest: unknown, signature: unknown, revision: number): Promise<void> {
     const next = await this.#store.update(current => {
       if (!Number.isInteger(revision) || revision <= current.maxRevision) {
-        throw new TypeError(`activation revision ${String(revision)} does not advance maxRevision ${String(current.maxRevision)}`)
+        throw new ManifestActivationConflictError(
+          typeof revision === 'number' ? revision : 0,
+          current.maxRevision,
+        )
       }
       return { ...current, manifest, signature, pendingManifest: null, maxRevision: revision }
     })
