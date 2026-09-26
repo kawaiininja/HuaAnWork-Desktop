@@ -47,6 +47,7 @@ describe('loadConfig', () => {
 
   it('fails closed when any required variable is missing, with guidance', () => {
     for (const key of Object.values(ENV_KEYS)) {
+      if (key === ENV_KEYS.adminToken) continue // admin token is optional (Task 2: unset = admin surface disabled)
       const partial = completeEnv()
       delete partial[key]
       let caught: unknown
@@ -59,6 +60,14 @@ describe('loadConfig', () => {
       expect((caught as ConfigError).message).toContain(key)
       expect((caught as ConfigError).message).toContain(ENV_KEYS.port)
     }
+  })
+
+  it('treats a missing or empty admin token as "admin surface disabled" (fail-closed)', () => {
+    const missing = completeEnv()
+    delete missing[ENV_KEYS.adminToken]
+    expect(loadConfig(missing).adminToken).toBeNull()
+    expect(loadConfig(completeEnvWith({ [ENV_KEYS.adminToken]: '   ' })).adminToken).toBeNull()
+    expect(loadConfig(completeEnv()).adminToken).toBe('test-admin-token')
   })
 
   it('rejects a non-numeric port', () => {

@@ -1,19 +1,23 @@
 /**
- * Catalog state for market-server (Task 1).
+ * Catalog state for market-server (Task 1; extended by Task 2).
  *
  * One JSON document (`<dataDir>/catalog-state.json`) is the entire catalog
- * state: versioned entries plus the stored signed manifest. Mutations go
- * through the locked atomic store; a restart reloads the document, which IS
- * the full-recovery story (§13). The server keeps no separate response cache
- * (round5 N8: M5 has no catalog caching anywhere; the wrapper re-fetches and
- * re-verifies every time).
+ * state: versioned entries, the activated signed manifest + its detached
+ * signature, the pending (not yet signed) manifest, and the persisted
+ * per-source maximum accepted revision. Mutations go through the locked
+ * atomic store; a restart reloads the document, which IS the full-recovery
+ * story (§13). The server keeps no separate response cache (round5 N8).
  *
  * Contract positioning (round3 R4/R12 + round4 M4'): market-server does NOT
  * claim to be a standard source — it serves no `catalog-source` manifest.
  * The provider-page payload layer is schema-compatible only. The install
  * target (tarball URL + sha256) is a versioned huaanwork private envelope,
- * carried by the offline-signed manifest (Task 2 intake/activation) and
- * stored here verbatim; this task never signs anything.
+ * carried by the offline-signed manifest and stored here verbatim; the
+ * signature record is a DETACHED sidecar — it never enters the strict
+ * contract schema body (Task 2 / Task 5 Step 1).
+ *
+ * The state schema stays `version: 1`; the Task 2 fields are additive and
+ * optional for backward compatibility with Task 1 state files.
  */
 
 import { JsonFileStore } from '../store.ts'
@@ -24,7 +28,11 @@ export const CATALOG_STATE_FILE = 'catalog-state.json'
 /**
  * One published catalog entry. `sha256`/`tarball` are private-envelope data:
  * they feed the signed manifest (wrapper install target) and are never
- * emitted in the contract provider page.
+ * emitted in the contract provider page. The URL-typed display fields
+ * (homepage / publisher.url / repository.url) are provider-page display data
+ * only; the contract requires them to be https URIs, and the intranet source
+ * has no public URLs to fill in — the admin surface therefore treats empty
+ * as unset and rejects non-https values at publish time (round3 R15).
  */
 export interface CatalogEntry {
   /** Stable provider item ID (contract identifier pattern). */
@@ -41,17 +49,66 @@ export interface CatalogEntry {
   readonly capabilities?: readonly string[]
   /** ISO 8601 UTC date-time. */
   readonly updatedAt?: string
-  /** lowercase hex sha256 of the published tarball (Task 2 envelope). */
+  /** lowercase hex sha256 of the published tarball (private envelope). */
   readonly sha256?: string
-  /** tarball file name served from the artifact endpoint (Task 2). */
+  /** tarball file name served from the artifact endpoint (private envelope). */
   readonly tarball?: string
+  /** https-only provider-page display field; empty/absent = unset. */
+  readonly homepage?: string
+  readonly publisherName?: string
+  /** https-only (paired with publisherName in the provider page). */
+  readonly publisherUrl?: string
+  /** https-only repository URL. */
+  readonly repositoryUrl?: string
 }
 
 export interface MarketStateV1 {
   readonly version: 1
   readonly entries: readonly CatalogEntry[]
-  /** Stored signed manifest (offline-signed envelope), verbatim; null until Task 2 activates one. */
+  /** Activated signed manifest, verbatim; null until a valid signature activates one. */
   readonly manifest: unknown | null
+  /** Canonical pending manifest awaiting an offline signature; null when none. */
+  readonly pendingManifest: unknown | null
+  /** Detached signature record of the ACTIVATED manifest (sidecar); null until activation. */
+  readonly signature: unknown | null
+  /** Persisted per-source maximum accepted manifest revision (anti-replay). */
+  readonly maxRevision: number
+}
+
+/** Mutable edit patch: every listed field may be replaced; `| undefined` clears it. */
+export type CatalogEntryPatch = Partial<{
+  displayName: string
+  summary: string
+  description: string | undefined
+  license: string | undefined
+  categories: readonly string[] | undefined
+  keywords: readonly string[] | undefined
+  capabilities: readonly string[] | undefined
+  updatedAt: string | undefined
+  homepage: string | undefined
+  publisherName: string | undefined
+  publisherUrl: string | undefined
+  repositoryUrl: string | undefined
+}>
+
+export class EntryNotFoundError extends Error {
+  readonly entryId: string
+
+  constructor(entryId: string) {
+    super(`no catalog entry with id ${entryId}`)
+    this.name = 'EntryNotFoundError'
+    this.entryId = entryId
+  }
+}
+
+export class DuplicateEntryError extends Error {
+  readonly entryId: string
+
+  constructor(entryId: string) {
+    super(`a catalog entry with id ${entryId} already exists`)
+    this.name = 'DuplicateEntryError'
+    this.entryId = entryId
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -101,6 +158,10 @@ function parseEntry(value: unknown): CatalogEntry {
     updatedAt?: string
     sha256?: string
     tarball?: string
+    homepage?: string
+    publisherName?: string
+    publisherUrl?: string
+    repositoryUrl?: string
   } = { id, packageName, version, displayName, summary }
   const description = optionalString(value.description)
   const license = optionalString(value.license)
@@ -110,6 +171,10 @@ function parseEntry(value: unknown): CatalogEntry {
   const updatedAt = optionalString(value.updatedAt)
   const sha256 = optionalString(value.sha256)
   const tarball = optionalString(value.tarball)
+  const homepage = optionalString(value.homepage)
+  const publisherName = optionalString(value.publisherName)
+  const publisherUrl = optionalString(value.publisherUrl)
+  const repositoryUrl = optionalString(value.repositoryUrl)
   if (description !== undefined) entry.description = description
   if (license !== undefined) entry.license = license
   if (categories !== undefined) entry.categories = categories
@@ -118,6 +183,10 @@ function parseEntry(value: unknown): CatalogEntry {
   if (updatedAt !== undefined) entry.updatedAt = updatedAt
   if (sha256 !== undefined) entry.sha256 = sha256
   if (tarball !== undefined) entry.tarball = tarball
+  if (homepage !== undefined) entry.homepage = homepage
+  if (publisherName !== undefined) entry.publisherName = publisherName
+  if (publisherUrl !== undefined) entry.publisherUrl = publisherUrl
+  if (repositoryUrl !== undefined) entry.repositoryUrl = repositoryUrl
   return entry
 }
 
@@ -133,11 +202,22 @@ function parseState(value: unknown): MarketStateV1 {
     if (ids.has(entry.id)) throw new TypeError(`duplicate catalog entry id ${entry.id}`)
     ids.add(entry.id)
   }
+  const maxRevision = value.maxRevision === undefined ? 0 : value.maxRevision
+  if (typeof maxRevision !== 'number' || !Number.isInteger(maxRevision) || maxRevision < 0) {
+    throw new TypeError('catalog state maxRevision must be a non-negative integer')
+  }
   return {
     version: MARKET_STATE_VERSION,
     entries,
     manifest: value.manifest === undefined ? null : value.manifest,
+    pendingManifest: value.pendingManifest === undefined ? null : value.pendingManifest,
+    signature: value.signature === undefined ? null : value.signature,
+    maxRevision,
   }
+}
+
+function emptyState(): MarketStateV1 {
+  return { version: MARKET_STATE_VERSION, entries: [], manifest: null, pendingManifest: null, signature: null, maxRevision: 0 }
 }
 
 export class CatalogStore {
@@ -152,7 +232,7 @@ export class CatalogStore {
   /** Open (or initialize) the catalog state. Corrupt JSON fails closed via StoreCorruptError. */
   static async open(dataDir: string): Promise<CatalogStore> {
     const store = new JsonFileStore<MarketStateV1>(dataDir, CATALOG_STATE_FILE, {
-      defaultValue: { version: MARKET_STATE_VERSION, entries: [], manifest: null },
+      defaultValue: emptyState(),
       validate: parseState,
     })
     return new CatalogStore(store, await store.load())
@@ -167,20 +247,107 @@ export class CatalogStore {
     return this.#state.entries
   }
 
-  /** The stored signed manifest, verbatim. Task 2 fills this via intake/activation. */
+  entry(id: string): CatalogEntry | null {
+    return this.#state.entries.find(candidate => candidate.id === id) ?? null
+  }
+
+  /** The activated signed manifest, verbatim. */
   manifest(): unknown | null {
     return this.#state.manifest
   }
 
-  /** Replace the catalog entries (admin intake lands in Task 2; tests seed via this). */
+  /** The canonical pending manifest awaiting an offline signature. */
+  pendingManifest(): unknown | null {
+    return this.#state.pendingManifest
+  }
+
+  /** Detached signature record of the activated manifest. */
+  signature(): unknown | null {
+    return this.#state.signature
+  }
+
+  /** Persisted per-source maximum accepted revision (anti-replay). */
+  maxRevision(): number {
+    return this.#state.maxRevision
+  }
+
+  /** Replace the catalog entries (tests seed via this). */
   async replaceEntries(entries: readonly CatalogEntry[]): Promise<void> {
-    const next = await this.#store.update(current => ({ ...current, entries: [...entries] }))
+    const next = await this.#store.update(current => {
+      const ids = new Set<string>()
+      for (const entry of entries) {
+        if (ids.has(entry.id)) throw new DuplicateEntryError(entry.id)
+        ids.add(entry.id)
+      }
+      return { ...current, entries: [...entries] }
+    })
     this.#state = next
   }
 
-  /** Store a signed manifest verbatim (no verification here — that is Task 2's activation gate). */
-  async setManifest(manifest: unknown): Promise<void> {
-    const next = await this.#store.update(current => ({ ...current, manifest }))
+  /** Append one entry (admin publish; identity+gate checks happened upstream). */
+  async addEntry(entry: CatalogEntry): Promise<void> {
+    const next = await this.#store.update(current => {
+      if (current.entries.some(candidate => candidate.id === entry.id)) {
+        throw new DuplicateEntryError(entry.id)
+      }
+      return { ...current, entries: [...current.entries, entry] }
+    })
+    this.#state = next
+  }
+
+  /** Patch display fields of one entry (admin edit). Throws EntryNotFoundError. */
+  async updateEntry(id: string, patch: CatalogEntryPatch): Promise<CatalogEntry> {
+    let updated: CatalogEntry | undefined
+    const next = await this.#store.update(current => {
+      const existing = current.entries.find(candidate => candidate.id === id)
+      if (existing === undefined) throw new EntryNotFoundError(id)
+      const index = current.entries.indexOf(existing)
+      // exactOptionalPropertyTypes: explicit-undefined patch entries CLEAR the
+      // field (key removed) instead of being written as undefined.
+      const merged: Record<string, unknown> = { ...existing }
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) delete merged[key]
+        else merged[key] = value
+      }
+      updated = merged as unknown as CatalogEntry
+      const entries = [...current.entries]
+      entries[index] = updated
+      return { ...current, entries }
+    })
+    this.#state = next
+    if (updated === undefined) throw new EntryNotFoundError(id)
+    return updated
+  }
+
+  /** Remove one entry from the catalog (admin unpublish; the artifact file stays on disk). */
+  async removeEntry(id: string): Promise<void> {
+    const next = await this.#store.update(current => {
+      if (!current.entries.some(candidate => candidate.id === id)) throw new EntryNotFoundError(id)
+      return { ...current, entries: current.entries.filter(candidate => candidate.id !== id) }
+    })
+    this.#state = next
+  }
+
+  /** Store the canonical pending manifest (admin prepare; no signature yet = not active). */
+  async setPendingManifest(manifest: unknown): Promise<void> {
+    const next = await this.#store.update(current => ({ ...current, pendingManifest: manifest }))
+    this.#state = next
+  }
+
+  /**
+   * Activate a verified pending manifest: the manifest and its detached
+   * signature become the served pair, the pending slot clears, and the
+   * persisted per-source max revision advances (anti-replay). Callers MUST
+   * have run verifyWithKeySlots first — this stores blindly (fail-closed
+   * verification lives in the intake path, manifest-prepare.ts).
+   */
+  async activate(manifest: unknown, signature: unknown, revision: number): Promise<void> {
+    const next = await this.#store.update(current => {
+      if (!Number.isInteger(revision) || revision <= current.maxRevision) {
+        throw new TypeError(`activation revision ${String(revision)} does not advance maxRevision ${String(current.maxRevision)}`)
+      }
+      return { ...current, manifest, signature, pendingManifest: null, maxRevision: revision }
+    })
     this.#state = next
   }
 }

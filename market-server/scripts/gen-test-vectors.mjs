@@ -42,10 +42,19 @@ function makeManifest(overrides = {}) {
     ...(overrides.envelope ?? {}),
   }
   const catalog = {
+    schemaVersion: '1.0.0',
     generatedAt: ISSUED_AT,
-    packages: [
-      { name: '@huaanwork/sample-plugin', version: '1.2.3', description: 'fixture package' },
+    items: [
+      {
+        id: 'sample-plugin@1.2.3',
+        name: '@huaanwork/sample-plugin',
+        displayName: 'Sample Plugin',
+        summary: 'fixture package',
+        package: { registry: 'npm', name: '@huaanwork/sample-plugin' },
+        latestVersion: '1.2.3',
+      },
     ],
+    page: { total: 1 },
   }
   const files = [
     {

@@ -67,16 +67,19 @@ export interface MarketEnvelope {
   readonly notAfter: string
 }
 
-export interface MarketCatalogEntry {
-  readonly name: string
-  readonly version: string
-  readonly description?: string
-}
-
-/** Catalog payload. M5-minimal shape; Task 2 owns the final catalog schema. */
+/**
+ * Catalog payload. The `catalog` member of the signed manifest is a
+ * provider-page compatible load (schemaVersion/items/page) — it must pass
+ * `parseCatalogProviderPage` after the envelope/files sidecar is detached
+ * (the strict schema has `additionalProperties: false` at the top level, so
+ * the sidecar must NEVER be merged into this body — Task 2 ruling).
+ * Signing treats the payload as opaque records.
+ */
 export interface MarketCatalogPayload {
+  readonly schemaVersion: '1.0.0'
   readonly generatedAt: string
-  readonly packages: readonly MarketCatalogEntry[]
+  readonly items: readonly Record<string, unknown>[]
+  readonly page: { readonly total: number }
 }
 
 /** One hosted artifact entry in the sha manifest. */
@@ -327,7 +330,18 @@ export function verifyWithKeySlots(
   const envelope = checkEnvelope(manifest.envelope, context)
   if (!envelope.ok) return envelope
 
-  if (signatureRecord.version !== SIGNATURE_VERSION || signatureRecord.algorithm !== SIGNATURE_ALGORITHM) {
+  // Shape guard first: a malformed record must yield a verdict, never throw
+  // (Task 2 intake pre-validates too; this is the defense-in-depth layer).
+  if (typeof signatureRecord !== 'object' || signatureRecord === null) {
+    return { ok: false, reason: 'invalid-signature' }
+  }
+  if (
+    signatureRecord.version !== SIGNATURE_VERSION
+    || signatureRecord.algorithm !== SIGNATURE_ALGORITHM
+    || typeof signatureRecord.keyId !== 'string'
+    || (signatureRecord.slot !== 1 && signatureRecord.slot !== 2)
+    || typeof signatureRecord.signature !== 'string'
+  ) {
     return { ok: false, reason: 'invalid-signature' }
   }
 

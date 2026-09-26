@@ -36,8 +36,19 @@ function makeManifest(overrides: {
       notAfter: overrides.notAfter ?? '2026-10-01T00:00:00Z',
     },
     catalog: {
+      schemaVersion: '1.0.0',
       generatedAt: '2026-09-25T00:00:00Z',
-      packages: [{ name: '@huaanwork/sample-plugin', version: '1.2.3' }],
+      items: [
+        {
+          id: 'sample-plugin@1.2.3',
+          name: '@huaanwork/sample-plugin',
+          displayName: 'Sample Plugin',
+          summary: 'fixture package',
+          package: { registry: 'npm', name: '@huaanwork/sample-plugin' },
+          latestVersion: '1.2.3',
+        },
+      ],
+      page: { total: 1 },
     },
     files: [
       {
@@ -302,6 +313,6 @@ describe('verifyCanonical primitive', () => {
     const manifest = makeManifest()
     const signature = signManifest(manifest, { privateKeyPem: key.privateKeyPem, slot: 1, signedAt: '2026-09-25T00:00:01Z' })
     expect(verifyCanonical(canonicalJson(manifest), signature.signature, key.publicKeyHex)).toBe(true)
-    expect(verifyCanonical(canonicalJson({ ...manifest, catalog: { generatedAt: 'x', packages: [] } }), signature.signature, key.publicKeyHex)).toBe(false)
+    expect(verifyCanonical(canonicalJson({ ...manifest, catalog: { schemaVersion: '1.0.0', generatedAt: 'x', items: [], page: { total: 0 } } }), signature.signature, key.publicKeyHex)).toBe(false)
   })
 })

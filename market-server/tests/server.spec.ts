@@ -7,8 +7,20 @@ import { parseCatalogProviderPage } from 'dsh-community-market/contracts'
 import { CatalogStore, type CatalogEntry } from '../src/catalog/store.ts'
 import type { MarketServerConfig } from '../src/config.ts'
 import { createMarketServer, type MarketHttpServer } from '../src/server.ts'
+import { ArtifactStore } from '../src/tarball/store.ts'
 
 const KEY_HEX = 'b2'.repeat(32)
+
+function testConfig(dataDir: string): MarketServerConfig {
+  return {
+    port: 0,
+    dataDir,
+    publicOrigin: 'http://market.intranet.example:8787',
+    verifyPublicKeyPath: '/nonexistent/key.hex',
+    verifyPublicKeyHex: KEY_HEX,
+    adminToken: 'test-admin-token',
+  }
+}
 
 function entry(id: string, overrides: Partial<CatalogEntry> = {}): CatalogEntry {
   return {
@@ -26,21 +38,15 @@ function entry(id: string, overrides: Partial<CatalogEntry> = {}): CatalogEntry 
 describe('market-server HTTP surface', () => {
   let dataDir: string
   let store: CatalogStore
+  let artifacts: ArtifactStore
   let market: MarketHttpServer
   let baseUrl: string
 
   beforeEach(async () => {
     dataDir = await mkdtemp(join(tmpdir(), 'market-server-http-'))
     store = await CatalogStore.open(dataDir)
-    const config: MarketServerConfig = {
-      port: 0,
-      dataDir,
-      publicOrigin: 'http://market.intranet.example:8787',
-      verifyPublicKeyPath: '/nonexistent/key.hex',
-      verifyPublicKeyHex: KEY_HEX,
-      adminToken: 'test-admin-token',
-    }
-    market = createMarketServer(config, store)
+    artifacts = await ArtifactStore.open(dataDir)
+    market = createMarketServer(testConfig(dataDir), store, artifacts)
     await new Promise<void>(resolve => market.server.listen(0, '127.0.0.1', resolve))
     const address = market.server.address() as AddressInfo
     baseUrl = `http://127.0.0.1:${String(address.port)}`
@@ -120,11 +126,25 @@ describe('market-server HTTP surface', () => {
     const before = await getJson('/v1/manifest')
     expect(before.status).toBe(404)
     expect((before.body as { error: { code: string } }).error.code).toBe('manifest-not-found')
+    const signatureNotFound = await getJson('/v1/manifest/signature')
+    expect(signatureNotFound.status).toBe(404)
     const signed = { envelope: { domain: 'http://market.intranet.example:8787', revision: 3 }, signature: 'cafe' }
-    await store.setManifest(signed)
+    await store.activate(signed, { signature: 'cafe' }, 3)
     const after = await getJson('/v1/manifest')
     expect(after.status).toBe(200)
     expect(after.body).toEqual(signed)
+    const sig = await getJson('/v1/manifest/signature')
+    expect(sig.status).toBe(200)
+    expect(sig.body).toEqual({ signature: 'cafe' })
+  })
+
+  it('serves the admin management page shell without embedding server-side data', async () => {
+    const response = await fetch(`${baseUrl}/admin`)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/html')
+    const html = await response.text()
+    expect(html).toContain('market-server')
+    expect(html).toContain('/v1/admin/manifest/prepare')
   })
 
   it('fully recovers catalog state across a server restart', async () => {
@@ -132,15 +152,8 @@ describe('market-server HTTP surface', () => {
     await new Promise<void>(resolve => market.server.close(() => resolve()))
     const reopenedStore = await CatalogStore.open(dataDir)
     expect(reopenedStore.entries().map(e => `${e.id}@${e.version}`)).toEqual(['alpha@3.2.1'])
-    const config: MarketServerConfig = {
-      port: 0,
-      dataDir,
-      publicOrigin: 'http://market.intranet.example:8787',
-      verifyPublicKeyPath: '/nonexistent/key.hex',
-      verifyPublicKeyHex: KEY_HEX,
-      adminToken: 'test-admin-token',
-    }
-    market = createMarketServer(config, reopenedStore)
+    const reopenedArtifacts = await ArtifactStore.open(dataDir)
+    market = createMarketServer(testConfig(dataDir), reopenedStore, reopenedArtifacts)
     await new Promise<void>(resolve => market.server.listen(0, '127.0.0.1', resolve))
     const address = market.server.address() as AddressInfo
     baseUrl = `http://127.0.0.1:${String(address.port)}`

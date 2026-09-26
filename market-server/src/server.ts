@@ -1,19 +1,32 @@
 /**
- * market-server HTTP surface (Task 1).
+ * market-server HTTP surface (Task 1; extended by Task 2).
  *
- * Routes (all GET; the admin mutating surface lands with Task 2):
+ * Public routes:
  *
- *   GET /v1/plugins   Provider-page catalog endpoint. Query parameters follow
- *                     the standard contract encoding: `q`, repeated
- *                     `category` / `capability`, `cursor`, `limit`, `sort`,
- *                     `locale`. Requests are parsed by the upstream
- *                     `normalizeCatalogQuery`; the response is a
- *                     `CatalogProviderPage` that already passed
- *                     `parseCatalogProviderPage` self-validation.
- *   GET /v1/manifest  The stored offline-signed catalog manifest, verbatim
- *                     (pass-through; signature verification/activation is
- *                     Task 2). 404 until one is stored.
- *   GET /healthz      Liveness probe: {"ok":true}.
+ *   GET /v1/plugins             Provider-page catalog endpoint (contract
+ *                               encoding: q / category / capability / cursor /
+ *                               limit / sort / locale); responses are
+ *                               self-validated by parseCatalogProviderPage.
+ *   GET /v1/manifest            The ACTIVATED offline-signed manifest,
+ *                               verbatim (pending → offline sign → verified
+ *                               intake/activation; 404 until one activates).
+ *   GET /v1/manifest/signature  The detached signature record (sidecar) of
+ *                               the activated manifest; 404 until activation.
+ *   GET /artifacts/<file>       Streaming .tgz download (never whole-file in
+ *                               memory); names are content-derived at publish.
+ *   GET /admin                  Operator management page (static shell; all
+ *                               data calls are token-authenticated).
+ *   GET /healthz                Liveness probe: {"ok":true}.
+ *
+ * Admin routes (Task 2, bearer-token auth, fail-closed — see admin/routes.ts):
+ *
+ *   GET  /v1/admin/state
+ *   POST /v1/admin/artifacts
+ *   PATCH /v1/admin/entries/:id
+ *   POST /v1/admin/entries/:id/unpublish
+ *   POST /v1/admin/manifest/prepare
+ *   GET  /v1/admin/manifest/pending
+ *   POST /v1/admin/manifest/signature
  *
  * Error bodies are `{"error":{"code","message"}}` and never leak paths, env,
  * or internals (contract doc security boundary).
@@ -25,9 +38,13 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { CatalogContractError } from 'dsh-community-market/contracts'
+import { handleAdminRequest } from './admin/routes.ts'
+import { renderAdminPage } from './admin/ui.ts'
 import { CatalogQueryError, CatalogService } from './catalog/service.ts'
 import type { CatalogStore } from './catalog/store.ts'
 import type { MarketServerConfig } from './config.ts'
+import { handleArtifactGet } from './tarball/http.ts'
+import type { ArtifactStore } from './tarball/store.ts'
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   const payload = `${JSON.stringify(body)}\n`
@@ -67,23 +84,49 @@ export interface MarketHttpServer {
   readonly config: MarketServerConfig
   readonly catalog: CatalogService
   readonly store: CatalogStore
+  readonly artifacts: ArtifactStore
 }
 
-export function createMarketServer(config: MarketServerConfig, store: CatalogStore): MarketHttpServer {
+export function createMarketServer(config: MarketServerConfig, store: CatalogStore, artifacts: ArtifactStore): MarketHttpServer {
   const catalog = new CatalogService(store)
+  const adminContext = { config, store, catalog, artifacts }
 
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     void (async () => {
       const url = new URL(request.url ?? '/', config.publicOrigin)
       const method = request.method ?? 'GET'
 
-      if (method !== 'GET') {
-        sendError(response, 405, 'method-not-allowed', 'only GET is supported')
+      if (url.pathname === '/healthz') {
+        if (method !== 'GET') {
+          sendError(response, 405, 'method-not-allowed', 'only GET is supported')
+          return
+        }
+        sendJson(response, 200, { ok: true })
         return
       }
 
-      if (url.pathname === '/healthz') {
-        sendJson(response, 200, { ok: true })
+      // Task 2: streaming artifact download (public; sha256 trust comes from
+      // the signed manifest, not from this endpoint's transport).
+      if (await handleArtifactGet(request, response, url.pathname, artifacts)) return
+
+      // Task 2: token-authed admin surface (disabled = 401 admin-disabled).
+      if (url.pathname.startsWith('/v1/admin/')) {
+        if (await handleAdminRequest(request, response, url, adminContext)) return
+      }
+
+      // Task 2: operator management page (static shell, no server-side data).
+      if (url.pathname === '/admin' || url.pathname === '/admin/') {
+        if (method !== 'GET') {
+          sendError(response, 405, 'method-not-allowed', 'only GET is supported')
+          return
+        }
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        response.end(renderAdminPage({ adminEnabled: config.adminToken !== null }))
+        return
+      }
+
+      if (method !== 'GET') {
+        sendError(response, 405, 'method-not-allowed', 'only GET is supported')
         return
       }
 
@@ -120,6 +163,16 @@ export function createMarketServer(config: MarketServerConfig, store: CatalogSto
         return
       }
 
+      if (url.pathname === '/v1/manifest/signature') {
+        const signature = store.signature()
+        if (signature === null) {
+          sendError(response, 404, 'signature-not-found', 'no activated manifest signature yet')
+          return
+        }
+        sendJson(response, 200, signature)
+        return
+      }
+
       sendError(response, 404, 'not-found', 'unknown route')
     })().catch(() => {
       if (!response.headersSent) sendError(response, 500, 'internal-error', 'internal error')
@@ -127,7 +180,7 @@ export function createMarketServer(config: MarketServerConfig, store: CatalogSto
     })
   })
 
-  return { server, config, catalog, store }
+  return { server, config, catalog, store, artifacts }
 }
 
 export async function listen(market: MarketHttpServer): Promise<void> {

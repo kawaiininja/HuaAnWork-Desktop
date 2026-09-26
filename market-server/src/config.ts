@@ -19,8 +19,14 @@
  *   MARKET_SERVER_VERIFY_PUBLIC_KEY   path to the pinned Ed25519 public key
  *                                     (raw 32-byte lowercase hex, 64 chars —
  *                                      the pinning format from Task 0.5)
- *   MARKET_SERVER_ADMIN_TOKEN         bearer token for the admin surface
- *                                     (intake/activation lands in Task 2)
+ *   MARKET_SERVER_ADMIN_TOKEN         OPTIONAL bearer token for the admin
+ *                                     surface (artifact publish, entry
+ *                                     edit/unpublish, manifest prepare /
+ *                                     signature intake). When unset/empty the
+ *                                     admin surface is ENTIRELY DISABLED
+ *                                     (fail-closed: every admin endpoint
+ *                                     answers 401 admin-disabled) and startup
+ *                                     prints guidance (Task 2 Step 3, D5).
  */
 
 import { readFileSync } from 'node:fs'
@@ -42,7 +48,11 @@ export interface MarketServerConfig {
   readonly verifyPublicKeyPath: string
   /** Raw 32-byte Ed25519 public key, lowercase hex (64 chars). */
   readonly verifyPublicKeyHex: string
-  readonly adminToken: string
+  /**
+   * Admin bearer token; null when unset — the admin surface is then entirely
+   * disabled (fail-closed: every admin endpoint answers 401 admin-disabled).
+   */
+  readonly adminToken: string | null
 }
 
 export class ConfigError extends Error {
@@ -64,7 +74,16 @@ const GUIDANCE = `market-server requires exactly these environment variables:
                                 path to the pinned Ed25519 verify public key
                                 (raw 32-byte lowercase hex, 64 characters;
                                 produced by scripts/gen-signing-key.mjs)
-  ${ENV_KEYS.adminToken}        bearer token for the admin surface (Task 2)
+
+OPTIONAL:
+
+  ${ENV_KEYS.adminToken}        bearer token for the admin surface (artifact
+                                publish / entry edit / manifest activation).
+                                When unset or empty the admin surface is
+                                ENTIRELY DISABLED: every admin endpoint
+                                answers 401 admin-disabled (fail-closed) and
+                                startup prints guidance. Set a strong random
+                                token to enable publishing.
 
 There is deliberately no private-key configuration item: catalog manifests are
 signed offline (two-step release flow) and the server only ever holds public
@@ -133,8 +152,8 @@ function parseVerifyPublicKey(raw: string | undefined): { path: string; hex: str
   return { path: keyPath, hex }
 }
 
-function parseAdminToken(raw: string | undefined): string {
-  if (raw === undefined || raw.trim() === '') fail(`${ENV_KEYS.adminToken} is missing.`)
+function parseAdminToken(raw: string | undefined): string | null {
+  if (raw === undefined || raw.trim() === '') return null
   return raw.trim()
 }
 

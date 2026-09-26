@@ -27,17 +27,17 @@ corepack yarn workspace market-server start
 
 Node 要求 `^22.19.0 || >=24.0.0`（与仓库 engines 一致）。
 
-## 环境配置（全部必需，fail-closed）
+## 环境配置（前四项必需、fail-closed；admin token 可选）
 
-缺任一项或值非法：进程打印指引并以 exit 1 退出，**不会**半配置启动。
+缺任一必需项或值非法：进程打印指引并以 exit 1 退出，**不会**半配置启动。
 
 | 变量 | 含义 | 校验 |
 | --- | --- | --- |
 | `MARKET_SERVER_PORT` | 监听 TCP 端口 | 整数 1..65535 |
-| `MARKET_SERVER_DATA_DIR` | JSON 状态目录（绝对路径；缺省不存在则创建，0700） | 非空 |
-| `MARKET_SERVER_PUBLIC_ORIGIN` | 本服务对外 origin，如 `http://market.intranet.example:8787` | http/https；禁 userinfo、query、fragment。内网**允许 plain http**：真实性由离线签名清单保证，不靠 TLS（决策 2） |
+| `MARKET_SERVER_DATA_DIR` | JSON 状态目录（绝对路径；缺省不存在则创建，0700） | 非空绝对路径 |
+| `MARKET_SERVER_PUBLIC_ORIGIN` | 本服务对外 origin，如 `http://market.intranet.example:8787` | http/https；禁 userinfo、query、fragment。内网**允许 plain http**：真实性由离线签名清单保证，不靠 TLS（决策 2）。同时是清单信封的 `domain` 钉扎值 |
 | `MARKET_SERVER_VERIFY_PUBLIC_KEY` | 钉扎 Ed25519 验签公钥文件路径 | 存在且可读；内容为 raw 32 字节小写 hex（64 字符，`gen-signing-key.mjs` 产出的钉扎格式） |
-| `MARKET_SERVER_ADMIN_TOKEN` | admin 面 bearer token（Task 2 的 intake/activation 端点使用） | 非空 |
+| `MARKET_SERVER_ADMIN_TOKEN` | admin 面 bearer token（**可选**） | 非空才生效。**未配置/为空 = admin 面整体禁用**（fail-closed：`/v1/admin/*` 一律 401 `admin-disabled`），启动时打印指引；配置后错 token / 缺 token 一律 401 `unauthorized` |
 
 **不存在任何私钥配置项**（round3 R9：原「env 注入私钥」裁定作废，与
 「不与托管同进程」矛盾）。发布签名是真离线两步流（见下）。
@@ -53,27 +53,55 @@ export MARKET_SERVER_ADMIN_TOKEN=<out-of-band 分发的强随机 token>
 node --experimental-strip-types src/index.ts
 ```
 
-## HTTP 面（Task 1）
+## HTTP 面
+
+### 公开面（GET）
 
 | 路由 | 语义 |
 | --- | --- |
 | `GET /v1/plugins` | provider-page 目录端点。查询参数按上游契约编码：`q`、重复 `category`（OR）/`capability`（AND）、`cursor`（不透明、绑定有效查询）、`limit`（1..200，默认 50）、`sort`（`relevance`/`updated`/`name`/`downloads`）、`locale`。响应为已通过上游 `parseCatalogProviderPage` 自校的 `CatalogProviderPage`。 |
-| `GET /v1/manifest` | 存储中的已签名清单**原文透传**（Task 2 收录激活后非 404；验签由 wrapper 钉住公钥完成，服务端不代验）。 |
+| `GET /v1/manifest` | **已激活**的离线签名清单原文（Task 2 两步流激活后非 404）。文档形态 `{envelope, catalog, files}`：`catalog` 单独过 `parseCatalogProviderPage`；`envelope`（防重放）与 `files`（name@version → tarballPath + sha256 + size）为**旁挂**字段——严格 schema 顶层 `additionalProperties:false`，消费方须先剥离再 parse（Task 5 wrapper 判定同此）。验签由 wrapper 钉住公钥完成，服务端不代验。 |
+| `GET /v1/manifest/signature` | 已激活清单的**分离签名** sidecar（Ed25519 记录：`version/algorithm/keyId/slot/signedAt/signature`）；未激活 404。 |
+| `GET /artifacts/<file>` | 流式 .tgz 下载（`fs.createReadStream` 管道，不整文件入内存）。文件名为内容派生（`<name>-<version>-<sha256[:12]>.tgz`）；sha256 信任来自已验签清单，不来自传输层。未知/不安全名 404。 |
+| `GET /admin` | 运营管理页（静态 shell，无服务端数据内嵌；一切数据操作走下述 token 端点）。 |
 | `GET /healthz` | 存活探针 `{"ok":true}`。 |
+
+### Admin 面（`/v1/admin/*`，bearer token，fail-closed）
+
+未配置 token：整面 401 `admin-disabled`。已配置：错/缺 token 一律 401 `unauthorized`。
+
+| 路由 | 语义 |
+| --- | --- |
+| `GET /v1/admin/state` | 总览：条目（含私有信封字段 sha256/tarball）、maxRevision、激活状态。 |
+| `POST /v1/admin/artifacts?displayName=..&summary=..[&sha256=..]` | 发布 .tgz（raw body 流式落盘 + 边收边算 sha256；可选 `sha256` 参数做客户端断言，不符即 400 `sha256-mismatch` 且不留文件）。随后过**发布侧门**：解包 tarball manifest（自实现 ustar 解析，零依赖），`dependencies`/`optionalDependencies` 非空或 `scripts` 含 `preinstall`/`install`/`postinstall`/`prepare` 一律 422 拒绝并**点名**违规项（`peerDependencies` 豁免、`bundleDependencies` 允许）——运营者在发布时拿错，不是用户安装时。 |
+| `PATCH /v1/admin/entries/:id` | 编辑展示字段。URL 类字段（`homepage`/`publisherUrl`/`repositoryUrl`）预检：**留空 = 清除/不填**（schema 非必填），填非 https 值 400 拒绝（round3 R15）。 |
+| `POST /v1/admin/entries/:id/unpublish` | 下架条目（制品文件保留在盘，可重新上架同 name@version）。 |
+| `POST /v1/admin/manifest/prepare` | 两步流第 1 步：生成 canonical 待签清单并入库 pending 槽——`domain` = 配置 origin、`revision` = 持久化 max+1（单调）、`issuedAt`/`notAfter`（TTL ≤ 7d）、catalog = 自校 provider page、files = 每个已托管制品的 sha256/tarballPath/size。条目 >200（契约单页上限）或制品缺失时诚实拒绝。 |
+| `GET /v1/admin/manifest/pending` | 下载当前待签清单（无则 404）。 |
+| `POST /v1/admin/manifest/signature` | 两步流第 3 步：对**存储中的** pending 清单做三输入两槽验签（含信封负例：`revision` 回退 / `notAfter` 过期 / `domain` 不符一律拒）。**仅验签通过才收录激活**（fail-closed：无有效签名永不激活）；激活 = manifest+signature 成对服务、pending 清空、持久化 maxRevision 前进。失败返回 `{activated:false, reason}`。 |
+
+> **registry 元数据端点（`/<pkg>` npm 风格 `dist.integrity`）：Task 2 未建。**
+> 它是可选的 M6 依赖闭包升级路径 (b) 骨架，**不在 M5 安装路径上**（M5 安装
+> 真相源 = 已签名 catalog/sha 清单 + wrapper 自下载，不经 pnpm registry 流）；
+> 届时须先解决「pnpm 旁路下载未校验字节」问题再启用（market-face-spec
+> 〈依赖闭包裁定〉）。
 
 错误体统一 `{"error":{"code","message"}}`，不泄露路径、env 或内部细节。
 
 ## 数据目录与备份/恢复
 
-- 状态 = `catalog-state.json`（catalog 条目 + 已签名 manifest 槽位）。
+- 状态 = `catalog-state.json`（catalog 条目 + 已激活 manifest/signature 对 +
+  pending 待签清单 + 持久化 maxRevision）。制品字节在 `artifacts/`
+  子目录（0700；文件 0600，文件名内容派生含 sha256 前 12 位）。
 - **备份**：停机（或持锁时）复制整个数据目录即可；单 JSON 文档无一致性
-  难题。建议每日复制 + 发布（Task 2 激活新清单）后即时复制。
-- **恢复**：停机，用备份 JSON 替换 `catalog-state.json`（保持 0600），
-  重启。损坏 JSON = **fail-closed**：启动报 `StoreCorruptError` 并退出，
+  难题。建议每日复制 + 发布（激活新清单）后即时复制。
+- **恢复**：停机，用备份替换 `catalog-state.json`（保持 0600），重启。
+  损坏 JSON = **fail-closed**：启动报 `StoreCorruptError` 并退出，
   文件不被触碰——按本 runbook 从备份恢复，切勿手工编辑状态文件。
 - 原子写（同目录 tmp + rename）保证崩溃/重启中读者只会看到整份旧或
   整份新状态；文件锁（`catalog-state.json.lock`，O_EXCL，30s 陈旧自动
-  熔断）串行化并发写者。
+  熔断）串行化并发写者。状态 schema 保持 `version:1`，Task 2 字段为
+  增量可选，Task 1 状态文件可直接加载。
 
 ## 升级
 

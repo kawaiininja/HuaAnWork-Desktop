@@ -95,6 +95,15 @@ function entryToItem(entry: CatalogEntry): Record<string, unknown> {
     item.capabilities = { required: [...entry.capabilities] }
   }
   if (entry.updatedAt !== undefined) item.updatedAt = entry.updatedAt
+  if (entry.homepage !== undefined && entry.homepage !== '') item.homepage = entry.homepage
+  if (entry.publisherName !== undefined && entry.publisherName !== '') {
+    const publisher: Record<string, unknown> = { name: entry.publisherName }
+    if (entry.publisherUrl !== undefined && entry.publisherUrl !== '') publisher.url = entry.publisherUrl
+    item.publisher = publisher
+  }
+  if (entry.repositoryUrl !== undefined && entry.repositoryUrl !== '') {
+    item.repository = { url: entry.repositoryUrl }
+  }
   return item
 }
 

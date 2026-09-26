@@ -4,19 +4,19 @@
   "domain": "http://market.intranet.example:8787",
   "keys": {
     "slot1": {
-      "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4",
-      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIJXy5nPEpd50VLgNVIxSGhZfpwncD6S7UDPnNb9JVPiD\n-----END PRIVATE KEY-----\n",
-      "fingerprint": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c"
+      "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIIbVog+iie5sXi1kOaJ4acDfyS3ILu19klR7wyabreR0\n-----END PRIVATE KEY-----\n",
+      "fingerprint": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199"
     },
     "slot2": {
-      "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
-      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINVBQmX+fT4JBpNm4sOs3yFUskUulQRPB2iOi1+h3rez\n-----END PRIVATE KEY-----\n",
-      "fingerprint": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5"
+      "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIHD01gmfxKh3oOXM1d2WrXZhXEW5AsLxFFM0MF4k05yp\n-----END PRIVATE KEY-----\n",
+      "fingerprint": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139"
     },
     "unknown": {
-      "publicKeyHex": "b6ca81fb41c864fc03a71553e0e9fa34968c601af28fcb37498b77deccfda023",
-      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIEZE50YfDtqALDmmZ74t04QUzN0sIXh19cQOm4UO5+hc\n-----END PRIVATE KEY-----\n",
-      "fingerprint": "b2e6c40bb2396177d40bd261b11e2f8f404e8b89ca8432602eb6b46cad46addc"
+      "publicKeyHex": "d14440d9f02ae94dce8c7fec8e11cf634223b1a1623e5cbccabcf35fe3a90f84",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIASBeaY3glDRnzqY2acI6f4S6OtLf8ZjqgMLxzDoSRlg\n-----END PRIVATE KEY-----\n",
+      "fingerprint": "c17e8f67a99191dd4fb05a96031b5173356e64819e7fe83c93adb785c59db292"
     }
   },
   "vectors": [
@@ -31,14 +31,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -53,21 +63,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -92,14 +102,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -114,21 +134,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+        "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
         "slot": 2,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "L+0hOTd1vJib7wR95KDz3uk9/mvfX3NB0ebHWucUpb52/Ya+DhHpcFhLoYfFZ5dVQNB05+b7xj+ZTKxCOdKtDQ=="
+        "signature": "P+Vym+qC6KFf0pDS3BnycxW7aL0Y5sXmpxJnFqK5PrV62PTMhqYcVzMHstuXS1nOrSTfpahuYcF5mu0S/ugTAw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -152,14 +172,24 @@
           "issuedAt": "2026-09-25T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -174,21 +204,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "7GVFbPk8a5XuejEPcN37ReL7S7aQsQm2rlqUACxwYwhpgouUj6y+4yXkcGhfCKVSnq1JFWjIsfusYCKUCBJpAQ=="
+        "signature": "6xj4xOQWqVIW+6mNn8ltdjQjj1pt0Z6L0wesOLUbivgLTZzt3jT5TD7NJf1FmsIuka12DeORdLVM2jd8dfdEAw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -213,14 +243,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -235,21 +275,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -274,14 +314,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -296,21 +346,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -335,14 +385,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -357,21 +417,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -396,14 +456,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -418,21 +488,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "JvvRWR9srsNlDxCAmm5xLSh1eCzTqVoEonSS/IBgY7zATO40jMEEUoEUXcIDI+j6DLUGN6JFC4KztV2PN3j1AA=="
+        "signature": "dH+qgELhhOUWbz7bwet+lVdIifRWsF5KkFvWPGpxbZrnPV/3/OC9C8q9qYMAfrzgRYQUu89R5neo/ximWy4GBA=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -457,14 +527,24 @@
           "notAfter": "2026-10-03T00:00:01Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -479,21 +559,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "cS+Ujr/Kh4kQD3nkYhfluBRkB1bYsBe69x2I83KiI5Y9oU2w8+DWYL73vuuXqKkjS19zUZs3zh4F0T+0u/BTAA=="
+        "signature": "+8AxzTFK6rfcNbUP10b7GiGlawUhSjPy9Jk4n+tl5mVn9hu97vZTFv1YgAKwD2E3DojHNOoajMmP0DvM6Nn+Cg=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -518,14 +598,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -540,21 +630,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+        "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
         "slot": 2,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "L+0hOTd1vJib7wR95KDz3uk9/mvfX3NB0ebHWucUpb52/Ya+DhHpcFhLoYfFZ5dVQNB05+b7xj+ZTKxCOdKtDQ=="
+        "signature": "P+Vym+qC6KFf0pDS3BnycxW7aL0Y5sXmpxJnFqK5PrV62PTMhqYcVzMHstuXS1nOrSTfpahuYcF5mu0S/ugTAw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-09-20T00:00:00Z"
         }
       ],
@@ -579,14 +669,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -601,21 +701,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "b2e6c40bb2396177d40bd261b11e2f8f404e8b89ca8432602eb6b46cad46addc",
+        "keyId": "c17e8f67a99191dd4fb05a96031b5173356e64819e7fe83c93adb785c59db292",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "LloU6Rw/G6Gdg5yvBzJxK5ZKefAXglgQdVrIohZxQJvWenTO5tiWEOrG1nvtp75R+zTR/MzZUq/P1dJJLwRTAg=="
+        "signature": "Rg3RloyzQUiSapR4VbxQLMVEy3mcIa+OLpDgfNrvKtmXseADpjtWv6OXfyRb8GdneqapVcsQEacrCKRS+GSOBQ=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -640,14 +740,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -662,21 +772,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
+        "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "L+0hOTd1vJib7wR95KDz3uk9/mvfX3NB0ebHWucUpb52/Ya+DhHpcFhLoYfFZ5dVQNB05+b7xj+ZTKxCOdKtDQ=="
+        "signature": "P+Vym+qC6KFf0pDS3BnycxW7aL0Y5sXmpxJnFqK5PrV62PTMhqYcVzMHstuXS1nOrSTfpahuYcF5mu0S/ugTAw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -701,14 +811,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -723,21 +843,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -762,14 +882,24 @@
           "notAfter": "2026-10-01T00:00:00Z"
         },
         "catalog": {
+          "schemaVersion": "1.0.0",
           "generatedAt": "2026-09-25T00:00:00Z",
-          "packages": [
+          "items": [
             {
+              "id": "sample-plugin@1.2.3",
               "name": "@huaanwork/sample-plugin",
-              "version": "1.2.3",
-              "description": "fixture package"
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
             }
-          ]
+          ],
+          "page": {
+            "total": 1
+          }
         },
         "files": [
           {
@@ -784,21 +914,21 @@
       "signature": {
         "version": 2,
         "algorithm": "Ed25519",
-        "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
+        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "P+EThq1xVaqeLNtkd+chqMuA7FVMOSNZzAWNZt+EMCKjLf+GKEyLEXy+mzwWtSwiq45RUvBqmgOEuNn3Bd8aDw=="
+        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "89b0358cdea1d2a7d37b4b62f3e0822d7a38d518ba80f22ff2b82f3915f6d52c",
-          "publicKeyHex": "f419c28a459bcb7f194094ede1fae31eeb3dbe3b6783f8d4f18713a9684cebc4"
+          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
         },
         {
           "slot": 2,
-          "keyId": "19cd4f4d46ab02cc26ebe6bd35511b6c4a6e0f3d9a4f9bb1ac831548729fd4d5",
-          "publicKeyHex": "b75374893990ee5f598aad681e9670caf7d05f04bc17a6696ba8f02e8487f398",
+          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],

@@ -166,10 +166,12 @@ describe('CatalogService contract conformance', () => {
     const dir = await mkdtemp(join(tmpdir(), 'market-server-catalog-'))
     const store = await CatalogStore.open(dir)
     expect(store.manifest()).toBeNull()
-    const signed = { envelope: { revision: 7 }, signature: 'deadbeef', catalog: { packages: [] } }
-    await store.setManifest(signed)
+    const signed = { envelope: { revision: 7 }, catalog: { items: [] }, files: [] }
+    await store.activate(signed, { signature: 'deadbeef' }, 7)
     const reopened = await CatalogStore.open(dir)
     expect(reopened.manifest()).toEqual(signed)
+    expect(reopened.signature()).toEqual({ signature: 'deadbeef' })
+    expect(reopened.maxRevision()).toBe(7)
   })
 
   it('rejects structurally invalid stored entries at open time', async () => {
