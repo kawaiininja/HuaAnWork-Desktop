@@ -123,7 +123,7 @@ import {
   prepareDesktopProfile,
   type SkippedOptionalEntry,
 } from './profile.ts'
-import { DesktopProfileCheckpoint } from './profile-checkpoint.ts'
+import { DesktopProfileCheckpoint, PROFILE_CHECKPOINT_USER_DATA_DIR_ENV } from './profile-checkpoint.ts'
 import {
   completeOrSkipDesktopSetupWizard,
   desktopSetupWizardRequired,
@@ -708,6 +708,12 @@ async function start(): Promise<void> {
       homeDir = dataDirectoryLocation.homeDir
     }
     process.env.DSH_HOME = homeDir
+    // 评审 D9:市场制品 GC(卸载时 gcRemovedPackageArtifacts + 启动孤儿清扫)的
+    // 保留判据必须能看到健康检查点 slot 的 package.json `file:` 引用——
+    // restoreSlot 会把旧引用写回 profile,已被 GC 的制品会让恢复后的物化
+    // 依赖确定性 ENOENT。隔离宿主 fork 时继承 process.env,同进程宿主直接
+    // 可读,此处一处赋值两侧 GC 调用点均可达。
+    process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV] = profileUserDataDir
     const desktopLaunchEnvironment = withDesktopDshHome(environment, homeDir)
     const projectionCacheRecovery = recoverOversizedSessionProjectionCache(homeDir)
     if (projectionCacheRecovery.status === 'quarantined') {

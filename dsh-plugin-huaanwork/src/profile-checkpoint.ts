@@ -873,6 +873,58 @@ export function createDesktopProfileCheckpoint(options: ProfileCheckpointOptions
   return new DesktopProfileCheckpoint(options)
 }
 
+/**
+ * Env override through which the Electron main process publishes the
+ * checkpoint userDataDir to the host process for market artifact GC
+ * (review D9). The isolated host is forked with the parent's process.env and
+ * the in-process host shares it, so one assignment in main.ts reaches every
+ * GC call site. Unset (non-Desktop host, unit tests) means checkpoint-blind
+ * retention — the pre-D9 behavior.
+ */
+export const PROFILE_CHECKPOINT_USER_DATA_DIR_ENV = 'HUAANWORK_CHECKPOINT_USER_DATA_DIR'
+
+/** On-disk root of one profile's checkpoint slots (mirrors the constructor layout). */
+export function desktopProfileCheckpointProfileRoot(userDataDir: string, profileDir: string): string {
+  return join(userDataDir, SNAPSHOT_ROOT, hash(hash(profileDir)))
+}
+
+/**
+ * Every `file:` path referenced by any checkpoint slot's stored
+ * package.json (dependencies AND devDependencies), resolved.
+ *
+ * Review D9: artifact GC must retain artifacts that a future restoreSlot can
+ * re-introduce into the profile package.json — otherwise the post-restore
+ * pnpm materialization fails deterministically (ENOENT on the dangling
+ * `file:` reference). Tolerant by design: missing or malformed slot
+ * snapshots contribute no references (captureHealthy writes slots atomically
+ * via staging + rename, so a present slot package.json is whole), and the
+ * collector never throws — callers use it as a retention criterion where
+ * skipping a slot is always safe.
+ */
+export function collectDesktopProfileCheckpointFileReferences(userDataDir: string, profileDir: string): Set<string> {
+  const referenced = new Set<string>()
+  const profileRoot = desktopProfileCheckpointProfileRoot(userDataDir, profileDir)
+  for (const slotId of DESKTOP_PROFILE_CHECKPOINT_SLOT_IDS) {
+    let manifest: unknown
+    try {
+      manifest = readJson(filePath(join(profileRoot, slotId), 'package.json'))
+    } catch {
+      continue // empty or unreadable slot: nothing to retain from it
+    }
+    if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) continue
+    for (const key of ['dependencies', 'devDependencies'] as const) {
+      const record = (manifest as Record<string, unknown>)[key]
+      if (record === null || typeof record !== 'object' || Array.isArray(record)) continue
+      for (const value of Object.values(record)) {
+        if (typeof value === 'string' && value.startsWith('file:')) {
+          referenced.add(resolve(value.slice('file:'.length)))
+        }
+      }
+    }
+  }
+  return referenced
+}
+
 /** Remove all three slots and the skip marker for one deleted Profile. */
 export function clearDesktopProfileCheckpoint(userDataDir: string, profileDir: string): void {
   const absoluteUserData = assertAbsolute('userDataDir', userDataDir)

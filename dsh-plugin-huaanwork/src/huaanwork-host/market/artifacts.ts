@@ -6,7 +6,9 @@
  * ——目录 0700、文件 0600、**安装后不删除**(pnpm add 把 `file:<绝对路径>` 写进
  * profile package.json,制品与引用共存亡;删制品 ⇒ 任何后续 pnpm 操作 ENOENT,
  * round5 实验 C 实证)。GC 规则:profile package.json 不再含指向制品的 `file:`
- * 引用时才可删(removePlugin 成功后清对应制品;启动时惰性清扫孤儿)。
+ * 引用时才可删(removePlugin 成功后清对应制品;启动时惰性清扫孤儿;
+ * 评审 D9 起判据扩为「当前 profile **且所有 checkpoint slot** 均无引用,
+ * restoreSlot 会重新引入旧引用)。
  *
  * 本模块只放纯助手(无 cordis / 无 plugins-host 依赖),供 install.ts(安装)、
  * routes/index(惰性清扫)与 plugins-host.removePlugin(卸载 GC)共用——
@@ -15,6 +17,10 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import {
+  PROFILE_CHECKPOINT_USER_DATA_DIR_ENV,
+  collectDesktopProfileCheckpointFileReferences,
+} from '../../profile-checkpoint.ts'
 
 /** 制品目录名(profileDir 下,0700)。 */
 export const MARKET_ARTIFACTS_DIR_NAME = '.market-artifacts'
@@ -71,6 +77,27 @@ function referencedArtifactPaths(profileDir: string): Set<string> {
   return referenced
 }
 
+/**
+ * 健康检查点 slot 的 package.json 仍 `file:` 引用的制品路径(评审 D9:
+ * restoreSlot 会把**旧** package.json 写回 profile——若其中引用的制品已被 GC,
+ * 恢复后的物化依赖 pnpm 确定性 ENOENT,而计划钦定的四步 e2e 结构上抓不到
+ * restore 路径)。经 main 进程注入的 env 定位 checkpoint profileRoot
+ * (profileIdentity = sha256(profileDir),与上方同一 resolve 口径);env 缺席
+ * (非 Electron 宿主/单测)= 空集,即修复前行为。
+ */
+function checkpointReferencedArtifactPaths(profileDir: string): Set<string> {
+  const userDataDir = process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
+  if (userDataDir === undefined || userDataDir === '') return new Set()
+  return collectDesktopProfileCheckpointFileReferences(userDataDir, profileDir)
+}
+
+/** 当前 profile 与所有 checkpoint slot 合计的保留判据(D9:两者都不得引用才可删)。 */
+function retentionReferencedArtifactPaths(profileDir: string): Set<string> {
+  const referenced = referencedArtifactPaths(profileDir)
+  for (const path of checkpointReferencedArtifactPaths(profileDir)) referenced.add(path)
+  return referenced
+}
+
 /** 判定制品文件是否被 profile 的 `file:` 引用指向(惰性清扫的保留判据)。 */
 export function isArtifactReferenced(profileDir: string, artifactPath: string): boolean {
   return referencedArtifactPaths(profileDir).has(resolve(artifactPath))
@@ -88,7 +115,8 @@ export function isArtifactReferenced(profileDir: string, artifactPath: string): 
  * (版本以数字起头、点分 1–3 段 + 可选 prerelease/build 连字符/加号后缀——
  * 发布侧门(gate.ts)只要求 filename-safe 版本,`1.0` 之类两段版合法可发布,
  * 故 GC 不得限死三段 semver;`extra-1.0.0` 之类的残余不可能伪造成版本);
- * ② **该制品当前无 `file:` 引用指向**(双保险:即便命名边界被
+ * ② **该制品当前无 `file:` 引用指向**(当前 profile 与所有 checkpoint slot
+ * 合计,见 retentionReferencedArtifactPaths;双保险:即便命名边界被
  * 未来命名规则突破,有引用者永不删)。漏删(伪阴性)无害——启动惰性清扫兜底。
  * best-effort:任何失败只记日志,绝不阻断卸载;不存在的目录直接返回。
  */
@@ -99,7 +127,7 @@ export function gcRemovedPackageArtifacts(profileDir: string, packageName: strin
   // 版本:数字起头、点分 1–3 段(对齐 gate.ts 的 filename-safe 版本面,`1.0` 可 GC)
   // + prerelease/build(连字符/加号后缀);sha12 恰 12 位小写 hex。
   const exactName = new RegExp(`^${escaped}-(\\d+(?:\\.\\d+){0,2}(?:[-+][0-9A-Za-z.-]+)?)-([0-9a-f]{12})\\.tgz$`, 'u')
-  const referenced = referencedArtifactPaths(profileDir)
+  const referenced = retentionReferencedArtifactPaths(profileDir)
   for (const entry of readdirSync(dir)) {
     if (!exactName.test(entry)) continue
     const path = join(dir, entry)
@@ -118,13 +146,14 @@ export function gcRemovedPackageArtifacts(profileDir: string, packageName: strin
 }
 
 /**
- * 启动时惰性清扫:只删**无 `file:` 引用指向**的孤儿制品(N1:有引用者删了必坏)。
+ * 启动时惰性清扫:只删**当前 profile 与所有 checkpoint slot 均无 `file:` 引用
+ * 指向**的孤儿制品(N1 + 评审 D9:restoreSlot 会重新引入旧引用,有引用者删了必坏)。
  * best-effort;返回清扫掉的文件名(便于测试断言与日志)。
  */
 export function sweepOrphanMarketArtifacts(profileDir: string, logger: (message: string) => void): string[] {
   const dir = marketArtifactsDir(profileDir)
   if (!existsSync(dir)) return []
-  const referenced = referencedArtifactPaths(profileDir)
+  const referenced = retentionReferencedArtifactPaths(profileDir)
   const removed: string[] = []
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith('.tgz')) continue

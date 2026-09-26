@@ -8,6 +8,10 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
+  DesktopProfileCheckpoint,
+  PROFILE_CHECKPOINT_USER_DATA_DIR_ENV,
+} from '../../src/profile-checkpoint.ts'
+import {
   gcRemovedPackageArtifacts,
   marketArtifactName,
   profileFileReferencesExist,
@@ -330,5 +334,68 @@ describe('artifact GC (N1)', () => {
     sweepOrphanMarketArtifacts(profileDir, () => {})
     gcRemovedPackageArtifacts(profileDir, '@huaanwork/other', () => {})
     expect(existsSync(referenced)).toBe(true)
+  })
+})
+
+describe('artifact GC × profile checkpoint (review D9)', () => {
+  function artifactFile(profileDir: string, name: string, version: string, sha: string): string {
+    const path = join(profileDir, '.market-artifacts', marketArtifactName(name, version, sha))
+    writeFileSync(path, 'bytes')
+    return path
+  }
+
+  function profileManifest(dependencies: Record<string, string>): string {
+    return `${JSON.stringify({ name: 'profile', dependencies }, undefined, 2)}\n`
+  }
+
+  test('an artifact referenced by a checkpoint slot survives uninstall GC and boot sweep; GC resumes once the checkpoint reference is gone', () => {
+    const profileDir = tempProfile()
+    const userDataDir = mkdtempSync(join(tmpdir(), 'hw-market-checkpoint-'))
+    roots.push(userDataDir)
+    const a = artifactFile(profileDir, '@x/plugin-a', '1.0.0', 'a'.repeat(64))
+
+    // ① 安装态:profile package.json 引用 A 的制品。
+    writeFileSync(join(profileDir, 'package.json'), profileManifest({ '@x/plugin-a': `file:${a}` }))
+    // ② 健康启动 captureHealthy:真实写路径产出含该引用的 slot 快照。
+    const checkpoint = new DesktopProfileCheckpoint({
+      userDataDir,
+      profileDir,
+      profileName: 'test-profile',
+      provider: 'desktop-profile',
+    })
+    expect(checkpoint.captureHealthy().status).toBe('captured')
+    // ③ 卸载结果态:当前 profile 中的引用已消失(只剩 checkpoint slot 持有)。
+    writeFileSync(join(profileDir, 'package.json'), profileManifest({}))
+
+    // main 进程注入的 env(生产由 main.ts 赋值;此处直接模拟)。
+    process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV] = userDataDir
+    try {
+      // 卸载 GC 必须保留 A:某个 checkpoint slot 仍引用它,restoreSlot 后物化
+      // 依赖要靠它(删了 ⇒ 恢复后 pnpm 确定性 ENOENT,D9 失效模式)。
+      gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', () => {})
+      expect(existsSync(a)).toBe(true)
+      // 启动孤儿清扫同样必须保留 A。
+      expect(sweepOrphanMarketArtifacts(profileDir, () => {})).toEqual([])
+      expect(existsSync(a)).toBe(true)
+      expect(profileFileReferencesExist(profileDir)).toBe(true)
+
+      // ④ checkpoint 引用失效(如该 profile 的 checkpoint 被清空)⇒ GC 恢复收集。
+      rmSync(checkpoint.profileRoot, { recursive: true, force: true })
+      const logs: string[] = []
+      gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', (m) => logs.push(m))
+      expect(existsSync(a)).toBe(false)
+      expect(logs.some(m => m.includes('x-plugin-a-1.0.0') && m.includes('removed artifact'))).toBe(true)
+    } finally {
+      delete process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
+    }
+  })
+
+  test('env unset (non-Desktop host) keeps the pre-D9 checkpoint-blind behavior', () => {
+    const profileDir = tempProfile()
+    const a = artifactFile(profileDir, '@x/plugin-a', '1.0.0', 'a'.repeat(64))
+    delete process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
+
+    gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', () => {})
+    expect(existsSync(a)).toBe(false)
   })
 })
