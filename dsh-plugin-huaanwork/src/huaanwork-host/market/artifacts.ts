@@ -77,17 +77,34 @@ export function isArtifactReferenced(profileDir: string, artifactPath: string): 
 }
 
 /**
- * removePlugin 成功后的制品 GC:删除 `<safeName>-*.tgz` 的全部制品
- * (同一包多版本各留一份,卸载即清该包全部制品——其 `file:` 引用已被 pnpm 移除)。
+ * removePlugin 成功后的制品 GC:删除该包**精确制品名**的全部制品
+ * (同一包多版本各一份,卸载即清该包全部制品——其 `file:` 引用已被 pnpm 移除)。
+ *
+ * **边界纪律(N1,评审 round 1 修复)**:不得按裸前缀 `<safeName>-*` 匹配——
+ * `@x/plugin-a` 的 safeName `x-plugin-a` 是 `@x/plugin-a-extra` 制品名
+ * `x-plugin-a-extra-<version>-<sha12>.tgz` 的前缀,裸前缀匹配会删掉仍在装的
+ * 相邻包的制品 ⇒ 悬空 `file:` 引用 ⇒ 后续任何 pnpm 操作 ENOENT(实验 C)。
+ * 故候选必须同时满足:① 严格结构 `<safeName>-<semver>-<sha12>.tgz`
+ * (版本以数字起头,npm version 必为 semver,`extra-1.0.0` 之类的残余不可能
+ * 伪造成版本);② **该制品当前无 `file:` 引用指向**(双保险:即便命名边界被
+ * 未来命名规则突破,有引用者永不删)。漏删(伪阴性)无害——启动惰性清扫兜底。
  * best-effort:任何失败只记日志,绝不阻断卸载;不存在的目录直接返回。
  */
 export function gcRemovedPackageArtifacts(profileDir: string, packageName: string, logger: (message: string) => void): void {
   const dir = marketArtifactsDir(profileDir)
   if (!existsSync(dir)) return
-  const prefix = `${safeArtifactName(packageName)}-`
+  const escaped = safeArtifactName(packageName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // 版本:semver 核心 + prerelease/build(连字符/加号后缀);sha12 恰 12 位小写 hex。
+  const exactName = new RegExp(`^${escaped}-(\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?)-([0-9a-f]{12})\\.tgz$`, 'u')
+  const referenced = referencedArtifactPaths(profileDir)
   for (const entry of readdirSync(dir)) {
-    if (!entry.startsWith(prefix) || !entry.endsWith('.tgz')) continue
+    if (!exactName.test(entry)) continue
     const path = join(dir, entry)
+    if (referenced.has(resolve(path))) {
+      // 双保险命中:命名像该包的制品仍被 profile 引用(边界外情形)——保留。
+      logger(`huaanwork-market: kept referenced artifact ${entry} during uninstall of ${packageName}`)
+      continue
+    }
     try {
       rmSync(path)
       logger(`huaanwork-market: removed artifact ${entry} after uninstall of ${packageName}`)

@@ -227,6 +227,43 @@ describe('artifact GC (N1)', () => {
     expect(logs.some(m => m.includes('plugin-a'))).toBe(true)
   })
 
+  test('GC prefix collision (N1, review round 1): uninstalling plugin-a never touches plugin-a-extra', () => {
+    const profileDir = tempProfile()
+    const a = artifact(profileDir, '@x/plugin-a', '1.0.0', 'a'.repeat(64))
+    // 相邻包:safeName `x/plugin-a` 是 `x/plugin-a-extra` 制品名的裸前缀。
+    const extra = artifact(profileDir, '@x/plugin-a-extra', '2.0.0', 'e'.repeat(64))
+    // extra 已装,profile 里有指向其制品的 file: 引用(卸载 a 后必须仍可解析)。
+    writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
+      name: 'profile',
+      dependencies: { '@x/plugin-a-extra': `file:${extra}` },
+    }, undefined, 2)}\n`)
+    const logs: string[] = []
+
+    gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', (m) => logs.push(m))
+
+    // a 的制品被 GC;extra 的制品与引用全部存活——后续 pnpm 操作不会 ENOENT。
+    expect(existsSync(a)).toBe(false)
+    expect(existsSync(extra)).toBe(true)
+    expect(profileFileReferencesExist(profileDir)).toBe(true)
+    expect(logs.some(m => m.includes('x-plugin-a-1.0.0') && m.includes('removed artifact'))).toBe(true)
+    expect(logs.some(m => m.includes('x-plugin-a-extra'))).toBe(false)
+  })
+
+  test('GC boundary: prerelease versions still match exactly; non-semver lookalikes never match', () => {
+    const profileDir = tempProfile()
+    const stable = artifact(profileDir, '@x/pkg', '1.0.0', '1'.repeat(64))
+    const prerelease = artifact(profileDir, '@x/pkg', '1.0.0-beta.2', '2'.repeat(64))
+    // 命名陷阱:裸前缀 `x/pkg-` 命中,但 `notsemver` 不是版本 ⇒ 不得删。
+    writeFileSync(join(profileDir, '.market-artifacts', 'x-pkg-notsemver-' + '3'.repeat(12) + '.tgz'), 'x')
+    const logs: string[] = []
+
+    gcRemovedPackageArtifacts(profileDir, '@x/pkg', (m) => logs.push(m))
+
+    expect(existsSync(stable)).toBe(false)
+    expect(existsSync(prerelease)).toBe(false)
+    expect(existsSync(join(profileDir, '.market-artifacts', 'x-pkg-notsemver-' + '3'.repeat(12) + '.tgz'))).toBe(true)
+  })
+
   test('boot sweep deletes only orphans without a file: reference', () => {
     const profileDir = tempProfile()
     const referenced = artifact(profileDir, '@huaanwork/plugin-a', '1.0.0', 'a'.repeat(64))
