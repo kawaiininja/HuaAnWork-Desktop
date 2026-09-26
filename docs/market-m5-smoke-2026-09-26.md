@@ -49,15 +49,18 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
 | 取消重启诚实告知（§14 第 33 条）：message「已取消重启」、清单已写入不回滚 | 绿 | route handler |
 | 装坏包恢复窗口：无自动回滚 + `routeDesktopStartupFailure` → `startup-recovery` | 绿 | wrapper 判定函数（窗口本体为 Electron 面，见「层级限制」） |
 | 内网宕机：state 仍 200 诚实可读（本地 tab 旁路依据）、catalog 502 `market-unreachable` | 绿 | route handler（真实进程 SIGKILL 后） |
-| 远程安装全程零非 loopback 连接 | wrapper 层 `http(s).request` 全量记录 = 仅 `127.0.0.1:*` | 进程内连接记录 |
+| 远程安装全程零非 loopback 连接 | wrapper HTTP seam 记录（每次 fetch 委托前记录 host）+ 阳性对照（记录数 >0，防记录器空转）= 仅 `127.0.0.1:*` | wrapper HTTP 注入缝（委托真实 `createMarketHttpClient`，socket 层为真实 node:http） |
 
 ## 断网/不触公网的论证（三证，本环境未做 pfctl 级封禁——记录为环境限制）
 
 1. **机制强制**：每次市场 add argv 恒含 `--offline`（封死网络路径）+ 双门零依赖断言；
 2. **冷缓存密封**：store/cache 双目录每次新建为空——任何触网解析必确定性失败，
    四步仍全绿 ⇒ 安装实际零网络依赖；
-3. **连接记录**：冒烟进程内 `http.request`/`https.request` 全量补丁记录，
-   断言全部连接目标为 `127.0.0.1:<port>`（loopback 源 + wrapper 自有 client）。
+3. **连接记录**：记录器坐在 wrapper 的 HTTP 注入缝（`deps.http`）上——每次 `fetchText`/
+   `fetchBuffer` 委托前记录目标 host，再委托真实 `createMarketHttpClient()`（真实
+   node:http socket）；阳性对照断言记录数 >0（记录器空转则测试必失败，评审 round 1
+   修正：模块导出补丁拦不到 wrapper 的 ESM `get` 绑定，初版记录器为空转，已废弃该做法）。
+   实测全部记录目标为 `127.0.0.1:<port>`（loopback 源 + wrapper 自有 client）。
 
 ## round6 S2：应用自带 pnpm 密封语义复现
 

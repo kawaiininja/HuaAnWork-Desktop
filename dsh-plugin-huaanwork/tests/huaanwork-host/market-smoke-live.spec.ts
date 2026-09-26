@@ -17,13 +17,13 @@
  * - 恢复窗口本体为 Electron 主进程面(openStartupRecoveryWindow),本冒烟只锁
  *   wrapper 层「无自动回滚」+ 启动失败路由承接两条可测语义(与 e2e 同口径);
  * - 断网等价性 = `--offline` 机制强制(argv 断言)+ 密封冷 store/cache(安装若
- *   触网必确定性失败)+ http(s).request 连接记录(断言 wrapper 层零非 loopback
- *   连接)三证;公网接口在本机未做 pfctl 级封禁,记录为环境限制。
+ *   触网必确定性失败)+ wrapper HTTP seam 连接记录(记录每次 fetch 委托的 host,
+ *   断言零非 loopback;阳性对照防记录器空转)三证;公网接口在本机未做 pfctl 级
+ *   封禁,记录为环境限制。
  */
 import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,6 +34,8 @@ import { removePlugin } from '../../src/huaanwork-host/plugins-host.ts'
 import { MARKET_ROUTE_PATHS, registerMarketRoutes } from '../../src/huaanwork-host/market/routes.ts'
 import {
   createFileRevisionStore,
+  createMarketHttpClient,
+  type MarketHttpClient,
   type MarketRevisionStore,
 } from '../../src/huaanwork-host/market/catalog-client.ts'
 import { downloadAndStageArtifact } from '../../src/huaanwork-host/market/install.ts'
@@ -159,10 +161,11 @@ async function activateManifest(market: LiveMarket): Promise<{ revision: number 
 // wrapper route 层 harness(与 market-e2e.spec 同构;pnpm = 应用自带 binary)
 // ---------------------------------------------------------------------------
 
-const bundledPnpmVersion = (() => {
+/** 应用自带 pnpm(round6 S2):node <app>/node_modules/pnpm/bin/pnpm.mjs + 密封 store/cache。 */
+function bundledPnpmVersion(): string {
   const run = spawnSync(process.execPath, [BUNDLED_PNPM, '--version'], { encoding: 'utf8' })
   return (run.stdout || run.stderr || '').trim()
-})()
+}
 
 interface PnpmStub { pnpm: { runPlugin(argv: readonly string[], invokingDir: string): any }; calls: string[][] }
 
@@ -222,6 +225,7 @@ function registerRoutes(sandbox: MarketSandbox, market: LiveMarket, stub: PnpmSt
     pins: { current: { publicKeyHex: market.publicKeyHex } },
     now: () => Date.now(),
     revisionStore: opts.revisionStore ?? createFileRevisionStore(sandbox.profileDir, () => {}),
+    http: recordingHttpClient(),
     logger: () => {},
   })
   return recorded
@@ -272,23 +276,27 @@ async function callRoute(recorded: RecordedRoute[], path: string, req: IncomingM
 }
 
 // ---------------------------------------------------------------------------
-// 连接记录(wrapper 层 http/https request 全量 host 断言)
+// 连接记录(wrapper HTTP seam:deps.http 注入记录 client,委托真实 client 实现)
 // ---------------------------------------------------------------------------
+//
+// 不补丁 node:http 模块导出——wrapper 经 ESM import 绑定 `get as httpGet`,
+// 模块导出补丁(无论 request 还是 get)都拦不到已导入绑定(评审 round 1 实证
+// 0 命中)。记录器坐在 wrapper 的 HTTP 注入缝上:record → 委托
+// createMarketHttpClient() 的真实 fetchBuffer(node:http 真实 socket)。
 
-const connections: string[] = []
-const nodeRequire = createRequire(import.meta.url)
-function watchConnections(): void {
-  const http = nodeRequire('node:http') as typeof import('node:http')
-  const https = nodeRequire('node:https') as typeof import('node:https')
-  for (const mod of [http, https]) {
-    const original = mod.request
-    const patched = function (this: unknown, ...args: unknown[]) {
-      const first = args[0] as { host?: string; hostname?: string; port?: number } | string
-      const host = typeof first === 'string' ? new URL(first).host : `${first.hostname ?? first.host ?? '?'}${first.port ? `:${String(first.port)}` : ''}`
-      connections.push(host)
-      return (original as (...a: unknown[]) => unknown).apply(this, args)
-    }
-    ;(mod as { request: unknown }).request = patched
+const recordedHosts: string[] = []
+
+function recordingHttpClient(): MarketHttpClient {
+  const real = createMarketHttpClient()
+  return {
+    fetchText(url, label) {
+      recordedHosts.push(new URL(url).host)
+      return real.fetchText(url, label)
+    },
+    fetchBuffer(url, label, maxBytes) {
+      recordedHosts.push(new URL(url).host)
+      return real.fetchBuffer(url, label, maxBytes)
+    },
   }
 }
 
@@ -296,11 +304,11 @@ function artifactFiles(sandbox: MarketSandbox): string[] {
   return readdirSync(sandbox.artifactsDir).filter(name => name.endsWith('.tgz'))
 }
 
-suite(`M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用自带 pnpm ${bundledPnpmVersion})`, () => {
+suite('M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用自带 pnpm)', () => {
   test('发布侧门 + 两步离线签名激活 + 装A装B卸A卸B + 防重放/origin 负例 + 宕机降级 + 取消诚实 + 零非 loopback 连接', async () => {
+    const pnpmVersion = bundledPnpmVersion()
     expect(existsSync(BUNDLED_PNPM)).toBe(true)
-    expect(bundledPnpmVersion).toMatch(/^\d+\.\d+\.\d+$/u)
-    watchConnections()
+    expect(pnpmVersion).toMatch(/^\d+\.\d+\.\d+$/u)
 
     const sandbox = createMarketSandbox()
     const workspaceBefore = readFileSync(join(sandbox.profileDir, 'pnpm-workspace.yaml'), 'utf8')
@@ -343,6 +351,10 @@ suite(`M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用
     await activateManifest(market) // revision 2
     const catalog = await callRoute(recorded, MARKET_ROUTE_PATHS.catalog, request(undefined, { method: 'GET' }))
     expect(catalog.status()).toBe(200)
+    // 阳性对照:记录器必须真实观测到 wrapper 发起的 loopback 流量——
+    // 记录为零则本测试必失败(评审 round 1:防记录器空转)。
+    expect(recordedHosts.length).toBeGreaterThan(0)
+    expect(recordedHosts.every(host => host.startsWith('127.0.0.1'))).toBe(true)
     await activateManifest(market) // revision 3
     const installable = await callRoute(recorded, MARKET_ROUTE_PATHS.installable, request(undefined, { method: 'GET' }))
     expect(installable.status()).toBe(200)
@@ -409,13 +421,14 @@ suite(`M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用
     expect(replay.json().error.code).toBe('market-verification-failed')
 
     // ---- origin 钉扎负例(X1):跨源 tarball URL 在下载入口即拒,零请求 ----
-    const before = connections.length
+    const recordedBeforeX1 = recordedHosts.length
     await expect(downloadAndStageArtifact({
       origin: market.origin,
       file: { name: 'smoke-plugin-a', version: '1.0.0', sha256: builtA.sha256, tarballPath: 'http://evil.intranet.example/artifacts/smoke-plugin-a-1.0.0.tgz', size: 1 } as MarketManifestFile,
       profileDir: sandbox.profileDir,
+      http: recordingHttpClient(),
     })).rejects.toThrow(/origin|同源|same-origin/iu)
-    expect(connections.length).toBe(before)
+    expect(recordedHosts.length).toBe(recordedBeforeX1)
 
     // ---- 取消诚实(§14 第 33 条):取消重启,message 告知已写入清单 ----
     const cancelStub = bundledPnpmStub(sandbox)
@@ -440,8 +453,8 @@ suite(`M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用
     expect(downCatalog.status()).toBe(502)
     expect(downCatalog.json().error.code).toBe('market-unreachable')
 
-    // ---- 零非 loopback 连接实证(wrapper 层 http/https 全量记录) ----
-    const nonLoopback = connections.filter(host => !host.startsWith('127.0.0.1'))
+    // ---- 零非 loopback 连接实证(wrapper HTTP seam 记录:每次委托前记录 host) ----
+    const nonLoopback = recordedHosts.filter(host => !host.startsWith('127.0.0.1'))
     expect(nonLoopback).toEqual([])
   }, 240_000)
 })
