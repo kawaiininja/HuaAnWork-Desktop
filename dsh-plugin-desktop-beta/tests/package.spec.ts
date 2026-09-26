@@ -82,12 +82,12 @@ describe('published package surface', () => {
 
   it('runs desktop and community market typechecks from the root command', () => {
     expect(workspaceManifest.scripts?.typecheck)
-      .toBe('yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-plugin-desktop-beta typecheck && yarn workspace dsh-plugin-huaanwork typecheck && yarn workspace dsh-community-market typecheck')
+      .toBe('yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-plugin-desktop-beta typecheck && yarn workspace dsh-plugin-huaanwork typecheck && yarn workspace dsh-community-market typecheck && yarn workspace market-server typecheck')
   })
 
   it('runs desktop and community market tests from the root command', () => {
     expect(workspaceManifest.scripts?.test)
-      .toBe('yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test')
+      .toBe('yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test && yarn workspace market-server test')
   })
 
   it('registers both npm launcher names', () => {
