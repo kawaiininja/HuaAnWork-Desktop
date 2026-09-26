@@ -151,11 +151,14 @@ describe('envelope anti-replay field check', () => {
     expect(checkEnvelope({ ...makeManifest().envelope, revision: 1.5 }, context())).toEqual({ ok: false, reason: 'invalid-revision' })
   })
 
-  it('rejects revision regression against the persisted per-source maximum', () => {
-    expect(checkEnvelope(makeManifest({ revision: 5 }).envelope, context({ lastSeenRevision: 5 }))).toEqual({
+  it('rejects a genuinely older revision against the persisted per-source maximum; accepts the current one (idempotent re-read)', () => {
+    // final-review ruling 2026-09-26 (spec §14 第十轮 第 49 条): only
+    // `revision < lastSeenRevision` rejects; equal verifies OK.
+    expect(checkEnvelope(makeManifest({ revision: 4 }).envelope, context({ lastSeenRevision: 5 }))).toEqual({
       ok: false,
       reason: 'revision-regression',
     })
+    expect(checkEnvelope(makeManifest({ revision: 5 }).envelope, context({ lastSeenRevision: 5 }))).toEqual({ ok: true })
     expect(checkEnvelope(makeManifest({ revision: 6 }).envelope, context({ lastSeenRevision: 5 }))).toEqual({ ok: true })
   })
 

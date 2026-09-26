@@ -1,22 +1,22 @@
 {
-  "fixtureVersion": 1,
-  "comment": "Shared signing test vectors (round3 R10). Consumed by market-server tests now and by the wrapper-side verifier test (dsh-plugin-huaanwork) later — the wrapper re-implements the same semantics over node:crypto and must reproduce every verdict. The private keys below are THROWAWAY test material, never reuse them as real signing keys. Regenerate with: node scripts/gen-test-vectors.mjs",
+  "fixtureVersion": 2,
+  "comment": "Shared signing test vectors (round3 R10). Consumed by market-server tests now and by the wrapper-side verifier test (dsh-plugin-huaanwork) later — the wrapper re-implements the same semantics over node:crypto and must reproduce every verdict. fixtureVersion 2 (2026-09-26, spec §14 第十轮 第 49 条): revision-regression now uses a genuinely older manifest (revision < lastSeenRevision rejects) and an equal-revision idempotent re-read vector verifies OK. The private keys below are THROWAWAY test material, never reuse them as real signing keys. Regenerate with: node scripts/gen-test-vectors.mjs",
   "domain": "http://market.intranet.example:8787",
   "keys": {
     "slot1": {
-      "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69",
-      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIIbVog+iie5sXi1kOaJ4acDfyS3ILu19klR7wyabreR0\n-----END PRIVATE KEY-----\n",
-      "fingerprint": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199"
+      "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIN72IYTYgzTTiRBwUM8jVG8Q5VWnzhYfGjqUUt2xN45i\n-----END PRIVATE KEY-----\n",
+      "fingerprint": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0"
     },
     "slot2": {
-      "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
-      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIHD01gmfxKh3oOXM1d2WrXZhXEW5AsLxFFM0MF4k05yp\n-----END PRIVATE KEY-----\n",
-      "fingerprint": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139"
+      "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIOQLOyiYFtWxU/L4MH/sqe3yefZndFOxnv4SCqT/xBgL\n-----END PRIVATE KEY-----\n",
+      "fingerprint": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a"
     },
     "unknown": {
-      "publicKeyHex": "d14440d9f02ae94dce8c7fec8e11cf634223b1a1623e5cbccabcf35fe3a90f84",
-      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIASBeaY3glDRnzqY2acI6f4S6OtLf8ZjqgMLxzDoSRlg\n-----END PRIVATE KEY-----\n",
-      "fingerprint": "c17e8f67a99191dd4fb05a96031b5173356e64819e7fe83c93adb785c59db292"
+      "publicKeyHex": "0f76976f6bed6676dad1857a5ba71c2429df0eae2b826b85e8409d8ad90dfa4e",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIEyDVMXIrodVS6w0XKhbVbyBrRKi8Nh+a4M/wR6mhmSy\n-----END PRIVATE KEY-----\n",
+      "fingerprint": "424f048977d462975a803b96ced3d2148bae073b7be153ba33c8d312623002ad"
     }
   },
   "vectors": [
@@ -63,21 +63,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
+        "signature": "QRO5OgKJa6FGM63PnlJjgQr6vgQnGwXYWd1+orr10XlZ3E+ESmRT1bSV1qDnHrwNFee4U0QJ0CK/jiD5sT++Cw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -134,21 +134,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+        "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
         "slot": 2,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "P+Vym+qC6KFf0pDS3BnycxW7aL0Y5sXmpxJnFqK5PrV62PTMhqYcVzMHstuXS1nOrSTfpahuYcF5mu0S/ugTAw=="
+        "signature": "eonJLmaa1B4sjd9kDC1+YPFr1/ar50mxU71khyFYWEgRUySOVYVXjdbc/Y9F5t+YCpg1Kebje3ieaL4Ha35+Aw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -204,21 +204,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "6xj4xOQWqVIW+6mNn8ltdjQjj1pt0Z6L0wesOLUbivgLTZzt3jT5TD7NJf1FmsIuka12DeORdLVM2jd8dfdEAw=="
+        "signature": "YvS1ykgksgz1qgPm2yPrcjor0VBrGUVnafaZL8/GyyE3Hs7Arc4zd4988DVDBnB5nbVJe5eVdARiZ8a3msy+AA=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -238,7 +238,7 @@
         "envelope": {
           "version": 1,
           "domain": "http://market.intranet.example:8787",
-          "revision": 5,
+          "revision": 4,
           "issuedAt": "2026-09-25T00:00:00Z",
           "notAfter": "2026-10-01T00:00:00Z"
         },
@@ -275,21 +275,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
+        "signature": "T4L8KEWukpNZVa0CK27CNUofwUIBc1oViSjSozHFQd3T7xGwegKV9nmB76BogZKdzoQyJgvQN4kwR/6RoLx1Dw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -346,21 +346,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
+        "signature": "QRO5OgKJa6FGM63PnlJjgQr6vgQnGwXYWd1+orr10XlZ3E+ESmRT1bSV1qDnHrwNFee4U0QJ0CK/jiD5sT++Cw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -417,21 +417,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
+        "signature": "QRO5OgKJa6FGM63PnlJjgQr6vgQnGwXYWd1+orr10XlZ3E+ESmRT1bSV1qDnHrwNFee4U0QJ0CK/jiD5sT++Cw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -488,21 +488,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "dH+qgELhhOUWbz7bwet+lVdIifRWsF5KkFvWPGpxbZrnPV/3/OC9C8q9qYMAfrzgRYQUu89R5neo/ximWy4GBA=="
+        "signature": "GR24SA0zPFwmm2sbeTw+JuGIEaBbKSiGu3CxaGOxpMKSmoQxTWX6KPkVP34i9HW5f/DqlmwnKr9z+Se3X+r/AQ=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -559,21 +559,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "+8AxzTFK6rfcNbUP10b7GiGlawUhSjPy9Jk4n+tl5mVn9hu97vZTFv1YgAKwD2E3DojHNOoajMmP0DvM6Nn+Cg=="
+        "signature": "+9FmoQ23CWV5oVrH5RU9oljwwD0LIYVbEyPfzoUbiSLGoR1c5tZC6V+HuYNSxMtixHBvWQEvFx2nc2Xh+bP+AQ=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -630,21 +630,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+        "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
         "slot": 2,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "P+Vym+qC6KFf0pDS3BnycxW7aL0Y5sXmpxJnFqK5PrV62PTMhqYcVzMHstuXS1nOrSTfpahuYcF5mu0S/ugTAw=="
+        "signature": "eonJLmaa1B4sjd9kDC1+YPFr1/ar50mxU71khyFYWEgRUySOVYVXjdbc/Y9F5t+YCpg1Kebje3ieaL4Ha35+Aw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-09-20T00:00:00Z"
         }
       ],
@@ -701,21 +701,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "c17e8f67a99191dd4fb05a96031b5173356e64819e7fe83c93adb785c59db292",
+        "keyId": "424f048977d462975a803b96ced3d2148bae073b7be153ba33c8d312623002ad",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "Rg3RloyzQUiSapR4VbxQLMVEy3mcIa+OLpDgfNrvKtmXseADpjtWv6OXfyRb8GdneqapVcsQEacrCKRS+GSOBQ=="
+        "signature": "DndAnSF/2OnD5dhuEf+9Ca3JDo014fd1BWrxt20aKUy2ECmgrdM/gfdwBE7VUyE4eGqZUC2I8b4QMDY3S8egDg=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -772,21 +772,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
+        "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "P+Vym+qC6KFf0pDS3BnycxW7aL0Y5sXmpxJnFqK5PrV62PTMhqYcVzMHstuXS1nOrSTfpahuYcF5mu0S/ugTAw=="
+        "signature": "eonJLmaa1B4sjd9kDC1+YPFr1/ar50mxU71khyFYWEgRUySOVYVXjdbc/Y9F5t+YCpg1Kebje3ieaL4Ha35+Aw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -843,21 +843,21 @@
       "signature": {
         "version": 1,
         "algorithm": "Ed25519",
-        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
+        "signature": "QRO5OgKJa6FGM63PnlJjgQr6vgQnGwXYWd1+orr10XlZ3E+ESmRT1bSV1qDnHrwNFee4U0QJ0CK/jiD5sT++Cw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -914,21 +914,21 @@
       "signature": {
         "version": 2,
         "algorithm": "Ed25519",
-        "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
         "slot": 1,
         "signedAt": "2026-09-25T00:00:00Z",
-        "signature": "D+40THpR+hdtd3/8E1g0QsSv4t5YBDHHza/YswXM8UG+S11c7oM+ZHU8AarYV38z8UN+Ya2CClgqcj8gVcrOBA=="
+        "signature": "QRO5OgKJa6FGM63PnlJjgQr6vgQnGwXYWd1+orr10XlZ3E+ESmRT1bSV1qDnHrwNFee4U0QJ0CK/jiD5sT++Cw=="
       },
       "slots": [
         {
           "slot": 1,
-          "keyId": "40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199",
-          "publicKeyHex": "64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69"
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
         },
         {
           "slot": 2,
-          "keyId": "634a72deedf63c98c97d05e5009d4ce4dbc7eee38b70867e9e99610aae75c139",
-          "publicKeyHex": "472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6",
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
           "retiredAt": "2026-10-01T00:00:00Z"
         }
       ],
@@ -940,6 +940,77 @@
       "expect": {
         "ok": false,
         "reason": "invalid-signature"
+      }
+    },
+    {
+      "name": "idempotent-reread-current-revision",
+      "manifest": {
+        "envelope": {
+          "version": 1,
+          "domain": "http://market.intranet.example:8787",
+          "revision": 5,
+          "issuedAt": "2026-09-25T00:00:00Z",
+          "notAfter": "2026-10-01T00:00:00Z"
+        },
+        "catalog": {
+          "schemaVersion": "1.0.0",
+          "generatedAt": "2026-09-25T00:00:00Z",
+          "items": [
+            {
+              "id": "sample-plugin@1.2.3",
+              "name": "@huaanwork/sample-plugin",
+              "displayName": "Sample Plugin",
+              "summary": "fixture package",
+              "package": {
+                "registry": "npm",
+                "name": "@huaanwork/sample-plugin"
+              },
+              "latestVersion": "1.2.3"
+            }
+          ],
+          "page": {
+            "total": 1
+          }
+        },
+        "files": [
+          {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "tarballPath": "/artifacts/huaanwork-sample-plugin-1.2.3.tgz",
+            "size": 4096
+          }
+        ]
+      },
+      "signature": {
+        "version": 1,
+        "algorithm": "Ed25519",
+        "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+        "slot": 1,
+        "signedAt": "2026-09-25T00:00:00Z",
+        "signature": "QRO5OgKJa6FGM63PnlJjgQr6vgQnGwXYWd1+orr10XlZ3E+ESmRT1bSV1qDnHrwNFee4U0QJ0CK/jiD5sT++Cw=="
+      },
+      "slots": [
+        {
+          "slot": 1,
+          "keyId": "e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0",
+          "publicKeyHex": "3fea222bee8b8a1c169d8a9a6a0c0bd20948f603f95056a4cfcad5f41a27d638"
+        },
+        {
+          "slot": 2,
+          "keyId": "da9c1ed4b49d24c6ea590d266e49d33aa31b5c10ca45e63e5ca747b4e8b4122a",
+          "publicKeyHex": "267e891c4b19960914138da748743c4bcc0da1056e2d9d27e93023aa40996aa3",
+          "retiredAt": "2026-10-01T00:00:00Z"
+        }
+      ],
+      "context": {
+        "domain": "http://market.intranet.example:8787",
+        "now": "2026-09-26T00:00:00.000Z",
+        "lastSeenRevision": 5
+      },
+      "expect": {
+        "ok": true,
+        "slot": 1
       }
     }
   ]

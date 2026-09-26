@@ -138,9 +138,12 @@ const vectors = []
   })
 }
 
-// 4. revision regression against the persisted per-source maximum
+// 4. revision regression against the persisted per-source maximum:
+//    a GENUINELY OLDER manifest (final-review ruling 2026-09-26: only
+//    `revision < lastSeenRevision` rejects; re-reading the current revision
+//    is an accepted idempotent re-read — see vector 14).
 {
-  const manifest = makeManifest()
+  const manifest = makeManifest({ envelope: { revision: 4 } })
   vectors.push({
     name: 'revision-regression',
     manifest,
@@ -280,10 +283,27 @@ const vectors = []
   })
 }
 
+// 14. idempotent re-read of the CURRENT revision (final-review ruling
+//     2026-09-26, spec §14 第十轮 第 49 条): equal to lastSeenRevision
+//     verifies OK — the N8 no-cache re-verify makes every catalog read a
+//     fresh verification, so strict `>` would allow exactly one read per
+//     activation.
+{
+  const manifest = makeManifest()
+  vectors.push({
+    name: 'idempotent-reread-current-revision',
+    manifest,
+    signature: signedBy(manifest, slot1Key, 1),
+    slots: slotsInOverlap,
+    context: { domain: DOMAIN, now: NOW, lastSeenRevision: 5 },
+    expect: expectOk(1),
+  })
+}
+
 const fixture = {
-  fixtureVersion: 1,
+  fixtureVersion: 2,
   comment:
-    'Shared signing test vectors (round3 R10). Consumed by market-server tests now and by the wrapper-side verifier test (dsh-plugin-huaanwork) later — the wrapper re-implements the same semantics over node:crypto and must reproduce every verdict. The private keys below are THROWAWAY test material, never reuse them as real signing keys. Regenerate with: node scripts/gen-test-vectors.mjs',
+    'Shared signing test vectors (round3 R10). Consumed by market-server tests now and by the wrapper-side verifier test (dsh-plugin-huaanwork) later — the wrapper re-implements the same semantics over node:crypto and must reproduce every verdict. fixtureVersion 2 (2026-09-26, spec §14 第十轮 第 49 条): revision-regression now uses a genuinely older manifest (revision < lastSeenRevision rejects) and an equal-revision idempotent re-read vector verifies OK. The private keys below are THROWAWAY test material, never reuse them as real signing keys. Regenerate with: node scripts/gen-test-vectors.mjs',
   domain: DOMAIN,
   keys: {
     slot1: keyFixture(slot1Key),

@@ -16,7 +16,10 @@
  *   - `domain`    = the configured source origin; a manifest replayed across
  *                   sources fails the domain check outright.
  *   - `revision`  = monotonic per source; replaying an older revision fails
- *                   against the persisted per-source maximum.
+ *                   against the persisted per-source maximum. Re-reading the
+ *                   CURRENT revision is idempotent and accepted (final-review
+ *                   ruling 2026-09-26, spec §14 第十轮 第 49 条): only
+ *                   `revision < lastSeenRevision` rejects.
  *   - `issuedAt` / `notAfter` = validity window; expired manifests are
  *                   rejected. The TTL cap (notAfter - issuedAt) is at most
  *                   MAX_ENVELOPE_TTL (7 days) — the maximum exposure window
@@ -162,7 +165,7 @@ export interface VerificationContext {
   readonly domain: string
   /** Verification instant, epoch milliseconds (injectable for tests/determinism). */
   readonly now: number
-  /** Persisted per-source maximum revision already accepted; replaying <= this rejects. */
+  /** Persisted per-source maximum revision already accepted; replaying < this rejects (equal = idempotent re-read, accepted). */
   readonly lastSeenRevision?: number
 }
 
@@ -297,7 +300,7 @@ export function checkEnvelope(envelope: unknown, context: VerificationContext): 
   if (notAfterMs <= issuedAtMs) return { ok: false, reason: 'invalid-timestamp' }
   if (notAfterMs - issuedAtMs > MAX_ENVELOPE_TTL_MS) return { ok: false, reason: 'ttl-exceeds-cap' }
 
-  if (context.lastSeenRevision !== undefined && env.revision <= context.lastSeenRevision) {
+  if (context.lastSeenRevision !== undefined && env.revision < context.lastSeenRevision) {
     return { ok: false, reason: 'revision-regression' }
   }
 

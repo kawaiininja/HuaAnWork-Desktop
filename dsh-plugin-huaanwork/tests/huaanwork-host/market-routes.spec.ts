@@ -243,7 +243,7 @@ describe('GET state(wrapper 自有形态,R14)', () => {
     expect(out.json()).toEqual({
       provider: 'huaanwork-market',
       origin: 'http://127.0.0.1:1',
-      verification: { ready: true, currentKeyId: '40ba109ef2df4dbd8afb2273e9d1cc8ed9ed2bd75c7465d4c82dbfd23d27b199' },
+      verification: { ready: true, currentKeyId: 'e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0' },
       catalog: { maxAcceptedRevision: 7 },
       desktopActions: { requestRestart: true },
     })
@@ -334,14 +334,12 @@ describe('POST operations/preview + execute(单飞 R16 / X1 / 取消诚实)', ()
     activate(server, manifest)
     const { ctx, recorded } = fakeCtx()
     registerMarketRoutes(ctx, depsFor(profileDir, server.origin))
-    // 先查不存在的包(每次读都拉取验签;验签通过即持久化 revision——同一 manifest
-    // 在**同一** revision store 下第二次拉取会被单调判定为 replay,故 404 之后
-    // 的正例换一条全新 revision store 注册,等价于进程重启后的合法拉取)。
+    // 先查不存在的包(每次读都拉取验签;验签通过即持久化 revision)。
     const missing = await callRoute(recorded, MARKET_ROUTE_PATHS.preview, request({ name: 'nope', version: '1.0.0' }))
     expect(missing.status()).toBe(404)
-    const second = fakeCtx()
-    registerMarketRoutes(second.ctx, depsFor(profileDir, server.origin, { revisionStore: createMemoryRevisionStore().store }))
-    const out = await callRoute(second.recorded, MARKET_ROUTE_PATHS.preview, request({ name: '@huaanwork/sample', version: '1.2.3' }))
+    // 2026-09-26 裁定(§14 第十轮 第 49 条):等值 revision = 当前清单幂等重读,
+    // 同一 revision store 下第二次拉取照常放行——catalog → preview 可共享一次激活。
+    const out = await callRoute(recorded, MARKET_ROUTE_PATHS.preview, request({ name: '@huaanwork/sample', version: '1.2.3' }))
     expect(out.status()).toBe(200)
     expect(out.json().tarballUrl).toBe(`${server.origin}/artifacts/a.tgz`)
   })

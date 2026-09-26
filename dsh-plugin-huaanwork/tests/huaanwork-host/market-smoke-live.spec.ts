@@ -39,13 +39,14 @@ import {
   type MarketRevisionStore,
 } from '../../src/huaanwork-host/market/catalog-client.ts'
 import { downloadAndStageArtifact } from '../../src/huaanwork-host/market/install.ts'
-import type { MarketManifestFile } from '../../src/huaanwork-host/market/verify.ts'
+import type { MarketManifest, MarketManifestFile } from '../../src/huaanwork-host/market/verify.ts'
 import {
   createMarketSandbox,
   disposeAllMarketSandboxes,
   fileReferenceExists,
   type MarketSandbox,
 } from './market-pnpm-fixture.ts'
+import { createMarketTestServer, loadSigningVectors, signManifestForTest } from './market-test-server.ts'
 
 const LIVE = process.env.MARKET_SMOKE_LIVE === '1'
 const suite = LIVE ? describe : describe.skip
@@ -339,8 +340,9 @@ suite('M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用
     expect(revision).toBe(1)
 
     // ---- wrapper route 层:state / catalog / installable / installations ----
-    // N8(catalog 不缓存裁定):每次验签读都拉取,revision 必须单调——连续读前
-    // 各激活一轮新清单(真实运维节奏:发布即签)。
+    // N8(catalog 不缓存裁定):每次验签读都拉取;2026-09-26 裁定(§14 第十轮第 49 条)
+    // 等值 revision = 当前清单幂等重读——**一次激活**下 catalog/installable/
+    // installations/execute 反复读全部放行(原 7 次激活逐次供给的工作-around 撤销)。
     const stub = bundledPnpmStub(sandbox)
     const recorded = registerRoutes(sandbox, market, stub)
 
@@ -348,31 +350,29 @@ suite('M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用
     expect(state.status()).toBe(200)
     expect(state.json().verification.ready).toBe(true)
 
-    await activateManifest(market) // revision 2
     const catalog = await callRoute(recorded, MARKET_ROUTE_PATHS.catalog, request(undefined, { method: 'GET' }))
     expect(catalog.status()).toBe(200)
     // 阳性对照:记录器必须真实观测到 wrapper 发起的 loopback 流量——
     // 记录为零则本测试必失败(评审 round 1:防记录器空转)。
     expect(recordedHosts.length).toBeGreaterThan(0)
     expect(recordedHosts.every(host => host.startsWith('127.0.0.1'))).toBe(true)
-    await activateManifest(market) // revision 3
+    const catalogAgain = await callRoute(recorded, MARKET_ROUTE_PATHS.catalog, request(undefined, { method: 'GET' }))
+    expect(catalogAgain.status()).toBe(200) // 同 revision 幂等重读
     const installable = await callRoute(recorded, MARKET_ROUTE_PATHS.installable, request(undefined, { method: 'GET' }))
     expect(installable.status()).toBe(200)
     expect(installable.json().items).toHaveLength(2)
     const installations = await callRoute(recorded, MARKET_ROUTE_PATHS.installations, request(undefined, { method: 'GET' }))
     expect(installations.status()).toBe(200)
 
-    // ---- 四步:装 A → 装 B → 卸 A → 卸 B(N1 回归门,file: 全程在盘) ----
+    // ---- 四步:装 A → 装 B → 卸 A → 卸 B(N1 回归门,file: 全程在盘;一次激活) ----
     const deps = () => sandbox.readProfileDependencies()
 
-    await activateManifest(market) // revision 4
     const execA = await callRoute(recorded, MARKET_ROUTE_PATHS.execute, request({ name: 'smoke-plugin-a', version: '1.0.0' }))
     expect(execA.status()).toBe(200)
     expect(Object.keys(deps())).toHaveLength(1)
     expect(fileReferenceExists(sandbox.profileDir, deps())).toBe(true)
     expect(artifactFiles(sandbox)).toHaveLength(1) // 装后不删
 
-    await activateManifest(market) // revision 5
     const execB = await callRoute(recorded, MARKET_ROUTE_PATHS.execute, request({ name: 'smoke-plugin-b', version: '2.0.0' }))
     expect(execB.status()).toBe(200)
     expect(Object.keys(deps())).toHaveLength(2)
@@ -409,16 +409,38 @@ suite('M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用
     // ---- 全程无批准键写入(N3 机械面) ----
     expect(readFileSync(join(sandbox.profileDir, 'pnpm-workspace.yaml'), 'utf8')).toBe(workspaceBefore)
 
-    // ---- 防重放负例:持久 revision 已前进,旧清单(同 revision)重放必拒 ----
-    const { revision: activeRevision } = await activateManifest(market)
+    // ---- 防重放负例:genuinely OLDER 清单(重签合法签名)重放必拒 ----
+    // 2026-09-26 裁定后等值 revision 是合法幂等重读,重放负例必须用真正更旧的
+    // revision(mock 源供一份 revision 低于持久 max 的合法签名清单;真实服务进程
+    // 无法回退 served revision,故负例经 mock 源构造,验签链路与真实源同码)。
+    const vectors = loadSigningVectors()
+    const replayServer = await createMarketTestServer()
+    cleanup.push(() => replayServer.close())
+    const nowMs = Date.now()
+    const staleManifest: MarketManifest = {
+      envelope: {
+        version: 1,
+        domain: replayServer.origin,
+        revision: 4,
+        issuedAt: new Date(nowMs - 60_000).toISOString(),
+        notAfter: new Date(nowMs + 60_000).toISOString(),
+      },
+      catalog: { schemaVersion: '1.0.0', generatedAt: new Date(nowMs).toISOString(), items: [], page: { total: 0 } },
+      files: [{ name: 'smoke-plugin-a', version: '1.0.0', sha256: '0'.repeat(64), tarballPath: '/artifacts/smoke-plugin-a-1.0.0.tgz', size: 1 }],
+    }
+    replayServer.setManifest(staleManifest, signManifestForTest(staleManifest, vectors.keys.slot1.privateKeyPem, 1))
     const seeded: MarketRevisionStore = {
-      loadMaxRevision: () => activeRevision,
+      loadMaxRevision: () => 5, // 持久 max 已前进到 5 ⇒ revision 4  genuinely older
       saveMaxRevision: () => {},
     }
-    const replayRoutes = registerRoutes(sandbox, market, stub, { revisionStore: seeded })
+    const replayRoutes = registerRoutes(sandbox, {
+      origin: replayServer.origin,
+      publicKeyHex: vectors.keys.slot1.publicKeyHex,
+    } as LiveMarket, stub, { revisionStore: seeded })
     const replay = await callRoute(replayRoutes, MARKET_ROUTE_PATHS.execute, request({ name: 'smoke-plugin-a', version: '1.0.0' }))
     expect(replay.status()).toBe(502)
     expect(replay.json().error.code).toBe('market-verification-failed')
+    expect(replay.json().error.message).toMatch(/reason=revision-regression/u)
 
     // ---- origin 钉扎负例(X1):跨源 tarball URL 在下载入口即拒,零请求 ----
     const recordedBeforeX1 = recordedHosts.length
@@ -431,9 +453,9 @@ suite('M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用
     expect(recordedHosts.length).toBe(recordedBeforeX1)
 
     // ---- 取消诚实(§14 第 33 条):取消重启,message 告知已写入清单 ----
+    // (等值 revision 幂等重读已裁定合法,execute 前无需再激活一轮。)
     const cancelStub = bundledPnpmStub(sandbox)
     const cancelRoutes = registerRoutes(sandbox, market, cancelStub, { confirmed: false })
-    await activateManifest(market) // execute 前revision 单调(N8)
     const cancelInstall = await callRoute(cancelRoutes, MARKET_ROUTE_PATHS.execute, request({ name: 'smoke-plugin-a', version: '1.0.0' }))
     expect(cancelInstall.status()).toBe(200)
     expect(cancelInstall.json().restarting).toBeUndefined() // 取消 ⇒ 键缺省(M4 口径)

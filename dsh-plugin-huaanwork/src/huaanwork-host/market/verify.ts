@@ -4,12 +4,14 @@
  * **不 import market-server 任何代码**(依赖方向守卫):本模块以 `node:crypto`
  * 自实现 market-server/src/signing.ts 的验签语义,跨侧一致性由共享测试向量
  * `market-server/tests/fixtures/signing-vectors.json` 证明——wrapper 测试逐条
- * 复现该 fixtures 的 13 个向量,每条的 verdict(ok/slot 或 reason)必须一致。
+ * 复现该 fixtures 的全部向量,每条的 verdict(ok/slot 或 reason)必须一致。
  *
  * 语义镜像(与 signing.ts 逐项对齐,改动须同步两侧):
  * - canonicalJson:对象键递归排序、无空白;签名覆盖 utf8(canonicalJson(manifest))。
- * - 信封防重放:domain/revision/issuedAt/notAfter;revision 单调(lastSeenRevision)、
- *   notAfter 未过期、TTL ≤ 7 天;`notAfter` 含界有效、`retiredAt` 到点即拒(独占)。
+ * - 信封防重放:domain/revision/issuedAt/notAfter;revision 单调(仅 genuinely
+ *   older 拒:`revision < lastSeenRevision`;等值 = 当前清单幂等重读,放行——
+ *   final-review 裁定 2026-09-26,spec §14 第十轮 第 49 条)、notAfter 未过期、
+ *   TTL ≤ 7 天;`notAfter` 含界有效、`retiredAt` 到点即拒(独占)。
  * - 三输入两槽:签名记录 + 声明槽位 + 槽 2 retiredAt;keyId 先对**全部**槽解析
  *   (unknown-key),再比对声明槽(slot-key-mismatch),再过 retiredAt(slot-retired),
  *   最后 Ed25519(invalid-signature)。
@@ -142,7 +144,7 @@ export interface VerificationContext {
   readonly domain: string
   /** 验签时刻,epoch 毫秒(可注入,测试/确定性)。 */
   readonly now: number
-  /** 每源已持久化的最大 revision;回放 <= 此值即拒。 */
+  /** 每源已持久化的最大 revision;回放 < 此值即拒(等值 = 幂等重读,放行)。 */
   readonly lastSeenRevision?: number
 }
 
@@ -254,7 +256,7 @@ export function checkEnvelope(envelope: unknown, context: VerificationContext): 
   if (notAfterMs <= issuedAtMs) return { ok: false, reason: 'invalid-timestamp' }
   if (notAfterMs - issuedAtMs > MAX_ENVELOPE_TTL_MS) return { ok: false, reason: 'ttl-exceeds-cap' }
 
-  if (context.lastSeenRevision !== undefined && env.revision <= context.lastSeenRevision) {
+  if (context.lastSeenRevision !== undefined && env.revision < context.lastSeenRevision) {
     return { ok: false, reason: 'revision-regression' }
   }
 

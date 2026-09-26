@@ -170,9 +170,15 @@ describe('two-step offline-signed release flow', () => {
 
     const sign = (manifest: MarketManifest): Promise<Record<string, unknown>> => signOffline(manifest)
 
-    // revision regression: pending revision (1) is not > persisted max (1) after a first activation
+    // First activation advances the persisted max revision to 1; a second
+    // full release cycle advances it to 2 (idempotent same-revision re-reads
+    // are accepted since the 2026-09-26 ruling, so a genuinely OLDER pending
+    // is required to exercise revision-regression — spec §14 第十轮 第 49 条).
     const first = await sign(base)
     expect((await postSignature(first)).status).toBe(200)
+    const second = await prepare()
+    expect(envelopeOf(second).revision).toBe(2)
+    expect((await postSignature(await sign(second as MarketManifest))).status).toBe(200)
     const regression = await sign({ ...base }) // same revision 1 signed again
     const regressionResult = await postSignature(regression)
     // After activation there is no pending manifest left, so the honest verdict is no-pending-manifest;
@@ -220,9 +226,28 @@ describe('two-step offline-signed release flow', () => {
     })
     expect(domainVerdict).toEqual({ ok: false, reason: 'domain-mismatch' })
 
-    // None of the negatives activated anything.
+    // None of the negatives activated anything; the served manifest is the
+    // revision-2 release from the second cycle.
     expect((await fetch(`${market.baseUrl}/v1/manifest`)).status).toBe(200)
-    expect(envelopeOf((await (await fetch(`${market.baseUrl}/v1/manifest`)).json())).revision).toBe(1)
+    expect(envelopeOf((await (await fetch(`${market.baseUrl}/v1/manifest`)).json())).revision).toBe(2)
+  })
+
+  it('concurrent double-intake of the same pending surfaces an honest 409 activation conflict', async () => {
+    await publishTgz(market.baseUrl, 'test-admin-token')
+    const pending = await prepare()
+    const record = await signOffline(pending)
+    // Both requests read the same pending and both pass verification; the
+    // locked update serializes the two activate() calls and the loser must
+    // surface as 409 manifest-activation-conflict, not a bare 500
+    // (final review finding 2).
+    const [winner, loser] = await Promise.all([
+      postSignature(record),
+      postSignature(record),
+    ])
+    const statuses = [winner.status, loser.status].sort()
+    expect(statuses).toEqual([200, 409])
+    const conflicted = winner.status === 409 ? winner : loser
+    expect((conflicted.body as { error: { code: string } }).error.code).toBe('manifest-activation-conflict')
   })
 
   it('advances revision monotonically across releases and persists maxRevision in the state document', async () => {

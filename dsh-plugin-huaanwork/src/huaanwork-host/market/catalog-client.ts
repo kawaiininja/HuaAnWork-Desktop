@@ -10,9 +10,10 @@
  * 使重放无效,缓存只会放大被绕过的窗口。
  *
  * 链路:`GET /v1/manifest` + `GET /v1/manifest/signature` → verify.ts 三输入两槽验签
- * (信封:domain = 配置 origin、revision > 持久化最大值、notAfter 未过期)——任一
- * 不满足即拒,**不信任其中任何 sha256** → 通过后才更新每源持久化 max revision
- * (防重放判定的持久事实)。
+ * (信封:domain = 配置 origin、revision genuinely older 才拒(`<` 持久化最大值;
+ * 等值 = 当前清单幂等重读,放行——final-review 裁定 2026-09-26,spec §14 第十轮
+ * 第 49 条)、notAfter 未过期)——任一不满足即拒,**不信任其中任何 sha256** → 通过
+ * 后才更新每源持久化 max revision(防重放判定的持久事实;仅当推进时写盘)。
  */
 
 import { get as httpGet, type IncomingMessage } from 'node:http'
@@ -171,8 +172,12 @@ export function createFileRevisionStore(profileDir: string, logger: (message: st
       return typeof entry?.maxRevision === 'number' && Number.isInteger(entry.maxRevision) ? entry.maxRevision : undefined
     },
     saveMaxRevision(origin, revision) {
+      // 并行读(catalog + installable 同刻拉取)在无互斥的 RMW 上竞态:只在新值
+      // **大于**已存值时落盘——revision 永不允许回退写(2026-09-26 final review)。
       const state = readAll()
       const sources = sourcesOf(state)
+      const stored = sources[origin]?.maxRevision
+      if (typeof stored === 'number' && revision <= stored) return
       sources[origin] = { maxRevision: revision }
       state.sources = sources
       mkdirSync(join(profileDir, '.market-artifacts'), { recursive: true })

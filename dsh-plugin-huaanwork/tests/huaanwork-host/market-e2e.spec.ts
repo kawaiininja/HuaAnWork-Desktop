@@ -113,6 +113,21 @@ function request(body: unknown): IncomingMessage {
   return req as unknown as IncomingMessage
 }
 
+// GET 读:浏览器同源 GET 无 Origin 头——sec-fetch-site + referer 路径(loopback.ts)。
+function getRequest(): IncomingMessage {
+  const req = {
+    method: 'GET',
+    headers: {
+      host: '127.0.0.1:9',
+      'sec-fetch-site': 'same-origin',
+      referer: 'http://127.0.0.1:9/',
+    },
+    socket: { remoteAddress: '127.0.0.1' },
+    async *[Symbol.asyncIterator]() { /* empty */ },
+  }
+  return req as unknown as IncomingMessage
+}
+
 function capture(): { res: ServerResponse; status: () => number; json: () => any } {
   let status = 0
   let raw = ''
@@ -129,16 +144,21 @@ function capture(): { res: ServerResponse; status: () => number; json: () => any
 
 interface RecordedRoute { kind: string; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }
 
-async function callExecute(recorded: RecordedRoute[], body: { name: string; version: string }): Promise<{ status: () => number; json: () => any }> {
-  const route = recorded.find(entry => entry.path === MARKET_ROUTE_PATHS.execute)!
+async function callRoute(recorded: RecordedRoute[], path: string, req: IncomingMessage): Promise<{ status: () => number; json: () => any }> {
+  const route = recorded.find(entry => entry.path === path)
+  if (route === undefined) throw new Error(`route not registered: ${path}`)
   const out = capture()
-  route.handler(request(body), out.res)
+  route.handler(req, out.res)
   const deadline = Date.now() + 120_000
   while (out.status() === 0 && Date.now() < deadline) {
     await new Promise(resolve => setImmediate(resolve))
   }
-  if (out.status() === 0) throw new Error('execute did not finish')
+  if (out.status() === 0) throw new Error(`route ${path} did not finish`)
   return out
+}
+
+async function callExecute(recorded: RecordedRoute[], body: { name: string; version: string }): Promise<{ status: () => number; json: () => any }> {
+  return callRoute(recorded, MARKET_ROUTE_PATHS.execute, request(body))
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +250,16 @@ suite('wrapper 离线端到端(解法 A 全链,真实 pnpm + 密封 store/cache)
 
     const tgzCount = () => readdirSync(sandbox.artifactsDir).filter(entry => entry.endsWith('.tgz')).length
 
+    // ── 一次激活下 catalog → preview → execute 全链(2026-09-26 裁定,§14 第十轮
+    //    第 49 条):等值 revision = 当前清单幂等重读,每次读都拉取验签(N8)但
+    //    不再要求逐次供给更新清单。 ──
+    const catalog = await callRoute(recorded, MARKET_ROUTE_PATHS.catalog, getRequest())
+    expect(catalog.status()).toBe(200)
+    expect(catalog.json().items).toHaveLength(2)
+    const previewA = await callRoute(recorded, MARKET_ROUTE_PATHS.preview, request({ name: 'huaanwork-plugin-a', version: '1.0.0' }))
+    expect(previewA.status()).toBe(200)
+    expect(previewA.json().tarballUrl).toBe(`${server.origin}/artifacts/huaanwork-plugin-a-1.0.0.tgz`)
+
     // ── 装 A ──
     const installA = await callExecute(recorded, { name: 'huaanwork-plugin-a', version: '1.0.0' })
     expect(installA.status()).toBe(200)
@@ -238,13 +268,7 @@ suite('wrapper 离线端到端(解法 A 全链,真实 pnpm + 密封 store/cache)
     expect(existsSync(join(sandbox.profileDir, 'node_modules', 'huaanwork-plugin-a', 'package.json'))).toBe(true)
     expect(fileReferenceExists(sandbox.profileDir, sandbox.readProfileDependencies())).toBe(true)
 
-    // ── 装 B(制品 A 必须仍在盘——N1:file: 引用共存亡)──
-    // 无 catalog 缓存(N8):每次 execute 都重拉验签;revision 单调 ⇒ 装 B 前
-    // 必须供给更新的已签清单(revision 2)。
-    await serveSignedManifest(server, sandbox, [
-      { name: 'huaanwork-plugin-a', version: '1.0.0' },
-      { name: 'huaanwork-plugin-b', version: '2.0.0' },
-    ], 2)
+    // ── 装 B(同一激活下的幂等重读;制品 A 必须仍在盘——N1:file: 引用共存亡)──
     const installB = await callExecute(recorded, { name: 'huaanwork-plugin-b', version: '2.0.0' })
     expect(installB.status()).toBe(200)
     expect(Object.keys(sandbox.readProfileDependencies())).toHaveLength(2)
