@@ -1,0 +1,90 @@
+# M5 真机冒烟记录（离线等价）— 2026-09-26
+
+Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-smoke-live.spec.ts`
+（`MARKET_SMOKE_LIVE=1` 门控，默认 skip，不进入常规门禁）。本记录逐项标注
+** exercised 层级**，未做 UI 驱动的不声称 UI 驱动。
+
+## 环境
+
+- FORK 仓库 `HuaAnWork-Desktop` @ `fca41276cc`（+ 本冒烟新增 spec）。
+- Node v22.23.2（满足 `^22.19.0`）。
+- 应用自带 pnpm（round6 S2 版本基线）：`dsh-plugin-huaanwork/node_modules/pnpm/bin/pnpm.mjs`
+  = **11.8.0**（与 yarn-resolved PATH pnpm 10.32.1 不同，两侧结果均绿，见下）。
+- 冒烟时间：2026-09-26 16:53 本地。
+
+## 拓扑（全部真实件）
+
+- **真实 market-server 子进程**：`node --experimental-strip-types market-server/src/index.ts`，
+  env 四必需项（`MARKET_SERVER_PORT` / `_DATA_DIR` / `_PUBLIC_ORIGIN=http://127.0.0.1:<port>` /
+  `_VERIFY_PUBLIC_KEY=<keygen 产出 .pub.hex>`）+ `MARKET_SERVER_ADMIN_TOKEN`。
+  loopback = 内网等价；`PUBLIC_ORIGIN` 用真实 loopback origin（信封 `domain` 钉扎值）。
+- **真实离线签名工具链**：`scripts/gen-signing-key.mjs --out <tmpdir>`（脚本自带
+  「拒绝写入 git worktree」守卫）→ 管理面 `POST /v1/admin/manifest/prepare` → 下载
+  pending → `scripts/sign-manifest.mjs --manifest … --key … --slot 1`（**独立进程**，
+  私钥永不进服务端进程）→ `POST /v1/admin/manifest/signature` 激活
+  （应答 `{activated:true,revision,slot}`）。
+- **真实 wrapper**：`registerMarketRoutes` 实注册 7 条表外 routes（fake
+  `ctx.webServer` 仅记录注册；handler 为生产代码原样直调）；revision store 用真实
+  文件实现 `createFileRevisionStore`（`<profileDir>/.market-artifacts/state.json`）。
+- **应用自带 pnpm**：stub 以 `node <app>/node_modules/pnpm/bin/pnpm.mjs` 执行，
+  密封 `--store-dir`/`--cache-dir`（每次新建空目录 = 冷 store/cache）。
+
+## 结果：1 passed（vitest，约 3s）
+
+| 项 | 结果 | 层级 |
+| --- | --- | --- |
+| 目录端点 `GET /v1/plugins` provider-page 负载 | 200 | 真实服务端 HTTP |
+| 发布侧门：非零依赖制品 | **422 拒** | 真实服务端 HTTP |
+| 发布侧门：带 `postinstall`（curl 载荷）制品 | **422 拒** | 真实服务端 HTTP |
+| 两步离线签名流（真实工具，私钥独立进程） | 激活成功 revision 1..N | 真实服务端 + 真实工具进程 |
+| wrapper state/catalog/installable/installations | 200，installable 恰 2 项 | wrapper route handler |
+| 装 A → 装 B → 卸 A → 卸 B 四步全绿，依赖数 0→1→2→1→0 | 绿 | route handler + removePlugin + 应用自带 pnpm |
+| 每步 `file:` 引用实际存在（N1 回归门） | 绿 | pnpm 密封沙箱实证 |
+| 制品装后不删、卸后 GC（无 `file:` 引用才删） | 1→2→1→0 个 .tgz | 同上 |
+| add argv 恒带 `--offline --ignore-scripts`、无 `--registry` | 绿 | argv 快照 |
+| remove argv 不含两 flag（N2 硬约束） | 绿 | argv 快照 |
+| `pnpm-workspace.yaml` 逐字节不变（无批准键写入） | 绿 | 文件快照 |
+| 防重放：持久 revision 已前进后重放旧清单 | **502 `market-verification-failed`** | 真实服务端 + 种子 revision store |
+| origin 钉扎（X1）：跨源 tarball URL | 下载入口即拒，**零网络请求** | wrapper install 模块 |
+| 取消重启诚实告知（§14 第 33 条）：message「已取消重启」、清单已写入不回滚 | 绿 | route handler |
+| 装坏包恢复窗口：无自动回滚 + `routeDesktopStartupFailure` → `startup-recovery` | 绿 | wrapper 判定函数（窗口本体为 Electron 面，见「层级限制」） |
+| 内网宕机：state 仍 200 诚实可读（本地 tab 旁路依据）、catalog 502 `market-unreachable` | 绿 | route handler（真实进程 SIGKILL 后） |
+| 远程安装全程零非 loopback 连接 | wrapper 层 `http(s).request` 全量记录 = 仅 `127.0.0.1:*` | 进程内连接记录 |
+
+## 断网/不触公网的论证（三证，本环境未做 pfctl 级封禁——记录为环境限制）
+
+1. **机制强制**：每次市场 add argv 恒含 `--offline`（封死网络路径）+ 双门零依赖断言；
+2. **冷缓存密封**：store/cache 双目录每次新建为空——任何触网解析必确定性失败，
+   四步仍全绿 ⇒ 安装实际零网络依赖；
+3. **连接记录**：冒烟进程内 `http.request`/`https.request` 全量补丁记录，
+   断言全部连接目标为 `127.0.0.1:<port>`（loopback 源 + wrapper 自有 client）。
+
+## round6 S2：应用自带 pnpm 密封语义复现
+
+同一组密封断言套件以 PATH shim 指向应用自带 pnpm 复跑：
+
+- `market-pnpm-semantics.spec.ts` + `market-e2e.spec.ts` → **11 passed / 0 fail**
+  （套件自报 `[market-pnpm-semantics] pnpm version: 11.8.0`）。
+- 对照：PATH pnpm 10.32.1（yarn-resolved）下同一套件此前 6/6 + e2e 全绿（Task 5）。
+- 结论：两套 pnpm 版本下密封语义（`file:` 引用、卸载拒 flag、离线兜底、脚本零执行）
+  均绿；版本差异面（`ERR_PNPM_IGNORED_BUILDS` 第三重纵深）按 round6 S4 已版本条件化。
+
+## 层级限制（诚实声明）
+
+- **UI（MarketView renderer）未驱动**：本环境无显示/Electron 窗口。UI 是 wrapper
+  routes 之上的薄 fetch 层；冒烟在 route handler 层 exercise 全部 7 条 routes 的
+  生产代码路径，UI 专项留 `/plan-design-review`（已登记）。
+- **恢复窗口本体**（`openStartupRecoveryWindow`）为 Electron 主进程面：冒烟只锁
+  wrapper 层「无自动回滚」+ 启动失败路由承接两条可测语义（与 e2e 同口径），
+  窗口 UI 由既有 startup-recovery-window.spec 单测覆盖。
+- **公网断连**为 pfctl/拔网级证据的替代：以上三证为机制+冷缓存+连接记录的组合实证。
+- 占位 origin `market.intranet.example:8787`（`config.ts`
+  `HUAANWORK_MARKET_DEFAULT_ORIGIN`）为**发版/部署期配置**（env
+  `HUAANWORK_MARKET_ORIGIN` 覆盖），非可连真实地址；冒烟用真实 loopback origin
+  验证 domain 钉扎全链。
+
+## 复跑
+
+```bash
+cd dsh-plugin-huaanwork && MARKET_SMOKE_LIVE=1 corepack yarn vitest run tests/huaanwork-host/market-smoke-live.spec.ts
+```
