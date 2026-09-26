@@ -25,7 +25,6 @@
  *                                           on a fully valid verdict (fail-closed)
  */
 
-import { readFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { authenticateAdmin } from '../auth.ts'
 import { EntryContractError, formatContractIssues, validateCatalogEntryContract } from '../catalog/entry-contract.ts'
@@ -34,7 +33,7 @@ import { DuplicateEntryError, EntryNotFoundError, ManifestActivationConflictErro
 import type { CatalogEntry, CatalogEntryPatch, CatalogStore } from '../catalog/store.ts'
 import type { MarketServerConfig } from '../config.ts'
 import { intakeSignature, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
-import { TarballError, extractPackageManifest } from '../tarball/parse.ts'
+import { TarballError, extractPackageManifestFromFile } from '../tarball/parse.ts'
 import { checkPublishGate } from '../tarball/gate.ts'
 import {
   SHA256_PATTERN,
@@ -215,10 +214,12 @@ async function publishArtifact(request: IncomingMessage, response: ServerRespons
   }
 
   try {
-    const bytes = await readFile(ctx.artifacts.pathOf(staged.tempName))
     let gateResult: ReturnType<typeof checkPublishGate>
     try {
-      gateResult = checkPublishGate(extractPackageManifest(bytes))
+      // Review D6: run the gate over the staged file via streaming gunzip
+      // (capped decompression) instead of readFile-ing the whole artifact
+      // (up to 100 MiB compressed, far more decompressed) into memory.
+      gateResult = checkPublishGate(await extractPackageManifestFromFile(ctx.artifacts.pathOf(staged.tempName)))
     } catch (cause) {
       if (cause instanceof TarballError) {
         sendError(response, 400, cause.code, cause.message)

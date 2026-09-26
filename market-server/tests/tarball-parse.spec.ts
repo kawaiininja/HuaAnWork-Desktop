@@ -1,6 +1,9 @@
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
-import { TarballError, extractPackageManifest } from '../src/tarball/parse.ts'
+import { TarballError, extractPackageManifest, extractPackageManifestFromFile } from '../src/tarball/parse.ts'
 import { buildTar, buildTgz, cleanPackageManifest } from './helpers/tar.ts'
 
 describe('extractPackageManifest (zero-dependency ustar walk)', () => {
@@ -85,5 +88,76 @@ describe('extractPackageManifest (zero-dependency ustar walk)', () => {
   it('rejects a package.json that is not a JSON object', () => {
     const tar = buildTar([{ name: 'package/package.json', data: '[1,2,3]' }])
     expect(() => extractPackageManifest(gzipSync(tar))).toThrow(/must be a JSON object/u)
+  })
+})
+
+describe('decompression cap (review D6, gzip-bomb guard)', () => {
+  // A zero-filled tar entry compresses ~1028×, so a "bomb" is cheap to build:
+  // ~70 MiB of zeros gzip down to tens of KiB but decompress past the cap.
+  function gzipBomb(decompressedBytes: number): Buffer {
+    return gzipSync(buildTar([
+      { name: 'package/package.json', data: JSON.stringify(cleanPackageManifest()) },
+      { name: 'package/payload.bin', data: Buffer.alloc(decompressedBytes, 0) },
+    ]))
+  }
+
+  it('a normal artifact decompresses far under the cap and still parses', () => {
+    const tgz = buildTgz(cleanPackageManifest(), [{ name: 'index.js', data: 'module.exports = 1' }])
+    expect(extractPackageManifest(tgz)).toMatchObject({ name: '@huaanwork/sample-plugin', version: '1.2.3' })
+  })
+
+  it('rejects a gzip bomb over the cap with an honest fail-closed error (buffer path)', () => {
+    const bomb = gzipBomb(70 * 1024 * 1024)
+    expect(bomb.length).toBeLessThan(1024 * 1024) // sanity: this IS a bomb
+    let caught: unknown
+    try {
+      extractPackageManifest(bomb)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(TarballError)
+    expect((caught as TarballError).code).toBe('decompressed-tarball-too-large')
+    expect((caught as Error).message).toContain('67108864')
+  })
+
+  it('streaming file path: valid artifact parses with identical D1 walk rules', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'market-server-tarball-'))
+    const path = join(dir, 'valid.tgz')
+    await writeFile(path, buildTgz(cleanPackageManifest({ description: 'streamed' }), [{ name: 'index.js', data: '1' }]))
+    await expect(extractPackageManifestFromFile(path)).resolves.toMatchObject({
+      name: '@huaanwork/sample-plugin',
+      version: '1.2.3',
+      description: 'streamed',
+    })
+    // Behavior parity for the D1 rules under the streaming path (shared tail):
+    const dotdot = join(dir, 'dotdot.tgz')
+    await writeFile(dotdot, gzipSync(buildTar([
+      { name: 'package/escape/../package.json', data: '{"name":"x","version":"1.0.0"}' },
+    ])))
+    await expect(extractPackageManifestFromFile(dotdot)).rejects.toMatchObject({
+      code: 'invalid-tarball',
+    })
+    const ambiguous = join(dir, 'ambiguous.tgz')
+    await writeFile(ambiguous, gzipSync(buildTar([
+      { name: 'a/package.json', data: '{"name":"a","version":"1.0.0"}' },
+      { name: 'b/package.json', data: '{"name":"b","version":"1.0.0"}' },
+    ])))
+    await expect(extractPackageManifestFromFile(ambiguous)).rejects.toMatchObject({
+      code: 'invalid-tarball',
+    })
+    const notGzip = join(dir, 'not-gzip.tgz')
+    await writeFile(notGzip, Buffer.from('definitely not gzip'))
+    await expect(extractPackageManifestFromFile(notGzip)).rejects.toMatchObject({
+      code: 'invalid-tarball',
+    })
+  })
+
+  it('streaming file path: a gzip bomb file over the cap is rejected, not loaded whole', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'market-server-tarball-'))
+    const path = join(dir, 'bomb.tgz')
+    await writeFile(path, gzipBomb(70 * 1024 * 1024))
+    await expect(extractPackageManifestFromFile(path)).rejects.toMatchObject({
+      code: 'decompressed-tarball-too-large',
+    })
   })
 })

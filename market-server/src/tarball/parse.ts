@@ -13,16 +13,39 @@
  * hard links, and other file types are skipped.
  */
 
-import { gunzipSync } from 'node:zlib'
+import { createReadStream } from 'node:fs'
+import { createGunzip, gunzipSync } from 'node:zlib'
 
 export class TarballError extends Error {
-  readonly code: 'invalid-tarball' | 'missing-package-json' | 'invalid-package-json'
+  readonly code: 'invalid-tarball' | 'missing-package-json' | 'invalid-package-json' | 'decompressed-tarball-too-large'
 
   constructor(code: TarballError['code'], message: string) {
     super(message)
     this.name = 'TarballError'
     this.code = code
   }
+}
+
+/**
+ * Decompressed-tar ceiling for the publish gate (review D6): the gate reads
+ * only the manifest, and a zero-dependency plugin artifact is package.json
+ * plus a small payload, so 64 MiB decompressed is generous next to the
+ * 100 MiB COMPRESSED upload cap (MAX_ARTIFACT_BYTES). Without a cap a ~61 KB
+ * gzip bomb measured to expand ~1028× (→ ~60 MiB) and a larger one OOMs the
+ * single event-loop process. Both the buffered and the streaming paths
+ * enforce exactly this ceiling.
+ */
+export const MAX_TAR_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
+/** Map a node:zlib failure onto a fail-closed, honest TarballError. */
+function mapGunzipError(cause: unknown): TarballError {
+  if ((cause as NodeJS.ErrnoException | null)?.code === 'ERR_BUFFER_TOO_LARGE') {
+    return new TarballError(
+      'decompressed-tarball-too-large',
+      `decompressed tarball exceeds the ${String(MAX_TAR_DECOMPRESSED_BYTES)}-byte limit (possible gzip bomb); artifact rejected`,
+    )
+  }
+  return new TarballError('invalid-tarball', `not a gzip-compressed tarball: ${(cause as Error).message}`)
 }
 
 const TAR_BLOCK_SIZE = 512
@@ -142,16 +165,12 @@ function walkEntries(tar: Buffer, state: TarWalkState): void {
 }
 
 /**
- * Gunzip + walk a .tgz and return its parsed `<dir>/package.json` manifest.
- * Throws TarballError (fail-closed) on anything malformed.
+ * Shared selection tail: walk the decompressed tar, require exactly one
+ * depth-1 <dir>/package.json, and parse it. Used by BOTH the buffered entry
+ * point and the streaming file entry point, so every walk rule (`..` segments,
+ * PaxHeaders exclusion, ambiguity rejection) is identical on both paths.
  */
-export function extractPackageManifest(tgzBytes: Buffer): Record<string, unknown> {
-  let tar: Buffer
-  try {
-    tar = gunzipSync(tgzBytes)
-  } catch (cause) {
-    throw new TarballError('invalid-tarball', `not a gzip-compressed tarball: ${(cause as Error).message}`)
-  }
+function extractManifestFromTar(tar: Buffer): Record<string, unknown> {
   const state: TarWalkState = { pendingName: null, packageJsonCandidates: [] }
   walkEntries(tar, state)
   // Manifest selection rule (review D1, identical on the wrapper install
@@ -180,4 +199,67 @@ export function extractPackageManifest(tgzBytes: Buffer): Record<string, unknown
     throw new TarballError('invalid-package-json', 'package.json must be a JSON object')
   }
   return parsed as Record<string, unknown>
+}
+
+/**
+ * Gunzip + walk a .tgz and return its parsed `<dir>/package.json` manifest.
+ * Throws TarballError (fail-closed) on anything malformed.
+ */
+export function extractPackageManifest(tgzBytes: Buffer): Record<string, unknown> {
+  let tar: Buffer
+  try {
+    tar = gunzipSync(tgzBytes, { maxOutputLength: MAX_TAR_DECOMPRESSED_BYTES })
+  } catch (cause) {
+    throw mapGunzipError(cause)
+  }
+  return extractManifestFromTar(tar)
+}
+
+/**
+ * Streaming variant of extractPackageManifest over a staged artifact file
+ * (review D6): createReadStream piped through createGunzip, collecting at
+ * most MAX_TAR_DECOMPRESSED_BYTES, so the publish gate never holds the whole
+ * staged artifact (up to 100 MiB compressed) or its decompressed form in
+ * memory. The collected bytes feed the SAME extractManifestFromTar tail.
+ */
+export function extractPackageManifestFromFile(path: string): Promise<Record<string, unknown>> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const chunks: Buffer[] = []
+    let total = 0
+    let settled = false
+    const source = createReadStream(path)
+    const gunzip = createGunzip({ maxOutputLength: MAX_TAR_DECOMPRESSED_BYTES })
+    const settle = (error: Error | null, tar?: Buffer) => {
+      if (settled) return
+      settled = true
+      if (error !== null) {
+        rejectPromise(error)
+        return
+      }
+      try {
+        resolvePromise(extractManifestFromTar(tar!))
+      } catch (cause) {
+        rejectPromise(cause)
+      }
+    }
+    gunzip.on('data', (chunk: Buffer) => {
+      total += chunk.length
+      if (total > MAX_TAR_DECOMPRESSED_BYTES) {
+        // Fail closed the moment the ceiling is crossed; no need to keep
+        // draining a (potentially hostile) stream into memory.
+        source.destroy()
+        gunzip.destroy()
+        settle(mapGunzipError(Object.assign(new Error('buffer too large'), { code: 'ERR_BUFFER_TOO_LARGE' })))
+        return
+      }
+      chunks.push(chunk)
+    })
+    source.on('error', cause => settle(cause as Error))
+    // With maxOutputLength set, zlib itself errors ERR_BUFFER_TOO_LARGE once
+    // the decompressed total crosses the ceiling; either way the honest
+    // fail-closed TarballError is the same.
+    gunzip.on('error', cause => settle(mapGunzipError(cause)))
+    gunzip.on('end', () => settle(null, Buffer.concat(chunks)))
+    source.pipe(gunzip)
+  })
 }
