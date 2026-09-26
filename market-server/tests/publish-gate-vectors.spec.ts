@@ -18,6 +18,7 @@ interface GateVectorEntry {
   readonly path: string
   readonly manifest?: Record<string, unknown>
   readonly raw?: string
+  readonly typeflag?: string
 }
 
 interface GateVector {
@@ -40,6 +41,7 @@ function buildVectorTgz(vector: GateVector): Buffer {
   const entries: TarEntrySpec[] = vector.tarball.entries.map(entry => ({
     name: entry.path,
     data: entry.manifest !== undefined ? JSON.stringify(entry.manifest) : (entry.raw ?? ''),
+    ...(entry.typeflag !== undefined ? { typeflag: entry.typeflag } : {}),
   }))
   return gzipSync(buildTar(entries))
 }

@@ -213,6 +213,47 @@
     }
   },
   {
+    "name": "pax-metadata-file-on-package-json",
+    "reason": "a regular-file PaxHeaders metadata entry for package.json is tooling header, not a second manifest; it must not count toward the ambiguity rule (round 2)",
+    "tarball": {
+      "entries": [
+        {
+          "path": "PaxHeaders/package.json",
+          "raw": "29 path=package/package.json\n",
+          "typeflag": "0"
+        },
+        {
+          "path": "package/package.json",
+          "manifest": { "name": "@huaanwork/sample-plugin", "version": "1.2.3" }
+        }
+      ]
+    },
+    "expected": { "accept": true }
+  },
+  {
+    "name": "dotdot-segment-directory-entry",
+    "reason": "a directory entry whose name contains a .. segment is rejected before manifest selection on both sides, not just file entries (round 2)",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/escape/..",
+          "raw": "",
+          "typeflag": "5"
+        },
+        {
+          "path": "package/package.json",
+          "manifest": { "name": "@huaanwork/sample-plugin", "version": "1.2.3" }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "invalid-tarball",
+      "wrapperCode": "market-invalid-tarball",
+      "messageIncludes": ".."
+    }
+  },
+  {
     "name": "uppercase-package-name",
     "reason": "the contract package.name pattern is lowercase-only; an uppercase name would poison every provider page (D4)",
     "tarball": {

@@ -95,11 +95,16 @@ export function readTarballPackageJson(tgzBytes: Buffer): Record<string, unknown
   const entries = tarEntries(tar)
   let best: Buffer | undefined
   for (const entry of entries) {
-    if (entry.type !== '0' && entry.type !== '\0') continue
-    // 路径穿越段:任何文件条目名含 ".." 段即整包拒收(与发布侧门同口径)。
+    // 路径穿越段:任何条目名(含目录,先于类型过滤)含 ".." 段即整包拒收——
+    // 与发布侧门 walkEntries 逐条一致(D1 round 2)。
     if (entry.name.split('/').includes('..')) {
       throw new MarketInstallGateError(`tarball entry name contains a ".." segment: ${JSON.stringify(entry.name)}`, 'market-invalid-tarball')
     }
+    if (entry.type !== '0' && entry.type !== '\0') continue
+    // pax 元数据条目(node-tar/npm 惯例 PaxHeaders 路径段;有些工具以普通
+    // 文件 typeflag 落盘)不算 manifest 候选——与发布侧门同口径,否则带
+    // pax 元数据的合法 npm 包会被误判「歧义 tarball」(D1 round 2)。
+    if (entry.name.split('/').some((segment) => segment.startsWith('PaxHeaders'))) continue
     const segments = entry.name.split('/').filter((segment) => segment.length > 0)
     if (segments.length !== 2 || segments[1] !== 'package.json') continue
     if (best !== undefined) {

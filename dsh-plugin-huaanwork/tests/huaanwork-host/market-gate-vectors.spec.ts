@@ -17,7 +17,7 @@ function octal(value: number, width: number): string {
   return value.toString(8).padStart(width - 1, '0') + '\0'
 }
 
-function tarHeader(name: string, size: number): Buffer {
+function tarHeader(name: string, size: number, typeflag: number): Buffer {
   const header = Buffer.alloc(TAR_BLOCK_SIZE)
   header.write(name, 0, 'latin1')
   header.write(octal(0o644, 8), 100, 'latin1')
@@ -26,7 +26,7 @@ function tarHeader(name: string, size: number): Buffer {
   header.write(octal(size, 12), 124, 'latin1')
   header.write(octal(0, 12), 136, 'latin1')
   header.write('        ', 148, 'latin1')
-  header.writeUInt8(0x30, 156)
+  header.writeUInt8(typeflag, 156)
   header.write('ustar\0', 257, 'latin1')
   header.write('00', 263, 'latin1')
   let sum = 0
@@ -35,10 +35,11 @@ function tarHeader(name: string, size: number): Buffer {
   return header
 }
 
-function buildTgzBytes(entries: ReadonlyArray<{ path: string; bytes: Buffer }>): Buffer {
+function buildTgzBytes(entries: ReadonlyArray<{ path: string; bytes: Buffer; typeflag?: string }>): Buffer {
   const parts: Buffer[] = []
   for (const entry of entries) {
-    parts.push(tarHeader(entry.path, entry.bytes.length))
+    const typeflag = entry.typeflag === undefined ? 0x30 : entry.typeflag.charCodeAt(0)
+    parts.push(tarHeader(entry.path, entry.bytes.length, typeflag))
     parts.push(entry.bytes)
     const remainder = entry.bytes.length % TAR_BLOCK_SIZE
     if (remainder !== 0) parts.push(Buffer.alloc(TAR_BLOCK_SIZE - remainder))
@@ -51,6 +52,7 @@ interface GateVectorEntry {
   readonly path: string
   readonly manifest?: Record<string, unknown>
   readonly raw?: string
+  readonly typeflag?: string
 }
 
 interface GateVector {
@@ -75,6 +77,7 @@ describe('publish-gate-vectors.json (wrapper install-side gate, shared with mark
       const bytes = buildTgzBytes(vector.tarball.entries.map(entry => ({
         path: entry.path,
         bytes: Buffer.from(entry.manifest !== undefined ? JSON.stringify(entry.manifest) : (entry.raw ?? ''), 'utf8'),
+        ...(entry.typeflag !== undefined ? { typeflag: entry.typeflag } : {}),
       })))
 
       // tarball 结构层拒收(歧义 / `..` 段):readTarballPackageJson 即拒。
