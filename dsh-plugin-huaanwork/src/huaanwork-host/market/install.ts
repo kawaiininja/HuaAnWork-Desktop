@@ -16,7 +16,8 @@
  *    (两道补强;flag 构造只在 addPlugin 内;不经 runExternalMarketPluginInstall/--registry)。
  *
  * tarball 解包:node:zlib gunzip + ustar 512B 头 walk(零依赖,与 market-server
- * 发布侧门同形态;支持 ustar prefix 拼接与 GNU longname 'L';找最浅 * /package.json)。
+ * 发布侧门同形态;支持 ustar prefix 拼接与 GNU longname 'L';depth-1
+ * package.json 恰好一个才可用,含 `..` 段或多候选一律拒——与发布侧门同口径)。
  */
 
 import { createHash } from 'node:crypto'
@@ -79,8 +80,10 @@ function tarEntries(buffer: Buffer): { name: string; type: string; data: Buffer 
 }
 
 /**
- * 从 .tgz 字节解出顶层 package.json 对象。找不到/坏 gzip/坏 JSON 一律
- * MarketInstallGateError(不落盘判定的前置:预检不过即拒)。
+ * 从 .tgz 字节解出顶层 package.json 对象。找不到/坏 gzip/坏 JSON/含 `..` 段/
+ * 多 depth-1 候选一律 MarketInstallGateError(不落盘判定的前置:预检不过即拒)。
+ * 选择规则与 market-server 发布侧门逐条一致(review D1):depth-1 候选恰好一个
+ * 才可用,多于一个即「歧义 tarball」拒绝,不做任何 tie-break。
  */
 export function readTarballPackageJson(tgzBytes: Buffer): Record<string, unknown> {
   let tar: Buffer
@@ -90,20 +93,25 @@ export function readTarballPackageJson(tgzBytes: Buffer): Record<string, unknown
     throw new MarketInstallGateError('downloaded artifact is not a valid gzip tarball', 'market-invalid-tarball')
   }
   const entries = tarEntries(tar)
-  // 最浅匹配:`<单个根目录>/package.json`(npm 打包形态 `package/package.json`)。
-  let best: { depth: number; data: Buffer } | undefined
+  let best: Buffer | undefined
   for (const entry of entries) {
     if (entry.type !== '0' && entry.type !== '\0') continue
+    // 路径穿越段:任何文件条目名含 ".." 段即整包拒收(与发布侧门同口径)。
+    if (entry.name.split('/').includes('..')) {
+      throw new MarketInstallGateError(`tarball entry name contains a ".." segment: ${JSON.stringify(entry.name)}`, 'market-invalid-tarball')
+    }
     const segments = entry.name.split('/').filter((segment) => segment.length > 0)
     if (segments.length !== 2 || segments[1] !== 'package.json') continue
-    const depth = segments[0] === 'package' ? 0 : 1
-    if (best === undefined || depth < best.depth) best = { depth, data: entry.data }
+    if (best !== undefined) {
+      throw new MarketInstallGateError('tarball is ambiguous: more than one depth-1 package.json entry; expected exactly one', 'market-invalid-tarball')
+    }
+    best = entry.data
   }
   if (best === undefined) {
     throw new MarketInstallGateError('tarball has no top-level package.json', 'market-invalid-tarball')
   }
   try {
-    return JSON.parse(best.data.toString('utf8')) as Record<string, unknown>
+    return JSON.parse(best.toString('utf8')) as Record<string, unknown>
   } catch {
     throw new MarketInstallGateError('tarball package.json is not valid JSON', 'market-invalid-tarball')
   }
@@ -115,6 +123,12 @@ export function readTarballPackageJson(tgzBytes: Buffer): Record<string, unknown
 
 const LIFECYCLE_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare'] as const
 
+// 包身份正则:与 market-server/src/tarball/gate.ts 逐字一致(依赖方向守卫
+// 禁止 import market-server 源;共享 fixture publish-gate-vectors.json 把两侧
+// 判定钉死,任一侧漂移即红)。契约 package.name 为小写、latestVersion 上限 64。
+const PACKAGE_NAME_PATTERN = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
+const PACKAGE_VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9.+-]{0,63}$/u
+
 function nonEmptyRecord(value: unknown): value is Record<string, string> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length > 0
 }
@@ -122,8 +136,21 @@ function nonEmptyRecord(value: unknown): value is Record<string, string> {
 /**
  * 零依赖 + 无 lifecycle 安装脚本预检。fail-closed,点名违规项;
  * peerDependencies 豁免、bundleDependencies 允许、其余 scripts(build/test)允许。
+ * 包身份(name/version)先做与发布侧门同口径的校验(review D4/D5)。
  */
 export function precheckTarballManifest(manifest: Record<string, unknown>): void {
+  if (typeof manifest.name !== 'string' || !PACKAGE_NAME_PATTERN.test(manifest.name)) {
+    throw new MarketInstallGateError(
+      `package.json "name" must be a lowercase npm package name, got ${JSON.stringify(manifest.name)}`,
+      'invalid-package-identity',
+    )
+  }
+  if (typeof manifest.version !== 'string' || !PACKAGE_VERSION_PATTERN.test(manifest.version)) {
+    throw new MarketInstallGateError(
+      `package.json "version" must be a non-empty filename-safe string of at most 64 characters, got ${JSON.stringify(manifest.version)}`,
+      'invalid-package-identity',
+    )
+  }
   const violations: string[] = []
   if (nonEmptyRecord(manifest.dependencies)) {
     violations.push(`dependencies must be empty (zero-dependency market artifact), got: ${Object.keys(manifest.dependencies).join(', ')}`)
@@ -189,9 +216,19 @@ export async function downloadAndStageArtifact(options: {
 
   // 零依赖 + 无脚本预检(落盘前;不过即拒,profile 零接触)。
   const manifest = readTarballPackageJson(bytes)
-  const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : options.file.name
-  const version = typeof manifest.version === 'string' && manifest.version.length > 0 ? manifest.version : options.file.version
   precheckTarballManifest(manifest)
+  // 身份一致性(review D4/D5 廉价半段):制品落盘与安装的身份以**已验签清单
+  // 条目**为准(签名覆盖的就是它);tarball 自述 name/version 必须与之完全
+  // 相等,不等即拒——绝不允许装出一个与清单身份不一致的在盘制品。
+  if (manifest.name !== options.file.name || manifest.version !== options.file.version) {
+    throw new MarketInstallGateError(
+      `tarball self-declared identity ${JSON.stringify(`${String(manifest.name)}@${String(manifest.version)}`)} ` +
+      `does not match the signed manifest entry ${JSON.stringify(`${options.file.name}@${options.file.version}`)}`,
+      'invalid-package-identity',
+    )
+  }
+  const name = options.file.name
+  const version = options.file.version
 
   const artifactsDir = ensureMarketArtifactsDir(options.profileDir)
   const artifactPath = `${artifactsDir}/${marketArtifactName(name, version, sha256)}`

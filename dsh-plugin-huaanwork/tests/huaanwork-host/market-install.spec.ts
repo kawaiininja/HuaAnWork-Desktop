@@ -189,6 +189,26 @@ describe('downloadAndStageArtifact (sha256 比对 + origin 钉扎 + 制品落盘
     }
   })
 
+  test('rejects manifest-entry-vs-tarball identity mismatch: nothing staged (D4/D5)', async () => {
+    const profileDir = tempProfile()
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-idmismatch-'))
+    roots.push(dir)
+    // tarball 自述 name/version 与已验签清单条目不一致(被换包/被篡改)。
+    const bytes = buildTgz(dir, { name: '@huaanwork/other', version: '9.9.9' })
+    const http = fakeHttp(new Map([[`${ORIGIN}/artifacts/huaanwork-sample-1.2.3.tgz`, bytes]]))
+
+    await expect(downloadAndStageArtifact({
+      origin: ORIGIN,
+      file: fileEntry({ sha256: sha256Hex(bytes) }),
+      profileDir,
+      http,
+    })).rejects.toThrow(/identity/u)
+
+    for (const entry of readdirSync(join(profileDir, '.market-artifacts'))) {
+      expect(entry.endsWith('.tgz')).toBe(false)
+    }
+  })
+
   test('same-sha reinstall overwrites the artifact instead of delete-recreate', async () => {
     const profileDir = tempProfile()
     const dir = mkdtempSync(join(tmpdir(), 'hw-market-overwrite-'))
