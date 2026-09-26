@@ -304,8 +304,7 @@ export default function MarketView() {
         <div className="settings-overlay" role="dialog" aria-label="安装确认">
           <div className="confirm-modal">
             <p>
-              安装 {installableLabel({ name: preview.name, displayName: preview.name })}@{preview.version}
-              ？制品将经签名目录校验（sha256 比对）后安装。
+              安装 {preview.name}@{preview.version}？制品将经签名目录校验（sha256 比对）后安装。
             </p>
             <p className="hint">
               {formatMarketSize(preview.size)} · sha256 {preview.sha256}
