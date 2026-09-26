@@ -16063,6 +16063,7 @@ __metadata:
   resolution: "market-server@workspace:market-server"
   dependencies:
     "@types/node": "npm:^22.20.0"
+    dsh-community-market: "npm:0.1.0-dev.0"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
   languageName: unknown

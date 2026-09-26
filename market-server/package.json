@@ -10,9 +10,13 @@
   },
   "scripts": {
     "build": "echo \"market-server: TypeScript sources run directly; no build output\"",
-    "typecheck": "test ! -f tsconfig.json || tsc --noEmit",
-    "test": "vitest run tests --passWithNoTests",
+    "start": "node --experimental-strip-types src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run tests",
     "check": "yarn run typecheck && yarn run test"
+  },
+  "dependencies": {
+    "dsh-community-market": "0.1.0-dev.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
