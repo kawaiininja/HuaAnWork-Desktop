@@ -15,6 +15,7 @@ import HistoryDetailPane, {
   type SessionLogView,
 } from "./HistoryDetailPane.tsx";
 import KnowledgeBaseView from "./KnowledgeBaseView.tsx";
+import MarketView from "./MarketView.tsx";
 import ProjectsPanel, { ProjectCreateModal, createAndOpen } from "./ProjectsPanel.tsx";
 import Settings, {
   PLUGIN_APPLY_FAIL,
@@ -170,7 +171,7 @@ type ChatTab = {
 
 type SessionMenu = { sessionId: string; x: number; y: number };
 
-type View = "main" | "skills" | "automations" | "agents" | "knowledge";
+type View = "main" | "skills" | "automations" | "agents" | "knowledge" | "market";
 export type RightTab = "preview" | "progress" | "files" | "diff";
 type AuthPhase = "unknown" | "needs-register" | "logged-out" | "logged-in";
 
@@ -222,6 +223,17 @@ function IconAgent() {
       <title>智能体</title>
       <rect x="3.2" y="5.6" width="9.6" height="7" rx="1.8" />
       <path d="M8 2.8v2.8M6.4 8.6v.8M9.6 8.6v.8" />
+    </svg>
+  );
+}
+
+function IconMarket() {
+  return (
+    <svg {...ICON_PROPS} strokeLinejoin="round">
+      <title>插件市场</title>
+      <path d="M2.6 6.4L4 3.2h8l1.4 3.2" />
+      <path d="M2.8 6.4h10.4v5.4a1 1 0 0 1-1 1H3.8a1 1 0 0 1-1-1V6.4z" />
+      <path d="M6.2 9.4v2M5.2 10.4h2" />
     </svg>
   );
 }
@@ -1688,7 +1700,9 @@ export default function App() {
                 ? " — 智能体"
                 : view === "knowledge"
                   ? " — 知识库"
-                  : ""}
+                  : view === "market"
+                    ? " — 插件市场"
+                    : ""}
         </span>
         {showRightPane ? (
           <button
@@ -1751,6 +1765,15 @@ export default function App() {
           >
             <IconKnowledge />
             <span className="lbl">知识库</span>
+          </button>
+          <button
+            type="button"
+            className={view === "market" ? "nav-it on" : "nav-it"}
+            onClick={() => setView("market")}
+            title="插件市场"
+          >
+            <IconMarket />
+            <span className="lbl">插件市场</span>
           </button>
 
           <section className="side-section recent-section">
@@ -1879,6 +1902,8 @@ export default function App() {
             <AgentsView />
           ) : view === "knowledge" ? (
             <KnowledgeBaseView />
+          ) : view === "market" ? (
+            <MarketView />
           ) : historyView ? (
             <HistoryDetailPane
               view={historyView}
