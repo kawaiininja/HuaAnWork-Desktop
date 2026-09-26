@@ -107,6 +107,12 @@ const PAIRS = [
       'src/client/DesktopSettingsSection.tsx',
       // client/desktop-settings-locales.ts:设置面 provider 选项标签文案。
       'src/client/desktop-settings-locales.ts',
+      // M5 D9 修复复盘(2026-09-27):variant 白名单 17→19。checkpoint 感知的市场制品
+      // GC(retention 判据纳入 checkpoint slot 快照)——profile-checkpoint.ts 纯增量导出
+      // collector + env 常量(profile-checkpoint.ts:877-921),main.ts 纯增量注入
+      // HUAANWORK_CHECKPOINT_USER_DATA_DIR(main.ts:711-717);均为单侧增量,既有内容逐字不动。
+      'src/profile-checkpoint.ts',
+      'src/main.ts',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [
