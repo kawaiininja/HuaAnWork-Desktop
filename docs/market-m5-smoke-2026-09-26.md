@@ -9,8 +9,9 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
 - FORK 仓库 `HuaAnWork-Desktop`：初跑 `fca41276cc`，评审修复批复跑
   `fe3765b63d`（+ 本冒烟新增 spec）；**D16 负例补全批（安装侧门双证 + 过期
   notAfter + provider 默认 disabled fail-safe + 本地 `plugin.add` 往返）于
-  2026-09-27 09:34 复跑刷新，复跑时点 HEAD `bc2181e952`（负例 spec 与本记录
-  同批落盘）**。
+  2026-09-27 09:34 复跑刷新，该次复跑运行的是尚未提交的工作区代码，落盘于
+  `f02a5c3026`（09:36:56）——原记录标注的 HEAD `bc2181e952`（09:30:11）早于
+  负例 spec 存在，时序不成立，2026-09-27 实现评审 N-5 订正**。
 - Node v22.23.2（满足 `^22.19.0`）。
 - 应用自带 pnpm（round6 S2 版本基线）：`dsh-plugin-huaanwork/node_modules/pnpm/bin/pnpm.mjs`
   = **11.8.0**（初跑时点 PATH pnpm 为 10.32.1，两侧结果均绿——该双版本对照为
@@ -89,9 +90,20 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
 
 ## 层级限制（诚实声明）
 
-- **UI（MarketView renderer）未驱动**：本环境无显示/Electron 窗口。UI 是 wrapper
-  routes 之上的薄 fetch 层；冒烟在 route handler 层 exercise 全部 7 条 routes 的
-  生产代码路径，UI 专项留 `/plan-design-review`（已登记）。
+- **UI（MarketView renderer）未在真实 Electron 窗口驱动**：本环境无显示/窗口。
+  UI 是 wrapper routes 之上的薄 fetch 层；冒烟在 route handler 层 exercise 全部
+  7 条 routes 的生产代码路径。**组件层现有 jsdom 覆盖**（评审 D13 后新增
+  `tests/client-huaanwork/market-view.spec.ts`：`createRoot` + `act` 真挂组件，
+  断言旁路独立性、在飞安装跨挂载恢复、轮询放弃预算），但那仍非真实窗口驱动；
+  UI 专项留 `/plan-design-review`（已登记）。
+- **「重启生效」未 exercise**（Task 8 Step 3 枚举项，评审 D16 残余）：冒烟只断言
+  安装/卸载应答的 `restarting === true` 与取消分支的诚实 message，**未**驱动
+  「确认重启 → app relaunch → 新 bundle 实际生效」这条链——其本体是 Electron
+  主进程的 relaunch 面，headless 冒烟无窗口可承接。已测的替代证据：M4 的
+  confirmed-restart 链在 `plugins-host.spec.ts` 与 startup-recovery 相关单测中
+  覆盖，市场路径复用的正是同一条链（`desktopRuntime.requestConfirmedRestart`，
+  非 community-market 的无条件 `desktopActions.requestRestart`）。**真机 relaunch
+  验证列为发版前必做项**，不在本 headless 冒烟的能力范围内。
 - **恢复窗口本体**（`openStartupRecoveryWindow`）为 Electron 主进程面：冒烟只锁
   wrapper 层「无自动回滚」+ 启动失败路由承接两条可测语义（与 e2e 同口径），
   窗口 UI 由既有 startup-recovery-window.spec 单测覆盖。
