@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { parseCatalogProviderPage } from 'dsh-community-market/contracts'
+import type { CatalogEntry } from '../src/catalog/store.ts'
 import { adminHeaders, bootTestMarket, publishTgz, type TestMarket } from './helpers/server.ts'
 import { cleanPackageManifest } from './helpers/tar.ts'
 
@@ -395,5 +396,61 @@ describe('write-side contract validation + read-side poisoning (D3/D4)', () => {
     const { error } = result.body as { error: { code: string; message: string } }
     expect(error.code).toBe('invalid-package-identity')
     await catalogHealth()
+  })
+})
+
+describe('manifest/prepare honest 4xx (review D14d)', () => {
+  let market: TestMarket
+
+  beforeEach(async () => {
+    market = await bootTestMarket()
+  })
+
+  afterEach(async () => {
+    await market.close()
+  })
+
+  it('answers 409 artifact-missing (not a bare 500) when an entry points at a vanished artifact', async () => {
+    const published = await publishTgz(market.baseUrl, 'test-admin-token')
+    expect(published.status).toBe(201)
+    const { entry } = published.body as { entry: { id: string; tarball: string } }
+    // Operator cleanup path: the artifact file is gone while the entry still points at it.
+    await market.artifacts.remove(entry.tarball)
+
+    const prepare = await fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(prepare.status).toBe(409)
+    const parsed = await prepare.json() as { error: { code: string; message: string } }
+    expect(parsed.error.code).toBe('artifact-missing')
+    expect(parsed.error.message).toContain(entry.tarball)
+    // The operator guidance must reach the response, not just the server log.
+    expect(parsed.error.message).toContain('re-publish')
+  })
+
+  it('answers 422 catalog-too-large at 201 entries instead of a 500, with the operator guidance inline', async () => {
+    const published = await publishTgz(market.baseUrl, 'test-admin-token')
+    expect(published.status).toBe(201)
+    const { entry } = published.body as { entry: CatalogEntry }
+    const entries: CatalogEntry[] = [entry]
+    for (let index = 1; entries.length <= 200; index += 1) {
+      entries.push({
+        ...entry,
+        id: `bulk/pkg-${index}@1.0.0`,
+        packageName: `bulk-pkg-${index}`,
+      })
+    }
+    await market.store.replaceEntries(entries)
+
+    const prepare = await fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(prepare.status).toBe(422)
+    const parsed = await prepare.json() as { error: { code: string; message: string } }
+    expect(parsed.error.code).toBe('catalog-too-large')
+    expect(parsed.error.message).toContain('201')
+    expect(parsed.error.message).toContain('Split the source')
   })
 })

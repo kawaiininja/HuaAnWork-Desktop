@@ -32,7 +32,7 @@ import type { CatalogService } from '../catalog/service.ts'
 import { DuplicateEntryError, EntryNotFoundError, ManifestActivationConflictError } from '../catalog/store.ts'
 import type { CatalogEntry, CatalogEntryPatch, CatalogStore } from '../catalog/store.ts'
 import type { MarketServerConfig } from '../config.ts'
-import { intakeSignature, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
+import { intakeSignature, ManifestPrepareError, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
 import { TarballError, extractPackageManifestFromFile } from '../tarball/parse.ts'
 import { checkPublishGate } from '../tarball/gate.ts'
 import {
@@ -358,12 +358,27 @@ export async function handleAdminRequest(
     }
 
     if (pathname === `${ADMIN_ROUTE_PREFIX}manifest/prepare` && method === 'POST') {
-      const manifest = await preparePendingManifest({
-        store: ctx.store,
-        catalog: ctx.catalog,
-        config: ctx.config,
-        artifactSize: async fileName => (await ctx.artifacts.stat(fileName))?.size ?? null,
-      })
+      let manifest: Awaited<ReturnType<typeof preparePendingManifest>>
+      try {
+        manifest = await preparePendingManifest({
+          store: ctx.store,
+          catalog: ctx.catalog,
+          config: ctx.config,
+          artifactSize: async fileName => (await ctx.artifacts.stat(fileName))?.size ?? null,
+        })
+      } catch (cause) {
+        // Honest 4xx for operator-preventable conditions (review D14d): the
+        // runbook promises ">200 entries or a missing artifact is honestly
+        // rejected" — a bare 500 buries manifest-prepare's operator guidance
+        // (e.g. "Split the source (M6) before releasing") in server logs and
+        // mislabels a data-side problem as an internal error.
+        if (cause instanceof ManifestPrepareError) {
+          const status = cause.code === 'catalog-too-large' ? 422 : 409
+          sendError(response, status, cause.code, cause.message)
+          return true
+        }
+        throw cause
+      }
       sendJson(response, 200, { pendingManifest: manifest })
       return true
     }

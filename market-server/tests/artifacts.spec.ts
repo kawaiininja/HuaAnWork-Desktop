@@ -66,6 +66,13 @@ describe('artifact hosting round-trip', () => {
     expect(traversal.status).toBe(404)
     const literal = await fetch(`${baseUrl}/artifacts/..%2F..%2Fetc%2Fpasswd`)
     expect(literal.status).toBe(404)
+
+    // Malformed percent-encoding must not escape as a 500 with a stack (P2).
+    for (const bad of ['/artifacts/%zz', '/artifacts/%2', '/artifacts/%']) {
+      const malformed = await fetch(`${baseUrl}${bad}`)
+      expect(malformed.status, bad).toBe(404)
+      expect(((await malformed.json()) as { error: { code: string } }).error.code, bad).toBe('artifact-not-found')
+    }
   })
 
   it('rejects a re-upload whose claimed sha256 does not match the bytes (corrupt tarball guard)', async () => {

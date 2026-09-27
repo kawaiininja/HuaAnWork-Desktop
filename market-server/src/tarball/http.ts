@@ -30,7 +30,15 @@ export async function handleArtifactGet(
   artifacts: ArtifactStore,
 ): Promise<boolean> {
   if (!pathname.startsWith(ARTIFACTS_ROUTE_PREFIX)) return false
-  const fileName = decodeURIComponent(pathname.slice(ARTIFACTS_ROUTE_PREFIX.length))
+  // Malformed percent-encoding (e.g. /artifacts/%zz) makes decodeURIComponent
+  // throw URIError — that would escape as an unauthenticated 500 with a stack
+  // in the operator log. Answer the same honest 404 instead (review P2).
+  let fileName = ''
+  try {
+    fileName = decodeURIComponent(pathname.slice(ARTIFACTS_ROUTE_PREFIX.length))
+  } catch {
+    fileName = ''
+  }
 
   const notFound = (): void => {
     response.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
