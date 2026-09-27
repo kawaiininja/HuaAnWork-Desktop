@@ -1,19 +1,24 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { rpcCall, pickDirectoryDetailed } from "./api.ts";
 import { PLUGIN_APPLY_FAIL, PLUGIN_CONFIRM } from "./Settings.tsx";
 import {
   catalogItemLabel,
+  describeMarketPanel,
+  describeMarketSourceHint,
   filterCatalogItems,
   filterInstallable,
   formatMarketSize,
+  installButtonState,
   installableLabel,
   MARKET_TAB_LABELS,
   MARKET_TABS,
   shortSha256,
   type MarketCatalogView,
   type MarketInstallableItem,
+  type MarketLoadState,
   type MarketMutationResult,
+  type MarketPanelPhase,
   type MarketPreviewView,
   type MarketStateView,
   type MarketTab,
@@ -29,7 +34,8 @@ import { presentMarketError, type MarketErrorPresentation } from "./logic/market
  * - 错误态三类区分（不可达/验签失败/sha 不符），fail-closed 类不提供绕过（R23）；
  * - 「本地安装」tab（Task 7）：目录/.tgz 经 M4 plugin.add/remove 本地 RPC，不经内网——
  *   内网宕机时 remote tab 诚实报错、本 tab 仍可用（spec §13 单点缓解旁路）；
- * - 切走再回来即重新挂载并重新拉取（installations 回来自恢复）。
+ * - 切走再回来即重新挂载并重新拉取；在飞安装经 /state 的 executing 标志自恢复
+ *   （D13 轮询恢复）：挂载发现飞行中 ⇒ 显示进行中标识并 2s 轮询至完成后刷新列表。
  */
 
 const ROUTE_STATE = "/api/huaanwork-market/state";
@@ -71,7 +77,7 @@ async function marketFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
-type LoadState = "loading" | "ready" | "error";
+type LoadState = MarketLoadState;
 
 export default function MarketView() {
   const [tab, setTab] = useState<MarketTab>("discover");
@@ -88,6 +94,11 @@ export default function MarketView() {
   const [installableLoad, setInstallableLoad] = useState<LoadState>("loading");
 
   const [bundles, setBundles] = useState<string[]>([]);
+
+  // 在飞安装的服务端观察态（D13）：挂载时经 /state.executing 发现（本组件发起的
+  // execute 期间切走再回来即此态）。轮询至 false 后清并刷新列表——notice 属
+  // 组件内 state，跨 view 不存活，列表刷新即恢复信号，不伪造完成通知。
+  const [remoteExecuting, setRemoteExecuting] = useState(false);
 
   const [preview, setPreview] = useState<MarketPreviewView | null>(null);
   const [previewError, setPreviewError] = useState<MarketErrorPresentation | null>(null);
@@ -139,6 +150,7 @@ export default function MarketView() {
         if (!alive) return;
         setState(stateView);
         setStateLoad("ready");
+        setRemoteExecuting(stateView.executing === true);
       } catch {
         if (!alive) return;
         setStateLoad("error");
@@ -150,6 +162,31 @@ export default function MarketView() {
       alive = false;
     };
   }, [loadCatalogSide, loadInstallations]);
+
+  // D13 轮询恢复：remoteExecuting 期间每 2s 读 /state，飞行结束即清标识并
+  // 刷新目录与已装列表（自恢复）；unmount 时清理定时器。本地发起的 execute
+  // 由 confirmInstall 的收尾刷新管理，不经此轮询。
+  useEffect(() => {
+    if (!remoteExecuting) return undefined;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const stateView = await marketFetch<MarketStateView>(ROUTE_STATE);
+        if (stopped || stateView.executing === true) return;
+        setRemoteExecuting(false);
+        await Promise.all([loadCatalogSide(), loadInstallations()]);
+      } catch {
+        // 轮询失败静默：下一 tick 重试；错误呈现交给用户主动操作路径。
+      }
+    };
+    const timer = setInterval(() => {
+      void poll();
+    }, 2000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [remoteExecuting, loadCatalogSide, loadInstallations]);
 
   async function startInstall(item: MarketInstallableItem) {
     setNotice(null);
@@ -245,6 +282,24 @@ export default function MarketView() {
 
   const catalogItems = filterCatalogItems(catalog?.items ?? [], search);
   const installableItems = filterInstallable(installable, search);
+  // D13：面板四态（loading/error/empty/items）经纯函数判定，组合态回归由
+  // logic 测试 + jsdom spec 双层钉住；错误面板复用同一 presentation。
+  const discoverPhase = describeMarketPanel(catalogLoad, catalogError, catalogItems.length);
+  const installablePhase = describeMarketPanel(installableLoad, catalogError, installableItems.length);
+  // 安装/移除按钮的在飞禁用口径：本地 execute 与远端观察态任一在飞即禁用。
+  const anyExecuting = executing || remoteExecuting;
+
+  function panelBody(
+    phase: MarketPanelPhase,
+    loadingText: string,
+    emptyText: string,
+    children: ReactNode,
+  ): ReactNode {
+    if (phase.kind === "loading") return <p className="panel-empty">{loadingText}</p>;
+    if (phase.kind === "error") return <ErrorPanel presentation={phase.presentation} />;
+    if (phase.kind === "empty") return <p className="panel-empty">{emptyText}</p>;
+    return children;
+  }
 
   return (
     <div className="page-view">
@@ -273,15 +328,14 @@ export default function MarketView() {
             onChange={(event) => setSearch(event.target.value)}
           />
         ) : null}
-        <span className="market-state-hint">
-          {stateLoad === "ready" && state
-            ? state.verification.ready
-              ? `源：${state.origin}`
-              : "信任锚未配置：目录验签恒拒，请联系市场管理员"
-            : null}
-        </span>
+        <span className="market-state-hint">{describeMarketSourceHint(state, stateLoad)}</span>
       </div>
 
+      {remoteExecuting ? (
+        <div className="banner" role="status">
+          市场安装正在进行中，完成后列表将自动刷新。
+        </div>
+      ) : null}
       {notice ? (
         <div className={notice.error ? "banner error" : "banner"} role={notice.error ? "alert" : undefined}>
           {notice.text}
@@ -294,13 +348,7 @@ export default function MarketView() {
       ) : null}
 
       {tab === "discover" ? (
-        catalogLoad === "loading" ? (
-          <p className="panel-empty">加载目录中…</p>
-        ) : catalogLoad === "error" && catalogError ? (
-          <ErrorPanel presentation={catalogError} />
-        ) : catalogItems.length === 0 ? (
-          <p className="panel-empty">目录为空</p>
-        ) : (
+        panelBody(discoverPhase, "加载目录中…", "目录为空", (
           <ul className="market-list">
             {catalogItems.map((item, index) => (
               <li key={item.id ?? item.name ?? `catalog-${index}`} className="market-item">
@@ -309,37 +357,34 @@ export default function MarketView() {
               </li>
             ))}
           </ul>
-        )
+        ))
       ) : tab === "installable" ? (
-        installableLoad === "loading" ? (
-          <p className="panel-empty">加载可安装列表中…</p>
-        ) : installableLoad === "error" && catalogError ? (
-          <ErrorPanel presentation={catalogError} />
-        ) : installableItems.length === 0 ? (
-          <p className="panel-empty">暂无可安装插件</p>
-        ) : (
+        panelBody(installablePhase, "加载可安装列表中…", "暂无可安装插件", (
           <ul className="market-list">
-            {installableItems.map((item) => (
-              <li key={item.id} className="market-item">
-                <span className="recent-title">
-                  {installableLabel(item)} <em className="market-version">{item.version}</em>
-                </span>
-                {item.summary ? <span className="recent-meta">{item.summary}</span> : null}
-                <span className="recent-meta">
-                  {formatMarketSize(item.size)} · sha256 {shortSha256(item.sha256)}
-                </span>
-                <button
-                  type="button"
-                  className="btn primary market-install"
-                  disabled={item.installed || executing}
-                  onClick={() => void startInstall(item)}
-                >
-                  {item.installed ? "已安装" : executing ? "安装中…" : "安装"}
-                </button>
-              </li>
-            ))}
+            {installableItems.map((item) => {
+              const button = installButtonState(item, anyExecuting);
+              return (
+                <li key={item.id} className="market-item">
+                  <span className="recent-title">
+                    {installableLabel(item)} <em className="market-version">{item.version}</em>
+                  </span>
+                  {item.summary ? <span className="recent-meta">{item.summary}</span> : null}
+                  <span className="recent-meta">
+                    {formatMarketSize(item.size)} · sha256 {shortSha256(item.sha256)}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn primary market-install"
+                    disabled={button.disabled}
+                    onClick={() => void startInstall(item)}
+                  >
+                    {button.label}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
-        )
+        ))
       ) : tab === "installed" ? (
         bundles.length === 0 ? (
           <p className="panel-empty">尚未安装任何插件</p>
@@ -351,7 +396,7 @@ export default function MarketView() {
                 <button
                   type="button"
                   className="btn market-install"
-                  disabled={localBusy || executing}
+                  disabled={localBusy || anyExecuting}
                   onClick={() => void removeBundle(name)}
                 >
                   移除
@@ -364,7 +409,7 @@ export default function MarketView() {
         <LocalPanel
           bundles={bundles}
           localBusy={localBusy}
-          executing={executing}
+          executing={anyExecuting}
           onPick={() => void pickLocalPlugin()}
           onSubmitPath={(path) => submitLocalPath(path)}
           onRemove={(name) => void removeBundle(name)}

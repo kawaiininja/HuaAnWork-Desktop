@@ -158,6 +158,9 @@ async function handleState(services: MarketRouteServices, res: ServerResponse): 
   finishJson(res, 200, {
     provider: 'huaanwork-market',
     origin: services.deps.origin,
+    // 单飞标志（D13 轮询恢复）：客户端挂载读到 true ⇒ 显示「安装进行中」
+    // 标识并轮询至完成——在飞安装跨 view 卸载/重挂后仍可自恢复。
+    executing: services.executing.current,
     verification: {
       ready,
       ...(currentKeyId !== undefined ? { currentKeyId } : {}),

@@ -3,14 +3,18 @@ import { test } from "vitest";
 
 import {
   catalogItemLabel,
+  describeMarketPanel,
+  describeMarketSourceHint,
   filterCatalogItems,
   filterInstallable,
   formatMarketSize,
   installableLabel,
+  installButtonState,
   MARKET_TAB_LABELS,
   MARKET_TABS,
   shortSha256,
   type MarketInstallableItem,
+  type MarketStateView,
 } from "../../src/client-huaanwork/logic/market.ts";
 
 const ITEMS: MarketInstallableItem[] = [
@@ -83,4 +87,50 @@ test("MARKET_TABS pins the upstream-shaped union plus the M5 'local' offline-byp
     assert.ok(MARKET_TAB_LABELS[tab].length > 0, tab);
   }
   assert.equal(MARKET_TAB_LABELS.local, "本地安装");
+});
+
+const PRESENTATION = {
+  kind: "unreachable",
+  title: "无法连接市场",
+  body: "内网市场不可达",
+  canBypass: true,
+} as const;
+
+test("describeMarketPanel orders loading > error > empty > items (D13)", () => {
+  // loading 优先，即使已有错误与条目。
+  assert.deepEqual(describeMarketPanel("loading", PRESENTATION, 3), { kind: "loading" });
+  // error 态需要 presentation 才进错误分支。
+  assert.deepEqual(describeMarketPanel("error", PRESENTATION, 0), {
+    kind: "error",
+    presentation: PRESENTATION,
+  });
+  // 防御性回落：load=error 但 presentation 缺失（与既有 JSX 行为一致）落入 empty/items。
+  assert.deepEqual(describeMarketPanel("error", null, 0), { kind: "empty" });
+  assert.deepEqual(describeMarketPanel("error", null, 2), { kind: "items" });
+  // ready 态按条目数分空/非空。
+  assert.deepEqual(describeMarketPanel("ready", null, 0), { kind: "empty" });
+  assert.deepEqual(describeMarketPanel("ready", null, 1), { kind: "items" });
+});
+
+test("installButtonState disables on installed and in-flight execute (D13)", () => {
+  assert.deepEqual(installButtonState({ installed: true }, false), { disabled: true, label: "已安装" });
+  // installed 优先：已安装条目不显示「安装中…」。
+  assert.deepEqual(installButtonState({ installed: true }, true), { disabled: true, label: "已安装" });
+  assert.deepEqual(installButtonState({ installed: false }, true), { disabled: true, label: "安装中…" });
+  assert.deepEqual(installButtonState({ installed: false }, false), { disabled: false, label: "安装" });
+});
+
+test("describeMarketSourceHint stays silent until state is ready (D13)", () => {
+  const state = (ready: boolean): MarketStateView => ({
+    provider: "huaanwork-market",
+    origin: "http://127.0.0.1:8787",
+    verification: { ready, ...(ready ? { currentKeyId: "ab".repeat(32) } : {}) },
+    catalog: { maxAcceptedRevision: null },
+    desktopActions: { requestRestart: true },
+  });
+  assert.equal(describeMarketSourceHint(null, "ready"), null);
+  assert.equal(describeMarketSourceHint(state(true), "loading"), null);
+  assert.equal(describeMarketSourceHint(state(true), "error"), null);
+  assert.equal(describeMarketSourceHint(state(true), "ready"), "源：http://127.0.0.1:8787");
+  assert.equal(describeMarketSourceHint(state(false), "ready"), "信任锚未配置：目录验签恒拒，请联系市场管理员");
 });

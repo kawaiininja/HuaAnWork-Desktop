@@ -243,10 +243,45 @@ describe('GET state(wrapper 自有形态,R14)', () => {
     expect(out.json()).toEqual({
       provider: 'huaanwork-market',
       origin: 'http://127.0.0.1:1',
+      executing: false,
       verification: { ready: true, currentKeyId: 'e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0' },
       catalog: { maxAcceptedRevision: 7 },
       desktopActions: { requestRestart: true },
     })
+  })
+
+  test('exposes the single-flight executing flag for in-flight install recovery (D13)', async () => {
+    // 在飞安装跨 view 卸载/重挂的自恢复信号:execute 持有互斥期间 /state 必须如实
+    // 报 executing=true(客户端据此显示进行中标识并轮询),完成后复位为 false。
+    const server = await createMarketTestServer()
+    servers.push(server)
+    const profileDir = tempProfile()
+    const buildDir = mkdtempSync(join(tmpdir(), 'hw-market-state-exec-'))
+    roots.push(buildDir)
+    const bytes = buildTgz(buildDir, { name: '@huaanwork/sample', version: '1.2.3' })
+    server.addArtifact('/artifacts/a.tgz', bytes)
+    const manifest = manifestFor(server.origin, 1, [{
+      name: '@huaanwork/sample', version: '1.2.3', sha256: sha256Hex(bytes), tarballPath: '/artifacts/a.tgz', size: bytes.byteLength,
+    }])
+    activate(server, manifest)
+    let release!: (bytes: Buffer) => void
+    const gate = new Promise<Buffer>((resolvePromise) => { release = resolvePromise })
+    const http: MarketHttpClient = {
+      fetchText: async (url) => (await fetch(url)).text(),
+      fetchBuffer: async () => gate,
+    }
+    const { ctx, recorded } = fakeCtx()
+    registerMarketRoutes(ctx, depsFor(profileDir, server.origin, { http }))
+    const first = callRoute(recorded, MARKET_ROUTE_PATHS.execute, request({ name: '@huaanwork/sample', version: '1.2.3' }))
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+    const inFlight = await callRoute(recorded, MARKET_ROUTE_PATHS.state, getRequest())
+    expect(inFlight.status()).toBe(200)
+    expect((inFlight.json() as { executing: boolean }).executing).toBe(true)
+    release(bytes)
+    await first
+    const settled = await callRoute(recorded, MARKET_ROUTE_PATHS.state, getRequest())
+    expect((settled.json() as { executing: boolean }).executing).toBe(false)
   })
 })
 
