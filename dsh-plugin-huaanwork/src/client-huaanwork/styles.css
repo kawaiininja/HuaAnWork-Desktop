@@ -3086,6 +3086,21 @@ button {
   gap: 10px;
 }
 
+/* 本地安装页签（P22）：提示文/输入行/列表的纵向布局，与 sources 页签同观感。 */
+.market-local {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 路径输入（D11）：在 .row 里占据主宽，按钮随内容收缩。 */
+.market-path-input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  border-radius: var(--radius-md);
+}
+
 .market-source-disabled {
   padding: 12px 14px;
   border: 1px dashed var(--border);

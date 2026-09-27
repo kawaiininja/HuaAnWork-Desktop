@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { rpcCall, pickDirectory } from "./api.ts";
+import { rpcCall, pickDirectoryDetailed } from "./api.ts";
 import { PLUGIN_APPLY_FAIL, PLUGIN_CONFIRM } from "./Settings.tsx";
 import {
   catalogItemLabel,
@@ -58,8 +58,14 @@ async function marketFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
   const payload = (await response.json().catch(() => undefined)) as ErrorEnvelope | undefined;
   if (!response.ok) {
-    const error = new Error(payload?.error?.message ?? `HTTP ${response.status}`) as Error & { code?: string };
+    const error = new Error(payload?.error?.message ?? `HTTP ${response.status}`) as Error & {
+      code?: string;
+      status?: number;
+    };
     if (payload?.error?.code !== undefined) error.code = payload.error.code;
+    // 无 code 时（如 frontend-static fallback 回 HTML），HTTP 状态供分类
+    // not-registered（D10：市场路由未注册 = provider 未启用）。
+    error.status = response.status;
     throw error;
   }
   return payload as T;
@@ -86,7 +92,12 @@ export default function MarketView() {
   const [preview, setPreview] = useState<MarketPreviewView | null>(null);
   const [previewError, setPreviewError] = useState<MarketErrorPresentation | null>(null);
   const [executing, setExecuting] = useState(false);
-  const [notice, setNotice] = useState("");
+  // 通知条（P25）：失败（移除失败/本地安装失败/选择器不可用）走红色 error 条，
+  // 成功（安装完成/取消重启）保持中性条——视觉显著性不再对失败静音。
+  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
+  const notify = useCallback((text: string, error = false) => {
+    setNotice({ text, error });
+  }, []);
 
   const [localConfirming, setLocalConfirming] = useState<string | null>(null);
   const [localBusy, setLocalBusy] = useState(false);
@@ -141,7 +152,7 @@ export default function MarketView() {
   }, [loadCatalogSide, loadInstallations]);
 
   async function startInstall(item: MarketInstallableItem) {
-    setNotice("");
+    setNotice(null);
     setPreviewError(null);
     try {
       const view = await marketFetch<MarketPreviewView>(ROUTE_PREVIEW, {
@@ -168,7 +179,7 @@ export default function MarketView() {
         body: JSON.stringify({ name: target.name, version: target.version }),
       });
       // 取消重启的 message 诚实告知（承 M4 confirmAdd 先例）；确认路径应用随即 relaunch。
-      setNotice(result.message ?? (result.restarting ? "安装完成，正在重启…" : "插件已安装"));
+      notify(result.message ?? (result.restarting ? "安装完成，正在重启…" : "插件已安装"));
       await Promise.all([loadCatalogSide(), loadInstallations()]);
     } catch (error) {
       setPreviewError(presentMarketError(error));
@@ -178,23 +189,40 @@ export default function MarketView() {
   }
 
   async function removeBundle(name: string) {
-    setNotice("");
+    setNotice(null);
     try {
       const listed = await rpcCall<{ bundles?: string[]; message?: string }>("plugin.remove", { name });
       setBundles(Array.isArray(listed.bundles) ? listed.bundles : []);
-      if (listed.message) setNotice(listed.message);
+      if (listed.message) notify(listed.message);
       await loadCatalogSide();
     } catch (error) {
-      setNotice(`移除失败：${error instanceof Error ? error.message : String(error)}`);
+      notify(`移除失败：${error instanceof Error ? error.message : String(error)}`, true);
     }
   }
 
-  /** 本地安装（Task 7）：目录/.tgz 选择复用 M4 pickDirectory（取消/平台不可用同语义 null）。 */
+  /**
+   * 本地安装（Task 7）：目录选择复用 M4 picker（仅 win32 注册 route）。
+   * D11：平台不支持时诚实提示并指路路径输入，不再与「用户取消」同语义静默。
+   */
   async function pickLocalPlugin() {
-    const selected = await pickDirectory();
-    if (!selected) return;
-    setNotice("");
-    setLocalConfirming(selected);
+    const outcome = await pickDirectoryDetailed();
+    if (outcome.path !== null) {
+      setNotice(null);
+      setLocalConfirming(outcome.path);
+      return;
+    }
+    if (!outcome.available) {
+      notify("当前平台不支持目录选择器；请在下方输入本地目录或 .tgz 的路径。", true);
+    }
+    // 用户取消：保持静默（同 M4 口径）。
+  }
+
+  /** 本地安装（D11）：自由文本路径提交——.tgz 与无 picker 平台的共同兜底。 */
+  function submitLocalPath(path: string) {
+    const trimmed = path.trim();
+    if (trimmed === "" || localBusy || executing) return;
+    setNotice(null);
+    setLocalConfirming(trimmed);
   }
 
   /** 确认本地安装：M4 confirmAdd 同构——取消重启时 message 诚实告知，失败给 PLUGIN_APPLY_FAIL。 */
@@ -206,10 +234,10 @@ export default function MarketView() {
     try {
       const listed = await rpcCall<{ bundles?: string[]; message?: string }>("plugin.add", { source });
       setBundles(Array.isArray(listed.bundles) ? listed.bundles : []);
-      setNotice(listed.message ?? "插件已安装");
+      notify(listed.message ?? "插件已安装");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setNotice(`${PLUGIN_APPLY_FAIL}：${message}`);
+      notify(`${PLUGIN_APPLY_FAIL}：${message}`, true);
     } finally {
       setLocalBusy(false);
     }
@@ -254,7 +282,11 @@ export default function MarketView() {
         </span>
       </div>
 
-      {notice ? <div className="banner">{notice}</div> : null}
+      {notice ? (
+        <div className={notice.error ? "banner error" : "banner"} role={notice.error ? "alert" : undefined}>
+          {notice.text}
+        </div>
+      ) : null}
       {previewError ? (
         <div className="banner error" role="alert">
           {previewError.title}：{previewError.body}
@@ -319,7 +351,7 @@ export default function MarketView() {
                 <button
                   type="button"
                   className="btn market-install"
-                  disabled={executing}
+                  disabled={localBusy || executing}
                   onClick={() => void removeBundle(name)}
                 >
                   移除
@@ -334,6 +366,7 @@ export default function MarketView() {
           localBusy={localBusy}
           executing={executing}
           onPick={() => void pickLocalPlugin()}
+          onSubmitPath={(path) => submitLocalPath(path)}
           onRemove={(name) => void removeBundle(name)}
         />
       ) : (
@@ -383,28 +416,56 @@ export default function MarketView() {
   );
 }
 
-/** 「本地安装」tab：纯本地 plugin.add/remove RPC（不经内网，宕机旁路）。已装列表与 installed tab 同口径。 */
+/**
+ * 「本地安装」tab：纯本地 plugin.add/remove RPC（不经内网，宕机旁路）。已装列表与
+ * installed tab 同口径。D11：自由文本路径输入是 .tgz 与无 picker 平台（macOS/Linux）
+ * 的共同兜底；目录选择按钮仅在平台提供 picker route 时有效（否则诚实提示）。
+ */
 function LocalPanel({
   bundles,
   localBusy,
   executing,
   onPick,
+  onSubmitPath,
   onRemove,
 }: {
   bundles: string[];
   localBusy: boolean;
   executing: boolean;
   onPick: () => void;
+  onSubmitPath: (path: string) => void;
   onRemove: (name: string) => void;
 }) {
+  const [pathText, setPathText] = useState("");
+  const disabled = localBusy || executing;
+  const trimmed = pathText.trim();
   return (
     <div className="market-local">
       <p className="hint">
         仅本地目录或 .tgz，拒绝 GitHub / URL；本地安装不经签名与 sha256 校验（与内网市场远程安装不同），风险披露见安装确认框。
       </p>
       <div className="row">
-        <button type="button" className="btn primary" disabled={localBusy || executing} onClick={onPick}>
-          添加目录 / .tgz
+        <input
+          className="search-input market-path-input"
+          value={pathText}
+          placeholder="输入本地目录或 .tgz 的绝对路径"
+          aria-label="本地插件路径"
+          disabled={disabled}
+          onChange={(event) => setPathText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && trimmed !== "") onSubmitPath(trimmed);
+          }}
+        />
+        <button
+          type="button"
+          className="btn primary"
+          disabled={disabled || trimmed === ""}
+          onClick={() => onSubmitPath(trimmed)}
+        >
+          添加
+        </button>
+        <button type="button" className="btn" disabled={disabled} onClick={onPick}>
+          浏览目录…
         </button>
       </div>
       {bundles.length === 0 ? (
@@ -417,7 +478,7 @@ function LocalPanel({
               <button
                 type="button"
                 className="btn market-install"
-                disabled={localBusy || executing}
+                disabled={disabled}
                 onClick={() => onRemove(name)}
               >
                 移除

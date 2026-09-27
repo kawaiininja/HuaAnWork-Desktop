@@ -255,12 +255,27 @@ export async function setKeepAwake(hold: boolean): Promise<boolean> {
   return payload
 }
 
-export async function pickDirectory(): Promise<string | null> {
-  // 取消与非 2xx(如 macOS 上 route 未注册时 frontend-static fallback 的 405)同语义:resolve null。
+/** 目录选择器带状态应答：2xx+null = 用户取消；非 2xx = 平台未提供选择器。 */
+export interface DirectoryPickerOutcome {
+  readonly available: boolean
+  readonly path: string | null
+}
+
+/**
+ * D11：区分「用户取消」与「平台不支持」。picker route 仅在 win32 注册
+ * （src/index.ts），macOS/Linux 上非 2xx——旧 pickDirectory 对两者同语义
+ * 返回 null，市场本地安装页对不支持的平台只能静默无反馈。
+ */
+export async function pickDirectoryDetailed(): Promise<DirectoryPickerOutcome> {
   const response = await fetch(DIRECTORY_PICKER_PATH, { method: 'POST' })
-  if (!response.ok) return null
+  if (!response.ok) return { available: false, path: null }
   const payload = (await response.json().catch(() => undefined)) as { path?: unknown } | undefined
-  return typeof payload?.path === 'string' ? payload.path : null
+  return { available: true, path: typeof payload?.path === 'string' ? payload.path : null }
+}
+
+export async function pickDirectory(): Promise<string | null> {
+  const outcome = await pickDirectoryDetailed()
+  return outcome.path
 }
 
 export function notifyRunFailed(title: string, body: string): void {

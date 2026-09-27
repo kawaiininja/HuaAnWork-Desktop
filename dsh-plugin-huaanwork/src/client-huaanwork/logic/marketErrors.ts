@@ -8,10 +8,25 @@
  *
  * R23 收窄：验签/sha 失败**远程流程内绝不提供「仍要安装」绕过**；本地安装 tab
  * 是用户自主路径（Task 7 已并入 MarketView「本地安装」页签），unreachable 文案指路该页签。
+ *
+ * 评审 D10：provider 未启用（出厂默认 disabled ⇒ wrapper bundle 未加载 ⇒
+ * market routes 未注册）时 webserver 对 `/api/huaanwork-market/*` 统一答
+ * 404 `not-found`（或 frontend-static fallback 的无 code 404/405）——归为
+ * not-registered 态并指路设置面，而非落进 unknown 的通用文案。
+ *
+ * 评审 D12：unknown 不再丢弃诊断信息——服务端原始 message 附进正文；
+ * `pnpm-busy`（plugins-host 的 asPnpmBusy 映射）走 busy 文案。
  */
 
 /** 分类后的错误种类。 */
-export type MarketErrorKind = "unreachable" | "verification" | "sha256" | "install-gate" | "busy" | "unknown";
+export type MarketErrorKind =
+  | "unreachable"
+  | "verification"
+  | "sha256"
+  | "install-gate"
+  | "busy"
+  | "not-registered"
+  | "unknown";
 
 /** 错误展示：标题 + 正文 + 是否可经本地安装旁路。 */
 export interface MarketErrorPresentation {
@@ -56,6 +71,13 @@ const BUSY_PRESENTATION: MarketErrorPresentation = {
   canBypass: false,
 };
 
+const NOT_REGISTERED_PRESENTATION: MarketErrorPresentation = {
+  kind: "not-registered",
+  title: "插件市场未启用",
+  body: "当前未启用内网市场来源，市场路由未注册。请在「设置 → 桌面 → 插件市场」中选择 huaanwork-market 来源。",
+  canBypass: false,
+};
+
 const UNKNOWN_PRESENTATION: MarketErrorPresentation = {
   kind: "unknown",
   title: "市场操作失败",
@@ -63,8 +85,13 @@ const UNKNOWN_PRESENTATION: MarketErrorPresentation = {
   canBypass: false,
 };
 
-/** wrapper routes 错误码 → 分类。未知码回落 unknown（展示时附原始信息）。 */
-export function classifyMarketError(code: string | undefined): MarketErrorKind {
+/**
+ * wrapper routes 错误码 → 分类。未知码回落 unknown（展示时附原始信息）。
+ *
+ * `status` 为 marketFetch 记录的 HTTP 状态：无 code（非 JSON 应答）但 404/405
+ * 同样视为市场路由未注册（D10）。
+ */
+export function classifyMarketError(code: string | undefined, status?: number): MarketErrorKind {
   switch (code) {
     case "market-unreachable":
     case "market-config":
@@ -81,8 +108,14 @@ export function classifyMarketError(code: string | undefined): MarketErrorKind {
     case "market-artifact-url":
       return "install-gate";
     case "market-execute-busy":
+    case "pnpm-busy":
       return "busy";
+    case "not-found":
+      // webserver 对未注册路由的统一应答（market routes 全部表外注册，未加载
+      // wrapper bundle 时 `/api/huaanwork-market/*` 全部落到这里）。
+      return "not-registered";
     default:
+      if (code === undefined && (status === 404 || status === 405)) return "not-registered";
       return "unknown";
   }
 }
@@ -100,16 +133,28 @@ export function marketErrorPresentation(kind: MarketErrorKind): MarketErrorPrese
       return INSTALL_GATE_PRESENTATION;
     case "busy":
       return BUSY_PRESENTATION;
+    case "not-registered":
+      return NOT_REGISTERED_PRESENTATION;
     default:
       return UNKNOWN_PRESENTATION;
   }
 }
 
-/** 从（可能带 .code 的）Error 值一步得到展示形态。 */
+/** 从（可能带 .code / .status 的）Error 值一步得到展示形态。 */
 export function presentMarketError(error: unknown): MarketErrorPresentation {
   const code =
     error instanceof Error && typeof (error as { code?: unknown }).code === "string"
       ? (error as unknown as { code: string }).code
       : undefined;
-  return marketErrorPresentation(classifyMarketError(code));
+  const status =
+    error instanceof Error && typeof (error as { status?: unknown }).status === "number"
+      ? (error as unknown as { status: number }).status
+      : undefined;
+  const kind = classifyMarketError(code, status);
+  if (kind !== "unknown") return marketErrorPresentation(kind);
+  // unknown：附服务端原始信息（D12）——plugin-error 500 / pnpm-unavailable 503 /
+  // market-package-not-found 404 等最常真实发生的失败全部落进此类，排障线索不得归零。
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (message === "") return UNKNOWN_PRESENTATION;
+  return { ...UNKNOWN_PRESENTATION, body: `${UNKNOWN_PRESENTATION.body}（${message}）` };
 }
