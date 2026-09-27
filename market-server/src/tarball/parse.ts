@@ -225,10 +225,22 @@ export function extractPackageManifest(tgzBytes: Buffer): Record<string, unknown
 
 /**
  * Streaming variant of extractPackageManifest over a staged artifact file
- * (review D6): createReadStream piped through createGunzip, collecting at
- * most MAX_TAR_DECOMPRESSED_BYTES, so the publish gate never holds the whole
- * staged artifact (up to 100 MiB compressed) or its decompressed form in
- * memory. The collected bytes feed the SAME extractManifestFromTar tail.
+ * (review D6): createReadStream piped through createGunzip with
+ * maxOutputLength = MAX_TAR_DECOMPRESSED_BYTES.
+ *
+ * Memory claim, stated precisely (fix-round N-5 — the previous wording
+ * overclaimed): the staged artifact is read from disk in chunks, so the
+ * COMPRESSED bytes (up to 100 MiB) are never held whole. The DECOMPRESSED tar
+ * IS collected into a single Buffer before the walk — peak ≈ the decompressed
+ * size (capped at 64 MiB), transiently ≈ 2× during the final Buffer.concat
+ * (measured: a 60 MiB decompressed artifact peaks ~128 MiB of external memory).
+ * Making the walk itself incremental would remove that too; not worth it at this
+ * cap. The collected bytes feed the SAME extractManifestFromTar tail, so every
+ * walk rule is shared with the buffered entry point.
+ *
+ * A staged-file read error is deliberately NOT mapped to TarballError: it is a
+ * server-side fault, so it propagates to the route catch-all as a generic 500
+ * rather than being reported to the operator as a 4xx they caused.
  */
 export function extractPackageManifestFromFile(path: string): Promise<Record<string, unknown>> {
   return new Promise((resolvePromise, rejectPromise) => {

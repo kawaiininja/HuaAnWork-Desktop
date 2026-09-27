@@ -94,12 +94,17 @@ function sendRouteError(res: ServerResponse, error: RouteError, allow?: 'GET' | 
   finishJson(res, error.status, { error: { code: error.code, message: error.message } }, allow)
 }
 
-function toRouteError(error: unknown): RouteError {
+function toRouteError(error: unknown, logger: (message: string) => void): RouteError {
   if (error instanceof RouteError) return error
   if (error instanceof PluginCommandError) return new RouteError(error.status, error.code, error.message)
   if (error instanceof MarketFetchError) return new RouteError(error.status, error.code, error.message)
   if (error instanceof MarketInstallGateError) return new RouteError(400, error.code, error.message)
-  if (error instanceof Error) return new RouteError(400, 'market-error', error.message)
+  // 未预期错误(fs 故障、TypeError 等)一律 500 + 通用文案,细节只进日志(评审 P1):
+  // ① 这类是**服务端**故障,答 400 会让客户端与运维误判为调用方错误;
+  // ② `error.message` 可能含 profileDir 绝对路径(如 install.ts 的落盘失败),
+  //    不该原样回给渲染进程。已知具名错误类走上面的分支,其 message 是刻意
+  //    为用户/运维编写的,不含路径,保留可诊断性(评审 D12)。
+  logger(`huaanwork-market: unexpected route error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
   return new RouteError(500, 'internal', 'Internal Server Error')
 }
 
@@ -313,7 +318,7 @@ export function registerMarketRoutes(ctx: Context, deps: MarketRouteDeps): () =>
           try {
             await handler(req, res)
           } catch (error) {
-            sendRouteError(res, toRouteError(error), method)
+            sendRouteError(res, toRouteError(error, services.deps.logger), method)
           }
         })()
       },

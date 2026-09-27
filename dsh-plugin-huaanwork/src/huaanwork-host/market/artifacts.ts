@@ -124,16 +124,16 @@ function referencedArtifactPaths(profileDir: string): Set<string> {
  * (profileIdentity = sha256(profileDir),与上方同一 resolve 口径);env 缺席
  * (非 Electron 宿主/单测)= 空集,即修复前行为。
  */
-function checkpointReferencedArtifactPaths(profileDir: string): Set<string> {
+function checkpointReferencedArtifactPaths(profileDir: string, logger: (message: string) => void): Set<string> {
   const userDataDir = process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
   if (userDataDir === undefined || userDataDir === '') return new Set()
-  return collectDesktopProfileCheckpointFileReferences(userDataDir, profileDir)
+  return collectDesktopProfileCheckpointFileReferences(userDataDir, profileDir, logger)
 }
 
 /** 当前 profile 与所有 checkpoint slot 合计的保留判据(D9:两者都不得引用才可删)。 */
-function retentionReferencedArtifactPaths(profileDir: string): Set<string> {
+function retentionReferencedArtifactPaths(profileDir: string, logger: (message: string) => void): Set<string> {
   const referenced = referencedArtifactPaths(profileDir)
-  for (const path of checkpointReferencedArtifactPaths(profileDir)) referenced.add(path)
+  for (const path of checkpointReferencedArtifactPaths(profileDir, logger)) referenced.add(path)
   return referenced
 }
 
@@ -161,7 +161,7 @@ export function gcRemovedPackageArtifacts(profileDir: string, packageName: strin
   // 版本:数字起头、点分 1–3 段(对齐 gate.ts 的 filename-safe 版本面,`1.0` 可 GC)
   // + prerelease/build(连字符/加号后缀);sha12 恰 12 位小写 hex。
   const exactName = new RegExp(`^${escaped}-(\\d+(?:\\.\\d+){0,2}(?:[-+][0-9A-Za-z.-]+)?)-([0-9a-f]{12})\\.tgz$`, 'u')
-  const referenced = retentionReferencedArtifactPaths(profileDir)
+  const referenced = retentionReferencedArtifactPaths(profileDir, logger)
   for (const entry of readdirSync(dir)) {
     if (!exactName.test(entry)) continue
     const path = join(dir, entry)
@@ -187,7 +187,7 @@ export function gcRemovedPackageArtifacts(profileDir: string, packageName: strin
 export function sweepOrphanMarketArtifacts(profileDir: string, logger: (message: string) => void): string[] {
   const dir = marketArtifactsDir(profileDir)
   if (!existsSync(dir)) return []
-  const referenced = retentionReferencedArtifactPaths(profileDir)
+  const referenced = retentionReferencedArtifactPaths(profileDir, logger)
   const removed: string[] = []
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith('.tgz')) continue

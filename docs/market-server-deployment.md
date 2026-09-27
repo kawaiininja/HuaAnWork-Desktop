@@ -80,10 +80,10 @@ node --experimental-strip-types src/index.ts
 | 路由 | 语义 |
 | --- | --- |
 | `GET /v1/admin/state` | 总览：条目（含私有信封字段 sha256/tarball）、maxRevision、激活状态。 |
-| `POST /v1/admin/artifacts?displayName=..&summary=..[&sha256=..]` | 发布 .tgz（raw body 流式落盘 + 边收边算 sha256；可选 `sha256` 参数做客户端断言，不符即 400 `sha256-mismatch` 且不留文件）。随后过**发布侧门**：解包 tarball manifest（自实现 ustar 解析，零依赖），`dependencies`/`optionalDependencies` 非空或 `scripts` 含 `preinstall`/`install`/`postinstall`/`prepare` 一律 422 拒绝并**点名**违规项（`peerDependencies` 豁免、`bundleDependencies` 允许）——运营者在发布时拿错，不是用户安装时。 |
-| `PATCH /v1/admin/entries/:id` | 编辑展示字段。URL 类字段（`homepage`/`publisherUrl`/`repositoryUrl`）预检：**留空 = 清除/不填**（schema 非必填），填非 https 值 400 拒绝（round3 R15）。 |
+| `POST /v1/admin/artifacts?displayName=..&summary=..[&sha256=..]` | 发布 .tgz（raw body 流式落盘 + 边收边算 sha256；可选 `sha256` 参数做客户端断言，不符即 400 `sha256-mismatch` 且不留文件）。**两个尺寸上限**：压缩字节 ≤ **100 MiB**（超出即 413 `artifact-too-large`）；解压后 tar ≤ **64 MiB**（超出即 400 `decompressed-tarball-too-large`，gunzip 炸弹防护）。**注意两值不等**：不可压缩字节的 70 MiB 制品会「上传通过、门拒」，打包前请自检解压后尺寸。随后过**发布侧门**：解包 tarball manifest（自实现 ustar 解析，零依赖），① 结构层——depth-1 `<dir>/package.json` 候选**必须恰好一个**（多于一个即 400 `invalid-tarball`「歧义 tarball」，防干净诱饵掩护脏 manifest）、任何条目名含 `..` 段即 400 `invalid-tarball`；② 身份层——包名须匹配契约小写正则、版本 ≤64 字符，否则 422 `invalid-package-identity`；③ 依赖层——`dependencies`/`optionalDependencies` 非空即 422 `nonzero-dependencies`，`scripts` 含 `preinstall`/`install`/`postinstall`/`prepare` 即 422 `lifecycle-scripts`（`peerDependencies` 豁免、`bundleDependencies` 允许）。②③ 均**点名**违规项——运营者在发布时拿错，不是用户安装时。 |
+| `PATCH /v1/admin/entries/:id` | 编辑展示字段。**写入前在锁内跑一次 provider-page 契约自校**（评审 D3）：长度/控制字符/双向控制符/枚举/时间戳等违约一律 400 `invalid-entry-contract` 并点名 JSON path，不会先答 200 再把整站目录变成 400。URL 类字段（`homepage`/`publisherUrl`/`repositoryUrl`）预检与契约 `httpsUri` 正则**逐字一致**（禁 userinfo、禁端口、禁 fragment）：**留空 = 清除/不填**（schema 非必填），违约即 400 拒绝（round3 R15）。 |
 | `POST /v1/admin/entries/:id/unpublish` | 下架条目（制品文件保留在盘，可重新上架同 name@version）。 |
-| `POST /v1/admin/manifest/prepare` | 两步流第 1 步：生成 canonical 待签清单并入库 pending 槽——`domain` = 配置 origin、`revision` = 持久化 max+1（单调）、`issuedAt`/`notAfter`（TTL ≤ 7d）、catalog = 自校 provider page、files = 每个已托管制品的 sha256/tarballPath/size。条目 >200（契约单页上限）或制品缺失时诚实拒绝。 |
+| `POST /v1/admin/manifest/prepare` | 两步流第 1 步：生成 canonical 待签清单并入库 pending 槽——`domain` = 配置 origin、`revision` = 持久化 max+1（单调）、`issuedAt`/`notAfter`（TTL ≤ 7d）、catalog = 自校 provider page、files = 每个已托管制品的 sha256/tarballPath/size。**条目 >200（契约单页上限）→ 422 `catalog-too-large`**（响应体含「Split the source (M6) before releasing」指引）；**引用制品已不在盘 → 409 `artifact-missing`**（含重新上架指引）。两者都是诚实 4xx，不再是裸 500（评审 D14d）。⚠ **200 条目是硬悬崖**：超出后 prepare 会持续失败，须先 unpublish 降到 200 以内才能再发新清单——上架节奏请预留余量（评审 D15，发布时前移上限留待 M6）。 |
 | `GET /v1/admin/manifest/pending` | 下载当前待签清单（无则 404）。 |
 | `POST /v1/admin/manifest/signature` | 两步流第 3 步：对**存储中的** pending 清单做三输入两槽验签（含信封负例：`revision` 回退 / `notAfter` 过期 / `domain` 不符一律拒）。**仅验签通过才收录激活**（fail-closed：无有效签名永不激活）；激活 = manifest+signature 成对服务、pending 清空、持久化 maxRevision 前进。失败返回 `{activated:false, reason}`。 |
 
@@ -94,6 +94,35 @@ node --experimental-strip-types src/index.ts
 > 〈依赖闭包裁定〉）。
 
 错误体统一 `{"error":{"code","message"}}`，不泄露路径、env 或内部细节。
+
+**admin 面错误码速查**（运营者排障用；均为实测值，与 `src/admin/routes.ts` 对应）：
+
+| 状态 | code | 含义 / 处置 |
+| --- | --- | --- |
+| 400 | `invalid-publish-request` | 缺 `displayName` 或 `summary`（须非空） |
+| 400 | `invalid-sha256-format` | `sha256` 参数不是 64 位小写 hex |
+| 400 | `sha256-mismatch` | 声明的 sha256 与上传字节不符（不留文件） |
+| 400 | `invalid-tarball` | 非 gzip / 歧义 tarball（>1 个 depth-1 `package.json`）/ 条目名含 `..` 段 |
+| 400 | `missing-package-json` | tarball 内无 `<dir>/package.json` |
+| 400 | `invalid-package-json` | manifest 不是合法 JSON |
+| 400 | `decompressed-tarball-too-large` | 解压后 > 64 MiB（gunzip 炸弹防护） |
+| 400 | `invalid-entry-contract` | PATCH/publish 的条目违约上游 provider-page 契约（响应点名 JSON path） |
+| 400 | `invalid-entry-patch` / `invalid-json` | 请求体形状错误 |
+| 401 | `unauthorized` / `admin-disabled` | bearer token 缺失或错误；token 未配置时整个 admin 面禁用（`admin-disabled`，启动时打印配置指引） |
+| 404 | `pending-manifest-not-found` / `entry-not-found` / `not-found` | 目标不存在 |
+| 405 | `method-not-allowed` | 方法不符 |
+| 409 | `already-published` | 同 name@version 已发布（**盘上制品不受影响**，评审 D2）；先 unpublish 再重发 |
+| 409 | `manifest-activation-conflict` | 并发双 intake，败者诚实 409（非 500） |
+| 409 | `artifact-missing` | prepare 引用的制品已不在盘 |
+| 413 | `artifact-too-large` | 上传压缩字节 > 100 MiB |
+| 422 | `nonzero-dependencies` / `lifecycle-scripts` / `invalid-package-identity` | 发布侧门拒绝（点名违规项） |
+| 422 | `catalog-too-large` | 条目 > 200（契约单页上限）；先 unpublish 降量 |
+| 500 | `upload-failed` / `internal-error` / `invalid-stored-catalog` | **服务端**故障；细节进服务端日志（响应体不含路径与 ajv 内部） |
+
+> 读侧自校验失败（存储中的条目违约契约）答 **500 `invalid-stored-catalog`**
+> 而非 400——那是服务端数据故障，不是调用方查询错误；ajv 的 instancePath 与
+> schema 正则只进日志，不回给未认证客户端（评审 D3b）。写侧已在锁内自校
+> （D3），正常运营路径不会走到这里。
 
 ## 数据目录与备份/恢复
 

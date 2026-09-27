@@ -895,21 +895,44 @@ export function desktopProfileCheckpointProfileRoot(userDataDir: string, profile
  * Review D9: artifact GC must retain artifacts that a future restoreSlot can
  * re-introduce into the profile package.json — otherwise the post-restore
  * pnpm materialization fails deterministically (ENOENT on the dangling
- * `file:` reference). Tolerant by design: missing or malformed slot
- * snapshots contribute no references (captureHealthy writes slots atomically
- * via staging + rename, so a present slot package.json is whole), and the
- * collector never throws — callers use it as a retention criterion where
- * skipping a slot is always safe.
+ * `file:` reference). Tolerant by design: an absent or unreadable slot snapshot
+ * contributes no references, and the collector never throws.
+ *
+ * Fix-round N-8 — the previous wording claimed "skipping a slot is always
+ * safe", which is too strong. `readSnapshot` gates on file type, symlink, mode
+ * 0600 and size, and `restoreSlot` writes the stored bytes back **without
+ * parsing them**, while this collector must `JSON.parse` to read the
+ * references. So a slot whose package.json is corrupt JSON yet self-consistent
+ * with its manifest sha256/size is restorable but invisible here. That needs
+ * the profile to have been non-JSON at capture time, which pnpm
+ * materialization would already have rejected, so it is not reachable in
+ * practice — but the honest statement is "skipping is safe for
+ * mode/type/size-class damage, because readSnapshot applies the same
+ * strictness", not "always safe".
+ *
+ * Because a skipped slot silently weakens the retention criterion, anything
+ * other than a plain absent slot is reported through `logger` (optional; the
+ * plugin log, never an HTTP response) so an operator can tell that a given GC
+ * run was checkpoint-blind rather than inferring it from a later ENOENT.
  */
-export function collectDesktopProfileCheckpointFileReferences(userDataDir: string, profileDir: string): Set<string> {
+export function collectDesktopProfileCheckpointFileReferences(
+  userDataDir: string,
+  profileDir: string,
+  logger?: (message: string) => void,
+): Set<string> {
   const referenced = new Set<string>()
   const profileRoot = desktopProfileCheckpointProfileRoot(userDataDir, profileDir)
   for (const slotId of DESKTOP_PROFILE_CHECKPOINT_SLOT_IDS) {
     let manifest: unknown
     try {
       manifest = readJson(filePath(join(profileRoot, slotId), 'package.json'))
-    } catch {
-      continue // empty or unreadable slot: nothing to retain from it
+    } catch (cause) {
+      // An absent slot is the normal case (never captured, or already cleared)
+      // and stays silent; anything else is worth one log line.
+      if (!isENOENT(cause) && logger !== undefined) {
+        logger(`desktop-profile-checkpoint: could not read ${slotId} package.json for market artifact retention: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+      continue
     }
     if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) continue
     for (const key of ['dependencies', 'devDependencies'] as const) {

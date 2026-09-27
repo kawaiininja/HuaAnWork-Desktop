@@ -276,7 +276,10 @@ async function runDesktopPlugin(
   }
   if (outcome.exitCode !== 0) {
     const command = argv[0]
-    throw new Error(`dsh plugin ${command} failed (exit ${outcome.exitCode})`)
+    // 具名 500 而非裸 Error(评审 P1):pnpm 非零退出是**服务端**故障,裸 Error 会被
+    // market routes 的 catch-all 当成客户端错误答 400;具名后 code 稳定为
+    // plugin-error,客户端 unknown 分支仍能拿到 exit code 作诊断(message 不含路径)。
+    throw new PluginCommandError(500, 'plugin-error', `dsh plugin ${command} failed (exit ${outcome.exitCode})`)
   }
 }
 

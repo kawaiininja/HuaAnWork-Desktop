@@ -220,8 +220,97 @@ describe("MarketView 内网宕机降级（D13，spec §13 单点缓解）", () =
   });
 });
 
-describe("MarketView provider 未启用态（D10 + 修复轮 N-1）", () => {
-  it("全部 market route 404 时，发现页与来源页都给 not-registered 指引，且不含走不通的导航路径", async () => {
+describe("MarketView 在飞安装轮询的放弃预算（修复轮 N-4）", () => {
+  it("连续失败到预算即放弃观察：清进行中标识、诚实告知、控件不再被永久禁用", async () => {
+    vi.useFakeTimers();
+    let stateFailing = false;
+    const fetchLog = stubFetch({
+      state: () =>
+        stateFailing
+          ? jsonResponse(502, { error: { code: "market-unreachable", message: "connect ECONNREFUSED" } })
+          : jsonResponse(200, {
+              provider: "huaanwork-market",
+              origin: "http://127.0.0.1:8787",
+              executing: true,
+              verification: { ready: true, currentKeyId: "ab".repeat(32) },
+              catalog: { maxAcceptedRevision: 1 },
+              desktopActions: { requestRestart: true },
+            }),
+      catalog: () =>
+        jsonResponse(200, {
+          schemaVersion: "1.0.0",
+          source: {
+            sourceRecordId: "huaanwork-intranet",
+            providerId: "huaanwork-market",
+            adapterId: "huaanwork-market",
+            registrationKind: "market",
+            fetchedAt: "2026-09-27T00:00:00.000Z",
+            finalUrl: "http://127.0.0.1:8787",
+          },
+          items: [{ id: "alpha", name: "alpha", displayName: "Alpha 助手", summary: "目录条目" }],
+          page: { total: 1 },
+        }),
+      installable: () =>
+        jsonResponse(200, {
+          items: [
+            {
+              id: "alpha@1.0.0",
+              name: "alpha",
+              version: "1.0.0",
+              displayName: "Alpha 助手",
+              summary: "desc",
+              sha256: "a".repeat(64),
+              size: 42,
+              installed: false,
+            },
+          ],
+        }),
+      installations: () => jsonResponse(200, { bundles: [] }),
+    });
+
+    const view = await mountMarket();
+
+    // 飞行中：进行中标识在场，安装按钮被禁用。
+    expect(view.querySelector('[role="status"]')?.textContent).toContain("市场安装正在进行中");
+    await act(async () => {
+      tabButton(view, "可安装").click();
+    });
+    const installButton = [...view.querySelectorAll("button")].find(
+      (item) => item.textContent === "安装中…",
+    ) as HTMLButtonElement | undefined;
+    expect(installButton).toBeDefined();
+    expect(installButton!.disabled).toBe(true);
+
+    // 市场面开始持续不可读（wrapper bundle 卸载 / 宿主异常）。
+    stateFailing = true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+    }
+
+    // 放弃观察：标识清除、诚实告知「无法确认」（不是「已完成」）、控件恢复可用。
+    expect(view.querySelector('[role="status"]')).toBeNull();
+    const alert = view.querySelector(".banner.error");
+    expect(alert).not.toBeNull();
+    expect(alert!.textContent).toContain("无法确认市场安装状态");
+    expect(alert!.textContent).not.toContain("安装完成");
+    const retryButton = [...view.querySelectorAll("button")].find(
+      (item) => item.textContent === "安装",
+    ) as HTMLButtonElement | undefined;
+    expect(retryButton).toBeDefined();
+    expect(retryButton!.disabled).toBe(false);
+
+    // 放弃后定时器已卸下：再推两个周期不再读 /state。
+    const stateCalls = fetchLog.calls(ROUTES.state);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(fetchLog.calls(ROUTES.state)).toBe(stateCalls);
+  });
+});
+
+describe("MarketView provider 未启用态（D10 + 修复轮 N-1）", () => {  it("全部 market route 404 时，发现页与来源页都给 not-registered 指引，且不含走不通的导航路径", async () => {
     // 出厂默认 provider = disabled ⇒ wrapper bundle 未加载 ⇒ 四条 route 全部未注册。
     stubFetch({
       state: () => nonJsonResponse(404),

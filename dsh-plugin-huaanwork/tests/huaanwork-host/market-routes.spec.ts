@@ -407,6 +407,42 @@ describe('POST operations/preview + execute(单飞 R16 / X1 / 取消诚实)', ()
     // 远程安装不触公网:请求 host 全部是 127.0.0.1 mock(本条由 mock origin 保证)。
   })
 
+  // P14:夹具里早已接好的 tamperNextArtifact 一直零调用——「下载途中篡改」负例
+  // 此前只在单元层用 fakeHttp 覆盖(market-install.spec.ts 把清单 sha 换成 f*64
+  // 模拟)。此处走**真实 HTTP 服务端换字节**,校验的才是「清单 sha256 是真制品的、
+  // 传输中被换成另一份合法 tarball」这一真实攻击形态。
+  test('execute rejects bytes swapped in transit by the real server (P14)', async () => {
+    const server = await createMarketTestServer()
+    servers.push(server)
+    const profileDir = tempProfile()
+    const goodDir = mkdtempSync(join(tmpdir(), 'hw-market-tamper-good-'))
+    const badDir = mkdtempSync(join(tmpdir(), 'hw-market-tamper-bad-'))
+    roots.push(goodDir, badDir)
+    const bytes = buildTgz(goodDir, { name: '@huaanwork/sample', version: '1.2.3' })
+    // 篡改后的字节仍是一个**结构合法**的 tarball(否则测到的是解包失败而非 sha 不符)。
+    const tampered = buildTgz(badDir, { name: '@huaanwork/sample', version: '1.2.3', dependencies: { lodash: '^4.0.0' } })
+    const sha256 = sha256Hex(bytes)
+    expect(sha256Hex(tampered)).not.toBe(sha256)
+
+    server.addArtifact('/artifacts/a.tgz', bytes)
+    const manifest = manifestFor(server.origin, 1, [{
+      name: '@huaanwork/sample', version: '1.2.3', sha256, tarballPath: '/artifacts/a.tgz', size: bytes.byteLength,
+    }])
+    activate(server, manifest)
+    server.tamperNextArtifact('/artifacts/a.tgz', tampered)
+
+    const { ctx, recorded, pnpmCalls } = fakeCtx()
+    registerMarketRoutes(ctx, depsFor(profileDir, server.origin))
+    const out = await callRoute(recorded, MARKET_ROUTE_PATHS.execute, request({ name: '@huaanwork/sample', version: '1.2.3' }))
+
+    expect(out.status()).toBe(400)
+    expect(out.json().error.code).toBe('market-sha256-mismatch')
+    // 不落盘、不安装:pnpm 一次都没被调用,制品目录里没有该制品(被校验字节 ≠
+    // 传输所得字节 ⇒ 绝不让它进入 profile)。
+    expect(pnpmCalls).toEqual([])
+    expect(existsSync(join(profileDir, '.market-artifacts', `huaanwork-sample-1.2.3-${sha256.slice(0, 12)}.tgz`))).toBe(false)
+  })
+
   test('execute is single-flight: a concurrent execute gets 409 (R16)', async () => {
     const server = await createMarketTestServer()
     servers.push(server)

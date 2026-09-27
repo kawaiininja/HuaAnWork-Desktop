@@ -298,7 +298,13 @@ export async function downloadAndStageArtifact(options: {
     chmodSync(artifactPath, 0o600)
   } catch (error) {
     try { rmSync(tmpPath, { force: true }) } catch { /* best-effort */ }
-    throw new MarketFetchError(`failed to stage market artifact: ${error instanceof Error ? error.message : String(error)}`, 500, 'market-artifact-io')
+    // 只回 errno,不回 error.message(评审 P1:fs 错误的 message 含 profileDir
+    // 绝对路径,而本错误是具名类 ⇒ routes 会原样把 message 转给渲染进程)。
+    // errno 才是排障需要的那一半,路径对用户与运维都无增量信息。
+    const errno = typeof (error as { code?: unknown } | null)?.code === 'string'
+      ? (error as { code: string }).code
+      : 'unknown'
+    throw new MarketFetchError(`failed to stage market artifact (${errno})`, 500, 'market-artifact-io')
   }
   return { artifactPath, sha256, size: bytes.byteLength }
 }

@@ -37,8 +37,10 @@ import { TarballError, extractPackageManifestFromFile } from '../tarball/parse.t
 import { checkPublishGate } from '../tarball/gate.ts'
 import {
   SHA256_PATTERN,
+  MAX_ARTIFACT_BYTES,
   ArtifactShaMismatchError,
   ArtifactStore,
+  ArtifactTooLargeError,
   artifactFileName,
 } from '../tarball/store.ts'
 
@@ -209,7 +211,17 @@ async function publishArtifact(request: IncomingMessage, response: ServerRespons
       sendError(response, 400, 'sha256-mismatch', 'claimed sha256 does not match the uploaded bytes')
       return
     }
-    sendError(response, 400, 'upload-failed', cause instanceof Error ? cause.message : 'upload failed')
+    // 超限是调用方可诊断可纠正的,给 413 与实际上限(评审 P1:原答 400 且
+    // 文案不含上限,运营者无从判断该压到多大)。
+    if (cause instanceof ArtifactTooLargeError) {
+      sendError(response, 413, 'artifact-too-large', `artifact exceeds the ${String(MAX_ARTIFACT_BYTES)}-byte limit`)
+      return
+    }
+    // 其余 staging 失败(fs 故障等)是**服务端**问题:答 500 + 通用文案,
+    // cause.message 只进日志(评审 P1:fs 错误的 message 含数据目录绝对路径,
+    // 与 server.ts 自述的「never leak paths, env, or internals」矛盾)。
+    console.error('[market-server] failed to stage uploaded artifact:', cause)
+    sendError(response, 500, 'upload-failed', 'failed to stage the uploaded artifact; see the server log')
     return
   }
 
@@ -290,8 +302,13 @@ async function publishArtifact(request: IncomingMessage, response: ServerRespons
       await ctx.store.addEntry(entry, validateCatalogEntryContract)
     } catch (cause) {
       if (cause instanceof DuplicateEntryError) {
-        // Defense in depth: unreachable in the single-process server because
-        // the pre-commit duplicate check above serializes against addEntry.
+        // Reachable, not dead code (fix-round N-5 — the previous wording claimed
+        // the pre-commit duplicate check "serializes against addEntry", which is
+        // false: an `await ctx.artifacts.commit(...)` sits between them, so two
+        // same-byte publishes arriving in the same tick both pass the check, both
+        // commit, and the loser lands here). That is harmless by construction —
+        // the filename is content-derived, so the second commit renames over
+        // identical bytes — but the branch must stay.
         // NEVER remove the on-disk artifact here — another entry may still
         // reference it (review D2); the old remove() turned a harmless
         // re-publish into data loss plus a frozen release pipeline.

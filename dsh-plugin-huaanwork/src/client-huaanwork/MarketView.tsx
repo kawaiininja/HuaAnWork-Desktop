@@ -45,6 +45,14 @@ const ROUTE_INSTALLATIONS = "/api/huaanwork-market/installations";
 const ROUTE_PREVIEW = "/api/huaanwork-market/operations/preview";
 const ROUTE_EXECUTE = "/api/huaanwork-market/operations/execute";
 
+// 在飞安装轮询的放弃预算(修复轮 N-4)。/state 走 market route、本地安装走 host
+// RPC——两条通道,不能假定同生共死;市场面持续不可读时必须放弃观察并诚实告知,
+// 否则 remoteExecuting 永久为 true ⇒ 红条不退、anyExecuting 恒真 ⇒ installable
+// 与本地页签的全部控件被永久禁用(把旁路可用性挂在一个可能永久失败的观察态上)。
+const EXECUTING_POLL_INTERVAL_MS = 2000;
+const EXECUTING_POLL_FAILURE_BUDGET = 3;
+const EXECUTING_POLL_TOTAL_BUDGET_MS = 10 * 60 * 1000;
+
 interface ErrorEnvelope {
   error?: { code?: string; message?: string };
 }
@@ -172,27 +180,44 @@ export default function MarketView() {
   // D13 轮询恢复：remoteExecuting 期间每 2s 读 /state，飞行结束即清标识并
   // 刷新目录与已装列表（自恢复）；unmount 时清理定时器。本地发起的 execute
   // 由 confirmInstall 的收尾刷新管理，不经此轮询。
+  // N-4：轮询带放弃预算（连续失败 / 总时长），放弃时清标识并诚实告知——
+  // 「无法确认」而不是「已完成」；若安装其实仍在飞，用户再次 execute 会拿到
+  // wrapper 的单飞 409 → busy 文案，不会并发写 profile。
   useEffect(() => {
     if (!remoteExecuting) return undefined;
     let stopped = false;
+    let consecutiveFailures = 0;
+    const startedAt = Date.now();
+    const giveUp = (reason: string) => {
+      setRemoteExecuting(false);
+      notify(`无法确认市场安装状态：${reason}。安装可能仍在进行，请重试或重启应用后确认结果。`, true);
+    };
     const poll = async () => {
       try {
         const stateView = await marketFetch<MarketStateView>(ROUTE_STATE);
-        if (stopped || stateView.executing === true) return;
+        if (stopped) return;
+        consecutiveFailures = 0;
+        if (stateView.executing === true) {
+          if (Date.now() - startedAt >= EXECUTING_POLL_TOTAL_BUDGET_MS) giveUp("等待已超过 10 分钟");
+          return;
+        }
         setRemoteExecuting(false);
         await Promise.all([loadCatalogSide(), loadInstallations()]);
       } catch {
-        // 轮询失败静默：下一 tick 重试；错误呈现交给用户主动操作路径。
+        if (stopped) return;
+        consecutiveFailures += 1;
+        // 单次失败仍静默重试（瞬时抖动不值得打扰用户）；连续到预算才放弃。
+        if (consecutiveFailures >= EXECUTING_POLL_FAILURE_BUDGET) giveUp("市场状态连续多次读取失败");
       }
     };
     const timer = setInterval(() => {
       void poll();
-    }, 2000);
+    }, EXECUTING_POLL_INTERVAL_MS);
     return () => {
       stopped = true;
       clearInterval(timer);
     };
-  }, [remoteExecuting, loadCatalogSide, loadInstallations]);
+  }, [remoteExecuting, loadCatalogSide, loadInstallations, notify]);
 
   async function startInstall(item: MarketInstallableItem) {
     setNotice(null);

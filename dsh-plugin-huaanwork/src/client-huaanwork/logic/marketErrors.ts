@@ -93,6 +93,9 @@ const UNKNOWN_PRESENTATION: MarketErrorPresentation = {
   canBypass: false,
 };
 
+/** unknown 态透出到 UI 的服务端原文上限（修复轮 N-6，纵深：见 presentMarketError）。 */
+const UNKNOWN_DETAIL_MAX_CHARS = 200;
+
 /**
  * wrapper routes 错误码 → 分类。未知码回落 unknown（展示时附原始信息）。
  *
@@ -162,7 +165,10 @@ export function presentMarketError(error: unknown): MarketErrorPresentation {
   if (kind !== "unknown") return marketErrorPresentation(kind);
   // unknown：附服务端原始信息（D12）——plugin-error 500 / pnpm-unavailable 503 /
   // market-package-not-found 404 等最常真实发生的失败全部落进此类，排障线索不得归零。
-  const message = error instanceof Error ? error.message.trim() : "";
-  if (message === "") return UNKNOWN_PRESENTATION;
+  // 截断（修复轮 N-6）：服务端 message 由 routes.ts 的具名错误类提供、已不含路径，
+  // 但本函数无法约束未来的错误来源，故对透出到 UI 的原文设上限作纵深。
+  const raw = error instanceof Error ? error.message.trim() : "";
+  if (raw === "") return UNKNOWN_PRESENTATION;
+  const message = raw.length > UNKNOWN_DETAIL_MAX_CHARS ? `${raw.slice(0, UNKNOWN_DETAIL_MAX_CHARS)}…` : raw;
   return { ...UNKNOWN_PRESENTATION, body: `${UNKNOWN_PRESENTATION.body}（${message}）` };
 }

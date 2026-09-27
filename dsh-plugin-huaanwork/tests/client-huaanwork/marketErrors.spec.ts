@@ -101,3 +101,17 @@ test("unknown presentations keep the server-side message for diagnosis (D12)", (
   unregistered.status = 404;
   assert.equal(presentMarketError(unregistered).kind, "not-registered");
 });
+
+test("unknown presentations cap the server-side detail (N-6)", () => {
+  // 纵深：本函数无法约束未来的错误来源，故对透出到 UI 的原文设上限。
+  const long = presentMarketError(new Error(`x${"y".repeat(600)}`));
+  assert.equal(long.kind, "unknown");
+  assert.ok(long.body.length < 300, `body should be capped, got ${String(long.body.length)}`);
+  assert.ok(long.body.includes("…"), "truncated detail must be marked as truncated");
+  // 截断必须真的发生：原文的尾部不得出现在正文里。
+  assert.ok(!long.body.includes("y".repeat(300)), "the untuncated tail must not reach the UI");
+  // 上限内的原文必须完整保留（不得把 D12 的诊断价值截没了）。
+  const short = presentMarketError(new Error("dsh plugin add failed (exit 254)"));
+  assert.ok(!short.body.includes("…"), "a short message must not be marked truncated");
+  assert.match(short.body, /dsh plugin add failed \(exit 254\)/);
+});
