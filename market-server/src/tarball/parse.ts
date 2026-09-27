@@ -173,11 +173,19 @@ function walkEntries(tar: Buffer, state: TarWalkState): void {
 function extractManifestFromTar(tar: Buffer): Record<string, unknown> {
   const state: TarWalkState = { pendingName: null, packageJsonCandidates: [] }
   walkEntries(tar, state)
-  // Manifest selection rule (review D1, identical on the wrapper install
-  // side): exactly ONE depth-1 <dir>/package.json is acceptable. npm-packed
-  // artifacts always carry exactly one package/package.json; more than one
-  // candidate is an ambiguous tarball and must be rejected, not tie-broken —
-  // otherwise a clean decoy manifest can smuggle a dirty one past the gate.
+  // Manifest selection rule (review D1): exactly ONE depth-1 <dir>/package.json
+  // is acceptable. npm-packed artifacts always carry exactly one
+  // package/package.json; more than one candidate is an ambiguous tarball and
+  // must be rejected, not tie-broken — otherwise a clean decoy manifest can
+  // smuggle a dirty one past the gate.
+  //
+  // The wrapper install side applies the SAME rule (leading "./" normalization,
+  // ".." rejection, PaxHeaders exclusion, this depth-1 regex, no tie-break), and
+  // the agreement is machine-checked rather than comment-asserted: both packages
+  // run tests/fixtures/publish-gate-vectors.json (fix-round N-2 — the "./"
+  // normalization was missing on the wrapper side, so `tar -czf x.tgz .` output
+  // published 201 here and then failed every user's install). Known intentional
+  // differences are listed in the wrapper's readTarballPackageJson docstring.
   if (state.packageJsonCandidates.length === 0) {
     throw new TarballError('missing-package-json', 'tarball has no <dir>/package.json entry')
   }

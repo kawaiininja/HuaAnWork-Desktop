@@ -19,7 +19,9 @@
  *
  * tarball 解包:node:zlib gunzip + ustar 512B 头 walk(零依赖,与 market-server
  * 发布侧门同形态;支持 ustar prefix 拼接与 GNU longname 'L';depth-1
- * package.json 恰好一个才可用,含 `..` 段或多候选一律拒——与发布侧门同口径)。
+ * package.json 恰好一个才可用,含 `..` 段或多候选一律拒)。**manifest 选取规则**
+ * 与发布侧门逐条一致并由共享 fixture 钉住,两侧已知且有意的差异见
+ * readTarballPackageJson 的函数注释(N-2)。
  */
 
 import { createHash } from 'node:crypto'
@@ -84,8 +86,19 @@ function tarEntries(buffer: Buffer): { name: string; type: string; data: Buffer 
 /**
  * 从 .tgz 字节解出顶层 package.json 对象。找不到/坏 gzip/坏 JSON/含 `..` 段/
  * 多 depth-1 候选一律 MarketInstallGateError(不落盘判定的前置:预检不过即拒)。
- * 选择规则与 market-server 发布侧门逐条一致(review D1):depth-1 候选恰好一个
- * 才可用,多于一个即「歧义 tarball」拒绝,不做任何 tie-break。
+ *
+ * **manifest 选取规则**与 market-server 发布侧门(`tarball/parse.ts` walkEntries +
+ * extractManifestFromTar)逐条一致,并由共享 fixture
+ * `market-server/tests/fixtures/publish-gate-vectors.json` 两包各跑一遍钉住
+ * (review D1/D5,修复轮 N-2):① 前导 `./` 先归一化(`tar -czf x.tgz .` 的常见
+ * 形态);② 归一化名含 `..` 段即整包拒;③ PaxHeaders 元数据条目不算候选;
+ * ④ depth-1 候选用同一条正则,恰好一个才可用,多于一个即「歧义 tarball」拒绝,
+ * 不做任何 tie-break。
+ *
+ * 两侧**已知且有意**的差异(不属选取规则):本函数的 `..` 检查覆盖**全部**条目
+ * 类型,发布侧只覆盖 file/directory(parse.ts:147 先做类型过滤)——安装侧更严,
+ * 方向安全;发布侧另解析 pax `path=` 覆盖,本 walker 不解析(只认 GNU longname),
+ * 故 pax 长名制品由发布侧先拒。
  */
 export function readTarballPackageJson(tgzBytes: Buffer): Record<string, unknown> {
   let tar: Buffer
@@ -97,18 +110,23 @@ export function readTarballPackageJson(tgzBytes: Buffer): Record<string, unknown
   const entries = tarEntries(tar)
   let best: Buffer | undefined
   for (const entry of entries) {
-    // 路径穿越段:任何条目名(含目录,先于类型过滤)含 ".." 段即整包拒收——
-    // 与发布侧门 walkEntries 逐条一致(D1 round 2)。
-    if (entry.name.split('/').includes('..')) {
-      throw new MarketInstallGateError(`tarball entry name contains a ".." segment: ${JSON.stringify(entry.name)}`, 'market-invalid-tarball')
+    // ① 前导 `./` 归一化(N-2):与发布侧 parse.ts:149 同式。缺这一步时
+    //    `./package/package.json` 在本侧算 3 段而被跳过 ⇒ 服务端 201 上架、
+    //    每个用户安装时都吃 market-invalid-tarball(正是 D1 抱怨的倒置形态)。
+    const name = entry.name.replace(/^\.\//u, '')
+    // ② 路径穿越段:任何条目名(含目录,先于类型过滤)含 ".." 段即整包拒收(D1)。
+    if (name.split('/').includes('..')) {
+      throw new MarketInstallGateError(`tarball entry name contains a ".." segment: ${JSON.stringify(name)}`, 'market-invalid-tarball')
     }
     if (entry.type !== '0' && entry.type !== '\0') continue
-    // pax 元数据条目(node-tar/npm 惯例 PaxHeaders 路径段;有些工具以普通
-    // 文件 typeflag 落盘)不算 manifest 候选——与发布侧门同口径,否则带
-    // pax 元数据的合法 npm 包会被误判「歧义 tarball」(D1 round 2)。
-    if (entry.name.split('/').some((segment) => segment.startsWith('PaxHeaders'))) continue
-    const segments = entry.name.split('/').filter((segment) => segment.length > 0)
-    if (segments.length !== 2 || segments[1] !== 'package.json') continue
+    // ③ pax 元数据条目(node-tar/npm 惯例 PaxHeaders 路径段;有些工具以普通
+    //    文件 typeflag 落盘)不算 manifest 候选,否则带 pax 元数据的合法 npm 包
+    //    会被误判「歧义 tarball」(D1 round 2)。
+    if (name.split('/').some((segment) => segment.startsWith('PaxHeaders'))) continue
+    // ④ depth-1 候选正则与发布侧 parse.ts:161 逐字相同(N-2:原
+    //    `segments.length === 2` 写法对 `package//package.json` 与尾斜杠形态
+    //    判定与发布侧相反)。
+    if (!/^[^/]+\/package\.json$/u.test(name)) continue
     if (best !== undefined) {
       throw new MarketInstallGateError('tarball is ambiguous: more than one depth-1 package.json entry; expected exactly one', 'market-invalid-tarball')
     }
