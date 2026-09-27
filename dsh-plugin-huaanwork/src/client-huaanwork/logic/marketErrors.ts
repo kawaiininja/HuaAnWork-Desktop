@@ -12,7 +12,14 @@
  * 评审 D10：provider 未启用（出厂默认 disabled ⇒ wrapper bundle 未加载 ⇒
  * market routes 未注册）时 webserver 对 `/api/huaanwork-market/*` 统一答
  * 404 `not-found`（或 frontend-static fallback 的无 code 404/405）——归为
- * not-registered 态并指路设置面，而非落进 unknown 的通用文案。
+ * not-registered 态，而非落进 unknown 的通用文案。
+ *
+ * 修复轮 N-1：该态文案**不得指向本界面不存在的路径**。provider 选择器住在
+ * `client/DesktopSettingsSection.tsx`（经 `settings.section` slot 注入），而默认
+ * advanced shell 下 `client-huaanwork/` 独占 layout、对该 slot 零消费（实测
+ * grep 无命中）⇒「设置 → 桌面 → 插件市场」在华安工作台界面不可达。文案改为
+ * 陈述真实缺口 + 给出可达动作（联系部署方），入口本身登记为技术债（AGENTS.md
+ * 「市场来源选择入口未接入华安工作台界面」行）。
  *
  * 评审 D12：unknown 不再丢弃诊断信息——服务端原始 message 附进正文；
  * `pnpm-busy`（plugins-host 的 asPnpmBusy 映射）走 busy 文案。
@@ -74,7 +81,8 @@ const BUSY_PRESENTATION: MarketErrorPresentation = {
 const NOT_REGISTERED_PRESENTATION: MarketErrorPresentation = {
   kind: "not-registered",
   title: "插件市场未启用",
-  body: "当前未启用内网市场来源，市场路由未注册。请在「设置 → 桌面 → 插件市场」中选择 huaanwork-market 来源。",
+  // N-1：不写「设置 → 桌面 → 插件市场」这类本界面走不通的路径（见文件头）。
+  body: "当前市场来源为「禁用」，市场路由未注册，目录与安装均不可用。启用需在桌面设置的「插件市场」中选择「华安内网市场」（huaanwork-market）；华安工作台界面尚未接入该设置项，请联系部署方启用。",
   canBypass: false,
 };
 

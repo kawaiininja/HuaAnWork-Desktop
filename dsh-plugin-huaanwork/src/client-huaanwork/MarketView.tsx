@@ -85,6 +85,10 @@ export default function MarketView() {
 
   const [state, setState] = useState<MarketStateView | null>(null);
   const [stateLoad, setStateLoad] = useState<LoadState>("loading");
+  // D10 后半：state 读失败也保留分类后的形态，来源页签据此给出与其余页签
+  // 同口径的指引（not-registered / unreachable 各自文案），不再统一显示
+  // 「无法读取市场状态」。
+  const [stateError, setStateError] = useState<MarketErrorPresentation | null>(null);
 
   const [catalog, setCatalog] = useState<MarketCatalogView | null>(null);
   const [catalogLoad, setCatalogLoad] = useState<LoadState>("loading");
@@ -149,10 +153,12 @@ export default function MarketView() {
         const stateView = await marketFetch<MarketStateView>(ROUTE_STATE);
         if (!alive) return;
         setState(stateView);
+        setStateError(null);
         setStateLoad("ready");
         setRemoteExecuting(stateView.executing === true);
-      } catch {
+      } catch (error) {
         if (!alive) return;
+        setStateError(presentMarketError(error));
         setStateLoad("error");
       }
     })();
@@ -415,7 +421,7 @@ export default function MarketView() {
           onRemove={(name) => void removeBundle(name)}
         />
       ) : (
-        <SourcesPanel state={state} stateLoad={stateLoad} />
+        <SourcesPanel state={state} stateLoad={stateLoad} stateError={stateError} />
       )}
 
       {localConfirming ? (
@@ -550,13 +556,29 @@ function ErrorPanel({ presentation }: { presentation: MarketErrorPresentation })
 }
 
 /** sources tab：M5 单 canonical 内网源；多源 UI 占位禁用（M6）。 */
-function SourcesPanel({ state, stateLoad }: { state: MarketStateView | null; stateLoad: LoadState }) {
+function SourcesPanel({
+  state,
+  stateLoad,
+  stateError,
+}: {
+  state: MarketStateView | null;
+  stateLoad: LoadState;
+  stateError: MarketErrorPresentation | null;
+}) {
   return (
     <div className="market-sources">
       {stateLoad === "loading" ? (
         <p className="panel-empty">加载来源状态中…</p>
       ) : stateLoad === "error" ? (
-        <p className="panel-empty">无法读取市场状态</p>
+        // D10 后半：复用与目录页签同口径的分类文案（not-registered 给出真实
+        // 缺口与可达动作，unreachable 指向本地安装旁路），不再统一显示一句
+        // 「无法读取市场状态」。stateError 理论上与 error 态成对置位，null 时
+        // 回落旧文案仅作防御。
+        stateError !== null ? (
+          <ErrorPanel presentation={stateError} />
+        ) : (
+          <p className="panel-empty">无法读取市场状态</p>
+        )
       ) : state ? (
         <ul className="market-list">
           <li className="market-item">

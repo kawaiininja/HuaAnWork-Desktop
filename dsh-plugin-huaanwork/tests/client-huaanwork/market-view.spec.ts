@@ -34,6 +34,21 @@ function jsonResponse(status: number, body: unknown): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
 }
 
+/**
+ * 非 JSON 应答：provider 未启用时 market routes 全部未注册，webserver 的
+ * `not-found` / frontend-static fallback 都可能回非 JSON 体——marketFetch 的
+ * `json().catch(() => undefined)` 吃掉了它，分类只能靠 .status（D10）。
+ */
+function nonJsonResponse(status: number): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => {
+      throw new Error("not json");
+    },
+  } as unknown as Response;
+}
+
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
@@ -202,5 +217,41 @@ describe("MarketView 内网宕机降级（D13，spec §13 单点缓解）", () =
       await vi.advanceTimersByTimeAsync(4000);
     });
     expect(fetchLog.calls(ROUTES.state)).toBe(settledStateCalls);
+  });
+});
+
+describe("MarketView provider 未启用态（D10 + 修复轮 N-1）", () => {
+  it("全部 market route 404 时，发现页与来源页都给 not-registered 指引，且不含走不通的导航路径", async () => {
+    // 出厂默认 provider = disabled ⇒ wrapper bundle 未加载 ⇒ 四条 route 全部未注册。
+    stubFetch({
+      state: () => nonJsonResponse(404),
+      catalog: () => nonJsonResponse(404),
+      installable: () => nonJsonResponse(404),
+      installations: () => nonJsonResponse(404),
+    });
+
+    const view = await mountMarket();
+
+    // 发现页：分类为 not-registered（无 code、仅凭 404），标题即真实状态。
+    const discoverPanel = view.querySelector(".market-error");
+    expect(discoverPanel).not.toBeNull();
+    expect(discoverPanel!.textContent).toContain("插件市场未启用");
+    // N-1 回归门：文案不得给出本界面走不通的导航路径，且必须声明入口缺失。
+    expect(discoverPanel!.textContent).not.toContain("→");
+    expect(discoverPanel!.textContent).toContain("尚未接入");
+    expect(discoverPanel!.textContent).toContain("联系部署方");
+    // not-registered 不可旁路（R23：仅 unreachable 可旁路）。
+    expect(discoverPanel!.textContent).not.toContain("旁路");
+
+    // D10 后半：来源页签复用同一分类文案，不再只显示「无法读取市场状态」。
+    await act(async () => {
+      tabButton(view, "来源").click();
+    });
+    const sourcesPanel = view.querySelector(".market-sources .market-error");
+    expect(sourcesPanel).not.toBeNull();
+    expect(sourcesPanel!.textContent).toContain("插件市场未启用");
+    expect(view.querySelector(".market-sources")!.textContent).not.toContain("无法读取市场状态");
+    // 单源裁定的 M6 占位仍在（不因错误态丢失）。
+    expect(view.querySelector(".market-source-disabled[aria-disabled='true']")).not.toBeNull();
   });
 });

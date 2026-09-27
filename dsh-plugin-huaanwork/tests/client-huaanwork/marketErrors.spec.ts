@@ -56,11 +56,19 @@ test("sha256 mismatch is fail-closed with the mandated copy", () => {
   assert.equal(presentation.body, "插件文件校验失败，已拒绝安装。");
 });
 
-test("not-registered presentation points at the settings entry (D10)", () => {
+test("not-registered presentation states the real gap, not an unreachable path (D10 + N-1)", () => {
   const presentation = marketErrorPresentation("not-registered");
   assert.equal(presentation.canBypass, false);
-  assert.match(presentation.body, /设置/);
+  // 必须点名真实的设置项与 provider 值。
+  assert.match(presentation.body, /桌面设置/);
   assert.match(presentation.body, /huaanwork-market/);
+  // N-1 回归门：provider 选择器住在 client/DesktopSettingsSection.tsx（settings.section
+  // slot），默认 advanced shell 下 client-huaanwork 独占 layout 且对该 slot 零消费，
+  // 故「设置 → 桌面 → …」这类导航路径在本界面走不通——文案不得给出，且必须显式
+  // 声明入口缺失并给出可达动作。回退到旧文案（含箭头导航路径）即红。
+  assert.doesNotMatch(presentation.body, /→/);
+  assert.match(presentation.body, /尚未接入/);
+  assert.match(presentation.body, /联系部署方/);
 });
 
 test("no presentation other than unreachable offers a bypass (R23)", () => {
