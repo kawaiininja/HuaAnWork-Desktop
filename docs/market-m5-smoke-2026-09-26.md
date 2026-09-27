@@ -6,15 +6,18 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
 
 ## 环境
 
-- FORK 仓库 `HuaAnWork-Desktop`：初跑 `fca41276cc`，最新复跑 `fe3765b63d`
-  （+ 本冒烟新增 spec）。
+- FORK 仓库 `HuaAnWork-Desktop`：初跑 `fca41276cc`，评审修复批复跑
+  `fe3765b63d`（+ 本冒烟新增 spec）；**D16 负例补全批（安装侧门双证 + 过期
+  notAfter + provider 默认 disabled fail-safe + 本地 `plugin.add` 往返）于
+  2026-09-27 09:34 复跑刷新，复跑时点 HEAD `bc2181e952`（负例 spec 与本记录
+  同批落盘）**。
 - Node v22.23.2（满足 `^22.19.0`）。
 - 应用自带 pnpm（round6 S2 版本基线）：`dsh-plugin-huaanwork/node_modules/pnpm/bin/pnpm.mjs`
   = **11.8.0**（初跑时点 PATH pnpm 为 10.32.1，两侧结果均绿——该双版本对照为
   **历史时点证据**：当前树两者均解析 11.8.0，不再可复现，见下 round6 S2 节）。
-- 冒烟时间：2026-09-26 16:53 本地；**2026-09-27 08:20 评审修复批后在
-  `fe3765b63d` 复跑刷新**（1 passed / 2.3s；spec 其间经 `8295b835ee`、
-  `db2922126e` 与评审修复批演进）。
+- 冒烟时间：2026-09-26 16:53 本地；2026-09-27 08:20 评审修复批复跑
+  （1 passed / 2.3s）；**2026-09-27 09:34 D16 负例批后 2 passed / 3.3s**（spec
+  其间经 `8295b835ee`、`db2922126e` 与评审修复批演进）。
 
 ## 拓扑（全部真实件）
 
@@ -33,7 +36,7 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
 - **应用自带 pnpm**：stub 以 `node <app>/node_modules/pnpm/bin/pnpm.mjs` 执行，
   密封 `--store-dir`/`--cache-dir`（每次新建空目录 = 冷 store/cache）。
 
-## 结果：1 passed（vitest，约 3s）
+## 结果：2 passed（vitest，约 3s）
 
 | 项 | 结果 | 层级 |
 | --- | --- | --- |
@@ -49,6 +52,11 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
 | remove argv 不含两 flag（N2 硬约束） | 绿 | argv 快照 |
 | `pnpm-workspace.yaml` 逐字节不变（无批准键写入） | 绿 | 文件快照 |
 | 防重放：持久 revision 已前进后重放旧清单 | **502 `market-verification-failed`** | 真实服务端 + 种子 revision store |
+| **D16：防重放：过期 `notAfter`（TTL 恰 7d 含界、窗口整体在过去）** | **502 `market-verification-failed`（reason=expired）** | mock 源合法签名清单（同重放负例口径，见「层级限制」） |
+| **D16：安装侧门：非零依赖制品（发布侧之外的第二道，模拟发布侧门失准）** | **400 拒（`dependencies must be empty`）、不落盘、依赖数不变** | mock 源合法签名清单 + wrapper 预检 |
+| **D16：安装侧门：带 `postinstall`（curl 载荷）制品（安装侧证；发布侧 422 已双证）** | **400 拒（`scripts.postinstall is not allowed`）、不落盘** | 同上 |
+| **D16：provider 默认 disabled fail-safe** | 出厂组合 `market` 双 `disabled` ⇒ **零 market row**（⇒ wrapper bundle 不加载 ⇒ market routes 不注册）；safe-mode 强制 `disabled` | 真实 `prepareDesktopProfile` + `composeEntries`（真实 home 目录；组合层机械门另由 profile.spec 钉住） |
+| **D16：本地 tab 旁路：`plugin.add` → `plugin.remove` 往返（不经内网）** | add 无 `--offline`/`--ignore-scripts`（M4 本地语义，与市场远程安装恒带双 flag 区分）→ `file:` 引用实际存在 → remove 后依赖清零 | route handler + 应用自带 pnpm 真跑 |
 | origin 钉扎（X1）：跨源 tarball URL | 下载入口即拒，**零网络请求** | wrapper install 模块 |
 | 取消重启诚实告知（§14 第 33 条）：message「已取消重启」、清单已写入不回滚 | 绿 | route handler |
 | 装坏包恢复窗口：无自动回滚 + `routeDesktopStartupFailure` → `startup-recovery` | 绿 | wrapper 判定函数（窗口本体为 Electron 面，见「层级限制」） |
@@ -88,6 +96,11 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
   wrapper 层「无自动回滚」+ 启动失败路由承接两条可测语义（与 e2e 同口径），
   窗口 UI 由既有 startup-recovery-window.spec 单测覆盖。
 - **公网断连**为 pfctl/拔网级证据的替代：以上三证为机制+冷缓存+连接记录的组合实证。
+- **D16 mock 源负例的层级**（安装侧门双证 + 过期 `notAfter`）：真实服务进程的
+  发布侧门使「已验签清单指向带依赖/带脚本制品」**根本上不了架**（422 拒收）、
+  真实两步签名流产出的清单 `notAfter` 恒在未来——两类负例经 mock 源（合法签名
+  清单）构造，模拟「发布侧门/服务端失准」，wrapper 的验签、预检、落盘链路与
+  真实源**同码**（与既有 revision 重放负例同一口径）。
 - **pnpm 调用封装差异**（round6 S2 复现的层级限制，P32）：复现只对齐了 pnpm
   **二进制**，未对齐生产**调用封装**——生产路径是
   `appExecutable --import clear-env pnpmBinPath …`（Electron-as-node + 环境清洗，

