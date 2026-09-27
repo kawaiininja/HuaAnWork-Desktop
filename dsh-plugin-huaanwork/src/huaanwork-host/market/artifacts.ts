@@ -43,13 +43,23 @@ export function marketArtifactsDir(profileDir: string): string {
  * 确保制品目录存在且为 0700(评审 D7):chmod **恒执行**——mkdir 的 mode 受
  * umask 影响、且「先有 0755 目录再补权限」的旧路径要求 chmod 兜底;catalog
  * 读(saveMaxRevision)先于安装到达是生产正常时序,权限位不得依赖首次到达者。
+ *
+ * chmod 失败(EPERM/EROFS/非属主)**只忽略、不抛**(修复轮 N-9):权限收紧是
+ * best-effort 加固——目录位只影响同机其他用户能否**列举**制品名,制品文件本身
+ * 恒 0600,字节不因此泄露;而本函数也在 catalog **读**路径上(saveMaxRevision),
+ * 让它抛会把「读目录」变成 400 且经 toRouteError 回显 profileDir 绝对路径。
+ * mkdir 失败仍然抛(那是真故障:后续落制品必失败,早失败更诚实)。
  */
 export function ensureMarketArtifactsDir(profileDir: string): string {
   const dir = marketArtifactsDir(profileDir)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
   }
-  chmodSync(dir, 0o700)
+  try {
+    chmodSync(dir, 0o700)
+  } catch {
+    // best-effort:见上方注释。
+  }
   return dir
 }
 
@@ -62,24 +72,48 @@ export function readProfileDependencies(profileDir: string): Record<string, stri
 }
 
 /**
- * profile dependencies 里所有 `file:` 引用是否都实际存在(N1 回归门的核心断言;
- * 亦是孤儿清扫的判据——无 `file:` 引用指向的制品即孤儿)。
+ * profile package.json 中所有 `file:` 引用,解析为绝对路径。
+ *
+ * P17:`dependencies` 与 `devDependencies` **都**扫——与 checkpoint 侧
+ * `collectDesktopProfileCheckpointFileReferences` 同口径。只扫 dependencies 时,
+ * 一旦 pnpm 落点变化(如 `pnpm add -D` 或未来版本行为),活 profile 侧会漏掉
+ * 引用并删掉在役制品,即评审 D9 的失效模式经此路径依然可达(D9 的修复只让
+ * checkpoint 半边变严,活 profile 半边没跟上)。
+ *
+ * 坏 JSON **抛出**而不回落空集:回落 = 「无引用」= 删光制品,方向不安全。
+ * 与 readProfileDependencies 的既有行为一致。
+ */
+function collectProfileFileReferences(profileDir: string): string[] {
+  const path = join(profileDir, 'package.json')
+  if (!existsSync(path)) return []
+  const manifest = JSON.parse(readFileSync(path, 'utf8')) as {
+    dependencies?: Record<string, string>
+    devDependencies?: Record<string, string>
+  }
+  const references: string[] = []
+  for (const group of [manifest.dependencies, manifest.devDependencies]) {
+    if (group === undefined || group === null) continue
+    for (const reference of Object.values(group)) {
+      if (typeof reference !== 'string' || !reference.startsWith('file:')) continue
+      references.push(resolve(reference.slice('file:'.length)))
+    }
+  }
+  return references
+}
+
+/**
+ * profile 的 `file:` 引用是否都实际存在(N1 回归门的核心断言)。P17:与保留判据
+ * 共用同一 collector(旧实现不 resolve、且只看 dependencies,与
+ * referencedArtifactPaths 口径分裂)。注意**无引用时空集恒真**——消费方须自行
+ * 保证「确实存在引用」再据此下结论(market-install.spec.ts 有一条专测钉住
+ * 「引用缺失时返回 false」,防该断言退化为空真)。
  */
 export function profileFileReferencesExist(profileDir: string): boolean {
-  for (const reference of Object.values(readProfileDependencies(profileDir))) {
-    if (!reference.startsWith('file:')) continue
-    if (!existsSync(reference.slice('file:'.length))) return false
-  }
-  return true
+  return collectProfileFileReferences(profileDir).every((path) => existsSync(path))
 }
 
 function referencedArtifactPaths(profileDir: string): Set<string> {
-  const referenced = new Set<string>()
-  for (const reference of Object.values(readProfileDependencies(profileDir))) {
-    if (!reference.startsWith('file:')) continue
-    referenced.add(resolve(reference.slice('file:'.length)))
-  }
-  return referenced
+  return new Set(collectProfileFileReferences(profileDir))
 }
 
 /**
@@ -101,11 +135,6 @@ function retentionReferencedArtifactPaths(profileDir: string): Set<string> {
   const referenced = referencedArtifactPaths(profileDir)
   for (const path of checkpointReferencedArtifactPaths(profileDir)) referenced.add(path)
   return referenced
-}
-
-/** 判定制品文件是否被 profile 的 `file:` 引用指向(惰性清扫的保留判据)。 */
-export function isArtifactReferenced(profileDir: string, artifactPath: string): boolean {
-  return referencedArtifactPaths(profileDir).has(resolve(artifactPath))
 }
 
 /**

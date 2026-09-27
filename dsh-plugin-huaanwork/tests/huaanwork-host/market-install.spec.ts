@@ -329,6 +329,32 @@ describe('artifact GC (N1)', () => {
     expect(logs.some(m => m.includes('x-plugin-a-extra'))).toBe(false)
   })
 
+  // P17:保留判据必须与 checkpoint 侧同口径地扫 devDependencies。只扫
+  // dependencies 时,pnpm 落点一旦变化(如 `pnpm add -D`)活 profile 侧就看不见
+  // 引用 ⇒ 删掉在役制品 ⇒ 悬空 `file:` 引用,即评审 D9 的失效模式经此路径依然
+  // 可达(D9 的修复只让 checkpoint 半边变严)。回退 collectProfileFileReferences
+  // 为只读 dependencies 即红。
+  test('GC and the orphan sweep both retain an artifact referenced from devDependencies (P17)', () => {
+    const profileDir = tempProfile()
+    const dev = artifact(profileDir, '@x/plugin-dev', '1.0.0', 'd'.repeat(64))
+    writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
+      name: 'profile',
+      devDependencies: { '@x/plugin-dev': `file:${dev}` },
+    }, undefined, 2)}\n`)
+
+    // 卸载侧 GC:制品名精确命中该包,唯一的保命理由就是那条 devDependencies 引用
+    // (代码注释里的「双保险」分支)。
+    const logs: string[] = []
+    gcRemovedPackageArtifacts(profileDir, '@x/plugin-dev', (m) => logs.push(m))
+    expect(existsSync(dev)).toBe(true)
+    expect(logs.some(m => m.includes('kept referenced artifact'))).toBe(true)
+
+    // 启动孤儿清扫同口径:有引用者不是孤儿。
+    expect(sweepOrphanMarketArtifacts(profileDir, () => {})).toEqual([])
+    expect(existsSync(dev)).toBe(true)
+    expect(profileFileReferencesExist(profileDir)).toBe(true)
+  })
+
   test('GC boundary: prerelease versions still match exactly; non-semver lookalikes never match', () => {
     const profileDir = tempProfile()
     const stable = artifact(profileDir, '@x/pkg', '1.0.0', '1'.repeat(64))
