@@ -232,22 +232,39 @@ describe('two-step offline-signed release flow', () => {
     expect(envelopeOf((await (await fetch(`${market.baseUrl}/v1/manifest`)).json())).revision).toBe(2)
   })
 
-  it('concurrent double-intake of the same pending surfaces an honest 409 activation conflict', async () => {
+  it('concurrent double-intake of the same pending never surfaces a bare 5xx', async () => {
     await publishTgz(market.baseUrl, 'test-admin-token')
     const pending = await prepare()
     const record = await signOffline(pending)
-    // Both requests read the same pending and both pass verification; the
-    // locked update serializes the two activate() calls and the loser must
-    // surface as 409 manifest-activation-conflict, not a bare 500
-    // (final review finding 2).
+    // Both requests read the same pending and both pass verification. The loser
+    // resolves one of two ways depending on interleaving, and BOTH are honest
+    // (final review finding 2 was about it being a bare 500):
+    //   - it loses the locked activate() because maxRevision already advanced
+    //     => 409 manifest-activation-conflict;
+    //   - the winner already consumed `pending` before it read it
+    //     => 400 { activated: false, reason }.
+    // Asserting only 409 made this test ~20% flaky (measured 2/10) without ever
+    // catching a real defect, so pin the property that matters: exactly one
+    // activation, and the loser gets a 4xx with a machine-readable body.
     const [winner, loser] = await Promise.all([
       postSignature(record),
       postSignature(record),
     ])
     const statuses = [winner.status, loser.status].sort()
-    expect(statuses).toEqual([200, 409])
-    const conflicted = winner.status === 409 ? winner : loser
-    expect((conflicted.body as { error: { code: string } }).error.code).toBe('manifest-activation-conflict')
+    expect(statuses).toContain(200)
+    const activated = [winner, loser].filter((response) => response.status === 200)
+    expect(activated).toHaveLength(1)
+
+    const conflicted = winner.status === 200 ? loser : winner
+    expect(conflicted.status, `loser status must be 4xx, not ${String(conflicted.status)}`).toBeLessThan(500)
+    expect([400, 409]).toContain(conflicted.status)
+    if (conflicted.status === 409) {
+      expect((conflicted.body as { error: { code: string } }).error.code).toBe('manifest-activation-conflict')
+    } else {
+      const body = conflicted.body as { activated: boolean; reason?: string }
+      expect(body.activated).toBe(false)
+      expect(typeof body.reason).toBe('string')
+    }
   })
 
   it('advances revision monotonically across releases and persists maxRevision in the state document', async () => {
