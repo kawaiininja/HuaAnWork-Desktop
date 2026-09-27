@@ -18,9 +18,10 @@
 
 import { get as httpGet, type IncomingMessage } from 'node:http'
 import { get as httpsGet } from 'node:https'
-import { renameSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { renameSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { MarketVerificationPins } from './config.ts'
+import { ensureMarketArtifactsDir } from './artifacts.ts'
 import {
   verifyMarketManifest,
   type MarketManifest,
@@ -93,7 +94,7 @@ function requestBuffer(url: string, maxBytes: number, label: string): Promise<Bu
         response.resume()
         rejectPromise(new MarketFetchError(
           `market ${label} returned HTTP ${status} (${url})`,
-          status === 404 ? 502 : 502,
+          502,
         ))
         return
       }
@@ -180,7 +181,9 @@ export function createFileRevisionStore(profileDir: string, logger: (message: st
       if (typeof stored === 'number' && revision <= stored) return
       sources[origin] = { maxRevision: revision }
       state.sources = sources
-      mkdirSync(join(profileDir, '.market-artifacts'), { recursive: true })
+      // D7:catalog 读先于安装是生产正常时序(用户先浏览再安装),revision
+      // 落盘路径必须走同一 0700 归位,不得另开无 mode 的建目录岔路。
+      ensureMarketArtifactsDir(profileDir)
       const tmp = `${statePath}.tmp`
       writeFileSync(tmp, `${JSON.stringify(state, undefined, 2)}\n`, { mode: 0o600 })
       renameSync(tmp, statePath)

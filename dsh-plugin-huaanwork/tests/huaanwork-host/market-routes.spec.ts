@@ -405,6 +405,54 @@ describe('POST operations/preview + execute(单飞 R16 / X1 / 取消诚实)', ()
     expect(firstOut.status()).toBe(200)
   })
 
+  test('single-flight flag is set before the first await: a same-tick duplicate is rejected (D8 TOCTOU)', async () => {
+    const server = await createMarketTestServer()
+    servers.push(server)
+    const profileDir = tempProfile()
+    const buildDir = mkdtempSync(join(tmpdir(), 'hw-market-sf-tick-'))
+    roots.push(buildDir)
+    const bytes = buildTgz(buildDir, { name: '@huaanwork/sample', version: '1.2.3' })
+    server.addArtifact('/artifacts/a.tgz', bytes)
+    const manifest = manifestFor(server.origin, 1, [{
+      name: '@huaanwork/sample', version: '1.2.3', sha256: sha256Hex(bytes), tarballPath: '/artifacts/a.tgz', size: bytes.byteLength,
+    }])
+    activate(server, manifest)
+
+    let release!: (bytes: Buffer) => void
+    const gate = new Promise<Buffer>((resolvePromise) => { release = resolvePromise })
+    const http: MarketHttpClient = {
+      fetchText: async (url) => (await fetch(url)).text(),
+      fetchBuffer: async () => gate,
+    }
+    const { ctx, recorded } = fakeCtx()
+    registerMarketRoutes(ctx, depsFor(profileDir, server.origin, { http }))
+    const route = recorded.find(entry => entry.path === MARKET_ROUTE_PATHS.execute)
+    if (route === undefined) throw new Error('execute route not registered')
+
+    // 评审 D8 的窗口:两个 execute 在同一 tick 内背靠背派发(两个 fetch 并发、
+    // 或 UI 双击),第二个绝不得通过互斥检查——修复前置位在 readBody 的 await
+    // 之后,两个都会通过。此处刻意不插任何 setImmediate。
+    const first = capture()
+    const second = capture()
+    route.handler(request({ name: '@huaanwork/sample', version: '1.2.3' }), first.res)
+    route.handler(request({ name: '@huaanwork/sample', version: '1.2.3' }), second.res)
+
+    const deadline = Date.now() + 10_000
+    while (second.status() === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    expect(second.status()).toBe(409)
+    expect(second.json().error.code).toBe('market-execute-busy')
+    // 第一个仍持有互斥(挂在 gate 上),未完成。
+    expect(first.status()).toBe(0)
+
+    release(bytes)
+    while (first.status() === 0 && Date.now() < deadline + 10_000) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    expect(first.status()).toBe(200)
+  })
+
   test('cancelled restart answers with the honest not-effective message (§14 #33)', async () => {
     const server = await createMarketTestServer()
     servers.push(server)

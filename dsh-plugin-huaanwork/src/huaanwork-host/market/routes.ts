@@ -229,17 +229,19 @@ async function handlePreview(services: MarketRouteServices, req: IncomingMessage
 
 async function handleExecute(services: MarketRouteServices, req: IncomingMessage, res: ServerResponse): Promise<void> {
   // 单飞互斥(round3 R16):进行中的 execute 重复调用一律 409,绝不并发改 profile。
+  // 置位必须先于任何 await(评审 D8):检查与置位之间让出事件循环即 TOCTOU——
+  // 同一 tick 内并发派发的两个 execute 会都通过检查、都置位、都跑完整条链。
   if (services.executing.current) {
     throw new RouteError(409, 'market-execute-busy', 'another market install is already running')
   }
-  const body = await readBody(req)
-  const name = bodyString(body, 'name')
-  const version = bodyString(body, 'version')
-  if (name === undefined || version === undefined) {
-    throw new RouteError(400, 'bad-request', 'market execute requires params.name and params.version')
-  }
   services.executing.current = true
   try {
+    const body = await readBody(req)
+    const name = bodyString(body, 'name')
+    const version = bodyString(body, 'version')
+    if (name === undefined || version === undefined) {
+      throw new RouteError(400, 'bad-request', 'market execute requires params.name and params.version')
+    }
     const fetched = await verified(services)
     const entry = findManifestFile(fetched, name, version)
     const prepared = await downloadAndStageArtifact({

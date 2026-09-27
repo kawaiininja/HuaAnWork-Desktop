@@ -2,7 +2,7 @@
  * install.ts 单元层:(c) 安装侧门正负例、sha256 比对、制品落盘/GC。
  * pnpm 层语义在 market-pnpm-semantics.spec.ts;wrapper e2e 在 market-e2e.spec.ts。
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -12,12 +12,13 @@ import {
   PROFILE_CHECKPOINT_USER_DATA_DIR_ENV,
 } from '../../src/profile-checkpoint.ts'
 import {
+  ensureMarketArtifactsDir,
   gcRemovedPackageArtifacts,
   marketArtifactName,
   profileFileReferencesExist,
   sweepOrphanMarketArtifacts,
 } from '../../src/huaanwork-host/market/artifacts.ts'
-import type { MarketHttpClient } from '../../src/huaanwork-host/market/catalog-client.ts'
+import { createFileRevisionStore, type MarketHttpClient } from '../../src/huaanwork-host/market/catalog-client.ts'
 import {
   downloadAndStageArtifact,
   precheckTarballManifest,
@@ -33,7 +34,8 @@ afterEach(() => {
 function tempProfile(): string {
   const dir = mkdtempSync(join(tmpdir(), 'hw-market-install-'))
   roots.push(dir)
-  mkdirSync(join(dir, '.market-artifacts'), { mode: 0o700 })
+  // 评审 D7:不预建 .market-artifacts——目录创建是被测代码(ensureMarketArtifactsDir)
+  // 的职责,预建会让 0700 断言测到脚手架而非生产行为。
   writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name: 'profile', dependencies: {} }, undefined, 2)}\n`)
   return dir
 }
@@ -151,11 +153,12 @@ describe('downloadAndStageArtifact (sha256 比对 + origin 钉扎 + 制品落盘
       http,
     })).rejects.toThrow(/sha256/u)
 
-    // 不落盘:制品目录里没有 .tgz(也没有残留 temp)。
+    // 不落盘:拒绝路径不产生盘上副作用(目录未被创建,或其中没有任何 .tgz/残留 temp)。
     const staged = join(profileDir, '.market-artifacts')
-    expect(existsSync(staged)).toBe(true)
-    for (const entry of readdirSync(staged)) {
-      expect(entry.endsWith('.tgz')).toBe(false)
+    if (existsSync(staged)) {
+      for (const entry of readdirSync(staged)) {
+        expect(entry.endsWith('.tgz')).toBe(false)
+      }
     }
   })
 
@@ -188,8 +191,12 @@ describe('downloadAndStageArtifact (sha256 比对 + origin 钉扎 + 制品落盘
       profileDir,
       http,
     })).rejects.toThrow(/dependencies must be empty/u)
-    for (const entry of readdirSync(join(profileDir, '.market-artifacts'))) {
-      expect(entry.endsWith('.tgz')).toBe(false)
+    // 拒绝路径不落盘(tempProfile 不再预建目录,见 D7):目录可能根本未被创建。
+    const staged = join(profileDir, '.market-artifacts')
+    if (existsSync(staged)) {
+      for (const entry of readdirSync(staged)) {
+        expect(entry.endsWith('.tgz')).toBe(false)
+      }
     }
   })
 
@@ -208,8 +215,11 @@ describe('downloadAndStageArtifact (sha256 比对 + origin 钉扎 + 制品落盘
       http,
     })).rejects.toThrow(/identity/u)
 
-    for (const entry of readdirSync(join(profileDir, '.market-artifacts'))) {
-      expect(entry.endsWith('.tgz')).toBe(false)
+    const staged = join(profileDir, '.market-artifacts')
+    if (existsSync(staged)) {
+      for (const entry of readdirSync(staged)) {
+        expect(entry.endsWith('.tgz')).toBe(false)
+      }
     }
   })
 
@@ -231,8 +241,32 @@ describe('downloadAndStageArtifact (sha256 比对 + origin 钉扎 + 制品落盘
   })
 })
 
+describe('artifact dir mode (review D7)', () => {
+  test('catalog read before install (production timing): revision persistence creates the dir 0700', () => {
+    // 用户先浏览目录再安装是生产正常时序:saveMaxRevision 先于任何安装到达时,
+    // 制品目录由它创建——必须 0700(修复前是 mkdirSync 无 mode 的 0755)。
+    const profileDir = tempProfile()
+    const store = createFileRevisionStore(profileDir, () => {})
+    store.saveMaxRevision(ORIGIN, 1)
+    expect(existsSync(join(profileDir, '.market-artifacts'))).toBe(true)
+    expect(statSync(join(profileDir, '.market-artifacts')).mode & 0o777).toBe(0o700)
+    expect(store.loadMaxRevision(ORIGIN)).toBe(1)
+  })
+
+  test('an existing 0755 artifact dir is forced back to 0700 on the next ensure', () => {
+    const profileDir = tempProfile()
+    const dir = join(profileDir, '.market-artifacts')
+    mkdirSync(dir, { mode: 0o755 })
+    chmodSync(dir, 0o755)
+    ensureMarketArtifactsDir(profileDir)
+    expect(statSync(dir).mode & 0o777).toBe(0o700)
+  })
+})
+
 describe('artifact GC (N1)', () => {
   function artifact(profileDir: string, name: string, version: string, sha: string): string {
+    // GC 用例不经过安装路径(tempProfile 已不预建目录),本 helper 自备目录。
+    mkdirSync(join(profileDir, '.market-artifacts'), { recursive: true })
     const path = join(profileDir, '.market-artifacts', marketArtifactName(name, version, sha))
     writeFileSync(path, 'bytes')
     return path
@@ -339,6 +373,7 @@ describe('artifact GC (N1)', () => {
 
 describe('artifact GC × profile checkpoint (review D9)', () => {
   function artifactFile(profileDir: string, name: string, version: string, sha: string): string {
+    mkdirSync(join(profileDir, '.market-artifacts'), { recursive: true })
     const path = join(profileDir, '.market-artifacts', marketArtifactName(name, version, sha))
     writeFileSync(path, 'bytes')
     return path

@@ -15,7 +15,7 @@
  * 避免 install.ts ⇄ plugins-host.ts 循环依赖。
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   PROFILE_CHECKPOINT_USER_DATA_DIR_ENV,
@@ -39,12 +39,17 @@ export function marketArtifactsDir(profileDir: string): string {
   return join(profileDir, MARKET_ARTIFACTS_DIR_NAME)
 }
 
-/** 确保制品目录存在且为 0700(已存在不改动其权限位,避免与既有目录打架)。 */
+/**
+ * 确保制品目录存在且为 0700(评审 D7):chmod **恒执行**——mkdir 的 mode 受
+ * umask 影响、且「先有 0755 目录再补权限」的旧路径要求 chmod 兜底;catalog
+ * 读(saveMaxRevision)先于安装到达是生产正常时序,权限位不得依赖首次到达者。
+ */
 export function ensureMarketArtifactsDir(profileDir: string): string {
   const dir = marketArtifactsDir(profileDir)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
   }
+  chmodSync(dir, 0o700)
   return dir
 }
 
