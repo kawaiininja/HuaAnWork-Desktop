@@ -24,6 +24,10 @@ import { addPlugin, removePlugin } from '../../src/huaanwork-host/plugins-host.t
 import { MARKET_ROUTE_PATHS, registerMarketRoutes } from '../../src/huaanwork-host/market/routes.ts'
 import type { MarketManifest } from '../../src/huaanwork-host/market/verify.ts'
 import {
+  createMarketHttpClient,
+  type MarketHttpClient,
+} from '../../src/huaanwork-host/market/catalog-client.ts'
+import {
   combinedOutput,
   createMarketSandbox,
   disposeAllMarketSandboxes,
@@ -51,7 +55,34 @@ const servers: MarketTestServer[] = []
 afterEach(async () => {
   while (servers.length > 0) await servers.pop()!.close()
   disposeAllMarketSandboxes()
+  recordedHosts.length = 0
 })
+
+// ---------------------------------------------------------------------------
+// 连接记录(wrapper HTTP seam,评审第 4 批:自 market-smoke-live 同构搬入)。
+//
+// 不补丁 node:http 模块导出——wrapper 经 ESM import 绑定 `get as httpGet`,
+// 模块导出补丁拦不到已导入绑定。记录器坐在 wrapper 的 HTTP 注入缝上:
+// record → 委托 createMarketHttpClient() 的真实实现(node:http 真实 socket)。
+// 「零非 loopback 连接」由此进入每次 yarn test(原先只断言 mock 服务端收到
+// 的路径以 / 开头,发现不了打到别处的请求)。
+// ---------------------------------------------------------------------------
+
+const recordedHosts: string[] = []
+
+function recordingHttpClient(): MarketHttpClient {
+  const real = createMarketHttpClient()
+  return {
+    fetchText(url, label) {
+      recordedHosts.push(new URL(url).host)
+      return real.fetchText(url, label)
+    },
+    fetchBuffer(url, label, maxBytes) {
+      recordedHosts.push(new URL(url).host)
+      return real.fetchBuffer(url, label, maxBytes)
+    },
+  }
+}
 
 // ---------------------------------------------------------------------------
 // pnpm-backed runPlugin 桩:真实 pnpm + 密封 store/cache,argv 原样转发并记录。
@@ -221,6 +252,7 @@ function registerExecuteRoutes(sandbox: MarketSandbox, server: MarketTestServer,
     pins: PINS,
     now: () => NOW,
     revisionStore: createMemoryRevisionStore().store,
+    http: recordingHttpClient(),
     logger: () => {},
   })
   return recorded
@@ -311,10 +343,11 @@ suite('wrapper 离线端到端(解法 A 全链,真实 pnpm + 密封 store/cache)
     // ── 市场流程零批准键写入(workspace yaml 逐字不变)。──
     expect(workspaceYamlSnapshot(sandbox)).toBe(workspaceBefore)
     expect(noApprovalKeys(sandbox)).toBe(true)
-    // 网络层同源断言:全部请求都在配置 origin 路径空间内(无外链 URL)。
-    for (const path of server.requestedUrls) {
-      expect(path.startsWith('/')).toBe(true)
-    }
+    // ── 零非 loopback 连接(评审第 4 批:seam 记录器替掉「mock 收到的路径以 /
+    //    开头」弱断言):记录 wrapper 每次 fetch 委托的目标 host;阳性对照断言
+    //    记录数 >0(记录器空转则本断言必失败),全部落在 127.0.0.1。──
+    expect(recordedHosts.length).toBeGreaterThan(0)
+    expect(recordedHosts.every(host => host.startsWith('127.0.0.1'))).toBe(true)
   }, 180_000)
 
   test('卸载取消:清单已写入,诚实 message,下次自然重启照常生效(§14 #33)', async () => {
