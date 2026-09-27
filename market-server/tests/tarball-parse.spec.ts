@@ -57,6 +57,51 @@ describe('extractPackageManifest (zero-dependency ustar walk)', () => {
     expect(manifest).toEqual({ name: 'pax-pkg', version: '3.0.0' })
   })
 
+  it('consumes a PAX path override on a directory entry without leaking it to the next entry (P4)', () => {
+    // npm/node-tar emits per-entry pax headers for long or non-ASCII paths
+    // (e.g. package/中文目录/). The directory entry consumes pendingName and
+    // must clear it — a leak re-labels the following package.json entry and
+    // a legitimate tarball gets rejected as missing-package-json.
+    const dirTarget = 'package/中文目录/'
+    const dirRecord = ` path=${dirTarget}\n`
+    // PAX record length is counted in BYTES (non-ASCII targets differ from
+    // string length); len covers the digits themselves plus the record.
+    const recordBytes = Buffer.byteLength(dirRecord, 'utf8')
+    const dirPax = Buffer.from(`${String(recordBytes + String(recordBytes).length)}${dirRecord}`, 'utf8')
+    const tar = buildTar([
+      { name: 'PaxHeaders/dir', data: dirPax, typeflag: 'x' },
+      { name: 'shortdir', data: '', typeflag: '5' },
+      { name: 'package/package.json', data: '{"name":"pax-dir-pkg","version":"1.0.0"}' },
+    ])
+    const manifest = extractPackageManifest(gzipSync(tar))
+    expect(manifest).toEqual({ name: 'pax-dir-pkg', version: '1.0.0' })
+  })
+
+  it('applies a GNU longname override to exactly the next entry (P4)', () => {
+    // GNU longname (typeflag 'L'): data is the NUL-terminated name for the
+    // NEXT entry only. Long directory path + regular manifest afterwards.
+    const longDir = `${'d'.repeat(110)}/`
+    const tar = buildTar([
+      { name: 'dummy-long', data: `${longDir}\0`, typeflag: 'L' },
+      { name: 'shortdir', data: '', typeflag: '5' },
+      { name: 'package/package.json', data: '{"name":"longname-pkg","version":"2.0.0"}' },
+      { name: 'package/README.md', data: 'readme' },
+    ])
+    const manifest = extractPackageManifest(gzipSync(tar))
+    expect(manifest).toEqual({ name: 'longname-pkg', version: '2.0.0' })
+  })
+
+  it('rejects an ambiguous tarball with more than one depth-1 package.json (D1)', () => {
+    // Decoy smuggling: a clean manifest plus a dirty one must be rejected,
+    // never tie-broken (buffered path parity with the streaming test below).
+    const tar = buildTar([
+      { name: 'a/package.json', data: '{"name":"a","version":"1.0.0"}' },
+      { name: 'b/package.json', data: '{"name":"b","version":"1.0.0"}' },
+    ])
+    expect(() => extractPackageManifest(gzipSync(tar))).toThrow(/ambiguous/u)
+    expect(() => extractPackageManifest(gzipSync(tar))).toThrow(/a\/package\.json, b\/package\.json/u)
+  })
+
   it('rejects bytes that are not gzip at all', () => {
     expect(() => extractPackageManifest(Buffer.from('definitely not gzip'))).toThrow(TarballError)
     expect(() => extractPackageManifest(Buffer.from('definitely not gzip'))).toThrow(/not a gzip/u)

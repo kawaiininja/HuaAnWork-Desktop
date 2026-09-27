@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, readdir, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
@@ -112,5 +112,43 @@ describe('artifact hosting round-trip', () => {
     const staged = await artifacts.stage(Readable.from([bytes.subarray(0, 10), bytes.subarray(10)]))
     expect(staged.sha256).toBe(createHash('sha256').update(bytes).digest('hex'))
     await artifacts.discard(staged.tempName)
+  })
+})
+
+describe('upload cap and stale-temp sweep (review P35)', () => {
+  let dataDir: string
+
+  beforeEach(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), 'market-server-store-'))
+  })
+
+  it('rejects an upload over MAX_ARTIFACT_BYTES with nothing left behind', async () => {
+    const store = await ArtifactStore.open(dataDir)
+    // Endless 1 MiB chunks: stage() must stop and throw at the cap, not buffer
+    // the whole (unbounded) stream.
+    const chunk = Buffer.alloc(1024 * 1024, 1)
+    const endless = new Readable({ read() { this.push(chunk) } })
+    await expect(store.stage(endless)).rejects.toMatchObject({
+      name: 'ArtifactTooLargeError',
+      message: /upload cap/u,
+    })
+    const leftovers = (await readdir(store.directory)).filter(name => name.startsWith('.upload-'))
+    expect(leftovers).toEqual([])
+  })
+
+  it('sweeps stale .upload-*.tmp debris when the store opens, leaving fresh temps alone (P11)', async () => {
+    const first = await ArtifactStore.open(dataDir)
+    const stale = join(first.directory, '.upload-999999-0.tmp')
+    const fresh = join(first.directory, `.upload-${String(process.pid)}-${String(Date.now())}.tmp`)
+    await writeFile(stale, 'debris')
+    await writeFile(fresh, 'in flight')
+    // Age the debris past the sweep threshold (25h > 24h).
+    const old = new Date(Date.now() - 25 * 60 * 60 * 1000)
+    await utimes(stale, old, old)
+
+    await ArtifactStore.open(dataDir) // re-open triggers the sweep
+
+    await expect(stat(stale)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await stat(fresh)).size).toBe(Buffer.byteLength('in flight'))
   })
 })

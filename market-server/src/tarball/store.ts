@@ -13,7 +13,7 @@
 
 import { createHash } from 'node:crypto'
 import { createReadStream, type ReadStream } from 'node:fs'
-import { chmod, mkdir, open, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Readable } from 'node:stream'
 import { STATE_DIRECTORY_MODE, STATE_FILE_MODE } from '../store.ts'
@@ -23,6 +23,13 @@ export const SHA256_HEX_LENGTH = 64
 export const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 /** Upload size cap: an honest guard against accidental huge payloads (admin-only surface). */
 export const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
+/**
+ * Stale-upload sweep threshold (review P11): a `.upload-*.tmp` file older than
+ * this when the store opens is debris from a killed process (uploads are
+ * second-scale, and the deployment shape is a single process per data dir),
+ * not an in-flight upload. Swept best-effort; fresh temps are never touched.
+ */
+export const UPLOAD_TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
 export class ArtifactShaMismatchError extends Error {
   constructor() {
@@ -52,6 +59,21 @@ export function artifactFileName(name: string, version: string, sha256: string):
   return `${stem}-${version}-${sha256.slice(0, 12)}.tgz`
 }
 
+/** Best-effort sweep of stale upload temps left behind by killed processes (review P11). */
+async function sweepStaleUploadTemps(directory: string): Promise<void> {
+  const names = await readdir(directory).catch(() => undefined)
+  if (names === undefined) return
+  const now = Date.now()
+  for (const name of names) {
+    if (!name.startsWith('.upload-') || !name.endsWith('.tmp')) continue
+    const path = join(directory, name)
+    const info = await stat(path).catch(() => undefined)
+    if (info === undefined || !info.isFile()) continue
+    if (now - info.mtimeMs < UPLOAD_TEMP_MAX_AGE_MS) continue
+    await unlink(path).catch(() => undefined)
+  }
+}
+
 export class ArtifactStore {
   readonly #directory: string
 
@@ -67,6 +89,7 @@ export class ArtifactStore {
     const directory = join(dataDir, ARTIFACTS_SUBDIRECTORY)
     await mkdir(directory, { recursive: true, mode: STATE_DIRECTORY_MODE })
     await chmod(directory, STATE_DIRECTORY_MODE).catch(() => undefined)
+    await sweepStaleUploadTemps(directory)
     return new ArtifactStore(directory)
   }
 
