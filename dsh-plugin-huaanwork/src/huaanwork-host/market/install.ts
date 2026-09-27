@@ -48,6 +48,15 @@ export class MarketInstallGateError extends Error {
 
 const TAR_BLOCK_SIZE = 512
 
+/**
+ * 解压后 tar 字节上限(评审 D6:gunzip 炸弹防护)。**必须与 market-server 发布侧
+ * `tarball/parse.ts` 的 `MAX_TAR_DECOMPRESSED_BYTES` 同值**——发布侧已按此上限
+ * 拒绝过大的制品,安装侧若更严会让合法已发布制品装不上,若更松则失去意义。
+ * 依赖方向守卫禁止 import market-server,故以注释交叉引用而非共享常量;
+ * 两侧任一改动都必须同步(与 manifest 选取规则同理由,见 readTarballPackageJson)。
+ */
+const MAX_TAR_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
 function parseOctal(field: Buffer): number {
   const text = field.toString('ascii').replace(/\0.*$/u, '').trim()
   if (text.length === 0) return 0
@@ -103,8 +112,21 @@ function tarEntries(buffer: Buffer): { name: string; type: string; data: Buffer 
 export function readTarballPackageJson(tgzBytes: Buffer): Record<string, unknown> {
   let tar: Buffer
   try {
-    tar = gunzipSync(tgzBytes)
-  } catch {
+    // 评审 D6:带上限解压,gunzip 炸弹在此确定性失败而不是把主进程推向 OOM。
+    tar = gunzipSync(tgzBytes, { maxOutputLength: MAX_TAR_DECOMPRESSED_BYTES })
+  } catch (cause) {
+    // 超上限与坏 gzip 是两件事,分开诚实报错(实测 zlib 分别抛
+    // ERR_BUFFER_TOO_LARGE / Z_DATA_ERROR)——否则运营者看到「不是合法 gzip」
+    // 会去查传输,而真实原因是制品过大。
+    const code = typeof (cause as { code?: unknown } | null)?.code === 'string'
+      ? (cause as { code: string }).code
+      : undefined
+    if (code === 'ERR_BUFFER_TOO_LARGE') {
+      throw new MarketInstallGateError(
+        `downloaded artifact decompresses beyond the ${String(MAX_TAR_DECOMPRESSED_BYTES)}-byte limit (possible gzip bomb)`,
+        'market-invalid-tarball',
+      )
+    }
     throw new MarketInstallGateError('downloaded artifact is not a valid gzip tarball', 'market-invalid-tarball')
   }
   const entries = tarEntries(tar)
@@ -230,7 +252,10 @@ export async function downloadAndStageArtifact(options: {
     throw new MarketFetchError(`market artifact download failed: ${error instanceof Error ? error.message : String(error)}`, 502)
   }
 
-  // 边下边算(hash 在 chunk 上更新;默认 client 一次收齐,注入式流 client 逐 chunk)。
+  // 对**已收齐的**缓冲字节一次性算 sha256(评审 D6:非流式;流式下载边收边
+  // hash.update(chunk) 边写 tmp 留待 M6,偏离已登记 spec §14 第 53 条)。
+  // 被校验的字节即下方落盘的字节——解法 A 的「被校验字节 = 被安装字节」
+  // 不依赖流式,只依赖不在校验后重新取字节。
   const sha256 = createHash('sha256').update(bytes).digest('hex')
   if (sha256 !== options.file.sha256.toLowerCase()) {
     // sha256 不符:不落盘、不安装、诚实报错(传输损坏/路径 MITM 换包/清单不一致)。

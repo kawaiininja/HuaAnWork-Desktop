@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   DesktopProfileCheckpoint,
@@ -21,6 +22,7 @@ import {
 import { createFileRevisionStore, type MarketHttpClient } from '../../src/huaanwork-host/market/catalog-client.ts'
 import {
   downloadAndStageArtifact,
+  MarketInstallGateError,
   precheckTarballManifest,
   readTarballPackageJson,
 } from '../../src/huaanwork-host/market/install.ts'
@@ -111,6 +113,26 @@ describe('readTarballPackageJson', () => {
 
   test('rejects non-gzip and missing package.json', () => {
     expect(() => readTarballPackageJson(Buffer.from('not gzip'))).toThrow(/gzip/u)
+  })
+
+  // 评审 D6:解压上限。gunzipSync 不带 maxOutputLength 时,一个几十 KB 的
+  // gzip 炸弹可在 Electron 主进程里膨胀到数十 GiB。回退该选项即红。
+  test('caps decompression and says so instead of blaming gzip (review D6)', () => {
+    // 65 MiB 均匀字节压到几十 KB,越过 64 MiB 上限(与发布侧同值)。
+    const bomb = gzipSync(Buffer.alloc(65 * 1024 * 1024, 0x41))
+    expect(bomb.length).toBeLessThan(1024 * 1024)
+
+    let caught: unknown
+    try {
+      readTarballPackageJson(bomb)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(MarketInstallGateError)
+    expect((caught as MarketInstallGateError).code).toBe('market-invalid-tarball')
+    // 诚实报错:超限与「不是合法 gzip」是两件事,不得混为一谈。
+    expect((caught as Error).message).toMatch(/decompresses beyond/u)
+    expect((caught as Error).message).not.toMatch(/not a valid gzip/u)
   })
 })
 
