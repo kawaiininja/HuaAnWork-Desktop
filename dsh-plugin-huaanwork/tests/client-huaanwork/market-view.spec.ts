@@ -310,6 +310,88 @@ describe("MarketView 在飞安装轮询的放弃预算（修复轮 N-4）", () =
   });
 });
 
+describe("MarketView 已安装列表读失败（P27）", () => {
+  it("installations 读失败时不说「尚未安装任何插件」，两个页签同口径", async () => {
+    stubFetch({
+      state: () =>
+        jsonResponse(200, {
+          provider: "huaanwork-market",
+          origin: "http://127.0.0.1:8787",
+          executing: false,
+          verification: { ready: true, currentKeyId: "ab".repeat(32) },
+          catalog: { maxAcceptedRevision: 1 },
+          desktopActions: { requestRestart: true },
+        }),
+      catalog: () =>
+        jsonResponse(200, {
+          schemaVersion: "1.0.0",
+          source: {
+            sourceRecordId: "huaanwork-intranet",
+            providerId: "huaanwork-market",
+            adapterId: "huaanwork-market",
+            registrationKind: "market",
+            fetchedAt: "2026-09-27T00:00:00.000Z",
+            finalUrl: "http://127.0.0.1:8787",
+          },
+          items: [],
+          page: { total: 0 },
+        }),
+      installable: () => jsonResponse(200, { items: [] }),
+      // 读失败（不是空目录）：旧实现把它静默降级为 bundles = []。
+      installations: () => jsonResponse(500, { error: { code: "plugin-error", message: "boom" } }),
+    });
+
+    const view = await mountMarket();
+
+    for (const tab of ["已安装", "本地安装"] as const) {
+      await act(async () => {
+        tabButton(view, tab).click();
+      });
+      // 肯定式假话不得出现；诚实文案必须出现。
+      expect(view.textContent, tab).not.toContain("尚未安装任何插件");
+      expect(view.textContent, tab).toContain("无法读取已安装列表");
+      expect(view.textContent, tab).toContain("不代表没有已安装的插件");
+    }
+  });
+
+  it("读到空列表时才说「尚未安装任何插件」（对照组，防上一条把文案改死）", async () => {
+    stubFetch({
+      state: () =>
+        jsonResponse(200, {
+          provider: "huaanwork-market",
+          origin: "http://127.0.0.1:8787",
+          executing: false,
+          verification: { ready: true, currentKeyId: "ab".repeat(32) },
+          catalog: { maxAcceptedRevision: 1 },
+          desktopActions: { requestRestart: true },
+        }),
+      catalog: () =>
+        jsonResponse(200, {
+          schemaVersion: "1.0.0",
+          source: {
+            sourceRecordId: "huaanwork-intranet",
+            providerId: "huaanwork-market",
+            adapterId: "huaanwork-market",
+            registrationKind: "market",
+            fetchedAt: "2026-09-27T00:00:00.000Z",
+            finalUrl: "http://127.0.0.1:8787",
+          },
+          items: [],
+          page: { total: 0 },
+        }),
+      installable: () => jsonResponse(200, { items: [] }),
+      installations: () => jsonResponse(200, { bundles: [] }),
+    });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "已安装").click();
+    });
+    expect(view.textContent).toContain("尚未安装任何插件");
+    expect(view.textContent).not.toContain("无法读取已安装列表");
+  });
+});
+
 describe("MarketView provider 未启用态（D10 + 修复轮 N-1）", () => {  it("全部 market route 404 时，发现页与来源页都给 not-registered 指引，且不含走不通的导航路径", async () => {
     // 出厂默认 provider = disabled ⇒ wrapper bundle 未加载 ⇒ 四条 route 全部未注册。
     stubFetch({

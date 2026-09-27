@@ -4,6 +4,7 @@ import { rpcCall, pickDirectoryDetailed } from "./api.ts";
 import { PLUGIN_APPLY_FAIL, PLUGIN_CONFIRM } from "./Settings.tsx";
 import {
   catalogItemLabel,
+  describeInstalledEmptyMessage,
   describeMarketPanel,
   describeMarketSourceHint,
   filterCatalogItems,
@@ -106,6 +107,9 @@ export default function MarketView() {
   const [installableLoad, setInstallableLoad] = useState<LoadState>("loading");
 
   const [bundles, setBundles] = useState<string[]>([]);
+  // P27：区分「读取中 / 读失败 / 确实为空」，否则读失败会被呈现成
+  // 「尚未安装任何插件」这句肯定式假话。
+  const [installationsLoad, setInstallationsLoad] = useState<LoadState>("loading");
 
   // 在飞安装的服务端观察态（D13）：挂载时经 /state.executing 发现（本组件发起的
   // execute 期间切走再回来即此态）。轮询至 false 后清并刷新列表——notice 属
@@ -148,9 +152,13 @@ export default function MarketView() {
     try {
       const listed = await marketFetch<{ bundles?: string[] }>(ROUTE_INSTALLATIONS);
       setBundles(Array.isArray(listed.bundles) ? listed.bundles : []);
+      setInstallationsLoad("ready");
     } catch {
-      // installations 读失败不阻断整页：installed tab 展示空并在重进时自恢复。
+      // installations 读失败不阻断整页（旁路独立性，§13）——但**不得**把「读不到」
+      // 呈现成「确实没有」（P27）：置 error 态，由 describeInstalledEmptyMessage
+      // 给诚实文案，重进时自恢复。
       setBundles([]);
+      setInstallationsLoad("error");
     }
   }, []);
 
@@ -261,6 +269,7 @@ export default function MarketView() {
     try {
       const listed = await rpcCall<{ bundles?: string[]; message?: string }>("plugin.remove", { name });
       setBundles(Array.isArray(listed.bundles) ? listed.bundles : []);
+      setInstallationsLoad("ready");
       if (listed.message) notify(listed.message);
       await loadCatalogSide();
     } catch (error) {
@@ -302,6 +311,7 @@ export default function MarketView() {
     try {
       const listed = await rpcCall<{ bundles?: string[]; message?: string }>("plugin.add", { source });
       setBundles(Array.isArray(listed.bundles) ? listed.bundles : []);
+      setInstallationsLoad("ready");
       notify(listed.message ?? "插件已安装");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -319,6 +329,9 @@ export default function MarketView() {
   const installablePhase = describeMarketPanel(installableLoad, catalogError, installableItems.length);
   // 安装/移除按钮的在飞禁用口径：本地 execute 与远端观察态任一在飞即禁用。
   const anyExecuting = executing || remoteExecuting;
+  // P27：已安装列表的三态文案（null = 渲染列表）。installed 与 local 两个页签
+  // 共用同一份，避免两处空态口径分叉。
+  const installedEmptyMessage = describeInstalledEmptyMessage(installationsLoad, bundles.length);
 
   function panelBody(
     phase: MarketPanelPhase,
@@ -417,8 +430,8 @@ export default function MarketView() {
           </ul>
         ))
       ) : tab === "installed" ? (
-        bundles.length === 0 ? (
-          <p className="panel-empty">尚未安装任何插件</p>
+        installedEmptyMessage !== null ? (
+          <p className="panel-empty">{installedEmptyMessage}</p>
         ) : (
           <ul className="market-list">
             {bundles.map((name) => (
@@ -439,6 +452,7 @@ export default function MarketView() {
       ) : tab === "local" ? (
         <LocalPanel
           bundles={bundles}
+          emptyMessage={installedEmptyMessage}
           localBusy={localBusy}
           executing={anyExecuting}
           onPick={() => void pickLocalPlugin()}
@@ -499,6 +513,7 @@ export default function MarketView() {
  */
 function LocalPanel({
   bundles,
+  emptyMessage,
   localBusy,
   executing,
   onPick,
@@ -506,6 +521,8 @@ function LocalPanel({
   onRemove,
 }: {
   bundles: string[];
+  /** P27：已安装列表的三态文案（null = 渲染列表），与 installed 页签同源。 */
+  emptyMessage: string | null;
   localBusy: boolean;
   executing: boolean;
   onPick: () => void;
@@ -544,8 +561,8 @@ function LocalPanel({
           浏览目录…
         </button>
       </div>
-      {bundles.length === 0 ? (
-        <p className="panel-empty">尚未安装任何插件</p>
+      {emptyMessage !== null ? (
+        <p className="panel-empty">{emptyMessage}</p>
       ) : (
         <ul className="market-list">
           {bundles.map((name) => (

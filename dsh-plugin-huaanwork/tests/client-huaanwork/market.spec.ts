@@ -3,6 +3,7 @@ import { test } from "vitest";
 
 import {
   catalogItemLabel,
+  describeInstalledEmptyMessage,
   describeMarketPanel,
   describeMarketSourceHint,
   filterCatalogItems,
@@ -133,4 +134,21 @@ test("describeMarketSourceHint stays silent until state is ready (D13)", () => {
   assert.equal(describeMarketSourceHint(state(true), "error"), null);
   assert.equal(describeMarketSourceHint(state(true), "ready"), "源：http://127.0.0.1:8787");
   assert.equal(describeMarketSourceHint(state(false), "ready"), "信任锚未配置：目录验签恒拒，请联系市场管理员");
+});
+
+// P27：读失败不得被呈现成「尚未安装任何插件」——那是肯定式假话。三态分开。
+test("describeInstalledEmptyMessage separates unreadable from genuinely empty (P27)", () => {
+  assert.equal(describeInstalledEmptyMessage("loading", 0), "读取已安装列表中…");
+  // 读失败：即使 count 为 0 也**不得**说「尚未安装任何插件」。
+  const unreadable = describeInstalledEmptyMessage("error", 0);
+  assert.match(unreadable ?? "", /无法读取已安装列表/);
+  assert.doesNotMatch(unreadable ?? "", /尚未安装任何插件/);
+  assert.match(unreadable ?? "", /不代表没有已安装的插件/);
+  // 确实为空（读成功且 0 条）才允许这么说。
+  assert.equal(describeInstalledEmptyMessage("ready", 0), "尚未安装任何插件");
+  // 有内容 ⇒ 渲染列表本身。
+  assert.equal(describeInstalledEmptyMessage("ready", 2), null);
+  // 有内容时读取态不再覆盖列表（ready 之前若已有缓存条目也应展示）。
+  assert.equal(describeInstalledEmptyMessage("loading", 2), null);
+  assert.equal(describeInstalledEmptyMessage("error", 2), null);
 });

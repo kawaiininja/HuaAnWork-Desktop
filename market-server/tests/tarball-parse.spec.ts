@@ -91,6 +91,36 @@ describe('extractPackageManifest (zero-dependency ustar walk)', () => {
     expect(manifest).toEqual({ name: 'longname-pkg', version: '2.0.0' })
   })
 
+  // P4 的残余半边:目录条目(typeflag '5')一直会消费 pendingName,但 symlink('2')/
+  // hardlink('1')/fifo 经 typeFlagOf 落到 'other',旧代码的
+  // `if (type !== 'file' && type !== 'directory') continue` 在消费**之前**就跳过
+  // 它们 ⇒ 覆盖泄漏到下一条目。wrapper 侧对每条非 'L' 条目都清,故这同时是一处
+  // 两侧口径差异。回退该 continue 即红。
+  it('consumes a PAX path override on a symlink entry without leaking it (P4, link entries)', () => {
+    const linkTarget = 'package/链接目录/'
+    const record = ` path=${linkTarget}\n`
+    const recordBytes = Buffer.byteLength(record, 'utf8')
+    const pax = Buffer.from(`${String(recordBytes + String(recordBytes).length)}${record}`, 'utf8')
+    const tar = buildTar([
+      { name: 'PaxHeaders/link', data: pax, typeflag: 'x' },
+      { name: 'shortlink', data: '', typeflag: '2' }, // symlink → 'other'
+      { name: 'package/package.json', data: '{"name":"pax-link-pkg","version":"1.0.0"}' },
+    ])
+    const manifest = extractPackageManifest(gzipSync(tar))
+    expect(manifest).toEqual({ name: 'pax-link-pkg', version: '1.0.0' })
+  })
+
+  it('consumes a GNU longname override on a hardlink entry without leaking it (P4, link entries)', () => {
+    const longLink = `${'h'.repeat(110)}/`
+    const tar = buildTar([
+      { name: 'dummy-long', data: `${longLink}\0`, typeflag: 'L' },
+      { name: 'shortlink', data: '', typeflag: '1' }, // hardlink → 'other'
+      { name: 'package/package.json', data: '{"name":"longname-link-pkg","version":"2.0.0"}' },
+    ])
+    const manifest = extractPackageManifest(gzipSync(tar))
+    expect(manifest).toEqual({ name: 'longname-link-pkg', version: '2.0.0' })
+  })
+
   it('rejects an ambiguous tarball with more than one depth-1 package.json (D1)', () => {
     // Decoy smuggling: a clean manifest plus a dirty one must be rejected,
     // never tie-broken (buffered path parity with the streaming test below).

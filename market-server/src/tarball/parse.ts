@@ -144,13 +144,21 @@ function walkEntries(tar: Buffer, state: TarWalkState): void {
       state.pendingName = gnuLongNameOverride(data)
       continue
     }
-    if (type !== 'file' && type !== 'directory') continue
 
+    // Every non-pax, non-longname entry consumes the pending override — including
+    // symlinks/hardlinks/fifos, which typeFlagOf maps to 'other' (review P4). The
+    // previous `if (type !== 'file' && type !== 'directory') continue` skipped them
+    // BEFORE the override was consumed, so a pax/longname aimed at a link entry
+    // leaked onto the NEXT entry: a legitimate tarball could be rejected as
+    // missing its manifest, or a non-manifest file could newly match the depth-1
+    // regex. It also diverged from the wrapper install side, which clears on every
+    // non-longname entry.
     const name = (state.pendingName ?? headerName(block)).replace(/^\.\//u, '')
     state.pendingName = null
     // Fail closed on path traversal (review D1): a ".." segment must never
     // appear in any entry name — it would otherwise match the depth-1
-    // manifest regex below (".." is a valid [^/]+ segment).
+    // manifest regex below (".." is a valid [^/]+ segment). Checked for every
+    // entry kind, not just files, matching the wrapper's stricter scope.
     if (name.split('/').includes('..')) {
       throw new TarballError('invalid-tarball', `tar entry name contains a ".." segment: ${JSON.stringify(name)}`)
     }

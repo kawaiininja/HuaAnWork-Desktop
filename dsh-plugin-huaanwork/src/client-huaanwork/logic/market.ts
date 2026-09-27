@@ -186,3 +186,22 @@ export function describeMarketSourceHint(state: MarketStateView | null, load: Ma
   if (load !== "ready" || state === null) return null;
   return state.verification.ready ? `源：${state.origin}` : "信任锚未配置：目录验签恒拒，请联系市场管理员";
 }
+
+/**
+ * 已安装列表的空态/失败态文案（P27）。返回 null = 应当渲染列表本身。
+ *
+ * 读失败**不得**显示「尚未安装任何插件」——那是一句肯定式假话：旧实现把
+ * `loadInstallations` 的 catch 静默降级为 `bundles = []`，于是「读不到」与
+ * 「确实没有」在 UI 上不可区分。
+ *
+ * **有内容一律先渲染列表**（`count > 0` 优先于 load 态）：安装/移除后的刷新会
+ * 短暂回到 loading，若按 load 态优先会让已有列表闪成「读取中…」。
+ */
+export function describeInstalledEmptyMessage(load: MarketLoadState, count: number): string | null {
+  if (count > 0) return null;
+  if (load === "loading") return "读取已安装列表中…";
+  if (load === "error") {
+    return "无法读取已安装列表，请稍后重试或重启应用；这不代表没有已安装的插件。";
+  }
+  return "尚未安装任何插件";
+}
