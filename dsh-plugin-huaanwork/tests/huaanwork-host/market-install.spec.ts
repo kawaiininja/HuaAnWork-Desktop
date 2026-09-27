@@ -455,4 +455,59 @@ describe('artifact GC × profile checkpoint (review D9)', () => {
     gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', () => {})
     expect(existsSync(a)).toBe(false)
   })
+
+  // 评审 D9 指定而我方修复轮漏掉的最后一环:前一个测试只断言「GC 没删」,
+  // 从不真正 restore。此处走完 装 A → 快照 → 卸 A(GC) → restoreSlot → 引用仍可
+  // 解析 的完整四步。回退保留判据(退回 profile-only)即红:GC 会在 restore 之前
+  // 删掉 A,恢复后的 package.json 便指向不存在的制品,物化依赖确定性 ENOENT。
+  test('a checkpoint restore after uninstall GC still resolves the artifact reference (review D9, full cycle)', () => {
+    const profileDir = tempProfile()
+    const userDataDir = mkdtempSync(join(tmpdir(), 'hw-market-restore-'))
+    roots.push(userDataDir)
+    const a = artifactFile(profileDir, '@x/plugin-a', '1.0.0', 'a'.repeat(64))
+
+    writeFileSync(join(profileDir, 'package.json'), profileManifest({ '@x/plugin-a': `file:${a}` }))
+    const checkpoint = new DesktopProfileCheckpoint({
+      userDataDir,
+      profileDir,
+      profileName: 'test-profile',
+      provider: 'desktop-profile',
+    })
+    const captured = checkpoint.captureHealthy()
+    expect(captured.status).toBe('captured')
+    if (captured.status !== 'captured') return
+    // 卸载结果态:当前 profile 的引用消失,只剩 checkpoint slot 持有。
+    writeFileSync(join(profileDir, 'package.json'), profileManifest({}))
+
+    process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV] = userDataDir
+    try {
+      gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', () => {})
+      expect(existsSync(a)).toBe(true)
+
+      // 用户在恢复窗口选回该 slot:旧 package.json(含 A 的 file: 引用)被写回。
+      const restored = checkpoint.restoreSlot(captured.slotId)
+      expect(restored.status).toBe('restored')
+      expect(restored.dependencyMaterializationRequired).toBe(true)
+
+      // D9 的承重点:引用回来了,制品也还在盘上 ⇒ 后续物化 pnpm 不会 ENOENT。
+      const restoredManifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as {
+        dependencies?: Record<string, string>
+      }
+      expect(restoredManifest.dependencies?.['@x/plugin-a']).toBe(`file:${a}`)
+      expect(existsSync(a)).toBe(true)
+      expect(profileFileReferencesExist(profileDir)).toBe(true)
+    } finally {
+      delete process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
+    }
+  })
+
+  // 上一条的 profileFileReferencesExist 断言只有在「制品缺失时返回 false」的前提下
+  // 才有意义——否则它对任何 profile 都真(无 file: 引用时空集恒真)。此处钉住其牙齿。
+  test('profileFileReferencesExist is false when a referenced artifact is missing (assertion has teeth)', () => {
+    const profileDir = tempProfile()
+    const ghost = join(profileDir, '.market-artifacts', 'x-plugin-a-1.0.0-aaaaaaaaaaaa.tgz')
+    writeFileSync(join(profileDir, 'package.json'), profileManifest({ '@x/plugin-a': `file:${ghost}` }))
+    expect(existsSync(ghost)).toBe(false)
+    expect(profileFileReferencesExist(profileDir)).toBe(false)
+  })
 })
