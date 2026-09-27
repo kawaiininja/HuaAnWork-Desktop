@@ -32,7 +32,7 @@ import type { CatalogService } from '../catalog/service.ts'
 import { DuplicateEntryError, EntryNotFoundError, ManifestActivationConflictError } from '../catalog/store.ts'
 import type { CatalogEntry, CatalogEntryPatch, CatalogStore } from '../catalog/store.ts'
 import type { MarketServerConfig } from '../config.ts'
-import { intakeSignature, ManifestPrepareError, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
+import { intakeSignature, ManifestPrepareError, MAX_MANIFEST_ENTRIES, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
 import { TarballError, extractPackageManifestFromFile } from '../tarball/parse.ts'
 import { checkPublishGate } from '../tarball/gate.ts'
 import {
@@ -270,6 +270,23 @@ async function publishArtifact(request: IncomingMessage, response: ServerRespons
       || ctx.store.entries().some(existing => existing.tarball === fileName)
     ) {
       sendError(response, 409, 'already-published', `${gateResult.name}@${gateResult.version} is already published; unpublish it first to re-release`)
+      return
+    }
+    // Review D15: enforce the 200-entry ceiling AT PUBLISH TIME. prepare()
+    // rejects an oversized catalog with `catalog-too-large`, but on its own that
+    // only produces a frozen pipeline: entry 201 published fine and every
+    // subsequent prepare then failed, so the operator could not release a new
+    // manifest for the 200 entries they already had without unpublishing first.
+    // Rejecting here means the catalog can never enter that state — `>=` because
+    // prepare's own guard is `entries.length > MAX_MANIFEST_ENTRIES`.
+    if (ctx.store.entries().length >= MAX_MANIFEST_ENTRIES) {
+      sendError(
+        response,
+        422,
+        'catalog-full',
+        `the catalog already holds ${String(MAX_MANIFEST_ENTRIES)} entries, the most one signed provider page can carry; ` +
+        'unpublish an entry before publishing this one (paginated / multi-page manifests are M6)',
+      )
       return
     }
     const entry: CatalogEntry = {

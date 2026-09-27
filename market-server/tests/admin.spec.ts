@@ -453,4 +453,37 @@ describe('manifest/prepare honest 4xx (review D14d)', () => {
     expect(parsed.error.message).toContain('201')
     expect(parsed.error.message).toContain('Split the source')
   })
+
+  // 评审 D15:只在 prepare 时拒绝 ⇒ 第 201 条照样上架、之后 prepare 永久失败,
+  // 运营者连既有的 200 条也发不出新清单(整条发布链冻结,非优雅降级)。上限前移
+  // 到发布时后,市场永不进入冻结态。回退 publish 侧的 cap 检查即红。
+  it('rejects the 201st entry at publish time so the catalog can never freeze (review D15)', async () => {
+    const published = await publishTgz(market.baseUrl, 'test-admin-token')
+    expect(published.status).toBe(201)
+    const { entry } = published.body as { entry: CatalogEntry }
+    const entries: CatalogEntry[] = [entry]
+    for (let index = 1; entries.length < 200; index += 1) {
+      entries.push({ ...entry, id: `bulk/pkg-${index}@1.0.0`, packageName: `bulk-pkg-${index}` })
+    }
+    expect(entries).toHaveLength(200)
+    await market.store.replaceEntries(entries)
+
+    const prepare = () => fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    // 恰在上限时 prepare 仍然可用(其自身守卫是 `> MAX`)。
+    expect((await prepare()).status).toBe(200)
+
+    const overflow = await publishTgz(market.baseUrl, 'test-admin-token', cleanPackageManifest({ name: 'overflow-pkg', version: '1.0.0' }))
+    expect(overflow.status).toBe(422)
+    const parsed = overflow.body as { error: { code: string; message: string } }
+    expect(parsed.error.code).toBe('catalog-full')
+    expect(parsed.error.message).toContain('200')
+    expect(parsed.error.message).toContain('unpublish')
+
+    // 被拒的发布没有改变目录,且发布链**没有冻结**——这正是本条的目的。
+    expect(market.store.entries()).toHaveLength(200)
+    expect((await prepare()).status).toBe(200)
+  })
 })
