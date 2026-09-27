@@ -64,6 +64,16 @@ function main() {
     console.error(`--slot must be 1 or 2, got ${args.slot}`)
     process.exit(2)
   }
+  if (args.slot === 2) {
+    // Review D14c foot-gun guard: the M5 market-server intake only accepts
+    // slot 1 (keySlotsFromConfig = single slot), so a slot-2 signature can
+    // never be activated server-side. Slot 2 exists for the WRAPPER's
+    // rotation overlap window, not for this upload path.
+    console.error('warning: --slot 2 signatures cannot be activated by the M5 market-server')
+    console.error('         (server intake accepts slot 1 only; slot 2 is a wrapper-side rotation concept).')
+    console.error('         If you are rotating keys, first point MARKET_SERVER_VERIFY_PUBLIC_KEY at the')
+    console.error('         new public key and restart the server, then sign with --slot 1.')
+  }
 
   const manifest = JSON.parse(readFileSync(args.manifest, 'utf8'))
   if (typeof manifest !== 'object' || manifest === null || typeof manifest.envelope !== 'object' || manifest.envelope === null) {

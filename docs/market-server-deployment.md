@@ -35,7 +35,7 @@ Node 要求 `^22.19.0 || >=24.0.0`（与仓库 engines 一致）。
 | --- | --- | --- |
 | `MARKET_SERVER_PORT` | 监听 TCP 端口 | 整数 1..65535 |
 | `MARKET_SERVER_DATA_DIR` | JSON 状态目录（绝对路径；缺省不存在则创建，0700） | 非空绝对路径 |
-| `MARKET_SERVER_PUBLIC_ORIGIN` | 本服务对外 origin，如 `http://market.intranet.example:8787` | http/https；禁 userinfo、query、fragment。内网**允许 plain http**：真实性由离线签名清单保证，不靠 TLS（决策 2）。同时是清单信封的 `domain` 钉扎值 |
+| `MARKET_SERVER_PUBLIC_ORIGIN` | 本服务对外 origin，如 `http://market.intranet.example:8787` | http/https；禁 userinfo、query、fragment。内网**允许 plain http**——但该祝福只覆盖 catalog/manifest 的**真实性**（由离线签名清单保证，不靠 TLS，决策 2）；**不覆盖 admin token 的保密性**（见〈Admin 面〉通道要求）。同时是清单信封的 `domain` 钉扎值 |
 | `MARKET_SERVER_VERIFY_PUBLIC_KEY` | 钉扎 Ed25519 验签公钥文件路径 | 存在且可读；内容为 raw 32 字节小写 hex（64 字符，`gen-signing-key.mjs` 产出的钉扎格式） |
 | `MARKET_SERVER_ADMIN_TOKEN` | admin 面 bearer token（**可选**） | 非空才生效。**未配置/为空 = admin 面整体禁用**（fail-closed：`/v1/admin/*` 一律 401 `admin-disabled`），启动时打印指引；配置后错 token / 缺 token 一律 401 `unauthorized` |
 
@@ -69,6 +69,13 @@ node --experimental-strip-types src/index.ts
 ### Admin 面（`/v1/admin/*`，bearer token，fail-closed）
 
 未配置 token：整面 401 `admin-disabled`。已配置：错/缺 token 一律 401 `unauthorized`。
+
+> **通道要求（D14b）**：admin 面每次请求都以 `Authorization: Bearer` 明文
+> 发送 token（管理页并存 `sessionStorage`）。在 plain http 上，路径上的任何
+> MITM 都可收割 token——拿到 token 虽**无法**伪造激活（仍需离线私钥），但
+> 具备〈威胁模型边界〉所述的完整停服能力。要求：对 admin 面使用 **TLS**，或
+> 仅经 **localhost / SSH 隧道**访问；若确须在 plain http 上用，须明示接受
+> token 明文暴露的风险。
 
 | 路由 | 语义 |
 | --- | --- |
@@ -114,6 +121,20 @@ node --experimental-strip-types src/index.ts
 5. 回滚 = 停进程、还原代码与状态备份、重启。
 
 ---
+
+# 威胁模型边界（诚实声明）
+
+本机制**不防 market-server 管理员作恶**。持有 admin token 的运营者可以：下架
+任意乃至全部条目、污染 pending 槽、托管任意字节、冻结发布流水线——即具备
+**完整的市场停服能力**（含让在役版本 404，如果同时动盘上制品）。离线签名保证
+的边界是：**管理员无法伪造激活**——激活需要离线签名机上的私钥产出的分离签名，
+而私钥永不进入服务端进程（见下）。若部署方的威胁模型包含「恶意管理员」或
+「token 泄露后的主动滥用」，本机制不提供防御；token 泄露面见下节 admin 面
+说明，多签/审批类控制不在 M5 范围。
+
+admin bearer token 是本服务**唯一不受离线签名保护的机密**：catalog/manifest
+的真实性由签名保证（plain http 可用），token 的保密性只能靠传输层——见
+〈Admin 面〉的通道要求。
 
 # 密钥供给、轮换与吊销（Task 0.5 片段并入）
 
@@ -168,14 +189,21 @@ node --experimental-strip-types src/index.ts
 
 1. 离线签名机 `gen-signing-key.mjs` 生成新钥对；新公钥指纹经**带外渠道**
    告知 app 发版负责人（见下「公钥分发与指纹核对」）。
-2. 新私钥签新清单（`--slot` 用新槽位规划）；新清单 `revision` 继续单调递增，
+2. **先换服务端验签公钥**（D14c，按此顺序操作）：把 market-server 的
+   `MARKET_SERVER_VERIFY_PUBLIC_KEY` 指向新公钥文件并**重启**——服务端
+   intake 只认配置公钥（M5 单源：`keySlotsFromConfig` 单槽 = 槽 1），不先换
+   钥，新私钥签出的 sidecar 在 intake 时必然 `unknown-key`（若声明 `--slot 2`
+   则 `slot-key-mismatch`），市场无法发新清单，且故障现象与「私钥配错」难以
+   区分。
+3. 新私钥签新清单（`--slot 1`——M5 服务端只认槽 1，`--slot 2` 是 wrapper 侧
+   概念，服务端永远无法满足）；新清单 `revision` 继续单调递增，
    `notAfter` 照常 ≤ issuedAt + 7d。
-3. app 发版把**新旧两把公钥**同时钉进 wrapper 配置（新钥进槽 1，旧钥退槽 2
+4. app 发版把**新旧两把公钥**同时钉进 wrapper 配置（新钥进槽 1，旧钥退槽 2
    并带 `retiredAt` = 发版时刻 + 一个发版窗口）。
-4. 重叠期内旧钥签名仍可验（槽 2 未过 `retiredAt`）；窗口过后槽 2 机判拒绝
+5. 重叠期内旧钥签名仍可验（槽 2 未过 `retiredAt`）；窗口过后槽 2 机判拒绝
    （`slot-retired`），旧钥签名自然失效——轮换重叠期 = 一个 app 发版窗口
    （round4 C3）。
-5. 旧私钥离线销毁。
+6. 旧私钥离线销毁。
 
 ## 吊销（诚实表述，round3 R3）
 

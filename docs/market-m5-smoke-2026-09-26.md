@@ -6,11 +6,15 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
 
 ## 环境
 
-- FORK 仓库 `HuaAnWork-Desktop` @ `fca41276cc`（+ 本冒烟新增 spec）。
+- FORK 仓库 `HuaAnWork-Desktop`：初跑 `fca41276cc`，最新复跑 `fe3765b63d`
+  （+ 本冒烟新增 spec）。
 - Node v22.23.2（满足 `^22.19.0`）。
 - 应用自带 pnpm（round6 S2 版本基线）：`dsh-plugin-huaanwork/node_modules/pnpm/bin/pnpm.mjs`
-  = **11.8.0**（与 yarn-resolved PATH pnpm 10.32.1 不同，两侧结果均绿，见下）。
-- 冒烟时间：2026-09-26 16:53 本地。
+  = **11.8.0**（初跑时点 PATH pnpm 为 10.32.1，两侧结果均绿——该双版本对照为
+  **历史时点证据**：当前树两者均解析 11.8.0，不再可复现，见下 round6 S2 节）。
+- 冒烟时间：2026-09-26 16:53 本地；**2026-09-27 08:20 评审修复批后在
+  `fe3765b63d` 复跑刷新**（1 passed / 2.3s；spec 其间经 `8295b835ee`、
+  `db2922126e` 与评审修复批演进）。
 
 ## 拓扑（全部真实件）
 
@@ -36,7 +40,7 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
 | 目录端点 `GET /v1/plugins` provider-page 负载 | 200 | 真实服务端 HTTP |
 | 发布侧门：非零依赖制品 | **422 拒** | 真实服务端 HTTP |
 | 发布侧门：带 `postinstall`（curl 载荷）制品 | **422 拒** | 真实服务端 HTTP |
-| 两步离线签名流（真实工具，私钥独立进程） | 激活成功 revision 1..N | 真实服务端 + 真实工具进程 |
+| 两步离线签名流（真实工具，私钥独立进程） | 激活成功 revision 1（**历史时点写法「1..N」**：初跑时 spec 曾逐激活轮换 revision；HEAD 已改为单次激活 `revision === 1` + 其后等值幂等重读，spec §14 第 49 条） | 真实服务端 + 真实工具进程 |
 | wrapper state/catalog/installable/installations | 200，installable 恰 2 项 | wrapper route handler |
 | 装 A → 装 B → 卸 A → 卸 B 四步全绿，依赖数 0→1→2→1→0 | 绿 | route handler + removePlugin + 应用自带 pnpm |
 | 每步 `file:` 引用实际存在（N1 回归门） | 绿 | pnpm 密封沙箱实证 |
@@ -68,9 +72,12 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
 
 - `market-pnpm-semantics.spec.ts` + `market-e2e.spec.ts` → **11 passed / 0 fail**
   （套件自报 `[market-pnpm-semantics] pnpm version: 11.8.0`）。
-- 对照：PATH pnpm 10.32.1（yarn-resolved）下同一套件此前 6/6 + e2e 全绿（Task 5）。
+- 对照：PATH pnpm 10.32.1（yarn-resolved）下同一套件此前 6/6 + e2e 全绿（Task 5）
+  ——**此对照为历史时点证据**：当前树 PATH 与应用自带两侧均解析 11.8.0，
+  双版本对照不再可复现；版本差异面（`ERR_PNPM_IGNORED_BUILDS` 第三重纵深）
+  已按 round6 S4 版本条件化，两侧分支各有断言。
 - 结论：两套 pnpm 版本下密封语义（`file:` 引用、卸载拒 flag、离线兜底、脚本零执行）
-  均绿；版本差异面（`ERR_PNPM_IGNORED_BUILDS` 第三重纵深）按 round6 S4 已版本条件化。
+  均绿。
 
 ## 层级限制（诚实声明）
 
@@ -81,6 +88,12 @@ Task 8 Step 3。驱动器：`dsh-plugin-huaanwork/tests/huaanwork-host/market-sm
   wrapper 层「无自动回滚」+ 启动失败路由承接两条可测语义（与 e2e 同口径），
   窗口 UI 由既有 startup-recovery-window.spec 单测覆盖。
 - **公网断连**为 pfctl/拔网级证据的替代：以上三证为机制+冷缓存+连接记录的组合实证。
+- **pnpm 调用封装差异**（round6 S2 复现的层级限制，P32）：复现只对齐了 pnpm
+  **二进制**，未对齐生产**调用封装**——生产路径是
+  `appExecutable --import clear-env pnpmBinPath …`（Electron-as-node + 环境清洗，
+  `desktop-runtime-environment.ts` 还带 `PNPM_IGNORE_MINIMUM_RELEASE_AGE`），
+  本冒烟为 `process.execPath [BUNDLED_PNPM, …]`。版本一致，封装不一致；
+  封装层语义由 `verify:profile` 等常规门禁在别处覆盖。
 - 占位 origin `market.intranet.example:8787`（`config.ts`
   `HUAANWORK_MARKET_DEFAULT_ORIGIN`）为**发版/部署期配置**（env
   `HUAANWORK_MARKET_ORIGIN` 覆盖），非可连真实地址；冒烟用真实 loopback origin
