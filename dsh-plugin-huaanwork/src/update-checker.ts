@@ -6,8 +6,55 @@ import {
   type DesktopInstallationId,
 } from './desktop-installation-id.ts'
 
-/** Public endpoint returning the latest DSH Desktop version for a requested channel. */
-export const DESKTOP_VERSION_ENDPOINT = 'https://www.dshdesktop.cn/api/desktop/version'
+/**
+ * Deployment-configured intranet origin serving this product's release channel.
+ *
+ * The placeholder is unreachable by construction: an unconfigured deployment
+ * fails every version check closed instead of querying the upstream DSH public
+ * service, which does not answer for the huaanwork channel and would only leak
+ * installation metadata. Set HUAANWORK_UPDATE_ORIGIN at release provisioning.
+ */
+export const HUAANWORK_UPDATE_DEFAULT_ORIGIN = 'http://update.intranet.example:8790'
+
+/** Environment variable carrying the deployment update origin. */
+export const HUAANWORK_UPDATE_ORIGIN_ENV = 'HUAANWORK_UPDATE_ORIGIN'
+
+/** Raised when the configured update origin cannot be used as an absolute base. */
+export class UpdateOriginError extends Error {
+  constructor(message: string, options: { readonly cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause })
+    this.name = 'UpdateOriginError'
+  }
+}
+
+/** Normalize the deployment update origin, rejecting anything that is not a bare absolute http(s) base. */
+export function resolveUpdateOrigin(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = (env[HUAANWORK_UPDATE_ORIGIN_ENV] ?? HUAANWORK_UPDATE_DEFAULT_ORIGIN).trim()
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch (cause) {
+    throw new UpdateOriginError('The update origin must be an absolute http(s) URL.', { cause })
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new UpdateOriginError('The update origin must use http or https.')
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw new UpdateOriginError('The update origin must not embed credentials.')
+  }
+  if (url.pathname !== '/' && url.pathname !== '') {
+    throw new UpdateOriginError('The update origin must not include a path.')
+  }
+  if (url.search !== '' || url.hash !== '') {
+    throw new UpdateOriginError('The update origin must not include a query or fragment.')
+  }
+  return url.origin
+}
+
+/** Absolute version-check endpoint for one deployment origin. */
+export function desktopVersionEndpoint(origin: string = resolveUpdateOrigin()): string {
+  return `${origin}/api/desktop/version`
+}
 
 /** Header carrying the installed Desktop version to the fixed version endpoint. */
 export const DESKTOP_CURRENT_VERSION_HEADER = 'X-DSH-Desktop-Version'
@@ -59,6 +106,8 @@ export interface UpdateCheckOptions {
   readonly request?: UpdateRequest
   /** Installation UUID attached only to the fixed version-check endpoint. */
   readonly installationId?: DesktopInstallationId
+  /** Deployment update origin; defaults to the HUAANWORK_UPDATE_ORIGIN environment. */
+  readonly origin?: string
 }
 
 /** Successful comparison returned by the stable version service. */
@@ -143,7 +192,7 @@ export async function checkForDesktopUpdate(
 
   let response: Response
   try {
-    response = await request(DESKTOP_VERSION_ENDPOINT, init)
+    response = await request(desktopVersionEndpoint(options.origin), init)
   } catch {
     return null
   }

@@ -2,15 +2,17 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_CURRENT_VERSION_HEADER,
   DESKTOP_RELEASE_CHANNEL_HEADER,
-  DESKTOP_VERSION_ENDPOINT,
   MAX_VERSION_RESPONSE_BYTES,
   checkForStableUpdate,
   checkForDesktopUpdate,
   compareSemVerVersions,
+  desktopVersionEndpoint,
   desktopVersionRequestHeaders,
   matchesReleaseChannelVersionShape,
   parseSemVer,
+  resolveUpdateOrigin,
   SUPPORTED_RELEASE_CHANNELS,
+  UpdateOriginError,
   type UpdateRequest,
 } from '../src/update-checker.ts'
 import {
@@ -135,7 +137,7 @@ describe('public Desktop version check', () => {
     })
 
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.url).toBe(DESKTOP_VERSION_ENDPOINT)
+    expect(calls[0]?.url).toBe(desktopVersionEndpoint('http://update.intranet.example:8790'))
     expect(calls[0]?.url).not.toContain('/api/downloads/')
     expect(calls[0]?.init).toMatchObject({
       method: 'GET',
@@ -367,3 +369,47 @@ describe('huaanwork version checks', () => {
     await expect(checkForDesktopUpdate({ currentVersion: '0.1.0', channel: 'huaanwork', request: req2 })).resolves.toBeNull()
   })
 })
+
+describe('configurable update origin', () => {
+  it('defaults to the unreachable placeholder origin rather than the upstream public service', () => {
+    expect(resolveUpdateOrigin({})).toBe('http://update.intranet.example:8790')
+    expect(resolveUpdateOrigin({})).not.toContain('dshdesktop.cn')
+  })
+
+  it('reads the deployment origin from the environment and strips a trailing slash', () => {
+    expect(resolveUpdateOrigin({ HUAANWORK_UPDATE_ORIGIN: 'https://update.corp.lan:9000/' }))
+      .toBe('https://update.corp.lan:9000')
+  })
+
+  it('builds the version endpoint from the origin', () => {
+    expect(desktopVersionEndpoint('https://update.corp.lan:9000'))
+      .toBe('https://update.corp.lan:9000/api/desktop/version')
+  })
+
+  it.each([
+    'not a url',
+    'ftp://update.corp.lan',
+    'https://update.corp.lan/base',
+    'https://update.corp.lan/?x=1',
+    'https://user:pass@update.corp.lan',
+    '',
+  ])('rejects the unusable origin %s', raw => {
+    expect(() => resolveUpdateOrigin({ HUAANWORK_UPDATE_ORIGIN: raw })).toThrow(UpdateOriginError)
+  })
+
+  it('requests the configured endpoint', async () => {
+    const calls: string[] = []
+    const request: UpdateRequest = async url => {
+      calls.push(url)
+      return channelVersionResponse('0.1.0', 'huaanwork')
+    }
+    await checkForDesktopUpdate({
+      currentVersion: '0.1.0',
+      channel: 'huaanwork',
+      request,
+      origin: 'https://update.corp.lan:9000',
+    })
+    expect(calls).toEqual(['https://update.corp.lan:9000/api/desktop/version'])
+  })
+})
+
