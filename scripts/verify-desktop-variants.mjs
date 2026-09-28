@@ -113,12 +113,24 @@ const PAIRS = [
       // HUAANWORK_CHECKPOINT_USER_DATA_DIR(main.ts:711-717);均为单侧增量,既有内容逐字不动。
       'src/profile-checkpoint.ts',
       'src/main.ts',
+      // M6(2026-09-27)release-channel 切换:联合类型 'stable'|'beta' → 三元,
+      // 版本形状判定表化,更新 endpoint 由硬编码上游公共服务改为部署期可配置,
+      // 并透出每平台制品 sha256(D-M6-23)。
+      // 小写 'huaanwork' 字面量不被 normalize 归一,故必然产生差异。
+      'src/update-checker.ts',
+      'src/update-download.ts',
+      // M6 NSIS 制品名 DSH-Desktop-Beta-* → HuaAnWork-*:连字符形式不被
+      // normalize 的空格形式归一,与既有 scripts/verify-win-portable.ts 同因。
+      'scripts/verify-win-installer.ts',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [
       'src/client-huaanwork/',
       'src/huaanwork-host/',
       'src/huaanwork-guardrails/',
+      // M6 一次性数据迁移(旧 Tauri $DSH_HOME → HuaAnWork profile 目录),
+      // 主进程侧纯函数模块,单侧存在。
+      'src/huaanwork-migration/',
       'scripts/gen-',
       'scripts/huaanwork-',
     ],
