@@ -16,7 +16,10 @@ export const DESKTOP_CURRENT_VERSION_HEADER = 'X-DSH-Desktop-Version'
 export const DESKTOP_RELEASE_CHANNEL_HEADER = 'X-DSH-Desktop-Channel'
 
 /** Release streams supported by the Desktop service. */
-export type DesktopReleaseChannel = 'stable' | 'beta'
+export type DesktopReleaseChannel = 'stable' | 'beta' | 'huaanwork'
+
+/** Every channel this build can validate a version against, in declaration order. */
+export const SUPPORTED_RELEASE_CHANNELS: readonly DesktopReleaseChannel[] = ['stable', 'beta', 'huaanwork']
 
 /** Maximum response body bytes accepted from the version service. */
 export const MAX_VERSION_RESPONSE_BYTES = 4 * 1024
@@ -66,6 +69,7 @@ export type UpdateCheckResult = {
   readonly currentVersion: string
   /** Canonical latest stable version returned by the service. */
   readonly latestVersion: string
+  readonly sha256?: Readonly<Record<string, string>>
 }
 
 const SEMVER_PATTERN =
@@ -161,6 +165,7 @@ export async function checkForDesktopUpdate(
       : 'up-to-date',
     currentVersion: current.version,
     latestVersion: latest.version,
+    ...(latest.sha256 === undefined ? {} : { sha256: latest.sha256 }),
   }
 }
 
@@ -230,7 +235,10 @@ async function readLimitedBody(response: Response): Promise<string> {
   }
 }
 
-function parseVersionResponse(body: string, expectedChannel: DesktopReleaseChannel): ParsedSemVer | null {
+function parseVersionResponse(
+  body: string,
+  expectedChannel: DesktopReleaseChannel,
+): (ParsedSemVer & { readonly sha256?: Readonly<Record<string, string>> }) | null {
   let value: unknown
   try {
     value = JSON.parse(body)
@@ -238,9 +246,45 @@ function parseVersionResponse(body: string, expectedChannel: DesktopReleaseChann
     return null
   }
   if (!isRecord(value) || typeof value.version !== 'string') return null
-  if (expectedChannel === 'beta' && value.channel !== 'beta') return null
+  // beta 与 huaanwork 都要求服务端显式回显通道标签:未配置该通道的服务端因此恒返回 null(fail-closed)
+  if (expectedChannel !== 'stable' && value.channel !== expectedChannel) return null
   if (value.channel !== undefined && value.channel !== expectedChannel) return null
-  return parseCanonicalChannelVersion(value.version, expectedChannel)
+
+  let sha256: Record<string, string> | undefined
+  if (value.sha256 !== undefined) {
+    if (!isRecord(value.sha256)) return null
+    sha256 = {}
+    for (const [platform, hash] of Object.entries(value.sha256)) {
+      if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/u.test(hash)) return null
+      sha256[platform] = hash
+    }
+  }
+
+  const parsed = parseCanonicalChannelVersion(value.version, expectedChannel)
+  if (parsed === null) return null
+  return sha256 === undefined ? parsed : Object.assign(parsed, { sha256 })
+}
+
+/**
+ * Version-shape rule for one release stream.
+ *
+ * `huaanwork` mirrors `stable`: canonical SemVer with no prerelease identifiers.
+ * The exhaustive switch has no default branch on purpose - adding a fourth
+ * channel must fail typecheck here rather than silently inherit beta's shape.
+ */
+export function matchesReleaseChannelVersionShape(
+  channel: DesktopReleaseChannel,
+  parsed: ParsedSemVer,
+): boolean {
+  switch (channel) {
+    case 'stable':
+    case 'huaanwork':
+      return parsed.prerelease.length === 0
+    case 'beta':
+      return parsed.prerelease.length === 2
+        && parsed.prerelease[0] === 'beta'
+        && isNumeric(parsed.prerelease[1]!)
+  }
 }
 
 function parseCanonicalChannelVersion(
@@ -249,17 +293,15 @@ function parseCanonicalChannelVersion(
 ): ParsedSemVer | null {
   const parsed = parseCanonicalVersion(input)
   if (parsed === null) return null
-  if (channel === 'stable') return parsed.prerelease.length === 0 ? parsed : null
-  return parsed.prerelease.length === 2
-    && parsed.prerelease[0] === 'beta'
-    && isNumeric(parsed.prerelease[1]!)
-    ? parsed
-    : null
+  return matchesReleaseChannelVersionShape(channel, parsed) ? parsed : null
 }
 
 function parseCanonicalSupportedVersion(input: string): ParsedSemVer | null {
-  return parseCanonicalChannelVersion(input, 'stable')
-    ?? parseCanonicalChannelVersion(input, 'beta')
+  const parsed = parseCanonicalVersion(input)
+  if (parsed === null) return null
+  return SUPPORTED_RELEASE_CHANNELS.some(channel => matchesReleaseChannelVersionShape(channel, parsed))
+    ? parsed
+    : null
 }
 
 function parseCanonicalVersion(input: string): ParsedSemVer | null {

@@ -8,7 +8,9 @@ import {
   checkForDesktopUpdate,
   compareSemVerVersions,
   desktopVersionRequestHeaders,
+  matchesReleaseChannelVersionShape,
   parseSemVer,
+  SUPPORTED_RELEASE_CHANNELS,
   type UpdateRequest,
 } from '../src/update-checker.ts'
 import {
@@ -22,8 +24,12 @@ function versionResponse(version: unknown, init: ResponseInit = {}): Response {
   return Response.json({ version }, init)
 }
 
-function channelVersionResponse(version: unknown, channel: 'stable' | 'beta'): Response {
-  return Response.json({ version, channel })
+function channelVersionResponse(
+  version: unknown,
+  channel: 'stable' | 'beta' | 'huaanwork',
+  extra: Record<string, unknown> = {},
+): Response {
+  return Response.json({ version, channel, ...extra })
 }
 
 describe('strict SemVer parsing', () => {
@@ -275,5 +281,89 @@ describe('public Desktop version check', () => {
 
     await expect(checkForStableUpdate({ currentVersion, request })).resolves.toBeNull()
     expect(request).not.toHaveBeenCalled()
+  })
+})
+
+describe('huaanwork release channel version shape', () => {
+  it('lists the three supported channels', () => {
+    expect(SUPPORTED_RELEASE_CHANNELS).toEqual(['stable', 'beta', 'huaanwork'])
+  })
+
+  it('accepts canonical SemVer without prerelease for huaanwork, mirroring stable', () => {
+    const parsed = parseSemVer('0.1.0')!
+    expect(matchesReleaseChannelVersionShape('huaanwork', parsed)).toBe(true)
+    expect(matchesReleaseChannelVersionShape('stable', parsed)).toBe(true)
+  })
+
+  it('rejects a beta-shaped version on the huaanwork channel', () => {
+    const parsed = parseSemVer('0.1.0-beta.1')!
+    expect(matchesReleaseChannelVersionShape('huaanwork', parsed)).toBe(false)
+    expect(matchesReleaseChannelVersionShape('beta', parsed)).toBe(true)
+  })
+
+  it('rejects a stable-shaped version on the beta channel', () => {
+    expect(matchesReleaseChannelVersionShape('beta', parseSemVer('0.1.0')!)).toBe(false)
+  })
+})
+
+describe('huaanwork version checks', () => {
+  it('reports an update when the service echoes the huaanwork channel', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const request: UpdateRequest = async (url, init) => {
+      calls.push({ url, init })
+      return channelVersionResponse('0.2.0', 'huaanwork')
+    }
+    const result = await checkForDesktopUpdate({
+      currentVersion: '0.1.0',
+      channel: 'huaanwork',
+      request,
+    })
+    expect(result).toEqual({ status: 'update-available', currentVersion: '0.1.0', latestVersion: '0.2.0' })
+    expect(new Headers(calls[0]!.init.headers).get(DESKTOP_RELEASE_CHANNEL_HEADER)).toBe('huaanwork')
+  })
+
+  it('refuses a response that omits the huaanwork channel label', async () => {
+    const request: UpdateRequest = async () => versionResponse('0.2.0')
+    await expect(checkForDesktopUpdate({ currentVersion: '0.1.0', channel: 'huaanwork', request }))
+      .resolves.toBeNull()
+  })
+
+  it('refuses a response labeled with a different channel', async () => {
+    const request: UpdateRequest = async () => channelVersionResponse('0.2.0', 'stable')
+    await expect(checkForDesktopUpdate({ currentVersion: '0.1.0', channel: 'huaanwork', request }))
+      .resolves.toBeNull()
+  })
+
+  it('accepts the installed 0.1.0 as a valid huaanwork current version', () => {
+    expect(() => desktopVersionRequestHeaders(undefined, '0.1.0', 'huaanwork')).not.toThrow()
+    expect(desktopVersionRequestHeaders(undefined, '0.1.0', 'huaanwork')[DESKTOP_CURRENT_VERSION_HEADER]).toBe('0.1.0')
+  })
+
+  it('carries valid sha256 digests in UpdateCheckResult when present in version response (D-M6-23)', async () => {
+    const validHash = 'a'.repeat(64)
+    const request: UpdateRequest = async () => channelVersionResponse('0.2.0', 'huaanwork', {
+      sha256: { mac: validHash, windows: validHash },
+    })
+    const result = await checkForDesktopUpdate({
+      currentVersion: '0.1.0',
+      channel: 'huaanwork',
+      request,
+    })
+    expect(result).toEqual({
+      status: 'update-available',
+      currentVersion: '0.1.0',
+      latestVersion: '0.2.0',
+      sha256: { mac: validHash, windows: validHash },
+    })
+  })
+
+  it('refuses a version response carrying an invalid sha256 payload (D-M6-23)', async () => {
+    // 非 record
+    const req1: UpdateRequest = async () => channelVersionResponse('0.2.0', 'huaanwork', { sha256: 'not-a-record' })
+    await expect(checkForDesktopUpdate({ currentVersion: '0.1.0', channel: 'huaanwork', request: req1 })).resolves.toBeNull()
+
+    // 非 64 位小写 hex
+    const req2: UpdateRequest = async () => channelVersionResponse('0.2.0', 'huaanwork', { sha256: { mac: 'too-short' } })
+    await expect(checkForDesktopUpdate({ currentVersion: '0.1.0', channel: 'huaanwork', request: req2 })).resolves.toBeNull()
   })
 })
