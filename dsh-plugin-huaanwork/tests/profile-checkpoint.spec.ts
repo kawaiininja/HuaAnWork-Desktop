@@ -389,3 +389,92 @@ describe('Desktop profile health checkpoints', () => {
     expect(() => fixture().checkpoint.restoreSlot('slot-3')).toThrow('slot-3 is empty')
   })
 })
+
+describe('huaanwork checkpoint release channel', () => {
+  it('accepts huaanwork as a persisted channel', () => {
+    const checkpoint = new DesktopProfileCheckpoint({
+      userDataDir: mkdtempSync(join(tmpdir(), 'ckpt-huaanwork-')),
+      profileDir: mkdtempSync(join(tmpdir(), 'profile-huaanwork-')),
+      homeDir: mkdtempSync(join(tmpdir(), 'home-huaanwork-')),
+      profileName: 'desktop',
+      provider: 'desktop-profile',
+      appVersion: '0.1.0',
+      desktopPackageName: 'dsh-plugin-huaanwork',
+      releaseChannel: 'huaanwork',
+      dshVersion: '0.1.6-alpha.2',
+    })
+    expect(checkpoint.releaseChannel).toBe('huaanwork')
+  })
+
+  it('rejects an unknown channel at construction', () => {
+    expect(() => new DesktopProfileCheckpoint({
+      userDataDir: mkdtempSync(join(tmpdir(), 'ckpt-bad-')),
+      profileDir: mkdtempSync(join(tmpdir(), 'profile-bad-')),
+      homeDir: mkdtempSync(join(tmpdir(), 'home-bad-')),
+      profileName: 'desktop',
+      provider: 'desktop-profile',
+      appVersion: '0.1.0',
+      desktopPackageName: 'dsh-plugin-huaanwork',
+      // @ts-expect-error deliberately outside the union
+      releaseChannel: 'nightly',
+      dshVersion: '0.1.6-alpha.2',
+    })).toThrow(/invalid Desktop release channel/u)
+  })
+
+  it('treats a v4 manifest written on the stable channel as this edition\'s legacy identity', () => {
+    const target = fixture({
+      desktopPackageName: 'dsh-plugin-huaanwork',
+      releaseChannel: 'stable',
+    })
+    const captured = target.checkpoint.captureHealthy()
+    expect(captured.status).toBe('captured')
+
+    // 包名相等 ⇒ 放行任意已知通道,无需调用方注入任何白名单。
+    expect(inspectLatestDesktopProfileCheckpointUsage({
+      userDataDir: target.userData,
+      profileDir: target.profile,
+      profileName: 'work',
+      legacyDesktopPackageName: 'dsh-plugin-huaanwork',
+      legacyReleaseChannel: 'huaanwork',
+    }).status).not.toBe('invalid')
+  })
+
+  it('still refuses a v4 manifest written by a different package name', () => {
+    const target = fixture({
+      desktopPackageName: 'dsh-plugin-huaanwork',
+      releaseChannel: 'stable',
+    })
+    const captured = target.checkpoint.captureHealthy()
+    expect(captured.status).toBe('captured')
+
+    // 放宽的只是通道;包名不等(真正的跨产品)仍判 invalid,行为不变。
+    expect(inspectLatestDesktopProfileCheckpointUsage({
+      userDataDir: target.userData,
+      profileDir: target.profile,
+      profileName: 'work',
+      legacyDesktopPackageName: 'dsh-plugin-desktop-beta',
+      legacyReleaseChannel: 'beta',
+    }).status).toBe('invalid')
+  })
+
+  it('still refuses a v4 manifest carrying an unknown channel string', () => {
+    const target = fixture({
+      desktopPackageName: 'dsh-plugin-huaanwork',
+      releaseChannel: 'stable',
+    })
+    const captured = target.checkpoint.captureHealthy()
+    if (captured.status !== 'captured') throw new Error('expected captured')
+    const manifestPath = join(captured.snapshotDirectory, 'manifest.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>
+    writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, releaseChannel: 'nightly' })}\n`)
+
+    expect(inspectLatestDesktopProfileCheckpointUsage({
+      userDataDir: target.userData,
+      profileDir: target.profile,
+      profileName: 'work',
+      legacyDesktopPackageName: 'dsh-plugin-huaanwork',
+      legacyReleaseChannel: 'huaanwork',
+    }).status).toBe('invalid')
+  })
+})
+

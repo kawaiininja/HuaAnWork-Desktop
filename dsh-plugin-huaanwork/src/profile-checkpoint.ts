@@ -113,7 +113,7 @@ interface ProfileCheckpointManifestMetadata {
   readonly appVersion: string
 }
 
-export type DesktopProfileCheckpointReleaseChannel = 'stable' | 'beta'
+export type DesktopProfileCheckpointReleaseChannel = 'stable' | 'beta' | 'huaanwork'
 
 export interface ProfileCheckpointManifestV2 extends ProfileCheckpointManifestMetadata {
   readonly version: 2
@@ -250,9 +250,11 @@ function assertAppVersion(value: string): string {
   return value
 }
 
+const KNOWN_RELEASE_CHANNELS: ReadonlySet<string> = new Set(['stable', 'beta', 'huaanwork'])
+
 function assertReleaseChannel(value: string): DesktopProfileCheckpointReleaseChannel {
-  if (value !== 'stable' && value !== 'beta') fail('invalid Desktop release channel')
-  return value
+  if (!KNOWN_RELEASE_CHANNELS.has(value)) fail('invalid Desktop release channel')
+  return value as DesktopProfileCheckpointReleaseChannel
 }
 
 function assertSlotId(value: string): DesktopProfileCheckpointSlotId {
@@ -446,8 +448,12 @@ export function inspectLatestDesktopProfileCheckpointUsage(
           || typeof object.dshVersion !== 'string') {
           fail('checkpoint Desktop identity is invalid')
         }
+        // The package name is 1:1 with the edition, so it alone identifies whose history
+        // this manifest is - the channel carries no extra discriminating information.
+        // Accepting any *known* channel is what lets snapshots written while this edition
+        // still ran on 'stable' survive the switch to 'huaanwork'. Unknown strings still
+        // fail closed via assertReleaseChannel.
         const manifestChannel = assertReleaseChannel(object.releaseChannel)
-        if (manifestChannel !== legacyChannel) fail('checkpoint Desktop identity is invalid')
         desktopPackageName = object.desktopPackageName
         releaseChannel = manifestChannel
         dshVersion = assertAppVersion(object.dshVersion)
