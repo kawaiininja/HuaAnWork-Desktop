@@ -11,7 +11,8 @@ test('allows product-name data in Market source', () => {
     ['dsh-community-market/src/install.ts', "const blocked = new Set(['dsh-plugin-desktop'])\n"],
     // M5 round3 R10:market-server 同属 market 面受检根;尚未实现前的骨架也须过向检查。
     ['market-server/src/index.ts', "const blocked = new Set(['dsh-plugin-huaanwork'])\n"],
-  ]), { fileCount: 2 })
+    ['update-server/src/index.ts', "const blocked = new Set(['dsh-plugin-huaanwork'])\n"],
+  ]), { fileCount: 3 })
 })
 
 test('rejects Market imports of Desktop implementation', () => {
@@ -35,6 +36,12 @@ test('rejects Market imports of Desktop implementation', () => {
   assert.throws(() => verifyMarketDependencyDirection([
     ['market-server/src/server.ts', "const runtime = await import('../dsh-plugin-desktop/src/runtime.js')\n"],
   ]), /must not import Desktop implementation/u)
+  assert.throws(() => verifyMarketDependencyDirection([
+    ['update-server/src/routes.ts', "import type { HostRuntime } from 'dsh-plugin-huaanwork/host-runtime'\n"],
+  ]), /must not import Desktop implementation/u)
+  assert.throws(() => verifyMarketDependencyDirection([
+    ['update-server/src/server.ts', "const runtime = await import('../dsh-plugin-desktop/src/runtime.js')\n"],
+  ]), /must not import Desktop implementation/u)
 })
 
 test('allows Desktop sources importing upstream market contracts', () => {
@@ -46,20 +53,33 @@ test('allows Desktop sources importing upstream market contracts', () => {
   ]), { fileCount: 2 })
 })
 
-test('rejects Desktop imports of the market-server workspace (reverse rule, round3 R10)', () => {
+test('rejects Desktop imports of server workspaces (market-server / update-server)', () => {
   assert.throws(() => verifyDesktopDependencyDirection([
     ['dsh-plugin-huaanwork/src/huaanwork-host/market/routes.ts', "import { verifyManifest } from 'market-server/contracts'\n"],
-  ]), /must not import the market-server workspace/u)
+  ]), /must not import a server workspace \(market-server \/ update-server\)/u)
   assert.throws(() => verifyDesktopDependencyDirection([
     ['dsh-plugin-desktop/src/index.ts', "const admin = await import('market-server/admin')\n"],
-  ]), /must not import the market-server workspace/u)
+  ]), /must not import a server workspace \(market-server \/ update-server\)/u)
   assert.throws(() => verifyDesktopDependencyDirection([
     ['dsh-plugin-desktop-beta/src/index.ts', "const server = require('market-server')\n"],
-  ]), /must not import the market-server workspace/u)
+  ]), /must not import a server workspace \(market-server \/ update-server\)/u)
   // 相对路径钻进 market-server 工作区同样算违规(双向守卫按路径形态判定)。
   assert.throws(() => verifyDesktopDependencyDirection([
     ['dsh-plugin-huaanwork/src/client-huaanwork/api.ts', "export { fetchCatalog } from '../../market-server/src/catalog.js'\n"],
-  ]), /must not import the market-server workspace/u)
+  ]), /must not import a server workspace \(market-server \/ update-server\)/u)
+  // update-server 工作区同受反向规则约束
+  assert.throws(() => verifyDesktopDependencyDirection([
+    ['dsh-plugin-huaanwork/src/huaanwork-host/updates/client.ts', "import { checkUpdate } from 'update-server/client'\n"],
+  ]), /must not import a server workspace \(market-server \/ update-server\)/u)
+  assert.throws(() => verifyDesktopDependencyDirection([
+    ['dsh-plugin-desktop/src/index.ts', "const server = await import('update-server')\n"],
+  ]), /must not import a server workspace \(market-server \/ update-server\)/u)
+  assert.throws(() => verifyDesktopDependencyDirection([
+    ['dsh-plugin-desktop-beta/src/index.ts', "const server = require('update-server')\n"],
+  ]), /must not import a server workspace \(market-server \/ update-server\)/u)
+  assert.throws(() => verifyDesktopDependencyDirection([
+    ['dsh-plugin-huaanwork/src/client-huaanwork/api.ts', "export { fetchUpdate } from '../../update-server/src/index.js'\n"],
+  ]), /must not import a server workspace \(market-server \/ update-server\)/u)
 })
 
 // 评审 P15:解法 A(spec §14 第 40 条)的机器守卫——远程市场安装绝不旁路已验签清单。

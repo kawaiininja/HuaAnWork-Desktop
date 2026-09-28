@@ -1,0 +1,23 @@
+{
+  "name": "update-server",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "description": "Intranet release-channel update server for HuaAnWork Desktop (version API + installer artifact hosting)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "echo \"update-server: TypeScript sources run directly; no build output\"",
+    "start": "node --experimental-strip-types src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run tests",
+    "check": "yarn run typecheck && yarn run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

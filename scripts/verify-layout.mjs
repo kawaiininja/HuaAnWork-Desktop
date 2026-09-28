@@ -40,8 +40,9 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'packages/huaanwork-model',
   'packages/huaanwork-git-tools',
   'market-server',
+  'update-server',
 ])) {
-  fail('the root Yarn workspace must contain the desktop, community-fabric, community-market, and market-server packages')
+  fail('the root Yarn workspace must contain the desktop, community-fabric, community-market, market-server, and update-server packages')
 }
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', stablePlugin],

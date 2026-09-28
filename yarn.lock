@@ -18868,6 +18868,16 @@ __metadata:
   languageName: node
   linkType: hard
 
+"update-server@workspace:update-server":
+  version: 0.0.0-use.local
+  resolution: "update-server@workspace:update-server"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  languageName: unknown
+  linkType: soft
+
 "use-sync-external-store@npm:^1.6.0":
   version: 1.6.0
   resolution: "use-sync-external-store@npm:1.6.0"

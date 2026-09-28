@@ -16,7 +16,8 @@
     "packages/huaanwork-policy",
     "packages/huaanwork-model",
     "packages/huaanwork-git-tools",
-    "market-server"
+    "market-server",
+    "update-server"
   ],
   "resolutions": {
     "app-builder-lib@npm:26.15.7": "patch:app-builder-lib@npm%3A26.15.7#./patches/app-builder-lib@26.15.7.patch",
@@ -1175,9 +1176,9 @@
     }
   },
   "scripts": {
-    "build": "yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop build && yarn workspace dsh-plugin-desktop-beta build && yarn workspace dsh-plugin-huaanwork build && yarn workspace market-server build",
-    "typecheck": "yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-plugin-desktop-beta typecheck && yarn workspace dsh-plugin-huaanwork typecheck && yarn workspace dsh-community-market typecheck && yarn workspace market-server typecheck",
-    "test": "yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test && yarn workspace market-server test",
+    "build": "yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop build && yarn workspace dsh-plugin-desktop-beta build && yarn workspace dsh-plugin-huaanwork build && yarn workspace market-server build && yarn workspace update-server build",
+    "typecheck": "yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-plugin-desktop-beta typecheck && yarn workspace dsh-plugin-huaanwork typecheck && yarn workspace dsh-community-market typecheck && yarn workspace market-server typecheck && yarn workspace update-server typecheck",
+    "test": "yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test && yarn workspace market-server test && yarn workspace update-server test",
     "test:bilingual-docs": "node --test scripts/bilingual-docs.test.mjs",
     "check:bilingual-docs": "yarn test:bilingual-docs && node scripts/verify-bilingual-docs.mjs",
     "test:architecture-gates": "node --test scripts/market-dependency-direction.test.mjs",
@@ -1188,7 +1189,7 @@
     "check:vendored-runtime": "node scripts/sync-vendored-runtime.mjs --check --channel stable && node scripts/sync-vendored-runtime.mjs --check --channel beta && node scripts/sync-vendored-runtime.mjs --check --channel huaanwork",
     "check:desktop-variants": "yarn test:desktop-variants && node scripts/verify-desktop-variants.mjs",
     "check:layout": "yarn check:bilingual-docs && yarn check:architecture && yarn check:vendored-runtime && yarn check:desktop-variants && node scripts/verify-layout.mjs && yarn test:gate-scripts",
-    "check": "yarn check:layout && yarn workspace dsh-community-fabric check && yarn workspace dsh-community-market check && yarn workspace dsh-plugin-desktop check && yarn workspace dsh-plugin-desktop-beta check && yarn workspace dsh-plugin-huaanwork check && yarn workspace market-server check",
+    "check": "yarn check:layout && yarn workspace dsh-community-fabric check && yarn workspace dsh-community-market check && yarn workspace dsh-plugin-desktop check && yarn workspace dsh-plugin-desktop-beta check && yarn workspace dsh-plugin-huaanwork check && yarn workspace market-server check && yarn workspace update-server check",
     "dev": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop dev",
     "start": "yarn workspace dsh-plugin-desktop start",
     "package:dir": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop package:dir",
@@ -1210,6 +1211,7 @@
     "dist:win:beta": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop-beta dist:win",
     "dist:win-portable:beta": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop-beta dist:win-portable",
     "dev:huaanwork": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dev",
+    "dev:update-server": "yarn workspace update-server start",
     "package:dir:huaanwork": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork package:dir",
     "dist:mac:huaanwork": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac",
     "dist:mac-smoke:huaanwork": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac-smoke",

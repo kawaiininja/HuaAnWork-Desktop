@@ -1,5 +1,7 @@
 {
-  "fixtureVersion": 1,
-  "typecheck": "yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-plugin-desktop-beta typecheck && yarn workspace dsh-plugin-huaanwork typecheck && yarn workspace dsh-community-market typecheck && yarn workspace market-server typecheck",
-  "test": "yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test && yarn workspace market-server test"
+  "fixtureVersion": 2,
+  "build": "yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop build && yarn workspace dsh-plugin-desktop-beta build && yarn workspace dsh-plugin-huaanwork build && yarn workspace market-server build && yarn workspace update-server build",
+  "typecheck": "yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-plugin-desktop-beta typecheck && yarn workspace dsh-plugin-huaanwork typecheck && yarn workspace dsh-community-market typecheck && yarn workspace market-server typecheck && yarn workspace update-server typecheck",
+  "test": "yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test && yarn workspace market-server test && yarn workspace update-server test",
+  "check": "yarn check:layout && yarn workspace dsh-community-fabric check && yarn workspace dsh-community-market check && yarn workspace dsh-plugin-desktop check && yarn workspace dsh-plugin-desktop-beta check && yarn workspace dsh-plugin-huaanwork check && yarn workspace market-server check && yarn workspace update-server check"
 }

@@ -4,11 +4,11 @@ import { resolve } from 'node:path'
 
 const IMPORT_SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s*)['"]([^'"]+)['"]/gu
 const DESKTOP_MODULE = /(?:^|\/)dsh-plugin-(?:desktop(?:-beta)?|huaanwork)(?:\/|$)/u
-const MARKET_SERVER_MODULE = /(?:^|\/)market-server(?:\/|$)/u
+const SERVER_WORKSPACE_MODULE = /(?:^|\/)(?:market-server|update-server)(?:\/|$)/u
 
 // Market 面受检根(round3 R10):market 源只 import 上游 contracts/标准库,
 // 不得 import 任何 dsh-plugin-* 桌面实现。
-const MARKET_SOURCE_ROOTS = ['dsh-community-market/src', 'market-server/src']
+const MARKET_SOURCE_ROOTS = ['dsh-community-market/src', 'market-server/src', 'update-server/src']
 // 反向规则(round3 R10):桌面插件源不得 import market-server 服务端内部
 // (market-server 是独立服务端工作区,消费面经 wrapper + 上游 contracts,不直通服务端代码)。
 const DESKTOP_SOURCE_ROOTS = [
@@ -45,14 +45,14 @@ export function verifyDesktopDependencyDirection(files) {
   const violations = []
   for (const [path, source] of files) {
     for (const specifier of importedSpecifiers(source)) {
-      if (MARKET_SERVER_MODULE.test(normalizePath(specifier))) {
+      if (SERVER_WORKSPACE_MODULE.test(normalizePath(specifier))) {
         violations.push(normalizePath(path))
         break
       }
     }
   }
   if (violations.length > 0) {
-    throw new Error(`Desktop source must not import the market-server workspace: ${violations.join(', ')}`)
+    throw new Error(`Desktop source must not import a server workspace (market-server / update-server): ${violations.join(', ')}`)
   }
   return { fileCount: files.length }
 }

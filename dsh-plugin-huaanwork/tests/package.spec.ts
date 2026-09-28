@@ -21,7 +21,7 @@ const packageRoot = new URL('../', import.meta.url)
 const workspaceRoot = new URL('../', packageRoot)
 const ROOT_GATE_SCRIPTS = JSON.parse(
   readFileSync(join(import.meta.dirname, '../../scripts/expected-root-gate-scripts.json'), 'utf8'),
-) as { fixtureVersion: number; typecheck: string; test: string }
+) as { fixtureVersion: number; build: string; typecheck: string; test: string; check: string }
 const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), 'utf8')) as {
   name?: unknown
   version?: unknown
@@ -85,12 +85,12 @@ describe('published package surface', () => {
   })
 
   it('runs desktop and community market typechecks from the root command', () => {
-    expect(ROOT_GATE_SCRIPTS.fixtureVersion).toBe(1)
+    expect(ROOT_GATE_SCRIPTS.fixtureVersion).toBe(2)
     expect(workspaceManifest.scripts?.typecheck).toBe(ROOT_GATE_SCRIPTS.typecheck)
   })
 
   it('runs desktop and community market tests from the root command', () => {
-    expect(ROOT_GATE_SCRIPTS.fixtureVersion).toBe(1)
+    expect(ROOT_GATE_SCRIPTS.fixtureVersion).toBe(2)
     expect(workspaceManifest.scripts?.test).toBe(ROOT_GATE_SCRIPTS.test)
   })
 

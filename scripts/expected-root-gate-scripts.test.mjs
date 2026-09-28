@@ -7,7 +7,9 @@ const EXPECTED = JSON.parse(readFileSync(join(import.meta.dirname, 'expected-roo
 const manifest = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'))
 
 test('the shared gate-script fixture equals the root manifest', () => {
-  assert.strictEqual(EXPECTED.fixtureVersion, 1)
+  assert.strictEqual(EXPECTED.fixtureVersion, 2)
+  assert.strictEqual(manifest.scripts.build, EXPECTED.build)
   assert.strictEqual(manifest.scripts.typecheck, EXPECTED.typecheck)
   assert.strictEqual(manifest.scripts.test, EXPECTED.test)
+  assert.strictEqual(manifest.scripts.check, EXPECTED.check)
 })
