@@ -3,10 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  DESKTOP_DOWNLOAD_URLS,
   DESKTOP_TARGET_VERSION_HEADER,
   MAX_UPDATE_DOWNLOAD_BYTES,
   UpdateDownloadError,
+  desktopDownloadUrls,
   desktopUpdateFilename,
   downloadDesktopUpdate,
   pendingDesktopUpdateArtifact,
@@ -134,7 +134,7 @@ describe('desktop update installer download', () => {
     expect(result).toBe(join(directory, 'DSH-Desktop-2.1.0-mac.dmg'))
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.url).toBe(DESKTOP_DOWNLOAD_URLS.darwin)
+    expect(calls[0]?.url).toBe(desktopDownloadUrls().darwin)
     expect(calls[0]?.init).toMatchObject({ method: 'GET', cache: 'no-store', redirect: 'follow' })
     await expectNoPartialFiles(directory)
   })
@@ -147,7 +147,7 @@ describe('desktop update installer download', () => {
       version: '2.2.0',
       destinationPath: destinationPath(directory, 'win32', '2.2.0'),
       request: async (url) => {
-        expect(url).toBe(DESKTOP_DOWNLOAD_URLS.win32)
+        expect(url).toBe(desktopDownloadUrls().win32)
         return chunkedResponse([artifact])
       },
     })
@@ -390,5 +390,110 @@ describe('desktop update artifact cleanup', () => {
     await expect(pendingDesktopUpdateArtifact(userDataPath, '2.1.0', 'darwin')).resolves.toBeUndefined()
     if (remove) await expect(access(artifact.path)).rejects.toMatchObject({ code: 'ENOENT' })
     else await expect(access(artifact.path)).resolves.toBeUndefined()
+  })
+})
+
+describe('huaanwork update downloads', () => {
+  it('names the artifact after the product, not after DSH Desktop', () => {
+    expect(desktopUpdateFilename('darwin', '0.2.0', 'huaanwork')).toBe('HuaAnWork-0.2.0-mac.dmg')
+    expect(desktopUpdateFilename('win32', '0.2.0', 'huaanwork')).toBe('HuaAnWork-0.2.0-windows.exe')
+  })
+
+  it('keeps the stable and beta artifact names untouched', () => {
+    expect(desktopUpdateFilename('darwin', '2.0.4', 'stable')).toBe('DSH-Desktop-2.0.4-mac.dmg')
+    expect(desktopUpdateFilename('darwin', '2.0.6-beta.1', 'beta')).toBe('DSH-Desktop-Beta-2.0.6-beta.1-mac.dmg')
+  })
+
+  it('rejects a beta-shaped version on the huaanwork channel', () => {
+    expect(() => desktopUpdateFilename('darwin', '0.2.0-beta.1', 'huaanwork'))
+      .toThrow(/must match the huaanwork channel/u)
+  })
+
+  it('rejects a stable-shaped version on the beta channel', () => {
+    expect(() => desktopUpdateFilename('darwin', '2.0.4', 'beta')).toThrow(/must match the beta channel/u)
+  })
+
+  it('builds both download endpoints from the configured origin', () => {
+    expect(desktopDownloadUrls('https://update.corp.lan:9000')).toEqual({
+      darwin: 'https://update.corp.lan:9000/api/downloads/mac',
+      win32: 'https://update.corp.lan:9000/api/downloads/windows',
+    })
+  })
+
+  it('sends the huaanwork channel and target version to the configured origin', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const root = await temporaryDirectory()
+    const destination = join(root, 'HuaAnWork-0.2.0-mac.dmg')
+    const result = await downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '0.2.0',
+      channel: 'huaanwork',
+      origin: 'https://update.corp.lan:9000',
+      destinationPath: destination,
+      request: async (url, init) => {
+        calls.push({ url, init })
+        return new Response(dmgArtifact() as unknown as BodyInit, { status: 200, headers: { 'content-length': String(dmgArtifact().length) } })
+      },
+    })
+    expect(calls[0]!.url).toBe('https://update.corp.lan:9000/api/downloads/mac')
+    const headers = new Headers(calls[0]!.init.headers)
+    expect(headers.get(DESKTOP_RELEASE_CHANNEL_HEADER)).toBe('huaanwork')
+    expect(headers.get(DESKTOP_TARGET_VERSION_HEADER)).toBe('0.2.0')
+    expect(result).toBe(destination)
+  })
+
+  it('rejects a downloaded artifact whose sha256 does not match the pinned digest (D-M6-23)', async () => {
+    const root = await temporaryDirectory()
+    const destination = join(root, 'HuaAnWork-0.2.0-mac.dmg')
+    await expect(downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '0.2.0',
+      channel: 'huaanwork',
+      origin: 'https://update.corp.lan:9000',
+      destinationPath: destination,
+      expectedSha256: '0'.repeat(64),
+      request: async () => new Response(dmgArtifact() as unknown as BodyInit, { status: 200, headers: { 'content-length': String(dmgArtifact().length) } }),
+    })).rejects.toThrow(/update-integrity-mismatch/)
+    await expect(access(destination)).rejects.toThrow()
+  })
+
+  it('accepts the artifact when the pinned sha256 matches (D-M6-23)', async () => {
+    const root = await temporaryDirectory()
+    const destination = join(root, 'HuaAnWork-0.2.0-mac.dmg')
+    const artifact = dmgArtifact()
+    const { createHash } = await import('node:crypto')
+    const correctHash = createHash('sha256').update(artifact).digest('hex')
+    const result = await downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '0.2.0',
+      channel: 'huaanwork',
+      origin: 'https://update.corp.lan:9000',
+      destinationPath: destination,
+      expectedSha256: correctHash,
+      request: async () => new Response(artifact as unknown as BodyInit, { status: 200, headers: { 'content-length': String(artifact.length) } }),
+    })
+    expect(result).toBe(destination)
+  })
+
+  it('warns but proceeds when the version response carries no sha256 (honest downgrade)', async () => {
+    const root = await temporaryDirectory()
+    const destination = join(root, 'HuaAnWork-0.2.0-mac.dmg')
+    const warnLogs: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => warnLogs.push(args.join(' '))
+    try {
+      const result = await downloadDesktopUpdate({
+        platform: 'darwin',
+        version: '0.2.0',
+        channel: 'huaanwork',
+        origin: 'https://update.corp.lan:9000',
+        destinationPath: destination,
+        request: async () => new Response(dmgArtifact() as unknown as BodyInit, { status: 200, headers: { 'content-length': String(dmgArtifact().length) } }),
+      })
+      expect(result).toBe(destination)
+      expect(warnLogs.some(log => log.includes('integrity-unverified'))).toBe(true)
+    } finally {
+      console.warn = originalWarn
+    }
   })
 })

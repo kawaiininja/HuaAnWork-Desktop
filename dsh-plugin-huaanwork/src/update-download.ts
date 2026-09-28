@@ -1,23 +1,30 @@
 /** Headless, confirmation-gated downloads for DSH Desktop installers. */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmod, lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import {
   compareSemVerVersions,
   DESKTOP_RELEASE_CHANNEL_HEADER,
+  matchesReleaseChannelVersionShape,
   parseSemVer,
+  resolveUpdateOrigin,
+  SUPPORTED_RELEASE_CHANNELS,
   type DesktopReleaseChannel,
 } from './update-checker.ts'
 
 /** Desktop platforms with a fixed installer download endpoint. */
 export type DesktopDownloadPlatform = 'darwin' | 'win32'
 
-/** Fixed download endpoints that record one user-confirmed installer download. */
-export const DESKTOP_DOWNLOAD_URLS: Readonly<Record<DesktopDownloadPlatform, string>> = {
-  darwin: 'https://www.dshdesktop.cn/api/downloads/mac',
-  win32: 'https://www.dshdesktop.cn/api/downloads/windows',
+/** Download endpoints that record one user-confirmed installer download. */
+export function desktopDownloadUrls(
+  origin: string = resolveUpdateOrigin(),
+): Readonly<Record<DesktopDownloadPlatform, string>> {
+  return {
+    darwin: `${origin}/api/downloads/mac`,
+    win32: `${origin}/api/downloads/windows`,
+  }
 }
 
 /** Header pinning a download request and response to the checked release. */
@@ -35,6 +42,7 @@ export type UpdateDownloadErrorCode =
   | 'invalid-options'
   | 'network'
   | 'response-too-large'
+  | 'update-integrity-mismatch'
 
 /** Fetch-compatible request boundary supplied by the Electron adapter or a test. */
 export type UpdateArtifactRequest = (url: string, init: RequestInit) => Promise<Response>
@@ -53,6 +61,10 @@ export interface DownloadDesktopUpdateOptions {
   readonly request: UpdateArtifactRequest
   /** Optional cancellation signal owned by the update coordinator. */
   readonly signal?: AbortSignal
+  /** Optional deployment update origin override. */
+  readonly origin?: string
+  /** Optional expected sha256 checksum to verify downloaded artifact integrity. */
+  readonly expectedSha256?: string
 }
 
 /** Typed failure from installer request, validation, or cancellation. */
@@ -121,7 +133,7 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
 
   let response: Response
   try {
-    response = await options.request(DESKTOP_DOWNLOAD_URLS[platform], {
+    response = await options.request(desktopDownloadUrls(options.origin)[platform], {
       method: 'GET',
       headers: {
         [DESKTOP_RELEASE_CHANNEL_HEADER]: channel,
@@ -154,6 +166,19 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
     throwIfAborted(options.signal)
     await validateArtifact(paths.temporary, platform)
     throwIfAborted(options.signal)
+    if (options.expectedSha256 !== undefined) {
+      const bytes = await readFile(paths.temporary)
+      const actualHash = createHash('sha256').update(bytes).digest('hex')
+      if (actualHash.toLowerCase() !== options.expectedSha256.toLowerCase()) {
+        throw new UpdateDownloadError(
+          'update-integrity-mismatch',
+          `The downloaded installer sha256 (${actualHash}) does not match expected (${options.expectedSha256}) (update-integrity-mismatch).`,
+        )
+      }
+    } else {
+      console.warn('[update-download] installer sha256 is unverified (honest downgrade): integrity-unverified')
+    }
+    throwIfAborted(options.signal)
     await unlinkIfPresent(paths.completed)
     await rename(paths.temporary, paths.completed)
     return paths.completed
@@ -170,6 +195,12 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
   }
 }
 
+const CHANNEL_ARTIFACT_PRODUCT: Readonly<Record<DesktopReleaseChannel, string>> = {
+  stable: 'DSH-Desktop',
+  beta: 'DSH-Desktop-Beta',
+  huaanwork: 'HuaAnWork',
+}
+
 /** Fixed default filename shown by the native destination picker. */
 export function desktopUpdateFilename(
   platform: DesktopDownloadPlatform,
@@ -180,8 +211,7 @@ export function desktopUpdateFilename(
   validatedVersion(version, channel)
   const extension = platform === 'darwin' ? 'dmg' : 'exe'
   const platformName = platform === 'darwin' ? 'mac' : 'windows'
-  const product = channel === 'beta' ? 'DSH-Desktop-Beta' : 'DSH-Desktop'
-  return `${product}-${version}-${platformName}.${extension}`
+  return `${CHANNEL_ARTIFACT_PRODUCT[channel]}-${version}-${platformName}.${extension}`
 }
 
 /** Remember a downloaded installer until an upgraded application resolves its retention. */
@@ -259,12 +289,7 @@ function validatedPlatform(platform: DesktopDownloadPlatform): DesktopDownloadPl
 
 function validatedVersion(version: string, channel: DesktopReleaseChannel = 'stable'): string {
   const parsed = parseSemVer(version)
-  const expectedPrerelease = channel === 'stable'
-    ? parsed?.prerelease.length === 0
-    : parsed?.prerelease.length === 2
-      && parsed.prerelease[0] === 'beta'
-      && /^[0-9]+$/u.test(parsed.prerelease[1]!)
-  if (parsed === null || !expectedPrerelease || parsed.version !== version) {
+  if (parsed === null || !matchesReleaseChannelVersionShape(channel, parsed) || parsed.version !== version) {
     throw new UpdateDownloadError('invalid-options', `The update version must match the ${channel} channel.`)
   }
   return version
@@ -272,12 +297,11 @@ function validatedVersion(version: string, channel: DesktopReleaseChannel = 'sta
 
 function validatedReleaseVersion(version: string): string {
   const parsed = parseSemVer(version)
-  const isStable = parsed?.prerelease.length === 0
-  const isBeta = parsed?.prerelease.length === 2
-    && parsed.prerelease[0] === 'beta'
-    && /^[0-9]+$/u.test(parsed.prerelease[1]!)
-  if (parsed === null || parsed.version !== version || (!isStable && !isBeta)) {
-    throw new UpdateDownloadError('invalid-options', 'The update version must belong to a supported release channel.')
+  const supported = parsed !== null
+    && parsed.version === version
+    && SUPPORTED_RELEASE_CHANNELS.some(channel => matchesReleaseChannelVersionShape(channel, parsed))
+  if (!supported) {
+    throw new UpdateDownloadError('invalid-artifact', 'The recorded update version is not a supported release version.')
   }
   return version
 }
