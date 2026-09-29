@@ -911,6 +911,17 @@ describe('published package surface', () => {
     expect(manifest.build?.linux?.icon).toBe('build/app-icon.png')
   })
 
+  it('keeps both intranet servers out of the desktop installer', () => {
+    const files = ((manifest.build?.files ?? []) as string[]).join('\n')
+    expect(files).not.toContain('market-server')
+    expect(files).not.toContain('update-server')
+    for (const name of ['market-server', 'update-server']) {
+      const serverManifest = JSON.parse(readFileSync(
+        new URL(`${name}/package.json`, workspaceRoot), 'utf8')) as { private?: boolean }
+      expect(serverManifest.private, name).toBe(true)
+    }
+  })
+
   it('separates unsigned smoke packaging from the signed macOS release', () => {
     const packageDir = readFileSync(new URL('scripts/package-dir.mjs', packageRoot), 'utf8')
 

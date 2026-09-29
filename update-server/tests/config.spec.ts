@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { parseServerArgv } from '../src/argv.ts'
 import { loadUpdateServerConfig, UpdateServerConfigError } from '../src/config.ts'
 import { matchesChannelVersionShape } from '../src/channels.ts'
 
@@ -55,6 +56,22 @@ describe('loadUpdateServerConfig', () => {
     const config = loadUpdateServerConfig(VALID)
     expect(config.requestTimeoutMs).toBeGreaterThan(0)
     expect(config.allowedHosts).toContain('update.intranet.lan:8790')
+  })
+})
+
+describe('server argv', () => {
+  it('accepts --port and --data as conveniences', () => {
+    expect(parseServerArgv(['--port', '9000', '--data', '/srv/u'])).toEqual({ port: '9000', dataDir: '/srv/u' })
+  })
+  it('ignores unknown flags rather than guessing', () => {
+    expect(parseServerArgv(['--nope', 'x'])).toEqual({})
+  })
+  it('lets the environment win over the command line', () => {
+    const config = loadUpdateServerConfig({ ...VALID, UPDATE_SERVER_PORT: '8790' }, { port: '9000' })
+    expect(config.port).toBe(8790)
+  })
+  it('rejects a flag given without a value', () => {
+    expect(() => parseServerArgv(['--port'])).toThrow(/requires a value/u)
   })
 })
 

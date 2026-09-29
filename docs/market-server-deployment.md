@@ -27,6 +27,53 @@ corepack yarn workspace market-server start
 
 Node 要求 `^22.19.0 || >=24.0.0`（与仓库 engines 一致）。
 
+## CLI 参数（Task 3.5）
+
+market-server 的入口注册了 `bin`（`market-server` → `src/index.ts`，首行
+`#!/usr/bin/env -S node --experimental-strip-types`），并接受两个便利旗标：
+
+```bash
+market-server --port 8787 --data /srv/market-server/data
+# 等价于：
+node --experimental-strip-types src/index.ts --port 8787 --data /srv/market-server/data
+```
+
+旗标只是**便利**：`loadConfig(env, overrides)` 取 `env ?? overrides`，
+**env 值永远优先**（一条游离的 `--port` 不得静默覆盖部署配置）。未知旗标被
+忽略而不是猜测；`--port` / `--data` 缺少取值即报错退出。两个必需变量
+（`MARKET_SERVER_VERIFY_PUBLIC_KEY`、`MARKET_SERVER_PUBLIC_ORIGIN`）没有对应
+旗标，仍须经 env 提供。注：仓库工作区内 Yarn 不为工作区**自身**生成 bin
+shim（`nmHoistingLimits: workspaces`），本仓内以 `node --experimental-strip-types
+src/index.ts --port … --data …` 调用；`bin` 在包被外部安装（或容器化）时生效。
+
+## Dockerfile 与容器运行（Task 3.5，spec §11）
+
+`market-server/Dockerfile` 与 `update-server/Dockerfile` 同构：非 root
+（uid `10002`）、只拷 `package.json` + `src`、**不设 VOLUME、不写死 data
+dir**——数据目录由部署方经 env + bind mount 提供：
+
+```bash
+docker build -t huaanwork/market-server -f market-server/Dockerfile market-server
+docker run --rm -p 8787:8787 \
+  -e MARKET_SERVER_PORT=8787 \
+  -e MARKET_SERVER_DATA_DIR=/data \
+  -e MARKET_SERVER_PUBLIC_ORIGIN=http://market.intranet.example:8787 \
+  -e MARKET_SERVER_VERIFY_PUBLIC_KEY=/keys/market-signing-key.pub.hex \
+  -e MARKET_SERVER_ADMIN_TOKEN=<强随机 token> \
+  -v /srv/market-server/data:/data \
+  -v /srv/market-server/keys:/keys:ro \
+  huaanwork/market-server
+```
+
+> **该镜像只含服务端自身代码。** market-server 运行期 import
+> `dsh-community-market/contracts`（其下还 import `ajv`），故 `/app/node_modules`
+> 必须由部署方提供依赖闭包，两种可做法：① 以仓库工作区整体运行（把仓库挂进
+> `node:22-slim`，`workdir=/repo/market-server`）；② 构造派生镜像，把
+> `dsh-community-market`（**整个包目录**——`lib/contracts` 会读本包
+> `docs/schemas/*.schema.json`）与 `ajv` 闭包拷入 `/app/node_modules/`。缺闭包时
+> 进程在 import 期以 `ERR_MODULE_NOT_FOUND: Cannot find package
+> 'dsh-community-market'` 退出（2026-09-28 Task 3.5 实测）。
+
 ## 环境配置（前四项必需、fail-closed；admin token 可选）
 
 缺任一必需项或值非法：进程打印指引并以 exit 1 退出，**不会**半配置启动。
@@ -318,3 +365,22 @@ intake 只配了 slot 1，该 sidecar 会被拒（K1 已配置时 `slot-key-mism
   网络传输（用 U 盘/专人传递待签清单与签名产物）。
 - 签名机不运行 market-server、不挂载内网共享盘。
 - 每次签名记录 `signedAt`、所签清单 `revision`、所用槽位，供审计。
+
+## 与更新服务端的关系
+
+market-server（内网插件市场）与 update-server（桌面**更新通道**）是两个
+**独立**的内网服务端，可以同机部署：不同端口（默认 8787 / 8790）、各自独立
+的 `<dataDir>`（**不要共用一个数据目录**）：
+
+- **凭据面不同**：market-server 有 `MARKET_SERVER_ADMIN_TOKEN`（发布 / 下架 /
+  激活的写入面由它保护）；**update-server 没有任何口令，也没有任何写端点**
+  （只读；制品由运营者在部署机文件系统上直接放置）——不要让运营者去找一个
+  不存在的口令。
+- **信任面不同**：market-server 的目录真实性由**离线签名清单**保证，制品
+  字节另有 sha256 对账；update-server 只做客户端侧 sha256 比对（D-M6-23），
+  防传输/存储篡改，不防同时控制版本端点与下载端点的攻击者。
+- 两者**都不进桌面安装包**——`dsh-plugin-huaanwork/tests/package.spec.ts`
+  的回归门（`keeps both intranet servers out of the desktop installer`）钉住
+  两个工作区 `private: true` 且不出现于 `build.files`。
+- update-server 的部署、发布流程、下架硬顺序、备份/恢复、灾备旁路与威胁模型
+  边界见 [`update-server-deployment.md`](./update-server-deployment.md)。

@@ -44,6 +44,9 @@
  * There is deliberately no UPDATE_SERVER_ADMIN_TOKEN: a read-only server has no
  * admin face, and keeping a token env for a future one would only preserve a
  * dead 401 surface (YAGNI).
+ *
+ * The entry point may pass CLI conveniences (`--port` / `--data`, Task 3.5) as
+ * overrides. An env value always wins: deployment config stays authoritative.
  */
 
 import { isAbsolute, resolve } from 'node:path'
@@ -202,9 +205,19 @@ function parseListenHost(raw: string | undefined): string {
   return value
 }
 
-export function loadUpdateServerConfig(env: NodeJS.ProcessEnv = process.env): UpdateServerConfig {
-  const port = parsePort(env[ENV_KEYS.port])
-  const dataDir = parseDataDir(env[ENV_KEYS.dataDir])
+/**
+ * Build the config from the environment plus optional CLI conveniences.
+ *
+ * @param env - process environment (defaults to `process.env`).
+ * @param overrides - values from `--port` / `--data`; ignored wherever the
+ *   environment sets the same value, which stays authoritative.
+ */
+export function loadUpdateServerConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  overrides: Partial<Record<'port' | 'dataDir', string>> = {},
+): UpdateServerConfig {
+  const port = parsePort(env[ENV_KEYS.port] ?? overrides.port)
+  const dataDir = parseDataDir(env[ENV_KEYS.dataDir] ?? overrides.dataDir)
   const publicOrigin = parsePublicOrigin(env[ENV_KEYS.publicOrigin])
   const listenHost = parseListenHost(env[ENV_KEYS.listenHost])
   const requestTimeoutMs = parseRequestTimeoutMs(env[ENV_KEYS.requestTimeoutMs])

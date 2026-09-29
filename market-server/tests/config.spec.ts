@@ -2,6 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { parseServerArgv } from '../src/argv.ts'
 import { ConfigError, ENV_KEYS, loadConfig } from '../src/config.ts'
 
 const VALID_KEY_HEX = 'a1'.repeat(32)
@@ -103,6 +104,28 @@ describe('loadConfig', () => {
     const badPath = join(keyDir, 'bad.hex')
     await writeFile(badPath, 'zz'.repeat(32), { mode: 0o600 })
     expect(() => loadConfig(completeEnvWith({ [ENV_KEYS.verifyPublicKeyPath]: badPath }))).toThrow(ConfigError)
+  })
+
+  // Mirrors update-server/tests/config.spec.ts (Task 3.5): the two servers expose
+  // the same CLI conveniences, and the environment stays authoritative on both.
+  describe('server argv', () => {
+    it('accepts --port and --data as conveniences', () => {
+      expect(parseServerArgv(['--port', '9000', '--data', '/srv/u'])).toEqual({ port: '9000', dataDir: '/srv/u' })
+    })
+
+    it('ignores unknown flags rather than guessing', () => {
+      expect(parseServerArgv(['--nope', 'x'])).toEqual({})
+    })
+
+    it('lets the environment win over the command line', () => {
+      const config = loadConfig(completeEnv(), { port: '9000', dataDir: '/srv/other' })
+      expect(config.port).toBe(8787)
+      expect(config.dataDir).toBe(dataDir)
+    })
+
+    it('rejects a flag given without a value', () => {
+      expect(() => parseServerArgv(['--port'])).toThrow(/requires a value/u)
+    })
   })
 
   function completeEnvWith(overrides: Record<string, string>): NodeJS.ProcessEnv {

@@ -27,6 +27,9 @@
  *                                     (fail-closed: every admin endpoint
  *                                     answers 401 admin-disabled) and startup
  *                                     prints guidance (Task 2 Step 3, D5).
+ *
+ * The entry point may pass CLI conveniences (`--port` / `--data`, Task 3.5) as
+ * overrides. An env value always wins: deployment config stays authoritative.
  */
 
 import { readFileSync } from 'node:fs'
@@ -157,9 +160,19 @@ function parseAdminToken(raw: string | undefined): string | null {
   return raw.trim()
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): MarketServerConfig {
-  const port = parsePort(env[ENV_KEYS.port])
-  const dataDir = parseDataDir(env[ENV_KEYS.dataDir])
+/**
+ * Build the config from the environment plus optional CLI conveniences.
+ *
+ * @param env - process environment (defaults to `process.env`).
+ * @param overrides - values from `--port` / `--data`; ignored wherever the
+ *   environment sets the same value, which stays authoritative.
+ */
+export function loadConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  overrides: Partial<Record<'port' | 'dataDir', string>> = {},
+): MarketServerConfig {
+  const port = parsePort(env[ENV_KEYS.port] ?? overrides.port)
+  const dataDir = parseDataDir(env[ENV_KEYS.dataDir] ?? overrides.dataDir)
   const publicOrigin = parsePublicOrigin(env[ENV_KEYS.publicOrigin])
   const verifyPublicKey = parseVerifyPublicKey(env[ENV_KEYS.verifyPublicKeyPath])
   const adminToken = parseAdminToken(env[ENV_KEYS.adminToken])

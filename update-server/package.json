@@ -8,6 +8,7 @@
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
+  "bin": "src/index.ts",
   "scripts": {
     "build": "echo \"update-server: TypeScript sources run directly; no build output\"",
     "start": "node --experimental-strip-types src/index.ts",

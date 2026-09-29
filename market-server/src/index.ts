@@ -1,3 +1,4 @@
+#!/usr/bin/env -S node --experimental-strip-types
 /**
  * market-server entry point.
  *
@@ -5,9 +6,11 @@
  * corrupt state file prints operator guidance and exits 1 — the server never
  * starts half-configured.
  *
- * Run:  node --experimental-strip-types src/index.ts
+ * Run:  node --experimental-strip-types src/index.ts [--port <p>] [--data <dir>]
+ * The flags are conveniences; an env value always wins (Task 3.5).
  */
 
+import { parseServerArgv } from './argv.ts'
 import { CatalogStore } from './catalog/store.ts'
 import { ConfigError, loadConfig, type MarketServerConfig } from './config.ts'
 import { StoreCorruptError } from './store.ts'
@@ -17,7 +20,7 @@ import { ArtifactStore } from './tarball/store.ts'
 async function main(): Promise<void> {
   let config: MarketServerConfig
   try {
-    config = loadConfig(process.env)
+    config = loadConfig(process.env, parseServerArgv(process.argv.slice(2)))
   } catch (cause) {
     if (cause instanceof ConfigError) {
       console.error(cause.message)

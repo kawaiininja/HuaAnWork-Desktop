@@ -16066,6 +16066,8 @@ __metadata:
     dsh-community-market: "npm:0.1.0-dev.0"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
+  bin:
+    market-server: src/index.ts
   languageName: unknown
   linkType: soft
 
@@ -18875,6 +18877,8 @@ __metadata:
     "@types/node": "npm:^22.20.0"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
+  bin:
+    update-server: src/index.ts
   languageName: unknown
   linkType: soft
 
