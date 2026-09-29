@@ -1179,10 +1179,10 @@ async function start(): Promise<void> {
     // (那次调用会写 profile 的 cordis.patch.yml / package.json),也必须在 host-boot
     // 之前(huaanwork-host 的首个 effect 与 net-gate 会读目的文件)。
     //
-    // 与上面三个 Desktop 自有 codemod 不同:这里**不吞异常**。spec §8 要求迁移失败
-    // 「报错并进恢复窗口」,而 Desktop 那三处刻意 catch-and-continue(main.ts:1206-1212
-    // 的注释说明了它们的取舍)。跟随的先例是 Profile 依赖迁移(main.ts:1451-1455):
-    // catch 只为丰富信息 + maskSecrets,然后重新抛出。
+    // 与上面几个 Desktop 自有 codemod 不同:这里**不吞异常**。spec §8 要求迁移失败
+    // 「报错并进恢复窗口」,而 Desktop 的 codemod catch(`migrateLegacyAgentPresetSettings`
+    // 与 `migrateDesktopWindowMaterialSettings` 的几处)刻意 catch-and-continue。跟随的先例
+    // 是 `materializeProfile` 的 Profile 依赖迁移 catch:只为丰富信息 + maskSecrets,然后重新抛出。
     if (safeModePaths === undefined && !recoveryModeRequested) {
       try {
         const migration = await runHuaanworkLegacyMigration({

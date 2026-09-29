@@ -338,6 +338,23 @@ describe('full legacy migration', () => {
     expect(snapshotTree(f.homeDir)).toEqual(destinationBefore)
   })
 
+  it('is a no-op when no legacy source exists', async () => {
+    // 干净安装:config dir 与旧 `$DSH_HOME` 都不存在(用户从未装过旧版)——
+    // 迁移必须原地退出,不写任何目的文件,更不留 marker。
+    const userData = mkdtempSync(join(tmpdir(), 'mig-e2e-clean-userdata-'))
+    const homeDir = mkdtempSync(join(tmpdir(), 'mig-e2e-clean-home-'))
+    const profileDir = join(homeDir, 'profiles', 'desktop')
+    mkdirSync(profileDir, { recursive: true })
+    const report = await runHuaanworkLegacyMigration({
+      source: resolveLegacySource(userData),
+      target: { homeDir, profileDir },
+      steps: HUAANWORK_MIGRATION_STEPS,
+    })
+    expect(report.performed).toBe(false)
+    expect(report.marker).toBeNull()
+    expect(existsSync(join(profileDir, 'huaanwork-migration.json'))).toBe(false)
+  })
+
   it('leaves the legacy tree completely untouched', async () => {
     const f = fixture()
     const before = snapshotTree(f.userData)

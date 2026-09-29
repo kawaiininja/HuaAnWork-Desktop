@@ -14,9 +14,12 @@
  * - 「GET /huaanwork/…」断言落层为 route handler 包装的同一批读侧函数直调
  *   (readHuaanworkSettings / listProjects / listAutomations / authStatus / 会话日志 reader),
  *   HTTP 载体本身由 tests/huaanwork-host/routes.spec.ts + tests/client-huaanwork/api.spec.ts 覆盖;
- * - 全程隔离:临时 HOME + 显式 DSH_HOME + `--user-data-dir=<临时>/HuaAnWork`
- *   (macOS 的 `app.getPath('appData')` 不跟随 HOME,实测;`--user-data-dir` 是唯一
- *   可靠的 userData 重定向,迁移源 = userData,故它必须指向播种目录);
+ * - 全程隔离:临时 HOME + `--user-data-dir=<临时>/HuaAnWork`(config dir;旧 Tauri 的
+ *   三个文件与旧 `$DSH_HOME`(`<config dir>/dsh`,paths.ts 的 LEGACY_DSH_HOME)播种于此。
+ *   macOS 的 `app.getPath('appData')` 不跟随 HOME,实测;`--user-data-dir` 是唯一
+ *   可靠的 userData 重定向,迁移源 = userData,故它必须指向播种目录)
+ *   + 另一个独立临时根作为显式 `DSH_HOME`(新 home;迁移目的树,marker 与会话读侧都看它,
+ *   绝不能与旧树同根);
  *   应用自身在解析 userData 之前调用 `app.setName(PRODUCT_NAME)`(main.ts:1843),
  *   所以实际产品运行时该目录名确为 HuaAnWork(F1)。
  *   说明:应用会探测稳定版 `~/Library/Application Support/DSH Desktop` 的
@@ -98,8 +101,12 @@ function writeZstdSession(dir: string, sessionId: string, cwd: string): void {
 interface SmokeTree {
   readonly root: string
   readonly home: string
+  /** Electron userData 与旧 Tauri config dir:两个产品共用同一目录(F1)。 */
   readonly userDataDir: string
-  readonly dshHome: string
+  /** 旧 Tauri `$DSH_HOME`:在 config dir 内,即迁移源树。 */
+  readonly legacyDshHome: string
+  /** 新 Desktop home:显式 `DSH_HOME`,即迁移目的树;必须独立于旧树。 */
+  readonly newHome: string
 }
 
 /** 在临时 HOME 下播种一份完整旧布局(同 end-to-end.spec 的形状,规模收敛)。 */
@@ -108,8 +115,11 @@ function seedSmokeTree(): SmokeTree {
   cleanup.push(() => rmSync(root, { recursive: true, force: true }))
   const home = join(root, 'home')
   const userDataDir = legacyUserDataDir(home)
-  const dshHome = join(root, 'dsh-home')
-  mkdirSync(dshHome, { recursive: true })
+  // F1 的三个文件写在 config dir 下,而 mkdtemp 只创建了 root:先补建这一层。
+  mkdirSync(userDataDir, { recursive: true })
+  const legacyDshHome = join(userDataDir, 'dsh')
+  const newHome = join(root, 'new-home')
+  mkdirSync(newHome, { recursive: true })
   writeFileSync(join(userDataDir, 'settings.json'), JSON.stringify({
     base_url: 'http://127.0.0.1:11434/v1', model: 'llama3', api_key: 'k', theme: 'dark',
     models: [], active_model_id: '', work_allow_network: true, guard_mode: 'smart',
@@ -120,26 +130,26 @@ function seedSmokeTree(): SmokeTree {
     username: 'u', salt: 's', hash: 'h', kdf: 'scrypt', N: 16384, r: 8, p: 1,
   }), 'utf8')
   writeFileSync(join(userDataDir, 'auth-session.json'), JSON.stringify({ username: 'u' }), 'utf8')
-  mkdirSync(join(dshHome, 'automations'), { recursive: true })
-  writeFileSync(join(dshHome, 'projects.json'), JSON.stringify({
+  mkdirSync(join(legacyDshHome, 'automations'), { recursive: true })
+  writeFileSync(join(legacyDshHome, 'projects.json'), JSON.stringify({
     projects: [{ id: 'p1', name: 'proj', root: join(root, 'proj'), createdAt: 1 }],
   }), 'utf8')
-  writeFileSync(join(dshHome, 'automations.json'), JSON.stringify({
+  writeFileSync(join(legacyDshHome, 'automations.json'), JSON.stringify({
     automations: [{
       id: 'a1', projectId: null, name: 'auto', kind: 'agent', schedule: { kind: 'manual' },
       widget: false, enabled: true, createdAt: 1, channel: 'chat',
     }],
   }), 'utf8')
-  writeFileSync(join(dshHome, 'automations', 'a1.runs.jsonl'),
+  writeFileSync(join(legacyDshHome, 'automations', 'a1.runs.jsonl'),
     `${JSON.stringify({ runId: 'r1', startedAt: 1, endedAt: 2, ok: true, output: 'ok' })}\n`, 'utf8')
-  mkdirSync(join(dshHome, 'workspace'), { recursive: true })
-  writeFileSync(join(dshHome, 'workspace', 'notes.md'), 'notes\n', 'utf8')
-  const neutral = sessionIdFor(join(dshHome, 'workspace'))
-  writeZstdSession(join(dshHome, 'sessions', projectKey(join(dshHome, 'workspace')), neutral), neutral, join(dshHome, 'workspace'))
-  mkdirSync(join(dshHome, 'profiles', 'huaanwork'), { recursive: true })
-  writeFileSync(join(dshHome, 'profiles', 'huaanwork', 'package.json'),
+  mkdirSync(join(legacyDshHome, 'workspace'), { recursive: true })
+  writeFileSync(join(legacyDshHome, 'workspace', 'notes.md'), 'notes\n', 'utf8')
+  const neutral = sessionIdFor(join(legacyDshHome, 'workspace'))
+  writeZstdSession(join(legacyDshHome, 'sessions', projectKey(join(legacyDshHome, 'workspace')), neutral), neutral, join(legacyDshHome, 'workspace'))
+  mkdirSync(join(legacyDshHome, 'profiles', 'huaanwork'), { recursive: true })
+  writeFileSync(join(legacyDshHome, 'profiles', 'huaanwork', 'package.json'),
     JSON.stringify({ name: 'p', dsh: { profile: { bundles: ['legacy-plugin'] } } }), 'utf8')
-  return { root, home, userDataDir, dshHome }
+  return { root, home, userDataDir, legacyDshHome, newHome }
 }
 
 function snapshotTree(root: string): Map<string, string> {
@@ -215,6 +225,10 @@ describeLive('legacy migration against a real packaged layout', () => {
     const app = locatePackagedApp()
     const tree = seedSmokeTree()
     const source = resolveLegacySource(tree.userDataDir)
+    // 旧树 = config dir 内三个文件 + `<config dir>/dsh`(paths.ts);新 home 是另一个临时根,
+    // 旧树与新 home 不得同根,否则迁移源与目的树重叠(旧 fixture 的缺陷)。
+    expect(source.dshHome).toBe(tree.legacyDshHome)
+    expect(tree.newHome).not.toBe(tree.legacyDshHome)
     // 快照只覆盖旧版专属部分:config dir 是新旧共享目录(F1),运行中的应用合法地
     // 往其中写 Electron/新应用自己的文件(Cookies、Preferences、profile-selection…)。
     const legacySnapshot = snapshotLegacySource(source)
@@ -226,7 +240,7 @@ describeLive('legacy migration against a real packaged layout', () => {
         ...process.env,
         HOME: tree.home,
         USERPROFILE: tree.home,
-        DSH_HOME: tree.dshHome,
+        DSH_HOME: tree.newHome,
         ...(process.platform === 'linux' ? { XDG_CONFIG_HOME: join(tree.home, '.config') } : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -239,8 +253,8 @@ describeLive('legacy migration against a real packaged layout', () => {
     expect(existsSync(source.dshHome)).toBe(true)
     expect(existsSync(join(source.configDir, 'settings.json'))).toBe(true)
 
-    // 2. 等迁移 marker(活动 profile 内):应用已跑完一次性迁移。
-    const migrated = await waitFor('the migration marker', () => findMigratedProfile(tree.dshHome), BOOT_TIMEOUT_MS)
+    // 2. 等迁移 marker(活动 profile 内,目的树 = 新 home):应用已跑完一次性迁移。
+    const migrated = await waitFor('the migration marker', () => findMigratedProfile(tree.newHome), BOOT_TIMEOUT_MS)
     const profileDir = migrated.dir
     const marker = migrated.marker
     expect(marker.version).toBe(1)
@@ -267,7 +281,7 @@ describeLive('legacy migration against a real packaged layout', () => {
     // 4. 中性根会话已重铸,`session/list` 读到的就是它。
     const newNeutralRoot = neutralWorkspaceRoot(profileDir)
     const newNeutralId = sessionIdFor(newNeutralRoot)
-    const remintedPath = join(tree.dshHome, 'sessions', projectKey(newNeutralRoot), encodeSegment(newNeutralId), 'session.jsonl.zstd')
+    const remintedPath = join(tree.newHome, 'sessions', projectKey(newNeutralRoot), encodeSegment(newNeutralId), 'session.jsonl.zstd')
     expect(existsSync(remintedPath)).toBe(true)
     const header = JSON.parse(decompressZstdFrames(readFileSync(remintedPath)).split('\n', 1)[0] ?? '') as { id: string; cwd: string }
     expect(header.id).toBe(newNeutralId)
