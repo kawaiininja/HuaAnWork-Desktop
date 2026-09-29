@@ -338,7 +338,8 @@ export async function findSessionHeader(
   return located?.header
 }
 
-async function sessionLogFiles(sessionsRoot: string): Promise<string[]> {
+/** 递归枚举会话日志文件(含 `.jsonl.zstd`);sessions 根不存在返回空数组。 */
+export async function sessionLogFiles(sessionsRoot: string): Promise<string[]> {
   try {
     const entries = await readdir(sessionsRoot, { recursive: true, withFileTypes: true })
     return entries
