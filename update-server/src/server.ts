@@ -7,16 +7,32 @@
  * (`timeout = 0`) - requestTimeout, headersTimeout, and the socket inactivity
  * timeout all come from config.
  *
- * Routes (Task 3.2/3.3 append the version and download endpoints):
+ * Routes (Task 3.3 appends the download endpoints):
  *
- *   GET /healthz   Liveness probe: {"ok":true}.
+ *   GET /healthz              Liveness probe: {"ok":true}.
+ *   GET /api/desktop/version  Channel-scoped release metadata for the desktop
+ *                             update checker: version, channel label, and the
+ *                             per-platform artifact sha256 from the channel
+ *                             record. Never redirects; unknown channel 404
+ *                             unknown-channel, no release 404 no-release,
+ *                             corrupt record 500 corrupt-channel-record.
  *
  * Error bodies are `{"error":{"code","message"}}` (spec §9), matching the
  * desktop-side routes; they never leak paths, env, or internals.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { isUpdateServerChannel } from './channels.ts'
 import type { UpdateServerConfig } from './config.ts'
+import {
+  DESKTOP_CHANNEL_HEADER,
+  InvalidHeaderValueError,
+  lookupChannelVersion,
+  readVersionRequestHeaders,
+  type VersionRequestHeaders,
+  type VersionResponsePayload,
+} from './version/service.ts'
+import { CorruptChannelRecordError } from './version/store.ts'
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   const payload = `${JSON.stringify(body)}\n`
@@ -75,9 +91,50 @@ function handleHealthz({ response }: RouteContext): void {
   sendJson(response, 200, { ok: true })
 }
 
-/** Dispatch table; Task 3.2/3.3 append their endpoints here. */
+async function handleDesktopVersion({ request, response, config }: RouteContext): Promise<void> {
+  let headers: VersionRequestHeaders
+  try {
+    headers = readVersionRequestHeaders(request.headers)
+  } catch (cause) {
+    if (!(cause instanceof InvalidHeaderValueError)) throw cause
+    // The offending value is deliberately neither logged nor echoed.
+    sendError(response, 400, 'invalid-header', 'a request header value contains control characters')
+    return
+  }
+
+  const channel = headers.channel
+  if (channel === undefined || !isUpdateServerChannel(channel)) {
+    sendError(response, 404, 'unknown-channel', `the ${DESKTOP_CHANNEL_HEADER} header must name a channel this server serves`)
+    return
+  }
+
+  // Installation id and installed version are log-only (D-M6-11): they never
+  // select a record and never suppress an answer.
+  console.log('[update-server] version request:'
+    + ` channel=${channel} installed=${headers.installedVersion ?? '-'} installation=${headers.installationId ?? '-'}`)
+
+  // The store is a plain dataDir holder created per request, and the record is
+  // re-read per request: no lock file and no in-memory cache.
+  let payload: VersionResponsePayload | null
+  try {
+    payload = await lookupChannelVersion({ dataDir: config.dataDir }, channel)
+  } catch (cause) {
+    if (!(cause instanceof CorruptChannelRecordError)) throw cause
+    console.error(`[update-server] ${cause.message}`)
+    sendError(response, 500, 'corrupt-channel-record', 'the release record exists but is not a valid channel record')
+    return
+  }
+  if (payload === null) {
+    sendError(response, 404, 'no-release', `channel ${channel} has no published release yet`)
+    return
+  }
+  sendJson(response, 200, payload)
+}
+
+/** Dispatch table; Task 3.3 appends the download endpoints here. */
 const ROUTES: readonly Route[] = [
   { path: '/healthz', method: 'GET', handle: handleHealthz },
+  { path: '/api/desktop/version', method: 'GET', handle: handleDesktopVersion },
 ]
 
 export interface UpdateServer {

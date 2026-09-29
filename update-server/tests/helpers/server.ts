@@ -24,8 +24,13 @@ export interface TestUpdateServer {
   close: () => Promise<void>
 }
 
-export async function bootTestUpdateServer(): Promise<TestUpdateServer> {
-  const dataDir = await mkdtemp(join(tmpdir(), 'update-server-e2e-'))
+export interface TestUpdateServerOptions {
+  /** Reuse an existing data directory (restart tests); a fresh temp dir otherwise. */
+  readonly dataDir?: string
+}
+
+export async function bootTestUpdateServer(options: TestUpdateServerOptions = {}): Promise<TestUpdateServer> {
+  const dataDir = options.dataDir ?? await mkdtemp(join(tmpdir(), 'update-server-e2e-'))
   const config: UpdateServerConfig = {
     port: 0,
     dataDir,
