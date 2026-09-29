@@ -63,7 +63,18 @@ export class InvalidHeaderValueError extends Error {
 // reach the log or the response, so it is rejected before either happens.
 const DISALLOWED_HEADER_CHARACTERS = /[\u0000-\u001f\u007f]/u
 
-function readClientHeader(headers: IncomingHttpHeaders, name: string): string | undefined {
+/**
+ * Read one client header, rejecting any value that carries control characters.
+ *
+ * Exported for the download route (Task 3.3), which reads the channel header
+ * and its own target-version header through the same guard.
+ *
+ * @param headers - incoming request headers (Node lowercases their names).
+ * @param name - header name as the client spells it.
+ * @returns the value, `undefined` when the header is absent.
+ * @throws InvalidHeaderValueError when the value carries control characters.
+ */
+export function readClientHeader(headers: IncomingHttpHeaders, name: string): string | undefined {
   const value = headers[name.toLowerCase()]
   if (value === undefined) return undefined
   const text = Array.isArray(value) ? value.join(', ') : value

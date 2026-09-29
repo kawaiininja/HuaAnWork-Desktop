@@ -1,5 +1,6 @@
 /**
- * update-server HTTP skeleton (Task 3.1).
+ * update-server HTTP skeleton (Task 3.1) with the release endpoints of Tasks
+ * 3.2/3.3.
  *
  * Hardening is built in from the start (market-server P8, minus uploads, which
  * do not exist on a read-only server): every request passes the Host whitelist
@@ -7,7 +8,7 @@
  * (`timeout = 0`) - requestTimeout, headersTimeout, and the socket inactivity
  * timeout all come from config.
  *
- * Routes (Task 3.3 appends the download endpoints):
+ * Routes:
  *
  *   GET /healthz              Liveness probe: {"ok":true}.
  *   GET /api/desktop/version  Channel-scoped release metadata for the desktop
@@ -16,6 +17,10 @@
  *                             record. Never redirects; unknown channel 404
  *                             unknown-channel, no release 404 no-release,
  *                             corrupt record 500 corrupt-channel-record.
+ *   GET /api/downloads/mac    Installer artifact for the checked release,
+ *   GET /api/downloads/windows streamed with the record's Content-Length and
+ *                             sha256 header. Missing/short artifact 500
+ *                             artifact-missing-or-truncated (never a 404).
  *
  * Error bodies are `{"error":{"code","message"}}` (spec §9), matching the
  * desktop-side routes; they never leak paths, env, or internals.
@@ -24,6 +29,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { isUpdateServerChannel } from './channels.ts'
 import type { UpdateServerConfig } from './config.ts'
+import { DOWNLOAD_PATHS, handleDesktopDownload } from './download/routes.ts'
 import {
   DESKTOP_CHANNEL_HEADER,
   InvalidHeaderValueError,
@@ -131,10 +137,12 @@ async function handleDesktopVersion({ request, response, config }: RouteContext)
   sendJson(response, 200, payload)
 }
 
-/** Dispatch table; Task 3.3 appends the download endpoints here. */
+/** Dispatch table. */
 const ROUTES: readonly Route[] = [
   { path: '/healthz', method: 'GET', handle: handleHealthz },
   { path: '/api/desktop/version', method: 'GET', handle: handleDesktopVersion },
+  { path: DOWNLOAD_PATHS.mac, method: 'GET', handle: context => handleDesktopDownload(context, 'mac') },
+  { path: DOWNLOAD_PATHS.windows, method: 'GET', handle: context => handleDesktopDownload(context, 'windows') },
 ]
 
 export interface UpdateServer {

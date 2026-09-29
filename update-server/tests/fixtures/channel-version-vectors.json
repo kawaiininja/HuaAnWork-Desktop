@@ -1,0 +1,160 @@
+{
+  "fixtureVersion": 1,
+  "channels": [
+    "stable",
+    "beta",
+    "huaanwork"
+  ],
+  "vectors": [
+    {
+      "channel": "stable",
+      "version": "0.1.0",
+      "expected": true
+    },
+    {
+      "channel": "stable",
+      "version": "0.2.0",
+      "expected": true
+    },
+    {
+      "channel": "stable",
+      "version": "2.0.4",
+      "expected": true
+    },
+    {
+      "channel": "stable",
+      "version": "0.1.0-beta.1",
+      "expected": false
+    },
+    {
+      "channel": "stable",
+      "version": "2.0.6-beta.1",
+      "expected": false
+    },
+    {
+      "channel": "stable",
+      "version": "0.1",
+      "expected": false
+    },
+    {
+      "channel": "stable",
+      "version": "v0.1.0",
+      "expected": false
+    },
+    {
+      "channel": "stable",
+      "version": "0.1.0+mac.arm64",
+      "expected": true
+    },
+    {
+      "channel": "stable",
+      "version": "01.0.0",
+      "expected": false
+    },
+    {
+      "channel": "stable",
+      "version": "1.2.3-01",
+      "expected": false
+    },
+    {
+      "channel": "beta",
+      "version": "0.1.0",
+      "expected": false
+    },
+    {
+      "channel": "beta",
+      "version": "0.2.0",
+      "expected": false
+    },
+    {
+      "channel": "beta",
+      "version": "2.0.4",
+      "expected": false
+    },
+    {
+      "channel": "beta",
+      "version": "0.1.0-beta.1",
+      "expected": true
+    },
+    {
+      "channel": "beta",
+      "version": "2.0.6-beta.1",
+      "expected": true
+    },
+    {
+      "channel": "beta",
+      "version": "0.1",
+      "expected": false
+    },
+    {
+      "channel": "beta",
+      "version": "v0.1.0",
+      "expected": false
+    },
+    {
+      "channel": "beta",
+      "version": "0.1.0+mac.arm64",
+      "expected": false
+    },
+    {
+      "channel": "beta",
+      "version": "01.0.0",
+      "expected": false
+    },
+    {
+      "channel": "beta",
+      "version": "1.2.3-01",
+      "expected": false
+    },
+    {
+      "channel": "huaanwork",
+      "version": "0.1.0",
+      "expected": true
+    },
+    {
+      "channel": "huaanwork",
+      "version": "0.2.0",
+      "expected": true
+    },
+    {
+      "channel": "huaanwork",
+      "version": "2.0.4",
+      "expected": true
+    },
+    {
+      "channel": "huaanwork",
+      "version": "0.1.0-beta.1",
+      "expected": false
+    },
+    {
+      "channel": "huaanwork",
+      "version": "2.0.6-beta.1",
+      "expected": false
+    },
+    {
+      "channel": "huaanwork",
+      "version": "0.1",
+      "expected": false
+    },
+    {
+      "channel": "huaanwork",
+      "version": "v0.1.0",
+      "expected": false
+    },
+    {
+      "channel": "huaanwork",
+      "version": "0.1.0+mac.arm64",
+      "expected": true
+    },
+    {
+      "channel": "huaanwork",
+      "version": "01.0.0",
+      "expected": false
+    },
+    {
+      "channel": "huaanwork",
+      "version": "1.2.3-01",
+      "expected": false
+    }
+  ]
+}

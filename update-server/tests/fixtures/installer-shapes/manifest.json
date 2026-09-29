@@ -1,0 +1,91 @@
+{
+  "fixtureVersion": 1,
+  "note": "Shared installer-shape vectors for the cross-workspace contract. update-server's validateInstallerShape (src/artifact/validate.ts) and the client's private validateArtifact (dsh-plugin-huaanwork/src/update-download.ts) are independent implementations of the same criteria by necessity (no import may cross the workspace boundary), so both sides assert their verdict against these committed bytes. A change to a criterion on either side must update this fixture and both specs in the same commit.",
+  "sizeCapBytes": 1073741824,
+  "sizeVectors": [
+    {
+      "bytes": 0,
+      "expected": false,
+      "reason": "an empty file is never a valid installer"
+    },
+    {
+      "bytes": 1073741825,
+      "expected": false,
+      "reason": "one byte past the 1 GiB cap (the cap itself is inclusive)"
+    }
+  ],
+  "files": [
+    {
+      "name": "mac-universal.dmg",
+      "platform": "darwin",
+      "shape": "valid",
+      "universal": true,
+      "bytes": 8736,
+      "construction": "hand-crafted fat Mach-O (magic 0xcafebabe, x86_64 slice at 0x1000, arm64 slice at 0x2000, alignment 2^12) followed by a 512-byte trailer whose first four bytes are 'koly'. lipo -info reports both architectures, so this is the artifact the mac channel may publish (P1-1: mac is universal-only)."
+    },
+    {
+      "name": "mac-thin-arm64.dmg",
+      "platform": "darwin",
+      "shape": "valid",
+      "universal": false,
+      "bytes": 1024,
+      "construction": "hand-crafted thin Mach-O (magic 0xfeedfacf, cputype arm64), zero padding, then a 'koly' trailer. Passes the shape gate and must be refused by the mac-universal gate."
+    },
+    {
+      "name": "mac-truncated.dmg",
+      "platform": "darwin",
+      "shape": "invalid",
+      "universal": null,
+      "bytes": 100,
+      "construction": "100 bytes of deterministic filler: shorter than the 512-byte DMG trailer."
+    },
+    {
+      "name": "mac-bad-trailer.dmg",
+      "platform": "darwin",
+      "shape": "invalid",
+      "universal": null,
+      "bytes": 1536,
+      "construction": "1024 bytes of deterministic filler plus a 512-byte trailer whose first four bytes are 'xxxx' instead of 'koly'."
+    },
+    {
+      "name": "windows-valid.exe",
+      "platform": "win32",
+      "shape": "valid",
+      "universal": null,
+      "bytes": 256,
+      "construction": "'MZ' at offset 0, uint32LE 0x80 at 0x3c, and 'PE\\0\\0' at offset 0x80 (deterministic filler elsewhere)."
+    },
+    {
+      "name": "windows-bad-pe.exe",
+      "platform": "win32",
+      "shape": "invalid",
+      "universal": null,
+      "bytes": 256,
+      "construction": "'MZ' at offset 0 and the 0x80 offset at 0x3c, but 'XXXX' where the PE signature belongs."
+    },
+    {
+      "name": "windows-pe-offset-past-eof.exe",
+      "platform": "win32",
+      "shape": "invalid",
+      "universal": null,
+      "bytes": 256,
+      "construction": "'MZ' at offset 0 and an offset of 0x10000 at 0x3c, past the end of the file."
+    },
+    {
+      "name": "windows-truncated.exe",
+      "platform": "win32",
+      "shape": "invalid",
+      "universal": null,
+      "bytes": 32,
+      "construction": "'MZ' followed by filler: shorter than the 64-byte DOS header."
+    },
+    {
+      "name": "windows-not-mz.exe",
+      "platform": "win32",
+      "shape": "invalid",
+      "universal": null,
+      "bytes": 256,
+      "construction": "deterministic filler starting with the ELF magic: no MZ header at all."
+    }
+  ]
+}
