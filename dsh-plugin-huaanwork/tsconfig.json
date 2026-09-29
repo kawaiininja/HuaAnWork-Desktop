@@ -29,6 +29,7 @@
   "include": [
     "src/*.ts",
     "src/huaanwork-guardrails/**/*.ts",
-    "src/huaanwork-host/**/*.ts"
+    "src/huaanwork-host/**/*.ts",
+    "src/huaanwork-migration/**/*.ts"
   ]
 }

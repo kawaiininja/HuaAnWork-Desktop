@@ -469,7 +469,7 @@ test('unattended allow degrades an ask, writes an audit line, and never admits r
   const listeners: PreExecute[] = []
   apply({
     huaanworkUnattended: h.runtime.huaanworkUnattended,
-    huaanworkDshHome: h.profileDir,
+    huaanworkProfileDir: h.profileDir, huaanworkDshHome: h.profileDir,
     huaanworkAllowedOnce: new Set<string>(),
     huaanworkWorkspaceRoot: h.routeCtx.workspaceRoot,
     on(event: string, listener: PreExecute) {
