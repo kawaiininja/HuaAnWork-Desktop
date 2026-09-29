@@ -71,5 +71,6 @@ export async function runHuaanworkLegacyMigration(
 export { bumpCount, recordSkip, resolveLegacySource, legacySourceExists, readLegacyJson }
 export { migrateSettingsStep, convertLegacySettings } from './settings.ts'
 export { migrateAuthStep, isLegacyAccount } from './auth.ts'
+export { migrateProjectsStep, migrateTasksStep } from './registries.ts'
 export type { HuaanworkLegacySource, HuaanworkMigrationTarget, HuaanworkMigrationReport }
 
