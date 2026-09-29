@@ -74,5 +74,11 @@ export { migrateAuthStep, isLegacyAccount } from './auth.ts'
 export { migrateProjectsStep, migrateTasksStep } from './registries.ts'
 export { migrateAutomationsStep, migrateAutomationRunsStep, stripLegacyChannel } from './runs.ts'
 export { migrateSessionsStep, rewriteSessionHeader } from './sessions.ts'
+export {
+  migrateAgentsConfigStep,
+  migrateSkillTogglesStep,
+  migrateUserSkillsStep,
+  migrateNeutralWorkspaceStep,
+} from './extras.ts'
 export type { HuaanworkLegacySource, HuaanworkMigrationTarget, HuaanworkMigrationReport }
 

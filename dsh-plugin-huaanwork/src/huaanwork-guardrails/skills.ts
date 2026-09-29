@@ -382,10 +382,15 @@ export function bundledSkillDir(name: string): string | undefined {
 /** 系统技能：始终启用，不参与开关（承载 explore/test-fix 的 restrict/guard 机制）。 */
 export const SYSTEM_SKILLS: ReadonlySet<string> = new Set(["explore", "test-fix"]);
 
+/** 开关表落点(dshHome = $DSH_HOME/旧, Desktop 组合下是 profileDir);导出给迁移侧同源引用。 */
+export function skillTogglesPath(dshHome: string): string {
+  return join(dshHome, "skill-toggles.json");
+}
+
 export function readSkillToggles(dshHome: string): Record<string, boolean> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(join(dshHome, "skill-toggles.json"), "utf8"));
+    parsed = JSON.parse(readFileSync(skillTogglesPath(dshHome), "utf8"));
   } catch {
     return {}; // 缺失/损坏：全部禁用
   }
@@ -402,7 +407,7 @@ export function setSkillToggle(dshHome: string, name: string, enabled: boolean):
   const toggles = readSkillToggles(dshHome);
   if (enabled) toggles[name] = true;
   else delete toggles[name];
-  const target = join(dshHome, "skill-toggles.json");
+  const target = skillTogglesPath(dshHome);
   const tmp = `${target}.tmp`;
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(tmp, `${JSON.stringify(toggles, null, 2)}\n`, "utf8");

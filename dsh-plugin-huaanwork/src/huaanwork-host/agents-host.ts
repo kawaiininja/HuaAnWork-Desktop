@@ -77,6 +77,16 @@ type LocalEndpointEntry = {
   broken?: { reason: string }
 }
 
+/** 启用表落点(storageRoot = $DSH_HOME/旧, profileDir/新);导出给迁移侧同源引用。 */
+export function agentsEnabledPath(storageRoot: string): string {
+  return join(storageRoot, 'agents-enabled.json')
+}
+
+/** 本地端点表落点(storageRoot = $DSH_HOME/旧, profileDir/新);导出给迁移侧同源引用。 */
+export function agentsEndpointsPath(storageRoot: string): string {
+  return join(storageRoot, 'agents-endpoints.json')
+}
+
 function readEnabledMap(filePath: string): Record<string, boolean> {
   try {
     if (!existsSync(filePath)) return {}
@@ -164,8 +174,8 @@ export function createAgentsHost(opts: {
   requestTimeoutMs?: number
   onCatalogChange?: () => void
 }): AgentsHost {
-  const enabledPath = join(opts.storageRoot, 'agents-enabled.json')
-  const endpointsPath = join(opts.storageRoot, 'agents-endpoints.json')
+  const enabledPath = agentsEnabledPath(opts.storageRoot)
+  const endpointsPath = agentsEndpointsPath(opts.storageRoot)
   const now = opts.now ?? Date.now
 
   let cachedCatalogItems: ParsedCatalogItem[] = []
