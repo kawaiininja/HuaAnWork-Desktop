@@ -16,6 +16,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
+import {
+  DESKTOP_APP_ID,
+  DESKTOP_PACKAGE_NAMES,
+  DESKTOP_PRODUCT_IDENTITY,
+  DESKTOP_PRODUCT_NAME,
+  DESKTOP_RELEASE_CHANNEL,
+  DESKTOP_RELEASE_IDENTITIES,
+  OTHER_DESKTOP_PRODUCT_IDENTITY,
+} from '../src/product-identity.ts'
 
 const packageRoot = new URL('../', import.meta.url)
 const workspaceRoot = new URL('../', packageRoot)
@@ -1355,5 +1364,44 @@ describe('published package surface', () => {
     expect(installedRuntime.match(/wShowWindow: 0,/gu)).toHaveLength(2)
     expect(installedRuntime).toContain('createRestrictedProcess(api, options, buildCommandLine(options.command, options.args), 0')
     expect(installedRuntime).toContain('createRestrictedProcess(api, options, commandLine, 4')
+  })
+})
+
+describe('huaanwork product identity after the M6 channel switch', () => {
+  it('runs on its own release channel', () => {
+    expect(DESKTOP_RELEASE_IDENTITIES.huaanwork.releaseChannel).toBe('huaanwork')
+    expect(DESKTOP_RELEASE_CHANNEL).toBe('huaanwork')
+    expect(DESKTOP_PRODUCT_IDENTITY).toBe(DESKTOP_RELEASE_IDENTITIES.huaanwork)
+  })
+
+  it('keeps the two upstream editions byte-for-byte intact', () => {
+    expect(DESKTOP_RELEASE_IDENTITIES.stable).toEqual({
+      releaseChannel: 'stable',
+      packageName: 'dsh-plugin-desktop',
+      productName: 'DSH Desktop',
+      appId: 'ai.deepseek.dsh.desktop',
+      homeDirectoryName: '.dsh',
+    })
+    expect(DESKTOP_RELEASE_IDENTITIES.beta).toEqual({
+      releaseChannel: 'beta',
+      packageName: 'dsh-plugin-desktop-beta',
+      productName: 'DSH Desktop Beta',
+      appId: 'ai.deepseek.dsh.desktop.beta',
+      homeDirectoryName: '.dsh-beta',
+    })
+    expect(OTHER_DESKTOP_PRODUCT_IDENTITY).toBe(DESKTOP_RELEASE_IDENTITIES.stable)
+  })
+
+  it('still treats all three desktop shells as launcher-owned, never profile plugins', () => {
+    expect([...DESKTOP_PACKAGE_NAMES].sort()).toEqual([
+      'dsh-plugin-desktop',
+      'dsh-plugin-desktop-beta',
+      'dsh-plugin-huaanwork',
+    ])
+  })
+
+  it('keeps the huaanwork identity aligned with electron-builder', () => {
+    expect(DESKTOP_PRODUCT_NAME).toBe(manifest.build?.productName)
+    expect(DESKTOP_APP_ID).toBe(manifest.build?.appId)
   })
 })

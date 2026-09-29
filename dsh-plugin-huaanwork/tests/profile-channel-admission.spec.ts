@@ -260,7 +260,6 @@ describe('Desktop Profile release-channel admission', () => {
 function seedHuaanworkCheckpoint(options: {
   readonly desktopPackageName?: string
   readonly releaseChannel?: 'stable' | 'beta' | 'huaanwork'
-  readonly currentChannel?: 'stable' | 'beta' | 'huaanwork'
   readonly appVersion?: string
   readonly recordedAt?: string
 } = {}) {
@@ -280,48 +279,22 @@ function seedHuaanworkCheckpoint(options: {
   })
   const captured = checkpoint.captureHealthy()
   if (captured.status !== 'captured') throw new Error('expected captured')
-
-  // If currentChannel is specified (e.g. simulating post-Task 1.6 huaanwork channel),
-  // override target.locations.current.identity.releaseChannel
-  if (options.currentChannel !== undefined) {
-    const locations = {
-      ...target.locations,
-      current: {
-        ...target.locations.current,
-        identity: {
-          ...target.locations.current.identity,
-          releaseChannel: options.currentChannel,
-        },
-      },
-      all: [
-        {
-          ...target.locations.current,
-          identity: {
-            ...target.locations.current.identity,
-            releaseChannel: options.currentChannel,
-          },
-        },
-        target.locations.other,
-      ] as const,
-    }
-    return { ...target, locations }
-  }
   return target
 }
 
 describe('huaanwork legacy checkpoint admission', () => {
   it('accepts its own M1-M5 stable-channel checkpoints as usage history', () => {
-    // 构造: huaanwork 自己的 userData 里有一份 releaseChannel:'stable' 的 v4 快照,
-    // currentChannel 设为 'huaanwork' (模拟 Task 1.6 切换通道后).
+    // 构造: huaanwork 自己的 userData 里有一份 releaseChannel:'stable' 的 v4 快照.
+    // 此时运行时已切换为 huaanwork 通道.
     // Task 1.2 的和解若未生效, 这里会因通道不等抛错.
-    const target = seedHuaanworkCheckpoint({ releaseChannel: 'stable', currentChannel: 'huaanwork' })
+    const target = seedHuaanworkCheckpoint({ releaseChannel: 'stable' })
     expect(hasDesktopProfileUsageHistory(target.locations, target.profile, 'work')).toBe(true)
     expect(inspectDesktopProfileChannelAdmission(target.locations, target.profile, 'work'))
       .toEqual({ status: 'allow', reason: 'current-channel-latest' })
   })
 
   it('does not throw when the only evidence is a legacy-channel snapshot', () => {
-    const target = seedHuaanworkCheckpoint({ releaseChannel: 'stable', currentChannel: 'huaanwork' })
+    const target = seedHuaanworkCheckpoint({ releaseChannel: 'stable' })
     expect(() => hasDesktopProfileUsageHistory(target.locations, target.profile, 'work')).not.toThrow()
   })
 
@@ -330,7 +303,6 @@ describe('huaanwork legacy checkpoint admission', () => {
     const target = seedHuaanworkCheckpoint({
       desktopPackageName: 'dsh-plugin-desktop-beta',
       releaseChannel: 'beta',
-      currentChannel: 'huaanwork',
     })
     expect(() => hasDesktopProfileUsageHistory(target.locations, target.profile, 'work'))
       .toThrow(/checkpoint Desktop identity is invalid/u)

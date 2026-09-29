@@ -15,7 +15,7 @@ export const DESKTOP_RELEASE_IDENTITIES = Object.freeze({
     homeDirectoryName: '.dsh-beta',
   }),
   huaanwork: Object.freeze({
-    releaseChannel: 'stable' as const,
+    releaseChannel: 'huaanwork' as const,
     packageName: 'dsh-plugin-huaanwork',
     productName: 'HuaAnWork',
     appId: 'app.huaanwork.desktop',
