@@ -210,6 +210,12 @@ import {
   resolveDesktopChannelHome,
 } from './desktop-channel-home.ts'
 import { desktopRecoveryCopy } from './recovery-copy.ts'
+import {
+  describeMigrationForUser,
+  HUAANWORK_MIGRATION_STEPS,
+  resolveLegacySource,
+  runHuaanworkLegacyMigration,
+} from './huaanwork-migration/index.ts'
 
 const BIN_NAME = DESKTOP_PACKAGE_NAME
 const PRODUCT_NAME = DESKTOP_PRODUCT_NAME
@@ -1168,6 +1174,30 @@ async function start(): Promise<void> {
       }
       await shutdown.request(recoveryResult === 'restart' || recoveryResult === 'safe-mode' ? 0 : 1)
       return
+    }
+    // 旧 Tauri 数据的一次性迁移(spec §8)。必须在 prepareDesktopProfile 之前
+    // (那次调用会写 profile 的 cordis.patch.yml / package.json),也必须在 host-boot
+    // 之前(huaanwork-host 的首个 effect 与 net-gate 会读目的文件)。
+    //
+    // 与上面三个 Desktop 自有 codemod 不同:这里**不吞异常**。spec §8 要求迁移失败
+    // 「报错并进恢复窗口」,而 Desktop 那三处刻意 catch-and-continue(main.ts:1206-1212
+    // 的注释说明了它们的取舍)。跟随的先例是 Profile 依赖迁移(main.ts:1451-1455):
+    // catch 只为丰富信息 + maskSecrets,然后重新抛出。
+    if (safeModePaths === undefined && !recoveryModeRequested) {
+      try {
+        const migration = await runHuaanworkLegacyMigration({
+          source: resolveLegacySource(desktopUserDataDir),
+          target: { homeDir, profileDir: activeProfileDir },
+          steps: HUAANWORK_MIGRATION_STEPS,
+        })
+        if (migration.marker !== null) {
+          // DesktopLogger 只有 error 级(stderr + 日志文件 sink):迁移摘要走同一条通道。
+          electronLogger.error(`${BIN_NAME}: ${describeMigrationForUser(migration.marker)}`)
+        }
+      } catch (migrationCause) {
+        const detail = migrationCause instanceof Error ? migrationCause.message : String(migrationCause)
+        throw new Error(`${BIN_NAME}: legacy HuaAnWork data migration failed: ${maskSecrets(detail)}`)
+      }
     }
     startupStage = 'profile-composition'
     lifecycleRecorder.transitionStartupStage(startupStage)
