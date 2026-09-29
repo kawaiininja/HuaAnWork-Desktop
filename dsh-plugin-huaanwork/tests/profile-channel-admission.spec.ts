@@ -68,13 +68,19 @@ function capture(
   return join(result.snapshotDirectory, 'manifest.json')
 }
 
+const CHANNEL_PROBE_VERSION: Record<'stable' | 'beta' | 'huaanwork', string> = {
+  stable: '2.0.4',
+  beta: '2.0.6-beta.1',
+  huaanwork: '0.1.0',
+}
+
 async function recordSetup(
   target: ReturnType<typeof fixture>,
   release: DesktopReleaseUserData,
   recordedAt: string,
 ): Promise<void> {
   await completeOrSkipDesktopSetupWizard(release.userDataDir, target.profile, 'completed', {
-    desktopVersion: release.identity.releaseChannel === 'stable' ? '2.0.4' : '2.0.6-beta.1',
+    desktopVersion: CHANNEL_PROBE_VERSION[release.identity.releaseChannel],
     dshVersion: '0.1.2-rc.1',
     setupRevision: 1,
   }, recordedAt)
@@ -248,5 +254,85 @@ describe('Desktop Profile release-channel admission', () => {
     expect(readDesktopSetupWizardState(target.locations.other.userDataDir, target.profile)).toBeUndefined()
     expect(existsSync(target.profile)).toBe(true)
     expect(readFileSync(join(target.profile, 'package.json'), 'utf8')).toBe(profileManifest)
+  })
+})
+
+function seedHuaanworkCheckpoint(options: {
+  readonly desktopPackageName?: string
+  readonly releaseChannel?: 'stable' | 'beta' | 'huaanwork'
+  readonly currentChannel?: 'stable' | 'beta' | 'huaanwork'
+  readonly appVersion?: string
+  readonly recordedAt?: string
+} = {}) {
+  const target = fixture()
+  mkdirSync(target.currentUserData, { recursive: true })
+  const checkpoint = new DesktopProfileCheckpoint({
+    userDataDir: target.currentUserData,
+    profileDir: target.profile,
+    homeDir: target.home,
+    profileName: 'work',
+    provider: 'desktop-profile',
+    appVersion: options.appVersion ?? '0.1.0',
+    desktopPackageName: options.desktopPackageName ?? 'dsh-plugin-huaanwork',
+    releaseChannel: options.releaseChannel ?? 'stable',
+    dshVersion: '0.1.6-alpha.2',
+    now: () => Date.parse(options.recordedAt ?? '2026-09-02T01:00:00.000Z'),
+  })
+  const captured = checkpoint.captureHealthy()
+  if (captured.status !== 'captured') throw new Error('expected captured')
+
+  // If currentChannel is specified (e.g. simulating post-Task 1.6 huaanwork channel),
+  // override target.locations.current.identity.releaseChannel
+  if (options.currentChannel !== undefined) {
+    const locations = {
+      ...target.locations,
+      current: {
+        ...target.locations.current,
+        identity: {
+          ...target.locations.current.identity,
+          releaseChannel: options.currentChannel,
+        },
+      },
+      all: [
+        {
+          ...target.locations.current,
+          identity: {
+            ...target.locations.current.identity,
+            releaseChannel: options.currentChannel,
+          },
+        },
+        target.locations.other,
+      ] as const,
+    }
+    return { ...target, locations }
+  }
+  return target
+}
+
+describe('huaanwork legacy checkpoint admission', () => {
+  it('accepts its own M1-M5 stable-channel checkpoints as usage history', () => {
+    // 构造: huaanwork 自己的 userData 里有一份 releaseChannel:'stable' 的 v4 快照,
+    // currentChannel 设为 'huaanwork' (模拟 Task 1.6 切换通道后).
+    // Task 1.2 的和解若未生效, 这里会因通道不等抛错.
+    const target = seedHuaanworkCheckpoint({ releaseChannel: 'stable', currentChannel: 'huaanwork' })
+    expect(hasDesktopProfileUsageHistory(target.locations, target.profile, 'work')).toBe(true)
+    expect(inspectDesktopProfileChannelAdmission(target.locations, target.profile, 'work'))
+      .toEqual({ status: 'allow', reason: 'current-channel-latest' })
+  })
+
+  it('does not throw when the only evidence is a legacy-channel snapshot', () => {
+    const target = seedHuaanworkCheckpoint({ releaseChannel: 'stable', currentChannel: 'huaanwork' })
+    expect(() => hasDesktopProfileUsageHistory(target.locations, target.profile, 'work')).not.toThrow()
+  })
+
+  it('still rejects a checkpoint written by a different package name', () => {
+    // 负例: 和解只放宽通道, 不放宽包名。跨产品清单仍须 invalid 并被拒.
+    const target = seedHuaanworkCheckpoint({
+      desktopPackageName: 'dsh-plugin-desktop-beta',
+      releaseChannel: 'beta',
+      currentChannel: 'huaanwork',
+    })
+    expect(() => hasDesktopProfileUsageHistory(target.locations, target.profile, 'work'))
+      .toThrow(/checkpoint Desktop identity is invalid/u)
   })
 })
