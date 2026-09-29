@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { describe, expect, it, test } from "vitest";
 
 import { apply, HuaAnWorkAdapter, loadSettings } from "../../src/huaanwork-guardrails/model.ts";
 import { ToolCallId, type GenerateOptions, type StreamChunk } from "@deepseek-ai/dsh-llm";
@@ -34,14 +34,13 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   return chunks;
 }
 
-test("loadSettings reads profiles/desktop/huaanwork-settings.json and allows empty api_key", () => {
+test("loadSettings reads huaanwork-settings.json and allows empty api_key", () => {
   const root = mkdtempSync(join(tmpdir(), "huaanwork-settings-"));
-  const dshHome = join(root, "dsh");
-  const profileDir = join(dshHome, "profiles", "desktop");
+  const profileDir = join(root, "profile");
   mkdirSync(profileDir, { recursive: true });
   writeFileSync(join(profileDir, "huaanwork-settings.json"), JSON.stringify({ base_url: "http://127.0.0.1:9/v1", model: "qwen", api_key: "" }));
   try {
-    assert.deepEqual(loadSettings(dshHome), {
+    assert.deepEqual(loadSettings(profileDir), {
       base_url: "http://127.0.0.1:9/v1",
       model: "qwen",
       api_key: "",
@@ -53,8 +52,7 @@ test("loadSettings reads profiles/desktop/huaanwork-settings.json and allows emp
 
 test("loadSettings prefers the active entry in models", () => {
   const root = mkdtempSync(join(tmpdir(), "huaanwork-settings-"));
-  const dshHome = join(root, "dsh");
-  const profileDir = join(dshHome, "profiles", "desktop");
+  const profileDir = join(root, "profile");
   mkdirSync(profileDir, { recursive: true });
   writeFileSync(
     join(profileDir, "huaanwork-settings.json"),
@@ -70,7 +68,7 @@ test("loadSettings prefers the active entry in models", () => {
     }),
   );
   try {
-    assert.deepEqual(loadSettings(dshHome), {
+    assert.deepEqual(loadSettings(profileDir), {
       base_url: "http://b/v1",
       model: "beta",
       api_key: "k",
@@ -235,11 +233,12 @@ test("stream treats garbage model text as the final assistant reply", async () =
 test("POST chat/completions is streamed with 120s timeout and empty api_key is valid", async () => {
   const originalFetch = globalThis.fetch;
   const originalTimeout = AbortSignal.timeout;
-  const dshHome = process.env.DSH_HOME;
+  const originalProfileDir = process.env.HUAANWORK_PROFILE_DIR;
   const root = mkdtempSync(join(tmpdir(), "huaanwork-llm-"));
-  mkdirSync(join(root, "dsh", "profiles", "desktop"), { recursive: true });
-  writeFileSync(join(root, "dsh", "profiles", "desktop", "huaanwork-settings.json"), JSON.stringify({ api_key: "", model: "qwen" }));
-  process.env.DSH_HOME = join(root, "dsh");
+  const profileDir = join(root, "profile");
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, "huaanwork-settings.json"), JSON.stringify({ api_key: "", model: "qwen" }));
+  process.env.HUAANWORK_PROFILE_DIR = profileDir;
 
   let timeoutMs: number | undefined;
   let init: RequestInit | undefined;
@@ -268,8 +267,8 @@ test("POST chat/completions is streamed with 120s timeout and empty api_key is v
   } finally {
     globalThis.fetch = originalFetch;
     AbortSignal.timeout = originalTimeout;
-    if (dshHome === undefined) delete process.env.DSH_HOME;
-    else process.env.DSH_HOME = dshHome;
+    if (originalProfileDir === undefined) delete process.env.HUAANWORK_PROFILE_DIR;
+    else process.env.HUAANWORK_PROFILE_DIR = originalProfileDir;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -542,3 +541,23 @@ test("reasoning-only response with finish_reason=length reports the token budget
     globalThis.fetch = original;
   }
 });
+
+describe('model settings resolve from the injected profile directory', () => {
+  it('reads the endpoint the settings route wrote, under a non-default profile', () => {
+    const profileDir = mkdtempSync(join(tmpdir(), 'model-nondefault-'))
+    writeFileSync(join(profileDir, 'huaanwork-settings.json'), JSON.stringify({
+      base_url: 'http://127.0.0.1:1234/v1', model: 'm', api_key: '', models: [], active_model_id: '',
+    }), 'utf8')
+    expect(loadSettings(profileDir).base_url).toBe('http://127.0.0.1:1234/v1')
+  })
+
+  it('does not hardcode the desktop profile name', () => {
+    const home = mkdtempSync(join(tmpdir(), 'model-home-'))
+    const desktopProfile = join(home, 'profiles', 'desktop')
+    mkdirSync(desktopProfile, { recursive: true })
+    writeFileSync(join(desktopProfile, 'huaanwork-settings.json'), JSON.stringify({ base_url: 'http://127.0.0.1:9999/v1' }), 'utf8')
+    // 传的是 home 而非 profileDir:不得再从 home 拼出 profiles/desktop 读到这份文件。
+    expect(loadSettings(home).base_url).not.toBe('http://127.0.0.1:9999/v1')
+  })
+})
+

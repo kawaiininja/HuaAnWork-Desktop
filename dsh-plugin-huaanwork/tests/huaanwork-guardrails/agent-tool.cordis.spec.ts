@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
+import { describe, expect, it, test } from "vitest";
 
-import { apply, registerCallHostTool } from "../../src/huaanwork-guardrails/agent-tool.ts";
+import { apply, readCatalogToken, registerCallHostTool } from "../../src/huaanwork-guardrails/agent-tool.ts";
 
 type ToolDefinition = {
   name: string;
@@ -26,12 +26,13 @@ type PreExecuteListener = (
   next: () => Promise<{ kind: string; reason?: string }>,
 ) => Promise<{ kind: string; reason?: string }>;
 
-function createMockCtx(options: { dshHome?: string; snapshot?: any; fetchImpl?: typeof fetch } = {}) {
+function createMockCtx(options: { dshHome?: string; profileDir?: string; snapshot?: any; fetchImpl?: typeof fetch } = {}) {
   const registered: ToolDefinition[] = [];
   const events: Record<string, PreExecuteListener[]> = {};
 
   const ctx = {
     huaanworkDshHome: options.dshHome,
+    huaanworkProfileDir: options.profileDir,
     huaanworkAgentCatalog: options.snapshot ? { current: options.snapshot } : { current: { items: [] } },
     tools: {
       register(def: ToolDefinition) {
@@ -130,12 +131,10 @@ test("1. 注册名是 call_host_tool；description 动态枚举已启用且未 b
   assert.equal(harness.registered.length, 0);
 });
 
-test("2. snapshot 有 pdf-extract，settings.json 有 agents_catalog_token 时，execute 发送 POST 并携带 Bearer token 与 arguments", async () => {
-  const tmp = mkdtempSync(join(tmpdir(), "agent-tool-test-"));
-  const dshHome = join(tmp, "dsh");
-  mkdirSync(dshHome, { recursive: true });
+test("2. snapshot 有 pdf-extract，huaanwork-settings.json 有 agents_catalog_token 时，execute 发送 POST 并携带 Bearer token 与 arguments", async () => {
+  const profileDir = mkdtempSync(join(tmpdir(), "agent-tool-test-"));
   writeFileSync(
-    join(tmp, "settings.json"),
+    join(profileDir, "huaanwork-settings.json"),
     JSON.stringify({ agents_catalog_token: "secret-token-123" }),
     "utf8",
   );
@@ -166,7 +165,7 @@ test("2. snapshot 有 pdf-extract，settings.json 有 agents_catalog_token 时�
   };
 
   try {
-    const harness = createMockCtx({ dshHome, snapshot });
+    const harness = createMockCtx({ profileDir, snapshot });
     registerCallHostTool(harness.ctx as any, snapshot, { fetchImpl: fakeFetch });
     const tool = harness.registered[0];
     assert.ok(tool);
@@ -189,7 +188,7 @@ test("2. snapshot 有 pdf-extract，settings.json 有 agents_catalog_token 时�
     assert.equal(res.truncated, false);
     assert.equal(res.content[0].text, JSON.stringify({ ok: true, result: { pages: 3 } }));
   } finally {
-    rmSync(tmp, { recursive: true, force: true });
+    rmSync(profileDir, { recursive: true, force: true });
   }
 });
 
@@ -485,3 +484,22 @@ test("description 带条目描述，超长 argumentsSchema 截断到 1 KiB", () 
   assert.ok(tool.description.length - schemaIdx <= 1024 + 16, "schema 段必须截断");
   unregister?.();
 });
+
+describe('agents catalog token reads the profile settings document', () => {
+  it('returns the configured token', () => {
+    const profileDir = mkdtempSync(join(tmpdir(), 'catalog-token-'))
+    writeFileSync(join(profileDir, 'huaanwork-settings.json'), JSON.stringify({ agents_catalog_token: 'tok-123' }), 'utf8')
+    expect(readCatalogToken(profileDir)).toBe('tok-123')
+  })
+
+  it('returns an empty token rather than reading above the profile directory', () => {
+    const home = mkdtempSync(join(tmpdir(), 'catalog-token-home-'))
+    writeFileSync(join(home, 'settings.json'), JSON.stringify({ agents_catalog_token: 'leaked' }), 'utf8')
+    expect(readCatalogToken(join(home, '.huaanwork'))).toBe('')
+  })
+
+  it('returns an empty token when nothing was injected', () => {
+    expect(readCatalogToken(undefined)).toBe('')
+  })
+})
+

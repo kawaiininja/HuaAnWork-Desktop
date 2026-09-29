@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { test } from "vitest";
+import { describe, expect, it, test } from "vitest";
+import { readGuardMode, writeUnattendedAudit } from "../../src/huaanwork-guardrails/policy.ts";
 
 import {
   guard as policyGuard,
@@ -232,12 +233,12 @@ test("unattended enabled and callId's tool is in allow: pre-execute degrades ask
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
   // decide() 按平台把 shell 工具二选一(win32 → pwsh,其余 → bash),硬编码 bash 在 Windows CI 会被平台规则先拒。
   const shellName = process.platform === "win32" ? "pwsh" : "bash";
-  const dshHome = mkdtempSync(join(tmpdir(), "huaanwork-policy-audit-"));
+  const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-policy-audit-"));
   try {
     const allowedOnce = new Set<string>();
     const harness = applyPolicyWithUnattended({
       huaanworkAllowedOnce: allowedOnce,
-      huaanworkDshHome: dshHome,
+      huaanworkProfileDir: profileDir,
       huaanworkUnattended: {
         current: {
           runId: "run-1",
@@ -255,7 +256,7 @@ test("unattended enabled and callId's tool is in allow: pre-execute degrades ask
     assert.equal(harness.guard(call), undefined, "guard() must pass the degraded callId through unchanged");
     assert.equal(allowedOnce.has("call-1"), false, "guard()'s existing delete branch consumes the one-time entry");
 
-    const auditText = readFileSync(join(dshHome, "automations", "auto-1.audit.jsonl"), "utf8").trim();
+    const auditText = readFileSync(join(profileDir, "automations", "auto-1.audit.jsonl"), "utf8").trim();
     const [line, ...rest] = auditText.split("\n");
     assert.equal(rest.length, 0);
     const entry = JSON.parse(line) as Record<string, unknown>;
@@ -267,27 +268,27 @@ test("unattended enabled and callId's tool is in allow: pre-execute degrades ask
     assert.equal(typeof entry.at, "number");
     assert.equal(Object.hasOwn(entry, "arguments"), false, "audit line must not contain tool argument payloads");
   } finally {
-    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(profileDir, { recursive: true, force: true });
   }
 });
 
 test("audit file caps retained lines and trims the oldest ones on append (review finding 4)", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
-  const dshHome = mkdtempSync(join(tmpdir(), "huaanwork-policy-audit-cap-"));
+  const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-policy-audit-cap-"));
   try {
-    const auditPath = join(dshHome, "automations", "auto-cap.audit.jsonl");
+    const auditPath = join(profileDir, "automations", "auto-cap.audit.jsonl");
     // 预先塞入 60 行审计记录（超过 50 行上限），模拟一个长期运行、积累了大量降级记录的任务。
     const seeded = Array.from({ length: 60 }, (_, index) =>
       JSON.stringify({ at: index, runId: `seed-${index}`, tool: "bash", callId: `seed-call-${index}`, decision: "ask→allow" }),
     );
-    mkdirSync(join(dshHome, "automations"), { recursive: true });
+    mkdirSync(join(profileDir, "automations"), { recursive: true });
     writeFileSync(auditPath, `${seeded.join("\n")}\n`, "utf8");
 
     const allowedOnce = new Set<string>();
     const shellName = process.platform === "win32" ? "pwsh" : "bash";
     const harness = applyPolicyWithUnattended({
       huaanworkAllowedOnce: allowedOnce,
-      huaanworkDshHome: dshHome,
+      huaanworkProfileDir: profileDir,
       huaanworkUnattended: {
         current: { runId: "run-cap", automationId: "auto-cap", allow: new Set([shellName]) },
       },
@@ -304,7 +305,7 @@ test("audit file caps retained lines and trims the oldest ones on append (review
     const newest = JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
     assert.equal(newest.callId, "call-cap", "the newly-written line must be the last (most recent) line");
   } finally {
-    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(profileDir, { recursive: true, force: true });
   }
 });
 
@@ -530,14 +531,14 @@ test("presentation plugin gives ALLOWED_TOOLS to legacy chat agent", async () =>
 
 // —— 护栏三档模式：settings.json 直读 + seam fail-closed ——
 
-function applyPolicyWithHome(home: string | undefined) {
+function applyPolicyWithHome(profileDir: string | undefined) {
   const preExecuteListeners: PreExecute[] = [];
   let guard:
     | ((execution: { name: string; arguments: Record<string, unknown>; callId?: string }) => string | undefined)
     | undefined;
   const ctx = {
     huaanworkWorkspaceRoot: { current: process.cwd() },
-    ...(home === undefined ? {} : { huaanworkDshHome: home }),
+    ...(profileDir === undefined ? {} : { huaanworkProfileDir: profileDir }),
     on(event: string, listener: PreExecute) {
       if (event === "tools/pre-execute") preExecuteListeners.push(listener);
     },
@@ -558,12 +559,11 @@ function applyPolicyWithHome(home: string | undefined) {
 
 test("bundle policy reads guard_mode per call, falls back to ask, and switches mid-session", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
-  const base = mkdtempSync(join(tmpdir(), "huaanwork-guard-mode-"));
-  const home = join(base, "dsh");
-  const settingsPath = join(base, "settings.json");
+  const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-guard-mode-"));
+  const settingsPath = join(profileDir, "huaanwork-settings.json");
   try {
     // 缺失 settings.json → ask 语义：git_push pre-execute ask、guard deny
-    const missing = applyPolicyWithHome(home);
+    const missing = applyPolicyWithHome(profileDir);
     apply(missing.ctx as never);
     const push = { name: "git_push", arguments: {}, callId: "p1" };
     assert.deepEqual(await missing.preExecute(push), { kind: "ask" });
@@ -571,7 +571,7 @@ test("bundle policy reads guard_mode per call, falls back to ask, and switches m
 
     // full → pre-execute 放行，guard 无 allowedOnce 也放行；硬 deny 仍拦
     writeFileSync(settingsPath, JSON.stringify({ guard_mode: "full" }));
-    const full = applyPolicyWithHome(home);
+    const full = applyPolicyWithHome(profileDir);
     apply(full.ctx as never);
     assert.deepEqual(await full.preExecute(push), { kind: "allow" });
     assert.equal(full.guard({ name: "git_push", arguments: {}, callId: "p2" }), undefined);
@@ -583,7 +583,7 @@ test("bundle policy reads guard_mode per call, falls back to ask, and switches m
 
     // smart → git_push 仍 ask、guard deny；git_commit 放行
     writeFileSync(settingsPath, JSON.stringify({ guard_mode: "smart" }));
-    const smart = applyPolicyWithHome(home);
+    const smart = applyPolicyWithHome(profileDir);
     apply(smart.ctx as never);
     assert.deepEqual(await smart.preExecute(push), { kind: "ask" });
     assert.equal(smart.guard(push), GUARD_NEEDS_APPROVAL);
@@ -598,20 +598,19 @@ test("bundle policy reads guard_mode per call, falls back to ask, and switches m
     writeFileSync(settingsPath, JSON.stringify({ guard_mode: "bypass" }));
     assert.deepEqual(await smart.preExecute(push), { kind: "ask" });
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    rmSync(profileDir, { recursive: true, force: true });
   }
 });
 
 test("guard is fail-closed for would-be-ask calls in every mode", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
-  const base = mkdtempSync(join(tmpdir(), "huaanwork-guard-failclosed-"));
-  const home = join(base, "dsh");
-  const settingsPath = join(base, "settings.json");
+  const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-guard-failclosed-"));
+  const settingsPath = join(profileDir, "huaanwork-settings.json");
   const shellName = process.platform === "win32" ? "pwsh" : "bash";
   try {
     // ask 档：普通命令 pre-execute ask → guard 无核销即 deny
     writeFileSync(settingsPath, JSON.stringify({ guard_mode: "ask" }));
-    const askHarness = applyPolicyWithHome(home);
+    const askHarness = applyPolicyWithHome(profileDir);
     apply(askHarness.ctx as never);
     const plain = { name: shellName, arguments: { command: "ls -la" }, callId: "fc-ask" };
     assert.deepEqual(await askHarness.preExecute(plain), { kind: "ask" });
@@ -619,7 +618,7 @@ test("guard is fail-closed for would-be-ask calls in every mode", async () => {
 
     // smart 档：高危命令 pre-execute ask → guard 无核销即 deny
     writeFileSync(settingsPath, JSON.stringify({ guard_mode: "smart" }));
-    const smartHarness = applyPolicyWithHome(home);
+    const smartHarness = applyPolicyWithHome(profileDir);
     apply(smartHarness.ctx as never);
     const risky = { name: shellName, arguments: { command: "git push" }, callId: "fc-smart" };
     assert.deepEqual(await smartHarness.preExecute(risky), { kind: "ask" });
@@ -627,16 +626,16 @@ test("guard is fail-closed for would-be-ask calls in every mode", async () => {
 
     // full 档：硬 deny 经 guard 仍 deny
     writeFileSync(settingsPath, JSON.stringify({ guard_mode: "full" }));
-    const fullHarness = applyPolicyWithHome(home);
+    const fullHarness = applyPolicyWithHome(profileDir);
     apply(fullHarness.ctx as never);
     const catastrophic = { name: shellName, arguments: { command: "echo x && rm -rf y" }, callId: "fc-full" };
     assert.deepEqual(await fullHarness.preExecute(catastrophic), {
-    kind: "deny",
-    reason: POLICY(REASON_SHELL_HARD_DENY),
-  });
+      kind: "deny",
+      reason: POLICY(REASON_SHELL_HARD_DENY),
+    });
     assert.equal(fullHarness.guard(catastrophic), GUARD(REASON_SHELL_HARD_DENY));
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    rmSync(profileDir, { recursive: true, force: true });
   }
 });
 
@@ -703,4 +702,47 @@ test("re-created attachments maps are empty (reboot contract)", () => {
   const rebooted = emptyAttachments();
   assert.equal(isHostAttached(rebooted, "s", "pdf-extract"), false);
 });
+
+describe('guard mode reads the profile settings document', () => {
+  it('honours a non-default guard_mode written by the settings route', () => {
+    const profileDir = mkdtempSync(join(tmpdir(), 'guard-mode-'))
+    writeFileSync(join(profileDir, 'huaanwork-settings.json'), JSON.stringify({ guard_mode: 'full' }), 'utf8')
+    expect(readGuardMode(profileDir)).toBe('full')
+  })
+
+  it('falls back to ask when the profile has no settings document', () => {
+    expect(readGuardMode(mkdtempSync(join(tmpdir(), 'guard-mode-empty-')))).toBe('ask')
+  })
+
+  it('falls back to ask when no profile dir was injected', () => {
+    expect(readGuardMode(undefined)).toBe('ask')
+  })
+
+  it('rejects an unknown guard_mode rather than trusting it', () => {
+    const profileDir = mkdtempSync(join(tmpdir(), 'guard-mode-bad-'))
+    writeFileSync(join(profileDir, 'huaanwork-settings.json'), JSON.stringify({ guard_mode: 'yolo' }), 'utf8')
+    expect(readGuardMode(profileDir)).toBe('ask')
+  })
+
+  it('never reads a settings.json above the profile directory', () => {
+    // B1 regression gate: dirname(dshHome) used to push reading to user HOME.
+    const home = mkdtempSync(join(tmpdir(), 'guard-mode-home-'))
+    writeFileSync(join(home, 'settings.json'), JSON.stringify({ guard_mode: 'full' }), 'utf8')
+    const dshHome = join(home, '.huaanwork')
+    mkdirSync(join(dshHome, 'profiles', 'desktop'), { recursive: true })
+    expect(readGuardMode(dshHome)).toBe('ask')
+  })
+})
+
+describe('unattended audit lands where the cascade deleter looks', () => {
+  it('writes <profileDir>/automations/<id>.audit.jsonl', () => {
+    const profileDir = mkdtempSync(join(tmpdir(), 'audit-'))
+    writeUnattendedAudit({ huaanworkProfileDir: profileDir }, { runId: 'r1', automationId: 'a1', sessionId: 's1' }, 'run_code', 'call-1')
+    const path = join(profileDir, 'automations', 'a1.audit.jsonl')
+    expect(existsSync(path)).toBe(true)
+    const line = JSON.parse(readFileSync(path, 'utf8').trim()) as Record<string, unknown>
+    expect(line).toMatchObject({ runId: 'r1', sessionId: 's1', tool: 'run_code', callId: 'call-1', decision: 'ask→allow' })
+    expect(typeof line.at).toBe('number')
+  })
+})
 

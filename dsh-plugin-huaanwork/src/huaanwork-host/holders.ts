@@ -107,6 +107,7 @@ export function installHuaanworkHolders(
   }
   ctx.huaanworkDshHome = config.dshHome
   ctx.huaanworkProfileDir = config.profileDir
+  process.env.HUAANWORK_PROFILE_DIR = config.profileDir
   ctx.huaanworkAllowedOnce = new Set<string>()
   ctx.huaanworkApprovals = new Map()
   ctx.huaanworkUnattended = { current: null }

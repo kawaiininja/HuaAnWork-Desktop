@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { preExecuteExplained, type GuardMode, type ToolCall } from "@huaanwork/policy";
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
@@ -33,8 +33,9 @@ type UnattendedHolder = { current?: UnattendedScope };
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
   huaanworkAllowedOnce?: Set<string>;
-  /** `$DSH_HOME`：写无人值守降级审计行用。未注入时静默跳过审计（不阻断工具执行）。 */
+  /** 保留兼容旧调用方；护栏设置与审计已改由 huaanworkProfileDir 权威解析。 */
   huaanworkDshHome?: string;
+  huaanworkProfileDir?: string;
   /** boot 时注入一次的容器，`.current` 随每次 `runAgentTurn` 变化（见上方坑注释）。 */
   huaanworkUnattended?: UnattendedHolder;
   huaanworkAttachments?: AttachmentMaps;
@@ -53,13 +54,14 @@ type Context = {
 export const inject = ["tools"];
 
 /**
- * 同步读取护栏档位：settings.json 位于 `dirname($DSH_HOME)`（与 model.ts 同一约定）。
- * 缺失/损坏/值非法一律回落 "ask"（安全方向）。每个 seam 入口各读一次，seam 内复用。
+ * 读取护栏策略档位。存储根是 profile 目录(`huaanwork-settings.json` 由 host 的
+ * settings route 写入同一处),不是 DSH_HOME——旧 Tauri 时代 settings.json 住在
+ * `dirname($DSH_HOME)`,DSH_HOME 移到 `~/.huaanwork` 后那个表达式会静默指向用户 HOME。
  */
-export function readGuardMode(dshHome: string | undefined): GuardMode {
-  if (!dshHome) return "ask";
+export function readGuardMode(profileDir: string | undefined): GuardMode {
+  if (!profileDir) return "ask";
   try {
-    const parsed = JSON.parse(readFileSync(join(dirname(dshHome), "settings.json"), "utf8")) as Record<string, unknown>;
+    const parsed = JSON.parse(readFileSync(join(profileDir, "huaanwork-settings.json"), "utf8")) as Record<string, unknown>;
     return parsed.guard_mode === "smart" || parsed.guard_mode === "full" ? parsed.guard_mode : "ask";
   } catch {
     return "ask";
@@ -68,7 +70,7 @@ export function readGuardMode(dshHome: string | undefined): GuardMode {
 
 export function apply(ctx: Context): void {
   ctx.on("tools/pre-execute", async (execution, next) => {
-    const mode = readGuardMode(ctx.huaanworkDshHome);
+    const mode = readGuardMode(ctx.huaanworkProfileDir);
     const { decision, reason } = preExecuteExplained(toToolCall(execution, ctx), mode);
     // reason 面向模型：说明拒绝原因与可行替代（如「去掉管道拆成单条命令」），让模型能自我纠正，
     // 而不是对着一句 huaanwork-policy 脑补出「网络被封」「申请提权」之类的错误应对。
@@ -83,7 +85,7 @@ export function apply(ctx: Context): void {
   });
 
   ctx.tools.guard((execution) => {
-    const mode = readGuardMode(ctx.huaanworkDshHome);
+    const mode = readGuardMode(ctx.huaanworkProfileDir);
     const call = toToolCall(execution, ctx);
     // guard 的 deny 集合 == pre-execute 的 deny ∪ would-be-ask（guard 不能表达 ask），
     // 故只看 pre-execute 一档判定即可，两档语义与改造前逐字节一致。
@@ -125,21 +127,23 @@ function degradeIfUnattended(execution: ToolExecution, ctx: Context): boolean {
 const AUDIT_LINES_LIMIT = 50;
 
 /**
- * 降级审计行：`$DSH_HOME/automations/<automationId>.audit.jsonl`，一次降级一行，超过
+ * 降级审计行：`<profileDir>/automations/<automationId>.audit.jsonl`，一次降级一行，超过
  * {@link AUDIT_LINES_LIMIT} 时裁掉最旧的行（整文件重写，与 appendRun 对运行历史的处理一致）。
  * 不含工具参数正文（参数可能带路径与内容，对齐「自动化本身不另存凭证」的克制）。
- * `huaanworkDshHome` 未注入或读写失败都静默跳过——审计是事后可追溯性，不是工具执行的前置条件。
+ * `huaanworkProfileDir` 未注入或读写失败都静默跳过——审计是事后可追溯性，不是工具执行的前置条件。
  */
-function writeUnattendedAudit(
-  ctx: Context,
+export function writeUnattendedAudit(
+  ctx: Pick<Context, "huaanworkProfileDir">,
   unattended: Pick<UnattendedScope, "runId" | "automationId" | "sessionId">,
   tool: string,
   callId: string,
 ): void {
-  const dshHome = ctx.huaanworkDshHome;
-  if (!dshHome) return;
+  const profileDir = ctx.huaanworkProfileDir;
+  if (!profileDir) return;
   try {
-    const dir = join(dshHome, "automations");
+    // 与 huaanwork-host/stores.ts 的 auditPath 同源:级联删除按 profileDir 找,
+    // 写侧必须落同一处,否则审计文件永不被清理(G5)。
+    const dir = join(profileDir, "automations");
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `${unattended.automationId}.audit.jsonl`);
     const line = {

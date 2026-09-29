@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -29,11 +28,8 @@ const PROVIDER = "deepseek-official";
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
 const REQUEST_TIMEOUT_MS = 120_000;
 
-// Desktop 布局(spec §14 第五轮修订第 14 条):应用设置落 `<DSH_HOME>/profiles/desktop/
-// huaanwork-settings.json`。profile 名与 ../profile.ts 的 DESKTOP_PROFILE_NAME 保持一致;
-// 不再沿用 Tauri 时代的 `dirname(DSH_HOME)/settings.json` 兄弟文件布局。
-function resolveSettingsPath(dshHome: string): string {
-  return join(dshHome, "profiles", "desktop", "huaanwork-settings.json");
+function resolveSettingsPath(profileDir: string): string {
+  return join(profileDir, "huaanwork-settings.json");
 }
 /**
  * 调用方未指定时的 max_tokens 默认值。思考模式端点（deepseek 思考系）把 reasoning
@@ -59,6 +55,7 @@ type ModelSettings = {
 };
 
 type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/llm/src/index.ts(LlmAdapter 已 import;ctx.llm 无单独类型导出)
+  huaanworkProfileDir?: string;
   llm: {
     registerAdapter(providers: string[], adapter: LlmAdapter): unknown;
   };
@@ -80,14 +77,18 @@ export const name = "llm-deepseek";
 export const inject = ["llm"];
 
 export class HuaAnWorkAdapter extends LlmAdapter {
+  constructor(private readonly profileDir?: string) {
+    super();
+  }
+
   override providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: "HuaAnWork" };
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const entries = loadModelEntries();
+    const entries = loadModelEntries(this.profileDir);
     if (entries.length === 0) {
-      const id = loadSettings().model || "local";
+      const id = loadSettings(this.profileDir).model || "local";
       return [{ provider, id, name: id, inputModalities: ["text"] }];
     }
     return entries.map((entry) => {
@@ -106,7 +107,7 @@ export class HuaAnWorkAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const settings = loadSettings();
+    const settings = loadSettings(this.profileDir);
     const opened = await openCompletions(options, settings);
     const payloads: string[] = [];
     let text = "";
@@ -179,7 +180,7 @@ export class HuaAnWorkAdapter extends LlmAdapter {
 }
 
 export function apply(ctx: Context): void {
-  ctx.llm.registerAdapter([PROVIDER], new HuaAnWorkAdapter());
+  ctx.llm.registerAdapter([PROVIDER], new HuaAnWorkAdapter(ctx.huaanworkProfileDir));
 }
 
 type StoredModelEntry = {
@@ -209,8 +210,9 @@ function parseStoredEntry(raw: unknown): StoredModelEntry | null {
   };
 }
 
-export function loadModelEntries(dshHome = process.env.DSH_HOME ?? join(homedir(), ".dsh")): StoredModelEntry[] {
-  const path = resolveSettingsPath(dshHome);
+export function loadModelEntries(profileDir = process.env.HUAANWORK_PROFILE_DIR ?? ""): StoredModelEntry[] {
+  if (!profileDir) return [];
+  const path = resolveSettingsPath(profileDir);
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
     if (!Array.isArray(parsed.models)) return [];
@@ -221,9 +223,10 @@ export function loadModelEntries(dshHome = process.env.DSH_HOME ?? join(homedir(
   }
 }
 
-export function loadSettings(dshHome = process.env.DSH_HOME ?? join(homedir(), ".dsh")): ModelSettings {
-  const path = resolveSettingsPath(dshHome);
+export function loadSettings(profileDir = process.env.HUAANWORK_PROFILE_DIR ?? ""): ModelSettings {
   const defaults: ModelSettings = { base_url: DEFAULT_BASE_URL, model: "", api_key: "" };
+  if (!profileDir) return defaults;
+  const path = resolveSettingsPath(profileDir);
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
     const entries = Array.isArray(parsed.models)

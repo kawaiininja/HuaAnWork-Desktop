@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { clampTimeoutMs } from "@huaanwork/policy/agent-catalog";
@@ -33,6 +33,7 @@ type PreExecuteDecision = // 上游未导出;已逐字比对 0.1.6-alpha.2:core/
 
 type Context = {
   huaanworkDshHome?: string;
+  huaanworkProfileDir?: string;
   huaanworkAgentCatalog?: { current: AgentCatalogSnapshot };
   on(
     event: "tools/pre-execute",
@@ -106,10 +107,10 @@ function buildToolDescription(snapshot: AgentCatalogSnapshot): string {
   return lines.join("\n");
 }
 
-function readCatalogToken(dshHome?: string): string {
-  if (!dshHome) return "";
+export function readCatalogToken(profileDir?: string): string {
+  if (!profileDir) return "";
   try {
-    const settingsPath = join(dirname(dshHome), "settings.json");
+    const settingsPath = join(profileDir, "huaanwork-settings.json");
     if (!existsSync(settingsPath)) return "";
     const raw = readFileSync(settingsPath, "utf8");
     const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -181,7 +182,7 @@ export function registerCallHostTool(
         ? AbortSignal.any([callerSignal, timeoutSignal])
         : timeoutSignal;
 
-      const token = readCatalogToken(c.huaanworkDshHome);
+      const token = readCatalogToken(c.huaanworkProfileDir);
       const headers: Record<string, string> = {
         "content-type": "application/json",
       };
