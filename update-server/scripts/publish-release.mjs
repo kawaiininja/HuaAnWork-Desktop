@@ -13,7 +13,15 @@
  *                       applies after downloading (koly trailer / PE header)
  *   2 mac universal     assertMacArtifactIsUniversal - the mac channel has no
  *                       architecture dimension, so only universal dmgs may be
- *                       published (2026-09-28 P1-1)
+ *                       published (2026-09-28 P1-1). The dmg hides its
+ *                       architectures - lipo cannot read a disk image, only
+ *                       the .app packed inside it - so the client cannot tell
+ *                       either (its koly check passes and a mismatch only
+ *                       surfaces at mount time): the basename must carry the
+ *                       release pipeline's `universal` marker and the image is
+ *                       mounted read-only (hdiutil) to read the packed
+ *                       executable. Mac artifacts must be published from a
+ *                       macOS host.
  *   3 artifact size     at most PUBLISH_MAX_ARTIFACT_BYTES, the client's cap
  *   4 version shape     matchesChannelVersionShape for the target channel
  *   5 sha256            streamed (createReadStream + hash.update, never a
@@ -33,6 +41,10 @@
  *
  * --data-dir defaults to the UPDATE_SERVER_DATA_DIR environment variable, the
  * same variable the server reads.
+ *
+ * Mac artifacts must be published from a macOS host: verifying that the app
+ * inside the dmg is universal needs `hdiutil`, and the gate refuses anywhere
+ * it cannot inspect the packed executable.
  */
 
 import { createHash, randomBytes } from 'node:crypto'
@@ -138,7 +150,11 @@ async function checkInstallerShape(artifactFile, validateAs) {
   }
 }
 
-/** Step 2: the mac channel is universal-only (there is no arch dimension downstream). */
+/**
+ * Step 2: the mac channel is universal-only (there is no arch dimension
+ * downstream). The gate reads the basename marker, a Mach-O report, or - as
+ * the release artifacts require - the packed .app inside a mounted image.
+ */
 async function checkMacUniversal(artifactFile) {
   try {
     await assertMacArtifactIsUniversal(artifactFile)
@@ -305,7 +321,12 @@ async function main() {
   const artifactFile = resolve(options.file)
 
   await checkInstallerShape(artifactFile, validateAs)
-  if (platform === 'mac') await checkMacUniversal(artifactFile)
+  if (platform === 'mac') {
+    // The dmg hides its architectures inside the packed .app, so the gate has
+    // to mount it: mac artifacts must be published from a macOS host.
+    console.log('publish-release: 2 mac universal  mounting the dmg (hdiutil) to verify the app inside it; mac artifacts must be published from a macOS host')
+    await checkMacUniversal(artifactFile)
+  }
   const sizeOnDisk = statSync(artifactFile).size
   checkArtifactSize(sizeOnDisk)
   checkVersionShape(channel, version)

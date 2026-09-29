@@ -13,12 +13,23 @@
  * they assert this gate against the committed shared fixture
  * (tests/fixtures/installer-shapes) that dsh-plugin-huaanwork's
  * tests/update-server-contract.spec.ts reads by path.
+ *
+ * `assertMacArtifactIsUniversal` is tested in three layers: basename marker
+ * tripwire (no tools needed), Mach-O reports driven by fake `lipo`/`file`
+ * tools on a controlled PATH (the synthetic fixture is a fat Mach-O), and -
+ * on a macOS host with hdiutil - against a real UDZO dmg built at test time by
+ * `hdiutil create`, whose packed app executable is synthesized from a real
+ * universal system binary. The real-image layer is the one that matches the
+ * release pipeline (`electron-builder --mac dmg --universal`); it is skipped
+ * only where the host genuinely lacks the tooling.
  */
 
-import { chmod, mkdtemp, open, rm, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { execFile, execFileSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import { chmod, copyFile, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
+import { promisify } from 'node:util'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   InvalidInstallerError,
@@ -113,6 +124,97 @@ async function writeSparseDmg(path: string, size: number): Promise<void> {
   } finally {
     await handle.close()
   }
+}
+
+const execFileAsync = promisify(execFile)
+
+/** Whether `command` is resolvable on PATH (the gate finds its tools there). */
+function hostHasCommand(command: string): boolean {
+  return (process.env.PATH ?? '')
+    .split(':')
+    .some(directory => directory !== '' && existsSync(join(directory, command)))
+}
+
+/**
+ * A real system Mach-O that contains both an x86_64 and a true arm64 slice.
+ * Most macOS binaries carry arm64e rather than arm64, so the candidates are
+ * probed with lipo instead of assumed; the fat inner executable of the
+ * real-image tests is synthesized from this file.
+ */
+function findUniversalSystemBinary(): string | null {
+  const candidates = ['/usr/bin/file', '/usr/bin/sed', '/bin/cat', '/bin/ls', '/usr/bin/true', '/bin/sh']
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue
+    let report: string
+    try {
+      report = execFileSync('lipo', ['-info', candidate], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch {
+      // Not a Mach-O, or lipo is missing: try the next candidate.
+      continue
+    }
+    const tokens = report.split(/[^0-9A-Za-z_]+/u)
+    if (tokens.includes('x86_64') && tokens.includes('arm64')) return candidate
+  }
+  return null
+}
+
+const UNIVERSAL_SYSTEM_BINARY = findUniversalSystemBinary()
+
+/**
+ * The real-image tests build a genuine UDZO dmg (`hdiutil create`) and mount
+ * it again, and synthesize the inner executable with `lipo -thin`/`-create`.
+ * Skipped only where the host genuinely lacks that tooling; the refusal paths
+ * are pinned everywhere else.
+ */
+const REAL_DMG_TESTS_SUPPORTED = process.platform === 'darwin'
+  && hostHasCommand('hdiutil')
+  && hostHasCommand('lipo')
+  && UNIVERSAL_SYSTEM_BINARY !== null
+
+/**
+ * Build a real UDZO dmg - the shape the release pipeline ships - whose packed
+ * app executable is either fat (x86_64 + arm64) or a single arm64 slice.
+ *
+ * @param directory - scratch directory to stage and build in.
+ * @param fat - whether the app executable carries both slices.
+ * @returns path of the created dmg (basename carries the universal marker).
+ */
+async function buildProbeDmg(directory: string, fat: boolean): Promise<string> {
+  const source = UNIVERSAL_SYSTEM_BINARY
+  if (source === null) throw new Error('no universal system binary is available on this host')
+  const contentsDirectory = join(directory, 'payload', 'Probe.app', 'Contents')
+  const macosDirectory = join(contentsDirectory, 'MacOS')
+  await mkdir(macosDirectory, { recursive: true })
+  await writeFile(
+    join(contentsDirectory, 'Info.plist'),
+    '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>Probe</string></dict></plist>\n',
+  )
+  const executable = join(macosDirectory, 'Probe')
+  if (fat) {
+    const slices = join(directory, 'slices')
+    await mkdir(slices, { recursive: true })
+    const thinArm64 = join(slices, 'arm64.bin')
+    const thinX86 = join(slices, 'x86_64.bin')
+    await execFileAsync('lipo', ['-thin', 'arm64', source, '-output', thinArm64])
+    await execFileAsync('lipo', ['-thin', 'x86_64', source, '-output', thinX86])
+    await execFileAsync('lipo', ['-create', thinArm64, thinX86, '-output', executable])
+  } else {
+    await execFileAsync('lipo', ['-thin', 'arm64', source, '-output', executable])
+  }
+  await chmod(executable, 0o755)
+  const dmgPath = join(directory, fat ? 'probe-universal.dmg' : 'probe-thin-universal.dmg')
+  await execFileAsync('hdiutil', ['create', '-quiet', '-format', 'UDZO', '-srcfolder', join(directory, 'payload'), dmgPath])
+  return dmgPath
+}
+
+/**
+ * The gate must always detach the image it mounted - even when it refuses the
+ * artifact. `hdiutil info` reports the resolved path, so the (unique) basename
+ * is what is matched here.
+ */
+async function expectImageDetached(dmgPath: string): Promise<void> {
+  const { stdout } = await execFileAsync('hdiutil', ['info'], { encoding: 'utf8' })
+  expect(stdout).not.toContain(basename(dmgPath))
 }
 
 describe('validateInstallerShape', () => {
@@ -235,8 +337,16 @@ describe('shared installer-shape fixture (server gate vs client validator)', () 
   it.skipIf(process.platform !== 'darwin')('agrees on every shared mac-universal vector', async () => {
     const vectors = MANIFEST.files.filter(file => file.universal !== null)
     expect(vectors.length).toBeGreaterThanOrEqual(2)
+    const dir = await tempDir()
     for (const file of vectors) {
-      const verdict = await assertMacArtifactIsUniversal(join(SHAPE_FIXTURES, file.name))
+      // Inspect each vector under a universal-marked name (the tripwire must
+      // not be the reason a synthetic thin fixture is refused), so the vector
+      // exercises the architecture report itself: the fat Mach-O fixture -
+      // what the mac channel publishes today - must keep passing.
+      const marked = /universal/iu.test(file.name) ? file.name : file.name.replace(/\.dmg$/u, '-universal.dmg')
+      const inspectionPath = join(dir, `inspection-${marked}`)
+      await copyFile(join(SHAPE_FIXTURES, file.name), inspectionPath)
+      const verdict = await assertMacArtifactIsUniversal(inspectionPath)
         .then(() => true, () => false)
       expect(verdict, `${file.name} (${file.construction})`).toBe(file.universal)
     }
@@ -245,8 +355,9 @@ describe('shared installer-shape fixture (server gate vs client validator)', () 
 
 describe('assertMacArtifactIsUniversal', () => {
   /**
-   * Run `run` with PATH pointing at `bin` only, so the arch report comes from a
-   * controlled tool instead of whatever the host has installed.
+   * Run `run` with PATH pointing at `bin` only, so the arch report and the
+   * mount tooling come from a controlled directory instead of whatever the
+   * host has installed.
    */
   async function withPath(bin: string, run: () => Promise<void>): Promise<void> {
     const previous = process.env.PATH
@@ -258,18 +369,37 @@ describe('assertMacArtifactIsUniversal', () => {
     }
   }
 
-  async function writeFakeTool(bin: string, name: string, output: string): Promise<void> {
+  async function writeTool(bin: string, name: string, script: string): Promise<void> {
     const path = join(bin, name)
-    await writeFile(path, `#!/bin/sh\necho '${output}'\n`, 'utf8')
+    await writeFile(path, `#!/bin/sh\n${script}\n`, 'utf8')
     await chmod(path, 0o755)
   }
+
+  async function writeFakeTool(bin: string, name: string, output: string): Promise<void> {
+    await writeTool(bin, name, `echo '${output}'`)
+  }
+
+  it('refuses a basename without the release pipeline universal marker before any tool runs', async () => {
+    const bin = await tempDir() // empty: the marker tripwire must come first
+
+    await withPath(bin, async () => {
+      const failure = await assertMacArtifactIsUniversal('/nonexistent/installer.dmg').catch(cause => cause)
+      expect(failure).toBeInstanceOf(InvalidInstallerError)
+      expect(String(failure.message)).toContain('universal marker')
+
+      // The marker is case-insensitive: this name passes the tripwire and only
+      // fails because no tool can report an architecture.
+      const pastTripwire = await assertMacArtifactIsUniversal('/nonexistent/Installer-UNIVERSAL.dmg').catch(cause => cause)
+      expect(String(pastTripwire.message)).toContain('neither lipo nor file')
+    })
+  })
 
   it('accepts a report naming both the x86_64 and the arm64 slice', async () => {
     const bin = await tempDir()
     await writeFakeTool(bin, 'lipo', 'Architectures in the fat file: installer.dmg are: x86_64 arm64')
 
     await withPath(bin, async () => {
-      await expect(assertMacArtifactIsUniversal('/nonexistent/installer.dmg')).resolves.toBeUndefined()
+      await expect(assertMacArtifactIsUniversal('/nonexistent/installer-universal.dmg')).resolves.toBeUndefined()
     })
   })
 
@@ -278,7 +408,18 @@ describe('assertMacArtifactIsUniversal', () => {
     await writeFakeTool(bin, 'lipo', 'Non-fat file: installer.dmg is architecture: arm64')
 
     await withPath(bin, async () => {
-      await expect(assertMacArtifactIsUniversal('/nonexistent/installer.dmg')).rejects.toThrow(InvalidInstallerError)
+      const failure = await assertMacArtifactIsUniversal('/nonexistent/installer-universal.dmg').catch(cause => cause)
+      expect(failure).toBeInstanceOf(InvalidInstallerError)
+      expect(String(failure.message)).toContain('does not name both x86_64 and arm64')
+    })
+  })
+
+  it('does not mistake the arm64e subtype for the arm64 slice', async () => {
+    const bin = await tempDir()
+    await writeFakeTool(bin, 'lipo', 'Non-fat file: installer.dmg is architecture: arm64e')
+
+    await withPath(bin, async () => {
+      await expect(assertMacArtifactIsUniversal('/nonexistent/installer-universal.dmg')).rejects.toThrow(InvalidInstallerError)
     })
   })
 
@@ -287,7 +428,7 @@ describe('assertMacArtifactIsUniversal', () => {
     await writeFakeTool(bin, 'file', 'Mach-O universal binary with 2 architectures: [x86_64] [arm64]')
 
     await withPath(bin, async () => {
-      await expect(assertMacArtifactIsUniversal('/nonexistent/installer.dmg')).resolves.toBeUndefined()
+      await expect(assertMacArtifactIsUniversal('/nonexistent/installer-universal.dmg')).resolves.toBeUndefined()
     })
   })
 
@@ -295,7 +436,54 @@ describe('assertMacArtifactIsUniversal', () => {
     const bin = await tempDir()
 
     await withPath(bin, async () => {
-      await expect(assertMacArtifactIsUniversal('/nonexistent/installer.dmg')).rejects.toThrow(InvalidInstallerError)
+      const failure = await assertMacArtifactIsUniversal('/nonexistent/installer-universal.dmg').catch(cause => cause)
+      expect(failure).toBeInstanceOf(InvalidInstallerError)
+      expect(String(failure.message)).toContain('neither lipo nor file')
     })
   })
+
+  it.runIf(process.platform !== 'win32')(
+    'refuses a disk image when hdiutil is unavailable, naming the macOS host requirement',
+    async () => {
+      const dir = await tempDir()
+      // A koly-trailered file is classified as a disk image without building a
+      // real one; the fake lipo fails exactly like the real one on a dmg.
+      const artifact = await writeFixtureFile(dir, 'probe-universal.dmg', dmgBytes(1024, KOLY_TRAILER))
+      const bin = await tempDir()
+      await writeTool(bin, 'lipo', 'echo "fatal error: lipo: can\'t figure out the architecture type of: $2" 1>&2\nexit 1')
+      await writeTool(bin, 'file', 'echo "$1: zlib compressed data"')
+
+      await withPath(bin, async () => {
+        const failure = await assertMacArtifactIsUniversal(artifact).catch(cause => cause)
+        expect(failure).toBeInstanceOf(InvalidInstallerError)
+        expect(String(failure.message)).toContain('macOS host')
+      })
+    },
+  )
+
+  it.skipIf(!REAL_DMG_TESTS_SUPPORTED)(
+    'accepts a real UDZO dmg whose packed app executable carries both slices',
+    async () => {
+      const dir = await tempDir()
+      const dmg = await buildProbeDmg(dir, true)
+
+      await expect(assertMacArtifactIsUniversal(dmg)).resolves.toBeUndefined()
+      await expectImageDetached(dmg)
+    },
+    60_000, // hdiutil create and attach routinely take seconds on a loaded host
+  )
+
+  it.skipIf(!REAL_DMG_TESTS_SUPPORTED)(
+    'refuses a real UDZO dmg whose packed app executable is arm64-only',
+    async () => {
+      const dir = await tempDir()
+      const dmg = await buildProbeDmg(dir, false)
+
+      const failure = await assertMacArtifactIsUniversal(dmg).catch(cause => cause)
+      expect(failure).toBeInstanceOf(InvalidInstallerError)
+      expect(String(failure.message)).toContain('inside the dmg is not universal')
+      await expectImageDetached(dmg) // the refusal path detaches too
+    },
+    60_000,
+  )
 })

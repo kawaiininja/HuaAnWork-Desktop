@@ -10,7 +10,11 @@
  *
  * The `mac-universal.dmg` fixture is a hand-crafted fat Mach-O whose slices
  * satisfy the real `lipo -info`, so the mac publish path is tested end to end
- * instead of being mocked.
+ * instead of being mocked. Its basename carries the release pipeline's
+ * `universal` marker, which the gate requires first; the deploy-disk shape
+ * (a real UDZO dmg whose architectures live in the packed .app, and the
+ * macOS-host requirement for inspecting it) is covered in
+ * tests/artifact-validate.spec.ts.
  */
 
 import { createHash } from 'node:crypto'
@@ -101,12 +105,13 @@ async function publish(
   version: string,
   platform: 'mac' | 'windows',
   file: string,
+  env: NodeJS.ProcessEnv = {},
 ): Promise<PublishResult> {
   try {
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
       [PUBLISH_SCRIPT, '--channel', channel, '--version', version, '--platform', platform, '--file', file, '--data-dir', dataDir],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', env: { ...process.env, ...env } },
     )
     return { code: 0, stdout, stderr }
   } catch (cause) {
@@ -395,6 +400,20 @@ describe('download request headers (defense in depth)', () => {
 })
 
 describe('publish-release.mjs (the write side, run by an operator on the deploy host)', () => {
+  it('refuses a mac artifact whose basename carries no universal marker', async () => {
+    const booted = await boot()
+    // Shape-valid on purpose: only the marker tripwire may refuse it, and it
+    // runs before any architecture tooling - the CI smoke package scenario.
+    const placed = await placeArtifact(booted.dataDir, 'huaanwork', 'mac', MAC_ARTIFACT, 'HuaAnWork-0.2.0-arm64.dmg')
+
+    const result = await publish(booted.dataDir, 'huaanwork', '0.2.0', 'mac', placed.path)
+
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain('universal marker')
+    expect(await readRecord(booted.dataDir, 'huaanwork')).toBeNull()
+    expect(await readFile(placed.path)).toEqual(await readFile(MAC_ARTIFACT))
+  })
+
   it.runIf(MACHO_TOOLS_AVAILABLE)('refuses a dmg that is not universal', async () => {
     const booted = await boot()
     const placed = await placeArtifact(booted.dataDir, 'huaanwork', 'mac', THIN_MAC_ARTIFACT)
@@ -405,6 +424,33 @@ describe('publish-release.mjs (the write side, run by an operator on the deploy 
     expect(result.stderr).toContain('universal')
     expect(await readRecord(booted.dataDir, 'huaanwork')).toBeNull()
     expect(await readFile(placed.path)).toEqual(await readFile(THIN_MAC_ARTIFACT))
+  })
+
+  it.runIf(process.platform === 'darwin')('refuses a marked dmg whose architecture report names one slice', async () => {
+    const booted = await boot()
+    // Under a universal-marked name the tripwire cannot be the refusal: the
+    // thin Mach-O has to be caught by the architecture report itself.
+    const placed = await placeArtifact(booted.dataDir, 'huaanwork', 'mac', THIN_MAC_ARTIFACT, 'HuaAnWork-0.2.0-universal.dmg')
+
+    const result = await publish(booted.dataDir, 'huaanwork', '0.2.0', 'mac', placed.path)
+
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain('does not name both x86_64 and arm64')
+    expect(await readRecord(booted.dataDir, 'huaanwork')).toBeNull()
+  })
+
+  it.runIf(process.platform !== 'win32')('refuses to publish a mac dmg where no hdiutil exists to inspect it with', async () => {
+    const booted = await boot()
+    const placed = await placeArtifact(booted.dataDir, 'huaanwork', 'mac', MAC_ARTIFACT)
+    const emptyBin = await tempDir() // no hdiutil, no lipo, no file
+
+    const result = await publish(booted.dataDir, 'huaanwork', '0.2.0', 'mac', placed.path, { PATH: emptyBin })
+
+    expect(result.code).not.toBe(0)
+    // The printed step-2 guidance and the refusal both name the constraint.
+    expect(result.stdout).toContain('macOS host')
+    expect(result.stderr).toContain('macOS host')
+    expect(await readRecord(booted.dataDir, 'huaanwork')).toBeNull()
   })
 
   it('refuses an artifact whose bytes fail the installer shape gate', async () => {
