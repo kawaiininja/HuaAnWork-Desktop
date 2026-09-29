@@ -19,11 +19,19 @@ market-server 是 M5 内网插件市场的单进程 HTTP 服务端：provider-pa
 ## 启动
 
 ```bash
-corepack yarn install --immutable          # 仓库工作区内安装（Yarn 4 corepack）
+corepack yarn install --immutable                   # 仓库工作区内安装（Yarn 4 corepack）
+corepack yarn workspace dsh-community-market build  # 必做（理由见下）；或根命令 corepack yarn build
 node --experimental-strip-types src/index.ts
-# 或经 workspace 脚本：
+# 或经 workspace 脚本（同样以 install + build 为前置）：
 corepack yarn workspace market-server start
 ```
+
+**为什么必须先 build**：market-server 运行期 value-import
+`dsh-community-market/contracts`，该子路径解析到 `lib/contracts/index.js`
+——**git-ignored 的构建产物**；`dsh-community-market` 没有 prepare/postinstall
+一类钩子，**新克隆的工作树里没有 `lib/`，也没有任何步骤会自动构建它**。
+跳过 build 会在 import 期以 `ERR_MODULE_NOT_FOUND` 退出（两类签名见
+〈Dockerfile 与容器运行〉(iii)）。
 
 Node 要求 `^22.19.0 || >=24.0.0`（与仓库 engines 一致）。
 
@@ -65,14 +73,83 @@ docker run --rm -p 8787:8787 \
   huaanwork/market-server
 ```
 
-> **该镜像只含服务端自身代码。** market-server 运行期 import
-> `dsh-community-market/contracts`（其下还 import `ajv`），故 `/app/node_modules`
-> 必须由部署方提供依赖闭包，两种可做法：① 以仓库工作区整体运行（把仓库挂进
-> `node:22-slim`，`workdir=/repo/market-server`）；② 构造派生镜像，把
-> `dsh-community-market`（**整个包目录**——`lib/contracts` 会读本包
-> `docs/schemas/*.schema.json`）与 `ajv` 闭包拷入 `/app/node_modules/`。缺闭包时
-> 进程在 import 期以 `ERR_MODULE_NOT_FOUND: Cannot find package
-> 'dsh-community-market'` 退出（2026-09-28 Task 3.5 实测）。
+**登记偏离：该镜像是「基座」镜像——只含服务端自身代码，必须由部署方补上依赖
+闭包才能启动**（spec §11 的形状不变：`market-server/Dockerfile` 仍是非 root、
+只拷 `package.json` + `src`）。原因：market-server 运行期 import
+`dsh-community-market/contracts`，它解析到该包的 `lib/contracts/index.js`
+（**git-ignored 构建产物**，无自动构建钩子）；该子路径还 import `ajv`，并在
+运行期读本包 `docs/schemas/*.schema.json`。补闭包是**有顺序的**三步：
+
+**(i) 先产出构建产物**（与〈启动〉同一前置，不可省）：
+
+```bash
+corepack yarn install --immutable
+corepack yarn workspace dsh-community-market build
+```
+
+**(ii) 二选一提供闭包：**
+
+① **直接用仓库工作区运行**——把仓库挂进 `node:22-slim`，不构造派生镜像：
+
+```bash
+docker run --rm -p 8787:8787 -w /repo/market-server \
+  -v <repo-checkout>:/repo:ro \
+  -e MARKET_SERVER_PORT=8787 -e MARKET_SERVER_DATA_DIR=/data \
+  -e MARKET_SERVER_PUBLIC_ORIGIN=http://market.intranet.example:8787 \
+  -e MARKET_SERVER_VERIFY_PUBLIC_KEY=/keys/market-signing-key.pub.hex \
+  -e MARKET_SERVER_ADMIN_TOKEN=<强随机 token> \
+  -v /srv/market-server/data:/data -v /srv/market-server/keys:/keys:ro \
+  node:22-slim node --experimental-strip-types src/index.ts
+```
+
+该形态不搬闭包：仓库工作区的 `node_modules/` 由 (i) 的 install 提供
+（`market-server/node_modules/dsh-community-market` 是工作区符号链接），
+`lib/` 由 (i) 的 build 提供。
+
+② **构造派生镜像**——把闭包落到 `/app/node_modules`。在构建机上装配只含闭包的
+目录，再叠到基座镜像上：
+
+```bash
+# 在仓库根、已完成 (i)：
+corepack yarn workspaces focus market-server --production   # Yarn 按真实依赖图收敛闭包
+rm -rf /tmp/market-server-closure && mkdir -p /tmp/market-server-closure/node_modules
+cp -R dsh-community-market/node_modules/. /tmp/market-server-closure/node_modules/
+mkdir -p /tmp/market-server-closure/node_modules/dsh-community-market/docs
+cp -R dsh-community-market/package.json dsh-community-market/lib \
+  /tmp/market-server-closure/node_modules/dsh-community-market/
+cp -R dsh-community-market/docs/schemas \
+  /tmp/market-server-closure/node_modules/dsh-community-market/docs/schemas
+```
+
+```dockerfile
+# /tmp/market-server-closure/Dockerfile
+FROM huaanwork/market-server
+COPY node_modules /app/node_modules
+```
+
+```bash
+docker build -t huaanwork/market-server:closure /tmp/market-server-closure
+# 运行参数同①，镜像名换成 huaanwork/market-server:closure
+```
+
+`focus --production` 收敛出市场包的生产闭包（`ajv` / `ajv-formats` 及其传递依赖
+`fast-deep-equal`、`fast-uri`、`json-schema-traverse`、`require-from-string`），
+不必手抄清单；`Done with warnings` 与若干 `YN0002` peer 依赖警告属预期（市场包的
+可选 DSH peer 不在聚焦集合内，`contracts` 路径不需要它们）。随后的拷贝必须是
+**真复制**（不要 `cp -al` 硬链接、不要符号链接，搬运到部署机会失效）。注意
+`focus` 会把整个安装裁成这一条生产闭包（其它工作区的 devDependencies 与被按需
+下载的原生二进制一并被裁掉）：之后若要重建 `lib/`（如升级），先
+`corepack yarn install --immutable` 复原完整安装。本节的
+文件集已按 `/app` 布局在 `/tmp` 模拟启动实测（2026-09-30 修复轮：构建 → 装配 →
+`node --experimental-strip-types src/index.ts`，`listening` 横幅、`/healthz`、
+`/v1/plugins` 均通过）；镜像构建本身仍是部署门（本机无 Docker daemon）。
+
+**(iii) 缺闭包的两类失败签名**（都在 import 期、监听前退出）：
+
+- `ERR_MODULE_NOT_FOUND: Cannot find package 'dsh-community-market'` ⇒
+  `/app/node_modules` 里完全没有该包（闭包未提供）。
+- `ERR_MODULE_NOT_FOUND: Cannot find module '…/dsh-community-market/lib/contracts/index.js'`
+  ⇒ 包在，但 (i) 的 `lib/` 构建产物缺失或未拷入（等价于在全新克隆里跳过 build）。
 
 ## 环境配置（前四项必需、fail-closed；admin token 可选）
 
@@ -190,7 +267,9 @@ node --experimental-strip-types src/index.ts
 ## 升级
 
 1. 停进程。
-2. 更新代码（`git pull` + `corepack yarn install --immutable`）。
+2. 更新代码（`git pull` + `corepack yarn install --immutable` +
+   `corepack yarn workspace dsh-community-market build`）：`lib/` 是 git-ignored
+   构建产物，不重建会继续跑到旧契约代码，或直接 `ERR_MODULE_NOT_FOUND`。
 3. 状态 schema 带 `version` 字段；不兼容变更须随代码提供迁移说明并在
    `parseState` 校验处失败关闭（拒绝启动而非静默吞）。
 4. 启进程，验证 `GET /healthz` 与 `GET /v1/plugins` 响应过

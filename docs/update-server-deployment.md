@@ -172,10 +172,16 @@ curl -sI -H 'Host: update.intranet.lan:8790' \
   `hdiutil`——换 macOS 发布机重跑。
 - `3 artifact size`：超过客户端 1 GiB 上限——不要发布会被客户端拒收的制品。
 - `4 version shape`：版本不符合该通道形状——改版本号或改通道。
-- `5 placement`：文件不在 `<dataDir>/artifacts/<channel>/<platform>/`——脚本
+- `5 sha256`：哈希期间制品尺寸发生变化（文件被其它进程改写）——脚本报
+  「the artifact changed size while it was being hashed」；发布期间不要让
+  其它进程动该文件，重新取件后重跑。
+- `6 placement`：文件不在 `<dataDir>/artifacts/<channel>/<platform>/`——脚本
   会打印确切的 `scp` 目标行；先执行它再重跑。
 - `7 record`：既有记录不是合法 JSON——人工查看（或移除）该记录后重发；
   不要手工编辑记录。
+- `arguments`：调用参数错误（未知/重复/缺值的旗标、缺 `--data-dir` 且未设
+  `UPDATE_SERVER_DATA_DIR`、`--channel` / `--platform` 不在允许集内）——
+  按脚本打印的指引修正调用；不会触碰任何已发布文件。
 - 成功输出中的 `5 sha256` / `bytes` / `7 record <路径>` 请记入发布工单，
   用于与客户端的 `X-HuaAnWork-Artifact-Sha256` 对账。
 

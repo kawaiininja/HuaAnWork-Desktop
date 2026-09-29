@@ -178,34 +178,35 @@ function checkVersionShape(channel, version) {
 }
 
 /**
- * Step 5a: the artifact must already be the file the download route serves.
+ * Step 6: the artifact must already be the file the download route serves.
  *
  * Requiring this (instead of recording a path the server cannot reach) keeps
- * the next step's digest honest: it is always the digest of the served bytes.
+ * step 5's digest honest: it is always the digest of the served bytes. The
+ * check runs before the hash for exactly that reason.
  */
 function requirePlacement(inputFile, destination) {
   let inputPath
   try {
     inputPath = realpathSync(inputFile)
   } catch {
-    refuse('5 placement', `the artifact ${inputFile} cannot be read`)
+    refuse('6 placement', `the artifact ${inputFile} cannot be read`)
   }
   let destinationPath
   try {
     destinationPath = realpathSync(destination)
   } catch {
-    refuse('5 placement',
+    refuse('6 placement',
       'the artifact is not where this server will serve it from.'
       + `\n  copy it first:  scp <build-artifact> <deploy-host>:${destination}`
       + `\n  then rerun with:  --file ${destination}`)
   }
   if (destinationPath !== inputPath) {
-    refuse('5 placement', `--file resolves to ${inputPath}, but this server serves ${destination}`)
+    refuse('6 placement', `--file resolves to ${inputPath}, but this server serves ${destination}`)
   }
   return destinationPath
 }
 
-/** Step 5b: stream the artifact and hash it chunk by chunk (D-M6-12). */
+/** Step 5: stream the artifact and hash it chunk by chunk (D-M6-12). */
 async function hashArtifact(path) {
   const hash = createHash('sha256')
   let bytes = 0
