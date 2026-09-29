@@ -72,5 +72,6 @@ export { bumpCount, recordSkip, resolveLegacySource, legacySourceExists, readLeg
 export { migrateSettingsStep, convertLegacySettings } from './settings.ts'
 export { migrateAuthStep, isLegacyAccount } from './auth.ts'
 export { migrateProjectsStep, migrateTasksStep } from './registries.ts'
+export { migrateAutomationsStep, migrateAutomationRunsStep, stripLegacyChannel } from './runs.ts'
 export type { HuaanworkLegacySource, HuaanworkMigrationTarget, HuaanworkMigrationReport }
 
