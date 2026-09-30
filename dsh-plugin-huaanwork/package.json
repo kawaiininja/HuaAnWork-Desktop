@@ -480,7 +480,7 @@
       "differentialPackage": false,
       "shortcutName": "HuaAnWork",
       "useZip": false,
-      "artifactName": "DSH-Desktop-Beta-${version}-${arch}-Setup.${ext}"
+      "artifactName": "HuaAnWork-${version}-${arch}-Setup.${ext}"
     },
     "linux": {
       "target": [

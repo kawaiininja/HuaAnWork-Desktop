@@ -25,6 +25,7 @@ import {
   DESKTOP_RELEASE_IDENTITIES,
   OTHER_DESKTOP_PRODUCT_IDENTITY,
 } from '../src/product-identity.ts'
+import { desktopUpdateFilename } from '../src/update-download.ts'
 
 const packageRoot = new URL('../', import.meta.url)
 const workspaceRoot = new URL('../', packageRoot)
@@ -905,10 +906,24 @@ describe('published package surface', () => {
       differentialPackage: false,
       shortcutName: 'HuaAnWork',
       useZip: false,
-      // TODO(M6): rename to 'HuaAnWork-${version}-${arch}-Setup.${ext}' once the Windows installer is wired up
-      artifactName: 'DSH-Desktop-Beta-${version}-${arch}-Setup.${ext}',
+      artifactName: 'HuaAnWork-${version}-${arch}-Setup.${ext}',
     })
     expect(manifest.build?.linux?.icon).toBe('build/app-icon.png')
+  })
+
+  it('names the installer, the portable archive and the update artifact consistently', () => {
+    expect(manifest.build?.mac?.artifactName).toBe('HuaAnWork-${version}-${arch}.${ext}')
+    expect(manifest.build?.win?.artifactName).toBe('HuaAnWork-${version}-${arch}-Portable.${ext}')
+    expect(manifest.build?.nsis?.artifactName).toBe('HuaAnWork-${version}-${arch}-Setup.${ext}')
+    // desktopUpdateFilename('win32', …) is the native save-dialog default filename
+    // ('HuaAnWork-0.1.0-windows.exe'), while the NSIS installer is really named
+    // 'HuaAnWork-0.1.0-x64-Setup.exe'. The two names are deliberately different —
+    // do not "fix" them into one string: the update link depends on the former,
+    // the packaging pipeline emits the latter. This test only pins the shared
+    // product-name prefix, never full-name equality.
+    expect(desktopUpdateFilename('win32', '0.1.0', 'huaanwork')).toBe('HuaAnWork-0.1.0-windows.exe')
+    expect(JSON.stringify(manifest.build)).not.toContain('DSH-Desktop-Beta')
+    expect(JSON.stringify(manifest.build)).not.toContain('DSH Desktop Beta')
   })
 
   it('keeps both intranet servers out of the desktop installer', () => {

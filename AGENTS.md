@@ -39,7 +39,6 @@ This repository owns the desktop product around an unmodified DeepSeek Harness c
 
 | Item | File | Milestone |
 |------|------|-----------|
-| NSIS `artifactName` still reads `DSH-Desktop-Beta-*` | `dsh-plugin-huaanwork/package.json` L417; test pinned with `TODO(M6)` | M6 |
 | `verify:aa` concurrent process race: running `corepack yarn check` in parallel across all three workspaces occasionally causes the beta `verify:aa` step to fail (AA Host services conflict). Each workspace passes in isolation; CI strips `verify:aa` via the AA-skip step. Pre-dates M1. | `dsh-plugin-desktop-beta/scripts/verify-profile-boot.mjs` L333 | Pre-existing upstream flakiness |
 | README 仍自述为「DSH Desktop Beta 通道」并声称提供 `dsh-desktop-beta` bin 别名(事实性错误,该别名已随派生移除) | `dsh-plugin-huaanwork/README.md`, `README.zh.md` | M6 |
 | macOS 无原生目录选择(`MacPlatformStrategy.canPickDirectory = false`),picker route 保持 win32-only,客户端非 2xx(实测为 405)降级为 null;启用需改能力位并扩 variant 白名单,或改走上游 `dsh-host-directory-picker-native`(评审 P1-4 裁决)。**现为 M5 内网宕机旁路的阻塞项**(评审 D11 重新定级):市场「本地安装」页签已加自由文本路径输入兜底(`.tgz` 与 macOS 共同走它),picker 不可用时页面诚实提示——但完整旁路体验仍依赖本债项落地 | `dsh-plugin-huaanwork/src/electron-platform.ts` | M4(依 M5 D11 重新定级) |
