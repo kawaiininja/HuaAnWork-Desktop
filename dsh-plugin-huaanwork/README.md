@@ -162,7 +162,7 @@ The package installs two equivalent commands, `huaanwork` and `dsh-plugin-huaanw
   Native build approvals (node-pty, koffi, electron, and others) follow pnpm's usual `allowBuilds` rules.
 - **Electron missing** — the command prints a short installation guide instead of failing with a module error.
 
-Booting a profile that is composed with the desktop shell under an ordinary `dsh` invocation (without the launcher's `desktopRuntime` service) prints a reminder telling you to start it with `huaanwork` or from the packaged application; the shell registers nothing in that case.
+Booting a profile that is composed with the desktop shell under an ordinary `dsh` invocation (without the launcher's `desktopRuntime` service) prints a reminder to start it from the packaged launcher; the shell registers nothing in that case.
 
 A third-party Host plugin only needs its normal `dsh.bundle` patch. A plugin with browser UI also publishes the normal `dsh.client` metadata with `platform: "web"` and an exported `./client` artifact. The upstream Web client module graph discovers it in every mode; Electron does not require a separate client build or a desktop-specific registration API. Enhanced-mode contributions must target services and slots that exist in that explicit composition rather than assuming the official layout or sidebar occupant owns them.
 
