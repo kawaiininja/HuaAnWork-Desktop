@@ -56,19 +56,20 @@ test("sha256 mismatch is fail-closed with the mandated copy", () => {
   assert.equal(presentation.body, "插件文件校验失败，已拒绝安装。");
 });
 
-test("not-registered presentation states the real gap, not an unreachable path (D10 + N-1)", () => {
+test("not-registered presentation points at the real in-app entry (M6 Task 5.1: N-1 retired)", () => {
   const presentation = marketErrorPresentation("not-registered");
   assert.equal(presentation.canBypass, false);
-  // 必须点名真实的设置项与 provider 值。
-  assert.match(presentation.body, /桌面设置/);
+  // 入口已落地（MarketView「来源」页签内的 provider 开关）：文案必须指向真实可达
+  // 路径与 provider 值，并诚实说明需要重启才生效。
+  assert.match(presentation.body, /来源/);
   assert.match(presentation.body, /huaanwork-market/);
-  // N-1 回归门：provider 选择器住在 client/DesktopSettingsSection.tsx（settings.section
-  // slot），默认 advanced shell 下 client-huaanwork 独占 layout 且对该 slot 零消费，
-  // 故「设置 → 桌面 → …」这类导航路径在本界面走不通——文案不得给出，且必须显式
-  // 声明入口缺失并给出可达动作。回退到旧文案（含箭头导航路径）即红。
+  assert.match(presentation.body, /重启/);
+  // spec §7.3：来源地址仍由部署方配置（终端用户不改来源）。
+  assert.match(presentation.body, /部署方/);
+  // N-1 旧口径「华安工作台界面尚未接入该设置项」现在是假话（入口已在同一个界面
+  // 里），不得回潮；也不得给出本界面不存在的箭头导航路径。
+  assert.doesNotMatch(presentation.body, /尚未接入/);
   assert.doesNotMatch(presentation.body, /→/);
-  assert.match(presentation.body, /尚未接入/);
-  assert.match(presentation.body, /联系部署方/);
 });
 
 test("no presentation other than unreachable offers a bypass (R23)", () => {

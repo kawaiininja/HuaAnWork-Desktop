@@ -7,6 +7,8 @@
  * 形态承 tests/client-aa-settings.spec.ts 先例（createRoot + act 挂真实组件）；
  * rpcCall/pickDirectoryDetailed/Settings 常量经 vi.mock 拦截以斩断宿主依赖链。
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +22,7 @@ vi.mock("../../src/client-huaanwork/Settings.tsx", () => ({
   PLUGIN_CONFIRM: "确认安装该插件？",
 }));
 
+import { pickDirectoryDetailed } from "../../src/client-huaanwork/api.ts";
 import MarketView from "../../src/client-huaanwork/MarketView.tsx";
 
 const ROUTES = {
@@ -27,6 +30,11 @@ const ROUTES = {
   catalog: "/api/huaanwork-market/catalog",
   installable: "/api/huaanwork-market/installable",
   installations: "/api/huaanwork-market/installations",
+  preview: "/api/huaanwork-market/operations/preview",
+  // M6 Task 5.1：provider 开关走 M5 既有的 Desktop settings route（非新增 route）。
+  settings: "/api/desktop/settings",
+  marketSelect: "/api/desktop/market/select",
+  restart: "/api/desktop/restart",
 } as const;
 
 /** 最小 Response 形态（不依赖 undici 全局，jsdom 环境自足）。 */
@@ -55,19 +63,94 @@ let container: HTMLDivElement | undefined;
 /** 按 path 分派的 fetch stub：各 route 的应答由各测试注入（闭包可变）。 */
 function stubFetch(handlers: Partial<Record<keyof typeof ROUTES, () => Response>>) {
   const calls: Record<string, number> = {};
+  const requests: { path: string; init?: RequestInit }[] = [];
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const path = String(input);
       const key = (Object.keys(ROUTES) as Array<keyof typeof ROUTES>).find((name) => ROUTES[name] === path);
       calls[path] = (calls[path] ?? 0) + 1;
+      requests.push({ path, init });
       if (key !== undefined && handlers[key] !== undefined) return handlers[key]!();
       throw new Error(`unexpected market fetch: ${path}`);
     }),
   );
   return {
     calls: (path: string) => calls[path] ?? 0,
+    requests,
   };
+}
+
+/** 市场源地址（Task 5.1 只读展示断言用）。 */
+const MARKET_ORIGIN = "http://market.intra.example:8787";
+
+/** GET /api/huaanwork-market/state 的合法应答（wrapper 自有形态）。 */
+function marketStateBody(origin: string = MARKET_ORIGIN) {
+  return {
+    provider: "huaanwork-market",
+    origin,
+    executing: false,
+    verification: { ready: true, currentKeyId: "ab".repeat(32) },
+    catalog: { maxAcceptedRevision: 3 },
+    desktopActions: { requestRestart: true },
+  };
+}
+
+/** 市场侧三条取数的正常应答（来源面板测试的公共背景）。 */
+function marketSideHandlers() {
+  return {
+    catalog: () =>
+      jsonResponse(200, {
+        schemaVersion: "1.0.0",
+        source: {
+          sourceRecordId: "huaanwork-intranet",
+          providerId: "huaanwork-market",
+          adapterId: "huaanwork-market",
+          registrationKind: "market",
+          fetchedAt: "2026-09-27T00:00:00.000Z",
+          finalUrl: MARKET_ORIGIN,
+        },
+        items: [],
+        page: { total: 0 },
+      }),
+    installable: () => jsonResponse(200, { items: [] }),
+    installations: () => jsonResponse(200, { bundles: [] }),
+  };
+}
+
+/** GET /api/desktop/settings 的合法应答（parseDesktopSettingsView 全量校验通过）。 */
+function desktopSettingsBody(market: { requested: string; effective: string; legacyDefaulted: boolean }) {
+  return {
+    current: "default",
+    profiles: [{ name: "default", exists: true, webCapable: true, selectable: true, deletable: false }],
+    aa: { requested: false, effective: false },
+    market,
+    web: {
+      localUrl: `http://127.0.0.1:53000/?token=${"a".repeat(43)}`,
+      lanUrls: [],
+      lanState: "inactive",
+      lanError: null,
+      lanCaFingerprint: null,
+      lanCaUrls: [],
+    },
+  };
+}
+
+/** 来源页签内呈现的 provider 选项（值集合断言用）。 */
+function providerValues(view: HTMLDivElement): (string | null)[] {
+  return [...view.querySelectorAll("[data-market-provider]")].map((el) => el.getAttribute("data-market-provider"));
+}
+
+function optionButton(view: HTMLDivElement, provider: string): HTMLButtonElement {
+  const button = view.querySelector(`button[data-market-provider="${provider}"]`);
+  if (button === null) throw new Error(`provider option not found: ${provider}`);
+  return button as HTMLButtonElement;
+}
+
+function buttonByText(view: HTMLDivElement, label: string): HTMLButtonElement {
+  const button = [...view.querySelectorAll("button")].find((item) => item.textContent === label);
+  if (button === undefined) throw new Error(`button not found: ${label}`);
+  return button as HTMLButtonElement;
 }
 
 async function mountMarket(): Promise<HTMLDivElement> {
@@ -392,13 +475,19 @@ describe("MarketView 已安装列表读失败（P27）", () => {
   });
 });
 
-describe("MarketView provider 未启用态（D10 + 修复轮 N-1）", () => {  it("全部 market route 404 时，发现页与来源页都给 not-registered 指引，且不含走不通的导航路径", async () => {
-    // 出厂默认 provider = disabled ⇒ wrapper bundle 未加载 ⇒ 四条 route 全部未注册。
+describe("MarketView provider 未启用态（D10 + M6 Task 5.1 入口落地）", () => {
+  it("全部 market route 404 时给出指向本界面真实入口的 not-registered 指引，并可当场切换来源", async () => {
+    // 出厂默认 provider = disabled ⇒ wrapper bundle 未加载 ⇒ 四条 route 全部未注册；
+    // 但 Desktop settings route（provider 读/写面）仍注册 ⇒ 来源页签内的开关可用。
     stubFetch({
       state: () => nonJsonResponse(404),
       catalog: () => nonJsonResponse(404),
       installable: () => nonJsonResponse(404),
       installations: () => nonJsonResponse(404),
+      settings: () =>
+        jsonResponse(200, desktopSettingsBody({ requested: "disabled", effective: "disabled", legacyDefaulted: false })),
+      marketSelect: () => jsonResponse(202, { accepted: true, restartRequired: true }),
+      restart: () => jsonResponse(200, { accepted: true }),
     });
 
     const view = await mountMarket();
@@ -407,11 +496,12 @@ describe("MarketView provider 未启用态（D10 + 修复轮 N-1）", () => {  i
     const discoverPanel = view.querySelector(".market-error");
     expect(discoverPanel).not.toBeNull();
     expect(discoverPanel!.textContent).toContain("插件市场未启用");
-    // N-1 回归门：文案不得给出本界面走不通的导航路径，且必须声明入口缺失。
+    // 入口已落地：文案必须指向真实可达路径（来源页签）与 provider 值；
+    // 不得再声称「尚未接入」，也不得给走不通的箭头导航与旁路（R23）。
+    expect(discoverPanel!.textContent).toContain("来源");
+    expect(discoverPanel!.textContent).toContain("huaanwork-market");
     expect(discoverPanel!.textContent).not.toContain("→");
-    expect(discoverPanel!.textContent).toContain("尚未接入");
-    expect(discoverPanel!.textContent).toContain("联系部署方");
-    // not-registered 不可旁路（R23：仅 unreachable 可旁路）。
+    expect(discoverPanel!.textContent).not.toContain("尚未接入");
     expect(discoverPanel!.textContent).not.toContain("旁路");
 
     // D10 后半：来源页签复用同一分类文案，不再只显示「无法读取市场状态」。
@@ -422,7 +512,213 @@ describe("MarketView provider 未启用态（D10 + 修复轮 N-1）", () => {  i
     expect(sourcesPanel).not.toBeNull();
     expect(sourcesPanel!.textContent).toContain("插件市场未启用");
     expect(view.querySelector(".market-sources")!.textContent).not.toContain("无法读取市场状态");
-    // 单源裁定的 M6 占位仍在（不因错误态丢失）。
+    // 单源裁定的 M6 占位仍在（不因错误态丢失且不可交互）。
     expect(view.querySelector(".market-source-disabled[aria-disabled='true']")).not.toBeNull();
+
+    // 入口就位：来源页签内可直接把 disabled 切到 huaanwork-market（未确认前不落盘）。
+    expect(providerValues(view)).toEqual(["disabled", "huaanwork-market"]);
+    await act(async () => {
+      optionButton(view, "huaanwork-market").click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="切换市场来源"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog!.textContent).toContain("需要重启");
+  });
+});
+
+describe("market source panel（M6 Task 5.1：N-1 + P23/P24）", () => {
+  it("shows the configured origin read-only", async () => {
+    stubFetch({
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      settings: () =>
+        jsonResponse(200, desktopSettingsBody({ requested: "huaanwork-market", effective: "huaanwork-market", legacyDefaulted: false })),
+    });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "来源").click();
+    });
+
+    const panel = view.querySelector(".market-sources")!;
+    expect(panel.textContent).toContain(MARKET_ORIGIN);
+    // 只读：来源地址由部署方配置（spec §7.3），面板内不存在任何编辑控件。
+    expect(panel.querySelectorAll("input, textarea")).toHaveLength(0);
+  });
+
+  it("offers exactly the two provider states this product ships", async () => {
+    stubFetch({
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      settings: () =>
+        jsonResponse(200, desktopSettingsBody({ requested: "disabled", effective: "disabled", legacyDefaulted: false })),
+    });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "来源").click();
+    });
+
+    expect(providerValues(view)).toEqual(["disabled", "huaanwork-market"]);
+    // 上游 provider 形态（community-market / dsh-market）在内网部署不可达，不得呈现。
+    const panelText = view.querySelector(".market-sources")!.textContent!;
+    expect(panelText).not.toContain("community");
+    expect(panelText).not.toContain("dsh-market");
+  });
+
+  it("does not offer multi-source management", async () => {
+    stubFetch({
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      settings: () =>
+        jsonResponse(200, desktopSettingsBody({ requested: "disabled", effective: "disabled", legacyDefaulted: false })),
+    });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "来源").click();
+    });
+
+    const panel = view.querySelector(".market-sources")!;
+    // 来源管理不暴露给终端用户（spec §7.3）：面板内无任何增删改来源的控件。
+    const labels = [...panel.querySelectorAll("button, input, select, textarea")].map(
+      (el) => `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("placeholder") ?? ""}`,
+    );
+    expect(labels.some((label) => /添加|新增|编辑|删除/.test(label))).toBe(false);
+    // 多来源占位保留且不可交互（Task 6.11 只落骨架）。
+    const placeholder = panel.querySelector(".market-source-disabled[aria-disabled='true']")!;
+    expect(placeholder).not.toBeNull();
+    expect(placeholder.querySelectorAll("button, input, select, textarea")).toHaveLength(0);
+  });
+
+  it("requires a restart and says so honestly", async () => {
+    const fetchLog = stubFetch({
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      settings: () =>
+        jsonResponse(200, desktopSettingsBody({ requested: "disabled", effective: "disabled", legacyDefaulted: false })),
+      marketSelect: () => jsonResponse(202, { accepted: true, restartRequired: true }),
+      restart: () => jsonResponse(200, { accepted: true }),
+    });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "来源").click();
+    });
+
+    // 切换动作先出确认框（HuaAnWork 自有 overlay 组件，非 DesktopDialogWindow）。
+    await act(async () => {
+      optionButton(view, "huaanwork-market").click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="切换市场来源"]') as HTMLDivElement;
+    expect(dialog).not.toBeNull();
+    // 文案含「需要重启」与 spec §14 第 33 条诚实措辞（取消重启≠未生效，下次启动照常生效）。
+    expect(dialog.textContent).toContain("需要重启");
+    expect(dialog.textContent).toContain("下次启动");
+
+    // 未确认前不落盘：Escape 关闭不产生任何写请求。
+    await act(async () => {
+      dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(view.querySelector('[role="dialog"][aria-label="切换市场来源"]')).toBeNull();
+    expect(fetchLog.calls(ROUTES.marketSelect)).toBe(0);
+
+    // 确认：调 M5 既有的 select route，保存后应用自行重启（controller.scheduleRestart）。
+    await act(async () => {
+      optionButton(view, "huaanwork-market").click();
+    });
+    const confirmedDialog = view.querySelector('[role="dialog"][aria-label="切换市场来源"]') as HTMLDivElement;
+    await act(async () => {
+      buttonByText(confirmedDialog, "保存并重启").click();
+    });
+    expect(fetchLog.calls(ROUTES.marketSelect)).toBe(1);
+    const selectRequest = fetchLog.requests.find((request) => request.path === ROUTES.marketSelect)!;
+    expect(JSON.parse(String(selectRequest.init?.body))).toEqual({ provider: "huaanwork-market" });
+    // 既有 restart route（/api/desktop/restart）；不新增 route（P28 的表外 route 留给 Task 5.3）。
+    expect(fetchLog.calls(ROUTES.restart)).toBe(1);
+    expect(fetchLog.requests.some((request) => request.path === "/api/huaanwork-market/desktop/request-restart")).toBe(false);
+
+    // 保存后的诚实状态：选择已保存，取消重启不回滚。
+    const saved = confirmedDialog.querySelector('[role="status"]');
+    expect(saved).not.toBeNull();
+    expect(saved!.textContent).toContain("选择已保存");
+    expect(saved!.textContent).toContain("下次启动");
+  });
+
+  it("uses the design system palette rather than ghost tokens (P23)", () => {
+    const css = readFileSync(resolve(import.meta.dirname, "../../src/client-huaanwork/styles.css"), "utf8");
+    // --error-border 不在 DESIGN.md 调色板（幽灵 token，靠 fallback 生效）——不得回潮。
+    expect(css).not.toContain("--error-border");
+    expect(css).toContain("border: 1px solid var(--error)");
+  });
+
+  it("follows the repo tab and dialog a11y conventions (P24)", async () => {
+    vi.mocked(pickDirectoryDetailed).mockResolvedValue({ available: true, path: "/tmp/alpha.tgz" });
+    stubFetch({
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      installable: () =>
+        jsonResponse(200, {
+          items: [
+            {
+              id: "alpha@1.0.0",
+              name: "alpha",
+              version: "1.0.0",
+              sha256: "a".repeat(64),
+              size: 42,
+              installed: false,
+            },
+          ],
+        }),
+      preview: () =>
+        jsonResponse(200, {
+          name: "alpha",
+          version: "1.0.0",
+          sha256: "a".repeat(64),
+          size: 42,
+          tarballUrl: `${MARKET_ORIGIN}/alpha-1.0.0.tgz`,
+        }),
+      settings: () =>
+        jsonResponse(200, desktopSettingsBody({ requested: "disabled", effective: "disabled", legacyDefaulted: false })),
+    });
+
+    const view = await mountMarket();
+
+    // tab 栏语义（App.tsx/AutomationsView.tsx/Settings.tsx 同惯例）。
+    const tablist = view.querySelector('[role="tablist"]');
+    expect(tablist).not.toBeNull();
+    const tabs = [...tablist!.querySelectorAll('[role="tab"]')];
+    expect(tabs.length).toBeGreaterThan(0);
+    expect(tabs.filter((item) => item.getAttribute("aria-selected") === "true")).toHaveLength(1);
+
+    // 本地安装确认框：初始焦点在对话框内，Escape 关闭。
+    await act(async () => {
+      tabButton(view, "本地安装").click();
+    });
+    await act(async () => {
+      buttonByText(view, "浏览目录…").click();
+    });
+    const localDialog = view.querySelector('[role="dialog"][aria-label="本地安装确认"]') as HTMLDivElement;
+    expect(localDialog).not.toBeNull();
+    expect(localDialog.contains(document.activeElement)).toBe(true);
+    await act(async () => {
+      localDialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(view.querySelector('[role="dialog"][aria-label="本地安装确认"]')).toBeNull();
+
+    // 安装确认框（preview）：初始焦点在对话框内，Escape 关闭。
+    await act(async () => {
+      tabButton(view, "可安装").click();
+    });
+    await act(async () => {
+      buttonByText(view, "安装").click();
+    });
+    const previewDialog = view.querySelector('[role="dialog"][aria-label="安装确认"]') as HTMLDivElement;
+    expect(previewDialog).not.toBeNull();
+    expect(previewDialog.contains(document.activeElement)).toBe(true);
+    await act(async () => {
+      previewDialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(view.querySelector('[role="dialog"][aria-label="安装确认"]')).toBeNull();
   });
 });

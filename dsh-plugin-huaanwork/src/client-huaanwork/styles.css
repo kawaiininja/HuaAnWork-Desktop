@@ -3066,9 +3066,11 @@ button {
   font-size: 12.5px;
 }
 
+/* P23（M6 Task 5.1）：此处原用不在 DESIGN.md 调色板的幽灵 token（error 边框的
+   未定义变体，靠 fallback 生效）——改用调色板内真实 token。 */
 .market-error {
   padding: 18px 20px;
-  border: 1px solid var(--error-border, var(--error));
+  border: 1px solid var(--error);
   border-radius: var(--radius-md);
   background: var(--error-bg);
   color: var(--error);
@@ -3084,6 +3086,70 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* tab 栏（P24）：语义容器包住既有 filter-tab 视觉，间距与 .page-tools 原版面一致。 */
+.market-tabs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 来源面板（M6 Task 5.1）：provider 开关 + 只读说明，卡片形态承 .market-item。 */
+.market-provider {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.market-provider-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.market-provider-option {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.market-provider-option:hover {
+  border-color: var(--border-strong);
+}
+
+.market-provider-option.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  cursor: default;
+}
+
+.market-provider-option-title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.market-provider-option-body {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.market-provider-option-status {
+  font-size: 11px;
+  color: var(--accent-ink);
 }
 
 /* 本地安装页签（P22）：提示文/输入行/列表的纵向布局，与 sources 页签同观感。 */

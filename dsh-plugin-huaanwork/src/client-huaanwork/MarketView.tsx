@@ -25,6 +25,7 @@ import {
   type MarketTab,
 } from "./logic/market.ts";
 import { presentMarketError, type MarketErrorPresentation } from "./logic/marketErrors.ts";
+import MarketSourcePanel, { ErrorPanel } from "./MarketSourcePanel.tsx";
 
 /**
  * 市场页（M5 Task 6）：经 wrapper 自注册的表外 routes 直连
@@ -37,6 +38,9 @@ import { presentMarketError, type MarketErrorPresentation } from "./logic/market
  *   内网宕机时 remote tab 诚实报错、本 tab 仍可用（spec §13 单点缓解旁路）；
  * - 切走再回来即重新挂载并重新拉取；在飞安装经 /state 的 executing 标志自恢复
  *   （D13 轮询恢复）：挂载发现飞行中 ⇒ 显示进行中标识并 2s 轮询至完成后刷新列表。
+ * - 「来源」页签（M6 Task 5.1，债务 N-1）：MarketSourcePanel 呈现只读来源地址 +
+ *   provider 开关（disabled ↔ huaanwork-market）——写面走 M5 既有 desktop settings
+ *   route（/api/desktop/settings、/api/desktop/market/select），不改 route 面。
  */
 
 const ROUTE_STATE = "/api/huaanwork-market/state";
@@ -353,16 +357,21 @@ export default function MarketView() {
       </div>
 
       <div className="page-tools">
-        {MARKET_TABS.map((item) => (
-          <button
-            key={item}
-            type="button"
-            className={tab === item ? "filter-tab on" : "filter-tab"}
-            onClick={() => setTab(item)}
-          >
-            {MARKET_TAB_LABELS[item]}
-          </button>
-        ))}
+        {/* P24：tab 语义（role/aria-selected）承本仓 App.tsx/AutomationsView.tsx/Settings.tsx 惯例。 */}
+        <div className="market-tabs" role="tablist" aria-label="市场视图">
+          {MARKET_TABS.map((item) => (
+            <button
+              key={item}
+              type="button"
+              role="tab"
+              aria-selected={tab === item}
+              className={tab === item ? "filter-tab on" : "filter-tab"}
+              onClick={() => setTab(item)}
+            >
+              {MARKET_TAB_LABELS[item]}
+            </button>
+          ))}
+        </div>
         {tab === "discover" || tab === "installable" ? (
           <input
             className="search-input"
@@ -460,11 +469,22 @@ export default function MarketView() {
           onRemove={(name) => void removeBundle(name)}
         />
       ) : (
-        <SourcesPanel state={state} stateLoad={stateLoad} stateError={stateError} />
+        <MarketSourcePanel state={state} stateLoad={stateLoad} stateError={stateError} />
       )}
 
       {localConfirming ? (
-        <div className="settings-overlay" role="dialog" aria-label="本地安装确认">
+        <div
+          className="settings-overlay"
+          role="dialog"
+          aria-label="本地安装确认"
+          onKeyDown={(event) => {
+            // P24：Escape 关闭（承 App.tsx/AutomationsView.tsx/Settings.tsx 惯例）。
+            if (event.key === "Escape" && !localBusy) {
+              event.preventDefault();
+              setLocalConfirming(null);
+            }
+          }}
+        >
           <div className="confirm-modal">
             <p>{PLUGIN_CONFIRM}</p>
             <p className="hint">{localConfirming}</p>
@@ -472,7 +492,8 @@ export default function MarketView() {
               <button type="button" className="btn primary" disabled={localBusy} onClick={() => void confirmLocalAdd()}>
                 {localBusy ? "安装中…" : "安装"}
               </button>
-              <button type="button" className="btn" disabled={localBusy} onClick={() => setLocalConfirming(null)}>
+              {/* P24：初始焦点给最不具破坏性的动作，避免回车误触安装。 */}
+              <button type="button" className="btn" autoFocus disabled={localBusy} onClick={() => setLocalConfirming(null)}>
                 取消
               </button>
             </div>
@@ -481,7 +502,18 @@ export default function MarketView() {
       ) : null}
 
       {preview ? (
-        <div className="settings-overlay" role="dialog" aria-label="安装确认">
+        <div
+          className="settings-overlay"
+          role="dialog"
+          aria-label="安装确认"
+          onKeyDown={(event) => {
+            // P24：Escape 关闭（承 App.tsx/AutomationsView.tsx/Settings.tsx 惯例）。
+            if (event.key === "Escape" && !executing) {
+              event.preventDefault();
+              setPreview(null);
+            }
+          }}
+        >
           <div className="confirm-modal">
             <p>
               安装 {preview.name}@{preview.version}？制品将经签名目录校验（sha256 比对）后安装。
@@ -495,7 +527,8 @@ export default function MarketView() {
               <button type="button" className="btn primary" disabled={executing} onClick={() => void confirmInstall()}>
                 {executing ? "安装中…" : "安装"}
               </button>
-              <button type="button" className="btn" disabled={executing} onClick={() => setPreview(null)}>
+              {/* P24：初始焦点给最不具破坏性的动作，避免回车误触安装。 */}
+              <button type="button" className="btn" autoFocus disabled={executing} onClick={() => setPreview(null)}>
                 取消
               </button>
             </div>
@@ -584,63 +617,3 @@ function LocalPanel({
   );
 }
 
-/** 三类错误态展示：不可达给本地安装旁路提示，验签/sha 失败 fail-closed 无绕过（R23）。 */
-function ErrorPanel({ presentation }: { presentation: MarketErrorPresentation }) {
-  return (
-    <div className="market-error" role="alert">
-      <p className="market-error-title">{presentation.title}</p>
-      <p className="hint">{presentation.body}</p>
-      {presentation.canBypass ? (
-        <p className="hint">旁路：切换到「本地安装」页签，可安装本地目录或 .tgz 插件（不经签名与 sha256 校验，风险披露见该页确认框）。</p>
-      ) : null}
-    </div>
-  );
-}
-
-/** sources tab：M5 单 canonical 内网源；多源 UI 占位禁用（M6）。 */
-function SourcesPanel({
-  state,
-  stateLoad,
-  stateError,
-}: {
-  state: MarketStateView | null;
-  stateLoad: LoadState;
-  stateError: MarketErrorPresentation | null;
-}) {
-  return (
-    <div className="market-sources">
-      {stateLoad === "loading" ? (
-        <p className="panel-empty">加载来源状态中…</p>
-      ) : stateLoad === "error" ? (
-        // D10 后半：复用与目录页签同口径的分类文案（not-registered 给出真实
-        // 缺口与可达动作，unreachable 指向本地安装旁路），不再统一显示一句
-        // 「无法读取市场状态」。stateError 理论上与 error 态成对置位，null 时
-        // 回落旧文案仅作防御。
-        stateError !== null ? (
-          <ErrorPanel presentation={stateError} />
-        ) : (
-          <p className="panel-empty">无法读取市场状态</p>
-        )
-      ) : state ? (
-        <ul className="market-list">
-          <li className="market-item">
-            <span className="recent-title">
-              内网市场源 {state.verification.ready ? "（信任锚已配置）" : "（信任锚未配置）"}
-            </span>
-            <span className="recent-meta">地址：{state.origin}</span>
-            {state.verification.currentKeyId ? (
-              <span className="recent-meta">当前公钥：{state.verification.currentKeyId}</span>
-            ) : null}
-            <span className="recent-meta">
-              已接受的清单 revision：{state.catalog.maxAcceptedRevision ?? "尚无"}
-            </span>
-          </li>
-        </ul>
-      ) : null}
-      <div className="market-source-disabled" aria-disabled="true">
-        <p className="recent-title">添加更多市场源</p>
-        <p className="hint">多来源管理将在 M6 提供；当前版本仅支持内网单一受信任源。</p>
-      </div>
-    </div>
-  );
-}
