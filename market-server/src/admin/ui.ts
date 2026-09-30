@@ -52,7 +52,7 @@ pre{overflow:auto;max-height:16rem}
 </tr></thead><tbody></tbody></table>
 
 <h2>制品</h2>
-<div class="hint">删除端点会先查两个引用面（目录条目 / 已激活清单）：任一面仍引用即 409 拒绝，并在提示里给出解除引用的下一步；两面都无引用才真正删除。被引用的制品不给可点的删除按钮。</div>
+<div class="hint">删除端点会先查三个引用面（目录条目 / 已激活清单 / 已 prepare 的待激活清单）：任一面仍引用即 409 拒绝，并在提示里给出解除引用的下一步；三面都无引用才真正删除。被引用的制品不给可点的删除按钮。</div>
 <div class="hint" id="artifactMsg"></div>
 <h3>可删除</h3>
 <table id="artifactsDeletable"><thead><tr>
@@ -114,7 +114,9 @@ function setText(id, text) { document.getElementById(id).textContent = text }
 function referenceFaceHint(face) {
   if (face === 'catalog') return '被目录条目引用'
   if (face === 'manifest') return '被已激活清单引用'
+  if (face === 'pending') return '被已 prepare 的待激活清单引用'
   if (face === 'manifest-unreadable') return '已激活清单无法解析（fail-closed）'
+  if (face === 'pending-unreadable') return '待激活清单无法解析（fail-closed）'
   return '仍被引用'
 }
 

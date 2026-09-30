@@ -15,8 +15,10 @@
  *                                           publish time, not the user at
  *                                           install time)
  *   DELETE /v1/admin/artifact?file=<name>   delete one stored artifact (P11b);
- *                                           refused while EITHER reference
- *                                           face still names it
+ *                                           refused while ANY of the three
+ *                                           reference faces (catalog entry /
+ *                                           activated manifest / prepared
+ *                                           pending manifest) still names it
  *   PATCH /v1/admin/entries/:id             edit display fields (URL-typed
  *                                           fields preflighted: empty = unset,
  *                                           non-https rejected, round3 R15)
@@ -200,7 +202,7 @@ export function catalogEntryId(packageName: string, version: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// P11b: artifact reference judgment (dual face, fail-closed)
+// P11b: artifact reference judgment (three faces, fail-closed)
 // ---------------------------------------------------------------------------
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -213,14 +215,15 @@ function catalogEntryReferencing(store: CatalogStore, fileName: string): Catalog
 }
 
 /**
- * Manifest face verdict for one artifact file name.
+ * Verdict for one manifest slot (the ACTIVATED slot or the PREPARED-PENDING
+ * slot — both share the wire shape, `null` = empty slot).
  *
  * `referenced` and `unreadable` are both refusals; only `clear` permits a
- * delete. `clear` means "no activated manifest, or one whose files[] was
- * scanned with no hit". `unreadable` is the fail-closed arm: an activated
- * manifest whose `files[]` cannot be inspected cannot PROVE the artifact is
- * unreferenced (reachable by an operator hand-editing the state file or
- * restoring an old backup — activation pins the signature, not the shape).
+ * delete. `clear` means "empty slot, or one whose files[] was scanned with no
+ * hit". `unreadable` is the fail-closed arm: a stored manifest whose `files[]`
+ * cannot be inspected cannot PROVE the artifact is unreferenced (reachable by
+ * an operator hand-editing the state file or restoring an old backup —
+ * activation pins the signature, not the shape).
  */
 type ManifestReferenceVerdict = 'clear' | 'referenced' | 'unreadable'
 
@@ -234,31 +237,118 @@ function manifestArtifactVerdict(manifest: unknown, fileName: string): ManifestR
   return files.some(file => isRecord(file) && file.tarballPath === tarballPath) ? 'referenced' : 'clear'
 }
 
+/**
+ * The face that still names an artifact. Deleting needs ALL of them clear.
+ *
+ * Three faces, because each one can keep the bytes installable while the
+ * others are clear:
+ *   catalog  — an entry's `tarball` field (review D2);
+ *   manifest — the ACTIVATED signed manifest's files[].tarballPath, replayed
+ *              verbatim by GET /v1/manifest, so unpublish alone is not enough;
+ *   pending  — the PREPARED but not yet activated manifest (fix round 1): it is
+ *              stored verbatim while its signature is still signable, so
+ *              deleting an artifact it names arms a dangling download for the
+ *              very next activation (review: 被校验的字节 = 被安装的字节).
+ * The `*-unreadable` faces are refusals too: an operator-edited state document
+ * whose files[] cannot be inspected cannot PROVE the artifact is unreferenced.
+ */
+type ArtifactReference =
+  | { readonly face: 'catalog'; readonly entry: CatalogEntry }
+  | { readonly face: 'manifest' }
+  | { readonly face: 'pending' }
+  | { readonly face: 'manifest-unreadable' }
+  | { readonly face: 'pending-unreadable' }
+
+/**
+ * The ONE judgment shared by the delete route and the admin inventory (single
+ * source, no re-derivation): the first face that still names the artifact, or
+ * null when every face is clear. Faces are checked in a fixed order so the
+ * refusal copy stays stable when more than one face hits.
+ */
+function artifactReference(store: CatalogStore, fileName: string): ArtifactReference | null {
+  const entry = catalogEntryReferencing(store, fileName)
+  if (entry !== null) return { face: 'catalog', entry }
+  const manifestVerdict = manifestArtifactVerdict(store.manifest(), fileName)
+  if (manifestVerdict === 'referenced') return { face: 'manifest' }
+  if (manifestVerdict === 'unreadable') return { face: 'manifest-unreadable' }
+  const pendingVerdict = manifestArtifactVerdict(store.pendingManifest(), fileName)
+  if (pendingVerdict === 'referenced') return { face: 'pending' }
+  if (pendingVerdict === 'unreadable') return { face: 'pending-unreadable' }
+  return null
+}
+
 /** One stored artifact as the operator surface sees it (P11b). */
 interface AdminArtifactView {
   readonly fileName: string
   readonly size: number
-  /** True only when BOTH reference faces are clear (fail-closed). */
+  /** True only when ALL THREE reference faces are clear (fail-closed). */
   readonly deletable: boolean
   /** The face that still references it; null when deletable. */
-  readonly referencedBy: 'catalog' | 'manifest' | 'manifest-unreadable' | null
+  readonly referencedBy: ArtifactReference['face'] | null
 }
 
 async function artifactInventory(ctx: AdminContext): Promise<readonly AdminArtifactView[]> {
   const stored = await ctx.artifacts.list()
   return stored.map(({ fileName, size }) => {
-    if (catalogEntryReferencing(ctx.store, fileName) !== null) {
-      return { fileName, size, deletable: false, referencedBy: 'catalog' as const }
-    }
-    switch (manifestArtifactVerdict(ctx.store.manifest(), fileName)) {
-      case 'referenced':
-        return { fileName, size, deletable: false, referencedBy: 'manifest' as const }
-      case 'unreadable':
-        return { fileName, size, deletable: false, referencedBy: 'manifest-unreadable' as const }
-      default:
-        return { fileName, size, deletable: true, referencedBy: null }
-    }
+    const reference = artifactReference(ctx.store, fileName)
+    return reference === null
+      ? { fileName, size, deletable: true, referencedBy: null }
+      : { fileName, size, deletable: false, referencedBy: reference.face }
   })
+}
+
+/**
+ * Refuse a delete, naming the face and the operator's next step (honest copy).
+ * The two pending-manifest arms answer `artifact-referenced` per the fix-round
+ * ruling (a prepared manifest is a reference: it can still be signed and
+ * activated as stored); the unreadable arm says outright that we could not
+ * prove it is unreferenced rather than claiming a hit we did not see.
+ */
+function sendArtifactReferenceRefusal(response: ServerResponse, fileName: string, reference: ArtifactReference): void {
+  switch (reference.face) {
+    case 'catalog':
+      sendError(
+        response,
+        409,
+        'artifact-referenced',
+        `制品 ${fileName} 仍被目录条目 ${reference.entry.id} 引用(目录面);先下架该条目(POST /v1/admin/entries/${reference.entry.id}/unpublish),再删制品`,
+      )
+      return
+    case 'manifest':
+      sendError(
+        response,
+        409,
+        'artifact-referenced',
+        `制品 ${fileName} 仍被已激活清单引用;先重新 prepare + activate 一份不含该条目的清单,再删制品`,
+      )
+      return
+    case 'pending':
+      sendError(
+        response,
+        409,
+        'artifact-referenced',
+        `制品 ${fileName} 仍被已 prepare 的待激活清单引用(待签清单面);先重新 prepare 一份不含该条目的清单(或先处理当前 pending 清单),再删制品`,
+      )
+      return
+    case 'manifest-unreadable':
+      sendError(
+        response,
+        409,
+        'manifest-unreadable',
+        `制品 ${fileName} 的引用判定失败:已激活清单的形状无法解析(files[] 缺失或不是数组),无法证明它未被引用;` +
+          '先重新 prepare + activate 一份可解析的清单,再删制品',
+      )
+      return
+    case 'pending-unreadable':
+      sendError(
+        response,
+        409,
+        'artifact-referenced',
+        `制品 ${fileName} 的删除被拒:已 prepare 的待激活清单形状无法解析(files[] 缺失或不是数组),无法证明它未被引用;` +
+          '先重新 prepare 一份可解析的清单,再删制品',
+      )
+      return
+  }
 }
 
 /**
@@ -266,9 +356,10 @@ async function artifactInventory(ctx: AdminContext): Promise<readonly AdminArtif
  * deletion that `ArtifactStore.remove` never had a production caller for
  * (unpublish deliberately keeps the bytes, so the disk only grew).
  *
- * The judgment is fail-closed on BOTH reference faces: only when no catalog
- * entry and no activated signed manifest names the artifact does it unlink,
- * answering 204 (the reclaimed byte count travels in the
+ * The judgment is fail-closed on ALL THREE reference faces (see
+ * `artifactReference`): only when no catalog entry, no activated signed
+ * manifest, and no prepared-not-yet-activated manifest names the artifact does
+ * it unlink, answering 204 (the reclaimed byte count travels in the
  * `x-artifact-bytes-reclaimed` header — 204 carries no body). Every refusal
  * names the face and the operator's next step.
  */
@@ -292,34 +383,9 @@ async function deleteArtifact(response: ServerResponse, url: URL, ctx: AdminCont
     return
   }
 
-  const entry = catalogEntryReferencing(ctx.store, fileName)
-  if (entry !== null) {
-    sendError(
-      response,
-      409,
-      'artifact-referenced',
-      `制品 ${fileName} 仍被目录条目 ${entry.id} 引用(目录面);先下架该条目(POST /v1/admin/entries/${entry.id}/unpublish),再删制品`,
-    )
-    return
-  }
-  const manifestVerdict = manifestArtifactVerdict(ctx.store.manifest(), fileName)
-  if (manifestVerdict === 'referenced') {
-    sendError(
-      response,
-      409,
-      'artifact-referenced',
-      `制品 ${fileName} 仍被已激活清单引用;先重新 prepare + activate 一份不含该条目的清单,再删制品`,
-    )
-    return
-  }
-  if (manifestVerdict === 'unreadable') {
-    sendError(
-      response,
-      409,
-      'manifest-unreadable',
-      `制品 ${fileName} 的引用判定失败:已激活清单的形状无法解析(files[] 缺失或不是数组),无法证明它未被引用;` +
-        '先重新 prepare + activate 一份可解析的清单,再删制品',
-    )
+  const reference = artifactReference(ctx.store, fileName)
+  if (reference !== null) {
+    sendArtifactReferenceRefusal(response, fileName, reference)
     return
   }
 
@@ -532,8 +598,8 @@ export async function handleAdminRequest(
         active: manifest !== null,
         pending: ctx.store.pendingManifest() !== null,
         // P11b: the operator page lists deletable artifacts separately from
-        // referenced ones; the flag is computed here (one judgment, two faces)
-        // so the page never re-derives it.
+        // referenced ones; the flag is computed here (one judgment, all three
+        // faces) so the page never re-derives it.
         artifacts: await artifactInventory(ctx),
       })
       return true

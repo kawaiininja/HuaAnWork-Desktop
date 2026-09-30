@@ -704,6 +704,70 @@ describe('P11b operator-facing artifact deletion (M6 Task 6.6)', () => {
     expect(await market.artifacts.stat(entry.tarball)).not.toBeNull()
   })
 
+  // 评审 Important 1（修复轮 1）：第三面 —— **已 prepare 但未激活**的待签清单。
+  // 确定性运营者可复现序列（无竞态）：publish A → prepare（pending=[A]）→ unpublish A
+  // → 此刻目录面已清、已激活清单为空，唯独 pending 槽仍逐字持有指向 X 的清单。
+  // 旧双面判据在此判 204（管理页也把 X 标成可删）——而该 pending 的签名仍然有效，
+  // 运营者随后 activate 成功，/v1/manifest 便回放 /artifacts/X，客户端下载即失败。
+  // 第三面把这个窗口关死在删除端点（激活路径不动）。
+  it('refuses to delete while a prepared (not yet activated) pending manifest references it', async () => {
+    const entry = await publish('@huaanwork/prepared-only', '1.0.0')
+    // prepare 而不签名：待签清单留在 pending 槽（本用例不激活它）。
+    const prepared = await fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(prepared.status).toBe(200)
+    await unpublish(entry.id)
+
+    // 目录面与已激活清单面都已清空 —— 这正是旧双面判据会放行的状态。
+    expect(market.store.manifest()).toBeNull()
+    const response = await deleteArtifact(entry.tarball)
+    expect(response.status).toBe(409)
+    const parsed = await response.json() as { error: { code: string; message: string } }
+    expect(parsed.error.code).toBe('artifact-referenced')
+    // 诚实文案：点名 pending 面 + 下一步。
+    expect(parsed.error.message).toContain('待激活清单')
+    expect(parsed.error.message).toContain('重新 prepare')
+
+    // 制品仍在盘上、仍可下载（pending 可被原样签名激活，字节必须保住）。
+    expect(await market.artifacts.stat(entry.tarball)).not.toBeNull()
+    expect((await fetch(`${market.baseUrl}/artifacts/${entry.tarball}`)).status).toBe(200)
+    // 管理页与端点同一判据：X 标为被引用（不可删除）。
+    const view = (await artifactState()).find(artifact => artifact.fileName === entry.tarball)
+    expect(view).toMatchObject({ deletable: false, referencedBy: 'pending' })
+  })
+
+  it('deletes it once the pending manifest is resolved without the artifact', async () => {
+    const entry = await publish('@huaanwork/pending-resolved', '1.0.0')
+    const prepared = await fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(prepared.status).toBe(200)
+    await unpublish(entry.id)
+    expect((await deleteArtifact(entry.tarball)).status).toBe(409)
+
+    // 解决 pending：重新 prepare（目录已空 ⇒ files 为空）并激活它。
+    await release()
+    const response = await deleteArtifact(entry.tarball)
+    expect(response.status).toBe(204)
+    expect(await market.artifacts.stat(entry.tarball)).toBeNull()
+  })
+
+  it('fails closed when the prepared-but-unactivated pending manifest cannot be inspected', async () => {
+    const entry = await publish('@huaanwork/pending-shape', '1.0.0')
+    // 运营者手改状态文件 / 从旧备份还原：pending 槽的 files[] 不可解析。
+    // 无法**证明**未被引用 ⇒ 与已激活清单同款 fail-closed，拒绝删除。
+    await market.store.setPendingManifest({ envelope: { revision: 1 } })
+    await unpublish(entry.id)
+
+    const response = await deleteArtifact(entry.tarball)
+    expect(response.status).toBe(409)
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe('artifact-referenced')
+    expect(await market.artifacts.stat(entry.tarball)).not.toBeNull()
+  })
+
   it('deletes an artifact once neither the entries nor the activated manifest reference it', async () => {
     const kept = await publish('@huaanwork/kept', '1.0.0')
     const doomed = await publish('@huaanwork/remove-me', '1.0.0')
