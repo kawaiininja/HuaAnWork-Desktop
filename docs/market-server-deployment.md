@@ -238,7 +238,7 @@ node --experimental-strip-types src/index.ts
 
 | 路由 | 语义 |
 | --- | --- |
-| `GET /v1/plugins` | provider-page 目录端点。查询参数按上游契约编码：`q`、重复 `category`（OR）/`capability`（AND）、`cursor`（不透明、绑定有效查询）、`limit`（1..200，默认 50）、`sort`（`relevance`/`updated`/`name`/`downloads`）、`locale`。响应为逐条目通过上游契约校验的 `CatalogProviderPage`。**读侧逐条目隔离（Task 6.7，裁定 D-M6-26）**：命中本次查询但违约契约的存储条目**只隔离其自身**（不再 500 掉整个目录）——隔离数进响应头 `x-catalog-isolated-entries`，逐条 `name (id): 违约原因` 进服务端日志（**非**响应体）；全部命中条目皆违约时答 500 `invalid-stored-catalog`（不以 200 + 空目录谎称市场为空）。 |
+| `GET /v1/plugins` | provider-page 目录端点。查询参数按上游契约编码：`q`、重复 `category`（OR）/`capability`（AND）、`cursor`（不透明、绑定有效查询）、`limit`（1..200，默认 50）、`sort`（`relevance`/`updated`/`name`/`downloads`）、`locale`。响应为逐条目通过上游契约校验、且**装配后再过一次整页（信封）校验**的 `CatalogProviderPage`（Task 6.7 fix round 1——逐条目校验不覆盖信封字段，如 `page.nextCursor` 的 2048 字符上限）。**读侧逐条目隔离（Task 6.7，裁定 D-M6-26）**：命中本次查询但违约契约的存储条目**只隔离其自身**（不再 500 掉整个目录）——隔离数进响应头 `x-catalog-isolated-entries`，逐条 `name (id): 违约原因` 进服务端日志（**非**响应体）；全部命中条目皆违约时答 500 `invalid-stored-catalog`（不以 200 + 空目录谎称市场为空）。**超大但合法的查询**（如 `q` 200 字符 + 20 个长 `category`）会让翻页游标超过契约上限，此时拒绝服务该载荷并答 **400 `query-not-paginable`**——请求级拒绝，不是存储故障。 |
 | `GET /v1/manifest` | **已激活**的离线签名清单原文（Task 2 两步流激活后非 404）。文档形态 `{envelope, catalog, files}`：`catalog` 单独过 `parseCatalogProviderPage`；`envelope`（防重放）与 `files`（name@version → tarballPath + sha256 + size）为**旁挂**字段——严格 schema 顶层 `additionalProperties:false`，消费方须先剥离再 parse（Task 5 wrapper 判定同此）。验签由 wrapper 钉住公钥完成，服务端不代验。 |
 | `GET /v1/manifest/signature` | 已激活清单的**分离签名** sidecar（Ed25519 记录：`version/algorithm/keyId/slot/signedAt/signature`）；未激活 404。 |
 | `GET /artifacts/<file>` | 流式 .tgz 下载（`fs.createReadStream` 管道，不整文件入内存）。文件名为内容派生（`<name>-<version>-<sha256[:12]>.tgz`）；sha256 信任来自已验签清单，不来自传输层。未知/不安全名 404。 |
@@ -292,6 +292,8 @@ node --experimental-strip-types src/index.ts
 
 | 状态 | code | 含义 / 处置 |
 | --- | --- | --- |
+| 400 | `invalid-query` | 查询不符合上游契约（含超长/坏形状的入站 `cursor`） |
+| 400 | `query-not-paginable` | `/v1/plugins` 的有效查询**过大**：翻页游标是有效查询键的 base64url，超过契约 `page.nextCursor` 的 2048 字符上限（Task 6.7 fix round 1）。**合法请求但无法在契约内翻页**——收窄 `q`/`category`/`capability` 后重试；**非**存储故障 |
 | 400 | `invalid-publish-request` | 缺 `displayName` 或 `summary`（须非空） |
 | 400 | `invalid-sha256-format` | `sha256` 参数不是 64 位小写 hex |
 | 400 | `sha256-mismatch` | 声明的 sha256 与上传字节不符（不留文件） |
@@ -316,6 +318,7 @@ node --experimental-strip-types src/index.ts
 | 422 | `catalog-too-large` | prepare 时条目数 > 配置上限（默认 200 = 契约单页上限）；发布时已前移拦截，故通常只剩手改状态文件/旧备份还原可达 |
 | 422 | `catalog-full` | 发布第 N+1 条时被拒（N = 配置上限，默认 200；评审 D15 / Task 6.4）；先 unpublish 一条再发布。目录因此永不进入 prepare 冻结态 |
 | 500 | `upload-failed` / `internal-error` / `invalid-stored-catalog` | **服务端**故障；细节进服务端日志（响应体不含路径与 ajv 内部）。`invalid-stored-catalog` 自 Task 6.7（裁定 D-M6-26）起仅剩「**全部**命中条目皆违约」这一条路径——单条违约改为逐条目隔离（200 + 隔离信号） |
+| 500 | `page-envelope-invalid` | `/v1/plugins` 装配出的页面**整页**校验失败，但逐条目校验全过（Task 6.7 fix round 1 的兜底臂；当前装配下不可达——可达的游标超限走 400 `query-not-paginable`）。fail-closed：不服务契约拒绝的载荷，也不归因存储状态 |
 
 > **读侧逐条目隔离（Task 6.7，裁定 D-M6-26）**：存储中的条目违约契约的唯一可达
 > 来源是「运营者手改状态文件 / 从旧备份还原」（写侧已在锁内自校，D3）。此时
@@ -324,7 +327,12 @@ node --experimental-strip-types src/index.ts
 > —— 隔离绝不静默（静默少一个插件会让运营者无从知道自己改坏了什么）。**全部命中
 > 条目皆违约时仍 fail-closed**：答 **500 `invalid-stored-catalog`**（非 400——那是
 > 服务端数据故障，不是调用方查询错误；也**不**答 200 + 空目录，那会让客户端以为
-> 市场是空的）。ajv 的 instancePath 与 schema 正则只进日志，不回给未认证客户端
+> 市场是空的）。隔离后的页面还要过一遍**整页（信封）校验**（Task 6.7 fix round 1）
+> ——逐条目校验不覆盖信封：`page.nextCursor` 契约上限 2048 字符，而游标是本服务
+> 生成的**有效查询键的 base64url**，超大但**合法**的查询（`q` 与分类/能力过滤的
+> 尺寸上限相加即可超过）会撞上它；此时既不服务违约载荷、也不归因存储状态，而是
+> **400 `query-not-paginable`**（请求级拒绝，收窄查询即可）。ajv 的 instancePath 与
+> schema 正则只进日志，不回给未认证客户端
 > （评审 D3b）。**发布路径不放行**：存在违约条目时
 > `POST /v1/admin/manifest/prepare` 答 **409 `catalog-entry-invalid`** 并点名条目与
 > 处置（签名清单是客户端的安装真相源，不得像单次响应那样静默少条目）；修好或下架

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseCatalogProviderPage, parseCatalogQuery, CatalogContractError } from 'dsh-community-market/contracts'
-import { CatalogService, CatalogQueryError, InvalidStoredCatalogError } from '../src/catalog/service.ts'
+import { CatalogService, CatalogPageEnvelopeError, CatalogQueryError, InvalidStoredCatalogError } from '../src/catalog/service.ts'
 import { CatalogStore, type CatalogEntry } from '../src/catalog/store.ts'
 import { deadProcessPid } from './helpers/server.ts'
 
@@ -274,6 +274,79 @@ describe('read-side per-entry isolation (D-M6-26)', () => {
     // The convenience wrapper fails closed the same way (callers cannot get an
     // empty page out of this state by using it).
     expect(() => service.query({})).toThrow(InvalidStoredCatalogError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Page-envelope guard (Task 6.7 fix round 1)
+//
+// Per-entry isolation must not be the only guard: the per-entry validator says
+// nothing about the page ENVELOPE, whose `page.nextCursor` is capped at 2048
+// characters by the upstream schema. This service's cursor is the base64url of
+// the normalized effective query key, and the query schema permits q (200
+// chars) + 20 categories (64 chars each) + 32 capabilities (96 chars each), so
+// a legal request can need a longer cursor. The assembled page is therefore
+// validated as a WHOLE again after the per-entry pass; a page the contract
+// rejects fails closed as a request-level refusal (CatalogPageEnvelopeError) —
+// never a 200 carrying a schema-violating payload, and never blamed on stored
+// state.
+// ---------------------------------------------------------------------------
+
+describe('page-envelope guard (Task 6.7 fix round 1)', () => {
+  /** q at its 200-character bound; both entries carry it in their summary. */
+  const BIG_Q = 'x'.repeat(200)
+  /** 20 distinct category ids at their 64-character bound (the query maxItems). */
+  const BIG_CATEGORIES = Array.from(
+    { length: 20 },
+    (_, index) => `${String.fromCharCode(97 + index)}${'a'.repeat(63)}`,
+  )
+
+  async function serviceWithOversizedQuery(): Promise<CatalogService> {
+    return serviceWith([
+      entry({ id: 'big-one', summary: `${BIG_Q} first`, categories: [BIG_CATEGORIES[0]!] }),
+      entry({ id: 'big-two', summary: `${BIG_Q} second`, categories: [BIG_CATEGORIES[0]!] }),
+    ])
+  }
+
+  it('fails closed when the effective query is too large to carry a contract-valid cursor', async () => {
+    const service = await serviceWithOversizedQuery()
+    const query = { q: BIG_Q, category: BIG_CATEGORIES, limit: 1 }
+
+    // Premise check: the cursor this query needs really exceeds the contract
+    // cap (base64url of the normalized query key).
+    const normalizedKey = JSON.stringify({ q: BIG_Q, category: BIG_CATEGORIES, limit: 1 })
+    const cursorLength = Buffer.from(
+      JSON.stringify({ v: 1, o: 1, k: normalizedKey }),
+      'utf8',
+    ).toString('base64url').length
+    expect(cursorLength).toBeGreaterThan(2048)
+
+    // The same query is legal and servable when no cursor is needed: the
+    // envelope guard must not fire for the entries themselves.
+    const whole = service.queryWithIsolation({ q: BIG_Q, category: BIG_CATEGORIES, limit: 2 })
+    expect(whole.page.items).toHaveLength(2)
+    expect(whole.isolated).toEqual([])
+
+    const outcome = ((): unknown => {
+      try {
+        return service.queryWithIsolation(query)
+      } catch (cause) {
+        return cause
+      }
+    })()
+    // The honest fail-closed outcome: a request-level envelope refusal, NOT a
+    // stored-state fault (and definitely not a 200 with a bad payload).
+    expect(outcome).toBeInstanceOf(CatalogPageEnvelopeError)
+    expect(outcome).not.toBeInstanceOf(InvalidStoredCatalogError)
+    const error = outcome as CatalogPageEnvelopeError
+    expect(error.cursorOverflow).toBe(true)
+    expect(error.issues.map(issue => issue.path)).toEqual(['/page/nextCursor'])
+    expect(error.message).toContain('2048')
+    expect(error.message).toContain('narrow q/category/capability')
+    expect(error.message).toContain('the stored catalog is not at fault')
+    expect(error.isolated).toEqual([])
+    // The convenience wrapper fails closed the same way.
+    expect(() => service.query(query)).toThrow(CatalogPageEnvelopeError)
   })
 })
 

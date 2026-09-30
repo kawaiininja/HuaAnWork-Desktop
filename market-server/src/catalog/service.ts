@@ -7,6 +7,14 @@
  * import 上游 contract). A contract-violating stored entry is isolated and
  * reported per response instead of failing the whole catalog (D3 residual,
  * ruling D-M6-26; see `queryWithIsolation`).
+ * The assembled page is then validated AS A WHOLE with the upstream
+ * `parseCatalogProviderPage` (Task 6.7 fix round 1): the per-entry pass cannot
+ * stand in for that, because entry rules are per item and do not cover the
+ * page envelope — `$defs/page/nextCursor` is `maxLength: 2048`, and this
+ * service's cursor is the base64url of the normalized query key, which a
+ * legal-but-oversized query can exceed. That failure fails closed as a
+ * request-level refusal (`CatalogPageEnvelopeError`), never as stored-state
+ * corruption and never as a 200 whose payload violates the schema.
  * It never emits a `CatalogSnapshot`: Host provenance is forged by the
  * wrapper (Task 5), not by this server.
  *
@@ -28,7 +36,10 @@
  */
 
 import {
+  CatalogContractError,
   normalizeCatalogQuery,
+  parseCatalogProviderPage,
+  type CatalogContractIssue,
   type CatalogProviderPage,
   type CatalogQuery,
 } from 'dsh-community-market/contracts'
@@ -51,6 +62,15 @@ export class CatalogQueryError extends Error {
 
 const SCHEMA_VERSION = '1.0.0'
 const MAX_PAGE_ITEMS = 200
+
+/**
+ * The upstream page schema caps `page.nextCursor` at 2048 characters
+ * (`dsh-community-market/docs/schemas/catalog-provider-page.schema.json` →
+ * `$defs/page/nextCursor`). The cursor this service emits is the base64url of
+ * the normalized effective query key, so a legal-but-large query can need a
+ * longer one — see `CatalogPageEnvelopeError`.
+ */
+const MAX_NEXT_CURSOR_LENGTH = 2048
 
 interface CursorBody {
   readonly v: 1
@@ -178,6 +198,49 @@ export class InvalidStoredCatalogError extends Error {
   }
 }
 
+/**
+ * The ASSEMBLED page failed the upstream WHOLE-page validation although every
+ * served entry passed the per-entry validator — so no single stored entry is
+ * at fault, and this must never be reported as stored-state corruption
+ * (Task 6.7 fix round 1).
+ *
+ * The reachable cause is envelope/cursor-level: `page.nextCursor` is the
+ * base64url of the normalized effective query key, and the upstream page
+ * schema caps it at `MAX_NEXT_CURSOR_LENGTH` characters, which an
+ * oversized-but-legal query can exceed (e.g. `q` at its 200-character bound
+ * plus 20 long `category` values — the query schema permits both). The request
+ * provokes it, so it fails closed as a request-level refusal: the service
+ * refuses to serve a page the contract rejects instead of answering 200 with
+ * a schema-violating payload.
+ */
+export class CatalogPageEnvelopeError extends Error {
+  readonly issues: readonly CatalogContractIssue[]
+  /** Isolation report of the refused query (D-M6-26: logged by callers, never silent). */
+  readonly isolated: readonly IsolatedCatalogEntry[]
+  /** True when the only fault is the contract's `page.nextCursor` length cap. */
+  readonly cursorOverflow: boolean
+
+  constructor(
+    issues: readonly CatalogContractIssue[],
+    isolated: readonly IsolatedCatalogEntry[],
+    cursorLength: number | undefined,
+  ) {
+    const cursorOverflow = issues.length > 0 && issues.every(issue => issue.path === '/page/nextCursor')
+    super(
+      cursorOverflow
+        ? 'the effective query is too large to paginate within the provider-page contract: page.nextCursor is the '
+          + `base64url of the normalized query key and the contract caps it at ${String(MAX_NEXT_CURSOR_LENGTH)} characters, `
+          + `but this query needs ${String(cursorLength ?? 0)}; narrow q/category/capability and retry (the stored catalog is not at fault)`
+        : 'the assembled provider page failed the upstream whole-page contract validation although every served entry '
+          + `passed the per-entry validator (${formatContractIssues(issues)}); refusing to serve a page the contract rejects`,
+    )
+    this.name = 'CatalogPageEnvelopeError'
+    this.issues = issues
+    this.isolated = isolated
+    this.cursorOverflow = cursorOverflow
+  }
+}
+
 export class CatalogService {
   readonly #store: CatalogStore
   readonly #now: () => Date
@@ -211,6 +274,10 @@ export class CatalogService {
    * BEFORE pagination (so `page.total`, cursors and offsets all describe what
    * is actually served). If every matching entry is invalid the query fails
    * closed via InvalidStoredCatalogError rather than serving an empty page.
+   * The assembled page then goes through the upstream WHOLE-page validator as
+   * well (Task 6.7 fix round 1): a page the contract rejects — reachably, a
+   * legal-but-oversized query whose cursor exceeds the 2048-char cap — fails
+   * closed via CatalogPageEnvelopeError instead of being served.
    *
    * @param queryInput normalized-or-raw query value; run through the upstream
    *   `normalizeCatalogQuery`, so contract violations throw CatalogContractError.
@@ -276,17 +343,30 @@ export class CatalogService {
       items: pageItems,
       page: pageInfo,
     }
-    // No whole-page re-validation here any more (the old
-    // `parseCatalogProviderPage(page)` call): the page envelope is by
-    // construction (schemaVersion/generatedAt/page are ours; `items` is capped
-    // by MAX_PAGE_ITEMS and every item above just passed the upstream
-    // validator) and the upstream whole-page validator's only cross-item rule
-    // is id uniqueness, which the store already enforces at load
-    // (catalog/store.ts parseState rejects duplicate entry ids). A page
-    // assembled from individually-valid entries therefore cannot fail as a
-    // whole; round-trip conformance is pinned by tests/catalog-service.spec.ts.
-    // The effective-limit semantic check stays a query concern (the upstream
-    // helper caps it at 100, so it is not passed here).
-    return { page: page as CatalogProviderPage, isolated }
+
+    // Whole-page validation, re-asserted AFTER the per-entry pass (Task 6.7
+    // fix round 1). The per-entry pass is not a substitute for it: entry rules
+    // are per item and say nothing about the envelope. It can no longer be
+    // tripped by a poisoned entry (each item above just passed the very same
+    // upstream validator in isolation), so what remains is envelope-level —
+    // reachably `page.nextCursor` (maxLength 2048; ours is the base64url of
+    // the normalized query key, which a legal-but-oversized query exceeds),
+    // while id uniqueness, the validator's only cross-item rule, is enforced
+    // by the store at load (catalog/store.ts parseState rejects duplicate ids).
+    // A failure here is a request-level refusal (CatalogPageEnvelopeError),
+    // deliberately NOT conflated with InvalidStoredCatalogError; the service
+    // never answers 200 with a payload the contract rejects.
+    // (The effective-limit semantic check stays a query concern: the upstream
+    // helper caps that argument at 100 while this service admits limit up to
+    // MAX_PAGE_ITEMS, so it is not passed here.)
+    try {
+      return { page: parseCatalogProviderPage(page), isolated }
+    } catch (cause) {
+      if (cause instanceof CatalogContractError) {
+        const cursorLength = typeof pageInfo.nextCursor === 'string' ? pageInfo.nextCursor.length : undefined
+        throw new CatalogPageEnvelopeError(cause.issues, isolated, cursorLength)
+      }
+      throw cause
+    }
   }
 }

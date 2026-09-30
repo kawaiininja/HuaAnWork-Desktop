@@ -7,14 +7,21 @@
  *                               encoding: q / category / capability / cursor /
  *                               limit / sort / locale); every served item is
  *                               self-validated by the upstream contract
- *                               validator. A stored entry that violates the
+ *                               validator, and the assembled page is validated
+ *                               AS A WHOLE before it is sent (Task 6.7 fix
+ *                               round 1 — a page the contract rejects is never
+ *                               served). A stored entry that violates the
  *                               contract is isolated from THIS response only
  *                               (ruling D-M6-26): the count travels in the
  *                               `x-catalog-isolated-entries` response header
  *                               and the per-entry reason in the server log;
  *                               an all-invalid result answers 500
  *                               `invalid-stored-catalog` instead of an empty
- *                               page.
+ *                               page. An envelope-level refusal (reachably: a
+ *                               legal-but-oversized query whose cursor exceeds
+ *                               the contract's 2048-char cap) answers 400
+ *                               `query-not-paginable` — a request-level
+ *                               refusal, not stored-state corruption.
  *   GET /v1/manifest            The ACTIVATED offline-signed manifest,
  *                               verbatim (pending → offline sign → verified
  *                               intake/activation; 404 until one activates).
@@ -54,6 +61,7 @@ import { CatalogContractError } from 'dsh-community-market/contracts'
 import { ADMIN_ARTIFACTS_PATH, handleAdminRequest } from './admin/routes.ts'
 import { renderAdminPage } from './admin/ui.ts'
 import {
+  CatalogPageEnvelopeError,
   CatalogQueryError,
   CatalogService,
   InvalidStoredCatalogError,
@@ -279,20 +287,51 @@ export function createMarketServer(config: MarketServerConfig, store: CatalogSto
             )
             return
           }
+          if (cause instanceof CatalogPageEnvelopeError) {
+            // Task 6.7 fix round 1: every served entry passed the per-entry
+            // validator, so the page failed AS A WHOLE — an envelope-level
+            // refusal with no single stored entry at fault (reachably: the
+            // contract caps page.nextCursor at 2048 characters and a
+            // legal-but-large query overflows it). The request provokes it, so
+            // it is answered as a request-level refusal, NOT as stored-state
+            // corruption, and the schema-violating payload is never served.
+            console.error('[market-server] refusing to serve a provider page that fails the whole-page contract envelope:', cause)
+            if (cause.isolated.length > 0) logIsolatedEntries(cause.isolated)
+            if (cause.cursorOverflow) {
+              sendError(
+                response,
+                400,
+                'query-not-paginable',
+                'the effective query is too large to paginate within the provider-page contract: page.nextCursor is capped at 2048 characters and this request\'s normalized query key exceeds that; narrow q/category/capability and retry',
+              )
+              return
+            }
+            // Not cursor-bound: an envelope fault this assembly cannot explain
+            // (unreachable today). Fail closed without blaming the stored
+            // catalog; the detail stays in the operator log (review D3b).
+            sendError(
+              response,
+              500,
+              'page-envelope-invalid',
+              'the server could not assemble a contract-valid provider page for this request (details in the server log)',
+            )
+            return
+          }
           if (cause instanceof CatalogContractError) {
             if (cause.contract === 'query') {
               // Genuine request-side query contract violation.
               sendError(response, 400, 'invalid-query', cause.message)
               return
             }
-            // Stored entry shape can no longer produce this arm (every
-            // candidate entry is judged individually above), so anything left
-            // here is a server-side fault while assembling a response. Fail
-            // closed with a generic client message; the ajv
-            // instancePath/pattern details go to the operator log only (review
-            // D3b — the contract doc security boundary says error bodies never
-            // leak internals to unauthenticated clients).
-            console.error('[market-server] stored catalog failed provider-page self-validation:', cause)
+            // Defense-in-depth arm: the read path converts both its contract
+            // checks before this point (per-entry violations become
+            // EntryContractError → isolated; a rejected page becomes
+            // CatalogPageEnvelopeError), so only a 'query' contract error can
+            // reach here today. Kept fail-closed in case the read path changes
+            // shape; the ajv instancePath/pattern details go to the operator
+            // log only (review D3b — the contract doc security boundary says
+            // error bodies never leak internals to unauthenticated clients).
+            console.error('[market-server] provider-page contract error escaped the catalog read path:', cause)
             sendError(response, 500, 'invalid-stored-catalog', 'stored catalog state cannot produce a valid provider page')
             return
           }

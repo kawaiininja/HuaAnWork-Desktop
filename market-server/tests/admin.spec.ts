@@ -438,6 +438,59 @@ describe('write-side contract validation + read-side poisoning (D3/D4)', () => {
     }
   })
 
+  it('answers 400 query-not-paginable when a legal query is too large to carry a contract-valid cursor', async () => {
+    // Legal-but-oversized query: q at its 200-character bound plus 20
+    // categories at their 64-character bound, answered with limit=1. The
+    // nextCursor is the base64url of the normalized effective query key, so it
+    // exceeds the upstream schema's 2048-character `page.nextCursor` cap — the
+    // page would violate the very schema this endpoint advertises. The
+    // endpoint must fail closed, honestly, and without blaming stored state
+    // (Task 6.7 fix round 1).
+    const bigQ = 'x'.repeat(200)
+    const categories = Array.from(
+      { length: 20 },
+      (_, index) => `${String.fromCharCode(97 + index)}${'a'.repeat(63)}`,
+    )
+    await market.store.replaceEntries([
+      { id: 'big-one@1.0.0', packageName: '@huaanwork/big-one', version: '1.0.0', displayName: 'Big One', summary: `${bigQ} first`, categories: [categories[0]!] },
+      { id: 'big-two@1.0.0', packageName: '@huaanwork/big-two', version: '1.0.0', displayName: 'Big Two', summary: `${bigQ} second`, categories: [categories[0]!] },
+    ])
+    const params = new URLSearchParams({ q: bigQ, limit: '1' })
+    for (const category of categories) params.append('category', category)
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(argument => String(argument)).join(' '))
+    })
+    try {
+      const response = await fetch(`${market.baseUrl}/v1/plugins?${params.toString()}`)
+      // Fail closed: never a 200 whose payload the contract rejects.
+      expect(response.status).toBe(400)
+      const text = await response.text()
+      const parsed = JSON.parse(text) as { error: { code: string; message: string }; items?: unknown }
+      expect(parsed.error.code).toBe('query-not-paginable')
+      expect(parsed.error.message).toContain('2048')
+      // No page payload at all, and no ajv internals leak (review D3b).
+      expect(parsed.items).toBeUndefined()
+      expect(text).not.toContain('instancePath')
+      expect(text).not.toContain('/page/nextCursor')
+      // Honest attribution: the request is too large to paginate; the stored
+      // catalog is NOT reported as broken.
+      expect(parsed.error.message).not.toContain('stored catalog')
+      expect(parsed.error.message).toContain('narrow q/category/capability')
+      // The operator log carries the envelope refusal.
+      expect(logged.join('\n')).toContain('whole-page contract envelope')
+
+      // The guard does not misfire on the entries: the same query is served
+      // normally (200 + both entries) when pagination needs no cursor.
+      const servable = await fetch(`${market.baseUrl}/v1/plugins?${new URLSearchParams({ q: bigQ, limit: '2' }).toString()}`)
+      expect(servable.status).toBe(200)
+      const page = await servable.json() as { items: unknown[] }
+      expect(page.items).toHaveLength(2)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('keeps the write-side validation intact: no reachable write path admits a violating entry', async () => {
     // Publish-time: a control character in the summary is rejected by the
     // locked write-side contract check (review D3) ...
