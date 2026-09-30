@@ -17,7 +17,7 @@
     "check": "yarn run typecheck && yarn run test"
   },
   "dependencies": {
-    "dsh-community-market": "0.1.0-dev.0"
+    "dsh-community-market": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",

@@ -13121,7 +13121,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"dsh-community-market@npm:0.1.0-dev.0, dsh-community-market@workspace:dsh-community-market":
+"dsh-community-market@npm:0.1.0-dev.0, dsh-community-market@workspace:^, dsh-community-market@workspace:dsh-community-market":
   version: 0.0.0-use.local
   resolution: "dsh-community-market@workspace:dsh-community-market"
   dependencies:
@@ -16063,7 +16063,7 @@ __metadata:
   resolution: "market-server@workspace:market-server"
   dependencies:
     "@types/node": "npm:^22.20.0"
-    dsh-community-market: "npm:0.1.0-dev.0"
+    dsh-community-market: "workspace:^"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
   bin:
