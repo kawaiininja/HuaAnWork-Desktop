@@ -1,10 +1,29 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { test } from 'node:test'
 import {
   verifyDesktopDependencyDirection,
   verifyMarketDependencyDirection,
   verifyMarketInstallPathHasNoRegistryBypass,
 } from './market-dependency-direction.mjs'
+
+// 与 market-dependency-direction.mjs 的 MARKET_WRAPPER_ROOT 同值(该常量未导出;
+// 源头改路径的话本文件的后缀查找会落空并以**显式断言**变红,而不是静默跳过)。
+const MARKET_WRAPPER_ROOT = 'dsh-plugin-huaanwork/src/huaanwork-host/market'
+
+/** 与库内 readTrackedSources 同形的真实受检树读取(git ls-files,跟踪集先 git add)。 */
+function trackedMarketWrapperFiles(root) {
+  const paths = execFileSync('git', ['ls-files', '-z', '--', MARKET_WRAPPER_ROOT], {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+    .split('\0')
+    .filter(path => /\.[cm]?[jt]sx?$/u.test(path))
+  return paths.map(path => [path, readFileSync(resolve(root, path), 'utf8')])
+}
 
 test('allows product-name data in Market source', () => {
   assert.deepEqual(verifyMarketDependencyDirection([
@@ -131,4 +150,29 @@ test('rejects any registry bypass of the signed manifest in the market wrapper (
   assert.throws(() => verifyMarketInstallPathHasNoRegistryBypass([
     [wrapper, "await runExternalMarketPluginInstall(ctx, spec)\n"],
   ]), /market\/install\.ts/u)
+})
+
+// Task 6.11(第 39 条核实的机器钉):守卫对**真实受检树**返回零违规,且对注入负例
+// 必须变红——恒真的守卫比没有守卫更危险(spec §14 第 49 条、第 52 条末段,M5 教训)。
+// 上一条的负例全部是合成 fixture;本测试把负例注入**真实 git ls-files 文件清单**,
+// 证明这批真实文件确实逐个进入守卫的 pattern 判定,而不是被预过滤成空转。
+test('keeps the registry-bypass shape guard green on the real tracked tree (Task 6.11)', () => {
+  const root = resolve(import.meta.dirname, '..')
+  const files = trackedMarketWrapperFiles(root)
+  // 受检树非空(空文件集会让「零违规」断言恒真——正是本测试要封死的那种恒真)。
+  assert.ok(files.length > 0, `expected tracked files under ${MARKET_WRAPPER_ROOT}`)
+  // 真实树今天就是这样绿的:全部受检文件零违规,fileCount 与读取集一致。
+  assert.deepEqual(verifyMarketInstallPathHasNoRegistryBypass(files), { fileCount: files.length })
+
+  // 负例注入:同一份真实文件清单,把 install.ts 的源码换成含 bypass 形态的文本。
+  const installIndex = files.findIndex(([path]) => path.endsWith('/install.ts'))
+  assert.notEqual(installIndex, -1, `expected ${MARKET_WRAPPER_ROOT}/install.ts in the tracked set`)
+  const injected = source => files.map(([path, current], index) => [path, index === installIndex ? source : current])
+
+  assert.throws(() => verifyMarketInstallPathHasNoRegistryBypass(injected(
+    "const argv = ['add', spec, '--registry', origin]\n",
+  )), /must not bypass the signed manifest/u)
+  assert.throws(() => verifyMarketInstallPathHasNoRegistryBypass(injected(
+    'await runExternalMarketPluginInstall(ctx, spec)\n',
+  )), /must not bypass the signed manifest/u)
 })

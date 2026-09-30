@@ -273,7 +273,6 @@ describe('GET state(wrapper 自有形态,R14)', () => {
     const gate = new Promise<Buffer>((resolvePromise) => { release = resolvePromise })
     const http: MarketHttpClient = {
       fetchText: async (url) => (await fetch(url)).text(),
-      fetchBuffer: async () => { throw new Error('the streaming install path must not call fetchBuffer (第 53 条)') },
       fetchStream: async (_url, _label, _maxBytes, onChunk) => {
         const bytes = await gate
         await onChunk(bytes)
@@ -485,7 +484,6 @@ describe('POST operations/preview + execute(单飞 R16 / X1 / 取消诚实)', ()
     const gate = new Promise<Buffer>((resolvePromise) => { release = resolvePromise })
     const http: MarketHttpClient = {
       fetchText: async (url) => (await fetch(url)).text(),
-      fetchBuffer: async () => { throw new Error('the streaming install path must not call fetchBuffer (第 53 条)') },
       fetchStream: async (_url, _label, _maxBytes, onChunk) => {
         const bytes = await gate
         await onChunk(bytes)
@@ -522,7 +520,6 @@ describe('POST operations/preview + execute(单飞 R16 / X1 / 取消诚实)', ()
     const gate = new Promise<Buffer>((resolvePromise) => { release = resolvePromise })
     const http: MarketHttpClient = {
       fetchText: async (url) => (await fetch(url)).text(),
-      fetchBuffer: async () => { throw new Error('the streaming install path must not call fetchBuffer (第 53 条)') },
       fetchStream: async (_url, _label, _maxBytes, onChunk) => {
         const bytes = await gate
         await onChunk(bytes)

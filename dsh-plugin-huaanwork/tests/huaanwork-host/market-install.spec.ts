@@ -80,8 +80,9 @@ function buildTgz(dir: string, manifest: Record<string, unknown>, padding?: Buff
 
 /**
  * 注入缝的假 client:制品**逐 chunk 供给**(第 53 条后安装链只走 fetchStream)。
- * `fetchBuffer` 刻意拒绝调用——若实现回退到「一次收齐」,现有用例会因这一条而红,
- * 而不是静默把整包缓冲回内存。
+ * Task 6.11 起全量缓冲面 `fetchBuffer` 已从 `MarketHttpClient` 移除——「一次收齐」
+ * 的实现无法再经该缝回退,重新引入它会先撞上结构钉
+ * 〈the http client seam carries no whole-buffer fetch〉。
  */
 function fakeHttp(routes: Map<string, Buffer>): MarketHttpClient {
   return {
@@ -90,7 +91,6 @@ function fakeHttp(routes: Map<string, Buffer>): MarketHttpClient {
       if (bytes === undefined) return Promise.reject(new Error(`404 ${url}`))
       return Promise.resolve(bytes.toString('utf8'))
     },
-    fetchBuffer: () => Promise.reject(new Error('the streaming install path must not call fetchBuffer (第 53 条)')),
     fetchStream: async (url, _label, _maxBytes, onChunk) => {
       const bytes = routes.get(url)
       if (bytes === undefined) throw new Error(`404 ${url}`)
@@ -297,10 +297,10 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
   /**
    * 注入缝的 request 桩:制品逐 chunk 供给,并记录**调用方的驻留峰值**
    * (`liveBytes` = 已交给 onChunk、其回调尚未 resolve 的字节总和)。流式实现下
-   * 峰值 = 单个 chunk 量级;一次收齐的实现走 `fetchBuffer`(桩如实提供全量,好让
-   * 回归以**断言**而非类型错误变红),峰值 = 全量 —— 这正是第一条用例的红判据。
-   * 可选 `afterChunk` 钩子让用例在流**中途**观察盘上状态:边收边落盘的实现此刻
-   * 已有字节在暂存文件里,而一次收齐的实现此刻盘上什么都没有。
+   * 峰值 = 单个 chunk 量级。Task 6.11 移除了全量缓冲面 `fetchBuffer`,故「一次收齐」
+   * 只剩「在 fetchStream 里把块攒起来、收完再落盘」一种形态——它由 `afterChunk`
+   * 钩子在流**中途**看到的盘上状态判红(边收边落盘的实现此刻已有字节在暂存文件里,
+   * 收齐后再写的实现此刻盘上什么都没有),而非经已不存在的成员。
    */
   function streamingProbe(payload: Buffer, chunkCount = CHUNK_COUNT, afterChunk?: (chunkIndex: number) => void) {
     const chunkSize = Math.max(1, Math.ceil(payload.byteLength / chunkCount))
@@ -308,17 +308,11 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
       onChunkCalls: 0,
       handedBytes: 0,
       streamCalls: 0,
-      fetchBufferCalls: 0,
       liveBytes: 0,
       peakLiveBytes: 0,
     }
     const client: MarketHttpClient = {
       fetchText: () => Promise.reject(new Error('unexpected fetchText on the install path')),
-      fetchBuffer: () => {
-        state.fetchBufferCalls += 1
-        state.peakLiveBytes = Math.max(state.peakLiveBytes, payload.byteLength)
-        return Promise.resolve(Buffer.from(payload))
-      },
       fetchStream: async (_url, _label, _maxBytes, onChunk) => {
         state.streamCalls += 1
         // 恰好 chunkCount 块(按长度均分,不因余数少给一块)。
@@ -527,9 +521,9 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
       http: probe.client,
     })
 
-    // 100 个 chunk 逐一交给安装侧;**一次收齐**的旧路(fetchBuffer)一次也没走。
+    // 100 个 chunk 逐一交给安装侧(结构上已无全量缓冲面:Task 6.11 移除 fetchBuffer,
+    // 见〈the http client seam carries no whole-buffer fetch〉)。
     expect(probe.state.onChunkCalls).toBe(CHUNK_COUNT)
-    expect(probe.state.fetchBufferCalls).toBe(0)
     expect(probe.state.streamCalls).toBe(1)
     expect(probe.state.handedBytes).toBe(bytes.byteLength)
     // 「任何时刻」的驻留 = 单个 chunk 量级(桩记录峰值);旧实现这里是全量。
@@ -610,7 +604,6 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
     // 前 2 块正常落盘,第 3 块处 fetchStream 以「超上限」中止(与真实 client 同语义)。
     const client: MarketHttpClient = {
       fetchText: () => Promise.reject(new Error('unexpected fetchText')),
-      fetchBuffer: () => Promise.reject(new Error('unexpected fetchBuffer')),
       fetchStream: async (_url, _label, _maxBytes, onChunk) => {
         await onChunk(bytes.subarray(0, 4096))
         await onChunk(bytes.subarray(4096, 8192))
@@ -708,7 +701,6 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
     let staging: WriteStream | undefined
     const client: MarketHttpClient = {
       fetchText: () => Promise.reject(new Error('unexpected fetchText on the install path')),
-      fetchBuffer: () => Promise.reject(new Error('the streaming install path must not call fetchBuffer (第 53 条)')),
       fetchStream: async (_url, _label, _maxBytes, onChunk) => {
         await onChunk(bytes.subarray(0, 4096))
         const stream = staging!
@@ -745,7 +737,6 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
     const calls: string[] = []
     const http: MarketHttpClient = {
       fetchText: (url) => { calls.push(url); return Promise.reject(new Error('unreachable')) },
-      fetchBuffer: (url) => { calls.push(url); return Promise.reject(new Error('unreachable')) },
       fetchStream: (url) => { calls.push(url); return Promise.reject(new Error('unreachable')) },
     }
     await expect(downloadAndStageArtifact({
@@ -839,8 +830,17 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
     // 被安装文件 = 被哈希文件:argv 路径的 sha256 === 清单值,且中途未重新取字节。
     expect(sha256Hex(readFileSync(expectedPath))).toBe(signedSha)
     expect(probe.state.streamCalls).toBe(1)
-    expect(probe.state.fetchBufferCalls).toBe(0)
     expect(artifactDirEntries(profileDir)).toEqual([marketArtifactName('@huaanwork/sample', '1.2.3', signedSha)])
+  })
+
+  // Task 6.11:全量缓冲面 `fetchBuffer` 已无生产消费方(第 53 条把安装路径改为流式后),
+  // 从 `MarketHttpClient` 移除。结构钉:「回退到一次收齐」如今必须先**重新引入**一个
+  // 全量拉取成员,本钉让那次重新引入立即变红,迫使实现者回到本组用例的驻留峰值
+  // 与边收边写判据,而不是悄悄绕过它们。
+  test('the http client seam carries no whole-buffer fetch (Task 6.11 structural pin)', () => {
+    const surface: object = createMarketHttpClient()
+    expect('fetchBuffer' in surface).toBe(false)
+    expect(Object.keys(surface).sort()).toEqual(['fetchStream', 'fetchText'])
   })
 })
 

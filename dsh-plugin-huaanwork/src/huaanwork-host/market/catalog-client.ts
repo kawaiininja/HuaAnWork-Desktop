@@ -188,12 +188,6 @@ export interface MarketHttpClient {
   /** 拉 JSON 文本(GET);非 2xx/超时/超限 → MarketFetchError(诚实报错)。 */
   fetchText(url: string, label: string): Promise<string>
   /**
-   * 拉字节(GET;全量缓冲,上限 maxBytes)。M5 起 install 侧即用此面;第 53 条后
-   * 安装路径改走 `fetchStream`(本方法保留为通用字节拉取面,现有冒烟/端到端测试的
-   * 注入桩仍以它记录真实 client 行为)。非 2xx/超时/超限 → MarketFetchError。
-   */
-  fetchBuffer(url: string, label: string, maxBytes: number): Promise<Buffer>
-  /**
    * 逐 chunk 拉字节(第 53 条,内存峰值 O(chunk)):`onChunk` 可返回 Promise 以施加
    * 背压;**不跟随重定向**(非 200 一律拒);超 maxBytes 即断连不读完。返回收到字节数。
    */
@@ -208,7 +202,6 @@ export interface MarketHttpClient {
 export function createMarketHttpClient(): MarketHttpClient {
   return {
     fetchText: (url, label) => requestBuffer(url, MARKET_JSON_MAX_BYTES, label).then(buffer => buffer.toString('utf8')),
-    fetchBuffer: (url, label, maxBytes) => requestBuffer(url, maxBytes, label),
     fetchStream: (url, label, maxBytes, onChunk) => requestStream(url, label, maxBytes, onChunk),
   }
 }
