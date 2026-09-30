@@ -1,0 +1,224 @@
+# HuaAnWork release pipeline. Dispatch-only; it builds unsigned artifacts plus a
+# sha256 manifest and uploads them. Signing is a separate operator step.
+#
+# D-M6-17 (no signing credentials in CI): the repository has no signing
+# credentials, and ci.yml:150-153 already states the principle for its macOS job
+# ("the signed release is built manually on a credentialed machine ... No signing
+# secrets ever reach this job"). This workflow therefore produces
+# signable-later unsigned artifacts, and R1 signs on a credentialed machine
+# following docs/release-checklist.md. Adding credentials here is not a supported
+# shortcut: the signing-secret reference assertion in
+# dsh-plugin-huaanwork/tests/package.spec.ts fails on purpose so that the ruling
+# is re-opened explicitly.
+#
+# R-6 (2026-09-30): the macOS artifact built here is the unsigned smoke-path
+# build (`dist:mac-smoke:huaanwork`). It runs the same electron-builder
+# `--mac dmg --universal` pipeline as the signed release, minus signing,
+# notarization, and identity discovery; with zero credentials it is the only
+# complete macOS build that can run, and during R-6 it is the intranet release
+# artifact. The workspace release command that signs and notarizes never runs in
+# CI: it fails its preflight without credentials, and macOS signing is an
+# integral re-run on a credentialed machine (docs/release-checklist.md §1), not
+# a post-hoc signature over a CI artifact.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (canonical SemVer, no prerelease; must equal the HuaAnWork package version)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # A release must never be cancelled by a later trigger; a queued run waits.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  macos:
+    name: macOS unsigned release artifact
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out the repository and the pinned upstream submodule
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.23.2
+      - run: corepack enable
+      - name: Resolve Yarn cache folder
+        id: yarn-cache
+        run: echo "dir=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.yarn-cache.outputs.dir }}
+          key: yarn-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock', '.yarnrc.yml') }}
+      - run: yarn install --immutable
+      # The release version decides both the artifact names hosted on the update
+      # server and the file name the client derives for desktopUpdateFilename, so
+      # a mismatch would point the update chain at a file that does not exist.
+      - name: Verify the dispatched version matches dsh-plugin-huaanwork/package.json
+        shell: bash
+        env:
+          DISPATCHED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          packaged="$(node -p "require('./dsh-plugin-huaanwork/package.json').version")"
+          if [[ "$packaged" != "$DISPATCHED_VERSION" ]]; then
+            echo "::error::dispatched version $DISPATCHED_VERSION does not match dsh-plugin-huaanwork/package.json ($packaged)"
+            exit 1
+          fi
+          echo "Building HuaAnWork $packaged"
+      # Fail fast before any packaging time is spent. The guard script is created
+      # by task 4.8; after that task it also runs inside the root dist:win pairs,
+      # where this step remains as CI-side depth with a clear error surface. For
+      # the macOS smoke path below it is the only guard: that path stays
+      # deliberately unguarded in task 4.8's root scripts.
+      - name: Verify the release provisioning (fail fast)
+        run: node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs
+      # R-6: this is the macOS release artifact for the credential-free period.
+      # It is unsigned, so it must not be presented as a signed or notarized
+      # distribution build; the honest distribution wording lives in
+      # docs/release-checklist.md §1.8.
+      - name: Build the macOS release artifact (unsigned, universal DMG)
+        run: yarn dist:mac-smoke:huaanwork
+      - name: Write the sha256 manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { createHash } from "node:crypto"
+            import { readdirSync, readFileSync, writeFileSync } from "node:fs"
+            const dir = "dsh-plugin-huaanwork/dist/mac-smoke"
+            const names = readdirSync(dir).filter((name) => name.endsWith(".dmg")).sort()
+            if (names.length !== 1) {
+              throw new Error(`expected exactly one .dmg in ${dir}; found ${names.length}`)
+            }
+            const lines = names.map((name) =>
+              `${createHash("sha256").update(readFileSync(`${dir}/${name}`)).digest("hex")}  ${name}`)
+            writeFileSync(`${dir}/SHA256SUMS.txt`, `${lines.join("\n")}\n`)
+            console.log(lines.join("\n"))
+          '
+      - uses: actions/upload-artifact@v7
+        with:
+          name: huaanwork-macos-unsigned
+          path: |
+            dsh-plugin-huaanwork/dist/mac-smoke/*.dmg
+            dsh-plugin-huaanwork/dist/mac-smoke/SHA256SUMS.txt
+          if-no-files-found: error
+
+  windows:
+    name: Windows unsigned release artifacts
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out the repository and the pinned upstream submodule
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.23.2
+      - run: corepack enable
+      - name: Resolve Yarn cache folder
+        id: yarn-cache
+        run: echo "dir=$(yarn config get cacheFolder)" >> "$env:GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.yarn-cache.outputs.dir }}
+          key: yarn-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock', '.yarnrc.yml') }}
+      - run: yarn install --immutable
+      # Same version gate as the macOS job: see that step for why the version
+      # must equal the packaged version before anything is built.
+      - name: Verify the dispatched version matches dsh-plugin-huaanwork/package.json
+        shell: bash
+        env:
+          DISPATCHED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          packaged="$(node -p "require('./dsh-plugin-huaanwork/package.json').version")"
+          if [[ "$packaged" != "$DISPATCHED_VERSION" ]]; then
+            echo "::error::dispatched version $DISPATCHED_VERSION does not match dsh-plugin-huaanwork/package.json ($packaged)"
+            exit 1
+          fi
+          echo "Building HuaAnWork $packaged"
+      - name: Verify the release provisioning (fail fast)
+        run: node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs
+      # Each build command runs its own package gate (check:win-package) rather
+      # than skipping it, because these two commands are the documented unsigned
+      # release entry points (docs/release-checklist.md §2.6).
+      - name: Build the unsigned Windows release installer
+        run: yarn dist:win:huaanwork
+      - name: Build the unsigned Windows release portable archive
+        run: yarn dist:win-portable:huaanwork
+      - name: Write the sha256 manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { createHash } from "node:crypto"
+            import { readdirSync, readFileSync, writeFileSync } from "node:fs"
+            const dir = "dsh-plugin-huaanwork/dist"
+            const names = readdirSync(dir).filter((name) => /-x64-(?:Setup\.exe|Portable\.zip)$/u.test(name)).sort()
+            if (names.length !== 2) {
+              throw new Error(`expected the NSIS installer and the portable archive in ${dir}; found ${names.length}: ${names.join(", ")}`)
+            }
+            const lines = names.map((name) =>
+              `${createHash("sha256").update(readFileSync(`${dir}/${name}`)).digest("hex")}  ${name}`)
+            writeFileSync(`${dir}/SHA256SUMS.txt`, `${lines.join("\n")}\n`)
+            console.log(lines.join("\n"))
+          '
+      - uses: actions/upload-artifact@v7
+        with:
+          name: huaanwork-windows-unsigned
+          path: |
+            dsh-plugin-huaanwork/dist/HuaAnWork-*-x64-Setup.exe
+            dsh-plugin-huaanwork/dist/HuaAnWork-*-x64-Portable.zip
+            dsh-plugin-huaanwork/dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  manifest:
+    name: Combined sha256 manifest
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      # Re-check the downloaded bytes against each platform manifest: the
+      # combined manifest is only trustworthy if the artifacts still hash to
+      # what the build jobs recorded.
+      - name: Verify the downloaded artifacts against their manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in artifacts/*/; do
+            (cd "$dir" && sha256sum --check SHA256SUMS.txt)
+          done
+      - name: Aggregate both platform manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > SHA256SUMS.txt
+          for platformManifest in artifacts/*/SHA256SUMS.txt; do
+            echo "# $(basename "$(dirname "$platformManifest")")" >> SHA256SUMS.txt
+            cat "$platformManifest" >> SHA256SUMS.txt
+          done
+          cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: huaanwork-release-sha256sums
+          path: SHA256SUMS.txt
+          if-no-files-found: error

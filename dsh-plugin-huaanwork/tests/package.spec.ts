@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import {
@@ -87,6 +88,21 @@ const stableRuntimeVersion = (JSON.parse(readFileSync(
 const runtimeVersion = '0.1.6-alpha.2'
 const dshResolution = (name: string): unknown =>
   workspaceManifest.resolutions?.[`${name}@npm:${runtimeVersion}`]
+
+const GUARD_SCRIPT = 'dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs'
+
+/** 按 `jobs:` 下的顶层 job 键切块,使断言能落到单个 job 而非整份文本。 */
+function splitWorkflowJobs(workflow: string): Record<string, string> {
+  const jobsStart = workflow.search(/^jobs:$/mu)
+  assert.notStrictEqual(jobsStart, -1, 'release.yml must have a top-level jobs: key')
+  const body = workflow.slice(jobsStart)
+  const marks = [...body.matchAll(/^ {2}([A-Za-z0-9_-]+):$/gmu)]
+  const out: Record<string, string> = {}
+  marks.forEach((m, i) => {
+    out[m[1]!] = body.slice(m.index, marks[i + 1]?.index ?? body.length)
+  })
+  return out
+}
 
 describe('published package surface', () => {
   it('keeps the private workspace version-neutral and versions the HuaAnWork package', () => {
@@ -1046,6 +1062,52 @@ describe('published package surface', () => {
     expect(macosJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:mac-smoke')
     expect(macosJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')
     expect(macosJob).not.toContain('- run: yarn dist:mac-smoke')
+  })
+
+  it('ships a release workflow that uploads artifacts and holds no signing secrets', () => {
+    const workflow = readFileSync(new URL('.github/workflows/release.yml', workspaceRoot), 'utf8')
+    expect(workflow).toContain('workflow_dispatch')
+    expect(workflow).toContain('actions/upload-artifact')
+    expect(workflow).toContain('dsh-plugin-huaanwork')
+    expect(workflow).not.toContain('secrets.')
+    expect(workflow).toMatch(/runs-on:\s*macos-/u)
+    expect(workflow).toMatch(/runs-on:\s*windows-/u)
+  })
+
+  it('publishes a checksum manifest alongside the artifacts', () => {
+    const workflow = readFileSync(new URL('.github/workflows/release.yml', workspaceRoot), 'utf8')
+    expect(workflow).toMatch(/sha256/u)
+  })
+
+  it('fails the release when the dispatched version disagrees with the package version', () => {
+    const workflow = readFileSync(new URL('.github/workflows/release.yml', workspaceRoot), 'utf8')
+    expect(workflow).toMatch(/package\.json/u)
+  })
+
+  // 以下两条是 2026-09-28 发现 1 的**真正**机械护栏。初稿只加了全局
+  // expect(workflow).toContain('huaanwork-verify-provisioning') —— 那条会被 windows job
+  // 单独满足,于是 macOS job 漏掉守卫、且仍把冒烟包当发行制品上传,测试全绿。
+  it('gates every release job on the provisioning guard, not just one of them', () => {
+    const jobs = splitWorkflowJobs(
+      readFileSync(new URL('.github/workflows/release.yml', workspaceRoot), 'utf8'),
+    )
+    for (const name of ['macos', 'windows']) {
+      expect(jobs[name], `release.yml must define a "${name}" job`).toBeDefined()
+      expect(jobs[name], `the "${name}" job must run the provisioning guard`).toContain(GUARD_SCRIPT)
+    }
+  })
+
+  // 裁定 R-6(2026-09-30):mac 的 CI 发行制品 = 未签名 smoke 路径构建;
+  // 强制签名的 mac 发行命令永不进 CI(零 secrets 下必失败,签名属 R1 的 credentialed 机器)。
+  // 凭据到位后本断言不回改 —— 变的只是分发语义,不是 CI 产物形态。
+  it('builds the mac release artifact unsigned and keeps the signed build out of CI', () => {
+    const jobs = splitWorkflowJobs(
+      readFileSync(new URL('.github/workflows/release.yml', workspaceRoot), 'utf8'),
+    )
+    expect(jobs.macos).toContain('dist:mac-smoke:huaanwork')
+    expect(jobs.macos).not.toContain('dist:mac:huaanwork')
+    expect(jobs.windows).toContain('dist:win:huaanwork')
+    expect(jobs.windows).toContain('dist:win-portable:huaanwork')
   })
 
   it('skips product packaging only for documentation-only changes', () => {
