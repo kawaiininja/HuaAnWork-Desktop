@@ -283,6 +283,11 @@ export interface PreparedDesktopProfile {
   aaFailure?: string
   /** Internal boot diagnostic when the requested provider was disabled. */
   marketFailure?: string
+  /**
+   * Internal boot diagnostic when a stale `pendingRoot` was dropped at composition
+   * (spec §14 第 23 条残余). main.ts 落日志行;缺席 = 本次没有丢弃。
+   */
+  pendingRootDropped?: string
   /** Whether packaged pnpm must rebuild a legacy Profile dependency layout. */
   requiresDependencyMigration: boolean
 }
@@ -1008,7 +1013,15 @@ export function prepareDesktopProfile(
   const patches: PatchOptions[] = [...ordinary.patches, ...aaPatches]
   // HuaAnWork guardrail 锁层(M3):disable/config 行与 insert 行全部走内存组合,
   // 与 ui-layout 禁用同层——应用锁在所有用户 bundle 之后生效(spec §6 第 2 条)。
-  const workspaceRoot = readPendingWorkspaceRoot(profile.dir) ?? neutralWorkspaceRoot(profile.dir)
+  // spec §14 第 23 条残余(Task 6.9):超期 pendingRoot(写入时刻距今 > 10 分钟——
+  // 典型成因 = 重启确认框挂起期间进程被杀)在此丢弃并回落中立根,诊断经
+  // `pendingRootDropped` 透出(main.ts 落日志行,与 marketFailure 同一出口);
+  // 绝不静默消费一份没有裁决的陈旧切换意图。
+  let pendingRootDropped: string | undefined
+  const pendingRoot = readPendingWorkspaceRoot(profile.dir, {
+    onDrop: (drop) => { pendingRootDropped = drop.message },
+  })
+  const workspaceRoot = pendingRoot ?? neutralWorkspaceRoot(profile.dir)
   patches.push(
     { id: 'llm-deepseek', disabled: true },
     { id: 'approval', config: { policy: 'ask' } },
@@ -1265,6 +1278,7 @@ export function prepareDesktopProfile(
     market: desktopMarketSnapshotWithEffective(marketSelection, effectiveMarket),
     requiresDependencyMigration,
     ...(marketFailure === undefined ? {} : { marketFailure }),
+    ...(pendingRootDropped === undefined ? {} : { pendingRootDropped }),
   }
 }
 

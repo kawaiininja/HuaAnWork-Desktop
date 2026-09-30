@@ -588,10 +588,13 @@ test('workspace pendingRoot:project.open 经 route 驱动写盘,二次组合 + b
   assert.equal(opened.restarting, true, 'stub confirms restart, route answers restarting')
   assert.equal(opened.workspaceRoot, repo2, 'project.open response carries workspaceRoot (评审 D1)')
   assert.equal(opened.project.id, created.project.id, 'project.open response carries project')
-  assert.deepEqual(
-    JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')),
-    { pendingRoot: repo2 },
-    'project.open wrote pendingRoot via route',
+  // spec §14 第 23 条残余(Task 6.9):落盘同时附写入时刻(组合期 TTL 判据的原料),
+  // 故按字段断言而非整对象 deepEqual。
+  const written = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8'))
+  assert.equal(written.pendingRoot, repo2, 'project.open wrote pendingRoot via route')
+  assert.ok(
+    typeof written.writtenAt === 'string' && !Number.isNaN(Date.parse(written.writtenAt)),
+    'pendingRoot carries a parseable writtenAt (TTL input)',
   )
 
   const reprepared = prepareDesktopProfile('1', home, 'win32')

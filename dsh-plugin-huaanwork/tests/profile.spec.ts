@@ -28,7 +28,7 @@ import {
   validateDshMarketBundlePatches,
 } from '../src/profile.ts'
 import { DESKTOP_MARKET_IDENTITIES } from '../src/desktop-market.ts'
-import { writePendingWorkspaceRoot } from '../src/huaanwork-host/workspace-state.ts'
+import { PENDING_ROOT_TTL_MS, writePendingWorkspaceRoot } from '../src/huaanwork-host/workspace-state.ts'
 import { sessionIdFor } from '../src/huaanwork-host/session-id.ts'
 import { assertHuaanworkRowIdsHit } from '../src/huaanwork-host/row-assertions.ts'
 
@@ -1316,6 +1316,37 @@ virtualStoreDirMaxLength: 60
     expect(rows.get('huaanwork-host')?.config).toMatchObject({
       workspaceRoot: customRoot,
     })
+  })
+
+  /**
+   * spec §14 第 23 条残余(Task 6.9):确认框挂起期间被杀 ⇒ pendingRoot 已落盘而无裁决。
+   * 超期(> PENDING_ROOT_TTL_MS)的 pendingRoot 在组合期丢弃 → 中立根 + 诚实诊断
+   * (main.ts 消费 `pendingRootDropped` 落日志行),绝不静默消费陈旧意图。
+   */
+  it('drops a pendingRoot older than the TTL at composition and reports it', () => {
+    const home = temporaryHome()
+    const profileDir = ensureDesktopProfile(home)
+    const neutral = join(profileDir, 'workspace')
+    writeFileSync(
+      join(profileDir, 'huaanwork-workspace.json'),
+      `${JSON.stringify({
+        pendingRoot: '/stale/workspace',
+        writtenAt: new Date(Date.now() - PENDING_ROOT_TTL_MS - 60_000).toISOString(),
+      })}\n`,
+      'utf8',
+    )
+
+    const prepared = prepareDesktopProfile('1', home)
+    const composedRows = composeEntries([prepared.patches])
+    const rows = new Map(composedRows.map(row => [row.id!, row]))
+
+    expect(rows.get('agent-loop')?.config).toMatchObject({
+      agents: [expect.objectContaining({ id: 'huaanwork', cwd: neutral })],
+    })
+    expect(rows.get('fs-sandbox')?.config).toMatchObject({ cwd: neutral })
+    expect(rows.get('huaanwork-host')?.config).toMatchObject({ workspaceRoot: neutral })
+    expect(prepared.pendingRootDropped).toContain('/stale/workspace')
+    expect(prepared.pendingRootDropped).toMatch(/TTL/u)
   })
 
   it('负例(真实组合):旧 id workflow-worker-thread 必须报 miss', () => {

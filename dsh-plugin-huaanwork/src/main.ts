@@ -719,6 +719,14 @@ async function start(): Promise<void> {
     // restoreSlot 会把旧引用写回 profile,已被 GC 的制品会让恢复后的物化
     // 依赖确定性 ENOENT。隔离宿主 fork 时继承 process.env,同进程宿主直接
     // 可读,此处一处赋值两侧 GC 调用点均可达。
+    //
+    // N-11(实现评审第 5 批;Task 6.9 复核 → **已评估,保留**):本赋值同时把该键
+    // 泄漏进所有子进程(含用户可见终端)。显式传递只能改 `src/host-process.ts` 的
+    // `utilityProcess.fork`(其 `env: { ...process.env }` 是进入隔离宿主的唯一通道;
+    // launchEnvironmentLayers 只作 Cordis 服务供给、不落 process.env),而该文件与
+    // beta 变体逐字节共享、变体白名单预算冻结(22/6,不得新增条目)——且隔离宿主的
+    // artifacts.ts 读的是**子进程自己的** process.env。故保留现状:它是上述 D9
+    // 保留判据的环境依赖,改动一旦错位会静默退化 GC 判据(悬空 file: → ENOENT)。
     process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV] = profileUserDataDir
     const desktopLaunchEnvironment = withDesktopDshHome(environment, homeDir)
     const projectionCacheRecovery = recoverOversizedSessionProjectionCache(homeDir)
@@ -1492,6 +1500,11 @@ async function start(): Promise<void> {
       electronLogger.error(
         `${BIN_NAME}: requested Market provider ${prepared.market.requested} was disabled for this generation: ${prepared.marketFailure}`,
       )
+    }
+    // spec §14 第 23 条残余(Task 6.9):超期 pendingRoot 在组合期被丢弃时的日志行
+    // (组合诊断与日志同源;丢弃本身不阻断启动,故只记一行、不弹窗)。
+    if (prepared.pendingRootDropped !== undefined) {
+      electronLogger.error(`${BIN_NAME}: ${prepared.pendingRootDropped}`)
     }
     const prepareHostCertificate = async () => {
       if (prepared.lanAddresses.length === 0) return { failureCode: 'no-address' }

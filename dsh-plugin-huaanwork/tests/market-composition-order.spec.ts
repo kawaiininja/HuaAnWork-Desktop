@@ -1,4 +1,4 @@
-import { rmSync, mkdtempSync } from 'node:fs'
+import { rmSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -105,8 +105,11 @@ function assertMarketCompositionOrder(patches: readonly CompositionPatch[]): Mar
   }
   for (let index = 0; index < patches.length; index += 1) {
     if (isMarketProviderPatch(patches[index] ?? {}) && index >= anchor) {
+      // P18:报错文案只描述判据本身——`index >= anchor` 抓的是「market row 落在
+      // 锁层锚点之后(锁层内或更晚)」,不宣称它一定**落在锁层内部**(组合尾部
+      // 的 insert 块同样命中)。
       throw new Error(
-        `market provider row landed in the guardrail lock layer at index ${String(index)}; `
+        `market provider row at index ${String(index)} is not before the guardrail lock layer start index ${String(anchor)}; `
           + 'provider-layer patches must merge before the guardrail lock layer',
       )
     }
@@ -195,14 +198,16 @@ describe('market composition order (provider layer before guardrail lock layer)'
     expect(providerInsertIndex).toBeLessThan(order.lockLayerStart)
   })
 
-  it('rejects an injected fixture whose market row lands after the guardrail lock layer', () => {
+  it('rejects an injected fixture whose market row is spliced into the lock layer, truncating it', () => {
     const home = temporaryHome()
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')
     const realPatches = prepared.patches as CompositionPatch[]
     const anchor = lockLayerAnchor(realPatches)
 
-    // 注入 fixture:真实组合的前两层 + 锁层开头,再把 market row 追加在锁层**之后**
-    // (模拟「market row 被塞进锁层之后的落位」,Task 4 前真实 row 不存在,只能注入)。
+    // 注入 fixture:`slice(0, anchor + 2)` 只切到**锁层第 2 行**为止(锁层前段的
+    // llm-deepseek + approval),随后直接追加 market row insert 块——该块因此落在
+    // 锁层**内部**(锁层第 3 项位置),其后 15 个锁行全部缺失 ⇒ 命中的是
+    // 「锁层必须连续」判据,不是尾置 insert 块、也不是「塞进锁层之后的落位」。
     const fixture = [
       ...realPatches.slice(0, anchor + 2),
       { insert: [{ id: HUAANWORK_MARKET_ROW.id, name: HUAANWORK_MARKET_ROW.name }] },
@@ -211,7 +216,7 @@ describe('market composition order (provider layer before guardrail lock layer)'
     expect(() => assertMarketCompositionOrder(fixture)).toThrow(/guardrail lock layer/u)
   })
 
-  it('rejects an injected fixture whose market row is interleaved inside the lock layer', () => {
+  it('rejects an injected fixture whose market row is appended at the composition tail, after the lock layer', () => {
     const home = temporaryHome()
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')
     const realPatches = prepared.patches as CompositionPatch[]
@@ -219,8 +224,9 @@ describe('market composition order (provider layer before guardrail lock layer)'
     const finalInsertIndex = realPatches.length - 1
     expect(anchor).toBeLessThan(finalInsertIndex)
 
-    // 注入 fixture:market row 夹在锁层中段(锁 id 行之后、最终 insert 块之前)——
-    // 这正对应「market row 被误塞进 guardrail 锁 insert 块」的分层反转(round3 R5)。
+    // 注入 fixture:market row 作为独立 insert 块插在**组合末位之前**(finalInsertIndex
+    // = 真实组合最后一项的下标)——此时锁层与桌面写 config 层都已铺完、锁层本身仍连续,
+    // 命中的是「market row 未落在锁层锚点之前」的分层反转判据(round3 R5),不是锁层中段。
     const fixture = [
       ...realPatches.slice(0, finalInsertIndex),
       { insert: [{ id: HUAANWORK_MARKET_ROW.id, name: HUAANWORK_MARKET_ROW.name }] },
@@ -228,5 +234,18 @@ describe('market composition order (provider layer before guardrail lock layer)'
     ]
 
     expect(() => assertMarketCompositionOrder(fixture)).toThrow(/guardrail lock layer/u)
+  })
+
+  /**
+   * P18(Task 6.9):上面两根负例的注释/标题与报错文案曾写 `landed in the guardrail
+   * lock layer`,与其 fixture 构造(① 锁层被截断;② 落在组合尾部的 insert 块)不符。
+   * 断言逻辑不动,只钉措辞:被测字符串在测试内以分片拼接,故断言只对被测源码生效。
+   */
+  it('P18: the negative-case comments and error copy match the fixtures they describe', () => {
+    const source = readFileSync(join(import.meta.dirname, 'market-composition-order.spec.ts'), 'utf8')
+    expect(source).not.toContain(['landed in the', 'guardrail lock layer'].join(' '))
+    expect(source).toContain(['is not before the', 'guardrail lock layer start index'].join(' '))
+    expect(source).toContain(['spliced into the', 'lock layer'].join(' '))
+    expect(source).toContain(['appended at the composition', 'tail'].join(' '))
   })
 })

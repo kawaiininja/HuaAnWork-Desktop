@@ -7,7 +7,9 @@ import { sessionSendBlockers } from '../../src/huaanwork-host/sessions.ts'
 import {
   clearPendingWorkspaceRoot,
   neutralWorkspaceRoot,
+  PENDING_ROOT_TTL_MS,
   readPendingWorkspaceRoot,
+  type PendingRootDrop,
 } from '../../src/huaanwork-host/workspace-state.ts'
 import { closeWorkspace, openWorkspace } from '../../src/huaanwork-host/workspace.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
@@ -46,8 +48,12 @@ describe('openWorkspace', () => {
     const { ctx, requestRestart } = makeRouteCtx()
     await expect(openWorkspace(ctx, target)).resolves.toEqual({ restarting: true, workspaceRoot: resolve(target) })
     expect(readPendingWorkspaceRoot(profileDir)).toBe(resolve(target))
-    expect(JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')))
-      .toEqual({ pendingRoot: resolve(target) })
+    // spec §14 第 23 条残余:`pendingRoot` 落盘带写入时刻(组合期 TTL 判据的原料)。
+    const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')) as
+      { pendingRoot?: string; writtenAt?: string }
+    expect(state.pendingRoot).toBe(resolve(target))
+    expect(typeof state.writtenAt).toBe('string')
+    expect(Math.abs(Date.now() - Date.parse(state.writtenAt!))).toBeLessThan(60_000)
     expect(requestRestart).toHaveBeenCalledTimes(1)
     rmSync(target, { recursive: true, force: true })
   })
@@ -141,8 +147,10 @@ describe('closeWorkspace', () => {
     await expect(closeWorkspace(ctx)).resolves.toEqual({ restarting: true, workspaceRoot: neutral })
     expect(readPendingWorkspaceRoot(profileDir)).toBe(neutral)
     // 旧语义钉中立根:文件保留 `{}` 以外的可读状态,不删除。
-    expect(JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')))
-      .toEqual({ pendingRoot: neutral })
+    const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')) as
+      { pendingRoot?: string; writtenAt?: string }
+    expect(state.pendingRoot).toBe(neutral)
+    expect(typeof state.writtenAt).toBe('string')
     expect(requestRestart).toHaveBeenCalledTimes(1)
   })
 
@@ -185,5 +193,58 @@ describe('pendingRoot 生命周期', () => {
     expect(readPendingWorkspaceRoot(profileDir)).toBeNull()
     expect(existsSync(join(profileDir, 'huaanwork-workspace.json'))).toBe(true)
     expect(requestRestart).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * spec §14 第 23 条残余:确认框挂起期间进程被杀 ⇒ pendingRoot 已落盘而无裁决。
+   * 写入时刻 + TTL 把「无限期残留」收窄为「TTL 内残留」;超期在组合期丢弃并回报
+   * 诚实诊断(丢弃 ≠ 静默:onDrop 诊断经 profile.ts 出组合结果、main.ts 落日志行)。
+   */
+  function writeStateFile(payload: Record<string, unknown>): void {
+    writeFileSync(join(profileDir, 'huaanwork-workspace.json'), `${JSON.stringify(payload)}\n`, 'utf8')
+  }
+
+  test('超期 pendingRoot(> TTL)读回 null,并回报可诊断文案', () => {
+    const now = Date.now()
+    const writtenAt = new Date(now - PENDING_ROOT_TTL_MS - 60_000)
+    writeStateFile({ pendingRoot: '/stale/root', writtenAt: writtenAt.toISOString() })
+    const drops: PendingRootDrop[] = []
+    expect(readPendingWorkspaceRoot(profileDir, { now, onDrop: drop => drops.push(drop) })).toBeNull()
+    expect(drops).toHaveLength(1)
+    expect(drops[0]!.root).toBe('/stale/root')
+    expect(drops[0]!.message).toContain('/stale/root')
+    expect(drops[0]!.message).toContain(String(PENDING_ROOT_TTL_MS / 60_000))
+  })
+
+  test('TTL 边界:恰在 TTL 上仍消费(丢弃判据是 age > TTL,不是 >=)', () => {
+    const now = Date.now()
+    writeStateFile({ pendingRoot: '/edge/root', writtenAt: new Date(now - PENDING_ROOT_TTL_MS).toISOString() })
+    const drops: unknown[] = []
+    expect(readPendingWorkspaceRoot(profileDir, { now, onDrop: drop => drops.push(drop) })).toBe('/edge/root')
+    expect(drops).toHaveLength(0)
+  })
+
+  /**
+   * 无 `writtenAt` = 本 TTL 之前的构建落盘的旧文件(一次性升级过渡):年龄不可知
+   * 不等于必须丢弃——TTL 只收窄「无限期残留」,不回溯改变旧文件的消费语义
+   * (逆向影响:升级前那次**已确认**的切换会被吞掉)。旧文件由首个 effect 清除。
+   */
+  test('无 writtenAt(或值不可解析)的旧文件维持既有消费语义,不被 TTL 判据误伤', () => {
+    const now = Date.now()
+    for (const payload of [{ pendingRoot: '/legacy/root' }, { pendingRoot: '/legacy/root', writtenAt: 'not-a-time' }]) {
+      writeStateFile(payload)
+      const drops: unknown[] = []
+      expect(readPendingWorkspaceRoot(profileDir, { now, onDrop: drop => drops.push(drop) })).toBe('/legacy/root')
+      expect(drops).toHaveLength(0)
+    }
+    // 时钟偏移(writtenAt 在未来)同样按「未超期」消费,不因偏移误伤。
+    writeStateFile({ pendingRoot: '/skewed/root', writtenAt: new Date(now + 60_000).toISOString() })
+    expect(readPendingWorkspaceRoot(profileDir, { now })).toBe('/skewed/root')
+  })
+
+  test('未注入 onDrop 时超期同样丢弃(诊断是可选透出,不是消费条件)', () => {
+    const now = Date.now()
+    writeStateFile({ pendingRoot: '/stale/root', writtenAt: new Date(now - PENDING_ROOT_TTL_MS - 1).toISOString() })
+    expect(readPendingWorkspaceRoot(profileDir)).toBeNull()
   })
 })

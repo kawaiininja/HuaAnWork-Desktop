@@ -1178,4 +1178,21 @@ describe('artifact GC × profile checkpoint (review D9)', () => {
     expect(existsSync(ghost)).toBe(false)
     expect(profileFileReferencesExist(profileDir)).toBe(false)
   })
+
+  /**
+   * N-11(Task 6.9):`HUAANWORK_CHECKPOINT_USER_DATA_DIR` 写进 `process.env` 会泄漏到
+   * 所有子进程(含用户可见终端)。裁定 = **已评估,保留现状**:显式传递只能改
+   * `src/host-process.ts` 的 `utilityProcess.fork` env(与 beta 逐字节共享,白名单预算
+   * 冻结 22/6、不得新增条目),而隔离宿主的 `artifacts.ts` 读的是**子进程自己的**
+   * `process.env`——fork 的 `env: { ...process.env }` 是唯一可达通道。理由现落在
+   * main.ts 的注释里;本条钉住注释与唯一注入点(退回沉默即红)。
+   */
+  test('N-11: the unconditional env write is evaluated and kept, with its reason recorded in main.ts', () => {
+    const mainSource = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8')
+    expect(mainSource).toContain('已评估,保留')
+    expect(mainSource).toContain('host-process.ts')
+    expect(mainSource).toContain('utilityProcess.fork')
+    expect(mainSource.match(/process\.env\[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV\] = profileUserDataDir/gu))
+      .toHaveLength(1)
+  })
 })

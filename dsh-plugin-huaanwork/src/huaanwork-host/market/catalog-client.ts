@@ -13,7 +13,8 @@
  * (信封:domain = 配置 origin、revision genuinely older 才拒(`<` 持久化最大值;
  * 等值 = 当前清单幂等重读,放行——final-review 裁定 2026-09-26,spec §14 第十轮
  * 第 49 条)、notAfter 未过期)——任一不满足即拒,**不信任其中任何 sha256** → 通过
- * 后才更新每源持久化 max revision(防重放判定的持久事实;仅当推进时写盘)。
+ * 后先过 `files` 形状守卫(P19:结构不可消费 = 拒绝整份清单,且不落 revision),
+ * 再更新每源持久化 max revision(防重放判定的持久事实;仅当推进时写盘)。
  */
 
 import { get as httpGet, type IncomingMessage } from 'node:http'
@@ -26,6 +27,7 @@ import { ensureMarketArtifactsDir } from './artifacts.ts'
 import {
   verifyMarketManifest,
   type MarketManifest,
+  type MarketManifestFile,
   type MarketManifestSignature,
   type VerificationVerdict,
 } from './verify.ts'
@@ -293,8 +295,6 @@ export interface VerifiedManifest {
   readonly manifest: MarketManifest
   readonly signature: MarketManifestSignature
   readonly slot: 1 | 2
-  /** 本次验签是否推进了持久化 max revision(防重放判定的提交点)。 */
-  readonly revisionAdvanced: boolean
 }
 
 export interface FetchVerifiedManifestOptions {
@@ -304,6 +304,44 @@ export interface FetchVerifiedManifestOptions {
   /** epoch 毫秒(可注入;生产为 Date.now())。 */
   readonly now: number
   readonly http?: MarketHttpClient
+}
+
+/** 形状守卫的取值描述:只报类型,不回显不可信内容(错误文案会到达渲染进程)。 */
+function describeManifestValue(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  return typeof value
+}
+
+/**
+ * P19(Task 6.9):已验签清单的 `files` 形状守卫(数组 + 每个条目是非数组对象)。
+ *
+ * 验签只保证**字节与信封**可信,不保证结构可消费:routes.ts 的两处消费点
+ * (`.find` ~:142 / `.map` ~:195)对非数组会抛裸 TypeError(`.find is not a function`),
+ * 条目非对象则在 `file.name` 解引用时抛 TypeError —— 到了 toRouteError 只会变成
+ * 500 internal + 通用文案,不可诊断。此处 fail-closed 拒绝整份清单,错误码具名。
+ *
+ * 口径分工(不与 Task 6.3 的 sha256 形状预检重复):本层管「清单结构能不能被消费」
+ * (结构边界,拒绝整份清单);install.ts 管「被选中条目的 sha256 能不能当暂存名与
+ * 校验值」(安装边界,只针对被选中的那一条)。两者都在各自的信任边界上判一次。
+ */
+function assertManifestFilesShape(files: unknown): asserts files is readonly MarketManifestFile[] {
+  if (!Array.isArray(files)) {
+    throw new MarketFetchError(
+      `已验签清单的 files 字段不是数组(收到 ${describeManifestValue(files)}):清单结构不可消费,已拒绝整份清单,其中任何 sha256 均不被采用`,
+      502,
+      'market-manifest-files',
+    )
+  }
+  for (const [index, entry] of files.entries()) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new MarketFetchError(
+        `已验签清单的 files[${String(index)}] 不是对象(收到 ${describeManifestValue(entry)}):清单结构不可消费,已拒绝整份清单,其中任何 sha256 均不被采用`,
+        502,
+        'market-manifest-files',
+      )
+    }
+  }
 }
 
 /**
@@ -361,9 +399,16 @@ export async function fetchVerifiedManifest(options: FetchVerifiedManifestOption
     )
   }
 
-  const revisionAdvanced = lastSeenRevision === undefined || manifest.envelope.revision > lastSeenRevision
-  if (revisionAdvanced) {
+  // P19:结构守卫在**验签之后、落 revision 之前**——真实但不可消费的清单照样拒绝,
+  // 且不推进防重放 revision(它从未被采用过)。畸形到 canonicalJson 都拒绝的值
+  // 已在上面映射 503(verifyMarketManifest 抛 → market-verification-unavailable);
+  // 本守卫补的是「canonicalJson 收得下、消费点收不下」这条路径。
+  assertManifestFilesShape(manifest.files)
+
+  // P20(Task 6.9):「是否推进」不再作为返回值透出(零消费方;spec §14 第 49 条把
+  // revision 判定改为 `>=` 后「是否前进」对消费方已无语义)——该判据只剩落盘一处用途。
+  if (lastSeenRevision === undefined || manifest.envelope.revision > lastSeenRevision) {
     options.revisionStore.saveMaxRevision(options.origin, manifest.envelope.revision)
   }
-  return { manifest, signature, slot: verdict.slot, revisionAdvanced }
+  return { manifest, signature, slot: verdict.slot }
 }

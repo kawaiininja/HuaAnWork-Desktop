@@ -13,7 +13,11 @@ import { afterEach, describe, expect, test } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { HUAANWORK_MARKET_ROUTES } from '../../src/huaanwork-host/market/index.ts'
 import { MARKET_ROUTE_PATHS, MARKET_ROUTE_LIST, registerMarketRoutes } from '../../src/huaanwork-host/market/routes.ts'
-import type { MarketHttpClient } from '../../src/huaanwork-host/market/catalog-client.ts'
+import {
+  createMarketHttpClient,
+  fetchVerifiedManifest,
+  type MarketHttpClient,
+} from '../../src/huaanwork-host/market/catalog-client.ts'
 import { fingerprintPublicKeyHex, type MarketManifest } from '../../src/huaanwork-host/market/verify.ts'
 import {
   createMarketTestServer,
@@ -721,5 +725,71 @@ describe('POST desktop/request-restart', () => {
     const routesSource = readFileSync(resolve(import.meta.dirname, '../../src/huaanwork-host/market/routes.ts'), 'utf8')
     expect(routesSource).toContain('RESTART_CANCELLED_MESSAGES')
     expect(routesSource).not.toContain('已取消重启')
+  })
+})
+
+describe('P19/P20: signed-manifest shape guard and the consumer-less revision field', () => {
+  const singleFile = () => [{ name: 'a', version: '1.0.0', sha256: '0'.repeat(64), tarballPath: '/artifacts/a.tgz', size: 1 }]
+
+  /**
+   * P19:清单按合法形状构造(catalog.items 由 files 派生)并**真实签名**后再把
+   * `files` 换成非数组——canonicalJson 能序列化该值,故验签通过,命中的是形状路径。
+   * 修复前:`installable`(`.map`)抛裸 TypeError → 500 internal;修复后:具名错误码。
+   */
+  test('P19: a signed manifest whose files field is not an array fails with a named error code', async () => {
+    const server = await createMarketTestServer()
+    servers.push(server)
+    const manifest = {
+      ...manifestFor(server.origin, 1, singleFile()),
+      files: 'nope',
+    } as unknown as MarketManifest
+    activate(server, manifest)
+    const { ctx, recorded } = fakeCtx()
+    registerMarketRoutes(ctx, depsFor(tempProfile(), server.origin))
+
+    const installable = await callRoute(recorded, MARKET_ROUTE_PATHS.installable, getRequest())
+    expect(installable.status()).toBe(502)
+    expect(installable.json().error.code).toBe('market-manifest-files')
+    expect(installable.json().error.message).not.toMatch(/TypeError/u)
+
+    // preview(`.find`)与 installable(`.map`)是 manifest.files 仅有的两处消费点。
+    const preview = await callRoute(recorded, MARKET_ROUTE_PATHS.preview, request({ name: 'a', version: '1.0.0' }))
+    expect(preview.status()).toBe(502)
+    expect(preview.json().error.code).toBe('market-manifest-files')
+  })
+
+  test('P19: file entries that are not objects fail with the same named code', async () => {
+    const server = await createMarketTestServer()
+    servers.push(server)
+    // `[null]` 修复前同样抛裸 TypeError(`file.name` 解引用);条目形状与数组形状同码。
+    const manifest = {
+      ...manifestFor(server.origin, 1, singleFile()),
+      files: [null],
+    } as unknown as MarketManifest
+    activate(server, manifest)
+    const { ctx, recorded } = fakeCtx()
+    registerMarketRoutes(ctx, depsFor(tempProfile(), server.origin))
+
+    const out = await callRoute(recorded, MARKET_ROUTE_PATHS.installable, getRequest())
+    expect(out.status()).toBe(502)
+    expect(out.json().error.code).toBe('market-manifest-files')
+  })
+
+  /**
+   * P20:`VerifiedManifest.revisionAdvanced` 零消费方(全仓 grep 见 Task 6.9 报告),
+   * 删除后返回值只剩三键;字段仍在时本断言红(对象携带、`Object.keys` 可见)。
+   */
+  test('P20: VerifiedManifest carries no field without a consumer', async () => {
+    const server = await createMarketTestServer()
+    servers.push(server)
+    activate(server, manifestFor(server.origin, 1, singleFile()))
+    const verified = await fetchVerifiedManifest({
+      origin: server.origin,
+      pins: PINS,
+      revisionStore: createMemoryRevisionStore().store,
+      now: NOW,
+      http: createMarketHttpClient(),
+    })
+    expect(Object.keys(verified).sort()).toEqual(['manifest', 'signature', 'slot'])
   })
 })
