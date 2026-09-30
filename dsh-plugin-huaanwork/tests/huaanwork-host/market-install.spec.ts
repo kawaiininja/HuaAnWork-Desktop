@@ -2,8 +2,12 @@
  * install.ts 单元层:(c) 安装侧门正负例、sha256 比对、流式下载(第 53 条)、制品落盘/GC。
  * pnpm 层语义在 market-pnpm-semantics.spec.ts;wrapper e2e 在 market-e2e.spec.ts。
  */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync,
+  readFileSync, readdirSync, rmSync, statSync, writeFileSync, type WriteStream,
+} from 'node:fs'
 import { randomBytes } from 'node:crypto'
+import { once } from 'node:events'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -354,8 +358,15 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
   /**
    * 与生产同形的安装链:downloadAndStageArtifact → executeMarketInstall(→ addPlugin)。
    * 负例据此断言「下载/校验失败时 addPlugin 一次未被调用」(pnpm 零调用、零重启请求)。
+   * `extra` 传 `openStagingStream`(评审 Important 1 的暂存写故障注入缝)或替换 origin
+   * (真实 socket 用例用随机端口)。
    */
-  function installChain(profileDir: string, http: MarketHttpClient, entry: ReturnType<typeof fileEntry>) {
+  function installChain(
+    profileDir: string,
+    http: MarketHttpClient,
+    entry: ReturnType<typeof fileEntry>,
+    extra: { readonly origin?: string; readonly openStagingStream?: (tmpPath: string) => WriteStream } = {},
+  ) {
     const pnpmCalls: string[][] = []
     let restartRequests = 0
     // profile 清单先落一份非空 bundles(与 plugins-host.spec 的 writeProfile 同形):
@@ -384,12 +395,68 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
       pnpmCalls,
       restartRequests: () => restartRequests,
       run: async () => executeMarketInstall(ctx, await downloadAndStageArtifact({
-        origin: ORIGIN,
+        origin: extra.origin ?? ORIGIN,
         file: entry,
         profileDir,
         http,
+        ...(extra.openStagingStream !== undefined ? { openStagingStream: extra.openStagingStream } : {}),
       })),
     }
+  }
+
+  /**
+   * 在有界时间内等一个 promise 落定。**挂死**是本组用例的失效形态之一(等一个
+   * 永不再来的 'drain'),故「超时未落定」与「落定但分类错」必须分开上报 ——
+   * vitest 的默认超时只能证否,说不出分类。
+   */
+  async function settleWithin<T>(
+    promise: Promise<T>,
+    ms: number,
+  ): Promise<{ kind: 'resolved'; value: T } | { kind: 'rejected'; error: unknown } | { kind: 'stalled' }> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        promise.then(
+          (value): { kind: 'resolved'; value: T } => ({ kind: 'resolved', value }),
+          (error): { kind: 'rejected'; error: unknown } => ({ kind: 'rejected', error }),
+        ),
+        new Promise<{ kind: 'stalled' }>((resolve) => { timer = setTimeout(() => resolve({ kind: 'stalled' }), ms) }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * 注入缝的暂存写流:真实 fs 写流(生产同款:0600 文件 + `fd`),在第 `failAtWrite`
+   * 次 `write` 上以 **fs 写故障的终态**失败 —— `destroy(ENOSPC 形态 error)`,即
+   * `stream.errored` 同步置位、'error' 已发出、此后 `write()` 恒返回 false 且不会再
+   * 有任何 'drain'/'error'(实测;评审 Important 1 的复现形态)。之前的块仍走真实
+   * fs 写,故「边收边落盘」未被替换,替换掉的只是故障的**来源**(单测无法真的把
+   * 磁盘写满)。message 刻意带上绝对路径:真实 fs 错误(open/rename 等)的 message
+   * 就含路径,故「只回 errno」的断言必须有牙齿(评审 P1)。
+   */
+  function stagingStreamFailingAt(tmpPath: string, failAtWrite: number): WriteStream {
+    const stream = createWriteStream(tmpPath, { fd: openSync(tmpPath, 'w', 0o600) })
+    const originalWrite = stream.write.bind(stream) as (chunk: Buffer) => boolean
+    let writes = 0
+    stream.write = ((chunk: Buffer): boolean => {
+      writes += 1
+      if (writes === failAtWrite) {
+        stream.destroy(Object.assign(
+          new Error(`ENOSPC: no space left on device, write '${tmpPath}'`),
+          { code: 'ENOSPC', syscall: 'write', path: tmpPath },
+        ))
+        return false
+      }
+      return originalWrite(chunk)
+    }) as unknown as WriteStream['write']
+    return stream
+  }
+
+  /** fs 写故障的 errno 形态错误(单测里无法真的写满磁盘,故以同形态错误注入)。 */
+  function enospcFault(): Error {
+    return Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC', syscall: 'write' })
   }
 
   /**
@@ -579,6 +646,97 @@ describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', 
     // 评审 P1:message 只回 errno,绝不回 profileDir 绝对路径。
     expect((caught as Error).message).toMatch(/\(ENOTDIR\)/u)
     expect((caught as Error).message).not.toContain(profileDir)
+    expect(chain.pnpmCalls).toEqual([])
+  })
+
+  /**
+   * 评审 Important 1(前半):下载到一半时**宿主写故障**不得被讲成「内网市场不可达」。
+   * 故障用注入缝制造(磁盘满无法在可移植的单测里真实制造),其余全链是生产件:真实
+   * socket + `createMarketHttpClient` 的 `requestStream` —— 正是它会把非
+   * MarketFetchError 的 fs 错误包装成 502 `market-unreachable`(本用例的回归点)。
+   */
+  test('a mid-stream staging write fault is host IO (500 market-artifact-io), not a 502 market outage', async () => {
+    const profileDir = tempProfile()
+    const served = Buffer.alloc(64 * 8192, 0x42)
+    const server = await chunkedServer({ chunks: 64, chunkBytes: 8192 })
+    try {
+      const chain = installChain(profileDir, createMarketHttpClient(), fileEntry({ sha256: sha256Hex(served) }), {
+        origin: server.origin,
+        // 第 2 块写时「磁盘满」:下载**中途**、且已有一块真实落盘。
+        openStagingStream: (tmpPath) => stagingStreamFailingAt(tmpPath, 2),
+      })
+
+      const started = Date.now()
+      // 等待上界 3 s > 断言上界 2 s:这样「落定但慢到不像样」与「根本没落定(挂死)」
+      // 是两条不同的失败信息。生产件里的 socket 静默超时是 15 s(MARKET_HTTP_TIMEOUT_MS)。
+      const outcome = await settleWithin(chain.run(), 3000)
+      const elapsed = Date.now() - started
+
+      expect(outcome.kind).not.toBe('stalled')
+      if (outcome.kind !== 'rejected') throw new Error(`expected the install to reject, got ${outcome.kind}`)
+      const error = outcome.error as MarketFetchError
+      expect(error).toBeInstanceOf(MarketFetchError)
+      // 宿主 IO ⇒ 500 market-artifact-io;绝不是 502 market-unreachable(磁盘满与网络无关)。
+      expect(error.status).toBe(500)
+      expect(error.code).toBe('market-artifact-io')
+      expect(error.message).toMatch(/\(ENOSPC\)/u)
+      expect(error.message).not.toMatch(/unreachable/u)
+      expect(error.message).not.toMatch(/timed out/u)
+      expect(error.message).not.toContain(profileDir)
+      // 未等满 15 s 的 socket 静默超时:故障即报,不白占 execute 的单飞互斥。
+      expect(elapsed).toBeLessThan(2000)
+      // 暂存零残留、绝不安装。
+      expect(artifactDirEntries(profileDir)).toEqual([])
+      expect(chain.pnpmCalls).toEqual([])
+    } finally {
+      await server.close()
+    }
+  })
+
+  /**
+   * 评审 Important 1(后半):写流一旦 `destroy(err)`,`write()` 恒返回 false 且**不会
+   * 再有 'drain'/'error'** ⇒ 「等 drain」等于等一个永不再来的事件(实测 1.5 s 不落定)。
+   * 本用例把故障放在两次 onChunk 之间的边界上(此刻 'error' 已发出、`stream.errored`
+   * 已置位),正是只会挂死的那个交错;此处没有 socket,故旧实现会**永久**挂住(生产中
+   * 则拖满 15 s 的静默超时并谎报 timed out)。
+   */
+  test('a write fault that already destroyed the stream cannot stall the install on a drain that never comes', async () => {
+    const profileDir = tempProfile()
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-stream-io-'))
+    roots.push(dir)
+    const bytes = buildTgz(dir, { name: '@huaanwork/sample', version: '1.2.3' }, Buffer.alloc(64 * 1024, 0x55))
+    let staging: WriteStream | undefined
+    const client: MarketHttpClient = {
+      fetchText: () => Promise.reject(new Error('unexpected fetchText on the install path')),
+      fetchBuffer: () => Promise.reject(new Error('the streaming install path must not call fetchBuffer (第 53 条)')),
+      fetchStream: async (_url, _label, _maxBytes, onChunk) => {
+        await onChunk(bytes.subarray(0, 4096))
+        const stream = staging!
+        const errored = once(stream, 'error')
+        stream.destroy(enospcFault())
+        await errored // 故障已完整发出:'error' 已 emit、errored 已置位
+        await onChunk(bytes.subarray(4096, 8192))
+        return { bytes: bytes.byteLength }
+      },
+    }
+    const chain = installChain(profileDir, client, fileEntry({ sha256: sha256Hex(bytes) }), {
+      openStagingStream: (tmpPath) => {
+        staging = createWriteStream(tmpPath, { fd: openSync(tmpPath, 'w', 0o600) })
+        return staging
+      },
+    })
+
+    const outcome = await settleWithin(chain.run(), 2000)
+
+    expect(outcome.kind).not.toBe('stalled')
+    if (outcome.kind !== 'rejected') throw new Error(`expected the install to reject, got ${outcome.kind}`)
+    const error = outcome.error as MarketFetchError
+    expect(error).toBeInstanceOf(MarketFetchError)
+    expect(error.status).toBe(500)
+    expect(error.code).toBe('market-artifact-io')
+    expect(error.message).toMatch(/\(ENOSPC\)/u)
+    expect(error.message).not.toMatch(/unreachable|timed out/u)
+    expect(artifactDirEntries(profileDir)).toEqual([])
     expect(chain.pnpmCalls).toEqual([])
   })
 

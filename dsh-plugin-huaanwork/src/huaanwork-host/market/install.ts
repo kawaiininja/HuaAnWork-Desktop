@@ -309,6 +309,16 @@ export interface PreparedMarketArtifact {
 }
 
 /**
+ * 生产暂存写流(默认实现):先**同步**建好暂存文件(0600)再进写流——失败清理紧跟
+ * 在「文件已存在」之后,不与写流的异步 open 赛跑(否则清理可能先跑、文件后出现,
+ * 留下残留)。暂存与制品同目录(`.market-artifacts/`)——rename 必须同文件系统,
+ * 不能借道 tmpdir。
+ */
+function openStagingWriteStream(tmpPath: string): WriteStream {
+  return createWriteStream(tmpPath, { fd: openSync(tmpPath, 'w', 0o600) })
+}
+
+/**
  * 中止暂存写流并删除暂存文件(所有失败路径的收尾)。**先等 'close'**(fd 释放)再删:
  * Windows 上删一个仍被打开的文件会 EPERM;监听在 destroy **之前**挂好,无竞态。
  */
@@ -319,6 +329,39 @@ async function abortArtifactWrite(stream: WriteStream, tmpPath: string): Promise
     await closed
   }
   discardMarketArtifactTemp(tmpPath)
+}
+
+/**
+ * 暂存写故障的**唯一**归类点(评审 Important 1):宿主 IO 一律
+ * `MarketFetchError(500, 'market-artifact-io')`,**只带 errno**(P1:fs 错误的 message
+ * 含 profileDir 绝对路径,而具名错误会经 routes 原样转给渲染进程)。
+ *
+ * 为什么必须在这里归类:裸 fs 错误若逃到 `fetchStream`,`requestStream` 的兜底会把
+ * 任何非 MarketFetchError 包装成 502 `market-unreachable` —— 磁盘满/IO 故障就会被
+ * 讲成「内网市场不可达」,与网络毫无关系。
+ */
+function stagingIoError(fault: unknown): MarketFetchError {
+  return new MarketFetchError(`failed to stage market artifact (${marketIoErrno(fault)})`, 500, 'market-artifact-io')
+}
+
+/**
+ * 把一个 chunk 写进暂存流并施加背压(第 53 条)。兑现 = 本块已交给内核。
+ *
+ * **不能在写流已死时等 'drain'**(评审 Important 1):`destroy(err)` 之后 'error' 已经
+ * 发过、`write()` 恒返回 false,且**不会再有 'drain'/'error'** —— 实测 destroy 之后
+ * `once(ws,'drain')` 1.5 s 不落定。挂在那里,安装链只能靠 15 s 的 socket 静默超时
+ * 脱身(白占 execute 的单飞互斥 15 s),还会把「磁盘满」讲成「timed out」。故等 drain
+ * 之前先看**已置位的故障**(调用方给的 `writeFault`:含 Node 在 destroy 时同步置位的
+ * `stream.errored`)与 `destroyed`;`write` 期间才发生的错误由 'error' 让本 await 拒绝
+ * (调用方按同一 errno 口径归类)。
+ */
+async function writeStageChunk(stream: WriteStream, chunk: Buffer, faultOf: () => Error | undefined): Promise<void> {
+  const before = faultOf()
+  if (before !== undefined || stream.destroyed) throw stagingIoError(before)
+  if (stream.write(chunk)) return
+  const during = faultOf()
+  if (during !== undefined || stream.destroyed) throw stagingIoError(during)
+  await once(stream, 'drain')
 }
 
 /**
@@ -337,6 +380,15 @@ export async function downloadAndStageArtifact(options: {
   readonly file: MarketManifestFile
   readonly profileDir: string
   readonly http?: MarketHttpClient
+  /**
+   * **测试注入缝**(生产恒用默认实现 `openStagingWriteStream`):替换暂存写流的
+   * 创建。存在的唯一理由:「下载到一半时写流报错」(ENOSPC/EIO)这类**宿主故障**
+   * 无法在可移植的单测里真实制造(填满磁盘/tmpfs 都不可行),而它正是「宿主 IO
+   * 不得被讲成市场不可达、且不得挂在等不到的 drain 上」的回归位点(评审
+   * Important 1)。注入者自己负责按生产同款建好暂存文件(0600),否则清理断言
+   * 失去意义。
+   */
+  readonly openStagingStream?: (tmpPath: string) => WriteStream
 }): Promise<PreparedMarketArtifact> {
   // ① URL 同源钉扎(X1,第 51 条):跨源在**任何请求之前**就拒,fail-closed。
   const url = resolveSameOriginUrl(options.origin, options.file.tarballPath)
@@ -362,25 +414,37 @@ export async function downloadAndStageArtifact(options: {
   // (`.market-artifacts/`)——rename 必须同文件系统,不能借道 tmpdir。
   let writeStream: WriteStream
   try {
-    writeStream = createWriteStream(tmpPath, { fd: openSync(tmpPath, 'w', 0o600) })
+    writeStream = (options.openStagingStream ?? openStagingWriteStream)(tmpPath)
   } catch (error) {
     discardMarketArtifactTemp(tmpPath)
     // 建不了暂存文件是宿主 IO:只回 errno(评审 P1),不把绝对路径回给渲染进程。
     throw new MarketFetchError(`failed to stage market artifact (${marketIoErrno(error)})`, 500, 'market-artifact-io')
   }
   // 写流故障的确定性观察点:'error' 监听必须有——否则未捕获 'error' 会掀翻主进程;
-  // 且背压等 drain 时 once(stream,'drain') 会以同一错误拒绝(见下方回调)。
+  // 且背压等 drain 时 once(stream,'drain') 会以同一错误拒绝(见 writeStageChunk)。
   let writeFailure: Error | undefined
   writeStream.on('error', (error: Error) => { writeFailure = error })
+  // 写故障的**唯一**读取口径:'error' 事件记下的错误优先;其次 Node 在 `destroy()` 时
+  // **同步**置位的 `stream.errored`('error' 事件要到下一个 tick 才发出,背压路径上
+  // 可能还没到 —— 只认事件就会漏掉「故障已置位」这个状态,正是评审 Important 1 的
+  // 挂死窗口)。
+  const writeFault = (): Error | undefined => {
+    const fault: Error | null = writeFailure ?? writeStream.errored
+    return fault ?? undefined
+  }
 
   let receivedBytes: number
   try {
     const received = await http.fetchStream(url, `artifact ${name}@${version}`, MARKET_ARTIFACT_MAX_BYTES, async (chunk) => {
       // 边收边算 sha256、边写暂存:被哈希的正是被写入的同一份字节(解法 A)。
       hash.update(chunk)
-      if (!writeStream.write(chunk)) {
-        // 背压:内核缓冲排空后再要下一块;写流期间报错则本 await 以该错误拒绝。
-        await once(writeStream, 'drain')
+      try {
+        await writeStageChunk(writeStream, chunk, writeFault)
+      } catch (error) {
+        // 写故障(含背压等待期间的 'error')是**宿主 IO**:在此归类成 500
+        // `market-artifact-io` 并只回 errno。若放它原样上抛,requestStream 会包装成
+        // 502 `market-unreachable` —— 一次磁盘满就会被讲成「内网市场不可达」。
+        throw error instanceof MarketFetchError ? error : stagingIoError(writeFault() ?? error)
       }
     })
     receivedBytes = received.bytes
@@ -406,13 +470,16 @@ export async function downloadAndStageArtifact(options: {
 
   try {
     // 收尾:冲刷已排队的字节并等 fd 关闭(rename 前确保写流已彻底交还文件)。
-    if (writeFailure !== undefined) throw writeFailure
+    // 写故障(可能发生在最后一块之后、流已收完)同样在此被拦下,走 500 errno 口径。
+    const pending = writeFault()
+    if (pending !== undefined) throw pending
     const closed = once(writeStream, 'close').catch(() => { /* fd 关闭细节不覆盖 end 的判定 */ })
     await new Promise<void>((resolve, reject) => {
       writeStream.end((error?: Error | null) => { error ? reject(error) : resolve() })
     })
     await closed
-    if (writeFailure !== undefined) throw writeFailure
+    const late = writeFault()
+    if (late !== undefined) throw late
   } catch (error) {
     await abortArtifactWrite(writeStream, tmpPath)
     // 只回 errno,不回 error.message(评审 P1:fs 错误的 message 含 profileDir 绝对
