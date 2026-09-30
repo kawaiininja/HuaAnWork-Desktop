@@ -1430,4 +1430,45 @@ describe('huaanwork product identity after the M6 channel switch', () => {
     expect(DESKTOP_PRODUCT_NAME).toBe(manifest.build?.productName)
     expect(DESKTOP_APP_ID).toBe(manifest.build?.appId)
   })
+
+  it('does not describe this package as the upstream beta channel', () => {
+    for (const name of ['README.md', 'README.zh.md']) {
+      const text = readFileSync(new URL(name, packageRoot), 'utf8')
+      expect(text, name).not.toContain('DSH Desktop Beta')
+      expect(text, name).not.toContain('dsh-desktop-beta')
+      expect(text, name).not.toContain('dshdesktop.cn')
+      expect(text, name).not.toContain('DSH-Desktop-Beta')
+    }
+  })
+
+  it('documents only the launcher names this package actually registers', () => {
+    for (const name of ['README.md', 'README.zh.md']) {
+      const text = readFileSync(new URL(name, packageRoot), 'utf8')
+      for (const bin of Object.keys(manifest.bin ?? {})) expect(text, name).toContain(bin)
+    }
+  })
+
+  it('documents the configured update origin instead of a hardcoded endpoint', () => {
+    for (const name of ['README.md', 'README.zh.md']) {
+      const text = readFileSync(new URL(name, packageRoot), 'utf8')
+      expect(text, name).toContain('HUAANWORK_UPDATE_ORIGIN')
+    }
+  })
+
+  it('does not document an install-stable flow this product does not have', () => {
+    for (const name of ['README.md', 'README.zh.md']) {
+      const text = readFileSync(new URL(name, packageRoot), 'utf8')
+      expect(text, name).not.toMatch(/Install Stable Edition/u)
+      expect(text, name).not.toContain('安装稳定版')
+    }
+  })
+
+  it('points at the two intranet servers and the migration guide', () => {
+    for (const name of ['README.md', 'README.zh.md']) {
+      const text = readFileSync(new URL(name, packageRoot), 'utf8')
+      expect(text, name).toContain('update-server-deployment.md')
+      expect(text, name).toContain('market-server-deployment.md')
+      expect(text, name).toContain('huaanwork-data-migration.md')
+    }
+  })
 })

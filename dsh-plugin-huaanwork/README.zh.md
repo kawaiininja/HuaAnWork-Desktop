@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-`dsh-plugin-huaanwork` 在 Electron 中运行 DSH Desktop 抢先版，同时仍然参与普通 Cordis 组合。安装后的应用名称为 **HuaAnWork**。该包只提供 `dsh-plugin-huaanwork` 可执行命令和 `dsh-desktop-beta` 别名，不会与稳定版 npm 包或命令冲突。
+`dsh-plugin-huaanwork` 即 **HuaAnWork**，是一个独立的内网桌面应用，在 Electron 中运行，同时仍然参与普通 Cordis 组合。该包提供 `huaanwork` 与 `dsh-plugin-huaanwork` 两个可执行命令，不会与上游 `dsh-plugin-desktop` npm 包或其命令冲突。
 
-稳定版 `dsh-plugin-desktop` 与此 Beta 包可以安装在同一台机器上。两者使用不同的应用名、系统身份、快捷方式、单实例锁和 Electron 用户数据目录；但会有意共用同一 `DSH_HOME`（或默认的 `~/.dsh`），因此 Profile、设置、插件和会话仍然共享。支持同时安装，但不保证可靠地同时运行，因为两版可能争用 Profile 文件、端口和依赖状态。自动更新只跟随 Beta 通道；托盘中提供显式操作，可在保留 Beta 的同时安装稳定版。
+上游稳定版 `dsh-plugin-desktop` 与 HuaAnWork 可以安装在同一台机器上。两者使用不同的应用名、系统身份、快捷方式、单实例锁和 Electron 用户数据目录；但会有意共用同一 `DSH_HOME`（或默认的 `~/.dsh`），因此 Profile、设置、插件和会话仍然共享。支持同时安装，但不保证可靠地同时运行，因为两版可能争用 Profile 文件、端口和依赖状态。自动更新只跟随 `huaanwork` 通道，该通道由部署配置的内网更新服务端提供。
 
 ## 架构
 
@@ -149,11 +149,11 @@ npx dsh-plugin-huaanwork
 
 ## 命令行启动
 
-该包安装两个仅属于 Beta 的等价命令 `dsh-desktop-beta` 与 `dsh-plugin-huaanwork`。无参数调用时，两者都会启动打包的 Electron launcher（`lib/main.js`）。
+该包安装两个等价命令 `huaanwork` 与 `dsh-plugin-huaanwork`。无参数调用时，两者都会启动打包的 Electron launcher（`lib/main.js`）。
 
-- **全局安装** —— `npm install -g dsh-plugin-huaanwork` 会自动安装 `electron` peer，之后直接执行 `dsh-desktop-beta` 即可基于共享的默认 DSH home 启动应用：
+- **全局安装** —— `npm install -g dsh-plugin-huaanwork` 会自动安装 `electron` peer，之后直接执行 `huaanwork` 即可基于共享的默认 DSH home 启动应用：
   ```sh
-  dsh-desktop-beta
+  huaanwork
   ```
 - **在 profile 内** —— `dsh plugin --profile <name> add dsh-plugin-huaanwork` 后，命令位于该 profile 的 `node_modules/.bin`。pnpm 不会自动安装 `electron` peer；需要命令行启动时，请手动添加：
   ```sh
@@ -162,7 +162,7 @@ npx dsh-plugin-huaanwork
   原生构建许可（node-pty、koffi、electron 等）遵循 pnpm 常规的 `allowBuilds` 规则。
 - **缺少 electron** —— 命令会打印简短的安装指引，而不是抛出模块错误。
 
-如果用普通 `dsh` 命令直接启动一个组合了桌面壳的 profile（缺少 launcher 的 `desktopRuntime` service），会打印提示，告诉你用 `dsh-desktop-beta` 或打包版应用启动；此时桌面壳不会注册任何功能。
+如果用普通 `dsh` 命令直接启动一个组合了桌面壳的 profile（缺少 launcher 的 `desktopRuntime` service），会打印提示，告诉你用 `huaanwork` 或打包版应用启动；此时桌面壳不会注册任何功能。
 
 第三方 Host 插件只需提供普通 `dsh.bundle` patch。包含浏览器 UI 的插件还要发布普通 `dsh.client` 元数据，将 `platform` 设为 `"web"`，并导出 `./client` 产物。上游 Web 客户端模块图会在所有模式下发现它；Electron 不要求单独的客户端构建，也不引入 desktop 专用注册 API。增强模式 contribution 必须面向该显式组合中存在的 service 与 slot，不能假设官方 layout 或 sidebar occupant 拥有它们。
 
@@ -170,17 +170,30 @@ npx dsh-plugin-huaanwork
 
 当 Desktop 窗口没有焦点时，直接用户发起的回合到达 `completed` 会显示原生完成通知；以 `error` 或 `max-tokens` 结束时则显示需要处理的通知。后台任务完成或失败也使用同一条原生注意力路径。取消、阻塞、中断、被终止的任务、插件发起、仅 continuation、turn 不匹配及 subagent 活动都保持静默。点击通知会显示并聚焦窗口。macOS 与 Linux 会递增应用角标，Windows 会闪烁任务栏按钮；显示、聚焦或释放窗口时会清除这些提示。实时生效的 `dsh-desktop-notifications` settings namespace 提供相互独立的 `notifyOnTurnCompletion`、`notifyOnTurnFailure`、`notifyOnJobCompletion` 与 `notifyOnJobFailure` 开关，默认全部开启。通知文案刻意保持通用，不会包含提示词、回复、错误、任务标签、命令、路径、会话 ID、模型或 provider 名称、工具数据及输出。
 
-打包后的 macOS 与 Windows 应用会在启动 60 秒后查询 `https://www.dshdesktop.cn/api/desktop/version`，并在每次检查完成六小时后再次查询。每次 no-cache 请求的期限为 15 秒，会携带 `X-DSH-Desktop-Channel: beta` 和当前安装版本，并与托盘中的 **Check for Updates…** 命令共用一个 in-flight operation。Beta 只接受规范的 `-beta.N` SemVer，且响应必须明确包含 `channel: "beta"`；它不会静默使用稳定版。后台失败和非更新版本保持静默；手工检查一定会显示原生结果对话框。**安装稳定版** 会另行查询稳定通道，允许目标版本更低，并把稳定版安装在 Beta 旁边。开发运行、未打包启动与 Linux 不会下载安装包。
+打包后的 macOS 与 Windows 应用会在启动 60 秒后查询 `<HUAANWORK_UPDATE_ORIGIN>/api/desktop/version`，并在每次检查完成六小时后再次查询。origin 取自 `HUAANWORK_UPDATE_ORIGIN` 环境变量；未配置该变量的部署会让每次检查 fail-closed，而不会去查询公网服务。每次 no-cache 请求的期限为 15 秒，会携带 `X-DSH-Desktop-Channel: huaanwork` 和当前安装版本，并与托盘中的 **Check for Updates…** 命令共用一个 in-flight operation。`huaanwork` 通道只接受不带 prerelease 的规范 SemVer，且响应必须明确包含 `channel: "huaanwork"`；它不会静默使用其他通道。后台失败和非更新版本保持静默；手工检查一定会显示原生结果对话框。开发运行、未打包启动与 Linux 不会下载安装包。
 
 选择 **Download** 后，应用会先重新确认服务端版本没有变化，然后打开原生保存对话框。默认位置是 Downloads，但用户可以选择其他绝对路径和文件名；取消对话框不会发起下载请求。DSH Desktop 使用 Electron 网络跟随 service redirect，把不超过 1 GiB 的文件流式写入用户选择的路径，记录安装包位置用于升级交接，并在交付前拒绝不完整的 DMG 或 Windows PE。macOS 会打开下载好的 DMG，并提示用户替换 `Applications` 中的应用后重新打开。Windows 会在 NSIS 安装器准备完成后再次确认；选择 **Restart and Install** 会启动安装器，并在当前进程退出前请求 Cordis 有序 teardown。升级后的应用启动时会询问删除已记录的安装包，或保留它；任一选择都会消费 pending cleanup state。下载、文件系统与安装器打开失败都会保持静默，同时保留托盘中的可重试版本操作。
 
-Release operator 必须先发布两个平台产物，再让 Beta 版本可被发现。版本与下载服务在 `X-DSH-Desktop-Channel: beta` 时必须选择 Beta，并在下载响应中同时回显 `beta` 与请求的 `X-DSH-Desktop-Target-Version`。值缺失、服务不可用、响应不匹配或格式无效时，Desktop 不会显示任何提示。稳定服务仍需支持显式安装操作和旧客户端。
+Release operator 必须先发布两个平台产物，再让版本可被发现。内网版本与下载服务必须在 `X-DSH-Desktop-Channel: huaanwork` 时选择 huaanwork 通道，并在下载响应中同时回显 `huaanwork` 与请求的 `X-DSH-Desktop-Target-Version`。值缺失、服务不可用、响应不匹配或格式无效时，Desktop 不会显示任何提示。部署说明见 [docs/update-server-deployment.md](../docs/update-server-deployment.md)。
 
 在 macOS 与 Windows 上，**打开 DSH 终端** 会打开以当前激活 profile 为工作目录的系统终端。设置页标题区会在它旁边提供重启菜单，其中包含 **重启 Desktop** 和 **重启到恢复模式**；任何重启路径都会先显示确认，再开始有序 Cordis shutdown 和 Electron relaunch。终端欢迎信息会显示应用版本、当前 profile、profile 目录与 DSH home，并列出配置与插件管理命令。在该终端内，裸 `dsh`、`dsh --dump-config`，以及没有选择 profile 的 plugin 子命令都会默认使用当前激活 profile；显式 `--profile` 与上游 `web` alias 会保留原有含义。DSH Desktop 会在自身 user-data 目录下按 profile 生成私有 `dsh`、`pnpm` 与 `node` shim，设置 `DSH_HOME`，使用当前 profile 作为工作目录，并且只在该终端的 `PATH` 前置 shim 目录；之后切换 profile 不会改变已经打开的终端命令。它不会修改全局环境或 shell 启动文件。macOS launcher 会先保留用户的交互式 zsh 或 bash 设置，再恢复 desktop 自有变量。Windows 会依次选择 PowerShell 7、Windows PowerShell 或命令提示符，并在新的 Windows Terminal 窗口中打开；如果 `wt.exe` 不可用，则由私有 `cmd start` broker 创建可见控制台。同步启动失败与 broker 非正常退出会使用 Desktop dialog surface。Linux 不组合该终端命令。
 
 Desktop 的确认、警告、错误与结果统一使用基于 shadcn 的 `DesktopDialogWindow`。每个 dialog 都是独立、沙箱化的模态 `BrowserWindow`，在可用时以当前 Desktop 窗口为 parent；它不是官方 Web 页面内部的组件或 portal。作为 parent 子窗口的纯操作 dialog 不显示窗口按钮，也不会渲染空白 frame；只有独立显示并带有 macOS 红绿灯或 Windows 窗口按钮的 dialog 才使用共享的 36 像素 utility frame。Escape 或可用的窗口关闭操作会映射为有界取消，并且只向 main process 返回一次本地结果。操作系统的打开文件和保存文件选择器仍保持原生，因为它们负责选择系统路径，而不是展示 Desktop 操作。
 
 恢复模式同样使用独立的 Desktop-owned 窗口；当存在 macOS 红绿灯或 Windows 窗口按钮时显示空白 36 像素 frame。其完整 shadcn 页面先说明进入恢复模式的原因，再把操作分成 **插件管理**、**回滚**、**切换配置** 与 **诊断** 四个 Tab。新增 Profile 窗口也只在实际存在这些窗口按钮时使用无标题 utility frame。恢复操作和任何重启请求都会打开 `DesktopDialogWindow` 确认，而不会把 modal 放进恢复页面里。
+
+## 内网部署服务端
+
+HuaAnWork 面向不依赖公网的内网部署：
+
+- 只读的**更新服务端**（`update-server/`）提供打包应用轮询的版本端点，并托管发布制品本身。启动、数据布局与发布流程见 [docs/update-server-deployment.md](../docs/update-server-deployment.md)。
+- **市场服务端**（`market-server/`）提供 `huaanwork-market` provider 消费的已签名插件目录与制品。部署、公钥供给与两步离线签名流程见 [docs/market-server-deployment.md](../docs/market-server-deployment.md)。
+
+两者都是私有 workspace 包，均不包含在桌面安装包或已发布的 npm 包中。
+
+## 旧版数据迁移
+
+在仍保留旧版（Tauri 版）HuaAnWork 数据的机器上，新版 HuaAnWork Desktop 的**首次启动**会在 Profile 组合之前把数据迁移到新布局，每个 Profile 只执行一次。迁移范围包括应用设置、本地账号、会话记录、项目、任务、自动化任务、局域网智能体配置、技能开关、用户技能与中性工作区内容，旧数据会被刻意保留。安全模式与显式请求的恢复模式会跳过迁移。触发条件、完整迁移范围与失败表现的说明见 [docs/huaanwork-data-migration.md](../docs/huaanwork-data-migration.md)。
 
 ## 日志与诊断
 
@@ -194,11 +207,11 @@ HuaAnWork 将 UTF-8 日志写入独立的 Electron 用户数据目录：Windows 
 
 ## 原生生命周期
 
-关闭窗口会隐藏窗口，Host Cordis 树继续运行。托盘可以重新打开窗口、选择激活 profile、打开隔离的 DSH 终端、检查 stable release、通过标准 settings namespace 更改模式，或请求显式退出。Profile 与模式切换都会先 dispose 当前 Cordis 树，再让 Electron relaunch。原生退出、`SIGINT` 与 `SIGTERM` 也会在退出前请求 dispose；超过五秒或收到重复请求时会强制完成最终退出。导航与重定向被限制在确切的 loopback origin；外部 HTTP、HTTPS 与邮件链接由操作系统打开；renderer 启用 `contextIsolation` 与 Chromium sandbox，并关闭 Node integration。
+关闭窗口会隐藏窗口，Host Cordis 树继续运行。托盘可以重新打开窗口、选择激活 profile、打开隔离的 DSH 终端、检查可用更新、通过标准 settings namespace 更改模式，或请求显式退出。Profile 与模式切换都会先 dispose 当前 Cordis 树，再让 Electron relaunch。原生退出、`SIGINT` 与 `SIGTERM` 也会在退出前请求 dispose；超过五秒或收到重复请求时会强制完成最终退出。导航与重定向被限制在确切的 loopback origin；外部 HTTP、HTTPS 与邮件链接由操作系统打开；renderer 启用 `contextIsolation` 与 Chromium sandbox，并关闭 Node integration。
 
 ## 打包
 
-Stable 与 Beta 在 Windows、macOS 和 Linux 上均关闭 ASAR。打包后的 Electron smoke 会通过本地文件系统后端验证随包 Cordis 技能。
+HuaAnWork 在 Windows、macOS 和 Linux 上关闭 ASAR。打包后的 Electron smoke 会通过本地文件系统后端验证随包 Cordis 技能。
 
 `yarn package:dir` 为当前宿主平台创建未封装目录。如果应用目录缺少 desktop 更新与终端模块、DSH CLI bootstrap、内置 pnpm 入口或物理 deployment package，packaged-runtime gate 会拒绝该产物。Electron Builder 会把根 manifest、desktop runtime 与完整依赖树输出到 `resources/app/`（macOS 为 `Contents/Resources/app/`）；Host profile boot 与 CLI bootstrap 都会使用这棵物理树，因此 DSH profile fallback 的符号链接不会指向虚拟 ASAR 目录。`build/app-icon.png` 保持为未经修改的 iOS Default 源图，并继续作为 Windows 与 Linux 应用图标。构建过程会运行 `scripts/generate-mac-app-icon.mjs`，把该图缩放为 824 × 824 像素并居中放入透明的 1024 × 1024 画布；macOS 打包与运行中的 Dock 都使用生成的 `build/app-icon-mac.png`。`build/tray-icon.svg` 是品牌蓝托盘源文件：构建过程会派生由 macOS 系统自动着色的模板图，以及固定品牌蓝的 Windows 与 Linux 托盘图。
 
@@ -229,7 +242,7 @@ corepack.cmd yarn dist:win
 
 该流程不要求 Python 或 Visual Studio C++ Build Tools。Windows 命令会直接使用 `node-pty` 内置的 x64 Node-API 二进制，而不会让 Electron Builder 从源码重新编译；如果安装包 staging tree 缺少这些二进制，packaged-runtime gate 会直接拒绝产物。
 
-`dist:win` 会拒绝非 Windows 或非 x64 宿主，先执行一组 Windows 可运行的 gate，其中包括 build、全部 TypeScript compiler face、打包与原生 shell 聚焦测试，以及 runtime-closure verifier；随后再构建 NSIS 安装向导，并校验生成的两个 PE 文件。完整跨平台 suite 仍由 CI 持有，因为其中部分 POSIX 执行测试不是 Windows 程序。安装向导支持当前用户安装或提升权限后的所有用户安装，可更改安装目录，会创建开始菜单与桌面快捷方式，并且卸载应用时保留 DSH 用户数据。版本 `2.0.5-beta.2` 会输出到 `dsh-plugin-huaanwork\dist\DSH-Desktop-Beta-2.0.5-beta.2-x64-Setup.exe`；用于 smoke 测试的未封装程序仍位于 `dsh-plugin-huaanwork\dist\win-unpacked\HuaAnWork.exe`。
+`dist:win` 会拒绝非 Windows 或非 x64 宿主，先执行一组 Windows 可运行的 gate，其中包括 build、全部 TypeScript compiler face、打包与原生 shell 聚焦测试，以及 runtime-closure verifier；随后再构建 NSIS 安装向导，并校验生成的两个 PE 文件。完整跨平台 suite 仍由 CI 持有，因为其中部分 POSIX 执行测试不是 Windows 程序。安装向导支持当前用户安装或提升权限后的所有用户安装，可更改安装目录，会创建开始菜单与桌面快捷方式，并且卸载应用时保留 DSH 用户数据。版本 `0.1.0` 会输出到 `dsh-plugin-huaanwork\dist\HuaAnWork-0.1.0-x64-Setup.exe`；用于 smoke 测试的未封装程序仍位于 `dsh-plugin-huaanwork\dist\win-unpacked\HuaAnWork.exe`。
 
 该本地命令会主动移除 Windows 证书变量，并设置 `signExecutable=false`。产物可以安装测试，但没有 Authenticode publisher，因此 Windows 可能显示 Unknown publisher 或 SmartScreen 警告。签名后的 Windows release、证书校验、安装器升级与卸载测试，以及原生 UI 和 sandbox smoke 仍是独立的发布 gate。
 
@@ -241,7 +254,7 @@ corepack.cmd yarn dist:win
 corepack.cmd yarn dist:win-portable
 ```
 
-产物为 `dsh-plugin-huaanwork\\dist\\DSH-Desktop-Beta-2.0.5-beta.2-x64-Portable.zip`。用户解压到任意可写目录后运行其中的 `HuaAnWork.exe`，不需要安装器、管理员权限、开始菜单注册或卸载步骤。它仍会把 profile、日志和缓存写入 Windows 的 Beta 用户数据目录，因此这是便携分发方式，不是把数据完全封装在 exe 旁边的自包含沙箱。绿色 ZIP 不会交给 NSIS 自动更新流程，新版本需要手动替换并重新解压。本地构建没有签名，Windows 可能显示 Unknown publisher 或 SmartScreen 警告；签名后的绿色版仍属于正式发布 gate。
+产物为 `dsh-plugin-huaanwork\\dist\\HuaAnWork-0.1.0-x64-Portable.zip`。用户解压到任意可写目录后运行其中的 `HuaAnWork.exe`，不需要安装器、管理员权限、开始菜单注册或卸载步骤。它仍会把 profile、日志和缓存写入 Windows 的 HuaAnWork 用户数据目录，因此这是便携分发方式，不是把数据完全封装在 exe 旁边的自包含沙箱。绿色 ZIP 不会交给 NSIS 自动更新流程，新版本需要手动替换并重新解压。本地构建没有签名，Windows 可能显示 Unknown publisher 或 SmartScreen 警告；签名后的绿色版仍属于正式发布 gate。
 
 ### macOS DMG 冒烟构建
 
@@ -265,5 +278,5 @@ corepack.cmd yarn dist:win-portable
 - `dshmarket@1.2.3` 仍是用户可选安装的第三方 package，而不是内置 marketplace。只有重新审计的版本同时消费可选 Desktop service、保留普通 DSH fallback，并包含再分发所需的完整 license notice 后，才会重新评估预装。
 - 更新交接只验证下载容器，不验证 publisher 身份。macOS 仍要求用户从已打开的 DMG 替换应用；Windows 会运行已下载的 NSIS 安装器，但本地 `dist:win` 产物没有签名。签名产物、Authenticode/publisher 校验、SmartScreen 信誉与原生升级测试仍是发布 gate。
 - 共享 carrier 使用 HTTP 与 WebSocket，而不是 Electron IPC；默认只绑定 loopback，并支持经过明确确认的全接口局域网监听。替换 carrier 需要上游 DSH 提供 transport 扩展点，不属于该独立包的范围。
-- Beta 使用固定官方 release 源码构建的 DSH `0.1.6-alpha.2` 运行时分发包；桌面构建解析这些包接口，不直接链接源码 checkout。历史会话由上游迁移到 V3，自动转换旧 PTC 事件和 `code` 预设引用并保留原日志，桌面端不再生成预设别名。旧运行时无法读取 V3 会话。扩展和增强模式接入右侧 Sidebar 的文档预览、分栏和全屏，并通过 keyed `main` 槽位支持独立于会话选择的全局插件面板。
+- HuaAnWork 使用固定官方 release 源码构建的 DSH `0.1.6-alpha.2` 运行时分发包；桌面构建解析这些包接口，不直接链接源码 checkout。历史会话由上游迁移到 V3，自动转换旧 PTC 事件和 `code` 预设引用并保留原日志，桌面端不再生成预设别名。旧运行时无法读取 V3 会话。扩展和增强模式接入右侧 Sidebar 的文档预览、分栏和全屏，并通过 keyed `main` 槽位支持独立于会话选择的全局插件面板。
 - `package:dir` 是用于 smoke 的未封装产物。`dist:win` 会额外生成未签名的 NSIS 测试安装包，但不会建立 Authenticode 身份或 SmartScreen 信誉。安装与升级行为、原生通知与终端、Windows ACL sandbox，以及每台目标机器上的原生材质外观仍属于目标平台验证边界。
