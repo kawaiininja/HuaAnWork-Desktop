@@ -5,8 +5,16 @@
  *
  *   GET /v1/plugins             Provider-page catalog endpoint (contract
  *                               encoding: q / category / capability / cursor /
- *                               limit / sort / locale); responses are
- *                               self-validated by parseCatalogProviderPage.
+ *                               limit / sort / locale); every served item is
+ *                               self-validated by the upstream contract
+ *                               validator. A stored entry that violates the
+ *                               contract is isolated from THIS response only
+ *                               (ruling D-M6-26): the count travels in the
+ *                               `x-catalog-isolated-entries` response header
+ *                               and the per-entry reason in the server log;
+ *                               an all-invalid result answers 500
+ *                               `invalid-stored-catalog` instead of an empty
+ *                               page.
  *   GET /v1/manifest            The ACTIVATED offline-signed manifest,
  *                               verbatim (pending → offline sign → verified
  *                               intake/activation; 404 until one activates).
@@ -45,19 +53,46 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { CatalogContractError } from 'dsh-community-market/contracts'
 import { ADMIN_ARTIFACTS_PATH, handleAdminRequest } from './admin/routes.ts'
 import { renderAdminPage } from './admin/ui.ts'
-import { CatalogQueryError, CatalogService } from './catalog/service.ts'
+import {
+  CatalogQueryError,
+  CatalogService,
+  InvalidStoredCatalogError,
+  type IsolatedCatalogEntry,
+} from './catalog/service.ts'
 import type { CatalogStore } from './catalog/store.ts'
 import type { MarketServerConfig } from './config.ts'
 import { handleArtifactGet } from './tarball/http.ts'
 import type { ArtifactStore } from './tarball/store.ts'
 
-function sendJson(response: ServerResponse, status: number, body: unknown): void {
+function sendJson(
+  response: ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): void {
   const payload = `${JSON.stringify(body)}\n`
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
+    ...headers,
   })
   response.end(payload)
+}
+
+/**
+ * Ruling D-M6-26: an isolated catalog entry must reach the operator's log with
+ * its contract reason — isolation is never a silent drop. One shape for every
+ * arm (partial isolation, all-invalid refusal) so the journal reads the same;
+ * the ajv issue detail stays here and never enters a client body (review D3b).
+ */
+function logIsolatedEntries(isolated: readonly IsolatedCatalogEntry[]): void {
+  for (const entry of isolated) {
+    // name/id are stored values (possibly hand-edited, hence possibly ugly):
+    // JSON-encode them so one isolation always stays one log line.
+    console.error(
+      `[market-server] isolated catalog entry ${JSON.stringify(entry.name)} (${JSON.stringify(entry.id)}): ${entry.reason}`,
+    )
+  }
 }
 
 function sendError(response: ServerResponse, status: number, code: string, message: string): void {
@@ -212,23 +247,53 @@ export function createMarketServer(config: MarketServerConfig, store: CatalogSto
 
       if (url.pathname === '/v1/plugins') {
         try {
-          const page = catalog.query(parseQueryParams(url))
+          const { page, isolated } = catalog.queryWithIsolation(parseQueryParams(url))
+          if (isolated.length > 0) {
+            // Ruling D-M6-26: the isolation is honestly visible in BOTH
+            // channels. The count travels as response metadata (a probe can
+            // alert on it, and it needs no contract change: the payload stays a
+            // field-exact CatalogProviderPage); the per-entry name/id/reason
+            // goes to the operator log only (review D3b — ajv detail must not
+            // reach unauthenticated clients).
+            logIsolatedEntries(isolated)
+            sendJson(response, 200, page, { 'x-catalog-isolated-entries': String(isolated.length) })
+            return
+          }
           sendJson(response, 200, page)
         } catch (cause) {
+          if (cause instanceof InvalidStoredCatalogError) {
+            // Fail-closed arm of the read-side isolation: every candidate entry
+            // was isolated, so a 200 would carry an EMPTY catalog and tell
+            // clients the market is empty. Report the data fault it is; the
+            // per-entry reasons stay in the operator log (D3b).
+            console.error(
+              `[market-server] every catalog entry matching the request violates the provider-page contract ` +
+                `(${String(cause.isolated.length)} isolated); refusing to answer with an empty catalog`,
+            )
+            logIsolatedEntries(cause.isolated)
+            sendError(
+              response,
+              500,
+              'invalid-stored-catalog',
+              'every catalog entry matching this query violates the provider-page contract; refusing to answer with an empty catalog (details in the server log)',
+            )
+            return
+          }
           if (cause instanceof CatalogContractError) {
-            if (cause.contract === 'provider-page') {
-              // Read-side SELF-validation failure: the stored catalog violates
-              // the contract, so this is a server-side data fault, not a bad
-              // query. Fail closed with a generic client message; the ajv
-              // instancePath/pattern details go to the operator log only
-              // (review D3b — the contract doc security boundary says error
-              // bodies never leak internals to unauthenticated clients).
-              console.error('[market-server] stored catalog failed provider-page self-validation:', cause)
-              sendError(response, 500, 'invalid-stored-catalog', 'stored catalog state cannot produce a valid provider page')
+            if (cause.contract === 'query') {
+              // Genuine request-side query contract violation.
+              sendError(response, 400, 'invalid-query', cause.message)
               return
             }
-            // Genuine request-side query contract violation.
-            sendError(response, 400, 'invalid-query', cause.message)
+            // Stored entry shape can no longer produce this arm (every
+            // candidate entry is judged individually above), so anything left
+            // here is a server-side fault while assembling a response. Fail
+            // closed with a generic client message; the ajv
+            // instancePath/pattern details go to the operator log only (review
+            // D3b — the contract doc security boundary says error bodies never
+            // leak internals to unauthenticated clients).
+            console.error('[market-server] stored catalog failed provider-page self-validation:', cause)
+            sendError(response, 500, 'invalid-stored-catalog', 'stored catalog state cannot produce a valid provider page')
             return
           }
           if (cause instanceof CatalogQueryError) {

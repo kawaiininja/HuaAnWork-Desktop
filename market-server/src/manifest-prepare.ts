@@ -38,7 +38,12 @@ import {
   type MarketManifestFile,
   type MarketManifestSignature,
 } from './signing.ts'
-import type { CatalogService } from './catalog/service.ts'
+import {
+  InvalidStoredCatalogError,
+  type CatalogQueryResult,
+  type CatalogService,
+  type IsolatedCatalogEntry,
+} from './catalog/service.ts'
 import type { CatalogStore } from './catalog/store.ts'
 import type { MarketServerConfig } from './config.ts'
 
@@ -55,13 +60,44 @@ import type { MarketServerConfig } from './config.ts'
 export const MAX_MANIFEST_ENTRIES = 200
 
 export class ManifestPrepareError extends Error {
-  readonly code: 'catalog-too-large' | 'artifact-missing'
+  readonly code: 'catalog-too-large' | 'artifact-missing' | 'catalog-entry-invalid'
 
   constructor(code: ManifestPrepareError['code'], message: string) {
     super(message)
     this.name = 'ManifestPrepareError'
     this.code = code
   }
+}
+
+/** How many offending entries a refusal message spells out before summarising. */
+const MAX_LISTED_ISOLATED_ENTRIES = 3
+
+/**
+ * Honest refusal for the release path when stored entries violate the
+ * provider-page contract (D3 residual, ruling D-M6-26).
+ *
+ * The READ side isolates such an entry and keeps serving the rest
+ * (catalog/service.ts), because a per-request page can honestly say less. A
+ * SIGNED manifest must not shed an entry the same way: it is the install truth
+ * for clients and lives far longer than one request, so prepare refuses —
+ * naming the entry and the operator's next step — instead of releasing a
+ * manifest that quietly drops it. Only a hand-edited state file or a restored
+ * backup can put these entries there (every write path validates inside its
+ * locked write, review D3), so the operator is the one who can fix it.
+ */
+function refuseInvalidCatalogEntries(isolated: readonly IsolatedCatalogEntry[]): ManifestPrepareError {
+  const listed = isolated.slice(0, MAX_LISTED_ISOLATED_ENTRIES).map(entry => `${entry.id} (${entry.reason})`)
+  const rest = isolated.length - listed.length
+  const subject = isolated.length === 1
+    ? 'one stored catalog entry violates'
+    : `${String(isolated.length)} stored catalog entries violate`
+  return new ManifestPrepareError(
+    'catalog-entry-invalid',
+    `${subject} the provider-page contract and cannot enter a signed manifest: ` +
+      `${listed.join('; ')}${rest > 0 ? `; and ${String(rest)} more (see the server log)` : ''}. ` +
+      'Fix the entry, or unpublish it (POST /v1/admin/entries/<id>/unpublish), then run prepare again — ' +
+      'the catalog endpoint keeps serving the valid entries meanwhile.',
+  )
 }
 
 export type IntakeVerdict =
@@ -89,6 +125,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * an entry pointing at a vanished artifact blocks the release). `maxEntries`
  * is the effective catalog scale cap from config (default = the contract
  * maximum); it bounds both the guard and the provider page built here.
+ * Stored entries that violate the provider-page contract block the release as
+ * well (ruling D-M6-26): the read side isolates them per response, a signed
+ * manifest never silently sheds one.
  */
 export async function buildPendingManifest(args: {
   readonly store: CatalogStore
@@ -108,7 +147,19 @@ export async function buildPendingManifest(args: {
     )
   }
 
-  const page = args.catalog.query({ limit: args.maxEntries })
+  // Read side: the page is self-validated per entry (ruling D-M6-26), so this
+  // call reports isolation instead of throwing for a single bad stored entry.
+  let result: CatalogQueryResult
+  try {
+    result = args.catalog.queryWithIsolation({ limit: args.maxEntries })
+  } catch (cause) {
+    // Every matching entry invalid: the service fails closed before a page
+    // exists. Same honest refusal, carrying the per-entry reasons.
+    if (cause instanceof InvalidStoredCatalogError) throw refuseInvalidCatalogEntries(cause.isolated)
+    throw cause
+  }
+  if (result.isolated.length > 0) throw refuseInvalidCatalogEntries(result.isolated)
+  const page = result.page
   const files: MarketManifestFile[] = []
   for (const entry of entries) {
     if (entry.sha256 === undefined || entry.tarball === undefined) continue

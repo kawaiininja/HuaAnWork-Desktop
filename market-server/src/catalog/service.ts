@@ -2,8 +2,11 @@
  * Provider-page query service (Task 1).
  *
  * Answers in the upstream `CatalogProviderPage` wire shape and self-validates
- * every response with the upstream `parseCatalogProviderPage` runtime
- * validator — no dialect of our own (守则 2: 协议字段只 import 上游 contract).
+ * every SERVED entry with the very validator the write path runs (the upstream
+ * contract validator behind it) — no dialect of our own (守则 2: 协议字段只
+ * import 上游 contract). A contract-violating stored entry is isolated and
+ * reported per response instead of failing the whole catalog (D3 residual,
+ * ruling D-M6-26; see `queryWithIsolation`).
  * It never emits a `CatalogSnapshot`: Host provenance is forged by the
  * wrapper (Task 5), not by this server.
  *
@@ -26,10 +29,14 @@
 
 import {
   normalizeCatalogQuery,
-  parseCatalogProviderPage,
   type CatalogProviderPage,
   type CatalogQuery,
 } from 'dsh-community-market/contracts'
+// entry-contract.ts wraps the SAME upstream validator around a single entry
+// (the write-side guard, review D3); the read side reuses it so one judgment
+// covers both paths. The two modules import each other's functions, used at
+// call time only (initialization-safe).
+import { EntryContractError, formatContractIssues, validateCatalogEntryContract } from './entry-contract.ts'
 import type { CatalogEntry, CatalogStore } from './store.ts'
 
 export class CatalogQueryError extends Error {
@@ -129,6 +136,48 @@ function compareUpdated(a: CatalogEntry, b: CatalogEntry): number {
   return bTime - aTime
 }
 
+/**
+ * One stored entry that was kept out of a served page because it violates the
+ * provider-page contract (ruling D-M6-26). The reachable cause is an operator
+ * hand-editing the state file or restoring an old backup — every write path
+ * validates in the locked write (review D3) — so the operator must be able to
+ * see WHAT was isolated, not just that the list got shorter.
+ */
+export interface IsolatedCatalogEntry {
+  /** Stored entry id (`name@version`) — what the state file and admin API key on. */
+  readonly id: string
+  /** Contract `name` (packageName) of the isolated entry. */
+  readonly name: string
+  /** The contract issues, rendered by `formatContractIssues` for the operator. */
+  readonly reason: string
+}
+
+/** One catalog query's result: the served page plus what was isolated from it. */
+export interface CatalogQueryResult {
+  readonly page: CatalogProviderPage
+  readonly isolated: readonly IsolatedCatalogEntry[]
+}
+
+/**
+ * Fail-closed arm of the read-side isolation (ruling D-M6-26): EVERY entry the
+ * query would have served violates the provider-page contract. Answering 200
+ * with an empty page would tell clients the market is empty, so callers must
+ * report this as the server-side data fault it is. Carries the per-entry report
+ * so the caller can log it verbatim (and name the entries to the operator).
+ */
+export class InvalidStoredCatalogError extends Error {
+  readonly isolated: readonly IsolatedCatalogEntry[]
+
+  constructor(isolated: readonly IsolatedCatalogEntry[]) {
+    super(
+      `every catalog entry matching this query violates the provider-page contract (${String(isolated.length)} isolated); ` +
+        'refusing to answer with an empty catalog as if the market were empty',
+    )
+    this.name = 'InvalidStoredCatalogError'
+    this.isolated = isolated
+  }
+}
+
 export class CatalogService {
   readonly #store: CatalogStore
   readonly #now: () => Date
@@ -139,12 +188,34 @@ export class CatalogService {
   }
 
   /**
-   * Run a catalog query and return a self-validated provider page.
+   * Run a catalog query and return the served page.
+   *
+   * Convenience wrapper for callers with no operator report to deliver: an
+   * isolated entry is dropped from the page and only the caller who used
+   * `queryWithIsolation` can tell the operator about it. HTTP surfaces must use
+   * that method (ruling D-M6-26: isolation is never silent).
    *
    * @param queryInput normalized-or-raw query value; run through the upstream
    *   `normalizeCatalogQuery`, so contract violations throw CatalogContractError.
    */
   query(queryInput: unknown): CatalogProviderPage {
+    return this.queryWithIsolation(queryInput).page
+  }
+
+  /**
+   * Run a catalog query, isolating any candidate entry that violates the
+   * provider-page contract (D3 residual, ruling D-M6-26).
+   *
+   * Isolation happens AFTER the effective query filter (only entries this
+   * response would serve are judged, so the report describes the response) and
+   * BEFORE pagination (so `page.total`, cursors and offsets all describe what
+   * is actually served). If every matching entry is invalid the query fails
+   * closed via InvalidStoredCatalogError rather than serving an empty page.
+   *
+   * @param queryInput normalized-or-raw query value; run through the upstream
+   *   `normalizeCatalogQuery`, so contract violations throw CatalogContractError.
+   */
+  queryWithIsolation(queryInput: unknown): CatalogQueryResult {
     const query = normalizeCatalogQuery(queryInput)
     const key = queryKey(query)
     const limit = Math.min(query.limit ?? 50, MAX_PAGE_ITEMS)
@@ -163,6 +234,25 @@ export class CatalogService {
         // Stored order is the relevance/downloads ranking (no local statistics).
         break
     }
+
+    // Read-side per-entry validation (ruling D-M6-26): one hand-edited entry
+    // must not take down the catalog, so each candidate is judged with the
+    // single-entry validator the write path uses. A non-contract failure
+    // (structural corruption) is NOT folded into "isolated": it stays
+    // fail-closed, exactly as before this change.
+    const isolated: IsolatedCatalogEntry[] = []
+    const servable: CatalogEntry[] = []
+    for (const entry of filtered) {
+      try {
+        validateCatalogEntryContract(entry)
+        servable.push(entry)
+      } catch (cause) {
+        if (!(cause instanceof EntryContractError)) throw cause
+        isolated.push({ id: entry.id, name: entry.packageName, reason: formatContractIssues(cause.issues) })
+      }
+    }
+    if (servable.length === 0 && filtered.length > 0) throw new InvalidStoredCatalogError(isolated)
+    filtered = servable
 
     let offset = 0
     if (query.cursor !== undefined) {
@@ -186,9 +276,17 @@ export class CatalogService {
       items: pageItems,
       page: pageInfo,
     }
-    // Self-validation against the upstream contract (round3 R12). The
-    // effective-limit semantic check is enforced by construction above; the
-    // upstream helper caps that check at 100, so it is not passed here.
-    return parseCatalogProviderPage(page)
+    // No whole-page re-validation here any more (the old
+    // `parseCatalogProviderPage(page)` call): the page envelope is by
+    // construction (schemaVersion/generatedAt/page are ours; `items` is capped
+    // by MAX_PAGE_ITEMS and every item above just passed the upstream
+    // validator) and the upstream whole-page validator's only cross-item rule
+    // is id uniqueness, which the store already enforces at load
+    // (catalog/store.ts parseState rejects duplicate entry ids). A page
+    // assembled from individually-valid entries therefore cannot fail as a
+    // whole; round-trip conformance is pinned by tests/catalog-service.spec.ts.
+    // The effective-limit semantic check stays a query concern (the upstream
+    // helper caps it at 100, so it is not passed here).
+    return { page: page as CatalogProviderPage, isolated }
   }
 }

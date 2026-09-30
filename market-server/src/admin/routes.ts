@@ -25,6 +25,12 @@
  *   POST /v1/admin/entries/:id/unpublish    remove an entry from the catalog
  *   POST /v1/admin/manifest/prepare         two-step flow step 1: build +
  *                                           persist the canonical pending manifest
+ *                                           (refused with an honest 409 while a
+ *                                           stored entry violates the
+ *                                           provider-page contract, ruling
+ *                                           D-M6-26 — the read side isolates,
+ *                                           a signed manifest never silently
+ *                                           sheds an entry)
  *   GET  /v1/admin/manifest/pending         download the pending manifest
  *   POST /v1/admin/manifest/signature       two-step flow step 3: verify the
  *                                           detached signature, activate only
@@ -636,6 +642,13 @@ export async function handleAdminRequest(
         // and mislabels a data-side problem as an internal error.
         if (cause instanceof ManifestPrepareError) {
           const status = cause.code === 'catalog-too-large' ? 422 : 409
+          // Ruling D-M6-26: a refusal caused by a contract-violating stored
+          // entry reaches the operator in the response body (this route is
+          // token-authenticated, so the named entry + reason are allowed) and
+          // in the durable log.
+          if (cause.code === 'catalog-entry-invalid') {
+            console.error('[market-server] refusing to prepare a signed manifest:', cause.message)
+          }
           sendError(response, status, cause.code, cause.message)
           return true
         }

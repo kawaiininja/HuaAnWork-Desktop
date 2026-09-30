@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseCatalogProviderPage } from 'dsh-community-market/contracts'
@@ -370,28 +370,156 @@ describe('write-side contract validation + read-side poisoning (D3/D4)', () => {
     await catalogHealth()
   })
 
-  it('read-side self-validation failure of stored state answers 500 invalid-stored-catalog without ajv internals (D3b)', async () => {
+  it('isolates one poisoned stored entry instead of failing the whole catalog (D3b → ruling D-M6-26)', async () => {
     // Seed corrupt state directly (bypasses the write-side guards, simulating
-    // an operator-edited state file): a control character in displayName.
+    // an operator-edited state file or a restored old backup): one entry with a
+    // control character in displayName, two healthy entries around it.
     await market.store.replaceEntries([
-      {
-        id: 'poisoned@1.0.0',
-        packageName: 'poisoned',
-        version: '1.0.0',
-        displayName: 'bad\u0007name',
-        summary: 'A poisoned entry',
-      },
+      { id: 'keeper-one@1.0.0', packageName: '@huaanwork/keeper-one', version: '1.0.0', displayName: 'Keeper One', summary: 'First healthy entry' },
+      { id: 'poisoned@1.0.0', packageName: 'poisoned', version: '1.0.0', displayName: 'bad\u0007name', summary: 'A poisoned entry' },
+      { id: 'keeper-two@1.0.0', packageName: '@huaanwork/keeper-two', version: '1.0.0', displayName: 'Keeper Two', summary: 'Second healthy entry' },
     ])
-    const response = await fetch(`${market.baseUrl}/v1/plugins`)
-    expect(response.status).toBe(500)
-    const text = await response.text()
-    const parsed = JSON.parse(text) as { error: { code: string; message: string } }
-    expect(parsed.error.code).toBe('invalid-stored-catalog')
-    expect(parsed.error.message).toBe('stored catalog state cannot produce a valid provider page')
-    // The ajv instancePath/pattern internals must NOT leak to the client.
-    expect(text).not.toContain('instancePath')
-    expect(text).not.toContain('must match pattern')
-    expect(text).not.toContain('/items/0')
+
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(argument => String(argument)).join(' '))
+    })
+    try {
+      const response = await fetch(`${market.baseUrl}/v1/plugins`)
+      expect(response.status).toBe(200)
+      const body = await response.json() as { items: Array<{ id: string }>; page: { total: number } }
+      expect(body.items.map(item => item.id)).toEqual(['keeper-one@1.0.0', 'keeper-two@1.0.0'])
+      expect(body.page.total).toBe(2)
+      expect(() => parseCatalogProviderPage(body)).not.toThrow()
+
+      // Ruling D-M6-26: the isolation is honestly visible. The response carries
+      // the count as metadata (a probe can alert on it) ...
+      expect(response.headers.get('x-catalog-isolated-entries')).toBe('1')
+      // ... and the operator log names the isolated entry and the contract
+      // issue behind it. Both channels exist on purpose: the count alone says
+      // "something was isolated", the log says what the operator broke.
+      expect(logged.join('\n')).toContain('poisoned@1.0.0')
+      expect(logged.join('\n')).toContain('displayName')
+      // The ajv detail stays out of the unauthenticated body (review D3b).
+      const bodyText = JSON.stringify(body)
+      expect(bodyText).not.toContain('instancePath')
+      expect(bodyText).not.toContain('must match pattern')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('fails closed (500 invalid-stored-catalog, never an empty catalog) when every stored entry is invalid', async () => {
+    await market.store.replaceEntries([
+      { id: 'poisoned@1.0.0', packageName: 'poisoned', version: '1.0.0', displayName: 'bad\u0007name', summary: 'A poisoned entry' },
+    ])
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(argument => String(argument)).join(' '))
+    })
+    try {
+      const response = await fetch(`${market.baseUrl}/v1/plugins`)
+      // 200 + an empty page would tell clients the market is empty; that is the
+      // one answer isolation must never produce (ruling D-M6-26 fail-closed arm).
+      expect(response.status).toBe(500)
+      const text = await response.text()
+      const parsed = JSON.parse(text) as { error: { code: string; message: string } }
+      expect(parsed.error.code).toBe('invalid-stored-catalog')
+      expect(parsed.error.message).toContain('provider-page contract')
+      // The ajv instancePath/pattern internals must NOT leak to the client (D3b).
+      expect(text).not.toContain('instancePath')
+      expect(text).not.toContain('must match pattern')
+      expect(text).not.toContain('/items/0')
+      // ... but they must reach the operator: the refusal logs what was isolated.
+      expect(logged.join('\n')).toContain('poisoned@1.0.0')
+      expect(logged.join('\n')).toContain('displayName')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('keeps the write-side validation intact: no reachable write path admits a violating entry', async () => {
+    // Publish-time: a control character in the summary is rejected by the
+    // locked write-side contract check (review D3) ...
+    const poisonedPublish = await publishTgz(
+      market.baseUrl,
+      'test-admin-token',
+      cleanPackageManifest(),
+      { summary: 'line1\u0007line2' },
+    )
+    expect(poisonedPublish.status).toBe(400)
+    expect((poisonedPublish.body as { error: { code: string } }).error.code).toBe('invalid-entry-contract')
+
+    // ... PATCH-time: an over-long displayName is rejected the same way.
+    const published = await publishTgz(market.baseUrl, 'test-admin-token')
+    expect(published.status).toBe(201)
+    const { entry } = published.body as { entry: { id: string } }
+    const rejected = await fetch(`${market.baseUrl}/v1/admin/entries/${encodeURIComponent(entry.id)}`, {
+      method: 'PATCH',
+      headers: { ...adminHeaders('test-admin-token'), 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'x'.repeat(200) }),
+    })
+    expect(rejected.status).toBe(400)
+    expect(((await rejected.json()) as { error: { code: string } }).error.code).toBe('invalid-entry-contract')
+
+    // Nothing was admitted: the served page needs no isolation signal at all.
+    const page = await fetch(`${market.baseUrl}/v1/plugins`)
+    expect(page.status).toBe(200)
+    expect(page.headers.get('x-catalog-isolated-entries')).toBeNull()
+    const body = await page.json() as { items: unknown[] }
+    expect(body.items).toHaveLength(1)
+  })
+
+  it('refuses to prepare a signed manifest while a stored entry violates the contract (honest 409, not a bare 500)', async () => {
+    const published = await publishTgz(market.baseUrl, 'test-admin-token')
+    expect(published.status).toBe(201)
+    // Operator hand-edit: poison one stored entry on top of the healthy one.
+    await market.store.replaceEntries([
+      ...market.store.entries(),
+      { id: 'poisoned@1.0.0', packageName: 'poisoned', version: '1.0.0', displayName: 'bad\u0007name', summary: 'A poisoned entry' },
+    ])
+
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(argument => String(argument)).join(' '))
+    })
+    try {
+      const prepare = await fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+        method: 'POST',
+        headers: adminHeaders('test-admin-token'),
+      })
+      // The read side isolates (see above); a SIGNED manifest must not silently
+      // shed an entry, so prepare refuses with an honest, actionable 409 instead
+      // of a bare 500 (or a manifest that quietly drops the entry).
+      expect(prepare.status).toBe(409)
+      const parsed = await prepare.json() as { error: { code: string; message: string } }
+      expect(parsed.error.code).toBe('catalog-entry-invalid')
+      expect(parsed.error.message).toContain('poisoned@1.0.0')
+      expect(parsed.error.message).toContain('displayName')
+      expect(parsed.error.message).toContain('unpublish')
+      // The refusal also lands in the durable operator log, with the entry.
+      expect(logged.join('\n')).toContain('refusing to prepare a signed manifest')
+      expect(logged.join('\n')).toContain('poisoned@1.0.0')
+
+      // The read side keeps serving the valid entries meanwhile.
+      const page = await fetch(`${market.baseUrl}/v1/plugins`)
+      expect(page.status).toBe(200)
+      expect(page.headers.get('x-catalog-isolated-entries')).toBe('1')
+
+      // All-invalid is the same honest refusal (the service fails closed before
+      // a page exists), not a 500.
+      await market.store.replaceEntries([
+        { id: 'poisoned@1.0.0', packageName: 'poisoned', version: '1.0.0', displayName: 'bad\u0007name', summary: 'A poisoned entry' },
+      ])
+      const again = await fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+        method: 'POST',
+        headers: adminHeaders('test-admin-token'),
+      })
+      expect(again.status).toBe(409)
+      expect(((await again.json()) as { error: { code: string } }).error.code).toBe('catalog-entry-invalid')
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('rejects a publish whose catalog entry id would exceed the contract identifier maxLength of 160 (D4)', async () => {

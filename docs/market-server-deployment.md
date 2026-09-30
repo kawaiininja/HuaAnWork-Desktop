@@ -238,7 +238,7 @@ node --experimental-strip-types src/index.ts
 
 | 路由 | 语义 |
 | --- | --- |
-| `GET /v1/plugins` | provider-page 目录端点。查询参数按上游契约编码：`q`、重复 `category`（OR）/`capability`（AND）、`cursor`（不透明、绑定有效查询）、`limit`（1..200，默认 50）、`sort`（`relevance`/`updated`/`name`/`downloads`）、`locale`。响应为已通过上游 `parseCatalogProviderPage` 自校的 `CatalogProviderPage`。 |
+| `GET /v1/plugins` | provider-page 目录端点。查询参数按上游契约编码：`q`、重复 `category`（OR）/`capability`（AND）、`cursor`（不透明、绑定有效查询）、`limit`（1..200，默认 50）、`sort`（`relevance`/`updated`/`name`/`downloads`）、`locale`。响应为逐条目通过上游契约校验的 `CatalogProviderPage`。**读侧逐条目隔离（Task 6.7，裁定 D-M6-26）**：命中本次查询但违约契约的存储条目**只隔离其自身**（不再 500 掉整个目录）——隔离数进响应头 `x-catalog-isolated-entries`，逐条 `name (id): 违约原因` 进服务端日志（**非**响应体）；全部命中条目皆违约时答 500 `invalid-stored-catalog`（不以 200 + 空目录谎称市场为空）。 |
 | `GET /v1/manifest` | **已激活**的离线签名清单原文（Task 2 两步流激活后非 404）。文档形态 `{envelope, catalog, files}`：`catalog` 单独过 `parseCatalogProviderPage`；`envelope`（防重放）与 `files`（name@version → tarballPath + sha256 + size）为**旁挂**字段——严格 schema 顶层 `additionalProperties:false`，消费方须先剥离再 parse（Task 5 wrapper 判定同此）。验签由 wrapper 钉住公钥完成，服务端不代验。 |
 | `GET /v1/manifest/signature` | 已激活清单的**分离签名** sidecar（Ed25519 记录：`version/algorithm/keyId/slot/signedAt/signature`）；未激活 404。 |
 | `GET /artifacts/<file>` | 流式 .tgz 下载（`fs.createReadStream` 管道，不整文件入内存）。文件名为内容派生（`<name>-<version>-<sha256[:12]>.tgz`）；sha256 信任来自已验签清单，不来自传输层。未知/不安全名 404。 |
@@ -271,11 +271,12 @@ node --experimental-strip-types src/index.ts
 
 | 路由 | 语义 |
 | --- | --- |
-| `GET /v1/admin/state` | 总览：条目（含私有信封字段 sha256/tarball）、maxRevision、激活状态。 |
+| `GET /v1/admin/state` | 总览：条目（含私有信封字段 sha256/tarball）、maxRevision、激活状态、**制品清单 `artifacts`**（P11b，Task 6.6）：每项 `fileName`/`size`/`deletable` 布尔 + `referencedBy` 面名（`catalog`/`manifest`/`pending` 或 `*-unreadable`；`deletable` 仅在**三面全清**时为 true，fail-closed）。 |
 | `POST /v1/admin/artifacts?displayName=..&summary=..[&sha256=..]` | 发布 .tgz（raw body 流式落盘 + 边收边算 sha256；可选 `sha256` 参数做客户端断言，不符即 400 `sha256-mismatch` 且不留文件）。**两个尺寸上限**：压缩字节 ≤ **100 MiB**（超出即 413 `artifact-too-large`）；解压后 tar ≤ **64 MiB**（超出即 400 `decompressed-tarball-too-large`，gunzip 炸弹防护）。**注意两值不等**：不可压缩字节的 70 MiB 制品会「上传通过、门拒」，打包前请自检解压后尺寸。随后过**发布侧门**：解包 tarball manifest（自实现 ustar 解析，零依赖），① 结构层——depth-1 `<dir>/package.json` 候选**必须恰好一个**（多于一个即 400 `invalid-tarball`「歧义 tarball」，防干净诱饵掩护脏 manifest）、任何条目名含 `..` 段即 400 `invalid-tarball`；② 身份层——包名须匹配契约小写正则、版本 ≤64 字符，否则 422 `invalid-package-identity`；③ 依赖层——`dependencies`/`optionalDependencies` 非空即 422 `nonzero-dependencies`，`scripts` 含 `preinstall`/`install`/`postinstall`/`prepare` 即 422 `lifecycle-scripts`（`peerDependencies` 豁免、`bundleDependencies` 允许）。②③ 均**点名**违规项——运营者在发布时拿错，不是用户安装时。 |
+| `DELETE /v1/admin/artifact?file=<存放文件名>` | 删除单个已托管制品（P11b，Task 6.6；`unpublish` 有意保留字节，此前磁盘只增不减）。**引用面判定 fail-closed（三面，顺序固定）**：① 目录条目 `tarball`、② 已激活清单 `files[].tarballPath`（`GET /v1/manifest` 原文重放，故仅 unpublish 不够）、③ 已 prepare 的待签清单（仍可被签名激活）——任何一面仍引用即拒，答 **409 `artifact-referenced`**（清单形状无法解析、无法证明未引用时答 409 `manifest-unreadable`），文案**点名是哪一面**与运营者下一步（下架条目 / 重新 prepare + activate / 先处理当前 pending）。三面全清才 unlink，答 **204 + `x-artifact-bytes-reclaimed` 头**（回收字节数；204 无 body）。 |
 | `PATCH /v1/admin/entries/:id` | 编辑展示字段。**写入前在锁内跑一次 provider-page 契约自校**（评审 D3）：长度/控制字符/双向控制符/枚举/时间戳等违约一律 400 `invalid-entry-contract` 并点名 JSON path，不会先答 200 再把整站目录变成 400。URL 类字段（`homepage`/`publisherUrl`/`repositoryUrl`）预检与契约 `httpsUri` 正则**逐字一致**（禁 userinfo、禁端口、禁 fragment）：**留空 = 清除/不填**（schema 非必填），违约即 400 拒绝（round3 R15）。 |
 | `POST /v1/admin/entries/:id/unpublish` | 下架条目（制品文件保留在盘，可重新上架同 name@version）。 |
-| `POST /v1/admin/manifest/prepare` | 两步流第 1 步：生成 canonical 待签清单并入库 pending 槽——`domain` = 配置 origin、`revision` = 持久化 max+1（单调）、`issuedAt`/`notAfter`（TTL ≤ 7d）、catalog = 自校 provider page、files = 每个已托管制品的 sha256/tarballPath/size。**条目数 > 配置上限（默认 200 = 契约单页上限）→ 422 `catalog-too-large`**（响应体含「Split the source before releasing」指引）；**引用制品已不在盘 → 409 `artifact-missing`**（含重新上架指引）。两者都是诚实 4xx，不再是裸 500（评审 D14d）。**上限已在发布时前移**（评审 D15）：第 N+1 条（N = 配置上限）上架即 422 `catalog-full`，故目录**永远不会**进入「prepare 持续失败、连既有条目也发不出新清单」的冻结态；`catalog-too-large` 因而只剩「运营者手改状态文件 / 从旧备份还原」这一条可达路径。上限可配置（Task 6.4，裁定 R-3）与分页延后见〈目录规模上限〉。 |
+| `POST /v1/admin/manifest/prepare` | 两步流第 1 步：生成 canonical 待签清单并入库 pending 槽——`domain` = 配置 origin、`revision` = 持久化 max+1（单调）、`issuedAt`/`notAfter`（TTL ≤ 7d）、catalog = 自校 provider page、files = 每个已托管制品的 sha256/tarballPath/size。**条目数 > 配置上限（默认 200 = 契约单页上限）→ 422 `catalog-too-large`**（响应体含「Split the source before releasing」指引）；**引用制品已不在盘 → 409 `artifact-missing`**（含重新上架指引）。两者都是诚实 4xx，不再是裸 500（评审 D14d）。**上限已在发布时前移**（评审 D15）：第 N+1 条（N = 配置上限）上架即 422 `catalog-full`，故目录**永远不会**进入「prepare 持续失败、连既有条目也发不出新清单」的冻结态；`catalog-too-large` 因而只剩「运营者手改状态文件 / 从旧备份还原」这一条可达路径。上限可配置（Task 6.4，裁定 R-3）与分页延后见〈目录规模上限〉。**存储条目违约契约 → 409 `catalog-entry-invalid`**（Task 6.7，裁定 D-M6-26）：签名清单不得静默少条目，故 prepare 拒绝并点名条目与处置（下架该条目或修好状态文件后重跑）；只有手改状态文件/还原旧备份可达此分支。 |
 | `GET /v1/admin/manifest/pending` | 下载当前待签清单（无则 404）。 |
 | `POST /v1/admin/manifest/signature` | 两步流第 3 步：对**存储中的** pending 清单做 keyId 权威验签（裁定 R-1；含信封负例：`revision` 回退 / `notAfter` 过期 / `domain` 不符一律拒）。**仅验签通过才收录激活**（fail-closed：无有效签名永不激活）；激活 = manifest+signature 成对服务、pending 清空、持久化 maxRevision 前进。失败返回 `{activated:false, reason}`。 |
 
@@ -307,17 +308,27 @@ node --experimental-strip-types src/index.ts
 | 409 | `already-published` | 同 name@version 已发布（**盘上制品不受影响**，评审 D2）；先 unpublish 再重发 |
 | 409 | `manifest-activation-conflict` | 并发双 intake，败者诚实 409（非 500） |
 | 409 | `artifact-missing` | prepare 引用的制品已不在盘 |
+| 409 | `catalog-entry-invalid` | prepare 拒绝：存储条目违约 provider-page 契约（Task 6.7，裁定 D-M6-26；只可能来自手改状态文件/旧备份还原）；点名条目与处置，修好后重跑 |
+| 409 | `artifact-referenced` / `manifest-unreadable` | `DELETE /v1/admin/artifact` 的引用面拒绝：文案点名是哪一面（目录条目 / 已激活清单 / 待签清单）与下一步；`manifest-unreadable` = 清单形状无法解析、无法证明未引用（fail-closed） |
 | 413 | `artifact-too-large` | 上传压缩字节 > 100 MiB |
 | 429 | `too-many-uploads` | 并发上传已达 `MARKET_SERVER_MAX_CONCURRENT_UPLOADS`（默认 4）；等手上传结束后重试 |
 | 422 | `nonzero-dependencies` / `lifecycle-scripts` / `invalid-package-identity` | 发布侧门拒绝（点名违规项） |
 | 422 | `catalog-too-large` | prepare 时条目数 > 配置上限（默认 200 = 契约单页上限）；发布时已前移拦截，故通常只剩手改状态文件/旧备份还原可达 |
 | 422 | `catalog-full` | 发布第 N+1 条时被拒（N = 配置上限，默认 200；评审 D15 / Task 6.4）；先 unpublish 一条再发布。目录因此永不进入 prepare 冻结态 |
-| 500 | `upload-failed` / `internal-error` / `invalid-stored-catalog` | **服务端**故障；细节进服务端日志（响应体不含路径与 ajv 内部） |
+| 500 | `upload-failed` / `internal-error` / `invalid-stored-catalog` | **服务端**故障；细节进服务端日志（响应体不含路径与 ajv 内部）。`invalid-stored-catalog` 自 Task 6.7（裁定 D-M6-26）起仅剩「**全部**命中条目皆违约」这一条路径——单条违约改为逐条目隔离（200 + 隔离信号） |
 
-> 读侧自校验失败（存储中的条目违约契约）答 **500 `invalid-stored-catalog`**
-> 而非 400——那是服务端数据故障，不是调用方查询错误；ajv 的 instancePath 与
-> schema 正则只进日志，不回给未认证客户端（评审 D3b）。写侧已在锁内自校
-> （D3），正常运营路径不会走到这里。
+> **读侧逐条目隔离（Task 6.7，裁定 D-M6-26）**：存储中的条目违约契约的唯一可达
+> 来源是「运营者手改状态文件 / 从旧备份还原」（写侧已在锁内自校，D3）。此时
+> `/v1/plugins` **只隔离违约条目本身**：仍答 200 并服务其余条目，隔离数经响应头
+> `x-catalog-isolated-entries` 暴露，逐条 `name (id): 违约原因` 进服务端日志
+> —— 隔离绝不静默（静默少一个插件会让运营者无从知道自己改坏了什么）。**全部命中
+> 条目皆违约时仍 fail-closed**：答 **500 `invalid-stored-catalog`**（非 400——那是
+> 服务端数据故障，不是调用方查询错误；也**不**答 200 + 空目录，那会让客户端以为
+> 市场是空的）。ajv 的 instancePath 与 schema 正则只进日志，不回给未认证客户端
+> （评审 D3b）。**发布路径不放行**：存在违约条目时
+> `POST /v1/admin/manifest/prepare` 答 **409 `catalog-entry-invalid`** 并点名条目与
+> 处置（签名清单是客户端的安装真相源，不得像单次响应那样静默少条目）；修好或下架
+> 该条目后重跑 prepare 即可，读侧期间照常服务。
 
 ## 数据目录与备份/恢复
 

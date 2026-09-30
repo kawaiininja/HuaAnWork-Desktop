@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseCatalogProviderPage, parseCatalogQuery, CatalogContractError } from 'dsh-community-market/contracts'
-import { CatalogService, CatalogQueryError } from '../src/catalog/service.ts'
+import { CatalogService, CatalogQueryError, InvalidStoredCatalogError } from '../src/catalog/service.ts'
 import { CatalogStore, type CatalogEntry } from '../src/catalog/store.ts'
 import { deadProcessPid } from './helpers/server.ts'
 
@@ -187,6 +187,93 @@ describe('CatalogService contract conformance', () => {
       { mode: 0o600 },
     )
     await expect(CatalogStore.open(dir)).rejects.toThrow(TypeError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Read-side per-entry isolation (D3 residual; ruling D-M6-26)
+//
+// One contract-violating stored entry — the exposure face left after the
+// write-side guards (review D3) is an operator hand-editing the state file or
+// restoring an old backup — used to fail the WHOLE catalog, because the
+// assembled page was validated as a whole. Now every candidate entry is judged
+// with the same single-entry validator the write path runs: the violating ones
+// are isolated and reported, and only an all-invalid result fails closed (a
+// 200 + empty page would tell clients the market is empty).
+// ---------------------------------------------------------------------------
+
+/** Control character in displayName: violates the contract's plainText rule. */
+const POISONED: CatalogEntry = entry({
+  id: 'poisoned',
+  displayName: 'bad\u0007name',
+  summary: 'A poisoned entry',
+})
+
+describe('read-side per-entry isolation (D-M6-26)', () => {
+  it('serves the valid entries when one entry violates the contract', async () => {
+    const service = await serviceWith([...ENTRIES, POISONED])
+    const { page, isolated } = service.queryWithIsolation({})
+    expect(page.items.map(item => item.id)).toEqual(['alpha', 'beta', 'gamma'])
+    expect(page.page.total).toBe(3)
+    // The served page is still a contract page: the upstream WHOLE-page
+    // validator accepts it, i.e. the isolation is complete rather than partial.
+    expect(() => parseCatalogProviderPage(JSON.parse(JSON.stringify(page)))).not.toThrow()
+    expect(isolated).toHaveLength(1)
+  })
+
+  it('reports which entry was isolated and why, for the operator', async () => {
+    const service = await serviceWith([...ENTRIES, POISONED])
+    const { isolated } = service.queryWithIsolation({})
+    expect(isolated.map(isolatedEntry => isolatedEntry.name)).toEqual(['@huaanwork/poisoned'])
+    expect(isolated[0]?.id).toBe('poisoned')
+    expect(isolated[0]?.reason).toContain('displayName')
+    // A healthy catalog reports nothing (the signal is not background noise).
+    expect((await serviceWith(ENTRIES)).queryWithIsolation({}).isolated).toEqual([])
+  })
+
+  it('isolates before pagination, so totals and cursors describe what is served', async () => {
+    const service = await serviceWith([POISONED, ...ENTRIES])
+    const first = service.queryWithIsolation({ limit: 1, sort: 'name' })
+    expect(first.page.items.map(item => item.displayName)).toEqual(['Alpha Plugin'])
+    expect(first.page.page.total).toBe(3) // the isolated entry is not counted as served
+    expect(first.isolated).toHaveLength(1)
+    const second = service.queryWithIsolation({ limit: 1, sort: 'name', cursor: first.page.page.nextCursor })
+    expect(second.page.items.map(item => item.displayName)).toEqual(['Beta Plugin'])
+    const third = service.queryWithIsolation({ limit: 1, sort: 'name', cursor: second.page.page.nextCursor })
+    expect(third.page.items.map(item => item.displayName)).toEqual(['Gamma Tool'])
+    expect(third.page.page.nextCursor).toBeUndefined()
+  })
+
+  it('judges only the entries the effective query would serve', async () => {
+    const service = await serviceWith([...ENTRIES, POISONED])
+    const matched = service.queryWithIsolation({ q: 'alpha' })
+    expect(matched.page.items.map(item => item.id)).toEqual(['alpha'])
+    // The poisoned entry does not match this query, so nothing was isolated
+    // from THIS response (the signal describes the response, not the state).
+    expect(matched.isolated).toEqual([])
+    // A query that matches nothing is an empty result, not an isolation
+    // failure: it must not be turned into the fail-closed arm.
+    const none = service.queryWithIsolation({ q: 'no-such-plugin' })
+    expect(none.page.items).toEqual([])
+    expect(none.isolated).toEqual([])
+  })
+
+  it('fails closed when every matching entry violates the contract (no 200 + empty page)', async () => {
+    const service = await serviceWith([POISONED])
+    const outcome = ((): unknown => {
+      try {
+        return service.queryWithIsolation({})
+      } catch (cause) {
+        return cause
+      }
+    })()
+    expect(outcome).toBeInstanceOf(InvalidStoredCatalogError)
+    const error = outcome as InvalidStoredCatalogError
+    expect(error.isolated).toHaveLength(1)
+    expect(error.isolated[0]?.name).toBe('@huaanwork/poisoned')
+    // The convenience wrapper fails closed the same way (callers cannot get an
+    // empty page out of this state by using it).
+    expect(() => service.query({})).toThrow(InvalidStoredCatalogError)
   })
 })
 
