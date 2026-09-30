@@ -11,10 +11,13 @@ import {
   filterCatalogItems,
   filterInstallable,
   formatMarketSize,
+  IMMUTABLE_REMOVE_REASON,
+  immutableRemoveReason,
   installableLabel,
   installButtonState,
   MARKET_TAB_LABELS,
   MARKET_TABS,
+  parseImmutableBundles,
   RESTART_CANCELLED_NOTICE,
   shortSha256,
   type MarketInstallableItem,
@@ -168,4 +171,29 @@ test("RESTART_CANCELLED_NOTICE stays word-for-word equal to the host cancel noti
   const installed = source.match(/export const RESTART_CANCELLED_MESSAGES = \{[\s\S]*?installed: '([^']+)'/);
   assert.ok(installed, "plugins-host.ts 的 RESTART_CANCELLED_MESSAGES 中未找到 installed 取消文案字面量");
   assert.equal(installed[1], RESTART_CANCELLED_NOTICE);
+});
+
+// P26（M6 Task 6.10）：不可移除判定是纯函数。名单的唯一真相源是 host
+// （installations 应答的 `immutable` 字段，源头 plugins-host.ts 的 IMMUTABLE_BUNDLES），
+// 客户端只读不抄——因此这里同时钉「读应答字段」与「形状守卫」两件事。
+test("parseImmutableBundles reads the host payload and guards its shape (P26)", () => {
+  assert.deepEqual(parseImmutableBundles({ immutable: ["alpha", "beta"] }), ["alpha", "beta"]);
+  // 旧 wrapper 应答（无该字段）⇒ 空集合：不灰化、不假装知道（行为与修复前一致）。
+  assert.deepEqual(parseImmutableBundles({ bundles: ["alpha"] }), []);
+  // 形状守卫：非数组、非对象、非字符串条目一律剔除，不得把畸形应答当名单用。
+  assert.deepEqual(parseImmutableBundles({ immutable: "alpha" }), []);
+  assert.deepEqual(parseImmutableBundles({ immutable: [1, "alpha", null] }), ["alpha"]);
+  assert.deepEqual(parseImmutableBundles(null), []);
+  assert.deepEqual(parseImmutableBundles(undefined), []);
+});
+
+test("immutableRemoveReason explains why a carrier bundle cannot be removed (P26)", () => {
+  const reason = immutableRemoveReason(["alpha", "beta"], "beta");
+  assert.equal(reason, IMMUTABLE_REMOVE_REASON);
+  // 说明必须说真话：为何不可移除（随应用分发）且结论明确（不能移除）。
+  assert.match(reason ?? "", /随应用分发/);
+  assert.match(reason ?? "", /不能移除/);
+  // 不在 host 名单里的 bundle 返回 null ⇒ 移除按钮保持可用。
+  assert.equal(immutableRemoveReason(["alpha"], "beta"), null);
+  assert.equal(immutableRemoveReason([], "beta"), null);
 });

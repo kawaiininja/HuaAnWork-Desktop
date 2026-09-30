@@ -95,6 +95,49 @@ export interface MarketMutationResult {
 }
 
 /**
+ * GET /api/huaanwork-market/installations 应答（P26，M6 Task 6.10）：
+ * host profile 清单 + host 的权威不可移除集合。
+ */
+export interface MarketInstallationsView {
+  bundles: string[];
+  /**
+   * host 标注为不可移除的 bundle 集合（源头是 `plugins-host.ts` 的
+   * IMMUTABLE_BUNDLES：随应用/市场分发的 carrier）。旧 wrapper 无此字段。
+   */
+  immutable?: string[];
+}
+
+/**
+ * 不可移除集合的读取（P26，M6 Task 6.10）：只认 host installations 应答的
+ * `immutable` 字段——真相源是 `plugins-host.ts:42-48` 的 IMMUTABLE_BUNDLES，
+ * 客户端**不复制名单**（复制即第二真相源，host 增删一个 bundle 就漂移）。
+ *
+ * 形状守卫：非数组、非字符串条目一律剔除——畸形应答不得变成一张「名单」。
+ * 旧 wrapper 无该字段时回落空集合：移除按钮保持可用，host 拒绝时的失败信息
+ * 仍然诚实（与修复前行为一致）。
+ */
+export function parseImmutableBundles(payload: unknown): string[] {
+  const immutable = (payload as { immutable?: unknown } | null | undefined)?.immutable;
+  return Array.isArray(immutable) ? immutable.filter((name): name is string => typeof name === "string") : [];
+}
+
+/**
+ * 不可移除的说明文案（P26）：随应用分发的应用本体/市场载体不能被卸载。
+ * host 的 `plugin.remove` 对 IMMUTABLE_BUNDLES 恒拒绝（失败信息诚实但带英文
+ * 包名语境），按钮侧改用本条中文说明，用户不必点一次才知道点不动。
+ */
+export const IMMUTABLE_REMOVE_REASON = "随应用分发（应用本体或市场载体），不能移除";
+
+/**
+ * 移除控件的禁用理由（P26）：bundle 在 host 下发的不可移除集合里 ⇒ 返回说明
+ * 文案；否则 null（移除保持可用）。判定纯函数，名单参数即 `parseImmutableBundles`
+ * 的解析结果——客户端不持有自己的名单。
+ */
+export function immutableRemoveReason(immutableNames: readonly string[], name: string): string | null {
+  return immutableNames.includes(name) ? IMMUTABLE_REMOVE_REASON : null;
+}
+
+/**
  * 「重启被取消」的诚实告知（P28，M6 Task 5.3；spec §14 第 33 条口径，
  * 与宿主 `RESTART_CANCELLED_MESSAGES.installed` 同句——由 market.spec.ts 钉住）。
  *

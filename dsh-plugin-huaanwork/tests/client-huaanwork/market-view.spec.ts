@@ -1045,3 +1045,137 @@ describe("取消重启后的重启入口（M6 Task 5.3，P28 接线）", () => {
     expect(banner.textContent).toContain("手动退出");
   });
 });
+
+/**
+ * M6 Task 6.10（债务 P26）：IMMUTABLE bundle 的移除按钮灰化。
+ *
+ * 「已安装」与「本地安装」两个页签渲染的是同一份 host profile 清单，卸载也都走
+ * 同一条 `plugin.remove` RPC；而 host 的 IMMUTABLE_BUNDLES（plugins-host.ts:42-48）
+ * 对随应用/市场分发的 bundle（`@deepseek-ai/dsh-base`、`dsh-web-app`、
+ * `dsh-desktop-app`、`dsh-community-market`、`huaanwork-market`）恒拒绝——失败
+ * 信息诚实，但按钮本应灰化并说明原因。
+ *
+ * 名单**不得**在客户端复制（第二真相源会随 host 增删漂移）：不可移除信息随
+ * installations 应答的 `immutable` 字段下发，客户端只渲染 host 的判定。
+ */
+describe("IMMUTABLE bundle 的移除按钮灰化（M6 Task 6.10，P26）", () => {
+  /**
+   * brief/AGENTS.md 的名单把两个包写成 `dsh-web-app` / `dsh-desktop-app`，而
+   * profile 清单与 host 集合里的真实条目是带 scope 的 `@deepseek-ai/dsh-web-app`
+   * （app-boot `profile.ts:140` 的 web 模板）与 `@deepseek-ai/dsh-desktop-app`
+   * （plugins-host.ts:49-55）。此处按**真实应答形态**注入（测试输入，模拟 host），
+   * 不是被测代码的名单——客户端源码里出现这些名字由下面的源码扫描用例钉死。
+   */
+  const IMMUTABLE_NAMES = [
+    "@deepseek-ai/dsh-base",
+    "@deepseek-ai/dsh-web-app",
+    "@deepseek-ai/dsh-desktop-app",
+    "dsh-community-market",
+    "huaanwork-market",
+  ];
+  /** 源码扫描的禁用字面量：真实名 + brief 简写（硬编码者可能用任一写法）。 */
+  const FORBIDDEN_LITERALS = [...IMMUTABLE_NAMES, "dsh-web-app", "dsh-desktop-app"];
+  const USER_BUNDLE = "@huaanwork/sample";
+  const REASON_PATTERN = /随应用分发/;
+
+  /** 市场侧背景应答 + 带 `immutable` 字段的 installations 应答（P26 的下发通道）。 */
+  function immutableHandlers(bundles: string[], immutable: string[] = IMMUTABLE_NAMES) {
+    return {
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      installations: () => jsonResponse(200, { bundles, immutable }),
+    };
+  }
+
+  /** 按包名定位列表项内的移除控件（installed 与 local 两个页签列表同构）。 */
+  function removeButtonFor(view: HTMLDivElement, name: string): HTMLButtonElement {
+    const item = [...view.querySelectorAll(".market-item")].find(
+      (el) => el.querySelector(".recent-title")?.textContent === name,
+    );
+    if (item === undefined) throw new Error(`bundle item not found: ${name}`);
+    const button = item.querySelector("button");
+    if (button === null) throw new Error(`remove control not found: ${name}`);
+    return button as HTMLButtonElement;
+  }
+
+  /** 可访问说明：`title` 与 `aria-describedby` 指向文本的并集（两者任一可承载）。 */
+  function removeExplanation(view: HTMLDivElement, button: HTMLButtonElement): string {
+    const ids = (button.getAttribute("aria-describedby") ?? "").split(/\s+/u).filter((id) => id !== "");
+    const described = ids.map((id) => view.ownerDocument.getElementById(id)?.textContent ?? "").join(" ");
+    return `${button.getAttribute("title") ?? ""} ${described}`.trim();
+  }
+
+  async function openTab(label: "已安装" | "本地安装"): Promise<HTMLDivElement> {
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, label).click();
+    });
+    return view;
+  }
+
+  it.each(IMMUTABLE_NAMES)("disables the remove control for %s with an accessible explanation", async (name) => {
+    stubFetch(immutableHandlers([name]));
+
+    const view = await openTab("已安装");
+    const button = removeButtonFor(view, name);
+
+    // 灰化：按钮不可点，而不是点了必然失败。
+    expect(button.disabled).toBe(true);
+    // 说明必须可访问且说真话（为何不可移除：随应用分发的载体）。
+    const explanation = removeExplanation(view, button);
+    expect(explanation).toMatch(REASON_PATTERN);
+    expect(explanation).toContain("不能移除");
+  });
+
+  it("keeps remove enabled for a user-installed bundle", async () => {
+    stubFetch(immutableHandlers([...IMMUTABLE_NAMES, USER_BUNDLE]));
+
+    const view = await openTab("已安装");
+    const userButton = removeButtonFor(view, USER_BUNDLE);
+    expect(userButton.disabled).toBe(false);
+    expect(removeExplanation(view, userButton)).not.toMatch(REASON_PATTERN);
+    // 同一条列表里，hybrid 名单只灰化 host 标注的那些。
+    expect(removeButtonFor(view, IMMUTABLE_NAMES[0]!).disabled).toBe(true);
+  });
+
+  it("greys out the same bundles in the local tab (same list, same remove path)", async () => {
+    stubFetch(immutableHandlers([...IMMUTABLE_NAMES, USER_BUNDLE]));
+
+    const view = await openTab("本地安装");
+    for (const name of IMMUTABLE_NAMES) {
+      const button = removeButtonFor(view, name);
+      expect(button.disabled, name).toBe(true);
+      expect(removeExplanation(view, button), name).toContain("不能移除");
+    }
+    expect(removeButtonFor(view, USER_BUNDLE).disabled).toBe(false);
+  });
+
+  it("reads the immutable set from the host rather than duplicating it", async () => {
+    // ① host 标注的、客户端无从知晓的将来 carrier 同样灰化；
+    // ② host 未标注时不擅自套用任何内置名单（旧 wrapper 应答的诚实降级：
+    //    与修复前一致——按钮可点、host 拒绝时给诚实的失败信息）。
+    const futureCarrier = "@deepseek-ai/dsh-future-carrier";
+    stubFetch(immutableHandlers([futureCarrier, IMMUTABLE_NAMES[0]!], [futureCarrier]));
+
+    const view = await openTab("已安装");
+    expect(removeButtonFor(view, futureCarrier).disabled).toBe(true);
+    expect(removeButtonFor(view, IMMUTABLE_NAMES[0]!).disabled).toBe(false);
+  });
+
+  it("does not liter-copy the immutable names into the client sources", () => {
+    // 唯一真相源 = host 的 IMMUTABLE_BUNDLES（plugins-host.ts:42-48）；客户端把
+    // 整份名单抄进来即第二真相源，host 加一个 bundle 客户端就漂移。
+    // 只查引号紧邻名字的字面量：route 路径（`/api/...`）与注释里的提及不是名单。
+    for (const file of ["MarketView.tsx", "logic/market.ts"]) {
+      const source = readFileSync(resolve(import.meta.dirname, `../../src/client-huaanwork/${file}`), "utf8");
+      for (const name of FORBIDDEN_LITERALS) {
+        expect(source, `${file} 不得出现名单字面量 ${name}`).not.toContain(`"${name}"`);
+        expect(source, `${file} 不得出现名单字面量 ${name}`).not.toContain(`'${name}'`);
+        expect(source, `${file} 不得出现名单字面量 ${name}`).not.toContain(`\`${name}\``);
+      }
+    }
+    // 正向钉（防止上一条因「两边都没提」而空过）：渲染读的是应答字段。
+    const market = readFileSync(resolve(import.meta.dirname, "../../src/client-huaanwork/MarketView.tsx"), "utf8");
+    expect(market).toContain("immutable");
+  });
+});

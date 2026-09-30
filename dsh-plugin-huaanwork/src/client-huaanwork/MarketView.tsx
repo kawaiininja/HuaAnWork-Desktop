@@ -10,15 +10,18 @@ import {
   filterCatalogItems,
   filterInstallable,
   formatMarketSize,
+  immutableRemoveReason,
   installButtonState,
   installableLabel,
   MARKET_TAB_LABELS,
   MARKET_TABS,
+  parseImmutableBundles,
   RESTART_CANCELLED_NOTICE,
   restartPending,
   shortSha256,
   type MarketCatalogView,
   type MarketInstallableItem,
+  type MarketInstallationsView,
   type MarketLoadState,
   type MarketMutationResult,
   type MarketPanelPhase,
@@ -46,6 +49,10 @@ import MarketSourcePanel, { ErrorPanel } from "./MarketSourcePanel.tsx";
  * - 取消重启后的重启入口（M6 Task 5.3，债务 P28）：安装链取消重启 ⇒ 清单已写入而
  *   应用未重启，页面级给出「立即重启」（打既有表外 route，不新增 route）+
  *   spec §14 第 33 条诚实文案；动作可用性读 /state 的 `desktopActions.requestRestart`。
+ * - IMMUTABLE bundle 的移除灰化（M6 Task 6.10，债务 P26）：不可移除名单随
+ *   installations 应答下发（host 的 IMMUTABLE_BUNDLES 是唯一真相源，客户端不复制），
+ *   命中即禁用移除按钮并给出可访问说明；installed 与 local 两个页签同口径（同一份
+ *   清单、同一条 plugin.remove RPC）。
  */
 
 const ROUTE_STATE = "/api/huaanwork-market/state";
@@ -119,6 +126,12 @@ export default function MarketView() {
   const [installableLoad, setInstallableLoad] = useState<LoadState>("loading");
 
   const [bundles, setBundles] = useState<string[]>([]);
+  // P26（M6 Task 6.10）：host 的权威不可移除集合，来自 installations 应答的
+  // `immutable` 字段（源头 plugins-host.ts 的 IMMUTABLE_BUNDLES）。客户端不复制
+  // 名单；命中即灰化移除按钮并说明。plugin.add/remove 的应答不带该字段而集合是
+  // host 恒定量，故只在 installations 取数时更新，读失败时保留上一次的已知值
+  //（否则一次瞬时失败会把灰化按钮重新点亮）。
+  const [immutableBundles, setImmutableBundles] = useState<string[]>([]);
   // P27：区分「读取中 / 读失败 / 确实为空」，否则读失败会被呈现成
   // 「尚未安装任何插件」这句肯定式假话。
   const [installationsLoad, setInstallationsLoad] = useState<LoadState>("loading");
@@ -168,13 +181,14 @@ export default function MarketView() {
 
   const loadInstallations = useCallback(async () => {
     try {
-      const listed = await marketFetch<{ bundles?: string[] }>(ROUTE_INSTALLATIONS);
+      const listed = await marketFetch<MarketInstallationsView>(ROUTE_INSTALLATIONS);
       setBundles(Array.isArray(listed.bundles) ? listed.bundles : []);
+      setImmutableBundles(parseImmutableBundles(listed));
       setInstallationsLoad("ready");
     } catch {
       // installations 读失败不阻断整页（旁路独立性，§13）——但**不得**把「读不到」
       // 呈现成「确实没有」（P27）：置 error 态，由 describeInstalledEmptyMessage
-      // 给诚实文案，重进时自恢复。
+      // 给诚实文案，重进时自恢复。P26：不可移除集合保留上一次的已知值（host 恒定量）。
       setBundles([]);
       setInstallationsLoad("error");
     }
@@ -514,24 +528,38 @@ export default function MarketView() {
           <p className="panel-empty">{installedEmptyMessage}</p>
         ) : (
           <ul className="market-list">
-            {bundles.map((name) => (
-              <li key={name} className="market-item">
-                <span className="recent-title">{name}</span>
-                <button
-                  type="button"
-                  className="btn market-install"
-                  disabled={localBusy || anyExecuting}
-                  onClick={() => void removeBundle(name)}
-                >
-                  移除
-                </button>
-              </li>
-            ))}
+            {bundles.map((name, index) => {
+              // P26：host 标注不可移除的 carrier 灰化 + 说明（见 logic/market.ts 的
+              // immutableRemoveReason——名单来自 installations 应答，不在此复制）。
+              const reason = immutableRemoveReason(immutableBundles, name);
+              const reasonId = `market-installed-remove-reason-${index}`;
+              return (
+                <li key={name} className="market-item">
+                  <span className="recent-title">{name}</span>
+                  {reason !== null ? (
+                    <span className="recent-meta" id={reasonId}>
+                      {reason}
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="btn market-install"
+                    disabled={reason !== null || localBusy || anyExecuting}
+                    title={reason ?? undefined}
+                    aria-describedby={reason !== null ? reasonId : undefined}
+                    onClick={() => void removeBundle(name)}
+                  >
+                    移除
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )
       ) : tab === "local" ? (
         <LocalPanel
           bundles={bundles}
+          immutableBundles={immutableBundles}
           emptyMessage={installedEmptyMessage}
           localBusy={localBusy}
           executing={anyExecuting}
@@ -618,6 +646,7 @@ export default function MarketView() {
  */
 function LocalPanel({
   bundles,
+  immutableBundles,
   emptyMessage,
   localBusy,
   executing,
@@ -626,6 +655,8 @@ function LocalPanel({
   onRemove,
 }: {
   bundles: string[];
+  /** P26：host 的权威不可移除集合（与 installed 页签同一份），命中即灰化移除。 */
+  immutableBundles: readonly string[];
   /** P27：已安装列表的三态文案（null = 渲染列表），与 installed 页签同源。 */
   emptyMessage: string | null;
   localBusy: boolean;
@@ -670,19 +701,32 @@ function LocalPanel({
         <p className="panel-empty">{emptyMessage}</p>
       ) : (
         <ul className="market-list">
-          {bundles.map((name) => (
-            <li key={name} className="market-item">
-              <span className="recent-title">{name}</span>
-              <button
-                type="button"
-                className="btn market-install"
-                disabled={disabled}
-                onClick={() => onRemove(name)}
-              >
-                移除
-              </button>
-            </li>
-          ))}
+          {bundles.map((name, index) => {
+            // P26：与 installed 页签同口径——同一份 host 清单、同一条 plugin.remove
+            // RPC，host 拒绝移除的 carrier 在此同样灰化并说明。
+            const reason = immutableRemoveReason(immutableBundles, name);
+            const reasonId = `market-local-remove-reason-${index}`;
+            return (
+              <li key={name} className="market-item">
+                <span className="recent-title">{name}</span>
+                {reason !== null ? (
+                  <span className="recent-meta" id={reasonId}>
+                    {reason}
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  className="btn market-install"
+                  disabled={disabled || reason !== null}
+                  title={reason ?? undefined}
+                  aria-describedby={reason !== null ? reasonId : undefined}
+                  onClick={() => onRemove(name)}
+                >
+                  移除
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

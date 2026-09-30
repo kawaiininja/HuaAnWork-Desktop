@@ -13,6 +13,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { HUAANWORK_MARKET_ROUTES } from '../../src/huaanwork-host/market/index.ts'
 import { MARKET_ROUTE_PATHS, MARKET_ROUTE_LIST, registerMarketRoutes } from '../../src/huaanwork-host/market/routes.ts'
+import { IMMUTABLE_BUNDLES } from '../../src/huaanwork-host/plugins-host.ts'
 import {
   createMarketHttpClient,
   fetchVerifiedManifest,
@@ -319,13 +320,27 @@ describe('GET catalog / installable / installations', () => {
     })
   })
 
-  test('installations reuses listPlugins semantics (dsh.profile.bundles)', async () => {
+  test('installations reuses listPlugins semantics (dsh.profile.bundles) + the host immutable set (P26)', async () => {
     const profileDir = tempProfile()
     const { ctx, recorded } = fakeCtx()
     registerMarketRoutes(ctx, depsFor(profileDir, 'http://127.0.0.1:1'))
     const out = await callRoute(recorded, MARKET_ROUTE_PATHS.installations, getRequest())
     expect(out.status()).toBe(200)
-    expect(out.json()).toEqual({ bundles: ['@deepseek-ai/dsh-base'] })
+    const body = out.json() as { bundles: string[]; immutable: string[] }
+    expect(body.bundles).toEqual(['@deepseek-ai/dsh-base'])
+    // P26(M6 Task 6.10):客户端据 `immutable` 灰化移除按钮——随应用/市场分发的
+    // carrier 必须在列(名单真相源是 IMMUTABLE_BUNDLES,客户端不复制)。名字按
+    // profile 清单的真实形态(brief 简写的 dsh-web-app/dsh-desktop-app 实为带
+    // scope 的 @deepseek-ai/ 形态,见 app-boot profile.ts:140)。
+    expect(body.immutable).toEqual(expect.arrayContaining([
+      '@deepseek-ai/dsh-base',
+      '@deepseek-ai/dsh-web-app',
+      '@deepseek-ai/dsh-desktop-app',
+      'dsh-community-market',
+      'huaanwork-market',
+    ]))
+    // 下发的就是卸载写路径(plugin.remove)用的那个集合本身:不是第二份手抄名单。
+    expect(new Set(body.immutable)).toEqual(new Set(IMMUTABLE_BUNDLES))
   })
 
   test('installable marks installed packages from profile dependencies', async () => {

@@ -22,7 +22,7 @@ import { parseCatalogProviderPage } from 'dsh-community-market/contracts'
 import type { ConfirmedRestartRuntime } from '../../host-runtime-bridge.ts'
 import type { DesktopPnpm } from '../../pnpm.ts'
 import { isSameOriginLoopbackRequest } from '../loopback.ts'
-import { listPlugins, PluginCommandError, RESTART_CANCELLED_MESSAGES } from '../plugins-host.ts'
+import { IMMUTABLE_BUNDLES, listPlugins, PluginCommandError, RESTART_CANCELLED_MESSAGES } from '../plugins-host.ts'
 import { readJsonBody, RouteError } from '../routes.ts'
 import { readProfileDependencies } from './artifacts.ts'
 import {
@@ -211,8 +211,12 @@ async function handleInstallable(services: MarketRouteServices, res: ServerRespo
 }
 
 async function handleInstallations(services: MarketRouteServices, res: ServerResponse): Promise<void> {
-  // 复用 plugins-host 的 listPlugins 语义(M4 口径:bundles 读 dsh.profile.bundles)。
-  finishJson(res, 200, listPlugins(services.profileDir))
+  // 复用 plugins-host 的 listPlugins 语义(M4 口径:bundles 读 dsh.profile.bundles),
+  // 并带上 host 的权威不可移除集合(P26,M6 Task 6.10):客户端据此灰化移除按钮并
+  // 给出说明。名单**只有这一个真相源**(plugins-host.ts 的 IMMUTABLE_BUNDLES)——
+  // 下发全量集合而非过滤后的子集,判定留在客户端逐条做;旧客户端忽略该字段、
+  // 旧 wrapper 无此字段时各自保持既有行为。不新增 route(恒 7 条),只扩应答字段。
+  finishJson(res, 200, { ...listPlugins(services.profileDir), immutable: [...IMMUTABLE_BUNDLES] })
 }
 
 async function handlePreview(services: MarketRouteServices, req: IncomingMessage, res: ServerResponse): Promise<void> {
