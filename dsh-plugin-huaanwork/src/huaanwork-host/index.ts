@@ -11,7 +11,7 @@ import { startAutomationScheduler } from './automation-scheduler.ts'
 import { bindAutomationRuntime, type AutomationRuntime } from './automations-host.ts'
 import { registerKeepAwakeRoute } from './keep-awake-route.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
-import { sweepProjectLegacySessions } from './session-sweep.ts'
+import { sweepProjectLegacySessionsOncePerProcess } from './session-sweep.ts'
 import { restoreEnabledBundledSkills } from './skills-host.ts'
 import { createAgentsHost } from './agents-host.ts'
 import { setAgentsDirectory } from './sessions.ts'
@@ -62,11 +62,13 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   // 执行体与 collector 接线。调度 tick 走同一 enqueueAutomation,不直接调 executeRun。
   const runtime = ctx as unknown as AutomationRuntime
   bindAutomationRuntime(runtime, routeCtx)
-  // —— 启动存量清扫(G6,Task 6.12;旧 host.ts:922/936 同位置语义;裁定 D-M6-24)——
+  // —— 启动存量清扫(G6,Task 6.12;旧 host.ts:922/936 同位置语义;裁定 D-M6-24 / R-6.12-1)——
   // 在 apply() 内执行 ⇒ 每次 generation 启动(workspace.open 触发)都会跑,天然晚于
   // main.ts 的一次性迁移钩子:迁移搬进来的 legacy chat-auto 日志由同一次启动清掉。
-  // 两侧都幂等且廉价(无可删项即 no-op,不做全树遍历);清扫失败只记日志,不把启动
-  // 拖下水——存量垃圾的 IO 故障不该让 boot 失败。
+  // 两侧都幂等;清扫失败只记日志,不把启动拖下水——存量垃圾的 IO 故障不该让 boot 失败。
+  // 分工(R-6.12-1):chat-auto 清扫每代都跑(廉价:readdir + 前缀判据,不解压任何日志;
+  // D-M6-24 的迁移时序论证针对的正是它);项目存量清扫要解压会话日志读 cwd 判归属,
+  // 按旧 host.ts:936 的「进程启动只扫一次」语义用进程级门闩(实现与理由见 session-sweep.ts)。
   try {
     const sweptChatAuto = await sweepLegacyChatAutoSessions(join(config.dshHome, 'sessions'), runsDir(config.profileDir))
     if (sweptChatAuto > 0) {
@@ -84,13 +86,13 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     const registeredProjectRoots = (await listProjects(config.profileDir)).map((project) => project.root)
     // 中立根排除在 protectedRoots:registeredProjectRoots 可能是中立根的祖先目录(项目根注册在
     // profileDir 之上),此时 cwd 前缀比较会误命中中立根下的游离会话——规格 §1.3 要求它们永不清扫。
-    const sweptProjectLegacy = await sweepProjectLegacySessions(
+    const sweptProjectLegacy = await sweepProjectLegacySessionsOncePerProcess(
       join(config.dshHome, 'sessions'),
       registeredProjectRoots,
       referencedSessionIds,
       [neutralWorkspaceRoot(config.profileDir)],
     )
-    if (sweptProjectLegacy.removed > 0 || sweptProjectLegacy.skipped > 0) {
+    if (sweptProjectLegacy.ran && (sweptProjectLegacy.removed > 0 || sweptProjectLegacy.skipped > 0)) {
       routeCtx.logger(`[sessions] swept ${sweptProjectLegacy.removed} project legacy session logs, skipped ${sweptProjectLegacy.skipped}`)
     }
   } catch (cause) {

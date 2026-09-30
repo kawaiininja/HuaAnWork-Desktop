@@ -216,8 +216,9 @@ describe('legacy chat-auto sweep (G6)', () => {
     expect(await sweepLegacyChatAutoSessions(big.sessionsRoot, big.runsDir, bigFs.fs)).toBe(0)
 
     // 两跑 readdir 次数 = 顶层 sessions/ + 各非 legacy 顶层项下探一层 + runs 目录。
-    // 40 条会话与 2 条会话同值 ⇒ 不做全树遍历(会话目录一次都不进)。
-    expect(smallFs.readdirCalls()).toBe(6)
+    // 判据是「不随会话数增长」(40 条与 2 条同值),不钉精确数字:将来给清扫加一条
+    // probe readdir 不应假红;下界只防计数桩本身失效(恒 0)。
+    expect(smallFs.readdirCalls()).toBeGreaterThan(0)
     expect(bigFs.readdirCalls()).toBe(smallFs.readdirCalls())
     expect(await removeLegacyChatAutoSessionDirs(big.sessionsRoot)).toBe(0)
   })

@@ -15,8 +15,12 @@ import { LEGACY_CHAT_AUTO_SESSION_PREFIX } from './automation-session-ids.ts'
  * - `.runs.jsonl` 只删 `sessionId` 以 legacy 前缀开头的运行记录;**不可解析的行保留**
  *   (清扫绝不抹掉无法解析的历史),`huaanwork-auto-` 当前通道行原样保留;
  * - `huaanwork-chat-<digest>` 用户会话不在判据内(旧 AGENTS.md 不变式 9);
- * - 幂等:无可删项即 no-op;readdir 次数 = 顶层 + 各非 legacy 顶层项一层 + runs 目录,
- *   不随会话数增长(不做全树遍历)。
+ * - 幂等:无可删项即 no-op;dsh 原生三级布局(顶层 = cwd 目录)下 readdir 次数 =
+ *   顶层 + 各非 legacy 顶层项一层 + runs 目录,**不随会话数增长**(不做全树遍历)。
+ *   限定:历史平铺布局(会话目录直接摊在 sessions 根上)里每个非 legacy 顶层项各付
+ *   一次下探 readdir ⇒ 随顶层项数增长——旧实现的既有行为(非本次引入),见 Task 6.12
+ *   报告 §8;注意生产调用点每代都跑这一侧(裁定 R-6.12-1 第 1 条),故顶层项极多时
+ *   仍有每代一次全顶层枚举的成本。
  *
  * 定向改动(相对旧实现,与 session-sweep.ts 同原则):sessions 根与 runs 根由调用方
  * 显式传入——旧版都由 dshHome 拼出,而 Desktop 组合下会话在 `dshHome/sessions`、
@@ -64,6 +68,8 @@ export async function removeLegacyChatAutoSessionDirs(
     top.map(async (entry) => {
       const path = join(sessionsRoot, entry)
       if (entry.startsWith(LEGACY_CHAT_AUTO_SESSION_PREFIX)) {
+        // 与规格 §1.3 容错口径(「单个删除失败记 stderr 跳过」)的已知出入,逐字保留上游行为:
+        // rm 失败被静默吞掉,但 removed 仍自增 ⇒ 计数可能高报。
         await fs.rm(path, { recursive: true, force: true }).catch(() => undefined)
         removed += 1
         return
@@ -78,6 +84,7 @@ export async function removeLegacyChatAutoSessionDirs(
         children
           .filter((child) => child.startsWith(LEGACY_CHAT_AUTO_SESSION_PREFIX))
           .map(async (child) => {
+            // 同上:删除失败被吞掉但计数自增(逐字上游;与规格 §1.3 措辞的已知出入见上)。
             await fs.rm(join(path, child), { recursive: true, force: true }).catch(() => undefined)
             removed += 1
           }),
