@@ -94,6 +94,29 @@ export interface MarketMutationResult {
   message?: string;
 }
 
+/**
+ * 「重启被取消」的诚实告知（P28，M6 Task 5.3；spec §14 第 33 条口径，
+ * 与 `plugins-host.ts:163` 的取消应答同句）。
+ *
+ * 取消 ≠ 未发生：声明式清单已写入，下次启动照常生效。文案由**客户端持有**，
+ * 不照抄 route 应答的 message——表外 request-restart 的取消分支只回裸
+ * 「已取消重启」（债务 P3，Task 6.9 处置），照抄会让用户看到的话变旧。
+ */
+export const RESTART_CANCELLED_NOTICE = "已取消重启：插件已写入清单，下次启动时生效";
+
+/**
+ * 插件变更链的应答是否留下「重启仍待用户触发」的状态（P28，M6 Task 5.3）。
+ *
+ * M4/M5 的变更链（`plugins-host.ts:160-167` addPlugin、`:182-189` removePlugin）
+ * 只有两条出口：接受重启 ⇒ `restarting: true`，应用随即 relaunch（无需入口）；
+ * 取消 ⇒ 应答不带 `restarting` 而清单已写入 ⇒ 变更待生效。故 `restarting !== true`
+ * 即待生效——同一判定同时服务 execute 应答与表外 request-restart 应答
+ * （后者取消时同样回 `restarting: false`）。
+ */
+export function restartPending(result: Pick<MarketMutationResult, "restarting">): boolean {
+  return result.restarting !== true;
+}
+
 /** 列表展示名：displayName 缺省回落包名。 */
 export function installableLabel(item: Pick<MarketInstallableItem, "name" | "displayName">): string {
   const display = item.displayName?.trim();

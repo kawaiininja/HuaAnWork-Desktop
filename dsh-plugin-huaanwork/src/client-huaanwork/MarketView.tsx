@@ -14,6 +14,8 @@ import {
   installableLabel,
   MARKET_TAB_LABELS,
   MARKET_TABS,
+  RESTART_CANCELLED_NOTICE,
+  restartPending,
   shortSha256,
   type MarketCatalogView,
   type MarketInstallableItem,
@@ -41,6 +43,9 @@ import MarketSourcePanel, { ErrorPanel } from "./MarketSourcePanel.tsx";
  * - 「来源」页签（M6 Task 5.1，债务 N-1）：MarketSourcePanel 呈现只读来源地址 +
  *   provider 开关（disabled ↔ huaanwork-market）——写面走 M5 既有 desktop settings
  *   route（/api/desktop/settings、/api/desktop/market/select），不改 route 面。
+ * - 取消重启后的重启入口（M6 Task 5.3，债务 P28）：安装链取消重启 ⇒ 清单已写入而
+ *   应用未重启，页面级给出「立即重启」（打既有表外 route，不新增 route）+
+ *   spec §14 第 33 条诚实文案；动作可用性读 /state 的 `desktopActions.requestRestart`。
  */
 
 const ROUTE_STATE = "/api/huaanwork-market/state";
@@ -49,6 +54,9 @@ const ROUTE_INSTALLABLE = "/api/huaanwork-market/installable";
 const ROUTE_INSTALLATIONS = "/api/huaanwork-market/installations";
 const ROUTE_PREVIEW = "/api/huaanwork-market/operations/preview";
 const ROUTE_EXECUTE = "/api/huaanwork-market/operations/execute";
+// 表外既有 route 的第 7 条（market/routes.ts:59，P28 的后半）：取消重启后的唯一
+// 重启入口。MARKET_ROUTE_PATHS 恒 7 条——本 Task 只消费，不新增（Global Constraint 5）。
+const ROUTE_REQUEST_RESTART = "/api/huaanwork-market/desktop/request-restart";
 
 // 在飞安装轮询的放弃预算(修复轮 N-4)。/state 走 market route、本地安装走 host
 // RPC——两条通道,不能假定同生共死;市场面持续不可读时必须放弃观察并诚实告知,
@@ -132,6 +140,12 @@ export default function MarketView() {
 
   const [localConfirming, setLocalConfirming] = useState<string | null>(null);
   const [localBusy, setLocalBusy] = useState(false);
+
+  // 待生效变更（P28，M6 Task 5.3）：安装链取消重启 ⇒ 清单已写入而应用未重启。
+  // 此前该状态只能体现为一句通知，用户没有任何界面手段触发重启（只能自己退出
+  // 应用）；现在置位后由页面级条给出「立即重启」与 §14 第 33 条诚实文案。
+  const [pendingRestart, setPendingRestart] = useState(false);
+  const [restartRequesting, setRestartRequesting] = useState(false);
 
   const loadCatalogSide = useCallback(async () => {
     setCatalogLoad("loading");
@@ -258,13 +272,40 @@ export default function MarketView() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: target.name, version: target.version }),
       });
-      // 取消重启的 message 诚实告知（承 M4 confirmAdd 先例）；确认路径应用随即 relaunch。
-      notify(result.message ?? (result.restarting ? "安装完成，正在重启…" : "插件已安装"));
+      if (restartPending(result)) {
+        // 取消重启：清单已写入而应用未重启 ⇒ 置待生效态，由页面条给出「立即重启」
+        // 入口（诚实文案由客户端持有，不照抄 route 应答——P3 的口径问题不在此处补）。
+        setPendingRestart(true);
+      } else {
+        // 确认路径应用随即 relaunch。
+        notify(result.message ?? "安装完成，正在重启…");
+      }
       await Promise.all([loadCatalogSide(), loadInstallations()]);
     } catch (error) {
       setPreviewError(presentMarketError(error));
     } finally {
       setExecuting(false);
+    }
+  }
+
+  /**
+   * 「立即重启」（P28，M6 Task 5.3）：取消过一次重启的用户经**既有**表外 route
+   * `/api/huaanwork-market/desktop/request-restart` 再触发一次（不新增 route：
+   * MARKET_ROUTE_PATHS 恒 7 条）。取消 ⇒ 变更仍待生效：入口与诚实文案原样保留
+   * （route 的裸「已取消重启」不覆盖；P3 由 Task 6.9 处置）；接受 ⇒ 应用随即 relaunch。
+   */
+  async function requestRestartNow() {
+    if (restartRequesting) return;
+    setRestartRequesting(true);
+    setNotice(null);
+    try {
+      const result = await marketFetch<MarketMutationResult>(ROUTE_REQUEST_RESTART, { method: "POST" });
+      if (!restartPending(result)) notify("正在重启…");
+    } catch (error) {
+      const presentation = presentMarketError(error);
+      notify(`重启请求失败：${presentation.title}。${presentation.body}`, true);
+    } finally {
+      setRestartRequesting(false);
     }
   }
 
@@ -307,17 +348,21 @@ export default function MarketView() {
     setLocalConfirming(trimmed);
   }
 
-  /** 确认本地安装：M4 confirmAdd 同构——取消重启时 message 诚实告知，失败给 PLUGIN_APPLY_FAIL。 */
+  /** 确认本地安装：M4 confirmAdd 同构——取消重启时置待生效态（同一判定服务两条安装路径）。 */
   async function confirmLocalAdd() {
     if (!localConfirming || localBusy) return;
     const source = localConfirming;
     setLocalConfirming(null);
     setLocalBusy(true);
     try {
-      const listed = await rpcCall<{ bundles?: string[]; message?: string }>("plugin.add", { source });
+      const listed = await rpcCall<{ bundles?: string[]; message?: string; restarting?: boolean }>("plugin.add", { source });
       setBundles(Array.isArray(listed.bundles) ? listed.bundles : []);
       setInstallationsLoad("ready");
-      notify(listed.message ?? "插件已安装");
+      if (restartPending(listed)) {
+        setPendingRestart(true);
+      } else {
+        notify(listed.message ?? "插件已安装");
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       notify(`${PLUGIN_APPLY_FAIL}：${message}`, true);
@@ -337,6 +382,11 @@ export default function MarketView() {
   // P27：已安装列表的三态文案（null = 渲染列表）。installed 与 local 两个页签
   // 共用同一份，避免两处空态口径分叉。
   const installedEmptyMessage = describeInstalledEmptyMessage(installationsLoad, bundles.length);
+  // 待生效入口的动作可用性（P28 前半：消费 /state 的 `desktopActions.requestRestart`）。
+  // 该字段与表外 request-restart route 同属 huaanwork-market bundle：字段为 false、
+  // 或 state 读不到（provider 未启用时整组表外 route 未注册）时，按钮必然打到不存在
+  // 的 route ⇒ 只在 host 明示可用时呈现按钮，否则留诚实文案并指路手动重启。
+  const restartActionAvailable = state !== null && state.desktopActions.requestRestart;
 
   function panelBody(
     phase: MarketPanelPhase,
@@ -398,6 +448,24 @@ export default function MarketView() {
       {previewError ? (
         <div className="banner error" role="alert">
           {previewError.title}：{previewError.body}
+        </div>
+      ) : null}
+      {pendingRestart ? (
+        // 页面级（非页签级）：待生效的是 profile 清单，与当前看哪个页签无关。
+        <div className="banner market-pending" role="status">
+          <span className="market-pending-text">{RESTART_CANCELLED_NOTICE}</span>
+          {restartActionAvailable ? (
+            <button
+              type="button"
+              className="btn primary"
+              disabled={restartRequesting}
+              onClick={() => void requestRestartNow()}
+            >
+              {restartRequesting ? "重启中…" : "立即重启"}
+            </button>
+          ) : (
+            <span className="market-pending-hint">应用内重启当前不可用，请手动退出并重新打开应用。</span>
+          )}
         </div>
       ) : null}
 

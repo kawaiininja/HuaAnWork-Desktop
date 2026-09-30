@@ -3178,3 +3178,32 @@ button {
   font-size: 13px;
   font-weight: 600;
 }
+
+/* 待生效变更条（P28，M6 Task 5.3）：取消重启后清单已写入而应用未重启，此条给出
+   显式「立即重启」入口。形态 = info banner（DESIGN.md〈Components〉Banner：
+   info = accent-soft）内嵌一枚动作钮——置主区顶部、不打断布局，也不与
+   warn（琥珀，留给人批准）/ error（红）抢语义。 */
+.banner.market-pending {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.market-pending-text {
+  font-size: 13.5px;
+}
+
+.market-pending .btn {
+  flex: none;
+  margin-left: auto;
+  padding: 5px 14px;
+  font-size: 12.5px;
+}
+
+.market-pending-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}

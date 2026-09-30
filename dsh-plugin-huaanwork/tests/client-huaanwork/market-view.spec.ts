@@ -22,7 +22,7 @@ vi.mock("../../src/client-huaanwork/Settings.tsx", () => ({
   PLUGIN_CONFIRM: "确认安装该插件？",
 }));
 
-import { pickDirectoryDetailed } from "../../src/client-huaanwork/api.ts";
+import { pickDirectoryDetailed, rpcCall } from "../../src/client-huaanwork/api.ts";
 import MarketView from "../../src/client-huaanwork/MarketView.tsx";
 
 const ROUTES = {
@@ -31,6 +31,9 @@ const ROUTES = {
   installable: "/api/huaanwork-market/installable",
   installations: "/api/huaanwork-market/installations",
   preview: "/api/huaanwork-market/operations/preview",
+  execute: "/api/huaanwork-market/operations/execute",
+  // M6 Task 5.3（P28 接线）：表外既有 route 的第 7 条——「立即重启」打这里，不新增 route。
+  requestRestart: "/api/huaanwork-market/desktop/request-restart",
   // M6 Task 5.1：provider 开关走 M5 既有的 Desktop settings route（非新增 route）。
   settings: "/api/desktop/settings",
   marketSelect: "/api/desktop/market/select",
@@ -803,5 +806,241 @@ describe("本地安装的目录选择（D11：darwin 走原生 picker，自由�
     const fallbackDialog = localDialog(view);
     expect(fallbackDialog).not.toBeNull();
     expect(fallbackDialog!.textContent).toContain("/tmp/beta");
+  });
+});
+
+/**
+ * M6 Task 5.3（债务 P28）：取消重启后的重启入口。
+ *
+ * 接线前 `/state` 的 `desktopActions.requestRestart` 与表外
+ * `/api/huaanwork-market/desktop/request-restart` 都是客户端死面——用户在重启确认框
+ * 点「取消」后，界面没有任何手段再触发重启，只能自己退出应用重开。四条口径：
+ * ① 有变更待生效 ⇒ 出现「立即重启」；② 无待生效 ⇒ 不出现；
+ * ③ 文案走 spec §14 第 33 条（取消 ≠ 未生效，下次启动照常生效）；
+ * ④ 点击打**既有**表外 route（MARKET_ROUTE_PATHS 恒 7 条，不新增 route）。
+ */
+describe("取消重启后的重启入口（M6 Task 5.3，P28 接线）", () => {
+  /** 表外既有 route 的字面路径（routes.ts:59；断言不引用被测常量，避免自证）。 */
+  const REQUEST_RESTART_PATH = "/api/huaanwork-market/desktop/request-restart";
+  /** addPlugin 取消分支的诚实应答（plugins-host.ts:163）。 */
+  const CANCEL_MESSAGE = "已取消重启：插件已写入清单，下次启动时生效";
+
+  const ALPHA_ITEM = {
+    id: "alpha@1.0.0",
+    name: "alpha",
+    version: "1.0.0",
+    sha256: "a".repeat(64),
+    size: 42,
+    installed: false,
+  };
+
+  /** 市场侧点击链的背景应答；execute 与其余 route 由各测试注入。 */
+  function installHandlers(
+    execute: () => Response,
+    extra: Partial<Record<keyof typeof ROUTES, () => Response>> = {},
+  ) {
+    return {
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      installable: () => jsonResponse(200, { items: [ALPHA_ITEM] }),
+      preview: () =>
+        jsonResponse(200, {
+          name: "alpha",
+          version: "1.0.0",
+          sha256: ALPHA_ITEM.sha256,
+          size: ALPHA_ITEM.size,
+          tarballUrl: `${MARKET_ORIGIN}/alpha-1.0.0.tgz`,
+        }),
+      execute,
+      ...extra,
+    };
+  }
+
+  /** 「可安装」页签 → 预览确认 → execute 的完整点击链（取消重启发生在 execute 应答里）。 */
+  async function installAlpha(view: HTMLDivElement): Promise<void> {
+    await act(async () => {
+      tabButton(view, "可安装").click();
+    });
+    await act(async () => {
+      buttonByText(view, "安装").click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="安装确认"]') as HTMLDivElement;
+    await act(async () => {
+      buttonByText(dialog, "安装").click();
+    });
+  }
+
+  function pendingBanner(view: HTMLElement): HTMLElement {
+    const banner = view.querySelector(".market-pending");
+    if (banner === null) throw new Error("待生效变更条未出现");
+    return banner as HTMLElement;
+  }
+
+  function restartButton(view: HTMLElement): HTMLButtonElement | undefined {
+    return [...view.querySelectorAll("button")].find((item) => item.textContent === "立即重启") as
+      | HTMLButtonElement
+      | undefined;
+  }
+
+  /**
+   * 表外 market route 表（Global Constraint 5：恒 7 条）逐条读出。
+   *
+   * 直接 import `huaanwork-host/market/routes.ts` 在此 jsdom 环境下不可用：它会
+   * 连带加载 `dsh-community-market/contracts`，其 schema 经 `new URL(..., import.meta.url)`
+   * 读取，vite 的 `/@fs` 前缀会让该路径落空（实测 ENOENT）⇒ 读源码字面量。
+   * 运行时枚举本身由 node 环境的 `tests/huaanwork-host/market-routes.spec.ts` 钉住。
+   */
+  function marketRoutePaths(): string[] {
+    const source = readFileSync(resolve(import.meta.dirname, "../../src/huaanwork-host/market/routes.ts"), "utf8");
+    const literal = source.match(/export const MARKET_ROUTE_PATHS = \{([\s\S]*?)\} as const/u);
+    if (literal === null) throw new Error("MARKET_ROUTE_PATHS 字面量未找到");
+    return [...literal[1]!.matchAll(/:\s*'([^']+)'/gu)].map((match) => match[1]!);
+  }
+
+  it("offers an explicit restart action once a change is pending", async () => {
+    stubFetch(
+      installHandlers(() =>
+        jsonResponse(200, { bundles: ["alpha"], restarting: false, message: CANCEL_MESSAGE }),
+      ),
+    );
+
+    const view = await mountMarket();
+    await installAlpha(view);
+
+    // 取消重启 ⇒ 清单已写入、应用未重启：界面必须给出可点的重启入口。
+    const banner = pendingBanner(view);
+    const button = restartButton(banner);
+    expect(button).toBeDefined();
+    expect(button!.disabled).toBe(false);
+  });
+
+  it("does not offer restart when nothing is pending", async () => {
+    const log = stubFetch(installHandlers(() => jsonResponse(200, { bundles: ["alpha"], restarting: true })));
+
+    const view = await mountMarket();
+    // 尚未安装任何东西：没有待生效变更 ⇒ 入口不存在。
+    expect(view.querySelector(".market-pending")).toBeNull();
+    expect(restartButton(view)).toBeUndefined();
+
+    await installAlpha(view);
+
+    // 接受重启的安装（应用随即 relaunch）不留待生效 ⇒ 仍无入口。
+    expect(log.calls(ROUTES.execute)).toBe(1);
+    expect(view.querySelector(".market-pending")).toBeNull();
+    expect(restartButton(view)).toBeUndefined();
+  });
+
+  it("states honestly that a cancelled restart still takes effect next launch", async () => {
+    stubFetch(
+      installHandlers(() =>
+        jsonResponse(200, { bundles: ["alpha"], restarting: false, message: CANCEL_MESSAGE }),
+      ),
+    );
+
+    const view = await mountMarket();
+    await installAlpha(view);
+
+    const text = pendingBanner(view).textContent ?? "";
+    // spec §14 第 33 条口径（与 plugins-host.ts:163 同句）：取消 ≠ 未生效。
+    expect(text).toContain("已取消重启");
+    expect(text).toContain("已写入清单，下次启动时生效");
+    expect(text).not.toContain("未生效");
+    expect(text).not.toContain("已回滚");
+  });
+
+  it("calls the existing off-table route rather than a new one", async () => {
+    const confirmed = { accepted: false };
+    const log = stubFetch(
+      installHandlers(
+        () => jsonResponse(200, { bundles: ["alpha"], restarting: false, message: CANCEL_MESSAGE }),
+        {
+          // 表外 route 的取消分支只回裸「已取消重启」（P3，Task 6.9 处置）。
+          requestRestart: () =>
+            confirmed.accepted
+              ? jsonResponse(200, { restarting: true })
+              : jsonResponse(200, { restarting: false, message: "已取消重启" }),
+        },
+      ),
+    );
+
+    const view = await mountMarket();
+    await installAlpha(view);
+
+    // 第一次点击：用户又取消了 ⇒ 变更仍在待生效，入口与诚实文案原样保留
+    //（route 的裸 message 不得把用户看到的话变旧）。
+    await act(async () => {
+      restartButton(pendingBanner(view))!.click();
+    });
+    expect(pendingBanner(view).textContent).toContain("已写入清单，下次启动时生效");
+    expect(restartButton(view)).toBeDefined();
+
+    // 第二次点击：接受 ⇒ controller 随即 relaunch（jsdom 里只剩中性告知）。
+    confirmed.accepted = true;
+    await act(async () => {
+      restartButton(pendingBanner(view))!.click();
+    });
+    expect(view.textContent).toContain("正在重启");
+
+    // 只打既有的第 7 条表外 route，且不新增 route（Global Constraint 5）。
+    const calls = log.requests.filter((request) => request.path === REQUEST_RESTART_PATH);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((request) => request.init?.method === "POST")).toBe(true);
+    expect(marketRoutePaths()).toHaveLength(7);
+    expect(marketRoutePaths()).toContain(REQUEST_RESTART_PATH);
+    // 与「来源」页签的 provider 切换流（/api/desktop/restart）互不串线。
+    expect(log.calls(ROUTES.restart)).toBe(0);
+  });
+
+  it("offers the same affordance for a cancelled local install", async () => {
+    vi.mocked(pickDirectoryDetailed).mockResolvedValue({ available: true, path: "/tmp/alpha.tgz" });
+    vi.mocked(rpcCall).mockResolvedValue({ bundles: ["alpha"], message: CANCEL_MESSAGE });
+    const log = stubFetch({ state: () => jsonResponse(200, marketStateBody()), ...marketSideHandlers() });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "本地安装").click();
+    });
+    await act(async () => {
+      buttonByText(view, "浏览目录…").click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="本地安装确认"]') as HTMLDivElement;
+    await act(async () => {
+      buttonByText(dialog, "安装").click();
+    });
+
+    // 同一条判定（addPlugin 的取消应答）同时服务本地路径：入口与诚实文案一致。
+    expect(log.calls(ROUTES.installations)).toBeGreaterThan(0);
+    expect(pendingBanner(view).textContent).toContain("已写入清单，下次启动时生效");
+    expect(restartButton(view)).toBeDefined();
+  });
+
+  it("does not offer a dead button when the host does not expose the restart action", async () => {
+    // provider 未启用 ⇒ 整组表外 route（含 request-restart）未注册、/state 404：
+    // desktopActions.requestRestart 不可得 ⇒ 只给诚实文案 + 手动重启指路，不给死按钮。
+    vi.mocked(pickDirectoryDetailed).mockResolvedValue({ available: true, path: "/tmp/alpha.tgz" });
+    vi.mocked(rpcCall).mockResolvedValue({ bundles: ["alpha"], message: CANCEL_MESSAGE });
+    stubFetch({
+      state: () => nonJsonResponse(404),
+      catalog: () => nonJsonResponse(404),
+      installable: () => nonJsonResponse(404),
+      installations: () => nonJsonResponse(404),
+    });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "本地安装").click();
+    });
+    await act(async () => {
+      buttonByText(view, "浏览目录…").click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="本地安装确认"]') as HTMLDivElement;
+    await act(async () => {
+      buttonByText(dialog, "安装").click();
+    });
+
+    const banner = pendingBanner(view);
+    expect(banner.textContent).toContain("已写入清单，下次启动时生效");
+    expect(restartButton(banner)).toBeUndefined();
+    expect(banner.textContent).toContain("手动退出");
   });
 });
