@@ -1215,6 +1215,8 @@
     "package:dir:huaanwork": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork package:dir",
     "dist:mac:huaanwork": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac",
     "dist:mac-smoke:huaanwork": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac-smoke",
+    "dist:win:huaanwork": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:win",
+    "dist:win-portable:huaanwork": "yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:win-portable",
     "aa:check": "node scripts/prepare-agents-anywhere-release.mjs --check",
     "aa:prepare-release": "node scripts/prepare-agents-anywhere-release.mjs"
   }

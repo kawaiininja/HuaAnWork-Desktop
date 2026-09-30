@@ -1006,6 +1006,24 @@ describe('published package surface', () => {
     expect(manifest.devDependencies?.['builder-util']).toBe('26.15.3')
   })
 
+  it('exposes the same distribution entry points as the upstream editions', () => {
+    const scripts = workspaceManifest.scripts ?? {}
+    for (const name of [
+      'dev:huaanwork', 'package:dir:huaanwork',
+      'dist:mac:huaanwork', 'dist:mac-smoke:huaanwork',
+      'dist:win:huaanwork', 'dist:win-portable:huaanwork',
+    ]) {
+      expect(scripts[name], name).toBeTypeOf('string')
+    }
+    // 与 stable/beta 同构:每条都先跑 aa:prepare-release 再构建 community-market
+    for (const name of ['dist:win:huaanwork', 'dist:win-portable:huaanwork']) {
+      const script = scripts[name] as string
+      expect(script.startsWith('yarn aa:prepare-release && ')).toBe(true)
+      expect(script).toContain('yarn workspace dsh-community-market build && ')
+      expect(script).toContain('yarn workspace dsh-plugin-huaanwork dist:win')
+    }
+  })
+
   it('runs platform package gates before reusing native packaging outputs', () => {
     const windowsJob = ciWorkflow.slice(
       ciWorkflow.indexOf('  desktop-windows:'),
