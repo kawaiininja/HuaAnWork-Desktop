@@ -304,7 +304,19 @@ describe('two-step offline-signed release flow', () => {
   it('a re-prepare regenerates the pending manifest (fresh issuedAt/notAfter, same next revision)', async () => {
     await publishTgz(market.baseUrl, 'test-admin-token')
     const first = await prepare()
-    const second = await prepare()
+    // Precondition constructed, not raced: `issuedAt` is millisecond-granular
+    // (manifest-prepare.ts), so two prepares landing in the same millisecond
+    // produce byte-identical pending manifests and the stale signature below
+    // would verify (observed once, Task 6.10 root check). Re-prepare through
+    // the module's `now` seam one second after the first envelope, so the two
+    // pendings are guaranteed to differ.
+    const second = await preparePendingManifest({
+      store: market.store,
+      catalog: new CatalogService(market.store),
+      config: market.config,
+      now: new Date(Date.parse(envelopeOf(first).issuedAt) + 1000),
+      artifactSize: async fileName => (await market.artifacts.stat(fileName))?.size ?? null,
+    })
     expect(envelopeOf(second).revision).toBe(envelopeOf(first).revision)
     expect(Date.parse(envelopeOf(second).issuedAt)).toBeGreaterThanOrEqual(Date.parse(envelopeOf(first).issuedAt))
 

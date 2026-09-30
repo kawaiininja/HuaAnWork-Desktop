@@ -161,7 +161,7 @@ export function commitMarketArtifact(tmpPath: string, artifactPath: string): voi
  * 本地安装(Task 6.2,裁定 R-2)落的就是**同一个**命名与布局函数 ⇒ 本地制品一落位
  * 就与市场制品同受「当前 profile 且所有 checkpoint slot 均无引用才可删」的保留/GC
  * 判据(spec §14 第 42/48/50 条)。市场路径(install.ts 的 downloadAndStageArtifact)
- * **逐 chunk 流式**写同一个暂存名、走同一个提交函数(Task 6.3 收敛:落盘协议自此人
+ * **逐 chunk 流式**写同一个暂存名、走同一个提交函数(Task 6.3 收敛:落盘协议自此
  * 一份实现,不再有逐行双生);它传入的制品已在本目录内,addPlugin 侧直通不再重新落盘
  * (修复轮 1:否则二次落盘还会把发布侧门的宽版本面喂给本地命名边界)。
  *

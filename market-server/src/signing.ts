@@ -345,7 +345,8 @@ export function checkEnvelope(envelope: unknown, context: VerificationContext): 
 }
 
 // ---------------------------------------------------------------------------
-// Three-input two-slot rotation verification
+// KeyId-authoritative rotation verification (ruling R-1; the record's
+// declared slot is metadata, not a gate)
 // ---------------------------------------------------------------------------
 
 function findSlotByKeyId(slots: readonly KeySlotConfig[], keyId: string): KeySlotConfig | undefined {

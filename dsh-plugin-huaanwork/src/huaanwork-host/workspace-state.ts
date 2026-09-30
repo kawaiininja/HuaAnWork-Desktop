@@ -86,7 +86,8 @@ export function readPendingWorkspaceRoot(
       root,
       message: `huaanwork-workspace: dropped stale pendingRoot ${root}: written at ${writtenAtText} `
         + `(${String(Math.round(ageMs / 60_000))} minutes ago), over the ${String(PENDING_ROOT_TTL_MS / 60_000)}-minute TTL `
-        + `(the restart confirmation was never answered — the process was killed while pending); composition uses the neutral root`,
+        + `(the restart confirmation was never answered (the process died while pending), or it was accepted `
+        + `and composition followed more than the TTL later (machine suspend / delayed relaunch)); composition uses the neutral root`,
     })
     return null
   }

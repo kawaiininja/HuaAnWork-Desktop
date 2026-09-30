@@ -10,8 +10,8 @@
  *              `issuedAt`/`notAfter` with TTL ≤ 7 days) + the provider-page
  *              catalog payload. Stored in the pending slot — NOT active.
  *   INTAKE   — verify an uploaded DETACHED signature record against the
- *              STORED pending manifest with the configured public key slot
- *              (three-input two-slot verdict from signing.ts, envelope
+ *              STORED pending manifest (keyId-authoritative verdict from
+ *              signing.ts — declared slot is metadata, ruling R-1 — envelope
  *              negatives included). Only a fully valid verdict ACTIVATES:
  *              the manifest + signature become the served pair and the
  *              persisted max revision advances. Fail-closed otherwise — a

@@ -292,9 +292,12 @@ export function extractPackageManifestFromFile(path: string): Promise<Record<str
       chunks.push(chunk)
     })
     source.on('error', cause => settle(cause as Error))
-    // With maxOutputLength set, zlib itself errors ERR_BUFFER_TOO_LARGE once
-    // the decompressed total crosses the ceiling; either way the honest
-    // fail-closed TarballError is the same.
+    // zlib IGNORES maxOutputLength for a streaming Transform (measured by
+    // Task 6.3: createGunzip({ maxOutputLength }) passes every decompressed
+    // byte through). The manual counter in the 'data' handler above is what
+    // enforces MAX_TAR_DECOMPRESSED_BYTES on this path; this handler only maps
+    // genuine gunzip failures (bad stream / CRC) to the same honest
+    // fail-closed TarballError.
     gunzip.on('error', cause => settle(mapGunzipError(cause)))
     gunzip.on('end', () => settle(null, Buffer.concat(chunks)))
     source.pipe(gunzip)

@@ -195,7 +195,7 @@ describe('envelope anti-replay field check', () => {
   })
 })
 
-describe('three-input two-slot rotation verification', () => {
+describe('keyId-authoritative rotation verification (ruling R-1)', () => {
   it('accepts either non-retired slot during the rotation overlap', () => {
     const current = generateKeyPair()
     const previous = generateKeyPair()

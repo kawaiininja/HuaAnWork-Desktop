@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   RUNS_LIMIT,
   bindTaskSession,
@@ -36,6 +36,7 @@ function makeHome(): string {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   while (homes.length > 0) rmSync(homes.pop()!, { recursive: true, force: true })
 })
 
@@ -64,15 +65,26 @@ describe('projects 读路径(旧 projects.test.ts 用例)', () => {
     mkdirSync(rootA, { recursive: true })
     mkdirSync(rootB, { recursive: true })
 
+    // Precondition constructed, not raced (controller ruling R-6.1-1, lifted in
+    // the Phase 6 final-review wave): createProject stamps `createdAt: Date.now()`
+    // and listProjects' sort has no tiebreak, so two creates in the same
+    // millisecond leave the [b, a] order to file order. Only Date is faked, so
+    // fs promises and the rest of vitest keep the real clock.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_000)
     const a = await createProject(home, { root: rootA })
+    vi.setSystemTime(2_000)
     const b = await createProject(home, { name: '显式名', root: rootB })
     expect(a.name).toBe('repo-a')
     expect(b.name).toBe('显式名')
+    // The precondition itself, pinned: b provably post-dates a.
+    expect([a.createdAt, b.createdAt]).toEqual([1_000, 2_000])
 
     // 初始按 createdAt 倒序(b 后建在前)。
     expect((await listProjects(home)).map((p) => p.id)).toEqual([b.id, a.id])
 
     // touch 后 a 排到最前。
+    vi.setSystemTime(3_000)
     await touchProject(home, a.id)
     expect((await listProjects(home)).map((p) => p.id)).toEqual([a.id, b.id])
 

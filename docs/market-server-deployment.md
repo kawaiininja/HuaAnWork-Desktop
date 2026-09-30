@@ -216,9 +216,10 @@ node --experimental-strip-types src/index.ts
 
 **生效点（单一真相源）**：有效上限来自配置，两处消费**同一值**——发布时
 （第 N+1 条即 422 `catalog-full`，`admin/routes.ts`）与 prepare 纵深（条目数
-> N 即 422 `catalog-too-large`，`manifest-prepare.ts`）。代码中的数值 `200`
+> N 即 422 `catalog-too-large`，`manifest-prepare.ts`）。**目录规模上限域内**的数值 `200`
 > 只在 `MAX_MANIFEST_ENTRIES` 定义一次（契约默认 / 天花板），config 的默认值
-> 与启动校验的硬上限都取自它。
+> 与启动校验的硬上限都取自它（`catalog/service.ts` 的 `MAX_PAGE_ITEMS = 200` 是
+> 单请求页大小上限，与本上限无关）。
 
 **超过 200 个插件需要什么（未实现，延后）**：分页清单 + **多页签名的信任
 模型**——须先解「一个签名信封如何覆盖多页」（页间绑定、页序、缺页检测）这一
@@ -303,9 +304,11 @@ node --experimental-strip-types src/index.ts
 | 400 | `decompressed-tarball-too-large` | 解压后 > 64 MiB（gunzip 炸弹防护） |
 | 400 | `invalid-entry-contract` | PATCH/publish 的条目违约上游 provider-page 契约（响应点名 JSON path） |
 | 400 | `invalid-entry-patch` / `invalid-json` | 请求体形状错误 |
+| 400 | `invalid-delete-request` | `DELETE /v1/admin/artifact` 缺必填查询参数 `file`（存储制品文件名，须以 `.tgz` 结尾） |
 | 401 | `unauthorized` / `admin-disabled` | bearer token 缺失或错误；token 未配置时整个 admin 面禁用（`admin-disabled`，启动时打印配置指引）。**`admin-disabled` 只出现在 JSON API 与启动日志，不出现在未认证的 `/admin` 页面**（P7） |
 | 403 | `host-not-allowed` | `Host` 不在 `MARKET_SERVER_ALLOWED_HOSTS`（默认 = `MARKET_SERVER_PUBLIC_ORIGIN` 的 host；检查反向代理是否改写了 Host，或本机探针是否漏带 Host 头） |
 | 404 | `pending-manifest-not-found` / `entry-not-found` / `not-found` | 目标不存在 |
+| 404 | `artifact-not-found` | `DELETE /v1/admin/artifact` 的目标不在盘：名字不安全、未存储、或与并发删除者竞争后已被删；盘上制品名以 `.tgz` 结尾 |
 | 405 | `method-not-allowed` | 方法不符 |
 | 409 | `already-published` | 同 name@version 已发布（**盘上制品不受影响**，评审 D2）；先 unpublish 再重发 |
 | 409 | `manifest-activation-conflict` | 并发双 intake，败者诚实 409（非 500） |
@@ -477,7 +480,7 @@ admin bearer token 是本服务**唯一不受离线签名保护的机密**：cat
 没有被钉过新钥，无法验证新钥签名的清单（`unknown-key`）——这是钉扎机制的固有
 边界，故仍推荐「app 发版先走」。
 
-### 轮换程序（本机实现下两步之间目录持续可用）
+### 轮换程序（本实现下两步之间目录持续可用）
 
 选「app 发版先走 + 在 `retiredAt` 之前完成服务端换钥」而不是相反：发版先走的
 第 2、3 步之间服务端清单仍由 K1 签名，已升级客户端照样验证通过（上文实测表
