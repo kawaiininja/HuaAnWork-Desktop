@@ -38,7 +38,8 @@ function cwdWithinAnyRoot(cwd: string | undefined, roots: readonly string[]): bo
  * 逐文件删除前的保留判定(规格 §1.3 排除清单,计划评审 P1-1/P3-2):
  * - 被 task.sessionId 引用的会话;
  * - 自动化运行会话(huaanwork-auto- 前缀;旧 huaanwork-chat-auto- 前缀兜底——正常已被
- *   sweepLegacyChatAutoSessions 清掉,这里是清扫失败残留的保险);
+ *   启动清扫 automation-sweep.ts 的 sweepLegacyChatAutoSessions 清掉,这里是清扫失败
+ *   残留的保险);
  * - 非 topLevel 日志(origin=subagent / 有 parentSession 的子代理日志,与 session.list 口径一致:
  *   UI 从不展示它们,父日志仍含工具调用摘要,不随清扫误删)。
  */
