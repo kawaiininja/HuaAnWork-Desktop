@@ -4,7 +4,8 @@
  * round3 R12/M4' 裁定:market-server 只发 provider-page(严格 schema,信封/sidecar
  * 旁挂);`CatalogSnapshot` 的 **Host provenance 由 wrapper 自铸**——wrapper 是
  * 本源消费端,属 Host 侧角色。单源裁定(Task 0.5 Step 4):sourceRecordId/providerId
- * 固定为 canonical 内网源身份;多源 keyring/UI 延后 M6(不改造清单⑤)。
+ * 固定为 canonical 内网源身份;多源 keyring/UI 为 M6 裁定不实现的升级路径
+ * (见 `docs/market-upgrade-paths.md`;不改造清单⑤)。
  *
  * 契约负载不自造方言:入参必须已过上游 `parseCatalogProviderPage` 自校(routes 层
  * 在验签后调用);本函数只做形态映射 + provenance 铸造。
@@ -12,7 +13,7 @@
 
 import type { CatalogSnapshot } from 'dsh-community-market/contracts'
 
-/** canonical 内网源身份(单源裁定;多源延后 M6)。 */
+/** canonical 内网源身份(单源裁定;多源为 M6 裁定不实现的升级路径,见 `docs/market-upgrade-paths.md`)。 */
 export const HUAANWORK_MARKET_SOURCE_RECORD_ID = 'huaanwork-intranet' as const
 export const HUAANWORK_MARKET_PROVIDER_ID = 'huaanwork-market' as const
 export const HUAANWORK_MARKET_ADAPTER_ID = 'huaanwork-market-wrapper' as const

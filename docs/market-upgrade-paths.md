@@ -114,7 +114,7 @@
 - 或需要按源隔离信任（每源独立公钥、独立轮换、独立吊销），例如两个部门各运营一个源。
 
 M5 已裁定单一 canonical 内网源（`docs/market-server-deployment.md`〈信任锚形态〉、
-`config.ts` 注释「两槽钉扎……多源 keyring 延后 M6」）：今天 keyring 只有一份
+`config.ts` 注释「两槽钉扎……多源 keyring 为 M6 裁定不实现的升级路径」）：今天 keyring 只有一份
 （单源、两槽）。
 
 ### 2.2 设计骨架

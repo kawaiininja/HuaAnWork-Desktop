@@ -92,7 +92,7 @@ export interface PreviousMarketVerificationSlot {
   readonly retiredAt: string
 }
 
-/** 两槽钉扎:当前公钥 + 上一把(带 retiredAt)。多源 keyring 延后 M6(不改造清单⑤)。 */
+/** 两槽钉扎:当前公钥 + 上一把(带 retiredAt)。多源 keyring 为 M6 裁定不实现的升级路径(见 `docs/market-upgrade-paths.md`;不改造清单⑤)。 */
 export interface MarketVerificationPins {
   readonly current?: PinnedMarketVerificationKey
   readonly previous?: PreviousMarketVerificationSlot
