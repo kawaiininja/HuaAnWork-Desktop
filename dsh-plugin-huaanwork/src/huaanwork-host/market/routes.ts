@@ -22,7 +22,7 @@ import { parseCatalogProviderPage } from 'dsh-community-market/contracts'
 import type { ConfirmedRestartRuntime } from '../../host-runtime-bridge.ts'
 import type { DesktopPnpm } from '../../pnpm.ts'
 import { isSameOriginLoopbackRequest } from '../loopback.ts'
-import { listPlugins, PluginCommandError } from '../plugins-host.ts'
+import { listPlugins, PluginCommandError, RESTART_CANCELLED_MESSAGES } from '../plugins-host.ts'
 import { readJsonBody, RouteError } from '../routes.ts'
 import { readProfileDependencies } from './artifacts.ts'
 import {
@@ -274,7 +274,9 @@ async function handleExecute(services: MarketRouteServices, req: IncomingMessage
 async function handleRequestRestart(services: MarketRouteServices, res: ServerResponse): Promise<void> {
   const confirmed = await services.runtime.requestConfirmedRestart()
   if (!confirmed) {
-    finishJson(res, 200, { restarting: false, message: '已取消重启' })
+    // P3(Task 6.9):取消 ≠ 未生效(spec §14 第 33 条)。本路由无安装/卸载语境,
+    // 故回共享常量里的中立句(「变更已保存」);字面量只活在 RESTART_CANCELLED_MESSAGES。
+    finishJson(res, 200, { restarting: false, message: RESTART_CANCELLED_MESSAGES.pending })
     return
   }
   finishJson(res, 200, { restarting: true })

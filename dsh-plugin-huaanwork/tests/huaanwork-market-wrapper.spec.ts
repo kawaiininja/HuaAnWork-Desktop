@@ -11,8 +11,6 @@ import {
   PINS_AT_RELEASE,
   parsePinnedMarketKey,
   resolveMarketOrigin,
-  usableMarketVerificationKeys,
-  type MarketVerificationPins,
 } from '../src/huaanwork-host/market/config.ts'
 import {
   apply,
@@ -75,29 +73,17 @@ describe('huaanwork-market pinned verification keys', () => {
     }
   })
 
-  it('resolves usable keys across the two-slot rotation window', () => {
-    const current = { publicKeyHex: THROWAWAY_TEST_KEY_HEX }
-    const previous = {
-      key: { publicKeyHex: '472d9a7adf9dd19cc20f187551e94d73e1b380dd07c07c47c04f6d17f5dfc3b6' },
-      retiredAt: '2026-10-01T00:00:00Z',
-    }
-    const now = new Date('2026-09-26T00:00:00Z')
-    expect(usableMarketVerificationKeys({}, now)).toEqual([])
-    expect(usableMarketVerificationKeys({ current }, now)).toEqual([current])
-    expect(usableMarketVerificationKeys({ current, previous }, now)).toEqual([current, previous.key])
-    // 槽 2 过 retiredAt 即拒(round4 C3)。
-    const afterRetired = new Date('2026-10-02T00:00:00Z')
-    expect(usableMarketVerificationKeys({ current, previous }, afterRetired)).toEqual([current])
-    // 槽 2 缺/坏 retiredAt = 配置事故,fail-closed 抛错,不静默降级。
-    const pinsWithoutRetiredAt: MarketVerificationPins = {
-      current,
-      previous: { key: previous.key } as unknown as NonNullable<MarketVerificationPins['previous']>,
-    }
-    expect(() => usableMarketVerificationKeys(pinsWithoutRetiredAt, now)).toThrow(HuaanworkMarketConfigError)
-    expect(() => usableMarketVerificationKeys({
-      current,
-      previous: { key: previous.key, retiredAt: 'not-a-date' },
-    }, now)).toThrow(/retiredAt/u)
+  /**
+   * P13(Task 6.9):槽 2 `retiredAt` 判定只允许有一个实现——`verify.ts` 的
+   * `marketKeySlotsFromPins`(Task 6.1 起 keyId 权威,槽号只是元数据)。config.ts
+   * 的 `usableMarketVerificationKeys` 是其重复实现(且生产零消费),已删除;
+   * 该判定的行为面由 market-verify.spec.ts 的向量回放与旋转窗用例钉住。
+   */
+  it('P13: there is exactly one implementation of the slot retirement rule', async () => {
+    const configExports = (await import('../src/huaanwork-host/market/config.ts')) as unknown as Record<string, unknown>
+    const verifyExports = (await import('../src/huaanwork-host/market/verify.ts')) as unknown as Record<string, unknown>
+    expect('usableMarketVerificationKeys' in configExports).toBe(false)
+    expect(typeof verifyExports.marketKeySlotsFromPins).toBe('function')
   })
 })
 

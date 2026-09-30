@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { gzipSync } from 'node:zlib'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   DesktopProfileCheckpoint,
   PROFILE_CHECKPOINT_USER_DATA_DIR_ENV,
@@ -881,6 +881,49 @@ describe('artifact dir mode (review D7)', () => {
     chmodSync(dir, 0o755)
     ensureMarketArtifactsDir(profileDir)
     expect(statSync(dir).mode & 0o777).toBe(0o700)
+  })
+})
+
+describe('revision state staging name (P16)', () => {
+  /**
+   * P16(Task 6.9):固定暂存名 `${statePath}.tmp` 下,共享同一 profileDir 的两个 app
+   * 实例会互相覆盖对方的暂存文件。协议改为 `<statePath>.tmp-<pid>-<8hex>`(与
+   * Task 6.3 的制品暂存同款):pid 区分实例,8 位随机 hex 让同 pid 的多次提交也
+   * 各有其名。时钟冻结——名字不得来自时间(同刻两个实例会撞名)。
+   */
+  test('P16: two concurrent state writers never share a staging name (frozen clock)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-27T12:00:00Z'))
+    try {
+      const module = (await import('../../src/huaanwork-host/market/catalog-client.ts')) as unknown as Record<string, unknown>
+      const protocol = module.revisionStateTempPath as ((statePath: string) => string) | undefined
+      expect(protocol, 'catalog-client must export the one staging-name protocol').toBeTypeOf('function')
+      if (protocol === undefined) throw new Error('unreachable: asserted above')
+
+      const profileDir = tempProfile()
+      const statePath = join(profileDir, '.market-artifacts', 'state.json')
+      const first = protocol(statePath)
+      const second = protocol(statePath)
+      expect(first).toMatch(/^.*state\.json\.tmp-\d+-[0-9a-f]{8}$/u)
+      expect(first).toContain(`.tmp-${String(process.pid)}-`)
+      expect(second).not.toBe(first)
+
+      // 两个写者并发提交(同进程 = 同 pid 的最坏形态:pid 分不开时靠随机后缀分开):
+      // 都成功、互不覆盖,且暂存名不留残余(提交是同步 write+rename)。
+      const storeA = createFileRevisionStore(profileDir, () => {})
+      const storeB = createFileRevisionStore(profileDir, () => {})
+      const originA = 'http://a.intranet.example:8787'
+      const originB = 'http://b.intranet.example:8787'
+      await Promise.all([
+        Promise.resolve().then(() => storeA.saveMaxRevision(originA, 5)),
+        Promise.resolve().then(() => storeB.saveMaxRevision(originB, 7)),
+      ])
+      expect(storeA.loadMaxRevision(originA)).toBe(5)
+      expect(storeB.loadMaxRevision(originB)).toBe(7)
+      expect(readdirSync(join(profileDir, '.market-artifacts')).filter(entry => entry.includes('.tmp'))).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

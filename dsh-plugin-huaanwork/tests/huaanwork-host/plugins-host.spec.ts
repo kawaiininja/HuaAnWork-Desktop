@@ -555,6 +555,29 @@ describe('plugin add/remove', () => {
       message: 'could not read a non-empty installed bundle list; returning the previous list',
     })
   })
+
+  /**
+   * P3(Task 6.9):安装、卸载与表外 restart 路由三处取消分支共用**同一个导出
+   * 文案常量**(spec §14 第 33 条:取消 ≠ 未生效)。字面量只允许活在常量定义一处,
+   * 各取消分支按名引用——路由侧原先的裸文案回归由 market-routes.spec 钉住。
+   */
+  test('P3: every cancel branch references the shared exported copy constant', async () => {
+    const module = (await import('../../src/huaanwork-host/plugins-host.ts')) as unknown as Record<string, unknown>
+    const shared = module.RESTART_CANCELLED_MESSAGES as Record<string, string> | undefined
+    expect(shared?.installed).toBe('已取消重启：插件已写入清单，下次启动时生效')
+    expect(shared?.removed).toBe('已取消重启：插件已从清单移除，下次启动时不再加载')
+    expect(shared?.pending).toContain('下次启动时生效')
+    for (const message of Object.values(shared ?? {})) {
+      expect(message).not.toContain('未生效')
+      expect(message).not.toContain('已回滚')
+    }
+
+    const source = readFileSync(resolve(import.meta.dirname, '../../src/huaanwork-host/plugins-host.ts'), 'utf8')
+    // 取消分支按名引用常量,不再内联字面量(`message: '已取消重启…'` 形态)。
+    expect(source).toContain('RESTART_CANCELLED_MESSAGES.installed')
+    expect(source).toContain('RESTART_CANCELLED_MESSAGES.removed')
+    expect(source).not.toMatch(/message: '已取消重启/u)
+  })
 })
 
 // ---------------------------------------------------------------------------

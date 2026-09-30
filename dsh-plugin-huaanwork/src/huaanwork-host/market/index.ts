@@ -35,7 +35,6 @@ export {
   DEFAULT_MARKET_VERIFICATION_PINS,
   PINS_AT_RELEASE,
   assertMarketVerificationReady,
-  usableMarketVerificationKeys,
   parsePinnedMarketKey,
   type MarketVerificationPins,
   type PinnedMarketVerificationKey,

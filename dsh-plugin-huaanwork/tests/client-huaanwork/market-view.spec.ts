@@ -954,11 +954,12 @@ describe("取消重启后的重启入口（M6 Task 5.3，P28 接线）", () => {
       installHandlers(
         () => jsonResponse(200, { bundles: ["alpha"], restarting: false, message: CANCEL_MESSAGE }),
         {
-          // 表外 route 的取消分支只回裸「已取消重启」（P3，Task 6.9 处置）。
+          // 表外 route 的取消分支（P3 修复后）回的是无增/删语境的中立句——
+          // 它不带安装语境，不得覆盖本横幅的「插件已写入清单」文案。
           requestRestart: () =>
             confirmed.accepted
               ? jsonResponse(200, { restarting: true })
-              : jsonResponse(200, { restarting: false, message: "已取消重启" }),
+              : jsonResponse(200, { restarting: false, message: "已取消重启：变更已保存，下次启动时生效" }),
         },
       ),
     );

@@ -274,7 +274,8 @@ export default function MarketView() {
       });
       if (restartPending(result)) {
         // 取消重启：清单已写入而应用未重启 ⇒ 置待生效态，由页面条给出「立即重启」
-        // 入口（诚实文案由客户端持有，不照抄 route 应答——P3 的口径问题不在此处补）。
+        // 入口（诚实文案由客户端持有：route 的取消句是无增/删语境的中立句，见
+        // logic/market.ts 的 RESTART_CANCELLED_NOTICE）。
         setPendingRestart(true);
       } else {
         // 确认路径应用随即 relaunch。
@@ -292,7 +293,8 @@ export default function MarketView() {
    * 「立即重启」（P28，M6 Task 5.3）：取消过一次重启的用户经**既有**表外 route
    * `/api/huaanwork-market/desktop/request-restart` 再触发一次（不新增 route：
    * MARKET_ROUTE_PATHS 恒 7 条）。取消 ⇒ 变更仍待生效：入口与诚实文案原样保留
-   * （route 的裸「已取消重启」不覆盖；P3 由 Task 6.9 处置）；接受 ⇒ 应用随即 relaunch。
+   * （P3 修复后 route 回的是无增/删语境的中立句「变更已保存」，不带安装语境，
+   * 不覆盖本横幅的文案）；接受 ⇒ 应用随即 relaunch。
    */
   async function requestRestartNow() {
     if (restartRequesting) return;

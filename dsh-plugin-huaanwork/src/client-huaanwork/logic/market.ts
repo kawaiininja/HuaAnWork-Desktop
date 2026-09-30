@@ -96,11 +96,13 @@ export interface MarketMutationResult {
 
 /**
  * 「重启被取消」的诚实告知（P28，M6 Task 5.3；spec §14 第 33 条口径，
- * 与 `plugins-host.ts:163` 的取消应答同句）。
+ * 与宿主 `RESTART_CANCELLED_MESSAGES.installed` 同句——由 market.spec.ts 钉住）。
  *
  * 取消 ≠ 未发生：声明式清单已写入，下次启动照常生效。文案由**客户端持有**，
- * 不照抄 route 应答的 message——表外 request-restart 的取消分支只回裸
- * 「已取消重启」（债务 P3，Task 6.9 处置），照抄会让用户看到的话变旧。
+ * 不照抄 route 应答的 message：表外 request-restart 的取消分支（P3 修复后）回的是
+ * **无增/删语境**的中立句（「变更已保存」），而本横幅的语境恒是**安装**
+ * （pendingRestart 只由两条安装路径置位），照抄中立句会丢掉用户需要知道的
+ * 「插件」这一语境。
  */
 export const RESTART_CANCELLED_NOTICE = "已取消重启：插件已写入清单，下次启动时生效";
 

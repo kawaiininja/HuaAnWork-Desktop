@@ -142,32 +142,6 @@ export function parsePinnedMarketKey(key: PinnedMarketVerificationKey, label: st
 }
 
 /**
- * 三输入两槽判定中的「当前可用公钥」解析(签名 + 槽位 + 槽 2 retiredAt):
- * current 恒可用(已配置前提下);previous 仅在 retiredAt 之前可用。
- */
-export function usableMarketVerificationKeys(
-  pins: MarketVerificationPins,
-  now: Date,
-): PinnedMarketVerificationKey[] {
-  const keys: PinnedMarketVerificationKey[] = []
-  if (pins.current !== undefined) {
-    keys.push(parsePinnedMarketKey(pins.current, 'current verification key'))
-  }
-  if (pins.previous !== undefined) {
-    const retiredAtMs = Date.parse(pins.previous.retiredAt)
-    if (Number.isNaN(retiredAtMs)) {
-      throw new HuaanworkMarketConfigError(
-        `invalid previous verification slot: retiredAt ${JSON.stringify(pins.previous.retiredAt)} is not an ISO-8601 timestamp`,
-      )
-    }
-    if (retiredAtMs > now.getTime()) {
-      keys.push(parsePinnedMarketKey(pins.previous.key, 'previous verification key'))
-    }
-  }
-  return keys
-}
-
-/**
  * fail-closed 验签就绪 gate(Task 5 verify.ts 在验签前恒调本函数):
  * 未钉当前公钥 ⇒ 抛具名错误,market 验签永远拒绝——不存在「无公钥放行」路径。
  */

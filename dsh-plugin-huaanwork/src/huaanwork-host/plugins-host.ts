@@ -54,6 +54,27 @@ export const IMMUTABLE_BUNDLES: ReadonlySet<string> = new Set([
   HUAANWORK_MARKET_BUNDLE_NAME,
 ])
 
+/**
+ * 取消重启的诚实告知——**共享文案常量**(Task 6.9 P3;spec §14 第 33 条:
+ * 取消 ≠ 未生效)。声明式清单已落盘,下次启动照常生效/不再加载。
+ *
+ * 安装(addPlugin)、卸载(removePlugin)与表外 restart 路由
+ * (`market/routes.ts` 的 request-restart)三处取消分支按名引用本对象,字面量
+ * 只允许活在这一处:此前路由回裸「已取消重启」,与两处插件措辞漂移。
+ */
+export const RESTART_CANCELLED_MESSAGES = {
+  /** 插件安装取消:制品已写进 profile 的声明式清单。 */
+  installed: '已取消重启：插件已写入清单，下次启动时生效',
+  /** 插件卸载取消:已从声明式清单移除。 */
+  removed: '已取消重启：插件已从清单移除，下次启动时不再加载',
+  /**
+   * 表外 restart 路由取消:该路由没有安装/卸载语境(待生效的变更可能是增也可能
+   * 是删),故取增删皆准的中立陈述「变更已保存」——不写「已写入清单」(卸载时
+   * 事实相反),也不写「未生效」。
+   */
+  pending: '已取消重启：变更已保存，下次启动时生效',
+} as const
+
 export function listPlugins(storageRoot: string): { bundles: string[] } {
   return { bundles: readBundleList(storageRoot) }
 }
@@ -180,7 +201,7 @@ export async function addPlugin(
   if (!await routeCtx.requestRestart()) {
     return {
       bundles: [...before],
-      message: '已取消重启：插件已写入清单，下次启动时生效',
+      message: RESTART_CANCELLED_MESSAGES.installed,
     }
   }
   const listed = bundlesAfterAdd(routeCtx, before, staged.packageName)
@@ -380,7 +401,7 @@ export async function removePlugin(routeCtx: PluginMutationContext, name: string
   if (!await routeCtx.requestRestart()) {
     return {
       bundles: [...before],
-      message: '已取消重启：插件已从清单移除，下次启动时不再加载',
+      message: RESTART_CANCELLED_MESSAGES.removed,
     }
   }
   const listed = bundlesAfterRemove(routeCtx, before, name)

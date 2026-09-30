@@ -6,7 +6,11 @@
  * 不存在「无公钥放行」路径;三负例(篡改清单/缺签名/错公钥)。
  */
 import { describe, expect, test } from 'vitest'
-import { PINS_AT_RELEASE, type MarketVerificationPins } from '../../src/huaanwork-host/market/config.ts'
+import {
+  HuaanworkMarketConfigError,
+  PINS_AT_RELEASE,
+  type MarketVerificationPins,
+} from '../../src/huaanwork-host/market/config.ts'
 import {
   canonicalJson,
   checkEnvelope,
@@ -74,6 +78,38 @@ describe('wrapper verify mirrors market-server semantics across all shared vecto
         expect(actual?.publicKeyHex).toBe(expected.publicKeyHex)
       }
     }
+  })
+})
+
+/**
+ * P13(Task 6.9):`config.ts` 的 `usableMarketVerificationKeys`(槽 2 `retiredAt`
+ * 判定的第二份实现,生产零消费)已删除,`marketKeySlotsFromPins` 成为唯一真相源。
+ * 其原有用例的覆盖转移如下(逐条):
+ * - 「空钉扎 ⇒ 无可用钥」→ 本文件 `empty pins (PINS_AT_RELEASE default) always
+ *   rejects`(fail-closed gate)与 wrapper spec 的 `ships no placeholder key`;
+ * - 「current 恒可用」/「previous 在 retiredAt 前可用」/「过期即不可用」→ 上方
+ *   向量回放 + 旋转窗三例(`accepts a K1-signed manifest …`(slot 2 可用)、
+ *   `still rejects a manifest whose declared key has passed its retiredAt`);
+ * - 「retiredAt 缺失/坏值 ⇒ 具名配置错误」在删除前**只**由旧函数覆盖 ⇒ 现挂在
+ *   唯一真相源上(下方两条断言),判定输入的透传也一并钉住。
+ */
+describe('marketKeySlotsFromPins is the single source of the slot-2 retirement rule (P13)', () => {
+  const sample = vectors.find(vector => vector.name === 'valid-current-slot')!
+  const pins = pinsFromVectorSlots(sample.slots)
+
+  test('carries the previous slot with its retiredAt (the judgment input, not a second verdict)', () => {
+    const slots = marketKeySlotsFromPins(pins)
+    expect(slots).toHaveLength(2)
+    expect(slots.find(slot => slot.slot === 2)?.retiredAt).toBe(pins.previous!.retiredAt)
+  })
+
+  test('a missing or malformed previous retiredAt is a named configuration incident (fail-closed)', () => {
+    const current = { publicKeyHex: pins.current!.publicKeyHex }
+    const previousKey = pins.previous!.key
+    expect(() => marketKeySlotsFromPins({ current, previous: { key: previousKey } as never }))
+      .toThrow(HuaanworkMarketConfigError)
+    expect(() => marketKeySlotsFromPins({ current, previous: { key: previousKey, retiredAt: 'not-a-date' } }))
+      .toThrow(/retiredAt/u)
   })
 })
 

@@ -118,9 +118,11 @@ export function marketArtifactPath(profileDir: string, name: string, version: st
 /**
  * 暂存名协议(唯一实现):`<artifactPath>.tmp-<pid>`。
  *
- * 带 pid 是 P16 的一半(另一半是 `state.json` 的固定名 `.tmp`,归 Task 6.9):同
- * profile 的多个进程各有可辨的暂存名(单进程内同包并发安装由 execute 路由的单飞
- * 互斥挡住),崩溃残留也能看出归属。
+ * 带 pid 是 P16 的一半;另一半(revision 状态暂存名,Task 6.9 落为
+ * `<statePath>.tmp-<pid>-<8hex>`,见 catalog-client.ts 的 revisionStateTempPath)
+ * 与本品同因:`profileDir` 被并列实例共享时,固定名会互相覆盖。同 profile 的多个
+ * 进程各有可辨的暂存名(单进程内同包并发安装由 execute 路由的单飞互斥挡住),
+ * 崩溃残留也能看出归属。
  */
 export function marketArtifactTempPath(artifactPath: string): string {
   return `${artifactPath}.tmp-${String(process.pid)}`

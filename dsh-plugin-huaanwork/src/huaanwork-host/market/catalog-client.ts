@@ -18,6 +18,7 @@
 
 import { get as httpGet, type IncomingMessage } from 'node:http'
 import { get as httpsGet } from 'node:https'
+import { randomBytes } from 'node:crypto'
 import { renameSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { MarketVerificationPins } from './config.ts'
@@ -222,6 +223,23 @@ export interface MarketRevisionStore {
 
 const REVISION_STATE_VERSION = 1
 
+/**
+ * revision 状态暂存名协议(唯一实现,Task 6.9 P16):`<statePath>.tmp-<pid>-<8hex>`。
+ *
+ * 固定名 `${statePath}.tmp` 下,共享同一 profileDir 的两个 app 实例会互相覆盖
+ * 对方的暂存文件(install.ts 一侧的制品暂存已带 pid,Task 6.2/6.3;本处补齐
+ * 另一半):pid 区分实例,8 位随机 hex 让同一 pid 的多次提交也各有其名——制品侧
+ * 的重复落盘是「同 sha 等价重写」,只带 pid 就够;状态文件每次内容都不同,加随机
+ * 后缀才稳。
+ *
+ * 该名字只被本模块写入并被紧随其后的 `renameSync` 消费:制品孤儿清扫只认
+ * `.tgz`(sweepOrphanMarketArtifacts),不会扫到它;改名的窗口极短,崩溃残留
+ * 不会遮蔽或冒充状态文件。
+ */
+export function revisionStateTempPath(statePath: string): string {
+  return `${statePath}.tmp-${String(process.pid)}-${randomBytes(4).toString('hex')}`
+}
+
 /** 文件实现:`<profileDir>/.market-artifacts/state.json`(0600,原子写)。 */
 export function createFileRevisionStore(profileDir: string, logger: (message: string) => void): MarketRevisionStore {
   const statePath = join(profileDir, '.market-artifacts', 'state.json')
@@ -259,7 +277,8 @@ export function createFileRevisionStore(profileDir: string, logger: (message: st
       // D7:catalog 读先于安装是生产正常时序(用户先浏览再安装),revision
       // 落盘路径必须走同一 0700 归位,不得另开无 mode 的建目录岔路。
       ensureMarketArtifactsDir(profileDir)
-      const tmp = `${statePath}.tmp`
+      // P16(Task 6.9):暂存名带 pid + 随机后缀,共享 profileDir 的并列实例不互相覆盖。
+      const tmp = revisionStateTempPath(statePath)
       writeFileSync(tmp, `${JSON.stringify(state, undefined, 2)}\n`, { mode: 0o600 })
       renameSync(tmp, statePath)
     },

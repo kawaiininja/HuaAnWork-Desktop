@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { HUAANWORK_MARKET_ROUTES } from '../../src/huaanwork-host/market/index.ts'
@@ -696,6 +696,30 @@ describe('POST desktop/request-restart', () => {
     const no = await callRoute(ctxNo.recorded, MARKET_ROUTE_PATHS.requestRestart, request({}))
     expect(no.status()).toBe(200)
     expect(no.json().restarting).toBe(false)
-    expect(no.json().message).toMatch(/已取消重启/u)
+    // §14 第 33 条:取消 ≠ 未生效——变更已保存,下次启动照常生效(不再回裸「已取消重启」)。
+    expect(no.json().message).toContain('已取消重启')
+    expect(no.json().message).toContain('下次启动时生效')
+    expect(no.json().message).not.toContain('未生效')
+  })
+
+  /**
+   * P3(Task 6.9):独立 restart 路由无安装/卸载语境(待生效变更可能是增也可能是删),
+   * 故取增删皆准的中立句(「变更已保存」);但它必须与 plugins-host 的两处取消分支
+   * 引用**同一个**导出常量——路由源码内不再有裸字面量,应答的「已取消重启」前缀
+   * 只能来自共享常量(本文件只扫 routes.ts;plugins-host.ts 侧由其自测钉住)。
+   */
+  test('P3: the cancel copy is the shared exported constant, not a bare「已取消重启」', async () => {
+    const module = (await import('../../src/huaanwork-host/plugins-host.ts')) as unknown as Record<string, unknown>
+    const shared = module.RESTART_CANCELLED_MESSAGES as Record<string, string> | undefined
+    expect(shared?.pending).toBe('已取消重启：变更已保存，下次启动时生效')
+
+    const { ctx, recorded } = fakeCtx({ desktopRuntime: { requestConfirmedRestart: async () => false } })
+    registerMarketRoutes(ctx, depsFor('/tmp/nope', 'http://127.0.0.1:1'))
+    const out = await callRoute(recorded, MARKET_ROUTE_PATHS.requestRestart, request({}))
+    expect(out.json().message).toBe(shared?.pending)
+
+    const routesSource = readFileSync(resolve(import.meta.dirname, '../../src/huaanwork-host/market/routes.ts'), 'utf8')
+    expect(routesSource).toContain('RESTART_CANCELLED_MESSAGES')
+    expect(routesSource).not.toContain('已取消重启')
   })
 })
