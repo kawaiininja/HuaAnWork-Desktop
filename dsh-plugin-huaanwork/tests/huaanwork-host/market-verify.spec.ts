@@ -8,8 +8,11 @@
 import { describe, expect, test } from 'vitest'
 import { PINS_AT_RELEASE, type MarketVerificationPins } from '../../src/huaanwork-host/market/config.ts'
 import {
+  canonicalJson,
   checkEnvelope,
   marketKeySlotsFromPins,
+  publicKeyFromHex,
+  verifyCanonical,
   verifyMarketManifest,
   verifyWithKeySlots,
   type KeySlotConfig,
@@ -175,5 +178,46 @@ describe('key rotation has an overlap window (R-1)', () => {
       .toEqual({ ok: false, reason: 'revision-regression' })
     expect(verifyMarketManifest(manifest, sigByK1Slot1, pinsAfterRelease, { ...context, lastSeenRevision: manifest.envelope.revision }))
       .toEqual({ ok: true, slot: 2 })
+  })
+})
+
+/**
+ * P9/P10 镜像证明(market-server Task 6.5):两侧语义镜像不变 ——
+ *
+ * - P9:`publicKeyFromHex` 对畸形 hex 返回 `null`,**绝不抛**(旧实现按
+ *   `Buffer.from(hex,'hex')` 的解码长度判定,畸形串会抛);`verifyCanonical`
+ *   对畸形钥答 `false`。
+ * - P10:`not-yet-valid` 有 30s 时钟偏移宽限(具名常量 `CLOCK_SKEW_GRACE_MS`,
+ *   与 `market-server/src/signing.ts` 同名同值;runbook
+ *   `docs/market-server-deployment.md` 引用该名并写明 NTP 前置条件)。
+ */
+describe('wrapper mirrors the P9/P10 hardening (market-server Task 6.5)', () => {
+  const sample = (): Vector => vectors.find(vector => vector.name === 'valid-current-slot')!
+
+  test('publicKeyFromHex returns null for malformed hex instead of throwing', () => {
+    for (const hex of ['', 'zz', '00'.repeat(31), '00'.repeat(33), `${'00'.repeat(32)}zz`]) {
+      expect(publicKeyFromHex(hex), hex).toBeNull()
+    }
+    expect(publicKeyFromHex(fixture.keys.slot1.publicKeyHex)?.type).toBe('public')
+  })
+
+  test('verifyCanonical answers false for a malformed key, never throws', () => {
+    const vector = sample()
+    const signature = signManifestForTest(vector.manifest, fixture.keys.slot1.privateKeyPem, 1)
+    expect(verifyCanonical(canonicalJson(vector.manifest), signature.signature, 'zz')).toBe(false)
+    expect(verifyCanonical(canonicalJson(vector.manifest), signature.signature, fixture.keys.slot1.publicKeyHex)).toBe(true)
+  })
+
+  test('names the grace constant so the runbook can cite it', async () => {
+    const exports = (await import('../../src/huaanwork-host/market/verify.ts')) as unknown as Record<string, unknown>
+    expect(exports.CLOCK_SKEW_GRACE_MS).toBe(30_000)
+  })
+
+  test('accepts a not-yet-valid manifest inside the grace window, rejects one outside it', () => {
+    const vector = sample()
+    const issuedAtMs = Date.parse(vector.manifest.envelope.issuedAt)
+    expect(checkEnvelope({ ...vector.manifest.envelope }, { ...contextOf(vector), now: issuedAtMs - 1_000 })).toEqual({ ok: true })
+    expect(checkEnvelope({ ...vector.manifest.envelope }, { ...contextOf(vector), now: issuedAtMs - 300_000 }))
+      .toEqual({ ok: false, reason: 'not-yet-valid' })
   })
 })

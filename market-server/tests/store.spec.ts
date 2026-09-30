@@ -1,8 +1,9 @@
-import { chmod, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { JsonFileStore, LockTimeoutError, STATE_DIRECTORY_MODE, STATE_FILE_MODE, StoreCorruptError } from '../src/store.ts'
+import { deadProcessPid, liveProcess } from './helpers/server.ts'
 
 async function tempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'market-server-store-'))
@@ -90,8 +91,9 @@ describe('JsonFileStore', () => {
     const dir = await tempDir()
     const lockPath = join(dir, 'state.json.lock')
     await mkdir(dir, { recursive: true })
-    // Simulate a crashed holder: lock exists and is older than the stale window.
-    await writeFile(lockPath, '999999', { mode: STATE_FILE_MODE })
+    // Simulate a crashed holder: the recorded pid is gone and the lock is older
+    // than the stale window.
+    await writeFile(lockPath, `${JSON.stringify({ pid: await deadProcessPid(), startedAt: Date.now() - 60_000, token: 'crashed' })}\n`, { mode: STATE_FILE_MODE })
     const past = new Date(Date.now() - 60_000)
     await chmod(lockPath, STATE_FILE_MODE)
     await utimes(lockPath, past, past)
@@ -109,5 +111,130 @@ describe('JsonFileStore', () => {
     await expect(
       store.update(() => DEFAULT_STATE),
     ).rejects.toBeInstanceOf(LockTimeoutError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P5: stale-lock takeover (M6 Task 6.5)
+//
+// The defect: breaking a stale lock was `unlink(lockPath)`, so two processes
+// that both saw the same stale lock could delete EACH OTHER's fresh lock — and
+// both ended up believing they held it. The fix: a lock is only broken when its
+// recorded owner is CONFIRMED gone (`process.kill(pid, 0)` probe), and the
+// takeover is a single atomic `rename` whose result is verified by content, so
+// a fresh lock is never destroyed (a lock that is not the one inspected is put
+// back with a non-clobbering `link`).
+// ---------------------------------------------------------------------------
+
+describe('P5 stale lock takeover', () => {
+  async function seedLock(dir: string, contents: string, ageMs: number): Promise<string> {
+    const lockPath = join(dir, 'state.json.lock')
+    await mkdir(dir, { recursive: true })
+    await writeFile(lockPath, contents, { mode: STATE_FILE_MODE })
+    const past = new Date(Date.now() - ageMs)
+    await utimes(lockPath, past, past)
+    return lockPath
+  }
+
+  it('takes over a lock whose owning process is dead, atomically', async () => {
+    const dir = await tempDir()
+    const lockPath = await seedLock(
+      dir,
+      `${JSON.stringify({ pid: await deadProcessPid(), startedAt: Date.now() - 60_000, token: 'dead-holder' })}\n`,
+      60_000,
+    )
+    const store = new JsonFileStore<DemoState>(dir, 'state.json', { defaultValue: DEFAULT_STATE, validate: validateDemo })
+    await store.update(() => ({ version: 1, entries: ['after-takeover'] }))
+    await expect(store.load()).resolves.toEqual({ version: 1, entries: ['after-takeover'] })
+    // The takeover moved the dead holder's entry aside and cleaned it up: no
+    // lock-related file (lock, takeover quarantine) is left behind after release.
+    await expect(stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readdir(dir)).filter(name => name.includes('.lock'))).toEqual([])
+  })
+
+  it('takes over a legacy bare-pid lock whose owner is gone (Task 1/2 format)', async () => {
+    const dir = await tempDir()
+    await seedLock(dir, `${String(await deadProcessPid())}\n`, 60_000)
+    const store = new JsonFileStore<DemoState>(dir, 'state.json', { defaultValue: DEFAULT_STATE, validate: validateDemo })
+    await store.update(() => ({ version: 1, entries: ['legacy'] }))
+    await expect(store.load()).resolves.toEqual({ version: 1, entries: ['legacy'] })
+  })
+
+  it('refuses to take over a lock whose owning process is alive', async () => {
+    const dir = await tempDir()
+    const holder = await liveProcess()
+    try {
+      const seeded = `${JSON.stringify({ pid: holder.pid, startedAt: Date.now(), token: 'live-holder' })}\n`
+      const lockPath = await seedLock(dir, seeded, 60_000) // old enough to look stale
+      const store = new JsonFileStore<DemoState>(dir, 'state.json', {
+        defaultValue: DEFAULT_STATE,
+        validate: validateDemo,
+        lockTiming: { waitMs: 200, retryMs: 25 },
+      })
+      const failure = await store.update(() => DEFAULT_STATE).then(() => null, (cause: unknown) => cause)
+      expect(failure).toBeInstanceOf(LockTimeoutError)
+      expect((failure as LockTimeoutError).holder?.pid).toBe(holder.pid)
+      // The live holder's lock file is untouched, byte for byte.
+      await expect(readFile(lockPath, 'utf8')).resolves.toBe(seeded)
+    } finally {
+      await holder.stop()
+    }
+  })
+
+  it('does not let two concurrent starters both believe they hold the lock', async () => {
+    const dir = await tempDir()
+    const lockPath = join(dir, 'state.json.lock')
+    const events: string[] = []
+    const first = new JsonFileStore<DemoState>(dir, 'state.json', { defaultValue: DEFAULT_STATE, validate: validateDemo })
+    const second = new JsonFileStore<DemoState>(dir, 'state.json', { defaultValue: DEFAULT_STATE, validate: validateDemo })
+    const holder = first.update(async (current) => {
+      events.push('first:enter')
+      // Age our own lock: it now LOOKS stale, but its recorded owner (this very
+      // process) is alive — a correct breaker must refuse to touch it.
+      const past = new Date(Date.now() - 60_000)
+      await utimes(lockPath, past, past)
+      await new Promise(resolve => setTimeout(resolve, 300))
+      events.push('first:exit')
+      return { version: 1, entries: [...current.entries, 'first'] }
+    })
+    while (!events.includes('first:enter')) await new Promise(resolve => setTimeout(resolve, 5))
+    const contender = second.update((current) => {
+      events.push('second:enter')
+      events.push('second:exit')
+      return { version: 1, entries: [...current.entries, 'second'] }
+    })
+    await Promise.all([holder, contender])
+    // Exactly one holder at a time: the contender waits for the release instead
+    // of breaking a live holder's lock (the pre-fix code destroyed it and both
+    // writers ran inside "their" lock — events interleaved and one update was
+    // lost).
+    expect(events).toEqual(['first:enter', 'first:exit', 'second:enter', 'second:exit'])
+    const reloaded = new JsonFileStore<DemoState>(dir, 'state.json', { defaultValue: DEFAULT_STATE, validate: validateDemo })
+    await expect(reloaded.load()).resolves.toEqual({ version: 1, entries: ['first', 'second'] })
+  })
+
+  it('never removes a lock file it does not own (release is identity-checked)', async () => {
+    const dir = await tempDir()
+    const lockPath = join(dir, 'state.json.lock')
+    const store = new JsonFileStore<DemoState>(dir, 'state.json', { defaultValue: DEFAULT_STATE, validate: validateDemo })
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    let foreignInode: number | bigint = 0
+    try {
+      await store.update(async (current) => {
+        // Simulate another process taking over our lock while the update runs:
+        // replace the directory entry with a different file (new inode).
+        const replacement = join(dir, 'foreign.lock')
+        await writeFile(replacement, `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: 'foreign' })}\n`, { mode: STATE_FILE_MODE })
+        await rename(replacement, lockPath)
+        foreignInode = (await stat(lockPath)).ino
+        return current
+      })
+      // The foreign lock survived — deleting it would be the P5 defect — and the
+      // compromise reached the operator log instead of being swallowed.
+      expect((await stat(lockPath)).ino).toBe(foreignInode)
+      expect(reported).toHaveBeenCalledWith(expect.stringContaining('state.json.lock'))
+    } finally {
+      reported.mockRestore()
+    }
   })
 })

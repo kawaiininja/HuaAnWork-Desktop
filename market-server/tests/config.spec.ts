@@ -48,10 +48,15 @@ describe('loadConfig', () => {
 
   it('fails closed when any required variable is missing, with guidance', () => {
     for (const key of Object.values(ENV_KEYS)) {
-      // Both optional keys have documented defaults: the admin token disables
-      // the admin surface (Task 2), the catalog cap defaults to the contract
-      // maximum (Task 6.4).
-      if (key === ENV_KEYS.adminToken || key === ENV_KEYS.maxCatalogEntries) continue
+      // Optional keys have documented defaults: the admin token disables the
+      // admin surface (Task 2), the catalog cap defaults to the contract
+      // maximum (Task 6.4), and the P8 hardening knobs have explicit defaults.
+      if (
+        key === ENV_KEYS.adminToken
+        || key === ENV_KEYS.maxCatalogEntries
+        || key === ENV_KEYS.allowedHosts
+        || key === ENV_KEYS.maxConcurrentUploads
+      ) continue
       const partial = completeEnv()
       delete partial[key]
       let caught: unknown
@@ -139,6 +144,44 @@ describe('loadConfig', () => {
       for (const bad of ['abc', '0', '-1', '1.5']) {
         expect(() => loadConfig(completeEnvWith({ [ENV_KEYS.maxCatalogEntries]: bad })), bad).toThrow(ConfigError)
       }
+    })
+  })
+
+  // P8 (Task 6.5): the Host whitelist and the upload concurrency cap are part of
+  // config (same shape as update-server's UPDATE_SERVER_ALLOWED_HOSTS), and the
+  // three server timeouts have explicit non-zero defaults.
+  describe('operational hardening config (P8)', () => {
+    it('derives the Host whitelist from the public origin when unset', () => {
+      expect(loadConfig(completeEnv()).allowedHosts).toEqual(['market.intranet.example:8787'])
+    })
+
+    it('accepts an explicit comma-separated whitelist', () => {
+      const config = loadConfig(completeEnvWith({ [ENV_KEYS.allowedHosts]: 'market.intranet.example:8787, 10.0.0.5' }))
+      expect(config.allowedHosts).toEqual(['market.intranet.example:8787', '10.0.0.5'])
+    })
+
+    it('treats a blank whitelist as unset and rejects wildcard or garbage entries', () => {
+      const derived = loadConfig(completeEnv()).allowedHosts
+      expect(loadConfig(completeEnvWith({ [ENV_KEYS.allowedHosts]: '   ' })).allowedHosts).toEqual(derived)
+      expect(loadConfig(completeEnvWith({ [ENV_KEYS.allowedHosts]: ',' })).allowedHosts).toEqual(derived)
+      for (const bad of ['*,market.intranet.example:8787', 'market.intranet.example:8787/evil', 'a b', 'host:70000']) {
+        expect(() => loadConfig(completeEnvWith({ [ENV_KEYS.allowedHosts]: bad })), bad).toThrow(ConfigError)
+      }
+    })
+
+    it('defaults the upload concurrency cap and rejects a non-positive one', () => {
+      expect(loadConfig(completeEnv()).maxConcurrentUploads).toBeGreaterThan(0)
+      expect(loadConfig(completeEnvWith({ [ENV_KEYS.maxConcurrentUploads]: '2' })).maxConcurrentUploads).toBe(2)
+      for (const bad of ['0', '-1', 'abc']) {
+        expect(() => loadConfig(completeEnvWith({ [ENV_KEYS.maxConcurrentUploads]: bad })), bad).toThrow(ConfigError)
+      }
+    })
+
+    it('keeps the three server timeouts explicit and non-zero', () => {
+      const config = loadConfig(completeEnv())
+      expect(config.requestTimeoutMs).toBeGreaterThan(0)
+      expect(config.headersTimeoutMs).toBeGreaterThan(0)
+      expect(config.socketTimeoutMs).toBeGreaterThan(0)
     })
   })
 

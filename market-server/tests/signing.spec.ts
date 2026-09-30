@@ -96,8 +96,9 @@ describe('key generation', () => {
   it('keyId is the sha256 fingerprint of the raw public key', () => {
     const key = generateKeyPair()
     expect(fingerprintPublicKeyHex(key.publicKeyHex)).toMatch(/^[0-9a-f]{64}$/)
-    expect(() => publicKeyFromHex(key.publicKeyHex)).not.toThrow()
-    expect(() => publicKeyFromHex('abcd')).toThrow()
+    expect(publicKeyFromHex(key.publicKeyHex)).not.toBeNull()
+    // P9: malformed hex is a null, never a throw.
+    expect(publicKeyFromHex('abcd')).toBeNull()
   })
 })
 
@@ -323,5 +324,83 @@ describe('verifyCanonical primitive', () => {
     const signature = signManifest(manifest, { privateKeyPem: key.privateKeyPem, slot: 1, signedAt: '2026-09-25T00:00:01Z' })
     expect(verifyCanonical(canonicalJson(manifest), signature.signature, key.publicKeyHex)).toBe(true)
     expect(verifyCanonical(canonicalJson({ ...manifest, catalog: { schemaVersion: '1.0.0', generatedAt: 'x', items: [], page: { total: 0 } } }), signature.signature, key.publicKeyHex)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P9: publicKeyFromHex never throws (M6 Task 6.5)
+//
+// The "never throw" contract was false for malformed public-key hex:
+// `Buffer.from(hex, 'hex')` silently drops invalid characters, and the old
+// implementation threw whenever the decoded length was not 32 bytes. The pinned
+// format is 64 hex characters; anything else now returns null and every caller
+// handles it explicitly (verifyCanonical -> false, the verify chain ->
+// invalid-signature).
+// ---------------------------------------------------------------------------
+
+describe('P9 publicKeyFromHex never throws', () => {
+  it.each(['', 'zz', '00'.repeat(31), '00'.repeat(33), `${'00'.repeat(32)}zz`])(
+    'returns null for malformed hex %j',
+    (hex) => {
+      expect(publicKeyFromHex(hex)).toBeNull()
+    },
+  )
+
+  it('still accepts a well-formed 32-byte key', () => {
+    const key = generateKeyPair()
+    const publicKey = publicKeyFromHex(key.publicKeyHex)
+    expect(publicKey).not.toBeNull()
+    expect(publicKey?.type).toBe('public')
+  })
+
+  it('verifyCanonical answers false (never throws) for a malformed key', () => {
+    const key = generateKeyPair()
+    const manifest = makeManifest()
+    const signature = signManifest(manifest, { privateKeyPem: key.privateKeyPem, slot: 1, signedAt: '2026-09-25T00:00:01Z' })
+    expect(verifyCanonical(canonicalJson(manifest), signature.signature, 'zz')).toBe(false)
+  })
+
+  it('the verify chain reports a malformed configured key as invalid-signature, never a throw', () => {
+    const key = generateKeyPair()
+    const manifest = makeManifest()
+    const signature = signManifest(manifest, { privateKeyPem: key.privateKeyPem, slot: 1, signedAt: '2026-09-25T00:00:01Z' })
+    const malformedSlot: KeySlotConfig = {
+      slot: 1,
+      keyId: fingerprintPublicKeyHex(key.publicKeyHex),
+      publicKeyHex: 'zz',
+    }
+    expect(verifyWithKeySlots(manifest, signature, [malformedSlot], context())).toEqual({ ok: false, reason: 'invalid-signature' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P10: clock-skew grace on `not-yet-valid` (M6 Task 6.5)
+//
+// The defect: with a signing machine one second fast, every intake failed with
+// `not-yet-valid` — a reason code that reads like an attack. The grace window
+// accepts a slightly future-dated `issuedAt` while still rejecting a genuinely
+// premature one; the runbook's NTP precondition
+// (docs/market-server-deployment.md) is the operational counterpart of the
+// mechanism.
+// ---------------------------------------------------------------------------
+
+describe('P10 clock skew grace', () => {
+  const ISSUED_AT = '2026-09-26T00:00:00Z'
+  const ISSUED_AT_MS = Date.parse(ISSUED_AT)
+
+  it('accepts a not-yet-valid manifest inside the grace window', () => {
+    // The signing machine's clock is one second fast — the exact scenario.
+    const envelope = makeManifest({ issuedAt: ISSUED_AT }).envelope
+    expect(checkEnvelope(envelope, context({ now: ISSUED_AT_MS - 1_000 }))).toEqual({ ok: true })
+  })
+
+  it('still rejects one outside it', () => {
+    const envelope = makeManifest({ issuedAt: ISSUED_AT }).envelope
+    expect(checkEnvelope(envelope, context({ now: ISSUED_AT_MS - 300_000 }))).toEqual({ ok: false, reason: 'not-yet-valid' })
+  })
+
+  it('names the grace constant so the runbook can cite it', async () => {
+    const exports = (await import('../src/signing.ts')) as unknown as Record<string, unknown>
+    expect(exports.CLOCK_SKEW_GRACE_MS).toBe(30_000)
   })
 })

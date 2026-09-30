@@ -34,6 +34,21 @@
  *                                     page (`items` maxItems: 200) — so a
  *                                     higher value is refused at startup
  *                                     (Task 6.4, ruling R-3).
+ *   MARKET_SERVER_ALLOWED_HOSTS       OPTIONAL comma-separated `host[:port]`
+ *                                     whitelist for the HTTP `Host` header
+ *                                     (same semantics as update-server's
+ *                                     UPDATE_SERVER_ALLOWED_HOSTS; default =
+ *                                     the host of MARKET_SERVER_PUBLIC_ORIGIN).
+ *   MARKET_SERVER_MAX_CONCURRENT_UPLOADS
+ *                                     OPTIONAL upload concurrency cap (integer
+ *                                     >= 1, default 4). Beyond it
+ *                                     `POST /v1/admin/artifacts` answers 429
+ *                                     `too-many-uploads` (Task 6.5, P8).
+ *
+ * The three server timeouts (`requestTimeout` / `headersTimeout` / `timeout`)
+ * are also explicit config (Task 6.5, P8): they have documented module
+ * constants and are NOT env-tunable — `server.timeout = 0` ("never") was the
+ * defect, not a tuning knob.
  *
  * The entry point may pass CLI conveniences (`--port` / `--data`, Task 3.5) as
  * overrides. An env value always wins: deployment config stays authoritative.
@@ -50,7 +65,23 @@ export const ENV_KEYS = {
   verifyPublicKeyPath: 'MARKET_SERVER_VERIFY_PUBLIC_KEY',
   adminToken: 'MARKET_SERVER_ADMIN_TOKEN',
   maxCatalogEntries: 'MARKET_SERVER_MAX_CATALOG_ENTRIES',
+  allowedHosts: 'MARKET_SERVER_ALLOWED_HOSTS',
+  maxConcurrentUploads: 'MARKET_SERVER_MAX_CONCURRENT_UPLOADS',
 } as const
+
+/**
+ * Explicit server timeouts (P8; the defect was Node's `timeout = 0`, i.e. an
+ * idle connection could hold its slots forever). `requestTimeout` is the time
+ * to receive the ENTIRE request — 5 minutes covers a 100 MiB artifact upload
+ * over a slow intranet link; `headersTimeout` bounds a stalled header write;
+ * `timeout` closes idle keep-alive sockets.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 300_000
+export const DEFAULT_HEADERS_TIMEOUT_MS = 60_000
+export const DEFAULT_SOCKET_TIMEOUT_MS = 120_000
+
+/** Concurrent artifact uploads accepted before the route answers 429 (P8). */
+export const DEFAULT_MAX_CONCURRENT_UPLOADS = 4
 
 export interface MarketServerConfig {
   readonly port: number
@@ -73,6 +104,23 @@ export interface MarketServerConfig {
    * be lowered: a larger catalog could never be released (Task 6.4, ruling R-3).
    */
   readonly maxCatalogEntries: number
+  /**
+   * Hosts this server answers to: case-insensitive `host[:port]` whitelist
+   * matched against the request's `Host` header; an entry without a port
+   * covers every port of that host. Defaults to the host of `publicOrigin` —
+   * the same shape as update-server's `UPDATE_SERVER_ALLOWED_HOSTS`. A request
+   * whose Host is not listed is rejected with 403 `host-not-allowed` (pure
+   * hardening: no route consumed `headers.host` before).
+   */
+  readonly allowedHosts: readonly string[]
+  /** Concurrent `POST /v1/admin/artifacts` cap; beyond it the route answers 429. */
+  readonly maxConcurrentUploads: number
+  /** node:http `server.requestTimeout`: time to receive the entire request. */
+  readonly requestTimeoutMs: number
+  /** node:http `server.headersTimeout`. */
+  readonly headersTimeoutMs: number
+  /** node:http `server.timeout`: idle-socket inactivity (0 would mean "never"). */
+  readonly socketTimeoutMs: number
 }
 
 export class ConfigError extends Error {
@@ -115,6 +163,18 @@ OPTIONAL:
                                 raising the ceiling needs paginated manifests
                                 with a multi-page signature trust model
                                 (not implemented, ruling R-3).
+  ${ENV_KEYS.allowedHosts}
+                                comma-separated Host header whitelist (an entry
+                                without a port covers every port of that host).
+                                Unset or empty derives it from the host of
+                                ${ENV_KEYS.publicOrigin}. 其他 Host 一律 403
+                                host-not-allowed；本机探针须显式带上 Host 头
+                                （见 runbook 的探针说明）。三项服务器超时由代码
+                                常量固定（无 env 键）。
+  ${ENV_KEYS.maxConcurrentUploads}
+                                concurrent \`POST /v1/admin/artifacts\` cap
+                                (integer >= 1, default ${String(DEFAULT_MAX_CONCURRENT_UPLOADS)}). Beyond it the
+                                upload route answers 429 too-many-uploads.
 
 There is deliberately no private-key configuration item: catalog manifests are
 signed offline (two-step release flow) and the server only ever holds public
@@ -218,6 +278,50 @@ function parseMaxCatalogEntries(raw: string | undefined): number {
   return value
 }
 
+// A whitelist entry is a hostname, IPv4 address, or bracketed IPv6 address,
+// optionally with a port. Wildcards are rejected loudly: an entry that could
+// never match would silently deny every request. (Same shape as update-server's
+// `HOST_ENTRY_PATTERN` — the two servers keep one semantics.)
+const HOST_ENTRY_PATTERN =
+  /^(?<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::(?<port>[0-9]{1,5}))?$/u
+
+/**
+ * Host-header whitelist (P8), mirroring update-server's
+ * `UPDATE_SERVER_ALLOWED_HOSTS` semantics: the default derives from the public
+ * origin (the name clients actually use), an entry without a port covers every
+ * port of that host, and a wildcard is refused loudly — an entry that could
+ * never match would silently deny every request.
+ */
+function parseAllowedHosts(raw: string | undefined, publicOrigin: string): readonly string[] {
+  const derived = [new URL(publicOrigin).host]
+  if (raw === undefined || raw.trim() === '') return derived
+  const entries = raw.split(',').map(entry => entry.trim()).filter(entry => entry !== '')
+  if (entries.length === 0) return derived
+  for (const entry of entries) {
+    const match = HOST_ENTRY_PATTERN.exec(entry)
+    if (match === null) {
+      fail(`${ENV_KEYS.allowedHosts} entry ${JSON.stringify(entry)} is not a host or host:port value.`)
+    }
+    const port = match.groups?.port
+    if (port !== undefined && (Number(port) < 1 || Number(port) > 65535)) {
+      fail(`${ENV_KEYS.allowedHosts} entry ${JSON.stringify(entry)} has a port outside 1..65535.`)
+    }
+  }
+  return entries
+}
+
+function parseMaxConcurrentUploads(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_MAX_CONCURRENT_UPLOADS
+  if (!/^\d+$/u.test(raw.trim())) {
+    fail(`${ENV_KEYS.maxConcurrentUploads} must be a positive integer, got ${JSON.stringify(raw)}.`)
+  }
+  const value = Number(raw.trim())
+  if (value < 1) {
+    fail(`${ENV_KEYS.maxConcurrentUploads} must be at least 1, got ${value}.`)
+  }
+  return value
+}
+
 /**
  * Build the config from the environment plus optional CLI conveniences.
  *
@@ -243,5 +347,10 @@ export function loadConfig(
     verifyPublicKeyHex: verifyPublicKey.hex,
     adminToken,
     maxCatalogEntries,
+    allowedHosts: parseAllowedHosts(env[ENV_KEYS.allowedHosts], publicOrigin),
+    maxConcurrentUploads: parseMaxConcurrentUploads(env[ENV_KEYS.maxConcurrentUploads]),
+    requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    headersTimeoutMs: DEFAULT_HEADERS_TIMEOUT_MS,
+    socketTimeoutMs: DEFAULT_SOCKET_TIMEOUT_MS,
   }
 }

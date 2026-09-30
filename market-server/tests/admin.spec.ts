@@ -532,3 +532,51 @@ describe('catalog scale cap configured below the contract maximum (ruling R-3)',
     expect((await prepare()).status).toBe(200)
   })
 })
+
+// ---------------------------------------------------------------------------
+// P7: the unauthenticated admin page must not disclose whether a token is
+// configured (M6 Task 6.5). The defect: the shell rendered an
+// "MARKET_SERVER_ADMIN_TOKEN is not configured" banner only when unset, so an
+// unauthenticated observer could tell — purely by response shape — whether the
+// admin surface was disabled. The page now renders identically either way; the
+// `admin-disabled` code lives only in the JSON API (which is where the operator
+// inspects it).
+// ---------------------------------------------------------------------------
+
+describe('P7 admin page leaks nothing', () => {
+  const LEAK_PATTERNS = [/未配置/u, /not configured/iu, /MARKET_SERVER_ADMIN_TOKEN/u, /admin-disabled/u, /token is not/u]
+  const booted: TestMarket[] = []
+
+  afterEach(async () => {
+    await Promise.all(booted.splice(0).map(async (market) => market.close()))
+  })
+
+  async function boot(options: Parameters<typeof bootTestMarket>[0] = {}): Promise<TestMarket> {
+    const market = await bootTestMarket(options)
+    booted.push(market)
+    return market
+  }
+
+  it('renders the same shape whether or not a token is configured', async () => {
+    const enabled = await boot()
+    const disabled = await boot({ adminToken: null })
+    const withToken = await fetch(`${enabled.baseUrl}/admin`)
+    const withoutToken = await fetch(`${disabled.baseUrl}/admin`)
+    expect(withToken.status).toBe(200)
+    expect(withoutToken.status).toBe(200)
+    const [a, b] = await Promise.all([withToken.text(), withoutToken.text()])
+    // Same bytes: the response carries no "is a token configured?" signal.
+    expect(a).toBe(b)
+    for (const pattern of LEAK_PATTERNS) {
+      expect(a, `admin page must not match ${String(pattern)}`).not.toMatch(pattern)
+    }
+  })
+
+  it('keeps the disabled signal in the JSON API, not the page', async () => {
+    const disabled = await boot({ adminToken: null })
+    const api = await fetch(`${disabled.baseUrl}/v1/admin/state`, { headers: adminHeaders('whatever') })
+    expect(api.status).toBe(401)
+    const body = await api.json() as { error: { code: string } }
+    expect(body.error.code).toBe('admin-disabled')
+  })
+})

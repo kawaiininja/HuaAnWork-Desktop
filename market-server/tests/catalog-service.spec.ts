@@ -1,10 +1,11 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseCatalogProviderPage, parseCatalogQuery, CatalogContractError } from 'dsh-community-market/contracts'
 import { CatalogService, CatalogQueryError } from '../src/catalog/service.ts'
 import { CatalogStore, type CatalogEntry } from '../src/catalog/store.ts'
+import { deadProcessPid } from './helpers/server.ts'
 
 const FIXED_NOW = () => new Date('2026-09-26T00:00:00.000Z')
 
@@ -168,10 +169,13 @@ describe('CatalogService contract conformance', () => {
     expect(store.manifest()).toBeNull()
     const signed = { envelope: { revision: 7 }, catalog: { items: [] }, files: [] }
     await store.activate(signed, { signature: 'deadbeef' }, 7)
+    // A restart releases the previous instance's lock before reopening (P6).
+    await store.close()
     const reopened = await CatalogStore.open(dir)
     expect(reopened.manifest()).toEqual(signed)
     expect(reopened.signature()).toEqual({ signature: 'deadbeef' })
     expect(reopened.maxRevision()).toBe(7)
+    await reopened.close()
   })
 
   it('rejects structurally invalid stored entries at open time', async () => {
@@ -183,5 +187,89 @@ describe('CatalogService contract conformance', () => {
       { mode: 0o600 },
     )
     await expect(CatalogStore.open(dir)).rejects.toThrow(TypeError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P6: single-instance guard (M6 Task 6.5)
+//
+// A second instance against the same data directory (or a state JSON restored
+// while another instance is running) silently serves stale state. `<dataDir>/
+// server.lock` records the holding pid + start time; a second instance fails at
+// startup with an honest error naming the holder. A lock whose recorded owner is
+// gone (crashed process) is taken over atomically, so restarts keep working.
+// ---------------------------------------------------------------------------
+
+describe('P6 single instance guard', () => {
+  it('refuses a second instance against the same data directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'market-server-instance-'))
+    const first = await CatalogStore.open(dir)
+    try {
+      const failure = await CatalogStore.open(dir).then(() => null, (cause: unknown) => cause)
+      expect(failure).toBeInstanceOf(Error)
+      expect((failure as Error).name).toBe('InstanceLockError')
+      // The refusal leaves the holding instance's lock in place.
+      const recorded = JSON.parse(await readFile(join(dir, 'server.lock'), 'utf8')) as { pid: number }
+      expect(recorded.pid).toBe(process.pid)
+    } finally {
+      await first.close()
+    }
+  })
+
+  it('reports the holding pid so the operator can act', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'market-server-instance-'))
+    const first = await CatalogStore.open(dir)
+    try {
+      const lockFile = join(dir, 'server.lock')
+      const recorded = JSON.parse(await readFile(lockFile, 'utf8')) as { pid: number; startedAt: number }
+      expect(recorded.pid).toBe(process.pid)
+      expect(recorded.startedAt).toBeGreaterThan(0)
+
+      const failure = await CatalogStore.open(dir).then(() => null, (cause: unknown) => cause)
+      expect(failure).toBeInstanceOf(Error)
+      const error = failure as Error & { holderPid?: number | null; lockPath?: string }
+      expect(error.holderPid).toBe(process.pid)
+      expect(error.lockPath).toBe(lockFile)
+      expect(error.message).toContain('server.lock')
+      expect(error.message).toContain(`pid ${String(process.pid)}`)
+    } finally {
+      await first.close()
+    }
+  })
+
+  it('refuses a second instance with an honest error when the lock names no process', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'market-server-instance-'))
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'server.lock'), '{ not a lock record', { mode: 0o600 })
+    const failure = await CatalogStore.open(dir).then(() => null, (cause: unknown) => cause)
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).name).toBe('InstanceLockError')
+    expect((failure as Error).message).toContain('server.lock')
+  })
+
+  it('takes the lock over when the previous holder is gone (crash recovery)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'market-server-instance-'))
+    await mkdir(dir, { recursive: true })
+    await writeFile(
+      join(dir, 'server.lock'),
+      `${JSON.stringify({ pid: await deadProcessPid(), startedAt: Date.now() - 60_000, token: 'crashed-instance' })}\n`,
+      { mode: 0o600 },
+    )
+    const store = await CatalogStore.open(dir)
+    // The lock now names THIS process, not the crashed one.
+    const recorded = JSON.parse(await readFile(join(dir, 'server.lock'), 'utf8')) as { pid: number }
+    expect(recorded.pid).toBe(process.pid)
+    const failed = await CatalogStore.open(dir).then(() => null, (cause: unknown) => cause)
+    expect(failed).toBeInstanceOf(Error) // the takeover holder is alive → refused
+    await store.close()
+  })
+
+  it('releases the lock on close, so the directory can be opened again', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'market-server-instance-'))
+    const first = await CatalogStore.open(dir)
+    await first.close()
+    await expect(readFile(join(dir, 'server.lock'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    const reopened = await CatalogStore.open(dir)
+    await reopened.close()
   })
 })

@@ -8,6 +8,15 @@
  * atomic store; a restart reloads the document, which IS the full-recovery
  * story (§13). The server keeps no separate response cache (round5 N8).
  *
+ * Single instance (Task 6.5, P6): opening the state takes `<dataDir>/server.lock`
+ * (pid + start time). A second instance against the same data directory — or a
+ * state JSON restored underneath a running instance — would silently serve
+ * stale state, so it FAILS AT STARTUP with an honest error naming the holding
+ * pid (the operator either stops that instance or, if the pid is gone, deletes
+ * the lock file). A lock whose recorded owner is confirmed gone (crashed
+ * process) is taken over atomically, so restarts keep working; `close()`
+ * releases the lock on the way out.
+ *
  * Contract positioning (round3 R4/R12 + round4 M4'): market-server does NOT
  * claim to be a standard source — it serves no `catalog-source` manifest.
  * The provider-page payload layer is schema-compatible only. The install
@@ -20,10 +29,13 @@
  * optional for backward compatibility with Task 1 state files.
  */
 
-import { JsonFileStore } from '../store.ts'
+import { join } from 'node:path'
+import { JsonFileStore, acquireLockFile, type LockFileConflict } from '../store.ts'
 
 export const MARKET_STATE_VERSION = 1
 export const CATALOG_STATE_FILE = 'catalog-state.json'
+/** Single-instance lock of the data directory (pid + start time). */
+export const SERVER_LOCK_FILE = 'server.lock'
 
 /**
  * One published catalog entry. `sha256`/`tarball` are private-envelope data:
@@ -238,22 +250,82 @@ function emptyState(): MarketStateV1 {
   return { version: MARKET_STATE_VERSION, entries: [], manifest: null, pendingManifest: null, signature: null, maxRevision: 0 }
 }
 
+/**
+ * A second instance against the same data directory (P6). The error names the
+ * holder so the operator can act; the process exits non-zero at startup instead
+ * of serving stale state.
+ */
+export class InstanceLockError extends Error {
+  readonly lockPath: string
+  readonly holderPid: number | null
+  readonly holderStartedAt: number | null
+
+  constructor(lockPath: string, conflict: LockFileConflict) {
+    const holder = conflict.holder
+    if (holder === null) {
+      super(
+        `market-server: another instance may already be using the data directory — ${lockPath} exists but does not name a process ` +
+          `(${conflict.reason}). Inspect it and remove it only after confirming no market-server is running against that data directory.`,
+      )
+    } else {
+      super(
+        `market-server: another instance is already using the data directory — ${lockPath} is held by pid ${String(holder.pid)} ` +
+          `since ${holder.startedAt > 0 ? new Date(holder.startedAt).toISOString() : 'an unknown time'} (${conflict.reason}). ` +
+          'Stop that instance before starting this one; if that pid is no longer running, remove the lock file.',
+      )
+    }
+    this.name = 'InstanceLockError'
+    this.lockPath = lockPath
+    this.holderPid = holder?.pid ?? null
+    this.holderStartedAt = holder?.startedAt ?? null
+  }
+}
+
 export class CatalogStore {
   readonly #store: JsonFileStore<MarketStateV1>
+  readonly #releaseInstanceLock: () => Promise<void>
   #state: MarketStateV1
 
-  private constructor(store: JsonFileStore<MarketStateV1>, state: MarketStateV1) {
+  private constructor(store: JsonFileStore<MarketStateV1>, state: MarketStateV1, releaseInstanceLock: () => Promise<void>) {
     this.#store = store
     this.#state = state
+    this.#releaseInstanceLock = releaseInstanceLock
   }
 
-  /** Open (or initialize) the catalog state. Corrupt JSON fails closed via StoreCorruptError. */
+  /**
+   * Open (or initialize) the catalog state. Corrupt JSON fails closed via
+   * StoreCorruptError; a data directory already owned by a live instance fails
+   * via InstanceLockError (P6).
+   */
   static async open(dataDir: string): Promise<CatalogStore> {
     const store = new JsonFileStore<MarketStateV1>(dataDir, CATALOG_STATE_FILE, {
       defaultValue: emptyState(),
       validate: parseState,
     })
-    return new CatalogStore(store, await store.load())
+    const lockPath = join(dataDir, SERVER_LOCK_FILE)
+    // No age requirement and no waiting: the server may run for days, so the
+    // mtime says nothing about liveness — the recorded pid does. A lock whose
+    // owner is gone (crashed instance) is taken over atomically; a live (or
+    // unattributable) holder refuses this startup immediately.
+    const acquisition = await acquireLockFile(lockPath, { staleMs: 0, waitMs: 0 })
+    if (!acquisition.ok) throw new InstanceLockError(lockPath, acquisition.conflict)
+    try {
+      return new CatalogStore(store, await store.load(), acquisition.release)
+    } catch (cause) {
+      await acquisition.release().catch((releaseCause: unknown) => {
+        console.error('[market-server] failed to release the instance lock after a startup error:', releaseCause)
+      })
+      throw cause
+    }
+  }
+
+  /**
+   * Release this instance's data-directory lock (`<dataDir>/server.lock`).
+   * Idempotent; the process exit path needs no signal handler because a lock
+   * whose owner is gone is taken over by the next instance.
+   */
+  async close(): Promise<void> {
+    await this.#releaseInstanceLock()
   }
 
   /** Stateless read: the in-memory state is the authoritative document, not a cache tier. */

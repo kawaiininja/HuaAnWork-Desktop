@@ -12,11 +12,16 @@
  *   older 拒:`revision < lastSeenRevision`;等值 = 当前清单幂等重读,放行——
  *   final-review 裁定 2026-09-26,spec §14 第十轮 第 49 条)、notAfter 未过期、
  *   TTL ≤ 7 天;`notAfter` 含界有效、`retiredAt` 到点即拒(独占)。
+ * - `not-yet-valid` 有 30s 时钟偏移宽限(`CLOCK_SKEW_GRACE_MS`,Task 6.5 P10,
+ *   与 market-server 同名同值):签名机时钟略快不致每次 intake 失败;NTP 前置
+ *   条件是运营纪律(runbook),宽限只是机制兜底。
  * - 签名轮换(keyId 权威,裁定 R-1 → spec §14 第 63 条):keyId 先对**全部**槽解析
  *   (无处可循即 unknown-key),解析结果即权威钥;**签名记录声明的槽号只是运营
  *   元数据**,不参与判定;`retiredAt` 按**解析到的槽**判定(slot-retired),最后
  *   Ed25519(invalid-signature)。
- * - 签名记录形状守卫:畸形记录返回 verdict,绝不抛 TypeError(Task 2 同口径)。
+ * - 签名记录形状守卫:畸形记录返回 verdict,绝不抛 TypeError(Task 2 同口径);
+ *   `publicKeyFromHex` 对畸形 hex 返回 null(绝不抛),`verifyCanonical` 对畸形钥
+ *   答 false(Task 6.5 P9,与 signing.ts 镜像)。
  *
  * fail-closed 公钥供给:信任锚来自 config.ts 的两槽钉扎;验签前恒调
  * assertMarketVerificationReady(pins)——PINS_AT_RELEASE 默认为空 = 恒拒
@@ -41,6 +46,14 @@ export const SIGNATURE_ALGORITHM = 'Ed25519' as const
 
 /** 信封寿命上限:notAfter - issuedAt <= 7 天(round5 N7)。 */
 export const MAX_ENVELOPE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+/**
+ * `not-yet-valid` 的时钟偏移宽限(Task 6.5 P10,与 market-server signing.ts
+ * 同名同值):签名机时钟略快(1 秒级)时不应让每次 intake 都以读起来像攻击的
+ * 原因码失败。运营侧对应物 = runbook 里的 NTP 前置条件(宽限是机制兜底,
+ * 不是免对时的理由)。
+ */
+export const CLOCK_SKEW_GRACE_MS = 30_000
 
 export type KeySlotNumber = 1 | 2
 
@@ -188,6 +201,9 @@ export function canonicalJson(value: unknown): string {
 const ED25519_SPKI_DER_LENGTH = 44
 const ED25519_RAW_KEY_LENGTH = 32
 
+/** 钉住公钥格式:64 个 hex 字符(raw 32 字节 Ed25519 公钥)。 */
+const ED25519_RAW_KEY_HEX_PATTERN = /^[0-9a-fA-F]{64}$/u
+
 /** raw 32 字节 Ed25519 公钥(小写 hex)——钉住格式。 */
 export function extractRawPublicKeyHex(publicKey: import('node:crypto').KeyObject): string {
   const spki = publicKey.export({ format: 'der', type: 'spki' })
@@ -202,21 +218,26 @@ export function fingerprintPublicKeyHex(publicKeyHex: string): string {
   return createHash('sha256').update(Buffer.from(publicKeyHex, 'hex')).digest('hex')
 }
 
-/** 从钉住 raw-hex 格式重建 KeyObject(经 JWK,无需 PEM)。 */
-export function publicKeyFromHex(publicKeyHex: string): import('node:crypto').KeyObject {
+/**
+ * 从钉住 raw-hex 格式重建 KeyObject(经 JWK,无需 PEM)。**绝不抛**
+ * (Task 6.5 P9):钉住格式 = 恰好 64 个 hex 字符,其余(坏字符、长度不符、
+ * 尾部垃圾)一律返回 null,调用方显式处理(verifyCanonical → false,
+ * 验签链 → invalid-signature)。镜像 `market-server/src/signing.ts`。
+ */
+export function publicKeyFromHex(publicKeyHex: string): import('node:crypto').KeyObject | null {
+  if (!ED25519_RAW_KEY_HEX_PATTERN.test(publicKeyHex)) return null
   const raw = Buffer.from(publicKeyHex, 'hex')
-  if (raw.length !== ED25519_RAW_KEY_LENGTH) {
-    throw new Error(`Ed25519 raw public key must be 32 bytes, got ${raw.length}`)
-  }
   return createPublicKey({
     format: 'jwk',
     key: { kty: 'OKP', crv: 'Ed25519', x: raw.toString('base64url') },
   })
 }
 
-/** 用 raw-hex 公钥验 base64 Ed25519 签名(canonical 字节上)。 */
+/** 用 raw-hex 公钥验 base64 Ed25519 签名(canonical 字节上)。畸形钥答 false,绝不抛(P9)。 */
 export function verifyCanonical(canonical: string, signatureBase64: string, publicKeyHex: string): boolean {
-  return cryptoVerify(null, Buffer.from(canonical, 'utf8'), publicKeyFromHex(publicKeyHex), Buffer.from(signatureBase64, 'base64'))
+  const publicKey = publicKeyFromHex(publicKeyHex)
+  if (publicKey === null) return false
+  return cryptoVerify(null, Buffer.from(canonical, 'utf8'), publicKey, Buffer.from(signatureBase64, 'base64'))
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +282,9 @@ export function checkEnvelope(envelope: unknown, context: VerificationContext): 
     return { ok: false, reason: 'revision-regression' }
   }
 
-  if (context.now < issuedAtMs) return { ok: false, reason: 'not-yet-valid' }
+  // P10:签名机时钟略快不应让每次 intake 以「像攻击」的原因码失败 ——
+  // `not-yet-valid` 带小宽限窗(runbook 的 NTP 前置条件才是根治手段)。
+  if (context.now < issuedAtMs - CLOCK_SKEW_GRACE_MS) return { ok: false, reason: 'not-yet-valid' }
   if (context.now > notAfterMs) return { ok: false, reason: 'expired' }
 
   return { ok: true }
@@ -320,7 +343,9 @@ export function verifyWithKeySlots(
   const envelope = checkEnvelope(manifest.envelope, context)
   if (!envelope.ok) return envelope
 
-  // 形状守卫优先:畸形记录返回 verdict,绝不抛 TypeError(与 Task 2  defense-in-depth 同层)。
+  // 形状守卫优先:畸形记录(或畸形配置钥 —— P9:`publicKeyFromHex` 返回 null、
+  // `verifyCanonical` 答 false)返回 verdict,绝不抛 TypeError(与 Task 2
+  // defense-in-depth 同层)。
   if (typeof signatureRecord !== 'object' || signatureRecord === null) {
     return { ok: false, reason: 'invalid-signature' }
   }

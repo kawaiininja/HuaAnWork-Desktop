@@ -6,17 +6,17 @@
  * client, so DESIGN.md client rules do not apply). The shell embeds NO
  * server-side user data: every table row is rendered client-side from
  * authenticated fetches via textContent (no HTML injection surface). All
- * mutating calls carry the bearer token; when the server has no token
- * configured the page says so up front (the API will 401 admin-disabled
- * anyway — fail-closed).
+ * mutating calls carry the bearer token.
+ *
+ * P7 (Task 6.5): the page is UNAUTHENTICATED, so it renders the same bytes
+ * whether or not a token is configured — an earlier banner said
+ * "MARKET_SERVER_ADMIN_TOKEN is not configured", which let an unauthenticated
+ * observer tell whether the admin surface was disabled. The `admin-disabled`
+ * answer now lives only in the JSON API, where an operator with the token (or
+ * the startup log) sees it.
  */
 
-export function renderAdminPage(options: { readonly adminEnabled: boolean }): string {
-  const banner = options.adminEnabled
-    ? ''
-    : `<p class="warn">MARKET_SERVER_ADMIN_TOKEN is not configured: the admin surface is <b>disabled</b> (fail-closed). ` +
-      `Set a strong random token and restart the server to enable publishing.</p>`
-
+export function renderAdminPage(): string {
   return `<!doctype html>
 <html lang="zh">
 <head>
@@ -28,7 +28,6 @@ body{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0
 h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:2rem}
 table{border-collapse:collapse;width:100%;font-size:.85rem}
 td,th{border:1px solid #ccc;padding:.3rem .5rem;text-align:left;vertical-align:top}
-.warn{background:#fdecea;border:1px solid #f5c6c0;padding:.6rem;border-radius:4px}
 .hint{color:#666;font-size:.8rem}
 button{margin:.15rem;padding:.25rem .6rem;cursor:pointer}
 input,textarea{padding:.3rem;margin:.15rem;max-width:100%}
@@ -40,7 +39,6 @@ pre{overflow:auto;max-height:16rem}
 </head>
 <body>
 <h1>market-server 管理面</h1>
-${banner}
 <fieldset>
   <legend>认证</legend>
   <label>Admin bearer token: <input id="token" type="password" size="40"></label>

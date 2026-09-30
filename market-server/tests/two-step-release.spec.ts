@@ -281,6 +281,9 @@ describe('two-step offline-signed release flow', () => {
     // Restart = reopen the same data directory: the persisted max revision
     // and the activated manifest survive (§13 full recovery), and the next
     // pending manifest continues monotonically (no revision regression).
+    // The stopped instance releases the data directory's single-instance lock
+    // first (P6) — a restart is stop-then-start, not two live instances.
+    await market.store.close()
     const { CatalogStore } = await import('../src/catalog/store.ts')
     const { ArtifactStore: ReopenArtifactStore } = await import('../src/tarball/store.ts')
     const reopenedStore = await CatalogStore.open(market.dataDir)
@@ -295,6 +298,7 @@ describe('two-step offline-signed release flow', () => {
       artifactSize: async fileName => (await reopenedArtifacts.stat(fileName))?.size ?? null,
     })
     expect(envelopeOf(third).revision).toBe(3)
+    await reopenedStore.close()
   })
 
   it('a re-prepare regenerates the pending manifest (fresh issuedAt/notAfter, same next revision)', async () => {

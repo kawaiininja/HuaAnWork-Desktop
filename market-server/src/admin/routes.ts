@@ -45,6 +45,8 @@ import {
 } from '../tarball/store.ts'
 
 export const ADMIN_ROUTE_PREFIX = '/v1/admin/'
+/** Artifact upload route; server.ts keys its upload concurrency cap (P8) off this path. */
+export const ADMIN_ARTIFACTS_PATH = `${ADMIN_ROUTE_PREFIX}artifacts`
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024
 
@@ -389,7 +391,7 @@ export async function handleAdminRequest(
       return true
     }
 
-    if (pathname === `${ADMIN_ROUTE_PREFIX}artifacts` && method === 'POST') {
+    if (pathname === ADMIN_ARTIFACTS_PATH && method === 'POST') {
       await publishArtifact(request, response, url, ctx)
       return true
     }

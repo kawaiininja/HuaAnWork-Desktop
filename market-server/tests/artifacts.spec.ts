@@ -33,6 +33,11 @@ describe('artifact hosting round-trip', () => {
       verifyPublicKeyHex: KEY_HEX,
       adminToken: 'test-admin-token',
       maxCatalogEntries: MAX_MANIFEST_ENTRIES,
+      allowedHosts: ['127.0.0.1'],
+      maxConcurrentUploads: 4,
+      requestTimeoutMs: 300_000,
+      headersTimeoutMs: 60_000,
+      socketTimeoutMs: 120_000,
     }
     market = createMarketServer(config, store, artifacts)
     await new Promise<void>(resolve => market.server.listen(0, '127.0.0.1', resolve))

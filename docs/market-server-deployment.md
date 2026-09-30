@@ -11,6 +11,9 @@ market-server 是 M5 内网插件市场的单进程 HTTP 服务端：provider-pa
 - 单进程 `node`（无原生依赖、无 SQLite；评审 D6：整个服务端状态 =
   `<dataDir>/catalog-state.json` 一个 JSON 文档，原子写 + 文件锁，
   目录 0700 / 文件 0600，随 `desktop-market/state.json` 先例）。
+  **单实例守卫（P6，Task 6.5）**：打开状态时取 `<dataDir>/server.lock`
+  （内含 pid + 启动时刻）；同一数据目录上的**第二个实例启动即失败**并诚实
+  报出持锁 pid（见〈数据目录与备份/恢复〉）。
 - 启动即全量恢复（§13 缓解）：状态从 JSON 文档重建；重启 = 完整恢复。
   读取无状态语义，服务端**不做 catalog 缓存**（round5 N8：M5 全链路无
   catalog 缓存，wrapper 每次拉取并验签，`revision` 单调使重放无效）。
@@ -34,6 +37,12 @@ corepack yarn workspace market-server start
 〈Dockerfile 与容器运行〉(iii)）。
 
 Node 要求 `^22.19.0 || >=24.0.0`（与仓库 engines 一致）。
+
+**启动即校验「这是唯一实例」**（P6）：数据目录被另一个活进程持有时
+（`<dataDir>/server.lock`），启动打印诚实错误（含持锁 pid）并以 exit 1 退出；
+记录 pid 已不在（崩溃残留）的锁会被**原子接管**，所以常规重启无需手工清理。
+另：进程收到 SIGTERM/SIGINT 直接退出、不释放锁 —— 这是可接受的，因为下一次
+启动会接管「pid 已死」的锁。
 
 ## CLI 参数（Task 3.5）
 
@@ -163,9 +172,17 @@ docker build -t huaanwork/market-server:closure /tmp/market-server-closure
 | `MARKET_SERVER_VERIFY_PUBLIC_KEY` | 钉扎 Ed25519 验签公钥文件路径 | 存在且可读；内容为 raw 32 字节小写 hex（64 字符，`gen-signing-key.mjs` 产出的钉扎格式） |
 | `MARKET_SERVER_ADMIN_TOKEN` | admin 面 bearer token（**可选**） | 非空才生效。**未配置/为空 = admin 面整体禁用**（fail-closed：`/v1/admin/*` 一律 401 `admin-disabled`），启动时打印指引；配置后错 token / 缺 token 一律 401 `unauthorized` |
 | `MARKET_SERVER_MAX_CATALOG_ENTRIES` | 目录规模上限（**可选**，默认 200） | 正整数 **1..200**。配置 **>200 启动即失败**（错误信息指向上游契约 `maxItems`）；只能调低，见〈目录规模上限〉 |
+| `MARKET_SERVER_ALLOWED_HOSTS` | `Host` 头白名单（逗号分隔；条目可带端口，不带端口则覆盖该主机任意端口） | 可选；缺省由 `MARKET_SERVER_PUBLIC_ORIGIN` 的 host 派生（与 update-server 的 `UPDATE_SERVER_ALLOWED_HOSTS` 同语义）。**白名单外的 Host 一律 403 `host-not-allowed`**；本机探针须显式带 Host 头（见〈HTTP 面〉） |
+| `MARKET_SERVER_MAX_CONCURRENT_UPLOADS` | 并发上传上限（**可选**，正整数 ≥ 1，默认 4） | 超限的 `POST /v1/admin/artifacts` 一律 **429 `too-many-uploads`**（不排队、不吞请求） |
 
 **不存在任何私钥配置项**（round3 R9：原「env 注入私钥」裁定作废，与
 「不与托管同进程」矛盾）。发布签名是真离线两步流（见下）。
+
+**三项服务器超时（P8，Task 6.5）没有 env 键**：`requestTimeout` = 300 s
+（收完整请求，含 100 MiB 上传的慢链路）、`headersTimeout` = 60 s、
+`timeout`（空闲 socket）= 120 s，均为代码内具名常量并显式生效。此前的
+`server.timeout = 0`（= 永不超时）意味着一条卡住的连接可以永久占住它的
+资源 —— 修法是把三个值都显式、非零地建进 config。
 
 示例（systemd unit 的 `Environment=` 同口径）：
 
@@ -225,8 +242,21 @@ node --experimental-strip-types src/index.ts
 | `GET /v1/manifest` | **已激活**的离线签名清单原文（Task 2 两步流激活后非 404）。文档形态 `{envelope, catalog, files}`：`catalog` 单独过 `parseCatalogProviderPage`；`envelope`（防重放）与 `files`（name@version → tarballPath + sha256 + size）为**旁挂**字段——严格 schema 顶层 `additionalProperties:false`，消费方须先剥离再 parse（Task 5 wrapper 判定同此）。验签由 wrapper 钉住公钥完成，服务端不代验。 |
 | `GET /v1/manifest/signature` | 已激活清单的**分离签名** sidecar（Ed25519 记录：`version/algorithm/keyId/slot/signedAt/signature`）；未激活 404。 |
 | `GET /artifacts/<file>` | 流式 .tgz 下载（`fs.createReadStream` 管道，不整文件入内存）。文件名为内容派生（`<name>-<version>-<sha256[:12]>.tgz`）；sha256 信任来自已验签清单，不来自传输层。未知/不安全名 404。 |
-| `GET /admin` | 运营管理页（静态 shell，无服务端数据内嵌；一切数据操作走下述 token 端点）。 |
+| `GET /admin` | 运营管理页（静态 shell，无服务端数据内嵌；一切数据操作走下述 token 端点）。**P7（Task 6.5）：未认证页面在「token 是否已配置」两种情况下返回逐字节相同的响应** —— 早先的「未配置横幅」泄漏了「admin 面是否禁用」这一目标选择情报；`admin-disabled` 这个 code 自此只出现在 JSON API（与启动日志）。 |
 | `GET /healthz` | 存活探针 `{"ok":true}`。 |
+
+> **Host 白名单（P8，Task 6.5）**：每个请求先过 `Host` 白名单，白名单外的
+> Host 一律 **403 `host-not-allowed`**（本服务此前无任何 `headers.host`
+> 消费点，故这是纵深加固而非已利用缺陷的修补）。默认只认
+> `MARKET_SERVER_PUBLIC_ORIGIN` 的 host，所以**本机探针/容器 HEALTHCHECK
+> 必须显式带 Host 头**（或用 load balancer 转发时保留原 Host）：
+>
+> ```bash
+> curl -sf -H "Host: market.intranet.example:8787" http://127.0.0.1:8787/healthz
+> # 或把 127.0.0.1 加进白名单：MARKET_SERVER_ALLOWED_HOSTS=market.intranet.example:8787,127.0.0.1
+> ```
+>
+> 另：上传并发上限（默认 4）超限即 **429 `too-many-uploads`**，不排队。
 
 ### Admin 面（`/v1/admin/*`，bearer token，fail-closed）
 
@@ -270,13 +300,15 @@ node --experimental-strip-types src/index.ts
 | 400 | `decompressed-tarball-too-large` | 解压后 > 64 MiB（gunzip 炸弹防护） |
 | 400 | `invalid-entry-contract` | PATCH/publish 的条目违约上游 provider-page 契约（响应点名 JSON path） |
 | 400 | `invalid-entry-patch` / `invalid-json` | 请求体形状错误 |
-| 401 | `unauthorized` / `admin-disabled` | bearer token 缺失或错误；token 未配置时整个 admin 面禁用（`admin-disabled`，启动时打印配置指引） |
+| 401 | `unauthorized` / `admin-disabled` | bearer token 缺失或错误；token 未配置时整个 admin 面禁用（`admin-disabled`，启动时打印配置指引）。**`admin-disabled` 只出现在 JSON API 与启动日志，不出现在未认证的 `/admin` 页面**（P7） |
+| 403 | `host-not-allowed` | `Host` 不在 `MARKET_SERVER_ALLOWED_HOSTS`（默认 = `MARKET_SERVER_PUBLIC_ORIGIN` 的 host；检查反向代理是否改写了 Host，或本机探针是否漏带 Host 头） |
 | 404 | `pending-manifest-not-found` / `entry-not-found` / `not-found` | 目标不存在 |
 | 405 | `method-not-allowed` | 方法不符 |
 | 409 | `already-published` | 同 name@version 已发布（**盘上制品不受影响**，评审 D2）；先 unpublish 再重发 |
 | 409 | `manifest-activation-conflict` | 并发双 intake，败者诚实 409（非 500） |
 | 409 | `artifact-missing` | prepare 引用的制品已不在盘 |
 | 413 | `artifact-too-large` | 上传压缩字节 > 100 MiB |
+| 429 | `too-many-uploads` | 并发上传已达 `MARKET_SERVER_MAX_CONCURRENT_UPLOADS`（默认 4）；等手上传结束后重试 |
 | 422 | `nonzero-dependencies` / `lifecycle-scripts` / `invalid-package-identity` | 发布侧门拒绝（点名违规项） |
 | 422 | `catalog-too-large` | prepare 时条目数 > 配置上限（默认 200 = 契约单页上限）；发布时已前移拦截，故通常只剩手改状态文件/旧备份还原可达 |
 | 422 | `catalog-full` | 发布第 N+1 条时被拒（N = 配置上限，默认 200；评审 D15 / Task 6.4）；先 unpublish 一条再发布。目录因此永不进入 prepare 冻结态 |
@@ -292,15 +324,30 @@ node --experimental-strip-types src/index.ts
 - 状态 = `catalog-state.json`（catalog 条目 + 已激活 manifest/signature 对 +
   pending 待签清单 + 持久化 maxRevision）。制品字节在 `artifacts/`
   子目录（0700；文件 0600，文件名内容派生含 sha256 前 12 位）。
+- **单实例锁 = `server.lock`（P6，Task 6.5）**：内含持锁 pid + 启动时刻。
+  第二个实例（或「未停机就还原 JSON」留下的运行中实例）会让**新实例启动即
+  失败**并诚实报出持锁 pid，而不是静默服务陈旧状态。处置：
+  1. 若报出的 pid 仍在运行 → 先停该实例（`kill <pid>` / 停 systemd unit）；
+  2. 若该 pid 已不在（崩溃残留）→ 直接删除 `server.lock` 后重启
+     （**先确认没有 market-server 在跑**）；正常的下一次启动也会自动接管
+     「记录 pid 已死」的锁，所以只有 pid 无法归属（文件内容损坏）时才必须手工删。
 - **备份**：停机（或持锁时）复制整个数据目录即可；单 JSON 文档无一致性
   难题。建议每日复制 + 发布（激活新清单）后即时复制。
+  **不要在实例运行中还原 `catalog-state.json`** —— 运行中的实例持有内存
+  快照，还原会让它继续服务旧状态；先停实例（`server.lock` 是「谁在跑」的
+  权威标记），再还原，再启动。
 - **恢复**：停机，用备份替换 `catalog-state.json`（保持 0600），重启。
   损坏 JSON = **fail-closed**：启动报 `StoreCorruptError` 并退出，
   文件不被触碰——按本 runbook 从备份恢复，切勿手工编辑状态文件。
 - 原子写（同目录 tmp + rename）保证崩溃/重启中读者只会看到整份旧或
-  整份新状态；文件锁（`catalog-state.json.lock`，O_EXCL，30s 陈旧自动
-  熔断）串行化并发写者。状态 schema 保持 `version:1`，Task 2 字段为
-  增量可选，Task 1 状态文件可直接加载。
+  整份新状态；文件锁（`catalog-state.json.lock`）串行化并发写者。
+  **陈旧锁接管（P5，Task 6.5）**：只有**确认持锁进程已死**（`process.kill(pid, 0)`
+  探测）且锁龄超过 30 s 才会熔断，且熔断本身是一次原子 `rename` 过户 +
+  内容身份校验（若期间已有人建了新锁，会把新锁原样放回，绝不删除）
+  ——两进程同时熔断不会再互删对方的锁。取不到锁即诚实超时
+  （`LockTimeoutError`），接管无法安全完成则抛 `LockTakeoverError`（启动失败）。
+  状态 schema 保持 `version:1`，Task 2 字段为增量可选，Task 1 状态文件
+  可直接加载。
 
 ## 升级
 
@@ -350,7 +397,9 @@ admin bearer token 是本服务**唯一不受离线签名保护的机密**：cat
   （`invalid-signature`）。信封字段判定先于一切：`missing-field` /
   `unsupported-envelope-version` / `invalid-revision` / `revision-regression` /
   `invalid-timestamp` / `domain-mismatch` / `not-yet-valid` / `expired` /
-  `ttl-exceeds-cap`。既有已签名清单无需重签——`slot` 字段仍在，只是不再被比对。
+  `ttl-exceeds-cap`。`not-yet-valid` 带 30 s 时钟偏移宽限
+  （`CLOCK_SKEW_GRACE_MS`，P10；两侧实现同名同值，运营侧见〈离线签名操作纪律〉
+  的 NTP 前置条件）。既有已签名清单无需重签——`slot` 字段仍在，只是不再被比对。
 
 ## 真离线两步发布流（round3 R9）
 
@@ -477,6 +526,14 @@ intake」。安全性论证不变：`keyId` 是公钥的 sha256 指纹，攻击�
 
 ## 离线签名操作纪律
 
+- **NTP 前置条件（P10 的运营侧，Task 6.5）**：离线签名机与 market-server
+  都必须启用 NTP 对时（签名机同样算「时钟可信设备」，停机久了尤其是）。
+  签名机时钟快 1 秒曾会让每次 intake 都以 `not-yet-valid` 失败——一个读起来
+  像被攻击的原因码。机制侧兜底 = 两侧实现共同的具名常量
+  `CLOCK_SKEW_GRACE_MS = 30_000`（`market-server/src/signing.ts` 与 wrapper 的
+  `verify.ts` 同名同值）：`issuedAt` 最多提前 30 s 仍接受；**再往前一律
+  `not-yet-valid`**。**宽限是兜底，不是免对时的理由**——一次真实的事故
+  （时钟跳变）只会被宽限掩盖 30 秒。
 - 私钥只在离线签名机落盘（0600），不出该机、不入任何版本控制、不经任何
   网络传输（用 U 盘/专人传递待签清单与签名产物）。
 - 签名机不运行 market-server、不挂载内网共享盘。

@@ -23,7 +23,10 @@
  *   - `issuedAt` / `notAfter` = validity window; expired manifests are
  *                   rejected. The TTL cap (notAfter - issuedAt) is at most
  *                   MAX_ENVELOPE_TTL (7 days) — the maximum exposure window
- *                   of a leaked signing key.
+ *                   of a leaked signing key. `not-yet-valid` carries a small
+ *                   clock-skew grace (CLOCK_SKEW_GRACE_MS, Task 6.5 P10): the
+ *                   signing machine is expected to run NTP, and the grace is
+ *                   the mechanism backstop for a clock that is a moment fast.
  *
  * Two-slot rotation, keyId-authoritative (ruling R-1, spec §14 entry 63):
  *   - slot 1 = current key; slot 2 = previous key, valid only until its
@@ -53,6 +56,17 @@ export const SIGNATURE_ALGORITHM = 'Ed25519' as const
 
 /** Maximum envelope lifetime: notAfter - issuedAt <= 7 days (round5 N7). */
 export const MAX_ENVELOPE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+/**
+ * Clock-skew grace on `not-yet-valid` (Task 6.5, P10): an offline signing
+ * machine whose clock runs a little fast would otherwise fail every intake
+ * with an attack-flavored reason code. A manifest whose `issuedAt` is at most
+ * this far in the future is accepted; the operational counterpart is the NTP
+ * precondition in docs/market-server-deployment.md (the grace is a mechanism
+ * backstop, not a reason to skip time synchronization). Mirrored by the
+ * wrapper verifier under the same name.
+ */
+export const CLOCK_SKEW_GRACE_MS = 30_000
 
 /** Rotation overlap: slot 2 survives one app-release window via `retiredAt`. */
 export type KeySlotNumber = 1 | 2
@@ -226,6 +240,9 @@ export function generateKeyPair(): GeneratedKeyPair {
 const ED25519_SPKI_DER_LENGTH = 44
 const ED25519_RAW_KEY_LENGTH = 32
 
+/** The pinned public-key format: 64 hex characters (raw 32-byte Ed25519 key). */
+const ED25519_RAW_KEY_HEX_PATTERN = /^[0-9a-fA-F]{64}$/u
+
 /** Extract the raw 32-byte key from an SPKI DER Ed25519 public key (last 32 bytes). */
 function extractRawPublicKeyHex(publicKey: import('node:crypto').KeyObject): string {
   const spki = publicKey.export({ format: 'der', type: 'spki' })
@@ -240,12 +257,17 @@ export function fingerprintPublicKeyHex(publicKeyHex: string): string {
   return createHash('sha256').update(Buffer.from(publicKeyHex, 'hex')).digest('hex')
 }
 
-/** Rebuild a node KeyObject from the pinned raw-hex format (via JWK, no PEM needed). */
-export function publicKeyFromHex(publicKeyHex: string): import('node:crypto').KeyObject {
+/**
+ * Rebuild a node KeyObject from the pinned raw-hex format (via JWK, no PEM
+ * needed). NEVER throws (Task 6.5, P9): the pinned format is exactly 64 hex
+ * characters — anything else (bad characters, wrong length, trailing garbage)
+ * returns null, and callers must handle the null explicitly (verifyCanonical →
+ * false, the verify chain → `invalid-signature`). The old implementation threw
+ * on a wrong decoded length, which falsified this contract.
+ */
+export function publicKeyFromHex(publicKeyHex: string): import('node:crypto').KeyObject | null {
+  if (!ED25519_RAW_KEY_HEX_PATTERN.test(publicKeyHex)) return null
   const raw = Buffer.from(publicKeyHex, 'hex')
-  if (raw.length !== ED25519_RAW_KEY_LENGTH) {
-    throw new Error(`Ed25519 raw public key must be 32 bytes, got ${raw.length}`)
-  }
   return createPublicKey({
     format: 'jwk',
     key: { kty: 'OKP', crv: 'Ed25519', x: raw.toString('base64url') },
@@ -257,9 +279,15 @@ export function signCanonical(canonical: string, privateKeyPem: string): string 
   return cryptoSign(null, Buffer.from(canonical, 'utf8'), createPrivateKey(privateKeyPem)).toString('base64')
 }
 
-/** Verify a base64 Ed25519 signature over the canonical bytes with a raw-hex public key. */
+/**
+ * Verify a base64 Ed25519 signature over the canonical bytes with a raw-hex
+ * public key. A malformed key (null from publicKeyFromHex) answers false —
+ * never a throw (P9).
+ */
 export function verifyCanonical(canonical: string, signatureBase64: string, publicKeyHex: string): boolean {
-  return cryptoVerify(null, Buffer.from(canonical, 'utf8'), publicKeyFromHex(publicKeyHex), Buffer.from(signatureBase64, 'base64'))
+  const publicKey = publicKeyFromHex(publicKeyHex)
+  if (publicKey === null) return false
+  return cryptoVerify(null, Buffer.from(canonical, 'utf8'), publicKey, Buffer.from(signatureBase64, 'base64'))
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +335,10 @@ export function checkEnvelope(envelope: unknown, context: VerificationContext): 
     return { ok: false, reason: 'revision-regression' }
   }
 
-  if (context.now < issuedAtMs) return { ok: false, reason: 'not-yet-valid' }
+  // P10: a signing machine whose clock runs a little fast must not fail every
+  // intake with an attack-flavored reason code — a small grace window applies
+  // to `not-yet-valid` (the NTP precondition in the runbook is the real fix).
+  if (context.now < issuedAtMs - CLOCK_SKEW_GRACE_MS) return { ok: false, reason: 'not-yet-valid' }
   if (context.now > notAfterMs) return { ok: false, reason: 'expired' }
 
   return { ok: true }
@@ -338,8 +369,10 @@ export function verifyWithKeySlots(
   const envelope = checkEnvelope(manifest.envelope, context)
   if (!envelope.ok) return envelope
 
-  // Shape guard first: a malformed record must yield a verdict, never throw
-  // (Task 2 intake pre-validates too; this is the defense-in-depth layer).
+  // Shape guard first: a malformed record (or a malformed configured key, P9:
+  // `publicKeyFromHex` returns null and `verifyCanonical` answers false) must
+  // yield a verdict, never throw (Task 2 intake pre-validates too; this is the
+  // defense-in-depth layer).
   if (typeof signatureRecord !== 'object' || signatureRecord === null) {
     return { ok: false, reason: 'invalid-signature' }
   }
