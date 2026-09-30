@@ -7,12 +7,16 @@
  * GET catalog/artifact routes are the only unauthenticated faces.
  *
  * Routes:
- *   GET  /v1/admin/state                    overview (entries + manifest slots)
+ *   GET  /v1/admin/state                    overview (entries + manifest slots
+ *                                           + the artifact inventory, P11b)
  *   POST /v1/admin/artifacts                publish a .tgz (raw body; the
  *                                           publish gate runs HERE so the
  *                                           operator gets honest errors at
  *                                           publish time, not the user at
  *                                           install time)
+ *   DELETE /v1/admin/artifact?file=<name>   delete one stored artifact (P11b);
+ *                                           refused while EITHER reference
+ *                                           face still names it
  *   PATCH /v1/admin/entries/:id             edit display fields (URL-typed
  *                                           fields preflighted: empty = unset,
  *                                           non-https rejected, round3 R15)
@@ -33,6 +37,7 @@ import { DuplicateEntryError, EntryNotFoundError, ManifestActivationConflictErro
 import type { CatalogEntry, CatalogEntryPatch, CatalogStore } from '../catalog/store.ts'
 import type { MarketServerConfig } from '../config.ts'
 import { intakeSignature, ManifestPrepareError, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
+import { isSafeArtifactName } from '../tarball/http.ts'
 import { TarballError, extractPackageManifestFromFile } from '../tarball/parse.ts'
 import { checkPublishGate } from '../tarball/gate.ts'
 import {
@@ -47,6 +52,8 @@ import {
 export const ADMIN_ROUTE_PREFIX = '/v1/admin/'
 /** Artifact upload route; server.ts keys its upload concurrency cap (P8) off this path. */
 export const ADMIN_ARTIFACTS_PATH = `${ADMIN_ROUTE_PREFIX}artifacts`
+/** Artifact deletion route (P11b): `DELETE ...?file=<stored artifact file name>`. */
+export const ADMIN_ARTIFACT_PATH = `${ADMIN_ROUTE_PREFIX}artifact`
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024
 
@@ -190,6 +197,143 @@ export function parseEntryPatch(body: unknown): CatalogEntryPatch {
 /** Stable catalog id for a published name@version (contract identifier pattern). */
 export function catalogEntryId(packageName: string, version: string): string {
   return `${packageName.replace(/^@/u, '')}@${version}`
+}
+
+// ---------------------------------------------------------------------------
+// P11b: artifact reference judgment (dual face, fail-closed)
+// ---------------------------------------------------------------------------
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Catalog face: an entry whose `tarball` field IS the target file (review D2 precedent). */
+function catalogEntryReferencing(store: CatalogStore, fileName: string): CatalogEntry | null {
+  return store.entries().find(entry => entry.tarball === fileName) ?? null
+}
+
+/**
+ * Manifest face verdict for one artifact file name.
+ *
+ * `referenced` and `unreadable` are both refusals; only `clear` permits a
+ * delete. `clear` means "no activated manifest, or one whose files[] was
+ * scanned with no hit". `unreadable` is the fail-closed arm: an activated
+ * manifest whose `files[]` cannot be inspected cannot PROVE the artifact is
+ * unreferenced (reachable by an operator hand-editing the state file or
+ * restoring an old backup — activation pins the signature, not the shape).
+ */
+type ManifestReferenceVerdict = 'clear' | 'referenced' | 'unreadable'
+
+function manifestArtifactVerdict(manifest: unknown, fileName: string): ManifestReferenceVerdict {
+  if (manifest === null) return 'clear'
+  if (!isRecord(manifest)) return 'unreadable'
+  const files = manifest.files
+  if (!Array.isArray(files)) return 'unreadable'
+  // manifest-prepare.ts writes `/artifacts/<tarball>` into files[].tarballPath.
+  const tarballPath = `/artifacts/${fileName}`
+  return files.some(file => isRecord(file) && file.tarballPath === tarballPath) ? 'referenced' : 'clear'
+}
+
+/** One stored artifact as the operator surface sees it (P11b). */
+interface AdminArtifactView {
+  readonly fileName: string
+  readonly size: number
+  /** True only when BOTH reference faces are clear (fail-closed). */
+  readonly deletable: boolean
+  /** The face that still references it; null when deletable. */
+  readonly referencedBy: 'catalog' | 'manifest' | 'manifest-unreadable' | null
+}
+
+async function artifactInventory(ctx: AdminContext): Promise<readonly AdminArtifactView[]> {
+  const stored = await ctx.artifacts.list()
+  return stored.map(({ fileName, size }) => {
+    if (catalogEntryReferencing(ctx.store, fileName) !== null) {
+      return { fileName, size, deletable: false, referencedBy: 'catalog' as const }
+    }
+    switch (manifestArtifactVerdict(ctx.store.manifest(), fileName)) {
+      case 'referenced':
+        return { fileName, size, deletable: false, referencedBy: 'manifest' as const }
+      case 'unreadable':
+        return { fileName, size, deletable: false, referencedBy: 'manifest-unreadable' as const }
+      default:
+        return { fileName, size, deletable: true, referencedBy: null }
+    }
+  })
+}
+
+/**
+ * `DELETE /v1/admin/artifact?file=<name>` (P11b): the operator-facing artifact
+ * deletion that `ArtifactStore.remove` never had a production caller for
+ * (unpublish deliberately keeps the bytes, so the disk only grew).
+ *
+ * The judgment is fail-closed on BOTH reference faces: only when no catalog
+ * entry and no activated signed manifest names the artifact does it unlink,
+ * answering 204 (the reclaimed byte count travels in the
+ * `x-artifact-bytes-reclaimed` header — 204 carries no body). Every refusal
+ * names the face and the operator's next step.
+ */
+async function deleteArtifact(response: ServerResponse, url: URL, ctx: AdminContext): Promise<void> {
+  const fileName = url.searchParams.get('file')
+  if (fileName === null || fileName.trim() === '') {
+    sendError(response, 400, 'invalid-delete-request', 'query param file (the stored artifact file name) is required')
+    return
+  }
+  // The name is joined into the artifacts directory by stat()/remove(): an
+  // unsafe name must never reach the filesystem (`..` would escape the
+  // subdirectory and could unlink the state document). Same rule as the
+  // download route.
+  if (!isSafeArtifactName(fileName)) {
+    sendError(response, 404, 'artifact-not-found', 'no stored artifact with that name; hosted artifact names end in .tgz')
+    return
+  }
+  const info = await ctx.artifacts.stat(fileName)
+  if (info === null) {
+    sendError(response, 404, 'artifact-not-found', `no stored artifact named ${fileName}`)
+    return
+  }
+
+  const entry = catalogEntryReferencing(ctx.store, fileName)
+  if (entry !== null) {
+    sendError(
+      response,
+      409,
+      'artifact-referenced',
+      `制品 ${fileName} 仍被目录条目 ${entry.id} 引用(目录面);先下架该条目(POST /v1/admin/entries/${entry.id}/unpublish),再删制品`,
+    )
+    return
+  }
+  const manifestVerdict = manifestArtifactVerdict(ctx.store.manifest(), fileName)
+  if (manifestVerdict === 'referenced') {
+    sendError(
+      response,
+      409,
+      'artifact-referenced',
+      `制品 ${fileName} 仍被已激活清单引用;先重新 prepare + activate 一份不含该条目的清单,再删制品`,
+    )
+    return
+  }
+  if (manifestVerdict === 'unreadable') {
+    sendError(
+      response,
+      409,
+      'manifest-unreadable',
+      `制品 ${fileName} 的引用判定失败:已激活清单的形状无法解析(files[] 缺失或不是数组),无法证明它未被引用;` +
+        '先重新 prepare + activate 一份可解析的清单,再删制品',
+    )
+    return
+  }
+
+  const removed = await ctx.artifacts.remove(fileName)
+  if (!removed) {
+    // Raced with another deleter: nothing was reclaimed, so say so honestly.
+    sendError(response, 404, 'artifact-not-found', `no stored artifact named ${fileName}`)
+    return
+  }
+  response.writeHead(204, {
+    'cache-control': 'no-store',
+    'x-artifact-bytes-reclaimed': String(info.size),
+  })
+  response.end()
 }
 
 async function publishArtifact(request: IncomingMessage, response: ServerResponse, url: URL, ctx: AdminContext): Promise<void> {
@@ -387,12 +531,25 @@ export async function handleAdminRequest(
         activeRevision: activeRevision(manifest),
         active: manifest !== null,
         pending: ctx.store.pendingManifest() !== null,
+        // P11b: the operator page lists deletable artifacts separately from
+        // referenced ones; the flag is computed here (one judgment, two faces)
+        // so the page never re-derives it.
+        artifacts: await artifactInventory(ctx),
       })
       return true
     }
 
     if (pathname === ADMIN_ARTIFACTS_PATH && method === 'POST') {
       await publishArtifact(request, response, url, ctx)
+      return true
+    }
+
+    if (pathname === ADMIN_ARTIFACT_PATH) {
+      if (method !== 'DELETE') {
+        sendError(response, 405, 'method-not-allowed', 'only DELETE is supported')
+        return true
+      }
+      await deleteArtifact(response, url, ctx)
       return true
     }
 

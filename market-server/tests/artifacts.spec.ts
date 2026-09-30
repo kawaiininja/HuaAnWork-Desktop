@@ -4,7 +4,7 @@ import { mkdtemp, readdir, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMarketServer, type MarketHttpServer } from '../src/server.ts'
 import { CatalogStore } from '../src/catalog/store.ts'
 import type { MarketServerConfig } from '../src/config.ts'
@@ -157,5 +157,63 @@ describe('upload cap and stale-temp sweep (review P35)', () => {
 
     await expect(stat(stale)).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await stat(fresh)).size).toBe(Buffer.byteLength('in flight'))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P11a (M6 Task 6.6): the staging name was `.upload-<pid>-<ts>.tmp` — pid plus
+// millisecond, NO random component. Two uploads landing in the same
+// millisecond of one process computed the SAME name, and the `'wx'` open was
+// the only backstop: the loser got EEXIST (an fs staging failure, i.e. HTTP
+// 500 `upload-failed`). The name now carries a random suffix, the same shape
+// update-server's Task 3.3 uses.
+// ---------------------------------------------------------------------------
+
+describe('P11a staging name collisions (M6 Task 6.6)', () => {
+  let dataDir: string
+
+  beforeEach(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), 'market-server-staging-'))
+  })
+
+  it('stages two same-millisecond uploads without EEXIST', async () => {
+    const store = await ArtifactStore.open(dataDir)
+    // Freeze the clock: both uploads compute the same Date.now(), which is
+    // exactly the defect's precondition (only real time separated them before).
+    const frozen = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(frozen)
+    // Both O_EXCL opens are issued before either settles (the second name is
+    // computed in the same tick as the first open), so with the old fixed name
+    // exactly one of them loses the O_EXCL race — deterministically, not by
+    // timing luck.
+    const [first, second] = await Promise.all([
+      store.stage(Readable.from([Buffer.from('first upload bytes')])),
+      store.stage(Readable.from([Buffer.from('second upload bytes')])),
+    ]).finally(() => {
+      clock.mockRestore()
+    })
+
+    expect(first.tempName).not.toBe(second.tempName)
+    expect(first.sha256).not.toBe(second.sha256)
+    for (const staged of [first, second]) {
+      expect((await stat(join(store.directory, staged.tempName))).size).toBeGreaterThan(0)
+      await store.discard(staged.tempName)
+    }
+    expect((await readdir(store.directory)).filter(name => name.startsWith('.upload-'))).toEqual([])
+  })
+
+  it('includes a random component in the staging name', async () => {
+    const store = await ArtifactStore.open(dataDir)
+    const frozen = 1_700_000_000_000
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(frozen)
+    const staged = await store.stage(Readable.from([Buffer.from('bytes')])).finally(() => {
+      clock.mockRestore()
+    })
+
+    const parts = /^\.upload-(\d+)-(\d+)-([0-9a-f]{8})\.tmp$/u.exec(staged.tempName)
+    expect(parts, staged.tempName).not.toBeNull()
+    expect(parts?.[1]).toBe(String(process.pid))
+    expect(parts?.[2]).toBe(String(frozen))
+    await store.discard(staged.tempName)
   })
 })

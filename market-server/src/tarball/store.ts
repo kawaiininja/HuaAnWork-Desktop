@@ -11,7 +11,7 @@
  * mismatch rejects the upload with nothing left behind.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { createReadStream, type ReadStream } from 'node:fs'
 import { chmod, mkdir, open, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -103,11 +103,17 @@ export class ArtifactStore {
    * and then either `commit`s to a content-derived final name or `discard`s.
    * `claimedSha256` (optional `?sha256=` upload param) is checked against the
    * computed digest and rejects the whole upload.
+   *
+   * The temp name carries pid + millisecond + 4 random bytes (review P11a;
+   * same shape as update-server's Task 3.3): pid alone does not separate two
+   * uploads of ONE process that land in the same millisecond — the `'wx'` open
+   * was then the only backstop and the loser got EEXIST.
    */
   async stage(stream: Readable, claimedSha256?: string): Promise<{ tempName: string } & SavedArtifact> {
     const hash = createHash('sha256')
     let size = 0
-    const tempName = `.upload-${String(process.pid)}-${String(Date.now())}.tmp`
+    const tempName =
+      `.upload-${String(process.pid)}-${String(Date.now())}-${randomBytes(4).toString('hex')}.tmp`
     const handle = await open(join(this.#directory, tempName), 'wx', STATE_FILE_MODE)
     try {
       for await (const chunk of stream) {
@@ -171,6 +177,24 @@ export class ArtifactStore {
       if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw cause
     }
+  }
+
+  /**
+   * Inventory of stored artifacts, name-sorted (P11b: the admin page lists
+   * deletable artifacts separately from referenced ones). Staged upload temps
+   * are not artifacts and never appear here.
+   */
+  async list(): Promise<readonly { fileName: string; size: number }[]> {
+    const names = (await readdir(this.#directory)).filter(name => name.endsWith('.tgz')).sort()
+    const artifacts: { fileName: string; size: number }[] = []
+    for (const name of names) {
+      // `stat` answers null only for a file that vanished between readdir and
+      // here (a concurrent delete); any other failure is a real fault and
+      // propagates.
+      const info = await this.stat(name)
+      if (info !== null) artifacts.push({ fileName: name, size: info.size })
+    }
+    return artifacts
   }
 
   /** Remove a stored artifact (operator cleanup; NOT part of unpublish). */

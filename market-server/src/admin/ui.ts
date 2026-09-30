@@ -51,6 +51,18 @@ pre{overflow:auto;max-height:16rem}
 <th>id</th><th>包</th><th>sha256(前12)</th><th>显示名</th><th>操作</th>
 </tr></thead><tbody></tbody></table>
 
+<h2>制品</h2>
+<div class="hint">删除端点会先查两个引用面（目录条目 / 已激活清单）：任一面仍引用即 409 拒绝，并在提示里给出解除引用的下一步；两面都无引用才真正删除。被引用的制品不给可点的删除按钮。</div>
+<div class="hint" id="artifactMsg"></div>
+<h3>可删除</h3>
+<table id="artifactsDeletable"><thead><tr>
+<th>文件</th><th>字节</th><th>操作</th>
+</tr></thead><tbody></tbody></table>
+<h3>被引用（不可删除）</h3>
+<table id="artifactsReferenced"><thead><tr>
+<th>文件</th><th>字节</th><th>操作</th>
+</tr></thead><tbody></tbody></table>
+
 <fieldset>
   <legend>发布制品（上传 .tgz）</legend>
   <div><input id="file" type="file" accept=".tgz,application/gzip"> <span class="hint">tarball 的 package.json 须零依赖且无 preinstall/install/postinstall/prepare（发布侧门，违反即拒）</span></div>
@@ -95,9 +107,16 @@ function authHeaders() {
 async function api(path, options) {
   const response = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options && options.headers) } })
   const body = await response.json().catch(() => null)
-  return { status: response.status, body }
+  return { status: response.status, body, headers: response.headers }
 }
 function setText(id, text) { document.getElementById(id).textContent = text }
+
+function referenceFaceHint(face) {
+  if (face === 'catalog') return '被目录条目引用'
+  if (face === 'manifest') return '被已激活清单引用'
+  if (face === 'manifest-unreadable') return '已激活清单无法解析（fail-closed）'
+  return '仍被引用'
+}
 
 document.getElementById('saveToken').onclick = () => {
   sessionStorage.setItem('marketAdminToken', tokenInput.value)
@@ -130,6 +149,45 @@ async function refresh() {
     row.appendChild(actions)
     tbody.appendChild(row)
   }
+
+  const deletableBody = document.querySelector('#artifactsDeletable tbody')
+  const referencedBody = document.querySelector('#artifactsReferenced tbody')
+  deletableBody.textContent = ''
+  referencedBody.textContent = ''
+  for (const artifact of body.artifacts) {
+    const row = document.createElement('tr')
+    for (const value of [artifact.fileName, String(artifact.size)]) {
+      const cell = document.createElement('td')
+      cell.textContent = value
+      row.appendChild(cell)
+    }
+    const actions = document.createElement('td')
+    const remove = document.createElement('button')
+    remove.textContent = '删除制品'
+    if (artifact.deletable) {
+      remove.onclick = async () => {
+        const result = await api('/v1/admin/artifact?file=' + encodeURIComponent(artifact.fileName), { method: 'DELETE' })
+        setText('artifactMsg', result.status === 204
+          ? '已删除 ' + artifact.fileName + '，回收 ' + (result.headers.get('x-artifact-bytes-reclaimed') || '?') + ' 字节'
+          : result.status + ' ' + JSON.stringify(result.body))
+        refresh()
+      }
+      actions.appendChild(remove)
+      row.appendChild(actions)
+      deletableBody.appendChild(row)
+    } else {
+      // P11b: 被引用的制品不给可点的删除按钮（与 P26 的 IMMUTABLE 灰化同款思路）。
+      remove.disabled = true
+      actions.appendChild(remove)
+      const hint = document.createElement('span')
+      hint.className = 'hint'
+      hint.textContent = ' ' + referenceFaceHint(artifact.referencedBy)
+      actions.appendChild(hint)
+      row.appendChild(actions)
+      referencedBody.appendChild(row)
+    }
+  }
+
   setText('stateView', JSON.stringify({
     entryCount: body.entryCount,
     maxRevision: body.maxRevision,

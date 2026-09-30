@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { parseCatalogProviderPage } from 'dsh-community-market/contracts'
 import type { CatalogEntry } from '../src/catalog/store.ts'
+import { signManifest, type MarketManifest } from '../src/signing.ts'
 import { adminHeaders, bootTestMarket, publishTgz, type TestMarket } from './helpers/server.ts'
 import { cleanPackageManifest } from './helpers/tar.ts'
 
@@ -27,6 +30,7 @@ describe('admin bearer-token auth (D5, fail-closed)', () => {
         ['POST', '/v1/admin/manifest/prepare'],
         ['GET', '/v1/admin/state'],
         ['GET', '/v1/admin/manifest/pending'],
+        ['DELETE', '/v1/admin/artifact?file=whatever.tgz'],
       ] as const) {
         const response = await fetch(`${disabled.baseUrl}${path}`, {
           method,
@@ -578,5 +582,230 @@ describe('P7 admin page leaks nothing', () => {
     expect(api.status).toBe(401)
     const body = await api.json() as { error: { code: string } }
     expect(body.error.code).toBe('admin-disabled')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P11b (M6 Task 6.6): operator-facing artifact deletion. `ArtifactStore.remove`
+// had ZERO production callers and unpublish deliberately keeps the artifact, so
+// the disk only grew. The endpoint's judgment is a DUAL reference face,
+// fail-closed:
+//
+//   catalog face  — any `entries[].tarball` equal to the target file name
+//                   (the publish-side precedent, review D2);
+//   manifest face — any `files[].tarballPath` (`/artifacts/<tarball>`) in the
+//                   ACTIVATED signed manifest, read verbatim via store.manifest().
+//
+// The catalog face alone is not enough: unpublish removes the entry but
+// rebuilds and re-signs NOTHING, and GET /v1/manifest replays the activated
+// manifest byte-for-byte — between unpublish and a re-prepare + activate,
+// clients can still download and install exactly those bytes. Deleting then
+// would be the D2 data-loss shape again.
+// ---------------------------------------------------------------------------
+
+describe('P11b operator-facing artifact deletion (M6 Task 6.6)', () => {
+  let market: TestMarket
+
+  beforeEach(async () => {
+    market = await bootTestMarket()
+  })
+
+  afterEach(async () => {
+    await market.close()
+  })
+
+  async function publish(name: string, version: string): Promise<{ id: string; tarball: string }> {
+    const result = await publishTgz(market.baseUrl, 'test-admin-token', cleanPackageManifest({ name, version }))
+    expect(result.status, JSON.stringify(result.body)).toBe(201)
+    return (result.body as { entry: { id: string; tarball: string } }).entry
+  }
+
+  async function unpublish(id: string): Promise<void> {
+    const response = await fetch(`${market.baseUrl}/v1/admin/entries/${encodeURIComponent(id)}/unpublish`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(response.status).toBe(200)
+  }
+
+  /** The two-step release: prepare -> offline sign -> verified intake/activate. */
+  async function release(): Promise<void> {
+    const prepared = await fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(prepared.status).toBe(200)
+    const { pendingManifest } = await prepared.json() as { pendingManifest: unknown }
+    const record = signManifest(pendingManifest as MarketManifest, {
+      privateKeyPem: market.key.privateKeyPem,
+      slot: 1,
+      signedAt: new Date().toISOString(),
+    })
+    const intake = await fetch(`${market.baseUrl}/v1/admin/manifest/signature`, {
+      method: 'POST',
+      headers: { ...adminHeaders('test-admin-token'), 'content-type': 'application/json' },
+      body: JSON.stringify(record),
+    })
+    expect(intake.status).toBe(200)
+  }
+
+  async function deleteArtifact(fileName: string): Promise<Response> {
+    return fetch(`${market.baseUrl}/v1/admin/artifact?file=${encodeURIComponent(fileName)}`, {
+      method: 'DELETE',
+      headers: adminHeaders('test-admin-token'),
+    })
+  }
+
+  interface ArtifactView {
+    readonly fileName: string
+    readonly size: number
+    readonly deletable: boolean
+    readonly referencedBy: string | null
+  }
+
+  async function artifactState(): Promise<readonly ArtifactView[]> {
+    const response = await fetch(`${market.baseUrl}/v1/admin/state`, { headers: adminHeaders('test-admin-token') })
+    expect(response.status).toBe(200)
+    return ((await response.json()) as { artifacts: readonly ArtifactView[] }).artifacts
+  }
+
+  it('refuses to delete an artifact a catalog entry still references (D2 root cause)', async () => {
+    const entry = await publish('@huaanwork/keep-me', '1.0.0')
+
+    const response = await deleteArtifact(entry.tarball)
+    expect(response.status).toBe(409)
+    const parsed = await response.json() as { error: { code: string; message: string } }
+    expect(parsed.error.code).toBe('artifact-referenced')
+    // Honest copy: WHICH face references it, and what the operator does next.
+    expect(parsed.error.message).toContain(entry.id)
+    expect(parsed.error.message).toContain('unpublish')
+
+    // Nothing was deleted: still on disk, still downloadable.
+    expect(await market.artifacts.stat(entry.tarball)).not.toBeNull()
+    expect((await fetch(`${market.baseUrl}/artifacts/${entry.tarball}`)).status).toBe(200)
+  })
+
+  it('refuses to delete after unpublish while the activated manifest still references it', async () => {
+    const entry = await publish('@huaanwork/still-signed', '1.0.0')
+    await release()
+    await unpublish(entry.id)
+
+    // The activated manifest still names the artifact, so clients can still
+    // download and install it (an entries-only check would delete live bytes).
+    const manifest = await (await fetch(`${market.baseUrl}/v1/manifest`)).json() as { files: Array<{ tarballPath: string }> }
+    expect(manifest.files.map(file => file.tarballPath)).toContain(`/artifacts/${entry.tarball}`)
+
+    const response = await deleteArtifact(entry.tarball)
+    expect(response.status).toBe(409)
+    const parsed = await response.json() as { error: { code: string; message: string } }
+    expect(parsed.error.code).toBe('artifact-referenced')
+    expect(parsed.error.message).toContain('已激活清单')
+    expect(parsed.error.message).toContain('重新 prepare')
+    expect(await market.artifacts.stat(entry.tarball)).not.toBeNull()
+  })
+
+  it('deletes an artifact once neither the entries nor the activated manifest reference it', async () => {
+    const kept = await publish('@huaanwork/kept', '1.0.0')
+    const doomed = await publish('@huaanwork/remove-me', '1.0.0')
+    await release()
+    await unpublish(doomed.id)
+    await release() // re-prepare + activate a manifest WITHOUT the entry
+
+    const response = await deleteArtifact(doomed.tarball)
+    expect(response.status).toBe(204)
+    expect(await market.artifacts.stat(doomed.tarball)).toBeNull()
+    expect((await fetch(`${market.baseUrl}/artifacts/${doomed.tarball}`)).status).toBe(404)
+    // The artifact still referenced by both faces is untouched.
+    expect(await market.artifacts.stat(kept.tarball)).not.toBeNull()
+  })
+
+  it('lists deletable artifacts separately from referenced ones in the admin page', async () => {
+    const kept = await publish('@huaanwork/kept', '1.0.0')
+    await release() // activated manifest = [kept]
+    const manifestOnly = await publish('@huaanwork/manifest-only', '1.0.0')
+    await release() // activated manifest = [kept, manifest-only]
+    await unpublish(manifestOnly.id) // catalog face clear, manifest face still names it
+    const orphan = await publish('@huaanwork/orphan', '1.0.0')
+    await unpublish(orphan.id) // never entered an activated manifest
+
+    const byName = new Map((await artifactState()).map(artifact => [artifact.fileName, artifact]))
+    expect(byName.get(kept.tarball)).toMatchObject({ deletable: false, referencedBy: 'catalog' })
+    expect(byName.get(manifestOnly.tarball)).toMatchObject({ deletable: false, referencedBy: 'manifest' })
+    expect(byName.get(orphan.tarball)).toMatchObject({ deletable: true, referencedBy: null })
+
+    const html = await (await fetch(`${market.baseUrl}/admin`)).text()
+    // Two separate lists: deletable artifacts, and referenced (undeletable) ones.
+    expect(html).toContain('id="artifactsDeletable"')
+    expect(html).toContain('id="artifactsReferenced"')
+    // Referenced rows never get a clickable delete button (the P26 IMMUTABLE
+    // grey-out idea): the button receives an onclick only in the deletable
+    // branch, the other branch renders it disabled with the face named.
+    expect(html).toContain('if (artifact.deletable)')
+    expect(html).toContain('remove.disabled = true')
+  })
+
+  it('reports disk reclaimed so the operator can see the effect', async () => {
+    const kept = await publish('@huaanwork/size-kept', '1.0.0')
+    const doomed = await publish('@huaanwork/size-doomed', '1.0.0')
+    await release()
+    await unpublish(doomed.id)
+    await release()
+    const size = (await market.artifacts.stat(doomed.tarball))?.size
+    expect(size).toBeGreaterThan(0)
+
+    const response = await deleteArtifact(doomed.tarball)
+    expect(response.status).toBe(204)
+    // 204 carries no body by design, so the reclaimed byte count travels in a header.
+    expect(response.headers.get('x-artifact-bytes-reclaimed')).toBe(String(size))
+    expect(await market.artifacts.stat(doomed.tarball)).toBeNull()
+    expect((await artifactState()).map(artifact => artifact.fileName)).not.toContain(doomed.tarball)
+    expect(await market.artifacts.stat(kept.tarball)).not.toBeNull()
+  })
+
+  it('fails closed when the activated manifest shape cannot be inspected', async () => {
+    const entry = await publish('@huaanwork/shape', '1.0.0')
+    // Seed an activated manifest with no inspectable files[] (reachable by an
+    // operator hand-editing the state file or restoring an old backup; the
+    // signature pins the bytes, not the document shape). We cannot prove the
+    // artifact is unreferenced, so deletion must refuse rather than guess.
+    await market.store.activate({ envelope: { revision: 1 } }, null, 1)
+    await unpublish(entry.id)
+
+    const response = await deleteArtifact(entry.tarball)
+    expect(response.status).toBe(409)
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe('manifest-unreadable')
+    expect(await market.artifacts.stat(entry.tarball)).not.toBeNull()
+  })
+
+  it('rejects a missing or unsafe artifact name without touching the data directory', async () => {
+    // A publish writes the state document, so the traversal target exists on disk.
+    const entry = await publish('@huaanwork/name-guard', '1.0.0')
+    const stateFile = join(market.dataDir, 'catalog-state.json')
+    await expect(stat(stateFile)).resolves.toBeDefined()
+
+    const missing = await fetch(`${market.baseUrl}/v1/admin/artifact`, {
+      method: 'DELETE',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(missing.status).toBe(400)
+    expect(((await missing.json()) as { error: { code: string } }).error.code).toBe('invalid-delete-request')
+
+    // The deletion route answers only DELETE.
+    const wrongMethod = await fetch(`${market.baseUrl}/v1/admin/artifact?file=x.tgz`, {
+      method: 'GET',
+      headers: adminHeaders('test-admin-token'),
+    })
+    expect(wrongMethod.status).toBe(405)
+
+    // The name is joined into the artifacts directory before unlink(); a
+    // traversal segment must never reach the filesystem.
+    for (const unsafe of ['../../catalog-state.json', '../server.lock', 'catalog-state.json', '.upload-1-1.tmp']) {
+      const response = await deleteArtifact(unsafe)
+      expect(response.status, unsafe).toBe(404)
+      expect(((await response.json()) as { error: { code: string } }).error.code, unsafe).toBe('artifact-not-found')
+    }
+    await expect(stat(stateFile)).resolves.toBeDefined()
+    await expect(stat(join(market.dataDir, 'server.lock'))).resolves.toBeDefined()
+    expect(await market.artifacts.stat(entry.tarball)).not.toBeNull()
   })
 })
