@@ -247,4 +247,86 @@ describe('pendingRoot 生命周期', () => {
     writeStateFile({ pendingRoot: '/stale/root', writtenAt: new Date(now - PENDING_ROOT_TTL_MS - 1).toISOString() })
     expect(readPendingWorkspaceRoot(profileDir)).toBeNull()
   })
+
+  /**
+   * Minor 2(Task 6.9 fix round 1):状态文件内容恰为 `null` 时,JSON.parse 的成功
+   * 返回值会让「属性访问」抛裸 TypeError。读侧保持全函数性:任何合法但非对象的
+   * JSON 值(以及仍属对象的数组,其属性自然缺省)一律读回 null,不抛。
+   */
+  test('状态文件内容是 null 或标量时读回 null,不抛裸 TypeError', () => {
+    for (const raw of ['null', '42', '"text"', 'true', '[1]']) {
+      writeFileSync(join(profileDir, 'huaanwork-workspace.json'), `${raw}\n`, 'utf8')
+      expect(readPendingWorkspaceRoot(profileDir)).toBeNull()
+    }
+  })
+
+  /**
+   * Minor 3(Task 6.9 fix round 1):spec §14 第 23 条残余的断言形状是「丢弃 + 有
+   * 日志」。丢弃判据由本 spec 钉住;这里廉价钉住日志半支——main.ts 是 Electron
+   * 入口(单测不可 import),组合期诊断 `pendingRootDropped` 必须在 main.ts 里送进
+   * electronLogger.error,否则丢弃会退回静默。
+   */
+  test('main.ts 把组合期丢弃诊断落进 electronLogger.error(drop 日志路径的源级钉子)', () => {
+    const mainSource = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8')
+    expect(mainSource).toMatch(
+      /if \(prepared\.pendingRootDropped !== undefined\) \{\s*electronLogger\.error\(`\$\{BIN_NAME\}: \$\{prepared\.pendingRootDropped\}`\)/u,
+    )
+  })
+})
+
+describe('确认后重打 writtenAt(F1:TTL 锚定裁决时刻,不吞已确认切换)', () => {
+  /**
+   * F1(Task 6.9 fix round 1,评审 Important 1):原生确认框无超时,promise 挂起多久
+   * 由用户决定。预写 pendingRoot 的 writtenAt 若停留在弹框之前,用户超过 TTL 才确认
+   * 时,组合期会把这次**已确认**的切换当残留丢掉——而 HTTP 已应答 `restarting: true`,
+   * 重启进中立根且无任何用户可见通知。修复 = 确认路径以裁决时刻重打 writtenAt:
+   * 已裁决切换的年龄改度量「确认 → 重启」间隙(秒级);未裁决的对话框残留保有预写
+   * 时刻,仍会被 TTL 抓住(见上组用例)。
+   */
+  test('open:确认框停留超过 TTL 后确认 → writtenAt 重锚在裁决时刻,组合期不丢弃', async () => {
+    const target = mkdtempSync(join(tmpdir(), 'hw-ws-late-open-'))
+    const start = Date.parse('2026-01-01T00:00:00.000Z')
+    const decisionTime = start + PENDING_ROOT_TTL_MS + 60_000
+    vi.useFakeTimers()
+    vi.setSystemTime(start)
+    try {
+      const { ctx, requestRestart } = makeRouteCtx()
+      requestRestart.mockImplementation(async () => {
+        // 对话框挂起 TTL + 1 分钟(超时不存在,这就是「用户迟到」;预写时刻已超期)。
+        vi.setSystemTime(decisionTime)
+        return true
+      })
+      await expect(openWorkspace(ctx, target)).resolves.toEqual({ restarting: true, workspaceRoot: resolve(target) })
+      const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')) as
+        { writtenAt?: string }
+      expect(Date.parse(state.writtenAt ?? '')).toBe(decisionTime)
+      // 重启后在组合期读取:年龄只是「确认 → 重启」间隙(秒级),TTL 不误伤已裁决切换。
+      expect(readPendingWorkspaceRoot(profileDir, { now: decisionTime + 5_000 })).toBe(resolve(target))
+    } finally {
+      vi.useRealTimers()
+      rmSync(target, { recursive: true, force: true })
+    }
+  })
+
+  test('close:确认框停留超过 TTL 后确认 → writtenAt 重锚在裁决时刻,组合期不丢弃', async () => {
+    const start = Date.parse('2026-01-01T00:00:00.000Z')
+    const decisionTime = start + PENDING_ROOT_TTL_MS + 60_000
+    vi.useFakeTimers()
+    vi.setSystemTime(start)
+    try {
+      const { ctx, requestRestart } = makeRouteCtx()
+      const neutral = neutralWorkspaceRoot(profileDir)
+      requestRestart.mockImplementation(async () => {
+        vi.setSystemTime(decisionTime)
+        return true
+      })
+      await expect(closeWorkspace(ctx)).resolves.toEqual({ restarting: true, workspaceRoot: neutral })
+      const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')) as
+        { writtenAt?: string }
+      expect(Date.parse(state.writtenAt ?? '')).toBe(decisionTime)
+      expect(readPendingWorkspaceRoot(profileDir, { now: decisionTime + 5_000 })).toBe(neutral)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

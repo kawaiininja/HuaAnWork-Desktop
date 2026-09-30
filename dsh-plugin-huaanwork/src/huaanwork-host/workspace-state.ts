@@ -9,10 +9,16 @@ const STATE_FILENAME = 'huaanwork-workspace.json'
  * TTL 把「无限期残留」收窄为「TTL 内残留」,并让残留可诊断(超期在组合期丢弃 +
  * 回报具名理由)。
  *
+ * 时刻锚点(评审 F1,Task 6.9 fix round 1):每次写入都带时刻,且**确认被接受时
+ * 路由层会以确认时刻重打一次**(workspace.ts)——已裁决切换的年龄因此度量的是
+ * 「确认 → 组合」的重启间隙(秒级);对话框挂起期间被杀留下的**未裁决残留**保有
+ * 预写时刻,年龄超过 TTL 才在组合期被丢弃。TTL(10 分钟)覆盖正常重启间隙,但
+ * 不承诺「永不误伤」:机器挂起等极端情况下,超期丢弃的是长期悬置的意图,方向保守
+ * (回落中立根)且必有日志。
+ *
  * 与 automations-store 的 `MISSED_GRACE_MS` 同量级(10 分钟)但语义无关——一个是
  * 「错过调度」的宽限,一个是「待切换根」的寿命,故各自持常量,不共享(共享会把
- * 两个不相干的调整耦合在一起)。TTL 远大于确认框在屏幕上停留的真实时长(人工
- * 点击为秒级),故正常路径永不误伤。
+ * 两个不相干的调整耦合在一起)。
  */
 export const PENDING_ROOT_TTL_MS = 10 * 60_000
 
@@ -55,17 +61,22 @@ export function readPendingWorkspaceRoot(
 ): string | null {
   const file = join(profileDir, STATE_FILENAME)
   if (!existsSync(file)) return null
-  let parsed: { pendingRoot?: unknown; writtenAt?: unknown }
+  let parsed: unknown
   try {
-    parsed = JSON.parse(readFileSync(file, 'utf8')) as { pendingRoot?: unknown; writtenAt?: unknown }
+    parsed = JSON.parse(readFileSync(file, 'utf8'))
   } catch {
     return null
   }
-  const root = typeof parsed.pendingRoot === 'string' && parsed.pendingRoot.length > 0 ? parsed.pendingRoot : null
+  // Minor 2(Task 6.9 fix round 1):属性访问必须在全函数性守卫之后——文件内容恰为
+  // 字面 `null` 时 JSON.parse 成功返回 null,旧写法在此抛裸 TypeError。任何非对象
+  // (null/标量)一律读回 null,与「任何畸形内容读回 null」的既有语义一致。
+  if (parsed === null || typeof parsed !== 'object') return null
+  const state = parsed as { pendingRoot?: unknown; writtenAt?: unknown }
+  const root = typeof state.pendingRoot === 'string' && state.pendingRoot.length > 0 ? state.pendingRoot : null
   if (root === null) return null
 
   const now = options.now ?? Date.now()
-  const writtenAtText = typeof parsed.writtenAt === 'string' ? parsed.writtenAt : undefined
+  const writtenAtText = typeof state.writtenAt === 'string' ? state.writtenAt : undefined
   const writtenAtMs = writtenAtText === undefined ? Number.NaN : Date.parse(writtenAtText)
   if (Number.isNaN(writtenAtMs)) return root
 
@@ -90,6 +101,9 @@ export function clearPendingWorkspaceRoot(profileDir: string): void {
 /**
  * 落盘待切换根:附写入时刻(epoch → ISO 8601 UTC,TTL 判据的原料);
  * `null` = 清除(不删文件,留 `{}` 占位,状态仍可读)。
+ *
+ * 调用时序(评审 F1):路由层先预写(对话框挂起期间被杀 ⇒ 残留带预写时刻,超期被
+ * TTL 抓住),确认被接受时再以确认时刻重打一次——已裁决切换的年龄只度量重启间隙。
  */
 export function writePendingWorkspaceRoot(profileDir: string, root: string | null): void {
   const file = join(profileDir, STATE_FILENAME)
