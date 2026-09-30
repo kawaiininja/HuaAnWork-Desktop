@@ -1,11 +1,17 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { PROFILE_TEMPLATES } from '@deepseek-ai/dsh-app-boot'
 
 import type { DesktopPnpm, DesktopPnpmHandle } from '../pnpm.ts'
 import { DESKTOP_PACKAGE_NAMES } from '../product-identity.ts'
-import { gcRemovedPackageArtifacts } from './market/artifacts.ts'
+import {
+  gcRemovedPackageArtifacts,
+  isMarketArtifactVersion,
+  MarketArtifactIoError,
+  stageMarketArtifact,
+} from './market/artifacts.ts'
 import { HUAANWORK_MARKET_BUNDLE_NAME } from './market/config.ts'
 
 /**
@@ -78,6 +84,14 @@ function readBundleManifest(storageRoot: string): string[] | undefined {
 const remoteSource = /github:|git\+|https?:\/\//i
 
 /**
+ * 本地/市场插件写路径的 pnpm 能力面。`runPlugin`(经 `dsh plugin` CLI 安装/卸载)
+ * 必需;`run`(直跑 pnpm)可选——本地**目录**源要用它跑 `pnpm pack`,缺席时诚实
+ * 503 而不是退回「把源路径直接交给 pnpm」(那正是 Task 6.2 要修的悬空 `file:` 缺陷)。
+ * 生产由 DesktopPnpmService 同时实现两者(holders.ts 传的是完整服务实例)。
+ */
+export type PluginPnpmCapability = Pick<DesktopPnpm, 'runPlugin'> & Partial<Pick<DesktopPnpm, 'run'>>
+
+/**
  * plugin.add / plugin.remove 的调用方。RouteContext 结构上满足本类型;
  * desktopPnpm 由 holders 挂上,缺席时再向 runtimeCtx 查 desktopPnpm 服务。
  */
@@ -85,7 +99,7 @@ export interface PluginMutationContext {
   profileDir: string
   logger(message: string): void
   requestRestart(): Promise<boolean>
-  desktopPnpm?: Pick<DesktopPnpm, 'runPlugin'>
+  desktopPnpm?: PluginPnpmCapability
   runtimeCtx?: object
 }
 
@@ -115,7 +129,8 @@ export class PluginCommandError extends Error {
 /**
  * 本地插件安装与卸载。
  *
- * 顺序是 listPlugins → desktopPnpm.runPlugin → requestRestart。安装必须先结束:
+ * 顺序是本地源制品化(裁定 R-2,见 stageLocalPluginSource)→ listPlugins →
+ * desktopPnpm.runPlugin → requestRestart。安装必须先结束:
  * requestConfirmedRestart 确认后用 setImmediate 安排 relaunch,CLI 未结束就被掐会留下半成品。
  *
  * 取消不置 restarting,应答安装前的 listPlugins 快照(评审 P1-2)。本函数不改写 profile,
@@ -130,7 +145,8 @@ export class PluginCommandError extends Error {
  * 健康启动的声明式清单。这是需人工介入的恢复。compose gate 的 Desktop 等价是 boot 期
  * row-id 启动断言,重启即被覆盖,此处不另造检查。
  */
-/** addPlugin 的可选选项。M5 市场远程安装传 offline:true;本地调用方不传(M4 语义不变)。 */
+/** addPlugin 的可选选项。M5 市场远程安装传 offline:true;本地调用方不传(M4 语义不变,
+ *  本地安装的 argv 恒不带两 flag——制品已落 `.market-artifacts/`,不需要 --offline)。 */
 export interface AddPluginOptions {
   /**
    * 市场远程安装路径专用:true 时 pnpm 恒带 --offline --ignore-scripts。
@@ -151,11 +167,13 @@ export async function addPlugin(
   if (!source) throw new Error('plugin.add requires source')
   assertNotRemote(source)
   const resolved = resolve(source)
-  const packageName = isTarballFile(resolved) ? undefined : validatedDirectoryPackage(resolved)
+  // 本地源先落 `.market-artifacts/`(裁定 R-2):安装的是**制品路径**而非源路径,
+  // 源被移动/删除不再影响 profile(缺陷机理与取舍见 stageLocalPluginSource)。
+  const staged = await stageLocalPluginSource(routeCtx, resolved)
   const before = listPlugins(routeCtx.profileDir).bundles
   const argv: readonly [string, string, ...string[]] = opts?.offline === true
-    ? ['add', resolved, '--offline', '--ignore-scripts']
-    : ['add', resolved]
+    ? ['add', staged.artifactPath, '--offline', '--ignore-scripts']
+    : ['add', staged.artifactPath]
   await runDesktopPlugin(routeCtx, argv)
   if (!await routeCtx.requestRestart()) {
     return {
@@ -163,8 +181,162 @@ export async function addPlugin(
       message: '已取消重启：插件已写入清单，下次启动时生效',
     }
   }
-  const listed = bundlesAfterAdd(routeCtx, before, packageName)
+  const listed = bundlesAfterAdd(routeCtx, before, staged.packageName)
   return { bundles: listed.bundles, restarting: true, ...(listed.message ? { message: listed.message } : {}) }
+}
+
+/**
+ * 本地源 → `.market-artifacts/` 制品(裁定 R-2,spec §14 第 42/48 条)。
+ *
+ * `pnpm add <本地路径>` 把 `file:<源绝对路径>` 写进 profile package.json,制品与
+ * 该引用共存亡:源被移动/删除后,**任何后续 `pnpm add` 都以 ENOENT(EXIT=254)
+ * 确定性失败**(2026-09-25 实验 A/C;2026-09-30 以随包 pnpm 11.8.0 复现)。故本地
+ * 源先复制/打包成制品(与市场安装**同一**命名与落盘函数,见 market/artifacts.ts),
+ * 再安装制品路径:制品装后不删,并自动受 checkpoint-aware 的保留/GC 判据保护
+ * (第 50 条)。身份(name/version)取自源自身的 package.json。
+ *
+ * `packageName` 只对目录源有值(沿用 M4:`bundlesAfterAdd` 的清单推断分支不认
+ * `.tgz` 源);本地路径的 argv 不带 market 的两 flag(`offline` 仅市场安装传)。
+ */
+async function stageLocalPluginSource(
+  routeCtx: PluginMutationContext,
+  resolved: string,
+): Promise<{ artifactPath: string; packageName?: string }> {
+  if (isTarballFile(resolved)) {
+    // `.tgz`:字节原样复制——被安装字节 = 被复制字节(与市场路径解法 A 同精神)。
+    const bytes = readLocalSourceBytes(resolved)
+    const identity = localArchiveIdentity(await readLocalTarballManifest(bytes, routeCtx.logger))
+    assertStorableIdentity(identity.name, identity.version)
+    return { artifactPath: stageLocalBytes(routeCtx, identity, bytes) }
+  }
+  // 目录:先校验身份(M4 校验语义 + 制品命名边界),再 `pnpm pack` 成 `.tgz`
+  // ——目录不能被 pnpm 以 `file:` 引用后删源(M4 缺陷的另一半)。
+  const identity = validatedDirectoryPackage(resolved)
+  assertStorableIdentity(identity.name, identity.version)
+  const bytes = await packLocalDirectory(routeCtx, resolved)
+  return {
+    artifactPath: stageLocalBytes(routeCtx, identity, bytes),
+    packageName: identity.name,
+  }
+}
+
+/** 落盘本地源字节;落盘 IO 失败是**宿主**故障 ⇒ 具名 500(消息只带 errno,评审 P1)。 */
+function stageLocalBytes(
+  routeCtx: PluginMutationContext,
+  identity: { name: string; version: string },
+  bytes: Buffer,
+): string {
+  try {
+    return stageMarketArtifact(routeCtx.profileDir, identity.name, identity.version, bytes).artifactPath
+  } catch (error) {
+    if (error instanceof MarketArtifactIoError) {
+      throw new PluginCommandError(
+        500,
+        'plugin-error',
+        `plugin add: could not stage the local source into .market-artifacts (${error.errno})`,
+      )
+    }
+    throw error
+  }
+}
+
+/**
+ * 读本地 `.tgz` 的顶层 package.json。
+ *
+ * 复用 market/install.ts 的 `readTarballPackageJson`(**唯一**的 ustar walker,其
+ * manifest 选取规则与发布侧门由共享 fixture 钉住;另写一份会让两侧漂移)——用
+ * 懒加载:静态 import 会重新引入 artifacts.ts 的模块注释所要避免的
+ * install.ts ⇄ plugins-host.ts 循环依赖。
+ *
+ * 本地源不是市场制品:那份拒绝文案里的「downloaded」对本地文件不成立(诚实文案),
+ * 故只把原因码回给用户、把原文交给宿主日志。
+ */
+async function readLocalTarballManifest(
+  bytes: Buffer,
+  logger: (message: string) => void,
+): Promise<Record<string, unknown>> {
+  const { MarketInstallGateError, readTarballPackageJson } = await import('./market/install.ts')
+  try {
+    return readTarballPackageJson(bytes)
+  } catch (error) {
+    if (error instanceof MarketInstallGateError) {
+      logger(`plugin add: local source is not a usable .tgz archive: ${error.message}`)
+      throw new Error(`plugin source is not a usable .tgz package archive (${error.code})`)
+    }
+    throw error
+  }
+}
+
+/** `.tgz` 源的自述身份(name/version 必须是字符串;合法性另由 assertStorableIdentity 判)。 */
+function localArchiveIdentity(manifest: Record<string, unknown>): { name: string; version: string } {
+  const { name, version } = manifest
+  if (typeof name !== 'string' || !name) throw new Error('plugin package.json is missing name')
+  if (typeof version !== 'string' || !version) throw new Error('plugin package.json is missing version')
+  return { name, version }
+}
+
+/** 读源 `.tgz` 字节。源在校验后消失/不可读时诚实报错(只回 errno,不回含绝对路径的 fs message)。 */
+function readLocalSourceBytes(source: string): Buffer {
+  try {
+    return readFileSync(source)
+  } catch (error) {
+    const errno = typeof (error as { code?: unknown } | null)?.code === 'string'
+      ? (error as { code: string }).code
+      : 'unknown'
+    throw new Error(`plugin source could not be read (${errno}): ${source}`)
+  }
+}
+
+/**
+ * 目录源 → `.tgz` 字节:`pnpm -C <源目录> pack --pack-destination <私有临时目录>`。
+ *
+ * `DesktopPnpmService.run` 的 cwd 恒为 profileDir,故用 pnpm 的全局 `-C` 指向源
+ * 目录;打包目的地是本次调用私有的临时目录,读完即删(不往用户目录与 profile 里
+ * 留中间产物)。**不带任何 flag**:本地源是用户自己选的工程,其 prepack/prepare
+ * 构建照常执行——`--ignore-scripts` 是市场路径对**不可信制品**的封死,不适用于此
+ * (且 pnpm 11 对带构建脚本的包在忽略脚本时直接硬失败)。
+ */
+async function packLocalDirectory(routeCtx: PluginMutationContext, source: string): Promise<Buffer> {
+  const destination = mkdtempSync(join(tmpdir(), 'huaanwork-plugin-pack-'))
+  try {
+    await runDesktopPnpm(
+      routeCtx,
+      ['-C', source, 'pack', '--pack-destination', destination],
+      (exitCode) => `pnpm pack of the plugin source failed (exit ${exitCode})`,
+    )
+    const tarballs = readdirSync(destination).filter((entry) => entry.endsWith('.tgz'))
+    const packedName = tarballs[0]
+    if (tarballs.length !== 1 || packedName === undefined) {
+      throw new PluginCommandError(
+        500,
+        'plugin-error',
+        `plugin pack: expected exactly one packed tarball, found ${String(tarballs.length)}`,
+      )
+    }
+    return readFileSync(join(destination, packedName))
+  } finally {
+    rmSync(destination, { recursive: true, force: true })
+  }
+}
+
+/** 制品名里不允许出现的字符(控制字符;路径分隔符已由 safeArtifactName 折成 `-`)。 */
+const UNSAFE_ARTIFACT_NAME = /[\u0000-\u001f\u007f]/u
+
+/**
+ * 命名边界守卫(本地源侧):`<safeName>-<version>-<sha12>.tgz` 必须能承载该身份,
+ * 否则与 `gcRemovedPackageArtifacts` 的候选正则失配——卸载时制品漏删,只能等启动
+ * 孤儿清扫兜底。**拒绝安装并诚实报错,不放宽 GC 正则**(spec §14 第 42/49 条)。
+ */
+function assertStorableIdentity(name: string, version: string): void {
+  if (UNSAFE_ARTIFACT_NAME.test(name)) {
+    throw new Error(`plugin name ${JSON.stringify(name)} cannot be staged as a plugin artifact; names must not contain control characters`)
+  }
+  if (!isMarketArtifactVersion(version)) {
+    throw new Error(
+      `plugin version ${JSON.stringify(version)} cannot be staged as a plugin artifact; ` +
+      'versions must be 1-3 dot-separated numeric segments with an optional -/+ suffix (e.g. "1.0", "1.0.0", "1.0.0-beta.1")',
+    )
+  }
 }
 
 /** remove 与 add 同构:无来源校验,IMMUTABLE_BUNDLES 直接拒绝。取消应答同样
@@ -204,7 +376,12 @@ function isTarballFile(source: string): boolean {
   }
 }
 
-function validatedDirectoryPackage(source: string): string {
+/**
+ * 本地目录源的身份与声明校验(M4 语义:name 必填、`dsh.bundle` 必声明);
+ * Task 6.2 起 version 也必填——制品名是 `<name>-<version>-<sha256前12>.tgz`,
+ * 没有版本就无处落盘(且落成无版本名会让 GC 候选正则失配)。
+ */
+function validatedDirectoryPackage(source: string): { name: string; version: string } {
   const manifest = readManifest(join(source, 'package.json'))
   if (typeof manifest.name !== 'string' || !manifest.name) {
     throw new Error('plugin package.json is missing name')
@@ -212,17 +389,20 @@ function validatedDirectoryPackage(source: string): string {
   if (manifest.dsh?.bundle == null) {
     throw new Error('package must declare dsh.bundle')
   }
-  return manifest.name
+  if (typeof manifest.version !== 'string' || !manifest.version) {
+    throw new Error('plugin package.json is missing version')
+  }
+  return { name: manifest.name, version: manifest.version }
 }
 
-function readManifest(path: string): { name?: string; dsh?: { bundle?: unknown } } {
+function readManifest(path: string): { name?: string; version?: string; dsh?: { bundle?: unknown } } {
   if (!existsSync(path)) {
     throw new Error(`plugin source is not a local package: ${path}`)
   }
-  return JSON.parse(readFileSync(path, 'utf8')) as { name?: string; dsh?: { bundle?: unknown } }
+  return JSON.parse(readFileSync(path, 'utf8')) as { name?: string; version?: string; dsh?: { bundle?: unknown } }
 }
 
-function desktopPnpmOf(routeCtx: PluginMutationContext): Pick<DesktopPnpm, 'runPlugin'> {
+function desktopPnpmOf(routeCtx: PluginMutationContext): PluginPnpmCapability {
   if (routeCtx.desktopPnpm && typeof routeCtx.desktopPnpm.runPlugin === 'function') {
     return routeCtx.desktopPnpm
   }
@@ -234,7 +414,7 @@ function desktopPnpmOf(routeCtx: PluginMutationContext): Pick<DesktopPnpm, 'runP
     service = undefined
   }
   if (service && typeof (service as { runPlugin?: unknown }).runPlugin === 'function') {
-    return service as Pick<DesktopPnpm, 'runPlugin'>
+    return service as PluginPnpmCapability
   }
   throw new PluginCommandError(503, 'pnpm-unavailable', 'desktopPnpm.runPlugin is not available')
 }
@@ -248,17 +428,18 @@ function asPnpmBusy(error: unknown): PluginCommandError | undefined {
 }
 
 /**
- * argv 形如 [command, target, ...flags]:M5 起允许追加 pnpm flags(市场远程安装
- * 的 --offline --ignore-scripts);flags 经 dsh plugin CLI 直通 pnpm。
+ * 跑一次 pnpm 子进程并等它结束:`start` 决定入口(runPlugin 走 `dsh plugin` CLI、
+ * run 直跑 pnpm)。单并发冲突映 409(不排队);非零退出映**具名 500**(评审 P1:
+ * pnpm 非零退出是服务端故障,裸 Error 会被 market routes 的 catch-all 当成客户端
+ * 错误答 400;具名后 code 稳定为 plugin-error,message 不含路径)。
  */
-async function runDesktopPlugin(
-  routeCtx: PluginMutationContext,
-  argv: readonly [string, string, ...string[]],
+async function awaitPnpm(
+  start: () => DesktopPnpmHandle,
+  failure: (exitCode: number | null) => string,
 ): Promise<void> {
-  const invokingDir = resolve(routeCtx.profileDir)
   let handle: DesktopPnpmHandle
   try {
-    handle = desktopPnpmOf(routeCtx).runPlugin(argv, invokingDir)
+    handle = start()
   } catch (error) {
     const busy = asPnpmBusy(error)
     if (busy) throw busy
@@ -275,12 +456,40 @@ async function runDesktopPlugin(
     throw error
   }
   if (outcome.exitCode !== 0) {
-    const command = argv[0]
-    // 具名 500 而非裸 Error(评审 P1):pnpm 非零退出是**服务端**故障,裸 Error 会被
-    // market routes 的 catch-all 当成客户端错误答 400;具名后 code 稳定为
-    // plugin-error,客户端 unknown 分支仍能拿到 exit code 作诊断(message 不含路径)。
-    throw new PluginCommandError(500, 'plugin-error', `dsh plugin ${command} failed (exit ${outcome.exitCode})`)
+    throw new PluginCommandError(500, 'plugin-error', failure(outcome.exitCode))
   }
+}
+
+/**
+ * argv 形如 [command, target, ...flags]:M5 起允许追加 pnpm flags(市场远程安装
+ * 的 --offline --ignore-scripts);flags 经 dsh plugin CLI 直通 pnpm。
+ */
+async function runDesktopPlugin(
+  routeCtx: PluginMutationContext,
+  argv: readonly [string, string, ...string[]],
+): Promise<void> {
+  const invokingDir = resolve(routeCtx.profileDir)
+  await awaitPnpm(
+    () => desktopPnpmOf(routeCtx).runPlugin(argv, invokingDir),
+    (exitCode) => `dsh plugin ${argv[0]} failed (exit ${exitCode})`,
+  )
+}
+
+/**
+ * 直跑 pnpm(DesktopPnpm.run;cwd 恒为 profileDir,故需要换目录时用 pnpm 的全局
+ * `-C`)。本地路径只有**目录源 pack** 用它;执行器缺席时诚实 503。
+ */
+async function runDesktopPnpm(
+  routeCtx: PluginMutationContext,
+  argv: readonly string[],
+  failure: (exitCode: number | null) => string,
+): Promise<void> {
+  const pnpm = desktopPnpmOf(routeCtx)
+  if (typeof pnpm.run !== 'function') {
+    throw new PluginCommandError(503, 'pnpm-unavailable', 'desktopPnpm.run is not available')
+  }
+  const run = pnpm.run.bind(pnpm)
+  await awaitPnpm(() => run(argv), failure)
 }
 
 function resumePipe(stream: { resume?: () => void } | undefined): void {

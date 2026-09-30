@@ -4,10 +4,9 @@ import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { AgentSource, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
-import type { DesktopPnpm } from '../pnpm.ts'
 import { isSameOriginLoopbackRequest } from './loopback.ts'
 import { hasGit, listTree } from './native.ts'
-import { addPlugin, listPlugins, PluginCommandError, removePlugin } from './plugins-host.ts'
+import { addPlugin, listPlugins, PluginCommandError, removePlugin, type PluginPnpmCapability } from './plugins-host.ts'
 import { getAgentsDirectory } from './sessions.ts'
 import { removeSessionFilesById } from './session-sweep.ts'
 import {
@@ -102,10 +101,11 @@ export interface RouteContext {
    */
   requestRestart(): Promise<boolean>
   /**
-   * 插件安装/卸载的 CLI 执行器(pnpm.ts runPlugin)。holders 在 desktopPnpm
-   * 已提供时挂上;缺席时写路径再向 runtimeCtx 查一次,仍没有则 503。
+   * 插件安装/卸载的 CLI 执行器(pnpm.ts runPlugin;Task 6.2 起 `run` 也被本地目录源
+   * 的 `pnpm pack` 消费)。holders 在 desktopPnpm 已提供时挂上;缺席时写路径再向
+   * runtimeCtx 查一次,仍没有则 503。
    */
-  desktopPnpm?: Pick<DesktopPnpm, 'runPlugin'>
+  desktopPnpm?: PluginPnpmCapability
 }
 
 export type RouteHandler = (req: RouteRequest, ctx: RouteContext) => Promise<unknown>

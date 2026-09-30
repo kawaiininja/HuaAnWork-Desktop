@@ -11,11 +11,12 @@
  * restoreSlot 会重新引入旧引用)。
  *
  * 本模块只放纯助手(无 cordis / 无 plugins-host 依赖),供 install.ts(安装)、
- * routes/index(惰性清扫)与 plugins-host.removePlugin(卸载 GC)共用——
+ * routes/index(惰性清扫)与 plugins-host(卸载 GC、Task 6.2 起的本地安装落盘)共用——
  * 避免 install.ts ⇄ plugins-host.ts 循环依赖。
  */
 
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   PROFILE_CHECKPOINT_USER_DATA_DIR_ENV,
@@ -28,6 +29,25 @@ export const MARKET_ARTIFACTS_DIR_NAME = '.market-artifacts'
 /** 计划命名:`<name>-<version>-<sha256前12>.tgz`。 */
 export function marketArtifactName(name: string, version: string, sha256hex: string): string {
   return `${safeArtifactName(name)}-${version}-${sha256hex.slice(0, 12)}.tgz`
+}
+
+/**
+ * 制品版本面(命名边界的**唯一**字面量):数字起头、点分 1–3 段 + 可选
+ * prerelease/build 后缀。GC 候选正则与本地安装的合法性判据共用它——两份实现
+ * 会让「什么版本能落盘」与「什么版本能回收」漂移(spec §14 第 42/49 条)。
+ */
+const ARTIFACT_VERSION_LITERAL = '\\d+(?:\\.\\d+){0,2}(?:[-+][0-9A-Za-z.-]+)?'
+const ARTIFACT_VERSION_PATTERN = new RegExp(`^${ARTIFACT_VERSION_LITERAL}$`, 'u')
+
+/**
+ * 版本号是否落在制品命名边界内(Task 6.2 的本地源合法性判据):点分 1–3 段
+ * 数字 + 可选 `-`/`+` 后缀(`1.0`、`1.0.0`、`1.0.0-beta.1` 合法;`1.0.0.1`
+ * 不合法)。本地源若落成 `1.0.0.1` 这类名字,`gcRemovedPackageArtifacts` 的
+ * 候选正则永不命中 ⇒ 卸载时制品漏删(只剩启动孤儿清扫兜底)。故本地安装**拒绝**
+ * 这类源并诚实报错,**不放宽 GC 正则**。
+ */
+export function isMarketArtifactVersion(version: string): boolean {
+  return ARTIFACT_VERSION_PATTERN.test(version)
 }
 
 /** scoped 名(如 `@huaanwork/sample`)落盘前净化(与 market-server store 同口径)。 */
@@ -61,6 +81,64 @@ export function ensureMarketArtifactsDir(profileDir: string): string {
     // best-effort:见上方注释。
   }
   return dir
+}
+
+/**
+ * 制品落盘失败(IO)。message **只带 errno、不带绝对路径** —— 与 install.ts 的
+ * `market-artifact-io` 同口径(评审 P1:fs 错误的 message 含 profileDir 绝对路径,
+ * 而具名错误会经 routes 原样回渲染进程)。映射成哪个 HTTP 状态由消费方决定:
+ * plugins-host 映 500 plugin-error(本地安装落盘失败是**宿主**故障)。
+ */
+export class MarketArtifactIoError extends Error {
+  readonly errno: string
+
+  constructor(errno: string) {
+    super(`failed to stage the market artifact (${errno})`)
+    this.name = 'MarketArtifactIoError'
+    this.errno = errno
+  }
+}
+
+/**
+ * 把**已在手上的字节**落成制品:`<profileDir>/.market-artifacts/<name>-<version>-
+ * <sha256前12>.tgz`(目录 0700、文件 0600;temp + rename 原子落盘,同 sha 重复落盘
+ * 原地覆盖写保 inode——`file:` 引用不受影响)。
+ *
+ * 本地安装(Task 6.2,裁定 R-2)与市场安装落的是**同一个**命名与布局函数 ⇒ 本地
+ * 制品一落位就与市场制品同受「当前 profile 且所有 checkpoint slot 均无引用才可删」
+ * 的保留/GC 判据(spec §14 第 42/48/50 条)。市场路径传入的已是本目录制品:同身份
+ * 同字节 ⇒ 同名,走的是幂等覆盖写分支。
+ *
+ * 名字里的 sha12 由**同一份字节**算出(不另行传参——两处各算一次就多一个漂移面)。
+ * 落盘失败抛 `MarketArtifactIoError`(只带 errno,不带绝对路径)。
+ */
+export function stageMarketArtifact(
+  profileDir: string,
+  name: string,
+  version: string,
+  bytes: Uint8Array,
+): { artifactPath: string; sha256: string } {
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const artifactsDir = ensureMarketArtifactsDir(profileDir)
+  const artifactPath = join(artifactsDir, marketArtifactName(name, version, sha256))
+  const tmpPath = `${artifactPath}.tmp-${String(process.pid)}`
+  try {
+    if (existsSync(artifactPath)) {
+      writeFileSync(artifactPath, bytes)
+    } else {
+      writeFileSync(tmpPath, bytes, { mode: 0o600 })
+      chmodSync(tmpPath, 0o600)
+      renameSync(tmpPath, artifactPath)
+    }
+    chmodSync(artifactPath, 0o600)
+  } catch (error) {
+    try { rmSync(tmpPath, { force: true }) } catch { /* best-effort */ }
+    const errno = typeof (error as { code?: unknown } | null)?.code === 'string'
+      ? (error as { code: string }).code
+      : 'unknown'
+    throw new MarketArtifactIoError(errno)
+  }
+  return { artifactPath, sha256 }
 }
 
 /** 读 profile package.json 的 dependencies 原样(缺文件/缺键返回 {})。 */
@@ -159,8 +237,9 @@ export function gcRemovedPackageArtifacts(profileDir: string, packageName: strin
   if (!existsSync(dir)) return
   const escaped = safeArtifactName(packageName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   // 版本:数字起头、点分 1–3 段(对齐 gate.ts 的 filename-safe 版本面,`1.0` 可 GC)
-  // + prerelease/build(连字符/加号后缀);sha12 恰 12 位小写 hex。
-  const exactName = new RegExp(`^${escaped}-(\\d+(?:\\.\\d+){0,2}(?:[-+][0-9A-Za-z.-]+)?)-([0-9a-f]{12})\\.tgz$`, 'u')
+  // + prerelease/build(连字符/加号后缀);sha12 恰 12 位小写 hex。版本面与本地
+  // 安装的 `isMarketArtifactVersion` 共用同一字面量(见该函数注释)。
+  const exactName = new RegExp(`^${escaped}-${ARTIFACT_VERSION_LITERAL}-([0-9a-f]{12})\\.tgz$`, 'u')
   const referenced = retentionReferencedArtifactPaths(profileDir, logger)
   for (const entry of readdirSync(dir)) {
     if (!exactName.test(entry)) continue
