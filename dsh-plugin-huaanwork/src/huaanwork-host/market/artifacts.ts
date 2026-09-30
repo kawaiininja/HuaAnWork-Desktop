@@ -104,10 +104,11 @@ export class MarketArtifactIoError extends Error {
  * <sha256前12>.tgz`(目录 0700、文件 0600;temp + rename 原子落盘,同 sha 重复落盘
  * 原地覆盖写保 inode——`file:` 引用不受影响)。
  *
- * 本地安装(Task 6.2,裁定 R-2)与市场安装落的是**同一个**命名与布局函数 ⇒ 本地
- * 制品一落位就与市场制品同受「当前 profile 且所有 checkpoint slot 均无引用才可删」
- * 的保留/GC 判据(spec §14 第 42/48/50 条)。市场路径传入的已是本目录制品:同身份
- * 同字节 ⇒ 同名,走的是幂等覆盖写分支。
+ * 本地安装(Task 6.2,裁定 R-2)落的就是**同一个**命名与布局函数 ⇒ 本地制品一落位
+ * 就与市场制品同受「当前 profile 且所有 checkpoint slot 均无引用才可删」的保留/GC
+ * 判据(spec §14 第 42/48/50 条)。市场路径(`executeMarketInstall`)传入的制品已在
+ * 本目录内,addPlugin 侧直通不再重新落盘(修复轮 1:否则二次落盘还会把发布侧门的
+ * 宽版本面喂给本地命名边界)。
  *
  * 名字里的 sha12 由**同一份字节**算出(不另行传参——两处各算一次就多一个漂移面)。
  * 落盘失败抛 `MarketArtifactIoError`(只带 errno,不带绝对路径)。
@@ -121,6 +122,10 @@ export function stageMarketArtifact(
   const sha256 = createHash('sha256').update(bytes).digest('hex')
   const artifactsDir = ensureMarketArtifactsDir(profileDir)
   const artifactPath = join(artifactsDir, marketArtifactName(name, version, sha256))
+  // 与 market/install.ts:285-308 同协议(逐行双生:同 existsSync 原地覆盖写分支、同
+  // `${artifactPath}.tmp-${process.pid}` 暂存名、同 0600、同 errno 提取)。复制是
+  // 控制方把 install.ts 保留给 Task 6.3 的边界产物,不是自由选择;Task 6.3 收敛为
+  // 单实现之前,两侧任一改动必须同步(否则「落盘协议」与「安装侧错误口径」漂移)。
   const tmpPath = `${artifactPath}.tmp-${String(process.pid)}`
   try {
     if (existsSync(artifactPath)) {

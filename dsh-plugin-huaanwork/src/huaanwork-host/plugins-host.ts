@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 
 import { PROFILE_TEMPLATES } from '@deepseek-ai/dsh-app-boot'
 
@@ -10,6 +10,7 @@ import {
   gcRemovedPackageArtifacts,
   isMarketArtifactVersion,
   MarketArtifactIoError,
+  marketArtifactsDir,
   stageMarketArtifact,
 } from './market/artifacts.ts'
 import { HUAANWORK_MARKET_BUNDLE_NAME } from './market/config.ts'
@@ -169,6 +170,7 @@ export async function addPlugin(
   const resolved = resolve(source)
   // 本地源先落 `.market-artifacts/`(裁定 R-2):安装的是**制品路径**而非源路径,
   // 源被移动/删除不再影响 profile(缺陷机理与取舍见 stageLocalPluginSource)。
+  // 已在制品目录内的路径(市场安装链传入的制品)原样直通——不二次落盘、不判版本。
   const staged = await stageLocalPluginSource(routeCtx, resolved)
   const before = listPlugins(routeCtx.profileDir).bundles
   const argv: readonly [string, string, ...string[]] = opts?.offline === true
@@ -195,6 +197,14 @@ export async function addPlugin(
  * 再安装制品路径:制品装后不删,并自动受 checkpoint-aware 的保留/GC 判据保护
  * (第 50 条)。身份(name/version)取自源自身的 package.json。
  *
+ * **已在 `.market-artifacts/` 落位的制品直通**(修复轮 1,Important 1):市场安装
+ * (`executeMarketInstall`)传进来的就是本目录产物——`isStagedMarketArtifact` 命中时
+ * 原样返回,**不二次落盘、不做身份/版本拒绝**。判据是内禀位置而非 `opts.offline`:
+ * 发布侧门(market-server gate.ts)只要求 filename-safe 版本(点分 4 段/`abc`/`V1.0`
+ * 均可发布),本地命名边界更窄;若把本地门套到市场制品上,今天是「下载成功 →
+ * 确定性拒绝」并留下孤儿制品,且读起来像用户的本地源有问题。位置命中即回到本 Task
+ * 之前逐字一致的市场行为(裁定 R-2 的拒绝面只针对**本地源**)。
+ *
  * `packageName` 只对目录源有值(沿用 M4:`bundlesAfterAdd` 的清单推断分支不认
  * `.tgz` 源);本地路径的 argv 不带 market 的两 flag(`offline` 仅市场安装传)。
  */
@@ -202,6 +212,9 @@ async function stageLocalPluginSource(
   routeCtx: PluginMutationContext,
   resolved: string,
 ): Promise<{ artifactPath: string; packageName?: string }> {
+  if (isStagedMarketArtifact(routeCtx.profileDir, resolved)) {
+    return { artifactPath: resolved }
+  }
   if (isTarballFile(resolved)) {
     // `.tgz`:字节原样复制——被安装字节 = 被复制字节(与市场路径解法 A 同精神)。
     const bytes = readLocalSourceBytes(resolved)
@@ -218,6 +231,19 @@ async function stageLocalPluginSource(
     artifactPath: stageLocalBytes(routeCtx, identity, bytes),
     packageName: identity.name,
   }
+}
+
+/**
+ * 解析后的路径是否已在**本 profile 的** `.market-artifacts/` 内(市场安装链
+ * `executeMarketInstall` 传入的制品恒在此;market/install.ts 落盘后即调 addPlugin)。
+ * 内禀位置判别:命中 ⇒ 制品已落位,直通(见 stageLocalPluginSource,修复轮 1)。
+ * `relative` 判据对 `..` 与绝对路径两侧都封死;`resolve` 只做规范化,不触符号链接
+ * ——profileDir 与制品路径同基,前缀比较自洽。
+ */
+function isStagedMarketArtifact(profileDir: string, resolved: string): boolean {
+  const dir = resolve(marketArtifactsDir(profileDir))
+  const rel = relative(dir, resolved)
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
 }
 
 /** 落盘本地源字节;落盘 IO 失败是**宿主**故障 ⇒ 具名 500(消息只带 errno,评审 P1)。 */

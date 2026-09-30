@@ -13,6 +13,7 @@ import {
   IMMUTABLE_BUNDLES,
   PluginCommandError,
   removePlugin,
+  type AddPluginOptions,
   type PluginMutationContext,
   type PluginMutationResult,
 } from '../../src/huaanwork-host/plugins-host.ts'
@@ -626,9 +627,10 @@ async function localAdd(
   ctx: PluginMutationContext,
   source: string,
   stub: LocalPnpmStub,
+  opts?: AddPluginOptions,
 ): Promise<{ result?: PluginMutationResult; failure?: string }> {
   try {
-    return { result: await addPlugin(ctx, source) }
+    return { result: await addPlugin(ctx, source, opts) }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return { failure: `${message}\n--- pnpm output ---\n${stub.output.join('\n')}` }
@@ -838,5 +840,66 @@ describe('local plugin installs survive their source disappearing', () => {
     expect((await localAdd(ctx, prerelease.path, stub)).failure).toBeUndefined()
     expect(fileReferenceFor(sandbox.readProfileDependencies(), 'local-prerelease'))
       .toBe(`file:${stagedPathFor(sandbox.profileDir, 'local-prerelease', '1.0.0-beta.1', readFileSync(prerelease.path))}`)
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------
+// 修复轮 1(Important 1):**已在 `.market-artifacts/` 落位的制品直通**——市场安装
+// 路径执行的版本门/二次落盘必须与本 Task 之前逐字一致。
+//
+// 发布侧门(market-server/src/tarball/gate.ts)只要求 filename-safe 版本,
+// `2026.09.27.1`(点分 4 段)、`1.0.0.1`、`abc`、`V1.0` 都是可发布版本;本地命名
+// 边界(点分 1–3 段)比它窄,不能反过来把市场已发布制品拒之门外(否则今天是
+// 「下载成功 → 确定性拒绝」,还留下孤儿制品)。判据是**内禀位置**:解析后的路径
+// 在本 profile 的 `.market-artifacts/` 内 ⇒ 直通(不再二次落盘、不判身份/版本)。
+// ---------------------------------------------------------------------------
+
+describe('artifacts already staged under .market-artifacts pass through the local gate (fix round 1)', () => {
+  /** 发布侧门放行、本地命名边界**外**的版本(点分 4 段)——两条门的分歧样本。 */
+  const OUTSIDE_BOUNDARY = '2026.09.27.1'
+
+  test('an offline install of an already-staged artifact with a not-1–3-segment version succeeds and stays byte-identical', async () => {
+    const sandbox = createMarketSandbox()
+    const built = sandbox.buildTarball({ name: 'market-passthrough', version: OUTSIDE_BOUNDARY })
+    // 市场安装链落的制品形态:`.market-artifacts/<name>-<version>-<sha12>.tgz`(0600)。
+    const artifactPath = sandbox.promoteToArtifact(built)
+    const stub = bundledLocalPnpmStub(sandbox)
+    const before = statSync(artifactPath)
+    const beforeBytes = readFileSync(artifactPath)
+
+    const added = await localAdd(localCtx(sandbox, stub), artifactPath, stub, { offline: true })
+
+    // 修前:本地版本门把该制品拒之门外(exit: cannot be staged as a plugin artifact)。
+    expect(added.failure).toBeUndefined()
+    expect(added.result?.restarting).toBe(true)
+    // argv 与本 Task 之前逐字一致:装的就是制品路径 + 市场两 flag。
+    const addCalls = stub.calls.filter((call) => call[0] === 'add')
+    expect(addCalls).toEqual([['add', artifactPath, '--offline', '--ignore-scripts']])
+    // `file:` 引用指向制品本身,制品在盘。
+    expect(fileReferenceFor(sandbox.readProfileDependencies(), 'market-passthrough')).toBe(`file:${artifactPath}`)
+    expect(fileReferenceExists(sandbox.profileDir, sandbox.readProfileDependencies())).toBe(true)
+    // 未被二次落盘:字节、inode、mtime 均未动(旧实现会以同名原地覆盖写 ⇒ mtime 变)。
+    const after = statSync(artifactPath)
+    expect(readFileSync(artifactPath).equals(beforeBytes)).toBe(true)
+    expect(after.ino).toBe(before.ino)
+    expect(after.mtimeMs).toBe(before.mtimeMs)
+    expect(countTarballs(sandbox.artifactsDir)).toBe(1)
+  }, 120_000)
+
+  test('the discriminator is the artifact-dir location: the same version outside it is still refused (Step 4 intact)', async () => {
+    const sandbox = createMarketSandbox()
+    const stub = bundledLocalPnpmStub(sandbox)
+    const ctx = localCtx(sandbox, stub)
+    const built = sandbox.buildTarball({ name: 'local-outside-boundary', version: OUTSIDE_BOUNDARY })
+
+    // 同一份字节放在制品目录**外** ⇒ 本地源 ⇒ Step 4 的拒绝照旧(不落盘、不跑 pnpm)。
+    await expect(addPlugin(ctx, built.path)).rejects.toThrow(/cannot be staged as a plugin artifact/u)
+    expect(countTarballs(sandbox.artifactsDir)).toBe(0)
+    expect(stub.calls).toEqual([])
+
+    // 落进制品目录(市场安装的形态)⇒ 直通装成:两种命运只由位置决定,不由字节。
+    const artifactPath = sandbox.promoteToArtifact(built)
+    expect((await localAdd(ctx, artifactPath, stub, { offline: true })).failure).toBeUndefined()
+    expect(fileReferenceFor(sandbox.readProfileDependencies(), 'local-outside-boundary')).toBe(`file:${artifactPath}`)
   }, 120_000)
 })
