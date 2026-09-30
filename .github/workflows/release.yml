@@ -79,11 +79,12 @@ jobs:
             exit 1
           fi
           echo "Building HuaAnWork $packaged"
-      # Fail fast before any packaging time is spent. The guard script is created
-      # by task 4.8; after that task it also runs inside the root dist:win pairs,
-      # where this step remains as CI-side depth with a clear error surface. For
-      # the macOS smoke path below it is the only guard: that path stays
-      # deliberately unguarded in task 4.8's root scripts.
+      # Fail fast before any packaging time is spent: without the pinned market
+      # public key and both real intranet origins this build would ship a product
+      # whose market face rejects every signed manifest
+      # (docs/release-checklist.md §0). The Windows root commands run the same
+      # guard as their first step; here it stays as the CI-side error surface, and
+      # for the unsigned macOS smoke path below it is the only guard.
       - name: Verify the release provisioning (fail fast)
         run: node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs
       # R-6: this is the macOS release artifact for the credential-free period.

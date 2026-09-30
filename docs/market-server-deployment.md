@@ -437,6 +437,16 @@ intake 只配了 slot 1，该 sidecar 会被拒（K1 已配置时 `slot-key-mism
 - 发版钉扎进 wrapper `config.ts`（Task 4 Step 3）前，负责人在离线签名机重算
   `sha256(raw pubkey)` 与带外指纹比对一致才允许合入；market-server 侧配置
   （Task 2）同口径核对。
+- **钉入形态与机械守卫（M6 Task 4.8）**：wrapper 侧钉扎是
+  `PINS_AT_RELEASE.current = { keyId: <sha256 指纹>, publicKeyHex: <raw hex> }`
+  ——两项一并钉入且必须配对（`config.ts` 的 `parsePinnedMarketKey` 校验
+  `keyId === sha256(publicKeyHex)`，不配对即 fail-closed 抛错）。发行命令前置的
+  `node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs` 在打包前做
+  同一判定并逐项打印指纹，供 R1 与 R2 带外核对；**空钉扎、只给公钥不给指纹、
+  指纹不配对、或任一 default origin 仍含 `.example`，构建一律拒绝**。
+- **master 的按设计状态是未 provisioning**（空钉扎 + 两个 `.example` 占位 origin），
+  故守卫在 master 上恒拒；真实值在发行分支钉入，步骤见
+  [`release-checklist.md`](./release-checklist.md)。
 
 ## 离线签名操作纪律
 

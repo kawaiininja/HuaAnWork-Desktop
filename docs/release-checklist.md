@@ -10,6 +10,48 @@
 > 不是待补缺口。凭据到位后按本文实跑即可,不需要任何未完成的开发工作;R-6 生效期的内网发行
 > 使用未签名制品(macOS 见 §1.8,Windows 见 §2)。R1 的实跑结果记入 Task 7.3 的冒烟记录。
 
+## 0. 发行 provisioning:市场公钥与两个 origin(先于打包)
+
+**先跑这一步,再谈签名与打包。** 三条真实发行命令(`dist:mac:huaanwork` / `dist:win:huaanwork` /
+`dist:win-portable:huaanwork`)与 `.github/workflows/release.yml` 的两个 job 都在打包前跑 provisioning
+守卫:
+
+```bash
+node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs
+```
+
+守卫读源码文本(不 import,故在无 `yarn install` 的最小环境也能跑),判定三项:市场验签公钥
+(`config.ts` 的 `PINS_AT_RELEASE.current` 的 `publicKeyHex` + `keyId`)、市场 origin
+(`HUAANWORK_MARKET_DEFAULT_ORIGIN`)、更新 origin(`HUAANWORK_UPDATE_DEFAULT_ORIGIN`)。**空钉扎、
+`keyId` 与公钥不配对、任一 origin 仍含 `.example`,都非零退出并逐项列出缺什么**——未 provisioning
+的构建因此在打包前就被拦下,而不是等用户点市场才撞上恒拒(fail-closed:无公钥 ⇒ 市场验签永远拒绝)。
+**诚实说明**:env 覆盖(`HUAANWORK_MARKET_ORIGIN` / `HUAANWORK_UPDATE_ORIGIN`)只重指运行期 origin,
+既不提供公钥也不构成对信任锚的 provisioning,故不满足守卫。
+
+本仓库 master 的按设计状态就是**未 provisioning**:`PINS_AT_RELEASE` 为空(市场面恒拒)、两个 origin
+是 `.example` 占位(按构造不可达)。真实值由 R2 提供、R1 在**发行分支**钉入(裁定 D-M6-18:R3 执行者
+不得自己生成密钥或猜测地址)。双人流程,逐项可照做:
+
+1. **R2** 在**离线签名机**跑 `node market-server/scripts/gen-signing-key.mjs --out <仓库外目录>`
+   (该脚本自带「拒绝写入 git worktree」守卫;私钥落盘 0600)。
+2. **R2** 记录 `market-signing-key.pub.hex` 与其 sha256 指纹,经**第二条信道**(非邮件、非同一 IM
+   会话)把**指纹**交给 R1。
+3. **R1** 在发行分支把 hex 写入 `dsh-plugin-huaanwork/src/huaanwork-host/market/config.ts` 的
+   `PINS_AT_RELEASE.current.publicKeyHex`,`keyId` 用 R2 给的指纹(两者必须配对,守卫会回算拒绝抄错)。
+4. **R1** 把两个 default origin 换成 R2 提供的真实内网地址:`config.ts` 的
+   `HUAANWORK_MARKET_DEFAULT_ORIGIN` 与 `update-checker.ts` 的 `HUAANWORK_UPDATE_DEFAULT_ORIGIN`
+   (**两个都换**;只换一个会被守卫当作未 provisioning 拒绝)。
+5. **R1** 跑 `node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs`,核对输出的
+   `sha256(公钥原始字节)` 与 R2 经第二信道给出的指纹**逐字符相同**,并把该输出贴进发行记录(冒烟记录)。
+6. **R1** 跑 `corepack yarn dist:mac:huaanwork` / `dist:win:huaanwork`(§1 / §2)。
+7. **私钥永不进入 fork 仓库、永不进入 CI、永不进入 market-server 进程**(真离线两步流,spec §14 第 41 条)。
+8. **`notAfter` 上限 7 天即私钥泄露的最大暴露窗口**(spec §14 第 47 条)⇒ 离线签名节奏必须短于该窗口,
+   推荐发布即签。
+
+守卫**不覆盖** `dist:win-sign:huaanwork`(§2 的签名路径,它的命令串保持 Task 4.6 原样):该命令内部会先跑
+一次未签名打包,故发行当天按上面第 5 步单独跑一次守卫;守卫的口径不因签名路径而放宽。市场服务端的部署、
+轮换与吊销见 [`market-server-deployment.md`](./market-server-deployment.md)。
+
 ## 1. macOS 签名与公证
 
 ### 1.1 前置(缺一不可)

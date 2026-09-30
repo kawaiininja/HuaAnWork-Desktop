@@ -16,6 +16,8 @@
  * 永远拒绝(Task 5 verify.ts 消费此 gate)。
  */
 
+import { createHash } from 'node:crypto'
+
 export const HUAANWORK_MARKET_BUNDLE_NAME = 'huaanwork-market' as const
 
 /** package.json exports map 的 wrapper subpath(src/profile.ts 的落位校验消费)。 */
@@ -73,6 +75,14 @@ export function resolveMarketOrigin(env: NodeJS.ProcessEnv = process.env): strin
 /** 钉住格式:raw 32 字节 Ed25519 公钥,小写 hex(64 字符)——docs/market-server-deployment.md。 */
 export interface PinnedMarketVerificationKey {
   readonly publicKeyHex: string
+  /**
+   * 公钥原始字节的 sha256 hex 指纹(= 签名 sidecar 的 keyId)。
+   * 发行钉入必须给出(打包前由 scripts/huaanwork-verify-provisioning.mjs 强制),用于与
+   * R2 带外给出的指纹逐字符核对;给出时本模块校验它与 publicKeyHex 配对,不配对即抛
+   * (人工钉入最可能的错误是抄错指纹,结果是一版恒拒真清单的 app)。
+   * 可缺失:由测试向量驱动的 pins 在 verify.ts 里现场推导指纹,不需要预先声明。
+   */
+  readonly keyId?: string
 }
 
 /** 轮换重叠期的上一把公钥(槽 2);`retiredAt` 退役时刻一到,其签名即拒(round4 C3)。 */
@@ -97,17 +107,36 @@ export const DEFAULT_MARKET_VERIFICATION_PINS: MarketVerificationPins = Object.f
 /**
  * app 发版钉扎点(docs/market-server-deployment.md「公钥分发与指纹核对」):
  * 新发版把新公钥放 current、旧公钥退 previous(带 retiredAt = 一个 app 发版窗口)。
+ * 钉入形态:`current: { keyId: <sha256 指纹>, publicKeyHex: <raw hex> }`(发行钉入两者缺一
+ * 不可,由 `scripts/huaanwork-verify-provisioning.mjs` 在打包前强制并回算指纹)。
  * 当前未钉任何公钥——verify 恒拒,直至发版供给。
  */
 export const PINS_AT_RELEASE: MarketVerificationPins = DEFAULT_MARKET_VERIFICATION_PINS
 
-/** 校验一把钉住公钥的格式(raw 32 字节小写 hex);非法即具名错误 fail-closed。 */
+/**
+ * 校验一把钉住公钥的格式(raw 32 字节小写 hex)与声明的指纹;非法即具名错误 fail-closed。
+ * `keyId` 给出时必须是 `publicKeyHex` 的 sha256 指纹(见 PinnedMarketVerificationKey)。
+ */
 export function parsePinnedMarketKey(key: PinnedMarketVerificationKey, label: string): PinnedMarketVerificationKey {
   if (key === null || typeof key !== 'object' || typeof key.publicKeyHex !== 'string'
     || !/^[0-9a-f]{64}$/u.test(key.publicKeyHex)) {
     throw new HuaanworkMarketConfigError(
       `invalid ${label}: pinned public key must be raw 32-byte Ed25519 lowercase hex (64 chars)`,
     )
+  }
+  if (key.keyId !== undefined) {
+    if (typeof key.keyId !== 'string' || !/^[0-9a-f]{64}$/u.test(key.keyId)) {
+      throw new HuaanworkMarketConfigError(
+        `invalid ${label}: keyId must be the sha256 fingerprint of the pinned public key (64 lowercase hex chars)`,
+      )
+    }
+    const expectedKeyId = createHash('sha256').update(Buffer.from(key.publicKeyHex, 'hex')).digest('hex')
+    if (key.keyId !== expectedKeyId) {
+      throw new HuaanworkMarketConfigError(
+        `invalid ${label}: keyId ${JSON.stringify(key.keyId)} is not sha256(publicKeyHex) ${JSON.stringify(expectedKeyId)};`
+        + ' the pinned fingerprint and the pinned public key must be the same key (re-check the out-of-band fingerprint)',
+      )
+    }
   }
   return key
 }

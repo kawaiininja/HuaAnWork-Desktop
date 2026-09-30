@@ -995,7 +995,7 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['verify:cli']).toBe('node scripts/verify-cli-runtime.mjs')
     expect(manifest.scripts?.check).toContain('yarn run verify:cli')
     expect(workspaceManifest.scripts?.['dist:mac:huaanwork'])
-      .toBe('yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac')
+      .toBe('yarn aa:prepare-release && node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac')
     expect(workspaceManifest.scripts?.['dist:mac-smoke:huaanwork'])
       .toBe('yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac-smoke')
     expect(manifest.build?.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
@@ -1038,6 +1038,23 @@ describe('published package surface', () => {
       expect(script).toContain('yarn workspace dsh-community-market build && ')
       expect(script).toContain('yarn workspace dsh-plugin-huaanwork dist:win')
     }
+  })
+
+  // Task 4.8:未完成 provisioning 的构建**不产出制品**。守卫只能挂在真实发行命令上。
+  it('runs the provisioning guard before any release packaging command', () => {
+    const scripts = workspaceManifest.scripts ?? {}
+    for (const name of ['dist:mac:huaanwork', 'dist:win:huaanwork', 'dist:win-portable:huaanwork']) {
+      expect(scripts[name], name).toContain('huaanwork-verify-provisioning')
+    }
+  })
+
+  it('does not gate development or the headless check', () => {
+    const scripts = workspaceManifest.scripts ?? {}
+    // 开发态本就不该有生产公钥;接进 check 会让日常开发全红。同理不接 dist:mac-smoke
+    // (CI 的未签名冒烟路径;release.yml 的 macos job 在它之前单独跑守卫步骤)。
+    expect(scripts.check).not.toContain('huaanwork-verify-provisioning')
+    expect(scripts['dev:huaanwork']).not.toContain('huaanwork-verify-provisioning')
+    expect(scripts['dist:mac-smoke:huaanwork']).not.toContain('huaanwork-verify-provisioning')
   })
 
   it('runs platform package gates before reusing native packaging outputs', () => {
