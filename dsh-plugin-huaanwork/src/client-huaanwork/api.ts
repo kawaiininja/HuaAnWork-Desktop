@@ -262,9 +262,10 @@ export interface DirectoryPickerOutcome {
 }
 
 /**
- * D11：区分「用户取消」与「平台不支持」。picker route 仅在 win32 注册
- * （src/index.ts），macOS/Linux 上非 2xx——旧 pickDirectory 对两者同语义
- * 返回 null，市场本地安装页对不支持的平台只能静默无反馈。
+ * D11：区分「用户取消」与「平台不支持」。picker route 在 win32 与 darwin 注册
+ * （src/index.ts）：darwin 经组合的上游 directory-picker native capability 选目录
+ * （osascript），非 win32/darwin 或 native capability 缺席的组合返回非 2xx——旧
+ * pickDirectory 对两者同语义返回 null，市场本地安装页对不支持的平台只能静默无反馈。
  */
 export async function pickDirectoryDetailed(): Promise<DirectoryPickerOutcome> {
   const response = await fetch(DIRECTORY_PICKER_PATH, { method: 'POST' })

@@ -477,7 +477,7 @@ describe('原生桥', () => {
     await expect(pickDirectory()).resolves.toBeNull()
   })
 
-  test('pickDirectory 非 win32 平台 route 未注册:405 空 body(frontend-static fallback)→ null', async () => {
+  test('pickDirectory route 未注册(如 Linux,405 空 body/frontend-static fallback)→ null', async () => {
     fetchMock.mockResolvedValue(new Response('', { status: 405 }))
     await expect(pickDirectory()).resolves.toBeNull()
   })

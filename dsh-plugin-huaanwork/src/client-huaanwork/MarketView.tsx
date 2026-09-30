@@ -282,8 +282,9 @@ export default function MarketView() {
   }
 
   /**
-   * 本地安装（Task 7）：目录选择复用 M4 picker（仅 win32 注册 route）。
-   * D11：平台不支持时诚实提示并指路路径输入，不再与「用户取消」同语义静默。
+   * 本地安装（Task 7）：目录选择复用 M4 picker（win32 走 Electron 对话框，darwin 走
+   * 上游 directory-picker native capability）。D11：环境未提供 picker 时诚实提示并
+   * 指路路径输入，不再与「用户取消」同语义静默。
    */
   async function pickLocalPlugin() {
     const outcome = await pickDirectoryDetailed();
@@ -293,7 +294,7 @@ export default function MarketView() {
       return;
     }
     if (!outcome.available) {
-      notify("当前平台不支持目录选择器；请在下方输入本地目录或 .tgz 的路径。", true);
+      notify("当前环境不支持目录选择器；请在下方输入本地目录或 .tgz 的路径。", true);
     }
     // 用户取消：保持静默（同 M4 口径）。
   }
@@ -541,8 +542,9 @@ export default function MarketView() {
 
 /**
  * 「本地安装」tab：纯本地 plugin.add/remove RPC（不经内网，宕机旁路）。已装列表与
- * installed tab 同口径。D11：自由文本路径输入是 .tgz 与无 picker 平台（macOS/Linux）
- * 的共同兜底；目录选择按钮仅在平台提供 picker route 时有效（否则诚实提示）。
+ * installed tab 同口径。D11：自由文本路径输入是 .tgz 与无 picker route 平台
+ * （Linux，及 darwin 上 native capability 不可用的组合）的共同兜底；目录选择按钮
+ * 在 picker 拒绝时诚实提示并指路输入框（兜底不得删除）。
  */
 function LocalPanel({
   bundles,

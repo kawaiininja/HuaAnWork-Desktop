@@ -56,6 +56,14 @@ const config: DesktopConfig = {
 
 afterEach(() => { vi.useRealTimers() })
 
+/**
+ * Structural stand-in for the composed upstream `ctx.directoryPicker` service;
+ * only `capability()` is read by the macOS route.
+ */
+type DirectoryPickerSeamStub =
+  | { capability(): { kind: 'native'; pick(signal: AbortSignal): Promise<string | null> } }
+  | { capability(): { kind: 'browse' } }
+
 interface PluginHarness {
   ctx: Context
   runtime: DesktopRuntime
@@ -71,11 +79,36 @@ interface PluginHarness {
   lanHttps: DesktopLanHttpsRuntime
   setLanHttpsEnabled: ReturnType<typeof vi.fn<DesktopLanHttpsRuntime['setEnabled']>>
   requestRejection: ReturnType<typeof vi.fn<(request: ConnectionTrustRequest) => ConnectionRequestRejection>>
+  setDirectoryPicker(service: DirectoryPickerSeamStub | undefined): void
   route(path: string): WebRoute | undefined
   routes(): readonly WebRoute[]
   notify(next: DesktopSettings, prev: DesktopSettings): Promise<void>
   notifyLocale(preference: LocaleId | undefined): void
   notifyTheme(preference: ThemePreference): void
+}
+
+/** Same-origin POST request shape shared by the picker route cases. */
+function pickerRequest(): IncomingMessage {
+  return {
+    method: 'POST',
+    headers: { origin: 'http://127.0.0.1:43120' },
+  } as unknown as IncomingMessage
+}
+
+/** ServerResponse double that records the JSON body and exposes the close listener. */
+function pickerResponse(): ServerResponse & {
+  body: string
+  on: ReturnType<typeof vi.fn>
+  end: ReturnType<typeof vi.fn>
+} {
+  const res = {
+    body: '',
+    statusCode: 200,
+    setHeader: vi.fn(),
+    on: vi.fn(),
+    end: vi.fn((value?: string) => { res.body = value ?? '' }),
+  }
+  return res as unknown as ServerResponse & typeof res
 }
 
 function createHarness(
@@ -98,6 +131,7 @@ function createHarness(
   const settingsUpdated = new Set<(namespace: unknown, next: unknown) => void>()
   let localePreference: LocaleId | undefined
   let themePreference: ThemePreference = 'system'
+  let directoryPicker: DirectoryPickerSeamStub | undefined
   const browserAccess = createDesktopBrowserAccess(
     ordinaryBrowserEnabled,
     Buffer.alloc(32, 6).toString('base64url'),
@@ -188,6 +222,7 @@ function createHarness(
       if (String(key) === 'desktopRuntime') return runtime
       if (String(key) === 'desktopBrowserAccess') return browserAccess
       if (String(key) === 'desktopLanHttps') return lanHttps
+      if (String(key) === 'directoryPicker') return directoryPicker
       return () => {}
     }),
     effect: vi.fn((register: () => unknown) => register()),
@@ -211,6 +246,7 @@ function createHarness(
     lanHttps,
     setLanHttpsEnabled,
     requestRejection,
+    setDirectoryPicker: (service) => { directoryPicker = service },
     route: path => routes.get(path),
     routes: () => [...routes.values()],
     notify: async (next, prev) => { await watcher?.(next, prev) },
@@ -503,6 +539,96 @@ describe('desktop Host plugin', () => {
     expect(harness.validateDirectory).toHaveBeenCalledWith('E:\\repo')
     expect(res.statusCode).toBe(200)
     expect(JSON.parse(body)).toEqual({ allowed: false })
+  })
+
+  it('serves the macOS native picker through the composed upstream directory-picker seam', async () => {
+    const harness = createHarness('darwin')
+    const pick = vi.fn(async (_signal: AbortSignal) => '/Users/me/project')
+    harness.setDirectoryPicker({ capability: () => ({ kind: 'native', pick }) })
+    apply(harness.ctx, config)
+
+    const route = harness.route(DESKTOP_DIRECTORY_PICKER_PATH)
+    expect(route).toEqual(expect.objectContaining({
+      kind: 'exact',
+      path: DESKTOP_DIRECTORY_PICKER_PATH,
+    }))
+    const res = pickerResponse()
+    await route?.handler(pickerRequest(), res)
+
+    expect(pick).toHaveBeenCalledOnce()
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ path: '/Users/me/project' })
+    // D11 route (b): macOS never reaches the Windows Electron dialog path.
+    expect(harness.pickDirectory).not.toHaveBeenCalled()
+    // The Windows-only workspace volume validator stays unregistered on macOS.
+    expect(harness.route(DESKTOP_DIRECTORY_VALIDATOR_PATH)).toBeUndefined()
+  })
+
+  it('keeps a macOS user cancel distinct from a platform refusal', async () => {
+    const cancelled = createHarness('darwin')
+    cancelled.setDirectoryPicker({ capability: () => ({ kind: 'native', pick: async () => null }) })
+    apply(cancelled.ctx, config)
+    const cancelRes = pickerResponse()
+    await cancelled.route(DESKTOP_DIRECTORY_PICKER_PATH)?.handler(pickerRequest(), cancelRes)
+    expect(cancelRes.statusCode).toBe(200)
+    expect(JSON.parse(cancelRes.body)).toEqual({ path: null })
+
+    // A composed browse backend (SSH launch / non-loopback bind) cannot reach the
+    // host display: the refusal stays a non-2xx so the client keeps its fallback.
+    const refused = createHarness('darwin')
+    refused.setDirectoryPicker({ capability: () => ({ kind: 'browse' }) })
+    apply(refused.ctx, config)
+    const refusedRes = pickerResponse()
+    await refused.route(DESKTOP_DIRECTORY_PICKER_PATH)?.handler(pickerRequest(), refusedRes)
+    expect(refusedRes.statusCode).toBe(500)
+    expect(JSON.parse(refusedRes.body)).toEqual({ error: 'native directory picker failed' })
+
+    // A profile without the composed seam is a refusal too, never a silent null.
+    const absent = createHarness('darwin')
+    apply(absent.ctx, config)
+    const absentRes = pickerResponse()
+    await absent.route(DESKTOP_DIRECTORY_PICKER_PATH)?.handler(pickerRequest(), absentRes)
+    expect(absentRes.statusCode).toBe(500)
+  })
+
+  it('aborts the macOS seam pick when the renderer connection closes', async () => {
+    const harness = createHarness('darwin')
+    let seen: AbortSignal | undefined
+    let release: (() => void) | undefined
+    const pick = vi.fn((signal: AbortSignal) => {
+      seen = signal
+      return new Promise<string | null>((resolve) => { release = () => { resolve(null) } })
+    })
+    harness.setDirectoryPicker({ capability: () => ({ kind: 'native', pick }) })
+    apply(harness.ctx, config)
+
+    const res = pickerResponse()
+    const pending = harness.route(DESKTOP_DIRECTORY_PICKER_PATH)?.handler(pickerRequest(), res)
+    expect(res.on).toHaveBeenCalledWith('close', expect.any(Function))
+    const close = res.on.mock.calls[0]?.[1] as unknown as () => void
+    close()
+    expect(seen?.aborted).toBe(true)
+    release?.()
+    await pending
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('keeps the Windows picker on the Electron dialog and Linux unregistered', async () => {
+    const windows = createHarness('win32')
+    const seamPick = vi.fn(async () => '/tmp/never')
+    windows.setDirectoryPicker({ capability: () => ({ kind: 'native', pick: seamPick }) })
+    windows.pickDirectory.mockResolvedValue('C:\\Work')
+    apply(windows.ctx, config)
+    const windowsRes = pickerResponse()
+    await windows.route(DESKTOP_DIRECTORY_PICKER_PATH)?.handler(pickerRequest(), windowsRes)
+    expect(windows.pickDirectory).toHaveBeenCalledOnce()
+    expect(seamPick).not.toHaveBeenCalled()
+    expect(JSON.parse(windowsRes.body)).toEqual({ path: 'C:\\Work' })
+
+    const linux = createHarness('linux')
+    apply(linux.ctx, config)
+    expect(linux.route(DESKTOP_DIRECTORY_PICKER_PATH)).toBeUndefined()
+    expect(linux.route(DESKTOP_DIRECTORY_VALIDATOR_PATH)).toBeUndefined()
   })
 
   it.each(['win32', 'linux'] as const)(

@@ -417,6 +417,23 @@ virtualStoreDirMaxLength: 60
     }
   })
 
+  it('keeps the upstream auto directory-picker row enabled on macOS', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const rows = composeEntries([prepared.patches])
+
+    // D11 route (b): darwin patches the picker row not at all, so the upstream
+    // auto row stays enabled and resolves to the native backend on a loopback boot
+    // (@deepseek-ai/dsh-host-directory-picker-auto: loopback + darwin ⇒ native).
+    expect(prepared.mode).toBe('advanced')
+    expect(rows.find(row => row.id === 'directory-picker')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-host-directory-picker-auto',
+    }))
+    expect(rows.find(row => row.id === 'directory-picker')?.disabled).toBeFalsy()
+    // The Windows browse pair is inserted only on win32.
+    expect(rows.map(row => row.name)).not.toContain('@deepseek-ai/dsh-host-directory-picker-browse')
+  })
+
   it('merges a frozen LAN IPv4 snapshot into existing Web runtime trust', () => {
     const home = temporaryHome()
     writeFileSync(join(home, 'cordis.patch.yml'), [

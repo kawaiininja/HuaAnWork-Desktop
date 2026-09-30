@@ -722,3 +722,86 @@ describe("market source panel（M6 Task 5.1：N-1 + P23/P24）", () => {
     expect(view.querySelector('[role="dialog"][aria-label="安装确认"]')).toBeNull();
   });
 });
+
+describe("本地安装的目录选择（D11：darwin 走原生 picker，自由文本兜底保留）", () => {
+  /** 受控输入的受信赋值路径：绕过 React 的 value tracker 才能触发 onChange。 */
+  function typePath(input: HTMLInputElement, value: string): void {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+    if (setter === undefined) throw new Error("HTMLInputElement value setter unavailable");
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function localHandlers() {
+    return {
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+    };
+  }
+
+  function localDialog(view: HTMLDivElement): HTMLElement | null {
+    return view.querySelector('[role="dialog"][aria-label="本地安装确认"]');
+  }
+
+  async function openLocalTab(): Promise<HTMLDivElement> {
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "本地安装").click();
+    });
+    return view;
+  }
+
+  it("picker 可用时优先弹确认框，自由文本兜底不得删除", async () => {
+    vi.mocked(pickDirectoryDetailed).mockResolvedValue({ available: true, path: "/tmp/alpha-1.0.0.tgz" });
+    stubFetch(localHandlers());
+
+    const view = await openLocalTab();
+    await act(async () => {
+      buttonByText(view, "浏览目录…").click();
+    });
+
+    const dialog = localDialog(view);
+    expect(dialog).not.toBeNull();
+    expect(dialog!.textContent).toContain("/tmp/alpha-1.0.0.tgz");
+    expect(view.querySelector('[role="alert"]')).toBeNull();
+    // 兜底保留：手输路径输入框始终在场。
+    expect(view.querySelector('input[aria-label="本地插件路径"]')).not.toBeNull();
+  });
+
+  it("用户取消保持静默；picker 不可用时诚实提示并保留自由文本兜底", async () => {
+    stubFetch(localHandlers());
+    const view = await openLocalTab();
+
+    // 取消（2xx + path:null）：不弹确认框，也不报错（既有 M4 口径）。
+    vi.mocked(pickDirectoryDetailed).mockResolvedValue({ available: true, path: null });
+    await act(async () => {
+      buttonByText(view, "浏览目录…").click();
+    });
+    expect(localDialog(view)).toBeNull();
+    expect(view.querySelector('[role="alert"]')).toBeNull();
+
+    // 平台/组合拒绝（非 2xx）：红色提示指路自由文本，且不弹确认框。
+    // darwin 已支持 picker（D11），故措辞不再断言「平台不支持」而是「环境未提供」。
+    vi.mocked(pickDirectoryDetailed).mockResolvedValue({ available: false, path: null });
+    await act(async () => {
+      buttonByText(view, "浏览目录…").click();
+    });
+    const alert = view.querySelector('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(alert!.textContent).toContain("当前环境不支持目录选择器");
+    expect(alert!.textContent).toContain("路径");
+    expect(localDialog(view)).toBeNull();
+
+    // 兜底可用：手输路径仍能进入确认框（picker 失败时的唯一退路）。
+    const input = view.querySelector('input[aria-label="本地插件路径"]') as HTMLInputElement;
+    await act(async () => {
+      typePath(input, "/tmp/beta");
+    });
+    await act(async () => {
+      buttonByText(view, "添加").click();
+    });
+    const fallbackDialog = localDialog(view);
+    expect(fallbackDialog).not.toBeNull();
+    expect(fallbackDialog!.textContent).toContain("/tmp/beta");
+  });
+});
