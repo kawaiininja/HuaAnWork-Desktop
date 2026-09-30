@@ -287,7 +287,8 @@ async function callRoute(recorded: RecordedRoute[], path: string, req: IncomingM
 // 不补丁 node:http 模块导出——wrapper 经 ESM import 绑定 `get as httpGet`,
 // 模块导出补丁(无论 request 还是 get)都拦不到已导入绑定(评审 round 1 实证
 // 0 命中)。记录器坐在 wrapper 的 HTTP 注入缝上:record → 委托
-// createMarketHttpClient() 的真实 fetchBuffer(node:http 真实 socket)。
+// createMarketHttpClient() 的真实实现(node:http 真实 socket;第 53 条起制品
+// 下载走 fetchStream)。
 
 const recordedHosts: string[] = []
 
@@ -301,6 +302,10 @@ function recordingHttpClient(): MarketHttpClient {
     fetchBuffer(url, label, maxBytes) {
       recordedHosts.push(new URL(url).host)
       return real.fetchBuffer(url, label, maxBytes)
+    },
+    fetchStream(url, label, maxBytes, onChunk) {
+      recordedHosts.push(new URL(url).host)
+      return real.fetchStream(url, label, maxBytes, onChunk)
     },
   }
 }

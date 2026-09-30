@@ -1,30 +1,46 @@
 /**
- * install.ts 单元层:(c) 安装侧门正负例、sha256 比对、制品落盘/GC。
+ * install.ts 单元层:(c) 安装侧门正负例、sha256 比对、流式下载(第 53 条)、制品落盘/GC。
  * pnpm 层语义在 market-pnpm-semantics.spec.ts;wrapper e2e 在 market-e2e.spec.ts。
  */
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { Readable } from 'node:stream'
 import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   DesktopProfileCheckpoint,
   PROFILE_CHECKPOINT_USER_DATA_DIR_ENV,
 } from '../../src/profile-checkpoint.ts'
+import type { DesktopPnpmHandle } from '../../src/pnpm.ts'
+import type { ConfirmedRestartRuntime } from '../../src/host-runtime-bridge.ts'
 import {
   ensureMarketArtifactsDir,
   gcRemovedPackageArtifacts,
   marketArtifactName,
+  marketArtifactTempPath,
   profileFileReferencesExist,
   sweepOrphanMarketArtifacts,
 } from '../../src/huaanwork-host/market/artifacts.ts'
-import { createFileRevisionStore, type MarketHttpClient } from '../../src/huaanwork-host/market/catalog-client.ts'
+import {
+  createFileRevisionStore,
+  createMarketHttpClient,
+  MarketFetchError,
+  resolveSameOriginUrl,
+  type MarketHttpClient,
+} from '../../src/huaanwork-host/market/catalog-client.ts'
 import {
   downloadAndStageArtifact,
+  executeMarketInstall,
+  MARKET_ARTIFACT_MAX_BYTES,
   MarketInstallGateError,
+  type MarketInstallContext,
   precheckTarballManifest,
   readTarballPackageJson,
+  readTarballPackageJsonFromFile,
 } from '../../src/huaanwork-host/market/install.ts'
 import { sha256Hex } from './market-test-server.ts'
 
@@ -42,17 +58,27 @@ function tempProfile(): string {
   return dir
 }
 
-/** 真实 tar.gz(npm 形态 package/ 根),与 market-pnpm-fixture 同构造。 */
-function buildTgz(dir: string, manifest: Record<string, unknown>): Buffer {
+/**
+ * 真实 tar.gz(npm 形态 package/ 根),与 market-pnpm-fixture 同构造。
+ * `padding` 追加一个 `package/payload.bin` —— 第 53 条的「100 个 chunk」用例需要一个
+ * 明显大于单个 chunk 的全量字节数,好让「峰值 = 全量」与「峰值 = 单 chunk」可区分。
+ */
+function buildTgz(dir: string, manifest: Record<string, unknown>, padding?: Buffer): Buffer {
   const pkgDir = join(dir, 'package')
   mkdirSync(pkgDir, { recursive: true })
   writeFileSync(join(pkgDir, 'package.json'), `${JSON.stringify(manifest, undefined, 2)}\n`)
+  if (padding !== undefined) writeFileSync(join(pkgDir, 'payload.bin'), padding)
   const out = join(dir, 'out.tgz')
   const tar = spawnSync('tar', ['czf', out, 'package'], { cwd: dir, encoding: 'utf8' })
   if (tar.status !== 0) throw new Error(`tar failed: ${tar.stderr}`)
   return readFileSync(out)
 }
 
+/**
+ * 注入缝的假 client:制品**逐 chunk 供给**(第 53 条后安装链只走 fetchStream)。
+ * `fetchBuffer` 刻意拒绝调用——若实现回退到「一次收齐」,现有用例会因这一条而红,
+ * 而不是静默把整包缓冲回内存。
+ */
 function fakeHttp(routes: Map<string, Buffer>): MarketHttpClient {
   return {
     fetchText: (url) => {
@@ -60,10 +86,15 @@ function fakeHttp(routes: Map<string, Buffer>): MarketHttpClient {
       if (bytes === undefined) return Promise.reject(new Error(`404 ${url}`))
       return Promise.resolve(bytes.toString('utf8'))
     },
-    fetchBuffer: (url) => {
+    fetchBuffer: () => Promise.reject(new Error('the streaming install path must not call fetchBuffer (第 53 条)')),
+    fetchStream: async (url, _label, _maxBytes, onChunk) => {
       const bytes = routes.get(url)
-      if (bytes === undefined) return Promise.reject(new Error(`404 ${url}`))
-      return Promise.resolve(bytes)
+      if (bytes === undefined) throw new Error(`404 ${url}`)
+      const chunkSize = Math.max(1, Math.ceil(bytes.byteLength / 4))
+      for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+        await onChunk(bytes.subarray(offset, Math.min(offset + chunkSize, bytes.byteLength)))
+      }
+      return { bytes: bytes.byteLength }
     },
   }
 }
@@ -184,22 +215,6 @@ describe('downloadAndStageArtifact (sha256 比对 + origin 钉扎 + 制品落盘
     }
   })
 
-  test('rejects cross-origin tarball URLs fail-closed (X1) before any download', async () => {
-    const profileDir = tempProfile()
-    const calls: string[] = []
-    const http: MarketHttpClient = {
-      fetchText: (url) => { calls.push(url); return Promise.reject(new Error('unreachable')) },
-      fetchBuffer: (url) => { calls.push(url); return Promise.reject(new Error('unreachable')) },
-    }
-    await expect(downloadAndStageArtifact({
-      origin: ORIGIN,
-      file: fileEntry({ tarballPath: 'http://evil.intranet.example:9999/artifacts/x.tgz' }),
-      profileDir,
-      http,
-    })).rejects.toThrow(/origin pinning/u)
-    expect(calls).toEqual([])
-  })
-
   test('rejects a non-zero-dependency tarball at the gate: nothing staged', async () => {
     const profileDir = tempProfile()
     const dir = mkdtempSync(join(tmpdir(), 'hw-market-dep-'))
@@ -245,7 +260,10 @@ describe('downloadAndStageArtifact (sha256 比对 + origin 钉扎 + 制品落盘
     }
   })
 
-  test('same-sha reinstall overwrites the artifact instead of delete-recreate', async () => {
+  // Task 6.3 收敛落盘协议:不再有 existsSync 原地覆盖写(那是非原子窗口:写一半
+  // 被杀进程即留半个制品在最终名下)。重复安装 = 重写 temp + rename 原子替换,内容
+  // 与权限不变,盘上不留暂存残留。
+  test('same-sha reinstall atomically replaces the artifact (temp + rename, no residue)', async () => {
     const profileDir = tempProfile()
     const dir = mkdtempSync(join(tmpdir(), 'hw-market-overwrite-'))
     roots.push(dir)
@@ -255,11 +273,434 @@ describe('downloadAndStageArtifact (sha256 比对 + origin 钉扎 + 制品落盘
     const entry = fileEntry({ sha256 })
 
     const first = await downloadAndStageArtifact({ origin: ORIGIN, file: entry, profileDir, http })
-    const before = statSync(first.artifactPath).ino
     const second = await downloadAndStageArtifact({ origin: ORIGIN, file: entry, profileDir, http })
+
     expect(second.artifactPath).toBe(first.artifactPath)
-    expect(existsSync(first.artifactPath)).toBe(true)
-    expect(statSync(first.artifactPath).ino).toBe(before)
+    expect(readFileSync(first.artifactPath).equals(bytes)).toBe(true)
+    expect(statSync(first.artifactPath).mode & 0o777).toBe(0o600)
+    // 同 sha 的两次安装只留一条制品;暂存名(`.tmp-<pid>`)在两次落盘后都不留痕。
+    expect(readdirSync(join(profileDir, '.market-artifacts'))).toEqual([marketArtifactName('@huaanwork/sample', '1.2.3', sha256)])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 第 53 条 / 裁定 D-M6-25:远程制品流式下载
+// ---------------------------------------------------------------------------
+
+describe('streaming artifact download (spec §14 第 53 条 / 裁定 D-M6-25)', () => {
+  const CHUNK_COUNT = 100
+
+  /**
+   * 注入缝的 request 桩:制品逐 chunk 供给,并记录**调用方的驻留峰值**
+   * (`liveBytes` = 已交给 onChunk、其回调尚未 resolve 的字节总和)。流式实现下
+   * 峰值 = 单个 chunk 量级;一次收齐的实现走 `fetchBuffer`(桩如实提供全量,好让
+   * 回归以**断言**而非类型错误变红),峰值 = 全量 —— 这正是第一条用例的红判据。
+   * 可选 `afterChunk` 钩子让用例在流**中途**观察盘上状态:边收边落盘的实现此刻
+   * 已有字节在暂存文件里,而一次收齐的实现此刻盘上什么都没有。
+   */
+  function streamingProbe(payload: Buffer, chunkCount = CHUNK_COUNT, afterChunk?: (chunkIndex: number) => void) {
+    const chunkSize = Math.max(1, Math.ceil(payload.byteLength / chunkCount))
+    const state = {
+      onChunkCalls: 0,
+      handedBytes: 0,
+      streamCalls: 0,
+      fetchBufferCalls: 0,
+      liveBytes: 0,
+      peakLiveBytes: 0,
+    }
+    const client: MarketHttpClient = {
+      fetchText: () => Promise.reject(new Error('unexpected fetchText on the install path')),
+      fetchBuffer: () => {
+        state.fetchBufferCalls += 1
+        state.peakLiveBytes = Math.max(state.peakLiveBytes, payload.byteLength)
+        return Promise.resolve(Buffer.from(payload))
+      },
+      fetchStream: async (_url, _label, _maxBytes, onChunk) => {
+        state.streamCalls += 1
+        // 恰好 chunkCount 块(按长度均分,不因余数少给一块)。
+        for (let index = 0; index < chunkCount; index++) {
+          const start = Math.floor((index * payload.byteLength) / chunkCount)
+          const end = Math.floor(((index + 1) * payload.byteLength) / chunkCount)
+          const chunk = payload.subarray(start, end)
+          state.onChunkCalls += 1
+          state.handedBytes += chunk.byteLength
+          state.liveBytes += chunk.byteLength
+          state.peakLiveBytes = Math.max(state.peakLiveBytes, state.liveBytes)
+          await onChunk(chunk)
+          state.liveBytes -= chunk.byteLength
+          afterChunk?.(index + 1)
+        }
+        return { bytes: payload.byteLength }
+      },
+    }
+    return { client, state, chunkSize }
+  }
+
+  function completedPnpmHandle(): DesktopPnpmHandle {
+    return {
+      stdout: Readable.from([]),
+      stderr: Readable.from([]),
+      done: Promise.resolve({ exitCode: 0, signal: null }),
+      cancel() {},
+    }
+  }
+
+  /** 制品目录内容:拒绝路径断言「零残留」(既无 .tgz,也无 `.tmp-<pid>`)。 */
+  function artifactDirEntries(profileDir: string): string[] {
+    const dir = join(profileDir, '.market-artifacts')
+    return existsSync(dir) ? readdirSync(dir).sort() : []
+  }
+
+  /**
+   * 与生产同形的安装链:downloadAndStageArtifact → executeMarketInstall(→ addPlugin)。
+   * 负例据此断言「下载/校验失败时 addPlugin 一次未被调用」(pnpm 零调用、零重启请求)。
+   */
+  function installChain(profileDir: string, http: MarketHttpClient, entry: ReturnType<typeof fileEntry>) {
+    const pnpmCalls: string[][] = []
+    let restartRequests = 0
+    // profile 清单先落一份非空 bundles(与 plugins-host.spec 的 writeProfile 同形):
+    // addPlugin 成功路径要读回清单,空清单会落到 fallback/抛错分支。
+    writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
+      name: 'profile',
+      version: '0.0.0',
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+      dependencies: {},
+    }, undefined, 2)}\n`)
+    const ctx: MarketInstallContext = {
+      profileDir,
+      logger: () => {},
+      pnpm: {
+        runPlugin: (argv) => {
+          pnpmCalls.push([...argv])
+          return completedPnpmHandle()
+        },
+      },
+      // addPlugin 只消费 requestConfirmedRestart;其余成员由 main.ts 的生产 runtime 提供。
+      runtime: {
+        requestConfirmedRestart: async () => { restartRequests += 1; return true },
+      } as unknown as ConfirmedRestartRuntime,
+    }
+    return {
+      pnpmCalls,
+      restartRequests: () => restartRequests,
+      run: async () => executeMarketInstall(ctx, await downloadAndStageArtifact({
+        origin: ORIGIN,
+        file: entry,
+        profileDir,
+        http,
+      })),
+    }
+  }
+
+  /**
+   * 逐 chunk 供给的裸 node:http 服务器(真实 socket,不经注入桩),供 fetchStream
+   * 直测截断与重定向。`finished` 只在客户端**真的读完全部字节**后才为 true:每次
+   * write 越过 highWaterMark 都等 drain,客户端不读就写不完(32 MiB 远超任何内核
+   * 发送缓冲)⇒ 它是「超限即断连、不读完剩余」的可观测判据。
+   */
+  async function chunkedServer(options: { chunks: number; chunkBytes: number; status?: number; location?: string }) {
+    const state = { sentChunks: 0, finished: false }
+    const server: Server = createServer((_req, res) => {
+      // 客户端 destroy 之后服务端续写会 EPIPE;吞掉以免未捕获 'error' 掀翻测试进程。
+      res.on('error', () => {})
+      res.statusCode = options.status ?? 200
+      if (options.location !== undefined) res.setHeader('location', options.location)
+      const chunk = Buffer.alloc(options.chunkBytes, 0x42)
+      let index = 0
+      const pump = (): void => {
+        while (index < options.chunks) {
+          index += 1
+          state.sentChunks += 1
+          if (!res.write(chunk)) {
+            res.once('drain', pump)
+            return
+          }
+        }
+        state.finished = true
+        res.end()
+      }
+      pump()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('chunked test server has no address')
+    return {
+      origin: `http://127.0.0.1:${address.port}`,
+      state,
+      close: () => new Promise<void>((resolve) => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      }),
+    }
+  }
+
+  test('never holds the whole compressed artifact in memory', async () => {
+    const profileDir = tempProfile()
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-mem-'))
+    roots.push(dir)
+    // 200 KiB(**不可压**随机字节,故 tgz 本身也约 200 KiB)切成 100 份 ⇒
+    // 单 chunk ≈ 2 KiB,与全量相差两个数量级。
+    const bytes = buildTgz(dir, { name: '@huaanwork/sample', version: '1.2.3' }, randomBytes(200 * 1024))
+    const signedSha = sha256Hex(bytes)
+    const tmpPath = marketArtifactTempPath(join(
+      profileDir, '.market-artifacts', marketArtifactName('@huaanwork/sample', '1.2.3', signedSha),
+    ))
+    let midStreamSize = -1
+    const probe = streamingProbe(bytes, CHUNK_COUNT, (chunkIndex) => {
+      if (chunkIndex === CHUNK_COUNT / 2) {
+        // 流到一半:写流已排空的那些字节**已经在盘上**,而整包尚未收齐。
+        midStreamSize = existsSync(tmpPath) ? statSync(tmpPath).size : 0
+      }
+    })
+
+    const prepared = await downloadAndStageArtifact({
+      origin: ORIGIN,
+      file: fileEntry({ sha256: signedSha }),
+      profileDir,
+      http: probe.client,
+    })
+
+    // 100 个 chunk 逐一交给安装侧;**一次收齐**的旧路(fetchBuffer)一次也没走。
+    expect(probe.state.onChunkCalls).toBe(CHUNK_COUNT)
+    expect(probe.state.fetchBufferCalls).toBe(0)
+    expect(probe.state.streamCalls).toBe(1)
+    expect(probe.state.handedBytes).toBe(bytes.byteLength)
+    // 「任何时刻」的驻留 = 单个 chunk 量级(桩记录峰值);旧实现这里是全量。
+    expect(probe.state.peakLiveBytes).toBeLessThanOrEqual(probe.chunkSize)
+    expect(probe.state.peakLiveBytes).toBeLessThan(bytes.byteLength)
+    // 中点处盘上已有字节且尚未收齐 ⇒ 边收边写,不是收齐后才落盘。
+    expect(midStreamSize).toBeGreaterThan(0)
+    expect(midStreamSize).toBeLessThan(bytes.byteLength)
+    expect(sha256Hex(readFileSync(prepared.artifactPath))).toBe(signedSha)
+  })
+
+  test('hashes the exact bytes it writes (solution A preserved)', async () => {
+    const profileDir = tempProfile()
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-stream-sha-'))
+    roots.push(dir)
+    const bytes = buildTgz(dir, { name: '@huaanwork/sample', version: '1.2.3' })
+    const signedSha = sha256Hex(bytes)
+    const probe = streamingProbe(bytes, CHUNK_COUNT)
+
+    const prepared = await downloadAndStageArtifact({
+      origin: ORIGIN,
+      file: fileEntry({ sha256: signedSha }),
+      profileDir,
+      http: probe.client,
+    })
+
+    // 落盘文件的 sha256 === 流式累加算出的 sha256 === 已验签清单里的值。
+    expect(prepared.sha256).toBe(signedSha)
+    expect(sha256Hex(readFileSync(prepared.artifactPath))).toBe(signedSha)
+    expect(prepared.size).toBe(bytes.byteLength)
+  })
+
+  test('aborts and cleans up when the sha256 does not match the signed manifest', async () => {
+    const profileDir = tempProfile()
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-stream-tamper-'))
+    roots.push(dir)
+    const bytes = buildTgz(dir, { name: '@huaanwork/sample', version: '1.2.3' }, Buffer.alloc(64 * 1024, 0x33))
+    const tampered = Buffer.from(bytes)
+    tampered[Math.floor(tampered.byteLength / 2)]! ^= 0xff
+    const probe = streamingProbe(tampered, CHUNK_COUNT)
+    const chain = installChain(profileDir, probe.client, fileEntry({ sha256: sha256Hex(bytes) }))
+
+    await expect(chain.run()).rejects.toMatchObject({ code: 'market-sha256-mismatch' })
+
+    // 暂存文件已删:制品目录零残留(非原子窗口会留下的半个制品也不存在)。
+    expect(artifactDirEntries(profileDir)).toEqual([])
+    // 绝不调用 addPlugin:pnpm 零调用、零重启请求。
+    expect(chain.pnpmCalls).toEqual([])
+    expect(chain.restartRequests()).toBe(0)
+  })
+
+  test('aborts at the compressed cap instead of buffering past it', async () => {
+    // 裁定 D-M6-25:上限自 512 MiB 放宽到 2 GiB(流式后内存峰值 O(chunk) 才敢放宽)。
+    expect(MARKET_ARTIFACT_MAX_BYTES).toBe(2 * 1024 ** 3)
+    // 2 GiB 的流量无法真跑;此处以 1 KiB 的小上限直测同一段截断机制。
+    const server = await chunkedServer({ chunks: 32768, chunkBytes: 1024 })
+    try {
+      const url = resolveSameOriginUrl(server.origin, '/artifacts/big.tgz')
+      const delivered: number[] = []
+      await expect(createMarketHttpClient().fetchStream(url, 'artifact big', 1024, (chunk) => {
+        delivered.push(chunk.byteLength)
+      })).rejects.toThrow(/market artifact big exceeded 1024 bytes/u)
+      // 交付恒不越过 cap(超限那一块没有交给安装侧)——TCP 可能把多次 write 并成
+      // 一个 chunk,故这里断言的是上界而非「恰好 1024」。
+      expect(delivered.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(1024)
+      // 客户端 destroy 了连接:服务端剩余 32 MiB 从未被读走(不是「读完再报错」)。
+      expect(server.state.finished).toBe(false)
+    } finally {
+      await server.close()
+    }
+  })
+
+  test('a mid-stream abort deletes the staging file (cap breach leaves zero residue, no install)', async () => {
+    const profileDir = tempProfile()
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-stream-cap-'))
+    roots.push(dir)
+    const bytes = buildTgz(dir, { name: '@huaanwork/sample', version: '1.2.3' }, Buffer.alloc(64 * 1024, 0x44))
+    // 前 2 块正常落盘,第 3 块处 fetchStream 以「超上限」中止(与真实 client 同语义)。
+    const client: MarketHttpClient = {
+      fetchText: () => Promise.reject(new Error('unexpected fetchText')),
+      fetchBuffer: () => Promise.reject(new Error('unexpected fetchBuffer')),
+      fetchStream: async (_url, _label, _maxBytes, onChunk) => {
+        await onChunk(bytes.subarray(0, 4096))
+        await onChunk(bytes.subarray(4096, 8192))
+        throw new MarketFetchError('market artifact @huaanwork/sample@1.2.3 exceeded 2 bytes', 502)
+      },
+    }
+    const chain = installChain(profileDir, client, fileEntry({ sha256: sha256Hex(bytes) }))
+
+    await expect(chain.run()).rejects.toThrow(/exceeded/u)
+
+    expect(artifactDirEntries(profileDir)).toEqual([])
+    expect(chain.pnpmCalls).toEqual([])
+  })
+
+  test('a staging IO fault reports errno only (no absolute path, no install)', async () => {
+    const profileDir = tempProfile()
+    // `.market-artifacts` 是文件而不是目录 ⇒ 建暂存文件必失败(ENOTDIR)。
+    writeFileSync(join(profileDir, '.market-artifacts'), 'not a directory')
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-io-'))
+    roots.push(dir)
+    const bytes = buildTgz(dir, { name: '@huaanwork/sample', version: '1.2.3' })
+    const probe = streamingProbe(bytes, 4)
+    const chain = installChain(profileDir, probe.client, fileEntry({ sha256: sha256Hex(bytes) }))
+
+    let caught: unknown
+    try {
+      await chain.run()
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(MarketFetchError)
+    expect((caught as MarketFetchError).code).toBe('market-artifact-io')
+    // 评审 P1:message 只回 errno,绝不回 profileDir 绝对路径。
+    expect((caught as Error).message).toMatch(/\(ENOTDIR\)/u)
+    expect((caught as Error).message).not.toContain(profileDir)
+    expect(chain.pnpmCalls).toEqual([])
+  })
+
+  test('still refuses a cross-origin tarball URL before making any request (spec §14 第 51 条)', async () => {
+    const profileDir = tempProfile()
+    const calls: string[] = []
+    const http: MarketHttpClient = {
+      fetchText: (url) => { calls.push(url); return Promise.reject(new Error('unreachable')) },
+      fetchBuffer: (url) => { calls.push(url); return Promise.reject(new Error('unreachable')) },
+      fetchStream: (url) => { calls.push(url); return Promise.reject(new Error('unreachable')) },
+    }
+    await expect(downloadAndStageArtifact({
+      origin: ORIGIN,
+      file: fileEntry({ tarballPath: 'http://evil.intranet.example:9999/artifacts/x.tgz' }),
+      profileDir,
+      http,
+    })).rejects.toMatchObject({ code: 'market-artifact-origin' })
+    expect(calls).toEqual([])
+  })
+
+  test('still does not follow redirects (a 3xx hop cannot be taken)', async () => {
+    const target = await chunkedServer({ chunks: 1, chunkBytes: 16 })
+    const redirector = await chunkedServer({ chunks: 0, chunkBytes: 1, status: 302, location: `${target.origin}/artifacts/x.tgz` })
+    try {
+      const url = resolveSameOriginUrl(redirector.origin, '/artifacts/x.tgz')
+      await expect(createMarketHttpClient().fetchStream(url, 'artifact x', 4096, () => {}))
+        .rejects.toThrow(/HTTP 302/u)
+      expect(target.state.sentChunks).toBe(0)
+    } finally {
+      await redirector.close()
+      await target.close()
+    }
+  })
+
+  test('keeps the decompression cap equal to the publish-side cap', async () => {
+    // 边界即数值:解压恰 64 MiB 通过上限(随后因「没有 package.json」而拒),
+    // 64 MiB + 1 字节才触发上限错误 —— 那个 +1 把 64 MiB 这个数值本身钉死。
+    // 发布侧同值单测(market-server/tests/tarball-parse.spec.ts):
+    // 「rejects a gzip bomb over the cap with an honest fail-closed error (buffer path)」
+    // 断言消息含 67108864;「streaming file path: a gzip bomb file over the cap …」
+    // 钉住流式文件路径。依赖方向守卫禁止 import market-server,故两侧各自单测钉住。
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-cap-'))
+    roots.push(dir)
+    const atCap = join(dir, 'at-cap.tgz')
+    const overCap = join(dir, 'over-cap.tgz')
+    const corrupt = join(dir, 'corrupt.tgz')
+    writeFileSync(atCap, gzipSync(Buffer.alloc(64 * 1024 * 1024, 0x41)))
+    writeFileSync(overCap, gzipSync(Buffer.alloc(64 * 1024 * 1024 + 1, 0x41)))
+    writeFileSync(corrupt, Buffer.from('definitely not gzip'))
+    expect(statSync(atCap).size).toBeLessThan(1024 * 1024) // 炸弹形态,不是 64 MiB 真传输
+
+    await expect(readTarballPackageJsonFromFile(atCap)).rejects.toThrow(/no top-level package\.json/u)
+
+    let caught: unknown
+    try {
+      await readTarballPackageJsonFromFile(overCap)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(MarketInstallGateError)
+    expect((caught as MarketInstallGateError).code).toBe('market-invalid-tarball')
+    // 超限与「不是合法 gzip」分开诚实报错(第 53 条);上限数字出现在文案里。
+    expect((caught as Error).message).toMatch(/decompresses beyond the 67108864-byte limit/u)
+    expect((caught as Error).message).not.toMatch(/not a valid gzip/u)
+
+    // 坏 gzip 仍报「不是合法 gzip」:两条失败路径不互相冒充。
+    await expect(readTarballPackageJsonFromFile(corrupt)).rejects.toThrow(/not a valid gzip/u)
+  })
+
+  test('a gzip bomb artifact is rejected at the decompression cap through the install path', async () => {
+    const profileDir = tempProfile()
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-bomb-'))
+    roots.push(dir)
+    const bomb = gzipSync(Buffer.alloc(64 * 1024 * 1024 + 1, 0x41))
+    expect(bomb.byteLength).toBeLessThan(1024 * 1024)
+    const probe = streamingProbe(bomb, 4)
+    const chain = installChain(profileDir, probe.client, fileEntry({ sha256: sha256Hex(bomb) }))
+
+    await expect(chain.run()).rejects.toThrow(/decompresses beyond/u)
+
+    expect(artifactDirEntries(profileDir)).toEqual([])
+    expect(chain.pnpmCalls).toEqual([])
+  })
+
+  test('installs the artifact it just verified, byte for byte', async () => {
+    const profileDir = tempProfile()
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-install-bytes-'))
+    roots.push(dir)
+    const bytes = buildTgz(dir, { name: '@huaanwork/sample', version: '1.2.3' }, Buffer.alloc(32 * 1024, 0x77))
+    const signedSha = sha256Hex(bytes)
+    const probe = streamingProbe(bytes, CHUNK_COUNT)
+    const chain = installChain(profileDir, probe.client, fileEntry({ sha256: signedSha }))
+
+    const result = await chain.run()
+
+    // addPlugin 收到的是**已校验制品**路径(offline:true ⇒ 两 flag),不是源/临时路径。
+    const expectedPath = join(profileDir, '.market-artifacts', marketArtifactName('@huaanwork/sample', '1.2.3', signedSha))
+    expect(chain.pnpmCalls).toEqual([['add', expectedPath, '--offline', '--ignore-scripts']])
+    expect(result.restarting).toBe(true)
+    // 被安装文件 = 被哈希文件:argv 路径的 sha256 === 清单值,且中途未重新取字节。
+    expect(sha256Hex(readFileSync(expectedPath))).toBe(signedSha)
+    expect(probe.state.streamCalls).toBe(1)
+    expect(probe.state.fetchBufferCalls).toBe(0)
+    expect(artifactDirEntries(profileDir)).toEqual([marketArtifactName('@huaanwork/sample', '1.2.3', signedSha)])
+  })
+})
+
+describe('readTarballPackageJsonFromFile (第 53 条:落盘制品不再整包读回内存)', () => {
+  test('streams the manifest out of a staged file (same walk rules as the buffered reader)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hw-market-file-read-'))
+    roots.push(dir)
+    const bytes = buildTgz(dir, { name: 'pkg-file', version: '2.0.0' })
+    const path = join(dir, 'artifact.tgz')
+    writeFileSync(path, bytes)
+
+    await expect(readTarballPackageJsonFromFile(path)).resolves.toEqual({ name: 'pkg-file', version: '2.0.0' })
+  })
+
+  test('maps a read fault to an errno-only host error instead of a tarball verdict', async () => {
+    // 文件读不动(此处不存在)是**宿主**故障,不得被报成「制品不是合法 tarball」。
+    await expect(readTarballPackageJsonFromFile(join(tmpdir(), 'hw-market-missing-artifact.tgz')))
+      .rejects.toMatchObject({ code: 'market-artifact-io' })
   })
 })
 

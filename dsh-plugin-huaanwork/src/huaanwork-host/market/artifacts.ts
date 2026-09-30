@@ -99,18 +99,70 @@ export class MarketArtifactIoError extends Error {
   }
 }
 
+/** fs/zlib 错误的稳定 code(只取 errno 那一半,评审 P1)。 */
+export function marketIoErrno(error: unknown): string {
+  return typeof (error as { code?: unknown } | null)?.code === 'string'
+    ? (error as { code: string }).code
+    : 'unknown'
+}
+
 /**
- * 把**已在手上的字节**落成制品:`<profileDir>/.market-artifacts/<name>-<version>-
- * <sha256前12>.tgz`(目录 0700、文件 0600;temp + rename 原子落盘,同 sha 重复落盘
- * 原地覆盖写保 inode——`file:` 引用不受影响)。
+ * 制品在盘上的**目标路径**(命名 + 目录归位的唯一实现):`<profileDir>/.market-artifacts/
+ * <name>-<version>-<sha256前12>.tgz`。名字里的 sha12 由**同一份字节**算出(不另行
+ * 传参——两处各算一次就多一个漂移面)。目录在此归位为 0700。
+ */
+export function marketArtifactPath(profileDir: string, name: string, version: string, sha256hex: string): string {
+  return join(ensureMarketArtifactsDir(profileDir), marketArtifactName(name, version, sha256hex))
+}
+
+/**
+ * 暂存名协议(唯一实现):`<artifactPath>.tmp-<pid>`。
+ *
+ * 带 pid 是 P16 的一半(另一半是 `state.json` 的固定名 `.tmp`,归 Task 6.9):同
+ * profile 的多个进程各有可辨的暂存名(单进程内同包并发安装由 execute 路由的单飞
+ * 互斥挡住),崩溃残留也能看出归属。
+ */
+export function marketArtifactTempPath(artifactPath: string): string {
+  return `${artifactPath}.tmp-${String(process.pid)}`
+}
+
+/**
+ * best-effort 清理暂存文件(所有失败路径的收尾)。清理失败只忽略——它是加固,
+ * 不是判据;且此时调用方手上已有一个更值得上报的失败原因,不得被它遮蔽。
+ */
+export function discardMarketArtifactTemp(tmpPath: string): void {
+  try { rmSync(tmpPath, { force: true }) } catch { /* best-effort */ }
+}
+
+/**
+ * 暂存 → 制品提交(唯一实现):0600 → rename **无条件**原子替换目标。
+ *
+ * 非原子窗口已消除(任务 6.3 修复):旧协议在目标已存在时 `existsSync` + 原地覆盖写,
+ * 一旦写入中途失败/被杀,最终名下就留下半个制品;而名字里的 sha12 由同一份字节算出,
+ * 重复安装本就是等价重写,`rename` 的原子替换既够用也没有那个窗口。失败清理暂存并抛
+ * `MarketArtifactIoError`(只带 errno)。
+ */
+export function commitMarketArtifact(tmpPath: string, artifactPath: string): void {
+  try {
+    chmodSync(tmpPath, 0o600)
+    renameSync(tmpPath, artifactPath)
+  } catch (error) {
+    discardMarketArtifactTemp(tmpPath)
+    throw new MarketArtifactIoError(marketIoErrno(error))
+  }
+}
+
+/**
+ * 把**已在手上的字节**落成制品(目录 0700、文件 0600;temp + rename 原子落盘,
+ * 同 sha 重复落盘 = 等价重写——`file:` 引用按路径解析,替换后仍指向同一制品)。
  *
  * 本地安装(Task 6.2,裁定 R-2)落的就是**同一个**命名与布局函数 ⇒ 本地制品一落位
  * 就与市场制品同受「当前 profile 且所有 checkpoint slot 均无引用才可删」的保留/GC
- * 判据(spec §14 第 42/48/50 条)。市场路径(`executeMarketInstall`)传入的制品已在
- * 本目录内,addPlugin 侧直通不再重新落盘(修复轮 1:否则二次落盘还会把发布侧门的
- * 宽版本面喂给本地命名边界)。
+ * 判据(spec §14 第 42/48/50 条)。市场路径(install.ts 的 downloadAndStageArtifact)
+ * **逐 chunk 流式**写同一个暂存名、走同一个提交函数(Task 6.3 收敛:落盘协议自此人
+ * 一份实现,不再有逐行双生);它传入的制品已在本目录内,addPlugin 侧直通不再重新落盘
+ * (修复轮 1:否则二次落盘还会把发布侧门的宽版本面喂给本地命名边界)。
  *
- * 名字里的 sha12 由**同一份字节**算出(不另行传参——两处各算一次就多一个漂移面)。
  * 落盘失败抛 `MarketArtifactIoError`(只带 errno,不带绝对路径)。
  */
 export function stageMarketArtifact(
@@ -120,29 +172,15 @@ export function stageMarketArtifact(
   bytes: Uint8Array,
 ): { artifactPath: string; sha256: string } {
   const sha256 = createHash('sha256').update(bytes).digest('hex')
-  const artifactsDir = ensureMarketArtifactsDir(profileDir)
-  const artifactPath = join(artifactsDir, marketArtifactName(name, version, sha256))
-  // 与 market/install.ts:285-308 同协议(逐行双生:同 existsSync 原地覆盖写分支、同
-  // `${artifactPath}.tmp-${process.pid}` 暂存名、同 0600、同 errno 提取)。复制是
-  // 控制方把 install.ts 保留给 Task 6.3 的边界产物,不是自由选择;Task 6.3 收敛为
-  // 单实现之前,两侧任一改动必须同步(否则「落盘协议」与「安装侧错误口径」漂移)。
-  const tmpPath = `${artifactPath}.tmp-${String(process.pid)}`
+  const artifactPath = marketArtifactPath(profileDir, name, version, sha256)
+  const tmpPath = marketArtifactTempPath(artifactPath)
   try {
-    if (existsSync(artifactPath)) {
-      writeFileSync(artifactPath, bytes)
-    } else {
-      writeFileSync(tmpPath, bytes, { mode: 0o600 })
-      chmodSync(tmpPath, 0o600)
-      renameSync(tmpPath, artifactPath)
-    }
-    chmodSync(artifactPath, 0o600)
+    writeFileSync(tmpPath, bytes, { mode: 0o600 })
   } catch (error) {
-    try { rmSync(tmpPath, { force: true }) } catch { /* best-effort */ }
-    const errno = typeof (error as { code?: unknown } | null)?.code === 'string'
-      ? (error as { code: string }).code
-      : 'unknown'
-    throw new MarketArtifactIoError(errno)
+    discardMarketArtifactTemp(tmpPath)
+    throw new MarketArtifactIoError(marketIoErrno(error))
   }
+  commitMarketArtifact(tmpPath, artifactPath)
   return { artifactPath, sha256 }
 }
 

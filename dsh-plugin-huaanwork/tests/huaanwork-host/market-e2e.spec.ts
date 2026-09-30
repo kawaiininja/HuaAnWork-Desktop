@@ -81,6 +81,10 @@ function recordingHttpClient(): MarketHttpClient {
       recordedHosts.push(new URL(url).host)
       return real.fetchBuffer(url, label, maxBytes)
     },
+    fetchStream(url, label, maxBytes, onChunk) {
+      recordedHosts.push(new URL(url).host)
+      return real.fetchStream(url, label, maxBytes, onChunk)
+    },
   }
 }
 

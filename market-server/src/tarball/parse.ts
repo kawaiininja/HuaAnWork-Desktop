@@ -34,6 +34,15 @@ export class TarballError extends Error {
  * gzip bomb measured to expand ~1028× (→ ~60 MiB) and a larger one OOMs the
  * single event-loop process. Both the buffered and the streaming paths
  * enforce exactly this ceiling.
+ *
+ * KEEP IN SYNC with the install side's ceiling of the same value
+ * (`dsh-plugin-huaanwork/src/huaanwork-host/market/install.ts`,
+ * MAX_TAR_DECOMPRESSED_BYTES — spec §14 第 53 条): an install-side ceiling
+ * that is stricter makes legitimately published artifacts uninstallable, a
+ * looser one loses the gzip-bomb protection. The dependency-direction guard
+ * forbids any cross-package import, so equality is held by this comment plus
+ * a unit test on each side (here: `tarball-parse.spec.ts`, over-cap bombs on
+ * both the buffered and the streaming file path).
  */
 export const MAX_TAR_DECOMPRESSED_BYTES = 64 * 1024 * 1024
 

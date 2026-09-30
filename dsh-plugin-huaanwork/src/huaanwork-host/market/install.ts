@@ -1,19 +1,25 @@
 /**
- * huaanwork-market 远程安装执行(M5 Task 5 Step 3,解法 A)。
+ * huaanwork-market 远程安装执行(M5 Task 5 Step 3,解法 A;M6 Task 6.3 流式,第 53 条)。
  *
  * 安装链(〈安装入口边界〉,被校验顶层制品字节 = 被安装字节):
  * ① 从**已验签清单**取 `name@version` 的 tarballPath + sha256;URL 经
  *    catalog-client.resolveSameOriginUrl 同源钉扎(X1,fail-closed)。
- * ② 自有 HTTP client 拉取 .tgz,**全量缓冲**(上限 MARKET_ARTIFACT_MAX_BYTES)
- *    后一次性 sha256 比对清单——**非流式**(评审 D6:流式下载留待后续批次,
- *    届时改为边收边 hash.update(chunk) 边写 tmp)。
- * ③ 与清单 sha256 比对:不符即拒——temp 清理,**不落盘、不安装、诚实报错**。
+ * ② 自有 HTTP client **流式**拉取 .tgz(catalog-client.fetchStream,不跟随重定向;
+ *    压缩上限 MARKET_ARTIFACT_MAX_BYTES = 2 GiB,裁定 D-M6-25):边收边
+ *    `hash.update(chunk)` 边写暂存文件(背压:`write` 返回 false 即等 drain),主进程
+ *    内存峰值 = O(chunk);超上限即断连并**不读完**剩余字节。
+ * ③ 流结束比对 sha256(**被哈希的就是被写入暂存、随后原子 rename 成制品的那些
+ *    字节**——第 53 条:「被校验顶层制品字节 = 被安装字节」不依赖流式,只要求校验后
+ *    不重新取字节):不符即删暂存并拒——**不落盘、不安装、诚实报错**。
  * ④ **零依赖与无脚本预检**(round4 裁定 (c),安装侧门,与发布侧门同口径):
  *    dependencies/optionalDependencies 非空即拒;scripts 含 preinstall/install/
  *    postinstall/prepare 亦拒(peerDependencies 豁免;bundleDependencies 允许;
- *    其余非 lifecycle scripts 允许)。
+ *    其余非 lifecycle scripts 允许)。manifest 从**暂存文件流式解压**读出(下同),
+ *    压缩字节不整包读回内存。
  * ⑤ 通过才落制品 `<profileDir>/.market-artifacts/<name>-<version>-<sha256前12>.tgz`
- *    (目录 0700、文件 0600、**不删**——file: 引用共存亡,N1);同 sha 重复安装覆盖写。
+ *    (目录 0700、文件 0600、**不删**——file: 引用共存亡,N1);命名/暂存/提交走
+ *    market/artifacts.ts 的**唯一**实现(与本地安装共用,Task 6.3 收敛),同 sha
+ *    重复安装 = 等价重写(temp + rename 原子替换)。
  * ⑥ `addPlugin(制品路径, {offline: true})` → pnpm 恒带 `--offline --ignore-scripts`
  *    (两道补强;flag 构造只在 addPlugin 内;不经 runExternalMarketPluginInstall/--registry)。
  *
@@ -25,12 +31,22 @@
  */
 
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { gunzipSync } from 'node:zlib'
+import { once } from 'node:events'
+import { createReadStream, createWriteStream, openSync, type WriteStream } from 'node:fs'
+import { Writable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { createGunzip, gunzipSync } from 'node:zlib'
 import type { DesktopPnpm } from '../../pnpm.ts'
 import type { ConfirmedRestartRuntime } from '../../host-runtime-bridge.ts'
 import { addPlugin, type PluginMutationResult } from '../plugins-host.ts'
-import { marketArtifactName, ensureMarketArtifactsDir } from './artifacts.ts'
+import {
+  commitMarketArtifact,
+  discardMarketArtifactTemp,
+  MarketArtifactIoError,
+  marketArtifactPath,
+  marketArtifactTempPath,
+  marketIoErrno,
+} from './artifacts.ts'
 import { MarketFetchError, createMarketHttpClient, resolveSameOriginUrl, type MarketHttpClient } from './catalog-client.ts'
 import type { MarketManifestFile } from './verify.ts'
 
@@ -93,6 +109,21 @@ function tarEntries(buffer: Buffer): { name: string; type: string; data: Buffer 
 }
 
 /**
+ * zlib 失败 → 具名门错误。超上限与坏 gzip 是两件事,**分开诚实报错**(实测 zlib
+ * 分别抛 ERR_BUFFER_TOO_LARGE / Z_DATA_ERROR)——否则运营者看到「不是合法 gzip」
+ * 会去查传输,而真实原因是制品过大。
+ */
+function mapGunzipFailure(cause: unknown): MarketInstallGateError {
+  if (marketIoErrno(cause) === 'ERR_BUFFER_TOO_LARGE') {
+    return new MarketInstallGateError(
+      `downloaded artifact decompresses beyond the ${String(MAX_TAR_DECOMPRESSED_BYTES)}-byte limit (possible gzip bomb)`,
+      'market-invalid-tarball',
+    )
+  }
+  return new MarketInstallGateError('downloaded artifact is not a valid gzip tarball', 'market-invalid-tarball')
+}
+
+/**
  * 从 .tgz 字节解出顶层 package.json 对象。找不到/坏 gzip/坏 JSON/含 `..` 段/
  * 多 depth-1 候选一律 MarketInstallGateError(不落盘判定的前置:预检不过即拒)。
  *
@@ -115,20 +146,61 @@ export function readTarballPackageJson(tgzBytes: Buffer): Record<string, unknown
     // 评审 D6:带上限解压,gunzip 炸弹在此确定性失败而不是把主进程推向 OOM。
     tar = gunzipSync(tgzBytes, { maxOutputLength: MAX_TAR_DECOMPRESSED_BYTES })
   } catch (cause) {
-    // 超上限与坏 gzip 是两件事,分开诚实报错(实测 zlib 分别抛
-    // ERR_BUFFER_TOO_LARGE / Z_DATA_ERROR)——否则运营者看到「不是合法 gzip」
-    // 会去查传输,而真实原因是制品过大。
-    const code = typeof (cause as { code?: unknown } | null)?.code === 'string'
-      ? (cause as { code: string }).code
-      : undefined
-    if (code === 'ERR_BUFFER_TOO_LARGE') {
-      throw new MarketInstallGateError(
-        `downloaded artifact decompresses beyond the ${String(MAX_TAR_DECOMPRESSED_BYTES)}-byte limit (possible gzip bomb)`,
-        'market-invalid-tarball',
-      )
-    }
-    throw new MarketInstallGateError('downloaded artifact is not a valid gzip tarball', 'market-invalid-tarball')
+    throw mapGunzipFailure(cause)
   }
+  return manifestFromTarBytes(tar)
+}
+
+/**
+ * 从**盘上暂存文件**流式读出顶层 package.json(第 53 条):安装链落盘后不再把压缩
+ * 制品整包读回内存——`createReadStream` 逐块喂 `createGunzip`,解压产物按**同一
+ * 上限**收进内存后交给**同一个** walker 尾巴(选取规则零漂移)。
+ *
+ * 上限判定必须手工计数:`maxOutputLength` 只被 zlib 的便利方法(`gunzipSync` 等)
+ * 兑现,**流式 Transform 会照单全收**——实测 `createGunzip({ maxOutputLength: 100 })`
+ * 对 1000 字节的 gzip 输出全部 1000 字节且不报错。发布侧 `tarball/parse.ts` 的流式
+ * 路径同样手工计数(total > MAX_TAR_DECOMPRESSED_BYTES ⇒ ERR_BUFFER_TOO_LARGE 语义),
+ * 故两侧上限语义一致;判超即以上限错误中止(不再继续灌数据)。
+ *
+ * 内存口径诚实说明(与发布侧 extractPackageManifestFromFile 同款措辞):压缩字节恒
+ * 不整包驻留;**解压后的 tar** 会收成单个 Buffer(峰值 ≈ 解压上限 64 MiB,
+ * `Buffer.concat` 期间瞬时 ≈ 2×)。上限之内不值得再做增量 walk。
+ *
+ * 错误口径:zlib/上限失败是**制品**判定,走具名门错误;读盘故障(我们的暂存文件)
+ * 是**宿主** IO,走只带 errno 的 500(评审 P1:不得把宿主故障报成制品的过错,也不得
+ * 把 profileDir 绝对路径回给渲染进程)。
+ */
+export async function readTarballPackageJsonFromFile(path: string): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = []
+  let total = 0
+  try {
+    await pipeline(
+      createReadStream(path),
+      createGunzip(),
+      new Writable({
+        write: (chunk: Buffer, _encoding, callback) => {
+          total += chunk.byteLength
+          if (total > MAX_TAR_DECOMPRESSED_BYTES) {
+            // 与发布侧 parse.ts 的流式路径同款:`ERR_BUFFER_TOO_LARGE` 语义的错误码
+            // 让上限失败与坏 gzip 走进同一个具名映射(mapGunzipFailure)。
+            callback(Object.assign(new Error('decompressed tarball exceeds the cap'), { code: 'ERR_BUFFER_TOO_LARGE' }))
+            return
+          }
+          chunks.push(chunk)
+          callback()
+        },
+      }),
+    )
+  } catch (cause) {
+    const errno = marketIoErrno(cause)
+    if (errno === 'ERR_BUFFER_TOO_LARGE' || errno.startsWith('Z_')) throw mapGunzipFailure(cause)
+    throw new MarketFetchError(`failed to read the staged market artifact (${errno})`, 500, 'market-artifact-io')
+  }
+  return manifestFromTarBytes(Buffer.concat(chunks))
+}
+
+/** tar 字节 → 顶层 package.json(两条读取路径共用的 walker 尾巴)。 */
+function manifestFromTarBytes(tar: Buffer): Record<string, unknown> {
   const entries = tarEntries(tar)
   let best: Buffer | undefined
   for (const entry of entries) {
@@ -217,11 +289,18 @@ export function precheckTarballManifest(manifest: Record<string, unknown>): void
 }
 
 // ---------------------------------------------------------------------------
-// 下载 + 校验 + 落制品
+// 下载 + 校验 + 落制品(第 53 条:流式)
 // ---------------------------------------------------------------------------
 
-/** 制品响应体上限(内网插件制品;防失控服务端)。 */
-export const MARKET_ARTIFACT_MAX_BYTES = 512 * 1024 * 1024
+/**
+ * 制品响应体上限(内网插件制品;防失控服务端)。裁定 **D-M6-25**:自 512 MiB 放宽到
+ * **2 GiB**(与 update-server 的 1 GiB 安装器上限同量级,留余量)——流式改造后主进程
+ * 内存峰值只与单个 chunk 有关,上限不再等于内存占用,故可放宽而不把安装链推向 OOM。
+ */
+export const MARKET_ARTIFACT_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+/** 已验签清单条目的 sha256 形状(64 位小写 hex)。 */
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u
 
 export interface PreparedMarketArtifact {
   readonly artifactPath: string
@@ -230,10 +309,28 @@ export interface PreparedMarketArtifact {
 }
 
 /**
- * 下载 .tgz(全量缓冲,上限 MARKET_ARTIFACT_MAX_BYTES)+ 对缓冲字节一次性
- * 算 sha256 并比对清单 + 零依赖无脚本预检 + 落制品(评审 D6:当前**非流式**,
- * 流式下载边收边 hash 留待后续批次)。任何一步失败:temp 清理(不落盘)、
+ * 中止暂存写流并删除暂存文件(所有失败路径的收尾)。**先等 'close'**(fd 释放)再删:
+ * Windows 上删一个仍被打开的文件会 EPERM;监听在 destroy **之前**挂好,无竞态。
+ */
+async function abortArtifactWrite(stream: WriteStream, tmpPath: string): Promise<void> {
+  if (!stream.closed) {
+    const closed = once(stream, 'close').catch(() => { /* destroy 期的 'error' 不遮蔽原故障 */ })
+    stream.destroy()
+    await closed
+  }
+  discardMarketArtifactTemp(tmpPath)
+}
+
+/**
+ * 下载 .tgz(第 53 条:**流式**,上限 MARKET_ARTIFACT_MAX_BYTES = 2 GiB)+ 边收边
+ * 算 sha256 边写暂存文件(背压:写返回 false 即等 drain,内存峰值 O(chunk))+
+ * 与已验签清单比对 + 零依赖无脚本预检 + 落制品。任何一步失败:暂存清理(不落盘)、
  * 不安装、抛具名错误。
+ *
+ * **被校验顶层制品字节 = 被安装字节**(解法 A):`hash.update` 与
+ * `writeStream.write` 吃的是同一个 chunk 变量,随后只有 chmod + rename,绝不在校验后
+ * 重新取字节。落盘命名/暂存/提交流程的唯一实现在 market/artifacts.ts(与本地安装
+ * Task 6.2 共用),本函数只负责「把流写进那个暂存名」。
  */
 export async function downloadAndStageArtifact(options: {
   readonly origin: string
@@ -241,72 +338,118 @@ export async function downloadAndStageArtifact(options: {
   readonly profileDir: string
   readonly http?: MarketHttpClient
 }): Promise<PreparedMarketArtifact> {
+  // ① URL 同源钉扎(X1,第 51 条):跨源在**任何请求之前**就拒,fail-closed。
   const url = resolveSameOriginUrl(options.origin, options.file.tarballPath)
   const http = options.http ?? createMarketHttpClient()
-
-  let bytes: Buffer
-  try {
-    bytes = await http.fetchBuffer(url, `artifact ${options.file.name}@${options.file.version}`, MARKET_ARTIFACT_MAX_BYTES)
-  } catch (error) {
-    if (error instanceof MarketFetchError) throw error
-    throw new MarketFetchError(`market artifact download failed: ${error instanceof Error ? error.message : String(error)}`, 502)
-  }
-
-  // 对**已收齐的**缓冲字节一次性算 sha256(评审 D6:非流式;流式下载边收边
-  // hash.update(chunk) 边写 tmp 留待 M6,偏离已登记 spec §14 第 53 条)。
-  // 被校验的字节即下方落盘的字节——解法 A 的「被校验字节 = 被安装字节」
-  // 不依赖流式,只依赖不在校验后重新取字节。
-  const sha256 = createHash('sha256').update(bytes).digest('hex')
-  if (sha256 !== options.file.sha256.toLowerCase()) {
-    // sha256 不符:不落盘、不安装、诚实报错(传输损坏/路径 MITM 换包/清单不一致)。
+  const name = options.file.name
+  const version = options.file.version
+  // 已验签清单条目的 sha256:它同时是暂存名与制品名的输入,形状先 fail-closed 钉死
+  // (名字里的 sha12 与校验值同源;畸形值不得进入文件名,畸形清单也不可能匹配任何下载)。
+  const signedSha256 = options.file.sha256.toLowerCase()
+  if (!SHA256_HEX_PATTERN.test(signedSha256)) {
     throw new MarketFetchError(
-      `插件文件校验失败,已拒绝安装:${options.file.name}@${options.file.version} 下载所得 sha256=${sha256} 与已验签清单 ${options.file.sha256} 不符`,
+      `插件文件校验失败,已拒绝安装:${name}@${version} 的已验签清单 sha256 不是 64 位 hex 摘要`,
       400,
       'market-sha256-mismatch',
     )
   }
 
-  // 零依赖 + 无脚本预检(落盘前;不过即拒,profile 零接触)。
-  const manifest = readTarballPackageJson(bytes)
-  precheckTarballManifest(manifest)
-  // 身份一致性(review D4/D5 廉价半段):制品落盘与安装的身份以**已验签清单
-  // 条目**为准(签名覆盖的就是它);tarball 自述 name/version 必须与之完全
-  // 相等,不等即拒——绝不允许装出一个与清单身份不一致的在盘制品。
-  if (manifest.name !== options.file.name || manifest.version !== options.file.version) {
-    throw new MarketInstallGateError(
-      `tarball self-declared identity ${JSON.stringify(`${String(manifest.name)}@${String(manifest.version)}`)} ` +
-      `does not match the signed manifest entry ${JSON.stringify(`${options.file.name}@${options.file.version}`)}`,
-      'invalid-package-identity',
+  const artifactPath = marketArtifactPath(options.profileDir, name, version, signedSha256)
+  const tmpPath = marketArtifactTempPath(artifactPath)
+  const hash = createHash('sha256')
+  // 先**同步**建好暂存文件(0600)再进写流:失败清理紧跟在「文件已存在」之后,不与写流
+  // 的异步 open 赛跑(否则清理可能先跑、文件后出现,留下残留)。暂存与制品同目录
+  // (`.market-artifacts/`)——rename 必须同文件系统,不能借道 tmpdir。
+  let writeStream: WriteStream
+  try {
+    writeStream = createWriteStream(tmpPath, { fd: openSync(tmpPath, 'w', 0o600) })
+  } catch (error) {
+    discardMarketArtifactTemp(tmpPath)
+    // 建不了暂存文件是宿主 IO:只回 errno(评审 P1),不把绝对路径回给渲染进程。
+    throw new MarketFetchError(`failed to stage market artifact (${marketIoErrno(error)})`, 500, 'market-artifact-io')
+  }
+  // 写流故障的确定性观察点:'error' 监听必须有——否则未捕获 'error' 会掀翻主进程;
+  // 且背压等 drain 时 once(stream,'drain') 会以同一错误拒绝(见下方回调)。
+  let writeFailure: Error | undefined
+  writeStream.on('error', (error: Error) => { writeFailure = error })
+
+  let receivedBytes: number
+  try {
+    const received = await http.fetchStream(url, `artifact ${name}@${version}`, MARKET_ARTIFACT_MAX_BYTES, async (chunk) => {
+      // 边收边算 sha256、边写暂存:被哈希的正是被写入的同一份字节(解法 A)。
+      hash.update(chunk)
+      if (!writeStream.write(chunk)) {
+        // 背压:内核缓冲排空后再要下一块;写流期间报错则本 await 以该错误拒绝。
+        await once(writeStream, 'drain')
+      }
+    })
+    receivedBytes = received.bytes
+  } catch (error) {
+    await abortArtifactWrite(writeStream, tmpPath)
+    if (error instanceof MarketFetchError) throw error
+    throw new MarketFetchError(
+      `market artifact download failed: ${error instanceof Error ? error.message : String(error)}`,
+      502,
     )
   }
-  const name = options.file.name
-  const version = options.file.version
 
-  const artifactsDir = ensureMarketArtifactsDir(options.profileDir)
-  const artifactPath = `${artifactsDir}/${marketArtifactName(name, version, sha256)}`
-  // 同 sha 重复安装:已存在则原地覆盖写(保 inode,不删重建——file: 引用不受影响);
-  // 不存在则 temp + rename 原子落盘。
-  const tmpPath = `${artifactPath}.tmp-${process.pid}`
-  try {
-    if (existsSync(artifactPath)) {
-      writeFileSync(artifactPath, bytes)
-    } else {
-      writeFileSync(tmpPath, bytes, { mode: 0o600 })
-      chmodSync(tmpPath, 0o600)
-      renameSync(tmpPath, artifactPath)
-    }
-    chmodSync(artifactPath, 0o600)
-  } catch (error) {
-    try { rmSync(tmpPath, { force: true }) } catch { /* best-effort */ }
-    // 只回 errno,不回 error.message(评审 P1:fs 错误的 message 含 profileDir
-    // 绝对路径,而本错误是具名类 ⇒ routes 会原样把 message 转给渲染进程)。
-    // errno 才是排障需要的那一半,路径对用户与运维都无增量信息。
-    const errno = typeof (error as { code?: unknown } | null)?.code === 'string'
-      ? (error as { code: string }).code
-      : 'unknown'
-    throw new MarketFetchError(`failed to stage market artifact (${errno})`, 500, 'market-artifact-io')
+  const sha256 = hash.digest('hex')
+  if (sha256 !== signedSha256) {
+    // sha256 不符:不落盘、不安装、诚实报错(传输损坏/路径 MITM 换包/清单不一致)。
+    await abortArtifactWrite(writeStream, tmpPath)
+    throw new MarketFetchError(
+      `插件文件校验失败,已拒绝安装:${name}@${version} 下载所得 sha256=${sha256} 与已验签清单 ${options.file.sha256} 不符`,
+      400,
+      'market-sha256-mismatch',
+    )
   }
-  return { artifactPath, sha256, size: bytes.byteLength }
+
+  try {
+    // 收尾:冲刷已排队的字节并等 fd 关闭(rename 前确保写流已彻底交还文件)。
+    if (writeFailure !== undefined) throw writeFailure
+    const closed = once(writeStream, 'close').catch(() => { /* fd 关闭细节不覆盖 end 的判定 */ })
+    await new Promise<void>((resolve, reject) => {
+      writeStream.end((error?: Error | null) => { error ? reject(error) : resolve() })
+    })
+    await closed
+    if (writeFailure !== undefined) throw writeFailure
+  } catch (error) {
+    await abortArtifactWrite(writeStream, tmpPath)
+    // 只回 errno,不回 error.message(评审 P1:fs 错误的 message 含 profileDir 绝对
+    // 路径,而本错误是具名类 ⇒ routes 会原样把 message 转给渲染进程)。
+    throw new MarketFetchError(`failed to stage market artifact (${marketIoErrno(error)})`, 500, 'market-artifact-io')
+  }
+
+  try {
+    // 零依赖 + 无脚本预检(落盘前;不过即拒,profile 零接触)。manifest 从**暂存
+    // 文件**流式解压读出(第 53 条):压缩字节不整包读回内存。
+    const manifest = await readTarballPackageJsonFromFile(tmpPath)
+    precheckTarballManifest(manifest)
+    // 身份一致性(review D4/D5 廉价半段):制品落盘与安装的身份以**已验签清单
+    // 条目**为准(签名覆盖的就是它);tarball 自述 name/version 必须与之完全
+    // 相等,不等即拒——绝不允许装出一个与清单身份不一致的在盘制品。
+    if (manifest.name !== name || manifest.version !== version) {
+      throw new MarketInstallGateError(
+        `tarball self-declared identity ${JSON.stringify(`${String(manifest.name)}@${String(manifest.version)}`)} ` +
+        `does not match the signed manifest entry ${JSON.stringify(`${name}@${version}`)}`,
+        'invalid-package-identity',
+      )
+    }
+  } catch (error) {
+    discardMarketArtifactTemp(tmpPath)
+    throw error
+  }
+
+  try {
+    // 暂存 → 制品(唯一实现):0600 + rename 原子替换(同 sha 重复安装 = 等价重写)。
+    commitMarketArtifact(tmpPath, artifactPath)
+  } catch (error) {
+    if (error instanceof MarketArtifactIoError) {
+      throw new MarketFetchError(`failed to stage market artifact (${error.errno})`, 500, 'market-artifact-io')
+    }
+    throw error
+  }
+  return { artifactPath, sha256, size: receivedBytes }
 }
 
 // ---------------------------------------------------------------------------

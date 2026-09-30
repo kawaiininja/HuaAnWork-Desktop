@@ -120,18 +120,93 @@ function requestBuffer(url: string, maxBytes: number, label: string): Promise<Bu
   })
 }
 
+/**
+ * 逐 chunk 拉取(GET;第 53 条):每个 chunk 交给 `onChunk`(返回 Promise 则 await,
+ * 调用方据此施加背压——写盘返回 false 时等 'drain'),内存峰值 O(chunk)。
+ *
+ * **不跟随重定向**:3xx 与其它任何非 200 一律拒(第 51 条的同源钉扎在调用方完成,
+ * 故一个跨源 3xx 无从击穿;本方法只打传入的那个 URL)。超 `maxBytes` 立即
+ * `response.destroy()` 并拒,**不读完剩余字节**。`onChunk` 抛错即中止下载并原样
+ * 上抛(宿主 IO 故障不得被伪装成网络故障)。返回累计收到的字节数。
+ */
+function requestStream(
+  url: string,
+  label: string,
+  maxBytes: number,
+  onChunk: (chunk: Buffer) => void | Promise<void>,
+): Promise<{ bytes: number }> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const parts = originParts(url)
+    const transport = parts.protocol === 'https:' ? httpsGet : httpGet
+    const request = transport(url, (response: IncomingMessage) => {
+      const status = response.statusCode ?? 0
+      if (status !== 200) {
+        response.resume()
+        rejectPromise(new MarketFetchError(
+          `market ${label} returned HTTP ${status} (${url})`,
+          502,
+        ))
+        return
+      }
+      void (async () => {
+        let bytes = 0
+        try {
+          for await (const chunk of response) {
+            const buffer = chunk as Buffer
+            bytes += buffer.byteLength
+            if (bytes > maxBytes) {
+              // 超限即断连:剩余字节不再读(第 53 条:内存峰值 = O(chunk),不是 O(响应体))。
+              response.destroy()
+              throw new MarketFetchError(`market ${label} exceeded ${maxBytes} bytes`, 502)
+            }
+            await onChunk(buffer)
+          }
+          resolvePromise({ bytes })
+        } catch (error) {
+          response.destroy()
+          rejectPromise(error instanceof MarketFetchError
+            ? error
+            : new MarketFetchError(`market ${label} is unreachable: ${error instanceof Error ? error.message : String(error)}`, 502))
+        }
+      })()
+    })
+    request.setTimeout(MARKET_HTTP_TIMEOUT_MS, () => {
+      request.destroy(new MarketFetchError(`market ${label} timed out after ${MARKET_HTTP_TIMEOUT_MS}ms`, 502))
+    })
+    request.on('error', (error: Error) => {
+      if (error instanceof MarketFetchError) rejectPromise(error)
+      else rejectPromise(new MarketFetchError(`market ${label} is unreachable: ${error.message}`, 502))
+    })
+  })
+}
+
 /** 自有 HTTP client 面(测试可注入假实现;默认实现只打配置 origin)。 */
 export interface MarketHttpClient {
   /** 拉 JSON 文本(GET);非 2xx/超时/超限 → MarketFetchError(诚实报错)。 */
   fetchText(url: string, label: string): Promise<string>
-  /** 拉字节(GET;全量缓冲,上限 maxBytes)——评审 D6:当前**非流式**,「流式拉字节」是后续批次目标;install 侧对返回的缓冲一次性算 sha256。非 2xx/超时/超限 → MarketFetchError(诚实报错)。 */
+  /**
+   * 拉字节(GET;全量缓冲,上限 maxBytes)。M5 起 install 侧即用此面;第 53 条后
+   * 安装路径改走 `fetchStream`(本方法保留为通用字节拉取面,现有冒烟/端到端测试的
+   * 注入桩仍以它记录真实 client 行为)。非 2xx/超时/超限 → MarketFetchError。
+   */
   fetchBuffer(url: string, label: string, maxBytes: number): Promise<Buffer>
+  /**
+   * 逐 chunk 拉字节(第 53 条,内存峰值 O(chunk)):`onChunk` 可返回 Promise 以施加
+   * 背压;**不跟随重定向**(非 200 一律拒);超 maxBytes 即断连不读完。返回收到字节数。
+   */
+  fetchStream(
+    url: string,
+    label: string,
+    maxBytes: number,
+    onChunk: (chunk: Buffer) => void | Promise<void>,
+  ): Promise<{ bytes: number }>
 }
 
 export function createMarketHttpClient(): MarketHttpClient {
   return {
     fetchText: (url, label) => requestBuffer(url, MARKET_JSON_MAX_BYTES, label).then(buffer => buffer.toString('utf8')),
     fetchBuffer: (url, label, maxBytes) => requestBuffer(url, maxBytes, label),
+    fetchStream: (url, label, maxBytes, onChunk) => requestStream(url, label, maxBytes, onChunk),
   }
 }
 

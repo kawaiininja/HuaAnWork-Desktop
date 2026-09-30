@@ -268,7 +268,12 @@ describe('GET state(wrapper 自有形态,R14)', () => {
     const gate = new Promise<Buffer>((resolvePromise) => { release = resolvePromise })
     const http: MarketHttpClient = {
       fetchText: async (url) => (await fetch(url)).text(),
-      fetchBuffer: async () => gate,
+      fetchBuffer: async () => { throw new Error('the streaming install path must not call fetchBuffer (第 53 条)') },
+      fetchStream: async (_url, _label, _maxBytes, onChunk) => {
+        const bytes = await gate
+        await onChunk(bytes)
+        return { bytes: bytes.byteLength }
+      },
     }
     const { ctx, recorded } = fakeCtx()
     registerMarketRoutes(ctx, depsFor(profileDir, server.origin, { http }))
@@ -456,12 +461,17 @@ describe('POST operations/preview + execute(单飞 R16 / X1 / 取消诚实)', ()
     }])
     activate(server, manifest)
 
-    // fetchBuffer 挂起 → 第一个 execute 持有互斥;第二个必须 409。
+    // fetchStream 挂起 → 第一个 execute 持有互斥;第二个必须 409。
     let release!: (bytes: Buffer) => void
     const gate = new Promise<Buffer>((resolvePromise) => { release = resolvePromise })
     const http: MarketHttpClient = {
       fetchText: async (url) => (await fetch(url)).text(),
-      fetchBuffer: async () => gate,
+      fetchBuffer: async () => { throw new Error('the streaming install path must not call fetchBuffer (第 53 条)') },
+      fetchStream: async (_url, _label, _maxBytes, onChunk) => {
+        const bytes = await gate
+        await onChunk(bytes)
+        return { bytes: bytes.byteLength }
+      },
     }
     const { ctx, recorded } = fakeCtx()
     registerMarketRoutes(ctx, depsFor(profileDir, server.origin, { http }))
@@ -493,7 +503,12 @@ describe('POST operations/preview + execute(单飞 R16 / X1 / 取消诚实)', ()
     const gate = new Promise<Buffer>((resolvePromise) => { release = resolvePromise })
     const http: MarketHttpClient = {
       fetchText: async (url) => (await fetch(url)).text(),
-      fetchBuffer: async () => gate,
+      fetchBuffer: async () => { throw new Error('the streaming install path must not call fetchBuffer (第 53 条)') },
+      fetchStream: async (_url, _label, _maxBytes, onChunk) => {
+        const bytes = await gate
+        await onChunk(bytes)
+        return { bytes: bytes.byteLength }
+      },
     }
     const { ctx, recorded } = fakeCtx()
     registerMarketRoutes(ctx, depsFor(profileDir, server.origin, { http }))
