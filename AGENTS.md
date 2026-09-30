@@ -34,6 +34,7 @@ This repository owns the desktop product around an unmodified DeepSeek Harness c
 - Derived from `dsh-plugin-desktop-beta` at M1 (2026-09-19). Identity source of truth: `dsh-plugin-huaanwork/src/product-identity.ts`.
 - **Zero-touch rule**: never edit `dsh-plugin-desktop/src/` or `dsh-plugin-desktop-beta/src/` when working on the huaanwork variant; changes to shared logic go into the originating package and are then reviewed via `corepack yarn check:desktop-variants`.
 - `dsh-community-market` DSH deps are synced exclusively via the beta channel vendored runtime; `sync-vendored-runtime.mjs` intentionally skips it for the `huaanwork` channel.
+- macOS release acceptance is **"credentials arrive → sign"**: the pipeline (`scripts/release-preflight.ts`, `scripts/release-mac.ts`, `scripts/verify-mac-release.ts`) is complete and runbook'd in `docs/release-checklist.md`. Per ruling R-6 (2026-09-30) the credential purchase is trigger-deferred, so shipping unsigned intranet artifacts is the expected M6 state rather than a gap — once credentials arrive, R1 runs the checklist as-is (no unfinished development work).
 
 ## Known tech debt
 

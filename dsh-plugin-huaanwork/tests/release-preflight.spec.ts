@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   adaptMacReleaseEnvironment,
@@ -9,6 +10,24 @@ const DEVELOPER_ID_OUTPUT = `
   1) 0123456789ABCDEF "Developer ID Application: Mengxin Yang (TEAM123456)"
      1 valid identities found
 `
+
+const packageRoot = new URL('../', import.meta.url)
+// Fork root: `docs/` sits beside the packages, not inside dsh-plugin-huaanwork/.
+const workspaceRoot = new URL('../', packageRoot)
+
+/**
+ * Derive the credential names from the single source of truth without forcing an `export`
+ * onto `scripts/release-preflight.ts`: that file is frozen byte-identical with the beta
+ * channel by the variant guard (whitelist budget 22 files / 6 prefixes). Every parsed name
+ * is cross-checked against `withoutMacReleaseSecrets` below, so a stale or partial parse
+ * cannot silently pass.
+ */
+function releaseVariablesFromSource(): readonly string[] {
+  const source = readFileSync(new URL('scripts/release-preflight.ts', packageRoot), 'utf8')
+  const block = /const RELEASE_VARIABLES = \[([\s\S]*?)\] as const/.exec(source)
+  if (block === null) throw new Error('RELEASE_VARIABLES is missing from scripts/release-preflight.ts')
+  return [...block[1]!.matchAll(/'([A-Z][A-Z_0-9]*)'/g)].map(match => match[1]!)
+}
 
 function ready(overrides: Partial<NodeJS.ProcessEnv> = {}) {
   return assertMacReleaseReady({
@@ -164,5 +183,17 @@ describe('macOS release preflight', () => {
       platform: 'win32',
       listCodeSigningIdentities: () => DEVELOPER_ID_OUTPUT,
     })).toThrow('must be built on macOS')
+  })
+
+  it('keeps the release checklist credential list in sync with the preflight constants', () => {
+    const checklist = readFileSync(new URL('docs/release-checklist.md', workspaceRoot), 'utf8')
+    const names = releaseVariablesFromSource()
+
+    expect(names.length).toBeGreaterThan(0)
+    for (const name of names) {
+      expect(checklist, name).toContain(name)
+      expect(withoutMacReleaseSecrets({ [name]: 'placeholder', KEPT: 'kept' }), name)
+        .toEqual({ KEPT: 'kept' })
+    }
   })
 })
