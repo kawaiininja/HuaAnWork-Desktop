@@ -119,7 +119,7 @@ export default function MarketSourcePanel({
     try {
       const acceptance = await api.selectMarket(target);
       setProvider((current) =>
-        current === null ? current : { ...current, requested: target, legacyDefaulted: false },
+        current === null ? current : { ...current, requested: target },
       );
       setApplyPhase("saved");
       setApplyRestart(acceptance.restartRequired);

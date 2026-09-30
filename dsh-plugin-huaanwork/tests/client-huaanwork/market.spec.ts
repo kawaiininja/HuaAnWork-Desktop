@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { test } from "vitest";
 
 import {
@@ -13,6 +15,7 @@ import {
   installButtonState,
   MARKET_TAB_LABELS,
   MARKET_TABS,
+  RESTART_CANCELLED_NOTICE,
   shortSha256,
   type MarketInstallableItem,
   type MarketStateView,
@@ -151,4 +154,22 @@ test("describeInstalledEmptyMessage separates unreadable from genuinely empty (P
   // 有内容时读取态不再覆盖列表（ready 之前若已有缓存条目也应展示）。
   assert.equal(describeInstalledEmptyMessage("loading", 2), null);
   assert.equal(describeInstalledEmptyMessage("error", 2), null);
+});
+
+// P28（评审修复波）：客户端诚实文案是从宿主源码抄来的同一句——此处把「同句」钉成
+// 断言；宿主改词而客户端未同步时本门立即变红。
+test("RESTART_CANCELLED_NOTICE stays word-for-word equal to the host cancel notice (P28)", () => {
+  // 读源码（同 market-view.spec.ts 读 styles.css 的既有跨文件姿态），锚定 addPlugin
+  // 的取消分支——removePlugin 的取消文案不同，不得误取。任一环节找不到即抛错，
+  // 绝不静默跳过或与空串比较。
+  const source = readFileSync(resolve(import.meta.dirname, "../../src/huaanwork-host/plugins-host.ts"), "utf8");
+  const addPluginStart = source.indexOf("export async function addPlugin(");
+  assert.notEqual(addPluginStart, -1, "plugins-host.ts 中未找到 addPlugin");
+  const removePluginStart = source.indexOf("export async function removePlugin(", addPluginStart);
+  assert.notEqual(removePluginStart, -1, "plugins-host.ts 中未找到 addPlugin 之后的 removePlugin");
+  const cancelBranch = source
+    .slice(addPluginStart, removePluginStart)
+    .match(/if \(!await routeCtx\.requestRestart\(\)\) \{\s*return \{\s*bundles: \[\.\.\.before\],\s*message: '([^']+)',\s*\}/);
+  assert.ok(cancelBranch, "plugins-host.ts 的 addPlugin 取消分支中未找到取消文案字面量");
+  assert.equal(cancelBranch[1], RESTART_CANCELLED_NOTICE);
 });
