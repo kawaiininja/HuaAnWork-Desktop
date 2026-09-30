@@ -20,13 +20,14 @@ export interface SigningVectorKeys {
 
 /** 共享测试向量(与 market-server 测试同源一份文件,round3 R10)。 */
 export function loadSigningVectors(): {
+  readonly fixtureVersion: number
   readonly domain: string
   readonly keys: SigningVectorKeys
 } {
   const fixture = JSON.parse(readFileSync(
     join(__dirname, '../../../market-server/tests/fixtures/signing-vectors.json'),
     'utf8',
-  )) as { domain: string; keys: SigningVectorKeys }
+  )) as { fixtureVersion: number; domain: string; keys: SigningVectorKeys }
   return fixture
 }
 

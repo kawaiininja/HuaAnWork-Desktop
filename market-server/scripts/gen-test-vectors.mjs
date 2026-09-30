@@ -141,7 +141,7 @@ const vectors = []
 // 4. revision regression against the persisted per-source maximum:
 //    a GENUINELY OLDER manifest (final-review ruling 2026-09-26: only
 //    `revision < lastSeenRevision` rejects; re-reading the current revision
-//    is an accepted idempotent re-read — see vector 14).
+//    is an accepted idempotent re-read — see vector 16).
 {
   const manifest = makeManifest({ envelope: { revision: 4 } })
   vectors.push({
@@ -237,21 +237,63 @@ const vectors = []
   })
 }
 
-// 11. record claims slot 1 but carries slot 2's keyId
+// 11. rotation overlap (ruling R-1, spec §14 第 52 条 → 第 63 条): the client
+//     pinned the NEW key as current and the OLD key as previous; the server
+//     (single slot) still signs with the old key declaring slot 1. keyId
+//     resolution is authoritative, so the manifest verifies against the
+//     RESOLVED slot 2 — the overlap window the pre-R-1 semantics denied.
 {
   const manifest = makeManifest()
-  const signature = { ...signedBy(manifest, slot2Key, 2), slot: 1 }
+  const slotsRotated = [
+    { slot: 1, keyId: fingerprintPublicKeyHex(slot2Key.publicKeyHex), publicKeyHex: slot2Key.publicKeyHex },
+    { slot: 2, keyId: fingerprintPublicKeyHex(slot1Key.publicKeyHex), publicKeyHex: slot1Key.publicKeyHex, retiredAt: SLOT2_RETIRED_AT },
+  ]
   vectors.push({
-    name: 'slot-key-mismatch',
+    name: 'overlap-window-old-key-signed-manifest',
+    manifest,
+    signature: signedBy(manifest, slot1Key, 1),
+    slots: slotsRotated,
+    context: { domain: DOMAIN, now: NOW, lastSeenRevision: 4 },
+    expect: expectOk(2),
+  })
+}
+
+// 12. the declared slot is METADATA: a record whose declared slot disagrees
+//     with the slot its keyId resolves to (here the current key declares slot
+//     2) still verifies against the RESOLVED slot — no slot-key-mismatch.
+{
+  const manifest = makeManifest()
+  const signature = { ...signedBy(manifest, slot1Key, 1), slot: 2 }
+  vectors.push({
+    name: 'declared-slot-metadata-mismatch-accepted',
     manifest,
     signature,
     slots: slotsInOverlap,
     context: { domain: DOMAIN, now: NOW, lastSeenRevision: 4 },
-    expect: expectReject('slot-key-mismatch'),
+    expect: expectOk(1),
   })
 }
 
-// 12. manifest tampered after signing (sha manifest integrity)
+// 13. `retiredAt` is judged on the RESOLVED slot, not on the declared one: the
+//     old key is configured as slot 2 past its retirement while declaring
+//     slot 1 — still rejected as slot-retired.
+{
+  const manifest = makeManifest()
+  const slotsRetired = [
+    slotsInOverlap[0],
+    { ...slotsInOverlap[1], retiredAt: '2026-09-20T00:00:00Z' },
+  ]
+  vectors.push({
+    name: 'slot-retired-on-resolved-slot',
+    manifest,
+    signature: signedBy(manifest, slot2Key, 1),
+    slots: slotsRetired,
+    context: { domain: DOMAIN, now: NOW, lastSeenRevision: 4 },
+    expect: expectReject('slot-retired'),
+  })
+}
+
+// 14. manifest tampered after signing (sha manifest integrity)
 {
   const manifest = makeManifest()
   const signature = signedBy(manifest, slot1Key, 1)
@@ -269,7 +311,7 @@ const vectors = []
   })
 }
 
-// 13. unsupported signature record version
+// 15. unsupported signature record version
 {
   const manifest = makeManifest()
   const signature = { ...signedBy(manifest, slot1Key, 1), version: SIGNATURE_VERSION + 1 }
@@ -283,7 +325,7 @@ const vectors = []
   })
 }
 
-// 14. idempotent re-read of the CURRENT revision (final-review ruling
+// 16. idempotent re-read of the CURRENT revision (final-review ruling
 //     2026-09-26, spec §14 第十轮 第 49 条): equal to lastSeenRevision
 //     verifies OK — the N8 no-cache re-verify makes every catalog read a
 //     fresh verification, so strict `>` would allow exactly one read per
@@ -301,9 +343,9 @@ const vectors = []
 }
 
 const fixture = {
-  fixtureVersion: 2,
+  fixtureVersion: 3,
   comment:
-    'Shared signing test vectors (round3 R10). Consumed by market-server tests now and by the wrapper-side verifier test (dsh-plugin-huaanwork) later — the wrapper re-implements the same semantics over node:crypto and must reproduce every verdict. fixtureVersion 2 (2026-09-26, spec §14 第十轮 第 49 条): revision-regression now uses a genuinely older manifest (revision < lastSeenRevision rejects) and an equal-revision idempotent re-read vector verifies OK. The private keys below are THROWAWAY test material, never reuse them as real signing keys. Regenerate with: node scripts/gen-test-vectors.mjs',
+    'Shared signing test vectors (round3 R10). Consumed by market-server tests now and by the wrapper-side verifier test (dsh-plugin-huaanwork) later — the wrapper re-implements the same semantics over node:crypto and must reproduce every verdict. fixtureVersion 2 (2026-09-26, spec §14 第十轮 第 49 条): revision-regression now uses a genuinely older manifest (revision < lastSeenRevision rejects) and an equal-revision idempotent re-read vector verifies OK. fixtureVersion 3 (2026-09-30, ruling R-1, spec §14 第 63 条): keyId resolution is authoritative and the declared slot is metadata — the former slot-key-mismatch vector is replaced by an overlap-window positive vector, a declared-slot-metadata positive vector, and a slot-retired-on-resolved-slot negative vector. The private keys below are THROWAWAY test material, never reuse them as real signing keys. Regenerate with: node scripts/gen-test-vectors.mjs',
   domain: DOMAIN,
   keys: {
     slot1: keyFixture(slot1Key),

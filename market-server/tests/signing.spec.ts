@@ -230,15 +230,17 @@ describe('three-input two-slot rotation verification', () => {
     })
   })
 
-  it('rejects a record whose keyId does not match the claimed slot', () => {
+  it('accepts a record whose declared slot disagrees with the slot its keyId resolves to (keyId is authoritative, ruling R-1)', () => {
     const current = generateKeyPair()
     const previous = generateKeyPair()
     const manifest = makeManifest()
     const slots = [slotConfig(1, current), slotConfig(2, previous, '2026-10-01T00:00:00Z')]
-    const signature = { ...signManifest(manifest, { privateKeyPem: previous.privateKeyPem, slot: 2, signedAt: '2026-09-25T00:00:01Z' }), slot: 1 as const }
+    // The current key declares slot 2; declared slots are metadata, so the
+    // verdict reports the RESOLVED slot.
+    const signature = { ...signManifest(manifest, { privateKeyPem: current.privateKeyPem, slot: 1, signedAt: '2026-09-25T00:00:01Z' }), slot: 2 as const }
     expect(verifyWithKeySlots(manifest, signature, slots, context())).toEqual({
-      ok: false,
-      reason: 'slot-key-mismatch',
+      ok: true,
+      slot: 1,
     })
   })
 
@@ -278,11 +280,16 @@ interface Vector {
 const fixture = JSON.parse(
   readFileSync(join(import.meta.dirname, 'fixtures', 'signing-vectors.json'), 'utf8'),
 ) as {
+  readonly fixtureVersion: number
   readonly domain: string
   readonly vectors: readonly Vector[]
 }
 
 describe('shared test vectors (wrapper-side reusable contract)', () => {
+  it('the shared fixture is pinned to fixtureVersion 3 (both sides assert it)', () => {
+    expect(fixture.fixtureVersion).toBe(3)
+  })
+
   it('the committed fixture carries vectors for every verdict class', () => {
     const reasons = new Set(fixture.vectors.filter((v) => !v.expect.ok).map((v) => (v.expect as { reason: string }).reason))
     for (const expected of [
@@ -292,7 +299,6 @@ describe('shared test vectors (wrapper-side reusable contract)', () => {
       'domain-mismatch',
       'slot-retired',
       'unknown-key',
-      'slot-key-mismatch',
       'invalid-signature',
     ]) {
       expect(reasons.has(expected), `fixture covers ${expected}`).toBe(true)

@@ -65,14 +65,13 @@ function main() {
     process.exit(2)
   }
   if (args.slot === 2) {
-    // Review D14c foot-gun guard: the M5 market-server intake only accepts
-    // slot 1 (keySlotsFromConfig = single slot), so a slot-2 signature can
-    // never be activated server-side. Slot 2 exists for the WRAPPER's
-    // rotation overlap window, not for this upload path.
-    console.error('warning: --slot 2 signatures cannot be activated by the M5 market-server')
-    console.error('         (server intake accepts slot 1 only; slot 2 is a wrapper-side rotation concept).')
-    console.error('         If you are rotating keys, first point MARKET_SERVER_VERIFY_PUBLIC_KEY at the')
-    console.error('         new public key and restart the server, then sign with --slot 1.')
+    // Ruling R-1 (spec §14 entry 63): the declared slot is metadata. The
+    // verdict resolves the keyId against the configured keys and judges
+    // `retiredAt` on the RESOLVED slot, so --slot 2 no longer gates intake.
+    console.error('note: --slot 2 no longer affects verification (ruling R-1: keyId is authoritative,')
+    console.error('      the declared slot is metadata). The market-server intake resolves the keyId')
+    console.error('      against its configured key and rejects any key it does not hold (unknown-key);')
+    console.error('      declaring --slot 1 remains the operator convention for the server-side key.')
   }
 
   const manifest = JSON.parse(readFileSync(args.manifest, 'utf8'))

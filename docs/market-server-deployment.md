@@ -209,7 +209,7 @@ node --experimental-strip-types src/index.ts
 | `POST /v1/admin/entries/:id/unpublish` | 下架条目（制品文件保留在盘，可重新上架同 name@version）。 |
 | `POST /v1/admin/manifest/prepare` | 两步流第 1 步：生成 canonical 待签清单并入库 pending 槽——`domain` = 配置 origin、`revision` = 持久化 max+1（单调）、`issuedAt`/`notAfter`（TTL ≤ 7d）、catalog = 自校 provider page、files = 每个已托管制品的 sha256/tarballPath/size。**条目 >200（契约单页上限）→ 422 `catalog-too-large`**（响应体含「Split the source (M6) before releasing」指引）；**引用制品已不在盘 → 409 `artifact-missing`**（含重新上架指引）。两者都是诚实 4xx，不再是裸 500（评审 D14d）。**200 条目上限已在发布时前移**（评审 D15）：第 201 条上架即 422 `catalog-full`，故目录**永远不会**进入「prepare 持续失败、连既有条目也发不出新清单」的冻结态；`catalog-too-large` 因而只剩「运营者手改状态文件 / 从旧备份还原」这一条可达路径。分页清单 / 多页签名留待 M6。 |
 | `GET /v1/admin/manifest/pending` | 下载当前待签清单（无则 404）。 |
-| `POST /v1/admin/manifest/signature` | 两步流第 3 步：对**存储中的** pending 清单做三输入两槽验签（含信封负例：`revision` 回退 / `notAfter` 过期 / `domain` 不符一律拒）。**仅验签通过才收录激活**（fail-closed：无有效签名永不激活）；激活 = manifest+signature 成对服务、pending 清空、持久化 maxRevision 前进。失败返回 `{activated:false, reason}`。 |
+| `POST /v1/admin/manifest/signature` | 两步流第 3 步：对**存储中的** pending 清单做 keyId 权威验签（裁定 R-1；含信封负例：`revision` 回退 / `notAfter` 过期 / `domain` 不符一律拒）。**仅验签通过才收录激活**（fail-closed：无有效签名永不激活）；激活 = manifest+signature 成对服务、pending 清空、持久化 maxRevision 前进。失败返回 `{activated:false, reason}`。 |
 
 > **registry 元数据端点（`/<pkg>` npm 风格 `dist.integrity`）：Task 2 未建。**
 > 它是可选的 M6 依赖闭包升级路径 (b) 骨架，**不在 M5 安装路径上**（M5 安装
@@ -305,16 +305,14 @@ admin bearer token 是本服务**唯一不受离线签名保护的机密**：cat
   字节的 sha256 hex 指纹。wrapper 侧以 JWK（`{kty:'OKP', crv:'Ed25519',
   x: base64url}`）重建 KeyObject，无需 PEM/SPKI 解析。
 - 槽位：槽 1 = 当前钥；槽 2 = 上一把钥，`retiredAt` = 换钥时刻 + 一个
-  app 发版窗口。验签为**三输入两槽判定**：分离签名 + 声明槽位 +
-  槽 2 `retiredAt`——keyId 先对全部槽位解析（无命中即 `unknown-key`），
-  再比对声明槽位（不符即 `slot-key-mismatch`），槽 2 过 `retiredAt` 即拒
-  （`slot-retired`），最后做 Ed25519 验签（`invalid-signature`）。信封字段
-  判定先于一切：`missing-field` / `unsupported-envelope-version` /
-  `invalid-revision` / `revision-regression` / `invalid-timestamp` /
-  `domain-mismatch` / `not-yet-valid` / `expired` / `ttl-exceeds-cap`。
-  **⚠ 上述算法描述准确，但「声明槽位必须等于 keyId 解析到的槽位」这一步与
-  「M5 服务端只配槽 1」合起来使槽 2 实际不可达——轮换因此没有重叠窗口。
-  操作前必读下〈正常轮换〉节的实测表与限制说明（spec §14 第 52 条）。**
+  app 发版窗口。验签为 **keyId 权威判定**（裁定 R-1，spec §14 第 63 条）：
+  keyId 先对全部槽位解析（无命中即 `unknown-key`），**解析到的槽即权威钥**；
+  签名记录声明的槽号只是运营元数据，不参与判定；随后按**解析到的槽**判
+  `retiredAt`（槽 2 过点即拒，`slot-retired`），最后做 Ed25519 验签
+  （`invalid-signature`）。信封字段判定先于一切：`missing-field` /
+  `unsupported-envelope-version` / `invalid-revision` / `revision-regression` /
+  `invalid-timestamp` / `domain-mismatch` / `not-yet-valid` / `expired` /
+  `ttl-exceeds-cap`。既有已签名清单无需重签——`slot` 字段仍在，只是不再被比对。
 
 ## 真离线两步发布流（round3 R9）
 
@@ -326,7 +324,7 @@ admin bearer token 是本服务**唯一不受离线签名保护的机密**：cat
 2. 签名管理员把 pending manifest 下载到**离线签名机**（私钥唯一居所），运行
    `node scripts/sign-manifest.mjs --manifest <pending.json> --key <market-signing-key.pem> --slot 1`，
    产出**分离签名** sidecar（`<pending.json>.sig.json`）。
-3. 签名管理员把 sidecar 上传回 market-server；服务端用配置公钥做三输入两槽
+3. 签名管理员把 sidecar 上传回 market-server；服务端用配置公钥做 keyId 权威
    验签（含信封字段判定与 `revision` 单调检查），**通过才收录激活**——
    **fail-closed：无有效签名的清单不得激活**（Task 2 侧断言）。
 
@@ -344,74 +342,65 @@ admin bearer token 是本服务**唯一不受离线签名保护的机密**：cat
 窗口**：每 ≤7 天重签一轮，或每次发布即签（推荐后者——发布即签使任何时刻在
 效清单的 `notAfter` 都不超过下一次常规发布）。
 
-## 正常轮换（M5 机制限制：无重叠窗口，操作前必读）
+## 正常轮换（重叠窗口成立，操作前必读）
 
-**先说机制事实（2026-09-27 实测，非推断）。** market-server 只有**一个**验签槽
-（`src/manifest-prepare.ts` 的 `keySlotsFromConfig` 恒返回 slot 1），故其收录的
-每一份签名都声明 `slot: 1`。wrapper 的三输入两槽判定
-（`dsh-plugin-huaanwork/src/huaanwork-host/market/verify.ts` 的
-`verifyWithKeySlots`）先用 `keyId` 对**全部**钉扎槽解析（无处可循即
-`unknown-key`），**再要求解析到的槽号 == 签名声明的槽号**（否则
-`slot-key-mismatch`）。两条合起来的推论是：
+**先说机制事实（2026-09-30 实现后实测，非推断）。** 验签为 keyId 权威判定
+（裁定 R-1，spec §14 第 63 条）：wrapper 的 `verifyWithKeySlots`
+（`dsh-plugin-huaanwork/src/huaanwork-host/market/verify.ts`）与 market-server
+的镜像（`market-server/src/signing.ts`）都先用 `keyId` 对**全部**钉扎槽解析
+（无处可循即 `unknown-key`），**解析到的槽即权威钥**；签名记录声明的槽号只是
+运营元数据，不参与判定；`retiredAt` 按解析到的槽判定。market-server 的
+`keySlotsFromConfig` 仍只配置服务端生产钥（恒 `slot: 1`），故其收录的签名都
+声明 `slot: 1`——这在判定里已无影响。
 
-> **一个客户端在任一时刻只接受一把公钥——即其 `PINS_AT_RELEASE.current`。**
-> 槽 2（`previous` + `retiredAt`）只对**声明 `--slot 2` 的签名**生效，而 M5
-> 服务端永远无法收录 `--slot 2` 的 sidecar（intake 只配了 slot 1；
-> `scripts/sign-manifest.mjs` 对 `--slot 2` 打印告警）。因此**槽 2 在 M5 的
-> 服务端拓扑下实际不可达**，「轮换重叠期旧钥清单仍可验」这一设计意图
-> （spec §14 第 41 条）在当前实现下**不成立**——见 spec §14 第 52 条。
-
-实测四种组合（真实 ed25519 密钥，两包真实代码，`verifyMarketManifest` 直调）：
+实测四种组合（真实 ed25519 密钥，两包真实代码，`verifyMarketManifest` 直调；
+2026-09-30 实现后重跑）：
 
 | 客户端钉扎 | 服务端签名钥 / 声明槽 | 结果 |
 |---|---|---|
-| current=K1 | K1 / slot 1 | **OK**（稳态） |
-| current=K2, previous=K1（`retiredAt` 未到） | K1 / slot 1 | **REJECT `slot-key-mismatch`** |
-| current=K2, previous=K1 | K2 / slot 1 | **OK** |
+| current=K1 | K1 / slot 1 | **OK**（slot 1，稳态） |
+| current=K2, previous=K1（`retiredAt` 未到） | K1 / slot 1 | **OK**（slot 2，重叠期旧钥清单可验） |
+| current=K2, previous=K1 | K2 / slot 1 | **OK**（slot 1） |
 | current=K1（未升级） | K2 / slot 1 | **REJECT `unknown-key`** |
 
-第 2 行与第 4 行合起来意味着：**「app 发版钉新钥」与「服务端换钥」无论孰先孰后，
-都存在一段窗口使部分客户端拒绝目录**——发版先走则第 2 行命中（已升级客户端拒绝
-仍由旧钥签名的清单），服务端先走则第 4 行命中（未升级客户端拒绝新钥清单）。
-**M5 没有无中断的轮换顺序。**
+**重叠窗口现在成立**：app 发版把 current 钉成 K2 之后，已升级客户端在
+`retiredAt` 之前**同时接受** K1 与 K2 签名的清单（第 2、3 行）——发版与服务器
+换钥之间不再有恒拒段，轮换顺序不再产生拒绝窗口（M5 的第 2 行 REJECT
+`slot-key-mismatch` 已消除）。第 4 行仍然成立且**不是顺序缺陷**：未升级客户端
+没有被钉过新钥，无法验证新钥签名的清单（`unknown-key`）——这是钉扎机制的固有
+边界，故仍推荐「app 发版先走」。
 
-### M5 的轮换程序（诚实版：把拒绝窗口压到最小）
+### 轮换程序（本机实现下两步之间目录持续可用）
 
-选「app 发版先走 + 紧随服务端换钥」而不是相反，理由是爆炸半径：app 发版是**渐进**
-的（数天至数周），服务端换钥是**瞬时**的。发版先走时只有「在两步之间恰好升级」的
-少数客户端受影响，且第 3 步一完成即自愈；服务端先走则**全部**未升级客户端立即恒拒，
-直到它们各自升级。
+选「app 发版先走 + 在 `retiredAt` 之前完成服务端换钥」而不是相反：发版先走的
+第 2、3 步之间服务端清单仍由 K1 签名，已升级客户端照样验证通过（下表第 2 行）；
+反序（服务端先换 K2）则会让第 4 行的窗口出现在所有未升级客户端上（它们拒绝
+新钥清单，直到各自升级）。
 
 1. 离线签名机 `gen-signing-key.mjs` 生成新钥对 K2；新公钥指纹经**带外渠道**告知
    app 发版负责人（见下「公钥分发与指纹核对」）。
 2. app 发版把 **current = K2、previous = K1（`retiredAt` = 发版时刻 + 一个发版
-   窗口）** 钉进 `PINS_AT_RELEASE`。注意：升级到该版本的客户端**即刻拒绝仍由 K1
-   签名的清单**（上表第 2 行），故第 3 步必须在**同一维护窗口内**紧随执行。
-3. 同一窗口内把 market-server 的 `MARKET_SERVER_VERIFY_PUBLIC_KEY` 指向 K2 并
-   **重启**；随后用 K2 私钥 `--slot 1` 签新清单（`revision` 继续单调递增，
-   `notAfter` ≤ issuedAt + 7d）。此后已升级客户端恢复（上表第 3 行）。
-4. 第 3 步之前**尚未**升级的客户端在第 2、3 步之间恒拒；第 3 步之后升级的客户端
-   直接落到第 3 行，正常。窗口内目录不可用期间**本地安装旁路不受影响**
-   （MarketView「本地安装」页签走 host RPC，不经 market routes）。
-5. `retiredAt` 过后槽 2 机判拒绝（`slot-retired`）；旧私钥 K1 离线销毁。
+   窗口）** 钉进 `PINS_AT_RELEASE`。已升级客户端从这一刻起即可验证 K2 与 K1
+   两种签名的清单；未升级客户端继续验证仍由 K1 签名（`slot: 1`）的清单。
+3. 在 `retiredAt` 之前把 market-server 的 `MARKET_SERVER_VERIFY_PUBLIC_KEY`
+   指向 K2 并**重启**；随后用 K2 私钥 `--slot 1` 签新清单（`revision` 继续单调
+   递增，`notAfter` ≤ issuedAt + 7d）。此步不必与第 2 步挤在同一维护窗口。
+4. `retiredAt` 过后槽 2 机判拒绝（`slot-retired`）；旧私钥 K1 离线销毁。
 
-**不得**：为了「让旧钥清单继续可验」而用 K1 签 `--slot 2` 的 sidecar——服务端
-intake 只配了 slot 1，该 sidecar 会被拒（K1 已配置时 `slot-key-mismatch`，K1 未
-配置时 `unknown-key`），永远无法激活。
+**`--slot` 声明已不影响判定**：声明槽是元数据，`--slot 1` 与 `--slot 2` 不再
+改变验签结果（`sign-manifest.mjs` 对 `--slot 2` 的旧告警已按此订正）；服务端
+intake 按 keyId 对配置钥解析，**配置里没有的钥无论声明哪个槽都拒**
+（`unknown-key`）。运营仍按惯例声明 `--slot 1`（服务端单钥的现实），便于审计。
 
-### M6 处置候选（机制修复，二选一，须单独评审）
+### 处置记录（裁定 R-1，2026-09-30 落地）
 
-- **让服务端也支持两槽**：`keySlotsFromConfig` 读两把公钥、intake 接受
-  `--slot 2`，于是重叠期内旧钥清单可以 `--slot 2` 声明并被双方接受（真正兑现
-  第 41 条的重叠期意图）；或
-- **放宽 wrapper 的槽号相等判定为以 `keyId` 解析为准**（声明槽降为元数据），
-  `retiredAt` 仍按解析到的槽判定。安全性不因此减弱：`keyId` 是公钥的 sha256
-  指纹，攻击者仍需持有被钉扎公钥对应的私钥；在 `keyId` 权威之后，槽号声明不
-  提供额外保证。**此项属验签语义变更，须单独评审 + 落共享测试向量，不在 M5
-  修复轮范围内**（本轮只做诚实化登记，未改验签代码）。
-
-登记：AGENTS.md 技术债表「M5 市场签名轮换无重叠窗口」行 + spec §14 第十轮
-第 52 条。
+M5 登记的〈M6 处置候选〉二选一已选定并落地：**放宽为以 `keyId` 解析为准**（声明
+槽降为元数据，`retiredAt` 仍按解析到的槽判定），**未**采用「服务端支持两槽
+intake」。安全性论证不变：`keyId` 是公钥的 sha256 指纹，攻击者仍需持有被钉扎
+公钥对应的私钥；在 `keyId` 权威之后，槽号声明不提供额外保证。这是验签语义变更，
+已按纪律落共享测试向量（`fixtureVersion: 3`：重叠期正向量 + 声明槽元数据正向量
++ `retiredAt` 按解析槽判定的负向量；`slot-key-mismatch` 原因码自此移除，两侧
+验签器与生成器同步）。登记：spec §14 第 63 条。
 
 ## 吊销（诚实表述，round3 R3）
 

@@ -25,11 +25,14 @@
  *                   MAX_ENVELOPE_TTL (7 days) — the maximum exposure window
  *                   of a leaked signing key.
  *
- * Two-slot rotation (three inputs: signature + slot + slot-2 `retiredAt`):
+ * Two-slot rotation, keyId-authoritative (ruling R-1, spec §14 entry 63):
  *   - slot 1 = current key; slot 2 = previous key, valid only until its
  *     `retiredAt` moment (one app-release window after rotation).
- *   - After `retiredAt`, slot-2 signatures are rejected by machine-checkable
- *     rule (round4 C3). Unknown keys are rejected.
+ *   - The keyId resolves the key against ALL configured slots; the declared
+ *     slot in the signature record is operator bookkeeping (metadata) and does
+ *     not gate the verdict. `retiredAt` is judged on the RESOLVED slot: after
+ *     it, that key's signatures are rejected by machine-checkable rule
+ *     (round4 C3). Unknown keys are rejected.
  *
  * Canonical form: the signature covers `canonicalJson(manifest)` — a
  * deterministic JSON serialization (object keys sorted recursively, no
@@ -111,8 +114,9 @@ export interface MarketManifest {
 export interface MarketManifestSignature {
   readonly version: number
   readonly algorithm: typeof SIGNATURE_ALGORITHM
-  /** = fingerprintPublicKeyHex(publicKeyHex); binds the record to a key slot. */
+  /** = fingerprintPublicKeyHex(publicKeyHex); the authoritative key identifier. */
   readonly keyId: string
+  /** Operator bookkeeping metadata: verification resolves by keyId (ruling R-1). */
   readonly slot: KeySlotNumber
   /** ISO 8601 UTC signing time (operator bookkeeping; replay control is the envelope's job). */
   readonly signedAt: string
@@ -148,7 +152,6 @@ export type EnvelopeRejectionReason =
 
 export type SlotRejectionReason =
   | 'unknown-key'
-  | 'slot-key-mismatch'
   | 'slot-retired'
   | 'invalid-signature'
 
@@ -319,10 +322,12 @@ function findSlotByKeyId(slots: readonly KeySlotConfig[], keyId: string): KeySlo
 }
 
 /**
- * Three-input two-slot verification: (1) the detached signature, (2) the
- * claimed key slot, (3) slot 2's `retiredAt` retirement moment — plus the
- * anti-replay envelope check. Fail-closed at every step; the manifest's sha
- * manifest may be trusted only when this returns ok.
+ * KeyId-authoritative verification (ruling R-1): the detached signature and the
+ * RESOLVED slot's `retiredAt` retirement moment — plus the anti-replay envelope
+ * check. The keyId resolves the signer against all configured slots; the slot
+ * the record claims is metadata and never gates the verdict. Fail-closed at
+ * every step; the manifest's sha manifest may be trusted only when this
+ * returns ok.
  */
 export function verifyWithKeySlots(
   manifest: MarketManifest,
@@ -348,11 +353,10 @@ export function verifyWithKeySlots(
     return { ok: false, reason: 'invalid-signature' }
   }
 
-  // Resolve the keyId against ALL configured slots first: a signer whose key
-  // is pinned nowhere is unknown, regardless of which slot the record claims.
+  // Resolve the keyId against ALL configured slots: the resolved slot is
+  // authoritative; the record's claimed slot is metadata (ruling R-1).
   const slot = findSlotByKeyId(slots, signatureRecord.keyId)
   if (slot === undefined) return { ok: false, reason: 'unknown-key' }
-  if (slot.slot !== signatureRecord.slot) return { ok: false, reason: 'slot-key-mismatch' }
 
   if (slot.slot === 2 && slot.retiredAt !== undefined) {
     const retiredAtMs = parseEpochMs(slot.retiredAt)

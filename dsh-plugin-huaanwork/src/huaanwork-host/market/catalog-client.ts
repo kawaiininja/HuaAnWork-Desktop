@@ -9,7 +9,7 @@
  * 每次读都是「拉取 + 验签」,**无 catalog 缓存**(round5 N8 裁定 (a)):revision 单调
  * 使重放无效,缓存只会放大被绕过的窗口。
  *
- * 链路:`GET /v1/manifest` + `GET /v1/manifest/signature` → verify.ts 三输入两槽验签
+ * 链路:`GET /v1/manifest` + `GET /v1/manifest/signature` → verify.ts keyId 权威验签
  * (信封:domain = 配置 origin、revision genuinely older 才拒(`<` 持久化最大值;
  * 等值 = 当前清单幂等重读,放行——final-review 裁定 2026-09-26,spec §14 第十轮
  * 第 49 条)、notAfter 未过期)——任一不满足即拒,**不信任其中任何 sha256** → 通过

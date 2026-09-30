@@ -14,7 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { HUAANWORK_MARKET_ROUTES } from '../../src/huaanwork-host/market/index.ts'
 import { MARKET_ROUTE_PATHS, MARKET_ROUTE_LIST, registerMarketRoutes } from '../../src/huaanwork-host/market/routes.ts'
 import type { MarketHttpClient } from '../../src/huaanwork-host/market/catalog-client.ts'
-import type { MarketManifest } from '../../src/huaanwork-host/market/verify.ts'
+import { fingerprintPublicKeyHex, type MarketManifest } from '../../src/huaanwork-host/market/verify.ts'
 import {
   createMarketTestServer,
   createMemoryRevisionStore,
@@ -244,7 +244,7 @@ describe('GET state(wrapper 自有形态,R14)', () => {
       provider: 'huaanwork-market',
       origin: 'http://127.0.0.1:1',
       executing: false,
-      verification: { ready: true, currentKeyId: 'e7ff292ae4203452633cb19639875e69d942e8f9293f5ee1719b26969f198fa0' },
+      verification: { ready: true, currentKeyId: fingerprintPublicKeyHex(vectors.keys.slot1.publicKeyHex) },
       catalog: { maxAcceptedRevision: 7 },
       desktopActions: { requestRestart: true },
     })

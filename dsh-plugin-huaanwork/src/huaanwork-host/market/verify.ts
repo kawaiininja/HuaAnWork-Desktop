@@ -12,9 +12,10 @@
  *   older 拒:`revision < lastSeenRevision`;等值 = 当前清单幂等重读,放行——
  *   final-review 裁定 2026-09-26,spec §14 第十轮 第 49 条)、notAfter 未过期、
  *   TTL ≤ 7 天;`notAfter` 含界有效、`retiredAt` 到点即拒(独占)。
- * - 三输入两槽:签名记录 + 声明槽位 + 槽 2 retiredAt;keyId 先对**全部**槽解析
- *   (unknown-key),再比对声明槽(slot-key-mismatch),再过 retiredAt(slot-retired),
- *   最后 Ed25519(invalid-signature)。
+ * - 签名轮换(keyId 权威,裁定 R-1 → spec §14 第 63 条):keyId 先对**全部**槽解析
+ *   (无处可循即 unknown-key),解析结果即权威钥;**签名记录声明的槽号只是运营
+ *   元数据**,不参与判定;`retiredAt` 按**解析到的槽**判定(slot-retired),最后
+ *   Ed25519(invalid-signature)。
  * - 签名记录形状守卫:畸形记录返回 verdict,绝不抛 TypeError(Task 2 同口径)。
  *
  * fail-closed 公钥供给:信任锚来自 config.ts 的两槽钉扎;验签前恒调
@@ -90,8 +91,9 @@ export interface MarketManifest {
 export interface MarketManifestSignature {
   readonly version: number
   readonly algorithm: typeof SIGNATURE_ALGORITHM
-  /** = fingerprintPublicKeyHex(publicKeyHex);把记录绑到钥槽。 */
+  /** = fingerprintPublicKeyHex(publicKeyHex);权威钥标识(验签按它解析)。 */
   readonly keyId: string
+  /** 运营记账元数据:验签按 keyId 解析到的槽判定,声明槽不参与(裁定 R-1)。 */
   readonly slot: KeySlotNumber
   /** ISO 8601 UTC 签名时刻(运营记账;防重放是信封的职责)。 */
   readonly signedAt: string
@@ -127,7 +129,6 @@ export type EnvelopeRejectionReason =
 
 export type SlotRejectionReason =
   | 'unknown-key'
-  | 'slot-key-mismatch'
   | 'slot-retired'
   | 'invalid-signature'
 
@@ -267,7 +268,7 @@ export function checkEnvelope(envelope: unknown, context: VerificationContext): 
 }
 
 // ---------------------------------------------------------------------------
-// 钉扎 → 钥槽(三输入两槽判定的 wrapper 供给)
+// 钉扎 → 钥槽(keyId 权威判定的 wrapper 供给)
 // ---------------------------------------------------------------------------
 
 /**
@@ -305,8 +306,10 @@ function findSlotByKeyId(slots: readonly KeySlotConfig[], keyId: string): KeySlo
 }
 
 /**
- * 三输入两槽验签:(1) 分离签名,(2) 声明钥槽,(3) 槽 2 的 retiredAt 退役时刻
- * —— 外加信封防重放判定。逐步 fail-closed;仅当返回 ok 时才可信任清单中的 sha256。
+ * keyId 权威验签(keyId-authoritative,裁定 R-1):(1) 分离签名,(2) 解析到的槽的
+ * `retiredAt` 退役时刻 —— 外加信封防重放判定。keyId 对全部槽解析,解析结果即权威钥;
+ * 记录声明的槽号只是元数据,不参与判定(`retiredAt` 按解析到的槽执行)。
+ * 逐步 fail-closed;仅当返回 ok 时才可信任清单中的 sha256。
  */
 export function verifyWithKeySlots(
   manifest: MarketManifest,
@@ -331,11 +334,10 @@ export function verifyWithKeySlots(
     return { ok: false, reason: 'invalid-signature' }
   }
 
-  // keyId 先对**全部**配置槽解析:钉住无处可循的签名者即 unknown-key,
-  // 无论记录声明哪个槽(与 signing.ts 语义一致)。
+  // keyId 对**全部**配置槽解析,解析结果即权威钥:钉住无处可循的签名者即
+  // unknown-key;记录声明的槽号只是元数据,不作比对(裁定 R-1,与 signing.ts 镜像)。
   const slot = findSlotByKeyId(slots, signatureRecord.keyId)
   if (slot === undefined) return { ok: false, reason: 'unknown-key' }
-  if (slot.slot !== signatureRecord.slot) return { ok: false, reason: 'slot-key-mismatch' }
 
   if (slot.slot === 2 && slot.retiredAt !== undefined) {
     const retiredAtMs = parseEpochMs(slot.retiredAt)
@@ -352,7 +354,7 @@ export function verifyWithKeySlots(
 }
 
 /**
- * wrapper 侧一次性验签入口(routes/install 消费):钉扎 → 钥槽 → 三输入两槽。
+ * wrapper 侧一次性验签入口(routes/install 消费):钉扎 → 钥槽 → keyId 权威判定。
  * pins 默认 PINS_AT_RELEASE(空 = 恒拒);测试经 pins 注入 throwaway 钥。
  */
 export function verifyMarketManifest(
