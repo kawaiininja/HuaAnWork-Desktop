@@ -132,6 +132,7 @@
   "files": [
     "build/app-icon.png",
     "build/app-icon-mac.png",
+    "build/app-icon.ico",
     "build/tray-icon.svg",
     "build/tray-icon*.png",
     "cordis.patch.yml",
@@ -167,7 +168,7 @@
     }
   },
   "scripts": {
-    "build": "node scripts/generate-mac-app-icon.mjs && node scripts/generate-tray-icons.mjs && node scripts/clean.mjs && tsdown && vite build --config vite.native-ui.config.ts && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
+    "build": "node scripts/generate-mac-app-icon.mjs && node scripts/generate-tray-icons.mjs && node scripts/gen-windows-ico.mjs && node scripts/clean.mjs && tsdown && vite build --config vite.native-ui.config.ts && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.native-ui.json --noEmit && tsc -p tsconfig.tests.json --noEmit && tsc -p tsconfig.tests.client.json --noEmit",
     "test": "vitest run",
     "gen:styles": "node scripts/gen-huaanwork-styles.ts",
@@ -422,6 +423,7 @@
     "files": [
       "build/app-icon.png",
       "build/app-icon-mac.png",
+      "build/app-icon.ico",
       "build/tray-icon.svg",
       "build/tray-icon*.png",
       "cordis.patch.yml",
@@ -466,7 +468,7 @@
         }
       ],
       "artifactName": "HuaAnWork-${version}-${arch}-Portable.${ext}",
-      "icon": "build/app-icon.png",
+      "icon": "build/app-icon.ico",
       "asar": false
     },
     "nsis": {

@@ -883,6 +883,7 @@ describe('published package surface', () => {
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
       'build/app-icon-mac.png',
+      'build/app-icon.ico',
       'build/tray-icon.svg',
       'build/tray-icon*.png',
       'docs/**',
@@ -890,6 +891,7 @@ describe('published package surface', () => {
     expect(manifest.build?.files).toEqual([
       'build/app-icon.png',
       'build/app-icon-mac.png',
+      'build/app-icon.ico',
       'build/tray-icon.svg',
       'build/tray-icon*.png',
       'cordis.patch.yml',
@@ -904,7 +906,7 @@ describe('published package surface', () => {
     expect(manifest.build?.mac?.mergeASARs).toBe(false)
     expect(manifest.build?.mac?.signIgnore).toEqual(['\\.(?:pak|dat|wasm)$'])
     expect(manifest.build?.win?.compression).toBe('normal')
-    expect(manifest.build?.win?.icon).toBe('build/app-icon.png')
+    expect(manifest.build?.win?.icon).toBe('build/app-icon.ico')
     expect(manifest.build?.win?.target).toEqual([{
       target: 'nsis',
       arch: ['x64'],
@@ -957,6 +959,7 @@ describe('published package surface', () => {
     const packageDir = readFileSync(new URL('scripts/package-dir.mjs', packageRoot), 'utf8')
 
     expect(manifest.scripts?.build).toContain('node scripts/generate-mac-app-icon.mjs')
+    expect(manifest.scripts?.build).toContain('node scripts/gen-windows-ico.mjs')
     expect(manifest.scripts?.['prepare:electron-native']).toBe('node scripts/prepare-fs-ext.ts')
     expect(manifest.scripts?.dev).toContain('yarn run prepare:electron-native')
     expect(manifest.scripts?.['package:dir'])
@@ -1152,10 +1155,11 @@ describe('published package surface', () => {
     expect(ciWorkflow).toContain('Documentation-only change; product build and tests are not required.')
   })
 
-  it('keeps one fixed brand-blue tray source for generated native assets', () => {
+  it('keeps one fixed HuaAnWork brand tray source for generated native assets', () => {
     const source = readFileSync(new URL('build/tray-icon.svg', packageRoot), 'utf8')
 
-    expect(source.match(/#4D6BFE/gu)).toHaveLength(1)
+    // DESIGN.md palette --accent (靛蓝) is the single fill color; the upstream DSH brand blue is gone.
+    expect(source.match(/#3A4ED0/gu)).toHaveLength(1)
     expect(source).not.toMatch(/<style\b|prefers-color-scheme/iu)
     for (const filename of [
       'tray-iconTemplate.png',
@@ -1169,12 +1173,83 @@ describe('published package surface', () => {
     }
   })
 
-  it('keeps the fixed inverted Beta source icon', () => {
-    const digest = createHash('sha256')
-      .update(readFileSync(new URL('build/app-icon.png', packageRoot)))
-      .digest('hex')
+  it('ships HuaAnWork-branded icons rather than the upstream artwork', () => {
+    const ours = readFileSync(new URL('build/app-icon.png', packageRoot))
+    const beta = readFileSync(new URL('../dsh-plugin-desktop-beta/build/app-icon.png', packageRoot))
+    expect(createHash('sha256').update(ours).digest('hex'))
+      .not.toBe(createHash('sha256').update(beta).digest('hex'))
+  })
 
-    expect(digest).toBe('b661d0982f47b5a35a7e8c3524a7aa6a18e044eb64d2e480e01875b82dd2be7f')
+  it('generates the mac icon from the branded source at build time', async () => {
+    // app-icon-mac.png 必须由 generate-mac-app-icon.mjs 从 app-icon.png 派生:
+    // 用 sharp 读元数据,断言 824×824 内容区 + 100px 透明内缩(该脚本的既有产物契约)
+    const source = await sharp(readFileSync(new URL('build/app-icon.png', packageRoot))).metadata()
+    const icon = sharp(readFileSync(new URL('build/app-icon-mac.png', packageRoot)))
+    const metadata = await icon.metadata()
+    const { info } = await icon
+      .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 0 })
+      .toBuffer({ resolveWithObject: true })
+
+    expect(source).toEqual(expect.objectContaining({
+      format: 'png',
+      width: 1024,
+      height: 1024,
+      space: 'rgb16',
+      depth: 'ushort',
+      bitsPerSample: 16,
+      channels: 4,
+      hasAlpha: true,
+      icc: expect.anything(),
+    }))
+    expect(metadata).toEqual(expect.objectContaining({
+      format: 'png',
+      width: 1024,
+      height: 1024,
+      space: 'rgb16',
+      depth: 'ushort',
+      bitsPerSample: 16,
+      channels: 4,
+      hasAlpha: true,
+    }))
+    expect(metadata.icc).toEqual(source.icc)
+    expect(info).toEqual(expect.objectContaining({
+      width: 824,
+      height: 824,
+      trimOffsetLeft: -100,
+      trimOffsetTop: -100,
+    }))
+  })
+
+  it('ships a Windows icon and lists it in both file manifests', () => {
+    expect(existsSync(new URL('build/app-icon.ico', packageRoot))).toBe(true)
+    expect(manifest.build?.win?.icon).toBe('build/app-icon.ico')
+    expect((manifest.build?.files ?? []) as string[]).toContain('build/app-icon.ico')
+    expect((manifest.files ?? []) as string[]).toContain('build/app-icon.ico')
+  })
+
+  it('produces a structurally valid Windows icon container', () => {
+    const ico = readFileSync(new URL('build/app-icon.ico', packageRoot))
+    expect(ico.readUInt16LE(0)).toBe(0)      // 保留
+    expect(ico.readUInt16LE(2)).toBe(1)      // 类型:icon
+    const count = ico.readUInt16LE(4)
+    expect(count).toBeGreaterThanOrEqual(6)
+    for (let index = 0; index < count; index += 1) {
+      const entry = 6 + index * 16
+      const offset = ico.readUInt32LE(entry + 12)
+      const size = ico.readUInt32LE(entry + 8)
+      expect(offset + size).toBeLessThanOrEqual(ico.length)
+      expect(ico.subarray(offset, offset + 8).toString('hex')).toBe('89504e470d0a1a0a')
+    }
+  })
+
+  it('does not name the upstream product in the installer copy', () => {
+    const messages = readFileSync(new URL('build/assistedMessages.yml', packageRoot), 'utf8')
+    expect(messages).not.toContain('DSH Desktop')
+    expect(messages).toContain('HuaAnWork')
+  })
+
+  it('does not use the upstream brand blue in the tray icon', () => {
+    expect(readFileSync(new URL('build/tray-icon.svg', packageRoot), 'utf8')).not.toContain('#4D6BFE')
   })
 
   it('generates a centered macOS icon with a 100-pixel visual inset', async () => {
@@ -1202,6 +1277,19 @@ describe('published package surface', () => {
       trimOffsetLeft: -100,
       trimOffsetTop: -100,
     }))
+  })
+
+  it('lists every runtime asset in both the npm and the builder file manifests', () => {
+    // spec §14 第 18 条:npm files 有而 build.files 无 ⇒ 打包后 ENOENT。
+    // 对 build/ 下每个被 package.json 引用的资产,断言两处都在。
+    const npmFiles = (manifest.files ?? []) as string[]
+    const builderFiles = (manifest.build?.files ?? []) as string[]
+    for (const asset of ['build/app-icon.png', 'build/app-icon-mac.png', 'build/app-icon.ico', 'build/tray-icon.svg']) {
+      expect(npmFiles, asset).toContain(asset)
+      expect(builderFiles, asset).toContain(asset)
+    }
+    expect(builderFiles).toContain('skills/**')      // M3 冒烟缺陷 1 的回归门
+    expect(npmFiles).toContain('skills/')
   })
 
   it('keeps Electron out of production dependencies consumed by electron-builder', () => {

@@ -10,9 +10,13 @@ const buildRoot = join(packageRoot, 'build')
 const sourcePath = join(buildRoot, 'tray-icon.svg')
 const source = await readFile(sourcePath, 'utf8')
 
-const BRAND_BLUE = '#4D6BFE'
-if (!source.includes(`fill="${BRAND_BLUE}"`) || /<style\b/iu.test(source)) {
-  throw new Error(`generate-tray-icons: tray-icon.svg must use the fixed brand color ${BRAND_BLUE}`)
+// The tray SVG owns the edition's brand color and this generator renders the
+// blue variants in exactly that color. Each edition's design system documents
+// the palette value its SVG carries (HuaAnWork: DESIGN.md --accent 靛蓝).
+const fills = [...new Set([...source.matchAll(/fill="(#[0-9A-Fa-f]{6})"/gu)].map((match) => match[1]))]
+const BRAND_BLUE = fills.length === 1 ? fills[0] : undefined
+if (BRAND_BLUE === undefined || /<style\b/iu.test(source)) {
+  throw new Error('generate-tray-icons: tray-icon.svg must use exactly one fill color and no <style> block')
 }
 
 const variants = [
