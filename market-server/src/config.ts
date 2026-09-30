@@ -27,6 +27,13 @@
  *                                     (fail-closed: every admin endpoint
  *                                     answers 401 admin-disabled) and startup
  *                                     prints guidance (Task 2 Step 3, D5).
+ *   MARKET_SERVER_MAX_CATALOG_ENTRIES OPTIONAL catalog scale cap (integer
+ *                                     1..200, default 200). 200 is the
+ *                                     UPSTREAM CONTRACT maximum — the signed
+ *                                     manifest carries exactly one provider
+ *                                     page (`items` maxItems: 200) — so a
+ *                                     higher value is refused at startup
+ *                                     (Task 6.4, ruling R-3).
  *
  * The entry point may pass CLI conveniences (`--port` / `--data`, Task 3.5) as
  * overrides. An env value always wins: deployment config stays authoritative.
@@ -34,6 +41,7 @@
 
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
+import { MAX_MANIFEST_ENTRIES } from './manifest-prepare.ts'
 
 export const ENV_KEYS = {
   port: 'MARKET_SERVER_PORT',
@@ -41,6 +49,7 @@ export const ENV_KEYS = {
   publicOrigin: 'MARKET_SERVER_PUBLIC_ORIGIN',
   verifyPublicKeyPath: 'MARKET_SERVER_VERIFY_PUBLIC_KEY',
   adminToken: 'MARKET_SERVER_ADMIN_TOKEN',
+  maxCatalogEntries: 'MARKET_SERVER_MAX_CATALOG_ENTRIES',
 } as const
 
 export interface MarketServerConfig {
@@ -56,6 +65,14 @@ export interface MarketServerConfig {
    * disabled (fail-closed: every admin endpoint answers 401 admin-disabled).
    */
   readonly adminToken: string | null
+  /**
+   * Effective catalog scale cap: the most entries this deployment accepts
+   * (publish-time rejection, `catalog-full`). Defaults to the upstream
+   * contract maximum (MAX_MANIFEST_ENTRIES = 200 — a signed manifest carries
+   * exactly one provider page, contract `items` `maxItems: 200`) and can only
+   * be lowered: a larger catalog could never be released (Task 6.4, ruling R-3).
+   */
+  readonly maxCatalogEntries: number
 }
 
 export class ConfigError extends Error {
@@ -87,6 +104,17 @@ OPTIONAL:
                                 answers 401 admin-disabled (fail-closed) and
                                 startup prints guidance. Set a strong random
                                 token to enable publishing.
+  ${ENV_KEYS.maxCatalogEntries}
+                                the most catalog entries this deployment
+                                accepts (integer 1..${String(MAX_MANIFEST_ENTRIES)},
+                                default ${String(MAX_MANIFEST_ENTRIES)}). ${String(MAX_MANIFEST_ENTRIES)} is the upstream
+                                contract maximum (\`items\` maxItems: ${String(MAX_MANIFEST_ENTRIES)}): a
+                                signed manifest carries exactly ONE provider
+                                page, so a larger catalog could never be
+                                released. Lower it for a small deployment;
+                                raising the ceiling needs paginated manifests
+                                with a multi-page signature trust model
+                                (not implemented, ruling R-3).
 
 There is deliberately no private-key configuration item: catalog manifests are
 signed offline (two-step release flow) and the server only ever holds public
@@ -161,6 +189,36 @@ function parseAdminToken(raw: string | undefined): string | null {
 }
 
 /**
+ * The catalog scale cap (Task 6.4, ruling R-3). The ceiling is NOT this
+ * service's implementation choice: the signed manifest carries exactly one
+ * provider page and the upstream provider-page contract pins `items` to
+ * `maxItems: 200` (dsh-community-market contracts), so a larger catalog could
+ * never be released — accepting a higher cap would only move the failure to
+ * prepare time, i.e. recreate the frozen-pipeline state fixed by D15.
+ * Raising the ceiling needs paginated manifests with a multi-page signature
+ * trust model (deferred by ruling R-3).
+ */
+function parseMaxCatalogEntries(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return MAX_MANIFEST_ENTRIES
+  if (!/^\d+$/u.test(raw.trim())) {
+    fail(`${ENV_KEYS.maxCatalogEntries} must be a positive integer, got ${JSON.stringify(raw)}.`)
+  }
+  const value = Number(raw.trim())
+  if (value < 1) {
+    fail(`${ENV_KEYS.maxCatalogEntries} must be at least 1, got ${value}.`)
+  }
+  if (value > MAX_MANIFEST_ENTRIES) {
+    fail(
+      `${ENV_KEYS.maxCatalogEntries} must not exceed ${String(MAX_MANIFEST_ENTRIES)}, got ${value}: ` +
+        `the upstream catalog contract pins \`items\` to maxItems: ${String(MAX_MANIFEST_ENTRIES)} and a signed manifest carries exactly ` +
+        'one provider page, so a catalog larger than that could never be released. Lower the value; ' +
+        'raising the ceiling needs paginated manifests with a multi-page signature trust model (not implemented, ruling R-3).',
+    )
+  }
+  return value
+}
+
+/**
  * Build the config from the environment plus optional CLI conveniences.
  *
  * @param env - process environment (defaults to `process.env`).
@@ -176,6 +234,7 @@ export function loadConfig(
   const publicOrigin = parsePublicOrigin(env[ENV_KEYS.publicOrigin])
   const verifyPublicKey = parseVerifyPublicKey(env[ENV_KEYS.verifyPublicKeyPath])
   const adminToken = parseAdminToken(env[ENV_KEYS.adminToken])
+  const maxCatalogEntries = parseMaxCatalogEntries(env[ENV_KEYS.maxCatalogEntries])
   return {
     port,
     dataDir,
@@ -183,5 +242,6 @@ export function loadConfig(
     verifyPublicKeyPath: verifyPublicKey.path,
     verifyPublicKeyHex: verifyPublicKey.hex,
     adminToken,
+    maxCatalogEntries,
   }
 }

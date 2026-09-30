@@ -42,7 +42,16 @@ import type { CatalogService } from './catalog/service.ts'
 import type { CatalogStore } from './catalog/store.ts'
 import type { MarketServerConfig } from './config.ts'
 
-/** The signed manifest carries at most one provider page (contract max 200 items). */
+/**
+ * The signed manifest carries at most one provider page — the UPSTREAM
+ * CONTRACT maximum (`items` `maxItems: 200` in
+ * dsh-community-market's catalog-provider-page schema), not this service's
+ * implementation choice. This constant is the single definition of the
+ * contract default/ceiling: `config.ts` defaults the effective cap
+ * (`MarketServerConfig.maxCatalogEntries`) to it and refuses startup with any
+ * higher value, and both caps below read the effective value from config
+ * (Task 6.4, ruling R-3).
+ */
 export const MAX_MANIFEST_ENTRIES = 200
 
 export class ManifestPrepareError extends Error {
@@ -77,25 +86,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * Build the canonical pending manifest. `artifactSize` resolves the stored
  * size of a hosted artifact file name (null = missing on disk → fail closed:
- * an entry pointing at a vanished artifact blocks the release).
+ * an entry pointing at a vanished artifact blocks the release). `maxEntries`
+ * is the effective catalog scale cap from config (default = the contract
+ * maximum); it bounds both the guard and the provider page built here.
  */
 export async function buildPendingManifest(args: {
   readonly store: CatalogStore
   readonly catalog: CatalogService
   readonly domain: string
   readonly now: Date
+  readonly maxEntries: number
   readonly artifactSize: (fileName: string) => Promise<number | null>
 }): Promise<MarketManifest> {
   const entries = args.store.entries()
-  if (entries.length > MAX_MANIFEST_ENTRIES) {
+  if (entries.length > args.maxEntries) {
     throw new ManifestPrepareError(
       'catalog-too-large',
-      `the signed manifest carries one provider page (contract max ${String(MAX_MANIFEST_ENTRIES)} items); ` +
-        `this source has ${String(entries.length)} entries. Split the source (M6) before releasing.`,
+      `this source has ${String(entries.length)} entries but the configured catalog cap is ${String(args.maxEntries)} ` +
+        `(a signed manifest carries one provider page; the upstream contract pins \`items\` to maxItems: ${String(MAX_MANIFEST_ENTRIES)}). ` +
+        'Split the source before releasing — paginated / multi-page manifests are not implemented (ruling R-3).',
     )
   }
 
-  const page = args.catalog.query({ limit: MAX_MANIFEST_ENTRIES })
+  const page = args.catalog.query({ limit: args.maxEntries })
   const files: MarketManifestFile[] = []
   for (const entry of entries) {
     if (entry.sha256 === undefined || entry.tarball === undefined) continue
@@ -149,6 +162,7 @@ export async function preparePendingManifest(args: {
     catalog: args.catalog,
     domain: args.config.publicOrigin,
     now,
+    maxEntries: args.config.maxCatalogEntries,
     artifactSize: args.artifactSize,
   })
   await args.store.setPendingManifest(manifest)

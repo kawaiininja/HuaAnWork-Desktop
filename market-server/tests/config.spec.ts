@@ -48,7 +48,10 @@ describe('loadConfig', () => {
 
   it('fails closed when any required variable is missing, with guidance', () => {
     for (const key of Object.values(ENV_KEYS)) {
-      if (key === ENV_KEYS.adminToken) continue // admin token is optional (Task 2: unset = admin surface disabled)
+      // Both optional keys have documented defaults: the admin token disables
+      // the admin surface (Task 2), the catalog cap defaults to the contract
+      // maximum (Task 6.4).
+      if (key === ENV_KEYS.adminToken || key === ENV_KEYS.maxCatalogEntries) continue
       const partial = completeEnv()
       delete partial[key]
       let caught: unknown
@@ -104,6 +107,39 @@ describe('loadConfig', () => {
     const badPath = join(keyDir, 'bad.hex')
     await writeFile(badPath, 'zz'.repeat(32), { mode: 0o600 })
     expect(() => loadConfig(completeEnvWith({ [ENV_KEYS.verifyPublicKeyPath]: badPath }))).toThrow(ConfigError)
+  })
+
+  // 裁定 R-3 / 评审 D15:上游契约只允许单个 provider page(`items` maxItems 200),
+  // 故 200 是**契约天花板**而非本服务的实现选择。可配置只允许调低;调高在启动时
+  // 诚实失败(放得更宽只会把失败推迟到 prepare 阶段,即 D15 修掉的冻结态)。
+  describe('catalog scale cap (D15 / ruling R-3)', () => {
+    it('defaults to the upstream contract maximum of 200 entries', () => {
+      expect(loadConfig(completeEnv()).maxCatalogEntries).toBe(200)
+    })
+
+    it('refuses to configure a cap above the contract maximum, citing the upstream maxItems', () => {
+      let caught: unknown
+      try {
+        loadConfig(completeEnvWith({ [ENV_KEYS.maxCatalogEntries]: '201' }))
+      } catch (cause) {
+        caught = cause
+      }
+      expect(caught).toBeInstanceOf(ConfigError)
+      const message = (caught as ConfigError).message
+      expect(message).toContain(ENV_KEYS.maxCatalogEntries)
+      expect(message).toContain('maxItems')
+      expect(message).toContain('200')
+    })
+
+    it('allows a lower cap for a small deployment', () => {
+      expect(loadConfig(completeEnvWith({ [ENV_KEYS.maxCatalogEntries]: '50' })).maxCatalogEntries).toBe(50)
+    })
+
+    it('rejects a cap that is not a positive integer', () => {
+      for (const bad of ['abc', '0', '-1', '1.5']) {
+        expect(() => loadConfig(completeEnvWith({ [ENV_KEYS.maxCatalogEntries]: bad })), bad).toThrow(ConfigError)
+      }
+    })
   })
 
   // Mirrors update-server/tests/config.spec.ts (Task 3.5): the two servers expose

@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { CatalogStore, type CatalogStore as CatalogStoreType } from '../../src/catalog/store.ts'
 import type { MarketServerConfig } from '../../src/config.ts'
+import { MAX_MANIFEST_ENTRIES } from '../../src/manifest-prepare.ts'
 import { generateKeyPair } from '../../src/signing.ts'
 import { createMarketServer, type MarketHttpServer } from '../../src/server.ts'
 import { ArtifactStore } from '../../src/tarball/store.ts'
@@ -28,7 +29,7 @@ export interface TestMarket {
   close: () => Promise<void>
 }
 
-export async function bootTestMarket(options: { readonly adminToken?: string | null } = {}): Promise<TestMarket> {
+export async function bootTestMarket(options: { readonly adminToken?: string | null; readonly maxCatalogEntries?: number } = {}): Promise<TestMarket> {
   const dataDir = await mkdtemp(join(tmpdir(), 'market-server-e2e-'))
   const store = await CatalogStore.open(dataDir)
   const artifacts = await ArtifactStore.open(dataDir)
@@ -40,6 +41,7 @@ export async function bootTestMarket(options: { readonly adminToken?: string | n
     verifyPublicKeyPath: '/nonexistent/key.hex',
     verifyPublicKeyHex: key.publicKeyHex,
     adminToken: options.adminToken === undefined ? ADMIN_TOKEN : options.adminToken,
+    maxCatalogEntries: options.maxCatalogEntries ?? MAX_MANIFEST_ENTRIES,
   }
   const market = createMarketServer(config, store, artifacts)
   await new Promise<void>(resolve => market.server.listen(0, '127.0.0.1', resolve))

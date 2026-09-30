@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createMarketServer, type MarketHttpServer } from '../src/server.ts'
 import { CatalogStore } from '../src/catalog/store.ts'
 import type { MarketServerConfig } from '../src/config.ts'
+import { MAX_MANIFEST_ENTRIES } from '../src/manifest-prepare.ts'
 import { ArtifactStore, artifactFileName } from '../src/tarball/store.ts'
 import { cleanPackageManifest, buildTgz } from './helpers/tar.ts'
 
@@ -31,6 +32,7 @@ describe('artifact hosting round-trip', () => {
       verifyPublicKeyPath: '/nonexistent/key.hex',
       verifyPublicKeyHex: KEY_HEX,
       adminToken: 'test-admin-token',
+      maxCatalogEntries: MAX_MANIFEST_ENTRIES,
     }
     market = createMarketServer(config, store, artifacts)
     await new Promise<void>(resolve => market.server.listen(0, '127.0.0.1', resolve))

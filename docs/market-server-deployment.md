@@ -162,6 +162,7 @@ docker build -t huaanwork/market-server:closure /tmp/market-server-closure
 | `MARKET_SERVER_PUBLIC_ORIGIN` | 本服务对外 origin，如 `http://market.intranet.example:8787` | http/https；禁 userinfo、query、fragment。内网**允许 plain http**——但该祝福只覆盖 catalog/manifest 的**真实性**（由离线签名清单保证，不靠 TLS，决策 2）；**不覆盖 admin token 的保密性**（见〈Admin 面〉通道要求）。同时是清单信封的 `domain` 钉扎值 |
 | `MARKET_SERVER_VERIFY_PUBLIC_KEY` | 钉扎 Ed25519 验签公钥文件路径 | 存在且可读；内容为 raw 32 字节小写 hex（64 字符，`gen-signing-key.mjs` 产出的钉扎格式） |
 | `MARKET_SERVER_ADMIN_TOKEN` | admin 面 bearer token（**可选**） | 非空才生效。**未配置/为空 = admin 面整体禁用**（fail-closed：`/v1/admin/*` 一律 401 `admin-disabled`），启动时打印指引；配置后错 token / 缺 token 一律 401 `unauthorized` |
+| `MARKET_SERVER_MAX_CATALOG_ENTRIES` | 目录规模上限（**可选**，默认 200） | 正整数 **1..200**。配置 **>200 启动即失败**（错误信息指向上游契约 `maxItems`）；只能调低，见〈目录规模上限〉 |
 
 **不存在任何私钥配置项**（round3 R9：原「env 注入私钥」裁定作废，与
 「不与托管同进程」矛盾）。发布签名是真离线两步流（见下）。
@@ -176,6 +177,43 @@ export MARKET_SERVER_VERIFY_PUBLIC_KEY=/srv/market-server/keys/market-signing-ke
 export MARKET_SERVER_ADMIN_TOKEN=<out-of-band 分发的强随机 token>
 node --experimental-strip-types src/index.ts
 ```
+
+## 目录规模上限（D15 / 裁定 R-3）
+
+**上限 200 条目来自上游契约，不是本服务的实现选择。** 签名清单只承载
+**一个** provider page，而上游 `dsh-community-market` 的 provider-page 契约
+把 `items` 钉在 `maxItems: 200`
+（`src/contracts/generated/catalog-provider-page.ts`；catalog snapshot 同值）。
+因此目录规模天花板 = 200 条目——没有任何服务端配置能放大清单一次可承载的
+条目数，除非先改签名的信任模型（见下）。
+
+**可配置（只能调低）**：`MARKET_SERVER_MAX_CATALOG_ENTRIES`（可选，整数
+1..200，默认 200）。
+
+- **调低**：小型部署可设更小的上限（如 `=50`），第 51 条上架即 422
+  `catalog-full`；恰在上限时发布流（prepare）照常可用。
+- **调高**：**启动即失败**（打印指引 + exit 1），错误信息指向上游契约
+  `maxItems` 与「一个签名信封只覆盖一个 provider page」。放得更宽只会把失败
+  推迟到 `manifest/prepare` 阶段——那正是 D15 修掉的「目录冻结」态（第 N+1
+  条上架成功、之后每次 prepare 都失败）。
+
+**生效点（单一真相源）**：有效上限来自配置，两处消费**同一值**——发布时
+（第 N+1 条即 422 `catalog-full`，`admin/routes.ts`）与 prepare 纵深（条目数
+> N 即 422 `catalog-too-large`，`manifest-prepare.ts`）。代码中的数值 `200`
+> 只在 `MAX_MANIFEST_ENTRIES` 定义一次（契约默认 / 天花板），config 的默认值
+> 与启动校验的硬上限都取自它。
+
+**超过 200 个插件需要什么（未实现，延后）**：分页清单 + **多页签名的信任
+模型**——须先解「一个签名信封如何覆盖多页」（页间绑定、页序、缺页检测）这一
+独立设计问题。裁定 R-3：M6 只做「上限可配置 + 文档诚实化」，分页 / 多页签名
+延后。
+
+**运营方动作**：在插件数**接近**上限（而非到第 201 条被拒）时就提出——规划
+分批拆源或推动分页方案立项。
+
+> 订正记录：M5 计划 Tech Stack 曾写「规模千级条目前足够」，该假设**从未与
+> 契约 `maxItems` 对账**（评审 D15）。已在 M5 计划〈实施后订正汇总〉第 10 条
+> 订正，正文保持时点原样（spec §14 第 29 条先例）。
 
 ## HTTP 面
 
@@ -207,7 +245,7 @@ node --experimental-strip-types src/index.ts
 | `POST /v1/admin/artifacts?displayName=..&summary=..[&sha256=..]` | 发布 .tgz（raw body 流式落盘 + 边收边算 sha256；可选 `sha256` 参数做客户端断言，不符即 400 `sha256-mismatch` 且不留文件）。**两个尺寸上限**：压缩字节 ≤ **100 MiB**（超出即 413 `artifact-too-large`）；解压后 tar ≤ **64 MiB**（超出即 400 `decompressed-tarball-too-large`，gunzip 炸弹防护）。**注意两值不等**：不可压缩字节的 70 MiB 制品会「上传通过、门拒」，打包前请自检解压后尺寸。随后过**发布侧门**：解包 tarball manifest（自实现 ustar 解析，零依赖），① 结构层——depth-1 `<dir>/package.json` 候选**必须恰好一个**（多于一个即 400 `invalid-tarball`「歧义 tarball」，防干净诱饵掩护脏 manifest）、任何条目名含 `..` 段即 400 `invalid-tarball`；② 身份层——包名须匹配契约小写正则、版本 ≤64 字符，否则 422 `invalid-package-identity`；③ 依赖层——`dependencies`/`optionalDependencies` 非空即 422 `nonzero-dependencies`，`scripts` 含 `preinstall`/`install`/`postinstall`/`prepare` 即 422 `lifecycle-scripts`（`peerDependencies` 豁免、`bundleDependencies` 允许）。②③ 均**点名**违规项——运营者在发布时拿错，不是用户安装时。 |
 | `PATCH /v1/admin/entries/:id` | 编辑展示字段。**写入前在锁内跑一次 provider-page 契约自校**（评审 D3）：长度/控制字符/双向控制符/枚举/时间戳等违约一律 400 `invalid-entry-contract` 并点名 JSON path，不会先答 200 再把整站目录变成 400。URL 类字段（`homepage`/`publisherUrl`/`repositoryUrl`）预检与契约 `httpsUri` 正则**逐字一致**（禁 userinfo、禁端口、禁 fragment）：**留空 = 清除/不填**（schema 非必填），违约即 400 拒绝（round3 R15）。 |
 | `POST /v1/admin/entries/:id/unpublish` | 下架条目（制品文件保留在盘，可重新上架同 name@version）。 |
-| `POST /v1/admin/manifest/prepare` | 两步流第 1 步：生成 canonical 待签清单并入库 pending 槽——`domain` = 配置 origin、`revision` = 持久化 max+1（单调）、`issuedAt`/`notAfter`（TTL ≤ 7d）、catalog = 自校 provider page、files = 每个已托管制品的 sha256/tarballPath/size。**条目 >200（契约单页上限）→ 422 `catalog-too-large`**（响应体含「Split the source (M6) before releasing」指引）；**引用制品已不在盘 → 409 `artifact-missing`**（含重新上架指引）。两者都是诚实 4xx，不再是裸 500（评审 D14d）。**200 条目上限已在发布时前移**（评审 D15）：第 201 条上架即 422 `catalog-full`，故目录**永远不会**进入「prepare 持续失败、连既有条目也发不出新清单」的冻结态；`catalog-too-large` 因而只剩「运营者手改状态文件 / 从旧备份还原」这一条可达路径。分页清单 / 多页签名留待 M6。 |
+| `POST /v1/admin/manifest/prepare` | 两步流第 1 步：生成 canonical 待签清单并入库 pending 槽——`domain` = 配置 origin、`revision` = 持久化 max+1（单调）、`issuedAt`/`notAfter`（TTL ≤ 7d）、catalog = 自校 provider page、files = 每个已托管制品的 sha256/tarballPath/size。**条目数 > 配置上限（默认 200 = 契约单页上限）→ 422 `catalog-too-large`**（响应体含「Split the source before releasing」指引）；**引用制品已不在盘 → 409 `artifact-missing`**（含重新上架指引）。两者都是诚实 4xx，不再是裸 500（评审 D14d）。**上限已在发布时前移**（评审 D15）：第 N+1 条（N = 配置上限）上架即 422 `catalog-full`，故目录**永远不会**进入「prepare 持续失败、连既有条目也发不出新清单」的冻结态；`catalog-too-large` 因而只剩「运营者手改状态文件 / 从旧备份还原」这一条可达路径。上限可配置（Task 6.4，裁定 R-3）与分页延后见〈目录规模上限〉。 |
 | `GET /v1/admin/manifest/pending` | 下载当前待签清单（无则 404）。 |
 | `POST /v1/admin/manifest/signature` | 两步流第 3 步：对**存储中的** pending 清单做 keyId 权威验签（裁定 R-1；含信封负例：`revision` 回退 / `notAfter` 过期 / `domain` 不符一律拒）。**仅验签通过才收录激活**（fail-closed：无有效签名永不激活）；激活 = manifest+signature 成对服务、pending 清空、持久化 maxRevision 前进。失败返回 `{activated:false, reason}`。 |
 
@@ -240,8 +278,8 @@ node --experimental-strip-types src/index.ts
 | 409 | `artifact-missing` | prepare 引用的制品已不在盘 |
 | 413 | `artifact-too-large` | 上传压缩字节 > 100 MiB |
 | 422 | `nonzero-dependencies` / `lifecycle-scripts` / `invalid-package-identity` | 发布侧门拒绝（点名违规项） |
-| 422 | `catalog-too-large` | prepare 时条目 > 200（契约单页上限）；发布时已前移拦截，故通常只剩手改状态文件/旧备份还原可达 |
-| 422 | `catalog-full` | 发布第 201 条时被拒（评审 D15）；先 unpublish 一条再发布。目录因此永不进入 prepare 冻结态 |
+| 422 | `catalog-too-large` | prepare 时条目数 > 配置上限（默认 200 = 契约单页上限）；发布时已前移拦截，故通常只剩手改状态文件/旧备份还原可达 |
+| 422 | `catalog-full` | 发布第 N+1 条时被拒（N = 配置上限，默认 200；评审 D15 / Task 6.4）；先 unpublish 一条再发布。目录因此永不进入 prepare 冻结态 |
 | 500 | `upload-failed` / `internal-error` / `invalid-stored-catalog` | **服务端**故障；细节进服务端日志（响应体不含路径与 ajv 内部） |
 
 > 读侧自校验失败（存储中的条目违约契约）答 **500 `invalid-stored-catalog`**

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { parseCatalogProviderPage } from 'dsh-community-market/contracts'
 import { CatalogStore, type CatalogEntry } from '../src/catalog/store.ts'
 import type { MarketServerConfig } from '../src/config.ts'
+import { MAX_MANIFEST_ENTRIES } from '../src/manifest-prepare.ts'
 import { createMarketServer, type MarketHttpServer } from '../src/server.ts'
 import { ArtifactStore } from '../src/tarball/store.ts'
 
@@ -19,6 +20,7 @@ function testConfig(dataDir: string): MarketServerConfig {
     verifyPublicKeyPath: '/nonexistent/key.hex',
     verifyPublicKeyHex: KEY_HEX,
     adminToken: 'test-admin-token',
+    maxCatalogEntries: MAX_MANIFEST_ENTRIES,
   }
 }
 

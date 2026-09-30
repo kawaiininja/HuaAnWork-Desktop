@@ -32,7 +32,7 @@ import type { CatalogService } from '../catalog/service.ts'
 import { DuplicateEntryError, EntryNotFoundError, ManifestActivationConflictError } from '../catalog/store.ts'
 import type { CatalogEntry, CatalogEntryPatch, CatalogStore } from '../catalog/store.ts'
 import type { MarketServerConfig } from '../config.ts'
-import { intakeSignature, ManifestPrepareError, MAX_MANIFEST_ENTRIES, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
+import { intakeSignature, ManifestPrepareError, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
 import { TarballError, extractPackageManifestFromFile } from '../tarball/parse.ts'
 import { checkPublishGate } from '../tarball/gate.ts'
 import {
@@ -272,20 +272,23 @@ async function publishArtifact(request: IncomingMessage, response: ServerRespons
       sendError(response, 409, 'already-published', `${gateResult.name}@${gateResult.version} is already published; unpublish it first to re-release`)
       return
     }
-    // Review D15: enforce the 200-entry ceiling AT PUBLISH TIME. prepare()
+    // Review D15: enforce the catalog scale cap AT PUBLISH TIME. prepare()
     // rejects an oversized catalog with `catalog-too-large`, but on its own that
-    // only produces a frozen pipeline: entry 201 published fine and every
+    // only produces a frozen pipeline: entry N+1 published fine and every
     // subsequent prepare then failed, so the operator could not release a new
-    // manifest for the 200 entries they already had without unpublishing first.
-    // Rejecting here means the catalog can never enter that state — `>=` because
-    // prepare's own guard is `entries.length > MAX_MANIFEST_ENTRIES`.
-    if (ctx.store.entries().length >= MAX_MANIFEST_ENTRIES) {
+    // manifest for the N entries they already had without unpublishing first.
+    // Rejecting here means the catalog can never enter that state — `>=`
+    // because prepare's own guard is `entries.length > cap`. The cap is the
+    // configured effective value (config.maxCatalogEntries, default = the
+    // upstream contract maximum; Task 6.4, ruling R-3) — never a literal here.
+    const maxCatalogEntries = ctx.config.maxCatalogEntries
+    if (ctx.store.entries().length >= maxCatalogEntries) {
       sendError(
         response,
         422,
         'catalog-full',
-        `the catalog already holds ${String(MAX_MANIFEST_ENTRIES)} entries, the most one signed provider page can carry; ` +
-        'unpublish an entry before publishing this one (paginated / multi-page manifests are M6)',
+        `the catalog already holds ${String(maxCatalogEntries)} entries, the most this deployment accepts; ` +
+        'unpublish an entry before publishing this one (paginated / multi-page manifests are not implemented, ruling R-3)',
       )
       return
     }
@@ -402,10 +405,10 @@ export async function handleAdminRequest(
         })
       } catch (cause) {
         // Honest 4xx for operator-preventable conditions (review D14d): the
-        // runbook promises ">200 entries or a missing artifact is honestly
-        // rejected" — a bare 500 buries manifest-prepare's operator guidance
-        // (e.g. "Split the source (M6) before releasing") in server logs and
-        // mislabels a data-side problem as an internal error.
+        // runbook promises "more entries than the cap or a missing artifact is
+        // honestly rejected" — a bare 500 buries manifest-prepare's operator
+        // guidance (e.g. "Split the source before releasing") in server logs
+        // and mislabels a data-side problem as an internal error.
         if (cause instanceof ManifestPrepareError) {
           const status = cause.code === 'catalog-too-large' ? 422 : 409
           sendError(response, status, cause.code, cause.message)

@@ -487,3 +487,48 @@ describe('manifest/prepare honest 4xx (review D14d)', () => {
     expect((await prepare()).status).toBe(200)
   })
 })
+
+// 裁定 R-3:上限可配置(**只能调低**——契约天花板 200 由 config 启动校验钉死)。
+// 发布时 cap 与 prepare 纵深都必须读**配置值**,不得各自写死字面量。
+describe('catalog scale cap configured below the contract maximum (ruling R-3)', () => {
+  let market: TestMarket
+
+  beforeEach(async () => {
+    market = await bootTestMarket({ maxCatalogEntries: 50 })
+  })
+
+  afterEach(async () => {
+    await market.close()
+  })
+
+  it('rejects the 51st entry at publish time when the cap is configured to 50', async () => {
+    const published = await publishTgz(market.baseUrl, 'test-admin-token')
+    expect(published.status).toBe(201)
+    const { entry } = published.body as { entry: CatalogEntry }
+    const entries: CatalogEntry[] = [entry]
+    for (let index = 1; entries.length < 50; index += 1) {
+      entries.push({ ...entry, id: `bulk/pkg-${index}@1.0.0`, packageName: `bulk-pkg-${index}` })
+    }
+    expect(entries).toHaveLength(50)
+    await market.store.replaceEntries(entries)
+
+    const prepare = () => fetch(`${market.baseUrl}/v1/admin/manifest/prepare`, {
+      method: 'POST',
+      headers: adminHeaders('test-admin-token'),
+    })
+    // 恰在上限时 prepare 仍然可用(其自身守卫是 `> cap`)。
+    expect((await prepare()).status).toBe(200)
+
+    const overflow = await publishTgz(market.baseUrl, 'test-admin-token', cleanPackageManifest({ name: 'overflow-pkg', version: '1.0.0' }))
+    expect(overflow.status).toBe(422)
+    const parsed = overflow.body as { error: { code: string; message: string } }
+    expect(parsed.error.code).toBe('catalog-full')
+    // 诚实点名**配置值**,而不是契约默认 200。
+    expect(parsed.error.message).toContain('50')
+    expect(parsed.error.message).toContain('unpublish')
+
+    // 被拒的发布没有改变目录,且发布链没有冻结。
+    expect(market.store.entries()).toHaveLength(50)
+    expect((await prepare()).status).toBe(200)
+  })
+})
