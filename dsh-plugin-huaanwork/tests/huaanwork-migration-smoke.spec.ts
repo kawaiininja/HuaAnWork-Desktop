@@ -34,6 +34,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { zstdCompressSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
+import { dshProductVersion } from '../src/dsh-product-version.ts'
 import { authStatus } from '../src/huaanwork-host/auth.ts'
 import { readHuaanworkSettings } from '../src/huaanwork-host/settings.ts'
 import { listAutomations, listProjects } from '../src/huaanwork-host/stores.ts'
@@ -43,6 +44,8 @@ import { neutralWorkspaceRoot } from '../src/huaanwork-host/workspace-state.ts'
 import { MIGRATION_MARKER_FILENAME, type HuaanworkMigrationMarker } from '../src/huaanwork-migration/marker.ts'
 import { resolveLegacySource, type HuaanworkLegacySource } from '../src/huaanwork-migration/paths.ts'
 import { encodeSegment, projectKey } from '../src/huaanwork-migration/sessions.ts'
+import { createDesktopWebProfile } from '../src/profile-manager.ts'
+import { completeOrSkipDesktopSetupWizard, desktopSetupWizardStateConstants } from '../src/setup-wizard-state.ts'
 
 const LIVE = process.env.HUAANWORK_MIGRATION_SMOKE === '1'
 const describeLive = LIVE ? describe : describe.skip
@@ -109,8 +112,20 @@ interface SmokeTree {
   readonly newHome: string
 }
 
-/** 在临时 HOME 下播种一份完整旧布局(同 end-to-end.spec 的形状,规模收敛)。 */
-function seedSmokeTree(): SmokeTree {
+/**
+ * 在临时 HOME 下播种一份完整旧布局(同 end-to-end.spec 的形状,规模收敛),
+ * 并预置两个与迁移正交、应用在真实「已有数据」的机器上必然已存在的状态:
+ *
+ * - 默认 profile 目录:零 profile 的 home 上应用冷启动会自行 materialize
+ *   (profile-manager.ts `materializeDefaultDesktopProfile`);夹具用同一实现
+ *   (`createDesktopWebProfile`)预置,让该目录属于「启动前已存在」的一批。
+ * - Setup Wizard 完成标记:全新 profile 的首启 wizard 是**真实产品行为**,与
+ *   迁移正交;无人值守运行须预置完成态(应用自身 `completeOrSkipDesktopSetupWizard`
+ *   写出的同一 v2 状态),否则宿主在人工决策前不会启动(R1 发现 1)。
+ *   两者必须同在:profile 目录若本次启动才出现,`main.ts` 会先清空该 profile
+ *   的使用记录(`clearDesktopProfileUsageHistory`),单独预置的标记会被清掉。
+ */
+async function seedSmokeTree(): Promise<SmokeTree> {
   // 夹具根必须 realpath:Electron 解析 --user-data-dir 时会穿过 macOS 的
   // /var -> /private/var 符号链接,remint 会话的落盘路径断言依赖两侧文本路径一致。
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'mig-smoke-')))
@@ -151,6 +166,17 @@ function seedSmokeTree(): SmokeTree {
   mkdirSync(join(legacyDshHome, 'profiles', 'huaanwork'), { recursive: true })
   writeFileSync(join(legacyDshHome, 'profiles', 'huaanwork', 'package.json'),
     JSON.stringify({ name: 'p', dsh: { profile: { bundles: ['legacy-plugin'] } } }), 'utf8')
+  // 预置默认 profile(应用冷启动的同一 materialize 路径)与它的 wizard 完成标记。
+  const profileDir = createDesktopWebProfile(newHome, 'desktop').dir
+  // 版本字段与应用 setupWizardVersions 同源:插件 package.json(electron-runtime.ts
+  // `desktopProductVersion` 读的就是它,这里不能引 electron 模块)+ 已安装的
+  // @deepseek-ai/dsh;setupRevision 取产品常量。字段仅作诊断,门只判「状态存在」。
+  const desktopVersion = (JSON.parse(readFileSync(join(PLUGIN_ROOT, 'package.json'), 'utf8')) as { version: string }).version
+  await completeOrSkipDesktopSetupWizard(userDataDir, profileDir, 'completed', {
+    desktopVersion,
+    dshVersion: dshProductVersion(),
+    setupRevision: desktopSetupWizardStateConstants.setupRevision,
+  })
   return { root, home, userDataDir, legacyDshHome, newHome }
 }
 
@@ -225,7 +251,7 @@ async function hostResponds(): Promise<number | undefined> {
 describeLive('legacy migration against a real packaged layout', () => {
   it('migrates a seeded tree under the real DSH_HOME and boots the host afterwards', async () => {
     const app = locatePackagedApp()
-    const tree = seedSmokeTree()
+    const tree = await seedSmokeTree()
     const source = resolveLegacySource(tree.userDataDir)
     // 旧树 = config dir 内三个文件 + `<config dir>/dsh`(paths.ts);新 home 是另一个临时根,
     // 旧树与新 home 不得同根,否则迁移源与目的树重叠(旧 fixture 的缺陷)。

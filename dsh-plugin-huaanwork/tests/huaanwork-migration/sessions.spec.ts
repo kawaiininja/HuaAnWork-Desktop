@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { zstdCompressSync } from 'node:zlib'
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { runHuaanworkLegacyMigration } from '../../src/huaanwork-migration/index.ts'
 import { resolveLegacySource } from '../../src/huaanwork-migration/paths.ts'
@@ -113,6 +113,39 @@ function firstLine(path: string): string {
   const bytes = readFileSync(path)
   const text = path.endsWith('.zstd') ? decompressZstdFrames(bytes) : bytes.toString('utf8')
   return text.split('\n', 1)[0] ?? ''
+}
+
+/**
+ * 首帧的字节终点(结构扫描,转写自上游 frame 遍历
+ * session-persistence-jsonl/src/zstd.ts:48-104 的 block 步行:magic + 帧头 +
+ * 数据块序列 + 可选校验)。拿到「独立可解码的第一帧」的明文范围,断言与上游
+ * assertZstdHeaderFrame(同包 src/index.ts:74-79)同判据。
+ */
+function firstZstdFrameEnd(buffer: Buffer): number {
+  let offset = 4
+  const descriptor = buffer.readUInt8(offset)
+  offset += 1
+  const contentSizeFlag = descriptor >>> 6
+  const singleSegment = (descriptor & 0x20) !== 0
+  const checksum = (descriptor & 0x04) !== 0
+  const dictionaryFlag = descriptor & 0x03
+  const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag
+  const contentSizeBytes = contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentSizeFlag
+  offset += (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes
+  for (;;) {
+    const blockHeader = buffer.readUIntLE(offset, 3)
+    offset += 3
+    const blockType = (blockHeader >>> 1) & 0x03
+    const blockSize = blockHeader >>> 3
+    offset += blockType === 1 ? 1 : blockSize
+    if ((blockHeader & 1) !== 0) break
+  }
+  return checksum ? offset + 4 : offset
+}
+
+/** 独立解码第一帧为文本(与上游 assertZstdHeaderFrame 面对同一段明文)。 */
+function firstZstdFrameText(buffer: Buffer): string {
+  return zstdDecompressSync(buffer.subarray(0, firstZstdFrameEnd(buffer))).toString('utf8')
 }
 
 describe('migrateSessionsStep', () => {
@@ -348,5 +381,54 @@ describe('migrateSessionsStep', () => {
     const skippedRelative = join('--Users-x-proj--', 'huaanwork-chat-0000000000000003', 'session.jsonl.zstd')
     expect(report.skipped).toContain(`${skippedRelative}: exceeds the cumulative decompression budget`)
     expect(existsSync(join(f.destinationRoot, skippedRelative))).toBe(false)
+  })
+})
+
+describe('re-minted session frame layout (upstream first-frame contract)', () => {
+  /** 重铸目标路径与两侧文本,内容种子 = header + turn(R1 真机发现 2 的复现形状)。 */
+  function remintFixture() {
+    const f = fixture()
+    const oldRoot = join(f.dshHome, 'workspace')
+    const oldId = sessionIdFor(oldRoot)
+    const newRoot = neutralWorkspaceRoot(f.profileDir)
+    const newId = sessionIdFor(newRoot)
+    const createdAt = 1_700_000_000_000
+    const sourceHeaderLine = JSON.stringify({ type: 'session', version: 0, id: oldId, createdAt, cwd: oldRoot, delegationDepth: 0 })
+    const rewrittenHeaderLine = JSON.stringify({ type: 'session', version: 0, id: newId, createdAt, cwd: newRoot, delegationDepth: 0 })
+    const turnLine = JSON.stringify({ type: 'turn', index: 0 })
+    const sourcePath = join(f.sessionsRoot, projectKey(oldRoot), encodeSegment(oldId), 'session.jsonl.zstd')
+    const destination = join(f.destinationRoot, projectKey(newRoot), encodeSegment(newId), 'session.jsonl.zstd')
+    return { f, sourceHeaderLine, rewrittenHeaderLine, turnLine, sourcePath, destination }
+  }
+
+  it('keeps the rewritten header as its own first frame and the rest of the log as a later frame', async () => {
+    const { f, sourceHeaderLine, rewrittenHeaderLine, turnLine, sourcePath, destination } = remintFixture()
+    writeZstdLog(sourcePath, [sourceHeaderLine, turnLine])
+    const report = createMigrationReport()
+    await migrateSessionsStep.run(f.source, f.target, report)
+    const bytes = readFileSync(destination)
+    // (a) 独立可解码的第一帧恰为一行 header(上游 assertZstdHeaderFrame 的判据;
+    // 单帧合并 header+content 在此为红 —— R1 真机发现 2)。
+    const firstFrame = firstZstdFrameText(bytes)
+    expect(firstFrame.indexOf('\n')).toBe(firstFrame.length - 1)
+    expect(firstFrame).toBe(`${rewrittenHeaderLine}\n`)
+    // 内容行确实在后续帧里,而不是被第一帧吞掉。
+    expect(firstZstdFrameEnd(bytes)).toBeLessThan(bytes.length)
+    // (b) 拼接全部帧的明文 = header + content,无数据丢失。
+    expect(decompressZstdFrames(bytes)).toBe(`${rewrittenHeaderLine}\n${turnLine}\n`)
+    expect(report.counts.sessionsReminted).toBe(1)
+  })
+
+  it('emits a single header frame for a header-only re-minted session', async () => {
+    const { f, sourceHeaderLine, rewrittenHeaderLine, sourcePath, destination } = remintFixture()
+    writeZstdLog(sourcePath, [sourceHeaderLine])
+    const report = createMigrationReport()
+    await migrateSessionsStep.run(f.source, f.target, report)
+    const bytes = readFileSync(destination)
+    // header-only 会话不产生空尾帧(镜像上游空会话的单帧编码)。
+    expect(firstZstdFrameEnd(bytes)).toBe(bytes.length)
+    expect(firstZstdFrameText(bytes)).toBe(`${rewrittenHeaderLine}\n`)
+    expect(decompressZstdFrames(bytes)).toBe(`${rewrittenHeaderLine}\n`)
+    expect(report.counts.sessionsReminted).toBe(1)
   })
 })

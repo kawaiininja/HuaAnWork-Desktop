@@ -178,9 +178,9 @@ function inCanonicalSessionDir(segments: readonly string[], name: string, cwd: s
 
 /**
  * Write one destination log. An unchanged header is copied byte for byte — no
- * re-compression, no serialization drift; a rewritten header is re-rendered as a single
- * zstd frame (the readers concatenate independent frames, so one frame is compatible)
- * with the rest of the log text preserved verbatim.
+ * re-compression, no serialization drift; a rewritten header is re-rendered as the
+ * frame sequence {@link encodeRewrittenZstdSession} builds, with the rest of the log
+ * text preserved verbatim.
  *
  * `writeFileAtomic` types `content` as string, but its implementation passes the value
  * straight to `fs.writeFile`, which writes a Uint8Array's bytes verbatim; the cast keeps
@@ -189,6 +189,26 @@ function inCanonicalSessionDir(segments: readonly string[], name: string, cwd: s
  */
 function writeLogFile(destination: string, content: Buffer): Promise<void> {
   return writeFileAtomic(destination, content as unknown as string, { mode: FILE_MODE, dirMode: DIRECTORY_MODE })
+}
+
+/**
+ * Encode a re-minted header plus the untouched remainder as the concatenated frame
+ * sequence the upstream writer produces
+ * (deepseek-harness/packages/session/session-persistence-jsonl/src/index.ts:1206-1221):
+ * the independently decodable first frame carries exactly the header line and its
+ * trailing newline, and the remaining lines travel in a further appended frame. The
+ * upstream reader asserts that first frame into a header record — `assertZstdHeaderFrame`
+ * (same file :74-79) refuses a first frame holding anything more, which makes host boot
+ * fail — so header and content must never be merged into one frame. The remainder's
+ * leading newline is consumed by the header frame; a header-only log emits the header
+ * frame alone, the upstream empty-session encoding.
+ */
+function encodeRewrittenZstdSession(rewritten: string, remainder: string): Buffer {
+  const headerFrame = zstdCompressSync(Buffer.from(`${rewritten}\n`, 'utf8'))
+  const rest = remainder.slice(1)
+  return rest.length === 0
+    ? headerFrame
+    : Buffer.concat([headerFrame, zstdCompressSync(Buffer.from(rest, 'utf8'))])
 }
 
 /**
@@ -251,12 +271,11 @@ export function createMigrateSessionsStep(limits: SessionMigrationLimits = DEFAU
           recordSkip(report, `${relativePath}: destination already exists`)
           continue
         }
-        const rewrittenText = `${rewritten}${remainder}`
         const content = rewritten === first
           ? raw
           : compressed
-            ? zstdCompressSync(Buffer.from(rewrittenText, 'utf8'))
-            : Buffer.from(rewrittenText, 'utf8')
+            ? encodeRewrittenZstdSession(rewritten, remainder)
+            : Buffer.from(`${rewritten}${remainder}`, 'utf8')
         await writeLogFile(destination, content)
         bumpCount(report, 'sessions')
         bumpCount(report, remintId === undefined ? 'sessionsCarried' : 'sessionsReminted')
