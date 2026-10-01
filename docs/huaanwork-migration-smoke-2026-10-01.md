@@ -48,7 +48,7 @@ Task 7.2。门控驱动器：`dsh-plugin-huaanwork/tests/huaanwork-migration-smo
 | 4 | AuthGate 处于 **needs-login**；旧密码可登录 | **UI 待人类**。机器面：`auth-session.json` 被「intentionally expired」跳过、`account.json` 因目标已存在跳过（未覆盖）⇒ 需登录态、密码 = 用户旧华安工作台密码 | 文件系统 + 待人类 UI |
 | 5 | 项目列表含迁移项目 | **无此数据、不适用**（R-7.2-1：真实旧树无 `projects.json`） | 实测缺失 |
 | 6 | 任务列表 `sessionId` 重铸、可见历史消息 | **无此数据、不适用**（真实旧树无 tasks/任务数据） | 实测缺失 |
-| 7 | 中性根会话出现在侧栏「任务」区、`cwd` 指向新中性根、`workspace/` 可访问（G4） | **文件系统已执行 + UI 待人类**：marker `sessionsReminted 1`；新 home 落盘重铸文件（`task-7.2-secondboot-post.txt` sha `f7ca4fcc…`），header.id/cwd = 新中性根（门控 spec :286-288 同断言）；旧 `workspace/` 为空 ⇒ `workspaceFiles 0`，无文件可核对。侧栏展示待人类 | 文件系统 + 待人类 UI |
+| 7 | 中性根会话出现在侧栏「任务」区、`cwd` 指向新中性根、`workspace/` 可访问（G4） | **文件系统已执行 + UI 待人类**：marker `sessionsReminted 1`；新 home 落盘重铸文件（`task-7.2-secondboot-post.txt` sha `f7ca4fcc…`），header.id/cwd = 新中性根（门控 spec :314-316 同断言）；旧 `workspace/` 为空 ⇒ `workspaceFiles 0`，无文件可核对。侧栏展示待人类 | 文件系统 + 待人类 UI |
 | 8 | 自动化列表含迁移条目 | **无此数据、不适用**（真实旧树无 `automations.json`/runs） | 实测缺失 |
 | 9 | 技能中心启用态/自撰技能（G2/G3） | **无此数据、不适用**（树中无技能数据） | 实测缺失 |
 | 10 | 智能体目录（G1） | **无此数据、不适用**（树中无智能体数据） | 实测缺失 |
