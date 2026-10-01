@@ -28,7 +28,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -111,7 +111,9 @@ interface SmokeTree {
 
 /** 在临时 HOME 下播种一份完整旧布局(同 end-to-end.spec 的形状,规模收敛)。 */
 function seedSmokeTree(): SmokeTree {
-  const root = mkdtempSync(join(tmpdir(), 'mig-smoke-'))
+  // 夹具根必须 realpath:Electron 解析 --user-data-dir 时会穿过 macOS 的
+  // /var -> /private/var 符号链接,remint 会话的落盘路径断言依赖两侧文本路径一致。
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'mig-smoke-')))
   cleanup.push(() => rmSync(root, { recursive: true, force: true }))
   const home = join(root, 'home')
   const userDataDir = legacyUserDataDir(home)
@@ -122,7 +124,7 @@ function seedSmokeTree(): SmokeTree {
   mkdirSync(newHome, { recursive: true })
   writeFileSync(join(userDataDir, 'settings.json'), JSON.stringify({
     base_url: 'http://127.0.0.1:11434/v1', model: 'llama3', api_key: 'k', theme: 'dark',
-    models: [], active_model_id: '', work_allow_network: true, guard_mode: 'smart',
+    models: [{ id: 'default', name: '默认', base_url: 'http://127.0.0.1:11434/v1', model: 'llama3', api_key: 'k' }], active_model_id: 'default', work_allow_network: true, guard_mode: 'smart',
     automation_timeout_ms: 600000, keep_awake: true, agents_host: '', agents_port: '',
     agents_catalog_token: '',
   }), 'utf8')
