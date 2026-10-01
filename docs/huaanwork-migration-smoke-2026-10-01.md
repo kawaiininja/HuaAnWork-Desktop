@@ -58,8 +58,9 @@ Task 7.2。门控驱动器：`dsh-plugin-huaanwork/tests/huaanwork-migration-smo
 
 ## 冒烟发现（产品级，均未在真实旧树上触发）
 
-真机冒烟（含门控 spec 隔离树）暴露两个独立问题，均**与 R-7.2-6 的 spec 夹具修复无关**，
-按裁决口径不修产品、如实上报控制器：
+真机冒烟（含门控 spec 隔离树）暴露两个独立问题，均**与 R-7.2-6 的 spec 夹具修复无关**。
+两项均已按控制器裁决修复（2026-10-01 FIX ROUND 1，R-7.2-7/R-7.2-8，commit
+`4709e6ab95`；修复内容与证据见文末「修复跟进」）：
 
 1. **首启 Setup Wizard 阻塞一切全新 profile 的无人值守启动**（`task-7.2-wizard-block-evidence.txt`）。
    `main.ts:1352-1369` 在 profile-composition 阶段 `await setupWizardWindow.run()`
@@ -73,7 +74,8 @@ Task 7.2。门控驱动器：`dsh-plugin-huaanwork/tests/huaanwork-migration-smo
    （`~/.huaanwork/profiles/desktop` 有 09-22 使用记录）。**含义**：Task 2.9 的 spec
    诞生于 wizard 之前，其对「全新隔离树直接起到宿主」的假设在含 wizard 的当前产品上
    不再自洽——需要控制器裁定 spec 侧（如种子内预置 setup 状态）或明确「spec 运行需
-   操作者过 wizard」的纪律。
+   操作者过 wizard」的纪律。**状态：已处置（FIXED，harness 侧）**——R-7.2-8 采纳
+   「种子预置 setup 完成态」，见「修复跟进」。
 2. **中性根会话重铸产物违反上游首帧契约**（`task-7.2-remint-frame-defect-evidence.txt`）。
    `huaanwork-migration/sessions.ts:254-259` 对重铸会话写
    `zstdCompressSync(重写 header + 其余全部文本)` = **单帧含多行**；上游
@@ -88,7 +90,8 @@ Task 7.2。门控驱动器：`dsh-plugin-huaanwork/tests/huaanwork-migration-smo
    对照（同种子、会话改为 header-only）：`startup.run.completed`、宿主端口 43120 应答 403、
    一切正常。**含义**：对「用过」的旧中性根会话（真实用户的主工作区会话），迁移后
    host-boot 存在确定性失败面——R1 真机的最大收获。修法在迁移写入侧（header 行单独成帧），
-   属产品改动，交控制器裁定。
+   属产品改动，交控制器裁定。**状态：已修（FIXED，产品侧）**——R-7.2-7 采纳写入侧修复
+   （header 行单独成帧 + 回归钉），见「修复跟进」。
 
 ## 门控 spec（Task 2.9）修复与 3× 复跑状态
 
@@ -106,7 +109,8 @@ Task 7.2。门控驱动器：`dsh-plugin-huaanwork/tests/huaanwork-migration-smo
   经 operator-assist 过 wizard 后暴露发现 2（含 turn 的种子 ⇒ host-boot 致命）；
   将种子会话改为 header-only（真实旧树形状）则全绿。即：**修复本身成立（`:268` 红转绿、
   文件级断言全绿），但 3× 复跑在当前产品+机器状态下不可达，属产品级发现而非 spec 缺陷**，
-  按裁决 STOP+上报（见 `task-7.2-report.md`）。
+  按裁决 STOP+上报（见 `task-7.2-report.md`）。**2026-10-01 修复跟进：两项阻塞已按
+  R-7.2-7/R-7.2-8 解除，3× 无人值守全绿已达成（见文末「修复跟进」）。**
 - operator-assist 方法与脚本留档：`task-7.2-wizard-skip-wrapper.sh`（`--remote-debugging-port`
   包装真实二进制）与 `task-7.2-wizard-skipper.mjs`（在 wizard 页执行与 UI「跳过」同源的
   `window.location.assign('dsh-setup-wizard://skip')`，`App.tsx:708`）。仅用于诊断与失败路径
@@ -193,6 +197,49 @@ HUAANWORK_MIGRATION_SMOKE_APP="$PWD/dist/mac-smoke/mac-universal/HuaAnWork.app/C
 corepack yarn vitest run tests/huaanwork-migration-smoke.spec.ts
 ```
 
-注意：当前产品上**无人值守运行会被首启 Setup Wizard 阻塞**（发现 1）；通过 wizard 后
-含 turn 的种子会话还会触发 host-boot 失败（发现 2）。复跑前请先读
-`task-7.2-report.md` 与两份发现证据文件。
+注意：**发现 1、发现 2 均已修复并闭环（见文末「修复跟进」）**。首启 Setup Wizard 对全新
+profile 仍是真实产品行为，但门控 spec 的夹具已预置完成标记（与默认 profile 目录一并预置，
+否则会被启动期的使用记录清理抹掉），**无人值守复跑不再被阻塞**；含 turn 的种子会话此前
+触发的 host-boot 失败已随重铸帧修复消除。历史背景请读 `task-7.2-report.md` 与两份发现
+证据文件（其结论均已在「修复跟进」中收口）。
+
+## 修复跟进（2026-10-01 FIX ROUND 1）
+
+控制器对 R1 两发现给出裁决（R-7.2-7 产品侧修重铸帧；R-7.2-8 harness 侧预置 wizard 完成态），
+本记录闭环如下（证据同目录 `task-7.2-fix-*`）：
+
+- **产品修复（发现 2，R-7.2-7）**：commit `4709e6ab95`。重铸写入侧改为「重写后的 header
+  单独成一帧（`header + '\n'`），其余内容另帧追加」（`remainder` 去掉被 header 帧消费的
+  首换行；header-only 会话不产生空尾帧），与上游 writer 的帧布局逐字对齐
+  （`deepseek-harness/packages/session/session-persistence-jsonl/src/index.ts:1206-1221`
+  的 `encodeMaterialization`），满足读取侧 `assertZstdHeaderFrame`（同文件 `:74-79`）：
+  独立可解码的第一帧恰为一行 header。携搬路径（header 未变 → 原字节复制）与未压缩路径
+  不变。回归钉 = `tests/huaanwork-migration/sessions.spec.ts`「re-minted session frame
+  layout」两条（内容会话：第一帧恰一行且以 `\n` 结尾 + 拼接明文无数据丢失；header-only：
+  单帧无空尾帧）；RED（`task-7.2-fix-red-pin.log`，未修树在 `assertZstdHeaderFrame` 镜像
+  判据处红）→ GREEN（`task-7.2-fix-green-pin.log`，迁移目录 137/137）。全迁移模块扫描
+  （`src/huaanwork-migration/*.ts`）：唯一 zstd 重编站点即本处（`sessions.ts`）；
+  `extras.ts`/`runs.ts` 为逐字节复制或纯文本行改写，无同类问题。
+- **harness 预置（发现 1，R-7.2-8）**：commit `4709e6ab95`。门控 spec 的 `seedSmokeTree`
+  预置两个状态：默认 profile 目录（产品自身 `createDesktopWebProfile`，即应用冷启动
+  `materializeDefaultDesktopProfile` 的同一路径）与该 profile 的 Setup Wizard 完成标记
+  （产品自身 `completeOrSkipDesktopSetupWizard` 写出的同一 v2 状态，版本字段与应用
+  `setupWizardVersions` 同源）。**披露**：全新 profile 的首启 wizard 是真实产品行为，
+  与迁移正交；夹具预标记完成态使 spec 无人值守可跑，未改任何产品行为。两者必须同在：
+  profile 目录若本次启动才出现，`main.ts` 会先 `clearDesktopProfileUsageHistory` 清掉
+  单独预置的标记。离线核验（`task-7.2-fix-seed-check.log`）：预置后
+  `desktopSetupWizardRequired === false` 且 `hasDesktopProfileUsageHistory === true`，
+  main.ts 的 wizard 门为 false（不阻塞）。
+- **制品重打包（R-7.2-9）**：`corepack yarn dist:mac-smoke` @ 23:12，MACSMOKE_EXIT=0
+  （`task-7.2-fix-rebuild.log`；打包产物 `lib/main.js` 中已核到修复函数与逻辑）。
+  新制品（`task-7.2-fix-artifact-hashes.txt`）：dmg
+  `4e03117c210fe7ab5895294f9017edd6ce3d7eafe2b5dd0ae1f4dcb26298095b`；app 二进制
+  `4f7513861419dc713ec1ec7f408b972ae59e4f9e7eb84bbd6ed68fe12fc2eb89`——均不同于
+  21:45 修复前制品（`09adf0e0…`/`e17a0031…`）。
+- **3× 无人值守全绿（R-7.2-10）**：canonical 命令（内容种子），run1/2/3 均 PASS
+  @ 23:15:13/23:15:39/23:15:44（`task-7.2-fix-gated-run{1,2,3}.log`，
+  GATED_RUN*_EXIT=0，测试体 2.6s/2.1s/2.1s；无 wizard 阻塞、宿主端口在窗口内如常应答；
+  每轮后 `pgrep` 无残留进程）。**即 Step 2 门「3 次连续干净全绿」达成**。
+- **门禁**：`corepack yarn check:desktop-variants` 绿（VARIANTS_EXIT=0，
+  `task-7.2-fix-gate-desktop-variants.log`）；根 `corepack yarn check` 绿
+  （ROOT_CHECK_EXIT=0，`task-7.2-fix-gate-root-check.log`）。
