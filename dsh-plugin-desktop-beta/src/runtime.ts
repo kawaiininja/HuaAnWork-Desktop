@@ -118,8 +118,9 @@ export interface DesktopUpdateAdapter {
   confirmDownload(version: string, channel?: DesktopReleaseChannel): Promise<boolean>
   /** Present the outcome of a user-triggered version check. */
   showManualCheckResult(result: UpdateCheckResult | null): Promise<void>
-  /** Download and hand one confirmed update to the platform installer. */
-  downloadAndOpen(version: string, signal: AbortSignal, channel?: DesktopReleaseChannel): Promise<void>
+  /** Download and hand one confirmed update to the platform installer; `expectedSha256` carries the
+   * channel record's per-platform pins (wire keys `mac`/`windows`), verified before the installer opens (D-M6-23). */
+  downloadAndOpen(version: string, signal: AbortSignal, channel?: DesktopReleaseChannel, expectedSha256?: Readonly<Record<string, string>>): Promise<void>
   /** Present a native status notification without blocking the Host tree. */
   notify(notification: DesktopNotification): void
 }

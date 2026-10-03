@@ -66,6 +66,7 @@ export type UpdateCheckResult = {
   readonly currentVersion: string
   /** Canonical latest stable version returned by the service. */
   readonly latestVersion: string
+  readonly sha256?: Readonly<Record<string, string>>
 }
 
 const SEMVER_PATTERN =
@@ -161,6 +162,7 @@ export async function checkForDesktopUpdate(
       : 'up-to-date',
     currentVersion: current.version,
     latestVersion: latest.version,
+    ...(latest.sha256 === undefined ? {} : { sha256: latest.sha256 }),
   }
 }
 
@@ -230,7 +232,10 @@ async function readLimitedBody(response: Response): Promise<string> {
   }
 }
 
-function parseVersionResponse(body: string, expectedChannel: DesktopReleaseChannel): ParsedSemVer | null {
+function parseVersionResponse(
+  body: string,
+  expectedChannel: DesktopReleaseChannel,
+): (ParsedSemVer & { readonly sha256?: Readonly<Record<string, string>> }) | null {
   let value: unknown
   try {
     value = JSON.parse(body)
@@ -240,7 +245,21 @@ function parseVersionResponse(body: string, expectedChannel: DesktopReleaseChann
   if (!isRecord(value) || typeof value.version !== 'string') return null
   if (expectedChannel === 'beta' && value.channel !== 'beta') return null
   if (value.channel !== undefined && value.channel !== expectedChannel) return null
-  return parseCanonicalChannelVersion(value.version, expectedChannel)
+
+  // Per-platform integrity pins (D-M6-23); absent on services that do not publish them.
+  let sha256: Record<string, string> | undefined
+  if (value.sha256 !== undefined) {
+    if (!isRecord(value.sha256)) return null
+    sha256 = {}
+    for (const [platform, hash] of Object.entries(value.sha256)) {
+      if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/u.test(hash)) return null
+      sha256[platform] = hash
+    }
+  }
+
+  const parsed = parseCanonicalChannelVersion(value.version, expectedChannel)
+  if (parsed === null) return null
+  return sha256 === undefined ? parsed : Object.assign(parsed, { sha256 })
 }
 
 function parseCanonicalChannelVersion(

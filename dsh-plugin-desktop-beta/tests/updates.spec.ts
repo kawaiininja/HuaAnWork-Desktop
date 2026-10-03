@@ -58,7 +58,7 @@ async function createHarness(options: {
   readonly currentVersion?: string
   readonly confirmDownload?: (version: string, channel?: 'stable' | 'beta') => Promise<boolean>
   readonly showManualCheckResult?: (result: UpdateCheckResult | null) => Promise<void>
-  readonly downloadAndOpen?: (version: string, signal: AbortSignal, channel?: 'stable' | 'beta') => Promise<void>
+  readonly downloadAndOpen?: (version: string, signal: AbortSignal, channel?: 'stable' | 'beta', expectedSha256?: Readonly<Record<string, string>>) => Promise<void>
   readonly notify?: (notification: DesktopNotification) => void
   readonly locale?: DesktopRuntime['locale']
   readonly state?: string
@@ -169,6 +169,7 @@ describe('desktop update Host plugin', () => {
       '2.0.4',
       expect.any(AbortSignal),
       'stable',
+      undefined,
     )
     const channels = request.mock.calls.map(([, init]) => new Headers(init.headers).get(DESKTOP_RELEASE_CHANNEL_HEADER))
     expect(channels).toContain('beta')
@@ -340,6 +341,23 @@ describe('desktop update Host plugin', () => {
     await vi.waitFor(() => { expect(harness.tray.label()).toBe('DSH Desktop 2.1.0 Available') })
     expect(harness.notifications).toEqual([])
     expect(harness.tray.label()).toBe('DSH Desktop 2.1.0 Available')
+  })
+
+  it('threads the channel record sha256 pins into the adapter download (D-M6-23)', async () => {
+    const sha256 = { mac: 'a'.repeat(64), windows: 'b'.repeat(64) }
+    const harness = await createHarness({
+      packaged: false,
+      request: async () => Response.json({ version: '2.1.0', sha256 }),
+      confirmDownload: async () => true,
+    })
+
+    await harness.tray.invoke()
+    expect(harness.downloadAndOpen).toHaveBeenCalledWith(
+      '2.1.0',
+      expect.any(AbortSignal),
+      undefined,
+      sha256,
+    )
   })
 
   it('treats a manual available-version selection as a fresh confirmation', async () => {

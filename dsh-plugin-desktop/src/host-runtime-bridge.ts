@@ -49,7 +49,7 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Desk
       },
       confirmDownload: (version, channel) => send('update:confirmDownload', [version, channel]),
       showManualCheckResult: result => send('update:showManualCheckResult', [result]),
-      downloadAndOpen: (version, signal, channel) => send('update:downloadAndOpen', [version, channel], signal),
+      downloadAndOpen: (version, signal, channel, expectedSha256) => send('update:downloadAndOpen', [version, channel, expectedSha256], signal),
       notify: notification => { void send('update:notify', [notification]) },
     },
     schedule(spec) {
@@ -169,7 +169,7 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): () => 
   })
   handle('update:confirmDownload', ([version, channel]) => runtime.updates.confirmDownload(version, channel))
   handle('update:showManualCheckResult', ([result]) => runtime.updates.showManualCheckResult(result))
-  handle('update:downloadAndOpen', ([version, channel], signal) => runtime.updates.downloadAndOpen(version, signal, channel))
+  handle('update:downloadAndOpen', ([version, channel, expectedSha256], signal) => runtime.updates.downloadAndOpen(version, signal, channel, expectedSha256))
   handle('update:notify', ([value]) => runtime.updates.notify(value))
   return async () => {
     trays.forEach(tray => tray.dispose()); trays.clear()

@@ -154,7 +154,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       request: (url, init) => net.fetch(url, init),
       confirmDownload: (version, channel) => this.confirmUpdateDownload(version, channel),
       showManualCheckResult: result => this.showManualUpdateCheckResult(result),
-      downloadAndOpen: (version, signal, channel) => this.downloadAndOpenUpdate(version, signal, channel),
+      downloadAndOpen: (version, signal, channel, expectedSha256) => this.downloadAndOpenUpdate(version, signal, channel, expectedSha256),
       notify: notification => { this.showNotification(notification) },
     }
   }
@@ -748,6 +748,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     version: string,
     signal: AbortSignal,
     channel: DesktopReleaseChannel = 'stable',
+    expectedSha256?: Readonly<Record<string, string>>,
   ): Promise<void> {
     const copy = desktopNativeCopy(this.currentLocale)
     const platform = this.platformStrategy.updateDownloadPlatform
@@ -757,10 +758,13 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const destinationPath = await this.chooseUpdateDestination(version, channel)
     if (destinationPath === undefined) return
     signal.throwIfAborted()
+    // The wire pins are keyed mac/windows (ArtifactPlatform); map the download platform.
+    const platformSha256 = expectedSha256?.[platform === 'darwin' ? 'mac' : 'windows']
     const artifactPath = await downloadDesktopUpdate({
       platform,
       version,
       ...(channel === 'stable' ? {} : { channel }),
+      ...(platformSha256 === undefined ? {} : { expectedSha256: platformSha256 }),
       destinationPath,
       request: (url, init) => net.fetch(url, init),
       signal,

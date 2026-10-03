@@ -2581,6 +2581,48 @@ describe('Electron desktop runtime', () => {
     await release()
   })
 
+  it('verifies the downloaded installer against the channel record sha256 pin (D-M6-23)', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+
+    updater.download.mockResolvedValueOnce('/tmp/DSH-Desktop-2.1.0-mac.dmg')
+    electron.dialog.showSaveDialog.mockResolvedValueOnce({
+      canceled: false,
+      filePath: '/tmp/Downloads/DSH-Desktop-2.1.0-mac.dmg',
+    })
+    const sha256 = { mac: 'a'.repeat(64), windows: 'b'.repeat(64) }
+    const controller = new AbortController()
+    await runtime.updates.downloadAndOpen('2.1.0', controller.signal, undefined, sha256)
+    expect(updater.download).toHaveBeenCalledWith({
+      platform: 'darwin',
+      version: '2.1.0',
+      destinationPath: '/tmp/Downloads/DSH-Desktop-2.1.0-mac.dmg',
+      request: expect.any(Function),
+      signal: controller.signal,
+      expectedSha256: sha256.mac,
+    })
+
+    // A record without the platform's key keeps the honest-downgrade path (no pin passed).
+    updater.download.mockResolvedValueOnce('/tmp/DSH-Desktop-2.1.0-mac.dmg')
+    electron.dialog.showSaveDialog.mockResolvedValueOnce({
+      canceled: false,
+      filePath: '/tmp/Downloads/DSH-Desktop-2.1.0-mac.dmg',
+    })
+    await runtime.updates.downloadAndOpen('2.1.0', new AbortController().signal, undefined, { windows: 'b'.repeat(64) })
+    expect(updater.download).toHaveBeenLastCalledWith({
+      platform: 'darwin',
+      version: '2.1.0',
+      destinationPath: '/tmp/Downloads/DSH-Desktop-2.1.0-mac.dmg',
+      request: expect.any(Function),
+      signal: expect.any(AbortSignal),
+    })
+
+    await release()
+  })
+
   it('starts the downloaded Windows installer visibly before requesting orderly exit', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
     updater.download.mockResolvedValueOnce('C:\\Updates\\DSH-Desktop-2.1.0-windows.exe')

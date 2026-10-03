@@ -253,10 +253,13 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
       this.downloadingVersion = version
       this.registration.refresh()
       try {
+        // D-M6-23: thread the confirmed channel record's per-platform sha256 pins into the
+        // download; absent pins keep the honest-downgrade (integrity-unverified) warning path.
+        const expectedSha256 = confirmedResult?.sha256
         if (this.options.adapter.releaseChannel === undefined && channel === 'stable') {
-          await this.options.adapter.downloadAndOpen(version, controller.signal)
+          await this.options.adapter.downloadAndOpen(version, controller.signal, undefined, expectedSha256)
         } else {
-          await this.options.adapter.downloadAndOpen(version, controller.signal, channel)
+          await this.options.adapter.downloadAndOpen(version, controller.signal, channel, expectedSha256)
         }
       } catch {
         // Network, filesystem, and installer-opening failures are deliberately silent.
