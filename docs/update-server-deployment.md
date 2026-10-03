@@ -56,7 +56,7 @@ update-server: listening on 8790 for http://update.intranet.lan:8790
 | --- | --- | --- |
 | `UPDATE_SERVER_PORT` | 监听 TCP 端口 | 必需；整数 1..65535 |
 | `UPDATE_SERVER_DATA_DIR` | 发布数据目录（绝对路径）。服务端只读，**从不创建或写入**它；`channels/<channel>.json` 与 `artifacts/` 都由运营者放入 | 必需；非空绝对路径 |
-| `UPDATE_SERVER_PUBLIC_ORIGIN` | 本服务对外 origin，如 `http://update.intranet.lan:8790` | 必需；http/https、无 userinfo/path/query/fragment。内网**允许 plain http**——制品完整性由客户端的 sha256 比对保证（D-M6-23），不靠 TLS |
+| `UPDATE_SERVER_PUBLIC_ORIGIN` | 本服务对外 origin，如 `http://update.intranet.lan:8790` | 必需；http/https、无 userinfo/path/query/fragment。内网**允许 plain http**——制品完整性由客户端的 sha256 比对保证（D-M6-23），不靠 TLS（**2026-10-03 订正**：该控制在本句登记时**尚未接线**——生产调用方从未传入 `expectedSha256`，客户端恒走 `integrity-unverified` 降级，本句当时不成立；M7 评估 D1 发现后于 fork 提交 `246bd2a59d` 完成真实接线，自此本句成立） |
 | `UPDATE_SERVER_ALLOWED_HOSTS` | `Host` 头白名单（逗号分隔；条目可带端口，不带端口则覆盖该主机任意端口） | 可选；缺省由 `UPDATE_SERVER_PUBLIC_ORIGIN` 的 host 派生。**其他 Host 一律 403 `host-not-allowed`** |
 | `UPDATE_SERVER_REQUEST_TIMEOUT_MS` | request / headers / socket 不活跃超时（毫秒） | 可选；默认 `30000`，必须 > 0（P8 形态：绝不使用 Node 的 0 = 无界超时） |
 | `UPDATE_SERVER_LISTEN_HOST` | 监听地址 | 可选；默认 `0.0.0.0`（内网必须可达） |

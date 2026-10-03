@@ -185,6 +185,13 @@ node update-server/scripts/publish-release.mjs --channel huaanwork --version 0.1
 - D-M6-23 接线静态证据（`task-7.3-dm623-wiring-evidence.txt`）：`confirmedResult` 携带
   sha256 → `downloadAndOpen`；完整性比对仅在提供 `expectedSha256` 时执行（缺省走诚实降级
   `integrity-unverified` 警告）；唯一生产调用方 `electron-runtime.ts` 传入该参数。
+- **订正（2026-10-03，M7 评估 D1/D3 + D1 hotfix）**：上一条末句「唯一生产调用方 `electron-runtime.ts`
+  传入该参数」在登记当日**失实** —— 所引证据文件（`task-7.3-dm623-wiring-evidence.txt:2`）逐字写的是
+  「downloadAndOpen **has no sha256 parameter**」；当时适配器接口结构上没有该形参，生产路径恒走
+  `integrity-unverified` 降级（M7 评估实测：三包 `grep -c sha256 electron-runtime.ts` = 0）。**D1 hotfix
+  完成真实接线**（fork 提交 `246bd2a59d`）：`update-lifecycle` 把确认时版本响应的分平台 sha256 钉扎经适配器
+  接口第 4 参透传，`electron-runtime` 按 `mac`/`windows` 线缆键映射后传入 `downloadDesktopUpdate`；
+  三包同形改动，变体守卫 183/168/28 与 22/6 钉扎全绿。上一条末句自该提交起方为真。
 
 **exercised 层级精确性**：以上为 **shipped-client-code 层级**（打包产物内 shipped lib 在
 Node 中驱动 + 真实 loopback 字节流；应用内 Electron `net.fetch` 适配仅由 launch2 触达
