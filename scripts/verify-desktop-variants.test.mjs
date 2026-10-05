@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { isOneSided, filterDirOneSided, verifyDesktopVariants, PAIRS } from './verify-desktop-variants.mjs'
@@ -240,4 +240,45 @@ test('no allowedDifferences entry is commented out in either pair', () => {
   }
   assert.deepStrictEqual(offenders, [], `commented-out whitelist entries found:\n- ${offenders.join('\n- ')}`)
 })
+
+test('pins the stable↔beta baseline and enforces its one-sided scripts (M6 blindspot)', () => {
+  const pair = PAIRS.find(candidate => candidate.name === 'stable↔beta')
+  assert.ok(pair, 'the stable↔beta pair must exist')
+  assert.deepStrictEqual(pair.dirs, ['src', 'scripts'])
+
+  assert.strictEqual(
+    pair.allowedDifferences.length,
+    19,
+    `stable↔beta allowedDifferences must hold exactly 19 entries, found ${String(pair.allowedDifferences.length)}`,
+  )
+
+  const scriptsOneSided = [
+    'scripts/build-windows-nsis-ab.ts',
+    'scripts/generate-windows-app-icon.mjs',
+    'scripts/inspect-windows-installed-app.ts',
+    'scripts/probe-windows-packaged-runtime.ts',
+    'scripts/run-windows-nsis-ab.ps1',
+    'scripts/verify-nsis-ab-prepackaged.ts',
+    'scripts/windows-nsis-ab.ts',
+  ]
+  for (const entry of scriptsOneSided) {
+    assert.ok(
+      pair.allowedDifferences.includes(entry),
+      `${entry} must stay registered as an allowed difference`,
+    )
+  }
+
+  for (const entry of scriptsOneSided) {
+    const relative = entry.slice('scripts/'.length)
+    assert.ok(
+      !existsSync(resolve(import.meta.dirname, '..', pair.right, 'scripts', relative)),
+      `${entry} is a stable-only script; it must not appear in ${pair.right}/scripts/`,
+    )
+    assert.ok(
+      existsSync(resolve(import.meta.dirname, '..', pair.left, 'scripts', relative)),
+      `${entry} must exist in ${pair.left}/scripts/ (otherwise the slot is a zombie)`,
+    )
+  }
+})
+
 

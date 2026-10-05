@@ -33,7 +33,7 @@ export const PAIRS = [
     name: 'stable↔beta',
     left: 'dsh-plugin-desktop',
     right: 'dsh-plugin-desktop-beta',
-    dirs: ['src'],
+    dirs: ['src', 'scripts'],
     normalize: s => s
       .replaceAll('dsh-plugin-desktop-beta', 'dsh-plugin-desktop')
       .replaceAll('DSH Desktop Beta', 'DSH Desktop'),
@@ -49,6 +49,30 @@ export const PAIRS = [
       // follows that API; stable stays on 0.1.5-rc.2, where the field still exists.
       'profile.ts',
       'profile-manager.ts',
+      // M7 Task 1.3(M6 盲区):stable↔beta 的 scripts/ 自 M1 起完全无守卫覆盖,
+      // 实测 15 条漂移(8 differ + 7 only-in-stable),此前无登记、无审阅记录。
+      // 全部登记为 allowedDifferences 而非 oneSidedPrefixes:后者的语义是「只存在于
+      // right 侧」(:180-181),而本对的 right 是 beta、这 7 个文件只在 stable(left),
+      // 用前缀会让守卫立刻变红。「beta 侧不得长出同名文件」这层强制改由
+      // verify-desktop-variants.test.mjs 的 STABLE_BETA_SCRIPTS_ONE_SIDED 断言承担。
+      // 口径:多目录配对一律带 scripts/ 前缀(见 :68-69 的语义说明),裸文件名会同时
+      // 命中 src/ 与 scripts/ 两个桶。既有 4 条保持裸文件名不动(它们是 src-only 名,
+      // 且 scripts/ 下无同名文件 —— 本 Task 的 Step 4 会机械核验这一点)。
+      'scripts/generate-tray-icons.mjs',
+      'scripts/mac-universal.ts',
+      'scripts/probe-windows-installer-quit.ps1',
+      'scripts/verify-loader-boot.mjs',
+      'scripts/verify-packaged-runtime.ts',
+      'scripts/verify-profile-boot.mjs',
+      'scripts/verify-win-installer.ts',
+      'scripts/verify-win-portable.ts',
+      'scripts/build-windows-nsis-ab.ts',
+      'scripts/generate-windows-app-icon.mjs',
+      'scripts/inspect-windows-installed-app.ts',
+      'scripts/probe-windows-packaged-runtime.ts',
+      'scripts/run-windows-nsis-ab.ps1',
+      'scripts/verify-nsis-ab-prepackaged.ts',
+      'scripts/windows-nsis-ab.ts',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [],
