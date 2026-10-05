@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 
 import { createDesktopSettingsApi, type DesktopMarketProvider } from "../client/desktop-settings-api.ts";
 import type { MarketErrorPresentation } from "./logic/marketErrors.ts";
-import type { MarketLoadState, MarketStateView } from "./logic/market.ts";
+import { RESTART_UNAVAILABLE_NOTICE, type MarketLoadState, type MarketStateView } from "./logic/market.ts";
+import { resolveRestartAvailability } from "./logic/restartAvailability.ts";
 
 /**
  * 市场来源面板（M6 Task 5.1，债务 N-1）：把 provider 开关（disabled ↔
@@ -74,6 +75,7 @@ export default function MarketSourcePanel({
   // 只在真的需要重启时出现——选择与当前生效来源一致时不得谎报「正在重启」。
   const [applyRestart, setApplyRestart] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
+  const [desktopSettingsReachable, setDesktopSettingsReachable] = useState(false);
 
   const readProvider = useCallback(async () => {
     setProviderPhase("loading");
@@ -83,9 +85,11 @@ export default function MarketSourcePanel({
         requested: view.market.requested,
         effective: view.market.effective,
       });
+      setDesktopSettingsReachable(true);
       setProviderPhase("ready");
     } catch {
       // 读不到当前 provider ⇒ 不呈现可能不成立的开关（fail-closed），诚实告知。
+      setDesktopSettingsReachable(false);
       setProvider(null);
       setProviderPhase("error");
     }
@@ -94,6 +98,15 @@ export default function MarketSourcePanel({
   useEffect(() => {
     void readProvider();
   }, [readProvider]);
+
+  const requestDesktopRestart = async () => {
+    try {
+      await createDesktopSettingsApi().restart();
+    } catch {
+      // 选择已保存，不得谎报为「未保存」；诚实告知需手动重启。
+      setApplyError("选择已保存，但重启请求未成功；请手动退出并重新打开应用以生效。");
+    }
+  };
 
   function openConfirm(target: DesktopMarketProvider): void {
     setApplyPhase("idle");
@@ -128,12 +141,7 @@ export default function MarketSourcePanel({
         // bridge 等价直调）。controller.selectMarket 已在应答后自行 scheduleRestart，
         // 而 ElectronDesktopRuntime.requestRestart 对在飞请求去重（restartRequest 字段）
         // ⇒ 两次调用合并为同一次重启确认，不新增 route。
-        try {
-          await api.restart();
-        } catch {
-          // 选择已保存，不得谎报为「未保存」；诚实告知需手动重启。
-          setApplyError("选择已保存，但重启请求未成功；请手动退出并重新打开应用以生效。");
-        }
+        await requestDesktopRestart();
       }
     } catch (error) {
       setApplyPhase("failed");
@@ -217,9 +225,26 @@ export default function MarketSourcePanel({
               })}
             </div>
             {provider.requested !== provider.effective ? (
-              <p className="hint" role="status">
-                已选择「{currentLabel}」，重启应用后生效；取消重启不会撤销该选择，下次启动应用时照常生效。
-              </p>
+              <div className="banner market-pending" role="status" data-testid="restart-pending-banner">
+                <p className="hint">
+                  已选择「{currentLabel}」，重启应用后生效；取消重启不会撤销该选择，下次启动应用时照常生效。
+                </p>
+                {/* 常备入口(M1):切源流的取消不可观测(/api/desktop/restart 恒 202 先应答、
+                    confirmAndRestart 取消即静默 resolve void),故无法「取消后才出现」——
+                    只能在 requested !== effective 期间常备。判据走 Task 2.1 的共享判定:
+                    read() 在 :82-85 已成功 ⇒ desktopSettingsController 在位 ⇒ 桌面
+                    restart route 已注册 ⇒ 按钮不是死按钮。 */}
+                {resolveRestartAvailability({
+                  marketRestartAction: false,
+                  desktopRestartRoute: desktopSettingsReachable,
+                }).canRestart ? (
+                  <button type="button" className="btn primary" onClick={() => void requestDesktopRestart()}>
+                    立即重启
+                  </button>
+                ) : (
+                  <p className="hint">{RESTART_UNAVAILABLE_NOTICE}</p>
+                )}
+              </div>
             ) : null}
           </>
         ) : null}
