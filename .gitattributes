@@ -1,3 +1,9 @@
 * text=auto eol=lf
 patches/*.patch text eol=lf whitespace=-space-before-tab,-blank-at-eol
 .yarn/patches/*.patch text eol=lf whitespace=-space-before-tab,-blank-at-eol
+
+# 安装器形状 fixture 是刻意构造的二进制残次品;其中 windows-not-mz.exe 只有 256 字节且
+# 内容大部分可打印,落在 git 的二进制启发式阈值之下被当成文本,于是 `git diff --check`
+# 会报 trailing whitespace 并让 CI 的 changes job 退出 2(D2)。目录级声明即可,不用全局
+# `*.exe`/`*.dmg`——那两行今天完全冗余(全仓这 9 个文件都在此目录内)且作用域无界。
+update-server/tests/fixtures/installer-shapes/** binary
