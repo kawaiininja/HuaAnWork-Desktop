@@ -28,7 +28,7 @@ export function filterDirOneSided(oneSidedPaths, dir, dirs = [dir]) {
     .map((p) => (p.startsWith(`${dir}/`) ? p.slice(dir.length + 1) : p))
 }
 
-const PAIRS = [
+export const PAIRS = [
   {
     name: 'stable↔beta',
     left: 'dsh-plugin-desktop',

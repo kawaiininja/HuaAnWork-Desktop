@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { isOneSided, filterDirOneSided, verifyDesktopVariants } from './verify-desktop-variants.mjs'
+import { isOneSided, filterDirOneSided, verifyDesktopVariants, PAIRS } from './verify-desktop-variants.mjs'
 
 test('isOneSided: 支持 Set 和 Array 类型的 oneSidedPaths', () => {
   const path = 'src/client-huaanwork/api.ts'
@@ -141,40 +141,103 @@ test('verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位', 
 })
 
 test('pins the beta↔huaanwork divergence budget so growth is always explicit', () => {
-  const source = readFileSync(resolve(import.meta.dirname, 'verify-desktop-variants.mjs'), 'utf8')
-  const pairStart = source.indexOf("name: 'beta↔huaanwork'")
-  assert.notStrictEqual(pairStart, -1, 'the beta↔huaanwork pair must exist')
-  const pair = source.slice(pairStart)
+  const pair = PAIRS.find(candidate => candidate.name === 'beta↔huaanwork')
+  assert.ok(pair, 'the beta↔huaanwork pair must exist')
 
-  // allowedDifferences:恰好 22。正则要求 src/ 或 scripts/ 前缀,故 stable↔beta
-  // 那对的裸文件名条目('product-identity.ts' 等)不会被误计——但 pairStart 的
-  // 切片本身也已把它们排除在外。
-  const allowedStart = pair.indexOf('allowedDifferences: [')
-  const allowedEnd = pair.indexOf('oneSidedPrefixes: [')
-  assert.ok(allowedStart !== -1 && allowedEnd > allowedStart, 'both budget blocks must exist in order')
-  const entries = new Set(
-    [...pair.slice(allowedStart, allowedEnd).matchAll(/'(?:src|scripts)\/[^']+'/gu)].map(m => m[0]),
+  assert.strictEqual(
+    pair.allowedDifferences.length,
+    22,
+    `beta↔huaanwork allowedDifferences must hold exactly 22 entries, found ${String(pair.allowedDifferences.length)}`,
   )
-  assert.strictEqual(entries.size, 22, `allowedDifferences must hold exactly 22 entries, found ${String(entries.size)}`)
+  assert.strictEqual(
+    new Set(pair.allowedDifferences).size,
+    22,
+    'beta↔huaanwork allowedDifferences must not contain duplicates',
+  )
+  assert.deepStrictEqual(pair.oneSidedPrefixes, [
+    'src/client-huaanwork/',
+    'src/huaanwork-host/',
+    'src/huaanwork-guardrails/',
+    'src/huaanwork-migration/',
+    'scripts/gen-',
+    'scripts/huaanwork-',
+  ])
 
-  // 负向钉扎:profile-channel-admission.ts 不得占额。它的和解已下沉到 profile-checkpoint.ts
-  // (已在册 #18),该文件必须保持三包逐字节相同。守卫「允许差异而非要求差异」,故超额
-  // 预登记不会报红——只能靠这条负例拦住僵尸额度回潮(Global Constraint 2)。
   assert.ok(
-    !entries.has("'src/profile-channel-admission.ts'"),
+    !pair.allowedDifferences.includes('src/profile-channel-admission.ts'),
     'profile-channel-admission.ts must not hold a whitelist slot; the injection design was voided on 2026-09-28',
   )
 
-  // oneSidedPrefixes:恰好 6,且顺序固定(顺序是既有约定,打乱会让 diff 噪音掩盖真实增删)。
-  const prefixEnd = pair.indexOf(']', allowedEnd)
-  const prefixEntries = [...pair.slice(allowedEnd, prefixEnd).matchAll(/'[^']+'/gu)].map(m => m[0])
-  assert.deepStrictEqual(prefixEntries, [
-    "'src/client-huaanwork/'",
-    "'src/huaanwork-host/'",
-    "'src/huaanwork-guardrails/'",
-    "'src/huaanwork-migration/'",
-    "'scripts/gen-'",
-    "'scripts/huaanwork-'",
-  ])
+  for (const entry of pair.allowedDifferences) {
+    assert.match(
+      entry,
+      /^(?:src|scripts)\//u,
+      `beta↔huaanwork allowedDifferences entry must be dir-prefixed, found ${entry}`,
+    )
+  }
+
+  const source = readFileSync(resolve(import.meta.dirname, 'verify-desktop-variants.mjs'), 'utf8')
+  const pairStart = source.indexOf("name: 'beta↔huaanwork'")
+  assert.notStrictEqual(pairStart, -1, 'the beta↔huaanwork pair must exist in source')
+  const block = source.slice(pairStart, source.indexOf('oneSidedPrefixes: [', pairStart))
+  const commented = block
+    .split('\n')
+    .filter(line => /^\s*\/\/.*'(?:src|scripts)\//u.test(line))
+    .filter(line => !line.includes('allowedDifferences.has('))
+  assert.deepStrictEqual(
+    commented,
+    [],
+    `no allowedDifferences entry may be commented out; found:\n${commented.join('\n')}`,
+  )
+})
+
+test('zombie slot guard: every registered exemption is an active difference', () => {
+  const zombies = []
+
+  for (const pair of PAIRS) {
+    for (const [field, entries] of [
+      ['allowedDifferences', pair.allowedDifferences ?? []],
+      ['oneSidedPrefixes', pair.oneSidedPrefixes ?? []],
+    ]) {
+      entries.forEach((entry, index) => {
+        const mutated = PAIRS.map(candidate => {
+          if (candidate.name !== pair.name) return candidate
+          const next = { ...candidate }
+          next[field] = candidate[field].filter((_, position) => position !== index)
+          return next
+        })
+        let threw = false
+        try {
+          verifyDesktopVariants(mutated)
+        } catch {
+          threw = true
+        }
+        if (!threw) zombies.push(`[${pair.name}] ${field}[${String(index)}] = ${entry}`)
+      })
+    }
+  }
+
+  assert.deepStrictEqual(
+    zombies,
+    [],
+    `zombie whitelist slots detected (removing them keeps the guard green):\n- ${zombies.join('\n- ')}`,
+  )
+})
+
+test('no allowedDifferences entry is commented out in either pair', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'verify-desktop-variants.mjs'), 'utf8')
+  const offenders = []
+  for (const pair of PAIRS) {
+    const start = source.indexOf(`name: '${pair.name}'`)
+    assert.notStrictEqual(start, -1, `pair ${pair.name} must exist in source`)
+    const end = source.indexOf('oneSidedPrefixes: [', start)
+    const block = source.slice(start, end === -1 ? undefined : end)
+    for (const line of block.split('\n')) {
+      if (/^\s*\/\/\s*'(?:src\/|scripts\/)?[\w.@/*-]+\.(?:ts|tsx|mjs|js|ps1)'/u.test(line)) {
+        offenders.push(`[${pair.name}] ${line.trim()}`)
+      }
+    }
+  }
+  assert.deepStrictEqual(offenders, [], `commented-out whitelist entries found:\n- ${offenders.join('\n- ')}`)
 })
 
