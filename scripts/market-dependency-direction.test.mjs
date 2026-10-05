@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import {
   verifyDesktopDependencyDirection,
@@ -175,4 +175,32 @@ test('keeps the registry-bypass shape guard green on the real tracked tree (Task
   assert.throws(() => verifyMarketInstallPathHasNoRegistryBypass(injected(
     'await runExternalMarketPluginInstall(ctx, spec)\n',
   )), /must not bypass the signed manifest/u)
+})
+
+test('DESKTOP_SOURCE_ROOTS covers the fork-owned huaanwork workspaces (M14 blindspot B)', async () => {
+  const source = readFileSync(join(import.meta.dirname, 'market-dependency-direction.mjs'), 'utf8')
+  const block = source.slice(
+    source.indexOf('const DESKTOP_SOURCE_ROOTS = ['),
+    source.indexOf(']', source.indexOf('const DESKTOP_SOURCE_ROOTS = [')),
+  )
+  for (const root of [
+    'dsh-plugin-desktop/src',
+    'dsh-plugin-desktop-beta/src',
+    'dsh-plugin-huaanwork/src',
+    'packages/huaanwork-policy/src',
+    'packages/huaanwork-model/src',
+    'packages/huaanwork-git-tools/src',
+  ]) {
+    assert.ok(block.includes(`'${root}'`), `DESKTOP_SOURCE_ROOTS must include ${root}`)
+  }
+})
+
+test('the CLI states its own boundary: import specifiers only, not filesystem cross-reads', () => {
+  const out = execFileSync(process.execPath, ['scripts/verify-market-dependency-direction.mjs'], {
+    cwd: resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+  })
+  assert.match(out, /import specifiers only/u)
+  assert.match(out, /filesystem cross-reads/u)
+  assert.match(out, /expected-root-gate-scripts\.json/u)
 })

@@ -15,6 +15,13 @@ const DESKTOP_SOURCE_ROOTS = [
   'dsh-plugin-desktop/src',
   'dsh-plugin-desktop-beta/src',
   'dsh-plugin-huaanwork/src',
+  // M7 Task 1.4(M14 盲区 B):fork 自有的三个 workspace 此前完全不在受检根内,
+  // 可以 import 任何东西而不触发本守卫,而 root `test` 确实在跑它们。
+  // 注意这里扫的是**目录路径**,不是包名(包名是 @huaanwork/policy 等);
+  // 任何将来基于 import 说明符的规则必须改用 @huaanwork/ 前缀。
+  'packages/huaanwork-policy/src',
+  'packages/huaanwork-model/src',
+  'packages/huaanwork-git-tools/src',
 ]
 
 function normalizePath(path) {

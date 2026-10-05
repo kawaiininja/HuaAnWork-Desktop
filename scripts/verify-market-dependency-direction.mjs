@@ -5,5 +5,11 @@ const root = resolve(import.meta.dirname, '..')
 const result = verifyTrackedMarketDependencyDirection(root)
 
 process.stdout.write(
-  `verify-market-dependency-direction: ${String(result.fileCount)} tracked source files respect the market dependency direction (market sources independent of Desktop implementation; Desktop sources independent of market-server); ${String(result.wrapperFileCount)} market wrapper files carry no registry bypass of the signed manifest (no runExternalMarketPluginInstall / --registry / --prefer-offline)\n`,
+  `verify-market-dependency-direction: ${String(result.fileCount)} tracked source files respect the market dependency direction ` +
+  `(market sources independent of Desktop implementation; Desktop sources independent of market-server); ` +
+  `${String(result.wrapperFileCount)} market wrapper files carry no registry bypass of the signed manifest ` +
+  `(no runExternalMarketPluginInstall / --registry / --prefer-offline); ` +
+  `note: this guard verifies import specifiers only -- runtime filesystem cross-reads are not covered ` +
+  `(e.g. the three packages' tests/package.spec.ts readFileSync of scripts/expected-root-gate-scripts.json, ` +
+  `a registered upstream-sync exception) and are guarded separately\n`,
 )
