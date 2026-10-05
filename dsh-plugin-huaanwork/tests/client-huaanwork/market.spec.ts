@@ -19,6 +19,8 @@ import {
   MARKET_TABS,
   parseImmutableBundles,
   RESTART_CANCELLED_NOTICE,
+  RESTART_CANCELLED_PENDING_NOTICE,
+  RESTART_CANCELLED_REMOVED_NOTICE,
   shortSha256,
   type MarketInstallableItem,
   type MarketStateView,
@@ -171,6 +173,20 @@ test("RESTART_CANCELLED_NOTICE stays word-for-word equal to the host cancel noti
   const installed = source.match(/export const RESTART_CANCELLED_MESSAGES = \{[\s\S]*?installed: '([^']+)'/);
   assert.ok(installed, "plugins-host.ts 的 RESTART_CANCELLED_MESSAGES 中未找到 installed 取消文案字面量");
   assert.equal(installed[1], RESTART_CANCELLED_NOTICE);
+});
+
+test("RESTART_CANCELLED_REMOVED_NOTICE stays word-for-word equal to the host cancel notice (Task 2.2)", () => {
+  const source = readFileSync(resolve(import.meta.dirname, "../../src/huaanwork-host/plugins-host.ts"), "utf8");
+  const removed = source.match(/export const RESTART_CANCELLED_MESSAGES = \{[\s\S]*?removed: '([^']+)'/);
+  assert.ok(removed, "plugins-host.ts 的 RESTART_CANCELLED_MESSAGES 中未找到 removed 取消文案字面量");
+  assert.equal(removed[1], RESTART_CANCELLED_REMOVED_NOTICE);
+});
+
+test("RESTART_CANCELLED_PENDING_NOTICE stays word-for-word equal to the host cancel notice (Task 2.2)", () => {
+  const source = readFileSync(resolve(import.meta.dirname, "../../src/huaanwork-host/plugins-host.ts"), "utf8");
+  const pending = source.match(/export const RESTART_CANCELLED_MESSAGES = \{[\s\S]*?pending: '([^']+)'/);
+  assert.ok(pending, "plugins-host.ts 的 RESTART_CANCELLED_MESSAGES 中未找到 pending 取消文案字面量");
+  assert.equal(pending[1], RESTART_CANCELLED_PENDING_NOTICE);
 });
 
 // P26（M6 Task 6.10）：不可移除判定是纯函数。名单的唯一真相源是 host

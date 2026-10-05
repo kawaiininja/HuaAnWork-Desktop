@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/client-huaanwork/api.ts", () => ({
   rpcCall: vi.fn(),
@@ -63,17 +63,41 @@ function nonJsonResponse(status: number): Response {
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
+let lastRestartUrl: string | null = null;
+const restartRequestUrl = () => lastRestartUrl;
+
+type StubHandlers = Partial<Record<keyof typeof ROUTES, () => Response>> & {
+  desktopSettings?: () => Response;
+};
+
 /** 按 path 分派的 fetch stub：各 route 的应答由各测试注入（闭包可变）。 */
-function stubFetch(handlers: Partial<Record<keyof typeof ROUTES, () => Response>>) {
+function stubFetch(handlers: StubHandlers) {
   const calls: Record<string, number> = {};
   const requests: { path: string; init?: RequestInit }[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const path = String(input);
-      const key = (Object.keys(ROUTES) as Array<keyof typeof ROUTES>).find((name) => ROUTES[name] === path);
       calls[path] = (calls[path] ?? 0) + 1;
       requests.push({ path, init });
+
+      if (path === ROUTES.restart || path === ROUTES.requestRestart) {
+        lastRestartUrl = path;
+      }
+
+      if (path === ROUTES.settings) {
+        if (handlers.desktopSettings !== undefined) return handlers.desktopSettings();
+        if (handlers.settings !== undefined) return handlers.settings();
+        return nonJsonResponse(404);
+      }
+
+      if (path === ROUTES.restart) {
+        if (handlers.restart !== undefined) return handlers.restart();
+        if (handlers.desktopSettings !== undefined) return jsonResponse(200, { accepted: true });
+        return nonJsonResponse(404);
+      }
+
+      const key = (Object.keys(ROUTES) as Array<keyof typeof ROUTES>).find((name) => ROUTES[name] === path);
       if (key !== undefined && handlers[key] !== undefined) return handlers[key]!();
       throw new Error(`unexpected market fetch: ${path}`);
     }),
@@ -172,6 +196,10 @@ function tabButton(view: HTMLDivElement, label: string): HTMLButtonElement {
   if (button === undefined) throw new Error(`tab button not found: ${label}`);
   return button as HTMLButtonElement;
 }
+
+beforeEach(() => {
+  lastRestartUrl = null;
+});
 
 afterEach(async () => {
   await act(async () => {
@@ -1015,9 +1043,43 @@ describe("取消重启后的重启入口（M6 Task 5.3，P28 接线）", () => {
     expect(restartButton(view)).toBeDefined();
   });
 
-  it("does not offer a dead button when the host does not expose the restart action", async () => {
-    // provider 未启用 ⇒ 整组表外 route（含 request-restart）未注册、/state 404：
-    // desktopActions.requestRestart 不可得 ⇒ 只给诚实文案 + 手动重启指路，不给死按钮。
+  it("falls back to the desktop restart route when the market bundle is not registered (D5)", async () => {
+    vi.mocked(pickDirectoryDetailed).mockResolvedValue({ available: true, path: "/tmp/alpha.tgz" });
+    vi.mocked(rpcCall).mockResolvedValue({ bundles: ["alpha"], message: CANCEL_MESSAGE });
+    stubFetch({
+      state: () => nonJsonResponse(404),
+      catalog: () => nonJsonResponse(404),
+      installable: () => nonJsonResponse(404),
+      installations: () => nonJsonResponse(404),
+      desktopSettings: () =>
+        jsonResponse(200, desktopSettingsBody({ requested: "disabled", effective: "disabled", legacyDefaulted: false })),
+      restart: () => jsonResponse(200, { accepted: true }),
+    });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "本地安装").click();
+    });
+    await act(async () => {
+      buttonByText(view, "浏览目录…").click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="本地安装确认"]') as HTMLDivElement;
+    await act(async () => {
+      buttonByText(dialog, "安装").click();
+    });
+
+    const banner = pendingBanner(view);
+    expect(banner.textContent).toContain("已写入清单，下次启动时生效");
+    const button = restartButton(banner);
+    expect(button).toBeDefined();
+
+    await act(async () => {
+      button!.click();
+    });
+    expect(restartRequestUrl()).toBe(ROUTES.restart);
+  });
+
+  it("gives honest manual-restart copy only when both restart channels are gone", async () => {
     vi.mocked(pickDirectoryDetailed).mockResolvedValue({ available: true, path: "/tmp/alpha.tgz" });
     vi.mocked(rpcCall).mockResolvedValue({ bundles: ["alpha"], message: CANCEL_MESSAGE });
     stubFetch({
@@ -1042,7 +1104,33 @@ describe("取消重启后的重启入口（M6 Task 5.3，P28 接线）", () => {
     const banner = pendingBanner(view);
     expect(banner.textContent).toContain("已写入清单，下次启动时生效");
     expect(restartButton(banner)).toBeUndefined();
-    expect(banner.textContent).toContain("手动退出");
+    expect(banner.textContent).toContain("本次会话未提供应用内重启入口；请手动退出并重新打开应用以生效。");
+  });
+
+  it("contextualises the banner notice for a cancelled remove flow (M1)", async () => {
+    vi.mocked(rpcCall).mockResolvedValue({
+      bundles: ["@deepseek-ai/dsh-base"],
+      message: "已取消重启：插件已从清单移除，下次启动时不再加载",
+      restarting: false,
+    });
+    stubFetch({
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      installations: () => jsonResponse(200, { bundles: ["alpha"], immutable: [] }),
+    });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "已安装").click();
+    });
+    const removeBtn = buttonByText(view, "移除");
+    await act(async () => {
+      removeBtn.click();
+    });
+
+    const banner = pendingBanner(view);
+    expect(banner.textContent).toContain("已取消重启：插件已从清单移除，下次启动时不再加载");
+    expect(restartButton(banner)).toBeDefined();
   });
 });
 

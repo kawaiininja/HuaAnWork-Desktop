@@ -149,6 +149,10 @@ export function immutableRemoveReason(immutableNames: readonly string[], name: s
  */
 export const RESTART_CANCELLED_NOTICE = "已取消重启：插件已写入清单，下次启动时生效";
 
+export const RESTART_CANCELLED_REMOVED_NOTICE = "已取消重启：插件已从清单移除，下次启动时不再加载";
+export const RESTART_CANCELLED_PENDING_NOTICE = "已取消重启：变更已保存，下次启动时生效";
+export const RESTART_UNAVAILABLE_NOTICE = "本次会话未提供应用内重启入口；请手动退出并重新打开应用以生效。";
+
 /**
  * 插件变更链的应答是否留下「重启仍待用户触发」的状态（P28，M6 Task 5.3）。
  *

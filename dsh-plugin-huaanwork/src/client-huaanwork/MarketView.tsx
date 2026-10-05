@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
+import { createDesktopSettingsApi } from "../client/desktop-settings-api.ts";
 import { rpcCall, pickDirectoryDetailed } from "./api.ts";
 import { PLUGIN_APPLY_FAIL, PLUGIN_CONFIRM } from "./Settings.tsx";
 import {
@@ -17,6 +18,8 @@ import {
   MARKET_TABS,
   parseImmutableBundles,
   RESTART_CANCELLED_NOTICE,
+  RESTART_CANCELLED_REMOVED_NOTICE,
+  RESTART_UNAVAILABLE_NOTICE,
   restartPending,
   shortSha256,
   type MarketCatalogView,
@@ -30,6 +33,7 @@ import {
   type MarketTab,
 } from "./logic/market.ts";
 import { presentMarketError, type MarketErrorPresentation } from "./logic/marketErrors.ts";
+import { resolveRestartAvailability } from "./logic/restartAvailability.ts";
 import MarketSourcePanel, { ErrorPanel } from "./MarketSourcePanel.tsx";
 
 /**
@@ -154,10 +158,12 @@ export default function MarketView() {
   const [localConfirming, setLocalConfirming] = useState<string | null>(null);
   const [localBusy, setLocalBusy] = useState(false);
 
-  // 待生效变更（P28，M6 Task 5.3）：安装链取消重启 ⇒ 清单已写入而应用未重启。
+  // 待生效变更（P28，M6 Task 5.3；M1/D5 Task 2.2）：安装/卸载链取消重启 ⇒ 清单已变更而应用未重启。
   // 此前该状态只能体现为一句通知，用户没有任何界面手段触发重启（只能自己退出
   // 应用）；现在置位后由页面级条给出「立即重启」与 §14 第 33 条诚实文案。
   const [pendingRestart, setPendingRestart] = useState(false);
+  const [pendingRestartContext, setPendingRestartContext] = useState<"install" | "remove" | null>(null);
+  const [desktopSettingsReachable, setDesktopSettingsReachable] = useState(false);
   const [restartRequesting, setRestartRequesting] = useState(false);
 
   const loadCatalogSide = useCallback(async () => {
@@ -208,6 +214,15 @@ export default function MarketView() {
         if (!alive) return;
         setStateError(presentMarketError(error));
         setStateLoad("error");
+      }
+    })();
+    void (async () => {
+      try {
+        await createDesktopSettingsApi().read();
+        if (!alive) return;
+        setDesktopSettingsReachable(true);
+      } catch {
+        // 桌面通道探测失败时静默忽略（不可达，回落至 market action 或 none）
       }
     })();
     void loadCatalogSide();
@@ -291,6 +306,7 @@ export default function MarketView() {
         // 入口（诚实文案由客户端持有：route 的取消句是无增/删语境的中立句，见
         // logic/market.ts 的 RESTART_CANCELLED_NOTICE）。
         setPendingRestart(true);
+        setPendingRestartContext("install");
       } else {
         // 确认路径应用随即 relaunch。
         notify(result.message ?? "安装完成，正在重启…");
@@ -328,10 +344,15 @@ export default function MarketView() {
   async function removeBundle(name: string) {
     setNotice(null);
     try {
-      const listed = await rpcCall<{ bundles?: string[]; message?: string }>("plugin.remove", { name });
+      const listed = await rpcCall<{ bundles?: string[]; message?: string; restarting?: boolean }>("plugin.remove", { name });
       setBundles(Array.isArray(listed.bundles) ? listed.bundles : []);
       setInstallationsLoad("ready");
-      if (listed.message) notify(listed.message);
+      if (restartPending(listed)) {
+        setPendingRestart(true);
+        setPendingRestartContext("remove");
+      } else if (listed.message) {
+        notify(listed.message);
+      }
       await loadCatalogSide();
     } catch (error) {
       notify(`移除失败：${error instanceof Error ? error.message : String(error)}`, true);
@@ -376,6 +397,7 @@ export default function MarketView() {
       setInstallationsLoad("ready");
       if (restartPending(listed)) {
         setPendingRestart(true);
+        setPendingRestartContext("install");
       } else {
         notify(listed.message ?? "插件已安装");
       }
@@ -398,11 +420,14 @@ export default function MarketView() {
   // P27：已安装列表的三态文案（null = 渲染列表）。installed 与 local 两个页签
   // 共用同一份，避免两处空态口径分叉。
   const installedEmptyMessage = describeInstalledEmptyMessage(installationsLoad, bundles.length);
-  // 待生效入口的动作可用性（P28 前半：消费 /state 的 `desktopActions.requestRestart`）。
-  // 该字段与表外 request-restart route 同属 huaanwork-market bundle：字段为 false、
-  // 或 state 读不到（provider 未启用时整组表外 route 未注册）时，按钮必然打到不存在
-  // 的 route ⇒ 只在 host 明示可用时呈现按钮，否则留诚实文案并指路手动重启。
-  const restartActionAvailable = state !== null && state.desktopActions.requestRestart;
+  // 待生效入口的动作可用性（M1/D5：消费共享判定 resolveRestartAvailability）。
+  // 优先表外 request-restart route，若 market bundle 未注册则回落至桌面设置重启 route；
+  // 仅在两条通道均不可达时诚实告知手动重启。
+  const marketRestartAction = state !== null && state.desktopActions.requestRestart;
+  const restartAvailability = resolveRestartAvailability({
+    marketRestartAction,
+    desktopRestartRoute: desktopSettingsReachable,
+  });
 
   function panelBody(
     phase: MarketPanelPhase,
@@ -469,18 +494,36 @@ export default function MarketView() {
       {pendingRestart ? (
         // 页面级（非页签级）：待生效的是 profile 清单，与当前看哪个页签无关。
         <div className="banner market-pending" role="status">
-          <span className="market-pending-text">{RESTART_CANCELLED_NOTICE}</span>
-          {restartActionAvailable ? (
+          <span className="market-pending-text">
+            {pendingRestartContext === "remove" ? RESTART_CANCELLED_REMOVED_NOTICE : RESTART_CANCELLED_NOTICE}
+          </span>
+          {restartAvailability.canRestart ? (
             <button
               type="button"
               className="btn primary"
               disabled={restartRequesting}
-              onClick={() => void requestRestartNow()}
+              onClick={() => {
+                if (restartAvailability.route === "market-action") {
+                  void requestRestartNow();
+                } else if (restartAvailability.route === "desktop-route") {
+                  if (restartRequesting) return;
+                  setRestartRequesting(true);
+                  void createDesktopSettingsApi()
+                    .restart()
+                    .catch((error) => {
+                      const message = error instanceof Error ? error.message : String(error);
+                      notify(`重启请求失败：${message}`, true);
+                    })
+                    .finally(() => {
+                      setRestartRequesting(false);
+                    });
+                }
+              }}
             >
               {restartRequesting ? "重启中…" : "立即重启"}
             </button>
           ) : (
-            <span className="market-pending-hint">应用内重启当前不可用，请手动退出并重新打开应用。</span>
+            <span className="market-pending-hint">{RESTART_UNAVAILABLE_NOTICE}</span>
           )}
         </div>
       ) : null}
