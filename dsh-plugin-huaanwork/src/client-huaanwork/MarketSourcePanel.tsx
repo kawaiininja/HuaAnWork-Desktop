@@ -227,7 +227,7 @@ export default function MarketSourcePanel({
 
       <div className="market-source-disabled" aria-disabled="true">
         <p className="recent-title">添加更多市场源</p>
-        <p className="hint">多来源管理将在 M6 提供；当前版本仅支持内网单一受信任源。</p>
+        <p className="hint">当前版本仅支持内网单一受信任源；多来源扩展暂未开放（裁定 R-4：刻意不建）。</p>
       </div>
 
       {confirming !== null ? (
