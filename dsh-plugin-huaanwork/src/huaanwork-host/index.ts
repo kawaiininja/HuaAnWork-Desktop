@@ -26,6 +26,7 @@ export interface HuaanworkHostConfig {
   dshHome: string
   profileDir: string
   workspaceRoot: string
+  checkpointUserDataDir?: string
   /** profile 行 / profile-boot 桩可关调度器。测试缝是 HUAANWORK_AUTOMATION_TICK_MS,不是这个开关。 */
   automationScheduler?: {
     disabled?: boolean
@@ -36,12 +37,14 @@ export const Config: z<HuaanworkHostConfig> = z.object({
   dshHome: z.string(),
   profileDir: z.string(),
   workspaceRoot: z.string(),
+  checkpointUserDataDir: z.string(),
   automationScheduler: z.object({
     disabled: z.boolean().default(false),
   }).default({ disabled: false }),
 })
 
 export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<void> {
+  ctx.huaanworkCheckpointUserDataDir = config.checkpointUserDataDir ?? ''
   // generation 重启防循环:组合期已消费 pendingRoot,首个 effect 立即清除——
   // 此后 boot 失败时,下次组合回中立根,恢复窗口可达(spec §9)。
   ctx.effect(() => {

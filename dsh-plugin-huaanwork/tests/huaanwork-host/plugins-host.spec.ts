@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { DesktopPnpmHandle } from '../../src/pnpm.ts'
 import { withDesktopPnpmPolicy } from '../../src/pnpm-policy.ts'
-import { DesktopProfileCheckpoint, PROFILE_CHECKPOINT_USER_DATA_DIR_ENV } from '../../src/profile-checkpoint.ts'
+import { DesktopProfileCheckpoint } from '../../src/profile-checkpoint.ts'
 import {
   addPlugin,
   IMMUTABLE_BUNDLES,
@@ -598,7 +598,7 @@ interface LocalPnpmStub {
   }
 }
 
-function localCtx(sandbox: MarketSandbox, stub: LocalPnpmStub, confirmed = true) {
+function localCtx(sandbox: MarketSandbox, stub: LocalPnpmStub, confirmed = true): PluginMutationContext {
   return {
     profileDir: sandbox.profileDir,
     logger: () => {},
@@ -807,24 +807,20 @@ describe('local plugin installs survive their source disappearing', () => {
     })
     expect(checkpoint.captureHealthy().status).toBe('captured')
 
-    process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV] = userDataDir
-    try {
-      // 卸载(引用从当前 profile 消失,只剩 checkpoint slot 持有)——本地制品必须
-      // 与市场制品同受 checkpoint-aware 保留判据保护,否则 restoreSlot 后物化 ENOENT。
-      const removed = await removePlugin(ctx, 'local-checkpoint-plugin')
-      expect(removed.restarting).toBe(true)
-      expect(sandbox.readProfileDependencies()['local-checkpoint-plugin']).toBeUndefined()
-      expect(existsSync(artifactPath)).toBe(true)
-      // 启动孤儿清扫同口径:有 checkpoint 引用者不是孤儿。
-      expect(sweepOrphanMarketArtifacts(sandbox.profileDir, () => {})).toEqual([])
-      expect(existsSync(artifactPath)).toBe(true)
-      // 牙齿:checkpoint 引用消失后 GC 恢复回收——证明确实是 checkpoint 把它保下来的。
-      rmSync(checkpoint.profileRoot, { recursive: true, force: true })
-      gcRemovedPackageArtifacts(sandbox.profileDir, 'local-checkpoint-plugin', () => {})
-      expect(existsSync(artifactPath)).toBe(false)
-    } finally {
-      delete process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
-    }
+    ctx.checkpointUserDataDir = userDataDir
+    // 卸载(引用从当前 profile 消失,只剩 checkpoint slot 持有)——本地制品必须
+    // 与市场制品同受 checkpoint-aware 保留判据保护,否则 restoreSlot 后物化 ENOENT。
+    const removed = await removePlugin(ctx, 'local-checkpoint-plugin')
+    expect(removed.restarting).toBe(true)
+    expect(sandbox.readProfileDependencies()['local-checkpoint-plugin']).toBeUndefined()
+    expect(existsSync(artifactPath)).toBe(true)
+    // 启动孤儿清扫同口径:有 checkpoint 引用者不是孤儿。
+    expect(sweepOrphanMarketArtifacts(sandbox.profileDir, userDataDir, () => {})).toEqual([])
+    expect(existsSync(artifactPath)).toBe(true)
+    // 牙齿:checkpoint 引用消失后 GC 恢复回收——证明确实是 checkpoint 把它保下来的。
+    rmSync(checkpoint.profileRoot, { recursive: true, force: true })
+    gcRemovedPackageArtifacts(sandbox.profileDir, 'local-checkpoint-plugin', userDataDir, () => {})
+    expect(existsSync(artifactPath)).toBe(false)
   }, 120_000)
 
   test('reports an honest error when the local source cannot be read', async () => {

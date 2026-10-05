@@ -123,6 +123,7 @@ export interface PluginMutationContext {
   requestRestart(): Promise<boolean>
   desktopPnpm?: PluginPnpmCapability
   runtimeCtx?: object
+  checkpointUserDataDir?: string
 }
 
 /**
@@ -397,7 +398,11 @@ export async function removePlugin(routeCtx: PluginMutationContext, name: string
   }
   const before = listPlugins(routeCtx.profileDir).bundles
   await runDesktopPlugin(routeCtx, ['remove', name])
-  gcRemovedPackageArtifacts(routeCtx.profileDir, name, routeCtx.logger)
+  const checkpointUserDataDir =
+    routeCtx.checkpointUserDataDir
+    ?? (routeCtx.runtimeCtx as { huaanworkCheckpointUserDataDir?: string } | undefined)?.huaanworkCheckpointUserDataDir
+    ?? ''
+  gcRemovedPackageArtifacts(routeCtx.profileDir, name, checkpointUserDataDir, routeCtx.logger)
   if (!await routeCtx.requestRestart()) {
     return {
       bundles: [...before],

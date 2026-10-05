@@ -17,7 +17,6 @@ import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   DesktopProfileCheckpoint,
-  PROFILE_CHECKPOINT_USER_DATA_DIR_ENV,
 } from '../../src/profile-checkpoint.ts'
 import type { DesktopPnpmHandle } from '../../src/pnpm.ts'
 import type { ConfirmedRestartRuntime } from '../../src/host-runtime-bridge.ts'
@@ -942,7 +941,7 @@ describe('artifact GC (N1)', () => {
     const b = artifact(profileDir, '@huaanwork/plugin-b', '1.0.0', 'b'.repeat(64))
     const logs: string[] = []
 
-    gcRemovedPackageArtifacts(profileDir, '@huaanwork/plugin-a', (m) => logs.push(m))
+    gcRemovedPackageArtifacts(profileDir, '@huaanwork/plugin-a', '', (m) => logs.push(m))
 
     expect(existsSync(a)).toBe(false)
     expect(existsSync(b)).toBe(true)
@@ -961,7 +960,7 @@ describe('artifact GC (N1)', () => {
     }, undefined, 2)}\n`)
     const logs: string[] = []
 
-    gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', (m) => logs.push(m))
+    gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', '', (m) => logs.push(m))
 
     // a 的制品被 GC;extra 的制品与引用全部存活——后续 pnpm 操作不会 ENOENT。
     expect(existsSync(a)).toBe(false)
@@ -987,12 +986,12 @@ describe('artifact GC (N1)', () => {
     // 卸载侧 GC:制品名精确命中该包,唯一的保命理由就是那条 devDependencies 引用
     // (代码注释里的「双保险」分支)。
     const logs: string[] = []
-    gcRemovedPackageArtifacts(profileDir, '@x/plugin-dev', (m) => logs.push(m))
+    gcRemovedPackageArtifacts(profileDir, '@x/plugin-dev', '', (m) => logs.push(m))
     expect(existsSync(dev)).toBe(true)
     expect(logs.some(m => m.includes('kept referenced artifact'))).toBe(true)
 
     // 启动孤儿清扫同口径:有引用者不是孤儿。
-    expect(sweepOrphanMarketArtifacts(profileDir, () => {})).toEqual([])
+    expect(sweepOrphanMarketArtifacts(profileDir, '', () => {})).toEqual([])
     expect(existsSync(dev)).toBe(true)
     expect(profileFileReferencesExist(profileDir)).toBe(true)
   })
@@ -1005,7 +1004,7 @@ describe('artifact GC (N1)', () => {
     writeFileSync(join(profileDir, '.market-artifacts', 'x-pkg-notsemver-' + '3'.repeat(12) + '.tgz'), 'x')
     const logs: string[] = []
 
-    gcRemovedPackageArtifacts(profileDir, '@x/pkg', (m) => logs.push(m))
+    gcRemovedPackageArtifacts(profileDir, '@x/pkg', '', (m) => logs.push(m))
 
     expect(existsSync(stable)).toBe(false)
     expect(existsSync(prerelease)).toBe(false)
@@ -1021,7 +1020,7 @@ describe('artifact GC (N1)', () => {
     const fourSegment = artifact(profileDir, '@x/pkg', '1.0.0.1', '6'.repeat(64))
     const logs: string[] = []
 
-    gcRemovedPackageArtifacts(profileDir, '@x/pkg', (m) => logs.push(m))
+    gcRemovedPackageArtifacts(profileDir, '@x/pkg', '', (m) => logs.push(m))
 
     expect(existsSync(one)).toBe(false)
     expect(existsSync(bare)).toBe(false)
@@ -1041,7 +1040,7 @@ describe('artifact GC (N1)', () => {
       dependencies: { '@huaanwork/plugin-a': `file:${referenced}` },
     }, undefined, 2)}\n`)
 
-    const removed = sweepOrphanMarketArtifacts(profileDir, () => {})
+    const removed = sweepOrphanMarketArtifacts(profileDir, '', () => {})
 
     expect(removed).toEqual([marketArtifactName('@huaanwork/plugin-b', '1.0.0', 'b'.repeat(64))])
     expect(existsSync(referenced)).toBe(true)
@@ -1055,8 +1054,8 @@ describe('artifact GC (N1)', () => {
     writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
       dependencies: { '@huaanwork/plugin-a': `file:${referenced}` },
     })}\n`)
-    sweepOrphanMarketArtifacts(profileDir, () => {})
-    gcRemovedPackageArtifacts(profileDir, '@huaanwork/other', () => {})
+    sweepOrphanMarketArtifacts(profileDir, '', () => {})
+    gcRemovedPackageArtifacts(profileDir, '@huaanwork/other', '', () => {})
     expect(existsSync(referenced)).toBe(true)
   })
 })
@@ -1092,35 +1091,28 @@ describe('artifact GC × profile checkpoint (review D9)', () => {
     // ③ 卸载结果态:当前 profile 中的引用已消失(只剩 checkpoint slot 持有)。
     writeFileSync(join(profileDir, 'package.json'), profileManifest({}))
 
-    // main 进程注入的 env(生产由 main.ts 赋值;此处直接模拟)。
-    process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV] = userDataDir
-    try {
-      // 卸载 GC 必须保留 A:某个 checkpoint slot 仍引用它,restoreSlot 后物化
-      // 依赖要靠它(删了 ⇒ 恢复后 pnpm 确定性 ENOENT,D9 失效模式)。
-      gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', () => {})
-      expect(existsSync(a)).toBe(true)
-      // 启动孤儿清扫同样必须保留 A。
-      expect(sweepOrphanMarketArtifacts(profileDir, () => {})).toEqual([])
-      expect(existsSync(a)).toBe(true)
-      expect(profileFileReferencesExist(profileDir)).toBe(true)
+    // 卸载 GC 必须保留 A:某个 checkpoint slot 仍引用它,restoreSlot 后物化
+    // 依赖要靠它(删了 ⇒ 恢复后 pnpm 确定性 ENOENT,D9 失效模式)。
+    gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', userDataDir, () => {})
+    expect(existsSync(a)).toBe(true)
+    // 启动孤儿清扫同样必须保留 A。
+    expect(sweepOrphanMarketArtifacts(profileDir, userDataDir, () => {})).toEqual([])
+    expect(existsSync(a)).toBe(true)
+    expect(profileFileReferencesExist(profileDir)).toBe(true)
 
-      // ④ checkpoint 引用失效(如该 profile 的 checkpoint 被清空)⇒ GC 恢复收集。
-      rmSync(checkpoint.profileRoot, { recursive: true, force: true })
-      const logs: string[] = []
-      gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', (m) => logs.push(m))
-      expect(existsSync(a)).toBe(false)
-      expect(logs.some(m => m.includes('x-plugin-a-1.0.0') && m.includes('removed artifact'))).toBe(true)
-    } finally {
-      delete process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
-    }
+    // ④ checkpoint 引用失效(如该 profile 的 checkpoint 被清空)⇒ GC 恢复收集。
+    rmSync(checkpoint.profileRoot, { recursive: true, force: true })
+    const logs: string[] = []
+    gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', userDataDir, (m) => logs.push(m))
+    expect(existsSync(a)).toBe(false)
+    expect(logs.some(m => m.includes('x-plugin-a-1.0.0') && m.includes('removed artifact'))).toBe(true)
   })
 
-  test('env unset (non-Desktop host) keeps the pre-D9 checkpoint-blind behavior', () => {
+  test('empty checkpointUserDataDir (non-Desktop host) keeps the pre-D9 checkpoint-blind behavior', () => {
     const profileDir = tempProfile()
     const a = artifactFile(profileDir, '@x/plugin-a', '1.0.0', 'a'.repeat(64))
-    delete process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
 
-    gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', () => {})
+    gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', '', () => {})
     expect(existsSync(a)).toBe(false)
   })
 
@@ -1147,26 +1139,21 @@ describe('artifact GC × profile checkpoint (review D9)', () => {
     // 卸载结果态:当前 profile 的引用消失,只剩 checkpoint slot 持有。
     writeFileSync(join(profileDir, 'package.json'), profileManifest({}))
 
-    process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV] = userDataDir
-    try {
-      gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', () => {})
-      expect(existsSync(a)).toBe(true)
+    gcRemovedPackageArtifacts(profileDir, '@x/plugin-a', userDataDir, () => {})
+    expect(existsSync(a)).toBe(true)
 
-      // 用户在恢复窗口选回该 slot:旧 package.json(含 A 的 file: 引用)被写回。
-      const restored = checkpoint.restoreSlot(captured.slotId)
-      expect(restored.status).toBe('restored')
-      expect(restored.dependencyMaterializationRequired).toBe(true)
+    // 用户在恢复窗口选回该 slot:旧 package.json(含 A 的 file: 引用)被写回。
+    const restored = checkpoint.restoreSlot(captured.slotId)
+    expect(restored.status).toBe('restored')
+    expect(restored.dependencyMaterializationRequired).toBe(true)
 
-      // D9 的承重点:引用回来了,制品也还在盘上 ⇒ 后续物化 pnpm 不会 ENOENT。
-      const restoredManifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as {
-        dependencies?: Record<string, string>
-      }
-      expect(restoredManifest.dependencies?.['@x/plugin-a']).toBe(`file:${a}`)
-      expect(existsSync(a)).toBe(true)
-      expect(profileFileReferencesExist(profileDir)).toBe(true)
-    } finally {
-      delete process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
+    // D9 的承重点:引用回来了,制品也还在盘上 ⇒ 后续物化 pnpm 不会 ENOENT。
+    const restoredManifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>
     }
+    expect(restoredManifest.dependencies?.['@x/plugin-a']).toBe(`file:${a}`)
+    expect(existsSync(a)).toBe(true)
+    expect(profileFileReferencesExist(profileDir)).toBe(true)
   })
 
   // 上一条的 profileFileReferencesExist 断言只有在「制品缺失时返回 false」的前提下
@@ -1180,19 +1167,25 @@ describe('artifact GC × profile checkpoint (review D9)', () => {
   })
 
   /**
-   * N-11(Task 6.9):`HUAANWORK_CHECKPOINT_USER_DATA_DIR` 写进 `process.env` 会泄漏到
-   * 所有子进程(含用户可见终端)。裁定 = **已评估,保留现状**:显式传递只能改
-   * `src/host-process.ts` 的 `utilityProcess.fork` env(与 beta 逐字节共享,白名单预算
-   * 冻结 22/6、不得新增条目),而隔离宿主的 `artifacts.ts` 读的是**子进程自己的**
-   * `process.env`——fork 的 `env: { ...process.env }` 是唯一可达通道。理由现落在
-   * main.ts 的注释里;本条钉住注释与唯一注入点(退回沉默即红)。
+   * N-11(M21):此前将检查点用户数据目录写进全局 process.env 会泄漏到
+   * 所有子进程(含用户可见终端)。现改由 config 参数路线贯穿:profileUserDataDir 作为
+   * prepareDesktopProfile 实参注入插件 config,挂至 ctx.huaanworkCheckpointUserDataDir,
+   * 供 market 制品 GC 消费;不再写全局 env。
    */
-  test('N-11: the unconditional env write is evaluated and kept, with its reason recorded in main.ts', () => {
+  test('N-11: the checkpoint user-data dir reaches the market GC via config, never via process.env', () => {
+    const legacyConstName = ['PROFILE', 'CHECKPOINT', 'USER', 'DATA', 'DIR', 'ENV'].join('_')
+    const legacyEnvName = ['HUAANWORK', 'CHECKPOINT', 'USER', 'DATA', 'DIR'].join('_')
     const mainSource = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8')
-    expect(mainSource).toContain('已评估,保留')
-    expect(mainSource).toContain('host-process.ts')
-    expect(mainSource).toContain('utilityProcess.fork')
-    expect(mainSource.match(/process\.env\[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV\] = profileUserDataDir/gu))
-      .toHaveLength(1)
+    expect(mainSource).not.toContain(legacyConstName)
+    expect(mainSource).not.toContain(legacyEnvName)
+    expect(mainSource.match(/process\.env\[[^\]]*CHECKPOINT[^\]]*\]/gu)).toBeNull()
+    const artifactsSource = readFileSync(join(import.meta.dirname, '../../src/huaanwork-host/market/artifacts.ts'), 'utf8')
+    expect(artifactsSource).not.toContain(legacyConstName)
+    expect(artifactsSource).not.toContain(legacyEnvName)
+    const checkpointSource = readFileSync(join(import.meta.dirname, '../../src/profile-checkpoint.ts'), 'utf8')
+    expect(checkpointSource).not.toContain(legacyConstName)
+    expect(checkpointSource).not.toContain(legacyEnvName)
+    const calls = mainSource.match(/prepareDesktopProfile\([\s\S]*?profileUserDataDir/gu)
+    expect(calls?.length).toBeGreaterThanOrEqual(4)
   })
 })

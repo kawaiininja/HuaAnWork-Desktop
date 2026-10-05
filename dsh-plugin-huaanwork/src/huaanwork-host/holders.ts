@@ -10,6 +10,7 @@ export interface HuaanworkHostConfig {
   dshHome: string
   profileDir: string
   workspaceRoot: string
+  checkpointUserDataDir?: string
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -24,6 +25,7 @@ declare module '@deepseek-ai/cordis' {
     huaanworkApprovals: Map<string, unknown>
     huaanworkEmit: (event: RpcEvent) => void
     huaanworkAgentRequest: { current: unknown }
+    huaanworkCheckpointUserDataDir: string
   }
 }
 
@@ -38,6 +40,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkApprovals',
   'huaanworkEmit',
   'huaanworkAgentRequest',
+  'huaanworkCheckpointUserDataDir',
 ] as const
 
 let installed = false
@@ -107,6 +110,7 @@ export function installHuaanworkHolders(
   }
   ctx.huaanworkDshHome = config.dshHome
   ctx.huaanworkProfileDir = config.profileDir
+  ctx.huaanworkCheckpointUserDataDir = config.checkpointUserDataDir ?? ''
   process.env.HUAANWORK_PROFILE_DIR = config.profileDir
   ctx.huaanworkAllowedOnce = new Set<string>()
   ctx.huaanworkApprovals = new Map()

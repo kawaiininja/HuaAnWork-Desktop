@@ -72,7 +72,7 @@ export function apply(ctx: Context): void {
   const logger = (message: string) => { ctx.logger?.info(message) }
   ctx.effect(() => {
     // 启动时惰性清扫孤儿制品(N1 GC:只删无 file: 引用者;有引用者删了必坏)。
-    sweepOrphanMarketArtifacts(profiles.current.dir, logger)
+    sweepOrphanMarketArtifacts(profiles.current.dir, ctx.huaanworkCheckpointUserDataDir ?? '', logger)
     // 7 条表外 market routes(守则 5;ROUTE_TABLE 54 不破)。
     const disposeRoutes = registerMarketRoutes(ctx, {
       profileDir: profiles.current.dir,

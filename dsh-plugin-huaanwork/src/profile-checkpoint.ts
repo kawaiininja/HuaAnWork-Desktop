@@ -879,16 +879,6 @@ export function createDesktopProfileCheckpoint(options: ProfileCheckpointOptions
   return new DesktopProfileCheckpoint(options)
 }
 
-/**
- * Env override through which the Electron main process publishes the
- * checkpoint userDataDir to the host process for market artifact GC
- * (review D9). The isolated host is forked with the parent's process.env and
- * the in-process host shares it, so one assignment in main.ts reaches every
- * GC call site. Unset (non-Desktop host, unit tests) means checkpoint-blind
- * retention — the pre-D9 behavior.
- */
-export const PROFILE_CHECKPOINT_USER_DATA_DIR_ENV = 'HUAANWORK_CHECKPOINT_USER_DATA_DIR'
-
 /** On-disk root of one profile's checkpoint slots (mirrors the constructor layout). */
 export function desktopProfileCheckpointProfileRoot(userDataDir: string, profileDir: string): string {
   return join(userDataDir, SNAPSHOT_ROOT, hash(hash(profileDir)))

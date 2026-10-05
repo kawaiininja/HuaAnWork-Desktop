@@ -870,6 +870,7 @@ export function prepareDesktopProfile(
   pluginStatePath?: string,
   marketSelection: DesktopMarketSnapshot = DEFAULT_DESKTOP_MARKET_SNAPSHOT,
   hooks: DesktopProfilePreparationHooks = {},
+  checkpointUserDataDir?: string,
 ): PreparedDesktopProfile {
   const lanAddresses = preparedLanAddresses(hooks.lanAddresses)
   const profileDir = profileName === DESKTOP_PROFILE_NAME
@@ -1042,7 +1043,7 @@ export function prepareDesktopProfile(
     { id: 'sandbox-policy', config: { workspaceRoot, mode: 'workspace-write' } },
     {
       insert: [
-        { id: 'huaanwork-host', name: 'dsh-plugin-huaanwork/huaanwork-host', config: { dshHome: home, profileDir: profile.dir, workspaceRoot } },
+        { id: 'huaanwork-host', name: 'dsh-plugin-huaanwork/huaanwork-host', config: { dshHome: home, profileDir: profile.dir, workspaceRoot, ...(checkpointUserDataDir !== undefined ? { checkpointUserDataDir } : {}) } },
         // 插入顺序契约(旧 cordis.patch.yml:43-65,load-order 即安全边界):不得重排。
         { id: 'huaanwork-model', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/model' },
         { id: 'huaanwork-policy', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/policy' },

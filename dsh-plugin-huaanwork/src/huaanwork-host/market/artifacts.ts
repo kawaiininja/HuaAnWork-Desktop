@@ -19,7 +19,6 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
-  PROFILE_CHECKPOINT_USER_DATA_DIR_ENV,
   collectDesktopProfileCheckpointFileReferences,
 } from '../../profile-checkpoint.ts'
 
@@ -243,20 +242,19 @@ function referencedArtifactPaths(profileDir: string): Set<string> {
  * 健康检查点 slot 的 package.json 仍 `file:` 引用的制品路径(评审 D9:
  * restoreSlot 会把**旧** package.json 写回 profile——若其中引用的制品已被 GC,
  * 恢复后的物化依赖 pnpm 确定性 ENOENT,而计划钦定的四步 e2e 结构上抓不到
- * restore 路径)。经 main 进程注入的 env 定位 checkpoint profileRoot
- * (profileIdentity = sha256(profileDir),与上方同一 resolve 口径);env 缺席
+ * restore 路径)。经 config 传入 checkpointUserDataDir 定位 checkpoint profileRoot
+ * (profileIdentity = sha256(profileDir),与上方同一 resolve 口径);空串
  * (非 Electron 宿主/单测)= 空集,即修复前行为。
  */
-function checkpointReferencedArtifactPaths(profileDir: string, logger: (message: string) => void): Set<string> {
-  const userDataDir = process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV]
-  if (userDataDir === undefined || userDataDir === '') return new Set()
-  return collectDesktopProfileCheckpointFileReferences(userDataDir, profileDir, logger)
+function checkpointReferencedArtifactPaths(profileDir: string, checkpointUserDataDir: string, logger: (message: string) => void): Set<string> {
+  if (checkpointUserDataDir === '') return new Set()
+  return collectDesktopProfileCheckpointFileReferences(checkpointUserDataDir, profileDir, logger)
 }
 
 /** 当前 profile 与所有 checkpoint slot 合计的保留判据(D9:两者都不得引用才可删)。 */
-function retentionReferencedArtifactPaths(profileDir: string, logger: (message: string) => void): Set<string> {
+function retentionReferencedArtifactPaths(profileDir: string, checkpointUserDataDir: string, logger: (message: string) => void): Set<string> {
   const referenced = referencedArtifactPaths(profileDir)
-  for (const path of checkpointReferencedArtifactPaths(profileDir, logger)) referenced.add(path)
+  for (const path of checkpointReferencedArtifactPaths(profileDir, checkpointUserDataDir, logger)) referenced.add(path)
   return referenced
 }
 
@@ -277,7 +275,7 @@ function retentionReferencedArtifactPaths(profileDir: string, logger: (message: 
  * 未来命名规则突破,有引用者永不删)。漏删(伪阴性)无害——启动惰性清扫兜底。
  * best-effort:任何失败只记日志,绝不阻断卸载;不存在的目录直接返回。
  */
-export function gcRemovedPackageArtifacts(profileDir: string, packageName: string, logger: (message: string) => void): void {
+export function gcRemovedPackageArtifacts(profileDir: string, packageName: string, checkpointUserDataDir: string, logger: (message: string) => void): void {
   const dir = marketArtifactsDir(profileDir)
   if (!existsSync(dir)) return
   const escaped = safeArtifactName(packageName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -285,7 +283,7 @@ export function gcRemovedPackageArtifacts(profileDir: string, packageName: strin
   // + prerelease/build(连字符/加号后缀);sha12 恰 12 位小写 hex。版本面与本地
   // 安装的 `isMarketArtifactVersion` 共用同一字面量(见该函数注释)。
   const exactName = new RegExp(`^${escaped}-${ARTIFACT_VERSION_LITERAL}-([0-9a-f]{12})\\.tgz$`, 'u')
-  const referenced = retentionReferencedArtifactPaths(profileDir, logger)
+  const referenced = retentionReferencedArtifactPaths(profileDir, checkpointUserDataDir, logger)
   for (const entry of readdirSync(dir)) {
     if (!exactName.test(entry)) continue
     const path = join(dir, entry)
@@ -308,10 +306,10 @@ export function gcRemovedPackageArtifacts(profileDir: string, packageName: strin
  * 指向**的孤儿制品(N1 + 评审 D9:restoreSlot 会重新引入旧引用,有引用者删了必坏)。
  * best-effort;返回清扫掉的文件名(便于测试断言与日志)。
  */
-export function sweepOrphanMarketArtifacts(profileDir: string, logger: (message: string) => void): string[] {
+export function sweepOrphanMarketArtifacts(profileDir: string, checkpointUserDataDir: string, logger: (message: string) => void): string[] {
   const dir = marketArtifactsDir(profileDir)
   if (!existsSync(dir)) return []
-  const referenced = retentionReferencedArtifactPaths(profileDir, logger)
+  const referenced = retentionReferencedArtifactPaths(profileDir, checkpointUserDataDir, logger)
   const removed: string[] = []
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith('.tgz')) continue

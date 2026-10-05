@@ -123,7 +123,7 @@ import {
   prepareDesktopProfile,
   type SkippedOptionalEntry,
 } from './profile.ts'
-import { DesktopProfileCheckpoint, PROFILE_CHECKPOINT_USER_DATA_DIR_ENV } from './profile-checkpoint.ts'
+import { DesktopProfileCheckpoint } from './profile-checkpoint.ts'
 import {
   completeOrSkipDesktopSetupWizard,
   desktopSetupWizardRequired,
@@ -714,20 +714,16 @@ async function start(): Promise<void> {
       homeDir = dataDirectoryLocation.homeDir
     }
     process.env.DSH_HOME = homeDir
-    // 评审 D9:市场制品 GC(卸载时 gcRemovedPackageArtifacts + 启动孤儿清扫)的
+    // 评审 D9 / N-11:市场制品 GC(卸载时 gcRemovedPackageArtifacts + 启动孤儿清扫)的
     // 保留判据必须能看到健康检查点 slot 的 package.json `file:` 引用——
     // restoreSlot 会把旧引用写回 profile,已被 GC 的制品会让恢复后的物化
-    // 依赖确定性 ENOENT。隔离宿主 fork 时继承 process.env,同进程宿主直接
-    // 可读,此处一处赋值两侧 GC 调用点均可达。
+    // 依赖确定性 ENOENT。
     //
-    // N-11(实现评审第 5 批;Task 6.9 复核 → **已评估,保留**):本赋值同时把该键
-    // 泄漏进所有子进程(含用户可见终端)。显式传递只能改 `src/host-process.ts` 的
-    // `utilityProcess.fork`(其 `env: { ...process.env }` 是进入隔离宿主的唯一通道;
-    // launchEnvironmentLayers 只作 Cordis 服务供给、不落 process.env),而该文件与
-    // beta 变体逐字节共享、变体白名单预算冻结(22/6,不得新增条目)——且隔离宿主的
-    // artifacts.ts 读的是**子进程自己的** process.env。故保留现状:它是上述 D9
-    // 保留判据的环境依赖,改动一旦错位会静默退化 GC 判据(悬空 file: → ENOENT)。
-    process.env[PROFILE_CHECKPOINT_USER_DATA_DIR_ENV] = profileUserDataDir
+    // N-11(M21):此前将 profileUserDataDir 写入全局 process.env 会泄漏到所有子进程
+    // (含用户可见终端)。现改由 config 参数路线贯穿:profileUserDataDir 作为实参注入
+    // prepareDesktopProfile,并经 huaanwork-host 插件 config.checkpointUserDataDir
+    // 挂至 ctx.huaanworkCheckpointUserDataDir,供 market 制品 GC 消费;不再修改全局
+    // process.env,彻底消除环境变量泄漏。
     const desktopLaunchEnvironment = withDesktopDshHome(environment, homeDir)
     const projectionCacheRecovery = recoverOversizedSessionProjectionCache(homeDir)
     if (projectionCacheRecovery.status === 'quarantined') {
@@ -1235,6 +1231,7 @@ async function start(): Promise<void> {
       pluginManagementStatePath,
       marketSelection,
       preparationHooks,
+      profileUserDataDir,
     )
     let legacyPresetMigrated = false
     if (safeModePaths === undefined) {
@@ -1258,6 +1255,7 @@ async function start(): Promise<void> {
         pluginManagementStatePath,
         marketSelection,
         preparationHooks,
+        profileUserDataDir,
       )
     }
     if (safeModePaths !== undefined) {
@@ -1283,6 +1281,7 @@ async function start(): Promise<void> {
         pluginManagementStatePath,
         marketSelection,
         preparationHooks,
+        profileUserDataDir,
       )
     } else if (profilePreferences === undefined) {
       const browserAccessMigrated = await migrateDesktopBrowserAccessSettings(prepared.settingsDocument)
@@ -1306,6 +1305,7 @@ async function start(): Promise<void> {
           pluginManagementStatePath,
           marketSelection,
           preparationHooks,
+          profileUserDataDir,
         )
       }
       const importedSettings = readDesktopSetupWizardSettings(prepared.settingsDocument)
@@ -1341,6 +1341,7 @@ async function start(): Promise<void> {
         pluginManagementStatePath,
         marketSelection,
         preparationHooks,
+        profileUserDataDir,
       )
     }
     // Safe Mode must reach the working surface with shipped defaults. Its
@@ -1382,7 +1383,7 @@ async function start(): Promise<void> {
           aaEnabled: false,
         })
         prepared = prepareDesktopProfile(process.env.DSH_TELEMETRY_DISABLED, homeDir, process.platform,
-          activeProfileName, pluginManagementStatePath, marketSelection, preparationHooks)
+          activeProfileName, pluginManagementStatePath, marketSelection, preparationHooks, profileUserDataDir)
         await completeOrSkipDesktopSetupWizard(
           marketUserDataDir,
           prepared.profile.dir,
@@ -1418,6 +1419,7 @@ async function start(): Promise<void> {
           pluginManagementStatePath,
           marketSelection,
           preparationHooks,
+          profileUserDataDir,
         )
         await completeOrSkipDesktopSetupWizard(
           marketUserDataDir,
@@ -1482,6 +1484,7 @@ async function start(): Promise<void> {
           pluginManagementStatePath,
           marketSelection,
           preparationHooks,
+          profileUserDataDir,
         )
         if (prepared.requiresDependencyMigration) {
           throw new Error(`${BIN_NAME}: packaged pnpm did not produce compatible Profile dependency metadata`)
