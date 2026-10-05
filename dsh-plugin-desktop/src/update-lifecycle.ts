@@ -16,6 +16,7 @@ import {
   type DesktopReleaseChannel,
   type UpdateCheckResult,
 } from './update-checker.ts'
+import { DESKTOP_PRODUCT_NAME } from './product-identity.ts'
 
 const MAX_STATE_BYTES = 4 * 1024
 
@@ -358,8 +359,8 @@ function parseState(text: string): ParsedUpdateState {
 
 function updateAvailableNotification(locale: DesktopLocale, version: string): DesktopNotification {
   return locale === 'zh'
-    ? { title: 'DSH Desktop 有可用更新', body: `版本 ${version} 已可下载。打开 DSH Desktop 即可继续。` }
-    : { title: 'DSH Desktop Update Available', body: `Version ${version} is ready to download. Open DSH Desktop to continue.` }
+    ? { title: `${DESKTOP_PRODUCT_NAME} 有可用更新`, body: `版本 ${version} 已可下载。打开 ${DESKTOP_PRODUCT_NAME} 即可继续。` }
+    : { title: `${DESKTOP_PRODUCT_NAME} Update Available`, body: `Version ${version} is ready to download. Open ${DESKTOP_PRODUCT_NAME} to continue.` }
 }
 
 async function readState(filename: string): Promise<string> {

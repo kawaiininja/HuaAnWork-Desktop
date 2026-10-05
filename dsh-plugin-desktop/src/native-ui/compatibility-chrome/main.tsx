@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react'
 import type { CompatibilityChromeBridge, CompatibilityChromeCommand, CompatibilityChromeState } from '../../compatibility-chrome-contract.ts'
 import { DesktopFrameTitlebarView } from '../../client/DesktopFrameTitlebarView.tsx'
 import { en, zh } from '../../client/desktop-settings-locales.ts'
+import { DESKTOP_PRODUCT_NAME } from '../../product-identity.ts'
 import { installChromeOverlay } from './overlay.ts'
 
 declare global {
@@ -38,7 +39,7 @@ export function Chrome() {
     document.documentElement.lang = state?.locale === 'zh' ? 'zh-CN' : 'en'
   }, [state?.locale])
   const copy = state?.locale === 'zh' ? zh : en
-  if (!state) return <header className="dshDesktopFrameTitlebar">DSH Desktop {failed && <span role="alert">{copy.operationFailed}</span>}</header>
+  if (!state) return <header className="dshDesktopFrameTitlebar">{DESKTOP_PRODUCT_NAME} {failed && <span role="alert">{copy.operationFailed}</span>}</header>
   return <DesktopFrameTitlebarView
     key={generation}
     api={api}

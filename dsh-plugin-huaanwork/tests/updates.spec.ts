@@ -19,6 +19,7 @@ import {
   type UpdateCheckResult,
 } from '../src/update-checker.ts'
 import { apply, Config, inject, type Config as UpdateConfig } from '../src/updates.ts'
+import { DESKTOP_PRODUCT_NAME } from '../src/product-identity.ts'
 
 const testConfig: UpdateConfig = {
   enabled: true,
@@ -292,13 +293,13 @@ describe('desktop update Host plugin', () => {
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
     await vi.waitFor(() => {
       expect(harness.notifications).toEqual([{
-        title: 'DSH Desktop Update Available',
-        body: 'Version 2.1.0 is ready to download. Open DSH Desktop to continue.',
+        title: `${DESKTOP_PRODUCT_NAME} Update Available`,
+        body: `Version 2.1.0 is ready to download. Open ${DESKTOP_PRODUCT_NAME} to continue.`,
       }])
     })
     expect(harness.confirmDownload).not.toHaveBeenCalled()
     expect(harness.downloadAndOpen).not.toHaveBeenCalled()
-    expect(harness.tray.label()).toBe('DSH Desktop 2.1.0 Available')
+    expect(harness.tray.label()).toBe(`${DESKTOP_PRODUCT_NAME} 2.1.0 Available`)
     await vi.waitFor(async () => {
       expect(JSON.parse(await readFile(harness.statePath, 'utf8'))).toEqual({
         version: 3,
@@ -333,14 +334,14 @@ describe('desktop update Host plugin', () => {
     expect(version).toBe('2.1.0')
     expect(signal).toBeInstanceOf(AbortSignal)
     expect(signal.aborted).toBe(false)
-    expect(harness.tray.label()).toBe('Downloading DSH Desktop 2.1.0…')
+    expect(harness.tray.label()).toBe(`Downloading ${DESKTOP_PRODUCT_NAME} 2.1.0…`)
     expect(harness.notifications).toEqual([])
 
     resolveDownload()
     await pending
-    await vi.waitFor(() => { expect(harness.tray.label()).toBe('DSH Desktop 2.1.0 Available') })
+    await vi.waitFor(() => { expect(harness.tray.label()).toBe(`${DESKTOP_PRODUCT_NAME} 2.1.0 Available`) })
     expect(harness.notifications).toEqual([])
-    expect(harness.tray.label()).toBe('DSH Desktop 2.1.0 Available')
+    expect(harness.tray.label()).toBe(`${DESKTOP_PRODUCT_NAME} 2.1.0 Available`)
   })
 
   it('threads the channel record sha256 pins into the adapter download (D-M6-23)', async () => {
@@ -373,7 +374,7 @@ describe('desktop update Host plugin', () => {
     await harness.tray.invoke()
     expect(confirmDownload).toHaveBeenCalledOnce()
     expect(harness.downloadAndOpen).not.toHaveBeenCalled()
-    expect(harness.tray.label()).toBe('DSH Desktop 2.1.0 Available')
+    expect(harness.tray.label()).toBe(`${DESKTOP_PRODUCT_NAME} 2.1.0 Available`)
 
     await harness.tray.invoke()
     expect(confirmDownload).toHaveBeenCalledTimes(2)
@@ -397,7 +398,7 @@ describe('desktop update Host plugin', () => {
     expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0')
     expect(harness.downloadAndOpen).not.toHaveBeenCalled()
     expect(harness.showManualCheckResult).not.toHaveBeenCalled()
-    expect(harness.tray.label()).toBe('DSH Desktop 2.2.0 Available')
+    expect(harness.tray.label()).toBe(`${DESKTOP_PRODUCT_NAME} 2.2.0 Available`)
   })
 
   it.each([
@@ -486,7 +487,7 @@ describe('desktop update Host plugin', () => {
 
     expect(harness.notifications).toEqual([])
     expect(harness.confirmDownload).not.toHaveBeenCalled()
-    expect(harness.tray.label()).toBe('DSH Desktop 2.1.0 Available')
+    expect(harness.tray.label()).toBe(`${DESKTOP_PRODUCT_NAME} 2.1.0 Available`)
   })
 
   it('does not prompt on a platform without a fixed download entry', async () => {
@@ -529,7 +530,7 @@ describe('desktop update Host plugin', () => {
     expect(harness.downloadAndOpen).toHaveBeenCalledOnce()
     expect(harness.notifications).toEqual([])
     expect(harness.warnings).toEqual([])
-    expect(harness.tray.label()).toBe('DSH Desktop 2.1.0 Available')
+    expect(harness.tray.label()).toBe(`${DESKTOP_PRODUCT_NAME} 2.1.0 Available`)
   })
 
   it('aborts checks and downloads and removes the tray item on effect disposal', async () => {
