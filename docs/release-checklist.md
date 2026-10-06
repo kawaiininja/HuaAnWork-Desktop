@@ -20,7 +20,18 @@
 node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs
 ```
 
-守卫读源码文本(不 import,故在无 `yarn install` 的最小环境也能跑),判定三项:市场验签公钥
+**第四条命令(R-6 生效期的实际制品来源)**:`corepack yarn dist:mac-smoke:huaanwork`。它此前**不跑**
+守卫(§1.8 的 `:212` 指定它为 R-6 生效期的 macOS 内网发行制品来源,而 §0 的清单没列它 ⇒ R1 照 §0
+建立「发行命令都有守卫」的预期后跑 §1.8 的命令,清单没告诉他这条不会替他跑守卫)。**裁定 R-M7-8
+(2026-10-03)显式变更了该设计**:现在它也跑守卫,但带 `--smoke`,故可在**显式声明**
+`HUAANWORK_ALLOW_UNPROVISIONED_SMOKE=1` 时放行。语义差别必须记住:
+- **不带该 env** ⇒ 与三条发行命令一致,未 provisioning 即拒(fail-closed);
+- **带该 env** ⇒ 放行,但产出的是 **unsigned / unprovisioned** 冒烟制品:市场验签恒拒、两个 origin
+  仍是不可达的 `.example` 占位。**它不构成 provisioning,不得用于对外发行**;R-6 生效期的**内网自用**
+  发行仍按 §1.8 的诚实标注执行。
+- CI 的 `desktop-macos` job(`ci.yml:182-185`)按 D-M6-17 零 secrets、且 R2 未交付,故**已注入**该 env。
+
+守卫读源码文本(不 import,故在无 `yarn install` 的最小环境也能跑),判定四项（公钥、公钥指纹 keyId、市场 origin、更新 origin —— 前两条同属一个信任锚，故文档历史上合称「三项」）:市场验签公钥
 (`config.ts` 的 `PINS_AT_RELEASE.current` 的 `publicKeyHex` + `keyId`)、市场 origin
 (`HUAANWORK_MARKET_DEFAULT_ORIGIN`)、更新 origin(`HUAANWORK_UPDATE_DEFAULT_ORIGIN`)。**空钉扎、
 `keyId` 与公钥不配对、任一 origin 仍含 `.example`,都非零退出并逐项列出缺什么**——未 provisioning

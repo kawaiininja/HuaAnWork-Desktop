@@ -19,9 +19,10 @@
  * 本脚本不生成密钥、不猜测地址(裁定 D-M6-18),也不读写网络。
  *
  * 用法:
- *   node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs [--root <dir>]
+ *   node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs [--root <dir>] [--smoke]
  *
  * `--root` 只用于测试/演练时指向 fixture 仓;发行命令与 CI 都不传它(默认 = 本仓库根)。
+ * `--smoke` 仅用于冒烟路径(dist:mac-smoke:huaanwork);在显式声明 HUAANWORK_ALLOW_UNPROVISIONED_SMOKE=1 时放行。
  */
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -33,7 +34,7 @@ const CONFIG_SOURCE = 'dsh-plugin-huaanwork/src/huaanwork-host/market/config.ts'
 const UPDATE_SOURCE = 'dsh-plugin-huaanwork/src/update-checker.ts'
 const PINNED_KEY_PATTERN = /^[0-9a-f]{64}$/u
 
-const USAGE = `usage: node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs [--root <dir>]
+const USAGE = `usage: node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs [--root <dir>] [--smoke]
 
 Verifies that this build carries the release-provisioned market trust anchor
 (public key + its sha256 fingerprint) and both real intranet origins.
@@ -41,7 +42,7 @@ Exit code 0 = provisioned; 1 = unprovisioned (refuses to build a release);
 2 = usage error.`
 
 function parseArgs(argv) {
-  const args = { root: DEFAULT_ROOT, help: false }
+  const args = { root: DEFAULT_ROOT, help: false, smoke: false }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--root') {
@@ -49,6 +50,8 @@ function parseArgs(argv) {
       if (value === undefined || value.startsWith('-')) throw new Error('--root requires a directory')
       args.root = resolve(value)
       index += 1
+    } else if (arg === '--smoke') {
+      args.smoke = true
     } else if (arg === '--help' || arg === '-h') {
       args.help = true
     } else {
@@ -202,6 +205,19 @@ function main() {
     return
   }
   if (state.problems.length > 0) {
+    const smokeMode = args.smoke === true
+    const exemption = process.env.HUAANWORK_ALLOW_UNPROVISIONED_SMOKE === '1'
+    if (smokeMode && exemption) {
+      process.stdout.write(
+        'huaanwork-verify-provisioning: exemption accepted (HUAANWORK_ALLOW_UNPROVISIONED_SMOKE=1) for the SMOKE path only.\n' +
+        `  仍缺 ${String(state.problems.length)} 项 provisioning:\n${state.problems.map(item => `  - ${item}`).join('\n')}\n` +
+        '  本次产出的是 **unsigned / unprovisioned** 冒烟制品:市场验签恒拒(fail-closed,无公钥)、\n' +
+        '  两个 origin 仍是不可达的 .example 占位。它**不构成** provisioning,也不得用于发行。\n' +
+        '  发行路径(dist:mac/win/win-portable:huaanwork)不带 --smoke,故不受本豁免影响。\n' +
+        '  裁定依据:R-M7-8(显式变更 M6 plan :7354 的「smoke 路径刻意不接守卫」设计)。\n',
+      )
+      process.exit(0)
+    }
     reportUnprovisioned(state)
     process.exit(1)
   }

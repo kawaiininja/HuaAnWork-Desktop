@@ -1000,7 +1000,7 @@ describe('published package surface', () => {
     expect(workspaceManifest.scripts?.['dist:mac:huaanwork'])
       .toBe('yarn aa:prepare-release && node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac')
     expect(workspaceManifest.scripts?.['dist:mac-smoke:huaanwork'])
-      .toBe('yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac-smoke')
+      .toBe('yarn aa:prepare-release && node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs --smoke && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:mac-smoke')
     expect(manifest.build?.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
     expect(manifest.build?.afterAllArtifactBuild).toBe('./scripts/verify-electron-fuses.ts')
     expect(manifest.build?.mac).toEqual(expect.objectContaining({
@@ -1053,11 +1053,12 @@ describe('published package surface', () => {
 
   it('does not gate development or the headless check', () => {
     const scripts = workspaceManifest.scripts ?? {}
-    // 开发态本就不该有生产公钥;接进 check 会让日常开发全红。同理不接 dist:mac-smoke
-    // (CI 的未签名冒烟路径;release.yml 的 macos job 在它之前单独跑守卫步骤)。
+    // R-M7-8(2026-10-03)显式变更了 M6 plan :7354 的「smoke 路径刻意不接守卫」设计:
+    // smoke 现在也接守卫,但带 --smoke,故可在**显式声明**豁免时放行(CI 的未签名冒烟
+    // 依赖它)。check 与 dev:huaanwork 仍然不接 —— 开发态本就不该有生产公钥。
     expect(scripts.check).not.toContain('huaanwork-verify-provisioning')
     expect(scripts['dev:huaanwork']).not.toContain('huaanwork-verify-provisioning')
-    expect(scripts['dist:mac-smoke:huaanwork']).not.toContain('huaanwork-verify-provisioning')
+    expect(scripts['dist:mac-smoke:huaanwork']).toContain('huaanwork-verify-provisioning.mjs --smoke')
   })
 
   it('runs platform package gates before reusing native packaging outputs', () => {
