@@ -121,3 +121,79 @@ git fetch upstream --tags
     1. 3 个孤儿提交（`d1d8c81b5a`/`eb56d3a1c1`/`5737bcceb6`）的丢弃或重写；
     2. 基座跟进 `dsh-desktop-stable`/`beta` 还是迁往 `dsh-desktop-next`；
     3. 白名单预算模型采用「一次性临时预算」还是「长期分级收敛模型」。
+
+---
+
+## 8. 看板首次运行记录
+
+本节记录落后量与冲突面看板脚本（`scripts/upstream-sync-dashboard.mjs`）的**阶段 A 基线快照**，作为后续 M8 规划的基准起点。
+后续定期巡检时，新运行输出必须**以追加方式记录在本节之后，不得覆盖历史记录**，以保持历史 as-of 序列的完整可追溯性。
+
+### 首次运行快照（2026-10-06 / 2026-10-07）
+
+```text
+upstream-sync-dashboard: as-of 2026-10-06T23:10:07.856Z / upstream commit 2026-10-03T17:44:59+08:00
+  ref        = upstream/master @ a1ff68b2960753ab1f6c90565bf3d9e3f3b7ae91
+  merge-base = a934d988610605078001d7c22bbaa2435cbeb385 (2026-09-18T09:10:55+08:00)
+  behind     = 344 commits   ahead = 222 commits
+  overlap (三个口径分别计,不相加):
+    whitelist            : 21/36  (beta↔huaanwork 22 + stable↔beta 19, 去重后 36)
+      hits (21):
+        - scripts/generate-windows-app-icon.mjs
+        - scripts/mac-universal.ts
+        - scripts/verify-packaged-runtime.ts
+        - scripts/verify-profile-boot.mjs
+        - src/client/DesktopSettingsSection.tsx
+        - src/client/desktop-settings-api.ts
+        - src/client/desktop-settings-locales.ts
+        - src/client/index.ts
+        - src/electron-runtime.ts
+        - src/host-runtime-bridge.ts
+        - src/index.ts
+        - src/main.ts
+        - src/native-ui/setup-wizard/App.tsx
+        - src/profile-manager.ts
+        - src/profile-preferences.ts
+        - src/profile.ts
+        - src/setup-wizard-contract.ts
+        - src/setup-wizard-window.ts
+        - src/update-checker.ts
+        - src/update-download.ts
+        … and 1 more
+    threePackageIdentical: 45/162  (三包 src/ 逐字节相同的隐含同步面)
+      hits (45):
+        - client/DesktopNativeActions.tsx
+        - client/assets.d.ts
+        - client/contracts.ts
+        - client/desktop-settings-styles.ts
+        - client/desktop-settings.ts
+        - client/environment.ts
+        - client/layout-service.ts
+        - client/layout-state.ts
+        - client/styles.ts
+        - client/window-service.ts
+        - desktop-cli.ts
+        - desktop-logger.ts
+        - desktop-plugins.ts
+        - diagnostic-export.ts
+        - directory-picker-contract.ts
+        - electron-platform.ts
+        - electron-shell-generation.ts
+        - host-bootstrap.ts
+        - host-process-entry.ts
+        - host-process.ts
+        … and 25 more
+    permanentOverride    : 3/8  (docs/upstream-sync.md §6 列的 fork-owned 文件)
+      hits (3):
+        - dsh-plugin-desktop-beta/tests/package.spec.ts
+        - dsh-plugin-desktop/tests/package.spec.ts
+        - scripts/verify-desktop-variants.mjs
+  note: read-only. Not wired into any gate. Re-run after `git fetch upstream` and record the as-of pair.
+```
+
+### 快照数据解读与分母对账
+1. **落后量与提前量**：落后上游 `upstream/master` 344 个提交，fork 领先 222 个提交（基于动态 `merge-base`：`a934d98861`）。
+2. **白名单面（Scope A）**：分母 36（`beta↔huaanwork` 22 条与 `stable↔beta` 19 条差异名单去重后 36 个源码/脚本路径），其中 21 个在上游改动中被触及。
+3. **三包同形面（Scope B）**：分母 162（三个包 `src/` 并集 293 个文件，交集 187 个文件，逐字节哈希一致 162 个文件）。Task 3.2 规范化清扫的 7 个死模块本来就在 162 内部且前后均保持逐字节对齐，故分母稳固保持 162（与 `AGENTS.md:51` 债表一致），其中 45 个在上游改动中被触及。
+4. **永久 Override 面（Scope C）**：分母 8（本文件 §6 动态声明的 8 个 fork 专有控制文件），其中 3 个在上游改动中存在同名更新（`scripts/verify-desktop-variants.mjs` 以及两个 package.spec.ts），同步时必须坚决压制上游覆盖。
+
