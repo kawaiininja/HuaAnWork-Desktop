@@ -17,6 +17,7 @@ This repository owns the desktop product around an unmodified DeepSeek Harness c
 - Run the complete headless gate with `corepack yarn check`.
 - Develop and validate Desktop feature changes in `dsh-plugin-desktop-beta/` first, then synchronize shared changes into `dsh-plugin-desktop/` while preserving declared variant differences. Before committing or pushing shared Desktop changes, run `corepack yarn check:desktop-variants` and validate both affected packages; neither package automatically inherits the other's source edits.
 - Run upstream operations through the root scripts, such as `corepack yarn upstream:build`.
+- Upstream synchronization: the basis is the `upstream` remote (`anywhere-labs/dsh-desktop`), **not** fork `origin/master` and **not** the local mirror's `master`. See `docs/upstream-sync.md` for the ref discipline, the lag reporting format, and the permanent fork-owned overrides.
 
 - `deepseek-harness/` is a pinned upstream Git submodule. Never edit files inside it from a desktop feature branch.
 - `dsh-plugin-desktop/` owns the Cordis Host and Client faces, Electron bootstrap, packaging, and release tests.
