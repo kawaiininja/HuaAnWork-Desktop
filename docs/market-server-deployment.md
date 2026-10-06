@@ -541,6 +541,44 @@ intake」。安全性论证不变：`keyId` 是公钥的 sha256 指纹，攻击�
    再可用至其 `notAfter`（≤ 泄露发现时刻 + 7 天）。
 3. 记录泄露时间窗，审计期间内以该钥签名的全部清单 revision。
 
+## 紧急下架（SOP：让一个在架插件停止被安装）
+
+**先读这一句：`unpublish` 挡不住客户端安装。** 客户端的安装真相源**只有已激活的
+Ed25519 签名清单**；`POST /v1/admin/…/unpublish` 只从 `state.entries` 里删掉该条目
+（`admin/routes.ts:721-739` → `catalog/store.ts:425-431` 的 `removeEntry`），**既不重建也不重签清单**，
+而 `GET /v1/manifest`（`server.ts:352-360` 一带）原样回放已激活清单 ⇒ 下架之后客户端
+仍能按旧清单下载并安装该插件。删除制品字节也不行：DELETE 有三面引用检查（catalog 条目 /
+已激活清单 / pending 清单，`admin/routes.ts:275-285` 的 `artifactReference()`，拒绝分支 `:314-358`），任一面命中即 **409 `artifact-referenced`**
+（清单不可读时是 **409 `manifest-unreadable`**，fail-closed）。
+
+**紧急下架唯一路径 = 一次完整的离线重签**，需要离线签名机与签名管理员在场：
+
+1. 服务端下架条目：`POST /v1/admin/…/unpublish`（把它移出 `state.entries`）。
+2. 重新生成清单：`prepare` —— 新 revision 不含该条目。
+3. 离线签名机签名（气隙、私钥 0600、见〈离线签名操作纪律〉的 NTP 前置）。
+4. `intake` 激活新签名清单。**激活完成之前，旧清单仍然有效、客户端仍能安装该插件。**
+
+**时间窗口与责任人（紧急下架流程，必须填实，不得留空）**
+
+| 环节 | 预计耗时 | 责任人 | 备注 |
+|---|---|---|---|
+| 1 服务端下架 | < 1 min | 市场运营 | 需 admin token；该动作**成功时无任何日志**（M25，见威胁模型节） |
+| 2 prepare | < 1 min | 市场运营 | 若撞上 `catalog-too-large` / `manifest-too-large` 见〈目录规模上限〉 |
+| 3 离线签名 | **取决于签名管理员到场** | 签名管理员 | 含带外指纹核对；**这是唯一的长杆** |
+| 4 intake 激活 | < 1 min | 市场运营 | 激活后旧 revision 被 `maxRevision` 单调判定挡住重放 |
+
+⇒ **紧急下架不是一个按钮，是一次需要人到场、耗时以「签名管理员多久能到」计的运维动作。**
+威胁模型节已诚实声明「不防管理员作恶」，但此前**没有**声明「下架一个在架条目需要一次完整
+离线重签」—— 本节补上这句。若业务上需要「秒级下架」，那是一个**新的信任根设计问题**
+（在线吊销 / 远程可更新 keyring），按 spec §14 第 41 条已明裁「不存在在线吊销」，
+远程可更新 keyring 是 M19 的未决问题（R-M7-7 维持不做）。
+
+**回归钉**：`market-server/tests/admin.spec.ts` 的
+`replays the activated manifest and its signature byte-for-byte across an unpublish (M10)`（`:888-908`）
+钉住「unpublish 不动已激活清单与签名的任何一个字节」；既有的
+`refuses to delete after unpublish while the activated manifest still references it`（`:869-886`）
+与「唯一生效路径 = 重新 prepare + 签 + 激活」（`deletes an artifact once neither the entries nor the activated manifest reference it`，`:974-987`）一同构成本节的机械保障。
+
 ## 公钥分发与指纹核对
 
 - 公钥（raw hex）与指纹（sha256 hex）由 `gen-signing-key.mjs` 打印；指纹是

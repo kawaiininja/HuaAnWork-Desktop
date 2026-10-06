@@ -885,6 +885,28 @@ describe('P11b operator-facing artifact deletion (M6 Task 6.6)', () => {
     expect(await market.artifacts.stat(entry.tarball)).not.toBeNull()
   })
 
+  it('replays the activated manifest and its signature byte-for-byte across an unpublish (M10)', async () => {
+    // 既有 :869-886 只比 files[].tarballPath;本条比**整份文档**——信封(revision/
+    // issuedAt/notAfter/domain)与签名记录都不得因一次 unpublish 而变动。这是
+    // 「紧急下架的唯一生效路径是重新 prepare + 离线签 + intake」的可机械验证形式:
+    // 任何让服务端自动重建/重签的改动都会让本条变红。
+    const entry = await publish('@huaanwork/takedown-probe', '1.0.0')
+    await release()
+
+    const manifestBefore = await (await fetch(`${market.baseUrl}/v1/manifest`)).text()
+    const signatureBefore = await (await fetch(`${market.baseUrl}/v1/manifest/signature`)).text()
+
+    await unpublish(entry.id)
+
+    const manifestAfter = await (await fetch(`${market.baseUrl}/v1/manifest`)).text()
+    const signatureAfter = await (await fetch(`${market.baseUrl}/v1/manifest/signature`)).text()
+
+    expect(manifestAfter).toBe(manifestBefore)
+    expect(signatureAfter).toBe(signatureBefore)
+    // 且下架对客户端安装路径**零影响**:字节仍可下载(这正是需要 SOP 的原因)。
+    expect((await fetch(`${market.baseUrl}/artifacts/${entry.tarball}`)).status).toBe(200)
+  })
+
   // 评审 Important 1（修复轮 1）：第三面 —— **已 prepare 但未激活**的待签清单。
   // 确定性运营者可复现序列（无竞态）：publish A → prepare（pending=[A]）→ unpublish A
   // → 此刻目录面已清、已激活清单为空，唯独 pending 槽仍逐字持有指向 X 的清单。
