@@ -459,12 +459,25 @@ admin bearer token 是本服务**唯一不受离线签名保护的机密**：cat
 
 ## 暴露窗口陈述（round5 N7）
 
-`notAfter` 上限 = **7 天**（信封寿命 `notAfter - issuedAt ≤ 7d`，验签侧
-`ttl-exceeds-cap` 强制）。**`notAfter` 上限即私钥泄露的最大暴露窗口：泄露后
-攻击者用泄露私钥签出的清单，最长可用期 = 7 天**（受 `revision` 单调与
-`domain` 钉扎进一步收窄）。因此**离线签名操作节奏（重签/签名）必须短于该
-窗口**：每 ≤7 天重签一轮，或每次发布即签（推荐后者——发布即签使任何时刻在
-效清单的 `notAfter` 都不超过下一次常规发布）。
+`notAfter` 上限 = **7 天**（信封寿命 `notAfter - issuedAt ≤ 7d`，验签侧 `ttl-exceeds-cap`
+强制）。**`notAfter` 上限即私钥泄露的最大暴露窗口：泄露后攻击者用泄露私钥签出的清单，
+最长可用期 = 7 天**（受 `revision` 单调与 `domain` 钉扎进一步收窄）。
+
+**离线签名节奏是硬要求，不是二选一（M11 订正，2026-10-05）**：原文把「每 ≤7 天重签一轮」
+与「每次发布即签」并列成两个可选方案，并论证「发布即签使任何时刻在效清单的
+`notAfter` 都不超过下一次常规发布」。**该论证对无发布的静默期不成立** —— 它是事件驱动的
+（由发布触发），静默期内没有任何事件去重签，在效清单会在 `notAfter` 到期后**过期即全市场
+四条 route 全 502**（客户端无缓存、每次读都重验，`verify.ts:285-288` 过期即 `expired`）。
+括号里那句默默假设了「7 天内会有下一次发布」。
+
+⇒ **必须做的是**：① 设立**定时巡检**（周期 ≤ 7 天，建议每日）读 `/healthz` 的
+`envelope.expiresInSeconds` 与 `envelope.warning`；② 设立**每周定期空转重签**（无发布也重签
+一轮；空转重签合法 —— `revision` 等值放行，见〈正常轮换〉节的机制事实）；③ 「发布即签」
+仍然推荐，但它是**锦上添花**，不能替代 ①②。
+**可见性**：`/healthz` 现暴露 `envelope: { active, revision, notAfter, expiresInSeconds, warning }`
+（剩余不足 **48 小时**即 `warning: true`；**已过期则 `ok: false`**，不会把全市场停摆显示成健康），
+并同时暴露 Task 4.1 的三个 M18 观测量（`manifestCanonicalBytes` / `entryCount` / `averageEntryBytes`）。
+巡检脚本可直接读这个端点，不需要人工估算。
 
 ## 正常轮换（重叠窗口成立，操作前必读）
 

@@ -298,7 +298,11 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
-function parseEpochMs(iso: string): number | null {
+/**
+ * Parse an ISO-8601 string to unix epoch milliseconds, returning null if invalid.
+ * Reused by `/healthz` to compute remaining envelope lifetime (M11).
+ */
+export function parseEpochMs(iso: string): number | null {
   const ms = Date.parse(iso)
   return Number.isNaN(ms) ? null : ms
 }

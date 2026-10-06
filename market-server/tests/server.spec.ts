@@ -75,7 +75,7 @@ describe('market-server HTTP surface', () => {
   it('answers /healthz', async () => {
     const { status, body } = await getJson('/healthz')
     expect(status).toBe(200)
-    expect(body).toEqual({ ok: true })
+    expect((body as { ok: boolean }).ok).toBe(true)
   })
 
   it('serves a self-validated provider page from /v1/plugins', async () => {

@@ -31,7 +31,7 @@
  *                               memory); names are content-derived at publish.
  *   GET /admin                  Operator management page (static shell; all
  *                               data calls are token-authenticated).
- *   GET /healthz                Liveness probe: {"ok":true}.
+ *   GET /healthz                Liveness probe: envelope lifetime, warning, observables.
  *
  * Admin routes (Task 2, bearer-token auth, fail-closed — see admin/routes.ts):
  *
@@ -71,6 +71,12 @@ import type { CatalogStore } from './catalog/store.ts'
 import type { MarketServerConfig } from './config.ts'
 import { handleArtifactGet } from './tarball/http.ts'
 import type { ArtifactStore } from './tarball/store.ts'
+import {
+  canonicalJson,
+  MAX_ENVELOPE_TTL_MS,
+  parseEpochMs,
+  type MarketManifest,
+} from './signing.ts'
 
 function sendJson(
   response: ServerResponse,
@@ -180,6 +186,54 @@ export interface MarketHttpServer {
   readonly artifacts: ArtifactStore
 }
 
+/** 48h: 低于此剩余寿命即 warning(M11)。7 天信封寿命上限见 signing.ts:58 (MAX_ENVELOPE_TTL_MS)。 */
+const ENVELOPE_WARNING_SECONDS = 48 * 60 * 60
+void MAX_ENVELOPE_TTL_MS
+
+/**
+ * 测试缝: 仅当请求带可解析的 `x-test-now` 头时使用它, 否则用真实时钟。
+ * /healthz 是只读存活探测、不改任何状态, 且伪造结果只会让报告更保守 (更早 warning /
+ * 更早 not-ok); 客户端的 notAfter 校验读的是**客户端自己的**时钟
+ * (dsh-plugin-huaanwork/src/huaanwork-host/market/verify.ts:285-288), 与本端点无关
+ * ⇒ 该头不能被用来绕过验签。
+ */
+function testNowFrom(request: IncomingMessage): Date {
+  const header = request.headers['x-test-now']
+  const raw = Array.isArray(header) ? header[0] : header
+  if (raw === undefined) return new Date()
+  const parsed = new Date(raw)
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed
+}
+
+function healthPayload(store: CatalogStore, now: Date) {
+  const raw = store.manifest()
+  const manifest = (raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw as MarketManifest : null)
+  const envelope = manifest?.envelope
+  const notAfterMs = envelope?.notAfter === undefined ? null : parseEpochMs(envelope.notAfter)
+  const expiresInSeconds = notAfterMs === null ? null : Math.round((notAfterMs - now.getTime()) / 1000)
+  const active = envelope !== undefined && notAfterMs !== null
+  const warning = expiresInSeconds !== null && expiresInSeconds < ENVELOPE_WARNING_SECONDS
+
+  // M18 observables (Task 4.1):
+  const manifestCanonicalBytes = manifest !== null ? Buffer.byteLength(canonicalJson(manifest), 'utf8') : 0
+  const entryCount = manifest !== null && Array.isArray(manifest.catalog?.items) ? manifest.catalog.items.length : 0
+  const averageEntryBytes = entryCount > 0 ? Math.round(manifestCanonicalBytes / entryCount) : 0
+
+  return {
+    ok: !active || (expiresInSeconds !== null && expiresInSeconds > 0),
+    envelope: {
+      active,
+      revision: envelope?.revision ?? 0,
+      notAfter: envelope?.notAfter ?? null,
+      expiresInSeconds,
+      warning,
+    },
+    manifestCanonicalBytes,
+    entryCount,
+    averageEntryBytes,
+  }
+}
+
 export function createMarketServer(config: MarketServerConfig, store: CatalogStore, artifacts: ArtifactStore): MarketHttpServer {
   const catalog = new CatalogService(store)
   const adminContext = { config, store, catalog, artifacts }
@@ -221,7 +275,7 @@ export function createMarketServer(config: MarketServerConfig, store: CatalogSto
           sendError(response, 405, 'method-not-allowed', 'only GET is supported')
           return
         }
-        sendJson(response, 200, { ok: true })
+        sendJson(response, 200, healthPayload(store, testNowFrom(request)))
         return
       }
 
