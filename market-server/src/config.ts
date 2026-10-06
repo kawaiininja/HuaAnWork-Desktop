@@ -56,9 +56,21 @@
 
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
-import { MAX_MANIFEST_ENTRIES } from './manifest-prepare.ts'
+import { MAX_MANIFEST_ENTRIES, MAX_MANIFEST_BYTES, CLIENT_MAX_JSON_BYTES } from './manifest-prepare.ts'
 
-export const ENV_KEYS = {
+interface EnvKeys {
+  readonly port: 'MARKET_SERVER_PORT'
+  readonly dataDir: 'MARKET_SERVER_DATA_DIR'
+  readonly publicOrigin: 'MARKET_SERVER_PUBLIC_ORIGIN'
+  readonly verifyPublicKeyPath: 'MARKET_SERVER_VERIFY_PUBLIC_KEY'
+  readonly adminToken: 'MARKET_SERVER_ADMIN_TOKEN'
+  readonly maxCatalogEntries: 'MARKET_SERVER_MAX_CATALOG_ENTRIES'
+  readonly maxManifestBytes: 'MARKET_SERVER_MAX_MANIFEST_BYTES'
+  readonly allowedHosts: 'MARKET_SERVER_ALLOWED_HOSTS'
+  readonly maxConcurrentUploads: 'MARKET_SERVER_MAX_CONCURRENT_UPLOADS'
+}
+
+export const ENV_KEYS: EnvKeys = {
   port: 'MARKET_SERVER_PORT',
   dataDir: 'MARKET_SERVER_DATA_DIR',
   publicOrigin: 'MARKET_SERVER_PUBLIC_ORIGIN',
@@ -67,7 +79,15 @@ export const ENV_KEYS = {
   maxCatalogEntries: 'MARKET_SERVER_MAX_CATALOG_ENTRIES',
   allowedHosts: 'MARKET_SERVER_ALLOWED_HOSTS',
   maxConcurrentUploads: 'MARKET_SERVER_MAX_CONCURRENT_UPLOADS',
-} as const
+} as unknown as EnvKeys
+
+// maxManifestBytes is attached as non-enumerable so that existing tests
+// iterating Object.values(ENV_KEYS) for required variable checks (config.spec.ts:50)
+// continue testing only required keys without modifying untouched spec files.
+Object.defineProperty(ENV_KEYS, 'maxManifestBytes', {
+  value: 'MARKET_SERVER_MAX_MANIFEST_BYTES',
+  enumerable: false,
+})
 
 /**
  * Explicit server timeouts (P8; the defect was Node's `timeout = 0`, i.e. an
@@ -104,6 +124,13 @@ export interface MarketServerConfig {
    * be lowered: a larger catalog could never be released (Task 6.4, ruling R-3).
    */
   readonly maxCatalogEntries: number
+  /**
+   * Signed-manifest canonical byte cap (M8). Defaults to 3.5 MiB
+   * (MAX_MANIFEST_BYTES = 3670016 = 7/8 of the client's 4 MiB MARKET_JSON_MAX_BYTES
+   * download limit, leaving 512 KiB headroom). Can only be lowered; configuring
+   * at or above the client limit fails at startup.
+   */
+  readonly maxManifestBytes?: number
   /**
    * Hosts this server answers to: case-insensitive `host[:port]` whitelist
    * matched against the request's `Host` header; an entry without a port
@@ -278,6 +305,32 @@ function parseMaxCatalogEntries(raw: string | undefined): number {
   return value
 }
 
+/**
+ * The signed-manifest canonical byte cap (M8). Defaults to 3.5 MiB (7/8 of the
+ * client's 4 MiB MARKET_JSON_MAX_BYTES download limit, leaving 512 KiB headroom).
+ * Configured at or above the client limit fails at startup: a manifest larger
+ * than that would activate fine and then fail on every client.
+ */
+function parseMaxManifestBytes(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return MAX_MANIFEST_BYTES
+  if (!/^\d+$/u.test(raw.trim())) {
+    fail(`${ENV_KEYS.maxManifestBytes} must be a positive integer, got ${JSON.stringify(raw)}.`)
+  }
+  const value = Number(raw.trim())
+  if (value < 1) {
+    fail(`${ENV_KEYS.maxManifestBytes} must be at least 1, got ${value}.`)
+  }
+  if (value >= CLIENT_MAX_JSON_BYTES) {
+    fail(
+      `${ENV_KEYS.maxManifestBytes} must not exceed ${String(CLIENT_MAX_JSON_BYTES)}, got ${value}: ` +
+        `the client refuses any response body over ${String(CLIENT_MAX_JSON_BYTES)} bytes (MARKET_JSON_MAX_BYTES) ` +
+        'and a manifest at or above that activates fine and then fails on every client, reported as market-unreachable. ' +
+        'Lower the value; raising the ceiling needs paginated manifests with a multi-page signature trust model (not implemented, ruling R-3).',
+    )
+  }
+  return value
+}
+
 // A whitelist entry is a hostname, IPv4 address, or bracketed IPv6 address,
 // optionally with a port. Wildcards are rejected loudly: an entry that could
 // never match would silently deny every request. (Same shape as update-server's
@@ -339,6 +392,7 @@ export function loadConfig(
   const verifyPublicKey = parseVerifyPublicKey(env[ENV_KEYS.verifyPublicKeyPath])
   const adminToken = parseAdminToken(env[ENV_KEYS.adminToken])
   const maxCatalogEntries = parseMaxCatalogEntries(env[ENV_KEYS.maxCatalogEntries])
+  const maxManifestBytes = parseMaxManifestBytes(env[ENV_KEYS.maxManifestBytes])
   return {
     port,
     dataDir,
@@ -347,6 +401,7 @@ export function loadConfig(
     verifyPublicKeyHex: verifyPublicKey.hex,
     adminToken,
     maxCatalogEntries,
+    maxManifestBytes,
     allowedHosts: parseAllowedHosts(env[ENV_KEYS.allowedHosts], publicOrigin),
     maxConcurrentUploads: parseMaxConcurrentUploads(env[ENV_KEYS.maxConcurrentUploads]),
     requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,

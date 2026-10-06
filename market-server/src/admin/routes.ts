@@ -45,6 +45,7 @@ import { DuplicateEntryError, EntryNotFoundError, ManifestActivationConflictErro
 import type { CatalogEntry, CatalogEntryPatch, CatalogStore } from '../catalog/store.ts'
 import type { MarketServerConfig } from '../config.ts'
 import { intakeSignature, ManifestPrepareError, preparePendingManifest, type IntakeVerdict } from '../manifest-prepare.ts'
+import { canonicalJson, type MarketManifest } from '../signing.ts'
 import { isSafeArtifactName } from '../tarball/http.ts'
 import { TarballError, extractPackageManifestFromFile } from '../tarball/parse.ts'
 import { checkPublishGate } from '../tarball/gate.ts'
@@ -594,14 +595,22 @@ export async function handleAdminRequest(
 
   try {
     if (pathname === `${ADMIN_ROUTE_PREFIX}state` && method === 'GET') {
-      const manifest = ctx.store.manifest()
+      const rawManifest = ctx.store.manifest()
+      const activeManifest = (rawManifest !== null && typeof rawManifest === 'object' && !Array.isArray(rawManifest)
+        ? rawManifest as MarketManifest
+        : null)
+      const manifestCanonicalBytes = activeManifest !== null ? Buffer.byteLength(canonicalJson(activeManifest), 'utf8') : 0
+      const entryCount = activeManifest !== null && Array.isArray(activeManifest.catalog?.items) ? activeManifest.catalog.items.length : 0
+      const averageEntryBytes = entryCount > 0 ? Math.round(manifestCanonicalBytes / entryCount) : 0
       sendJson(response, 200, {
         adminEnabled: true,
         entries: ctx.store.entries(),
-        entryCount: ctx.store.entries().length,
+        entryCount,
+        manifestCanonicalBytes,
+        averageEntryBytes,
         maxRevision: ctx.store.maxRevision(),
-        activeRevision: activeRevision(manifest),
-        active: manifest !== null,
+        activeRevision: activeRevision(rawManifest),
+        active: activeManifest !== null,
         pending: ctx.store.pendingManifest() !== null,
         // P11b: the operator page lists deletable artifacts separately from
         // referenced ones; the flag is computed here (one judgment, all three
@@ -626,9 +635,9 @@ export async function handleAdminRequest(
     }
 
     if (pathname === `${ADMIN_ROUTE_PREFIX}manifest/prepare` && method === 'POST') {
-      let manifest: Awaited<ReturnType<typeof preparePendingManifest>>
+      let prepared: Awaited<ReturnType<typeof preparePendingManifest>>
       try {
-        manifest = await preparePendingManifest({
+        prepared = await preparePendingManifest({
           store: ctx.store,
           catalog: ctx.catalog,
           config: ctx.config,
@@ -641,7 +650,7 @@ export async function handleAdminRequest(
         // guidance (e.g. "Split the source before releasing") in server logs
         // and mislabels a data-side problem as an internal error.
         if (cause instanceof ManifestPrepareError) {
-          const status = cause.code === 'catalog-too-large' ? 422 : 409
+          const status = cause.code === 'catalog-too-large' || cause.code === 'manifest-too-large' ? 422 : 409
           // Ruling D-M6-26: a refusal caused by a contract-violating stored
           // entry reaches the operator in the response body (this route is
           // token-authenticated, so the named entry + reason are allowed) and
@@ -654,7 +663,12 @@ export async function handleAdminRequest(
         }
         throw cause
       }
-      sendJson(response, 200, { pendingManifest: manifest })
+      sendJson(response, 200, {
+        pendingManifest: prepared.manifest,
+        manifestCanonicalBytes: prepared.manifestCanonicalBytes,
+        entryCount: prepared.entryCount,
+        averageEntryBytes: prepared.averageEntryBytes,
+      })
       return true
     }
 

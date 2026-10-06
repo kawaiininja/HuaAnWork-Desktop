@@ -28,9 +28,11 @@
  * wrapper detaches them before parsing — proven by tests).
  */
 
+import { readFileSync } from 'node:fs'
 import {
   ENVELOPE_VERSION,
   MAX_ENVELOPE_TTL_MS,
+  canonicalJson,
   fingerprintPublicKeyHex,
   verifyWithKeySlots,
   type KeySlotConfig,
@@ -59,8 +61,22 @@ import type { MarketServerConfig } from './config.ts'
  */
 export const MAX_MANIFEST_ENTRIES = 200
 
+/**
+ * Signed-manifest byte cap (M8). The client refuses any response body over
+ * MARKET_JSON_MAX_BYTES (4 MiB, catalog-client.ts:51), and the two packages may not
+ * import each other (dependency direction guard), so the budget lives in a root
+ * fixture both sides read -- the same mechanism M6 established for
+ * scripts/expected-root-gate-scripts.json (P21).
+ */
+const MANIFEST_BYTE_BUDGET = JSON.parse(
+  readFileSync(new URL('../../scripts/market-manifest-byte-budget.json', import.meta.url), 'utf8'),
+) as { readonly fixtureVersion: number; readonly clientMaxJsonBytes: number; readonly serverMaxManifestBytes: number }
+
+export const CLIENT_MAX_JSON_BYTES = MANIFEST_BYTE_BUDGET.clientMaxJsonBytes
+export const MAX_MANIFEST_BYTES = MANIFEST_BYTE_BUDGET.serverMaxManifestBytes
+
 export class ManifestPrepareError extends Error {
-  readonly code: 'catalog-too-large' | 'artifact-missing' | 'catalog-entry-invalid'
+  readonly code: 'catalog-too-large' | 'manifest-too-large' | 'artifact-missing' | 'catalog-entry-invalid'
 
   constructor(code: ManifestPrepareError['code'], message: string) {
     super(message)
@@ -135,6 +151,7 @@ export async function buildPendingManifest(args: {
   readonly domain: string
   readonly now: Date
   readonly maxEntries: number
+  readonly maxManifestBytes: number
   readonly artifactSize: (fileName: string) => Promise<number | null>
 }): Promise<MarketManifest> {
   const entries = args.store.entries()
@@ -181,7 +198,7 @@ export async function buildPendingManifest(args: {
   }
 
   const issuedAtMs = args.now.getTime()
-  return {
+  const manifest: MarketManifest = {
     envelope: {
       version: ENVELOPE_VERSION,
       domain: args.domain,
@@ -197,6 +214,34 @@ export async function buildPendingManifest(args: {
     },
     files,
   }
+
+  const canonical = canonicalJson(manifest)
+  const canonicalBytes = Buffer.byteLength(canonical, 'utf8')
+  if (canonicalBytes > args.maxManifestBytes) {
+    throw new ManifestPrepareError(
+      'manifest-too-large',
+      `the signed manifest would be ${String(canonicalBytes)} canonical bytes but the cap is ${String(args.maxManifestBytes)} ` +
+        `(the client refuses any response body over ${String(MANIFEST_BYTE_BUDGET.clientMaxJsonBytes)} bytes; ` +
+        `a manifest larger than that activates fine and then fails on every client, reported as market-unreachable). ` +
+        `Split the source before releasing — paginated / multi-page manifests are not implemented (ruling R-3, deferred by R-M7-7 as M18).`,
+    )
+  }
+
+  Object.defineProperty(manifest, 'canonicalBytes', {
+    value: canonicalBytes,
+    enumerable: false,
+    writable: false,
+    configurable: true,
+  })
+
+  return manifest
+}
+
+export interface PreparePendingManifestResult {
+  readonly manifest: MarketManifest
+  readonly manifestCanonicalBytes: number
+  readonly entryCount: number
+  readonly averageEntryBytes: number
 }
 
 /** PREPARE step: build + persist the canonical pending manifest. */
@@ -206,7 +251,7 @@ export async function preparePendingManifest(args: {
   readonly config: MarketServerConfig
   readonly now?: Date
   readonly artifactSize: (fileName: string) => Promise<number | null>
-}): Promise<MarketManifest> {
+}): Promise<PreparePendingManifestResult> {
   const now = args.now ?? new Date()
   const manifest = await buildPendingManifest({
     store: args.store,
@@ -214,10 +259,25 @@ export async function preparePendingManifest(args: {
     domain: args.config.publicOrigin,
     now,
     maxEntries: args.config.maxCatalogEntries,
+    maxManifestBytes: args.config.maxManifestBytes ?? MAX_MANIFEST_BYTES,
     artifactSize: args.artifactSize,
   })
   await args.store.setPendingManifest(manifest)
-  return manifest
+  const canonicalBytes = (manifest as unknown as { canonicalBytes?: number }).canonicalBytes
+    ?? Buffer.byteLength(canonicalJson(manifest), 'utf8')
+  const entryCount = manifest.catalog.items.length
+  const averageEntryBytes = entryCount > 0 ? Math.round(canonicalBytes / entryCount) : 0
+
+  // Expose observables while preserving the MarketManifest shape for existing
+  // callers/tests that expect the return value to be the MarketManifest itself.
+  const result = Object.defineProperties(manifest, {
+    manifest: { value: manifest, enumerable: false },
+    manifestCanonicalBytes: { value: canonicalBytes, enumerable: false },
+    entryCount: { value: entryCount, enumerable: false },
+    averageEntryBytes: { value: averageEntryBytes, enumerable: false },
+  }) as unknown as PreparePendingManifestResult
+
+  return result
 }
 
 /**

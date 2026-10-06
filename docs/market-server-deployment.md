@@ -221,6 +221,20 @@ node --experimental-strip-types src/index.ts
 > 与启动校验的硬上限都取自它（`catalog/service.ts` 的 `MAX_PAGE_ITEMS = 200` 是
 > 单请求页大小上限，与本上限无关）。
 
+**清单字节上限(M8,2026-10-05)**:条目数不是唯一的上限。客户端对**整个响应体**设有
+`MARKET_JSON_MAX_BYTES = 4 MiB` 的帽(`dsh-plugin-huaanwork/src/huaanwork-host/market/catalog-client.ts:51`),
+而服务端此前只有条目数守卫 ⇒ `prepare` 会照签一份客户端拉不下来的清单、`intake` 会照激活它,
+**激活之后全部客户端才开始失败**,且失败被重包成 `market-unreachable`(502)——归因错误。
+现服务端在条目数守卫之后再设一道 `MARKET_SERVER_MAX_MANIFEST_BYTES`(默认 3.5 MiB = 客户端帽的 7/8,
+留出传输信封与将来字段增长的余量),超限即 **422 `manifest-too-large`**,错误信息给出实测 canonical
+字节数、帽值与唯一出路(拆源;分页/多页签名是 M18,按 R-3 与 R-M7-7 延后)。
+两个数字**互相不得 import**(依赖方向红线),故经 root `scripts/market-manifest-byte-budget.json`
+对账,两侧各有一条测试钉住自己与 fixture 相等(机制同 M6 为消解 P21 而建的
+`scripts/expected-root-gate-scripts.json`)。
+**运营观测量**:`/v1/admin/state` 与 `/healthz` 暴露 `manifestCanonicalBytes` / `entryCount` /
+`averageEntryBytes` 三个量,它们正是 M18 三个触发条件(条目 ≥150 / canonical ≥3 MiB / 平均元数据 ≥15 KB)
+的可打印形式 —— **巡检时直接读这三个数,不要人工估算**(债表 `AGENTS.md:45`)。
+
 **超过 200 个插件需要什么（未实现，延后）**：分页清单 + **多页签名的信任
 模型**——须先解「一个签名信封如何覆盖多页」（页间绑定、页序、缺页检测）这一
 独立设计问题。裁定 R-3：M6 只做「上限可配置 + 文档诚实化」，分页 / 多页签名

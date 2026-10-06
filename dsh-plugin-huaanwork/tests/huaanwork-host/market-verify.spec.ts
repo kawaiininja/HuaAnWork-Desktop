@@ -6,6 +6,9 @@
  * 不存在「无公钥放行」路径;三负例(篡改清单/缺签名/错公钥)。
  */
 import { describe, expect, test } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { MARKET_JSON_MAX_BYTES } from '../../src/huaanwork-host/market/catalog-client.ts'
 import {
   HuaanworkMarketConfigError,
   PINS_AT_RELEASE,
@@ -256,4 +259,15 @@ describe('wrapper mirrors the P9/P10 hardening (market-server Task 6.5)', () => 
     expect(checkEnvelope({ ...vector.manifest.envelope }, { ...contextOf(vector), now: issuedAtMs - 300_000 }))
       .toEqual({ ok: false, reason: 'not-yet-valid' })
   })
+
+  test('MARKET_JSON_MAX_BYTES stays above the server-side manifest cap (M8 cross-package budget)', () => {
+    // 两端互相不得 import(依赖方向红线),故经 root fixture 对账。跨边界 readFileSync 的
+    // 深度是 ../../../scripts/(从 huaanwork-host/tests/ 到根)。
+    const budget = JSON.parse(
+      readFileSync(join(import.meta.dirname, '../../../scripts/market-manifest-byte-budget.json'), 'utf8'),
+    ) as { clientMaxJsonBytes: number; serverMaxManifestBytes: number }
+    expect(MARKET_JSON_MAX_BYTES).toBe(budget.clientMaxJsonBytes)
+    expect(budget.serverMaxManifestBytes).toBeLessThan(budget.clientMaxJsonBytes)
+  })
 })
+

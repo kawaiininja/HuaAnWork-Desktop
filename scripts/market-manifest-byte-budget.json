@@ -1,0 +1,12 @@
+{
+  "fixtureVersion": 1,
+  "clientMaxJsonBytes": 4194304,
+  "serverMaxManifestBytes": 3670016,
+  "headroomRatio": 0.875,
+  "m18Triggers": {
+    "entryCount": 150,
+    "manifestCanonicalBytes": 3145728,
+    "averageEntryBytes": 15360
+  },
+  "note": "clientMaxJsonBytes mirrors MARKET_JSON_MAX_BYTES in dsh-plugin-huaanwork/src/huaanwork-host/market/catalog-client.ts:51 (4 MiB). serverMaxManifestBytes is 7/8 of it so prepare refuses a manifest that would leave less than 512 KiB for the HTTP envelope, headers and any future field growth. m18Triggers are the three observability thresholds from the AGENTS.md:45 debt row (ruling R-M7-7's rewrite of R-3); they are reporting thresholds, not enforcement caps. Neither side may import the other (dependency direction guard), so both read this file with readFileSync -- the same mechanism M6 established for scripts/expected-root-gate-scripts.json (P21)."
+}
