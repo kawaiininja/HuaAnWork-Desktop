@@ -76,6 +76,7 @@ export default function MarketSourcePanel({
   const [applyRestart, setApplyRestart] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [desktopSettingsReachable, setDesktopSettingsReachable] = useState(false);
+  const [restartRequesting, setRestartRequesting] = useState(false);
 
   const readProvider = useCallback(async () => {
     setProviderPhase("loading");
@@ -100,11 +101,17 @@ export default function MarketSourcePanel({
   }, [readProvider]);
 
   const requestDesktopRestart = async () => {
+    // M7 review fix round: 在飞守卫 —— MarketView 的重启按钮有
+    // restartRequesting 门,此处此前没有,双击会双发 /api/desktop/restart。
+    if (restartRequesting) return;
+    setRestartRequesting(true);
     try {
       await createDesktopSettingsApi().restart();
     } catch {
       // 选择已保存，不得谎报为「未保存」；诚实告知需手动重启。
       setApplyError("选择已保存，但重启请求未成功；请手动退出并重新打开应用以生效。");
+    } finally {
+      setRestartRequesting(false);
     }
   };
 
@@ -238,8 +245,13 @@ export default function MarketSourcePanel({
                   marketRestartAction: false,
                   desktopRestartRoute: desktopSettingsReachable,
                 }).canRestart ? (
-                  <button type="button" className="btn primary" onClick={() => void requestDesktopRestart()}>
-                    立即重启
+                  <button
+                    type="button"
+                    className="btn primary"
+                    disabled={restartRequesting}
+                    onClick={() => void requestDesktopRestart()}
+                  >
+                    {restartRequesting ? "重启中…" : "立即重启"}
                   </button>
                 ) : (
                   <p className="hint">{RESTART_UNAVAILABLE_NOTICE}</p>

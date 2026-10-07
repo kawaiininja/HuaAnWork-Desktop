@@ -164,6 +164,9 @@ export default function MarketView() {
   const [pendingRestart, setPendingRestart] = useState(false);
   const [pendingRestartContext, setPendingRestartContext] = useState<"install" | "remove" | null>(null);
   const [desktopSettingsReachable, setDesktopSettingsReachable] = useState(false);
+  // M7 review fix round: 探针是否已落定。未落定时不得渲染「未提供重启入口」
+  // —— 那是结论态文案,在首次探测返回前出现就是闪烁的失实声称。
+  const [desktopSettingsProbeSettled, setDesktopSettingsProbeSettled] = useState(false);
   const [restartRequesting, setRestartRequesting] = useState(false);
 
   const loadCatalogSide = useCallback(async () => {
@@ -223,6 +226,8 @@ export default function MarketView() {
         setDesktopSettingsReachable(true);
       } catch {
         // 桌面通道探测失败时静默忽略（不可达，回落至 market action 或 none）
+      } finally {
+        if (alive) setDesktopSettingsProbeSettled(true);
       }
     })();
     void loadCatalogSide();
@@ -231,6 +236,27 @@ export default function MarketView() {
       alive = false;
     };
   }, [loadCatalogSide, loadInstallations]);
+
+  // M7 review fix round: 挂载时的一次性探测遇到瞬时失败(宿主尚在启动、单发丢包)
+  // 会把整条会话永久降级为「未提供重启入口」。在横幅真正出现的时刻重探一次,
+  // 让瞬时故障在用户需要的当下自愈;成功的探测结果仍然缓存(不重探)。
+  useEffect(() => {
+    if (!pendingRestart || desktopSettingsReachable) return;
+    let alive = true;
+    void (async () => {
+      try {
+        await createDesktopSettingsApi().read();
+        if (alive) setDesktopSettingsReachable(true);
+      } catch {
+        // 仍然不可达:保持既有兜底文案,不放大错误。
+      } finally {
+        if (alive) setDesktopSettingsProbeSettled(true);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [pendingRestart, desktopSettingsReachable]);
 
   // D13 轮询恢复：remoteExecuting 期间每 2s 读 /state，飞行结束即清标识并
   // 刷新目录与已装列表（自恢复）；unmount 时清理定时器。本地发起的 execute
@@ -522,9 +548,11 @@ export default function MarketView() {
             >
               {restartRequesting ? "重启中…" : "立即重启"}
             </button>
-          ) : (
+          ) : desktopSettingsProbeSettled ? (
+            // 结论态文案:只有首次探测落定后才允许声称「未提供入口」,
+            // 否则横幅一出现就闪一句失实的不可用(M7 review fix round)。
             <span className="market-pending-hint">{RESTART_UNAVAILABLE_NOTICE}</span>
-          )}
+          ) : null}
         </div>
       ) : null}
 
