@@ -42,10 +42,56 @@ test('a drifted README version makes the guard exit non-zero', () => {
       join(root, 'dsh-plugin-huaanwork', 'README.md'),
       '# x\n\n`HuaAnWork-0.1.0-x64-Setup.exe`\n',
     )
+    writeFileSync(
+      join(root, 'dsh-plugin-huaanwork', 'README.zh.md'),
+      '# x\n\n`HuaAnWork-0.2.0-x64-Portable.zip`\n',
+    )
     const result = checkReadmeVersions(root)
     assert.strictEqual(result.violations.length, 1)
     assert.match(result.violations[0].reason, /0\.1\.0/u)
     assert.match(result.violations[0].reason, /0\.2\.0/u)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a missing in-scope README is a violation, not a vacuous pass (M7 review fix round)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'readme-versions-missing-'))
+  try {
+    mkdirSync(join(root, 'dsh-plugin-huaanwork'), { recursive: true })
+    writeFileSync(
+      join(root, 'dsh-plugin-huaanwork', 'package.json'),
+      `${JSON.stringify({ name: 'dsh-plugin-huaanwork', version: '0.2.0' }, null, 2)}\n`,
+    )
+    // 只写 zh 一个;删掉另一个在管 README 不得让守卫反而更绿。
+    writeFileSync(
+      join(root, 'dsh-plugin-huaanwork', 'README.zh.md'),
+      '# x\n\n`HuaAnWork-0.2.0-x64-Portable.zip`\n',
+    )
+    const result = checkReadmeVersions(root)
+    assert.strictEqual(result.violations.length, 1)
+    assert.strictEqual(result.violations[0].file, 'dsh-plugin-huaanwork/README.md')
+    assert.match(result.violations[0].reason, /not found/u)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a README with zero artifact version strings is a violation, not a vacuous pass (M7 review fix round)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'readme-versions-zero-'))
+  try {
+    mkdirSync(join(root, 'dsh-plugin-huaanwork'), { recursive: true })
+    writeFileSync(
+      join(root, 'dsh-plugin-huaanwork', 'package.json'),
+      `${JSON.stringify({ name: 'dsh-plugin-huaanwork', version: '0.2.0' }, null, 2)}\n`,
+    )
+    // 版本串被连同文案一起改写掉的形态:两个 README 都零命中 ⇒ checked=0,旧守卫全绿。
+    writeFileSync(join(root, 'dsh-plugin-huaanwork', 'README.md'), '# x\n\nno versions here\n')
+    writeFileSync(join(root, 'dsh-plugin-huaanwork', 'README.zh.md'), '# x\n\nalso none\n')
+    const result = checkReadmeVersions(root)
+    assert.strictEqual(result.checked, 0)
+    assert.strictEqual(result.violations.length, 2)
+    assert.ok(result.violations.every(v => /pass vacuously/u.test(v.reason)))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

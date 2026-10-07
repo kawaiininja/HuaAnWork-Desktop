@@ -53,11 +53,20 @@ export function checkReadmeVersions(root) {
     for (const readme of scope.readmes) {
       const path = `${scope.packageDir}/${readme}`
       const fullPath = join(root, path)
-      if (!existsSync(fullPath)) continue
+      // M7 review fix round: 两个 vacuous-pass 方向的封堵 ——
+      // ① 在管 README 不存在 ⇒ 守卫无从谈起,必须红而不是绿;
+      // ② README 存在但零命中 ⇒ 守卫对该文件同样什么都没守住(版本串被
+      //    连同文案一起删掉的漂移会静默全绿),同样必须红。
+      if (!existsSync(fullPath)) {
+        violations.push({ file: path, reason: 'in-scope README not found; a version guard may not pass on files it cannot read' })
+        continue
+      }
       const text = readFileSync(fullPath, 'utf8')
       const lines = text.split('\n')
+      let fileMatches = 0
       lines.forEach((line, index) => {
         for (const match of line.matchAll(scope.artifactPattern)) {
+          fileMatches += 1
           checked += 1
           if (match[1] !== expected) {
             violations.push({
@@ -68,6 +77,9 @@ export function checkReadmeVersions(root) {
           }
         }
       })
+      if (fileMatches === 0) {
+        violations.push({ file: path, reason: 'no artifact version strings matched the scope pattern; the guard would pass vacuously on this file' })
+      }
     }
   }
   return { checked, violations }
