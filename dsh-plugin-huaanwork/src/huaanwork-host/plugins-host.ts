@@ -402,6 +402,16 @@ export async function removePlugin(routeCtx: PluginMutationContext, name: string
     routeCtx.checkpointUserDataDir
     ?? (routeCtx.runtimeCtx as { huaanworkCheckpointUserDataDir?: string } | undefined)?.huaanworkCheckpointUserDataDir
     ?? ''
+  if (checkpointUserDataDir === '') {
+    // M7 review fix round: '' is the deliberate pre-D9 behavior on non-Desktop
+    // hosts (pinned by market-install.spec.ts), but on a Desktop host it means
+    // the holders mixin never wired the config value — the exact silent
+    // degradation Task 3.1 set out to remove. Say it out loud either way.
+    routeCtx.logger(
+      'plugin remove: checkpointUserDataDir unavailable; artifact GC runs checkpoint-blind ' +
+        '(pre-D9 behavior: a later checkpoint restore may resolve a dangling file: reference to a removed artifact)',
+    )
+  }
   gcRemovedPackageArtifacts(routeCtx.profileDir, name, checkpointUserDataDir, routeCtx.logger)
   if (!await routeCtx.requestRestart()) {
     return {

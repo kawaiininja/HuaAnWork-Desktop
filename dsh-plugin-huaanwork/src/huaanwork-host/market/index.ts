@@ -72,7 +72,13 @@ export function apply(ctx: Context): void {
   const logger = (message: string) => { ctx.logger?.info(message) }
   ctx.effect(() => {
     // 启动时惰性清扫孤儿制品(N1 GC:只删无 file: 引用者;有引用者删了必坏)。
-    sweepOrphanMarketArtifacts(profiles.current.dir, ctx.huaanworkCheckpointUserDataDir ?? '', logger)
+    const checkpointUserDataDir = ctx.huaanworkCheckpointUserDataDir ?? ''
+    if (checkpointUserDataDir === '') {
+      // M7 review fix round:与 plugins-host 的 remove 流同一纪律 —— checkpoint-blind
+      // 可以是非 Desktop 宿主的合法形态,但不得无声。
+      logger('huaanwork-market: checkpointUserDataDir unavailable; orphan-artifact sweep runs checkpoint-blind (pre-D9 behavior)')
+    }
+    sweepOrphanMarketArtifacts(profiles.current.dir, checkpointUserDataDir, logger)
     // 7 条表外 market routes(守则 5;ROUTE_TABLE 54 不破)。
     const disposeRoutes = registerMarketRoutes(ctx, {
       profileDir: profiles.current.dir,
