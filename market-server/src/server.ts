@@ -191,18 +191,24 @@ const ENVELOPE_WARNING_SECONDS = 48 * 60 * 60
 void MAX_ENVELOPE_TTL_MS
 
 /**
- * 测试缝: 仅当请求带可解析的 `x-test-now` 头时使用它, 否则用真实时钟。
- * /healthz 是只读存活探测、不改任何状态, 且伪造结果只会让报告更保守 (更早 warning /
- * 更早 not-ok); 客户端的 notAfter 校验读的是**客户端自己的**时钟
- * (dsh-plugin-huaanwork/src/huaanwork-host/market/verify.ts:285-288), 与本端点无关
+ * 测试缝 (R-M7-12, 2026-10-07 裁定①): 仅当请求带可解析的 `x-test-now` 头**且其值在
+ * 将来**时才使用它; 过去时间与不可解析值一律忽略、回落真实时钟。
+ * 原处方 (M7 计划 `:3181-3182`) 的安全论证「伪造只会让报告更保守」只对将来时间成立 ——
+ * 过去时间会夸大 `expiresInSeconds`、压制 48h warning, 把临近过期显示成健康 (假健康
+ * 方向, 恰好是该论证声称不可能的方向)。裁定后只保留「假告警」方向: 将来时间让报告
+ * 更早 warning / 更早 not-ok (更保守), 假健康方向在解析处即被消除。
+ * /healthz 是只读存活探测、不改任何状态; 客户端的 notAfter 校验读的是**客户端自己的**
+ * 时钟 (dsh-plugin-huaanwork/src/huaanwork-host/market/verify.ts:285-288), 与本端点无关
  * ⇒ 该头不能被用来绕过验签。
  */
 function testNowFrom(request: IncomingMessage): Date {
+  const now = new Date()
   const header = request.headers['x-test-now']
   const raw = Array.isArray(header) ? header[0] : header
-  if (raw === undefined) return new Date()
+  if (raw === undefined) return now
   const parsed = new Date(raw)
-  return Number.isNaN(parsed.getTime()) ? new Date() : parsed
+  if (Number.isNaN(parsed.getTime())) return now
+  return parsed.getTime() > now.getTime() ? parsed : now
 }
 
 function healthPayload(store: CatalogStore, now: Date) {
@@ -219,8 +225,14 @@ function healthPayload(store: CatalogStore, now: Date) {
   const entryCount = manifest !== null && Array.isArray(manifest.catalog?.items) ? manifest.catalog.items.length : 0
   const averageEntryBytes = entryCount > 0 ? Math.round(manifestCanonicalBytes / entryCount) : 0
 
+  // M7 评审修复轮: 一份「在服务」的清单若信封缺失或 notAfter 不可解析, 每个客户端
+  // 都会以 invalid-timestamp 拒收同一份清单 —— /healthz 报 ok:true 就是把「全市场
+  // 拒收」显示成健康 (最糟的运维误导组合)。只有「从未激活过清单」(manifest === null)
+  // 才是合法的 inactive-healthy。
+  const served = manifest !== null
+
   return {
-    ok: !active || (expiresInSeconds !== null && expiresInSeconds > 0),
+    ok: !served || (active && expiresInSeconds !== null && expiresInSeconds > 0),
     envelope: {
       active,
       revision: envelope?.revision ?? 0,

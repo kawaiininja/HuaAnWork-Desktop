@@ -102,4 +102,35 @@ describe('/healthz envelope lifetime (M11)', () => {
     expect(body.entryCount).toBe(1)
     expect(typeof body.averageEntryBytes).toBe('number')
   })
+
+  it('ignores a PAST x-test-now instead of letting it inflate the remaining lifetime (R-M7-12)', async () => {
+    // 裁定①: 过去时间是「假健康」方向 —— 若被接受, expiresInSeconds 会被夸大
+    // (7 天前 ⇒ 剩余寿命凭空多出 7 天), 临近过期报告 warning:false。修复后
+    // 过去时间一律忽略, 与不带头的真实时钟读数一致 (容差 120s)。
+    await publishAndActivate('@huaanwork/probe', '1.0.0')
+    const realBody = (await (await fetch(`${market.baseUrl}/healthz`)).json()) as HealthResponseBody
+    const body = (await (await fetch(`${market.baseUrl}/healthz`, {
+      headers: { 'x-test-now': new Date(Date.now() - MAX_ENVELOPE_TTL_MS).toISOString() },
+    })).json()) as HealthResponseBody
+    expect(body.envelope.expiresInSeconds).toBeLessThanOrEqual(MAX_ENVELOPE_TTL_MS / 1000)
+    expect(Math.abs((body.envelope.expiresInSeconds ?? 0) - (realBody.envelope.expiresInSeconds ?? 0))).toBeLessThan(120)
+    expect(body.ok).toBe(true)
+  })
+
+  it('reports a served manifest with an unparseable envelope as not-ok (M7 review fix round)', async () => {
+    // 信封缺失或 notAfter 不可解析的「在服务」清单, 每个客户端都以 invalid-timestamp
+    // 拒收 ⇒ /healthz 报 ok:true 就是把「全市场拒收」显示成健康。直接以损坏状态激活
+    // (磁盘篡改/程序缺陷的现实来源), 必须 ok:false。
+    await publishAndActivate('@huaanwork/probe', '1.0.0')
+    const corrupt = {
+      envelope: { version: 1, domain: 'http://market.intranet.example:8787', revision: 2, issuedAt: 'garbage', notAfter: 'not-a-date' },
+      catalog: { schemaVersion: '1.0.0', generatedAt: new Date().toISOString(), items: [], page: { total: 0 } },
+      files: [],
+    }
+    await market.store.activate(corrupt as unknown as MarketManifest, { keyId: 'x', signature: 'y' } as never, 2)
+    const body = (await (await fetch(`${market.baseUrl}/healthz`)).json()) as HealthResponseBody
+    expect(body.ok).toBe(false)
+    expect(body.envelope.active).toBe(false)
+    expect(body.manifestCanonicalBytes).toBeGreaterThan(0)
+  })
 })
