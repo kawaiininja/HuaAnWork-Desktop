@@ -196,4 +196,3 @@ upstream-sync-dashboard: as-of 2026-10-06T23:10:07.856Z / upstream commit 2026-1
 2. **白名单面（Scope A）**：分母 36（`beta↔huaanwork` 22 条与 `stable↔beta` 19 条差异名单去重后 36 个源码/脚本路径），其中 21 个在上游改动中被触及。
 3. **三包同形面（Scope B）**：分母 162（三个包 `src/` 并集 293 个文件，交集 187 个文件，逐字节哈希一致 162 个文件）。Task 3.2 规范化清扫的 7 个死模块本来就在 162 内部且前后均保持逐字节对齐，故分母稳固保持 162（与 `AGENTS.md:51` 债表一致），其中 45 个在上游改动中被触及。
 4. **永久 Override 面（Scope C）**：分母 8（本文件 §6 动态声明的 8 个 fork 专有控制文件），其中 3 个在上游改动中存在同名更新（`scripts/verify-desktop-variants.mjs` 以及两个 package.spec.ts），同步时必须坚决压制上游覆盖。
-

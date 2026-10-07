@@ -270,4 +270,3 @@ describe('wrapper mirrors the P9/P10 hardening (market-server Task 6.5)', () => 
     expect(budget.serverMaxManifestBytes).toBeLessThan(budget.clientMaxJsonBytes)
   })
 })
-
