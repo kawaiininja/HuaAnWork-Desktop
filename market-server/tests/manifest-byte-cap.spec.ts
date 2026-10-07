@@ -7,6 +7,8 @@ import {
   MAX_MANIFEST_ENTRIES,
   MAX_MANIFEST_BYTES,
   ManifestPrepareError,
+  intakeSignature,
+  parseManifestByteBudget,
   preparePendingManifest,
   type PreparePendingManifestResult,
 } from '../src/manifest-prepare.ts'
@@ -167,5 +169,118 @@ describe('signed manifest byte cap (M8)', () => {
     // 配置得比客户端能拉的上限还高 = 配置事故,启动即拒,而不是等激活后全体客户端失败。
     expect(() => parseConfig({ env: { MARKET_SERVER_MAX_MANIFEST_BYTES: String(BUDGET.clientMaxJsonBytes) } }))
       .toThrow(/must not exceed/u)
+  })
+})
+
+describe('manifest byte budget fixture validation (M7 review fix round)', () => {
+  it('accepts the shipped fixture', () => {
+    const budget = parseManifestByteBudget(
+      JSON.parse(readFileSync(join(import.meta.dirname, '../../scripts/market-manifest-byte-budget.json'), 'utf8')),
+    )
+    expect(budget.serverMaxManifestBytes).toBe(MAX_MANIFEST_BYTES)
+    expect(budget.clientMaxJsonBytes).toBe(BUDGET.clientMaxJsonBytes)
+  })
+
+  it('rejects corrupt shapes instead of silently disabling the cap', () => {
+    // 裸 JSON.parse + 断言转换的时代,这些形状会让 `canonicalBytes > cap` 静默为假
+    // (fail-open)。现在必须在模块加载时炸出来(fail-closed = 服务不启动)。
+    expect(() => parseManifestByteBudget(null)).toThrow(/must be a JSON object/u)
+    expect(() => parseManifestByteBudget([1, 2, 3])).toThrow(/must be a JSON object/u)
+    expect(() => parseManifestByteBudget({ fixtureVersion: 1, clientMaxJsonBytes: '4194304', serverMaxManifestBytes: 3670016 }))
+      .toThrow(/clientMaxJsonBytes must be a positive integer/u)
+    expect(() => parseManifestByteBudget({ fixtureVersion: 1, clientMaxJsonBytes: 4194304, serverMaxManifestBytes: Number.NaN }))
+      .toThrow(/serverMaxManifestBytes must be a positive integer/u)
+    expect(() => parseManifestByteBudget({ fixtureVersion: 1, clientMaxJsonBytes: 4194304 }))
+      .toThrow(/serverMaxManifestBytes must be a positive integer/u)
+  })
+
+  it('rejects a fixture whose server cap meets or exceeds the client limit', () => {
+    // 反向不变式:server < client。撞线即 fail-closed,错误信息须引 M18/R-3 的出路。
+    expect(() => parseManifestByteBudget({ fixtureVersion: 1, clientMaxJsonBytes: 4194304, serverMaxManifestBytes: 4194304 }))
+      .toThrow(/must be below/u)
+    expect(() => parseManifestByteBudget({ fixtureVersion: 1, clientMaxJsonBytes: 4194304, serverMaxManifestBytes: 5000000 }))
+      .toThrow(/multi-page signature trust model/u)
+  })
+})
+
+describe('intake re-checks the current caps (M7 review fix round)', () => {
+  async function storeWithPending(entries: readonly CatalogEntry[]): Promise<{ store: CatalogStore; config: MarketServerConfig }> {
+    const dir = await mkdtemp(join(tmpdir(), 'manifest-intake-cap-'))
+    const store = await CatalogStore.open(dir)
+    await store.replaceEntries(entries)
+    const catalog = new CatalogService(store)
+    const config: MarketServerConfig = {
+      port: 8787,
+      dataDir: dir,
+      publicOrigin: 'http://market.intranet.example:8787',
+      verifyPublicKeyPath: '/nonexistent/key.hex',
+      verifyPublicKeyHex: 'a1'.repeat(32),
+      adminToken: 'test-admin-token',
+      maxCatalogEntries: MAX_MANIFEST_ENTRIES,
+      maxManifestBytes: MAX_MANIFEST_BYTES,
+      allowedHosts: ['127.0.0.1'],
+      maxConcurrentUploads: 4,
+      requestTimeoutMs: 300_000,
+      headersTimeoutMs: 60_000,
+      socketTimeoutMs: 120_000,
+    }
+    await preparePendingManifest({ store, catalog, config, artifactSize: async () => 1024 })
+    return { store, config }
+  }
+
+  it('refuses to activate a pending manifest prepared under a since-lowered byte cap', async () => {
+    // prepare 在旧(大)帽下合法;运维调低 MARKET_SERVER_MAX_MANIFEST_BYTES 后,
+    // 存量 pending 不得带着旧帽的体积激活 —— 必须拒并指出唯一出路 = 重跑 prepare。
+    const { store, config } = await storeWithPending(buildEntries({ count: 3, keywordPadding: '' }))
+    try {
+      const bytes = Buffer.byteLength(canonicalJson(store.pendingManifest()), 'utf8')
+      const verdict = await intakeSignature({
+        store,
+        config: { ...config, maxManifestBytes: bytes - 1 },
+        signatureRecord: { keyId: 'unused', signature: 'unused' },
+      })
+      expect(verdict.ok).toBe(false)
+      if (!verdict.ok) {
+        expect(verdict.reason).toMatch(/^manifest-too-large/u)
+        expect(verdict.reason).toContain('Re-run prepare')
+      }
+    } finally {
+      await store.close()
+    }
+  })
+
+  it('refuses to activate a pending manifest prepared under a since-lowered entry cap', async () => {
+    const { store, config } = await storeWithPending(buildEntries({ count: 3, keywordPadding: '' }))
+    try {
+      const verdict = await intakeSignature({
+        store,
+        config: { ...config, maxCatalogEntries: 2 },
+        signatureRecord: { keyId: 'unused', signature: 'unused' },
+      })
+      expect(verdict.ok).toBe(false)
+      if (!verdict.ok) {
+        expect(verdict.reason).toMatch(/^catalog-too-large/u)
+        expect(verdict.reason).toContain('Re-run prepare')
+      }
+    } finally {
+      await store.close()
+    }
+  })
+
+  it('passes the cap gate when the caps are unchanged (the signature verdict then decides)', async () => {
+    // 负向对照:帽未变时不得误拦 —— 失败必须来自签名裁定(dummy 签名),
+    // 而不是来自新加的两道 cap 门。
+    const { store, config } = await storeWithPending(buildEntries({ count: 3, keywordPadding: '' }))
+    try {
+      const verdict = await intakeSignature({
+        store,
+        config,
+        signatureRecord: { keyId: 'unused', signature: 'unused' },
+      })
+      expect(verdict.ok).toBe(false)
+      if (!verdict.ok) expect(verdict.reason).not.toMatch(/too-large/u)
+    } finally {
+      await store.close()
+    }
   })
 })

@@ -68,9 +68,48 @@ export const MAX_MANIFEST_ENTRIES = 200
  * fixture both sides read -- the same mechanism M6 established for
  * scripts/expected-root-gate-scripts.json (P21).
  */
-const MANIFEST_BYTE_BUDGET = JSON.parse(
-  readFileSync(new URL('../../scripts/market-manifest-byte-budget.json', import.meta.url), 'utf8'),
-) as { readonly fixtureVersion: number; readonly clientMaxJsonBytes: number; readonly serverMaxManifestBytes: number }
+export interface ManifestByteBudget {
+  readonly fixtureVersion: number
+  readonly clientMaxJsonBytes: number
+  readonly serverMaxManifestBytes: number
+}
+
+/**
+ * Validate the budget fixture at module load (M7 review fix round). A bare
+ * JSON.parse + cast would let a hand-edited fixture (string / NaN / inverted
+ * values) silently disable the cap: `canonicalBytes > maxManifestBytes` goes
+ * false for every manifest, and the client-invariant check compares a string
+ * against a number. Fail closed instead: a corrupt fixture means the server
+ * does not boot.
+ */
+export function parseManifestByteBudget(raw: unknown): ManifestByteBudget {
+  const source = 'scripts/market-manifest-byte-budget.json'
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${source} must be a JSON object, got ${Array.isArray(raw) ? 'an array' : typeof raw}.`)
+  }
+  const record = raw as Record<string, unknown>
+  for (const key of ['fixtureVersion', 'clientMaxJsonBytes', 'serverMaxManifestBytes'] as const) {
+    const value = record[key]
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+      throw new Error(`${source}.${key} must be a positive integer, got ${JSON.stringify(value)}.`)
+    }
+  }
+  const budget = raw as unknown as ManifestByteBudget
+  if (budget.serverMaxManifestBytes >= budget.clientMaxJsonBytes) {
+    throw new Error(
+      `${source}.serverMaxManifestBytes (${String(budget.serverMaxManifestBytes)}) must be below ` +
+        `clientMaxJsonBytes (${String(budget.clientMaxJsonBytes)}): a manifest at or above the client ` +
+        'download limit activates fine and then fails on every client, reported as market-unreachable. ' +
+        'Fix the fixture; raising the ceiling needs paginated manifests with a multi-page signature ' +
+        'trust model (not implemented, ruling R-3).',
+    )
+  }
+  return budget
+}
+
+const MANIFEST_BYTE_BUDGET = parseManifestByteBudget(
+  JSON.parse(readFileSync(new URL('../../scripts/market-manifest-byte-budget.json', import.meta.url), 'utf8')),
+)
 
 export const CLIENT_MAX_JSON_BYTES = MANIFEST_BYTE_BUDGET.clientMaxJsonBytes
 export const MAX_MANIFEST_BYTES = MANIFEST_BYTE_BUDGET.serverMaxManifestBytes
@@ -299,6 +338,33 @@ export async function intakeSignature(args: {
   const envelope = pending.envelope
   if (typeof envelope.revision !== 'number' || !Number.isInteger(envelope.revision) || envelope.revision < 1) {
     return { ok: false, reason: 'invalid-revision' }
+  }
+
+  // Re-check the CURRENT caps before activation (M7 review fix round): the
+  // pending manifest was capped at PREPARE time, but an operator may have
+  // lowered MARKET_SERVER_MAX_MANIFEST_BYTES / MARKET_SERVER_MAX_CATALOG_ENTRIES
+  // since. Without this gate the stale pending would activate under the new,
+  // smaller cap. Fail closed and point at the remedy: re-run prepare.
+  const maxManifestBytes = args.config.maxManifestBytes ?? MAX_MANIFEST_BYTES
+  const canonicalBytes = Buffer.byteLength(canonicalJson(pending), 'utf8')
+  if (canonicalBytes > maxManifestBytes) {
+    return {
+      ok: false,
+      reason:
+        `manifest-too-large: the stored pending manifest is ${String(canonicalBytes)} canonical bytes but the ` +
+        `configured cap is now ${String(maxManifestBytes)} (lowered after it was prepared). ` +
+        'Re-run prepare to rebuild it under the current cap, then sign and intake again.',
+    }
+  }
+  const items = isRecord(pending.catalog) && Array.isArray(pending.catalog.items) ? pending.catalog.items : []
+  if (items.length > args.config.maxCatalogEntries) {
+    return {
+      ok: false,
+      reason:
+        `catalog-too-large: the stored pending manifest carries ${String(items.length)} entries but the ` +
+        `configured catalog cap is now ${String(args.config.maxCatalogEntries)} (lowered after it was prepared). ` +
+        'Re-run prepare to rebuild it under the current cap, then sign and intake again.',
+    }
   }
 
   const verdict = verifyWithKeySlots(

@@ -50,10 +50,12 @@ describe('loadConfig', () => {
     for (const key of Object.values(ENV_KEYS)) {
       // Optional keys have documented defaults: the admin token disables the
       // admin surface (Task 2), the catalog cap defaults to the contract
-      // maximum (Task 6.4), and the P8 hardening knobs have explicit defaults.
+      // maximum (Task 6.4), the manifest byte cap defaults to the shared
+      // budget fixture (M8), and the P8 hardening knobs have explicit defaults.
       if (
         key === ENV_KEYS.adminToken
         || key === ENV_KEYS.maxCatalogEntries
+        || key === ENV_KEYS.maxManifestBytes
         || key === ENV_KEYS.allowedHosts
         || key === ENV_KEYS.maxConcurrentUploads
       ) continue

@@ -77,17 +77,17 @@ export const ENV_KEYS: EnvKeys = {
   verifyPublicKeyPath: 'MARKET_SERVER_VERIFY_PUBLIC_KEY',
   adminToken: 'MARKET_SERVER_ADMIN_TOKEN',
   maxCatalogEntries: 'MARKET_SERVER_MAX_CATALOG_ENTRIES',
+  maxManifestBytes: 'MARKET_SERVER_MAX_MANIFEST_BYTES',
   allowedHosts: 'MARKET_SERVER_ALLOWED_HOSTS',
   maxConcurrentUploads: 'MARKET_SERVER_MAX_CONCURRENT_UPLOADS',
-} as unknown as EnvKeys
+}
 
-// maxManifestBytes is attached as non-enumerable so that existing tests
-// iterating Object.values(ENV_KEYS) for required variable checks (config.spec.ts:50)
-// continue testing only required keys without modifying untouched spec files.
-Object.defineProperty(ENV_KEYS, 'maxManifestBytes', {
-  value: 'MARKET_SERVER_MAX_MANIFEST_BYTES',
-  enumerable: false,
-})
+// maxManifestBytes is a normal enumerable key (M7 review fix round): the
+// earlier non-enumerable attachment dodged config.spec.ts's required-variable
+// sweep instead of teaching it that this knob is OPTIONAL (documented
+// default). The spec now skips it the same way it skips the other optional
+// keys — a non-enumerable key would be silently dropped by any future
+// spread/Object.assign of ENV_KEYS.
 
 /**
  * Explicit server timeouts (P8; the defect was Node's `timeout = 0`, i.e. an
@@ -190,6 +190,22 @@ OPTIONAL:
                                 raising the ceiling needs paginated manifests
                                 with a multi-page signature trust model
                                 (not implemented, ruling R-3).
+  ${ENV_KEYS.maxManifestBytes}
+                                the most canonical bytes the SIGNED MANIFEST
+                                may carry (integer 1..${String(CLIENT_MAX_JSON_BYTES - 1)},
+                                default ${String(MAX_MANIFEST_BYTES)} from the shared budget fixture
+                                scripts/market-manifest-byte-budget.json). The
+                                client refuses any response body over
+                                ${String(CLIENT_MAX_JSON_BYTES)} bytes, so a manifest at or above
+                                that activates fine and then fails on every
+                                client, reported as market-unreachable. Lower
+                                it for a small deployment; raising the ceiling
+                                needs paginated manifests with a multi-page
+                                signature trust model (not implemented,
+                                ruling R-3). Re-checked at intake: a pending
+                                manifest prepared under a larger cap can no
+                                longer activate after this is lowered — re-run
+                                prepare, then sign and intake again.
   ${ENV_KEYS.allowedHosts}
                                 comma-separated Host header whitelist (an entry
                                 without a port covers every port of that host).
@@ -312,14 +328,23 @@ function parseMaxCatalogEntries(raw: string | undefined): number {
  * than that would activate fine and then fail on every client.
  */
 function parseMaxManifestBytes(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return MAX_MANIFEST_BYTES
-  if (!/^\d+$/u.test(raw.trim())) {
-    fail(`${ENV_KEYS.maxManifestBytes} must be a positive integer, got ${JSON.stringify(raw)}.`)
+  let value: number
+  if (raw === undefined || raw.trim() === '') {
+    value = MAX_MANIFEST_BYTES
+  } else {
+    if (!/^\d+$/u.test(raw.trim())) {
+      fail(`${ENV_KEYS.maxManifestBytes} must be a positive integer, got ${JSON.stringify(raw)}.`)
+    }
+    value = Number(raw.trim())
+    if (value < 1) {
+      fail(`${ENV_KEYS.maxManifestBytes} must be at least 1, got ${value}.`)
+    }
   }
-  const value = Number(raw.trim())
-  if (value < 1) {
-    fail(`${ENV_KEYS.maxManifestBytes} must be at least 1, got ${value}.`)
-  }
+  // The client-invariant check applies to the DEFAULT too (M7 review fix
+  // round): the default comes from the shared budget fixture, and a corrupt
+  // fixture must not ship as an unchallenged default. (The fixture's own
+  // module-load validation in manifest-prepare.ts already refuses
+  // server >= client; this is the second, independent layer.)
   if (value >= CLIENT_MAX_JSON_BYTES) {
     fail(
       `${ENV_KEYS.maxManifestBytes} must not exceed ${String(CLIENT_MAX_JSON_BYTES)}, got ${value}: ` +
