@@ -413,6 +413,26 @@ admin bearer token 是本服务**唯一不受离线签名保护的机密**：cat
 的真实性由签名保证（plain http 可用），token 的保密性只能靠传输层——见
 〈Admin 面〉的通道要求。
 
+**审计能力的诚实声明（M25 文档先行；实现按 R-M7-7 延后）**
+
+- **成功路径零日志**：`market-server/src/admin/routes.ts` 全文只有 3 处 `console.error`，且都在**失败**路径
+  ⇒ `publish` / `PATCH` / `unpublish` / `prepare` / `signature-intake` / `artifact-delete` **成功时无任何记录**
+  （无 who、无 when、无 before/after）。
+- **无清单历史**：`MarketStateV1`（`catalog/store.ts:77-88`）只保留**当前**激活的 manifest/signature 对与
+  当前 pendingManifest ⇒ **过往激活过的清单一律不留**。
+- **后果**：本文档两处明示要求的审计能力，服务端**都答不出来** ——
+  ① 〈吊销〉节第 3 步要求「审计期间内以该钥签名的全部清单 revision」；
+  ② 〈离线签名操作纪律〉节要求逐次签名留审计记录（`:628` 一带）。
+  这两条只能由**离线签名机的人工记录**回答，服务端无法交叉验证。
+- **威胁模型因此需补一句**：本文档已声明「不防管理员作恶」，但**没有**声明
+  「**事后也无法追溯**」。admin token 是唯一不受离线签名保护的机密、泄露即具完整停服能力
+  （见〈紧急下架（SOP）〉节：下架一个在架条目需要一次完整离线重签），**而停服动作恰好无日志**。
+- **现有的替代审计链**（诚实定性，不是缓解）：离线签名机的人工签名记录 + 数据目录备份链
+  （`catalog-state.json` 的历史备份，见〈数据目录与备份/恢复〉节）。**滥用不可追溯**这一点
+  必须写进运营交接，不能让读者从「有备份」推出「有审计」。
+- **实现档延后**：3 人日，按 R-M7-7 延后；**明确排除**「审计日志自身的完整性保护」
+  （那会再推高 2–3 人日并引入新的密钥管理面）。触发条件与归属见债表 `AGENTS.md:53`。
+
 # 密钥供给、轮换与吊销（Task 0.5 片段并入）
 
 > 信任锚形态（M5 单源裁定，P2③）：M5 只支持**一个 canonical 内网市场
@@ -608,6 +628,30 @@ Ed25519 签名清单**；`POST /v1/admin/…/unpublish` 只从 `state.entries` �
   `node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs` 在打包前做
   同一判定并逐项打印指纹，供 R1 与 R2 带外核对；**空钉扎、只给公钥不给指纹、
   指纹不配对、或任一 default origin 仍含 `.example`，构建一律拒绝**。
+- **`previous` 槽的钉入形态（M20 附带；此前本文档只给了 `current` 的扁平形态，导致按扁平形态
+  钉 `previous` 会在验签前 fail-closed 抛错）**：`previous` 是**嵌套**结构，不是扁平的 ——
+
+  ```ts
+  PINS_AT_RELEASE = {
+    current: { keyId: '<sha256(raw pubkey)>', publicKeyHex: '<raw 32-byte ed25519 hex, 64 chars>' },
+    previous: {
+      key: { keyId: '<上一把的指纹>', publicKeyHex: '<上一把的 raw hex>' },   // ← 注意嵌在 key 里
+      retiredAt: '<ISO-8601 退役时刻>',                                      // ← 与 key 同级,不在 key 内
+    },
+  }
+  ```
+
+  类型定义：`PreviousMarketVerificationSlot`（`dsh-plugin-huaanwork/src/huaanwork-host/market/config.ts:89-93`）
+  = `{ readonly key: PinnedMarketVerificationKey; readonly retiredAt: string }`；两槽容器
+  `MarketVerificationPins`（`:96-99`）= `{ current?; previous? }`。
+  **按扁平形态钉（把 `publicKeyHex` 直接放在 `previous` 下）会怎样**：`parsePinnedMarketKey`
+  （`:120`）读不到 `key.publicKeyHex` ⇒ 在 **`:123`** 抛 `HuaanworkMarketConfigError`
+  （`invalid …: pinned public key must be raw 32-byte Ed25519 lowercase hex (64 chars)`）⇒
+  **在验签之前就 fail-closed**，市场面恒拒。这是**配置事故**而不是攻击，但报错文案读起来像后者
+  ⇒ 轮换是低频高危操作，形态写错的代价是一次全内网市场停摆。
+  **`retiredAt` 语义**：ISO-8601 退役时刻，一到即拒该钥签名；**缺失或不可解析同样 fail-closed**
+  （`:91` 的注释明写「缺失或不可解析 = 配置事故」）。轮换叙事的完整四组合见本文档
+  〈正常轮换（重叠窗口成立，操作前必读）〉节与 spec §14 第 63 条。
 - **master 的按设计状态是未 provisioning**（空钉扎 + 两个 `.example` 占位 origin），
   故守卫在 master 上恒拒；真实值在发行分支钉入，步骤见
   [`release-checklist.md`](./release-checklist.md)。
