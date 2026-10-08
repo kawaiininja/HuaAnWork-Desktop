@@ -1135,6 +1135,126 @@ describe("取消重启后的重启入口（M6 Task 5.3，P28 接线）", () => {
 });
 
 /**
+ * M26 Task 2（评审 P1-1 / 裁定 N5）：搜索空态文案失实修复。
+ *
+ * 修复前 `describeMarketPanel` 消费的是**过滤后**长度：原列表非空、搜索无匹配时
+ * filtered.length === 0 ⇒ 落入 empty 分支，把「搜索无结果」误报成「目录为空」/
+ * 「暂无可安装插件」两句肯定式假话（D4 同款），且误报文案下用户没有任何清空
+ * 搜索的出口。修复后须分流「原列表真空」（保留诚实文案）与「过滤后为空」
+ * （专属空态 + 清空搜索动作）；空态复用既有 `.panel-empty`（裁定 C2，`market-
+ * search-empty` 仅为布局增量修饰类）。
+ */
+describe("搜索空态（M26 Task 2：P1-1/N5 文案失实修复）", () => {
+  const QUERY = "nonexistent-plugin-xyz";
+
+  const CATALOG_ITEM = { id: "alpha", name: "alpha", displayName: "Alpha 助手", summary: "示例摘要" };
+  const INSTALLABLE_ITEM = {
+    id: "alpha@1.0.0",
+    name: "alpha",
+    version: "1.0.0",
+    displayName: "Alpha 助手",
+    summary: "desc",
+    sha256: "a".repeat(64),
+    size: 42,
+    installed: false,
+  };
+
+  /** 目录与可安装列表各含一条目的背景应答（原列表非空，过滤后可为空）。 */
+  function searchHandlers() {
+    return {
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      catalog: () =>
+        jsonResponse(200, {
+          schemaVersion: "1.0.0",
+          source: {
+            sourceRecordId: "huaanwork-intranet",
+            providerId: "huaanwork-market",
+            adapterId: "huaanwork-market",
+            registrationKind: "market",
+            fetchedAt: "2026-09-27T00:00:00.000Z",
+            finalUrl: MARKET_ORIGIN,
+          },
+          items: [CATALOG_ITEM],
+          page: { total: 1 },
+        }),
+      installable: () => jsonResponse(200, { items: [INSTALLABLE_ITEM] }),
+      installations: () => jsonResponse(200, { bundles: [] }),
+    };
+  }
+
+  /** 受控搜索输入的受信赋值路径（同「本地安装」describe 内 typePath 的口径）。 */
+  function typeSearch(view: HTMLDivElement, value: string): void {
+    const input = view.querySelector('input[aria-label="搜索插件"]') as HTMLInputElement;
+    if (input === null) throw new Error("search input not found");
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+    if (setter === undefined) throw new Error("HTMLInputElement value setter unavailable");
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("发现页：过滤后为空时不再误报「目录为空」，给出专属空态与清空搜索", async () => {
+    stubFetch(searchHandlers());
+    const view = await mountMarket();
+    // 对照：无搜索词时列表正常渲染（原列表非空）。
+    expect(view.textContent).toContain("Alpha 助手");
+
+    await act(async () => {
+      typeSearch(view, QUERY);
+    });
+
+    // N5 负向断言：误报的肯定式假话不得出现。
+    expect(view.textContent).not.toContain("目录为空");
+    // 专属搜索空态（C2：复用 .panel-empty，market-search-empty 仅为增量修饰类）。
+    const empty = view.querySelector(".panel-empty.market-search-empty");
+    expect(empty).not.toBeNull();
+    expect(empty!.textContent).toContain(`未找到匹配「${QUERY}」的插件`);
+    // 清空搜索：清空输入框并恢复完整列表。
+    await act(async () => {
+      buttonByText(view, "清空搜索").click();
+    });
+    expect((view.querySelector('input[aria-label="搜索插件"]') as HTMLInputElement).value).toBe("");
+    expect(view.textContent).toContain("Alpha 助手");
+  });
+
+  it("可安装页：过滤后为空时不再误报「暂无可安装插件」，清空后恢复列表", async () => {
+    stubFetch(searchHandlers());
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "可安装").click();
+    });
+    expect(view.textContent).toContain("Alpha 助手");
+
+    await act(async () => {
+      typeSearch(view, QUERY);
+    });
+
+    expect(view.textContent).not.toContain("暂无可安装插件");
+    const empty = view.querySelector(".panel-empty.market-search-empty");
+    expect(empty).not.toBeNull();
+    expect(empty!.textContent).toContain(`未找到匹配「${QUERY}」的插件`);
+
+    await act(async () => {
+      buttonByText(view, "清空搜索").click();
+    });
+    expect(view.textContent).toContain("Alpha 助手");
+  });
+
+  it("搜索命中时不触发的空态（对照组：空态只在过滤后为空时出现）", async () => {
+    stubFetch(searchHandlers());
+    const view = await mountMarket();
+
+    await act(async () => {
+      typeSearch(view, "alpha");
+    });
+
+    expect(view.querySelector(".panel-empty.market-search-empty")).toBeNull();
+    expect(view.textContent).toContain("Alpha 助手");
+    expect(view.textContent).not.toContain("目录为空");
+  });
+});
+
+/**
  * M6 Task 6.10（债务 P26）：IMMUTABLE bundle 的移除按钮灰化。
  *
  * 「已安装」与「本地安装」两个页签渲染的是同一份 host profile 清单，卸载也都走

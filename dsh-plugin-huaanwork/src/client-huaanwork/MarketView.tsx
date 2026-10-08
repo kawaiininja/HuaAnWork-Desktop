@@ -441,6 +441,16 @@ export default function MarketView() {
   // logic 测试 + jsdom spec 双层钉住；错误面板复用同一 presentation。
   const discoverPhase = describeMarketPanel(catalogLoad, catalogError, catalogItems.length);
   const installablePhase = describeMarketPanel(installableLoad, catalogError, installableItems.length);
+  // P1-1（M26 Task 2，裁定 N5）：区分「原列表真空」与「搜索过滤后为空」。
+  // describeMarketPanel 消费的是过滤后长度，原列表非空而过滤后为空时 phase 仍会
+  // 落入 empty 分支——那是「目录为空/暂无可安装」两句肯定式假话的来源。此处以
+  // 原始长度 + 非空搜索词分流：只有原列表确有条目、搜索词滤掉全部时才走专属
+  // 搜索空态（phase.kind === "empty" 已保证 load ready 且无 error）。
+  const searching = search.trim() !== "";
+  const catalogSearchMiss =
+    discoverPhase.kind === "empty" && searching && (catalog?.items ?? []).length > 0;
+  const installableSearchMiss =
+    installablePhase.kind === "empty" && searching && installable.length > 0;
   // 安装/移除按钮的在飞禁用口径：本地 execute 与远端观察态任一在飞即禁用。
   const anyExecuting = executing || remoteExecuting;
   // P27：已安装列表的三态文案（null = 渲染列表）。installed 与 local 两个页签
@@ -465,6 +475,22 @@ export default function MarketView() {
     if (phase.kind === "error") return <ErrorPanel presentation={phase.presentation} />;
     if (phase.kind === "empty") return <p className="panel-empty">{emptyText}</p>;
     return children;
+  }
+
+  /**
+   * 搜索空态（P1-1/N5，M26 Task 2）：原列表非空而当前搜索词无匹配时的专属提示。
+   * 复用既有 .panel-empty（裁定 C2），market-search-empty 仅为布局增量修饰类；
+   * 「清空搜索」直接复位搜索词，列表随即恢复。
+   */
+  function renderSearchEmpty(): ReactNode {
+    return (
+      <div className="panel-empty market-search-empty">
+        <p>未找到匹配「{search}」的插件</p>
+        <button type="button" className="btn small" onClick={() => setSearch("")}>
+          清空搜索
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -557,30 +583,37 @@ export default function MarketView() {
       ) : null}
 
       {tab === "discover" ? (
-        panelBody(discoverPhase, "加载目录中…", "目录为空", (
-          <ul className="market-list">
-            {catalogItems.map((item, index) => (
-              <li key={item.id ?? item.name ?? `catalog-${index}`} className="market-item">
-                <span className="recent-title">{catalogItemLabel(item)}</span>
-                {item.summary ? <span className="recent-meta">{item.summary}</span> : null}
-              </li>
-            ))}
-          </ul>
-        ))
-      ) : tab === "installable" ? (
-        panelBody(installablePhase, "加载可安装列表中…", "暂无可安装插件", (
-          <ul className="market-list">
-            {installableItems.map((item) => {
-              const button = installButtonState(item, anyExecuting);
-              return (
-                <li key={item.id} className="market-item">
-                  <span className="recent-title">
-                    {installableLabel(item)} <em className="market-version">{item.version}</em>
-                  </span>
+        catalogSearchMiss ? (
+          renderSearchEmpty()
+        ) : (
+          panelBody(discoverPhase, "加载目录中…", "目录为空", (
+            <ul className="market-list">
+              {catalogItems.map((item, index) => (
+                <li key={item.id ?? item.name ?? `catalog-${index}`} className="market-item">
+                  <span className="recent-title">{catalogItemLabel(item)}</span>
                   {item.summary ? <span className="recent-meta">{item.summary}</span> : null}
-                  <span className="recent-meta">
-                    {formatMarketSize(item.size)} · sha256 {shortSha256(item.sha256)}
-                  </span>
+                </li>
+              ))}
+            </ul>
+          ))
+        )
+      ) : tab === "installable" ? (
+        installableSearchMiss ? (
+          renderSearchEmpty()
+        ) : (
+          panelBody(installablePhase, "加载可安装列表中…", "暂无可安装插件", (
+            <ul className="market-list">
+              {installableItems.map((item) => {
+                const button = installButtonState(item, anyExecuting);
+                return (
+                  <li key={item.id} className="market-item">
+                    <span className="recent-title">
+                      {installableLabel(item)} <em className="market-version">{item.version}</em>
+                    </span>
+                    {item.summary ? <span className="recent-meta">{item.summary}</span> : null}
+                    <span className="recent-meta market-meta">
+                      {formatMarketSize(item.size)} · sha256 {shortSha256(item.sha256)}
+                    </span>
                   <button
                     type="button"
                     className="btn primary market-install"
@@ -593,7 +626,8 @@ export default function MarketView() {
               );
             })}
           </ul>
-        ))
+          ))
+        )
       ) : tab === "installed" ? (
         installedEmptyMessage !== null ? (
           <p className="panel-empty">{installedEmptyMessage}</p>
@@ -688,7 +722,7 @@ export default function MarketView() {
             <p>
               安装 {preview.name}@{preview.version}？制品将经签名目录校验（sha256 比对）后安装。
             </p>
-            <p className="hint">
+            <p className="hint market-meta">
               {formatMarketSize(preview.size)} · sha256 {preview.sha256}
               <br />
               {preview.tarballUrl}

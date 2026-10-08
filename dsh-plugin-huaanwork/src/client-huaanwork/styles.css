@@ -3053,11 +3053,21 @@ button {
   font-weight: 600;
 }
 
+/* P2-2（M26 Task 2，DESIGN.md Typography 硬条款）：版本号等元数据走 JetBrains
+   Mono + tabular-nums——等宽数字列对齐，sha256/体积比对时不跳动。 */
 .market-version {
   font-style: normal;
   font-weight: 400;
   font-size: 12px;
   color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 同 P2-2：承载 sha256/体积的元数据行（安装确认框的校验摘要同口径）。 */
+.market-meta {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .market-install {
@@ -3206,4 +3216,19 @@ button {
   margin-left: auto;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* 搜索空态（P1-1/N5，M26 Task 2）：复用 .panel-empty 的观感，只加纵向布局增量
+   （裁定 C2/W3——不造平行类名，market-search-empty 只是同元素上的修饰类）。 */
+.market-search-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 空态内的次要动作钮：同 .market-install 的紧凑尺寸口径。 */
+.btn.small {
+  padding: 5px 14px;
+  font-size: 12.5px;
 }
