@@ -83,7 +83,7 @@
 | ↳ (6) M23 | 三包 `tests/` 漂移基线分类与守卫规划 | Task 6.4, Task 7.3, Task 8.2 | **部分完成/延后** | Task 6.4 产出 4 类归类报告；守卫延后至 M8 之后，前置：清 6 条存量 + 守卫加 left 侧支持 |
 | ↳ (7) M24 | `_no-cwd` 与 subagent 会话分类 | Task 7.3, Task 8.2 | **延后** | 数据层已有 140 passed 隔离门；触发：旧树含 `_no-cwd` 或 `origin: 'subagent'`, M4-A5 侧栏异常, 或 M28 触及目录约定 |
 | ↳ (8) M25 | market-server 审计日志 (3 人日) | Task 7.2, Task 7.3, Task 8.2 | **延后** | 实现延后，排除日志自身完整性保护；Task 7.2 已落地文档诚实化与「成功路径零日志/滥用不可追溯」 |
-| ↳ (9) M26 | 市场 UI 的 `/plan-design-review` (1.5 人日) | Task 7.3, Task 8.2 | **延后** | 明确登记为「M7 收口后的第一个后继动作」，前置 M1/D4 已满足 |
+| ↳ (9) M26 | 市场 UI 的 `/plan-design-review` (1.5 人日) | Task 7.3, Task 8.2 | **完成** | **M26 已闭环（2026-10-08）**：评审工件见 `HuaAnWork/docs/superpowers/specs/2026-10-08-market-ui-design-review.md`；第一轮 P 级缺陷已由 M26 Task 2/3 修复闭环；GSTACK Design Review 行 Runs 0→1 |
 | ↳ (10) M27 | Windows 面触发条件重估 (1.5 人日) | Task 0.4, Task 7.3, Task 8.2 | **延后** | Task 0.4 证明 CI 虽绿但实质缺口仍存，触发条件已部分成立；独立工单 1.5 人日承接 |
 | ↳ (11) M28 | 上游大同步 (阶段 B，15–25 人日) | Task 6.1–6.4, Task 7.3, Task 8.2 | **移交 M8** | 另立 M8 里程碑，Task 6.3 三份冲突清单与 Task 6.2 看板直接作为输入包 |
 | ↳ (12) M29 | `verify:aa` 并发竞态 | Task 7.3, Task 8.2 | **未评估/不做** | 属于本地开发环境边缘场景，本轮不触发 |

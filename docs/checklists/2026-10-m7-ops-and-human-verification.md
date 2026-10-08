@@ -206,7 +206,7 @@
 | **M23** | 三包 `tests/` 守卫 | 延后；**本轮只批基线分类，已由 Task 6.4 完成**。建守卫前置：先清理 `should-be-identical` 存量（6 条）+ 给守卫增加「仅存在于 left 侧」单侧语义（Task 1.3 发现的限制）。归属：M8 之后。 |
 | **M24** | `_no-cwd` 与 subagent 会话分类 | 延后（**数据层已有隔离门覆盖**，`sessions.spec.ts:304`/`:319`，140 passed 实跑，不得声称未验证）。触发条件：任一真实用户旧树被发现含 `_no-cwd` 目录或 `origin: 'subagent'` 会话；或 M4-A5 侧栏发现异常；或 M28 触及目录约定。归属：触发后 1 人日 + 0.5 人日人类核对。 |
 | **M25** | market-server 审计日志 | 实现延后（3 人日）；**文档诚实化已由 Task 7.2 落地**。实现档明确排除「审计日志自身的完整性保护」。归属：技术债表 `AGENTS.md:54`。 |
-| **M26** | 市场 UI 的 `/plan-design-review` | 延后，排在 M1 与 D4 之后。M7 的 Task 1.1 与 Task 2.x 已完成，其前置已满足 ⇒ 明确登记为「**M7 收口后的第一个后继动作**」（1.5 人日：跑评审 + 落工件 0.5，处置第一轮 P 级发现 1.0）。 |
+| **M26** | 市场 UI 的 `/plan-design-review` | **已完成（2026-10-08，M26 闭环）**：评审工件见 `HuaAnWork/docs/superpowers/specs/2026-10-08-market-ui-design-review.md`；第一轮 P 级缺陷已由 Task 2/3 修复闭环（搜索空态误报、Esc 焦点解耦、ErrorPanel 重试入口）；GSTACK Design Review 行 Runs 0→1。 |
 | **M27** | Windows 面 | 延后；**触发条件已于 2026-10-04 部分成立**（Task 0.4 已重估并订正债表 `:55`）。实质缺口仍存在：`ci.yml:140-148` 的 `desktop-windows` 缺少 `verify-win-installer` 步骤、`release.yml:186-189` 的 upload path 不含 `win-unpacked/`。归属：1.5 人日，且可在 CI 内完成而不需要 Windows 主机。 |
 | **M28** | 上游大同步（阶段 B） | **另立里程碑 M8**（裁定 R-M7-3，15–25 人日）。三个前置裁定随 M8 计划再裁。Task 6.3 的 `needs-ruling` / `replay-fork` / `fork-owned-override` 三份清单为直接输入。 |
 | **M29** | `verify:aa` 并发竞态 | **本轮不评估**（设计文档明示）。复议触发点：M8 重钉 AA 桥时顺带核实上游是否已修。出处：债表 `AGENTS.md:44` + M6 计划 §5.5 第 6 条（spec §14 对此零命中）。 |
