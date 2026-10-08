@@ -118,6 +118,32 @@ describe("MarketSourcePanel copy invariants (D4)", () => {
   });
 });
 
+describe("切源确认弹窗 window 级 Esc（M26 Task 3，裁定 C1）", () => {
+  it("focus 脱离对话框时，window 派发的 Escape 也能关闭确认框", async () => {
+    stubSettingsApi({ requested: "disabled", effective: "disabled" });
+    const view = await mountSourcePanel();
+
+    await act(async () => {
+      (view.querySelector('button[data-market-provider="huaanwork-market"]') as HTMLButtonElement).click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="切换市场来源"]');
+    expect(dialog).not.toBeNull();
+
+    // 焦点故意脱离对话框：P24 元素级 onKeyDown 只能捕获驻留焦点内的按键，
+    // 此处即其失效场景（裁定 C1 升级为 window 级监听的理由）。
+    // 注：jsdom 下 document.body.focus() 不移动 activeElement（规范把 body 焦点
+    // 委派给文档），故聚焦对话框外的另一个真实控件达到同等脱焦效果。
+    const outside = view.querySelector('button[data-market-provider="disabled"]') as HTMLButtonElement;
+    outside.focus();
+    expect(dialog!.contains(document.activeElement)).toBe(false);
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    expect(view.querySelector('[role="dialog"][aria-label="切换市场来源"]')).toBeNull();
+  });
+});
+
 describe("MarketSourcePanel persistent restart entry (M1)", () => {
   it("keeps a restart trigger whenever the selected source differs from the effective one", async () => {
     stubSettingsApi({ requested: "huaanwork-market", effective: "disabled" });

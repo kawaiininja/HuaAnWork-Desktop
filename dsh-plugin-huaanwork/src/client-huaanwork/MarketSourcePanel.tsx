@@ -122,13 +122,28 @@ export default function MarketSourcePanel({
     setConfirming(target);
   }
 
-  function closeConfirm(): void {
+  const closeConfirm = useCallback(() => {
     if (applyPhase === "saving") return;
     setConfirming(null);
     setApplyPhase("idle");
     setApplyRestart(false);
     setApplyError(null);
-  }
+  }, [applyPhase]);
+
+  // C1（M26 Task 3）：消除 P24 元素级 Esc 对焦点驻留的依赖——元素级 onKeyDown
+  // 只能捕获驻留焦点内的按键，焦点移出对话框（如点击对话框外区域）后 Esc 即失效；
+  // 故在弹窗激活且非保存中时挂 window 级监听，元素级 onKeyDown 保留作辅助。
+  useEffect(() => {
+    if (confirming === null || applyPhase === "saving") return undefined;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeConfirm();
+      }
+    };
+    window.addEventListener("keydown", onEscape);
+    return () => window.removeEventListener("keydown", onEscape);
+  }, [confirming, applyPhase, closeConfirm]);
 
   async function confirmSwitch(): Promise<void> {
     if (confirming === null || applyPhase === "saving") return;
@@ -325,14 +340,37 @@ export default function MarketSourcePanel({
   );
 }
 
-/** 三类错误态展示：不可达给本地安装旁路提示，验签/sha 失败 fail-closed 无绕过（R23）。
+/**
+ * 三类错误态展示：不可达给本地安装旁路提示，验签/sha 失败 fail-closed 无绕过（R23）。
  * 原在 MarketView 内（与来源面板共用同一 `.market-error` 形态）；随来源面板抽到
- * 本模块并由 MarketView 复用，避免两个组件互相 import 形成环。 */
-export function ErrorPanel({ presentation }: { presentation: MarketErrorPresentation }) {
+ * 本模块并由 MarketView 复用，避免两个组件互相 import 形成环。
+ *
+ * N1（M26 Task 3）：可选 onRetry 重试入口——断网不可自救缺口（评审 P1-2）；
+ * retrying 时按钮禁用并显示进行中文案，防抖由调用方（MarketView 的
+ * handleDebouncedRetry）负责。 */
+export function ErrorPanel({
+  presentation,
+  onRetry,
+  retrying = false,
+}: {
+  presentation: MarketErrorPresentation;
+  onRetry?: () => void;
+  retrying?: boolean;
+}) {
   return (
     <div className="market-error" role="alert">
       <p className="market-error-title">{presentation.title}</p>
       <p className="hint">{presentation.body}</p>
+      {onRetry ? (
+        <button
+          type="button"
+          className="btn small market-retry-btn"
+          disabled={retrying}
+          onClick={onRetry}
+        >
+          {retrying ? "正在重试…" : "重试"}
+        </button>
+      ) : null}
       {presentation.canBypass ? (
         <p className="hint">旁路：切换到「本地安装」页签，可安装本地目录或 .tgz 插件（不经签名与 sha256 校验，风险披露见该页确认框）。</p>
       ) : null}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { createDesktopSettingsApi } from "../client/desktop-settings-api.ts";
 import { rpcCall, pickDirectoryDetailed } from "./api.ts";
@@ -76,6 +76,10 @@ const ROUTE_REQUEST_RESTART = "/api/huaanwork-market/desktop/request-restart";
 const EXECUTING_POLL_INTERVAL_MS = 2000;
 const EXECUTING_POLL_FAILURE_BUDGET = 3;
 const EXECUTING_POLL_TOTAL_BUDGET_MS = 10 * 60 * 1000;
+
+// N1（M26 Task 3）：错误面板重试入口的防抖窗口——500ms 内连点只发起一次
+// 全量刷新（useRef + Date.now()，不依赖定时器；详情见 handleDebouncedRetry）。
+const RETRY_DEBOUNCE_MS = 500;
 
 interface ErrorEnvelope {
   error?: { code?: string; message?: string };
@@ -300,6 +304,45 @@ export default function MarketView() {
     };
   }, [remoteExecuting, loadCatalogSide, loadInstallations, notify]);
 
+  // C1（M26 Task 3）：消除 P24 元素级 Esc 对焦点驻留的依赖——弹层激活且非
+  // busy/executing 时挂 window 级监听（元素级 onKeyDown 只能捕获驻留焦点内的
+  // 按键，焦点移出对话框后 Esc 即失效）；元素级 onKeyDown 保留作辅助。
+  useEffect(() => {
+    if (localConfirming === null || localBusy) return undefined;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setLocalConfirming(null);
+      }
+    };
+    window.addEventListener("keydown", onEscape);
+    return () => window.removeEventListener("keydown", onEscape);
+  }, [localConfirming, localBusy]);
+
+  useEffect(() => {
+    if (preview === null || executing) return undefined;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setPreview(null);
+      }
+    };
+    window.addEventListener("keydown", onEscape);
+    return () => window.removeEventListener("keydown", onEscape);
+  }, [preview, executing]);
+
+  // N1（M26 Task 3，评审 P1-2）：错误面板重试入口——断网/瞬断后用户可在错误
+  // 面板直接自救，无需切走再回来等重挂载。500ms 防抖（useRef + Date.now()）：
+  // 连点只发起一次全量刷新（目录 + 已装列表），与主流程按钮的 localBusy /
+  // executing / anyExecuting 在飞守卫互补而非替代。
+  const lastRetryAtRef = useRef(0);
+  const handleDebouncedRetry = useCallback(() => {
+    const now = Date.now();
+    if (now - lastRetryAtRef.current < RETRY_DEBOUNCE_MS) return;
+    lastRetryAtRef.current = now;
+    void Promise.all([loadCatalogSide(), loadInstallations()]);
+  }, [loadCatalogSide, loadInstallations]);
+
   async function startInstall(item: MarketInstallableItem) {
     setNotice(null);
     setPreviewError(null);
@@ -472,7 +515,14 @@ export default function MarketView() {
     children: ReactNode,
   ): ReactNode {
     if (phase.kind === "loading") return <p className="panel-empty">{loadingText}</p>;
-    if (phase.kind === "error") return <ErrorPanel presentation={phase.presentation} />;
+    if (phase.kind === "error")
+      return (
+        <ErrorPanel
+          presentation={phase.presentation}
+          onRetry={handleDebouncedRetry}
+          retrying={catalogLoad === "loading"}
+        />
+      );
     if (phase.kind === "empty") return <p className="panel-empty">{emptyText}</p>;
     return children;
   }

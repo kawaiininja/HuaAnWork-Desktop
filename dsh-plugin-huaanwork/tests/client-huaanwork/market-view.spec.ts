@@ -1254,6 +1254,134 @@ describe("搜索空态（M26 Task 2：P1-1/N5 文案失实修复）", () => {
   });
 });
 
+describe("弹层 window 级 Esc（M26 Task 3，裁定 C1）", () => {
+  /** 焦点脱离对话框后向 window 派发 Escape——P24 元素级 onKeyDown 的失效场景。
+   * 注：jsdom 下 document.body.focus() 不移动 activeElement（规范把 body 焦点
+   * 委派给文档），故 blur 掉当前焦点元素达到同等脱焦效果。 */
+  function escapeFromBlurredFocus(): void {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  }
+
+  it("本地安装确认：焦点脱离对话框时 window 派发的 Escape 关闭弹层", async () => {
+    vi.mocked(pickDirectoryDetailed).mockResolvedValue({ available: true, path: "/tmp/alpha.tgz" });
+    stubFetch({ state: () => jsonResponse(200, marketStateBody()), ...marketSideHandlers() });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "本地安装").click();
+    });
+    await act(async () => {
+      buttonByText(view, "浏览目录…").click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="本地安装确认"]');
+    expect(dialog).not.toBeNull();
+
+    await act(async () => {
+      escapeFromBlurredFocus();
+    });
+    expect(view.querySelector('[role="dialog"][aria-label="本地安装确认"]')).toBeNull();
+  });
+
+  it("安装确认（preview）：焦点脱离对话框时 window 派发的 Escape 关闭弹层", async () => {
+    stubFetch({
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      installable: () =>
+        jsonResponse(200, {
+          items: [
+            {
+              id: "alpha@1.0.0",
+              name: "alpha",
+              version: "1.0.0",
+              displayName: "Alpha 助手",
+              summary: "desc",
+              sha256: "a".repeat(64),
+              size: 42,
+              installed: false,
+            },
+          ],
+        }),
+      preview: () =>
+        jsonResponse(200, {
+          name: "alpha",
+          version: "1.0.0",
+          sha256: "a".repeat(64),
+          size: 42,
+          tarballUrl: `${MARKET_ORIGIN}/alpha-1.0.0.tgz`,
+        }),
+    });
+
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "可安装").click();
+    });
+    await act(async () => {
+      buttonByText(view, "安装").click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="安装确认"]');
+    expect(dialog).not.toBeNull();
+
+    await act(async () => {
+      escapeFromBlurredFocus();
+    });
+    expect(view.querySelector('[role="dialog"][aria-label="安装确认"]')).toBeNull();
+  });
+});
+
+describe("错误面板重试入口（M26 Task 3，评审 N1）", () => {
+  /** 目录/可安装 502（内网宕机口径）+ 其余 route 正常的背景应答。 */
+  function failingCatalogHandlers() {
+    return {
+      state: () => jsonResponse(200, marketStateBody()),
+      catalog: () => jsonResponse(502, { error: { code: "market-unreachable", message: "connect ECONNREFUSED" } }),
+      installable: () => jsonResponse(502, { error: { code: "market-unreachable", message: "connect ECONNREFUSED" } }),
+      installations: () => jsonResponse(200, { bundles: [] }),
+    };
+  }
+
+  it("目录拉取失败时错误面板渲染重试按钮，点击重新发起底层拉取", async () => {
+    const log = stubFetch(failingCatalogHandlers());
+    const view = await mountMarket();
+
+    // 错误面板内必须存在重试按钮（评审前 ErrorPanel 零重试入口）。
+    const panel = view.querySelector(".market-error") as HTMLDivElement;
+    expect(panel).not.toBeNull();
+    const retryButton = buttonByText(panel, "重试");
+    const callsBefore = log.calls(ROUTES.catalog);
+
+    await act(async () => {
+      retryButton.click();
+    });
+    // 断言落在底层 fetch 计数上：点击必须真正重新发起目录拉取。
+    expect(log.calls(ROUTES.catalog)).toBe(callsBefore + 1);
+  });
+
+  it("300ms 内连点两次重试只发起一次底层拉取（500ms 防抖）", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-08T00:00:00.000Z"));
+    const log = stubFetch(failingCatalogHandlers());
+    const view = await mountMarket();
+
+    const retryButton = buttonByText(view.querySelector(".market-error") as HTMLDivElement, "重试");
+    const callsBefore = log.calls(ROUTES.catalog);
+
+    await act(async () => {
+      retryButton.click();
+    });
+    // 第一次点击的拉取在假时钟下同步落定（fetch stub 立即 resolve），
+    // 按钮恢复可点——第二次点击必须靠防抖（而非 disabled）被吞掉。
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    await act(async () => {
+      retryButton.click();
+    });
+    await act(async () => {});
+    expect(log.calls(ROUTES.catalog)).toBe(callsBefore + 1);
+  });
+});
+
 /**
  * M6 Task 6.10（债务 P26）：IMMUTABLE bundle 的移除按钮灰化。
  *
