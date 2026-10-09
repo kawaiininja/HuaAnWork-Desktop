@@ -115,3 +115,66 @@ fork 多出两条上游未覆盖的语义（fail-closed 整体拒绝、多 artif
   未进入 drift 列表）。
 - 未触碰 stable / beta `src/`（`git status` 仅 `dsh-plugin-huaanwork/src/update-checker.ts`），
   故无需复跑其 spec。
+
+---
+
+# B 组（needs-ruling：文案模板，10 hunks）— Task 2.6
+
+> 本节由 **Task 2.6** 追加；A 组（§1–§5）未改动。MERGE_BASE（动态解析）：
+> `git merge-base origin/master HEAD` → `8cd74f5e9b`（as-of 2026-10-09）；基准 HEAD `ba30ead710`。
+> 本任务**未改任何源码**：仅追加本节（见 §6.3 的零改动论证）。
+
+## 6.1 本质与处方
+
+上游 350 提交给 `notifications.ts` / `recovery-copy.ts` 带来**新功能 + 新文案**，同时把产品名
+**硬编码**为 `DSH Desktop`（`git show upstream/master:dsh-plugin-desktop/src/{notifications,recovery-copy}.ts`
+可见 `Open DSH Desktop for details.`、`DSH Desktop Recovery Assistant`、`confirmDisableBody … DSH Desktop simply will not load it …`
+等）。fork 在 M3/M7 已把运行时文案收口为 `DESKTOP_PRODUCT_NAME`（`product-identity.ts`）。处方 = **采上游新功能与新文案 +
+把上游硬编码 `DSH Desktop` 换成 `${DESKTOP_PRODUCT_NAME}` 模板**（M7 Task 3.2 路线 (b)，重放极薄）。
+
+## 6.2 逐 hunk 决策表（10 条）
+
+> 简报对 hunk 仅登记编号与文件（notifications ×6：beta #4/#5/#6 + stable #15/#16/#17；recovery-copy ×4：
+> beta #7/#8 + stable #18/#19），未附逐 hunk 内容。本表按 `git diff 8cd74f5e9b HEAD` 对每个文件的**三个/两个
+> 语义区域**对位：notifications = ① 设置/导入面 ② 文案表 + schedule 结局 + 回合来源追踪 ③ job 观察 + `apply`；
+> recovery-copy = ④ 禁用/启用插件文案与接口 ⑤ bundle-selection 失败文案与阶段标签。区域↔编号按简报排列顺序对位
+> （beta #4→①、#5→②、#6→③、#7→④、#8→⑤；stable #15→①、#16→②、#17→③、#18→④、#19→⑤）。
+> 三包 `src/notifications.ts`、`src/recovery-copy.ts` 现**互相逐字节相同**（`diff` 空 ×4），故「取哪侧」一律为上游合并形态。
+> 归类：`covered`（上游已覆盖，采上游）/ `template-replay`（上游硬编码产品名 → 模板重放）/ `no-op`（无需重放）。
+
+| # | 文件 | 侧 | 区域 | 归类 | 采纳内容 | 重放内容 | 理由 |
+|---|---|---|---|---|---|---|---|
+| beta #4 | `dsh-plugin-desktop-beta/src/notifications.ts` | beta | ① 导入/设置面 | `covered` | 上游：设置 schema/类型迁至 `settings-bridge.ts`（`bindDesktopNotificationSettings`、`DEFAULT_NOTIFICATION_SETTINGS`、`DESKTOP_NOTIFICATIONS_SETTINGS_ENTRY_ID`），新增 `observeDesktopJobOutcomes`/`DesktopJobOutcome` 导入；`DESKTOP_NOTIFICATIONS_SETTINGS_NAMESPACE` 取 bridge 常量 | 无 | 纯功能搬迁，无产品名字面量；`jobs-bridge.ts`/`settings-bridge.ts` 三包均已存在 |
+| beta #5 | `dsh-plugin-desktop-beta/src/notifications.ts` | beta | ② 文案表 + schedule + 回合来源 | `template-replay` | 上游新增 `schedule-completed/-failed` 文案与 `OpenTurn.source: 'user'\|'schedule'` 追踪、`notifyOnSchedule*` 分流；EN/ZH 失败文案 | 上游 6 处硬编码 `DSH Desktop` → `${DESKTOP_PRODUCT_NAME}`（`turn-failed`/`job-failed`/`schedule-failed` × EN/ZH，`notifications.ts:37,39,41,45,47,49`）；import 位于 `:6` | 上游字面量是 stable 产品名；beta/huaanwork 需各自身份。该模板形态早于本任务已在位（M7 3.2 (b)） |
+| beta #6 | `dsh-plugin-desktop-beta/src/notifications.ts` | beta | ③ job 观察 + `apply` | `covered` | 上游：`notifyJob` 改吃 `DesktopJobOutcome`，`apply(ctx, config)` 以 `ctx.effect(bindDesktopNotificationSettings…)` 绑定设置，`observeDesktopJobOutcomes(jobsCtx, …)`（`:127`） | 无 | 无产品名字面量；effect 标签 `dsh-plugin-desktop: …` 为内部诊断标识（插件包名），非面向用户的产品名文案 |
+| stable #15 | `dsh-plugin-desktop/src/notifications.ts` | stable | ① 导入/设置面 | `covered` | 同 beta #4 | 无 | 同 beta #4 |
+| stable #16 | `dsh-plugin-desktop/src/notifications.ts` | stable | ② 文案表 + schedule + 回合来源 | `template-replay` | 同 beta #5 | 同 beta #5：6 处 `DSH Desktop` → `${DESKTOP_PRODUCT_NAME}`；stable 下该常量解析为 `DSH Desktop`，**用户可见文案与上游字节等价** | 与上游相比 stable 的**唯一**差异就是这 6 行模板化（`git diff upstream/master HEAD` 仅含 import + 6 行） |
+| stable #17 | `dsh-plugin-desktop/src/notifications.ts` | stable | ③ job 观察 + `apply` | `covered` | 同 beta #6 | 无 | 同 beta #6 |
+| beta #7 | `dsh-plugin-desktop-beta/src/recovery-copy.ts` | beta | ④ 禁用/启用插件 | `template-replay` | 上游新接口/文案：`disable`/`enable`/`disabledHint`、`confirmDisable*`/`confirmEnable*`、`disabledSuccess`/`enabledSuccess`、`pluginsBody` 新措辞、`confirmRollbackBody`「including which plugins are enabled」（EN/ZH） | 上游含产品名的新文案全部模板化：`confirmDisableBody`（`:290`）、`confirmEnableBody`（`:293`）、`confirmRollbackBody`（`:296`/`:453`）、`disabledSuccess`（`:299`/`:456`）、`enabledSuccess`（`:300`/`:457`）→ `${DESKTOP_PRODUCT_NAME}` | 上游字面量 `DSH Desktop`；ZH 的 `confirmDisableBody`/`confirmEnableBody` 本身不含产品名，无需处理 |
+| beta #8 | `dsh-plugin-desktop-beta/src/recovery-copy.ts` | beta | ⑤ bundle-selection | `covered` | 上游：`bundleSelectionFailedTitle/Message` 与阶段标签 `'bundle-selection'`（EN/ZH） | 无 | 新增 5 条文案均不含产品名，无字面量可替换 |
+| stable #18 | `dsh-plugin-desktop/src/recovery-copy.ts` | stable | ④ 禁用/启用插件 | `template-replay` | 同 beta #7 | 同 beta #7；stable 下常量=`DSH Desktop`，与上游用户可见文案等价 | 与上游 diff 仅为产品名模板化 |
+| stable #19 | `dsh-plugin-desktop/src/recovery-copy.ts` | stable | ⑤ bundle-selection | `covered` | 同 beta #8 | 无 | 同 beta #8 |
+
+> huaanwork（`dsh-plugin-huaanwork/src/{notifications,recovery-copy}.ts`）为第三变体：与 stable/beta **逐字节相同**，
+> 其 `DESKTOP_PRODUCT_NAME` 由其 `product-identity.ts` 解析为 `HuaAnWork`；无任何独立重放。
+
+## 6.3 出口判据（机械）核验
+
+1. **「零改动」论证（主动验证控制器 grep，而非沿用）**：
+   - `rg -i "DSH Desktop|HuaAnWork|华安" src/notifications.ts src/recovery-copy.ts`（三包）→ **无匹配**（硬编码产品名 0 处）。
+   - `git diff -U0 8cd74f5e9b HEAD -- <两文件>` 的**新增行**再 grep 产品名字面量 → 三包均 `(none)`。
+   - `git diff upstream/master HEAD -- dsh-plugin-desktop/src/notifications.ts` 仅余 `+import { DESKTOP_PRODUCT_NAME }`
+     与 6 行模板化，证明上游所有 `DSH Desktop` 字面量均已被替换，无遗漏。
+   - 三包均含 `observeDesktopJobOutcomes`（`notifications.ts:7,127`，`jobs-bridge.ts:31`）、`recovery-copy.ts` 的 disable/enable/
+     bundle-selection 新文案、`DESKTOP_PRODUCT_NAME` 导入。→ 没有真实缺口，**不重写**。
+2. **残留 `DSH` 字样盘点（非产品名，按「采上游」保留）**：`DSH data directory`/`DSH 数据目录`（数据目录术语，
+   与 `DESKTOP_HOME_DIRECTORY_NAME` 同属数据面命名）、`Open DSH Terminal`、`DSH plugin uninstall`。这些均为合并前
+   基线已存在的文案（不在上游新增段内），也非 `DSH Desktop` 产品名；其品牌化属另案（数据目录/终端品牌），本任务**不吞并**，
+   在此显式登记。
+3. **测试**（三包，`corepack yarn vitest run tests/<spec>`）：`notifications`（11）、`notifications-live`（1，stable/beta）、
+   `desktop-copy`（9）、`recovery-native-ui`（7）、`recovery-navigation`（6）→ 全绿（huaanwork 无 `notifications-live.spec.ts`）。
+4. `corepack yarn check:whitespace` → exit 0。
+5. `node scripts/verify-desktop-variants.mjs` → 漂移列表仍恰为冻结的十条（`src/bin.ts`、`src/safe-mode.ts`、
+   `scripts/package-mac.ts`、`scripts/package-win.ts`、`scripts/verify-cli-runtime.mjs`、`scripts/verify-electron-fuses.ts`、
+   `scripts/verify-licenses.mjs`、`scripts/verify-mac-entitlements.ts`、`scripts/verify-mac-release.ts`、
+   `scripts/verify-mac-smoke.ts`），无新增、无白名单。
