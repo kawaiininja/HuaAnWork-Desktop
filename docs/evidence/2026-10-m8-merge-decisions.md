@@ -216,3 +216,45 @@ fork 多出两条上游未覆盖的语义（fail-closed 整体拒绝、多 artif
 2. `dsh-plugin-huaanwork` 下 `corepack yarn vitest run`：`package-mac` / `package-win` / `verify-mac-smoke` / `mac-entitlements` → 4 files、30 passed；`package.spec` + `verify-mac-release` → 76 passed、1 skipped；`windows-console-host` 在 darwin 上 1 file skipped、2 tests skipped（`describe.runIf(win32)`）。
 3. `corepack yarn check:whitespace` → exit 0；`git diff --check` → exit 0。
 4. `node scripts/verify-desktop-variants.mjs` → exit 1。剩余 6 条，且仅此 6 条：`src/bin.ts`、`src/safe-mode.ts`、`scripts/verify-cli-runtime.mjs`、`scripts/verify-electron-fuses.ts`、`scripts/verify-licenses.mjs`、`scripts/verify-mac-release.ts`。四条已传播文件不再出现。未新增 `allowedDifferences`。
+
+---
+
+# 剩余六条 beta↔huaanwork 传播与 runtime 校验 — Task 2.8
+
+> 本节由 **Task 2.8** 追加；A 组（§1–§5）、B 组（§6）、C/D/E 组（§7）未删未改。
+> **度量基准（as-of，Global Constraint §8）**：2026-10-09。父 HEAD `4d843f0f70`
+> （MERGE_BASE=`8cd74f5e9b`，`git merge-base origin/master HEAD`）。
+> 六条源文件的重放落在该父提交之上的工作树；重放后
+> `node scripts/verify-desktop-variants.mjs` exit 0（见 §8.2），实测于提交前工作树。
+> 归类：`replay`（把 beta 行为重放到 huaanwork，身份只保留既有 `normalize()` 已吸收的产品名与工作区名）。
+> 未改 `scripts/verify-desktop-variants.mjs`，未向 `allowedDifferences` 加名额。
+> stable / beta 的源文件未改。
+
+## 8.1 runtime 与 market
+
+`upstream.json` 的 beta 与 huaanwork 都是 `runtimePackageVersion` `0.2.1-alpha.1`、commit `5badb15009`（as-of 2026-10-09 @ `4d843f0f70`）。`corepack yarn check:vendored-runtime` exit 0：stable 318 packages from `639ed01539`，beta 321 packages from `5badb15009`，huaanwork 321 packages from `5badb15009`。检查已绿，未跑 `--write`，未改 vendor 树。未改 `yarn.lock`。未加回 `dshmarket@1.38.1`。
+
+## 8.2 六条传播
+
+归一化规则仍是现有的两条：`dsh-plugin-huaanwork`→`dsh-plugin-desktop-beta`，`HuaAnWork`→`DSH Desktop Beta`。下表行号是重放后的 huaanwork 文件（as-of 2026-10-09，父 HEAD `4d843f0f70` 的工作树）。
+
+| # | 文件 | 归类 | 重放内容 | 身份 |
+|---|---|---|---|---|
+| 1 | `src/bin.ts` | `replay` | 文件夹启动：`parseDesktopCliRequest`（`:46`）、`parseDesktopCli` 委托它（`:66`）、`launchElectron` 把路径接成 `` `${DESKTOP_WORKSPACE_ARGUMENT}=${workspacePath}` ``（`:131`）。 | 帮助文本 `Usage: dsh-plugin-huaanwork`（`:27`）、`Launch HuaAnWork`（`:29`）。 |
+| 2 | `src/safe-mode.ts` | `replay` | `cleanupDesktopSafeModeEnvironment` 改为调用 `cleanupDisposableTree`（`:116`），删掉内联递归删除。import 在 `:11`。 | `BIN_NAME` 仍是 `dsh-plugin-huaanwork`。 |
+| 3 | `scripts/verify-cli-runtime.mjs` | `replay` | flat-profile 冒烟先建 `home/profiles/desktop/package.json`（`dsh-profile-desktop`，`:187`），并以 `DSH_HOME` 启动（`:194`）。 | 链接的包目录仍是 `node_modules/dsh-plugin-huaanwork`（`:165`）。 |
+| 4 | `scripts/verify-electron-fuses.ts` | `replay` | `CLI_ARCH_FLAGS`（`:61`）与 `cliArchitectures`（`:215`）。`--dir` 且目标表为空时，从 electron-builder 命令行读 arch，没有 flag 则用 `process.arch`（`:280`）。 | 错误前缀仍是 beta 同款的 `dsh-plugin-desktop:`，不是产品名。 |
+| 5 | `scripts/verify-licenses.mjs` | `replay` | SPDX 允许列表加入 `'(MIT OR CC0-1.0)'`（`:32`）。 | 工作区回退名仍是 `dsh-plugin-huaanwork`。 |
+| 6 | `scripts/verify-mac-release.ts` | `replay` | 调用 Task 2.7 的 `verifyMacEntitlements`（import `:9`，默认选项 `:56`，校验点 `:99`）。`/bin/uv` 做可执行检查，且仅对当前进程架构跑 `--version`（`:91`）。 | `productName` 为 `HuaAnWork`（`:52`）。 |
+
+测试：`tests/bin.spec.ts`、`tests/verify-electron-fuses.spec.ts`、`tests/verify-mac-release.spec.ts` 补上 beta 已有、huaanwork 缺的断言；产品名与工作区名换成 HuaAnWork。mac 用例里的 DMG 路径用 `HuaAnWork-2.0.0-universal.dmg`，与 `package.json` `mac.artifactName` `HuaAnWork-${version}-${arch}.${ext}` 一致（连字符 slug `DSH-Desktop-Beta` 不是产品名，`normalize()` 也不吸收它）。`tests/safe-mode.spec.ts` 归一化后已与 beta 逐字节相同，未改。
+
+## 8.3 出口核验（as-of 2026-10-09，父 HEAD `4d843f0f70`，重放后工作树）
+
+1. `corepack yarn check:vendored-runtime` → exit 0。三通道读数见 §8.1（stable 318 / beta 321 / huaanwork 321）。
+2. `dsh-plugin-huaanwork` 下 `corepack yarn vitest run tests/bin.spec.ts tests/safe-mode.spec.ts tests/desktop-cli.spec.ts tests/verify-electron-fuses.spec.ts tests/verify-mac-release.spec.ts tests/mac-entitlements.spec.ts tests/release-mac.spec.ts` → 7 files，75 passed，1 skipped。
+3. 同目录 `corepack yarn verify:licenses` → exit 0：`609 production packages checked; 2 use notice-required licenses (LGPL-3.0-or-later)`。`corepack yarn verify:cli` → exit 0。
+4. 同目录 `corepack yarn test`（`vitest run`）→ 215 files passed、3 skipped（218）；2578 tests passed、13 skipped（2591）；Duration 14.97s。
+5. 仓库根 `corepack yarn check:whitespace` → exit 0（对照当时 HEAD `4d843f0f70`；该脚本比较 `merge-base` 与 `HEAD`，不含未提交差异）。
+6. `node scripts/verify-desktop-variants.mjs` → exit 0。先前 6 条不再列出，也没有新路径。未新增 `allowedDifferences`。
+7. stable / beta 源文件未改，未复跑这两个工作区的全量测试。
