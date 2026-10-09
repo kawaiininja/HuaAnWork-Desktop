@@ -16,6 +16,8 @@ const upstream = readJson('upstream.json')
 const stablePlugin = readJson('dsh-plugin-desktop/package.json')
 const betaPlugin = readJson('dsh-plugin-desktop-beta/package.json')
 const huaanworkPlugin = readJson('dsh-plugin-huaanwork/package.json')
+const nextDesktop = readJson('dsh-desktop-next/package.json')
+const nextReference = readJson('dsh-desktop-next/upstream-reference.json')
 const fabric = readJson('dsh-community-fabric/package.json')
 const market = readJson('dsh-community-market/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
@@ -33,6 +35,7 @@ if (workspace.packageManager !== 'yarn@4.18.0') {
 if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'dsh-plugin-desktop',
   'dsh-plugin-desktop-beta',
+  'dsh-desktop-next',
   'dsh-plugin-huaanwork',
   'dsh-community-fabric',
   'dsh-community-market',
@@ -47,6 +50,7 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', stablePlugin],
   ['dsh-plugin-desktop-beta', betaPlugin],
+  ['dsh-desktop-next', nextDesktop],
   ['dsh-plugin-huaanwork', huaanworkPlugin],
   ['dsh-community-fabric', fabric],
   ['dsh-community-market', market],
@@ -72,6 +76,8 @@ for (const legacyFile of [
   'dsh-plugin-desktop/pnpm-workspace.yaml',
   'dsh-plugin-desktop-beta/pnpm-lock.yaml',
   'dsh-plugin-desktop-beta/pnpm-workspace.yaml',
+  'dsh-desktop-next/pnpm-lock.yaml',
+  'dsh-desktop-next/pnpm-workspace.yaml',
   'dsh-plugin-huaanwork/pnpm-lock.yaml',
   'dsh-plugin-huaanwork/pnpm-workspace.yaml',
   'dsh-community-fabric/pnpm-lock.yaml',
@@ -95,6 +101,7 @@ for (const [owner, manifest] of [
   ['root', workspace],
   ['stable desktop', stablePlugin],
   ['beta desktop', betaPlugin],
+  ['next desktop', nextDesktop],
   ['huaanwork desktop', huaanworkPlugin],
   ['fabric', fabric],
   ['market', market],
@@ -137,4 +144,9 @@ for (const [channel, plugin] of [['stable', stablePlugin], ['beta', betaPlugin],
   }
 }
 
-process.stdout.write(`verify-layout: all Desktop workspaces and upstream ${activeUpstream.commit.slice(0, 10)} are consistent\n`)
+if (nextDesktop.name !== 'dsh-desktop-next' || nextDesktop.private !== true) fail('Next must remain a private experimental package')
+for (const [name, version] of Object.entries(nextDesktop.dependencies)) {
+  if ((name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) && version !== nextReference.version) fail(`Next ${name} must match the pinned upstream family`)
+}
+
+process.stdout.write(`verify-layout: all Desktop workspaces including Next and upstream ${activeUpstream.commit.slice(0, 10)} are consistent\n`)

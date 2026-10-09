@@ -12,15 +12,19 @@ This repository owns the desktop product around an unmodified DeepSeek Harness c
 
 - Start the desktop development workflow with `corepack yarn dev`.
 - Build the desktop package with `corepack yarn build`.
+- Root build, dev/start, and packaging commands refresh `dshmarket` from npm `latest` for Stable, Beta, and Next via `corepack yarn market:prepare`. Commit its exact dependency versions, Desktop compatibility patch, and lockfile together. `corepack yarn market:check` verifies freshness without writes; offline lookups or incompatible patches fail rather than silently retaining an old market. Installed apps do not hot-update executable plugins on launch.
+- Before each release, run `corepack yarn aa:prepare-release` to build the latest official Agents Anywhere `main` for both Desktop channels. Commit the resulting artifact, provenance, manifests, and lockfile before packaging. Signed macOS releases and root Windows distribution commands verify freshness and installed versions; `DSH_AA_SOURCE_REF=pinned` is no longer supported.
 - Run unit tests with `corepack yarn test`.
 - Run type checking with `corepack yarn typecheck`.
 - Run the complete headless gate with `corepack yarn check`.
+- `corepack yarn dev:next` explicitly launches the experimental Next app; `corepack yarn check:next` validates it without a graphical application. Next uses the official published Web frontend and the recorded upstream Desktop presentation, with product capabilities composed as a separate bundle.
 - Develop and validate Desktop feature changes in `dsh-plugin-desktop-beta/` first, then synchronize shared changes into `dsh-plugin-desktop/` while preserving declared variant differences. Before committing or pushing shared Desktop changes, run `corepack yarn check:desktop-variants` and validate both affected packages; neither package automatically inherits the other's source edits.
 - Run upstream operations through the root scripts, such as `corepack yarn upstream:build`.
 - Upstream synchronization: the basis is the `upstream` remote (`anywhere-labs/dsh-desktop`), **not** fork `origin/master` and **not** the local mirror's `master`. See `docs/upstream-sync.md` for the ref discipline, the lag reporting format, and the permanent fork-owned overrides.
 
 - `deepseek-harness/` is a pinned upstream Git submodule. Never edit files inside it from a desktop feature branch.
 - `dsh-plugin-desktop/` owns the Cordis Host and Client faces, Electron bootstrap, packaging, and release tests.
+- `dsh-desktop-next/` owns the separate experimental Desktop shell, Profiles and recovery, and adapters for the existing AA bridge and Community Market. Next-only changes do not belong in the Stable/Beta variant mirror. Keep its upstream reference and published runtime versions aligned; do not fork the official main frontend.
 - `dsh-community-fabric/` owns the community interoperability RFC. Until schemas and a reviewed reference adapter exist, it remains a private documentation scaffold and must not declare loadable DSH or package entry points.
 - `dsh-community-market/` owns the community-market shell. Its runtime is implemented with a **public-network security model** (`restricted-http.ts` blocks intranet addresses; `createNpmRegistryVerifier` trusts npmjs). The M5 intranet market does **not** reuse its runtime routes (spec §14 第十轮 第 39 条, review D8); the huaanwork intranet consumer face is self-implemented in the wrapper (`dsh-plugin-huaanwork/src/huaanwork-host/market/`, 7 off-table routes), importing only the `dsh-community-market/contracts` provider-page schemas. The upstream package itself remains zero-modified.
 - The outer repository and all owned packages use the root Yarn release with `nodeLinker: node-modules`.

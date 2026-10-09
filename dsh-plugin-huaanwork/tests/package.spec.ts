@@ -76,6 +76,7 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
 }
 const workspaceManifest = JSON.parse(readFileSync(new URL('package.json', workspaceRoot), 'utf8')) as {
   version?: unknown
+  workspaces?: string[]
   resolutions?: Record<string, unknown>
   scripts?: Record<string, unknown>
 }
@@ -118,6 +119,54 @@ describe('published package surface', () => {
   it('runs desktop and community market tests from the root command', () => {
     expect(ROOT_GATE_SCRIPTS.fixtureVersion).toBe(2)
     expect(workspaceManifest.scripts?.test).toBe(ROOT_GATE_SCRIPTS.test)
+  })
+
+  it('declares the unified workspace topology and gate layout', () => {
+    const EXPECTED_WORKSPACES = [
+      'dsh-plugin-desktop',
+      'dsh-plugin-desktop-beta',
+      'dsh-desktop-next',
+      'dsh-plugin-huaanwork',
+      'dsh-community-fabric',
+      'dsh-community-market',
+      'packages/huaanwork-policy',
+      'packages/huaanwork-model',
+      'packages/huaanwork-git-tools',
+      'market-server',
+      'update-server',
+    ]
+    expect(workspaceManifest.workspaces).toHaveLength(11)
+    for (const ws of EXPECTED_WORKSPACES) {
+      expect(workspaceManifest.workspaces).toContain(ws)
+    }
+    expect(workspaceManifest.scripts?.['check:layout']).toBe(
+      'yarn test:market-release && yarn test:aa-release && yarn check:bilingual-docs && yarn check:architecture && yarn check:vendored-runtime && yarn check:desktop-variants && yarn icons:check && node scripts/verify-layout.mjs && yarn test:gate-scripts && yarn check:readme-versions',
+    )
+  })
+
+  it('enforces modern resolutions and aligned dshmarket dependency', () => {
+    const resolutionKeys = Object.keys(workspaceManifest.resolutions ?? {})
+    const resolutionValues = Object.values(workspaceManifest.resolutions ?? {})
+    for (const key of resolutionKeys) {
+      expect(key).not.toContain('@npm:0.1.')
+    }
+    for (const val of resolutionValues) {
+      expect(String(val)).not.toContain('0.1.6-alpha.2')
+    }
+    const dshmarketResolutions = resolutionKeys.filter(k => k.startsWith('dshmarket@npm:'))
+    expect(dshmarketResolutions).toHaveLength(1)
+    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.66.11')
+
+    const stableManifest = JSON.parse(readFileSync(
+      new URL('dsh-plugin-desktop/package.json', workspaceRoot), 'utf8',
+    )) as { dependencies?: Record<string, string> }
+    const huaanworkManifest = JSON.parse(readFileSync(
+      new URL('dsh-plugin-huaanwork/package.json', workspaceRoot), 'utf8',
+    )) as { dependencies?: Record<string, string> }
+
+    expect(stableManifest.dependencies?.dshmarket).toBe('1.66.11')
+    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.66.11')
+    expect(huaanworkManifest.dependencies?.dshmarket).toBe(stableManifest.dependencies?.dshmarket)
   })
 
   it('registers both npm launcher names', () => {
@@ -1064,6 +1113,10 @@ describe('published package surface', () => {
   it('runs platform package gates before reusing native packaging outputs', () => {
     const windowsJob = ciWorkflow.slice(
       ciWorkflow.indexOf('  desktop-windows:'),
+      ciWorkflow.indexOf('  desktop-linux:'),
+    )
+    const linuxJob = ciWorkflow.slice(
+      ciWorkflow.indexOf('  desktop-linux:'),
       ciWorkflow.indexOf('  desktop-macos:'),
     )
     const macosJob = ciWorkflow.slice(
@@ -1073,13 +1126,18 @@ describe('published package surface', () => {
 
     expect(windowsJob).not.toContain('- run: yarn check')
     expect(windowsJob).toContain('workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]')
-    expect(windowsJob).toContain('- run: yarn workspace ${{ matrix.workspace }} check:win-package')
+    expect(windowsJob).toContain('- run: yarn workspace ${{ matrix.workspace }} check:win-package:platform')
     expect(windowsJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:win')
     expect(windowsJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:win-portable')
     expect(windowsJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')
+    expect(windowsJob.match(/DSH_WINDOWS_PACKAGE_COMPRESSION: store/g)).toHaveLength(2)
+
+    expect(linuxJob).toContain('workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta]')
+    expect(linuxJob).not.toContain('dsh-plugin-huaanwork')
+
     expect(macosJob).not.toContain('- run: yarn check')
     expect(macosJob).toContain('workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]')
-    expect(macosJob).toContain('- run: yarn workspace ${{ matrix.workspace }} check:mac-package')
+    expect(macosJob).toContain('- run: yarn workspace ${{ matrix.workspace }} check:mac-package:platform')
     expect(macosJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:mac-smoke')
     expect(macosJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')
     expect(macosJob).not.toContain('- run: yarn dist:mac-smoke')

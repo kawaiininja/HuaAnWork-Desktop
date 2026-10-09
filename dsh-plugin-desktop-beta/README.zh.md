@@ -42,7 +42,6 @@ DSH home `settings.yaml` 文档中的 `dsh-desktop.mode` 字段是单一事实�
 dsh-desktop:
   mode: compatibility # compatibility、extended 或 advanced
   macosMaterial: transparent # off 或 transparent
-  windowsMaterial: acrylic # off、acrylic，系统支持时还可用 mica
 ```
 
 Launcher 会在组合一个 generation 之前，读取当前 `@deepseek-ai/dsh-settings-file` row 解析到的同一份文件。Host 通过标准 settings service 注册 `dsh-desktop` namespace。profile manifest 中没有平行的模式值。
@@ -63,7 +62,7 @@ Cordis row 会在 profile 激活期间登记原生窗口参数。Launcher 只在
 
 本次 alpha runtime 迁移不再携带 Desktop 自有的工作区文件夹拖放行为或聊天附件拖放隔离补丁。在按 alpha Client UI 重新评估这些交互前，请使用普通工作区选择流程。
 
-在所有呈现模式下，Windows PowerShell 都会保留上游 `pwsh-sandbox` 行为与 Windows ACL confinement。Launcher generation 只会把该 Host provider 替换为同一 package 中的 `dsh-plugin-desktop-beta/windows-pwsh-sandbox` 子路径。对于与上游 ACL runner 完全匹配的 argv，adapter 会让打包后的 Electron executable 通过私有 trampoline 以 Node 模式启动。Trampoline 会先精确校验上游 runner，再在导入它之前移除 Node-mode 环境变量，并确保自身这个原本没有 console 的 Windows 进程拥有一个隐藏 console。受限 PowerShell 进程随后可以继承该 console，而不必在已经使用受限 token 时自行创建。Console 分配失败会通过现有带签名的 runner 失败路径退出；全部 ACL policy 与后续失败处理仍委托给上游 runner。Desktop deploy root 还会保留 Yarn patch，在两条原生受限进程路径上把 `STARTF_USESHOWWINDOW`、现有的 `STARTF_USESTDHANDLES` 与 `SW_HIDE` 组合起来。它不会使用与上游实现不兼容的 `CREATE_NO_WINDOW` 或 `CREATE_NEW_CONSOLE` flag。直接使用 `danger-full-access` 的 PowerShell、macOS 与 Linux 执行路径保持不变；Windows confinement 失败时不会自动回退到不受限执行。
+在所有呈现模式下，Windows PowerShell 都会保留上游 `pwsh-sandbox` 行为与 Windows ACL confinement。Launcher generation 只会把该 Host provider 替换为同一 package 中的 `dsh-plugin-desktop-beta/windows-pwsh-sandbox` 子路径。对于与上游 ACL runner 完全匹配的 argv，adapter 会让打包后的 Electron executable 通过私有 trampoline 以 Node 模式启动。Trampoline 会先精确校验上游 runner，再在导入它之前移除 Node-mode 环境变量，并确保自身这个原本没有 console 的 Windows 进程拥有一个没有窗口的 console：Windows 11 24H2 及更高版本会直接分配，更早的版本则附加到一个短暂运行、不受限的 `cmd.exe` 的无窗口 console；只有两者都失败时，才分配普通 console 并将其隐藏。受限 PowerShell 进程随后可以继承该 console，而不必在已经使用受限 token 时自行创建，也不会有 console 窗口被交给 Windows Terminal。Console 分配失败会通过现有带签名的 runner 失败路径退出；全部 ACL policy 与后续失败处理仍委托给上游 runner。Desktop deploy root 还会保留 Yarn patch，在两条原生受限进程路径上把 `STARTF_USESHOWWINDOW`、现有的 `STARTF_USESTDHANDLES` 与 `SW_HIDE` 组合起来。它不会使用与上游实现不兼容的 `CREATE_NO_WINDOW` 或 `CREATE_NEW_CONSOLE` flag。直接使用 `danger-full-access` 的 PowerShell、macOS 与 Linux 执行路径保持不变；Windows confinement 失败时不会自动回退到不受限执行。
 
 ## 扩展窗口模式
 
@@ -75,7 +74,7 @@ Cordis row 会在 profile 激活期间登记原生窗口参数。Launcher 只在
 
 DOM 会把操作栏声明为 Desktop frame，并把下移后的上游 root 声明为它的 content viewport。`shell.overlay` 会成为 fixed 插件 surface 的 containing block，直接 portal 到 `body` 的对话框则获得相同的内容偏移；两条路径都会被限制在 36 像素 frame 下方，不会再压暗或拦截顶栏。
 
-自定义窗口材质独立于模式设置。macOS 可选“关闭”或“透明材质”；Windows 可选“关闭”和原生“亚克力”，仅 Windows 11 build 22621 及以上显示 Mica。Windows 10 因此使用真正的原生亚克力，而不是 CSS 模拟。已持久化但系统不支持的 Mica 会按能力门槛回退到亚克力。切换模式或材质都会执行有序重启。
+自定义窗口材质独立于模式设置。macOS 可选“关闭”或“透明材质”。Windows 不提供材质选项，所有 Windows 窗口都是普通的不透明窗口。已移除的 `windowsMaterial` 旧值 `acrylic` 和 `mica` 仍可读取，旧设置照常启动，两者都按关闭处理。切换模式或材质都会执行有序重启。
 
 ## 增强模式
 
@@ -200,7 +199,13 @@ DSH Desktop Beta 将 UTF-8 日志写入独立的 Electron 用户数据目录：W
 
 Stable 与 Beta 在 Windows、macOS 和 Linux 上均关闭 ASAR。打包后的 Electron smoke 会通过本地文件系统后端验证随包 Cordis 技能。
 
-`yarn package:dir` 为当前宿主平台创建未封装目录。如果应用目录缺少 desktop 更新与终端模块、DSH CLI bootstrap、内置 pnpm 入口或物理 deployment package，packaged-runtime gate 会拒绝该产物。Electron Builder 会把根 manifest、desktop runtime 与完整依赖树输出到 `resources/app/`（macOS 为 `Contents/Resources/app/`）；Host profile boot 与 CLI bootstrap 都会使用这棵物理树，因此 DSH profile fallback 的符号链接不会指向虚拟 ASAR 目录。`build/app-icon.png` 保持为未经修改的 iOS Default 源图，并继续作为 Windows 与 Linux 应用图标。构建过程会运行 `scripts/generate-mac-app-icon.mjs`，把该图缩放为 824 × 824 像素并居中放入透明的 1024 × 1024 画布；macOS 打包与运行中的 Dock 都使用生成的 `build/app-icon-mac.png`。`build/tray-icon.svg` 是品牌蓝托盘源文件：构建过程会派生由 macOS 系统自动着色的模板图，以及固定品牌蓝的 Windows 与 Linux 托盘图。
+`yarn package:dir` 为当前宿主平台创建未封装目录。如果应用目录缺少 desktop 更新与终端模块、DSH CLI bootstrap、内置 pnpm 入口或物理 deployment package，packaged-runtime gate 会拒绝该产物。Electron Builder 会把根 manifest、desktop runtime 与完整依赖树输出到 `resources/app/`（macOS 为 `Contents/Resources/app/`）；Host profile boot 与 CLI bootstrap 都会使用这棵物理树，因此 DSH profile fallback 的符号链接不会指向虚拟 ASAR 目录。
+
+可编辑的图标工程位于 `build/app-icon.icon`，使用 System Dark 背景，保留 BETA 徽标。macOS 打包直接把这个分层源工程编译为 `Assets.car`，并声明 `CFBundleIconName`；打包后的应用保留原生 Dock 图标。Apple 编译器同时生成 `build/app-icon.icns`，用于较旧的 macOS 和 DMG 卷图标。Composer 导出的 `build/app-icon.png` 用于 Linux，并作为 Windows `build/app-icon.ico` 的来源；ICO 提供常用高 DPI 档位的精确帧，保留对应版本的图案，供应用程序、NSIS 安装器和卸载器使用。带内边距的 `build/app-icon-mac.png` 仅用于未打包的 Electron 开发运行，此时还没有编译后的应用包。
+
+在 Icon Composer 保存工程后，在安装了 Xcode 27 和 Icon Composer 的 Mac 上，从仓库根目录运行 `corepack yarn icons:export --channel beta`。省略 `--channel` 可一起导出 Stable、Beta 和 Next。请同时提交工程、所有导出资源和 `build/app-icon.resources.json`；`corepack yarn icons:check` 可在任何系统上检查资源是否过期或缺失，无需 Xcode。macOS 原生打包要求 Xcode 26 或更新版本；若 `xcode-select` 指向 Command Line Tools，请为打包命令设置 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`，导出脚本则会自动查找完整 Xcode 安装。
+
+`build/tray-icon.svg` 是品牌蓝托盘源文件：构建过程会派生由 macOS 系统自动着色的模板图，以及固定品牌蓝的 Windows 与 Linux 托盘图。
 
 ### WSL Linux 无界面检查
 

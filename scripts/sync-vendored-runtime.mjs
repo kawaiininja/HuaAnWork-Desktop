@@ -53,12 +53,18 @@ const otherVersions = [...new Set(
     })
     .filter(candidateVersion => candidateVersion !== version)
 )]
+const marketPath = join(root, 'dsh-community-market', 'package.json')
 const pluginPaths = [
   join(root, upstream.package, 'package.json'),
   // dsh-community-market DSH deps are governed by the beta channel's vendored runtime;
   // huaanwork inherits from the same resolved vendor tree via upstream.channels.huaanwork.
-  ...(channel === 'beta' ? [join(root, 'dsh-community-market', 'package.json')] : []),
+  ...(channel === 'beta' ? [marketPath] : []),
 ]
+// Stable and Beta both load the market bundle, and dsh 0.2 refuses a bundle
+// whose dsh peers exclude the running runtime, so its peers accept every
+// channel's version while its build dependencies follow Beta.
+const marketPeerRange = [...new Set(['stable', 'beta'].map(name => upstreamDocument.channels?.[name]?.sourceVersion))].join(' || ')
+const expectedRange = (path, field) => path === marketPath && field === 'peerDependencies' ? marketPeerRange : version
 
 const vendorRelative = `vendor/dsh-runtime/${version}`
 const vendorDirectory = join(root, ...vendorRelative.split('/'))
@@ -92,48 +98,53 @@ function expectedResolution(entry) {
 function writeVendor() {
   const packedDirectory = join(root, 'deepseek-harness', 'dist', 'npm')
   const orderPath = join(packedDirectory, 'publish-order.txt')
-  if (!existsSync(orderPath)) {
+  let packages
+  if (existsSync(orderPath)) {
+    const filenames = readFileSync(orderPath, 'utf8').trim().split(/\r?\n/u).filter(Boolean)
+    if (filenames.length === 0 || new Set(filenames).size !== filenames.length) {
+      fail('upstream publish order is empty or contains duplicate tarballs')
+    }
+
+    mkdirSync(vendorDirectory, { recursive: true })
+    packages = filenames.map((filename) => {
+      if (basename(filename) !== filename) fail(`tarball path escapes its directory: ${JSON.stringify(filename)}`)
+      const source = join(packedDirectory, filename)
+      if (!existsSync(source) || !statSync(source).isFile()) fail(`missing packed tarball ${filename}`)
+      const target = join(vendorDirectory, filename)
+      copyFileSync(source, target)
+      return {
+        name: packageName(filename),
+        version,
+        filename,
+        size: statSync(source).size,
+        sha256: sha256(source),
+      }
+    })
+    const names = packages.map(entry => entry.name)
+    if (new Set(names).size !== names.length) fail('two tarballs map to the same package name')
+
+    const expectedFiles = new Set([...filenames, 'manifest.json'])
+    for (const entry of readdirSync(vendorDirectory, { withFileTypes: true })) {
+      if (expectedFiles.has(entry.name)) continue
+      if (!entry.isFile()) fail(`unexpected directory in vendored runtime: ${entry.name}`)
+      unlinkSync(join(vendorDirectory, entry.name))
+    }
+
+    const manifest = {
+      formatVersion: 1,
+      repository: upstreamDocument.repository,
+      commit: upstream.commit,
+      version,
+      buildProfile: 'official',
+      packages,
+    }
+    writeJson(manifestPath, manifest)
+  } else if (existsSync(manifestPath)) {
+    const manifest = readJson(manifestPath)
+    packages = manifest.packages
+  } else {
     fail('upstream release tarballs are missing; run yarn upstream:prepare-runtime first')
   }
-  const filenames = readFileSync(orderPath, 'utf8').trim().split(/\r?\n/u).filter(Boolean)
-  if (filenames.length === 0 || new Set(filenames).size !== filenames.length) {
-    fail('upstream publish order is empty or contains duplicate tarballs')
-  }
-
-  mkdirSync(vendorDirectory, { recursive: true })
-  const packages = filenames.map((filename) => {
-    if (basename(filename) !== filename) fail(`tarball path escapes its directory: ${JSON.stringify(filename)}`)
-    const source = join(packedDirectory, filename)
-    if (!existsSync(source) || !statSync(source).isFile()) fail(`missing packed tarball ${filename}`)
-    const target = join(vendorDirectory, filename)
-    copyFileSync(source, target)
-    return {
-      name: packageName(filename),
-      version,
-      filename,
-      size: statSync(source).size,
-      sha256: sha256(source),
-    }
-  })
-  const names = packages.map(entry => entry.name)
-  if (new Set(names).size !== names.length) fail('two tarballs map to the same package name')
-
-  const expectedFiles = new Set([...filenames, 'manifest.json'])
-  for (const entry of readdirSync(vendorDirectory, { withFileTypes: true })) {
-    if (expectedFiles.has(entry.name)) continue
-    if (!entry.isFile()) fail(`unexpected directory in vendored runtime: ${entry.name}`)
-    unlinkSync(join(vendorDirectory, entry.name))
-  }
-
-  const manifest = {
-    formatVersion: 1,
-    repository: upstreamDocument.repository,
-    commit: upstream.commit,
-    version,
-    buildProfile: 'official',
-    packages,
-  }
-  writeJson(manifestPath, manifest)
 
   upstream.runtimePackageVersion = version
   upstream.runtimeSource = `${vendorRelative}/manifest.json`
@@ -154,7 +165,7 @@ function writeVendor() {
     const plugin = readJson(path)
     for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
       for (const name of Object.keys(plugin[field] ?? {})) {
-        if (isDshPackage(name) && packageNames.has(name)) plugin[field][name] = version
+        if (isDshPackage(name) && packageNames.has(name)) plugin[field][name] = expectedRange(path, field)
       }
     }
     writeJson(path, plugin)
@@ -212,7 +223,8 @@ function checkVendor() {
       for (const [name, range] of Object.entries(plugin[field] ?? {})) {
         if (!isDshPackage(name)) continue
         if (!names.has(name)) fail(`${relative(root, path)} references absent runtime package ${name}`)
-        if (range !== version) fail(`${relative(root, path)} ${field}.${name} must use ${version}`)
+        const expected = expectedRange(path, field)
+        if (range !== expected) fail(`${relative(root, path)} ${field}.${name} must use ${expected}`)
       }
     }
   }
