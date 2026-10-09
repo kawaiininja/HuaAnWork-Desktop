@@ -258,3 +258,92 @@ fork 多出两条上游未覆盖的语义（fail-closed 整体拒绝、多 artif
 5. 仓库根 `corepack yarn check:whitespace` → exit 0（对照当时 HEAD `4d843f0f70`；该脚本比较 `merge-base` 与 `HEAD`，不含未提交差异）。
 6. `node scripts/verify-desktop-variants.mjs` → exit 0。先前 6 条不再列出，也没有新路径。未新增 `allowedDifferences`。
 7. stable / beta 源文件未改，未复跑这两个工作区的全量测试。
+
+---
+
+# 全量收口（spike 63 hunks）— Task 2.9
+
+> 本节由 **Task 2.9** 追加；§1–§8 未删未改。needs-ruling 的 30 条已在 §3 / §6 / §7 写过处置，下表只给指针，不另写一套故事。其余 33 条（take-upstream 2 + replay-fork 22 + fork-owned-override 5 + matrix-preserve 4）是本节新登记的。modify-delete 在 spike 与落地 merge 都是 0 条。
+>
+> **度量基准（as-of，Global Constraint §8）**：2026-10-09，父 HEAD `37636c78cf6913ba7c25cf754e3c3556c63521c0`（本节提交之前）。MERGE_BASE `git merge-base origin/master HEAD` → `8cd74f5e9b`。冲突块对照用落地 merge 的两个父提交 `efde2186be`（fork）与 `ca52ce2cd9`（upstream/master）做 `git merge-tree --write-tree`（默认 conflict style），得到 **63** 处 `<<<<<<<`、**28** 个文件，与 `docs/evidence/2026-10-m8-merge-spike-refresh.md` 的 63/28 及逐 hunk 首行一致。取侧是把冲突两侧的独有行与该 HEAD 的文件内容比对，不是复述处方。
+
+## 9.1 五类里尚未逐条登记的 33 hunks
+
+归类沿用 spike。`取哪侧` 是 HEAD 上的实测，不是计划里的处方。行号都在父 HEAD `37636c78cf`。
+
+| spike | 文件 | 归类 | 取哪侧 | 重放内容 / 落点 | 理由 |
+|---|---|---|---|---|---|
+| take-upstream #1 | `dsh-plugin-desktop/THIRD_PARTY_NOTICES.md` #1 | `take-upstream` | 上游 | 无。bridge 行是上游版本 `0.1.0-dev.0.desktop.c216ac3ddda3b.r7b32a9b2`（`:8`） | 冲突两侧各 1 行，HEAD 等于上游行 |
+| take-upstream #2 | `dsh-plugin-desktop-beta/THIRD_PARTY_NOTICES.md` #1 | `take-upstream` | 上游 | 无。同一版本串（beta `:8`） | 同 stable |
+| replay #1 | `.gitignore` #1 | `replay-fork` | 并集 | 上游三条 `dsh-desktop-next/lib/`、`dist/`、`.desktop-next/`（`:17-19`）与 fork 的 `.worktrees/`（`:21`）、`market-server/keys/`（`:23`）都在 | 两侧独有行在 HEAD 都在；没有只属于一侧的行丢失 |
+| replay #2 | `dsh-plugin-desktop-beta/package.json` #1 | `replay-fork` | 上游依赖块 | 无脚本重放：fork 独有 script key **0** 个，上游多出的 **6** 个 script key 都在 HEAD。依赖块采上游 | 该文件唯一冲突 hunk 的首行是 bridge tarball。fork 父提交有、上游与 HEAD 都没有的依赖键是 `@deepseek-ai/dsh-agent-presets`、`@deepseek-ai/dsh-invariants`、`@deepseek-ai/dsh-settings-file`（3 个） |
+| replay #3 | `dsh-plugin-desktop/package.json` #1 | `replay-fork` | 上游依赖块 | 无脚本重放：fork 独有 script key **0** 个，上游多出的 **6** 个都在。依赖块采上游 | 同 beta 的冲突形状。消失的 fork 独有依赖键是 `@deepseek-ai/dsh-agent-presets`、`@deepseek-ai/dsh-code-runtime`、`@deepseek-ai/dsh-settings-file`（3 个）。`@deepseek-ai/dsh-invariants` 仍在 stable `:233` |
+| replay #4 | `dsh-plugin-desktop/package.json` #2 | `replay-fork` | 上游 | 无。`x64ArchFiles`（`:414`）是上游 **11** 条 glob；fork 的 **10** 条是它的子集，HEAD 没有第三种条目。beta 的同名字段同样是这 11 条（beta 该字段不在冲突 hunk 里） | spike 的并集条件是「fork 有上游没有的条目才取并集」。实测没有这样的条目，采上游即超集 |
+| replay #5 | `package.json` #1 | `replay-fork` | 并集改写 | `build`（`:1343`）、`typecheck`（`:1344`）、`test`（`:1345`）同时含 `dsh-desktop-next`、`dsh-plugin-huaanwork`、`market-server`、`update-server`；`build` 另有上游的 `market:prepare`。三条的字面值都不等于任一父提交 | 冲突首行是 `"build":`。spike 的 #1 对的是这组根命令，不是文件里的第一个 hunk |
+| replay #6 | `package.json` #2 | `replay-fork` | 并集 | `workspaces`（`:10-22`）**11** 项：上游的 `dsh-desktop-next` 加上 fork 多出的 6 项（`dsh-plugin-huaanwork`、三个 `packages/huaanwork-*`、`market-server`、`update-server`） | 冲突首行是 workspace 名。11 = 上游 5 项所在列表并上 fork 6 项，as-of 上列 HEAD |
+| replay #7 | `package.json` #3 | `replay-fork` | 并集改写 | `check:layout`（`:1357`）= 上游的 `test:market-release` / `test:aa-release` / `icons:check` + fork 的 `test:gate-scripts` / `check:readme-versions`。`check:vendored-runtime`（`:1353`）含第三通道 `huaanwork`。`check`（`:1358`）含 `check:whitespace`、`dsh-desktop-next`、`dsh-plugin-huaanwork`、`market-server`、`update-server`。fork 独有 script key 13 个、上游独有 15 个，HEAD 缺失 **0** | 冲突 ours 首行 `"test:desktop-variants"`，theirs 首行 `"check:vendored-runtime"`。根 `resolutions` 没有自己的冲突 hunk；`dshmarket` 键 **1** 条，值为上游 `dshmarket@npm:1.66.11`，fork 的 `dshmarket@npm:1.38.1` 不在 |
+| replay #8 | `package.json` #4 | `replay-fork` | 上游 | 无。`dev:beta`（`:1373`）及同 hunk 的 beta 启动/打包命令等于上游（带 `market:prepare`） | 冲突首行 `"dev:beta":`。fork 独有的 script key 不在这个 hunk 的丢失集里（见 replay #7 的 0 缺失） |
+| replay #9 | `scripts/verify-layout.mjs` #1 | `replay-fork` | 并集 | `huaanworkPlugin`（`:18`）与 `nextDesktop` / `nextReference`（`:19-20`）都在 | 两侧独有行都在 |
+| replay #10 | `scripts/verify-layout.mjs` #2 | `replay-fork` | 并集 | workspace 列表同时有 `dsh-desktop-next`（`:38`）与 `dsh-plugin-huaanwork`（`:39`），以及三个 `packages/huaanwork-*`（`:42-44`） | 两侧独有行都在 |
+| replay #11 | `scripts/verify-layout.mjs` #3 | `replay-fork` | 并集 | yarn 继承循环同时有 next（`:53`）与 huaanwork（`:54`） | 两侧独有行都在 |
+| replay #12 | `scripts/verify-layout.mjs` #4 | `replay-fork` | 并集 | pnpm 锁文件检查同时有 next（`:79-80`）与 huaanwork（`:81-82`） | 两侧独有行都在 |
+| replay #13 | `scripts/verify-layout.mjs` #5 | `replay-fork` | 并集 | 边界检查同时有 `next desktop` 与 `huaanwork desktop`（`:105`） | 两侧独有行都在 |
+| replay #14 | `scripts/verify-layout.mjs` #6 | `replay-fork` | 并集改写 | 上游的 Next 私有包断言在 `:147-150`；三通道循环在 `:137-145`；stdout（`:152`）是两侧句子的拼接：`all Desktop workspaces including Next and upstream` | 冲突 ours 只有旧 stdout，theirs 是 Next 断言加另一句 stdout。HEAD 两段都在，stdout 字面值不等于任一侧 |
+| replay #15 | `yarn.lock` #1 | `replay-fork` | 上游 | 无。bridge 解析是 `agents-anywhere-dsh-bridge-next-2.0.3`（出现 **10** 次）；`0.1.0-dev` 旧 tarball 出现 **0** 次 | 冲突首行是 bridge locator |
+| replay #16 | `yarn.lock` #2 | `replay-fork` | 上游 | 无。`@deepseek-ai/cordis@npm:4.0.4` 出现 **2** 次；`4.0.2` 出现 **0** 次 | 冲突首行是 cordis 版本 |
+| replay #17 | `yarn.lock` #3 | `replay-fork` | 上游 | 无。ours 首行 `@types/ws@npm:^8.18.1` 所在块采上游（theirs 从 `@ubjs/core@npm:0.31.0-3` 起） | 独有行比对为采上游 |
+| replay #18 | `yarn.lock` #4 | `replay-fork` | 上游 | 无。bridge 路径是 2.0.3 tarball，不是 fork 的 `0.1.0-dev` 路径 | 冲突两侧各 1 行路径 |
+| replay #19 | `yarn.lock` #5 | `replay-fork` | 上游 | 无。第二处 bridge 路径，同样是 2.0.3 | 同 #18 |
+| replay #20 | `yarn.lock` #6 | `replay-fork` | 上游 stanza + 工作区条目仍在 | `dshmarket@npm:1.66.11` 出现 **2** 次；`dshmarket@npm:1.38.1` 与 `1.66.7` 出现 **0** 次。`dsh-plugin-huaanwork@workspace:`、`market-server@workspace:`、`update-server@workspace:`、`@huaanwork/policy@workspace:` 各出现 **2** 次 | 冲突 ours 是旧的 huaanwork 工作区块加 `dshmarket@1.38.1`，theirs 是 `dshmarket@npm:1.66.11`。1.38.1 不在 HEAD；四个工作区键在。合并之后 `827e53fc03` 又改了 lockfile（**+4 / −128** 行：schemastery 描述符、huaanwork 依赖加 `dsh-deepseek-account`、删 `node-addon-*-0.1.9`），不把上述取侧改回去 |
+| replay #21 | `yarn.lock` #7 | `replay-fork` | 并集 | `market-server@workspace:market-server` 在 HEAD（计次见 #20） | 冲突 ours 是 market-server 工作区，theirs 是 `markdown-table`；两侧独有行都在 |
+| replay #22 | `yarn.lock` #8 | `replay-fork` | 并集 | `update-server@workspace:update-server` 在 HEAD（计次见 #20） | 冲突 ours 是 update-server 工作区，theirs 是 `use-sync-external-store`；两侧独有行都在 |
+| fork-owned #1 | `dsh-plugin-desktop/tests/package.spec.ts` #1 | `fork-owned-override` | fork | 无。测试标题仍是 `runs desktop and community market typechecks from the root command`，且文件含 `fixtureVersion` | 冲突 theirs 的标题 `runs all desktop editions…` 不在 HEAD |
+| fork-owned #2 | `dsh-plugin-desktop-beta/tests/package.spec.ts` #1 | `fork-owned-override` | fork | 无。同一标题（beta `:98`） | 同 stable |
+| fork-owned #3 | `scripts/verify-desktop-variants.mjs` #1 | `fork-owned-override` | fork，随后有本分支编辑 | merge `a36953ee24` 这一 hunk 采 fork。其后 `a50a8c4f70`、`7d5c2ab68e`、`fbdf834185` 改了同一文件的 `allowedDifferences` 与注释。HEAD 仍导出 `PAIRS`（`:31`），文件里没有 `normalizeIdentity` 函数（只在 `:96` 的注释里出现这个词） | 冲突 theirs 是上游把守卫收成 `product-identity.ts` 单差集。HEAD 不是那一版 |
+| fork-owned #4 | `scripts/verify-desktop-variants.mjs` #2 | `fork-owned-override` | fork | 无。`verifyDesktopVariants`（`:243`）仍是 fork 的 pairs 循环，不是上游的 `sharedPaths` 循环 | 冲突 ours 首行就是这个函数 |
+| fork-owned #5 | `scripts/verify-desktop-variants.mjs` #3 | `fork-owned-override` | fork | 无。stdout（`:287`）是 `all editions use isolated Host and chrome` | 冲突 ours 为空，theirs 是 `both editions use isolated Host and chrome`。这句不在 HEAD |
+| matrix #1 | `dsh-plugin-desktop/tests/package.spec.ts` #2 | `matrix-preserve` | fork 的三格 + 上游步骤名 | Windows 断言（`:1026`）含 `dsh-plugin-huaanwork`；步骤名（`:1027`）是上游的 `check:win-package:platform` | 冲突两侧的整行都不在 HEAD：名单留了 fork 的三格，步骤名换成了上游的 `:platform` |
+| matrix #2 | `dsh-plugin-desktop/tests/package.spec.ts` #3 | `matrix-preserve` | 同上 | macOS（`:1038` 三格，`:1039` `check:mac-package:platform`） | 同 Windows |
+| matrix #3 | `dsh-plugin-desktop-beta/tests/package.spec.ts` #2 | `matrix-preserve` | 同上 | Windows（beta `:1093`） | 同 stable |
+| matrix #4 | `dsh-plugin-desktop-beta/tests/package.spec.ts` #3 | `matrix-preserve` | 同上 | macOS（beta `:1105`） | 同 stable |
+
+`modify-delete`：spike 记 0。同一对父提交再生出的 28 个冲突文件全部是内容冲突（各有 `<<<<<<<`），没有额外的删除/修改路径。没有待登记的 hunk。
+
+## 9.2 needs-ruling 30 条的指针
+
+spike §4 的编号。已有章节用的是计划简报编号（例如 beta #2），与 spike 的 per-file 序号不是同一套；指针对的是**同一冲突首行**已经写过的那一节。
+
+| spike §4 | 冲突首行所在文件 | 指向 |
+|---|---|---|
+| 1 | `.github/workflows/ci.yml` #1 | §7.1 行 `ci.yml #1` |
+| 2 | beta `electron-runtime.ts` #1（`downloadAndOpen` 参数名） | §3 行 `beta #2` |
+| 3 | beta `electron-runtime.ts` #2（类型） | §3 行 `beta #3` |
+| 4 | beta `notifications.ts` #1（import） | §6.2 行 `beta #4` |
+| 5 | beta `notifications.ts` #2（英文 `job-failed`） | §6.2 行 `beta #5`（该行登记了 EN/ZH 的 `job-failed` 模板） |
+| 6 | beta `notifications.ts` #3（中文 `job-failed`） | §6.2 行 `beta #5` |
+| 7 | beta `recovery-copy.ts` #1（英文 `confirmRollbackBody`） | §6.2 行 `beta #7` |
+| 8 | beta `recovery-copy.ts` #2（中文 `confirmRollbackBody`） | §6.2 行 `beta #7` |
+| 9 | beta `runtime.ts` #1（JSDoc） | §3 行 `stable #14`（同节写明 stable↔beta 逐字节相同） |
+| 10 | beta `update-checker.ts` #1（`sha256` 字段） | §3 行 `beta #9` |
+| 11 | beta `update-checker.ts` #2（结果组装） | §3 行 `beta #11` |
+| 12 | beta `update-lifecycle.ts` #1 | §3 行 `beta #12` |
+| 13 | stable `electron-runtime.ts` #1 | §3 行 `stable #13`（该行写明与 beta #2/#3 对侧收口） |
+| 14 | stable `electron-runtime.ts` #2 | §3 行 `stable #13` |
+| 15 | stable `notifications.ts` #1 | §6.2 行 `stable #15` |
+| 16 | stable `notifications.ts` #2 | §6.2 行 `stable #16` |
+| 17 | stable `notifications.ts` #3 | §6.2 行 `stable #16` |
+| 18 | stable `recovery-copy.ts` #1 | §6.2 行 `stable #18` |
+| 19 | stable `recovery-copy.ts` #2 | §6.2 行 `stable #18` |
+| 20 | stable `runtime.ts` #1 | §3 行 `stable #14` |
+| 21 | stable `update-checker.ts` #1 | §3 行 `stable #20` |
+| 22 | stable `update-checker.ts` #2 | §3 行 `stable #23` |
+| 23 | stable `update-lifecycle.ts` #1 | §3 行 `beta #12`（同节：huaanwork 与 stable 逐字节相同，stable 这一 hunk 采上游） |
+| 24 | `updates.spec.ts` #1 | §3 行 `tests #24` |
+| 25 | `updates.spec.ts` #2 | §3 行 `tests #25` |
+| 26 | `prepare-agents-anywhere-release.mjs` #1 | §7.1 行 `#26/#27/#28` |
+| 27 | `prepare-agents-anywhere-release.mjs` #2 | §7.1 行 `#26/#27/#28` |
+| 28 | `prepare-agents-anywhere-release.mjs` #3 | §7.1 行 `#26/#27/#28` |
+| 29 | `sync-vendored-runtime.mjs` #1 | §7.1 行 `#29` |
+| 30 | `vendor/agents-anywhere/provenance.json` #1 | §7.1 行 `#30` |
+
+合计：§9.1 的 33 行 + §9.2 的 30 行 = **63**。§8 的六条传播不是 spike hunk，不重复计入。as-of 2026-10-09 @ `37636c78cf6913ba7c25cf754e3c3556c63521c0`。
