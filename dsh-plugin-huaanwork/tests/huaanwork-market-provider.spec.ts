@@ -123,6 +123,8 @@ const PREFERENCES: DesktopProfilePreferences = {
     notifyOnTurnFailure: false,
     notifyOnJobCompletion: false,
     notifyOnJobFailure: false,
+    notifyOnScheduleCompletion: false,
+    notifyOnScheduleFailure: false,
   },
 }
 
@@ -157,6 +159,8 @@ describe('8 文件校验器镜像一致(Step 1/5)', () => {
         notifyOnTurnFailure: false,
         notifyOnJobCompletion: false,
         notifyOnJobFailure: false,
+        notifyOnScheduleCompletion: false,
+        notifyOnScheduleFailure: false,
       },
     }
     expect(isDesktopSetupWizardSelection(selection)).toBe(true)
@@ -177,6 +181,8 @@ describe('8 文件校验器镜像一致(Step 1/5)', () => {
     url.searchParams.set('notifyOnTurnFailure', 'false')
     url.searchParams.set('notifyOnJobCompletion', 'false')
     url.searchParams.set('notifyOnJobFailure', 'false')
+    url.searchParams.set('notifyOnScheduleCompletion', 'false')
+    url.searchParams.set('notifyOnScheduleFailure', 'false')
 
     const action = parseDesktopSetupWizardAction(url.href)
     expect(action).toEqual({

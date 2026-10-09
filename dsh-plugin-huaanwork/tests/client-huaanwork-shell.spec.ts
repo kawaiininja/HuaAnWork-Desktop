@@ -16,6 +16,14 @@ function fakeCtx(layoutTaken = false) {
       entries: () => [],
     },
     effect: (fn: () => unknown) => { fn() },
+    inject: (_deps: unknown, fn: (scope: any) => void) => {
+      const scope = {
+        effect: (f: () => unknown) => { f() },
+        locale: { register: () => {}, bind: () => () => '' },
+        shortcuts: { register: () => {} },
+      }
+      fn(scope)
+    },
   }
   return { ctx: ctx as any, provided, slots }
 }

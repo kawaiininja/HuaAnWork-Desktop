@@ -355,6 +355,10 @@ describe('huaanwork version checks', () => {
       status: 'update-available',
       currentVersion: '0.1.0',
       latestVersion: '0.2.0',
+      installerSha256: {
+        darwin: validHash,
+        win32: validHash,
+      },
       sha256: { mac: validHash, windows: validHash },
     })
   })

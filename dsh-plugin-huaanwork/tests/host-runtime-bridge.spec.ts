@@ -2,7 +2,7 @@ import { MessageChannel } from 'node:worker_threads'
 import { expect, it, vi } from 'vitest'
 import { HostRpc } from '../src/host-rpc.ts'
 import { bindNativeRuntime, createHostRuntime, KeepAwakeUnavailableError, runtimeSnapshot, type ConfirmedRestartRuntime, type KeepAwakeRuntime } from '../src/host-runtime-bridge.ts'
-import type { DesktopRuntime, DesktopShellSpec, DesktopTrayItem } from '../src/runtime.ts'
+import type { DesktopLocale, DesktopRuntime, DesktopShellSpec, DesktopTrayItem } from '../src/runtime.ts'
 
 it('preserves the Web URL and authentication while projecting shell and tray callbacks', async () => {
   const { port1, port2 } = new MessageChannel()
@@ -14,8 +14,10 @@ it('preserves the Web URL and authentication while projecting shell and tray cal
   let tray!: DesktopTrayItem
   const disposeShell = vi.fn(async () => {})
   const disposeTray = vi.fn()
+  let nativeLocale: DesktopLocale = 'en'
   const native = {
-    platform: 'win32', windowsBuild: 22631, locale: 'en',
+    platform: 'win32', get locale() { return nativeLocale },
+    setLocalePreference: (preference: DesktopLocale | undefined) => { nativeLocale = preference ?? 'zh' },
     updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.7-beta.1', statePath: '/tmp/update',
       request: vi.fn(async () => new Response('{"version":"2.0.8-beta.1"}', { headers: { 'x-test': 'yes' } })),
     },
@@ -77,7 +79,7 @@ it('pins the confirmed-restart RPC seam: method name, interactive flag, boolean 
   // createHostRuntime 的公开返回类型仍是 DesktopRuntime(ConfirmedRestartRuntime
   // 是 huaanwork-host 侧的显式窄化),本用例按同约定窄化后再调用。
   const runtime = createHostRuntime(child, {
-    platform: 'win32', windowsBuild: 22631, locale: 'en',
+    platform: 'win32', locale: 'en',
     updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
   }) as ConfirmedRestartRuntime
   await expect(runtime.requestConfirmedRestart()).resolves.toBe(true)
@@ -99,7 +101,7 @@ it('pins the confirmed-restart RPC seam: method name, interactive flag, boolean 
     },
   } as unknown as HostRpc
   const native = {
-    platform: 'win32', windowsBuild: 22631, locale: 'en',
+    platform: 'win32', locale: 'en',
     updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
     schedule: () => async () => {},
     registerTrayItem: () => ({ refresh() {}, dispose() {} }),
@@ -127,7 +129,7 @@ it('pins the keep-awake RPC seam: method name, non-interactive timeout, boolean 
     handle: () => () => {},
   } as unknown as HostRpc
   const runtime = createHostRuntime(child, {
-    platform: 'win32', windowsBuild: 22631, locale: 'en',
+    platform: 'win32', locale: 'en',
     updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
   }) as KeepAwakeRuntime
   await runtime.setKeepAwake!(true)
@@ -147,7 +149,7 @@ it('pins the keep-awake RPC seam: method name, non-interactive timeout, boolean 
   } as unknown as HostRpc
   const seen: boolean[] = []
   const native = {
-    platform: 'win32', windowsBuild: 22631, locale: 'en',
+    platform: 'win32', locale: 'en',
     updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
     schedule: () => async () => {},
     registerTrayItem: () => ({ refresh() {}, dispose() {} }),
@@ -173,7 +175,7 @@ it('pins the keep-awake RPC seam: method name, non-interactive timeout, boolean 
     },
   } as unknown as HostRpc
   const bare = {
-    platform: 'linux', windowsBuild: undefined, locale: 'en',
+    platform: 'linux', locale: 'en',
     updates: { isPackaged: false, canDownload: false, currentVersion: '2.0.0', statePath: '/tmp/update' },
     schedule: () => async () => {},
     registerTrayItem: () => ({ refresh() {}, dispose() {} }),

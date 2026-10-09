@@ -12,6 +12,7 @@ import {
 import { sessionFormatV0ToV1 } from '@deepseek-ai/dsh-session-format-v0-to-v1'
 import { sessionFormatV1ToV2 } from '@deepseek-ai/dsh-session-format-v1-to-v2'
 import { sessionFormatV2ToV3 } from '@deepseek-ai/dsh-session-format-v2-to-v3'
+import { sessionFormatV3ToV4 } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import { decompressZstdFrames } from '../../src/huaanwork-host/session-view.ts'
@@ -44,7 +45,7 @@ import {
  */
 
 function migrationChainLegs() {
-  return [sessionFormatV0ToV1, sessionFormatV1ToV2, sessionFormatV2ToV3]
+  return [sessionFormatV0ToV1, sessionFormatV1ToV2, sessionFormatV2ToV3, sessionFormatV3ToV4]
 }
 
 interface MigrateThenAppendOptions {

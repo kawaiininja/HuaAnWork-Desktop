@@ -30,13 +30,19 @@ test("rejects parent traversal escapes", () => {
 });
 
 test("allows git metadata reads but denies git metadata writes", () => {
-  const root = path.resolve(import.meta.dirname, "../../..");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "policy-paths-git-"));
+  try {
+    fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".git", "config"), "[core]\n");
 
-  assert.equal(
-    resolveInside(root, ".git/config"),
-    fs.realpathSync(path.join(root, ".git", "config")),
-  );
-  assert.equal(resolveInside(root, ".git/hooks/x", { forWrite: true }), null);
+    assert.equal(
+      resolveInside(root, ".git/config"),
+      fs.realpathSync(path.join(root, ".git", "config")),
+    );
+    assert.equal(resolveInside(root, ".git/hooks/x", { forWrite: true }), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("matches Windows git metadata segments case-insensitively", () => {
@@ -49,13 +55,19 @@ test(
   "allows .GIT reads but denies .GIT writes on Windows",
   { skip: process.platform !== "win32" },
   () => {
-    const root = path.resolve(import.meta.dirname, "../../..");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "policy-paths-git-win-"));
+    try {
+      fs.mkdirSync(path.join(root, ".git"), { recursive: true });
+      fs.writeFileSync(path.join(root, ".git", "config"), "[core]\n");
 
-    assert.equal(
-      resolveInside(root, ".GIT/config"),
-      fs.realpathSync(path.join(root, ".GIT", "config")),
-    );
-    assert.equal(resolveInside(root, ".GIT/config", { forWrite: true }), null);
+      assert.equal(
+        resolveInside(root, ".GIT/config"),
+        fs.realpathSync(path.join(root, ".GIT", "config")),
+      );
+      assert.equal(resolveInside(root, ".GIT/config", { forWrite: true }), null);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   },
 );
 

@@ -114,10 +114,13 @@ async function clientVerdict(
       request: async (url: string) => {
         requestedUrl = url
         // Uint8Array (not Buffer) so the body satisfies the DOM/undici BodyInit.
-        return new Response(new Uint8Array(bytes), {
-          status: 200,
-          headers: { 'content-length': String(declaredBytes), 'content-type': 'application/octet-stream' },
-        })
+        return {
+          response: new Response(new Uint8Array(bytes), {
+            status: 200,
+            headers: { 'content-length': String(declaredBytes), 'content-type': 'application/octet-stream' },
+          }),
+          finalUrl: url,
+        }
       },
     })
     return { ok: true, code: undefined, requestedUrl }

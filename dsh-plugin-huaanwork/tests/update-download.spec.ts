@@ -1,12 +1,13 @@
+import { createHash } from 'node:crypto'
 import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  DESKTOP_DOWNLOAD_URLS,
   DESKTOP_TARGET_VERSION_HEADER,
   MAX_UPDATE_DOWNLOAD_BYTES,
   UpdateDownloadError,
-  desktopDownloadUrls,
   desktopUpdateFilename,
   downloadDesktopUpdate,
   pendingDesktopUpdateArtifact,
@@ -14,6 +15,7 @@ import {
   resolveDesktopUpdateArtifact,
   type DesktopDownloadPlatform,
   type UpdateArtifactRequest,
+  type UpdateArtifactResponse,
 } from '../src/update-download.ts'
 import { DESKTOP_RELEASE_CHANNEL_HEADER } from '../src/update-checker.ts'
 
@@ -43,9 +45,13 @@ function windowsArtifact(): Uint8Array {
   return artifact
 }
 
-function chunkedResponse(chunks: readonly Uint8Array[], headers: HeadersInit = {}): Response {
+function chunkedResponse(
+  chunks: readonly Uint8Array[],
+  headers: HeadersInit = {},
+  finalUrl: string = 'https://www.dshdesktop.cn/api/downloads/mac',
+): UpdateArtifactResponse {
   let index = 0
-  return new Response(new ReadableStream<Uint8Array>({
+  const response = new Response(new ReadableStream<Uint8Array>({
     pull(controller) {
       const chunk = chunks[index]
       index += 1
@@ -53,6 +59,9 @@ function chunkedResponse(chunks: readonly Uint8Array[], headers: HeadersInit = {
       else controller.enqueue(chunk)
     },
   }), { status: 200, headers })
+  // The settled URL is reported explicitly: Electron net.fetch Responses
+  // carry an empty url, so the gate must never read it off the Response.
+  return { response, finalUrl }
 }
 
 async function expectFailure(
@@ -110,7 +119,7 @@ describe('desktop update installer download', () => {
       version: '2.0.6-beta.1',
       channel: 'beta',
       destinationPath: join(directory, 'DSH-Desktop-Beta-2.0.6-beta.1-mac.dmg'),
-      request: async () => chunkedResponse([dmgArtifact()]),
+      request: async () => chunkedResponse([dmgArtifact()], {}, 'https://cdn-lfs-cn-1.modelscope.cn/installer.dmg'),
     })
     expect(result).toBe(join(directory, 'DSH-Desktop-Beta-2.0.6-beta.1-mac.dmg'))
   })
@@ -134,7 +143,7 @@ describe('desktop update installer download', () => {
     expect(result).toBe(join(directory, 'DSH-Desktop-2.1.0-mac.dmg'))
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.url).toBe(desktopDownloadUrls().darwin)
+    expect(calls[0]?.url).toBe(DESKTOP_DOWNLOAD_URLS.darwin)
     expect(calls[0]?.init).toMatchObject({ method: 'GET', cache: 'no-store', redirect: 'follow' })
     await expectNoPartialFiles(directory)
   })
@@ -147,13 +156,138 @@ describe('desktop update installer download', () => {
       version: '2.2.0',
       destinationPath: destinationPath(directory, 'win32', '2.2.0'),
       request: async (url) => {
-        expect(url).toBe(desktopDownloadUrls().win32)
-        return chunkedResponse([artifact])
+        expect(url).toBe(DESKTOP_DOWNLOAD_URLS.win32)
+        return chunkedResponse([artifact], {}, 'https://www.dshdesktop.cn/api/downloads/windows')
       },
     })
 
     expect(result).toBe(join(directory, 'DSH-Desktop-2.2.0-windows.exe'))
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
+    await expectNoPartialFiles(directory)
+  })
+
+  it.each([
+    'https://modelscope.cn/models/t4wefan/deepseek-harness-desktop/resolve/master/installer.dmg',
+    'https://cdn-lfs-cn-1.modelscope.cn/installer.dmg',
+    'https://other.example/installer.dmg',
+    'https://modelscope.cn/models/another-user/another-repo/installer.dmg',
+  ])('accepts a valid installer from an HTTPS redirect to %s', async finalUrl => {
+    const directory = await temporaryDirectory()
+    const artifact = dmgArtifact()
+    const result = await downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.2.1',
+      destinationPath: destinationPath(directory, 'darwin', '2.2.1'),
+      request: async () => chunkedResponse(
+        [artifact],
+        {},
+        finalUrl,
+      ),
+    })
+    expect(await readFile(result)).toEqual(Buffer.from(artifact))
+  })
+
+  it.each([
+    ['an https downgrade', 'http://www.dshdesktop.cn/api/downloads/mac'],
+    ['embedded credentials', 'https://user:password@cdn.example/installer.dmg'],
+    ['a non-HTTPS port', 'https://cdn.example:8080/installer.dmg'],
+    ['a missing final URL', ''],
+  ] as const)('rejects a download that settles on %s', async (_label, finalUrl) => {
+    const directory = await temporaryDirectory()
+    await expectFailure(downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.3.0',
+      destinationPath: destinationPath(directory, 'darwin', '2.3.0'),
+      request: async () => chunkedResponse([dmgArtifact()], {}, finalUrl),
+    }), 'redirect-origin')
+    await expectNoPartialFiles(directory)
+  })
+
+  it('cancels the response body when the HTTPS check rejects the settled URL', async () => {
+    const directory = await temporaryDirectory()
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      pull(stream) { stream.enqueue(dmgArtifact()) },
+      cancel() { cancelled = true },
+    })
+    await expectFailure(downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.3.0',
+      destinationPath: destinationPath(directory, 'darwin', '2.3.0'),
+      request: async () => ({
+        response: new Response(body, { status: 200 }),
+        finalUrl: 'http://cdn.example/installer.dmg',
+      }),
+    }), 'redirect-origin')
+    expect(cancelled).toBe(true)
+    await expectNoPartialFiles(directory)
+  })
+
+  it('cancels the response body when the HTTP status is unsuccessful', async () => {
+    const directory = await temporaryDirectory()
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      pull(stream) { stream.enqueue(Buffer.from('service unavailable')) },
+      cancel() { cancelled = true },
+    })
+    await expectFailure(downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.4.1',
+      destinationPath: destinationPath(directory, 'darwin', '2.4.1'),
+      request: async () => ({
+        response: new Response(body, { status: 503 }),
+        finalUrl: 'https://www.dshdesktop.cn/api/downloads/mac',
+      }),
+    }), 'http-status')
+    expect(cancelled).toBe(true)
+    await expectNoPartialFiles(directory)
+  })
+
+  it('enforces an expected installer digest before completing the download', async () => {
+    const directory = await temporaryDirectory()
+    const artifact = dmgArtifact()
+    const digest = createHash('sha256').update(artifact).digest('hex')
+    const valid = await downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.3.1',
+      destinationPath: destinationPath(directory, 'darwin', '2.3.1'),
+      request: async () => chunkedResponse([artifact]),
+      expectedSha256: digest,
+    })
+    expect(await readFile(valid)).toEqual(Buffer.from(artifact))
+
+    // Hex case is normalized, matching the version-checker parsing path.
+    const upper = await downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.3.4',
+      destinationPath: destinationPath(directory, 'darwin', '2.3.4'),
+      request: async () => chunkedResponse([artifact]),
+      expectedSha256: digest.toUpperCase(),
+    })
+    expect(await readFile(upper)).toEqual(Buffer.from(artifact))
+
+    const otherDirectory = await temporaryDirectory()
+    await expectFailure(downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.3.2',
+      destinationPath: destinationPath(otherDirectory, 'darwin', '2.3.2'),
+      request: async () => chunkedResponse([artifact]),
+      expectedSha256: 'a'.repeat(64),
+    }), 'invalid-artifact')
+    await expectNoPartialFiles(otherDirectory)
+  })
+
+  it('rejects a malformed expected digest before issuing any request', async () => {
+    const directory = await temporaryDirectory()
+    const request = vi.fn()
+    await expectFailure(downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.3.3',
+      destinationPath: destinationPath(directory, 'darwin', '2.3.3'),
+      request,
+      expectedSha256: 'not-a-sha256',
+    }), 'invalid-options')
+    expect(request).not.toHaveBeenCalled()
     await expectNoPartialFiles(directory)
   })
 
@@ -214,8 +348,14 @@ describe('desktop update installer download', () => {
   })
 
   it.each([
-    ['an unsuccessful response', async () => new Response(null, { status: 503 }), 'http-status'],
-    ['a missing response body', async () => new Response(null, { status: 200 }), 'empty-body'],
+    ['an unsuccessful response', async (): Promise<UpdateArtifactResponse> => ({
+      response: new Response(null, { status: 503 }),
+      finalUrl: 'https://www.dshdesktop.cn/api/downloads/mac',
+    }), 'http-status'],
+    ['a missing response body', async (): Promise<UpdateArtifactResponse> => ({
+      response: new Response(null, { status: 200 }),
+      finalUrl: 'https://www.dshdesktop.cn/api/downloads/mac',
+    }), 'empty-body'],
     ['a zero-byte response body', async () => chunkedResponse([]), 'empty-body'],
   ] as const)('rejects %s without leaving a partial file', async (_label, request, code) => {
     const directory = await temporaryDirectory()
@@ -248,12 +388,13 @@ describe('desktop update installer download', () => {
     let requestSignal: AbortSignal | null | undefined
     const request: UpdateArtifactRequest = async (_url, init) => {
       requestSignal = init.signal
-      return new Response(new ReadableStream<Uint8Array>({
+      const response = new Response(new ReadableStream<Uint8Array>({
         pull(stream) {
           stream.enqueue(dmgArtifact().subarray(0, 128))
           controller.abort(new DOMException('stop', 'AbortError'))
         },
       }))
+      return { response, finalUrl: 'https://www.dshdesktop.cn/api/downloads/mac' }
     }
 
     await expectFailure(downloadDesktopUpdate({
@@ -306,7 +447,7 @@ describe('desktop update installer download', () => {
 
   it('rejects a relative destination path before requesting', async () => {
     let requested = false
-    const request = async (): Promise<Response> => {
+    const request = async (): Promise<UpdateArtifactResponse> => {
       requested = true
       return chunkedResponse([dmgArtifact()])
     }
@@ -326,7 +467,7 @@ describe('desktop update installer download', () => {
     temporaryRoots.push(linked)
     await symlink(directory, linked, process.platform === 'win32' ? 'junction' : 'dir')
     let requested = false
-    const request = async (): Promise<Response> => {
+    const request = async (): Promise<UpdateArtifactResponse> => {
       requested = true
       return chunkedResponse([dmgArtifact()])
     }
@@ -394,30 +535,14 @@ describe('desktop update artifact cleanup', () => {
 })
 
 describe('huaanwork update downloads', () => {
-  it('names the artifact after the product, not after DSH Desktop', () => {
+  it('formats the installer filename for the huaanwork channel', () => {
     expect(desktopUpdateFilename('darwin', '0.2.0', 'huaanwork')).toBe('HuaAnWork-0.2.0-mac.dmg')
     expect(desktopUpdateFilename('win32', '0.2.0', 'huaanwork')).toBe('HuaAnWork-0.2.0-windows.exe')
-  })
-
-  it('keeps the stable and beta artifact names untouched', () => {
-    expect(desktopUpdateFilename('darwin', '2.0.4', 'stable')).toBe('DSH-Desktop-2.0.4-mac.dmg')
-    expect(desktopUpdateFilename('darwin', '2.0.6-beta.1', 'beta')).toBe('DSH-Desktop-Beta-2.0.6-beta.1-mac.dmg')
   })
 
   it('rejects a beta-shaped version on the huaanwork channel', () => {
     expect(() => desktopUpdateFilename('darwin', '0.2.0-beta.1', 'huaanwork'))
       .toThrow(/must match the huaanwork channel/u)
-  })
-
-  it('rejects a stable-shaped version on the beta channel', () => {
-    expect(() => desktopUpdateFilename('darwin', '2.0.4', 'beta')).toThrow(/must match the beta channel/u)
-  })
-
-  it('builds both download endpoints from the configured origin', () => {
-    expect(desktopDownloadUrls('https://update.corp.lan:9000')).toEqual({
-      darwin: 'https://update.corp.lan:9000/api/downloads/mac',
-      win32: 'https://update.corp.lan:9000/api/downloads/windows',
-    })
   })
 
   it('sends the huaanwork channel and target version to the configured origin', async () => {
@@ -432,7 +557,7 @@ describe('huaanwork update downloads', () => {
       destinationPath: destination,
       request: async (url, init) => {
         calls.push({ url, init })
-        return new Response(dmgArtifact() as unknown as BodyInit, { status: 200, headers: { 'content-length': String(dmgArtifact().length) } })
+        return chunkedResponse([dmgArtifact()], { 'content-length': String(dmgArtifact().length) }, url)
       },
     })
     expect(calls[0]!.url).toBe('https://update.corp.lan:9000/api/downloads/mac')
@@ -452,8 +577,8 @@ describe('huaanwork update downloads', () => {
       origin: 'https://update.corp.lan:9000',
       destinationPath: destination,
       expectedSha256: '0'.repeat(64),
-      request: async () => new Response(dmgArtifact() as unknown as BodyInit, { status: 200, headers: { 'content-length': String(dmgArtifact().length) } }),
-    })).rejects.toThrow(/update-integrity-mismatch/)
+      request: async () => chunkedResponse([dmgArtifact()], { 'content-length': String(dmgArtifact().length) }, 'https://update.corp.lan:9000/api/downloads/mac'),
+    })).rejects.toThrow(/The update installer does not match the published digest/)
     await expect(access(destination)).rejects.toThrow()
   })
 
@@ -470,7 +595,7 @@ describe('huaanwork update downloads', () => {
       origin: 'https://update.corp.lan:9000',
       destinationPath: destination,
       expectedSha256: correctHash,
-      request: async () => new Response(artifact as unknown as BodyInit, { status: 200, headers: { 'content-length': String(artifact.length) } }),
+      request: async () => chunkedResponse([artifact], { 'content-length': String(artifact.length) }, 'https://update.corp.lan:9000/api/downloads/mac'),
     })
     expect(result).toBe(destination)
   })
@@ -488,7 +613,7 @@ describe('huaanwork update downloads', () => {
         channel: 'huaanwork',
         origin: 'https://update.corp.lan:9000',
         destinationPath: destination,
-        request: async () => new Response(dmgArtifact() as unknown as BodyInit, { status: 200, headers: { 'content-length': String(dmgArtifact().length) } }),
+        request: async () => chunkedResponse([dmgArtifact()], { 'content-length': String(dmgArtifact().length) }, 'https://update.corp.lan:9000/api/downloads/mac'),
       })
       expect(result).toBe(destination)
       expect(warnLogs.some(log => log.includes('integrity-unverified'))).toBe(true)

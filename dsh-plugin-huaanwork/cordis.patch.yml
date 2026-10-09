@@ -4,7 +4,7 @@
     - id: desktop-shell
       name: dsh-plugin-huaanwork
       config:
-        mode: compatibility
+        mode: advanced
     - id: desktop-terminal
       name: dsh-plugin-huaanwork/terminal
       disabled: !!js process.platform === 'linux'

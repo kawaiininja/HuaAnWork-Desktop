@@ -119,6 +119,7 @@ export type UpdateCheckResult = {
   /** Canonical latest stable version returned by the service. */
   readonly latestVersion: string
   readonly sha256?: Readonly<Record<string, string>>
+  readonly installerSha256?: Readonly<Partial<Record<'win32' | 'darwin', string>>>
 }
 
 const SEMVER_PATTERN =
@@ -214,7 +215,13 @@ export async function checkForDesktopUpdate(
       : 'up-to-date',
     currentVersion: current.version,
     latestVersion: latest.version,
-    ...(latest.sha256 === undefined ? {} : { sha256: latest.sha256 }),
+    ...(latest.sha256 === undefined ? {} : {
+      sha256: latest.sha256,
+      installerSha256: {
+        ...(latest.sha256.win32 ? { win32: latest.sha256.win32 } : latest.sha256.windows ? { win32: latest.sha256.windows } : {}),
+        ...(latest.sha256.darwin ? { darwin: latest.sha256.darwin } : latest.sha256.mac ? { darwin: latest.sha256.mac } : {}),
+      },
+    }),
   }
 }
 
@@ -336,7 +343,7 @@ export function matchesReleaseChannelVersionShape(
   }
 }
 
-function parseCanonicalChannelVersion(
+export function parseCanonicalChannelVersion(
   input: string,
   channel: DesktopReleaseChannel,
 ): ParsedSemVer | null {

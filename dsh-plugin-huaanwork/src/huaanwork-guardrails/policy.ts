@@ -189,7 +189,7 @@ function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
     name: execution.name,
     args,
     workspaceRoot,
-    gitDirty: isGitDirty(workspaceRoot),
+    gitDirty: execution.name === "git_checkout" ? isGitDirty(workspaceRoot) : false,
     ...(attached !== undefined ? { attached } : {}),
   };
 }

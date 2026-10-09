@@ -83,6 +83,9 @@ export interface DesktopSettingsApi {
   deleteProfile(name: string): Promise<DesktopSettingsView>
   selectAa?(enabled: boolean): Promise<DesktopRestartAcceptance>
   selectMarket(provider: DesktopMarketProvider): Promise<DesktopRestartAcceptance>
+  /** Optional native actions for individual browser login URLs. */
+  openBrowser?(url: string): Promise<void>
+  copyBrowser?(url: string): Promise<void>
   openTerminal(): Promise<void>
   restart(): Promise<void>
   restartToRecovery(): Promise<void>
@@ -99,8 +102,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isMarketProvider(value: unknown): value is DesktopMarketProvider {
-  return value === 'disabled' || value === 'community-market' || value === 'dsh-market'
-    || value === 'huaanwork-market'
+  return value === 'disabled' || value === 'community-market' || value === 'dsh-market' || value === 'huaanwork-market'
 }
 
 function isLanState(value: unknown): value is DesktopLanState {

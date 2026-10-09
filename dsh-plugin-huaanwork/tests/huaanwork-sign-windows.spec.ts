@@ -431,6 +431,6 @@ describe('windows signing documentation', () => {
 
     expect(workspaceManifest.scripts?.['dist:win-sign']).toBe('node scripts/huaanwork-sign-windows.ts')
     expect(rootManifest.scripts?.['dist:win-sign:huaanwork'])
-      .toBe('yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:win-sign')
+      .toBe('yarn market:prepare && yarn aa:prepare-release && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-huaanwork dist:win-sign')
   })
 })
