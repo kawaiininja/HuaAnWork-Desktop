@@ -183,3 +183,36 @@ fork 多出两条上游未覆盖的语义（fail-closed 整体拒绝、多 artif
    `scripts/package-mac.ts`、`scripts/package-win.ts`、`scripts/verify-cli-runtime.mjs`、`scripts/verify-electron-fuses.ts`、
    `scripts/verify-licenses.mjs`、`scripts/verify-mac-entitlements.ts`、`scripts/verify-mac-release.ts`、
    `scripts/verify-mac-smoke.ts`），无新增、无白名单。
+
+---
+
+# C/D/E 组（needs-ruling：脚本 / CI / bridge）— Task 2.7
+
+> 本节由 **Task 2.7** 追加；A 组（§1–§5）与 B 组（§6）未删未改。
+> **度量基准（as-of，Global Constraint §8）**：2026-10-09。C/D/E 源文件未改，行号与读数
+> 相对父提交 HEAD `7dd3550686`（MERGE_BASE=`8cd74f5e9b`，`git merge-base origin/master HEAD`）。
+> 四条脚本的重放落在该父提交之上的本任务工作树；重放后 `node scripts/verify-desktop-variants.mjs`
+> 的剩余 drift 为 6 条（见 §7.2），实测于提交前工作树，父 HEAD `7dd3550686`。
+> 归类：`covered`（上游形态已在树内，本任务无重放）/ `replay`（把上游行为重放到 huaanwork，保留身份）。
+> 「重放内容」无则写 `无`。
+
+## 7.1 逐条决策
+
+| # | 文件 | 归类 | 重放内容 | 理由 |
+|---|---|---|---|---|
+| #26/#27/#28 | `scripts/prepare-agents-anywhere-release.mjs` | `covered` | 无 | 上游形状已在：`runtimePeerRanges()`（`:76`）读 `agents-anywhere-release-policy.mjs` 的 `AA_WORKSPACES.map`（policy `:18`）；prepare 本体 `:163` 用同一 `AA_WORKSPACES.map` 写四个 `package.json`。`AA_WORKSPACES`（policy `:8`）含 `dsh-plugin-huaanwork`。as-of 2026-10-09 @ `7dd3550686`，四工作区的 `@agents-anywhere/dsh-bridge-next` 都指向 provenance 的同一 tarball（4/4 artifact-match）。 |
+| #29 | `scripts/sync-vendored-runtime.mjs` | `covered` | 无 | 用法行 `:22` 与通道守卫 `:36` 接受 `huaanwork`。market 依赖仍只在 `channel === 'beta'` 时写入（`:61`），huaanwork 不另开 market 通道。as-of 2026-10-09 @ `7dd3550686`，本文件未改。 |
+| ci.yml #1 | `.github/workflows/ci.yml` | `covered` | 无（workflow 本身） | 两机制并存：`HUAANWORK_ALLOW_UNPROVISIONED_SMOKE: '1'`（`:245`）与 `DSH_MAC_SMOKE_ARCH`（`:249`，PR `arm64` / 否则 `universal`）。PyYAML 6.0.3 解析成功（as-of 2026-10-09 @ `7dd3550686`）。§7.4：Windows 矩阵 3 格（`:139`）、macOS 矩阵 3 格（`:219`）、`desktop-linux` 仅 desktop+beta（`:186`，2 格）、`check` job 仍含 next 四步（window-controls / onboarding / protocol / sidebar-browser，`:117–127`）。 |
+| #30 | `vendor/agents-anywhere/provenance.json` | `covered` | 无 | `sourceVersion` 为 `2.0.3`（`:6`），commit `7df5b31f3fe23d4be92ccd5ae5e0aeb6a3744c0e`。as-of 2026-10-09 @ `7dd3550686`。未追最新 AA main。 |
+| §7.4 | `dsh-plugin-huaanwork/package.json` `:platform` 脚本 | `replay` | 采 beta 的 `check:win-package:platform` / `check:mac-package:platform` 正文（与 beta 逐字节相同，as-of 本任务工作树对比）。旧脚本里没有上游名单之外的华安测试文件，故加回集合为空。上游名单里缺的两个测试文件已补上：`tests/windows-console-host.spec.ts`（源 `src/windows-console-host.ts` 归一化后与 beta 逐字节相同）、`tests/mac-entitlements.spec.ts`（产品名改为 `HuaAnWork`）。`verify:aa` 改为先跑 `prepare-agents-anywhere-runtime.mjs`，与 beta 逐字节相同。未加入 `dist:linux` / `check:linux-package`。 | CI 的三格矩阵已调用 `:platform`，huaanwork 原先没有这两个 script key。 |
+| 传播 | `dsh-plugin-huaanwork/scripts/package-mac.ts` | `replay` | `macSmokeArchitecture(options.env)`；非 universal 时打日志并传 `` `--${architecture}` ``，不再写死 `--universal`。工作区名保持 `dsh-plugin-huaanwork`。 | 归一化（`dsh-plugin-huaanwork`→`dsh-plugin-desktop-beta`，`HuaAnWork`→`DSH Desktop Beta`）后与 beta 逐字节相同。as-of 2026-10-09，父 HEAD `7dd3550686`。 |
+| 传播 | `dsh-plugin-huaanwork/scripts/package-win.ts` | `replay` | `windowsCompressionOverride()` 与 `DSH_WINDOWS_PACKAGE_COMPRESSION`（`store`/`normal`/`maximum`），并传入 `--config.win.compression=`。工作区名保持 `dsh-plugin-huaanwork`。 | 同上，归一化后与 beta 逐字节相同。 |
+| 传播 | `dsh-plugin-huaanwork/scripts/verify-mac-smoke.ts` | `replay` | `executableSlices` 由 `macSmokeExecutableSlices(macSmokeArchitecture(...))` 决定；缺省仍校验 x86_64 与 arm64。`productName` 保持 `HuaAnWork`。 | 单架构冒烟不再断言不存在的切片。归一化后与 beta 逐字节相同。 |
+| 传播 | `dsh-plugin-huaanwork/scripts/verify-mac-entitlements.ts` | `replay` | 模块原先不存在，按 beta 逐字节复制（`productName` 为参数，文件内无产品名）。`package.json` `build.mac` 补上上游 entitlements plist，以及 `NSMicrophoneUsageDescription` = `HuaAnWork uses the microphone for voice input.`。未改 `scripts/verify-mac-release.ts`（留给 Task 2.8）。 | huaanwork 已有 mac 发行流水线（`dist:mac`、`release-mac.ts`、`hardenedRuntime`），缺模块不是「没有 mac 流水线」。 |
+
+## 7.2 出口核验（as-of 2026-10-09，父 HEAD `7dd3550686`，重放后工作树）
+
+1. `corepack yarn test:aa-release` → 14 pass / 0 fail。`corepack yarn check:aa` → exit 1，`Usage Error: Couldn't find a script named "check:aa".` 根脚本实际名称是 `aa:check`。`corepack yarn aa:check` 能联网，但 exit 1：`AA release check failed: artifact is not from the latest AA main commit`（解析到的 main 为 `7fe1fce32650483bf8433f7a198032178580ff16`，provenance commit 仍是 `7df5b31f3fe23d4be92ccd5ae5e0aeb6a3744c0e`）。未跑 `aa:prepare-release`，未把桥改到更新的 main。
+2. `dsh-plugin-huaanwork` 下 `corepack yarn vitest run`：`package-mac` / `package-win` / `verify-mac-smoke` / `mac-entitlements` → 4 files、30 passed；`package.spec` + `verify-mac-release` → 76 passed、1 skipped；`windows-console-host` 在 darwin 上 1 file skipped、2 tests skipped（`describe.runIf(win32)`）。
+3. `corepack yarn check:whitespace` → exit 0；`git diff --check` → exit 0。
+4. `node scripts/verify-desktop-variants.mjs` → exit 1。剩余 6 条，且仅此 6 条：`src/bin.ts`、`src/safe-mode.ts`、`scripts/verify-cli-runtime.mjs`、`scripts/verify-electron-fuses.ts`、`scripts/verify-licenses.mjs`、`scripts/verify-mac-release.ts`。四条已传播文件不再出现。未新增 `allowedDifferences`。
