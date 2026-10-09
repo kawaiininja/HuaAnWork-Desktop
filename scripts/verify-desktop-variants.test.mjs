@@ -146,12 +146,12 @@ test('pins the beta↔huaanwork divergence budget so growth is always explicit',
 
   assert.strictEqual(
     pair.allowedDifferences.length,
-    25,
-    `beta↔huaanwork allowedDifferences must hold exactly 25 entries, found ${String(pair.allowedDifferences.length)}`,
+    24,
+    `beta↔huaanwork allowedDifferences must hold exactly 24 entries, found ${String(pair.allowedDifferences.length)}`,
   )
   assert.strictEqual(
     new Set(pair.allowedDifferences).size,
-    25,
+    24,
     'beta↔huaanwork allowedDifferences must not contain duplicates',
   )
   assert.deepStrictEqual(pair.oneSidedPrefixes, [
@@ -274,8 +274,8 @@ test('pins the stable↔beta baseline and enforces its one-sided scripts (M6 bli
 
   assert.strictEqual(
     pair.allowedDifferences.length,
-    19,
-    `stable↔beta allowedDifferences must hold exactly 19 entries, found ${String(pair.allowedDifferences.length)}`,
+    14,
+    `stable↔beta allowedDifferences must hold exactly 14 entries, found ${String(pair.allowedDifferences.length)}`,
   )
 
   // M8 Task 2.4:此前 7 条(as-of 827e53fc03),现 6 条(as-of a50a8c4f70,即下方

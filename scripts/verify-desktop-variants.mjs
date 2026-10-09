@@ -39,16 +39,6 @@ export const PAIRS = [
       .replaceAll('DSH Desktop Beta', 'DSH Desktop'),
     allowedDifferences: [
       'product-identity.ts',
-      // Beta rides dsh 0.1.6-alpha.2, whose runArgv fuses confinement preparation into the
-      // execution deadline and returns { result, spawnRequested }; stable stays on
-      // 0.1.5-rc.2, whose override takes an argv array and returns ShellRunResult.
-      'windows-pwsh-sandbox.ts',
-      // dsh 0.1.6-alpha.2 dropped the profile patch-reload policy: `patchReload` is gone from
-      // ProfileTemplate, Profile, and the profile manifest, `initProfile` takes two arguments,
-      // and reload is owned by the `hmr` entry in a profile's cordis.patch.yml instead. Beta
-      // follows that API; stable stays on 0.1.5-rc.2, where the field still exists.
-      'profile.ts',
-      'profile-manager.ts',
       // M7 Task 1.3(M6 盲区):stable↔beta 的 scripts/ 自 M1 起完全无守卫覆盖,
       // 实测 15 条漂移(8 differ + 7 only-in-stable),此前无登记、无审阅记录。
       // 全部登记为 allowedDifferences 而非 oneSidedPrefixes:后者的语义是「只存在于
@@ -57,8 +47,9 @@ export const PAIRS = [
       // 用前缀会让守卫立刻变红。「beta 侧不得长出同名文件」这层强制改由
       // verify-desktop-variants.test.mjs 的 scriptsOneSided 断言承担。
       // 口径:多目录配对一律带 scripts/ 前缀(见下方语义说明),裸文件名会同时
-      // 命中 src/ 与 scripts/ 两个桶。既有 4 条保持裸文件名不动(它们是 src-only 名,
-      // 且 scripts/ 下无同名文件 —— M7 Task 1.3 的 Step 4 已机械核验这一点)。
+      // 命中 src/ 与 scripts/ 两个桶。剩下的裸文件名只有 product-identity.ts。
+      // Task 2.9:as-of 1743474908,zombie probe 报 windows-pwsh-sandbox.ts、
+      // profile.ts、profile-manager.ts 已不再构成差异,三条裸名额删除,不放宽守卫。
       //
       // M8 Task 2.4 订正:only-in-stable 由 7 条降为 6 条(6 条 = as-of 827e53fc03 实测;
       // 7 条 = as-of efde2186be 实测,即上方 M7 Task 1.3 的合并前登记值)。上游 350 提交把
@@ -68,11 +59,11 @@ export const PAIRS = [
       // 仍然单侧的 6 条,断言本体保留在 verify-desktop-variants.test.mjs,并新增一条
       // 正向钉记录「该文件现存在于两侧且逐字节相同、不占白名单名额」,防止无声回退。
       'scripts/generate-tray-icons.mjs',
-      'scripts/mac-universal.ts',
+      // Task 2.9:as-of 1743474908,mac-universal.ts 与 verify-profile-boot.mjs
+      // 在 zombie probe 中已不再构成差异,名额删除。
       'scripts/probe-windows-installer-quit.ps1',
       'scripts/verify-loader-boot.mjs',
       'scripts/verify-packaged-runtime.ts',
-      'scripts/verify-profile-boot.mjs',
       'scripts/verify-win-installer.ts',
       'scripts/verify-win-portable.ts',
       'scripts/build-windows-nsis-ab.ts',
@@ -115,7 +106,7 @@ export const PAIRS = [
       // 多目录配对一律带目录前缀(见下方语义说明 1);裸文件名会导致
       // allowedDifferences.has('src/product-identity.ts') 恒为 false。
       'src/product-identity.ts',
-      'src/index.ts',
+      // Task 2.9:as-of 1743474908,src/index.ts 在 zombie probe 中已不再构成差异,名额删除。
       'src/profile.ts',
       'src/client/index.ts',
       // huaanwork 的 portable 制品名用产品名 HuaAnWork(与其 package.json 的
