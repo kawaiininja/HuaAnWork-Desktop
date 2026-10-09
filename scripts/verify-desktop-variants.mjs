@@ -60,7 +60,8 @@ export const PAIRS = [
       // 命中 src/ 与 scripts/ 两个桶。既有 4 条保持裸文件名不动(它们是 src-only 名,
       // 且 scripts/ 下无同名文件 —— M7 Task 1.3 的 Step 4 已机械核验这一点)。
       //
-      // M8 Task 2.4 订正:only-in-stable 由 7 条降为 6 条。上游 350 提交把
+      // M8 Task 2.4 订正:only-in-stable 由 7 条降为 6 条(6 条 = as-of 827e53fc03 实测;
+      // 7 条是上方 M7 Task 1.3 的合并前登记值)。上游 350 提交把
       // scripts/generate-windows-app-icon.mjs 也放进了 beta(合并前 fork 侧只有 stable 有),
       // 合并后 stable 与 beta 的该文件**逐字节相同** ⇒ 它的 allowedDifferences 名额已成
       // 僵尸额度,故删除。方向性强制(「stable-only 脚本不得出现在 beta」)随之收窄到
@@ -167,7 +168,8 @@ export const PAIRS = [
       // M6 NSIS 制品名 DSH-Desktop-Beta-* → HuaAnWork-*:连字符形式不被
       // normalize 的空格形式归一,与既有 scripts/verify-win-portable.ts 同因。
       'scripts/verify-win-installer.ts',
-      // M8 Task 2.4:上游本次新增的三条脚本,huaanwork **单侧不存在**(只在 left/beta)。
+      // M8 Task 2.4:上游本次新增的三条脚本(as-of 827e53fc03),huaanwork **单侧不存在**
+      // (只在 left/beta)。
       // 一律登记为 allowedDifferences 而非 oneSidedPrefixes:后者语义是「只存在于
       // right 侧」(见上方 stable↔beta 同一说明与 verifyDesktopVariants 内 isOneSided
       // 分支的 must exist only in <right> 报错),本对的 right 是 huaanwork、这三个文件
@@ -205,8 +207,9 @@ export const PAIRS = [
       //    scripts/gen-windows-ico.mjs 产出(该文件由既有前缀 scripts/gen- 声明单侧),
       //    来源是提交 87804beccb「用 HuaAnWork 品牌资产替换上游美术」。
       //    ⇒ 品牌资产与图标导出流水线是本版本自有的另一条,不可同形。
-      //    附注(非守卫事项):上游生成器出 16 档精确 DPI 帧,fork 的 gen-windows-ico.mjs
-      //    出 7 档 —— 这是图标保真度差距,不是本条名额的理由,登记在此以免被误读为已对齐。
+      //    附注(非守卫事项,as-of 827e53fc03):上游生成器出 16 档精确 DPI 帧,fork 的
+      //    gen-windows-ico.mjs 出 7 档 —— 这是图标保真度差距,不是本条名额的理由,
+      //    登记在此以免被误读为已对齐。
       'scripts/generate-windows-app-icon.mjs',
     ],
     oneSidedPaths: [],

@@ -278,7 +278,8 @@ test('pins the stable↔beta baseline and enforces its one-sided scripts (M6 bli
     `stable↔beta allowedDifferences must hold exactly 19 entries, found ${String(pair.allowedDifferences.length)}`,
   )
 
-  // M8 Task 2.4:此前 7 条,现 6 条。上游 350 提交把 generate-windows-app-icon.mjs 也放进了
+  // M8 Task 2.4:此前 7 条(as-of 827e53fc03),现 6 条(as-of a50a8c4f70,即下方
+  // scriptsOneSided 的长度)。上游 350 提交把 generate-windows-app-icon.mjs 也放进了
   // beta(合并前 fork 侧只有 stable 有),合并后两侧逐字节相同 ⇒ 该条既不再单侧、也不再
   // 是差异,已从 allowedDifferences 撤除(见下方正向钉)。方向性强制对其余 6 条仍然生效。
   const scriptsOneSided = [
