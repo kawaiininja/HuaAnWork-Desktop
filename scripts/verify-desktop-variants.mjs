@@ -61,7 +61,7 @@ export const PAIRS = [
       // 且 scripts/ 下无同名文件 —— M7 Task 1.3 的 Step 4 已机械核验这一点)。
       //
       // M8 Task 2.4 订正:only-in-stable 由 7 条降为 6 条(6 条 = as-of 827e53fc03 实测;
-      // 7 条是上方 M7 Task 1.3 的合并前登记值)。上游 350 提交把
+      // 7 条 = as-of efde2186be 实测,即上方 M7 Task 1.3 的合并前登记值)。上游 350 提交把
       // scripts/generate-windows-app-icon.mjs 也放进了 beta(合并前 fork 侧只有 stable 有),
       // 合并后 stable 与 beta 的该文件**逐字节相同** ⇒ 它的 allowedDifferences 名额已成
       // 僵尸额度,故删除。方向性强制(「stable-only 脚本不得出现在 beta」)随之收窄到
