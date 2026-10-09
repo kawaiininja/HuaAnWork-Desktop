@@ -19,7 +19,8 @@
 1. ❌ **错误基准 1：fork 自己的 `origin/master`**
    - **否定理由**：在当前仓库内，`origin/master` 解析为 fork 自身的远端仓库（`kawaiininja/HuaAnWork-Desktop`）。若拿 `origin/master` 作为基准计算落后量，落后提交数恒为 0，会产生「完全无落后」的彻底误判。
 2. ❌ **错误基准 2：本地镜像 master `upstream-local/master`**
-   - **否定理由**：`upstream-local/master` 指向本地镜像目录（`../DSH Desktop`）的本地 `master` 分支，该分支携带了 3 个从未推送到上游的孤儿提交（`d1d8c81b5a`、`eb56d3a1c1`、`5737bcceb6`），且停留在 2026-09-19，不能代表上游官方最新状态。
+   - **否定理由**：`upstream-local/master` 指向本地镜像目录（`../DSH Desktop`）的本地 `master` 分支，该分支曾携带 3 个从未推送到上游的孤儿提交（`d1d8c81b5a`、`eb56d3a1c1`、`5737bcceb6`），且停留在 2026-09-19，不能代表上游官方最新状态。
+   - **重置记录**：该镜像已于 2026-10-09（Task 1.1 / R-M8-1）通过 `git fetch origin && git reset --hard origin/master` 重置至上游官方 tip（`ca52ce2cd9ac872358e9a9464902e3c7ee4d494f`），3 个孤儿提交已不在其 `master` 分支上；即便如此，本地镜像仍可能因未及时 fetch 发生漂移，不可作为同步基准。
 3. ❌ **错误基准 3：`master...upstream-local/master` 的左/右计数（如 `195  0`）**
    - **否定理由**：右侧计数恒为 0，仅仅是因为本地镜像刚好停在 fork 的历史分支点附近，若将右侧 0 误读为落后量，会得出「已完全跟上上游」的致命错误结论（评估 L6）。
 
@@ -27,7 +28,13 @@
 
 ## 2. 镜像的使用纪律（Ref-Only 比较）
 
-本地镜像目录 `../DSH Desktop` 的工作树**处于脏状态**（实测有 47 个既有 ` D` 删除项与 submodule ` m` 修改，包含 `vendor/dsh-runtime/0.1.5-rc.2/*.tgz`、`0.1.6-alpha.2/*.tgz`、`assets/*.png` 等；目录 mtime 为 09-18/09-23，非任何评估造成）。
+本地镜像目录 `../DSH Desktop` 曾长期处于脏工作树状态（实测有 47 个既有 ` D` 删除项与 submodule ` m` 修改，包含 `vendor/dsh-runtime/0.1.5-rc.2/*.tgz`、`0.1.6-alpha.2/*.tgz`、`assets/*.png` 等；目录 mtime 为 09-18/09-23，非任何评估造成）。
+
+### 镜像重置事件记录（2026-10-09，Task 1.1 / R-M8-1）：
+- **重置日期**：2026-10-09
+- **重置前 ref**：`5737bcceb62994903f931b8f6ae8e50065204ecf`（包含 3 个孤儿提交）
+- **重置后 ref**：`ca52ce2cd9ac872358e9a9464902e3c7ee4d494f`（对齐官方 tip `origin/master`）
+- **说明**：重置后镜像仍仅作历史只读副本备查，不作为同步基准。
 
 ### 纪律要求：
 1. **禁止直接检查镜像工作树**：严禁使用 `ls`、`git status` 或读取工作树文件来判断「上游是否存在某文件/某改动」。
