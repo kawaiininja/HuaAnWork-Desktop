@@ -118,7 +118,19 @@ export type UpdateCheckResult = {
   readonly currentVersion: string
   /** Canonical latest stable version returned by the service. */
   readonly latestVersion: string
+  /**
+   * D-M6-23 channel-record passthrough. Upstream only models the two desktop
+   * installer platforms (see installerSha256); this field preserves the full,
+   * hex-validated multi-artifact digest record the huaanwork channel publishes.
+   * parseVersionResponse fails the whole check closed if any entry is malformed.
+   */
   readonly sha256?: Readonly<Record<string, string>>
+  /**
+   * Optional per-platform hex SHA-256 digests of the published installers.
+   * Whenever the service publishes them, the download path enforces them as
+   * a hard integrity gate before execution; they are optional only because
+   * the version endpoint does not publish digests yet.
+   */
   readonly installerSha256?: Readonly<Partial<Record<'win32' | 'darwin', string>>>
 }
 
@@ -206,22 +218,24 @@ export async function checkForDesktopUpdate(
     return null
   }
 
+  let digestInput: unknown
+  try {
+    digestInput = JSON.parse(body)
+  } catch {
+    digestInput = undefined
+  }
   const latest = parseVersionResponse(body, options.channel)
   if (latest === null) return null
   const comparison = compareParsedSemVer(latest, current)
+  const digests = parseInstallerDigestResponse(digestInput)
   return {
     status: comparison > 0 || (options.allowDowngrade === true && comparison !== 0)
       ? 'update-available'
       : 'up-to-date',
     currentVersion: current.version,
     latestVersion: latest.version,
-    ...(latest.sha256 === undefined ? {} : {
-      sha256: latest.sha256,
-      installerSha256: {
-        ...(latest.sha256.win32 ? { win32: latest.sha256.win32 } : latest.sha256.windows ? { win32: latest.sha256.windows } : {}),
-        ...(latest.sha256.darwin ? { darwin: latest.sha256.darwin } : latest.sha256.mac ? { darwin: latest.sha256.mac } : {}),
-      },
-    }),
+    ...(latest.sha256 === undefined ? {} : { sha256: latest.sha256 }),
+    ...(digests === undefined ? {} : { installerSha256: digests }),
   }
 }
 
@@ -306,6 +320,10 @@ function parseVersionResponse(
   if (expectedChannel !== 'stable' && value.channel !== expectedChannel) return null
   if (value.channel !== undefined && value.channel !== expectedChannel) return null
 
+  // D-M6-23 channel-record integrity: a published digest record must be a hex-
+  // validated object or the whole check fails closed (replayed fork semantic
+  // upstream does not carry). Valid records flow through to installerSha256 via
+  // the shared parseInstallerDigestResponse extractor below.
   let sha256: Record<string, string> | undefined
   if (value.sha256 !== undefined) {
     if (!isRecord(value.sha256)) return null
@@ -350,6 +368,27 @@ export function parseCanonicalChannelVersion(
   const parsed = parseCanonicalVersion(input)
   if (parsed === null) return null
   return matchesReleaseChannelVersionShape(channel, parsed) ? parsed : null
+}
+
+/**
+ * Extract optional per-platform installer digests from the parsed version
+ * response: `{ "version": "2.0.2", "sha256": { "windows": "<hex>", "mac": "<hex>" } }`.
+ * Hex digits are case-normalized; absent or malformed fields simply leave the
+ * digest gate unset for that platform.
+ */
+function parseInstallerDigestResponse(value: unknown): UpdateCheckResult['installerSha256'] | undefined {
+  if (!isRecord(value) || !isRecord(value.sha256)) return undefined
+  const digests: Partial<Record<'win32' | 'darwin', string>> = {}
+  const normalize = (digest: unknown): string | undefined => {
+    if (typeof digest !== 'string') return undefined
+    const normalized = digest.trim().toLowerCase()
+    return /^[0-9a-f]{64}$/u.test(normalized) ? normalized : undefined
+  }
+  const windows = normalize(value.sha256.windows ?? value.sha256.win32)
+  const mac = normalize(value.sha256.mac ?? value.sha256.darwin)
+  if (windows !== undefined) digests.win32 = windows
+  if (mac !== undefined) digests.darwin = mac
+  return Object.keys(digests).length > 0 ? digests : undefined
 }
 
 function parseCanonicalSupportedVersion(input: string): ParsedSemVer | null {
