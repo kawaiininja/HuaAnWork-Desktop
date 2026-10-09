@@ -70,6 +70,7 @@ jobs:
         if: needs.changes.outputs.product == 'true'
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
           submodules: recursive
       - uses: actions/setup-node@v6
@@ -106,6 +107,8 @@ jobs:
           }
           NODE
       - if: needs.changes.outputs.product == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: yarn check
 
   # Windows-only logic and unsigned NSIS/portable builds on a real Windows runner:
