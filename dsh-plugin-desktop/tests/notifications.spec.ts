@@ -11,6 +11,7 @@ import {
   type DesktopNotificationSettings,
 } from '../src/notifications.ts'
 import type { DesktopRuntime } from '../src/runtime.ts'
+import { DESKTOP_PRODUCT_NAME } from '../src/product-identity.ts'
 
 type OptionalService = 'jobs' | 'sessions' | 'settings'
 
@@ -205,7 +206,7 @@ describe('desktop notifications Host plugin', () => {
 
     expect(harness.notifyAttention.mock.calls).toEqual([
       [{ title: 'Background Job Completed', body: 'A background job has finished.' }],
-      [{ title: 'Background Job Failed', body: 'A background job could not finish. Open DSH Desktop for details.' }],
+      [{ title: 'Background Job Failed', body: `A background job could not finish. Open ${DESKTOP_PRODUCT_NAME} for details.` }],
     ])
     expect(JSON.stringify(harness.notifyAttention.mock.calls)).not.toMatch(/Users|private|secret|session-123/u)
   })
@@ -244,8 +245,8 @@ describe('desktop notifications Host plugin', () => {
     }, 6))
 
     expect(harness.notifyAttention.mock.calls).toEqual([
-      [{ title: 'Background Job Failed', body: 'A background job could not finish. Open DSH Desktop for details.' }],
-      [{ title: 'User Turn Failed', body: 'A user-initiated turn could not finish. Open DSH Desktop for details.' }],
+      [{ title: 'Background Job Failed', body: `A background job could not finish. Open ${DESKTOP_PRODUCT_NAME} for details.` }],
+      [{ title: 'User Turn Failed', body: `A user-initiated turn could not finish. Open ${DESKTOP_PRODUCT_NAME} for details.` }],
     ])
   })
 
@@ -324,7 +325,7 @@ describe('desktop notifications Host plugin', () => {
     expect(harness.notifyAttention).toHaveBeenCalledOnce()
     expect(harness.notifyAttention).toHaveBeenCalledWith({
       title: 'User Turn Failed',
-      body: 'A user-initiated turn could not finish. Open DSH Desktop for details.',
+      body: `A user-initiated turn could not finish. Open ${DESKTOP_PRODUCT_NAME} for details.`,
     })
   })
 
