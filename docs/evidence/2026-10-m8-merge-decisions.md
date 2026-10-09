@@ -40,8 +40,11 @@ fork 多出两条上游未覆盖的语义（fail-closed 整体拒绝、多 artif
   这是降低后续同步冲突面的「消减 fork 增量」。
 - **未覆盖部分（在上游基底上重放 fork）**：
   1. **D-M6-23 fail-closed 完整性门**：`parseVersionResponse` 保留 fork 的严格校验——
-     `sha256` 存在即必须是对象、每个条目必须是 64 位小写 hex，否则整检查
-     `return null`（`update-checker.ts:327-338`）。
+     `sha256` 存在即必须是对象，每个条目**先按上游共享提取器相同方式归一化（`trim` +
+     `toLowerCase`）再严格校验**：归一化后仍非 64 位 hex 才整检查 `return null`
+     （`update-checker.ts:332-343`）。这样大写 / 两端空白但本体合法的签名摘要被接受并归一，
+     不再被误拒（fix round 1 修正；上游 `dsh-plugin-desktop/tests/update-checker.spec.ts:140-153`
+     正是该归一化语义），仅归一化后仍非法者触发 fail-closed。
   2. **多 artifact 通道记录透传**：`UpdateCheckResult.sha256`（全平台键原样 hex-validated
      passthrough，`update-checker.ts:127`）保留，上游只建模两桌面平台无法承载该形态。
 - **D-M6-23 回归钉未被替换**：hotfix `246bd2a59d` 的生产接线（`electron-runtime.ts:934`
@@ -62,22 +65,27 @@ fork 多出两条上游未覆盖的语义（fail-closed 整体拒绝、多 artif
 > 收口为**逐字节相同**（§7.3），故这些 hunk 的「取哪侧」= 上游合并形态；huaanwork
 > 侧的处置 = 第 2 节的 union。
 
-| # | 文件 | 该侧语义（摘要来源 / 校验点 / fail-closed / 平台形态） | 取哪侧 | 理由 |
-|---|---|---|---|---|
-| beta #2 | `electron-runtime.ts` | downloadAndOpen 透传签名新增第 4 参 `installerSha256` | 上游（stable/beta 已逐字节相同） | 校验点接线，上游=fork 同形；无 fork 增量 |
-| beta #3 | `electron-runtime.ts` | `installerSha256?.[platform]` → `expectedSha256` 下载参数类型 | 上游 | 同一硬门接线（hotfix 246bd2a59d 落点），采上游 |
-| beta #9 | `update-checker.ts` | `UpdateCheckResult.installerSha256` 字段形态 `Partial<Record<'win32'|'darwin'>>` | 上游形态 | 覆盖部分采上游；huaanwork 字段同形 |
-| beta #10 | `update-checker.ts` | 版本响应 digest 提取（来源轴） | 上游提取器 `parseInstallerDigestResponse` | 「采上游形态消减增量」；替换 fork 内联 spread |
-| beta #11 | `update-checker.ts` | digest 透传进结果（透传轴） | 上游 + 重放 fork | installerSha256 采上游；raw `sha256` 重放 fork 多 artifact |
-| beta #12 | `update-lifecycle.ts` | digest 贯穿生命周期（无语义改写，仅穿参） | 上游（stable/beta 逐字节相同） | huaanwork 已与 stable 逐字节相同，无需改 |
-| stable #13 | `electron-runtime.ts` | 传参与类型（与 beta #2/#3 对侧收口） | 上游 | stable↔beta 已逐字节相同 |
-| stable #14 | `runtime.ts` | digest 字段 JSDoc（文档轴） | 上游 | huaanwork `runtime.ts` 与 stable 逐字节相同 |
-| stable #20 | `update-checker.ts` | 来源轴（与 beta #10 对侧） | 上游提取器 | 同 beta #10 |
-| stable #21 | `update-checker.ts` | 校验点轴：硬门语义 `installerSha256` 发布即强制 | 上游 | fork 同一硬门，采上游 JSDoc/字段形态 |
-| stable #22 | `update-checker.ts` | fail-closed 轴：上游 lenient-drop | **重放 fork（更严）** | fork fail-closed 不弱于上游，D-M6-23 要求保留 |
-| stable #23 | `update-checker.ts` | 平台形态轴：上游收敛 win32/darwin | 上游 + 重放 fork raw passthrough | 两桌面平台采上游；多 artifact 记录重放 fork |
-| tests #24 | `updates.spec.ts` | digest 用例（happy-path win/mac→win32/darwin、omit-none） | 上游（三变体逐字节相同） | 共享 spec，huaanwork union 下仍全绿 |
-| tests #25 | `updates.spec.ts` | digest recheck/omit 用例 | 上游 | 同 #24；另 fork 专属 `tests/update-checker.spec.ts` 的 D-M6-23 钉保持绿 |
+> 归类取值：`covered`（上游已覆盖，采上游形态）/ `uncovered`（上游未覆盖，在上游基底
+> 重放 fork）/ `covered+uncovered`（union 行，两者并存）/ `identity`（身份常量）/ `no-op`
+> （huaanwork 该文件已与 stable 逐字节相同，无需改）。「重放内容」给出具体落点/内容，
+> 无重放则写 `无`。全部行号基于 fix round 1 后的 `dsh-plugin-huaanwork/src/update-checker.ts`。
+
+| # | 文件 | 该侧语义（摘要来源 / 校验点 / fail-closed / 平台形态） | 归类 | 取哪侧 | 重放内容（落点/内容 或 无） | 理由 |
+|---|---|---|---|---|---|---|
+| beta #2 | `electron-runtime.ts` | downloadAndOpen 透传签名新增第 4 参 `installerSha256` | `covered` / `no-op` | 上游（stable/beta 已逐字节相同） | 无（huaanwork `electron-runtime.ts:240` 与 stable `:235` 逐字节相同） | 校验点接线，上游=fork 同形；无 fork 增量 |
+| beta #3 | `electron-runtime.ts` | `installerSha256?.[platform]` → `expectedSha256` 下载参数类型 | `covered` / `no-op` | 上游 | 无（`electron-runtime.ts:934` 与 stable `:879` 逐字节相同；hotfix 246bd2a59d 落点未改） | 同一硬门接线，采上游 |
+| beta #9 | `update-checker.ts` | `UpdateCheckResult.installerSha256` 字段形态 `Partial<Record<'win32'|'darwin'>>` | `covered` | 上游形态 | 无（`update-checker.ts:134` 字段形态与 stable 一致，JSDoc 亦同） | 覆盖部分采上游；huaanwork 字段同形 |
+| beta #10 | `update-checker.ts` | 版本响应 digest 提取（来源轴） | `covered` | 上游提取器 `parseInstallerDigestResponse` | 无（`update-checker.ts:385-397` 为上游提取器逐字节副本，替换 fork 内联 spread） | 「采上游形态消减增量」 |
+| beta #11 | `update-checker.ts` | digest 透传进结果（透传轴） | `covered+uncovered` | 上游 + 重放 fork | 重放 raw `sha256` 多 artifact 透传：字段 `update-checker.ts:127` + 组装 `:237` `...(latest.sha256 === undefined ? {} : { sha256 })` | installerSha256 采上游；raw passthrough 上游不建模 |
+| beta #12 | `update-lifecycle.ts` | digest 贯穿生命周期（仅穿参，无语义改写） | `no-op` | 上游（stable/beta 逐字节相同） | 无（huaanwork `update-lifecycle.ts` 与 stable 逐字节相同） | 无需改 |
+| stable #13 | `electron-runtime.ts` | 传参与类型（与 beta #2/#3 对侧收口） | `covered` / `no-op` | 上游 | 无（同 beta #2/#3，逐字节相同） | stable↔beta 已逐字节相同 |
+| stable #14 | `runtime.ts` | digest 字段 JSDoc（文档轴） | `covered` / `no-op` | 上游 | 无（huaanwork `runtime.ts` 与 stable 逐字节相同） | 文档轴，无差异 |
+| stable #20 | `update-checker.ts` | 来源轴（与 beta #10 对侧） | `covered` | 上游提取器 | 无（同 beta #10：`parseInstallerDigestResponse` @ `:385`） | 同 beta #10 |
+| stable #21 | `update-checker.ts` | 校验点轴：硬门 `installerSha256` 发布即强制 | `covered` / `no-op` | 上游 | 无（硬门接线未改：`electron-runtime.ts:934` → `update-download.ts:209 assertInstallerDigest`） | fork 同一硬门 |
+| stable #22 | `update-checker.ts` | fail-closed 轴：上游 lenient-drop | `uncovered` | **重放 fork（更严）** | 重放 fail-closed 门：`parseVersionResponse` `update-checker.ts:332-343`（每条先 `trim+lowercase` 归一，归一后仍非 64 位 hex ⇒ 整检查 `return null`） | fork fail-closed 不弱于上游，D-M6-23 要求保留 |
+| stable #23 | `update-checker.ts` | 平台形态轴：上游收敛 win32/darwin | `covered+uncovered` | 上游 + 重放 fork raw passthrough | 两桌面平台采上游（`installerSha256` @ `:238`）；多 artifact 记录重放 raw `sha256`（`:127` / `:237`） | 两平台采上游；多 artifact 重放 fork |
+| tests #24 | `updates.spec.ts` | digest 用例（happy-path win/mac→win32/darwin、omit-none） | `covered` / `no-op` | 上游（三变体逐字节相同） | 无（共享 spec，huaanwork union 下仍全绿） | 共享 spec |
+| tests #25 | `updates.spec.ts` | digest recheck/omit 用例 | `covered` + `uncovered`(钉) | 上游 | 共享 spec 本体无重放（逐字节相同）；fork D-M6-23 回归钉重放于 `tests/update-checker.spec.ts`:「carries valid … (D-M6-23)」「accepts uppercase and whitespace-padded … (D-M6-23)」「refuses … invalid sha256 payload (D-M6-23)」 | 共享 spec + fork 专属钉并存 |
 
 > 校验：`updates.spec.ts` 三变体合并后逐字节相同（stable↔beta↔huaanwork `diff` 空），
 > 符合 §7.3；fork 的 D-M6-23 专属回归在 `tests/update-checker.spec.ts`，与共享 spec 并存。

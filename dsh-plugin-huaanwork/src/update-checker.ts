@@ -322,15 +322,21 @@ function parseVersionResponse(
 
   // D-M6-23 channel-record integrity: a published digest record must be a hex-
   // validated object or the whole check fails closed (replayed fork semantic
-  // upstream does not carry). Valid records flow through to installerSha256 via
-  // the shared parseInstallerDigestResponse extractor below.
+  // upstream does not carry). Each entry is first normalized the same way the
+  // shared stable/beta extractor normalizes (trim + lowercase) so an uppercase
+  // or whitespace-padded but otherwise valid digest is accepted, not rejected;
+  // only entries invalid after normalization trip the fail-closed rejection.
+  // Valid records flow through to installerSha256 via the shared
+  // parseInstallerDigestResponse extractor below.
   let sha256: Record<string, string> | undefined
   if (value.sha256 !== undefined) {
     if (!isRecord(value.sha256)) return null
     sha256 = {}
     for (const [platform, hash] of Object.entries(value.sha256)) {
-      if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/u.test(hash)) return null
-      sha256[platform] = hash
+      if (typeof hash !== 'string') return null
+      const normalized = hash.trim().toLowerCase()
+      if (!/^[0-9a-f]{64}$/u.test(normalized)) return null
+      sha256[platform] = normalized
     }
   }
 

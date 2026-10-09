@@ -363,14 +363,40 @@ describe('huaanwork version checks', () => {
     })
   })
 
+  it('accepts uppercase and whitespace-padded valid digests, normalizing them (D-M6-23)', async () => {
+    // 采上游共享提取器的归一化语义:大写 / 两端空白但本体合法的摘要应被接受并归一,
+    // 不应在 fail-closed 校验前被误拒。
+    const upper = 'A'.repeat(64)
+    const padded = `  ${'b'.repeat(64)}  `
+    const request: UpdateRequest = async () => channelVersionResponse('0.2.0', 'huaanwork', {
+      sha256: { windows: upper, mac: padded },
+    })
+    const result = await checkForDesktopUpdate({
+      currentVersion: '0.1.0',
+      channel: 'huaanwork',
+      request,
+    })
+    expect(result).toEqual({
+      status: 'update-available',
+      currentVersion: '0.1.0',
+      latestVersion: '0.2.0',
+      installerSha256: { win32: 'a'.repeat(64), darwin: 'b'.repeat(64) },
+      sha256: { windows: 'a'.repeat(64), mac: 'b'.repeat(64) },
+    })
+  })
+
   it('refuses a version response carrying an invalid sha256 payload (D-M6-23)', async () => {
     // 非 record
     const req1: UpdateRequest = async () => channelVersionResponse('0.2.0', 'huaanwork', { sha256: 'not-a-record' })
     await expect(checkForDesktopUpdate({ currentVersion: '0.1.0', channel: 'huaanwork', request: req1 })).resolves.toBeNull()
 
-    // 非 64 位小写 hex
+    // 长度不足:归一化后仍非 64 位 hex
     const req2: UpdateRequest = async () => channelVersionResponse('0.2.0', 'huaanwork', { sha256: { mac: 'too-short' } })
     await expect(checkForDesktopUpdate({ currentVersion: '0.1.0', channel: 'huaanwork', request: req2 })).resolves.toBeNull()
+
+    // 归一化后才暴露的非法:大写但含非 hex 字符,trim+lowercase 后仍失败,整检查 fail-closed
+    const req3: UpdateRequest = async () => channelVersionResponse('0.2.0', 'huaanwork', { sha256: { win32: `${'A'.repeat(63)}G` } })
+    await expect(checkForDesktopUpdate({ currentVersion: '0.1.0', channel: 'huaanwork', request: req3 })).resolves.toBeNull()
   })
 })
 
