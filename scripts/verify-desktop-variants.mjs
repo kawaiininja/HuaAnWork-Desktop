@@ -52,12 +52,20 @@ export const PAIRS = [
       // M7 Task 1.3(M6 盲区):stable↔beta 的 scripts/ 自 M1 起完全无守卫覆盖,
       // 实测 15 条漂移(8 differ + 7 only-in-stable),此前无登记、无审阅记录。
       // 全部登记为 allowedDifferences 而非 oneSidedPrefixes:后者的语义是「只存在于
-      // right 侧」(:180-181),而本对的 right 是 beta、这 7 个文件只在 stable(left),
+      // right 侧」(见 verifyDesktopVariants 内 isOneSided 分支的 must exist only in
+      // <right> 报错),而本对的 right 是 beta、这批文件只在 stable(left),
       // 用前缀会让守卫立刻变红。「beta 侧不得长出同名文件」这层强制改由
-      // verify-desktop-variants.test.mjs 的 STABLE_BETA_SCRIPTS_ONE_SIDED 断言承担。
-      // 口径:多目录配对一律带 scripts/ 前缀(见 :68-69 的语义说明),裸文件名会同时
+      // verify-desktop-variants.test.mjs 的 scriptsOneSided 断言承担。
+      // 口径:多目录配对一律带 scripts/ 前缀(见下方语义说明),裸文件名会同时
       // 命中 src/ 与 scripts/ 两个桶。既有 4 条保持裸文件名不动(它们是 src-only 名,
-      // 且 scripts/ 下无同名文件 —— 本 Task 的 Step 4 会机械核验这一点)。
+      // 且 scripts/ 下无同名文件 —— M7 Task 1.3 的 Step 4 已机械核验这一点)。
+      //
+      // M8 Task 2.4 订正:only-in-stable 由 7 条降为 6 条。上游 350 提交把
+      // scripts/generate-windows-app-icon.mjs 也放进了 beta(合并前 fork 侧只有 stable 有),
+      // 合并后 stable 与 beta 的该文件**逐字节相同** ⇒ 它的 allowedDifferences 名额已成
+      // 僵尸额度,故删除。方向性强制(「stable-only 脚本不得出现在 beta」)随之收窄到
+      // 仍然单侧的 6 条,断言本体保留在 verify-desktop-variants.test.mjs,并新增一条
+      // 正向钉记录「该文件现存在于两侧且逐字节相同、不占白名单名额」,防止无声回退。
       'scripts/generate-tray-icons.mjs',
       'scripts/mac-universal.ts',
       'scripts/probe-windows-installer-quit.ps1',
@@ -67,12 +75,26 @@ export const PAIRS = [
       'scripts/verify-win-installer.ts',
       'scripts/verify-win-portable.ts',
       'scripts/build-windows-nsis-ab.ts',
-      'scripts/generate-windows-app-icon.mjs',
       'scripts/inspect-windows-installed-app.ts',
       'scripts/probe-windows-packaged-runtime.ts',
       'scripts/run-windows-nsis-ab.ps1',
       'scripts/verify-nsis-ab-prepackaged.ts',
       'scripts/windows-nsis-ab.ts',
+      // M8 Task 2.4:上游本次新增的 Linux 制品校验脚本。两个通道**不可能**产出同名
+      // 制品,所以差异本身不可消除;但这一格白名单名额是可消除的 —— 它存在只是因为
+      // 本对 normalize 的改写规则覆盖不到这里用到的两种身份写法。
+      // 差异面(全部三处都是制品/二进制名,别无一字):
+      //   AppImage  DSH-Desktop-<v>-x86_64.AppImage  vs  DSH-Desktop-Beta-<v>-…
+      //   deb       DSH-Desktop-<v>-amd64.deb        vs  DSH-Desktop-Beta-<v>-…
+      //   可执行文件 linux-unpacked/dsh-desktop       vs  linux-unpacked/dsh-desktop-beta
+      // 本对 normalize 只改写工作区名与**带空格**的 DSH Desktop Beta;**连字符** slug
+      // DSH-Desktop-Beta 与**小写**二进制名 dsh-desktop-beta 都能穿过它 ——
+      // 与下方 beta↔huaanwork 的 verify-win-portable.ts、verify-win-installer.ts 同一根因。
+      // 旁证:上游自己(ca52ce2cd9)的 stable 与 beta 两份该文件也互不相同,即这条分叉是
+      // 「有两个通道」的固有产物,不是 fork 侧漏改。
+      // ⇒ **Task 3.1 normalizeIdentity 的吸收候选**:规范化覆盖连字符 slug 与小写二进制名
+      //    之后本条应当删除(届时它会变成僵尸额度,Task 3.1 的反向验证会暴露它)。
+      'scripts/verify-linux-artifacts.ts',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [],
@@ -145,6 +167,47 @@ export const PAIRS = [
       // M6 NSIS 制品名 DSH-Desktop-Beta-* → HuaAnWork-*:连字符形式不被
       // normalize 的空格形式归一,与既有 scripts/verify-win-portable.ts 同因。
       'scripts/verify-win-installer.ts',
+      // M8 Task 2.4:上游本次新增的三条脚本,huaanwork **单侧不存在**(只在 left/beta)。
+      // 一律登记为 allowedDifferences 而非 oneSidedPrefixes:后者语义是「只存在于
+      // right 侧」(见上方 stable↔beta 同一说明与 verifyDesktopVariants 内 isOneSided
+      // 分支的 must exist only in <right> 报错),本对的 right 是 huaanwork、这三个文件
+      // 只在 left,用前缀会让守卫立刻变红 —— 与上方 stable↔beta 的 only-in-stable
+      // 处置同形。「huaanwork 侧不得长出同名文件」这层方向性强制由
+      // verify-desktop-variants.test.mjs 的 betaOnlyScripts 断言承担(M6 盲区同解法)。
+      // 注意:不得把既有前缀 scripts/gen- 放宽成 scripts/generate- 来覆盖第三条 ——
+      // 那会双向静默吞掉今后所有 generate-* 脚本。
+      //
+      // 1) Linux 打包:huaanwork 结构性没有 Linux 发行流水线,且这是**fork 自己的既有
+      //    决定**,不是本次合并漏改。实测三项(as-of 827e53fc03):
+      //    ① dsh-plugin-huaanwork/package.json 的 build.linux.target 只有 ["dir"],
+      //       stable/beta 是 AppImage + deb 两个 x64 target;该 ["dir"] 在合并前的
+      //       efde2186be 已是此值;
+      //    ② huaanwork 没有 dist:linux、也没有 check:linux-package(两个 script key 都
+      //       只在 stable/beta 的 package.json 里);
+      //    ③ ci.yml 的三个发行矩阵中,fork 把 dsh-plugin-huaanwork 加进了 desktop-windows
+      //       与 desktop-macos 两格(三格矩阵,Task 2.4 matrix-preserve 类要保的就是它),
+      //       却**没有**加进 desktop-linux(该 job 沿用上游的两格矩阵)。同一文件内
+      //       有选择地不加 ⇒ 有意排除。
+      //    ⇒ 「一个版本没有的流水线」,不可同形。
+      'scripts/package-linux.ts',
+      // 2) Linux 制品校验:校验对象是 huaanwork 从不产出的 AppImage/deb
+      //    (DSH-Desktop-Beta-<v>-x86_64.AppImage / -amd64.deb 与 linux-unpacked 内的
+      //    dsh-desktop-beta 可执行文件),只被 beta 的 check:linux-package:platform
+      //    经 tests/verify-linux-artifacts.spec.ts 调用;huaanwork 的 tests/ 下既没有
+      //    verify-linux-artifacts.spec.ts 也没有 package-linux.spec.ts。与第 1 条同一
+      //    结构性理由。
+      'scripts/verify-linux-artifacts.ts',
+      // 3) Windows 图标生成:huaanwork 自带 fork 专有的品牌图标流水线,上游这个生成器
+      //    在本版本**没有消费方**。实测:上游图标导出器 scripts/export-app-icons.mjs 的
+      //    ICON_PACKAGES 只有 stable/beta/next 三通道(无 huaanwork),而它是仓库内
+      //    generateWindowsAppIcon 的唯一代码消费点;huaanwork 的 package.json 没有
+      //    icons:export;huaanwork 的 build/app-icon.ico(已跟踪)由 fork 专有的
+      //    scripts/gen-windows-ico.mjs 产出(该文件由既有前缀 scripts/gen- 声明单侧),
+      //    来源是提交 87804beccb「用 HuaAnWork 品牌资产替换上游美术」。
+      //    ⇒ 品牌资产与图标导出流水线是本版本自有的另一条,不可同形。
+      //    附注(非守卫事项):上游生成器出 16 档精确 DPI 帧,fork 的 gen-windows-ico.mjs
+      //    出 7 档 —— 这是图标保真度差距,不是本条名额的理由,登记在此以免被误读为已对齐。
+      'scripts/generate-windows-app-icon.mjs',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [

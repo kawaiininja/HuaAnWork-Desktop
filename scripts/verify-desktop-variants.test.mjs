@@ -146,12 +146,12 @@ test('pins the beta↔huaanwork divergence budget so growth is always explicit',
 
   assert.strictEqual(
     pair.allowedDifferences.length,
-    22,
-    `beta↔huaanwork allowedDifferences must hold exactly 22 entries, found ${String(pair.allowedDifferences.length)}`,
+    25,
+    `beta↔huaanwork allowedDifferences must hold exactly 25 entries, found ${String(pair.allowedDifferences.length)}`,
   )
   assert.strictEqual(
     new Set(pair.allowedDifferences).size,
-    22,
+    25,
     'beta↔huaanwork allowedDifferences must not contain duplicates',
   )
   assert.deepStrictEqual(pair.oneSidedPrefixes, [
@@ -162,6 +162,32 @@ test('pins the beta↔huaanwork divergence budget so growth is always explicit',
     'scripts/gen-',
     'scripts/huaanwork-',
   ])
+
+  // M8 Task 2.4:三条上游新增脚本在 huaanwork 单侧不存在(只在 left/beta)。
+  // allowedDifferences 本身**不带方向**,一旦 huaanwork 长出同名文件也会被静默吞掉,
+  // 所以在白名单之外补一条方向性强制 —— 与 stable↔beta 的 scriptsOneSided 同一解法
+  // (M6 盲区)。若将来 huaanwork 真的接入了 Linux 发行流水线或改用上游图标导出器,
+  // 这条断言会红,提示把名额从 allowedDifferences 撤掉,而不是让漂移无声固化。
+  const betaOnlyScripts = [
+    'scripts/package-linux.ts',
+    'scripts/verify-linux-artifacts.ts',
+    'scripts/generate-windows-app-icon.mjs',
+  ]
+  for (const entry of betaOnlyScripts) {
+    assert.ok(
+      pair.allowedDifferences.includes(entry),
+      `${entry} must stay registered as an allowed difference`,
+    )
+    const relative = entry.slice('scripts/'.length)
+    assert.ok(
+      existsSync(resolve(import.meta.dirname, '..', pair.left, 'scripts', relative)),
+      `${entry} must exist in ${pair.left}/scripts/ (otherwise the slot is a zombie)`,
+    )
+    assert.ok(
+      !existsSync(resolve(import.meta.dirname, '..', pair.right, 'scripts', relative)),
+      `${entry} is beta-only; it must not appear in ${pair.right}/scripts/`,
+    )
+  }
 
   assert.ok(
     !pair.allowedDifferences.includes('src/profile-channel-admission.ts'),
@@ -252,9 +278,11 @@ test('pins the stable↔beta baseline and enforces its one-sided scripts (M6 bli
     `stable↔beta allowedDifferences must hold exactly 19 entries, found ${String(pair.allowedDifferences.length)}`,
   )
 
+  // M8 Task 2.4:此前 7 条,现 6 条。上游 350 提交把 generate-windows-app-icon.mjs 也放进了
+  // beta(合并前 fork 侧只有 stable 有),合并后两侧逐字节相同 ⇒ 该条既不再单侧、也不再
+  // 是差异,已从 allowedDifferences 撤除(见下方正向钉)。方向性强制对其余 6 条仍然生效。
   const scriptsOneSided = [
     'scripts/build-windows-nsis-ab.ts',
-    'scripts/generate-windows-app-icon.mjs',
     'scripts/inspect-windows-installed-app.ts',
     'scripts/probe-windows-packaged-runtime.ts',
     'scripts/run-windows-nsis-ab.ps1',
@@ -279,4 +307,23 @@ test('pins the stable↔beta baseline and enforces its one-sided scripts (M6 bli
       `${entry} must exist in ${pair.left}/scripts/ (otherwise the slot is a zombie)`,
     )
   }
+
+  // M8 Task 2.4 正向钉:记录被上游推翻的那条前提的**新**事实,防止无声回退。
+  // generate-windows-app-icon.mjs 现在两侧都在、逐字节相同,因此既不占 allowedDifferences
+  // 名额,也不受单侧强制约束。任一半边变化(一侧被删,或两侧开始分叉)都必须让本钉变红,
+  // 由人来决定是重新登记名额还是把分叉消掉。
+  const sharedIconScript = 'generate-windows-app-icon.mjs'
+  const stableIcon = resolve(import.meta.dirname, '..', pair.left, 'scripts', sharedIconScript)
+  const betaIcon = resolve(import.meta.dirname, '..', pair.right, 'scripts', sharedIconScript)
+  assert.ok(existsSync(stableIcon), `${sharedIconScript} must exist in ${pair.left}/scripts/`)
+  assert.ok(existsSync(betaIcon), `${sharedIconScript} must exist in ${pair.right}/scripts/ (upstream layout since the M8 merge)`)
+  assert.strictEqual(
+    readFileSync(stableIcon, 'utf8'),
+    readFileSync(betaIcon, 'utf8'),
+    `${sharedIconScript} is byte-identical across stable and beta; if it ever diverges, register the difference explicitly instead of leaving it undeclared`,
+  )
+  assert.ok(
+    !pair.allowedDifferences.includes(`scripts/${sharedIconScript}`),
+    `scripts/${sharedIconScript} must not hold a whitelist slot while the two sides are identical (zombie budget)`,
+  )
 })
