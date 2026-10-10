@@ -1,0 +1,361 @@
+as-of HEAD: 7037c6e8a4fa36076466146e69eac3c43cdc0b7e
+branch-detached worktree of sync/upstream-2.0.x
+node_modules dirs: 0
+command: corepack yarn check:layout
+started: 2026-10-10T03:22:21Z
+----
+TAP version 13
+# Subtest: refreshes all editions and rechecks the tag on every invocation
+ok 1 - refreshes all editions and rechecks the tag on every invocation
+  ---
+  duration_ms: 34.614042
+  type: 'test'
+  ...
+# Subtest: check is read-only and rejects stale installed copies
+ok 2 - check is read-only and rejects stale installed copies
+  ---
+  duration_ms: 6.501292
+  type: 'test'
+  ...
+# Subtest: restores manifests and the lockfile after an interrupted installation
+ok 3 - restores manifests and the lockfile after an interrupted installation
+  ---
+  duration_ms: 5.625667
+  type: 'test'
+  ...
+# Subtest: does not accept an offline or malformed latest response
+ok 4 - does not accept an offline or malformed latest response
+  ---
+  duration_ms: 0.946375
+  type: 'test'
+  ...
+# Subtest: all root launch, build and packaging entry points prepare the market first
+ok 5 - all root launch, build and packaging entry points prepare the market first
+  ---
+  duration_ms: 0.790708
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 124.027334
+TAP version 13
+# Subtest: accepts the latest AA across Stable, Beta and Next runtime peers
+ok 1 - accepts the latest AA across Stable, Beta and Next runtime peers
+  ---
+  duration_ms: 6.888583
+  type: 'test'
+  ...
+# Subtest: accepts the generated artifact version for AA 0.1.0-dev.0
+ok 2 - accepts the generated artifact version for AA 0.1.0-dev.0
+  ---
+  duration_ms: 4.979334
+  type: 'test'
+  ...
+# Subtest: accepts the generated artifact version for AA 2.0.1
+ok 3 - accepts the generated artifact version for AA 2.0.1
+  ---
+  duration_ms: 5.25025
+  type: 'test'
+  ...
+# Subtest: accepts the generated artifact version for AA 2.0.1+build.1
+ok 4 - accepts the generated artifact version for AA 2.0.1+build.1
+  ---
+  duration_ms: 4.498292
+  type: 'test'
+  ...
+# Subtest: rejects a version identifying a different commit even when provenance matches
+ok 5 - rejects a version identifying a different commit even when provenance matches
+  ---
+  duration_ms: 4.57775
+  type: 'test'
+  ...
+# Subtest: rejects a compatibility patch pinned to a previous AA artifact
+ok 6 - rejects a compatibility patch pinned to a previous AA artifact
+  ---
+  duration_ms: 4.51675
+  type: 'test'
+  ...
+# Subtest: pins the AA staging type graph while keeping both Desktop runtime peer ranges
+ok 7 - pins the AA staging type graph while keeping both Desktop runtime peer ranges
+  ---
+  duration_ms: 5.155375
+  type: 'test'
+  ...
+# Subtest: rejects the former stable-old/beta-new split even if the tarball is valid
+ok 8 - rejects the former stable-old/beta-new split even if the tarball is valid
+  ---
+  duration_ms: 5.129708
+  type: 'test'
+  ...
+# Subtest: rejects a Next install left on the old AA artifact
+ok 9 - rejects a Next install left on the old AA artifact
+  ---
+  duration_ms: 4.737417
+  type: 'test'
+  ...
+# Subtest: rejects a prepared artifact after AA main advances
+ok 10 - rejects a prepared artifact after AA main advances
+  ---
+  duration_ms: 4.365792
+  type: 'test'
+  ...
+# Subtest: rejects stale installed code despite updated manifests and provenance
+ok 11 - rejects stale installed code despite updated manifests and provenance
+  ---
+  duration_ms: 4.382042
+  type: 'test'
+  ...
+# Subtest: requires rebuilding the AA peer patch after a Desktop runtime update
+ok 12 - requires rebuilding the AA peer patch after a Desktop runtime update
+  ---
+  duration_ms: 4.318625
+  type: 'test'
+  ...
+# Subtest: rejects corrupted or replaced vendor bytes
+ok 13 - rejects corrupted or replaced vendor bytes
+  ---
+  duration_ms: 4.0065
+  type: 'test'
+  ...
+# Subtest: repairs the 0644 uv payload for both Mac architectures in all channels
+ok 14 - repairs the 0644 uv payload for both Mac architectures in all channels
+  ---
+  duration_ms: 8.316667
+  type: 'test'
+  ...
+1..14
+# tests 14
+# suites 0
+# pass 14
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 148.456
+TAP version 13
+# Subtest: parses exactly two Markdown blob records
+ok 1 - parses exactly two Markdown blob records
+  ---
+  duration_ms: 1.168084
+  type: 'test'
+  ...
+# Subtest: rejects malformed, incomplete, and escaping bilingual records
+ok 2 - rejects malformed, incomplete, and escaping bilingual records
+  ---
+  duration_ms: 0.212167
+  type: 'test'
+  ...
+# Subtest: verifies every recorded document hash
+ok 3 - verifies every recorded document hash
+  ---
+  duration_ms: 0.423375
+  type: 'test'
+  ...
+# Subtest: reports malformed records and missing documents in one failure
+ok 4 - reports malformed records and missing documents in one failure
+  ---
+  duration_ms: 0.20775
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 69.277167
+verify-bilingual-docs: 54 records and 108 documents are consistent
+TAP version 13
+# Subtest: allows product-name data in Market source
+ok 1 - allows product-name data in Market source
+  ---
+  duration_ms: 1.04
+  type: 'test'
+  ...
+# Subtest: rejects Market imports of Desktop implementation
+ok 2 - rejects Market imports of Desktop implementation
+  ---
+  duration_ms: 0.345709
+  type: 'test'
+  ...
+# Subtest: allows Desktop sources importing upstream market contracts
+ok 3 - allows Desktop sources importing upstream market contracts
+  ---
+  duration_ms: 0.0915
+  type: 'test'
+  ...
+# Subtest: rejects Desktop imports of server workspaces (market-server / update-server)
+ok 4 - rejects Desktop imports of server workspaces (market-server / update-server)
+  ---
+  duration_ms: 0.17425
+  type: 'test'
+  ...
+# Subtest: allows the market wrapper to explain the bypass in prose (P15)
+ok 5 - allows the market wrapper to explain the bypass in prose (P15)
+  ---
+  duration_ms: 0.120375
+  type: 'test'
+  ...
+# Subtest: rejects any registry bypass of the signed manifest in the market wrapper (P15)
+ok 6 - rejects any registry bypass of the signed manifest in the market wrapper (P15)
+  ---
+  duration_ms: 0.212625
+  type: 'test'
+  ...
+# Subtest: keeps the registry-bypass shape guard green on the real tracked tree (Task 6.11)
+ok 7 - keeps the registry-bypass shape guard green on the real tracked tree (Task 6.11)
+  ---
+  duration_ms: 7.60075
+  type: 'test'
+  ...
+# Subtest: DESKTOP_SOURCE_ROOTS covers the fork-owned huaanwork workspaces (M14 blindspot B)
+ok 8 - DESKTOP_SOURCE_ROOTS covers the fork-owned huaanwork workspaces (M14 blindspot B)
+  ---
+  duration_ms: 0.125625
+  type: 'test'
+  ...
+# Subtest: the CLI states its own boundary: import specifiers only, not filesystem cross-reads
+ok 9 - the CLI states its own boundary: import specifiers only, not filesystem cross-reads
+  ---
+  duration_ms: 104.291292
+  type: 'test'
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 9
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 185.67
+verify-market-dependency-direction: 779 tracked source files respect the market dependency direction (market sources independent of Desktop implementation; Desktop sources independent of market-server); 8 market wrapper files carry no registry bypass of the signed manifest (no runExternalMarketPluginInstall / --registry / --prefer-offline); note: this guard verifies import specifiers only -- runtime filesystem cross-reads are not covered (e.g. the three packages' tests/package.spec.ts readFileSync of scripts/expected-root-gate-scripts.json, a registered upstream-sync exception) and are guarded separately
+sync-vendored-runtime: stable 318 packages from 639ed01539 are verified
+sync-vendored-runtime: beta 321 packages from 5badb15009 are verified
+sync-vendored-runtime: huaanwork 321 packages from 5badb15009 are verified
+TAP version 13
+# verify-desktop-variants: test-pair src (1 files) shared source files are aligned; all editions use isolated Host and chrome; test-pair allowlist 1 (oneSidedPrefixes 1)
+# Subtest: isOneSided: 支持 Set 和 Array 类型的 oneSidedPaths
+ok 1 - isOneSided: 支持 Set 和 Array 类型的 oneSidedPaths
+  ---
+  duration_ms: 0.60125
+  type: 'test'
+  ...
+# Subtest: isOneSided: 精确路径与前缀匹配及未命中场景 (含负向用例)
+ok 2 - isOneSided: 精确路径与前缀匹配及未命中场景 (含负向用例)
+  ---
+  duration_ms: 0.098583
+  type: 'test'
+  ...
+# Subtest: filterDirOneSided: 多目录与单目录场景下 oneSidedPaths 过滤与前缀剥离
+ok 3 - filterDirOneSided: 多目录与单目录场景下 oneSidedPaths 过滤与前缀剥离
+  ---
+  duration_ms: 0.558917
+  type: 'test'
+  ...
+# Subtest: verifyDesktopVariants: 统计计数与差异检测 (单测模拟 fixture)
+ok 4 - verifyDesktopVariants: 统计计数与差异检测 (单测模拟 fixture)
+  ---
+  duration_ms: 4.514125
+  type: 'test'
+  ...
+# Subtest: verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位
+ok 5 - verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位
+  ---
+  duration_ms: 94.729834
+  type: 'test'
+  ...
+# Subtest: pins the beta↔huaanwork divergence budget so growth is always explicit
+ok 6 - pins the beta↔huaanwork divergence budget so growth is always explicit
+  ---
+  duration_ms: 0.572417
+  type: 'test'
+  ...
+# Subtest: pin scan does not treat a quoted path inside a comment as an entry
+ok 7 - pin scan does not treat a quoted path inside a comment as an entry
+  ---
+  duration_ms: 0.124959
+  type: 'test'
+  ...
+# Subtest: zombie slot guard: every registered exemption is an active difference
+ok 8 - zombie slot guard: every registered exemption is an active difference
+  ---
+  duration_ms: 1071.193875
+  type: 'test'
+  ...
+# Subtest: no allowedDifferences entry is commented out in either pair
+ok 9 - no allowedDifferences entry is commented out in either pair
+  ---
+  duration_ms: 0.350542
+  type: 'test'
+  ...
+# Subtest: pins the stable↔beta baseline and enforces its one-sided scripts (M6 blindspot)
+ok 10 - pins the stable↔beta baseline and enforces its one-sided scripts (M6 blindspot)
+  ---
+  duration_ms: 0.605666
+  type: 'test'
+  ...
+# Subtest: beta↔huaanwork artifact-name templates are identity, not allowlist entries
+ok 11 - beta↔huaanwork artifact-name templates are identity, not allowlist entries
+  ---
+  duration_ms: 0.163625
+  type: 'test'
+  ...
+1..11
+# tests 11
+# suites 0
+# pass 11
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1243.472583
+verify-desktop-variants: stable↔beta src (204 files), stable↔beta scripts (33 files), beta↔huaanwork src (187 files), beta↔huaanwork scripts (31 files) shared source files are aligned; all editions use isolated Host and chrome; stable↔beta allowlist 9 (oneSidedPrefixes 0), beta↔huaanwork allowlist 22 (oneSidedPrefixes 6)
+TAP version 13
+# Subtest: resource checks reject edited vector layers, edited exports and missing exports without Xcode
+ok 1 - resource checks reject edited vector layers, edited exports and missing exports without Xcode
+  ---
+  duration_ms: 17.186167
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 85.934792
+icons: stable source and all platform resources match
+icons: beta source and all platform resources match
+icons: next source and all platform resources match
+verify-layout: all Desktop workspaces including Next and upstream 5badb15009 are consistent
+TAP version 13
+# Subtest: the shared gate-script fixture equals the root manifest
+ok 1 - the shared gate-script fixture equals the root manifest
+  ---
+  duration_ms: 0.445708
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 68.181
+verify-readme-versions: 4 hardcoded artifact version string(s) in 1 scoped package(s) (dsh-plugin-huaanwork) match their own package.json; 4 README(s) out of scope (M28): dsh-plugin-desktop/README.md, dsh-plugin-desktop/README.zh.md, dsh-plugin-desktop-beta/README.md, dsh-plugin-desktop-beta/README.zh.md
+----
+exit_code: 0
+ended: 2026-10-10T03:22:30Z

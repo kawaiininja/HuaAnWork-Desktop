@@ -1,0 +1,10 @@
+as-of parent HEAD: 7037c6e8a4fa36076466146e69eac3c43cdc0b7e
+command: corepack yarn workspace dsh-desktop-next verify:sidebar-browser --no-sandbox
+started: 2026-10-10T03:50:12Z
+ELECTRON_RUN_AS_NODE=<unset>
+display: built-in Liquid Retina XDR online; DISPLAY=<unset>; xvfb-run=absent; platform=Darwin
+----
+Run this native Browser check on Linux under xvfb-run; portable checks do not start Electron.
+----
+exit_code: 1
+ended: 2026-10-10T03:50:12Z

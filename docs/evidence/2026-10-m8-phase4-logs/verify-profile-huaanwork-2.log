@@ -1,0 +1,11 @@
+command: corepack yarn workspace dsh-plugin-huaanwork verify:profile
+started: 2026-10-10T03:38:49Z
+----
+post-boot gate: agent registry empty at first check; waiting for materialization
+dsh-plugin-desktop-profile-smoke: warning: 2 entries did not activate
+web-fetch-http (@deepseek-ai/dsh-web-fetch-http): pending (waiting for service: web)
+job-controller (@deepseek-ai/dsh-api-job-controller): pending (waiting for service: jobs)
+verify-profile-boot: minimal preset, plugin manager, and disabled hmr lock passed
+----
+exit_code: 0
+ended: 2026-10-10T03:38:54Z

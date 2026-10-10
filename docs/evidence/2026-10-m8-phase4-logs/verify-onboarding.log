@@ -1,0 +1,11 @@
+as-of parent HEAD: 7037c6e8a4fa36076466146e69eac3c43cdc0b7e
+command: corepack yarn workspace dsh-desktop-next verify:onboarding
+started: 2026-10-10T03:49:25Z
+PLAYWRIGHT_BROWSERS_PATH=<unset>
+display: built-in Liquid Retina XDR online; DISPLAY=<unset>; xvfb-run=absent
+----
+dsh web: http://127.0.0.1:51908/?token=BaXK4Rml2z_SaN5lHp6Q1TfCB6F1UyVWRh4oocs_ScU
+Original Next onboarding passed inside the official surface: independent native eligibility, official progress completed, state-read and save retries, five original pages, artwork, back navigation, choices, skip, completion, inert cleanup, and no repeat.
+----
+exit_code: 0
+ended: 2026-10-10T03:49:41Z

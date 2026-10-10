@@ -1,0 +1,1690 @@
+as-of parent HEAD: 7037c6e8a4fa36076466146e69eac3c43cdc0b7e
+branch: sync/upstream-2.0.x
+BASE_SHA: <unset>
+command: corepack yarn check
+started: 2026-10-10T03:39:08Z
+note: rerun after huaanwork client vite build and profile-boot smoke alignment
+----
+TAP version 13
+# Subtest: refreshes all editions and rechecks the tag on every invocation
+ok 1 - refreshes all editions and rechecks the tag on every invocation
+  ---
+  duration_ms: 28.071167
+  type: 'test'
+  ...
+# Subtest: check is read-only and rejects stale installed copies
+ok 2 - check is read-only and rejects stale installed copies
+  ---
+  duration_ms: 4.941917
+  type: 'test'
+  ...
+# Subtest: restores manifests and the lockfile after an interrupted installation
+ok 3 - restores manifests and the lockfile after an interrupted installation
+  ---
+  duration_ms: 4.607917
+  type: 'test'
+  ...
+# Subtest: does not accept an offline or malformed latest response
+ok 4 - does not accept an offline or malformed latest response
+  ---
+  duration_ms: 0.810958
+  type: 'test'
+  ...
+# Subtest: all root launch, build and packaging entry points prepare the market first
+ok 5 - all root launch, build and packaging entry points prepare the market first
+  ---
+  duration_ms: 0.691416
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 107.444375
+TAP version 13
+# Subtest: accepts the latest AA across Stable, Beta and Next runtime peers
+ok 1 - accepts the latest AA across Stable, Beta and Next runtime peers
+  ---
+  duration_ms: 6.531084
+  type: 'test'
+  ...
+# Subtest: accepts the generated artifact version for AA 0.1.0-dev.0
+ok 2 - accepts the generated artifact version for AA 0.1.0-dev.0
+  ---
+  duration_ms: 4.049625
+  type: 'test'
+  ...
+# Subtest: accepts the generated artifact version for AA 2.0.1
+ok 3 - accepts the generated artifact version for AA 2.0.1
+  ---
+  duration_ms: 4.743709
+  type: 'test'
+  ...
+# Subtest: accepts the generated artifact version for AA 2.0.1+build.1
+ok 4 - accepts the generated artifact version for AA 2.0.1+build.1
+  ---
+  duration_ms: 3.845417
+  type: 'test'
+  ...
+# Subtest: rejects a version identifying a different commit even when provenance matches
+ok 5 - rejects a version identifying a different commit even when provenance matches
+  ---
+  duration_ms: 4.96675
+  type: 'test'
+  ...
+# Subtest: rejects a compatibility patch pinned to a previous AA artifact
+ok 6 - rejects a compatibility patch pinned to a previous AA artifact
+  ---
+  duration_ms: 4.018209
+  type: 'test'
+  ...
+# Subtest: pins the AA staging type graph while keeping both Desktop runtime peer ranges
+ok 7 - pins the AA staging type graph while keeping both Desktop runtime peer ranges
+  ---
+  duration_ms: 5.065958
+  type: 'test'
+  ...
+# Subtest: rejects the former stable-old/beta-new split even if the tarball is valid
+ok 8 - rejects the former stable-old/beta-new split even if the tarball is valid
+  ---
+  duration_ms: 4.010459
+  type: 'test'
+  ...
+# Subtest: rejects a Next install left on the old AA artifact
+ok 9 - rejects a Next install left on the old AA artifact
+  ---
+  duration_ms: 4.240458
+  type: 'test'
+  ...
+# Subtest: rejects a prepared artifact after AA main advances
+ok 10 - rejects a prepared artifact after AA main advances
+  ---
+  duration_ms: 3.836208
+  type: 'test'
+  ...
+# Subtest: rejects stale installed code despite updated manifests and provenance
+ok 11 - rejects stale installed code despite updated manifests and provenance
+  ---
+  duration_ms: 4.095042
+  type: 'test'
+  ...
+# Subtest: requires rebuilding the AA peer patch after a Desktop runtime update
+ok 12 - requires rebuilding the AA peer patch after a Desktop runtime update
+  ---
+  duration_ms: 3.461708
+  type: 'test'
+  ...
+# Subtest: rejects corrupted or replaced vendor bytes
+ok 13 - rejects corrupted or replaced vendor bytes
+  ---
+  duration_ms: 4.343625
+  type: 'test'
+  ...
+# Subtest: repairs the 0644 uv payload for both Mac architectures in all channels
+ok 14 - repairs the 0644 uv payload for both Mac architectures in all channels
+  ---
+  duration_ms: 7.990833
+  type: 'test'
+  ...
+1..14
+# tests 14
+# suites 0
+# pass 14
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 137.664709
+TAP version 13
+# Subtest: parses exactly two Markdown blob records
+ok 1 - parses exactly two Markdown blob records
+  ---
+  duration_ms: 1.314583
+  type: 'test'
+  ...
+# Subtest: rejects malformed, incomplete, and escaping bilingual records
+ok 2 - rejects malformed, incomplete, and escaping bilingual records
+  ---
+  duration_ms: 0.207334
+  type: 'test'
+  ...
+# Subtest: verifies every recorded document hash
+ok 3 - verifies every recorded document hash
+  ---
+  duration_ms: 0.337834
+  type: 'test'
+  ...
+# Subtest: reports malformed records and missing documents in one failure
+ok 4 - reports malformed records and missing documents in one failure
+  ---
+  duration_ms: 0.269917
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 70.019333
+verify-bilingual-docs: 54 records and 108 documents are consistent
+TAP version 13
+# Subtest: allows product-name data in Market source
+ok 1 - allows product-name data in Market source
+  ---
+  duration_ms: 1.378541
+  type: 'test'
+  ...
+# Subtest: rejects Market imports of Desktop implementation
+ok 2 - rejects Market imports of Desktop implementation
+  ---
+  duration_ms: 0.396917
+  type: 'test'
+  ...
+# Subtest: allows Desktop sources importing upstream market contracts
+ok 3 - allows Desktop sources importing upstream market contracts
+  ---
+  duration_ms: 0.088333
+  type: 'test'
+  ...
+# Subtest: rejects Desktop imports of server workspaces (market-server / update-server)
+ok 4 - rejects Desktop imports of server workspaces (market-server / update-server)
+  ---
+  duration_ms: 0.194667
+  type: 'test'
+  ...
+# Subtest: allows the market wrapper to explain the bypass in prose (P15)
+ok 5 - allows the market wrapper to explain the bypass in prose (P15)
+  ---
+  duration_ms: 0.121292
+  type: 'test'
+  ...
+# Subtest: rejects any registry bypass of the signed manifest in the market wrapper (P15)
+ok 6 - rejects any registry bypass of the signed manifest in the market wrapper (P15)
+  ---
+  duration_ms: 0.191667
+  type: 'test'
+  ...
+# Subtest: keeps the registry-bypass shape guard green on the real tracked tree (Task 6.11)
+ok 7 - keeps the registry-bypass shape guard green on the real tracked tree (Task 6.11)
+  ---
+  duration_ms: 7.549625
+  type: 'test'
+  ...
+# Subtest: DESKTOP_SOURCE_ROOTS covers the fork-owned huaanwork workspaces (M14 blindspot B)
+ok 8 - DESKTOP_SOURCE_ROOTS covers the fork-owned huaanwork workspaces (M14 blindspot B)
+  ---
+  duration_ms: 0.1525
+  type: 'test'
+  ...
+# Subtest: the CLI states its own boundary: import specifiers only, not filesystem cross-reads
+ok 9 - the CLI states its own boundary: import specifiers only, not filesystem cross-reads
+  ---
+  duration_ms: 112.63075
+  type: 'test'
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 9
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 191.106667
+verify-market-dependency-direction: 779 tracked source files respect the market dependency direction (market sources independent of Desktop implementation; Desktop sources independent of market-server); 8 market wrapper files carry no registry bypass of the signed manifest (no runExternalMarketPluginInstall / --registry / --prefer-offline); note: this guard verifies import specifiers only -- runtime filesystem cross-reads are not covered (e.g. the three packages' tests/package.spec.ts readFileSync of scripts/expected-root-gate-scripts.json, a registered upstream-sync exception) and are guarded separately
+sync-vendored-runtime: stable 318 packages from 639ed01539 are verified
+sync-vendored-runtime: beta 321 packages from 5badb15009 are verified
+sync-vendored-runtime: huaanwork 321 packages from 5badb15009 are verified
+TAP version 13
+# verify-desktop-variants: test-pair src (1 files) shared source files are aligned; all editions use isolated Host and chrome; test-pair allowlist 1 (oneSidedPrefixes 1)
+# Subtest: isOneSided: 支持 Set 和 Array 类型的 oneSidedPaths
+ok 1 - isOneSided: 支持 Set 和 Array 类型的 oneSidedPaths
+  ---
+  duration_ms: 0.567917
+  type: 'test'
+  ...
+# Subtest: isOneSided: 精确路径与前缀匹配及未命中场景 (含负向用例)
+ok 2 - isOneSided: 精确路径与前缀匹配及未命中场景 (含负向用例)
+  ---
+  duration_ms: 0.095125
+  type: 'test'
+  ...
+# Subtest: filterDirOneSided: 多目录与单目录场景下 oneSidedPaths 过滤与前缀剥离
+ok 3 - filterDirOneSided: 多目录与单目录场景下 oneSidedPaths 过滤与前缀剥离
+  ---
+  duration_ms: 0.52325
+  type: 'test'
+  ...
+# Subtest: verifyDesktopVariants: 统计计数与差异检测 (单测模拟 fixture)
+ok 4 - verifyDesktopVariants: 统计计数与差异检测 (单测模拟 fixture)
+  ---
+  duration_ms: 4.421125
+  type: 'test'
+  ...
+# Subtest: verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位
+ok 5 - verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位
+  ---
+  duration_ms: 94.462583
+  type: 'test'
+  ...
+# Subtest: pins the beta↔huaanwork divergence budget so growth is always explicit
+ok 6 - pins the beta↔huaanwork divergence budget so growth is always explicit
+  ---
+  duration_ms: 0.57075
+  type: 'test'
+  ...
+# Subtest: pin scan does not treat a quoted path inside a comment as an entry
+ok 7 - pin scan does not treat a quoted path inside a comment as an entry
+  ---
+  duration_ms: 0.136708
+  type: 'test'
+  ...
+# Subtest: zombie slot guard: every registered exemption is an active difference
+ok 8 - zombie slot guard: every registered exemption is an active difference
+  ---
+  duration_ms: 1015.491208
+  type: 'test'
+  ...
+# Subtest: no allowedDifferences entry is commented out in either pair
+ok 9 - no allowedDifferences entry is commented out in either pair
+  ---
+  duration_ms: 0.345875
+  type: 'test'
+  ...
+# Subtest: pins the stable↔beta baseline and enforces its one-sided scripts (M6 blindspot)
+ok 10 - pins the stable↔beta baseline and enforces its one-sided scripts (M6 blindspot)
+  ---
+  duration_ms: 0.54875
+  type: 'test'
+  ...
+# Subtest: beta↔huaanwork artifact-name templates are identity, not allowlist entries
+ok 11 - beta↔huaanwork artifact-name templates are identity, not allowlist entries
+  ---
+  duration_ms: 0.165458
+  type: 'test'
+  ...
+1..11
+# tests 11
+# suites 0
+# pass 11
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1186.034708
+verify-desktop-variants: stable↔beta src (204 files), stable↔beta scripts (33 files), beta↔huaanwork src (187 files), beta↔huaanwork scripts (31 files) shared source files are aligned; all editions use isolated Host and chrome; stable↔beta allowlist 9 (oneSidedPrefixes 0), beta↔huaanwork allowlist 22 (oneSidedPrefixes 6)
+TAP version 13
+# Subtest: resource checks reject edited vector layers, edited exports and missing exports without Xcode
+ok 1 - resource checks reject edited vector layers, edited exports and missing exports without Xcode
+  ---
+  duration_ms: 9.434791
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 78.039333
+icons: stable source and all platform resources match
+icons: beta source and all platform resources match
+icons: next source and all platform resources match
+verify-layout: all Desktop workspaces including Next and upstream 5badb15009 are consistent
+TAP version 13
+# Subtest: the shared gate-script fixture equals the root manifest
+ok 1 - the shared gate-script fixture equals the root manifest
+  ---
+  duration_ms: 0.448459
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 65.062958
+verify-readme-versions: 4 hardcoded artifact version string(s) in 1 scoped package(s) (dsh-plugin-huaanwork) match their own package.json; 4 README(s) out of scope (M28): dsh-plugin-desktop/README.md, dsh-plugin-desktop/README.zh.md, dsh-plugin-desktop-beta/README.md, dsh-plugin-desktop-beta/README.zh.md
+TAP version 13
+# Subtest: dsh-plugin-desktop: rc.2 tool results retain the same hash after JSON transport
+ok 1 - dsh-plugin-desktop: rc.2 tool results retain the same hash after JSON transport
+  ---
+  duration_ms: 3.65525
+  type: 'test'
+  ...
+# Subtest: dsh-plugin-desktop: Python gets a compatible bypass list and a writable project copy
+ok 2 - dsh-plugin-desktop: Python gets a compatible bypass list and a writable project copy
+  ---
+  duration_ms: 17.005667
+  type: 'test'
+  ...
+# Subtest: dsh-plugin-desktop: RPC errors reach logs and credentials stay redacted
+ok 3 - dsh-plugin-desktop: RPC errors reach logs and credentials stay redacted
+  ---
+  duration_ms: 1.69625
+  type: 'test'
+  ...
+# Subtest: dsh-plugin-desktop-beta: rc.2 tool results retain the same hash after JSON transport
+ok 4 - dsh-plugin-desktop-beta: rc.2 tool results retain the same hash after JSON transport
+  ---
+  duration_ms: 1.799084
+  type: 'test'
+  ...
+# Subtest: dsh-plugin-desktop-beta: Python gets a compatible bypass list and a writable project copy
+ok 5 - dsh-plugin-desktop-beta: Python gets a compatible bypass list and a writable project copy
+  ---
+  duration_ms: 4.924291
+  type: 'test'
+  ...
+# Subtest: dsh-plugin-desktop-beta: RPC errors reach logs and credentials stay redacted
+ok 6 - dsh-plugin-desktop-beta: RPC errors reach logs and credentials stay redacted
+  ---
+  duration_ms: 1.379458
+  type: 'test'
+  ...
+# Subtest: dsh-desktop-next: rc.2 tool results retain the same hash after JSON transport
+ok 7 - dsh-desktop-next: rc.2 tool results retain the same hash after JSON transport
+  ---
+  duration_ms: 1.610875
+  type: 'test'
+  ...
+# Subtest: dsh-desktop-next: Python gets a compatible bypass list and a writable project copy
+ok 8 - dsh-desktop-next: Python gets a compatible bypass list and a writable project copy
+  ---
+  duration_ms: 5.772083
+  type: 'test'
+  ...
+# Subtest: dsh-desktop-next: RPC errors reach logs and credentials stay redacted
+ok 9 - dsh-desktop-next: RPC errors reach logs and credentials stay redacted
+  ---
+  duration_ms: 1.274
+  type: 'test'
+  ...
+# Subtest: dsh-plugin-huaanwork: rc.2 tool results retain the same hash after JSON transport
+ok 10 - dsh-plugin-huaanwork: rc.2 tool results retain the same hash after JSON transport
+  ---
+  duration_ms: 0.86925
+  type: 'test'
+  ...
+# Subtest: dsh-plugin-huaanwork: Python gets a compatible bypass list and a writable project copy
+ok 11 - dsh-plugin-huaanwork: Python gets a compatible bypass list and a writable project copy
+  ---
+  duration_ms: 6.711625
+  type: 'test'
+  ...
+# Subtest: dsh-plugin-huaanwork: RPC errors reach logs and credentials stay redacted
+ok 12 - dsh-plugin-huaanwork: RPC errors reach logs and credentials stay redacted
+  ---
+  duration_ms: 1.143708
+  type: 'test'
+  ...
+1..12
+# tests 12
+# suites 0
+# pass 12
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 116.955958
+verify-fabric-docs: 20 Markdown files and 10 bilingual pairs are consistent
+verify-market-docs: 12 Markdown files, 6 bilingual pairs, and 4 schemas are consistent
+contract-types: 4 generated type files written
+ℹ tsdown v0.22.2 powered by rolldown v1.1.5
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-community-market/tsdown.config.ts 
+ℹ [dsh-community-market/client] entry: src/client/index.ts
+ℹ [dsh-community-market/client] target: es2022
+ℹ [dsh-community-market/client] tsconfig: tsconfig.client.json
+
+ WARN  `external` is deprecated. Use `deps.neverBundle` instead.
+
+ℹ Build start
+ℹ [dsh-community-market/client] lib/client.js      140.18 kB │ gzip: 23.83 kB
+ℹ [dsh-community-market/client] lib/client.js.map  197.80 kB │ gzip: 38.72 kB
+ℹ [dsh-community-market/client] 2 files, total: 337.99 kB
+✔ [dsh-community-market/client] Build complete in 39ms
+dsh-community-market: client externals are all declared (12 allowed).
+verify-package-exports: 4 type exports exist
+verify-market-client-loader: dsh-community-market registered one client module
+contract-types: 4 generated type files are current
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-community-market
+
+
+ Test Files  22 passed (22)
+      Tests  285 passed (285)
+   Start at  11:39:32
+   Duration  4.66s (transform 1.17s, setup 626ms, import 3.68s, tests 6.63s, environment 3.16s)
+
+ℹ tsdown v0.22.2 powered by rolldown v1.1.5
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop/tsdown.config.ts 
+ℹ [dsh-plugin-desktop] entry: src/index.ts, src/module-resolution.ts, src/webserver.ts, src/profile.ts, src/profile-manager.ts, src/profile-service.ts, src/profile-context.ts, src/desktop-plugins.ts, src/pnpm.ts, src/profiles.ts, src/diagnostics.ts, src/notifications.ts, src/diagnostic-export-worker.ts, src/packaged-runtime-smoke.ts, src/runtime.ts, src/electron-runtime.ts, src/desktop-runtime-environment.ts, src/desktop-terminal.ts, src/desktop-cli.ts, src/terminal.ts, src/update-checker.ts, src/update-download.ts, src/updates.ts, src/windows-pwsh-sandbox.ts, src/windows-acl-runner.ts, src/main.ts, src/host-process-entry.ts
+ℹ [dsh-plugin-desktop] target: es2024
+ℹ [dsh-plugin-desktop] tsconfig: tsconfig.json
+ℹ [dsh-plugin-desktop/bin] entry: src/bin.ts
+ℹ [dsh-plugin-desktop/bin] target: es2024
+ℹ [dsh-plugin-desktop/bin] tsconfig: tsconfig.json
+ℹ [dsh-plugin-desktop/preload] entry: src/preload.ts, src/compatibility-preload.ts
+ℹ [dsh-plugin-desktop/preload] target: es2022
+ℹ [dsh-plugin-desktop/preload] tsconfig: tsconfig.json
+
+ WARN  `external` is deprecated. Use `deps.neverBundle` instead.
+
+ℹ Build start
+ℹ [dsh-plugin-desktop/preload] [CJS] lib/preload.cjs                    2.50 kB │ gzip: 0.93 kB
+ℹ [dsh-plugin-desktop/preload] [CJS] lib/compatibility-preload.cjs      1.00 kB │ gzip: 0.40 kB
+ℹ [dsh-plugin-desktop/preload] [CJS] lib/preload.cjs.map                7.52 kB │ gzip: 2.62 kB
+ℹ [dsh-plugin-desktop/preload] [CJS] lib/compatibility-preload.cjs.map  2.64 kB │ gzip: 0.98 kB
+ℹ [dsh-plugin-desktop/preload] [CJS] 4 files, total: 13.66 kB
+✔ [dsh-plugin-desktop/preload] Build complete in 37ms
+ℹ [dsh-plugin-desktop/bin] [ESM] Granting execute permission to lib/bin.js
+ℹ [dsh-plugin-desktop/bin] [ESM] lib/bin.js      11.50 kB │ gzip:  3.90 kB
+ℹ [dsh-plugin-desktop/bin] [ESM] lib/bin.js.map  55.90 kB │ gzip: 13.86 kB
+ℹ [dsh-plugin-desktop/bin] [ESM] 2 files, total: 67.39 kB
+✔ [dsh-plugin-desktop/bin] Build complete in 40ms
+ℹ [dsh-plugin-desktop] Hint: consider adding deps.onlyBundle option to avoid unintended bundling of dependencies, or set deps.onlyBundle: false to disable this hint.
+See more at https://tsdown.dev/options/dependencies#deps-onlybundle
+Detected dependencies in bundle:
+- @vscode/ripgrep
+ℹ [dsh-plugin-desktop] [ESM] lib/main.js                                      212.83 kB │ gzip: 51.90 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/index.js                                      24.07 kB │ gzip:  7.26 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/updates.js                                    13.36 kB │ gzip:  3.94 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/host-process-entry.js                         12.78 kB │ gzip:  3.89 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/packaged-runtime-smoke.js                     11.81 kB │ gzip:  3.66 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/diagnostic-export-worker.js                   10.80 kB │ gzip:  3.26 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/pnpm.js                                        6.54 kB │ gzip:  2.31 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/windows-acl-runner.js                          6.23 kB │ gzip:  2.54 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/notifications.js                               5.92 kB │ gzip:  1.95 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/windows-pwsh-sandbox.js                        5.62 kB │ gzip:  2.23 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-cli.js                                 4.96 kB │ gzip:  1.84 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/webserver.js                                   2.75 kB │ gzip:  1.15 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profiles.js                                    1.96 kB │ gzip:  0.81 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile.js                                     1.20 kB │ gzip:  0.43 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/terminal.js                                    1.02 kB │ gzip:  0.56 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-plugins.js                             0.85 kB │ gzip:  0.28 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/diagnostics.js                                 0.82 kB │ gzip:  0.46 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/update-download.js                             0.63 kB │ gzip:  0.27 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/update-checker.js                              0.63 kB │ gzip:  0.28 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-manager.js                             0.49 kB │ gzip:  0.20 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/electron-runtime.js                            0.32 kB │ gzip:  0.19 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-runtime-environment.js                 0.19 kB │ gzip:  0.13 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-terminal.js                            0.17 kB │ gzip:  0.12 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-service.js                             0.14 kB │ gzip:  0.11 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/module-resolution.js                           0.13 kB │ gzip:  0.11 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-context.js                             0.12 kB │ gzip:  0.10 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/runtime.js                                     0.01 kB │ gzip:  0.03 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/main.js.map                                  406.80 kB │ gzip: 95.15 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/electron-runtime-D6253B0D.js.map             298.16 kB │ gzip: 73.36 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-channel-admission-BreM2vAG.js.map    158.71 kB │ gzip: 39.12 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/electron-runtime-D6253B0D.js                 156.71 kB │ gzip: 42.04 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-PQ4jA7ky.js.map                      115.63 kB │ gzip: 31.40 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-channel-admission-BreM2vAG.js         82.96 kB │ gzip: 21.49 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-PQ4jA7ky.js                           63.09 kB │ gzip: 17.75 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-plugins-D2Dccc9D.js.map               60.77 kB │ gzip: 12.90 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/settings-bridge-HPG4IF_K.js.map               59.03 kB │ gzip: 14.36 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/tray-locale-Cjglfxv1.js.map                   46.00 kB │ gzip: 11.45 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/module-resolution-CTTB3FAS.js.map             44.01 kB │ gzip: 10.27 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/lifecycle-events-BsI4ve_r.js.map              43.69 kB │ gzip: 10.10 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/index.js.map                                  41.69 kB │ gzip: 11.59 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-terminal-CSXxo5CR.js.map              39.90 kB │ gzip: 10.34 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-settings-route-DOJ-bzmO.js.map        37.54 kB │ gzip:  6.97 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/update-download-BJssBduM.js.map               34.83 kB │ gzip:  9.51 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-runtime-environment-BCd9iEvr.js.map   34.02 kB │ gzip:  9.46 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-plugins-D2Dccc9D.js                   31.77 kB │ gzip:  6.83 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/tray-locale-Cjglfxv1.js                       30.60 kB │ gzip:  8.94 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/settings-bridge-HPG4IF_K.js                   29.59 kB │ gzip:  7.58 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/lan-https-runtime-6lVFk32q.js.map             29.29 kB │ gzip:  8.03 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/lan-https-certificate-BiOwb7ka.js.map         28.79 kB │ gzip:  7.63 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/update-checker-Ep4izusm.js.map                28.09 kB │ gzip:  8.21 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-manager-DZ2V7TPG.js.map               27.98 kB │ gzip:  7.64 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/updates.js.map                                27.03 kB │ gzip:  7.27 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/host-process-entry.js.map                     24.53 kB │ gzip:  7.27 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-terminal-CSXxo5CR.js                  22.54 kB │ gzip:  6.21 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/lifecycle-events-BsI4ve_r.js                  22.53 kB │ gzip:  5.54 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/module-resolution-CTTB3FAS.js                 21.33 kB │ gzip:  4.41 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/packaged-runtime-smoke.js.map                 19.24 kB │ gzip:  5.89 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/diagnostic-export-worker.js.map               19.21 kB │ gzip:  5.41 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/update-download-BJssBduM.js                   19.14 kB │ gzip:  5.48 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-runtime-environment-BCd9iEvr.js       19.04 kB │ gzip:  5.68 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-settings-route-DOJ-bzmO.js            18.01 kB │ gzip:  3.69 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/lan-https-certificate-BiOwb7ka.js             16.37 kB │ gzip:  4.47 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-manager-DZ2V7TPG.js                   15.72 kB │ gzip:  4.61 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/update-checker-Ep4izusm.js                    15.08 kB │ gzip:  4.68 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/lan-https-runtime-6lVFk32q.js                 14.22 kB │ gzip:  4.26 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/log-files-C8bEL5Tw.js.map                     13.87 kB │ gzip:  4.32 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-service-BRZQTDkG.js.map               13.58 kB │ gzip:  3.64 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/pnpm.js.map                                   13.37 kB │ gzip:  4.15 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/windows-acl-runner.js.map                     11.06 kB │ gzip:  4.07 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/notifications.js.map                          10.98 kB │ gzip:  3.59 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/package-overlay-Ca250500.js.map                9.59 kB │ gzip:  3.16 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/windows-pwsh-sandbox.js.map                    9.39 kB │ gzip:  3.47 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-cli.js.map                             8.59 kB │ gzip:  3.12 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/diagnostic-export-CHpLmCFd.js.map              8.42 kB │ gzip:  2.96 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/log-files-C8bEL5Tw.js                          7.34 kB │ gzip:  2.51 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-context-C6gi0kBv.js.map                6.37 kB │ gzip:  2.59 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-service-BRZQTDkG.js                    6.29 kB │ gzip:  1.83 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/webserver.js.map                               5.67 kB │ gzip:  2.17 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/platform-login-BFKNMEcY.js.map                 5.58 kB │ gzip:  2.21 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-browser-access-5-Ph3Uv7.js.map         5.23 kB │ gzip:  2.03 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/package-overlay-Ca250500.js                    4.91 kB │ gzip:  1.73 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/mask-secrets-Bh0DpkE4.js.map                   4.30 kB │ gzip:  1.76 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/diagnostic-export-CHpLmCFd.js                  4.10 kB │ gzip:  1.51 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/packaged-runtime-path-BJR_Zwad.js.map          3.92 kB │ gzip:  1.66 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profiles.js.map                                3.58 kB │ gzip:  1.36 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/profile-context-C6gi0kBv.js                    3.39 kB │ gzip:  1.50 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/platform-login-BFKNMEcY.js                     2.64 kB │ gzip:  1.12 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-browser-access-5-Ph3Uv7.js             2.59 kB │ gzip:  1.13 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/mask-secrets-Bh0DpkE4.js                       2.56 kB │ gzip:  1.17 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/packaged-runtime-path-BJR_Zwad.js              2.23 kB │ gzip:  1.01 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/product-identity-DUPfNg4Q.js.map               2.22 kB │ gzip:  0.82 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/asar-archive-policy-Cah5WU6P.js.map            1.95 kB │ gzip:  1.04 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/product-identity-DUPfNg4Q.js                   1.68 kB │ gzip:  0.62 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/terminal.js.map                                1.60 kB │ gzip:  0.80 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/asar-archive-policy-Cah5WU6P.js                1.57 kB │ gzip:  0.87 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/pnpm-policy-Dj9BWmx3.js.map                    1.42 kB │ gzip:  0.73 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/diagnostics.js.map                             1.32 kB │ gzip:  0.67 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/directory-picker-contract-BRGGtgwE.js.map      1.27 kB │ gzip:  0.63 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/pnpm-policy-Dj9BWmx3.js                        1.11 kB │ gzip:  0.59 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/directory-picker-contract-BRGGtgwE.js          0.74 kB │ gzip:  0.38 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-port-DWrq-_UM.js.map                   0.44 kB │ gzip:  0.32 kB
+ℹ [dsh-plugin-desktop] [ESM] lib/desktop-port-DWrq-_UM.js                       0.29 kB │ gzip:  0.22 kB
+ℹ [dsh-plugin-desktop] [ESM] 102 files, total: 2.72 MB
+✔ [dsh-plugin-desktop] Build complete in 114ms
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 2016 modules transformed.
+rendering chunks...
+computing gzip size...
+lib/client.js  626.94 kB │ gzip: 130.43 kB
+
+✓ built in 176ms
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 2091 modules transformed.
+rendering chunks...
+computing gzip size...
+lib/native-ui/desktop-dialog.html                                     1.22 kB │ gzip:  0.51 kB
+lib/native-ui/profile-create.html                                     1.26 kB │ gzip:  0.50 kB
+lib/native-ui/compatibility-chrome.html                               1.30 kB │ gzip:  0.53 kB
+lib/native-ui/profile-selector.html                                   1.64 kB │ gzip:  0.60 kB
+lib/native-ui/setup-wizard.html                                       1.80 kB │ gzip:  0.63 kB
+lib/native-ui/recovery.html                                           2.06 kB │ gzip:  0.68 kB
+lib/native-ui/assets/inter-vietnamese-wght-normal-CBcvBZtf.woff2     10.25 kB
+lib/native-ui/assets/inter-greek-ext-wght-normal-DlzME5K_.woff2      11.23 kB
+lib/native-ui/assets/inter-cyrillic-wght-normal-DqGufNeO.woff2       18.74 kB
+lib/native-ui/assets/inter-greek-wght-normal-CkhJZR-_.woff2          18.99 kB
+lib/native-ui/assets/inter-cyrillic-ext-wght-normal-BOeWTOD4.woff2   25.96 kB
+lib/native-ui/assets/inter-latin-wght-normal-Dx4kXJAl.woff2          48.25 kB
+lib/native-ui/assets/inter-latin-ext-wght-normal-DO1Apj_S.woff2      85.06 kB
+lib/native-ui/assets/compatibility-chrome-FdPoIB88.css                8.70 kB │ gzip:  1.86 kB
+lib/native-ui/assets/button-BVBZjOE6.css                             46.25 kB │ gzip:  8.73 kB
+lib/native-ui/assets/x-CI6R4Fky.js                                    0.18 kB │ gzip:  0.17 kB │ map:   0.80 kB
+lib/native-ui/assets/plus-5DXArws5.js                                 0.18 kB │ gzip:  0.18 kB │ map:   0.81 kB
+lib/native-ui/assets/arrow-left-CS9nHE7i.js                           0.20 kB │ gzip:  0.19 kB │ map:   0.85 kB
+lib/native-ui/assets/circle-question-mark-CWC8O6ok.js                 0.29 kB │ gzip:  0.24 kB │ map:   1.08 kB
+lib/native-ui/assets/triangle-alert-MlTtUXwX.js                       0.30 kB │ gzip:  0.24 kB │ map:   1.07 kB
+lib/native-ui/assets/label-wqVoKQQu.js                                0.31 kB │ gzip:  0.25 kB │ map:   0.67 kB
+lib/native-ui/assets/DesktopFrame--SyFW0mg.js                         0.45 kB │ gzip:  0.31 kB │ map:   1.27 kB
+lib/native-ui/assets/input-CP5wv-Wd.js                                0.52 kB │ gzip:  0.36 kB │ map:   0.89 kB
+lib/native-ui/assets/product-identity-Bp2uac8Q.js                     0.54 kB │ gzip:  0.27 kB │ map:   2.10 kB
+lib/native-ui/assets/rolldown-runtime-CbXtAM7H.js                     0.58 kB │ gzip:  0.36 kB
+lib/native-ui/assets/refresh-cw-BjaNrlN-.js                           0.68 kB │ gzip:  0.37 kB │ map:   2.40 kB
+lib/native-ui/assets/alert-Cdj7mq70.js                                0.76 kB │ gzip:  0.41 kB │ map:   1.87 kB
+lib/native-ui/assets/card-DhnieLxC.js                                 1.09 kB │ gzip:  0.48 kB │ map:   3.22 kB
+lib/native-ui/assets/DirectionContext-DjqH-KIG.js                     1.84 kB │ gzip:  0.94 kB │ map:  10.43 kB
+lib/native-ui/assets/profile-selector-DOBBS5NX.js                     2.44 kB │ gzip:  1.20 kB │ map:   6.71 kB
+lib/native-ui/assets/profile-create-Dp992J2t.js                       3.32 kB │ gzip:  1.68 kB │ map:   7.98 kB
+lib/native-ui/assets/desktop-dialog-DnMOArsx.js                       4.32 kB │ gzip:  1.80 kB │ map:  11.17 kB
+lib/native-ui/assets/stateAttributesMapping-7IJavLOa.js               4.34 kB │ gzip:  1.94 kB │ map:  34.25 kB
+lib/native-ui/assets/CompositeRoot-GcWtOTz_.js                        9.08 kB │ gzip:  3.60 kB │ map:  43.82 kB
+lib/native-ui/assets/scroll-area-B7iuXsY0.js                         12.41 kB │ gzip:  4.90 kB │ map:  62.76 kB
+lib/native-ui/assets/popupStateMapping-BtUeBhCj.js                   27.84 kB │ gzip:  9.73 kB │ map: 149.86 kB
+lib/native-ui/assets/recovery-B6pzAAx-.js                            30.67 kB │ gzip:  9.48 kB │ map: 102.15 kB
+lib/native-ui/assets/recovery-copy-A7hc5nwh.js                       58.85 kB │ gzip: 17.87 kB │ map: 138.73 kB
+lib/native-ui/assets/setup-wizard-CsRMrqW0.js                        70.30 kB │ gzip: 23.22 kB │ map: 276.71 kB
+lib/native-ui/assets/compatibility-chrome-DRHbD20_.js                73.53 kB │ gzip: 26.27 kB │ map: 311.48 kB
+lib/native-ui/assets/button-OYQ0-x1F.js                             180.98 kB │ gzip: 59.22 kB │ map: 541.68 kB
+
+✓ built in 157ms
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop
+
+dsh-plugin-desktop: renderer failed to load (-105: NAME_NOT_RESOLVED)
+dsh-plugin-desktop: renderer failed to load (-102: CONNECTION_REFUSED)
+dsh-plugin-desktop: renderer boot failed (plugins: Unknown client plugin): renderer main frame failed to load (-102: CONNECTION_REFUSED)
+dsh-plugin-desktop: renderer boot failed (plugins: Unknown client plugin): The Renderer did not report boot health within 30000ms.
+dsh-plugin-desktop: renderer process gone (reason: crashed, exitCode: 9 / 0x00000009)
+dsh-plugin-desktop: renderer boot failed (plugins: Unknown client plugin): renderer process gone (reason: crashed, exitCode: 9 / 0x00000009)
+dsh-plugin-desktop: renderer process gone (reason: crashed, exitCode: 9 / 0x00000009)
+dsh-plugin-desktop: renderer boot failed (plugins: dsh-vision-router): keyed slot "tool.call.toolview" already has an entry for key "vision_crop" at priority 0
+dsh-plugin-desktop: renderer boot failed (plugins: dsh-vision-router): The client Loader did not provide an error message.
+dsh-plugin-desktop: renderer boot failed (plugins: dsh-vision-router): The client Loader did not provide an error message.
+dsh: disabling profile plugin row "incompatible": Plugin incompatible-plugin@1.0.0 is incompatible with dsh 0.2.0-rc.2: peerDependencies {"@deepseek-ai/dsh-llm":"0.1.5-rc.2"}. Running it may cause crashes or data loss. Update the plugin or install a plugin version compatible with this dsh runtime. To accept this risk explicitly, grant the exact-version exemption for incompatible-plugin@1.0.0 on dsh 0.2.0-rc.2 with `dsh plugin allow-version` or the plugin manager, then retry the installation or restart dsh. Exact-version exemption: not active.
+[object Object]
+Error: crash here
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop/tests/desktop-logger.spec.ts:145:23
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+Error: DeepSeek request extension preparation failed
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop/tests/desktop-logger.spec.ts:266:21
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+cause=Error: cannot resolve active package
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop/tests/desktop-logger.spec.ts:264:18
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+Error: crash in main
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop/tests/logging-integration.spec.ts:71:23
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+
+ Test Files  158 passed | 2 skipped (160)
+      Tests  1742 passed | 12 skipped (1754)
+   Start at  11:40:02
+   Duration  6.40s (transform 5.92s, setup 0ms, import 12.32s, tests 31.37s, environment 3.01s)
+
+TAP version 13
+# Subtest: rejects a required first-party peer that is not declared at the root
+ok 1 - rejects a required first-party peer that is not declared at the root
+  ---
+  duration_ms: 1.092041
+  type: 'test'
+  ...
+# Subtest: accepts required root peers and ignores optional peers
+ok 2 - accepts required root peers and ignores optional peers
+  ---
+  duration_ms: 0.105958
+  type: 'test'
+  ...
+# Subtest: requires external peers of direct deploy-root packages
+ok 3 - requires external peers of direct deploy-root packages
+  ---
+  duration_ms: 0.154416
+  type: 'test'
+  ...
+# Subtest: upgrades an optional path when another package requires the same dependency
+ok 4 - upgrades an optional path when another package requires the same dependency
+  ---
+  duration_ms: 0.09425
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 73.982666
+verify-runtime-closure: 296 first-party nodes form a closed reachable runtime graph.
+verify-profile-boot: Creator, plugin manager and two Profile HMR generations passed
+verify-profile-boot: Creator, plugin manager and two Profile HMR generations passed
+verify-licenses: 591 production packages checked; 2 use notice-required licenses (LGPL-3.0-or-later)
+TAP version 13
+# Subtest: accepts the checked-in operation reliability matrix
+ok 1 - accepts the checked-in operation reliability matrix
+  ---
+  duration_ms: 14.39375
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 99.833375
+verify-operation-reliability: 7 operations and 18 fault contracts verified.
+ℹ tsdown v0.22.2 powered by rolldown v1.1.5
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/tsdown.config.ts 
+ℹ [dsh-plugin-desktop-beta] entry: src/index.ts, src/module-resolution.ts, src/webserver.ts, src/profile.ts, src/profile-manager.ts, src/profile-service.ts, src/profile-context.ts, src/desktop-plugins.ts, src/pnpm.ts, src/profiles.ts, src/diagnostics.ts, src/notifications.ts, src/diagnostic-export-worker.ts, src/packaged-runtime-smoke.ts, src/runtime.ts, src/electron-runtime.ts, src/desktop-runtime-environment.ts, src/desktop-terminal.ts, src/desktop-cli.ts, src/terminal.ts, src/update-checker.ts, src/update-download.ts, src/updates.ts, src/windows-pwsh-sandbox.ts, src/windows-acl-runner.ts, src/main.ts, src/host-process-entry.ts
+ℹ [dsh-plugin-desktop-beta] target: es2024
+ℹ [dsh-plugin-desktop-beta] tsconfig: tsconfig.json
+ℹ [dsh-plugin-desktop-beta/bin] entry: src/bin.ts
+ℹ [dsh-plugin-desktop-beta/bin] target: es2024
+ℹ [dsh-plugin-desktop-beta/bin] tsconfig: tsconfig.json
+ℹ [dsh-plugin-desktop-beta/preload] entry: src/preload.ts, src/compatibility-preload.ts
+ℹ [dsh-plugin-desktop-beta/preload] target: es2022
+ℹ [dsh-plugin-desktop-beta/preload] tsconfig: tsconfig.json
+
+ WARN  `external` is deprecated. Use `deps.neverBundle` instead.
+
+ℹ Build start
+ℹ [dsh-plugin-desktop-beta/preload] [CJS] lib/preload.cjs                    2.50 kB │ gzip: 0.93 kB
+ℹ [dsh-plugin-desktop-beta/preload] [CJS] lib/compatibility-preload.cjs      1.00 kB │ gzip: 0.40 kB
+ℹ [dsh-plugin-desktop-beta/preload] [CJS] lib/preload.cjs.map                7.52 kB │ gzip: 2.62 kB
+ℹ [dsh-plugin-desktop-beta/preload] [CJS] lib/compatibility-preload.cjs.map  2.64 kB │ gzip: 0.98 kB
+ℹ [dsh-plugin-desktop-beta/preload] [CJS] 4 files, total: 13.66 kB
+✔ [dsh-plugin-desktop-beta/preload] Build complete in 40ms
+ℹ [dsh-plugin-desktop-beta/bin] [ESM] Granting execute permission to lib/bin.js
+ℹ [dsh-plugin-desktop-beta/bin] [ESM] lib/bin.js      11.51 kB │ gzip:  3.90 kB
+ℹ [dsh-plugin-desktop-beta/bin] [ESM] lib/bin.js.map  55.91 kB │ gzip: 13.86 kB
+ℹ [dsh-plugin-desktop-beta/bin] [ESM] 2 files, total: 67.41 kB
+✔ [dsh-plugin-desktop-beta/bin] Build complete in 43ms
+ℹ [dsh-plugin-desktop-beta] Hint: consider adding deps.onlyBundle option to avoid unintended bundling of dependencies, or set deps.onlyBundle: false to disable this hint.
+See more at https://tsdown.dev/options/dependencies#deps-onlybundle
+Detected dependencies in bundle:
+- @vscode/ripgrep
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/main.js                                      212.84 kB │ gzip: 51.90 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/index.js                                      24.07 kB │ gzip:  7.26 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/updates.js                                    13.36 kB │ gzip:  3.94 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/host-process-entry.js                         12.78 kB │ gzip:  3.90 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/packaged-runtime-smoke.js                     11.81 kB │ gzip:  3.66 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/diagnostic-export-worker.js                   10.80 kB │ gzip:  3.26 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/pnpm.js                                        6.54 kB │ gzip:  2.31 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/windows-acl-runner.js                          6.23 kB │ gzip:  2.54 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/notifications.js                               5.92 kB │ gzip:  1.95 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/windows-pwsh-sandbox.js                        5.62 kB │ gzip:  2.23 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-cli.js                                 4.96 kB │ gzip:  1.84 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/webserver.js                                   2.75 kB │ gzip:  1.15 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profiles.js                                    1.96 kB │ gzip:  0.81 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile.js                                     1.20 kB │ gzip:  0.43 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/terminal.js                                    1.02 kB │ gzip:  0.56 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-plugins.js                             0.85 kB │ gzip:  0.29 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/diagnostics.js                                 0.82 kB │ gzip:  0.46 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/update-download.js                             0.63 kB │ gzip:  0.27 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/update-checker.js                              0.63 kB │ gzip:  0.28 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-manager.js                             0.49 kB │ gzip:  0.20 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/electron-runtime.js                            0.32 kB │ gzip:  0.19 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-runtime-environment.js                 0.19 kB │ gzip:  0.13 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-terminal.js                            0.17 kB │ gzip:  0.12 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-service.js                             0.14 kB │ gzip:  0.11 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/module-resolution.js                           0.13 kB │ gzip:  0.11 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-context.js                             0.12 kB │ gzip:  0.10 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/runtime.js                                     0.01 kB │ gzip:  0.03 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/main.js.map                                  406.80 kB │ gzip: 95.16 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/electron-runtime-Cb1k38ko.js.map             298.16 kB │ gzip: 73.36 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-channel-admission-xV58DIMW.js.map    158.71 kB │ gzip: 39.12 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/electron-runtime-Cb1k38ko.js                 156.71 kB │ gzip: 42.04 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-DDjpgssl.js.map                      115.63 kB │ gzip: 31.40 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-channel-admission-xV58DIMW.js         82.96 kB │ gzip: 21.49 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-DDjpgssl.js                           63.09 kB │ gzip: 17.75 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-plugins-CX_UoJHS.js.map               60.77 kB │ gzip: 12.90 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/settings-bridge--mC9XaLY.js.map               59.03 kB │ gzip: 14.36 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/tray-locale-BkaVQhiH.js.map                   46.00 kB │ gzip: 11.45 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/module-resolution-CTTB3FAS.js.map             44.01 kB │ gzip: 10.27 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/lifecycle-events-BsI4ve_r.js.map              43.69 kB │ gzip: 10.10 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/index.js.map                                  41.69 kB │ gzip: 11.59 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-terminal-DclE4zDs.js.map              39.91 kB │ gzip: 10.35 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-settings-route-B212iCuy.js.map        37.54 kB │ gzip:  6.97 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/update-download-BJssBduM.js.map               34.83 kB │ gzip:  9.51 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-runtime-environment-vephuVl_.js.map   34.02 kB │ gzip:  9.46 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-plugins-CX_UoJHS.js                   31.77 kB │ gzip:  6.83 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/tray-locale-BkaVQhiH.js                       30.60 kB │ gzip:  8.94 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/settings-bridge--mC9XaLY.js                   29.59 kB │ gzip:  7.58 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/lan-https-runtime-6lVFk32q.js.map             29.29 kB │ gzip:  8.03 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/lan-https-certificate-BiOwb7ka.js.map         28.79 kB │ gzip:  7.63 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/update-checker-Ep4izusm.js.map                28.09 kB │ gzip:  8.21 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-manager-WGXXRq1x.js.map               27.98 kB │ gzip:  7.64 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/updates.js.map                                27.03 kB │ gzip:  7.27 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/host-process-entry.js.map                     24.53 kB │ gzip:  7.27 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-terminal-DclE4zDs.js                  22.55 kB │ gzip:  6.22 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/lifecycle-events-BsI4ve_r.js                  22.53 kB │ gzip:  5.54 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/module-resolution-CTTB3FAS.js                 21.33 kB │ gzip:  4.41 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/packaged-runtime-smoke.js.map                 19.24 kB │ gzip:  5.89 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/diagnostic-export-worker.js.map               19.21 kB │ gzip:  5.42 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/update-download-BJssBduM.js                   19.14 kB │ gzip:  5.48 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-runtime-environment-vephuVl_.js       19.04 kB │ gzip:  5.68 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-settings-route-B212iCuy.js            18.01 kB │ gzip:  3.69 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/lan-https-certificate-BiOwb7ka.js             16.37 kB │ gzip:  4.47 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-manager-WGXXRq1x.js                   15.72 kB │ gzip:  4.61 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/update-checker-Ep4izusm.js                    15.08 kB │ gzip:  4.68 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/lan-https-runtime-6lVFk32q.js                 14.22 kB │ gzip:  4.26 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/log-files-C8bEL5Tw.js.map                     13.87 kB │ gzip:  4.32 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-service-BRZQTDkG.js.map               13.58 kB │ gzip:  3.64 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/pnpm.js.map                                   13.37 kB │ gzip:  4.15 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/windows-acl-runner.js.map                     11.06 kB │ gzip:  4.07 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/notifications.js.map                          10.98 kB │ gzip:  3.59 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/package-overlay-Ca250500.js.map                9.59 kB │ gzip:  3.16 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/windows-pwsh-sandbox.js.map                    9.39 kB │ gzip:  3.47 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-cli.js.map                             8.59 kB │ gzip:  3.12 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/diagnostic-export-CHpLmCFd.js.map              8.42 kB │ gzip:  2.96 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/log-files-C8bEL5Tw.js                          7.34 kB │ gzip:  2.51 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-context-ByHO1vb0.js.map                6.37 kB │ gzip:  2.58 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-service-BRZQTDkG.js                    6.29 kB │ gzip:  1.83 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/webserver.js.map                               5.67 kB │ gzip:  2.17 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/platform-login-BFKNMEcY.js.map                 5.58 kB │ gzip:  2.21 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-browser-access-5-Ph3Uv7.js.map         5.23 kB │ gzip:  2.03 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/package-overlay-Ca250500.js                    4.91 kB │ gzip:  1.73 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/mask-secrets-Bh0DpkE4.js.map                   4.30 kB │ gzip:  1.76 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/diagnostic-export-CHpLmCFd.js                  4.10 kB │ gzip:  1.51 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/packaged-runtime-path-BJR_Zwad.js.map          3.92 kB │ gzip:  1.66 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profiles.js.map                                3.58 kB │ gzip:  1.36 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/profile-context-ByHO1vb0.js                    3.39 kB │ gzip:  1.49 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/platform-login-BFKNMEcY.js                     2.64 kB │ gzip:  1.12 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-browser-access-5-Ph3Uv7.js             2.59 kB │ gzip:  1.13 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/mask-secrets-Bh0DpkE4.js                       2.56 kB │ gzip:  1.17 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/packaged-runtime-path-BJR_Zwad.js              2.23 kB │ gzip:  1.01 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/product-identity-DOSu4si7.js.map               2.23 kB │ gzip:  0.82 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/asar-archive-policy-Cah5WU6P.js.map            1.95 kB │ gzip:  1.04 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/product-identity-DOSu4si7.js                   1.68 kB │ gzip:  0.62 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/terminal.js.map                                1.60 kB │ gzip:  0.80 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/asar-archive-policy-Cah5WU6P.js                1.57 kB │ gzip:  0.87 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/pnpm-policy-Dj9BWmx3.js.map                    1.42 kB │ gzip:  0.73 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/diagnostics.js.map                             1.32 kB │ gzip:  0.67 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/directory-picker-contract-BRGGtgwE.js.map      1.27 kB │ gzip:  0.63 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/pnpm-policy-Dj9BWmx3.js                        1.11 kB │ gzip:  0.59 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/directory-picker-contract-BRGGtgwE.js          0.74 kB │ gzip:  0.38 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-port-DWrq-_UM.js.map                   0.44 kB │ gzip:  0.32 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] lib/desktop-port-DWrq-_UM.js                       0.29 kB │ gzip:  0.22 kB
+ℹ [dsh-plugin-desktop-beta] [ESM] 102 files, total: 2.72 MB
+✔ [dsh-plugin-desktop-beta] Build complete in 122ms
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 2016 modules transformed.
+rendering chunks...
+computing gzip size...
+lib/client.js  626.94 kB │ gzip: 130.43 kB
+
+✓ built in 199ms
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 2091 modules transformed.
+rendering chunks...
+computing gzip size...
+lib/native-ui/desktop-dialog.html                                     1.22 kB │ gzip:  0.51 kB
+lib/native-ui/profile-create.html                                     1.26 kB │ gzip:  0.50 kB
+lib/native-ui/compatibility-chrome.html                               1.30 kB │ gzip:  0.53 kB
+lib/native-ui/profile-selector.html                                   1.64 kB │ gzip:  0.59 kB
+lib/native-ui/setup-wizard.html                                       1.80 kB │ gzip:  0.63 kB
+lib/native-ui/recovery.html                                           2.06 kB │ gzip:  0.68 kB
+lib/native-ui/assets/inter-vietnamese-wght-normal-CBcvBZtf.woff2     10.25 kB
+lib/native-ui/assets/inter-greek-ext-wght-normal-DlzME5K_.woff2      11.23 kB
+lib/native-ui/assets/inter-cyrillic-wght-normal-DqGufNeO.woff2       18.74 kB
+lib/native-ui/assets/inter-greek-wght-normal-CkhJZR-_.woff2          18.99 kB
+lib/native-ui/assets/inter-cyrillic-ext-wght-normal-BOeWTOD4.woff2   25.96 kB
+lib/native-ui/assets/inter-latin-wght-normal-Dx4kXJAl.woff2          48.25 kB
+lib/native-ui/assets/inter-latin-ext-wght-normal-DO1Apj_S.woff2      85.06 kB
+lib/native-ui/assets/compatibility-chrome-FdPoIB88.css                8.70 kB │ gzip:  1.86 kB
+lib/native-ui/assets/button-BVBZjOE6.css                             46.25 kB │ gzip:  8.73 kB
+lib/native-ui/assets/x-CI6R4Fky.js                                    0.18 kB │ gzip:  0.17 kB │ map:   0.80 kB
+lib/native-ui/assets/plus-5DXArws5.js                                 0.18 kB │ gzip:  0.18 kB │ map:   0.81 kB
+lib/native-ui/assets/arrow-left-CS9nHE7i.js                           0.20 kB │ gzip:  0.19 kB │ map:   0.85 kB
+lib/native-ui/assets/circle-question-mark-CWC8O6ok.js                 0.29 kB │ gzip:  0.24 kB │ map:   1.08 kB
+lib/native-ui/assets/triangle-alert-MlTtUXwX.js                       0.30 kB │ gzip:  0.24 kB │ map:   1.07 kB
+lib/native-ui/assets/label-wqVoKQQu.js                                0.31 kB │ gzip:  0.25 kB │ map:   0.67 kB
+lib/native-ui/assets/DesktopFrame--SyFW0mg.js                         0.45 kB │ gzip:  0.31 kB │ map:   1.27 kB
+lib/native-ui/assets/input-CP5wv-Wd.js                                0.52 kB │ gzip:  0.36 kB │ map:   0.89 kB
+lib/native-ui/assets/product-identity-CK__Bbl5.js                     0.54 kB │ gzip:  0.27 kB │ map:   2.11 kB
+lib/native-ui/assets/rolldown-runtime-CbXtAM7H.js                     0.58 kB │ gzip:  0.36 kB
+lib/native-ui/assets/refresh-cw-BjaNrlN-.js                           0.68 kB │ gzip:  0.37 kB │ map:   2.40 kB
+lib/native-ui/assets/alert-Cdj7mq70.js                                0.76 kB │ gzip:  0.41 kB │ map:   1.87 kB
+lib/native-ui/assets/card-DhnieLxC.js                                 1.09 kB │ gzip:  0.48 kB │ map:   3.22 kB
+lib/native-ui/assets/DirectionContext-DjqH-KIG.js                     1.84 kB │ gzip:  0.94 kB │ map:  10.43 kB
+lib/native-ui/assets/profile-selector-Ci9As6tk.js                     2.44 kB │ gzip:  1.20 kB │ map:   6.71 kB
+lib/native-ui/assets/profile-create-Dp992J2t.js                       3.32 kB │ gzip:  1.68 kB │ map:   7.98 kB
+lib/native-ui/assets/desktop-dialog-DnMOArsx.js                       4.32 kB │ gzip:  1.80 kB │ map:  11.17 kB
+lib/native-ui/assets/stateAttributesMapping-7IJavLOa.js               4.34 kB │ gzip:  1.94 kB │ map:  34.25 kB
+lib/native-ui/assets/CompositeRoot-GcWtOTz_.js                        9.08 kB │ gzip:  3.60 kB │ map:  43.82 kB
+lib/native-ui/assets/scroll-area-B7iuXsY0.js                         12.41 kB │ gzip:  4.90 kB │ map:  62.76 kB
+lib/native-ui/assets/popupStateMapping-BtUeBhCj.js                   27.84 kB │ gzip:  9.73 kB │ map: 149.86 kB
+lib/native-ui/assets/recovery-CxnDUoaj.js                            30.67 kB │ gzip:  9.48 kB │ map: 102.15 kB
+lib/native-ui/assets/recovery-copy-BwvQAPFi.js                       58.85 kB │ gzip: 17.88 kB │ map: 138.73 kB
+lib/native-ui/assets/setup-wizard-DbPCCFN7.js                        70.30 kB │ gzip: 23.22 kB │ map: 276.71 kB
+lib/native-ui/assets/compatibility-chrome-CmAHgO6g.js                73.53 kB │ gzip: 26.27 kB │ map: 311.48 kB
+lib/native-ui/assets/button-OYQ0-x1F.js                             180.98 kB │ gzip: 59.22 kB │ map: 541.68 kB
+
+✓ built in 167ms
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta
+
+dsh-plugin-desktop: renderer failed to load (-105: NAME_NOT_RESOLVED)
+dsh-plugin-desktop: renderer failed to load (-102: CONNECTION_REFUSED)
+dsh-plugin-desktop: renderer boot failed (plugins: Unknown client plugin): renderer main frame failed to load (-102: CONNECTION_REFUSED)
+dsh-plugin-desktop: renderer boot failed (plugins: Unknown client plugin): The Renderer did not report boot health within 30000ms.
+dsh-plugin-desktop: renderer process gone (reason: crashed, exitCode: 9 / 0x00000009)
+dsh-plugin-desktop: renderer boot failed (plugins: Unknown client plugin): renderer process gone (reason: crashed, exitCode: 9 / 0x00000009)
+dsh-plugin-desktop: renderer process gone (reason: crashed, exitCode: 9 / 0x00000009)
+dsh-plugin-desktop: renderer boot failed (plugins: dsh-vision-router): keyed slot "tool.call.toolview" already has an entry for key "vision_crop" at priority 0
+dsh-plugin-desktop: renderer boot failed (plugins: dsh-vision-router): The client Loader did not provide an error message.
+dsh-plugin-desktop: renderer boot failed (plugins: dsh-vision-router): The client Loader did not provide an error message.
+dsh: disabling profile plugin row "incompatible": Plugin incompatible-plugin@1.0.0 is incompatible with dsh 0.2.1-alpha.1: peerDependencies {"@deepseek-ai/dsh-llm":"0.1.5-rc.2"}. Running it may cause crashes or data loss. Update the plugin or install a plugin version compatible with this dsh runtime. To accept this risk explicitly, grant the exact-version exemption for incompatible-plugin@1.0.0 on dsh 0.2.1-alpha.1 with `dsh plugin allow-version` or the plugin manager, then retry the installation or restart dsh. Exact-version exemption: not active.
+[object Object]
+Error: crash here
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/tests/desktop-logger.spec.ts:145:23
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+Error: DeepSeek request extension preparation failed
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/tests/desktop-logger.spec.ts:266:21
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+cause=Error: cannot resolve active package
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/tests/desktop-logger.spec.ts:264:18
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+Error: crash in main
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/tests/logging-integration.spec.ts:71:23
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+
+ Test Files  156 passed | 1 skipped (157)
+      Tests  1721 passed | 10 skipped (1731)
+   Start at  11:40:50
+   Duration  6.12s (transform 6.27s, setup 0ms, import 11.73s, tests 30.29s, environment 2.81s)
+
+TAP version 13
+# Subtest: rejects a required first-party peer that is not declared at the root
+ok 1 - rejects a required first-party peer that is not declared at the root
+  ---
+  duration_ms: 1.102708
+  type: 'test'
+  ...
+# Subtest: accepts required root peers and ignores optional peers
+ok 2 - accepts required root peers and ignores optional peers
+  ---
+  duration_ms: 0.102792
+  type: 'test'
+  ...
+# Subtest: requires external peers of direct deploy-root packages
+ok 3 - requires external peers of direct deploy-root packages
+  ---
+  duration_ms: 0.152083
+  type: 'test'
+  ...
+# Subtest: upgrades an optional path when another package requires the same dependency
+ok 4 - upgrades an optional path when another package requires the same dependency
+  ---
+  duration_ms: 0.092041
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 74.496792
+verify-runtime-closure: 298 first-party nodes form a closed reachable runtime graph.
+verify-profile-boot: Creator, plugin manager and two Profile HMR generations passed
+verify-profile-boot: Creator, plugin manager and two Profile HMR generations passed
+verify-licenses: 609 production packages checked; 2 use notice-required licenses (LGPL-3.0-or-later)
+TAP version 13
+# Subtest: accepts the checked-in operation reliability matrix
+ok 1 - accepts the checked-in operation reliability matrix
+  ---
+  duration_ms: 13.274083
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 96.80875
+verify-operation-reliability: 7 operations and 18 fault contracts verified.
+ℹ tsdown v0.22.2 powered by rolldown v1.1.5
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-desktop-next/tsdown.config.ts 
+ℹ entry: src/keybindings.ts, src/recovery.ts, src/browser-guests.ts, src/permissions.ts, src/desktop-cli.ts, src/plugin-cli.ts, src/desktop-runtime.ts, src/main.ts, src/host/index.ts, src/profiles.ts, src/extensions.ts, src/webserver.ts, src/host-process.ts, src/web-document.ts, src/app-downloads.ts
+ℹ target: es2024
+ℹ tsconfig: tsconfig.json
+ℹ entry: src/preload-app.ts
+ℹ target: es2024
+ℹ tsconfig: tsconfig.json
+ℹ entry: src/preload-shell.ts
+ℹ target: es2024
+ℹ tsconfig: tsconfig.json
+ℹ Build start
+ℹ Cleaning 41 files
+ℹ [CJS] lib/preload-shell.cjs  2.25 kB │ gzip: 0.78 kB
+ℹ [CJS] 1 files, total: 2.25 kB
+ℹ [CJS] lib/preload-app.cjs  18.34 kB │ gzip: 5.80 kB
+ℹ [CJS] 1 files, total: 18.34 kB
+✔ Build complete in 41ms
+✔ Build complete in 41ms
+ℹ [ESM] lib/main.js                             179.48 kB │ gzip: 50.56 kB
+ℹ [ESM] lib/host.js                               7.73 kB │ gzip:  2.87 kB
+ℹ [ESM] lib/web-document.js                       7.50 kB │ gzip:  3.08 kB
+ℹ [ESM] lib/browser-guests.js                     6.90 kB │ gzip:  2.39 kB
+ℹ [ESM] lib/app-downloads.js                      4.39 kB │ gzip:  1.88 kB
+ℹ [ESM] lib/desktop-cli.js                        4.31 kB │ gzip:  1.67 kB
+ℹ [ESM] lib/webserver.js                          2.67 kB │ gzip:  0.99 kB
+ℹ [ESM] lib/plugin-cli.js                         1.28 kB │ gzip:  0.71 kB
+ℹ [ESM] lib/keybindings.js                        1.18 kB │ gzip:  0.62 kB
+ℹ [ESM] lib/profiles.js                           0.48 kB │ gzip:  0.24 kB
+ℹ [ESM] lib/permissions.js                        0.26 kB │ gzip:  0.18 kB
+ℹ [ESM] lib/host-process.js                       0.21 kB │ gzip:  0.13 kB
+ℹ [ESM] lib/extensions.js                         0.20 kB │ gzip:  0.15 kB
+ℹ [ESM] lib/desktop-runtime.js                    0.13 kB │ gzip:  0.11 kB
+ℹ [ESM] lib/recovery.js                           0.09 kB │ gzip:  0.08 kB
+ℹ [ESM] lib/desktop-runtime-CDwCkC_c.js          33.95 kB │ gzip:  9.76 kB
+ℹ [ESM] lib/recovery-qWP1I77E.js                 31.81 kB │ gzip:  9.06 kB
+ℹ [ESM] lib/host-process-DlKI40cJ.js             17.43 kB │ gzip:  5.20 kB
+ℹ [ESM] lib/system-proxy-DkiIfsD6.js             17.04 kB │ gzip:  6.38 kB
+ℹ [ESM] lib/extensions-ChZuEj2B.js                9.05 kB │ gzip:  3.22 kB
+ℹ [ESM] lib/notifications-Byu3rRfH.js             5.03 kB │ gzip:  1.81 kB
+ℹ [ESM] lib/desktop-browser-access-C0FYC2_M.js    2.88 kB │ gzip:  1.23 kB
+ℹ [ESM] lib/pnpm-policy-BxdMnMZN.js               1.55 kB │ gzip:  0.76 kB
+ℹ [ESM] lib/asar-archive-policy-Cah5WU6P.js       1.51 kB │ gzip:  0.83 kB
+ℹ [ESM] lib/ipc-DOOZaSvx.js                       1.27 kB │ gzip:  0.47 kB
+ℹ [ESM] lib/desktop-contract-tdLX1LE5.js          1.12 kB │ gzip:  0.46 kB
+ℹ [ESM] 26 files, total: 339.43 kB
+✔ Build complete in 57ms
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 3710 modules transformed.
+rendering chunks...
+computing gzip size...
+lib/client.js  1,184.58 kB │ gzip: 641.06 kB
+
+✓ built in 252ms
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 1936 modules transformed.
+rendering chunks...
+computing gzip size...
+lib/native-ui/index.html                                              0.34 kB │ gzip:  0.25 kB
+lib/native-ui/assets/inter-vietnamese-wght-normal-CBcvBZtf.woff2     10.25 kB
+lib/native-ui/assets/inter-greek-ext-wght-normal-DlzME5K_.woff2      11.23 kB
+lib/native-ui/assets/inter-cyrillic-wght-normal-DqGufNeO.woff2       18.74 kB
+lib/native-ui/assets/inter-greek-wght-normal-CkhJZR-_.woff2          18.99 kB
+lib/native-ui/assets/inter-cyrillic-ext-wght-normal-BOeWTOD4.woff2   25.96 kB
+lib/native-ui/assets/inter-latin-wght-normal-Dx4kXJAl.woff2          48.25 kB
+lib/native-ui/assets/inter-latin-ext-wght-normal-DO1Apj_S.woff2      85.06 kB
+lib/native-ui/assets/index-DGPV2o3i.css                              47.94 kB │ gzip:  9.09 kB
+lib/native-ui/assets/index-DrbyTtLx.js                              313.52 kB │ gzip: 99.09 kB
+
+✓ built in 150ms
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-desktop-next
+
+
+ Test Files  54 passed (54)
+      Tests  427 passed (427)
+   Start at  11:41:21
+   Duration  2.99s (transform 1.77s, setup 0ms, import 4.72s, tests 9.69s, environment 2ms)
+
+Next frontend check passed: official 0.2.1-alpha.1 entry and independent sandboxed preloads for macOS, Windows and Linux.
+dsh web: http://127.0.0.1:50095/?token=Hy3_d6Grvarls9u_GCjrJT26jj482y_UeIFXFcGJbX4
+dsh web: http://127.0.0.1:50124/?token=vNCPCxU9CmNXNbaxLNSufFx8WmaW-EnxueZti8Uu1gM
+dsh web: http://127.0.0.1:50138/?token=pEsM5ZPmQp_B22XmzcJgPoucx3uvKdhkWpfR_8wz7e4
+verify-host: Web-composed Schedule switch and restart persistence passed
+dsh web: http://127.0.0.1:50157/?token=2M7ddvSm5ml_Uyz2Xz0MEgAE20dhMKrafSIhbOZHleA
+dsh web: http://127.0.0.1:50187/?token=5d8p669LloIkbomkkSbaHMogGEAT4P2Zk0yIf7g0GcQ
+dsh web: http://127.0.0.1:50191/?token=XJZABcnU6FCpngcMEcokND19atZcHHSqERg0MgqpwmI
+dsh web: http://127.0.0.1:50194/?token=-7I9lhgPLHe_A6FDU-wOKh6e-rjfwN4rEG4IhHJjdpQ
+Next Host smoke passed (Node): authenticated 0.2.1-alpha.1 Web, exclusive market selection and independent AA persisted, official row toggles, dshmarket offline install and cross-market removal, official install/remove with a freshly published locked dependency, native dshmarket update origin gate, graceful shutdown, recovery boot and profile switch.
+dsh web: http://127.0.0.1:50199/?token=2PD4P87tmV8Vb2cjNSXZjKX2uN1RDOx6Xfh370TTxK0
+dsh web: http://127.0.0.1:50216/?token=dKVyxbGAHAmzdEgCRCM6sH4LuzwBOXzXJ09s1Ul6_j4
+dsh web: http://127.0.0.1:50226/?token=T9rDvr36Eb6uMjiynHA1VUctFJwLTjBz94M2g0rX35U
+dsh web: http://127.0.0.1:50235/?token=iG20e8DMj5zWTmNqxoqySO-CgXbWNaVSGioDKOxYeyU
+dsh web: http://127.0.0.1:50241/?token=HQ6G_GkPbxpvfhV-OWy4p1Tb99X8bhyRHPmgR4jwQQQ
+dsh web: http://127.0.0.1:50247/?token=nhUAMfmy6d9spmpuP7xpb7-O8pOT-HOVOzqBz1jmI1M
+Next Desktop runtime passed: native-only HTTP/WebSocket gate, hot browser enable/disable with existing browser-stream revocation and native-stream preservation, per-Host credentials, corrupt-manifest recovery, isolated safe mode, separate global repair, and full process shutdown.
+Electron 44.0.0 / Node 24.18.1: 6 safe-home close/restart cases pass for read-only files, writable external junction targets and writable ancestor junction targets.
+gen-windows-ico: wrote build/app-icon.ico with frames 16, 24, 32, 48, 64, 128, 256
+ℹ tsdown v0.22.2 powered by rolldown v1.1.5
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/tsdown.config.ts 
+ℹ [dsh-plugin-huaanwork] entry: src/index.ts, src/module-resolution.ts, src/webserver.ts, src/profile.ts, src/profile-manager.ts, src/profile-service.ts, src/profile-context.ts, src/desktop-plugins.ts, src/pnpm.ts, src/profiles.ts, src/diagnostics.ts, src/notifications.ts, src/diagnostic-export-worker.ts, src/packaged-runtime-smoke.ts, src/runtime.ts, src/electron-runtime.ts, src/desktop-runtime-environment.ts, src/desktop-terminal.ts, src/desktop-cli.ts, src/terminal.ts, src/update-checker.ts, src/update-download.ts, src/updates.ts, src/windows-pwsh-sandbox.ts, src/windows-acl-runner.ts, src/main.ts, src/host-process-entry.ts, src/huaanwork-guardrails/policy.ts, src/huaanwork-guardrails/approval.ts, src/huaanwork-guardrails/limits.ts, src/huaanwork-guardrails/sandbox-cwd.ts, src/huaanwork-guardrails/present-as.ts, src/huaanwork-guardrails/huaanwork-model.ts, src/huaanwork-guardrails/git.ts, src/huaanwork-guardrails/skills.ts, src/huaanwork-guardrails/agent-tool.ts, src/huaanwork-guardrails/agent-mcp.ts, src/huaanwork-guardrails/bridge.ts, src/huaanwork-host/index.ts, src/huaanwork-host/gates.ts, src/huaanwork-host/market/index.ts
+ℹ [dsh-plugin-huaanwork] target: es2024
+ℹ [dsh-plugin-huaanwork] tsconfig: tsconfig.json
+ℹ [dsh-plugin-huaanwork/bin] entry: src/bin.ts
+ℹ [dsh-plugin-huaanwork/bin] target: es2024
+ℹ [dsh-plugin-huaanwork/bin] tsconfig: tsconfig.json
+ℹ [dsh-plugin-huaanwork/preload] entry: src/preload.ts, src/compatibility-preload.ts
+ℹ [dsh-plugin-huaanwork/preload] target: es2022
+ℹ [dsh-plugin-huaanwork/preload] tsconfig: tsconfig.json
+
+ WARN  `external` is deprecated. Use `deps.neverBundle` instead.
+
+ℹ Build start
+ℹ [dsh-plugin-huaanwork/preload] [CJS] lib/preload.cjs                    2.50 kB │ gzip: 0.93 kB
+ℹ [dsh-plugin-huaanwork/preload] [CJS] lib/compatibility-preload.cjs      1.00 kB │ gzip: 0.40 kB
+ℹ [dsh-plugin-huaanwork/preload] [CJS] lib/preload.cjs.map                7.52 kB │ gzip: 2.62 kB
+ℹ [dsh-plugin-huaanwork/preload] [CJS] lib/compatibility-preload.cjs.map  2.64 kB │ gzip: 0.98 kB
+ℹ [dsh-plugin-huaanwork/preload] [CJS] 4 files, total: 13.66 kB
+✔ [dsh-plugin-huaanwork/preload] Build complete in 45ms
+ℹ [dsh-plugin-huaanwork/bin] [ESM] Granting execute permission to lib/bin.js
+ℹ [dsh-plugin-huaanwork/bin] [ESM] lib/bin.js      11.76 kB │ gzip:  3.95 kB
+ℹ [dsh-plugin-huaanwork/bin] [ESM] lib/bin.js.map  56.30 kB │ gzip: 13.93 kB
+ℹ [dsh-plugin-huaanwork/bin] [ESM] 2 files, total: 68.06 kB
+✔ [dsh-plugin-huaanwork/bin] Build complete in 49ms
+ℹ [dsh-plugin-huaanwork] Hint: consider adding deps.onlyBundle option to avoid unintended bundling of dependencies, or set deps.onlyBundle: false to disable this hint.
+See more at https://tsdown.dev/options/dependencies#deps-onlybundle
+Detected dependencies in bundle:
+- @vscode/ripgrep
+ℹ [dsh-plugin-huaanwork] [ESM] lib/main.js                                      259.84 kB │ gzip:  65.41 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/index.js                                      24.07 kB │ gzip:   7.26 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/model.js                 19.66 kB │ gzip:   6.32 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-host/index.js                       18.97 kB │ gzip:   6.74 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-host/market/index.js                13.97 kB │ gzip:   4.59 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/updates.js                                    13.36 kB │ gzip:   3.94 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/policy.js                12.92 kB │ gzip:   5.09 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/host-process-entry.js                         12.83 kB │ gzip:   3.91 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/packaged-runtime-smoke.js                     11.81 kB │ gzip:   3.66 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/diagnostic-export-worker.js                   10.80 kB │ gzip:   3.27 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/agent-tool.js             7.18 kB │ gzip:   2.45 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/pnpm.js                                        6.54 kB │ gzip:   2.31 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/git.js                    6.52 kB │ gzip:   2.10 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/bridge.js                 6.31 kB │ gzip:   2.28 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-host/gates.js                        6.26 kB │ gzip:   2.68 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/windows-acl-runner.js                          6.23 kB │ gzip:   2.54 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/notifications.js                               5.92 kB │ gzip:   1.95 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/windows-pwsh-sandbox.js                        5.62 kB │ gzip:   2.23 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-cli.js                                 4.96 kB │ gzip:   1.84 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/limits.js                 3.79 kB │ gzip:   1.36 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/webserver.js                                   2.75 kB │ gzip:   1.15 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/approval.js               2.40 kB │ gzip:   1.08 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profiles.js                                    1.96 kB │ gzip:   0.82 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/sandbox-cwd.js            1.70 kB │ gzip:   0.68 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile.js                                     1.20 kB │ gzip:   0.43 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/skills.js                 1.18 kB │ gzip:   0.48 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/terminal.js                                    1.02 kB │ gzip:   0.56 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/update-checker.js                              0.98 kB │ gzip:   0.40 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-plugins.js                             0.85 kB │ gzip:   0.29 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/diagnostics.js                                 0.82 kB │ gzip:   0.46 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/update-download.js                             0.68 kB │ gzip:   0.28 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-manager.js                             0.49 kB │ gzip:   0.20 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/electron-runtime.js                            0.32 kB │ gzip:   0.19 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-runtime-environment.js                 0.19 kB │ gzip:   0.13 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-terminal.js                            0.17 kB │ gzip:   0.12 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/agent-mcp.js              0.15 kB │ gzip:   0.13 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/present-as.js             0.14 kB │ gzip:   0.12 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-service.js                             0.14 kB │ gzip:   0.11 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/module-resolution.js                           0.13 kB │ gzip:   0.11 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-context.js                             0.12 kB │ gzip:   0.10 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/runtime.js                                     0.01 kB │ gzip:   0.03 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/main.js.map                                  496.46 kB │ gzip: 117.72 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/electron-runtime-BEJXfgfH.js.map             301.85 kB │ gzip:  74.56 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/routes-ehVJTgFo.js.map                       205.59 kB │ gzip:  52.48 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/electron-runtime-BEJXfgfH.js                 159.20 kB │ gzip:  43.05 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-COAAvLCd.js.map                      130.54 kB │ gzip:  35.47 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/routes-ehVJTgFo.js                           105.14 kB │ gzip:  28.35 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/sessions-nh-V_m7T.js.map                     105.11 kB │ gzip:  29.13 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-channel-admission-Bbw-ZGOq.js.map     83.48 kB │ gzip:  22.60 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/install-B4S6IGWC.js.map                       81.82 kB │ gzip:  26.28 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-COAAvLCd.js                           70.92 kB │ gzip:  19.58 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-plugins-DK1x71_C.js.map               60.77 kB │ gzip:  12.90 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-checkpoint-BhctPm3X.js.map            60.10 kB │ gzip:  14.10 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/settings-bridge-DQGbZM16.js.map               59.10 kB │ gzip:  14.39 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/plugins-host-C7LkrYkN.js.map                  57.92 kB │ gzip:  19.78 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/sessions-nh-V_m7T.js                          53.63 kB │ gzip:  16.05 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/tray-locale-CGC0PAA8.js.map                   46.00 kB │ gzip:  11.45 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-channel-admission-Bbw-ZGOq.js         44.70 kB │ gzip:  13.01 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/module-resolution-CTTB3FAS.js.map             44.01 kB │ gzip:  10.27 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/lifecycle-events-BsI4ve_r.js.map              43.69 kB │ gzip:  10.10 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/index.js.map                                  41.69 kB │ gzip:  11.59 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/install-B4S6IGWC.js                           41.43 kB │ gzip:  15.15 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-host/index.js.map                   40.51 kB │ gzip:  13.97 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-terminal-ChYAMQ-n.js.map              39.90 kB │ gzip:  10.35 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/model.js.map             39.17 kB │ gzip:  11.17 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-settings-route-B4x3DpXb.js.map        37.59 kB │ gzip:   6.98 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/update-download-Bx_OHLvg.js.map               36.47 kB │ gzip:   9.96 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/plugins-host-C7LkrYkN.js                      35.73 kB │ gzip:  13.23 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/agents-host-BJJnhbXL.js.map                   35.56 kB │ gzip:   9.06 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-runtime-environment-BIC9WTrK.js.map   34.02 kB │ gzip:   9.46 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/update-checker-By_Uy3TD.js.map                34.01 kB │ gzip:  10.03 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-plugins-DK1x71_C.js                   31.77 kB │ gzip:   6.83 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-host/market/index.js.map            30.89 kB │ gzip:  10.42 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-checkpoint-BhctPm3X.js                30.76 kB │ gzip:   7.66 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/tray-locale-CGC0PAA8.js                       30.60 kB │ gzip:   8.94 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/settings-bridge-DQGbZM16.js                   29.64 kB │ gzip:   7.60 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/lan-https-runtime-6lVFk32q.js.map             29.29 kB │ gzip:   8.03 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/lan-https-certificate-BiOwb7ka.js.map         28.79 kB │ gzip:   7.63 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-manager-CZHa0_Lg.js.map               27.98 kB │ gzip:   7.64 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/policy.js.map            27.31 kB │ gzip:   9.58 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/updates.js.map                                27.03 kB │ gzip:   7.27 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/skills-4JUbFoUH.js.map                        26.06 kB │ gzip:   8.05 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/host-process-entry.js.map                     24.53 kB │ gzip:   7.27 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/host-runtime-bridge-OzIWmauM.js.map           22.60 kB │ gzip:   7.26 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-terminal-ChYAMQ-n.js                  22.54 kB │ gzip:   6.22 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/lifecycle-events-BsI4ve_r.js                  22.53 kB │ gzip:   5.54 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/module-resolution-CTTB3FAS.js                 21.33 kB │ gzip:   4.41 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/update-download-Bx_OHLvg.js                   20.06 kB │ gzip:   5.74 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/packaged-runtime-smoke.js.map                 19.24 kB │ gzip:   5.89 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/diagnostic-export-worker.js.map               19.21 kB │ gzip:   5.42 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-runtime-environment-BIC9WTrK.js       19.04 kB │ gzip:   5.68 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/update-checker-By_Uy3TD.js                    18.22 kB │ gzip:   5.62 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-settings-route-B4x3DpXb.js            18.04 kB │ gzip:   3.70 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/agents-host-BJJnhbXL.js                       17.40 kB │ gzip:   4.41 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/lan-https-certificate-BiOwb7ka.js             16.37 kB │ gzip:   4.47 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-manager-CZHa0_Lg.js                   15.72 kB │ gzip:   4.61 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/agent-catalog-yLKrX-h_.js.map                 15.02 kB │ gzip:   5.05 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/agent-tool.js.map        14.47 kB │ gzip:   4.55 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/git.js.map               14.46 kB │ gzip:   4.04 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/lan-https-runtime-6lVFk32q.js                 14.22 kB │ gzip:   4.26 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/bridge.js.map            13.98 kB │ gzip:   4.46 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/log-files-C8bEL5Tw.js.map                     13.87 kB │ gzip:   4.32 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-service-BRZQTDkG.js.map               13.58 kB │ gzip:   3.64 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/pnpm.js.map                                   13.37 kB │ gzip:   4.15 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/skills-4JUbFoUH.js                            13.12 kB │ gzip:   4.51 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-host/gates.js.map                   12.91 kB │ gzip:   4.91 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/host-runtime-bridge-OzIWmauM.js               12.10 kB │ gzip:   3.80 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/windows-acl-runner.js.map                     11.06 kB │ gzip:   4.07 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/notifications.js.map                          10.98 kB │ gzip:   3.59 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/config-DstiCmRp.js.map                         9.72 kB │ gzip:   4.15 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/package-overlay-Ca250500.js.map                9.59 kB │ gzip:   3.16 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/windows-pwsh-sandbox.js.map                    9.39 kB │ gzip:   3.47 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/present-as-GlFWbyUI.js.map                     8.62 kB │ gzip:   3.02 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-cli.js.map                             8.59 kB │ gzip:   3.12 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/agent-catalog-yLKrX-h_.js                      8.54 kB │ gzip:   3.27 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/diagnostic-export-CHpLmCFd.js.map              8.42 kB │ gzip:   2.96 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/limits.js.map             8.36 kB │ gzip:   2.73 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/session-id-BgLBW4lE.js.map                     8.32 kB │ gzip:   3.96 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/holders-Bcgs-JQX.js.map                        7.37 kB │ gzip:   3.01 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/log-files-C8bEL5Tw.js                          7.34 kB │ gzip:   2.51 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/shell-Bk5YkES1.js.map                          6.95 kB │ gzip:   2.88 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/config-DstiCmRp.js                             6.42 kB │ gzip:   2.97 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-context-BrSjstvE.js.map                6.37 kB │ gzip:   2.58 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-service-BRZQTDkG.js                    6.29 kB │ gzip:   1.83 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/webserver.js.map                               5.67 kB │ gzip:   2.17 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/platform-login-BFKNMEcY.js.map                 5.58 kB │ gzip:   2.21 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/session-id-BgLBW4lE.js                         5.56 kB │ gzip:   2.85 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/approval.js.map           5.37 kB │ gzip:   2.05 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-browser-access-5-Ph3Uv7.js.map         5.23 kB │ gzip:   2.03 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/package-overlay-Ca250500.js                    4.91 kB │ gzip:   1.73 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/shell-Bk5YkES1.js                              4.76 kB │ gzip:   2.25 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/mask-secrets-Bh0DpkE4.js.map                   4.30 kB │ gzip:   1.76 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/huaanwork-guardrails/sandbox-cwd.js.map        4.12 kB │ gzip:   1.53 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/diagnostic-export-CHpLmCFd.js                  4.10 kB │ gzip:   1.51 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/holders-Bcgs-JQX.js                            4.05 kB │ gzip:   1.93 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/http-cap-DdxGjakG.js.map                       4.04 kB │ gzip:   1.73 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/packaged-runtime-path-BJR_Zwad.js.map          3.92 kB │ gzip:   1.66 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/agent-mcp-DF702ZqI.js.map                      3.78 kB │ gzip:   1.53 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/present-as-GlFWbyUI.js                         3.69 kB │ gzip:   1.40 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profiles.js.map                                3.58 kB │ gzip:   1.36 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/profile-context-BrSjstvE.js                    3.39 kB │ gzip:   1.49 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/agent-attachments-CHBuCf15.js.map              3.25 kB │ gzip:   0.89 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/platform-login-BFKNMEcY.js                     2.64 kB │ gzip:   1.12 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/product-identity-BcMUrgtj.js.map               2.62 kB │ gzip:   0.89 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-browser-access-5-Ph3Uv7.js             2.59 kB │ gzip:   1.13 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/mask-secrets-Bh0DpkE4.js                       2.56 kB │ gzip:   1.17 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/packaged-runtime-path-BJR_Zwad.js              2.23 kB │ gzip:   1.01 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/http-cap-DdxGjakG.js                           2.19 kB │ gzip:   1.10 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/agent-mcp-DF702ZqI.js                          1.98 kB │ gzip:   0.92 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/asar-archive-policy-Cah5WU6P.js.map            1.95 kB │ gzip:   1.04 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/product-identity-BcMUrgtj.js                   1.94 kB │ gzip:   0.67 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/agent-attachments-CHBuCf15.js                  1.69 kB │ gzip:   0.50 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/terminal.js.map                                1.60 kB │ gzip:   0.80 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/asar-archive-policy-Cah5WU6P.js                1.57 kB │ gzip:   0.87 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/pnpm-policy-Dj9BWmx3.js.map                    1.42 kB │ gzip:   0.73 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/truncate-B0iu5OXS.js.map                       1.36 kB │ gzip:   0.66 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/diagnostics.js.map                             1.32 kB │ gzip:   0.67 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/directory-picker-contract-BRGGtgwE.js.map      1.27 kB │ gzip:   0.63 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/pnpm-policy-Dj9BWmx3.js                        1.11 kB │ gzip:   0.59 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/truncate-B0iu5OXS.js                           0.78 kB │ gzip:   0.41 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/directory-picker-contract-BRGGtgwE.js          0.74 kB │ gzip:   0.38 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/channels-_4gmy_0P.js.map                       0.71 kB │ gzip:   0.47 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/channels-_4gmy_0P.js                           0.46 kB │ gzip:   0.34 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-port-DWrq-_UM.js.map                   0.44 kB │ gzip:   0.32 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/desktop-port-DWrq-_UM.js                       0.29 kB │ gzip:   0.22 kB
+ℹ [dsh-plugin-huaanwork] [ESM] lib/install-DlqlzHrW.js                            0.16 kB │ gzip:   0.12 kB
+ℹ [dsh-plugin-huaanwork] [ESM] 166 files, total: 4.11 MB
+✔ [dsh-plugin-huaanwork] Build complete in 161ms
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 2055 modules transformed.
+rendering chunks...
+computing gzip size...
+lib/client.js  1,065.65 kB │ gzip: 227.70 kB
+
+✓ built in 216ms
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 2091 modules transformed.
+rendering chunks...
+computing gzip size...
+lib/native-ui/desktop-dialog.html                                     1.22 kB │ gzip:  0.51 kB
+lib/native-ui/profile-create.html                                     1.26 kB │ gzip:  0.50 kB
+lib/native-ui/compatibility-chrome.html                               1.30 kB │ gzip:  0.52 kB
+lib/native-ui/profile-selector.html                                   1.64 kB │ gzip:  0.59 kB
+lib/native-ui/setup-wizard.html                                       1.80 kB │ gzip:  0.62 kB
+lib/native-ui/recovery.html                                           2.06 kB │ gzip:  0.68 kB
+lib/native-ui/assets/inter-vietnamese-wght-normal-CBcvBZtf.woff2     10.25 kB
+lib/native-ui/assets/inter-greek-ext-wght-normal-DlzME5K_.woff2      11.23 kB
+lib/native-ui/assets/inter-cyrillic-wght-normal-DqGufNeO.woff2       18.74 kB
+lib/native-ui/assets/inter-greek-wght-normal-CkhJZR-_.woff2          18.99 kB
+lib/native-ui/assets/inter-cyrillic-ext-wght-normal-BOeWTOD4.woff2   25.96 kB
+lib/native-ui/assets/inter-latin-wght-normal-Dx4kXJAl.woff2          48.25 kB
+lib/native-ui/assets/inter-latin-ext-wght-normal-DO1Apj_S.woff2      85.06 kB
+lib/native-ui/assets/compatibility-chrome-FdPoIB88.css                8.70 kB │ gzip:  1.86 kB
+lib/native-ui/assets/button-BVBZjOE6.css                             46.25 kB │ gzip:  8.73 kB
+lib/native-ui/assets/x-CI6R4Fky.js                                    0.18 kB │ gzip:  0.17 kB │ map:   0.80 kB
+lib/native-ui/assets/plus-5DXArws5.js                                 0.18 kB │ gzip:  0.18 kB │ map:   0.81 kB
+lib/native-ui/assets/arrow-left-CS9nHE7i.js                           0.20 kB │ gzip:  0.19 kB │ map:   0.85 kB
+lib/native-ui/assets/circle-question-mark-CWC8O6ok.js                 0.29 kB │ gzip:  0.24 kB │ map:   1.08 kB
+lib/native-ui/assets/triangle-alert-MlTtUXwX.js                       0.30 kB │ gzip:  0.24 kB │ map:   1.07 kB
+lib/native-ui/assets/label-wqVoKQQu.js                                0.31 kB │ gzip:  0.25 kB │ map:   0.67 kB
+lib/native-ui/assets/DesktopFrame--SyFW0mg.js                         0.45 kB │ gzip:  0.31 kB │ map:   1.27 kB
+lib/native-ui/assets/input-CP5wv-Wd.js                                0.52 kB │ gzip:  0.36 kB │ map:   0.89 kB
+lib/native-ui/assets/rolldown-runtime-CbXtAM7H.js                     0.58 kB │ gzip:  0.36 kB
+lib/native-ui/assets/refresh-cw-BjaNrlN-.js                           0.68 kB │ gzip:  0.37 kB │ map:   2.40 kB
+lib/native-ui/assets/product-identity-D1sKYxlr.js                     0.74 kB │ gzip:  0.32 kB │ map:   2.51 kB
+lib/native-ui/assets/alert-Cdj7mq70.js                                0.76 kB │ gzip:  0.41 kB │ map:   1.87 kB
+lib/native-ui/assets/card-DhnieLxC.js                                 1.09 kB │ gzip:  0.48 kB │ map:   3.22 kB
+lib/native-ui/assets/DirectionContext-DjqH-KIG.js                     1.84 kB │ gzip:  0.94 kB │ map:  10.43 kB
+lib/native-ui/assets/profile-selector-CaEhiQhj.js                     2.44 kB │ gzip:  1.20 kB │ map:   6.71 kB
+lib/native-ui/assets/profile-create-Dp992J2t.js                       3.32 kB │ gzip:  1.68 kB │ map:   7.98 kB
+lib/native-ui/assets/desktop-dialog-DnMOArsx.js                       4.32 kB │ gzip:  1.80 kB │ map:  11.17 kB
+lib/native-ui/assets/stateAttributesMapping-7IJavLOa.js               4.34 kB │ gzip:  1.94 kB │ map:  34.25 kB
+lib/native-ui/assets/CompositeRoot-GcWtOTz_.js                        9.08 kB │ gzip:  3.60 kB │ map:  43.82 kB
+lib/native-ui/assets/scroll-area-B7iuXsY0.js                         12.41 kB │ gzip:  4.90 kB │ map:  62.76 kB
+lib/native-ui/assets/popupStateMapping-BtUeBhCj.js                   27.84 kB │ gzip:  9.73 kB │ map: 149.86 kB
+lib/native-ui/assets/recovery-CX0OjbCa.js                            30.67 kB │ gzip:  9.48 kB │ map: 102.15 kB
+lib/native-ui/assets/recovery-copy-DXVViBO6.js                       58.85 kB │ gzip: 17.88 kB │ map: 138.73 kB
+lib/native-ui/assets/setup-wizard-Ci8xWfZT.js                        70.35 kB │ gzip: 23.24 kB │ map: 276.82 kB
+lib/native-ui/assets/compatibility-chrome-DfvmTrtf.js                73.92 kB │ gzip: 26.40 kB │ map: 311.98 kB
+lib/native-ui/assets/button-OYQ0-x1F.js                             180.98 kB │ gzip: 59.22 kB │ map: 541.68 kB
+
+✓ built in 156ms
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork
+
+dsh-plugin-desktop: renderer failed to load (-105: NAME_NOT_RESOLVED)
+dsh-plugin-desktop: renderer failed to load (-102: CONNECTION_REFUSED)
+dsh-plugin-desktop: renderer boot failed (plugins: Unknown client plugin): renderer main frame failed to load (-102: CONNECTION_REFUSED)
+dsh-plugin-desktop: renderer boot failed (plugins: Unknown client plugin): The Renderer did not report boot health within 30000ms.
+dsh-plugin-desktop: renderer process gone (reason: crashed, exitCode: 9 / 0x00000009)
+dsh-plugin-desktop: renderer boot failed (plugins: Unknown client plugin): renderer process gone (reason: crashed, exitCode: 9 / 0x00000009)
+dsh-plugin-desktop: renderer process gone (reason: crashed, exitCode: 9 / 0x00000009)
+Confirmed restart failed: shutdown coordinator is not ready
+dsh-plugin-desktop: renderer boot failed (plugins: dsh-vision-router): keyed slot "tool.call.toolview" already has an entry for key "vision_crop" at priority 0
+dsh-plugin-desktop: renderer boot failed (plugins: dsh-vision-router): The client Loader did not provide an error message.
+dsh-plugin-desktop: renderer boot failed (plugins: dsh-vision-router): The client Loader did not provide an error message.
+[object Object]
+Error: crash here
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/tests/desktop-logger.spec.ts:145:23
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+Error: DeepSeek request extension preparation failed
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/tests/desktop-logger.spec.ts:266:21
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+cause=Error: cannot resolve active package
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/tests/desktop-logger.spec.ts:264:18
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+Error: crash in main
+    at /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/tests/logging-integration.spec.ts:71:23
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64
+
+ Test Files  215 passed | 3 skipped (218)
+      Tests  2578 passed | 13 skipped (2591)
+   Start at  11:42:33
+   Duration  14.75s (transform 7.36s, setup 0ms, import 18.55s, tests 80.98s, environment 3.44s)
+
+TAP version 13
+# Subtest: rejects a required first-party peer that is not declared at the root
+ok 1 - rejects a required first-party peer that is not declared at the root
+  ---
+  duration_ms: 1.18325
+  type: 'test'
+  ...
+# Subtest: accepts required root peers and ignores optional peers
+ok 2 - accepts required root peers and ignores optional peers
+  ---
+  duration_ms: 0.111333
+  type: 'test'
+  ...
+# Subtest: requires external peers of direct deploy-root packages
+ok 3 - requires external peers of direct deploy-root packages
+  ---
+  duration_ms: 0.172208
+  type: 'test'
+  ...
+# Subtest: upgrades an optional path when another package requires the same dependency
+ok 4 - upgrades an optional path when another package requires the same dependency
+  ---
+  duration_ms: 0.103042
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 73.107625
+verify-runtime-closure: 298 first-party nodes form a closed reachable runtime graph.
+post-boot gate: agent registry empty at first check; waiting for materialization
+dsh-plugin-desktop-profile-smoke: warning: 2 entries did not activate
+web-fetch-http (@deepseek-ai/dsh-web-fetch-http): pending (waiting for service: web)
+job-controller (@deepseek-ai/dsh-api-job-controller): pending (waiting for service: jobs)
+verify-profile-boot: minimal preset, plugin manager, and disabled hmr lock passed
+TAP version 13
+# dsh-plugin-huaanwork-host-loop-smoke: warning: 2 entries did not activate
+# web-fetch-http (@deepseek-ai/dsh-web-fetch-http): pending (waiting for service: web)
+# job-controller (@deepseek-ai/dsh-api-job-controller): pending (waiting for service: jobs)
+# Subtest: 文本回合:token 帧 + session/end ok + 会话列表标题非空
+ok 1 - 文本回合:token 帧 + session/end ok + 会话列表标题非空
+  ---
+  duration_ms: 19514.323792
+  type: 'test'
+  ...
+# Subtest: 工具审批 approve:approval/asked → approve → tool/start → tool/end → session/end ok
+ok 2 - 工具审批 approve:approval/asked → approve → tool/start → tool/end → session/end ok
+  ---
+  duration_ms: 107.8005
+  type: 'test'
+  ...
+# Subtest: 工具审批 reject:拒绝后工具不执行,回合以拒绝收尾(不崩、不挂起)
+ok 3 - 工具审批 reject:拒绝后工具不执行,回合以拒绝收尾(不崩、不挂起)
+  ---
+  duration_ms: 43.476333
+  type: 'test'
+  ...
+# Subtest: run_code / web_search 缺席:主 agent schemas 不含禁用工具
+ok 4 - run_code / web_search 缺席:主 agent schemas 不含禁用工具
+  ---
+  duration_ms: 0.235542
+  type: 'test'
+  ...
+# Subtest: session.cancel:挂起回合被取消收尾,进程不挂
+ok 5 - session.cancel:挂起回合被取消收尾,进程不挂
+  ---
+  duration_ms: 516.304709
+  type: 'test'
+  ...
+# Subtest: presentAs("ptc") 防线:主 agent scope 抛 disabled by HuaAnWork
+ok 6 - presentAs("ptc") 防线:主 agent scope 抛 disabled by HuaAnWork
+  ---
+  duration_ms: 0.535291
+  type: 'test'
+  ...
+# post-boot gate: agent registry empty at first check; waiting for materialization
+# dsh-plugin-huaanwork-host-loop-smoke: warning: 2 entries did not activate
+# web-fetch-http (@deepseek-ai/dsh-web-fetch-http): pending (waiting for service: web)
+# job-controller (@deepseek-ai/dsh-api-job-controller): pending (waiting for service: jobs)
+# Subtest: workspace pendingRoot:project.open 经 route 驱动写盘,二次组合 + boot 模拟 generation 重启(不触发真实 relaunch)
+ok 7 - workspace pendingRoot:project.open 经 route 驱动写盘,二次组合 + boot 模拟 generation 重启(不触发真实 relaunch)
+  ---
+  duration_ms: 2901.809584
+  type: 'test'
+  ...
+# Subtest: scheduler:due 任务由 tick 经执行体跑完(stub LLM)
+ok 8 - scheduler:due 任务由 tick 经执行体跑完(stub LLM)
+  ---
+  duration_ms: 135.242334
+  type: 'test'
+  ...
+# Subtest: scheduler:错过宽限记 missed 并推进,不执行
+ok 9 - scheduler:错过宽限记 missed 并推进,不执行
+  ---
+  duration_ms: 38.746291
+  type: 'test'
+  ...
+# Subtest: scheduler:run-once catchup 同根入队,跨根顺延不入队
+ok 10 - scheduler:run-once catchup 同根入队,跨根顺延不入队
+  ---
+  duration_ms: 320.676584
+  type: 'test'
+  ...
+# Subtest: scheduler:expired 置停且不执行
+ok 11 - scheduler:expired 置停且不执行
+  ---
+  duration_ms: 40.465125
+  type: 'test'
+  ...
+# Subtest: scheduler:once 错过宽限后自停
+ok 12 - scheduler:once 错过宽限后自停
+  ---
+  duration_ms: 37.542875
+  type: 'test'
+  ...
+# Subtest: scheduler:同根 due 按 projectId 分组,跨根与中立顺延,项目已删除仍执行
+ok 13 - scheduler:同根 due 按 projectId 分组,跨根与中立顺延,项目已删除仍执行
+  ---
+  duration_ms: 1083.445167
+  type: 'test'
+  ...
+# post-boot gate: agent registry empty at first check; waiting for materialization
+# dsh-plugin-huaanwork-host-loop-smoke: warning: 2 entries did not activate
+# web-fetch-http (@deepseek-ai/dsh-web-fetch-http): pending (waiting for service: web)
+# job-controller (@deepseek-ai/dsh-api-job-controller): pending (waiting for service: jobs)
+# Subtest: scheduler:generation 重启补 cancelled,中立根上的中立任务会执行
+ok 14 - scheduler:generation 重启补 cancelled,中立根上的中立任务会执行
+  ---
+  duration_ms: 3152.891292
+  type: 'test'
+  ...
+1..14
+# tests 14
+# suites 0
+# pass 14
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 28114.720333
+post-boot gate: agent registry empty at first check; waiting for materialization
+dsh-plugin-desktop-profile-smoke: warning: 2 entries did not activate
+web-fetch-http (@deepseek-ai/dsh-web-fetch-http): pending (waiting for service: web)
+job-controller (@deepseek-ai/dsh-api-job-controller): pending (waiting for service: jobs)
+verify-profile-boot: minimal preset, plugin manager, and disabled hmr lock passed
+verify-licenses: 609 production packages checked; 2 use notice-required licenses (LGPL-3.0-or-later)
+TAP version 13
+# Subtest: accepts the checked-in operation reliability matrix
+ok 1 - accepts the checked-in operation reliability matrix
+  ---
+  duration_ms: 13.19625
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 94.414
+verify-operation-reliability: 7 operations and 18 fault contracts verified.
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/market-server
+
+
+ Test Files  14 passed (14)
+      Tests  244 passed (244)
+   Start at  11:43:33
+   Duration  11.56s (transform 1.07s, setup 0ms, import 2.77s, tests 22.05s, environment 1ms)
+
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/update-server
+
+
+ Test Files  5 passed (5)
+      Tests  88 passed (88)
+   Start at  11:43:48
+   Duration  29.36s (transform 259ms, setup 0ms, import 455ms, tests 32.12s, environment 0ms)
+
+----
+exit_code: 0
+ended: 2026-10-10T03:44:17Z

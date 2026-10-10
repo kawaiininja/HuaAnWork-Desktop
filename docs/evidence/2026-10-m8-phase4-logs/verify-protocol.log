@@ -1,0 +1,10 @@
+as-of parent HEAD: 7037c6e8a4fa36076466146e69eac3c43cdc0b7e
+command: corepack yarn workspace dsh-desktop-next verify:protocol --no-sandbox
+started: 2026-10-10T03:50:11Z
+ELECTRON_RUN_AS_NODE=<unset>
+display: built-in Liquid Retina XDR online; DISPLAY=<unset>; xvfb-run=absent; platform=Darwin
+----
+Run this native protocol check on Linux under xvfb-run; use check:next for portable headless checks.
+----
+exit_code: 1
+ended: 2026-10-10T03:50:12Z

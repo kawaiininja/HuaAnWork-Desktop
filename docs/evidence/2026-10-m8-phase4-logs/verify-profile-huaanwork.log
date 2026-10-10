@@ -1,0 +1,19 @@
+as-of worktree (uncommitted gate fix) parent HEAD: 7037c6e8a4fa36076466146e69eac3c43cdc0b7e
+command: corepack yarn workspace dsh-plugin-huaanwork verify:profile
+started: 2026-10-10T03:36:52Z
+----
+post-boot gate: agent registry empty at first check; waiting for materialization
+dsh-plugin-desktop-profile-smoke: warning: 2 entries did not activate
+web-fetch-http (@deepseek-ai/dsh-web-fetch-http): pending (waiting for service: web)
+job-controller (@deepseek-ai/dsh-api-job-controller): pending (waiting for service: jobs)
+file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/scripts/verify-profile-boot.mjs:309
+      throw new Error(`Profile HMR failed to activate generation ${value}`)
+            ^
+
+Error: Profile HMR failed to activate generation 1
+    at file:///Users/amonmiao/Downloads/cursor/%E6%99%BA%E8%83%BD%E5%8A%9E%E5%85%AC%E5%B9%B3%E5%8F%B0/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/scripts/verify-profile-boot.mjs:309:13
+
+Node.js v22.23.2
+----
+exit_code: 1
+ended: 2026-10-10T03:37:12Z

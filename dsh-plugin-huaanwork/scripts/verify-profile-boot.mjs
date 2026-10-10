@@ -284,32 +284,29 @@ try {
   if (ctx.get('pluginManager') === undefined) {
     throw new Error('Desktop Profile did not activate the official plugin manager')
   }
-  // Resolve AND mount Creator: discovery alone cannot catch missing Host services.
-  // 0.1.7 replaced `standingKeyFor` with `acquireScope`, a disposable revision
-  // lease: the composition is mounted at registration and the lease still throws
-  // `agent-preset/invalid` when that mount is unusable, which is what we assert.
-  await (await agentPresets.acquireScope('cordis'))[Symbol.asyncDispose]()
+  // Resolve AND mount the preset this profile actually selects. Discovery alone
+  // cannot catch missing Host services. 0.1.7 replaced `standingKeyFor` with
+  // `acquireScope`, a disposable revision lease: the composition is mounted at
+  // registration and the lease still throws `agent-preset/invalid` when that
+  // mount is unusable, which is what we assert. Beta mounts `cordis`. This
+  // profile's guardrail lock disables jobs, web, and user-questions, so the
+  // cordis preset cannot mount; the selected default is `minimal`.
+  await (await agentPresets.acquireScope('minimal'))[Symbol.asyncDispose]()
   if ((await ctx.get('pluginManager').listPlugins()).length === 0) {
     throw new Error('Official plugin manager cannot inspect the Desktop composition')
   }
-  // Exercise the actual Profile watcher twice, rather than invoking our reader
-  // directly. Both generations must preserve the Desktop layers and fixture.
-  const reloadProbePath = join(home, 'reload-probe.mjs')
-  writeFileSync(reloadProbePath, "export function apply(ctx, config) { ctx.provide('desktopReloadProbe', config.value) }\n")
-  for (const value of [1, 2]) {
-    writeFileSync(prepared.profile.patchPath, JSON.stringify([DESKTOP_SHELL_PATCH_ENTRY, { insert: [{
-      id: 'desktop-reload-probe', name: pathToFileURL(reloadProbePath).href, config: { value },
-    }] }]))
-    const deadline = Date.now() + 15_000
-    while (ctx.get('desktopReloadProbe') !== value && Date.now() < deadline) await delay(50)
-    if (ctx.get('desktopReloadProbe') !== value) {
-      throw new Error(`Profile HMR failed to activate generation ${value}`)
-    }
+  // Beta rewrites the profile patch and waits for two live HMR generations.
+  // This edition's guardrail lock disables the hmr row, so a disk rewrite must
+  // not hot-apply. Assert that lock, then keep checking the services a reload
+  // would have had to preserve.
+  const hmrLock = patches.find(patch => patch?.id === 'hmr' && patch.disabled === true)
+  if (hmrLock === undefined) {
+    throw new Error('HuaAnWork guardrail must keep the hmr row disabled')
   }
   if (ctx.get('desktopRuntime') !== runtime || ctx.get('pluginManager') === undefined) {
-    throw new Error('Profile reload lost Desktop or plugin-manager services')
+    throw new Error('Desktop profile lost Desktop or plugin-manager services')
   }
-  await (await ctx.agentPresets.acquireScope('cordis'))[Symbol.asyncDispose]()
+  await (await ctx.agentPresets.acquireScope('minimal'))[Symbol.asyncDispose]()
   const hostServiceProbe = ctx.get(HOST_SERVICE_PROBE_KEY)
   if (hostServiceProbe?.current?.name !== 'desktop'
     || hostServiceProbe.current.dir !== prepared.profile.dir
@@ -480,7 +477,7 @@ try {
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
   }
-  process.stdout.write('verify-profile-boot: Creator, plugin manager and two Profile HMR generations passed\n')
+  process.stdout.write('verify-profile-boot: minimal preset, plugin manager, and disabled hmr lock passed\n')
 } finally {
   await ctx?.fiber.dispose()
   releasePackageResolver?.()
