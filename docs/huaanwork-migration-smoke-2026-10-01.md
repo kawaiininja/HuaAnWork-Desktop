@@ -18,7 +18,7 @@ Task 7.2。门控驱动器：`dsh-plugin-huaanwork/tests/huaanwork-migration-smo
 - 备份（仓库外，先于任何真实启动）：`~/Downloads/huaanwork-m6-smoke-backup-2026-10-01/`
   含 `old-tree/`、`new-home/` 与两份 sha256 manifest；21:35 逐字节核验与现场 IDENTICAL
   （`task-7.2-backup-verify.txt`）。冒烟期间的权威「冒烟前」快照即此备份与
-  `task-7.2-{before,after}-*.tsv`。
+  `task-7.2-{before,after}-*.tsv`。**该备份已于 2026-10-10 删除。**
 - 打包路径（R-7.2-0）：根 `corepack yarn package:dir:huaanwork` **失败**——
   `aa:prepare-release` 的 AA vendoring 已过时效门并注入副作用（3 个 package.json +
   yarn.lock + vendor provenance，证据 `task-7.2-aa-injection-evidence.txt`，全部还原、
@@ -124,8 +124,8 @@ Task 7.2。门控驱动器：`dsh-plugin-huaanwork/tests/huaanwork-migration-smo
   （见第 3/4 项）。干净家全量迁移（settings/account/projects/automations/runs/workspaceFiles
   全计数）在门控 spec 的隔离树中被验证（`task-7.2-diagnostic3-marker.json`）。
 - **clean-home replay 注记**：真实树**未做**干净家重放（首启已消费、marker 不得动）；
-  若未来需要重放，用 `~/Downloads/huaanwork-m6-smoke-backup-2026-10-01/` 的备份在离线环境
-  演练，真实树不就地重置。
+  若未来需要重放，在离线环境演练，真实树不就地重置。（原备用的离线快照
+  `~/Downloads/huaanwork-m6-smoke-backup-2026-10-01/` 已于 2026-10-10 删除，重放需另行准备。）
 - **时序外注记（22:06，冒烟窗口与证据采集之后）**：旧版 Tauri 应用（bundle
   `com.huaanwork.desktop`，TMPDIR 证据 22:06）的一次启动重写了旧树
   `dsh/{cordis.yml,cordis.patch.yml,profiles/huaanwork/package.json,sessions/…/session.jsonl.zstd}`：
