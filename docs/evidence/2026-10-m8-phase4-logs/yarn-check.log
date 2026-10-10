@@ -442,7 +442,7 @@ verify-fabric-docs: 20 Markdown files and 10 bilingual pairs are consistent
 verify-market-docs: 12 Markdown files, 6 bilingual pairs, and 4 schemas are consistent
 contract-types: 4 generated type files written
 ℹ tsdown v0.22.2 powered by rolldown v1.1.5
-ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-community-market/tsdown.config.ts 
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-community-market/tsdown.config.ts
 ℹ [dsh-community-market/client] entry: src/client/index.ts
 ℹ [dsh-community-market/client] target: es2022
 ℹ [dsh-community-market/client] tsconfig: tsconfig.client.json
@@ -468,7 +468,7 @@ contract-types: 4 generated type files are current
    Duration  4.64s (transform 1.08s, setup 588ms, import 3.51s, tests 6.60s, environment 3.14s)
 
 ℹ tsdown v0.22.2 powered by rolldown v1.1.5
-ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop/tsdown.config.ts 
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop/tsdown.config.ts
 ℹ [dsh-plugin-desktop] entry: src/index.ts, src/module-resolution.ts, src/webserver.ts, src/profile.ts, src/profile-manager.ts, src/profile-service.ts, src/profile-context.ts, src/desktop-plugins.ts, src/pnpm.ts, src/profiles.ts, src/diagnostics.ts, src/notifications.ts, src/diagnostic-export-worker.ts, src/packaged-runtime-smoke.ts, src/runtime.ts, src/electron-runtime.ts, src/desktop-runtime-environment.ts, src/desktop-terminal.ts, src/desktop-cli.ts, src/terminal.ts, src/update-checker.ts, src/update-download.ts, src/updates.ts, src/windows-pwsh-sandbox.ts, src/windows-acl-runner.ts, src/main.ts, src/host-process-entry.ts
 ℹ [dsh-plugin-desktop] target: es2024
 ℹ [dsh-plugin-desktop] tsconfig: tsconfig.json
@@ -776,7 +776,7 @@ ok 1 - accepts the checked-in operation reliability matrix
 # duration_ms 96.228292
 verify-operation-reliability: 7 operations and 18 fault contracts verified.
 ℹ tsdown v0.22.2 powered by rolldown v1.1.5
-ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/tsdown.config.ts 
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-desktop-beta/tsdown.config.ts
 ℹ [dsh-plugin-desktop-beta] entry: src/index.ts, src/module-resolution.ts, src/webserver.ts, src/profile.ts, src/profile-manager.ts, src/profile-service.ts, src/profile-context.ts, src/desktop-plugins.ts, src/pnpm.ts, src/profiles.ts, src/diagnostics.ts, src/notifications.ts, src/diagnostic-export-worker.ts, src/packaged-runtime-smoke.ts, src/runtime.ts, src/electron-runtime.ts, src/desktop-runtime-environment.ts, src/desktop-terminal.ts, src/desktop-cli.ts, src/terminal.ts, src/update-checker.ts, src/update-download.ts, src/updates.ts, src/windows-pwsh-sandbox.ts, src/windows-acl-runner.ts, src/main.ts, src/host-process-entry.ts
 ℹ [dsh-plugin-desktop-beta] target: es2024
 ℹ [dsh-plugin-desktop-beta] tsconfig: tsconfig.json
@@ -1084,7 +1084,7 @@ ok 1 - accepts the checked-in operation reliability matrix
 # duration_ms 98.8395
 verify-operation-reliability: 7 operations and 18 fault contracts verified.
 ℹ tsdown v0.22.2 powered by rolldown v1.1.5
-ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-desktop-next/tsdown.config.ts 
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-desktop-next/tsdown.config.ts
 ℹ entry: src/keybindings.ts, src/recovery.ts, src/browser-guests.ts, src/permissions.ts, src/desktop-cli.ts, src/plugin-cli.ts, src/desktop-runtime.ts, src/main.ts, src/host/index.ts, src/profiles.ts, src/extensions.ts, src/webserver.ts, src/host-process.ts, src/web-document.ts, src/app-downloads.ts
 ℹ target: es2024
 ℹ tsconfig: tsconfig.json
@@ -1182,7 +1182,7 @@ Next Desktop runtime passed: native-only HTTP/WebSocket gate, hot browser enable
 Electron 44.0.0 / Node 24.18.1: 6 safe-home close/restart cases pass for read-only files, writable external junction targets and writable ancestor junction targets.
 gen-windows-ico: wrote build/app-icon.ico with frames 16, 24, 32, 48, 64, 128, 256
 ℹ tsdown v0.22.2 powered by rolldown v1.1.5
-ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/tsdown.config.ts 
+ℹ config file: /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork/tsdown.config.ts
 ℹ [dsh-plugin-huaanwork] entry: src/index.ts, src/module-resolution.ts, src/webserver.ts, src/profile.ts, src/profile-manager.ts, src/profile-service.ts, src/profile-context.ts, src/desktop-plugins.ts, src/pnpm.ts, src/profiles.ts, src/diagnostics.ts, src/notifications.ts, src/diagnostic-export-worker.ts, src/packaged-runtime-smoke.ts, src/runtime.ts, src/electron-runtime.ts, src/desktop-runtime-environment.ts, src/desktop-terminal.ts, src/desktop-cli.ts, src/terminal.ts, src/update-checker.ts, src/update-download.ts, src/updates.ts, src/windows-pwsh-sandbox.ts, src/windows-acl-runner.ts, src/main.ts, src/host-process-entry.ts, src/huaanwork-guardrails/policy.ts, src/huaanwork-guardrails/approval.ts, src/huaanwork-guardrails/limits.ts, src/huaanwork-guardrails/sandbox-cwd.ts, src/huaanwork-guardrails/present-as.ts, src/huaanwork-guardrails/huaanwork-model.ts, src/huaanwork-guardrails/git.ts, src/huaanwork-guardrails/skills.ts, src/huaanwork-guardrails/agent-tool.ts, src/huaanwork-guardrails/agent-mcp.ts, src/huaanwork-guardrails/bridge.ts, src/huaanwork-host/index.ts, src/huaanwork-host/gates.ts, src/huaanwork-host/market/index.ts
 ℹ [dsh-plugin-huaanwork] target: es2024
 ℹ [dsh-plugin-huaanwork] tsconfig: tsconfig.json
