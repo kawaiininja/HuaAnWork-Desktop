@@ -1,6 +1,6 @@
 # Phase 4 smoke — Task 4.2
 
-Recorded on `sync/upstream-2.0.x` as-of `d22f8409fd` in `HuaAnWork-Desktop-sync`. `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` was unset. Built binaries and `dist/` are not in the commit.
+Recorded on `sync/upstream-2.0.x` as-of `0e4dd17b0d` in `HuaAnWork-Desktop-sync`. `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` was unset. Built binaries and `dist/` are not in the commit.
 
 Logs: `docs/evidence/2026-10-m8-phase4-logs/`.
 
