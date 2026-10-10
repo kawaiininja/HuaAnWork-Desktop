@@ -6,13 +6,13 @@ Recorded on `sync/upstream-2.0.x` in `HuaAnWork-Desktop-sync`. Counts below are 
 
 `package.json` maps root `check:readme-versions` to `node scripts/verify-readme-versions.mjs`. The script under that name is `scripts/verify-readme-versions.mjs`.
 
-The 4/1/4 rule is the scope registered for R-M7-4. It still holds, and the out-of-scope marks are the same four paths registered in `e8bd0c24b4` (`git diff e8bd0c24b4 HEAD` does not touch `outOfScopeRegistered` or those paths).
+The 4/1/4 rule is the scope registered for R-M7-4. It still holds. The out-of-scope marks are unchanged. `git diff e8bd0c24b4 HEAD` does not touch `outOfScopeRegistered`. That diff does edit all four README files, and those edits do not update the artifact version strings: insertions above them moved stable from 230/242 to 237/249 and beta from 232/244 to 237/249.
 
 | Count | What it is |
 |---|---|
 | 4 | Hardcoded artifact version strings. `dsh-plugin-huaanwork/README.md` and `README.zh.md` each contain `HuaAnWork-0.1.0-x64-Setup.exe` and `HuaAnWork-0.1.0-x64-Portable.zip` (lines 245 and 257 in both files). |
 | 1 | Scoped package: `dsh-plugin-huaanwork`. `README_VERSION_SCOPES` has length 1. Authority is that package's own `package.json` `"version": "0.1.0"`. All four strings match it. |
-| 4 | READMEs left out of scope (M28), unchanged: `dsh-plugin-desktop/README.md`, `dsh-plugin-desktop/README.zh.md`, `dsh-plugin-desktop-beta/README.md`, `dsh-plugin-desktop-beta/README.zh.md`. |
+| 4 | Out-of-scope marks, unchanged: `dsh-plugin-desktop/README.md`, `dsh-plugin-desktop/README.zh.md`, `dsh-plugin-desktop-beta/README.md`, `dsh-plugin-desktop-beta/README.zh.md`. |
 
 Root `package.json` has no `version` field. The guard does not compare against a root version.
 
@@ -30,7 +30,7 @@ Exit 0. The script printed one line:
 verify-readme-versions: 4 hardcoded artifact version string(s) in 1 scoped package(s) (dsh-plugin-huaanwork) match their own package.json; 4 README(s) out of scope (M28): dsh-plugin-desktop/README.md, dsh-plugin-desktop/README.zh.md, dsh-plugin-desktop-beta/README.md, dsh-plugin-desktop-beta/README.zh.md
 ```
 
-No README was edited. The guard was already green, so there was no in-scope drift to fix.
+This task edited no README. The guard was already green, so there was no in-scope drift to fix. The four out-of-scope files were already edited, without updating those strings.
 
 ## Stable and beta strings
 
