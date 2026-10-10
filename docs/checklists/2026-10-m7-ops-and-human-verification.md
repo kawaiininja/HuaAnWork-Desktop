@@ -81,7 +81,7 @@
 
 **环境逐字节实测记录（as-of 2026-10-07）**：
 - `dist/` 状态：**未在树中**（`ls -ld dist` 返回 `No such file or directory`；属于 git-untracked 目录，环境已失）；
-- 更新服务数据目录：`~/Downloads/huaanwork-m6-update-server-data/` **在场**（实测占用 507 MB）；
+- 更新服务数据目录：`~/Downloads/huaanwork-m6-update-server-data/` **在场**（实测占用 507 MB；**该目录已于 2026-10-10 删除**）；
 - **五个关键制品与记录指纹复核结果**：
   1. DMG 安装器：`artifacts/huaanwork/mac/HuaAnWork-0.1.1-universal.dmg` sha256 = `8dc014a72fd684db19d89672d214f06446c1ad3751920cd5b0bc8fc456c5d242`（**吻合 MATCH**）；
   2. 通道发布记录：`channels/huaanwork.json` sha256 = `69705f3e0f968f100dd4384cee9ff723995492c2cf8edfd32822868111346549`（**吻合 MATCH**）；

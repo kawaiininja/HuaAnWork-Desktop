@@ -135,7 +135,7 @@
 ### 5.2 Task 7.3 M4 人类核对清单 (A1–A28)
 - **环境现状 (as-of 2026-10-07)**：
   - 本地 `dist/` 目录当前未生成（处于 clean 状态）；
-  - `~/Downloads/huaanwork-m6-update-server-data` 部署数据包就绪（507 MB，sha256 校验全匹配）；
+  - `~/Downloads/huaanwork-m6-update-server-data` 部署数据包就绪（507 MB，sha256 校验全匹配；**该目录已于 2026-10-10 删除**）；
   - 依赖安装器运行的核对项需在重新执行 `dist:mac-smoke:huaanwork` 后解锁。
 - **强制执行纪律与顺序约束**：
   1. **A19 篡改项必须排在最后**：A19 会人工破坏制品签名/哈希，执行后必须立即还原并复验，防止污染后续测试。

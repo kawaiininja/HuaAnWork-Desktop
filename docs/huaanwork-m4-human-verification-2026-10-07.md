@@ -12,7 +12,7 @@
 | fork HEAD | `87432e00cf`（含 M7 全量 + 修复轮 + R-M7-12；A14 的 Task 2.2/2.3 移交项与品牌清扫均在此基线上） | 2026-10-07 |
 | 制品 | `dist/mac-smoke/`（2026-10-07 重建；此前 dist 已失，见清单 §2.1） | 2026-10-07 |
 | userData | `~/.huaanwork/profiles/desktop/`（含 10-04 重置后的 `account.json`、`huaanwork-migration.json`、`projects.json` 等迁移态） | 2026-10-07 |
-| update-server 数据 | `~/Downloads/huaanwork-m6-update-server-data/`（507 MB） | 2026-10-07 |
+| update-server 数据 | `~/Downloads/huaanwork-m6-update-server-data/`（507 MB；**已于 2026-10-10 删除**） | 2026-10-07 |
 | `/Applications/HuaAnWork.app` | bundle id `com.huaanwork.desktop` = **旧 Tauri 版残迹，与本次核对无关，全程不触碰** | 2026-10-07 |
 | 10-04 环境补注 | 第 0 步已全绿（dmg `8dc014a7…` / app `0a5f7fc1…` / 记录 `69705f3e…` / backup cmp IDENTICAL / marker `84924ded…`） | 2026-10-04 |
 

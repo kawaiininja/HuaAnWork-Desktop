@@ -36,7 +36,9 @@ Task 7.3。本记录由续跑实现者（`impl-7.3-cont`）整编前实现者（
 - 启动时序：launch1 **23:39:48**（无 `HUAANWORK_UPDATE_ORIGIN`）；launch2 **23:45:25**
   （`HUAANWORK_UPDATE_ORIGIN=http://127.0.0.1:8794`）；两轮均 `APP_EXIT=0`。
 - 更新服务端：本机 loopback `127.0.0.1:8794`，数据目录
-  `~/Downloads/huaanwork-m6-update-server-data/`（**保留**供人类 UI 核对与再部署）；
+  `~/Downloads/huaanwork-m6-update-server-data/`（原注记 **保留**供人类 UI 核对与再部署；
+  **该目录已于 2026-10-10 删除**——M4 人类核对与 M8 更新链 digest 冒烟均已消费完毕，
+  复跑需先重建，见「复跑与再部署」注记）；
   23:43:54 发布 0.1.1；`SERVER_EXIT=0` 干净停止。当前无任何进程/监听（核验在案）。
 
 ## Step 1：macOS 未签名冒烟包
@@ -126,6 +128,9 @@ portable 校验仅需 zip；installer 校验另需同批 `dist/win-unpacked/HuaA
 
 ### 部署与发布（可再部署命令）
 
+> **注（2026-10-10）**：数据目录 `~/Downloads/huaanwork-m6-update-server-data/` 已删除；
+> 以下命令为现场原文，复跑需先重建数据目录并重走本节的发布流程。
+
 ```bash
 # 启动服务端（本 Task 现场用法；runbook = docs/update-server-deployment.md）
 cd update-server
@@ -211,7 +216,7 @@ Node 中驱动 + 真实 loopback 字节流；应用内 Electron `net.fetch` 适�
 
 ## 待人类核对指南
 
-1. **启动更新服务端**（数据目录已就位，0.1.1 记录未篡改）：
+1. **启动更新服务端**（原数据目录已就位、0.1.1 记录未篡改；**该目录已于 2026-10-10 删除**，复跑需先重建）：
 
    ```bash
    cd update-server
@@ -256,7 +261,8 @@ Node 中驱动 + 真实 loopback 字节流；应用内 Electron `net.fetch` 适�
   `dshdesktop.cn` 字面量（唯一命中 = node_modules 文档）。
 - **客户端协议检查层级**：shipped lib 值 + loopback 字节流（`request` 适配用 Node `fetch`）；
   应用内 Electron 适配的下载驱动路径（托盘 → 确认 → 下载）未做 UI 驱动 ⇒ 待人类。
-- **服务端数据目录保留**在场（供人类核对/再部署）；通道记录当前为未篡改态（sha `69705f3e…`
+- **服务端数据目录**原为保留在场（供人类核对/再部署），**已于 2026-10-10 删除**（DMG 逐字节
+  副本与通道记录备份仍在，见「复跑与再部署」）；通道记录原为未篡改态（sha `69705f3e…`
   与 `task-7.3-record-backup.json` 一致）；篡改负例经「备份→篡改→复现→恢复」循环完成。
 - **临时资源清理已核**（`task-7.3-cont-verification.txt`）：`/var/folders/.../task-7.3-client-*`
   无残留；`update-server`/`HuaAnWork` 进程 0；8790/8794 无监听；无仓库根 `logs/`。
@@ -267,6 +273,9 @@ Node 中驱动 + 真实 loopback 字节流；应用内 Electron `net.fetch` 适�
 
 ## 复跑与再部署
 
+- 更新服务数据目录：原 `~/Downloads/huaanwork-m6-update-server-data/`（含 0.1.1 记录）已于
+  2026-10-10 删除；DMG 逐字节副本 = `~/Downloads/HuaAnWork-0.1.1-mac.dmg`，通道记录备份 =
+  `.superpowers/sdd/2026-09-27-*/logs/task-7.3-record-backup.json`；复跑需重建数据目录并按 Step 4 发布。
 - 重建制品：`cd dsh-plugin-huaanwork && corepack yarn dist:mac-smoke`
 - 钩子复现：`node <WS>/logs/task-7.3-hook-replication.mjs "$PWD/dsh-plugin-huaanwork/dist/mac-smoke/mac-universal" HuaAnWork`
 - 客户端协议复跑：`node <WS>/logs/task-7.3-client-checks.mjs base http://127.0.0.1:8794`
