@@ -37,7 +37,7 @@ corepack yarn workspace dsh-plugin-huaanwork exec vitest run \
   tests/huaanwork-host/market-verify.spec.ts
 ```
 
-Exit 0. 17 files, 271 tests, 0 fail. Log: `market-unit.log` (04:13:20Z–04:13:26Z).
+Exit 0. 17 files, 271 tests, 0 fail. Log: `market-unit.log` (04:13:20Z–04:13:26Z). That log is from before the release pin and the `1.66.14` lock. The rerun on this tree is `market-unit-after-pin.log`, below.
 
 Live server, then the client: a throwaway market-server answered `GET /healthz` with `ok: true` before and after one signed catalog page. `fetchVerifiedManifest` plus `parseCatalogProviderPage` returned one item, `@huaanwork/phase4-probe`, `latestVersion` `1.0.0`, `page.total` 1. Exit 0. Log: `market-chain-smoke.log` (04:16:03Z–04:16:05Z). The one-shot spec was not committed.
 
@@ -93,6 +93,12 @@ Exit 1. Unprovisioned: empty `PINS_AT_RELEASE`, and both default origins still c
 
 `corepack yarn market:prepare` at 2026-10-10T05:02:57Z exited 0 and wrote `dshmarket` `1.66.14` for desktop, beta, next, and huaanwork, with one root resolution `dshmarket@npm:1.66.14`. It did not move the Agents Anywhere pin. `corepack yarn install --immutable` exited 0. `corepack yarn check:desktop-variants` exited 0. Commit `fdb54d9d98`.
 
-`corepack yarn dist:mac-smoke:huaanwork` with `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` unset started 2026-10-10T05:05:04Z and exited 0 at 05:12:57Z. `market:prepare` printed `dshmarket latest verified: 1.66.14` and did not rewrite the lock. `aa:prepare-release` selected AA main `7fe1fce32650483bf8433f7a198032178580ff16` and updated the bridge pin for the duration of the build. The command still exited 0. Verification printed `macOS DMG smoke verification passed` for `dsh-plugin-huaanwork/dist/mac-smoke/HuaAnWork-0.1.0-universal.dmg` (479M). The DMG is not committed.
+`corepack yarn dist:mac-smoke:huaanwork` with `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` unset started 2026-10-10T05:05:04Z and was observed to exit 0 at 05:12:57Z. That run's complete stdout was not saved. The committed log is the rerun below.
 
-After that exit, the AA provenance, bridge pin, and `yarn.lock` were checked back out to `7df5b31f3fe23d4be92ccd5ae5e0aeb6a3744c0e`. The new tarball was deleted. `corepack yarn install --immutable` exited 0. The AA pin move was not committed.
+## Committed root log and post-pin market suite
+
+`corepack yarn dist:mac-smoke:huaanwork` with `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` unset started 2026-10-10T05:24:44Z and exited 0 at 05:32:36Z. Complete stdout and stderr: `docs/evidence/2026-10-m8-phase4-logs/dist-mac-smoke-root.log`. The log contains the command, the start time, `macOS DMG smoke verification passed`, and `dsh-plugin-huaanwork/dist/mac-smoke/HuaAnWork-0.1.0-universal.dmg` (479M, not committed). `market:prepare` printed `dshmarket latest verified: 1.66.14`.
+
+`aa:prepare-release` selected `7fe1fce32650483bf8433f7a198032178580ff16` during that command. After exit 0, provenance, bridge pins, and `yarn.lock` were checked back out to `7df5b31f3fe23d4be92ccd5ae5e0aeb6a3744c0e`, the `c7fe1fce` tarball was deleted, and `corepack yarn install --immutable` exited 0. That restore is recorded here next to `dist-mac-smoke-root.log`. The AA main pin was not committed.
+
+The 17-file HuaAnWork market suite was re-run on this tree after the pin and the `1.66.14` lock. `dshmarket` 1.66.14 nests undici, so `tests/dshmarket-compat.spec.ts` mocks that copy as well as the hoisted one. Exit 0. 17 files, 271 tests. Log: `market-unit-after-pin.log` (2026-10-10T05:24:29Z–05:24:35Z).

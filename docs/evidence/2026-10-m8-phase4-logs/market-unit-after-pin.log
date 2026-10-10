@@ -1,0 +1,13 @@
+command: corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/client-huaanwork/market.spec.ts tests/client-huaanwork/market-view.spec.ts tests/client-huaanwork/market-source-panel.spec.ts tests/client-huaanwork/marketErrors.spec.ts tests/desktop-market.spec.ts tests/dshmarket-compat.spec.ts tests/huaanwork-market-provider.spec.ts tests/huaanwork-market-wrapper.spec.ts tests/market-composition-order.spec.ts tests/market-pnpm-integration.spec.ts tests/huaanwork-host/market-config.spec.ts tests/huaanwork-host/market-e2e.spec.ts tests/huaanwork-host/market-gate-vectors.spec.ts tests/huaanwork-host/market-install.spec.ts tests/huaanwork-host/market-pnpm-semantics.spec.ts tests/huaanwork-host/market-routes.spec.ts tests/huaanwork-host/market-verify.spec.ts
+START 2026-10-10T05:24:29Z
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork
+
+
+ Test Files  17 passed (17)
+      Tests  271 passed (271)
+   Start at  13:24:30
+   Duration  5.01s (transform 3.10s, setup 0ms, import 4.80s, tests 10.97s, environment 822ms)
+
+EXIT 0
+END 2026-10-10T05:24:35Z
