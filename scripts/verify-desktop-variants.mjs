@@ -102,9 +102,13 @@ export const PAIRS = [
       'src/product-identity.ts',
       // Task 2.9:as-of 1743474908,src/index.ts 在 zombie probe 中已不再构成差异,名额删除。
       'src/profile.ts',
+      // Advanced mode installs the HuaAnWork shell. Onboarding, the launch-folder
+      // bridge, and the settings-forms inject match beta.
       'src/client/index.ts',
-      // huaanwork advanced mode drops ui-sidebar and ui-conversation, so the
-      // assembled web graph asserted here is not the beta graph.
+      // The advanced web graph omits ui-sidebar, ui-conversation, and the
+      // conversation-row dependents that cannot stay enabled without that row.
+      // The runtime stub also implements requestConfirmedRestart: huaanwork-host
+      // throws on boot if desktopRuntime lacks it, and beta's shell never calls it.
       'scripts/verify-profile-boot.mjs',
       // M3 实现评审 D2 修复:workspace.open/close 需要原生重启确认框的裁决回传 Host
       // (取消路径清 pendingRoot)。两文件均为纯增量差异——electron-runtime.ts 新增
