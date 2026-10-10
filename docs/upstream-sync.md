@@ -103,7 +103,7 @@ git fetch upstream --tags
 
 1. **`scripts/verify-desktop-variants.mjs`**：
    - 上游已将该文件缩减至 36 行、`allowedDifferences` 仅剩 1 项并引入 `normalizeIdentity`；
-   - fork 维护着三通道完整守卫逻辑、三通道四元组及预算名单（22/6 与 19/0），必须整体保留 fork 版本。
+   - M8 Phase 3（R-M8-3，Task 3.1）重塑之后，fork 仍整体保留本文件。它仍是本清单第 1 条永久 override。差异清单不再是「22/6 与 19/0」预算：身份拼法由规范化吸收，结构性清单为 stable↔beta 9 项、beta↔huaanwork 22 项、只存在于 right 的前缀 6 项。计数与理由见 `AGENTS.md` 债表变体守卫行。
 2. **`scripts/expected-root-gate-scripts.json`**：
    - 纯 fork 自有的根门禁脚本逐字锁定 fixture（`fixtureVersion: 2`），上游无此文件。
 3. **`scripts/market-manifest-byte-budget.json`**：
@@ -276,3 +276,17 @@ upstream-sync-dashboard: as-of 2026-10-09T00:56:21.062Z / upstream commit 2026-1
 2. **白名单面（Scope A）**：分母 36（`beta↔huaanwork` 22 + `stable↔beta` 19 去重后 36 项），触及 21 项（与首次快照 21 项一致）。
 3. **三包同形面（Scope B）**：分母 162，触及 47 项（较首次快照 45 项净增 2 项：上游新改动额外触及了同形面文件）。
 4. **永久 Override 面（Scope C）**：分母 8，触及 3 项（与首次快照一致，仍为两个 `package.spec.ts` 与 `scripts/verify-desktop-variants.mjs`）。
+
+### M8 Phase 5 看板对齐（2026-10-10）
+
+本注追加在既有 as-of 快照之后，不改写上文任何数字。首次快照的 behind 344，以及 Phase 0 快照的 behind 350 / ahead 242、merge-base `a934d98861`、白名单分母 36，都仍是合并前的历史读数。
+
+对齐读数用的是本地 ref，没有 `git fetch`，也没有推送。命令在 HEAD `4ade24c3aa` 上执行：
+
+- `git merge-base HEAD upstream/master` = `ca52ce2cd9ac872358e9a9464902e3c7ee4d494f`（Phase 2 合并点，等于当时本地 `upstream/master`，提交时间 2026-10-08 12:44:38 +0800）。
+- `git rev-list --count HEAD..upstream/master` = 0。
+- `git rev-list --count upstream/master..HEAD` = 283。
+
+Phase 3 重塑之后，变体守卫 `scripts/verify-desktop-variants.mjs` 仍是 §6 第 1 条永久 override。Phase 0 快照的 permanentOverride 命中里已经有这个文件，和「仍是第 1 条」一致。重塑后的结构性计数（stable↔beta 9、beta↔huaanwork 22、前缀 6）写在 §6 第 1 条，不要把上文的 22+19 分母当成当前清单规模。
+
+本地实施至 Phase 5 在本分支完成。推送与 CI 对账是 Phase 6，尚未进行。本注不声明上游同步已推送。
