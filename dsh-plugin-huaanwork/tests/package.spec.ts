@@ -1065,6 +1065,7 @@ describe('published package surface', () => {
     }))
     expect(manifest.build?.npmRebuild).toBe(false)
     expect(manifest.build?.mac?.x64ArchFiles).toContain('fs-ext/prebuilds/darwin-*')
+    expect(manifest.build?.mac?.x64ArchFiles).toContain('sherpa-onnx-darwin-*')
     expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.build?.files).toContain('!node_modules/fs-ext/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')

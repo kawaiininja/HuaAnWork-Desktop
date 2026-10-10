@@ -28,7 +28,7 @@ export const HUAANWORK_MARKET_SUBPATH_EXPORT = './huaanwork-market' as const
  * 清单 + 本 wrapper 验签保证,不靠 TLS,market-face-spec〈市场面规范〉)。
  * 与 market-server 的 MARKET_SERVER_PUBLIC_ORIGIN 示例同值。
  */
-export const HUAANWORK_MARKET_DEFAULT_ORIGIN = 'http://market.intranet.example:8787'
+export const HUAANWORK_MARKET_DEFAULT_ORIGIN = 'http://market.intranet.lan:8787'
 
 /** env 覆盖键:部署期重指内网源(唯一允许的 env 配置面;验签公钥不走 env)。 */
 export const HUAANWORK_MARKET_ORIGIN_ENV = 'HUAANWORK_MARKET_ORIGIN'
@@ -109,9 +109,14 @@ export const DEFAULT_MARKET_VERIFICATION_PINS: MarketVerificationPins = Object.f
  * 新发版把新公钥放 current、旧公钥退 previous(带 retiredAt = 一个 app 发版窗口)。
  * 钉入形态:`current: { keyId: <sha256 指纹>, publicKeyHex: <raw hex> }`(发行钉入两者缺一
  * 不可,由 `scripts/huaanwork-verify-provisioning.mjs` 在打包前强制并回算指纹)。
- * 当前未钉任何公钥——verify 恒拒,直至发版供给。
+ * 空钉扎仍是 `DEFAULT_MARKET_VERIFICATION_PINS`;本常量是发版槽,私钥不在仓库。
  */
-export const PINS_AT_RELEASE: MarketVerificationPins = DEFAULT_MARKET_VERIFICATION_PINS
+export const PINS_AT_RELEASE: MarketVerificationPins = {
+  current: {
+    keyId: 'f34f6afeb6d36759dafeb218d1b70a851ac08e9cdcc4ae6d9cbc12c2860fb531',
+    publicKeyHex: '5d162fd0a158518fa92769375c99ccd74b847670ef5a1ffbff035f22fffa1079',
+  },
+}
 
 /**
  * 校验一把钉住公钥的格式(raw 32 字节小写 hex)与声明的指纹;非法即具名错误 fail-closed。

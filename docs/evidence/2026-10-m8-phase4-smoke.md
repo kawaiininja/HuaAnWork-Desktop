@@ -51,7 +51,27 @@ The same file in desktop, beta, and huaanwork now stats that parent and lists on
 
 `HUAANWORK_MIGRATION_SMOKE=1` first exited 1 because this shell exports `ELECTRON_RUN_AS_NODE=1`, so the binary started as Node and rejected `--user-data-dir` (exit 9). The spec now deletes that variable before spawn. The rerun exited 0 in 3.57s. Log: `migration-smoke.log` (passing run 04:26:11Z–04:26:16Z).
 
-## dist:mac-smoke:huaanwork — not passed
+## dist:mac-smoke:huaanwork — DMG produced after the pin
+
+Provisioning scanner on the pinned tree, 2026-10-10T04:40:18Z, exit 0. Fingerprints only:
+
+```text
+HUAANWORK_MARKET_DEFAULT_ORIGIN = http://market.intranet.lan:8787
+  sha256(origin string) = 80c6da2fa9934fa1e7115364062c6123ec42af8560a6f3e23da901567a2cc97d
+HUAANWORK_UPDATE_DEFAULT_ORIGIN = http://update.intranet.lan:8790
+  sha256(origin string) = e816cd5e97c6cd9bfa09fbb9518e776fd91c986f0a72d7212ced1f0e8d025ee9
+PINS_AT_RELEASE.current.publicKeyHex = 5d162fd0a158518fa92769375c99ccd74b847670ef5a1ffbff035f22fffa1079
+PINS_AT_RELEASE.current.keyId = f34f6afeb6d36759dafeb218d1b70a851ac08e9cdcc4ae6d9cbc12c2860fb531
+  sha256(raw public key bytes) = f34f6afeb6d36759dafeb218d1b70a851ac08e9cdcc4ae6d9cbc12c2860fb531
+```
+
+`HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` stayed unset. The private key stayed in `/Users/amonmiao/.huaanwork-release` and was not committed.
+
+`corepack yarn dist:mac-smoke:huaanwork` started 2026-10-10T04:41:38Z and exited 1 at 04:42:52Z. `market:prepare` rewrote `dshmarket` from `1.66.11` to npm latest `1.66.14`, and `aa:prepare-release` moved the Agents Anywhere pin to `7fe1fce`. `package.spec` then rejected `dshmarket@npm:1.66.14`. Those rewrites were checked out and `corepack yarn install --immutable` exited 0. The upstream `dshmarket` resolution on the branch stays `1.66.11`. No DMG from that invocation.
+
+On the restored tree, `corepack yarn workspace dsh-plugin-huaanwork dist:mac-smoke` (exemption still unset) exited 0, 2026-10-10T04:49:02Z–04:56:03Z. The first universal merge failed because `sherpa-onnx-darwin-arm64/libonnxruntime.dylib` was missing from HuaAnWork `x64ArchFiles`; that pattern is now in the huaanwork mac config, matching beta. The rerun printed `macOS DMG smoke verification passed` for `dsh-plugin-huaanwork/dist/mac-smoke/HuaAnWork-0.1.0-universal.dmg` (478M). The DMG is not committed.
+
+## Earlier dist:mac-smoke attempt — not passed
 
 ```bash
 corepack yarn dist:mac-smoke:huaanwork

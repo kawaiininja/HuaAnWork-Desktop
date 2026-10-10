@@ -9,12 +9,11 @@ import {
 /**
  * Deployment-configured intranet origin serving this product's release channel.
  *
- * The placeholder is unreachable by construction: an unconfigured deployment
- * fails every version check closed instead of querying the upstream DSH public
- * service, which does not answer for the huaanwork channel and would only leak
- * installation metadata. Set HUAANWORK_UPDATE_ORIGIN at release provisioning.
+ * The compiled-in intranet origin is not the upstream DSH public service, which
+ * does not answer for the huaanwork channel. Set HUAANWORK_UPDATE_ORIGIN to
+ * point a deployment at another host.
  */
-export const HUAANWORK_UPDATE_DEFAULT_ORIGIN = 'http://update.intranet.example:8790'
+export const HUAANWORK_UPDATE_DEFAULT_ORIGIN = 'http://update.intranet.lan:8790'
 
 /** Environment variable carrying the deployment update origin. */
 export const HUAANWORK_UPDATE_ORIGIN_ENV = 'HUAANWORK_UPDATE_ORIGIN'

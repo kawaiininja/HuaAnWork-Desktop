@@ -1,0 +1,15 @@
+Root command corepack yarn dist:mac-smoke:huaanwork
+HUAANWORK_ALLOW_UNPROVISIONED_SMOKE unset
+START 2026-10-10T04:41:38Z
+EXIT 1
+END 2026-10-10T04:42:52Z
+package.spec rejected dshmarket@npm:1.66.14 after market:prepare. No DMG.
+Rewrites checked out. yarn install --immutable exit 0.
+
+Workspace command on the restored tree:
+corepack yarn workspace dsh-plugin-huaanwork dist:mac-smoke
+START 2026-10-10T04:49:02Z
+macOS DMG smoke verification passed: dsh-plugin-huaanwork/dist/mac-smoke/HuaAnWork-0.1.0-universal.dmg
+EXIT 0
+END 2026-10-10T04:56:03Z
+-rw-r--r-- 478M HuaAnWork-0.1.0-universal.dmg

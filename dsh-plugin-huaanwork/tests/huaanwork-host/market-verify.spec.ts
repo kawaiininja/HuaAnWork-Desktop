@@ -10,8 +10,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { MARKET_JSON_MAX_BYTES } from '../../src/huaanwork-host/market/catalog-client.ts'
 import {
+  DEFAULT_MARKET_VERIFICATION_PINS,
   HuaanworkMarketConfigError,
-  PINS_AT_RELEASE,
   type MarketVerificationPins,
 } from '../../src/huaanwork-host/market/config.ts'
 import {
@@ -121,9 +121,11 @@ describe('wrapper verify fail-closed gate', () => {
   const pins = pinsFromVectorSlots(sample.slots)
   const context = contextOf(sample)
 
-  test('empty pins (PINS_AT_RELEASE default) always rejects: no key, no pass', () => {
-    expect(PINS_AT_RELEASE).toEqual({})
-    expect(() => verifyMarketManifest(sample.manifest, sample.signature as never, PINS_AT_RELEASE, context))
+  test('empty pins always reject: no key, no pass', () => {
+    expect(DEFAULT_MARKET_VERIFICATION_PINS).toEqual({})
+    expect(() => verifyMarketManifest(sample.manifest, sample.signature as never, DEFAULT_MARKET_VERIFICATION_PINS, context))
+      .toThrow(/no pinned verification public key/u)
+    expect(() => verifyMarketManifest(sample.manifest, sample.signature as never, {}, context))
       .toThrow(/no pinned verification public key/u)
   })
 

@@ -30,7 +30,7 @@ function envWith(origin?: string): NodeJS.ProcessEnv {
 describe('huaanwork-market config origin', () => {
   it('pins the compiled-in intranet origin by default', () => {
     expect(resolveMarketOrigin(envWith())).toBe(HUAANWORK_MARKET_DEFAULT_ORIGIN)
-    expect(HUAANWORK_MARKET_DEFAULT_ORIGIN).toBe('http://market.intranet.example:8787')
+    expect(HUAANWORK_MARKET_DEFAULT_ORIGIN).toBe('http://market.intranet.lan:8787')
   })
 
   it('honors the HUAANWORK_MARKET_ORIGIN env override and normalizes to a bare origin', () => {
@@ -53,11 +53,13 @@ describe('huaanwork-market config origin', () => {
 })
 
 describe('huaanwork-market pinned verification keys', () => {
-  it('ships no placeholder key: verification always rejects until release provisioning', () => {
+  it('keeps the empty default pin fail-closed and ships a paired release pin', () => {
     expect(DEFAULT_MARKET_VERIFICATION_PINS).toEqual({})
-    expect(PINS_AT_RELEASE).toBe(DEFAULT_MARKET_VERIFICATION_PINS)
-    expect(() => assertMarketVerificationReady()).toThrow(/no pinned verification public key/u)
+    expect(() => assertMarketVerificationReady(DEFAULT_MARKET_VERIFICATION_PINS)).toThrow(/no pinned verification public key/u)
     expect(() => assertMarketVerificationReady({})).toThrow(HuaanworkMarketConfigError)
+    const pinned = assertMarketVerificationReady(PINS_AT_RELEASE)
+    expect(pinned.publicKeyHex).toMatch(/^[0-9a-f]{64}$/u)
+    expect(pinned.keyId).toMatch(/^[0-9a-f]{64}$/u)
   })
 
   it('accepts the release-pinned current key only in raw 32-byte lowercase hex form', () => {

@@ -137,7 +137,7 @@ describe('public Desktop version check', () => {
     })
 
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.url).toBe(desktopVersionEndpoint('http://update.intranet.example:8790'))
+    expect(calls[0]?.url).toBe(desktopVersionEndpoint('http://update.intranet.lan:8790'))
     expect(calls[0]?.url).not.toContain('/api/downloads/')
     expect(calls[0]?.init).toMatchObject({
       method: 'GET',
@@ -401,9 +401,10 @@ describe('huaanwork version checks', () => {
 })
 
 describe('configurable update origin', () => {
-  it('defaults to the unreachable placeholder origin rather than the upstream public service', () => {
-    expect(resolveUpdateOrigin({})).toBe('http://update.intranet.example:8790')
+  it('defaults to the intranet update origin rather than the upstream public service', () => {
+    expect(resolveUpdateOrigin({})).toBe('http://update.intranet.lan:8790')
     expect(resolveUpdateOrigin({})).not.toContain('dshdesktop.cn')
+    expect(resolveUpdateOrigin({})).not.toContain('.example')
   })
 
   it('reads the deployment origin from the environment and strips a trailing slash', () => {
