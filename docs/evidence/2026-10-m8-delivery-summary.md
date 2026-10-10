@@ -39,6 +39,12 @@ The second evidence push is already on origin. `origin/master` is `6708693d4dfd2
 
 CI run https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/38033205707 is blocked by the account spending limit. The expanded ledger is 0 green, 1 red, 10 skipped. `changes` did not start. Its annotation is: "The job was not started because recent account payments have failed or your spending limit needs to be increased." The same annotation is on earlier runs, including https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/37600132144 and https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/37714088258 before this branch, and on https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/38033065235 for the earlier M8 push. This red is not attributed to this branch. The run is not green. The ledger is `docs/evidence/2026-10-m8-ci-reconciliation.md`.
 
+Update-chain digest. `docs/evidence/2026-10-m8-merge-decisions.md` says the remaining differences are identity constants and that they are allowed to stay. Those constants are the `huaanwork` channel enum, the intranet update origin inside `resolveUpdateOrigin`, and the release-channel shape (`SUPPORTED_RELEASE_CHANNELS` and `matchesReleaseChannelVersionShape`). The table does not record any other digest semantic difference as still unclosed. It does not call those identity constants closed.
+
+A10. The tray-icon check stays failed and out of scope. `docs/huaanwork-m4-human-verification-2026-10-07.md` records A10 as not passed (F-M4-1): the status item is created and the menu works, and the icon draws no pixels. This milestone does not fix it. As-of parent `9bc0e2de02`, this branch vendors Electron `44.0.0`: `dsh-plugin-huaanwork/package.json` pins that version in `devDependencies` and `peerDependencies`, `yarn.lock` resolves `electron@npm:44.0.0` to version `44.0.0`, and `dsh-plugin-huaanwork/node_modules/electron/package.json` reads `44.0.0`. The tray check was not re-run.
+
+M23. The `tests/` guard was not added. The remaining prerequisite is the left-sided mechanism. `oneSidedPrefixes` still means a path that exists only on the right.
+
 ## Dashboard
 
 No fetch. Both counts are from the local `upstream/master` ref `ca52ce2cd9ac872358e9a9464902e3c7ee4d494f`. On parent `bcf4088bba`, `git merge-base HEAD upstream/master` was that same commit, `git rev-list --count HEAD..upstream/master` was 0, and `git rev-list --count upstream/master..HEAD` was 288. This file's commit is one more commit reachable from `HEAD` and not from `upstream/master`. The as-of reading on the commit that adds this file is:
@@ -60,3 +66,5 @@ git rev-list --count upstream/master..HEAD
 ```
 
 The upstream count is 0. `upstream/master` is an ancestor of this commit. The local ref is still the merged tip `ca52ce2cd9ac872358e9a9464902e3c7ee4d494f`, so the zero is not an upstream advance after the merge.
+
+Fix round 1 edits this file in a later commit. No fetch. As-of that commit, `git rev-list --count HEAD..upstream/master` is 0 and `git rev-list --count upstream/master..HEAD` is 290. The behind count stays 0 because `upstream/master` is still an ancestor of HEAD.
