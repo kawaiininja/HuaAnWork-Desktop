@@ -153,12 +153,27 @@ test("describeInstalledEmptyMessage separates unreadable from genuinely empty (P
   assert.doesNotMatch(unreadable ?? "", /尚未安装任何插件/);
   assert.match(unreadable ?? "", /不代表没有已安装的插件/);
   // 确实为空（读成功且 0 条）才允许这么说。
-  assert.equal(describeInstalledEmptyMessage("ready", 0), "尚未安装任何插件");
+  assert.equal(
+    describeInstalledEmptyMessage("ready", 0),
+    "尚未安装任何插件。请到「本地安装」页签，从本地目录或 .tgz 安装。",
+  );
   // 有内容 ⇒ 渲染列表本身。
   assert.equal(describeInstalledEmptyMessage("ready", 2), null);
   // 有内容时读取态不再覆盖列表（ready 之前若已有缓存条目也应展示）。
   assert.equal(describeInstalledEmptyMessage("loading", 2), null);
   assert.equal(describeInstalledEmptyMessage("error", 2), null);
+});
+
+// P3-1：已安装列表真空是裸句，须指路「本地安装」页签/目录（不是搜索空态）。
+test("describeInstalledEmptyMessage points a genuinely empty list at the local install tab (M26 residual P3-1)", () => {
+  const message = describeInstalledEmptyMessage("ready", 0);
+  assert.equal(message, "尚未安装任何插件。请到「本地安装」页签，从本地目录或 .tgz 安装。");
+  assert.match(message ?? "", /本地安装/);
+  assert.match(message ?? "", /页签/);
+  assert.match(message ?? "", /目录/);
+  // 读失败与加载中不得改口成这句指路。
+  assert.notEqual(describeInstalledEmptyMessage("error", 0), message);
+  assert.notEqual(describeInstalledEmptyMessage("loading", 0), message);
 });
 
 // P28（评审修复波）：客户端诚实文案是从宿主源码抄来的同一句——此处把「同句」钉成

@@ -1515,3 +1515,240 @@ describe("IMMUTABLE bundle 的移除按钮灰化（M6 Task 6.10，P26）", () =>
     expect(market).toContain("immutable");
   });
 });
+
+/** P3-1：两处列表空态（不是搜索空态）补上的指路句。 */
+const INSTALLED_LIST_EMPTY = "尚未安装任何插件。请到「本地安装」页签，从本地目录或 .tgz 安装。";
+const INSTALLABLE_LIST_EMPTY = "暂无可安装插件。请到「本地安装」页签，从本地目录或 .tgz 安装。";
+
+describe("M26 residual P2-3 removeBundle 在飞守卫", () => {
+  it("双发 plugin.remove 仅一次生效，不靠按钮 disabled", async () => {
+    let releaseRemove = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    const removed: unknown[] = [];
+    vi.mocked(rpcCall).mockImplementation(async (method, params) => {
+      if (method !== "plugin.remove") return {};
+      removed.push(params);
+      await gate;
+      return { bundles: ["@huaanwork/sample"] };
+    });
+
+    try {
+      stubFetch({
+        state: () => jsonResponse(200, marketStateBody()),
+        ...marketSideHandlers(),
+        installations: () => jsonResponse(200, { bundles: ["@huaanwork/sample"], immutable: [] }),
+      });
+      const view = await mountMarket();
+      await act(async () => {
+        tabButton(view, "已安装").click();
+      });
+      const button = buttonByText(view, "移除");
+      expect(button.disabled).toBe(false);
+
+      // 两次点击落在同一次 act 里：重渲染前按钮 disabled 还挡不住第二次。
+      await act(async () => {
+        button.click();
+        button.click();
+      });
+      expect(removed, "重渲染前的双击").toHaveLength(1);
+
+      // 即使把 disabled 点亮，函数体仍须自己早退。
+      button.disabled = false;
+      await act(async () => {
+        button.click();
+      });
+      expect(removed, "点亮按钮后的再次点击").toHaveLength(1);
+
+      releaseRemove();
+      await act(async () => {});
+      const again = buttonByText(view, "移除");
+      expect(again.disabled).toBe(false);
+      await act(async () => {
+        again.click();
+      });
+      expect(removed, "在飞结束后可以再次移除").toHaveLength(2);
+    } finally {
+      releaseRemove();
+      vi.mocked(rpcCall).mockReset();
+    }
+  });
+});
+
+describe("M26 residual P3-1 列表空态指路", () => {
+  it("可安装列表真空时指路「本地安装」页签，且不是搜索空态", async () => {
+    stubFetch({
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+    });
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "可安装").click();
+    });
+    const empty = view.querySelector(".panel-empty");
+    expect(empty).not.toBeNull();
+    expect(empty!.textContent).toBe(INSTALLABLE_LIST_EMPTY);
+    expect(view.querySelector(".market-search-empty")).toBeNull();
+    expect(view.textContent).not.toContain("清空搜索");
+  });
+
+  it("已安装列表真空时指路「本地安装」页签，本地页签同句", async () => {
+    stubFetch({
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+    });
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "已安装").click();
+    });
+    const installed = view.querySelector(".panel-empty");
+    expect(installed).not.toBeNull();
+    expect(installed!.textContent).toBe(INSTALLED_LIST_EMPTY);
+
+    await act(async () => {
+      tabButton(view, "本地安装").click();
+    });
+    const local = view.querySelector(".market-local .panel-empty");
+    expect(local).not.toBeNull();
+    expect(local!.textContent).toBe(INSTALLED_LIST_EMPTY);
+  });
+});
+
+describe("M26 residual P3-2 确认条圆角 token", () => {
+  function sourceHandlers(extra: StubHandlers): StubHandlers {
+    return {
+      state: () => jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      settings: () =>
+        jsonResponse(
+          200,
+          desktopSettingsBody({ requested: "disabled", effective: "disabled", legacyDefaulted: false }),
+        ),
+      ...extra,
+    };
+  }
+
+  async function saveSwitch(): Promise<HTMLDivElement> {
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "来源").click();
+    });
+    await act(async () => {
+      optionButton(view, "huaanwork-market").click();
+    });
+    const dialog = view.querySelector('[role="dialog"][aria-label="切换市场来源"]') as HTMLDivElement;
+    expect(dialog).not.toBeNull();
+    await act(async () => {
+      buttonByText(dialog, "保存并重启").click();
+    });
+    return dialog;
+  }
+
+  function expectRadiusToken(banner: Element | null) {
+    expect(banner).not.toBeNull();
+    expect((banner as HTMLElement).style.borderRadius).toBe("var(--radius-md)");
+  }
+
+  it("保存成功条使用圆角 token，不再写死 8", async () => {
+    stubFetch(sourceHandlers({
+      marketSelect: () => jsonResponse(202, { accepted: true, restartRequired: true }),
+      restart: () => jsonResponse(200, { accepted: true }),
+    }));
+    const dialog = await saveSwitch();
+    const banner = dialog.querySelector('[role="status"]');
+    expect(banner?.textContent).toContain("选择已保存");
+    expectRadiusToken(banner);
+  });
+
+  it("保存后重启失败条使用圆角 token，不再写死 8", async () => {
+    stubFetch(sourceHandlers({
+      marketSelect: () => jsonResponse(202, { accepted: true, restartRequired: true }),
+      restart: () => jsonResponse(500, { accepted: false }),
+    }));
+    const dialog = await saveSwitch();
+    const banner = dialog.querySelector('[role="alert"]');
+    expect(banner?.textContent).toContain("重启请求未成功");
+    expectRadiusToken(banner);
+  });
+
+  it("切换未保存条使用圆角 token，不再写死 8", async () => {
+    stubFetch(sourceHandlers({
+      marketSelect: () => jsonResponse(500, { accepted: false }),
+    }));
+    const dialog = await saveSwitch();
+    const banner = dialog.querySelector('[role="alert"]');
+    expect(banner?.textContent).toContain("切换未保存");
+    expectRadiusToken(banner);
+  });
+});
+
+function cssBlock(css: string, header: string): string | null {
+  const start = css.indexOf(header);
+  if (start < 0) return null;
+  const open = css.indexOf("{", start);
+  const close = css.indexOf("}", open);
+  if (open < 0 || close < 0) return null;
+  return css.slice(open + 1, close);
+}
+
+describe("M26 residual P3-3 字阶", () => {
+  it("market-state-hint 与 market-version 离开 12px，对齐字阶", () => {
+    const css = readFileSync(resolve(import.meta.dirname, "../../src/client-huaanwork/styles.css"), "utf8");
+    const hint = cssBlock(css, ".market-state-hint {");
+    const version = cssBlock(css, ".market-version {");
+    expect(hint).not.toBeNull();
+    expect(version).not.toBeNull();
+    expect(hint).toContain("font-size: 11px;");
+    expect(version).toContain("font-size: 12.5px;");
+    expect(hint).not.toContain("font-size: 12px;");
+    expect(version).not.toContain("font-size: 12px;");
+  });
+});
+
+describe("M26 residual P3-4 provider focus ring", () => {
+  it("market-provider-option 有显式 focus-visible ring", () => {
+    const css = readFileSync(resolve(import.meta.dirname, "../../src/client-huaanwork/styles.css"), "utf8");
+    const block = cssBlock(css, ".market-provider-option:focus-visible {");
+    expect(block).not.toBeNull();
+    expect(block).toContain("border-color: var(--accent);");
+    expect(block).toContain("box-shadow: 0 0 0 3px var(--accent-soft);");
+  });
+});
+
+describe("M26 residual onRetry 来源状态错误面板", () => {
+  it("来源页 stateError 的错误面板有重试，点击会重新读取市场状态", async () => {
+    let stateFails = true;
+    const log = stubFetch({
+      state: () =>
+        stateFails
+          ? jsonResponse(502, { error: { code: "market-unreachable", message: "down" } })
+          : jsonResponse(200, marketStateBody()),
+      ...marketSideHandlers(),
+      settings: () =>
+        jsonResponse(
+          200,
+          desktopSettingsBody({ requested: "disabled", effective: "disabled", legacyDefaulted: false }),
+        ),
+    });
+    const view = await mountMarket();
+    await act(async () => {
+      tabButton(view, "来源").click();
+    });
+
+    const panel = view.querySelector(".market-sources .market-error");
+    expect(panel).not.toBeNull();
+    const labels = [...panel!.querySelectorAll("button")].map((button) => button.textContent);
+    expect(labels).toContain("重试");
+
+    const before = log.calls(ROUTES.state);
+    stateFails = false;
+    const retry = [...panel!.querySelectorAll("button")].find((button) => button.textContent === "重试");
+    await act(async () => {
+      retry!.click();
+    });
+    expect(log.calls(ROUTES.state)).toBe(before + 1);
+    expect(view.querySelector(".market-sources .market-error")).toBeNull();
+    expect(view.textContent).toContain(MARKET_ORIGIN);
+  });
+});

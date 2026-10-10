@@ -207,22 +207,26 @@ export default function MarketView() {
     }
   }, []);
 
+  const mountedRef = useRef(true);
+  const loadMarketState = useCallback(async () => {
+    try {
+      const stateView = await marketFetch<MarketStateView>(ROUTE_STATE);
+      if (!mountedRef.current) return;
+      setState(stateView);
+      setStateError(null);
+      setStateLoad("ready");
+      setRemoteExecuting(stateView.executing === true);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setStateError(presentMarketError(error));
+      setStateLoad("error");
+    }
+  }, []);
+
   useEffect(() => {
+    mountedRef.current = true;
     let alive = true;
-    void (async () => {
-      try {
-        const stateView = await marketFetch<MarketStateView>(ROUTE_STATE);
-        if (!alive) return;
-        setState(stateView);
-        setStateError(null);
-        setStateLoad("ready");
-        setRemoteExecuting(stateView.executing === true);
-      } catch (error) {
-        if (!alive) return;
-        setStateError(presentMarketError(error));
-        setStateLoad("error");
-      }
-    })();
+    void loadMarketState();
     void (async () => {
       try {
         await createDesktopSettingsApi().read();
@@ -238,8 +242,9 @@ export default function MarketView() {
     void loadInstallations();
     return () => {
       alive = false;
+      mountedRef.current = false;
     };
-  }, [loadCatalogSide, loadInstallations]);
+  }, [loadCatalogSide, loadInstallations, loadMarketState]);
 
   // M7 review fix round: 挂载时的一次性探测遇到瞬时失败(宿主尚在启动、单发丢包)
   // 会把整条会话永久降级为「未提供重启入口」。在横幅真正出现的时刻重探一次,
@@ -410,7 +415,13 @@ export default function MarketView() {
     }
   }
 
+  // P2-3：按钮 disabled 在重渲染前挡不住第二次点击。ref 在同一次渲染里早退，
+  // localBusy 与本地安装共用，提交后按钮也随之禁用。
+  const removeInFlight = useRef(false);
   async function removeBundle(name: string) {
+    if (removeInFlight.current || localBusy) return;
+    removeInFlight.current = true;
+    setLocalBusy(true);
     setNotice(null);
     try {
       const listed = await rpcCall<{ bundles?: string[]; message?: string; restarting?: boolean }>("plugin.remove", { name });
@@ -425,6 +436,9 @@ export default function MarketView() {
       await loadCatalogSide();
     } catch (error) {
       notify(`移除失败：${error instanceof Error ? error.message : String(error)}`, true);
+    } finally {
+      removeInFlight.current = false;
+      setLocalBusy(false);
     }
   }
 
@@ -651,7 +665,7 @@ export default function MarketView() {
         installableSearchMiss ? (
           renderSearchEmpty()
         ) : (
-          panelBody(installablePhase, "加载可安装列表中…", "暂无可安装插件", (
+          panelBody(installablePhase, "加载可安装列表中…", "暂无可安装插件。请到「本地安装」页签，从本地目录或 .tgz 安装。", (
             <ul className="market-list">
               {installableItems.map((item) => {
                 const button = installButtonState(item, anyExecuting);
@@ -723,7 +737,12 @@ export default function MarketView() {
           onRemove={(name) => void removeBundle(name)}
         />
       ) : (
-        <MarketSourcePanel state={state} stateLoad={stateLoad} stateError={stateError} />
+        <MarketSourcePanel
+          state={state}
+          stateLoad={stateLoad}
+          stateError={stateError}
+          onRetry={() => { void loadMarketState(); }}
+        />
       )}
 
       {localConfirming ? (

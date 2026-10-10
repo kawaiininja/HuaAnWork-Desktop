@@ -275,5 +275,6 @@ export function describeInstalledEmptyMessage(load: MarketLoadState, count: numb
   if (load === "error") {
     return "无法读取已安装列表，请稍后重试或重启应用；这不代表没有已安装的插件。";
   }
-  return "尚未安装任何插件";
+  // P3-1：真空列表不是搜索空态。裸句不告诉用户下一步，指路「本地安装」页签。
+  return "尚未安装任何插件。请到「本地安装」页签，从本地目录或 .tgz 安装。";
 }

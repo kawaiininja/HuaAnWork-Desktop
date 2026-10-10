@@ -62,10 +62,13 @@ export default function MarketSourcePanel({
   state,
   stateLoad,
   stateError,
+  onRetry,
 }: {
   state: MarketStateView | null;
   stateLoad: MarketLoadState;
   stateError: MarketErrorPresentation | null;
+  /** 来源状态读失败的重试。M26 Task 3 只接了 MarketView 里两处 ErrorPanel。 */
+  onRetry?: () => void;
 }) {
   const [provider, setProvider] = useState<ProviderView | null>(null);
   const [providerPhase, setProviderPhase] = useState<ProviderPhase>("loading");
@@ -183,7 +186,7 @@ export default function MarketSourcePanel({
         // 「无法读取市场状态」。stateError 理论上与 error 态成对置位，null 时
         // 回落旧文案仅作防御。
         stateError !== null ? (
-          <ErrorPanel presentation={stateError} />
+          <ErrorPanel presentation={stateError} onRetry={onRetry} />
         ) : (
           <p className="panel-empty">无法读取市场状态</p>
         )
@@ -303,19 +306,19 @@ export default function MarketSourcePanel({
               确认后应用会保存该选择；若需要重启，在重启确认中选择「取消」不会撤销该选择——它已保存，下次启动应用时照常生效。
             </p>
             {applyPhase === "saved" && applyError !== null ? (
-              <p className="banner error" role="alert" style={{ borderRadius: 8 }}>
+              <p className="banner error" role="alert" style={{ borderRadius: "var(--radius-md)" }}>
                 {applyError}
               </p>
             ) : null}
             {applyPhase === "saved" && applyError === null ? (
-              <p className="banner" role="status" style={{ borderRadius: 8 }}>
+              <p className="banner" role="status" style={{ borderRadius: "var(--radius-md)" }}>
                 {applyRestart
                   ? "选择已保存。应用会提示重启以生效；若取消重启，选择不会回滚，下次启动应用时照常生效。"
                   : "选择已保存，与当前生效的市场来源一致，无需重启。"}
               </p>
             ) : null}
             {applyPhase === "failed" ? (
-              <p className="banner error" role="alert" style={{ borderRadius: 8 }}>
+              <p className="banner error" role="alert" style={{ borderRadius: "var(--radius-md)" }}>
                 切换未保存：{applyError ?? "请稍后重试。"}
               </p>
             ) : null}
