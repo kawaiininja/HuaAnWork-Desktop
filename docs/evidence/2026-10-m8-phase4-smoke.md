@@ -88,3 +88,12 @@ node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs --smoke
 ```
 
 Exit 1. Unprovisioned: empty `PINS_AT_RELEASE`, and both default origins still contain `.example`. No DMG. Keys were not invented. Log: `dist-mac-smoke-huaanwork.log` (command start 04:26:34Z, gate end 04:27:39Z).
+
+## Root mac smoke after the dshmarket 1.66.14 lock
+
+`corepack yarn market:prepare` at 2026-10-10T05:02:57Z exited 0 and wrote `dshmarket` `1.66.14` for desktop, beta, next, and huaanwork, with one root resolution `dshmarket@npm:1.66.14`. It did not move the Agents Anywhere pin. `corepack yarn install --immutable` exited 0. `corepack yarn check:desktop-variants` exited 0. Commit `fdb54d9d98`.
+
+`corepack yarn dist:mac-smoke:huaanwork` with `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` unset started 2026-10-10T05:05:04Z and exited 0 at 05:12:57Z. `market:prepare` printed `dshmarket latest verified: 1.66.14` and did not rewrite the lock. `aa:prepare-release` selected AA main `7fe1fce32650483bf8433f7a198032178580ff16` and updated the bridge pin for the duration of the build. The command still exited 0. Verification printed `macOS DMG smoke verification passed` for `dsh-plugin-huaanwork/dist/mac-smoke/HuaAnWork-0.1.0-universal.dmg` (479M). The DMG is not committed.
+
+After that exit, the AA provenance, bridge pin, and `yarn.lock` were checked back out to `7df5b31f3fe23d4be92ccd5ae5e0aeb6a3744c0e`. The new tarball was deleted. `corepack yarn install --immutable` exited 0. The AA pin move was not committed.
+
