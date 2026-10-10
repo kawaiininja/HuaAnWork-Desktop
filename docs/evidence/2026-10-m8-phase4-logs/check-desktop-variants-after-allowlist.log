@@ -1,0 +1,85 @@
+as-of HEAD: f36e5ae3ad9486a156b2fe974cd381dfb05abb6c
+command: corepack yarn check:desktop-variants
+started: 2026-10-10T03:53:25Z
+----
+TAP version 13
+# verify-desktop-variants: test-pair src (1 files) shared source files are aligned; all editions use isolated Host and chrome; test-pair allowlist 1 (oneSidedPrefixes 1)
+# Subtest: isOneSided: 支持 Set 和 Array 类型的 oneSidedPaths
+ok 1 - isOneSided: 支持 Set 和 Array 类型的 oneSidedPaths
+  ---
+  duration_ms: 0.530708
+  type: 'test'
+  ...
+# Subtest: isOneSided: 精确路径与前缀匹配及未命中场景 (含负向用例)
+ok 2 - isOneSided: 精确路径与前缀匹配及未命中场景 (含负向用例)
+  ---
+  duration_ms: 0.105417
+  type: 'test'
+  ...
+# Subtest: filterDirOneSided: 多目录与单目录场景下 oneSidedPaths 过滤与前缀剥离
+ok 3 - filterDirOneSided: 多目录与单目录场景下 oneSidedPaths 过滤与前缀剥离
+  ---
+  duration_ms: 0.516666
+  type: 'test'
+  ...
+# Subtest: verifyDesktopVariants: 统计计数与差异检测 (单测模拟 fixture)
+ok 4 - verifyDesktopVariants: 统计计数与差异检测 (单测模拟 fixture)
+  ---
+  duration_ms: 5.213417
+  type: 'test'
+  ...
+# Subtest: verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位
+ok 5 - verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位
+  ---
+  duration_ms: 146.050208
+  type: 'test'
+  ...
+# Subtest: pins the beta↔huaanwork divergence budget so growth is always explicit
+ok 6 - pins the beta↔huaanwork divergence budget so growth is always explicit
+  ---
+  duration_ms: 0.662041
+  type: 'test'
+  ...
+# Subtest: pin scan does not treat a quoted path inside a comment as an entry
+ok 7 - pin scan does not treat a quoted path inside a comment as an entry
+  ---
+  duration_ms: 0.153208
+  type: 'test'
+  ...
+# Subtest: zombie slot guard: every registered exemption is an active difference
+ok 8 - zombie slot guard: every registered exemption is an active difference
+  ---
+  duration_ms: 1209.291167
+  type: 'test'
+  ...
+# Subtest: no allowedDifferences entry is commented out in either pair
+ok 9 - no allowedDifferences entry is commented out in either pair
+  ---
+  duration_ms: 0.409875
+  type: 'test'
+  ...
+# Subtest: pins the stable↔beta baseline and enforces its one-sided scripts (M6 blindspot)
+ok 10 - pins the stable↔beta baseline and enforces its one-sided scripts (M6 blindspot)
+  ---
+  duration_ms: 0.757334
+  type: 'test'
+  ...
+# Subtest: beta↔huaanwork artifact-name templates are identity, not allowlist entries
+ok 11 - beta↔huaanwork artifact-name templates are identity, not allowlist entries
+  ---
+  duration_ms: 0.210084
+  type: 'test'
+  ...
+1..11
+# tests 11
+# suites 0
+# pass 11
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1435.82425
+verify-desktop-variants: stable↔beta src (204 files), stable↔beta scripts (33 files), beta↔huaanwork src (187 files), beta↔huaanwork scripts (31 files) shared source files are aligned; all editions use isolated Host and chrome; stable↔beta allowlist 9 (oneSidedPrefixes 0), beta↔huaanwork allowlist 22 (oneSidedPrefixes 6)
+----
+exit_code: 0
+ended: 2026-10-10T03:53:27Z
