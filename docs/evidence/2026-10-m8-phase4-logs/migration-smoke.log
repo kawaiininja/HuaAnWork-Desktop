@@ -1,0 +1,17 @@
+APP present: dsh-plugin-huaanwork/dist/mac-arm64/HuaAnWork.app/Contents/MacOS/HuaAnWork
+
+First run, ELECTRON_RUN_AS_NODE inherited as 1. START 2026-10-10T04:21:45Z. EXIT 1. END 2026-10-10T04:23:46Z.
+The packaged binary printed:
+HuaAnWork: bad option: --user-data-dir=...
+[child exit code=9 signal=null]
+timed out waiting for the migration marker
+
+Second run, after the spec deletes ELECTRON_RUN_AS_NODE. START 2026-10-10T04:26:11Z.
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  12:26:12
+   Duration  3.86s (transform 91ms, setup 0ms, import 197ms, tests 3.57s, environment 0ms)
+
+EXIT 0
+END 2026-10-10T04:26:16Z

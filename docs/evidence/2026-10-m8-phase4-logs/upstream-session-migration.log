@@ -1,0 +1,12 @@
+START 2026-10-10T04:13:20Z
+HUAANWORK_MIGRATION_SMOKE unset
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  12:13:21
+   Duration  349ms (transform 22ms, setup 0ms, import 105ms, tests 117ms, environment 0ms)
+
+EXIT 0
+END 2026-10-10T04:13:21Z

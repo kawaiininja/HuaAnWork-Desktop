@@ -1,0 +1,17 @@
+START 2026-10-10T04:16:03Z
+GET /healthz {"ok":true,"envelope":{"active":false,"revision":0,"notAfter":null,"expiresInSeconds":null,"warning":false},"manifestCanonicalBytes":0,"entryCount":0,"averageEntryBytes":0}
+POST /v1/admin/artifacts 201 {"entry":{"id":"huaanwork/phase4-probe@1.0.0","packageName":"@huaanwork/phase4-probe","version":"1.0.0","displayName":"Phase4 Probe","summary":"one catalog page","updatedAt":"2026-10-10T04:16:04.910Z","sha256":"a2ae2fd9a0b425f78bbc2ec847586e9b0ebf10d8e93b17de412451ec1d8c4df9","tarball":"huaanwork-phase4-probe-1.0.0-a2ae2fd9a0b4.tgz"},"sha256":"a2ae2fd9a0b425f78bbc2ec847586e9b0ebf10d8e93b17de412451ec1d8c4df9"}
+POST /v1/admin/manifest/prepare 200 entryCount=1
+POST /v1/admin/manifest/signature 200 {"activated":true,"revision":1,"slot":1}
+GET /healthz after activation {"ok":true,"envelope":{"active":true,"revision":1,"notAfter":"2026-10-17T04:16:04.915Z","expiresInSeconds":604800,"warning":false},"manifestCanonicalBytes":732,"entryCount":1,"averageEntryBytes":732}
+GET /v1/plugins items=1 page={"total":1}
+client page: {"total":1,"items":[{"id":"huaanwork/phase4-probe@1.0.0","name":"@huaanwork/phase4-probe","displayName":"Phase4 Probe","summary":"one catalog page","package":{"registry":"npm","name":"@huaanwork/phase4-probe"},"latestVersion":"1.0.0","updatedAt":"2026-10-10T04:16:04.910Z"}]}
+MARKET_SMOKE_OK
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  12:16:04
+   Duration  639ms
+
+EXIT 0
+END 2026-10-10T04:16:05Z

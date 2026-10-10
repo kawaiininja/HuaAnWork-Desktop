@@ -1,0 +1,16 @@
+START 2026-10-10T04:13:21Z
+schema: channels/huaanwork.json version=0.1.1 publishedAt=2026-10-01T14:43:54.565Z
+schema: mac filename=HuaAnWork-0.1.1-universal.dmg bytes=531865729 sha256=8dc014a72fd684db19d89672d214f06446c1ad3751920cd5b0bc8fc456c5d242
+hashing the published DMG
+schema match: record parses, byte length matches, sha256 matches the DMG
+version endpoint: {"version":"0.1.1","channel":"huaanwork","sha256":{"mac":"8dc014a72fd684db19d89672d214f06446c1ad3751920cd5b0bc8fc456c5d242"}}
+checkForDesktopUpdate: {"status":"update-available","currentVersion":"0.1.0","latestVersion":"0.1.1","sha256":{"mac":"8dc014a72fd684db19d89672d214f06446c1ad3751920cd5b0bc8fc456c5d242"},"installerSha256":{"darwin":"8dc014a72fd684db19d89672d214f06446c1ad3751920cd5b0bc8fc456c5d242"}}
+positive download
+positive download saved /var/folders/fc/j0sprzg92_926g51qh0pyp9w0000gn/T/m8-update-dest-50439/HuaAnWork-0.1.1-mac.dmg sha256=8dc014a72fd684db19d89672d214f06446c1ad3751920cd5b0bc8fc456c5d242
+tamper: flipped 1 byte at offset 4096 (198 -> 199); file size stays 531865729
+tampered download refused: code=invalid-artifact message=The update installer does not match the published digest.
+destination leftover: []
+original DMG sha256 unchanged
+DIGEST_SMOKE_OK
+EXIT 0
+END 2026-10-10T04:13:24Z

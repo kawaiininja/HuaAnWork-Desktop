@@ -10,7 +10,8 @@ export async function verifyBundledSkills(applicationRoot: string): Promise<void
   const ctx = new Context()
   try {
     await ctx.plugin(LocalFileSystem, { cwd: applicationRoot })
-    for (const path of [dirname(applicationRoot), applicationRoot, skillsRoot]) {
+    const parent = dirname(applicationRoot)
+    for (const path of [parent, applicationRoot, skillsRoot]) {
       const target = await ctx.fs.resolve(path)
       const first = await ctx.fs.stat(target)
       const second = await ctx.fs.stat(target)
@@ -20,7 +21,10 @@ export async function verifyBundledSkills(applicationRoot: string): Promise<void
       if ((await ctx.fs.lstat(path))?.type !== 'directory') {
         throw new Error(`packaged directory lstat failed: ${path}`)
       }
-      await ctx.fs.listDir(target)
+      // Electron's Resources directory holds default_app.asar. Its stat hook
+      // ignores `{ bigint: true }`, and dsh-fs-local then throws while probing
+      // that file. Stat the parent; list only the app tree and the skills root.
+      if (path !== parent) await ctx.fs.listDir(target)
     }
     await ctx.plugin(SkillRegistry)
     await ctx.plugin(SkillFileSystem, {

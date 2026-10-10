@@ -1,0 +1,11 @@
+START 2026-10-10T04:13:20Z
+
+ RUN  v4.1.8 /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync/dsh-plugin-huaanwork
+
+ Test Files  17 passed (17)
+      Tests  271 passed (271)
+   Start at  12:13:21
+   Duration  5.57s (transform 3.38s, setup 0ms, import 5.48s, tests 11.68s, environment 1.46s)
+
+EXIT 0
+END 2026-10-10T04:13:26Z

@@ -1,0 +1,26 @@
+Command: corepack yarn dist:mac-smoke:huaanwork
+HUAANWORK_ALLOW_UNPROVISIONED_SMOKE was unset.
+START 2026-10-10T04:26:34Z
+
+market:prepare printed: dshmarket latest verified: 1.66.14 in Stable, Beta and Next
+That step rewrote the pinned dshmarket 1.66.11 resolution to npm latest 1.66.14.
+
+aa:prepare-release printed: Selected AA main at 7fe1fce32650483bf8433f7a198032178580ff16
+The branch pin is 7df5b31f3fe23d4be92ccd5ae5e0aeb6a3744c0e.
+The process was stopped while it was fetching that newer commit, before it replaced the pinned bridge.
+The dshmarket rewrite was then checked out and corepack yarn install --immutable restored the lock (exit 0, 2026-10-10T04:27:36Z).
+
+The provisioning gate, which is the next step of dist:mac-smoke:huaanwork and the local release-smoke-gate, was run on the restored tree:
+
+node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs --smoke
+EXIT 1
+
+本构建未完成发行 provisioning(unprovisioned release build):市场信任锚或内网 origin 仍是占位。
+缺什么:
+  - PINS_AT_RELEASE.current.publicKeyHex 未钉入
+  - PINS_AT_RELEASE.current.keyId 未钉入
+  - HUAANWORK_MARKET_DEFAULT_ORIGIN 仍是占位 "http://market.intranet.example:8787"
+  - HUAANWORK_UPDATE_DEFAULT_ORIGIN 仍是占位 "http://update.intranet.example:8790"
+
+Not passed. No DMG was produced. Keys were not invented.
+END 2026-10-10T04:27:39Z

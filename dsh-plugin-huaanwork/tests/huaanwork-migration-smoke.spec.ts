@@ -263,26 +263,37 @@ describeLive('legacy migration against a real packaged layout', () => {
 
     let log = ''
     // macOS 下 userData 不跟随 HOME(文件头实测),迁移源 = userData ⇒ 用 Chromium 开关把它指到播种目录。
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: tree.home,
+      USERPROFILE: tree.home,
+      DSH_HOME: tree.newHome,
+      ...(process.platform === 'linux' ? { XDG_CONFIG_HOME: join(tree.home, '.config') } : {}),
+    }
+    // A parent Electron or test runner may export this. Leaving it set makes the
+    // packaged binary start as Node and reject --user-data-dir (exit 9).
+    delete childEnv.ELECTRON_RUN_AS_NODE
     const child: ChildProcess = spawn(app, [`--user-data-dir=${tree.userDataDir}`], {
-      env: {
-        ...process.env,
-        HOME: tree.home,
-        USERPROFILE: tree.home,
-        DSH_HOME: tree.newHome,
-        ...(process.platform === 'linux' ? { XDG_CONFIG_HOME: join(tree.home, '.config') } : {}),
-      },
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     cleanup.push(() => { child.kill('SIGKILL') })
-    child.stdout?.on('data', chunk => { log += String(chunk).slice(0, 4096) })
-    child.stderr?.on('data', chunk => { log += String(chunk).slice(0, 4096) })
+    child.stdout?.on('data', chunk => { log = (log + String(chunk)).slice(-16_000) })
+    child.stderr?.on('data', chunk => { log = (log + String(chunk)).slice(-16_000) })
+    child.on('exit', (code, signal) => { log += `\n[child exit code=${String(code)} signal=${String(signal)}]\n` })
 
     // 1. 旧树就位(源发现的前提):presence 判据与迁移同源。
     expect(existsSync(source.dshHome)).toBe(true)
     expect(existsSync(join(source.configDir, 'settings.json'))).toBe(true)
 
     // 2. 等迁移 marker(活动 profile 内,目的树 = 新 home):应用已跑完一次性迁移。
-    const migrated = await waitFor('the migration marker', () => findMigratedProfile(tree.newHome), BOOT_TIMEOUT_MS)
+    let migrated: { dir: string; marker: HuaanworkMigrationMarker }
+    try {
+      migrated = await waitFor('the migration marker', () => findMigratedProfile(tree.newHome), BOOT_TIMEOUT_MS)
+    } catch (error) {
+      console.error(`APP_LOG\n${log}`)
+      throw error
+    }
     const profileDir = migrated.dir
     const marker = migrated.marker
     expect(marker.version).toBe(1)
