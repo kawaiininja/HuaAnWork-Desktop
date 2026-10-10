@@ -4,7 +4,20 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { isOneSided, filterDirOneSided, verifyDesktopVariants, PAIRS } from './verify-desktop-variants.mjs'
+import { isOneSided, filterDirOneSided, verifyDesktopVariants, normalizeIdentity, PAIRS } from './verify-desktop-variants.mjs'
+
+// A commented-out allowlist entry is a comment line whose payload is only a
+// quoted path. A quoted path inside a prose comment is not an entry: the old
+// scan matched allowedDifferences.has('src/product-identity.ts') inside the
+// semantic note and, after de-duplicating, still reported the live count.
+function commentedAllowlistEntries(block) {
+  const entries = []
+  for (const line of block.split('\n')) {
+    const match = /^\s*\/\/\s*'((?:src\/|scripts\/)?[\w.@/*-]+\.(?:ts|tsx|mjs|js|ps1))'\s*,?\s*$/u.exec(line)
+    if (match) entries.push(match[1])
+  }
+  return entries
+}
 
 test('isOneSided: 支持 Set 和 Array 类型的 oneSidedPaths', () => {
   const path = 'src/client-huaanwork/api.ts'
@@ -138,6 +151,8 @@ test('verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位', 
   assert.match(out, /stable↔beta src \(\d+ files\)/)
   assert.match(out, /beta↔huaanwork src \(\d+ files\)/)
   assert.match(out, /beta↔huaanwork scripts \(\d+ files\)/)
+  assert.match(out, /stable↔beta allowlist 9 \(oneSidedPrefixes 0\)/)
+  assert.match(out, /beta↔huaanwork allowlist 22 \(oneSidedPrefixes 6\)/)
 })
 
 test('pins the beta↔huaanwork divergence budget so growth is always explicit', () => {
@@ -146,12 +161,12 @@ test('pins the beta↔huaanwork divergence budget so growth is always explicit',
 
   assert.strictEqual(
     pair.allowedDifferences.length,
-    24,
-    `beta↔huaanwork allowedDifferences must hold exactly 24 entries, found ${String(pair.allowedDifferences.length)}`,
+    22,
+    `beta↔huaanwork allowedDifferences must hold exactly 22 entries, found ${String(pair.allowedDifferences.length)}`,
   )
   assert.strictEqual(
     new Set(pair.allowedDifferences).size,
-    24,
+    22,
     'beta↔huaanwork allowedDifferences must not contain duplicates',
   )
   assert.deepStrictEqual(pair.oneSidedPrefixes, [
@@ -206,15 +221,25 @@ test('pins the beta↔huaanwork divergence budget so growth is always explicit',
   const pairStart = source.indexOf("name: 'beta↔huaanwork'")
   assert.notStrictEqual(pairStart, -1, 'the beta↔huaanwork pair must exist in source')
   const block = source.slice(pairStart, source.indexOf('oneSidedPrefixes: [', pairStart))
-  const commented = block
-    .split('\n')
-    .filter(line => /^\s*\/\/.*'(?:src|scripts)\//u.test(line))
-    .filter(line => !line.includes('allowedDifferences.has('))
   assert.deepStrictEqual(
-    commented,
+    commentedAllowlistEntries(block),
     [],
-    `no allowedDifferences entry may be commented out; found:\n${commented.join('\n')}`,
+    'a prose comment that quotes a path is not an allowlist entry',
   )
+})
+
+test('pin scan does not treat a quoted path inside a comment as an entry', () => {
+  const block = [
+    "      // allowedDifferences.has('src/product-identity.ts') 恒为 false。",
+    "      // see scripts/verify-win-installer.ts for the absorbed spelling",
+    "      // 'src/ghost.ts',",
+    "      'src/real.ts',",
+  ].join('\n')
+  assert.deepStrictEqual(commentedAllowlistEntries(block), ['src/ghost.ts'])
+
+  const source = readFileSync(resolve(import.meta.dirname, 'verify-desktop-variants.mjs'), 'utf8')
+  assert.match(source, /allowedDifferences\.has\('src\/product-identity\.ts'\)/)
+  assert.deepStrictEqual(commentedAllowlistEntries(source), [])
 })
 
 test('zombie slot guard: every registered exemption is an active difference', () => {
@@ -258,10 +283,8 @@ test('no allowedDifferences entry is commented out in either pair', () => {
     assert.notStrictEqual(start, -1, `pair ${pair.name} must exist in source`)
     const end = source.indexOf('oneSidedPrefixes: [', start)
     const block = source.slice(start, end === -1 ? undefined : end)
-    for (const line of block.split('\n')) {
-      if (/^\s*\/\/\s*'(?:src\/|scripts\/)?[\w.@/*-]+\.(?:ts|tsx|mjs|js|ps1)'/u.test(line)) {
-        offenders.push(`[${pair.name}] ${line.trim()}`)
-      }
+    for (const entry of commentedAllowlistEntries(block)) {
+      offenders.push(`[${pair.name}] ${entry}`)
     }
   }
   assert.deepStrictEqual(offenders, [], `commented-out whitelist entries found:\n- ${offenders.join('\n- ')}`)
@@ -272,10 +295,11 @@ test('pins the stable↔beta baseline and enforces its one-sided scripts (M6 bli
   assert.ok(pair, 'the stable↔beta pair must exist')
   assert.deepStrictEqual(pair.dirs, ['src', 'scripts'])
 
+  assert.deepStrictEqual(pair.oneSidedPrefixes, [])
   assert.strictEqual(
     pair.allowedDifferences.length,
-    14,
-    `stable↔beta allowedDifferences must hold exactly 14 entries, found ${String(pair.allowedDifferences.length)}`,
+    9,
+    `stable↔beta allowedDifferences must hold exactly 9 entries, found ${String(pair.allowedDifferences.length)}`,
   )
 
   // M8 Task 2.4:此前 7 条(as-of 827e53fc03),现 6 条(as-of a50a8c4f70,即下方
@@ -327,4 +351,41 @@ test('pins the stable↔beta baseline and enforces its one-sided scripts (M6 bli
     !pair.allowedDifferences.includes(`scripts/${sharedIconScript}`),
     `scripts/${sharedIconScript} must not hold a whitelist slot while the two sides are identical (zombie budget)`,
   )
+
+  for (const file of ['generate-tray-icons.mjs', 'verify-packaged-runtime.ts']) {
+    const left = readFileSync(resolve(import.meta.dirname, '..', pair.left, 'scripts', file), 'utf8')
+    const right = readFileSync(resolve(import.meta.dirname, '..', pair.right, 'scripts', file), 'utf8')
+    assert.strictEqual(left, right, `${file} is shared behavior and must stay byte-identical`)
+    assert.ok(
+      !pair.allowedDifferences.includes(`scripts/${file}`),
+      `scripts/${file} must not hold a whitelist slot while the two sides are identical`,
+    )
+  }
+
+  for (const file of ['verify-linux-artifacts.ts', 'verify-win-installer.ts', 'verify-win-portable.ts']) {
+    const left = readFileSync(resolve(import.meta.dirname, '..', pair.left, 'scripts', file), 'utf8')
+    const right = readFileSync(resolve(import.meta.dirname, '..', pair.right, 'scripts', file), 'utf8')
+    assert.notStrictEqual(left, right, `${file} still spells the edition name differently`)
+    assert.strictEqual(
+      normalizeIdentity(left, 'stable↔beta'),
+      normalizeIdentity(right, 'stable↔beta'),
+      `${file} differs only by identity and must not return to the allowlist`,
+    )
+    assert.ok(!pair.allowedDifferences.includes(`scripts/${file}`))
+  }
+})
+
+test('beta↔huaanwork artifact-name templates are identity, not allowlist entries', () => {
+  const pair = PAIRS.find(candidate => candidate.name === 'beta↔huaanwork')
+  assert.ok(pair)
+  for (const file of ['verify-win-installer.ts', 'verify-win-portable.ts']) {
+    const left = readFileSync(resolve(import.meta.dirname, '..', pair.left, 'scripts', file), 'utf8')
+    const right = readFileSync(resolve(import.meta.dirname, '..', pair.right, 'scripts', file), 'utf8')
+    assert.notStrictEqual(left, right)
+    assert.strictEqual(normalizeIdentity(left, 'beta↔huaanwork'), normalizeIdentity(right, 'beta↔huaanwork'))
+    assert.ok(
+      !pair.allowedDifferences.includes(`scripts/${file}`),
+      `scripts/${file} is an identity spelling and must not hold a slot`,
+    )
+  }
 })
