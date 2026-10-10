@@ -1,6 +1,6 @@
 # Phase 5 README version guard — Task 5.2
 
-Recorded on `sync/upstream-2.0.x` in `HuaAnWork-Desktop-sync`. Counts below were read on parent `5c0815d23f`. This commit adds only this document, so the same counts hold as-of the evidence commit.
+Recorded on `sync/upstream-2.0.x` in `HuaAnWork-Desktop-sync`. Counts below are as-of `9d442bfeff`. They were read on parent `5c0815d23f`. `9d442bfeff` adds only this document.
 
 ## Guard reading
 
