@@ -27,11 +27,11 @@ import {
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from '@deepseek-ai/dsh-launch-environment'
 
-import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
 import { installDesktopPnpmRuntime } from '../lib/desktop-runtime-environment.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
 import { DesktopProfileService } from '../lib/profile-service.js'
+import { createDesktopProfileBoot } from '../lib/profile-context.js'
 import { startStubLlm } from './huaanwork-stub-llm.mjs'
 
 const BIN_NAME = 'dsh-plugin-huaanwork-host-loop-smoke'
@@ -173,8 +173,15 @@ async function bootSharedHost() {
 
   webPort = ctx.webServer.port
   origin = `http://127.0.0.1:${String(webPort)}`
-  const desktopSettings = ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE)
+  const desktopSettings = ctx.settings.describe()
+    .find(entry => String(entry.ns) === 'desktop-shell')?.value
   assert.equal(desktopSettings?.mode, 'advanced')
+  // The legacy settings import reloads the host after boot and disposes the
+  // event hub. Connect only after that reload, or the socket stays on the
+  // disposed hub and session frames never arrive.
+  const agentPresets = ctx.get('agentPresets')
+  const importDeadline = Date.now() + 15_000
+  while (agentPresets?.defaultId !== 'minimal' && Date.now() < importDeadline) await sleep(50)
 
   ws = new WebSocket(`ws://127.0.0.1:${String(webPort)}/huaanwork/events`, {
     headers: { [rendererHeader.name]: rendererHeader.value },
@@ -264,28 +271,31 @@ async function bootPrepared(prepared) {
     async requestConfirmedRestart() { return true },
     prepareToQuit() {},
   }
+  const pnpmBootstrap = {
+    activeProfileName: 'desktop',
+    activeProfileDir: prepared.profile.dir,
+    homeDir: home,
+    appExecutable: process.execPath,
+    pnpmBinPath,
+    electronVersion,
+    nodeBinDir: pnpmRuntime.nodeBinDir,
+    nodeShimPath: pnpmRuntime.nodeShimPath,
+    clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
+    dshBootstrapPath: fileURLToPathLocal(new URL('../lib/desktop-cli.js', import.meta.url)),
+  }
+  const profileBoot = createDesktopProfileBoot(prepared, pnpmBootstrap)
   const nextCtx = await boot(
     BIN_NAME,
     prepared.rootConfig,
     [...prepared.patches],
     async (host) => {
+      profileBoot.prepare(host)
       host.loader.internal = undefined
       host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
       host.provide('desktopBrowserAccess', BROWSER_ACCESS)
       host.provide('desktopLanHttps', LAN_HTTPS)
       host.provide('desktopRuntime', runtime)
-      host.provide('desktopPnpmBootstrap', {
-        activeProfileName: 'desktop',
-        activeProfileDir: prepared.profile.dir,
-        homeDir: home,
-        appExecutable: process.execPath,
-        pnpmBinPath,
-        electronVersion,
-        nodeBinDir: pnpmRuntime.nodeBinDir,
-        nodeShimPath: pnpmRuntime.nodeShimPath,
-        clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
-        dshBootstrapPath: fileURLToPathLocal(new URL('../lib/desktop-cli.js', import.meta.url)),
-      })
+      host.provide('desktopPnpmBootstrap', pnpmBootstrap)
       await host.plugin(DesktopProfileService, {
         current: {
           name: 'desktop',
@@ -308,6 +318,7 @@ async function bootPrepared(prepared) {
     },
     prepared.bareModuleBaseUrl,
   )
+  profileBoot.markReady()
   await runtime.mountScheduled()
   return nextCtx
 }
@@ -600,6 +611,8 @@ test('workspace pendingRoot:project.open 经 route 驱动写盘,二次组合 + b
   const reprepared = prepareDesktopProfile('1', home, 'win32')
   await ctx.fiber.dispose()
   ctx = await bootPrepared(reprepared)
+  webPort = ctx.webServer.port
+  origin = `http://127.0.0.1:${String(webPort)}`
 
   // 组合期消费 pendingRoot:holder 钉新根,agent-loop cwd / 会话 id 按新根铸造。
   assert.equal(ctx.huaanworkWorkspaceRoot.current, repo2, 'workspace root holder pinned to pendingRoot')

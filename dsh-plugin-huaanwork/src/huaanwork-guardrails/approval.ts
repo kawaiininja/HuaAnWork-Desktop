@@ -31,6 +31,7 @@ type Context = {
   on(
     event: "approval/request",
     listener: (request: ApprovalRequest, next: () => Promise<ApprovalOutcome>) => Promise<ApprovalOutcome>,
+    options?: boolean | { global?: boolean; prepend?: boolean },
   ): void;
 };
 
@@ -64,7 +65,7 @@ export function apply(ctx: Context): void {
       ctx.huaanworkAllowedOnce?.add(request.callId);
     }
     return outcome;
-  });
+  }, { global: true, prepend: true });
 }
 
 /** agent 引用的会话身份（session.id 优先，回落 agent.id）；无身份返回 undefined。 */

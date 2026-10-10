@@ -33,7 +33,7 @@ type ToolResult = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
   huaanworkEmit?: (event: RpcEvent) => void;
-  on(event: string, listener: (...args: never[]) => unknown, prepend?: boolean): void;
+  on(event: string, listener: (...args: never[]) => unknown, options?: boolean | { global?: boolean; prepend?: boolean }): void;
 };
 
 const DIFF_AFTER = new Set([
@@ -50,8 +50,10 @@ export const name = "huaanwork-bridge";
 export const inject = ["tools"];
 
 export function apply(ctx: Context): void {
+  // Agent turns dispatch llm/stream, tools/execute, and agent/status on the
+  // agent scope. An unscoped listener does not see those events.
   ctx.on("llm/stream", ((options: unknown, next: () => AsyncIterable<StreamChunk>) =>
-    mapTokens(ctx, sessionIdOfOptions(options), purposeOfOptions(options), next())) as never);
+    mapTokens(ctx, sessionIdOfOptions(options), purposeOfOptions(options), next())) as never, { global: true });
 
   ctx.on(
     "tools/execute",
@@ -79,14 +81,14 @@ export function apply(ctx: Context): void {
       }
       return { ...result, content: [{ type: "text", text: capped.text }] };
     }) as never,
-    true,
+    { global: true, prepend: true },
   );
 
   ctx.on("agent/status", ((payload: { status?: string; agent?: AgentRef }) => {
     if (payload?.status !== "idle") return;
     const sessionId = sessionIdOfAgentRef(payload.agent);
     emit(ctx, { event: "session/end", ok: true, ...(sessionId === undefined ? {} : { sessionId }) });
-  }) as never);
+  }) as never, { global: true });
 
   ctx.on("agent/error", ((payload: { error?: unknown; agent?: AgentRef }) => {
     const sessionId = sessionIdOfAgentRef(payload.agent);
@@ -100,7 +102,7 @@ export function apply(ctx: Context): void {
       error: errorMessage(payload?.error),
       ...(sessionId === undefined ? {} : { sessionId }),
     });
-  }) as never);
+  }) as never, { global: true });
 }
 
 async function* mapTokens(

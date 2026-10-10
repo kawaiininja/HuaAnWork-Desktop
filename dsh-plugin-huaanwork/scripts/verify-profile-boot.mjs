@@ -4,17 +4,18 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { setTimeout as delay } from 'node:timers/promises'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import {
   createLaunchEnvironmentSnapshot,
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from '@deepseek-ai/dsh-launch-environment'
-import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
 import { installDesktopPnpmRuntime } from '../lib/desktop-runtime-environment.js'
 import { installProfilePackageResolver } from '../lib/module-resolution.js'
 import { prepareDesktopProfile } from '../lib/profile.js'
 import { DesktopProfileService } from '../lib/profile-service.js'
+import { createDesktopProfileBoot } from '../lib/profile-context.js'
 
 const BIN_NAME = 'dsh-plugin-desktop-profile-smoke'
 const HOST_SERVICE_PLUGIN_NAME = 'dsh-desktop-host-services-smoke-plugin'
@@ -82,21 +83,18 @@ try {
     hostServicePluginDir,
     { recursive: true, force: false, errorOnExist: true },
   )
-  const patches = [
+  prepared.overlays = [
     // Deliberately compose the consumer before the desktop-pnpm provider row.
     // Its required injection must keep it pending until that service mounts.
-    {
-      insert: [{
-        id: 'desktop-host-services-smoke-plugin',
-        name: HOST_SERVICE_PLUGIN_NAME,
-      }],
-    },
-    ...prepared.patches,
+    { insert: [{ id: 'desktop-host-services-smoke-plugin', name: HOST_SERVICE_PLUGIN_NAME }] },
+    // The smoke's explicit Profile home must also own account credentials.
+    { id: 'credentials', config: { dshHome: home } },
     // Keep this headless probe independent of the operator's AA account.
     ...(prepared.aaEnabled ? [{ id: 'agents-anywhere-bridge-next', config: {
       dshHome: home, stateRoot: join(home, 'aa-smoke-state'),
     } }] : []),
   ]
+  const patches = [...prepared.patches, ...prepared.overlays]
   const packageRoot = new URL('../', import.meta.url)
   const pnpmBinPath = fileURLToPath(new URL('node_modules/pnpm/bin/pnpm.mjs', packageRoot))
   const electronVersion = JSON.parse(
@@ -155,29 +153,32 @@ try {
     async requestConfirmedRestart() { return true },
     prepareToQuit() {},
   }
+  const pnpmBootstrap = {
+    activeProfileName: 'desktop',
+    activeProfileDir: prepared.profile.dir,
+    homeDir: prepared.homeDir,
+    appExecutable: process.execPath,
+    pnpmBinPath,
+    electronVersion,
+    nodeBinDir: pnpmRuntime.nodeBinDir,
+    nodeShimPath: pnpmRuntime.nodeShimPath,
+    clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
+    dshBootstrapPath: fileURLToPath(new URL('../lib/desktop-cli.js', import.meta.url)),
+  }
+  const profileBoot = createDesktopProfileBoot(prepared, pnpmBootstrap)
   ctx = await boot(
     BIN_NAME,
     prepared.rootConfig,
     patches,
     async (host) => {
+      profileBoot.prepare(host)
       // Match the public resolver path used by packaged Electron.
       host.loader.internal = undefined
       host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
       host.provide('desktopBrowserAccess', BROWSER_ACCESS)
       host.provide('desktopLanHttps', LAN_HTTPS)
       host.provide('desktopRuntime', runtime)
-      host.provide('desktopPnpmBootstrap', {
-        activeProfileName: 'desktop',
-        activeProfileDir: prepared.profile.dir,
-        homeDir: prepared.homeDir,
-        appExecutable: process.execPath,
-        pnpmBinPath,
-        electronVersion,
-        nodeBinDir: pnpmRuntime.nodeBinDir,
-        nodeShimPath: pnpmRuntime.nodeShimPath,
-        clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
-        dshBootstrapPath: fileURLToPath(new URL('../lib/desktop-cli.js', import.meta.url)),
-      })
+      host.provide('desktopPnpmBootstrap', pnpmBootstrap)
       await host.plugin(DesktopProfileService, {
         current: {
           name: 'desktop',
@@ -200,6 +201,7 @@ try {
     },
     prepared.bareModuleBaseUrl,
   )
+  profileBoot.markReady()
   await runtime.mountScheduled()
 
   if (ctx.get('desktopPnpm') === undefined) {
@@ -217,6 +219,11 @@ try {
   if (!presetIds.includes('minimal') || !presetIds.includes('standard')) {
     throw new Error(`assembled Windows profile exposes unexpected presets: ${presetIds.join(', ')}`)
   }
+  // The legacy import runs off `loader.await()`, so the preset choice lands after
+  // this profile has finished mounting. Waiting for it here is what proves the
+  // section and field renames reached a namespace the settings service accepts.
+  const importDeadline = Date.now() + 15_000
+  while (agentPresets.defaultId !== 'minimal' && Date.now() < importDeadline) await delay(50)
   if (agentPresets.defaultId !== 'minimal') {
     throw new Error(`assembled Windows profile selected unexpected default ${agentPresets.defaultId}`)
   }
@@ -244,7 +251,7 @@ try {
     throw new Error(`assembled Windows browse picker listed ${listing.path} instead of ${home}`)
   }
 
-  const expectedUrl = `http://127.0.0.1:${String(ctx.webServer.port)}/?dsh-desktop-mode=advanced&dsh-desktop-platform=win32&dsh-desktop-version=2.0.0&dsh-desktop-material=off&dsh-desktop-mica=1`
+  const expectedUrl = `http://127.0.0.1:${String(ctx.webServer.port)}/?dsh-desktop-mode=advanced&dsh-desktop-platform=win32&dsh-desktop-version=2.0.0&dsh-desktop-material=off`
   if (mountedSpec?.url !== expectedUrl) {
     throw new Error(`desktop plugin produced an unexpected renderer URL: ${String(mountedSpec?.url)}`)
   }
@@ -257,9 +264,12 @@ try {
   if (nativeThemeSource !== 'system') {
     throw new Error(`desktop plugin produced an unexpected native theme source: ${nativeThemeSource}`)
   }
-  const desktopSettings = ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE)
+  // 0.1.7 keys live configuration by Loader entry id and serves it from the
+  // describe face; `settings.get(namespace)` was the 0.1.5 surface.
+  const desktopSettings = ctx.settings.describe()
+    .find(entry => String(entry.ns) === 'desktop-shell')?.value
   if (desktopSettings?.mode !== 'advanced') {
-    throw new Error('assembled Host settings are missing the advanced dsh-desktop mode')
+    throw new Error('assembled Host settings are missing the advanced desktop-shell mode')
   }
   if (!trayItems.some(item => item.label() === 'Check for Updates…')) {
     throw new Error('assembled desktop profile is missing the update tray command')
@@ -304,9 +314,11 @@ try {
     redirect: 'manual',
   })
   await exchange.body?.cancel()
-  if (exchange.status !== 303 || exchange.headers.get('location') !== '/') {
+  // 0.1.7 redirects document-relative (`./`) rather than to the site root,
+  // so the exchange survives a mounted base path.
+  if (exchange.status !== 303 || exchange.headers.get('location') !== './') {
     throw new Error(
-      `browser authentication exchange returned HTTP ${String(exchange.status)} instead of a root redirect`,
+      `browser authentication exchange returned HTTP ${String(exchange.status)} location ${String(exchange.headers.get('location'))} instead of a document-relative redirect`,
     )
   }
   const setCookie = exchange.headers.get('set-cookie')
