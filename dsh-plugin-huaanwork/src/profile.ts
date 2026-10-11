@@ -1574,8 +1574,9 @@ export function prepareDesktopProfile(
             { id: 'ui-sidebar', disabled: true },
             { id: 'ui-conversation', disabled: true },
             // Upstream 0.1.6-alpha.2 split Conversation/Chat/Trajectory owners
-            // (deepseek-harness@c27de594fd): these six inject `uiConversation`
-            // and hang the web boot when the conversation row is disabled. The
+            // (deepseek-harness@c27de594fd): these inject `uiConversation`
+            // and hang the web boot when the conversation row is disabled.
+            // 2.0 added ui-schedule and ui-user-questions to that set. The
             // HuaAnWork shell replaces their surfaces wholesale, so they leave
             // the composition together with ui-conversation.
             { id: 'ui-chat', disabled: true },
@@ -1584,6 +1585,8 @@ export function prepareDesktopProfile(
             { id: 'ui-trajectory', disabled: true },
             { id: 'ui-deliverables', disabled: true },
             { id: 'ui-workflow-run', disabled: true },
+            { id: 'ui-schedule', disabled: true },
+            { id: 'ui-user-questions', disabled: true },
           ]
         : [
             { id: 'ui-sidebar', disabled: false },

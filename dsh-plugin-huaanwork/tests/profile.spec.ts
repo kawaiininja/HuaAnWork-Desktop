@@ -418,7 +418,7 @@ virtualStoreDirMaxLength: 60
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
-    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run']) {
+    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run', 'ui-schedule', 'ui-user-questions']) {
       expect(rows.find(row => row.id === id)?.disabled).toBe(true)
     }
   })
@@ -817,7 +817,7 @@ virtualStoreDirMaxLength: 60
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
-    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run']) {
+    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run', 'ui-schedule', 'ui-user-questions']) {
       expect(rows.find(row => row.id === id)?.disabled).toBe(true)
     }
   })

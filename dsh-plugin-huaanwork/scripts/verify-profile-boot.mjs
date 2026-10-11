@@ -473,6 +473,8 @@ try {
     '@deepseek-ai/dsh-client-ui-trajectory',
     '@deepseek-ai/dsh-client-ui-deliverables',
     '@deepseek-ai/dsh-client-ui-workflow-run',
+    '@deepseek-ai/dsh-client-ui-schedule',
+    '@deepseek-ai/dsh-client-ui-user-questions',
     '@deepseek-ai/dsh-client-ui-directory-picker-native',
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)

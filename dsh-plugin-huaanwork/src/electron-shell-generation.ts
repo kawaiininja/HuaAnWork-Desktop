@@ -666,6 +666,11 @@ export class ElectronShellGeneration {
         spec.rendererAccessHeader,
       )
       revealStartupSurface()
+      // Chromium remembers a zoom level per host. This shell always loads from
+      // 127.0.0.1, so a leftover level (smoke sessions landed on -2, about 69%)
+      // shrinks the whole HuaAnWork layout away from the 100% Tauri app.
+      // Shortcuts can still zoom for this session; the next launch starts at 0.
+      renderer.setZoomLevel(0)
       if (isolated) await renderer.loadURL(spec.url)
       else await window.loadURL(spec.url)
       if (isolated) renderer.focus()

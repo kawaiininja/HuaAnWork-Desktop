@@ -1586,7 +1586,7 @@ describe('Electron desktop runtime', () => {
     const zoomInRelease = { preventDefault: vi.fn() }
     zoomListener(zoomInRelease, { type: 'keyUp', control: true, key: '=' })
     expect(zoomInRelease.preventDefault).not.toHaveBeenCalled()
-    expect(electron.webContents.setZoomLevel).toHaveBeenCalledTimes(1)
+    expect(electron.webContents.setZoomLevel).toHaveBeenCalledTimes(2)
 
     const zoomOut = { preventDefault: vi.fn() }
     zoomListener(zoomOut, { type: 'keyDown', control: true, key: '-' })
