@@ -46,7 +46,7 @@ vi.mock('undici', async importOriginal => ({
   ...await importOriginal<Record<string, unknown>>(),
   fetch: registryFetch,
 }))
-// dshmarket 1.66.14 ships its own undici, so the hoisted mock above does not
+// dshmarket 1.66.15 ships its own undici, so the hoisted mock above does not
 // see the registry calls. Mock that copy too.
 vi.mock('../node_modules/dshmarket/node_modules/undici', async importOriginal => ({
   ...await importOriginal<Record<string, unknown>>(),
