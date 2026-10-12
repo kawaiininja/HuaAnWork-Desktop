@@ -432,7 +432,7 @@ test("getBundledSkill reads bundled content and rejects bad names", () => {
   assert.match(explore?.content ?? "", /subagent/);
 });
 
-test("scanBundledSkillEntries covers flat and directory forms, exactly 23 names", () => {
+test("scanBundledSkillEntries covers flat and directory forms, exactly 24 names", () => {
   const entries = scanBundledSkillEntries();
   const byName = new Map(
     entries.map((entry) => [parseSkillMarkdown(readFileSync(entry.path, "utf8")).name, entry.kind]),
@@ -440,21 +440,23 @@ test("scanBundledSkillEntries covers flat and directory forms, exactly 23 names"
   assert.deepEqual(
     [...byName.keys()].sort(),
     [
-      "brainstorming", "darwin-skill", "deep-research", "dispatching-parallel-agents",
-      "explore", "find-skills", "frontend-design", "frontend-dev", "graph", "grill-me",
-      "humanizer", "investigate", "markitdown-skill", "nuwa-skill", "pdf", "pptx",
-      "skill-creator", "skill-vetter", "subagent-driven-development", "systematic-debugging",
+      "brainstorming", "code-review", "darwin-skill", "deep-research",
+      "dispatching-parallel-agents", "explore", "find-skills", "frontend-design",
+      "frontend-dev", "graph", "grill-me", "humanizer", "investigate",
+      "markitdown-skill", "nuwa-skill", "pdf", "pptx", "skill-creator",
+      "skill-vetter", "subagent-driven-development", "systematic-debugging",
       "test-fix", "using-superpowers", "xlsx",
     ],
   );
   assert.equal(byName.get("pdf"), "bundle");
   assert.equal(byName.get("explore"), "flat");
   assert.equal(byName.get("investigate"), "bundle");
+  assert.equal(byName.get("code-review"), "bundle");
 });
 
 test("listBundledSkills covers directory-form skills", () => {
   const names = listBundledSkills().map((skill) => skill.name);
-  assert.equal(names.length, 23);
+  assert.equal(names.length, 24);
   assert.ok(names.includes("pdf") && names.includes("graph"));
   // 每个条目都有非空 description
   for (const skill of listBundledSkills()) assert.ok(skill.description.length > 0, skill.name);
