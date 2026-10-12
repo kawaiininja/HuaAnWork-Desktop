@@ -1444,6 +1444,16 @@ export function prepareDesktopProfile(
     { id: 'approval', config: { policy: 'ask' } },
     { id: 'tools', config: { mode: 'native' } },
     { id: 'agent-loop', config: { agents: [{ id: 'huaanwork', sessionId: sessionIdFor(workspaceRoot), cwd: workspaceRoot, provider: 'deepseek-official', model: 'local' }] } },
+    // L1/L2 复挂：dsh-base 已挂载、dsh-web-app overlay 关闭的三行翻回启用
+    //（docs/superpowers/specs/2026-10-12-agent-toolbox-design.md 裁定 5）。
+    // tool-bash/tool-pwsh 平台二选一，与上游 base patch 的门控同形；
+    // enableRunInBackground: false 使 run_in_background 不进 schema——
+    // jobs/tool-jobs 硬锁定下该参数可见必败（收口裁定，spike §4.6）。
+    { id: 'tool-fs', disabled: false },
+    { id: 'tool-fs-search', disabled: false },
+    process.platform === 'win32'
+      ? { id: 'tool-pwsh', disabled: false, config: { enableRunInBackground: false } }
+      : { id: 'tool-bash', disabled: false, config: { enableRunInBackground: false } },
     { id: 'hmr', disabled: true },
     { id: 'jobs', disabled: true },
     { id: 'tool-jobs', disabled: true },

@@ -10,6 +10,11 @@ export interface RowLike {
   config?: unknown
 }
 
+const shellToolAssertion: RowHitAssertion =
+  process.platform === 'win32'
+    ? { id: 'tool-pwsh', intent: 'override', expectConfig: { enableRunInBackground: false } }
+    : { id: 'tool-bash', intent: 'override', expectConfig: { enableRunInBackground: false } }
+
 export const HUAANWORK_ROW_ASSERTIONS: readonly RowHitAssertion[] = [
   { id: 'llm-deepseek', intent: 'disable' },
   { id: 'approval', intent: 'override', expectConfig: { policy: 'ask' } },
@@ -18,6 +23,9 @@ export const HUAANWORK_ROW_ASSERTIONS: readonly RowHitAssertion[] = [
   { id: 'hmr', intent: 'disable' },
   { id: 'jobs', intent: 'disable' },
   { id: 'tool-jobs', intent: 'disable' },
+  { id: 'tool-fs', intent: 'override' },
+  { id: 'tool-fs-search', intent: 'override' },
+  shellToolAssertion,
   { id: 'web', intent: 'disable' },
   { id: 'web-search-deepseek', intent: 'disable' },
   { id: 'tool-web', intent: 'disable' },

@@ -1259,6 +1259,13 @@ virtualStoreDirMaxLength: 60
       expect(rows.get(id)?.disabled).toBe(true)
     }
 
+    // L1/L2 复挂钉：dsh-base 挂载、web-app overlay 关闭的三行被变体翻回启用。
+    expect(rows.get('tool-fs')?.disabled).toBe(false)
+    expect(rows.get('tool-fs-search')?.disabled).toBe(false)
+    const shellRowId = process.platform === 'win32' ? 'tool-pwsh' : 'tool-bash'
+    expect(rows.get(shellRowId)?.disabled).toBe(false)
+    expect(rows.get(shellRowId)?.config).toMatchObject({ enableRunInBackground: false })
+
     const insertedIds = composedRows.map(row => row.id)
     const expectedOrder = [
       'huaanwork-host',
