@@ -66,7 +66,31 @@ const defaultLaunch: LaunchLike = async () => {
   } as unknown as BrowserLike;
 };
 
+function unsupportedPageUrl(url: string): string | null {
+  let protocol: string;
+  try {
+    protocol = new URL(url).protocol;
+  } catch {
+    return `截图目标地址无法解析：${url}`;
+  }
+  if (protocol === "http:" || protocol === "https:") return null;
+  return `截图目标协议不受支持：${protocol}`;
+}
+
+/** data: / blob: 是文档内嵌资源，不是出网请求。 */
+function isInlineUrl(url: string): boolean {
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === "data:" || protocol === "blob:";
+  } catch {
+    return false;
+  }
+}
+
 export async function screenshot(args: ScreenshotArgs, deps: ScreenshotDeps): Promise<ScreenshotResult> {
+  // 首跳先看协议：公网开关打开也不能用 file: 等协议读本地文件。Chrome 内部的 302 仍由浏览器自己跟。
+  const schemeError = unsupportedPageUrl(args.url);
+  if (schemeError !== null) return { ok: false, error: schemeError };
   if (!deps.checkNetwork() && !isLanEndpoint(args.url)) return { ok: false, error: NETWORK_GATE_ERROR };
 
   const launch = deps.launch ?? defaultLaunch;
@@ -74,10 +98,10 @@ export async function screenshot(args: ScreenshotArgs, deps: ScreenshotDeps): Pr
   try {
     browser = await launch();
   } catch (error) {
-    // 启动失败按消息分流：只有"找不到可执行文件"才是缺 Chrome 的指路文案；
+    // 启动失败按消息分流：只有"找不到可执行文件 / chrome 发行版"才是缺 Chrome 的指路文案；
     // 其他启动错误（权限、profile 锁、协议不支持）按原样报出，避免误导排查方向。
     const message = error instanceof Error ? error.message : String(error);
-    if (/executable|doesn't exist|ENOENT|channel/i.test(message)) {
+    if (/executable|doesn't exist|ENOENT|channel|distribution 'chrome' is not found/i.test(message)) {
       return { ok: false, error: CHROME_MISSING_ERROR };
     }
     return { ok: false, error: `截图失败：${message}` };
@@ -91,11 +115,11 @@ export async function screenshot(args: ScreenshotArgs, deps: ScreenshotDeps): Pr
       height: args.height ?? DEFAULT_VIEWPORT.height,
     });
     // 首跳已在函数入口检查。Playwright goto 会自己跟随 302，子资源也会打到公网。
-    // 公网开关关闭时，任一非局域网请求都中止，避免局域网地址跳到公网仍被画进 PNG。
+    // 公网开关关闭时，data: / blob: 继续；其余非局域网请求中止，避免局域网地址跳到公网仍被画进 PNG。
     if (!deps.checkNetwork() && page.route) {
       await page.route("**/*", async (route) => {
         const url = route.request().url();
-        if (isLanEndpoint(url)) {
+        if (isInlineUrl(url) || isLanEndpoint(url)) {
           await route.continue();
           return;
         }

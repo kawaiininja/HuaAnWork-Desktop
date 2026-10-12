@@ -70,6 +70,57 @@ test("saveImage 缝存在时返回 imageRef；视口与 fullPage 透传", async 
   assert.equal(captured.fullPage, true);
 });
 
+test("Playwright 找不到 chrome 发行版时返回指路错误", async () => {
+  const result = await screenshot(
+    { url: LAN_URL },
+    {
+      checkNetwork: () => true,
+      workspaceRoot: tempWorkspace(),
+      launch: async () => {
+        throw new Error("Chromium distribution 'chrome' is not found");
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error, CHROME_MISSING_ERROR);
+});
+
+test("发行版不受支持不算缺 Chrome", async () => {
+  const result = await screenshot(
+    { url: LAN_URL },
+    {
+      checkNetwork: () => true,
+      workspaceRoot: tempWorkspace(),
+      launch: async () => {
+        throw new Error("Chromium distribution 'chrome' is not supported on darwin");
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.notEqual(result.error, CHROME_MISSING_ERROR);
+    assert.match(result.error, /is not supported on darwin/);
+  }
+});
+
+test("file: 即使允许公网也不启动浏览器", async () => {
+  let launched = false;
+  const result = await screenshot(
+    { url: "file:///etc/passwd" },
+    {
+      checkNetwork: () => true,
+      workspaceRoot: tempWorkspace(),
+      launch: async () => {
+        launched = true;
+        return fakeBrowser(new Uint8Array([1]));
+      },
+    },
+  );
+  assert.equal(launched, false);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error, "截图目标协议不受支持：file:");
+});
+
 test("launch 抛错（无系统 Chrome）返回指路错误", async () => {
   const result = await screenshot(
     { url: LAN_URL },
@@ -130,4 +181,36 @@ test("门控：off 档下后续请求落到公网时中止并返回门控错误"
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.error, NETWORK_GATE_ERROR);
   assert.equal(disposition, "abort");
+});
+
+test("门控：off 档 data: 与 blob: 继续，不记为公网拦截", async () => {
+  const dispositions: Record<string, string> = {};
+  const browser: BrowserLike = {
+    async newPage() {
+      return {
+        async setViewportSize() {},
+        async route(_pattern, handler) {
+          for (const url of ["data:image/png;base64,AA==", "blob:http://127.0.0.1/asset"]) {
+            await handler({
+              request: () => ({ url: () => url }),
+              async abort() { dispositions[url] = "abort"; },
+              async continue() { dispositions[url] = "continue"; },
+            });
+          }
+        },
+        async goto() { throw new Error("net::ERR_FAILED"); },
+        async waitForTimeout() {},
+        async screenshot() { return new Uint8Array([1]); },
+      };
+    },
+    async close() {},
+  };
+  const result = await screenshot(
+    { url: LAN_URL },
+    { checkNetwork: () => false, workspaceRoot: tempWorkspace(), launch: async () => browser },
+  );
+  assert.equal(dispositions["data:image/png;base64,AA=="], "continue");
+  assert.equal(dispositions["blob:http://127.0.0.1/asset"], "continue");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.notEqual(result.error, NETWORK_GATE_ERROR);
 });

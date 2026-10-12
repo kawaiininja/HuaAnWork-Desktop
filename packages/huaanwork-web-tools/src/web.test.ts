@@ -75,3 +75,70 @@ test("抓取失败与非 2xx 返回结构化错误", async () => {
   assert.equal(res.ok, false);
   if (!res.ok) assert.match(res.error, /404/);
 });
+
+test("读体期间超时会结束本次抓取", { timeout: 2_000 }, async () => {
+  const rawFetch: RawFetch = async (_url, init) => ({
+    status: 200,
+    headers: { get: () => "text/plain; charset=utf-8" },
+    body: new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise((_resolve, reject) => {
+          const fail = () => reject(init.signal.reason ?? new Error("aborted"));
+          if (init.signal.aborted) fail();
+          else init.signal.addEventListener("abort", fail, { once: true });
+        });
+      },
+    }),
+  });
+  const result = await webFetch(LAN_URL, { checkNetwork: () => true, rawFetch, timeoutMs: 30 });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error, /读取响应失败/);
+});
+
+test("302 未读的响应体在 webFetch 返回前被取消", async () => {
+  let cancelled = false;
+  let calls = 0;
+  const rawFetch: RawFetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        status: 302,
+        headers: { get: (name) => (name.toLowerCase() === "location" ? `${LAN_URL}/next` : null) },
+        body: new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+      };
+    }
+    return {
+      status: 200,
+      headers: { get: (name) => (name.toLowerCase() === "content-type" ? "text/plain" : null) },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("ok"));
+          controller.close();
+        },
+      }),
+    };
+  };
+  const result = await webFetch(LAN_URL, { checkNetwork: () => true, rawFetch });
+  assert.equal(cancelled, true);
+  assert.equal(result.ok, true);
+});
+
+test("非 2xx 的响应体被取消", async () => {
+  let cancelled = false;
+  const rawFetch: RawFetch = async () => ({
+    status: 404,
+    headers: { get: () => null },
+    body: new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    }),
+  });
+  const result = await webFetch(LAN_URL, { checkNetwork: () => true, rawFetch });
+  assert.equal(result.ok, false);
+  assert.equal(cancelled, true);
+});
