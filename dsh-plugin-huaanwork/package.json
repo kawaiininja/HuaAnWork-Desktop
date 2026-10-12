@@ -360,6 +360,7 @@
     "fs-ext": "2.1.1",
     "koffi": "3.1.5",
     "node-addon-require-builtin": "^0.1.6",
+    "playwright-core": "1.63.0",
     "pnpm": "11.8.0",
     "react": "18.3.1",
     "selfsigned": "5.5.0",

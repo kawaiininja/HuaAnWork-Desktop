@@ -11434,6 +11434,7 @@ __metadata:
   dependencies:
     "@huaanwork/policy": "npm:*"
     "@types/node": "npm:^22.20.0"
+    playwright-core: "npm:1.63.0"
     typescript: "npm:~5.6.3"
   languageName: unknown
   linkType: soft
@@ -16385,6 +16386,7 @@ __metadata:
     lucide-react: "npm:^1.33.0"
     node-addon-require-builtin: "npm:^0.1.6"
     node-gyp: "npm:13.0.1"
+    playwright-core: "npm:1.63.0"
     pnpm: "npm:11.8.0"
     react: "npm:18.3.1"
     react-dom: "npm:18.3.1"
