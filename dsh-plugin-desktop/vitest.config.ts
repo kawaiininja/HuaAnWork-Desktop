@@ -1,6 +1,12 @@
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  resolve: {
+    // dshmarket ships a nested undici. The compat spec mocks the package name
+    // `undici`; without dedupe that mock hits this workspace's copy and the
+    // nested copy still calls the live registry.
+    dedupe: ['undici'],
+  },
   test: {
     environment: 'node',
     include: ['tests/**/*.spec.ts'],
