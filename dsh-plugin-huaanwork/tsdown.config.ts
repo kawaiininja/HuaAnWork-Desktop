@@ -40,6 +40,7 @@ export default defineConfig([
       'huaanwork-guardrails/present-as': 'src/huaanwork-guardrails/present-as.ts',
       'huaanwork-guardrails/model': 'src/huaanwork-guardrails/huaanwork-model.ts',
       'huaanwork-guardrails/git': 'src/huaanwork-guardrails/git.ts',
+      'huaanwork-guardrails/web': 'src/huaanwork-guardrails/web.ts',
       'huaanwork-guardrails/skills': 'src/huaanwork-guardrails/skills.ts',
       'huaanwork-guardrails/agent-tool': 'src/huaanwork-guardrails/agent-tool.ts',
       'huaanwork-guardrails/agent-mcp': 'src/huaanwork-guardrails/agent-mcp.ts',

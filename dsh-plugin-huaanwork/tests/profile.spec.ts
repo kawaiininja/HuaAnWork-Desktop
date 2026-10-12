@@ -1273,6 +1273,7 @@ virtualStoreDirMaxLength: 60
       'huaanwork-policy',
       'huaanwork-sandbox-cwd',
       'huaanwork-git',
+      'huaanwork-web',
       'huaanwork-agent-tool',
       'huaanwork-agent-mcp',
       'huaanwork-approval',

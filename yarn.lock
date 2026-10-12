@@ -11428,7 +11428,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@huaanwork/web-tools@workspace:packages/huaanwork-web-tools":
+"@huaanwork/web-tools@npm:*, @huaanwork/web-tools@workspace:packages/huaanwork-web-tools":
   version: 0.0.0-use.local
   resolution: "@huaanwork/web-tools@workspace:packages/huaanwork-web-tools"
   dependencies:
@@ -16362,6 +16362,7 @@ __metadata:
     "@huaanwork/git-tools": "npm:*"
     "@huaanwork/model": "npm:*"
     "@huaanwork/policy": "npm:*"
+    "@huaanwork/web-tools": "npm:*"
     "@tailwindcss/vite": "npm:^4"
     "@types/js-yaml": "npm:^4.0.9"
     "@types/mdast": "npm:^4.0.4"

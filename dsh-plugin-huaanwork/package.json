@@ -100,6 +100,10 @@
       "types": "./lib/types/huaanwork-guardrails/git.d.ts",
       "default": "./lib/huaanwork-guardrails/git.js"
     },
+    "./huaanwork-guardrails/web": {
+      "types": "./lib/types/huaanwork-guardrails/web.d.ts",
+      "default": "./lib/huaanwork-guardrails/web.js"
+    },
     "./huaanwork-guardrails/skills": {
       "types": "./lib/types/huaanwork-guardrails/skills.d.ts",
       "default": "./lib/huaanwork-guardrails/skills.js"
@@ -380,6 +384,7 @@
     "@huaanwork/git-tools": "*",
     "@huaanwork/model": "*",
     "@huaanwork/policy": "*",
+    "@huaanwork/web-tools": "*",
     "@tailwindcss/vite": "^4",
     "@types/js-yaml": "^4.0.9",
     "@types/mdast": "^4.0.4",

@@ -22,6 +22,8 @@ const ALLOWED_TOOLS = new Set([
   "git_checkout",
   "git_commit",
   "git_push",
+  "web_fetch",
+  "screenshot",
   "call_host_tool",
 ]);
 

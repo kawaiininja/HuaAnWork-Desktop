@@ -1475,6 +1475,7 @@ export function prepareDesktopProfile(
         { id: 'huaanwork-policy', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/policy' },
         { id: 'huaanwork-sandbox-cwd', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/sandbox-cwd' },
         { id: 'huaanwork-git', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/git' },
+        { id: 'huaanwork-web', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/web' },
         { id: 'huaanwork-agent-tool', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/agent-tool' },
         { id: 'huaanwork-agent-mcp', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/agent-mcp' },
         { id: 'huaanwork-approval', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/approval' },
