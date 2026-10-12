@@ -23,7 +23,7 @@ interface CompositionPatch {
 /**
  * Guardrail 锁层 patch 的 19 个 id'd 行(profile.ts 锁层 push 逐字)——守卫按这份
  * 清单识别锁层;改锁行 id 必须同步这里(守卫会红)。
- * tool-fs / tool-fs-search / 平台 shell 是复挂进锁层的行,shell 与 profile.ts 一样只取当前平台一个。
+ * 本 spec 的 prepareDesktopProfile 一律传入 darwin,故锁层 id 是 tool-bash,即便宿主是 win32。
  */
 const GUARDRAIL_LOCK_IDS: ReadonlySet<string> = new Set([
   'llm-deepseek',
@@ -32,7 +32,7 @@ const GUARDRAIL_LOCK_IDS: ReadonlySet<string> = new Set([
   'agent-loop',
   'tool-fs',
   'tool-fs-search',
-  process.platform === 'win32' ? 'tool-pwsh' : 'tool-bash',
+  'tool-bash',
   'hmr',
   'jobs',
   'tool-jobs',
