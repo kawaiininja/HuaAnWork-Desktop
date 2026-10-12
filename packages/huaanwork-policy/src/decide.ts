@@ -92,6 +92,11 @@ function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
     case "git_status":
     case "git_diff":
       return ALLOW;
+    // 出网工具：策略层不 ask（避免每次抓取弹审批），门控由 allow_network 总闸
+    // 与工具内 isLanEndpoint 判定承担（spec 裁定 3 / policy 增量汇总）。
+    case "web_fetch":
+    case "screenshot":
+      return ALLOW;
     case "bash":
     case "pwsh":
       return decideShell(input, mode, seam);

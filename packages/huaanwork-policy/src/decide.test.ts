@@ -335,3 +335,12 @@ test("explained APIs: would-be-ask denies at guard seam carry the approval reaso
     decision: "allow",
   });
 });
+
+test("web_fetch/screenshot 三档均 allow（出网由 allow_network 总闸负责）", () => {
+  for (const mode of ["ask", "smart", "full"] as const) {
+    for (const name of ["web_fetch", "screenshot"]) {
+      assert.equal(preExecute({ name, args: {}, workspaceRoot: "/ws" }, mode), "allow");
+      assert.equal(guard({ name, args: {}, workspaceRoot: "/ws" }, mode), "allow");
+    }
+  }
+});
