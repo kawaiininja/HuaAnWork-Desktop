@@ -28,37 +28,25 @@ function trimIncompleteUtf8(bytes: Uint8Array): Uint8Array {
   return bytes;
 }
 
-/**
- * 从可读流边读边计字节数，超过 maxBytes 时取消 reader 并截断，返回已读解码文本及截断标志。
- * stream 为 null 时直接返回空文本且未截断。
- */
-export async function readCappedText(
+export async function readCappedBytes(
   stream: ReadableStream<Uint8Array> | null,
   maxBytes: number,
-): Promise<{ text: string; truncated: boolean }> {
-  if (stream === null) {
-    return { text: "", truncated: false };
-  }
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  if (stream === null) return { bytes: new Uint8Array(), truncated: false };
   if (maxBytes <= 0) {
-    try {
-      await stream.cancel();
-    } catch {
-      // 忽略取消异常
-    }
-    return { text: "", truncated: true };
+    try { await stream.cancel(); } catch { /* 忽略取消异常 */ }
+    return { bytes: new Uint8Array(), truncated: true };
   }
 
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
   let truncated = false;
-
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       if (!value || value.byteLength === 0) continue;
-
       if (totalBytes + value.byteLength > maxBytes) {
         const needed = maxBytes - totalBytes;
         if (needed > 0) {
@@ -66,32 +54,30 @@ export async function readCappedText(
           totalBytes += needed;
         }
         truncated = true;
-        try {
-          await reader.cancel();
-        } catch {
-          // 忽略取消异常
-        }
+        try { await reader.cancel(); } catch { /* 忽略取消异常 */ }
         break;
-      } else {
-        chunks.push(value);
-        totalBytes += value.byteLength;
       }
+      chunks.push(value);
+      totalBytes += value.byteLength;
     }
   } finally {
     reader.releaseLock();
   }
 
-  let merged = new Uint8Array(totalBytes);
+  const bytes = new Uint8Array(totalBytes);
   let offset = 0;
   for (const chunk of chunks) {
-    merged.set(chunk, offset);
+    bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  return { bytes, truncated };
+}
 
-  if (truncated) {
-    merged = trimIncompleteUtf8(merged) as Uint8Array<ArrayBuffer>;
-  }
-
-  const text = new TextDecoder("utf-8").decode(merged);
-  return { text, truncated };
+export async function readCappedText(
+  stream: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  const capped = await readCappedBytes(stream, maxBytes);
+  const bytes = capped.truncated ? trimIncompleteUtf8(capped.bytes) : capped.bytes;
+  return { text: new TextDecoder("utf-8").decode(bytes), truncated: capped.truncated };
 }

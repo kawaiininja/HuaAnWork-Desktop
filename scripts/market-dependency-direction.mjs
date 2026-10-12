@@ -22,6 +22,7 @@ const DESKTOP_SOURCE_ROOTS = [
   'packages/huaanwork-policy/src',
   'packages/huaanwork-model/src',
   'packages/huaanwork-git-tools/src',
+  'packages/huaanwork-web-tools/src',
 ]
 
 function normalizePath(path) {

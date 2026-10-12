@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CATALOG_BODY_LIMIT, readCappedText } from "./http-cap.ts";
+import { CATALOG_BODY_LIMIT, readCappedBytes, readCappedText } from "./http-cap.ts";
 
 function createStream(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
@@ -39,4 +39,35 @@ test("readCappedText caps stream exceeding maxBytes and sets truncated: true", a
 
 test("CATALOG_BODY_LIMIT is 1 MiB", () => {
   assert.equal(CATALOG_BODY_LIMIT, 1024 * 1024);
+});
+
+test("readCappedBytes 按额度截原始字节并取消 reader", async () => {
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3, 4, 5]));
+      controller.enqueue(new Uint8Array([6, 7, 8]));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const result = await readCappedBytes(stream, 4);
+  assert.deepEqual([...result.bytes], [1, 2, 3, 4]);
+  assert.equal(result.truncated, true);
+  assert.equal(cancelled, true);
+});
+
+test("readCappedText 仍修掉被截断的半个 UTF-8 序列", async () => {
+  // "a" + "€"(e2 82 ac)；上限 2 字节会切在欧元的首字节上。
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([0x61, 0xe2, 0x82, 0xac]));
+      controller.close();
+    },
+  });
+  const result = await readCappedText(stream, 2);
+  assert.equal(result.truncated, true);
+  assert.equal(result.text, "a");
+  assert.ok(Buffer.byteLength(result.text) <= 2);
 });

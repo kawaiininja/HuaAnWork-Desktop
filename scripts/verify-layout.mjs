@@ -42,6 +42,7 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'packages/huaanwork-policy',
   'packages/huaanwork-model',
   'packages/huaanwork-git-tools',
+  'packages/huaanwork-web-tools',
   'market-server',
   'update-server',
 ])) {

@@ -17,6 +17,7 @@
     "packages/huaanwork-policy",
     "packages/huaanwork-model",
     "packages/huaanwork-git-tools",
+    "packages/huaanwork-web-tools",
     "market-server",
     "update-server"
   ],
@@ -1342,7 +1343,7 @@
   "scripts": {
     "build": "yarn market:prepare && yarn workspace dsh-community-market build && yarn workspace dsh-plugin-desktop build && yarn workspace dsh-plugin-desktop-beta build && yarn workspace dsh-desktop-next build && yarn workspace dsh-plugin-huaanwork build && yarn workspace market-server build && yarn workspace update-server build",
     "typecheck": "yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-plugin-desktop-beta typecheck && yarn workspace dsh-plugin-huaanwork typecheck && yarn workspace dsh-community-market typecheck && yarn workspace dsh-desktop-next typecheck && yarn workspace market-server typecheck && yarn workspace update-server typecheck",
-    "test": "yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace dsh-desktop-next test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test && yarn workspace market-server test && yarn workspace update-server test",
+    "test": "yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace dsh-desktop-next test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test && yarn workspace @huaanwork/web-tools test && yarn workspace market-server test && yarn workspace update-server test",
     "test:bilingual-docs": "node --test scripts/bilingual-docs.test.mjs",
     "check:bilingual-docs": "yarn test:bilingual-docs && node scripts/verify-bilingual-docs.mjs",
     "test:architecture-gates": "node --test scripts/market-dependency-direction.test.mjs",

@@ -11428,6 +11428,16 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@huaanwork/web-tools@workspace:packages/huaanwork-web-tools":
+  version: 0.0.0-use.local
+  resolution: "@huaanwork/web-tools@workspace:packages/huaanwork-web-tools"
+  dependencies:
+    "@huaanwork/policy": "npm:*"
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:~5.6.3"
+  languageName: unknown
+  linkType: soft
+
 "@img/colour@npm:^1.1.0":
   version: 1.1.0
   resolution: "@img/colour@npm:1.1.0"

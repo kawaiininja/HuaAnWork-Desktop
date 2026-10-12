@@ -116,10 +116,11 @@ describe('published package surface', () => {
       'packages/huaanwork-policy',
       'packages/huaanwork-model',
       'packages/huaanwork-git-tools',
+      'packages/huaanwork-web-tools',
       'market-server',
       'update-server',
     ]
-    expect(workspaceManifest.workspaces).toHaveLength(11)
+    expect(workspaceManifest.workspaces).toHaveLength(12)
     for (const ws of EXPECTED_WORKSPACES) {
       expect(workspaceManifest.workspaces).toContain(ws)
     }
