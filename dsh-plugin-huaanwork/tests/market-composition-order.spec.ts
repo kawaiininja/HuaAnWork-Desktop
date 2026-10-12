@@ -21,14 +21,18 @@ interface CompositionPatch {
 }
 
 /**
- * Guardrail 锁层 patch 的 16 个 id'd 行(profile.ts:962-978 逐字)——守卫按这份
+ * Guardrail 锁层 patch 的 19 个 id'd 行(profile.ts 锁层 push 逐字)——守卫按这份
  * 清单识别锁层;改锁行 id 必须同步这里(守卫会红)。
+ * tool-fs / tool-fs-search / 平台 shell 是复挂进锁层的行,shell 与 profile.ts 一样只取当前平台一个。
  */
 const GUARDRAIL_LOCK_IDS: ReadonlySet<string> = new Set([
   'llm-deepseek',
   'approval',
   'tools',
   'agent-loop',
+  'tool-fs',
+  'tool-fs-search',
+  process.platform === 'win32' ? 'tool-pwsh' : 'tool-bash',
   'hmr',
   'jobs',
   'tool-jobs',
@@ -149,7 +153,7 @@ describe('market composition order (provider layer before guardrail lock layer)'
     const order = assertMarketCompositionOrder(patches)
 
     expect(prepared.market.effective).toBe('disabled')
-    // 默认 disabled:无 market row;锁层连续 17 项(16 个 id'd 行 + 1 个 insert 块),
+    // 默认 disabled:无 market row;锁层连续 20 项(19 个 id'd 行 + 1 个 insert 块),
     // 其后是 Desktop 应用写 config 层(settings 等,profile.ts:1024 起)——非本断言范围。
     expect(order.marketPatchCount).toBe(0)
     expect(order.lockLayerSize).toBe(GUARDRAIL_LOCK_IDS.size + 1)

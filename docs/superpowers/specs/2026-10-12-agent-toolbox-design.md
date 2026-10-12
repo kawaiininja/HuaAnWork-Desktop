@@ -103,6 +103,13 @@ dsh-plugin-huaanwork/src/huaanwork-guardrails/
 | 截应用自身窗口 | 不做（需跨 Rust/进程边界） |
 | 持久记忆 | 不属于工具面，未纳入本轮 |
 
+## 威胁模型登记（2026-10-12 工具箱扩展）
+
+1. **bash 出网旁路**：`allow_network` 总闸只管 web_fetch/screenshot/模型端点；`bash` 执行的命令（如 curl）不受其门控，由 `decideShell` 三档护栏负责（full 档下 curl 直接放行，ask/smart 档弹审批或按元字符规则拒绝）。
+2. **write/edit 沙箱越级参数**：上游 tool-fs 在 `fs-sandbox`(workspace-write) 下给 write/edit 展开 `sandbox_permissions`/`justification` 参数；实测只能越过沙箱、越不过 huaanwork-policy 的 pre-execute 判定（spike §4.5），deny 即终局。
+3. **nohup/& 自管后台**：后台任务管理面本轮不开放（jobs/tool-jobs 硬锁定），但 full 档下模型可用 `nohup … &` 自管后台进程（spike §4.6 实测），产物无管理面可回收；开放 job_* 管理面是后续独立裁定。
+4. **链路本地元数据地址**：`isLanEndpoint` 把整段 `169.254.0.0/16`（含 `169.254.169.254`）和 `*.local` 视为局域网。`allow_network=off` 时 `web_fetch` / `screenshot` 仍放行这些地址。这是复用模型端点谓词的结果，本轮不改谓词；云主机上 agent 因此可以 GET 实例元数据服务。
+
 ## 实施验证项（动手时先确认）
 
 1. `screenshot` 的返回形态：确认工具侧能拿到 attachment 服务并构造 `ImageBlock`（需要 `ImageAttachmentRef`，不是裸 base64；上游 `browser-use-stagehand-native` README 有同形做法可参照）—— 不可达则只走 PNG 路径兜底。
