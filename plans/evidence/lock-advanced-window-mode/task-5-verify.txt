@@ -1,0 +1,18 @@
+corepack yarn workspace dsh-plugin-huaanwork vitest run tests/profile.spec.ts tests/profile-preferences.spec.ts tests/setup-wizard-settings.spec.ts tests/setup-wizard-native-ui.spec.ts tests/setup-wizard-copy.spec.ts tests/setup-wizard-window.spec.ts tests/client-desktop-settings.spec.ts tests/electron-runtime.spec.ts tests/safe-mode.spec.ts tests/compatibility-shell.spec.ts tests/window-options.spec.ts tests/host-runtime-bridge.spec.ts tests/plugin.spec.ts
+
+ Test Files  13 passed (13)
+      Tests  353 passed | 1 skipped (354)
+   Duration  1.66s
+
+corepack yarn workspace dsh-plugin-huaanwork typecheck
+exit 0
+
+node scripts/verify-desktop-variants.mjs
+exit 1
+Desktop variant source drift is not declared:
+- [beta↔huaanwork] src/electron-shell-generation.ts
+
+node --test scripts/verify-desktop-variants.test.mjs
+pins the beta↔huaanwork divergence budget so growth is always explicit: pass
+allowedDifferences length 22, no duplicates
+the full-green subtest fails only on the pre-existing electron-shell-generation.ts drift

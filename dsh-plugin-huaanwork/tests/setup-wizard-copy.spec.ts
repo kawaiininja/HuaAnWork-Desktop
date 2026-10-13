@@ -131,7 +131,11 @@ describe('Desktop Setup Wizard copy and contract', () => {
     // Windows has no selectable material; the removed Mica value is rejected.
     expect(isDesktopSetupWizardInput({ ...input, windowsMaterial: 'mica' })).toBe(false)
     expect(isDesktopSetupWizardInput({ ...input, micaSupported: true })).toBe(false)
-    expect(desktopSetupWizardSelectionIsAvailable(input, input)).toBe(true)
+    expect(desktopSetupWizardSelectionIsAvailable(input, input)).toBe(false)
+    expect(desktopSetupWizardSelectionIsAvailable(
+      { ...input, mode: 'advanced', openBrowser: false, networkExposure: 'loopback' },
+      { platform: 'win32' },
+    )).toBe(true)
     expect(desktopSetupWizardSelectionIsAvailable(
       { ...input, mode: 'extended', windowsMaterial: 'off' },
       { platform: 'linux' },
@@ -147,7 +151,7 @@ describe('Desktop Setup Wizard copy and contract', () => {
     expect(desktopSetupWizardSelectionIsAvailable(
       { ...input, openBrowser: true, networkExposure: 'lan' },
       { platform: 'win32' },
-    )).toBe(true)
+    )).toBe(false)
     expect(desktopSetupWizardSelectionIsAvailable(
       { ...input, mode: 'advanced', openBrowser: true, networkExposure: 'lan' },
       { platform: 'win32' },

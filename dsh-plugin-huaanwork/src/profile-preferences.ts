@@ -179,16 +179,19 @@ function normalizedPreferences(
   const mode = assertMode(value.mode, error)
   if (typeof value.openBrowser !== 'boolean') throw error('openBrowser must be a boolean')
   const networkExposure = assertExposure(value.networkExposure, error)
-  if (value.openBrowser && mode !== 'compatibility') {
-    throw error('openBrowser requires compatibility mode')
-  }
-  if (networkExposure === 'lan' && !value.openBrowser) {
-    throw error('LAN exposure requires openBrowser')
+  const shellLocked = process.platform === 'darwin' || process.platform === 'win32'
+  if (!shellLocked) {
+    if (value.openBrowser && mode !== 'compatibility') {
+      throw error('openBrowser requires compatibility mode')
+    }
+    if (networkExposure === 'lan' && !value.openBrowser) {
+      throw error('LAN exposure requires openBrowser')
+    }
   }
   return Object.freeze({
-    mode,
-    openBrowser: value.openBrowser,
-    networkExposure,
+    mode: shellLocked ? 'advanced' : mode,
+    openBrowser: shellLocked ? false : value.openBrowser,
+    networkExposure: shellLocked ? 'loopback' : networkExposure,
     notifications: normalizedNotifications(value.notifications, error),
     aaEnabled: value.aaEnabled === true,
     market: assertMarket(value.market, error),

@@ -54,26 +54,31 @@ export type DesktopSetupWizardStep =
 
 export const DESKTOP_SETUP_WIZARD_STEPS = Object.freeze([
   'welcome',
-  'mode',
   'material',
   'market',
   'aa',
   'notifications',
-  'browser',
   'success',
 ] as const satisfies readonly DesktopSetupWizardStep[])
+
+function desktopSetupWizardStepIndex(step: DesktopSetupWizardStep): number {
+  for (let index = 0; index < DESKTOP_SETUP_WIZARD_STEPS.length; index += 1) {
+    if (DESKTOP_SETUP_WIZARD_STEPS[index] === step) return index
+  }
+  return -1
+}
 
 export function previousDesktopSetupWizardStep(
   step: DesktopSetupWizardStep,
 ): DesktopSetupWizardStep | undefined {
-  const index = DESKTOP_SETUP_WIZARD_STEPS.indexOf(step)
+  const index = desktopSetupWizardStepIndex(step)
   return index > 0 ? DESKTOP_SETUP_WIZARD_STEPS[index - 1] : undefined
 }
 
 export function nextDesktopSetupWizardStep(
   step: DesktopSetupWizardStep,
 ): DesktopSetupWizardStep | undefined {
-  const index = DESKTOP_SETUP_WIZARD_STEPS.indexOf(step)
+  const index = desktopSetupWizardStepIndex(step)
   return index >= 0 && index < DESKTOP_SETUP_WIZARD_STEPS.length - 1
     ? DESKTOP_SETUP_WIZARD_STEPS[index + 1]
     : undefined
@@ -119,7 +124,19 @@ export function decodeDesktopSetupWizardInput(search: string): DesktopSetupWizar
   return value
 }
 
-function normalizedSelection(input: DesktopSetupWizardInput): DesktopSetupWizardSelection {
+export function normalizedSelection(input: DesktopSetupWizardInput): DesktopSetupWizardSelection {
+  if (input.platform === 'darwin' || input.platform === 'win32') {
+    return {
+      mode: 'advanced',
+      macosMaterial: input.macosMaterial,
+      windowsMaterial: input.windowsMaterial,
+      openBrowser: false,
+      networkExposure: 'loopback',
+      market: 'disabled',
+      aaEnabled: input.aaEnabled === true,
+      notifications: { ...input.notifications },
+    }
+  }
   const mode = input.platform === 'linux' ? 'compatibility' : input.mode
   const browserAccess = mode === 'compatibility' && (input.openBrowser || input.networkExposure === 'lan')
   return {
@@ -784,7 +801,7 @@ export function SetupWizardApp({ embedded }: { embedded?: EmbeddedSetupWizard } 
     const previous = previousDesktopSetupWizardStep(step)
     if (previous !== undefined) setStep(previous)
   }
-  const stepIndex = DESKTOP_SETUP_WIZARD_STEPS.indexOf(step)
+  const stepIndex = desktopSetupWizardStepIndex(step)
   return <>{embedded ? null : <DesktopFrame />}<div ref={wizard} className={embedded ? 'dshSetupWizard' : undefined} lang={locale}>
   {embedded && <header className="dshSetupProgress">
     <ol aria-label={locale === 'zh' ? '引导进度' : 'Setup progress'}>{DESKTOP_SETUP_WIZARD_STEPS.map((item, index) => <li key={item} aria-current={item === step ? 'step' : undefined}><span className="sr-only">{index + 1}</span></li>)}</ol>
@@ -799,7 +816,10 @@ export function SetupWizardApp({ embedded }: { embedded?: EmbeddedSetupWizard } 
           embedded={Boolean(embedded)}
           copy={copy}
           onSkip={skip}
-          onStart={() => { setStep('mode') }}
+          onStart={() => {
+            const next = nextDesktopSetupWizardStep('welcome')
+            if (next !== undefined) setStep(next)
+          }}
           profileName={input.profileName}
         />
         : step === 'success'

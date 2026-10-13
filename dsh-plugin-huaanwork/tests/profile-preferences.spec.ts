@@ -43,6 +43,18 @@ const PREFERENCES: DesktopProfilePreferences = Object.freeze({
   market: 'community-market',
 })
 
+const shellLocked = process.platform === 'darwin' || process.platform === 'win32'
+
+function persistedShell(preferences: DesktopProfilePreferences): DesktopProfilePreferences {
+  if (!shellLocked) return preferences
+  return {
+    ...preferences,
+    mode: 'advanced',
+    openBrowser: false,
+    networkExposure: 'loopback',
+  }
+}
+
 function temporaryDirectory(label: string): string {
   const directory = mkdtempSync(join(tmpdir(), label))
   temporaryDirectories.push(directory)
@@ -83,7 +95,7 @@ describe('Desktop Profile preferences', () => {
       const update = desktopProfilePreferencesFromSettings(stored, stored.notifications, stored.market, enabled)
       await writeDesktopProfilePreferences(userData, profile, update)
       expect(readDesktopProfilePreferences(userData, profile)).toMatchObject({
-        ...PREFERENCES, aaEnabled: enabled,
+        ...persistedShell(PREFERENCES), aaEnabled: enabled,
       })
     }
   })
@@ -139,7 +151,7 @@ describe('Desktop Profile preferences', () => {
       .resolves.toEqual({
         version: 1,
         profileHash: workHash,
-        ...PREFERENCES,
+        ...persistedShell(PREFERENCES),
         recordedAt: RECORDED_AT,
       })
     await writeDesktopProfilePreferences(userData, personal, {
@@ -194,14 +206,6 @@ describe('Desktop Profile preferences', () => {
     } as DesktopProfilePreferences, RECORDED_AT)).rejects.toThrow('exactly the supported fields')
     await expect(writeDesktopProfilePreferences(userData, profile, {
       ...PREFERENCES,
-      mode: 'advanced',
-    }, RECORDED_AT)).rejects.toThrow('openBrowser requires compatibility mode')
-    await expect(writeDesktopProfilePreferences(userData, profile, {
-      ...PREFERENCES,
-      openBrowser: false,
-    }, RECORDED_AT)).rejects.toThrow('LAN exposure requires openBrowser')
-    await expect(writeDesktopProfilePreferences(userData, profile, {
-      ...PREFERENCES,
       notifications: {
         ...PREFERENCES.notifications,
         extra: true,
@@ -210,7 +214,76 @@ describe('Desktop Profile preferences', () => {
     await expect(writeDesktopProfilePreferences(userData, profile, PREFERENCES, '2026-08-28'))
       .rejects.toThrow('recordedAt')
 
-    expect(readDesktopProfilePreferences(userData, profile)).toBeUndefined()
+    if (shellLocked) {
+      await expect(writeDesktopProfilePreferences(userData, profile, {
+        ...PREFERENCES,
+        mode: 'advanced',
+      }, RECORDED_AT)).resolves.toMatchObject({
+        mode: 'advanced',
+        openBrowser: false,
+        networkExposure: 'loopback',
+      })
+      await expect(writeDesktopProfilePreferences(userData, profile, {
+        ...PREFERENCES,
+        mode: 'extended',
+        openBrowser: true,
+        networkExposure: 'lan',
+      }, RECORDED_AT)).resolves.toMatchObject({
+        mode: 'advanced',
+        openBrowser: false,
+        networkExposure: 'loopback',
+      })
+    } else {
+      await expect(writeDesktopProfilePreferences(userData, profile, {
+        ...PREFERENCES,
+        mode: 'advanced',
+      }, RECORDED_AT)).rejects.toThrow('openBrowser requires compatibility mode')
+      await expect(writeDesktopProfilePreferences(userData, profile, {
+        ...PREFERENCES,
+        openBrowser: false,
+      }, RECORDED_AT)).rejects.toThrow('LAN exposure requires openBrowser')
+      await expect(writeDesktopProfilePreferences(userData, profile, {
+        ...PREFERENCES,
+        mode: 'extended',
+        openBrowser: true,
+        networkExposure: 'lan',
+      }, RECORDED_AT)).rejects.toThrow('openBrowser requires compatibility mode')
+      expect(readDesktopProfilePreferences(userData, profile)).toBeUndefined()
+    }
+  })
+
+  it('stores compatibility browser access as the locked shell on macOS and Windows', async () => {
+    const userData = temporaryDirectory('dsh-profile-preferences-lock-')
+    const profile = temporaryDirectory('dsh-profile-preferences-lock-profile-')
+    const written = await writeDesktopProfilePreferences(userData, profile, {
+      ...PREFERENCES,
+      mode: 'compatibility',
+      openBrowser: true,
+      networkExposure: 'lan',
+    }, RECORDED_AT)
+    const read = readDesktopProfilePreferences(userData, profile)
+    if (shellLocked) {
+      expect(written).toMatchObject({ mode: 'advanced', openBrowser: false, networkExposure: 'loopback' })
+      expect(read).toMatchObject({ mode: 'advanced', openBrowser: false, networkExposure: 'loopback' })
+    } else {
+      expect(written).toMatchObject({ mode: 'compatibility', openBrowser: true, networkExposure: 'lan' })
+      expect(read).toMatchObject({ mode: 'compatibility', openBrowser: true, networkExposure: 'lan' })
+    }
+  })
+
+  it('rejects a preference mode outside the three legal strings', () => {
+    const userData = temporaryDirectory('dsh-profile-preferences-mode-')
+    const profile = temporaryDirectory('dsh-profile-preferences-mode-profile-')
+    writeRawState(userData, profile, {
+      version: 1,
+      profileHash: desktopProfilePreferencesProfileHash(profile),
+      ...PREFERENCES,
+      mode: 'desktop',
+      recordedAt: RECORDED_AT,
+    })
+    expect(() => readDesktopProfilePreferences(userData, profile)).toThrow(
+      'mode must be compatibility, extended, or advanced',
+    )
   })
 
   it('rejects malformed, mismatched, and oversized existing state', async () => {

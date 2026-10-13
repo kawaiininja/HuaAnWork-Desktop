@@ -1,0 +1,8 @@
+node scripts/verify-desktop-variants.mjs
+exit 1
+
+Error: Desktop variant source drift is not declared:
+- [beta↔huaanwork] src/electron-shell-generation.ts
+
+No new undeclared path for profile.ts, profile-preferences.ts, App.tsx, setup-wizard-contract.ts, DesktopSettingsSection.tsx, or electron-runtime.ts.
+Allowlist was not edited.

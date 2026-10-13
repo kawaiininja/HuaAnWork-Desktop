@@ -12,6 +12,7 @@ import {
   DESKTOP_SETUP_WIZARD_STEPS,
   desktopSetupWizardSkipRequiresLanAcknowledgement,
   nextDesktopSetupWizardStep,
+  normalizedSelection,
   previousDesktopSetupWizardStep,
   resolveDesktopSetupWizardBrowserAccessRequest,
   SetupWizardBrowserCompatibilityConfirmation,
@@ -61,7 +62,7 @@ const selection: DesktopSetupWizardSelection = {
 const copy = desktopSetupWizardCopy('zh')
 
 function renderStep(
-  step: Exclude<(typeof DESKTOP_SETUP_WIZARD_STEPS)[number], 'welcome' | 'success'>,
+  step: 'mode' | 'material' | 'market' | 'aa' | 'notifications' | 'browser',
   current: DesktopSetupWizardSelection = selection,
 ): string {
   return renderToStaticMarkup(createElement(SetupWizardStepPage, {
@@ -98,37 +99,42 @@ function elementTree(node: ReactNode): readonly ReactElement[] {
 afterEach(() => { vi.unstubAllGlobals() })
 
 describe('Setup Wizard step flow', () => {
-  it('starts with an introduction and keeps browser access as the final setting page', () => {
+  it('starts with an introduction and continues at the material page', () => {
     expect(DESKTOP_SETUP_WIZARD_STEPS).toEqual([
       'welcome',
-      'mode',
       'material',
       'market',
       'aa',
       'notifications',
-      'browser',
       'success',
     ])
+    expect(nextDesktopSetupWizardStep('welcome')).toBe('material')
+    expect(normalizedSelection({ ...input, platform: 'win32', mode: 'compatibility', openBrowser: true, networkExposure: 'lan' })).toMatchObject({
+      mode: 'advanced',
+      openBrowser: false,
+      networkExposure: 'loopback',
+    })
+    expect(normalizedSelection({ ...input, platform: 'linux', mode: 'extended', openBrowser: true, networkExposure: 'lan' })).toMatchObject({
+      mode: 'compatibility',
+      openBrowser: true,
+      networkExposure: 'lan',
+    })
   })
 
   it('moves only between adjacent pages and stops at both boundaries', () => {
     expect(DESKTOP_SETUP_WIZARD_STEPS.map(step => previousDesktopSetupWizardStep(step))).toEqual([
       undefined,
       'welcome',
-      'mode',
       'material',
       'market',
       'aa',
       'notifications',
-      'browser',
     ])
     expect(DESKTOP_SETUP_WIZARD_STEPS.map(step => nextDesktopSetupWizardStep(step))).toEqual([
-      'mode',
       'material',
       'market',
       'aa',
       'notifications',
-      'browser',
       'success',
       undefined,
     ])
@@ -313,7 +319,7 @@ describe('Setup Wizard navigation and completion', () => {
       onBack: () => {},
       onNext: () => {},
       onSkip: () => {},
-      step: 'mode',
+      step: 'material',
     }))
     expect(markup).toContain(`aria-label="${copy.back}"`)
     expect(markup).not.toMatch(new RegExp(`<button[^>]+aria-label="${copy.back}"[^>]+disabled=""`, 'u'))

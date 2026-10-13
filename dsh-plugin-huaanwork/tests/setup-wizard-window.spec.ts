@@ -200,11 +200,11 @@ describe('DesktopSetupWizardWindow', () => {
   it('returns the full immutable selection after explicit completion', async () => {
     const source = input()
     const expected: DesktopSetupWizardSelection = {
-      mode: source.mode,
+      mode: 'advanced',
       macosMaterial: source.macosMaterial,
       windowsMaterial: source.windowsMaterial,
-      openBrowser: source.openBrowser,
-      networkExposure: source.networkExposure,
+      openBrowser: false,
+      networkExposure: 'loopback',
       aaEnabled: false,
       market: source.market,
       notifications: source.notifications,

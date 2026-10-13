@@ -583,6 +583,74 @@ function importPendingDesktopShellSection(
   }
 }
 
+const ADVANCED_SHELL_LOCK = {
+  mode: 'advanced',
+  openBrowser: false,
+  networkExposure: 'loopback',
+} as const
+
+/** macOS and Windows keep the shell on advanced. Linux stays compatibility-only. */
+function desktopShellLockPlatform(platform: NodeJS.Platform): boolean {
+  return platform === 'darwin' || platform === 'win32'
+}
+
+/**
+ * Whether the composed row's raw fields are a legal triple that is not the lock.
+ * Illegal strings are left for {@link parseDesktopShellMode} to reject.
+ */
+function rawDesktopShellNeedsAdvancedLock(config: Record<string, unknown>): boolean {
+  const mode = config.mode
+  if (mode !== undefined && mode !== 'compatibility' && mode !== 'extended' && mode !== 'advanced') return false
+  if (config.openBrowser !== undefined && typeof config.openBrowser !== 'boolean') return false
+  const exposure = config.networkExposure
+  if (exposure !== undefined && exposure !== 'loopback' && exposure !== 'lan') return false
+  return mode === 'compatibility' || mode === 'extended' || config.openBrowser === true || exposure === 'lan'
+}
+
+/** Write the lock onto the last plain desktop-shell row without touching the settings document. */
+function rewriteDesktopShellLock(patchPath: string, rowName: unknown): void {
+  if (lstatSync(patchPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new Error(`${BIN_NAME}: desktop-shell lock could not persist mode advanced`)
+  }
+  let before: string
+  try {
+    before = readFileSync(patchPath, 'utf8')
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
+    before = '[]\n'
+  }
+  const patchDocument = parseDocument(before, {
+    customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+  })
+  if (patchDocument.errors.length > 0 || !isSeq(patchDocument.contents)) {
+    throw new Error(`${BIN_NAME}: desktop-shell lock could not persist mode advanced`)
+  }
+  const rows = patchDocument.contents
+  rows.flow = false
+  const index = rows.items.findLastIndex((item, rowIndex) => isMap(item)
+    && patchDocument.getIn([rowIndex, 'id']) === DESKTOP_SHELL_ENTRY_ID
+    && !item.has('insert')
+    && (!item.has('name') || patchDocument.getIn([rowIndex, 'name']) === rowName))
+  const section = { ...ADVANCED_SHELL_LOCK }
+  if (index < 0) {
+    patchDocument.addIn([], {
+      id: DESKTOP_SHELL_ENTRY_ID,
+      ...(typeof rowName === 'string' ? { name: rowName } : {}),
+      config: section,
+    })
+  } else {
+    const config = patchDocument.getIn([index, 'config'], true)
+    if (config === undefined) {
+      patchDocument.setIn([index, 'config'], patchDocument.createNode(section))
+    } else if (isMap(config)) {
+      for (const [key, value] of Object.entries(section)) config.set(key, value)
+    } else {
+      throw new Error(`${BIN_NAME}: desktop-shell lock could not persist mode advanced`)
+    }
+  }
+  replaceDocument(patchPath, String(patchDocument))
+}
+
 /** Replace a document in one rename, so a crash leaves either its old or its new bytes. */
 function replaceDocument(path: string, text: string): void {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
@@ -697,6 +765,12 @@ export interface DesktopProfilePreparationHooks {
    * with the restart that starts the next generation.
    */
   generationMode?: DesktopShellMode
+
+  /**
+   * The advanced-mode lock already rewrote this Profile's patch once.
+   * A second mismatch throws instead of rewriting again.
+   */
+  desktopShellLocked?: boolean
 }
 
 /** User patch entry skipped to keep a profile bootable. */
@@ -1515,6 +1589,11 @@ export function prepareDesktopProfile(
   }
   const desktopShellConfig = rowConfig(desktopShell)
   const pendingSection = pendingDesktopShellSection(settingsSpec)
+  if (desktopShellLockPlatform(platform) && pendingSection !== undefined) {
+    pendingSection.mode = ADVANCED_SHELL_LOCK.mode
+    pendingSection.openBrowser = ADVANCED_SHELL_LOCK.openBrowser
+    pendingSection.networkExposure = ADVANCED_SHELL_LOCK.networkExposure
+  }
   // Land the section the import would merge before anything boots on this row,
   // then prepare again from the persisted profile. Merely supplying the pending
   // values to this generation is not enough: the import renames the document
@@ -1534,6 +1613,25 @@ export function prepareDesktopProfile(
       pluginStatePath,
       marketSelection,
       hooks,
+      checkpointUserDataDir,
+    )
+  }
+  if (desktopShellLockPlatform(platform)
+    && hooks.profilePatches === undefined
+    && rawDesktopShellNeedsAdvancedLock(desktopShellConfig)) {
+    if (hooks.desktopShellLocked === true) {
+      throw new Error(`${BIN_NAME}: desktop-shell lock could not persist mode advanced`)
+    }
+    rewriteDesktopShellLock(profile.patchPath, desktopShell.name)
+    return prepareDesktopProfile(
+      telemetryDisabled,
+      home,
+      platform,
+      profileName,
+      pluginStatePath,
+      marketSelection,
+      { ...hooks, desktopShellLocked: true },
+      checkpointUserDataDir,
     )
   }
   // Startup preferences used to live in the global settings document. 0.1.7 made

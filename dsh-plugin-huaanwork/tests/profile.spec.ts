@@ -23,6 +23,7 @@ import {
   desktopStartupSettingsFromSettings,
   desktopBundleList,
   ensureDesktopProfile,
+  parseDesktopShellMode,
   prepareDesktopProfile,
   readDesktopShellMode,
   shippedSkillRoot,
@@ -313,7 +314,7 @@ virtualStoreDirMaxLength: 60
     expect(() => ensureDesktopProfile(home)).toThrow('dsh.profile.bundles must be an array')
   })
 
-  it('assembles the Host shell without replacing the upstream client shell in compatibility mode', () => {
+  it('rewrites a compatibility settings document to advanced and disables the official UI rows', () => {
     const home = temporaryHome()
     writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: compatibility\n')
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')
@@ -350,7 +351,7 @@ virtualStoreDirMaxLength: 60
     expect(readFileSync(prepared.rootConfig, 'utf8')).toBe('[]\n')
     expect(prepared.homeDir).toBe(home)
     expect(fileURLToPath(prepared.bareModuleBaseUrl)).toBe(join(prepared.profile.dir, 'package.json'))
-    expect(prepared.mode).toBe('compatibility')
+    expect(prepared.mode).toBe('advanced')
     expect(prepared.openBrowser).toBe(false)
     expect(prepared.networkExposure).toBe('loopback')
     expect(prepared.lanAddresses).toEqual([])
@@ -365,7 +366,7 @@ virtualStoreDirMaxLength: 60
       const matching = rows.filter(row => row.id === id)
       expect(matching).toHaveLength(1)
       expect(matching[0]).toEqual(expect.objectContaining({ name }))
-      expect(matching[0]?.disabled).toBeFalsy()
+      expect(matching[0]?.disabled).toBe(true)
     }
     expect(rows.find(row => row.id === 'directory-picker')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-host-directory-picker-auto',
@@ -797,7 +798,7 @@ virtualStoreDirMaxLength: 60
     expect(prepared.networkExposure).toBe('loopback')
     expect(rows.find(row => row.id === 'desktop-shell')).toEqual(expect.objectContaining({
       disabled: false,
-      config: expect.objectContaining({ mode: 'advanced', port: 43_189 }),
+      config: expect.objectContaining({ mode: 'advanced', port: 43_189, openBrowser: false, networkExposure: 'loopback' }),
     }))
     expect(rows.find(row => row.id === 'webserver')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-host-webserver',
@@ -814,6 +815,7 @@ virtualStoreDirMaxLength: 60
       name: '@deepseek-ai/dsh-settings',
     }))
     expect(prepared.settingsDocument).toBe(join(home, 'settings.yaml'))
+    expect(readFileSync(join(prepared.profile.dir, 'cordis.patch.yml'), 'utf8')).toMatch(/openBrowser: false[\s\S]*networkExposure: loopback|networkExposure: loopback[\s\S]*openBrowser: false/u)
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
@@ -822,7 +824,7 @@ virtualStoreDirMaxLength: 60
     }
   })
 
-  it('keeps legacy browser intent but clamps LAN exposure when compatibility mode is selected', () => {
+  it('rewrites a compatibility settings document to advanced and clears browser access', () => {
     const home = temporaryHome()
     writeFileSync(join(home, 'settings.yaml'), [
       'dsh-desktop:',
@@ -837,10 +839,13 @@ virtualStoreDirMaxLength: 60
     const rows = composeEntries([prepared.patches])
 
     expect(prepared).toMatchObject({
-      mode: 'compatibility',
-      openBrowser: true,
-      networkExposure: 'lan',
+      mode: 'advanced',
+      openBrowser: false,
+      networkExposure: 'loopback',
     })
+    expect(readFileSync(join(prepared.profile.dir, 'cordis.patch.yml'), 'utf8')).toContain('mode: advanced')
+    expect(readFileSync(join(prepared.profile.dir, 'cordis.patch.yml'), 'utf8')).toContain('openBrowser: false')
+    expect(readFileSync(join(prepared.profile.dir, 'cordis.patch.yml'), 'utf8')).toContain('networkExposure: loopback')
     expect(rows.find(row => row.id === 'desktop-webserver')).toEqual(expect.objectContaining({
       config: { host: '127.0.0.1', port: 43_189 },
     }))
@@ -849,7 +854,7 @@ virtualStoreDirMaxLength: 60
     }))
   })
 
-  it('replaces the official root layout for extended window mode while retaining its occupants', () => {
+  it('rewrites extended window mode to advanced while retaining material preferences', () => {
     const home = temporaryHome()
     writeDesktopShellPreferences(home, [
       'mode: extended',
@@ -861,20 +866,36 @@ virtualStoreDirMaxLength: 60
     const rows = composeEntries([prepared.patches])
 
     expect(prepared).toEqual(expect.objectContaining({
-      mode: 'extended',
+      mode: 'advanced',
       macosMaterial: 'off',
       windowsMaterial: 'off',
     }))
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
-    expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(false)
-    expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(false)
+    expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'desktop-shell')).toEqual(expect.objectContaining({
       config: expect.objectContaining({
-        mode: 'extended',
+        mode: 'advanced',
         macosMaterial: 'off',
         windowsMaterial: 'off',
       }),
     }))
+  })
+
+  it('leaves a Linux compatibility profile on compatibility mode', () => {
+    const home = temporaryHome()
+    writeDesktopShellPreferences(home, [
+      'mode: compatibility',
+      'openBrowser: false',
+      'networkExposure: loopback',
+    ])
+
+    const prepared = prepareDesktopProfile(undefined, home, 'linux')
+    const patch = readFileSync(join(prepared.profile.dir, 'cordis.patch.yml'), 'utf8')
+
+    expect(prepared.mode).toBe('compatibility')
+    expect(patch).toContain('mode: compatibility')
+    expect(patch).not.toContain('mode: advanced')
   })
 
   it('reads JSON settings and defaults an absent desktop namespace to advanced', () => {
@@ -932,6 +953,9 @@ virtualStoreDirMaxLength: 60
   it('rejects invalid settings roots, sections, modes, and YAML', () => {
     expect(() => desktopShellModeFromSettings([])).toThrow('must be a map')
     expect(() => desktopShellModeFromSettings({ 'dsh-desktop': true })).toThrow('settings must be a map')
+    expect(() => parseDesktopShellMode('enhanced')).toThrow(
+      'must be "compatibility", "extended", or "advanced"',
+    )
     expect(() => desktopShellModeFromSettings({ 'dsh-desktop': { mode: 'glass' } })).toThrow(
       'must be "compatibility", "extended", or "advanced"',
     )

@@ -1,0 +1,5 @@
+rg -n "mode-compatibility|扩展窗口" dsh-plugin-huaanwork/src/electron-runtime.ts
+no matches
+
+rg -n "setMode\\('compatibility'\\)|setMode\\('extended'\\)" dsh-plugin-huaanwork/src/client/DesktopSettingsSection.tsx
+no matches

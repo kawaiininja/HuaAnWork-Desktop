@@ -159,6 +159,11 @@ export function desktopSetupWizardSelectionIsAvailable(
   selection: DesktopSetupWizardSelection,
   capabilities: Pick<DesktopSetupWizardInput, 'platform'>,
 ): boolean {
+  if (capabilities.platform === 'darwin' || capabilities.platform === 'win32') {
+    return selection.mode === 'advanced'
+      && selection.openBrowser === false
+      && selection.networkExposure === 'loopback'
+  }
   if (selection.openBrowser && selection.mode !== 'compatibility') return false
   if (!selection.openBrowser && selection.networkExposure === 'lan') return false
   return capabilities.platform !== 'linux' || selection.mode === 'compatibility'
