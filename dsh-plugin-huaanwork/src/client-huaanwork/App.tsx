@@ -1691,17 +1691,16 @@ export default function App() {
           <IconSidebar />
         </button>
         <span className="titlebar-title">
-          HuaAnWork
           {view === "skills"
-            ? " — 技能中心"
+            ? "技能中心"
             : view === "automations"
-              ? " — 自动化"
+              ? "自动化"
               : view === "agents"
-                ? " — 智能体"
+                ? "智能体"
                 : view === "knowledge"
-                  ? " — 知识库"
+                  ? "知识库"
                   : view === "market"
-                    ? " — 插件市场"
+                    ? "插件市场"
                     : ""}
         </span>
         {showRightPane ? (

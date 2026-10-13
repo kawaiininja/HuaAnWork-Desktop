@@ -138,16 +138,19 @@ button {
   align-items: center;
   gap: 4px;
   height: 44px;
-  padding-left: 84px; /* 让开 macOS 交通灯 */
-  padding-right: 14px;
+  /* 左右共用同一内边距，两侧收起按钮到窗口边框的距离始终相等。
+     交通灯与 Windows 标题按钮在上方拖拽条，不占用本行。 */
+  padding-inline: 14px;
   background: var(--sidebar-bg);
   border-bottom: 1px solid var(--border);
   user-select: none;
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .titlebar-title {
   flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-muted);
