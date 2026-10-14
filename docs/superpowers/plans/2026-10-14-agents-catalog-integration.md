@@ -10,7 +10,7 @@
 
 **设计依据:** `docs/superpowers/specs/2026-10-13-agents-catalog-integration-design.md`(两轮评审通过)。下文引用为「设计 §x」。
 
-**执行状态(2026-10-14):** M-A0~M-A3 已实现并通过代码评审——**以各仓 commit 链为执行凭证,checkbox 不逐项回勾**:agent-catalog-server(`9fceb61`→`d405fe8`)、代码审查智能体(`68ada9d`→`60b6b52`)、错别字检测智能体(`ff782e9`→`942ff91`)、任务编排智能体(`29c396c`→`3f54ddb`)。评审与处置记录见 `2026-10-14-agents-catalog-integration-code-review.md`(8/8 修复闭环,四仓回归 308/308)。A4-0 部署 runbook 已交付(`agent-catalog-server/docs/deployment-runbook.md`,预联调后已订正 Node 版本边界与 DEMO_API_TOKEN 前置);**M-A4 预联调(机器可执行部分)已完成**——证据 `docs/evidence/2026-10-14-agents-catalog-integration-precheck.md`(用例归档 `docs/evidence/assets/a4-precheck-2026-10-14/`);剩余 A4-1 GUI 联调与 A4-2 公用机切目录为人工真机两段。
+**执行状态(2026-10-14):** M-A0~M-A3 已实现并通过代码评审——**以各仓 commit 链为执行凭证,checkbox 不逐项回勾**:agent-catalog-server(`9fceb61`→`d405fe8`)、代码审查智能体(`68ada9d`→`60b6b52`)、错别字检测智能体(`ff782e9`→`942ff91`)、任务编排智能体(`29c396c`→`3f54ddb`)。评审与处置记录见 `2026-10-14-agents-catalog-integration-code-review.md`(8/8 修复闭环,四仓回归 308/308)。A4-0 部署 runbook 已交付(`agent-catalog-server/docs/deployment-runbook.md`,预联调后已订正 Node 版本边界与 DEMO_API_TOKEN 前置);**M-A4 预联调(机器可执行部分)已完成**——证据 `docs/evidence/2026-10-14-agents-catalog-integration-precheck.md`(用例归档 `docs/evidence/assets/a4-precheck-2026-10-14/`)。**A4-1 GUI 段第一轮已执行**(证据 `docs/evidence/2026-10-14-a4-1-gui-run.md`):面板/入口登记/信封派发/批准通道全部通过;**聊天链被 P1 桌面端缺陷阻塞——`call_host_tool` 在桌面 runtime 未注册**(registerCallHostTool 无生产调用方,已按设计 §6 另行登记,修复草图在证据记录 §二;修复后按其 §三 复测清单收口);A4-2 公用机段待 P1 修复后进行。
 
 **执行顺序:** M-A0 / M-A1 / M-A2 / M-A3 互不依赖,可四条线并行(建议每线一个子代理);M-A4 依赖前四者全部完成。
 
