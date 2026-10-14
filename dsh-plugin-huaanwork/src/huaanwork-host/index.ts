@@ -18,6 +18,7 @@ import { setAgentsDirectory } from './sessions.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
 import { clearPendingWorkspaceRoot, neutralWorkspaceRoot } from './workspace-state.ts'
+import { registerCallHostTool } from '../huaanwork-guardrails/agent-tool.ts'
 
 export const name = 'huaanwork-host'
 export const inject = ['webServer', 'agents', 'subagents', 'desktopRuntime']
@@ -110,6 +111,9 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   }, 'huaanwork: automation scheduler')
   // 智能体目录真实接线(Task 10):fetch 公用机目录 + 本地 endpoints,存储根 = profileDir;
   // 目录快照同步进 huaanworkAgentCatalog holder(agent-invoke 的 @agent 分发消费)。
+  // P1 修复(2026-10-14,A4-1 证据 §二):目录变更时同步重注册 call_host_tool,
+  // 刷新其描述中的可用小工具清单(execute 本就读 live holder,不受陈旧描述影响)。
+  let syncHostToolDescription: (() => void) | undefined
   const agentsHost = createAgentsHost({
     storageRoot: config.profileDir,
     readSettings: () => {
@@ -122,10 +126,39 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     },
     onCatalogChange: () => {
       ctx.huaanworkAgentCatalog.current = agentsHost.snapshotForRuntime()
+      syncHostToolDescription?.()
     },
   })
   setAgentsDirectory(agentsHost)
   ctx.huaanworkAgentCatalog.current = agentsHost.snapshotForRuntime()
+  // call_host_tool 注册接线(P1 修复):旧 sidecar 的生产调用在桌面移植时遗失,
+  // @点名 HTTP 小工具链路因此断裂。工具全局注册单实例,执行边界在 policy 的会话
+  // 附件门禁(decide.ts:111-112:unattached → deny),可见性由 present-as 的
+  // ALLOWED_TOOLS(present-as.ts:27)放行——与旧 sidecar 同构的纵深防御。
+  // 经桥接对象显式持有 tools 服务、目录 holder 与 profileDir:
+  // registerCallHostTool 按鸭子类型消费(agent-tool.ts:127 ctx: unknown),
+  // 不依赖子上下文对 holder 属性的原型链可见性。
+  ctx.plugin({
+    inject: ['tools'],
+    apply: (pc: Context) => {
+      pc.effect(() => {
+        const toolCtx = {
+          tools: (pc as unknown as { tools?: unknown }).tools,
+          huaanworkAgentCatalog: ctx.huaanworkAgentCatalog,
+          huaanworkProfileDir: config.profileDir,
+        }
+        let unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
+        syncHostToolDescription = () => {
+          unregister?.()
+          unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
+        }
+        return () => {
+          syncHostToolDescription = undefined
+          unregister?.()
+        }
+      }, 'huaanwork: call_host_tool registration')
+    },
+  })
   // 统一网络门禁第二层(llm/stream 前置全局监听;AGENTS.md 不变式 9)。
   installNetworkGate(ctx, routeCtx)
   ctx.effect(() => {
