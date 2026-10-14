@@ -10,6 +10,8 @@
 
 **设计依据:** `docs/superpowers/specs/2026-10-13-agents-catalog-integration-design.md`(两轮评审通过)。下文引用为「设计 §x」。
 
+**执行状态(2026-10-14):** M-A0~M-A3 已实现并通过代码评审——**以各仓 commit 链为执行凭证,checkbox 不逐项回勾**:agent-catalog-server(`9fceb61`→`d405fe8`)、代码审查智能体(`68ada9d`→`60b6b52`)、错别字检测智能体(`ff782e9`→`942ff91`)、任务编排智能体(`29c396c`→`3f54ddb`)。评审与处置记录见 `2026-10-14-agents-catalog-integration-code-review.md`(8/8 修复闭环,四仓回归 308/308)。A4-0 部署 runbook 已交付(`agent-catalog-server/docs/deployment-runbook.md`);A4-1/A4-2 人工真机部分待执行。
+
 **执行顺序:** M-A0 / M-A1 / M-A2 / M-A3 互不依赖,可四条线并行(建议每线一个子代理);M-A4 依赖前四者全部完成。
 
 ## Global Constraints
