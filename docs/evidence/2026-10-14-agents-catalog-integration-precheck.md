@@ -1,7 +1,7 @@
 # M-A4 预联调记录(机器可执行部分)— 2026-10-14
 
 - **范围**:M-A4 中可由 CLI 侧完成的部分——五进程同机起服(四服务 + mock-api)、runbook §8 探活、三智能体全链契约走查、真解析器条目校验。**A4-1 的 GUI 面板/真机 @点名与 A4-2 的公用机切目录为人工步骤,未包含**(清单见文末)。
-- **方法**:全部请求体以 JSON 用例文件落盘(`/tmp/a4-precheck/cases/`,13 个预置 + 6 个 jobId 动态生成),`curl -d @file` 注入,规避 shell 转义;服务由单总控脚本托管(五进程,127.0.0.1:18080/18081/18082/8787/9100)。
+- **方法**:全部请求体以 JSON 用例文件落盘(`docs/evidence/assets/a4-precheck-2026-10-14/`,13 个预置 + 6 个 jobId 动态生成,连同总控脚本 `supervisor.sh` 与解析器校验脚本 `validate-entries.mts` 共 20 件;运行期原件在 `/tmp`,已归档进仓),`curl -d @file` 注入,规避 shell 转义;服务由单总控脚本托管(五进程,127.0.0.1:18080/18081/18082/8787/9100)。
 - **环境**:开发机 macOS,Node v22.23.2,typo-check 用 `.venv` + `TYPOGUARD_FAKE_RUNNER=1`(CI 桩),code-review 用 `CODE_REVIEW_MOCK=1`,task-orch 用 `examples/tasks.json` + `test/mock-api.mjs`(9100)+ `DEMO_API_TOKEN=dummy-token`,口令 `precheck-2026-10-14`。
 - **条目**:`<LAN_IP>` 以 sed 替换为 `127.0.0.1` 生成本地副本(`/tmp/a4-precheck/entries/`),仓内条目文件未改动。
 
@@ -54,10 +54,10 @@
 | 本地 127.0.0.1 副本 | **三条目全部 OK**(typo-check@v0.1.0 / code-review@v1.0.0 / task-orch@v0.1.0,entrypoint 与端口正确)——**A0-4 Step 2 的「人肉核对」就此由真解析器闭合** |
 | 仓内 `<LAN_IP>` 占位版 | **三条目全部 BROKEN:「entrypoint.url 不是合法 URL」**——证实 runbook §7 的部署期替换步骤是**承重的**:不替换则「发现」页直接呈现损坏态 |
 
-## 观察与运维备注
+## 观察与运维备注(已同步 runbook)
 
-1. **Node 22.23.2 无需 `--experimental-sqlite`**:task-orch 直接 import `node:sqlite` 成功(node:sqlite 于 22.13+ 免 flag;首启打印的 M2 预检警告是保守口径,不影响运行)。runbook §1 的「Node 22 必须加 flag」适用于 < 22.13 的部署,可按需放宽。
-2. **`examples/tasks.json` 的 `${DEMO_API_TOKEN}`**:未设置该环境变量时 task-orch 启动即失败(「密钥引用解析失败」)——runbook §1 的 task-orch 前置宜补一行「示例配置需 `DEMO_API_TOKEN`」。
+1. **Node 22.13+ 无需 `--experimental-sqlite`**(本机 22.23.2 实测直接 import 成功;首启打印的 M2 预检警告为保守口径,可忽略)。runbook §1/§3.4/§4.4 已按版本边界订正:flag 硬要求仅适用 Node 22.5–22.12。
+2. **`examples/tasks.json` 的 `${DEMO_API_TOKEN}`**:未设置该环境变量时 task-orch 启动即失败(「密钥引用解析失败:密钥环境变量未设置」)——已补进 runbook §1 task-orch 前置。
 3. 首轮用 shell 内联转义拼 JSON 时出现过一次自伤性坏请求,恰好实测了 S-1 的两条错误路径——错误处理真实生效,非仅测试内断言。
 
 ## 遗留给人工的 M-A4 步骤(A4-1 GUI / A4-2 公用机)
