@@ -21,3 +21,4 @@ dsh-desktop-next/.desktop-next/
 .worktrees/
 # M5 market-server offline signing keys — private key must never be committed
 market-server/keys/
+WindowsApp/
