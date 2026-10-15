@@ -120,6 +120,12 @@ export const PAIRS = [
       // ConfirmedRestartRuntime 接口与 native:requestConfirmedRestart 绑定。
       'src/electron-runtime.ts',
       'src/host-runtime-bridge.ts',
+      // 裁定(2026-10-15):f9fd375243 给 huaanwork 侧新增 5 行
+      // renderer.setZoomLevel(0) —— Chromium 按 host 记忆缩放档位,本 shell 恒从
+      // 127.0.0.1 加载,残留档位(冒烟会话曾落在 -2,约 69%)会把整个 HuaAnWork
+      // 布局缩离 100% 的 Tauri 应用。这是 huaanwork 变体专属诉求(beta 没有
+      // 「对齐 Tauri 应用」的基线),不同步进 beta,占 1 个白名单名额。
+      'src/electron-shell-generation.ts',
       // M5 Task 0 复盘登记(D2 + round3 R8/R7 + round4 X2 终值):variant 白名单 8→17。
       // 下列 9 个 shared 文件是 round3 R7 裁定的 provider 联合类型全量镜像面(8 文件 13 处
       // 校验点,守则 6)——Task 3 接入 huaanwork-market 第四 provider 时必然产生共享文件
