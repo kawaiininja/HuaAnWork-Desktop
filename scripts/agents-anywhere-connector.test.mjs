@@ -38,8 +38,10 @@ for (const workspace of AA_WORKSPACES) {
       return source.slice(start, end)
     }
     const { createProjection, contentHash } = runInNewContext(
-      ['identity', 'tools', 'history'].map(region).join('\n') + ';({ createProjection, contentHash })',
-      { createHash, Buffer, json: value => JSON.parse(JSON.stringify(value)), record: value => value ?? {} },
+      // types 区域自 2.1.0-desktop.c58d98da25a23 起承载 wellFormedJson/wellFormedString
+      // (history 的 flushHashes 引用它们),必须随切片一起装入,不再由沙箱垫 record/json。
+      ['types', 'identity', 'tools', 'history'].map(region).join('\n') + ';({ createProjection, contentHash })',
+      { createHash, Buffer },
     )
     const projection = createProjection('native-session', 'platform-session')
     projection.apply({ type: 'tool/result', seq: 0, time: '2026-09-24T00:00:00Z',
