@@ -130,7 +130,7 @@ describe('published package surface', () => {
     }
     const dshmarketResolutions = resolutionKeys.filter(k => k.startsWith('dshmarket@npm:'))
     expect(dshmarketResolutions).toHaveLength(1)
-    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.66.15')
+    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.66.22')
 
     const stableManifest = JSON.parse(readFileSync(
       new URL('dsh-plugin-desktop/package.json', workspaceRoot), 'utf8',
@@ -139,8 +139,8 @@ describe('published package surface', () => {
       new URL('dsh-plugin-huaanwork/package.json', workspaceRoot), 'utf8',
     )) as { dependencies?: Record<string, string> }
 
-    expect(stableManifest.dependencies?.dshmarket).toBe('1.66.15')
-    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.66.15')
+    expect(stableManifest.dependencies?.dshmarket).toBe('1.66.22')
+    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.66.22')
     expect(huaanworkManifest.dependencies?.dshmarket).toBe(stableManifest.dependencies?.dshmarket)
   })
 
