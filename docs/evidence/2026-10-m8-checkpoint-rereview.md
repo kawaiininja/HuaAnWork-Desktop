@@ -54,7 +54,7 @@
 |---|---|---|
 | F-1 | **darwin 目录选择恢复未提交**(登记时状态):HEAD(`b860ba8f9a`)的 `src/index.ts` 仍无 `directoryPicker` 的 darwin 注册;恢复(含被删 darwin 测试与白名单 23→24)当时只存在于主工作树的**在途未提交改动**(2026-10-16 实测:`src/index.ts` +54/-21,`verify-desktop-variants.mjs`/`.test.mjs` 已改) | **已处置(2026-10-16,`424ac705d4`)**:4 文件提交(宿主注册 + 4 条 darwin 用例 + 白名单 23→24 + 名额钉),plugin.spec 31/31、守卫 11/11 |
 | F-2 | **`guardrails/policy.ts:192` 的 `gitDirty` 语义收窄**(所有工具 → 仅 `git_checkout` 才探测):checkpoint 携带,无上游对侧、无文档理由、无测试。**订正(2026-10-16 裁定时)**:本行原文「零读取方 ⇒ 惰性」**有误**——复核扫描只搜了 `dsh-plugin-huaanwork/`,漏了 `packages/`;真实读取方是 `packages/huaanwork-policy/src/decide.ts:106`,且**恰好在 `case "git_checkout"` 分支内** ⇒ 收窄在所有可达判定上与原版逐字等价,并把每次工具调用一次的同步 `git status` spawn(`spawnSync`)从热路径摘除;恢复原语义 = 纯性能回退,零功能收益 | **已处置(2026-10-16,用户裁定「保留收窄」,`a9b682eb36`)**:注释钉(policy.ts)+ probe 回归钉(policy.cordis.spec.ts,反向探针验证过活性)+ 本订正 |
-| F-3 | **6 个 beta 声明而 huaanwork 缺席的 dep**:5 个 experimental/llm-account 类在 huaanwork src 零 import(结构性缺席,无害);`@deepseek-ai/dsh-client-shortcuts` 在 `src/client/layout-service.ts:3` 有 **type-only import 但未声明**——经 yarn hoisting 解析、编译后擦除,typecheck/测试全绿,属卫生问题 | 建议随 F-1 的在途工作一并处理:在 package.json 声明,或改为从既有声明 dep 中转类型 |
+| F-3 | **6 个 beta 声明而 huaanwork 缺席的 dep**:5 个 experimental/llm-account 类在 huaanwork src 零 import(结构性缺席,无害);`@deepseek-ai/dsh-client-shortcuts` 在 `src/client/layout-service.ts:3` 有 **type-only import 但未声明**——经 yarn hoisting 解析、编译后擦除,typecheck/测试全绿,属卫生问题 | **已处置(2026-10-16,`a188b5d82e`)**:镜像 beta 声明(dependencies @ 0.2.1-alpha.1),yarn.lock 仅增一行记账(root resolution 与 vendored tarball 均既有);处置后残余差异 5 项,全为零 import 结构性缺席;immutable/vendored-runtime/layout 测试 43/43/client typecheck/守卫全绿 |
 | F-4 | **checkpoint 声明的精确性**:「dep profile matches beta's exactly」只对共享 dep 的版本钉成立,key 集合在 checkpoint 时点即不一致(148 vs 160) | 已在 §1 矩阵如实订正;无需代码动作 |
 
 **主工作树在途改动的测量污染(记录,非发现)**:主树实测全量套 1 红(`test-port-mapping.spec.ts`,证据行 `automations-host.spec.ts:815` 被在途编辑移位)与守卫名额 24,均量在脏树上;干净树复测证明两者皆非 HEAD 缺陷。主树另有 26 个字体文件删除等在途工作,未被本复核触碰。
@@ -62,5 +62,5 @@
 ## 5. 收口结论
 
 - checkpoint 的 verify-as-I-go 义务由本次复核**收口**:运行时主张在 HEAD 全部复测成立;两处已知问题(守卫红、Task 2.5 缺口)确认已在后续提交闭环;静默丢弃扫描除已登记的 darwin picker 外**无新增发现**。
-- 开口项后续处置:F-1 已由 `424ac705d4` 提交收口;F-2 经订正后于 `a9b682eb36` 裁定「保留收窄」并补钉收口;F-3 仍开放。
+- 开口项后续处置:F-1 已由 `424ac705d4` 提交收口;F-2 经订正后于 `a9b682eb36` 裁定「保留收窄」并补钉收口;F-3 已由 `a188b5d82e` 声明依赖收口。三个开口项全部闭。
 - 复核自身的临时 worktree 已清理,主工作树零改动(本文件除外)。
