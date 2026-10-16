@@ -622,7 +622,7 @@ export default function App() {
 
   /**
    * 把工作区切回中立根（未归属项目的「任务」会话的工作目录）。
-   * 已在中立根时 sidecar 端短路不重启；切走则清掉项目激活态（工作区不再属于任何项目）。
+   * 宿主进程内热切换，不重启应用。已在中立根时短路；切走则清掉项目激活态。
    * 真实切换后默认标签 work-1 重新绑定中立根的稳定会话（它恒为「当前工作区的主对话」）。
    */
   async function ensureNeutralWorkspace(): Promise<void> {
@@ -1892,6 +1892,15 @@ export default function App() {
               onEnterIntentConsumed={() => setAutomationEnter(null)}
               onChanged={() => void refreshAutomations()}
               onAutomationCreated={() => setDraft("")}
+              onWorkspaceAligned={(root) => {
+                if (!root || workspaceRef.current === root) return;
+                setWorkspace(root);
+                workspaceRef.current = root;
+                const owner = projects.find((project) => project.root === root);
+                setActiveProjectId(owner?.id ?? null);
+                activeProjectIdRef.current = owner?.id ?? null;
+                if (!owner) setGitWarning("");
+              }}
               keepAwake={keepAwake}
               onToggleKeepAwake={(next) => void toggleKeepAwake(next)}
               missedBanner={missedBannerView(missedBanner.count, missedBanner.dismissed)}

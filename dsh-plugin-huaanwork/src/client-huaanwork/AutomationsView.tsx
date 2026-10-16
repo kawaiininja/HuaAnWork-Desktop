@@ -48,6 +48,8 @@ type Props = {
    * 手动点「＋新建任务」创建成功也会触发（此时 App 侧草稿本就为空或与本次创建无关，清空无害）。
    */
   onAutomationCreated?: () => void;
+  /** 手动运行把工作区热切换到任务所属目录后通知 App 对齐界面。 */
+  onWorkspaceAligned?: (workspaceRoot: string) => void;
   /** Task 10：保持系统唤醒设置值（与账户页共用同一持久化字段）。 */
   keepAwake: boolean;
   onToggleKeepAwake: (next: boolean) => void;
@@ -106,6 +108,7 @@ export default function AutomationsView({
   onEnterIntentConsumed,
   onChanged,
   onAutomationCreated,
+  onWorkspaceAligned,
   keepAwake,
   onToggleKeepAwake,
   missedBanner,
@@ -156,7 +159,8 @@ export default function AutomationsView({
   async function run(automation: AutomationInfo) {
     setError("");
     try {
-      await runAutomation(automation.id);
+      const started = await runAutomation(automation.id);
+      if (started.workspaceRoot) onWorkspaceAligned?.(started.workspaceRoot);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }

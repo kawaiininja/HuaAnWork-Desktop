@@ -215,7 +215,7 @@ export interface ProjectLegacySweepAttempt {
 }
 
 /**
- * 门闩包裹体:本进程首次调用执行清扫;其后(如 workspace.open 触发的 generation 重启)
+ * 门闩包裹体:本进程首次调用执行清扫;其后(同进程再次 apply)
  * 直接返回 `{ ran: false }`,不再读任何会话日志。先落闩再扫:清扫抛错也只尝试一次
  * (与旧 host.ts:936 同语义),失败由调用方记日志,新的宿主进程会再试(门闩是进程域,
  * 不是磁盘标记)。

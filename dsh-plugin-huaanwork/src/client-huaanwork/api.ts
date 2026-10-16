@@ -4,6 +4,9 @@ export type { RpcEvent }
 export type TreeNode = { name: string; path: string; isDir: boolean; children?: TreeNode[] }
 
 const REQUEST_TIMEOUT_MS = 180_000 // 平移旧 sidecar.rs:102 的 RPC 超时
+/** 这些调用要等模型回合结束，不能用 180 秒把还在生成的会话标成失败。 */
+const LONG_RUNNING_METHODS = new Set(['session.send', 'session.resume'])
+const LONG_REQUEST_TIMEOUT_MS = 30 * 60_000
 
 const DIRECTORY_PICKER_PATH = '/_dsh/desktop/pick-directory'
 
@@ -118,17 +121,7 @@ export const ROUTES: Record<string, RouteDef> = {
 
 interface ErrorEnvelope { error?: { code?: string; message?: string } }
 
-// —— workspace.open/close 的 generation 重启语义 ——
-// 两方法会触发整代重启。原生确认框(M3 评审 D2 修复后)先出结果再 relaunch:
-// HTTP 应答与 teardown 无先后保证,两条时序都可能(评审 R6:不按概率描述)——
-// 确认 → 200 + `{ restarting: true, workspaceRoot }` 正常写出;或 teardown 抢先、
-// fetch 撞上 webServer 关闭(连接 reset),此分支同样可达,故网络错误(非超时)→
-// 轮询 /huaanwork/status 至 200 → 按 { restarting: true } resolve;两条路径客户端
-// 都必须承接。取消 → 200 返回当前根,走普通应答。
-// onSidecarExit 已驱动 UI 的「切换中」态。
-// project.open 不在此列:它的应答携带 project/workspaceRoot,连接中断时客户端
-// 无法凭本地信息合成,只能原样抛错(窗口极窄且应用随即 relaunch,评审 D5 口径)。
-const RESTART_METHODS = new Set(['workspace.open', 'workspace.close'])
+// 工作区 open/close 在宿主进程内热切换,网络错误按普通请求失败抛出。
 const READY_POLL_INTERVAL_MS = 500
 
 /** 轮询 GET /huaanwork/status 至 200 或超时;generation 重启后的就绪等待。 */
@@ -155,12 +148,13 @@ export async function waitForReady(timeoutMs = 60_000): Promise<void> {
 export async function rpcCall<T>(method: string, params?: unknown): Promise<T> {
   const route = ROUTES[method]
   if (!route) throw new Error(`unknown method: ${method}`)
+  const timeoutMs = LONG_RUNNING_METHODS.has(method) ? LONG_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS
   let response: Response
   try {
     const queryString = route.query ? route.query(params) : ''
     const init: RequestInit = {
       method: route.http,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     }
     if (route.body) {
       init.headers = { 'content-type': 'application/json' }
@@ -170,12 +164,7 @@ export async function rpcCall<T>(method: string, params?: unknown): Promise<T> {
   } catch (err) {
     const name = (err as { name?: string } | null)?.name
     if (name === 'AbortError' || name === 'TimeoutError') {
-      throw new Error(`请求超时(${REQUEST_TIMEOUT_MS / 1000}s)`)
-    }
-    if (RESTART_METHODS.has(method)) {
-      // generation 重启:连接中断是预期路径,等服务就绪后按重启语义 resolve。
-      await waitForReady()
-      return { restarting: true } as T
+      throw new Error(`请求超时(${timeoutMs / 1000}s)`)
     }
     throw err
   }

@@ -274,7 +274,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'two parallel script tasks do not lock workspace.open',
     label: '本任务补',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:815',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:838',
   },
   {
     file: 'automations-host.test.ts',

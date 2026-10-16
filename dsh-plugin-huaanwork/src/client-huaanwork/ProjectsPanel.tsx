@@ -496,9 +496,23 @@ export function ProjectCreateModal({
   );
 }
 
-/** 供 App 使用的「创建并打开」动作（命名模态确认后调用）。 */
+/**
+ * 供 App 使用的「创建并打开」。先登记再打开;打开失败(含用户取消切换)时删掉
+ * 刚登记的项目,这样目录还不是项目,再次点击可以重新走创建。
+ */
 export async function createAndOpen(root: string, name: string): Promise<{ project: ProjectInfo; workspaceRoot: string }> {
   const created = await createProject({ root, name });
-  const opened = await openProject(created.project.id);
-  return { project: opened.project, workspaceRoot: opened.workspaceRoot };
+  try {
+    const opened = await openProject(created.project.id);
+    return { project: opened.project, workspaceRoot: opened.workspaceRoot };
+  } catch (error) {
+    try {
+      await removeProject(created.project.id);
+    } catch (rollback) {
+      const openMessage = error instanceof Error ? error.message : String(error);
+      const rollbackMessage = rollback instanceof Error ? rollback.message : String(rollback);
+      throw new Error(`${openMessage}（回滚未完成：${rollbackMessage}）`, { cause: error });
+    }
+    throw error;
+  }
 }

@@ -107,8 +107,7 @@ export function startAutomationScheduler(
           console.error('automation residual recovery failed:', error)
         })
       }
-      // R1 兜底恢复(userRoot)不移植:旧 host.ts:828-830 的 restoreUserRoot 依赖进程内热切换。
-      // Desktop 换根由 pendingRoot 生命周期承接,换根即 generation 重启,tick 内没有可调用的恢复。
+      // R1 兜底恢复(userRoot)不移植。工作区热切换只改 holder,tick 读当前根,不在 tick 内把根改回去。
       if (sessionSendBlockers.agentAutomationQueued > 0) return
       if (!(await agentIdle(routeCtx))) return
       const now = Date.now()

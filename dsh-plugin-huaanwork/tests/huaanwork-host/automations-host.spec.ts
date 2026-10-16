@@ -10,8 +10,6 @@ import { afterEach, expect, test } from 'vitest'
 
 import type { AutomationInfo, RpcEvent, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
 import {
-  MANUAL_CROSS_NEUTRAL_MESSAGE,
-  MANUAL_CROSS_PROJECT_MESSAGE,
   automationCollector,
   automationTail,
   bindAutomationRuntime,
@@ -599,7 +597,7 @@ test('timeout is status timeout for a hung agent, a hung script, and a plain err
   expect(failed.output).toContain('agent boom')
 }, 15_000)
 
-test('manual cross-root runs are rejected; schedule and catchup are not enqueued', async () => {
+test('manual run hot-switches to the task root; schedule and catchup stay on the current root', async () => {
   const h = makeHarness()
   const other = mkdtempSync(join(tmpdir(), 'hw-auto-other-'))
   dirs.push(other)
@@ -608,16 +606,14 @@ test('manual cross-root runs are rejected; schedule and catchup are not enqueued
     projectId: project.id,
     name: '跨根',
   })
-  await expect(handler('automation.run')(body({ id: bound.id }), h.routeCtx)).rejects.toThrow(MANUAL_CROSS_PROJECT_MESSAGE)
-  expect(h.events.some((event) => event.event === 'automation/run-start')).toBe(false)
-
   await enqueueAutomation(bound, { trigger: 'schedule' })
   await enqueueAutomation(bound, { trigger: 'catchup', coalescedCount: 2 })
   expect(h.events.some((event) => event.event === 'automation/run-start')).toBe(false)
   expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
 
-  h.routeCtx.workspaceRoot.current = other
-  await enqueueAutomation(bound, { trigger: 'schedule' })
+  const accepted = await handler('automation.run')(body({ id: bound.id }), h.routeCtx)
+  expect(accepted).toMatchObject({ queued: true, workspaceRoot: resolve(other) })
+  expect(h.routeCtx.workspaceRoot.current).toBe(resolve(other))
   const ended = await waitRunEnd(h.events, bound.id)
   expect(ended).toMatchObject({ ok: true })
 
@@ -625,9 +621,10 @@ test('manual cross-root runs are rejected; schedule and catchup are not enqueued
   dirs.push(away)
   h.routeCtx.workspaceRoot.current = away
   const neutralTask = await agentTask(h.profileDir, { name: '中立', prompt: '冷知识' })
-  await expect(handler('automation.run')(body({ id: neutralTask.id }), h.routeCtx)).rejects.toThrow(
-    MANUAL_CROSS_NEUTRAL_MESSAGE,
-  )
+  const neutralRun = await handler('automation.run')(body({ id: neutralTask.id }), h.routeCtx)
+  expect(neutralRun).toMatchObject({ queued: true, workspaceRoot: h.neutral })
+  expect(h.routeCtx.workspaceRoot.current).toBe(h.neutral)
+  await waitRunEnd(h.events, neutralTask.id)
 }, 15_000)
 
 test('unbound agent runs on the neutral root and a vanished project still queues a failed run', async () => {
@@ -858,9 +855,15 @@ test('two parallel script tasks do not lock workspace.open', async () => {
   await poll(() => marks.every((mark) => existsSync(mark)) && h.events.filter((event) => event.event === 'automation/run-start').length === 2)
   expect(h.events.some((event) => event.event === 'automation/run-end')).toBe(false)
 
-  h.routeCtx.requestRestart = async () => true
+  let restartCalls = 0
+  h.routeCtx.requestRestart = async () => {
+    restartCalls += 1
+    return true
+  }
   const opened = await handler('workspace.open')(body({ root: other }), h.routeCtx)
-  expect(opened).toEqual({ restarting: true, workspaceRoot: resolve(other) })
+  expect(opened).toEqual({ workspaceRoot: resolve(other) })
+  expect(h.routeCtx.workspaceRoot.current).toBe(resolve(other))
+  expect(restartCalls).toBe(0)
 
   for (const release of releases) writeFileSync(release, '1')
   for (const task of tasks) await waitRunEnd(h.events, task.id)

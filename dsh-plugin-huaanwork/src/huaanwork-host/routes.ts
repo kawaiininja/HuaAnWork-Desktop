@@ -94,10 +94,8 @@ export interface RouteContext {
   /** cordis 运行时 ctx(agents/subagents/huaanworkApprovals 等 holders);Task 7 session 域消费。 */
   runtimeCtx?: SessionRuntimeContext
   /**
-   * workspace.open/close 的 generation 重启注入(index.ts 以 desktopRuntime 的
-   * requestConfirmedRestart 提供)。回传原生确认框裁决:true = 已确认且 relaunch
-   * 即将发生;false = 用户取消/正在退出,调用方必须清掉已写的 pendingRoot 且
-   * 不得按重启语义应答(评审 D2)。
+   * 插件安装/卸载的确认重启(index.ts 以 desktopRuntime.requestConfirmedRestart 提供)。
+   * 工作区切换不走这里:open/close 在进程内改 holder。
    */
   requestRestart(): Promise<boolean>
   /**
@@ -186,9 +184,8 @@ export interface NativeRouteEntry {
 }
 
 export const ROUTE_TABLE: readonly RouteTableEntry[] = [
-  // workspace(Task 9:写 pendingRoot → 确认框;确认 → generation 重启,200 + restarting 与
-  // 连接中断都可能,客户端两条路径都承接;取消 → 清 pendingRoot 返回当前根;
-  // 已在目标根短路返回 { workspaceRoot },旧 host.ts:1013-1023 语义)
+  // workspace:进程内热切换 holder,应答 { workspaceRoot },不重启。
+  // 已在目标根短路返回当前根。
   {
     method: 'workspace.open',
     http: 'POST',
@@ -507,10 +504,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     method: 'project.open',
     http: 'POST',
     path: '/huaanwork/project/open',
-    // 旧 host.ts:1033-1042 语义:assertAutomationIdle(openWorkspace 内)→ 查项目 →
-    // 切工作区 → touchProject 排序戳。评审 D1:应答恒带 workspaceRoot(重启路径也带,
-    // 客户端立即对齐根);评审 D2-③:确认框取消时 openWorkspace 回当前根,与 project.root
-    // 不符即「取消」——诚实报错,客户端四调用点各有 catch,不留半切换状态。
+    // 查项目 → 进程内切工作区 → touchProject 排序戳。应答恒带 workspaceRoot。
+    // 若切换后的根与项目根不一致,报 restart-cancelled,调用方应撤销刚写入的项目。
     handler: workspaceRoute(async (req, ctx) => {
       const projectId = bodyParam(req.body, 'projectId')
       if (!projectId) throw new Error('project.open requires params.projectId')
@@ -622,19 +617,25 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     method: 'automation.run',
     http: 'POST',
     path: '/huaanwork/automation/run',
-    // 旧 host.ts:1100-1114,方案①替换跨项目热切换。
-    // fire-and-forget:不得 await 执行体,否则堵住 handler 并绕过 automationTail。
+    // 手动运行先热切换到任务所属目录（未归属项目则回到中立根），再入队。
+    // 调度跨根仍不入队。fire-and-forget:不得 await 执行体。
     handler: workspaceRoute(async (req, ctx) => {
       assertAutomationIdle()
       if (!(await agentIdle(ctx))) throw new Error('当前对话仍在进行，请先完成或停止后再运行任务')
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.run requires params.id')
       const automation = await findAutomation(ctx.profileDir, id)
+      if (automation.projectId) {
+        const project = (await listProjects(ctx.profileDir)).find((item) => item.id === automation.projectId)
+        if (project) await openWorkspace(ctx, project.root)
+      } else {
+        await closeWorkspace(ctx)
+      }
       const decision = await automationRootDecision(ctx, automation)
       if (decision.kind === 'cross') throw new Error(decision.message)
       const runId = randomUUID()
       void enqueueAutomation(automation, { trigger: 'manual', runId })
-      return { queued: true, runId }
+      return { queued: true, runId, workspaceRoot: ctx.workspaceRoot.current }
     }),
   }, // Task 4 (M4)
   {

@@ -59,7 +59,7 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   const routeCtx = installHuaanworkHolders(ctx, config, hub, () => {
     const runtime = ctx.desktopRuntime as ConfirmedRestartRuntime
     if (typeof runtime.requestConfirmedRestart !== 'function') {
-      throw new Error('huaanwork-host: desktopRuntime 缺少 requestConfirmedRestart()(工作区切换需要原生确认回传能力;请使用 ElectronDesktopRuntime)')
+      throw new Error('huaanwork-host: desktopRuntime 缺少 requestConfirmedRestart()(插件安装确认重启需要原生确认回传能力;请使用 ElectronDesktopRuntime)')
     }
     return runtime.requestConfirmedRestart()
   })
@@ -67,7 +67,7 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   const runtime = ctx as unknown as AutomationRuntime
   bindAutomationRuntime(runtime, routeCtx)
   // —— 启动存量清扫(G6,Task 6.12;旧 host.ts:922/936 同位置语义;裁定 D-M6-24 / R-6.12-1)——
-  // 在 apply() 内执行 ⇒ 每次 generation 启动(workspace.open 触发)都会跑,天然晚于
+  // 在 apply() 内执行 ⇒ 每次进程启动都会跑,天然晚于
   // main.ts 的一次性迁移钩子:迁移搬进来的 legacy chat-auto 日志由同一次启动清掉。
   // 两侧都幂等;清扫失败只记日志,不把启动拖下水——存量垃圾的 IO 故障不该让 boot 失败。
   // 分工(R-6.12-1):chat-auto 清扫每代都跑(廉价:readdir + 前缀判据,不解压任何日志;

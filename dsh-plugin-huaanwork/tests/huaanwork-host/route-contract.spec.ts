@@ -31,7 +31,7 @@ export const OPTIONAL_KEYS_WHITELIST: Record<string, string[]> = {
  * 16 个 501 路由在后续任务实现后的目标业务必选键集合。
  * 按 Task 0 Step 1 与评审 P3-4、旧 host.ts/skills-host.ts 应答行钉死:
  * - plugin.add/remove: ['bundles'] (restarting 列入可选键白名单, bundles 为必含键)
- * - automation.run: ['queued', 'runId'] (旧 host.ts:1114)
+ * - automation.run: ['queued', 'runId', 'workspaceRoot']
  * - automation.pruneSessions: ['removed'] (旧 host.ts:1131)
  * - skill.importPreview: ['targetName', 'nameMismatch', 'kind'] (旧 skills-host.ts:279)
  * - skill.create/update/import: ['skill'] (SkillWriteResult)
@@ -57,7 +57,7 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.create': ['automation'],
   'automation.update': ['automation'],
   'automation.remove': ['removed'],
-  'automation.run': ['queued', 'runId'],
+  'automation.run': ['queued', 'runId', 'workspaceRoot'],
   'automation.pruneSessions': ['removed'],
 }
 
@@ -158,7 +158,7 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.create': ['automation'],
   'automation.update': ['automation'],
   'automation.remove': ['removed'],
-  'automation.run': ['queued', 'runId'],
+  'automation.run': ['queued', 'runId', 'workspaceRoot'],
   'automation.runs': ['runs'],
   'automation.pruneSessions': ['removed'],
   'automation.templates': ['templates'],
@@ -179,8 +179,8 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
  */
 export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   // workspace
-  'workspace.open': ['workspaceRoot', 'restarting'],
-  'workspace.close': ['workspaceRoot', 'restarting'],
+  'workspace.open': ['workspaceRoot'],
+  'workspace.close': ['workspaceRoot'],
 
   // session
   'session.send': ['ok'],
@@ -261,7 +261,7 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   // project
   'project.list': ['projects'],
   'project.create': ['project'],
-  'project.open': ['project', 'workspaceRoot', 'restarting'],
+  'project.open': ['project', 'workspaceRoot'],
   'project.remove': ['removed', 'project'],
   'project.rename': ['project'],
 
@@ -270,7 +270,7 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'automation.create': ['automation'],
   'automation.update': ['automation'],
   'automation.remove': ['removed'],
-  'automation.run': ['queued', 'runId'],
+  'automation.run': ['queued', 'runId', 'workspaceRoot'],
   'automation.runs': ['runs'],
   'automation.pruneSessions': ['removed'],
   'automation.templates': ['templates'],
@@ -395,7 +395,7 @@ describe('Route Contract Cross-Test (D6)', () => {
     // 逐项严格断言评审审查要求的真实键名:
     expect(TARGET_BUSINESS_REQUIRED_KEYS['plugin.add']).toEqual(['bundles'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['plugin.remove']).toEqual(['bundles'])
-    expect(TARGET_BUSINESS_REQUIRED_KEYS['automation.run']).toEqual(['queued', 'runId'])
+    expect(TARGET_BUSINESS_REQUIRED_KEYS['automation.run']).toEqual(['queued', 'runId', 'workspaceRoot'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['automation.pruneSessions']).toEqual(['removed'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['skill.importPreview']).toEqual(['targetName', 'nameMismatch', 'kind'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['skill.create']).toEqual(['skill'])

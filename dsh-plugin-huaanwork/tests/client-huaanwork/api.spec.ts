@@ -283,45 +283,23 @@ describe('rpcCall 错误处理', () => {
   })
 })
 
-describe('workspace.open/close 的 generation 重启语义', () => {
-  test('确认后 200 正常返回:restarting 应答(含 workspaceRoot)直传,不触发 waitForReady 轮询', async () => {
-    // 多数时候应答先于 teardown 写出(评审 D5:这才是真实主路径)。
-    fetchMock.mockResolvedValueOnce(jsonResponse({ restarting: true, workspaceRoot: '/tmp/x' }))
+describe('workspace.open/close 热切换', () => {
+  test('200 应答原样返回 workspaceRoot,不轮询 status', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ workspaceRoot: '/tmp/x' }))
     await expect(rpcCall('workspace.open', { root: '/tmp/x' }))
-      .resolves.toEqual({ restarting: true, workspaceRoot: '/tmp/x' })
+      .resolves.toEqual({ workspaceRoot: '/tmp/x' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  test('open 中途连接 reset → waitForReady 轮询 → status 200 后 resolve { restarting: true }', async () => {
-    // 第 1 次 POST workspace/open 撞上 webServer 关闭;随后 status 先 503 再 200。
-    fetchMock
-      .mockRejectedValueOnce(new TypeError('fetch failed'))
-      .mockResolvedValueOnce(new Response('down', { status: 503 }))
-      .mockResolvedValueOnce(jsonResponse({ ready: true }))
-    await expect(rpcCall('workspace.open', { root: '/tmp/x' })).resolves.toEqual({ restarting: true })
-    const calls = fetchMock.mock.calls.map((call) => `${call[1].method} ${call[0]}`)
-    expect(calls).toEqual([
-      'POST /huaanwork/workspace/open',
-      'GET /huaanwork/status',
-      'GET /huaanwork/status',
-    ])
+  test('open 连接失败按普通请求抛出,不伪装成重启成功', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'))
+    await expect(rpcCall('workspace.open', { root: '/tmp/x' })).rejects.toThrow('fetch failed')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  test('close 中途连接 reset → 同样 resolve { restarting: true }', async () => {
-    fetchMock
-      .mockRejectedValueOnce(new TypeError('fetch failed'))
-      .mockResolvedValueOnce(jsonResponse({ ready: true }))
-    await expect(rpcCall('workspace.close')).resolves.toEqual({ restarting: true })
-  })
-
-  test('重启等待超时 → reject(60s 无 200)', async () => {
-    vi.useFakeTimers()
-    fetchMock.mockRejectedValue(new TypeError('fetch failed'))
-    const promise = rpcCall('workspace.open', { root: '/tmp/x' })
-    // 先挂 assertion 再推进定时器,避免 rejection 在挂载前被记为 unhandled。
-    const assertion = expect(promise).rejects.toThrow('等待服务重启超时(60s)')
-    await vi.advanceTimersByTimeAsync(61_000)
-    await assertion
+  test('close 连接失败按普通请求抛出', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'))
+    await expect(rpcCall('workspace.close')).rejects.toThrow('fetch failed')
   })
 
   test('waitForReady:已是 200 时立即返回,不发额外请求之外的重试', async () => {

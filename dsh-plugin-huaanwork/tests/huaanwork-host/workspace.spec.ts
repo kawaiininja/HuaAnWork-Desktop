@@ -9,6 +9,7 @@ import {
   neutralWorkspaceRoot,
   PENDING_ROOT_TTL_MS,
   readPendingWorkspaceRoot,
+  writePendingWorkspaceRoot,
   type PendingRootDrop,
 } from '../../src/huaanwork-host/workspace-state.ts'
 import { closeWorkspace, openWorkspace } from '../../src/huaanwork-host/workspace.ts'
@@ -43,30 +44,35 @@ function makeRouteCtx(): { ctx: RouteContext; requestRestart: ReturnType<typeof 
 }
 
 describe('openWorkspace', () => {
-  test('合法目录:写 pendingRoot(绝对路径)+ 调 requestRestart + 返回 { restarting: true, workspaceRoot }', async () => {
+  test('合法目录:进程内切 holder,不写 pendingRoot,不调 requestRestart', async () => {
     const target = mkdtempSync(join(tmpdir(), 'hw-ws-target-'))
+    const policy = { workspaceRoot: profileDir }
     const { ctx, requestRestart } = makeRouteCtx()
-    await expect(openWorkspace(ctx, target)).resolves.toEqual({ restarting: true, workspaceRoot: resolve(target) })
-    expect(readPendingWorkspaceRoot(profileDir)).toBe(resolve(target))
-    // spec §14 第 23 条残余:`pendingRoot` 落盘带写入时刻(组合期 TTL 判据的原料)。
-    const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')) as
-      { pendingRoot?: string; writtenAt?: string }
-    expect(state.pendingRoot).toBe(resolve(target))
-    expect(typeof state.writtenAt).toBe('string')
-    expect(Math.abs(Date.now() - Date.parse(state.writtenAt!))).toBeLessThan(60_000)
-    expect(requestRestart).toHaveBeenCalledTimes(1)
+    ctx.runtimeCtx = {
+      sandboxPolicy: policy,
+      get: (name) => (name === 'sandboxPolicy' ? policy : undefined),
+    }
+    await expect(openWorkspace(ctx, target)).resolves.toEqual({ workspaceRoot: resolve(target) })
+    expect(ctx.workspaceRoot.current).toBe(resolve(target))
+    expect(policy.workspaceRoot).toBe(resolve(target))
+    expect(existsSync(join(profileDir, 'huaanwork-workspace.json'))).toBe(false)
+    expect(requestRestart).not.toHaveBeenCalled()
     rmSync(target, { recursive: true, force: true })
   })
 
-  test('确认框取消:清除已写 pendingRoot + 返回当前根(不应答 restarting)(评审 D2)', async () => {
-    const target = mkdtempSync(join(tmpdir(), 'hw-ws-cancel-'))
-    const { ctx, requestRestart } = makeRouteCtx()
-    requestRestart.mockResolvedValue(false)
-    await expect(openWorkspace(ctx, target)).resolves.toEqual({ workspaceRoot: profileDir })
-    // pendingRoot 先写后清:文件留 `{}` 占位,读回 null——下次冷启动不会静默切换。
-    expect(readPendingWorkspaceRoot(profileDir)).toBeNull()
-    expect(JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8'))).toEqual({})
-    expect(requestRestart).toHaveBeenCalledTimes(1)
+  test('sandboxPolicy 读取抛错时切换仍然成功，holder 已指向目标目录', async () => {
+    const target = mkdtempSync(join(tmpdir(), 'hw-ws-policy-throw-'))
+    const { ctx } = makeRouteCtx()
+    ctx.runtimeCtx = {
+      get sandboxPolicy(): { workspaceRoot?: string } {
+        throw new Error('cannot read service sandboxPolicy')
+      },
+      get(name: string): unknown {
+        throw new Error(`missing ${name}`)
+      },
+    }
+    await expect(openWorkspace(ctx, target)).resolves.toEqual({ workspaceRoot: resolve(target) })
+    expect(ctx.workspaceRoot.current).toBe(resolve(target))
     rmSync(target, { recursive: true, force: true })
   })
 
@@ -79,7 +85,7 @@ describe('openWorkspace', () => {
       const { ctx } = makeRouteCtx()
       await openWorkspace(ctx, 'subdir')
       // macOS 上 process.cwd() 返回 /private/var 实路径,resolve 以 cwd 为准。
-      expect(readPendingWorkspaceRoot(profileDir)).toBe(join(process.cwd(), 'subdir'))
+      expect(ctx.workspaceRoot.current).toBe(join(process.cwd(), 'subdir'))
     } finally {
       process.chdir(previous)
     }
@@ -141,25 +147,16 @@ describe('openWorkspace', () => {
 })
 
 describe('closeWorkspace', () => {
-  test('写 pendingRoot=中立根(非删文件)+ 调 requestRestart,确认后返回中立根', async () => {
+  test('切回中立根:进程内改 holder,不写 pendingRoot,不调 requestRestart', async () => {
     const { ctx, requestRestart } = makeRouteCtx()
     const neutral = neutralWorkspaceRoot(profileDir)
-    await expect(closeWorkspace(ctx)).resolves.toEqual({ restarting: true, workspaceRoot: neutral })
-    expect(readPendingWorkspaceRoot(profileDir)).toBe(neutral)
-    // 旧语义钉中立根:文件保留 `{}` 以外的可读状态,不删除。
-    const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')) as
-      { pendingRoot?: string; writtenAt?: string }
-    expect(state.pendingRoot).toBe(neutral)
-    expect(typeof state.writtenAt).toBe('string')
-    expect(requestRestart).toHaveBeenCalledTimes(1)
-  })
-
-  test('确认框取消:清除 pendingRoot + 返回当前根(评审 D2)', async () => {
-    const { ctx, requestRestart } = makeRouteCtx()
-    requestRestart.mockResolvedValue(false)
-    await expect(closeWorkspace(ctx)).resolves.toEqual({ workspaceRoot: profileDir })
-    expect(readPendingWorkspaceRoot(profileDir)).toBeNull()
-    expect(requestRestart).toHaveBeenCalledTimes(1)
+    const policy = { workspaceRoot: profileDir }
+    ctx.runtimeCtx = { sandboxPolicy: policy }
+    await expect(closeWorkspace(ctx)).resolves.toEqual({ workspaceRoot: neutral })
+    expect(ctx.workspaceRoot.current).toBe(neutral)
+    expect(policy.workspaceRoot).toBe(neutral)
+    expect(existsSync(join(profileDir, 'huaanwork-workspace.json'))).toBe(false)
+    expect(requestRestart).not.toHaveBeenCalled()
   })
 
   test('已在中立根 → 短路:不写不重启,返回 { workspaceRoot }(旧 host.ts:1021 语义)', async () => {
@@ -181,18 +178,12 @@ describe('closeWorkspace', () => {
 })
 
 describe('pendingRoot 生命周期', () => {
-  test('写 → 读 → 清(首个 effect)→ 读 null 往返一致;文件不删', async () => {
-    const { ctx, requestRestart } = makeRouteCtx()
-    // 当前根指向别处,确保 open 走真重启写盘路径。
-    ctx.workspaceRoot.current = join(profileDir, 'current-root')
-    await openWorkspace(ctx, profileDir)
-    const pending = readPendingWorkspaceRoot(profileDir)
-    expect(pending).toBe(resolve(profileDir))
-    // 模拟 apply 首个 effect:重启 generation 前清除。
+  test('写 → 读 → 清(首个 effect)→ 读 null 往返一致;文件不删', () => {
+    writePendingWorkspaceRoot(profileDir, resolve(profileDir))
+    expect(readPendingWorkspaceRoot(profileDir)).toBe(resolve(profileDir))
     clearPendingWorkspaceRoot(profileDir)
     expect(readPendingWorkspaceRoot(profileDir)).toBeNull()
     expect(existsSync(join(profileDir, 'huaanwork-workspace.json'))).toBe(true)
-    expect(requestRestart).toHaveBeenCalledTimes(1)
   })
 
   /**
@@ -274,59 +265,3 @@ describe('pendingRoot 生命周期', () => {
   })
 })
 
-describe('确认后重打 writtenAt(F1:TTL 锚定裁决时刻,不吞已确认切换)', () => {
-  /**
-   * F1(Task 6.9 fix round 1,评审 Important 1):原生确认框无超时,promise 挂起多久
-   * 由用户决定。预写 pendingRoot 的 writtenAt 若停留在弹框之前,用户超过 TTL 才确认
-   * 时,组合期会把这次**已确认**的切换当残留丢掉——而 HTTP 已应答 `restarting: true`,
-   * 重启进中立根且无任何用户可见通知。修复 = 确认路径以裁决时刻重打 writtenAt:
-   * 已裁决切换的年龄改度量「确认 → 重启」间隙(秒级);未裁决的对话框残留保有预写
-   * 时刻,仍会被 TTL 抓住(见上组用例)。
-   */
-  test('open:确认框停留超过 TTL 后确认 → writtenAt 重锚在裁决时刻,组合期不丢弃', async () => {
-    const target = mkdtempSync(join(tmpdir(), 'hw-ws-late-open-'))
-    const start = Date.parse('2026-01-01T00:00:00.000Z')
-    const decisionTime = start + PENDING_ROOT_TTL_MS + 60_000
-    vi.useFakeTimers()
-    vi.setSystemTime(start)
-    try {
-      const { ctx, requestRestart } = makeRouteCtx()
-      requestRestart.mockImplementation(async () => {
-        // 对话框挂起 TTL + 1 分钟(超时不存在,这就是「用户迟到」;预写时刻已超期)。
-        vi.setSystemTime(decisionTime)
-        return true
-      })
-      await expect(openWorkspace(ctx, target)).resolves.toEqual({ restarting: true, workspaceRoot: resolve(target) })
-      const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')) as
-        { writtenAt?: string }
-      expect(Date.parse(state.writtenAt ?? '')).toBe(decisionTime)
-      // 重启后在组合期读取:年龄只是「确认 → 重启」间隙(秒级),TTL 不误伤已裁决切换。
-      expect(readPendingWorkspaceRoot(profileDir, { now: decisionTime + 5_000 })).toBe(resolve(target))
-    } finally {
-      vi.useRealTimers()
-      rmSync(target, { recursive: true, force: true })
-    }
-  })
-
-  test('close:确认框停留超过 TTL 后确认 → writtenAt 重锚在裁决时刻,组合期不丢弃', async () => {
-    const start = Date.parse('2026-01-01T00:00:00.000Z')
-    const decisionTime = start + PENDING_ROOT_TTL_MS + 60_000
-    vi.useFakeTimers()
-    vi.setSystemTime(start)
-    try {
-      const { ctx, requestRestart } = makeRouteCtx()
-      const neutral = neutralWorkspaceRoot(profileDir)
-      requestRestart.mockImplementation(async () => {
-        vi.setSystemTime(decisionTime)
-        return true
-      })
-      await expect(closeWorkspace(ctx)).resolves.toEqual({ restarting: true, workspaceRoot: neutral })
-      const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')) as
-        { writtenAt?: string }
-      expect(Date.parse(state.writtenAt ?? '')).toBe(decisionTime)
-      expect(readPendingWorkspaceRoot(profileDir, { now: decisionTime + 5_000 })).toBe(neutral)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-})

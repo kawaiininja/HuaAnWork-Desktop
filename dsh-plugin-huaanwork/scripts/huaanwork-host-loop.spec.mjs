@@ -12,10 +12,10 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve as resolvePath } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, before, test } from 'node:test'
 import { WebSocket } from 'ws'
@@ -226,7 +226,7 @@ function fileURLToPathLocal(url) {
 }
 
 /**
- * 进程内组合 + boot(Workspace 用例的「generation 重启」即再调本函数一次)。
+ * 进程内组合 + boot(调度用例的 generation 重启即再调本函数一次)。
  * 复用同一 pnpmRuntime / BROWSER_ACCESS;每次 boot 新铸 desktopRuntime stub。
  */
 async function bootPrepared(prepared) {
@@ -585,55 +585,28 @@ test('presentAs("ptc") 防线:主 agent scope 抛 disabled by HuaAnWork', { time
   )
 })
 
-test('workspace pendingRoot:project.open 经 route 驱动写盘,二次组合 + boot 模拟 generation 重启(不触发真实 relaunch)', { timeout: BOOT_WATCHDOG_MS }, async () => {
-  // 评审 R2:M3 唯一的真 boot 整合证据改走与 UI 相同的 route——注册项目后经
-  // POST /huaanwork/project/open 钉新根(runtime 桩确认重启),覆盖
-  // assertAutomationIdle → 写 pendingRoot → 确认回传应答全链;此前此处直接写
-  // huaanwork-workspace.json,完全绕过 route,D2 修复涉及的逻辑均不在覆盖内。
+test('workspace:project.open 在当前进程热切换,不写 pendingRoot、不重启', { timeout: BOOT_WATCHDOG_MS }, async () => {
+  // 与 UI 相同的 route:注册项目后 POST /huaanwork/project/open 把 holder 钉到新根。
   const repo2 = join(base, 'repo2')
   mkdirSync(repo2, { recursive: true })
   writeFileSync(join(repo2, 'README.md'), '# second workspace\n')
   const created = await post('/huaanwork/project/create', { root: repo2, name: 'repo2' })
   assert.equal(created.project.root, repo2, 'project.create pins repo2 root')
   const opened = await post('/huaanwork/project/open', { projectId: created.project.id })
-  assert.equal(opened.restarting, true, 'stub confirms restart, route answers restarting')
-  assert.equal(opened.workspaceRoot, repo2, 'project.open response carries workspaceRoot (评审 D1)')
+  assert.equal(opened.restarting, undefined, 'project open hot-switches without restart')
+  assert.equal(opened.workspaceRoot, repo2, 'project.open response carries workspaceRoot')
   assert.equal(opened.project.id, created.project.id, 'project.open response carries project')
-  // spec §14 第 23 条残余(Task 6.9):落盘同时附写入时刻(组合期 TTL 判据的原料),
-  // 故按字段断言而非整对象 deepEqual。
-  const written = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8'))
-  assert.equal(written.pendingRoot, repo2, 'project.open wrote pendingRoot via route')
-  assert.ok(
-    typeof written.writtenAt === 'string' && !Number.isNaN(Date.parse(written.writtenAt)),
-    'pendingRoot carries a parseable writtenAt (TTL input)',
-  )
+  assert.equal(ctx.huaanworkWorkspaceRoot.current, repo2, 'workspace root holder switches in process')
+  const statePath = join(profileDir, 'huaanwork-workspace.json')
+  if (existsSync(statePath)) {
+    const written = JSON.parse(readFileSync(statePath, 'utf8'))
+    assert.equal(written.pendingRoot, undefined, 'hot-switch does not write pendingRoot')
+  }
 
-  const reprepared = prepareDesktopProfile('1', home, 'win32')
-  await ctx.fiber.dispose()
-  ctx = await bootPrepared(reprepared)
-  webPort = ctx.webServer.port
-  origin = `http://127.0.0.1:${String(webPort)}`
-
-  // 组合期消费 pendingRoot:holder 钉新根,agent-loop cwd / 会话 id 按新根铸造。
-  assert.equal(ctx.huaanworkWorkspaceRoot.current, repo2, 'workspace root holder pinned to pendingRoot')
-  const agent = mainAgent()
-  assert.equal(agent.session?.header?.cwd, repo2, 'agent-loop cwd follows pendingRoot')
-  const expectedSessionId = `huaanwork-${createHash('sha256').update(resolvePath(repo2)).digest('hex').slice(0, 16)}`
-  assert.equal(agent.session?.id, expectedSessionId, 'session id minted from pendingRoot')
-  assert.equal(String(agent.session?.id).startsWith('huaanwork-chat'), false, 'new session ids do not use the legacy huaanwork-chat prefix')
-
-  // huaanwork-host 首个 effect:pendingRoot 已清(文件保留 {} 占位,不删除)。
-  const state = JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8'))
-  assert.deepEqual(state, {}, 'pendingRoot cleared by first apply effect')
-
-  // open 同根短路(旧 host.ts:1013 语义):不重启、不写 pendingRoot,服务端仍活着应答 200。
+  // open 同根短路:不改 holder。
   const reopened = await post('/huaanwork/workspace/open', { root: repo2 })
   assert.deepEqual(reopened, { workspaceRoot: repo2 }, 'open short-circuits on same root')
-  assert.deepEqual(
-    JSON.parse(readFileSync(join(profileDir, 'huaanwork-workspace.json'), 'utf8')),
-    {},
-    'short-circuit must not write pendingRoot',
-  )
+  assert.equal(ctx.huaanworkWorkspaceRoot.current, repo2, 'short-circuit keeps the switched root')
 })
 
 test('scheduler:due 任务由 tick 经执行体跑完(stub LLM)', { timeout: TEST_TIMEOUT_MS }, async () => {

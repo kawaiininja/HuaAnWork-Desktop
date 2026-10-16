@@ -31,6 +31,10 @@ import type { RouteContext } from './routes.ts'
 
 export type SessionRuntimeContext = {
   huaanworkApprovals?: ApprovalMap
+  /** 工作区热切换时同步的沙箱根;缺席时只改 routeCtx.workspaceRoot holder。 */
+  sandboxPolicy?: { workspaceRoot?: string }
+  /** cordis Context.get。sandboxPolicy 未注入到本插件时,用它做全局查找。 */
+  get?: (name: string) => unknown
   agents?: {
     get?: (id: string) => ListedAgent | undefined
     list?: () => ListedAgent[]

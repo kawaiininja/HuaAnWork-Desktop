@@ -26,7 +26,7 @@ import { neutralWorkspaceRoot } from './workspace-state.ts'
  * agent 任务走 automationTail 串行链(并发恒 1);script 走上限 2 的槽位池,两者互不阻塞。
  * 不移植 restoreUserRoot / 进程内热切换:到达执行体的任务在当前 workspaceRoot 下运行。
  * schedule/catchup 若目标根 ≠ 当前根,本入口直接返回、不入队(Task 5 调度器消费同一入口)。
- * 手动跨根由 automation.run 在入队前具名拒绝;项目已删除不算跨根,放行执行体记失败。
+ * 手动运行由路由先热切换到目标根再入队;调度跨根不入队。项目已删除不算跨根,放行执行体记失败。
  */
 
 /** 绑定项目已不在当前根时,手动 run 的拒绝文案。 */

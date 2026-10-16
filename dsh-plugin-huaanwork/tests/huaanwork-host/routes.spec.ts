@@ -729,7 +729,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
       error: { code: 'workspace-error', message: 'project nope was not found' },
     })
 
-    // open 异根 + 确认重启:200 恒带 workspaceRoot(评审 D1),pendingRoot 落盘。
+    // open 异根:进程内热切换,200 带 workspaceRoot,不重启、不写 pendingRoot。
     const otherRoot = join(profileTempDir, 'repo-y')
     mkdirSync(otherRoot, { recursive: true })
     const createdY = await fetch(`${baseUrl}/huaanwork/project/create`, authed({
@@ -739,7 +739,11 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     }))
     const { project: projectY } = await createdY.json()
     routeCtx.workspaceRoot.current = join(profileTempDir, 'workspace')
-    routeCtx.requestRestart = async () => true
+    let restartCalls = 0
+    routeCtx.requestRestart = async () => {
+      restartCalls += 1
+      return true
+    }
     const openedY = await fetch(`${baseUrl}/huaanwork/project/open`, authed({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -747,23 +751,12 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     }))
     expect(openedY.status).toBe(200)
     const openedYJson = await openedY.json()
-    expect(openedYJson).toMatchObject({ restarting: true, workspaceRoot: otherRoot })
+    expect(openedYJson).toMatchObject({ workspaceRoot: otherRoot })
+    expect(openedYJson.restarting).toBeUndefined()
     expect(openedYJson.project.id).toBe(projectY.id)
-    expect(readPendingWorkspaceRoot(profileTempDir)).toBe(otherRoot)
-
-    // open 异根 + 确认框取消:400 restart-cancelled,pendingRoot 已清(评审 D2)。
-    routeCtx.requestRestart = async () => false
-    const cancelled = await fetch(`${baseUrl}/huaanwork/project/open`, authed({
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectId: projectY.id }),
-    }))
-    expect(cancelled.status).toBe(400)
-    expect(await cancelled.json()).toEqual({
-      error: { code: 'restart-cancelled', message: '已取消工作区切换,项目未打开' },
-    })
+    expect(routeCtx.workspaceRoot.current).toBe(otherRoot)
+    expect(restartCalls).toBe(0)
     expect(readPendingWorkspaceRoot(profileTempDir)).toBeNull()
-    routeCtx.requestRestart = async () => true
 
     // 清理 repo-y,不影响下方级联删除的空表断言。
     await fetch(`${baseUrl}/huaanwork/project/remove`, authed({
