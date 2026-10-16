@@ -16232,6 +16232,7 @@ __metadata:
     "@deepseek-ai/dsh-client-file-upload": "npm:0.2.1-alpha.1"
     "@deepseek-ai/dsh-client-locale": "npm:0.2.1-alpha.1"
     "@deepseek-ai/dsh-client-modules": "npm:0.2.1-alpha.1"
+    "@deepseek-ai/dsh-client-shortcuts": "npm:0.2.1-alpha.1"
     "@deepseek-ai/dsh-client-store": "npm:0.2.1-alpha.1"
     "@deepseek-ai/dsh-client-ui-approval": "npm:0.2.1-alpha.1"
     "@deepseek-ai/dsh-client-ui-attachment": "npm:0.2.1-alpha.1"

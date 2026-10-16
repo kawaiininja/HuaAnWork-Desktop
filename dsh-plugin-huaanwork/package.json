@@ -234,6 +234,7 @@
     "@deepseek-ai/dsh-client-file-upload": "0.2.1-alpha.1",
     "@deepseek-ai/dsh-client-locale": "0.2.1-alpha.1",
     "@deepseek-ai/dsh-client-modules": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-shortcuts": "0.2.1-alpha.1",
     "@deepseek-ai/dsh-client-store": "0.2.1-alpha.1",
     "@deepseek-ai/dsh-client-ui-approval": "0.2.1-alpha.1",
     "@deepseek-ai/dsh-client-ui-attachment": "0.2.1-alpha.1",
