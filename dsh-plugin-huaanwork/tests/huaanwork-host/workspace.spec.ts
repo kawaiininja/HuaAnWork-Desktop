@@ -264,4 +264,3 @@ describe('pendingRoot 生命周期', () => {
     )
   })
 })
-
