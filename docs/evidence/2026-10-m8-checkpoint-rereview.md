@@ -64,3 +64,18 @@
 - checkpoint 的 verify-as-I-go 义务由本次复核**收口**:运行时主张在 HEAD 全部复测成立;两处已知问题(守卫红、Task 2.5 缺口)确认已在后续提交闭环;静默丢弃扫描除已登记的 darwin picker 外**无新增发现**。
 - 开口项后续处置:F-1 已由 `424ac705d4` 提交收口;F-2 经订正后于 `a9b682eb36` 裁定「保留收窄」并补钉收口;F-3 已由 `a188b5d82e` 声明依赖收口。三个开口项全部闭。
 - 复核自身的临时 worktree 已清理,主工作树零改动(本文件除外)。
+
+## 6. 主线推送记录(2026-10-16,裁定 R-M8-4 单次推送)
+
+本文件所在提交随本段描述的单次推送入库;推送范围 = `origin/master`(`147cbd39d2`)之后的提交,含 2026-10-16 会话前的 4 笔市场/vendor/守卫维护提交(市场 1.66.22 ×2、桥刷新、setZoomLevel 白名单)与本复核及收口链 11 笔(上文 §4–§5 各 SHA,另含工作树收口三笔:`3943e3b5f9` 字体裁剪、`ac9b57b1f6` 工作区热切换 + createAndOpen、`9a0d895c67` LLM 超时与补答,以及 whitespace 门禁修复一笔)。
+
+推送前门禁读数(均为提交态、非工作树):
+
+| 门禁 | 读数 |
+|---|---|
+| `check:whitespace`(BASE_SHA = merge-base) | exit 0(修复 `workspace.spec.ts` 文件尾空行后复跑) |
+| huaanwork 全量套件 | exit 0:2608 tests(2595 pass / 13 skip) |
+| huaanwork typecheck(5 projects) | exit 0 |
+| `check:desktop-variants` | 绿:守卫 11/11,allowlist 9(0)/24(6) |
+
+工作树收口三笔提交各自的验证细节在各自提交信息里;`3943e3b5f9` 同批订正了 §4 下方登记段的字体计数笔误(26→24)。
