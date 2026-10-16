@@ -256,7 +256,7 @@ test("POST chat/completions is streamed with 120s timeout and empty api_key is v
   try {
     await collect(new HuaAnWorkAdapter().stream(userOptions({ signal: new AbortController().signal })));
     assert.equal(url, "http://127.0.0.1:11434/v1/chat/completions");
-    assert.equal(timeoutMs, 120_000);
+    assert.equal(timeoutMs, 600_000);
     const headers = new Headers(init?.headers);
     assert.equal(headers.get("authorization"), null);
     assert.ok(headers.get("user-agent"));
@@ -501,7 +501,7 @@ test("follow-up request sends empty reasoning_content for tool-call turns withou
   }
 });
 
-test("request sends a default max_tokens budget and respects an explicit maxTokens", async () => {
+test("request never sends a max_tokens budget below the reasoning floor", async () => {
   const original = globalThis.fetch;
   const bodies: { max_tokens?: number }[] = [];
   globalThis.fetch = async (_input, init) => {
@@ -512,13 +512,44 @@ test("request sends a default max_tokens budget and respects an explicit maxToke
     await collect(new HuaAnWorkAdapter().stream(userOptions()));
     await collect(new HuaAnWorkAdapter().stream(userOptions({ maxTokens: 4096 })));
     assert.equal(bodies[0]?.max_tokens, 16_384);
-    assert.equal(bodies[1]?.max_tokens, 4096);
+    assert.equal(bodies[1]?.max_tokens, 16_384);
   } finally {
     globalThis.fetch = original;
   }
 });
 
-test("reasoning-only response with finish_reason=length reports the token budget, not a bare empty response", async () => {
+test("reasoning-only stop is asked to continue and then accepts the real answer", async () => {
+  const original = globalThis.fetch;
+  const bodies: { messages?: { role?: string; content?: string }[] }[] = [];
+  globalThis.fetch = async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as { messages?: { role?: string; content?: string }[] });
+    if (bodies.length === 1) {
+      return sseResponse([
+        { choices: [{ delta: { reasoning_content: "Let me take the screenshot now." } }] },
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+        "[DONE]",
+      ]);
+    }
+    return sseResponse([
+      { choices: [{ delta: { content: "采集结果已整理。" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions()));
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[1]?.messages?.at(-1)?.content, "请继续完成这一步：需要工具就直接发起工具调用，否则输出正文结果。不要只输出思考。");
+    const finish = chunks.at(-1);
+    assert.equal(finish?.type, "finish");
+    if (finish?.type === "finish") assert.equal(finish.reason.kind, "stop");
+    assert.ok(chunks.some((chunk) => chunk.type === "text-delta" && chunk.text.includes("采集结果已整理")));
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("reasoning-only stop with finish_reason=length reports the token budget, not a bare empty response", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () =>
     sseResponse([

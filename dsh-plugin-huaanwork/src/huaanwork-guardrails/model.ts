@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
+  MessageId,
   ToolCallId,
   LlmAdapter,
   LlmError,
@@ -26,7 +27,8 @@ import {
 
 const PROVIDER = "deepseek-official";
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
-const REQUEST_TIMEOUT_MS = 120_000;
+/** 思考模型单次流式生成经常超过 2 分钟，120 秒会把正常回合掐成超时。 */
+const REQUEST_TIMEOUT_MS = 600_000;
 
 function resolveSettingsPath(profileDir: string): string {
   return join(profileDir, "huaanwork-settings.json");
@@ -76,6 +78,116 @@ type WireMessage = {
 export const name = "llm-deepseek";
 export const inject = ["llm"];
 
+const CONTINUE_AFTER_REASONING = "请继续完成这一步：需要工具就直接发起工具调用，否则输出正文结果。不要只输出思考。";
+
+type ModelStreamRead = {
+  text: string;
+  textStarted: boolean;
+  emitted: number;
+  textIndex: number;
+  nextIndex: number;
+  reasoning: string;
+  payloads: string[];
+};
+
+function streamHasOutput(read: ModelStreamRead): boolean {
+  if (read.text.length > 0) return true;
+  if (parseSseToolCalls(read.payloads, isRegisteredToolName).length > 0) return true;
+  return parseTextProtocol(read.text, isRegisteredToolName) !== null;
+}
+
+function continueAfterReasoning(options: GenerateOptions, reasoning: string): GenerateOptions {
+  const assistant: GenerateOptions["messages"][number] = {
+    id: MessageId("hw-reasoning"),
+    role: "assistant",
+    content: reasoning.length > 0
+      ? [{ type: "reasoning", text: reasoning }]
+      : [{ type: "text", text: "" }],
+    source: { kind: "model", provider: options.provider, model: options.model },
+  };
+  const nudge: GenerateOptions["messages"][number] = {
+    id: MessageId("hw-continue"),
+    role: "user",
+    content: [{ type: "text", text: CONTINUE_AFTER_REASONING }],
+    source: { kind: "user" },
+  };
+  return { ...options, messages: [...options.messages, assistant, nudge] };
+}
+
+function* finishModelStream(read: ModelStreamRead): Generator<StreamChunk> {
+  const toolCalls = parseSseToolCalls(read.payloads, isRegisteredToolName);
+  if (toolCalls.length > 0) {
+    yield* emitToolCalls(toolCalls, read.nextIndex);
+    return;
+  }
+  const textCall = parseTextProtocol(read.text, isRegisteredToolName);
+  if (textCall) {
+    yield* emitToolCalls([textCall], read.nextIndex);
+    return;
+  }
+  yield* emitText(read.text, read.textStarted, read.emitted, read.textIndex, read.nextIndex, sseFinishReason(read.payloads));
+}
+
+async function* readModelStream(
+  opened: { body: ReadableStream<Uint8Array>; signal: AbortSignal; timeout: AbortSignal },
+  callerSignal: AbortSignal | undefined,
+): AsyncGenerator<StreamChunk, ModelStreamRead> {
+  const payloads: string[] = [];
+  let text = "";
+  let emitted = 0;
+  let textStarted = false;
+  let sawNativeToolCall = false;
+  let reasoning = "";
+  let reasoningStarted = false;
+  let nextIndex = 0;
+  let reasoningIndex = 0;
+  let textIndex = 0;
+
+  try {
+    for await (const line of readSseLines(opened.body, opened.signal)) {
+      const [payload] = ssePayloads([line]);
+      if (payload === undefined) continue;
+      payloads.push(payload);
+      const delta = sseEventDelta(payload);
+      if (delta.hasToolCalls) sawNativeToolCall = true;
+      if (delta.reasoning.length > 0) {
+        if (!reasoningStarted) {
+          reasoningIndex = nextIndex;
+          nextIndex += 1;
+          yield { type: "block-start", index: reasoningIndex, blockType: "reasoning" };
+          reasoningStarted = true;
+        }
+        reasoning += delta.reasoning;
+        yield { type: "reasoning-delta", index: reasoningIndex, text: delta.reasoning };
+      }
+      if (delta.content.length > 0) text += delta.content;
+      if (sawNativeToolCall) continue;
+
+      const safe = text.slice(emitted, textProtocolHoldIndex(text));
+      if (safe.length === 0) continue;
+      if (!textStarted) {
+        textIndex = nextIndex;
+        nextIndex += 1;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
+        textStarted = true;
+      }
+      yield { type: "text-delta", index: textIndex, text: safe };
+      emitted += safe.length;
+    }
+  } catch (error) {
+    if (callerSignal?.aborted) throw new LlmError("HuaAnWork model request aborted by caller", "ABORTED", { cause: error });
+    if (opened.timeout.aborted) {
+      throw new LlmError(`HuaAnWork model request timed out after ${REQUEST_TIMEOUT_MS}ms`, "TIMEOUT", { cause: error });
+    }
+    throw error;
+  }
+
+  if (reasoningStarted) {
+    yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: reasoning } };
+  }
+  return { text, textStarted, emitted, textIndex, nextIndex, reasoning, payloads };
+}
+
 export class HuaAnWorkAdapter extends LlmAdapter {
   constructor(private readonly profileDir?: string) {
     super();
@@ -108,74 +220,27 @@ export class HuaAnWorkAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const settings = loadSettings(this.profileDir);
-    const opened = await openCompletions(options, settings);
-    const payloads: string[] = [];
-    let text = "";
-    let emitted = 0;
-    let textStarted = false;
-    let sawNativeToolCall = false;
-    let reasoning = "";
-    let reasoningStarted = false;
-    let nextIndex = 0;
-    let reasoningIndex = 0;
-    let textIndex = 0;
-
-    try {
-      for await (const line of readSseLines(opened.body, opened.signal)) {
-        const [payload] = ssePayloads([line]);
-        if (payload === undefined) continue;
-        payloads.push(payload);
-        const delta = sseEventDelta(payload);
-        if (delta.hasToolCalls) sawNativeToolCall = true;
-        if (delta.reasoning.length > 0) {
-          if (!reasoningStarted) {
-            reasoningIndex = nextIndex;
-            nextIndex += 1;
-            yield { type: "block-start", index: reasoningIndex, blockType: "reasoning" };
-            reasoningStarted = true;
-          }
-          reasoning += delta.reasoning;
-          yield { type: "reasoning-delta", index: reasoningIndex, text: delta.reasoning };
-        }
-        if (delta.content.length > 0) text += delta.content;
-        if (sawNativeToolCall) continue;
-
-        const safe = text.slice(emitted, textProtocolHoldIndex(text));
-        if (safe.length === 0) continue;
-        if (!textStarted) {
-          textIndex = nextIndex;
-          nextIndex += 1;
-          yield { type: "block-start", index: textIndex, blockType: "text" };
-          textStarted = true;
-        }
-        yield { type: "text-delta", index: textIndex, text: safe };
-        emitted += safe.length;
-      }
-    } catch (error) {
-      if (options.signal?.aborted) throw new LlmError("HuaAnWork model request aborted by caller", "ABORTED", { cause: error });
-      if (opened.timeout.aborted) {
-        throw new LlmError(`HuaAnWork model request timed out after ${REQUEST_TIMEOUT_MS}ms`, "TIMEOUT", { cause: error });
-      }
-      throw error;
-    }
-
-    if (reasoningStarted) {
-      yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: reasoning } };
-    }
-
-    const toolCalls = parseSseToolCalls(payloads, isRegisteredToolName);
-    if (toolCalls.length > 0) {
-      yield* emitToolCalls(toolCalls, nextIndex);
+    const first = yield* readModelStream(await openCompletions(options, settings), options.signal);
+    if (streamHasOutput(first) || sseFinishReason(first.payloads) === "length") {
+      yield* finishModelStream(first);
       return;
     }
-
-    const textCall = parseTextProtocol(text, isRegisteredToolName);
-    if (textCall) {
-      yield* emitToolCalls([textCall], nextIndex);
+    // deepseek-flash 一类思考模型经常只回 reasoning_content 就 stop。
+    // 原请求重试仍是同一份上下文，所以这里带上思考再要一次正文或工具调用。
+    const second = yield* readModelStream(
+      await openCompletions(continueAfterReasoning(options, first.reasoning), settings),
+      options.signal,
+    );
+    if (streamHasOutput(second)) {
+      yield* finishModelStream(second);
       return;
     }
-
-    yield* emitText(text, textStarted, emitted, textIndex, nextIndex, sseFinishReason(payloads));
+    const reasoning = second.reasoning || first.reasoning;
+    if (reasoning.length > 0 && sseFinishReason(second.payloads) !== "length") {
+      yield* emitText(reasoning, false, 0);
+      return;
+    }
+    yield* finishModelStream(second.reasoning.length > 0 ? second : first);
   }
 }
 
@@ -340,7 +405,8 @@ function serializeRequest(options: GenerateOptions, settings: ModelSettings): Re
     stream: true,
     ...(tools !== undefined && tools.length > 0 ? { tools } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-    max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
+    // 思考内容计入完成预算。调用方给的更小上限（如标题生成）会被推理吃光，正文为空。
+    max_tokens: Math.max(options.maxTokens ?? 0, DEFAULT_MAX_TOKENS),
     ...(options.stop !== undefined ? { stop: options.stop } : {}),
   };
 }
