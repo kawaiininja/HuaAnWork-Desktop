@@ -1,0 +1,65 @@
+# 2026-10 M8 checkpoint 系统复核(wip 提交 827e53fc03 的 verify-as-I-go 收口)
+
+复核对象:`827e53fc034652452c9244e7f31d7f668657f8c6`(2026-10-09 17:28:54 +0800,wip(m8) checkpoint,自述 "NOT yet reviewed",Controller 裁定 "keep, verify as I go")。
+
+复核基线:主分支 HEAD = `b860ba8f9a`(2026-10-16 时点),checkpoint 之后 79 个提交。运行时门禁在独立干净 worktree(`HuaAnWork-Desktop-rereview`,detached at HEAD)上执行,主工作树的在途改动未被触碰、不被计入测量。
+
+参照系:`a36953ee24`(checkpoint 的父提交 = M8 Phase 2 合并提交)、`efde2186be`(合并前 fork 侧 tip)、`ca52ce2cd9`(合并的上游 master)。
+
+## 1. checkpoint 逐条主张核对矩阵
+
+| 主张(提交信息原文要点) | 判定 | 证据 |
+|---|---|---|
+| runtime re-pin 0.2.1-alpha.1,`@deepseek-ai/*` dep profile 与 beta 完全一致(7 个 distinct 版本;schemastery ^3.18.5-alpha.1;node-addon-require-builtin ^0.1.6) | **部分成立** | 共享 dep 的版本钉全一致(HEAD 实测 161 keys 比对,155 个版本全等,含两个具名包)。但 **key 集合不一致**:checkpoint 时点 huaanwork 148 个 `@deepseek-ai/*` keys vs beta 160 个(合并前 beta 也是 148——12 个 key 是合并从上游带入 beta 的,huaanwork 未跟进)。至 HEAD 仍有 6 个 key 缺席,见 §4 F-3 |
+| `yarn.lock` 由 yarn 再生、非手编(GC4);`yarn install --immutable` exit 0 | 成立 | HEAD 实测 exit 0(主树 2.2s;干净 worktree 49.5s,含 1 条 YN0007 构建提示,exit 0)。手编无法直接回溯证伪,lockfile 在两树均可被 yarn 接受 |
+| 18 个新模块自上游移植 | 成立 | `git show 827e53fc03 --diff-filter=A` 实测恰 18 个 A 文件,清单与提交信息列举吻合(system-proxy、platform-login、onboarding、jobs-bridge、startup-audit、asar-archive-policy、disposable-tree、link-projections、launch-workspace、profile-context 等) |
+| `paths.test.ts` 不再依赖真实 `.git`(worktree 中是 FILE),改为 tmpdir 合成 | 成立 | `packages/huaanwork-policy/src/paths.test.ts:10/33-36/58-61`:`mkdtempSync(os.tmpdir())` + `mkdirSync .git`,零真实 `.git` 读取 |
+| 删除 `tests/dsh-settings-legacy-compat.spec.ts`(随上游,三符号无引用) | 成立 | 文件在 HEAD 不存在;`deepEqualJson` / `installSettingsSection` / `settingsNamespace` 在 huaanwork `src/` 零命中 |
+| huaanwork typecheck(5 tsc projects)绿 | 成立(HEAD 复测) | 干净树 exit 0(`tsc -p tsconfig{,.client,.native-ui,.tests,.tests.client}.json --noEmit` × 5) |
+| huaanwork 全量套件(214 files / 2562 tests)绿 | 成立(HEAD 复测,计数已漂移) | 干净树 + 完整构建链后 exit 0:**220 files(217 通过 / 3 skip)/ 2604 tests(2591 通过 / 13 skip)**。计数增长来自 checkpoint 之后的后续功能提交(automations、web_fetch/screenshot、call_host_tool 等),非复核发现的缺口 |
+| `check:vendored-runtime`(3 channels)绿 | 成立(HEAD 复测) | `stable 318 packages from 639ed01539`、`beta 321 from 5badb15009`、`huaanwork 321 from 5badb15009` 全部 verified |
+| 已知红:`check:desktop-variants`(2 of 9) | 已在后续收口 | HEAD 实测绿:守卫测试 11/11 pass,verify 通过,allowlist stable↔beta 9(前缀 0)、beta↔huaanwork **23**(前缀 6)。名额 23 = R-M8-3 结构性 22 + setZoomLevel 裁定(`1ce000b99c`)1;工作树在途的目录选择恢复会把名额带至 24(未提交,见 F-1) |
+| 已知缺口:update-checker 缺 stable/beta 已验证的 `parseInstallerDigestResponse`(Task 2.5) | 已当日闭环 | `3ff2b646c6`(采共享 extractor + 重放两条 D-M6-23 语义)+ `ba30ead710`(fail-closed 前规范化)——当日 22:18/22:31 落地,后续 `4e1fa83ed0` 加固;函数现位于 `src/update-checker.ts:384` |
+
+## 2. 静默丢弃扫描(本次复核的核心命题)
+
+已知先例:`bd71df0beb`(2026-09-30)加入的 macOS 原生目录选择被 checkpoint 静默丢弃(白名单注释 `scripts/verify-desktop-variants.mjs:103-108` 记载)。问题:是否还有同类。
+
+**方法**(四层):
+
+1. **fork 单侧目录文件级对照**(`efde2186be` → HEAD):`client-huaanwork/`、`huaanwork-host/`、`huaanwork-guardrails/`、`huaanwork-migration/` 四目录**零删除**,仅新增 `huaanwork-guardrails/web.ts`。
+2. **白名单收敛分析**(pre-merge 22 → HEAD 23):收敛集恰 3 文件,逐一判读——
+   - `src/index.ts`:**确认为静默丢弃**(F-1);
+   - `scripts/verify-win-portable.ts`、`scripts/verify-win-installer.ts`:**合法收敛**——HEAD 上 huaanwork 侧 `HuaAnWork-*` 制品名校验逻辑逐字保留,差异消失是 R-M8-3 `normalizeIdentity` 在比较前吸收身份拼法,不再占名额,非能力丢失。
+3. **checkpoint 在 fork 单侧目录内的内容级改动判读**:`guardrails/model.ts` 是采上游一线 wire 格式(`role:"tool"` 一等消息),配套测试全绿,判合法;`guardrails/policy.ts` 的 `gitDirty` 语义收窄是**无上游对侧、无测试、无文档**的语义变更(F-2)。
+4. **六项已知 fork 能力标记 grep**(HEAD):`requestConfirmedRestart`(electron-runtime 2 处 / host-runtime-bridge 5 处)、`huaanwork-market` 第四 provider(12+ 文件)、`huaanworkCheckpointUserDataDir` config 贯穿(holders/index/market/plugins-host)、三通道 `SUPPORTED_RELEASE_CHANNELS`(update-checker.ts:68)、profile-checkpoint 市场 GC(main.ts 迁移接线在位)——**全部在位**。
+
+**结论:静默丢弃共 1 例(darwin 目录选择),与已知登记重合,无新增发现。**
+
+## 3. 干净 HEAD 树上的运行时门禁
+
+| 门禁 | 结果 |
+|---|---|
+| `corepack yarn install --immutable` | exit 0 |
+| huaanwork typecheck(5 projects) | exit 0 |
+| huaanwork 全量套件 | **exit 0**;220 files(217 pass / 3 skip)、2604 tests(2591 pass / 13 skip) |
+| `check:vendored-runtime` | 3 channels verified |
+| `check:desktop-variants` | 绿;守卫 11/11,allowlist 9/23,前缀 0/6 |
+
+**裸树起跑红线(非缺陷,provisioning 缺件)**:新鲜 checkout 直接 `yarn workspace dsh-plugin-huaanwork test` 会红,须依次补:① `tsdown`(产 `lib/desktop-cli.js` 等主进程产物)② `vite build --config vite.client.config.ts` + `vite.native-ui.config.ts`(产 `lib/client.js`、`lib/native-ui/*.html`)③ `git submodule update --init --recursive`(`deepseek-harness`;mac-entitlements.spec 读它的 plist)④ `yarn workspace dsh-community-market build`(`dsh-community-market/contracts`)。补齐后全绿。该套件的有效性隐含「开发期已配置的树」,与 checkpoint 当时的绿一致。
+
+## 4. 发现与待裁定项
+
+| # | 发现 | 状态/建议 |
+|---|---|---|
+| F-1 | **darwin 目录选择恢复未提交**:HEAD(`b860ba8f9a`)的 `src/index.ts` 仍无 `directoryPicker` 的 darwin 注册;恢复(含被删 darwin 测试与白名单 23→24)只存在于主工作树的**在途未提交改动**(2026-10-16 实测:`src/index.ts` +54/-21,`verify-desktop-variants.mjs`/`.test.mjs` 已改) | 在途工作收尾提交即闭。提交前跑 `check:desktop-variants` |
+| F-2 | **`guardrails/policy.ts:192` 的 `gitDirty` 语义收窄**(所有工具 → 仅 `git_checkout` 才探测):checkpoint 携带,无上游对侧、无文档理由、无测试;HEAD 全仓仅构造点一处命中,零读取方 ⇒ 当前**惰性** | 需裁定:恢复原语义,或保留并补测试+注释钉界。鉴于惰性,不构成发布风险 |
+| F-3 | **6 个 beta 声明而 huaanwork 缺席的 dep**:5 个 experimental/llm-account 类在 huaanwork src 零 import(结构性缺席,无害);`@deepseek-ai/dsh-client-shortcuts` 在 `src/client/layout-service.ts:3` 有 **type-only import 但未声明**——经 yarn hoisting 解析、编译后擦除,typecheck/测试全绿,属卫生问题 | 建议随 F-1 的在途工作一并处理:在 package.json 声明,或改为从既有声明 dep 中转类型 |
+| F-4 | **checkpoint 声明的精确性**:「dep profile matches beta's exactly」只对共享 dep 的版本钉成立,key 集合在 checkpoint 时点即不一致(148 vs 160) | 已在 §1 矩阵如实订正;无需代码动作 |
+
+**主工作树在途改动的测量污染(记录,非发现)**:主树实测全量套 1 红(`test-port-mapping.spec.ts`,证据行 `automations-host.spec.ts:815` 被在途编辑移位)与守卫名额 24,均量在脏树上;干净树复测证明两者皆非 HEAD 缺陷。主树另有 26 个字体文件删除等在途工作,未被本复核触碰。
+
+## 5. 收口结论
+
+- checkpoint 的 verify-as-I-go 义务由本次复核**收口**:运行时主张在 HEAD 全部复测成立;两处已知问题(守卫红、Task 2.5 缺口)确认已在后续提交闭环;静默丢弃扫描除已登记的 darwin picker(在途恢复中)外**无新增发现**。
+- 复核自身的临时 worktree 已清理,主工作树零改动(本文件除外)。
