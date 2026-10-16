@@ -152,7 +152,7 @@ test('verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位', 
   assert.match(out, /beta↔huaanwork src \(\d+ files\)/)
   assert.match(out, /beta↔huaanwork scripts \(\d+ files\)/)
   assert.match(out, /stable↔beta allowlist 9 \(oneSidedPrefixes 0\)/)
-  assert.match(out, /beta↔huaanwork allowlist 23 \(oneSidedPrefixes 6\)/)
+  assert.match(out, /beta↔huaanwork allowlist 24 \(oneSidedPrefixes 6\)/)
 })
 
 test('pins the beta↔huaanwork divergence budget so growth is always explicit', () => {
@@ -161,12 +161,12 @@ test('pins the beta↔huaanwork divergence budget so growth is always explicit',
 
   assert.strictEqual(
     pair.allowedDifferences.length,
-    23,
-    `beta↔huaanwork allowedDifferences must hold exactly 23 entries, found ${String(pair.allowedDifferences.length)}`,
+    24,
+    `beta↔huaanwork allowedDifferences must hold exactly 24 entries, found ${String(pair.allowedDifferences.length)}`,
   )
   assert.strictEqual(
     new Set(pair.allowedDifferences).size,
-    23,
+    24,
     'beta↔huaanwork allowedDifferences must not contain duplicates',
   )
   assert.deepStrictEqual(pair.oneSidedPrefixes, [

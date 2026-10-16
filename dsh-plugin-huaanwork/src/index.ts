@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+// Empty type import carries the `directoryPicker` Context merge for the macOS
+// picker route below.
+import type {} from '@deepseek-ai/dsh-host-directory-picker'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import {
   handleRendererBootRequest,
@@ -139,6 +142,32 @@ export function desktopRendererUrl(
     url.searchParams.set('dsh-desktop-titlebar-inset', String(DESKTOP_FRAME_HEIGHT))
   }
   return url.href
+}
+
+/**
+ * D11 route (b): macOS reaches the operating-system chooser through the composed
+ * upstream `ctx.directoryPicker` seam instead of the Windows Electron dialog.
+ * The desktop profile patches the upstream `directory-picker` auto row to the
+ * browse pair only on win32, so a macOS loopback boot keeps the auto row and
+ * resolves it to the native backend (osascript). A composed browse backend
+ * (SSH launch) or an absent seam throws here, keeping the refusal a non-2xx so
+ * the renderer surfaces it honestly instead of reading a silent cancel.
+ * @param ctx - Host context carrying the composed picker service at request time.
+ * @param res - response whose connection lifetime aborts the native chooser.
+ * @returns the selected absolute path, or null when the operator cancels.
+ */
+function pickMacosDirectory(ctx: Context, res: ServerResponse): Promise<string | null> {
+  const picker = ctx.get('directoryPicker')
+  if (picker === undefined) {
+    throw new Error('dsh-plugin-desktop: macOS directory picking requires the directory-picker seam')
+  }
+  const capability = picker.capability()
+  if (capability.kind !== 'native') {
+    throw new Error(`dsh-plugin-desktop: macOS directory picking requires the native capability, composed ${capability.kind}`)
+  }
+  const controller = new AbortController()
+  res.on('close', () => { controller.abort() })
+  return capability.pick(controller.signal)
 }
 
 /**
@@ -277,7 +306,7 @@ export function apply(ctx: Context, config: DesktopShellConfig): void {
     }),
     'dsh-plugin-desktop: renderer boot report route',
   )
-  if (runtime.platform === 'win32') {
+  if (runtime.platform === 'win32' || runtime.platform === 'darwin') {
     ctx.effect(
       () => ctx.webServer.register({
         kind: 'exact',
@@ -288,7 +317,9 @@ export function apply(ctx: Context, config: DesktopShellConfig): void {
             req,
             res,
             rendererOrigin,
-            () => runtime.pickDirectory(),
+            runtime.platform === 'darwin'
+              ? () => pickMacosDirectory(ctx, res)
+              : () => runtime.pickDirectory(),
             cause => {
               ctx.logger.error(`dsh-plugin-desktop: native directory picker failed: ${cause instanceof Error ? cause.message : String(cause)}`)
             },
@@ -297,25 +328,27 @@ export function apply(ctx: Context, config: DesktopShellConfig): void {
       }),
       'dsh-plugin-desktop: native directory picker route',
     )
-    ctx.effect(
-      () => ctx.webServer.register({
-        kind: 'exact',
-        path: DESKTOP_DIRECTORY_VALIDATOR_PATH,
-        handler: (req, res) => {
-          if (rejectDesktopRequest(ctx, req, res)) return
-          return handleDesktopDirectoryValidationRequest(
-            req,
-            res,
-            rendererOrigin,
-            path => runtime.validateDirectory(path),
-            cause => {
-              ctx.logger.error(`dsh-plugin-desktop: workspace directory validation failed: ${cause instanceof Error ? cause.message : String(cause)}`)
-            },
-          )
-        },
-      }),
-      'dsh-plugin-desktop: workspace directory validation route',
-    )
+    if (runtime.platform === 'win32') {
+      ctx.effect(
+        () => ctx.webServer.register({
+          kind: 'exact',
+          path: DESKTOP_DIRECTORY_VALIDATOR_PATH,
+          handler: (req, res) => {
+            if (rejectDesktopRequest(ctx, req, res)) return
+            return handleDesktopDirectoryValidationRequest(
+              req,
+              res,
+              rendererOrigin,
+              path => runtime.validateDirectory(path),
+              cause => {
+                ctx.logger.error(`dsh-plugin-desktop: workspace directory validation failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+              },
+            )
+          },
+        }),
+        'dsh-plugin-desktop: workspace directory validation route',
+      )
+    }
   }
   ctx.effect(() => {
     let pending: ReturnType<typeof setImmediate> | undefined

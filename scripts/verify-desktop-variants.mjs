@@ -100,7 +100,13 @@ export const PAIRS = [
       // 多目录配对一律带目录前缀(见下方语义说明 1);裸文件名会导致
       // allowedDifferences.has('src/product-identity.ts') 恒为 false。
       'src/product-identity.ts',
-      // Task 2.9:as-of 1743474908,src/index.ts 在 zombie probe 中已不再构成差异,名额删除。
+      // huaanwork-only: macOS native directory picking (D11 route (b)). The
+      // picker route registers on win32 || darwin and resolves through the
+      // composed upstream `directoryPicker` seam (osascript); beta registers
+      // it on win32 only. History: added by bd71df0beb (2026-09-30), silently
+      // dropped by the unreviewed M8 propagation checkpoint 827e53fc03
+      // (2026-10-09), restored 2026-10-15 with the deleted darwin tests.
+      'src/index.ts',
       'src/profile.ts',
       // Advanced mode installs the HuaAnWork shell. Onboarding, the launch-folder
       // bridge, and the settings-forms inject match beta.
