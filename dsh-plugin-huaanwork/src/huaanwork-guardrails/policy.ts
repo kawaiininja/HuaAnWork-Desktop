@@ -189,6 +189,10 @@ function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
     name: execution.name,
     args,
     workspaceRoot,
+    // gitDirty 只有 decide() 的 git_checkout 分支读取(packages/huaanwork-policy/
+    // src/decide.ts 的 case "git_checkout"),其余工具一律不读。原版对每次工具调用
+    // 都同步 spawn 一个 `git status`,是热路径纯开销;2026-10-16 复核 F-2 裁定保留
+    // 本收窄——所有可达判定与原版逐字等价,probe 回归钉在 policy.cordis.spec.ts。
     gitDirty: execution.name === "git_checkout" ? isGitDirty(workspaceRoot) : false,
     ...(attached !== undefined ? { attached } : {}),
   };

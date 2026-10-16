@@ -3,8 +3,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { describe, expect, it, test } from "vitest";
+import { describe, expect, it, test, vi } from "vitest";
 import { readGuardMode, writeUnattendedAudit } from "../../src/huaanwork-guardrails/policy.ts";
+
+// F-2 pin(2026-10-16 裁定):透明包装 spawnSync 以便计数,实际执行仍走原实现,
+// 本文件既有用例(含 git init)行为不变。
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawnSync: vi.fn(actual.spawnSync) };
+});
 
 import {
   guard as policyGuard,
@@ -118,6 +125,52 @@ test("policy plugin treats a non-repo workspace as clean for git_checkout", asyn
     const checkout = { name: "git_checkout", arguments: {} };
     assert.deepEqual(await preExecute?.(checkout, async () => ({ kind: "allow" })), { kind: "allow" });
     assert.equal(guard?.(checkout), undefined);
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("policy plugin probes git status only for git_checkout (F-2 narrowing pin)", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
+  const workspaceRoot = mkdtempSync(join(tmpdir(), "huaanwork-policy-probe-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "-q", "--template=/dev/null"], { cwd: workspaceRoot }).status, 0);
+    writeFileSync(join(workspaceRoot, "dirty.txt"), "dirty\n");
+
+    let preExecute: PreExecute | undefined;
+    apply({
+      huaanworkWorkspaceRoot: { current: workspaceRoot },
+      on(event: string, listener: PreExecute) {
+        if (event === "tools/pre-execute") preExecute = listener;
+      },
+      tools: {
+        guard() {
+          return () => undefined;
+        },
+      },
+    });
+
+    const statusProbes = () =>
+      vi
+        .mocked(spawnSync)
+        .mock.calls.filter(([command, argv]) => command === "git" && Array.isArray(argv) && argv[0] === "status")
+        .length;
+
+    vi.mocked(spawnSync).mockClear();
+    // 非 checkout 工具在脏仓库下:判定照常放行,且零 git status 探测。
+    assert.deepEqual(
+      await preExecute?.({ name: "read", arguments: { path: "dirty.txt" } }, async () => ({ kind: "allow" })),
+      { kind: "allow" },
+    );
+    assert.equal(statusProbes(), 0);
+
+    // git_checkout:恰好探测一次,脏树判定仍是 ask——与上一条共同钉死
+    // 收窄与原语义在所有可达判定上等价(2026-10-16 裁定「保留收窄」)。
+    assert.deepEqual(
+      await preExecute?.({ name: "git_checkout", arguments: {} }, async () => ({ kind: "allow" })),
+      { kind: "ask" },
+    );
+    assert.equal(statusProbes(), 1);
   } finally {
     rmSync(workspaceRoot, { recursive: true, force: true });
   }
