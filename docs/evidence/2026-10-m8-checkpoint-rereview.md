@@ -79,3 +79,13 @@
 | `check:desktop-variants` | 绿:守卫 11/11,allowlist 9(0)/24(6) |
 
 工作树收口三笔提交各自的验证细节在各自提交信息里;`3943e3b5f9` 同批订正了 §4 下方登记段的字体计数笔误(26→24)。
+
+### CI 对账(run `38911832693`,as-of 2026-10-16T14:57Z,run 尚未结束)
+
+推送触发 CI run `38911832693`(commit `b9406e731b`)。as-of 读数:
+
+- **CI 额度已恢复**:2026-10-12 起 run 实际执行,2026-10-10 的 spending-limit 跳过不再存在。
+- **11 个展开格中 10 格绿**:`changes`、`upstream-command-windows`、`desktop-windows` ×3(huaanwork 6m17s)、`desktop-macos` ×3(huaanwork 14m32s)、`desktop-linux` ×2。
+- **`check` job 的根 gate `Run yarn check` 绿**——2026-10-12/13/14 三连败的根因实锤为 setZoomLevel 守卫红(三次 failure 日志均为 `Desktop variant source drift is not declared`,10-14 精确到 `[beta↔huaanwork] src/electron-shell-generation.ts`),修复 `1ce000b99c` 随本次推送在 CI 生效(`upstream-command-windows` 与 `check` 的守卫步均转绿)。
+- **Next 四步验证:前三绿(`window-controls` 42s、`onboarding` 24s、`protocol` 3s),`sidebar-browser` 自 14:10:18 挂起 55+ 分钟未决**。脚本内部 45s deadline(`dsh-desktop-next/scripts/verify-sidebar-browser.mjs:30`)未触发 ⇒ Electron 进程级挂起,非脚本超时路径。该步骤在本 fork **从无绿色先例**(10-10 额度 skip;10-12/13/14 的 check job 在 2 分钟早夭,未及 Next 步),属 R-M8-2 Next 基座观察项的首次暴露;本批推送对 `dsh-desktop-next/` 仅两处依赖钉刷新(桥 tarball 文件名、dshmarket 版本,`109cf90918`/`5ca2d0e72a`),无行为改动。处置裁定:不取消,留 job 自然超时(6h);预期终态 = failure(仅 sidebar-browser 超时),不推翻上列主线结论。
+- 终态复查:`gh run view 38911832693 --repo kawaiininja/HuaAnWork-Desktop`。
