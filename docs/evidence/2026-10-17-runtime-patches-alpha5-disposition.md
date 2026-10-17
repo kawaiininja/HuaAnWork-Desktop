@@ -8,7 +8,7 @@
 - **评估时刻 (As-Of)**:2026-10-17(`git fetch` 后)
 - **旧基线**:子模组 pin `5badb15009`(dsh-v0.2.1-alpha.1),`vendor/dsh-runtime/0.2.1-alpha.1/`(321 包),`patches/` 21 个 `*@0.2.1-alpha.1.patch`
 - **新基线**:`deepseek-harness` `origin/master` = `1517a4dbca` = **dsh-v0.2.1-alpha.5**(alpha.5 之后无新增提交)
-- **方法**:Read 补丁全文 → 定位子模组包源码 → `git diff 5badb15009..origin/master -- <包路径>` + `git show origin/master:<file>` 逐 hunk 对照 → 全仓 `git grep <补丁引入符号> origin/master` 验证是否被吸收。**吸收判定的证据口径(2026-10-17 GLM 评审订正)**:并非所有补丁符号在上游零命中——`pickNativeDirectory`(7 文件,上游自有包 `packages/host/directory-picker-native` 的同名符号)、`optionalBundles`(5 文件,上游 scripts 与 agent note)、`data-conversation-header`(3 文件,上游 `-leading`/`-corner` 前缀子串)、`resolvePackageManifest`(1 文件,web 测试同名助手)均有命中,但均为同名异码/上游自有,**不构成吸收**;其余符号(`readPatches`/`plugins.overview`/`desktopPermissions`/`exclusiveBundles` 等)零命中。附注(2026-10-17 二轮订正):上游自有包 `packages/host/directory-picker-native` **并非本轮新增**——2026-07-28 `5579b13503` 创建、首见 `dsh-v0.1.0-rc.7`,**alpha.1 树已包含**(`git ls-tree 5badb15009 packages/host/` 实测),本窗口仅演进 9 文件 +100/−42。「重做 #4 前先核对能否复用」的建议仍成立,但理由应表述为:**fork 在 alpha.1 选 bridge 方案时上游原生选择器(native capability 经 subprocess)已并存,重做是重新评估取舍的时机**,而非「本轮新增」。
+- **方法**:Read 补丁全文 → 定位子模组包源码 → `git diff 5badb15009..origin/master -- <包路径>` + `git show origin/master:<file>` 逐 hunk 对照 → 全仓 `git grep <补丁引入符号> origin/master` 验证是否被吸收。**吸收判定的证据口径(2026-10-17 GLM 评审订正)**:并非所有补丁符号在上游零命中——`pickNativeDirectory`(7 文件,上游自有包 `packages/host/directory-picker-native` 的同名符号)、`optionalBundles`(5 文件,上游 scripts 与 agent note)、`data-conversation-header`(3 文件,上游 `-leading`/`-corner` 前缀子串)、`resolvePackageManifest`(1 文件,web 测试同名助手)均有命中,但均为同名异码/上游自有,**不构成吸收**;其余符号(`readPatches`/`plugins.overview`/`desktopPermissions`/`exclusiveBundles` 等)零命中。附注(2026-10-17 二轮订正):上游自有包 `packages/host/directory-picker-native` **并非本轮新增**——2026-07-28 `5579b13503` 创建、首见 `dsh-v0.1.0-rc.7`,**alpha.1 树已包含**(`git ls-tree 5badb15009 packages/host/` 实测),本窗口仅演进:host 单包 9 文件 +100/−42,连同客户端包 `packages/client/ui-directory-picker-native`(上游原生选择器的 UI 半边,对 #4 的取舍评估同样相关)合计 13 文件 +117/−47——两口径均为实测。「重做 #4 前先核对能否复用」的建议仍成立,但理由应表述为:**fork 在 alpha.1 选 bridge 方案时上游原生选择器(native capability 经 subprocess)已并存,重做是重新评估取舍的时机**,而非「本轮新增」。
 - **补丁形态注意**:补丁打在构建产物 `lib/index.js` 上,对照以 `src/` 源码为准;重做产物路径(chunk 哈希、双构建出口)以 alpha.5 实际构建结果为准
 
 ## 1. 总体结论
@@ -107,7 +107,7 @@ GLM 复审发现**第一轮订正提交本身又引入 4 处错误**,核实后�
 
 | # | 指摘 | 核实结论与订正 |
 |---|---|---|
-| 1 | §0/§6 附注称 `packages/host/directory-picker-native` 是「本轮新增」——不实 | ✅ 成立。该包 2026-07-28 `5579b13503` 创建、首见 `dsh-v0.1.0-rc.7`,`git ls-tree 5badb15009` 确认 **alpha.1 树已包含**;窗口内仅演进(实测 9 文件 +100/−42;GLM 给的 13/+117/−47 与实测有出入,以实测为准)。§0 附注、#4 行、§6 #3 行三处「本轮新增」表述已全部改写为「alpha.1 已并存,重做是重新评估取舍的时机」 |
+| 1 | §0/§6 附注称 `packages/host/directory-picker-native` 是「本轮新增」——不实 | ✅ 成立。该包 2026-07-28 `5579b13503` 创建、首见 `dsh-v0.1.0-rc.7`,`git ls-tree 5badb15009` 确认 **alpha.1 树已包含**;窗口内仅演进(host 单包实测 9 文件 +100/−42,连同客户端包合计 13 文件 +117/−47,两口径均实测——原「GLM 给的 13/+117/−47 与实测有出入」系把口径差误记为数字出入,见第三轮订正)。§0 附注、#4 行、§6 #3 行三处「本轮新增」表述已全部改写为「alpha.1 已并存,重做是重新评估取舍的时机」 |
 | 2 | §1「已吸收 0」行仍写「零命中」,与已订正的 §0 自相矛盾 | ✅ 成立。第一轮只改了 §0 方法条,漏改 §1 表格行的同一断言。已改为「有命中但不构成吸收」口径 |
 | 3 | §1 重做顺序「15 个小补丁」off-by-one | ✅ 成立。小档改为 16 后此句漏改(16/3/2=21 自洽,「15」是旧口径残迹)。已订正 |
 | 4 | §6 #1「7 个删除文件」数字错 | ✅ 成立。实测 `git diff-tree -r` 为 **14 个文件、2515 行**;初稿的 7 来自 `grep -c` 统计 `--stat` 输出——stat 对长路径缩写为 `.../` 吞掉了匹配串,是**核实方法缺陷**而非 head 截断(GLM 推测的原因不准,数字对)。已订正并注明 |
@@ -117,3 +117,7 @@ GLM 复审发现**第一轮订正提交本身又引入 4 处错误**,核实后�
 1. **订正动作自身豁免了核实纪律**:§6 刚登记「新增 vs 既有」类断言必须核实,同一提交里就把 `directory-picker-native` 写成「本轮新增」——该断言来自核实 #3 时看到 grep 命中后的即兴推断,没有 `git log`/`ls-tree` 验证包的历史。教训:**订正补丁与正文适用同一核实标准,「顺手补充的观察」也要核实**。
 2. **改断言不做全文件扫尾**:同一断言(「零命中」「15 个」)在文档多处出现,第一轮只改了最先看到的一处。教训:**订正前先 `grep` 旧表述在全文的所有出现点,列清单逐处改**,而非发现一处改一处。
 3. **核实命令本身有损耗**:`grep -c` 打在被路径缩写的 `--stat` 输出上得到假计数。教训:**计数类断言用结构化输出(`diff-tree -r --name-status`)而非对展示用输出做文本匹配**。
+
+### 第三轮(GLM 三审订正,2026-10-17)
+
+一处口径误记:二轮 #1 行曾把 GLM 复审给出的 13/+117/−47 记为「与实测有出入,以实测为准」——实测该数字是 host+client 两包合计口径(客户端包 `packages/client/ui-directory-picker-native` 单独为 4 文件 +17/−5),与 host 单包 9 文件 +100/−42 **同为实测、仅口径不同,并非数字错误**。已订正两处(按二轮教训 #2 先 `grep` 全文出现点,共两处,均已改):§0 附注与二轮 #1 行均改为双口径并列;§0 并注明客户端包是上游原生选择器的 UI 半边、对 #4 的 bridge vs 原生取舍评估同样相关。教训(与上方三条机制性原因并列):**转述他人测量先核对其口径,口径差 ≠ 数字错**。
