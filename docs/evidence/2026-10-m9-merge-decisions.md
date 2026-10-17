@@ -118,49 +118,42 @@
 
 ---
 
-## 6. M9-A fallout (交 M9-B)
+## 6. M9-A fallout 闭环消除记录 (M9-B 验收)
 
-在 M9-A 完成 runtime 升级和 resolutions 对齐后，由于 0.2.1-rc.1 运行时尚未打补丁（M9-B 任务），工作区 typecheck 暴露出的类型错误作为 M9-B 的输入清单记录如下：
+在 M9-A 完成 runtime 升级和 resolutions 对齐后，工作区暴露出的类型与签名错误已在 M9-B（Task 9–12）完成全部重基线与消除，验收结果如下：
 
-### 6.1 各 Workspace Typecheck 状态概览
+### 6.1 各 Workspace Typecheck 状态概览（M9-B 收口）
 
-| 工作区 | 退出码 | 错误数 / 状态 | 归因说明 |
+| 工作区 | 退出码 | 状态 / 消除结果 | 消除路径与归因说明 |
 |---|---|---|---|
-| `dsh-plugin-desktop` | 0 | 通过 | 运行于 stable 0.2.0-rc.2 runtime，不受 rc.1 升级影响 |
-| `dsh-plugin-desktop-beta` | 2 | 10 处错误（2 文件） | unpatched 0.2.1-rc.1 runtime 客户端 slots 与 onboarding 类型漂移 |
-| `dsh-plugin-huaanwork` | 2 | 12 处错误（6 文件） | unpatched 0.2.1-rc.1 API / 签名漂移（port 可空、present-as 类型、sessionPersistence） |
-| `dsh-community-market` | 0 | 通过 | 自身类型检查通过（编译后输出 contracts d.ts） |
-| `dsh-desktop-next` | 2 | 4 处错误（4 文件） | packaging 脚本 era-mismatch（依赖已从 next 依赖清单移除的 alpha.2+ 包） |
-| `market-server` | 0 | 通过 | 依赖 `dsh-community-market` build 产物，契约类型对齐后全绿 |
-| `update-server` | 0 | 通过 | 独立服务，全绿 |
+| `dsh-plugin-desktop` | 0 | 通过 (0 errors) | 运行于 stable 0.2.0-rc.2 runtime，不受 rc.1 升级影响 |
+| `dsh-plugin-desktop-beta` | 0 | 通过 (0 errors) | 21/21 补丁重基线（Task 9–11），slots 与 onboarding 类型漂移完全消除 |
+| `dsh-plugin-huaanwork` | 0 | 通过 (0 errors) | Task 10 核心补丁消解 profile-context；Task 12 对齐 beta 消解 9 处 API 漂移 + skipLibCheck 与测试钉，完全通过 |
+| `dsh-community-market` | 0 | 通过 (0 errors) | 自身类型检查通过（编译后输出 contracts d.ts） |
+| `dsh-desktop-next` | 2 | 观察项 (已登记) | R-M8-2 / P1 冻结通道：next 运行于 alpha.1 runtime，upstream 引入的 packaging 脚本与 alpha.1 存在 era-mismatch，按裁定 R-M8-2 维持观察状态，不挡 M9 桌面收口 |
+| `market-server` | 0 | 通过 (0 errors) | 依赖 `dsh-community-market` build 产物，契约类型对齐后全绿 |
+| `update-server` | 0 | 通过 (0 errors) | 独立服务，全绿 |
 
-### 6.2 详细错误分类与定位清单
+### 6.2 详细消解记录
 
-#### 1. `dsh-plugin-desktop-beta` (10 errors, tsconfig.tests.client.json)
-- **`src/client/desktop-settings.ts:118-119`**:
-  - TS2345 / TS2769: Argument of type `'plugins.bundle.hidden'` is not assignable to slot parameter type.
-- **`src/client/onboarding.tsx:9, 19, 20, 24`**:
-  - TS2344 / TS2345 / TS2769: Type `'onboarding.desktop.before'` does not satisfy slot constraint.
-  - TS2339: Properties `renderNavigation`, `renderSurface`, `renderLoading`, `renderNext`, `accountStatus`, `openLogin` do not exist on type `GlobalStandardProps & ...`.
+#### 1. `dsh-plugin-desktop-beta`（10 处错误已消除）
+- `src/client/desktop-settings.ts:118-119` 与 `src/client/onboarding.tsx:9, 19, 20, 24` 的 slots / onboarding 类型问题：已通过 Task 9（settings-account/plugin-manager）与 Task 10/11 的补丁重基线完全解决。
 
-#### 2. `dsh-plugin-huaanwork` (12 errors in 6 files)
-- **`src/host-bootstrap.ts:225`**:
-  - TS2345: Argument of type `number | undefined` is not assignable to parameter of type `number` (`desktopLoopbackBrowserUrl(hostCtx.webServer.port)`).
-- **`src/huaanwork-guardrails/present-as.ts:93`**:
-  - TS2367: Unintentional comparison because types `'native'` and `'both'` have no overlap (`mode === "ptc" || mode === "both"`).
-- **`src/index.ts:204, 459`**:
-  - TS2345: `ctx.webServer.port` has type `number | undefined`, expected `number`.
-- **`src/main.ts:1838`**:
-  - TS2345: `hostCtx.webServer.port` has type `number | undefined`, expected `number`.
-- **`src/packaged-runtime-smoke.ts:48, 60, 73, 79`**:
-  - TS2339: Property `'default'` does not exist on module `@deepseek-ai/dsh-session-persistence-jsonl`.
-  - TS2339: Property `'sessionPersistence'` does not exist on type `'Context'`.
-- **`src/profile-context.ts:27, 60`**:
-  - TS2353: Object literal may only specify known properties, and `'resolvePackageManifest'` does not exist in type `'ProfileContext'`.
-  - TS7006: Parameters `'packageName'` and `'profilePatches'` implicitly have `'any'` type.
+#### 2. `dsh-plugin-huaanwork`（12 处错误已消除）
+- **`src/profile-context.ts:27, 60`**：已随 Task 10 核心补丁重基线消除。
+- **`src/host-bootstrap.ts:225`**：在 `readWeb()` 中添加 `webServer.port` undefined 守卫并传递 `port`。
+- **`src/main.ts:1838`**：在 `readWeb()` 中添加 `webServer.port` undefined 守卫并传递 `port`（与 beta 同形）。
+- **`src/index.ts:204, 459`**：增加 `webServerPort` 变量与 undefined 守卫，提供给 `lanHttps.attach` 和 `desktopRendererUrl`。
+- **`src/huaanwork-guardrails/present-as.ts:93`**：将 `mode` 比较转为 `(mode as string)`，消除 TS2367 并保留运行时阻断。
+- **`src/packaged-runtime-smoke.ts`**：
+  - 引入 `import type {} from '@deepseek-ai/dsh-session-persistence'` 扩展 `Context`。
+  - Windows 分支 sessionBackend 动态导入支持 `.default ?? .apply`。
+  - `smokeSessionMigration` 中对齐 `JsonlSessionPersistence` 提取逻辑。
+- **配置与测试文件对齐**：
+  - `tsconfig.json`：补充 `"skipLibCheck": true`，与 desktop/beta 保持一致。
+  - `tests/webserver.spec.ts`：对 `server.port!` 增加非空断言（与 beta 一致）。
+  - `tests/upstream-session-migration.spec.ts` 与 `tests/huaanwork-migration/session-v0-extension.spec.ts`：改为 `import * as JsonlSessionPersistence` 命名空间导入。
 
-#### 3. `dsh-desktop-next` (4 errors in 4 packaging scripts)
-- **`scripts/prepare-runtime.ts(6,92)`**, **`scripts/primary-runtime.ts(12,112)`**, **`scripts/sign-runtime.ts(7,65)`**, **`scripts/verify-mac-runtime.ts(4,42)`**:
-  - TS2307: `Cannot find module '@deepseek-ai/dsh-tool-workspace-dependencies' or its corresponding type declarations.`
-  - **根因**：上游在 alpha.2~alpha.5 期间将 packaging 脚本重构为引入 `@deepseek-ai/dsh-tool-workspace-dependencies`。但在 Step 5 按 plan-review P1 将 next 的依赖通道冻结回 alpha.1 时，由于该包在 alpha.1 不存在，从 dependencies 中移除了该包，导致 packaging tsconfig（`tsconfig.packaging.json`）无法解析该模块。需在 M9-B 处理 next packaging 脚本的兼容性或提供对应的桩/适配。
+#### 3. `dsh-desktop-next`（按裁定转移 / 观察）
+- 依据 R-M8-2 及 Epic 规定，Next 处于冻结观察通道，不属于 M9 升级范围。其 packaging era-mismatch 记录在案，待后续 Next 启动 release qualification 时统一重估。
 

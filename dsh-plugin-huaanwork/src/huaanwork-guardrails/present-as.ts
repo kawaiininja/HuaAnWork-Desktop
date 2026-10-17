@@ -90,7 +90,7 @@ export function apply(ctx: Context): void {
   // D3(0.1.6-alpha.2):presentAs 需 agent.ctx;全局呈现锁走 tools row 的 mode: native
   const presentAs = ctx.tools.presentAs.bind(ctx.tools);
   ctx.tools.presentAs = (mode) => {
-    if (mode === "ptc" || mode === "both") {
+    if ((mode as string) === "ptc" || (mode as string) === "both") {
       ctx.huaanworkEmit?.({
         event: "session/end",
         ok: false,
