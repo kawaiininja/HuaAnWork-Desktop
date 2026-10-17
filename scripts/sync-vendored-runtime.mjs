@@ -63,7 +63,7 @@ const pluginPaths = [
 // Stable and Beta both load the market bundle, and dsh 0.2 refuses a bundle
 // whose dsh peers exclude the running runtime, so its peers accept every
 // channel's version while its build dependencies follow Beta.
-const marketPeerRange = [...new Set(['stable', 'beta'].map(name => upstreamDocument.channels?.[name]?.sourceVersion))].join(' || ')
+const marketPeerRange = [...new Set([...['stable', 'beta'].map(name => upstreamDocument.channels?.[name]?.sourceVersion), '0.2.1-alpha.1'])].join(' || ')
 const expectedRange = (path, field) => path === marketPath && field === 'peerDependencies' ? marketPeerRange : version
 
 const vendorRelative = `vendor/dsh-runtime/${version}`
