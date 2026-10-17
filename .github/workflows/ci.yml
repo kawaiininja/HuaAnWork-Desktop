@@ -62,6 +62,7 @@ jobs:
   check:
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Documentation-only gate
         if: needs.changes.outputs.product == 'false'
@@ -121,10 +122,39 @@ jobs:
         run: yarn workspace dsh-desktop-next verify:onboarding
       - name: Verify Next native protocol mutations in Electron
         if: needs.changes.outputs.product == 'true'
-        run: xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:protocol --no-sandbox
+        run: |
+          set -euo pipefail
+          # ubuntu-latest has GNU timeout. Skip the wrapper only when this
+          # runner's timeout cannot send a follow-up SIGKILL.
+          if timeout --help >/dev/null 2>&1 && timeout --help 2>&1 | grep -q -- '--kill-after'; then
+            timeout --kill-after=10s 120s xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:protocol --no-sandbox
+          else
+            echo "GNU timeout is unavailable; running Electron without the 120s kill wrapper." >&2
+            xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:protocol --no-sandbox
+          fi
       - name: Verify Next native sidebar Browser in Electron
+        id: sidebar-browser
         if: needs.changes.outputs.product == 'true'
-        run: xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:sidebar-browser --no-sandbox
+        timeout-minutes: 5
+        env:
+          ELECTRON_ENABLE_LOGGING: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p sidebar-browser-ci-logs
+          electron_cmd=(xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:sidebar-browser --no-sandbox)
+          if timeout --help >/dev/null 2>&1 && timeout --help 2>&1 | grep -q -- '--kill-after'; then
+            electron_cmd=(timeout --kill-after=10s 120s "${electron_cmd[@]}")
+          else
+            echo "GNU timeout is unavailable; running Electron without the 120s kill wrapper." >&2
+          fi
+          "${electron_cmd[@]}" 2>&1 | tee sidebar-browser-ci-logs/verify-sidebar-browser.log
+      - name: Upload sidebar-browser logs
+        if: (failure() || cancelled()) && (steps.sidebar-browser.outcome == 'failure' || steps.sidebar-browser.outcome == 'cancelled')
+        uses: actions/upload-artifact@v7
+        with:
+          name: sidebar-browser-logs
+          path: sidebar-browser-ci-logs/
+          if-no-files-found: warn
 
   # Windows-only logic and unsigned NSIS/portable builds on a real Windows runner:
   # updates, window options, pwsh sandbox, volume diagnostics, and packaging.
