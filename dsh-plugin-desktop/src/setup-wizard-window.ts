@@ -161,6 +161,7 @@ export class DesktopSetupWizardWindow {
     const customFrame = auxiliaryWindowHasCustomFrame(input.platform)
     const window = createDesktopLocalWindow({
       partition: 'dsh-setup-wizard',
+      locale: this.options.locale,
       title: copy.title,
       ...auxiliaryWindowChromeOptions(input.platform),
       width: 880,

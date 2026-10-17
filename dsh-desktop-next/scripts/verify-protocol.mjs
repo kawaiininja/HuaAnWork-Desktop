@@ -143,6 +143,7 @@ async function verifyPluginFrames() {
     clearTimeout(deadline)
     other?.destroy()
     window?.destroy()
+    server.closeAllConnections()
     await new Promise(resolve => server.close(resolve))
     app.exit(code)
   }

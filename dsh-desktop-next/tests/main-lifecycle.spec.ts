@@ -2,16 +2,19 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DEFAULT_PREFERENCES, SAFE_MODE_PREFERENCES } from '../src/desktop-contract.ts'
 import type { NextDesktopRuntime } from '../src/desktop-runtime.ts'
 import { NextProfiles } from '../src/profiles.ts'
 import { NextRecovery } from '../src/recovery.ts'
 
+const originalMonitors = new Set(process.listeners('uncaughtExceptionMonitor'))
+afterEach(() => { for (const listener of process.listeners('uncaughtExceptionMonitor')) if (!originalMonitors.has(listener)) process.off('uncaughtExceptionMonitor', listener) })
+
 const fixture = vi.hoisted(() => ({
   windows: [] as any[], trays: [] as any[], handlers: new Map<string, (...args: any[]) => any>(),
   load: vi.fn(), report: vi.fn(), plugin: vi.fn(), pluginDone: vi.fn(), diagnosticAppend: vi.fn(),
-  terminalTarget: vi.fn(), openTerminal: vi.fn(),
+  terminalTarget: vi.fn(), openTerminal: vi.fn(), popup: vi.fn(),
   stop: vi.fn(async () => {}),
   close: vi.fn(async () => {}), start: vi.fn(async () => {}), preferences: { closeToTray: true },
   phase: 'ready' as 'ready' | 'error',
@@ -29,7 +32,7 @@ vi.mock('../src/desktop-runtime.ts', async () => { const { NextProfiles } = awai
   backend = { stop: fixture.stop, host: undefined, get state() { return { phase: fixture.phase } } }
   profiles: NextProfiles
   recovery: import('../src/recovery.ts').NextRecovery
-  diagnostics = { append: fixture.diagnosticAppend, flush: vi.fn(), hostChunk: vi.fn() }
+  diagnostics = { append: fixture.diagnosticAppend, flush: vi.fn(), hostChunk: vi.fn(), record: fixture.diagnosticAppend, operation: vi.fn(() => vi.fn()), begin: vi.fn(), end: vi.fn(), pendingOperations: vi.fn(() => []) }
   constructor(options: ConstructorParameters<typeof NextDesktopRuntime>[0]) {
     fixture.runtimeOptions = options
     fixture.preferences = this.preferences; fixture.onPermission = options.onPermission
@@ -86,6 +89,7 @@ vi.mock('electron', async () => {
     setVibrancy() {}
     setBackgroundColor() {}
     setBackgroundMaterial() {}
+    setTitleBarOverlay = vi.fn()
     async loadURL(url: string) { this.webContents.mainFrame.url = url; this.loadedUrls.push(url); await fixture.load(this, url) }
   }
   class Tray extends EventEmitter {
@@ -103,7 +107,8 @@ vi.mock('electron', async () => {
     Notification: class { static isSupported() { return false } },
     clipboard: {}, dialog: { showMessageBox: vi.fn(async () => ({ response: 0 })) }, shell: {}, safeStorage: {}, nativeTheme: { shouldUseDarkColors: true, on() {} },
     nativeImage: { createFromPath: () => ({ isEmpty: () => false, setTemplateImage() {} }) },
-    Menu: { buildFromTemplate: (items: any) => items, setApplicationMenu() {} },
+    // Templates stay plain arrays for tray assertions; the popup spy is non-enumerable.
+    Menu: { buildFromTemplate: (items: any) => Object.defineProperty(items, 'popup', { value: (options: unknown) => fixture.popup(items, options), configurable: true }), setApplicationMenu() {} },
     protocol: { registerSchemesAsPrivileged() {}, handle() {} },
     session: { defaultSession: { webRequest: { onBeforeSendHeaders() {} }, setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, setDisplayMediaRequestHandler() {}, on() {} } },
     systemPreferences: { getMediaAccessStatus: () => 'not-determined', askForMediaAccess: vi.fn(async () => false), isTrustedAccessibilityClient: () => false },
@@ -120,7 +125,7 @@ beforeEach(async () => {
   fixture.needsOnboarding = false; fixture.corruptProfile = false; fixture.restart.mockReset()
   fixture.plugin.mockReset(); fixture.pluginDone.mockReset().mockResolvedValue({ exitCode: 0 });
   fixture.load.mockReset(); fixture.report.mockReset(); fixture.diagnosticAppend.mockReset();
-  fixture.terminalTarget.mockReset(); fixture.openTerminal.mockClear();
+  fixture.terminalTarget.mockReset(); fixture.openTerminal.mockClear(); fixture.popup.mockClear();
   fixture.stop.mockReset().mockResolvedValue(undefined); fixture.start.mockClear(); fixture.close.mockReset().mockResolvedValue(undefined)
   const { app, autoUpdater } = await import('electron')
   autoUpdater.removeAllListeners()
@@ -217,13 +222,82 @@ it('captures scoped client errors with either Electron console-message signature
     await import('../src/main.ts')
     await vi.waitFor(() => expect(fixture.windows).toHaveLength(1))
     const consoleMessage = fixture.windows[0].webContents
+    // Startup records how the login-shell environment and locale were resolved before any Host starts.
+    expect(fixture.diagnosticAppend).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ source: 'desktop', event: 'shell-environment.resolved' }))
+    fixture.diagnosticAppend.mockClear()
+    Object.assign(fixture.preferences, { developerLogging: true })
     consoleMessage.emit('console-message', {}, 2, '[next-ui-diagnostic] aa=false')
     consoleMessage.emit('console-message', { message: "slot entry crashed in 'sidebar.footer.action': error" })
     consoleMessage.emit('console-message', {}, 2)
     consoleMessage.emit('console-message', {}, 2, 'unrelated output')
-    expect(fixture.diagnosticAppend).toHaveBeenCalledTimes(2)
-    expect(fixture.diagnosticAppend).toHaveBeenCalledWith('[next-ui-diagnostic] aa=false', 'warn')
+    expect(fixture.diagnosticAppend).toHaveBeenCalledTimes(3)
+    expect(fixture.diagnosticAppend).toHaveBeenCalledWith(expect.objectContaining({ source: 'renderer', event: 'console', message: '[next-ui-diagnostic] aa=false', level: 'warn', developer: true }))
+    expect(fixture.diagnosticAppend).toHaveBeenCalledWith(expect.objectContaining({ source: 'renderer', level: 'error', developer: false }))
   } finally {
+    vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true })
+  }
+})
+
+it('keeps the Windows caption buttons transparent so full-window official surfaces show beneath them', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'next-windows-caption-'))
+  vi.stubEnv('DSH_DESKTOP_NEXT_HOME', home)
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+  try {
+    await import('../src/main.ts')
+    await vi.waitFor(() => expect(fixture.windows).toHaveLength(1))
+    const window = fixture.windows[0]
+    expect(window.options.titleBarOverlay).toEqual({ height: 40, color: '#00000000', symbolColor: '#f9fafb' })
+    const sender = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
+    const appearance = fixture.handlers.get('dsh-next:windows-appearance')!
+    // The recorded preload reports the language, the sidebar fill and the primary label color.
+    appearance(sender, 'zh-CN', 'rgba(27, 27, 28, 1)', 'rgba(249, 250, 251, 1)')
+    expect(window.setTitleBarOverlay).toHaveBeenCalledWith({ color: '#00000000', symbolColor: 'rgba(249, 250, 251, 1)' })
+    appearance(sender, 'zh-CN', 'rgba(27, 27, 28, 1)', 'red')
+    appearance({ ...sender, senderFrame: { url: 'dsh-app://app/' } }, 'zh-CN', 'rgba(27, 27, 28, 1)', 'rgba(15, 17, 21, 1)')
+    expect(window.setTitleBarOverlay).toHaveBeenCalledOnce()
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+    vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true })
+  }
+})
+
+it('pops the official editing context menu with Windows labels in the application language', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'next-context-menu-'))
+  vi.stubEnv('DSH_DESKTOP_NEXT_HOME', home)
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+  try {
+    await import('../src/main.ts')
+    await vi.waitFor(() => expect(fixture.windows).toHaveLength(1))
+    const window = fixture.windows[0]
+    const editFlags = { canUndo: true, canRedo: false, canCut: true, canCopy: true, canPaste: true, canDelete: true, canSelectAll: true, canEditRichly: false }
+    window.webContents.emit('context-menu', {}, { isEditable: true, selectionText: '', editFlags })
+    expect(fixture.popup).toHaveBeenCalledWith([
+      { role: 'undo', enabled: true, label: '撤销', accelerator: '' },
+      { role: 'redo', enabled: false, label: '重做', accelerator: '' },
+      { type: 'separator', accelerator: '' },
+      { role: 'cut', enabled: true, label: '剪切', accelerator: '' },
+      { role: 'copy', enabled: true, label: '复制', accelerator: '' },
+      { role: 'paste', enabled: true, label: '粘贴', accelerator: '' },
+      { type: 'separator', accelerator: '' },
+      { role: 'selectAll', enabled: true, label: '全选', accelerator: '' },
+    ], { window })
+    const sender = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
+    fixture.handlers.get('dsh-next:locale')!(sender, 'en')
+    window.webContents.emit('context-menu', {}, { isEditable: false, selectionText: 'DSH', editFlags })
+    expect(fixture.popup).toHaveBeenLastCalledWith([{ role: 'copy', enabled: true, label: 'Copy', accelerator: '' }], { window })
+    window.webContents.emit('context-menu', {}, { isEditable: false, selectionText: '', editFlags })
+    expect(fixture.popup).toHaveBeenCalledTimes(2)
+    await fixture.handlers.get('dsh-next:command')!(sender, { type: 'controls', page: 'profiles' })
+    const controls = fixture.windows[1]
+    controls.webContents.emit('context-menu', {}, { isEditable: true, selectionText: '', editFlags: { ...editFlags, canUndo: false } })
+    expect(fixture.popup).toHaveBeenLastCalledWith(expect.arrayContaining([
+      { role: 'undo', enabled: false, label: 'Undo', accelerator: '' },
+      { role: 'paste', enabled: true, label: 'Paste', accelerator: '' },
+    ]), { window: controls })
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
     vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true })
   }
 })
@@ -240,7 +314,7 @@ it.each(['normal', '--next-safe-mode'])('stages an explicit update before hiding
   vi.doMock('../src/update-installer.ts', () => ({ NextUpdateInstaller: class { stage = stage; launch = launch } }))
   vi.doMock('../src/updates.ts', () => ({ NextUpdates: class {
     constructor(private options: { install(): Promise<void> }) {}
-    snapshot() { return { phase: 'ready', version: '2.0.17-next.1', installable: true } }
+    snapshot() { return { phase: 'ready', version: '2.0.18-next.1', installable: true } }
     start() {}
     dispose = async () => {}
     install = () => this.options.install()
@@ -385,6 +459,7 @@ it.each(['ready', 'error'] as const)('allows five seconds for native menu teardo
     expect(app.exit).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(1)
     expect(app.exit).toHaveBeenCalledExactlyOnceWith(1)
+    expect(fixture.diagnosticAppend).toHaveBeenCalledWith(expect.objectContaining({ source: 'electron', event: 'shutdown.timeout', level: 'error' }))
     finishClose()
     await vi.advanceTimersByTimeAsync(10_000)
     expect(app.quit).toHaveBeenCalledOnce()

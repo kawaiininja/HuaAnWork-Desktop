@@ -45,6 +45,8 @@ for (const platform of ['darwin', 'win32', 'linux']) {
   const dataset = {}
   const invocations = []
   const userActivation = { isActive: false }
+  // Stands in for Electron's webUtils: only Files the shell handed to the page have a host path.
+  const hostPaths = new Map()
   for (const [entry, hostname] of [['preload-app.cjs', 'app'], ['preload-shell.cjs', 'shell']]) {
     const listeners = new Map()
     // The shared map answers the per-platform assertions below; this one records a single entry,
@@ -62,7 +64,7 @@ for (const platform of ['darwin', 'win32', 'linux']) {
             return Promise.resolve(undefined)
           }, send() {},
           on: (channel, listener) => listeners.set(channel, listener), removeListener: channel => listeners.delete(channel), off: channel => listeners.delete(channel),
-        } }
+        }, webUtils: { getPathForFile: file => hostPaths.get(file) ?? '' } }
       },
       process: { platform }, location: { protocol: 'dsh-app:', hostname },
       document: { readyState: 'loading', documentElement: { dataset, style: { setProperty() {} } } },
@@ -110,15 +112,23 @@ for (const platform of ['darwin', 'win32', 'linux']) {
       assert.deepEqual(received, ['general', 'permissions'])
       stop()
       assert.equal(listeners.has('dsh-next:settings-open'), false)
+      // The official composer refuses dropped folders without this bridge and uploads every
+      // non-image file instead of citing it; the carrier name and `pathFor` are upstream's.
+      const picked = { name: 'notes.md' }
+      hostPaths.set(picked, '/Users/me/notes.md')
+      assert.equal(exposed.get('__DSH_HOST_PATHS__')?.pathFor(picked), '/Users/me/notes.md', 'A dropped or picked file reports its host path')
+      assert.equal(exposed.get('__DSH_HOST_PATHS__')?.pathFor({ name: 'pasted.png' }), '', 'A File without a host path answers empty so the composer uploads it')
     } else {
       assert.equal(own.get('desktopNext').onOpenSettings, undefined)
       assert.equal(own.has('dshDesktop'), false, 'Only the application document may reach guest browsers')
+      assert.equal(own.has('__DSH_HOST_PATHS__'), false, 'Only the application document may read host paths of its files')
     }
   }
   assert.equal(dataset.platform, platform)
   assert.equal(exposed.get('dshDesktop')?.protocolVersion, 1)
   assert.equal(typeof exposed.get('dshDesktopBoot')?.ready, 'function')
   assert.equal(typeof exposed.get('__DSH_DIRECTORY_PICKER__')?.pick, 'function')
+  assert.equal(typeof exposed.get('__DSH_HOST_PATHS__')?.pathFor, 'function')
   assert.equal(typeof exposed.get('desktopNext')?.command, 'function')
   assert.equal(typeof exposed.get('desktopNext')?.browserLinks, 'function')
   const permissions = exposed.get('desktopNext').permissions
@@ -131,4 +141,4 @@ for (const platform of ['darwin', 'win32', 'linux']) {
   await permissions.openSettings('screen')
   assert.deepEqual([...invocations.at(-1)], ['dsh-next:permission-settings', 'screen'])
 }
-console.log('Next frontend check passed: official 0.2.1-alpha.1 entry and independent sandboxed preloads for macOS, Windows and Linux.')
+console.log('Next frontend check passed: official 0.2.1-alpha.5 entry and independent sandboxed preloads for macOS, Windows and Linux.')

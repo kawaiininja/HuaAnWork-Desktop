@@ -1,9 +1,9 @@
 /** Official Desktop boot in headless Chromium; simulated IPC/platform, no native window or user profile. */
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { DesktopHostProcess } from '../lib/host-process.js'
@@ -22,24 +22,14 @@ const screenshots = join(root, '.desktop-next', 'verification')
 const manager = new NextProfiles(home)
 manager.ensure('desktop')
 manager.setFeatures('desktop', { market: true, remoteControl: false })
-// The renderer below simulates darwin, so the Host must mount the matching
-// `native` directory flow for the preload-backed picker to be the surface under
-// test. Upstream's chooser resolves `browse` on a Linux host with no
-// zenity/kdialog on PATH, which is every headless CI runner: hand it a display
-// and an executable chooser stub so one platform does not silently verify a
-// different flow. Nothing ever runs the stub — the client short-circuits to the
-// injected `__DSH_DIRECTORY_PICKER__` before the Host backend is consulted.
-const chooserEnv = {}
-if (process.platform === 'linux') {
-  const chooserDir = join(home, 'chooser-bin')
-  mkdirSync(chooserDir)
-  writeFileSync(join(chooserDir, 'zenity'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
-  chooserEnv.PATH = `${chooserDir}${delimiter}${process.env.PATH ?? ''}`
-  chooserEnv.DISPLAY = process.env.DISPLAY ?? ':0'
-}
+// A running Desktop hands its sampled LAN addresses to the Host as trusted authorities,
+// and upstream's adaptive directory-picker row then mounts the in-app browsing panel for
+// every browser it serves. Declare one here so the Host resolves `browse` on every
+// platform: the picker under test is Next's own Desktop occupant over the injected
+// `__DSH_DIRECTORY_PICKER__`, not the official native flow a trust-free Host would mount.
 const host = new DesktopHostProcess(process.execPath, root, manager.directory('desktop'), undefined,
-  { ...process.env, ...chooserEnv, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }, undefined, undefined, undefined,
-  join(root, 'lib', 'host.js'))
+  { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1', DSH_NEXT_TRUSTED_HOSTS: JSON.stringify(['192.0.2.10']) },
+  undefined, undefined, undefined, join(root, 'lib', 'host.js'))
 const shortcutPreferences = desktopKeybindings(home, 'macos', () => {})
 let browser
 let page
@@ -47,6 +37,11 @@ let recoveryPage
 const diagnostics = []
 try {
   const ready = await host.start()
+  // The trusted authority above made the Host compose the browse interaction; the Desktop
+  // document below must still adopt the injected path through Next's own occupant.
+  const roster = JSON.stringify(ready.injections)
+  assert.ok(roster.includes('@deepseek-ai/dsh-client-ui-directory-picker-browse'), 'the Host mounted the browse directory flow')
+  assert.ok(!roster.includes('@deepseek-ai/dsh-client-ui-directory-picker-native'), 'the Host left the native directory flow unmounted')
   const streamBaseUrl = new URL(ready.url).origin
   const cookie = await authenticateWebHost(ready.url)
   const cookieSeparator = cookie.indexOf('=')
@@ -333,7 +328,13 @@ try {
   await remoteDialog.getByRole('button', { name: /^(关闭远程控制|Close Remote Control|关闭手机连接)$/ }).click()
   await remoteDialog.waitFor({ state: 'hidden' })
   await dshChoice.focus()
-  await page.waitForFunction(() => document.activeElement === document.querySelector('[data-next-markets] [role="radio"]:last-child'))
+  // The Plugins page reloads its bundle list after the Remote Control dialog closes and
+  // locks every choice until the Host answers; a keypress inside that window is ignored
+  // by design, so wait for the focused choice to be actionable before pressing.
+  await page.waitForFunction(() => {
+    const choice = document.querySelector('[data-next-markets] [role="radio"]:last-child')
+    return document.activeElement === choice && choice.getAttribute('aria-disabled') !== 'true'
+  })
   await dshChoice.press('Space')
   await waitSelected('[data-next-markets] [role="radio"]:last-child')
   await assertMarketStyles('after switching to dsh-market')
@@ -373,7 +374,7 @@ try {
   const checkCuaStatus = async status => {
     await controls.getByRole('button', { name: /^Computer Use — / }).click()
     await page.locator('[data-next-computer-use]').getByRole('status').getByText(status).waitFor()
-    await page.getByRole('button', { name: /^(返回插件列表|Back to plugins)$/ }).click()
+    await page.getByRole('button', { name: /^(返回插件(?:列表)?|Back to plugins)$/ }).click()
     await controls.waitFor({ state: 'visible' })
     await page.waitForFunction(() => {
       const toggle = document.querySelector('[data-next-plugin-controls] [data-next-computer-use] [role="switch"]')
@@ -405,7 +406,7 @@ try {
   await page.screenshot({ path: join(screenshots, 'plugin-controls.png'), animations: 'disabled' })
   await permissionGear.click()
   const permissionDialog = page.getByRole('dialog', { name: /^(系统权限|System permissions)$/ })
-  await permissionDialog.getByRole('group', { name: /屏幕录制|Screen recording/ }).getByText(/已拒绝|Denied/).waitFor()
+  await permissionDialog.getByRole('group', { name: /屏幕录制|Screen recording/ }).getByText(/未授权|Not granted/).waitFor()
   assert.equal(await permissionDialog.getByRole('group').count(), 3)
   assert.ok(permissionActions.every(item => item.action === 'query'), 'Opening the dialog must never prompt for permissions')
   assert.equal(await dragRegion(), 'no-drag')
@@ -413,7 +414,7 @@ try {
   await permissionDialog.press('Escape')
   await permissionDialog.waitFor({ state: 'hidden' })
   await page.evaluate(() => window.__nextTestOpenSettings('permissions'))
-  await permissionDialog.getByRole('group', { name: /屏幕录制|Screen recording/ }).getByText(/已拒绝|Denied/).waitFor()
+  await permissionDialog.getByRole('group', { name: /屏幕录制|Screen recording/ }).getByText(/未授权|Not granted/).waitFor()
   await page.evaluate(() => window.__nextTestOpenSettings('permissions'))
   assert.equal(await permissionDialog.count(), 1)
   assert.equal(await context.pages().length, 1)
@@ -614,12 +615,12 @@ try {
   const updateSection = settings.locator('[data-next-updates]')
   await updateSection.getByRole('button', { name: /检查更新|Check for updates/ }).click()
   assert.equal(controlCommands.at(-1).type, 'check-updates')
-  controlState.updates = { phase: 'downloading', version: '2.0.17-next.1', installable: true, received: 50, total: 100 }
+  controlState.updates = { phase: 'downloading', version: '2.0.18-next.1', installable: true, received: 50, total: 100 }
   await updateSection.getByText(/正在下载更新 50%|Downloading update 50%/).waitFor()
   assert.equal(await updateSection.locator('progress').getAttribute('value'), '50')
   await updateSection.scrollIntoViewIfNeeded()
   await page.screenshot({ path: join(screenshots, 'desktop-update-progress.png'), animations: 'disabled' })
-  controlState.updates = { phase: 'ready', version: '2.0.17-next.1', installable: true }
+  controlState.updates = { phase: 'ready', version: '2.0.18-next.1', installable: true }
   await updateSection.getByRole('button', { name: /安装并重启|Install and restart/ }).click()
   assert.equal(controlCommands.at(-1).type, 'install-update')
   controlState.updates = { phase: 'idle', installable: true }
@@ -658,7 +659,7 @@ try {
   const screen = permissionSettings.getByRole('group', { name: /屏幕录制|Screen recording/ })
   await screen.getByRole('button', { name: /打开系统设置|Open system settings/ }).click()
   assert.ok(permissionActions.some(item => item.action === 'openSettings' && item.permission === 'screen'))
-  await screen.getByText(/已拒绝|Denied/).waitFor()
+  await screen.getByText(/未授权|Not granted/).waitFor()
   await permissionSettings.getByRole('button', { name: /^(关闭|Close)$/ }).click()
   await notifications.click()
   await page.waitForFunction(() => document.querySelector('[aria-labelledby="dsh-desktop-notifications-title"] [role="switch"]')?.getAttribute('aria-checked') === 'false')
@@ -791,8 +792,11 @@ try {
   const webWelcome = webPage.getByRole('button', { name: /^(继续|Continue)$/ })
   await webWelcome.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {})
   if (await webWelcome.isVisible()) await webWelcome.click()
-  // The rc.2 Web entry can open directly when the default model is available.
-  await webPage.getByRole('button', { name: /^(稍后配置|Configure later)$/ }).click({ timeout: 2_000 }).catch(() => {})
+  // The rc.2 Web entry can open directly when the default model is available;
+  // 0.2.1-alpha.5 opens the account sign-in dialog in marker-free Web contexts.
+  const webOnboardingDismiss = webPage.getByRole('dialog', { name: /^(开始使用|Get started)$/ }).getByRole('button', { name: /^(关闭|Close)$/ })
+    .or(webPage.getByRole('button', { name: /^(稍后配置|Configure later)$/ }))
+  await webOnboardingDismiss.first().click({ timeout: 2_000 }).catch(() => {})
   await webPage.locator('[aria-modal=true]').waitFor({ state: 'hidden' })
   await openSettingsPanel(webPage)
   assert.equal(await webPage.locator('.dshDesktopNativeActions').count(), 0)
@@ -811,7 +815,7 @@ try {
   await webContext.close()
   assert.deepEqual(errors, [])
   assert.deepEqual(await page.evaluate(() => globalThis.__NEXT_TEST_BOOT__.failures), [])
-  console.log('Next window controls passed through the official 0.2.1-alpha.1 Desktop boot branch: stacked sidebar extension entries, homepage/plugin collapse and reopen, navigation, caption geometry, clickable actions, existing-header and platform isolation, official Settings header shortcuts and keyboard navigation, grouped Desktop Settings and immediate saves, per-address login URL rows with exact open/copy targets, Profile cards and tray creation, the Host-independent recovery artifact, and native Browser toolbar, navigation, pane geometry, overlay isolation, tab lifetime and Web iframe fallback. Chromium simulates the preload contract; native Electron window movement and page loading are not tested here.')
+  console.log('Next window controls passed through the official 0.2.1-alpha.5 Desktop boot branch: stacked sidebar extension entries, homepage/plugin collapse and reopen, navigation, caption geometry, clickable actions, existing-header and platform isolation, official Settings header shortcuts and keyboard navigation, grouped Desktop Settings and immediate saves, per-address login URL rows with exact open/copy targets, Profile cards and tray creation, the Host-independent recovery artifact, and native Browser toolbar, navigation, pane geometry, overlay isolation, tab lifetime and Web iframe fallback. Chromium simulates the preload contract; native Electron window movement and page loading are not tested here.')
   console.log(`Screenshots: ${screenshots}`)
 } catch (error) {
   console.error(error)

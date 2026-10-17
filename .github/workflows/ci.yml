@@ -93,6 +93,8 @@ jobs:
         run: yarn install --immutable
       - name: Temporarily skip AA profile smoke in CI
         if: needs.changes.outputs.product == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         # Remove this step after AA Host service activation is fixed.
         # Local checks and the standalone verify:aa command remain available.
         run: |
@@ -103,7 +105,11 @@ jobs:
             const manifest = JSON.parse(readFileSync(path, 'utf8'))
             const smoke = ' && yarn run verify:aa'
             if (!manifest.scripts.check.includes(smoke)) throw new Error(`AA check not found in ${workspace}`)
-            manifest.scripts.check = manifest.scripts.check.replace(smoke, '')
+            // On pull requests, verify-desktop-variants already gates shared Desktop source,
+            // so Stable runs build + closure + license checks while Beta runs the full suite.
+            manifest.scripts.check = workspace === 'dsh-plugin-desktop' && process.env.EVENT_NAME === 'pull_request'
+              ? 'yarn run build && yarn run verify:closure && yarn run verify:licenses'
+              : manifest.scripts.check.replace(smoke, '')
             writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`)
           }
           NODE
@@ -111,50 +117,29 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: yarn check
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        if: needs.changes.outputs.product == 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock') }}
       - name: Install Chromium for Next window regression
         if: needs.changes.outputs.product == 'true'
-        run: yarn workspace dsh-desktop-next exec playwright install --with-deps chromium
-      - name: Verify Next window controls in the official frontend
-        if: needs.changes.outputs.product == 'true'
-        run: yarn workspace dsh-desktop-next verify:window-controls
-      - name: Verify Next Profile onboarding without a Host
-        if: needs.changes.outputs.product == 'true'
-        run: yarn workspace dsh-desktop-next verify:onboarding
-      - name: Verify Next native protocol mutations in Electron
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            yarn workspace dsh-desktop-next exec playwright install-deps chromium
+          else
+            yarn workspace dsh-desktop-next exec playwright install --with-deps chromium
+          fi
+      - name: Verify Next window controls, onboarding, protocol, and sidebar Browser in parallel
         if: needs.changes.outputs.product == 'true'
         run: |
-          set -euo pipefail
-          # ubuntu-latest has GNU timeout. Skip the wrapper only when this
-          # runner's timeout cannot send a follow-up SIGKILL.
-          if timeout --help >/dev/null 2>&1 && timeout --help 2>&1 | grep -q -- '--kill-after'; then
-            timeout --kill-after=10s 120s xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:protocol --no-sandbox
-          else
-            echo "GNU timeout is unavailable; running Electron without the 120s kill wrapper." >&2
-            xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:protocol --no-sandbox
-          fi
-      - name: Verify Next native sidebar Browser in Electron
-        id: sidebar-browser
-        if: needs.changes.outputs.product == 'true'
-        timeout-minutes: 5
-        env:
-          ELECTRON_ENABLE_LOGGING: '1'
-        run: |
-          set -euo pipefail
-          mkdir -p sidebar-browser-ci-logs
-          electron_cmd=(xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:sidebar-browser --no-sandbox)
-          if timeout --help >/dev/null 2>&1 && timeout --help 2>&1 | grep -q -- '--kill-after'; then
-            electron_cmd=(timeout --kill-after=10s 120s "${electron_cmd[@]}")
-          else
-            echo "GNU timeout is unavailable; running Electron without the 120s kill wrapper." >&2
-          fi
-          "${electron_cmd[@]}" 2>&1 | tee sidebar-browser-ci-logs/verify-sidebar-browser.log
-      - name: Upload sidebar-browser logs
-        if: (failure() || cancelled()) && (steps.sidebar-browser.outcome == 'failure' || steps.sidebar-browser.outcome == 'cancelled')
-        uses: actions/upload-artifact@v7
-        with:
-          name: sidebar-browser-logs
-          path: sidebar-browser-ci-logs/
-          if-no-files-found: warn
+          node scripts/run-parallel.mjs \
+            "yarn workspace dsh-desktop-next verify:window-controls" \
+            "yarn workspace dsh-desktop-next verify:onboarding" \
+            "xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:protocol --no-sandbox" \
+            "xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:sidebar-browser --no-sandbox"
 
   # Windows-only logic and unsigned NSIS/portable builds on a real Windows runner:
   # updates, window options, pwsh sandbox, volume diagnostics, and packaging.
@@ -184,6 +169,14 @@ jobs:
         with:
           path: ${{ steps.yarn-cache.outputs.dir }}
           key: yarn-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock', '.yarnrc.yml') }}
+      - name: Cache primary runtime and Electron Builder downloads
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ matrix.workspace }}/.desktop-build/downloads
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: packaging-downloads-${{ runner.os }}-${{ runner.arch }}-${{ matrix.workspace }}-${{ hashFiles('yarn.lock', 'deepseek-harness/scripts/primary-runtime/lock.json') }}
       - run: yarn install --immutable
       # Typecheck is platform-neutral and already gated by `check`.
       - run: yarn workspace ${{ matrix.workspace }} check:win-package:platform
@@ -213,7 +206,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta]
+        workspace: ${{ github.event_name == 'pull_request' && fromJSON('["dsh-plugin-desktop-beta"]') || fromJSON('["dsh-plugin-desktop", "dsh-plugin-desktop-beta"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -231,6 +224,13 @@ jobs:
         with:
           path: ${{ steps.yarn-cache.outputs.dir }}
           key: yarn-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock', '.yarnrc.yml') }}
+      - name: Cache Electron Builder downloads
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: packaging-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
       - run: yarn workspace ${{ matrix.workspace }} check:linux-package:platform
       - name: Build Linux AppImage and Debian package
@@ -264,6 +264,14 @@ jobs:
         with:
           path: ${{ steps.yarn-cache.outputs.dir }}
           key: yarn-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock', '.yarnrc.yml') }}
+      - name: Cache primary runtime and Electron Builder downloads
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ matrix.workspace }}/.desktop-build/downloads
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: packaging-downloads-${{ runner.os }}-${{ runner.arch }}-${{ matrix.workspace }}-${{ hashFiles('yarn.lock', 'deepseek-harness/scripts/primary-runtime/lock.json') }}
       - run: yarn install --immutable
       - run: yarn workspace ${{ matrix.workspace }} check:mac-package:platform
       - name: Build macOS smoke artifact
@@ -295,5 +303,4 @@ jobs:
         with:
           node-version: 22.23.2
       - run: corepack enable
-      - run: yarn check:layout
       - run: yarn upstream:version

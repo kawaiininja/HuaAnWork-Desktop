@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -514,4 +514,38 @@ it('still loads the Profile when the projection sweep fails', () => {
     expect(sweep).toHaveBeenCalledWith(dir)
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('could not remove dsh 0.1.5 link projections'))
   } finally { sweep.mockRestore(); stderr.mockRestore() }
+})
+
+it('leaves no Profile link into an archived installation and points the AA bridge at its unpacked files', () => {
+  const manager = profiles()
+  const dir = manager.ensure('desktop')
+  const resources = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-next-resources-')))
+  roots.push(resources)
+  const archive = join(resources, 'app.asar')
+  const bridge = join(archive, 'node_modules', '@agents-anywhere', 'dsh-bridge-next')
+  const uv = join(archive, 'node_modules', '@dataiku', `uv-${process.platform}-${process.arch}`)
+  for (const path of [bridge, uv]) mkdirSync(path, { recursive: true })
+  writeFileSync(join(archive, 'package.json'), readFileSync(NEXT_PACKAGE))
+  writeFileSync(join(bridge, 'package.json'), JSON.stringify({ name: AA_PACKAGE, version: '0.0.0', exports: { '.': './index.js', './package.json': './package.json' } }))
+  writeFileSync(join(bridge, 'index.js'), 'export {}\n')
+  writeFileSync(join(uv, 'package.json'), JSON.stringify({ name: `@dataiku/uv-${process.platform}-${process.arch}`, version: '0.0.0' }))
+  // A development launch left its link behind; the archived application removes it.
+  const modules = join(manager.home, 'profiles', 'node_modules')
+  mkdirSync(modules, { recursive: true })
+  const link = join(modules, 'dsh-desktop-next')
+  symlinkSync(dirname(NEXT_PACKAGE), link, 'junction')
+  const profile = loadNextProfile(dir, manager.home, join(archive, 'package.json'))
+  expect(lstatSync(link, { throwIfNoEntry: false })).toBeUndefined()
+  expect(profile.layers.map(layer => layer.packageName)).toContain('dsh-desktop-next')
+  const overlay = JSON.parse(readFileSync(join(dir, 'desktop-next.cordis.patch.json'), 'utf8')) as { id: string; config: Record<string, string> }[]
+  const unpacked = join(resources, 'app.asar.unpacked', 'node_modules')
+  expect(overlay).toEqual([{ id: 'agents-anywhere-bridge-next', config: {
+    dshHome: manager.home,
+    connectorSourceDir: join(unpacked, '@agents-anywhere', 'dsh-bridge-next', 'lib', 'bundled-connector'),
+    uvPath: join(unpacked, '@dataiku', `uv-${process.platform}-${process.arch}`, 'bin', process.platform === 'win32' ? 'uv.exe' : 'uv'),
+  } }])
+  // A physical installation keeps the managed link and the bridge's own defaults.
+  loadNextProfile(dir, manager.home)
+  expect(lstatSync(link).isSymbolicLink()).toBe(true)
+  expect(JSON.parse(readFileSync(join(dir, 'desktop-next.cordis.patch.json'), 'utf8'))).toEqual([{ id: 'agents-anywhere-bridge-next', config: { dshHome: manager.home } }])
 })
