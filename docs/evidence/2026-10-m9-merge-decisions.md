@@ -85,3 +85,82 @@
    - `corepack yarn install --immutable` 运行返回 0，无任何锁文件漂移与解法冲突。
 3. **根脚本一致性门禁**：
    - `node --test scripts/expected-root-gate-scripts.test.mjs` → `pass 1, fail 0`（断言 root package.json 的 build / typecheck / test / check 与 fixture 逐字吻合）。
+
+---
+
+## 5. M9-A 验收核查与 Vendored Runtime 落地证据 (Task 8)
+
+### 5.1 验收项核查结果
+
+1. **上游提交祖先关系**：
+   - `git merge-base --is-ancestor 44084bdae0 HEAD` 返回 0 (`MERGE-OK`)，证实上游 master 提交 `44084bdae0` 已完整合并进分支。
+2. **Submodule pin 独立提交**：
+   - `git show --stat 800fa2f370` 仅包含 1 个文件改动（`deepseek-harness | 2 +-`，pin 至 `1600d8a1e1` 即 `dsh-v0.2.1-rc.1`）。
+3. **Driver 废弃包清理状态**：
+   - `grep -c 'dsh-subagent-in-process-driver'` 实测：
+     - `dsh-plugin-desktop`: 1（stable 维持 0.2.0-rc.2）
+     - `dsh-plugin-desktop-beta`: 0（上游 0.2.1-rc.1 已清理）
+     - `dsh-plugin-huaanwork`: 0（Task 5/6 裁定 R-M9-2 清理）
+     - `dsh-desktop-next`: 1（维持冻结 alpha.1 通道）
+4. **Vendored Runtime 存续**：
+   - `vendor/dsh-runtime/0.2.1-alpha.1/manifest.json`：存在（Next 独立通道）
+   - `vendor/dsh-runtime/0.2.1-rc.1/manifest.json`：成功创建并打包 341 个 tarballs
+5. **Market DSH peer 范围**：
+   - `grep -c '"0\.2\.0-rc\.2 || 0\.2\.1-rc\.1 || 0\.2\.1-alpha\.1"' dsh-community-market/package.json` 返回 44 处匹配，覆盖所有 44 个 DSH peer 依赖。
+6. **Vendored Runtime 三通道校验**：
+   - `corepack yarn check:vendored-runtime` 全绿：
+     - `stable 318 packages from 639ed01539 are verified`
+     - `beta 341 packages from 1600d8a1e1 are verified`
+     - `huaanwork 341 packages from 1600d8a1e1 are verified`
+7. **Resolutions 完好性**：
+   - alpha.1 对应的 642 条 resolutions 全部放回，确保 Next 依赖解析不受影响。
+   - `@deepseek-ai/schemastery@npm:^3.18.5-alpha.1: 3.18.5` 保持在位。
+
+---
+
+## 6. M9-A fallout (交 M9-B)
+
+在 M9-A 完成 runtime 升级和 resolutions 对齐后，由于 0.2.1-rc.1 运行时尚未打补丁（M9-B 任务），工作区 typecheck 暴露出的类型错误作为 M9-B 的输入清单记录如下：
+
+### 6.1 各 Workspace Typecheck 状态概览
+
+| 工作区 | 退出码 | 错误数 / 状态 | 归因说明 |
+|---|---|---|---|
+| `dsh-plugin-desktop` | 0 | 通过 | 运行于 stable 0.2.0-rc.2 runtime，不受 rc.1 升级影响 |
+| `dsh-plugin-desktop-beta` | 2 | 10 处错误（2 文件） | unpatched 0.2.1-rc.1 runtime 客户端 slots 与 onboarding 类型漂移 |
+| `dsh-plugin-huaanwork` | 2 | 12 处错误（6 文件） | unpatched 0.2.1-rc.1 API / 签名漂移（port 可空、present-as 类型、sessionPersistence） |
+| `dsh-community-market` | 0 | 通过 | 自身类型检查通过（编译后输出 contracts d.ts） |
+| `dsh-desktop-next` | 2 | 4 处错误（4 文件） | packaging 脚本 era-mismatch（依赖已从 next 依赖清单移除的 alpha.2+ 包） |
+| `market-server` | 0 | 通过 | 依赖 `dsh-community-market` build 产物，契约类型对齐后全绿 |
+| `update-server` | 0 | 通过 | 独立服务，全绿 |
+
+### 6.2 详细错误分类与定位清单
+
+#### 1. `dsh-plugin-desktop-beta` (10 errors, tsconfig.tests.client.json)
+- **`src/client/desktop-settings.ts:118-119`**:
+  - TS2345 / TS2769: Argument of type `'plugins.bundle.hidden'` is not assignable to slot parameter type.
+- **`src/client/onboarding.tsx:9, 19, 20, 24`**:
+  - TS2344 / TS2345 / TS2769: Type `'onboarding.desktop.before'` does not satisfy slot constraint.
+  - TS2339: Properties `renderNavigation`, `renderSurface`, `renderLoading`, `renderNext`, `accountStatus`, `openLogin` do not exist on type `GlobalStandardProps & ...`.
+
+#### 2. `dsh-plugin-huaanwork` (12 errors in 6 files)
+- **`src/host-bootstrap.ts:225`**:
+  - TS2345: Argument of type `number | undefined` is not assignable to parameter of type `number` (`desktopLoopbackBrowserUrl(hostCtx.webServer.port)`).
+- **`src/huaanwork-guardrails/present-as.ts:93`**:
+  - TS2367: Unintentional comparison because types `'native'` and `'both'` have no overlap (`mode === "ptc" || mode === "both"`).
+- **`src/index.ts:204, 459`**:
+  - TS2345: `ctx.webServer.port` has type `number | undefined`, expected `number`.
+- **`src/main.ts:1838`**:
+  - TS2345: `hostCtx.webServer.port` has type `number | undefined`, expected `number`.
+- **`src/packaged-runtime-smoke.ts:48, 60, 73, 79`**:
+  - TS2339: Property `'default'` does not exist on module `@deepseek-ai/dsh-session-persistence-jsonl`.
+  - TS2339: Property `'sessionPersistence'` does not exist on type `'Context'`.
+- **`src/profile-context.ts:27, 60`**:
+  - TS2353: Object literal may only specify known properties, and `'resolvePackageManifest'` does not exist in type `'ProfileContext'`.
+  - TS7006: Parameters `'packageName'` and `'profilePatches'` implicitly have `'any'` type.
+
+#### 3. `dsh-desktop-next` (4 errors in 4 packaging scripts)
+- **`scripts/prepare-runtime.ts(6,92)`**, **`scripts/primary-runtime.ts(12,112)`**, **`scripts/sign-runtime.ts(7,65)`**, **`scripts/verify-mac-runtime.ts(4,42)`**:
+  - TS2307: `Cannot find module '@deepseek-ai/dsh-tool-workspace-dependencies' or its corresponding type declarations.`
+  - **根因**：上游在 alpha.2~alpha.5 期间将 packaging 脚本重构为引入 `@deepseek-ai/dsh-tool-workspace-dependencies`。但在 Step 5 按 plan-review P1 将 next 的依赖通道冻结回 alpha.1 时，由于该包在 alpha.1 不存在，从 dependencies 中移除了该包，导致 packaging tsconfig（`tsconfig.packaging.json`）无法解析该模块。需在 M9-B 处理 next packaging 脚本的兼容性或提供对应的桩/适配。
+
