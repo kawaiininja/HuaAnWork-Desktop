@@ -1,0 +1,85 @@
+# 2026-10-17 Runtime 兼容补丁 alpha.5 处置清单(21/21)
+
+> **性质**:升级前置评估(规划工件),不落地任何代码改动。
+> 背景:新一轮上游同步评估(2026-10-17 对账,fork 落后 upstream 116 提交、子模组落后 4 个 alpha)判定 `patches/` 下 21 个 `*@0.2.1-alpha.1.patch` 全部钉死在旧版本,升级后 sync 脚本**静默回落为无补丁解析**(check 模式亦不报错)。本清单对 21 个补丁逐一核对 alpha.5 源码,给出「已吸收 / 需重做 / 可放弃」三态判定。
+
+## 0. 口径与基线
+
+- **评估时刻 (As-Of)**:2026-10-17(`git fetch` 后)
+- **旧基线**:子模组 pin `5badb15009`(dsh-v0.2.1-alpha.1),`vendor/dsh-runtime/0.2.1-alpha.1/`(321 包),`patches/` 21 个 `*@0.2.1-alpha.1.patch`
+- **新基线**:`deepseek-harness` `origin/master` = `1517a4dbca` = **dsh-v0.2.1-alpha.5**(alpha.5 之后无新增提交)
+- **方法**:Read 补丁全文 → 定位子模组包源码 → `git diff 5badb15009..origin/master -- <包路径>` + `git show origin/master:<file>` 逐 hunk 对照 → 全仓 `git grep <补丁引入符号> origin/master` 验证是否被吸收(零命中 = 未吸收)
+- **补丁形态注意**:补丁打在构建产物 `lib/index.js` 上,对照以 `src/` 源码为准;重做产物路径(chunk 哈希、双构建出口)以 alpha.5 实际构建结果为准
+
+## 1. 总体结论
+
+| 判定 | 数量 | 说明 |
+|---|---|---|
+| 上游已吸收 | **0** | 21 个补丁引入的符号(`readPatches`/`resolvePackageManifest`/`data-conversation-*`/`pickNativeDirectory`/`plugins.overview`/`optionalBundles`/`exclusiveBundles`/`desktopPermissions` 等)在 origin/master 全仓 grep 零命中 |
+| 需重做 | **21** | 难度小 17、中 3、中-大 2 |
+| 可放弃 | **0** | 21 个目标包在 alpha.5 全部存在;仅 `dsh-subagent-in-process-driver`(非补丁对象)被上游删除,另见消费面评估 |
+
+**工作量估算:约 7–9 人日**(小 ×17 ≈ 2–3,中 ×3 ≈ 1.5–2,中-大 ×2 ≈ 3–4)。无吸收/放弃的不确定性,全部是确定性移植。
+
+**重做顺序建议**:先 2 个中-大(slot/钩子形态由上游新结构决定)→ dsh 核心 + hmr + ptc(机制类,影响面大)→ 15 个小补丁批量过 → 每个补丁落地后跑 `check:vendored-runtime` + 对应包测试。
+
+## 2. 难度小(17 个,锚点基本原位,机械重打)
+
+| # | 补丁 | 意图 | alpha.5 证据与备注 |
+|---|---|---|---|
+| 1 | dsh-app-boot | ProfileContext 注入 `readPatches`/`resolvePackageManifest` 启动器钩子 | `profile-context.ts:74` `readProfilePatches` 仍在但函数体重写(经 `readBundlePatches`);早退插在函数顶部即可。`compatibility-preflight.ts:29` `manifestOf` 同形,`bare` 提前声明需按新版面重排;d.ts 重新生成 |
+| 2 | dsh-client-modules | `newlineCount` 性能优化(indexOf 循环) | `src/index.ts:348-351` 仍是 alpha.1 原样实现。注意 alpha.5 该包拆了 Node/browser 双构建(`e137ebaaa1`),需验证两条产物路径 |
+| 3 | dsh-client-ui-conversation | 会话头部 `data-conversation-header`/`data-conversation-title-row` 定位钩子 | `ConversationHeader.tsx:18-23`、`ConversationSession.tsx:69` 无属性,JSX 结构与 alpha.1 几乎一致(文件迁入 skeleton/ 子目录) |
+| 4 | dsh-client-ui-directory-picker-browse | 原生选目录(`__DSH_DESKTOP_PICK_DIRECTORY__`)+ 打开前校验,9 hunk | 包仅 4 文件外围改动,核心源码未动,锚点原位;`browser.nativePicker` 文案注意 alpha.5 i18n 字典已精简(`c7d61ecc11`) |
+| 5 | dsh-client-ui-primitives | 宽表格常显细滚动条 | `MarkdownText.module.css:208-217` 与补丁前文逐字相同;确认 `:221-224` 新增 `:focus-visible` 规则无需联动 |
+| 6 | dsh-client-ui-settings-general | `desktop` 设置分区专属 SVG 图标 | `SettingsRoot.tsx:32-38` **alpha.1→5 零改动**;直接在 `:36` 附近重加 `if (id === 'desktop')` 分支 |
+| 7 | dsh-client-ui-settings-shell | Windows `desktop-windows-pwsh-sandbox` 第三控制器 | `index.ts:47-52` 结构同形;**以 alpha.5 的 `order: 40` 为基底,勿回退成 10** |
+| 8 | dsh-client-ui-sidebar | `data-sidebar-header-controls` 标记属性 | `HeaderLeadingControls.tsx:30` 根元素零改动,一行属性 |
+| 9 | dsh-experimental-computer-use-cua-driver-native | `check_permissions` 接桌面 `desktopPermissions` 服务 | `src/index.ts:103-109`/`:133-137` 锚点逐字对应;升级后确认桌面侧服务注册键名未变 |
+| 10 | dsh-host-directory-picker-browse | Windows reparse/系统目录 stat 失败按「不可进入」跳过 | `src/index.ts:157-176` 原逻辑未动;**保留 alpha.5 catch 块内新增的 abort 重抛**(`if (signal?.aborted) throw asError(signal.reason)`) |
+| 11 | dsh-host-open-in-app | 剥除子进程环境 `ELECTRON_RUN_AS_NODE` | `resolver.ts` alpha.1→5 **零 diff**;两 hunk 是同一份源码的两份构建出口,只改 `src/resolver.ts` 一处;`...options.env` 展开顺序不要动 |
+| 12 | dsh-plugin-manager | `dsh.optionalBundles`/`dsh.exclusiveBundles` 清单驱动 bundle 管理 | 锚点文本未变但行号漂移(:291/:749 → :329/:823,包 +219 行),**以符号锚定勿用行号** |
+| 13 | dsh-plugin-package-inventory-deepseek | asar 包清单解析(asar-module-resolver 符号探测) | `src/index.ts:74-84` `barePackageManifest` 逐字相同,hunk 几乎原样平移 |
+| 14 | dsh-subprocess-local | Electron 宿主下私有 runner 强制 Node 模式 | `runner-launch.ts:66-84` 逐字相同;上游桌面的解法(`apps/desktop/src/node-environment.ts`)不覆盖私有 runner 路径,补丁继续必要 |
+| 15 | dsh-web-app | opener 环境旗标剥离 + `windowsHide: true` | hunk② `env: scrubbedParentEnv(),` 原位可平移;hunk① 程序体新增 win32 launcher 等待逻辑,上下文行需用 alpha.5 新文本 |
+| 16 | dsh(核心)hunk① | `manageDesktopProfile` 时跳过 `rejectElectronProfile` | `apps/cli/src/args.ts:183` 仍裸调用;上游 `apps/desktop-host/src/cli.ts:16` 同向演进,**未来有被吸收可能**,重做时留意 |
+| 17 | dsh-sandbox-windows-acl | DACL 仅 Modify 的目录先补 WRITE_OWNER ACE 再重试授权 | 包 src 零改动;⚠️ **上游刻意不做自愈**(README.md:130 明示 loud failure + 诊断 skill)——本补丁是与上游设计取向相左的**永久 fork 差**,重做时须登记,勿静默重打 |
+
+## 3. 难度中(3 个,机制有结构性漂移)
+
+### 3.1 dsh-hmr
+- **意图**:无 `--expose-internals` 的 public-loader 嵌入跑 HMR(仅模块 HMR 才要求 internals)
+- **关键问题**:alpha.5 `Service.init` 头部新增 `const mainJob = this.mainJob()`(`index.ts:349`),`mainJob() → esmJob() → hasEsmCache() → Reflect.get(this.internal, ...)` 在 `this.internal === undefined` 时直接 TypeError——alpha.1 的 init 无此前置解引用,**旧两 hunk 方案不再够用**。且 `private internal: ModuleLoader`(`:231`)非可选类型,条件放宽后 TS 收窄报错
+- **重做要点**:同时对 `mainJob`/`hasEsmCache` 加空值守卫(或 init 头部跳过)+ 类型放宽
+
+### 3.2 dsh-ptc-runtime-node
+- **意图**:Electron utility process 无 `ELECTRON_RUN_AS_NODE` 可继承,构建 PTC 子进程 env 时显式补
+- **关键问题**:上游 `a66d81e33f` 把 `ELECTRON_RUN_AS_NODE` 从 `STARTUP_ENVIRONMENT_NAMES` 白名单**删掉**改显式过滤 ⇒ **补丁从「仍需」升级为「硬需求」**(不打补丁 PTC 子进程完全拿不到 node-mode selector);且 alpha.5 新增持久 PTC(`src/persistent.ts:192-196`)有**同构 env 过滤块**,alpha.1 补丁不可能覆盖它
+- **重做要点**:`src/index.ts:224-227` 与 `src/persistent.ts:192-196` **两个现场必须同补**,漏一个持久 PTC 起不来
+
+### 3.3 dsh(核心)hunks②③
+- **意图**:`runProfile` 把 `options.resolvedProfile.readPatches` 透传进 `profileContext` + d.ts 补字段
+- **关键问题**:机制完全未吸收,但承载代码大改——`profileContext` 块移入 `runProfile`(`profile-boot.ts:314-322`)并扩字段;`ProfileContext` 接口(`profile-context.ts:15-33`)改**全 readonly**
+- **重做要点**:①`ResolvedProfileRuntime` 加 `readPatches?: ProfileContext['readPatches']`;②profileContext 字面量加条件展开(位置在 packageManager 展开项之后、dir 之前,与 alpha.1 补丁一致);③接口新增字段必须写 `readonly`
+
+## 4. 难度中-大(2 个,本轮真正的重头)
+
+### 4.1 dsh-client-ui-plugin-manager
+- **意图**:5 个桌面 slot(`plugins.header.leading`/`plugins.overview`/`plugins.bundle.hidden`/`plugins.item.hidden`/`plugins.bundle.actions`)+ `renderComponents` 复合渲染 + 隐藏集合进 ConfigLedger,12 hunk
+- **关键问题**:alpha.5 `PluginManagerPage.tsx` 大改(+1772/-256):Installed/More 双 tab 模型,`listed` 过滤从 `optional` 改为 `official`,`ordered/pinned/more` 三段拆分(`60328899e5`/`b227127d62`/`3de3a977e0`)。**补丁「双列表」语义被上游新结构覆盖**
+- **重做要点**:隐藏集合挂到新的 more/official 过滤链而非旧双变量;`PluginSidebarControl`/`data-plugin-page-header` 插入点对窄宽重排(`ee558c82d7`)重新定位
+
+### 4.2 dsh-client-ui-settings-account
+- **意图**:`dshDesktopSetup` 扩展——桌面 onboarding 组件抽取 + `onboarding.desktop.before` slot + `readOnboardingApiKeyPresence` 无 bridge 回退 + `openDesktopLogin`,8 hunk
+- **关键问题**:包大改(55 文件),所有 hunk 锚点搬迁;`DesktopOnboardingEntry` 签名已改(`setVisible` + hooks 注入);`readOnboardingApiKeyPresence` 拆到 `onboarding-credentials.ts:7` 仍是纯 bridge 版
+- **重做要点**:ctx 回退需改签名并在调用点包闭包(`index.ts:261` 以无参函数传入 controller);须与上游新增的凭据刷新失效机制(`credentials/reference-updated`)及 Web 账号登录(`8ee22c3668`)共存
+
+## 5. 关联阻断项(非补丁,但同批处置)
+
+本清单只覆盖补丁层;同一升级还有三个硬阻断项(详见会话评估,建议在立项文档中并列登记):
+
+- **A1**:`dsh-subagent-in-process-driver` 被上游删除(`5ca7f533e1`,alpha.2→3),四个插件包 `package.json` 各引用一行(huaanwork 在 `:329`),`sync-vendored-runtime --check` 直接 fail ⇒ 裁定为删行或按上游 `bundle/base` 新组成换成 `dsh-subagent-fork-in-process`/`dsh-subagent-spawn-in-process`
+- **A3**:cordis 家族外层钉版(`4.0.5-alpha.1` 系)须随上游升到 `-alpha.2` 系(含 cosmokit、community-market 的 `"4.0.4 || 4.0.5-alpha.1"` 区间),否则 yarn 装出两份 cordis 单例
+- **验证链**:`upstream:prepare-runtime` → 裁 A1/A3 → `sync-vendored-runtime --write`(beta + huaanwork)→ 本清单 21 补丁 → `install --immutable` → `check` → `typecheck` → `test` → 真机冒烟(登录凭据优先级反转、市场插件重复安装报错语义、迁移幂等、profile-boot 断言)
+
+stable 通道钉在 0.2.0-rc.2,不在本次区间;bump 只动 beta/huaanwork。
