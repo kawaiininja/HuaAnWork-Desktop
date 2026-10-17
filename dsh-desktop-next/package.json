@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsdown && vite build --config vite.client.config.ts && vite build --config vite.native-ui.config.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.packaging.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/run-electron-check.test.mjs",
     "verify:host": "node scripts/verify-host.mjs",
     "verify:host:electron": "node scripts/verify-host.mjs --electron",
     "verify:frontend": "node scripts/verify-frontend.mjs",
@@ -20,7 +20,7 @@
     "verify:onboarding": "node scripts/verify-onboarding.mjs",
     "verify:protocol": "electron scripts/verify-protocol.mjs",
     "verify:plugin-frames": "node scripts/verify-plugin-frames.mjs",
-    "verify:sidebar-browser": "electron scripts/verify-sidebar-browser.mjs",
+    "verify:sidebar-browser": "node scripts/run-electron-check.mjs",
     "check": "yarn build && yarn typecheck && yarn test && yarn verify:frontend && yarn verify:host && yarn verify:desktop-runtime && yarn verify:safe-cleanup",
     "dev": "yarn build && node scripts/start.mjs",
     "start": "node scripts/start.mjs",

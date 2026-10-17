@@ -80,12 +80,14 @@
 
 工作树收口三笔提交各自的验证细节在各自提交信息里;`3943e3b5f9` 同批订正了 §4 下方登记段的字体计数笔误(26→24)。
 
-### CI 对账(run `38911832693`,as-of 2026-10-16T14:57Z,run 尚未结束)
+### CI 对账(run `38911832693`,终态 cancelled)
 
-推送触发 CI run `38911832693`(commit `b9406e731b`)。as-of 读数:
+推送触发 CI run `38911832693`(commit `b9406e731b`)。终态读数于 2026-10-17 订正。未另标的时间是 UTC,北京时间 = UTC+8。
 
-- **CI 额度已恢复**:2026-10-12 起 run 实际执行,2026-10-10 的 spending-limit 跳过不再存在。
-- **11 个展开格中 10 格绿**:`changes`、`upstream-command-windows`、`desktop-windows` ×3(huaanwork 6m17s)、`desktop-macos` ×3(huaanwork 14m32s)、`desktop-linux` ×2。
-- **`check` job 的根 gate `Run yarn check` 绿**——2026-10-12/13/14 三连败的根因实锤为 setZoomLevel 守卫红(三次 failure 日志均为 `Desktop variant source drift is not declared`,10-14 精确到 `[beta↔huaanwork] src/electron-shell-generation.ts`),修复 `1ce000b99c` 随本次推送在 CI 生效(`upstream-command-windows` 与 `check` 的守卫步均转绿)。
-- **Next 四步验证:前三绿(`window-controls` 42s、`onboarding` 24s、`protocol` 3s),`sidebar-browser` 自 14:10:18 挂起 55+ 分钟未决**。脚本内部 45s deadline(`dsh-desktop-next/scripts/verify-sidebar-browser.mjs:30`)未触发 ⇒ Electron 进程级挂起,非脚本超时路径。该步骤在本 fork **从无绿色先例**(10-10 额度 skip;10-12/13/14 的 check job 在 2 分钟早夭,未及 Next 步),属 R-M8-2 Next 基座观察项的首次暴露;本批推送对 `dsh-desktop-next/` 仅两处依赖钉刷新(桥 tarball 文件名、dshmarket 版本,`109cf90918`/`5ca2d0e72a`),无行为改动。处置裁定:不取消,留 job 自然超时(6h);预期终态 = failure(仅 sidebar-browser 超时),不推翻上列主线结论。
-- 终态复查:`gh run view 38911832693 --repo kawaiininja/HuaAnWork-Desktop`。
+- **CI 额度已于 10-11 恢复**:run `38100060421` 在 2026-10-11 08:55:18(北京时间,`2026-10-11T00:55:18Z`)开始,workflow 更新于 `2026-10-11T01:18:28Z`,已正常执行约 23 分钟。这不是 spending-limit 跳过。该 run 自己的结论仍是 failure(`check` 为断言失败,不是下面的守卫红)。2026-10-10 的额度跳过(例如 run `38033205707` 的产品 job 全部 skipped)从这次起不再出现。
+- **11 个展开格中 10 格绿**:`changes`、`upstream-command-windows`、`desktop-windows` ×3(huaanwork 6m17s)、`desktop-macos` ×3(huaanwork 14m32s)、`desktop-linux` ×2。huaanwork 只在 Windows 和 macOS 上构建;Linux 只有 `dsh-plugin-desktop` 与 `dsh-plugin-desktop-beta`。
+- **`check` job 的根 gate `Run yarn check` 绿**——2026-10-11/12/13/14 **四连败**的根因实锤为 setZoomLevel 守卫红。四次 failure 日志均为 `Desktop variant source drift is not declared`,精确到 `[beta↔huaanwork] src/electron-shell-generation.ts`。10-11 那一次是提交 `f9fd375243`(run `38102194100`),加上 10-12 `38314604265`、10-13 `38408266786`、10-14 `38578361070`。四次 `check` 都在约 2 分钟早夭,未及 Next 步。修复 `1ce000b99c` 随本次推送在 CI 生效(`upstream-command-windows` 与 `check` 的守卫步均转绿)。
+- **Next 四步验证:前三绿(`window-controls` 42s、`onboarding` 24s、`protocol` 3s)。`sidebar-browser` 自 `2026-10-16T14:10:18Z`(UTC,北京时间 22:10:18)挂起,脚本 45s deadline 没有日志。** 该步骤在本 fork 当时从无绿色先例(10-10 额度 skip;上述四连败的 check job 在 2 分钟早夭,未及 Next 步),属 R-M8-2 Next 基座观察项的首次暴露。本批推送对 `dsh-desktop-next/` 仅两处依赖钉刷新(桥 tarball 文件名、dshmarket 版本,`109cf90918`/`5ca2d0e72a`),无行为改动。
+- **终态 = cancelled(6 小时默认超时),不是 failure。** `check` 从 `2026-10-16T13:57:31Z` 到 `2026-10-16T19:57:56Z`;步骤 `Verify Next native sidebar Browser in Electron` 结论 cancelled。取消时列出的孤儿进程是 xvfb-run、Xvfb 和两个 node,没有 Electron pid 17319。日志在启动后约 1 秒停在 `(node:17319) electron: Failed to load URL: http://127.0.0.1:44059/first with error: ERR_BLOCKED_BY_RESPONSE`。
+- **2026-10-17 xvfb 复现订正了「Electron 加载 /embed 后退出、外层仍在等」。** 同一命令下 Electron 主进程一直存活,45s `setTimeout` 不执行。`/first` 的 `ERR_BLOCKED_BY_RESPONSE` 是 `/embed` 页面里的 iframe 被 `frame-ancestors 'none'` 拒绝,断言本来就要求这次嵌入失败。卡住的位置是 `guests.bind(window)` 没有传入 `attachInput`:访客 `dom-ready` 抛出未捕获的 `TypeError: attachInput is not a function`,Electron 的 JS 事件循环停住,npm CLI 只等子进程 `close`,所以外层一直等。补上 no-op `attachInput` 后,同一 xvfb 命令约 2 秒打印通过并退出。
+- `57a675ad5c` 触发的 run `38979201338` 只走了文档快速通道(`changes` 将改动判为非产品路径,`check` 只执行 Documentation-only gate,desktop 与 upstream 任务全部 skipped),没有验证产品代码。
