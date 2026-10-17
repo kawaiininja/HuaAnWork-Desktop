@@ -8,14 +8,14 @@
 - **评估时刻 (As-Of)**:2026-10-17(`git fetch` 后)
 - **旧基线**:子模组 pin `5badb15009`(dsh-v0.2.1-alpha.1),`vendor/dsh-runtime/0.2.1-alpha.1/`(321 包),`patches/` 21 个 `*@0.2.1-alpha.1.patch`
 - **新基线**:`deepseek-harness` `origin/master` = `1517a4dbca` = **dsh-v0.2.1-alpha.5**(alpha.5 之后无新增提交)
-- **方法**:Read 补丁全文 → 定位子模组包源码 → `git diff 5badb15009..origin/master -- <包路径>` + `git show origin/master:<file>` 逐 hunk 对照 → 全仓 `git grep <补丁引入符号> origin/master` 验证是否被吸收。**吸收判定的证据口径(2026-10-17 GLM 评审订正)**:并非所有补丁符号在上游零命中——`pickNativeDirectory`(7 文件,上游自有包 `packages/host/directory-picker-native` 的同名符号)、`optionalBundles`(5 文件,上游 scripts 与 agent note)、`data-conversation-header`(3 文件,上游 `-leading`/`-corner` 前缀子串)、`resolvePackageManifest`(1 文件,web 测试同名助手)均有命中,但均为同名异码/上游自有,**不构成吸收**;其余符号(`readPatches`/`plugins.overview`/`desktopPermissions`/`exclusiveBundles` 等)零命中。附注:上游在 alpha 区间新增了 `packages/host/directory-picker-native` 原生选择器包,与 #4 补丁意图邻域重叠,重做 #4 时应先核对该包是否可直接复用。
+- **方法**:Read 补丁全文 → 定位子模组包源码 → `git diff 5badb15009..origin/master -- <包路径>` + `git show origin/master:<file>` 逐 hunk 对照 → 全仓 `git grep <补丁引入符号> origin/master` 验证是否被吸收。**吸收判定的证据口径(2026-10-17 GLM 评审订正)**:并非所有补丁符号在上游零命中——`pickNativeDirectory`(7 文件,上游自有包 `packages/host/directory-picker-native` 的同名符号)、`optionalBundles`(5 文件,上游 scripts 与 agent note)、`data-conversation-header`(3 文件,上游 `-leading`/`-corner` 前缀子串)、`resolvePackageManifest`(1 文件,web 测试同名助手)均有命中,但均为同名异码/上游自有,**不构成吸收**;其余符号(`readPatches`/`plugins.overview`/`desktopPermissions`/`exclusiveBundles` 等)零命中。附注(2026-10-17 二轮订正):上游自有包 `packages/host/directory-picker-native` **并非本轮新增**——2026-07-28 `5579b13503` 创建、首见 `dsh-v0.1.0-rc.7`,**alpha.1 树已包含**(`git ls-tree 5badb15009 packages/host/` 实测),本窗口仅演进 9 文件 +100/−42。「重做 #4 前先核对能否复用」的建议仍成立,但理由应表述为:**fork 在 alpha.1 选 bridge 方案时上游原生选择器(native capability 经 subprocess)已并存,重做是重新评估取舍的时机**,而非「本轮新增」。
 - **补丁形态注意**:补丁打在构建产物 `lib/index.js` 上,对照以 `src/` 源码为准;重做产物路径(chunk 哈希、双构建出口)以 alpha.5 实际构建结果为准
 
 ## 1. 总体结论
 
 | 判定 | 数量 | 说明 |
 |---|---|---|
-| 上游已吸收 | **0** | 21 个补丁引入的符号(`readPatches`/`resolvePackageManifest`/`data-conversation-*`/`pickNativeDirectory`/`plugins.overview`/`optionalBundles`/`exclusiveBundles`/`desktopPermissions` 等)在 origin/master 全仓 grep 零命中 |
+| 上游已吸收 | **0** | 21 个补丁引入的符号经 origin/master 全仓 grep 核对:`readPatches`/`plugins.overview`/`exclusiveBundles`/`desktopPermissions` 等零命中;`pickNativeDirectory`/`optionalBundles`/`data-conversation-*`/`resolvePackageManifest` 有命中但均为上游自有符号或同名异码,**不构成吸收**(口径详见 §0 方法条) |
 | 需重做 | **21** | 难度小 16、中 3、中-大 2(dsh 核心补丁的 hunk① 属小、hunks②③ 属中,**按补丁计整体入「中」一档**,不重复计数) |
 | 可放弃 | **0** | 21 个目标包在 alpha.5 全部存在;仅 `dsh-subagent-in-process-driver`(非补丁对象)被上游删除,另见消费面评估 |
 
@@ -23,7 +23,7 @@
 
 **hunk 计数口径**:补丁多同时打 lib 主产物与 lib/types 的 d.ts 产物;本文 hunk 数记「全部目标文件合计」,括号内注明主产物 hunk 数。
 
-**重做顺序建议**:先 2 个中-大(slot/钩子形态由上游新结构决定)→ dsh 核心 + hmr + ptc(机制类,影响面大)→ 15 个小补丁批量过 → 每个补丁落地后跑 `check:vendored-runtime` + 对应包测试。
+**重做顺序建议**:先 2 个中-大(slot/钩子形态由上游新结构决定)→ dsh 核心 + hmr + ptc(机制类,影响面大)→ 16 个小补丁批量过 → 每个补丁落地后跑 `check:vendored-runtime` + 对应包测试。
 
 ## 2. 难度小(16 个,锚点基本原位,机械重打)
 
@@ -32,7 +32,7 @@
 | 1 | dsh-app-boot | ProfileContext 注入 `readPatches`/`resolvePackageManifest` 启动器钩子 | `profile-context.ts:74` `readProfilePatches` 仍在但函数体重写(经 `readBundlePatches`);早退插在函数顶部即可。`compatibility-preflight.ts:29` `manifestOf` 同形,`bare` 提前声明需按新版面重排;d.ts 重新生成 |
 | 2 | dsh-client-modules | `newlineCount` 性能优化(indexOf 循环) | `src/index.ts:348-351` 仍是 alpha.1 原样实现。注意 alpha.5 该包拆了 Node/browser 双构建(`e137ebaaa1`),需验证两条产物路径 |
 | 3 | dsh-client-ui-conversation | 会话头部 `data-conversation-header`/`data-conversation-title-row` 定位钩子 | `ConversationHeader.tsx:18-23`、`ConversationSession.tsx:69` 无属性,JSX 结构与 alpha.1 几乎一致(skeleton/ 子目录 **alpha.1 已存在**,非本轮迁入) |
-| 4 | dsh-client-ui-directory-picker-browse | 原生选目录(`__DSH_DESKTOP_PICK_DIRECTORY__`)+ 打开前校验,13 hunk(lib/client.js 9) | 包仅 4 文件外围改动,核心源码未动,锚点原位;`browser.nativePicker` 文案注意 alpha.5 i18n 字典已精简(`c7d61ecc11`)。另:上游本轮新增自有原生选择器包 `packages/host/directory-picker-native`(见 §0 方法附注),重做前先核对能否直接复用 |
+| 4 | dsh-client-ui-directory-picker-browse | 原生选目录(`__DSH_DESKTOP_PICK_DIRECTORY__`)+ 打开前校验,13 hunk(lib/client.js 9) | 包仅 4 文件外围改动,核心源码未动,锚点原位;`browser.nativePicker` 文案注意 alpha.5 i18n 字典已精简(`c7d61ecc11`)。另:上游自有原生选择器包 `packages/host/directory-picker-native` **alpha.1 已并存**(非本轮新增,见 §0 附注)——重做是重新评估 bridge vs 上游原生方案取舍的时机,先核对能否直接复用 |
 | 5 | dsh-client-ui-primitives | 宽表格常显细滚动条 | `MarkdownText.module.css:208-217` 与补丁前文逐字相同;`:221` 的 `:focus-visible` 规则 **alpha.1 已存在**(非本轮新增),无需联动 |
 | 6 | dsh-client-ui-settings-general | `desktop` 设置分区专属 SVG 图标 | `SettingsRoot.tsx:32-38` **alpha.1→5 零改动**;直接在 `:36` 附近重加 `if (id === 'desktop')` 分支 |
 | 7 | dsh-client-ui-settings-shell | Windows `desktop-windows-pwsh-sandbox` 第三控制器 | `index.ts:47-52` 结构同形;**以 alpha.5 的 `order: 40` 为基底,勿回退成 10** |
@@ -92,11 +92,28 @@ GLM 对本文件提出 6 处 issue,经逐条在子模组(`git show`/`git diff`/`
 
 | # | 指摘 | 核实结论与订正 |
 |---|---|---|
-| 1 | §5 A1 提交号与窗口双错 | ✅ 成立。实测 `3d852a1cea`(2026-09-17)的 stat 含该包 7 个删除文件,alpha.2 tag 树已无此包;`5ca7f533e1`(2026-09-21)对该包零触及。已订正 |
+| 1 | §5 A1 提交号与窗口双错 | ✅ 成立。`3d852a1cea`(2026-09-17)删除该包 **14 个文件、2515 行**(`git diff-tree -r --name-status` 实测 14 条 D;初稿核实时用 `grep -c` 数 `--stat` 输出得 7,系 stat 长路径缩写为 `.../` 吞掉匹配串所致的**核实方法缺陷**),alpha.2 tag 树已无此包;`5ca7f533e1`(2026-09-21)对该包零触及。已订正 |
 | 2 | §3.2 `a66d81e33f` 归因错误 | ✅ 成立。`git tag --contains` 首见 `dsh-v0.1.6-alpha.2`,`merge-base --is-ancestor` 确认 alpha.1 已包含,alpha.1 `index.ts:230` 已有显式过滤。「升级为硬需求」表述删除,本轮真实增量仅 `persistent.ts` 第二现场(`git cat-file -e` 确认该文件 alpha.1 不存在)。已订正 |
-| 3 | §1「零命中」表述不实 | ✅ 成立。`pickNativeDirectory`(7 文件)/`optionalBundles`(5)/`data-conversation-header`(3)/`resolvePackageManifest`(1) 在上游均有命中,均为同名异码或上游自有,「0 吸收」结论不变但证据口径已改写为「有命中但不构成吸收」。副产发现:上游新增 `packages/host/directory-picker-native` 自有原生选择器包,已挂到 #4 备注 |
+| 3 | §1「零命中」表述不实 | ✅ 成立。`pickNativeDirectory`(7 文件)/`optionalBundles`(5)/`data-conversation-header`(3)/`resolvePackageManifest`(1) 在上游均有命中,均为同名异码或上游自有,「0 吸收」结论不变但证据口径已改写为「有命中但不构成吸收」 |
 | 4 | 三处假「新增」 | ✅ 全部成立。`skeleton/` 子目录(alpha.1 ls-tree 已有)、`:focus-visible` 规则(alpha.1 `:221` 已有)、abort 重抛(alpha.1 `:169` 已有)。三处均已订正;#10「保留 abort 重抛」的建议本身仍正确,保留 |
 | 5 | 数字口径 | ✅ 全部成立。dsh 补丁双计(小 17+中 3+中大 2=22)→ 改为 16/3/2=21 并注明口径;`PluginManagerPage.tsx` 单文件实为 +338/−92(+1772/−256 是整包 25 文件);plugin-manager `src/index.ts` 实为 +163/−56(净 +107,原「+219」是 diffstat 行数);hunk 计数统一为「全部目标文件合计(主产物)」:settings-account 7(6)、plugin-manager 23(16)、directory-picker-browse 13(9)。已订正 |
 | 6 | #12 应与 #17 同等登记「与上游明示取向相左」 | ✅ 成立。上游 agent note `2026-09-15-shipped-optional-bundles.md` 明载清单形态被评估并否决(「maintainers keep product decisions in code」)。已在 #12 行内补「永久 fork 差、须同等登记」警示 |
 
 **教训登记**:初稿由 3 个并行子代理分组产出,汇编者(本会话)未对子代理的关键断言(提交归因、行号归属、diffstat 口径)做独立核实即落盘——违反「代码断言先核实再引用」纪律。后续此类清单在落盘前,对「提交号/窗口」「diffstat 归属(单文件 vs 整包)」「新增 vs 既有」三类断言必须抽查核实。
+
+### 第二轮(GLM 复审订正轮引入的新错误,2026-10-17)
+
+GLM 复审发现**第一轮订正提交本身又引入 4 处错误**,核实后全部成立并已订正:
+
+| # | 指摘 | 核实结论与订正 |
+|---|---|---|
+| 1 | §0/§6 附注称 `packages/host/directory-picker-native` 是「本轮新增」——不实 | ✅ 成立。该包 2026-07-28 `5579b13503` 创建、首见 `dsh-v0.1.0-rc.7`,`git ls-tree 5badb15009` 确认 **alpha.1 树已包含**;窗口内仅演进(实测 9 文件 +100/−42;GLM 给的 13/+117/−47 与实测有出入,以实测为准)。§0 附注、#4 行、§6 #3 行三处「本轮新增」表述已全部改写为「alpha.1 已并存,重做是重新评估取舍的时机」 |
+| 2 | §1「已吸收 0」行仍写「零命中」,与已订正的 §0 自相矛盾 | ✅ 成立。第一轮只改了 §0 方法条,漏改 §1 表格行的同一断言。已改为「有命中但不构成吸收」口径 |
+| 3 | §1 重做顺序「15 个小补丁」off-by-one | ✅ 成立。小档改为 16 后此句漏改(16/3/2=21 自洽,「15」是旧口径残迹)。已订正 |
+| 4 | §6 #1「7 个删除文件」数字错 | ✅ 成立。实测 `git diff-tree -r` 为 **14 个文件、2515 行**;初稿的 7 来自 `grep -c` 统计 `--stat` 输出——stat 对长路径缩写为 `.../` 吞掉了匹配串,是**核实方法缺陷**而非 head 截断(GLM 推测的原因不准,数字对)。已订正并注明 |
+
+**修订为何引入新错误——三条机制性原因**:
+
+1. **订正动作自身豁免了核实纪律**:§6 刚登记「新增 vs 既有」类断言必须核实,同一提交里就把 `directory-picker-native` 写成「本轮新增」——该断言来自核实 #3 时看到 grep 命中后的即兴推断,没有 `git log`/`ls-tree` 验证包的历史。教训:**订正补丁与正文适用同一核实标准,「顺手补充的观察」也要核实**。
+2. **改断言不做全文件扫尾**:同一断言(「零命中」「15 个」)在文档多处出现,第一轮只改了最先看到的一处。教训:**订正前先 `grep` 旧表述在全文的所有出现点,列清单逐处改**,而非发现一处改一处。
+3. **核实命令本身有损耗**:`grep -c` 打在被路径缩写的 `--stat` 输出上得到假计数。教训:**计数类断言用结构化输出(`diff-tree -r --name-status`)而非对展示用输出做文本匹配**。
