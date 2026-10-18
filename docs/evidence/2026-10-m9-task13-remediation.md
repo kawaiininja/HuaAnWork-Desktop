@@ -69,7 +69,7 @@ next 的三个预期修复(`package.spec` office 依赖、`plugin-detail-navigat
 - **host-process 集成测试**:原中断波次写 `compatibility.json` 键到旧 AA 版本;按 brief 先尝试直接删除该写入 —— 新 AA 的 dsh peers 直接接受 rc.1,beta 与 huaanwork 的两个用例都通过,故不再需要豁免。
 - **`verify:operations`**:删掉的一行 spec 只是同一矩阵的重复断言;`verify-operation-reliability.mjs` 现在自己断言 7 operations / 18 scenarios。实跑 exit 0(`7 operations and 18 fault contracts verified`)。
 - **Market × plugin-manager**:`tests/market-plugin-manager-integration.spec.ts` 替换 `market-pnpm-integration.spec.ts`;rc.1 的 `@deepseek-ai/dsh-plugin-manager/lib/index.js` 确有 `super(ctx, "pluginManager")`,而 `dsh-community-market/src/index.ts` 通过 `ctx.inject(['pluginManager','profileContext'])` 消费它 —— 新 spec 走的是真实当前路径。实跑 exit 0。
-- **`webRuntime`**:rc.1 安装树内 `grep -R "webRuntime" dsh-plugin-{desktop-beta,huaanwork}/node_modules/@deepseek-ai` 命中 0;子模组内唯一命中是一个测试里的局部变量 `web-runtime`。`src/index.ts` 的 inject 删除是必要的启动修复。
+- **`webRuntime`**:rc.1 安装树内 `grep -R "webRuntime" dsh-plugin-{desktop-beta,huaanwork}/node_modules/@deepseek-ai` 命中 0;子模组内唯一命中是一个测试里的局部变量 `web-runtime`。`src/index.ts` 的 inject 删除是必要的启动修复;beta/huaanwork 的 `verify-loader-boot.mjs` 也不再提供该 mock(stable 仍钉 0.2.0-rc.2,保留该行)。
 - **`tool-ralph`**:用真实 `prepareDesktopProfile` + `composeEntries` 组合 huaanwork profile,实测 210 行、无 `tool-ralph` 行(rc.1 的 ralph bundle 仍定义该行 id,但 huaanwork 的 bundle 选择不挂载它)。optional 标记正确。
 
 ## 6. 门禁记录(2026-10-18,worktree 根目录)
@@ -89,5 +89,22 @@ next 的三个预期修复(`package.spec` office 依赖、`plugin-detail-navigat
 
 - next 升 rc.1 后不再有 alpha.1 消费方,alpha.1 的 resolution/patches 只是**休眠资产**;若未来有人重新引入 alpha.1 依赖,`yarn.lock` 需要重新解析(当前 lock 无 alpha.1 包条目)。
 - huaanwork 有 40 条与 beta 的已登记分叉(**15 个文件只存在于 beta** + **25 个两侧内容分叉**;深色主题 select 与 `mac-universal.ts` 已同步,不占名额),意味着上游 2.1 的功能面尚未进入内网变体;触发条件与工作量见 `AGENTS.md` 新债行。
-- `THIRD_PARTY_NOTICES.md` 三包仍是旧的 AA/DSH 版本清单(`verify:notices` 不在任何 `check` 链里,未纳入本次范围);发版前应按新安装树重新生成。
+- `THIRD_PARTY_NOTICES.md` 已按安装树重生成(2026-10-18):stable 592 / beta 623 / huaanwork 624 production packages;stable DSH 0.2.0-rc.2,beta/huaanwork 0.2.1-rc.1;sharp 0.35.5;AA r57f6b0fe;无 alpha.5/0.35.3。`verify:notices` 仍不在任何 `check` 链里,发版前若依赖树再变需重跑。
 - AA 制品随 workspace peer 并集变化而换名(r-hash):以后再改任一 desktop 包的 dsh peer 版本,`aa:check` 会先红并提示重跑 `aa:prepare-release` —— 这是设计内行为,但需要发版流程预期一次制品更新。
+
+## 8. R-M9-R2 / notices / P3 后最终门禁(2026-10-18)
+
+- **R-M9-R2(用户裁定)**:市场重复安装判据改为「UI 禁用重复安装;底层重复 install 返回 `restart-required` / `changed=false` 且 profile 字节不变」;human doc 已勾选通过,Epic/plan/AGENTS 已同步。
+- **notices**:三包 `THIRD_PARTY_NOTICES.md` 已重生成(见 §7);`verify:notices` 未纳入 `check` 链,本次为手工生成。
+- **P3 清理**:删除 `vendor/dsh-runtime/0.2.1-alpha.2/` 与 `0.2.1-alpha.5/` 两个死 lane(675 个 vendor 文件)及 44 个未引用 `*@0.2.1-alpha.2.patch` / `*@0.2.1-alpha.5.patch`;alpha.1 休眠 lane 与 21 个 alpha.1 补丁保留。`nextResolutions`→`alpha1Resolutions`(三包测试);row-assertions 增加 ralph rename 探针;present-as 改用类型守卫;webserver 策略单测独立;beta/huaanwork 的 `webRuntime` mock 移除(stable 仍钉 0.2.0-rc.2 保留);huaanwork 两个死直接依赖移除;market cordis peer 收敛为 `"4.0.4 || 4.0.5"`。兼容性说明见处置清单 §7.1。
+
+| 命令 | 退出码 | 关键输出 |
+|---|---|---|
+| `corepack yarn install --immutable` | 0 | lock 与 manifests 一致 |
+| `corepack yarn check` | 0 | 全链绿;变体守卫 7/64/6;三通道 vendored runtime;huaanwork host loop / loader / profile / AA / licenses / operations 全过 |
+| `corepack yarn typecheck` | 0 | 七个 workspace 全绿 |
+| `corepack yarn test` | 0 | 全部 workspace 测试文件通过:desktop 143、beta 143、huaanwork 218(+3 skipped)、next 77、market 13、market-server 14、update-server 5;wrapper 4/4、update-download 目标测试 44/44 |
+| `corepack yarn check:desktop-variants` | 0 | 11/11;stable↔beta 7;beta↔huaanwork 64;oneSidedPrefixes 6 |
+| `corepack yarn check:vendored-runtime` | 0 | stable 318 / beta 341 / huaanwork 341 |
+
+未本机执行:Linux/xvfb 的 CI Electron 步骤(需 CI runner)。

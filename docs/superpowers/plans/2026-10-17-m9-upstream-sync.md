@@ -12,14 +12,16 @@
 **补丁权威依据:** `docs/evidence/2026-10-17-runtime-patches-alpha5-disposition.md`(下称「处置清单」。注意其 §5 A3 行的「-alpha.2 系」是过期口径,以 Epic 步骤⑤的 rc.1 稳定系为准)
 **评审:** GLM plan-review(`docs/superpowers/plans/2026-10-17-m9-upstream-sync-plan-review.md`)的 P1 + P2-1 已由其落盘;P2-2/3/4 与 P3 三项 nit 已于 2026-10-17 全部采纳并入本文(补丁生成改临时 git 仓 `git diff`——`--no-index` 实测会带双层前缀 `a/a/`,弃用;Task 6 不设 tgz 固定数;重放口径两套;合并提交排除证据文档、可变 install 挪到全部消解后;Epic M9-B 回滚句补 resolution 同步要求)。开工前补齐(同日):合并提交用 `git commit --no-edit`;`ci.yml` 只保住三处 `dsh-plugin-huaanwork`,不对整文件 `checkout --ours`;schemastery 用根 resolution 把 `^3.18.5-alpha.1` 钉到 `3.18.5`,`yarn install` / `yarn up` 都不做这件事。
 
+> **执行状态(2026-10-18)**:Task 1–13、15 已完成;Task 14 的四项冒烟已完成,市场重复安装按 R-M9-R2 判据通过(UI 禁用 + 底层 restart-required/changed=false + profile 字节不变);Task 16(推送/CI 对账/债表收口/worktree 清理)待执行。证据:Task 1–8 → `docs/evidence/2026-10-m9-merge-decisions.md`;Task 9–12 → `patches/` + `docs/evidence/2026-10-17-runtime-patches-alpha5-disposition.md`;Task 13–15 → `docs/evidence/2026-10-m9-task13-remediation.md`、`docs/huaanwork-m9-human-verification-2026-10-18.md`。本计划保留 60 个 step checkbox 作为原始执行清单,完成状态以本段和上述证据为准,不再逐框回填。
+
 ## Global Constraints
 
 - 子模组目标 pin = `1600d8a1e140dcde43a1a0941940a0480712c011`(dsh-v0.2.1-rc.1),**单独一个提交**,`git show --stat` 只含 gitlink 一行;合并提交带上的第一跳是上游 pin `1517a4dbca`(alpha.5),属合并提交、不拆。
 - **`deepseek-harness/` 是 pin 住的子模组,绝不编辑其中文件**;上游命令只经 root `upstream:*` 脚本。
 - Zero-touch 规则:不为 huaanwork 工作编辑 `dsh-plugin-desktop/src/` 或 `dsh-plugin-desktop-beta/src/`。
-- A1(R-M9-2):只删 beta、huaanwork 两包的 `@deepseek-ai/dsh-subagent-in-process-driver` 依赖行;desktop、next 的同名行保留。
-- A3 目标值(rc.1 稳定系,已实测):cordis `4.0.5`、group `1.0.5`、include `1.0.10`、loader `1.0.6`、timer `1.1.7`;schemastery 声明行 caret **不动**。`^3.18.5-alpha.1` 同时容纳 `3.18.5-alpha.2` 和 `3.18.5`,合并后的锁若停在 alpha.2,`yarn install` 不会把它抬上去。用根 resolution `"@deepseek-ai/schemastery@npm:^3.18.5-alpha.1": "3.18.5"` 钉死(与本仓 `koffi@npm:^3.1.0` → `3.1.5` 同形)。不要用 `yarn up`(会改 manifest 里的 range)或 `yarn up -R`(会解到该 range 的最高版本,不必是 `3.18.5`)。Next、market、beta、huaanwork 共用这个 caret,安装实例一起变成 `3.18.5`,声明行仍是 `^3.18.5-alpha.1`,不算升 Next 的钉版。desktop 的 `^3.18.4` 是另一条 descriptor,不在这条 resolution 里。**next 的 cordis 五成员与 desktop 的 4.0.4 系一律不动。** npm 上 `-alpha.2` 与稳定版并存,钉错版本安装不报错——升版后必须 `yarn why` 验证。
-- `vendor/dsh-runtime/0.2.1-alpha.1/`、21 个 `*@0.2.1-alpha.1.patch`、根 resolutions 整段 `@npm:0.2.1-alpha.1`(642 行,含 driver 2 行)是 **next 的解析通道,全程保留**。`*@0.2.0-rc.2.patch` 及更早代补丁也不动。**合并陷阱(2026-10-17 plan-review P1)**:fork 侧自 merge-base 对 beta/next/market 的 dsh/cordis/schemastery/driver 依赖行零改动而上游已改 ⇒ 三方合并 theirs-wins **静默推进**到上游 alpha.5/-alpha.2 值、driver 行被上游删除、上游新增 17 个 lane 依赖——next 的冻结通道依赖行必须在合并后显式恢复(Task 2 Step 5),否则本条、DoD 3 的 next 计数与 Task 8 的 642 行恢复理由全部失效。
+- A1(R-M9-2):立项期只删 beta、huaanwork 两包的 `@deepseek-ai/dsh-subagent-in-process-driver` 依赖行;desktop、next 的同名行保留。R-M9-R1 后 next 的 driver 行也删除(最终态 next=0)。
+- A3 目标值(rc.1 稳定系,已实测):cordis `4.0.5`、group `1.0.5`、include `1.0.10`、loader `1.0.6`、timer `1.1.7`;schemastery 声明行 caret **不动**。`^3.18.5-alpha.1` 同时容纳 `3.18.5-alpha.2` 和 `3.18.5`,合并后的锁若停在 alpha.2,`yarn install` 不会把它抬上去。用根 resolution `"@deepseek-ai/schemastery@npm:^3.18.5-alpha.1": "3.18.5"` 钉死(与本仓 `koffi@npm:^3.1.0` → `3.1.5` 同形)。不要用 `yarn up`(会改 manifest 里的 range)或 `yarn up -R`(会解到该 range 的最高版本,不必是 `3.18.5`)。Next、market、beta、huaanwork 共用这个 caret,安装实例一起变成 `3.18.5`,声明行仍是 `^3.18.5-alpha.1`,不算升 Next 的钉版。desktop 的 `^3.18.4` 是另一条 descriptor,不在这条 resolution 里。**立项期约束:next 的 cordis 五成员与 desktop 的 4.0.4 系一律不动;R-M9-R1 后 next 五成员已随 Task 13 升 rc.1 稳定系。** npm 上 `-alpha.2` 与稳定版并存,钉错版本安装不报错——升版后必须 `yarn why` 验证。
+- `vendor/dsh-runtime/0.2.1-alpha.1/`、21 个 `*@0.2.1-alpha.1.patch`、根 resolutions 整段 `@npm:0.2.1-alpha.1`(642 行,含 driver 2 行)是 **立项期 next 的解析通道;R-M9-R1 后 next 已升 rc.1,alpha.1 lane 保留休眠**。`*@0.2.0-rc.2.patch` 及更早代补丁也不动。**合并陷阱(2026-10-17 plan-review P1)**:fork 侧自 merge-base 对 beta/next/market 的 dsh/cordis/schemastery/driver 依赖行零改动而上游已改 ⇒ 三方合并 theirs-wins **静默推进**到上游 alpha.5/-alpha.2 值、driver 行被上游删除、上游新增 17 个 lane 依赖——next 的冻结通道依赖行必须在合并后显式恢复(Task 2 Step 5),否则本条、DoD 3 的 next 计数与 Task 8 的 642 行恢复理由全部失效。
 - 永久 override(`docs/upstream-sync.md` §6,8 个文件)合并时保留 fork 侧:`scripts/verify-desktop-variants.mjs`、`scripts/expected-root-gate-scripts.json`、`scripts/market-manifest-byte-budget.json`、三包 `tests/package.spec.ts`、`market-server/src/manifest-prepare.ts`、`dsh-plugin-huaanwork/tests/huaanwork-host/market-verify.spec.ts`。
 - `yarn.lock` 与根 `package.json` **不逐 hunk 三方合并**:按 `docs/upstream-sync.md` §5,取上游版为基底、重放 fork 增量、重装生成锁文件。
 - dshmarket:`dist:mac:huaanwork` 先跑 `market:prepare`;若最新 dshmarket 套不上 `.yarn/patches/dshmarket-desktop.patch`(2026-10-17 实测 latest 1.66.32/1.66.35 均 hunk #7 FAILED),用锁文件里已安装的版本出包,不提交市场版本变动,不算 M9 的红。
@@ -218,7 +220,7 @@ Expected: `git show --stat` 只有 `deepseek-harness` 一行 gitlink 变更,父�
 grep -c 'dsh-subagent-in-process-driver' dsh-plugin-desktop/package.json dsh-plugin-desktop-beta/package.json dsh-plugin-huaanwork/package.json dsh-desktop-next/package.json
 ```
 
-Expected: desktop=1、beta=0、huaanwork=0、next=1(合计 2)。
+Expected: desktop=1、beta=0、huaanwork=0、next=0(R-M9-R1 后合计 1;立项期 next=1 的口径已由 Task 13 取代)。
 
 - [ ] **Step 3: Commit**
 
@@ -256,11 +258,11 @@ git commit -m "feat(huaanwork): drop removed dsh-subagent-in-process-driver dep 
 `dsh-community-market/package.json`(market 自 merge-base 零 fork 改动 ⇒ 合并整文件 theirs-wins,**改前值是上游 alpha.5/-alpha.2 形态**,plan-review P1 订正):
 
 - cordis devDep:`"4.0.5-alpha.2"` → `"4.0.5"`
-- cordis peer:`"4.0.4 || 4.0.5-alpha.2"` → `"4.0.4 || 4.0.5-alpha.1 || 4.0.5"`
+- cordis peer:`"4.0.4 || 4.0.5-alpha.2"` → **`"4.0.4 || 4.0.5"`**(R-M9-R1 后 next 已 4.0.5;2026-10-18 P3 清理删除无消费方的 `4.0.5-alpha.1` 支)
 - schemastery peer:**恢复为 fork 值 `"^3.18.4 || ^3.18.5-alpha.1"`**(合并推进到 `^3.18.4 || ^3.18.5-alpha.2`——`^3.18.5-alpha.2` 不盖 next 的 `3.18.5-alpha.1`,必须恢复;`^3.18.4` 已含 3.18.5 稳定版,删 `-alpha.1` 支同样会破 next)
 - schemastery devDep:恢复为 `"^3.18.5-alpha.1"`(与 beta/huaanwork/next 同 caret)
 
-三支缺一不可:`4.0.4` = stable 宿主现钉,`4.0.5-alpha.1` = next 现钉(Task 2 Step 5 恢复后),`4.0.5` = beta/huaanwork 新钉;精确版本 `4.0.5-alpha.1` 不等于 `4.0.5`。market 的 dsh peers(`"0.2.0-rc.2 || 0.2.1-alpha.5"` 形态)不手改——Task 8 的 beta `--write` 会写成三支串。
+最终两支:`4.0.4` = stable 宿主现钉,`4.0.5` = beta/huaanwork/next 现钉;精确版本 `4.0.5-alpha.1` 不等于 `4.0.5`。立项期曾保留 alpha.1 支,2026-10-18 P3 清理已删除。market 的 dsh peers(`"0.2.0-rc.2 || 0.2.1-alpha.5"` 形态)不手改——Task 8 的 beta `--write` 会写成三支串。
 
 - [ ] **Step 3: 用根 resolution 把该 caret 钉到 `3.18.5`,再重装**
 
@@ -278,7 +280,7 @@ corepack yarn why @deepseek-ai/cordis
 corepack yarn why @deepseek-ai/schemastery
 ```
 
-Expected: 请求范围是 `^3.18.5-alpha.1` 的 schemastery 实例为 `3.18.5`(beta、huaanwork、next、market 的声明行仍是这个 caret,安装实例一起变成 `3.18.5`,不算升 Next 的钉版)。desktop 若仍因 `^3.18.4` 解到别的 3.18.x,不算失败。huaanwork 的 cordis 只有 `4.0.5` 一份;workspace 根上 desktop 的 `4.0.4` 与 next 的 `4.0.5-alpha.1` 继续共存,**不算失败**。**中间态注意(plan-review P1 连带)**:beta 的 dsh 依赖此间仍是合并带入的 npm alpha.5(Task 8 `--write` 才回 vendored rc.1),其传递闭包可能与新钉 `4.0.5` 并存两份 cordis——beta 侧若见两份,先记录不阻断,以 Task 8 Step 5 的终检为准;huaanwork 侧若两份则确系钉版漏改,停下排查,不继续。
+Expected: 请求范围是 `^3.18.5-alpha.1` 的 schemastery 实例为 `3.18.5`(beta、huaanwork、next、market 的声明行仍是这个 caret,安装实例一起变成 `3.18.5`,不算升 Next 的钉版)。desktop 若仍因 `^3.18.4` 解到别的 3.18.x,不算失败。huaanwork 的 cordis 只有 `4.0.5` 一份;workspace 根上 desktop 的 `4.0.4` 与 next 的 `4.0.5` 继续共存(R-M9-R1 后),**不算失败**。**中间态注意(plan-review P1 连带)**:beta 的 dsh 依赖此间仍是合并带入的 npm alpha.5(Task 8 `--write` 才回 vendored rc.1),其传递闭包可能与新钉 `4.0.5` 并存两份 cordis——beta 侧若见两份,先记录不阻断,以 Task 8 Step 5 的终检为准;huaanwork 侧若两份则确系钉版漏改,停下排查,不继续。
 
 - [ ] **Step 4: Commit**
 
@@ -419,7 +421,7 @@ corepack yarn why @deepseek-ai/schemastery
 corepack yarn typecheck 2>&1 | tail -30
 ```
 
-Expected: MERGE-OK;driver 计数 1/0/0/1(next 的 1 来自 Task 2 Step 5 的恢复行);两个 vendor 目录都在;market dsh peer 三支串计数 = 44(全部 dsh peer;plan-review P2-1:原 `grep '"@deepseek-ai/dsh@npm'` 对 market 的 package.json 匹配零行——`@npm:` 选择子只存在于根 resolutions——已订正为本命令);根 resolutions 仍有 `"@deepseek-ai/schemastery@npm:^3.18.5-alpha.1": "3.18.5"`。`yarn why` 终检:beta/huaanwork 的 cordis 为 `4.0.5`;`^3.18.5-alpha.1` 这条 schemastery descriptor 为 `3.18.5`(beta 此刻已回 vendored rc.1,Task 5 Step 3 的 cordis 中间态顾虑在此消除;desktop 另一条 `^3.18.4` 不算失败)。`typecheck` 此时**预期有失败**(rc.1 无补丁)——把失败清单完整落进 `docs/evidence/2026-10-m9-merge-decisions.md` 末尾的「M9-A fallout(交 M9-B)」节,不挡本卡;**若 next 的失败源于合并代码引用 Task 2 Step 5 移除的 17 个上游新增 lane 依赖(era mismatch),按该步的裁定路径处理,不静默放行**。
+Expected: MERGE-OK;driver 计数 1/0/0/0(R-M9-R1 后 next=0;Task 2 Step 5 的恢复仅适用于立项期);两个 vendor 目录都在;market dsh peer 三支串计数 = 44(全部 dsh peer;plan-review P2-1:原 `grep '"@deepseek-ai/dsh@npm'` 对 market 的 package.json 匹配零行——`@npm:` 选择子只存在于根 resolutions——已订正为本命令);根 resolutions 仍有 `"@deepseek-ai/schemastery@npm:^3.18.5-alpha.1": "3.18.5"`。`yarn why` 终检:beta/huaanwork 的 cordis 为 `4.0.5`;`^3.18.5-alpha.1` 这条 schemastery descriptor 为 `3.18.5`(beta 此刻已回 vendored rc.1,Task 5 Step 3 的 cordis 中间态顾虑在此消除;desktop 另一条 `^3.18.4` 不算失败)。`typecheck` 此时**预期有失败**(rc.1 无补丁)——把失败清单完整落进 `docs/evidence/2026-10-m9-merge-decisions.md` 末尾的「M9-A fallout(交 M9-B)」节,不挡本卡;**若 next 的失败源于合并代码引用 Task 2 Step 5 移除的 17 个上游新增 lane 依赖(era mismatch),按该步的裁定路径处理,不静默放行**。
 
 - [ ] **Step 6: Commit + 关闭跟踪壳**
 
@@ -628,6 +630,8 @@ git commit -m "docs(agents): register #12/#17 as permanent fork diffs; close M9-
 
 ### Task 13: 无头验证链
 
+> **Task 13.1(2026-10-18,R-M9-R1)**:`dsh-desktop-next` 随合并源码升 `0.2.1-rc.1`,AA 桥重建、Task 13 remediation 与四条无头命令复跑记录见 `docs/evidence/2026-10-m9-task13-remediation.md`。这是 Task 13 的扩展范围,不是原 Step 1 的替代。
+
 - [ ] **Step 1: 四条命令全绿并留证据**
 
 ```bash
@@ -649,9 +653,9 @@ Expected: 全绿;每条的命令原文 + 退出码 + 关键输出记入收口记
 
 按 M4 基线文档(`docs/huaanwork-m4-human-verification-2026-10-07.md`)对应条目重跑;结论 + 证据落新文档。
 
-- [ ] **Step 2: 市场重复安装 → `already-installed` 报错语义**
+- [ ] **Step 2: 市场重复安装(R-M9-R2 判据)**
 
-同上;确认语义是改后的 `already-installed` 而非旧行为。
+按 R-M9-R2:UI 禁用重复安装;底层重复 install 返回 `restart-required` / `changed=false` 且 profile 字节不变。原 `already-installed` 判据在 hmr 锁下结构性不可达。
 
 - [ ] **Step 3: 迁移幂等 × rc.1 persistence 新增 7 项(逐条销号)**
 

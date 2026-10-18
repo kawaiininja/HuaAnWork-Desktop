@@ -103,12 +103,12 @@ git fetch upstream --tags
 
 1. **`scripts/verify-desktop-variants.mjs`**：
    - 上游已将该文件缩减至 36 行、`allowedDifferences` 仅剩 1 项并引入 `normalizeIdentity`；
-   - M8 Phase 3（R-M8-3，Task 3.1）重塑之后，fork 仍整体保留本文件。它仍是本清单第 1 条永久 override。差异清单不再是「22/6 与 19/0」预算：身份拼法由规范化吸收，结构性清单为 stable↔beta 9 项、beta↔huaanwork 22 项、只存在于 right 的前缀 6 项。计数与理由见 `AGENTS.md` 债表变体守卫行。
+   - M8 Phase 3（R-M8-3，Task 3.1）重塑之后，fork 仍整体保留本文件。它仍是本清单第 1 条永久 override。差异清单不再是「22/6 与 19/0」预算：身份拼法由规范化吸收，结构性清单为 stable↔beta 7 项、beta↔huaanwork 64 项、只存在于 right 的前缀 6 项(M9 后计数,以 AGENTS 债表为准)。计数与理由见 `AGENTS.md` 债表变体守卫行。
 2. **`scripts/expected-root-gate-scripts.json`**：
    - 纯 fork 自有的根门禁脚本逐字锁定 fixture（`fixtureVersion: 2`），上游无此文件。
 3. **`scripts/market-manifest-byte-budget.json`**：
    - Task 4.1 引入的跨包清单字节上限配置，作为单源真相维护。
-4. **跨边界读取 gate fixture 的 4 处测试与实现文件**：
+4. **跨边界读取 gate fixture 的 5 处测试与实现文件**：
    - `dsh-plugin-desktop/tests/package.spec.ts`
    - `dsh-plugin-desktop-beta/tests/package.spec.ts`
    - `dsh-plugin-huaanwork/tests/package.spec.ts`
@@ -287,6 +287,6 @@ upstream-sync-dashboard: as-of 2026-10-09T00:56:21.062Z / upstream commit 2026-1
 - `git rev-list --count HEAD..upstream/master` = 0。
 - `git rev-list --count upstream/master..HEAD` = 283。
 
-Phase 3 重塑之后，变体守卫 `scripts/verify-desktop-variants.mjs` 仍是 §6 第 1 条永久 override。Phase 0 快照的 permanentOverride 命中里已经有这个文件，和「仍是第 1 条」一致。重塑后的结构性计数（stable↔beta 9、beta↔huaanwork 22、前缀 6）写在 §6 第 1 条，不要把上文的 22+19 分母当成当前清单规模。
+Phase 3 重塑之后，变体守卫 `scripts/verify-desktop-variants.mjs` 仍是 §6 第 1 条永久 override。Phase 0 快照的 permanentOverride 命中里已经有这个文件，和「仍是第 1 条」一致。重塑后的结构性计数（stable↔beta 7、beta↔huaanwork 64、前缀 6;M9 后以 AGENTS 债表为准）写在 §6 第 1 条，不要把上文的 22+19 分母当成当前清单规模。
 
 本地实施至 Phase 5 在本分支完成。推送与 CI 对账是 Phase 6，尚未进行。本注不声明上游同步已推送。

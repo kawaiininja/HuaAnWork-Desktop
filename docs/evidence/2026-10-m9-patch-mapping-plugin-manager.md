@@ -48,8 +48,8 @@
 2. **包过滤模型变更 (`optional` → `official`)**：
    - alpha.1 中以 `pkg.optional` 区分官方可选插件与安装插件：`mine = listed.filter(pkg => pkg.installed || !pkg.optional)`，`official = listed.filter(pkg => pkg.optional && !pkg.installed)`。
    - rc.1 中上游统合为 `pkg.official`：`mine = listed.filter(pkg => !pkg.official)`，`official = listed.filter(pkg => pkg.official)`。
-3. **卡片分组重构 (`basicCards` / `extensionsCards` / `moreCards`)**：
-   - rc.1 对 Installed 面板中的卡片进行两段式呈现：`basicCards`（承载 `ledger.items`）与 `extensionsCards`（承载已安装扩展），而在 More 面板呈现 `moreCards`（承载 `orderOptionalBundles(official)`）。
+3. **卡片分组重构 (`basicCards` / `extensions` / `more`)**：
+   - rc.1 的实际局部变量是 `basicCards`（承载 `ledger.items`）、`mine`、`extensions = ordered.filter(pinned)` 与 `more = ordered`，由 `renderGroup(...)` 消费。`showsCards` 在 rc.1 仍存在（用于主列表显示）；不存在 `extensionsCards`/`moreCards` 这两个变量。补丁映射以实际变量链为准。
 4. **页面头部与拖拽重排**：
    - 页面头部样式类重构为 `pageHeading` / `pageHead`，引入原生拖拽属性 `data-window-drag`。
 

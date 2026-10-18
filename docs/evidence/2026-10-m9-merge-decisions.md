@@ -18,6 +18,7 @@
   - 目标 rc.1 pin（Task 3 单独提交）：`1517a4dbca` → `1600d8a1e14`（`dsh-v0.2.1-rc.1`）
 - **合并提交 SHA**：`78efd755aa`
 - **Next 依赖通道恢复提交 SHA**：`e95c3ef912`
+- **合并提交中间态**：`78efd755aa` 的 `upstream.json` 中 huaanwork 仍指 alpha.1（beta 已是 alpha.5），后续 `bb80bcc8e3` 才统一到 rc.1；最终态无影响，记录在此以免误读。
 
 ---
 
@@ -27,8 +28,8 @@
 
 | # | 冲突文件 | 冲突主题 / Hunk | HEAD (Fork) 写法 | 44084bdae0 (Upstream) 写法 | 取舍 | 决策理由与处置细节 |
 |---|---|---|---|---|---|---|
-| 1 | `dsh-desktop-next/scripts/verify-sidebar-browser.mjs` | sidebar-browser 退出与异常守卫 | 监听 `render-process-gone`，注释 Production 传递 attachGuest，`guests.bind(window, () => () => {})` | 进程级捕获 `child-process-gone` 与 `uncaughtException` 并记日志退出，同为 `guests.bind(window, () => () => {})` | `theirs` (上游) | 平凡冲突。上游吸收了 PR #1 根因修复（空回调避免访客 dom-ready 抛未捕获 TypeError），且补充了进程级异常与子进程退出兜底，完全覆盖 fork 需求。 |
-| 2 | `.github/workflows/ci.yml` (Hunk 1) | Next 验证步骤组织 | 串行执行 `verify:window-controls`、`verify:onboarding`、`verify:protocol`、`verify:sidebar-browser` 及独立日志上传 | 使用 `scripts/run-parallel.mjs` 并行执行上述 4 项验证，统一管理子进程 | `theirs` (上游) | 并行化脚本结构更紧凑，显著缩短 CI 运行时间，xvfb 环境参数均已正确配置。 |
+| 1 | `dsh-desktop-next/scripts/verify-sidebar-browser.mjs` | sidebar-browser 退出与异常守卫 | 监听 `render-process-gone`，注释 Production 传递 attachGuest，`guests.bind(window, () => () => {})` | 只有 `uncaughtException` 兜底;fork 的 `child-process-gone`/`render-process-gone`/window-level `render-process-gone`/`process.on('exit')` 诊断在合并时被覆盖丢失 | `theirs` (上游) | 平凡冲突。上游吸收了 PR #1 根因修复（空回调避免访客 dom-ready 抛未捕获 TypeError），但没有补充 fork 的进程级诊断；2026-10-18 已把 fork 诊断恢复到上游脚本。 |
+| 2 | `.github/workflows/ci.yml` (Hunk 1) | Next 验证步骤组织 | 串行执行 `verify:window-controls`、`verify:onboarding`、`verify:protocol`、`verify:sidebar-browser` 及独立日志上传 | 使用 `scripts/run-parallel.mjs` 并行执行上述 4 项验证，统一管理子进程 | `theirs` (上游) | 并行化脚本结构更紧凑，显著缩短 CI 运行时间，xvfb 环境参数均已正确配置。**但合并同时丢失了 fork 的 120s timeout、5min step timeout、ELECTRON_ENABLE_LOGGING 与日志 artifact；2026-10-18 已在保留并行化的前提下恢复。** |
 | 3 | `.github/workflows/ci.yml` (Hunk 2) | `desktop-windows` 构建矩阵 | `workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]` | `workspace: ${{ github.event_name == 'pull_request' && fromJSON('["dsh-plugin-desktop-beta"]') \|\| fromJSON('["dsh-plugin-desktop", "dsh-plugin-desktop-beta"]') }}` | `ours` (保留 fork 三格) | **严防静默脱落**：上游无 huaanwork 变体；若采上游选择子会让 huaanwork 从 Windows 发版/冒烟矩阵中消失而 CI 仍虚假全绿。 |
 | 4 | `.github/workflows/ci.yml` (Hunk 3) | `desktop-macos` 构建矩阵 | `workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]` | 同 Hunk 2，上游仅含 desktop / beta | `ours` (保留 fork 三格) | 同 Hunk 2，保留 huaanwork 在 macOS 产物打包与冒烟测试中的席位。 |
 | 5 | `.gitignore` | 忽略规则新增 | 包含 `.worktrees/`、`market-server/keys/`（M5 离线签名私钥）、`WindowsApp/` | 包含 `dsh-desktop-next/.desktop-build/`、`dsh-plugin-desktop/.desktop-build/`、`dsh-plugin-desktop-beta/.desktop-build/` | `union` (并集) | 规则不互斥，合并双方条目，兼顾上游构建临时目录忽略与内网市场私钥防泄漏安全门禁。 |
@@ -101,9 +102,9 @@
      - `dsh-plugin-desktop`: 1（stable 维持 0.2.0-rc.2）
      - `dsh-plugin-desktop-beta`: 0（上游 0.2.1-rc.1 已清理）
      - `dsh-plugin-huaanwork`: 0（Task 5/6 裁定 R-M9-2 清理）
-     - `dsh-desktop-next`: 1（维持冻结 alpha.1 通道）
+     - `dsh-desktop-next`: 0（R-M9-R1 后 next 升 rc.1；alpha.1 lane 休眠）
 4. **Vendored Runtime 存续**：
-   - `vendor/dsh-runtime/0.2.1-alpha.1/manifest.json`：存在（Next 独立通道）
+   - `vendor/dsh-runtime/0.2.1-alpha.1/manifest.json`：存在（休眠 alpha.1 通道；R-M9-R1 后无消费方）
    - `vendor/dsh-runtime/0.2.1-rc.1/manifest.json`：成功创建并打包 341 个 tarballs
 5. **Market DSH peer 范围**：
    - `grep -c '"0\.2\.0-rc\.2 || 0\.2\.1-rc\.1 || 0\.2\.1-alpha\.1"' dsh-community-market/package.json` 返回 44 处匹配，覆盖所有 44 个 DSH peer 依赖。
@@ -113,7 +114,7 @@
      - `beta 341 packages from 1600d8a1e1 are verified`
      - `huaanwork 341 packages from 1600d8a1e1 are verified`
 7. **Resolutions 完好性**：
-   - alpha.1 对应的 642 条 resolutions 全部放回，确保 Next 依赖解析不受影响。
+   - alpha.1 对应的 642 条 resolutions 全部放回，作为休眠 lane 保留；R-M9-R1 后 next 不再消费。
    - `@deepseek-ai/schemastery@npm:^3.18.5-alpha.1: 3.18.5` 保持在位。
 
 ---
@@ -130,7 +131,7 @@
 | `dsh-plugin-desktop-beta` | 0 | 通过 (0 errors) | 21/21 补丁重基线（Task 9–11），slots 与 onboarding 类型漂移完全消除 |
 | `dsh-plugin-huaanwork` | 0 | 通过 (0 errors) | Task 10 核心补丁消解 profile-context；Task 12 对齐 beta 消解 9 处 API 漂移 + skipLibCheck 与测试钉，完全通过 |
 | `dsh-community-market` | 0 | 通过 (0 errors) | 自身类型检查通过（编译后输出 contracts d.ts） |
-| `dsh-desktop-next` | 2 | 观察项 (已登记) | R-M8-2 / P1 冻结通道：next 运行于 alpha.1 runtime，upstream 引入的 packaging 脚本与 alpha.1 存在 era-mismatch，按裁定 R-M8-2 维持观察状态，不挡 M9 桌面收口 |
+| `dsh-desktop-next` | 0 | 通过（R-M9-R1 后） | R-M9-R1：next 已升 rc.1；Task 13 remediation 后 typecheck exit 0。原记录 2 为立项期冻结通道观察，保留为历史 |
 | `market-server` | 0 | 通过 (0 errors) | 依赖 `dsh-community-market` build 产物，契约类型对齐后全绿 |
 | `update-server` | 0 | 通过 (0 errors) | 独立服务，全绿 |
 

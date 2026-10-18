@@ -121,3 +121,42 @@ GLM 复审发现**第一轮订正提交本身又引入 4 处错误**,核实后�
 ### 第三轮(GLM 三审订正,2026-10-17)
 
 一处口径误记:二轮 #1 行曾把 GLM 复审给出的 13/+117/−47 记为「与实测有出入,以实测为准」——实测该数字是 host+client 两包合计口径(客户端包 `packages/client/ui-directory-picker-native` 单独为 4 文件 +17/−5),与 host 单包 9 文件 +100/−42 **同为实测、仅口径不同,并非数字错误**。已订正两处(按二轮教训 #2 先 `grep` 全文出现点,共两处,均已改):§0 附注与二轮 #1 行均改为双口径并列;§0 并注明客户端包是上游原生选择器的 UI 半边、对 #4 的 bridge vs 原生取舍评估同样相关。教训(与上方三条机制性原因并列):**转述他人测量先核对其口径,口径差 ≠ 数字错**。
+
+---
+
+## 7. rc.1 重打完成签收(2026-10-18)
+
+> 本表是 M9-B 的逐行销号。21/21 rc.1 补丁均由补丁审计在 rc.1 tgz 上 `patch -p1 --dry-run` 通过(0 fuzz/0 offset);21 个 alpha.1 补丁保留未动;根 `package.json` 两套 resolution 各 21 个唯一补丁路径。
+
+| # | 补丁 | 文件 | hunk | dry-run | 重点 |
+|---|---|---|---|---|---|
+| 1 | `dsh-app-boot@0.2.1-rc.1.patch` | 2 | 3 | 0 fuzz/0 offset | readProfilePatches 顶部早退 |
+| 2 | `dsh-client-modules@0.2.1-rc.1.patch` | 1 | 1 | 0 fuzz/0 offset | Node/browser 双构建 |
+| 3 | `dsh-client-ui-conversation@0.2.1-rc.1.patch` | 1 | 2 | 0 fuzz/0 offset | 按处置清单逐条核对 |
+| 4 | `dsh-client-ui-directory-picker-browse@0.2.1-rc.1.patch` | 3 | 13 | 0 fuzz/0 offset | bridge 保留(R-M9-3) |
+| 5 | `dsh-client-ui-plugin-manager@0.2.1-rc.1.patch` | 4 | 21 | 0 fuzz/0 offset | more/official 过滤链 + 5 slots |
+| 6 | `dsh-client-ui-primitives@0.2.1-rc.1.patch` | 1 | 1 | 0 fuzz/0 offset | 按处置清单逐条核对 |
+| 7 | `dsh-client-ui-settings-account@0.2.1-rc.1.patch` | 2 | 7 | 0 fuzz/0 offset | 锚点搬迁 + ctx 闭包 |
+| 8 | `dsh-client-ui-settings-general@0.2.1-rc.1.patch` | 1 | 2 | 0 fuzz/0 offset | 按处置清单逐条核对 |
+| 9 | `dsh-client-ui-settings-shell@0.2.1-rc.1.patch` | 1 | 2 | 0 fuzz/0 offset | order: 40 基底 |
+| 10 | `dsh-client-ui-sidebar@0.2.1-rc.1.patch` | 1 | 1 | 0 fuzz/0 offset | 按处置清单逐条核对 |
+| 11 | `dsh-experimental-computer-use-cua-driver-native@0.2.1-rc.1.patch` | 1 | 2 | 0 fuzz/0 offset | 按处置清单逐条核对 |
+| 12 | `dsh-hmr@0.2.1-rc.1.patch` | 1 | 3 | 0 fuzz/0 offset | hasEsmCache/mainJob 空值守卫 + internal 类型放宽 |
+| 13 | `dsh-host-directory-picker-browse@0.2.1-rc.1.patch` | 1 | 1 | 0 fuzz/0 offset | abort 重抛保留 |
+| 14 | `dsh-host-open-in-app@0.2.1-rc.1.patch` | 2 | 2 | 0 fuzz/0 offset | 仅 resolver.ts;env spread 顺序 |
+| 15 | `dsh-plugin-manager@0.2.1-rc.1.patch` | 1 | 2 | 0 fuzz/0 offset | 按处置清单逐条核对 |
+| 16 | `dsh-plugin-package-inventory-deepseek@0.2.1-rc.1.patch` | 1 | 1 | 0 fuzz/0 offset | 按处置清单逐条核对 |
+| 17 | `dsh-ptc-runtime-node@0.2.1-rc.1.patch` | 1 | 2 | 0 fuzz/0 offset | index.ts / persistent.ts 两现场 |
+| 18 | `dsh-sandbox-windows-acl@0.2.1-rc.1.patch` | 1 | 1 | 0 fuzz/0 offset | #17 永久 fork 差 |
+| 19 | `dsh-subprocess-local@0.2.1-rc.1.patch` | 1 | 1 | 0 fuzz/0 offset | 按处置清单逐条核对 |
+| 20 | `dsh-web-app@0.2.1-rc.1.patch` | 1 | 2 | 0 fuzz/0 offset | 按处置清单逐条核对 |
+| 21 | `dsh@0.2.1-rc.1.patch` | 3 | 3 | 0 fuzz/0 offset | readonly readPatches + 条件展开 |
+
+**计数核对**:文件合计 31、hunk 合计 73,与补丁审计表一致;`dsh-client-ui-plugin-manager` 的 23→21 是两个 EOF newline hunk(`config-ledger.d.ts` / `slot-contract.d.ts`)被 rc.1 已带换行吸收,`lib/client.js` 仍为 16 hunk,不是行为丢失。
+
+### 7.1 兼容性说明(2026-10-18)
+
+- 3 个补丁锚定 rc.1 tarball 的 hash 文件名(`dsh@…` → `lib/profile-boot-C14i-8IN.js`、`dsh-sandbox-windows-acl@…` → `lib/types-Cl_DXjhk.js`、`dsh-subprocess-local@…` → `lib/runner-launch-B2zsQ1Dz.js`)。重新 vendoring 同版本时必须重新推导文件名,不能盲复用。
+- `dsh-experimental-computer-use-cua-driver-native` 补丁在 beta/huaanwork 没有 `desktopPermissions` 生产者,实际 inert;上游 prompt 回退保留。
+- `dsh-client-ui-settings-account` 的 `sourceMappingURL` 之后追加声明的形状沿用 alpha.1,不是本轮缺陷。
+- 44 个未引用的 `*@0.2.1-alpha.2.patch` / `*@0.2.1-alpha.5.patch` 与 `vendor/dsh-runtime/0.2.1-alpha.2/`、`0.2.1-alpha.5/` 两个死 lane 已于 2026-10-18 删除。
