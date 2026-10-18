@@ -97,6 +97,12 @@ M9-A ──> M9-B ──> M9-C
 9. 新制品 A1–A19 重跑记录落盘(本机、人机混合);A10 单独裁决,结论写入债表托盘行
 10. R-M9-4 遵守:全程未先修 A10
 
+> **执行订正 2026-10-18(用户裁定 R-M9-R1)**:`dsh-desktop-next` 随合并带入的上游源码(alpha.5/rc.1 时代)升级到 `0.2.1-rc.1`,DoD 3 与 DoD 5 的口径随之订正;原文保留为立项期口径,不静默改写。
+> - **DoD 3 现为**:driver 依赖行计数 desktop=1、beta=0、huaanwork=0、next=0(**合计 1**);根 resolutions 仍同时含 `@npm:0.2.0-rc.2`(stable)、`@npm:0.2.1-rc.1`(beta/huaanwork/next)与整段 `@npm:0.2.1-alpha.1`(休眠)。
+> - **DoD 5 现为**:next 的 cordis 五成员 = rc.1 稳定系(`4.0.5` / `1.0.5` / `1.0.10` / `1.0.6` / `1.1.7`),dsh 依赖 = `0.2.1-rc.1`,schemastery 声明行 = `^3.18.5-alpha.1`(与 beta/huaanwork 同 lane);beta/huaanwork 与 desktop 条款不变;market peer 不变。
+> - **alpha.1 lane 有意休眠**:`vendor/dsh-runtime/0.2.1-alpha.1/`、21 个 `*@0.2.1-alpha.1.patch` 与根 resolutions 的整段 alpha.1 行**原样保留**。next 离开 alpha.1 后无消费方,`yarn.lock` 的 alpha.1 解析条目由 yarn 自然剪除(market 的 dsh peer 三支串仍含 alpha.1,故 lock 内仍有该字符串);这是休眠而非删除。
+> - **理由**:合并带入的 next 源码是 alpha.5/rc.1 时代,冻结依赖使 next 的 `typecheck`/`test` 结构性无法转绿(实测 114 tsc errors、5 test failures、`host-office.spec` 无法加载);把 next 整体回退 pre-merge 仍会对 rc.1 beta 报 typecheck 错(实测)。用户 2026-10-18 批准按本文 era-mismatch 条款「accept deps follow upstream + sync DoD 3/5」升级 next,M9 范围相应包含 next 的 rc.1 升级(Task 13)。此订正同步写入 `docs/superpowers/plans/2026-10-17-m9-upstream-sync.md` Task 2 Step 5。
+
 ## Rules for the implementing agent
 
 1. Acceptance criteria are the `protects / fails_when / no_claim` profile of each test: the observable it protects, the wrong result it rejects, and what green does not prove. Never "make the tests pass".

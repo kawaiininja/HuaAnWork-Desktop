@@ -153,6 +153,8 @@ corepack yarn install
 
 Expected: `restored 162`(dependencies 159 含 driver 恢复 + devDependencies 3);`removed upstream-added: 17`——17 条清单落合并记录文档。install 后 next 的树回到纯 alpha.1 vendored+patched。**era-mismatch 裁定路径**:若后续 typecheck(Task 8 Step 5 的 fallout 清单)爆出合并代码引用这 17 个被移除的依赖,停下裁定「next 相关源码也回退 fork 侧」或「接受该依赖随上游(须同步改 DoD 3/5 与本步)」,不静默放行。
 
+> **执行订正 2026-10-18(用户裁定 R-M9-R1)**:本步对 next 的「严格冻结 alpha.1」已被 Task 13 取代。合并带入的 next 源码是 alpha.5/rc.1 时代,冻结通道使 next 的 `typecheck`/`test` 结构性无法转绿(实测 114 tsc errors、5 test failures、`host-office.spec` 无法加载),且回退 pre-merge 仍会对 rc.1 beta 报 typecheck 错。按本 Epic 的 era-mismatch 条款「accept deps follow upstream + sync DoD 3/5」并经用户 2026-10-18 批准,next 升级到 `0.2.1-rc.1`(**Task 13 范围**)。本步脚本与 2026-10-17 的执行记录保留为历史,不得再对 next 执行;`vendor/dsh-runtime/0.2.1-alpha.1/`、21 个 `*@0.2.1-alpha.1.patch` 与根 resolutions 的 alpha.1 段仍原样保留(休眠)。
+
 ```bash
 git add dsh-desktop-next/package.json yarn.lock
 git commit -m "chore(next): restore frozen alpha.1 dependency lane after upstream merge (plan-review P1)"
