@@ -1,19 +1,31 @@
 /** Real Electron guests against pages with anti-framing headers; Linux Xvfb only, never opens the user's desktop. */
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { app, BrowserWindow } from 'electron'
 import { DesktopBrowserGuests } from '../lib/browser-guests.js'
 
+function logProcessEvent(kind, details) {
+  writeSync(2, `Native Browser ${kind}: ${JSON.stringify(details)}\n`)
+}
+
+// These fire for the browser process and its guests. An uncaught throw inside
+// a guest event (see bind() below) stops the JS loop without exiting, so the
+// deadline never runs; log that path instead of wedging.
+app.on('child-process-gone', (_event, details) => logProcessEvent('child-process-gone', details))
+app.on('render-process-gone', (_event, _contents, details) => logProcessEvent('render-process-gone', details))
+process.on('exit', code => { writeSync(2, `Native Browser process exit: code=${code}\n`) })
+process.on('uncaughtException', error => {
+  writeSync(2, `Native Browser uncaught exception: ${error?.stack ?? error}\n`)
+  app.exit(1)
+})
+
 if (process.platform !== 'linux' || !process.env.DISPLAY) {
   console.error('Run this native Browser check on Linux under xvfb-run; portable checks do not start Electron.')
   app.exit(1)
-} else {
-  process.on('uncaughtException', error => { console.error(error); app.exit(1) })
-  void verify()
-}
+} else { void verify() }
 
 async function verify() {
   const home = mkdtempSync(join(tmpdir(), 'dsh-native-browser-'))
@@ -30,7 +42,7 @@ async function verify() {
   })
   let window
   let code = 0
-  const deadline = setTimeout(() => { console.error('Native Browser check timed out'); app.exit(1) }, 45_000)
+  const deadline = setTimeout(() => { writeSync(2, 'Native Browser check timed out\n'); app.exit(1) }, 45_000)
   try {
     await app.whenReady()
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -39,6 +51,9 @@ async function verify() {
     const guests = new DesktopBrowserGuests(() => [`http://127.0.0.1:${server.address().port + 1}`])
     window = new BrowserWindow({ show: false,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, webviewTag: true } })
+    window.webContents.on('render-process-gone', (_event, details) => logProcessEvent('window render-process-gone', details))
+    // Production passes attachGuest. Omitting it throws inside the guest
+    // dom-ready handler and freezes this process without an exit status.
     guests.bind(window, () => () => {})
     await window.webContents.session.cookies.set({ url: origin, name: 'app-secret', value: 'app-only' })
     await window.loadURL(`${origin}/embed`)
