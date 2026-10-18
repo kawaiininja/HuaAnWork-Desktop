@@ -209,10 +209,6 @@ export const PAIRS = [
       'scripts/generate-windows-app-icon.mjs',
       // M9: Upstream 2.1 features (Context menu, Developer logging, Plugin packages, Office runtime)
       // active in desktop-beta but not incorporated into huaanwork.
-      // The dark-theme <select> option fill is an upstream 2.1 UI fix parked out of M9
-      // (see .superpowers/sdd/2026-10-17-m9-upstream-sync/parked-desktop-settings-select.patch),
-      // so this file stays divergent until a UI wave ports it.
-      'src/client/desktop-settings-styles.ts',
       'src/client/ui-diagnostics.ts',
       'src/compatibility-shell.ts',
       'src/context-menu.ts',
