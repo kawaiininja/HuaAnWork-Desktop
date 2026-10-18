@@ -1,8 +1,8 @@
 # 2026-10 M9 补丁映射与移植记录 — dsh-client-ui-settings-account
 
-> **工件性质**：Task 9 交付物（补丁移植与架构对账证据）  
-> **目标包**：`@deepseek-ai/dsh-client-ui-settings-account@0.2.1-rc.1`  
-> **补丁产物**：`patches/dsh-client-ui-settings-account@0.2.1-rc.1.patch`  
+> **工件性质**：Task 9 交付物（补丁移植与架构对账证据）<br>
+> **目标包**：`@deepseek-ai/dsh-client-ui-settings-account@0.2.1-rc.1`<br>
+> **补丁产物**：`patches/dsh-client-ui-settings-account@0.2.1-rc.1.patch`<br>
 > **旧基线补丁**：`patches/dsh-client-ui-settings-account@0.2.1-alpha.1.patch`
 
 ---

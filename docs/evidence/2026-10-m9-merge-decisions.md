@@ -156,4 +156,3 @@
 
 #### 3. `dsh-desktop-next`（按裁定转移 / 观察）
 - 依据 R-M8-2 及 Epic 规定，Next 处于冻结观察通道，不属于 M9 升级范围。其 packaging era-mismatch 记录在案，待后续 Next 启动 release qualification 时统一重估。
-
