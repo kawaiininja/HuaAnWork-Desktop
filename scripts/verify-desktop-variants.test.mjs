@@ -295,7 +295,7 @@ test('no allowedDifferences entry is commented out in either pair', () => {
   assert.deepStrictEqual(offenders, [], `commented-out whitelist entries found:\n- ${offenders.join('\n- ')}`)
 })
 
-test('pins the stable↔beta baseline and enforces its one-sided scripts (M6 blindspot)', () => {
+test('pins the stable↔beta baseline and its divergent runtime scripts (M6 blindspot)', () => {
   const pair = PAIRS.find(candidate => candidate.name === 'stable↔beta')
   assert.ok(pair, 'the stable↔beta pair must exist')
   assert.deepStrictEqual(pair.dirs, ['src', 'scripts'])

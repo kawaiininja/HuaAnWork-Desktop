@@ -156,3 +156,4 @@
 
 #### 3. `dsh-desktop-next`（按裁定转移 / 观察）
 - 依据 R-M8-2 及 Epic 规定，Next 处于冻结观察通道，不属于 M9 升级范围。其 packaging era-mismatch 记录在案，待后续 Next 启动 release qualification 时统一重估。
+- **执行订正 2026-10-18（用户裁定 R-M9-R1）**：本句「不属于 M9 升级范围」已被取代——`dsh-desktop-next` 随合并带入的上游源码升级到 `0.2.1-rc.1`，属于 Task 13 范围；原文保留为当时的记录。依据见 Epic 的「执行订正 2026-10-18」段（`docs/superpowers/specs/2026-10-17-m9-upstream-sync-epic.md`，DoD 3/5 同步订正）与计划的 Task 2 Step 5 订正（`docs/superpowers/plans/2026-10-17-m9-upstream-sync.md`）。

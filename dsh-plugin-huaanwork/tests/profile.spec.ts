@@ -1281,6 +1281,7 @@ virtualStoreDirMaxLength: 60
     ]) {
       expect(rows.get(id)?.disabled).toBe(true)
     }
+    // Backstop: HUAANWORK_ROW_ASSERTIONS marks tool-ralph optional, so row-assertions.ts skips it when absent; mirror that semantics here.
     if (rows.has('tool-ralph')) {
       expect(rows.get('tool-ralph')?.disabled).toBe(true)
     }

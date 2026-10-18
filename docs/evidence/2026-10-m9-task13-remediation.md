@@ -63,7 +63,7 @@ next 的三个预期修复(`package.spec` office 依赖、`plugin-detail-navigat
 
 - **huaanwork rc.1 依赖 parity**:177 条 lane 值,与 beta 逐条一致(本记录以两包 `dependencies`/`devDependencies` 的 dsh/cordis/schemastery 并集比对)。保留。
 - **package/behavior 测试更新**:dshmarket 1.66.28、beta `2.0.17-beta.2`、primary-runtime(`prepare:runtime`/`extraResources`/`signIgnore`)、rc.1 PTC `launch` 形状、request-inventory 由 reject 改 warning、通知文案读 `DESKTOP_PRODUCT_NAME`、`tool-ralph` optional。对应 workspace 测试全绿。
-- **变体守卫**:stable↔beta 9→7(上游剪掉 6 个 NSIS A/B 脚本;4 个 runtime 脚本两侧分化);beta↔huaanwork 24→**65** = 24 既有 + 41 上游 2.1 新文件。41 个新文件是「上游 2.1 功能未搬进 huaanwork」的登记债,不是 parity;类别见 `AGENTS.md` 新债行。上游 2.1 的深色主题 `<select>` 修复已同步到 huaanwork(`desktop-settings-styles.ts` 与 beta 逐字节相同),不占名额。守卫与 `verify-desktop-variants.test.mjs` 的计数钉同步(65/6),`corepack yarn check:desktop-variants` exit 0。
+- **变体守卫**:stable↔beta 9→7(上游剪掉 6 个 NSIS A/B 脚本;4 个 runtime 脚本两侧分化);beta↔huaanwork 24→**65** = 24 既有 + 41 上游 2.1 新登记。41 条新登记的实测形状(2026-10-18 复核):**15 个文件只存在于 beta**、**26 个两侧都存在但内容分叉**(上游 2.1 developer-logging / file-path-bridge 功能未搬);未来对齐 wave 必须新增 15 + 合并 26,不是「加 41 个文件」。这是「上游 2.1 功能未搬进 huaanwork」的登记债,不是 parity;类别见 `AGENTS.md` 新债行。上游 2.1 的深色主题 `<select>` 修复已同步到 huaanwork(`desktop-settings-styles.ts` 与 beta 逐字节相同),不占名额。守卫与 `verify-desktop-variants.test.mjs` 的计数钉同步(65/6),`corepack yarn check:desktop-variants` exit 0。
 - **空白**:mapping 文档的行尾两空格改为 `<br>`,`merge-decisions.md` 去掉 EOF 空行,`market-toggle.ts` 去掉 3 行 EOF 空行;`git diff --check` exit 0,提交后 `check:whitespace` exit 0。
 - **深色主题 `<select>` 修复**:早先中断波次把它当作停放项;复核发现它正是 beta 已含的上游 2.1 UI 修复(`desktop-settings-styles.ts` 两版只差这 6 行)。按「上游变更应同步进变体」处理:应用到 huaanwork,两文件逐字节相同,不占白名单名额;`parked-desktop-settings-select.patch` 已应用,不再保留为债务。
 - **host-process 集成测试**:原中断波次写 `compatibility.json` 键到旧 AA 版本;按 brief 先尝试直接删除该写入 —— 新 AA 的 dsh peers 直接接受 rc.1,beta 与 huaanwork 的两个用例都通过,故不再需要豁免。
@@ -78,7 +78,7 @@ next 的三个预期修复(`package.spec` office 依赖、`plugin-detail-navigat
 |---|---|---|
 | `corepack yarn install --immutable` | 0 | Done with warnings(既有 peer 警告) |
 | `corepack yarn typecheck` | 0 | 七个 workspace 全绿(next 真实 `tsc --noEmit` + packaging) |
-| `corepack yarn test` | 1 | 唯一失败:`dsh-plugin-huaanwork/tests/huaanwork-host/automation-scheduler.spec.ts > cross-root due stays due and a deleted project still runs`(`poll timed out after 4000ms`,全量并发负载下);其余 2595 passed / 13 skipped。**隔离复跑该文件 12/12 passed(6.9s)** ⇒ 负载型 flake,非代码回归;未改测试。 |
+| `corepack yarn test` | 1(首跑)→ 0(最终树复跑) | **首跑**:唯一失败 `dsh-plugin-huaanwork/tests/huaanwork-host/automation-scheduler.spec.ts > cross-root due stays due and a deleted project still runs`(`poll timed out after 4000ms`,全量并发负载下);其余 2595 passed / 13 skipped。隔离复跑该文件 12/12 passed(6.9s)⇒ 负载型 flake,非代码回归;未改测试。**最终树全量复跑**:exit 0,全部 workspace 绿,该超时未复现。 |
 | `corepack yarn check` | 0 | 全链绿(`verify-profile-boot`、`verify:operations`、`verify:licenses`、`verify-runtime-closure`、`check:desktop-variants`、三通道 vendored runtime 等) |
 | `corepack yarn check:desktop-variants` | 0 | stable↔beta allowlist 7;beta↔huaanwork allowlist 65(oneSidedPrefixes 6);11/11 tests |
 | `corepack yarn aa:check` | 0 | `AA release verified: all Desktop channels use 39b82d4f…` |
@@ -88,6 +88,6 @@ next 的三个预期修复(`package.spec` office 依赖、`plugin-detail-navigat
 ## 7. 残留风险
 
 - next 升 rc.1 后不再有 alpha.1 消费方,alpha.1 的 resolution/patches 只是**休眠资产**;若未来有人重新引入 alpha.1 依赖,`yarn.lock` 需要重新解析(当前 lock 无 alpha.1 包条目)。
-- huaanwork 有 41 处与 beta 的已登记分叉(全部是上游 2.1 新文件;深色主题 select 已同步,不占名额),意味着上游 2.1 的功能面尚未进入内网变体;触发条件与工作量见 `AGENTS.md` 新债行。
+- huaanwork 有 41 条与 beta 的已登记分叉(**15 个文件只存在于 beta** + **26 个两侧内容分叉**;深色主题 select 已同步,不占名额),意味着上游 2.1 的功能面尚未进入内网变体;触发条件与工作量见 `AGENTS.md` 新债行。
 - `THIRD_PARTY_NOTICES.md` 三包仍是旧的 AA/DSH 版本清单(`verify:notices` 不在任何 `check` 链里,未纳入本次范围);发版前应按新安装树重新生成。
 - AA 制品随 workspace peer 并集变化而换名(r-hash):以后再改任一 desktop 包的 dsh peer 版本,`aa:check` 会先红并提示重跑 `aa:prepare-release` —— 这是设计内行为,但需要发版流程预期一次制品更新。
