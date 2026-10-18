@@ -793,7 +793,7 @@ try {
   await webWelcome.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {})
   if (await webWelcome.isVisible()) await webWelcome.click()
   // The rc.2 Web entry can open directly when the default model is available;
-  // 0.2.1-alpha.5 opens the account sign-in dialog in marker-free Web contexts.
+  // 0.2.1-rc.1 opens the account sign-in dialog in marker-free Web contexts.
   const webOnboardingDismiss = webPage.getByRole('dialog', { name: /^(开始使用|Get started)$/ }).getByRole('button', { name: /^(关闭|Close)$/ })
     .or(webPage.getByRole('button', { name: /^(稍后配置|Configure later)$/ }))
   await webOnboardingDismiss.first().click({ timeout: 2_000 }).catch(() => {})
@@ -815,7 +815,7 @@ try {
   await webContext.close()
   assert.deepEqual(errors, [])
   assert.deepEqual(await page.evaluate(() => globalThis.__NEXT_TEST_BOOT__.failures), [])
-  console.log('Next window controls passed through the official 0.2.1-alpha.5 Desktop boot branch: stacked sidebar extension entries, homepage/plugin collapse and reopen, navigation, caption geometry, clickable actions, existing-header and platform isolation, official Settings header shortcuts and keyboard navigation, grouped Desktop Settings and immediate saves, per-address login URL rows with exact open/copy targets, Profile cards and tray creation, the Host-independent recovery artifact, and native Browser toolbar, navigation, pane geometry, overlay isolation, tab lifetime and Web iframe fallback. Chromium simulates the preload contract; native Electron window movement and page loading are not tested here.')
+  console.log('Next window controls passed through the official 0.2.1-rc.1 Desktop boot branch: stacked sidebar extension entries, homepage/plugin collapse and reopen, navigation, caption geometry, clickable actions, existing-header and platform isolation, official Settings header shortcuts and keyboard navigation, grouped Desktop Settings and immediate saves, per-address login URL rows with exact open/copy targets, Profile cards and tray creation, the Host-independent recovery artifact, and native Browser toolbar, navigation, pane geometry, overlay isolation, tab lifetime and Web iframe fallback. Chromium simulates the preload contract; native Electron window movement and page loading are not tested here.')
   console.log(`Screenshots: ${screenshots}`)
 } catch (error) {
   console.error(error)

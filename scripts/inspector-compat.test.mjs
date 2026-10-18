@@ -33,7 +33,8 @@ for (const workspace of ['dsh-plugin-desktop-beta', 'dsh-desktop-next']) {
   test(`${workspace}: official Reload DevTools completes through the hosted embedder callback`, { skip }, () => {
     const require = createRequire(resolve(workspace, 'package.json'))
     const manifest = require.resolve('@deepseek-ai/dsh-experimental-inspector/package.json')
-    assert.equal(JSON.parse(readFileSync(manifest, 'utf8')).version, '0.2.1-alpha.5')
+    // M9: both workspaces run the same DSH 0.2.1-rc.1 lane.
+    assert.equal(JSON.parse(readFileSync(manifest, 'utf8')).version, '0.2.1-rc.1')
     const directory = join(dirname(manifest), 'lib/devtools/chunks')
     const parse = (prefix, marker) => {
       const files = readdirSync(directory).filter(name => name.startsWith(prefix + '-') && name.endsWith('.js')

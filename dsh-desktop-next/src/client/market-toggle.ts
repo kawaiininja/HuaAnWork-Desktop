@@ -484,6 +484,3 @@ export async function toggleMarketEndpointInOfficial(
   ])
   return await applyOfficialIndexes(remote, endpointUrl, configuredUrls, existingUrls, officialBundleEnabled)
 }
-
-
-
