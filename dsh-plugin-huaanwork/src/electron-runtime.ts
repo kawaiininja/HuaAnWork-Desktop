@@ -61,7 +61,7 @@ import {
   type DesktopUpdateArtifact,
   type UpdateArtifactResponse,
 } from './update-download.ts'
-import type { UpdateCheckResult } from './update-checker.ts'
+import { resolveUpdateOrigin, type UpdateCheckResult } from './update-checker.ts'
 import type { DesktopInstallationId } from './desktop-installation-id.ts'
 import { DESKTOP_RELEASE_CHANNEL } from './product-identity.ts'
 import type { DesktopReleaseChannel } from './update-checker.ts'
@@ -931,6 +931,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       destinationPath,
       request: requestDesktopArtifact,
       signal,
+      // The upstream origin gate defaults to https-only when no expected origin
+      // is passed; this variant's deployment origin is http intranet, so pass
+      // it explicitly — same-origin http stays allowed, foreign https redirects
+      // are still rejected (M9 real-machine finding: without this the download
+      // aborted with "The update download must settle on HTTPS").
+      origin: resolveUpdateOrigin(),
       ...(installerSha256?.[platform] === undefined ? {} : { expectedSha256: installerSha256[platform] }),
     })
     signal.throwIfAborted()
