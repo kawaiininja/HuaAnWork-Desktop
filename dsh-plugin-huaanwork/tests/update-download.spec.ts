@@ -187,6 +187,23 @@ describe('desktop update installer download', () => {
     expect(await readFile(result)).toEqual(Buffer.from(artifact))
   })
 
+  it('accepts a same-origin HTTP artifact when the expected origin is the deployment origin', async () => {
+    const directory = await temporaryDirectory()
+    const artifact = dmgArtifact()
+    const result = await downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.2.2',
+      destinationPath: destinationPath(directory, 'darwin', '2.2.2'),
+      origin: 'http://intranet.example:8080',
+      request: async () => chunkedResponse(
+        [artifact],
+        {},
+        'http://intranet.example:8080/api/downloads/mac',
+      ),
+    })
+    expect(await readFile(result)).toEqual(Buffer.from(artifact))
+  })
+
   it.each([
     ['an https downgrade', 'http://www.dshdesktop.cn/api/downloads/mac'],
     ['embedded credentials', 'https://user:password@cdn.example/installer.dmg'],
