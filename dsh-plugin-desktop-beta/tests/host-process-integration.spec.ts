@@ -26,6 +26,7 @@ it.each([false, true])('boots a separate Web Host with client plugins (AA enable
     writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\nagent-presets:\n  default: minimal\n')
     const prepared = prepareDesktopProfile('1', home, 'win32', undefined, undefined, undefined, { aaEnabled })
     prepared.overlays = []
+    // M9: the rebuilt AA package accepts the 0.2.1-rc.1 peers directly, so the profile needs no exemption.
     if (aaEnabled) prepared.overlays.push({ id: 'agents-anywhere-bridge-next', config: { dshHome: home, stateRoot: join(home, 'aa-state') } })
     prepared.port = 0
     const plugin = join(prepared.profile.dir, 'node_modules', 'isolated-client-fixture')

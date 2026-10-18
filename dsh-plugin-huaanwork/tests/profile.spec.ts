@@ -1277,10 +1277,12 @@ virtualStoreDirMaxLength: 60
       'tool-web',
       'workflow-ptc',
       'tool-workflow',
-      'tool-ralph',
       'user-questions',
     ]) {
       expect(rows.get(id)?.disabled).toBe(true)
+    }
+    if (rows.has('tool-ralph')) {
+      expect(rows.get('tool-ralph')?.disabled).toBe(true)
     }
 
     // L1/L2 复挂钉：dsh-base 挂载、web-app overlay 关闭的三行被变体翻回启用。

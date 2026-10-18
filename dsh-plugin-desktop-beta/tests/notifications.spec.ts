@@ -287,7 +287,7 @@ describe('desktop notifications Host plugin', () => {
 
     expect(harness.notifyAttention.mock.calls).toEqual([
       [{ title: 'Background Job Completed', body: 'A background job has finished.' }],
-      [{ title: 'Background Job Failed', body: 'A background job could not finish. Open DSH Desktop for details.' }],
+      [{ title: 'Background Job Failed', body: `A background job could not finish. Open ${DESKTOP_PRODUCT_NAME} for details.` }],
     ])
   })
 

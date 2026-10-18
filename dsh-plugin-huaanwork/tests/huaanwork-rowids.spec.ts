@@ -71,4 +71,14 @@ describe('row-id 命中断言', () => {
   test('正例:修正后的 16 条全命中不抛', () => {
     expect(() => assertHuaanworkRowIdsHit(composed)).not.toThrow()
   })
+
+  test('optional row: 缺失时不抛，存在但未禁用时抛', () => {
+    const withoutRalph = new Map(composed)
+    withoutRalph.delete('tool-ralph')
+    expect(() => assertHuaanworkRowIdsHit(withoutRalph)).not.toThrow()
+
+    const unDisabledRalph = new Map(composed)
+    unDisabledRalph.set('tool-ralph', { disabled: false })
+    expect(() => assertHuaanworkRowIdsHit(unDisabledRalph)).toThrow(/tool-ralph: expected disabled/)
+  })
 })
