@@ -419,7 +419,7 @@ virtualStoreDirMaxLength: 60
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
-    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run', 'ui-schedule', 'ui-user-questions']) {
+    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run', 'ui-schedule', 'ui-user-questions', 'ui-skill', 'ui-reference', 'ui-secret-mask']) {
       expect(rows.find(row => row.id === id)?.disabled).toBe(true)
     }
   })
@@ -819,7 +819,7 @@ virtualStoreDirMaxLength: 60
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(true)
-    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run', 'ui-schedule', 'ui-user-questions']) {
+    for (const id of ['ui-chat', 'ui-goal', 'ui-plan', 'ui-trajectory', 'ui-deliverables', 'ui-workflow-run', 'ui-schedule', 'ui-user-questions', 'ui-skill', 'ui-reference', 'ui-secret-mask']) {
       expect(rows.find(row => row.id === id)?.disabled).toBe(true)
     }
   })
@@ -1277,10 +1277,13 @@ virtualStoreDirMaxLength: 60
       'tool-web',
       'workflow-ptc',
       'tool-workflow',
-      'tool-ralph',
       'user-questions',
     ]) {
       expect(rows.get(id)?.disabled).toBe(true)
+    }
+    // Backstop: HUAANWORK_ROW_ASSERTIONS marks tool-ralph optional, so row-assertions.ts skips it when absent; mirror that semantics here.
+    if (rows.has('tool-ralph')) {
+      expect(rows.get('tool-ralph')?.disabled).toBe(true)
     }
 
     // L1/L2 复挂钉：dsh-base 挂载、web-app overlay 关闭的三行被变体翻回启用。

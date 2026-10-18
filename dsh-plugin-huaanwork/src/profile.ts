@@ -1696,6 +1696,13 @@ export function prepareDesktopProfile(
             { id: 'ui-workflow-run', disabled: true },
             { id: 'ui-schedule', disabled: true },
             { id: 'ui-user-questions', disabled: true },
+            // 2.1-rc.1 added `uiConversation` to the required inject of the
+            // reference-source plugins (alpha.1 did not require it): without
+            // the conversation row they hang the renderer web boot (M9 真机
+            // 实测 2026-10-18: RendererStartupFailure on exactly these three).
+            { id: 'ui-skill', disabled: true },
+            { id: 'ui-reference', disabled: true },
+            { id: 'ui-secret-mask', disabled: true },
           ]
         : [
             { id: 'ui-sidebar', disabled: false },

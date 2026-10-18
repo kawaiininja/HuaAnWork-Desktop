@@ -2711,6 +2711,7 @@ describe('Electron desktop runtime', () => {
       destinationPath: '/tmp/Downloads/DSH-Desktop-2.1.0-mac.dmg',
       request: expect.any(Function),
       signal: controller.signal,
+      origin: expect.any(String),
     })
     expect(electron.shell.openPath).toHaveBeenCalledWith('/tmp/DSH-Desktop-2.1.0-mac.dmg')
     expect(updater.record).toHaveBeenCalledWith('/tmp/dsh-desktop-user-data', {
@@ -2767,6 +2768,7 @@ describe('Electron desktop runtime', () => {
       request: expect.any(Function),
       signal: controller.signal,
       expectedSha256: sha256.darwin,
+      origin: expect.any(String),
     })
 
     // A record without the platform's key keeps the honest-downgrade path (no pin passed).
@@ -2782,6 +2784,7 @@ describe('Electron desktop runtime', () => {
       destinationPath: '/tmp/Downloads/DSH-Desktop-2.1.0-mac.dmg',
       request: expect.any(Function),
       signal: expect.any(AbortSignal),
+      origin: expect.any(String),
     })
 
     await release()

@@ -116,26 +116,26 @@
     }
   },
   "scripts": {
-    "build": "node scripts/clean.mjs && tsdown && vite build --config vite.client.config.ts && vite build --config vite.native-ui.config.ts && tsc -p tsconfig.json --emitDeclarationOnly && tsc -p tsconfig.client.json --emitDeclarationOnly",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.native-ui.json --noEmit && tsc -p tsconfig.tests.json --noEmit && tsc -p tsconfig.tests.client.json --noEmit",
+    "build": "node scripts/clean.mjs && node ../scripts/run-parallel.mjs \"tsdown\" \"vite build --config vite.client.config.ts\" \"vite build --config vite.native-ui.config.ts\" \"tsc -p tsconfig.json --emitDeclarationOnly\" \"tsc -p tsconfig.client.json --emitDeclarationOnly\"",
+    "typecheck": "node ../scripts/run-parallel.mjs \"tsc -p tsconfig.native-ui.json --noEmit\" \"tsc -p tsconfig.tests.json --noEmit\" \"tsc -p tsconfig.tests.client.json --noEmit\"",
     "test": "vitest run",
     "verify:closure": "node --test scripts/runtime-closure.spec.mjs && node scripts/verify-runtime-closure.mjs",
     "verify:cli": "node scripts/verify-cli-runtime.mjs",
     "verify:loader": "node scripts/verify-loader-boot.mjs",
     "verify:profile": "node scripts/verify-profile-boot.mjs",
     "verify:licenses": "node scripts/verify-licenses.mjs",
-    "verify:operations": "node --test scripts/operation-reliability.spec.mjs && node scripts/verify-operation-reliability.mjs",
+    "verify:operations": "node scripts/verify-operation-reliability.mjs",
     "verify:notices": "node scripts/verify-licenses.mjs --notices THIRD_PARTY_NOTICES.md",
-    "check": "yarn run build && yarn run typecheck && yarn run test && yarn run verify:closure && yarn run verify:cli && yarn run verify:loader && yarn run verify:profile && yarn run verify:aa && yarn run verify:licenses && yarn run verify:operations",
+    "check": "yarn run build && node ../scripts/run-parallel.mjs \"yarn run typecheck\" \"yarn run test\" \"yarn run verify:closure\" \"yarn run verify:cli\" \"yarn run verify:loader\" \"yarn run verify:profile\" \"true && yarn run verify:aa\" \"yarn run verify:licenses\" \"yarn run verify:operations\"",
     "check:win-package": "yarn run check:win-package:platform && yarn run typecheck",
-    "check:win-package:platform": "yarn workspace dsh-community-market build && yarn run build && vitest run tests/package.spec.ts tests/package-win.spec.ts tests/desktop-installer-quit.spec.ts tests/installer-nsh.spec.ts tests/update-checker.spec.ts tests/update-download.spec.ts tests/verify-win-installer.spec.ts tests/verify-win-portable.spec.ts tests/verify-packaged-runtime.spec.ts tests/windows-pwsh-sandbox.spec.ts tests/windows-console-host.spec.ts tests/windows-volume-diagnostics.spec.ts tests/window-options.spec.ts tests/safe-mode.spec.ts && yarn run verify:closure",
+    "check:win-package:platform": "yarn workspace dsh-community-market build && yarn run build && vitest run tests/package.spec.ts tests/package-win.spec.ts tests/desktop-installer-quit.spec.ts tests/installer-nsh.spec.ts tests/update-checker.spec.ts tests/update-download.spec.ts tests/verify-win-installer.spec.ts tests/verify-win-portable.spec.ts tests/verify-packaged-runtime.spec.ts tests/windows-pwsh-sandbox.spec.ts tests/windows-volume-diagnostics.spec.ts tests/window-options.spec.ts tests/safe-mode.spec.ts && yarn run verify:closure",
     "check:mac-package": "yarn run check:mac-package:platform && yarn run typecheck",
     "check:mac-package:platform": "yarn workspace dsh-community-market build && yarn run build && vitest run tests/package.spec.ts tests/package-mac.spec.ts tests/verify-mac-smoke.spec.ts tests/verify-mac-release.spec.ts tests/mac-entitlements.spec.ts tests/verify-packaged-runtime.spec.ts tests/mac-universal.spec.ts && yarn run verify:closure",
     "check:linux-package": "yarn run check:linux-package:platform && yarn run typecheck",
     "check:linux-package:platform": "yarn workspace dsh-community-market build && yarn run build && vitest run tests/package.spec.ts tests/package-linux.spec.ts tests/verify-linux-artifacts.spec.ts tests/verify-packaged-runtime.spec.ts && yarn run verify:closure",
-    "start": "node lib/bin.js",
-    "dev": "yarn run build && yarn run prepare:electron-native && node lib/bin.js",
-    "package:dir": "yarn run build && yarn run prepare:electron-native && node scripts/package-dir.mjs",
+    "start": "yarn run prepare:runtime && node lib/bin.js",
+    "dev": "yarn run build && yarn run prepare:electron-native && yarn run prepare:runtime && node lib/bin.js",
+    "package:dir": "yarn run build && yarn run prepare:electron-native && yarn run prepare:runtime && node scripts/package-dir.mjs",
     "dist:mac": "node scripts/release-mac.ts",
     "dist:mac-smoke": "node scripts/package-mac.ts",
     "dist:win": "node scripts/package-win.ts",
@@ -144,10 +144,11 @@
     "prepack": "yarn run check",
     "verify:aa": "node ../scripts/prepare-agents-anywhere-runtime.mjs && DSH_VERIFY_AA=1 node scripts/verify-profile-boot.mjs",
     "prepare:electron-native": "node scripts/prepare-fs-ext.ts",
+    "prepare:runtime": "node scripts/prepare-runtime.ts",
     "icons:export": "node ../scripts/export-app-icons.mjs --channel stable"
   },
   "dependencies": {
-    "@agents-anywhere/dsh-bridge-next": "file:../vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c58d98da25a23.r7190cf39.tgz",
+    "@agents-anywhere/dsh-bridge-next": "file:../vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c39b82d4fffb1.r57f6b0fe.tgz",
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/cordis-plugin-group": "1.0.4",
     "@deepseek-ai/cordis-plugin-include": "1.0.9",
@@ -214,6 +215,7 @@
     "@deepseek-ai/dsh-experimental-agent-team-profile": "0.2.0-rc.2",
     "@deepseek-ai/dsh-experimental-api-speech-to-text": "0.2.0-rc.2",
     "@deepseek-ai/dsh-experimental-auto-review": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-experimental-inspector": "0.2.0-rc.2",
     "@deepseek-ai/dsh-experimental-schedule-bundle": "0.2.0-rc.2",
     "@deepseek-ai/dsh-experimental-speech-to-text": "0.2.0-rc.2",
     "@deepseek-ai/dsh-experimental-voice-input-bundle": "0.2.0-rc.2",
@@ -271,6 +273,7 @@
     "@deepseek-ai/dsh-shell-env": "0.2.0-rc.2",
     "@deepseek-ai/dsh-skill": "0.2.0-rc.2",
     "@deepseek-ai/dsh-skill-filesystem": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-skill-office": "0.2.0-rc.2",
     "@deepseek-ai/dsh-spill": "0.2.0-rc.2",
     "@deepseek-ai/dsh-storage": "0.2.0-rc.2",
     "@deepseek-ai/dsh-storage-domain": "0.2.0-rc.2",
@@ -293,6 +296,7 @@
     "@deepseek-ai/dsh-tool-skill": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tool-todo": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tool-workflow": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-workspace-dependencies": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
     "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2",
     "@deepseek-ai/dsh-typert-registry": "0.2.0-rc.2",
@@ -310,7 +314,7 @@
     "@deepseek-ai/schemastery": "^3.18.4",
     "adm-zip": "^0.6.0",
     "dsh-community-market": "0.1.0-dev.0",
-    "dshmarket": "1.66.22",
+    "dshmarket": "1.66.28",
     "fs-ext": "2.1.1",
     "koffi": "3.1.5",
     "node-addon-require-builtin": "^0.1.6",
@@ -333,6 +337,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/mdast": "^4.0.4",
     "@types/node": "^22.20.0",
+    "@types/papaparse": "^5.3.0",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "@types/semver": "^7.7.1",
@@ -342,15 +347,19 @@
     "clsx": "^2.1.1",
     "electron": "44.0.0",
     "electron-builder": "26.15.7",
+    "extract-zip": "2.0.1",
+    "fflate": "0.8.2",
     "jsdom": "29.1.1",
     "lexical": "0.49.0",
     "lucide-react": "^1.33.0",
     "node-gyp": "13.0.1",
+    "papaparse": "^5.5.0",
     "react-dom": "18.3.1",
     "shadcn": "^4.18.0",
-    "sharp": "0.35.3",
+    "sharp": "0.35.5",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4",
+    "tar": "7.5.22",
     "tsdown": "0.22.2",
     "tw-animate-css": "^1.4.0",
     "typescript": "6.0.3",
@@ -405,18 +414,31 @@
       "hardenedRuntime": true,
       "entitlements": "../deepseek-harness/apps/desktop/scripts/macos-entitlements.plist",
       "entitlementsInherit": "../deepseek-harness/apps/desktop/scripts/macos-entitlements.plist",
+      "extraResources": [
+        {
+          "from": ".desktop-build/runtime",
+          "to": "runtime"
+        }
+      ],
       "icon": "build/app-icon.icon",
       "mergeASARs": false,
       "notarize": true,
       "signIgnore": [
-        "\\.(?:pak|dat|wasm)$"
+        "\\.(?:pak|dat|wasm)$",
+        "/Contents/Resources/runtime/(?:arm64|x64)/primary-runtime(?:/|$)"
       ],
-      "x64ArchFiles": "**/node_modules/{@dataiku/uv-darwin-*/**,@deepseek-ai/node-addon-system-darwin-*/**,node-pty/prebuilds/darwin-*/**,fs-ext/prebuilds/darwin-*/**,node-addon-require-builtin-darwin-*/**,@vscode/ripgrep-darwin-*/**,@img/sharp-darwin-*/**,@img/sharp-libvips-darwin-*/**,@koromix/koffi-darwin-*/**,@deepseek-ai/libreoffice-kit-darwin-*/**,sherpa-onnx-darwin-*/**}",
+      "x64ArchFiles": "{**/node_modules/{@dataiku/uv-darwin-*/**,@deepseek-ai/node-addon-system-darwin-*/**,node-pty/prebuilds/darwin-*/**,fs-ext/prebuilds/darwin-*/**,node-addon-require-builtin-darwin-*/**,@vscode/ripgrep-darwin-*/**,@img/sharp-darwin-*/**,@img/sharp-libvips-darwin-*/**,@koromix/koffi-darwin-*/**,@deepseek-ai/libreoffice-kit-darwin-*/**,sherpa-onnx-darwin-*/**},Contents/Resources/runtime/**,Contents/Resources/runtime/**/.*/**}",
       "asar": false
     },
     "win": {
       "asar": false,
       "compression": "normal",
+      "extraResources": [
+        {
+          "from": ".desktop-build/runtime",
+          "to": "runtime"
+        }
+      ],
       "target": [
         {
           "target": "nsis",

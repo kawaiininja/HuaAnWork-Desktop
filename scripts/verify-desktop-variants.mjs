@@ -75,15 +75,12 @@ export const PAIRS = [
       // Upstream stable boot smoke exposes authenticatedUrl and a distinct
       // renderer token; beta does not. Both sides match upstream.
       'scripts/verify-loader-boot.mjs',
-      // Stable-only NSIS A/B tooling. oneSidedPrefixes means "exists only on
-      // the right", and this pair's right is beta, so these only-in-stable
-      // files stay on the allowlist. The test enforces the direction.
-      'scripts/build-windows-nsis-ab.ts',
-      'scripts/inspect-windows-installed-app.ts',
-      'scripts/probe-windows-packaged-runtime.ts',
-      'scripts/run-windows-nsis-ab.ps1',
-      'scripts/verify-nsis-ab-prepackaged.ts',
-      'scripts/windows-nsis-ab.ts',
+      // Upstream 0.2.1 runtime preparation and smoke divergence between Stable (0.2.0-rc.2)
+      // and Beta (0.2.1-rc.1).
+      'scripts/prepare-runtime.ts',
+      'scripts/primary-runtime.ts',
+      'scripts/sign-runtime.ts',
+      'scripts/verify-profile-boot.mjs',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [],
@@ -210,6 +207,50 @@ export const PAIRS = [
       //    gen-windows-ico.mjs 出 7 档 —— 这是图标保真度差距,不是本条名额的理由,
       //    登记在此以免被误读为已对齐。
       'scripts/generate-windows-app-icon.mjs',
+      // M9: Upstream 2.1 features (Context menu, Developer logging, Plugin packages, Office runtime)
+      // active in desktop-beta but not incorporated into huaanwork.
+      'src/client/ui-diagnostics.ts',
+      'src/compatibility-shell.ts',
+      'src/context-menu.ts',
+      'src/desktop-office.ts',
+      'src/developer-logging.ts',
+      'src/diagnostic-record.ts',
+      'src/file-exporter.ts',
+      'src/file-path-bridge-contract.ts',
+      'src/host-bootstrap.ts',
+      'src/host-developer-logging.ts',
+      'src/host-process.ts',
+      'src/host-rpc.ts',
+      'src/jobs-bridge.ts',
+      'src/local-window-policy.ts',
+      'src/log-files.ts',
+      'src/module-resolution.ts',
+      'src/official-diagnostics.ts',
+      'src/plugin-packages.ts',
+      'src/preload.ts',
+      'src/process-output-logging.ts',
+      'src/profile-create-window.ts',
+      'src/profile-selection-window.ts',
+      'src/renderer-logging.ts',
+      'src/runtime.ts',
+      'src/settings-bridge.ts',
+      'src/startup-recovery-window.ts',
+      'src/webserver.ts',
+      // M9: Upstream 2.1 primary runtime packaging and platform scripts active in
+      // desktop-beta but not incorporated into huaanwork (which does not carry Python runtime).
+      'scripts/package-mac.ts',
+      'scripts/package-win-portable.ts',
+      'scripts/package-win.ts',
+      'scripts/prepare-runtime.ts',
+      'scripts/primary-runtime.ts',
+      'scripts/prune-python-tests.ts',
+      'scripts/release-mac.ts',
+      'scripts/sign-runtime.ts',
+      'scripts/verify-electron-fuses.ts',
+      'scripts/verify-mac-release.ts',
+      'scripts/verify-mac-runtime.ts',
+      'scripts/verify-mac-smoke.ts',
+      'scripts/verify-packaged-runtime.ts',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [

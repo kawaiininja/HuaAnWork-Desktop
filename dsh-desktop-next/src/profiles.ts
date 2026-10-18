@@ -1,5 +1,6 @@
 /** Next-owned profile state. Recovery works without importing any user plugin. */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, unlinkSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { initProfile, loadOverlayPatches, loadProfileDirectory, PROFILE_TEMPLATES, readProfilePatches, type Profile, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
@@ -10,6 +11,7 @@ import { DEFAULT_PROFILE } from './desktop-contract.ts'
 import { computerUsePatch } from './profile-computer-use.ts'
 import { RETIRED_SCHEDULE_BUNDLE, retiredSchedulePatch } from './profile-schedule.ts'
 import { removeLinkProjectionsSafely } from '../../dsh-plugin-desktop-beta/src/link-projections.ts'
+import { insideArchive, unpackedPath } from './asar-archive-policy.ts'
 
 export const NEXT_PACKAGE = fileURLToPath(new URL('../package.json', import.meta.url))
 export const WEB_BUNDLES = [...PROFILE_TEMPLATES.web!.bundles]
@@ -280,23 +282,27 @@ export function loadNextProfile(projectDir: string, home: string, installAnchor 
   retireLinkProjections(projectDir)
   // Upstream bundle discovery walks physical node_modules before installing its
   // runtime resolver. Project only this application's bundle, not its dependency
-  // tree; the alpha.2 runtime resolver owns all other package fallbacks.
+  // tree; the alpha.2 runtime resolver owns all other package fallbacks. No
+  // filesystem link can enter app.asar: a packaged application leaves the resolver
+  // to supply its own package and removes a link a development launch left behind.
   const modules = join(home, 'profiles', 'node_modules')
   const existingModules = lstatSync(modules, { throwIfNoEntry: false })
   if (existingModules && !existingModules.isDirectory()) throw new Error('Next bundle fallback must be a real directory')
   mkdirSync(modules, { recursive: true, mode: 0o700 })
   const link = join(modules, 'dsh-desktop-next')
   const target = realpathSync(dirname(installAnchor))
+  const linkTarget = insideArchive(installAnchor) ? undefined : target
   const existingLink = lstatSync(link, { throwIfNoEntry: false })
   if (existingLink && !existingLink.isSymbolicLink()) throw new Error('Next bundle fallback is occupied by an unmanaged package')
-  if (existingLink && resolve(modules, readlinkSync(link)) !== target) unlinkSync(link)
-  if (!lstatSync(link, { throwIfNoEntry: false })) symlinkSync(target, link, 'junction')
+  if (existingLink && (linkTarget === undefined || resolve(modules, readlinkSync(link)) !== linkTarget)) unlinkSync(link)
+  if (linkTarget !== undefined && !lstatSync(link, { throwIfNoEntry: false })) symlinkSync(linkTarget, link, 'junction')
   const profile = loadProfileDirectory('dsh-desktop-next', projectDir, installAnchor)
   profile.layers.push({ packageName: 'dsh-desktop-next', packageDir: target,
     patchPaths: [NEXT_BUNDLE_PATCH], patches: loadOverlayPatches('dsh-desktop-next', NEXT_BUNDLE_PATCH) })
   const overlay = [
     { id: 'agents-anywhere-bridge-next', config: {
       dshHome: home,
+      ...archivedAgentsAnywhereConfig(installAnchor),
     } },
   ]
   // Leave AA stateRoot unset to share its default credentials and device binding with Stable/Beta.
@@ -304,6 +310,25 @@ export function loadNextProfile(projectDir: string, home: string, installAnchor 
   // The official manager still owns per-Profile bundle/row enablement.
   atomicJson(join(projectDir, 'desktop-next.cordis.patch.json'), overlay)
   return profile
+}
+
+/**
+ * Paths the AA bridge cannot derive once it runs from app.asar: it copies its bundled Connector
+ * project with `fs.cp` and spawns uv, and both need the copies unpacked beside the archive.
+ * @param installAnchor - Next's package.json.
+ * @returns Overrides for an archived installation; empty for a physical one.
+ */
+function archivedAgentsAnywhereConfig(installAnchor: string): { connectorSourceDir?: string; uvPath?: string } {
+  if (!insideArchive(installAnchor)) return {}
+  let packageDir: string
+  try { packageDir = dirname(createRequire(installAnchor).resolve(`${AA_PACKAGE}/package.json`)) }
+  catch { return {} /* The bridge is optional; without it there is nothing to redirect. */ }
+  const config: { connectorSourceDir: string; uvPath?: string } = { connectorSourceDir: unpackedPath(join(packageDir, 'lib', 'bundled-connector')) }
+  try {
+    const uv = dirname(createRequire(join(packageDir, 'package.json')).resolve(`@dataiku/uv-${process.platform}-${process.arch}/package.json`))
+    config.uvPath = unpackedPath(join(uv, 'bin', process.platform === 'win32' ? 'uv.exe' : 'uv'))
+  } catch { /* No bundled uv for this platform; the bridge searches PATH as before. */ }
+  return config
 }
 
 /** Recompose Next's own layer before user/global patches on every manager or HMR read. */

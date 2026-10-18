@@ -3,6 +3,10 @@ import type { ToolPresentationMode } from "@deepseek-ai/dsh-tools";
 
 import type { AttachmentMaps } from "./agent-attachments.ts";
 
+function isDisabledPresentationMode(mode: unknown): mode is "ptc" | "both" {
+  return mode === "ptc" || mode === "both";
+}
+
 const ALLOWED_TOOLS = new Set([
   "read",
   "read_file",
@@ -90,7 +94,7 @@ export function apply(ctx: Context): void {
   // D3(0.1.6-alpha.2):presentAs 需 agent.ctx;全局呈现锁走 tools row 的 mode: native
   const presentAs = ctx.tools.presentAs.bind(ctx.tools);
   ctx.tools.presentAs = (mode) => {
-    if (mode === "ptc" || mode === "both") {
+    if (isDisabledPresentationMode(mode)) {
       ctx.huaanworkEmit?.({
         event: "session/end",
         ok: false,

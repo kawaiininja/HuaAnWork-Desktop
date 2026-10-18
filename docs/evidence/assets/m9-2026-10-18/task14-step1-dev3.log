@@ -1,0 +1,8 @@
+dsh-plugin-huaanwork: outbound proxy = none (source: none; the system proxy resolver returned DIRECT for every probe)
+dsh-plugin-huaanwork: 已从旧版华安工作台迁移:sessions 1、sessionsReminted 1。 跳过 3 项(已存在或不可解析)。 需要重新登录一次。旧数据目录未删除,可在确认无误后自行清理。 未迁移:cordis.yml、cordis.patch.yml、logs/plugin.log、logs/sidecar.log、auth-session.json、profiles/huaanwork、@deepseek-ai/dsh-base、@huaanwork/bundle。旧版安装的插件需在插件市场重新安装。
+dsh-plugin-desktop: host outbound proxy policy installed
+post-boot gate: agent registry empty at first check; waiting for materialization
+dsh-plugin-huaanwork: warning: 2 entries did not activate
+web-fetch-http (@deepseek-ai/dsh-web-fetch-http): pending (waiting for service: web)
+job-controller (@deepseek-ai/dsh-api-job-controller): pending (waiting for service: jobs)
+sandbox_extension_issue_file failed for /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop-sync-m9/dsh-plugin-huaanwork/node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Helper.app/Contents/Resources: 1 (Operation not permitted)

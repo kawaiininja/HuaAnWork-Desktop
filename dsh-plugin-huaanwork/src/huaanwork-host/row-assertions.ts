@@ -2,6 +2,7 @@ export interface RowHitAssertion {
   id: string
   intent: 'disable' | 'override'
   expectConfig?: Record<string, unknown> | undefined
+  optional?: boolean | undefined
 }
 
 export interface RowLike {
@@ -31,7 +32,7 @@ export const HUAANWORK_ROW_ASSERTIONS: readonly RowHitAssertion[] = [
   { id: 'tool-web', intent: 'disable' },
   { id: 'workflow-ptc', intent: 'disable' },
   { id: 'tool-workflow', intent: 'disable' },
-  { id: 'tool-ralph', intent: 'disable' },
+  { id: 'tool-ralph', intent: 'disable', optional: true },
   { id: 'user-questions', intent: 'disable' },
   { id: 'fs-sandbox', intent: 'override' },
   { id: 'sandbox-policy', intent: 'override', expectConfig: { mode: 'workspace-write' } },
@@ -51,9 +52,18 @@ export function assertHuaanworkRowIdsHit(
   declared: readonly RowHitAssertion[] = HUAANWORK_ROW_ASSERTIONS,
 ): void {
   const problems: string[] = []
-  for (const { id, intent, expectConfig } of declared) {
+  for (const { id, intent, expectConfig, optional } of declared) {
     const row = rows.get(id)
     if (row === undefined) {
+      if (id === 'tool-ralph') {
+        // tool-ralph is intentionally absent in this variant; catch a silent
+        // upstream rename instead of letting the optional assertion swallow it.
+        const renamed = [...rows.keys()].filter(candidate => candidate !== id && /ralph/u.test(candidate))
+        if (renamed.length > 0) {
+          problems.push(`${id}: expected absent for this variant, but renamed row(s) exist: ${renamed.join(', ')}`)
+        }
+      }
+      if (optional) continue
       problems.push(`${id}: declared ${intent} but the id does not exist in the composed profile (upstream renamed or removed it)`)
       continue
     }

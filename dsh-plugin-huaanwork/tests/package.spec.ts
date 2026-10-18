@@ -159,7 +159,7 @@ describe('published package surface', () => {
     }
     const dshmarketResolutions = resolutionKeys.filter(k => k.startsWith('dshmarket@npm:'))
     expect(dshmarketResolutions).toHaveLength(1)
-    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.66.22')
+    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.66.28')
 
     const stableManifest = JSON.parse(readFileSync(
       new URL('dsh-plugin-desktop/package.json', workspaceRoot), 'utf8',
@@ -168,8 +168,8 @@ describe('published package surface', () => {
       new URL('dsh-plugin-huaanwork/package.json', workspaceRoot), 'utf8',
     )) as { dependencies?: Record<string, string> }
 
-    expect(stableManifest.dependencies?.dshmarket).toBe('1.66.22')
-    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.66.22')
+    expect(stableManifest.dependencies?.dshmarket).toBe('1.66.28')
+    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.66.28')
     expect(huaanworkManifest.dependencies?.dshmarket).toBe(stableManifest.dependencies?.dshmarket)
   })
 
@@ -421,10 +421,15 @@ describe('published package surface', () => {
     const betaResolutions = dshResolutions.filter(([selector]) =>
       selector.endsWith(`@npm:${runtimeVersion}`)
       || selector.endsWith(`@npm:^${runtimeVersion}`))
+    // Dormant alpha.1 lane: retained after R-M9-R1 moved Next to rc.1.
+    const alpha1Resolutions = dshResolutions.filter(([selector]) =>
+      selector.endsWith('@npm:0.2.1-alpha.1')
+      || selector.endsWith('@npm:^0.2.1-alpha.1'))
 
     expect(stableResolutions.length).toBeGreaterThan(0)
     expect(betaResolutions.length).toBeGreaterThan(0)
-    expect(new Set([...stableResolutions, ...betaResolutions].map(([selector]) => selector)).size)
+    expect(alpha1Resolutions.length).toBeGreaterThan(0)
+    expect(new Set([...stableResolutions, ...betaResolutions, ...alpha1Resolutions].map(([selector]) => selector)).size)
       .toBe(dshResolutions.length)
     for (const [selector, resolution] of stableResolutions) {
       expect([stableRuntimeVersion, `^${stableRuntimeVersion}`]).toContain(selector.split('@npm:')[1])
@@ -433,6 +438,10 @@ describe('published package surface', () => {
     for (const [selector, resolution] of betaResolutions) {
       expect([runtimeVersion, `^${runtimeVersion}`]).toContain(selector.split('@npm:')[1])
       expect(String(resolution)).toContain(runtimeVersion)
+    }
+    for (const [selector, resolution] of alpha1Resolutions) {
+      expect(['0.2.1-alpha.1', '^0.2.1-alpha.1']).toContain(selector.split('@npm:')[1])
+      expect(String(resolution)).toContain('0.2.1-alpha.1')
     }
   })
 
@@ -1132,7 +1141,7 @@ describe('published package surface', () => {
     expect(windowsJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')
     expect(windowsJob.match(/DSH_WINDOWS_PACKAGE_COMPRESSION: store/g)).toHaveLength(2)
 
-    expect(linuxJob).toContain('workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta]')
+    expect(linuxJob).toContain('fromJSON(\'["dsh-plugin-desktop", "dsh-plugin-desktop-beta"]\')')
     expect(linuxJob).not.toContain('dsh-plugin-huaanwork')
 
     expect(macosJob).not.toContain('- run: yarn check')
@@ -1510,9 +1519,10 @@ describe('published package surface', () => {
     const workspaceRequire = createRequire(new URL('package.json', packageRoot))
     const root = dirname(workspaceRequire.resolve('@deepseek-ai/dsh-ptc-runtime-node/package.json'))
     const index = readFileSync(join(root, 'lib/index.js'), 'utf8')
-    expect(index).toContain('nodeExecutable: config.nodeExecutable ?? process.execPath')
+    // dsh 0.2.1-alpha.2 replaced `nodeExecutable` with `launch`; the local default is still this process.
+    expect(index).toMatch(/const launch = config \?\? \{\s+kind: "pkg" in process \? "embedded" : "node-script",\s+executable: process\.execPath\s+\};/u)
     expect(index).toContain('confined = policy.mode === "danger-full-access" ? void 0 : await this.ctx.sandbox.confine(')
-    const block = /\t+const env = Object\.fromEntries\(Object\.keys\(process\.env\)[\s\S]*?\n\t+if \(packaged\) \{[\s\S]*?\n\t+\}\n(?=\t+handle = this\.ctx\.subprocess\.spawn\()/u.exec(index)?.[0]
+    const block = /\t+const env = Object\.fromEntries\(Object\.keys\(process\.env\)[^\n]*\n(?:\t+\/\/[^\n]*\n)*\t+if \(process\.versions\.electron !== void 0\) env\.ELECTRON_RUN_AS_NODE = "1";\n\t+if \(packaged\) \{[\s\S]*?\n\t+\}\n(?=\t+handle = this\.ctx\.subprocess\.spawn\()/u.exec(index)?.[0]
     if (block === undefined) throw new Error('Cannot find the PTC worker environment')
     const evaluate = (electron: string | undefined, parent: Record<string, string>, packaged = true) => runInNewContext(
       `${block}\nenv`,
@@ -1537,7 +1547,8 @@ describe('published package surface', () => {
     const names = /const STARTUP_ENVIRONMENT_NAMES = new Set\(\[([\s\S]*?)\]\)/u.exec(bootstrap)?.[1]
     if (names === undefined) throw new Error('Cannot find the PTC bootstrap environment allowlist')
     expect(names).not.toMatch(/ELECTRON_RUN_AS_NODE/iu)
-    expect(bootstrap).toContain('if (!STARTUP_ENVIRONMENT_NAMES.has(key.toUpperCase())) Reflect.deleteProperty(processState.env, key);')
+    expect(bootstrap).toContain('if (!STARTUP_ENVIRONMENT_NAMES.has(key.toUpperCase())) Reflect.deleteProperty(state.env, key);')
+    expect(bootstrap).toContain('clearProgramEnvironment(processState);')
   })
 
   // A patch whose filename does not match the pinned version degrades silently to the

@@ -112,6 +112,7 @@ async function verify() {
   } finally {
     clearTimeout(deadline)
     window?.destroy()
+    server.closeAllConnections()
     await new Promise(resolve => server.close(resolve))
     rmSync(home, { recursive: true, force: true })
     app.exit(code)

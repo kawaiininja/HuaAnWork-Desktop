@@ -38,8 +38,7 @@ for (const workspace of AA_WORKSPACES) {
       return source.slice(start, end)
     }
     const { createProjection, contentHash } = runInNewContext(
-      // types 区域自 2.1.0-desktop.c58d98da25a23 起承载 wellFormedJson/wellFormedString
-      // (history 的 flushHashes 引用它们),必须随切片一起装入,不再由沙箱垫 record/json。
+      // types carries the JSON helpers history applies before hashing, including lone-surrogate normalization.
       ['types', 'identity', 'tools', 'history'].map(region).join('\n') + ';({ createProjection, contentHash })',
       { createHash, Buffer },
     )
@@ -53,7 +52,14 @@ for (const workspace of AA_WORKSPACES) {
     assert.equal(item.content.callId, 'call-1')
     // Optional fields omitted by JSON must not change the hash sent to Python.
     assert.equal(contentHash({ ...item, content: { ...item.content, optional: undefined } }), item.contentHash)
-    assert.throws(() => projection.apply({ type: 'tool/result', seq: 1, time: '2026-09-24T00:00:01Z',
+    // A lone surrogate an old plugin sends is normalized before the hash Python recomputes from UTF-8.
+    projection.apply({ type: 'tool/result', seq: 1, time: '2026-09-24T00:00:01Z',
+      data: { message: { role: 'tool', toolCallId: 'call-2', content: [{ type: 'text', text: 'ok\uD800' }] }, meta: {} } })
+    const normalized = JSON.parse(JSON.stringify(projection.snapshot().find(entry => entry.content.callId === 'call-2')))
+    assert.equal(normalized.content.output, 'ok\uFFFD')
+    assert.equal(normalized.content.result[0].text, 'ok\uFFFD')
+    assert.equal(normalized.contentHash, contentHash(normalized))
+    assert.throws(() => projection.apply({ type: 'tool/result', seq: 2, time: '2026-09-24T00:00:02Z',
       data: { message: { content: [{}] }, meta: {} } }), /Invalid DSH tool result message/)
   })
 

@@ -52,8 +52,9 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
       signIgnore?: unknown
       target?: unknown
       x64ArchFiles?: unknown
+      extraResources?: unknown
     }
-    win?: { asar?: unknown; compression?: unknown; icon?: unknown; asarUnpack?: unknown; target?: unknown; artifactName?: unknown }
+    win?: { asar?: unknown; compression?: unknown; icon?: unknown; asarUnpack?: unknown; target?: unknown; artifactName?: unknown; extraResources?: unknown }
     nsis?: Record<string, unknown>
     portable?: Record<string, unknown>
     linux?: {
@@ -130,7 +131,7 @@ describe('published package surface', () => {
     }
     const dshmarketResolutions = resolutionKeys.filter(k => k.startsWith('dshmarket@npm:'))
     expect(dshmarketResolutions).toHaveLength(1)
-    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.66.22')
+    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.66.28')
 
     const stableManifest = JSON.parse(readFileSync(
       new URL('dsh-plugin-desktop/package.json', workspaceRoot), 'utf8',
@@ -139,8 +140,8 @@ describe('published package surface', () => {
       new URL('dsh-plugin-huaanwork/package.json', workspaceRoot), 'utf8',
     )) as { dependencies?: Record<string, string> }
 
-    expect(stableManifest.dependencies?.dshmarket).toBe('1.66.22')
-    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.66.22')
+    expect(stableManifest.dependencies?.dshmarket).toBe('1.66.28')
+    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.66.28')
     expect(huaanworkManifest.dependencies?.dshmarket).toBe(stableManifest.dependencies?.dshmarket)
   })
 
@@ -362,9 +363,15 @@ describe('published package surface', () => {
       selector.endsWith(`@npm:${betaRuntimeVersion}`)
       || selector.endsWith(`@npm:^${betaRuntimeVersion}`))
 
+    // Dormant alpha.1 lane: retained after R-M9-R1 moved Next to rc.1.
+    const alpha1Resolutions = dshResolutions.filter(([selector]) =>
+      selector.endsWith('@npm:0.2.1-alpha.1')
+      || selector.endsWith('@npm:^0.2.1-alpha.1'))
+
     expect(stableResolutions.length).toBeGreaterThan(0)
     expect(betaResolutions.length).toBeGreaterThan(0)
-    expect(new Set([...stableResolutions, ...betaResolutions].map(([selector]) => selector)).size)
+    expect(alpha1Resolutions.length).toBeGreaterThan(0)
+    expect(new Set([...stableResolutions, ...betaResolutions, ...alpha1Resolutions].map(([selector]) => selector)).size)
       .toBe(dshResolutions.length)
     for (const [selector, resolution] of stableResolutions) {
       expect([runtimeVersion, `^${runtimeVersion}`]).toContain(selector.split('@npm:')[1])
@@ -375,6 +382,10 @@ describe('published package surface', () => {
     for (const [selector, resolution] of betaResolutions) {
       expect([betaRuntimeVersion, `^${betaRuntimeVersion}`]).toContain(selector.split('@npm:')[1])
       expect(String(resolution)).toContain(betaRuntimeVersion)
+    }
+    for (const [selector, resolution] of alpha1Resolutions) {
+      expect(['0.2.1-alpha.1', '^0.2.1-alpha.1']).toContain(selector.split('@npm:')[1])
+      expect(String(resolution)).toContain('0.2.1-alpha.1')
     }
   })
 
@@ -903,7 +914,7 @@ describe('published package surface', () => {
     expect(manifest.build?.mac?.icon).toBe('build/app-icon.icon')
     expect(manifest.build?.dmg?.icon).toBe('build/app-icon.icns')
     expect(manifest.build?.mac?.mergeASARs).toBe(false)
-    expect(manifest.build?.mac?.signIgnore).toEqual(['\\.(?:pak|dat|wasm)$'])
+    expect(manifest.build?.mac?.signIgnore).toEqual(['\\.(?:pak|dat|wasm)$', '/Contents/Resources/runtime/(?:arm64|x64)/primary-runtime(?:/|$)'])
     expect(manifest.build?.win?.icon).toBe('build/app-icon.ico')
     expect(manifest.build?.win?.target).toEqual([{
       target: 'nsis',
@@ -945,7 +956,12 @@ describe('published package surface', () => {
   it('separates unsigned smoke packaging from the signed macOS release', () => {
     const packageDir = readFileSync(new URL('scripts/package-dir.mjs', packageRoot), 'utf8')
 
-    expect(manifest.scripts?.['package:dir']).toBe('yarn run build && yarn run prepare:electron-native && node scripts/package-dir.mjs')
+    expect(manifest.scripts?.['package:dir'])
+      .toBe('yarn run build && yarn run prepare:electron-native && yarn run prepare:runtime && node scripts/package-dir.mjs')
+    expect(manifest.scripts?.['prepare:runtime']).toBe('node scripts/prepare-runtime.ts')
+    // Like upstream Desktop's dev launcher, every development launch prepares the payload before the shell starts.
+    expect(manifest.scripts?.dev).toBe('yarn run build && yarn run prepare:electron-native && yarn run prepare:runtime && node lib/bin.js')
+    expect(manifest.scripts?.start).toBe('yarn run prepare:runtime && node lib/bin.js')
     expect(packageDir).toContain("CSC_IDENTITY_AUTO_DISCOVERY: 'false'")
     expect(packageDir).toContain("'--config.forceCodeSigning=false'")
     expect(packageDir).toContain("'--config.mac.identity=null'")
@@ -1000,13 +1016,29 @@ describe('published package surface', () => {
       hardenedRuntime: true,
       mergeASARs: false,
       notarize: true,
-      signIgnore: ['\\.(?:pak|dat|wasm)$'],
+      signIgnore: ['\\.(?:pak|dat|wasm)$', '/Contents/Resources/runtime/(?:arm64|x64)/primary-runtime(?:/|$)'],
       target: ['dir'],
       x64ArchFiles: expect.stringContaining('node-pty/prebuilds/darwin-*'),
     }))
     expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
     expect(manifest.devDependencies?.['@electron/fuses']).toBe('1.8.0')
+  })
+
+  it('carries the primary runtime beside the application like upstream Desktop', () => {
+    // Both CPU payloads ride beside the application as extra resources; Linux ships none.
+    for (const platform of ['mac', 'win'] as const) {
+      expect(manifest.build?.[platform]?.extraResources, platform).toEqual([{ from: '.desktop-build/runtime', to: 'runtime' }])
+    }
+    expect(manifest.build).not.toHaveProperty('extraResources')
+    expect(manifest.build?.linux).not.toHaveProperty('extraResources')
+    // electron-builder must not re-sign the pre-signed payloads, and the universal merge keeps the identical payloads as they are.
+    expect(manifest.build?.mac?.signIgnore).toContain('/Contents/Resources/runtime/(?:arm64|x64)/primary-runtime(?:/|$)')
+    expect(manifest.build?.mac?.x64ArchFiles).toMatch(/^\{\*\*\/node_modules\/\{.+\},Contents\/Resources\/runtime\/\*\*,Contents\/Resources\/runtime\/\*\*\/\.\*\/\*\*\}$/u)
+    expect(manifest.scripts?.['prepare:runtime']).toBe('node scripts/prepare-runtime.ts')
+    for (const name of ['@deepseek-ai/dsh-skill-office', '@deepseek-ai/dsh-tool-workspace-dependencies']) {
+      expect(manifest.dependencies?.[name], name).toBe(runtimeVersion)
+    }
   })
 
   it('runs platform package gates before reusing native packaging outputs', () => {
@@ -1032,7 +1064,7 @@ describe('published package surface', () => {
     // Smoke artifacts are never published, so CI skips their compression.
     expect(windowsJob.match(/DSH_WINDOWS_PACKAGE_COMPRESSION: store/g)).toHaveLength(2)
 
-    expect(linuxJob).toContain('workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta]')
+    expect(linuxJob).toContain('fromJSON(\'["dsh-plugin-desktop", "dsh-plugin-desktop-beta"]\')')
     expect(linuxJob).not.toContain('dsh-plugin-huaanwork')
 
     expect(macosJob).not.toContain('- run: yarn check')

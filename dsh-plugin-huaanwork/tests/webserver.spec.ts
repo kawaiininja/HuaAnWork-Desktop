@@ -7,7 +7,7 @@ import {
   type DesktopBrowserAccess,
 } from '../src/desktop-browser-access.ts'
 import { DESKTOP_WEB_PORT_RETRY_LIMIT } from '../src/desktop-port.ts'
-import DesktopWebServer from '../src/webserver.ts'
+import DesktopWebServer, { assertLoopbackHost } from '../src/webserver.ts'
 
 const occupied: Server[] = []
 const contexts: Context[] = []
@@ -70,12 +70,19 @@ async function requestUpgrade(
 }
 
 describe('Desktop WebServer port policy', () => {
+  it('rejects a non-loopback host before binding', () => {
+    expect(() => assertLoopbackHost('0.0.0.0')).toThrow(/requires loopback until LAN HTTPS is available/)
+    expect(() => assertLoopbackHost('127.0.0.1')).not.toThrow()
+  })
+
   it('fails closed when asked to bind all interfaces before LAN HTTPS exists', async () => {
     const context = new Context()
     contexts.push(context)
 
+    // dsh 0.2.1-alpha.2's webserver schema rejects wildcard binds before the
+    // Desktop policy runs; either refusal keeps the bind closed.
     await expect(context.plugin(DesktopWebServer, { host: '0.0.0.0', port: 0 }))
-      .rejects.toThrow('requires loopback until LAN HTTPS is available')
+      .rejects.toThrow(/requires loopback until LAN HTTPS is available|unspecified \(wildcard\) address, which is not supported/u)
   })
 
   it('increments only after the requested loopback bind reports EADDRINUSE', async () => {
@@ -168,8 +175,8 @@ describe('Desktop WebServer browser gate', () => {
       },
     })
 
-    await expect(requestUpgrade(server.port, '/socket')).resolves.toContain('403 Forbidden')
-    await expect(requestUpgrade(server.port, '/socket', {
+    await expect(requestUpgrade(server.port!, '/socket')).resolves.toContain('403 Forbidden')
+    await expect(requestUpgrade(server.port!, '/socket', {
       [access.rendererHeader.name]: access.rendererHeader.value,
     })).resolves.toContain('101 Switching Protocols')
   })
