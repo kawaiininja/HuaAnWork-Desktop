@@ -81,4 +81,11 @@ describe('row-id 命中断言', () => {
     unDisabledRalph.set('tool-ralph', { disabled: false })
     expect(() => assertHuaanworkRowIdsHit(unDisabledRalph)).toThrow(/tool-ralph: expected disabled/)
   })
+
+  test('optional row: 上游改名后的 ralph 行必须报错', () => {
+    const renamedRalph = new Map(composed)
+    renamedRalph.delete('tool-ralph')
+    renamedRalph.set('tool-ralph-v2', { disabled: true })
+    expect(() => assertHuaanworkRowIdsHit(renamedRalph)).toThrow(/renamed row/)
+  })
 })

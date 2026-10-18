@@ -55,6 +55,14 @@ export function assertHuaanworkRowIdsHit(
   for (const { id, intent, expectConfig, optional } of declared) {
     const row = rows.get(id)
     if (row === undefined) {
+      if (id === 'tool-ralph') {
+        // tool-ralph is intentionally absent in this variant; catch a silent
+        // upstream rename instead of letting the optional assertion swallow it.
+        const renamed = [...rows.keys()].filter(candidate => candidate !== id && /ralph/u.test(candidate))
+        if (renamed.length > 0) {
+          problems.push(`${id}: expected absent for this variant, but renamed row(s) exist: ${renamed.join(', ')}`)
+        }
+      }
       if (optional) continue
       problems.push(`${id}: declared ${intent} but the id does not exist in the composed profile (upstream renamed or removed it)`)
       continue

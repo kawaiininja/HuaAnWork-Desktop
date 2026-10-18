@@ -7,7 +7,7 @@ import {
   type DesktopBrowserAccess,
 } from '../src/desktop-browser-access.ts'
 import { DESKTOP_WEB_PORT_RETRY_LIMIT } from '../src/desktop-port.ts'
-import DesktopWebServer from '../src/webserver.ts'
+import DesktopWebServer, { assertLoopbackHost } from '../src/webserver.ts'
 
 const occupied: Server[] = []
 const contexts: Context[] = []
@@ -70,6 +70,11 @@ async function requestUpgrade(
 }
 
 describe('Desktop WebServer port policy', () => {
+  it('rejects a non-loopback host before binding', () => {
+    expect(() => assertLoopbackHost('0.0.0.0')).toThrow(/requires loopback until LAN HTTPS is available/)
+    expect(() => assertLoopbackHost('127.0.0.1')).not.toThrow()
+  })
+
   it('fails closed when asked to bind all interfaces before LAN HTTPS exists', async () => {
     const context = new Context()
     contexts.push(context)

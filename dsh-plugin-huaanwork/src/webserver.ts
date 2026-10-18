@@ -45,6 +45,12 @@ function rejectBrowserUpgrade(socket: Duplex): void {
   ].join('\r\n'))
 }
 
+export function assertLoopbackHost(host: string): void {
+  if (host !== '127.0.0.1') {
+    throw new Error('dsh-plugin-desktop: Desktop WebServer requires loopback until LAN HTTPS is available')
+  }
+}
+
 /** Reuse the upstream WebServer while retrying only real bind collisions. */
 export class DesktopWebServer extends WebServer {
   static override Config = WebServer.Config
@@ -52,9 +58,7 @@ export class DesktopWebServer extends WebServer {
   private readonly desktopConfig: Config
 
   constructor(ctx: ConstructorParameters<typeof WebServer>[0], config: Config) {
-    if (config.host !== '127.0.0.1') {
-      throw new Error('dsh-plugin-desktop: Desktop WebServer requires loopback until LAN HTTPS is available')
-    }
+    assertLoopbackHost(config.host)
     super(ctx, config)
     this.desktopConfig = config
   }

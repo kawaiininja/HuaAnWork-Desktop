@@ -399,14 +399,15 @@ describe('published package surface', () => {
       selector.endsWith(`@npm:${runtimeVersion}`)
       || selector.endsWith(`@npm:^${runtimeVersion}`))
 
-    const nextResolutions = dshResolutions.filter(([selector]) =>
+    // Dormant alpha.1 lane: retained after R-M9-R1 moved Next to rc.1.
+    const alpha1Resolutions = dshResolutions.filter(([selector]) =>
       selector.endsWith('@npm:0.2.1-alpha.1')
       || selector.endsWith('@npm:^0.2.1-alpha.1'))
 
     expect(stableResolutions.length).toBeGreaterThan(0)
     expect(betaResolutions.length).toBeGreaterThan(0)
-    expect(nextResolutions.length).toBeGreaterThan(0)
-    expect(new Set([...stableResolutions, ...betaResolutions, ...nextResolutions].map(([selector]) => selector)).size)
+    expect(alpha1Resolutions.length).toBeGreaterThan(0)
+    expect(new Set([...stableResolutions, ...betaResolutions, ...alpha1Resolutions].map(([selector]) => selector)).size)
       .toBe(dshResolutions.length)
     for (const [selector, resolution] of stableResolutions) {
       expect([stableRuntimeVersion, `^${stableRuntimeVersion}`]).toContain(selector.split('@npm:')[1])
@@ -416,7 +417,7 @@ describe('published package surface', () => {
       expect([runtimeVersion, `^${runtimeVersion}`]).toContain(selector.split('@npm:')[1])
       expect(String(resolution)).toContain(runtimeVersion)
     }
-    for (const [selector, resolution] of nextResolutions) {
+    for (const [selector, resolution] of alpha1Resolutions) {
       expect(['0.2.1-alpha.1', '^0.2.1-alpha.1']).toContain(selector.split('@npm:')[1])
       expect(String(resolution)).toContain('0.2.1-alpha.1')
     }
