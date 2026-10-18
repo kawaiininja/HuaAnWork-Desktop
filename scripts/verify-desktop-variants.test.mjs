@@ -151,8 +151,8 @@ test('verify-desktop-variants: 当前仓库实跑全绿,三通道摘要在位', 
   assert.match(out, /stable↔beta src \(\d+ files\)/)
   assert.match(out, /beta↔huaanwork src \(\d+ files\)/)
   assert.match(out, /beta↔huaanwork scripts \(\d+ files\)/)
-  assert.match(out, /stable↔beta allowlist 9 \(oneSidedPrefixes 0\)/)
-  assert.match(out, /beta↔huaanwork allowlist 24 \(oneSidedPrefixes 6\)/)
+  assert.match(out, /stable↔beta allowlist 7 \(oneSidedPrefixes 0\)/)
+  assert.match(out, /beta↔huaanwork allowlist 66 \(oneSidedPrefixes 6\)/)
 })
 
 test('pins the beta↔huaanwork divergence budget so growth is always explicit', () => {
@@ -161,12 +161,12 @@ test('pins the beta↔huaanwork divergence budget so growth is always explicit',
 
   assert.strictEqual(
     pair.allowedDifferences.length,
-    24,
-    `beta↔huaanwork allowedDifferences must hold exactly 24 entries, found ${String(pair.allowedDifferences.length)}`,
+    66,
+    `beta↔huaanwork allowedDifferences must hold exactly 66 entries, found ${String(pair.allowedDifferences.length)}`,
   )
   assert.strictEqual(
     new Set(pair.allowedDifferences).size,
-    24,
+    66,
     'beta↔huaanwork allowedDifferences must not contain duplicates',
   )
   assert.deepStrictEqual(pair.oneSidedPrefixes, [
@@ -178,7 +178,7 @@ test('pins the beta↔huaanwork divergence budget so growth is always explicit',
     'scripts/huaanwork-',
   ])
 
-  // M8 Task 2.4:三条上游新增脚本在 huaanwork 单侧不存在(只在 left/beta)。
+  // M8/M9: 上游新增脚本在 huaanwork 单侧不存在(只在 left/beta)。
   // allowedDifferences 本身**不带方向**,一旦 huaanwork 长出同名文件也会被静默吞掉,
   // 所以在白名单之外补一条方向性强制 —— 与 stable↔beta 的 scriptsOneSided 同一解法
   // (M6 盲区)。若将来 huaanwork 真的接入了 Linux 发行流水线或改用上游图标导出器,
@@ -187,6 +187,11 @@ test('pins the beta↔huaanwork divergence budget so growth is always explicit',
     'scripts/package-linux.ts',
     'scripts/verify-linux-artifacts.ts',
     'scripts/generate-windows-app-icon.mjs',
+    'scripts/prepare-runtime.ts',
+    'scripts/primary-runtime.ts',
+    'scripts/prune-python-tests.ts',
+    'scripts/sign-runtime.ts',
+    'scripts/verify-mac-runtime.ts',
   ]
   for (const entry of betaOnlyScripts) {
     assert.ok(
@@ -298,38 +303,31 @@ test('pins the stable↔beta baseline and enforces its one-sided scripts (M6 bli
   assert.deepStrictEqual(pair.oneSidedPrefixes, [])
   assert.strictEqual(
     pair.allowedDifferences.length,
-    9,
-    `stable↔beta allowedDifferences must hold exactly 9 entries, found ${String(pair.allowedDifferences.length)}`,
+    7,
+    `stable↔beta allowedDifferences must hold exactly 7 entries, found ${String(pair.allowedDifferences.length)}`,
   )
 
-  // M8 Task 2.4:此前 7 条(as-of 827e53fc03),现 6 条(as-of a50a8c4f70,即下方
-  // scriptsOneSided 的长度)。上游 350 提交把 generate-windows-app-icon.mjs 也放进了
-  // beta(合并前 fork 侧只有 stable 有),合并后两侧逐字节相同 ⇒ 该条既不再单侧、也不再
-  // 是差异,已从 allowedDifferences 撤除(见下方正向钉)。方向性强制对其余 6 条仍然生效。
-  const scriptsOneSided = [
-    'scripts/build-windows-nsis-ab.ts',
-    'scripts/inspect-windows-installed-app.ts',
-    'scripts/probe-windows-packaged-runtime.ts',
-    'scripts/run-windows-nsis-ab.ps1',
-    'scripts/verify-nsis-ab-prepackaged.ts',
-    'scripts/windows-nsis-ab.ts',
+  // M9: Upstream pruned the 6 NSIS A/B scripts, and the 0.2.1 runtime preparation
+  // and smoke scripts diverged between Stable (0.2.0-rc.2) and Beta (0.2.1-rc.1).
+  const runtimeScripts = [
+    'scripts/prepare-runtime.ts',
+    'scripts/primary-runtime.ts',
+    'scripts/sign-runtime.ts',
+    'scripts/verify-profile-boot.mjs',
   ]
-  for (const entry of scriptsOneSided) {
+  for (const entry of runtimeScripts) {
     assert.ok(
       pair.allowedDifferences.includes(entry),
       `${entry} must stay registered as an allowed difference`,
     )
-  }
-
-  for (const entry of scriptsOneSided) {
     const relative = entry.slice('scripts/'.length)
     assert.ok(
-      !existsSync(resolve(import.meta.dirname, '..', pair.right, 'scripts', relative)),
-      `${entry} is a stable-only script; it must not appear in ${pair.right}/scripts/`,
+      existsSync(resolve(import.meta.dirname, '..', pair.left, 'scripts', relative)),
+      `${entry} must exist in ${pair.left}/scripts/`,
     )
     assert.ok(
-      existsSync(resolve(import.meta.dirname, '..', pair.left, 'scripts', relative)),
-      `${entry} must exist in ${pair.left}/scripts/ (otherwise the slot is a zombie)`,
+      existsSync(resolve(import.meta.dirname, '..', pair.right, 'scripts', relative)),
+      `${entry} must exist in ${pair.right}/scripts/`,
     )
   }
 
