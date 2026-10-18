@@ -475,6 +475,11 @@ try {
     '@deepseek-ai/dsh-client-ui-workflow-run',
     '@deepseek-ai/dsh-client-ui-schedule',
     '@deepseek-ai/dsh-client-ui-user-questions',
+    // uiConversation dependents added by 0.2.1-rc.1 (inject gained the
+    // conversation service; M9 真机实测 RendererStartupFailure on these three).
+    '@deepseek-ai/dsh-client-ui-skill',
+    '@deepseek-ai/dsh-client-ui-reference',
+    '@deepseek-ai/dsh-client-ui-secret-mask',
     '@deepseek-ai/dsh-client-ui-directory-picker-native',
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
