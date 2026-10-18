@@ -238,7 +238,6 @@ export const PAIRS = [
       'src/webserver.ts',
       // M9: Upstream 2.1 primary runtime packaging and platform scripts active in
       // desktop-beta but not incorporated into huaanwork (which does not carry Python runtime).
-      'scripts/mac-universal.ts',
       'scripts/package-mac.ts',
       'scripts/package-win-portable.ts',
       'scripts/package-win.ts',
