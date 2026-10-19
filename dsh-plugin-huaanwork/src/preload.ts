@@ -5,6 +5,12 @@ import { SETUP_ONBOARDING_CHANNEL } from './setup-onboarding-bridge.ts'
 import { DESKTOP_FILE_PATH_BRIDGE } from './file-path-bridge-contract.ts'
 import { DESKTOP_NATIVE_DIRECTORY_PICKER_CHANNEL } from './directory-picker-contract.ts'
 import {
+  HOST_LIVENESS_CHANNEL,
+  HOST_LIVENESS_READ_CHANNEL,
+  HOST_LIVENESS_STOP_CHANNEL,
+  HOST_LIVENESS_TURNS_CHANNEL,
+} from './host-liveness.ts'
+import {
   DESKTOP_RENDERER_ACTION_CHANNEL,
   DESKTOP_RENDERER_ACTIONS_BRIDGE,
   type DesktopRendererAction,
@@ -44,4 +50,15 @@ contextBridge.exposeInMainWorld('dshDesktopSetup', {
   dismissAccount: (profile: string) => ipcRenderer.invoke(SETUP_ONBOARDING_CHANNEL, { action: 'dismiss-account', profile }),
   applyPending: (profile: string) => ipcRenderer.invoke(SETUP_ONBOARDING_CHANNEL, { action: 'apply-pending', profile }),
   finish: (profile: string, selection?: unknown) => ipcRenderer.invoke(SETUP_ONBOARDING_CHANNEL, { action: 'finish', profile, selection }),
+})
+
+contextBridge.exposeInMainWorld('huaanworkHostLiveness', {
+  read: () => ipcRenderer.invoke(HOST_LIVENESS_READ_CHANNEL),
+  onChange(listener: (state: { phase: 'ok' | 'suspect' | 'stoppable'; turns: number }) => void) {
+    const wrapped = (_event: unknown, state: { phase: 'ok' | 'suspect' | 'stoppable'; turns: number }) => listener(state)
+    ipcRenderer.on(HOST_LIVENESS_CHANNEL, wrapped)
+    return () => { ipcRenderer.removeListener(HOST_LIVENESS_CHANNEL, wrapped) }
+  },
+  reportTurns: (turns: number) => { ipcRenderer.send(HOST_LIVENESS_TURNS_CHANNEL, turns) },
+  requestStop: () => ipcRenderer.invoke(HOST_LIVENESS_STOP_CHANNEL),
 })

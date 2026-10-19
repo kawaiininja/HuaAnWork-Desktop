@@ -262,6 +262,19 @@ function IconSidebar() {
   );
 }
 
+type HostLivenessPhase = "ok" | "suspect" | "stoppable";
+
+type HostLivenessBridge = {
+  read(): Promise<{ phase: HostLivenessPhase; turns: number }>;
+  onChange(listener: (state: { phase: HostLivenessPhase; turns: number }) => void): () => void;
+  reportTurns(turns: number): void;
+  requestStop(): Promise<boolean>;
+};
+
+function hostLivenessBridge(): HostLivenessBridge | undefined {
+  return (window as unknown as { huaanworkHostLiveness?: HostLivenessBridge }).huaanworkHostLiveness;
+}
+
 function IconRightPane() {
   return (
     <svg viewBox="0 0 16 16" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={1.4} strokeLinecap="round" aria-hidden>
@@ -315,6 +328,7 @@ export default function App() {
   const [keepAwakeUnavailable, setKeepAwakeUnavailable] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
   const [turnActive, setTurnActive] = useState(false);
+  const [hostPhase, setHostPhase] = useState<HostLivenessPhase>("ok");
   /** 当前未结束回合的最近一次 reasoning 增量、正文增量或工具结果。句子只由 turnStatus 算出。 */
   const [turnPulse, setTurnPulse] = useState<{
     tabId: string;
@@ -1034,6 +1048,27 @@ export default function App() {
     return () => clearInterval(timer);
   }, [turnActive]);
 
+  useEffect(() => {
+    const bridge = hostLivenessBridge();
+    if (!bridge) return;
+    let alive = true;
+    const report = () => bridge.reportTurns((turnActive ? 1 : 0) + runningAutomationIds.size);
+    report();
+    void bridge.read().then((state) => {
+      if (!alive) return;
+      setHostPhase(state.phase);
+      report();
+    }).catch(() => {});
+    const stop = bridge.onChange((state) => {
+      setHostPhase(state.phase);
+      report();
+    });
+    return () => {
+      alive = false;
+      stop();
+    };
+  }, [turnActive, runningAutomationIds]);
+
   /**
    * 重启重建的运行对话骨架：首次打开时懒加载运行日志回填内容（不调 session.resume、
    * 不切工作区——激活不抢上下文，工作区对齐推迟到发送时由 send() 做）。
@@ -1386,7 +1421,7 @@ export default function App() {
     const text = draft.trim();
     const invokedSkill = parseSlashInvoke(text);
     const invokedAt = parseAtInvoke(text);
-    if ((!text && !invokedAt) || sidecarDead || turnActive) return;
+    if ((!text && !invokedAt) || sidecarDead || turnActive || hostPhase !== "ok") return;
     if (tryOpenAutomationFromDraft(text)) return;
     if (automationActiveRef.current) {
       noteActive("后台任务运行中，请稍候再发送消息。");
@@ -1817,6 +1852,7 @@ export default function App() {
             <header className="side-header">
               <span>任务</span>
             </header>
+            {hostPhase !== "ok" ? <p className="side-muted">执行进程无响应</p> : null}
             {unscopedWorkSessions.length === 0 && runTabs.length === 0 ? (
               <p className="side-muted">暂无任务</p>
             ) : (
@@ -1836,7 +1872,7 @@ export default function App() {
                         }}
                       >
                         <span className="recent-title">{tab.label}</span>
-                        <span className="recent-meta">自动化运行{running ? " · 运行中" : ""}</span>
+                        <span className="recent-meta">自动化运行{running ? " · 运行中" : ""}{hostPhase !== "ok" ? " · 执行进程无响应" : ""}</span>
                       </button>
                     </li>
                   );
@@ -1858,7 +1894,7 @@ export default function App() {
                         }}
                       >
                         <span className="recent-title">{title}</span>
-                        <span className="recent-meta">{sessionMetaOf(session)}</span>
+                        <span className="recent-meta">{sessionMetaOf(session)}{hostPhase !== "ok" ? " · 执行进程无响应" : ""}</span>
                       </button>
                     </li>
                   );
@@ -1879,6 +1915,7 @@ export default function App() {
                 ＋ 新建
               </button>
             </header>
+            {hostPhase !== "ok" ? <p className="side-muted">执行进程无响应</p> : null}
             <ProjectsPanel
               projects={projects}
               activeProjectId={activeProjectId}
@@ -1916,6 +1953,16 @@ export default function App() {
           {pluginFail ? <div className="banner error">{pluginFail}</div> : null}
           {guardModeError ? <div className="banner error">{guardModeError}</div> : null}
           {sessionFailed ? <div className="banner error">会话已失败。上次 diff 保留在右侧，本轮不再继续。</div> : null}
+          {hostPhase !== "ok" ? (
+            <div className="banner warn" role="status">
+              执行进程无响应
+              {hostPhase === "stoppable" ? (
+                <button type="button" className="chip" onClick={() => void hostLivenessBridge()?.requestStop()}>
+                  结束进程
+                </button>
+              ) : null}
+            </div>
+          ) : null}
 
           {view === "skills" ? (
             <SkillsView />
@@ -2168,7 +2215,7 @@ export default function App() {
                     停止
                   </button>
                 ) : (
-                  <button type="submit" className="send" aria-label="发送" disabled={blocked || runTabLive || !draft.trim()}>
+                  <button type="submit" className="send" aria-label="发送" disabled={blocked || runTabLive || !draft.trim() || hostPhase !== "ok"}>
                     ↑
                   </button>
                 )}

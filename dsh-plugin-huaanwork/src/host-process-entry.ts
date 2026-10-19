@@ -28,6 +28,7 @@ const rpc = new HostRpc({
 let host: DesktopStartupGenerationHost | undefined
 let inspectServices = () => ({ aaRuntime: false, aaOnboarding: false })
 rpc.handle('status', () => ({ pid: process.pid, services: inspectServices() }))
+rpc.handle('liveness', () => ({ ok: true }))
 let starting = false
 let stopping = false
 let lan: DesktopLanHttpsRuntime | undefined
