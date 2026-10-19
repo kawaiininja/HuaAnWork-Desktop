@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, test } from "vitest";
 
-import { apply, HuaAnWorkAdapter, loadSettings } from "../../src/huaanwork-guardrails/model.ts";
+import { parseSseToolCalls } from "@huaanwork/model";
+
+import { apply, HuaAnWorkAdapter, isRegisteredToolName, loadSettings } from "../../src/huaanwork-guardrails/model.ts";
 import { ToolCallId, type GenerateOptions, type StreamChunk } from "@deepseek-ai/dsh-llm";
 
 function userOptions(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
@@ -591,4 +593,20 @@ describe('model settings resolve from the injected profile directory', () => {
     expect(loadSettings(home).base_url).not.toBe('http://127.0.0.1:9999/v1')
   })
 })
+
+test("route tool names survive the static tool filter", () => {
+  const payloads = [
+    JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "propose_plan", arguments: "{\"objective\":\"汇总三份材料\"}" } }] } }],
+    }),
+  ];
+  assert.equal(parseSseToolCalls(payloads, isRegisteredToolName).length, 1);
+
+  const requestInput = [
+    JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "c2", function: { name: "request_input", arguments: "{\"prompt\":\"还缺哪一份\"}" } }] } }],
+    }),
+  ];
+  assert.equal(parseSseToolCalls(requestInput, isRegisteredToolName).length, 1);
+});
 

@@ -333,3 +333,15 @@ test('presentAs("ptc") 被拒(D1:0.1.6-alpha.2 呈现模式改名后的 run_code
     "should emit session/end with ok:false",
   );
 });
+
+test("ALLOWED_TOOLS includes propose_plan and request_input", () => {
+  const agent = createMockAgent({
+    sessionId: "work-route",
+    initialToolNames: ["read", "propose_plan", "request_input"],
+  });
+  const ctx = createMockContext({ agents: [agent] });
+  apply(ctx as never);
+  const allow = agent.restrictCalls[0].allow;
+  assert.ok(allow.includes("propose_plan"));
+  assert.ok(allow.includes("request_input"));
+});
