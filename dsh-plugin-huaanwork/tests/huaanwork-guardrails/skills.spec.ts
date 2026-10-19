@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 
+import { childrenOf } from "../../src/huaanwork-host/child-sessions.ts";
 import { apply as applyLimits } from "../../src/huaanwork-guardrails/limits.ts";
 import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
@@ -584,6 +585,36 @@ test("empty persona does not start a subagent", async () => {
     assert.equal(originalCalls, 0);
     assert.equal(ctx.huaanworkAgentRequest.current, undefined);
   }
+});
+
+test("overlapping startActivation calls register each child under its own parent", async () => {
+  const startListeners: Array<(info: unknown) => void> = [];
+  const gates = new Map<string, () => void>();
+  const ctx = {
+    skills: { register: () => () => undefined },
+    on(event: string, listener: (info: unknown) => void) {
+      if (event === "subagent/start") startListeners.push(listener);
+    },
+    subagents: {
+      start: async () => ({}),
+      async startActivation(spec: { request: { parent: { session: { id: string } } }; childId: string }) {
+        await new Promise<void>((resolve) => gates.set(spec.childId, resolve));
+        for (const listener of startListeners) listener({ id: spec.childId, local: true });
+        return { childId: spec.childId };
+      },
+    },
+  };
+  applySkills(ctx as never);
+  const activate = ctx.subagents.startActivation as (spec: unknown) => Promise<unknown>;
+  const first = activate({ request: { parent: { session: { id: "huaanwork-overlap-a" } } }, childId: "overlap-child-a" });
+  const second = activate({ request: { parent: { session: { id: "huaanwork-overlap-b" } } }, childId: "overlap-child-b" });
+  await new Promise((resolve) => setImmediate(resolve));
+  gates.get("overlap-child-a")?.();
+  await first;
+  gates.get("overlap-child-b")?.();
+  await second;
+  assert.deepEqual(childrenOf("huaanwork-overlap-a"), ["overlap-child-a"]);
+  assert.deepEqual(childrenOf("huaanwork-overlap-b"), ["overlap-child-b"]);
 });
 
 test("subagent start error still clears current request", async () => {

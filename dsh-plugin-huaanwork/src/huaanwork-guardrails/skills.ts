@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -113,7 +114,8 @@ export function apply(ctx: Context): void {
   const lifted = new WeakMap<Agent, () => void>();
   let pendingSpawn: SkillKind | undefined;
   let restricting = false;
-  let startParentSessionId: string | undefined;
+  // subagent/start 在 start 的异步链内同步派发且载荷不带 parent；按调用隔离，重叠的 start 不会互相覆盖。
+  const startParent = new AsyncLocalStorage<string | undefined>();
 
   ctx.skills.register(loadSkill("explore.md"));
   ctx.skills.register(loadSkill("test-fix.md"));
@@ -182,7 +184,7 @@ export function apply(ctx: Context): void {
 
   ctx.on("subagent/start", ((info: { id?: string; parent?: unknown }) => {
     if (!info.id) return;
-    const parentId = startParentSessionId ?? sessionIdOf(info.parent) ?? currentCallerSession();
+    const parentId = startParent.getStore() ?? sessionIdOf(info.parent) ?? currentCallerSession();
     if (parentId && parentId !== info.id) registerChildSession(parentId, info.id);
     const child = ctx.agents?.get?.(info.id);
     if (child) consumePendingSpawn(child);
@@ -215,14 +217,7 @@ export function apply(ctx: Context): void {
         // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写。
         // 事件载荷没有 parent；父会话 id 取这次 start 的 parent，缺省用发起调用的用户会话。
         const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
-        const previousParent = startParentSessionId;
-        startParentSessionId = parentFromCall;
-        let run: any;
-        try {
-          run = await original(...args);
-        } finally {
-          startParentSessionId = previousParent;
-        }
+        const run: any = await startParent.run(parentFromCall, () => original(...args));
         if (current && run?.localAgent) {
           const tools = run.localAgent.ctx?.get?.("tools");
           const schemas = tools?.schemas?.() ?? [];
@@ -250,13 +245,7 @@ export function apply(ctx: Context): void {
     const originalActivation = activation.bind(ctx.subagents);
     ctx.subagents.startActivation = async (...args: never[]) => {
       const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
-      const previousParent = startParentSessionId;
-      startParentSessionId = parentFromCall;
-      try {
-        return await originalActivation(...args);
-      } finally {
-        startParentSessionId = previousParent;
-      }
+      return startParent.run(parentFromCall, () => originalActivation(...args));
     };
   }
 }
