@@ -1538,7 +1538,6 @@ export function prepareDesktopProfile(
     { id: 'workflow-ptc', disabled: true },
     { id: 'tool-workflow', disabled: true },
     { id: 'tool-ralph', disabled: true },
-    { id: 'user-questions', disabled: true },
     { id: 'fs-sandbox', config: { cwd: workspaceRoot } },
     { id: 'sandbox-policy', config: { workspaceRoot, mode: 'workspace-write' } },
     {
@@ -1554,6 +1553,7 @@ export function prepareDesktopProfile(
         { id: 'huaanwork-agent-tool', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/agent-tool' },
         { id: 'huaanwork-agent-mcp', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/agent-mcp' },
         { id: 'huaanwork-approval', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/approval' },
+        { id: 'huaanwork-question-answerer', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/question-answerer' },
         { id: 'huaanwork-present-as', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/present-as' },
         { id: 'huaanwork-route-tools', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/route-tool-plugin' },
         { id: 'huaanwork-skills', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/skills' },

@@ -39,6 +39,7 @@ export default defineConfig([
       'huaanwork-guardrails/sandbox-cwd': 'src/huaanwork-guardrails/sandbox-cwd.ts',
       'huaanwork-guardrails/present-as': 'src/huaanwork-guardrails/present-as.ts',
       'huaanwork-guardrails/route-tool-plugin': 'src/huaanwork-guardrails/route-tool-plugin.ts',
+      'huaanwork-guardrails/question-answerer': 'src/huaanwork-guardrails/question-answerer.ts',
       'huaanwork-guardrails/model': 'src/huaanwork-guardrails/huaanwork-model.ts',
       'huaanwork-guardrails/thinking-prompt': 'src/huaanwork-guardrails/thinking-prompt.ts',
       'huaanwork-guardrails/git': 'src/huaanwork-guardrails/git.ts',

@@ -1277,7 +1277,6 @@ virtualStoreDirMaxLength: 60
       'tool-web',
       'workflow-ptc',
       'tool-workflow',
-      'user-questions',
     ]) {
       expect(rows.get(id)?.disabled).toBe(true)
     }

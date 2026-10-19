@@ -96,6 +96,10 @@
       "types": "./lib/types/huaanwork-guardrails/route-tool-plugin.d.ts",
       "default": "./lib/huaanwork-guardrails/route-tool-plugin.js"
     },
+    "./huaanwork-guardrails/question-answerer": {
+      "types": "./lib/types/huaanwork-guardrails/question-answerer.d.ts",
+      "default": "./lib/huaanwork-guardrails/question-answerer.js"
+    },
     "./huaanwork-guardrails/model": {
       "types": "./lib/types/huaanwork-guardrails/model.d.ts",
       "default": "./lib/huaanwork-guardrails/model.js"

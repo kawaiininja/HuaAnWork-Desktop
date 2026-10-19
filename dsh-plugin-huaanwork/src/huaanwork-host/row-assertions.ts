@@ -33,7 +33,6 @@ export const HUAANWORK_ROW_ASSERTIONS: readonly RowHitAssertion[] = [
   { id: 'workflow-ptc', intent: 'disable' },
   { id: 'tool-workflow', intent: 'disable' },
   { id: 'tool-ralph', intent: 'disable', optional: true },
-  { id: 'user-questions', intent: 'disable' },
   { id: 'fs-sandbox', intent: 'override' },
   { id: 'sandbox-policy', intent: 'override', expectConfig: { mode: 'workspace-write' } },
 ]
