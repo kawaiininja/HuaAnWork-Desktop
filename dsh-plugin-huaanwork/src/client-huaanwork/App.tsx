@@ -97,7 +97,7 @@ import {
   unscopedSessions,
 } from "./logic/sessionChannel.ts";
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
-import { resolveThinking, shouldRenderThinking } from "./logic/thinkingPanel.ts";
+import { hasAssistantTextAfter, resolveThinking, shouldRenderThinking } from "./logic/thinkingPanel.ts";
 import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
@@ -2619,19 +2619,6 @@ function thinkingBefore(items: readonly ChatItem[], index: number): Extract<Chat
     if (item.kind === "thinking") return item;
   }
   return undefined;
-}
-
-function hasAssistantTextAfter(items: readonly ChatItem[], index: number): boolean {
-  const current = items[index];
-  if (current?.kind !== "thinking") return false;
-  for (let i = index + 1; i < items.length; i += 1) {
-    const item = items[i];
-    if (item.kind === "user") return false;
-    if (item.kind === "assistant") {
-      return resolveThinking({ reasoning: current.thought, assistantText: item.text }).visible.trim().length > 0;
-    }
-  }
-  return false;
 }
 
 function hasVisibleReply(items: ChatItem[]): boolean {

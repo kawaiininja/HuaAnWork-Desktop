@@ -50,3 +50,25 @@ export function thinkingChrome(input: {
 export function shouldRenderThinking(thought: string): boolean {
   return thought.trim().length > 0;
 }
+
+type TurnItem =
+  | { kind: "thinking"; thought: string }
+  | { kind: "assistant"; text: string }
+  | { kind: "user" }
+  | { kind: "tool" }
+  | { kind: "ask" }
+  | { kind: "note" };
+
+export function hasAssistantTextAfter(items: readonly TurnItem[], index: number): boolean {
+  const current = items[index];
+  if (current?.kind !== "thinking") return false;
+  for (let i = index + 1; i < items.length; i += 1) {
+    const item = items[i];
+    if (item.kind === "user") return false;
+    if (item.kind === "assistant") {
+      const visible = resolveThinking({ reasoning: current.thought, assistantText: item.text }).visible.trim();
+      if (visible.length > 0) return true;
+    }
+  }
+  return false;
+}

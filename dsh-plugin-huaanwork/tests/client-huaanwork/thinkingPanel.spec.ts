@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { extractThinkBlocks, resolveThinking, thinkingChrome } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
-import { shouldRenderThinking } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
+import {
+  extractThinkBlocks,
+  hasAssistantTextAfter,
+  resolveThinking,
+  shouldRenderThinking,
+  thinkingChrome,
+} from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 
 test("reasoning wins and think tags stay out of the answer", () => {
   const resolved = resolveThinking({
@@ -50,4 +55,24 @@ test("panel collapses when answer text arrives unless the user toggled it", () =
 test("blank thought does not render a panel", () => {
   assert.equal(shouldRenderThinking("  "), false);
   assert.equal(shouldRenderThinking("先看文件"), true);
+});
+
+test("later answer text counts after a think-only assistant item", () => {
+  const items = [
+    { kind: "thinking" as const, thought: "先看文件" },
+    { kind: "assistant" as const, text: "<think>还没完" },
+    { kind: "tool" as const },
+    { kind: "assistant" as const, text: "这是答案" },
+  ];
+  assert.equal(hasAssistantTextAfter(items, 0), true);
+});
+
+test("a following user message ends the scan", () => {
+  const items = [
+    { kind: "thinking" as const, thought: "先看文件" },
+    { kind: "assistant" as const, text: "<think></think>" },
+    { kind: "user" as const },
+    { kind: "assistant" as const, text: "下一轮的答案" },
+  ];
+  assert.equal(hasAssistantTextAfter(items, 0), false);
 });
