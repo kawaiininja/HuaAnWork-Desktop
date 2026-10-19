@@ -32,6 +32,7 @@ type Agent = {
   ctx?: {
     get?(name: string): ToolsService | undefined;
   };
+  session?: { header?: { parentSession?: unknown } };
 };
 
 type SkillRegistration = {
@@ -184,9 +185,10 @@ export function apply(ctx: Context): void {
 
   ctx.on("subagent/start", ((info: { id?: string; parent?: unknown }) => {
     if (!info.id) return;
-    const parentId = startParent.getStore() ?? sessionIdOf(info.parent) ?? currentCallerSession();
-    if (parentId && parentId !== info.id) registerChildSession(parentId, info.id);
     const child = ctx.agents?.get?.(info.id);
+    // 冷恢复从 sendMessage 派发，不经 start 包装；进程级最近发送可能是兄弟会话，不能拿来兜底。
+    const parentId = sessionIdOf(child?.session?.header?.parentSession) ?? startParent.getStore() ?? sessionIdOf(info.parent);
+    if (parentId && parentId !== info.id) registerChildSession(parentId, info.id);
     if (child) consumePendingSpawn(child);
   }) as never);
 

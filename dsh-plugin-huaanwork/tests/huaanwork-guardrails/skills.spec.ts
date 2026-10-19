@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 
-import { childrenOf } from "../../src/huaanwork-host/child-sessions.ts";
+import { childrenOf, noteCallerSession } from "../../src/huaanwork-host/child-sessions.ts";
 import { apply as applyLimits } from "../../src/huaanwork-guardrails/limits.ts";
 import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
@@ -615,6 +615,31 @@ test("overlapping startActivation calls register each child under its own parent
   await second;
   assert.deepEqual(childrenOf("huaanwork-overlap-a"), ["overlap-child-a"]);
   assert.deepEqual(childrenOf("huaanwork-overlap-b"), ["overlap-child-b"]);
+});
+
+test("a cold-resumed child stays on its own parent, never the last sibling send", () => {
+  const startListeners: Array<(info: unknown) => void> = [];
+  const agents = new Map<string, unknown>([
+    ["cold-child-with-header", { session: { header: { parentSession: "huaanwork-cold-a" } } }],
+    ["cold-child-no-header", { session: { header: {} } }],
+  ]);
+  const ctx = {
+    skills: { register: () => () => undefined },
+    on(event: string, listener: (info: unknown) => void) {
+      if (event === "subagent/start") startListeners.push(listener);
+    },
+    agents: { get: (id: string) => agents.get(id) },
+  };
+  applySkills(ctx as never);
+  noteCallerSession("huaanwork-cold-b");
+  try {
+    for (const listener of startListeners) listener({ id: "cold-child-with-header", local: true });
+    for (const listener of startListeners) listener({ id: "cold-child-no-header", local: true });
+    assert.deepEqual(childrenOf("huaanwork-cold-a"), ["cold-child-with-header"]);
+    assert.deepEqual(childrenOf("huaanwork-cold-b"), []);
+  } finally {
+    noteCallerSession(undefined);
+  }
 });
 
 test("subagent start error still clears current request", async () => {
