@@ -97,7 +97,9 @@ import {
   unscopedSessions,
 } from "./logic/sessionChannel.ts";
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
+import { resolveThinking, shouldRenderThinking } from "./logic/thinkingPanel.ts";
 import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
+import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
 /**
  * 用户对话会话 id（事件路由用）：huaanwork-chat- 旧会话与 huaanwork-<16hex digest> 新会话。
@@ -133,6 +135,7 @@ type AskCard = {
 type ChatItem =
   | { id: number; kind: "user"; text: string }
   | { id: number; kind: "assistant"; text: string }
+  | { id: number; kind: "thinking"; thought: string; interrupted: boolean }
   | { id: number; kind: "tool"; card: ToolCard }
   | { id: number; kind: "ask"; card: AskCard }
   | { id: number; kind: "note"; text: string };
@@ -1946,14 +1949,16 @@ export default function App() {
                     </div>
                   </div>
                 ) : null}
-                {items.map((item) => {
-                  if (item.kind === "assistant") {
-                    const visible = stripThinking(item.text);
-                    if (!visible) return null;
-                    return <ChatRow key={item.id} item={{ ...item, text: visible }} blocked={blocked} onAnswer={answer} />;
-                  }
-                  return <ChatRow key={item.id} item={item} blocked={blocked} onAnswer={answer} />;
-                })}
+                {items.map((item, index) => (
+                  <ChatRow
+                    key={item.id}
+                    item={item}
+                    blocked={blocked}
+                    onAnswer={answer}
+                    reasoning={item.kind === "assistant" ? (thinkingBefore(items, index)?.thought ?? "") : ""}
+                    hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(items, index) : false}
+                  />
+                ))}
                 {turnActive && !hasVisibleReply(items) ? <div className="note">正在生成…</div> : null}
                 <div ref={chatEndRef} />
               </div>
@@ -2537,13 +2542,41 @@ function ChatRow({
   item,
   blocked,
   onAnswer,
+  reasoning = "",
+  hasAssistantText = false,
 }: {
   item: ChatItem;
   blocked: boolean;
   onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
+  reasoning?: string;
+  hasAssistantText?: boolean;
 }) {
   if (item.kind === "user") return <div className="bubble user">{item.text}</div>;
-  if (item.kind === "assistant") return <div className="bubble assistant">{item.text}</div>;
+  if (item.kind === "thinking") {
+    if (!shouldRenderThinking(item.thought)) return null;
+    return (
+      <ThinkingPanel
+        thought={item.thought}
+        hasAssistantText={hasAssistantText}
+        interrupted={item.interrupted}
+      />
+    );
+  }
+  if (item.kind === "assistant") {
+    const resolved = resolveThinking({ reasoning, assistantText: item.text });
+    const visible = resolved.visible;
+    const answerReady = visible.trim().length > 0;
+    const panelThought = reasoning.trim().length > 0 ? "" : resolved.thought;
+    if (!shouldRenderThinking(panelThought) && !answerReady) return null;
+    return (
+      <>
+        {shouldRenderThinking(panelThought) ? (
+          <ThinkingPanel thought={panelThought} hasAssistantText={answerReady} interrupted={false} />
+        ) : null}
+        {answerReady ? <div className="bubble assistant">{visible}</div> : null}
+      </>
+    );
+  }
   if (item.kind === "note") return <div className="note">{item.text}</div>;
   if (item.kind === "tool") {
     return (
@@ -2579,28 +2612,38 @@ function ChatRow({
   );
 }
 
-const THINK_TAGS = ["<think>", "<thinking>", "</think>", "</thinking>"];
-
-function holdIncompleteThinkTag(text: string): string {
-  const lt = text.lastIndexOf("<");
-  if (lt < 0) return text;
-  const suffix = text.slice(lt);
-  if (suffix.includes(">")) return text;
-  const lower = suffix.toLowerCase();
-  return THINK_TAGS.some((tag) => tag.startsWith(lower)) ? text.slice(0, lt) : text;
+function thinkingBefore(items: readonly ChatItem[], index: number): Extract<ChatItem, { kind: "thinking" }> | undefined {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const item = items[i];
+    if (item.kind === "user") return undefined;
+    if (item.kind === "thinking") return item;
+  }
+  return undefined;
 }
 
-function stripThinking(text: string): string {
-  const head = holdIncompleteThinkTag(text);
-  const withoutBlocks = head.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "");
-  return withoutBlocks.replace(/<think(?:ing)?>[\s\S]*$/i, "");
+function hasAssistantTextAfter(items: readonly ChatItem[], index: number): boolean {
+  const current = items[index];
+  if (current?.kind !== "thinking") return false;
+  for (let i = index + 1; i < items.length; i += 1) {
+    const item = items[i];
+    if (item.kind === "user") return false;
+    if (item.kind === "assistant") {
+      return resolveThinking({ reasoning: current.thought, assistantText: item.text }).visible.trim().length > 0;
+    }
+  }
+  return false;
 }
 
 function hasVisibleReply(items: ChatItem[]): boolean {
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const item = items[i];
     if (item.kind === "user") return false;
-    if (item.kind === "assistant" && stripThinking(item.text).trim().length > 0) return true;
+    if (
+      item.kind === "assistant"
+      && resolveThinking({ reasoning: thinkingBefore(items, i)?.thought ?? "", assistantText: item.text }).visible.trim().length > 0
+    ) {
+      return true;
+    }
   }
   return false;
 }

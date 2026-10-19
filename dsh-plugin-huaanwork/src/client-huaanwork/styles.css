@@ -900,6 +900,13 @@ button {
   font-size: 12px;
 }
 
+.thinking-body {
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--text-muted);
+}
+
 /* 工具调用 pill */
 
 .tool-row {

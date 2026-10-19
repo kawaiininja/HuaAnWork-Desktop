@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { extractThinkBlocks, resolveThinking, thinkingChrome } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
+import { shouldRenderThinking } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 
 test("reasoning wins and think tags stay out of the answer", () => {
   const resolved = resolveThinking({
@@ -44,4 +45,9 @@ test("panel collapses when answer text arrives unless the user toggled it", () =
     thinkingChrome({ thought: "先看文件", hasAssistantText: false, userToggled: null, interrupted: true }).title,
     "思考 · 已中断",
   );
+});
+
+test("blank thought does not render a panel", () => {
+  assert.equal(shouldRenderThinking("  "), false);
+  assert.equal(shouldRenderThinking("先看文件"), true);
 });

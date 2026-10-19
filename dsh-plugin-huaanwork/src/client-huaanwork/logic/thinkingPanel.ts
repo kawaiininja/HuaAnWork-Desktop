@@ -46,3 +46,7 @@ export function thinkingChrome(input: {
   if (input.userToggled === "collapse") return { title, expanded: false };
   return { title, expanded: !input.hasAssistantText };
 }
+
+export function shouldRenderThinking(thought: string): boolean {
+  return thought.trim().length > 0;
+}
