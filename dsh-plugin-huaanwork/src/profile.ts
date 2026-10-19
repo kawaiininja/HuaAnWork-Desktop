@@ -1546,6 +1546,7 @@ export function prepareDesktopProfile(
         { id: 'huaanwork-host', name: 'dsh-plugin-huaanwork/huaanwork-host', config: { dshHome: home, profileDir: profile.dir, workspaceRoot, ...(checkpointUserDataDir !== undefined ? { checkpointUserDataDir } : {}) } },
         // 插入顺序契约(旧 cordis.patch.yml:43-65,load-order 即安全边界):不得重排。
         { id: 'huaanwork-model', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/model' },
+        { id: 'huaanwork-thinking-prompt', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/thinking-prompt' },
         { id: 'huaanwork-policy', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/policy' },
         { id: 'huaanwork-sandbox-cwd', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/sandbox-cwd' },
         { id: 'huaanwork-git', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/git' },
