@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
+import { emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import {
+  sendToAgent,
   sessionAnswerApproval,
   sessionCancel,
   sessionList,
@@ -12,6 +14,7 @@ import {
   sessionRemove,
   sessionResume,
   sessionSend,
+  setAgentsDirectory,
   type ListedAgent,
   type SessionRuntimeContext,
 } from '../../src/huaanwork-host/sessions.ts'
@@ -186,6 +189,72 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
     expect(message.role).toBe('user')
     expect(message.content[0]).toEqual({ type: 'text', text: '你好' })
     expect(message.source).toEqual({ kind: 'user' })
+  })
+
+  test('sendToAgent returns after followup and detaches @ tools only after idle', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = 'huaanwork-0123456789abcdef'
+    const maps = emptyAttachments()
+    let releaseIdle: () => void = () => {}
+    const idle = new Promise<void>((resolve) => {
+      releaseIdle = resolve
+    })
+    const agent: ListedAgent = {
+      id: sessionId,
+      session: { id: sessionId },
+      followup: () => undefined,
+      whenIdle: () => idle,
+    }
+    const ctx = {
+      huaanworkAttachments: maps,
+      agents: {
+        get: (id: string) => (id === sessionId ? agent : undefined),
+        list: () => [agent],
+      },
+    }
+    const emptyDirectory = {
+      list: () => ({ items: [] }),
+      refresh: async () => ({ items: [] }),
+      get: async () => undefined,
+      setEnabled: () => undefined,
+      addEndpoint: () => ({ ok: false as const, fieldErrors: [] }),
+      removeEndpoint: () => undefined,
+      snapshotForRuntime: () => ({ items: [] }),
+    }
+    setAgentsDirectory({
+      ...emptyDirectory,
+      list: () => ({
+        items: [
+          {
+            name: 'tool',
+            source: 'local',
+            kind: 'tool',
+            entrypointKind: 'http',
+            description: '查询',
+            version: '1',
+            permissions: [],
+            enabled: true,
+          },
+        ],
+      }),
+    })
+    try {
+      const pending = sendToAgent(ctx, routeCtx, { text: '@tool 查询', sessionId })
+      const result = await Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(() => resolve('timed-out'), 50)),
+      ])
+      expect(result).toEqual({ queued: true, sessionId })
+      const detached = () => maps.sessionHostTools.get(sessionId)?.has('tool') !== true
+      expect(detached()).toBe(false)
+      releaseIdle()
+      await idle.then(() => new Promise((resolve) => setTimeout(resolve, 0)))
+      expect(detached()).toBe(true)
+    } finally {
+      releaseIdle()
+      setAgentsDirectory(emptyDirectory)
+    }
   })
 
   test('@agent with an unconfigured directory throws the empty-catalog error', async () => {

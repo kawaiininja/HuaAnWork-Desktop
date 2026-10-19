@@ -121,6 +121,16 @@ export async function sendToAgent(
     cleanedUp = true
     await afterIdle?.()
   }
+  // followup 受理后立即返回。@ HTTP 工具的 detach 只在 idle 之后跑，
+  // 成功路径和 finally 共用这一次登记，避免回合中途解绑或解绑两次。
+  let detachScheduled = false
+  let acceptedAgent: { whenIdle?: () => Promise<void> } | undefined
+  const scheduleDetachAfterIdle = () => {
+    if (detachScheduled) return
+    detachScheduled = true
+    const idle = acceptedAgent?.whenIdle?.() ?? Promise.resolve()
+    void idle.then(() => cleanup(), () => cleanup()).catch(() => undefined)
+  }
 
   try {
     // 显式 sessionId(对话标签绑定独立会话):不在场的会话按需 create / resume;
@@ -156,16 +166,16 @@ export async function sendToAgent(
     }
 
     const agent = await resolveAgent()
+    acceptedAgent = agent
     agent.followup({
       id: `huaanwork-${Date.now()}`,
       role: 'user',
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
     })
-    await agent.whenIdle?.()
-    await cleanup()
+    scheduleDetachAfterIdle()
   } finally {
-    await cleanup()
+    scheduleDetachAfterIdle()
   }
   return { queued: true, sessionId }
 }
