@@ -296,6 +296,18 @@ test("unknown mcp tool name denies unless attached", () => {
   assert.equal(guard({ ...call, attached: true }), "deny");
 });
 
+test("route tools are allowed when not attached in ask mode", () => {
+  for (const name of ["propose_plan", "request_input"]) {
+    const call = { name, args: {}, workspaceRoot: ws };
+    assert.equal(preExecute(call, "ask"), "allow", name);
+    assert.equal(guard(call, "ask"), "allow", name);
+  }
+
+  const madeUp = { name: "not_a_real_tool", args: {}, workspaceRoot: ws };
+  assert.equal(preExecute(madeUp, "ask"), "deny");
+  assert.equal(guard(madeUp, "ask"), "deny");
+});
+
 test("explained APIs: decisions identical to wrappers, denies carry actionable reasons", () => {
   const shellName = process.platform === "win32" ? "pwsh" : "bash";
   const wrongShell = process.platform === "win32" ? "bash" : "pwsh";

@@ -88,6 +88,8 @@ function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
       return validStringReplacement(input) ? ALLOW : deny(REASON_STR_REPLACE);
     case "skill":
     case "todo_write":
+    case "propose_plan":
+    case "request_input":
     case "subagent":
     case "git_status":
     case "git_diff":
