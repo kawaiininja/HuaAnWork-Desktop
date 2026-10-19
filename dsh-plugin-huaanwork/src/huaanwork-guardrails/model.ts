@@ -25,6 +25,8 @@ import {
   type ToolCall,
 } from "@huaanwork/model";
 
+import { preferControlCalls } from "./route-tools.ts";
+
 const PROVIDER = "deepseek-official";
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
 /** 思考模型单次流式生成经常超过 2 分钟，120 秒会把正常回合掐成超时。 */
@@ -120,14 +122,15 @@ function continueAfterReasoning(options: GenerateOptions, reasoning: string): Ge
 }
 
 function* finishModelStream(read: ModelStreamRead): Generator<StreamChunk> {
-  const toolCalls = parseSseToolCalls(read.payloads, isRegisteredToolName);
+  const toolCalls = preferControlCalls(parseSseToolCalls(read.payloads, isRegisteredToolName));
   if (toolCalls.length > 0) {
     yield* emitToolCalls(toolCalls, read.nextIndex);
     return;
   }
   const textCall = parseTextProtocol(read.text, isRegisteredToolName);
-  if (textCall) {
-    yield* emitToolCalls([textCall], read.nextIndex);
+  const textCalls = textCall ? preferControlCalls([textCall]) : [];
+  if (textCalls.length > 0) {
+    yield* emitToolCalls(textCalls, read.nextIndex);
     return;
   }
   yield* emitText(read.text, read.textStarted, read.emitted, read.textIndex, read.nextIndex, sseFinishReason(read.payloads));

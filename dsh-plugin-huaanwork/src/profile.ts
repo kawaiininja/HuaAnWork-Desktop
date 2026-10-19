@@ -1555,6 +1555,7 @@ export function prepareDesktopProfile(
         { id: 'huaanwork-agent-mcp', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/agent-mcp' },
         { id: 'huaanwork-approval', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/approval' },
         { id: 'huaanwork-present-as', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/present-as' },
+        { id: 'huaanwork-route-tools', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/route-tool-plugin' },
         { id: 'huaanwork-skills', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/skills' },
         { id: 'huaanwork-limits', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/limits' },
         { id: 'huaanwork-bridge', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/bridge' },

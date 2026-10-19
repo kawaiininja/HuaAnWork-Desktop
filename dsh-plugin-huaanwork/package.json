@@ -92,6 +92,10 @@
       "types": "./lib/types/huaanwork-guardrails/present-as.d.ts",
       "default": "./lib/huaanwork-guardrails/present-as.js"
     },
+    "./huaanwork-guardrails/route-tool-plugin": {
+      "types": "./lib/types/huaanwork-guardrails/route-tool-plugin.d.ts",
+      "default": "./lib/huaanwork-guardrails/route-tool-plugin.js"
+    },
     "./huaanwork-guardrails/model": {
       "types": "./lib/types/huaanwork-guardrails/model.d.ts",
       "default": "./lib/huaanwork-guardrails/model.js"

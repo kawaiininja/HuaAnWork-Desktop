@@ -126,6 +126,35 @@ test("stream concatenates SSE tool_calls and does not execute unknown names", as
   }
 });
 
+test("stream emits only the route call when the model also calls read", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, id: "c1", function: { name: "read", arguments: '{"path":"a.md"}' } },
+                { index: 1, id: "c2", function: { name: "propose_plan", arguments: '{"objective":"汇总三份材料"}' } },
+              ],
+            },
+          },
+        ],
+      },
+      "[DONE]",
+    ]);
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions()));
+    const names = chunks.flatMap((chunk) =>
+      chunk.type === "block-end" && chunk.block.type === "tool-call" ? [chunk.block.name] : [],
+    );
+    assert.deepEqual(names, ["propose_plan"]);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("stream parses XML text protocol when SSE has no tool_calls", async () => {
   const original = globalThis.fetch;
   const xml = `<tool_call name="read">\n<arg name="path">src/main.rs</arg>\n</tool_call>`;

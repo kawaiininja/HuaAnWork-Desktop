@@ -32,6 +32,8 @@ import type { RouteContext } from './routes.ts'
 
 export type SessionRuntimeContext = {
   huaanworkApprovals?: ApprovalMap
+  /** 分流工具 `propose_plan` / `request_input` 读取的当前会话 agent(holders.ts 注入容器)。 */
+  huaanworkRouteAgent?: { current: unknown }
   /** 工作区热切换时同步的沙箱根;缺席时只改 routeCtx.workspaceRoot holder。 */
   sandboxPolicy?: { workspaceRoot?: string }
   /** cordis Context.get。sandboxPolicy 未注入到本插件时,用它做全局查找。 */
@@ -169,6 +171,7 @@ export async function sendToAgent(
 
     const agent = await resolveAgent()
     acceptedAgent = agent
+    if (ctx.huaanworkRouteAgent) ctx.huaanworkRouteAgent.current = agent
     agent.followup({
       id: `huaanwork-${Date.now()}`,
       role: 'user',

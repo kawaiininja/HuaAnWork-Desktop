@@ -14,6 +14,11 @@ function exactString(args: unknown, key: "objective" | "question"): string | und
   return value.trim();
 }
 
+export function preferControlCalls<T extends { name: string }>(calls: readonly T[]): T[] {
+  const control = calls.find((call) => call.name === "propose_plan" || call.name === "request_input");
+  return control ? [control] : [...calls];
+}
+
 export function classifyToolCalls(calls: readonly { name: string; args: unknown }[]): RouteDecision {
   const control = calls.find((call) => call.name === "propose_plan" || call.name === "request_input");
   if (control?.name === "propose_plan") {
