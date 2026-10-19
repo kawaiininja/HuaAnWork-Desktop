@@ -15,7 +15,13 @@ import {
 } from './automations-store.ts'
 import type { RouteContext } from './routes.ts'
 import { sessionIdFor } from './session-id.ts'
-import { findSessionAgent, sendToAgent, sessionSendBlockers, type SessionRuntimeContext } from './sessions.ts'
+import {
+  findSessionAgent,
+  sendToAgent,
+  sessionSendBlockers,
+  type ListedAgent,
+  type SessionRuntimeContext,
+} from './sessions.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
 import { listProjects, recentRuns } from './stores.ts'
 import { neutralWorkspaceRoot } from './workspace-state.ts'
@@ -229,14 +235,17 @@ function stripModelThinking(text: string): string {
   return open >= 0 ? closed.slice(0, open) : closed
 }
 
-/** 只取消这一条自动化会话,不回落到通道 agent,也不顺带取消其它 live agent。 */
-function cancelAutomationSession(ctx: AutomationRuntime, sessionId: string): void {
+/** 按会话 id 精确定位自动化会话的 agent,不回落到通道 agent。 */
+function automationSessionAgent(ctx: AutomationRuntime, sessionId: string): ListedAgent | undefined {
   const direct = ctx.agents?.get?.(sessionId)
-  const agent =
-    direct && (direct.id === sessionId || direct.session?.id === sessionId)
-      ? direct
-      : ctx.agents?.list?.().find((item) => item.id === sessionId || item.session?.id === sessionId)
-  agent?.cancel?.({ kind: 'user' })
+  return direct && (direct.id === sessionId || direct.session?.id === sessionId)
+    ? direct
+    : ctx.agents?.list?.().find((item) => item.id === sessionId || item.session?.id === sessionId)
+}
+
+/** 只取消这一条自动化会话,不顺带取消其它 live agent。 */
+function cancelAutomationSession(ctx: AutomationRuntime, sessionId: string): void {
+  automationSessionAgent(ctx, sessionId)?.cancel?.({ kind: 'user' })
 }
 
 async function mergedRunPrefix(routeCtx: RouteContext, automation: AutomationInfo): Promise<string | undefined> {
@@ -274,7 +283,7 @@ async function runAgentTurn(
   // 超时与 drain 都作用在这个 turn 上。
   const turn = (async () => {
     await sendToAgent(ctx, routeCtx, { text: prompt, sessionId })
-    await findSessionAgent(ctx, sessionId)?.whenIdle?.()
+    await automationSessionAgent(ctx, sessionId)?.whenIdle?.()
   })()
   try {
     await Promise.race([

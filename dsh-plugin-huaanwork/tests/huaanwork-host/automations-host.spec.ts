@@ -20,7 +20,7 @@ import {
 import { createAutomation, normalizeAutomationInput, updateAutomation } from '../../src/huaanwork-host/automations-store.ts'
 import { ROUTE_TABLE, type RouteContext, type RouteHandler, type RouteRequest } from '../../src/huaanwork-host/routes.ts'
 import { sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
-import { sessionSendBlockers, type ListedAgent } from '../../src/huaanwork-host/sessions.ts'
+import { AGENT_ID, sessionSendBlockers, type ListedAgent } from '../../src/huaanwork-host/sessions.ts'
 import { createProject, listAutomations, recentRuns } from '../../src/huaanwork-host/stores.ts'
 import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 
@@ -782,6 +782,33 @@ test('agent run reads the collector only after the agent goes idle, and the time
   h.state.reply = 'no-idle-hook'
   await enqueueAutomation(automation, { trigger: 'manual', runId: 'idle-3' })
   expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({ status: 'ok', output: 'no-idle-hook' })
+}, 15_000)
+
+test('agent run waits on its own session agent, not the channel agent, when get(sessionId) misses', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  let channelIdleCalls = 0
+  h.installUserAgent(AGENT_ID, () => {
+    channelIdleCalls += 1
+    return Promise.resolve()
+  })
+  const agents = h.runtime.agents!
+  const get = agents.get!
+  agents.get = (id: string) => (id.startsWith('huaanwork-auto-') ? undefined : get(id))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '精确会话' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '精确会话' })
+
+  const run = enqueueAutomation(automation, { trigger: 'manual', runId: 'exact-1' })
+  await poll(() => h.followups.length === 1)
+  const sessionId = h.followups[0]!.sessionId
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(runEnds(h.events, automation.id)).toHaveLength(0)
+  expect(channelIdleCalls).toBe(0)
+  h.routeCtx.emit({ event: 'token', text: 'own-output', sessionId })
+  h.release(sessionId)
+  await run
+  expect(await recentRuns(h.profileDir, automation.id)).toMatchObject([{ status: 'ok', output: 'own-output' }])
+  expect(channelIdleCalls).toBe(0)
 }, 15_000)
 
 test('agent timeout cancels the session and settles the turn before the next agent starts', async () => {
