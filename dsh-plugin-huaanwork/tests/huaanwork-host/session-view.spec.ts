@@ -192,6 +192,34 @@ describe('detailRecords', () => {
     expect(records[0]).toMatchObject({ kind: 'user', text: '正常消息' })
   })
 
+  test('places a reasoning block ahead of the assistant text from the same message', () => {
+    const log = sessionLog([
+      HEADER,
+      {
+        type: 'assistant/message',
+        seq: 1,
+        time: T0 + 5,
+        surfaceOp: 'append',
+        data: {
+          turn: 0,
+          step: 0,
+          message: {
+            id: 'm1',
+            role: 'assistant',
+            content: [
+              { type: 'reasoning', text: '先看文件' },
+              { type: 'text', text: '好的' },
+            ],
+          },
+        },
+      },
+    ])
+    const records = detailRecords(log)
+    expect(records.map((record) => record.kind)).toEqual(['thinking', 'assistant'])
+    expect(records[0]).toMatchObject({ kind: 'thinking', time: T0 + 5, text: '先看文件' })
+    expect(records[1]).toMatchObject({ kind: 'assistant', time: T0 + 5, text: '好的' })
+  })
+
   test('truncates oversized tool results', () => {
     const log = sessionLog([HEADER, toolResult('c1', 'x'.repeat(20_000), 1, T0 + 3)])
     const [record] = detailRecords(log)

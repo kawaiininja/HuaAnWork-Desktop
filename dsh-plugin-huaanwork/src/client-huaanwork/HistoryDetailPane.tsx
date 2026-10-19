@@ -1,8 +1,10 @@
 import { useState } from "react";
+import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
 /** 会话日志详情记录（与 sidecar session-view 的 detailRecords 对齐）。 */
 export type SessionDetailRecord =
   | { kind: "user"; time: number; text: string }
+  | { kind: "thinking"; time: number; text: string }
   | { kind: "assistant"; time: number; text: string }
   | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string }
   | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string };
@@ -137,6 +139,9 @@ function SessionDetailRow({ record }: { record: SessionDetailRecord }) {
         <div className="detail-body">{record.text}</div>
       </div>
     );
+  }
+  if (record.kind === "thinking") {
+    return <ThinkingPanel thought={record.text} hasAssistantText={true} interrupted={false} />;
   }
   if (record.kind === "tool-call") {
     return (

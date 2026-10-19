@@ -84,6 +84,7 @@ export function chatTabHasConversation(tab: { items: readonly TitleItem[] }): bo
 /** 会话日志详情记录（与 sidecar session-view 的 detailRecords 对齐）。 */
 export type HistoryRecord =
   | { kind: "user"; time: number; text: string }
+  | { kind: "thinking"; time: number; text: string }
   | { kind: "assistant"; time: number; text: string }
   | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string }
   | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string };
@@ -91,6 +92,7 @@ export type HistoryRecord =
 /** 历史记录映射后的对话流条目（App 侧再包一层 id 成为 ChatItem）。 */
 export type HistoryChatItem =
   | { kind: "user"; text: string }
+  | { kind: "thinking"; text: string }
   | { kind: "assistant"; text: string }
   | { kind: "tool"; name: string; callId?: string }
   | { kind: "note"; text: string };
@@ -104,6 +106,8 @@ export function historyItemsFromRecords(records: readonly HistoryRecord[]): Hist
   for (const record of records) {
     if (record.kind === "user") {
       items.push({ kind: "user", text: record.text });
+    } else if (record.kind === "thinking") {
+      items.push({ kind: "thinking", text: record.text });
     } else if (record.kind === "assistant") {
       items.push({ kind: "assistant", text: record.text });
     } else if (record.kind === "tool-call") {

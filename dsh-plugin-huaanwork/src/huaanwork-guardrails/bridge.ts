@@ -5,12 +5,17 @@ import { capToolOutput } from "@huaanwork/policy/truncate";
 
 type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
+  | { event: "reasoning"; text: string; sessionId?: string; final?: true }
   | { event: "tool/start"; name: string; callId?: string; sessionId?: string }
   | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string }
   | { event: "diff"; text: string; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string };
 
-type StreamChunk = { type?: string; text?: string };
+type StreamChunk = {
+  type?: string;
+  text?: string;
+  block?: { type?: string; text?: string };
+};
 
 /** dsh 执行对象的 agent 引用：会话身份取 session.id，回落 agent.id（与 host 的 findAgentBySession 同形状）。 */
 type AgentRef = { id?: string; session?: { id?: string } };
@@ -112,10 +117,26 @@ async function* mapTokens(
   stream: AsyncIterable<StreamChunk>,
 ): AsyncIterable<StreamChunk> {
   for await (const chunk of stream) {
-    // 非回合流（compaction / session-title 等辅助模型调用）的 text-delta 不是回合产出：
-    // 照常透传 chunks，但不发 token 事件——否则会被运行收集器按 sessionId 误归集为该次任务的产出。
+    // 非回合流（compaction / session-title 等辅助模型调用）的 text-delta / reasoning 不是回合产出：
+    // 照常透传 chunks，但不发 token 或 reasoning 事件——否则会被运行收集器按 sessionId 误归集为该次任务的产出。
     if (purpose === undefined && chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
       emit(ctx, { event: "token", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
+    }
+    if (purpose === undefined && chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
+      emit(ctx, { event: "reasoning", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
+    }
+    if (
+      purpose === undefined
+      && chunk?.type === "block-end"
+      && chunk.block?.type === "reasoning"
+      && typeof chunk.block.text === "string"
+    ) {
+      emit(ctx, {
+        event: "reasoning",
+        text: chunk.block.text,
+        final: true,
+        ...(sessionId === undefined ? {} : { sessionId }),
+      });
     }
     yield chunk;
   }

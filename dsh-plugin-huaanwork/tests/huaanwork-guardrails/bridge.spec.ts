@@ -7,6 +7,8 @@ import { test } from "vitest";
 
 type StreamChunk =
   | { type: "text-delta"; index: number; text: string }
+  | { type: "reasoning-delta"; index: number; text: string }
+  | { type: "block-end"; index: number; block: { type: "reasoning"; text: string } }
   | { type: "finish"; reason: { kind: string } };
 
 type ToolResult = {
@@ -242,5 +244,42 @@ test("bridge skips token events for auxiliary streams (purpose compaction/sessio
   assert.equal(
     emitted.filter((event) => (event as { event?: string }).event === "token").length,
     1,
+  );
+});
+
+test("bridge forwards user-turn reasoning and skips purposed calls", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const wrap = listeners["llm/stream"]?.[0] as (
+    options: { sessionId?: string; purpose?: string },
+    next: () => AsyncIterable<StreamChunk>,
+  ) => AsyncIterable<StreamChunk>;
+  async function* userTurn() {
+    yield { type: "reasoning-delta" as const, index: 0, text: "先" };
+    yield { type: "reasoning-delta" as const, index: 0, text: "看" };
+    yield { type: "block-end" as const, index: 0, block: { type: "reasoning" as const, text: "先看" } };
+  }
+  for await (const _chunk of wrap({ sessionId: "huaanwork-0123456789abcdef" }, userTurn)) {
+    // drain
+  }
+  async function* titled() {
+    yield { type: "reasoning-delta" as const, index: 0, text: "标题思考" };
+    yield { type: "text-delta" as const, index: 1, text: "标题" };
+  }
+  for await (const _chunk of wrap({ purpose: "session-title" }, titled)) {
+    // drain
+  }
+  assert.deepEqual(
+    emitted.filter((event) => (event as { event?: string }).event === "reasoning"),
+    [
+      { event: "reasoning", text: "先", sessionId: "huaanwork-0123456789abcdef" },
+      { event: "reasoning", text: "看", sessionId: "huaanwork-0123456789abcdef" },
+      { event: "reasoning", text: "先看", sessionId: "huaanwork-0123456789abcdef", final: true },
+    ],
+  );
+  assert.deepEqual(
+    emitted.filter((event) => (event as { event?: string }).event === "token"),
+    [],
   );
 });

@@ -1552,6 +1552,9 @@ export default function App() {
         };
       }
       if (item.kind === "user") return { id: allocId(), kind: "user", text: item.text };
+      if (item.kind === "thinking") {
+        return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false };
+      }
       if (item.kind === "assistant") return { id: allocId(), kind: "assistant", text: item.text };
       return { id: allocId(), kind: "note", text: item.text };
     });
@@ -2468,6 +2471,9 @@ function handleEvent(
     case "token":
       setItems((prev) => appendToken(prev, event.text), event.sessionId);
       break;
+    case "reasoning":
+      setItems((prev) => applyReasoning(prev, event.text, event.final === true, allocId), event.sessionId);
+      break;
     case "tool/start":
       setItems((prev) => [
         ...prev,
@@ -2536,6 +2542,29 @@ function appendToken(items: ChatItem[], text: string): ChatItem[] {
     return [...items.slice(0, -1), { ...last, text: last.text + text }];
   }
   return [...items, { id: (last?.id ?? 0) + 1, kind: "assistant", text }];
+}
+
+/** 同一回合只保留一块思考：非 final 追加草稿，final 用全文覆盖，不另起一块。 */
+function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number): ChatItem[] {
+  let turnStart = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === "user") {
+      turnStart = i + 1;
+      break;
+    }
+  }
+  const existing = items.findIndex((item, index) => index >= turnStart && item.kind === "thinking");
+  if (existing >= 0) {
+    const current = items[existing];
+    if (current?.kind !== "thinking") return items;
+    const next = items.slice();
+    next[existing] = { ...current, thought: final ? text : current.thought + text };
+    return next;
+  }
+  const created: ChatItem = { id: allocId(), kind: "thinking", thought: text, interrupted: false };
+  const assistantAt = items.findIndex((item, index) => index >= turnStart && item.kind === "assistant");
+  if (assistantAt >= 0) return [...items.slice(0, assistantAt), created, ...items.slice(assistantAt)];
+  return [...items, created];
 }
 
 function ChatRow({

@@ -73,7 +73,7 @@ function scanZstdFrameEnd(buffer: Buffer, start: number): number | undefined {
  * 事件行的既定形状(@deepseek-ai/dsh-session):
  * - header:`{ type: "session", version, id, createdAt, cwd?, origin?, parentSession?, delegationDepth }`
  * - `user/message`:data 即消息 `{ role: "user", content: [{ type: "text", text }], source?: { kind } }`
- * - `assistant/message`:`data.message.content` 为 `text` / `tool-call` 块
+ * - `assistant/message`:`data.message.content` 为 `reasoning` / `text` / `tool-call` 块
  * - `tool/call`:`data: { turn, step, callId, name, arguments }`
  * - `tool/result`:`data.message.content[0]` 为 `tool-result` 块(含 isError 与文本)
  * - `session/title`:`data: { title, messageSeqs, source }`(取最后一条为准)
@@ -190,11 +190,15 @@ export function detailRecords(text: string): SessionDetailRecord[] {
       case 'assistant/message': {
         const message = asObject(data.message)
         const blocks = Array.isArray(message.content) ? message.content : []
-        const textBlocks = blocks
-          .map((block) => asObject(block))
-          .filter((block) => block.type === 'text' && typeof block.text === 'string')
-          .map((block) => block.text as string)
-        const messageText = textBlocks.join('\n\n').trim()
+        const reasoningParts: string[] = []
+        const textParts: string[] = []
+        for (const block of blocks.map((entry) => asObject(entry))) {
+          if (block.type === 'reasoning' && typeof block.text === 'string') reasoningParts.push(block.text)
+          else if (block.type === 'text' && typeof block.text === 'string') textParts.push(block.text)
+        }
+        const thought = reasoningParts.map((part) => part.trim()).filter((part) => part.length > 0).join('\n\n')
+        const messageText = textParts.join('\n\n').trim()
+        if (thought) records.push({ kind: 'thinking', time, text: thought })
         if (messageText) records.push({ kind: 'assistant', time, text: messageText })
         break
       }

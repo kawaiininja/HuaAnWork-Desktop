@@ -51,6 +51,15 @@ test("historyItemsFromRecords maps roles, tool calls and failed results", () => 
   );
 });
 
+test("history restores a collapsed thinking record", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "问" },
+    { kind: "thinking", time: 2, text: "先看文件" },
+    { kind: "assistant", time: 3, text: "好的" },
+  ]);
+  assert.deepEqual(items[1], { kind: "thinking", text: "先看文件" });
+});
+
 test("sessionHasContent hides empty shell sessions from history lists", () => {
   // 项目打开时铸造的空壳会话：只有初始化事件，不算历史条目。
   assert.equal(sessionHasContent({ messageCount: 0, turnCount: 0 }), false);
