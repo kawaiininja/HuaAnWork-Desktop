@@ -2,17 +2,21 @@ import { randomUUID } from "node:crypto";
 
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 
+import { AUTO_CONTINUE_LABEL, planNeedsConfirm } from "../client-huaanwork/logic/planConfirm.ts";
 import { registerApproval, type ApprovalResult } from "../huaanwork-host/approvals.ts";
-import { readGuardMode } from "./policy.ts";
+import type { AttachmentMaps } from "./agent-attachments.ts";
+import { declaresAskTool, planTarget, targetChanged, type PlanTarget } from "./plan-signals.ts";
+import { isGitDirty, readGuardMode } from "./policy.ts";
 
 export const name = "huaanwork-question-answerer";
 export const inject = ["userQuestions"];
 
 /** 对话里没有可点击的回答者时显示这一句。不执行写入，也不交给官方到点放行。 */
 export const UNANSWERED_TEXT = "这个问题还没有人接到";
-const AUTO_CONTINUE_TEXT = "按当前护栏自动继续";
 
 type ApprovalMap = Map<string, (result: ApprovalResult) => void>;
+/** sessionId → 把该会话未回答的 plan-review 以取消结算；没有可结算的评审时返回 false。 */
+type PlanReviewMap = Map<string, () => boolean>;
 
 type Question = {
   id: string;
@@ -38,11 +42,15 @@ type AskedEvent = {
   reason?: string;
   summary?: string;
   sessionId?: string;
+  autoContinue?: boolean;
 };
 
 type Context = {
   huaanworkProfileDir?: string;
+  huaanworkWorkspaceRoot?: { current: string };
+  huaanworkAttachments?: AttachmentMaps;
   huaanworkApprovals?: ApprovalMap;
+  huaanworkPlanReviews?: PlanReviewMap;
   huaanworkEmit?: (event: AskedEvent) => void;
   on(
     event: "user-questions/request",
@@ -54,6 +62,8 @@ type Context = {
 type LiveReview = { approvalRequestId: string; approvals: ApprovalMap };
 
 const livePlanReviews = new Map<string, LiveReview>();
+/** sessionId → 上一份已确认计划的目标、收件人与写入范围。 */
+const confirmedTargets = new Map<string, PlanTarget>();
 
 export function answererDecision(input: {
   hasListener: boolean;
@@ -77,7 +87,7 @@ export function apply(ctx: Context): void {
       hasListener: true,
       intent: kind,
       mode,
-      autoContinue: kind === "plan-review" && mode === "full",
+      autoContinue: kind === "plan-review" && !planNeedsConfirm(confirmInput(ctx, request, mode)),
     });
     const approvals = mapOf(ctx.huaanworkApprovals);
     const canShow = typeof ctx.huaanworkEmit === "function";
@@ -85,11 +95,43 @@ export function apply(ctx: Context): void {
     if (decision === "auto-approve") {
       const identity = reviewIdentity(request);
       if (identity) supersede(identity);
-      showCard(ctx, request, randomUUID(), AUTO_CONTINUE_TEXT);
+      showCard(ctx, request, randomUUID(), AUTO_CONTINUE_LABEL, true);
+      recordConfirmed(request);
       return approveAnswers(request);
     }
     return waitOnCard(ctx, approvals, request);
   }, { global: true, prepend: true });
+}
+
+function reviewedPlan(request: QuestionRequest): string {
+  return request.questions?.find((question) => question.intent?.kind === "plan-review")?.detail ?? "";
+}
+
+function confirmInput(ctx: Context, request: QuestionRequest, mode: "ask" | "smart" | "full") {
+  const plan = reviewedPlan(request);
+  const sessionId = sessionIdOfAgentRef(request.agent);
+  const workspaceRoot = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd();
+  const attachedTools = sessionId
+    ? [
+        ...(ctx.huaanworkAttachments?.sessionHostTools.get(sessionId) ?? []),
+        ...(ctx.huaanworkAttachments?.sessionAgentTools.get(sessionId) ?? []),
+      ]
+    : [];
+  return {
+    mode,
+    declaresAskTool: mode === "smart" && declaresAskTool(plan, { workspaceRoot, gitDirty: () => isGitDirty(workspaceRoot), attachedTools }),
+    changesTarget: mode === "full" && targetChanged(sessionId ? confirmedTargets.get(sessionId) : undefined, planTarget(plan)),
+  };
+}
+
+function recordConfirmed(request: QuestionRequest): void {
+  const sessionId = sessionIdOfAgentRef(request.agent);
+  if (sessionId && reviewIdentity(request)) confirmedTargets.set(sessionId, planTarget(reviewedPlan(request)));
+}
+
+/** 「退出计划模式」作废评审时抛给提问服务的错误；官方 `exit_plan_mode` 据此结束回合并返回未批准。 */
+function exitCancelled(): Error {
+  return Object.assign(new Error("用户退出了计划模式"), { name: "UserQuestionError", code: "ASK_CANCELLED" });
 }
 
 function requestKind(request: QuestionRequest): "plan-review" | "ask_user_question" | "other" {
@@ -104,7 +146,13 @@ function mapOf(value: ApprovalMap | undefined): ApprovalMap | undefined {
   return value instanceof Map ? value : undefined;
 }
 
-function showCard(ctx: Context, request: QuestionRequest, approvalRequestId: string, reason: string): void {
+function showCard(
+  ctx: Context,
+  request: QuestionRequest,
+  approvalRequestId: string,
+  reason: string,
+  autoContinue = false,
+): void {
   const question = request.questions?.[0];
   const sessionId = sessionIdOfAgentRef(request.agent);
   const callId = question?.intent?.callId;
@@ -117,6 +165,7 @@ function showCard(ctx: Context, request: QuestionRequest, approvalRequestId: str
     ...(summary ? { summary } : {}),
     ...(callId ? { callId } : {}),
     ...(sessionId ? { sessionId } : {}),
+    ...(autoContinue ? { autoContinue } : {}),
   });
 }
 
@@ -168,14 +217,36 @@ async function waitOnCard(ctx: Context, approvals: ApprovalMap, request: Questio
   if (identity) livePlanReviews.set(identity, { approvalRequestId, approvals });
   const reason = request.questions?.map((question) => question.question).filter(Boolean).join("\n") || "ask_user_question";
   showCard(ctx, request, approvalRequestId, reason);
+  const sessionId = sessionIdOfAgentRef(request.agent);
+  const reviews = identity && sessionId && ctx.huaanworkPlanReviews instanceof Map ? ctx.huaanworkPlanReviews : undefined;
+  let settleExit: (() => boolean) | undefined;
+  const exited = new Promise<never>((_resolve, reject) => {
+    settleExit = () => {
+      if (!approvals.delete(approvalRequestId)) return false;
+      reject(exitCancelled());
+      return true;
+    };
+  });
+  if (reviews && sessionId && settleExit) reviews.set(sessionId, settleExit);
   try {
-    const result = await waitForDecision(approvals, approvalRequestId, request.signal);
-    return result === "allowed-once" ? approveAnswers(request) : declineAnswers(request);
+    const result = await Promise.race([waitForDecision(approvals, approvalRequestId, request.signal), exited]);
+    if (result !== "allowed-once") return declineAnswers(request);
+    recordConfirmed(request);
+    return approveAnswers(request);
   } finally {
+    if (reviews && sessionId && reviews.get(sessionId) === settleExit) reviews.delete(sessionId);
     if (identity && livePlanReviews.get(identity)?.approvalRequestId === approvalRequestId) {
       livePlanReviews.delete(identity);
     }
   }
+}
+
+/** 「退出计划模式」第一步：把该会话未回答的 plan-review 以取消结算。返回是否结算了一份评审。 */
+export function settlePlanReview(reviews: PlanReviewMap | undefined, sessionId: string): boolean {
+  const settle = reviews?.get(sessionId);
+  if (!settle) return false;
+  reviews?.delete(sessionId);
+  return settle();
 }
 
 function waitForDecision(

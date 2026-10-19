@@ -57,6 +57,7 @@ import {
   resolveTheme,
   type ThemePref,
 } from "./logic/accountStatus.ts";
+import { AUTO_CONTINUE_LABEL, PLAN_CARD_NOTE } from "./logic/planConfirm.ts";
 import logoUrl from "./assets/huaan-mark.png";
 import {
   bindTaskSession,
@@ -128,10 +129,14 @@ type ToolCard = {
 type AskCard = {
   approvalRequestId: string;
   toolName: string;
+  callId?: string;
   reason?: string;
   summary?: string;
+  autoContinue?: boolean;
   answered?: "approve" | "reject";
 };
+
+const PLAN_EXITED_NOTE = "已退出计划模式";
 
 type ChatItem =
   | { id: number; kind: "user"; text: string }
@@ -1553,6 +1558,36 @@ export default function App() {
     }
   }
 
+  /** 宿主先把未回答的计划评审以取消结算，再退出计划模式；评审卡不在屏上时也能用。 */
+  async function exitPlanMode() {
+    if (sidecarDead) return;
+    const target = activeTab;
+    const sessionId = chatTabs.find((tab) => tab.id === target)?.sessionId;
+    try {
+      await rpcCall("session.exitPlanMode", { ...(sessionId ? { sessionId } : {}) });
+      const note: ChatItem = { id: allocId(), kind: "note", text: PLAN_EXITED_NOTE };
+      setChatTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === target
+            ? {
+                ...tab,
+                items: [
+                  ...tab.items.map((item) =>
+                    item.kind === "ask" && item.card.toolName === "plan-review" && !item.card.answered && !item.card.autoContinue
+                      ? { ...item, card: { ...item.card, answered: "reject" as const } }
+                      : item,
+                  ),
+                  note,
+                ],
+              }
+            : tab,
+        ),
+      );
+    } catch (error) {
+      noteActive(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function answer(card: AskCard, decision: "approve" | "reject") {
     if (sidecarDead) return;
     const method = decision === "approve" ? "session.approve" : "session.reject";
@@ -2209,6 +2244,11 @@ export default function App() {
                     onManage={() => openSettings("model")}
                   />
                 ) : null}
+                {planModeActive(items) ? (
+                  <button type="button" className="chip" disabled={blocked} onClick={() => void exitPlanMode()}>
+                    退出计划模式
+                  </button>
+                ) : null}
                 <span className="composer-spacer" />
                 {turnActive ? (
                   <button type="button" className="send stop" disabled={blocked} onClick={() => void stopTurn()}>
@@ -2582,21 +2622,22 @@ function handleEvent(
         event.sessionId,
       );
       break;
-    case "approval/asked":
-      setItems((prev) => [
-        ...prev,
-        {
-          id: allocId(),
-          kind: "ask",
-          card: {
-            approvalRequestId: event.approvalRequestId,
-            toolName: event.toolName,
-            reason: event.reason,
-            summary: event.summary,
-          },
+    case "approval/asked": {
+      const ask: ChatItem = {
+        id: allocId(),
+        kind: "ask",
+        card: {
+          approvalRequestId: event.approvalRequestId,
+          toolName: event.toolName,
+          callId: event.callId,
+          reason: event.reason,
+          summary: event.summary,
+          autoContinue: event.autoContinue,
         },
-      ], event.sessionId);
+      };
+      setItems((prev) => (event.toolName === "plan-review" ? insertBeforeToolRow(prev, ask, event.callId) : [...prev, ask]), event.sessionId);
       break;
+    }
     case "diff":
       setDiff(event.text);
       break;
@@ -2643,6 +2684,37 @@ function interruptCurrentTurn(items: ChatItem[]): ChatItem[] {
     return item;
   });
   return changed ? next : items;
+}
+
+/** 计划卡画在本回合 `exit_plan_mode` 那一行工具之前；找不到那一行就追加在末尾。 */
+function insertBeforeToolRow(items: ChatItem[], card: ChatItem, callId: string | undefined): ChatItem[] {
+  let turnStart = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === "user") {
+      turnStart = i + 1;
+      break;
+    }
+  }
+  const at = items.findIndex(
+    (item, index) =>
+      index >= turnStart &&
+      item.kind === "tool" &&
+      (callId ? item.card.callId === callId : item.card.name === "exit_plan_mode"),
+  );
+  return at >= 0 ? [...items.slice(0, at), card, ...items.slice(at)] : [...items, card];
+}
+
+/** 进入计划模式由 `propose_plan` 完成；计划被同意或用户点了「退出计划模式」后离开。 */
+function planModeActive(items: readonly ChatItem[]): boolean {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i];
+    if (item.kind === "note" && item.text === PLAN_EXITED_NOTE) return false;
+    if (item.kind === "ask" && item.card.toolName === "plan-review") {
+      return !(item.card.autoContinue || item.card.answered === "approve");
+    }
+    if (item.kind === "tool" && item.card.name === "propose_plan") return true;
+  }
+  return false;
 }
 
 function appendToken(items: ChatItem[], text: string): ChatItem[] {
@@ -2726,6 +2798,7 @@ function ChatRow({
       </div>
     );
   }
+  if (item.card.toolName === "plan-review") return <PlanCard card={item.card} blocked={blocked} onAnswer={onAnswer} />;
   return (
     <div className="card ask-card">
       <span className="ttl">✋ 批准请求 · {item.card.toolName}</span>
@@ -2743,6 +2816,39 @@ function ChatRow({
           </button>
           <button type="button" className="btn reject" disabled={blocked} onClick={() => onAnswer(item.card, "reject")}>
             拒绝
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 「按这个计划执行」「继续改计划」走同一张审批卡的批准 / 拒绝，宿主把它们答成官方 plan-review 的同意与继续计划。 */
+function PlanCard({
+  card,
+  blocked,
+  onAnswer,
+}: {
+  card: AskCard;
+  blocked: boolean;
+  onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
+}) {
+  return (
+    <div className="card ask-card">
+      <span className="ttl">计划</span>
+      {card.summary ? <pre>{card.summary}</pre> : null}
+      <p style={{ margin: 0 }}>{PLAN_CARD_NOTE}</p>
+      {card.autoContinue ? (
+        <p style={{ margin: 0 }}>{AUTO_CONTINUE_LABEL}</p>
+      ) : card.answered ? (
+        <p style={{ margin: 0 }}>{card.answered === "approve" ? "已按这个计划执行" : "继续改计划"}</p>
+      ) : (
+        <div className="row">
+          <button type="button" className="btn approve" disabled={blocked} onClick={() => onAnswer(card, "approve")}>
+            按这个计划执行
+          </button>
+          <button type="button" className="btn reject" disabled={blocked} onClick={() => onAnswer(card, "reject")}>
+            继续改计划
           </button>
         </div>
       )}

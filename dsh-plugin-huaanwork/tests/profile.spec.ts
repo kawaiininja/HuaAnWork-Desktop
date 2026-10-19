@@ -1291,6 +1291,9 @@ virtualStoreDirMaxLength: 60
     const shellRowId = process.platform === 'win32' ? 'tool-pwsh' : 'tool-bash'
     expect(rows.get(shellRowId)?.disabled).toBe(false)
     expect(rows.get(shellRowId)?.config).toMatchObject({ enableRunInBackground: false })
+    expect(rows.get('plan-mode')?.disabled).toBe(false)
+    expect(rows.get('plan-mode')?.name).toBe('@deepseek-ai/dsh-plan-mode')
+    expect((rows.get('plan-mode')?.config as { section?: string } | undefined)?.section).toMatch(/exit_plan_mode/)
 
     const insertedIds = composedRows.map(row => row.id)
     const expectedOrder = [

@@ -31,6 +31,7 @@ const ALLOWED_TOOLS = new Set([
   "call_host_tool",
   "propose_plan",
   "request_input",
+  "exit_plan_mode",
 ]);
 
 type ToolsService = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:584(ToolRuntime.presentAs)

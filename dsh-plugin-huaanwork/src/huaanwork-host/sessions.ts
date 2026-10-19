@@ -2,6 +2,7 @@ import { readdir, unlink } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 
 import { workNetworkGateError } from '@huaanwork/policy/network'
+import { settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { invokeSkillText } from './skill-invoke.ts'
@@ -32,6 +33,8 @@ import type { RouteContext } from './routes.ts'
 
 export type SessionRuntimeContext = {
   huaanworkApprovals?: ApprovalMap
+  /** question-answerer 登记的未回答 plan-review 结算器(holders.ts 注入容器)。 */
+  huaanworkPlanReviews?: Map<string, () => boolean>
   /** 分流工具 `propose_plan` / `request_input` 读取的当前会话 agent(holders.ts 注入容器)。 */
   huaanworkRouteAgent?: { current: unknown }
   /** 工作区热切换时同步的沙箱根;缺席时只改 routeCtx.workspaceRoot holder。 */
@@ -245,6 +248,7 @@ function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params:
 export type ListedAgent = {
   id?: string
   session?: { id?: string }
+  status?: string
   followup?: (message: unknown) => void
   whenIdle?: () => Promise<void>
   cancel?: (reason: { kind: 'parent' | 'user' }) => void
@@ -486,6 +490,26 @@ export async function sessionResume(
   if (!persisted) throw new Error(`session ${sessionId} was not found`)
   await ensureChannelAgent(ctx, routeCtx, sessionId)
   return { sessionId, resumed: true }
+}
+
+/**
+ * 「退出计划模式」:先把未回答的 plan-review 以取消结算,让等待中的 `exit_plan_mode`
+ * 结束回合,再 `planMode.set(agent, false)`。顺序不能反:先退出会让那次评审一直停住。
+ * 没有可结算的评审而回合还在跑时停止这一回合,不让模型离开计划模式后接着写。
+ */
+export function sessionExitPlanMode(
+  ctx: SessionRuntimeContext,
+  routeCtx: RouteContext,
+  params: unknown,
+): { exited: boolean } {
+  const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
+  const settled = settlePlanReview(ctx.huaanworkPlanReviews, sessionId)
+  const agent = findSessionAgent(ctx, sessionId)
+  const planMode = ctx.get?.('planMode') as { set?: (agent: unknown, active: boolean) => unknown } | undefined
+  if (!agent || typeof planMode?.set !== 'function') return { exited: false }
+  planMode.set(agent, false)
+  if (!settled && agent.status === 'running') agent.cancel?.({ kind: 'user' })
+  return { exited: true }
 }
 
 export async function sessionAnswerApproval(

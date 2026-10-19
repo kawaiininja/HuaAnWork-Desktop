@@ -51,6 +51,7 @@ export const ROUTES: Record<string, RouteDef> = {
   'session.cancel': post('/huaanwork/session/cancel'),
   'session.approve': post('/huaanwork/session/approve'),
   'session.reject': post('/huaanwork/session/reject'),
+  'session.exitPlanMode': post('/huaanwork/session/exitPlanMode'),
   'session.list': get('/huaanwork/session/list', objectQuery),
   'session.open': post('/huaanwork/session/open'),
   'session.remove': post('/huaanwork/session/remove'),

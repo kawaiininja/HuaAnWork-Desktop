@@ -198,7 +198,7 @@ function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
   };
 }
 
-function isGitDirty(workspaceRoot: string): boolean {
+export function isGitDirty(workspaceRoot: string): boolean {
   try {
     const result = spawnSync("git", ["status", "--porcelain"], {
       cwd: workspaceRoot,

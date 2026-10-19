@@ -90,6 +90,7 @@ function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
     case "todo_write":
     case "propose_plan":
     case "request_input":
+    case "exit_plan_mode":
     case "subagent":
     case "git_status":
     case "git_diff":

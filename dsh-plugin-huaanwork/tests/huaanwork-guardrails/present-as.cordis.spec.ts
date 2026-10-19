@@ -345,3 +345,16 @@ test("ALLOWED_TOOLS includes propose_plan and request_input", () => {
   assert.ok(allow.includes("propose_plan"));
   assert.ok(allow.includes("request_input"));
 });
+
+test("ALLOWED_TOOLS keeps the official exit_plan_mode and leaves ask_user_question out", () => {
+  const agent = createMockAgent({
+    sessionId: "work-plan",
+    initialToolNames: ["read", "exit_plan_mode", "ask_user_question"],
+  });
+  const ctx = createMockContext({ agents: [agent] });
+  apply(ctx as never);
+  ctx.emit("tools/change");
+  const allow = agent.restrictCalls.at(-1)!.allow;
+  assert.ok(allow.includes("exit_plan_mode"));
+  assert.ok(!allow.includes("ask_user_question"));
+});

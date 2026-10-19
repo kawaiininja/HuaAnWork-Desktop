@@ -9,6 +9,7 @@ import {
   sendToAgent,
   sessionAnswerApproval,
   sessionCancel,
+  sessionExitPlanMode,
   sessionList,
   sessionNew,
   sessionOpen,
@@ -454,6 +455,38 @@ describe('session.approve / session.reject (旧 host.ts:1677 answerApproval)', (
 
     await expect(sessionAnswerApproval(ctx, routeCtx, {}, 'rejected'))
       .resolves.toEqual({ handled: false })
+  })
+})
+
+describe('session.exitPlanMode', () => {
+  function planCtx(agent: ListedAgent, calls: string[]) {
+    const reviews = new Map<string, () => boolean>()
+    const ctx: SessionRuntimeContext = {
+      huaanworkPlanReviews: reviews,
+      agents: { get: (id) => (id === 's1' ? agent : undefined) },
+      get: (name) => (name === 'planMode'
+        ? { set: (target: unknown, active: boolean) => { calls.push(`set:${String(active)}:${target === agent}`) } }
+        : undefined),
+    }
+    return { ctx, reviews }
+  }
+
+  test('settles the pending plan review before leaving plan mode', () => {
+    const calls: string[] = []
+    const agent: ListedAgent = { id: 's1', status: 'running', cancel: () => { calls.push('cancel') } }
+    const { ctx, reviews } = planCtx(agent, calls)
+    reviews.set('s1', () => { calls.push('settle'); return true })
+    expect(sessionExitPlanMode(ctx, makeRouteCtx(freshTmp()), { sessionId: 's1' })).toEqual({ exited: true })
+    expect(calls).toEqual(['settle', 'set:false:true'])
+    expect(reviews.has('s1')).toBe(false)
+  })
+
+  test('without a review on screen it still leaves plan mode and stops the running turn', () => {
+    const calls: string[] = []
+    const agent: ListedAgent = { id: 's1', status: 'running', cancel: () => { calls.push('cancel') } }
+    const { ctx } = planCtx(agent, calls)
+    expect(sessionExitPlanMode(ctx, makeRouteCtx(freshTmp()), { sessionId: 's1' })).toEqual({ exited: true })
+    expect(calls).toEqual(['set:false:true', 'cancel'])
   })
 })
 

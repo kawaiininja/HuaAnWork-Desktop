@@ -1528,6 +1528,8 @@ export function prepareDesktopProfile(
     process.platform === 'win32'
       ? { id: 'tool-pwsh', disabled: false, config: { enableRunInBackground: false } }
       : { id: 'tool-bash', disabled: false, config: { enableRunInBackground: false } },
+    // 计划模式在宿主平面复挂(dsh-base 挂载、web-app overlay 关闭);ui-plan 仍关闭,计划卡在华安对话里。
+    { id: 'plan-mode', disabled: false },
     { id: 'hmr', disabled: true },
     { id: 'jobs', disabled: true },
     { id: 'tool-jobs', disabled: true },

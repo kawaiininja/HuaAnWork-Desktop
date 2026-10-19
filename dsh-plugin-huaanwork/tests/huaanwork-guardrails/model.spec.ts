@@ -639,3 +639,8 @@ test("route tool names survive the static tool filter", () => {
   assert.equal(parseSseToolCalls(requestInput, isRegisteredToolName).length, 1);
 });
 
+test("exit_plan_mode survives the static tool filter, ask_user_question does not", () => {
+  assert.equal(isRegisteredToolName("exit_plan_mode"), true);
+  assert.equal(isRegisteredToolName("ask_user_question"), false);
+});
+

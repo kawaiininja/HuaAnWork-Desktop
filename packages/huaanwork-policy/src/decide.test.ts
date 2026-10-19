@@ -308,6 +308,19 @@ test("route tools are allowed when not attached in ask mode", () => {
   assert.equal(guard(madeUp, "ask"), "deny");
 });
 
+test("exit_plan_mode is allowed when not attached; goal tools stay denied", () => {
+  const exit = { name: "exit_plan_mode", args: { plan: "# Plan" }, workspaceRoot: ws };
+  for (const mode of ["ask", "smart", "full"] as const) {
+    assert.equal(preExecute(exit, mode), "allow", mode);
+    assert.equal(guard(exit, mode), "allow", mode);
+  }
+  for (const name of ["get_goal", "create_goal", "update_goal"]) {
+    const call = { name, args: {}, workspaceRoot: ws };
+    assert.equal(preExecute(call, "ask"), "deny", name);
+    assert.equal(guard(call, "ask"), "deny", name);
+  }
+});
+
 test("explained APIs: decisions identical to wrappers, denies carry actionable reasons", () => {
   const shellName = process.platform === "win32" ? "pwsh" : "bash";
   const wrongShell = process.platform === "win32" ? "bash" : "pwsh";

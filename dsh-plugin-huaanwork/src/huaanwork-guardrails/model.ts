@@ -54,6 +54,7 @@ export function isRegisteredToolName(name: string): boolean {
     || name === "call_host_tool"
     || name === "propose_plan"
     || name === "request_input"
+    || name === "exit_plan_mode"
     || name.startsWith("mcp__");
 }
 

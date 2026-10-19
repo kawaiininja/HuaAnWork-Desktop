@@ -24,6 +24,7 @@ declare module '@deepseek-ai/cordis' {
     huaanworkAgentCatalog: { current: { items: unknown[] } }
     huaanworkRouteAgent: { current: unknown }
     huaanworkApprovals: Map<string, unknown>
+    huaanworkPlanReviews: Map<string, () => boolean>
     huaanworkEmit: (event: RpcEvent) => void
     huaanworkAgentRequest: { current: unknown }
     huaanworkCheckpointUserDataDir: string
@@ -40,6 +41,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkAgentCatalog',
   'huaanworkRouteAgent',
   'huaanworkApprovals',
+  'huaanworkPlanReviews',
   'huaanworkEmit',
   'huaanworkAgentRequest',
   'huaanworkCheckpointUserDataDir',
@@ -116,6 +118,7 @@ export function installHuaanworkHolders(
   process.env.HUAANWORK_PROFILE_DIR = config.profileDir
   ctx.huaanworkAllowedOnce = new Set<string>()
   ctx.huaanworkApprovals = new Map()
+  ctx.huaanworkPlanReviews = new Map()
   ctx.huaanworkUnattended = { current: null }
   ctx.huaanworkAttachments = emptyAttachments()
   ctx.huaanworkAgentRequest = { current: null }

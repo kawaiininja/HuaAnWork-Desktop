@@ -61,6 +61,7 @@ import {
   assertAutomationIdle,
   sessionAnswerApproval,
   sessionCancel,
+  sessionExitPlanMode,
   sessionList,
   sessionNew,
   sessionOpen,
@@ -202,6 +203,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { method: 'session.cancel', http: 'POST', path: '/huaanwork/session/cancel', handler: sessionRoute(async (req, ctx) => sessionCancel(requireRuntime(ctx), ctx, req.body)) }, // Task 7
   { method: 'session.approve', http: 'POST', path: '/huaanwork/session/approve', handler: sessionRoute(async (req, ctx) => sessionAnswerApproval(requireRuntime(ctx), ctx, req.body, 'allowed-once')) }, // Task 7
   { method: 'session.reject', http: 'POST', path: '/huaanwork/session/reject', handler: sessionRoute(async (req, ctx) => sessionAnswerApproval(requireRuntime(ctx), ctx, req.body, 'rejected')) }, // Task 7
+  { method: 'session.exitPlanMode', http: 'POST', path: '/huaanwork/session/exitPlanMode', handler: sessionRoute(async (req, ctx) => sessionExitPlanMode(requireRuntime(ctx), ctx, req.body)) },
   { method: 'session.list', http: 'GET', path: '/huaanwork/session/list', handler: sessionRoute(async (req, ctx) => sessionList(ctx, req.query.get('root') ?? undefined)) }, // Task 7 (文件 I/O 读会话列表)
   { method: 'session.open', http: 'POST', path: '/huaanwork/session/open', handler: sessionRoute(async (req, ctx) => sessionOpen(ctx, req.body)) }, // Task 7
   { method: 'session.remove', http: 'POST', path: '/huaanwork/session/remove', handler: sessionRoute(async (req, ctx) => sessionRemove(ctx, req.body)) }, // Task 7

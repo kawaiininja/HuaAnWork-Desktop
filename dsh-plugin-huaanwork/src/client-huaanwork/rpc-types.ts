@@ -7,6 +7,7 @@ export type RpcRequest = {
     | "session.cancel"
     | "session.approve"
     | "session.reject"
+    | "session.exitPlanMode"
     | "session.list"
     | "session.open"
     | "session.remove"
@@ -233,6 +234,8 @@ export type RpcEvent =
       reason?: string;
       summary?: string;
       sessionId?: string;
+      /** plan-review 已由回答者按当前护栏提交同意，卡片不再等待点击。 */
+      autoContinue?: boolean;
     }
   | { event: "diff"; text: string; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string }
