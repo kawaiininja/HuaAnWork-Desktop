@@ -39,6 +39,7 @@ type Harness = {
     reply: string
     cancelDelayMs: number
     ignoreCancel: boolean
+    noWhenIdle: boolean
     cancels: string[]
     inFlight: number
     maxInFlight: number
@@ -73,6 +74,7 @@ function makeHarness(current?: string): Harness {
     reply: 'stub-output',
     cancelDelayMs: 0,
     ignoreCancel: false,
+    noWhenIdle: false,
     cancels: [] as string[],
     inFlight: 0,
     maxInFlight: 0,
@@ -124,6 +126,7 @@ function makeHarness(current?: string): Harness {
           },
           whenIdle: () => idle,
         }
+        if (state.noWhenIdle) delete agent.whenIdle
         agents.set(sessionId, agent)
         return agent
       },
@@ -747,6 +750,39 @@ test('agent enqueue resolves when the run record cannot be written', async () =>
     process.off('unhandledRejection', onRejection)
   }
 })
+
+test('agent run reads the collector only after the agent goes idle, and the timeout covers that wait', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const settings = join(h.profileDir, 'huaanwork-settings.json')
+  writeFileSync(settings, JSON.stringify({ automation_timeout_ms: 5_000 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '等空闲' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '等空闲' })
+
+  const run = enqueueAutomation(automation, { trigger: 'manual', runId: 'idle-1' })
+  await poll(() => h.followups.length === 1)
+  const sessionId = h.followups[0]!.sessionId
+  h.routeCtx.emit({ event: 'token', text: 'part-1 ', sessionId })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(runEnds(h.events, automation.id)).toHaveLength(0)
+  h.routeCtx.emit({ event: 'token', text: 'part-2', sessionId })
+  h.release(sessionId)
+  await run
+  expect(await recentRuns(h.profileDir, automation.id)).toMatchObject([{ status: 'ok', output: 'part-1 part-2' }])
+
+  writeFileSync(settings, JSON.stringify({ automation_timeout_ms: 150 }))
+  await enqueueAutomation(automation, { trigger: 'manual', runId: 'idle-2' })
+  expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({
+    status: 'timeout',
+    output: expect.stringContaining('自动化任务执行超时'),
+  })
+
+  h.state.mode = 'immediate'
+  h.state.noWhenIdle = true
+  h.state.reply = 'no-idle-hook'
+  await enqueueAutomation(automation, { trigger: 'manual', runId: 'idle-3' })
+  expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({ status: 'ok', output: 'no-idle-hook' })
+}, 15_000)
 
 test('agent timeout cancels the session and settles the turn before the next agent starts', async () => {
   const h = makeHarness()

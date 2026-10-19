@@ -270,7 +270,12 @@ async function runAgentTurn(
       ? { runId, automationId: automation.id, allow: new Set(allow), sessionId }
       : undefined
   }
-  const turn = sendToAgent(ctx, routeCtx, { text: prompt, sessionId })
+  // sendToAgent 在 followup 受理后即返回;自动化要的是整轮产出,故 turn 还要等到 idle。
+  // 超时与 drain 都作用在这个 turn 上。
+  const turn = (async () => {
+    await sendToAgent(ctx, routeCtx, { text: prompt, sessionId })
+    await findSessionAgent(ctx, sessionId)?.whenIdle?.()
+  })()
   try {
     await Promise.race([
       turn,
