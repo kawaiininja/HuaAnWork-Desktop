@@ -493,8 +493,10 @@ export async function sessionResume(
 }
 
 /**
- * 「退出计划模式」:先把未回答的 plan-review 以取消结算,让等待中的 `exit_plan_mode`
- * 结束回合,再 `planMode.set(agent, false)`。顺序不能反:先退出会让那次评审一直停住。
+ * 「退出计划模式」:先确认会话 agent 与 `planMode` 都在。缺一则不结算评审,
+ * 返回 `{ exited: false }`,计划模式保持原样。两者都在时,先把未回答的 plan-review
+ * 以取消结算,让等待中的 `exit_plan_mode` 结束回合,再 `planMode.set(agent, false)`。
+ * 顺序不能反:先退出会让那次评审一直停住。
  * 没有可结算的评审而回合还在跑时停止这一回合,不让模型离开计划模式后接着写。
  */
 export function sessionExitPlanMode(
@@ -503,10 +505,10 @@ export function sessionExitPlanMode(
   params: unknown,
 ): { exited: boolean } {
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
-  const settled = settlePlanReview(ctx.huaanworkPlanReviews, sessionId)
   const agent = findSessionAgent(ctx, sessionId)
   const planMode = ctx.get?.('planMode') as { set?: (agent: unknown, active: boolean) => unknown } | undefined
   if (!agent || typeof planMode?.set !== 'function') return { exited: false }
+  const settled = settlePlanReview(ctx.huaanworkPlanReviews, sessionId)
   planMode.set(agent, false)
   if (!settled && agent.status === 'running') agent.cancel?.({ kind: 'user' })
   return { exited: true }

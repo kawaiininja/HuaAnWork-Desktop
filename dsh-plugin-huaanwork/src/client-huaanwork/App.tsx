@@ -57,7 +57,7 @@ import {
   resolveTheme,
   type ThemePref,
 } from "./logic/accountStatus.ts";
-import { AUTO_CONTINUE_LABEL, PLAN_CARD_NOTE } from "./logic/planConfirm.ts";
+import { AUTO_CONTINUE_LABEL, PLAN_CARD_NOTE, PLAN_EXITED_NOTE, planExitNote } from "./logic/planConfirm.ts";
 import logoUrl from "./assets/huaan-mark.png";
 import {
   bindTaskSession,
@@ -135,8 +135,6 @@ type AskCard = {
   autoContinue?: boolean;
   answered?: "approve" | "reject";
 };
-
-const PLAN_EXITED_NOTE = "已退出计划模式";
 
 type ChatItem =
   | { id: number; kind: "user"; text: string }
@@ -1564,8 +1562,14 @@ export default function App() {
     const target = activeTab;
     const sessionId = chatTabs.find((tab) => tab.id === target)?.sessionId;
     try {
-      await rpcCall("session.exitPlanMode", { ...(sessionId ? { sessionId } : {}) });
-      const note: ChatItem = { id: allocId(), kind: "note", text: PLAN_EXITED_NOTE };
+      const result = await rpcCall("session.exitPlanMode", { ...(sessionId ? { sessionId } : {}) });
+      const text = planExitNote(result);
+      if (!text) {
+        const note: ChatItem = { id: allocId(), kind: "note", text: "未能退出计划模式" };
+        setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: [...tab.items, note] } : tab)));
+        return;
+      }
+      const note: ChatItem = { id: allocId(), kind: "note", text };
       setChatTabs((prev) =>
         prev.map((tab) =>
           tab.id === target

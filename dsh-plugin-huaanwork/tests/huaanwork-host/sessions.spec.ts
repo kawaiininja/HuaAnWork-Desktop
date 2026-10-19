@@ -488,6 +488,27 @@ describe('session.exitPlanMode', () => {
     expect(sessionExitPlanMode(ctx, makeRouteCtx(freshTmp()), { sessionId: 's1' })).toEqual({ exited: true })
     expect(calls).toEqual(['set:false:true', 'cancel'])
   })
+
+  test('a missing agent or planMode does not settle the pending review', () => {
+    const agent: ListedAgent = { id: 's1', status: 'running', cancel: () => undefined }
+    const routeCtx = makeRouteCtx(freshTmp())
+
+    const missingAgentCalls: string[] = []
+    const missingAgent = planCtx(agent, missingAgentCalls)
+    missingAgent.ctx.agents = { get: () => undefined }
+    missingAgent.reviews.set('s1', () => { missingAgentCalls.push('settle'); return true })
+    expect(sessionExitPlanMode(missingAgent.ctx, routeCtx, { sessionId: 's1' })).toEqual({ exited: false })
+    expect(missingAgentCalls).toEqual([])
+    expect(missingAgent.reviews.has('s1')).toBe(true)
+
+    const missingPlanCalls: string[] = []
+    const missingPlan = planCtx(agent, missingPlanCalls)
+    missingPlan.ctx.get = () => undefined
+    missingPlan.reviews.set('s1', () => { missingPlanCalls.push('settle'); return true })
+    expect(sessionExitPlanMode(missingPlan.ctx, routeCtx, { sessionId: 's1' })).toEqual({ exited: false })
+    expect(missingPlanCalls).toEqual([])
+    expect(missingPlan.reviews.has('s1')).toBe(true)
+  })
 })
 
 describe('settings 读取一致性', () => {
