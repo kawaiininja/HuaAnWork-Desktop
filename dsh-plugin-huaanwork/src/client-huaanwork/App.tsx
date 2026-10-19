@@ -831,7 +831,9 @@ export default function App() {
     const appendTurnOutcome = async (sessionId?: string) => {
       const turn = await readTurn(sessionId);
       if (!turn || cancelled) return;
-      appendTurnNotes(turn, turnOutcomeNotes(turn.checks, turn.tree));
+      const notes = turnOutcomeNotes(turn.checks, turn.tree);
+      if (notes.length === 0) return;
+      appendTurnNotes(turn, notes);
     };
     /** 官方续轮到上限停下：把停下的轮数和尚未核对的缺项写进对话，不自动建下一个目标。 */
     const appendGoalStopped = async (round: number, sessionId?: string) => {

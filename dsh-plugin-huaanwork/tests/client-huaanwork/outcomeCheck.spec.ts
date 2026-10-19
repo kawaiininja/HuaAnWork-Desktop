@@ -53,14 +53,14 @@ test("required files and commands come only from what the text spells out", () =
   assert.deepEqual(extractRequiredFiles("随便聊聊"), []);
 });
 
-test("turn result lists gaps, never claims done with gaps, and admits when nothing was checkable", () => {
+test("turn result lists gaps and never claims done with gaps; empty lists are not a pass", () => {
   assert.deepEqual(turnOutcomeLines({ requiredFiles: ["a.md"], requiredCommands: [], gaps: ["缺少文件：a.md"] }), {
     done: false,
     lines: ["缺少文件：a.md"],
   });
   assert.deepEqual(turnOutcomeLines({ requiredFiles: [], requiredCommands: [], gaps: [] }), {
     done: false,
-    lines: ["没有自动核对项，需要你自己看"],
+    lines: [],
   });
   assert.deepEqual(turnOutcomeLines({ requiredFiles: ["a.md"], requiredCommands: [], gaps: [] }), { done: true, lines: [] });
 });
@@ -100,9 +100,7 @@ test("turn checks read the last turn only and outcome notes never say done with 
   assert.deepEqual(turnOutcomeNotes(checks, tree), ["已完成：自动核对 3 项均通过"]);
   assert.deepEqual(turnOutcomeNotes(checks, [{ path: "/w/报告.md" }]), ["缺少文件：out/摘要.md"]);
   assert.deepEqual(turnOutcomeNotes(checks, []), ["没能读取工作区，文件未核对：报告.md、out/摘要.md"]);
-  assert.deepEqual(turnOutcomeNotes(turnChecks([{ kind: "user", text: "帮我润色这段话" }]), []), [
-    "没有自动核对项，需要你自己看",
-  ]);
+  assert.deepEqual(turnOutcomeNotes(turnChecks([{ kind: "user", text: "帮我润色这段话" }]), []), []);
 });
 
 test("the last result of a repeated command wins, in both orders", () => {
@@ -185,17 +183,60 @@ test("leading Chinese words are not part of the file name", () => {
   assert.deepEqual(extractRequiredFiles("整理一份总结报告.md"), ["整理一份总结报告.md"]);
 });
 
-test("a file is not reported missing when the real name only differs by leading Chinese words", () => {
+test("a file matches only the exact name or a path ending in it", () => {
   const paths = treePaths([{ path: "/w/总结报告.md" }, { path: "/w/docs/报告.md" }]);
   assert.equal(fileExistsInTree(treePaths([{ path: "/w/报告.md" }]), "报告.md"), true);
   assert.equal(fileExistsInTree(paths, "报告.md"), true);
-  assert.equal(fileExistsInTree(treePaths([{ path: "/w/总结报告.md" }]), "报告.md"), true);
-  assert.equal(fileExistsInTree(treePaths([{ path: "/w/总结报告.md" }]), "整理一份总结报告.md"), true);
-  assert.equal(fileExistsInTree(treePaths([{ path: "/w/周报/本周总结.md" }]), "保存周报/本周总结.md"), true);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/总结报告.md" }]), "报告.md"), false);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/总结报告.md" }]), "整理一份总结报告.md"), false);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/周报/本周总结.md" }]), "保存周报/本周总结.md"), false);
   assert.equal(fileExistsInTree(treePaths([{ path: "/w/a报告.md" }]), "报告.md"), false);
   assert.equal(fileExistsInTree(treePaths([{ path: "/w/总结.md" }]), "报告.md"), false);
   assert.deepEqual(
     turnOutcomeNotes(turnChecks([{ kind: "user", text: "帮我把总结写到报告.md里" }]), [{ path: "/w/报告.md" }]),
     ["已完成：自动核对 1 项均通过"],
+  );
+});
+
+test("帮我把总结写到报告.md里 extracts 报告.md", () => {
+  assert.deepEqual(extractRequiredFiles("帮我把总结写到报告.md里"), ["报告.md"]);
+});
+
+test("总结报告.md is a gap when the tree only contains 报告.md", () => {
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/报告.md" }]), "总结报告.md"), false);
+  assert.deepEqual(
+    turnOutcomeNotes(turnChecks([{ kind: "user", text: "请写 总结报告.md" }]), [{ path: "/w/报告.md" }]),
+    ["缺少文件：总结报告.md"],
+  );
+});
+
+test("a plain user and assistant turn produces no outcome note", () => {
+  assert.deepEqual(turnOutcomeNotes(turnChecks([{ kind: "user", text: "你好" }, { kind: "assistant" }]), []), []);
+});
+
+test("a turn that ran a tool and names no file or command still needs a human look", () => {
+  assert.deepEqual(
+    turnOutcomeNotes(
+      turnChecks([
+        { kind: "user", text: "你好" },
+        { kind: "assistant" },
+        { kind: "tool", card: { name: "bash", isError: false } },
+      ]),
+      [],
+    ),
+    ["没有自动核对项，需要你自己看"],
+  );
+});
+
+test("a plan-review card with nothing to check still needs a human look", () => {
+  assert.deepEqual(
+    turnOutcomeNotes(
+      turnChecks([
+        { kind: "user", text: "你好" },
+        { kind: "ask", card: { toolName: "plan-review", summary: "先看看" } },
+      ]),
+      [],
+    ),
+    ["没有自动核对项，需要你自己看"],
   );
 });

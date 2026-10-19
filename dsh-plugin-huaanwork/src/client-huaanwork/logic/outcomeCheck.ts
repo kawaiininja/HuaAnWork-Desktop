@@ -20,7 +20,6 @@ export function outcomeGaps(input: {
 
 const FILE_PATH = /[\w\u4e00-\u9fff./\\~-]+\.(?:md|txt|docx?|xlsx?|pptx?|csv|json|pdf|html?|tsx?|jsx?|py)\b/gi;
 const LEADING_CJK = /^[\u4e00-\u9fff]+/;
-const CJK_ONLY = /^[\u4e00-\u9fff]+$/;
 /** 中文句子里紧挨文件名的虚词或动词；文件名从最后一个这样的字之后开始。 */
 const NAME_BOUNDARY = /[到把在为成叫进入给存写至于将的和与及或]/g;
 
@@ -30,12 +29,6 @@ function stripLeadingSentence(match: string): string {
   let cut = 0;
   for (const boundary of run.matchAll(NAME_BOUNDARY)) cut = (boundary.index ?? 0) + 1;
   return cut > 0 && cut < match.length ? match.slice(cut) : match;
-}
-
-/** 两个名字只差开头连写的中文字，也当作同一个文件（句子切分可能多切或少切）。 */
-function sameNameUpToLeadingCjk(a: string, b: string): boolean {
-  const [longer, shorter] = a.length >= b.length ? [a, b] : [b, a];
-  return longer.endsWith(shorter) && CJK_ONLY.test(longer.slice(0, longer.length - shorter.length));
 }
 const COMMAND_SPAN = /`([^`\n]+)`/g;
 const COMMAND_START = /^(?:pnpm|npm|yarn|corepack|npx|node|python3?|pytest|cargo|go|make|bun|deno|git)\s/;
@@ -72,16 +65,12 @@ export function treePaths(nodes: readonly TreeLike[]): string[] {
 
 export function fileExistsInTree(paths: readonly string[], file: string): boolean {
   const wanted = file.replace(/\\/g, "/").replace(/^\.\//, "");
-  const depth = wanted.split("/").length;
-  return paths.some((path) => {
-    if (path === wanted || path.endsWith(`/${wanted}`)) return true;
-    return sameNameUpToLeadingCjk(path.split("/").slice(-depth).join("/"), wanted);
-  });
+  return paths.some((path) => path === wanted || path.endsWith(`/${wanted}`));
 }
 
 export const NO_AUTO_CHECK_TEXT = "没有自动核对项，需要你自己看";
 
-/** Turn-result lines: gaps block "已完成"; no checks at all says so honestly. */
+/** Gaps block "已完成". Empty required lists are not a pass; the caller decides the no-check sentence. */
 export function turnOutcomeLines(input: {
   requiredFiles: readonly string[];
   requiredCommands: readonly string[];
@@ -89,7 +78,7 @@ export function turnOutcomeLines(input: {
 }): { done: boolean; lines: string[] } {
   if (input.gaps.length > 0) return { done: false, lines: [...input.gaps] };
   if (input.requiredFiles.length === 0 && input.requiredCommands.length === 0) {
-    return { done: false, lines: [NO_AUTO_CHECK_TEXT] };
+    return { done: false, lines: [] };
   }
   return { done: true, lines: [] };
 }
@@ -118,6 +107,8 @@ export type TurnChecks = {
   requiredFiles: string[];
   requiredCommands: string[];
   toolResults: { name: string; command?: string; isError: boolean }[];
+  /** 本回合跑过工具，或出现过计划评审卡。纯聊天为 false。 */
+  didWork: boolean;
 };
 
 /** 本回合（最后一条用户消息之后）要核对的文件、命令与已记录的工具结果。 */
@@ -134,10 +125,13 @@ export function turnChecks(items: readonly TurnItem[]): TurnChecks {
   }
   const files = extractRequiredFiles(userText);
   const toolResults: TurnChecks["toolResults"] = [];
+  let didWork = false;
   for (const item of items.slice(start)) {
-    if (item.kind === "ask" && item.card.toolName === "plan-review" && item.card.summary) {
-      files.push(...extractRequiredFiles(item.card.summary));
+    if (item.kind === "ask" && item.card.toolName === "plan-review") {
+      didWork = true;
+      if (item.card.summary) files.push(...extractRequiredFiles(item.card.summary));
     } else if (item.kind === "tool") {
+      didWork = true;
       toolResults.push({
         name: item.card.name,
         ...(item.card.command === undefined ? {} : { command: item.card.command }),
@@ -146,7 +140,7 @@ export function turnChecks(items: readonly TurnItem[]): TurnChecks {
       });
     }
   }
-  return { requiredFiles: unique(files), requiredCommands: extractRequiredCommands(userText), toolResults };
+  return { requiredFiles: unique(files), requiredCommands: extractRequiredCommands(userText), toolResults, didWork };
 }
 
 /** 本回合核对出的缺项；工作区读不到时文件项如实记为未核对，不当作缺失。 */
@@ -163,13 +157,17 @@ export function turnGaps(checks: TurnChecks, tree: readonly TreeLike[]): string[
   return gaps;
 }
 
-/** 回合结束时追加到对话里的核对句子；有缺项就不出现「已完成」。 */
+/**
+ * 回合结束时追加到对话里的核对句子；有缺项就不出现「已完成」。
+ * 没有任何必核文件或命令时，只有本回合跑过工具或出现过计划卡才写「没有自动核对项」。
+ */
 export function turnOutcomeNotes(checks: TurnChecks, tree: readonly TreeLike[]): string[] {
   const gaps = turnGaps(checks, tree);
   const outcome = turnOutcomeLines({ requiredFiles: checks.requiredFiles, requiredCommands: checks.requiredCommands, gaps });
   if (outcome.done) {
     return [`已完成：自动核对 ${checks.requiredFiles.length + checks.requiredCommands.length} 项均通过`];
   }
+  if (outcome.lines.length === 0 && checks.didWork) return [NO_AUTO_CHECK_TEXT];
   return outcome.lines;
 }
 
