@@ -31,6 +31,8 @@ const PROVIDER = "deepseek-official";
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
 /** 思考模型单次流式生成经常超过 2 分钟，120 秒会把正常回合掐成超时。 */
 const REQUEST_TIMEOUT_MS = 600_000;
+/** 与官方 @deepseek-ai/dsh-llm-deepseek 的 DEFAULT_CONTEXT_WINDOW 同值;本文件不依赖该包,故按值声明。 */
+const DEFAULT_CONTEXT_WINDOW = 1_000_000;
 
 function resolveSettingsPath(profileDir: string): string {
   return join(profileDir, "huaanwork-settings.json");
@@ -224,6 +226,9 @@ export class HuaAnWorkAdapter extends LlmAdapter {
       id: model,
       name: model,
       inputModalities: ["text"],
+      // compaction-basic 靠它算压力;缺失会抛 TargetPressureConfigError 而静默不压缩。
+      // 数值取官方 DeepSeek 适配器的 DEFAULT_CONTEXT_WINDOW(1e6)。
+      context: { contextWindow: DEFAULT_CONTEXT_WINDOW },
     };
   }
 

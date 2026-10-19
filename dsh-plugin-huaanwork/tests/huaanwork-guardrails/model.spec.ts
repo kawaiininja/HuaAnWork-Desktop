@@ -94,6 +94,12 @@ test("apply registers the existing deepseek-official route", () => {
   assert.ok(registered.adapter instanceof HuaAnWorkAdapter);
 });
 
+test("resolveModel reports a positive integer context window so compaction can measure pressure", async () => {
+  const info = await new HuaAnWorkAdapter().resolveModel("deepseek-official", "local");
+  assert.equal(info.context?.contextWindow, 1_000_000);
+  assert.ok(Number.isInteger(info.context?.contextWindow) && (info.context?.contextWindow ?? 0) > 0);
+});
+
 test("stream concatenates SSE tool_calls and does not execute unknown names", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () =>
