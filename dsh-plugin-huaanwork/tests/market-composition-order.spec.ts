@@ -36,6 +36,8 @@ const GUARDRAIL_LOCK_IDS: ReadonlySet<string> = new Set([
   process.platform === 'win32' ? 'tool-pwsh' : 'tool-bash',
   'plan-mode',
   'tool-todo',
+  'tool-result-pruner',
+  'compaction-basic',
   'hmr',
   'jobs',
   'tool-jobs',

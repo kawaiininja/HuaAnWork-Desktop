@@ -284,6 +284,42 @@ test("bridge forwards user-turn reasoning and skips purposed calls", async () =>
   );
 });
 
+test("compaction purpose does not emit reasoning or tokens", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const wrap = listeners["llm/stream"]?.[0] as (
+    options: { purpose?: string },
+    next: () => AsyncIterable<{ type: "reasoning-delta" | "text-delta"; index: number; text: string }>,
+  ) => AsyncIterable<unknown>;
+  async function* compact() {
+    yield { type: "reasoning-delta" as const, index: 0, text: "压缩思考" };
+    yield { type: "text-delta" as const, index: 1, text: "摘要" };
+  }
+  for await (const _chunk of wrap({ purpose: "compaction" }, compact)) {
+    // drain
+  }
+  assert.equal(emitted.length, 0);
+});
+
+test("bridge tells the client when a compaction finished, and stays silent on failed or other session events", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as (
+    session: { id: string },
+    event: { type: string; data?: { error?: string } },
+  ) => void;
+  assert.equal(typeof onSessionEvent, "function");
+  const session = { id: "huaanwork-0123456789abcdef" };
+  onSessionEvent(session, { type: "compaction/start", data: {} });
+  onSessionEvent(session, { type: "compaction/summary", data: {} });
+  onSessionEvent(session, { type: "compaction/end", data: { error: "summary failed" } });
+  assert.deepEqual(emitted, []);
+  onSessionEvent(session, { type: "compaction/end", data: {} });
+  assert.deepEqual(emitted, [{ event: "compaction/done", sessionId: "huaanwork-0123456789abcdef" }]);
+});
+
 test("bridge carries todo_write todos and shell commands on tool/start, and isError on tool/end", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
   const { ctx, listeners, emitted } = createCtx();

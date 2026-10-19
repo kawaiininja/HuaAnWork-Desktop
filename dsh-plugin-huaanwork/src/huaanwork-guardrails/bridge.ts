@@ -18,6 +18,7 @@ type RpcEvent =
     }
   | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string; isError?: true }
   | { event: "diff"; text: string; sessionId?: string }
+  | { event: "compaction/done"; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string };
 
 type StreamChunk = {
@@ -99,6 +100,13 @@ export function apply(ctx: Context): void {
     }) as never,
     { global: true, prepend: true },
   );
+
+  // 压缩收尾信号：compaction/end 只写会话日志，不经 llm/stream。无 error 才算压缩完成，失败不提示。
+  ctx.on("session/event", ((session: { id?: string } | undefined, event: { type?: string; data?: { error?: unknown } } | undefined) => {
+    if (event?.type !== "compaction/end" || event.data?.error !== undefined) return;
+    const sessionId = typeof session?.id === "string" && session.id ? session.id : undefined;
+    emit(ctx, { event: "compaction/done", ...(sessionId === undefined ? {} : { sessionId }) });
+  }) as never, { global: true });
 
   ctx.on("agent/status", ((payload: { status?: string; agent?: AgentRef }) => {
     if (payload?.status !== "idle") return;

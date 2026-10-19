@@ -1532,6 +1532,9 @@ export function prepareDesktopProfile(
     { id: 'plan-mode', disabled: false },
     // 待办进度:todo_write 已在 ALLOWED_TOOLS;单活跃项纪律,与回合进度展示一致。
     { id: 'tool-todo', disabled: false, config: { allowParallelInProgress: false } },
+    // 长会话的工具输出裁剪与历史压缩:web-app overlay 关闭,华安翻回启用;压缩的模型调用带 purpose,桥接层不当作回合产出。
+    { id: 'tool-result-pruner', disabled: false },
+    { id: 'compaction-basic', disabled: false },
     { id: 'hmr', disabled: true },
     { id: 'jobs', disabled: true },
     { id: 'tool-jobs', disabled: true },

@@ -247,6 +247,7 @@ export type RpcEvent =
       autoContinue?: boolean;
     }
   | { event: "diff"; text: string; sessionId?: string }
+  | { event: "compaction/done"; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string }
   | { event: "sidecar/status"; ready: boolean }
   | { event: "automation/run-start"; automationId: string; runId: string; projectId: string | null; sessionId?: string; trigger?: "manual" | "schedule" | "catchup" }

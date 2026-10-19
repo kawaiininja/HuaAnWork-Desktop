@@ -1293,6 +1293,8 @@ virtualStoreDirMaxLength: 60
     expect(rows.get(shellRowId)?.config).toMatchObject({ enableRunInBackground: false })
     expect(rows.get('tool-todo')?.disabled).toBe(false)
     expect(rows.get('tool-todo')?.config).toMatchObject({ allowParallelInProgress: false })
+    expect(rows.get('tool-result-pruner')?.disabled).toBe(false)
+    expect(rows.get('compaction-basic')?.disabled).toBe(false)
     expect(rows.get('plan-mode')?.disabled).toBe(false)
     expect(rows.get('plan-mode')?.name).toBe('@deepseek-ai/dsh-plan-mode')
     expect((rows.get('plan-mode')?.config as { section?: string } | undefined)?.section).toMatch(/exit_plan_mode/)

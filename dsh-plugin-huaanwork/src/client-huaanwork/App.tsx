@@ -2628,6 +2628,8 @@ function sessionMetaOf(session: SessionRow): string {
   return parts.join(" · ");
 }
 
+const COMPACTION_NOTE = "更早的工具输出已被压缩";
+
 function handleEvent(
   event: RpcEvent,
   allocId: () => number,
@@ -2706,6 +2708,10 @@ function handleEvent(
     }
     case "diff":
       setDiff(event.text);
+      break;
+    case "compaction/done":
+      // 固定提示走聊天 note，不进思考面板。
+      setItems((prev) => [...prev, { id: allocId(), kind: "note", text: COMPACTION_NOTE }], event.sessionId);
       break;
     case "session/end":
       setTurnActive(false);
