@@ -14,6 +14,8 @@ type Agent = {
   cancel?: (reason: { kind: "parent" }) => void;
 };
 
+type Exec = { agent?: unknown; signal?: AbortSignal };
+
 type Context = {
   huaanworkRouteAgent?: { current: unknown };
   huaanworkEmit?: (event: { event: "session/end"; ok: false; error: string; sessionId?: string }) => void;
@@ -63,8 +65,9 @@ const textOutput = {
 };
 
 export function apply(ctx: Context): void {
-  const currentAgent = (): Agent | undefined => {
-    const agent = ctx.huaanworkRouteAgent?.current;
+  // `huaanworkRouteAgent` 是单槽，后一次发送会覆盖它；执行上下文带了 agent 就以它为准。
+  const currentAgent = (exec: Exec | undefined): Agent | undefined => {
+    const agent = exec?.agent ?? ctx.huaanworkRouteAgent?.current;
     return agent && typeof agent === "object" ? (agent as Agent) : undefined;
   };
 
@@ -112,8 +115,8 @@ export function apply(ctx: Context): void {
         objective: { type: "string", description: "必填，一句话目标。不要带其他字段。" },
       },
       output: textOutput,
-      async execute(args) {
-        const agent = currentAgent();
+      async execute(args, exec?: Exec) {
+        const agent = currentAgent(exec);
         const sessionId = sessionIdOfAgentRef(agent);
         if (!agent || !sessionId) throw new Error("当前没有可以进入计划模式的会话");
         const decision = classifyToolCalls([{ name: "propose_plan", args }]);
@@ -135,8 +138,8 @@ export function apply(ctx: Context): void {
         question: { type: "string", description: "必填，只问一个问题。不要带其他字段。" },
       },
       output: textOutput,
-      async execute(args, exec?: { signal?: AbortSignal }) {
-        const agent = currentAgent();
+      async execute(args, exec?: Exec) {
+        const agent = currentAgent(exec);
         const sessionId = sessionIdOfAgentRef(agent);
         if (!agent || !sessionId) throw new Error("当前没有可以提问的会话");
         const decision = classifyToolCalls([{ name: "request_input", args }]);
