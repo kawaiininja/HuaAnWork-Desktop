@@ -5,6 +5,11 @@ export const HOST_LIVENESS_TURNS_CHANNEL = "huaanwork:host-liveness-turns";
 export const HOST_LIVENESS_STOP_CHANNEL = "huaanwork:host-liveness-stop";
 export const HOST_LIVENESS_READ_CHANNEL = "huaanwork:host-liveness-read";
 
+/** 探活走既有的 `status` 调用：Host 主事件循环回出带 pid 的状态才算应答。 */
+export function probeAnswered(value: unknown): boolean {
+  return !!value && typeof value === "object" && typeof (value as { pid?: unknown }).pid === "number";
+}
+
 export function reduceLiveness(
   state: Liveness,
   event: { kind: "probe-ok" | "probe-miss" | "turn-count"; atMs: number; turns?: number },

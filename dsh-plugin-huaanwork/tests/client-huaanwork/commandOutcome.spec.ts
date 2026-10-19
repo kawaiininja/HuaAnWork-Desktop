@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { failureMarkers, resultTextFailed, shellCommandOf } from "../../src/client-huaanwork/logic/commandOutcome.ts";
+import { failureMarkers, resultTextFailed, shellCommandOf, toolRowIcon } from "../../src/client-huaanwork/logic/commandOutcome.ts";
 
 test("failure markers follow the rc.1 bash renderResult lines", () => {
   assert.equal(resultTextFailed("ok\n[exit code: 1]"), true);
@@ -28,4 +28,10 @@ test("shell commands come only from bash / pwsh arguments", () => {
   assert.equal(shellCommandOf("write", { command: "x" }), undefined);
   assert.equal(shellCommandOf("bash", { command: "  " }), undefined);
   assert.equal(shellCommandOf("bash", undefined), undefined);
+});
+
+test("a failed tool row shows a cross, not a check", () => {
+  assert.equal(toolRowIcon({ status: "start" }), "●");
+  assert.equal(toolRowIcon({ status: "end" }), "✓");
+  assert.equal(toolRowIcon({ status: "end", isError: true }), "✗");
 });

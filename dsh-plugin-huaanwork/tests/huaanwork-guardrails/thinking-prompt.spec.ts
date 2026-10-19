@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { apply, THINKING_PROMPT_NAME, THINKING_PROMPT_ORDER, THINKING_PROMPT_TEXT } from "../../src/huaanwork-guardrails/thinking-prompt.ts";
+import { apply, inject, name, THINKING_PROMPT_NAME, THINKING_PROMPT_ORDER, THINKING_PROMPT_TEXT } from "../../src/huaanwork-guardrails/thinking-prompt.ts";
+
+test("thinking prompt plugin is named and injects systemPrompt", () => {
+  assert.equal(name, "huaanwork-thinking-prompt");
+  assert.deepEqual(inject, ["systemPrompt"]);
+});
 
 test("thinking prompt is a constant section and does not use plan-policy order", () => {
   const registered: { name: string; order: number; text: string }[] = [];

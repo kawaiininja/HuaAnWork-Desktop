@@ -98,7 +98,16 @@ import {
   unscopedSessions,
 } from "./logic/sessionChannel.ts";
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
-import { hasAssistantTextAfter, resolveThinking, shouldRenderThinking } from "./logic/thinkingPanel.ts";
+import {
+  hasAssistantTextAfter,
+  nextThinkingSteps,
+  resolveThinking,
+  shouldRenderThinking,
+  thinkingStepsText,
+  type ThinkingSteps,
+} from "./logic/thinkingPanel.ts";
+import { closeOpenInputs, inputCardStatus, settleInputCard, type InputCard } from "./logic/inputCard.ts";
+import { toolRowIcon } from "./logic/commandOutcome.ts";
 import { turnStatus } from "./logic/turnStatus.ts";
 import {
   appendOutcomeNotes,
@@ -153,10 +162,11 @@ type AskCard = {
 type ChatItem =
   | { id: number; kind: "user"; text: string }
   | { id: number; kind: "assistant"; text: string; interrupted?: boolean }
-  | { id: number; kind: "thinking"; thought: string; interrupted: boolean }
+  | { id: number; kind: "thinking"; thought: string; interrupted: boolean; steps?: ThinkingSteps }
   | { id: number; kind: "tool"; card: ToolCard }
   | { id: number; kind: "todo"; todos: TodoEntry[] }
   | { id: number; kind: "ask"; card: AskCard }
+  | { id: number; kind: "input"; card: InputCard }
   | { id: number; kind: "note"; text: string };
 
 type SessionRow = {
@@ -1675,6 +1685,26 @@ export default function App() {
     );
   }
 
+  /** `request_input` 卡片：提交的文字回到同一回合；取消结束这次调用并停止回合。 */
+  async function answerInput(itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) {
+    if (sidecarDead || card.state !== "open") return;
+    let handled = false;
+    try {
+      const result = await rpcCall<{ handled?: boolean }>("session.answerInput", { sessionId: card.sessionId, ...reply });
+      handled = result?.handled === true;
+    } catch (error) {
+      noteActive(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    // 宿主那边已不在等（回合已结束或问题被替换）：卡片关掉，不显示「已回答」。
+    const state = !handled ? "closed" : "cancel" in reply ? "cancelled" : "answered";
+    const answerText = state === "answered" && "answer" in reply ? reply.answer : undefined;
+    setChatTabs((prev) => prev.map((tab) => {
+      const items = settleInputCard(tab.items, itemId, state, answerText);
+      return items === tab.items ? tab : { ...tab, items };
+    }));
+  }
+
   /**
    * 「任务」区游离会话：点击即恢复为可聊标签（对齐子任务的 selectSubtask 体验，无「继续此会话」跳转）。
    * 读历史失败或恢复失败时退化为只读历史视图 + 错误提示（面板内可经「继续此会话」重试）。
@@ -1827,7 +1857,7 @@ export default function App() {
   const showRightPane = view === "main";
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const pendingAsk = chatTabs.some((tab) =>
-    tab.items.some((item) => item.kind === "ask" && !item.card.answered),
+    tab.items.some((item) => (item.kind === "ask" && !item.card.answered) || (item.kind === "input" && item.card.state === "open")),
   );
   const logoutDisabled = turnActive || pendingAsk;
 
@@ -2146,6 +2176,7 @@ export default function App() {
                     item={item}
                     blocked={blocked}
                     onAnswer={answer}
+                    onInput={answerInput}
                     reasoning={item.kind === "assistant" ? (thinkingBefore(items, index)?.thought ?? "") : ""}
                     hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(items, index) : false}
                   />
@@ -2722,6 +2753,12 @@ function handleEvent(
       setItems((prev) => (event.toolName === "plan-review" ? insertBeforeToolRow(prev, ask, event.callId) : [...prev, ask]), event.sessionId);
       break;
     }
+    case "input/asked":
+      setItems((prev) => [
+        ...prev,
+        { id: allocId(), kind: "input", card: { question: event.question, sessionId: event.sessionId, state: "open" } },
+      ], event.sessionId);
+      break;
     case "diff":
       setDiff(event.text);
       break;
@@ -2739,6 +2776,7 @@ function handleEvent(
       // 回合结束刷新会话列表（任务区/最近对话）。日志写回是 ~200ms 批处理，
       // 等一拍再拉，避免新会话因 messageCount 仍为 0 被空壳过滤漏掉。
       setTimeout(() => void refreshRecent(), 600);
+      setItems((prev) => closeOpenInputs(prev), event.sessionId);
       if (event.cancelled || !event.ok) {
         setItems((prev) => interruptCurrentTurn(prev), event.sessionId);
       }
@@ -2832,7 +2870,7 @@ function appendToken(items: ChatItem[], text: string): ChatItem[] {
   return [...items, { id: (last?.id ?? 0) + 1, kind: "assistant", text }];
 }
 
-/** 同一回合只保留一块思考：非 final 追加草稿，final 用全文覆盖，不另起一块。 */
+/** 同一回合只保留一块思考：非 final 追加当前步骤，final 只替换当前步骤，工具调用前已定稿的步骤保留。 */
 function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number): ChatItem[] {
   let turnStart = 0;
   for (let i = items.length - 1; i >= 0; i -= 1) {
@@ -2845,11 +2883,13 @@ function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId
   if (existing >= 0) {
     const current = items[existing];
     if (current?.kind !== "thinking") return items;
+    const steps = nextThinkingSteps(current.steps ?? { settled: current.thought, draft: "" }, text, final);
     const next = items.slice();
-    next[existing] = { ...current, thought: final ? text : current.thought + text };
+    next[existing] = { ...current, thought: thinkingStepsText(steps), steps };
     return next;
   }
-  const created: ChatItem = { id: allocId(), kind: "thinking", thought: text, interrupted: false };
+  const steps = nextThinkingSteps({ settled: "", draft: "" }, text, final);
+  const created: ChatItem = { id: allocId(), kind: "thinking", thought: thinkingStepsText(steps), interrupted: false, steps };
   const assistantAt = items.findIndex((item, index) => index >= turnStart && item.kind === "assistant");
   if (assistantAt >= 0) return [...items.slice(0, assistantAt), created, ...items.slice(assistantAt)];
   return [...items, created];
@@ -2859,12 +2899,14 @@ function ChatRow({
   item,
   blocked,
   onAnswer,
+  onInput,
   reasoning = "",
   hasAssistantText = false,
 }: {
   item: ChatItem;
   blocked: boolean;
   onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
+  onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
   reasoning?: string;
   hasAssistantText?: boolean;
 }) {
@@ -2910,13 +2952,14 @@ function ChatRow({
   if (item.kind === "tool") {
     return (
       <div className={item.card.status === "start" ? "tool-row running" : "tool-row"}>
-        <span className="tool-icon">{item.card.status === "start" ? "●" : "✓"}</span>
+        <span className="tool-icon">{toolRowIcon(item.card)}</span>
         <strong>{item.card.name}</strong>
         <span className="muted">{item.card.status === "start" ? "运行中" : "结束"}</span>
         {item.card.truncated ? <span className="badge">truncated</span> : null}
       </div>
     );
   }
+  if (item.kind === "input") return <InputCardView itemId={item.id} card={item.card} blocked={blocked} onInput={onInput} />;
   if (item.card.toolName === "plan-review") return <PlanCard card={item.card} blocked={blocked} onAnswer={onAnswer} />;
   return (
     <div className="card ask-card">
@@ -2970,6 +3013,48 @@ function PlanCard({
             继续改计划
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+/** 模型用 `request_input` 提的问题：在对话里作答，提交或取消后这一回合才继续。 */
+function InputCardView({
+  itemId,
+  card,
+  blocked,
+  onInput,
+}: {
+  itemId: number;
+  card: InputCard;
+  blocked: boolean;
+  onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
+}) {
+  const [reply, setReply] = useState("");
+  const status = inputCardStatus(card);
+  return (
+    <div className="card ask-card">
+      <span className="ttl">需要你回答</span>
+      <p style={{ margin: 0 }}>{card.question}</p>
+      {status ? (
+        <p style={{ margin: 0 }}>{status}</p>
+      ) : (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (reply.trim()) onInput(itemId, card, { answer: reply.trim() });
+          }}
+        >
+          <textarea rows={3} value={reply} disabled={blocked} onChange={(event) => setReply(event.target.value)} />
+          <div className="row">
+            <button type="submit" className="btn approve" disabled={blocked || !reply.trim()}>
+              提交
+            </button>
+            <button type="button" className="btn reject" disabled={blocked} onClick={() => onInput(itemId, card, { cancel: true })}>
+              取消
+            </button>
+          </div>
+        </form>
       )}
     </div>
   );

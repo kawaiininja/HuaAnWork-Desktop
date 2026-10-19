@@ -7,6 +7,7 @@ export const name = "huaanwork-route-tools";
 export const inject = ["tools", "planMode"];
 
 const INVALID_ROUTE_TEXT = "没能理解这个请求";
+const STOPPED_TEXT = "回合已停止，这个问题不再等待回答";
 
 type Agent = {
   id?: string;
@@ -18,7 +19,11 @@ type Exec = { agent?: unknown; signal?: AbortSignal };
 
 type Context = {
   huaanworkRouteAgent?: { current: unknown };
-  huaanworkEmit?: (event: { event: "session/end"; ok: false; error: string; sessionId?: string }) => void;
+  huaanworkEmit?: (
+    event:
+      | { event: "session/end"; ok: false; error: string; sessionId?: string }
+      | { event: "input/asked"; question: string; sessionId: string },
+  ) => void;
   planMode: { set(agent: Agent, active: boolean): unknown };
   tools: { register(definition: unknown): unknown };
 };
@@ -53,6 +58,15 @@ export function cancelRouteInput(sessionId: string): boolean {
   return true;
 }
 
+/** 停止回合：等待中的 `request_input` 立即结束，不再等卡片。 */
+export function releaseRouteInput(sessionId: string): boolean {
+  const pending = pendingInputs.get(sessionId);
+  if (!pending) return false;
+  pendingInputs.delete(sessionId);
+  pending.reject(new Error(STOPPED_TEXT));
+  return true;
+}
+
 const textOutput = {
   schema: {
     type: "object" as const,
@@ -80,12 +94,17 @@ export function apply(ctx: Context): void {
     throw new Error(reason);
   };
 
-  const waitForInput = (agent: Agent, sessionId: string, signal: AbortSignal | undefined) =>
+  const waitForInput = (agent: Agent, sessionId: string, question: string, signal: AbortSignal | undefined) =>
     new Promise<string>((resolve, reject) => {
+      const emit = ctx.huaanworkEmit;
+      if (typeof emit !== "function") {
+        reject(new Error("没有可以显示问题的对话"));
+        return;
+      }
       pendingInputs.get(sessionId)?.reject(new Error("这个问题已被新的问题替换"));
       const onAbort = () => {
         if (pendingInputs.get(sessionId) === pending) pendingInputs.delete(sessionId);
-        reject(new Error("回合已停止，这个问题不再等待回答"));
+        reject(new Error(STOPPED_TEXT));
       };
       const pending: PendingInput = {
         agent,
@@ -104,6 +123,7 @@ export function apply(ctx: Context): void {
       }
       signal?.addEventListener("abort", onAbort, { once: true });
       pendingInputs.set(sessionId, pending);
+      emit({ event: "input/asked", question, sessionId });
     });
 
   ctx.tools.register(
@@ -147,7 +167,7 @@ export function apply(ctx: Context): void {
           return rejectInvalid(agent, sessionId, "request_input 只接受一个非空字符串字段 question，请修正后再调用一次。");
         }
         invalidRoutes.delete(sessionId);
-        return { text: await waitForInput(agent, sessionId, exec?.signal) };
+        return { text: await waitForInput(agent, sessionId, decision.question, exec?.signal) };
       },
     }),
   );

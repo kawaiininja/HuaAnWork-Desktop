@@ -3,6 +3,7 @@ import { join, resolve, sep } from 'node:path'
 
 import { workNetworkGateError } from '@huaanwork/policy/network'
 import { settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
+import { answerRouteInput, cancelRouteInput, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { invokeSkillText } from './skill-invoke.ts'
@@ -242,6 +243,7 @@ function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params:
     agent.cancel?.({ kind: 'parent' })
   }
   primary?.cancel?.({ kind: 'user' })
+  releaseRouteInput(sessionId)
   return { accepted: true }
 }
 
@@ -512,6 +514,16 @@ export function sessionExitPlanMode(
   planMode.set(agent, false)
   if (!settled && agent.status === 'running') agent.cancel?.({ kind: 'user' })
   return { exited: true }
+}
+
+/** `request_input` 的对话卡片：提交的文字作为工具结果回到同一回合；`cancel: true` 结束这次调用并停止回合。 */
+export function sessionAnswerInput(params: unknown): { handled: boolean } {
+  const sessionId = objectString(params, 'sessionId')
+  if (!sessionId) return { handled: false }
+  if (objectBool(params, 'cancel')) return { handled: cancelRouteInput(sessionId) }
+  const answer = objectString(params, 'answer')?.trim()
+  if (!answer) return { handled: false }
+  return { handled: answerRouteInput(sessionId, answer) }
 }
 
 export async function sessionAnswerApproval(

@@ -3,9 +3,11 @@ import { test } from "vitest";
 import {
   extractThinkBlocks,
   hasAssistantTextAfter,
+  nextThinkingSteps,
   resolveThinking,
   shouldRenderThinking,
   thinkingChrome,
+  thinkingStepsText,
 } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 
 test("reasoning wins and think tags stay out of the answer", () => {
@@ -75,4 +77,20 @@ test("a following user message ends the scan", () => {
     { kind: "assistant" as const, text: "下一轮的答案" },
   ];
   assert.equal(hasAssistantTextAfter(items, 0), false);
+});
+
+test("a final reasoning event replaces only the current step, earlier steps stay", () => {
+  let steps = { settled: "", draft: "" };
+  steps = nextThinkingSteps(steps, "先读", false);
+  steps = nextThinkingSteps(steps, "文件", false);
+  assert.equal(thinkingStepsText(steps), "先读文件");
+  steps = nextThinkingSteps(steps, "先读文件。", true);
+  assert.equal(thinkingStepsText(steps), "先读文件。");
+  // 工具调用之后的下一步思考
+  steps = nextThinkingSteps(steps, "再写", false);
+  assert.equal(thinkingStepsText(steps), "先读文件。\n\n再写");
+  steps = nextThinkingSteps(steps, "再写报告。", true);
+  assert.equal(thinkingStepsText(steps), "先读文件。\n\n再写报告。");
+  // 与重开历史一致：每条消息一块思考，按顺序拼起来就是同一段文字
+  assert.equal(thinkingStepsText(steps), ["先读文件。", "再写报告。"].join("\n\n"));
 });

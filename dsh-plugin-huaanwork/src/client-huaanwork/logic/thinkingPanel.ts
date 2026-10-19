@@ -51,12 +51,32 @@ export function shouldRenderThinking(thought: string): boolean {
   return thought.trim().length > 0;
 }
 
+/** 一回合的思考：已定稿的各步与当前步骤的草稿。 */
+export type ThinkingSteps = { settled: string; draft: string };
+
+function joinSteps(...parts: string[]): string {
+  return parts.map((part) => part.trim()).filter((part) => part.length > 0).join("\n\n");
+}
+
+/** 非 final 追加到当前步骤；final 用全文替换当前步骤并定稿，之前定稿的步骤不动。 */
+export function nextThinkingSteps(steps: ThinkingSteps, text: string, final: boolean): ThinkingSteps {
+  if (final) return { settled: joinSteps(steps.settled, text), draft: "" };
+  return { settled: steps.settled, draft: steps.draft + text };
+}
+
+/** 各步之间空一行，与重开历史时每条消息一块思考的文字一致。 */
+export function thinkingStepsText(steps: ThinkingSteps): string {
+  return joinSteps(steps.settled, steps.draft);
+}
+
 type TurnItem =
   | { kind: "thinking"; thought: string }
   | { kind: "assistant"; text: string }
   | { kind: "user" }
   | { kind: "tool" }
   | { kind: "ask" }
+  | { kind: "input" }
+  | { kind: "todo" }
   | { kind: "note" };
 
 export function hasAssistantTextAfter(items: readonly TurnItem[], index: number): boolean {

@@ -11,6 +11,7 @@ import {
   HOST_LIVENESS_READ_CHANNEL,
   HOST_LIVENESS_STOP_CHANNEL,
   HOST_LIVENESS_TURNS_CHANNEL,
+  probeAnswered,
   reduceLiveness,
   type Liveness,
 } from './huaanwork-host/host-liveness.ts'
@@ -81,10 +82,6 @@ function electronLivenessApi(): ElectronLivenessApi {
   catch { return {} }
 }
 
-function probeAnswered(value: unknown): boolean {
-  return !!value && typeof value === 'object' && (value as { ok?: unknown }).ok === true
-}
-
 function publishHostLiveness(state: Liveness): void {
   const windows = electronLivenessApi().BrowserWindow?.getAllWindows?.()
   if (!windows) return
@@ -138,7 +135,7 @@ function beginHostLiveness(rpc: HostRpc, child: { kill(): boolean }): () => void
   publishHostLiveness(state)
   const timer = setInterval(() => {
     if (closed) return
-    void rpc.call('liveness', [], undefined, 2_000).then(
+    void rpc.call('status', [], undefined, 2_000).then(
       value => {
         const atMs = Date.now()
         if (probeAnswered(value)) apply({ kind: 'probe-ok', atMs })

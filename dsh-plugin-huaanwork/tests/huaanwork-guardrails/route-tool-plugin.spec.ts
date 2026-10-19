@@ -1,7 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { preferControlCalls } from "../../src/huaanwork-guardrails/route-tools.ts";
-import { apply, cancelRouteInput, noteInvalidRoute } from "../../src/huaanwork-guardrails/route-tool-plugin.ts";
+import {
+  answerRouteInput,
+  apply,
+  cancelRouteInput,
+  noteInvalidRoute,
+  releaseRouteInput,
+} from "../../src/huaanwork-guardrails/route-tool-plugin.ts";
+
+type Exec = { agent?: unknown; signal?: AbortSignal };
+type Registered = { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> };
+
+function routeTools(emitted: unknown[], emit = true) {
+  const tools = new Map<string, Registered>();
+  apply({
+    huaanworkRouteAgent: { current: null },
+    ...(emit ? { huaanworkEmit: (event: unknown) => { emitted.push(event); } } : {}),
+    planMode: { set() { return "queued"; } },
+    tools: { register(definition: Registered) { tools.set(definition.name, definition); } },
+  });
+  return tools;
+}
 
 test("a control call drops sibling ordinary calls before they are emitted", () => {
   assert.deepEqual(
@@ -30,10 +50,10 @@ test("route tools act on the executing agent, not the shared holder", async () =
   const sent = { id: "huaanwork-aaaaaaaaaaaaaaaa", cancel() {} };
   const later = { id: "huaanwork-bbbbbbbbbbbbbbbb", cancelled: 0, cancel() { this.cancelled += 1; } };
   const seen: unknown[] = [];
-  type Exec = { agent?: unknown; signal?: AbortSignal };
   const tools = new Map<string, { execute: (args: unknown, exec?: Exec) => Promise<unknown> }>();
   apply({
     huaanworkRouteAgent: { current: sent },
+    huaanworkEmit: () => undefined,
     planMode: { set(next: unknown, active: boolean) { seen.push([next, active]); return "queued"; } },
     tools: { register(definition: { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }) { tools.set(definition.name, definition); } },
   });
@@ -45,6 +65,41 @@ test("route tools act on the executing agent, not the shared holder", async () =
   assert.equal(cancelRouteInput(later.id), true);
   await assert.rejects(waiting!, /用户取消了这个问题/);
   assert.equal(later.cancelled, 1);
+});
+
+test("request_input shows the question in the chat and returns the submitted answer", async () => {
+  const emitted: unknown[] = [];
+  const tools = routeTools(emitted);
+  const agent = { id: "huaanwork-cccccccccccccccc" };
+  const waiting = tools.get("request_input")!.execute({ question: "发给谁？" }, { agent });
+  await Promise.resolve();
+  assert.deepEqual(emitted, [{ event: "input/asked", question: "发给谁？", sessionId: agent.id }]);
+  assert.equal(answerRouteInput(agent.id, "张三"), true);
+  assert.deepEqual(await waiting, { text: "张三" });
+  assert.equal(answerRouteInput(agent.id, "again"), false);
+});
+
+test("stopping the turn releases a waiting request_input", async () => {
+  const tools = routeTools([]);
+  const agent = { id: "huaanwork-dddddddddddddddd" };
+  const controller = new AbortController();
+  const aborted = tools.get("request_input")!.execute({ question: "哪个目录？" }, { agent, signal: controller.signal });
+  controller.abort();
+  await assert.rejects(aborted, /回合已停止/);
+  assert.equal(answerRouteInput(agent.id, "late"), false);
+
+  const released = tools.get("request_input")!.execute({ question: "哪个目录？" }, { agent });
+  await Promise.resolve();
+  assert.equal(releaseRouteInput(agent.id), true);
+  await assert.rejects(released, /回合已停止/);
+  assert.equal(releaseRouteInput(agent.id), false);
+});
+
+test("request_input does not wait when no chat can show the question", async () => {
+  const tools = routeTools([], false);
+  const agent = { id: "huaanwork-eeeeeeeeeeeeeeee" };
+  await assert.rejects(tools.get("request_input")!.execute({ question: "发给谁？" }, { agent }), /没有可以显示问题的对话/);
+  assert.equal(answerRouteInput(agent.id, "x"), false);
 });
 
 test("the second invalid route call ends the turn", () => {

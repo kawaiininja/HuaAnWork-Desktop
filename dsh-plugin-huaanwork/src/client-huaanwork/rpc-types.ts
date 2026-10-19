@@ -8,6 +8,7 @@ export type RpcRequest = {
     | "session.approve"
     | "session.reject"
     | "session.exitPlanMode"
+    | "session.answerInput"
     | "session.list"
     | "session.open"
     | "session.remove"
@@ -246,6 +247,8 @@ export type RpcEvent =
       /** plan-review 已由回答者按当前护栏提交同意，卡片不再等待点击。 */
       autoContinue?: boolean;
     }
+  /** `request_input` 在等对话卡片的回答；回答或取消走 `session.answerInput`。 */
+  | { event: "input/asked"; question: string; sessionId: string }
   | { event: "diff"; text: string; sessionId?: string }
   | { event: "compaction/done"; sessionId?: string }
   | { event: "goal/round"; round: number; sessionId?: string }

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { resolve as pathResolve } from 'node:path'
 
 import type { AutomationInfo, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
+import { releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import { resolveApproval } from './approvals.ts'
 import { automationRunSessionId } from './automation-session-ids.ts'
 import {
@@ -246,6 +247,7 @@ function automationSessionAgent(ctx: AutomationRuntime, sessionId: string): List
 /** 只取消这一条自动化会话,不顺带取消其它 live agent。 */
 function cancelAutomationSession(ctx: AutomationRuntime, sessionId: string): void {
   automationSessionAgent(ctx, sessionId)?.cancel?.({ kind: 'user' })
+  releaseRouteInput(sessionId)
 }
 
 async function mergedRunPrefix(routeCtx: RouteContext, automation: AutomationInfo): Promise<string | undefined> {

@@ -35,3 +35,9 @@ export function failureMarkers(text: string): string[] {
 export function resultTextFailed(text: string): boolean {
   return failureMarkers(text).length > 0;
 }
+
+/** 对话里工具行的图标：运行中、结束、出错。 */
+export function toolRowIcon(card: { status: "start" | "end"; isError?: boolean }): string {
+  if (card.status === "start") return "●";
+  return card.isError === true ? "✗" : "✓";
+}

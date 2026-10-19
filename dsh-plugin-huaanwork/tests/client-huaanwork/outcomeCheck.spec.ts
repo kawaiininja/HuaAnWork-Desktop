@@ -178,3 +178,24 @@ test("a late outcome is dropped when a newer user message already sits on the ta
   const next = [...items, { id: 3, kind: "user" as const }];
   assert.equal(appendOutcomeNotes(next, 1, notes), next);
 });
+
+test("leading Chinese words are not part of the file name", () => {
+  assert.deepEqual(extractRequiredFiles("帮我把总结写到报告.md里"), ["报告.md"]);
+  assert.deepEqual(extractRequiredFiles("保存为周报/本周总结.md"), ["周报/本周总结.md"]);
+  assert.deepEqual(extractRequiredFiles("整理一份总结报告.md"), ["整理一份总结报告.md"]);
+});
+
+test("a file is not reported missing when the real name only differs by leading Chinese words", () => {
+  const paths = treePaths([{ path: "/w/总结报告.md" }, { path: "/w/docs/报告.md" }]);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/报告.md" }]), "报告.md"), true);
+  assert.equal(fileExistsInTree(paths, "报告.md"), true);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/总结报告.md" }]), "报告.md"), true);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/总结报告.md" }]), "整理一份总结报告.md"), true);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/周报/本周总结.md" }]), "保存周报/本周总结.md"), true);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/a报告.md" }]), "报告.md"), false);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/总结.md" }]), "报告.md"), false);
+  assert.deepEqual(
+    turnOutcomeNotes(turnChecks([{ kind: "user", text: "帮我把总结写到报告.md里" }]), [{ path: "/w/报告.md" }]),
+    ["已完成：自动核对 1 项均通过"],
+  );
+});

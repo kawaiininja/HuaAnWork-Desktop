@@ -5,9 +5,11 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { registerChildSession } from '../../src/huaanwork-host/child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import { emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
+import { apply as applyRouteTools } from '../../src/huaanwork-guardrails/route-tool-plugin.ts'
 import {
   sendToAgent,
   sessionAnswerApproval,
+  sessionAnswerInput,
   sessionCancel,
   sessionExitPlanMode,
   sessionList,
@@ -384,6 +386,51 @@ describe('session.cancel (旧 host.ts:1560)', () => {
     const ctx: SessionRuntimeContext = { agents: { list: () => [target, child, sibling] } }
     sessionCancel(ctx, routeCtx, { sessionId: 'huaanwork-aaaaaaaaaaaaaaaa' })
     expect(reasons.sort()).toEqual(['child:parent', 'target:user'])
+  })
+})
+
+describe('session.answerInput', () => {
+  type Exec = { agent?: unknown; signal?: AbortSignal }
+  type Registered = { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }
+
+  function askInput(agent: ListedAgent): Promise<unknown> {
+    const tools = new Map<string, Registered>()
+    applyRouteTools({
+      huaanworkEmit: () => undefined,
+      planMode: { set: () => undefined },
+      tools: { register: (definition: Registered) => { tools.set(definition.name, definition) } },
+    })
+    return tools.get('request_input')!.execute({ question: '发给谁？' }, { agent })
+  }
+
+  test('the card answer becomes the request_input result', async () => {
+    const agent: ListedAgent = { id: 'huaanwork-1111111111111111', cancel: () => undefined }
+    const waiting = askInput(agent)
+    expect(sessionAnswerInput({ sessionId: agent.id, answer: '张三' })).toEqual({ handled: true })
+    await expect(waiting).resolves.toEqual({ text: '张三' })
+    expect(sessionAnswerInput({ sessionId: agent.id, answer: '张三' })).toEqual({ handled: false })
+  })
+
+  test('cancelling the card ends the call and stops the turn', async () => {
+    const reasons: string[] = []
+    const agent: ListedAgent = { id: 'huaanwork-2222222222222222', cancel: (reason) => { reasons.push(reason.kind) } }
+    const waiting = askInput(agent)
+    expect(sessionAnswerInput({ sessionId: agent.id, cancel: true })).toEqual({ handled: true })
+    await expect(waiting).rejects.toThrow(/用户取消了这个问题/)
+    expect(reasons).toEqual(['parent'])
+  })
+
+  test('a blank answer or a missing session id is not handled', () => {
+    expect(sessionAnswerInput({ sessionId: 'huaanwork-3333333333333333', answer: '  ' })).toEqual({ handled: false })
+    expect(sessionAnswerInput({ answer: '张三' })).toEqual({ handled: false })
+  })
+
+  test('session.cancel releases a waiting request_input', async () => {
+    const agent: ListedAgent = { id: 'huaanwork-4444444444444444', cancel: () => undefined }
+    const waiting = askInput(agent)
+    const ctx: SessionRuntimeContext = { agents: { get: (id) => (id === agent.id ? agent : undefined), list: () => [agent] } }
+    sessionCancel(ctx, makeRouteCtx(freshTmp()), { sessionId: agent.id })
+    await expect(waiting).rejects.toThrow(/回合已停止/)
   })
 })
 

@@ -19,6 +19,24 @@ export function outcomeGaps(input: {
 }
 
 const FILE_PATH = /[\w\u4e00-\u9fff./\\~-]+\.(?:md|txt|docx?|xlsx?|pptx?|csv|json|pdf|html?|tsx?|jsx?|py)\b/gi;
+const LEADING_CJK = /^[\u4e00-\u9fff]+/;
+const CJK_ONLY = /^[\u4e00-\u9fff]+$/;
+/** 中文句子里紧挨文件名的虚词或动词；文件名从最后一个这样的字之后开始。 */
+const NAME_BOUNDARY = /[到把在为成叫进入给存写至于将的和与及或]/g;
+
+/** 「帮我把总结写到报告.md」里文件名是「报告.md」：去掉连写在前面的中文句子。 */
+function stripLeadingSentence(match: string): string {
+  const run = LEADING_CJK.exec(match)?.[0] ?? "";
+  let cut = 0;
+  for (const boundary of run.matchAll(NAME_BOUNDARY)) cut = (boundary.index ?? 0) + 1;
+  return cut > 0 && cut < match.length ? match.slice(cut) : match;
+}
+
+/** 两个名字只差开头连写的中文字，也当作同一个文件（句子切分可能多切或少切）。 */
+function sameNameUpToLeadingCjk(a: string, b: string): boolean {
+  const [longer, shorter] = a.length >= b.length ? [a, b] : [b, a];
+  return longer.endsWith(shorter) && CJK_ONLY.test(longer.slice(0, longer.length - shorter.length));
+}
 const COMMAND_SPAN = /`([^`\n]+)`/g;
 const COMMAND_START = /^(?:pnpm|npm|yarn|corepack|npx|node|python3?|pytest|cargo|go|make|bun|deno|git)\s/;
 
@@ -28,7 +46,7 @@ function unique(values: string[]): string[] {
 
 /** 只认文字里明确写出的文件路径（用户原文，或计划卡写明的产物路径）。 */
 export function extractRequiredFiles(text: string): string[] {
-  return unique(text.match(FILE_PATH) ?? []);
+  return unique((text.match(FILE_PATH) ?? []).map(stripLeadingSentence));
 }
 
 /** 只认用反引号写明、且以常见命令行工具开头的命令。 */
@@ -54,7 +72,11 @@ export function treePaths(nodes: readonly TreeLike[]): string[] {
 
 export function fileExistsInTree(paths: readonly string[], file: string): boolean {
   const wanted = file.replace(/\\/g, "/").replace(/^\.\//, "");
-  return paths.some((path) => path === wanted || path.endsWith(`/${wanted}`));
+  const depth = wanted.split("/").length;
+  return paths.some((path) => {
+    if (path === wanted || path.endsWith(`/${wanted}`)) return true;
+    return sameNameUpToLeadingCjk(path.split("/").slice(-depth).join("/"), wanted);
+  });
 }
 
 export const NO_AUTO_CHECK_TEXT = "没有自动核对项，需要你自己看";
@@ -90,7 +112,7 @@ type TurnItem =
   | { kind: "user"; text: string }
   | { kind: "ask"; card: { toolName: string; summary?: string } }
   | { kind: "tool"; card: { name: string; command?: string; isError?: boolean; status?: "start" | "end" } }
-  | { kind: "assistant" | "thinking" | "note" | "todo" };
+  | { kind: "assistant" | "thinking" | "note" | "todo" | "input" };
 
 export type TurnChecks = {
   requiredFiles: string[];

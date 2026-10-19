@@ -10,7 +10,7 @@ const LONG_REQUEST_TIMEOUT_MS = 30 * 60_000
 
 const DIRECTORY_PICKER_PATH = '/_dsh/desktop/pick-directory'
 
-// —— 54 方法 → route 映射(与 huaanwork-host/routes.ts 的 ROUTE_TABLE 互为唯一事实源)——
+// —— 56 方法 → route 映射(与 huaanwork-host/routes.ts 的 ROUTE_TABLE 互为唯一事实源)——
 // Task 4 的 GET route 均不取 query 参数,故 path 为常量;写类 route body 透传 params。
 // Task 10 起 GET 类 route 定义 query contract:params 对象的键值编码为 query string
 // (undefined 值跳过;空对象 → 无 query,path 不变)。服务端 routes.ts 同名参数直读。
@@ -52,6 +52,7 @@ export const ROUTES: Record<string, RouteDef> = {
   'session.approve': post('/huaanwork/session/approve'),
   'session.reject': post('/huaanwork/session/reject'),
   'session.exitPlanMode': post('/huaanwork/session/exitPlanMode'),
+  'session.answerInput': post('/huaanwork/session/answerInput'),
   'session.list': get('/huaanwork/session/list', objectQuery),
   'session.open': post('/huaanwork/session/open'),
   'session.remove': post('/huaanwork/session/remove'),
