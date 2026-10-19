@@ -20,8 +20,8 @@ export function outcomeGaps(input: {
 
 const FILE_PATH = /[\w\u4e00-\u9fff./\\~-]+\.(?:md|txt|docx?|xlsx?|pptx?|csv|json|pdf|html?|tsx?|jsx?|py)\b/gi;
 const LEADING_CJK = /^[\u4e00-\u9fff]+/;
-/** 中文句子里紧挨文件名的虚词或动词；文件名从最后一个这样的字之后开始。 */
-const NAME_BOUNDARY = /[到把在为成叫进入给存写至于将的和与及或]/g;
+/** 句子里紧挨文件名的动词；的、和、与、及、或会进文件名，不在这里切开。 */
+const NAME_BOUNDARY = /[到把在为成叫进入给存写至于将]/g;
 
 /** 「帮我把总结写到报告.md」里文件名是「报告.md」：去掉连写在前面的中文句子。 */
 function stripLeadingSentence(match: string): string {

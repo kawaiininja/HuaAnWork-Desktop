@@ -202,6 +202,16 @@ test("帮我把总结写到报告.md里 extracts 报告.md", () => {
   assert.deepEqual(extractRequiredFiles("帮我把总结写到报告.md里"), ["报告.md"]);
 });
 
+test("的和与及或 stay inside the file name", () => {
+  assert.deepEqual(extractRequiredFiles("请写我的报告.md"), ["我的报告.md"]);
+  assert.deepEqual(extractRequiredFiles("写到项目的计划.md"), ["项目的计划.md"]);
+  assert.equal(fileExistsInTree(treePaths([{ path: "/w/报告.md" }]), "我的报告.md"), false);
+  assert.deepEqual(
+    turnOutcomeNotes(turnChecks([{ kind: "user", text: "请写我的报告.md" }]), [{ path: "/w/报告.md" }]),
+    ["缺少文件：我的报告.md"],
+  );
+});
+
 test("总结报告.md is a gap when the tree only contains 报告.md", () => {
   assert.equal(fileExistsInTree(treePaths([{ path: "/w/报告.md" }]), "总结报告.md"), false);
   assert.deepEqual(
