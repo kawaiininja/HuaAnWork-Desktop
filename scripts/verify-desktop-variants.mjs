@@ -220,6 +220,8 @@ export const PAIRS = [
       'src/host-bootstrap.ts',
       'src/host-developer-logging.ts',
       'src/host-process.ts',
+      // The utility-process entry has to answer the supervisor's liveness call.
+      'src/host-process-entry.ts',
       'src/host-rpc.ts',
       'src/jobs-bridge.ts',
       'src/local-window-policy.ts',

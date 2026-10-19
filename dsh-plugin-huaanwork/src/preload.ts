@@ -9,7 +9,7 @@ import {
   HOST_LIVENESS_READ_CHANNEL,
   HOST_LIVENESS_STOP_CHANNEL,
   HOST_LIVENESS_TURNS_CHANNEL,
-} from './host-liveness.ts'
+} from './huaanwork-host/host-liveness.ts'
 import {
   DESKTOP_RENDERER_ACTION_CHANNEL,
   DESKTOP_RENDERER_ACTIONS_BRIDGE,

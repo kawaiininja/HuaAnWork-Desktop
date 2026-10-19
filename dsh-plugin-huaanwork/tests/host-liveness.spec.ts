@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { reduceLiveness, type Liveness } from "../src/host-liveness.ts";
+import { reduceLiveness, type Liveness } from "../src/huaanwork-host/host-liveness.ts";
 
 const start: Liveness = { phase: "ok", turns: 1, lastOkMs: 0 };
 

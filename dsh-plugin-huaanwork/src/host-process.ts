@@ -13,7 +13,7 @@ import {
   HOST_LIVENESS_TURNS_CHANNEL,
   reduceLiveness,
   type Liveness,
-} from './host-liveness.ts'
+} from './huaanwork-host/host-liveness.ts'
 import { bindNativeRuntime, runtimeSnapshot } from './host-runtime-bridge.ts'
 import type { DesktopHostOptions } from './host-bootstrap.ts'
 import type { DesktopRuntime } from './runtime.ts'
