@@ -19,6 +19,8 @@ type RpcEvent =
   | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string; isError?: true }
   | { event: "diff"; text: string; sessionId?: string }
   | { event: "compaction/done"; sessionId?: string }
+  | { event: "goal/round"; round: number; sessionId?: string }
+  | { event: "goal/round-limit"; round: number; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string };
 
 type StreamChunk = {
@@ -102,10 +104,30 @@ export function apply(ctx: Context): void {
   );
 
   // 压缩收尾信号：compaction/end 只写会话日志，不经 llm/stream。无 error 才算压缩完成，失败不提示。
-  ctx.on("session/event", ((session: { id?: string } | undefined, event: { type?: string; data?: { error?: unknown } } | undefined) => {
-    if (event?.type !== "compaction/end" || event.data?.error !== undefined) return;
+  ctx.on("session/event", ((session: { id?: string } | undefined, event: { type?: string; data?: unknown } | undefined) => {
     const sessionId = typeof session?.id === "string" && session.id ? session.id : undefined;
-    emit(ctx, { event: "compaction/done", ...(sessionId === undefined ? {} : { sessionId }) });
+    const scope = sessionId === undefined ? {} : { sessionId };
+    if (event?.type === "compaction/end") {
+      if (objectValue(event.data).error !== undefined) return;
+      emit(ctx, { event: "compaction/done", ...scope });
+      return;
+    }
+    // 目标续轮信号：官方 goal-round-driver 入队的轮次消息（source.kind=goal，round>0）进入会话时即一轮开始；
+    // 到上限时驱动器把目标记为 blocked/round-limit。这里只转述，不另写续跑器。
+    if (event?.type === "user/message") {
+      const source = objectValue(objectValue(event.data).source);
+      if (source.kind === "goal" && typeof source.round === "number" && source.round > 0) {
+        emit(ctx, { event: "goal/round", round: source.round, ...scope });
+      }
+      return;
+    }
+    if (event?.type === "goal/change") {
+      const data = objectValue(event.data);
+      const goal = objectValue(data.goal);
+      if (goal.phase === "blocked" && objectValue(goal.blockedReason).code === "round-limit" && typeof data.roundsStarted === "number") {
+        emit(ctx, { event: "goal/round-limit", round: data.roundsStarted, ...scope });
+      }
+    }
   }) as never, { global: true });
 
   ctx.on("agent/status", ((payload: { status?: string; agent?: AgentRef }) => {

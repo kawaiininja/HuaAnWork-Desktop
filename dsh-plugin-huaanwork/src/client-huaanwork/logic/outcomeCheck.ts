@@ -127,8 +127,8 @@ export function turnChecks(items: readonly TurnItem[]): TurnChecks {
   return { requiredFiles: unique(files), requiredCommands: extractRequiredCommands(userText), toolResults };
 }
 
-/** 回合结束时追加到对话里的核对句子；有缺项就不出现「已完成」。 */
-export function turnOutcomeNotes(checks: TurnChecks, tree: readonly TreeLike[]): string[] {
+/** 本回合核对出的缺项；工作区读不到时文件项如实记为未核对，不当作缺失。 */
+export function turnGaps(checks: TurnChecks, tree: readonly TreeLike[]): string[] {
   const paths = treePaths(tree);
   const unreadable = checks.requiredFiles.length > 0 && paths.length === 0;
   const gaps = outcomeGaps({
@@ -138,6 +138,12 @@ export function turnOutcomeNotes(checks: TurnChecks, tree: readonly TreeLike[]):
     fileExists: (path) => fileExistsInTree(paths, path),
   });
   if (unreadable) gaps.push(`没能读取工作区，文件未核对：${checks.requiredFiles.join("、")}`);
+  return gaps;
+}
+
+/** 回合结束时追加到对话里的核对句子；有缺项就不出现「已完成」。 */
+export function turnOutcomeNotes(checks: TurnChecks, tree: readonly TreeLike[]): string[] {
+  const gaps = turnGaps(checks, tree);
   const outcome = turnOutcomeLines({ requiredFiles: checks.requiredFiles, requiredCommands: checks.requiredCommands, gaps });
   if (outcome.done) {
     return [`已完成：自动核对 ${checks.requiredFiles.length + checks.requiredCommands.length} 项均通过`];

@@ -248,6 +248,8 @@ export type RpcEvent =
     }
   | { event: "diff"; text: string; sessionId?: string }
   | { event: "compaction/done"; sessionId?: string }
+  | { event: "goal/round"; round: number; sessionId?: string }
+  | { event: "goal/round-limit"; round: number; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string }
   | { event: "sidecar/status"; ready: boolean }
   | { event: "automation/run-start"; automationId: string; runId: string; projectId: string | null; sessionId?: string; trigger?: "manual" | "schedule" | "catchup" }

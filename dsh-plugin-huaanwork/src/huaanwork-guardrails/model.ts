@@ -57,6 +57,9 @@ export function isRegisteredToolName(name: string): boolean {
     || name === "propose_plan"
     || name === "request_input"
     || name === "exit_plan_mode"
+    || name === "get_goal"
+    || name === "create_goal"
+    || name === "update_goal"
     || name.startsWith("mcp__");
 }
 

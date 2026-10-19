@@ -7,6 +7,9 @@ export const inject = ["agents", "tools"];
 
 export const MAX_CONSECUTIVE_SAME_FAILURES = 3;
 export const MAX_TEST_FIX_ROUNDS = 5;
+/** 目标自动续轮上限;客户端的 GOAL_ROUND_LIMIT 与 profile 的 defaultMaxGoalRounds 同值。 */
+export const MAX_GOAL_ROUNDS = 4;
+export const GOAL_ROUNDS_EXCEEDED = `目标最多自动续 ${MAX_GOAL_ROUNDS} 轮`;
 
 type Agent = {
   id?: string;
@@ -92,6 +95,7 @@ export function apply(ctx: Context): void {
           return stop(execution.agent, state, `still-failing tests after ${MAX_TEST_FIX_ROUNDS} rounds\n${summary}`);
         }
       }
+      if (exceedsGoalRounds(execution)) return { kind: "deny", reason: GOAL_ROUNDS_EXCEEDED };
       return next();
     }) as never,
     true,
@@ -144,6 +148,13 @@ function stopReason(state: SessionState): string {
   }
   if (state.failCount >= MAX_CONSECUTIVE_SAME_FAILURES) return "same tool and key args failed 3 times";
   return "session stopped";
+}
+
+/** create_goal / update_goal 带了大于上限的 max_goal_rounds;缺省交给服务默认值(已收到 4)。 */
+function exceedsGoalRounds(execution: Execution): boolean {
+  if (execution.name !== "create_goal" && execution.name !== "update_goal") return false;
+  const cap = objectArgs(execution.arguments).max_goal_rounds;
+  return typeof cap === "number" && cap > MAX_GOAL_ROUNDS;
 }
 
 function isTestRound(execution: Execution): boolean {

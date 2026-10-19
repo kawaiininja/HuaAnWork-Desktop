@@ -320,6 +320,28 @@ test("bridge tells the client when a compaction finished, and stays silent on fa
   assert.deepEqual(emitted, [{ event: "compaction/done", sessionId: "huaanwork-0123456789abcdef" }]);
 });
 
+test("bridge reports goal rounds and the round limit from the official session events", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as (
+    session: { id: string },
+    event: { type: string; data?: unknown },
+  ) => void;
+  const session = { id: "huaanwork-0123456789abcdef" };
+  onSessionEvent(session, { type: "user/message", data: { source: { kind: "user" } } });
+  onSessionEvent(session, { type: "user/message", data: { source: { kind: "goal", goalId: "g", revision: 1, round: 0 } } });
+  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "blocked", blockedReason: { code: "model-reported", message: "x" } }, roundsStarted: 3 } });
+  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "active" }, roundsStarted: 2 } });
+  assert.deepEqual(emitted, []);
+  onSessionEvent(session, { type: "user/message", data: { source: { kind: "goal", goalId: "g", revision: 1, round: 2 } } });
+  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "blocked", blockedReason: { code: "round-limit", message: "x" } }, roundsStarted: 4 } });
+  assert.deepEqual(emitted, [
+    { event: "goal/round", round: 2, sessionId: "huaanwork-0123456789abcdef" },
+    { event: "goal/round-limit", round: 4, sessionId: "huaanwork-0123456789abcdef" },
+  ]);
+});
+
 test("bridge carries todo_write todos and shell commands on tool/start, and isError on tool/end", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
   const { ctx, listeners, emitted } = createCtx();

@@ -106,9 +106,11 @@ import {
   outcomeTargetTab,
   todoLabel,
   turnChecks,
+  turnGaps,
   turnOutcomeNotes,
   type TodoEntry,
 } from "./logic/outcomeCheck.ts";
+import { goalRoundLabel, goalRoundStopped } from "./logic/goalRound.ts";
 import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
@@ -778,13 +780,10 @@ export default function App() {
       const target = targetTabFor(sessionId);
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: updater(tab.items) } : tab)));
     };
-    /**
-     * 回合正常结束：读侧核对用户写明的文件与命令，把结果写进对话；不重跑任何命令。
-     * 只写用户对话标签：子代理空闲也会发 session/end，其会话 id 不属于任何标签时不写。
-     */
-    const appendTurnOutcome = async (sessionId?: string) => {
+    /** 读出本回合要核对的内容；只认用户对话标签：子代理空闲也会发 session/end，其会话 id 不属于任何标签时返回 undefined。 */
+    const readTurn = async (sessionId?: string) => {
       const tabId = outcomeTargetTab(sessionId, chatTabsRef.current, liveChatRef.current);
-      if (!tabId) return;
+      if (!tabId) return undefined;
       // chatTabsRef 在提交后才同步，可能还看不到同一批事件里的 tool/end。
       // 函数式更新按队列顺序执行，拿到的 prev 已含这批事件；这里只读取，不改状态。
       const items = await new Promise<ChatItem[] | undefined>((resolve) => {
@@ -793,7 +792,7 @@ export default function App() {
           return prev;
         });
       });
-      if (!items || !items.some((item) => item.kind === "user")) return;
+      if (!items || !items.some((item) => item.kind === "user")) return undefined;
       const turnUserId = latestUserItemId(items);
       const checks = turnChecks(items);
       const root = workspaceRef.current;
@@ -805,16 +804,30 @@ export default function App() {
           tree = [];
         }
       }
-      if (cancelled) return;
-      const notes = turnOutcomeNotes(checks, tree).map((text) => ({ id: allocId(), kind: "note" as const, text }));
+      return { tabId, turnUserId, checks, tree };
+    };
+    const appendTurnNotes = (turn: NonNullable<Awaited<ReturnType<typeof readTurn>>>, texts: string[]) => {
+      const notes = texts.map((text) => ({ id: allocId(), kind: "note" as const, text }));
       // 等待期间用户可能已发出新消息：在最新状态上判断，旧回合的结论不落到新消息之后。
       setChatTabs((prev) =>
         prev.map((candidate) =>
-          candidate.id === tabId
-            ? { ...candidate, items: appendOutcomeNotes(candidate.items, turnUserId, notes) as ChatItem[] }
+          candidate.id === turn.tabId
+            ? { ...candidate, items: appendOutcomeNotes(candidate.items, turn.turnUserId, notes) as ChatItem[] }
             : candidate,
         ),
       );
+    };
+    /** 回合正常结束：读侧核对用户写明的文件与命令，把结果写进对话；不重跑任何命令。 */
+    const appendTurnOutcome = async (sessionId?: string) => {
+      const turn = await readTurn(sessionId);
+      if (!turn || cancelled) return;
+      appendTurnNotes(turn, turnOutcomeNotes(turn.checks, turn.tree));
+    };
+    /** 官方续轮到上限停下：把停下的轮数和尚未核对的缺项写进对话，不自动建下一个目标。 */
+    const appendGoalStopped = async (round: number, sessionId?: string) => {
+      const turn = await readTurn(sessionId);
+      if (!turn || cancelled) return;
+      appendTurnNotes(turn, [goalRoundStopped(round, turnGaps(turn.checks, turn.tree))]);
     };
     const setChannelSessionFailed = (failed: boolean, sessionId?: string) => {
       const target = targetTabFor(sessionId);
@@ -920,6 +933,9 @@ export default function App() {
           }
           if (event.event === "session/end" && event.ok && event.cancelled !== true) {
             void appendTurnOutcome(eventSessionId);
+          }
+          if (event.event === "goal/round-limit") {
+            void appendGoalStopped(event.round, eventSessionId);
           }
           if (event.event === "sidecar/status" && event.ready && authPhaseRef.current !== "logged-in") {
             pullAuthStatusRef.current();
@@ -2712,6 +2728,11 @@ function handleEvent(
     case "compaction/done":
       // 固定提示走聊天 note，不进思考面板。
       setItems((prev) => [...prev, { id: allocId(), kind: "note", text: COMPACTION_NOTE }], event.sessionId);
+      break;
+    case "goal/round":
+      // 官方驱动器开了新一轮：回合又在跑了，并说明这只是续轮、不是验收。
+      setTurnActive(true);
+      setItems((prev) => [...prev, { id: allocId(), kind: "note", text: goalRoundLabel(event.round) }], event.sessionId);
       break;
     case "session/end":
       setTurnActive(false);

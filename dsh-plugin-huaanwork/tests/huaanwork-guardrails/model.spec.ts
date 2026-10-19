@@ -650,3 +650,9 @@ test("exit_plan_mode survives the static tool filter, ask_user_question does not
   assert.equal(isRegisteredToolName("ask_user_question"), false);
 });
 
+
+test("goal tools survive the static tool filter", () => {
+  for (const name of ["get_goal", "create_goal", "update_goal"]) {
+    assert.equal(isRegisteredToolName(name), true, name);
+  }
+});

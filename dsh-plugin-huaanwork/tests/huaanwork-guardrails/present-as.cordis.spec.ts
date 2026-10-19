@@ -358,3 +358,16 @@ test("ALLOWED_TOOLS keeps the official exit_plan_mode and leaves ask_user_questi
   assert.ok(allow.includes("exit_plan_mode"));
   assert.ok(!allow.includes("ask_user_question"));
 });
+
+test("goal tools survive the allow list so tool-goal reaches the model", () => {
+  const goalTools = ["get_goal", "create_goal", "update_goal"];
+  const agent = createMockAgent({ id: "huaanwork", initialToolNames: ["read", "todo_write", ...goalTools, "send_message"] });
+  const ctx = createMockContext({ agents: [agent] });
+
+  apply(ctx as never);
+
+  const allow = agent.restrictCalls[0].allow;
+  for (const name of goalTools) assert.ok(allow.includes(name), `allow must include ${name}`);
+  assert.ok(allow.includes("todo_write"));
+  assert.ok(!allow.includes("send_message"));
+});
