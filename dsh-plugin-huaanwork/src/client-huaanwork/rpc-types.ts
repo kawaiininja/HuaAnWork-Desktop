@@ -217,15 +217,24 @@ export type SessionDetailRecord =
   | { kind: "user"; time: number; text: string }
   | { kind: "thinking"; time: number; text: string }
   | { kind: "assistant"; time: number; text: string }
-  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string }
+  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string }
   | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string };
 
 /** 事件归属会话：token/tool/diff/session 事件携带发起回合的会话 id，前端与收集器据此归因。 */
 export type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
   | { event: "reasoning"; text: string; sessionId?: string; final?: true }
-  | { event: "tool/start"; name: string; callId?: string; sessionId?: string }
-  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string }
+  | {
+      event: "tool/start";
+      name: string;
+      callId?: string;
+      sessionId?: string;
+      /** bash / pwsh 调用的 command 参数,供回合结束核对「要求的命令」。 */
+      command?: string;
+      /** todo_write 的完整替换列表。 */
+      todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+    }
+  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string; isError?: true }
   | {
       event: "approval/asked";
       approvalRequestId: string;

@@ -205,12 +205,14 @@ export function detailRecords(text: string): SessionDetailRecord[] {
       case 'tool/call': {
         const name = typeof data.name === 'string' ? data.name : ''
         const args = formatArgs(data.arguments)
+        const command = shellCommandOf(name, data.arguments)
         records.push({
           kind: 'tool-call',
           time,
           name,
           ...(typeof data.callId === 'string' ? { callId: data.callId } : {}),
           ...(args !== undefined ? { args } : {}),
+          ...(command !== undefined ? { command } : {}),
         })
         break
       }
@@ -241,6 +243,13 @@ export function detailRecords(text: string): SessionDetailRecord[] {
     }
   }
   return records
+}
+
+/** bash / pwsh 调用的 command 参数;日志里没有退出码,这里也不造一个。 */
+function shellCommandOf(name: string, args: unknown): string | undefined {
+  if (name !== 'bash' && name !== 'pwsh') return undefined
+  const command = asObject(args).command
+  return typeof command === 'string' && command.trim() ? command : undefined
 }
 
 function parseJsonLine(line: string): Json | undefined {

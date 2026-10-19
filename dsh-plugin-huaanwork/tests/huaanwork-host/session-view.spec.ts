@@ -180,6 +180,21 @@ describe('detailRecords', () => {
     expect(records[3]).toMatchObject({ kind: 'tool-result', callId: 'c1', isError: true, text: '1 failing' })
   })
 
+  test('keeps the shell command on tool-call records and never invents an exit code', () => {
+    const log = sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      toolCall('c2', 'pwsh', { command: 'Get-ChildItem' }, 2, T0 + 4),
+      toolCall('c3', 'write', { command: 'ignored', path: 'a.md' }, 3, T0 + 5),
+      toolResult('c1', 'ok', 4, T0 + 6),
+    ])
+    const records = detailRecords(log)
+    expect(records[0]).toMatchObject({ kind: 'tool-call', name: 'bash', command: 'pnpm test' })
+    expect(records[1]).toMatchObject({ kind: 'tool-call', name: 'pwsh', command: 'Get-ChildItem' })
+    expect(records[2]).not.toHaveProperty('command')
+    expect(records[3]).not.toHaveProperty('exitCode')
+  })
+
   test('skips plugin injections and tolerates corrupt lines', () => {
     const log = [
       line(HEADER),

@@ -283,3 +283,34 @@ test("bridge forwards user-turn reasoning and skips purposed calls", async () =>
     [],
   );
 });
+
+test("bridge carries todo_write todos and shell commands on tool/start, and isError on tool/end", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+  const ok = async (): Promise<ToolResult> => ({ isError: false, content: [{ type: "text", text: "ok" }] });
+  const bad = async (): Promise<ToolResult> => ({ isError: true, content: [{ type: "text", text: "boom" }] });
+
+  await execute(
+    {
+      name: "todo_write",
+      callId: "t1",
+      arguments: { todos: [{ content: "写报告", status: "in_progress" }, { content: "核对", status: "weird" }, { content: 3, status: "pending" }] },
+    },
+    ok,
+  );
+  await execute({ name: "bash", callId: "b1", arguments: { command: "pnpm test" } }, bad);
+
+  const starts = emitted.filter((event) => (event as { event?: string }).event === "tool/start");
+  assert.deepEqual(starts[0], {
+    event: "tool/start",
+    name: "todo_write",
+    callId: "t1",
+    todos: [{ content: "写报告", status: "in_progress" }],
+  });
+  assert.deepEqual(starts[1], { event: "tool/start", name: "bash", callId: "b1", command: "pnpm test" });
+  const ends = emitted.filter((event) => (event as { event?: string }).event === "tool/end") as { isError?: boolean }[];
+  assert.equal(ends[0]?.isError, undefined);
+  assert.equal(ends[1]?.isError, true);
+});

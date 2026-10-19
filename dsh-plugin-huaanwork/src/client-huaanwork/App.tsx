@@ -100,6 +100,7 @@ import {
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
 import { hasAssistantTextAfter, resolveThinking, shouldRenderThinking } from "./logic/thinkingPanel.ts";
 import { turnStatus } from "./logic/turnStatus.ts";
+import { todoLabel, turnChecks, turnOutcomeNotes, type TodoEntry } from "./logic/outcomeCheck.ts";
 import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
@@ -124,6 +125,9 @@ type ToolCard = {
   callId?: string;
   status: "start" | "end";
   truncated?: boolean;
+  /** bash / pwsh 的 command 参数与结果是否出错：回合结束核对「要求的命令」用。 */
+  command?: string;
+  isError?: boolean;
 };
 
 type AskCard = {
@@ -141,6 +145,7 @@ type ChatItem =
   | { id: number; kind: "assistant"; text: string; interrupted?: boolean }
   | { id: number; kind: "thinking"; thought: string; interrupted: boolean }
   | { id: number; kind: "tool"; card: ToolCard }
+  | { id: number; kind: "todo"; todos: TodoEntry[] }
   | { id: number; kind: "ask"; card: AskCard }
   | { id: number; kind: "note"; text: string };
 
@@ -765,6 +770,31 @@ export default function App() {
       const target = targetTabFor(sessionId);
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: updater(tab.items) } : tab)));
     };
+    /** 回合正常结束：读侧核对用户写明的文件与命令，把结果写进对话；不重跑任何命令。 */
+    const appendTurnOutcome = async (sessionId?: string) => {
+      const tabId = targetTabFor(sessionId);
+      const tab = chatTabsRef.current.find((candidate) => candidate.id === tabId);
+      if (!tab || tab.automationId || !tab.items.some((item) => item.kind === "user")) return;
+      const checks = turnChecks(tab.items);
+      const root = workspaceRef.current;
+      let tree: TreeNode[] = [];
+      if (checks.requiredFiles.length > 0 && root) {
+        try {
+          tree = await listTree(root, 6);
+        } catch {
+          tree = [];
+        }
+      }
+      if (cancelled) return;
+      const notes = turnOutcomeNotes(checks, tree);
+      setChatTabs((prev) =>
+        prev.map((candidate) =>
+          candidate.id === tabId
+            ? { ...candidate, items: [...candidate.items, ...notes.map((text) => ({ id: allocId(), kind: "note" as const, text }))] }
+            : candidate,
+        ),
+      );
+    };
     const setChannelSessionFailed = (failed: boolean, sessionId?: string) => {
       const target = targetTabFor(sessionId);
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, sessionFailed: failed } : tab)));
@@ -866,6 +896,9 @@ export default function App() {
             const at = Date.now();
             setTurnPulse({ tabId: turnTab, latest: kind, at });
             setNow(at);
+          }
+          if (event.event === "session/end" && event.ok && event.cancelled !== true) {
+            void appendTurnOutcome(eventSessionId);
           }
           if (event.event === "sidecar/status" && event.ready && authPhaseRef.current !== "logged-in") {
             pullAuthStatusRef.current();
@@ -2600,6 +2633,11 @@ function handleEvent(
       setItems((prev) => applyReasoning(prev, event.text, event.final === true, allocId), event.sessionId);
       break;
     case "tool/start":
+      if (event.name === "todo_write" && event.todos) {
+        const todos = event.todos;
+        setItems((prev) => upsertTodoItem(prev, todos, allocId), event.sessionId);
+        break;
+      }
       setItems((prev) => [
         ...prev,
         {
@@ -2610,6 +2648,7 @@ function handleEvent(
             name: event.name,
             callId: event.callId,
             status: "start",
+            ...(event.command === undefined ? {} : { command: event.command }),
           },
         },
       ], event.sessionId);
@@ -2621,7 +2660,9 @@ function handleEvent(
           const match = event.callId
             ? item.card.callId === event.callId
             : item.card.name === event.name && item.card.status === "start";
-          return match ? { ...item, card: { ...item.card, status: "end", truncated: event.truncated } } : item;
+          return match
+            ? { ...item, card: { ...item.card, status: "end", truncated: event.truncated, ...(event.isError ? { isError: true } : {}) } }
+            : item;
         }),
         event.sessionId,
       );
@@ -2663,6 +2704,20 @@ function handleEvent(
       }
       break;
   }
+}
+
+/** 本回合只保留最新一份待办列表（todo_write 每次发送完整替换列表）。 */
+function upsertTodoItem(items: ChatItem[], todos: TodoEntry[], allocId: () => number): ChatItem[] {
+  let turnStart = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === "user") {
+      turnStart = i + 1;
+      break;
+    }
+  }
+  const at = items.findIndex((item, index) => index >= turnStart && item.kind === "todo");
+  if (at < 0) return [...items, { id: allocId(), kind: "todo", todos }];
+  return items.map((item, index) => (index === at ? { ...item, todos } : item));
 }
 
 /** 取消或失败时，本回合已出现的思考面板标题改为「思考 · 已中断」。成功结束保持「已生成」。 */
@@ -2792,6 +2847,18 @@ function ChatRow({
     );
   }
   if (item.kind === "note") return <div className="note">{item.text}</div>;
+  if (item.kind === "todo") {
+    return (
+      <div className="card todo-card">
+        <span className="ttl">待办</span>
+        {item.todos.map((todo) => (
+          <div key={todo.content} className={todo.status === "completed" ? "muted" : undefined}>
+            <span className="badge">{todoLabel(todo.status)}</span> {todo.content}
+          </div>
+        ))}
+      </div>
+    );
+  }
   if (item.kind === "tool") {
     return (
       <div className={item.card.status === "start" ? "tool-row running" : "tool-row"}>

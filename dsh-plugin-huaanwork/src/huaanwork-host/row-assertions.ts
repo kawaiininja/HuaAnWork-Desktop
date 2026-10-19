@@ -28,6 +28,7 @@ export const HUAANWORK_ROW_ASSERTIONS: readonly RowHitAssertion[] = [
   { id: 'tool-fs-search', intent: 'override' },
   shellToolAssertion,
   { id: 'plan-mode', intent: 'override' },
+  { id: 'tool-todo', intent: 'override', expectConfig: { allowParallelInProgress: false } },
   { id: 'web', intent: 'disable' },
   { id: 'web-search-deepseek', intent: 'disable' },
   { id: 'tool-web', intent: 'disable' },

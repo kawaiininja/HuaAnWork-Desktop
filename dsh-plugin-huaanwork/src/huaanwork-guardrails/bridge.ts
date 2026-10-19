@@ -6,8 +6,15 @@ import { capToolOutput } from "@huaanwork/policy/truncate";
 type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
   | { event: "reasoning"; text: string; sessionId?: string; final?: true }
-  | { event: "tool/start"; name: string; callId?: string; sessionId?: string }
-  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string }
+  | {
+      event: "tool/start";
+      name: string;
+      callId?: string;
+      sessionId?: string;
+      command?: string;
+      todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+    }
+  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string; isError?: true }
   | { event: "diff"; text: string; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string };
 
@@ -69,6 +76,7 @@ export function apply(ctx: Context): void {
         name: execution.name,
         ...(execution.callId === undefined ? {} : { callId: execution.callId }),
         ...(sessionId === undefined ? {} : { sessionId }),
+        ...startDetail(execution),
       });
       const result = await next();
       const capped = capResult(result);
@@ -78,6 +86,7 @@ export function apply(ctx: Context): void {
         ...(execution.callId === undefined ? {} : { callId: execution.callId }),
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(capped.truncated ? { truncated: true } : {}),
+        ...(result.isError === true ? { isError: true as const } : {}),
       });
       if (execution.name === "git_diff") {
         emit(ctx, { event: "diff", text: capped.text, ...(sessionId === undefined ? {} : { sessionId }) });
@@ -195,6 +204,26 @@ function porcelainUntrackedPath(line: string): string | undefined {
   }
   if (!path || path.endsWith("/")) return undefined;
   return path;
+}
+
+const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
+
+/** tool/start 的附加信息:todo_write 的待办列表、bash / pwsh 的 command 参数。 */
+function startDetail(execution: ToolExecution): Partial<Extract<RpcEvent, { event: "tool/start" }>> {
+  const args = objectValue(execution.arguments);
+  if (execution.name === "todo_write" && Array.isArray(args.todos)) {
+    const todos = args.todos.flatMap((entry) => {
+      const todo = objectValue(entry);
+      return typeof todo.content === "string" && typeof todo.status === "string" && TODO_STATUSES.has(todo.status)
+        ? [{ content: todo.content, status: todo.status as "pending" | "in_progress" | "completed" }]
+        : [];
+    });
+    return { todos };
+  }
+  if ((execution.name === "bash" || execution.name === "pwsh") && typeof args.command === "string" && args.command.trim()) {
+    return { command: args.command };
+  }
+  return {};
 }
 
 function emit(ctx: Context, event: RpcEvent): void {

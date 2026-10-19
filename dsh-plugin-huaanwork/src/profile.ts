@@ -1530,6 +1530,8 @@ export function prepareDesktopProfile(
       : { id: 'tool-bash', disabled: false, config: { enableRunInBackground: false } },
     // 计划模式在宿主平面复挂(dsh-base 挂载、web-app overlay 关闭);ui-plan 仍关闭,计划卡在华安对话里。
     { id: 'plan-mode', disabled: false },
+    // 待办进度:todo_write 已在 ALLOWED_TOOLS;单活跃项纪律,与回合进度展示一致。
+    { id: 'tool-todo', disabled: false, config: { allowParallelInProgress: false } },
     { id: 'hmr', disabled: true },
     { id: 'jobs', disabled: true },
     { id: 'tool-jobs', disabled: true },
