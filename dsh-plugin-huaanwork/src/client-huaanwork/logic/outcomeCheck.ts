@@ -1,3 +1,5 @@
+import { resultTextFailed } from "./commandOutcome.ts";
+
 export function outcomeGaps(input: {
   requiredFiles: readonly string[];
   requiredCommands: readonly string[];
@@ -9,7 +11,8 @@ export function outcomeGaps(input: {
     if (!input.fileExists(file)) gaps.push(`缺少文件：${file}`);
   }
   for (const command of input.requiredCommands) {
-    const result = input.toolResults.find((item) => item.command === command);
+    // 同一命令跑过几次，以最后一次的结果为准。
+    const result = input.toolResults.findLast((item) => item.command === command);
     if (!result || result.isError) gaps.push(`命令未通过：${command}`);
   }
   return gaps;
@@ -86,7 +89,7 @@ export type TodoEntry = { content: string; status: TodoStatus };
 type TurnItem =
   | { kind: "user"; text: string }
   | { kind: "ask"; card: { toolName: string; summary?: string } }
-  | { kind: "tool"; card: { name: string; command?: string; isError?: boolean } }
+  | { kind: "tool"; card: { name: string; command?: string; isError?: boolean; status?: "start" | "end" } }
   | { kind: "assistant" | "thinking" | "note" | "todo" };
 
 export type TurnChecks = {
@@ -116,7 +119,8 @@ export function turnChecks(items: readonly TurnItem[]): TurnChecks {
       toolResults.push({
         name: item.card.name,
         ...(item.card.command === undefined ? {} : { command: item.card.command }),
-        isError: item.card.isError === true,
+        // 没结束的工具卡不算通过。
+        isError: item.card.isError === true || item.card.status === "start",
       });
     }
   }
@@ -139,4 +143,52 @@ export function turnOutcomeNotes(checks: TurnChecks, tree: readonly TreeLike[]):
     return [`已完成：自动核对 ${checks.requiredFiles.length + checks.requiredCommands.length} 项均通过`];
   }
   return outcome.lines;
+}
+
+type DetailRecord =
+  | { kind: "tool-call"; name: string; callId?: string; command?: string }
+  | { kind: "tool-result"; callId?: string; isError: boolean; text: string }
+  | { kind: "user" | "thinking" | "assistant" };
+
+/** 会话日志详情 → 核对输入：只认带 command 的 shell 调用；没有配对结果的调用不算通过。 */
+export function toolResultsFromRecords(records: readonly DetailRecord[]): TurnChecks["toolResults"] {
+  const results: TurnChecks["toolResults"] = [];
+  records.forEach((record, index) => {
+    if (record.kind !== "tool-call" || record.command === undefined) return;
+    const paired = records.slice(index + 1).find(
+      (candidate) => candidate.kind === "tool-result" && record.callId !== undefined && candidate.callId === record.callId,
+    );
+    results.push({
+      name: record.name,
+      command: record.command,
+      isError: paired === undefined || paired.kind !== "tool-result" || paired.isError || resultTextFailed(paired.text),
+    });
+  });
+  return results;
+}
+
+/**
+ * 回合结束的核对只写进用户对话标签：会话 id 存在却不属于任何对话标签（子代理空闲也会发 session/end），
+ * 或落在自动化运行标签上，一律不写；没有会话 id 时才回落到当前对话标签。
+ */
+export function outcomeTargetTab(
+  sessionId: string | undefined,
+  tabs: readonly { id: string; sessionId?: string; automationId?: string }[],
+  liveTabId: string,
+): string | undefined {
+  const tab = sessionId ? tabs.find((candidate) => candidate.sessionId === sessionId) : tabs.find((candidate) => candidate.id === liveTabId);
+  return tab && !tab.automationId ? tab.id : undefined;
+}
+
+export function latestUserItemId(items: readonly { id: number; kind: string }[]): number | undefined {
+  return items.findLast((item) => item.kind === "user")?.id;
+}
+
+/** 异步核对返回时，标签上已有更新的用户消息就丢掉上一回合的结论。 */
+export function appendOutcomeNotes<T extends { id: number; kind: string }>(
+  items: readonly T[],
+  turnUserId: number | undefined,
+  notes: readonly T[],
+): readonly T[] {
+  return latestUserItemId(items) === turnUserId ? [...items, ...notes] : items;
 }

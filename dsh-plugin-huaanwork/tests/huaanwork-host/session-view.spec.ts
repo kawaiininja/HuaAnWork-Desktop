@@ -195,6 +195,24 @@ describe('detailRecords', () => {
     expect(records[3]).not.toHaveProperty('exitCode')
   })
 
+  test('reads failure markers from the uncapped result so a clipped head cannot hide them', () => {
+    const tail = `${'x'.repeat(9000)}\n[exit code: 1]`
+    const log = sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      toolResult('c1', tail, 2, T0 + 4),
+      toolCall('c2', 'read', { path: 'a.md' }, 3, T0 + 5),
+      toolResult('c2', 'file mentions\n[exit code: 1]', 4, T0 + 6),
+      toolCall('c3', 'bash', { command: 'pnpm lint' }, 5, T0 + 7),
+      toolResult('c3', 'fine\n[exit code: 0]', 6, T0 + 8),
+    ])
+    const results = detailRecords(log).filter((record) => record.kind === 'tool-result')
+    expect(results[0]).toMatchObject({ isError: true })
+    expect((results[0] as { text: string }).text.endsWith('[exit code: 1]')).toBe(true)
+    expect(results[1]).toMatchObject({ isError: false })
+    expect(results[2]).toMatchObject({ isError: false })
+  })
+
   test('skips plugin injections and tolerates corrupt lines', () => {
     const log = [
       line(HEADER),

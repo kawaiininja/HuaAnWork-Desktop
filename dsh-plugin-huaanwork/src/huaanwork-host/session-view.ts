@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { zstdDecompressSync } from 'node:zlib'
 
+import { failureMarkers, isShellTool, shellCommandOf } from '../client-huaanwork/logic/commandOutcome.ts'
 import type { SessionDetailRecord, SessionSummary } from '../client-huaanwork/rpc-types.ts'
 
 const ZSTD_MAGIC = 0xfd2fb528
@@ -88,6 +89,7 @@ const TITLE_MAX_CHARS = 80
 const ARGS_MAX_CHARS = 200
 /** 工具结果在详情里最多展示 8000 字符(历史日志展示上限,非工具输出管道)。 */
 const RESULT_MAX_CHARS = 8000
+const TRUNCATED_SUFFIX = '…（已截断）'
 
 type Json = Record<string, unknown>
 
@@ -173,6 +175,7 @@ export function summarizeSessionLog(text: string): SessionSummary | undefined {
 /** 把日志事件流映射为按顺序排列的可读记录(用户消息、助手回复、工具调用与结果)。 */
 export function detailRecords(text: string): SessionDetailRecord[] {
   const records: SessionDetailRecord[] = []
+  const toolNames = new Map<string, string>()
   const lines = text.split('\n')
   for (const line of lines.slice(1)) {
     const event = parseJsonLine(line)
@@ -206,6 +209,7 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         const name = typeof data.name === 'string' ? data.name : ''
         const args = formatArgs(data.arguments)
         const command = shellCommandOf(name, data.arguments)
+        if (typeof data.callId === 'string') toolNames.set(data.callId, name)
         records.push({
           kind: 'tool-call',
           time,
@@ -229,12 +233,18 @@ export function detailRecords(text: string): SessionDetailRecord[] {
           .join('\n')
           .trim()
         const source = asObject(message.source)
+        // 失败标记在未截断的结果文本里解析(clipText 保留头部,尾部标记会被切掉);
+        // 只对 shell 工具解析,避免读到文件里引用的标记文字。
+        const markers = typeof source.callId === 'string' && isShellTool(toolNames.get(source.callId) ?? '')
+          ? failureMarkers(resultText)
+          : []
+        const clipped = clipText(resultText, RESULT_MAX_CHARS, TRUNCATED_SUFFIX)
         records.push({
           kind: 'tool-result',
           time,
           ...(typeof source.callId === 'string' ? { callId: source.callId } : {}),
-          isError: block?.isError === true,
-          text: clipText(resultText, RESULT_MAX_CHARS, '…（已截断）'),
+          isError: block?.isError === true || markers.length > 0,
+          text: markers.length > 0 && clipped.endsWith(TRUNCATED_SUFFIX) ? `${clipped} ${markers.join(' ')}` : clipped,
         })
         break
       }
@@ -243,13 +253,6 @@ export function detailRecords(text: string): SessionDetailRecord[] {
     }
   }
   return records
-}
-
-/** bash / pwsh 调用的 command 参数;日志里没有退出码,这里也不造一个。 */
-function shellCommandOf(name: string, args: unknown): string | undefined {
-  if (name !== 'bash' && name !== 'pwsh') return undefined
-  const command = asObject(args).command
-  return typeof command === 'string' && command.trim() ? command : undefined
 }
 
 function parseJsonLine(line: string): Json | undefined {

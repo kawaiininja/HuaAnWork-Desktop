@@ -3,6 +3,8 @@ import { spawnSync } from "node:child_process";
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { capToolOutput } from "@huaanwork/policy/truncate";
 
+import { isShellTool, resultTextFailed, shellCommandOf } from "../client-huaanwork/logic/commandOutcome.ts";
+
 type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
   | { event: "reasoning"; text: string; sessionId?: string; final?: true }
@@ -86,7 +88,7 @@ export function apply(ctx: Context): void {
         ...(execution.callId === undefined ? {} : { callId: execution.callId }),
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(capped.truncated ? { truncated: true } : {}),
-        ...(result.isError === true ? { isError: true as const } : {}),
+        ...(toolFailed(execution.name, result) ? { isError: true as const } : {}),
       });
       if (execution.name === "git_diff") {
         emit(ctx, { event: "diff", text: capped.text, ...(sessionId === undefined ? {} : { sessionId }) });
@@ -220,10 +222,17 @@ function startDetail(execution: ToolExecution): Partial<Extract<RpcEvent, { even
     });
     return { todos };
   }
-  if ((execution.name === "bash" || execution.name === "pwsh") && typeof args.command === "string" && args.command.trim()) {
-    return { command: args.command };
-  }
-  return {};
+  const command = shellCommandOf(execution.name, execution.arguments);
+  return command === undefined ? {} : { command };
+}
+
+/** 工具报错,或 shell 结果文本(未截断)里已带失败标记。capToolOutput 保留头部,标记须在截断前解析。 */
+function toolFailed(name: string, result: ToolResult): boolean {
+  if (result.isError === true) return true;
+  if (!isShellTool(name)) return false;
+  const value = objectValue(result.value);
+  const text = typeof value.stdout === "string" ? value.stdout : contentText(result);
+  return resultTextFailed(`${text}\n${errorText(result)}`);
 }
 
 function emit(ctx: Context, event: RpcEvent): void {

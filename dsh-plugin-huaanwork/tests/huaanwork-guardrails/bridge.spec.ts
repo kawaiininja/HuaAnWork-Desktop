@@ -314,3 +314,19 @@ test("bridge carries todo_write todos and shell commands on tool/start, and isEr
   assert.equal(ends[0]?.isError, undefined);
   assert.equal(ends[1]?.isError, true);
 });
+
+test("bridge reads failure markers from the uncapped shell result, past the 32 KiB head cap", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+  const text = (body: string) => async (): Promise<ToolResult> => ({ isError: false, content: [{ type: "text", text: body }] });
+
+  await execute({ name: "bash", callId: "f1", arguments: { command: "pnpm test" } }, text("x".repeat(40 * 1024) + "\n[exit code: 1]"));
+  await execute({ name: "bash", callId: "f2", arguments: { command: "pnpm lint" } }, text("fine\n[exit code: 0]"));
+  await execute({ name: "read", callId: "f3", arguments: { path: "a.md" } }, text("quoted\n[exit code: 1]"));
+  const ends = emitted.filter((event) => (event as { event?: string }).event === "tool/end") as { callId?: string; isError?: boolean }[];
+  assert.equal(ends[0]?.isError, true);
+  assert.equal(ends[1]?.isError, undefined);
+  assert.equal(ends[2]?.isError, undefined);
+});

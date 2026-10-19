@@ -100,7 +100,15 @@ import {
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
 import { hasAssistantTextAfter, resolveThinking, shouldRenderThinking } from "./logic/thinkingPanel.ts";
 import { turnStatus } from "./logic/turnStatus.ts";
-import { todoLabel, turnChecks, turnOutcomeNotes, type TodoEntry } from "./logic/outcomeCheck.ts";
+import {
+  appendOutcomeNotes,
+  latestUserItemId,
+  outcomeTargetTab,
+  todoLabel,
+  turnChecks,
+  turnOutcomeNotes,
+  type TodoEntry,
+} from "./logic/outcomeCheck.ts";
 import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
@@ -770,12 +778,24 @@ export default function App() {
       const target = targetTabFor(sessionId);
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: updater(tab.items) } : tab)));
     };
-    /** 回合正常结束：读侧核对用户写明的文件与命令，把结果写进对话；不重跑任何命令。 */
+    /**
+     * 回合正常结束：读侧核对用户写明的文件与命令，把结果写进对话；不重跑任何命令。
+     * 只写用户对话标签：子代理空闲也会发 session/end，其会话 id 不属于任何标签时不写。
+     */
     const appendTurnOutcome = async (sessionId?: string) => {
-      const tabId = targetTabFor(sessionId);
-      const tab = chatTabsRef.current.find((candidate) => candidate.id === tabId);
-      if (!tab || tab.automationId || !tab.items.some((item) => item.kind === "user")) return;
-      const checks = turnChecks(tab.items);
+      const tabId = outcomeTargetTab(sessionId, chatTabsRef.current, liveChatRef.current);
+      if (!tabId) return;
+      // chatTabsRef 在提交后才同步，可能还看不到同一批事件里的 tool/end。
+      // 函数式更新按队列顺序执行，拿到的 prev 已含这批事件；这里只读取，不改状态。
+      const items = await new Promise<ChatItem[] | undefined>((resolve) => {
+        setChatTabs((prev) => {
+          resolve(prev.find((candidate) => candidate.id === tabId)?.items);
+          return prev;
+        });
+      });
+      if (!items || !items.some((item) => item.kind === "user")) return;
+      const turnUserId = latestUserItemId(items);
+      const checks = turnChecks(items);
       const root = workspaceRef.current;
       let tree: TreeNode[] = [];
       if (checks.requiredFiles.length > 0 && root) {
@@ -786,11 +806,12 @@ export default function App() {
         }
       }
       if (cancelled) return;
-      const notes = turnOutcomeNotes(checks, tree);
+      const notes = turnOutcomeNotes(checks, tree).map((text) => ({ id: allocId(), kind: "note" as const, text }));
+      // 等待期间用户可能已发出新消息：在最新状态上判断，旧回合的结论不落到新消息之后。
       setChatTabs((prev) =>
         prev.map((candidate) =>
           candidate.id === tabId
-            ? { ...candidate, items: [...candidate.items, ...notes.map((text) => ({ id: allocId(), kind: "note" as const, text }))] }
+            ? { ...candidate, items: appendOutcomeNotes(candidate.items, turnUserId, notes) as ChatItem[] }
             : candidate,
         ),
       );
