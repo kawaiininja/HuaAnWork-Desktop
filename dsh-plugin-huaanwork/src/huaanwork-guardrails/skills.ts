@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
+import { currentCallerSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
 
 export const name = "huaanwork-skills";
 export const inject = ["skills", "agents", "tools", "subagents"];
@@ -50,6 +51,7 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   };
   subagents?: {
     start(...args: never[]): Promise<{ localAgent?: Agent }>;
+    startActivation?(...args: never[]): Promise<unknown>;
   };
   huaanworkAgentRequest?: {
     current?: {
@@ -111,6 +113,7 @@ export function apply(ctx: Context): void {
   const lifted = new WeakMap<Agent, () => void>();
   let pendingSpawn: SkillKind | undefined;
   let restricting = false;
+  let startParentSessionId: string | undefined;
 
   ctx.skills.register(loadSkill("explore.md"));
   ctx.skills.register(loadSkill("test-fix.md"));
@@ -177,8 +180,10 @@ export function apply(ctx: Context): void {
     consumePendingSpawn(agent);
   }) as never);
 
-  ctx.on("subagent/start", ((info: { id?: string }) => {
+  ctx.on("subagent/start", ((info: { id?: string; parent?: unknown }) => {
     if (!info.id) return;
+    const parentId = startParentSessionId ?? sessionIdOf(info.parent) ?? currentCallerSession();
+    if (parentId && parentId !== info.id) registerChildSession(parentId, info.id);
     const child = ctx.agents?.get?.(info.id);
     if (child) consumePendingSpawn(child);
   }) as never);
@@ -207,8 +212,17 @@ export function apply(ctx: Context): void {
             throw new Error("智能体人设为空");
           }
         }
-        // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写
-        const run: any = await original(...args);
+        // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写。
+        // 事件载荷没有 parent；父会话 id 取这次 start 的 parent，缺省用发起调用的用户会话。
+        const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
+        const previousParent = startParentSessionId;
+        startParentSessionId = parentFromCall;
+        let run: any;
+        try {
+          run = await original(...args);
+        } finally {
+          startParentSessionId = previousParent;
+        }
         if (current && run?.localAgent) {
           const tools = run.localAgent.ctx?.get?.("tools");
           const schemas = tools?.schemas?.() ?? [];
@@ -230,6 +244,39 @@ export function apply(ctx: Context): void {
       }
     };
   }
+
+  const activation = ctx.subagents?.startActivation;
+  if (activation && ctx.subagents) {
+    const originalActivation = activation.bind(ctx.subagents);
+    ctx.subagents.startActivation = async (...args: never[]) => {
+      const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
+      const previousParent = startParentSessionId;
+      startParentSessionId = parentFromCall;
+      try {
+        return await originalActivation(...args);
+      } finally {
+        startParentSessionId = previousParent;
+      }
+    };
+  }
+}
+
+function sessionIdOf(value: unknown): string | undefined {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as { id?: unknown; session?: { id?: unknown } };
+  if (typeof record.session?.id === "string" && record.session.id.length > 0) return record.session.id;
+  if (typeof record.id === "string" && record.id.length > 0 && record.id !== "huaanwork") return record.id;
+  return undefined;
+}
+
+function parentFromStartArgs(args: readonly unknown[]): unknown {
+  const second = args[1];
+  if (second && typeof second === "object" && "parent" in second) return (second as { parent?: unknown }).parent;
+  const first = args[0];
+  if (!first || typeof first !== "object") return undefined;
+  const spec = first as { parent?: unknown; request?: { parent?: unknown } };
+  return spec.request?.parent ?? spec.parent;
 }
 
 export type BundledSkillInfo = { name: string; description: string };

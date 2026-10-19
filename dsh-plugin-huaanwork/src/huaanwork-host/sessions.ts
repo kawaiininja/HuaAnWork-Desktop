@@ -7,6 +7,7 @@ import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { invokeSkillText } from './skill-invoke.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
 import type { AgentsHost } from './agents-host.ts'
+import { childrenOf, noteCallerSession } from './child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog } from './session-view.ts'
@@ -113,6 +114,7 @@ export async function sendToAgent(
   const settings = await readHuaanworkSettings(routeCtx.profileDir)
   const blocked = workNetworkGateError({ allowNetwork: settings.allow_network, baseUrl: settings.base_url })
   if (blocked) throw new Error(blocked)
+  noteCallerSession(sessionId)
 
   let afterIdle: (() => Promise<void>) | undefined
   let cleanedUp = false
@@ -226,8 +228,11 @@ async function ensureChannelAgent(
 function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): { accepted: true } {
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
   const primary = findSessionAgent(ctx, sessionId)
+  const childIds = new Set(childrenOf(sessionId))
   for (const agent of ctx.agents?.list?.() ?? []) {
     if (agent === primary) continue
+    const id = agent.session?.id ?? agent.id
+    if (id === undefined || !childIds.has(id)) continue
     agent.cancel?.({ kind: 'parent' })
   }
   primary?.cancel?.({ kind: 'user' })

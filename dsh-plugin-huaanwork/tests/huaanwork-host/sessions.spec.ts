@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
+import { registerChildSession } from '../../src/huaanwork-host/child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import { emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import {
@@ -350,9 +351,38 @@ describe('session.cancel (旧 host.ts:1560)', () => {
     const primary: ListedAgent = { id: 'huaanwork', cancel: (reason) => cancelled.push(reason) }
     const child: ListedAgent = { id: 'child-1', cancel: (reason) => cancelled.push(reason) }
     const ctx: SessionRuntimeContext = { agents: { get: (id) => (id === 'huaanwork' ? primary : undefined), list: () => [primary, child] } }
+    registerChildSession(sessionIdFor(routeCtx.workspaceRoot.current), 'child-1')
     const result = sessionCancel(ctx, routeCtx, {}) as { accepted: boolean }
     expect(result).toEqual({ accepted: true })
     expect(cancelled).toEqual([{ kind: 'parent' }, { kind: 'user' }])
+  })
+
+  test('cancelAgent does not cancel a sibling session', () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const reasons: string[] = []
+    const target: ListedAgent = {
+      session: { id: 'huaanwork-aaaaaaaaaaaaaaaa' },
+      cancel(reason) {
+        reasons.push(`target:${reason.kind}`)
+      },
+    }
+    const child: ListedAgent = {
+      session: { id: 'child' },
+      cancel(reason) {
+        reasons.push(`child:${reason.kind}`)
+      },
+    }
+    const sibling: ListedAgent = {
+      session: { id: 'huaanwork-bbbbbbbbbbbbbbbb' },
+      cancel() {
+        reasons.push('sibling')
+      },
+    }
+    registerChildSession('huaanwork-aaaaaaaaaaaaaaaa', 'child')
+    const ctx: SessionRuntimeContext = { agents: { list: () => [target, child, sibling] } }
+    sessionCancel(ctx, routeCtx, { sessionId: 'huaanwork-aaaaaaaaaaaaaaaa' })
+    expect(reasons.sort()).toEqual(['child:parent', 'target:user'])
   })
 })
 

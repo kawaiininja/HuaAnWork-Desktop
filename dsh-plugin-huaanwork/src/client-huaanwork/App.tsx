@@ -135,7 +135,7 @@ type AskCard = {
 
 type ChatItem =
   | { id: number; kind: "user"; text: string }
-  | { id: number; kind: "assistant"; text: string }
+  | { id: number; kind: "assistant"; text: string; interrupted?: boolean }
   | { id: number; kind: "thinking"; thought: string; interrupted: boolean }
   | { id: number; kind: "tool"; card: ToolCard }
   | { id: number; kind: "ask"; card: AskCard }
@@ -2558,6 +2558,9 @@ function handleEvent(
       // 回合结束刷新会话列表（任务区/最近对话）。日志写回是 ~200ms 批处理，
       // 等一拍再拉，避免新会话因 messageCount 仍为 0 被空壳过滤漏掉。
       setTimeout(() => void refreshRecent(), 600);
+      if (event.cancelled || !event.ok) {
+        setItems((prev) => interruptCurrentTurn(prev), event.sessionId);
+      }
       if (event.cancelled) break;
       if (!event.ok) {
         setSessionFailed(true, event.sessionId);
@@ -2568,6 +2571,31 @@ function handleEvent(
       }
       break;
   }
+}
+
+/** 取消或失败时，本回合已出现的思考面板标题改为「思考 · 已中断」。成功结束保持「已生成」。 */
+function interruptCurrentTurn(items: ChatItem[]): ChatItem[] {
+  let turnStart = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === "user") {
+      turnStart = i + 1;
+      break;
+    }
+  }
+  let changed = false;
+  const next = items.map((item, index) => {
+    if (index < turnStart) return item;
+    if (item.kind === "thinking" && !item.interrupted) {
+      changed = true;
+      return { ...item, interrupted: true };
+    }
+    if (item.kind === "assistant" && item.interrupted !== true) {
+      changed = true;
+      return { ...item, interrupted: true };
+    }
+    return item;
+  });
+  return changed ? next : items;
 }
 
 function appendToken(items: ChatItem[], text: string): ChatItem[] {
@@ -2634,7 +2662,7 @@ function ChatRow({
     return (
       <>
         {shouldRenderThinking(panelThought) ? (
-          <ThinkingPanel thought={panelThought} hasAssistantText={answerReady} interrupted={false} />
+          <ThinkingPanel thought={panelThought} hasAssistantText={answerReady} interrupted={item.interrupted === true} />
         ) : null}
         {answerReady ? <div className="bubble assistant">{visible}</div> : null}
       </>
