@@ -39,6 +39,7 @@ export default defineConfig([
       'huaanwork-guardrails/sandbox-cwd': 'src/huaanwork-guardrails/sandbox-cwd.ts',
       'huaanwork-guardrails/present-as': 'src/huaanwork-guardrails/present-as.ts',
       'huaanwork-guardrails/model': 'src/huaanwork-guardrails/huaanwork-model.ts',
+      'huaanwork-guardrails/thinking-prompt': 'src/huaanwork-guardrails/thinking-prompt.ts',
       'huaanwork-guardrails/git': 'src/huaanwork-guardrails/git.ts',
       'huaanwork-guardrails/web': 'src/huaanwork-guardrails/web.ts',
       'huaanwork-guardrails/skills': 'src/huaanwork-guardrails/skills.ts',

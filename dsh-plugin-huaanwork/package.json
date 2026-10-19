@@ -96,6 +96,10 @@
       "types": "./lib/types/huaanwork-guardrails/model.d.ts",
       "default": "./lib/huaanwork-guardrails/model.js"
     },
+    "./huaanwork-guardrails/thinking-prompt": {
+      "types": "./lib/types/huaanwork-guardrails/thinking-prompt.d.ts",
+      "default": "./lib/huaanwork-guardrails/thinking-prompt.js"
+    },
     "./huaanwork-guardrails/git": {
       "types": "./lib/types/huaanwork-guardrails/git.d.ts",
       "default": "./lib/huaanwork-guardrails/git.js"
