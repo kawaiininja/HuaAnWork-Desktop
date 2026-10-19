@@ -98,6 +98,7 @@ import {
 } from "./logic/sessionChannel.ts";
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
 import { hasAssistantTextAfter, resolveThinking, shouldRenderThinking } from "./logic/thinkingPanel.ts";
+import { turnStatus } from "./logic/turnStatus.ts";
 import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
@@ -314,6 +315,14 @@ export default function App() {
   const [keepAwakeUnavailable, setKeepAwakeUnavailable] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
   const [turnActive, setTurnActive] = useState(false);
+  /** 当前未结束回合的最近一次 reasoning 增量、正文增量或工具结果。句子只由 turnStatus 算出。 */
+  const [turnPulse, setTurnPulse] = useState<{
+    tabId: string;
+    latest: "reasoning" | "text" | "tool" | "quiet";
+    at: number;
+  }>({ tabId: "", latest: "quiet", at: 0 });
+  const [now, setNow] = useState(() => Date.now());
+  const turnTabRef = useRef<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>("work-1");
   const [historyView, setHistoryView] = useState<SessionLogView | null>(null);
   const [sessionMenu, setSessionMenu] = useState<SessionMenu | null>(null);
@@ -390,6 +399,12 @@ export default function App() {
   const activeChat = chatTabs.find((tab) => tab.id === activeTab) ?? chatTabs[0];
   const items = activeChat.items;
   const sessionFailed = activeChat.sessionFailed;
+  const showTurnLine = turnActive && turnPulse.tabId === activeChat.id;
+  const turnLine = turnStatus({
+    latest: turnPulse.latest,
+    runningTool: runningToolName(items),
+    quietMs: Math.max(0, now - turnPulse.at),
+  });
   const slashToken = slashTokenAt(draft, slashCursor);
   const slashOpen = Boolean(slashToken && !isReservedSlash(slashToken.query) && !slashClosed);
   const slashMatches = slashOpen ? slashSkills(slashCatalog, slashToken?.query ?? "").slice(0, 8) : [];
@@ -828,6 +843,13 @@ export default function App() {
           handleEvent(event, allocId, setReady, setChannelItems, setDiff, setTurnActive, setChannelSessionFailed, async () => {
             await refreshSessions();
           }, sawReady);
+          const kind = activityKind(event);
+          const turnTab = turnTabRef.current;
+          if (kind && turnTab && targetTabFor(eventSessionId) === turnTab) {
+            const at = Date.now();
+            setTurnPulse({ tabId: turnTab, latest: kind, at });
+            setNow(at);
+          }
           if (event.event === "sidecar/status" && event.ready && authPhaseRef.current !== "logged-in") {
             pullAuthStatusRef.current();
           }
@@ -1005,6 +1027,12 @@ export default function App() {
   useEffect(() => {
     chatTabsRef.current = chatTabs;
   }, [chatTabs]);
+
+  useEffect(() => {
+    if (!turnActive) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [turnActive]);
 
   /**
    * 重启重建的运行对话骨架：首次打开时懒加载运行日志回填内容（不调 session.resume、
@@ -1446,6 +1474,10 @@ export default function App() {
       const userMsg: ChatItem = { id: allocId(), kind: "user", text };
       setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, items: [...tab.items, userMsg] } : tab)));
       setDraft("");
+      const started = Date.now();
+      turnTabRef.current = chatId;
+      setTurnPulse({ tabId: chatId, latest: "quiet", at: started });
+      setNow(started);
       setTurnActive(true);
       stopping.current = false;
       try {
@@ -1962,7 +1994,9 @@ export default function App() {
                     hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(items, index) : false}
                   />
                 ))}
-                {turnActive && !hasVisibleReply(items) ? <div className="note">正在生成…</div> : null}
+                {showTurnLine ? (
+                  <div className={turnLine.alert ? "banner warn" : "note"}>{turnLine.text}</div>
+                ) : null}
                 <div ref={chatEndRef} />
               </div>
             </>
@@ -2650,16 +2684,18 @@ function thinkingBefore(items: readonly ChatItem[], index: number): Extract<Chat
   return undefined;
 }
 
-function hasVisibleReply(items: ChatItem[]): boolean {
+function runningToolName(items: readonly ChatItem[]): string | null {
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const item = items[i];
-    if (item.kind === "user") return false;
-    if (
-      item.kind === "assistant"
-      && resolveThinking({ reasoning: thinkingBefore(items, i)?.thought ?? "", assistantText: item.text }).visible.trim().length > 0
-    ) {
-      return true;
-    }
+    if (!item || item.kind === "user") return null;
+    if (item.kind === "tool" && item.card.status === "start") return item.card.name;
   }
-  return false;
+  return null;
+}
+
+function activityKind(event: RpcEvent): "reasoning" | "text" | "tool" | null {
+  if (event.event === "reasoning") return "reasoning";
+  if (event.event === "token") return "text";
+  if (event.event === "tool/end") return "tool";
+  return null;
 }
