@@ -15,10 +15,10 @@
 | --- | --- | --- |
 | Host 启动审计把“还没有 agent”当成致命错误，真实启动失败、无窗口 | `e0f952279e` | 首轮启动日志：`conversation surface audit failed: no agent is available...`；修复后 `verify:profile` 通过，应用正常进入 advanced 首页 |
 | `propose_plan` 描述未说明计划正文必须经 `exit_plan_mode` 提交；真实模型把计划写成普通正文，计划卡和评审不出现 | `24b5c28c5d` | 首轮计划轮：`propose_plan` 后再无 `exit_plan_mode`，计划正文出现在助手气泡，并出现“缺少文件：acceptance-report.md”；修复后同一提示走 `propose_plan → exit_plan_mode`，出现计划卡并执行 |
-
-| 修复后同一复杂请求的行为：`propose_plan` → `exit_plan_mode` → 计划卡（固定说明 + “按当前护栏自动继续”）→ `read`/`write`/自检 → `已完成：自动核对 3 项均通过`。`huaanwork-plan2-18.png` 截在计划执行中途；最终“已完成：自动核对 3 项均通过”来自同一回合的实时 DOM 观察。 |
-| 最终整支 review 发现新启动审计每次都多等 10 秒 agent（gate + host audit 串行，启动约 20 秒）；移除启动路径的 agent 等待，保留服务/全局工具 fail-closed | `0c140e8534` | 修复后 `conversation-boot-audit` 的空 registry 测试在 1 秒内 resolve；既有 gate 自己的等待保留，属既有行为 |
+| 最终整支 review 发现新启动审计每次都多等 10 秒 agent（gate + host audit 串行，启动约 20 秒）；移除启动路径的 agent 等待，保留服务/全局工具 fail-closed | `0c140e8534` | 修复后 `conversation-boot-audit` 的空 registry 测试在 1 秒内 resolve；`verify:host` 14/14、`verify:profile` exit 0（仍打印 gate 的 advisory no-agent warning） |
 | 额外清理：stopped phase 清除残留的“执行进程已结束。结果可能不完整。”崩溃式 note；计划轮在扫工作区前先判定不核对 | `0c140e8534` | `hostStop.spec.ts` / `appWiring.spec.ts` / `outcomeCheck.spec.ts` |
+
+修复后同一复杂请求的行为：`propose_plan` → `exit_plan_mode` → 计划卡（固定说明 + “按当前护栏自动继续”）→ `read`/`write`/自检 → `已完成：自动核对 3 项均通过`。`huaanwork-plan2-18.png` 截在计划执行中途；最终“已完成：自动核对 3 项均通过”来自同一回合的实时 DOM 观察。
 
 ## B 项结果
 
@@ -67,11 +67,12 @@ Task 8 的全量 headless 记录（在 e0f952279e/24b5c28c5d 两处验收修复�
 - `typecheck`：exit 0。
 - `check:desktop-variants`：exit 0（11/11，allowlist 64 / oneSidedPrefixes 6）。
 - 最终构建已在 `0c140e8534` 后执行；应用此前从 `24b5c28c5d` 构建启动并通过上述桌面检查，`0c140e8534` 的启动等待与 UI 清理由聚焦测试和构建覆盖。
+- `0c140e8534` 后的 post-fix smokes：`verify:host` **14/14**、`verify:profile` **exit 0**（仍打印 gate 的 advisory no-agent warning，属预期）。
 - 整支最终 review 发现并修复的启动等待：`0c140e8534` 移除了 Host/target 启动审计对按会话创建的 agent 的 10 秒等待；`conversation-boot-audit` 的空 registry 用例在 1 秒内 resolve，服务/全局工具仍 fail-closed。
 
 ## 残余风险与说明
 
-- 启动日志仍有一条 **advisory**：`huaanwork-gates` 是可选 entry，boot 时没有 agent，无法验证主 agent 的 `restrict()`；Host 侧 post-boot audit 已保证 service/全局工具缺失会中止启动。该 warning 不阻塞启动；gate 自己的既有 10 秒等待仍是启动耗时的一部分。
+- 启动日志仍有一条 **advisory**：`huaanwork-gates` 是可选 entry，boot 时没有 agent，无法验证主 agent 的 `restrict()`；Host 侧 post-boot audit 已保证 service/全局工具缺失会中止启动。该 warning 不阻塞启动；gate 自身只读一次 agent 列表并保留 advisory 报错，10 秒等待来自已移除的共享审计。
 - `查询上海一周天气预报` 的旧会话日志被 `dsh-session` 报告 `first frame is not exactly one header line`；UI 的只读历史仍能显示（B05 用的就是它），但 agent 恢复该旧会话会失败。这是既有数据问题，不是本分支写入路径造成的。
 - B07 的字面失败是设计预期与真实模型能力的冲突；需要在设计层裁决：建议把 B07 改为“不出现计划卡；允许一次有界只读工具”，或在系统提示里提供时钟。不要为此改路由器（当前时间不在模型知识内，`bash date` 属于 R1 的 direct）。
 - B14/B21 以单测为准；B15/B25 标为 UNIT-ONLY；B19 是独立的目标续轮验收；B18 是顺序回归。B16 的 60 秒 kill 与 Windows 未验证。
