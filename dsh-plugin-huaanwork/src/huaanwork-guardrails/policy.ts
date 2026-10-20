@@ -16,7 +16,7 @@ type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/too
 };
 
 /** 无人值守授权范围（Phase 2，方案 A）：只在 `runAgentTurn` 执行期间由 host.ts 设置。 */
-type UnattendedScope = { runId: string; automationId: string; allow: Set<string>; sessionId?: string };
+export type UnattendedScope = { runId: string; automationId: string; allow: Set<string>; sessionId?: string };
 
 /**
  * `.current` 的读写坑（真实 Cordis 踩过，勿改回直接 `ctx.currentUnattended = ...`）：
@@ -30,8 +30,11 @@ type UnattendedScope = { runId: string; automationId: string; allow: Set<string>
  * mutate 容器的 `.current` 字段——容器本身是普通 JS 对象，不受 Cordis Proxy 管辖，读写
  * 不再受 inject 限制。`current` 因此兼具「可选」（旧调用方没装容器）与「可为 null」
  * （boot 的空槽）两种缺席形态。
+ *
+ * 导出只为编译期钉：三种形态的赋值由 `tests/huaanwork-host/policy-type.spec.ts` 在
+ * tsconfig.tests.json 覆盖的目录里钉住，收窄成非 nullable（或去掉 `?`）会让 typecheck 变红。
  */
-type UnattendedHolder = { current?: UnattendedScope | null };
+export type UnattendedHolder = { current?: UnattendedScope | null };
 
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
