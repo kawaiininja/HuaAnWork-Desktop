@@ -126,7 +126,16 @@ import {
   turnOutcomeNotes,
   type TodoEntry,
 } from "./logic/outcomeCheck.ts";
-import { goalRoundLabel, goalRoundStopped } from "./logic/goalRound.ts";
+import {
+  INITIAL_GOAL_TURN_STATE,
+  goalRoundDrivesTurn,
+  goalRoundLabel,
+  goalRoundStopped,
+  reduceGoalTurn,
+  type GoalTurnAction,
+  type GoalTurnEvent,
+  type GoalTurnState,
+} from "./logic/goalRound.ts";
 import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
@@ -375,6 +384,8 @@ export default function App() {
   const [now, setNow] = useState(() => Date.now());
   const turnTabRef = useRef<string | null>(null);
   const turnSessionRef = useRef<string | null>(null);
+  /** 目标相位 + 每回合结论闸门；状态机本身在 logic/goalRound.ts，便于脱离界面单测。 */
+  const goalTurnRef = useRef<GoalTurnState>(INITIAL_GOAL_TURN_STATE);
   const turnEpochRef = useRef(0);
   const stopSeqRef = useRef(0);
   const userStopSessionRef = useRef<string | null>(null);
@@ -885,6 +896,15 @@ export default function App() {
       if (!turn || cancelled) return;
       appendTurnNotes(turn, [goalRoundStopped(round, turnGaps(turn.checks, turn.tree, turn.treeKnown))]);
     };
+    /**
+     * 目标事件进入纯状态机。返回本回合应写的结论：同一用户回合里
+     * `session/end` 与终态 `goal/state` 无论谁先到，都只有第一次拿到 outcome。
+     */
+    const noteGoalEvent = (event: GoalTurnEvent): GoalTurnAction => {
+      const result = reduceGoalTurn(goalTurnRef.current, event);
+      goalTurnRef.current = result.state;
+      return result.action;
+    };
     const setChannelSessionFailed = (failed: boolean, sessionId?: string) => {
       const target = targetTabFor(sessionId);
       if (!target) return;
@@ -994,9 +1014,12 @@ export default function App() {
             && typeof eventSessionId === "string"
             && eventSessionId.length > 0
             && eventSessionId === userStopSessionRef.current;
+          // 官方续轮只属于当前跟踪的用户回合时才恢复全局回合态；后台目标不能卡住发送。
+          const goalRoundDrives = event.event === "goal/round"
+            && goalRoundDrivesTurn(eventSessionId, turnSessionRef.current);
           handleEvent(event, allocId, setReady, setChannelItems, setDiff, setTurnActive, setChannelSessionFailed, async () => {
             await refreshSessions();
-          }, sawReady, endsTrackedTurn, userStopped);
+          }, sawReady, endsTrackedTurn, userStopped, goalRoundDrives);
           if (event.event === "session/end" && endsTrackedTurn) {
             turnTabRef.current = null;
             if (event.cancelled || !event.ok || userStopped) turnSessionRef.current = null;
@@ -1006,12 +1029,8 @@ export default function App() {
             if (turnSessionRef.current === eventSessionId) turnSessionRef.current = null;
             stopping.current = false;
           }
-          if (
-            event.event === "goal/round"
-            && event.sessionId
-            && event.sessionId === turnSessionRef.current
-          ) {
-            const goalTab = chatTabsRef.current.find((tab) => tab.sessionId === event.sessionId)?.id;
+          if (goalRoundDrives) {
+            const goalTab = chatTabsRef.current.find((tab) => tab.sessionId === eventSessionId)?.id;
             if (goalTab) turnTabRef.current = goalTab;
           }
           const kind = activityKind(event);
@@ -1021,11 +1040,24 @@ export default function App() {
             setTurnPulse({ tabId: turnTab, latest: kind, at });
             setNow(at);
           }
-          if (event.event === "session/end" && event.ok && event.cancelled !== true && !userStopped) {
-            void appendTurnOutcome(eventSessionId);
+          if (event.event === "goal/state") {
+            const action = "cleared" in event
+              ? noteGoalEvent({ kind: "goal-cleared", sessionId: event.sessionId })
+              : noteGoalEvent({ kind: "goal-state", phase: event.phase, sessionId: event.sessionId });
+            if (action.kind === "outcome") void appendTurnOutcome(event.sessionId);
           }
           if (event.event === "goal/round-limit") {
-            void appendGoalStopped(event.round, eventSessionId);
+            const action = noteGoalEvent({ kind: "goal-round-limit", round: event.round, sessionId: eventSessionId });
+            if (action.kind === "goal-stopped") void appendGoalStopped(action.round, eventSessionId);
+          }
+          if (event.event === "session/end") {
+            const action = noteGoalEvent({
+              kind: "session-end",
+              sessionId: eventSessionId,
+              ok: event.ok,
+              ...(event.cancelled === true || userStopped ? { cancelled: true as const } : {}),
+            });
+            if (action.kind === "outcome") void appendTurnOutcome(eventSessionId);
           }
           if (event.event === "sidecar/status" && event.ready && authPhaseRef.current !== "logged-in") {
             pullAuthStatusRef.current();
@@ -1683,6 +1715,11 @@ export default function App() {
       turnEpochRef.current += 1;
       turnTabRef.current = chatId;
       turnSessionRef.current = sessionId ?? null;
+      // 新用户回合重新开结算窗口：上一回合的「结论已写」不能挡住这一回合。
+      goalTurnRef.current = reduceGoalTurn(goalTurnRef.current, {
+        kind: "turn-started",
+        ...(sessionId === undefined ? {} : { sessionId }),
+      }).state;
       userStopSessionRef.current = null;
       latchOwnerRef.current = null;
       setTurnPulse({ tabId: chatId, latest: "quiet", at: started });
@@ -2848,6 +2885,7 @@ function handleEvent(
   sawReady: MutableRefObject<boolean>,
   endsTrackedTurn: boolean,
   userStopped: boolean,
+  drivesTrackedTurn: boolean,
 ) {
   switch (event.event) {
     case "sidecar/status":
@@ -2937,8 +2975,9 @@ function handleEvent(
       setItems((prev) => [...prev, { id: allocId(), kind: "note", text: COMPACTION_NOTE }], event.sessionId);
       break;
     case "goal/round":
-      // 官方驱动器开了新一轮：回合又在跑了，并说明这只是续轮、不是验收。
-      setTurnActive(true);
+      // 官方驱动器开了新一轮：只有当前跟踪的会话才恢复全局回合态；
+      // 后台会话的续轮只把说明写进它自己的标签，不能卡住发送。
+      if (drivesTrackedTurn) setTurnActive(true);
       setItems((prev) => [...prev, { id: allocId(), kind: "note", text: goalRoundLabel(event.round) }], event.sessionId);
       break;
     case "session/end":

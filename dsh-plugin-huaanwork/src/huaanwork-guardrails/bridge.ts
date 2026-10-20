@@ -4,6 +4,7 @@ import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { capToolOutput } from "@huaanwork/policy/truncate";
 
 import { isShellTool, resultTextFailed, shellCommandOf } from "../client-huaanwork/logic/commandOutcome.ts";
+import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
 
 type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
@@ -21,6 +22,8 @@ type RpcEvent =
   | { event: "compaction/done"; sessionId?: string }
   | { event: "goal/round"; round: number; sessionId?: string }
   | { event: "goal/round-limit"; round: number; sessionId?: string }
+  | { event: "goal/state"; phase: GoalPhase; roundsStarted?: number; sessionId?: string }
+  | { event: "goal/state"; cleared: true; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string };
 
 type StreamChunk = {
@@ -123,10 +126,24 @@ export function apply(ctx: Context): void {
     }
     if (event?.type === "goal/change") {
       const data = objectValue(event.data);
+      // 清空墓碑没有 goal / phase：告诉客户端忘掉该会话的目标，避免 active 永久抑制结论。
+      if (data.operation === "clear") {
+        emit(ctx, { event: "goal/state", cleared: true, ...scope });
+        return;
+      }
       const goal = objectValue(data.goal);
-      if (goal.phase === "blocked" && objectValue(goal.blockedReason).code === "round-limit" && typeof data.roundsStarted === "number") {
+      const phase = goal.phase;
+      if (!isGoalPhase(phase)) return;
+      if (phase === "blocked" && objectValue(goal.blockedReason).code === "round-limit" && typeof data.roundsStarted === "number") {
+        // 先发专用停止事件：客户端据此只写「已停在第 N 轮」，随后到达的 blocked 状态不再补写结论。
         emit(ctx, { event: "goal/round-limit", round: data.roundsStarted, ...scope });
       }
+      emit(ctx, {
+        event: "goal/state",
+        phase,
+        ...(typeof data.roundsStarted === "number" ? { roundsStarted: data.roundsStarted } : {}),
+        ...scope,
+      });
     }
   }) as never, { global: true });
 
@@ -283,6 +300,10 @@ function sessionIdOfOptions(options: unknown): string | undefined {
 function purposeOfOptions(options: unknown): string | undefined {
   const purpose = (options as { purpose?: unknown } | undefined)?.purpose;
   return typeof purpose === "string" && purpose ? purpose : undefined;
+}
+
+function isGoalPhase(value: unknown): value is GoalPhase {
+  return value === "active" || value === "paused" || value === "blocked" || value === "complete";
 }
 
 /** agent 引用的会话身份（session.id 优先，回落 agent.id）已下沉到 @huaanwork/policy/channels。 */

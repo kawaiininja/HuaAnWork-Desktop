@@ -323,7 +323,7 @@ test("bridge tells the client when a compaction finished, and stays silent on fa
   assert.deepEqual(emitted, [{ event: "compaction/done", sessionId: "huaanwork-0123456789abcdef" }]);
 });
 
-test("bridge reports goal rounds and the round limit from the official session events", async () => {
+test("bridge reports goal rounds, every goal phase, and the round limit from official session events", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
   const { ctx, listeners, emitted } = createCtx();
   apply(ctx as never);
@@ -332,16 +332,45 @@ test("bridge reports goal rounds and the round limit from the official session e
     event: { type: string; data?: unknown },
   ) => void;
   const session = { id: "huaanwork-0123456789abcdef" };
+  const sessionId = "huaanwork-0123456789abcdef";
   onSessionEvent(session, { type: "user/message", data: { source: { kind: "user" } } });
   onSessionEvent(session, { type: "user/message", data: { source: { kind: "goal", goalId: "g", revision: 1, round: 0 } } });
-  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "blocked", blockedReason: { code: "model-reported", message: "x" } }, roundsStarted: 3 } });
-  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "active" }, roundsStarted: 2 } });
   assert.deepEqual(emitted, []);
-  onSessionEvent(session, { type: "user/message", data: { source: { kind: "goal", goalId: "g", revision: 1, round: 2 } } });
-  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "blocked", blockedReason: { code: "round-limit", message: "x" } }, roundsStarted: 4 } });
+
+  // All four official phases reach the client, with the round counter when present.
+  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "active" }, roundsStarted: 1 } });
+  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "paused" }, roundsStarted: 1 } });
+  onSessionEvent(session, {
+    type: "goal/change",
+    data: { goal: { phase: "blocked", blockedReason: { code: "model-reported", message: "x" } }, roundsStarted: 2 },
+  });
+  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "complete" }, roundsStarted: 3 } });
   assert.deepEqual(emitted, [
-    { event: "goal/round", round: 2, sessionId: "huaanwork-0123456789abcdef" },
-    { event: "goal/round-limit", round: 4, sessionId: "huaanwork-0123456789abcdef" },
+    { event: "goal/state", phase: "active", roundsStarted: 1, sessionId },
+    { event: "goal/state", phase: "paused", roundsStarted: 1, sessionId },
+    { event: "goal/state", phase: "blocked", roundsStarted: 2, sessionId },
+    { event: "goal/state", phase: "complete", roundsStarted: 3, sessionId },
+  ]);
+
+  // A clear tombstone ends the tracked goal instead of leaving the client stuck on `active`.
+  emitted.length = 0;
+  onSessionEvent(session, {
+    type: "goal/change",
+    data: { kind: "goal/change", version: 1, operation: "clear", cleared: { id: "g", revision: 5 }, clearedAt: 1 },
+  });
+  assert.deepEqual(emitted, [{ event: "goal/state", cleared: true, sessionId }]);
+
+  // Continuation rounds keep their labels; the cap keeps the dedicated stop plus the blocked state.
+  emitted.length = 0;
+  onSessionEvent(session, { type: "user/message", data: { source: { kind: "goal", goalId: "g", revision: 1, round: 2 } } });
+  onSessionEvent(session, {
+    type: "goal/change",
+    data: { goal: { phase: "blocked", blockedReason: { code: "round-limit", message: "x" } }, roundsStarted: 4 },
+  });
+  assert.deepEqual(emitted, [
+    { event: "goal/round", round: 2, sessionId },
+    { event: "goal/round-limit", round: 4, sessionId },
+    { event: "goal/state", phase: "blocked", roundsStarted: 4, sessionId },
   ]);
 });
 
