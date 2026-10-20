@@ -231,7 +231,7 @@ describe('detailRecords', () => {
   })
 
   test('reads failure markers from the uncapped result so a clipped head cannot hide them', () => {
-    const tail = `${'x'.repeat(9000)}\n[exit code: 1]`
+    const tail = `${'x'.repeat(40_000)}\n[exit code: 1]`
     const log = sessionLog([
       HEADER,
       toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
@@ -248,6 +248,39 @@ describe('detailRecords', () => {
     expect((results[0] as { text: string }).text.split('[exit code: 1]')).toHaveLength(2)
     expect(results[1]).toMatchObject({ isError: false })
     expect(results[2]).toMatchObject({ isError: false })
+  })
+
+  test('re-attaches a failure marker that truncation dropped from the middle', () => {
+    // 标记位于被截掉的中段:头尾都保留,只有未截断解析能看到它,随后补回一次。
+    const middleMarker = `${'x'.repeat(20_000)}\n[exit code: 1]\n${'y'.repeat(20_000)}`
+    const log = sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      toolResult('c1', middleMarker, 2, T0 + 4),
+    ])
+    const record = detailRecords(log).find((entry) => entry.kind === 'tool-result')
+    expect(record).toMatchObject({ kind: 'tool-result', isError: true })
+    if (record?.kind !== 'tool-result') throw new Error('expected tool-result record')
+    expect(record.text.split('[exit code: 1]')).toHaveLength(2)
+    expect(record.text.startsWith('x')).toBe(true)
+    expect(record.text).toContain('y')
+  })
+
+  test('caps history results in UTF-8 bytes so CJK output is not cut at the old character budget', () => {
+    // 9002 个字符 / 27012 字节:旧的 8000 字符与 8000 字节上限都会截断,32 KiB 字节上限完整保留。
+    const retained = `开头${'汉'.repeat(9000)}结尾`
+    const [kept] = detailRecords(sessionLog([HEADER, toolResult('c1', retained, 1, T0 + 3)]))
+    if (kept?.kind !== 'tool-result') throw new Error('expected tool-result record')
+    expect(kept.text).toBe(retained)
+
+    // 12003 个字符 / 36003 字节:按字节判定才截断;中文头部和尾部都保留。
+    const oversized = `${'汉'.repeat(12_000)}尾`
+    const [cut] = detailRecords(sessionLog([HEADER, toolResult('c1', oversized, 1, T0 + 3)]))
+    if (cut?.kind !== 'tool-result') throw new Error('expected tool-result record')
+    expect(cut.text.startsWith('汉')).toBe(true)
+    expect(cut.text.endsWith('尾')).toBe(true)
+    expect(cut.text).toContain('…（已截断）')
+    expect(Buffer.byteLength(cut.text, 'utf8')).toBeLessThanOrEqual(32 * 1024)
   })
 
   test('skips plugin injections and tolerates corrupt lines', () => {
@@ -291,7 +324,7 @@ describe('detailRecords', () => {
   })
 
   test('truncates oversized tool results with the live head+tail shape', () => {
-    const log = sessionLog([HEADER, toolResult('c1', `HEAD${'x'.repeat(20_000)}TAIL`, 1, T0 + 3)])
+    const log = sessionLog([HEADER, toolResult('c1', `HEAD${'x'.repeat(40_000)}TAIL`, 1, T0 + 3)])
     const [record] = detailRecords(log)
     expect(record).toBeDefined()
     expect(record!.kind).toBe('tool-result')
@@ -300,7 +333,7 @@ describe('detailRecords', () => {
     expect(record.text.startsWith('HEAD')).toBe(true)
     expect(record.text.endsWith('TAIL')).toBe(true)
     expect(record.text).toContain('…（已截断）')
-    expect(record.text.length).toBeLessThanOrEqual(8_100)
+    expect(Buffer.byteLength(record.text, 'utf8')).toBeLessThanOrEqual(32 * 1024)
   })
 })
 

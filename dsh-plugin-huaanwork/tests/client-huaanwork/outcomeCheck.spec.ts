@@ -291,9 +291,22 @@ test("a required path deeper than the workspace scan is unverified, not missing"
   assert.deepEqual(turnOutcomeNotes(deep, tree, true, { root: "/w" }), [
     "未核对（超出扫描深度）：a/b/c/d/e/f/g/report.md",
   ]);
-  // 绝对路径按扫描根折算相对层级。
-  const absolute = turnChecks([{ kind: "user", text: "写到 /w/a/b/c/d/e/f/g/report.md" }]);
-  assert.deepEqual(turnOutcomeNotes(absolute, tree, true, { root: "/w" }), [
-    "未核对（超出扫描深度）：/w/a/b/c/d/e/f/g/report.md",
+  // 绝对路径按扫描根折算相对层级:7 层仍在扫描内。不折算会数成 8 段而误报未核对。
+  const absoluteListed = turnChecks([{ kind: "user", text: "写到 /w/a/b/c/d/e/f/report.md" }]);
+  assert.deepEqual(turnOutcomeNotes(absoluteListed, tree, true, { root: "/w" }), [
+    "缺少文件：/w/a/b/c/d/e/f/report.md",
+  ]);
+  // 根目录末尾带斜杠同样折算。
+  assert.deepEqual(turnOutcomeNotes(absoluteListed, tree, true, { root: "/w/" }), [
+    "缺少文件：/w/a/b/c/d/e/f/report.md",
+  ]);
+  // 盘符绝对路径(Win32)与 POSIX 一样折算:7 层仍在扫描内,8 层才未核对。
+  const windowsListed = turnChecks([{ kind: "user", text: "写到 C:\\w\\a\\b\\c\\d\\e\\f\\report.md" }]);
+  assert.deepEqual(turnOutcomeNotes(windowsListed, tree, true, { root: "C:\\w" }), [
+    "缺少文件：C:\\w\\a\\b\\c\\d\\e\\f\\report.md",
+  ]);
+  const windowsDeep = turnChecks([{ kind: "user", text: "写到 C:\\w\\a\\b\\c\\d\\e\\f\\g\\report.md" }]);
+  assert.deepEqual(turnOutcomeNotes(windowsDeep, tree, true, { root: "C:\\w" }), [
+    "未核对（超出扫描深度）：C:\\w\\a\\b\\c\\d\\e\\f\\g\\report.md",
   ]);
 });

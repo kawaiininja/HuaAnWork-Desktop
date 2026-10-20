@@ -3,8 +3,8 @@
  * 回合结束核对(outcomeCheck.ts)只读它们产出的 command 与 isError。
  *
  * 失败标记取自 @deepseek-ai/dsh-tool-bash rc.1 的 renderResult:每个标记独占一行,
- * 位于输出末尾。长输出被截断时保留尾部,所以必须在未截断的结果文本上解析;
- * HuaAnWork 的 capToolOutput / clipText 保留头部,标记会被切掉。
+ * 通常位于输出末尾。长输出截断保留头、尾和中间的截断标记,会丢掉中段,
+ * 所以标记仍在未截断的结果文本上解析;截断后没保留的标记由调用方补回。
  */
 
 const NONZERO_EXIT = /^\[exit code: (-?\d+)\]$/;
@@ -54,4 +54,18 @@ export function resultTextFailed(text: string): boolean {
 export function toolRowIcon(card: { status: "start" | "end"; isError?: boolean }): string {
   if (card.status === "start") return "●";
   return card.isError === true ? "✗" : "✓";
+}
+
+/** 会话详情工具行的展示上限,与历史参数格(ARGS_MAX_CHARS)一致。 */
+const TOOL_LABEL_MAX_CHARS = 200;
+
+/** 历史工具行标签:命令优先、参数兜底;压成一行并限长,避免超长命令撑爆详情。 */
+export function toolArgumentLabel(tool: { command?: string; args?: string }): string | undefined {
+  for (const candidate of [tool.command, tool.args]) {
+    if (typeof candidate !== "string") continue;
+    const flat = candidate.replace(/\s+/g, " ").trim();
+    if (!flat) continue;
+    return flat.length <= TOOL_LABEL_MAX_CHARS ? flat : `${flat.slice(0, TOOL_LABEL_MAX_CHARS)}…`;
+  }
+  return undefined;
 }

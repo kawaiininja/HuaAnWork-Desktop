@@ -93,8 +93,11 @@ function scanZstdFrameEnd(buffer: Buffer, start: number): number | undefined {
 const TITLE_MAX_CHARS = 80
 /** 工具调用参数在详情里最多展示 200 字符。 */
 const ARGS_MAX_CHARS = 200
-/** 工具结果在详情里最多展示 8000 字节(历史日志展示上限,非工具输出管道);截断形状与实时桥一致。 */
-const RESULT_MAX_BYTES = 8000
+/**
+ * 工具结果在详情里最多展示 32 KiB（与实时桥 capToolOutput 的默认上限一致，按 UTF-8 字节计）；
+ * 截断形状也一致：保留头、尾和中间的截断标记。中文约占 3 字节/字，不与实时输出双标。
+ */
+const RESULT_MAX_BYTES = 32 * 1024
 
 type Json = Record<string, unknown>
 

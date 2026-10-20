@@ -16,7 +16,8 @@ export function outcomeGaps(input: {
   return gaps;
 }
 
-const FILE_PATH = /[\w\u4e00-\u9fff./\\~-]+\.(?:md|txt|docx?|xlsx?|pptx?|csv|json|pdf|html?|tsx?|jsx?|py)\b/gi;
+/** 文件路径可能带 Windows 盘符前缀（`C:\`、`C:/`），前缀可选、单独识别，避免把冒号放宽进整段路径。 */
+const FILE_PATH = /(?:[A-Za-z]:[\\/])?[\w\u4e00-\u9fff./\\~-]+\.(?:md|txt|docx?|xlsx?|pptx?|csv|json|pdf|html?|tsx?|jsx?|py)\b/gi;
 const LEADING_CJK = /^[\u4e00-\u9fff]+/;
 /** 句子里紧挨文件名的动词；的、和、与、及、或会进文件名，不在这里切开。 */
 const NAME_BOUNDARY = /[到把在为成叫进入给存写至于将]/g;
@@ -171,12 +172,12 @@ export const WORKSPACE_SCAN_DEPTH = 6;
 export type WorkspaceScan = { root?: string; depth?: number };
 
 /**
- * 路径相对扫描根的层级。绝对路径需要 root 才能折算；根外或没有 root 时返回 undefined，
- * 保持「找不到就是缺失」的旧口径，不臆测未核对。
+ * 路径相对扫描根的层级。绝对路径（POSIX 的 `/` 或 Windows 盘符 `C:\`）需要 root 才能折算；
+ * 根外或没有 root 时返回 undefined，保持「找不到就是缺失」的旧口径，不臆测未核对。
  */
 function scanRelativeDepth(path: string, root: string | undefined): number | undefined {
   let wanted = path.replace(/\\/g, "/").replace(/^\.\//, "");
-  if (wanted.startsWith("/")) {
+  if (wanted.startsWith("/") || /^[A-Za-z]:\//.test(wanted)) {
     if (typeof root !== "string" || root.length === 0) return undefined;
     const normalizedRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
     if (!normalizedRoot) return undefined;

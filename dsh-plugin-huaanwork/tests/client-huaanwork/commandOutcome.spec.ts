@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { failureMarkers, resultTextFailed, shellCommandOf, toolRowIcon } from "../../src/client-huaanwork/logic/commandOutcome.ts";
+import { failureMarkers, resultTextFailed, shellCommandOf, toolArgumentLabel, toolRowIcon } from "../../src/client-huaanwork/logic/commandOutcome.ts";
 
 test("failure markers follow the rc.1 bash renderResult lines", () => {
   assert.equal(resultTextFailed("ok\n[exit code: 1]"), true);
@@ -42,4 +42,13 @@ test("a failed tool row shows a cross, not a check", () => {
   assert.equal(toolRowIcon({ status: "start" }), "●");
   assert.equal(toolRowIcon({ status: "end" }), "✓");
   assert.equal(toolRowIcon({ status: "end", isError: true }), "✗");
+});
+
+test("history tool rows show the command over args and clip it to one display line", () => {
+  assert.equal(toolArgumentLabel({ command: "pnpm test", args: '{"command":"pnpm test"}' }), "pnpm test");
+  assert.equal(toolArgumentLabel({ args: '{"path":"a.md"}' }), '{"path":"a.md"}');
+  assert.equal(toolArgumentLabel({ command: "  \n ", args: "ls -la\n" }), "ls -la");
+  assert.equal(toolArgumentLabel({}), undefined);
+  const long = "x".repeat(300);
+  assert.equal(toolArgumentLabel({ command: long }), `${"x".repeat(200)}…`);
 });

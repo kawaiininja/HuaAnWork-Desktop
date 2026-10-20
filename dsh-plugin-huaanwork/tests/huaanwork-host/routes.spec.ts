@@ -13,10 +13,11 @@ import {
   RouteError,
   type RouteContext,
 } from '../../src/huaanwork-host/routes.ts'
-import { hasGit, listTree } from '../../src/huaanwork-host/native.ts'
+import { hasGit, listTree, type TreeNode } from '../../src/huaanwork-host/native.ts'
 import { getAgentsDirectory, sessionSendBlockers, setAgentsDirectory } from '../../src/huaanwork-host/sessions.ts'
 import { createAgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 import { readPendingWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
+import { WORKSPACE_SCAN_DEPTH } from '../../src/client-huaanwork/logic/outcomeCheck.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 
 const ALL_METHODS = [
@@ -187,6 +188,24 @@ describe('native functions', () => {
     const srcNode = tree.find((t) => t.name === 'src')!
     expect(srcNode.isDir).toBe(true)
     expect(srcNode.children?.some((c) => c.name === 'index.ts')).toBe(true)
+  })
+
+  test('listTree 在扫描深度下列到相对深度 7,再深一层不列出', () => {
+    // 与 outcomeCheck 的契约一致:listTree 展开 level < depth 的目录 ⇒ 树覆盖到相对 depth + 1。
+    const root = mkdtempSync(join(tmpdir(), 'hw-native-depth-'))
+    const flatten = (nodes: readonly TreeNode[]): string[] =>
+      nodes.flatMap((node) => [node.path, ...flatten(node.children ?? [])])
+    try {
+      const six = join(root, 'a', 'b', 'c', 'd', 'e', 'f')
+      mkdirSync(join(six, 'g'), { recursive: true })
+      writeFileSync(join(six, 'six.txt'), 'six')
+      writeFileSync(join(six, 'g', 'seven.txt'), 'seven')
+      const paths = flatten(listTree(root, WORKSPACE_SCAN_DEPTH))
+      expect(paths).toContain(join(six, 'six.txt'))
+      expect(paths).not.toContain(join(six, 'g', 'seven.txt'))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 
