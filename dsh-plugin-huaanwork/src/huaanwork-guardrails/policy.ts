@@ -6,6 +6,7 @@ import { preExecuteExplained, type GuardMode, type ToolCall } from "@huaanwork/p
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 
 import { isHostAttached, isMcpAttached, type AttachmentMaps } from "./agent-attachments.ts";
+import { GIT_SNAPSHOT_BUDGET_MS } from "./git-budget.ts";
 
 type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:376
   name: string;
@@ -203,6 +204,9 @@ export function isGitDirty(workspaceRoot: string): boolean {
     const result = spawnSync("git", ["status", "--porcelain"], {
       cwd: workspaceRoot,
       encoding: "utf8",
+      // Same liveness budget as the bridge snapshot: an untimed status on a huge
+      // tree would hold the Host loop past the 2 s probe and look like a hang.
+      timeout: GIT_SNAPSHOT_BUDGET_MS,
     });
     return result.status === 0 && (result.stdout ?? "").trim().length > 0;
   } catch {

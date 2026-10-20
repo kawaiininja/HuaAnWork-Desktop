@@ -176,6 +176,19 @@ test("policy plugin probes git status only for git_checkout (F-2 narrowing pin)"
   }
 });
 
+test("isGitDirty bounds the blocking git status probe", async () => {
+  const { isGitDirty } = await import("../../src/huaanwork-guardrails/policy.ts");
+  vi.mocked(spawnSync).mockClear();
+  isGitDirty(process.cwd());
+  const call = vi.mocked(spawnSync).mock.calls.at(0);
+  assert.ok(call, "the probe must still spawn one git status call");
+  const [command, argv, options] = call;
+  assert.equal(command, "git");
+  assert.deepEqual(argv, ["status", "--porcelain"]);
+  assert.equal(typeof options?.timeout, "number", "without a timeout a big tree can stall the Host loop");
+  assert.ok((options?.timeout ?? 0) > 0 && (options?.timeout ?? 0) <= 1_500);
+});
+
 test("Cordis guard allows git_push once after allowed-once and denies without approve", async () => {
   const { apply: applyPolicy } = await import("../../src/huaanwork-guardrails/policy.ts");
   const { apply: applyApproval } = await import("../../src/huaanwork-guardrails/approval.ts");

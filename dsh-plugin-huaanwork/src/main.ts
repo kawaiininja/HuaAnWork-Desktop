@@ -1673,6 +1673,14 @@ async function start(): Promise<void> {
           void runtime.showHostStoppedRecovery({ exitCode: exit.exitCode })
             .catch((cause: unknown) => { electronLogger.errorCause(cause) })
         },
+        onStoppedByUser: (exit) => {
+          // The liveness dialog's confirmed stop is not a crash: record it as an
+          // expected exit, never open the recovery dialog (its default restarts),
+          // and only leave the neutral note that the process ended on request.
+          electronLogger.info(`DSH Host stopped at the user's request (exit code ${exit.exitCode})`)
+          lifecycleRecorder.recordHostExit({ exitCode: exit.exitCode, expected: true, uptimeMs: exit.uptimeMs })
+          runtime.notifyAttention({ title: PRODUCT_NAME, body: '执行进程已按你的要求结束' })
+        },
       })
     } else {
       let currentProfilePreferences: DesktopProfilePreferences = profilePreferences

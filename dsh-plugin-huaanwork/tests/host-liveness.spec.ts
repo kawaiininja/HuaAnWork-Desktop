@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { probeAnswered, reduceLiveness, type Liveness } from "../src/huaanwork-host/host-liveness.ts";
+import { createHostExitGate, probeAnswered, reduceLiveness, type Liveness } from "../src/huaanwork-host/host-liveness.ts";
 
 const start: Liveness = { phase: "ok", turns: 1, lastOkMs: 0 };
 
@@ -19,4 +19,29 @@ test("only a status reply from the Host loop counts as an answer", () => {
   assert.equal(probeAnswered({ ok: true }), false);
   assert.equal(probeAnswered(undefined), false);
   assert.equal(probeAnswered({ pid: "4321" }), false);
+});
+
+test("a requested Host stop is a stop, not an unexpected failure", () => {
+  const gate = createHostExitGate();
+  // Before boot nothing has been promised to a renderer, so an exit stays silent.
+  assert.equal(gate.disposition(), "silent");
+
+  gate.markBooted();
+  assert.equal(gate.disposition(), "failure");
+
+  // The flag is set before child.kill(); the exit that follows must never reach onFailure.
+  gate.markStoppedByUser();
+  assert.equal(gate.stoppedByUser, true);
+  assert.equal(gate.disposition(), "user-stop");
+
+  // An app-requested teardown after the user stop stays off every exit report.
+  gate.markStopping();
+  assert.equal(gate.disposition(), "silent");
+});
+
+test("a stop marked before the exit is still a user stop, even if boot completed first", () => {
+  const gate = createHostExitGate();
+  gate.markBooted();
+  gate.markStoppedByUser();
+  assert.equal(gate.disposition(), "user-stop");
 });

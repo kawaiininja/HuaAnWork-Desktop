@@ -5,6 +5,12 @@ import { capToolOutput } from "@huaanwork/policy/truncate";
 
 import { isShellTool, resultTextFailed, shellCommandOf } from "../client-huaanwork/logic/commandOutcome.ts";
 import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
+import {
+  createGitWorkBudget,
+  GIT_SNAPSHOT_BUDGET_MS,
+  GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS,
+  type GitWorkBudget,
+} from "./git-budget.ts";
 
 type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
@@ -219,25 +225,38 @@ function emitGitDiff(ctx: Context, sessionId: string | undefined): void {
   }
 }
 
-function workspaceDiff(root: string): string | undefined {
-  const tracked = spawnSync("git", ["diff"], { cwd: root, encoding: "utf8" });
-  if (tracked.error) return undefined;
+/**
+ * One synchronous diff snapshot. Every git call shares {@link createGitWorkBudget}'s
+ * deadline, so a huge untracked tree degrades to a tracked-only diff instead of
+ * holding the Host loop long enough for the 2 s liveness probe to time out.
+ * The budget is injectable so tests can isolate the untracked-file cap from timing.
+ */
+export function workspaceDiff(root: string, budget: GitWorkBudget = createGitWorkBudget()): string | undefined {
+  const tracked = runGit(root, ["diff"], budget);
+  if (!tracked || tracked.error) return undefined;
   const parts = [tracked.stdout ?? ""];
-  const status = spawnSync("git", ["status", "--porcelain", "-uall"], { cwd: root, encoding: "utf8" });
-  if (!status.error) {
+  const status = runGit(root, ["status", "--porcelain", "-uall"], budget);
+  if (status && !status.error) {
     const empty = process.platform === "win32" ? "NUL" : "/dev/null";
+    let untrackedDiffs = 0;
     for (const line of (status.stdout ?? "").split(/\r?\n/)) {
+      if (untrackedDiffs >= GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS || budget.remainingMs() <= 0) break;
       const file = porcelainUntrackedPath(line);
       if (!file) continue;
-      const extra = spawnSync("git", ["diff", "--no-index", "--", empty, file], {
-        cwd: root,
-        encoding: "utf8",
-      });
-      if (extra.error) continue;
+      untrackedDiffs += 1;
+      const extra = runGit(root, ["diff", "--no-index", "--", empty, file], budget);
+      if (!extra || extra.error) continue;
       parts.push(extra.stdout ?? "");
     }
   }
   return parts.join("");
+}
+
+/** Never call spawnSync with `timeout: 0` (Node reads that as "no timeout"). */
+function runGit(root: string, args: string[], budget: GitWorkBudget) {
+  const timeout = Math.min(GIT_SNAPSHOT_BUDGET_MS, budget.remainingMs());
+  if (timeout <= 0) return undefined;
+  return spawnSync("git", args, { cwd: root, encoding: "utf8", timeout });
 }
 
 function porcelainUntrackedPath(line: string): string | undefined {

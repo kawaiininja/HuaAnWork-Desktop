@@ -3,7 +3,14 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { test, vi } from "vitest";
+
+// Transparent spawnSync wrapper: the snapshot tests below assert the blocking
+// budget on the real calls; every other test still executes the real binary.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawnSync: vi.fn(actual.spawnSync) };
+});
 
 type StreamChunk =
   | { type: "text-delta"; index: number; text: string }
@@ -170,6 +177,39 @@ test("bridge diff snapshot includes untracked new files", async () => {
     assert.equal(writes.length, 0);
   } finally {
     process.stdout.write = originalWrite;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a large untracked tree cannot block the Host loop past the git budget", async () => {
+  const { workspaceDiff } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { createGitWorkBudget, GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS } = await import(
+    "../../src/huaanwork-guardrails/git-budget.ts"
+  );
+  const root = mkdtempSync(join(tmpdir(), "huaanwork-bridge-budget-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "-q", "--template=/dev/null"], { cwd: root }).status, 0);
+    for (let index = 0; index <= GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS; index += 1) {
+      writeFileSync(join(root, `untracked-${index}.txt`), `body ${index}\n`);
+    }
+    vi.mocked(spawnSync).mockClear();
+    const text = workspaceDiff(root, createGitWorkBudget(60_000));
+    assert.ok(text?.includes("untracked-0.txt"), "the first untracked file still reaches the snapshot");
+
+    const calls = vi.mocked(spawnSync).mock.calls;
+    for (const [, , options] of calls) {
+      assert.equal(typeof options?.timeout, "number", "every blocking git call needs a timeout");
+      assert.ok((options?.timeout ?? 0) > 0 && (options?.timeout ?? 0) <= 1_500, "the timeout must stay under 1.5 s");
+    }
+    const untrackedDiffs = calls.filter(([command, argv]) =>
+      command === "git" && Array.isArray(argv) && argv[0] === "diff" && argv[1] === "--no-index"
+    );
+    assert.equal(
+      untrackedDiffs.length,
+      GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS,
+      "the snapshot stops after the configured number of untracked diffs",
+    );
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

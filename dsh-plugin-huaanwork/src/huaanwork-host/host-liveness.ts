@@ -21,3 +21,45 @@ export function reduceLiveness(
   if (silent >= 15_000) return { ...state, phase: "suspect" };
   return state;
 }
+
+/** Why the supervised Host is exiting, from the supervisor's point of view. */
+export type HostExitDisposition = "failure" | "user-stop" | "silent";
+
+export type HostExitGate = {
+  readonly booted: boolean;
+  readonly stopping: boolean;
+  readonly stoppedByUser: boolean;
+  markBooted(): void;
+  markStopping(): void;
+  /**
+   * Mark that the user confirmed the liveness dialog and the child is about to be
+   * killed. Must run before `child.kill()` so the exit handler never reads the
+   * kill as a crash and opens the recovery dialog (whose default is restart).
+   */
+  markStoppedByUser(): void;
+  disposition(): HostExitDisposition;
+};
+
+/**
+ * Tracks the three reasons a Host can end. A stop the user asked for is neutral:
+ * it is neither an unexpected failure nor an app-requested teardown (which stays
+ * completely silent while quitting or restarting).
+ */
+export function createHostExitGate(): HostExitGate {
+  let booted = false;
+  let stopping = false;
+  let stoppedByUser = false;
+  return {
+    get booted() { return booted; },
+    get stopping() { return stopping; },
+    get stoppedByUser() { return stoppedByUser; },
+    markBooted() { booted = true; },
+    markStopping() { stopping = true; },
+    markStoppedByUser() { stoppedByUser = true; },
+    disposition() {
+      if (stopping) return "silent";
+      if (stoppedByUser) return "user-stop";
+      return booted ? "failure" : "silent";
+    },
+  };
+}

@@ -2,11 +2,13 @@ import { EventEmitter } from 'node:events'
 import { expect, it, vi } from 'vitest'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import type { DesktopStartupGenerationHost } from '../src/startup-generation.ts'
+import type { HostRpc } from '../src/host-rpc.ts'
+import { HOST_LIVENESS_STOP_CHANNEL, HOST_LIVENESS_TURNS_CHANNEL } from '../src/huaanwork-host/host-liveness.ts'
 const state = vi.hoisted(() => ({ fork: vi.fn() }))
 vi.mock('electron', () => ({ utilityProcess: { fork: state.fork } }))
 import {
-  formatUnexpectedHostExit, HOST_STDERR_TAIL_CHARS, startIsolatedDesktopHost,
-  type IsolatedHostExit, type IsolatedHostOptions,
+  beginHostLiveness, formatUnexpectedHostExit, HOST_STDERR_TAIL_CHARS, startIsolatedDesktopHost,
+  type ElectronLivenessApi, type IsolatedHostExit, type IsolatedHostOptions,
 } from '../src/host-process.ts'
 
 function fixture() {
@@ -27,6 +29,34 @@ function fixture() {
     bindHost: (value: DesktopStartupGenerationHost) => { host = value }, requestQuit() {}, onFailure,
   } as unknown as IsolatedHostOptions
   return { child, options, onFailure, host: () => host }
+}
+
+/** The Electron surface the liveness probe normally gets from `require('electron')`. */
+function livenessHarness(dialogResponse: number) {
+  const handlers = new Map<string, (...args: never[]) => unknown>()
+  const listeners = new Map<string, (...args: never[]) => unknown>()
+  const api = {
+    ipcMain: {
+      on(channel: string, listener: (...args: never[]) => unknown) { listeners.set(channel, listener) },
+      handle(channel: string, listener: (...args: never[]) => unknown) { handlers.set(channel, listener) },
+      removeListener(channel: string, listener: (...args: never[]) => unknown) {
+        if (listeners.get(channel) === listener) listeners.delete(channel)
+      },
+      removeHandler(channel: string) { handlers.delete(channel) },
+      removeAllListeners(channel: string) { listeners.delete(channel) },
+    },
+    dialog: { showMessageBox: vi.fn(async () => ({ response: dialogResponse })) },
+  } as unknown as ElectronLivenessApi
+  // Every status probe misses: after 60 s with a live turn the Host is stoppable.
+  const rpc = { call: vi.fn(() => Promise.reject(new Error('probe missed'))) } as unknown as HostRpc
+  const child = { kill: vi.fn(() => true) }
+  const onUserStop = vi.fn()
+  return {
+    api, rpc, child, onUserStop,
+    reportTurns: (turns: number) =>
+      (listeners.get(HOST_LIVENESS_TURNS_CHANNEL) as ((event: unknown, turns: number) => void) | undefined)?.({}, turns),
+    stop: () => (handlers.get(HOST_LIVENESS_STOP_CHANNEL) as (() => Promise<boolean>) | undefined)?.(),
+  }
 }
 it('binds the child before startup and makes repeated teardown idempotent', async () => {
   const f = fixture()
@@ -81,4 +111,38 @@ it('keeps what a fatal Host said last, since its stderr is otherwise never persi
 it('logs only the exit reason when the Host wrote nothing', () => {
   const error = new Error('DSH Host exited (0); restart the application to reconnect')
   expect(formatUnexpectedHostExit(error, { exitCode: 0, uptimeMs: 1, stderrTail: '\n' })).toBe(error.message)
+})
+it('marks a confirmed liveness stop before killing the Host', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+  try {
+    const h = livenessHarness(0)
+    const dispose = beginHostLiveness(h.rpc, h.child, h.onUserStop, h.api)
+    h.reportTurns(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await h.stop()).toBe(true)
+    expect(h.onUserStop).toHaveBeenCalledOnce()
+    expect(h.child.kill).toHaveBeenCalledOnce()
+    // The exit handler reads this flag asynchronously; marking after kill() would race it.
+    expect(h.onUserStop.mock.invocationCallOrder[0]).toBeLessThan(
+      h.child.kill.mock.invocationCallOrder[0]!,
+    )
+    dispose()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+it('keeps the Host alive when the liveness stop is cancelled', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+  try {
+    const h = livenessHarness(1)
+    const dispose = beginHostLiveness(h.rpc, h.child, h.onUserStop, h.api)
+    h.reportTurns(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await h.stop()).toBe(false)
+    expect(h.onUserStop).not.toHaveBeenCalled()
+    expect(h.child.kill).not.toHaveBeenCalled()
+    dispose()
+  } finally {
+    vi.useRealTimers()
+  }
 })
