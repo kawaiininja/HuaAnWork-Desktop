@@ -10,6 +10,7 @@ import {
   shouldRenderThinking,
   thinkingChrome,
   thinkingStepsText,
+  type ThinkingToggleItem,
 } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 
 test("reasoning wins and think tags stay out of the answer", () => {
@@ -88,10 +89,10 @@ test("a user stop marks the current turn interrupted", () => {
 });
 
 test("a thinking toggle stays on the item", () => {
-  const items = [
-    { id: 1, kind: "thinking" as const },
-    { id: 2, kind: "assistant" as const },
-    { id: 3, kind: "user" as const },
+  const items: ThinkingToggleItem[] = [
+    { id: 1, kind: "thinking" },
+    { id: 2, kind: "assistant" },
+    { id: 3, kind: "user" },
   ];
   const expanded = withThinkingToggle(items, 1, "expand");
   assert.equal(expanded[0]?.userToggled, "expand");

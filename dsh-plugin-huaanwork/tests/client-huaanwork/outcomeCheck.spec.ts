@@ -70,8 +70,8 @@ test("turn result lists gaps and never claims done with gaps; empty lists are no
 
 test("file lookup works on a flattened workspace tree with relative paths", () => {
   const paths = treePaths([
-    { name: "docs", path: "/w/docs", isDir: true, children: [{ name: "plan.docx", path: "/w/docs/plan.docx", isDir: false }] },
-    { name: "报告.md", path: "/w/报告.md", isDir: false },
+    { path: "/w/docs", children: [{ path: "/w/docs/plan.docx" }] },
+    { path: "/w/报告.md" },
   ]);
   assert.equal(fileExistsInTree(paths, "报告.md"), true);
   assert.equal(fileExistsInTree(paths, "./docs/plan.docx"), true);
@@ -170,14 +170,15 @@ test("outcome notes go to a user chat tab only, never a child session or an auto
 });
 
 test("a late outcome is dropped when a newer user message already sits on the tab", () => {
-  const items = [
-    { id: 1, kind: "user" as const },
-    { id: 2, kind: "assistant" as const },
+  type TurnItem = { id: number; kind: "user" | "assistant" | "note"; text?: string };
+  const items: TurnItem[] = [
+    { id: 1, kind: "user" },
+    { id: 2, kind: "assistant" },
   ];
-  const notes = [{ id: 9, kind: "note" as const, text: "已完成：自动核对 1 项均通过" }];
+  const notes: TurnItem[] = [{ id: 9, kind: "note", text: "已完成：自动核对 1 项均通过" }];
   assert.equal(latestUserItemId(items), 1);
   assert.deepEqual(appendOutcomeNotes(items, 1, notes), [...items, ...notes]);
-  const next = [...items, { id: 3, kind: "user" as const }];
+  const next: TurnItem[] = [...items, { id: 3, kind: "user" }];
   assert.equal(appendOutcomeNotes(next, 1, notes), next);
 });
 

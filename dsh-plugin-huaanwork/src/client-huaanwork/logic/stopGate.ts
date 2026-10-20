@@ -84,15 +84,19 @@ export function consumeStaleIdle(
   return { drop: true, stale: next };
 }
 
-/** 只取出这次取消对应的结束事件，其它会话的仍留在队列里。 */
-export function takeHeldEnds<T extends { sessionId?: string }>(
+/**
+ * 只取出这次取消对应的结束事件，其它会话的仍留在队列里。
+ * 事件联合里有的成员不带 sessionId，由调用方给出读取方式，避免用一个更窄的结构类型假装它一定有。
+ */
+export function takeHeldEnds<T>(
   held: readonly T[],
   sessionId: string,
+  sessionIdOf: (event: T) => string | undefined,
 ): { taken: T[]; rest: T[] } {
   const taken: T[] = [];
   const rest: T[] = [];
   for (const event of held) {
-    if (event.sessionId === sessionId) taken.push(event);
+    if (sessionIdOf(event) === sessionId) taken.push(event);
     else rest.push(event);
   }
   return { taken, rest };

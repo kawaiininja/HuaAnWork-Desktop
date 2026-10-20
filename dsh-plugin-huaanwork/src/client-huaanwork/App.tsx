@@ -1769,7 +1769,7 @@ export default function App() {
   }
 
   function releaseHeldEnds(sessionId: string) {
-    const released = takeHeldEnds(heldEndsRef.current, sessionId);
+    const released = takeHeldEnds(heldEndsRef.current, sessionId, sessionIdOfEvent);
     heldEndsRef.current = released.rest;
     for (const end of released.taken) applySidecarEventRef.current(end);
   }
@@ -1777,7 +1777,7 @@ export default function App() {
   function toggleThinking(itemId: number, userToggled: "expand" | "collapse") {
     setChatTabs((prev) => prev.map((tab) => {
       const items = withThinkingToggle(tab.items, itemId, userToggled);
-      return items === tab.items ? tab : { ...tab, items };
+      return items === tab.items ? tab : { ...tab, items: [...items] };
     }));
   }
 
@@ -3244,4 +3244,9 @@ function activityKind(event: RpcEvent): "reasoning" | "text" | "tool" | null {
   if (event.event === "token") return "text";
   if (event.event === "tool/end") return "tool";
   return null;
+}
+
+/** `RpcEvent` 联合里有些成员不带 sessionId；按会话取回暂扣的结束事件时显式收窄。 */
+function sessionIdOfEvent(event: RpcEvent): string | undefined {
+  return "sessionId" in event ? event.sessionId : undefined;
 }

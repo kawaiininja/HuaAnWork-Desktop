@@ -52,7 +52,7 @@ test("releasing a cancel returns only that session's held ends", () => {
     { sessionId: "other", ok: true },
     { sessionId: "huaanwork-weather", ok: true },
   ];
-  const released = takeHeldEnds(held, "huaanwork-weather");
+  const released = takeHeldEnds(held, "huaanwork-weather", (event) => event.sessionId);
   assert.deepEqual(released.taken.map((event) => event.sessionId), ["huaanwork-weather", "huaanwork-weather"]);
   assert.deepEqual(released.rest, [{ sessionId: "other", ok: true }]);
 });

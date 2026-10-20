@@ -76,12 +76,15 @@ export function shouldRenderThinking(thought: string): boolean {
   return thought.trim().length > 0;
 }
 
+/** 思考与正文条目共有的切换字段；调用方与测试据此标注条目数组。 */
+export type ThinkingToggleItem = { id: number; kind: string; userToggled?: "expand" | "collapse" };
+
 /** 把展开或收起记在思考条目上，切换标签后重挂载仍读得到。 */
-export function withThinkingToggle<T extends { id: number; kind: string; userToggled?: "expand" | "collapse" }>(
+export function withThinkingToggle<T extends ThinkingToggleItem>(
   items: readonly T[],
   itemId: number,
   userToggled: "expand" | "collapse",
-): T[] {
+): readonly T[] {
   const index = items.findIndex((item) => (item.kind === "thinking" || item.kind === "assistant") && item.id === itemId);
   if (index < 0) return items;
   const current = items[index];

@@ -1284,6 +1284,9 @@ virtualStoreDirMaxLength: 60
     if (rows.has('tool-ralph')) {
       expect(rows.get('tool-ralph')?.disabled).toBe(true)
     }
+    // user-questions 已从锁层移除并重新启用：正例钉住它确实挂载且未被关闭。
+    expect(rows.has('user-questions')).toBe(true)
+    expect(rows.get('user-questions')?.disabled).not.toBe(true)
 
     // L1/L2 复挂钉：dsh-base 挂载、web-app overlay 关闭的三行被变体翻回启用。
     expect(rows.get('tool-fs')?.disabled).toBe(false)
@@ -1305,6 +1308,7 @@ virtualStoreDirMaxLength: 60
     const expectedOrder = [
       'huaanwork-host',
       'huaanwork-model',
+      'huaanwork-thinking-prompt',
       'huaanwork-policy',
       'huaanwork-sandbox-cwd',
       'huaanwork-git',
