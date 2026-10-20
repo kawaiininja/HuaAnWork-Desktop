@@ -52,6 +52,8 @@ type Context = {
   huaanworkAttachments?: AttachmentMaps;
   huaanworkApprovals?: ApprovalMap;
   huaanworkPlanReviews?: PlanReviewMap;
+  /** boot 时注入的容器;无人值守运行期间 `.current` 非空(policy.ts 同源)。 */
+  huaanworkUnattended?: { current?: unknown };
   huaanworkEmit?: (event: AskedEvent) => void;
   on(
     event: "user-questions/request",
@@ -82,6 +84,10 @@ export function apply(ctx: Context): void {
   ctx.on("user-questions/request", async (request, next) => {
     const kind = requestKind(request);
     if (kind === "other") return next();
+
+    // 无人值守自动化没有可点击的人:计划评审一律按「保留计划」结算,
+    // 不让 exit_plan_mode 等到一个永远不会来的点击(失败方向 = 不离开计划模式)。
+    if (kind === "plan-review" && ctx.huaanworkUnattended?.current) return declineAnswers(request);
 
     const mode = readGuardMode(ctx.huaanworkProfileDir);
     const decision = answererDecision({

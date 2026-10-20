@@ -211,6 +211,41 @@ test("ask mode always waits for the plan card", async () => {
   assert.deepEqual((await pending).answers, [{ id: "plan-review", selected: ["Keep planning"] }]);
 });
 
+test("an unattended plan review settles as keep-planning instead of waiting for a click", async () => {
+  const events: Asked[] = [];
+  const approvals = new Map<string, (result: ApprovalResult) => void>();
+  const reviews = new Map<string, () => boolean>();
+  let listener: Listener | undefined;
+  apply({
+    // Smart mode would auto-approve this read-only plan when a human is around;
+    // the unattended scope must settle it as declined first.
+    huaanworkProfileDir: modeDir("smart"),
+    huaanworkWorkspaceRoot: { current: tmpdir() },
+    huaanworkApprovals: approvals,
+    huaanworkPlanReviews: reviews,
+    huaanworkUnattended: {
+      current: { runId: "run-1", automationId: "auto-1", allow: new Set<string>() },
+    },
+    huaanworkEmit(event) {
+      if (event.event === "approval/asked") events.push(event);
+    },
+    on(_name, fn) {
+      listener = fn as Listener;
+    },
+  });
+
+  const settled = await listener!(
+    { questions: [reviewWith("c1", "# 汇总\n\n读 `docs/a.md`")], agent: { session: { id: "unattended-1" } } },
+    async () => {
+      throw new Error("next");
+    },
+  );
+  assert.deepEqual(settled.answers, [{ id: "plan-review", selected: ["Keep planning"] }]);
+  assert.equal(events.length, 0);
+  assert.equal(approvals.size, 0);
+  assert.equal(reviews.size, 0);
+});
+
 test("full mode confirms only when the target changed from the last confirmed plan", async () => {
   const { events, approvals, ask } = answerer("full");
   const first = await ask("full-1", "c1", "# 周报\n\n写入 `out/report.md`，收件人：张三");

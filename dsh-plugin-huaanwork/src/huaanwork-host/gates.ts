@@ -1,9 +1,10 @@
 /**
  * HuaAnWork post-boot gate(旧 packages/sidecar/src/gates.ts:73-142 的移植)。
  * 组合锁(Task 3)只验证静态条目;本插件在真实组合 boot 完成后逐条探活:
- * waterfall 可用、git_push 探针经 waterfall 得 ask、guard/execute 存在、
- * 同探针经 execute 必 isError、全局 schemas 无 run_code、agent 注册表有界
- * 等待非空、agent ctx 有 restrict、主 agent schemas 无 web_search/run_code。
+ * planMode/userQuestions 服务在位、waterfall 可用、git_push 探针经 waterfall 得 ask、
+ * guard/execute 存在、同探针经 execute 必 isError、全局 schemas 无 run_code、
+ * 分流/计划/目标工具在全局目录且对主 agent 可见、agent 注册表有界等待非空、
+ * agent ctx 有 restrict、主 agent schemas 无 web_search/run_code。
  * 任一失败即 throw → `boot()` 拒绝 → 启动 catch 进恢复窗口(spec §6 第 3 条)。
  *
  * 旧 `assertNoListeningServers` 的 Desktop 改造:loopback DesktopWebServer 是
@@ -31,6 +32,16 @@ type AgentCtxTools = {
   schemas?: () => readonly { name?: string }[]
 }
 
+/** `exit_plan_mode` 的评审通道由本服务提供(plan-mode 的 inject 同源)。 */
+type PlanModeService = {
+  set(agent: unknown, active: boolean): unknown
+}
+
+/** `request_input`/plan-review 的答案通道;answerer 与 route 工具都依赖它。 */
+type UserQuestionService = {
+  ask(request: unknown): Promise<unknown>
+}
+
 /** cordis ctx 无单独类型导出(上游 0.1.6-alpha.2 逐字比对);同旧 sidecar 的 duck-type 风格。 */
 type GatesContext = {
   waterfall(
@@ -52,10 +63,28 @@ type GatesContext = {
     /** 实际监听端口(config.port 为 0 时由 OS 分配,见 dsh-host-webserver)。 */
     readonly port: number
   }
+  planMode?: PlanModeService
+  userQuestions?: UserQuestionService
 }
 
+/**
+ * 本 profile 必须向模型暴露的工具(profile.ts 的锁层逐行对应):
+ * - `propose_plan` / `request_input`:分流工具(route-tool-plugin);
+ * - `exit_plan_mode`:官方 plan-mode 的评审出口;
+ * - 目标三件套:profile.ts 始终启用 tool-goal(行断言亦要求该 override 命中)。
+ * 只验证注册不够——present-as 按 agent restrict,故还要查主 agent 的 schema。
+ */
+const REQUIRED_TOOL_NAMES = [
+  'propose_plan',
+  'request_input',
+  'exit_plan_mode',
+  'get_goal',
+  'create_goal',
+  'update_goal',
+] as const
+
 export const name = 'huaanwork-gates'
-export const inject = ['tools', 'agents', 'webServer']
+export const inject = ['tools', 'agents', 'webServer', 'planMode', 'userQuestions']
 
 /**
  * 必须是 async function:cordis 的 isConstructor 把一切带 .prototype 的普通函数
@@ -73,6 +102,15 @@ export async function assertPostBootGate(
   ctx: GatesContext,
   existingHandles: ReadonlySet<unknown> = new Set(),
 ): Promise<void> {
+  // 锁层要求 plan-mode 与 user-questions 两行必须生效。缺任一服务时 cordis 会把
+  // 依赖它的 route-tools / question-answerer 静默挂起(只留启动告警),所以门禁
+  // 必须自己判负,不能假定这两个服务一定在位。
+  if (typeof ctx.planMode?.set !== 'function') {
+    throw new Error('post-boot gate failed: planMode service is missing (the plan-mode row did not activate)')
+  }
+  if (typeof ctx.userQuestions?.ask !== 'function') {
+    throw new Error('post-boot gate failed: userQuestions service is missing (the user-questions row did not activate)')
+  }
   const probe = {
     callId: 'huaanwork-start-gate',
     name: 'git_push',
@@ -93,8 +131,15 @@ export async function assertPostBootGate(
   if (!result.isError) {
     throw new Error('post-boot gate failed: git_push must be denied by the guard')
   }
-  if (ctx.tools.schemas().some((schema) => schema.name === 'run_code')) {
+  const catalog = new Set(ctx.tools.schemas().flatMap((schema) => (
+    typeof schema.name === 'string' ? [schema.name] : []
+  )))
+  if (catalog.has('run_code')) {
     throw new Error('post-boot gate failed: run_code is visible')
+  }
+  const unregistered = REQUIRED_TOOL_NAMES.filter((name) => !catalog.has(name))
+  if (unregistered.length > 0) {
+    throw new Error(`post-boot gate failed: required tool(s) not registered: ${unregistered.join(', ')}`)
   }
 
   // dsh 的 agent 注册表在部分环境下异步物化(旧 sidecar 实测:vendored node+pnpm
@@ -120,11 +165,16 @@ export async function assertPostBootGate(
   if (typeof mainAgentTools?.schemas !== 'function') {
     throw new Error('post-boot gate failed: main-agent schema dump is unavailable')
   }
-  const disabledName = mainAgentTools
-    .schemas()
-    .find((schema) => schema.name === 'web_search' || schema.name === 'run_code')?.name
+  const visible = new Set(mainAgentTools.schemas().flatMap((schema) => (
+    typeof schema.name === 'string' ? [schema.name] : []
+  )))
+  const disabledName = [...visible].find((name) => name === 'web_search' || name === 'run_code')
   if (disabledName) {
     throw new Error(`post-boot gate failed: main-agent schema contains disabled tool ${disabledName}`)
+  }
+  const hidden = REQUIRED_TOOL_NAMES.filter((name) => !visible.has(name))
+  if (hidden.length > 0) {
+    throw new Error(`post-boot gate failed: required tool(s) not visible to the main agent: ${hidden.join(', ')}`)
   }
   await assertNoUnexpectedListeners(ctx, existingHandles)
 }

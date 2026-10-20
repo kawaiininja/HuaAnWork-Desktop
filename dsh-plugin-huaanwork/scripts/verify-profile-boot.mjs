@@ -289,8 +289,8 @@ try {
   // `acquireScope`, a disposable revision lease: the composition is mounted at
   // registration and the lease still throws `agent-preset/invalid` when that
   // mount is unusable, which is what we assert. Beta mounts `cordis`. This
-  // profile's guardrail lock disables jobs, web, and user-questions, so the
-  // cordis preset cannot mount; the selected default is `minimal`.
+  // profile's guardrail lock disables jobs and web, so the cordis preset
+  // cannot mount; the selected default is `minimal`.
   await (await agentPresets.acquireScope('minimal'))[Symbol.asyncDispose]()
   if ((await ctx.get('pluginManager').listPlugins()).length === 0) {
     throw new Error('Official plugin manager cannot inspect the Desktop composition')

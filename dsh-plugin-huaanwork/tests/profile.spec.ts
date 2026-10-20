@@ -1339,6 +1339,18 @@ virtualStoreDirMaxLength: 60
     })
   })
 
+  it('overrides plan-mode guidance with the clarification tool HuaAnWork actually exposes', () => {
+    const prepared = prepareDesktopProfile('1', temporaryHome())
+    const rows = new Map(composeEntries([prepared.patches]).map(row => [row.id!, row]))
+    const section = (rows.get('plan-mode')?.config as { section?: string } | undefined)?.section
+
+    expect(typeof section).toBe('string')
+    expect(section).toContain('request_input')
+    expect(section).toContain('exit_plan_mode')
+    // Preset-only in upstream; present-as deliberately keeps it out of this profile.
+    expect(section).not.toContain('ask_user_question')
+  })
+
   it('pins the pending workspace root into agent-loop and sandbox rows', () => {
     const home = temporaryHome()
     const profileDir = ensureDesktopProfile(home)
