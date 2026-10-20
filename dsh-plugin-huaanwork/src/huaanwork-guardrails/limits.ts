@@ -1,3 +1,4 @@
+import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { classifyShell } from "@huaanwork/policy/shell";
 
 import { skillKindOf } from "./skills.ts";
@@ -37,7 +38,7 @@ type SessionState = {
 };
 
 type Context = {
-  huaanworkEmit?: (event: { event: "session/end"; ok: false; error: string }) => void;
+  huaanworkEmit?: (event: { event: "session/end"; ok: false; error: string; sessionId?: string }) => void;
   on(
     event: "tools/pre-execute" | "tools/result",
     listener: (...args: never[]) => unknown,
@@ -64,17 +65,19 @@ export function apply(ctx: Context): void {
     return created;
   };
 
-  const emitStop = (reason: string) => {
+  const emitStop = (agent: Agent | undefined, reason: string) => {
+    const sessionId = sessionIdOfAgentRef(agent);
     ctx.huaanworkEmit?.({
       event: "session/end",
       ok: false,
       error: reason,
+      ...(sessionId ? { sessionId } : {}),
     });
   };
 
   const stop = (agent: Agent | undefined, state: SessionState, reason: string) => {
     state.stopped = true;
-    emitStop(reason);
+    emitStop(agent, reason);
     return deny(agent, reason);
   };
 
@@ -116,7 +119,7 @@ export function apply(ctx: Context): void {
       }
       if (state.failCount >= MAX_CONSECUTIVE_SAME_FAILURES) {
         state.stopped = true;
-        emitStop("same tool and key args failed 3 times");
+        emitStop(execution.agent, "same tool and key args failed 3 times");
         execution.agent?.cancel?.({ kind: "parent" });
       }
       return;

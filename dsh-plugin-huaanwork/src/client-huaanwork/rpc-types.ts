@@ -235,7 +235,7 @@ export type RpcEvent =
       /** todo_write 的完整替换列表。 */
       todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
     }
-  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string; isError?: true }
+  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; text?: string; sessionId?: string; isError?: true }
   | {
       event: "approval/asked";
       approvalRequestId: string;

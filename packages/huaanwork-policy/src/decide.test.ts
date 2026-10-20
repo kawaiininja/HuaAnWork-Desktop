@@ -308,7 +308,7 @@ test("route tools are allowed when not attached in ask mode", () => {
   assert.equal(guard(madeUp, "ask"), "deny");
 });
 
-test("exit_plan_mode is allowed when not attached; goal tools stay denied", () => {
+test("exit_plan_mode and goal tools are allowed when not attached", () => {
   const exit = { name: "exit_plan_mode", args: { plan: "# Plan" }, workspaceRoot: ws };
   for (const mode of ["ask", "smart", "full"] as const) {
     assert.equal(preExecute(exit, mode), "allow", mode);
@@ -316,8 +316,10 @@ test("exit_plan_mode is allowed when not attached; goal tools stay denied", () =
   }
   for (const name of ["get_goal", "create_goal", "update_goal"]) {
     const call = { name, args: {}, workspaceRoot: ws };
-    assert.equal(preExecute(call, "ask"), "deny", name);
-    assert.equal(guard(call, "ask"), "deny", name);
+    for (const mode of ["ask", "smart", "full"] as const) {
+      assert.equal(preExecute(call, mode), "allow", `${name} ${mode}`);
+      assert.equal(guard(call, mode), "allow", `${name} ${mode}`);
+    }
   }
 });
 

@@ -16,7 +16,7 @@ type RpcEvent =
       command?: string;
       todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
     }
-  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string; isError?: true }
+  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; text?: string; sessionId?: string; isError?: true }
   | { event: "diff"; text: string; sessionId?: string }
   | { event: "compaction/done"; sessionId?: string }
   | { event: "goal/round"; round: number; sessionId?: string }
@@ -90,7 +90,7 @@ export function apply(ctx: Context): void {
         name: execution.name,
         ...(execution.callId === undefined ? {} : { callId: execution.callId }),
         ...(sessionId === undefined ? {} : { sessionId }),
-        ...(capped.truncated ? { truncated: true } : {}),
+        ...(capped.truncated ? { truncated: true, text: capped.text } : {}),
         ...(toolFailed(execution.name, result) ? { isError: true as const } : {}),
       });
       if (execution.name === "git_diff") {
@@ -256,7 +256,7 @@ function startDetail(execution: ToolExecution): Partial<Extract<RpcEvent, { even
   return command === undefined ? {} : { command };
 }
 
-/** 工具报错,或 shell 结果文本(未截断)里已带失败标记。capToolOutput 保留头部,标记须在截断前解析。 */
+/** 工具报错,或 shell 结果文本里已带失败标记。失败标记在截断前从原文读取。 */
 function toolFailed(name: string, result: ToolResult): boolean {
   if (result.isError === true) return true;
   if (!isShellTool(name)) return false;

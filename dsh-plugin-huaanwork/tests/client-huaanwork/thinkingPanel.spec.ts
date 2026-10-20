@@ -3,6 +3,8 @@ import { test } from "vitest";
 import {
   extractThinkBlocks,
   hasAssistantTextAfter,
+  interruptTurnItems,
+  withThinkingToggle,
   nextThinkingSteps,
   resolveThinking,
   shouldRenderThinking,
@@ -52,6 +54,50 @@ test("panel collapses when answer text arrives unless the user toggled it", () =
     thinkingChrome({ thought: "先看文件", hasAssistantText: false, userToggled: null, interrupted: true }).title,
     "思考 · 已中断",
   );
+  assert.deepEqual(
+    thinkingChrome({ thought: "先看文件", hasAssistantText: true, userToggled: null, interrupted: false, historical: true }),
+    { title: "思考", expanded: false },
+  );
+  assert.deepEqual(
+    thinkingChrome({ thought: "先看文件", hasAssistantText: false, userToggled: null, interrupted: false, historical: true }),
+    { title: "思考", expanded: false },
+  );
+  assert.equal(
+    thinkingChrome({ thought: "先看文件", hasAssistantText: false, userToggled: "expand", interrupted: false, historical: true }).expanded,
+    true,
+  );
+});
+
+test("a user stop marks the current turn interrupted", () => {
+  const items = [
+    { kind: "user" as const },
+    { kind: "thinking" as const, interrupted: false },
+    { kind: "assistant" as const, interrupted: false },
+  ];
+  const next = interruptTurnItems(items);
+  assert.equal(next[1]?.interrupted, true);
+  assert.equal(
+    thinkingChrome({
+      thought: "先看文件",
+      hasAssistantText: true,
+      userToggled: null,
+      interrupted: next[1]?.interrupted === true,
+    }).title,
+    "思考 · 已中断",
+  );
+});
+
+test("a thinking toggle stays on the item", () => {
+  const items = [
+    { id: 1, kind: "thinking" as const },
+    { id: 2, kind: "assistant" as const },
+    { id: 3, kind: "user" as const },
+  ];
+  const expanded = withThinkingToggle(items, 1, "expand");
+  assert.equal(expanded[0]?.userToggled, "expand");
+  assert.equal(withThinkingToggle(expanded, 2, "collapse")[1]?.userToggled, "collapse");
+  assert.equal(withThinkingToggle(expanded, 1, "expand"), expanded);
+  assert.equal(withThinkingToggle(items, 9, "collapse"), items);
 });
 
 test("blank thought does not render a panel", () => {

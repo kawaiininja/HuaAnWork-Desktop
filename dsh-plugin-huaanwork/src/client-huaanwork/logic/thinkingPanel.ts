@@ -36,19 +36,59 @@ export function thinkingChrome(input: {
   hasAssistantText: boolean;
   userToggled: "expand" | "collapse" | null;
   interrupted: boolean;
+  historical?: boolean;
 }): { title: string; expanded: boolean } {
   const title = input.interrupted
     ? "思考 · 已中断"
-    : input.hasAssistantText
-      ? "思考 · 已生成"
-      : "思考";
+    : input.historical
+      ? "思考"
+      : input.hasAssistantText
+        ? "思考 · 已生成"
+        : "思考";
   if (input.userToggled === "expand") return { title, expanded: true };
   if (input.userToggled === "collapse") return { title, expanded: false };
+  if (input.historical) return { title, expanded: false };
   return { title, expanded: !input.hasAssistantText };
+}
+
+/** 用户取消或回合失败：只改当前用户消息之后的思考和正文，标题因此变成「思考 · 已中断」。 */
+export function interruptTurnItems<T extends { kind: string; interrupted?: boolean }>(items: readonly T[]): T[] {
+  let turnStart = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === "user") {
+      turnStart = i + 1;
+      break;
+    }
+  }
+  let changed = false;
+  const next = items.map((item, index) => {
+    if (index < turnStart) return item;
+    if ((item.kind === "thinking" || item.kind === "assistant") && item.interrupted !== true) {
+      changed = true;
+      return { ...item, interrupted: true };
+    }
+    return item;
+  });
+  return changed ? next : [...items];
 }
 
 export function shouldRenderThinking(thought: string): boolean {
   return thought.trim().length > 0;
+}
+
+/** 把展开或收起记在思考条目上，切换标签后重挂载仍读得到。 */
+export function withThinkingToggle<T extends { id: number; kind: string; userToggled?: "expand" | "collapse" }>(
+  items: readonly T[],
+  itemId: number,
+  userToggled: "expand" | "collapse",
+): T[] {
+  const index = items.findIndex((item) => (item.kind === "thinking" || item.kind === "assistant") && item.id === itemId);
+  if (index < 0) return items;
+  const current = items[index];
+  if (!current || current.userToggled === userToggled) return items;
+  const next = items.slice();
+  next[index] = { ...current, userToggled };
+  return next;
 }
 
 /** 一回合的思考：已定稿的各步与当前步骤的草稿。 */

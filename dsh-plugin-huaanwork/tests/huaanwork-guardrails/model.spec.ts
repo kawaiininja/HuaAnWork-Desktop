@@ -586,6 +586,32 @@ test("reasoning-only stop is asked to continue and then accepts the real answer"
   }
 });
 
+test("a second reasoning-only stop finishes without inventing a tool or copying the thought", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return sseResponse([
+      { choices: [{ delta: { reasoning_content: "Try https://wttr.in/Shanghai?format=j1 for Shanghai tomorrow." } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions({
+      tools: [{ name: "web_fetch", description: "fetch", parameters: { type: "object", properties: {} } }],
+    })));
+    assert.equal(calls, 2);
+    assert.equal(chunks.some((chunk) => chunk.type === "block-end" && chunk.block.type === "tool-call"), false);
+    assert.equal(chunks.some((chunk) => chunk.type === "text-delta" && chunk.text.includes("wttr.in")), false);
+    const finish = chunks.at(-1);
+    assert.equal(finish?.type, "finish");
+    if (finish?.type === "finish") assert.equal(finish.reason.kind, "error");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("reasoning-only stop with finish_reason=length reports the token budget, not a bare empty response", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () =>

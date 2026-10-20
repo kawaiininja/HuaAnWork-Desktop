@@ -88,6 +88,9 @@ function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
       return validStringReplacement(input) ? ALLOW : deny(REASON_STR_REPLACE);
     case "skill":
     case "todo_write":
+    case "get_goal":
+    case "create_goal":
+    case "update_goal":
     case "propose_plan":
     case "request_input":
     case "exit_plan_mode":

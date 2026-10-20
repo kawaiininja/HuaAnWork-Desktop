@@ -4,10 +4,13 @@ import {
   appendOutcomeNotes,
   extractRequiredCommands,
   extractRequiredFiles,
+  eventTargetTab,
+  lookupSessionCwd,
   fileExistsInTree,
   latestUserItemId,
   outcomeGaps,
   outcomeTargetTab,
+  outcomeWorkspace,
   todoLabel,
   toolResultsFromRecords,
   treePaths,
@@ -100,6 +103,7 @@ test("turn checks read the last turn only and outcome notes never say done with 
   assert.deepEqual(turnOutcomeNotes(checks, tree), ["已完成：自动核对 3 项均通过"]);
   assert.deepEqual(turnOutcomeNotes(checks, [{ path: "/w/报告.md" }]), ["缺少文件：out/摘要.md"]);
   assert.deepEqual(turnOutcomeNotes(checks, []), ["没能读取工作区，文件未核对：报告.md、out/摘要.md"]);
+  assert.deepEqual(turnOutcomeNotes(checks, [], false), []);
   assert.deepEqual(turnOutcomeNotes(turnChecks([{ kind: "user", text: "帮我润色这段话" }]), []), []);
 });
 
@@ -236,6 +240,36 @@ test("a turn that ran a tool and names no file or command still needs a human lo
     ),
     ["没有自动核对项，需要你自己看"],
   );
+});
+
+test("a session directory still checks the file when no project is open", () => {
+  assert.equal(outcomeWorkspace(null, "/w"), "/w");
+  assert.equal(outcomeWorkspace("/project", "/w"), "/project");
+  assert.deepEqual(
+    turnOutcomeNotes(
+      turnChecks([
+        { kind: "user", text: "读 notes/a.md" },
+        { kind: "tool", card: { name: "read", status: "end" } },
+      ]),
+      [{ path: "/w/notes", children: [{ path: "/w/notes/a.md" }] }],
+    ),
+    ["已完成：自动核对 1 项均通过"],
+  );
+});
+
+test("a minted session directory is used before the session list catches up", () => {
+  assert.equal(lookupSessionCwd("s1", [], new Map([["s1", "/w"]])), "/w");
+  assert.equal(lookupSessionCwd("s1", [{ id: "s1", cwd: "/listed" }], new Map([["s1", "/w"]])), "/listed");
+  assert.equal(lookupSessionCwd("s1", [{ id: "s1" }], new Map()), undefined);
+});
+
+test("a deleted session does not paint onto a chat that already has another session", () => {
+  const tabs = [{ id: "new", sessionId: undefined }, { id: "old", sessionId: "huaanwork-weather" }];
+  assert.equal(eventTargetTab("huaanwork-weather", tabs, "new"), "old");
+  assert.equal(eventTargetTab("huaanwork-weather", [{ id: "new" }], "new", "huaanwork-weather"), "new");
+  assert.equal(eventTargetTab("huaanwork-weather", [{ id: "new" }], "new"), undefined);
+  assert.equal(eventTargetTab("huaanwork-weather", [{ id: "new", sessionId: "other" }], "new", "huaanwork-weather"), undefined);
+  assert.equal(eventTargetTab(undefined, [{ id: "new" }], "new"), "new");
 });
 
 test("a plan-review card with nothing to check still needs a human look", () => {

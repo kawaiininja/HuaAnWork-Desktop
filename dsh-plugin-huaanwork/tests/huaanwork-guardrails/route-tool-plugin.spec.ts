@@ -5,6 +5,7 @@ import {
   answerRouteInput,
   apply,
   cancelRouteInput,
+  clearInvalidRoute,
   noteInvalidRoute,
   releaseRouteInput,
 } from "../../src/huaanwork-guardrails/route-tool-plugin.ts";
@@ -106,4 +107,11 @@ test("the second invalid route call ends the turn", () => {
   assert.equal(noteInvalidRoute("s1").endTurn, false);
   assert.equal(noteInvalidRoute("s1").endTurn, true);
   assert.equal(noteInvalidRoute("s1").text, "没能理解这个请求");
+});
+
+test("the next accepted user turn gets another repair", () => {
+  assert.equal(noteInvalidRoute("s2").endTurn, false);
+  assert.equal(noteInvalidRoute("s2").endTurn, true);
+  clearInvalidRoute("s2");
+  assert.equal(noteInvalidRoute("s2").endTurn, false);
 });

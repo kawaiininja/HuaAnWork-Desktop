@@ -37,3 +37,12 @@ test("supports an explicit output limit", () => {
     truncated: true,
   });
 });
+
+test("keeps the head and the tail and marks the cut", () => {
+  const result = capToolOutput(`${"a".repeat(50)}TAIL`, "", false, 40);
+  assert.equal(result.truncated, true);
+  assert.equal(result.text.startsWith("a"), true);
+  assert.equal(result.text.endsWith("TAIL"), true);
+  assert.match(result.text, /已截断/);
+  assert.equal(Buffer.byteLength(result.text, "utf8") <= 40, true);
+});

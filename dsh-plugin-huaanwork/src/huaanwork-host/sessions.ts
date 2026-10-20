@@ -3,7 +3,7 @@ import { join, resolve, sep } from 'node:path'
 
 import { workNetworkGateError } from '@huaanwork/policy/network'
 import { settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
-import { answerRouteInput, cancelRouteInput, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
+import { answerRouteInput, cancelRouteInput, clearInvalidRoute, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { invokeSkillText } from './skill-invoke.ts'
@@ -175,6 +175,7 @@ export async function sendToAgent(
 
     const agent = await resolveAgent()
     acceptedAgent = agent
+    clearInvalidRoute(sessionId)
     if (ctx.huaanworkRouteAgent) ctx.huaanworkRouteAgent.current = agent
     agent.followup({
       id: `huaanwork-${Date.now()}`,
@@ -473,11 +474,12 @@ export async function sessionRemove(routeCtx: RouteContext, params: unknown): Pr
   return removeSession(join(routeCtx.dshHome, 'sessions'), params)
 }
 
-export function sessionNew(routeCtx: RouteContext, params: unknown): { sessionId: string } {
+export function sessionNew(routeCtx: RouteContext, params: unknown): { sessionId: string; cwd: string } {
+  const cwd = routeCtx.workspaceRoot.current
   const sessionId = objectBool(params, 'fresh')
-    ? freshSessionIdFor(routeCtx.workspaceRoot.current)
-    : sessionIdFor(routeCtx.workspaceRoot.current)
-  return { sessionId }
+    ? freshSessionIdFor(cwd)
+    : sessionIdFor(cwd)
+  return { sessionId, cwd }
 }
 
 export async function sessionResume(

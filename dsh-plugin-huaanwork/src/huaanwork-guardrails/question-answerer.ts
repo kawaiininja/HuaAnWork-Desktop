@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { UserQuestionError } from "@deepseek-ai/dsh-user-questions";
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 
 import { AUTO_CONTINUE_LABEL, planNeedsConfirm } from "../client-huaanwork/logic/planConfirm.ts";
@@ -129,9 +130,9 @@ function recordConfirmed(request: QuestionRequest): void {
   if (sessionId && reviewIdentity(request)) confirmedTargets.set(sessionId, planTarget(reviewedPlan(request)));
 }
 
-/** 「退出计划模式」作废评审时抛给提问服务的错误；官方 `exit_plan_mode` 据此结束回合并返回未批准。 */
-function exitCancelled(): Error {
-  return Object.assign(new Error("用户退出了计划模式"), { name: "UserQuestionError", code: "ASK_CANCELLED" });
+/** 「退出计划模式」作废评审时抛给提问服务的错误；官方 `exit_plan_mode` 用 instanceof 认出取消。 */
+function exitCancelled(): UserQuestionError {
+  return new UserQuestionError("用户退出了计划模式", "ASK_CANCELLED");
 }
 
 function requestKind(request: QuestionRequest): "plan-review" | "ask_user_question" | "other" {

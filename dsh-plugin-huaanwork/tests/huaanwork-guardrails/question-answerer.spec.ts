@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { UserQuestionError } from "@deepseek-ai/dsh-user-questions";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -228,8 +229,8 @@ test("exit settles an unanswered plan review as cancelled so exit_plan_mode can 
   const pending = ask("exit-1", "c1", "# 汇总");
   assert.equal(await pendingAfter(pending), "pending");
   assert.equal(settlePlanReview(reviews, "exit-1"), true);
-  await assert.rejects(pending, (error: { name?: string; code?: string }) =>
-    error.name === "UserQuestionError" && error.code === "ASK_CANCELLED");
+  await assert.rejects(pending, (error: unknown) =>
+    error instanceof UserQuestionError && error.code === "ASK_CANCELLED");
   assert.equal(approvals.has(events[0]!.approvalRequestId), false);
   assert.equal(reviews.has("exit-1"), false);
   assert.equal(settlePlanReview(reviews, "exit-1"), false);

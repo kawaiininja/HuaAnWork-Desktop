@@ -91,7 +91,10 @@ test("bridge caps tool output on tool/end and does not grow already truncated pa
       content: [{ type: "text", text: huge + "err" }],
     }),
   );
-  assert.equal((capped.content[0]?.text ?? "").length < huge.length + 3, true);
+  const cappedText = capped.content[0]?.text ?? "";
+  assert.equal(cappedText.length < huge.length + 3, true);
+  assert.match(cappedText, /已截断/);
+  assert.equal(cappedText.endsWith("err"), true);
   assert.deepEqual(
     emitted.find((event) => (event as { event?: string }).event === "tool/start"),
     { event: "tool/start", name: "bash", callId: "big" },

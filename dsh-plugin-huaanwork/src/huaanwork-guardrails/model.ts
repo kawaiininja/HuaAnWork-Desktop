@@ -118,13 +118,13 @@ function continueAfterReasoning(options: GenerateOptions, reasoning: string): Ge
       : [{ type: "text", text: "" }],
     source: { kind: "model", provider: options.provider, model: options.model },
   };
-  const nudge: GenerateOptions["messages"][number] = {
+  const followUp: GenerateOptions["messages"][number] = {
     id: MessageId("hw-continue"),
     role: "user",
     content: [{ type: "text", text: CONTINUE_AFTER_REASONING }],
     source: { kind: "user" },
   };
-  return { ...options, messages: [...options.messages, assistant, nudge] };
+  return { ...options, messages: [...options.messages, assistant, followUp] };
 }
 
 function* finishModelStream(read: ModelStreamRead): Generator<StreamChunk> {
@@ -145,6 +145,7 @@ function* finishModelStream(read: ModelStreamRead): Generator<StreamChunk> {
 async function* readModelStream(
   opened: { body: ReadableStream<Uint8Array>; signal: AbortSignal; timeout: AbortSignal },
   callerSignal: AbortSignal | undefined,
+  startIndex = 0,
 ): AsyncGenerator<StreamChunk, ModelStreamRead> {
   const payloads: string[] = [];
   let text = "";
@@ -153,7 +154,7 @@ async function* readModelStream(
   let sawNativeToolCall = false;
   let reasoning = "";
   let reasoningStarted = false;
-  let nextIndex = 0;
+  let nextIndex = startIndex;
   let reasoningIndex = 0;
   let textIndex = 0;
 
@@ -237,27 +238,27 @@ export class HuaAnWorkAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const settings = loadSettings(this.profileDir);
-    const first = yield* readModelStream(await openCompletions(options, settings), options.signal);
-    if (streamHasOutput(first) || sseFinishReason(first.payloads) === "length") {
-      yield* finishModelStream(first);
-      return;
-    }
     // deepseek-flash 一类思考模型经常只回 reasoning_content 就 stop。
-    // 原请求重试仍是同一份上下文，所以这里带上思考再要一次正文或工具调用。
-    const second = yield* readModelStream(
-      await openCompletions(continueAfterReasoning(options, first.reasoning), settings),
-      options.signal,
-    );
-    if (streamHasOutput(second)) {
-      yield* finishModelStream(second);
-      return;
+    // 再要一次正文或工具调用。仍然只有思考时结束这一轮：思考已从 reasoning 通道出去，
+    // 不抄进正文，也不根据思考文本另造工具调用。
+    let request = options;
+    let startIndex = 0;
+    let latest: ModelStreamRead | undefined;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const read = yield* readModelStream(
+        await openCompletions(request, settings),
+        options.signal,
+        startIndex,
+      );
+      latest = read;
+      startIndex = read.nextIndex;
+      if (streamHasOutput(read) || sseFinishReason(read.payloads) === "length") {
+        yield* finishModelStream(read);
+        return;
+      }
+      if (attempt === 0) request = continueAfterReasoning(options, read.reasoning);
     }
-    const reasoning = second.reasoning || first.reasoning;
-    if (reasoning.length > 0 && sseFinishReason(second.payloads) !== "length") {
-      yield* emitText(reasoning, false, 0);
-      return;
-    }
-    yield* finishModelStream(second.reasoning.length > 0 ? second : first);
+    if (latest) yield* finishModelStream(latest);
   }
 }
 

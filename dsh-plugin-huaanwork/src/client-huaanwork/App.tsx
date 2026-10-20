@@ -100,19 +100,26 @@ import {
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
 import {
   hasAssistantTextAfter,
+  interruptTurnItems,
   nextThinkingSteps,
   resolveThinking,
   shouldRenderThinking,
   thinkingStepsText,
+  withThinkingToggle,
   type ThinkingSteps,
 } from "./logic/thinkingPanel.ts";
 import { closeOpenInputs, inputCardStatus, settleInputCard, type InputCard } from "./logic/inputCard.ts";
 import { toolRowIcon } from "./logic/commandOutcome.ts";
-import { turnStatus } from "./logic/turnStatus.ts";
+import { resolveActiveTab } from "./logic/chatTabs.ts";
+import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
+import { resolveStopSession, turnStatus } from "./logic/turnStatus.ts";
 import {
   appendOutcomeNotes,
+  eventTargetTab,
   latestUserItemId,
+  lookupSessionCwd,
   outcomeTargetTab,
+  outcomeWorkspace,
   todoLabel,
   turnChecks,
   turnGaps,
@@ -144,6 +151,8 @@ type ToolCard = {
   callId?: string;
   status: "start" | "end";
   truncated?: boolean;
+  /** 超长工具输出裁成头尾之后的正文，对话里直接显示。 */
+  output?: string;
   /** bash / pwsh 的 command 参数与结果是否出错：回合结束核对「要求的命令」用。 */
   command?: string;
   isError?: boolean;
@@ -161,8 +170,8 @@ type AskCard = {
 
 type ChatItem =
   | { id: number; kind: "user"; text: string }
-  | { id: number; kind: "assistant"; text: string; interrupted?: boolean }
-  | { id: number; kind: "thinking"; thought: string; interrupted: boolean; steps?: ThinkingSteps }
+  | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse" }
+  | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse" }
   | { id: number; kind: "tool"; card: ToolCard }
   | { id: number; kind: "todo"; todos: TodoEntry[] }
   | { id: number; kind: "ask"; card: AskCard }
@@ -365,7 +374,22 @@ export default function App() {
   }>({ tabId: "", latest: "quiet", at: 0 });
   const [now, setNow] = useState(() => Date.now());
   const turnTabRef = useRef<string | null>(null);
+  const turnSessionRef = useRef<string | null>(null);
+  const turnEpochRef = useRef(0);
+  const stopSeqRef = useRef(0);
+  const userStopSessionRef = useRef<string | null>(null);
+  const latchOwnerRef = useRef<number | null>(null);
+  /** 取消请求尚未返回。这期间的 session/end 先搁下，返回后才决定算不算用户停止。 */
+  const stopPendingRef = useRef<StopTicket | null>(null);
+  /** 停止对应的那条空闲结束。用户已经发出更新的一轮时，这条结束不能写进新消息。 */
+  const staleIdleRef = useRef<StaleIdle[]>([]);
+  const heldEndsRef = useRef<RpcEvent[]>([]);
+  const applySidecarEventRef = useRef<(event: RpcEvent) => void>(() => {});
   const [activeTab, setActiveTab] = useState<string>("work-1");
+  useEffect(() => {
+    const next = resolveActiveTab(activeTab, chatTabs);
+    if (next !== activeTab) setActiveTab(next);
+  }, [activeTab, chatTabs]);
   const [historyView, setHistoryView] = useState<SessionLogView | null>(null);
   const [sessionMenu, setSessionMenu] = useState<SessionMenu | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -420,6 +444,14 @@ export default function App() {
   const keepAwakeDriver = keepAwakeDriverRef.current;
   const activeProjectIdRef = useRef<string | null>(null);
   const workspaceRef = useRef<string | null>(null);
+  const sessionsRef = useRef<SessionRow[]>([]);
+  /** session.new 返回的目录。列表刷新晚于回合结束，核对先用这份。 */
+  const sessionCwdRef = useRef(new Map<string, string>());
+  function rememberMinted(minted: { sessionId?: string; cwd?: string }) {
+    if (typeof minted.sessionId === "string" && minted.sessionId && typeof minted.cwd === "string" && minted.cwd) {
+      sessionCwdRef.current.set(minted.sessionId, minted.cwd);
+    }
+  }
   const nextId = useRef(1);
   const stopping = useRef(false);
   const sendingRef = useRef(false);
@@ -564,8 +596,9 @@ export default function App() {
           { id, label: task.name, items: [], sessionFailed: false, projectId: task.projectId, pendingPick: false, taskId: task.id },
         ]);
         setActiveTab(id);
-        void rpcCall<{ sessionId?: string }>("session.new", { fresh: true })
+        void rpcCall<{ sessionId?: string; cwd?: string }>("session.new", { fresh: true })
           .then((minted) => {
+            rememberMinted(minted);
             if (typeof minted.sessionId === "string" && minted.sessionId) {
               setChatTabs((prev) =>
                 prev.map((tab) => (tab.id === id && !tab.sessionId ? { ...tab, sessionId: minted.sessionId } : tab)),
@@ -647,26 +680,36 @@ export default function App() {
   /** 子任务删除：级联删会话历史（sidecar 侧）；关闭绑定标签并清选中；维护「chatTabs 非空」不变量。 */
   async function removeSubtask(task: TaskInfo) {
     await removeTask(task.id);
-    if (selectedTaskId === task.id) setSelectedTaskId(null);
-    const remaining = chatTabs.filter((tab) => tab.taskId !== task.id);
-    const needSeed = remaining.length === 0;
-    const removingActive = remaining.length !== chatTabs.length && !remaining.some((tab) => tab.id === activeTab);
-    // 不变量：chatTabs 恒非空——activeChat = chatTabs.find(...) ?? chatTabs[0] 依赖它，
-    // 空数组会让 activeChat 变 undefined 并在渲染时无守护地解引用。过滤后为空必须补种子标签。
-    // 种子标签用中立形态（projectId:null）：绝不用 task.projectId，避免跨工作区 cwd 守卫拒绝首发。
+    setSelectedTaskId((current) => (current === task.id ? null : current));
     const seedId = `work-${nextChatSeq.current}`;
     nextChatSeq.current += 1;
+    const trackedSession = turnSessionRef.current;
+    if (task.sessionId && trackedSession === task.sessionId && canStartStop(stopPendingRef.current)) {
+      const sessionId = task.sessionId;
+      const ticket: StopTicket = { id: stopSeqRef.current + 1, sessionId, epoch: turnEpochRef.current };
+      stopSeqRef.current = ticket.id;
+      turnTabRef.current = null;
+      turnSessionRef.current = null;
+      setTurnActive(false);
+      stopPendingRef.current = ticket;
+      void rpcCall("session.cancel", { sessionId }).then(() => {
+        settleStop(ticket, true);
+      }).catch(() => {
+        settleStop(ticket, false);
+      });
+    } else if (task.sessionId && trackedSession === task.sessionId) {
+      turnTabRef.current = null;
+      turnSessionRef.current = null;
+      setTurnActive(false);
+    }
+    const matchesRemoved = (tab: { taskId?: string; sessionId?: string }) =>
+      Boolean((tab.taskId && tab.taskId === task.id) || (task.sessionId && tab.sessionId === task.sessionId));
+    const seed = { id: seedId, label: "对话", items: [], sessionFailed: false, projectId: null, pendingPick: false };
     setChatTabs((prev) => {
-      const filtered = prev.filter((tab) => tab.taskId !== task.id);
-      return filtered.length > 0
-        ? filtered
-        : [{ id: seedId, label: "对话", items: [], sessionFailed: false, projectId: null, pendingPick: false }];
+      const filtered = prev.filter((tab) => !matchesRemoved(tab));
+      return filtered.length > 0 ? filtered : [seed];
     });
-    if (needSeed) setActiveTab(seedId);
-    else if (removingActive) setActiveTab(remaining[0]?.id ?? "work-1");
     await refreshTasks();
-    // sidecar 已级联删除该子任务的会话日志：同步刷新会话快照，
-    // 否则残留行会被 unscopedSessions 判成游离会话出现在「任务」区，删除时报 session was not found。
     await refreshSessions();
   }
 
@@ -700,7 +743,8 @@ export default function App() {
   /** 启动后为默认对话标签绑定稳定会话（跨重启延续上下文）。 */
   async function bindDefaultTabSessions() {
     try {
-      const minted = await rpcCall<{ sessionId?: string }>("session.new", {});
+      const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", {});
+      rememberMinted(minted);
       if (typeof minted.sessionId === "string" && minted.sessionId) {
         setChatTabs((prev) =>
           prev.map((tab) => (tab.id === "work-1" && !tab.sessionId ? { ...tab, sessionId: minted.sessionId } : tab)),
@@ -780,14 +824,12 @@ export default function App() {
       if (typeof sessionId !== "string" || !sessionId) return undefined;
       return chatTabsRef.current.find((tab) => tab.sessionId === sessionId)?.id;
     };
-    /** sessionId 命中的绑定标签优先，缺省回退 liveChatRef。 */
-    const targetTabFor = (sessionId?: string): string => {
-      const bound = boundTabFor(sessionId);
-      if (bound) return bound;
-      return liveChatRef.current;
-    };
+    /** 带会话 id 的事件只进绑定标签。删掉的会话不再回落到当前对话。 */
+    const targetTabFor = (sessionId?: string): string | undefined =>
+      eventTargetTab(sessionId, chatTabsRef.current, liveChatRef.current, turnSessionRef.current);
     const setChannelItems = (updater: (prev: ChatItem[]) => ChatItem[], sessionId?: string) => {
       const target = targetTabFor(sessionId);
+      if (!target) return;
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: updater(tab.items) } : tab)));
     };
     /** 读出本回合要核对的内容；只认用户对话标签：子代理空闲也会发 session/end，其会话 id 不属于任何标签时返回 undefined。 */
@@ -805,8 +847,10 @@ export default function App() {
       if (!items || !items.some((item) => item.kind === "user")) return undefined;
       const turnUserId = latestUserItemId(items);
       const checks = turnChecks(items);
-      const root = workspaceRef.current;
+      const listedCwd = lookupSessionCwd(sessionId, sessionsRef.current, sessionCwdRef.current);
+      const root = outcomeWorkspace(workspaceRef.current, listedCwd);
       let tree: TreeNode[] = [];
+      const treeKnown = checks.requiredFiles.length === 0 || root.length > 0;
       if (checks.requiredFiles.length > 0 && root) {
         try {
           tree = await listTree(root, 6);
@@ -814,7 +858,7 @@ export default function App() {
           tree = [];
         }
       }
-      return { tabId, turnUserId, checks, tree };
+      return { tabId, turnUserId, checks, tree, treeKnown };
     };
     const appendTurnNotes = (turn: NonNullable<Awaited<ReturnType<typeof readTurn>>>, texts: string[]) => {
       const notes = texts.map((text) => ({ id: allocId(), kind: "note" as const, text }));
@@ -831,7 +875,7 @@ export default function App() {
     const appendTurnOutcome = async (sessionId?: string) => {
       const turn = await readTurn(sessionId);
       if (!turn || cancelled) return;
-      const notes = turnOutcomeNotes(turn.checks, turn.tree);
+      const notes = turnOutcomeNotes(turn.checks, turn.tree, turn.treeKnown);
       if (notes.length === 0) return;
       appendTurnNotes(turn, notes);
     };
@@ -839,16 +883,24 @@ export default function App() {
     const appendGoalStopped = async (round: number, sessionId?: string) => {
       const turn = await readTurn(sessionId);
       if (!turn || cancelled) return;
-      appendTurnNotes(turn, [goalRoundStopped(round, turnGaps(turn.checks, turn.tree))]);
+      appendTurnNotes(turn, [goalRoundStopped(round, turnGaps(turn.checks, turn.tree, turn.treeKnown))]);
     };
     const setChannelSessionFailed = (failed: boolean, sessionId?: string) => {
       const target = targetTabFor(sessionId);
+      if (!target) return;
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, sessionFailed: failed } : tab)));
     };
-    void (async () => {
-      unlisten.push(
-        await onSidecarEvent((event) => {
-          if (cancelled) return;
+    const applyEvent = (event: RpcEvent) => {
+      if (cancelled) return;
+      if (event.event === "session/end" && isStopPending(stopPendingRef.current, event.sessionId)) {
+        heldEndsRef.current.push(event);
+        return;
+      }
+      if (event.event === "session/end") {
+        const consumed = consumeStaleIdle(staleIdleRef.current, event, turnEpochRef.current);
+        staleIdleRef.current = consumed.stale;
+        if (consumed.drop) return;
+      }
           // 后台任务事件：更新任务运行角标并刷新数据；agent 运行另建运行对话标签承载过程与结果。
           if (event.event === "automation/run-start") {
             automationActiveRef.current = true;
@@ -933,9 +985,35 @@ export default function App() {
           // 用户自身会话（huaanwork-chat- / huaanwork-<digest>）与绑定运行标签的事件照常渲染，
           // 并发 Chat 回合不再被全局布尔误伤（「运行中看直播」的路由前提）。
           if (automationActiveRef.current && !isUserSessionId(eventSessionId) && !boundTab) return;
+          const endsTrackedTurn = event.event === "session/end"
+            && typeof eventSessionId === "string"
+            && eventSessionId.length > 0
+            && turnTabRef.current !== null
+            && targetTabFor(eventSessionId) === turnTabRef.current;
+          const userStopped = event.event === "session/end"
+            && typeof eventSessionId === "string"
+            && eventSessionId.length > 0
+            && eventSessionId === userStopSessionRef.current;
           handleEvent(event, allocId, setReady, setChannelItems, setDiff, setTurnActive, setChannelSessionFailed, async () => {
             await refreshSessions();
-          }, sawReady);
+          }, sawReady, endsTrackedTurn, userStopped);
+          if (event.event === "session/end" && endsTrackedTurn) {
+            turnTabRef.current = null;
+            if (event.cancelled || !event.ok || userStopped) turnSessionRef.current = null;
+          }
+          if (userStopped && !event.cancelled) {
+            userStopSessionRef.current = null;
+            if (turnSessionRef.current === eventSessionId) turnSessionRef.current = null;
+            stopping.current = false;
+          }
+          if (
+            event.event === "goal/round"
+            && event.sessionId
+            && event.sessionId === turnSessionRef.current
+          ) {
+            const goalTab = chatTabsRef.current.find((tab) => tab.sessionId === event.sessionId)?.id;
+            if (goalTab) turnTabRef.current = goalTab;
+          }
           const kind = activityKind(event);
           const turnTab = turnTabRef.current;
           if (kind && turnTab && targetTabFor(eventSessionId) === turnTab) {
@@ -943,7 +1021,7 @@ export default function App() {
             setTurnPulse({ tabId: turnTab, latest: kind, at });
             setNow(at);
           }
-          if (event.event === "session/end" && event.ok && event.cancelled !== true) {
+          if (event.event === "session/end" && event.ok && event.cancelled !== true && !userStopped) {
             void appendTurnOutcome(eventSessionId);
           }
           if (event.event === "goal/round-limit") {
@@ -956,8 +1034,10 @@ export default function App() {
             setDiff(event.text);
             setRightTab("diff");
           }
-        }),
-      );
+    };
+    applySidecarEventRef.current = applyEvent;
+    void (async () => {
+      unlisten.push(await onSidecarEvent(applyEvent));
       unlisten.push(
         await onSidecarExit((payload) => {
           if (cancelled) return;
@@ -968,7 +1048,7 @@ export default function App() {
           setChatTabs((prev) =>
             prev.map((tab) =>
               tab.items.length > 0
-                ? { ...tab, sessionFailed: true, items: [...tab.items, { id: allocId(), kind: "note" as const, text: "Sidecar 已退出。会话失败。" }] }
+                ? { ...tab, sessionFailed: true, items: [...tab.items, { id: allocId(), kind: "note" as const, text: "执行进程已结束。结果可能不完整。" }] }
                 : tab,
             ),
           );
@@ -1207,7 +1287,8 @@ export default function App() {
 
   useEffect(() => {
     workspaceRef.current = workspace;
-  }, [workspace]);
+    sessionsRef.current = sessions;
+  }, [workspace, sessions]);
 
   // 进入自动化页面时拉取数据（页面为跨项目全局视图，无需聚焦项目）
   useEffect(() => {
@@ -1321,9 +1402,10 @@ export default function App() {
    */
   async function rebindTabSession(chatId: string): Promise<void> {
     try {
-      const minted = await rpcCall<{ sessionId?: string }>("session.new", {
+      const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", {
         fresh: chatId !== "work-1",
       });
+      rememberMinted(minted);
       if (typeof minted.sessionId !== "string" || !minted.sessionId) return;
       setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, sessionId: minted.sessionId } : tab)));
     } catch {
@@ -1393,15 +1475,16 @@ export default function App() {
   function newTask() {
     setDraft("");
     setSelectedTaskId(null);
+    setHistoryView(null);
     setView("main");
     const id = `work-${nextChatSeq.current}`;
     nextChatSeq.current += 1;
-    const workSeq = chatTabs.length + 1;
-    setChatTabs((prev) => [
-      ...prev,
-      { id, label: `任务 ${workSeq}`, items: [], sessionFailed: false, projectId: null, pendingPick: true },
-    ]);
+    setChatTabs((prev) => {
+      const tab = { id, label: `任务 ${prev.length + 1}`, items: [], sessionFailed: false, projectId: null, pendingPick: true };
+      return [...prev, tab];
+    });
     setActiveTab(id);
+    liveChatRef.current = id;
   }
 
   function pickSlashSkill(skill: SkillInfo) {
@@ -1489,7 +1572,8 @@ export default function App() {
     // 子态二复用标签的预铸会话（规格 §2.4）；子态一强制 mint fresh。
     let sessionId = createdNow ? undefined : tab.sessionId;
     if (!sessionId) {
-      const minted = await rpcCall<{ sessionId?: string }>("session.new", { fresh: true });
+      const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", { fresh: true });
+      rememberMinted(minted);
       sessionId = typeof minted.sessionId === "string" && minted.sessionId ? minted.sessionId : undefined;
       if (!sessionId) throw new Error("session.new 未返回会话 id");
       // 铸造成功即覆盖写回（子态一可能残留旧根会话 id，必须覆盖而非仅在空缺时回填）。
@@ -1572,9 +1656,10 @@ export default function App() {
       // 懒绑定会话：默认标签绑定通道稳定会话（跨重启延续），其余中立标签铸造独立会话。
       if (!sessionId) {
         try {
-          const minted = await rpcCall<{ sessionId?: string }>("session.new", {
+          const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", {
             fresh: chatId !== "work-1",
           });
+          rememberMinted(minted);
           if (typeof minted.sessionId === "string" && minted.sessionId) {
             sessionId = minted.sessionId;
             setChatTabs((prev) => prev.map((tab) => (tab.id === chatId && !tab.sessionId ? { ...tab, sessionId } : tab)));
@@ -1595,7 +1680,11 @@ export default function App() {
       setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, items: [...tab.items, userMsg] } : tab)));
       setDraft("");
       const started = Date.now();
+      turnEpochRef.current += 1;
       turnTabRef.current = chatId;
+      turnSessionRef.current = sessionId ?? null;
+      userStopSessionRef.current = null;
+      latchOwnerRef.current = null;
       setTurnPulse({ tabId: chatId, latest: "quiet", at: started });
       setNow(started);
       setTurnActive(true);
@@ -1623,19 +1712,73 @@ export default function App() {
   }
 
   async function stopTurn() {
-    if (sidecarDead || !turnActive) return;
+    if (sidecarDead || !turnActive || !canStartStop(stopPendingRef.current)) return;
+    const tabId = turnTabRef.current;
+    const tabSession = tabId ? chatTabs.find((tab) => tab.id === tabId)?.sessionId : undefined;
+    const sessionId = resolveStopSession(turnSessionRef.current, tabSession);
+    if (!sessionId) return;
+    const ticket: StopTicket = { id: stopSeqRef.current + 1, sessionId, epoch: turnEpochRef.current };
+    stopSeqRef.current = ticket.id;
     stopping.current = true;
-    const sessionId = chatTabs.find((tab) => tab.id === activeTab)?.sessionId;
+    stopPendingRef.current = ticket;
+    const noteFor = (text: string) => {
+      if (!tabId) return;
+      const note: ChatItem = { id: allocId(), kind: "note", text };
+      setChatTabs((prev) => prev.map((tab) => (tab.id === tabId ? { ...tab, items: [...tab.items, note] } : tab)));
+    };
     try {
-      await rpcCall("session.cancel", { ...(sessionId ? { sessionId } : {}) });
-      setLiveItems((prev) => [...prev, { id: allocId(), kind: "note", text: "已停止" }]);
+      await rpcCall("session.cancel", { sessionId });
+      const settled = settleStop(ticket, true);
+      if (settled.arm && tabId) {
+        setChatTabs((prev) => prev.map((tab) => (
+          tab.id === tabId
+            ? { ...tab, items: [...interruptTurnItems(tab.items), { id: allocId(), kind: "note" as const, text: "已停止" }] }
+            : tab
+        )));
+      }
     } catch (error) {
       stopping.current = false;
-      setLiveItems((prev) => [
-        ...prev,
-        { id: allocId(), kind: "note", text: error instanceof Error ? error.message : String(error) },
-      ]);
+      const settled = settleStop(ticket, false);
+      if (settled.note) noteFor(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  /** 取消返回后才扣闩锁。轮次已经前进就只丢掉旧结束，不动新的一轮。 */
+  function settleStop(ticket: StopTicket, ok: boolean): { arm: boolean; note: boolean } {
+    const done = finishStop({
+      ticket,
+      pending: stopPendingRef.current,
+      currentEpoch: turnEpochRef.current,
+      ok,
+      latchOwner: latchOwnerRef.current,
+    });
+    stopPendingRef.current = done.pending;
+    staleIdleRef.current = rememberStale(staleIdleRef.current, done.stale);
+    if (done.clearLatch) {
+      userStopSessionRef.current = null;
+      latchOwnerRef.current = null;
+    }
+    if (done.arm) {
+      userStopSessionRef.current = ticket.sessionId;
+      latchOwnerRef.current = ticket.id;
+      setTurnActive(false);
+      stopping.current = false;
+    }
+    releaseHeldEnds(ticket.sessionId);
+    return { arm: done.arm, note: done.note };
+  }
+
+  function releaseHeldEnds(sessionId: string) {
+    const released = takeHeldEnds(heldEndsRef.current, sessionId);
+    heldEndsRef.current = released.rest;
+    for (const end of released.taken) applySidecarEventRef.current(end);
+  }
+
+  function toggleThinking(itemId: number, userToggled: "expand" | "collapse") {
+    setChatTabs((prev) => prev.map((tab) => {
+      const items = withThinkingToggle(tab.items, itemId, userToggled);
+      return items === tab.items ? tab : { ...tab, items };
+    }));
   }
 
   /** 宿主先把未回答的计划评审以取消结算，再退出计划模式；评审卡不在屏上时也能用。 */
@@ -1761,7 +1904,7 @@ export default function App() {
       }
       if (item.kind === "user") return { id: allocId(), kind: "user", text: item.text };
       if (item.kind === "thinking") {
-        return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false };
+        return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false, historical: true };
       }
       if (item.kind === "assistant") return { id: allocId(), kind: "assistant", text: item.text };
       return { id: allocId(), kind: "note", text: item.text };
@@ -1831,9 +1974,24 @@ export default function App() {
     if (deleteBusy) return;
     setDeleteBusy(true);
     try {
+      if (sessionId === turnSessionRef.current) {
+        try {
+          await rpcCall("session.cancel", { sessionId });
+        } catch {
+          // 日志马上删掉；取消失败也不再把停止按钮留在一个没有会话的标签上。
+        }
+        turnTabRef.current = null;
+        turnSessionRef.current = null;
+        setTurnActive(false);
+      }
       await rpcCall("session.remove", { sessionId });
       setSessions((prev) => prev.filter((session, index) => String(session.id ?? `session-${index}`) !== sessionId));
-      if (historyView?.sessionId === sessionId) setHistoryView(null);
+      setHistoryView((view) => (view?.sessionId === sessionId ? null : view));
+      setChatTabs((prev) => prev.map((tab) => (
+        tab.sessionId === sessionId
+          ? { ...tab, items: [], sessionId: undefined, sessionFailed: false }
+          : tab
+      )));
       setConfirmDelete(null);
       setDeleteError("");
     } catch (error) {
@@ -2147,7 +2305,7 @@ export default function App() {
             />
           ) : (
             <>
-              <div className="chat-log">
+              <div className="chat-log" key={activeChat.id}>
                 {chatEmpty ? (
                   <div className="hero">
                     <h1>
@@ -2179,6 +2337,7 @@ export default function App() {
                     blocked={blocked}
                     onAnswer={answer}
                     onInput={answerInput}
+                    onThinkingToggle={toggleThinking}
                     reasoning={item.kind === "assistant" ? (thinkingBefore(items, index)?.thought ?? "") : ""}
                     hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(items, index) : false}
                   />
@@ -2357,7 +2516,7 @@ export default function App() {
                   </button>
                 ) : null}
                 <span className="composer-spacer" />
-                {turnActive ? (
+                {turnActive && activeTab === turnTabRef.current ? (
                   <button type="button" className="send stop" disabled={blocked} onClick={() => void stopTurn()}>
                     停止
                   </button>
@@ -2689,6 +2848,8 @@ function handleEvent(
   setSessionFailed: (failed: boolean, sessionId?: string) => void,
   refreshRecent: () => Promise<void>,
   sawReady: MutableRefObject<boolean>,
+  endsTrackedTurn: boolean,
+  userStopped: boolean,
 ) {
   switch (event.event) {
     case "sidecar/status":
@@ -2732,8 +2893,17 @@ function handleEvent(
           const match = event.callId
             ? item.card.callId === event.callId
             : item.card.name === event.name && item.card.status === "start";
-          return match
-            ? { ...item, card: { ...item.card, status: "end", truncated: event.truncated, ...(event.isError ? { isError: true } : {}) } }
+            return match
+            ? {
+                ...item,
+                card: {
+                  ...item.card,
+                  status: "end",
+                  truncated: event.truncated,
+                  ...(event.text ? { output: event.text } : {}),
+                  ...(event.isError ? { isError: true } : {}),
+                },
+              }
             : item;
         }),
         event.sessionId,
@@ -2774,15 +2944,15 @@ function handleEvent(
       setItems((prev) => [...prev, { id: allocId(), kind: "note", text: goalRoundLabel(event.round) }], event.sessionId);
       break;
     case "session/end":
-      setTurnActive(false);
+      if (endsTrackedTurn) setTurnActive(false);
       // 回合结束刷新会话列表（任务区/最近对话）。日志写回是 ~200ms 批处理，
       // 等一拍再拉，避免新会话因 messageCount 仍为 0 被空壳过滤漏掉。
       setTimeout(() => void refreshRecent(), 600);
       setItems((prev) => closeOpenInputs(prev), event.sessionId);
-      if (event.cancelled || !event.ok) {
-        setItems((prev) => interruptCurrentTurn(prev), event.sessionId);
+      if (event.cancelled || !event.ok || userStopped) {
+        setItems((prev) => interruptTurnItems(prev), event.sessionId);
       }
-      if (event.cancelled) break;
+      if (event.cancelled || userStopped) break;
       if (!event.ok) {
         setSessionFailed(true, event.sessionId);
         setItems((prev) => [
@@ -2806,31 +2976,6 @@ function upsertTodoItem(items: ChatItem[], todos: TodoEntry[], allocId: () => nu
   const at = items.findIndex((item, index) => index >= turnStart && item.kind === "todo");
   if (at < 0) return [...items, { id: allocId(), kind: "todo", todos }];
   return items.map((item, index) => (index === at ? { ...item, todos } : item));
-}
-
-/** 取消或失败时，本回合已出现的思考面板标题改为「思考 · 已中断」。成功结束保持「已生成」。 */
-function interruptCurrentTurn(items: ChatItem[]): ChatItem[] {
-  let turnStart = 0;
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    if (items[i]?.kind === "user") {
-      turnStart = i + 1;
-      break;
-    }
-  }
-  let changed = false;
-  const next = items.map((item, index) => {
-    if (index < turnStart) return item;
-    if (item.kind === "thinking" && !item.interrupted) {
-      changed = true;
-      return { ...item, interrupted: true };
-    }
-    if (item.kind === "assistant" && item.interrupted !== true) {
-      changed = true;
-      return { ...item, interrupted: true };
-    }
-    return item;
-  });
-  return changed ? next : items;
 }
 
 /** 计划卡画在本回合 `exit_plan_mode` 那一行工具之前；找不到那一行就追加在末尾。 */
@@ -2902,6 +3047,7 @@ function ChatRow({
   blocked,
   onAnswer,
   onInput,
+  onThinkingToggle,
   reasoning = "",
   hasAssistantText = false,
 }: {
@@ -2909,6 +3055,7 @@ function ChatRow({
   blocked: boolean;
   onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
   onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
+  onThinkingToggle?: (itemId: number, userToggled: "expand" | "collapse") => void;
   reasoning?: string;
   hasAssistantText?: boolean;
 }) {
@@ -2920,6 +3067,9 @@ function ChatRow({
         thought={item.thought}
         hasAssistantText={hasAssistantText}
         interrupted={item.interrupted}
+        historical={item.historical === true}
+        userToggled={item.userToggled ?? null}
+        onToggle={onThinkingToggle ? (next) => onThinkingToggle(item.id, next) : undefined}
       />
     );
   }
@@ -2932,7 +3082,13 @@ function ChatRow({
     return (
       <>
         {shouldRenderThinking(panelThought) ? (
-          <ThinkingPanel thought={panelThought} hasAssistantText={answerReady} interrupted={item.interrupted === true} />
+          <ThinkingPanel
+            thought={panelThought}
+            hasAssistantText={answerReady}
+            interrupted={item.interrupted === true}
+            userToggled={item.userToggled ?? null}
+            onToggle={onThinkingToggle ? (next) => onThinkingToggle(item.id, next) : undefined}
+          />
         ) : null}
         {answerReady ? <div className="bubble assistant">{visible}</div> : null}
       </>
@@ -2953,11 +3109,14 @@ function ChatRow({
   }
   if (item.kind === "tool") {
     return (
-      <div className={item.card.status === "start" ? "tool-row running" : "tool-row"}>
-        <span className="tool-icon">{toolRowIcon(item.card)}</span>
-        <strong>{item.card.name}</strong>
-        <span className="muted">{item.card.status === "start" ? "运行中" : "结束"}</span>
-        {item.card.truncated ? <span className="badge">truncated</span> : null}
+      <div>
+        <div className={item.card.status === "start" ? "tool-row running" : "tool-row"}>
+          <span className="tool-icon">{toolRowIcon(item.card)}</span>
+          <strong>{item.card.name}</strong>
+          <span className="muted">{item.card.status === "start" ? "运行中" : "结束"}</span>
+          {item.card.truncated ? <span className="badge">已截断</span> : null}
+        </div>
+        {item.card.output ? <pre className="thinking-body">{item.card.output}</pre> : null}
       </div>
     );
   }

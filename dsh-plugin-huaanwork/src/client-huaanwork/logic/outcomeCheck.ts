@@ -63,6 +63,7 @@ export function treePaths(nodes: readonly TreeLike[]): string[] {
   return paths;
 }
 
+/** 路径是否出现在调用方列出的工作区目录树里。这是存在性核对，不打开文件。 */
 export function fileExistsInTree(paths: readonly string[], file: string): boolean {
   const wanted = file.replace(/\\/g, "/").replace(/^\.\//, "");
   return paths.some((path) => path === wanted || path.endsWith(`/${wanted}`));
@@ -143,8 +144,36 @@ export function turnChecks(items: readonly TurnItem[]): TurnChecks {
   return { requiredFiles: unique(files), requiredCommands: extractRequiredCommands(userText), toolResults, didWork };
 }
 
+/** 打开了项目就核对该目录；否则用会话自己的工作目录。两者都没有才算没读到工作区。 */
+export function outcomeWorkspace(workspace: string | null | undefined, sessionCwd: string | null | undefined): string {
+  if (typeof workspace === "string" && workspace.length > 0) return workspace;
+  if (typeof sessionCwd === "string" && sessionCwd.length > 0) return sessionCwd;
+  return "";
+}
+
+/** 列表里已有目录就用列表；刚铸出、列表还没跟上时用铸造时记下的目录。 */
+export function lookupSessionCwd(
+  sessionId: string | undefined,
+  listed: readonly { id?: string; cwd?: string }[],
+  remembered: ReadonlyMap<string, string>,
+): string | undefined {
+  const fromList = sessionId ? listed.find((row) => row.id === sessionId)?.cwd : undefined;
+  if (typeof fromList === "string" && fromList.length > 0) return fromList;
+  if (!sessionId) return undefined;
+  const saved = remembered.get(sessionId);
+  return typeof saved === "string" && saved.length > 0 ? saved : undefined;
+}
+
 /** 本回合核对出的缺项；工作区读不到时文件项如实记为未核对，不当作缺失。 */
-export function turnGaps(checks: TurnChecks, tree: readonly TreeLike[]): string[] {
+export function turnGaps(checks: TurnChecks, tree: readonly TreeLike[], treeKnown = true): string[] {
+  if (!treeKnown) {
+    return outcomeGaps({
+      requiredFiles: [],
+      requiredCommands: checks.requiredCommands,
+      toolResults: checks.toolResults,
+      fileExists: () => false,
+    });
+  }
   const paths = treePaths(tree);
   const unreadable = checks.requiredFiles.length > 0 && paths.length === 0;
   const gaps = outcomeGaps({
@@ -161,8 +190,13 @@ export function turnGaps(checks: TurnChecks, tree: readonly TreeLike[]): string[
  * 回合结束时追加到对话里的核对句子；有缺项就不出现「已完成」。
  * 没有任何必核文件或命令时，只有本回合跑过工具或出现过计划卡才写「没有自动核对项」。
  */
-export function turnOutcomeNotes(checks: TurnChecks, tree: readonly TreeLike[]): string[] {
-  const gaps = turnGaps(checks, tree);
+export function turnOutcomeNotes(
+  checks: TurnChecks,
+  tree: readonly TreeLike[],
+  treeKnown = true,
+): string[] {
+  if (!treeKnown && checks.requiredFiles.length > 0) return turnGaps(checks, tree, false);
+  const gaps = turnGaps(checks, tree, true);
   const outcome = turnOutcomeLines({ requiredFiles: checks.requiredFiles, requiredCommands: checks.requiredCommands, gaps });
   if (outcome.done) {
     return [`已完成：自动核对 ${checks.requiredFiles.length + checks.requiredCommands.length} 项均通过`];
@@ -204,6 +238,27 @@ export function outcomeTargetTab(
 ): string | undefined {
   const tab = sessionId ? tabs.find((candidate) => candidate.sessionId === sessionId) : tabs.find((candidate) => candidate.id === liveTabId);
   return tab && !tab.automationId ? tab.id : undefined;
+}
+
+/**
+ * 带会话 id 的事件写入绑定了该会话的标签。
+ * 刚发出去、标签上的 sessionId 还没提交时，只有这次发送的会话（pendingSessionId）先落到当前空标签。
+ * 当前标签已经绑了别的会话，或会话已从标签上删掉，就丢掉，不再画进当前对话。
+ */
+export function eventTargetTab(
+  sessionId: string | undefined,
+  tabs: readonly { id: string; sessionId?: string }[],
+  liveTabId: string,
+  pendingSessionId?: string | null,
+): string | undefined {
+  if (typeof sessionId === "string" && sessionId.length > 0) {
+    const bound = tabs.find((tab) => tab.sessionId === sessionId)?.id;
+    if (bound) return bound;
+    const live = tabs.find((tab) => tab.id === liveTabId);
+    if (live && !live.sessionId && sessionId === pendingSessionId) return live.id;
+    return undefined;
+  }
+  return tabs.some((tab) => tab.id === liveTabId) ? liveTabId : undefined;
 }
 
 export function latestUserItemId(items: readonly { id: number; kind: string }[]): number | undefined {

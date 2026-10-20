@@ -141,7 +141,7 @@ function SessionDetailRow({ record }: { record: SessionDetailRecord }) {
     );
   }
   if (record.kind === "thinking") {
-    return <ThinkingPanel thought={record.text} hasAssistantText={true} interrupted={false} />;
+    return <ThinkingPanel thought={record.text} hasAssistantText={true} interrupted={false} historical />;
   }
   if (record.kind === "tool-call") {
     return (

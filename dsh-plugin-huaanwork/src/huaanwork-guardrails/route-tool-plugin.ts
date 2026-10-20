@@ -30,6 +30,11 @@ type Context = {
 
 const invalidRoutes = new Map<string, number>();
 
+/** 下一次用户消息受理时清掉，让每个用户回合都能重修一次坏参数。 */
+export function clearInvalidRoute(sessionId: string): void {
+  invalidRoutes.delete(sessionId);
+}
+
 export function noteInvalidRoute(sessionId: string): { endTurn: boolean; text?: string } {
   const count = (invalidRoutes.get(sessionId) ?? 0) + 1;
   invalidRoutes.set(sessionId, count);
