@@ -39,10 +39,10 @@
 | B13 | **PASS（行为观察）** | 发送后界面立即进入“正在思考/停止”状态，模型继续流式输出；发送连接没有等到 idle。未做 RPC 级别的精确计时。 |
 | B14 | 未执行（单测） | 5 分钟阈值由 `turnStatus.spec.ts` 钉住；真实等待 5 分钟成本高，未执行 |
 | B15 | UNIT-ONLY（单测） | `sessions.spec.ts` 的 sibling 取消用例；未真机 |
-| B16 | **PARTIAL** | 独立 Host 上挂起主循环后约 15 秒出现“执行进程无响应”，恢复后消失（`huaanwork-b16-suspect.png`）。60 秒“结束进程”确认**未验证**：62 秒观察时 Host 已被随后的测试清理命令（`pkill`）终止，界面出现的是 Host 崩溃/恢复框，而不是可归因于 liveness 的 kill 确认，因此该次 62 秒观察不作为结论。Windows 未验证。 |
+| B16 | **PASS（macOS）** | 挂起 Host 主循环后约 15 秒出现“执行进程无响应”；60 秒出现“结束进程”（`huaanwork-b16-60b.png`）。点击后 native 确认框有“终止 / 取消”，点“终止”后 Host 进程消失；界面显示“执行进程已按你的要求结束”，没有崩溃/恢复框（`huaanwork-b16-kill.png`）。确认框的会话数量文本未逐字读取；Windows 未验证。 |
 | B17 | **PASS** | `seq 1 20000` 的真实工具结果在对话中标记“已截断”，保留尾部与 spill 路径；模型仍正确回答最后一行 20000。`huaanwork-b17.png` |
 | B18 | 不适用 | 发送解耦已先于 `tool-goal` 启用；HEAD 上无法重建“启用前”状态。顺序约束由提交顺序与 `sessions.spec.ts` 覆盖。 |
-| B19 | 未执行 | 目标续轮是设计 §4 第 7 步，单独验收；本轮未创建真实 goal 跑满 4 轮 |
+| B19 | **PASS（macOS）** | 真实模型 `create_goal` 创建目标；UI 依次显示“正在按目标继续，第 1/4 轮”到“第 4/4 轮”；第 4 轮后显示“已停在第 4/4 轮。尚未核对：无”，没有第 5 轮自动续跑（`huaanwork-b19-final.png`）。目标保持 active/blocked(round-limit) 且未自行完成。随后用户明确说“完成”，模型用 revision 2 调 `update_goal complete`，最终 phase `complete`、revision 3、disarmed（`huaanwork-b19-complete.png`）。本轮目标只做文件读取/编辑，未触发工具级权限询问。 |
 | B20 | **PASS** | advanced 首页正常；官方 `ui-plan`/`ui-trajectory`/`ui-user-questions` 不在页面；`jobs`/web/hmr 等锁由 `profile.spec.ts`/`row-assertions` 与应用启动验证。`huaanwork-main.png` |
 | B21 | 未执行（单测） | `noteInvalidRoute` 的两次计数由单测覆盖；真实模型不会故意产生两次坏参数，未用桩 profile 重配端点 |
 | B22 | **PASS** | 点击“继续改计划”后 `exit_plan_mode` 以拒绝结算，计划模式保持，模型通过 `request_input` 请求修订方向，未执行计划中的写入/命令。`huaanwork-b22.png` |
@@ -75,7 +75,7 @@ Task 8 的全量 headless 记录（在 e0f952279e/24b5c28c5d 两处验收修复�
 - 启动日志仍有一条 **advisory**：`huaanwork-gates` 是可选 entry，boot 时没有 agent，无法验证主 agent 的 `restrict()`；Host 侧 post-boot audit 已保证 service/全局工具缺失会中止启动。该 warning 不阻塞启动；gate 自身只读一次 agent 列表并保留 advisory 报错，10 秒等待来自已移除的共享审计。
 - `查询上海一周天气预报` 的旧会话日志被 `dsh-session` 报告 `first frame is not exactly one header line`；UI 的只读历史仍能显示（B05 用的就是它），但 agent 恢复该旧会话会失败。这是既有数据问题，不是本分支写入路径造成的。
 - B07 的字面失败是设计预期与真实模型能力的冲突；需要在设计层裁决：建议把 B07 改为“不出现计划卡；允许一次有界只读工具”，或在系统提示里提供时钟。不要为此改路由器（当前时间不在模型知识内，`bash date` 属于 R1 的 direct）。
-- B14/B21 以单测为准；B15/B25 标为 UNIT-ONLY；B19 是独立的目标续轮验收；B18 是顺序回归。B16 的 60 秒 kill 与 Windows 未验证。
+- B14/B21 以单测为准；B15/B25 标为 UNIT-ONLY；B19 本轮已在真实模型上跑满 4 轮并验证停止/完成；B18 是顺序回归。B16 在 macOS 上已验证 kill，Windows 未验证。
 - 真实模型调用消耗了用户配置的 DeepSeek 额度；验收文件 `acceptance-note.md` 与 `acceptance-report.md` 留在 workspace，可按需删除。
 
 ## 最终 review 的剩余跟进项（不阻塞合并）
