@@ -59,7 +59,7 @@ type Context = {
    * `sessionId` 是该运行自己的会话(automations-host 的 runAgentTurn 设置);
    * 没有它的旧形状只可能来自旧调用方,按全局作用域处理。
    */
-  huaanworkUnattended?: { current?: UnattendedScope };
+  huaanworkUnattended?: { current?: UnattendedScope | null };
   huaanworkEmit?: (event: AskedEvent) => void;
   on(
     event: "user-questions/request",
@@ -75,6 +75,12 @@ type LiveReview = { approvalRequestId: string; approvals: ApprovalMap };
 const livePlanReviews = new Map<string, LiveReview>();
 /** sessionId → 上一份已确认计划的目标、收件人与写入范围。 */
 const confirmedTargets = new Map<string, PlanTarget>();
+
+/** 测试缝：清空跨用例共享的计划评审与已确认目标登记。 */
+export function resetQuestionAnswererState(): void {
+  livePlanReviews.clear();
+  confirmedTargets.clear();
+}
 
 export function answererDecision(input: {
   hasListener: boolean;
@@ -117,7 +123,7 @@ export function apply(ctx: Context): void {
     if (decision === "auto-approve") {
       const identity = reviewIdentity(request);
       if (identity) supersede(identity);
-      showCard(ctx, request, randomUUID(), AUTO_CONTINUE_LABEL, true);
+      showCard(ctx, request, randomUUID(), AUTO_CONTINUE_LABEL, { autoContinue: true });
       recordConfirmed(request);
       return approveAnswers(request);
     }
@@ -134,7 +140,7 @@ function reviewedPlan(request: QuestionRequest): string {
  * 期间人在别的会话里的计划评审照常等人;没有 `sessionId`(旧形状)时保持原有
  * 全局判定,失败方向仍是「不自动批准」。
  */
-function unattendedOwns(scope: UnattendedScope | undefined, request: QuestionRequest): boolean {
+function unattendedOwns(scope: UnattendedScope | null | undefined, request: QuestionRequest): boolean {
   if (!scope) return false;
   if (scope.sessionId === undefined) return true;
   const sessionId = sessionIdOfAgentRef(request.agent);
@@ -185,13 +191,15 @@ function mapOf(value: ApprovalMap | undefined): ApprovalMap | undefined {
   return value instanceof Map ? value : undefined;
 }
 
+/** 卡片选项：用具名字段替代两个位置布尔（autoContinue 默认 false、actionable 默认 true）。 */
+type CardOptions = { autoContinue?: boolean; actionable?: boolean };
+
 function showCard(
   ctx: Context,
   request: QuestionRequest,
   approvalRequestId: string,
   reason: string,
-  autoContinue = false,
-  actionable = true,
+  options: CardOptions = {},
 ): void {
   const question = request.questions?.[0];
   const sessionId = sessionIdOfAgentRef(request.agent);
@@ -205,8 +213,8 @@ function showCard(
     ...(summary ? { summary } : {}),
     ...(callId ? { callId } : {}),
     ...(sessionId ? { sessionId } : {}),
-    ...(autoContinue ? { autoContinue } : {}),
-    ...(actionable ? {} : { actionable: false as const }),
+    ...(options.autoContinue ? { autoContinue: true } : {}),
+    ...(options.actionable === false ? { actionable: false as const } : {}),
   });
 }
 
@@ -325,7 +333,9 @@ function waitForDecision(
 
 async function unanswered(ctx: Context, request: QuestionRequest): Promise<never> {
   // 没有任何审批登记:卡片只能是一句说明,不能带批准/拒绝按钮(点击只会静默失败)。
-  if (typeof ctx.huaanworkEmit === "function") showCard(ctx, request, randomUUID(), UNANSWERED_TEXT, false, false);
+  if (typeof ctx.huaanworkEmit === "function") {
+    showCard(ctx, request, randomUUID(), UNANSWERED_TEXT, { actionable: false });
+  }
   await hangUntilRealCancel(request.signal);
   const reason = request.signal?.reason;
   throw reason instanceof Error ? reason : new Error(UNANSWERED_TEXT);

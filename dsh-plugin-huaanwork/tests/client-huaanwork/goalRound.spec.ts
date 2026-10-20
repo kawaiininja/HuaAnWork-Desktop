@@ -225,6 +225,23 @@ test("clearing the goal stops suppression for the rest of the turn", () => {
   assert.deepEqual(kinds(actions), ["none", "none", "none", "outcome"]);
 });
 
+test("a paused or blocked goal suppresses only the turn it ended, never later unrelated turns", () => {
+  // 回归:抑制曾按相位判断,相位停在 paused/blocked 后,该会话每个后续普通回合
+  // 的 `session/end ok` 都被吞掉。标记只属于它发生的那一回合。
+  for (const phase of ["paused", "blocked"] as const) {
+    const actions = drive([
+      { kind: "turn-started", sessionId: SESSION },
+      { kind: "goal-state", phase: "active", sessionId: SESSION },
+      { kind: "goal-state", phase, roundsStarted: 1, sessionId: SESSION },
+      { kind: "session-end", sessionId: SESSION, ok: true },
+      // 用户没有恢复目标(相位仍是 paused/blocked),下一回合是一次普通对话。
+      { kind: "turn-started", sessionId: SESSION },
+      { kind: "session-end", sessionId: SESSION, ok: true },
+    ]);
+    assert.deepEqual(kinds(actions), ["none", "none", "none", "none", "none", "outcome"], phase);
+  }
+});
+
 test("a new user turn gets its own outcome after a terminal goal", () => {
   const actions = drive([
     { kind: "turn-started", sessionId: SESSION },

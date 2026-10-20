@@ -560,6 +560,7 @@ describe('automations-store 写路径与纯函数', () => {
 
   test('CRUD routes return automation / removed', async () => {
     const home = makeHome()
+    const releasedSessions: string[] = []
     const ctx = {
       dshHome: home,
       profileDir: home,
@@ -567,6 +568,14 @@ describe('automations-store 写路径与纯函数', () => {
       emit: () => {},
       logger: () => {},
       requestRestart: async () => false,
+      runtimeCtx: {
+        agents: {
+          get: (id: string) => {
+            releasedSessions.push(id)
+            return undefined
+          },
+        },
+      },
     }
     const create = ROUTE_TABLE.find((route) => route.method === 'automation.create')
     const update = ROUTE_TABLE.find((route) => route.method === 'automation.update')
@@ -610,12 +619,20 @@ describe('automations-store 写路径与纯函数', () => {
     expect(Object.keys(updated as object).sort()).toEqual(['automation'])
     expect((updated as { automation: AutomationInfo }).automation.name).toBe('改名')
 
+    // 运行会话日志随任务删除:路由必须在删目录前把会话交给 releaseSessionRuntime。
+    const runSessionId = `huaanwork-auto-${automation.id}-r1`
+    const runSessionDir = join(home, 'sessions', 'cwd-x', runSessionId)
+    mkdirSync(runSessionDir, { recursive: true })
+    expect(existsSync(runSessionDir)).toBe(true)
+
     const removed = await remove!.handler(
       { params: {}, body: { id: automation.id }, query: new URLSearchParams() },
       ctx,
     )
     expect(removed).toEqual({ removed: true })
     expect(await listAutomations(home)).toEqual([])
+    expect(existsSync(runSessionDir)).toBe(false)
+    expect(releasedSessions).toEqual([runSessionId])
   })
 
   test('markAutomation advances nextRunAt only when entering running', async () => {

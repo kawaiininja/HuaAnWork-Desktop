@@ -2,7 +2,11 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { childrenOf, registerChildSession } from '../../src/huaanwork-host/child-sessions.ts'
+import {
+  childrenOf,
+  registerChildSession,
+  resetChildSessionRegistry,
+} from '../../src/huaanwork-host/child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import { emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import {
@@ -10,6 +14,7 @@ import {
   apply as applyRouteTools,
   noteInvalidRoute,
   releaseRouteInput,
+  resetRouteToolState,
 } from '../../src/huaanwork-guardrails/route-tool-plugin.ts'
 import {
   sendToAgent,
@@ -29,7 +34,10 @@ import {
 } from '../../src/huaanwork-host/sessions.ts'
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
-import { apply as applyQuestionAnswerer } from '../../src/huaanwork-guardrails/question-answerer.ts'
+import {
+  apply as applyQuestionAnswerer,
+  resetQuestionAnswererState,
+} from '../../src/huaanwork-guardrails/question-answerer.ts'
 import { emptySettings, readHuaanworkSettings, writeHuaanworkSettings } from '../../src/huaanwork-host/settings.ts'
 import { assertStreamNetworkAllowed } from '../../src/huaanwork-host/net-gate.ts'
 import { sweepProjectLegacySessions } from '../../src/huaanwork-host/session-sweep.ts'
@@ -115,6 +123,10 @@ afterEach(() => {
     rmSync(tmpRoot, { recursive: true, force: true })
     tmpRoot = undefined
   }
+  // 护栏插件把等待中的卡片/坏参数计数/计划目标登记在模块级 Map 上:逐用例复位。
+  resetRouteToolState()
+  resetQuestionAnswererState()
+  resetChildSessionRegistry()
 })
 
 describe('sessionIdFor / freshSessionIdFor (旧 session-history.test.ts:L61-69)', () => {

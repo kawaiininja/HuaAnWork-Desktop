@@ -303,6 +303,27 @@ describe('automations 读路径(旧 automations.test.ts 用例)', () => {
     expect((await listAutomations(home))).toHaveLength(1)
   })
 
+  test('removeAutomationsOfProject 在删每个运行会话目录前回调 releaseSession(接运行态释放)', async () => {
+    const home = makeHome()
+    writeJson(home, 'automations.json', { automations: [makeAutomation('a1', 'p1', 1)] })
+    const sessionsRoot = join(home, 'sessions')
+    const doomedDir = join(sessionsRoot, 'cwd-x', 'huaanwork-auto-a1-r1')
+    const keptDir = join(sessionsRoot, 'cwd-x', 'huaanwork-auto-a2-r2')
+    mkdirSync(doomedDir, { recursive: true })
+    mkdirSync(keptDir, { recursive: true })
+
+    const released: string[] = []
+    await removeAutomationsOfProject(home, 'p1', sessionsRoot, (sessionId) => {
+      // 回调必须发生在目录还在的时候:宿主据此摘掉 live agent / 等待中的输入。
+      expect(existsSync(join(sessionsRoot, 'cwd-x', sessionId))).toBe(true)
+      released.push(sessionId)
+    })
+
+    expect(released).toEqual(['huaanwork-auto-a1-r1'])
+    expect(existsSync(doomedDir)).toBe(false)
+    expect(existsSync(keptDir)).toBe(true)
+  })
+
   test('RUNS_LIMIT = 50(运行历史上限与旧契约一致)', () => {
     expect(RUNS_LIMIT).toBe(50)
   })

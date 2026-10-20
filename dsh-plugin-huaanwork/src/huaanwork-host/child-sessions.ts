@@ -48,3 +48,10 @@ export function noteCallerSession(sessionId: string | undefined): void {
 export function currentCallerSession(): string | undefined {
   return registry().callerSessionId
 }
+
+/** 测试缝：清空进程级子会话登记（children + 当前调用会话），避免跨用例残留。 */
+export function resetChildSessionRegistry(): void {
+  const reg = registry()
+  reg.children.clear()
+  reg.callerSessionId = undefined
+}

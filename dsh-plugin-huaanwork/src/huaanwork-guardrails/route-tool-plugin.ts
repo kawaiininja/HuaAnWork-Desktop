@@ -12,7 +12,7 @@ const STOPPED_TEXT = "回合已停止，这个问题不再等待回答";
 export const UNATTENDED_NO_ANSWERER_TEXT = "无人值守运行没有可以回答这个问题的人";
 
 /** 与 question-answerer 同一作用域语义：带 sessionId 时只接管该会话，旧形状按全局处理。 */
-function unattendedOwnsInput(scope: { sessionId?: string } | undefined, sessionId: string): boolean {
+function unattendedOwnsInput(scope: { sessionId?: string } | null | undefined, sessionId: string): boolean {
   if (!scope) return false;
   if (scope.sessionId === undefined) return true;
   return scope.sessionId === sessionId;
@@ -28,8 +28,8 @@ type Exec = { agent?: unknown; signal?: AbortSignal };
 
 type Context = {
   huaanworkRouteAgent?: { current: unknown };
-  /** boot 时注入的容器；无人值守运行期间 `.current` 非空（policy.ts / question-answerer 同源）。 */
-  huaanworkUnattended?: { current?: { sessionId?: string } };
+  /** boot 时注入的容器；无人值守运行期间 `.current` 非空，boot 时初始化为 null（policy.ts / question-answerer 同源）。 */
+  huaanworkUnattended?: { current?: { sessionId?: string } | null };
   huaanworkEmit?: (
     event:
       | { event: "session/end"; ok: false; error: string; sessionId?: string }
@@ -54,6 +54,12 @@ export function noteInvalidRoute(sessionId: string): { endTurn: boolean; text?: 
 
 type PendingInput = { agent: Agent; resolve(answer: string): void; reject(error: Error): void };
 const pendingInputs = new Map<string, PendingInput>();
+
+/** 测试缝：清空按会话登记的运行态（坏参数计数 / 等待中的卡片），避免跨用例残留。 */
+export function resetRouteToolState(): void {
+  invalidRoutes.clear();
+  pendingInputs.clear();
+}
 
 /** 对话卡片提交：答案作为这次 `request_input` 的工具结果回到同一回合。 */
 export function answerRouteInput(sessionId: string, answer: string): boolean {

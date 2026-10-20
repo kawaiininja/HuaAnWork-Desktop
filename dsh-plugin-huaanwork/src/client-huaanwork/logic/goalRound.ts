@@ -18,11 +18,18 @@ export type GoalPhase = "active" | "paused" | "blocked" | "complete";
  */
 export type GoalTurnState = {
   readonly phases: Readonly<Record<string, GoalPhase>>;
+  /**
+   * 本回合观察到 paused/blocked 终态边沿的会话。它只压住**本回合**的结束结论：
+   * 相位本身会保留到目标被恢复或清空，若按相位抑制，一次 `/goal pause` 会让该会话
+   * 之后每个普通回合也丢掉结论。`turn-started` 与 resume（`active` 边沿）清掉它。
+   */
+  readonly suppressed: readonly string[];
   readonly settled: readonly string[];
 };
 
 export const INITIAL_GOAL_TURN_STATE: GoalTurnState = {
   phases: {},
+  suppressed: [],
   settled: [],
 };
 
@@ -54,8 +61,10 @@ export function goalTurnEdge(previous: GoalPhase | undefined, next: GoalPhase): 
  * 目标事件 → 回合结论的纯状态机（App 在 ref 里持有状态）。
  *
  * 裁定：只有 `active` 抑制每轮结束结论。`complete` 是唯一的验收结论；`paused` 与
- * 非 round-limit 的 `blocked` 是目标的终态但不是「已完成」的证据，只结算、不写结论
- * （输入卡取消、退出计划模式、删会话与 `/goal pause` 都会先暂停目标再结束回合）。
+ * 非 round-limit 的 `blocked` 是目标的终态但不是「已完成」的证据，只给**本回合**打
+ * `suppressed` 标记、不结算（输入卡取消、退出计划模式、删会话与 `/goal pause` 都会
+ * 先暂停目标再结束回合）。标记在 `turn-started` 与 resume 时清掉，所以暂停只影响它
+ * 发生的那一回合，pause → resume → complete 仍由 complete 写一次。
  * round-limit 由专用停止文案结算，不再写普通结论。
  * `settled` 是每回合幂等闸：`session/end` 与终态 `goal/state` 无论谁先到都只写一次。
  */
@@ -67,14 +76,18 @@ export function reduceGoalTurn(
   switch (event.kind) {
     case "turn-started":
       return {
-        state: { ...state, settled: without(state.settled, key) },
+        state: {
+          ...state,
+          suppressed: without(state.suppressed, key),
+          settled: without(state.settled, key),
+        },
         action: NOTHING,
       };
     case "goal-cleared": {
       // 目标已清空：忘掉相位，后续结束按「没有目标」正常写结论。
       const phases = { ...state.phases };
       delete phases[key];
-      return { state: { ...state, phases }, action: NOTHING };
+      return { state: { ...state, phases, suppressed: without(state.suppressed, key) }, action: NOTHING };
     }
     case "goal-state": {
       const previous = state.phases[key];
@@ -84,18 +97,24 @@ export function reduceGoalTurn(
       // 暂停，桥随后才发取消结束。这里只结算，「已停止」由停止流程自己写，
       // 迟到的取消结束不会补写。
       if (event.stopped === true) {
-        return { state: { ...state, phases, settled: withSettled(state, key) }, action: NOTHING };
+        return {
+          state: { ...state, phases, suppressed: without(state.suppressed, key), settled: withSettled(state, key) },
+          action: NOTHING,
+        };
       }
-      // start 只更新相位（供 session/end 判断是否抑制）；结算窗口由 turn-started 开启，
-      // 所以同一用户回合里 pause → resume → complete 仍只写一次结论。
+      // start 只更新相位（供 session/end 判断是否抑制），并清掉本回合的暂停标记：
+      // 结算窗口由 turn-started 开启，所以 pause → resume → complete 仍只写一次结论。
       // 抑制中（例如 round-limit 的专用文案已写）或没有边沿的重复投递同样不再写。
       if (edge !== "finish" || state.settled.includes(key)) {
-        return { state: { ...state, phases }, action: NOTHING };
+        const suppressed = event.phase === "active" ? without(state.suppressed, key) : state.suppressed;
+        return { state: { ...state, phases, suppressed }, action: NOTHING };
       }
-      // paused / blocked 不写结论也不结算：同一回合里恢复后仍可由 complete 写一次。
-      if (event.phase !== "complete") return { state: { ...state, phases }, action: NOTHING };
+      // paused / blocked 不写结论也不结算：只压住本回合的结束结论，恢复后仍可由 complete 写一次。
+      if (event.phase !== "complete") {
+        return { state: { ...state, phases, suppressed: withSuppressed(state.suppressed, key) }, action: NOTHING };
+      }
       return {
-        state: { ...state, phases, settled: [...state.settled, key] },
+        state: { ...state, phases, suppressed: without(state.suppressed, key), settled: [...state.settled, key] },
         action: { kind: "outcome" },
       };
     }
@@ -114,9 +133,13 @@ export function reduceGoalTurn(
       }
       // 目标仍在续轮：每轮结束只是中间结果。
       if (state.phases[key] === "active") return { state, action: NOTHING };
-      // 目标暂停/受阻：回合结束不是验收结论；结算掉，免得迟到的 complete 补写。
-      if (state.phases[key] === "paused" || state.phases[key] === "blocked") {
-        return { state: { ...state, settled: withSettled(state, key) }, action: NOTHING };
+      // 本回合见过 paused/blocked 终态：回合结束不是验收结论；结算掉，免得迟到的
+      // complete 补写。标记随这次结束消费，相位照旧留给下一回合判断。
+      if (state.suppressed.includes(key)) {
+        return {
+          state: { ...state, suppressed: without(state.suppressed, key), settled: withSettled(state, key) },
+          action: NOTHING,
+        };
       }
       if (state.settled.includes(key)) return { state, action: NOTHING };
       return {
@@ -142,4 +165,9 @@ function without(values: readonly string[], key: string): readonly string[] {
 /** 每回合只记一次：停止终态与取消结束可能先后到达同一会话。 */
 function withSettled(state: GoalTurnState, key: string): readonly string[] {
   return state.settled.includes(key) ? state.settled : [...state.settled, key];
+}
+
+/** 每回合只记一次暂停/受阻标记（同一终态重复投递不重复入列）。 */
+function withSuppressed(values: readonly string[], key: string): readonly string[] {
+  return values.includes(key) ? values : [...values, key];
 }

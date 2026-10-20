@@ -534,7 +534,11 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const projectId = bodyParam(req.body, 'projectId')
       if (!projectId) throw new Error('project.remove requires params.projectId')
       const removed = await removeProject(ctx.profileDir, projectId)
-      await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'))
+      // 自动化运行会话也是会话日志:删目录前同样释放运行态(等待中的输入、live agent、
+      // 子会话登记、坏参数计数与已确认计划目标),与 session.remove / 任务级联同口径。
+      await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'), (sessionId) =>
+        releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+      )
       const cascadedSessionIds = await removeTasksOfProject(ctx.profileDir, projectId)
       // 与 session.remove 同一运行态释放:删文件前先摘掉卡片、live agent、子会话与计划目标。
       for (const sessionId of cascadedSessionIds) releaseSessionRuntime(ctx.runtimeCtx, sessionId)
@@ -616,7 +620,10 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     handler: storeRoute(async (req, ctx) => {
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.remove requires params.id')
-      await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'))
+      // 运行会话随任务一并删除:删日志前先释放它的运行态(与 project.remove 同一接线段)。
+      await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
+        releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+      )
       return { removed: true }
     }),
   }, // Task 3 (M4)

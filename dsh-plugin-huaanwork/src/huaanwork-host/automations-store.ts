@@ -345,6 +345,7 @@ export async function removeAutomation(
   storageRoot: string,
   automationId: string,
   sessionsRoot: string = join(storageRoot, 'sessions'),
+  releaseSession?: (sessionId: string) => void,
 ): Promise<void> {
   return withAutomationRegistryLock(async () => {
     const registry = await readAutomationRegistry(storageRoot)
@@ -354,7 +355,7 @@ export async function removeAutomation(
     await writeAutomationRegistry(storageRoot, registry)
     await rm(runsPath(storageRoot, automationId), { force: true }).catch(() => undefined)
     await rm(auditPath(storageRoot, automationId), { force: true }).catch(() => undefined)
-    await removeAutomationSessions(sessionsRoot, automationId)
+    await removeAutomationSessions(sessionsRoot, automationId, releaseSession)
   })
 }
 

@@ -64,3 +64,25 @@ export function markApprovalAnswered<T extends { kind: string }>(
   });
   return changed ? next : items;
 }
+
+/**
+ * App `answer()` 的接线段：把「已处理」写回真正持有这张卡的全部标签。
+ * 生产调用点只此一处（App 直接把它交给 `setChatTabs`），测试驱动同一实现；
+ * 去掉 App 的调用点由 app-wiring 契约钉抓住。
+ */
+export function answerApprovalInTabs<
+  TItem extends { kind: string },
+  TTab extends { id: string; items: readonly TItem[] },
+>(
+  approvalRequestId: string,
+  decision: "approve" | "reject",
+  setTabs: (value: TTab[] | ((prev: TTab[]) => TTab[])) => void,
+): void {
+  setTabs((prev) =>
+    prev.map((tab) => {
+      const items = markApprovalAnswered(tab.items, approvalRequestId, decision);
+      // 展开保留标签的其余字段;泛型对象展开 TypeScript 无法自行证明，与 markApprovalAnswered 同写法。
+      return items === tab.items ? tab : ({ ...tab, items: [...items] } as TTab);
+    }),
+  );
+}

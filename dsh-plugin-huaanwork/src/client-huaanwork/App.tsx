@@ -110,11 +110,17 @@ import {
 } from "./logic/thinkingPanel.ts";
 import { closeOpenInputs, inputCardStatus, settleInputCard, type InputCard } from "./logic/inputCard.ts";
 import { toolRowIcon } from "./logic/commandOutcome.ts";
-import { askCardWaitsForClick, hasPendingAsk, markApprovalAnswered, resolveActiveTab } from "./logic/chatTabs.ts";
+import {
+  answerApprovalInTabs,
+  askCardWaitsForClick,
+  hasPendingAsk,
+  resolveActiveTab,
+  type ApprovalCardView,
+} from "./logic/chatTabs.ts";
 import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, sessionStopRequested, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
 import {
   HOST_UNRESPONSIVE_TEXT,
-  clearFailureOnStopped,
+  clearFailuresInTabs,
   hostExitNotice,
   hostLivenessNotice,
   type HostLivenessPhase,
@@ -175,16 +181,13 @@ type ToolCard = {
   isError?: boolean;
 };
 
-type AskCard = {
+/** 审批卡 = 逻辑层展示形状（answered/autoContinue/actionable）+ App 侧的原因、摘要与调用标识。 */
+type AskCard = ApprovalCardView & {
   approvalRequestId: string;
   toolName: string;
-  callId?: string;
   reason?: string;
+  callId?: string;
   summary?: string;
-  autoContinue?: boolean;
-  /** false = 没有可提交的审批（没人接的提问），卡片只显示说明。 */
-  actionable?: boolean;
-  answered?: "approve" | "reject";
 };
 
 type ChatItem =
@@ -1277,10 +1280,7 @@ export default function App() {
       hostStoppedByUserRef.current = phase === "stopped";
       setHostPhase(phase);
       // WebSocket 关闭可能先于停止确认到达:撤回关闭路径误标在标签上的失败横幅。
-      setChatTabs((prev) => {
-        const cleared = clearFailureOnStopped(phase, prev);
-        return cleared === prev ? prev : [...cleared];
-      });
+      clearFailuresInTabs(phase, setChatTabs);
     };
     const report = () => bridge.reportTurns((turnActive ? 1 : 0) + runningAutomationIds.size);
     report();
@@ -1894,12 +1894,7 @@ export default function App() {
     const method = decision === "approve" ? "session.approve" : "session.reject";
     await rpcCall(method, { approvalRequestId: card.approvalRequestId });
     // 卡片可能属于非当前查看的标签（liveChatRef 只表示谁拥有当前流）:按卡片自己的标签回写。
-    setChatTabs((prev) =>
-      prev.map((tab) => {
-        const items = markApprovalAnswered(tab.items, card.approvalRequestId, decision);
-        return items === tab.items ? tab : { ...tab, items: [...items] };
-      }),
-    );
+    answerApprovalInTabs(card.approvalRequestId, decision, setChatTabs);
   }
 
   /** `request_input` 卡片：提交的文字回到同一回合；取消结束这次调用并停止回合。 */
@@ -3204,23 +3199,28 @@ function ChatRow({
     <div className="card ask-card">
       <span className="ttl">✋ 批准请求 · {item.card.toolName}</span>
       {item.card.summary ? <pre>{item.card.summary}</pre> : null}
-      {item.card.reason ? <p style={{ margin: 0 }}>{item.card.reason}</p> : null}
-      <p className="muted" style={{ margin: 0 }}>
-        {item.card.approvalRequestId}
-      </p>
       {item.card.actionable === false ? (
+        // 说明卡没有审批登记：只讲一遍原因，不显示原始请求 id，也不渲染按钮。
         <p style={{ margin: 0 }}>{item.card.reason ?? "没有人接到这个请求，无法在这里回答"}</p>
-      ) : item.card.answered ? (
-        <p style={{ margin: 0 }}>{item.card.answered === "approve" ? "已批准" : "已拒绝"}</p>
       ) : (
-        <div className="row">
-          <button type="button" className="btn approve" disabled={blocked} onClick={() => onAnswer(item.card, "approve")}>
-            批准
-          </button>
-          <button type="button" className="btn reject" disabled={blocked} onClick={() => onAnswer(item.card, "reject")}>
-            拒绝
-          </button>
-        </div>
+        <>
+          {item.card.reason ? <p style={{ margin: 0 }}>{item.card.reason}</p> : null}
+          <p className="muted" style={{ margin: 0 }}>
+            {item.card.approvalRequestId}
+          </p>
+          {item.card.answered ? (
+            <p style={{ margin: 0 }}>{item.card.answered === "approve" ? "已批准" : "已拒绝"}</p>
+          ) : (
+            <div className="row">
+              <button type="button" className="btn approve" disabled={blocked} onClick={() => onAnswer(item.card, "approve")}>
+                批准
+              </button>
+              <button type="button" className="btn reject" disabled={blocked} onClick={() => onAnswer(item.card, "reject")}>
+                拒绝
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
