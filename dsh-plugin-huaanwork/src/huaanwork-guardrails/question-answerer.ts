@@ -44,6 +44,8 @@ type AskedEvent = {
   summary?: string;
   sessionId?: string;
   autoContinue?: boolean;
+  /** false = 这张卡没有任何可提交的审批（没人接的提问），界面不得渲染批准/拒绝按钮。 */
+  actionable?: false;
 };
 
 type Context = {
@@ -80,6 +82,8 @@ export function answererDecision(input: {
   mode: "ask" | "smart" | "full";
   autoContinue: boolean;
 }): "wait" | "auto-approve" | "unanswered" {
+  // 失败方向的原语:没有回答者时绝不自动放行。本插件的 apply() 自己就是那个监听者,
+  // 所以运行时传的是 true;这条分支是「没人接线」时的规格与测试锚,不要把 true 改成推导值。
   if (!input.hasListener) return "unanswered";
   if (input.intent === "plan-review" && input.autoContinue && input.mode !== "ask") return "auto-approve";
   return "wait";
@@ -187,6 +191,7 @@ function showCard(
   approvalRequestId: string,
   reason: string,
   autoContinue = false,
+  actionable = true,
 ): void {
   const question = request.questions?.[0];
   const sessionId = sessionIdOfAgentRef(request.agent);
@@ -201,6 +206,7 @@ function showCard(
     ...(callId ? { callId } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(autoContinue ? { autoContinue } : {}),
+    ...(actionable ? {} : { actionable: false as const }),
   });
 }
 
@@ -318,7 +324,8 @@ function waitForDecision(
 }
 
 async function unanswered(ctx: Context, request: QuestionRequest): Promise<never> {
-  if (typeof ctx.huaanworkEmit === "function") showCard(ctx, request, randomUUID(), UNANSWERED_TEXT);
+  // 没有任何审批登记:卡片只能是一句说明,不能带批准/拒绝按钮(点击只会静默失败)。
+  if (typeof ctx.huaanworkEmit === "function") showCard(ctx, request, randomUUID(), UNANSWERED_TEXT, false, false);
   await hangUntilRealCancel(request.signal);
   const reason = request.signal?.reason;
   throw reason instanceof Error ? reason : new Error(UNANSWERED_TEXT);

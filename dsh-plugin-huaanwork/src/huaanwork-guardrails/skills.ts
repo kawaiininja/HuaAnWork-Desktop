@@ -183,11 +183,12 @@ export function apply(ctx: Context): void {
     consumePendingSpawn(agent);
   }) as never);
 
-  ctx.on("subagent/start", ((info: { id?: string; parent?: unknown }) => {
+  ctx.on("subagent/start", ((info: { id?: string }) => {
     if (!info.id) return;
     const child = ctx.agents?.get?.(info.id);
-    // 冷恢复从 sendMessage 派发，不经 start 包装；进程级最近发送可能是兄弟会话，不能拿来兜底。
-    const parentId = sessionIdOf(child?.session?.header?.parentSession) ?? startParent.getStore() ?? sessionIdOf(info.parent);
+    // 事件载荷只有 { runId, provider, id, local },没有 parent;父会话取自子会话 header,
+    // 冷恢复路径靠它,start 包装路径靠下面的 AsyncLocalStorage。
+    const parentId = sessionIdOf(child?.session?.header?.parentSession) ?? startParent.getStore();
     if (parentId && parentId !== info.id) registerChildSession(parentId, info.id);
     if (child) consumePendingSpawn(child);
   }) as never);

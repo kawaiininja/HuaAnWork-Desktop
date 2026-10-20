@@ -13,11 +13,12 @@ import {
 type Exec = { agent?: unknown; signal?: AbortSignal };
 type Registered = { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> };
 
-function routeTools(emitted: unknown[], emit = true) {
+function routeTools(emitted: unknown[], emit = true, unattended?: { sessionId?: string; [key: string]: unknown }) {
   const tools = new Map<string, Registered>();
   apply({
     huaanworkRouteAgent: { current: null },
     ...(emit ? { huaanworkEmit: (event: unknown) => { emitted.push(event); } } : {}),
+    ...(unattended ? { huaanworkUnattended: { current: unattended } } : {}),
     planMode: { set() { return "queued"; } },
     tools: { register(definition: Registered) { tools.set(definition.name, definition); } },
   });
@@ -101,6 +102,45 @@ test("request_input does not wait when no chat can show the question", async () 
   const agent = { id: "huaanwork-eeeeeeeeeeeeeeee" };
   await assert.rejects(tools.get("request_input")!.execute({ question: "发给谁？" }, { agent }), /没有可以显示问题的对话/);
   assert.equal(answerRouteInput(agent.id, "x"), false);
+});
+
+test("request_input fails closed under the matching unattended scope instead of parking", async () => {
+  const emitted: unknown[] = [];
+  const agent = { id: "huaanwork-9999999999999999" };
+  const tools = routeTools(emitted, true, { runId: "run-1", automationId: "auto-1", sessionId: agent.id });
+  await assert.rejects(
+    tools.get("request_input")!.execute({ question: "发给谁？" }, { agent }),
+    /无人值守运行没有可以回答这个问题的人/,
+  );
+  // 没有人类卡片:不 emit、不登记待答(点了也不会静默成功)。
+  assert.deepEqual(emitted, []);
+  assert.equal(answerRouteInput(agent.id, "late"), false);
+
+  // 其他会话(人在自动化运行期间)照常等卡片,不被错误地降级。
+  const attended = routeTools(emitted, true, { runId: "run-2", automationId: "auto-2", sessionId: "automation-1" });
+  const human = { id: "huaanwork-aaaaaaaaaaaaaaaa" };
+  const waiting = attended.get("request_input")!.execute({ question: "哪一份？" }, { agent: human });
+  await Promise.resolve();
+  assert.deepEqual(emitted, [{ event: "input/asked", question: "哪一份？", sessionId: human.id }]);
+  assert.equal(answerRouteInput(human.id, "甲"), true);
+  assert.deepEqual(await waiting, { text: "甲" });
+});
+
+test("control-tool execute validates through the shared classifier, not a copy", async () => {
+  const emitted: unknown[] = [];
+  const tools = routeTools(emitted);
+  const planAgent = { id: "huaanwork-1111111111111111" };
+  const askAgent = { id: "huaanwork-2222222222222222" };
+  // 多出未声明字段 ⇒ classifyToolCalls 判 invalid，execute 返回可修正的错误。
+  await assert.rejects(
+    tools.get("propose_plan")!.execute({ objective: "汇总", steps: [] }, { agent: planAgent }),
+    /只接受一个非空字符串字段 objective/,
+  );
+  await assert.rejects(
+    tools.get("request_input")!.execute({ question: "  " }, { agent: askAgent }),
+    /只接受一个非空字符串字段 question/,
+  );
+  assert.deepEqual(emitted, []);
 });
 
 test("a throwing chat emit does not leave the question waiting", async () => {

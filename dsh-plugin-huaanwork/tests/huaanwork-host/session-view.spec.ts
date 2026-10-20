@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
+import { capToolOutput } from '@huaanwork/policy/truncate'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { detailRecords, decompressZstdFrames, summarizeSessionLog } from '../../src/huaanwork-host/session-view.ts'
 import type { SessionSummary } from '../../src/client-huaanwork/rpc-types.ts'
@@ -264,6 +265,8 @@ describe('detailRecords', () => {
     expect(record.text.split('[exit code: 1]')).toHaveLength(2)
     expect(record.text.startsWith('x')).toBe(true)
     expect(record.text).toContain('y')
+    // 截断标记必须在（只留头尾而没有标记就不是同一种形状）。
+    expect(record.text).toContain('…（已截断）')
   })
 
   test('caps history results in UTF-8 bytes so CJK output is not cut at the old character budget', () => {
@@ -280,7 +283,8 @@ describe('detailRecords', () => {
     expect(cut.text.startsWith('汉')).toBe(true)
     expect(cut.text.endsWith('尾')).toBe(true)
     expect(cut.text).toContain('…（已截断）')
-    expect(Buffer.byteLength(cut.text, 'utf8')).toBeLessThanOrEqual(32 * 1024)
+    // 上限与形状直接对齐实时桥的 capToolOutput 默认值（历史侧不再另写 32 KiB）。
+    expect(cut.text).toBe(capToolOutput(oversized, '').text)
   })
 
   test('skips plugin injections and tolerates corrupt lines', () => {
@@ -330,10 +334,10 @@ describe('detailRecords', () => {
     expect(record!.kind).toBe('tool-result')
     if (record?.kind !== 'tool-result') throw new Error('expected tool-result record')
     // 与实时桥一致:保留头、尾和中间的截断标记,而不是只留头。
-    expect(record.text.startsWith('HEAD')).toBe(true)
-    expect(record.text.endsWith('TAIL')).toBe(true)
-    expect(record.text).toContain('…（已截断）')
-    expect(Buffer.byteLength(record.text, 'utf8')).toBeLessThanOrEqual(32 * 1024)
+    expect(record!.text.startsWith('HEAD')).toBe(true)
+    expect(record!.text.endsWith('TAIL')).toBe(true)
+    expect(record!.text).toContain('…（已截断）')
+    expect(record!.text).toBe(capToolOutput(`HEAD${'x'.repeat(40_000)}TAIL`, '').text)
   })
 })
 

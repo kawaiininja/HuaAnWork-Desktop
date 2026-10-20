@@ -56,8 +56,11 @@ export function toolRowIcon(card: { status: "start" | "end"; isError?: boolean }
   return card.isError === true ? "✗" : "✓";
 }
 
-/** 会话详情工具行的展示上限,与历史参数格(ARGS_MAX_CHARS)一致。 */
-const TOOL_LABEL_MAX_CHARS = 200;
+/**
+ * 工具参数/命令标签的展示上限（字符）。会话详情工具行与历史参数格共用同一个数字，
+ * 两处不再各写一份 200。
+ */
+export const TOOL_LABEL_MAX_CHARS = 200;
 
 /** 历史工具行标签:命令优先、参数兜底;压成一行并限长,避免超长命令撑爆详情。 */
 export function toolArgumentLabel(tool: { command?: string; args?: string }): string | undefined {

@@ -343,6 +343,20 @@ async function openSession(sessionsRoot: string, params: unknown): Promise<unkno
   }
 }
 
+/**
+ * 删除会话前必须先释放的运行态：等待中的卡片、绑定的 live agent、子会话登记、
+ * 坏参数计数与上一份已确认的计划目标。`session.remove` 与 task/project 级联删除
+ * 两条路径共用同一实现，避免只清文件、留下会继承到同名新会话的旧状态。
+ */
+export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, sessionId: string): void {
+  releaseRouteInput(sessionId)
+  if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })
+  forgetChildSessions(sessionId)
+  forgetChildSession(sessionId)
+  clearInvalidRoute(sessionId)
+  forgetConfirmedTarget(sessionId)
+}
+
 async function removeSession(
   ctx: SessionRuntimeContext | undefined,
   sessionsRoot: string,
@@ -352,14 +366,8 @@ async function removeSession(
   if (!sessionId) throw new Error('session.remove requires params.sessionId')
   const located = await locateSessionFile(sessionsRoot, sessionId)
   if (!located) throw new Error(`session ${sessionId} was not found`)
-  // 删日志之前先把会话从运行态里摘出来:等待中的卡片、live agent、子会话登记、坏参数计数
-  // 和上一份已确认的计划目标都不能留到下一次同名会话上。
-  releaseRouteInput(sessionId)
-  if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })
-  forgetChildSessions(sessionId)
-  forgetChildSession(sessionId)
-  clearInvalidRoute(sessionId)
-  forgetConfirmedTarget(sessionId)
+  // 删日志之前先把会话从运行态里摘出来（见 releaseSessionRuntime 的注释）。
+  releaseSessionRuntime(ctx, sessionId)
   await unlink(located.file)
   return { removed: true }
 }

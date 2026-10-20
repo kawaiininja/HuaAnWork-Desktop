@@ -113,10 +113,10 @@ test("official ask_user_question waits on the same approval card", async () => {
   assert.deepEqual((await pending).answers, [{ id: "q1", selected: ["乙"] }]);
 });
 
-test("full mode without a chat answerer shows the unanswered notice and does not approve", async () => {
+test("full mode without a chat answerer shows a non-actionable notice and does not approve", async () => {
   const dir = mkdtempSync(join(tmpdir(), "huaanwork-qa-"));
   writeFileSync(join(dir, "huaanwork-settings.json"), JSON.stringify({ guard_mode: "full" }));
-  const events: Asked[] = [];
+  const events: (Asked & { actionable?: boolean })[] = [];
   let listener: Listener | undefined;
   apply({
     huaanworkProfileDir: dir,
@@ -144,6 +144,8 @@ test("full mode without a chat answerer shows the unanswered notice and does not
   ]);
   assert.equal(raced, "pending");
   assert.equal(events.some((event) => event.reason === "这个问题还没有人接到"), true);
+  // 没有任何审批登记:卡片不得渲染批准/拒绝按钮(点了只会静默失败)。
+  assert.equal(events[0]?.actionable, false);
   controller.abort();
   await assert.rejects(pending);
 });

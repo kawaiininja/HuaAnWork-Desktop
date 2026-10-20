@@ -8,6 +8,15 @@ export const inject = ["tools", "planMode"];
 
 const INVALID_ROUTE_TEXT = "没能理解这个请求";
 const STOPPED_TEXT = "回合已停止，这个问题不再等待回答";
+/** 无人值守运行没有可点击的人：request_input 必须立刻失败，不能停到自动化超时。 */
+export const UNATTENDED_NO_ANSWERER_TEXT = "无人值守运行没有可以回答这个问题的人";
+
+/** 与 question-answerer 同一作用域语义：带 sessionId 时只接管该会话，旧形状按全局处理。 */
+function unattendedOwnsInput(scope: { sessionId?: string } | undefined, sessionId: string): boolean {
+  if (!scope) return false;
+  if (scope.sessionId === undefined) return true;
+  return scope.sessionId === sessionId;
+}
 
 type Agent = {
   id?: string;
@@ -19,6 +28,8 @@ type Exec = { agent?: unknown; signal?: AbortSignal };
 
 type Context = {
   huaanworkRouteAgent?: { current: unknown };
+  /** boot 时注入的容器；无人值守运行期间 `.current` 非空（policy.ts / question-answerer 同源）。 */
+  huaanworkUnattended?: { current?: { sessionId?: string } };
   huaanworkEmit?: (
     event:
       | { event: "session/end"; ok: false; error: string; sessionId?: string }
@@ -100,6 +111,10 @@ export function apply(ctx: Context): void {
   };
 
   const waitForInput = (agent: Agent, sessionId: string, question: string, signal: AbortSignal | undefined) => {
+    // 无人值守自动化没有人类卡片：立刻以工具错误结束，而不是把整轮停到超时。
+    if (unattendedOwnsInput(ctx.huaanworkUnattended?.current, sessionId)) {
+      return Promise.reject(new Error(UNATTENDED_NO_ANSWERER_TEXT));
+    }
     let pending: PendingInput | undefined;
     const waiting = new Promise<string>((resolve, reject) => {
       const emit = ctx.huaanworkEmit;

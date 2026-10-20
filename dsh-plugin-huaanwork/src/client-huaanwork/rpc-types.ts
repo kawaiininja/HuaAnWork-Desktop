@@ -248,6 +248,8 @@ export type RpcEvent =
       sessionId?: string;
       /** plan-review 已由回答者按当前护栏提交同意，卡片不再等待点击。 */
       autoContinue?: boolean;
+      /** false = 没有可提交的审批（没人接的提问），卡片不得渲染批准/拒绝按钮。 */
+      actionable?: false;
     }
   /** `request_input` 在等对话卡片的回答；回答或取消走 `session.answerInput`。 */
   | { event: "input/asked"; question: string; sessionId: string }

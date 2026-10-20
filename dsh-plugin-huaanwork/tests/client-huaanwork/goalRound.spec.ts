@@ -112,7 +112,8 @@ test("goal completion writes exactly one outcome, whichever event lands first", 
   assert.deepEqual(kinds(duplicated), ["none", "none", "outcome", "none", "none"]);
 });
 
-test("a paused or non-round-limit blocked goal is terminal for the outcome", () => {
+test("a paused or non-round-limit blocked goal never claims 已完成", () => {
+  // 只有 goal/state complete 是验收结论:paused / blocked 不是「已完成」的证据。
   for (const phase of ["paused", "blocked"] as const) {
     const actions = drive([
       { kind: "turn-started", sessionId: SESSION },
@@ -120,11 +121,46 @@ test("a paused or non-round-limit blocked goal is terminal for the outcome", () 
       { kind: "goal-state", phase, roundsStarted: 2, sessionId: SESSION },
       { kind: "session-end", sessionId: SESSION, ok: true },
     ]);
-    assert.deepEqual(kinds(actions), ["none", "none", "outcome", "none"], phase);
+    assert.deepEqual(kinds(actions), ["none", "none", "none", "none"], phase);
   }
 });
 
-test("pausing and resuming inside one user turn still writes only one outcome", () => {
+test("an input-card cancel pauses the goal before the cancelled end and writes no 已完成", () => {
+  // 真实顺序(cancelRouteInput → agent.cancel → goal-round-driver 空闲处理先 pause,
+  // 再发 session/end cancelled):App 的停止信号只认用户按停止,这条 paused 不是 stopped。
+  const actions = drive([
+    { kind: "turn-started", sessionId: SESSION },
+    { kind: "goal-state", phase: "active", sessionId: SESSION },
+    { kind: "goal-state", phase: "paused", roundsStarted: 1, sessionId: SESSION },
+    { kind: "session-end", sessionId: SESSION, ok: true, cancelled: true },
+  ]);
+  assert.deepEqual(kinds(actions), ["none", "none", "none", "none"]);
+});
+
+test("a /goal pause pauses without a stop flag and still writes no 已完成", () => {
+  // `/goal pause` 不经过用户停止:goal/state paused 到达时 stopped=false。
+  // 若回合随后正常结束,暂停的目标也不是验收结论。
+  const paused = drive([
+    { kind: "turn-started", sessionId: SESSION },
+    { kind: "goal-state", phase: "active", sessionId: SESSION },
+    { kind: "goal-state", phase: "paused", roundsStarted: 2, sessionId: SESSION, stopped: false },
+    { kind: "session-end", sessionId: SESSION, ok: true },
+  ]);
+  assert.deepEqual(kinds(paused), ["none", "none", "none", "none"]);
+
+  // 之后恢复并真正完成时,仍然只由 complete 写一次结论。
+  const resumed = drive([
+    { kind: "turn-started", sessionId: SESSION },
+    { kind: "goal-state", phase: "active", sessionId: SESSION },
+    { kind: "goal-state", phase: "paused", roundsStarted: 2, sessionId: SESSION },
+    { kind: "goal-state", phase: "active", sessionId: SESSION },
+    { kind: "goal-state", phase: "complete", roundsStarted: 3, sessionId: SESSION },
+    { kind: "session-end", sessionId: SESSION, ok: true },
+  ]);
+  assert.deepEqual(kinds(resumed), ["none", "none", "none", "none", "outcome", "none"]);
+});
+
+test("pausing and resuming inside one user turn writes only the completion outcome", () => {
   const actions = drive([
     { kind: "turn-started", sessionId: SESSION },
     { kind: "goal-state", phase: "active", sessionId: SESSION },
@@ -133,7 +169,8 @@ test("pausing and resuming inside one user turn still writes only one outcome", 
     { kind: "goal-state", phase: "complete", roundsStarted: 2, sessionId: SESSION },
     { kind: "session-end", sessionId: SESSION, ok: true },
   ]);
-  assert.deepEqual(kinds(actions), ["none", "none", "outcome", "none", "none", "none"]);
+  // pause 不再是结论：同一回合恢复后仍只由 complete 写一次。
+  assert.deepEqual(kinds(actions), ["none", "none", "none", "none", "outcome", "none"]);
 });
 
 test("a cancelled turn settles silently and a late paused goal cannot add 已完成", () => {
@@ -168,14 +205,14 @@ test("a user stop pauses the goal before the cancelled end and writes no complet
   assert.deepEqual(reduced.settled, [SESSION]);
 });
 
-test("a normal paused goal still writes one outcome when no stop is in effect", () => {
+test("a normal paused goal stays neutral even when no stop is in effect", () => {
   const actions = drive([
     { kind: "turn-started", sessionId: SESSION },
     { kind: "goal-state", phase: "active", sessionId: SESSION },
     { kind: "goal-state", phase: "paused", roundsStarted: 2, sessionId: SESSION, stopped: false },
     { kind: "session-end", sessionId: SESSION, ok: true },
   ]);
-  assert.deepEqual(kinds(actions), ["none", "none", "outcome", "none"]);
+  assert.deepEqual(kinds(actions), ["none", "none", "none", "none"]);
 });
 
 test("clearing the goal stops suppression for the rest of the turn", () => {

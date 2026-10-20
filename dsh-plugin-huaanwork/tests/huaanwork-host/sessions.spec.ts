@@ -28,6 +28,8 @@ import {
   type SessionRuntimeContext,
 } from '../../src/huaanwork-host/sessions.ts'
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
+import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
+import { apply as applyQuestionAnswerer } from '../../src/huaanwork-guardrails/question-answerer.ts'
 import { emptySettings, readHuaanworkSettings, writeHuaanworkSettings } from '../../src/huaanwork-host/settings.ts'
 import { assertStreamNetworkAllowed } from '../../src/huaanwork-host/net-gate.ts'
 import { sweepProjectLegacySessions } from '../../src/huaanwork-host/session-sweep.ts'
@@ -550,6 +552,157 @@ describe('session.remove lifecycle', () => {
     expect(childrenOf('parent-of-removed')).not.toContain(sessionId)
     expect(noteInvalidRoute(sessionId).endTurn).toBe(false)
     await expect(sessionOpen(routeCtx, { sessionId })).rejects.toThrow(/was not found/)
+  })
+
+  /** full 模式答一次计划评审,把目标记为该会话的已确认基线;这里返回评审监听器与事件。 */
+  function planAnswerer(profileDir: string) {
+    writeFileSync(join(profileDir, 'huaanwork-settings.json'), JSON.stringify({ guard_mode: 'full' }))
+    const events: { approvalRequestId: string; autoContinue?: boolean }[] = []
+    const approvals = new Map<string, (result: 'allowed-once' | 'rejected' | 'unavailable' | 'cancelled') => void>()
+    let listener:
+      | ((request: unknown, next: () => Promise<unknown>) => Promise<{ answers: { id: string; selected: string[] }[] }>)
+      | undefined
+    applyQuestionAnswerer({
+      huaanworkProfileDir: profileDir,
+      huaanworkWorkspaceRoot: { current: tmpdir() },
+      huaanworkApprovals: approvals,
+      huaanworkPlanReviews: new Map(),
+      huaanworkEmit(event) {
+        if (event.event === 'approval/asked') events.push(event)
+      },
+      on(_name, fn) {
+        listener = fn as typeof listener
+      },
+    })
+    const ask = (sessionId: string, plan: string) => {
+      const callId = `call-${events.length}`
+      return listener!({
+        questions: [{
+          id: 'plan-review',
+          question: 'Approve this plan and leave plan mode?',
+          detail: plan,
+          options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+          intent: { kind: 'plan-review', approve: 'Approve', callId },
+        }],
+        agent: { session: { id: sessionId } },
+      }, async () => {
+        throw new Error('next')
+      })
+    }
+    return { events, approvals, ask }
+  }
+
+  async function pendingAfter(promise: Promise<unknown>): Promise<'settled' | 'pending'> {
+    return Promise.race([
+      promise.then(() => 'settled' as const, () => 'settled' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 30)),
+    ])
+  }
+
+  test('sessionRemove forgets the last confirmed plan target through the real route path', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = 'huaanwork-7777777777777777'
+    writePersistedSession(routeCtx.dshHome, sessionId, routeCtx.workspaceRoot.current)
+    const { events, approvals, ask } = planAnswerer(root)
+
+    // full 模式没有基线 ⇒ 第一份计划自动继续,并记成该会话的确认目标。
+    const first = await ask(sessionId, '# 周报\n\n写入 `out/report.md`，收件人：张三')
+    expect(first.answers).toEqual([{ id: 'plan-review', selected: ['Approve'] }])
+    expect(events[0]?.autoContinue).toBe(true)
+
+    // 目标变了就再确认一次,把这第二份记为新的已确认目标。
+    const second = ask(sessionId, '# 月报\n\n写入 `out/report.md`，收件人：李四')
+    expect(await pendingAfter(second)).toBe('pending')
+    approvals.get(events[1]!.approvalRequestId)!('allowed-once')
+    await second
+
+    // 经 session.remove 删除(不是直接调 forgetConfirmedTarget):记忆必须一起消失,
+    // 因此下一份不同的计划按「没有上一份」自动继续;若接线丢失,它会停住等确认。
+    await expect(sessionRemove(undefined, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
+    const afterRemoval = ask(sessionId, '# 季报\n\n写入 `out/report.md`，收件人：王五')
+    const state = await pendingAfter(afterRemoval)
+    if (state === 'pending') approvals.get(events[2]!.approvalRequestId)!('rejected')
+    await afterRemoval
+    expect(state).toBe('settled')
+    expect(events[2]?.autoContinue).toBe(true)
+  })
+
+  test('task.remove and project.remove release runtime state before the sweep deletes logs', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const taskSession = 'huaanwork-8888888888888888'
+    const projectSession = 'huaanwork-9999999999999999'
+    writePersistedSession(routeCtx.dshHome, taskSession, routeCtx.workspaceRoot.current)
+    writePersistedSession(routeCtx.dshHome, projectSession, routeCtx.workspaceRoot.current)
+    writeFileSync(join(root, 'tasks.json'), JSON.stringify({
+      tasks: [
+        { id: 't1', projectId: 'p1', name: 'T1', createdAt: 1, sessionId: taskSession },
+        { id: 't2', projectId: 'p2', name: 'T2', createdAt: 2, sessionId: projectSession },
+      ],
+    }))
+    writeFileSync(join(root, 'projects.json'), JSON.stringify({
+      projects: [{ id: 'p2', name: 'P2', root: join(root, 'p2'), createdAt: 1 }],
+    }))
+
+    const cancelled: string[] = []
+    const agents = new Map<string, ListedAgent>()
+    for (const sessionId of [taskSession, projectSession]) {
+      agents.set(sessionId, {
+        id: sessionId,
+        session: { id: sessionId },
+        status: 'running',
+        cancel: (reason) => { cancelled.push(`${sessionId}:${reason.kind}`) },
+      })
+      registerChildSession(sessionId, `child-${sessionId}`)
+      registerChildSession(`parent-${sessionId}`, sessionId)
+      expect(noteInvalidRoute(sessionId).endTurn).toBe(false)
+      expect(noteInvalidRoute(sessionId).endTurn).toBe(true)
+    }
+    routeCtx.runtimeCtx = { agents: { get: (id) => agents.get(id), list: () => [...agents.values()] } }
+
+    type Exec = { agent?: unknown; signal?: AbortSignal }
+    type Registered = { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }
+    const tools = new Map<string, Registered>()
+    applyRouteTools({
+      huaanworkEmit: () => undefined,
+      planMode: { set: () => undefined },
+      tools: { register: (definition: Registered) => { tools.set(definition.name, definition) } },
+    })
+    const waiting = new Map<string, Promise<unknown>>()
+    for (const sessionId of [taskSession, projectSession]) {
+      const agent = agents.get(sessionId)!
+      const pending = tools.get('request_input')!.execute({ question: '发给谁？' }, { agent })
+      const settlement = expect(pending).rejects.toThrow(/回合已停止/)
+      waiting.set(sessionId, settlement)
+      await Promise.resolve()
+    }
+
+    const invoke = async (method: string, body: unknown) => {
+      const route = ROUTE_TABLE.find((entry) => entry.method === method)
+      if (!route) throw new Error(`missing route ${method}`)
+      return route.handler({ params: {}, body, query: new URLSearchParams() }, routeCtx)
+    }
+
+    // task.remove:级联删任务绑定的会话日志;运行态必须先释放(等待卡片/agent/子会话/坏参数计数)。
+    await invoke('task.remove', { id: 't1' })
+    await waiting.get(taskSession)
+    expect(answerRouteInput(taskSession, 'late')).toBe(false)
+    expect(cancelled).toEqual([`${taskSession}:user`])
+    expect(childrenOf(taskSession)).toEqual([])
+    expect(childrenOf(`parent-${taskSession}`)).not.toContain(taskSession)
+    expect(noteInvalidRoute(taskSession).endTurn).toBe(false)
+    expect(existsSync(join(routeCtx.dshHome, 'sessions', 'repo', taskSession))).toBe(false)
+
+    // project.remove:同一层级联路径也必须走同一释放逻辑。
+    await invoke('project.remove', { projectId: 'p2' })
+    await waiting.get(projectSession)
+    expect(answerRouteInput(projectSession, 'late')).toBe(false)
+    expect(cancelled).toEqual([`${taskSession}:user`, `${projectSession}:user`])
+    expect(childrenOf(projectSession)).toEqual([])
+    expect(childrenOf(`parent-${projectSession}`)).not.toContain(projectSession)
+    expect(noteInvalidRoute(projectSession).endTurn).toBe(false)
+    expect(existsSync(join(routeCtx.dshHome, 'sessions', 'repo', projectSession))).toBe(false)
   })
 })
 

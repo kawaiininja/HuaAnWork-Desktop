@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 
-import { childrenOf, noteCallerSession } from "../../src/huaanwork-host/child-sessions.ts";
+import { childrenOf, forgetChildSession, noteCallerSession } from "../../src/huaanwork-host/child-sessions.ts";
 import { apply as applyLimits } from "../../src/huaanwork-guardrails/limits.ts";
 import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
@@ -619,21 +619,44 @@ test("overlapping startActivation calls register each child under its own parent
 });
 
 test("subagent end drops the child registration so a finished child is never canceled", () => {
-  const harness = createHarness();
-  harness.emit("subagent/start", { id: "end-child", parent: "end-parent" });
+  const startListeners: Array<(info: unknown) => void> = [];
+  const endListeners: Array<(info: unknown) => void> = [];
+  // 真实 subagent/start 载荷只有 { runId, provider, id, local }:父会话从子会话 header 读。
+  const children = new Map<string, unknown>([
+    ["end-child", { session: { header: { parentSession: "end-parent" } } }],
+    ["end-child-2", { session: { header: { parentSession: "end-parent-2" } } }],
+  ]);
+  const ctx = {
+    skills: { register: () => () => undefined },
+    on(event: string, listener: (info: unknown) => void) {
+      if (event === "subagent/start") startListeners.push(listener);
+      if (event === "subagent/end") endListeners.push(listener);
+    },
+    agents: { get: (id: string) => children.get(id) },
+  };
+  applySkills(ctx as never);
+  const emitStart = (id: string) => {
+    for (const listener of startListeners) listener({ runId: `run-${id}`, provider: "spawn", id, local: true });
+  };
+  const emitEnd = (payload: unknown) => {
+    for (const listener of endListeners) listener(payload);
+  };
+
+  emitStart("end-child");
+  emitStart("end-child-2");
   assert.deepEqual(childrenOf("end-parent"), ["end-child"]);
+  assert.deepEqual(childrenOf("end-parent-2"), ["end-child-2"]);
 
   // 与 start 成对的结束事件:载荷 id 就是子会话 id,登记表必须随之收缩。
-  harness.emit("subagent/end", { runId: "run-1", id: "end-child", stopReason: "completed" });
+  emitEnd({ runId: "run-end-child", id: "end-child", stopReason: "completed" });
   assert.deepEqual(childrenOf("end-parent"), []);
 
   // 空 id / 缺 id 的结束事件不改动任何登记。
-  const missing = createHarness();
-  missing.emit("subagent/start", { id: "end-child-2", parent: "end-parent-2" });
-  missing.emit("subagent/end", { id: "" });
-  missing.emit("subagent/end", {});
-  missing.emit("subagent/end", { id: 42 });
+  emitEnd({ id: "" });
+  emitEnd({});
+  emitEnd({ id: 42 });
   assert.deepEqual(childrenOf("end-parent-2"), ["end-child-2"]);
+  forgetChildSession("end-child-2");
 });
 
 test("a cold-resumed child stays on its own parent, never the last sibling send", () => {

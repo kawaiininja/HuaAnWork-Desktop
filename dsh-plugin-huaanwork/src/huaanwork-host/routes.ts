@@ -66,6 +66,7 @@ import {
   sessionList,
   sessionNew,
   sessionOpen,
+  releaseSessionRuntime,
   sessionRemove,
   sessionResume,
   sessionSend,
@@ -535,6 +536,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const removed = await removeProject(ctx.profileDir, projectId)
       await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'))
       const cascadedSessionIds = await removeTasksOfProject(ctx.profileDir, projectId)
+      // 与 session.remove 同一运行态释放:删文件前先摘掉卡片、live agent、子会话与计划目标。
+      for (const sessionId of cascadedSessionIds) releaseSessionRuntime(ctx.runtimeCtx, sessionId)
       await removeSessionFilesById(join(ctx.dshHome, 'sessions'), cascadedSessionIds)
       return { removed: true, project: removed }
     }),
@@ -706,6 +709,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       if (!id) throw new Error('task.remove requires params.id')
       const removedTask = await removeTask(ctx.profileDir, id)
       if (removedTask.sessionId) {
+        releaseSessionRuntime(ctx.runtimeCtx, removedTask.sessionId)
         await removeSessionFilesById(join(ctx.dshHome, 'sessions'), [removedTask.sessionId])
       }
       return { removed: true }

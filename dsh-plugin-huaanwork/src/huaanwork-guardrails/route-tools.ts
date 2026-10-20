@@ -19,6 +19,11 @@ export function preferControlCalls<T extends { name: string }>(calls: readonly T
   return control ? [control] : [...calls];
 }
 
+/**
+ * 分流工具判定的唯一规格。`route-tool-plugin` 的 `propose_plan` / `request_input`
+ * execute 都先过这一支（runtime 用的是同一函数，不是副本）；本文件保持纯函数，
+ * 便于把「只接受声明字段」的边界单独测。
+ */
 export function classifyToolCalls(calls: readonly { name: string; args: unknown }[]): RouteDecision {
   const control = calls.find((call) => call.name === "propose_plan" || call.name === "request_input");
   if (control?.name === "propose_plan") {

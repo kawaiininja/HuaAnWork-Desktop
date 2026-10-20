@@ -53,8 +53,10 @@ export function goalTurnEdge(previous: GoalPhase | undefined, next: GoalPhase): 
 /**
  * 目标事件 → 回合结论的纯状态机（App 在 ref 里持有状态）。
  *
- * 裁定：只有 `active` 抑制每轮结束结论。`complete`、`paused`、非 round-limit 的
- * `blocked` 都是终结态；round-limit 由专用停止文案结算，不再写普通结论。
+ * 裁定：只有 `active` 抑制每轮结束结论。`complete` 是唯一的验收结论；`paused` 与
+ * 非 round-limit 的 `blocked` 是目标的终态但不是「已完成」的证据，只结算、不写结论
+ * （输入卡取消、退出计划模式、删会话与 `/goal pause` 都会先暂停目标再结束回合）。
+ * round-limit 由专用停止文案结算，不再写普通结论。
  * `settled` 是每回合幂等闸：`session/end` 与终态 `goal/state` 无论谁先到都只写一次。
  */
 export function reduceGoalTurn(
@@ -80,8 +82,7 @@ export function reduceGoalTurn(
       const phases = { ...state.phases, [key]: event.phase };
       // 用户停止时的终态不是验收结论：官方 goal-round-driver 在空闲处理里先把目标
       // 暂停，桥随后才发取消结束。这里只结算，「已停止」由停止流程自己写，
-      // 迟到的取消结束不会补写。注意：用户主动 `/goal pause` 也会走到 paused 相位，
-      // 但那是另一条产品路径，本判定不覆盖它（是否也应静默属于单独的产品决定）。
+      // 迟到的取消结束不会补写。
       if (event.stopped === true) {
         return { state: { ...state, phases, settled: withSettled(state, key) }, action: NOTHING };
       }
@@ -91,6 +92,8 @@ export function reduceGoalTurn(
       if (edge !== "finish" || state.settled.includes(key)) {
         return { state: { ...state, phases }, action: NOTHING };
       }
+      // paused / blocked 不写结论也不结算：同一回合里恢复后仍可由 complete 写一次。
+      if (event.phase !== "complete") return { state: { ...state, phases }, action: NOTHING };
       return {
         state: { ...state, phases, settled: [...state.settled, key] },
         action: { kind: "outcome" },
@@ -111,6 +114,10 @@ export function reduceGoalTurn(
       }
       // 目标仍在续轮：每轮结束只是中间结果。
       if (state.phases[key] === "active") return { state, action: NOTHING };
+      // 目标暂停/受阻：回合结束不是验收结论；结算掉，免得迟到的 complete 补写。
+      if (state.phases[key] === "paused" || state.phases[key] === "blocked") {
+        return { state: { ...state, settled: withSettled(state, key) }, action: NOTHING };
+      }
       if (state.settled.includes(key)) return { state, action: NOTHING };
       return {
         state: { ...state, settled: [...state.settled, key] },

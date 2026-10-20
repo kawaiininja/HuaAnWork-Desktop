@@ -3,6 +3,7 @@ import { zstdDecompressSync } from 'node:zlib'
 
 import { capToolOutput } from '@huaanwork/policy/truncate'
 import {
+  TOOL_LABEL_MAX_CHARS,
   failureMarkers,
   isShellTool,
   parseToolArguments,
@@ -91,13 +92,6 @@ function scanZstdFrameEnd(buffer: Buffer, start: number): number | undefined {
 
 /** 标题最长保留 80 字符,避免超长首条消息把列表/弹窗撑爆。 */
 const TITLE_MAX_CHARS = 80
-/** 工具调用参数在详情里最多展示 200 字符。 */
-const ARGS_MAX_CHARS = 200
-/**
- * 工具结果在详情里最多展示 32 KiB（与实时桥 capToolOutput 的默认上限一致，按 UTF-8 字节计）；
- * 截断形状也一致：保留头、尾和中间的截断标记。中文约占 3 字节/字，不与实时输出双标。
- */
-const RESULT_MAX_BYTES = 32 * 1024
 
 type Json = Record<string, unknown>
 
@@ -246,8 +240,9 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         const markers = typeof source.callId === 'string' && isShellTool(toolNames.get(source.callId) ?? '')
           ? failureMarkers(resultText)
           : []
-        // 与实时桥同一截断形状:保留头、尾和中间的截断标记。
-        const capped = capToolOutput(resultText, '', false, RESULT_MAX_BYTES)
+        // 与实时桥同一截断形状:保留头、尾和中间的截断标记;上限用 capToolOutput 的默认值
+        // (32 KiB,按 UTF-8 字节计;中文约占 3 字节/字,不与实时输出双标)。
+        const capped = capToolOutput(resultText, '')
         const unshownMarkers = markers.filter((marker) => !capped.text.includes(marker))
         const text = unshownMarkers.length > 0 ? `${capped.text} ${unshownMarkers.join(' ')}` : capped.text
         records.push({
@@ -313,7 +308,7 @@ function formatArgs(value: unknown): string | undefined {
       return undefined
     }
   }
-  return clipText(encoded, ARGS_MAX_CHARS, '…')
+  return clipText(encoded, TOOL_LABEL_MAX_CHARS, '…')
 }
 
 /** 单行化并按需截断;超长时追加省略标记。 */

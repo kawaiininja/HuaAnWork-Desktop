@@ -9,6 +9,7 @@ import {
   HOST_LIVENESS_READ_CHANNEL,
   HOST_LIVENESS_STOP_CHANNEL,
   HOST_LIVENESS_TURNS_CHANNEL,
+  type LivenessPhase,
 } from './huaanwork-host/host-liveness.ts'
 import {
   DESKTOP_RENDERER_ACTION_CHANNEL,
@@ -54,8 +55,8 @@ contextBridge.exposeInMainWorld('dshDesktopSetup', {
 
 contextBridge.exposeInMainWorld('huaanworkHostLiveness', {
   read: () => ipcRenderer.invoke(HOST_LIVENESS_READ_CHANNEL),
-  onChange(listener: (state: { phase: 'ok' | 'suspect' | 'stoppable' | 'stopped'; turns: number }) => void) {
-    const wrapped = (_event: unknown, state: { phase: 'ok' | 'suspect' | 'stoppable' | 'stopped'; turns: number }) => listener(state)
+  onChange(listener: (state: { phase: LivenessPhase; turns: number }) => void) {
+    const wrapped = (_event: unknown, state: { phase: LivenessPhase; turns: number }) => listener(state)
     ipcRenderer.on(HOST_LIVENESS_CHANNEL, wrapped)
     return () => { ipcRenderer.removeListener(HOST_LIVENESS_CHANNEL, wrapped) }
   },

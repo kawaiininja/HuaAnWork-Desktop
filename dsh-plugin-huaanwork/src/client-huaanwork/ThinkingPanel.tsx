@@ -18,7 +18,7 @@ export function ThinkingPanel({
 }) {
   const [localToggle, setLocalToggle] = useState<"expand" | "collapse" | null>(null);
   const toggle = onToggle ? userToggled : localToggle;
-  const chrome = thinkingChrome({ thought, hasAssistantText, userToggled: toggle, interrupted, historical });
+  const chrome = thinkingChrome({ hasAssistantText, userToggled: toggle, interrupted, historical });
   const flip = () => {
     const next = chrome.expanded ? "collapse" : "expand";
     if (onToggle) onToggle(next);

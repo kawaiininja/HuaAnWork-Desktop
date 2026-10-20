@@ -32,7 +32,6 @@ export function resolveThinking(input: { reasoning: string; assistantText: strin
 }
 
 export function thinkingChrome(input: {
-  thought: string;
   hasAssistantText: boolean;
   userToggled: "expand" | "collapse" | null;
   interrupted: boolean;

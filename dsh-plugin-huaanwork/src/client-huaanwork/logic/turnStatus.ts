@@ -1,5 +1,8 @@
 const ALERT_MS = 5 * 60 * 1000;
 
+/** 发送瞬间的起步宽限:还没满 1 秒就说「已 1 秒没有新结果」会自相矛盾。 */
+const INITIAL_GRACE_MS = 1_000;
+
 const THINKING_GRACE_MS = 2_000;
 
 export function turnStatus(input: {
@@ -9,6 +12,9 @@ export function turnStatus(input: {
 }): { text: string; alert: boolean } {
   if (input.runningTool) {
     return { text: `正在执行工具 ${input.runningTool}`, alert: input.quietMs >= ALERT_MS };
+  }
+  if (input.quietMs < INITIAL_GRACE_MS) {
+    return { text: "正在思考", alert: false };
   }
   if (input.latest === "reasoning" && input.quietMs < THINKING_GRACE_MS) {
     return { text: "正在思考", alert: false };

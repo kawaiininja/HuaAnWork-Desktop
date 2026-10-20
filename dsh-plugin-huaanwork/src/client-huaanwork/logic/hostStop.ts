@@ -4,7 +4,10 @@
  * 不弹提示，横幅必须自己给出中性文案，且不能再显示「执行进程无响应」与结束按钮。
  */
 
-export type HostLivenessPhase = "ok" | "suspect" | "stoppable" | "stopped";
+import type { LivenessPhase } from "../../huaanwork-host/host-liveness.ts";
+
+/** 与宿主探活/预加载共用的同一联合，避免三处各自维护字面量。 */
+export type HostLivenessPhase = LivenessPhase;
 
 export const HOST_STOPPED_BY_USER_TEXT = "执行进程已按你的要求结束";
 export const HOST_UNRESPONSIVE_TEXT = "执行进程无响应";
@@ -20,6 +23,21 @@ export function hostLivenessNotice(phase: HostLivenessPhase): HostLivenessNotice
   if (phase === "ok") return { kind: "none" };
   if (phase === "stopped") return { kind: "stopped", text: HOST_STOPPED_BY_USER_TEXT };
   return { kind: "unresponsive", canStop: phase === "stoppable" };
+}
+
+/**
+ * 用户确认停止后的失败标记撤回。套接字关闭可能先于 `stopped` 相位到达：
+ * `onSidecarExit` 不知道这是主动停止，先把标签标成失败（红色横幅）。停止确认
+ * 到达时必须撤回它，否则中性终态上会一直挂着「会话已失败」。
+ * 返回同一个数组表示没有需要撤回的标记（调用方据此跳过状态更新）。
+ */
+export function clearFailureOnStopped<T extends { sessionFailed: boolean }>(
+  phase: HostLivenessPhase,
+  tabs: readonly T[],
+): readonly T[] {
+  if (phase !== "stopped") return tabs;
+  if (!tabs.some((tab) => tab.sessionFailed)) return tabs;
+  return tabs.map((tab) => (tab.sessionFailed ? { ...tab, sessionFailed: false } : tab));
 }
 
 /**

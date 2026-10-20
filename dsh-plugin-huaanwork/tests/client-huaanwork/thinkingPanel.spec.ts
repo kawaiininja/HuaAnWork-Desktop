@@ -44,27 +44,27 @@ test("an unclosed think tag stays out of the answer bubble", () => {
 
 test("panel collapses when answer text arrives unless the user toggled it", () => {
   assert.deepEqual(
-    thinkingChrome({ thought: "先看文件", hasAssistantText: true, userToggled: null, interrupted: false }),
+    thinkingChrome({ hasAssistantText: true, userToggled: null, interrupted: false }),
     { title: "思考 · 已生成", expanded: false },
   );
   assert.equal(
-    thinkingChrome({ thought: "先看文件", hasAssistantText: true, userToggled: "expand", interrupted: false }).expanded,
+    thinkingChrome({ hasAssistantText: true, userToggled: "expand", interrupted: false }).expanded,
     true,
   );
   assert.equal(
-    thinkingChrome({ thought: "先看文件", hasAssistantText: false, userToggled: null, interrupted: true }).title,
+    thinkingChrome({ hasAssistantText: false, userToggled: null, interrupted: true }).title,
     "思考 · 已中断",
   );
   assert.deepEqual(
-    thinkingChrome({ thought: "先看文件", hasAssistantText: true, userToggled: null, interrupted: false, historical: true }),
+    thinkingChrome({ hasAssistantText: true, userToggled: null, interrupted: false, historical: true }),
     { title: "思考", expanded: false },
   );
   assert.deepEqual(
-    thinkingChrome({ thought: "先看文件", hasAssistantText: false, userToggled: null, interrupted: false, historical: true }),
+    thinkingChrome({ hasAssistantText: false, userToggled: null, interrupted: false, historical: true }),
     { title: "思考", expanded: false },
   );
   assert.equal(
-    thinkingChrome({ thought: "先看文件", hasAssistantText: false, userToggled: "expand", interrupted: false, historical: true }).expanded,
+    thinkingChrome({ hasAssistantText: false, userToggled: "expand", interrupted: false, historical: true }).expanded,
     true,
   );
 });
@@ -79,7 +79,6 @@ test("a user stop marks the current turn interrupted", () => {
   assert.equal(next[1]?.interrupted, true);
   assert.equal(
     thinkingChrome({
-      thought: "先看文件",
       hasAssistantText: true,
       userToggled: null,
       interrupted: next[1]?.interrupted === true,

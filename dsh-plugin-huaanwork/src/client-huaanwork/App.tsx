@@ -110,10 +110,11 @@ import {
 } from "./logic/thinkingPanel.ts";
 import { closeOpenInputs, inputCardStatus, settleInputCard, type InputCard } from "./logic/inputCard.ts";
 import { toolRowIcon } from "./logic/commandOutcome.ts";
-import { hasPendingAsk, resolveActiveTab } from "./logic/chatTabs.ts";
+import { askCardWaitsForClick, hasPendingAsk, markApprovalAnswered, resolveActiveTab } from "./logic/chatTabs.ts";
 import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, sessionStopRequested, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
 import {
   HOST_UNRESPONSIVE_TEXT,
+  clearFailureOnStopped,
   hostExitNotice,
   hostLivenessNotice,
   type HostLivenessPhase,
@@ -181,6 +182,8 @@ type AskCard = {
   reason?: string;
   summary?: string;
   autoContinue?: boolean;
+  /** false = 没有可提交的审批（没人接的提问），卡片只显示说明。 */
+  actionable?: boolean;
   answered?: "approve" | "reject";
 };
 
@@ -550,11 +553,6 @@ export default function App() {
       cancelled = true;
     };
   }, [view, ready, sidecarDead]);
-
-  /** 流事件只写当前回合所属的对话标签（事件回调在挂载期注册，需稳定引用）。 */
-  const setLiveItems = useCallback((updater: (prev: ChatItem[]) => ChatItem[]) => {
-    setChatTabs((prev) => prev.map((tab) => (tab.id === liveChatRef.current ? { ...tab, items: updater(tab.items) } : tab)));
-  }, []);
 
   /** 向最近激活的对话标签追加一条提示。 */
   function noteActive(text: string) {
@@ -1278,6 +1276,11 @@ export default function App() {
     const observe = (phase: HostLivenessPhase) => {
       hostStoppedByUserRef.current = phase === "stopped";
       setHostPhase(phase);
+      // WebSocket 关闭可能先于停止确认到达:撤回关闭路径误标在标签上的失败横幅。
+      setChatTabs((prev) => {
+        const cleared = clearFailureOnStopped(phase, prev);
+        return cleared === prev ? prev : [...cleared];
+      });
     };
     const report = () => bridge.reportTurns((turnActive ? 1 : 0) + runningAutomationIds.size);
     report();
@@ -1886,14 +1889,16 @@ export default function App() {
 
   async function answer(card: AskCard, decision: "approve" | "reject") {
     if (sidecarDead) return;
+    // 没有审批登记的说明卡点了只会静默失败:不发起 RPC,也不改卡片。
+    if (!askCardWaitsForClick(card)) return;
     const method = decision === "approve" ? "session.approve" : "session.reject";
     await rpcCall(method, { approvalRequestId: card.approvalRequestId });
-    setLiveItems((prev) =>
-      prev.map((item) =>
-        item.kind === "ask" && item.card.approvalRequestId === card.approvalRequestId
-          ? { ...item, card: { ...item.card, answered: decision } }
-          : item,
-      ),
+    // 卡片可能属于非当前查看的标签（liveChatRef 只表示谁拥有当前流）:按卡片自己的标签回写。
+    setChatTabs((prev) =>
+      prev.map((tab) => {
+        const items = markApprovalAnswered(tab.items, card.approvalRequestId, decision);
+        return items === tab.items ? tab : { ...tab, items: [...items] };
+      }),
     );
   }
 
@@ -2991,6 +2996,7 @@ function handleEvent(
           reason: event.reason,
           summary: event.summary,
           autoContinue: event.autoContinue,
+          actionable: event.actionable,
         },
       };
       setItems((prev) => (event.toolName === "plan-review" ? insertBeforeToolRow(prev, ask, event.callId) : [...prev, ask]), event.sessionId);
@@ -3202,7 +3208,9 @@ function ChatRow({
       <p className="muted" style={{ margin: 0 }}>
         {item.card.approvalRequestId}
       </p>
-      {item.card.answered ? (
+      {item.card.actionable === false ? (
+        <p style={{ margin: 0 }}>{item.card.reason ?? "没有人接到这个请求，无法在这里回答"}</p>
+      ) : item.card.answered ? (
         <p style={{ margin: 0 }}>{item.card.answered === "approve" ? "已批准" : "已拒绝"}</p>
       ) : (
         <div className="row">
@@ -3235,6 +3243,8 @@ function PlanCard({
       <p style={{ margin: 0 }}>{PLAN_CARD_NOTE}</p>
       {card.autoContinue ? (
         <p style={{ margin: 0 }}>{AUTO_CONTINUE_LABEL}</p>
+      ) : card.actionable === false ? (
+        <p style={{ margin: 0 }}>{card.reason ?? "没有人接到这个请求，无法在这里回答"}</p>
       ) : card.answered ? (
         <p style={{ margin: 0 }}>{card.answered === "approve" ? "已按这个计划执行" : "继续改计划"}</p>
       ) : (
