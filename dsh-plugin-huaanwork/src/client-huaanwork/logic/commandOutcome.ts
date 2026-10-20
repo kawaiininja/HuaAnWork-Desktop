@@ -14,10 +14,24 @@ export function isShellTool(name: string): boolean {
   return name === "bash" || name === "pwsh";
 }
 
+/**
+ * tool/call.arguments 的两种真实形状：实时事件是已解析对象，会话日志把它序列化成 JSON 字符串。
+ * 字符串解析失败时原样返回，让调用方按非对象处理。
+ */
+export function parseToolArguments(args: unknown): unknown {
+  if (typeof args !== "string") return args;
+  try {
+    return JSON.parse(args);
+  } catch {
+    return args;
+  }
+}
+
 /** bash / pwsh 调用的 command 参数;日志里没有退出码,这里也不造一个。 */
 export function shellCommandOf(name: string, args: unknown): string | undefined {
   if (!isShellTool(name)) return undefined;
-  const command = args !== null && typeof args === "object" ? (args as { command?: unknown }).command : undefined;
+  const parsed = parseToolArguments(args);
+  const command = parsed !== null && typeof parsed === "object" ? (parsed as { command?: unknown }).command : undefined;
   return typeof command === "string" && command.trim() ? command : undefined;
 }
 

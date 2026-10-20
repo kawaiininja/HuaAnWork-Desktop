@@ -59,7 +59,8 @@ function assistantMessage(text: string, seq: number, time: number, toolCalls: Re
 }
 
 function toolCall(callId: string, name: string, args: Record<string, unknown>, seq: number, time: number) {
-  return { type: 'tool/call', seq, time, data: { turn: 0, step: 0, callId, name, arguments: args } }
+  // 真实日志把 arguments 序列化成 JSON 字符串(@deepseek-ai/dsh-session 的 tool/call 事件)。
+  return { type: 'tool/call', seq, time, data: { turn: 0, step: 0, callId, name, arguments: JSON.stringify(args) } }
 }
 
 function toolResult(callId: string, text: string, seq: number, time: number, isError = false) {
@@ -195,6 +196,40 @@ describe('detailRecords', () => {
     expect(records[3]).not.toHaveProperty('exitCode')
   })
 
+  test('reads the real JSON-string arguments shape and shows it as JSON once', () => {
+    const log = sessionLog([
+      HEADER,
+      {
+        type: 'tool/call',
+        seq: 1,
+        time: T0 + 3,
+        data: { turn: 0, step: 0, callId: 'c1', name: 'bash', arguments: '{"command":"pnpm test"}' },
+      },
+    ])
+    const [record] = detailRecords(log)
+    expect(record).toMatchObject({
+      kind: 'tool-call',
+      name: 'bash',
+      callId: 'c1',
+      command: 'pnpm test',
+      args: '{"command":"pnpm test"}',
+    })
+  })
+
+  test('does not double-encode a log that stores an already-parsed object', () => {
+    const log = sessionLog([
+      HEADER,
+      {
+        type: 'tool/call',
+        seq: 1,
+        time: T0 + 3,
+        data: { turn: 0, step: 0, callId: 'c1', name: 'bash', arguments: { command: 'pnpm test' } },
+      },
+    ])
+    const [record] = detailRecords(log)
+    expect(record).toMatchObject({ kind: 'tool-call', command: 'pnpm test', args: '{"command":"pnpm test"}' })
+  })
+
   test('reads failure markers from the uncapped result so a clipped head cannot hide them', () => {
     const tail = `${'x'.repeat(9000)}\n[exit code: 1]`
     const log = sessionLog([
@@ -209,6 +244,8 @@ describe('detailRecords', () => {
     const results = detailRecords(log).filter((record) => record.kind === 'tool-result')
     expect(results[0]).toMatchObject({ isError: true })
     expect((results[0] as { text: string }).text.endsWith('[exit code: 1]')).toBe(true)
+    // 尾部已保留标记时不再重复追加。
+    expect((results[0] as { text: string }).text.split('[exit code: 1]')).toHaveLength(2)
     expect(results[1]).toMatchObject({ isError: false })
     expect(results[2]).toMatchObject({ isError: false })
   })
@@ -253,14 +290,17 @@ describe('detailRecords', () => {
     expect(records[1]).toMatchObject({ kind: 'assistant', time: T0 + 5, text: '好的' })
   })
 
-  test('truncates oversized tool results', () => {
-    const log = sessionLog([HEADER, toolResult('c1', 'x'.repeat(20_000), 1, T0 + 3)])
+  test('truncates oversized tool results with the live head+tail shape', () => {
+    const log = sessionLog([HEADER, toolResult('c1', `HEAD${'x'.repeat(20_000)}TAIL`, 1, T0 + 3)])
     const [record] = detailRecords(log)
     expect(record).toBeDefined()
     expect(record!.kind).toBe('tool-result')
     if (record?.kind !== 'tool-result') throw new Error('expected tool-result record')
+    // 与实时桥一致:保留头、尾和中间的截断标记,而不是只留头。
+    expect(record.text.startsWith('HEAD')).toBe(true)
+    expect(record.text.endsWith('TAIL')).toBe(true)
+    expect(record.text).toContain('…（已截断）')
     expect(record.text.length).toBeLessThanOrEqual(8_100)
-    expect(record.text.endsWith('…（已截断）')).toBe(true)
   })
 })
 

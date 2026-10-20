@@ -1,7 +1,13 @@
 import { readFile } from 'node:fs/promises'
 import { zstdDecompressSync } from 'node:zlib'
 
-import { failureMarkers, isShellTool, shellCommandOf } from '../client-huaanwork/logic/commandOutcome.ts'
+import { capToolOutput } from '@huaanwork/policy/truncate'
+import {
+  failureMarkers,
+  isShellTool,
+  parseToolArguments,
+  shellCommandOf,
+} from '../client-huaanwork/logic/commandOutcome.ts'
 import type { SessionDetailRecord, SessionSummary } from '../client-huaanwork/rpc-types.ts'
 
 const ZSTD_MAGIC = 0xfd2fb528
@@ -87,9 +93,8 @@ function scanZstdFrameEnd(buffer: Buffer, start: number): number | undefined {
 const TITLE_MAX_CHARS = 80
 /** 工具调用参数在详情里最多展示 200 字符。 */
 const ARGS_MAX_CHARS = 200
-/** 工具结果在详情里最多展示 8000 字符(历史日志展示上限,非工具输出管道)。 */
-const RESULT_MAX_CHARS = 8000
-const TRUNCATED_SUFFIX = '…（已截断）'
+/** 工具结果在详情里最多展示 8000 字节(历史日志展示上限,非工具输出管道);截断形状与实时桥一致。 */
+const RESULT_MAX_BYTES = 8000
 
 type Json = Record<string, unknown>
 
@@ -233,18 +238,21 @@ export function detailRecords(text: string): SessionDetailRecord[] {
           .join('\n')
           .trim()
         const source = asObject(message.source)
-        // 失败标记在未截断的结果文本里解析(clipText 保留头部,尾部标记会被切掉);
+        // 失败标记在未截断的结果文本里解析(截断会丢掉中段);
         // 只对 shell 工具解析,避免读到文件里引用的标记文字。
         const markers = typeof source.callId === 'string' && isShellTool(toolNames.get(source.callId) ?? '')
           ? failureMarkers(resultText)
           : []
-        const clipped = clipText(resultText, RESULT_MAX_CHARS, TRUNCATED_SUFFIX)
+        // 与实时桥同一截断形状:保留头、尾和中间的截断标记。
+        const capped = capToolOutput(resultText, '', false, RESULT_MAX_BYTES)
+        const unshownMarkers = markers.filter((marker) => !capped.text.includes(marker))
+        const text = unshownMarkers.length > 0 ? `${capped.text} ${unshownMarkers.join(' ')}` : capped.text
         records.push({
           kind: 'tool-result',
           time,
           ...(typeof source.callId === 'string' ? { callId: source.callId } : {}),
           isError: block?.isError === true || markers.length > 0,
-          text: markers.length > 0 && clipped.endsWith(TRUNCATED_SUFFIX) ? `${clipped} ${markers.join(' ')}` : clipped,
+          text,
         })
         break
       }
@@ -290,11 +298,17 @@ function messageHasVisibleText(message: Json): boolean {
 
 function formatArgs(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined
+  const parsed = parseToolArguments(value)
   let encoded: string
-  try {
-    encoded = JSON.stringify(value) ?? ''
-  } catch {
-    return undefined
+  if (typeof parsed === 'string') {
+    // 不是合法 JSON 的字符串原样展示,避免多包一层引号。
+    encoded = parsed
+  } else {
+    try {
+      encoded = JSON.stringify(parsed) ?? ''
+    } catch {
+      return undefined
+    }
   }
   return clipText(encoded, ARGS_MAX_CHARS, '…')
 }

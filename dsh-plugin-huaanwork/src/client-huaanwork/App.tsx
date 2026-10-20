@@ -120,6 +120,7 @@ import {
 } from "./logic/hostStop.ts";
 import { resolveStopSession, turnStatus } from "./logic/turnStatus.ts";
 import {
+  WORKSPACE_SCAN_DEPTH,
   appendOutcomeNotes,
   eventTargetTab,
   latestUserItemId,
@@ -875,12 +876,12 @@ export default function App() {
       const treeKnown = checks.requiredFiles.length === 0 || root.length > 0;
       if (checks.requiredFiles.length > 0 && root) {
         try {
-          tree = await listTree(root, 6);
+          tree = await listTree(root, WORKSPACE_SCAN_DEPTH);
         } catch {
           tree = [];
         }
       }
-      return { tabId, turnUserId, checks, tree, treeKnown };
+      return { tabId, turnUserId, checks, tree, treeKnown, root };
     };
     const appendTurnNotes = (turn: NonNullable<Awaited<ReturnType<typeof readTurn>>>, texts: string[]) => {
       const notes = texts.map((text) => ({ id: allocId(), kind: "note" as const, text }));
@@ -897,7 +898,7 @@ export default function App() {
     const appendTurnOutcome = async (sessionId?: string) => {
       const turn = await readTurn(sessionId);
       if (!turn || cancelled) return;
-      const notes = turnOutcomeNotes(turn.checks, turn.tree, turn.treeKnown);
+      const notes = turnOutcomeNotes(turn.checks, turn.tree, turn.treeKnown, { root: turn.root });
       if (notes.length === 0) return;
       appendTurnNotes(turn, notes);
     };
@@ -905,7 +906,7 @@ export default function App() {
     const appendGoalStopped = async (round: number, sessionId?: string) => {
       const turn = await readTurn(sessionId);
       if (!turn || cancelled) return;
-      appendTurnNotes(turn, [goalRoundStopped(round, turnGaps(turn.checks, turn.tree, turn.treeKnown))]);
+      appendTurnNotes(turn, [goalRoundStopped(round, turnGaps(turn.checks, turn.tree, turn.treeKnown, { root: turn.root }))]);
     };
     /**
      * 目标事件进入纯状态机。返回本回合应写的结论：同一用户回合里

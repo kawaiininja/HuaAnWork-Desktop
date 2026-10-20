@@ -1,5 +1,3 @@
-import { resultTextFailed } from "./commandOutcome.ts";
-
 export function outcomeGaps(input: {
   requiredFiles: readonly string[];
   requiredCommands: readonly string[];
@@ -164,26 +162,71 @@ export function lookupSessionCwd(
   return typeof saved === "string" && saved.length > 0 ? saved : undefined;
 }
 
-/** 本回合核对出的缺项；工作区读不到时文件项如实记为未核对，不当作缺失。 */
-export function turnGaps(checks: TurnChecks, tree: readonly TreeLike[], treeKnown = true): string[] {
-  if (!treeKnown) {
-    return outcomeGaps({
-      requiredFiles: [],
-      requiredCommands: checks.requiredCommands,
-      toolResults: checks.toolResults,
-      fileExists: () => false,
-    });
+/**
+ * 回合结束核对读取工作区树的 depth 参数（与 App.tsx 的 listTree 调用一致）。
+ * listTree 会展开到第 depth 层目录并列出它们的子项，所以树能覆盖到相对深度 depth + 1。
+ */
+export const WORKSPACE_SCAN_DEPTH = 6;
+
+export type WorkspaceScan = { root?: string; depth?: number };
+
+/**
+ * 路径相对扫描根的层级。绝对路径需要 root 才能折算；根外或没有 root 时返回 undefined，
+ * 保持「找不到就是缺失」的旧口径，不臆测未核对。
+ */
+function scanRelativeDepth(path: string, root: string | undefined): number | undefined {
+  let wanted = path.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (wanted.startsWith("/")) {
+    if (typeof root !== "string" || root.length === 0) return undefined;
+    const normalizedRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!normalizedRoot) return undefined;
+    if (wanted === normalizedRoot) return 0;
+    if (!wanted.startsWith(`${normalizedRoot}/`)) return undefined;
+    wanted = wanted.slice(normalizedRoot.length + 1);
   }
-  const paths = treePaths(tree);
-  const unreadable = checks.requiredFiles.length > 0 && paths.length === 0;
-  const gaps = outcomeGaps({
-    requiredFiles: unreadable ? [] : checks.requiredFiles,
+  return wanted.split("/").filter(Boolean).length;
+}
+
+/** 本回合核对出的缺项；工作区读不到时文件项如实记为未核对，不当作缺失。 */
+export function turnGaps(
+  checks: TurnChecks,
+  tree: readonly TreeLike[],
+  treeKnown = true,
+  scan: WorkspaceScan = {},
+): string[] {
+  const commandGaps = outcomeGaps({
+    requiredFiles: [],
     requiredCommands: checks.requiredCommands,
     toolResults: checks.toolResults,
-    fileExists: (path) => fileExistsInTree(paths, path),
+    fileExists: () => false,
   });
-  if (unreadable) gaps.push(`没能读取工作区，文件未核对：${checks.requiredFiles.join("、")}`);
-  return gaps;
+  if (!treeKnown) {
+    if (checks.requiredFiles.length > 0) {
+      commandGaps.push(`没能读取工作区，文件未核对：${checks.requiredFiles.join("、")}`);
+    }
+    return commandGaps;
+  }
+  const paths = treePaths(tree);
+  if (checks.requiredFiles.length > 0 && paths.length === 0) {
+    commandGaps.push(`没能读取工作区，文件未核对：${checks.requiredFiles.join("、")}`);
+    return commandGaps;
+  }
+  // 扫描深度之外的路径无法判断存在与否：如实记为未核对，不报「缺少文件」。
+  const depth = scan.depth ?? WORKSPACE_SCAN_DEPTH;
+  const deepestListed = depth + 1;
+  const missing: string[] = [];
+  const beyondScan: string[] = [];
+  for (const file of checks.requiredFiles) {
+    if (fileExistsInTree(paths, file)) continue;
+    const relativeDepth = scanRelativeDepth(file, scan.root);
+    if (relativeDepth !== undefined && relativeDepth > deepestListed) beyondScan.push(file);
+    else missing.push(file);
+  }
+  return [
+    ...outcomeGaps({ requiredFiles: missing, requiredCommands: [], toolResults: [], fileExists: () => false }),
+    ...beyondScan.map((file) => `未核对（超出扫描深度）：${file}`),
+    ...commandGaps,
+  ];
 }
 
 /**
@@ -194,37 +237,15 @@ export function turnOutcomeNotes(
   checks: TurnChecks,
   tree: readonly TreeLike[],
   treeKnown = true,
+  scan: WorkspaceScan = {},
 ): string[] {
-  if (!treeKnown && checks.requiredFiles.length > 0) return turnGaps(checks, tree, false);
-  const gaps = turnGaps(checks, tree, true);
+  const gaps = turnGaps(checks, tree, treeKnown, scan);
   const outcome = turnOutcomeLines({ requiredFiles: checks.requiredFiles, requiredCommands: checks.requiredCommands, gaps });
   if (outcome.done) {
     return [`已完成：自动核对 ${checks.requiredFiles.length + checks.requiredCommands.length} 项均通过`];
   }
   if (outcome.lines.length === 0 && checks.didWork) return [NO_AUTO_CHECK_TEXT];
   return outcome.lines;
-}
-
-type DetailRecord =
-  | { kind: "tool-call"; name: string; callId?: string; command?: string }
-  | { kind: "tool-result"; callId?: string; isError: boolean; text: string }
-  | { kind: "user" | "thinking" | "assistant" };
-
-/** 会话日志详情 → 核对输入：只认带 command 的 shell 调用；没有配对结果的调用不算通过。 */
-export function toolResultsFromRecords(records: readonly DetailRecord[]): TurnChecks["toolResults"] {
-  const results: TurnChecks["toolResults"] = [];
-  records.forEach((record, index) => {
-    if (record.kind !== "tool-call" || record.command === undefined) return;
-    const paired = records.slice(index + 1).find(
-      (candidate) => candidate.kind === "tool-result" && record.callId !== undefined && candidate.callId === record.callId,
-    );
-    results.push({
-      name: record.name,
-      command: record.command,
-      isError: paired === undefined || paired.kind !== "tool-result" || paired.isError || resultTextFailed(paired.text),
-    });
-  });
-  return results;
 }
 
 /**

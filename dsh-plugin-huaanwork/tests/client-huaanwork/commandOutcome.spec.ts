@@ -30,6 +30,14 @@ test("shell commands come only from bash / pwsh arguments", () => {
   assert.equal(shellCommandOf("bash", undefined), undefined);
 });
 
+test("recorded JSON-string arguments yield the command, not an unparsed blob", () => {
+  assert.equal(shellCommandOf("bash", '{"command":"pnpm test"}'), "pnpm test");
+  assert.equal(shellCommandOf("pwsh", '{"command":"Get-ChildItem"}'), "Get-ChildItem");
+  assert.equal(shellCommandOf("bash", '{"command":"  "}'), undefined);
+  assert.equal(shellCommandOf("bash", '{"args":["x"]}'), undefined);
+  assert.equal(shellCommandOf("bash", "not json"), undefined);
+});
+
 test("a failed tool row shows a cross, not a check", () => {
   assert.equal(toolRowIcon({ status: "start" }), "●");
   assert.equal(toolRowIcon({ status: "end" }), "✓");

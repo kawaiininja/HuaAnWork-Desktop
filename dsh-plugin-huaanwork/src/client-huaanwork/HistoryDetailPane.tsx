@@ -6,7 +6,7 @@ export type SessionDetailRecord =
   | { kind: "user"; time: number; text: string }
   | { kind: "thinking"; time: number; text: string }
   | { kind: "assistant"; time: number; text: string }
-  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string }
+  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string }
   | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string };
 
 /** 历史会话详情视图模型：session.open 的 log/records/summary 组装结果。 */
@@ -148,7 +148,11 @@ function SessionDetailRow({ record }: { record: SessionDetailRecord }) {
       <div className="detail-tool" title={record.callId}>
         <span className="detail-tool-mark">▸</span>
         <span className="detail-tool-name">{record.name || "tool"}</span>
-        {record.args ? <code className="detail-tool-args">{record.args}</code> : null}
+        {record.command ? (
+          <code className="detail-tool-args">{record.command}</code>
+        ) : record.args ? (
+          <code className="detail-tool-args">{record.args}</code>
+        ) : null}
       </div>
     );
   }

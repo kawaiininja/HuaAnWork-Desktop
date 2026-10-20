@@ -12,7 +12,6 @@ import {
   outcomeTargetTab,
   outcomeWorkspace,
   todoLabel,
-  toolResultsFromRecords,
   treePaths,
   turnChecks,
   turnOutcomeLines,
@@ -103,7 +102,11 @@ test("turn checks read the last turn only and outcome notes never say done with 
   assert.deepEqual(turnOutcomeNotes(checks, tree), ["已完成：自动核对 3 项均通过"]);
   assert.deepEqual(turnOutcomeNotes(checks, [{ path: "/w/报告.md" }]), ["缺少文件：out/摘要.md"]);
   assert.deepEqual(turnOutcomeNotes(checks, []), ["没能读取工作区，文件未核对：报告.md、out/摘要.md"]);
-  assert.deepEqual(turnOutcomeNotes(checks, [], false), []);
+  assert.deepEqual(
+    turnOutcomeNotes(checks, [], false),
+    ["没能读取工作区，文件未核对：报告.md、out/摘要.md"],
+    "an unreadable workspace must not silently skip the file check",
+  );
   assert.deepEqual(turnOutcomeNotes(turnChecks([{ kind: "user", text: "帮我润色这段话" }]), []), []);
 });
 
@@ -129,24 +132,6 @@ test("the last result of a repeated command wins, in both orders", () => {
     }),
     ["命令未通过：pnpm test"],
   );
-});
-
-test("a bash result ending in [exit code: 1] is a gap even when isError is false", () => {
-  const records = [
-    { kind: "tool-call" as const, time: 1, name: "bash", callId: "c1", command: "pnpm test" },
-    { kind: "tool-result" as const, time: 2, callId: "c1", isError: false, text: `${"x".repeat(100)}\n[exit code: 1]` },
-  ];
-  const [result] = toolResultsFromRecords(records);
-  assert.deepEqual(result, { name: "bash", command: "pnpm test", isError: true });
-  assert.deepEqual(
-    outcomeGaps({ requiredFiles: [], requiredCommands: ["pnpm test"], toolResults: [result!], fileExists: () => true }),
-    ["命令未通过：pnpm test"],
-  );
-});
-
-test("a tool call without a result is not a pass", () => {
-  const records = [{ kind: "tool-call" as const, time: 1, name: "bash", callId: "c1", command: "pnpm test" }];
-  assert.deepEqual(toolResultsFromRecords(records), [{ name: "bash", command: "pnpm test", isError: true }]);
 });
 
 test("a tool card that has not ended is not a pass", () => {
@@ -284,4 +269,31 @@ test("a plan-review card with nothing to check still needs a human look", () => 
     ),
     ["没有自动核对项，需要你自己看"],
   );
+});
+
+test("an unreadable workspace reports required files as unverified instead of skipping them", () => {
+  const checks = turnChecks([
+    { kind: "user", text: "写 报告.md 并跑 `pnpm test`" },
+    { kind: "tool", card: { name: "bash", command: "pnpm test", isError: true } },
+  ]);
+  assert.deepEqual(turnOutcomeNotes(checks, [], false), [
+    "命令未通过：pnpm test",
+    "没能读取工作区，文件未核对：报告.md",
+  ]);
+});
+
+test("a required path deeper than the workspace scan is unverified, not missing", () => {
+  const tree = [{ path: "/w/readme.md" }];
+  // listTree(root, 6) 列出到相对深度 7(展开 6 层目录 + 它们的子项),8 层才超出扫描。
+  const listed = turnChecks([{ kind: "user", text: "写到 a/b/c/d/e/f/report.md" }]);
+  assert.deepEqual(turnOutcomeNotes(listed, tree, true, { root: "/w" }), ["缺少文件：a/b/c/d/e/f/report.md"]);
+  const deep = turnChecks([{ kind: "user", text: "写到 a/b/c/d/e/f/g/report.md" }]);
+  assert.deepEqual(turnOutcomeNotes(deep, tree, true, { root: "/w" }), [
+    "未核对（超出扫描深度）：a/b/c/d/e/f/g/report.md",
+  ]);
+  // 绝对路径按扫描根折算相对层级。
+  const absolute = turnChecks([{ kind: "user", text: "写到 /w/a/b/c/d/e/f/g/report.md" }]);
+  assert.deepEqual(turnOutcomeNotes(absolute, tree, true, { root: "/w" }), [
+    "未核对（超出扫描深度）：/w/a/b/c/d/e/f/g/report.md",
+  ]);
 });
