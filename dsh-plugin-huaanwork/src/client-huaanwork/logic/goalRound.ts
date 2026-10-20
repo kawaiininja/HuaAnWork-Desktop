@@ -28,7 +28,7 @@ export const INITIAL_GOAL_TURN_STATE: GoalTurnState = {
 
 export type GoalTurnEvent =
   | { kind: "turn-started"; sessionId?: string }
-  | { kind: "goal-state"; phase: GoalPhase; roundsStarted?: number; sessionId?: string }
+  | { kind: "goal-state"; phase: GoalPhase; roundsStarted?: number; sessionId?: string; stopped?: boolean }
   | { kind: "goal-cleared"; sessionId?: string }
   | { kind: "goal-round-limit"; round: number; sessionId?: string }
   | { kind: "session-end"; sessionId?: string; ok: boolean; cancelled?: boolean };
@@ -78,6 +78,13 @@ export function reduceGoalTurn(
       const previous = state.phases[key];
       const edge = goalTurnEdge(previous, event.phase);
       const phases = { ...state.phases, [key]: event.phase };
+      // 用户停止时的终态不是验收结论：官方 goal-round-driver 在空闲处理里先把目标
+      // 暂停，桥随后才发取消结束。这里只结算，「已停止」由停止流程自己写，
+      // 迟到的取消结束不会补写。注意：用户主动 `/goal pause` 也会走到 paused 相位，
+      // 但那是另一条产品路径，本判定不覆盖它（是否也应静默属于单独的产品决定）。
+      if (event.stopped === true) {
+        return { state: { ...state, phases, settled: withSettled(state, key) }, action: NOTHING };
+      }
       // start 只更新相位（供 session/end 判断是否抑制）；结算窗口由 turn-started 开启，
       // 所以同一用户回合里 pause → resume → complete 仍只写一次结论。
       // 抑制中（例如 round-limit 的专用文案已写）或没有边沿的重复投递同样不再写。
@@ -98,8 +105,9 @@ export function reduceGoalTurn(
     }
     case "session-end": {
       if (!event.ok || event.cancelled === true) {
-        // 取消/失败的回合不写验收结论；记下已结算，迟到的 paused 目标也不能补写。
-        return { state: { ...state, settled: [...state.settled, key] }, action: NOTHING };
+        // 取消/失败的回合不写验收结论；记下已结算（停止时的终态可能已记过，不能再记一次），
+        // 迟到的 paused 目标也不能补写。
+        return { state: { ...state, settled: withSettled(state, key) }, action: NOTHING };
       }
       // 目标仍在续轮：每轮结束只是中间结果。
       if (state.phases[key] === "active") return { state, action: NOTHING };
@@ -122,4 +130,9 @@ export function goalRoundDrivesTurn(sessionId: string | undefined, trackedSessio
 
 function without(values: readonly string[], key: string): readonly string[] {
   return values.includes(key) ? values.filter((value) => value !== key) : [...values];
+}
+
+/** 每回合只记一次：停止终态与取消结束可能先后到达同一会话。 */
+function withSettled(state: GoalTurnState, key: string): readonly string[] {
+  return state.settled.includes(key) ? state.settled : [...state.settled, key];
 }

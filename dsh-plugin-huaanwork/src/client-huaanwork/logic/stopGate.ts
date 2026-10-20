@@ -14,6 +14,20 @@ export function isStopPending(pending: StopTicket | null, eventSessionId: string
   return pending !== null && eventSessionId === pending.sessionId;
 }
 
+/**
+ * 该会话上用户已发起停止：取消请求在飞（`pending`），或取消成功、闩锁仍扣着
+ * （`stopSessionId`）。目标驱动会在取消结束之前先落下终态相位，据此判定
+ * 那条终态属于停止而不是验收。
+ */
+export function sessionStopRequested(
+  pending: StopTicket | null,
+  stopSessionId: string | null,
+  sessionId: string | undefined,
+): boolean {
+  if (typeof sessionId !== "string" || sessionId.length === 0) return false;
+  return isStopPending(pending, sessionId) || stopSessionId === sessionId;
+}
+
 /** 同一次发送里，取消还没返回时不再接受第二次停止。 */
 export function canStartStop(pending: StopTicket | null): boolean {
   return pending === null;

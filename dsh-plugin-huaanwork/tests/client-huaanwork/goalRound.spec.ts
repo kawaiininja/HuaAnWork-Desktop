@@ -147,6 +147,37 @@ test("a cancelled turn settles silently and a late paused goal cannot add 已完
   assert.deepEqual(kinds(actions), ["none", "none", "none", "none", "none"]);
 });
 
+test("a user stop pauses the goal before the cancelled end and writes no completion", () => {
+  // 真实顺序：官方 goal-round-driver 在空闲处理里先暂停目标（goal/state paused），
+  // 桥随后才发出 session/end cancelled。停止期间这条 paused 只能结算，不能写结论。
+  const steps: GoalTurnEvent[] = [
+    { kind: "turn-started", sessionId: SESSION },
+    { kind: "goal-state", phase: "active", sessionId: SESSION },
+    { kind: "goal-state", phase: "paused", roundsStarted: 1, sessionId: SESSION, stopped: true },
+    { kind: "session-end", sessionId: SESSION, ok: true, cancelled: true },
+    // 再迟到的终态与结束也不补写。
+    { kind: "goal-state", phase: "paused", roundsStarted: 1, sessionId: SESSION, stopped: true },
+    { kind: "session-end", sessionId: SESSION, ok: true },
+  ];
+  const actions = drive(steps);
+  assert.deepEqual(kinds(actions), ["none", "none", "none", "none", "none", "none"]);
+
+  // 停止终态与取消结束都会结算同一会话，`settled` 里不能出现两次。
+  let reduced = INITIAL_GOAL_TURN_STATE;
+  for (const event of steps) reduced = reduceGoalTurn(reduced, event).state;
+  assert.deepEqual(reduced.settled, [SESSION]);
+});
+
+test("a normal paused goal still writes one outcome when no stop is in effect", () => {
+  const actions = drive([
+    { kind: "turn-started", sessionId: SESSION },
+    { kind: "goal-state", phase: "active", sessionId: SESSION },
+    { kind: "goal-state", phase: "paused", roundsStarted: 2, sessionId: SESSION, stopped: false },
+    { kind: "session-end", sessionId: SESSION, ok: true },
+  ]);
+  assert.deepEqual(kinds(actions), ["none", "none", "outcome", "none"]);
+});
+
 test("clearing the goal stops suppression for the rest of the turn", () => {
   const actions = drive([
     { kind: "turn-started", sessionId: SESSION },

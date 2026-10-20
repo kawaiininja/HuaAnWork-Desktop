@@ -111,7 +111,7 @@ import {
 import { closeOpenInputs, inputCardStatus, settleInputCard, type InputCard } from "./logic/inputCard.ts";
 import { toolRowIcon } from "./logic/commandOutcome.ts";
 import { hasPendingAsk, resolveActiveTab } from "./logic/chatTabs.ts";
-import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
+import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, sessionStopRequested, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
 import { resolveStopSession, turnStatus } from "./logic/turnStatus.ts";
 import {
   appendOutcomeNotes,
@@ -1041,9 +1041,18 @@ export default function App() {
             setNow(at);
           }
           if (event.event === "goal/state") {
+            // 用户停止时官方驱动先在空闲处理里暂停目标，随后才是取消结束；
+            // 只看现存停止信号（取消在飞 / 已扣闩锁），这条终态只结算、不写结论。
+            const stopped = "phase" in event
+              && sessionStopRequested(stopPendingRef.current, userStopSessionRef.current, event.sessionId);
             const action = "cleared" in event
               ? noteGoalEvent({ kind: "goal-cleared", sessionId: event.sessionId })
-              : noteGoalEvent({ kind: "goal-state", phase: event.phase, sessionId: event.sessionId });
+              : noteGoalEvent({
+                kind: "goal-state",
+                phase: event.phase,
+                sessionId: event.sessionId,
+                ...(stopped ? { stopped: true as const } : {}),
+              });
             if (action.kind === "outcome") void appendTurnOutcome(event.sessionId);
           }
           if (event.event === "goal/round-limit") {

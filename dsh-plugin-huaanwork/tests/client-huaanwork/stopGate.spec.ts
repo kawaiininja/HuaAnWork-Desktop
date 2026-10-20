@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, takeHeldEnds, type StopTicket } from "../../src/client-huaanwork/logic/stopGate.ts";
+import {
+  canStartStop,
+  consumeStaleIdle,
+  finishStop,
+  isStopPending,
+  rememberStale,
+  sessionStopRequested,
+  takeHeldEnds,
+  type StopTicket,
+} from "../../src/client-huaanwork/logic/stopGate.ts";
 
 const ticket: StopTicket = { id: 1, sessionId: "huaanwork-weather", epoch: 4 };
 
@@ -10,6 +19,18 @@ test("a session end waits only while that session's cancel is in flight", () => 
   assert.equal(isStopPending(ticket, "other"), false);
   assert.equal(canStartStop(null), true);
   assert.equal(canStartStop(ticket), false);
+});
+
+test("a stop is in effect while its cancel is in flight or after it arms the latch", () => {
+  // 取消在飞：目标驱动的 paused 终态先到也算停止。
+  assert.equal(sessionStopRequested(ticket, null, "huaanwork-weather"), true);
+  // 取消已成功、闩锁仍扣着。
+  assert.equal(sessionStopRequested(null, "huaanwork-weather", "huaanwork-weather"), true);
+  // 别的会话或没有会话 id 不算。
+  assert.equal(sessionStopRequested(ticket, "huaanwork-weather", "other"), false);
+  assert.equal(sessionStopRequested(null, null, "huaanwork-weather"), false);
+  assert.equal(sessionStopRequested(ticket, null, undefined), false);
+  assert.equal(sessionStopRequested(null, "", ""), false);
 });
 
 test("a cancel arms the latch only for the turn that is still current", () => {
