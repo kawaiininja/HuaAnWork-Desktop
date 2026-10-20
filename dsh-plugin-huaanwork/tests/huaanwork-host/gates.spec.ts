@@ -81,7 +81,7 @@ test('a missing userQuestions service fails the gate instead of skipping the ans
 test('a route tool missing from the catalog fails the gate', async () => {
   const catalog = ['read', ...REQUIRED_TOOLS].filter((name) => name !== 'propose_plan')
   await assert.rejects(
-    assertPostBootGate(gateContext({ catalog })),
+    assertPostBootGate(gateContext({ catalog }), new Set(), { toolWaitMs: 0 }),
     /required tool\(s\) not registered: propose_plan/,
   )
 })
@@ -89,7 +89,7 @@ test('a route tool missing from the catalog fails the gate', async () => {
 test('a goal tool missing from the catalog fails the gate while tool-goal is enabled', async () => {
   const catalog = ['read', ...REQUIRED_TOOLS].filter((name) => name !== 'update_goal')
   await assert.rejects(
-    assertPostBootGate(gateContext({ catalog })),
+    assertPostBootGate(gateContext({ catalog }), new Set(), { toolWaitMs: 0 }),
     /required tool\(s\) not registered: update_goal/,
   )
 })
@@ -97,7 +97,7 @@ test('a goal tool missing from the catalog fails the gate while tool-goal is ena
 test('a registered route tool hidden from the main agent fails the gate', async () => {
   const visible = ['read', ...REQUIRED_TOOLS].filter((name) => name !== 'exit_plan_mode')
   await assert.rejects(
-    assertPostBootGate(gateContext({ visible })),
+    assertPostBootGate(gateContext({ visible }), new Set(), { toolWaitMs: 0 }),
     /required tool\(s\) not visible to the main agent: exit_plan_mode/,
   )
 })
@@ -107,5 +107,5 @@ test('a complete composition passes the gate', async () => {
     _getActiveHandles?: () => unknown[]
   })._getActiveHandles
   const baseline = new Set<unknown>(getActiveHandles?.() ?? [])
-  await assert.doesNotReject(assertPostBootGate(gateContext(), baseline))
+  await assert.doesNotReject(assertPostBootGate(gateContext(), baseline, { toolWaitMs: 0 }))
 }, 15_000)

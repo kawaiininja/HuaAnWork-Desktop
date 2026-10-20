@@ -83,6 +83,20 @@ const REQUIRED_TOOL_NAMES = [
   'update_goal',
 ] as const
 
+/**
+ * Loader entries activate concurrently, so a tool provider in the same wave as
+ * the gate may still be registering when the gate first reads schemas. Wait a
+ * bounded time before judging, the same way the agent registry is awaited
+ * below; a tool that never appears still fails (fail-closed).
+ */
+const TOOL_WAIT_TIMEOUT_MS = 5_000
+const TOOL_WAIT_POLL_MS = 100
+
+/** Tools the option can shrink to 0 in tests; production keeps the bounded wait. */
+type GateOptions = {
+  toolWaitMs?: number
+}
+
 export const name = 'huaanwork-gates'
 export const inject = ['tools', 'agents', 'webServer', 'planMode', 'userQuestions']
 
@@ -101,7 +115,9 @@ export async function apply(ctx: GatesContext): Promise<void> {
 export async function assertPostBootGate(
   ctx: GatesContext,
   existingHandles: ReadonlySet<unknown> = new Set(),
+  options: GateOptions = {},
 ): Promise<void> {
+  const toolWaitMs = options.toolWaitMs ?? TOOL_WAIT_TIMEOUT_MS
   // 锁层要求 plan-mode 与 user-questions 两行必须生效。缺任一服务时 cordis 会把
   // 依赖它的 route-tools / question-answerer 静默挂起(只留启动告警),所以门禁
   // 必须自己判负,不能假定这两个服务一定在位。
@@ -131,13 +147,11 @@ export async function assertPostBootGate(
   if (!result.isError) {
     throw new Error('post-boot gate failed: git_push must be denied by the guard')
   }
-  const catalog = new Set(ctx.tools.schemas().flatMap((schema) => (
-    typeof schema.name === 'string' ? [schema.name] : []
-  )))
+  const catalog = toolNames(ctx.tools.schemas())
   if (catalog.has('run_code')) {
     throw new Error('post-boot gate failed: run_code is visible')
   }
-  const unregistered = REQUIRED_TOOL_NAMES.filter((name) => !catalog.has(name))
+  const unregistered = await waitForRequiredTools(() => ctx.tools.schemas(), toolWaitMs)
   if (unregistered.length > 0) {
     throw new Error(`post-boot gate failed: required tool(s) not registered: ${unregistered.join(', ')}`)
   }
@@ -162,21 +176,46 @@ export async function assertPostBootGate(
     throw new Error("post-boot gate failed: agent ctx.get('tools').restrict must be a function")
   }
   const mainAgentTools = agent.ctx.get('tools')
-  if (typeof mainAgentTools?.schemas !== 'function') {
+  const dumpAgentSchemas = mainAgentTools?.schemas
+  if (typeof dumpAgentSchemas !== 'function') {
     throw new Error('post-boot gate failed: main-agent schema dump is unavailable')
   }
-  const visible = new Set(mainAgentTools.schemas().flatMap((schema) => (
-    typeof schema.name === 'string' ? [schema.name] : []
-  )))
+  const readAgentSchemas = () => dumpAgentSchemas.call(mainAgentTools)
+  const visible = toolNames(readAgentSchemas())
   const disabledName = [...visible].find((name) => name === 'web_search' || name === 'run_code')
   if (disabledName) {
     throw new Error(`post-boot gate failed: main-agent schema contains disabled tool ${disabledName}`)
   }
-  const hidden = REQUIRED_TOOL_NAMES.filter((name) => !visible.has(name))
+  const hidden = await waitForRequiredTools(readAgentSchemas, toolWaitMs)
   if (hidden.length > 0) {
     throw new Error(`post-boot gate failed: required tool(s) not visible to the main agent: ${hidden.join(', ')}`)
   }
   await assertNoUnexpectedListeners(ctx, existingHandles)
+}
+
+function toolNames(schemas: readonly { name?: string }[]): Set<string> {
+  return new Set(schemas.flatMap((schema) => (
+    typeof schema.name === 'string' ? [schema.name] : []
+  )))
+}
+
+/**
+ * Required tools may be registering in a concurrent Loader wave; poll until the
+ * deadline so a slow-but-correct provider is not mistaken for a missing one.
+ * @returns names still missing when the deadline passes.
+ */
+async function waitForRequiredTools(
+  schemas: () => readonly { name?: string }[],
+  waitMs: number,
+): Promise<string[]> {
+  const missing = (): string[] => REQUIRED_TOOL_NAMES.filter((name) => !toolNames(schemas()).has(name))
+  const deadline = Date.now() + waitMs
+  let unresolved = missing()
+  while (unresolved.length > 0 && Date.now() < deadline) {
+    await new Promise((done) => setTimeout(done, TOOL_WAIT_POLL_MS))
+    unresolved = missing()
+  }
+  return unresolved
 }
 
 /**
