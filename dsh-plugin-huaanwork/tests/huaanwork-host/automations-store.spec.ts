@@ -635,6 +635,51 @@ describe('automations-store 写路径与纯函数', () => {
     expect(releasedSessions).toEqual([runSessionId])
   })
 
+  test('project.remove releases automation run sessions before deleting their logs', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    writeFileSync(join(home, 'projects.json'), JSON.stringify({
+      projects: [{ id: 'p1', name: 'P1', root: join(home, 'p1'), createdAt: T0 }],
+    }))
+
+    const runSessionId = `huaanwork-auto-${automation.id}-r1`
+    const runSessionDir = join(home, 'sessions', 'cwd-x', runSessionId)
+    mkdirSync(runSessionDir, { recursive: true })
+
+    const releasedSessions: string[] = []
+    const ctx = {
+      dshHome: home,
+      profileDir: home,
+      workspaceRoot: { current: home },
+      emit: () => {},
+      logger: () => {},
+      requestRestart: async () => false,
+      runtimeCtx: {
+        agents: {
+          get: (id: string) => {
+            // 释放必须发生在目录还在的时候:路由要把 releaseSession 透传给
+            // removeAutomationsOfProject,而不是删完文件再补一次空回调。
+            expect(existsSync(join(home, 'sessions', 'cwd-x', id))).toBe(true)
+            releasedSessions.push(id)
+            return undefined
+          },
+        },
+      },
+    }
+    const remove = ROUTE_TABLE.find((route) => route.method === 'project.remove')
+    expect(remove).toBeDefined()
+
+    const removed = await remove!.handler(
+      { params: {}, body: { projectId: 'p1' }, query: new URLSearchParams() },
+      ctx,
+    )
+    expect(removed).toMatchObject({ removed: true })
+    // 回调参数若从路由里消失,releasedSessions 为空而目录仍会被删——本断言即红。
+    expect(releasedSessions).toEqual([runSessionId])
+    expect(existsSync(runSessionDir)).toBe(false)
+    expect(await listAutomations(home)).toEqual([])
+  })
+
   test('markAutomation advances nextRunAt only when entering running', async () => {
     const home = makeHome()
     const created = await createAutomation(

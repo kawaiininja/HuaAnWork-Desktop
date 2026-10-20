@@ -336,6 +336,23 @@ test("unattended off (ctx.huaanworkUnattended.current unset): ask path is byte-f
   assert.equal(allowedOnce.size, 0);
 });
 
+test("unattended holder in its boot shape (current: null): ask path is unchanged", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
+  const allowedOnce = new Set<string>();
+  // holders.ts 装容器的初始值就是 null（既不是 undefined 也不是缺席）：类型必须如实
+  // 写 `UnattendedScope | null`，运行时也必须与「未启用」逐字节同路径。
+  const harness = applyPolicyWithUnattended({
+    huaanworkAllowedOnce: allowedOnce,
+    huaanworkUnattended: { current: null },
+  });
+  apply(harness.ctx as never);
+
+  const call = { name: "git_push", arguments: {}, callId: "call-boot-null" };
+  assert.deepEqual(await harness.preExecute(call), { kind: "ask" });
+  assert.equal(harness.guard(call), GUARD_NEEDS_APPROVAL);
+  assert.equal(allowedOnce.size, 0);
+});
+
 test("unattended enabled and callId's tool is in allow: pre-execute degrades ask to allow, callId enters allowedOnce, guard passes, and an audit line is written", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
   // decide() 按平台把 shell 工具二选一(win32 → pwsh,其余 → bash),硬编码 bash 在 Windows CI 会被平台规则先拒。

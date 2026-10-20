@@ -26,10 +26,12 @@ type UnattendedScope = { runId: string; automationId: string; allow: Set<string>
  * 从其他插件的 ctx 读回来会直接抛 `cannot get property "foo" without inject`——
  * `huaanworkAllowedOnce`/`huaanworkWorkspaceRoot` 之所以能读到，是因为它们只在 `prepare`
  * 里赋值过；per-run 会变的 `currentUnattended` 做不到「只赋值一次」，所以只能反过来：
- * boot 时赋值一次一个「容器」（`{ current: undefined }`），此后永远只 mutate 容器的
- * `.current` 字段——容器本身是普通 JS 对象，不受 Cordis Proxy 管辖，读写不再受 inject 限制。
+ * boot 时赋值一次一个「容器」（`holders.ts` 装的是 `{ current: null }`），此后永远只
+ * mutate 容器的 `.current` 字段——容器本身是普通 JS 对象，不受 Cordis Proxy 管辖，读写
+ * 不再受 inject 限制。`current` 因此兼具「可选」（旧调用方没装容器）与「可为 null」
+ * （boot 的空槽）两种缺席形态。
  */
-type UnattendedHolder = { current?: UnattendedScope };
+type UnattendedHolder = { current?: UnattendedScope | null };
 
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
