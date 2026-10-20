@@ -99,6 +99,7 @@ import {
 import { DesktopProfileService } from './profile-service.ts'
 import { createDesktopProfileBoot } from './profile-context.ts'
 import { logInactiveStartupEntries } from './startup-audit.ts'
+import { assertConversationSurface } from './huaanwork-host/conversation-boot-audit.ts'
 import { DesktopActionsService } from './desktop-actions.ts'
 import { clearDesktopProfilePluginState, DesktopPluginsService } from './desktop-plugins.ts'
 import {
@@ -1896,6 +1897,11 @@ async function start(): Promise<void> {
         releasePackageResolver()
         throw cause
       })
+      // `huaanwork-gates` is an optional startup entry, so its own throw only
+      // warns and `boot()` still resolves. This is the enforcement: a missing
+      // plan service or route/plan/goal tool throws here, into the startup
+      // catch below (recovery window), before the renderer may start.
+      await assertConversationSurface(ctx)
       generation.bindHost(ctx)
       profileBoot.markReady()
       observeDesktopPreferenceSettings(ctx, fileExporter, enqueueProfilePreferencesWrite)
