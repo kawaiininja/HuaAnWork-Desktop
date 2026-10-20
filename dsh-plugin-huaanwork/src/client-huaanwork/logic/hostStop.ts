@@ -25,23 +25,41 @@ export function hostLivenessNotice(phase: HostLivenessPhase): HostLivenessNotice
   return { kind: "unresponsive", canStop: phase === "stoppable" };
 }
 
+/** 停止相位只识别脚本追加的脚注：`kind` 与文字都要对上。 */
+type HostStopItem = { kind: string; text?: string }
+
 /**
- * 用户确认停止后的失败标记撤回。套接字关闭可能先于 `stopped` 相位到达：
- * `onSidecarExit` 不知道这是主动停止，先把标签标成失败（红色横幅）。停止确认
- * 到达时必须撤回它，否则中性终态上会一直挂着「会话已失败」。
- * 返回同一个数组表示没有需要撤回的标记（调用方据此跳过状态更新）。
+ * 用户确认停止后的失败痕迹撤回。套接字关闭可能先于 `stopped` 相位到达：
+ * `onSidecarExit` 不知道这是主动停止，先把标签标成失败（红色横幅）并补一条
+ * 崩溃脚注。停止确认到达时必须两样一起撤回——失败标记和最后那条
+ * `HOST_EXIT_NOTE` 都换成中性语义，否则中性横幅旁边会一直挂着
+ * 「执行进程已结束。结果可能不完整。」。
+ * 返回同一个数组表示没有需要撤回的内容（调用方据此跳过状态更新）。
  *
  * 裁定：不区分失败来源。用户按停止后执行进程已经不在了，socket 关闭路径标上的
  * 发送失败、自动化失败也没有可重试的宿主；保留红条只会把「按你的要求结束」讲成
  * 崩溃。所以这里整片清掉，是停止语义，不是漏判。
  */
-export function clearFailureOnStopped<T extends { sessionFailed: boolean }>(
-  phase: HostLivenessPhase,
-  tabs: readonly T[],
-): readonly T[] {
+export function clearFailureOnStopped<
+  T extends { sessionFailed: boolean; items?: readonly HostStopItem[] },
+>(phase: HostLivenessPhase, tabs: readonly T[]): readonly T[] {
   if (phase !== "stopped") return tabs;
-  if (!tabs.some((tab) => tab.sessionFailed)) return tabs;
-  return tabs.map((tab) => (tab.sessionFailed ? { ...tab, sessionFailed: false } : tab));
+  let changed = false;
+  const settled = tabs.map((tab) => {
+    const items = tab.items;
+    const last = items?.[items.length - 1];
+    const crashNote = last !== undefined && last.kind === "note" && last.text === HOST_EXIT_NOTE;
+    if (!tab.sessionFailed && !crashNote) return tab;
+    changed = true;
+    return {
+      ...tab,
+      sessionFailed: false,
+      ...(crashNote
+        ? { items: [...(items ?? []).slice(0, -1), { ...last, text: HOST_STOPPED_BY_USER_TEXT }] }
+        : {}),
+    };
+  });
+  return changed ? settled : tabs;
 }
 
 /**
@@ -49,7 +67,9 @@ export function clearFailureOnStopped<T extends { sessionFailed: boolean }>(
  * 非 `stopped` 相位不派发更新（返回同一数组的更新也没有意义）。App 只调用这个
  * 函数，测试驱动同一个实现；去掉 App 的调用点由 app-wiring 契约钉抓住。
  */
-export function clearFailuresInTabs<T extends { sessionFailed: boolean }>(
+export function clearFailuresInTabs<
+  T extends { sessionFailed: boolean; items?: readonly HostStopItem[] },
+>(
   phase: HostLivenessPhase,
   setTabs: (value: T[] | ((prev: T[]) => T[])) => void,
 ): void {

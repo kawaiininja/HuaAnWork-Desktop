@@ -100,10 +100,26 @@ test("App consumes the two production helpers at their only call sites", () => {
   assert.doesNotMatch(APP_SOURCE, /markApprovalAnswered\(/);
 });
 
-test("App skips the turn-end outcome while plan mode is still pending", () => {
+test("App skips plan-turn outcomes before it lists the workspace tree", () => {
   const start = APP_SOURCE.indexOf("const appendTurnOutcome = async");
   const end = APP_SOURCE.indexOf("const appendGoalStopped", start);
   assert.ok(start >= 0 && end > start, "appendTurnOutcome is defined before appendGoalStopped");
-  // 生产调用点唯一：把计划回合的核对重新放回 appendTurnOutcome 即失败。
-  assert.match(APP_SOURCE.slice(start, end), /if \(!shouldCheckTurnOutcome\(turn\.items\)\) return;/);
+  const body = APP_SOURCE.slice(start, end);
+  const checkAt = body.indexOf("if (!shouldCheckTurnOutcome(pending.items)) return;");
+  const readAt = body.indexOf("const turn = await readTurn(sessionId, pending)");
+  assert.ok(checkAt >= 0, "appendTurnOutcome still suppresses plan-mode turns");
+  assert.ok(
+    readAt > checkAt,
+    "the plan-turn check must run before readTurn, which pays the depth-6 tree listing",
+  );
+  // readTurn 仍只在确有必核文件时才列树（执行回合行为不变）。
+  const turnStart = APP_SOURCE.indexOf("const readTurn = async");
+  const turnEnd = APP_SOURCE.indexOf("const appendTurnNotes", turnStart);
+  assert.ok(turnStart >= 0 && turnEnd > turnStart, "readTurn is defined before appendTurnNotes");
+  const turnBody = APP_SOURCE.slice(turnStart, turnEnd);
+  assert.match(turnBody, /if \(checks\.requiredFiles\.length > 0 && root\) \{/);
+  assert.ok(
+    turnBody.indexOf("listTree(root, WORKSPACE_SCAN_DEPTH)") > turnBody.indexOf("turnChecks(items)"),
+    "the tree listing stays inside the required-files branch",
+  );
 });

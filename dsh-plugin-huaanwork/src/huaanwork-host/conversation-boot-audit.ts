@@ -52,9 +52,9 @@ export type ConversationSurfaceAuditOptions = {
   /** Bounded wait for the plan services and the tool catalogs to settle; defaults to 5 s. */
   timeoutMs?: number
   /**
-   * Bounded wait for the main agent to materialize; defaults to 10 s. When no
-   * agent appears the audit resolves on the global checks instead of throwing:
-   * agents are created per session, so a fresh Host has none at boot.
+   * Bounded wait for the main agent to materialize; defaults to 0, a single
+   * read. Agents are created per session on demand, so waiting for one at boot
+   * only holds startup open for an agent a fresh Host will never have.
    */
   agentTimeoutMs?: number
 }
@@ -80,7 +80,12 @@ export const REQUIRED_CONVERSATION_TOOL_NAMES = [
 ] as const
 
 const DEFAULT_WAIT_TIMEOUT_MS = 5_000
-const DEFAULT_AGENT_WAIT_TIMEOUT_MS = 10_000
+/**
+ * No wait by default: the main-agent check is opportunistic. A boot that waits
+ * here serializes the gate's audit, the Host's post-boot audit, and the boot
+ * itself behind a deadline that resolves to "no agent" on every fresh launch.
+ */
+const DEFAULT_AGENT_WAIT_TIMEOUT_MS = 0
 const WAIT_POLL_MS = 100
 
 /**
@@ -92,12 +97,11 @@ const WAIT_POLL_MS = 100
  * (fail-closed). After `boot()` resolves the tree is settled, so the default
  * deadline is only a safety margin.
  *
- * The main-agent check differs: agents are created per session on demand, so a
- * fresh Host legitimately has none. When no agent materializes within the
- * bounded wait the per-agent restriction has nothing to read and the audit
- * resolves on the checks above; it does not treat an absent agent as a missing
- * surface. If an agent does exist, its restricted schema dump must carry every
- * required tool or the audit throws.
+ * The main-agent check is opportunistic and does not wait by default: agents
+ * are created per session on demand, so a fresh Host legitimately has none and
+ * a boot-time deadline would only add a wait that resolves to "no agent". An
+ * agent that exists on the first read must still carry every required tool in
+ * its restricted schema dump, or the audit throws.
  */
 export async function assertConversationSurface(
   ctx: ConversationSurfaceContext,
@@ -144,10 +148,9 @@ export async function assertConversationSurface(
     throw new Error(`conversation surface audit failed: required tool(s) not registered: ${unregistered.join(', ')}`)
   }
 
-  // The registry materializes asynchronously in some environments (the old
-  // sidecar intermittently saw an empty list), so wait before judging. An
-  // absent agent is not a failure: sessions create their agents on demand, so
-  // before the first session there is no per-agent surface to verify.
+  // Opportunistic: the default deadline is now, so this is a single read.
+  // Agents are created per session, so a fresh Host has none and the per-agent
+  // surface is skipped; an agent that is already there is still fail-closed.
   const agent = await waitForAgent(ctx, Date.now() + (options.agentTimeoutMs ?? DEFAULT_AGENT_WAIT_TIMEOUT_MS))
   if (agent?.ctx === undefined) {
     return
@@ -222,10 +225,11 @@ async function waitForRequiredTools(
 /**
  * The main agent carries the per-agent tool restriction (`present-as`), so its
  * schema dump is the only proof that the required tools are actually visible.
- * The registry can materialize asynchronously; poll until the deadline. An
- * agent that never appears is a legitimate fresh-Host state (agents are created
- * per session), so this returns undefined and the caller skips the per-agent
- * check rather than failing.
+ * This is opportunistic: the default deadline is now, so the registry is read
+ * once. An agent that never appears is a legitimate fresh-Host state (agents
+ * are created per session), so this returns undefined and the caller skips the
+ * per-agent check rather than failing. Callers that know an agent is imminent
+ * can pass a positive `agentTimeoutMs` to poll instead.
  */
 async function waitForAgent(
   ctx: ConversationSurfaceContext,

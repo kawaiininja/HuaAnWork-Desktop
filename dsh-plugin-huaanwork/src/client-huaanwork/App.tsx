@@ -857,8 +857,8 @@ export default function App() {
       if (!target) return;
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: updater(tab.items) } : tab)));
     };
-    /** 读出本回合要核对的内容；只认用户对话标签：子代理空闲也会发 session/end，其会话 id 不属于任何标签时返回 undefined。 */
-    const readTurn = async (sessionId?: string) => {
+    /** 读取本回合的标签与条目；只读状态，不列工作区树。子代理会话不属于任何标签时返回 undefined。 */
+    const readTurnItems = async (sessionId?: string) => {
       const tabId = outcomeTargetTab(sessionId, chatTabsRef.current, liveChatRef.current);
       if (!tabId) return undefined;
       // chatTabsRef 在提交后才同步，可能还看不到同一批事件里的 tool/end。
@@ -870,6 +870,13 @@ export default function App() {
         });
       });
       if (!items || !items.some((item) => item.kind === "user")) return undefined;
+      return { tabId, items };
+    };
+    /** 读出本回合要核对的内容；只认用户对话标签，工作区树只在确有必核文件时列出。 */
+    const readTurn = async (sessionId?: string, pending?: { tabId: string; items: ChatItem[] }) => {
+      const turn = pending ?? await readTurnItems(sessionId);
+      if (!turn) return undefined;
+      const { tabId, items } = turn;
       const turnUserId = latestUserItemId(items);
       const checks = turnChecks(items);
       const listedCwd = lookupSessionCwd(sessionId, sessionsRef.current, sessionCwdRef.current);
@@ -898,10 +905,13 @@ export default function App() {
     };
     /** 回合正常结束：读侧核对用户写明的文件与命令，把结果写进对话；不重跑任何命令。 */
     const appendTurnOutcome = async (sessionId?: string) => {
-      const turn = await readTurn(sessionId);
-      if (!turn || cancelled) return;
       // 计划模式还在等确认：本回合只提交计划，执行在批准后的下一回合，不写文件/命令核对。
-      if (!shouldCheckTurnOutcome(turn.items)) return;
+      // 先判定再列工作区树：计划回合不该为一次注定跳过的核对付 depth-6 的列表 RPC。
+      const pending = await readTurnItems(sessionId);
+      if (!pending || cancelled) return;
+      if (!shouldCheckTurnOutcome(pending.items)) return;
+      const turn = await readTurn(sessionId, pending);
+      if (!turn || cancelled) return;
       const notes = turnOutcomeNotes(turn.checks, turn.tree, turn.treeKnown, { root: turn.root });
       if (notes.length === 0) return;
       appendTurnNotes(turn, notes);

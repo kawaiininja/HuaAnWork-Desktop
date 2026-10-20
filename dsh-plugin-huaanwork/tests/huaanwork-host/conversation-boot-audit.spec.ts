@@ -106,10 +106,13 @@ for (const missing of REQUIRED_CONVERSATION_TOOL_NAMES) {
   })
 }
 
-test('an agent registry that never materializes skips the agent check and resolves', async () => {
+test('an agent registry that never materializes skips the agent check and resolves without waiting', async () => {
   const started = Date.now()
-  await assert.doesNotReject(assertConversationSurface(auditContext({ agents: false }), immediate))
-  assert.ok(Date.now() - started < 1_000, 'the audit must not wait past its deadline')
+  // Production defaults: the opportunistic agent check must read once and move
+  // on. Waiting here used to add 10 s to every boot (gate audit, then the Host
+  // post-boot audit, then the boot itself).
+  await assert.doesNotReject(assertConversationSurface(auditContext({ agents: false })))
+  assert.ok(Date.now() - started < 1_000, 'the audit must not wait for an agent')
 })
 
 test('the global checks still fail the audit when no agent materializes', async () => {
@@ -125,6 +128,18 @@ test('the service checks still fail the audit when no agent materializes', async
     assertConversationSurface(auditContext({ agents: false, userQuestions: undefined }), immediate),
     /userQuestions service is missing or malformed/,
   )
+})
+
+test('an agent that exists on the first read still fails the audit for a hidden tool', async () => {
+  const visible = ['read', ...REQUIRED_CONVERSATION_TOOL_NAMES].filter(name => name !== 'exit_plan_mode')
+  const started = Date.now()
+  // Only `timeoutMs` is overridden: `agentTimeoutMs` keeps its production
+  // default, proving the default is a single read, not a wait.
+  await assert.rejects(
+    assertConversationSurface(auditContext({ visible }), { timeoutMs: 0 }),
+    /required tool\(s\) not visible to the main agent: exit_plan_mode/,
+  )
+  assert.ok(Date.now() - started < 1_000, 'a present agent must be judged on the first read')
 })
 
 test('an agent whose tools service never attaches fails the audit', async () => {
