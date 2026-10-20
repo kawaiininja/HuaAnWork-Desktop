@@ -54,8 +54,8 @@ contextBridge.exposeInMainWorld('dshDesktopSetup', {
 
 contextBridge.exposeInMainWorld('huaanworkHostLiveness', {
   read: () => ipcRenderer.invoke(HOST_LIVENESS_READ_CHANNEL),
-  onChange(listener: (state: { phase: 'ok' | 'suspect' | 'stoppable'; turns: number }) => void) {
-    const wrapped = (_event: unknown, state: { phase: 'ok' | 'suspect' | 'stoppable'; turns: number }) => listener(state)
+  onChange(listener: (state: { phase: 'ok' | 'suspect' | 'stoppable' | 'stopped'; turns: number }) => void) {
+    const wrapped = (_event: unknown, state: { phase: 'ok' | 'suspect' | 'stoppable' | 'stopped'; turns: number }) => listener(state)
     ipcRenderer.on(HOST_LIVENESS_CHANNEL, wrapped)
     return () => { ipcRenderer.removeListener(HOST_LIVENESS_CHANNEL, wrapped) }
   },

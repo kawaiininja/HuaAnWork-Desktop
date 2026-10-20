@@ -112,6 +112,12 @@ import { closeOpenInputs, inputCardStatus, settleInputCard, type InputCard } fro
 import { toolRowIcon } from "./logic/commandOutcome.ts";
 import { hasPendingAsk, resolveActiveTab } from "./logic/chatTabs.ts";
 import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, sessionStopRequested, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
+import {
+  HOST_UNRESPONSIVE_TEXT,
+  hostExitNotice,
+  hostLivenessNotice,
+  type HostLivenessPhase,
+} from "./logic/hostStop.ts";
 import { resolveStopSession, turnStatus } from "./logic/turnStatus.ts";
 import {
   appendOutcomeNotes,
@@ -308,8 +314,6 @@ function IconSidebar() {
   );
 }
 
-type HostLivenessPhase = "ok" | "suspect" | "stoppable";
-
 type HostLivenessBridge = {
   read(): Promise<{ phase: HostLivenessPhase; turns: number }>;
   onChange(listener: (state: { phase: HostLivenessPhase; turns: number }) => void): () => void;
@@ -375,6 +379,11 @@ export default function App() {
   const [resumeBusy, setResumeBusy] = useState(false);
   const [turnActive, setTurnActive] = useState(false);
   const [hostPhase, setHostPhase] = useState<HostLivenessPhase>("ok");
+  /**
+   * 套接字关闭回调只挂载一次，读不到最新的 hostPhase；用户主动停止的标记放在
+   * ref 里，close 时据此给中性脚注而不是把标签标成失败。
+   */
+  const hostStoppedByUserRef = useRef(false);
   /** 当前未结束回合的最近一次 reasoning 增量、正文增量或工具结果。句子只由 turnStatus 算出。 */
   const [turnPulse, setTurnPulse] = useState<{
     tabId: string;
@@ -484,6 +493,8 @@ export default function App() {
   const activeChat = chatTabs.find((tab) => tab.id === activeTab) ?? chatTabs[0];
   const items = activeChat.items;
   const sessionFailed = activeChat.sessionFailed;
+  /** 相位 → 展示决策；`stopped` 是中性终态，不再显示无响应与结束按钮。 */
+  const hostNotice = hostLivenessNotice(hostPhase);
   const showTurnLine = turnActive && turnPulse.tabId === activeChat.id;
   const turnLine = turnStatus({
     latest: turnPulse.latest,
@@ -1085,11 +1096,16 @@ export default function App() {
           setSidecarDead(true);
           setTurnActive(false);
           if (!payload.ready && !sawReady.current) setPluginFail(PLUGIN_APPLY_FAIL);
-          // sidecar 崩溃影响全部通道：所有有对话内容的标签均标记失败。
+          // 用户主动停止不是崩溃：中性脚注、不标失败（失败标签会拉起红色横幅）。
+          const exitNotice = hostExitNotice(hostStoppedByUserRef.current);
           setChatTabs((prev) =>
             prev.map((tab) =>
               tab.items.length > 0
-                ? { ...tab, sessionFailed: true, items: [...tab.items, { id: allocId(), kind: "note" as const, text: "执行进程已结束。结果可能不完整。" }] }
+                ? {
+                    ...tab,
+                    ...(exitNotice.sessionFailed ? { sessionFailed: true } : {}),
+                    items: [...tab.items, { id: allocId(), kind: "note" as const, text: exitNotice.text }],
+                  }
                 : tab,
             ),
           );
@@ -1258,15 +1274,19 @@ export default function App() {
     const bridge = hostLivenessBridge();
     if (!bridge) return;
     let alive = true;
+    const observe = (phase: HostLivenessPhase) => {
+      hostStoppedByUserRef.current = phase === "stopped";
+      setHostPhase(phase);
+    };
     const report = () => bridge.reportTurns((turnActive ? 1 : 0) + runningAutomationIds.size);
     report();
     void bridge.read().then((state) => {
       if (!alive) return;
-      setHostPhase(state.phase);
+      observe(state.phase);
       report();
     }).catch(() => {});
     const stop = bridge.onChange((state) => {
-      setHostPhase(state.phase);
+      observe(state.phase);
       report();
     });
     return () => {
@@ -2195,7 +2215,7 @@ export default function App() {
             <header className="side-header">
               <span>任务</span>
             </header>
-            {hostPhase !== "ok" ? <p className="side-muted">执行进程无响应</p> : null}
+            {hostNotice.kind === "unresponsive" ? <p className="side-muted">{HOST_UNRESPONSIVE_TEXT}</p> : null}
             {unscopedWorkSessions.length === 0 && runTabs.length === 0 ? (
               <p className="side-muted">暂无任务</p>
             ) : (
@@ -2215,7 +2235,7 @@ export default function App() {
                         }}
                       >
                         <span className="recent-title">{tab.label}</span>
-                        <span className="recent-meta">自动化运行{running ? " · 运行中" : ""}{hostPhase !== "ok" ? " · 执行进程无响应" : ""}</span>
+                        <span className="recent-meta">自动化运行{running ? " · 运行中" : ""}{hostNotice.kind === "unresponsive" ? ` · ${HOST_UNRESPONSIVE_TEXT}` : ""}</span>
                       </button>
                     </li>
                   );
@@ -2237,7 +2257,7 @@ export default function App() {
                         }}
                       >
                         <span className="recent-title">{title}</span>
-                        <span className="recent-meta">{sessionMetaOf(session)}{hostPhase !== "ok" ? " · 执行进程无响应" : ""}</span>
+                        <span className="recent-meta">{sessionMetaOf(session)}{hostNotice.kind === "unresponsive" ? ` · ${HOST_UNRESPONSIVE_TEXT}` : ""}</span>
                       </button>
                     </li>
                   );
@@ -2258,7 +2278,7 @@ export default function App() {
                 ＋ 新建
               </button>
             </header>
-            {hostPhase !== "ok" ? <p className="side-muted">执行进程无响应</p> : null}
+            {hostNotice.kind === "unresponsive" ? <p className="side-muted">{HOST_UNRESPONSIVE_TEXT}</p> : null}
             <ProjectsPanel
               projects={projects}
               activeProjectId={activeProjectId}
@@ -2296,15 +2316,20 @@ export default function App() {
           {pluginFail ? <div className="banner error">{pluginFail}</div> : null}
           {guardModeError ? <div className="banner error">{guardModeError}</div> : null}
           {sessionFailed ? <div className="banner error">会话已失败。上次 diff 保留在右侧，本轮不再继续。</div> : null}
-          {hostPhase !== "ok" ? (
+          {hostNotice.kind === "unresponsive" ? (
             <div className="banner warn" role="status">
-              执行进程无响应
-              {hostPhase === "stoppable" ? (
+              {HOST_UNRESPONSIVE_TEXT}
+              {hostNotice.canStop ? (
                 <button type="button" className="chip" onClick={() => void hostLivenessBridge()?.requestStop()}>
                   结束进程
                 </button>
               ) : null}
             </div>
+          ) : null}
+          {hostNotice.kind === "stopped" ? (
+            // The focused window never receives notifyAttention, so the neutral
+            // stop phrase must live in the app itself. No error banner, no restart.
+            <div className="banner" role="status">{hostNotice.text}</div>
           ) : null}
 
           {view === "skills" ? (

@@ -35,6 +35,11 @@ export interface IsolatedHostOptions {
    * recovery dialog and no automatic restart, only a plain record of the stop.
    */
   onStoppedByUser?(exit: IsolatedHostExit): void
+  /**
+   * Test seam: the Electron surface the liveness probe, dialog, and renderer
+   * publish would use. Production leaves it unset and looks `electron` up.
+   */
+  livenessApi?: ElectronLivenessApi
 }
 
 /** What an unexpected Host exit leaves behind for evidence. */
@@ -110,8 +115,9 @@ export function beginHostLiveness(
 ): () => void {
   let state: Liveness = { phase: 'ok', turns: 0, lastOkMs: Date.now() }
   let closed = false
+  let stoppedByUser = false
   const apply = (event: { kind: 'probe-ok' | 'probe-miss' | 'turn-count'; atMs: number; turns?: number }) => {
-    if (closed) return
+    if (closed || stoppedByUser) return
     const next = reduceLiveness(state, event)
     const changed = next.phase !== state.phase || next.turns !== state.turns
     state = next
@@ -135,9 +141,15 @@ export function beginHostLiveness(
       defaultId: 1,
     })
     if (response !== 0 || closed || state.phase !== 'stoppable' || state.turns <= 0) return false
+    // The dialog's window may be unfocused, in which case the attention notice is
+    // the only signal. The focused window keeps its banner, so publish the stop
+    // before the kill: it must replace "unresponsive" with the neutral note there too.
+    stoppedByUser = true
+    state = { ...state, phase: 'stopped' }
     // Mark the reason before the kill: the exit handler runs asynchronously and
     // must never mistake the user's stop for an unexpected Host crash.
     onUserStop()
+    publishHostLiveness(state, api)
     child.kill()
     return true
   }
@@ -152,7 +164,7 @@ export function beginHostLiveness(
   }
   publishHostLiveness(state, api)
   const timer = setInterval(() => {
-    if (closed) return
+    if (closed || stoppedByUser) return
     void rpc.call('status', [], undefined, 2_000).then(
       value => {
         const atMs = Date.now()
@@ -241,7 +253,7 @@ export async function startIsolatedDesktopHost(options: IsolatedHostOptions): Pr
     const { desktopLaunchEnvironment, ...host } = options.host
     await rpc.call('boot', [{ ...host, launchEnvironmentLayers: serializeHostEnvironment(desktopLaunchEnvironment) }, runtimeSnapshot(options.runtime), options.rendererToken])
     exitGate.markBooted()
-    stopLiveness = beginHostLiveness(rpc, child, () => exitGate.markStoppedByUser())
+    stopLiveness = beginHostLiveness(rpc, child, () => exitGate.markStoppedByUser(), options.livenessApi)
   } catch (cause) {
     await stop()
     throw cause

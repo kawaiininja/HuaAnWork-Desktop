@@ -1,4 +1,11 @@
-export type Liveness = { phase: "ok" | "suspect" | "stoppable"; turns: number; lastOkMs: number };
+/**
+ * `ok | suspect | stoppable` is the probe's judgement of a live Host. `stopped`
+ * is not a judgement: the user confirmed the stop dialog, so the supervisor tells
+ * every window that this stop is neutral instead of leaving a stale "unresponsive".
+ */
+export type LivenessPhase = "ok" | "suspect" | "stoppable" | "stopped";
+
+export type Liveness = { phase: LivenessPhase; turns: number; lastOkMs: number };
 
 export const HOST_LIVENESS_CHANNEL = "huaanwork:host-liveness";
 export const HOST_LIVENESS_TURNS_CHANNEL = "huaanwork:host-liveness-turns";
@@ -14,6 +21,9 @@ export function reduceLiveness(
   state: Liveness,
   event: { kind: "probe-ok" | "probe-miss" | "turn-count"; atMs: number; turns?: number },
 ): Liveness {
+  // A confirmed stop is terminal for this Host generation: a late probe result
+  // must not revive the banner or the stop button.
+  if (state.phase === "stopped") return state;
   if (event.kind === "turn-count") return { ...state, turns: event.turns ?? 0 };
   if (event.kind === "probe-ok") return { phase: "ok", turns: state.turns, lastOkMs: event.atMs };
   const silent = event.atMs - state.lastOkMs;
@@ -26,8 +36,7 @@ export function reduceLiveness(
 export type HostExitDisposition = "failure" | "user-stop" | "silent";
 
 export type HostExitGate = {
-  readonly booted: boolean;
-  readonly stopping: boolean;
+  /** Read by the tests and available for diagnostics; the dispatch only needs {@link disposition}. */
   readonly stoppedByUser: boolean;
   markBooted(): void;
   markStopping(): void;
@@ -50,8 +59,6 @@ export function createHostExitGate(): HostExitGate {
   let stopping = false;
   let stoppedByUser = false;
   return {
-    get booted() { return booted; },
-    get stopping() { return stopping; },
     get stoppedByUser() { return stoppedByUser; },
     markBooted() { booted = true; },
     markStopping() { stopping = true; },

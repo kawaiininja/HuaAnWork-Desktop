@@ -28,3 +28,16 @@ test("the default budget fits the two-second liveness window and the untracked c
   now = GIT_SNAPSHOT_BUDGET_MS;
   assert.equal(budget.remainingMs(), 0);
 });
+
+test("a backwards clock step must not extend the budget", () => {
+  let now = 10_000;
+  const budget = createGitWorkBudget(1_000, () => now);
+  now += 400;
+  assert.equal(budget.remainingMs(), 600);
+  // A wall-clock adjustment that moves backwards cannot hand out more than the
+  // snapshot's original window.
+  now -= 5_000;
+  assert.equal(budget.remainingMs(), 1_000);
+  now = 0;
+  assert.equal(budget.remainingMs(), 1_000);
+});

@@ -45,3 +45,10 @@ test("a stop marked before the exit is still a user stop, even if boot completed
   gate.markStoppedByUser();
   assert.equal(gate.disposition(), "user-stop");
 });
+
+test("a stopped phase is terminal: a late probe cannot revive liveness or the stop button", () => {
+  const stopped: Liveness = { phase: "stopped", turns: 3, lastOkMs: 0 };
+  assert.equal(reduceLiveness(stopped, { kind: "turn-count", atMs: 1, turns: 0 }), stopped);
+  assert.equal(reduceLiveness(stopped, { kind: "probe-miss", atMs: 90_000 }), stopped);
+  assert.equal(reduceLiveness(stopped, { kind: "probe-ok", atMs: 90_000 }), stopped);
+});

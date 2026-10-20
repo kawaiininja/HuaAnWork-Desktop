@@ -254,7 +254,8 @@ export function workspaceDiff(root: string, budget: GitWorkBudget = createGitWor
 
 /** Never call spawnSync with `timeout: 0` (Node reads that as "no timeout"). */
 function runGit(root: string, args: string[], budget: GitWorkBudget) {
-  const timeout = Math.min(GIT_SNAPSHOT_BUDGET_MS, budget.remainingMs());
+  // performance.now() is fractional; spawnSync requires an unsigned integer.
+  const timeout = Math.min(GIT_SNAPSHOT_BUDGET_MS, Math.ceil(budget.remainingMs()));
   if (timeout <= 0) return undefined;
   return spawnSync("git", args, { cwd: root, encoding: "utf8", timeout });
 }

@@ -35,6 +35,10 @@ function fixture() {
 function livenessHarness(dialogResponse: number) {
   const handlers = new Map<string, (...args: never[]) => unknown>()
   const listeners = new Map<string, (...args: never[]) => unknown>()
+  const published: { phase: string; turns: number }[] = []
+  const send = vi.fn((_channel: string, payload: { phase: string; turns: number }) => {
+    published.push(payload)
+  })
   const api = {
     ipcMain: {
       on(channel: string, listener: (...args: never[]) => unknown) { listeners.set(channel, listener) },
@@ -46,13 +50,16 @@ function livenessHarness(dialogResponse: number) {
       removeAllListeners(channel: string) { listeners.delete(channel) },
     },
     dialog: { showMessageBox: vi.fn(async () => ({ response: dialogResponse })) },
+    BrowserWindow: {
+      getAllWindows: () => [{ isDestroyed: () => false, webContents: { send } }],
+    },
   } as unknown as ElectronLivenessApi
   // Every status probe misses: after 60 s with a live turn the Host is stoppable.
   const rpc = { call: vi.fn(() => Promise.reject(new Error('probe missed'))) } as unknown as HostRpc
   const child = { kill: vi.fn(() => true) }
   const onUserStop = vi.fn()
   return {
-    api, rpc, child, onUserStop,
+    api, rpc, child, onUserStop, published, send,
     reportTurns: (turns: number) =>
       (listeners.get(HOST_LIVENESS_TURNS_CHANNEL) as ((event: unknown, turns: number) => void) | undefined)?.({}, turns),
     stop: () => (handlers.get(HOST_LIVENESS_STOP_CHANNEL) as (() => Promise<boolean>) | undefined)?.(),
@@ -126,7 +133,37 @@ it('marks a confirmed liveness stop before killing the Host', async () => {
     expect(h.onUserStop.mock.invocationCallOrder[0]).toBeLessThan(
       h.child.kill.mock.invocationCallOrder[0]!,
     )
+    // The focused window never sees notifyAttention: the neutral phase must reach it
+    // before the kill, or it keeps the unresponsive banner with a dead stop button.
+    expect(h.published.at(-1)).toEqual({ phase: 'stopped', turns: 1 })
+    expect(h.send.mock.invocationCallOrder.at(-1)!).toBeLessThan(
+      h.child.kill.mock.invocationCallOrder[0]!,
+    )
     dispose()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+it('dispatches a confirmed liveness stop to onStoppedByUser instead of onFailure', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+  try {
+    const f = fixture()
+    const h = livenessHarness(0)
+    const onStoppedByUser = vi.fn()
+    f.options.onStoppedByUser = onStoppedByUser
+    f.options.livenessApi = h.api
+    await startIsolatedDesktopHost(f.options)
+    // The fixture answers every RPC, so silence the status probe: without an answer
+    // the liveness state must reach stoppable after 60 s with a live turn.
+    f.child.postMessage.mockImplementation(() => {})
+    h.reportTurns(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await h.stop()).toBe(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onStoppedByUser).toHaveBeenCalledOnce()
+    expect(f.onFailure).not.toHaveBeenCalled()
+    expect(h.published.at(-1)).toEqual({ phase: 'stopped', turns: 1 })
+    await f.host().fiber.dispose()
   } finally {
     vi.useRealTimers()
   }

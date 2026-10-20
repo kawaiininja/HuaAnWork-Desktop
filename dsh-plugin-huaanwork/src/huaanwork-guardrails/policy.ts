@@ -208,9 +208,17 @@ export function isGitDirty(workspaceRoot: string): boolean {
       // tree would hold the Host loop past the 2 s probe and look like a hang.
       timeout: GIT_SNAPSHOT_BUDGET_MS,
     });
+    // Not a repository (git exits 128) and git-not-installed (ENOENT) are the
+    // pre-existing "nothing to lose" cases: they stay clean, not dirty.
+    if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return false;
+    // No exit status at all means the probe timed out or was killed before git
+    // could answer. We do not know whether the tree is clean, so fail closed:
+    // a dirty `git_checkout` must still reach the ask path.
+    if (result.status === null) return true;
     return result.status === 0 && (result.stdout ?? "").trim().length > 0;
   } catch {
-    return false;
+    // An exception means the probe itself is unknown: fail closed like a timeout.
+    return true;
   }
 }
 

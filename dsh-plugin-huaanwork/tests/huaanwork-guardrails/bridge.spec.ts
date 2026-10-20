@@ -181,7 +181,7 @@ test("bridge diff snapshot includes untracked new files", async () => {
   }
 });
 
-test("a large untracked tree cannot block the Host loop past the git budget", async () => {
+test("a large untracked tree stays within the per-call git timeout and the untracked-diff cap", async () => {
   const { workspaceDiff } = await import("../../src/huaanwork-guardrails/bridge.ts");
   const { createGitWorkBudget, GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS } = await import(
     "../../src/huaanwork-guardrails/git-budget.ts"
@@ -212,6 +212,18 @@ test("a large untracked tree cannot block the Host loop past the git budget", as
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a spent git budget skips spawning instead of passing timeout: 0", async () => {
+  const { workspaceDiff } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { createGitWorkBudget } = await import("../../src/huaanwork-guardrails/git-budget.ts");
+  vi.mocked(spawnSync).mockClear();
+  assert.equal(workspaceDiff(process.cwd(), createGitWorkBudget(0)), undefined);
+  assert.equal(
+    vi.mocked(spawnSync).mock.calls.length,
+    0,
+    "spawnSync reads timeout: 0 as 'no timeout', so a spent budget must not call it at all",
+  );
 });
 
 test("write lands on disk and the diff snapshot is nonempty", async () => {

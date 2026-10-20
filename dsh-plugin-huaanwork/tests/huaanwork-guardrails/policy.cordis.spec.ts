@@ -180,13 +180,54 @@ test("isGitDirty bounds the blocking git status probe", async () => {
   const { isGitDirty } = await import("../../src/huaanwork-guardrails/policy.ts");
   vi.mocked(spawnSync).mockClear();
   isGitDirty(process.cwd());
-  const call = vi.mocked(spawnSync).mock.calls.at(0);
-  assert.ok(call, "the probe must still spawn one git status call");
-  const [command, argv, options] = call;
+  const calls = vi.mocked(spawnSync).mock.calls;
+  assert.equal(calls.length, 1, "the probe issues exactly one git status call");
+  const [command, argv, options] = calls[0]!;
   assert.equal(command, "git");
   assert.deepEqual(argv, ["status", "--porcelain"]);
   assert.equal(typeof options?.timeout, "number", "without a timeout a big tree can stall the Host loop");
   assert.ok((options?.timeout ?? 0) > 0 && (options?.timeout ?? 0) <= 1_500);
+});
+
+test("isGitDirty fails closed when the status probe times out or has no exit status", async () => {
+  const { isGitDirty } = await import("../../src/huaanwork-guardrails/policy.ts");
+  const mocked = vi.mocked(spawnSync);
+  mocked.mockClear();
+  // spawnSync reports a timeout as status: null plus an ETIMEDOUT error. Treating
+  // that as clean would let a dirty git_checkout skip the ask in smart/ask modes.
+  mocked.mockReturnValueOnce({
+    pid: 1,
+    output: [null, "", ""],
+    stdout: "",
+    stderr: "",
+    status: null,
+    signal: "SIGTERM",
+    error: Object.assign(new Error("spawnSync git ETIMEDOUT"), { code: "ETIMEDOUT" }),
+  } as never);
+  assert.equal(isGitDirty(process.cwd()), true, "a timed-out status is unknown, not clean");
+
+  // No error object but still no exit status (e.g. killed by a signal we did not set).
+  mocked.mockReturnValueOnce({
+    pid: 1,
+    output: [null, "", ""],
+    stdout: "",
+    stderr: "",
+    status: null,
+    signal: "SIGKILL",
+  } as never);
+  assert.equal(isGitDirty(process.cwd()), true, "an unknown status fails closed");
+
+  // The pre-existing not-installed fallback stays clean: there is no repository to protect.
+  mocked.mockReturnValueOnce({
+    pid: 0,
+    output: [null, "", ""],
+    stdout: "",
+    stderr: "",
+    status: null,
+    signal: null,
+    error: Object.assign(new Error("spawnSync git ENOENT"), { code: "ENOENT" }),
+  } as never);
+  assert.equal(isGitDirty(process.cwd()), false, "git not installed keeps the clean fallback");
 });
 
 test("Cordis guard allows git_push once after allowed-once and denies without approve", async () => {
