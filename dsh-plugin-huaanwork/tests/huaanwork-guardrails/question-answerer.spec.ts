@@ -246,6 +246,54 @@ test("an unattended plan review settles as keep-planning instead of waiting for 
   assert.equal(reviews.size, 0);
 });
 
+test("an unattended scope only declines plan reviews from its own session", async () => {
+  const events: Asked[] = [];
+  const approvals = new Map<string, (result: ApprovalResult) => void>();
+  let listener: Listener | undefined;
+  apply({
+    huaanworkProfileDir: modeDir("smart"),
+    huaanworkWorkspaceRoot: { current: tmpdir() },
+    huaanworkApprovals: approvals,
+    huaanworkPlanReviews: new Map(),
+    // 宿主在作用域里带上运行自己的会话(automations-host 的 runAgentTurn)。
+    huaanworkUnattended: {
+      current: {
+        runId: "run-2",
+        automationId: "auto-2",
+        allow: new Set<string>(),
+        sessionId: "automation-1",
+      },
+    },
+    huaanworkEmit(event) {
+      if (event.event === "approval/asked") events.push(event);
+    },
+    on(_name, fn) {
+      listener = fn as Listener;
+    },
+  });
+
+  // 自动化自己的会话:没有可点击的人,立即按「保留计划」结算。
+  const declined = await listener!(
+    { questions: [reviewWith("c1", "# 汇总\n\n读 `docs/a.md`")], agent: { session: { id: "automation-1" } } },
+    async () => {
+      throw new Error("next");
+    },
+  );
+  assert.deepEqual(declined.answers, [{ id: "plan-review", selected: ["Keep planning"] }]);
+  assert.equal(events.length, 0);
+
+  // 另一个会话里的人:只读计划在智能模式下照常自动继续,不被错误地降级。
+  const attended = await listener!(
+    { questions: [reviewWith("c2", "# 汇总\n\n读 `docs/a.md`")], agent: { session: { id: "human-1" } } },
+    async () => {
+      throw new Error("next");
+    },
+  );
+  assert.deepEqual(attended.answers, [{ id: "plan-review", selected: ["Approve"] }]);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.autoContinue, true);
+});
+
 test("full mode confirms only when the target changed from the last confirmed plan", async () => {
   const { events, approvals, ask } = answerer("full");
   const first = await ask("full-1", "c1", "# 周报\n\n写入 `out/report.md`，收件人：张三");

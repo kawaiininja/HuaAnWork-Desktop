@@ -44,6 +44,11 @@ type UserQuestionService = {
 
 /** cordis ctx 无单独类型导出(上游 0.1.6-alpha.2 逐字比对);同旧 sidecar 的 duck-type 风格。 */
 type GatesContext = {
+  /**
+   * 按名取服务,不要求在 `inject` 里声明。planMode/userQuestions 必须走这里,
+   * 原因见 {@link inject} 的注释。
+   */
+  get(name: string): unknown
   waterfall(
     event: string,
     execution: ToolExecution,
@@ -63,8 +68,6 @@ type GatesContext = {
     /** 实际监听端口(config.port 为 0 时由 OS 分配,见 dsh-host-webserver)。 */
     readonly port: number
   }
-  planMode?: PlanModeService
-  userQuestions?: UserQuestionService
 }
 
 /**
@@ -73,8 +76,9 @@ type GatesContext = {
  * - `exit_plan_mode`:官方 plan-mode 的评审出口;
  * - 目标三件套:profile.ts 始终启用 tool-goal(行断言亦要求该 override 命中)。
  * 只验证注册不够——present-as 按 agent restrict,故还要查主 agent 的 schema。
+ * 导出给测试构建 fixture,避免测试另抄一份名单后与生产名单静默漂移。
  */
-const REQUIRED_TOOL_NAMES = [
+export const REQUIRED_TOOL_NAMES = [
   'propose_plan',
   'request_input',
   'exit_plan_mode',
@@ -84,21 +88,30 @@ const REQUIRED_TOOL_NAMES = [
 ] as const
 
 /**
- * Loader entries activate concurrently, so a tool provider in the same wave as
- * the gate may still be registering when the gate first reads schemas. Wait a
- * bounded time before judging, the same way the agent registry is awaited
- * below; a tool that never appears still fails (fail-closed).
+ * Loader entries activate concurrently, so a service or tool provider in the
+ * same wave as the gate may still be registering when the gate first reads it.
+ * Wait a bounded time before judging, the same way the agent registry is
+ * awaited below; anything that never appears still fails (fail-closed).
+ * This deadline is shared by the service waits and the tool waits.
  */
-const TOOL_WAIT_TIMEOUT_MS = 5_000
-const TOOL_WAIT_POLL_MS = 100
+const BOOT_WAIT_TIMEOUT_MS = 5_000
+const BOOT_WAIT_POLL_MS = 100
 
-/** Tools the option can shrink to 0 in tests; production keeps the bounded wait. */
+/** Tests shrink the shared deadline to 0/300 ms; production keeps the bounded wait. */
 type GateOptions = {
   toolWaitMs?: number
 }
 
 export const name = 'huaanwork-gates'
-export const inject = ['tools', 'agents', 'webServer', 'planMode', 'userQuestions']
+/**
+ * Only the three pre-existing services belong here. `planMode` and
+ * `userQuestions` must NOT be injected: an unmet inject leaves this fiber
+ * pending, and `dsh-app-boot` only warns for non-required entries, so the gate
+ * body would never run and a missing service would boot green while the
+ * route/answerer plugins stay suspended. They are resolved through
+ * `ctx.get()` inside {@link assertPostBootGate} instead.
+ */
+export const inject = ['tools', 'agents', 'webServer']
 
 /**
  * 必须是 async function:cordis 的 isConstructor 把一切带 .prototype 的普通函数
@@ -117,15 +130,29 @@ export async function assertPostBootGate(
   existingHandles: ReadonlySet<unknown> = new Set(),
   options: GateOptions = {},
 ): Promise<void> {
-  const toolWaitMs = options.toolWaitMs ?? TOOL_WAIT_TIMEOUT_MS
-  // 锁层要求 plan-mode 与 user-questions 两行必须生效。缺任一服务时 cordis 会把
-  // 依赖它的 route-tools / question-answerer 静默挂起(只留启动告警),所以门禁
-  // 必须自己判负,不能假定这两个服务一定在位。
-  if (typeof ctx.planMode?.set !== 'function') {
-    throw new Error('post-boot gate failed: planMode service is missing (the plan-mode row did not activate)')
+  const deadline = Date.now() + (options.toolWaitMs ?? BOOT_WAIT_TIMEOUT_MS)
+  // 锁层要求 plan-mode 与 user-questions 两行必须生效。这两个服务不能放进
+  // inject(见 inject 注释),所以门禁自己经 ctx.get 有界等待并判形状;缺失或
+  // 形状不对都必须 throw,否则 route-tools / question-answerer 会被静默挂起。
+  const planMode = await waitForService<PlanModeService>(
+    ctx,
+    'planMode',
+    (service) => typeof service.set === 'function',
+    deadline,
+  )
+  if (!planMode) {
+    throw new Error('post-boot gate failed: planMode service is missing or malformed (the plan-mode row did not activate)')
   }
-  if (typeof ctx.userQuestions?.ask !== 'function') {
-    throw new Error('post-boot gate failed: userQuestions service is missing (the user-questions row did not activate)')
+  const userQuestions = await waitForService<UserQuestionService>(
+    ctx,
+    'userQuestions',
+    (service) => typeof service.ask === 'function',
+    deadline,
+  )
+  if (!userQuestions) {
+    throw new Error(
+      'post-boot gate failed: userQuestions service is missing or malformed (the user-questions row did not activate)',
+    )
   }
   const probe = {
     callId: 'huaanwork-start-gate',
@@ -147,24 +174,24 @@ export async function assertPostBootGate(
   if (!result.isError) {
     throw new Error('post-boot gate failed: git_push must be denied by the guard')
   }
-  const catalog = toolNames(ctx.tools.schemas())
-  if (catalog.has('run_code')) {
-    throw new Error('post-boot gate failed: run_code is visible')
-  }
-  const unregistered = await waitForRequiredTools(() => ctx.tools.schemas(), toolWaitMs)
+  assertNoForbiddenTools(toolNames(ctx.tools.schemas()), CATALOG_FORBIDDEN, 'global catalog')
+  const unregistered = await waitForRequiredTools(() => ctx.tools.schemas(), deadline)
   if (unregistered.length > 0) {
     throw new Error(`post-boot gate failed: required tool(s) not registered: ${unregistered.join(', ')}`)
   }
+  // Re-check after the wait: a provider that registers late can also add a
+  // forbidden name after the first read.
+  assertNoForbiddenTools(toolNames(ctx.tools.schemas()), CATALOG_FORBIDDEN, 'global catalog')
 
   // dsh 的 agent 注册表在部分环境下异步物化(旧 sidecar 实测:vendored node+pnpm
   // 同时在 PATH 时间歇性返回空表)。有界等待再判负——超时仍无 agent 才算门禁失败
   // (fail-closed)。
   const AGENT_WAIT_TIMEOUT_MS = 10_000
-  const deadline = Date.now() + AGENT_WAIT_TIMEOUT_MS
+  const agentDeadline = Date.now() + AGENT_WAIT_TIMEOUT_MS
   let agent = ctx.agents.list()[0]
   if (!agent?.ctx) {
     console.error('post-boot gate: agent registry empty at first check; waiting for materialization')
-    while (!agent?.ctx && Date.now() < deadline) {
+    while (!agent?.ctx && Date.now() < agentDeadline) {
       await new Promise((done) => setTimeout(done, 100))
       agent = ctx.agents.list()[0]
     }
@@ -181,15 +208,13 @@ export async function assertPostBootGate(
     throw new Error('post-boot gate failed: main-agent schema dump is unavailable')
   }
   const readAgentSchemas = () => dumpAgentSchemas.call(mainAgentTools)
-  const visible = toolNames(readAgentSchemas())
-  const disabledName = [...visible].find((name) => name === 'web_search' || name === 'run_code')
-  if (disabledName) {
-    throw new Error(`post-boot gate failed: main-agent schema contains disabled tool ${disabledName}`)
-  }
-  const hidden = await waitForRequiredTools(readAgentSchemas, toolWaitMs)
+  assertNoForbiddenTools(toolNames(readAgentSchemas()), MAIN_AGENT_FORBIDDEN, 'main-agent schema')
+  const hidden = await waitForRequiredTools(readAgentSchemas, deadline)
   if (hidden.length > 0) {
     throw new Error(`post-boot gate failed: required tool(s) not visible to the main agent: ${hidden.join(', ')}`)
   }
+  // Same late-registration hazard as the global catalog above.
+  assertNoForbiddenTools(toolNames(readAgentSchemas()), MAIN_AGENT_FORBIDDEN, 'main-agent schema')
   await assertNoUnexpectedListeners(ctx, existingHandles)
 }
 
@@ -199,20 +224,65 @@ function toolNames(schemas: readonly { name?: string }[]): Set<string> {
   )))
 }
 
+/** `run_code` must never be registered in the global catalog. */
+const CATALOG_FORBIDDEN = ['run_code'] as const
+/** The main agent must also not see `web_search` (unregistered or present-as hidden). */
+const MAIN_AGENT_FORBIDDEN = ['run_code', 'web_search'] as const
+
+function assertNoForbiddenTools(
+  names: ReadonlySet<string>,
+  forbidden: readonly string[],
+  scope: string,
+): void {
+  const found = forbidden.find((name) => names.has(name))
+  if (found) {
+    throw new Error(`post-boot gate failed: disabled tool ${found} is visible in the ${scope}`)
+  }
+}
+
+/**
+ * Services are deliberately not injected, so they may activate after this gate.
+ * Poll `ctx.get()` until the shared deadline; a service that is missing or has
+ * the wrong shape still returns undefined and fails the gate (fail-closed).
+ */
+async function waitForService<T>(
+  ctx: GatesContext,
+  serviceName: string,
+  isValid: (service: T) => boolean,
+  deadline: number,
+): Promise<T | undefined> {
+  const read = (): T | undefined => {
+    let value: unknown
+    try {
+      value = ctx.get(serviceName)
+    } catch {
+      return undefined
+    }
+    if (value === undefined || value === null) return undefined
+    return isValid(value as T) ? value as T : undefined
+  }
+  let service = read()
+  while (!service && Date.now() < deadline) {
+    await new Promise((done) => setTimeout(done, BOOT_WAIT_POLL_MS))
+    service = read()
+  }
+  return service
+}
+
 /**
  * Required tools may be registering in a concurrent Loader wave; poll until the
- * deadline so a slow-but-correct provider is not mistaken for a missing one.
+ * shared deadline so a slow-but-correct provider is not mistaken for a missing
+ * one.
  * @returns names still missing when the deadline passes.
  */
 async function waitForRequiredTools(
   schemas: () => readonly { name?: string }[],
-  waitMs: number,
+  deadline: number,
 ): Promise<string[]> {
   const missing = (): string[] => REQUIRED_TOOL_NAMES.filter((name) => !toolNames(schemas()).has(name))
-  const deadline = Date.now() + waitMs
   let unresolved = missing()
   while (unresolved.length > 0 && Date.now() < deadline) {
-    await new Promise((done) => setTimeout(done, TOOL_WAIT_POLL_MS))
+    await new Promise((done) => setTimeout(done, BOOT_WAIT_POLL_MS))
     unresolved = missing()
   }
   return unresolved

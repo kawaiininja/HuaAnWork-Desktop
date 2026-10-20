@@ -52,8 +52,12 @@ type Context = {
   huaanworkAttachments?: AttachmentMaps;
   huaanworkApprovals?: ApprovalMap;
   huaanworkPlanReviews?: PlanReviewMap;
-  /** boot 时注入的容器;无人值守运行期间 `.current` 非空(policy.ts 同源)。 */
-  huaanworkUnattended?: { current?: unknown };
+  /**
+   * boot 时注入的容器;无人值守运行期间 `.current` 非空(policy.ts 同源)。
+   * `sessionId` 是该运行自己的会话(automations-host 的 runAgentTurn 设置);
+   * 没有它的旧形状只可能来自旧调用方,按全局作用域处理。
+   */
+  huaanworkUnattended?: { current?: UnattendedScope };
   huaanworkEmit?: (event: AskedEvent) => void;
   on(
     event: "user-questions/request",
@@ -61,6 +65,8 @@ type Context = {
     options?: { global?: boolean; prepend?: boolean },
   ): void;
 };
+
+type UnattendedScope = { sessionId?: string }
 
 type LiveReview = { approvalRequestId: string; approvals: ApprovalMap };
 
@@ -85,9 +91,14 @@ export function apply(ctx: Context): void {
     const kind = requestKind(request);
     if (kind === "other") return next();
 
-    // 无人值守自动化没有可点击的人:计划评审一律按「保留计划」结算,
-    // 不让 exit_plan_mode 等到一个永远不会来的点击(失败方向 = 不离开计划模式)。
-    if (kind === "plan-review" && ctx.huaanworkUnattended?.current) return declineAnswers(request);
+    // 无人值守自动化没有可点击的人:它自己会话里的计划评审一律按「保留计划」
+    // 结算,不让 exit_plan_mode 等到一个永远不会来的点击(失败方向 = 不离开
+    // 计划模式)。作用域带 sessionId 时只接管该会话——人在自动化运行期间发起的
+    // 计划评审仍然走下面的正常通道;没有 sessionId 的旧形状退回全局判定。
+    // request_input/clarify 在无人值守下同样没有回答者,但那是单独的后续项,
+    // 本轮不在这里处理(保持现有行为)。
+    const unattended = ctx.huaanworkUnattended?.current;
+    if (kind === "plan-review" && unattendedOwns(unattended, request)) return declineAnswers(request);
 
     const mode = readGuardMode(ctx.huaanworkProfileDir);
     const decision = answererDecision({
@@ -112,6 +123,18 @@ export function apply(ctx: Context): void {
 
 function reviewedPlan(request: QuestionRequest): string {
   return request.questions?.find((question) => question.intent?.kind === "plan-review")?.detail ?? "";
+}
+
+/**
+ * 无人值守作用域是否接管这次请求。带 `sessionId` 时只接管同一会话,自动化运行
+ * 期间人在别的会话里的计划评审照常等人;没有 `sessionId`(旧形状)时保持原有
+ * 全局判定,失败方向仍是「不自动批准」。
+ */
+function unattendedOwns(scope: UnattendedScope | undefined, request: QuestionRequest): boolean {
+  if (!scope) return false;
+  if (scope.sessionId === undefined) return true;
+  const sessionId = sessionIdOfAgentRef(request.agent);
+  return sessionId !== undefined && sessionId === scope.sessionId;
 }
 
 function confirmInput(ctx: Context, request: QuestionRequest, mode: "ask" | "smart" | "full") {
