@@ -8,6 +8,10 @@ import {
 } from '../../src/huaanwork-host/conversation-boot-audit.ts'
 import { REQUIRED_TOOL_NAMES } from '../../src/huaanwork-host/gates.ts'
 
+/**
+ * `agents` is per session in production: a fresh Host has no agent before the
+ * first session, so the audit must resolve on the global checks in that state.
+ */
 type AuditOverrides = {
   catalog?: readonly string[]
   visible?: readonly string[]
@@ -16,6 +20,8 @@ type AuditOverrides = {
   userQuestions?: unknown
   /** `false` models a registry that never materializes. */
   agents?: boolean
+  /** `false` models an agent whose tools service never attaches. */
+  agentTools?: boolean
 }
 
 /**
@@ -49,7 +55,7 @@ function auditContext(overrides: AuditOverrides = {}) {
         ? []
         : [{
           ctx: {
-            get: (name: string) => (name === 'tools'
+            get: (name: string) => (name === 'tools' && overrides.agentTools !== false
               ? { schemas: () => visible.map(name => ({ name })) }
               : undefined),
           },
@@ -100,13 +106,32 @@ for (const missing of REQUIRED_CONVERSATION_TOOL_NAMES) {
   })
 }
 
-test('an agent registry that never materializes fails the audit', async () => {
+test('an agent registry that never materializes skips the agent check and resolves', async () => {
   const started = Date.now()
-  await assert.rejects(
-    assertConversationSurface(auditContext({ agents: false }), immediate),
-    /no agent is available to verify the conversation surface/,
-  )
+  await assert.doesNotReject(assertConversationSurface(auditContext({ agents: false }), immediate))
   assert.ok(Date.now() - started < 1_000, 'the audit must not wait past its deadline')
+})
+
+test('the global checks still fail the audit when no agent materializes', async () => {
+  const catalog = ['read', ...REQUIRED_CONVERSATION_TOOL_NAMES].filter(name => name !== 'propose_plan')
+  await assert.rejects(
+    assertConversationSurface(auditContext({ agents: false, catalog }), immediate),
+    /required tool\(s\) not registered: propose_plan/,
+  )
+})
+
+test('the service checks still fail the audit when no agent materializes', async () => {
+  await assert.rejects(
+    assertConversationSurface(auditContext({ agents: false, userQuestions: undefined }), immediate),
+    /userQuestions service is missing or malformed/,
+  )
+})
+
+test('an agent whose tools service never attaches fails the audit', async () => {
+  await assert.rejects(
+    assertConversationSurface(auditContext({ agentTools: false }), immediate),
+    /the main-agent schema dump is unavailable/,
+  )
 })
 
 test('a complete surface resolves', async () => {

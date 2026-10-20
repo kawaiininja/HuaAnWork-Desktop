@@ -1,8 +1,8 @@
 /**
  * HuaAnWork post-boot gate(旧 packages/sidecar/src/gates.ts:73-142 的移植)。
  * 组合锁(Task 3)只验证静态条目;本插件在真实组合 boot 完成后逐条探活:
- * 会话面(planMode/userQuestions 服务 + 分流/计划/目标工具在全局目录且对
- * 主 agent 可见,由 `conversation-boot-audit.ts` 的共享审计判定)、waterfall
+ * 会话面(planMode/userQuestions 服务 + 分流/计划/目标工具在全局目录;存在
+ * 主 agent 时还须对其可见,由 `conversation-boot-audit.ts` 的共享审计判定)、waterfall
  * 可用、git_push 探针经 waterfall 得 ask、guard/execute 存在、同探针经
  * execute 必 isError、全局 schemas 无 run_code、agent ctx 有 restrict、
  * 主 agent schemas 无 web_search/run_code。
@@ -138,8 +138,9 @@ export async function assertPostBootGate(
   }
   assertNoForbiddenTools(toolNames(ctx.tools.schemas()), CATALOG_FORBIDDEN, 'global catalog')
 
-  // 审计已经把 agent 注册表等到物化(旧 sidecar 实测:某些环境下异步出现);
-  // 这里再取一次只验 restrict,因为审计只读 schemas。
+  // 审计只读 schemas,这里再取一次验 restrict。agent 按会话创建,新装 Host
+  // 没有 agent 是合法状态;本条目是 optional 启动项,此处的 throw 仅 advisory
+  // (强制点在同一审计,且审计对「没有 agent」放行)。
   const agent = ctx.agents.list()[0]
   if (!agent?.ctx) {
     throw new Error('post-boot gate failed: no agent is available to verify restrict()')
