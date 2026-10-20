@@ -57,7 +57,7 @@ import {
   resolveTheme,
   type ThemePref,
 } from "./logic/accountStatus.ts";
-import { AUTO_CONTINUE_LABEL, PLAN_CARD_NOTE, PLAN_EXITED_NOTE, planExitNote } from "./logic/planConfirm.ts";
+import { AUTO_CONTINUE_LABEL, PLAN_CARD_NOTE, planExitNote, planModeActive } from "./logic/planConfirm.ts";
 import logoUrl from "./assets/huaan-mark.png";
 import {
   bindTaskSession,
@@ -134,6 +134,7 @@ import {
   lookupSessionCwd,
   outcomeTargetTab,
   outcomeWorkspace,
+  shouldCheckTurnOutcome,
   todoLabel,
   turnChecks,
   turnGaps,
@@ -882,7 +883,7 @@ export default function App() {
           tree = [];
         }
       }
-      return { tabId, turnUserId, checks, tree, treeKnown, root };
+      return { tabId, turnUserId, items, checks, tree, treeKnown, root };
     };
     const appendTurnNotes = (turn: NonNullable<Awaited<ReturnType<typeof readTurn>>>, texts: string[]) => {
       const notes = texts.map((text) => ({ id: allocId(), kind: "note" as const, text }));
@@ -899,6 +900,8 @@ export default function App() {
     const appendTurnOutcome = async (sessionId?: string) => {
       const turn = await readTurn(sessionId);
       if (!turn || cancelled) return;
+      // 计划模式还在等确认：本回合只提交计划，执行在批准后的下一回合，不写文件/命令核对。
+      if (!shouldCheckTurnOutcome(turn.items)) return;
       const notes = turnOutcomeNotes(turn.checks, turn.tree, turn.treeKnown, { root: turn.root });
       if (notes.length === 0) return;
       appendTurnNotes(turn, notes);
@@ -3067,19 +3070,6 @@ function insertBeforeToolRow(items: ChatItem[], card: ChatItem, callId: string |
       (callId ? item.card.callId === callId : item.card.name === "exit_plan_mode"),
   );
   return at >= 0 ? [...items.slice(0, at), card, ...items.slice(at)] : [...items, card];
-}
-
-/** 进入计划模式由 `propose_plan` 完成；计划被同意或用户点了「退出计划模式」后离开。 */
-function planModeActive(items: readonly ChatItem[]): boolean {
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    const item = items[i];
-    if (item.kind === "note" && item.text === PLAN_EXITED_NOTE) return false;
-    if (item.kind === "ask" && item.card.toolName === "plan-review") {
-      return !(item.card.autoContinue || item.card.answered === "approve");
-    }
-    if (item.kind === "tool" && item.card.name === "propose_plan") return true;
-  }
-  return false;
 }
 
 function appendToken(items: ChatItem[], text: string): ChatItem[] {

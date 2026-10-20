@@ -11,12 +11,14 @@ import {
   outcomeGaps,
   outcomeTargetTab,
   outcomeWorkspace,
+  shouldCheckTurnOutcome,
   todoLabel,
   treePaths,
   turnChecks,
   turnOutcomeLines,
   turnOutcomeNotes,
 } from "../../src/client-huaanwork/logic/outcomeCheck.ts";
+import { PLAN_EXITED_NOTE } from "../../src/client-huaanwork/logic/planConfirm.ts";
 
 test("missing files and commands are gaps even when every todo is checked", () => {
   const gaps = outcomeGaps({
@@ -268,6 +270,38 @@ test("a plan-review card with nothing to check still needs a human look", () => 
       [],
     ),
     ["没有自动核对项，需要你自己看"],
+  );
+});
+
+test("a plan-only turn pending confirmation skips the outcome check; approval or exit re-enables it", () => {
+  const user = { kind: "user" as const, text: "先出计划，确认后再写 acceptance-report.md" };
+  const proposed = { kind: "tool" as const, card: { name: "propose_plan" } };
+  const planBody = { kind: "assistant" as const, text: "计划正文……" };
+  const pendingReview = [
+    user,
+    proposed,
+    planBody,
+    { kind: "ask" as const, card: { toolName: "plan-review", summary: "产物：acceptance-report.md" } },
+  ];
+
+  // 模型只 propose_plan 并把计划写成普通消息、或把计划卡留在未回答：都不算执行回合。
+  assert.equal(shouldCheckTurnOutcome([user, proposed, planBody]), false);
+  assert.equal(shouldCheckTurnOutcome(pendingReview), false);
+
+  // 计划被同意（点批准或按护栏自动继续）或用户手动退出后，核对恢复。
+  assert.equal(
+    shouldCheckTurnOutcome([user, proposed, { kind: "ask", card: { toolName: "plan-review", answered: "approve" } }]),
+    true,
+  );
+  assert.equal(
+    shouldCheckTurnOutcome([user, proposed, { kind: "ask", card: { toolName: "plan-review", autoContinue: true } }]),
+    true,
+  );
+  assert.equal(shouldCheckTurnOutcome([user, proposed, { kind: "note", text: PLAN_EXITED_NOTE }]), true);
+  // 计划被拒仍在计划模式：核对继续留到批准后的执行回合。
+  assert.equal(
+    shouldCheckTurnOutcome([user, proposed, { kind: "ask", card: { toolName: "plan-review", answered: "reject" } }]),
+    false,
   );
 });
 

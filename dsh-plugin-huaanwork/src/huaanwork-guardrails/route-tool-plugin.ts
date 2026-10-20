@@ -161,7 +161,8 @@ export function apply(ctx: Context): void {
   ctx.tools.register(
     defineTool({
       name: "propose_plan",
-      description: "这件事需要先计划再动手时调用。只带一句话目标，计划正文之后再写。",
+      description:
+        "这件事需要先计划再动手时调用。只用 objective 传一句话目标，不要附带计划正文。进入计划模式后，计划正文必须通过 exit_plan_mode 提交评审：不能写成普通助手消息，也不能用散文征求确认。",
       // 不标 required：缺字段也要进 execute，才能按会话计数并返回可修正的原因。
       parameters: {
         objective: { type: "string", description: "必填，一句话目标。不要带其他字段。" },

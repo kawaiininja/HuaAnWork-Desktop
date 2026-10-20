@@ -11,7 +11,7 @@ import {
 } from "../../src/huaanwork-guardrails/route-tool-plugin.ts";
 
 type Exec = { agent?: unknown; signal?: AbortSignal };
-type Registered = { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> };
+type Registered = { name: string; description: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> };
 
 function routeTools(emitted: unknown[], emit = true, unattended?: { sessionId?: string; [key: string]: unknown }) {
   const tools = new Map<string, Registered>();
@@ -46,6 +46,13 @@ test("propose_plan execute enters plan mode for the current agent", async () => 
   });
   await tools.get("propose_plan")?.execute({ objective: "汇总三份材料" });
   assert.deepEqual(seen, [[agent, true]]);
+});
+
+test("propose_plan tells the model to submit the plan body through exit_plan_mode", () => {
+  const description = routeTools([]).get("propose_plan")?.description ?? "";
+  assert.match(description, /objective/);
+  assert.match(description, /exit_plan_mode/);
+  assert.doesNotMatch(description, /计划正文之后再写/);
 });
 
 test("route tools act on the executing agent, not the shared holder", async () => {

@@ -1,3 +1,5 @@
+import { planModeActive, type PlanModeItem } from "./planConfirm.ts";
+
 export function outcomeGaps(input: {
   requiredFiles: readonly string[];
   requiredCommands: readonly string[];
@@ -247,6 +249,14 @@ export function turnOutcomeNotes(
   }
   if (outcome.lines.length === 0 && checks.didWork) return [NO_AUTO_CHECK_TEXT];
   return outcome.lines;
+}
+
+/**
+ * 计划模式还在等确认（模型已 `propose_plan`，计划尚未提交或批准）的回合不跑回合结束核对：
+ * 这个回合只产出计划，真正的执行发生在批准后的下一回合。
+ */
+export function shouldCheckTurnOutcome(items: readonly PlanModeItem[]): boolean {
+  return !planModeActive(items);
 }
 
 /**

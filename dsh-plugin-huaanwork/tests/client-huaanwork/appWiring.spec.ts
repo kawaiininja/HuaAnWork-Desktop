@@ -99,3 +99,11 @@ test("App consumes the two production helpers at their only call sites", () => {
   // 已处理标记只能由 helper 回写,App 里不得再出现内联循环。
   assert.doesNotMatch(APP_SOURCE, /markApprovalAnswered\(/);
 });
+
+test("App skips the turn-end outcome while plan mode is still pending", () => {
+  const start = APP_SOURCE.indexOf("const appendTurnOutcome = async");
+  const end = APP_SOURCE.indexOf("const appendGoalStopped", start);
+  assert.ok(start >= 0 && end > start, "appendTurnOutcome is defined before appendGoalStopped");
+  // 生产调用点唯一：把计划回合的核对重新放回 appendTurnOutcome 即失败。
+  assert.match(APP_SOURCE.slice(start, end), /if \(!shouldCheckTurnOutcome\(turn\.items\)\) return;/);
+});
