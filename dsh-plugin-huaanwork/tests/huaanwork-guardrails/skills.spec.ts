@@ -165,6 +165,7 @@ function createHarness(options?: { childNames?: readonly string[]; parentNames?:
     childTools,
     cancelled,
     emitted,
+    emit,
     async invokeSkill(agent: Agent, name: string) {
       return emitWaterfall("tools/pre-execute", { name: "skill", arguments: { name }, agent });
     },
@@ -615,6 +616,24 @@ test("overlapping startActivation calls register each child under its own parent
   await second;
   assert.deepEqual(childrenOf("huaanwork-overlap-a"), ["overlap-child-a"]);
   assert.deepEqual(childrenOf("huaanwork-overlap-b"), ["overlap-child-b"]);
+});
+
+test("subagent end drops the child registration so a finished child is never canceled", () => {
+  const harness = createHarness();
+  harness.emit("subagent/start", { id: "end-child", parent: "end-parent" });
+  assert.deepEqual(childrenOf("end-parent"), ["end-child"]);
+
+  // 与 start 成对的结束事件:载荷 id 就是子会话 id,登记表必须随之收缩。
+  harness.emit("subagent/end", { runId: "run-1", id: "end-child", stopReason: "completed" });
+  assert.deepEqual(childrenOf("end-parent"), []);
+
+  // 空 id / 缺 id 的结束事件不改动任何登记。
+  const missing = createHarness();
+  missing.emit("subagent/start", { id: "end-child-2", parent: "end-parent-2" });
+  missing.emit("subagent/end", { id: "" });
+  missing.emit("subagent/end", {});
+  missing.emit("subagent/end", { id: 42 });
+  assert.deepEqual(childrenOf("end-parent-2"), ["end-child-2"]);
 });
 
 test("a cold-resumed child stays on its own parent, never the last sibling send", () => {

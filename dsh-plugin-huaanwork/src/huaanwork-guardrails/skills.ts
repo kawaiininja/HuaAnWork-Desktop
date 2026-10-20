@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
-import { currentCallerSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
+import { currentCallerSession, forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
 
 export const name = "huaanwork-skills";
 export const inject = ["skills", "agents", "tools", "subagents"];
@@ -63,7 +63,7 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
     } | undefined;
   };
   on(
-    event: "tools/pre-execute" | "agent/created" | "subagent/start" | "tools/change",
+    event: "tools/pre-execute" | "agent/created" | "subagent/start" | "subagent/end" | "tools/change",
     listener: (...args: never[]) => unknown,
     prepend?: boolean,
   ): void;
@@ -190,6 +190,12 @@ export function apply(ctx: Context): void {
     const parentId = sessionIdOf(child?.session?.header?.parentSession) ?? startParent.getStore() ?? sessionIdOf(info.parent);
     if (parentId && parentId !== info.id) registerChildSession(parentId, info.id);
     if (child) consumePendingSpawn(child);
+  }) as never);
+
+  // 与 subagent/start 成对的结束事件(载荷 id 即子会话 id):子会话结束后从登记表摘掉,
+  // 否则取消父会话时会对已经退出的会话重复发起取消,登记表也无界增长。
+  ctx.on("subagent/end", ((info: { id?: string }) => {
+    if (typeof info.id === "string" && info.id.length > 0) forgetChildSession(info.id);
   }) as never);
 
   ctx.on("tools/change", (() => {

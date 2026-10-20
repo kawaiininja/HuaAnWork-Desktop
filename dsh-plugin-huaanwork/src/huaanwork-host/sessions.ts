@@ -2,7 +2,7 @@ import { readdir, unlink } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 
 import { workNetworkGateError } from '@huaanwork/policy/network'
-import { settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
+import { forgetConfirmedTarget, settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
 import { answerRouteInput, cancelRouteInput, clearInvalidRoute, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
@@ -352,13 +352,14 @@ async function removeSession(
   if (!sessionId) throw new Error('session.remove requires params.sessionId')
   const located = await locateSessionFile(sessionsRoot, sessionId)
   if (!located) throw new Error(`session ${sessionId} was not found`)
-  // 删日志之前先把会话从运行态里摘出来:等待中的卡片、live agent、子会话登记和坏参数计数
-  // 都不能留到下一次同名会话上。
+  // 删日志之前先把会话从运行态里摘出来:等待中的卡片、live agent、子会话登记、坏参数计数
+  // 和上一份已确认的计划目标都不能留到下一次同名会话上。
   releaseRouteInput(sessionId)
   if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })
   forgetChildSessions(sessionId)
   forgetChildSession(sessionId)
   clearInvalidRoute(sessionId)
+  forgetConfirmedTarget(sessionId)
   await unlink(located.file)
   return { removed: true }
 }

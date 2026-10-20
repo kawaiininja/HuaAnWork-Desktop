@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import { answererDecision, apply, settlePlanReview } from "../../src/huaanwork-guardrails/question-answerer.ts";
+import { answererDecision, apply, forgetConfirmedTarget, settlePlanReview } from "../../src/huaanwork-guardrails/question-answerer.ts";
 
 test("a missing answerer never releases a write", () => {
   assert.equal(answererDecision({ hasListener: false, intent: "clarify", mode: "full", autoContinue: true }), "unanswered");
@@ -222,6 +222,33 @@ test("full mode confirms only when the target changed from the last confirmed pl
   assert.equal(await pendingAfter(changed), "pending");
   approvals.get(events[2]!.approvalRequestId)!("allowed-once");
   await changed;
+});
+
+test("forgetting a removed session drops its last confirmed plan target", async () => {
+  const { events, approvals, ask } = answerer("full");
+  const first = await ask("full-forget", "c1", "# 周报\n\n写入 `out/report.md`，收件人：张三");
+  assert.deepEqual(first.answers, [{ id: "plan-review", selected: ["Approve"] }]);
+  assert.equal(events[0]?.autoContinue, true);
+
+  // 目标变了就再确认一次,并把这第二份记为新的已确认目标。
+  const second = ask("full-forget", "c2", "# 月报\n\n写入 `out/report.md`，收件人：李四");
+  assert.equal(await pendingAfter(second), "pending");
+  approvals.get(events[1]!.approvalRequestId)!("allowed-once");
+  await second;
+
+  // 记忆还在:再换目标仍要确认。
+  const third = ask("full-forget", "c3", "# 季报\n\n写入 `out/report.md`，收件人：王五");
+  assert.equal(await pendingAfter(third), "pending");
+  approvals.get(events[2]!.approvalRequestId)!("allowed-once");
+  await third;
+
+  // 会话删除后忘掉目标:同名会话再出现按「没有上一份」处理,新目标不再触发确认。
+  forgetConfirmedTarget("full-forget");
+  forgetConfirmedTarget("never-confirmed");
+  const afterRemoval = await ask("full-forget", "c4", "# 月报\n\n写入 `out/report.md`，收件人：李四");
+  assert.deepEqual(afterRemoval.answers, [{ id: "plan-review", selected: ["Approve"] }]);
+  assert.equal(events[3]?.autoContinue, true);
+  assert.equal(events.length, 4);
 });
 
 test("exit settles an unanswered plan review as cancelled so exit_plan_mode can finish", async () => {

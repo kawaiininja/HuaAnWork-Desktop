@@ -510,6 +510,13 @@ describe('session.remove lifecycle', () => {
       status: 'running',
       cancel: (reason) => { reasons.push(reason.kind) },
     }
+    // 通道 agent 绑在兄弟会话上:删这个会话不能顺手把它停掉。
+    const channel: ListedAgent = {
+      id: 'huaanwork',
+      session: { id: 'huaanwork-6666666666666666' },
+      status: 'running',
+      cancel: (reason) => { reasons.push(`channel:${reason.kind}`) },
+    }
     registerChildSession(sessionId, 'child-of-removed')
     registerChildSession('parent-of-removed', sessionId)
     expect(noteInvalidRoute(sessionId).endTurn).toBe(false)
@@ -528,7 +535,10 @@ describe('session.remove lifecycle', () => {
     await Promise.resolve()
 
     const ctx: SessionRuntimeContext = {
-      agents: { get: (id) => (id === sessionId ? agent : undefined), list: () => [agent] },
+      agents: {
+        get: (id) => (id === sessionId ? agent : id === 'huaanwork' ? channel : undefined),
+        list: () => [agent, channel],
+      },
     }
     await expect(sessionRemove(ctx, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
     await settlement

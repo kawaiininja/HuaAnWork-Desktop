@@ -142,7 +142,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'session.list filters sessions by project root',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:546',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:556',
   },
   {
     file: 'automations-host.test.ts',
@@ -238,7 +238,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'stream network gate blocks public endpoints unless allow_network is on',
     label: '本任务补',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:670',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:680',
   },
   {
     file: 'automations-host.test.ts',
@@ -376,6 +376,6 @@ export const testPortMapping: TestPortRow[] = [
     file: 'unified-channel.test.ts',
     title: 'startHost sweeps legacy chat-auto run sessions and leaves user chat sessions',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:679',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:689',
   },
 ]

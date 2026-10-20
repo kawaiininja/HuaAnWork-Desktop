@@ -130,6 +130,11 @@ function recordConfirmed(request: QuestionRequest): void {
   if (sessionId && reviewIdentity(request)) confirmedTargets.set(sessionId, planTarget(reviewedPlan(request)));
 }
 
+/** 会话删除后忘掉它上一份已确认的计划目标;同名会话再出现时按「没有上一份」处理。 */
+export function forgetConfirmedTarget(sessionId: string): void {
+  confirmedTargets.delete(sessionId);
+}
+
 /** 「退出计划模式」作废评审时抛给提问服务的错误；官方 `exit_plan_mode` 用 instanceof 认出取消。 */
 function exitCancelled(): UserQuestionError {
   return new UserQuestionError("用户退出了计划模式", "ASK_CANCELLED");
