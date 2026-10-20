@@ -110,7 +110,7 @@ import {
 } from "./logic/thinkingPanel.ts";
 import { closeOpenInputs, inputCardStatus, settleInputCard, type InputCard } from "./logic/inputCard.ts";
 import { toolRowIcon } from "./logic/commandOutcome.ts";
-import { resolveActiveTab } from "./logic/chatTabs.ts";
+import { hasPendingAsk, resolveActiveTab } from "./logic/chatTabs.ts";
 import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
 import { resolveStopSession, turnStatus } from "./logic/turnStatus.ts";
 import {
@@ -2016,9 +2016,7 @@ export default function App() {
   const unscopedWorkSessions = unscopedSessions(sessions, projects);
   const showRightPane = view === "main";
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
-  const pendingAsk = chatTabs.some((tab) =>
-    tab.items.some((item) => (item.kind === "ask" && !item.card.answered) || (item.kind === "input" && item.card.state === "open")),
-  );
+  const pendingAsk = hasPendingAsk(chatTabs);
   const logoutDisabled = turnActive || pendingAsk;
 
   function openSettings(section?: SettingsSection) {

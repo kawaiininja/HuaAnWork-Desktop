@@ -99,8 +99,9 @@ export function apply(ctx: Context): void {
     throw new Error(reason);
   };
 
-  const waitForInput = (agent: Agent, sessionId: string, question: string, signal: AbortSignal | undefined) =>
-    new Promise<string>((resolve, reject) => {
+  const waitForInput = (agent: Agent, sessionId: string, question: string, signal: AbortSignal | undefined) => {
+    let pending: PendingInput | undefined;
+    const waiting = new Promise<string>((resolve, reject) => {
       const emit = ctx.huaanworkEmit;
       if (typeof emit !== "function") {
         reject(new Error("没有可以显示问题的对话"));
@@ -111,7 +112,7 @@ export function apply(ctx: Context): void {
         if (pendingInputs.get(sessionId) === pending) pendingInputs.delete(sessionId);
         reject(new Error(STOPPED_TEXT));
       };
-      const pending: PendingInput = {
+      pending = {
         agent,
         resolve(answer) {
           signal?.removeEventListener("abort", onAbort);
@@ -128,8 +129,13 @@ export function apply(ctx: Context): void {
       }
       signal?.addEventListener("abort", onAbort, { once: true });
       pendingInputs.set(sessionId, pending);
+      // 显示失败时 Promise 会被动 reject;登记表必须跟着清掉,否则这张卡会一直算作等待。
       emit({ event: "input/asked", question, sessionId });
     });
+    return waiting.finally(() => {
+      if (pending && pendingInputs.get(sessionId) === pending) pendingInputs.delete(sessionId);
+    });
+  };
 
   ctx.tools.register(
     defineTool({

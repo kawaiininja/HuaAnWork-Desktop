@@ -103,6 +103,25 @@ test("request_input does not wait when no chat can show the question", async () 
   assert.equal(answerRouteInput(agent.id, "x"), false);
 });
 
+test("a throwing chat emit does not leave the question waiting", async () => {
+  const tools = new Map<string, { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }>();
+  apply({
+    huaanworkRouteAgent: { current: null },
+    huaanworkEmit: () => {
+      throw new Error("chat is gone");
+    },
+    planMode: { set() { return "queued"; } },
+    tools: {
+      register(definition: { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }) {
+        tools.set(definition.name, definition);
+      },
+    },
+  });
+  const agent = { id: "huaanwork-ffffffffffffffff" };
+  await assert.rejects(tools.get("request_input")!.execute({ question: "发给谁？" }, { agent }), /chat is gone/);
+  assert.equal(releaseRouteInput(agent.id), false);
+});
+
 test("the second invalid route call ends the turn", () => {
   assert.equal(noteInvalidRoute("s1").endTurn, false);
   assert.equal(noteInvalidRoute("s1").endTurn, true);

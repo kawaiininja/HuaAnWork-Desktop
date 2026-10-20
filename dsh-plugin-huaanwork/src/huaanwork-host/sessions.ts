@@ -9,7 +9,12 @@ import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { invokeSkillText } from './skill-invoke.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
 import type { AgentsHost } from './agents-host.ts'
-import { childrenOf, noteCallerSession } from './child-sessions.ts'
+import {
+  childrenOf,
+  forgetChildSession,
+  forgetChildSessions,
+  noteCallerSession,
+} from './child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog } from './session-view.ts'
@@ -235,7 +240,8 @@ async function ensureChannelAgent(
 
 function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): { accepted: true } {
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
-  const primary = findSessionAgent(ctx, sessionId)
+  // 只取消绑定在该会话上的 agent;通道默认 agent 可能正在跑兄弟会话,不能替它按停止。
+  const primary = findAgentBySession(ctx, sessionId)
   const childIds = new Set(childrenOf(sessionId))
   for (const agent of ctx.agents?.list?.() ?? []) {
     if (agent === primary) continue
@@ -337,11 +343,22 @@ async function openSession(sessionsRoot: string, params: unknown): Promise<unkno
   }
 }
 
-async function removeSession(sessionsRoot: string, params: unknown): Promise<{ removed: true }> {
+async function removeSession(
+  ctx: SessionRuntimeContext | undefined,
+  sessionsRoot: string,
+  params: unknown,
+): Promise<{ removed: true }> {
   const sessionId = objectString(params, 'sessionId')
   if (!sessionId) throw new Error('session.remove requires params.sessionId')
   const located = await locateSessionFile(sessionsRoot, sessionId)
   if (!located) throw new Error(`session ${sessionId} was not found`)
+  // 删日志之前先把会话从运行态里摘出来:等待中的卡片、live agent、子会话登记和坏参数计数
+  // 都不能留到下一次同名会话上。
+  releaseRouteInput(sessionId)
+  if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })
+  forgetChildSessions(sessionId)
+  forgetChildSession(sessionId)
+  clearInvalidRoute(sessionId)
   await unlink(located.file)
   return { removed: true }
 }
@@ -470,8 +487,12 @@ export async function sessionOpen(routeCtx: RouteContext, params: unknown): Prom
   return openSession(join(routeCtx.dshHome, 'sessions'), params)
 }
 
-export async function sessionRemove(routeCtx: RouteContext, params: unknown): Promise<{ removed: true }> {
-  return removeSession(join(routeCtx.dshHome, 'sessions'), params)
+export async function sessionRemove(
+  ctx: SessionRuntimeContext | undefined,
+  routeCtx: RouteContext,
+  params: unknown,
+): Promise<{ removed: true }> {
+  return removeSession(ctx, join(routeCtx.dshHome, 'sessions'), params)
 }
 
 export function sessionNew(routeCtx: RouteContext, params: unknown): { sessionId: string; cwd: string } {
@@ -509,7 +530,8 @@ export function sessionExitPlanMode(
   params: unknown,
 ): { exited: boolean } {
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
-  const agent = findSessionAgent(ctx, sessionId)
+  // 目标会话没有 live agent 时不能借通道默认 agent 退出计划模式——那可能是兄弟会话。
+  const agent = findAgentBySession(ctx, sessionId)
   const planMode = ctx.get?.('planMode') as { set?: (agent: unknown, active: boolean) => unknown } | undefined
   if (!agent || typeof planMode?.set !== 'function') return { exited: false }
   const settled = settlePlanReview(ctx.huaanworkPlanReviews, sessionId)

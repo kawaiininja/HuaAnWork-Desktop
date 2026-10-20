@@ -2,10 +2,15 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { registerChildSession } from '../../src/huaanwork-host/child-sessions.ts'
+import { childrenOf, registerChildSession } from '../../src/huaanwork-host/child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import { emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
-import { apply as applyRouteTools } from '../../src/huaanwork-guardrails/route-tool-plugin.ts'
+import {
+  answerRouteInput,
+  apply as applyRouteTools,
+  noteInvalidRoute,
+  releaseRouteInput,
+} from '../../src/huaanwork-guardrails/route-tool-plugin.ts'
 import {
   sendToAgent,
   sessionAnswerApproval,
@@ -353,7 +358,11 @@ describe('session.cancel (旧 host.ts:1560)', () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)
     const cancelled: { kind: string }[] = []
-    const primary: ListedAgent = { id: 'huaanwork', cancel: (reason) => cancelled.push(reason) }
+    const primary: ListedAgent = {
+      id: 'huaanwork',
+      session: { id: sessionIdFor(routeCtx.workspaceRoot.current) },
+      cancel: (reason) => cancelled.push(reason),
+    }
     const child: ListedAgent = { id: 'child-1', cancel: (reason) => cancelled.push(reason) }
     const ctx: SessionRuntimeContext = { agents: { get: (id) => (id === 'huaanwork' ? primary : undefined), list: () => [primary, child] } }
     registerChildSession(sessionIdFor(routeCtx.workspaceRoot.current), 'child-1')
@@ -388,6 +397,31 @@ describe('session.cancel (旧 host.ts:1560)', () => {
     const ctx: SessionRuntimeContext = { agents: { list: () => [target, child, sibling] } }
     sessionCancel(ctx, routeCtx, { sessionId: 'huaanwork-aaaaaaaaaaaaaaaa' })
     expect(reasons.sort()).toEqual(['child:parent', 'target:user'])
+  })
+
+  test('cancelAgent does not cancel a channel agent that is running a sibling session', () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const reasons: string[] = []
+    const channel: ListedAgent = {
+      id: 'huaanwork',
+      session: { id: 'huaanwork-bbbbbbbbbbbbbbbb' },
+      cancel(reason) {
+        reasons.push(`channel:${reason.kind}`)
+      },
+    }
+    const child: ListedAgent = {
+      session: { id: 'huaanwork-child' },
+      cancel(reason) {
+        reasons.push(`child:${reason.kind}`)
+      },
+    }
+    registerChildSession('huaanwork-aaaaaaaaaaaaaaaa', 'huaanwork-child')
+    const ctx: SessionRuntimeContext = {
+      agents: { get: (id) => (id === 'huaanwork' ? channel : undefined), list: () => [channel, child] },
+    }
+    sessionCancel(ctx, routeCtx, { sessionId: 'huaanwork-aaaaaaaaaaaaaaaa' })
+    expect(reasons).toEqual(['child:parent'])
   })
 })
 
@@ -457,7 +491,54 @@ describe('session.open / session.remove (旧 host.ts:1381/1395)', () => {
     await expect(sessionOpen(routeCtx, { sessionId: 'missing' })).rejects.toThrow(/was not found/)
     await expect(sessionOpen(routeCtx, {})).rejects.toThrow(/requires params.sessionId/)
 
-    await expect(sessionRemove(routeCtx, { sessionId })).resolves.toEqual({ removed: true })
+    await expect(sessionRemove({}, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
+    await expect(sessionOpen(routeCtx, { sessionId })).rejects.toThrow(/was not found/)
+  })
+})
+
+describe('session.remove lifecycle', () => {
+  test('releases a waiting request_input, cancels the live agent, and forgets the session', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = 'huaanwork-5555555555555555'
+    writePersistedSession(routeCtx.dshHome, sessionId, routeCtx.workspaceRoot.current)
+
+    const reasons: string[] = []
+    const agent: ListedAgent = {
+      id: sessionId,
+      session: { id: sessionId },
+      status: 'running',
+      cancel: (reason) => { reasons.push(reason.kind) },
+    }
+    registerChildSession(sessionId, 'child-of-removed')
+    registerChildSession('parent-of-removed', sessionId)
+    expect(noteInvalidRoute(sessionId).endTurn).toBe(false)
+    expect(noteInvalidRoute(sessionId).endTurn).toBe(true)
+
+    type Exec = { agent?: unknown; signal?: AbortSignal }
+    type Registered = { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }
+    const tools = new Map<string, Registered>()
+    applyRouteTools({
+      huaanworkEmit: () => undefined,
+      planMode: { set: () => undefined },
+      tools: { register: (definition: Registered) => { tools.set(definition.name, definition) } },
+    })
+    const waiting = tools.get('request_input')!.execute({ question: '发给谁？' }, { agent })
+    const settlement = expect(waiting).rejects.toThrow(/回合已停止/)
+    await Promise.resolve()
+
+    const ctx: SessionRuntimeContext = {
+      agents: { get: (id) => (id === sessionId ? agent : undefined), list: () => [agent] },
+    }
+    await expect(sessionRemove(ctx, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
+    await settlement
+
+    expect(answerRouteInput(sessionId, 'late')).toBe(false)
+    expect(releaseRouteInput(sessionId)).toBe(false)
+    expect(reasons).toEqual(['user'])
+    expect(childrenOf(sessionId)).toEqual([])
+    expect(childrenOf('parent-of-removed')).not.toContain(sessionId)
+    expect(noteInvalidRoute(sessionId).endTurn).toBe(false)
     await expect(sessionOpen(routeCtx, { sessionId })).rejects.toThrow(/was not found/)
   })
 })
@@ -557,6 +638,23 @@ describe('session.exitPlanMode', () => {
     expect(sessionExitPlanMode(missingPlan.ctx, routeCtx, { sessionId: 's1' })).toEqual({ exited: false })
     expect(missingPlanCalls).toEqual([])
     expect(missingPlan.reviews.has('s1')).toBe(true)
+  })
+
+  test('does not exit plan mode or cancel a channel agent running a sibling session', () => {
+    const calls: string[] = []
+    const channel: ListedAgent = {
+      id: 'huaanwork',
+      session: { id: 'huaanwork-bbbbbbbbbbbbbbbb' },
+      status: 'running',
+      cancel: () => { calls.push('channel-cancel') },
+    }
+    const ctx: SessionRuntimeContext = {
+      agents: { get: (id) => (id === 'huaanwork' ? channel : undefined), list: () => [channel] },
+      get: (name) => (name === 'planMode' ? { set: () => { calls.push('plan-mode-set') } } : undefined),
+    }
+    expect(sessionExitPlanMode(ctx, makeRouteCtx(freshTmp()), { sessionId: 'huaanwork-aaaaaaaaaaaaaaaa' }))
+      .toEqual({ exited: false })
+    expect(calls).toEqual([])
   })
 })
 
