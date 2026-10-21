@@ -548,7 +548,7 @@ function RunsPanel({ automations, onChanged }: { automations: AutomationInfo[]; 
         {pruneConfirm ? (
           <>
             <span className="muted" style={{ fontSize: 12 }}>
-              将删除最近 20 条运行之外的会话目录，确定？
+              将删除每个任务最近 20 条运行之外的会话目录，确定？
             </span>
             <button type="button" className="btn danger" disabled={pruning} onClick={() => void prune()}>
               {pruning ? "清理中…" : "确认清理"}
