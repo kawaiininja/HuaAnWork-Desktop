@@ -112,7 +112,14 @@ const electron = vi.hoisted(() => {
   }
   const webContents = {
     id: 73,
-    session: { fetch: sessionFetch, webRequest, setPermissionCheckHandler: vi.fn(), setPermissionRequestHandler: vi.fn() },
+    session: {
+      fetch: sessionFetch,
+      webRequest,
+      setPermissionCheckHandler: vi.fn(),
+      setPermissionRequestHandler: vi.fn(),
+      on: vi.fn(),
+      removeListener: vi.fn(),
+    },
     closeDevTools: vi.fn(() => { devToolsOpened = false }),
     executeJavaScript: vi.fn(async (_code: string, _userGesture?: boolean) => null as unknown),
     getZoomLevel: vi.fn(() => zoomLevel),
