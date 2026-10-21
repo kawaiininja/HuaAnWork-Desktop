@@ -197,3 +197,93 @@ test("deleting a run closes its run tabs through the shared helper", () => {
   assert.match(APP_SOURCE, /closeRunTabsForSession\(chatTabsRef\.current, sessionId, activeTab\)/);
   assert.match(APP_SOURCE, /onRunDeleted=\{handleRunDeleted\}/);
 });
+
+const AUTOMATIONS_VIEW_SOURCE = readFileSync(
+  new URL("../../src/client-huaanwork/AutomationsView.tsx", import.meta.url),
+  "utf8",
+);
+
+test("App wires the attachment open handler, preview branch and download of the current file", () => {
+  // ChatRow 调用点:漏传 onOpenAttachment 时按钮点了没反应,而 ChatRow 单测仍绿。
+  assert.match(APP_SOURCE, /onOpenAttachment=\{handleOpenAttachment\}/);
+
+  // 预览分支:sandbox 空 + srcdoc 用完整 HTML 文档;Markdown 分支直接给原文。
+  const previewAt = APP_SOURCE.indexOf('{rightTab === "preview" ? (');
+  const previewEnd = APP_SOURCE.indexOf('{rightTab === "progress" ? (', previewAt);
+  assert.ok(previewAt >= 0 && previewEnd > previewAt, "the preview branch is still between the right-pane tabs");
+  const preview = APP_SOURCE.slice(previewAt, previewEnd);
+  assert.match(preview, /sandbox=""/);
+  assert.match(preview, /srcDoc=\{renderResultHtml\(previewAttachment\.sourceText\)\}/);
+  assert.match(preview, /previewFile === RESULT_ATTACHMENT_FILES\[0\]/);
+  assert.match(preview, /renderResultMarkdown\(previewAttachment\.sourceText\)/);
+  // 「下载」只下载当前打开的这一份,不是固定某一份。
+  assert.match(preview, /downloadAttachment\(previewFile, previewAttachment\.sourceText\)/);
+
+  // 下载实现:文件名来自附件本身,内容与预览同源(两份渲染器各用一次)。
+  const downloadAt = APP_SOURCE.indexOf("function downloadAttachment(");
+  const downloadEnd = APP_SOURCE.indexOf("/** 宿主先把未回答的计划评审", downloadAt);
+  assert.ok(downloadAt >= 0 && downloadEnd > downloadAt, "downloadAttachment is still defined before exitPlanMode");
+  const download = APP_SOURCE.slice(downloadAt, downloadEnd);
+  assert.match(download, /file === RESULT_ATTACHMENT_FILES\[0\]/);
+  assert.match(download, /renderResultMarkdown\(sourceText\)/);
+  assert.match(download, /renderResultHtml\(sourceText\)/);
+  assert.match(download, /anchor\.download = file/);
+});
+
+test("the composer stop branch for a live run is separate from the turn stop", () => {
+  const composerAt = APP_SOURCE.indexOf('className="composer-bar"');
+  const composerEnd = APP_SOURCE.indexOf("</form>", composerAt);
+  assert.ok(composerAt >= 0 && composerEnd > composerAt, "the composer bar is still inside the form");
+  const composer = APP_SOURCE.slice(composerAt, composerEnd);
+  // 用户回合停止走 stopTurn;运行对话走 runTabLive 分支的 stopRunTab,两者不得合并。
+  assert.match(composer, /onClick=\{\(\) => void stopTurn\(\)\}/);
+  assert.match(composer, /\) : runTabLive \? \(/);
+  assert.match(composer, /onClick=\{\(\) => void stopRunTab\(\)\}/);
+  assert.match(composer, /disabled=\{blocked \|\| stopRunPending\}/);
+
+  // stopRunTab 自身只调 automation.stop(停止这一轮),不碰 session.cancel。
+  const stopAt = APP_SOURCE.indexOf("async function stopRunTab()");
+  const stopEnd = APP_SOURCE.indexOf("function settleStop(", stopAt);
+  assert.ok(stopAt >= 0 && stopEnd > stopAt, "stopRunTab is still defined before settleStop");
+  const stopBody = APP_SOURCE.slice(stopAt, stopEnd);
+  assert.match(stopBody, /const automationId = activeChat\.automationId/);
+  assert.match(stopBody, /await stopAutomation\(automationId\)/);
+  assert.doesNotMatch(stopBody, /session\.cancel/);
+});
+
+test("the task-row stop calls automation.stop and refreshes afterwards", () => {
+  const stopAt = AUTOMATIONS_VIEW_SOURCE.indexOf("async function stop(automation: AutomationInfo)");
+  const stopEnd = AUTOMATIONS_VIEW_SOURCE.indexOf("async function submitRemove()", stopAt);
+  assert.ok(stopAt >= 0 && stopEnd > stopAt, "AutomationsView still owns a task-row stop handler");
+  const stopBody = AUTOMATIONS_VIEW_SOURCE.slice(stopAt, stopEnd);
+  const callAt = stopBody.indexOf("await stopAutomation(automation.id)");
+  const refreshAt = stopBody.indexOf("onChanged()");
+  assert.ok(callAt >= 0, "the task-row stop goes through automation.stop");
+  assert.ok(refreshAt > callAt, "the task row refreshes from the host after the stop call");
+});
+
+test("live-run state is run-scoped: run-end deletes only its own runId and turns count runs", () => {
+  // 旧实现按 automationId 记账:一条运行结束会摘掉任务 id,并发脚本的另一条仍在跑却不再显示停止。
+  assert.match(APP_SOURCE, /next\.delete\(event\.runId\)/);
+  assert.doesNotMatch(APP_SOURCE, /next\.delete\(event\.automationId\)/);
+  assert.match(
+    APP_SOURCE,
+    /setRunningRuns\(\(prev\) => \{\s*const next = new Map\(prev\);\s*next\.set\(event\.runId, \{ automationId: event\.automationId \}\);/,
+  );
+  // 探活上报的是在跑轮数,不是任务数。
+  assert.match(APP_SOURCE, /bridge\.reportTurns\(\(turnActive \? 1 : 0\) \+ runningRuns\.size\)/);
+  // 运行标签 live 判据按 runId;任务行仍用派生的任务 id 集合。
+  assert.match(APP_SOURCE, /isRunTabLive\(activeChat\.id, runningRunIds\)/);
+  assert.match(APP_SOURCE, /isRunTabLive\(tab\.id, runningRunIds\)/);
+  assert.match(APP_SOURCE, /useMemo\(\s*\(\) => new Set\(\[\.\.\.runningRuns\.values\(\)\]\.map\(\(entry\) => entry\.automationId\)\)/);
+});
+
+test("folded attachments use the assistant mapping and deleted runs stay suppressed", () => {
+  // 附件不能映射成空 note:否则思考面板在运行结束后仍展开并显示「进行中」。
+  assert.match(APP_SOURCE, /item\.kind === "attachment" \? attachmentAsAssistant\(item\) : item/);
+  // 删过运行后把该任务已加载的会话记进抑制集,并交给重建判定。
+  assert.match(APP_SOURCE, /const suppressed = suppressedRunSessionIdsRef\.current/);
+  assert.match(APP_SOURCE, /suppressed\.add\(sessionId\)/);
+  assert.match(APP_SOURCE, /suppressed\.add\(run\.sessionId\)/);
+  assert.match(APP_SOURCE, /suppressedRunSessionIdsRef\.current,\s*\);/);
+});

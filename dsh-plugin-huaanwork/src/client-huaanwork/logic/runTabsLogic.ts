@@ -28,15 +28,18 @@ type AutomationLike = { id: string; name: string; projectId?: string | null };
  * 每个任务取 startedAt 最新的、带 sessionId 的运行各重建一个骨架（只取最近一个，
  * 避免侧栏被历史运行刷屏；更早的运行仍走任务中心「运行记录」下钻）。
  * 跳过：已存在的标签（实时 run-start 或已重建骨架，同 id 键去重）、
- * automationRuns 里残留但已从注册表删除的任务（拿不到 label）。
+ * automationRuns 里残留但已从注册表删除的任务（拿不到 label）、以及
+ * `suppressedSessionIds` 命中的运行。
  *
- * 注意：当前 UI 没有关闭标签的入口；若将来加了，须把「用户已关闭的 run tab」集合
- * 作为第四个参数传入，否则刷新会把用户关掉的标签加回来。
+ * 抑制集合是 session 内存（重启即清空）：删掉一条运行记录后，它的会话不该被
+ * 重建回骨架标签。命中最新一条时必须整任务跳过，不能回退到更早的运行——那会
+ * 凭空造出一个用户没在看的旧标签。
  */
 export function runTabsToRebuild(
   automations: readonly AutomationLike[],
   automationRuns: Record<string, RunSummary[]>,
   existingTabIds: ReadonlySet<string>,
+  suppressedSessionIds: ReadonlySet<string> = new Set(),
 ): RunTabDescriptor[] {
   const descriptors: RunTabDescriptor[] = [];
   for (const automation of automations) {
@@ -47,6 +50,7 @@ export function runTabsToRebuild(
       .sort((a, b) => b.startedAt - a.startedAt);
     const latest = withSession[0];
     if (!latest) continue;
+    if (suppressedSessionIds.has(latest.sessionId as string)) continue;
     const tabId = `run-${latest.runId}`;
     if (existingTabIds.has(tabId)) continue;
     descriptors.push({
@@ -69,4 +73,18 @@ export function runResultNoteText(status: RunSummary["status"] | undefined): str
   if (status === "cancelled") return "自动化运行已取消";
   if (status && status !== "ok") return "自动化运行失败";
   return "自动化运行完成";
+}
+
+/**
+ * 运行对话标签是否仍在跑（纯函数）。
+ *
+ * 在途状态按 runId 记账：同一任务的 run N 进行中时，run N-1 的标签不再算 live，
+ * 否则旧标签会显示「停止」并把最新一轮停掉。标签 id 与 run-start 的去重键一致，
+ * 都是 `run-<runId>`；非运行标签（默认对话 / Work 会话）恒为 false。
+ */
+export function isRunTabLive(tabId: string, runningRunIds: ReadonlySet<string>): boolean {
+  const prefix = "run-";
+  if (!tabId.startsWith(prefix)) return false;
+  const runId = tabId.slice(prefix.length);
+  return runId.length > 0 && runningRunIds.has(runId);
 }

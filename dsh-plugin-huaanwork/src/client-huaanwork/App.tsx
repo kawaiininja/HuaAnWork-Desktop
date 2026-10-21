@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type MutableRefObject,
@@ -153,9 +154,10 @@ import {
   type GoalTurnEvent,
   type GoalTurnState,
 } from "./logic/goalRound.ts";
-import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
+import { isRunTabLive, runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
 import {
   RESULT_ATTACHMENT_FILES,
+  attachmentAsAssistant,
   foldRunAssistantItems,
   type ResultAttachmentFile,
 } from "./logic/runResultAttachments.ts";
@@ -450,7 +452,17 @@ export default function App() {
   const [automationRuns, setAutomationRuns] = useState<Record<string, RunSummary[]>>({});
   /** 全部项目下的子任务快照（侧栏任务区与选中项目卡片共用）。 */
   const [projectTasks, setProjectTasks] = useState<TaskInfo[]>([]);
-  const [runningAutomationIds, setRunningAutomationIds] = useState<ReadonlySet<string>>(new Set());
+  /**
+   * 在途运行按 runId 记账（run-start 加入 / run-end 只删自己的 runId）。
+   * 任务级「运行中」集合由它派生：同一任务的两条并发脚本运行，任意一条结束
+   * 都不会提前摘掉任务行的「停止」。
+   */
+  const [runningRuns, setRunningRuns] = useState<ReadonlyMap<string, { automationId: string }>>(new Map());
+  /**
+   * 删过运行记录后要抑制重建的会话 id（规格 §6；只在本次会话有效，重启清空）。
+   * 刷新任务列表时传给 runTabsToRebuild，避免刚删掉的运行又以骨架标签回来。
+   */
+  const suppressedRunSessionIdsRef = useRef<Set<string>>(new Set());
   /** Task 11：运行对话停止请求在飞——state 管按钮禁用，ref 挡同一批事件里的第二次点击。 */
   const [stopRunPending, setStopRunPending] = useState(false);
   const stopRunInFlight = useRef(false);
@@ -513,6 +525,13 @@ export default function App() {
   }, [authPhase]);
 
   const activeChat = chatTabs.find((tab) => tab.id === activeTab) ?? chatTabs[0];
+  /** 任务级「运行中」：任一在途运行属于该任务即算（任务行停止按钮与各类禁用的判据）。 */
+  const runningAutomationIds = useMemo(
+    () => new Set([...runningRuns.values()].map((entry) => entry.automationId)),
+    [runningRuns],
+  );
+  /** 运行对话标签的 live 判据按 runId（同一任务的旧标签不显示「停止」）。 */
+  const runningRunIds = useMemo(() => new Set(runningRuns.keys()), [runningRuns]);
   const items = activeChat.items;
   /**
    * 右侧预览选中的附件项（规格 §5）：选择记在标签上；标签里没有附件项时
@@ -820,10 +839,12 @@ export default function App() {
       // 重启重建（规格 L544 修订）：run tab 只由实时 run-start 事件创建进内存，重启即消失；
       // 这里按「每任务最近一次带会话的运行」补出骨架标签，内容首开时懒加载（见 runBackfill effect）。
       // 去重键 run-<runId> 与实时创建相同，幂等；只 append 不重置，chatTabs 恒非空不变量不破。
+      // 删除过运行记录的会话进抑制集：最新一条被抑制时整个任务跳过，不退回更早的运行。
       const rebuild = runTabsToRebuild(
         nextAutomations,
         listed.runs ?? {},
         new Set(chatTabsRef.current.map((tab) => tab.id)),
+        suppressedRunSessionIdsRef.current,
       );
       if (rebuild.length > 0) {
         setChatTabs((prev) => {
@@ -853,8 +874,16 @@ export default function App() {
    * 运行记录删除成功后关掉它绑定的运行对话标签（规格 §6）。
    * 只关自动化运行标签：默认对话标签即使 sessionId 相同也保留。
    * 被关的是当前标签时改选最近的存活标签，选择交给 closeRunTabsForSession 决定。
+   *
+   * 同时把该任务当前已加载的全部运行会话记进抑制集：删掉的这条不能在下一次
+   * automation.list 刷新时被 runTabsToRebuild 重建回骨架标签。
    */
-  function handleRunDeleted(sessionId: string) {
+  function handleRunDeleted(sessionId: string, automationId: string) {
+    const suppressed = suppressedRunSessionIdsRef.current;
+    if (sessionId) suppressed.add(sessionId);
+    for (const run of automationRuns[automationId] ?? []) {
+      if (typeof run.sessionId === "string" && run.sessionId) suppressed.add(run.sessionId);
+    }
     const result = closeRunTabsForSession(chatTabsRef.current, sessionId, activeTab);
     setChatTabs(result.tabs);
     setActiveTab(result.nextActiveId);
@@ -981,7 +1010,11 @@ export default function App() {
           // 后台任务事件：更新任务运行角标并刷新数据；agent 运行另建运行对话标签承载过程与结果。
           if (event.event === "automation/run-start") {
             automationActiveRef.current = true;
-            setRunningAutomationIds((prev) => new Set(prev).add(event.automationId));
+            setRunningRuns((prev) => {
+              const next = new Map(prev);
+              next.set(event.runId, { automationId: event.automationId });
+              return next;
+            });
             if (event.sessionId) {
               const automation = automationsRef.current.find((item) => item.id === event.automationId);
               const tabId = `run-${event.runId}`;
@@ -1018,9 +1051,11 @@ export default function App() {
             return;
           }
           if (event.event === "automation/run-end") {
-            setRunningAutomationIds((prev) => {
-              const next = new Set(prev);
-              next.delete(event.automationId);
+            // 只摘自己这一条 runId:同一任务的另一条并发运行仍在途时,任务行的
+            // 「停止」与角标不得提前消失。
+            setRunningRuns((prev) => {
+              const next = new Map(prev);
+              next.delete(event.runId);
               return next;
             });
             automationActiveRef.current = false;
@@ -1337,7 +1372,8 @@ export default function App() {
       // WebSocket 关闭可能先于停止确认到达:撤回关闭路径误标在标签上的失败横幅。
       clearFailuresInTabs(phase, setChatTabs);
     };
-    const report = () => bridge.reportTurns((turnActive ? 1 : 0) + runningAutomationIds.size);
+    // 探活上报的是「在跑几轮」:同一任务两条并发脚本运行要算两轮,不能按任务 id 去重。
+    const report = () => bridge.reportTurns((turnActive ? 1 : 0) + runningRuns.size);
     report();
     void bridge.read().then((state) => {
       if (!alive) return;
@@ -1352,7 +1388,7 @@ export default function App() {
       alive = false;
       stop();
     };
-  }, [turnActive, runningAutomationIds]);
+  }, [turnActive, runningRuns]);
 
   /**
    * 重启重建的运行对话骨架：首次打开时懒加载运行日志回填内容（不调 session.resume、
@@ -2177,12 +2213,11 @@ export default function App() {
 
   const blocked = sidecarDead;
   /**
-   * 运行对话标签仅在「该自动化运行进行中」锁输入；运行结束后可继续对话（规格 L544 修订，
-   * 发送路径会自动对齐工作区到运行会话目录）。已知过锁：runningAutomationIds 按 automationId
-   * 计，同一自动化 run N 进行中时其 run N-1 标签也锁——反正 send() 的 automationActiveRef
-   * 全局块与 sidecar assertSessionSendable 都会拒，语义一致。
+   * 运行对话标签仅在「这一轮自动化运行进行中」锁输入；运行结束后可继续对话（规格 L544 修订，
+   * 发送路径会自动对齐工作区到运行会话目录）。判据按 runId：同一任务的新一轮开跑后，
+   * 旧一轮的标签不再显示「停止」，否则点下去停的是最新那轮。
    */
-  const runTabLive = activeChat.automationId !== undefined && runningAutomationIds.has(activeChat.automationId);
+  const runTabLive = isRunTabLive(activeChat.id, runningRunIds);
   const chatEmpty = items.length === 0;
   /** 自动化运行对话（live tab）：不进最近对话/历史列表。 */
   const runTabs = chatTabs.filter((tab) => tab.automationId);
@@ -2330,7 +2365,7 @@ export default function App() {
               <ul className="recent-list">
                 {/* 进行中的自动化运行对话：每次运行在「任务」区新建一个对话。 */}
                 {runTabs.map((tab) => {
-                  const running = tab.automationId ? runningAutomationIds.has(tab.automationId) : false;
+                  const running = isRunTabLive(tab.id, runningRunIds);
                   return (
                     <li key={tab.id}>
                       <button
@@ -3224,13 +3259,16 @@ function appendToken(items: ChatItem[], text: string): ChatItem[] {
 type ContentChatItem = Exclude<ChatItem, { kind: "attachment" }>;
 
 /**
- * 回合核对与思考折叠只认对话内容项：结果附件是折叠后的 JSON 渲染项，
- * 按同位置的 note 占位 —— 核对忽略它，思考面板也当它没有可见助手文本。
- * 位置保持不变，hasAssistantTextAfter 的 index 仍然对准原列表。
+ * 回合核对与思考折叠用的对话内容视图：结果附件是折叠后的 JSON 渲染项，
+ * 在内容视图里等价于一整段助手正文（同 id、同位置，正文取 sourceText）。
+ *
+ * 这直接决定思考面板的收尾状态：`hasAssistantTextAfter` 只认 assistant，
+ * 若附件映射成空 note，运行结束后那条思考仍会展开并显示「进行中」。
+ * 回合核对只读 user / tool / plan-review，不读 assistant，因此不受影响。
  */
 function contentItems(items: readonly ChatItem[]): ContentChatItem[] {
   return items.map((item) =>
-    item.kind === "attachment" ? { id: item.id, kind: "note", text: "" } : item,
+    item.kind === "attachment" ? attachmentAsAssistant(item) : item,
   );
 }
 

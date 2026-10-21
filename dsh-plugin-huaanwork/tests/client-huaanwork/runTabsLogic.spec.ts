@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import type { RunSummary } from "../../src/client-huaanwork/logic/projects.ts";
-import { runResultNoteText, runTabsToRebuild } from "../../src/client-huaanwork/logic/runTabsLogic.ts";
+import { isRunTabLive, runResultNoteText, runTabsToRebuild } from "../../src/client-huaanwork/logic/runTabsLogic.ts";
 
 function run(partial: Partial<RunSummary> & { runId: string; startedAt: number }): RunSummary {
   return { endedAt: partial.startedAt + 1000, ok: true, output: "", ...partial };
@@ -82,6 +82,31 @@ test("runTabsToRebuild: null/absent projectId becomes null; multiple automations
 test("runTabsToRebuild: empty inputs yield nothing", () => {
   assert.deepEqual(runTabsToRebuild([], {}, new Set()), []);
   assert.deepEqual(runTabsToRebuild([autoA, autoB], {}, new Set()), []);
+});
+
+test("runTabsToRebuild: suppressing the newest session skips the task instead of rebuilding an older run", () => {
+  const runs = {
+    "auto-a": [
+      run({ runId: "r-new", startedAt: 200, sessionId: "sess-new" }),
+      run({ runId: "r-old", startedAt: 100, sessionId: "sess-old" }),
+    ],
+  };
+  // 最新一条被抑制（刚被删掉）：整个任务不重建，绝不回退到 r-old。
+  assert.deepEqual(runTabsToRebuild([autoA], runs, new Set(), new Set(["sess-new"])), []);
+  // 抑制的只是更早的那条：最新一条照常重建。
+  assert.equal(runTabsToRebuild([autoA], runs, new Set(), new Set(["sess-old"])).length, 1);
+  assert.equal(runTabsToRebuild([autoA], runs, new Set(), new Set(["sess-old"]))[0]?.runId, "r-new");
+  // 无抑制时仍是旧行为。
+  assert.equal(runTabsToRebuild([autoA], runs, new Set())[0]?.runId, "r-new");
+});
+
+test("isRunTabLive: only a run- tab whose runId is live counts", () => {
+  const live = new Set(["new"]);
+  assert.equal(isRunTabLive("run-new", live), true);
+  assert.equal(isRunTabLive("run-old", live), false);
+  assert.equal(isRunTabLive("run-", live), false);
+  assert.equal(isRunTabLive("work-1", live), false);
+  assert.equal(isRunTabLive("run-", new Set([""])), false);
 });
 
 test("runResultNoteText: exact footer strings (single source for run-end handler and rebuild backfill)", () => {

@@ -52,8 +52,11 @@ type Props = {
   onAutomationCreated?: () => void;
   /** 手动运行把工作区热切换到任务所属目录后通知 App 对齐界面。 */
   onWorkspaceAligned?: (workspaceRoot: string) => void;
-  /** 运行记录删除成功后通知 App 关闭该会话的运行对话标签（规格 §6；默认对话标签不受影响）。 */
-  onRunDeleted?: (sessionId: string) => void;
+  /**
+   * 运行记录删除成功后通知 App 关闭该会话的运行对话标签（规格 §6；默认对话标签不受影响）。
+   * 带上任务 id：App 要按任务把已加载的运行会话全部记进「不要再重建」的抑制集。
+   */
+  onRunDeleted?: (sessionId: string, automationId: string) => void;
   /** Task 10：保持系统唤醒设置值（与账户页共用同一持久化字段）。 */
   keepAwake: boolean;
   onToggleKeepAwake: (next: boolean) => void;
@@ -454,7 +457,7 @@ function AutomationRow({
  * 「上次」文案（规格 §8 末段）：时刻与状态词仍读注册表；只有已加载运行记录里
  * startedAt 最新的一条是 cancelled 时，状态词改说「已取消」。missed/timeout 不连带。
  */
-function lastRunLabel(automation: AutomationInfo, running: boolean, runs: RunSummary[]): string {
+export function lastRunLabel(automation: AutomationInfo, running: boolean, runs: RunSummary[]): string {
   if (running) return "运行中";
   if (!automation.lastRunAt) return "从未运行";
   const status = automation.lastStatus === "ok" ? "成功" : automation.lastStatus === "error" ? "失败" : "";
@@ -480,7 +483,7 @@ function RunsPanel({
 }: {
   automations: AutomationInfo[];
   onChanged: () => void;
-  onRunDeleted?: (sessionId: string) => void;
+  onRunDeleted?: (sessionId: string, automationId: string) => void;
 }) {
   const [fullRuns, setFullRuns] = useState<Record<string, RunSummary[]>>({});
   const [statusFilter, setStatusFilter] = useState<"all" | RunStatus>("all");
@@ -611,7 +614,7 @@ function RunsPanel({
       }));
       if (sessionDirRemoved === false) setNotice("记录已删除，但会话目录未能删除");
       if (run.sessionId && detail?.sessionId === run.sessionId) setDetail(null);
-      if (run.sessionId) onRunDeleted?.(run.sessionId);
+      if (run.sessionId) onRunDeleted?.(run.sessionId, automation.id);
       void reloadRuns(automation.id);
       onChanged();
     } catch (err) {

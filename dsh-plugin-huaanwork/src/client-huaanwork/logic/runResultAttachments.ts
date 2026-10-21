@@ -42,3 +42,16 @@ export function foldRunAssistantItems<T extends { kind: string }>(
   const rest = items.filter((item) => item.kind !== "assistant");
   return [...rest.slice(0, first), createAttachment(sourceText), ...rest.slice(first)];
 }
+
+/**
+ * 折叠后的附件项在「按对话内容判断」的视图里等价于一整段助手正文：
+ * 思考面板靠它判断本轮是否已有可见产出（`hasAssistantTextAfter`），回合核对
+ * 不读 assistant，所以映射成 assistant 不改变核对结果。位置与 id 原样保留。
+ */
+export function attachmentAsAssistant(item: { id: number; sourceText: string }): {
+  id: number;
+  kind: "assistant";
+  text: string;
+} {
+  return { id: item.id, kind: "assistant", text: item.sourceText };
+}

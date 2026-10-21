@@ -12,6 +12,7 @@ import {
   thinkingStepsText,
   type ThinkingToggleItem,
 } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
+import { attachmentAsAssistant } from "../../src/client-huaanwork/logic/runResultAttachments.ts";
 
 test("reasoning wins and think tags stay out of the answer", () => {
   const resolved = resolveThinking({
@@ -123,6 +124,26 @@ test("a following user message ends the scan", () => {
     { kind: "assistant" as const, text: "下一轮的答案" },
   ];
   assert.equal(hasAssistantTextAfter(items, 0), false);
+});
+
+test("a folded result attachment counts as assistant text after a finished thinking panel", () => {
+  // 运行结束后内容视图里的附件项：映射成 assistant 才算「已生成」。
+  const withAttachment = [
+    { kind: "thinking" as const, thought: "想了很久" },
+    attachmentAsAssistant({ id: 2, sourceText: '{"a":1}' }),
+  ];
+  assert.equal(hasAssistantTextAfter(withAttachment, 0), true);
+  // 评审前的空 note 占位：扫描不到助手正文，面板会展开并停在「进行中」。
+  const withPlaceholder = [
+    { kind: "thinking" as const, thought: "想了很久" },
+    { kind: "note" as const, text: "" },
+  ];
+  assert.equal(hasAssistantTextAfter(withPlaceholder, 0), false);
+  // chrome 随判据收敛：已生成且默认收起。
+  assert.deepEqual(
+    thinkingChrome({ hasAssistantText: true, userToggled: null, interrupted: false }),
+    { title: "思考 · 已生成", expanded: false },
+  );
 });
 
 test("a final reasoning event replaces only the current step, earlier steps stay", () => {

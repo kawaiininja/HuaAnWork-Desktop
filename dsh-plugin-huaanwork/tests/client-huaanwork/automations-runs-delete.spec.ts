@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../src/client-huaanwork/api.ts", () => ({ rpcCall: vi.fn() }));
 
 import { rpcCall } from "../../src/client-huaanwork/api.ts";
-import AutomationsView from "../../src/client-huaanwork/AutomationsView.tsx";
+import AutomationsView, { lastRunLabel } from "../../src/client-huaanwork/AutomationsView.tsx";
 import type { AutomationInfo, RunSummary } from "../../src/client-huaanwork/logic/projects.ts";
 
 type DeleteResult = { removed: boolean; sessionDirRemoved: boolean };
@@ -82,7 +82,14 @@ function deleteButtonFor(view: HTMLElement, output: string): HTMLButtonElement {
   return button;
 }
 
-async function mount(options: { onRunDeleted: (sessionId: string) => void; onChanged: () => void }): Promise<HTMLDivElement> {
+async function mount(options: {
+  onRunDeleted: (sessionId: string, automationId: string) => void;
+  onChanged: () => void;
+  runningIds?: ReadonlySet<string>;
+  runs?: Record<string, RunSummary[]>;
+  /** 默认进「运行记录」tab；任务行用例留在「任务」tab。 */
+  openRuns?: boolean;
+}): Promise<HTMLDivElement> {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   container = document.createElement("div");
   document.body.append(container);
@@ -93,8 +100,8 @@ async function mount(options: { onRunDeleted: (sessionId: string) => void; onCha
         projects: [],
         activeProjectId: null,
         automations: [AUTOMATION],
-        runs: {},
-        runningIds: new Set<string>(),
+        runs: options.runs ?? {},
+        runningIds: options.runningIds ?? new Set<string>(),
         onChanged: options.onChanged,
         onRunDeleted: options.onRunDeleted,
         keepAwake: false,
@@ -104,9 +111,11 @@ async function mount(options: { onRunDeleted: (sessionId: string) => void; onCha
       }),
     );
   });
-  await act(async () => {
-    buttonByText(container!, "运行记录").click();
-  });
+  if (options.openRuns !== false) {
+    await act(async () => {
+      buttonByText(container!, "运行记录").click();
+    });
+  }
   return container;
 }
 
@@ -159,7 +168,7 @@ describe("运行记录删除（spec §6）", () => {
     expect(view.textContent).toContain("第二条输出");
     // 目录没删掉要诚实说出来（记录本身已删，列表不再出现）。
     expect(view.textContent).toContain("记录已删除，但会话目录未能删除");
-    expect(onRunDeleted).toHaveBeenCalledWith("s-1");
+    expect(onRunDeleted).toHaveBeenCalledWith("s-1", "a1");
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
 
@@ -223,5 +232,61 @@ describe("运行记录删除（spec §6）", () => {
     });
     expect(view.querySelector('[role="dialog"]')).toBeNull();
     expect(view.textContent).not.toContain("第一条输出");
+  });
+});
+
+describe("任务行停止与「上次」文案（规格 §8）", () => {
+  it("a running task row shows 停止 and stops through automation.stop, then refreshes", async () => {
+    rpc.mockImplementation(async (method) => {
+      if (method === "automation.runs") return { runs: [] };
+      if (method === "automation.stop") return { stopped: true };
+      throw new Error(`unexpected rpc: ${method}`);
+    });
+    const onChanged = vi.fn();
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged,
+      runningIds: new Set(["a1"]),
+      openRuns: false,
+    });
+
+    const stop = buttonByText(view, "停止");
+    await act(async () => {
+      stop.click();
+    });
+
+    const stopCalls = rpc.mock.calls.filter((call) => call[0] === "automation.stop");
+    expect(stopCalls).toHaveLength(1);
+    expect(stopCalls[0]![1]).toEqual({ id: "a1" });
+    // 停止后必须向宿主重取读数（按钮文案随后收敛）。
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("a task with no live run offers 立即运行 instead of 停止", async () => {
+    rpc.mockImplementation(async (method) => {
+      if (method === "automation.runs") return { runs: [] };
+      throw new Error(`unexpected rpc: ${method}`);
+    });
+    const view = await mount({ onRunDeleted: vi.fn(), onChanged: vi.fn(), openRuns: false });
+    expect(view.textContent).toContain("立即运行");
+    expect(view.textContent).not.toContain("停止");
+  });
+
+  it("lastRunLabel says 已取消 only when the newest loaded run is cancelled", () => {
+    const automation: AutomationInfo = { ...AUTOMATION, lastRunAt: 5_000, lastStatus: "error" };
+    const cancelled: RunSummary[] = [
+      run("r1", "s-1", 1_000, "旧"),
+      { ...run("r2", "s-2", 2_000, "新"), status: "cancelled", ok: false },
+    ];
+    expect(lastRunLabel(automation, false, cancelled)).toContain("已取消");
+
+    const missed: RunSummary[] = [{ ...run("r1", "s-1", 1_000, "错过"), status: "missed", ok: false }];
+    expect(lastRunLabel(automation, false, missed)).not.toContain("已取消");
+
+    const timeout: RunSummary[] = [{ ...run("r1", "s-1", 1_000, "超时"), status: "timeout", ok: false }];
+    expect(lastRunLabel(automation, false, timeout)).not.toContain("已取消");
+
+    // 运行中优先于任何记录读数。
+    expect(lastRunLabel(automation, true, cancelled)).toBe("运行中");
   });
 });

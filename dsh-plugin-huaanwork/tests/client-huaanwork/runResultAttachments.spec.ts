@@ -3,6 +3,7 @@ import { test } from "vitest";
 
 import {
   RESULT_ATTACHMENT_FILES,
+  attachmentAsAssistant,
   collectAssistantText,
   foldRunAssistantItems,
   isJsonResultText,
@@ -53,4 +54,9 @@ test("non-JSON bodies return the same array reference untouched", () => {
 
 test("attachment file names are exactly the two fixed names", () => {
   assert.deepEqual([...RESULT_ATTACHMENT_FILES], ["结果.md", "结果.html"]);
+});
+
+test("an attachment becomes an assistant-shaped content item with the same id and text", () => {
+  const attachment = { id: 7, kind: "attachment" as const, sourceText: '{"a":1}' };
+  assert.deepEqual(attachmentAsAssistant(attachment), { id: 7, kind: "assistant", text: '{"a":1}' });
 });
