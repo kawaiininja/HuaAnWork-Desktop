@@ -152,6 +152,11 @@ import {
   type GoalTurnState,
 } from "./logic/goalRound.ts";
 import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
+import {
+  RESULT_ATTACHMENT_FILES,
+  foldRunAssistantItems,
+  type ResultAttachmentFile,
+} from "./logic/runResultAttachments.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
 /**
@@ -199,6 +204,7 @@ type ChatItem =
   | { id: number; kind: "todo"; todos: TodoEntry[] }
   | { id: number; kind: "ask"; card: AskCard }
   | { id: number; kind: "input"; card: InputCard }
+  | { id: number; kind: "attachment"; sourceText: string }
   | { id: number; kind: "note"; text: string };
 
 type SessionRow = {
@@ -878,7 +884,7 @@ export default function App() {
       if (!turn) return undefined;
       const { tabId, items } = turn;
       const turnUserId = latestUserItemId(items);
-      const checks = turnChecks(items);
+      const checks = turnChecks(contentItems(items));
       const listedCwd = lookupSessionCwd(sessionId, sessionsRef.current, sessionCwdRef.current);
       const root = outcomeWorkspace(workspaceRef.current, listedCwd);
       let tree: TreeNode[] = [];
@@ -1002,7 +1008,18 @@ export default function App() {
                 setChatTabs((prev) =>
                   prev.map((tab) =>
                     tab.id === target
-                      ? { ...tab, items: [...tab.items, { id: allocId(), kind: "note" as const, text: resultLabel }] }
+                      ? {
+                          ...tab,
+                          items: [
+                            // 整段 JSON 输出先收成附件项，结果脚注仍在末尾。
+                            ...foldRunAssistantItems(tab.items, (sourceText) => ({
+                              id: allocId(),
+                              kind: "attachment" as const,
+                              sourceText,
+                            })),
+                            { id: allocId(), kind: "note" as const, text: resultLabel },
+                          ],
+                        }
                       : tab,
                   ),
                 );
@@ -1336,7 +1353,14 @@ export default function App() {
           log: "",
           records: Array.isArray(opened.records) ? opened.records : [],
         };
-        const items = historyToChatItems(view);
+        const items = [
+          // 回放历史里的整段 JSON 回复同样收成附件项；结果脚注仍在其后（末尾）。
+          ...foldRunAssistantItems(historyToChatItems(view), (sourceText) => ({
+            id: allocId(),
+            kind: "attachment" as const,
+            sourceText,
+          })),
+        ];
         // 按 sessionId 匹配所属 run 取结果脚注：重建后同一任务又跑了新 run 也不会拿错。
         const run = (automationRuns[automationId] ?? []).find((item) => item.sessionId === sessionId);
         if (run) items.push({ id: allocId(), kind: "note", text: runResultNoteText(run.status) });
@@ -2422,7 +2446,7 @@ export default function App() {
                     onInput={answerInput}
                     onThinkingToggle={toggleThinking}
                     reasoning={item.kind === "assistant" ? (thinkingBefore(items, index)?.thought ?? "") : ""}
-                    hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(items, index) : false}
+                    hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(contentItems(items), index) : false}
                   />
                 ))}
                 {showTurnLine ? (
@@ -3090,6 +3114,19 @@ function appendToken(items: ChatItem[], text: string): ChatItem[] {
   return [...items, { id: (last?.id ?? 0) + 1, kind: "assistant", text }];
 }
 
+type ContentChatItem = Exclude<ChatItem, { kind: "attachment" }>;
+
+/**
+ * 回合核对与思考折叠只认对话内容项：结果附件是折叠后的 JSON 渲染项，
+ * 按同位置的 note 占位 —— 核对忽略它，思考面板也当它没有可见助手文本。
+ * 位置保持不变，hasAssistantTextAfter 的 index 仍然对准原列表。
+ */
+function contentItems(items: readonly ChatItem[]): ContentChatItem[] {
+  return items.map((item) =>
+    item.kind === "attachment" ? { id: item.id, kind: "note", text: "" } : item,
+  );
+}
+
 /** 同一回合只保留一块思考：非 final 追加当前步骤，final 只替换当前步骤，工具调用前已定稿的步骤保留。 */
 function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number): ChatItem[] {
   let turnStart = 0;
@@ -3121,6 +3158,7 @@ function ChatRow({
   onAnswer,
   onInput,
   onThinkingToggle,
+  onOpenAttachment,
   reasoning = "",
   hasAssistantText = false,
 }: {
@@ -3129,6 +3167,7 @@ function ChatRow({
   onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
   onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
   onThinkingToggle?: (itemId: number, userToggled: "expand" | "collapse") => void;
+  onOpenAttachment?: (file: ResultAttachmentFile) => void;
   reasoning?: string;
   hasAssistantText?: boolean;
 }) {
@@ -3190,6 +3229,17 @@ function ChatRow({
           {item.card.truncated ? <span className="badge">已截断</span> : null}
         </div>
         {item.card.output ? <pre className="thinking-body">{item.card.output}</pre> : null}
+      </div>
+    );
+  }
+  if (item.kind === "attachment") {
+    return (
+      <div className="attachment-row">
+        {RESULT_ATTACHMENT_FILES.map((file) => (
+          <button key={file} type="button" className="attachment-file" onClick={() => onOpenAttachment?.(file)}>
+            {file}
+          </button>
+        ))}
       </div>
     );
   }

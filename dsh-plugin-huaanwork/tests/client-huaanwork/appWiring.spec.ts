@@ -4,6 +4,7 @@ import { test } from "vitest";
 
 import { answerApprovalInTabs } from "../../src/client-huaanwork/logic/chatTabs.ts";
 import { clearFailuresInTabs } from "../../src/client-huaanwork/logic/hostStop.ts";
+import { foldRunAssistantItems } from "../../src/client-huaanwork/logic/runResultAttachments.ts";
 
 /**
  * App 两条回调接线的回归门（评审:helper 单测全绿但 App 调用被删仍绿）:
@@ -122,4 +123,55 @@ test("App skips plan-turn outcomes before it lists the workspace tree", () => {
     turnBody.indexOf("listTree(root, WORKSPACE_SCAN_DEPTH)") > turnBody.indexOf("turnChecks(items)"),
     "the tree listing stays inside the required-files branch",
   );
+});
+
+type FoldableItem = {
+  id: number;
+  kind: "note" | "assistant" | "tool" | "attachment";
+  text?: string;
+  sourceText?: string;
+};
+
+test("folding a run's JSON assistant text keeps one attachment in place and leaves siblings alone", () => {
+  const items: FoldableItem[] = [
+    { id: 1, kind: "note", text: "自动化运行中…" },
+    { id: 2, kind: "assistant", text: '{"a":1}' },
+    { id: 3, kind: "tool", text: undefined },
+  ];
+  const folded = foldRunAssistantItems(items, (sourceText) => ({ id: 9, kind: "attachment" as const, sourceText }));
+  assert.deepEqual(folded, [
+    { id: 1, kind: "note", text: "自动化运行中…" },
+    { id: 9, kind: "attachment", sourceText: '{"a":1}' },
+    { id: 3, kind: "tool", text: undefined },
+  ]);
+});
+
+test("App folds run output at both call sites and keeps each footnote last", () => {
+  // 两处调用：run-end 分支与回填效果。只数调用形式——import 行没有左括号，
+  // 删掉任一处接线，计数即降为 1（helper 全绿但 App 不调用的回归门）。
+  assert.equal((APP_SOURCE.match(/foldRunAssistantItems\(/g) ?? []).length, 2);
+
+  // run-end：先折叠目标标签，再追加结果脚注。
+  const runEnd = APP_SOURCE.indexOf("foldRunAssistantItems(tab.items");
+  assert.ok(runEnd >= 0, "run-end branch folds the target tab's items");
+  assert.ok(
+    APP_SOURCE.indexOf('kind: "note"', runEnd) > runEnd,
+    "the run-end result footnote is appended after the fold (footnote stays last)",
+  );
+
+  // 回填：折叠包住 historyToChatItems，脚注 push 在其后。
+  const composed = APP_SOURCE.indexOf("foldRunAssistantItems(historyToChatItems(view)");
+  assert.ok(composed >= 0, "backfill folds the replayed history before appending its footnote");
+  assert.ok(
+    APP_SOURCE.indexOf("runResultNoteText(run.status)", composed) > composed,
+    "the backfill footnote is pushed after the fold (footnote stays last)",
+  );
+});
+
+test("ChatRow offers exactly the shared result attachment files through the optional handler", () => {
+  assert.match(APP_SOURCE, /item\.kind === "attachment"/);
+  assert.match(APP_SOURCE, /RESULT_ATTACHMENT_FILES\.map\(/);
+  assert.match(APP_SOURCE, /onOpenAttachment\?\.\(file\)/);
+  // 按钮文案来自共享清单，不在 App 里内联文件名。
+  assert.doesNotMatch(APP_SOURCE, /结果\.md/);
 });
