@@ -7,7 +7,7 @@
 - 环境：macOS 26 / Electron 44.0.0 / Node 24.18.1 / 显式 advanced 模式
 - 模型：Host profile `~/.huaanwork/profiles/desktop/huaanwork-settings.json` 中的真实端点 `https://api.deepseek.com`，模型 `deepseek-flash`（不是桩模型）
 - 驱动方式：用 `--remote-debugging-port=9222` 启动 worktree 的 `lib/main.js`，通过 CDP `Runtime.evaluate` 操作页面、`Page.captureScreenshot` 截图。用户数据、profile 和会话均未重置。
-- 截图目录：`docs/evidence/2026-10-20-conversation-capabilities-screens/`
+- 截图：**未随本分支发布**；仅保留在本地 WIP 备份。下面出现的文件名仅作文本引用。
 
 ## 验收中发现并修复的问题
 
@@ -31,7 +31,7 @@
 | B05 | **PASS** | 重开“查询上海一周天气预报”会话，出现 3 个默认收起的“思考”面板；展开可见真实 reasoning 原文。`huaanwork-session.png` |
 | B06 | **PASS（带说明）** | `huaanwork:thinking-language` 的注册由单测钉住；真实模型本轮仍用英文思考，面板按设计照实显示英文原文，未翻译 |
 | B07 | **PASS（修订后的 B07）** | 真实模型对“现在几点？请用一句话回答。”调用了一次 `bash date`，没有计划卡，回答正确；`huaanwork-b07-done.png`。纯知识问题“1+1”直接回答、无工具无计划卡；`huaanwork-b07-knowledge.png`。原 B07 的“不调用工具”与 R1 冲突（当前时间不属于模型知识，属于 direct 而非 answer），本轮已把设计 B07 改为“不出现计划卡；允许一次有界只读工具”，未改路由器。 |
-| B08 | **PASS** | 真实模型调用 `glob` + `read` 读取 `acceptance-note.md`，回答标题和 token `BLUE-HARBOR-731`；无计划卡。`huaanwork-poll-10.png` |
+| B08 | **PASS** | 真实模型调用 `glob` + `read` 读取 `acceptance-note.md`，回答标题和 token `BLUE-HARBOR-***`；无计划卡。`huaanwork-poll-10.png` |
 | B09 | **PASS（计划卡/报告）/ 部分** | 计划卡出现，固定说明“计划确认前，模型仍可能读取工作区；写入和命令继续走现有权限。”，`acceptance-report.md` 真实存在；报告路径与内容已核对。ask 档的“等待点击”未单独切换档位执行；同一评审卡的按钮路径由 B10 与 `question-answerer` 单测覆盖。 |
 | B10 | **PASS** | 真实模型对含 `git push` 的计划调用 `exit_plan_mode`，出现“按这个计划执行 / 继续改计划”评审卡；点击“继续改计划”后未执行推送。`huaanwork-b10-settled.png`。未点击“按这个计划执行”，避免对用户仓库执行真实 push；工具级询问仍由 policy 单测覆盖。 |
 | B11 | **PASS** | 真实模型因缺少远端信息调用 `request_input`，出现输入卡；提交答案后卡片变为“已回答：…”，答案作为同一工具结果回到模型，回合继续，没有新用户消息。`huaanwork-b11-answered.png`。取消路径在 B22 清理时验证（“回合已结束，这个问题不再等待回答”），没有单独截图。 |
@@ -77,6 +77,16 @@ Task 8 的全量 headless 记录（在 e0f952279e/24b5c28c5d 两处验收修复�
 - **B25（桩模型）**：同一桩在同一响应里返回 `propose_plan` + `read`；UI 只出现 `propose_plan` 行和最终文本，没有 `read` 行，计划模式正常进入（`huaanwork-b25.png`）。这是 **MOCK**；`model.spec.ts`/`route-tools.spec.ts` 另有控制工具优先单测。profile 已恢复。
 - **B14/B15（单测）**：设计 Task 16 表把 B14 文案阈值、B15 兄弟会话取消列为单测为准。实际跑了 `turnStatus.spec.ts`、`sessions.spec.ts`、`model.spec.ts`、`route-tools.spec.ts`：**61/61 passed**；B14 覆盖 299,000/300,000ms 阈值与 running-tool 优先级，B15 覆盖 sibling 不被取消，B25 覆盖混合响应只保留控制工具。未做 5 分钟真实等待/双会话真机，因为设计明确以单测为准。
 - **Windows B16（BLOCKED）**：当前只有 macOS 主机，无法验证 Windows 的 kill/确认路径；按设计 §10 记录为**未验证/ BLOCKED**，不写成全平台通过。若拿到 Windows 主机，按本文件 B16 的 macOS 步骤重跑。
+
+## 合并后的真实模型 smoke（2026-10-21，HEAD `14a9a37848`）
+
+在 master（feature + 本地 `web_fetch`/`screenshot`/短 preamble + dshmarket 1.66.38）重新构建的 app 上，用真实 `https://api.deepseek.com` / `deepseek-flash` 跑三项：
+
+- **时间问答**：`现在几点？请用一句话回答。` → 一次 `bash` 得到 09:57，无计划卡；本轮模型未产生 reasoning，因此没有思考面板（符合“没有思考内容不渲染”）。
+- **读取**：`读一下 acceptance-note.md，并告诉我里面的 token。` → 思考面板“思考 · 已生成”，`glob` + `read` 执行，返回 `BLUE-HARBOR-***`，结果“已完成：自动核对 1 项均通过”。短 preamble 没有让回合提前结束。
+- **计划**：`propose_plan` → 计划卡（固定说明 + 两个确认按钮）→ `exit_plan_mode` 等待 → 点击“按这个计划执行” → `read`/`write`/`read`/`bash` → `smoke-report.md` 55 行 → “已完成：自动核对 3 项均通过”。没有计划轮的“缺少文件”噪音。
+
+截图：`smoke-merged-time-done.png`、`smoke-merged-read.png`、`smoke-merged-plan-approved.png`、`smoke-merged-final.png`。smoke 生成的 `smoke-report.md` 留在 workspace，可按需删除。
 
 ## 残余风险与说明
 
