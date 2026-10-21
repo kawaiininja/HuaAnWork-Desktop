@@ -119,10 +119,13 @@ test("App skips plan-turn outcomes before it lists the workspace tree", () => {
   assert.ok(turnStart >= 0 && turnEnd > turnStart, "readTurn is defined before appendTurnNotes");
   const turnBody = APP_SOURCE.slice(turnStart, turnEnd);
   assert.match(turnBody, /if \(checks\.requiredFiles\.length > 0 && root\) \{/);
-  assert.ok(
-    turnBody.indexOf("listTree(root, WORKSPACE_SCAN_DEPTH)") > turnBody.indexOf("turnChecks(items)"),
-    "the tree listing stays inside the required-files branch",
-  );
+  // 两个针都要真命中：indexOf 未命中返回 -1，单靠大小比较会变成永真断言
+  // （readTurn 现在核对的是 contentItems(items)，旧的 "turnChecks(items)" 已不在源码里）。
+  const checksAt = turnBody.indexOf("turnChecks(contentItems(items))");
+  const listTreeAt = turnBody.indexOf("listTree(root, WORKSPACE_SCAN_DEPTH)");
+  assert.ok(checksAt >= 0, "readTurn still computes the turn checks (rename the needle with it)");
+  assert.ok(listTreeAt >= 0, "readTurn still lists the workspace tree");
+  assert.ok(listTreeAt > checksAt, "the tree listing stays inside the required-files branch");
 });
 
 type FoldableItem = {
@@ -151,12 +154,18 @@ test("App folds run output at both call sites and keeps each footnote last", () 
   // 删掉任一处接线，计数即降为 1（helper 全绿但 App 不调用的回归门）。
   assert.equal((APP_SOURCE.match(/foldRunAssistantItems\(/g) ?? []).length, 2);
 
-  // run-end：先折叠目标标签，再追加结果脚注。
-  const runEnd = APP_SOURCE.indexOf("foldRunAssistantItems(tab.items");
-  assert.ok(runEnd >= 0, "run-end branch folds the target tab's items");
+  // run-end：先折叠目标标签，再在同一更新体里追加结果脚注（脚注仍在末尾）。
+  // 切片到「未命中标签」的 `: tab,` 分支为止：App.tsx 后面还有别的 `kind: "note"`
+  // 字面量，全文件搜索会让删掉本处脚注（或把它挪到折叠之前）仍然全绿。
+  const runEndFoldAt = APP_SOURCE.indexOf("foldRunAssistantItems(tab.items");
+  assert.ok(runEndFoldAt >= 0, "run-end branch folds the target tab's items");
+  const runEndEnd = APP_SOURCE.indexOf(": tab,", runEndFoldAt);
+  assert.ok(runEndEnd > runEndFoldAt, "run-end update body still ends with the untouched-tab branch");
+  const runEndBody = APP_SOURCE.slice(runEndFoldAt, runEndEnd);
+  const runEndNoteAt = runEndBody.indexOf('{ id: allocId(), kind: "note" as const, text: resultLabel }');
   assert.ok(
-    APP_SOURCE.indexOf('kind: "note"', runEnd) > runEnd,
-    "the run-end result footnote is appended after the fold (footnote stays last)",
+    runEndNoteAt > 0,
+    "the run-end result footnote is appended after the fold inside the same update (footnote stays last)",
   );
 
   // 回填：折叠包住 historyToChatItems，脚注 push 在其后。
@@ -169,9 +178,15 @@ test("App folds run output at both call sites and keeps each footnote last", () 
 });
 
 test("ChatRow offers exactly the shared result attachment files through the optional handler", () => {
-  assert.match(APP_SOURCE, /item\.kind === "attachment"/);
-  assert.match(APP_SOURCE, /RESULT_ATTACHMENT_FILES\.map\(/);
-  assert.match(APP_SOURCE, /onOpenAttachment\?\.\(file\)/);
+  // 只看 ChatRow 本体：`item.kind === "attachment"` 在 contentItems 适配器里也出现，
+  // 全文件搜索证明不了渲染分支还在。
+  const chatRowAt = APP_SOURCE.indexOf("function ChatRow(");
+  const planCardAt = APP_SOURCE.indexOf("\nfunction PlanCard(", chatRowAt);
+  assert.ok(chatRowAt >= 0 && planCardAt > chatRowAt, "ChatRow is still a top-level component before PlanCard");
+  const chatRow = APP_SOURCE.slice(chatRowAt, planCardAt);
+  assert.match(chatRow, /item\.kind === "attachment"/);
+  assert.match(chatRow, /RESULT_ATTACHMENT_FILES\.map\(/);
+  assert.match(chatRow, /onOpenAttachment\?\.\(file\)/);
   // 按钮文案来自共享清单，不在 App 里内联文件名。
   assert.doesNotMatch(APP_SOURCE, /结果\.md/);
 });
