@@ -157,6 +157,7 @@ import {
   foldRunAssistantItems,
   type ResultAttachmentFile,
 } from "./logic/runResultAttachments.ts";
+import { renderResultHtml, renderResultMarkdown } from "./logic/runResultRender.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
 /**
@@ -237,6 +238,8 @@ type ChatTab = {
   automationId?: string;
   /** 重启后重建的运行对话骨架：首启懒加载运行日志前为 true，加载（或失败降级）后清除。 */
   runPlaceholder?: boolean;
+  /** 右侧「预览」打开的结果附件（规格 §5）：选择记在标签上，换标签再回来沿用该标签上次的选择。 */
+  previewFile?: ResultAttachmentFile;
 };
 
 type SessionMenu = { sessionId: string; x: number; y: number };
@@ -506,6 +509,12 @@ export default function App() {
 
   const activeChat = chatTabs.find((tab) => tab.id === activeTab) ?? chatTabs[0];
   const items = activeChat.items;
+  /**
+   * 右侧预览选中的附件项（规格 §5）：选择记在标签上；标签里没有附件项时
+   * （如重建后日志未含该条）回落空占位，不显示下载。
+   */
+  const previewAttachment = activeChat.previewFile ? items.find((item) => item.kind === "attachment") : undefined;
+  const previewFile = previewAttachment ? activeChat.previewFile : undefined;
   const sessionFailed = activeChat.sessionFailed;
   /** 相位 → 展示决策；`stopped` 是中性终态，不再显示无响应与结束按钮。 */
   const hostNotice = hostLivenessNotice(hostPhase);
@@ -1888,6 +1897,29 @@ export default function App() {
     }));
   }
 
+  /** 点附件：留在当前对话，右侧切到预览并展开（规格 §5）。 */
+  function handleOpenAttachment(file: ResultAttachmentFile) {
+    setChatTabs((prev) => prev.map((tab) => (tab.id === activeTab ? { ...tab, previewFile: file } : tab)));
+    setRightTab("preview");
+    setRightCollapsed(false);
+  }
+
+  /**
+   * 只下载当前打开的这一份（规格 §5）：渲染进程用附件的展示文件名发起 Blob 下载，
+   * 内容与预览同源（Markdown 原文 / 完整 HTML 文档）。不写文件、不走宿主 RPC。
+   */
+  function downloadAttachment(file: ResultAttachmentFile, sourceText: string) {
+    const markdown = file === RESULT_ATTACHMENT_FILES[0];
+    const content = markdown ? renderResultMarkdown(sourceText) : renderResultHtml(sourceText);
+    const blob = new Blob([content], { type: markdown ? "text/markdown" : "text/html" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = file;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
   /** 宿主先把未回答的计划评审以取消结算，再退出计划模式；评审卡不在屏上时也能用。 */
   async function exitPlanMode() {
     if (sidecarDead) return;
@@ -2445,6 +2477,7 @@ export default function App() {
                     onAnswer={answer}
                     onInput={answerInput}
                     onThinkingToggle={toggleThinking}
+                    onOpenAttachment={handleOpenAttachment}
                     reasoning={item.kind === "assistant" ? (thinkingBefore(items, index)?.thought ?? "") : ""}
                     hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(contentItems(items), index) : false}
                   />
@@ -2655,10 +2688,35 @@ export default function App() {
             </div>
             <div className="right-body">
               {rightTab === "preview" ? (
-                <div className="panel-card">
-                  <p className="h">预览</p>
-                  <p className="panel-empty">AI 生成的摘要、代码片段等预览内容会显示在这里</p>
-                </div>
+                previewFile && previewAttachment ? (
+                  <div className="panel-card preview-card">
+                    <p className="h preview-head">
+                      <span>{previewFile}</span>
+                      <button
+                        type="button"
+                        className="side-action"
+                        onClick={() => downloadAttachment(previewFile, previewAttachment.sourceText)}
+                      >
+                        下载
+                      </button>
+                    </p>
+                    {previewFile === RESULT_ATTACHMENT_FILES[0] ? (
+                      <pre className="preview-md">{renderResultMarkdown(previewAttachment.sourceText)}</pre>
+                    ) : (
+                      <iframe
+                        className="preview-frame"
+                        sandbox=""
+                        title="结果"
+                        srcDoc={renderResultHtml(previewAttachment.sourceText)}
+                      />
+                    )}
+                  </div>
+                ) : (
+                  <div className="panel-card">
+                    <p className="h">预览</p>
+                    <p className="panel-empty">AI 生成的摘要、代码片段等预览内容会显示在这里</p>
+                  </div>
+                )
               ) : null}
               {rightTab === "progress" ? (
                 <div className="panel-card">
