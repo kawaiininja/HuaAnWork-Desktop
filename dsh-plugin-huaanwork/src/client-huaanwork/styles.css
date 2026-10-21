@@ -2810,6 +2810,12 @@ button {
   color: var(--text);
 }
 
+/* 运行记录「删除」：行内不参与换行，垂直居中于输出框 */
+.automation-runs .run-delete {
+  flex-shrink: 0;
+  align-self: center;
+}
+
 /* 任务表单模态（复用 settings-overlay + confirm-modal 容器） */
 
 .automation-form {

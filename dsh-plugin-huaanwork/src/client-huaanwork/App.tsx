@@ -113,6 +113,7 @@ import { toolRowIcon } from "./logic/commandOutcome.ts";
 import {
   answerApprovalInTabs,
   askCardWaitsForClick,
+  closeRunTabsForSession,
   hasPendingAsk,
   resolveActiveTab,
   type ApprovalCardView,
@@ -842,6 +843,17 @@ export default function App() {
     } catch {
       // 任务数据不可得时保留旧数据
     }
+  }
+
+  /**
+   * 运行记录删除成功后关掉它绑定的运行对话标签（规格 §6）。
+   * 只关自动化运行标签：默认对话标签即使 sessionId 相同也保留。
+   * 被关的是当前标签时改选最近的存活标签，选择交给 closeRunTabsForSession 决定。
+   */
+  function handleRunDeleted(sessionId: string) {
+    const result = closeRunTabsForSession(chatTabsRef.current, sessionId, activeTab);
+    setChatTabs(result.tabs);
+    setActiveTab(result.nextActiveId);
   }
 
   /** Task 10：判定驱动在前端——automation.list 每次刷新后重算期望的 hold 并交给驱动。
@@ -2414,6 +2426,7 @@ export default function App() {
               enterIntent={automationEnter}
               onEnterIntentConsumed={() => setAutomationEnter(null)}
               onChanged={() => void refreshAutomations()}
+              onRunDeleted={handleRunDeleted}
               onAutomationCreated={() => setDraft("")}
               onWorkspaceAligned={(root) => {
                 if (!root || workspaceRef.current === root) return;

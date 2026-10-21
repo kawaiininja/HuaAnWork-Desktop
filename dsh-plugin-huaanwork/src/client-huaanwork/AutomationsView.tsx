@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import BoardView from "./BoardView.tsx";
 import HistoryDetailPane, { type SessionDetailRecord, type SessionLogView } from "./HistoryDetailPane.tsx";
@@ -6,6 +6,7 @@ import { rpcCall } from "./api.ts";
 import {
   automationRuns,
   createAutomation,
+  deleteAutomationRun,
   describeSchedule,
   listAutomationTemplates,
   pruneAutomationSessions,
@@ -50,6 +51,8 @@ type Props = {
   onAutomationCreated?: () => void;
   /** 手动运行把工作区热切换到任务所属目录后通知 App 对齐界面。 */
   onWorkspaceAligned?: (workspaceRoot: string) => void;
+  /** 运行记录删除成功后通知 App 关闭该会话的运行对话标签（规格 §6；默认对话标签不受影响）。 */
+  onRunDeleted?: (sessionId: string) => void;
   /** Task 10：保持系统唤醒设置值（与账户页共用同一持久化字段）。 */
   keepAwake: boolean;
   onToggleKeepAwake: (next: boolean) => void;
@@ -109,6 +112,7 @@ export default function AutomationsView({
   onChanged,
   onAutomationCreated,
   onWorkspaceAligned,
+  onRunDeleted,
   keepAwake,
   onToggleKeepAwake,
   missedBanner,
@@ -271,7 +275,7 @@ export default function AutomationsView({
           </div>
         )
       ) : tab === "runs" ? (
-        <RunsPanel automations={automations} onChanged={onChanged} />
+        <RunsPanel automations={automations} onChanged={onChanged} onRunDeleted={onRunDeleted} />
       ) : (
         <BoardView automations={automations} runs={runs} projectId={null} projects={projects} />
       )}
@@ -413,7 +417,15 @@ function lastRunLabel(automation: AutomationInfo, running: boolean): string {
 }
 
 /** 「运行记录」tab：吃 automation.runs 全量运行，支持状态筛选、按日分组与点开会话详情（行内展开历史保留在任务行）。 */
-function RunsPanel({ automations, onChanged }: { automations: AutomationInfo[]; onChanged: () => void }) {
+function RunsPanel({
+  automations,
+  onChanged,
+  onRunDeleted,
+}: {
+  automations: AutomationInfo[];
+  onChanged: () => void;
+  onRunDeleted?: (sessionId: string) => void;
+}) {
   const [fullRuns, setFullRuns] = useState<Record<string, RunSummary[]>>({});
   const [statusFilter, setStatusFilter] = useState<"all" | RunStatus>("all");
   const [pruning, setPruning] = useState(false);
@@ -422,6 +434,13 @@ function RunsPanel({ automations, onChanged }: { automations: AutomationInfo[]; 
   /** 点开的运行会话详情（HistoryDetailPane 只读渲染，含原始日志切换）。 */
   const [detail, setDetail] = useState<SessionLogView | null>(null);
   const [opening, setOpening] = useState(false);
+  /** 待确认删除的运行记录（连同所属任务一起带出，避免确认时再查一次）。 */
+  const [pendingDelete, setPendingDelete] = useState<{ automation: AutomationInfo; run: RunSummary } | null>(null);
+  /** 在飞守卫（M26 P2-3 的连点教训）：不能只靠按钮 disabled，函数体必须自己早退。 */
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  /** 同步在飞锁：state 要等一次渲染，同一批事件里的第二次点击看不见它。 */
+  const deleteInFlight = useRef(false);
+  const [deleteError, setDeleteError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -508,6 +527,47 @@ function RunsPanel({ automations, onChanged }: { automations: AutomationInfo[]; 
     }
   }
 
+  /** 刷新单个任务的运行记录（删除成功后再向宿主要一次权威列表）。 */
+  async function reloadRuns(automationId: string) {
+    try {
+      const listed = await automationRuns(automationId);
+      setFullRuns((prev) => ({ ...prev, [automationId]: listed.runs ?? [] }));
+    } catch {
+      // 宿主已经删掉记录；刷新失败时保留本地乐观删除后的列表，下次进入本 tab 会重新拉取。
+    }
+  }
+
+  async function submitDeleteRun() {
+    // 在飞守卫：确认框里的连点不能发第二次 RPC（按钮 disabled 只是第二道防线）。
+    if (!pendingDelete || deleteInFlight.current) return;
+    const { automation, run } = pendingDelete;
+    deleteInFlight.current = true;
+    setDeletingRunId(run.runId);
+    setDeleteError("");
+    setNotice("");
+    try {
+      const { sessionDirRemoved } = await deleteAutomationRun(automation.id, run.runId);
+      setPendingDelete(null);
+      // 先乐观移除：宿主列表回来之前这一行就已消失；随后用宿主读数覆盖。
+      setFullRuns((prev) => ({
+        ...prev,
+        [automation.id]: (prev[automation.id] ?? []).filter((item) => item.runId !== run.runId),
+      }));
+      if (sessionDirRemoved === false) setNotice("记录已删除，但会话目录未能删除");
+      if (run.sessionId && detail?.sessionId === run.sessionId) setDetail(null);
+      if (run.sessionId) onRunDeleted?.(run.sessionId);
+      void reloadRuns(automation.id);
+      onChanged();
+    } catch (err) {
+      // 「运行中的记录不能删除」等错误：列表保持原样，关掉确认框并把原文露出来。
+      setPendingDelete(null);
+      setDeleteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      deleteInFlight.current = false;
+      setDeletingRunId(null);
+    }
+  }
+
   async function prune() {
     setPruning(true);
     setNotice("");
@@ -564,6 +624,11 @@ function RunsPanel({ automations, onChanged }: { automations: AutomationInfo[]; 
         )}
       </div>
       {notice ? <p className="muted" style={{ margin: "0 0 8px", fontSize: 12 }}>{notice}</p> : null}
+      {deleteError ? (
+        <p className="banner error" style={{ borderRadius: 8, margin: "0 0 8px" }}>
+          {deleteError}
+        </p>
+      ) : null}
       {rows.length === 0 ? (
         <p className="automation-runs-empty">没有匹配的运行记录</p>
       ) : (
@@ -605,6 +670,18 @@ function RunsPanel({ automations, onChanged }: { automations: AutomationInfo[]; 
                       head
                     )}
                     <pre className="run-output">{run.output || "（无输出）"}</pre>
+                    <button
+                      type="button"
+                      className="side-action danger run-delete"
+                      aria-label={`删除 ${automation.name} 在 ${formatRunTime(run.startedAt)} 的运行记录`}
+                      disabled={deletingRunId !== null}
+                      onClick={() => {
+                        setDeleteError("");
+                        setPendingDelete({ automation, run });
+                      }}
+                    >
+                      删除
+                    </button>
                   </li>
                 );
               })}
@@ -612,6 +689,38 @@ function RunsPanel({ automations, onChanged }: { automations: AutomationInfo[]; 
           ))}
         </ul>
       )}
+
+      {pendingDelete ? (
+        <div className="settings-overlay" role="dialog" aria-label="删除运行记录确认">
+          <div className="confirm-modal">
+            <h3>删除运行记录</h3>
+            <p className="hint" style={{ margin: 0, fontWeight: 600 }}>
+              {pendingDelete.automation.name} · {formatRunTime(pendingDelete.run.startedAt)}
+            </p>
+            <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+              这条运行记录及其会话目录将被一并删除，此操作无法撤销。确定删除吗？
+            </p>
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                className="btn"
+                disabled={deletingRunId !== null}
+                onClick={() => setPendingDelete(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn danger"
+                disabled={deletingRunId !== null}
+                onClick={() => void submitDeleteRun()}
+              >
+                {deletingRunId === pendingDelete.run.runId ? "删除中…" : "删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

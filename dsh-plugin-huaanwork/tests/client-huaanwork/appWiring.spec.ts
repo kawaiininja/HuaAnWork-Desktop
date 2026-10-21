@@ -190,3 +190,10 @@ test("ChatRow offers exactly the shared result attachment files through the opti
   // 按钮文案来自共享清单，不在 App 里内联文件名。
   assert.doesNotMatch(APP_SOURCE, /结果\.md/);
 });
+
+test("deleting a run closes its run tabs through the shared helper", () => {
+  // 契约钉:AutomationsView 的 onRunDeleted 必须落到 App 的 handler,且 handler 用
+  // closeRunTabsForSession 计算关闭结果——删掉任一处接线,helper 单测仍绿但界面不关标签。
+  assert.match(APP_SOURCE, /closeRunTabsForSession\(chatTabsRef\.current, sessionId, activeTab\)/);
+  assert.match(APP_SOURCE, /onRunDeleted=\{handleRunDeleted\}/);
+});
