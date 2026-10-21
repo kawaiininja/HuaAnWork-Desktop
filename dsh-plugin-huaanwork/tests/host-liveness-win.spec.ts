@@ -239,7 +239,7 @@ it.skipIf(process.platform !== 'win32')(
       })
       prepared.patches.push(...prepared.overlays)
       child = fork(fileURLToPath(new URL('./fixtures/isolated-host/liveness-child.mjs', import.meta.url)), [], {
-        execArgv: [], stdio: ['ignore', 'pipe', 'pipe', 'ipc'], serialization: 'advanced', windowsHide: true,
+        execArgv: [], stdio: ['ignore', 'pipe', 'pipe', 'ipc'], serialization: 'advanced',
         env: { ...process.env, B16_GRANDCHILD_PID_FILE: grandchildPidFile },
       })
       const worker = child
