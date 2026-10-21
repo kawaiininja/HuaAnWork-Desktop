@@ -69,6 +69,7 @@ import {
   projectRootName,
   renameTask,
   removeTask,
+  stopAutomation,
   type AutomationInfo,
   type AutomationSchedule,
   type ProjectInfo,
@@ -450,6 +451,9 @@ export default function App() {
   /** 全部项目下的子任务快照（侧栏任务区与选中项目卡片共用）。 */
   const [projectTasks, setProjectTasks] = useState<TaskInfo[]>([]);
   const [runningAutomationIds, setRunningAutomationIds] = useState<ReadonlySet<string>>(new Set());
+  /** Task 11：运行对话停止请求在飞——state 管按钮禁用，ref 挡同一批事件里的第二次点击。 */
+  const [stopRunPending, setStopRunPending] = useState(false);
+  const stopRunInFlight = useRef(false);
   /** Task 11：missed 启动横幅状态——count 只在未 dismiss 时随 automation/missed 事件累积。 */
   const [missedBanner, setMissedBanner] = useState<{ count: number; dismissed: boolean }>({ count: 0, dismissed: false });
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -1871,6 +1875,28 @@ export default function App() {
     }
   }
 
+  /**
+   * 运行对话的「停止」（规格 §8）：只走 automation.stop，不走普通用户回合的
+   * stopTurn / session.cancel——那条路径会取消当前会话并改写回合闩锁。
+   * stopped:false 表示调用时已无在途条目（竞态），仍刷新让按钮随宿主读数收敛。
+   */
+  async function stopRunTab() {
+    const automationId = activeChat.automationId;
+    if (!automationId || sidecarDead || stopRunInFlight.current) return;
+    stopRunInFlight.current = true;
+    setStopRunPending(true);
+    try {
+      await stopAutomation(automationId);
+    } catch (error) {
+      // 没有全局 toast：会话内脚注是既有的错误呈现方式（同发送路径）。
+      noteActive(`停止失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      stopRunInFlight.current = false;
+      setStopRunPending(false);
+      void refreshAutomations();
+    }
+  }
+
   /** 取消返回后才扣闩锁。轮次已经前进就只丢掉旧结束，不动新的一轮。 */
   function settleStop(ticket: StopTicket, ok: boolean): { arm: boolean; note: boolean } {
     const done = finishStop({
@@ -2672,6 +2698,16 @@ export default function App() {
                 {turnActive && activeTab === turnTabRef.current ? (
                   <button type="button" className="send stop" disabled={blocked} onClick={() => void stopTurn()}>
                     停止
+                  </button>
+                ) : runTabLive ? (
+                  // 运行对话的停止只停这一轮自动化，不碰普通用户回合的 stopTurn / session.cancel。
+                  <button
+                    type="button"
+                    className="send stop"
+                    disabled={blocked || stopRunPending}
+                    onClick={() => void stopRunTab()}
+                  >
+                    {stopRunPending ? "停止中…" : "停止"}
                   </button>
                 ) : (
                   <button type="submit" className="send" aria-label="发送" disabled={blocked || runTabLive || !draft.trim() || hostPhase !== "ok"}>

@@ -12,6 +12,7 @@ import {
   pruneAutomationSessions,
   removeAutomation,
   runAutomation,
+  stopAutomation,
   updateAutomation,
   type AutomationInfo,
   type AutomationSchedule,
@@ -170,6 +171,21 @@ export default function AutomationsView({
     }
   }
 
+  /**
+   * 停止任务的在途轮（规格 §8）。stopped:false 表示调用时已无在途条目（竞态），
+   * 同样刷新——以宿主读数收敛按钮文案，不把它当失败。
+   */
+  async function stop(automation: AutomationInfo) {
+    setError("");
+    try {
+      await stopAutomation(automation.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      onChanged();
+    }
+  }
+
   async function submitRemove() {
     if (!confirming) return;
     setBusy(true);
@@ -268,6 +284,7 @@ export default function AutomationsView({
                 busy={busy}
                 onToggle={() => void toggleEnabled(automation)}
                 onRun={() => void run(automation)}
+                onStop={() => stop(automation)}
                 onEdit={() => setEditing({ mode: "edit", automation })}
                 onRemove={() => setConfirming(automation)}
               />
@@ -327,6 +344,7 @@ function AutomationRow({
   busy,
   onToggle,
   onRun,
+  onStop,
   onEdit,
   onRemove,
 }: {
@@ -338,10 +356,27 @@ function AutomationRow({
   busy: boolean;
   onToggle: () => void;
   onRun: () => void;
+  onStop: () => Promise<void>;
   onEdit: () => void;
   onRemove: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  /** 停止请求在飞：state 管按钮禁用与文案，ref 管同一批事件里的第二次点击（同 M26 P2-3）。 */
+  const [stopping, setStopping] = useState(false);
+  const stopInFlight = useRef(false);
+
+  async function handleStop() {
+    if (stopInFlight.current) return;
+    stopInFlight.current = true;
+    setStopping(true);
+    try {
+      await onStop();
+    } finally {
+      stopInFlight.current = false;
+      setStopping(false);
+    }
+  }
+
   return (
     <div className={open ? "automation-row open" : "automation-row"}>
       <div className="automation-main">
@@ -357,7 +392,7 @@ function AutomationRow({
             {!automation.enabled ? <span className="automation-chip off">已停用</span> : null}
           </div>
           <span className="automation-meta">
-            {describeSchedule(automation.schedule)} · {lastRunLabel(automation, running)}
+            {describeSchedule(automation.schedule)} · {lastRunLabel(automation, running, runs)}
             {automation.kind === "agent" && automation.prompt ? ` · ${automation.prompt.slice(0, 40)}` : ""}
             {automation.kind === "script" && automation.command ? ` · ${automation.command.slice(0, 40)}` : ""}
           </span>
@@ -374,9 +409,15 @@ function AutomationRow({
           >
             <span className="knob" />
           </button>
-          <button type="button" className="side-action" disabled={running} onClick={onRun}>
-            {running ? "运行中…" : "立即运行"}
-          </button>
+          {running ? (
+            <button type="button" className="side-action" disabled={stopping} onClick={() => void handleStop()}>
+              {stopping ? "停止中…" : "停止"}
+            </button>
+          ) : (
+            <button type="button" className="side-action" onClick={onRun}>
+              立即运行
+            </button>
+          )}
           <button type="button" className="side-action" onClick={onEdit}>
             编辑
           </button>
@@ -409,11 +450,26 @@ function AutomationRow({
   );
 }
 
-function lastRunLabel(automation: AutomationInfo, running: boolean): string {
+/**
+ * 「上次」文案（规格 §8 末段）：时刻与状态词仍读注册表；只有已加载运行记录里
+ * startedAt 最新的一条是 cancelled 时，状态词改说「已取消」。missed/timeout 不连带。
+ */
+function lastRunLabel(automation: AutomationInfo, running: boolean, runs: RunSummary[]): string {
   if (running) return "运行中";
   if (!automation.lastRunAt) return "从未运行";
   const status = automation.lastStatus === "ok" ? "成功" : automation.lastStatus === "error" ? "失败" : "";
-  return `上次 ${formatRunTime(automation.lastRunAt)}${status ? ` · ${status}` : ""}`;
+  const latest = latestRun(runs);
+  const word = latest !== undefined && runStatusOf(latest) === "cancelled" ? "已取消" : status;
+  return `上次 ${formatRunTime(automation.lastRunAt)}${word ? ` · ${word}` : ""}`;
+}
+
+/** startedAt 最大的一条运行记录；同刻取先出现的那条（文件本身按追加顺序）。 */
+function latestRun(runs: RunSummary[]): RunSummary | undefined {
+  let latest: RunSummary | undefined;
+  for (const run of runs) {
+    if (!latest || run.startedAt > latest.startedAt) latest = run;
+  }
+  return latest;
 }
 
 /** 「运行记录」tab：吃 automation.runs 全量运行，支持状态筛选、按日分组与点开会话详情（行内展开历史保留在任务行）。 */
