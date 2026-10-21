@@ -1,3 +1,5 @@
+import type { GoalPhase } from "./logic/goalRound.ts";
+
 export type RpcRequest = {
   id: number;
   method:
@@ -7,6 +9,8 @@ export type RpcRequest = {
     | "session.cancel"
     | "session.approve"
     | "session.reject"
+    | "session.exitPlanMode"
+    | "session.answerInput"
     | "session.list"
     | "session.open"
     | "session.remove"
@@ -214,15 +218,26 @@ export type SessionSummary = {
 /** `session.open` 返回的可读会话记录，按日志顺序排列。 */
 export type SessionDetailRecord =
   | { kind: "user"; time: number; text: string }
+  | { kind: "thinking"; time: number; text: string }
   | { kind: "assistant"; time: number; text: string }
-  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string }
+  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string }
   | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string };
 
 /** 事件归属会话：token/tool/diff/session 事件携带发起回合的会话 id，前端与收集器据此归因。 */
 export type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
-  | { event: "tool/start"; name: string; callId?: string; sessionId?: string }
-  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string }
+  | { event: "reasoning"; text: string; sessionId?: string; final?: true }
+  | {
+      event: "tool/start";
+      name: string;
+      callId?: string;
+      sessionId?: string;
+      /** bash / pwsh 调用的 command 参数,供回合结束核对「要求的命令」。 */
+      command?: string;
+      /** todo_write 的完整替换列表。 */
+      todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+    }
+  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; text?: string; sessionId?: string; isError?: true }
   | {
       event: "approval/asked";
       approvalRequestId: string;
@@ -231,8 +246,19 @@ export type RpcEvent =
       reason?: string;
       summary?: string;
       sessionId?: string;
+      /** plan-review 已由回答者按当前护栏提交同意，卡片不再等待点击。 */
+      autoContinue?: boolean;
+      /** false = 没有可提交的审批（没人接的提问），卡片不得渲染批准/拒绝按钮。 */
+      actionable?: false;
     }
+  /** `request_input` 在等对话卡片的回答；回答或取消走 `session.answerInput`。 */
+  | { event: "input/asked"; question: string; sessionId: string }
   | { event: "diff"; text: string; sessionId?: string }
+  | { event: "compaction/done"; sessionId?: string }
+  | { event: "goal/round"; round: number; sessionId?: string }
+  | { event: "goal/round-limit"; round: number; sessionId?: string }
+  | { event: "goal/state"; phase: GoalPhase; roundsStarted?: number; sessionId?: string }
+  | { event: "goal/state"; cleared: true; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string }
   | { event: "sidecar/status"; ready: boolean }
   | { event: "automation/run-start"; automationId: string; runId: string; projectId: string | null; sessionId?: string; trigger?: "manual" | "schedule" | "catchup" }

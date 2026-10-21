@@ -1,17 +1,7 @@
 diff --git a/client/client.js b/client/client.js
-index 0899487..d7dac70 100644
 --- a/client/client.js
 +++ b/client/client.js
-@@ -4759,7 +4759,7 @@ window.__ModuleLoader__.load({ id: "dshmarket", factory: (require) => {
- 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
- 				className: Market_module_css_default.banner,
- 				children: [
--					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutline16, {
-+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(IconWarningOutline16$1, {
- 						size: 14,
- 						className: Market_module_css_default.bannerIcon
- 					}),
-@@ -10903,7 +10903,7 @@ window.__ModuleLoader__.load({ id: "dshmarket", factory: (require) => {
+@@ -11095,7 +11095,7 @@
  					return next;
  				});
  			}, []);
@@ -20,7 +10,7 @@ index 0899487..d7dac70 100644
  			const updatableNames = Object.keys(installed).filter((name) => name !== selfName && !effectiveDisabledSet.has(name) && isPluginUpdatable(name, String(installed[name]), updates[name], updatedNames));
  			const batchUpdatableNames = updatableNames.filter((name) => updates[name]?.restoreRequired !== true);
  			const ignoredUpdateSet = (0, react.useMemo)(() => new Set(ignoredUpdateNames), [ignoredUpdateNames]);
-@@ -12173,7 +12173,7 @@ window.__ModuleLoader__.load({ id: "dshmarket", factory: (require) => {
+@@ -12375,7 +12375,7 @@
  										className: Market_module_css_default.titleActions,
  										children: [
  											(() => {
@@ -30,10 +20,9 @@ index 0899487..d7dac70 100644
  												return status && status.updateAvailable && !updatedNames.includes(self) && !quietUpdateSet.has(self) && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
  													variant: "primary",
 diff --git a/lib/routes.js b/lib/routes.js
-index 91dce17..dae4135 100644
 --- a/lib/routes.js
 +++ b/lib/routes.js
-@@ -1770,7 +1770,7 @@ export function mountMarketRoutes(host, config, commandRuntime, agentsLookup, ho
+@@ -1770,7 +1770,7 @@
          // unreleased work.
          const channel = activeChannel();
          const installed = readInstalled(config.profile, activeProfileDir);
@@ -42,7 +31,7 @@ index 91dce17..dae4135 100644
              .filter(name => SELF_NAMES.has(name))
              .map(name => [name, channel]));
          const onlineSourceFor = new Map();
-@@ -1944,7 +1944,7 @@ export function mountMarketRoutes(host, config, commandRuntime, agentsLookup, ho
+@@ -1944,7 +1944,7 @@
                  }
                  try {
                      const { channelFor, onlineSourceFor, catalogNpmByRepo } = await updateCheckInputs();
@@ -51,7 +40,7 @@ index 91dce17..dae4135 100644
                      // `packages` carries the same objects the single-package endpoint
                      // returns, so one parser serves both. Only updatable ones: a badge
                      // wants the count, a panel wants the rows, and neither wants to
-@@ -1991,7 +1991,7 @@ export function mountMarketRoutes(host, config, commandRuntime, agentsLookup, ho
+@@ -1991,7 +1991,7 @@
                          // or a catalog-matched local package answers here with the
                          // release it can be compared against rather than with nothing.
                          const { channelFor, onlineSourceFor, catalogNpmByRepo } = await updateCheckInputs();
@@ -60,7 +49,7 @@ index 91dce17..dae4135 100644
                          if (update === undefined) {
                              sendJson(response, 404, { schema: UPDATE_API_V1_SCHEMA, error: 'plugin is not installed' });
                              return;
-@@ -3658,7 +3658,7 @@ export function mountMarketRoutes(host, config, commandRuntime, agentsLookup, ho
+@@ -3662,7 +3662,7 @@
                      catch (error) {
                          logEvent('warn', 'updates', `package source lookup failed — ${error instanceof Error ? error.message : String(error)}`);
                      }
@@ -69,7 +58,7 @@ index 91dce17..dae4135 100644
                      for (const [name, migration] of sourceMigrationFor) {
                          const status = updates[name];
                          if (status !== undefined)
-@@ -3947,7 +3947,8 @@ export function mountMarketRoutes(host, config, commandRuntime, agentsLookup, ho
+@@ -3951,7 +3951,8 @@
                              });
                              return;
                          }
@@ -79,7 +68,7 @@ index 91dce17..dae4135 100644
                          if (spec === undefined || INBOX_BUNDLES.has(name)) {
                              sendJson(response, 400, { error: 'plugin is not installed' });
                              return;
-@@ -4120,7 +4121,8 @@ export function mountMarketRoutes(host, config, commandRuntime, agentsLookup, ho
+@@ -4124,7 +4125,8 @@
                          // Desktop boundary; it is what turns a silent skip into a
                          // failure with a name.
                          if (usesNpmUpdateTarget) {
@@ -89,7 +78,7 @@ index 91dce17..dae4135 100644
                              // The requested release replaces the resolved one, and with it
                              // every check below that exists to judge `latest`: re-running
                              // them would refuse the version the dialog just found, in a loop
-@@ -4269,7 +4271,8 @@ export function mountMarketRoutes(host, config, commandRuntime, agentsLookup, ho
+@@ -4273,7 +4275,8 @@
                          // one needs a refresh, not a restart.
                          const wasLive = verifyActivation(config.profile, name, liveNames(), activeProfileDir, disabled.has(name)).state === 'live'
                              && hasHostHalf(config.profile, name, activeProfileDir);
@@ -99,7 +88,7 @@ index 91dce17..dae4135 100644
                          // #874: on DSH Desktop a generation-managed plugin is materialised
                          // by the host and its `dependencies` entry is suspended while pnpm
                          // runs, so the profile lockfile never records it. Read here, before
-@@ -4334,6 +4337,7 @@ export function mountMarketRoutes(host, config, commandRuntime, agentsLookup, ho
+@@ -4338,6 +4341,7 @@
                          // well as after.
                          const bundlesBefore = brokenClientBundles(config.profile, activeProfileDir);
                          const manifestBefore = manifestCapture.snapshot;
@@ -107,7 +96,7 @@ index 91dce17..dae4135 100644
                          const lockfileCapture = captureProfileLockfile();
                          const previousVersionZh = beforeVersion === null ? '更新前版本未知' : `更新前版本为 v${beforeVersion}`;
                          const previousVersionEn = beforeVersion === null ? 'the previous version is unknown' : `the previous version was v${beforeVersion}`;
-@@ -4790,14 +4794,16 @@ export function mountMarketRoutes(host, config, commandRuntime, agentsLookup, ho
+@@ -4800,14 +4804,16 @@
                          if (ok) {
                              const stack = readBundleStack(activeProfileDir);
                              const trial = trialValidate(activeProfileDir, stack.community, hostAnchorOption);
@@ -127,10 +116,9 @@ index 91dce17..dae4135 100644
                                      ? 'the composition would not boot'
                                      : `${firstIssue.layer}: ${firstIssue.message}`;
 diff --git a/lib/updates.js b/lib/updates.js
-index 5286ebc..ca92490 100644
 --- a/lib/updates.js
 +++ b/lib/updates.js
-@@ -455,21 +455,27 @@ onlineSourceFor = new Map(),
+@@ -455,21 +455,27 @@
   * entry that owns both the repo and the name, the npm fallback would
   * compare the install with whatever package merely shares its name.
   */

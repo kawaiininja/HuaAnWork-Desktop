@@ -589,6 +589,25 @@ const ADVANCED_SHELL_LOCK = {
   networkExposure: 'loopback',
 } as const
 
+/**
+ * Plan-mode guidance for this profile. Upstream's section tells the model to
+ * use `ask_user_question`, which exists only in the standard preset; HuaAnWork
+ * exposes `request_input` for clarifications instead (see
+ * `huaanwork-guardrails/route-tool-plugin.ts`). The read-only discipline and
+ * the final `exit_plan_mode` call stay upstream's.
+ */
+const HUAANWORK_PLAN_MODE_SECTION = `You are in plan mode. Stay in plan mode until the user approves your plan through exit_plan_mode or switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed only to keep the request shape stable. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+Resolve discoverable facts by inspection. Use request_input only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or request_input. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.`
+
 /** macOS and Windows keep the shell on advanced. Linux stays compatibility-only. */
 function desktopShellLockPlatform(platform: NodeJS.Platform): boolean {
   return platform === 'darwin' || platform === 'win32'
@@ -1528,6 +1547,18 @@ export function prepareDesktopProfile(
     process.platform === 'win32'
       ? { id: 'tool-pwsh', disabled: false, config: { enableRunInBackground: false } }
       : { id: 'tool-bash', disabled: false, config: { enableRunInBackground: false } },
+    // 计划模式在宿主平面复挂(dsh-base 挂载、web-app overlay 关闭);ui-plan 仍关闭,计划卡在华安对话里。
+    // section 覆写:上游指引让模型用 `ask_user_question`,但该工具只随 standard preset 提供,
+    // 本 profile 的澄清工具是 `request_input`(present-as 仍不允许 `ask_user_question`)。
+    { id: 'plan-mode', disabled: false, config: { section: HUAANWORK_PLAN_MODE_SECTION } },
+    // 待办进度:todo_write 已在 ALLOWED_TOOLS;单活跃项纪律,与回合进度展示一致。
+    { id: 'tool-todo', disabled: false, config: { allowParallelInProgress: false } },
+    // 目标续轮:官方 goal-round-driver 已在宿主上,这里只翻回 tool-goal(web-app overlay 关闭)并把默认续轮数收到 4。ui-goal 保持关闭。
+    { id: 'tool-goal', disabled: false },
+    { id: 'goal', config: { defaultMaxGoalRounds: 4 } },
+    // 长会话的工具输出裁剪与历史压缩:web-app overlay 关闭,华安翻回启用;压缩的模型调用带 purpose,桥接层不当作回合产出。
+    { id: 'tool-result-pruner', disabled: false },
+    { id: 'compaction-basic', disabled: false },
     { id: 'hmr', disabled: true },
     { id: 'jobs', disabled: true },
     { id: 'tool-jobs', disabled: true },
@@ -1538,7 +1569,6 @@ export function prepareDesktopProfile(
     { id: 'workflow-ptc', disabled: true },
     { id: 'tool-workflow', disabled: true },
     { id: 'tool-ralph', disabled: true },
-    { id: 'user-questions', disabled: true },
     { id: 'fs-sandbox', config: { cwd: workspaceRoot } },
     { id: 'sandbox-policy', config: { workspaceRoot, mode: 'workspace-write' } },
     {
@@ -1546,6 +1576,7 @@ export function prepareDesktopProfile(
         { id: 'huaanwork-host', name: 'dsh-plugin-huaanwork/huaanwork-host', config: { dshHome: home, profileDir: profile.dir, workspaceRoot, ...(checkpointUserDataDir !== undefined ? { checkpointUserDataDir } : {}) } },
         // 插入顺序契约(旧 cordis.patch.yml:43-65,load-order 即安全边界):不得重排。
         { id: 'huaanwork-model', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/model' },
+        { id: 'huaanwork-thinking-prompt', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/thinking-prompt' },
         { id: 'huaanwork-policy', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/policy' },
         { id: 'huaanwork-sandbox-cwd', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/sandbox-cwd' },
         { id: 'huaanwork-git', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/git' },
@@ -1553,7 +1584,9 @@ export function prepareDesktopProfile(
         { id: 'huaanwork-agent-tool', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/agent-tool' },
         { id: 'huaanwork-agent-mcp', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/agent-mcp' },
         { id: 'huaanwork-approval', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/approval' },
+        { id: 'huaanwork-question-answerer', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/question-answerer' },
         { id: 'huaanwork-present-as', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/present-as' },
+        { id: 'huaanwork-route-tools', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/route-tool-plugin' },
         { id: 'huaanwork-skills', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/skills' },
         { id: 'huaanwork-limits', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/limits' },
         { id: 'huaanwork-bridge', name: 'dsh-plugin-huaanwork/huaanwork-guardrails/bridge' },

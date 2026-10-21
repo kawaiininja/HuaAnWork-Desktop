@@ -3,6 +3,7 @@ import { boot, resolveProfileDir } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { createDesktopProfileBoot } from './profile-context.ts'
 import { logInactiveStartupEntries } from './startup-audit.ts'
+import { assertConversationSurface } from './huaanwork-host/conversation-boot-audit.ts'
 import { DSH_LAUNCH_ENVIRONMENT_KEY, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { DESKTOP_PACKAGE_NAME as BIN_NAME } from './product-identity.ts'
 import { observeDesktopPreferenceSettings } from './settings-bridge.ts'
@@ -275,6 +276,12 @@ export async function bootDesktopHost(options: DesktopHostOptions, runtime: Desk
       releasePackageResolver()
       throw cause
     })
+    // `huaanwork-gates` is an optional startup entry, so its own throw only
+    // warns and `boot()` still resolves. This audit is the enforcement: its
+    // throw propagates out of `bootDesktopHost`, rejecting the Host `boot` RPC
+    // so the supervisor tears this generation down instead of serving a Host
+    // without the conversation surface.
+    await assertConversationSurface(ctx)
     bindHost(ctx)
     profileBoot.markReady()
     observeDesktopPreferenceSettings(ctx, fileExporter, enqueueProfilePreferencesWrite)

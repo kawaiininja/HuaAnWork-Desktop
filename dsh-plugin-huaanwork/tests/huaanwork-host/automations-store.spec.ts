@@ -560,6 +560,7 @@ describe('automations-store 写路径与纯函数', () => {
 
   test('CRUD routes return automation / removed', async () => {
     const home = makeHome()
+    const releasedSessions: string[] = []
     const ctx = {
       dshHome: home,
       profileDir: home,
@@ -567,6 +568,14 @@ describe('automations-store 写路径与纯函数', () => {
       emit: () => {},
       logger: () => {},
       requestRestart: async () => false,
+      runtimeCtx: {
+        agents: {
+          get: (id: string) => {
+            releasedSessions.push(id)
+            return undefined
+          },
+        },
+      },
     }
     const create = ROUTE_TABLE.find((route) => route.method === 'automation.create')
     const update = ROUTE_TABLE.find((route) => route.method === 'automation.update')
@@ -610,12 +619,72 @@ describe('automations-store 写路径与纯函数', () => {
     expect(Object.keys(updated as object).sort()).toEqual(['automation'])
     expect((updated as { automation: AutomationInfo }).automation.name).toBe('改名')
 
+    // 运行会话日志随任务删除:路由必须在删目录前把会话交给 releaseSessionRuntime。
+    const runSessionId = `huaanwork-auto-${automation.id}-r1`
+    const runSessionDir = join(home, 'sessions', 'cwd-x', runSessionId)
+    mkdirSync(runSessionDir, { recursive: true })
+    expect(existsSync(runSessionDir)).toBe(true)
+
     const removed = await remove!.handler(
       { params: {}, body: { id: automation.id }, query: new URLSearchParams() },
       ctx,
     )
     expect(removed).toEqual({ removed: true })
     expect(await listAutomations(home)).toEqual([])
+    expect(existsSync(runSessionDir)).toBe(false)
+    expect(releasedSessions).toEqual([runSessionId])
+  })
+
+  test('project.remove releases automation run sessions before deleting their logs', async () => {
+    // dshHome 与 profileDir 必须是两个目录:removeAutomationsOfProject 的 sessionsRoot
+    // 默认值是 `join(storageRoot, 'sessions')`,而真实会话日志在 `dshHome/sessions`。
+    // 若路由漏传显式的 dshHome 根,默认根搜不到 cwd-x 下的运行日志、目录也不会被删,
+    // 本用例随之变红（两个目录相同时这个探针会失效）。
+    const dshHome = makeHome()
+    const profileDir = join(dshHome, 'profiles', 'huaanwork')
+    mkdirSync(profileDir, { recursive: true })
+    const automation = await createAutomation(profileDir, normalizeAutomationInput(agentInput(), T0), T0)
+    writeFileSync(join(profileDir, 'projects.json'), JSON.stringify({
+      projects: [{ id: 'p1', name: 'P1', root: join(dshHome, 'p1'), createdAt: T0 }],
+    }))
+
+    const runSessionId = `huaanwork-auto-${automation.id}-r1`
+    const runSessionDir = join(dshHome, 'sessions', 'cwd-x', runSessionId)
+    mkdirSync(runSessionDir, { recursive: true })
+
+    const releasedSessions: string[] = []
+    const ctx = {
+      dshHome,
+      profileDir,
+      workspaceRoot: { current: dshHome },
+      emit: () => {},
+      logger: () => {},
+      requestRestart: async () => false,
+      runtimeCtx: {
+        agents: {
+          get: (id: string) => {
+            // 释放必须发生在目录还在的时候:路由要把 releaseSession 透传给
+            // removeAutomationsOfProject,而不是删完文件再补一次空回调。
+            expect(existsSync(join(dshHome, 'sessions', 'cwd-x', id))).toBe(true)
+            releasedSessions.push(id)
+            return undefined
+          },
+        },
+      },
+    }
+    const remove = ROUTE_TABLE.find((route) => route.method === 'project.remove')
+    expect(remove).toBeDefined()
+
+    const removed = await remove!.handler(
+      { params: {}, body: { projectId: 'p1' }, query: new URLSearchParams() },
+      ctx,
+    )
+    expect(removed).toMatchObject({ removed: true })
+    // 显式根与回调任一从路由里消失:releasedSessions 为空,且真实日志目录留在原地——
+    // 下面两条断言同时变红。
+    expect(releasedSessions).toEqual([runSessionId])
+    expect(existsSync(runSessionDir)).toBe(false)
+    expect(await listAutomations(profileDir)).toEqual([])
   })
 
   test('markAutomation advances nextRunAt only when entering running', async () => {

@@ -176,6 +176,60 @@ test("policy plugin probes git status only for git_checkout (F-2 narrowing pin)"
   }
 });
 
+test("isGitDirty bounds the blocking git status probe", async () => {
+  const { isGitDirty } = await import("../../src/huaanwork-guardrails/policy.ts");
+  vi.mocked(spawnSync).mockClear();
+  isGitDirty(process.cwd());
+  const calls = vi.mocked(spawnSync).mock.calls;
+  assert.equal(calls.length, 1, "the probe issues exactly one git status call");
+  const [command, argv, options] = calls[0]!;
+  assert.equal(command, "git");
+  assert.deepEqual(argv, ["status", "--porcelain"]);
+  assert.equal(typeof options?.timeout, "number", "without a timeout a big tree can stall the Host loop");
+  assert.ok((options?.timeout ?? 0) > 0 && (options?.timeout ?? 0) <= 1_500);
+});
+
+test("isGitDirty fails closed when the status probe times out or has no exit status", async () => {
+  const { isGitDirty } = await import("../../src/huaanwork-guardrails/policy.ts");
+  const mocked = vi.mocked(spawnSync);
+  mocked.mockClear();
+  // spawnSync reports a timeout as status: null plus an ETIMEDOUT error. Treating
+  // that as clean would let a dirty git_checkout skip the ask in smart/ask modes.
+  mocked.mockReturnValueOnce({
+    pid: 1,
+    output: [null, "", ""],
+    stdout: "",
+    stderr: "",
+    status: null,
+    signal: "SIGTERM",
+    error: Object.assign(new Error("spawnSync git ETIMEDOUT"), { code: "ETIMEDOUT" }),
+  } as never);
+  assert.equal(isGitDirty(process.cwd()), true, "a timed-out status is unknown, not clean");
+
+  // No error object but still no exit status (e.g. killed by a signal we did not set).
+  mocked.mockReturnValueOnce({
+    pid: 1,
+    output: [null, "", ""],
+    stdout: "",
+    stderr: "",
+    status: null,
+    signal: "SIGKILL",
+  } as never);
+  assert.equal(isGitDirty(process.cwd()), true, "an unknown status fails closed");
+
+  // The pre-existing not-installed fallback stays clean: there is no repository to protect.
+  mocked.mockReturnValueOnce({
+    pid: 0,
+    output: [null, "", ""],
+    stdout: "",
+    stderr: "",
+    status: null,
+    signal: null,
+    error: Object.assign(new Error("spawnSync git ENOENT"), { code: "ENOENT" }),
+  } as never);
+  assert.equal(isGitDirty(process.cwd()), false, "git not installed keeps the clean fallback");
+});
+
 test("Cordis guard allows git_push once after allowed-once and denies without approve", async () => {
   const { apply: applyPolicy } = await import("../../src/huaanwork-guardrails/policy.ts");
   const { apply: applyApproval } = await import("../../src/huaanwork-guardrails/approval.ts");
@@ -277,6 +331,23 @@ test("unattended off (ctx.huaanworkUnattended.current unset): ask path is byte-f
   apply(harness.ctx as never);
 
   const call = { name: "git_push", arguments: {}, callId: "call-off" };
+  assert.deepEqual(await harness.preExecute(call), { kind: "ask" });
+  assert.equal(harness.guard(call), GUARD_NEEDS_APPROVAL);
+  assert.equal(allowedOnce.size, 0);
+});
+
+test("unattended holder in its boot shape (current: null): ask path is unchanged", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
+  const allowedOnce = new Set<string>();
+  // holders.ts 装容器的初始值就是 null（既不是 undefined 也不是缺席）：类型必须如实
+  // 写 `UnattendedScope | null`，运行时也必须与「未启用」逐字节同路径。
+  const harness = applyPolicyWithUnattended({
+    huaanworkAllowedOnce: allowedOnce,
+    huaanworkUnattended: { current: null },
+  });
+  apply(harness.ctx as never);
+
+  const call = { name: "git_push", arguments: {}, callId: "call-boot-null" };
   assert.deepEqual(await harness.preExecute(call), { kind: "ask" });
   assert.equal(harness.guard(call), GUARD_NEEDS_APPROVAL);
   assert.equal(allowedOnce.size, 0);

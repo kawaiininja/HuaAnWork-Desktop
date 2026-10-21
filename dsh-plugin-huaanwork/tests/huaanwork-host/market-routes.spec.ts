@@ -231,9 +231,9 @@ describe('HUAANWORK_MARKET_ROUTES 枚举清单(round3 R19)', () => {
     }
   })
 
-  test('ROUTE_TABLE 不受影响(表外注册,54 不破)', async () => {
+  test('ROUTE_TABLE 不受影响(表外注册,56 不破)', async () => {
     const { ROUTE_TABLE } = await import('../../src/huaanwork-host/routes.ts')
-    expect(ROUTE_TABLE).toHaveLength(54)
+    expect(ROUTE_TABLE).toHaveLength(56)
   })
 })
 

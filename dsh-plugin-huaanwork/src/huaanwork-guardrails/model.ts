@@ -25,10 +25,14 @@ import {
   type ToolCall,
 } from "@huaanwork/model";
 
+import { preferControlCalls } from "./route-tools.ts";
+
 const PROVIDER = "deepseek-official";
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
 /** 思考模型单次流式生成经常超过 2 分钟，120 秒会把正常回合掐成超时。 */
 const REQUEST_TIMEOUT_MS = 600_000;
+/** 与官方 @deepseek-ai/dsh-llm-deepseek 的 DEFAULT_CONTEXT_WINDOW 同值;本文件不依赖该包,故按值声明。 */
+const DEFAULT_CONTEXT_WINDOW = 1_000_000;
 
 function resolveSettingsPath(profileDir: string): string {
   return join(profileDir, "huaanwork-settings.json");
@@ -41,13 +45,24 @@ function resolveSettingsPath(profileDir: string): string {
 const DEFAULT_MAX_TOKENS = 16_384;
 
 /**
- * 运行时注册工具放行谓词：dsh-base 静态白名单之外，`call_host_tool`（@ 小工具）与
+ * 运行时注册工具放行谓词：dsh-base 静态白名单之外，`call_host_tool`（@ 小工具）、
+ * `propose_plan` / `request_input`（分流名字，这里只放行不执行）与
  * `mcp__*`（会话级 MCP 挂载）也是发给模型的 tools schema 里的合法名字。静态过滤会把
  * 模型的这类原生调用静默丢弃，回合「正常结束但任务没做」。执行侧仍有 policy 的
  * attached 检查兜底（未挂载一律 deny），放行解析不扩大权限面。
  */
-function isRegisteredToolName(name: string): boolean {
-  return KNOWN_TOOL_NAMES.has(name) || name === "call_host_tool" || name.startsWith("mcp__");
+export function isRegisteredToolName(name: string): boolean {
+  return KNOWN_TOOL_NAMES.has(name)
+    || name === "call_host_tool"
+    || name === "web_fetch"
+    || name === "screenshot"
+    || name === "propose_plan"
+    || name === "request_input"
+    || name === "exit_plan_mode"
+    || name === "get_goal"
+    || name === "create_goal"
+    || name === "update_goal"
+    || name.startsWith("mcp__");
 }
 
 type ModelSettings = {
@@ -79,6 +94,20 @@ export const name = "llm-deepseek";
 export const inject = ["llm"];
 
 const CONTINUE_AFTER_REASONING = "请继续完成这一步：需要工具就直接发起工具调用，否则输出正文结果。不要只输出思考。";
+/** 思考后面只跟了一句开场白，还没调用工具，也还没给出结果。 */
+const PREAMBLE_MAX_CHARS = 40;
+
+function hasToolCall(read: ModelStreamRead): boolean {
+  if (parseSseToolCalls(read.payloads, isRegisteredToolName).length > 0) return true;
+  return parseTextProtocol(read.text, isRegisteredToolName) !== null;
+}
+
+function needsToolContinuation(read: ModelStreamRead): boolean {
+  if (sseFinishReason(read.payloads) === "length") return false;
+  if (hasToolCall(read)) return false;
+  if (read.reasoning.trim().length === 0) return false;
+  return read.text.trim().length <= PREAMBLE_MAX_CHARS;
+}
 
 type ModelStreamRead = {
   text: string;
@@ -90,12 +119,6 @@ type ModelStreamRead = {
   payloads: string[];
 };
 
-function streamHasOutput(read: ModelStreamRead): boolean {
-  if (read.text.length > 0) return true;
-  if (parseSseToolCalls(read.payloads, isRegisteredToolName).length > 0) return true;
-  return parseTextProtocol(read.text, isRegisteredToolName) !== null;
-}
-
 function continueAfterReasoning(options: GenerateOptions, reasoning: string): GenerateOptions {
   const assistant: GenerateOptions["messages"][number] = {
     id: MessageId("hw-reasoning"),
@@ -105,24 +128,25 @@ function continueAfterReasoning(options: GenerateOptions, reasoning: string): Ge
       : [{ type: "text", text: "" }],
     source: { kind: "model", provider: options.provider, model: options.model },
   };
-  const nudge: GenerateOptions["messages"][number] = {
+  const followUp: GenerateOptions["messages"][number] = {
     id: MessageId("hw-continue"),
     role: "user",
     content: [{ type: "text", text: CONTINUE_AFTER_REASONING }],
     source: { kind: "user" },
   };
-  return { ...options, messages: [...options.messages, assistant, nudge] };
+  return { ...options, messages: [...options.messages, assistant, followUp] };
 }
 
 function* finishModelStream(read: ModelStreamRead): Generator<StreamChunk> {
-  const toolCalls = parseSseToolCalls(read.payloads, isRegisteredToolName);
+  const toolCalls = preferControlCalls(parseSseToolCalls(read.payloads, isRegisteredToolName));
   if (toolCalls.length > 0) {
     yield* emitToolCalls(toolCalls, read.nextIndex);
     return;
   }
   const textCall = parseTextProtocol(read.text, isRegisteredToolName);
-  if (textCall) {
-    yield* emitToolCalls([textCall], read.nextIndex);
+  const textCalls = textCall ? preferControlCalls([textCall]) : [];
+  if (textCalls.length > 0) {
+    yield* emitToolCalls(textCalls, read.nextIndex);
     return;
   }
   yield* emitText(read.text, read.textStarted, read.emitted, read.textIndex, read.nextIndex, sseFinishReason(read.payloads));
@@ -131,6 +155,7 @@ function* finishModelStream(read: ModelStreamRead): Generator<StreamChunk> {
 async function* readModelStream(
   opened: { body: ReadableStream<Uint8Array>; signal: AbortSignal; timeout: AbortSignal },
   callerSignal: AbortSignal | undefined,
+  startIndex = 0,
 ): AsyncGenerator<StreamChunk, ModelStreamRead> {
   const payloads: string[] = [];
   let text = "";
@@ -139,7 +164,7 @@ async function* readModelStream(
   let sawNativeToolCall = false;
   let reasoning = "";
   let reasoningStarted = false;
-  let nextIndex = 0;
+  let nextIndex = startIndex;
   let reasoningIndex = 0;
   let textIndex = 0;
 
@@ -215,32 +240,42 @@ export class HuaAnWorkAdapter extends LlmAdapter {
       id: model,
       name: model,
       inputModalities: ["text"],
+      // compaction-basic 靠它算压力;缺失会抛 TargetPressureConfigError 而静默不压缩。
+      // 数值取官方 DeepSeek 适配器的 DEFAULT_CONTEXT_WINDOW(1e6)。
+      context: { contextWindow: DEFAULT_CONTEXT_WINDOW },
     };
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const settings = loadSettings(this.profileDir);
-    const first = yield* readModelStream(await openCompletions(options, settings), options.signal);
-    if (streamHasOutput(first) || sseFinishReason(first.payloads) === "length") {
-      yield* finishModelStream(first);
-      return;
+    // deepseek-flash 经常在 reasoning 里写「接下来调用某工具」，然后 finish_reason=stop，
+    // 正文只有一句开场白，甚至没有正文。短 preamble 也当作未完成，带上思考再要一次；
+    // 第二次仍没有工具调用或实质正文就报 NO_ACTION，不把第二段思考当成已经完成的答复。
+    let request = options;
+    let startIndex = 0;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const read = yield* readModelStream(
+        await openCompletions(request, settings),
+        options.signal,
+        startIndex,
+      );
+      startIndex = read.nextIndex;
+      if (!needsToolContinuation(read)) {
+        yield* finishModelStream(read);
+        return;
+      }
+      if (attempt === 0) request = continueAfterReasoning(options, read.reasoning);
     }
-    // deepseek-flash 一类思考模型经常只回 reasoning_content 就 stop。
-    // 原请求重试仍是同一份上下文，所以这里带上思考再要一次正文或工具调用。
-    const second = yield* readModelStream(
-      await openCompletions(continueAfterReasoning(options, first.reasoning), settings),
-      options.signal,
-    );
-    if (streamHasOutput(second)) {
-      yield* finishModelStream(second);
-      return;
-    }
-    const reasoning = second.reasoning || first.reasoning;
-    if (reasoning.length > 0 && sseFinishReason(second.payloads) !== "length") {
-      yield* emitText(reasoning, false, 0);
-      return;
-    }
-    yield* finishModelStream(second.reasoning.length > 0 ? second : first);
+    yield {
+      type: "finish",
+      reason: {
+        kind: "error",
+        failure: {
+          code: "NO_ACTION",
+          message: "模型只返回了思考，没有调用工具，也没有给出结果。",
+        },
+      },
+    };
   }
 }
 

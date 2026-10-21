@@ -60,10 +60,13 @@ import {
 import {
   assertAutomationIdle,
   sessionAnswerApproval,
+  sessionAnswerInput,
   sessionCancel,
+  sessionExitPlanMode,
   sessionList,
   sessionNew,
   sessionOpen,
+  releaseSessionRuntime,
   sessionRemove,
   sessionResume,
   sessionSend,
@@ -202,9 +205,11 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { method: 'session.cancel', http: 'POST', path: '/huaanwork/session/cancel', handler: sessionRoute(async (req, ctx) => sessionCancel(requireRuntime(ctx), ctx, req.body)) }, // Task 7
   { method: 'session.approve', http: 'POST', path: '/huaanwork/session/approve', handler: sessionRoute(async (req, ctx) => sessionAnswerApproval(requireRuntime(ctx), ctx, req.body, 'allowed-once')) }, // Task 7
   { method: 'session.reject', http: 'POST', path: '/huaanwork/session/reject', handler: sessionRoute(async (req, ctx) => sessionAnswerApproval(requireRuntime(ctx), ctx, req.body, 'rejected')) }, // Task 7
+  { method: 'session.exitPlanMode', http: 'POST', path: '/huaanwork/session/exitPlanMode', handler: sessionRoute(async (req, ctx) => sessionExitPlanMode(requireRuntime(ctx), ctx, req.body)) },
+  { method: 'session.answerInput', http: 'POST', path: '/huaanwork/session/answerInput', handler: sessionRoute(async (req) => sessionAnswerInput(req.body)) },
   { method: 'session.list', http: 'GET', path: '/huaanwork/session/list', handler: sessionRoute(async (req, ctx) => sessionList(ctx, req.query.get('root') ?? undefined)) }, // Task 7 (文件 I/O 读会话列表)
   { method: 'session.open', http: 'POST', path: '/huaanwork/session/open', handler: sessionRoute(async (req, ctx) => sessionOpen(ctx, req.body)) }, // Task 7
-  { method: 'session.remove', http: 'POST', path: '/huaanwork/session/remove', handler: sessionRoute(async (req, ctx) => sessionRemove(ctx, req.body)) }, // Task 7
+  { method: 'session.remove', http: 'POST', path: '/huaanwork/session/remove', handler: sessionRoute(async (req, ctx) => sessionRemove(ctx.runtimeCtx, ctx, req.body)) }, // Task 7
   // 纯内存 handler: 仅根据 workspaceRoot 字符串生成或复用 session ID, 无 I/O
   { method: 'session.new', http: 'POST', path: '/huaanwork/session/new', handler: async (req, ctx) => sessionNew(ctx, req.body) }, // Task 7
   { method: 'session.resume', http: 'POST', path: '/huaanwork/session/resume', handler: sessionRoute(async (req, ctx) => sessionResume(requireRuntime(ctx), ctx, req.body)) }, // Task 7
@@ -529,8 +534,14 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const projectId = bodyParam(req.body, 'projectId')
       if (!projectId) throw new Error('project.remove requires params.projectId')
       const removed = await removeProject(ctx.profileDir, projectId)
-      await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'))
+      // 自动化运行会话也是会话日志:删目录前同样释放运行态(等待中的输入、live agent、
+      // 子会话登记、坏参数计数与已确认计划目标),与 session.remove / 任务级联同口径。
+      await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'), (sessionId) =>
+        releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+      )
       const cascadedSessionIds = await removeTasksOfProject(ctx.profileDir, projectId)
+      // 与 session.remove 同一运行态释放:删文件前先摘掉卡片、live agent、子会话与计划目标。
+      for (const sessionId of cascadedSessionIds) releaseSessionRuntime(ctx.runtimeCtx, sessionId)
       await removeSessionFilesById(join(ctx.dshHome, 'sessions'), cascadedSessionIds)
       return { removed: true, project: removed }
     }),
@@ -609,7 +620,10 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     handler: storeRoute(async (req, ctx) => {
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.remove requires params.id')
-      await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'))
+      // 运行会话随任务一并删除:删日志前先释放它的运行态(与 project.remove 同一接线段)。
+      await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
+        releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+      )
       return { removed: true }
     }),
   }, // Task 3 (M4)
@@ -702,6 +716,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       if (!id) throw new Error('task.remove requires params.id')
       const removedTask = await removeTask(ctx.profileDir, id)
       if (removedTask.sessionId) {
+        releaseSessionRuntime(ctx.runtimeCtx, removedTask.sessionId)
         await removeSessionFilesById(join(ctx.dshHome, 'sessions'), [removedTask.sessionId])
       }
       return { removed: true }

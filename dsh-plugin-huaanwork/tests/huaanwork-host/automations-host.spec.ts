@@ -20,7 +20,7 @@ import {
 import { createAutomation, normalizeAutomationInput, updateAutomation } from '../../src/huaanwork-host/automations-store.ts'
 import { ROUTE_TABLE, type RouteContext, type RouteHandler, type RouteRequest } from '../../src/huaanwork-host/routes.ts'
 import { sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
-import { sessionSendBlockers, type ListedAgent } from '../../src/huaanwork-host/sessions.ts'
+import { AGENT_ID, sessionSendBlockers, type ListedAgent } from '../../src/huaanwork-host/sessions.ts'
 import { createProject, listAutomations, recentRuns } from '../../src/huaanwork-host/stores.ts'
 import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 
@@ -39,6 +39,7 @@ type Harness = {
     reply: string
     cancelDelayMs: number
     ignoreCancel: boolean
+    noWhenIdle: boolean
     cancels: string[]
     inFlight: number
     maxInFlight: number
@@ -73,6 +74,7 @@ function makeHarness(current?: string): Harness {
     reply: 'stub-output',
     cancelDelayMs: 0,
     ignoreCancel: false,
+    noWhenIdle: false,
     cancels: [] as string[],
     inFlight: 0,
     maxInFlight: 0,
@@ -124,6 +126,7 @@ function makeHarness(current?: string): Harness {
           },
           whenIdle: () => idle,
         }
+        if (state.noWhenIdle) delete agent.whenIdle
         agents.set(sessionId, agent)
         return agent
       },
@@ -747,6 +750,66 @@ test('agent enqueue resolves when the run record cannot be written', async () =>
     process.off('unhandledRejection', onRejection)
   }
 })
+
+test('agent run reads the collector only after the agent goes idle, and the timeout covers that wait', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const settings = join(h.profileDir, 'huaanwork-settings.json')
+  writeFileSync(settings, JSON.stringify({ automation_timeout_ms: 5_000 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '等空闲' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '等空闲' })
+
+  const run = enqueueAutomation(automation, { trigger: 'manual', runId: 'idle-1' })
+  await poll(() => h.followups.length === 1)
+  const sessionId = h.followups[0]!.sessionId
+  h.routeCtx.emit({ event: 'token', text: 'part-1 ', sessionId })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(runEnds(h.events, automation.id)).toHaveLength(0)
+  h.routeCtx.emit({ event: 'token', text: 'part-2', sessionId })
+  h.release(sessionId)
+  await run
+  expect(await recentRuns(h.profileDir, automation.id)).toMatchObject([{ status: 'ok', output: 'part-1 part-2' }])
+
+  writeFileSync(settings, JSON.stringify({ automation_timeout_ms: 150 }))
+  await enqueueAutomation(automation, { trigger: 'manual', runId: 'idle-2' })
+  expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({
+    status: 'timeout',
+    output: expect.stringContaining('自动化任务执行超时'),
+  })
+
+  h.state.mode = 'immediate'
+  h.state.noWhenIdle = true
+  h.state.reply = 'no-idle-hook'
+  await enqueueAutomation(automation, { trigger: 'manual', runId: 'idle-3' })
+  expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({ status: 'ok', output: 'no-idle-hook' })
+}, 15_000)
+
+test('agent run waits on its own session agent, not the channel agent, when get(sessionId) misses', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  let channelIdleCalls = 0
+  h.installUserAgent(AGENT_ID, () => {
+    channelIdleCalls += 1
+    return Promise.resolve()
+  })
+  const agents = h.runtime.agents!
+  const get = agents.get!
+  agents.get = (id: string) => (id.startsWith('huaanwork-auto-') ? undefined : get(id))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '精确会话' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '精确会话' })
+
+  const run = enqueueAutomation(automation, { trigger: 'manual', runId: 'exact-1' })
+  await poll(() => h.followups.length === 1)
+  const sessionId = h.followups[0]!.sessionId
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(runEnds(h.events, automation.id)).toHaveLength(0)
+  expect(channelIdleCalls).toBe(0)
+  h.routeCtx.emit({ event: 'token', text: 'own-output', sessionId })
+  h.release(sessionId)
+  await run
+  expect(await recentRuns(h.profileDir, automation.id)).toMatchObject([{ status: 'ok', output: 'own-output' }])
+  expect(channelIdleCalls).toBe(0)
+}, 15_000)
 
 test('agent timeout cancels the session and settles the turn before the next agent starts', async () => {
   const h = makeHarness()

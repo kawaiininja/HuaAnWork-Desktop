@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
+import { capToolOutput } from '@huaanwork/policy/truncate'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { detailRecords, decompressZstdFrames, summarizeSessionLog } from '../../src/huaanwork-host/session-view.ts'
 import type { SessionSummary } from '../../src/client-huaanwork/rpc-types.ts'
@@ -59,7 +60,8 @@ function assistantMessage(text: string, seq: number, time: number, toolCalls: Re
 }
 
 function toolCall(callId: string, name: string, args: Record<string, unknown>, seq: number, time: number) {
-  return { type: 'tool/call', seq, time, data: { turn: 0, step: 0, callId, name, arguments: args } }
+  // 真实日志把 arguments 序列化成 JSON 字符串(@deepseek-ai/dsh-session 的 tool/call 事件)。
+  return { type: 'tool/call', seq, time, data: { turn: 0, step: 0, callId, name, arguments: JSON.stringify(args) } }
 }
 
 function toolResult(callId: string, text: string, seq: number, time: number, isError = false) {
@@ -180,6 +182,111 @@ describe('detailRecords', () => {
     expect(records[3]).toMatchObject({ kind: 'tool-result', callId: 'c1', isError: true, text: '1 failing' })
   })
 
+  test('keeps the shell command on tool-call records and never invents an exit code', () => {
+    const log = sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      toolCall('c2', 'pwsh', { command: 'Get-ChildItem' }, 2, T0 + 4),
+      toolCall('c3', 'write', { command: 'ignored', path: 'a.md' }, 3, T0 + 5),
+      toolResult('c1', 'ok', 4, T0 + 6),
+    ])
+    const records = detailRecords(log)
+    expect(records[0]).toMatchObject({ kind: 'tool-call', name: 'bash', command: 'pnpm test' })
+    expect(records[1]).toMatchObject({ kind: 'tool-call', name: 'pwsh', command: 'Get-ChildItem' })
+    expect(records[2]).not.toHaveProperty('command')
+    expect(records[3]).not.toHaveProperty('exitCode')
+  })
+
+  test('reads the real JSON-string arguments shape and shows it as JSON once', () => {
+    const log = sessionLog([
+      HEADER,
+      {
+        type: 'tool/call',
+        seq: 1,
+        time: T0 + 3,
+        data: { turn: 0, step: 0, callId: 'c1', name: 'bash', arguments: '{"command":"pnpm test"}' },
+      },
+    ])
+    const [record] = detailRecords(log)
+    expect(record).toMatchObject({
+      kind: 'tool-call',
+      name: 'bash',
+      callId: 'c1',
+      command: 'pnpm test',
+      args: '{"command":"pnpm test"}',
+    })
+  })
+
+  test('does not double-encode a log that stores an already-parsed object', () => {
+    const log = sessionLog([
+      HEADER,
+      {
+        type: 'tool/call',
+        seq: 1,
+        time: T0 + 3,
+        data: { turn: 0, step: 0, callId: 'c1', name: 'bash', arguments: { command: 'pnpm test' } },
+      },
+    ])
+    const [record] = detailRecords(log)
+    expect(record).toMatchObject({ kind: 'tool-call', command: 'pnpm test', args: '{"command":"pnpm test"}' })
+  })
+
+  test('reads failure markers from the uncapped result so a clipped head cannot hide them', () => {
+    const tail = `${'x'.repeat(40_000)}\n[exit code: 1]`
+    const log = sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      toolResult('c1', tail, 2, T0 + 4),
+      toolCall('c2', 'read', { path: 'a.md' }, 3, T0 + 5),
+      toolResult('c2', 'file mentions\n[exit code: 1]', 4, T0 + 6),
+      toolCall('c3', 'bash', { command: 'pnpm lint' }, 5, T0 + 7),
+      toolResult('c3', 'fine\n[exit code: 0]', 6, T0 + 8),
+    ])
+    const results = detailRecords(log).filter((record) => record.kind === 'tool-result')
+    expect(results[0]).toMatchObject({ isError: true })
+    expect((results[0] as { text: string }).text.endsWith('[exit code: 1]')).toBe(true)
+    // 尾部已保留标记时不再重复追加。
+    expect((results[0] as { text: string }).text.split('[exit code: 1]')).toHaveLength(2)
+    expect(results[1]).toMatchObject({ isError: false })
+    expect(results[2]).toMatchObject({ isError: false })
+  })
+
+  test('re-attaches a failure marker that truncation dropped from the middle', () => {
+    // 标记位于被截掉的中段:头尾都保留,只有未截断解析能看到它,随后补回一次。
+    const middleMarker = `${'x'.repeat(20_000)}\n[exit code: 1]\n${'y'.repeat(20_000)}`
+    const log = sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      toolResult('c1', middleMarker, 2, T0 + 4),
+    ])
+    const record = detailRecords(log).find((entry) => entry.kind === 'tool-result')
+    expect(record).toMatchObject({ kind: 'tool-result', isError: true })
+    if (record?.kind !== 'tool-result') throw new Error('expected tool-result record')
+    expect(record.text.split('[exit code: 1]')).toHaveLength(2)
+    expect(record.text.startsWith('x')).toBe(true)
+    expect(record.text).toContain('y')
+    // 截断标记必须在（只留头尾而没有标记就不是同一种形状）。
+    expect(record.text).toContain('…（已截断）')
+  })
+
+  test('caps history results in UTF-8 bytes so CJK output is not cut at the old character budget', () => {
+    // 9002 个字符 / 27012 字节:旧的 8000 字符与 8000 字节上限都会截断,32 KiB 字节上限完整保留。
+    const retained = `开头${'汉'.repeat(9000)}结尾`
+    const [kept] = detailRecords(sessionLog([HEADER, toolResult('c1', retained, 1, T0 + 3)]))
+    if (kept?.kind !== 'tool-result') throw new Error('expected tool-result record')
+    expect(kept.text).toBe(retained)
+
+    // 12003 个字符 / 36003 字节:按字节判定才截断;中文头部和尾部都保留。
+    const oversized = `${'汉'.repeat(12_000)}尾`
+    const [cut] = detailRecords(sessionLog([HEADER, toolResult('c1', oversized, 1, T0 + 3)]))
+    if (cut?.kind !== 'tool-result') throw new Error('expected tool-result record')
+    expect(cut.text.startsWith('汉')).toBe(true)
+    expect(cut.text.endsWith('尾')).toBe(true)
+    expect(cut.text).toContain('…（已截断）')
+    // 上限与形状直接对齐实时桥的 capToolOutput 默认值（历史侧不再另写 32 KiB）。
+    expect(cut.text).toBe(capToolOutput(oversized, '').text)
+  })
+
   test('skips plugin injections and tolerates corrupt lines', () => {
     const log = [
       line(HEADER),
@@ -192,14 +299,45 @@ describe('detailRecords', () => {
     expect(records[0]).toMatchObject({ kind: 'user', text: '正常消息' })
   })
 
-  test('truncates oversized tool results', () => {
-    const log = sessionLog([HEADER, toolResult('c1', 'x'.repeat(20_000), 1, T0 + 3)])
+  test('places a reasoning block ahead of the assistant text from the same message', () => {
+    const log = sessionLog([
+      HEADER,
+      {
+        type: 'assistant/message',
+        seq: 1,
+        time: T0 + 5,
+        surfaceOp: 'append',
+        data: {
+          turn: 0,
+          step: 0,
+          message: {
+            id: 'm1',
+            role: 'assistant',
+            content: [
+              { type: 'reasoning', text: '先看文件' },
+              { type: 'text', text: '好的' },
+            ],
+          },
+        },
+      },
+    ])
+    const records = detailRecords(log)
+    expect(records.map((record) => record.kind)).toEqual(['thinking', 'assistant'])
+    expect(records[0]).toMatchObject({ kind: 'thinking', time: T0 + 5, text: '先看文件' })
+    expect(records[1]).toMatchObject({ kind: 'assistant', time: T0 + 5, text: '好的' })
+  })
+
+  test('truncates oversized tool results with the live head+tail shape', () => {
+    const log = sessionLog([HEADER, toolResult('c1', `HEAD${'x'.repeat(40_000)}TAIL`, 1, T0 + 3)])
     const [record] = detailRecords(log)
     expect(record).toBeDefined()
     expect(record!.kind).toBe('tool-result')
     if (record?.kind !== 'tool-result') throw new Error('expected tool-result record')
-    expect(record.text.length).toBeLessThanOrEqual(8_100)
-    expect(record.text.endsWith('…（已截断）')).toBe(true)
+    // 与实时桥一致:保留头、尾和中间的截断标记,而不是只留头。
+    expect(record!.text.startsWith('HEAD')).toBe(true)
+    expect(record!.text.endsWith('TAIL')).toBe(true)
+    expect(record!.text).toContain('…（已截断）')
+    expect(record!.text).toBe(capToolOutput(`HEAD${'x'.repeat(40_000)}TAIL`, '').text)
   })
 })
 

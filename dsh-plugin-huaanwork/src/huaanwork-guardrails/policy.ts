@@ -6,6 +6,7 @@ import { preExecuteExplained, type GuardMode, type ToolCall } from "@huaanwork/p
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 
 import { isHostAttached, isMcpAttached, type AttachmentMaps } from "./agent-attachments.ts";
+import { GIT_SNAPSHOT_BUDGET_MS } from "./git-budget.ts";
 
 type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:376
   name: string;
@@ -15,7 +16,7 @@ type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/too
 };
 
 /** 无人值守授权范围（Phase 2，方案 A）：只在 `runAgentTurn` 执行期间由 host.ts 设置。 */
-type UnattendedScope = { runId: string; automationId: string; allow: Set<string>; sessionId?: string };
+export type UnattendedScope = { runId: string; automationId: string; allow: Set<string>; sessionId?: string };
 
 /**
  * `.current` 的读写坑（真实 Cordis 踩过，勿改回直接 `ctx.currentUnattended = ...`）：
@@ -25,10 +26,15 @@ type UnattendedScope = { runId: string; automationId: string; allow: Set<string>
  * 从其他插件的 ctx 读回来会直接抛 `cannot get property "foo" without inject`——
  * `huaanworkAllowedOnce`/`huaanworkWorkspaceRoot` 之所以能读到，是因为它们只在 `prepare`
  * 里赋值过；per-run 会变的 `currentUnattended` 做不到「只赋值一次」，所以只能反过来：
- * boot 时赋值一次一个「容器」（`{ current: undefined }`），此后永远只 mutate 容器的
- * `.current` 字段——容器本身是普通 JS 对象，不受 Cordis Proxy 管辖，读写不再受 inject 限制。
+ * boot 时赋值一次一个「容器」（`holders.ts` 装的是 `{ current: null }`），此后永远只
+ * mutate 容器的 `.current` 字段——容器本身是普通 JS 对象，不受 Cordis Proxy 管辖，读写
+ * 不再受 inject 限制。`current` 因此兼具「可选」（旧调用方没装容器）与「可为 null」
+ * （boot 的空槽）两种缺席形态。
+ *
+ * 导出只为编译期钉：三种形态的赋值由 `tests/huaanwork-host/policy-type.spec.ts` 在
+ * tsconfig.tests.json 覆盖的目录里钉住，收窄成非 nullable（或去掉 `?`）会让 typecheck 变红。
  */
-type UnattendedHolder = { current?: UnattendedScope };
+export type UnattendedHolder = { current?: UnattendedScope | null };
 
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
@@ -198,15 +204,26 @@ function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
   };
 }
 
-function isGitDirty(workspaceRoot: string): boolean {
+export function isGitDirty(workspaceRoot: string): boolean {
   try {
     const result = spawnSync("git", ["status", "--porcelain"], {
       cwd: workspaceRoot,
       encoding: "utf8",
+      // Same liveness budget as the bridge snapshot: an untimed status on a huge
+      // tree would hold the Host loop past the 2 s probe and look like a hang.
+      timeout: GIT_SNAPSHOT_BUDGET_MS,
     });
+    // Not a repository (git exits 128) and git-not-installed (ENOENT) are the
+    // pre-existing "nothing to lose" cases: they stay clean, not dirty.
+    if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return false;
+    // No exit status at all means the probe timed out or was killed before git
+    // could answer. We do not know whether the tree is clean, so fail closed:
+    // a dirty `git_checkout` must still reach the ask path.
+    if (result.status === null) return true;
     return result.status === 0 && (result.stdout ?? "").trim().length > 0;
   } catch {
-    return false;
+    // An exception means the probe itself is unknown: fail closed like a timeout.
+    return true;
   }
 }
 

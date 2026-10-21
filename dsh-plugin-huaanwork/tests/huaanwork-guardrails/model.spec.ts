@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, test } from "vitest";
 
-import { apply, HuaAnWorkAdapter, loadSettings } from "../../src/huaanwork-guardrails/model.ts";
+import { parseSseToolCalls } from "@huaanwork/model";
+
+import { apply, HuaAnWorkAdapter, isRegisteredToolName, loadSettings } from "../../src/huaanwork-guardrails/model.ts";
 import { ToolCallId, type GenerateOptions, type StreamChunk } from "@deepseek-ai/dsh-llm";
 
 function userOptions(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
@@ -92,6 +94,12 @@ test("apply registers the existing deepseek-official route", () => {
   assert.ok(registered.adapter instanceof HuaAnWorkAdapter);
 });
 
+test("resolveModel reports a positive integer context window so compaction can measure pressure", async () => {
+  const info = await new HuaAnWorkAdapter().resolveModel("deepseek-official", "local");
+  assert.equal(info.context?.contextWindow, 1_000_000);
+  assert.ok(Number.isInteger(info.context?.contextWindow) && (info.context?.contextWindow ?? 0) > 0);
+});
+
 test("stream concatenates SSE tool_calls and does not execute unknown names", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () =>
@@ -119,6 +127,35 @@ test("stream concatenates SSE tool_calls and does not execute unknown names", as
       }
     }
     assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("stream emits only the route call when the model also calls read", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, id: "c1", function: { name: "read", arguments: '{"path":"a.md"}' } },
+                { index: 1, id: "c2", function: { name: "propose_plan", arguments: '{"objective":"汇总三份材料"}' } },
+              ],
+            },
+          },
+        ],
+      },
+      "[DONE]",
+    ]);
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions()));
+    const names = chunks.flatMap((chunk) =>
+      chunk.type === "block-end" && chunk.block.type === "tool-call" ? [chunk.block.name] : [],
+    );
+    assert.deepEqual(names, ["propose_plan"]);
   } finally {
     globalThis.fetch = original;
   }
@@ -382,6 +419,36 @@ test("HTTP error includes the provider response body", async () => {
   }
 });
 
+test("stream passes through native web_fetch and screenshot calls", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, function: { name: "web_fetch", arguments: '{"url":"https://example.com"}' } },
+                { index: 1, function: { name: "screenshot", arguments: '{"url":"https://example.com"}' } },
+              ],
+            },
+          },
+        ],
+      },
+      "[DONE]",
+    ]);
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions()));
+    const names = chunks.flatMap((chunk) =>
+      chunk.type === "block-end" && chunk.block.type === "tool-call" ? [chunk.block.name] : [],
+    );
+    assert.deepEqual(names, ["web_fetch", "screenshot"]);
+    assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("stream passes through native call_host_tool and mcp__* calls (runtime-registered tools)", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () =>
@@ -549,6 +616,100 @@ test("reasoning-only stop is asked to continue and then accepts the real answer"
   }
 });
 
+test("a second reasoning-only stop finishes without inventing a tool or copying the thought", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return sseResponse([
+      { choices: [{ delta: { reasoning_content: "Try https://wttr.in/Shanghai?format=j1 for Shanghai tomorrow." } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions({
+      tools: [{ name: "web_fetch", description: "fetch", parameters: { type: "object", properties: {} } }],
+    })));
+    assert.equal(calls, 2);
+    assert.equal(chunks.some((chunk) => chunk.type === "block-end" && chunk.block.type === "tool-call"), false);
+    assert.equal(chunks.some((chunk) => chunk.type === "text-delta" && chunk.text.includes("wttr.in")), false);
+    const finish = chunks.at(-1);
+    assert.equal(finish?.type, "finish");
+    if (finish?.type === "finish") assert.equal(finish.reason.kind, "error");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("reasoning plus a short preamble is asked to continue, then a web_fetch call is kept", async () => {
+  const original = globalThis.fetch;
+  const bodies: { messages?: { role?: string; content?: string }[] }[] = [];
+  globalThis.fetch = async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as { messages?: { role?: string; content?: string }[] });
+    if (bodies.length === 1) {
+      return sseResponse([
+        { choices: [{ delta: { reasoning_content: "Let me test web_fetch on a public URL." } }] },
+        { choices: [{ delta: { content: "我直接测一下。" }, finish_reason: "stop" }] },
+        "[DONE]",
+      ]);
+    }
+    return sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, function: { name: "web_fetch", arguments: '{"url":"https://example.com"}' } },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions()));
+    assert.equal(bodies.length, 2);
+    const names = chunks.flatMap((chunk) =>
+      chunk.type === "block-end" && chunk.block.type === "tool-call" ? [chunk.block.name] : [],
+    );
+    assert.deepEqual(names, ["web_fetch"]);
+    assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("a second reasoning-only stop is an error, not a short successful reply", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return sseResponse([
+      { choices: [{ delta: { reasoning_content: "Let me actually call the tool now." } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions()));
+    assert.equal(calls, 2);
+    assert.equal(chunks.some((chunk) => chunk.type === "text-delta"), false);
+    const finish = chunks.at(-1);
+    assert.equal(finish?.type, "finish");
+    if (finish?.type === "finish" && finish.reason.kind === "error") {
+      assert.equal(finish.reason.failure.code, "NO_ACTION");
+    } else {
+      assert.fail("expected a finish error");
+    }
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("reasoning-only stop with finish_reason=length reports the token budget, not a bare empty response", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () =>
@@ -592,3 +753,30 @@ describe('model settings resolve from the injected profile directory', () => {
   })
 })
 
+test("route tool names survive the static tool filter", () => {
+  const payloads = [
+    JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "propose_plan", arguments: "{\"objective\":\"汇总三份材料\"}" } }] } }],
+    }),
+  ];
+  assert.equal(parseSseToolCalls(payloads, isRegisteredToolName).length, 1);
+
+  const requestInput = [
+    JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "c2", function: { name: "request_input", arguments: "{\"prompt\":\"还缺哪一份\"}" } }] } }],
+    }),
+  ];
+  assert.equal(parseSseToolCalls(requestInput, isRegisteredToolName).length, 1);
+});
+
+test("exit_plan_mode survives the static tool filter, ask_user_question does not", () => {
+  assert.equal(isRegisteredToolName("exit_plan_mode"), true);
+  assert.equal(isRegisteredToolName("ask_user_question"), false);
+});
+
+
+test("goal tools survive the static tool filter", () => {
+  for (const name of ["get_goal", "create_goal", "update_goal"]) {
+    assert.equal(isRegisteredToolName(name), true, name);
+  }
+});

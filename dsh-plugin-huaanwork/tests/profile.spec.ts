@@ -1277,7 +1277,6 @@ virtualStoreDirMaxLength: 60
       'tool-web',
       'workflow-ptc',
       'tool-workflow',
-      'user-questions',
     ]) {
       expect(rows.get(id)?.disabled).toBe(true)
     }
@@ -1285,6 +1284,9 @@ virtualStoreDirMaxLength: 60
     if (rows.has('tool-ralph')) {
       expect(rows.get('tool-ralph')?.disabled).toBe(true)
     }
+    // user-questions 已从锁层移除并重新启用：正例钉住它确实挂载且未被关闭。
+    expect(rows.has('user-questions')).toBe(true)
+    expect(rows.get('user-questions')?.disabled).not.toBe(true)
 
     // L1/L2 复挂钉：dsh-base 挂载、web-app overlay 关闭的三行被变体翻回启用。
     expect(rows.get('tool-fs')?.disabled).toBe(false)
@@ -1292,11 +1294,21 @@ virtualStoreDirMaxLength: 60
     const shellRowId = process.platform === 'win32' ? 'tool-pwsh' : 'tool-bash'
     expect(rows.get(shellRowId)?.disabled).toBe(false)
     expect(rows.get(shellRowId)?.config).toMatchObject({ enableRunInBackground: false })
+    expect(rows.get('tool-todo')?.disabled).toBe(false)
+    expect(rows.get('tool-todo')?.config).toMatchObject({ allowParallelInProgress: false })
+    expect(rows.get('tool-goal')?.disabled).toBe(false)
+    expect(rows.get('goal')?.config).toMatchObject({ defaultMaxGoalRounds: 4 })
+    expect(rows.get('tool-result-pruner')?.disabled).toBe(false)
+    expect(rows.get('compaction-basic')?.disabled).toBe(false)
+    expect(rows.get('plan-mode')?.disabled).toBe(false)
+    expect(rows.get('plan-mode')?.name).toBe('@deepseek-ai/dsh-plan-mode')
+    expect((rows.get('plan-mode')?.config as { section?: string } | undefined)?.section).toMatch(/exit_plan_mode/)
 
     const insertedIds = composedRows.map(row => row.id)
     const expectedOrder = [
       'huaanwork-host',
       'huaanwork-model',
+      'huaanwork-thinking-prompt',
       'huaanwork-policy',
       'huaanwork-sandbox-cwd',
       'huaanwork-git',
@@ -1304,7 +1316,9 @@ virtualStoreDirMaxLength: 60
       'huaanwork-agent-tool',
       'huaanwork-agent-mcp',
       'huaanwork-approval',
+      'huaanwork-question-answerer',
       'huaanwork-present-as',
+      'huaanwork-route-tools',
       'huaanwork-skills',
       'huaanwork-limits',
       'huaanwork-bridge',
@@ -1323,6 +1337,18 @@ virtualStoreDirMaxLength: 60
       profileDir: prepared.profile.dir,
       workspaceRoot: join(prepared.profile.dir, 'workspace'),
     })
+  })
+
+  it('overrides plan-mode guidance with the clarification tool HuaAnWork actually exposes', () => {
+    const prepared = prepareDesktopProfile('1', temporaryHome())
+    const rows = new Map(composeEntries([prepared.patches]).map(row => [row.id!, row]))
+    const section = (rows.get('plan-mode')?.config as { section?: string } | undefined)?.section
+
+    expect(typeof section).toBe('string')
+    expect(section).toContain('request_input')
+    expect(section).toContain('exit_plan_mode')
+    // Preset-only in upstream; present-as deliberately keeps it out of this profile.
+    expect(section).not.toContain('ask_user_question')
   })
 
   it('pins the pending workspace root into agent-loop and sandbox rows', () => {

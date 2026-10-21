@@ -358,8 +358,14 @@ export function auditPath(storageRoot: string, automationId: string): string {
  * 会话 id 由运行侧铸造(前缀 + automationId + "-" + 后缀),按前缀匹配即可;目录不存在或个别 cwd
  * 读取失败都不炸(删除路径的容错优先于清理彻底)。
  * 注意:Desktop 组合下会话日志在 dshHome/sessions(不在 profileDir 下),调用方显式传根。
+ * `releaseSession` 在删每个会话目录之前回调(宿主用它摘掉运行态,与 session.remove 同口径);
+ * 不传则保持旧的纯删文件行为,存储层单元测试无需构造运行态。
  */
-export async function removeAutomationSessions(sessionsRoot: string, automationId: string): Promise<void> {
+export async function removeAutomationSessions(
+  sessionsRoot: string,
+  automationId: string,
+  releaseSession?: (sessionId: string) => void,
+): Promise<void> {
   const wantedPrefixes = [`${AUTO_SESSION_PREFIX}${automationId}-`]
   let cwds: string[]
   try {
@@ -379,17 +385,24 @@ export async function removeAutomationSessions(sessionsRoot: string, automationI
       await Promise.all(
         entries
           .filter((entry) => wantedPrefixes.some((prefix) => entry.startsWith(prefix)))
-          .map((entry) => rm(join(cwdDir, entry), { recursive: true, force: true }).catch(() => undefined)),
+          .map((entry) => {
+            releaseSession?.(entry)
+            return rm(join(cwdDir, entry), { recursive: true, force: true }).catch(() => undefined)
+          }),
       )
     }),
   )
 }
 
-/** 项目删除时级联清理该项目全部任务及其运行历史。 */
+/**
+ * 项目删除时级联清理该项目全部任务及其运行历史。
+ * `releaseSession` 原样传给 `removeAutomationSessions`(见其注释)。
+ */
 export async function removeAutomationsOfProject(
   storageRoot: string,
   projectId: string,
   sessionsRoot: string = join(storageRoot, 'sessions'),
+  releaseSession?: (sessionId: string) => void,
 ): Promise<void> {
   return withAutomationRegistryLock(async () => {
     const registry = await readAutomationRegistry(storageRoot)
@@ -406,7 +419,7 @@ export async function removeAutomationsOfProject(
         rm(auditPath(storageRoot, automation.id), { force: true }).catch(() => undefined),
       ),
     )
-    await Promise.all(doomed.map((automation) => removeAutomationSessions(sessionsRoot, automation.id)))
+    await Promise.all(doomed.map((automation) => removeAutomationSessions(sessionsRoot, automation.id, releaseSession)))
   })
 }
 

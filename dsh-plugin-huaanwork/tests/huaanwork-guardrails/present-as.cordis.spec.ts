@@ -333,3 +333,41 @@ test('presentAs("ptc") 被拒(D1:0.1.6-alpha.2 呈现模式改名后的 run_code
     "should emit session/end with ok:false",
   );
 });
+
+test("ALLOWED_TOOLS includes propose_plan and request_input", () => {
+  const agent = createMockAgent({
+    sessionId: "work-route",
+    initialToolNames: ["read", "propose_plan", "request_input"],
+  });
+  const ctx = createMockContext({ agents: [agent] });
+  apply(ctx as never);
+  const allow = agent.restrictCalls[0].allow;
+  assert.ok(allow.includes("propose_plan"));
+  assert.ok(allow.includes("request_input"));
+});
+
+test("ALLOWED_TOOLS keeps the official exit_plan_mode and leaves ask_user_question out", () => {
+  const agent = createMockAgent({
+    sessionId: "work-plan",
+    initialToolNames: ["read", "exit_plan_mode", "ask_user_question"],
+  });
+  const ctx = createMockContext({ agents: [agent] });
+  apply(ctx as never);
+  ctx.emit("tools/change");
+  const allow = agent.restrictCalls.at(-1)!.allow;
+  assert.ok(allow.includes("exit_plan_mode"));
+  assert.ok(!allow.includes("ask_user_question"));
+});
+
+test("goal tools survive the allow list so tool-goal reaches the model", () => {
+  const goalTools = ["get_goal", "create_goal", "update_goal"];
+  const agent = createMockAgent({ id: "huaanwork", initialToolNames: ["read", "todo_write", ...goalTools, "send_message"] });
+  const ctx = createMockContext({ agents: [agent] });
+
+  apply(ctx as never);
+
+  const allow = agent.restrictCalls[0].allow;
+  for (const name of goalTools) assert.ok(allow.includes(name), `allow must include ${name}`);
+  assert.ok(allow.includes("todo_write"));
+  assert.ok(!allow.includes("send_message"));
+});

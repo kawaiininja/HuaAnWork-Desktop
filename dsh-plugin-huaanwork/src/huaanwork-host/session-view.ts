@@ -1,6 +1,14 @@
 import { readFile } from 'node:fs/promises'
 import { zstdDecompressSync } from 'node:zlib'
 
+import { capToolOutput } from '@huaanwork/policy/truncate'
+import {
+  TOOL_LABEL_MAX_CHARS,
+  failureMarkers,
+  isShellTool,
+  parseToolArguments,
+  shellCommandOf,
+} from '../client-huaanwork/logic/commandOutcome.ts'
 import type { SessionDetailRecord, SessionSummary } from '../client-huaanwork/rpc-types.ts'
 
 const ZSTD_MAGIC = 0xfd2fb528
@@ -73,7 +81,7 @@ function scanZstdFrameEnd(buffer: Buffer, start: number): number | undefined {
  * 事件行的既定形状(@deepseek-ai/dsh-session):
  * - header:`{ type: "session", version, id, createdAt, cwd?, origin?, parentSession?, delegationDepth }`
  * - `user/message`:data 即消息 `{ role: "user", content: [{ type: "text", text }], source?: { kind } }`
- * - `assistant/message`:`data.message.content` 为 `text` / `tool-call` 块
+ * - `assistant/message`:`data.message.content` 为 `reasoning` / `text` / `tool-call` 块
  * - `tool/call`:`data: { turn, step, callId, name, arguments }`
  * - `tool/result`:`data.message.content[0]` 为 `tool-result` 块(含 isError 与文本)
  * - `session/title`:`data: { title, messageSeqs, source }`(取最后一条为准)
@@ -84,10 +92,6 @@ function scanZstdFrameEnd(buffer: Buffer, start: number): number | undefined {
 
 /** 标题最长保留 80 字符,避免超长首条消息把列表/弹窗撑爆。 */
 const TITLE_MAX_CHARS = 80
-/** 工具调用参数在详情里最多展示 200 字符。 */
-const ARGS_MAX_CHARS = 200
-/** 工具结果在详情里最多展示 8000 字符(历史日志展示上限,非工具输出管道)。 */
-const RESULT_MAX_CHARS = 8000
 
 type Json = Record<string, unknown>
 
@@ -173,6 +177,7 @@ export function summarizeSessionLog(text: string): SessionSummary | undefined {
 /** 把日志事件流映射为按顺序排列的可读记录(用户消息、助手回复、工具调用与结果)。 */
 export function detailRecords(text: string): SessionDetailRecord[] {
   const records: SessionDetailRecord[] = []
+  const toolNames = new Map<string, string>()
   const lines = text.split('\n')
   for (const line of lines.slice(1)) {
     const event = parseJsonLine(line)
@@ -190,23 +195,30 @@ export function detailRecords(text: string): SessionDetailRecord[] {
       case 'assistant/message': {
         const message = asObject(data.message)
         const blocks = Array.isArray(message.content) ? message.content : []
-        const textBlocks = blocks
-          .map((block) => asObject(block))
-          .filter((block) => block.type === 'text' && typeof block.text === 'string')
-          .map((block) => block.text as string)
-        const messageText = textBlocks.join('\n\n').trim()
+        const reasoningParts: string[] = []
+        const textParts: string[] = []
+        for (const block of blocks.map((entry) => asObject(entry))) {
+          if (block.type === 'reasoning' && typeof block.text === 'string') reasoningParts.push(block.text)
+          else if (block.type === 'text' && typeof block.text === 'string') textParts.push(block.text)
+        }
+        const thought = reasoningParts.map((part) => part.trim()).filter((part) => part.length > 0).join('\n\n')
+        const messageText = textParts.join('\n\n').trim()
+        if (thought) records.push({ kind: 'thinking', time, text: thought })
         if (messageText) records.push({ kind: 'assistant', time, text: messageText })
         break
       }
       case 'tool/call': {
         const name = typeof data.name === 'string' ? data.name : ''
         const args = formatArgs(data.arguments)
+        const command = shellCommandOf(name, data.arguments)
+        if (typeof data.callId === 'string') toolNames.set(data.callId, name)
         records.push({
           kind: 'tool-call',
           time,
           name,
           ...(typeof data.callId === 'string' ? { callId: data.callId } : {}),
           ...(args !== undefined ? { args } : {}),
+          ...(command !== undefined ? { command } : {}),
         })
         break
       }
@@ -223,12 +235,22 @@ export function detailRecords(text: string): SessionDetailRecord[] {
           .join('\n')
           .trim()
         const source = asObject(message.source)
+        // 失败标记在未截断的结果文本里解析(截断会丢掉中段);
+        // 只对 shell 工具解析,避免读到文件里引用的标记文字。
+        const markers = typeof source.callId === 'string' && isShellTool(toolNames.get(source.callId) ?? '')
+          ? failureMarkers(resultText)
+          : []
+        // 与实时桥同一截断形状:保留头、尾和中间的截断标记;上限用 capToolOutput 的默认值
+        // (32 KiB,按 UTF-8 字节计;中文约占 3 字节/字,不与实时输出双标)。
+        const capped = capToolOutput(resultText, '')
+        const unshownMarkers = markers.filter((marker) => !capped.text.includes(marker))
+        const text = unshownMarkers.length > 0 ? `${capped.text} ${unshownMarkers.join(' ')}` : capped.text
         records.push({
           kind: 'tool-result',
           time,
           ...(typeof source.callId === 'string' ? { callId: source.callId } : {}),
-          isError: block?.isError === true,
-          text: clipText(resultText, RESULT_MAX_CHARS, '…（已截断）'),
+          isError: block?.isError === true || markers.length > 0,
+          text,
         })
         break
       }
@@ -274,13 +296,19 @@ function messageHasVisibleText(message: Json): boolean {
 
 function formatArgs(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined
+  const parsed = parseToolArguments(value)
   let encoded: string
-  try {
-    encoded = JSON.stringify(value) ?? ''
-  } catch {
-    return undefined
+  if (typeof parsed === 'string') {
+    // 不是合法 JSON 的字符串原样展示,避免多包一层引号。
+    encoded = parsed
+  } else {
+    try {
+      encoded = JSON.stringify(parsed) ?? ''
+    } catch {
+      return undefined
+    }
   }
-  return clipText(encoded, ARGS_MAX_CHARS, '…')
+  return clipText(encoded, TOOL_LABEL_MAX_CHARS, '…')
 }
 
 /** 单行化并按需截断;超长时追加省略标记。 */

@@ -2,11 +2,19 @@ import { readdir, unlink } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 
 import { workNetworkGateError } from '@huaanwork/policy/network'
+import { forgetConfirmedTarget, settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
+import { answerRouteInput, cancelRouteInput, clearInvalidRoute, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { invokeSkillText } from './skill-invoke.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
 import type { AgentsHost } from './agents-host.ts'
+import {
+  childrenOf,
+  forgetChildSession,
+  forgetChildSessions,
+  noteCallerSession,
+} from './child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog } from './session-view.ts'
@@ -31,6 +39,10 @@ import type { RouteContext } from './routes.ts'
 
 export type SessionRuntimeContext = {
   huaanworkApprovals?: ApprovalMap
+  /** question-answerer 登记的未回答 plan-review 结算器(holders.ts 注入容器)。 */
+  huaanworkPlanReviews?: Map<string, () => boolean>
+  /** 分流工具 `propose_plan` / `request_input` 读取的当前会话 agent(holders.ts 注入容器)。 */
+  huaanworkRouteAgent?: { current: unknown }
   /** 工作区热切换时同步的沙箱根;缺席时只改 routeCtx.workspaceRoot holder。 */
   sandboxPolicy?: { workspaceRoot?: string }
   /** cordis Context.get。sandboxPolicy 未注入到本插件时,用它做全局查找。 */
@@ -113,6 +125,7 @@ export async function sendToAgent(
   const settings = await readHuaanworkSettings(routeCtx.profileDir)
   const blocked = workNetworkGateError({ allowNetwork: settings.allow_network, baseUrl: settings.base_url })
   if (blocked) throw new Error(blocked)
+  noteCallerSession(sessionId)
 
   let afterIdle: (() => Promise<void>) | undefined
   let cleanedUp = false
@@ -120,6 +133,16 @@ export async function sendToAgent(
     if (cleanedUp) return
     cleanedUp = true
     await afterIdle?.()
+  }
+  // followup 受理后立即返回。@ HTTP 工具的 detach 只在 idle 之后跑，
+  // 成功路径和 finally 共用这一次登记，避免回合中途解绑或解绑两次。
+  let detachScheduled = false
+  let acceptedAgent: { whenIdle?: () => Promise<void> } | undefined
+  const scheduleDetachAfterIdle = () => {
+    if (detachScheduled) return
+    detachScheduled = true
+    const idle = acceptedAgent?.whenIdle?.() ?? Promise.resolve()
+    void idle.then(() => cleanup(), () => cleanup()).catch(() => undefined)
   }
 
   try {
@@ -156,16 +179,18 @@ export async function sendToAgent(
     }
 
     const agent = await resolveAgent()
+    acceptedAgent = agent
+    clearInvalidRoute(sessionId)
+    if (ctx.huaanworkRouteAgent) ctx.huaanworkRouteAgent.current = agent
     agent.followup({
       id: `huaanwork-${Date.now()}`,
       role: 'user',
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
     })
-    await agent.whenIdle?.()
-    await cleanup()
+    scheduleDetachAfterIdle()
   } finally {
-    await cleanup()
+    scheduleDetachAfterIdle()
   }
   return { queued: true, sessionId }
 }
@@ -215,18 +240,24 @@ async function ensureChannelAgent(
 
 function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): { accepted: true } {
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
-  const primary = findSessionAgent(ctx, sessionId)
+  // 只取消绑定在该会话上的 agent;通道默认 agent 可能正在跑兄弟会话,不能替它按停止。
+  const primary = findAgentBySession(ctx, sessionId)
+  const childIds = new Set(childrenOf(sessionId))
   for (const agent of ctx.agents?.list?.() ?? []) {
     if (agent === primary) continue
+    const id = agent.session?.id ?? agent.id
+    if (id === undefined || !childIds.has(id)) continue
     agent.cancel?.({ kind: 'parent' })
   }
   primary?.cancel?.({ kind: 'user' })
+  releaseRouteInput(sessionId)
   return { accepted: true }
 }
 
 export type ListedAgent = {
   id?: string
   session?: { id?: string }
+  status?: string
   followup?: (message: unknown) => void
   whenIdle?: () => Promise<void>
   cancel?: (reason: { kind: 'parent' | 'user' }) => void
@@ -312,11 +343,31 @@ async function openSession(sessionsRoot: string, params: unknown): Promise<unkno
   }
 }
 
-async function removeSession(sessionsRoot: string, params: unknown): Promise<{ removed: true }> {
+/**
+ * 删除会话前必须先释放的运行态：等待中的卡片、绑定的 live agent、子会话登记、
+ * 坏参数计数与上一份已确认的计划目标。`session.remove` 与 task/project 级联删除
+ * 两条路径共用同一实现，避免只清文件、留下会继承到同名新会话的旧状态。
+ */
+export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, sessionId: string): void {
+  releaseRouteInput(sessionId)
+  if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })
+  forgetChildSessions(sessionId)
+  forgetChildSession(sessionId)
+  clearInvalidRoute(sessionId)
+  forgetConfirmedTarget(sessionId)
+}
+
+async function removeSession(
+  ctx: SessionRuntimeContext | undefined,
+  sessionsRoot: string,
+  params: unknown,
+): Promise<{ removed: true }> {
   const sessionId = objectString(params, 'sessionId')
   if (!sessionId) throw new Error('session.remove requires params.sessionId')
   const located = await locateSessionFile(sessionsRoot, sessionId)
   if (!located) throw new Error(`session ${sessionId} was not found`)
+  // 删日志之前先把会话从运行态里摘出来（见 releaseSessionRuntime 的注释）。
+  releaseSessionRuntime(ctx, sessionId)
   await unlink(located.file)
   return { removed: true }
 }
@@ -445,15 +496,20 @@ export async function sessionOpen(routeCtx: RouteContext, params: unknown): Prom
   return openSession(join(routeCtx.dshHome, 'sessions'), params)
 }
 
-export async function sessionRemove(routeCtx: RouteContext, params: unknown): Promise<{ removed: true }> {
-  return removeSession(join(routeCtx.dshHome, 'sessions'), params)
+export async function sessionRemove(
+  ctx: SessionRuntimeContext | undefined,
+  routeCtx: RouteContext,
+  params: unknown,
+): Promise<{ removed: true }> {
+  return removeSession(ctx, join(routeCtx.dshHome, 'sessions'), params)
 }
 
-export function sessionNew(routeCtx: RouteContext, params: unknown): { sessionId: string } {
+export function sessionNew(routeCtx: RouteContext, params: unknown): { sessionId: string; cwd: string } {
+  const cwd = routeCtx.workspaceRoot.current
   const sessionId = objectBool(params, 'fresh')
-    ? freshSessionIdFor(routeCtx.workspaceRoot.current)
-    : sessionIdFor(routeCtx.workspaceRoot.current)
-  return { sessionId }
+    ? freshSessionIdFor(cwd)
+    : sessionIdFor(cwd)
+  return { sessionId, cwd }
 }
 
 export async function sessionResume(
@@ -468,6 +524,39 @@ export async function sessionResume(
   if (!persisted) throw new Error(`session ${sessionId} was not found`)
   await ensureChannelAgent(ctx, routeCtx, sessionId)
   return { sessionId, resumed: true }
+}
+
+/**
+ * 「退出计划模式」:先确认会话 agent 与 `planMode` 都在。缺一则不结算评审,
+ * 返回 `{ exited: false }`,计划模式保持原样。两者都在时,先把未回答的 plan-review
+ * 以取消结算,让等待中的 `exit_plan_mode` 结束回合,再 `planMode.set(agent, false)`。
+ * 顺序不能反:先退出会让那次评审一直停住。
+ * 没有可结算的评审而回合还在跑时停止这一回合,不让模型离开计划模式后接着写。
+ */
+export function sessionExitPlanMode(
+  ctx: SessionRuntimeContext,
+  routeCtx: RouteContext,
+  params: unknown,
+): { exited: boolean } {
+  const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
+  // 目标会话没有 live agent 时不能借通道默认 agent 退出计划模式——那可能是兄弟会话。
+  const agent = findAgentBySession(ctx, sessionId)
+  const planMode = ctx.get?.('planMode') as { set?: (agent: unknown, active: boolean) => unknown } | undefined
+  if (!agent || typeof planMode?.set !== 'function') return { exited: false }
+  const settled = settlePlanReview(ctx.huaanworkPlanReviews, sessionId)
+  planMode.set(agent, false)
+  if (!settled && agent.status === 'running') agent.cancel?.({ kind: 'user' })
+  return { exited: true }
+}
+
+/** `request_input` 的对话卡片：提交的文字作为工具结果回到同一回合；`cancel: true` 结束这次调用并停止回合。 */
+export function sessionAnswerInput(params: unknown): { handled: boolean } {
+  const sessionId = objectString(params, 'sessionId')
+  if (!sessionId) return { handled: false }
+  if (objectBool(params, 'cancel')) return { handled: cancelRouteInput(sessionId) }
+  const answer = objectString(params, 'answer')?.trim()
+  if (!answer) return { handled: false }
+  return { handled: answerRouteInput(sessionId, answer) }
 }
 
 export async function sessionAnswerApproval(

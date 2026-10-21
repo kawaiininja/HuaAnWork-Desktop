@@ -13,15 +13,16 @@ import {
   RouteError,
   type RouteContext,
 } from '../../src/huaanwork-host/routes.ts'
-import { hasGit, listTree } from '../../src/huaanwork-host/native.ts'
+import { hasGit, listTree, type TreeNode } from '../../src/huaanwork-host/native.ts'
 import { getAgentsDirectory, sessionSendBlockers, setAgentsDirectory } from '../../src/huaanwork-host/sessions.ts'
 import { createAgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 import { readPendingWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
+import { WORKSPACE_SCAN_DEPTH } from '../../src/client-huaanwork/logic/outcomeCheck.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 
 const ALL_METHODS = [
   'workspace.open', 'workspace.close',
-  'session.send', 'session.cancel', 'session.approve', 'session.reject', 'session.list', 'session.open', 'session.remove', 'session.new', 'session.resume',
+  'session.send', 'session.cancel', 'session.approve', 'session.reject', 'session.exitPlanMode', 'session.answerInput', 'session.list', 'session.open', 'session.remove', 'session.new', 'session.resume',
   'settings.get', 'settings.set',
   'auth.status', 'auth.register', 'auth.login', 'auth.logout', 'auth.changePassword',
   'plugin.add', 'plugin.remove', 'plugin.list',
@@ -34,10 +35,10 @@ const ALL_METHODS = [
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('54 个方法全部登记,无遗漏无重复', () => {
+  test('56 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(54)
+    expect(ROUTE_TABLE).toHaveLength(56)
   })
 
   test('status.get 返回 ready: true', async () => {
@@ -72,7 +73,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 54 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 56 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -86,6 +87,8 @@ describe('ROUTE_TABLE registry', () => {
       'session.cancel',
       'session.approve',
       'session.reject',
+      'session.exitPlanMode',
+      'session.answerInput',
       'session.list',
       'session.open',
       'session.remove',
@@ -133,7 +136,7 @@ describe('ROUTE_TABLE registry', () => {
       'plugin.add',
       'plugin.remove',
     ])
-    expect(implemented).toHaveLength(54)
+    expect(implemented).toHaveLength(56)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -185,6 +188,24 @@ describe('native functions', () => {
     const srcNode = tree.find((t) => t.name === 'src')!
     expect(srcNode.isDir).toBe(true)
     expect(srcNode.children?.some((c) => c.name === 'index.ts')).toBe(true)
+  })
+
+  test('listTree 在扫描深度下列到相对深度 7,再深一层不列出', () => {
+    // 与 outcomeCheck 的契约一致:listTree 展开 level < depth 的目录 ⇒ 树覆盖到相对 depth + 1。
+    const root = mkdtempSync(join(tmpdir(), 'hw-native-depth-'))
+    const flatten = (nodes: readonly TreeNode[]): string[] =>
+      nodes.flatMap((node) => [node.path, ...flatten(node.children ?? [])])
+    try {
+      const six = join(root, 'a', 'b', 'c', 'd', 'e', 'f')
+      mkdirSync(join(six, 'g'), { recursive: true })
+      writeFileSync(join(six, 'six.txt'), 'six')
+      writeFileSync(join(six, 'g', 'seven.txt'), 'seven')
+      const paths = flatten(listTree(root, WORKSPACE_SCAN_DEPTH))
+      expect(paths).toContain(join(six, 'six.txt'))
+      expect(paths).not.toContain(join(six, 'g', 'seven.txt'))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 

@@ -3,14 +3,40 @@ import { spawnSync } from "node:child_process";
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { capToolOutput } from "@huaanwork/policy/truncate";
 
+import { isShellTool, resultTextFailed, shellCommandOf } from "../client-huaanwork/logic/commandOutcome.ts";
+import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
+import {
+  createGitWorkBudget,
+  GIT_SNAPSHOT_BUDGET_MS,
+  GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS,
+  type GitWorkBudget,
+} from "./git-budget.ts";
+
 type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
-  | { event: "tool/start"; name: string; callId?: string; sessionId?: string }
-  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; sessionId?: string }
+  | { event: "reasoning"; text: string; sessionId?: string; final?: true }
+  | {
+      event: "tool/start";
+      name: string;
+      callId?: string;
+      sessionId?: string;
+      command?: string;
+      todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+    }
+  | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; text?: string; sessionId?: string; isError?: true }
   | { event: "diff"; text: string; sessionId?: string }
+  | { event: "compaction/done"; sessionId?: string }
+  | { event: "goal/round"; round: number; sessionId?: string }
+  | { event: "goal/round-limit"; round: number; sessionId?: string }
+  | { event: "goal/state"; phase: GoalPhase; roundsStarted?: number; sessionId?: string }
+  | { event: "goal/state"; cleared: true; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string };
 
-type StreamChunk = { type?: string; text?: string };
+type StreamChunk = {
+  type?: string;
+  text?: string;
+  block?: { type?: string; text?: string };
+};
 
 /** dsh 执行对象的 agent 引用：会话身份取 session.id，回落 agent.id（与 host 的 findAgentBySession 同形状）。 */
 type AgentRef = { id?: string; session?: { id?: string } };
@@ -64,6 +90,7 @@ export function apply(ctx: Context): void {
         name: execution.name,
         ...(execution.callId === undefined ? {} : { callId: execution.callId }),
         ...(sessionId === undefined ? {} : { sessionId }),
+        ...startDetail(execution),
       });
       const result = await next();
       const capped = capResult(result);
@@ -72,7 +99,8 @@ export function apply(ctx: Context): void {
         name: execution.name,
         ...(execution.callId === undefined ? {} : { callId: execution.callId }),
         ...(sessionId === undefined ? {} : { sessionId }),
-        ...(capped.truncated ? { truncated: true } : {}),
+        ...(capped.truncated ? { truncated: true, text: capped.text } : {}),
+        ...(toolFailed(execution.name, result) ? { isError: true as const } : {}),
       });
       if (execution.name === "git_diff") {
         emit(ctx, { event: "diff", text: capped.text, ...(sessionId === undefined ? {} : { sessionId }) });
@@ -83,6 +111,47 @@ export function apply(ctx: Context): void {
     }) as never,
     { global: true, prepend: true },
   );
+
+  // 压缩收尾信号：compaction/end 只写会话日志，不经 llm/stream。无 error 才算压缩完成，失败不提示。
+  ctx.on("session/event", ((session: { id?: string } | undefined, event: { type?: string; data?: unknown } | undefined) => {
+    const sessionId = typeof session?.id === "string" && session.id ? session.id : undefined;
+    const scope = sessionId === undefined ? {} : { sessionId };
+    if (event?.type === "compaction/end") {
+      if (objectValue(event.data).error !== undefined) return;
+      emit(ctx, { event: "compaction/done", ...scope });
+      return;
+    }
+    // 目标续轮信号：官方 goal-round-driver 入队的轮次消息（source.kind=goal，round>0）进入会话时即一轮开始；
+    // 到上限时驱动器把目标记为 blocked/round-limit。这里只转述，不另写续跑器。
+    if (event?.type === "user/message") {
+      const source = objectValue(objectValue(event.data).source);
+      if (source.kind === "goal" && typeof source.round === "number" && source.round > 0) {
+        emit(ctx, { event: "goal/round", round: source.round, ...scope });
+      }
+      return;
+    }
+    if (event?.type === "goal/change") {
+      const data = objectValue(event.data);
+      // 清空墓碑没有 goal / phase：告诉客户端忘掉该会话的目标，避免 active 永久抑制结论。
+      if (data.operation === "clear") {
+        emit(ctx, { event: "goal/state", cleared: true, ...scope });
+        return;
+      }
+      const goal = objectValue(data.goal);
+      const phase = goal.phase;
+      if (!isGoalPhase(phase)) return;
+      if (phase === "blocked" && objectValue(goal.blockedReason).code === "round-limit" && typeof data.roundsStarted === "number") {
+        // 先发专用停止事件：客户端据此只写「已停在第 N 轮」，随后到达的 blocked 状态不再补写结论。
+        emit(ctx, { event: "goal/round-limit", round: data.roundsStarted, ...scope });
+      }
+      emit(ctx, {
+        event: "goal/state",
+        phase,
+        ...(typeof data.roundsStarted === "number" ? { roundsStarted: data.roundsStarted } : {}),
+        ...scope,
+      });
+    }
+  }) as never, { global: true });
 
   ctx.on("agent/status", ((payload: { status?: string; agent?: AgentRef }) => {
     if (payload?.status !== "idle") return;
@@ -112,10 +181,26 @@ async function* mapTokens(
   stream: AsyncIterable<StreamChunk>,
 ): AsyncIterable<StreamChunk> {
   for await (const chunk of stream) {
-    // 非回合流（compaction / session-title 等辅助模型调用）的 text-delta 不是回合产出：
-    // 照常透传 chunks，但不发 token 事件——否则会被运行收集器按 sessionId 误归集为该次任务的产出。
+    // 非回合流（compaction / session-title 等辅助模型调用）的 text-delta / reasoning 不是回合产出：
+    // 照常透传 chunks，但不发 token 或 reasoning 事件——否则会被运行收集器按 sessionId 误归集为该次任务的产出。
     if (purpose === undefined && chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
       emit(ctx, { event: "token", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
+    }
+    if (purpose === undefined && chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
+      emit(ctx, { event: "reasoning", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
+    }
+    if (
+      purpose === undefined
+      && chunk?.type === "block-end"
+      && chunk.block?.type === "reasoning"
+      && typeof chunk.block.text === "string"
+    ) {
+      emit(ctx, {
+        event: "reasoning",
+        text: chunk.block.text,
+        final: true,
+        ...(sessionId === undefined ? {} : { sessionId }),
+      });
     }
     yield chunk;
   }
@@ -140,25 +225,39 @@ function emitGitDiff(ctx: Context, sessionId: string | undefined): void {
   }
 }
 
-function workspaceDiff(root: string): string | undefined {
-  const tracked = spawnSync("git", ["diff"], { cwd: root, encoding: "utf8" });
-  if (tracked.error) return undefined;
+/**
+ * One synchronous diff snapshot. Every git call shares {@link createGitWorkBudget}'s
+ * deadline, so a huge untracked tree degrades to a tracked-only diff instead of
+ * holding the Host loop long enough for the 2 s liveness probe to time out.
+ * The budget is injectable so tests can isolate the untracked-file cap from timing.
+ */
+export function workspaceDiff(root: string, budget: GitWorkBudget = createGitWorkBudget()): string | undefined {
+  const tracked = runGit(root, ["diff"], budget);
+  if (!tracked || tracked.error) return undefined;
   const parts = [tracked.stdout ?? ""];
-  const status = spawnSync("git", ["status", "--porcelain", "-uall"], { cwd: root, encoding: "utf8" });
-  if (!status.error) {
+  const status = runGit(root, ["status", "--porcelain", "-uall"], budget);
+  if (status && !status.error) {
     const empty = process.platform === "win32" ? "NUL" : "/dev/null";
+    let untrackedDiffs = 0;
     for (const line of (status.stdout ?? "").split(/\r?\n/)) {
+      if (untrackedDiffs >= GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS || budget.remainingMs() <= 0) break;
       const file = porcelainUntrackedPath(line);
       if (!file) continue;
-      const extra = spawnSync("git", ["diff", "--no-index", "--", empty, file], {
-        cwd: root,
-        encoding: "utf8",
-      });
-      if (extra.error) continue;
+      untrackedDiffs += 1;
+      const extra = runGit(root, ["diff", "--no-index", "--", empty, file], budget);
+      if (!extra || extra.error) continue;
       parts.push(extra.stdout ?? "");
     }
   }
   return parts.join("");
+}
+
+/** Never call spawnSync with `timeout: 0` (Node reads that as "no timeout"). */
+function runGit(root: string, args: string[], budget: GitWorkBudget) {
+  // performance.now() is fractional; spawnSync requires an unsigned integer.
+  const timeout = Math.min(GIT_SNAPSHOT_BUDGET_MS, Math.ceil(budget.remainingMs()));
+  if (timeout <= 0) return undefined;
+  return spawnSync("git", args, { cwd: root, encoding: "utf8", timeout });
 }
 
 function porcelainUntrackedPath(line: string): string | undefined {
@@ -174,6 +273,33 @@ function porcelainUntrackedPath(line: string): string | undefined {
   }
   if (!path || path.endsWith("/")) return undefined;
   return path;
+}
+
+const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
+
+/** tool/start 的附加信息:todo_write 的待办列表、bash / pwsh 的 command 参数。 */
+function startDetail(execution: ToolExecution): Partial<Extract<RpcEvent, { event: "tool/start" }>> {
+  const args = objectValue(execution.arguments);
+  if (execution.name === "todo_write" && Array.isArray(args.todos)) {
+    const todos = args.todos.flatMap((entry) => {
+      const todo = objectValue(entry);
+      return typeof todo.content === "string" && typeof todo.status === "string" && TODO_STATUSES.has(todo.status)
+        ? [{ content: todo.content, status: todo.status as "pending" | "in_progress" | "completed" }]
+        : [];
+    });
+    return { todos };
+  }
+  const command = shellCommandOf(execution.name, execution.arguments);
+  return command === undefined ? {} : { command };
+}
+
+/** 工具报错,或 shell 结果文本里已带失败标记。失败标记在截断前从原文读取。 */
+function toolFailed(name: string, result: ToolResult): boolean {
+  if (result.isError === true) return true;
+  if (!isShellTool(name)) return false;
+  const value = objectValue(result.value);
+  const text = typeof value.stdout === "string" ? value.stdout : contentText(result);
+  return resultTextFailed(`${text}\n${errorText(result)}`);
 }
 
 function emit(ctx: Context, event: RpcEvent): void {
@@ -194,6 +320,10 @@ function sessionIdOfOptions(options: unknown): string | undefined {
 function purposeOfOptions(options: unknown): string | undefined {
   const purpose = (options as { purpose?: unknown } | undefined)?.purpose;
   return typeof purpose === "string" && purpose ? purpose : undefined;
+}
+
+function isGoalPhase(value: unknown): value is GoalPhase {
+  return value === "active" || value === "paused" || value === "blocked" || value === "complete";
 }
 
 /** agent 引用的会话身份（session.id 优先，回落 agent.id）已下沉到 @huaanwork/policy/channels。 */

@@ -21,8 +21,9 @@ interface CompositionPatch {
 }
 
 /**
- * Guardrail 锁层 patch 的 19 个 id'd 行(profile.ts 锁层 push 逐字)——守卫按这份
- * 清单识别锁层;改锁行 id 必须同步这里(守卫会红)。
+ * Guardrail 锁层 patch 的 id'd 行(profile.ts 锁层 push 逐字)——守卫按这份
+ * 清单识别锁层;改锁行 id 必须同步这里(守卫会红)。`user-questions` 已重新启用,
+ * 不再属于锁层。
  * 锁层 shell 跟随 process.platform,因为 profile 的 shell 补丁读的是它;prepareDesktopProfile 的 'darwin' 参数不改变这一行。
  */
 const GUARDRAIL_LOCK_IDS: ReadonlySet<string> = new Set([
@@ -33,6 +34,12 @@ const GUARDRAIL_LOCK_IDS: ReadonlySet<string> = new Set([
   'tool-fs',
   'tool-fs-search',
   process.platform === 'win32' ? 'tool-pwsh' : 'tool-bash',
+  'plan-mode',
+  'tool-todo',
+  'tool-goal',
+  'goal',
+  'tool-result-pruner',
+  'compaction-basic',
   'hmr',
   'jobs',
   'tool-jobs',
@@ -42,7 +49,6 @@ const GUARDRAIL_LOCK_IDS: ReadonlySet<string> = new Set([
   'workflow-ptc',
   'tool-workflow',
   'tool-ralph',
-  'user-questions',
   'fs-sandbox',
   'sandbox-policy',
 ])
@@ -153,7 +159,7 @@ describe('market composition order (provider layer before guardrail lock layer)'
     const order = assertMarketCompositionOrder(patches)
 
     expect(prepared.market.effective).toBe('disabled')
-    // 默认 disabled:无 market row;锁层连续 20 项(19 个 id'd 行 + 1 个 insert 块),
+    // 默认 disabled:无 market row;锁层连续 19 项(18 个 id'd 行 + 1 个 insert 块),
     // 其后是 Desktop 应用写 config 层(settings 等,profile.ts:1024 起)——非本断言范围。
     expect(order.marketPatchCount).toBe(0)
     expect(order.lockLayerSize).toBe(GUARDRAIL_LOCK_IDS.size + 1)

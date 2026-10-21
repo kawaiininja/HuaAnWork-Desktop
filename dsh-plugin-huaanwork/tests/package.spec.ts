@@ -159,7 +159,7 @@ describe('published package surface', () => {
     }
     const dshmarketResolutions = resolutionKeys.filter(k => k.startsWith('dshmarket@npm:'))
     expect(dshmarketResolutions).toHaveLength(1)
-    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.66.28')
+    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.66.38')
 
     const stableManifest = JSON.parse(readFileSync(
       new URL('dsh-plugin-desktop/package.json', workspaceRoot), 'utf8',
@@ -168,8 +168,8 @@ describe('published package surface', () => {
       new URL('dsh-plugin-huaanwork/package.json', workspaceRoot), 'utf8',
     )) as { dependencies?: Record<string, string> }
 
-    expect(stableManifest.dependencies?.dshmarket).toBe('1.66.28')
-    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.66.28')
+    expect(stableManifest.dependencies?.dshmarket).toBe('1.66.38')
+    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.66.38')
     expect(huaanworkManifest.dependencies?.dshmarket).toBe(stableManifest.dependencies?.dshmarket)
   })
 
@@ -1036,6 +1036,10 @@ describe('published package surface', () => {
     expect(manifest.scripts?.['check:win-package:platform']).toContain('tests/update-download.spec.ts')
     expect(manifest.scripts?.['check:win-package:platform']).toContain('tests/windows-console-host.spec.ts')
     expect(manifest.scripts?.['check:win-package:platform']).toContain('tests/windows-volume-diagnostics.spec.ts')
+    expect(manifest.scripts?.['check:win-package:platform']).toContain('tests/host-liveness.spec.ts')
+    expect(manifest.scripts?.['check:win-package:platform']).toContain('tests/host-process.spec.ts')
+    expect(manifest.scripts?.['check:win-package:platform']).not.toContain('tests/host-liveness-win.spec.ts')
+    expect(manifest.scripts?.['test:host-liveness-win']).toBe('vitest run tests/host-liveness-win.spec.ts')
     expect(manifest.scripts?.['check:win-package:platform']).not.toContain('verify:win-minimal-pty')
     expect(manifest.scripts?.['check:win-package:platform']).toContain('yarn run verify:closure')
     expect(manifest.scripts?.['check:mac-package:platform']).toContain('yarn workspace dsh-community-market build')
@@ -1136,6 +1140,10 @@ describe('published package surface', () => {
     expect(windowsJob).not.toContain('- run: yarn check')
     expect(windowsJob).toContain('workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]')
     expect(windowsJob).toContain('- run: yarn workspace ${{ matrix.workspace }} check:win-package:platform')
+    expect(windowsJob).toContain('timeout-minutes: 60')
+    expect(windowsJob).toContain("if: matrix.workspace == 'dsh-plugin-huaanwork'")
+    expect(windowsJob).toContain('timeout-minutes: 5')
+    expect(windowsJob).toContain('yarn workspace dsh-plugin-huaanwork test:host-liveness-win')
     expect(windowsJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:win')
     expect(windowsJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:win-portable')
     expect(windowsJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')

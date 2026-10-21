@@ -1,10 +1,21 @@
 /** Electron owns the child lifetime; the child owns the unchanged DSH Web server. */
 import { serializeHostEnvironment } from './host-launch-environment.ts'
-import { utilityProcess } from 'electron'
+import { utilityProcess, type IpcMainEvent } from 'electron'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import { StringDecoder } from 'node:string_decoder'
 import { HostRpc } from './host-rpc.ts'
+import {
+  createHostExitGate,
+  HOST_LIVENESS_CHANNEL,
+  HOST_LIVENESS_READ_CHANNEL,
+  HOST_LIVENESS_STOP_CHANNEL,
+  HOST_LIVENESS_TURNS_CHANNEL,
+  probeAnswered,
+  reduceLiveness,
+  type Liveness,
+} from './huaanwork-host/host-liveness.ts'
 import { bindNativeRuntime, runtimeSnapshot } from './host-runtime-bridge.ts'
 import type { DesktopHostOptions } from './host-bootstrap.ts'
 import type { DesktopRuntime } from './runtime.ts'
@@ -19,6 +30,16 @@ export interface IsolatedHostOptions {
   bindHost(host: DesktopStartupGenerationHost): void
   requestQuit(code: number): void
   onFailure(error: Error, exit: IsolatedHostExit): void
+  /**
+   * The liveness dialog's confirmed stop ended the Host. Neutral by design: no
+   * recovery dialog and no automatic restart, only a plain record of the stop.
+   */
+  onStoppedByUser?(exit: IsolatedHostExit): void
+  /**
+   * Test seam: the Electron surface the liveness probe, dialog, and renderer
+   * publish would use. Production leaves it unset and looks `electron` up.
+   */
+  livenessApi?: ElectronLivenessApi
 }
 
 /** What an unexpected Host exit leaves behind for evidence. */
@@ -43,6 +64,126 @@ export function formatUnexpectedHostExit(error: Error, exit: IsolatedHostExit): 
   return tail === '' ? error.message : `${error.message}\nLast DSH Host stderr:\n${tail}`
 }
 
+const requireElectron = createRequire(import.meta.url)
+
+export type ElectronLivenessApi = {
+  ipcMain?: {
+    on(channel: string, listener: (event: IpcMainEvent, value: unknown) => void): void
+    handle(channel: string, listener: () => unknown): void
+    removeListener(channel: string, listener: (event: IpcMainEvent, value: unknown) => void): void
+    removeHandler(channel: string): void
+    removeAllListeners(channel: string): void
+  }
+  dialog?: {
+    showMessageBox(options: {
+      type: 'warning'
+      message: string
+      buttons: string[]
+      cancelId: number
+      defaultId: number
+    }): Promise<{ response: number }>
+  }
+  BrowserWindow?: {
+    getAllWindows(): Array<{ isDestroyed(): boolean; webContents: { send(channel: string, payload: unknown): void } }>
+  }
+}
+
+function electronLivenessApi(): ElectronLivenessApi {
+  try { return requireElectron('electron') as ElectronLivenessApi }
+  catch { return {} }
+}
+
+function publishHostLiveness(state: Liveness, api: ElectronLivenessApi = electronLivenessApi()): void {
+  const windows = api.BrowserWindow?.getAllWindows?.()
+  if (!windows) return
+  const payload = { phase: state.phase, turns: state.turns }
+  for (const win of windows) {
+    if (!win.isDestroyed()) win.webContents.send(HOST_LIVENESS_CHANNEL, payload)
+  }
+}
+
+/**
+ * Two-second probe of the isolated Host. A live pid, an open port, or stderr is not an answer.
+ * The Electron surface is injectable so the stop dialog and mark-before-kill ordering can be
+ * unit-tested without a running Electron main process.
+ */
+export function beginHostLiveness(
+  rpc: HostRpc,
+  child: { kill(): boolean },
+  onUserStop: () => void,
+  api: ElectronLivenessApi = electronLivenessApi(),
+): () => void {
+  let state: Liveness = { phase: 'ok', turns: 0, lastOkMs: Date.now() }
+  let closed = false
+  let stoppedByUser = false
+  const apply = (event: { kind: 'probe-ok' | 'probe-miss' | 'turn-count'; atMs: number; turns?: number }) => {
+    if (closed || stoppedByUser) return
+    const next = reduceLiveness(state, event)
+    const changed = next.phase !== state.phase || next.turns !== state.turns
+    state = next
+    if (changed) publishHostLiveness(state, api)
+  }
+  const onTurns = (_event: IpcMainEvent, turns: unknown) => {
+    if (typeof turns !== 'number' || !Number.isFinite(turns) || turns < 0) return
+    apply({ kind: 'turn-count', atMs: Date.now(), turns: Math.floor(turns) })
+  }
+  const onRead = () => ({ phase: state.phase, turns: state.turns })
+  const onStop = async () => {
+    if (closed || state.phase !== 'stoppable' || state.turns <= 0) return false
+    const turns = state.turns
+    const dialog = api.dialog
+    if (typeof dialog?.showMessageBox !== 'function') return false
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      message: `将终止 ${turns} 个未结束会话`,
+      buttons: ['终止', '取消'],
+      cancelId: 1,
+      defaultId: 1,
+    })
+    if (response !== 0 || closed || state.phase !== 'stoppable' || state.turns <= 0) return false
+    // The dialog's window may be unfocused, in which case the attention notice is
+    // the only signal. The focused window keeps its banner, so publish the stop
+    // before the kill: it must replace "unresponsive" with the neutral note there too.
+    stoppedByUser = true
+    state = { ...state, phase: 'stopped' }
+    // Mark the reason before the kill: the exit handler runs asynchronously and
+    // must never mistake the user's stop for an unexpected Host crash.
+    onUserStop()
+    publishHostLiveness(state, api)
+    child.kill()
+    return true
+  }
+  const ipcMain = api.ipcMain
+  if (ipcMain && typeof ipcMain.on === 'function' && typeof ipcMain.handle === 'function') {
+    ipcMain.removeHandler(HOST_LIVENESS_READ_CHANNEL)
+    ipcMain.removeHandler(HOST_LIVENESS_STOP_CHANNEL)
+    ipcMain.removeAllListeners(HOST_LIVENESS_TURNS_CHANNEL)
+    ipcMain.on(HOST_LIVENESS_TURNS_CHANNEL, onTurns)
+    ipcMain.handle(HOST_LIVENESS_READ_CHANNEL, onRead)
+    ipcMain.handle(HOST_LIVENESS_STOP_CHANNEL, onStop)
+  }
+  publishHostLiveness(state, api)
+  const timer = setInterval(() => {
+    if (closed || stoppedByUser) return
+    void rpc.call('status', [], undefined, 2_000).then(
+      value => {
+        const atMs = Date.now()
+        if (probeAnswered(value)) apply({ kind: 'probe-ok', atMs })
+        else apply({ kind: 'probe-miss', atMs })
+      },
+      () => { apply({ kind: 'probe-miss', atMs: Date.now() }) },
+    )
+  }, 2_000)
+  return () => {
+    if (closed) return
+    closed = true
+    clearInterval(timer)
+    ipcMain?.removeListener(HOST_LIVENESS_TURNS_CHANNEL, onTurns)
+    ipcMain?.removeHandler(HOST_LIVENESS_READ_CHANNEL)
+    ipcMain?.removeHandler(HOST_LIVENESS_STOP_CHANNEL)
+  }
+}
+
 export async function startIsolatedDesktopHost(options: IsolatedHostOptions): Promise<void> {
   const forkedAt = performance.now()
   const child = utilityProcess.fork(fileURLToPath(new URL('./host-process-entry.js', import.meta.url)), [], {
@@ -63,25 +204,35 @@ export async function startIsolatedDesktopHost(options: IsolatedHostOptions): Pr
   const releaseNative = bindNativeRuntime(rpc, options.runtime)
   rpc.handle('certificate', () => options.prepareCertificate())
   rpc.handle('quit', ([code]) => { setImmediate(() => options.requestQuit(code)) })
-  let stopping = false
+  const exitGate = createHostExitGate()
   let exited = false
-  let booted = false
+  let stopLiveness = () => {}
   let resolveExit!: () => void
   const exit = new Promise<void>(resolve => { resolveExit = resolve })
   child.once('exit', (code) => {
+    stopLiveness()
     exited = true
     rpc.close(`DSH Host exited (${code})`)
     resolveExit()
-    if (!stopping && booted) {
+    const exitInfo: IsolatedHostExit = {
+      exitCode: code,
+      uptimeMs: Math.max(0, performance.now() - forkedAt),
+      stderrTail,
+    }
+    const disposition = exitGate.disposition()
+    if (disposition === 'failure') {
       options.onFailure(
         new Error(`DSH Host exited (${code}); restart the application to reconnect`),
-        { exitCode: code, uptimeMs: Math.max(0, performance.now() - forkedAt), stderrTail },
+        exitInfo,
       )
+    } else if (disposition === 'user-stop') {
+      options.onStoppedByUser?.(exitInfo)
     }
   })
   let stopTask: Promise<void> | undefined
   const stop = (): Promise<void> => stopTask ??= (async () => {
-    stopping = true
+    exitGate.markStopping()
+    stopLiveness()
     if (!exited) {
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 3_000)
@@ -101,7 +252,8 @@ export async function startIsolatedDesktopHost(options: IsolatedHostOptions): Pr
   try {
     const { desktopLaunchEnvironment, ...host } = options.host
     await rpc.call('boot', [{ ...host, launchEnvironmentLayers: serializeHostEnvironment(desktopLaunchEnvironment) }, runtimeSnapshot(options.runtime), options.rendererToken])
-    booted = true
+    exitGate.markBooted()
+    stopLiveness = beginHostLiveness(rpc, child, () => exitGate.markStoppedByUser(), options.livenessApi)
   } catch (cause) {
     await stop()
     throw cause

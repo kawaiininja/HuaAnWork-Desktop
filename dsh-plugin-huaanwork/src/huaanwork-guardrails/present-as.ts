@@ -20,6 +20,9 @@ const ALLOWED_TOOLS = new Set([
   "skill",
   "subagent",
   "todo_write",
+  "get_goal",
+  "create_goal",
+  "update_goal",
   "git_status",
   "git_diff",
   "git_branch",
@@ -29,6 +32,9 @@ const ALLOWED_TOOLS = new Set([
   "web_fetch",
   "screenshot",
   "call_host_tool",
+  "propose_plan",
+  "request_input",
+  "exit_plan_mode",
 ]);
 
 type ToolsService = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:584(ToolRuntime.presentAs)
@@ -47,7 +53,7 @@ type Agent = {
 
 export type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts(Cordis ctx 无单独类型导出)
   huaanworkAttachments?: AttachmentMaps;
-  huaanworkEmit?: (event: { event: "session/end"; ok: false; error: string }) => void;
+  huaanworkEmit?: (event: { event: "session/end"; ok: false; error: string; sessionId?: string }) => void;
   tools: {
     presentAs(mode: ToolPresentationMode): () => void;
     schemas?(): readonly { name?: string }[];
@@ -182,10 +188,12 @@ export function apply(ctx: Context): void {
   ctx.on("agent/pre-step", (event, next) => {
     const agent = event?.agent ?? ctx.agents?.list()[0];
     if (agent?.ctx?.get?.("tools")?.schemas().some((schema) => schema.name === "run_code")) {
+      const sessionId = sessionIdOfAgentRef(agent);
       ctx.huaanworkEmit?.({
         event: "session/end",
         ok: false,
         error: "Code mode is disabled",
+        ...(sessionId ? { sessionId } : {}),
       });
       agent.cancel?.({ kind: "parent" });
       return { kind: "reject" };

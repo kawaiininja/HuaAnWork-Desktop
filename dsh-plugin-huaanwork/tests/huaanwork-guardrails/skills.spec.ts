@@ -2,12 +2,25 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { afterEach, test } from "vitest";
 
+import {
+  childrenOf,
+  forgetChildSession,
+  noteCallerSession,
+  resetChildSessionRegistry,
+} from "../../src/huaanwork-host/child-sessions.ts";
 import { apply as applyLimits } from "../../src/huaanwork-guardrails/limits.ts";
 import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
-import { SYSTEM_SKILLS, apply as applySkills, bundledSkillDir, exploreAllowList, getBundledSkill, listBundledSkills, parentVisibleExploreTranscript, parseSkillMarkdown, readSkillToggles, registerBundledSkill, scanBundledSkillEntries, serializeSkillMarkdown, setSkillToggle, shellToolName, testFixAllowList } from "../../src/huaanwork-guardrails/skills.ts";
+import { SYSTEM_SKILLS, apply as applySkills, bundledSkillDir, exploreAllowList, getBundledSkill, listBundledSkills, parentVisibleExploreTranscript, parseSkillMarkdown, readSkillToggles, registerBundledSkill, scanBundledSkillEntries, serializeSkillMarkdown, setBundledSkillRegistrar, setSkillToggle, shellToolName, testFixAllowList } from "../../src/huaanwork-guardrails/skills.ts";
+
+// 这些插件把 registrar / 子会话登记放在模块级或进程级全局:用例之间要复位,
+// 免得多份 harness 的 ctx 互相串(今天靠唯一 id 侥幸,不该依赖)。
+afterEach(() => {
+  setBundledSkillRegistrar(null);
+  resetChildSessionRegistry();
+});
 
 type Schema = { name: string };
 
@@ -164,6 +177,7 @@ function createHarness(options?: { childNames?: readonly string[]; parentNames?:
     childTools,
     cancelled,
     emitted,
+    emit,
     async invokeSkill(agent: Agent, name: string) {
       return emitWaterfall("tools/pre-execute", { name: "skill", arguments: { name }, agent });
     },
@@ -583,6 +597,102 @@ test("empty persona does not start a subagent", async () => {
 
     assert.equal(originalCalls, 0);
     assert.equal(ctx.huaanworkAgentRequest.current, undefined);
+  }
+});
+
+test("overlapping startActivation calls register each child under its own parent", async () => {
+  const startListeners: Array<(info: unknown) => void> = [];
+  const gates = new Map<string, () => void>();
+  const ctx = {
+    skills: { register: () => () => undefined },
+    on(event: string, listener: (info: unknown) => void) {
+      if (event === "subagent/start") startListeners.push(listener);
+    },
+    subagents: {
+      start: async () => ({}),
+      async startActivation(spec: { request: { parent: { session: { id: string } } }; childId: string }) {
+        await new Promise<void>((resolve) => gates.set(spec.childId, resolve));
+        for (const listener of startListeners) listener({ id: spec.childId, local: true });
+        return { childId: spec.childId };
+      },
+    },
+  };
+  applySkills(ctx as never);
+  const activate = ctx.subagents.startActivation as (spec: unknown) => Promise<unknown>;
+  const first = activate({ request: { parent: { session: { id: "huaanwork-overlap-a" } } }, childId: "overlap-child-a" });
+  const second = activate({ request: { parent: { session: { id: "huaanwork-overlap-b" } } }, childId: "overlap-child-b" });
+  await new Promise((resolve) => setImmediate(resolve));
+  gates.get("overlap-child-a")?.();
+  await first;
+  gates.get("overlap-child-b")?.();
+  await second;
+  assert.deepEqual(childrenOf("huaanwork-overlap-a"), ["overlap-child-a"]);
+  assert.deepEqual(childrenOf("huaanwork-overlap-b"), ["overlap-child-b"]);
+});
+
+test("subagent end drops the child registration so a finished child is never canceled", () => {
+  const startListeners: Array<(info: unknown) => void> = [];
+  const endListeners: Array<(info: unknown) => void> = [];
+  // 真实 subagent/start 载荷只有 { runId, provider, id, local }:父会话从子会话 header 读。
+  const children = new Map<string, unknown>([
+    ["end-child", { session: { header: { parentSession: "end-parent" } } }],
+    ["end-child-2", { session: { header: { parentSession: "end-parent-2" } } }],
+  ]);
+  const ctx = {
+    skills: { register: () => () => undefined },
+    on(event: string, listener: (info: unknown) => void) {
+      if (event === "subagent/start") startListeners.push(listener);
+      if (event === "subagent/end") endListeners.push(listener);
+    },
+    agents: { get: (id: string) => children.get(id) },
+  };
+  applySkills(ctx as never);
+  const emitStart = (id: string) => {
+    for (const listener of startListeners) listener({ runId: `run-${id}`, provider: "spawn", id, local: true });
+  };
+  const emitEnd = (payload: unknown) => {
+    for (const listener of endListeners) listener(payload);
+  };
+
+  emitStart("end-child");
+  emitStart("end-child-2");
+  assert.deepEqual(childrenOf("end-parent"), ["end-child"]);
+  assert.deepEqual(childrenOf("end-parent-2"), ["end-child-2"]);
+
+  // 与 start 成对的结束事件:载荷 id 就是子会话 id,登记表必须随之收缩。
+  emitEnd({ runId: "run-end-child", id: "end-child", stopReason: "completed" });
+  assert.deepEqual(childrenOf("end-parent"), []);
+
+  // 空 id / 缺 id 的结束事件不改动任何登记。
+  emitEnd({ id: "" });
+  emitEnd({});
+  emitEnd({ id: 42 });
+  assert.deepEqual(childrenOf("end-parent-2"), ["end-child-2"]);
+  forgetChildSession("end-child-2");
+});
+
+test("a cold-resumed child stays on its own parent, never the last sibling send", () => {
+  const startListeners: Array<(info: unknown) => void> = [];
+  const agents = new Map<string, unknown>([
+    ["cold-child-with-header", { session: { header: { parentSession: "huaanwork-cold-a" } } }],
+    ["cold-child-no-header", { session: { header: {} } }],
+  ]);
+  const ctx = {
+    skills: { register: () => () => undefined },
+    on(event: string, listener: (info: unknown) => void) {
+      if (event === "subagent/start") startListeners.push(listener);
+    },
+    agents: { get: (id: string) => agents.get(id) },
+  };
+  applySkills(ctx as never);
+  noteCallerSession("huaanwork-cold-b");
+  try {
+    for (const listener of startListeners) listener({ id: "cold-child-with-header", local: true });
+    for (const listener of startListeners) listener({ id: "cold-child-no-header", local: true });
+    assert.deepEqual(childrenOf("huaanwork-cold-a"), ["cold-child-with-header"]);
+    assert.deepEqual(childrenOf("huaanwork-cold-b"), []);
+  } finally {
+    noteCallerSession(undefined);
   }
 });
 

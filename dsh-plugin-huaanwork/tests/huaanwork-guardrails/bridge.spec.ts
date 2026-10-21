@@ -3,10 +3,19 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { test, vi } from "vitest";
+
+// Transparent spawnSync wrapper: the snapshot tests below assert the blocking
+// budget on the real calls; every other test still executes the real binary.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawnSync: vi.fn(actual.spawnSync) };
+});
 
 type StreamChunk =
   | { type: "text-delta"; index: number; text: string }
+  | { type: "reasoning-delta"; index: number; text: string }
+  | { type: "block-end"; index: number; block: { type: "reasoning"; text: string } }
   | { type: "finish"; reason: { kind: string } };
 
 type ToolResult = {
@@ -89,7 +98,10 @@ test("bridge caps tool output on tool/end and does not grow already truncated pa
       content: [{ type: "text", text: huge + "err" }],
     }),
   );
-  assert.equal((capped.content[0]?.text ?? "").length < huge.length + 3, true);
+  const cappedText = capped.content[0]?.text ?? "";
+  assert.equal(cappedText.length < huge.length + 3, true);
+  assert.match(cappedText, /已截断/);
+  assert.equal(cappedText.endsWith("err"), true);
   assert.deepEqual(
     emitted.find((event) => (event as { event?: string }).event === "tool/start"),
     { event: "tool/start", name: "bash", callId: "big" },
@@ -169,6 +181,51 @@ test("bridge diff snapshot includes untracked new files", async () => {
   }
 });
 
+test("a large untracked tree stays within the per-call git timeout and the untracked-diff cap", async () => {
+  const { workspaceDiff } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { createGitWorkBudget, GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS } = await import(
+    "../../src/huaanwork-guardrails/git-budget.ts"
+  );
+  const root = mkdtempSync(join(tmpdir(), "huaanwork-bridge-budget-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "-q", "--template=/dev/null"], { cwd: root }).status, 0);
+    for (let index = 0; index <= GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS; index += 1) {
+      writeFileSync(join(root, `untracked-${index}.txt`), `body ${index}\n`);
+    }
+    vi.mocked(spawnSync).mockClear();
+    const text = workspaceDiff(root, createGitWorkBudget(60_000));
+    assert.ok(text?.includes("untracked-0.txt"), "the first untracked file still reaches the snapshot");
+
+    const calls = vi.mocked(spawnSync).mock.calls;
+    for (const [, , options] of calls) {
+      assert.equal(typeof options?.timeout, "number", "every blocking git call needs a timeout");
+      assert.ok((options?.timeout ?? 0) > 0 && (options?.timeout ?? 0) <= 1_500, "the timeout must stay under 1.5 s");
+    }
+    const untrackedDiffs = calls.filter(([command, argv]) =>
+      command === "git" && Array.isArray(argv) && argv[0] === "diff" && argv[1] === "--no-index"
+    );
+    assert.equal(
+      untrackedDiffs.length,
+      GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS,
+      "the snapshot stops after the configured number of untracked diffs",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a spent git budget skips spawning instead of passing timeout: 0", async () => {
+  const { workspaceDiff } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { createGitWorkBudget } = await import("../../src/huaanwork-guardrails/git-budget.ts");
+  vi.mocked(spawnSync).mockClear();
+  assert.equal(workspaceDiff(process.cwd(), createGitWorkBudget(0)), undefined);
+  assert.equal(
+    vi.mocked(spawnSync).mock.calls.length,
+    0,
+    "spawnSync reads timeout: 0 as 'no timeout', so a spent budget must not call it at all",
+  );
+});
+
 test("write lands on disk and the diff snapshot is nonempty", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
   const root = mkdtempSync(join(tmpdir(), "huaanwork-bridge-write-"));
@@ -243,4 +300,175 @@ test("bridge skips token events for auxiliary streams (purpose compaction/sessio
     emitted.filter((event) => (event as { event?: string }).event === "token").length,
     1,
   );
+});
+
+test("bridge forwards user-turn reasoning and skips purposed calls", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const wrap = listeners["llm/stream"]?.[0] as (
+    options: { sessionId?: string; purpose?: string },
+    next: () => AsyncIterable<StreamChunk>,
+  ) => AsyncIterable<StreamChunk>;
+  async function* userTurn() {
+    yield { type: "reasoning-delta" as const, index: 0, text: "先" };
+    yield { type: "reasoning-delta" as const, index: 0, text: "看" };
+    yield { type: "block-end" as const, index: 0, block: { type: "reasoning" as const, text: "先看" } };
+  }
+  for await (const _chunk of wrap({ sessionId: "huaanwork-0123456789abcdef" }, userTurn)) {
+    // drain
+  }
+  async function* titled() {
+    yield { type: "reasoning-delta" as const, index: 0, text: "标题思考" };
+    yield { type: "text-delta" as const, index: 1, text: "标题" };
+  }
+  for await (const _chunk of wrap({ purpose: "session-title" }, titled)) {
+    // drain
+  }
+  assert.deepEqual(
+    emitted.filter((event) => (event as { event?: string }).event === "reasoning"),
+    [
+      { event: "reasoning", text: "先", sessionId: "huaanwork-0123456789abcdef" },
+      { event: "reasoning", text: "看", sessionId: "huaanwork-0123456789abcdef" },
+      { event: "reasoning", text: "先看", sessionId: "huaanwork-0123456789abcdef", final: true },
+    ],
+  );
+  assert.deepEqual(
+    emitted.filter((event) => (event as { event?: string }).event === "token"),
+    [],
+  );
+});
+
+test("compaction purpose does not emit reasoning or tokens", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const wrap = listeners["llm/stream"]?.[0] as (
+    options: { purpose?: string },
+    next: () => AsyncIterable<{ type: "reasoning-delta" | "text-delta"; index: number; text: string }>,
+  ) => AsyncIterable<unknown>;
+  async function* compact() {
+    yield { type: "reasoning-delta" as const, index: 0, text: "压缩思考" };
+    yield { type: "text-delta" as const, index: 1, text: "摘要" };
+  }
+  for await (const _chunk of wrap({ purpose: "compaction" }, compact)) {
+    // drain
+  }
+  assert.equal(emitted.length, 0);
+});
+
+test("bridge tells the client when a compaction finished, and stays silent on failed or other session events", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as (
+    session: { id: string },
+    event: { type: string; data?: { error?: string } },
+  ) => void;
+  assert.equal(typeof onSessionEvent, "function");
+  const session = { id: "huaanwork-0123456789abcdef" };
+  onSessionEvent(session, { type: "compaction/start", data: {} });
+  onSessionEvent(session, { type: "compaction/summary", data: {} });
+  onSessionEvent(session, { type: "compaction/end", data: { error: "summary failed" } });
+  assert.deepEqual(emitted, []);
+  onSessionEvent(session, { type: "compaction/end", data: {} });
+  assert.deepEqual(emitted, [{ event: "compaction/done", sessionId: "huaanwork-0123456789abcdef" }]);
+});
+
+test("bridge reports goal rounds, every goal phase, and the round limit from official session events", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as (
+    session: { id: string },
+    event: { type: string; data?: unknown },
+  ) => void;
+  const session = { id: "huaanwork-0123456789abcdef" };
+  const sessionId = "huaanwork-0123456789abcdef";
+  onSessionEvent(session, { type: "user/message", data: { source: { kind: "user" } } });
+  onSessionEvent(session, { type: "user/message", data: { source: { kind: "goal", goalId: "g", revision: 1, round: 0 } } });
+  assert.deepEqual(emitted, []);
+
+  // All four official phases reach the client, with the round counter when present.
+  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "active" }, roundsStarted: 1 } });
+  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "paused" }, roundsStarted: 1 } });
+  onSessionEvent(session, {
+    type: "goal/change",
+    data: { goal: { phase: "blocked", blockedReason: { code: "model-reported", message: "x" } }, roundsStarted: 2 },
+  });
+  onSessionEvent(session, { type: "goal/change", data: { goal: { phase: "complete" }, roundsStarted: 3 } });
+  assert.deepEqual(emitted, [
+    { event: "goal/state", phase: "active", roundsStarted: 1, sessionId },
+    { event: "goal/state", phase: "paused", roundsStarted: 1, sessionId },
+    { event: "goal/state", phase: "blocked", roundsStarted: 2, sessionId },
+    { event: "goal/state", phase: "complete", roundsStarted: 3, sessionId },
+  ]);
+
+  // A clear tombstone ends the tracked goal instead of leaving the client stuck on `active`.
+  emitted.length = 0;
+  onSessionEvent(session, {
+    type: "goal/change",
+    data: { kind: "goal/change", version: 1, operation: "clear", cleared: { id: "g", revision: 5 }, clearedAt: 1 },
+  });
+  assert.deepEqual(emitted, [{ event: "goal/state", cleared: true, sessionId }]);
+
+  // Continuation rounds keep their labels; the cap keeps the dedicated stop plus the blocked state.
+  emitted.length = 0;
+  onSessionEvent(session, { type: "user/message", data: { source: { kind: "goal", goalId: "g", revision: 1, round: 2 } } });
+  onSessionEvent(session, {
+    type: "goal/change",
+    data: { goal: { phase: "blocked", blockedReason: { code: "round-limit", message: "x" } }, roundsStarted: 4 },
+  });
+  assert.deepEqual(emitted, [
+    { event: "goal/round", round: 2, sessionId },
+    { event: "goal/round-limit", round: 4, sessionId },
+    { event: "goal/state", phase: "blocked", roundsStarted: 4, sessionId },
+  ]);
+});
+
+test("bridge carries todo_write todos and shell commands on tool/start, and isError on tool/end", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+  const ok = async (): Promise<ToolResult> => ({ isError: false, content: [{ type: "text", text: "ok" }] });
+  const bad = async (): Promise<ToolResult> => ({ isError: true, content: [{ type: "text", text: "boom" }] });
+
+  await execute(
+    {
+      name: "todo_write",
+      callId: "t1",
+      arguments: { todos: [{ content: "写报告", status: "in_progress" }, { content: "核对", status: "weird" }, { content: 3, status: "pending" }] },
+    },
+    ok,
+  );
+  await execute({ name: "bash", callId: "b1", arguments: { command: "pnpm test" } }, bad);
+
+  const starts = emitted.filter((event) => (event as { event?: string }).event === "tool/start");
+  assert.deepEqual(starts[0], {
+    event: "tool/start",
+    name: "todo_write",
+    callId: "t1",
+    todos: [{ content: "写报告", status: "in_progress" }],
+  });
+  assert.deepEqual(starts[1], { event: "tool/start", name: "bash", callId: "b1", command: "pnpm test" });
+  const ends = emitted.filter((event) => (event as { event?: string }).event === "tool/end") as { isError?: boolean }[];
+  assert.equal(ends[0]?.isError, undefined);
+  assert.equal(ends[1]?.isError, true);
+});
+
+test("bridge reads failure markers from the uncapped shell result, past the 32 KiB head cap", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+  const text = (body: string) => async (): Promise<ToolResult> => ({ isError: false, content: [{ type: "text", text: body }] });
+
+  await execute({ name: "bash", callId: "f1", arguments: { command: "pnpm test" } }, text("x".repeat(40 * 1024) + "\n[exit code: 1]"));
+  await execute({ name: "bash", callId: "f2", arguments: { command: "pnpm lint" } }, text("fine\n[exit code: 0]"));
+  await execute({ name: "read", callId: "f3", arguments: { path: "a.md" } }, text("quoted\n[exit code: 1]"));
+  const ends = emitted.filter((event) => (event as { event?: string }).event === "tool/end") as { callId?: string; isError?: boolean }[];
+  assert.equal(ends[0]?.isError, true);
+  assert.equal(ends[1]?.isError, undefined);
+  assert.equal(ends[2]?.isError, undefined);
 });

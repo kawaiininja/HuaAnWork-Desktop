@@ -1,11 +1,10 @@
 import { useState } from "react";
+import { ThinkingPanel } from "./ThinkingPanel.tsx";
+import { toolArgumentLabel } from "./logic/commandOutcome.ts";
+import type { SessionDetailRecord } from "./rpc-types.ts";
 
-/** 会话日志详情记录（与 sidecar session-view 的 detailRecords 对齐）。 */
-export type SessionDetailRecord =
-  | { kind: "user"; time: number; text: string }
-  | { kind: "assistant"; time: number; text: string }
-  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string }
-  | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string };
+/** 会话日志详情记录（与 sidecar session-view 的 detailRecords 对齐；唯一定义在 rpc-types）。 */
+export type { SessionDetailRecord };
 
 /** 历史会话详情视图模型：session.open 的 log/records/summary 组装结果。 */
 export type SessionLogView = {
@@ -138,12 +137,16 @@ function SessionDetailRow({ record }: { record: SessionDetailRecord }) {
       </div>
     );
   }
+  if (record.kind === "thinking") {
+    return <ThinkingPanel thought={record.text} hasAssistantText={true} interrupted={false} historical />;
+  }
   if (record.kind === "tool-call") {
+    const label = toolArgumentLabel(record);
     return (
       <div className="detail-tool" title={record.callId}>
         <span className="detail-tool-mark">▸</span>
         <span className="detail-tool-name">{record.name || "tool"}</span>
-        {record.args ? <code className="detail-tool-args">{record.args}</code> : null}
+        {label ? <code className="detail-tool-args">{label}</code> : null}
       </div>
     );
   }

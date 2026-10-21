@@ -57,6 +57,7 @@ import {
   resolveTheme,
   type ThemePref,
 } from "./logic/accountStatus.ts";
+import { AUTO_CONTINUE_LABEL, PLAN_CARD_NOTE, planExitNote, planModeActive } from "./logic/planConfirm.ts";
 import logoUrl from "./assets/huaan-mark.png";
 import {
   bindTaskSession,
@@ -97,7 +98,61 @@ import {
   unscopedSessions,
 } from "./logic/sessionChannel.ts";
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
+import {
+  hasAssistantTextAfter,
+  interruptTurnItems,
+  nextThinkingSteps,
+  resolveThinking,
+  shouldRenderThinking,
+  thinkingStepsText,
+  withThinkingToggle,
+  type ThinkingSteps,
+} from "./logic/thinkingPanel.ts";
+import { closeOpenInputs, inputCardStatus, settleInputCard, type InputCard } from "./logic/inputCard.ts";
+import { toolRowIcon } from "./logic/commandOutcome.ts";
+import {
+  answerApprovalInTabs,
+  askCardWaitsForClick,
+  hasPendingAsk,
+  resolveActiveTab,
+  type ApprovalCardView,
+} from "./logic/chatTabs.ts";
+import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, sessionStopRequested, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
+import {
+  HOST_UNRESPONSIVE_TEXT,
+  clearFailuresInTabs,
+  hostExitNotice,
+  hostLivenessNotice,
+  type HostLivenessPhase,
+} from "./logic/hostStop.ts";
+import { resolveStopSession, turnStatus } from "./logic/turnStatus.ts";
+import {
+  WORKSPACE_SCAN_DEPTH,
+  appendOutcomeNotes,
+  eventTargetTab,
+  latestUserItemId,
+  lookupSessionCwd,
+  outcomeTargetTab,
+  outcomeWorkspace,
+  shouldCheckTurnOutcome,
+  todoLabel,
+  turnChecks,
+  turnGaps,
+  turnOutcomeNotes,
+  type TodoEntry,
+} from "./logic/outcomeCheck.ts";
+import {
+  INITIAL_GOAL_TURN_STATE,
+  goalRoundDrivesTurn,
+  goalRoundLabel,
+  goalRoundStopped,
+  reduceGoalTurn,
+  type GoalTurnAction,
+  type GoalTurnEvent,
+  type GoalTurnState,
+} from "./logic/goalRound.ts";
 import { runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
+import { ThinkingPanel } from "./ThinkingPanel.tsx";
 
 /**
  * 用户对话会话 id（事件路由用）：huaanwork-chat- 旧会话与 huaanwork-<16hex digest> 新会话。
@@ -120,21 +175,30 @@ type ToolCard = {
   callId?: string;
   status: "start" | "end";
   truncated?: boolean;
+  /** 超长工具输出裁成头尾之后的正文，对话里直接显示。 */
+  output?: string;
+  /** bash / pwsh 的 command 参数与结果是否出错：回合结束核对「要求的命令」用。 */
+  command?: string;
+  isError?: boolean;
 };
 
-type AskCard = {
+/** 审批卡 = 逻辑层展示形状（answered/autoContinue/actionable）+ App 侧的原因、摘要与调用标识。 */
+type AskCard = ApprovalCardView & {
   approvalRequestId: string;
   toolName: string;
   reason?: string;
+  callId?: string;
   summary?: string;
-  answered?: "approve" | "reject";
 };
 
 type ChatItem =
   | { id: number; kind: "user"; text: string }
-  | { id: number; kind: "assistant"; text: string }
+  | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse" }
+  | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse" }
   | { id: number; kind: "tool"; card: ToolCard }
+  | { id: number; kind: "todo"; todos: TodoEntry[] }
   | { id: number; kind: "ask"; card: AskCard }
+  | { id: number; kind: "input"; card: InputCard }
   | { id: number; kind: "note"; text: string };
 
 type SessionRow = {
@@ -258,6 +322,17 @@ function IconSidebar() {
   );
 }
 
+type HostLivenessBridge = {
+  read(): Promise<{ phase: HostLivenessPhase; turns: number }>;
+  onChange(listener: (state: { phase: HostLivenessPhase; turns: number }) => void): () => void;
+  reportTurns(turns: number): void;
+  requestStop(): Promise<boolean>;
+};
+
+function hostLivenessBridge(): HostLivenessBridge | undefined {
+  return (window as unknown as { huaanworkHostLiveness?: HostLivenessBridge }).huaanworkHostLiveness;
+}
+
 function IconRightPane() {
   return (
     <svg viewBox="0 0 16 16" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={1.4} strokeLinecap="round" aria-hidden>
@@ -311,7 +386,38 @@ export default function App() {
   const [keepAwakeUnavailable, setKeepAwakeUnavailable] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
   const [turnActive, setTurnActive] = useState(false);
+  const [hostPhase, setHostPhase] = useState<HostLivenessPhase>("ok");
+  /**
+   * 套接字关闭回调只挂载一次，读不到最新的 hostPhase；用户主动停止的标记放在
+   * ref 里，close 时据此给中性脚注而不是把标签标成失败。
+   */
+  const hostStoppedByUserRef = useRef(false);
+  /** 当前未结束回合的最近一次 reasoning 增量、正文增量或工具结果。句子只由 turnStatus 算出。 */
+  const [turnPulse, setTurnPulse] = useState<{
+    tabId: string;
+    latest: "reasoning" | "text" | "tool" | "quiet";
+    at: number;
+  }>({ tabId: "", latest: "quiet", at: 0 });
+  const [now, setNow] = useState(() => Date.now());
+  const turnTabRef = useRef<string | null>(null);
+  const turnSessionRef = useRef<string | null>(null);
+  /** 目标相位 + 每回合结论闸门；状态机本身在 logic/goalRound.ts，便于脱离界面单测。 */
+  const goalTurnRef = useRef<GoalTurnState>(INITIAL_GOAL_TURN_STATE);
+  const turnEpochRef = useRef(0);
+  const stopSeqRef = useRef(0);
+  const userStopSessionRef = useRef<string | null>(null);
+  const latchOwnerRef = useRef<number | null>(null);
+  /** 取消请求尚未返回。这期间的 session/end 先搁下，返回后才决定算不算用户停止。 */
+  const stopPendingRef = useRef<StopTicket | null>(null);
+  /** 停止对应的那条空闲结束。用户已经发出更新的一轮时，这条结束不能写进新消息。 */
+  const staleIdleRef = useRef<StaleIdle[]>([]);
+  const heldEndsRef = useRef<RpcEvent[]>([]);
+  const applySidecarEventRef = useRef<(event: RpcEvent) => void>(() => {});
   const [activeTab, setActiveTab] = useState<string>("work-1");
+  useEffect(() => {
+    const next = resolveActiveTab(activeTab, chatTabs);
+    if (next !== activeTab) setActiveTab(next);
+  }, [activeTab, chatTabs]);
   const [historyView, setHistoryView] = useState<SessionLogView | null>(null);
   const [sessionMenu, setSessionMenu] = useState<SessionMenu | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -366,6 +472,14 @@ export default function App() {
   const keepAwakeDriver = keepAwakeDriverRef.current;
   const activeProjectIdRef = useRef<string | null>(null);
   const workspaceRef = useRef<string | null>(null);
+  const sessionsRef = useRef<SessionRow[]>([]);
+  /** session.new 返回的目录。列表刷新晚于回合结束，核对先用这份。 */
+  const sessionCwdRef = useRef(new Map<string, string>());
+  function rememberMinted(minted: { sessionId?: string; cwd?: string }) {
+    if (typeof minted.sessionId === "string" && minted.sessionId && typeof minted.cwd === "string" && minted.cwd) {
+      sessionCwdRef.current.set(minted.sessionId, minted.cwd);
+    }
+  }
   const nextId = useRef(1);
   const stopping = useRef(false);
   const sendingRef = useRef(false);
@@ -387,6 +501,14 @@ export default function App() {
   const activeChat = chatTabs.find((tab) => tab.id === activeTab) ?? chatTabs[0];
   const items = activeChat.items;
   const sessionFailed = activeChat.sessionFailed;
+  /** 相位 → 展示决策；`stopped` 是中性终态，不再显示无响应与结束按钮。 */
+  const hostNotice = hostLivenessNotice(hostPhase);
+  const showTurnLine = turnActive && turnPulse.tabId === activeChat.id;
+  const turnLine = turnStatus({
+    latest: turnPulse.latest,
+    runningTool: runningToolName(items),
+    quietMs: Math.max(0, now - turnPulse.at),
+  });
   const slashToken = slashTokenAt(draft, slashCursor);
   const slashOpen = Boolean(slashToken && !isReservedSlash(slashToken.query) && !slashClosed);
   const slashMatches = slashOpen ? slashSkills(slashCatalog, slashToken?.query ?? "").slice(0, 8) : [];
@@ -435,11 +557,6 @@ export default function App() {
       cancelled = true;
     };
   }, [view, ready, sidecarDead]);
-
-  /** 流事件只写当前回合所属的对话标签（事件回调在挂载期注册，需稳定引用）。 */
-  const setLiveItems = useCallback((updater: (prev: ChatItem[]) => ChatItem[]) => {
-    setChatTabs((prev) => prev.map((tab) => (tab.id === liveChatRef.current ? { ...tab, items: updater(tab.items) } : tab)));
-  }, []);
 
   /** 向最近激活的对话标签追加一条提示。 */
   function noteActive(text: string) {
@@ -504,8 +621,9 @@ export default function App() {
           { id, label: task.name, items: [], sessionFailed: false, projectId: task.projectId, pendingPick: false, taskId: task.id },
         ]);
         setActiveTab(id);
-        void rpcCall<{ sessionId?: string }>("session.new", { fresh: true })
+        void rpcCall<{ sessionId?: string; cwd?: string }>("session.new", { fresh: true })
           .then((minted) => {
+            rememberMinted(minted);
             if (typeof minted.sessionId === "string" && minted.sessionId) {
               setChatTabs((prev) =>
                 prev.map((tab) => (tab.id === id && !tab.sessionId ? { ...tab, sessionId: minted.sessionId } : tab)),
@@ -587,26 +705,36 @@ export default function App() {
   /** 子任务删除：级联删会话历史（sidecar 侧）；关闭绑定标签并清选中；维护「chatTabs 非空」不变量。 */
   async function removeSubtask(task: TaskInfo) {
     await removeTask(task.id);
-    if (selectedTaskId === task.id) setSelectedTaskId(null);
-    const remaining = chatTabs.filter((tab) => tab.taskId !== task.id);
-    const needSeed = remaining.length === 0;
-    const removingActive = remaining.length !== chatTabs.length && !remaining.some((tab) => tab.id === activeTab);
-    // 不变量：chatTabs 恒非空——activeChat = chatTabs.find(...) ?? chatTabs[0] 依赖它，
-    // 空数组会让 activeChat 变 undefined 并在渲染时无守护地解引用。过滤后为空必须补种子标签。
-    // 种子标签用中立形态（projectId:null）：绝不用 task.projectId，避免跨工作区 cwd 守卫拒绝首发。
+    setSelectedTaskId((current) => (current === task.id ? null : current));
     const seedId = `work-${nextChatSeq.current}`;
     nextChatSeq.current += 1;
+    const trackedSession = turnSessionRef.current;
+    if (task.sessionId && trackedSession === task.sessionId && canStartStop(stopPendingRef.current)) {
+      const sessionId = task.sessionId;
+      const ticket: StopTicket = { id: stopSeqRef.current + 1, sessionId, epoch: turnEpochRef.current };
+      stopSeqRef.current = ticket.id;
+      turnTabRef.current = null;
+      turnSessionRef.current = null;
+      setTurnActive(false);
+      stopPendingRef.current = ticket;
+      void rpcCall("session.cancel", { sessionId }).then(() => {
+        settleStop(ticket, true);
+      }).catch(() => {
+        settleStop(ticket, false);
+      });
+    } else if (task.sessionId && trackedSession === task.sessionId) {
+      turnTabRef.current = null;
+      turnSessionRef.current = null;
+      setTurnActive(false);
+    }
+    const matchesRemoved = (tab: { taskId?: string; sessionId?: string }) =>
+      Boolean((tab.taskId && tab.taskId === task.id) || (task.sessionId && tab.sessionId === task.sessionId));
+    const seed = { id: seedId, label: "对话", items: [], sessionFailed: false, projectId: null, pendingPick: false };
     setChatTabs((prev) => {
-      const filtered = prev.filter((tab) => tab.taskId !== task.id);
-      return filtered.length > 0
-        ? filtered
-        : [{ id: seedId, label: "对话", items: [], sessionFailed: false, projectId: null, pendingPick: false }];
+      const filtered = prev.filter((tab) => !matchesRemoved(tab));
+      return filtered.length > 0 ? filtered : [seed];
     });
-    if (needSeed) setActiveTab(seedId);
-    else if (removingActive) setActiveTab(remaining[0]?.id ?? "work-1");
     await refreshTasks();
-    // sidecar 已级联删除该子任务的会话日志：同步刷新会话快照，
-    // 否则残留行会被 unscopedSessions 判成游离会话出现在「任务」区，删除时报 session was not found。
     await refreshSessions();
   }
 
@@ -640,7 +768,8 @@ export default function App() {
   /** 启动后为默认对话标签绑定稳定会话（跨重启延续上下文）。 */
   async function bindDefaultTabSessions() {
     try {
-      const minted = await rpcCall<{ sessionId?: string }>("session.new", {});
+      const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", {});
+      rememberMinted(minted);
       if (typeof minted.sessionId === "string" && minted.sessionId) {
         setChatTabs((prev) =>
           prev.map((tab) => (tab.id === "work-1" && !tab.sessionId ? { ...tab, sessionId: minted.sessionId } : tab)),
@@ -720,24 +849,104 @@ export default function App() {
       if (typeof sessionId !== "string" || !sessionId) return undefined;
       return chatTabsRef.current.find((tab) => tab.sessionId === sessionId)?.id;
     };
-    /** sessionId 命中的绑定标签优先，缺省回退 liveChatRef。 */
-    const targetTabFor = (sessionId?: string): string => {
-      const bound = boundTabFor(sessionId);
-      if (bound) return bound;
-      return liveChatRef.current;
-    };
+    /** 带会话 id 的事件只进绑定标签。删掉的会话不再回落到当前对话。 */
+    const targetTabFor = (sessionId?: string): string | undefined =>
+      eventTargetTab(sessionId, chatTabsRef.current, liveChatRef.current, turnSessionRef.current);
     const setChannelItems = (updater: (prev: ChatItem[]) => ChatItem[], sessionId?: string) => {
       const target = targetTabFor(sessionId);
+      if (!target) return;
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: updater(tab.items) } : tab)));
+    };
+    /** 读取本回合的标签与条目；只读状态，不列工作区树。子代理会话不属于任何标签时返回 undefined。 */
+    const readTurnItems = async (sessionId?: string) => {
+      const tabId = outcomeTargetTab(sessionId, chatTabsRef.current, liveChatRef.current);
+      if (!tabId) return undefined;
+      // chatTabsRef 在提交后才同步，可能还看不到同一批事件里的 tool/end。
+      // 函数式更新按队列顺序执行，拿到的 prev 已含这批事件；这里只读取，不改状态。
+      const items = await new Promise<ChatItem[] | undefined>((resolve) => {
+        setChatTabs((prev) => {
+          resolve(prev.find((candidate) => candidate.id === tabId)?.items);
+          return prev;
+        });
+      });
+      if (!items || !items.some((item) => item.kind === "user")) return undefined;
+      return { tabId, items };
+    };
+    /** 读出本回合要核对的内容；只认用户对话标签，工作区树只在确有必核文件时列出。 */
+    const readTurn = async (sessionId?: string, pending?: { tabId: string; items: ChatItem[] }) => {
+      const turn = pending ?? await readTurnItems(sessionId);
+      if (!turn) return undefined;
+      const { tabId, items } = turn;
+      const turnUserId = latestUserItemId(items);
+      const checks = turnChecks(items);
+      const listedCwd = lookupSessionCwd(sessionId, sessionsRef.current, sessionCwdRef.current);
+      const root = outcomeWorkspace(workspaceRef.current, listedCwd);
+      let tree: TreeNode[] = [];
+      const treeKnown = checks.requiredFiles.length === 0 || root.length > 0;
+      if (checks.requiredFiles.length > 0 && root) {
+        try {
+          tree = await listTree(root, WORKSPACE_SCAN_DEPTH);
+        } catch {
+          tree = [];
+        }
+      }
+      return { tabId, turnUserId, items, checks, tree, treeKnown, root };
+    };
+    const appendTurnNotes = (turn: NonNullable<Awaited<ReturnType<typeof readTurn>>>, texts: string[]) => {
+      const notes = texts.map((text) => ({ id: allocId(), kind: "note" as const, text }));
+      // 等待期间用户可能已发出新消息：在最新状态上判断，旧回合的结论不落到新消息之后。
+      setChatTabs((prev) =>
+        prev.map((candidate) =>
+          candidate.id === turn.tabId
+            ? { ...candidate, items: appendOutcomeNotes(candidate.items, turn.turnUserId, notes) as ChatItem[] }
+            : candidate,
+        ),
+      );
+    };
+    /** 回合正常结束：读侧核对用户写明的文件与命令，把结果写进对话；不重跑任何命令。 */
+    const appendTurnOutcome = async (sessionId?: string) => {
+      // 计划模式还在等确认：本回合只提交计划，执行在批准后的下一回合，不写文件/命令核对。
+      // 先判定再列工作区树：计划回合不该为一次注定跳过的核对付 depth-6 的列表 RPC。
+      const pending = await readTurnItems(sessionId);
+      if (!pending || cancelled) return;
+      if (!shouldCheckTurnOutcome(pending.items)) return;
+      const turn = await readTurn(sessionId, pending);
+      if (!turn || cancelled) return;
+      const notes = turnOutcomeNotes(turn.checks, turn.tree, turn.treeKnown, { root: turn.root });
+      if (notes.length === 0) return;
+      appendTurnNotes(turn, notes);
+    };
+    /** 官方续轮到上限停下：把停下的轮数和尚未核对的缺项写进对话，不自动建下一个目标。 */
+    const appendGoalStopped = async (round: number, sessionId?: string) => {
+      const turn = await readTurn(sessionId);
+      if (!turn || cancelled) return;
+      appendTurnNotes(turn, [goalRoundStopped(round, turnGaps(turn.checks, turn.tree, turn.treeKnown, { root: turn.root }))]);
+    };
+    /**
+     * 目标事件进入纯状态机。返回本回合应写的结论：同一用户回合里
+     * `session/end` 与终态 `goal/state` 无论谁先到，都只有第一次拿到 outcome。
+     */
+    const noteGoalEvent = (event: GoalTurnEvent): GoalTurnAction => {
+      const result = reduceGoalTurn(goalTurnRef.current, event);
+      goalTurnRef.current = result.state;
+      return result.action;
     };
     const setChannelSessionFailed = (failed: boolean, sessionId?: string) => {
       const target = targetTabFor(sessionId);
+      if (!target) return;
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, sessionFailed: failed } : tab)));
     };
-    void (async () => {
-      unlisten.push(
-        await onSidecarEvent((event) => {
-          if (cancelled) return;
+    const applyEvent = (event: RpcEvent) => {
+      if (cancelled) return;
+      if (event.event === "session/end" && isStopPending(stopPendingRef.current, event.sessionId)) {
+        heldEndsRef.current.push(event);
+        return;
+      }
+      if (event.event === "session/end") {
+        const consumed = consumeStaleIdle(staleIdleRef.current, event, turnEpochRef.current);
+        staleIdleRef.current = consumed.stale;
+        if (consumed.drop) return;
+      }
           // 后台任务事件：更新任务运行角标并刷新数据；agent 运行另建运行对话标签承载过程与结果。
           if (event.event === "automation/run-start") {
             automationActiveRef.current = true;
@@ -822,9 +1031,69 @@ export default function App() {
           // 用户自身会话（huaanwork-chat- / huaanwork-<digest>）与绑定运行标签的事件照常渲染，
           // 并发 Chat 回合不再被全局布尔误伤（「运行中看直播」的路由前提）。
           if (automationActiveRef.current && !isUserSessionId(eventSessionId) && !boundTab) return;
+          const endsTrackedTurn = event.event === "session/end"
+            && typeof eventSessionId === "string"
+            && eventSessionId.length > 0
+            && turnTabRef.current !== null
+            && targetTabFor(eventSessionId) === turnTabRef.current;
+          const userStopped = event.event === "session/end"
+            && typeof eventSessionId === "string"
+            && eventSessionId.length > 0
+            && eventSessionId === userStopSessionRef.current;
+          // 官方续轮只属于当前跟踪的用户回合时才恢复全局回合态；后台目标不能卡住发送。
+          const goalRoundDrives = event.event === "goal/round"
+            && goalRoundDrivesTurn(eventSessionId, turnSessionRef.current);
           handleEvent(event, allocId, setReady, setChannelItems, setDiff, setTurnActive, setChannelSessionFailed, async () => {
             await refreshSessions();
-          }, sawReady);
+          }, sawReady, endsTrackedTurn, userStopped, goalRoundDrives);
+          if (event.event === "session/end" && endsTrackedTurn) {
+            turnTabRef.current = null;
+            if (event.cancelled || !event.ok || userStopped) turnSessionRef.current = null;
+          }
+          if (userStopped && !event.cancelled) {
+            userStopSessionRef.current = null;
+            if (turnSessionRef.current === eventSessionId) turnSessionRef.current = null;
+            stopping.current = false;
+          }
+          if (goalRoundDrives) {
+            const goalTab = chatTabsRef.current.find((tab) => tab.sessionId === eventSessionId)?.id;
+            if (goalTab) turnTabRef.current = goalTab;
+          }
+          const kind = activityKind(event);
+          const turnTab = turnTabRef.current;
+          if (kind && turnTab && targetTabFor(eventSessionId) === turnTab) {
+            const at = Date.now();
+            setTurnPulse({ tabId: turnTab, latest: kind, at });
+            setNow(at);
+          }
+          if (event.event === "goal/state") {
+            // 用户停止时官方驱动先在空闲处理里暂停目标，随后才是取消结束；
+            // 只看现存停止信号（取消在飞 / 已扣闩锁），这条终态只结算、不写结论。
+            const stopped = "phase" in event
+              && sessionStopRequested(stopPendingRef.current, userStopSessionRef.current, event.sessionId);
+            const action = "cleared" in event
+              ? noteGoalEvent({ kind: "goal-cleared", sessionId: event.sessionId })
+              : noteGoalEvent({
+                kind: "goal-state",
+                phase: event.phase,
+                sessionId: event.sessionId,
+                ...(stopped ? { stopped: true as const } : {}),
+              });
+            if (action.kind === "outcome") void appendTurnOutcome(event.sessionId);
+          }
+          if (event.event === "goal/round-limit") {
+            const action = noteGoalEvent({ kind: "goal-round-limit", round: event.round, sessionId: eventSessionId });
+            if (action.kind === "goal-stopped") void appendGoalStopped(action.round, eventSessionId);
+          }
+          if (event.event === "session/end") {
+            const action = noteGoalEvent({
+              kind: "session-end",
+              sessionId: eventSessionId,
+              ok: event.ok,
+              ...(event.cancelled === true || userStopped ? { cancelled: true as const } : {}),
+            });
+            if (action.kind === "outcome") void appendTurnOutcome(eventSessionId);
+          }
           if (event.event === "sidecar/status" && event.ready && authPhaseRef.current !== "logged-in") {
             pullAuthStatusRef.current();
           }
@@ -832,19 +1101,26 @@ export default function App() {
             setDiff(event.text);
             setRightTab("diff");
           }
-        }),
-      );
+    };
+    applySidecarEventRef.current = applyEvent;
+    void (async () => {
+      unlisten.push(await onSidecarEvent(applyEvent));
       unlisten.push(
         await onSidecarExit((payload) => {
           if (cancelled) return;
           setSidecarDead(true);
           setTurnActive(false);
           if (!payload.ready && !sawReady.current) setPluginFail(PLUGIN_APPLY_FAIL);
-          // sidecar 崩溃影响全部通道：所有有对话内容的标签均标记失败。
+          // 用户主动停止不是崩溃：中性脚注、不标失败（失败标签会拉起红色横幅）。
+          const exitNotice = hostExitNotice(hostStoppedByUserRef.current);
           setChatTabs((prev) =>
             prev.map((tab) =>
               tab.items.length > 0
-                ? { ...tab, sessionFailed: true, items: [...tab.items, { id: allocId(), kind: "note" as const, text: "Sidecar 已退出。会话失败。" }] }
+                ? {
+                    ...tab,
+                    ...(exitNotice.sessionFailed ? { sessionFailed: true } : {}),
+                    items: [...tab.items, { id: allocId(), kind: "note" as const, text: exitNotice.text }],
+                  }
                 : tab,
             ),
           );
@@ -1003,6 +1279,39 @@ export default function App() {
     chatTabsRef.current = chatTabs;
   }, [chatTabs]);
 
+  useEffect(() => {
+    if (!turnActive) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [turnActive]);
+
+  useEffect(() => {
+    const bridge = hostLivenessBridge();
+    if (!bridge) return;
+    let alive = true;
+    const observe = (phase: HostLivenessPhase) => {
+      hostStoppedByUserRef.current = phase === "stopped";
+      setHostPhase(phase);
+      // WebSocket 关闭可能先于停止确认到达:撤回关闭路径误标在标签上的失败横幅。
+      clearFailuresInTabs(phase, setChatTabs);
+    };
+    const report = () => bridge.reportTurns((turnActive ? 1 : 0) + runningAutomationIds.size);
+    report();
+    void bridge.read().then((state) => {
+      if (!alive) return;
+      observe(state.phase);
+      report();
+    }).catch(() => {});
+    const stop = bridge.onChange((state) => {
+      observe(state.phase);
+      report();
+    });
+    return () => {
+      alive = false;
+      stop();
+    };
+  }, [turnActive, runningAutomationIds]);
+
   /**
    * 重启重建的运行对话骨架：首次打开时懒加载运行日志回填内容（不调 session.resume、
    * 不切工作区——激活不抢上下文，工作区对齐推迟到发送时由 send() 做）。
@@ -1056,7 +1365,8 @@ export default function App() {
 
   useEffect(() => {
     workspaceRef.current = workspace;
-  }, [workspace]);
+    sessionsRef.current = sessions;
+  }, [workspace, sessions]);
 
   // 进入自动化页面时拉取数据（页面为跨项目全局视图，无需聚焦项目）
   useEffect(() => {
@@ -1170,9 +1480,10 @@ export default function App() {
    */
   async function rebindTabSession(chatId: string): Promise<void> {
     try {
-      const minted = await rpcCall<{ sessionId?: string }>("session.new", {
+      const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", {
         fresh: chatId !== "work-1",
       });
+      rememberMinted(minted);
       if (typeof minted.sessionId !== "string" || !minted.sessionId) return;
       setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, sessionId: minted.sessionId } : tab)));
     } catch {
@@ -1242,15 +1553,16 @@ export default function App() {
   function newTask() {
     setDraft("");
     setSelectedTaskId(null);
+    setHistoryView(null);
     setView("main");
     const id = `work-${nextChatSeq.current}`;
     nextChatSeq.current += 1;
-    const workSeq = chatTabs.length + 1;
-    setChatTabs((prev) => [
-      ...prev,
-      { id, label: `任务 ${workSeq}`, items: [], sessionFailed: false, projectId: null, pendingPick: true },
-    ]);
+    setChatTabs((prev) => {
+      const tab = { id, label: `任务 ${prev.length + 1}`, items: [], sessionFailed: false, projectId: null, pendingPick: true };
+      return [...prev, tab];
+    });
     setActiveTab(id);
+    liveChatRef.current = id;
   }
 
   function pickSlashSkill(skill: SkillInfo) {
@@ -1338,7 +1650,8 @@ export default function App() {
     // 子态二复用标签的预铸会话（规格 §2.4）；子态一强制 mint fresh。
     let sessionId = createdNow ? undefined : tab.sessionId;
     if (!sessionId) {
-      const minted = await rpcCall<{ sessionId?: string }>("session.new", { fresh: true });
+      const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", { fresh: true });
+      rememberMinted(minted);
       sessionId = typeof minted.sessionId === "string" && minted.sessionId ? minted.sessionId : undefined;
       if (!sessionId) throw new Error("session.new 未返回会话 id");
       // 铸造成功即覆盖写回（子态一可能残留旧根会话 id，必须覆盖而非仅在空缺时回填）。
@@ -1355,7 +1668,7 @@ export default function App() {
     const text = draft.trim();
     const invokedSkill = parseSlashInvoke(text);
     const invokedAt = parseAtInvoke(text);
-    if ((!text && !invokedAt) || sidecarDead || turnActive) return;
+    if ((!text && !invokedAt) || sidecarDead || turnActive || hostPhase !== "ok") return;
     if (tryOpenAutomationFromDraft(text)) return;
     if (automationActiveRef.current) {
       noteActive("后台任务运行中，请稍候再发送消息。");
@@ -1421,9 +1734,10 @@ export default function App() {
       // 懒绑定会话：默认标签绑定通道稳定会话（跨重启延续），其余中立标签铸造独立会话。
       if (!sessionId) {
         try {
-          const minted = await rpcCall<{ sessionId?: string }>("session.new", {
+          const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", {
             fresh: chatId !== "work-1",
           });
+          rememberMinted(minted);
           if (typeof minted.sessionId === "string" && minted.sessionId) {
             sessionId = minted.sessionId;
             setChatTabs((prev) => prev.map((tab) => (tab.id === chatId && !tab.sessionId ? { ...tab, sessionId } : tab)));
@@ -1443,6 +1757,19 @@ export default function App() {
       const userMsg: ChatItem = { id: allocId(), kind: "user", text };
       setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, items: [...tab.items, userMsg] } : tab)));
       setDraft("");
+      const started = Date.now();
+      turnEpochRef.current += 1;
+      turnTabRef.current = chatId;
+      turnSessionRef.current = sessionId ?? null;
+      // 新用户回合重新开结算窗口：上一回合的「结论已写」不能挡住这一回合。
+      goalTurnRef.current = reduceGoalTurn(goalTurnRef.current, {
+        kind: "turn-started",
+        ...(sessionId === undefined ? {} : { sessionId }),
+      }).state;
+      userStopSessionRef.current = null;
+      latchOwnerRef.current = null;
+      setTurnPulse({ tabId: chatId, latest: "quiet", at: started });
+      setNow(started);
       setTurnActive(true);
       stopping.current = false;
       try {
@@ -1468,32 +1795,139 @@ export default function App() {
   }
 
   async function stopTurn() {
-    if (sidecarDead || !turnActive) return;
+    if (sidecarDead || !turnActive || !canStartStop(stopPendingRef.current)) return;
+    const tabId = turnTabRef.current;
+    const tabSession = tabId ? chatTabs.find((tab) => tab.id === tabId)?.sessionId : undefined;
+    const sessionId = resolveStopSession(turnSessionRef.current, tabSession);
+    if (!sessionId) return;
+    const ticket: StopTicket = { id: stopSeqRef.current + 1, sessionId, epoch: turnEpochRef.current };
+    stopSeqRef.current = ticket.id;
     stopping.current = true;
-    const sessionId = chatTabs.find((tab) => tab.id === activeTab)?.sessionId;
+    stopPendingRef.current = ticket;
+    const noteFor = (text: string) => {
+      if (!tabId) return;
+      const note: ChatItem = { id: allocId(), kind: "note", text };
+      setChatTabs((prev) => prev.map((tab) => (tab.id === tabId ? { ...tab, items: [...tab.items, note] } : tab)));
+    };
     try {
-      await rpcCall("session.cancel", { ...(sessionId ? { sessionId } : {}) });
-      setLiveItems((prev) => [...prev, { id: allocId(), kind: "note", text: "已停止" }]);
+      await rpcCall("session.cancel", { sessionId });
+      const settled = settleStop(ticket, true);
+      if (settled.arm && tabId) {
+        setChatTabs((prev) => prev.map((tab) => (
+          tab.id === tabId
+            ? { ...tab, items: [...interruptTurnItems(tab.items), { id: allocId(), kind: "note" as const, text: "已停止" }] }
+            : tab
+        )));
+      }
     } catch (error) {
       stopping.current = false;
-      setLiveItems((prev) => [
-        ...prev,
-        { id: allocId(), kind: "note", text: error instanceof Error ? error.message : String(error) },
-      ]);
+      const settled = settleStop(ticket, false);
+      if (settled.note) noteFor(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** 取消返回后才扣闩锁。轮次已经前进就只丢掉旧结束，不动新的一轮。 */
+  function settleStop(ticket: StopTicket, ok: boolean): { arm: boolean; note: boolean } {
+    const done = finishStop({
+      ticket,
+      pending: stopPendingRef.current,
+      currentEpoch: turnEpochRef.current,
+      ok,
+      latchOwner: latchOwnerRef.current,
+    });
+    stopPendingRef.current = done.pending;
+    staleIdleRef.current = rememberStale(staleIdleRef.current, done.stale);
+    if (done.clearLatch) {
+      userStopSessionRef.current = null;
+      latchOwnerRef.current = null;
+    }
+    if (done.arm) {
+      userStopSessionRef.current = ticket.sessionId;
+      latchOwnerRef.current = ticket.id;
+      setTurnActive(false);
+      stopping.current = false;
+    }
+    releaseHeldEnds(ticket.sessionId);
+    return { arm: done.arm, note: done.note };
+  }
+
+  function releaseHeldEnds(sessionId: string) {
+    const released = takeHeldEnds(heldEndsRef.current, sessionId, sessionIdOfEvent);
+    heldEndsRef.current = released.rest;
+    for (const end of released.taken) applySidecarEventRef.current(end);
+  }
+
+  function toggleThinking(itemId: number, userToggled: "expand" | "collapse") {
+    setChatTabs((prev) => prev.map((tab) => {
+      const items = withThinkingToggle(tab.items, itemId, userToggled);
+      return items === tab.items ? tab : { ...tab, items: [...items] };
+    }));
+  }
+
+  /** 宿主先把未回答的计划评审以取消结算，再退出计划模式；评审卡不在屏上时也能用。 */
+  async function exitPlanMode() {
+    if (sidecarDead) return;
+    const target = activeTab;
+    const sessionId = chatTabs.find((tab) => tab.id === target)?.sessionId;
+    try {
+      const result = await rpcCall("session.exitPlanMode", { ...(sessionId ? { sessionId } : {}) });
+      const text = planExitNote(result);
+      if (!text) {
+        const note: ChatItem = { id: allocId(), kind: "note", text: "未能退出计划模式" };
+        setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: [...tab.items, note] } : tab)));
+        return;
+      }
+      const note: ChatItem = { id: allocId(), kind: "note", text };
+      setChatTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === target
+            ? {
+                ...tab,
+                items: [
+                  ...tab.items.map((item) =>
+                    item.kind === "ask" && item.card.toolName === "plan-review" && !item.card.answered && !item.card.autoContinue
+                      ? { ...item, card: { ...item.card, answered: "reject" as const } }
+                      : item,
+                  ),
+                  note,
+                ],
+              }
+            : tab,
+        ),
+      );
+    } catch (error) {
+      noteActive(error instanceof Error ? error.message : String(error));
     }
   }
 
   async function answer(card: AskCard, decision: "approve" | "reject") {
     if (sidecarDead) return;
+    // 没有审批登记的说明卡点了只会静默失败:不发起 RPC,也不改卡片。
+    if (!askCardWaitsForClick(card)) return;
     const method = decision === "approve" ? "session.approve" : "session.reject";
     await rpcCall(method, { approvalRequestId: card.approvalRequestId });
-    setLiveItems((prev) =>
-      prev.map((item) =>
-        item.kind === "ask" && item.card.approvalRequestId === card.approvalRequestId
-          ? { ...item, card: { ...item.card, answered: decision } }
-          : item,
-      ),
-    );
+    // 卡片可能属于非当前查看的标签（liveChatRef 只表示谁拥有当前流）:按卡片自己的标签回写。
+    answerApprovalInTabs(card.approvalRequestId, decision, setChatTabs);
+  }
+
+  /** `request_input` 卡片：提交的文字回到同一回合；取消结束这次调用并停止回合。 */
+  async function answerInput(itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) {
+    if (sidecarDead || card.state !== "open") return;
+    let handled = false;
+    try {
+      const result = await rpcCall<{ handled?: boolean }>("session.answerInput", { sessionId: card.sessionId, ...reply });
+      handled = result?.handled === true;
+    } catch (error) {
+      noteActive(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    // 宿主那边已不在等（回合已结束或问题被替换）：卡片关掉，不显示「已回答」。
+    const state = !handled ? "closed" : "cancel" in reply ? "cancelled" : "answered";
+    const answerText = state === "answered" && "answer" in reply ? reply.answer : undefined;
+    setChatTabs((prev) => prev.map((tab) => {
+      const items = settleInputCard(tab.items, itemId, state, answerText);
+      return items === tab.items ? tab : { ...tab, items };
+    }));
   }
 
   /**
@@ -1549,6 +1983,9 @@ export default function App() {
         };
       }
       if (item.kind === "user") return { id: allocId(), kind: "user", text: item.text };
+      if (item.kind === "thinking") {
+        return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false, historical: true };
+      }
       if (item.kind === "assistant") return { id: allocId(), kind: "assistant", text: item.text };
       return { id: allocId(), kind: "note", text: item.text };
     });
@@ -1617,9 +2054,24 @@ export default function App() {
     if (deleteBusy) return;
     setDeleteBusy(true);
     try {
+      if (sessionId === turnSessionRef.current) {
+        try {
+          await rpcCall("session.cancel", { sessionId });
+        } catch {
+          // 日志马上删掉；取消失败也不再把停止按钮留在一个没有会话的标签上。
+        }
+        turnTabRef.current = null;
+        turnSessionRef.current = null;
+        setTurnActive(false);
+      }
       await rpcCall("session.remove", { sessionId });
       setSessions((prev) => prev.filter((session, index) => String(session.id ?? `session-${index}`) !== sessionId));
-      if (historyView?.sessionId === sessionId) setHistoryView(null);
+      setHistoryView((view) => (view?.sessionId === sessionId ? null : view));
+      setChatTabs((prev) => prev.map((tab) => (
+        tab.sessionId === sessionId
+          ? { ...tab, items: [], sessionId: undefined, sessionFailed: false }
+          : tab
+      )));
       setConfirmDelete(null);
       setDeleteError("");
     } catch (error) {
@@ -1644,9 +2096,7 @@ export default function App() {
   const unscopedWorkSessions = unscopedSessions(sessions, projects);
   const showRightPane = view === "main";
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
-  const pendingAsk = chatTabs.some((tab) =>
-    tab.items.some((item) => item.kind === "ask" && !item.card.answered),
-  );
+  const pendingAsk = hasPendingAsk(chatTabs);
   const logoutDisabled = turnActive || pendingAsk;
 
   function openSettings(section?: SettingsSection) {
@@ -1779,6 +2229,7 @@ export default function App() {
             <header className="side-header">
               <span>任务</span>
             </header>
+            {hostNotice.kind === "unresponsive" ? <p className="side-muted">{HOST_UNRESPONSIVE_TEXT}</p> : null}
             {unscopedWorkSessions.length === 0 && runTabs.length === 0 ? (
               <p className="side-muted">暂无任务</p>
             ) : (
@@ -1798,7 +2249,7 @@ export default function App() {
                         }}
                       >
                         <span className="recent-title">{tab.label}</span>
-                        <span className="recent-meta">自动化运行{running ? " · 运行中" : ""}</span>
+                        <span className="recent-meta">自动化运行{running ? " · 运行中" : ""}{hostNotice.kind === "unresponsive" ? ` · ${HOST_UNRESPONSIVE_TEXT}` : ""}</span>
                       </button>
                     </li>
                   );
@@ -1820,7 +2271,7 @@ export default function App() {
                         }}
                       >
                         <span className="recent-title">{title}</span>
-                        <span className="recent-meta">{sessionMetaOf(session)}</span>
+                        <span className="recent-meta">{sessionMetaOf(session)}{hostNotice.kind === "unresponsive" ? ` · ${HOST_UNRESPONSIVE_TEXT}` : ""}</span>
                       </button>
                     </li>
                   );
@@ -1841,6 +2292,7 @@ export default function App() {
                 ＋ 新建
               </button>
             </header>
+            {hostNotice.kind === "unresponsive" ? <p className="side-muted">{HOST_UNRESPONSIVE_TEXT}</p> : null}
             <ProjectsPanel
               projects={projects}
               activeProjectId={activeProjectId}
@@ -1878,6 +2330,21 @@ export default function App() {
           {pluginFail ? <div className="banner error">{pluginFail}</div> : null}
           {guardModeError ? <div className="banner error">{guardModeError}</div> : null}
           {sessionFailed ? <div className="banner error">会话已失败。上次 diff 保留在右侧，本轮不再继续。</div> : null}
+          {hostNotice.kind === "unresponsive" ? (
+            <div className="banner warn" role="status">
+              {HOST_UNRESPONSIVE_TEXT}
+              {hostNotice.canStop ? (
+                <button type="button" className="chip" onClick={() => void hostLivenessBridge()?.requestStop()}>
+                  结束进程
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {hostNotice.kind === "stopped" ? (
+            // The focused window never receives notifyAttention, so the neutral
+            // stop phrase must live in the app itself. No error banner, no restart.
+            <div className="banner" role="status">{hostNotice.text}</div>
+          ) : null}
 
           {view === "skills" ? (
             <SkillsView />
@@ -1921,7 +2388,7 @@ export default function App() {
             />
           ) : (
             <>
-              <div className="chat-log">
+              <div className="chat-log" key={activeChat.id}>
                 {chatEmpty ? (
                   <div className="hero">
                     <h1>
@@ -1946,15 +2413,21 @@ export default function App() {
                     </div>
                   </div>
                 ) : null}
-                {items.map((item) => {
-                  if (item.kind === "assistant") {
-                    const visible = stripThinking(item.text);
-                    if (!visible) return null;
-                    return <ChatRow key={item.id} item={{ ...item, text: visible }} blocked={blocked} onAnswer={answer} />;
-                  }
-                  return <ChatRow key={item.id} item={item} blocked={blocked} onAnswer={answer} />;
-                })}
-                {turnActive && !hasVisibleReply(items) ? <div className="note">正在生成…</div> : null}
+                {items.map((item, index) => (
+                  <ChatRow
+                    key={item.id}
+                    item={item}
+                    blocked={blocked}
+                    onAnswer={answer}
+                    onInput={answerInput}
+                    onThinkingToggle={toggleThinking}
+                    reasoning={item.kind === "assistant" ? (thinkingBefore(items, index)?.thought ?? "") : ""}
+                    hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(items, index) : false}
+                  />
+                ))}
+                {showTurnLine ? (
+                  <div className={turnLine.alert ? "banner warn" : "note"}>{turnLine.text}</div>
+                ) : null}
                 <div ref={chatEndRef} />
               </div>
             </>
@@ -2120,13 +2593,18 @@ export default function App() {
                     onManage={() => openSettings("model")}
                   />
                 ) : null}
+                {planModeActive(items) ? (
+                  <button type="button" className="chip" disabled={blocked} onClick={() => void exitPlanMode()}>
+                    退出计划模式
+                  </button>
+                ) : null}
                 <span className="composer-spacer" />
-                {turnActive ? (
+                {turnActive && activeTab === turnTabRef.current ? (
                   <button type="button" className="send stop" disabled={blocked} onClick={() => void stopTurn()}>
                     停止
                   </button>
                 ) : (
-                  <button type="submit" className="send" aria-label="发送" disabled={blocked || runTabLive || !draft.trim()}>
+                  <button type="submit" className="send" aria-label="发送" disabled={blocked || runTabLive || !draft.trim() || hostPhase !== "ok"}>
                     ↑
                   </button>
                 )}
@@ -2441,6 +2919,8 @@ function sessionMetaOf(session: SessionRow): string {
   return parts.join(" · ");
 }
 
+const COMPACTION_NOTE = "更早的工具输出已被压缩";
+
 function handleEvent(
   event: RpcEvent,
   allocId: () => number,
@@ -2451,6 +2931,9 @@ function handleEvent(
   setSessionFailed: (failed: boolean, sessionId?: string) => void,
   refreshRecent: () => Promise<void>,
   sawReady: MutableRefObject<boolean>,
+  endsTrackedTurn: boolean,
+  userStopped: boolean,
+  drivesTrackedTurn: boolean,
 ) {
   switch (event.event) {
     case "sidecar/status":
@@ -2463,7 +2946,15 @@ function handleEvent(
     case "token":
       setItems((prev) => appendToken(prev, event.text), event.sessionId);
       break;
+    case "reasoning":
+      setItems((prev) => applyReasoning(prev, event.text, event.final === true, allocId), event.sessionId);
+      break;
     case "tool/start":
+      if (event.name === "todo_write" && event.todos) {
+        const todos = event.todos;
+        setItems((prev) => upsertTodoItem(prev, todos, allocId), event.sessionId);
+        break;
+      }
       setItems((prev) => [
         ...prev,
         {
@@ -2474,6 +2965,7 @@ function handleEvent(
             name: event.name,
             callId: event.callId,
             status: "start",
+            ...(event.command === undefined ? {} : { command: event.command }),
           },
         },
       ], event.sessionId);
@@ -2485,35 +2977,68 @@ function handleEvent(
           const match = event.callId
             ? item.card.callId === event.callId
             : item.card.name === event.name && item.card.status === "start";
-          return match ? { ...item, card: { ...item.card, status: "end", truncated: event.truncated } } : item;
+            return match
+            ? {
+                ...item,
+                card: {
+                  ...item.card,
+                  status: "end",
+                  truncated: event.truncated,
+                  ...(event.text ? { output: event.text } : {}),
+                  ...(event.isError ? { isError: true } : {}),
+                },
+              }
+            : item;
         }),
         event.sessionId,
       );
       break;
-    case "approval/asked":
+    case "approval/asked": {
+      const ask: ChatItem = {
+        id: allocId(),
+        kind: "ask",
+        card: {
+          approvalRequestId: event.approvalRequestId,
+          toolName: event.toolName,
+          callId: event.callId,
+          reason: event.reason,
+          summary: event.summary,
+          autoContinue: event.autoContinue,
+          actionable: event.actionable,
+        },
+      };
+      setItems((prev) => (event.toolName === "plan-review" ? insertBeforeToolRow(prev, ask, event.callId) : [...prev, ask]), event.sessionId);
+      break;
+    }
+    case "input/asked":
       setItems((prev) => [
         ...prev,
-        {
-          id: allocId(),
-          kind: "ask",
-          card: {
-            approvalRequestId: event.approvalRequestId,
-            toolName: event.toolName,
-            reason: event.reason,
-            summary: event.summary,
-          },
-        },
+        { id: allocId(), kind: "input", card: { question: event.question, sessionId: event.sessionId, state: "open" } },
       ], event.sessionId);
       break;
     case "diff":
       setDiff(event.text);
       break;
+    case "compaction/done":
+      // 固定提示走聊天 note，不进思考面板。
+      setItems((prev) => [...prev, { id: allocId(), kind: "note", text: COMPACTION_NOTE }], event.sessionId);
+      break;
+    case "goal/round":
+      // 官方驱动器开了新一轮：只有当前跟踪的会话才恢复全局回合态；
+      // 后台会话的续轮只把说明写进它自己的标签，不能卡住发送。
+      if (drivesTrackedTurn) setTurnActive(true);
+      setItems((prev) => [...prev, { id: allocId(), kind: "note", text: goalRoundLabel(event.round) }], event.sessionId);
+      break;
     case "session/end":
-      setTurnActive(false);
+      if (endsTrackedTurn) setTurnActive(false);
       // 回合结束刷新会话列表（任务区/最近对话）。日志写回是 ~200ms 批处理，
       // 等一拍再拉，避免新会话因 messageCount 仍为 0 被空壳过滤漏掉。
       setTimeout(() => void refreshRecent(), 600);
-      if (event.cancelled) break;
+      setItems((prev) => closeOpenInputs(prev), event.sessionId);
+      if (event.cancelled || !event.ok || userStopped) {
+        setItems((prev) => interruptTurnItems(prev), event.sessionId);
+      }
+      if (event.cancelled || userStopped) break;
       if (!event.ok) {
         setSessionFailed(true, event.sessionId);
         setItems((prev) => [
@@ -2525,6 +3050,38 @@ function handleEvent(
   }
 }
 
+/** 本回合只保留最新一份待办列表（todo_write 每次发送完整替换列表）。 */
+function upsertTodoItem(items: ChatItem[], todos: TodoEntry[], allocId: () => number): ChatItem[] {
+  let turnStart = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === "user") {
+      turnStart = i + 1;
+      break;
+    }
+  }
+  const at = items.findIndex((item, index) => index >= turnStart && item.kind === "todo");
+  if (at < 0) return [...items, { id: allocId(), kind: "todo", todos }];
+  return items.map((item, index) => (index === at ? { ...item, todos } : item));
+}
+
+/** 计划卡画在本回合 `exit_plan_mode` 那一行工具之前；找不到那一行就追加在末尾。 */
+function insertBeforeToolRow(items: ChatItem[], card: ChatItem, callId: string | undefined): ChatItem[] {
+  let turnStart = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === "user") {
+      turnStart = i + 1;
+      break;
+    }
+  }
+  const at = items.findIndex(
+    (item, index) =>
+      index >= turnStart &&
+      item.kind === "tool" &&
+      (callId ? item.card.callId === callId : item.card.name === "exit_plan_mode"),
+  );
+  return at >= 0 ? [...items.slice(0, at), card, ...items.slice(at)] : [...items, card];
+}
+
 function appendToken(items: ChatItem[], text: string): ChatItem[] {
   const last = items.at(-1);
   if (last?.kind === "assistant") {
@@ -2533,45 +3090,170 @@ function appendToken(items: ChatItem[], text: string): ChatItem[] {
   return [...items, { id: (last?.id ?? 0) + 1, kind: "assistant", text }];
 }
 
+/** 同一回合只保留一块思考：非 final 追加当前步骤，final 只替换当前步骤，工具调用前已定稿的步骤保留。 */
+function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number): ChatItem[] {
+  let turnStart = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === "user") {
+      turnStart = i + 1;
+      break;
+    }
+  }
+  const existing = items.findIndex((item, index) => index >= turnStart && item.kind === "thinking");
+  if (existing >= 0) {
+    const current = items[existing];
+    if (current?.kind !== "thinking") return items;
+    const steps = nextThinkingSteps(current.steps ?? { settled: current.thought, draft: "" }, text, final);
+    const next = items.slice();
+    next[existing] = { ...current, thought: thinkingStepsText(steps), steps };
+    return next;
+  }
+  const steps = nextThinkingSteps({ settled: "", draft: "" }, text, final);
+  const created: ChatItem = { id: allocId(), kind: "thinking", thought: thinkingStepsText(steps), interrupted: false, steps };
+  const assistantAt = items.findIndex((item, index) => index >= turnStart && item.kind === "assistant");
+  if (assistantAt >= 0) return [...items.slice(0, assistantAt), created, ...items.slice(assistantAt)];
+  return [...items, created];
+}
+
 function ChatRow({
   item,
   blocked,
   onAnswer,
+  onInput,
+  onThinkingToggle,
+  reasoning = "",
+  hasAssistantText = false,
 }: {
   item: ChatItem;
   blocked: boolean;
   onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
+  onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
+  onThinkingToggle?: (itemId: number, userToggled: "expand" | "collapse") => void;
+  reasoning?: string;
+  hasAssistantText?: boolean;
 }) {
   if (item.kind === "user") return <div className="bubble user">{item.text}</div>;
-  if (item.kind === "assistant") return <div className="bubble assistant">{item.text}</div>;
-  if (item.kind === "note") return <div className="note">{item.text}</div>;
-  if (item.kind === "tool") {
+  if (item.kind === "thinking") {
+    if (!shouldRenderThinking(item.thought)) return null;
     return (
-      <div className={item.card.status === "start" ? "tool-row running" : "tool-row"}>
-        <span className="tool-icon">{item.card.status === "start" ? "●" : "✓"}</span>
-        <strong>{item.card.name}</strong>
-        <span className="muted">{item.card.status === "start" ? "运行中" : "结束"}</span>
-        {item.card.truncated ? <span className="badge">truncated</span> : null}
+      <ThinkingPanel
+        thought={item.thought}
+        hasAssistantText={hasAssistantText}
+        interrupted={item.interrupted}
+        historical={item.historical === true}
+        userToggled={item.userToggled ?? null}
+        onToggle={onThinkingToggle ? (next) => onThinkingToggle(item.id, next) : undefined}
+      />
+    );
+  }
+  if (item.kind === "assistant") {
+    const resolved = resolveThinking({ reasoning, assistantText: item.text });
+    const visible = resolved.visible;
+    const answerReady = visible.trim().length > 0;
+    const panelThought = reasoning.trim().length > 0 ? "" : resolved.thought;
+    if (!shouldRenderThinking(panelThought) && !answerReady) return null;
+    return (
+      <>
+        {shouldRenderThinking(panelThought) ? (
+          <ThinkingPanel
+            thought={panelThought}
+            hasAssistantText={answerReady}
+            interrupted={item.interrupted === true}
+            userToggled={item.userToggled ?? null}
+            onToggle={onThinkingToggle ? (next) => onThinkingToggle(item.id, next) : undefined}
+          />
+        ) : null}
+        {answerReady ? <div className="bubble assistant">{visible}</div> : null}
+      </>
+    );
+  }
+  if (item.kind === "note") return <div className="note">{item.text}</div>;
+  if (item.kind === "todo") {
+    return (
+      <div className="card todo-card">
+        <span className="ttl">待办</span>
+        {item.todos.map((todo) => (
+          <div key={todo.content} className={todo.status === "completed" ? "muted" : undefined}>
+            <span className="badge">{todoLabel(todo.status)}</span> {todo.content}
+          </div>
+        ))}
       </div>
     );
   }
+  if (item.kind === "tool") {
+    return (
+      <div>
+        <div className={item.card.status === "start" ? "tool-row running" : "tool-row"}>
+          <span className="tool-icon">{toolRowIcon(item.card)}</span>
+          <strong>{item.card.name}</strong>
+          <span className="muted">{item.card.status === "start" ? "运行中" : "结束"}</span>
+          {item.card.truncated ? <span className="badge">已截断</span> : null}
+        </div>
+        {item.card.output ? <pre className="thinking-body">{item.card.output}</pre> : null}
+      </div>
+    );
+  }
+  if (item.kind === "input") return <InputCardView itemId={item.id} card={item.card} blocked={blocked} onInput={onInput} />;
+  if (item.card.toolName === "plan-review") return <PlanCard card={item.card} blocked={blocked} onAnswer={onAnswer} />;
   return (
     <div className="card ask-card">
       <span className="ttl">✋ 批准请求 · {item.card.toolName}</span>
       {item.card.summary ? <pre>{item.card.summary}</pre> : null}
-      {item.card.reason ? <p style={{ margin: 0 }}>{item.card.reason}</p> : null}
-      <p className="muted" style={{ margin: 0 }}>
-        {item.card.approvalRequestId}
-      </p>
-      {item.card.answered ? (
-        <p style={{ margin: 0 }}>{item.card.answered === "approve" ? "已批准" : "已拒绝"}</p>
+      {item.card.actionable === false ? (
+        // 说明卡没有审批登记：只讲一遍原因，不显示原始请求 id，也不渲染按钮。
+        <p style={{ margin: 0 }}>{item.card.reason ?? "没有人接到这个请求，无法在这里回答"}</p>
+      ) : (
+        <>
+          {item.card.reason ? <p style={{ margin: 0 }}>{item.card.reason}</p> : null}
+          <p className="muted" style={{ margin: 0 }}>
+            {item.card.approvalRequestId}
+          </p>
+          {item.card.answered ? (
+            <p style={{ margin: 0 }}>{item.card.answered === "approve" ? "已批准" : "已拒绝"}</p>
+          ) : (
+            <div className="row">
+              <button type="button" className="btn approve" disabled={blocked} onClick={() => onAnswer(item.card, "approve")}>
+                批准
+              </button>
+              <button type="button" className="btn reject" disabled={blocked} onClick={() => onAnswer(item.card, "reject")}>
+                拒绝
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** 「按这个计划执行」「继续改计划」走同一张审批卡的批准 / 拒绝，宿主把它们答成官方 plan-review 的同意与继续计划。 */
+function PlanCard({
+  card,
+  blocked,
+  onAnswer,
+}: {
+  card: AskCard;
+  blocked: boolean;
+  onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
+}) {
+  return (
+    <div className="card ask-card">
+      <span className="ttl">计划</span>
+      {card.summary ? <pre>{card.summary}</pre> : null}
+      <p style={{ margin: 0 }}>{PLAN_CARD_NOTE}</p>
+      {card.autoContinue ? (
+        <p style={{ margin: 0 }}>{AUTO_CONTINUE_LABEL}</p>
+      ) : card.actionable === false ? (
+        <p style={{ margin: 0 }}>{card.reason ?? "没有人接到这个请求，无法在这里回答"}</p>
+      ) : card.answered ? (
+        <p style={{ margin: 0 }}>{card.answered === "approve" ? "已按这个计划执行" : "继续改计划"}</p>
       ) : (
         <div className="row">
-          <button type="button" className="btn approve" disabled={blocked} onClick={() => onAnswer(item.card, "approve")}>
-            批准
+          <button type="button" className="btn approve" disabled={blocked} onClick={() => onAnswer(card, "approve")}>
+            按这个计划执行
           </button>
-          <button type="button" className="btn reject" disabled={blocked} onClick={() => onAnswer(item.card, "reject")}>
-            拒绝
+          <button type="button" className="btn reject" disabled={blocked} onClick={() => onAnswer(card, "reject")}>
+            继续改计划
           </button>
         </div>
       )}
@@ -2579,28 +3261,74 @@ function ChatRow({
   );
 }
 
-const THINK_TAGS = ["<think>", "<thinking>", "</think>", "</thinking>"];
-
-function holdIncompleteThinkTag(text: string): string {
-  const lt = text.lastIndexOf("<");
-  if (lt < 0) return text;
-  const suffix = text.slice(lt);
-  if (suffix.includes(">")) return text;
-  const lower = suffix.toLowerCase();
-  return THINK_TAGS.some((tag) => tag.startsWith(lower)) ? text.slice(0, lt) : text;
+/** 模型用 `request_input` 提的问题：在对话里作答，提交或取消后这一回合才继续。 */
+function InputCardView({
+  itemId,
+  card,
+  blocked,
+  onInput,
+}: {
+  itemId: number;
+  card: InputCard;
+  blocked: boolean;
+  onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
+}) {
+  const [reply, setReply] = useState("");
+  const status = inputCardStatus(card);
+  return (
+    <div className="card ask-card">
+      <span className="ttl">需要你回答</span>
+      <p style={{ margin: 0 }}>{card.question}</p>
+      {status ? (
+        <p style={{ margin: 0 }}>{status}</p>
+      ) : (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (reply.trim()) onInput(itemId, card, { answer: reply.trim() });
+          }}
+        >
+          <textarea rows={3} value={reply} disabled={blocked} onChange={(event) => setReply(event.target.value)} />
+          <div className="row">
+            <button type="submit" className="btn approve" disabled={blocked || !reply.trim()}>
+              提交
+            </button>
+            <button type="button" className="btn reject" disabled={blocked} onClick={() => onInput(itemId, card, { cancel: true })}>
+              取消
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
 }
 
-function stripThinking(text: string): string {
-  const head = holdIncompleteThinkTag(text);
-  const withoutBlocks = head.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "");
-  return withoutBlocks.replace(/<think(?:ing)?>[\s\S]*$/i, "");
+function thinkingBefore(items: readonly ChatItem[], index: number): Extract<ChatItem, { kind: "thinking" }> | undefined {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const item = items[i];
+    if (item.kind === "user") return undefined;
+    if (item.kind === "thinking") return item;
+  }
+  return undefined;
 }
 
-function hasVisibleReply(items: ChatItem[]): boolean {
+function runningToolName(items: readonly ChatItem[]): string | null {
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const item = items[i];
-    if (item.kind === "user") return false;
-    if (item.kind === "assistant" && stripThinking(item.text).trim().length > 0) return true;
+    if (!item || item.kind === "user") return null;
+    if (item.kind === "tool" && item.card.status === "start") return item.card.name;
   }
-  return false;
+  return null;
+}
+
+function activityKind(event: RpcEvent): "reasoning" | "text" | "tool" | null {
+  if (event.event === "reasoning") return "reasoning";
+  if (event.event === "token") return "text";
+  if (event.event === "tool/end") return "tool";
+  return null;
+}
+
+/** `RpcEvent` 联合里有些成员不带 sessionId；按会话取回暂扣的结束事件时显式收窄。 */
+function sessionIdOfEvent(event: RpcEvent): string | undefined {
+  return "sessionId" in event ? event.sessionId : undefined;
 }

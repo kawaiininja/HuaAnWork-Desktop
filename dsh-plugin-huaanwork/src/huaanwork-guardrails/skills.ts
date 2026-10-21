@@ -1,8 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
+import { currentCallerSession, forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
 
 export const name = "huaanwork-skills";
 export const inject = ["skills", "agents", "tools", "subagents"];
@@ -30,6 +32,7 @@ type Agent = {
   ctx?: {
     get?(name: string): ToolsService | undefined;
   };
+  session?: { header?: { parentSession?: unknown } };
 };
 
 type SkillRegistration = {
@@ -50,6 +53,7 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   };
   subagents?: {
     start(...args: never[]): Promise<{ localAgent?: Agent }>;
+    startActivation?(...args: never[]): Promise<unknown>;
   };
   huaanworkAgentRequest?: {
     current?: {
@@ -59,7 +63,7 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
     } | undefined;
   };
   on(
-    event: "tools/pre-execute" | "agent/created" | "subagent/start" | "tools/change",
+    event: "tools/pre-execute" | "agent/created" | "subagent/start" | "subagent/end" | "tools/change",
     listener: (...args: never[]) => unknown,
     prepend?: boolean,
   ): void;
@@ -111,6 +115,8 @@ export function apply(ctx: Context): void {
   const lifted = new WeakMap<Agent, () => void>();
   let pendingSpawn: SkillKind | undefined;
   let restricting = false;
+  // subagent/start 在 start 的异步链内同步派发且载荷不带 parent；按调用隔离，重叠的 start 不会互相覆盖。
+  const startParent = new AsyncLocalStorage<string | undefined>();
 
   ctx.skills.register(loadSkill("explore.md"));
   ctx.skills.register(loadSkill("test-fix.md"));
@@ -180,7 +186,17 @@ export function apply(ctx: Context): void {
   ctx.on("subagent/start", ((info: { id?: string }) => {
     if (!info.id) return;
     const child = ctx.agents?.get?.(info.id);
+    // 事件载荷只有 { runId, provider, id, local },没有 parent;父会话取自子会话 header,
+    // 冷恢复路径靠它,start 包装路径靠下面的 AsyncLocalStorage。
+    const parentId = sessionIdOf(child?.session?.header?.parentSession) ?? startParent.getStore();
+    if (parentId && parentId !== info.id) registerChildSession(parentId, info.id);
     if (child) consumePendingSpawn(child);
+  }) as never);
+
+  // 与 subagent/start 成对的结束事件(载荷 id 即子会话 id):子会话结束后从登记表摘掉,
+  // 否则取消父会话时会对已经退出的会话重复发起取消,登记表也无界增长。
+  ctx.on("subagent/end", ((info: { id?: string }) => {
+    if (typeof info.id === "string" && info.id.length > 0) forgetChildSession(info.id);
   }) as never);
 
   ctx.on("tools/change", (() => {
@@ -207,8 +223,10 @@ export function apply(ctx: Context): void {
             throw new Error("智能体人设为空");
           }
         }
-        // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写
-        const run: any = await original(...args);
+        // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写。
+        // 事件载荷没有 parent；父会话 id 取这次 start 的 parent，缺省用发起调用的用户会话。
+        const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
+        const run: any = await startParent.run(parentFromCall, () => original(...args));
         if (current && run?.localAgent) {
           const tools = run.localAgent.ctx?.get?.("tools");
           const schemas = tools?.schemas?.() ?? [];
@@ -230,6 +248,33 @@ export function apply(ctx: Context): void {
       }
     };
   }
+
+  const activation = ctx.subagents?.startActivation;
+  if (activation && ctx.subagents) {
+    const originalActivation = activation.bind(ctx.subagents);
+    ctx.subagents.startActivation = async (...args: never[]) => {
+      const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
+      return startParent.run(parentFromCall, () => originalActivation(...args));
+    };
+  }
+}
+
+function sessionIdOf(value: unknown): string | undefined {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as { id?: unknown; session?: { id?: unknown } };
+  if (typeof record.session?.id === "string" && record.session.id.length > 0) return record.session.id;
+  if (typeof record.id === "string" && record.id.length > 0 && record.id !== "huaanwork") return record.id;
+  return undefined;
+}
+
+function parentFromStartArgs(args: readonly unknown[]): unknown {
+  const second = args[1];
+  if (second && typeof second === "object" && "parent" in second) return (second as { parent?: unknown }).parent;
+  const first = args[0];
+  if (!first || typeof first !== "object") return undefined;
+  const spec = first as { parent?: unknown; request?: { parent?: unknown } };
+  return spec.request?.parent ?? spec.parent;
 }
 
 export type BundledSkillInfo = { name: string; description: string };

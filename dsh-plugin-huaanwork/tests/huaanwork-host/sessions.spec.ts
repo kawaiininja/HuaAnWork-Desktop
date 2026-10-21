@@ -2,20 +2,42 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import {
+  childrenOf,
+  registerChildSession,
+  resetChildSessionRegistry,
+} from '../../src/huaanwork-host/child-sessions.ts'
+import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
+import { emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
+import {
+  answerRouteInput,
+  apply as applyRouteTools,
+  noteInvalidRoute,
+  releaseRouteInput,
+  resetRouteToolState,
+} from '../../src/huaanwork-guardrails/route-tool-plugin.ts'
+import {
+  sendToAgent,
   sessionAnswerApproval,
+  sessionAnswerInput,
   sessionCancel,
+  sessionExitPlanMode,
   sessionList,
   sessionNew,
   sessionOpen,
   sessionRemove,
   sessionResume,
   sessionSend,
+  setAgentsDirectory,
   type ListedAgent,
   type SessionRuntimeContext,
 } from '../../src/huaanwork-host/sessions.ts'
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
+import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
+import {
+  apply as applyQuestionAnswerer,
+  resetQuestionAnswererState,
+} from '../../src/huaanwork-guardrails/question-answerer.ts'
 import { emptySettings, readHuaanworkSettings, writeHuaanworkSettings } from '../../src/huaanwork-host/settings.ts'
 import { assertStreamNetworkAllowed } from '../../src/huaanwork-host/net-gate.ts'
 import { sweepProjectLegacySessions } from '../../src/huaanwork-host/session-sweep.ts'
@@ -101,6 +123,10 @@ afterEach(() => {
     rmSync(tmpRoot, { recursive: true, force: true })
     tmpRoot = undefined
   }
+  // 护栏插件把等待中的卡片/坏参数计数/计划目标登记在模块级 Map 上:逐用例复位。
+  resetRouteToolState()
+  resetQuestionAnswererState()
+  resetChildSessionRegistry()
 })
 
 describe('sessionIdFor / freshSessionIdFor (旧 session-history.test.ts:L61-69)', () => {
@@ -125,8 +151,10 @@ describe('session.new (旧 host.ts:988-992)', () => {
     const routeCtx = makeRouteCtx(root)
     const stable = sessionNew(routeCtx, {})
     expect(stable.sessionId).toBe(sessionIdFor(routeCtx.workspaceRoot.current))
+    expect(stable.cwd).toBe(routeCtx.workspaceRoot.current)
     const freshA = sessionNew(routeCtx, { fresh: true })
     const freshB = sessionNew(routeCtx, { fresh: true })
+    expect(freshA.cwd).toBe(routeCtx.workspaceRoot.current)
     expect(freshA.sessionId).not.toBe(freshB.sessionId)
     expect(freshA.sessionId).toMatch(/^huaanwork-[0-9a-f]{16}-[0-9a-f]{8}$/)
   })
@@ -186,6 +214,72 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
     expect(message.role).toBe('user')
     expect(message.content[0]).toEqual({ type: 'text', text: '你好' })
     expect(message.source).toEqual({ kind: 'user' })
+  })
+
+  test('sendToAgent returns after followup and detaches @ tools only after idle', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = 'huaanwork-0123456789abcdef'
+    const maps = emptyAttachments()
+    let releaseIdle: () => void = () => {}
+    const idle = new Promise<void>((resolve) => {
+      releaseIdle = resolve
+    })
+    const agent: ListedAgent = {
+      id: sessionId,
+      session: { id: sessionId },
+      followup: () => undefined,
+      whenIdle: () => idle,
+    }
+    const ctx = {
+      huaanworkAttachments: maps,
+      agents: {
+        get: (id: string) => (id === sessionId ? agent : undefined),
+        list: () => [agent],
+      },
+    }
+    const emptyDirectory = {
+      list: () => ({ items: [] }),
+      refresh: async () => ({ items: [] }),
+      get: async () => undefined,
+      setEnabled: () => undefined,
+      addEndpoint: () => ({ ok: false as const, fieldErrors: [] }),
+      removeEndpoint: () => undefined,
+      snapshotForRuntime: () => ({ items: [] }),
+    }
+    setAgentsDirectory({
+      ...emptyDirectory,
+      list: () => ({
+        items: [
+          {
+            name: 'tool',
+            source: 'local',
+            kind: 'tool',
+            entrypointKind: 'http',
+            description: '查询',
+            version: '1',
+            permissions: [],
+            enabled: true,
+          },
+        ],
+      }),
+    })
+    try {
+      const pending = sendToAgent(ctx, routeCtx, { text: '@tool 查询', sessionId })
+      const result = await Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(() => resolve('timed-out'), 50)),
+      ])
+      expect(result).toEqual({ queued: true, sessionId })
+      const detached = () => maps.sessionHostTools.get(sessionId)?.has('tool') !== true
+      expect(detached()).toBe(false)
+      releaseIdle()
+      await idle.then(() => new Promise((resolve) => setTimeout(resolve, 0)))
+      expect(detached()).toBe(true)
+    } finally {
+      releaseIdle()
+      setAgentsDirectory(emptyDirectory)
+    }
   })
 
   test('@agent with an unconfigured directory throws the empty-catalog error', async () => {
@@ -278,12 +372,115 @@ describe('session.cancel (旧 host.ts:1560)', () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)
     const cancelled: { kind: string }[] = []
-    const primary: ListedAgent = { id: 'huaanwork', cancel: (reason) => cancelled.push(reason) }
+    const primary: ListedAgent = {
+      id: 'huaanwork',
+      session: { id: sessionIdFor(routeCtx.workspaceRoot.current) },
+      cancel: (reason) => cancelled.push(reason),
+    }
     const child: ListedAgent = { id: 'child-1', cancel: (reason) => cancelled.push(reason) }
     const ctx: SessionRuntimeContext = { agents: { get: (id) => (id === 'huaanwork' ? primary : undefined), list: () => [primary, child] } }
+    registerChildSession(sessionIdFor(routeCtx.workspaceRoot.current), 'child-1')
     const result = sessionCancel(ctx, routeCtx, {}) as { accepted: boolean }
     expect(result).toEqual({ accepted: true })
     expect(cancelled).toEqual([{ kind: 'parent' }, { kind: 'user' }])
+  })
+
+  test('cancelAgent does not cancel a sibling session', () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const reasons: string[] = []
+    const target: ListedAgent = {
+      session: { id: 'huaanwork-aaaaaaaaaaaaaaaa' },
+      cancel(reason) {
+        reasons.push(`target:${reason.kind}`)
+      },
+    }
+    const child: ListedAgent = {
+      session: { id: 'child' },
+      cancel(reason) {
+        reasons.push(`child:${reason.kind}`)
+      },
+    }
+    const sibling: ListedAgent = {
+      session: { id: 'huaanwork-bbbbbbbbbbbbbbbb' },
+      cancel() {
+        reasons.push('sibling')
+      },
+    }
+    registerChildSession('huaanwork-aaaaaaaaaaaaaaaa', 'child')
+    const ctx: SessionRuntimeContext = { agents: { list: () => [target, child, sibling] } }
+    sessionCancel(ctx, routeCtx, { sessionId: 'huaanwork-aaaaaaaaaaaaaaaa' })
+    expect(reasons.sort()).toEqual(['child:parent', 'target:user'])
+  })
+
+  test('cancelAgent does not cancel a channel agent that is running a sibling session', () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const reasons: string[] = []
+    const channel: ListedAgent = {
+      id: 'huaanwork',
+      session: { id: 'huaanwork-bbbbbbbbbbbbbbbb' },
+      cancel(reason) {
+        reasons.push(`channel:${reason.kind}`)
+      },
+    }
+    const child: ListedAgent = {
+      session: { id: 'huaanwork-child' },
+      cancel(reason) {
+        reasons.push(`child:${reason.kind}`)
+      },
+    }
+    registerChildSession('huaanwork-aaaaaaaaaaaaaaaa', 'huaanwork-child')
+    const ctx: SessionRuntimeContext = {
+      agents: { get: (id) => (id === 'huaanwork' ? channel : undefined), list: () => [channel, child] },
+    }
+    sessionCancel(ctx, routeCtx, { sessionId: 'huaanwork-aaaaaaaaaaaaaaaa' })
+    expect(reasons).toEqual(['child:parent'])
+  })
+})
+
+describe('session.answerInput', () => {
+  type Exec = { agent?: unknown; signal?: AbortSignal }
+  type Registered = { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }
+
+  function askInput(agent: ListedAgent): Promise<unknown> {
+    const tools = new Map<string, Registered>()
+    applyRouteTools({
+      huaanworkEmit: () => undefined,
+      planMode: { set: () => undefined },
+      tools: { register: (definition: Registered) => { tools.set(definition.name, definition) } },
+    })
+    return tools.get('request_input')!.execute({ question: '发给谁？' }, { agent })
+  }
+
+  test('the card answer becomes the request_input result', async () => {
+    const agent: ListedAgent = { id: 'huaanwork-1111111111111111', cancel: () => undefined }
+    const waiting = askInput(agent)
+    expect(sessionAnswerInput({ sessionId: agent.id, answer: '张三' })).toEqual({ handled: true })
+    await expect(waiting).resolves.toEqual({ text: '张三' })
+    expect(sessionAnswerInput({ sessionId: agent.id, answer: '张三' })).toEqual({ handled: false })
+  })
+
+  test('cancelling the card ends the call and stops the turn', async () => {
+    const reasons: string[] = []
+    const agent: ListedAgent = { id: 'huaanwork-2222222222222222', cancel: (reason) => { reasons.push(reason.kind) } }
+    const waiting = askInput(agent)
+    expect(sessionAnswerInput({ sessionId: agent.id, cancel: true })).toEqual({ handled: true })
+    await expect(waiting).rejects.toThrow(/用户取消了这个问题/)
+    expect(reasons).toEqual(['parent'])
+  })
+
+  test('a blank answer or a missing session id is not handled', () => {
+    expect(sessionAnswerInput({ sessionId: 'huaanwork-3333333333333333', answer: '  ' })).toEqual({ handled: false })
+    expect(sessionAnswerInput({ answer: '张三' })).toEqual({ handled: false })
+  })
+
+  test('session.cancel releases a waiting request_input', async () => {
+    const agent: ListedAgent = { id: 'huaanwork-4444444444444444', cancel: () => undefined }
+    const waiting = askInput(agent)
+    const ctx: SessionRuntimeContext = { agents: { get: (id) => (id === agent.id ? agent : undefined), list: () => [agent] } }
+    sessionCancel(ctx, makeRouteCtx(freshTmp()), { sessionId: agent.id })
+    await expect(waiting).rejects.toThrow(/回合已停止/)
   })
 })
 
@@ -308,8 +505,216 @@ describe('session.open / session.remove (旧 host.ts:1381/1395)', () => {
     await expect(sessionOpen(routeCtx, { sessionId: 'missing' })).rejects.toThrow(/was not found/)
     await expect(sessionOpen(routeCtx, {})).rejects.toThrow(/requires params.sessionId/)
 
-    await expect(sessionRemove(routeCtx, { sessionId })).resolves.toEqual({ removed: true })
+    await expect(sessionRemove({}, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
     await expect(sessionOpen(routeCtx, { sessionId })).rejects.toThrow(/was not found/)
+  })
+})
+
+describe('session.remove lifecycle', () => {
+  test('releases a waiting request_input, cancels the live agent, and forgets the session', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = 'huaanwork-5555555555555555'
+    writePersistedSession(routeCtx.dshHome, sessionId, routeCtx.workspaceRoot.current)
+
+    const reasons: string[] = []
+    const agent: ListedAgent = {
+      id: sessionId,
+      session: { id: sessionId },
+      status: 'running',
+      cancel: (reason) => { reasons.push(reason.kind) },
+    }
+    // 通道 agent 绑在兄弟会话上:删这个会话不能顺手把它停掉。
+    const channel: ListedAgent = {
+      id: 'huaanwork',
+      session: { id: 'huaanwork-6666666666666666' },
+      status: 'running',
+      cancel: (reason) => { reasons.push(`channel:${reason.kind}`) },
+    }
+    registerChildSession(sessionId, 'child-of-removed')
+    registerChildSession('parent-of-removed', sessionId)
+    expect(noteInvalidRoute(sessionId).endTurn).toBe(false)
+    expect(noteInvalidRoute(sessionId).endTurn).toBe(true)
+
+    type Exec = { agent?: unknown; signal?: AbortSignal }
+    type Registered = { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }
+    const tools = new Map<string, Registered>()
+    applyRouteTools({
+      huaanworkEmit: () => undefined,
+      planMode: { set: () => undefined },
+      tools: { register: (definition: Registered) => { tools.set(definition.name, definition) } },
+    })
+    const waiting = tools.get('request_input')!.execute({ question: '发给谁？' }, { agent })
+    const settlement = expect(waiting).rejects.toThrow(/回合已停止/)
+    await Promise.resolve()
+
+    const ctx: SessionRuntimeContext = {
+      agents: {
+        get: (id) => (id === sessionId ? agent : id === 'huaanwork' ? channel : undefined),
+        list: () => [agent, channel],
+      },
+    }
+    await expect(sessionRemove(ctx, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
+    await settlement
+
+    expect(answerRouteInput(sessionId, 'late')).toBe(false)
+    expect(releaseRouteInput(sessionId)).toBe(false)
+    expect(reasons).toEqual(['user'])
+    expect(childrenOf(sessionId)).toEqual([])
+    expect(childrenOf('parent-of-removed')).not.toContain(sessionId)
+    expect(noteInvalidRoute(sessionId).endTurn).toBe(false)
+    await expect(sessionOpen(routeCtx, { sessionId })).rejects.toThrow(/was not found/)
+  })
+
+  /** full 模式答一次计划评审,把目标记为该会话的已确认基线;这里返回评审监听器与事件。 */
+  function planAnswerer(profileDir: string) {
+    writeFileSync(join(profileDir, 'huaanwork-settings.json'), JSON.stringify({ guard_mode: 'full' }))
+    const events: { approvalRequestId: string; autoContinue?: boolean }[] = []
+    const approvals = new Map<string, (result: 'allowed-once' | 'rejected' | 'unavailable' | 'cancelled') => void>()
+    let listener:
+      | ((request: unknown, next: () => Promise<unknown>) => Promise<{ answers: { id: string; selected: string[] }[] }>)
+      | undefined
+    applyQuestionAnswerer({
+      huaanworkProfileDir: profileDir,
+      huaanworkWorkspaceRoot: { current: tmpdir() },
+      huaanworkApprovals: approvals,
+      huaanworkPlanReviews: new Map(),
+      huaanworkEmit(event) {
+        if (event.event === 'approval/asked') events.push(event)
+      },
+      on(_name, fn) {
+        listener = fn as typeof listener
+      },
+    })
+    const ask = (sessionId: string, plan: string) => {
+      const callId = `call-${events.length}`
+      return listener!({
+        questions: [{
+          id: 'plan-review',
+          question: 'Approve this plan and leave plan mode?',
+          detail: plan,
+          options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+          intent: { kind: 'plan-review', approve: 'Approve', callId },
+        }],
+        agent: { session: { id: sessionId } },
+      }, async () => {
+        throw new Error('next')
+      })
+    }
+    return { events, approvals, ask }
+  }
+
+  async function pendingAfter(promise: Promise<unknown>): Promise<'settled' | 'pending'> {
+    return Promise.race([
+      promise.then(() => 'settled' as const, () => 'settled' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 30)),
+    ])
+  }
+
+  test('sessionRemove forgets the last confirmed plan target through the real route path', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = 'huaanwork-7777777777777777'
+    writePersistedSession(routeCtx.dshHome, sessionId, routeCtx.workspaceRoot.current)
+    const { events, approvals, ask } = planAnswerer(root)
+
+    // full 模式没有基线 ⇒ 第一份计划自动继续,并记成该会话的确认目标。
+    const first = await ask(sessionId, '# 周报\n\n写入 `out/report.md`，收件人：张三')
+    expect(first.answers).toEqual([{ id: 'plan-review', selected: ['Approve'] }])
+    expect(events[0]?.autoContinue).toBe(true)
+
+    // 目标变了就再确认一次,把这第二份记为新的已确认目标。
+    const second = ask(sessionId, '# 月报\n\n写入 `out/report.md`，收件人：李四')
+    expect(await pendingAfter(second)).toBe('pending')
+    approvals.get(events[1]!.approvalRequestId)!('allowed-once')
+    await second
+
+    // 经 session.remove 删除(不是直接调 forgetConfirmedTarget):记忆必须一起消失,
+    // 因此下一份不同的计划按「没有上一份」自动继续;若接线丢失,它会停住等确认。
+    await expect(sessionRemove(undefined, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
+    const afterRemoval = ask(sessionId, '# 季报\n\n写入 `out/report.md`，收件人：王五')
+    const state = await pendingAfter(afterRemoval)
+    if (state === 'pending') approvals.get(events[2]!.approvalRequestId)!('rejected')
+    await afterRemoval
+    expect(state).toBe('settled')
+    expect(events[2]?.autoContinue).toBe(true)
+  })
+
+  test('task.remove and project.remove release runtime state before the sweep deletes logs', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const taskSession = 'huaanwork-8888888888888888'
+    const projectSession = 'huaanwork-9999999999999999'
+    writePersistedSession(routeCtx.dshHome, taskSession, routeCtx.workspaceRoot.current)
+    writePersistedSession(routeCtx.dshHome, projectSession, routeCtx.workspaceRoot.current)
+    writeFileSync(join(root, 'tasks.json'), JSON.stringify({
+      tasks: [
+        { id: 't1', projectId: 'p1', name: 'T1', createdAt: 1, sessionId: taskSession },
+        { id: 't2', projectId: 'p2', name: 'T2', createdAt: 2, sessionId: projectSession },
+      ],
+    }))
+    writeFileSync(join(root, 'projects.json'), JSON.stringify({
+      projects: [{ id: 'p2', name: 'P2', root: join(root, 'p2'), createdAt: 1 }],
+    }))
+
+    const cancelled: string[] = []
+    const agents = new Map<string, ListedAgent>()
+    for (const sessionId of [taskSession, projectSession]) {
+      agents.set(sessionId, {
+        id: sessionId,
+        session: { id: sessionId },
+        status: 'running',
+        cancel: (reason) => { cancelled.push(`${sessionId}:${reason.kind}`) },
+      })
+      registerChildSession(sessionId, `child-${sessionId}`)
+      registerChildSession(`parent-${sessionId}`, sessionId)
+      expect(noteInvalidRoute(sessionId).endTurn).toBe(false)
+      expect(noteInvalidRoute(sessionId).endTurn).toBe(true)
+    }
+    routeCtx.runtimeCtx = { agents: { get: (id) => agents.get(id), list: () => [...agents.values()] } }
+
+    type Exec = { agent?: unknown; signal?: AbortSignal }
+    type Registered = { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }
+    const tools = new Map<string, Registered>()
+    applyRouteTools({
+      huaanworkEmit: () => undefined,
+      planMode: { set: () => undefined },
+      tools: { register: (definition: Registered) => { tools.set(definition.name, definition) } },
+    })
+    const waiting = new Map<string, Promise<unknown>>()
+    for (const sessionId of [taskSession, projectSession]) {
+      const agent = agents.get(sessionId)!
+      const pending = tools.get('request_input')!.execute({ question: '发给谁？' }, { agent })
+      const settlement = expect(pending).rejects.toThrow(/回合已停止/)
+      waiting.set(sessionId, settlement)
+      await Promise.resolve()
+    }
+
+    const invoke = async (method: string, body: unknown) => {
+      const route = ROUTE_TABLE.find((entry) => entry.method === method)
+      if (!route) throw new Error(`missing route ${method}`)
+      return route.handler({ params: {}, body, query: new URLSearchParams() }, routeCtx)
+    }
+
+    // task.remove:级联删任务绑定的会话日志;运行态必须先释放(等待卡片/agent/子会话/坏参数计数)。
+    await invoke('task.remove', { id: 't1' })
+    await waiting.get(taskSession)
+    expect(answerRouteInput(taskSession, 'late')).toBe(false)
+    expect(cancelled).toEqual([`${taskSession}:user`])
+    expect(childrenOf(taskSession)).toEqual([])
+    expect(childrenOf(`parent-${taskSession}`)).not.toContain(taskSession)
+    expect(noteInvalidRoute(taskSession).endTurn).toBe(false)
+    expect(existsSync(join(routeCtx.dshHome, 'sessions', 'repo', taskSession))).toBe(false)
+
+    // project.remove:同一层级联路径也必须走同一释放逻辑。
+    await invoke('project.remove', { projectId: 'p2' })
+    await waiting.get(projectSession)
+    expect(answerRouteInput(projectSession, 'late')).toBe(false)
+    expect(cancelled).toEqual([`${taskSession}:user`, `${projectSession}:user`])
+    expect(childrenOf(projectSession)).toEqual([])
+    expect(childrenOf(`parent-${projectSession}`)).not.toContain(projectSession)
+    expect(noteInvalidRoute(projectSession).endTurn).toBe(false)
+    expect(existsSync(join(routeCtx.dshHome, 'sessions', 'repo', projectSession))).toBe(false)
   })
 })
 
@@ -355,6 +760,76 @@ describe('session.approve / session.reject (旧 host.ts:1677 answerApproval)', (
 
     await expect(sessionAnswerApproval(ctx, routeCtx, {}, 'rejected'))
       .resolves.toEqual({ handled: false })
+  })
+})
+
+describe('session.exitPlanMode', () => {
+  function planCtx(agent: ListedAgent, calls: string[]) {
+    const reviews = new Map<string, () => boolean>()
+    const ctx: SessionRuntimeContext = {
+      huaanworkPlanReviews: reviews,
+      agents: { get: (id) => (id === 's1' ? agent : undefined) },
+      get: (name) => (name === 'planMode'
+        ? { set: (target: unknown, active: boolean) => { calls.push(`set:${String(active)}:${target === agent}`) } }
+        : undefined),
+    }
+    return { ctx, reviews }
+  }
+
+  test('settles the pending plan review before leaving plan mode', () => {
+    const calls: string[] = []
+    const agent: ListedAgent = { id: 's1', status: 'running', cancel: () => { calls.push('cancel') } }
+    const { ctx, reviews } = planCtx(agent, calls)
+    reviews.set('s1', () => { calls.push('settle'); return true })
+    expect(sessionExitPlanMode(ctx, makeRouteCtx(freshTmp()), { sessionId: 's1' })).toEqual({ exited: true })
+    expect(calls).toEqual(['settle', 'set:false:true'])
+    expect(reviews.has('s1')).toBe(false)
+  })
+
+  test('without a review on screen it still leaves plan mode and stops the running turn', () => {
+    const calls: string[] = []
+    const agent: ListedAgent = { id: 's1', status: 'running', cancel: () => { calls.push('cancel') } }
+    const { ctx } = planCtx(agent, calls)
+    expect(sessionExitPlanMode(ctx, makeRouteCtx(freshTmp()), { sessionId: 's1' })).toEqual({ exited: true })
+    expect(calls).toEqual(['set:false:true', 'cancel'])
+  })
+
+  test('a missing agent or planMode does not settle the pending review', () => {
+    const agent: ListedAgent = { id: 's1', status: 'running', cancel: () => undefined }
+    const routeCtx = makeRouteCtx(freshTmp())
+
+    const missingAgentCalls: string[] = []
+    const missingAgent = planCtx(agent, missingAgentCalls)
+    missingAgent.ctx.agents = { get: () => undefined }
+    missingAgent.reviews.set('s1', () => { missingAgentCalls.push('settle'); return true })
+    expect(sessionExitPlanMode(missingAgent.ctx, routeCtx, { sessionId: 's1' })).toEqual({ exited: false })
+    expect(missingAgentCalls).toEqual([])
+    expect(missingAgent.reviews.has('s1')).toBe(true)
+
+    const missingPlanCalls: string[] = []
+    const missingPlan = planCtx(agent, missingPlanCalls)
+    missingPlan.ctx.get = () => undefined
+    missingPlan.reviews.set('s1', () => { missingPlanCalls.push('settle'); return true })
+    expect(sessionExitPlanMode(missingPlan.ctx, routeCtx, { sessionId: 's1' })).toEqual({ exited: false })
+    expect(missingPlanCalls).toEqual([])
+    expect(missingPlan.reviews.has('s1')).toBe(true)
+  })
+
+  test('does not exit plan mode or cancel a channel agent running a sibling session', () => {
+    const calls: string[] = []
+    const channel: ListedAgent = {
+      id: 'huaanwork',
+      session: { id: 'huaanwork-bbbbbbbbbbbbbbbb' },
+      status: 'running',
+      cancel: () => { calls.push('channel-cancel') },
+    }
+    const ctx: SessionRuntimeContext = {
+      agents: { get: (id) => (id === 'huaanwork' ? channel : undefined), list: () => [channel] },
+      get: (name) => (name === 'planMode' ? { set: () => { calls.push('plan-mode-set') } } : undefined),
+    }
+    expect(sessionExitPlanMode(ctx, makeRouteCtx(freshTmp()), { sessionId: 'huaanwork-aaaaaaaaaaaaaaaa' }))
+      .toEqual({ exited: false })
+    expect(calls).toEqual([])
   })
 })
 
