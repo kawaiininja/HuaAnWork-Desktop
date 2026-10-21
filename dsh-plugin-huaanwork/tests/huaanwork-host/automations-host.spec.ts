@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 
 import type { AutomationInfo, RpcEvent, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
+import { inFlightRuns, inFlightRunsOf } from '../../src/huaanwork-host/automation-inflight.ts'
 import {
   automationCollector,
   automationTail,
@@ -272,6 +273,7 @@ afterEach(async () => {
   await Promise.race([automationTail, new Promise((resolve) => setTimeout(resolve, 3_000))])
   sessionSendBlockers.workspaceDisplaced = false
   automationCollector.clear()
+  inFlightRuns.clear()
   while (dirs.length > 0) {
     const dir = dirs.pop()
     if (dir) rmSync(dir, { recursive: true, force: true })
@@ -959,3 +961,98 @@ test('a once task disables itself after it fires and does not record missed', as
   expect(runs[0]).toMatchObject({ status: 'ok', output: 'once-ok' })
   expect(runs.some((run) => run.status === 'missed')).toBe(false)
 })
+
+test('a scheduled agent run sits queued in flight before the executor wakes and leaves once done', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '在途' })
+  const blocker = await agentTask(h.profileDir, { projectId: project.id, name: '占住串行链' })
+  const queued = await agentTask(h.profileDir, { projectId: project.id, name: '排队任务' })
+
+  const blockerRun = enqueueAutomation(blocker, { trigger: 'manual', runId: 'inflight-blocker' })
+  await poll(() => h.followups.length === 1)
+
+  const queuedRun = enqueueAutomation(queued, { trigger: 'schedule' })
+  await poll(() => inFlightRunsOf(queued.id).length === 1)
+  const entry = inFlightRunsOf(queued.id)[0]
+  if (!entry) throw new Error('in-flight entry missing')
+  expect(entry).toMatchObject({
+    automationId: queued.id,
+    trigger: 'schedule',
+    phase: 'queued',
+    cancelRequested: false,
+    slotConsumed: false,
+  })
+  expect(entry.runId).toEqual(expect.any(String))
+  expect(h.followups).toHaveLength(1)
+
+  h.release()
+  await poll(() => h.followups.length === 2)
+  h.release()
+  await blockerRun
+  await queuedRun
+  await waitRunEnd(h.events, queued.id)
+  expect(inFlightRunsOf(queued.id)).toEqual([])
+  expect((await recentRuns(h.profileDir, queued.id))[0]?.runId).toBe(entry.runId)
+}, 15_000)
+
+test('a manual run keeps the caller supplied runId in flight and in the persisted record', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '手动在途' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '手动任务' })
+
+  const run = enqueueAutomation(automation, { trigger: 'manual', runId: 'manual-fixed-1' })
+  expect(inFlightRunsOf(automation.id)).toMatchObject([
+    {
+      automationId: automation.id,
+      runId: 'manual-fixed-1',
+      trigger: 'manual',
+      phase: 'queued',
+      cancelRequested: false,
+      slotConsumed: false,
+    },
+  ])
+  await poll(() => h.followups.length === 1)
+  h.release()
+  await run
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+  expect((await recentRuns(h.profileDir, automation.id))[0]?.runId).toBe('manual-fixed-1')
+}, 15_000)
+
+test('a cross-root schedule or catchup enqueue leaves no in-flight entry', async () => {
+  const h = makeHarness()
+  const other = mkdtempSync(join(tmpdir(), 'hw-auto-inflight-other-'))
+  dirs.push(other)
+  const project = await createProject(h.profileDir, { root: other, name: '别的根' })
+  const automation = await scriptTask(h.profileDir, nodeEval("process.stdout.write('never')"), {
+    projectId: project.id,
+    name: '跨根在途',
+  })
+
+  await enqueueAutomation(automation, { trigger: 'schedule' })
+  await enqueueAutomation(automation, { trigger: 'catchup', coalescedCount: 1 })
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+  expect(h.events.some((event) => event.event === 'automation/run-start')).toBe(false)
+  expect(await recentRuns(h.profileDir, automation.id)).toEqual([])
+}, 15_000)
+
+test('the in-flight entry flips to started as automation/run-start is emitted', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '阶段' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '阶段任务' })
+
+  const run = enqueueAutomation(automation, { trigger: 'manual', runId: 'phase-1' })
+  await poll(() =>
+    h.events.some((event) => event.event === 'automation/run-start' && event.automationId === automation.id),
+  )
+  const started = h.events.find(
+    (event) => event.event === 'automation/run-start' && event.automationId === automation.id,
+  )
+  expect(started).toMatchObject({ runId: 'phase-1' })
+  expect(inFlightRunsOf(automation.id)).toMatchObject([{ runId: 'phase-1', phase: 'started' }])
+  h.release()
+  await run
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+}, 15_000)

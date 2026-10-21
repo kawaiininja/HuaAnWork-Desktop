@@ -4,6 +4,7 @@ import { resolve as pathResolve } from 'node:path'
 
 import type { AutomationInfo, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
 import { releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
+import { inFlightRuns, startInFlightRun } from './automation-inflight.ts'
 import { resolveApproval } from './approvals.ts'
 import { automationRunSessionId } from './automation-session-ids.ts'
 import {
@@ -395,6 +396,8 @@ async function finishAutomation(
   if (coalescedCount !== undefined) summary.coalescedCount = coalescedCount
   if (run.sessionId !== undefined) summary.sessionId = run.sessionId
   await appendRun(routeCtx.profileDir, automation.id, summary)
+  // 记录落盘即摘条目:之后到达的 stop 看到「无条目」,自然归于「记录已落盘 ⇒ 未停止」。
+  inFlightRuns.delete(run.runId)
   // 完成时不再推进 nextRunAt:进入 running 时已经按 startedAt 算过一次。
   await markAutomation(routeCtx.profileDir, automation.id, {
     lastRunAt: endedAt,
@@ -430,6 +433,18 @@ export async function executeRun(
   runId: string,
   coalescedCount?: number,
 ): Promise<void> {
+  // ── 同步段不变量(规格 §8 / 评审注记 2)────────────────────────────
+  // 取消检查、阶段翻转与 run-start 发射三者之间不得插入任何 await：stop 的
+  // 同步声明依赖事件循环单线程在此段内不可交错。谁在这里加 await 谁就重新
+  // 打开「stop 插不进 queued 与 started 之间」的窗口。本段之后的第一个
+  // await 只能是下面的 markAutomation（发射之后）——同步段结束标记也钉在
+  // 那里，不钉在阶段翻转后（计划评审第 3 条）。
+  const entry = inFlightRuns.get(runId)
+  if (entry?.cancelRequested) {
+    inFlightRuns.delete(runId) // 档位已由停止侧消费（slotConsumed），执行体不再消费
+    return
+  }
+  if (entry) entry.phase = 'started'
   const startedAt = Date.now()
   const sessionId = automation.kind === 'agent' ? automationRunSessionId(automation.id, runId) : undefined
   routeCtx.emit({
@@ -440,6 +455,7 @@ export async function executeRun(
     trigger,
     ...(sessionId === undefined ? {} : { sessionId }),
   })
+  // ── 同步段结束（以上不得有 await）────────────────────────────────
   await markAutomation(routeCtx.profileDir, automation.id, { lastRunAt: startedAt, lastStatus: 'running' })
 
   const project = automation.projectId
@@ -509,7 +525,8 @@ async function runBound(
   meta: AutomationRunMeta,
 ): Promise<void> {
   const { ctx, routeCtx } = requireBound()
-  const runId = meta.runId ?? randomUUID()
+  if (meta.runId === undefined) throw new Error('automation run reached the executor without a runId')
+  const runId = meta.runId
   if (meta.coalescedCount === undefined) {
     await executeRun(ctx, routeCtx, automation, meta.trigger, runId)
   } else {
@@ -574,6 +591,19 @@ export function enqueueAutomation(
 }
 
 function dispatchEnqueue(automation: AutomationInfo, meta: AutomationRunMeta): Promise<void> {
-  return automation.kind === 'agent' ? enqueueAgentAutomation(automation, meta) : enqueueScriptAutomation(automation, meta)
+  // runId 在真正入队的同步段确定并写表(规格 §8;跨根放弃在到达这里之前已 return)。
+  const runId = meta.runId ?? randomUUID()
+  startInFlightRun({
+    automationId: automation.id,
+    runId,
+    trigger: meta.trigger,
+    phase: 'queued',
+    cancelRequested: false,
+    slotConsumed: false,
+  })
+  const withRunId = { ...meta, runId }
+  return automation.kind === 'agent'
+    ? enqueueAgentAutomation(automation, withRunId)
+    : enqueueScriptAutomation(automation, withRunId)
 }
 
