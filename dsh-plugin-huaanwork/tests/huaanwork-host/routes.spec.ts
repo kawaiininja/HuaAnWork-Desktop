@@ -30,15 +30,15 @@ const ALL_METHODS = [
   'agent.list', 'agent.get', 'agent.refresh', 'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
   'status.get',
   'project.list', 'project.create', 'project.open', 'project.remove', 'project.rename',
-  'automation.list', 'automation.create', 'automation.update', 'automation.remove', 'automation.stop', 'automation.run', 'automation.runs', 'automation.pruneSessions', 'automation.templates',
+  'automation.list', 'automation.create', 'automation.update', 'automation.remove', 'automation.stop', 'automation.deleteRun', 'automation.run', 'automation.runs', 'automation.pruneSessions', 'automation.templates',
   'task.list', 'task.create', 'task.remove', 'task.bindSession', 'task.rename',
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('57 个方法全部登记,无遗漏无重复', () => {
+  test('58 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(57)
+    expect(ROUTE_TABLE).toHaveLength(58)
   })
 
   test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
@@ -52,6 +52,28 @@ describe('ROUTE_TABLE registry', () => {
       status: 400,
       code: 'store-error',
       message: 'automation.stop requires params.id',
+    })
+  })
+
+  test('automation.deleteRun 登记为 POST /huaanwork/automation/deleteRun 并校验 id/runId', async () => {
+    const route = ROUTE_TABLE.find((r) => r.method === 'automation.deleteRun')
+    expect(route).toBeDefined()
+    expect(route?.http).toBe('POST')
+    expect(route?.path).toBe('/huaanwork/automation/deleteRun')
+    // 参数校验先于任何存储访问:即使没有 ctx 也应以 400 拒绝。
+    await expect(
+      route!.handler({ params: {}, body: {}, query: new URLSearchParams() } as any, {} as any),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: 'store-error',
+      message: 'automation.deleteRun requires params.id',
+    })
+    await expect(
+      route!.handler({ params: {}, body: { id: 'a1' }, query: new URLSearchParams() } as any, {} as any),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: 'store-error',
+      message: 'automation.deleteRun requires params.runId',
     })
   })
 
@@ -87,7 +109,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 57 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 58 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -127,6 +149,7 @@ describe('ROUTE_TABLE registry', () => {
       'automation.update',
       'automation.remove',
       'automation.stop',
+      'automation.deleteRun',
       'automation.runs',
       'automation.run',
       'automation.pruneSessions',
@@ -151,7 +174,7 @@ describe('ROUTE_TABLE registry', () => {
       'plugin.add',
       'plugin.remove',
     ])
-    expect(implemented).toHaveLength(57)
+    expect(implemented).toHaveLength(58)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue

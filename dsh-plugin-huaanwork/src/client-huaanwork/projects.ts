@@ -69,6 +69,14 @@ export function stopAutomation(id: string): Promise<{ stopped: boolean }> {
   return rpcCall("automation.stop", { id });
 }
 
+/** 删除单条运行记录：先释放会话运行态再删目录；sessionDirRemoved 报告目录是否删掉。 */
+export function deleteAutomationRun(
+  automationId: string,
+  runId: string,
+): Promise<{ removed: boolean; sessionDirRemoved: boolean }> {
+  return rpcCall("automation.deleteRun", { id: automationId, runId });
+}
+
 export function runAutomation(id: string): Promise<{ queued: boolean; runId?: string; workspaceRoot: string }> {
   return rpcCall("automation.run", { id });
 }

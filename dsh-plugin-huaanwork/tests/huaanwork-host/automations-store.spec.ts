@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import type { AutomationInfo, AutomationSchedule } from '../../src/client-huaanwork/rpc-types.ts'
+import type { AutomationInfo, AutomationSchedule, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
+import { inFlightRuns, startInFlightRun } from '../../src/huaanwork-host/automation-inflight.ts'
 import {
   AUTOMATION_SESSION_RETAIN_LIMIT,
   MAX_AUTOMATIONS,
@@ -10,6 +11,7 @@ import {
   advanceNextRunAt,
   appendRun,
   createAutomation,
+  deleteAutomationRun,
   markAutomation,
   dueAutomations,
   expiredAutomations,
@@ -17,6 +19,7 @@ import {
   normalizeAutomationInput,
   pruneAutomationSessions,
   removeAutomation,
+  rewriteLastRunFromRuns,
   updateAutomation,
 } from '../../src/huaanwork-host/automations-store.ts'
 import { humanizeCron, nextFireAfter, parseCron, periodOf } from '../../src/huaanwork-host/schedule.ts'
@@ -925,5 +928,239 @@ describe('schedule.ts (旧 schedule.test.ts 15 例)', () => {
     expect(humanizeCron('0 9 13 * *')).toBe('每月 13 日 09:00')
     expect(humanizeCron('0 0 29 2 *')).toBe('每年 2 月 29 日 00:00')
     expect(() => humanizeCron('0 0 * * MON')).toThrow(/不支持/)
+  })
+})
+
+function runSummary(runId: string, overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    runId,
+    startedAt: T0,
+    endedAt: T0 + 1,
+    ok: true,
+    output: `out-${runId}`,
+    status: 'ok',
+    trigger: 'schedule',
+    ...overrides,
+  }
+}
+
+describe('automation.deleteRun (Task 9)', () => {
+  test('removes one row, releases the session before deleting its directory', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    const sessionId = `huaanwork-auto-${id}-r1`
+    const sessionDir = join(home, 'sessions', 'cwd-b', sessionId)
+    mkdirSync(sessionDir, { recursive: true })
+    // 会话目录可能落在任意 cwd 下:扫描不是只看第一个条目。
+    mkdirSync(join(home, 'sessions', 'cwd-a'), { recursive: true })
+    await appendRun(home, id, runSummary('r1', { endedAt: T0 + 10, sessionId }))
+    await appendRun(home, id, runSummary('r2', { startedAt: T0 + 20, endedAt: T0 + 30, ok: false, status: 'error' }))
+
+    const observed: Array<{ sessionId: string; dirExisted: boolean }> = []
+    const result = await deleteAutomationRun(home, id, 'r1', {
+      sessionsRoot: join(home, 'sessions'),
+      releaseSession: (released) => {
+        observed.push({ sessionId: released, dirExisted: existsSync(sessionDir) })
+      },
+    })
+
+    expect(result).toEqual({ removed: true, sessionDirRemoved: true })
+    // 释放必须发生在目录还在的时候(session.remove / automation.remove 同序)。
+    expect(observed).toEqual([{ sessionId, dirExisted: true }])
+    expect(existsSync(sessionDir)).toBe(false)
+    expect((await recentRuns(home, id)).map((run) => run.runId)).toEqual(['r2'])
+    expect(readFileSync(join(home, 'automations', `${id}.runs.jsonl`), 'utf8').trimEnd().split('\n')).toHaveLength(1)
+  })
+
+  test('rejects a runId that is still in the in-flight table', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    await appendRun(home, id, runSummary('r1'))
+
+    startInFlightRun({
+      automationId: id,
+      runId: 'r1',
+      trigger: 'manual',
+      phase: 'queued',
+      cancelRequested: false,
+      slotConsumed: false,
+    })
+    try {
+      await expect(deleteAutomationRun(home, id, 'r1', { sessionsRoot: join(home, 'sessions') })).rejects.toThrow(
+        '运行中的记录不能删除',
+      )
+    } finally {
+      inFlightRuns.delete('r1')
+    }
+    // 拒绝发生在删行之前:记录原样保留。
+    expect((await recentRuns(home, id)).map((run) => run.runId)).toEqual(['r1'])
+  })
+
+  test('rolls lastRunAt/lastStatus back to the latest remaining real run and skips missed', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    await appendRun(home, id, runSummary('r1', { startedAt: T0 + 1, endedAt: T0 + 10 }))
+    await appendRun(home, id, runSummary('r2', { startedAt: T0 + 20, endedAt: T0 + 30, ok: false, status: 'error' }))
+    await appendRun(home, id, runSummary('r3', { startedAt: T0 + 40, endedAt: T0 + 50, ok: false, status: 'missed' }))
+    await markAutomation(home, id, { lastRunAt: T0 + 30, lastStatus: 'error' })
+
+    const find = async () => (await listAutomations(home)).find((item) => item.id === id)
+
+    await deleteAutomationRun(home, id, 'r2', { sessionsRoot: join(home, 'sessions') })
+    // 剩余最新是 missed 的 r3 ⇒ 跳过它,回退到 r1。
+    expect(await find()).toMatchObject({ lastRunAt: T0 + 10, lastStatus: 'ok' })
+
+    await deleteAutomationRun(home, id, 'r1', { sessionsRoot: join(home, 'sessions') })
+    // 只剩 missed:两字段都不存在(任务行显示「从未运行」)。
+    const cleared = await find()
+    expect(cleared?.lastRunAt).toBeUndefined()
+    expect(cleared?.lastStatus).toBeUndefined()
+  })
+
+  test('leaves both last-run fields untouched when the registry says running', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    await appendRun(home, id, runSummary('r1', { endedAt: T0 + 10 }))
+    const runningAt = T0 + 500
+    await markAutomation(home, id, { lastRunAt: runningAt, lastStatus: 'running' })
+
+    await rewriteLastRunFromRuns(home, id)
+
+    const row = (await listAutomations(home)).find((item) => item.id === id)
+    expect(row?.lastRunAt).toBe(runningAt)
+    expect(row?.lastStatus).toBe('running')
+  })
+
+  test('rewriteLastRunFromRuns rereads the runs file inside the registry lock (no stale snapshot)', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    await appendRun(home, id, runSummary('r1', { startedAt: T0 + 1, endedAt: T0 + 10 }))
+    await appendRun(home, id, runSummary('r2', { startedAt: T0 + 20, endedAt: T0 + 30, ok: false, status: 'error' }))
+    await markAutomation(home, id, { lastRunAt: T0 + 30, lastStatus: 'error' })
+
+    // deleteAutomationRun 自己的回写把基准落到 r1 之后,又有新运行 r3 落盘。
+    await deleteAutomationRun(home, id, 'r2', { sessionsRoot: join(home, 'sessions') })
+    await appendRun(
+      home,
+      id,
+      runSummary('r3', { startedAt: T0 + 40, endedAt: T0 + 50, ok: false, status: 'cancelled' }),
+    )
+
+    await rewriteLastRunFromRuns(home, id)
+
+    const row = (await listAutomations(home)).find((item) => item.id === id)
+    // 若用删行时的旧快照回写,这里会停在 r1 的 T0+10。
+    expect(row?.lastRunAt).toBe(T0 + 50)
+    expect(row?.lastStatus).toBe('error')
+  })
+
+  test('is idempotent for a missing row and does not rewrite the registry', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    await appendRun(home, id, runSummary('r1', { endedAt: T0 + 10 }))
+    await markAutomation(home, id, { lastRunAt: T0 + 10, lastStatus: 'ok' })
+    const registryBefore = readFileSync(join(home, 'automations.json'), 'utf8')
+
+    const result = await deleteAutomationRun(home, id, 'no-such-run', { sessionsRoot: join(home, 'sessions') })
+
+    expect(result).toEqual({ removed: false, sessionDirRemoved: true })
+    expect(readFileSync(join(home, 'automations.json'), 'utf8')).toBe(registryBefore)
+    expect((await recentRuns(home, id)).map((run) => run.runId)).toEqual(['r1'])
+  })
+
+  test('treats a missing session directory as already removed', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    await appendRun(home, id, runSummary('r1', { sessionId: `huaanwork-auto-${id}-gone` }))
+
+    const result = await deleteAutomationRun(home, id, 'r1', { sessionsRoot: join(home, 'sessions') })
+
+    expect(result).toEqual({ removed: true, sessionDirRemoved: true })
+    expect(await recentRuns(home, id)).toEqual([])
+  })
+
+  test('keeps the row deleted when removing the session directory fails', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    const sessionId = `huaanwork-auto-${id}-r1`
+    const cwdDir = join(home, 'sessions', 'cwd-x')
+    const sessionDir = join(cwdDir, sessionId)
+    mkdirSync(sessionDir, { recursive: true })
+    await appendRun(home, id, runSummary('r1', { endedAt: T0 + 10, sessionId }))
+
+    chmodSync(cwdDir, 0o555)
+    let result: Awaited<ReturnType<typeof deleteAutomationRun>>
+    try {
+      result = await deleteAutomationRun(home, id, 'r1', { sessionsRoot: join(home, 'sessions') })
+    } finally {
+      chmodSync(cwdDir, 0o755)
+    }
+
+    expect(result).toEqual({ removed: true, sessionDirRemoved: false })
+    // 删行成功优先:目录还在,列表里已没有这一条。
+    expect(existsSync(sessionDir)).toBe(true)
+    expect(await recentRuns(home, id)).toEqual([])
+  })
+
+  test('rewriteLastRunFromRuns silently ignores a missing automation', async () => {
+    const home = makeHome()
+    await expect(rewriteLastRunFromRuns(home, 'missing')).resolves.toBeUndefined()
+    expect(await listAutomations(home)).toEqual([])
+  })
+
+  test('automation.deleteRun route releases the session before deleting its directory', async () => {
+    // dshHome 与 profileDir 分列:路由必须把 dshHome/sessions 作为会话根传入,
+    // 用默认的 profileDir/sessions 会找不到目录,本用例随之变红。
+    const dshHome = makeHome()
+    const profileDir = join(dshHome, 'profiles', 'huaanwork')
+    mkdirSync(profileDir, { recursive: true })
+    const automation = await createAutomation(profileDir, normalizeAutomationInput(agentInput(), T0), T0)
+    const sessionId = `huaanwork-auto-${automation.id}-r1`
+    const runSessionDir = join(dshHome, 'sessions', 'cwd-x', sessionId)
+    mkdirSync(runSessionDir, { recursive: true })
+    await appendRun(profileDir, automation.id, runSummary('r1', { endedAt: T0 + 10, sessionId }))
+    await markAutomation(profileDir, automation.id, { lastRunAt: T0 + 10, lastStatus: 'ok' })
+
+    const releasedSessions: string[] = []
+    const ctx = {
+      dshHome,
+      profileDir,
+      workspaceRoot: { current: dshHome },
+      emit: () => {},
+      logger: () => {},
+      requestRestart: async () => false,
+      runtimeCtx: {
+        agents: {
+          get: (id: string) => {
+            // 释放必须发生在目录还在的时候:路由要把 releaseSession 透传给 deleteAutomationRun。
+            expect(existsSync(join(dshHome, 'sessions', 'cwd-x', id))).toBe(true)
+            releasedSessions.push(id)
+            return undefined
+          },
+        },
+      },
+    }
+    const route = ROUTE_TABLE.find((entry) => entry.method === 'automation.deleteRun')
+    expect(route).toBeDefined()
+
+    const result = await route!.handler(
+      { params: {}, body: { id: automation.id, runId: 'r1' }, query: new URLSearchParams() },
+      ctx,
+    )
+
+    expect(result).toEqual({ removed: true, sessionDirRemoved: true })
+    expect(releasedSessions).toEqual([sessionId])
+    expect(existsSync(runSessionDir)).toBe(false)
+    const row = (await listAutomations(profileDir)).find((item) => item.id === automation.id)
+    expect(row?.lastRunAt).toBeUndefined()
+    expect(row?.lastStatus).toBeUndefined()
   })
 })

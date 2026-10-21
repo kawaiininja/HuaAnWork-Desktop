@@ -3,6 +3,7 @@ import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import type { AutomationInfo, AutomationSchedule, RunSummary } from '../client-huaanwork/rpc-types.ts'
+import { inFlightRuns } from './automation-inflight.ts'
 import { isAutomationSessionEntry } from './automation-session-ids.ts'
 import { nextFireAfter, parseCron, periodOf } from './schedule.ts'
 import {
@@ -523,4 +524,100 @@ export async function pruneAutomationSessions(
     }),
   )
   return removed
+}
+
+/**
+ * 删除单条运行记录(规格 §6):删行 → 释放运行态 → 删对应会话目录 → 注册表锁内回写上次运行。
+ *
+ * 锁序:先在运行记录锁内删行并返回被删记录,锁释放后才进注册表锁回写。
+ * 不得反过来嵌套——`finishAutomation` 先拿运行记录锁、再等注册表锁,反向嵌套会死锁。
+ *
+ * 在途表中的 runId 拒绝删除:执行中的轮次要到结束才落盘,界面正常删不到它;
+ * 拒绝文案是界面直接展示给用户的那一句。
+ *
+ * 行不存在时幂等返回(不改注册表);目录不存在视为已删;删行成功后即使
+ * 目录删除失败也不回滚(列表不再出现这一条,由返回值报告目录未删)。
+ */
+export async function deleteAutomationRun(
+  storageRoot: string,
+  automationId: string,
+  runId: string,
+  opts: { sessionsRoot: string; releaseSession?: (sessionId: string) => void },
+): Promise<{ removed: boolean; sessionDirRemoved: boolean }> {
+  if (inFlightRuns.has(runId)) throw new Error('运行中的记录不能删除')
+  const removed = await withAppendRunLock(storageRoot, automationId, async () => {
+    const existing = await recentRuns(storageRoot, automationId)
+    const target = existing.find((run) => run.runId === runId)
+    if (!target) return undefined
+    const lines = existing.filter((run) => run.runId !== runId).map((entry) => JSON.stringify(entry))
+    await mkdir(dirname(runsPath(storageRoot, automationId)), { recursive: true })
+    await writeFile(runsPath(storageRoot, automationId), lines.length ? `${lines.join('\n')}\n` : '', 'utf8')
+    return target
+  })
+  if (removed === undefined) return { removed: false, sessionDirRemoved: true }
+  let sessionDirRemoved = true
+  if (removed.sessionId) {
+    // 先释放运行态,再删目录(session.remove / automation.remove 同序)。
+    opts.releaseSession?.(removed.sessionId)
+    sessionDirRemoved = await removeSessionDir(opts.sessionsRoot, removed.sessionId)
+  }
+  await rewriteLastRunFromRuns(storageRoot, automationId)
+  return { removed: true, sessionDirRemoved }
+}
+
+/**
+ * 注册表锁内重读运行记录,重算 lastRunAt/lastStatus(规格 §6)。
+ *
+ * 锁不可重入:禁调 markAutomation / updateAutomation;运行记录用 recentRuns
+ * 裸读(不取运行记录锁),否则与 `finishAutomation`(先运行记录锁、再注册表锁)反向嵌套。
+ * 锁内重新读取运行记录而不是接收删行时的快照:删行之后、回写之前落盘的新运行必须被看见。
+ * 任务不存在或 lastStatus 已是 running 时静默返回(不动这两个字段)。
+ */
+export async function rewriteLastRunFromRuns(storageRoot: string, automationId: string): Promise<void> {
+  return withAutomationRegistryLock(async () => {
+    const registry = await readAutomationRegistry(storageRoot)
+    const automation = registry.automations.find((item) => item.id === automationId)
+    if (!automation || automation.lastStatus === 'running') return
+    const real = (await recentRuns(storageRoot, automationId))
+      .filter((run) => run.status !== 'missed')
+      .sort((a, b) => b.startedAt - a.startedAt)[0]
+    if (real) {
+      automation.lastRunAt = real.endedAt
+      automation.lastStatus = real.ok ? 'ok' : 'error'
+    } else {
+      delete automation.lastRunAt
+      delete automation.lastStatus
+    }
+    await writeAutomationRegistry(storageRoot, registry)
+  })
+}
+
+/**
+ * prune 同款扫描定位会话目录并删除:会话目录布局是 `<sessionsRoot>/<cwd>/<sessionId>`。
+ * 找不到(或会话根不可读)视为已删;rm 失败返回 false,其余 cwd 不再尝试。
+ */
+async function removeSessionDir(sessionsRoot: string, sessionId: string): Promise<boolean> {
+  let cwds: string[]
+  try {
+    cwds = await readdir(sessionsRoot)
+  } catch {
+    return true
+  }
+  for (const cwd of cwds) {
+    const cwdDir = join(sessionsRoot, cwd)
+    let entries: string[]
+    try {
+      entries = await readdir(cwdDir)
+    } catch {
+      continue
+    }
+    if (!entries.includes(sessionId)) continue
+    try {
+      await rm(join(cwdDir, sessionId), { recursive: true, force: true })
+      return true
+    } catch {
+      return false
+    }
+  }
+  return true
 }

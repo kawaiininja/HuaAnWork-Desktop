@@ -100,7 +100,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'project RPCs create, open, rename, remove and cascade automations',
     label: 'Task 3 新增',
-    evidence: 'tests/huaanwork-host/automations-store.spec.ts:265',
+    evidence: 'tests/huaanwork-host/automations-store.spec.ts:268',
   },
   {
     file: 'automations-host.test.ts',
@@ -118,7 +118,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'automation.runs filters by status and truncates by limit',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-host/routes.spec.ts:868',
+    evidence: 'tests/huaanwork-host/routes.spec.ts:891',
   },
   {
     file: 'automations-host.test.ts',

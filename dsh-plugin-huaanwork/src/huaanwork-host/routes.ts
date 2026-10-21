@@ -75,6 +75,7 @@ import {
 import { closeWorkspace, openWorkspace } from './workspace.ts'
 import {
   createAutomation,
+  deleteAutomationRun,
   normalizeAutomationInput,
   pruneAutomationSessions,
   removeAutomation,
@@ -638,6 +639,23 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return await stopAutomation(id)
     }),
   }, // Task 8
+  {
+    method: 'automation.deleteRun',
+    http: 'POST',
+    path: '/huaanwork/automation/deleteRun',
+    // 删一条已结束的运行记录:删行 → 释放会话运行态 → 删对应会话目录(规格 §6)。
+    // 会话目录在 dshHome/sessions,与 automation.remove 同一接线。
+    handler: storeRoute(async (req, ctx) => {
+      const id = bodyParam(req.body, 'id')
+      if (!id) throw new Error('automation.deleteRun requires params.id')
+      const runId = bodyParam(req.body, 'runId')
+      if (!runId) throw new Error('automation.deleteRun requires params.runId')
+      return await deleteAutomationRun(ctx.profileDir, id, runId, {
+        sessionsRoot: join(ctx.dshHome, 'sessions'),
+        releaseSession: (sessionId) => releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+      })
+    }),
+  }, // Task 9
   {
     method: 'automation.run',
     http: 'POST',
