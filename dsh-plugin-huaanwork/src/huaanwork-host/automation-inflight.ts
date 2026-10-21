@@ -9,6 +9,12 @@ export type InFlightRun = {
   automationId: string
   runId: string
   trigger: 'schedule' | 'catchup' | 'manual'
+  /**
+   * 入队时的任务种类。执行体一直按入队时拿到的 automation 运行,而注册表里的
+   * kind 可被 updateAutomation 改写、任务也可能在运行中被删除 —— 停止侧必须以
+   * 这份快照选取消通道(定时对话取消会话 / 脚本杀子进程),不再回读注册表。
+   */
+  kind: 'agent' | 'script'
   phase: 'queued' | 'started'
   cancelRequested: boolean
   slotConsumed: boolean

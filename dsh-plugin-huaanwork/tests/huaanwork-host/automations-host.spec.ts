@@ -1317,3 +1317,47 @@ test('one stop handles a started and a queued run of the same task', async () =>
   expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
   expect(sessionSendBlockers.agentAutomationActive).toBe(0)
 }, 15_000)
+
+test('stop uses the run kind from the in-flight entry after the registry kind is edited', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '改种类' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '改种类任务' })
+  const accepted = (await handler('automation.run')(body({ id: automation.id }), h.routeCtx)) as { runId: string }
+  await poll(() => h.followups.length === 1)
+  const sessionId = `huaanwork-auto-${automation.id}-${accepted.runId}`
+
+  // 运行中把任务改成脚本:执行体仍按入队时的 agent 种类跑,停止侧不得改读注册表。
+  await updateAutomation(h.profileDir, automation.id, { kind: 'script', command: 'echo switched' })
+  expect((await listAutomations(h.profileDir)).find((item) => item.id === automation.id)?.kind).toBe('script')
+
+  await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: true })
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ runId: accepted.runId, ok: false, status: 'cancelled' })
+  // 旧实现按注册表的 script 去找 kill 句柄,agent 会话的 cancel 根本不会被调用。
+  expect(h.state.cancels).toEqual([sessionId])
+  const runs = await recentRuns(h.profileDir, automation.id)
+  expect(runs).toHaveLength(1)
+  expect(runs[0]).toMatchObject({ runId: accepted.runId, ok: false, status: 'cancelled' })
+  await automationTail
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+}, 15_000)
+
+test.skipIf(process.platform === 'win32')('stopping a script kills the whole process tree, not just the shell', async () => {
+  const h = makeHarness()
+  const started = join(h.neutral, 'tree-started')
+  const marker = join(h.neutral, 'tree-marker')
+  // 后台子 shell 先留痕再睡 2 秒后写 marker:只杀 bash 时它会活下来把 marker 写出来。
+  const command = `(printf started > ${quote(started)}; sleep 2; printf done > ${quote(marker)}) & wait`
+  const automation = await scriptTask(h.profileDir, command, { name: '进程树脚本' })
+  await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  // 等子 shell 真的起来(已写过 started 文件),否则在 fork 之前停止无法区分两种杀法。
+  await poll(() => existsSync(started))
+
+  await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: true })
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ ok: false, status: 'cancelled' })
+  // 子 shell 本应在启动约 2 秒后写 marker;给足 2.5 秒再断言它没有活下来。
+  await new Promise((resolve) => setTimeout(resolve, 2_500))
+  expect(existsSync(marker)).toBe(false)
+}, 15_000)

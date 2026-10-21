@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { resolve as pathResolve } from 'node:path'
 
@@ -26,7 +27,7 @@ import {
   type SessionRuntimeContext,
 } from './sessions.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
-import { findAutomation, listProjects, recentRuns } from './stores.ts'
+import { listProjects, recentRuns } from './stores.ts'
 import { neutralWorkspaceRoot } from './workspace-state.ts'
 
 /**
@@ -330,9 +331,58 @@ async function runAgentTurn(
 
 /**
  * 在跑脚本的 kill 句柄,按 runId 索引(规格 §8「脚本结束对应子进程」)。
- * 只登记到 `finish`(exit/error/timeout 任一先到)为止;停止侧命中即 child.kill()。
+ * 只登记到 `finish`(exit/error/timeout 任一先到)为止;停止侧命中即杀进程树。
  */
 export const scriptRunKillers = new Map<string, () => void>()
+
+/** SIGKILL 前留给进程处理 SIGTERM 的宽限;定时器 unref,不拖住宿主退出。 */
+const KILL_GRACE_MS = 2_000
+
+/**
+ * 结束脚本的整棵进程树。`bash -lc` / `pwsh -Command` 只是外壳:管道、后台
+ * 孙进程都属于它派生出的进程组,只杀外壳会让它们继续写文件、跑完整个超时窗口。
+ *
+ * - POSIX:子进程以 `detached` 启动,自成一个进程组(`pgid = child.pid`),
+ *   负 pid 即整组;先 SIGTERM,2 秒后 SIGKILL。组不存在时回落到只杀外壳。
+ * - Windows:`taskkill /T /F` 按 pid 树杀;spawn 失败或没有 pid 时回落 `child.kill()`。
+ */
+function killProcessTree(child: ChildProcess): void {
+  const pid = child.pid
+  if (pid === undefined) return
+  if (process.platform === 'win32') {
+    try {
+      const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' })
+      killer.on('error', () => {
+        try {
+          child.kill()
+        } catch {
+          // 进程已退出
+        }
+      })
+      killer.unref()
+    } catch {
+      child.kill()
+    }
+    return
+  }
+  try {
+    process.kill(-pid, 'SIGTERM')
+  } catch {
+    child.kill('SIGTERM')
+  }
+  const timer = setTimeout(() => {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        // 进程已退出
+      }
+    }
+  }, KILL_GRACE_MS)
+  timer.unref?.()
+}
 
 function runScript(
   command: string,
@@ -345,6 +395,8 @@ function runScript(
     const child = spawn(isWindows ? 'pwsh' : 'bash', isWindows ? ['-NoLogo', '-Command', command] : ['-lc', command], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // POSIX:独立进程组,停止/超时按组杀,后台孙进程不会漏网。
+      detached: !isWindows,
     })
     let stdout = ''
     let stderr = ''
@@ -356,9 +408,9 @@ function runScript(
       if (runId !== undefined) scriptRunKillers.delete(runId)
       resolve({ ok, output: clipOutput(output), timedOut })
     }
-    if (runId !== undefined) scriptRunKillers.set(runId, () => child.kill())
+    if (runId !== undefined) scriptRunKillers.set(runId, () => killProcessTree(child))
     const timer = setTimeout(() => {
-      child.kill()
+      killProcessTree(child)
       finish(false, `${stdout}${stderr}\n（任务超时，已终止）`, true)
     }, timeoutMs)
     timer.unref?.()
@@ -555,18 +607,13 @@ export async function stopAutomation(automationId: string): Promise<{ stopped: b
   }
   // ── 同步段结束 ──
   if (startedEntries.length > 0) {
-    let automation: AutomationInfo | undefined
-    try {
-      automation = await findAutomation(routeCtx.profileDir, automationId)
-    } catch {
-      // 任务在停止与执行之间被删除:标记仍有效,但没有可取消的对象,不得抛出。
-      automation = undefined
-    }
     for (const entry of startedEntries) {
-      if (automation?.kind === 'agent') {
-        cancelAutomationSession(ctx, automationRunSessionId(automationId, entry.runId))
+      // 按入队时的种类选通道:注册表里的 kind 可能已被改写、任务也可能已被删除,
+      // 回读注册表会让已开始的运行既不被取消也不被杀,而 stop 仍返回 stopped:true。
+      if (entry.kind === 'agent') {
+        cancelAutomationSession(ctx, automationRunSessionId(entry.automationId, entry.runId))
       } else {
-        // 脚本结束对应子进程;agent 任务不会登记 kill 句柄,这里是空操作。
+        // 脚本结束对应整棵子进程树;agent 任务不会登记 kill 句柄,这里是空操作。
         scriptRunKillers.get(entry.runId)?.()
       }
     }
@@ -670,6 +717,7 @@ function dispatchEnqueue(automation: AutomationInfo, meta: AutomationRunMeta): P
     automationId: automation.id,
     runId,
     trigger: meta.trigger,
+    kind: automation.kind,
     phase: 'queued',
     cancelRequested: false,
     slotConsumed: false,

@@ -983,6 +983,7 @@ describe('automation.deleteRun (Task 9)', () => {
       automationId: id,
       runId: 'r1',
       trigger: 'manual',
+      kind: 'agent',
       phase: 'queued',
       cancelRequested: false,
       slotConsumed: false,
