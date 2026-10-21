@@ -9,15 +9,37 @@ export type ResultBlock =
 
 const MAX_HEADING_LEVEL = 4;
 
-/** 单元格与列表项的压平文本：换行→空格；对象/数组一行 JSON.stringify；其余 String()。 */
-function flattenCell(value: unknown): string {
-  if (typeof value === "string") return value.replace(/\r?\n/g, " ");
+/** 表格与列表的压平文本：CRLF、CR、LF 一律写成空格，避免拆开表格行或列表项。 */
+const flattenLine = (text: string): string => text.replace(/\r\n|\r|\n/g, " ");
+
+/** 非字符串值的文本形态：对象/数组一行 JSON.stringify；其余 String()。 */
+function scalarText(value: unknown): string {
   if (value !== null && typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
 
+/**
+ * 表格单元格与列表项的压平文本：换行→空格（结构例外，原始换行会拆开表格行或列表项）；
+ * 对象/数组一行 JSON.stringify；其余 String()。
+ */
+function flattenedText(value: unknown): string {
+  return typeof value === "string" ? flattenLine(value) : scalarText(value);
+}
+
+/**
+ * 正文段落（规格 §4.3「字符串按原文分段」）：按任意换行切成独立段落，
+ * 不压平成空格、不裁剪原文；空行产生的空片段直接跳过。
+ */
+function paragraphBlocks(value: unknown): ResultBlock[] {
+  if (typeof value !== "string") return [{ kind: "paragraph", text: scalarText(value) }];
+  return value
+    .split(/\r\n|\r|\n/)
+    .filter((text) => text !== "")
+    .map((text) => ({ kind: "paragraph", text }));
+}
+
 function objectKeysOf(value: Record<string, unknown>): string[] {
-  return Object.keys(value).filter((key) => key !== "__proto__");
+  return Object.keys(value);
 }
 
 /** 顶层字段从二级标题开始；嵌套对象逐级加一，超过四级改用加粗段落。 */
@@ -32,7 +54,7 @@ function fieldBlocks(key: string, value: unknown, level: number): ResultBlock[] 
   if (value !== null && typeof value === "object") {
     return [label, ...objectBlocks(value as Record<string, unknown>, level + 1)];
   }
-  return [label, { kind: "paragraph", text: flattenCell(value) }];
+  return [label, ...paragraphBlocks(value)];
 }
 
 function objectBlocks(value: Record<string, unknown>, level: number): ResultBlock[] {
@@ -49,25 +71,27 @@ function arrayBlocks(value: readonly unknown[]): ResultBlock[] {
     const rows = value as readonly Record<string, unknown>[];
     const columns: string[] = [];
     for (const row of rows) {
-      for (const key of objectKeysOf(row)) if (!columns.includes(key)) columns.push(key);
+      // 只有表格列收集跳过 __proto__；对象字段展开保留全部自有键（Object.keys 只返回自有属性）。
+      for (const key of objectKeysOf(row)) if (key !== "__proto__" && !columns.includes(key)) columns.push(key);
     }
     return [{
       kind: "table",
       columns,
-      rows: rows.map((row) => columns.map((column) => (Object.hasOwn(row, column) ? flattenCell(row[column]) : ""))),
+      rows: rows.map((row) => columns.map((column) => (Object.hasOwn(row, column) ? flattenedText(row[column]) : ""))),
     }];
   }
-  return [{ kind: "list", items: value.map(flattenCell) }];
+  return [{ kind: "list", items: value.map(flattenedText) }];
 }
 
 export function jsonToBlocks(value: unknown): ResultBlock[] {
   if (Array.isArray(value)) return arrayBlocks(value);
   if (value !== null && typeof value === "object") return objectBlocks(value as Record<string, unknown>, 2);
-  return [{ kind: "paragraph", text: flattenCell(value) }];
+  return paragraphBlocks(value);
 }
 
-/** `|` 只在 Markdown 表格侧转义；正文保持原文。 */
-const escapeCell = (text: string): string => text.replace(/\|/g, "\\|");
+/** Markdown 表格文本：先压平换行，再转义反斜杠、最后转义竖线（`a\|b` 不会拆开表格）。 */
+const escapeCell = (text: string): string =>
+  flattenLine(text).replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
 
 export function blocksToMarkdown(blocks: readonly ResultBlock[]): string {
   const lines: string[] = [];
@@ -103,6 +127,9 @@ export function blocksToMarkdown(blocks: readonly ResultBlock[]): string {
 const escapeHtml = (text: string): string =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+/** HTML 表格文本：与 Markdown 同一份压平文本，再做 HTML 转义。 */
+const escapeTableCellHtml = (text: string): string => escapeHtml(flattenLine(text));
+
 export function blocksToHtmlDocument(blocks: readonly ResultBlock[]): string {
   const body: string[] = [];
   for (const block of blocks) {
@@ -118,11 +145,11 @@ export function blocksToHtmlDocument(blocks: readonly ResultBlock[]): string {
         break;
       case "table":
         body.push("<table><thead><tr>");
-        for (const column of block.columns) body.push(`<th>${escapeHtml(column)}</th>`);
+        for (const column of block.columns) body.push(`<th>${escapeTableCellHtml(column)}</th>`);
         body.push("</tr></thead><tbody>");
         for (const row of block.rows) {
           body.push("<tr>");
-          for (const cell of row) body.push(`<td>${escapeHtml(cell)}</td>`);
+          for (const cell of row) body.push(`<td>${escapeTableCellHtml(cell)}</td>`);
           body.push("</tr>");
         }
         body.push("</tbody></table>");
