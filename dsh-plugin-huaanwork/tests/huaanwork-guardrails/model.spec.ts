@@ -419,6 +419,36 @@ test("HTTP error includes the provider response body", async () => {
   }
 });
 
+test("stream passes through native web_fetch and screenshot calls", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, function: { name: "web_fetch", arguments: '{"url":"https://example.com"}' } },
+                { index: 1, function: { name: "screenshot", arguments: '{"url":"https://example.com"}' } },
+              ],
+            },
+          },
+        ],
+      },
+      "[DONE]",
+    ]);
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions()));
+    const names = chunks.flatMap((chunk) =>
+      chunk.type === "block-end" && chunk.block.type === "tool-call" ? [chunk.block.name] : [],
+    );
+    assert.deepEqual(names, ["web_fetch", "screenshot"]);
+    assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("stream passes through native call_host_tool and mcp__* calls (runtime-registered tools)", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () =>
@@ -607,6 +637,74 @@ test("a second reasoning-only stop finishes without inventing a tool or copying 
     const finish = chunks.at(-1);
     assert.equal(finish?.type, "finish");
     if (finish?.type === "finish") assert.equal(finish.reason.kind, "error");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("reasoning plus a short preamble is asked to continue, then a web_fetch call is kept", async () => {
+  const original = globalThis.fetch;
+  const bodies: { messages?: { role?: string; content?: string }[] }[] = [];
+  globalThis.fetch = async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as { messages?: { role?: string; content?: string }[] });
+    if (bodies.length === 1) {
+      return sseResponse([
+        { choices: [{ delta: { reasoning_content: "Let me test web_fetch on a public URL." } }] },
+        { choices: [{ delta: { content: "我直接测一下。" }, finish_reason: "stop" }] },
+        "[DONE]",
+      ]);
+    }
+    return sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, function: { name: "web_fetch", arguments: '{"url":"https://example.com"}' } },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions()));
+    assert.equal(bodies.length, 2);
+    const names = chunks.flatMap((chunk) =>
+      chunk.type === "block-end" && chunk.block.type === "tool-call" ? [chunk.block.name] : [],
+    );
+    assert.deepEqual(names, ["web_fetch"]);
+    assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("a second reasoning-only stop is an error, not a short successful reply", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return sseResponse([
+      { choices: [{ delta: { reasoning_content: "Let me actually call the tool now." } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const chunks = await collect(new HuaAnWorkAdapter().stream(userOptions()));
+    assert.equal(calls, 2);
+    assert.equal(chunks.some((chunk) => chunk.type === "text-delta"), false);
+    const finish = chunks.at(-1);
+    assert.equal(finish?.type, "finish");
+    if (finish?.type === "finish" && finish.reason.kind === "error") {
+      assert.equal(finish.reason.failure.code, "NO_ACTION");
+    } else {
+      assert.fail("expected a finish error");
+    }
   } finally {
     globalThis.fetch = original;
   }

@@ -54,6 +54,8 @@ const DEFAULT_MAX_TOKENS = 16_384;
 export function isRegisteredToolName(name: string): boolean {
   return KNOWN_TOOL_NAMES.has(name)
     || name === "call_host_tool"
+    || name === "web_fetch"
+    || name === "screenshot"
     || name === "propose_plan"
     || name === "request_input"
     || name === "exit_plan_mode"
@@ -92,6 +94,20 @@ export const name = "llm-deepseek";
 export const inject = ["llm"];
 
 const CONTINUE_AFTER_REASONING = "请继续完成这一步：需要工具就直接发起工具调用，否则输出正文结果。不要只输出思考。";
+/** 思考后面只跟了一句开场白，还没调用工具，也还没给出结果。 */
+const PREAMBLE_MAX_CHARS = 40;
+
+function hasToolCall(read: ModelStreamRead): boolean {
+  if (parseSseToolCalls(read.payloads, isRegisteredToolName).length > 0) return true;
+  return parseTextProtocol(read.text, isRegisteredToolName) !== null;
+}
+
+function needsToolContinuation(read: ModelStreamRead): boolean {
+  if (sseFinishReason(read.payloads) === "length") return false;
+  if (hasToolCall(read)) return false;
+  if (read.reasoning.trim().length === 0) return false;
+  return read.text.trim().length <= PREAMBLE_MAX_CHARS;
+}
 
 type ModelStreamRead = {
   text: string;
@@ -102,12 +118,6 @@ type ModelStreamRead = {
   reasoning: string;
   payloads: string[];
 };
-
-function streamHasOutput(read: ModelStreamRead): boolean {
-  if (read.text.length > 0) return true;
-  if (parseSseToolCalls(read.payloads, isRegisteredToolName).length > 0) return true;
-  return parseTextProtocol(read.text, isRegisteredToolName) !== null;
-}
 
 function continueAfterReasoning(options: GenerateOptions, reasoning: string): GenerateOptions {
   const assistant: GenerateOptions["messages"][number] = {
@@ -238,27 +248,34 @@ export class HuaAnWorkAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const settings = loadSettings(this.profileDir);
-    // deepseek-flash 一类思考模型经常只回 reasoning_content 就 stop。
-    // 再要一次正文或工具调用。仍然只有思考时结束这一轮：思考已从 reasoning 通道出去，
-    // 不抄进正文，也不根据思考文本另造工具调用。
+    // deepseek-flash 经常在 reasoning 里写「接下来调用某工具」，然后 finish_reason=stop，
+    // 正文只有一句开场白，甚至没有正文。短 preamble 也当作未完成，带上思考再要一次；
+    // 第二次仍没有工具调用或实质正文就报 NO_ACTION，不把第二段思考当成已经完成的答复。
     let request = options;
     let startIndex = 0;
-    let latest: ModelStreamRead | undefined;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const read = yield* readModelStream(
         await openCompletions(request, settings),
         options.signal,
         startIndex,
       );
-      latest = read;
       startIndex = read.nextIndex;
-      if (streamHasOutput(read) || sseFinishReason(read.payloads) === "length") {
+      if (!needsToolContinuation(read)) {
         yield* finishModelStream(read);
         return;
       }
       if (attempt === 0) request = continueAfterReasoning(options, read.reasoning);
     }
-    if (latest) yield* finishModelStream(latest);
+    yield {
+      type: "finish",
+      reason: {
+        kind: "error",
+        failure: {
+          code: "NO_ACTION",
+          message: "模型只返回了思考，没有调用工具，也没有给出结果。",
+        },
+      },
+    };
   }
 }
 
