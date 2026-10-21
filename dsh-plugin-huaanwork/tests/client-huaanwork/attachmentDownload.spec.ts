@@ -28,4 +28,6 @@ test("the main window session owns the will-download interception (wiring contra
   const afterRendererAssignment = source.slice(source.indexOf("this.renderer = renderer"));
   assert.ok(afterRendererAssignment.includes("renderer.session.on('will-download'"));
   assert.ok(afterRendererAssignment.includes("attachmentSavePath"));
+  // 只算路径不算接线:必须真的把保存路径交给下载项(否则仍弹保存框)。
+  assert.ok(afterRendererAssignment.includes("item.setSavePath(savePath)"));
 });

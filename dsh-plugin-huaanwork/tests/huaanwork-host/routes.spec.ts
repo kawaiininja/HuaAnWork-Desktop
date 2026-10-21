@@ -1478,3 +1478,33 @@ describe('errorRoute wrapper factory & handler error injection (N1)', () => {
     }
   })
 })
+
+describe('automation.stop 成功路径(Task 8)', () => {
+  test('绑定运行态且无在途轮时返回 stopped:false', async () => {
+    // 动态 import:本文件顶部的 import 块保持原样,e2e 行号证据(port mapping)不受影响。
+    const { bindAutomationRuntime } = await import('../../src/huaanwork-host/automations-host.ts')
+    const { inFlightRuns } = await import('../../src/huaanwork-host/automation-inflight.ts')
+    inFlightRuns.clear()
+    const profileDir = mkdtempSync(join(tmpdir(), 'hw-stop-route-'))
+    const routeCtx = {
+      dshHome: profileDir,
+      profileDir,
+      workspaceRoot: { current: profileDir },
+      emit: () => {},
+      logger: () => {},
+      requestRestart: async () => false,
+    } as RouteContext
+    bindAutomationRuntime({} as Parameters<typeof bindAutomationRuntime>[0], routeCtx)
+    try {
+      const route = ROUTE_TABLE.find((r) => r.method === 'automation.stop')!
+      // 成功路径不再只靠缺 id 的 400 用例守:没有在途轮时必须如实回 stopped:false,
+      // 界面据此把按钮收敛回「立即运行」。
+      await expect(
+        route.handler({ params: {}, body: { id: 'no-such-automation' }, query: new URLSearchParams() }, routeCtx),
+      ).resolves.toEqual({ stopped: false })
+    } finally {
+      inFlightRuns.clear()
+      rmSync(profileDir, { recursive: true, force: true })
+    }
+  })
+})
