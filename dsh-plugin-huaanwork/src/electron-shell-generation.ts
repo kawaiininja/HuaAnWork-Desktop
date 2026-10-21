@@ -41,6 +41,7 @@ import {
   type MainWindowBounds,
   type MainWindowStateStore,
 } from './main-window-state.ts'
+import { attachmentSavePath } from './client-huaanwork/logic/attachmentDownload.ts'
 
 const MIN_ZOOM_LEVEL = -4
 const MAX_ZOOM_LEVEL = 4
@@ -342,6 +343,17 @@ export class ElectronShellGeneration {
     const chrome = this.compatibilityShell?.chromeWebContents ?? window.webContents
     this.renderer = renderer
 
+    // 结果附件下载接管（规格 2026-10-21 §5）：只认两个固定名，其余下载保持默认行为。
+    // 保存到系统下载目录的同名文件，不弹保存框；重复下载覆盖该文件。
+    const handleResultAttachmentDownload = (
+      _event: Electron.Event,
+      item: Electron.DownloadItem,
+    ): void => {
+      const savePath = attachmentSavePath(item.getFilename(), app.getPath('downloads'))
+      if (savePath !== undefined) item.setSavePath(savePath)
+    }
+    renderer.session.on('will-download', handleResultAttachmentDownload)
+
     // Desktop-owned actions stay on the Electron lifetime. The page reaches the
     // main process directly, so a Host generation that exited, hung, or never
     // booted cannot take restart, terminal, or diagnostics down with it.
@@ -638,6 +650,7 @@ export class ElectronShellGeneration {
       renderer.off('did-start-loading', resetSurface)
       renderer.off('did-finish-load', loaded)
       if (!renderer.isDestroyed()) {
+        renderer.session.removeListener('will-download', handleResultAttachmentDownload)
         renderer.ipc.removeHandler(DESKTOP_RENDERER_ACTION_CHANNEL)
         if (platform.platform === 'darwin') renderer.ipc.removeHandler(DESKTOP_NATIVE_DIRECTORY_PICKER_CHANNEL)
         renderer.ipc.removeHandler(SETUP_ONBOARDING_CHANNEL)
