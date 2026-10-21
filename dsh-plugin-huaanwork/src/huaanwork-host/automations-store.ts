@@ -378,6 +378,40 @@ export async function advanceNextRunAt(storageRoot: string, automationId: string
   })
 }
 
+/**
+ * 被停止跳过的排队轮消费自己的到期档(规格 §8 档位消费规则 1/2;3/4 是 no-op)。
+ *
+ * 锁不可重入:禁在此调用 updateAutomation / markAutomation / advanceNextRunAt /
+ * removeAutomation —— 它们各自再取同一把注册表锁会死锁。这里在锁内裸读、就地改写、
+ * 再写回,与上述写周期串行且不嵌套。
+ *
+ * 任务不存在时静默返回(停止与删除竞争是合法时序,不得让停止失败)。
+ */
+export async function consumeSkippedSlot(
+  storageRoot: string,
+  automationId: string,
+  trigger: 'schedule' | 'catchup' | 'manual',
+  now: number,
+): Promise<void> {
+  return withAutomationRegistryLock(async () => {
+    const registry = await readAutomationRegistry(storageRoot)
+    const automation = registry.automations.find((item) => item.id === automationId)
+    if (!automation) return
+    if (automation.schedule.kind === 'once') {
+      // 规格 §8 规则 1 的字面语义:停用任务并去掉 nextRunAt,不再推进别的档。
+      // 不镜像 updateAutomation 的重算——「未到期 once 的手动轮被停」边角下重算会写回
+      // 未来档,但任务已停用、该值是死数据,按规格字面删(计划评审第 2 条)。
+      automation.enabled = false
+      delete automation.nextRunAt
+    } else if (trigger === 'schedule') {
+      const next = nextFireAfter(automation.schedule, now)
+      if (next === undefined) delete automation.nextRunAt
+      else automation.nextRunAt = next
+    }
+    await writeAutomationRegistry(storageRoot, registry)
+  })
+}
+
 /** 产出截断:入库前统一上限(旧 automations.ts OUTPUT_MAX_CHARS)。 */
 export const OUTPUT_MAX_CHARS = 32 * 1024
 

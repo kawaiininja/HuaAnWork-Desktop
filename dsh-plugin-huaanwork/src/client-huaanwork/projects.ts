@@ -64,6 +64,11 @@ export function removeAutomation(id: string): Promise<{ removed: boolean }> {
   return rpcCall("automation.remove", { id });
 }
 
+/** 停止任务的在途轮（排队轮跳过、已开始轮取消）；没有在途轮时 stopped 为 false。 */
+export function stopAutomation(id: string): Promise<{ stopped: boolean }> {
+  return rpcCall("automation.stop", { id });
+}
+
 export function runAutomation(id: string): Promise<{ queued: boolean; runId?: string; workspaceRoot: string }> {
   return rpcCall("automation.run", { id });
 }

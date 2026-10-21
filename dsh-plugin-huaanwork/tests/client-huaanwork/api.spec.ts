@@ -73,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(56 项)——
+// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(57 项)——
 const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'workspace.open': { http: 'POST', path: '/huaanwork/workspace/open' },
   'workspace.close': { http: 'POST', path: '/huaanwork/workspace/close' },
@@ -122,6 +122,7 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'automation.create': { http: 'POST', path: '/huaanwork/automation/create' },
   'automation.update': { http: 'POST', path: '/huaanwork/automation/update' },
   'automation.remove': { http: 'POST', path: '/huaanwork/automation/remove' },
+  'automation.stop': { http: 'POST', path: '/huaanwork/automation/stop' },
   'automation.run': { http: 'POST', path: '/huaanwork/automation/run' },
   'automation.runs': { http: 'GET', path: '/huaanwork/automation/runs' },
   'automation.pruneSessions': { http: 'POST', path: '/huaanwork/automation/pruneSessions' },
@@ -134,8 +135,8 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
 }
 
 describe('rpcCall 路由映射', () => {
-  test('全表 56 项与 ROUTE_TABLE 一一对应', () => {
-    expect(Object.keys(ROUTES)).toHaveLength(56)
+  test('全表 57 项与 ROUTE_TABLE 一一对应', () => {
+    expect(Object.keys(ROUTES)).toHaveLength(57)
     const actual = Object.fromEntries(
       Object.entries(ROUTES).map(([method, route]) => [method, { http: route.http, path: route.path }]),
     )

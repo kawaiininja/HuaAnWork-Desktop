@@ -15,7 +15,9 @@ import {
   automationTail,
   bindAutomationRuntime,
   enqueueAutomation,
+  scriptRunKillers,
   scriptSlotWaiters,
+  stopAutomation,
   type AutomationRuntime,
 } from '../../src/huaanwork-host/automations-host.ts'
 import { createAutomation, normalizeAutomationInput, updateAutomation } from '../../src/huaanwork-host/automations-store.ts'
@@ -44,6 +46,8 @@ type Harness = {
     cancels: string[]
     inFlight: number
     maxInFlight: number
+    /** 事件钩子:在 emit 返回前观察事件(测试用 run-start 同步触发 stop)。 */
+    onEvent: ((event: RpcEvent) => void) | undefined
   }
   release: (sessionId?: string) => void
   installUserAgent: (sessionId: string, whenIdle?: () => Promise<void>) => void
@@ -70,7 +74,7 @@ function makeHarness(current?: string): Harness {
   const userFollowups: unknown[] = []
   const releases = new Map<string, () => void>()
   const agents = new Map<string, ListedAgent>()
-  const state = {
+  const state: Harness['state'] = {
     mode: 'immediate' as Mode,
     reply: 'stub-output',
     cancelDelayMs: 0,
@@ -79,6 +83,7 @@ function makeHarness(current?: string): Harness {
     cancels: [] as string[],
     inFlight: 0,
     maxInFlight: 0,
+    onEvent: undefined,
   }
   const box: { routeCtx: RouteContext | undefined } = { routeCtx: undefined }
 
@@ -142,6 +147,9 @@ function makeHarness(current?: string): Harness {
     workspaceRoot: { current: current ?? neutral },
     emit(event) {
       events.push(event)
+      // 在途表阶段与事件发射由同一同步段完成:钩子内联调用 stop 就能命中「已 started、
+      // agent 尚未建成」的窗口,不必靠 sleep 猜时序。
+      state.onEvent?.(event)
     },
     logger() {},
     runtimeCtx: runtime,
@@ -273,6 +281,7 @@ afterEach(async () => {
   await Promise.race([automationTail, new Promise((resolve) => setTimeout(resolve, 3_000))])
   sessionSendBlockers.workspaceDisplaced = false
   automationCollector.clear()
+  scriptRunKillers.clear()
   inFlightRuns.clear()
   while (dirs.length > 0) {
     const dir = dirs.pop()
@@ -1055,4 +1064,256 @@ test('the in-flight entry flips to started as automation/run-start is emitted', 
   h.release()
   await run
   expect(inFlightRunsOf(automation.id)).toEqual([])
+}, 15_000)
+
+/** 先冲刷产出再写 mark、然后占住进程等信号:停止时产出已确定到达父进程。 */
+function outputThenHoldCommand(mark: string, text: string): string {
+  const script =
+    `const fs=require("node:fs");process.stdout.write(${JSON.stringify(text)},()=>{fs.writeFileSync(process.env.MARK,"1");` +
+    'const end=Date.now()+8000;while(Date.now()<end){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,40)}})'
+  return `MARK=${quote(mark)} ${quote(process.execPath)} -e ${quote(script)}`
+}
+
+test('stopping a started agent run writes one cancelled record and flips lastStatus to error', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '停止对话' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '长对话' })
+  const accepted = (await handler('automation.run')(body({ id: automation.id }), h.routeCtx)) as { runId: string }
+  await poll(() => h.followups.length === 1)
+  const sessionId = `huaanwork-auto-${automation.id}-${accepted.runId}`
+  expect(inFlightRunsOf(automation.id)).toMatchObject([{ runId: accepted.runId, phase: 'started' }])
+
+  await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: true })
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ runId: accepted.runId, ok: false, status: 'cancelled', sessionId })
+  // 已开始的取消走会话取消,不是空转。
+  expect(h.state.cancels).toEqual([sessionId])
+  expect(runEnds(h.events, automation.id)).toHaveLength(1)
+  const runs = await recentRuns(h.profileDir, automation.id)
+  expect(runs).toHaveLength(1)
+  expect(runs[0]).toMatchObject({ runId: accepted.runId, ok: false, status: 'cancelled', output: '已停止' })
+  const stored = (await listAutomations(h.profileDir)).find((item) => item.id === automation.id)
+  expect(stored?.lastStatus).toBe('error')
+  await automationTail
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+  expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
+  expect(sessionSendBlockers.agentAutomationActive).toBe(0)
+}, 15_000)
+
+test('stopping a started script kills the child, keeps collected output and is not a timeout', async () => {
+  const h = makeHarness()
+  const mark = join(h.neutral, 'stop-script-mark')
+  const automation = await scriptTask(h.profileDir, outputThenHoldCommand(mark, 'partial-out'), { name: '可停脚本' })
+  await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  // mark 在 stdout 冲刷完成后才写,看到它即表示已收集文本一定在管道里。
+  await poll(() => existsSync(mark))
+
+  await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: true })
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ ok: false, status: 'cancelled' })
+  const runs = await recentRuns(h.profileDir, automation.id)
+  expect(runs).toHaveLength(1)
+  expect(runs[0]).toMatchObject({ status: 'cancelled', ok: false })
+  expect(runs[0]?.status).not.toBe('timeout')
+  expect(runs[0]?.output).toContain('partial-out')
+  expect(runs[0]?.output).not.toContain('任务超时')
+  expect(scriptRunKillers.size).toBe(0)
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+}, 15_000)
+
+test('a cancel that lands after run-start but before the agent is built still records cancelled', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  h.state.ignoreCancel = true
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '早取消' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '早取消任务' })
+  let stopResult: Promise<{ stopped: boolean }> | undefined
+  h.state.onEvent = (event) => {
+    if (event.event === 'automation/run-start' && event.automationId === automation.id) {
+      // run-start 同步段内联停止:此时 agent 还没 create,取消调用必然空转。
+      stopResult = stopAutomation(automation.id)
+    }
+  }
+
+  const accepted = (await handler('automation.run')(body({ id: automation.id }), h.routeCtx)) as { runId: string }
+  await poll(() => h.followups.length === 1)
+  expect(stopResult).toBeDefined()
+  await expect(stopResult!).resolves.toEqual({ stopped: true })
+  expect(h.state.cancels).toEqual([])
+
+  // 标记之后回合自己跑完(ignoreCancel 表示取消对回合无效):仍写 cancelled,不写 ok。
+  const sessionId = `huaanwork-auto-${automation.id}-${accepted.runId}`
+  h.routeCtx.emit({ event: 'token', text: 'late-ok', sessionId })
+  h.release()
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ runId: accepted.runId, ok: false, status: 'cancelled' })
+  const runs = await recentRuns(h.profileDir, automation.id)
+  expect(runs).toHaveLength(1)
+  expect(runs[0]).toMatchObject({ status: 'cancelled', ok: false, output: 'late-ok' })
+}, 15_000)
+
+test('stopping after the run record is persisted reports not stopped and adds no second record', async () => {
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '已落盘' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '已落盘任务' })
+  h.state.reply = 'done-output'
+  await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  await waitRunEnd(h.events, automation.id)
+  await automationTail
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+
+  await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: false })
+  expect(await recentRuns(h.profileDir, automation.id)).toHaveLength(1)
+}, 15_000)
+
+test('stopping a queued schedule run advances nextRunAt once and the executor skips it', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '排队档位' })
+  const blocker = await agentTask(h.profileDir, { projectId: project.id, name: '占住串行链' })
+  const queued = await agentTask(h.profileDir, {
+    projectId: project.id,
+    name: '排队任务',
+    schedule: { kind: 'interval', minutes: 1 },
+  })
+  const blockerRun = enqueueAutomation(blocker, { trigger: 'manual', runId: 'stop-blocker' })
+  await poll(() => h.followups.length === 1)
+  const queuedRun = enqueueAutomation(queued, { trigger: 'schedule', runId: 'stop-queued' })
+  await poll(() => inFlightRuns.get('stop-queued')?.phase === 'queued')
+
+  const storedBefore = (await listAutomations(h.profileDir)).find((item) => item.id === queued.id)
+  const before = storedBefore?.nextRunAt
+  expect(typeof before).toBe('number')
+
+  await expect(stopAutomation(queued.id)).resolves.toEqual({ stopped: true })
+  // 档位写入按规格放在后台(N2-O1):有界等它落盘,不在 stop 返回后立刻断言。
+  await poll(async () => (await listAutomations(h.profileDir)).find((item) => item.id === queued.id)?.nextRunAt !== before)
+  const advanced = (await listAutomations(h.profileDir)).find((item) => item.id === queued.id)?.nextRunAt
+  expect(advanced).toBeGreaterThan(before!)
+
+  // 仍排队时再次停止:slotConsumed 已声明,不二次消费。
+  await expect(stopAutomation(queued.id)).resolves.toEqual({ stopped: true })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect((await listAutomations(h.profileDir)).find((item) => item.id === queued.id)?.nextRunAt).toBe(advanced)
+
+  h.release()
+  await blockerRun
+  await queuedRun
+  await automationTail
+  expect(
+    h.events.some((event) => event.event === 'automation/run-start' && event.automationId === queued.id),
+  ).toBe(false)
+  expect(await recentRuns(h.profileDir, queued.id)).toEqual([])
+  expect(inFlightRunsOf(queued.id)).toEqual([])
+  expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
+  expect(sessionSendBlockers.agentAutomationActive).toBe(0)
+}, 15_000)
+
+test('skipping queued catchup and manual runs leaves nextRunAt alone while a once run disables', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '档位规则' })
+  const blocker = await agentTask(h.profileDir, { projectId: project.id, name: '占住串行链' })
+  const catchupTask = await agentTask(h.profileDir, {
+    projectId: project.id,
+    name: '补跑任务',
+    schedule: { kind: 'interval', minutes: 1 },
+  })
+  const manualTask = await agentTask(h.profileDir, {
+    projectId: project.id,
+    name: '手动任务',
+    schedule: { kind: 'interval', minutes: 2 },
+  })
+  const onceTask = await agentTask(h.profileDir, {
+    projectId: project.id,
+    name: '一次任务',
+    schedule: { kind: 'once', at: Date.now() + 600_000 },
+  })
+
+  const blockerRun = enqueueAutomation(blocker, { trigger: 'manual', runId: 'slot-blocker' })
+  await poll(() => h.followups.length === 1)
+  const catchupRun = enqueueAutomation(catchupTask, { trigger: 'catchup', coalescedCount: 1, runId: 'slot-catchup' })
+  const manualRun = enqueueAutomation(manualTask, { trigger: 'manual', runId: 'slot-manual' })
+  const onceRun = enqueueAutomation(onceTask, { trigger: 'schedule', runId: 'slot-once' })
+  await poll(
+    () =>
+      inFlightRunsOf(catchupTask.id).length === 1 &&
+      inFlightRunsOf(manualTask.id).length === 1 &&
+      inFlightRunsOf(onceTask.id).length === 1,
+  )
+
+  const before = (await listAutomations(h.profileDir)).reduce<Record<string, number | undefined>>((acc, item) => {
+    acc[item.id] = item.nextRunAt
+    return acc
+  }, {})
+  expect(typeof before[catchupTask.id]).toBe('number')
+  expect(typeof before[manualTask.id]).toBe('number')
+  expect(typeof before[onceTask.id]).toBe('number')
+
+  await expect(stopAutomation(catchupTask.id)).resolves.toEqual({ stopped: true })
+  await expect(stopAutomation(manualTask.id)).resolves.toEqual({ stopped: true })
+  await expect(stopAutomation(onceTask.id)).resolves.toEqual({ stopped: true })
+
+  // once 分支的写入有明确可观测结果,用它界定后台写入已全部落盘。
+  await poll(async () => {
+    const stored = (await listAutomations(h.profileDir)).find((item) => item.id === onceTask.id)
+    return stored?.enabled === false && stored.nextRunAt === undefined
+  })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  const after = (await listAutomations(h.profileDir)).reduce<Record<string, number | undefined>>((acc, item) => {
+    acc[item.id] = item.nextRunAt
+    return acc
+  }, {})
+  // catchup:入队前调度器已推进;manual:不改 nextRunAt。两者都不再写档。
+  expect(after[catchupTask.id]).toBe(before[catchupTask.id])
+  expect(after[manualTask.id]).toBe(before[manualTask.id])
+
+  h.release()
+  await blockerRun
+  await catchupRun
+  await manualRun
+  await onceRun
+  await automationTail
+  for (const task of [catchupTask, manualTask, onceTask]) {
+    expect(
+      h.events.some((event) => event.event === 'automation/run-start' && event.automationId === task.id),
+    ).toBe(false)
+    expect(await recentRuns(h.profileDir, task.id)).toEqual([])
+    expect(inFlightRunsOf(task.id)).toEqual([])
+  }
+  expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
+  expect(sessionSendBlockers.agentAutomationActive).toBe(0)
+}, 15_000)
+
+test('one stop handles a started and a queued run of the same task', async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '两轮同停' })
+  const automation = await agentTask(h.profileDir, {
+    projectId: project.id,
+    name: '两轮任务',
+    schedule: { kind: 'interval', minutes: 1 },
+  })
+  const startedRun = enqueueAutomation(automation, { trigger: 'manual', runId: 'both-started' })
+  await poll(() => h.followups.length === 1 && inFlightRuns.get('both-started')?.phase === 'started')
+  const queuedRun = enqueueAutomation(automation, { trigger: 'schedule', runId: 'both-queued' })
+  await poll(() => inFlightRuns.get('both-queued')?.phase === 'queued')
+  const before = (await listAutomations(h.profileDir)).find((item) => item.id === automation.id)?.nextRunAt
+
+  await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: true })
+  await poll(async () => (await listAutomations(h.profileDir)).find((item) => item.id === automation.id)?.nextRunAt !== before)
+  await startedRun
+  await queuedRun
+  await automationTail
+
+  const runs = await recentRuns(h.profileDir, automation.id)
+  expect(runs).toHaveLength(1)
+  expect(runs[0]).toMatchObject({ runId: 'both-started', ok: false, status: 'cancelled' })
+  const starts = h.events.filter((event) => event.event === 'automation/run-start' && event.automationId === automation.id)
+  expect(starts).toHaveLength(1)
+  expect(starts[0]).toMatchObject({ runId: 'both-started' })
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+  expect(sessionSendBlockers.agentAutomationQueued).toBe(0)
+  expect(sessionSendBlockers.agentAutomationActive).toBe(0)
 }, 15_000)

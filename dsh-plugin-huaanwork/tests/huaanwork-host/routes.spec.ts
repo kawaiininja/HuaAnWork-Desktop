@@ -30,15 +30,29 @@ const ALL_METHODS = [
   'agent.list', 'agent.get', 'agent.refresh', 'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
   'status.get',
   'project.list', 'project.create', 'project.open', 'project.remove', 'project.rename',
-  'automation.list', 'automation.create', 'automation.update', 'automation.remove', 'automation.run', 'automation.runs', 'automation.pruneSessions', 'automation.templates',
+  'automation.list', 'automation.create', 'automation.update', 'automation.remove', 'automation.stop', 'automation.run', 'automation.runs', 'automation.pruneSessions', 'automation.templates',
   'task.list', 'task.create', 'task.remove', 'task.bindSession', 'task.rename',
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('56 个方法全部登记,无遗漏无重复', () => {
+  test('57 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(56)
+    expect(ROUTE_TABLE).toHaveLength(57)
+  })
+
+  test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
+    const route = ROUTE_TABLE.find((r) => r.method === 'automation.stop')
+    expect(route).toBeDefined()
+    expect(route?.http).toBe('POST')
+    expect(route?.path).toBe('/huaanwork/automation/stop')
+    await expect(
+      route!.handler({ params: {}, body: {}, query: new URLSearchParams() } as any, {} as any),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: 'store-error',
+      message: 'automation.stop requires params.id',
+    })
   })
 
   test('status.get 返回 ready: true', async () => {
@@ -73,7 +87,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 56 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 57 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -112,6 +126,7 @@ describe('ROUTE_TABLE registry', () => {
       'automation.create',
       'automation.update',
       'automation.remove',
+      'automation.stop',
       'automation.runs',
       'automation.run',
       'automation.pruneSessions',
@@ -136,7 +151,7 @@ describe('ROUTE_TABLE registry', () => {
       'plugin.add',
       'plugin.remove',
     ])
-    expect(implemented).toHaveLength(56)
+    expect(implemented).toHaveLength(57)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -914,6 +929,16 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     expect(noId.status).toBe(400)
     expect(await noId.json()).toEqual({
       error: { code: 'store-error', message: 'automation.runs requires params.id' },
+    })
+
+    // automation.stop:缺 id 在触达运行态之前就以 400 拒绝(Task 8)。
+    const stopNoId = await fetch(
+      `${baseUrl}/huaanwork/automation/stop`,
+      authed({ method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }),
+    )
+    expect(stopNoId.status).toBe(400)
+    expect(await stopNoId.json()).toEqual({
+      error: { code: 'store-error', message: 'automation.stop requires params.id' },
     })
 
     // templates:随包模板数组。

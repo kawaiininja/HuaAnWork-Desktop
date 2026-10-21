@@ -50,6 +50,7 @@ export type RpcRequest = {
     | "automation.create"
     | "automation.update"
     | "automation.remove"
+    | "automation.stop"
     | "automation.run"
     | "automation.runs"
     | "automation.pruneSessions"

@@ -4,12 +4,13 @@ import { resolve as pathResolve } from 'node:path'
 
 import type { AutomationInfo, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
 import { releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
-import { inFlightRuns, startInFlightRun } from './automation-inflight.ts'
+import { inFlightRuns, inFlightRunsOf, startInFlightRun, type InFlightRun } from './automation-inflight.ts'
 import { resolveApproval } from './approvals.ts'
 import { automationRunSessionId } from './automation-session-ids.ts'
 import {
   appendRun,
   clipOutput,
+  consumeSkippedSlot,
   markAutomation,
   OUTPUT_MAX_CHARS,
   UNATTENDED_TOOL_NAMES,
@@ -25,7 +26,7 @@ import {
   type SessionRuntimeContext,
 } from './sessions.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
-import { listProjects, recentRuns } from './stores.ts'
+import { findAutomation, listProjects, recentRuns } from './stores.ts'
 import { neutralWorkspaceRoot } from './workspace-state.ts'
 
 /**
@@ -327,10 +328,17 @@ async function runAgentTurn(
   }
 }
 
+/**
+ * 在跑脚本的 kill 句柄,按 runId 索引(规格 §8「脚本结束对应子进程」)。
+ * 只登记到 `finish`(exit/error/timeout 任一先到)为止;停止侧命中即 child.kill()。
+ */
+export const scriptRunKillers = new Map<string, () => void>()
+
 function runScript(
   command: string,
   cwd: string,
   timeoutMs: number,
+  runId?: string,
 ): Promise<{ ok: boolean; output: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const isWindows = process.platform === 'win32'
@@ -345,8 +353,10 @@ function runScript(
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (runId !== undefined) scriptRunKillers.delete(runId)
       resolve({ ok, output: clipOutput(output), timedOut })
     }
+    if (runId !== undefined) scriptRunKillers.set(runId, () => child.kill())
     const timer = setTimeout(() => {
       child.kill()
       finish(false, `${stdout}${stderr}\n（任务超时，已终止）`, true)
@@ -374,7 +384,7 @@ async function finishAutomation(
     startedAt: number
     ok: boolean
     output: string
-    status?: 'ok' | 'error' | 'timeout'
+    status?: 'ok' | 'error' | 'timeout' | 'cancelled'
     sessionId?: string
   },
   trigger: AutomationTrigger,
@@ -474,12 +484,17 @@ export async function executeRun(
 
   let ok = true
   let output = ''
-  let status: 'ok' | 'error' | 'timeout' = 'ok'
+  let status: 'ok' | 'error' | 'timeout' | 'cancelled' = 'ok'
   try {
     if (automation.kind === 'agent') {
       output = await runAgentTurn(ctx, routeCtx, automation, sessionId!, runId, trigger, coalescedCount)
     } else {
-      const result = await runScript(automation.command ?? '', routeCtx.workspaceRoot.current, automationTimeout(routeCtx))
+      const result = await runScript(
+        automation.command ?? '',
+        routeCtx.workspaceRoot.current,
+        automationTimeout(routeCtx),
+        runId,
+      )
       ok = result.ok
       output = result.output
       if (result.timedOut) status = 'timeout'
@@ -492,6 +507,13 @@ export async function executeRun(
   } finally {
     rejectRunPendingApprovals(ctx, runId)
   }
+  // 停止覆盖(规格 §8):标记在落盘前即生效——模型回合后来自己跑完也写 cancelled,
+  // 不写 ok;脚本被杀不记 timeout;产出保留已收集文本,什么都没有时正文为「已停止」。
+  if (inFlightRuns.get(runId)?.cancelRequested === true) {
+    ok = false
+    status = 'cancelled'
+    if (!output.trim()) output = '已停止'
+  }
   await finishAutomation(
     routeCtx,
     automation,
@@ -499,6 +521,57 @@ export async function executeRun(
     trigger,
     coalescedCount,
   )
+}
+
+/**
+ * 停止任务的全部在途轮(规格 §8),供 `automation.stop` 路由调用。
+ *
+ * - 没有条目:{ stopped: false } —— 界面据此把按钮恢复为「立即运行」。
+ * - `queued`:同步段标记取消并声明档位由本次停止消费,条目**留在表里**给执行体
+ *   醒来后观察并删除;在此删除会让执行体看到「无条目」而照常执行。
+ * - `started`:标记取消后按任务种类取消会话或杀掉脚本子进程;agent 尚未建成时
+ *   取消调用是空操作,标记仍然有效,收尾照常写一条 `cancelled` 记录。
+ */
+export async function stopAutomation(automationId: string): Promise<{ stopped: boolean }> {
+  const { ctx, routeCtx } = requireBound()
+  const entries = inFlightRunsOf(automationId)
+  if (entries.length === 0) return { stopped: false }
+  const startedEntries: InFlightRun[] = []
+  // ── 同步段:取消标记与档位所有权必须在任何 await 之前落表(规格 §8)。──
+  // 后到的停止看见 slotConsumed 已声明就不会二次消费;执行体与 stop 之间因此
+  // 不可能交错出「还是 queued / 已经 started」的缝隙。
+  for (const entry of entries) {
+    entry.cancelRequested = true
+    if (entry.phase === 'queued') {
+      if (!entry.slotConsumed) {
+        entry.slotConsumed = true
+        // 档位写入允许异步:失败只记日志,不混进停止应答(N2-O1 接受的窄窗口)。
+        void consumeSkippedSlot(routeCtx.profileDir, automationId, entry.trigger, Date.now())
+          .catch((error: unknown) => logFailure(error))
+      }
+    } else {
+      startedEntries.push(entry)
+    }
+  }
+  // ── 同步段结束 ──
+  if (startedEntries.length > 0) {
+    let automation: AutomationInfo | undefined
+    try {
+      automation = await findAutomation(routeCtx.profileDir, automationId)
+    } catch {
+      // 任务在停止与执行之间被删除:标记仍有效,但没有可取消的对象,不得抛出。
+      automation = undefined
+    }
+    for (const entry of startedEntries) {
+      if (automation?.kind === 'agent') {
+        cancelAutomationSession(ctx, automationRunSessionId(automationId, entry.runId))
+      } else {
+        // 脚本结束对应子进程;agent 任务不会登记 kill 句柄,这里是空操作。
+        scriptRunKillers.get(entry.runId)?.()
+      }
+    }
+  }
+  return { stopped: true }
 }
 
 export async function acquireScriptSlot(): Promise<void> {

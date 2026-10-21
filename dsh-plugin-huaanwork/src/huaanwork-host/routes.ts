@@ -80,7 +80,7 @@ import {
   removeAutomation,
   updateAutomation,
 } from './automations-store.ts'
-import { agentIdle, automationCollector, automationRootDecision, enqueueAutomation } from './automations-host.ts'
+import { agentIdle, automationCollector, automationRootDecision, enqueueAutomation, stopAutomation } from './automations-host.ts'
 
 export interface RouteRequest {
   params: Record<string, string>
@@ -627,6 +627,17 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { removed: true }
     }),
   }, // Task 3 (M4)
+  {
+    method: 'automation.stop',
+    http: 'POST',
+    path: '/huaanwork/automation/stop',
+    // 停止在途轮:不触碰工作区,只需 profileDir 与运行态。没有在途轮时回 stopped:false。
+    handler: storeRoute(async (req) => {
+      const id = bodyParam(req.body, 'id')
+      if (!id) throw new Error('automation.stop requires params.id')
+      return await stopAutomation(id)
+    }),
+  }, // Task 8
   {
     method: 'automation.run',
     http: 'POST',
