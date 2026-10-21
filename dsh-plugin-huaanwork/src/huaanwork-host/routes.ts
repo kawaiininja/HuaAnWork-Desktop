@@ -675,7 +675,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     method: 'automation.pruneSessions',
     http: 'POST',
     path: '/huaanwork/automation/pruneSessions',
-    // keep = collector 中的在途会话 ∪ 每任务最近 50 条 runs 的 sessionId
+    // keep = collector 中的在途会话 ∪ 每任务最近 20 条 runs 的 sessionId
     // (runs 侧由 pruneAutomationSessions 并入)。会话目录在 dshHome/sessions。
     handler: storeRoute(async (_req, ctx) => {
       const removed = await pruneAutomationSessions(

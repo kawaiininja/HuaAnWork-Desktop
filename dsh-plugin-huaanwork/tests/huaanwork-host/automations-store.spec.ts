@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import type { AutomationInfo, AutomationSchedule } from '../../src/client-huaanwork/rpc-types.ts'
 import {
+  AUTOMATION_SESSION_RETAIN_LIMIT,
   MAX_AUTOMATIONS,
   MISSED_GRACE_MS,
   advanceNextRunAt,
@@ -20,7 +21,7 @@ import {
 } from '../../src/huaanwork-host/automations-store.ts'
 import { humanizeCron, nextFireAfter, parseCron, periodOf } from '../../src/huaanwork-host/schedule.ts'
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
-import { listAutomations, recentRuns, removeAutomationsOfProject } from '../../src/huaanwork-host/stores.ts'
+import { RUNS_LIMIT, listAutomations, recentRuns, removeAutomationsOfProject } from '../../src/huaanwork-host/stores.ts'
 
 // 写路径与纯函数用例移植自旧 sidecar automations.test.ts(属于本层的部分)
 // 与 schedule.test.ts 15 例。node:test assert → vitest expect。
@@ -324,6 +325,50 @@ describe('automations-store 写路径与纯函数', () => {
     expect(readdirSync(sessionsCwd).sort()).toEqual([`huaanwork-auto-${id}-r51`, 'huaanwork-user'].sort())
     expect(readFileSync(runsPath, 'utf8')).toBe(runsBody)
     expect(existsSync(runsPath)).toBe(true)
+  })
+
+  test('pruneAutomationSessions keeps only the newest 20 run sessions plus active ones', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    const sessionIds = Array.from({ length: AUTOMATION_SESSION_RETAIN_LIMIT + 1 }, (_, index) => `huaanwork-auto-${id}-r${index + 1}`)
+    const runsBody = sessionIds
+      .map((sessionId, index) =>
+        JSON.stringify({
+          runId: `r${index + 1}`,
+          startedAt: T0 + index,
+          endedAt: T0 + index + 1,
+          ok: true,
+          output: 'ok',
+          status: 'ok',
+          trigger: 'schedule',
+          sessionId,
+        }),
+      )
+      .join('\n')
+    const runsPath = join(home, 'automations', `${id}.runs.jsonl`)
+    mkdirSync(join(home, 'automations'), { recursive: true })
+    writeFileSync(runsPath, `${runsBody}\n`, 'utf8')
+
+    const sessionsCwd = join(home, 'sessions', 'some-cwd')
+    for (const sessionId of sessionIds) mkdirSync(join(sessionsCwd, sessionId), { recursive: true })
+    const activeSessionId = `huaanwork-auto-${id}-live`
+    mkdirSync(join(sessionsCwd, activeSessionId), { recursive: true })
+    mkdirSync(join(sessionsCwd, 'huaanwork-user'), { recursive: true })
+
+    // 会话保留条数与运行记录上限是两件事:运行记录仍留 50 条,会话目录只留 20 条。
+    expect(AUTOMATION_SESSION_RETAIN_LIMIT).toBe(20)
+    expect(AUTOMATION_SESSION_RETAIN_LIMIT).not.toBe(RUNS_LIMIT)
+
+    const removed = await pruneAutomationSessions(home, new Set([activeSessionId]))
+    expect(removed).toBe(1)
+    expect(existsSync(join(sessionsCwd, sessionIds[0]!))).toBe(false)
+    expect(readdirSync(sessionsCwd).sort()).toEqual(
+      [...sessionIds.slice(1), activeSessionId, 'huaanwork-user'].sort(),
+    )
+    const afterPrune = readFileSync(runsPath, 'utf8')
+    expect(afterPrune).toBe(`${runsBody}\n`)
+    expect(afterPrune.trimEnd().split('\n')).toHaveLength(21)
   })
 
   test('normalizeAutomationInput creates a script automation', async () => {

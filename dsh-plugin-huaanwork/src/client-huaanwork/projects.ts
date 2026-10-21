@@ -76,7 +76,7 @@ export function automationRuns(
   return rpcCall("automation.runs", { id, ...opts });
 }
 
-/** 清理历史运行会话目录：保留每任务最近 50 条运行对应的会话（及正在运行的），返回删除目录数。 */
+/** 清理历史运行会话目录：保留每任务最近 20 条运行对应的会话（及正在运行的），返回删除目录数。 */
 export function pruneAutomationSessions(): Promise<{ removed: number }> {
   return rpcCall("automation.pruneSessions");
 }

@@ -34,6 +34,11 @@ export const MISSED_GRACE_MS = 10 * 60_000
 export const PROMPT_MAX_BYTES = 8 * 1024
 /** 任务总数上限:注册表读改写周期内防膨胀的最后防线。 */
 export const MAX_AUTOMATIONS = 50
+/**
+ * 每个任务保留会话目录的运行条数。与 {@link RUNS_LIMIT}(运行记录条数上限,50)
+ * 分列:运行记录仍保留 50 条,会话目录只保留最近 20 条运行的。
+ */
+export const AUTOMATION_SESSION_RETAIN_LIMIT = 20
 
 /**
  * 无人值守授权可表达的工具名全集。`run_code` 永远不在这个集合里——
@@ -437,8 +442,9 @@ export async function appendRun(storageRoot: string, automationId: string, run: 
 }
 
 /**
- * 清理历史运行会话目录:保留运行文件里最近 {@link RUNS_LIMIT} 条对应的会话,
- * 以及调用方声明的活跃会话。只删会话目录,不改 runs/audit 文件。不加注册表锁。
+ * 清理历史运行会话目录:每个任务只保留运行文件里最近
+ * {@link AUTOMATION_SESSION_RETAIN_LIMIT} 条对应的会话,以及调用方声明的活跃会话。
+ * 只删会话目录,不改 runs/audit 文件(运行记录仍按 {@link RUNS_LIMIT} 保留)。不加注册表锁。
  */
 export async function pruneAutomationSessions(
   storageRoot: string,
@@ -449,7 +455,7 @@ export async function pruneAutomationSessions(
   const registry = await readAutomationRegistry(storageRoot)
   await Promise.all(
     registry.automations.map(async (automation) => {
-      const runs = await recentRuns(storageRoot, automation.id, RUNS_LIMIT)
+      const runs = await recentRuns(storageRoot, automation.id, AUTOMATION_SESSION_RETAIN_LIMIT)
       for (const run of runs) {
         if (run.sessionId) keep.add(run.sessionId)
       }
