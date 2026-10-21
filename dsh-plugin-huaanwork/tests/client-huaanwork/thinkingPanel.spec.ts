@@ -132,16 +132,17 @@ test("a folded result attachment counts as assistant text after a finished think
     { kind: "thinking" as const, thought: "想了很久" },
     attachmentAsAssistant({ id: 2, sourceText: '{"a":1}' }),
   ];
-  assert.equal(hasAssistantTextAfter(withAttachment, 0), true);
+  const hasAttachmentText = hasAssistantTextAfter(withAttachment, 0);
+  assert.equal(hasAttachmentText, true);
   // 评审前的空 note 占位：扫描不到助手正文，面板会展开并停在「进行中」。
   const withPlaceholder = [
     { kind: "thinking" as const, thought: "想了很久" },
     { kind: "note" as const, text: "" },
   ];
   assert.equal(hasAssistantTextAfter(withPlaceholder, 0), false);
-  // chrome 随判据收敛：已生成且默认收起。
+  // chrome 用的是同一个判据：已生成且默认收起，而不是「进行中」。
   assert.deepEqual(
-    thinkingChrome({ hasAssistantText: true, userToggled: null, interrupted: false }),
+    thinkingChrome({ hasAssistantText: hasAttachmentText, userToggled: null, interrupted: false }),
     { title: "思考 · 已生成", expanded: false },
   );
 });
