@@ -80,7 +80,7 @@
 
 目录服务端条目:entries/ 目录每名一个 JSON 文件,形状 = 现有 catalog 条目契约 + `mounts`。发现页客户端无需改动即可展示(persona 本就下发)。`mounts` 对他人是**声明式引用**:启用他人智能体时,缺失的挂载在详情里标出,不自动安装(MVP 不做依赖分发)。
 
-约束:name 本地唯一;发布时与远端同名即更新,version 必须单调增(服务端校验);`mounts` 引用名在创建时必须存在(host 工具校验,防 LLM 幻觉挂名)。
+约束:name 本地唯一;发布时客户端携带本地 `version`,与远端同名即更新、服务端要求该 version 严格大于远端现存(拒绝即 409,客户端引导用户本地升版后重发);`mounts` 引用名在创建时必须存在(host 工具校验,防 LLM 幻觉挂名)。本地 `version` 的递增时机 = 每次修改 persona/mounts 等实质字段时 host 侧自增;首次发布前恒为 1。
 
 YAGNI(刻意不做):挂载能力的依赖闭包分发;agent 的 argumentsSchema/entrypoint(纯 persona 不需要);知识库挂载;market-server 方向的发布。
 
@@ -91,7 +91,7 @@ YAGNI(刻意不做):挂载能力的依赖闭包分发;agent 的 argumentsSchema/
 | 1 | create-agent 技能 | `dsh-plugin-huaanwork/skills/create-agent/SKILL.md`(新增) | 内置技能,userInvocable + 模型可触发;技能体 = grill-me 访谈协议(逐问、一轮一问)+ 落库前必须给出确认摘要 + 确认后调用 `create_local_agent` 工具的指令 |
 | 2 | host 工具接线 | `huaanwork-host/`(复用 call-host-tool 体系,见 2026-10-14 设计) | 新工具 `create_local_agent`:入参即 §5 条目(不含 enabled/published);校验 name 唯一、mounts 引用存在、字段长度上限;写 `agents-endpoints.json` 并即时 `enabled=true` |
 | 3 | agents-host 放开本地 agent | `agents-host.ts` + `AgentsView.tsx:539` | 本地条目允许 `kind:"agent"`;`@名字` 路由与 spawn 路径对 local agent 与 catalog agent 同形处理 |
-| 4 | 侧栏「智能体」区块 | `client-huaanwork/App.tsx`(仿 `ProjectsPanel` 加 `AgentsPanel`) | 位于「任务」「项目」两 section 之间;每行:名称 + 一行简介 + 启用/关闭切换 + 发布/取消发布按钮;点击行 → 跳 AgentsView 对应条目;新 RPC:`agent.createLocal`(刷新用)、`agent.publish` / `agent.unpublish` |
+| 4 | 侧栏「智能体」区块 | `client-huaanwork/App.tsx`(仿 `ProjectsPanel` 加 `AgentsPanel`) | 位于「任务」「项目」两 section 之间;每行:名称 + 一行简介 + 启用/关闭切换 + 发布/取消发布按钮;点击行 → 跳 AgentsView 对应条目;新 RPC:`agent.publish` / `agent.unpublish`(落库只经 host 工具,客户端不开第二条写路径);host 工具落库成功后由 host 通知客户端重拉 `agent.list` 刷新侧栏 |
 | 5 | 目录服务端写接口 | 目录服务(M-A0 服务,随本次同期实现) | `POST /v1/catalog`(同 Bearer,timing-safe;同名要求 version 单调增)、`DELETE /v1/catalog/<name>`;写 = entries/ 目录落/删文件,原子写(tmp+rename);schema 校验 + 大小上限 |
 | 6 | 发布客户端 | `agents-host.ts` 新增 publish/unpublish | 带 Bearer POST 本地条目(剔除 enabled/published 本地态);失败分类 TRANSPORT/TIMEOUT/AUTH/CONFLICT,UI 诚实报错 |
 
