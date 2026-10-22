@@ -10,6 +10,12 @@ type GateOverrides = {
   /** `unknown` so tests can model a registered-but-wrongly-shaped service. */
   planMode?: unknown
   userQuestions?: unknown
+  /** Overrides the agent registry; defaults to one materialized main agent. */
+  agents?: {
+    list(): readonly {
+      ctx?: { get?: (name: string) => { restrict?: unknown; schemas?: () => readonly { name?: string }[] } | undefined }
+    }[]
+  }
 }
 
 /**
@@ -52,7 +58,7 @@ function gateContext(overrides: GateOverrides = {}) {
       },
       schemas: () => (overrides.toolSchemas ?? (() => catalog))().map((name) => ({ name })),
     },
-    agents: {
+    agents: overrides.agents ?? {
       list: () => [{
         ctx: {
           get: (name: string) => (name === 'tools' ? agentTools : undefined),
@@ -148,3 +154,41 @@ test('a complete composition passes the gate', async () => {
   const baseline = new Set<unknown>(getActiveHandles?.() ?? [])
   await assert.doesNotReject(assertPostBootGate(gateContext(), baseline, { toolWaitMs: 0 }))
 }, 15_000)
+
+test('the gate skips restrict() when no agent exists before the first session', async () => {
+  // Agents are created per session, so a fresh Host has none: the shared audit
+  // passes and the gate must not throw on the same legitimate state.
+  const getActiveHandles = (process as NodeJS.Process & {
+    _getActiveHandles?: () => unknown[]
+  })._getActiveHandles
+  const baseline = new Set<unknown>(getActiveHandles?.() ?? [])
+  await assert.doesNotReject(
+    assertPostBootGate(gateContext({ agents: { list: () => [] } }), baseline, { toolWaitMs: 0 }),
+  )
+}, 15_000)
+
+test('the gate skips restrict() while the main agent has not materialized its context', async () => {
+  const getActiveHandles = (process as NodeJS.Process & {
+    _getActiveHandles?: () => unknown[]
+  })._getActiveHandles
+  const baseline = new Set<unknown>(getActiveHandles?.() ?? [])
+  await assert.doesNotReject(
+    assertPostBootGate(gateContext({ agents: { list: () => [{}] } }), baseline, { toolWaitMs: 0 }),
+  )
+}, 15_000)
+
+test('a materialized agent without restrict() still fails the gate', async () => {
+  const agents = {
+    list: () => [{
+      ctx: {
+        get: (name: string) => (name === 'tools'
+          ? { schemas: () => ['read', ...REQUIRED_TOOL_NAMES].map((tool) => ({ name: tool })) }
+          : undefined),
+      },
+    }],
+  }
+  await assert.rejects(
+    assertPostBootGate(gateContext({ agents }), new Set(), { toolWaitMs: 0 }),
+    /agent ctx\.get\('tools'\)\.restrict must be a function/,
+  )
+})

@@ -138,22 +138,23 @@ export async function assertPostBootGate(
   }
   assertNoForbiddenTools(toolNames(ctx.tools.schemas()), CATALOG_FORBIDDEN, 'global catalog')
 
-  // 审计只读 schemas,这里再取一次验 restrict。agent 按会话创建,新装 Host
-  // 没有 agent 是合法状态;本条目是 optional 启动项,此处的 throw 仅 advisory
-  // (强制点在同一审计,且审计对「没有 agent」放行)。
+  // 审计只读 schemas,这里再取一次验 restrict。与审计同一判定:agent 按会话
+  // 创建,首个会话之前没有 agent(或 agent 记录尚未物化出 ctx)是合法状态,
+  // 跳过 restrict 核验——此前这里直接 throw,而该 throw 在 optional 条目下只会
+  // 被 cordis 以 Error + 全栈记录,每次新装启动都在合法路径上制造误报噪音。
+  // 已物化的 agent 仍 fail-closed:restrict 缺失或 schemas 不可读照常 throw。
   const agent = ctx.agents.list()[0]
-  if (!agent?.ctx) {
-    throw new Error('post-boot gate failed: no agent is available to verify restrict()')
+  if (agent?.ctx !== undefined) {
+    const mainAgentTools = agent.ctx.get?.('tools')
+    if (typeof mainAgentTools?.restrict !== 'function') {
+      throw new Error("post-boot gate failed: agent ctx.get('tools').restrict must be a function")
+    }
+    const dumpAgentSchemas = mainAgentTools?.schemas
+    if (typeof dumpAgentSchemas !== 'function') {
+      throw new Error('post-boot gate failed: main-agent schema dump is unavailable')
+    }
+    assertNoForbiddenTools(toolNames(dumpAgentSchemas.call(mainAgentTools)), MAIN_AGENT_FORBIDDEN, 'main-agent schema')
   }
-  const mainAgentTools = agent.ctx.get?.('tools')
-  if (typeof mainAgentTools?.restrict !== 'function') {
-    throw new Error("post-boot gate failed: agent ctx.get('tools').restrict must be a function")
-  }
-  const dumpAgentSchemas = mainAgentTools?.schemas
-  if (typeof dumpAgentSchemas !== 'function') {
-    throw new Error('post-boot gate failed: main-agent schema dump is unavailable')
-  }
-  assertNoForbiddenTools(toolNames(dumpAgentSchemas.call(mainAgentTools)), MAIN_AGENT_FORBIDDEN, 'main-agent schema')
   await assertNoUnexpectedListeners(ctx, existingHandles)
 }
 
