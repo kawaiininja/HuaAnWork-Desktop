@@ -62,7 +62,7 @@ const LAN_HTTPS = Object.freeze({
   async stop() { return LAN_HTTPS_SNAPSHOT },
 })
 const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-profile-'))
-// AA 2.0.3+ publishes its per-user bridge endpoint under `userInfo().homedir`
+// AA 2.0.3+ publishes its per-user bridge lease under `userInfo().homedir`
 // rather than `DSH_HOME`. Redirect `os.userInfo` and `os.homedir` to the
 // isolated smoke directory so `verify:aa` never touches the operator's real
 // `~/.agents-anywhere/` or collides with a running Desktop instance.
@@ -446,9 +446,9 @@ try {
     throw new Error('AA Host services did not activate in the actual Desktop profile')
   }
   if (aaEnabled) {
-    // AA 2.0.3 publishes one fixed per-user rendezvous that DSH_HOME does not
+    // The bridge holds one fixed per-user manager lease that DSH_HOME does not
     // move, so the isolated Profile home is not where the Connector looks.
-    const endpoint = join(userInfo().homedir, '.agents-anywhere', 'dsh-bridge', 'endpoint.json')
+    const endpoint = join(userInfo().homedir, '.agents-anywhere', 'dsh-bridge', '.manager-lock.json')
     const runtimeStatus = ctx.get('agentsAnywhereRuntime').status()
     if (runtimeStatus.state !== 'ready') {
       throw new Error(`AA local runtime is ${String(runtimeStatus.state)}: ${String(runtimeStatus.message)}`)

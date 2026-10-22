@@ -5,26 +5,31 @@ import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { access, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, relative, sep } from 'node:path'
+import { join, relative, sep, dirname } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
 import { promisify, stripVTControlCharacters } from 'node:util'
 import { runInNewContext } from 'node:vm'
 import { AA_WORKSPACES } from './agents-anywhere-release-policy.mjs'
 
-// Exercise the installed artifact: a patch file alone does not prove Yarn applied it.
+// Exercise the installed artifact: Desktop relies on these upstream behaviors,
+// so a silent upstream regression must fail here before a release ships.
+// Upstream dropped the `//#region` bundle markers; regions now start at
+// `// src/<path>` comment lines and run to the next one.
 function loadConnector(workspace, environment) {
   const source = readFileSync(new URL(`../${workspace}/node_modules/@agents-anywhere/dsh-bridge-next/lib/index.js`, import.meta.url), 'utf8')
-  const start = source.indexOf('//#region src/host/connector/logs.ts')
-  const end = source.indexOf('//#region src/host/desktop/detect.ts', start)
+  const start = source.indexOf('// src/host/connector/logs.ts')
+  const end = source.indexOf('// src/host/desktop/detect.ts', start)
   assert.ok(start >= 0 && end > start)
-  return runInNewContext(`${source.slice(start, end)}; SourceConnector`, {
-    execFile, promisify, stripVTControlCharacters, join, relative, createHash, setTimeout, clearTimeout,
+  return runInNewContext(`${source.slice(start, end)}; ({ SourceConnector, ConnectorLogs })`, {
+    execFile, promisify, stripVTControlCharacters, join, relative, dirname, createHash, setTimeout, clearTimeout,
     access, cp, mkdtemp, readFile, readdir, rename, rm,
     process: { platform: process.platform, env: environment },
     readJson$1: async () => [], writeJson: async () => {}, mkdir,
     resolveUv: async () => 'uv',
     DEFAULT_CONNECTOR_SETTINGS: { syncIntervalSeconds: 30 },
+    setTimeout$1: async () => {},
+    performance,
   })
 }
 
@@ -32,8 +37,8 @@ for (const workspace of AA_WORKSPACES) {
   test(`${workspace}: rc.2 tool results retain the same hash after JSON transport`, () => {
     const source = readFileSync(new URL(`../${workspace}/node_modules/@agents-anywhere/dsh-bridge-next/lib/index.js`, import.meta.url), 'utf8')
     const region = name => {
-      const start = source.indexOf(`//#region src/host/dsh-runtime/${name}.ts`)
-      const end = source.indexOf('//#endregion', start)
+      const start = source.indexOf(`// src/host/dsh-runtime/${name}.ts`)
+      const end = source.indexOf('// src/', start + 1)
       assert.ok(start >= 0 && end > start)
       return source.slice(start, end)
     }
@@ -56,8 +61,8 @@ for (const workspace of AA_WORKSPACES) {
     projection.apply({ type: 'tool/result', seq: 1, time: '2026-09-24T00:00:01Z',
       data: { message: { role: 'tool', toolCallId: 'call-2', content: [{ type: 'text', text: 'ok\uD800' }] }, meta: {} } })
     const normalized = JSON.parse(JSON.stringify(projection.snapshot().find(entry => entry.content.callId === 'call-2')))
-    assert.equal(normalized.content.output, 'ok\uFFFD')
-    assert.equal(normalized.content.result[0].text, 'ok\uFFFD')
+    assert.equal(normalized.content.output, 'ok�')
+    assert.equal(normalized.content.result[0].text, 'ok�')
     assert.equal(normalized.contentHash, contentHash(normalized))
     assert.throws(() => projection.apply({ type: 'tool/result', seq: 2, time: '2026-09-24T00:00:02Z',
       data: { message: { content: [{}] }, meta: {} } }), /Invalid DSH tool result message/)
@@ -77,27 +82,40 @@ for (const workspace of AA_WORKSPACES) {
       HTTPS_PROXY: 'http://127.0.0.1:7890',
     }
     const original = { ...env }
-    const Connector = loadConnector(workspace, env)
+    const { SourceConnector } = loadConnector(workspace, env)
     const child = new EventEmitter()
     child.stdout = new PassThrough()
     child.stderr = new PassThrough()
     child.stdin = new EventEmitter()
     child.exitCode = null
     child.signalCode = null
-    child.stdin.write = line => {
-      const request = JSON.parse(line)
-      queueMicrotask(() => child.stdout.write(JSON.stringify({
-        jsonrpc: '2.0', id: request.id,
-        result: { running: request.method === 'connector.start', authFailed: false },
-      }) + '\n'))
-    }
     let launched, launchedArgs
-    const connector = new Connector({ stateRoot, connectorSourceDir: source, uvPath: 'uv' },
-      (_command, args, options) => { launched = options; launchedArgs = args; return child })
+    const noopLogOutput = { connect() {}, async flush() {} }
+    const noopDiagnostics = { log() {} }
+    const connector = new SourceConnector(
+      { stateRoot, connectorSourceDir: source, uvPath: 'uv' },
+      (_command, args, options) => { launched = options; launchedArgs = args; return child },
+      () => ({ syncIntervalSeconds: 30 }),
+      1000,
+      async () => {},
+      noopDiagnostics,
+      noopLogOutput,
+    )
+    // The Mesh control plane is upstream's own contract; stub the join so the
+    // spawn environment and project mirroring can be observed directly.
+    connector.connect = async () => {
+      connector.control = {
+        getState: async () => ({ running: true, authFailed: false }),
+        start: async () => ({ running: true, authFailed: false }),
+      }
+    }
+    connector.watchEvents = () => {}
     await connector.start({ connectorId: 'device', connectorToken: 'private-test-token' }, 'https://example.com', new AbortController().signal)
     assert.equal(connector.running, true)
     assert.equal(launched.env.NO_PROXY, 'localhost,127.0.0.1,::1,::1,.example.com')
-    assert.equal(launched.env.no_proxy, 'internal.test,::1')
+    // Upstream rewrites bracketed IPv6 in place and, unlike the retired Desktop
+    // patch, does not trim entries.
+    assert.equal(launched.env.no_proxy, 'internal.test, ::1 ')
     assert.equal(launched.env.HTTPS_PROXY, env.HTTPS_PROXY)
     assert.deepEqual(env, original)
     assert.ok(launched.cwd.startsWith(join(stateRoot, 'connector-source') + sep))
@@ -108,20 +126,21 @@ for (const workspace of AA_WORKSPACES) {
     await connector.logs.flush()
   })
 
-  test(`${workspace}: RPC errors reach logs and credentials stay redacted`, async t => {
+  test(`${workspace}: connector output reaches logs and credentials stay redacted`, async t => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-aa-logs-'))
     t.after(() => rm(stateRoot, { recursive: true, force: true }))
-    const Connector = loadConnector(workspace, {})
-    const connector = new Connector({ stateRoot }, () => {})
-    await connector.logs.startSession(['private-test-token'])
-    const frame = JSON.stringify({ jsonrpc: '2.0', method: 'connector/log', params: {
-      level: 'ERROR', message: "Invalid port: ':1]' private-test-token",
-      exception: 'InvalidURL private-test-token',
-    } }) + '\n'
-    connector.receive(frame.slice(0, 31))
-    connector.receive(frame.slice(31))
-    await connector.logs.flush()
-    const lines = Array.from(connector.logs.entries, entry => entry.text)
-    assert.deepEqual(lines, ["[connector] ERROR: Invalid port: ':1]' [REDACTED]", 'InvalidURL [REDACTED]'])
+    const { ConnectorLogs } = loadConnector(workspace, {})
+    const logs = new ConnectorLogs(stateRoot)
+    await logs.startSession(['private-test-token'])
+    const text = "Invalid port: ':1]' private-test-token\nAuthorization: Bearer abc123 private-test-token\n"
+    logs.output(text.slice(0, 20))
+    logs.output(text.slice(20))
+    logs.finish()
+    await logs.flush()
+    const lines = Array.from(logs.entries, entry => entry.text)
+    assert.deepEqual(lines, [
+      "Invalid port: ':1]' [REDACTED]",
+      'Authorization: [REDACTED] [REDACTED] [REDACTED]',
+    ])
   })
 }
