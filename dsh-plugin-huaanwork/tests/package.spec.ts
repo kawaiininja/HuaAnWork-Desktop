@@ -1080,6 +1080,9 @@ describe('published package surface', () => {
     expect(manifest.build?.npmRebuild).toBe(false)
     expect(manifest.build?.mac?.x64ArchFiles).toContain('fs-ext/prebuilds/darwin-*')
     expect(manifest.build?.mac?.x64ArchFiles).toContain('sherpa-onnx-darwin-*')
+    // Agents Anywhere depends on meshcall. Both darwin router binaries are identical
+    // Mach-O files in the x64 and arm64 trees, so the universal merge must accept them.
+    expect(manifest.build?.mac?.x64ArchFiles).toContain('meshcall-router-darwin-*')
     expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.build?.files).toContain('!node_modules/fs-ext/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')

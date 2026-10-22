@@ -5,7 +5,7 @@ the package names, versions, and licenses for transparency.
 | Package | Version | License |
 | --- | --- | --- |
 | @agentclientprotocol/sdk | 1.4.0 | Apache-2.0 |
-| @agents-anywhere/dsh-bridge-next | 2.1.0-desktop.c39b82d4fffb1.r57f6b0fe | MIT |
+| @agents-anywhere/dsh-bridge-next | 2.1.0-desktop.c4b4f6e51bca0.r57f6b0fe | MIT |
 | @anthropic-ai/sdk | 0.129.0 | MIT |
 | @aws-sdk/client-bedrock-runtime | 3.1127.0 | Apache-2.0 |
 | @aws-sdk/core | 3.978.1 | Apache-2.0 |
@@ -456,7 +456,7 @@ the package names, versions, and licenses for transparency.
 | diff | 9.0.0 | BSD-3-Clause |
 | dijkstrajs | 1.0.3 | MIT |
 | dsh-community-market | 0.1.0-dev.0 | MIT |
-| dshmarket | 1.66.28 | MIT |
+| dshmarket | 1.66.47 | MIT |
 | ecdsa-sig-formatter | 1.0.11 | Apache-2.0 |
 | ee-first | 1.1.1 | MIT |
 | emoji-regex | 8.0.0 | MIT |
@@ -519,6 +519,9 @@ the package names, versions, and licenses for transparency.
 | loose-envify | 1.4.0 | MIT |
 | lowercase-keys | 3.0.0 | MIT |
 | lucide-react | 1.41.0 | ISC |
+| meshcall | 0.3.0 | MIT |
+| meshcall-router-darwin-arm64 | 0.3.0 | MIT |
+| meshcall-router-darwin-x64 | 0.3.0 | MIT |
 | mime-db | 1.54.0 | MIT |
 | mime-types | 3.0.2 | MIT |
 | mimic-response | 4.0.0 | MIT |

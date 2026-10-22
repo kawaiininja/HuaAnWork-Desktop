@@ -1084,6 +1084,10 @@ describe('published package surface', () => {
     // sherpa-onnx-node dependency installs both darwin arch packages; the
     // universal merge must take them from the x64 build instead of lipo-ing.
     expect(manifest.build?.mac?.x64ArchFiles).toContain('sherpa-onnx-darwin-*')
+    // Agents Anywhere depends on meshcall, whose optional router packages install
+    // both darwin Mach-O binaries into every CPU tree. @electron/universal refuses
+    // identical Mach-O files unless x64ArchFiles names them, then keeps the x64 copy.
+    expect(manifest.build?.mac?.x64ArchFiles).toContain('meshcall-router-darwin-*')
     expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.build?.files).toContain('!node_modules/fs-ext/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')

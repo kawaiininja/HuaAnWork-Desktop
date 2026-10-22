@@ -218,17 +218,17 @@ node scripts/verify-mac-release.ts dist/mac-release
 - **不要手工修改 `dist/mac-release/` 里的产物再分发**:发行制品必须由这条管线一次产出、一次
   通过三道门;事后手改的制品没有可复现的来源。
 
-### 1.7 universal 构建注意(`x64ArchFiles` 的 10 条 glob)
+### 1.7 universal 构建注意(`x64ArchFiles` 的 12 条 glob)
 
 `--universal` 把 arm64 与 x64 两份合进一个 dmg。`build.mac.x64ArchFiles`
-(`dsh-plugin-huaanwork/package.json:454`)的 **10 条 glob** 决定哪些原生模块在 universal 合包时
+(`dsh-plugin-huaanwork/package.json:508`)的 **12 条 glob** 决定哪些原生模块在 universal 合包时
 按 x64 处理:
 
 ```text
-**/node_modules/{@deepseek-ai/node-addon-system-darwin-*/**,node-pty/prebuilds/darwin-*/**,fs-ext/prebuilds/darwin-*/**,node-addon-require-builtin-darwin-*/**,@vscode/ripgrep-darwin-*/**,@img/sharp-darwin-*/**,@img/sharp-libvips-darwin-*/**,@koromix/koffi-darwin-*/**,@dataiku/uv-darwin-*/**,@deepseek-ai/libreoffice-kit-darwin-*/**}
+**/node_modules/{@deepseek-ai/node-addon-system-darwin-*/**,node-pty/prebuilds/darwin-*/**,fs-ext/prebuilds/darwin-*/**,node-addon-require-builtin-darwin-*/**,@vscode/ripgrep-darwin-*/**,@img/sharp-darwin-*/**,@img/sharp-libvips-darwin-*/**,@koromix/koffi-darwin-*/**,@dataiku/uv-darwin-*/**,@deepseek-ai/libreoffice-kit-darwin-*/**,meshcall-router-darwin-*/**,sherpa-onnx-darwin-*/**}
 ```
 
-计数 10。**改原生依赖时必须同步这份清单**:新增原生模块而不把它纳入 glob,universal 包会在
+计数 12。**改原生依赖时必须同步这份清单**:新增原生模块而不把它纳入 glob,universal 包会在
 Intel 机器上加载 arm64 二进制而崩。清单的**真相源是 `dsh-plugin-huaanwork/package.json` 的
 `build.mac.x64ArchFiles` 字段**,本节副本只为对照,改字段时顺手更新这里;验收侧
 `verify-mac-release.ts` 还会对 `MACOS_UNIVERSAL_NATIVE_ENTRIES` 里逐项跑 `lipo -verify_arch` 兜底。
