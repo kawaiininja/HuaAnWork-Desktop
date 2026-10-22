@@ -1020,6 +1020,9 @@ describe('published package surface', () => {
       target: ['dir'],
       x64ArchFiles: expect.stringContaining('node-pty/prebuilds/darwin-*'),
     }))
+    // Agents Anywhere depends on meshcall. Both darwin router binaries are identical
+    // Mach-O files in the x64 and arm64 trees, so the universal merge must accept them.
+    expect(manifest.build?.mac?.x64ArchFiles).toContain('meshcall-router-darwin-*')
     expect(manifest.build?.files).toContain('!node_modules/node-pty/build/**')
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
     expect(manifest.devDependencies?.['@electron/fuses']).toBe('1.8.0')
