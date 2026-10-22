@@ -1996,7 +1996,7 @@
     "@deepseek-ai/dsh-web-search-exa@npm:^0.2.1-alpha.1": "file:vendor/dsh-runtime/0.2.1-alpha.1/deepseek-ai-dsh-web-search-exa-0.2.1-alpha.1.tgz",
     "@deepseek-ai/dsh-web-search-perplexity@npm:0.2.1-alpha.1": "file:vendor/dsh-runtime/0.2.1-alpha.1/deepseek-ai-dsh-web-search-perplexity-0.2.1-alpha.1.tgz",
     "@deepseek-ai/dsh-web-search-perplexity@npm:^0.2.1-alpha.1": "file:vendor/dsh-runtime/0.2.1-alpha.1/deepseek-ai-dsh-web-search-perplexity-0.2.1-alpha.1.tgz",
-    "dshmarket@npm:1.66.38": "patch:dshmarket@npm%3A1.66.38#./.yarn/patches/dshmarket-desktop.patch"
+    "dshmarket@npm:1.66.47": "patch:dshmarket@npm%3A1.66.47#./.yarn/patches/dshmarket-desktop.patch"
   },
   "dependenciesMeta": {
     "@deepseek-ai/dsh-subprocess-local": {
