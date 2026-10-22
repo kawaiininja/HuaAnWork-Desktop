@@ -31,17 +31,72 @@ test("missing table cells render as empty cells, never undefined", () => {
 
 test("object and array table cells become one-line JSON text", () => {
   const md = renderResultMarkdown('[{"o":{"k":"a\\nb"},"a":[1,2]}]');
-  // Markdown 表格先转义反斜杠，JSON.stringify 里的 \n 写成 \\n。
+  // Markdown 表格先转义反斜杠，JSON.stringify 里的 \n 从一条反斜杠加倍成两条。
   assert.ok(md.includes(String.raw`{"k":"a\\nb"}`));
-  assert.ok(md.includes("[1,2]"));
+  assert.ok(md.includes("\\[1,2\\]"));
 });
 
-test("table cells escape pipes and flatten newlines; prose strings outside tables do not escape", () => {
+test("table cells escape pipes and flatten newlines; inline prose characters are preserved", () => {
   const table = renderResultMarkdown('[{"文本":"a|b\\nc"}]');
   assert.ok(table.includes("a\\|b c"));
   const prose = renderResultMarkdown('{"说明":"x|y # 不是标题"}');
   assert.ok(prose.includes("x|y"));
   assert.ok(prose.includes("# 不是标题"));
+});
+
+test("markdown text escapes structure-changing characters so the downloaded file renders literally", () => {
+  const source =
+    '{"说明":"# 标题\\n- 列表项\\n1. 有序项\\n2) 括号有序项\\n> 引用\\n`代码` <script>x</script> *强调* _下划线_ [链接] & 实体"}';
+  const md = renderResultMarkdown(source);
+  assert.ok(md.includes("\\# 标题"));
+  assert.ok(md.includes("\\- 列表项"));
+  assert.ok(md.includes("1\\. 有序项"));
+  assert.ok(md.includes("2\\) 括号有序项"));
+  assert.ok(md.includes("\\> 引用"));
+  assert.ok(md.includes("\\`代码\\`"));
+  assert.ok(md.includes("\\<script>"));
+  assert.ok(md.includes("\\*强调\\*"));
+  assert.ok(md.includes("\\_下划线\\_"));
+  assert.ok(md.includes("\\[链接\\]"));
+  assert.ok(md.includes("\\& 实体"));
+  // 结构化解释必须消失：不能出现行首标题、未转义的 HTML 或裸代码围栏。
+  assert.ok(!md.includes("\n# 标题"));
+  assert.ok(!/(^|[^\\])<script>/.test(md));
+});
+
+test("ordered markers with a closing paren are escaped as well as dotted markers", () => {
+  const md = renderResultMarkdown('{"说明":"1) first\\n2) second"}');
+  assert.ok(md.includes("1\\) first"));
+  assert.ok(md.includes("2\\) second"));
+  // 转义后行首不再残留可被 GFM 解析成有序列表的标记。
+  assert.ok(!/^\s*\d+[.)]\s/m.test(md));
+});
+
+test("a trailing heading hash is escaped so it stays in the heading text", () => {
+  // `## Title #` 会被 GFM 当成闭合标记，渲染成 `Title`；转义后才是 `Title #`。
+  assert.ok(renderResultMarkdown('{"Title #":"v"}').includes("## Title \\#"));
+  assert.ok(renderResultMarkdown('{"Title ##":"v"}').includes("## Title \\#\\#"));
+});
+
+test("standalone heading and thematic-break markers are escaped", () => {
+  const md = renderResultMarkdown('{"说明":"####\\n---"}');
+  assert.ok(md.includes("\\####"));
+  assert.ok(md.includes("\\---"));
+});
+
+test("table cells escape markdown text as well as pipes", () => {
+  const md = renderResultMarkdown('[{"文本":"<b> & *x* _y_ [z]"}]');
+  assert.ok(md.includes("\\<b>"));
+  assert.ok(md.includes("\\&"));
+  assert.ok(md.includes("\\*x\\*"));
+  assert.ok(md.includes("\\_y\\_"));
+  assert.ok(md.includes("\\[z\\]"));
+});
+
+test("object field names with newlines flatten into one heading label", () => {
+  const md = renderResultMarkdown('{"a\\nb":1}');
+  assert.ok(md.includes("## a b"));
+  assert.ok(!md.includes("## a\nb"));
 });
 
 test("prose strings keep paragraph breaks: every newline form starts a new paragraph", () => {
@@ -84,7 +139,7 @@ test("markdown table escapes backslashes before pipes so a literal a\\|b cannot 
 test("__proto__ is skipped as a table column but kept as an object field", () => {
   const md = renderResultMarkdown('{"__proto__":"字段值","a":1}');
   const lines = md.split("\n");
-  assert.ok(lines.includes("## __proto__"));
+  assert.ok(lines.includes("## \\_\\_proto\\_\\_"));
   assert.ok(lines.includes("字段值"));
   assert.ok(lines.includes("## a"));
 
@@ -112,6 +167,15 @@ test("empty object and array get their fixed labels", () => {
   assert.ok(md.includes("（空数组）"));
 });
 
+test("an array of empty objects does not render a columnless table", () => {
+  const md = renderResultMarkdown('[{}]');
+  assert.ok(md.includes("（空对象）"));
+  assert.ok(!md.includes("|  |"));
+  const html = renderResultHtml('[{}]');
+  assert.ok(html.includes("<p>（空对象）</p>"));
+  assert.ok(!html.includes("<table>"));
+});
+
 test("html document is complete, escaped, script-free", () => {
   const html = renderResultHtml('{"x":"<script>alert(1)</script>"}');
   assert.ok(html.startsWith("<!DOCTYPE html>"));
@@ -120,4 +184,12 @@ test("html document is complete, escaped, script-free", () => {
   assert.ok(html.includes("&lt;script&gt;"));
   assert.ok(!html.includes("<script>"));
   assert.ok(!html.includes("http://") && !html.includes("https://"));
+});
+
+test("html escapes text in headings, tables and lists too", () => {
+  const html = renderResultHtml('{"<h>":"<x>","t":[{"<c>":"<v>"}],"l":["<i>"]}');
+  assert.ok(html.includes("<h2>&lt;h&gt;</h2>"));
+  assert.ok(html.includes("<th>&lt;c&gt;</th>"));
+  assert.ok(html.includes("<td>&lt;v&gt;</td>"));
+  assert.ok(html.includes("<li>&lt;i&gt;</li>"));
 });

@@ -213,11 +213,22 @@ test("App wires the attachment open handler, preview branch and download of the 
   assert.ok(previewAt >= 0 && previewEnd > previewAt, "the preview branch is still between the right-pane tabs");
   const preview = APP_SOURCE.slice(previewAt, previewEnd);
   assert.match(preview, /sandbox=""/);
-  assert.match(preview, /srcDoc=\{renderResultHtml\(previewAttachment\.sourceText\)\}/);
+  assert.match(preview, /srcDoc=\{previewContent \?\? ""\}/);
   assert.match(preview, /previewFile === RESULT_ATTACHMENT_FILES\[0\]/);
-  assert.match(preview, /renderResultMarkdown\(previewAttachment\.sourceText\)/);
+  assert.match(preview, /\{previewContent \?\? ""\}/);
   // 「下载」只下载当前打开的这一份,不是固定某一份。
   assert.match(preview, /downloadAttachment\(previewFile, previewAttachment\.sourceText\)/);
+
+  // 预览内容按 sourceText 记忆化,两份渲染器各用一次（预览与下载同源）。
+  const memoAt = APP_SOURCE.indexOf("const previewContent = useMemo(");
+  const memoEnd = APP_SOURCE.indexOf("const sessionFailed", memoAt);
+  assert.ok(memoAt >= 0 && memoEnd > memoAt, "previewContent is memoized before sessionFailed");
+  const memo = APP_SOURCE.slice(memoAt, memoEnd);
+  // 预览页不可见时不解析/渲染：token 流每次刷新 items 都会换引用。
+  assert.match(memo, /rightTab !== "preview"/);
+  assert.match(memo, /previewFile === RESULT_ATTACHMENT_FILES\[0\]/);
+  assert.match(memo, /renderResultMarkdown\(previewAttachment\.sourceText\)/);
+  assert.match(memo, /renderResultHtml\(previewAttachment\.sourceText\)/);
 
   // 下载实现:文件名来自附件本身,内容与预览同源(两份渲染器各用一次)。
   const downloadAt = APP_SOURCE.indexOf("function downloadAttachment(");
@@ -228,6 +239,7 @@ test("App wires the attachment open handler, preview branch and download of the 
   assert.match(download, /renderResultMarkdown\(sourceText\)/);
   assert.match(download, /renderResultHtml\(sourceText\)/);
   assert.match(download, /anchor\.download = file/);
+  assert.match(download, /setTimeout\(\(\) => URL\.revokeObjectURL\(url\), 0\)/);
 });
 
 test("the composer stop branch for a live run is separate from the turn stop", () => {
@@ -247,19 +259,65 @@ test("the composer stop branch for a live run is separate from the turn stop", (
   assert.ok(stopAt >= 0 && stopEnd > stopAt, "stopRunTab is still defined before settleStop");
   const stopBody = APP_SOURCE.slice(stopAt, stopEnd);
   assert.match(stopBody, /const automationId = activeChat\.automationId/);
-  assert.match(stopBody, /await stopAutomation\(automationId\)/);
+  assert.match(stopBody, /await stopAutomationWithReconcile\(automationId\)/);
   assert.doesNotMatch(stopBody, /session\.cancel/);
 });
 
-test("the task-row stop calls automation.stop and refreshes afterwards", () => {
+test("the task-row stop goes through the reconciling stop path and refreshes afterwards", () => {
   const stopAt = AUTOMATIONS_VIEW_SOURCE.indexOf("async function stop(automation: AutomationInfo)");
   const stopEnd = AUTOMATIONS_VIEW_SOURCE.indexOf("async function submitRemove()", stopAt);
   assert.ok(stopAt >= 0 && stopEnd > stopAt, "AutomationsView still owns a task-row stop handler");
   const stopBody = AUTOMATIONS_VIEW_SOURCE.slice(stopAt, stopEnd);
-  const callAt = stopBody.indexOf("await stopAutomation(automation.id)");
-  const refreshAt = stopBody.indexOf("onChanged()");
+  assert.match(stopBody, /onStopAutomation \?\? stopAutomation/);
+  const callAt = stopBody.indexOf("await requestStop(automation.id)");
   assert.ok(callAt >= 0, "the task-row stop goes through automation.stop");
-  assert.ok(refreshAt > callAt, "the task row refreshes from the host after the stop call");
+  assert.match(stopBody, /await requestStop\(automation\.id\)/);
+  const refreshAt = stopBody.indexOf("onChanged()");
+  assert.ok(refreshAt > callAt, "the task row refreshes from the host after the await on the stop call");
+});
+
+test("running-run state converges on refresh, host exit and stopped:false", () => {
+  const refreshAt = APP_SOURCE.indexOf("async function refreshAutomations()");
+  const refreshEnd = APP_SOURCE.indexOf("function handleRunDeleted", refreshAt);
+  assert.ok(refreshAt >= 0 && refreshEnd > refreshAt, "refreshAutomations is still defined before handleRunDeleted");
+  const refreshBody = APP_SOURCE.slice(refreshAt, refreshEnd);
+  assert.match(refreshBody, /setRunningRuns\(\(prev\) => settleRunningRuns\(prev, listed\.runs \?\? \{\}\)\)/);
+
+  const exitAt = APP_SOURCE.indexOf("await onSidecarExit((payload) => {");
+  assert.ok(exitAt >= 0, "the sidecar exit handler is still wired");
+  // 锚到下一段已知定义,不用固定字符窗口:上面的注释增长不应让断言失去意义。
+  const exitEnd = APP_SOURCE.indexOf("const hydrateModels = useCallback(", exitAt);
+  assert.ok(exitEnd > exitAt, "the sidecar exit handler is still followed by hydrateModels");
+  const exitBody = APP_SOURCE.slice(exitAt, exitEnd);
+  assert.match(exitBody, /setRunningRuns\(\(prev\) => \(prev\.size === 0 \? prev : new Map\(\)\)\)/);
+
+  const stopAt = APP_SOURCE.indexOf("async function stopAutomationWithReconcile(");
+  assert.ok(stopAt >= 0, "App owns a reconciling stop wrapper");
+  const stopEnd = APP_SOURCE.indexOf("async function stopRunTab(", stopAt);
+  assert.ok(stopEnd > stopAt, "stopAutomationWithReconcile is defined before stopRunTab");
+  const stopBody = APP_SOURCE.slice(stopAt, stopEnd);
+  assert.match(stopBody, /const runIds = \[\.\.\.runningRuns\]/);
+  assert.match(stopBody, /if \(!result\.stopped\)/);
+  assert.match(stopBody, /dropRunningRunIds\(prev, runIds\)/);
+
+  const tabAt = APP_SOURCE.indexOf("async function stopRunTab()");
+  const tabEnd = APP_SOURCE.indexOf("function settleStop(", tabAt);
+  assert.ok(tabAt >= 0 && tabEnd > tabAt, "stopRunTab is still defined before settleStop");
+  assert.match(APP_SOURCE.slice(tabAt, tabEnd), /await stopAutomationWithReconcile\(automationId\)/);
+
+  // 任务行也必须走同一个 reconciling 入口，否则 stopped:false 仍会卡住。
+  assert.match(APP_SOURCE, /onStopAutomation=\{stopAutomationWithReconcile\}/);
+});
+
+test("run deletion suppresses only the deleted run and earlier runs", () => {
+  const at = APP_SOURCE.indexOf("function handleRunDeleted(");
+  const end = APP_SOURCE.indexOf("Task 10：判定驱动在前端", at);
+  assert.ok(at >= 0 && end > at, "handleRunDeleted is still defined before the keep-awake effect");
+  const body = APP_SOURCE.slice(at, end);
+  // 用被删运行自己的 startedAt 作为分界（不是任务级清空或固定值）。
+  assert.match(body, /sessionsToSuppressAfterDelete\(automationRuns\[automationId\] \?\? \[\], sessionId, startedAt\)/);
+  // 旧实现按任务抑制全部已加载会话，会挡住更新运行的合法重建。
+  assert.doesNotMatch(body, /for \(const run of automationRuns\[automationId\]/);
 });
 
 test("live-run state is run-scoped: run-end deletes only its own runId and turns count runs", () => {
@@ -281,9 +339,8 @@ test("live-run state is run-scoped: run-end deletes only its own runId and turns
 test("folded attachments use the assistant mapping and deleted runs stay suppressed", () => {
   // 附件不能映射成空 note:否则思考面板在运行结束后仍展开并显示「进行中」。
   assert.match(APP_SOURCE, /item\.kind === "attachment" \? attachmentAsAssistant\(item\) : item/);
-  // 删过运行后把该任务已加载的会话记进抑制集,并交给重建判定。
+  // 删过运行后把被删会话及其更早的会话记进抑制集,并交给重建判定。
   assert.match(APP_SOURCE, /const suppressed = suppressedRunSessionIdsRef\.current/);
-  assert.match(APP_SOURCE, /suppressed\.add\(sessionId\)/);
-  assert.match(APP_SOURCE, /suppressed\.add\(run\.sessionId\)/);
+  assert.match(APP_SOURCE, /sessionsToSuppressAfterDelete\(/);
   assert.match(APP_SOURCE, /suppressedRunSessionIdsRef\.current,\s*\);/);
 });

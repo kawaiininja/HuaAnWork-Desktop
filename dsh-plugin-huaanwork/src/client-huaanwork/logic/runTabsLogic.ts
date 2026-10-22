@@ -75,6 +75,14 @@ export function runResultNoteText(status: RunSummary["status"] | undefined): str
   return "自动化运行完成";
 }
 
+/** `run-<runId>` 标签的运行 id；非运行标签返回 undefined。 */
+export function runIdOfTab(tabId: string): string | undefined {
+  const prefix = "run-";
+  if (!tabId.startsWith(prefix)) return undefined;
+  const runId = tabId.slice(prefix.length);
+  return runId.length > 0 ? runId : undefined;
+}
+
 /**
  * 运行对话标签是否仍在跑（纯函数）。
  *
@@ -83,8 +91,67 @@ export function runResultNoteText(status: RunSummary["status"] | undefined): str
  * 都是 `run-<runId>`；非运行标签（默认对话 / Work 会话）恒为 false。
  */
 export function isRunTabLive(tabId: string, runningRunIds: ReadonlySet<string>): boolean {
-  const prefix = "run-";
-  if (!tabId.startsWith(prefix)) return false;
-  const runId = tabId.slice(prefix.length);
-  return runId.length > 0 && runningRunIds.has(runId);
+  const runId = runIdOfTab(tabId);
+  return runId !== undefined && runningRunIds.has(runId);
+}
+
+/**
+ * 刷新任务快照时对账在途表：运行记录出现即表示该轮已经落盘，客户端不应再把它
+ * 当成在途（覆盖丢失 run-end / host 重启后 stop 返回 stopped:false 的场景）。
+ * 返回原 Map 表示没有变化，避免无意义的状态更新。
+ */
+export function settleRunningRuns<T>(
+  running: ReadonlyMap<string, T>,
+  runs: Readonly<Record<string, readonly { runId: string }[]>>,
+): ReadonlyMap<string, T> {
+  if (running.size === 0) return running;
+  const settled = new Set<string>();
+  for (const list of Object.values(runs)) {
+    for (const run of list) settled.add(run.runId);
+  }
+  if (settled.size === 0) return running;
+  let changed = false;
+  const next = new Map(running);
+  for (const runId of next.keys()) {
+    if (!settled.has(runId)) continue;
+    next.delete(runId);
+    changed = true;
+  }
+  return changed ? next : running;
+}
+
+/**
+ * 删除一条运行后要抑制重建的会话：被删会话及其更早的运行。
+ * 不能连更新的运行一起抑制，否则刷新时会挡住最新运行的合法重建。
+ */
+export function sessionsToSuppressAfterDelete(
+  runs: readonly { startedAt: number; sessionId?: string }[],
+  deletedSessionId: string,
+  deletedStartedAt: number,
+): string[] {
+  const result = new Set<string>();
+  if (deletedSessionId) result.add(deletedSessionId);
+  for (const run of runs) {
+    if (typeof run.sessionId === "string" && run.sessionId && run.startedAt <= deletedStartedAt) {
+      result.add(run.sessionId);
+    }
+  }
+  return [...result];
+}
+
+/**
+ * 停止调用返回 stopped:false 时，只摘掉调用前快照里的 runId。
+ * 不能按 automationId 清空：调用在飞期间可能已经开了新一轮。
+ */
+export function dropRunningRunIds<T>(
+  running: ReadonlyMap<string, T>,
+  runIds: readonly string[],
+): ReadonlyMap<string, T> {
+  if (running.size === 0 || runIds.length === 0) return running;
+  let changed = false;
+  const next = new Map(running);
+  for (const runId of runIds) {
+    if (next.delete(runId)) changed = true;
+  }
+  return changed ? next : running;
 }

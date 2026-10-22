@@ -1,7 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { AutomationInfo, AutomationSchedule, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
 import { inFlightRuns, startInFlightRun } from '../../src/huaanwork-host/automation-inflight.ts'
 import {
@@ -24,7 +24,7 @@ import {
 } from '../../src/huaanwork-host/automations-store.ts'
 import { humanizeCron, nextFireAfter, parseCron, periodOf } from '../../src/huaanwork-host/schedule.ts'
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
-import { RUNS_LIMIT, listAutomations, recentRuns, removeAutomationsOfProject } from '../../src/huaanwork-host/stores.ts'
+import { RUNS_LIMIT, listAutomations, recentRuns, removeAutomationsOfProject, runsPath } from '../../src/huaanwork-host/stores.ts'
 
 // 写路径与纯函数用例移植自旧 sidecar automations.test.ts(属于本层的部分)
 // 与 schedule.test.ts 15 例。node:test assert → vitest expect。
@@ -1087,7 +1087,24 @@ describe('automation.deleteRun (Task 9)', () => {
     expect(await recentRuns(home, id)).toEqual([])
   })
 
-  test('keeps the row deleted when removing the session directory fails', async () => {
+  test('skips non-directory entries in the sessions root instead of reporting unreadable', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    const sessionsRoot = join(home, 'sessions')
+    mkdirSync(sessionsRoot, { recursive: true })
+    // macOS 会在目录里写 .DS_Store;旧实现 readdir 它得到 ENOTDIR,把缺失目录报成失败。
+    writeFileSync(join(sessionsRoot, '.DS_Store'), 'junk', 'utf8')
+    await appendRun(home, id, runSummary('r1', { endedAt: T0 + 10, sessionId: `huaanwork-auto-${id}-gone` }))
+
+    const result = await deleteAutomationRun(home, id, 'r1', { sessionsRoot })
+
+    expect(result).toEqual({ removed: true, sessionDirRemoved: true })
+    expect(existsSync(join(sessionsRoot, '.DS_Store'))).toBe(true)
+    expect(await recentRuns(home, id)).toEqual([])
+  })
+
+  test.skipIf(process.platform === 'win32')('keeps the row deleted when removing the session directory fails', async () => {
     const home = makeHome()
     const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
     const id = automation.id
@@ -1109,6 +1126,88 @@ describe('automation.deleteRun (Task 9)', () => {
     // 删行成功优先:目录还在,列表里已没有这一条。
     expect(existsSync(sessionDir)).toBe(true)
     expect(await recentRuns(home, id)).toEqual([])
+  })
+
+  test.skipIf(process.platform === 'win32')('reports a deletion failure when the sessions root is unreadable', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    const sessionsRoot = join(home, 'sessions')
+    mkdirSync(sessionsRoot, { recursive: true })
+    await appendRun(home, id, runSummary('r1', { endedAt: T0 + 10, sessionId: `huaanwork-auto-${id}-r1` }))
+
+    chmodSync(sessionsRoot, 0o000)
+    let result: Awaited<ReturnType<typeof deleteAutomationRun>>
+    try {
+      result = await deleteAutomationRun(home, id, 'r1', { sessionsRoot })
+    } finally {
+      chmodSync(sessionsRoot, 0o755)
+    }
+
+    expect(result).toEqual({ removed: true, sessionDirRemoved: false })
+    expect(await recentRuns(home, id)).toEqual([])
+  })
+
+  test('returns success when the registry rewrite fails after the run row is deleted, and self-heals later', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    await appendRun(home, id, runSummary('r1', { startedAt: T0 + 1, endedAt: T0 + 10 }))
+    await appendRun(home, id, runSummary('r2', { startedAt: T0 + 20, endedAt: T0 + 30, ok: false, status: 'error' }))
+    await markAutomation(home, id, { lastRunAt: T0 + 30, lastStatus: 'error' })
+    const find = async () => (await listAutomations(home)).find((item) => item.id === id)
+
+    // 让 writeAutomationRegistry 的临时文件路径不可写:目录存在时 writeFile 报 EISDIR。
+    const warnings: string[] = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map((arg) => String(arg)).join(' '))
+    })
+    let result: Awaited<ReturnType<typeof deleteAutomationRun>>
+    const tmpPath = join(home, 'automations.json.tmp')
+    try {
+      mkdirSync(tmpPath)
+      try {
+        result = await deleteAutomationRun(home, id, 'r2', { sessionsRoot: join(home, 'sessions') })
+      } finally {
+        rmSync(tmpPath, { recursive: true, force: true })
+      }
+    } finally {
+      warn.mockRestore()
+    }
+
+    expect(result).toEqual({ removed: true, sessionDirRemoved: true })
+    expect((await recentRuns(home, id)).map((run) => run.runId)).toEqual(['r1'])
+    // 回写失败已被警告记录，注册表暂时保留删行前的旧状态。
+    expect(warnings.some((line) => line.includes('[automations]'))).toBe(true)
+    expect(await find()).toMatchObject({ lastRunAt: T0 + 30, lastStatus: 'error' })
+
+    // 下一次回写（如再次删除或运行结束）以权威运行记录自愈。
+    await rewriteLastRunFromRuns(home, id)
+    expect(await find()).toMatchObject({ lastRunAt: T0 + 10, lastStatus: 'ok' })
+  })
+
+  test('deleteAutomationRun sees a run that lands between row deletion and rewrite', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const id = automation.id
+    const sessionId = `huaanwork-auto-${id}-r2`
+    await appendRun(home, id, runSummary('r1', { startedAt: T0 + 1, endedAt: T0 + 10 }))
+    await appendRun(home, id, runSummary('r2', { startedAt: T0 + 20, endedAt: T0 + 30, ok: false, status: 'error', sessionId }))
+    await markAutomation(home, id, { lastRunAt: T0 + 30, lastStatus: 'error' })
+    const lateRun = runSummary('r3', { startedAt: T0 + 40, endedAt: T0 + 50 })
+
+    const result = await deleteAutomationRun(home, id, 'r2', {
+      sessionsRoot: join(home, 'sessions'),
+      releaseSession: () => {
+        // 模拟删行后、注册表回写前新运行落盘；回写必须在锁内重读看到它。
+        appendFileSync(runsPath(home, id), `${JSON.stringify(lateRun)}\n`, 'utf8')
+      },
+    })
+
+    expect(result).toEqual({ removed: true, sessionDirRemoved: true })
+    const row = (await listAutomations(home)).find((item) => item.id === id)
+    expect(row?.lastRunAt).toBe(T0 + 50)
+    expect(row?.lastStatus).toBe('ok')
   })
 
   test('rewriteLastRunFromRuns silently ignores a missing automation', async () => {

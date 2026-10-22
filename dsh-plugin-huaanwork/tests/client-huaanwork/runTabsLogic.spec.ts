@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import type { RunSummary } from "../../src/client-huaanwork/logic/projects.ts";
-import { isRunTabLive, runResultNoteText, runTabsToRebuild } from "../../src/client-huaanwork/logic/runTabsLogic.ts";
+import {
+  dropRunningRunIds,
+  isRunTabLive,
+  runIdOfTab,
+  runResultNoteText,
+  runTabsToRebuild,
+  sessionsToSuppressAfterDelete,
+  settleRunningRuns,
+} from "../../src/client-huaanwork/logic/runTabsLogic.ts";
 
 function run(partial: Partial<RunSummary> & { runId: string; startedAt: number }): RunSummary {
   return { endedAt: partial.startedAt + 1000, ok: true, output: "", ...partial };
@@ -107,6 +115,61 @@ test("isRunTabLive: only a run- tab whose runId is live counts", () => {
   assert.equal(isRunTabLive("run-", live), false);
   assert.equal(isRunTabLive("work-1", live), false);
   assert.equal(isRunTabLive("run-", new Set([""])), false);
+});
+
+test("runIdOfTab: extracts the run id only from run-<runId> tab ids", () => {
+  assert.equal(runIdOfTab("run-abc"), "abc");
+  assert.equal(runIdOfTab("run-"), undefined);
+  assert.equal(runIdOfTab("work-1"), undefined);
+});
+
+test("settleRunningRuns: a run record appearing means that run is no longer live", () => {
+  const running = new Map([
+    ["r1", { automationId: "auto-a" }],
+    ["r2", { automationId: "auto-a" }],
+    ["r3", { automationId: "auto-b" }],
+  ]);
+  const settled = settleRunningRuns(running, {
+    "auto-a": [run({ runId: "r2", startedAt: 200 })],
+    "auto-b": [run({ runId: "other", startedAt: 300 })],
+  });
+  assert.deepEqual([...settled.keys()], ["r1", "r3"]);
+
+  // 没有命中时返回同一个 Map，避免刷新触发无意义的状态更新。
+  assert.equal(settleRunningRuns(running, {}), running);
+  assert.equal(
+    settleRunningRuns(running, { "auto-a": [run({ runId: "not-live", startedAt: 1 })] }),
+    running,
+  );
+});
+
+test("dropRunningRunIds: clears only the ids captured before the stop call", () => {
+  const running = new Map([
+    ["old-1", { automationId: "auto-a" }],
+    ["old-2", { automationId: "auto-a" }],
+    ["new", { automationId: "auto-a" }],
+  ]);
+  const next = dropRunningRunIds(running, ["old-1", "old-2"]);
+  assert.deepEqual([...next.keys()], ["new"]);
+  assert.equal(dropRunningRunIds(running, []), running);
+  assert.equal(dropRunningRunIds(running, ["missing"]), running);
+});
+
+test("sessionsToSuppressAfterDelete: deleted run and earlier runs only, never newer ones", () => {
+  const runs = [
+    { startedAt: 100, sessionId: "s-old" },
+    { startedAt: 200, sessionId: "s-deleted" },
+    { startedAt: 250 },
+    { startedAt: 300, sessionId: "s-new" },
+  ];
+  assert.deepEqual(
+    sessionsToSuppressAfterDelete(runs, "s-deleted", 200).sort(),
+    ["s-deleted", "s-old"],
+  );
+  assert.deepEqual(
+    sessionsToSuppressAfterDelete(runs, "s-new", 300).sort(),
+    ["s-deleted", "s-new", "s-old"],
+  );
 });
 
 test("runResultNoteText: exact footer strings (single source for run-end handler and rebuild backfill)", () => {

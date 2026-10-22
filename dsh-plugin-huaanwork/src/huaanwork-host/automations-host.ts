@@ -353,7 +353,8 @@ const KILL_GRACE_MS = 2_000
  * 孙进程都属于它派生出的进程组,只杀外壳会让它们继续写文件、跑完整个超时窗口。
  *
  * - POSIX:子进程以 `detached` 启动,自成一个进程组(`pgid = child.pid`),
- *   负 pid 即整组;先 SIGTERM,2 秒后 SIGKILL。组不存在时回落到只杀外壳。
+ *   负 pid 即整组;先 SIGTERM,2 秒后探测整组仍存活再 SIGKILL(组长先退出不豁免
+ *   忽略 SIGTERM 的孙进程)。组不存在时回落到只杀外壳。停止与超时两条路径共用。
  * - Windows:`taskkill /T /F` 按 pid 树杀;spawn 失败或没有 pid 时回落 `child.kill()`。
  */
 function killProcessTree(child: ChildProcess): void {
@@ -361,7 +362,7 @@ function killProcessTree(child: ChildProcess): void {
   if (pid === undefined) return
   if (process.platform === 'win32') {
     try {
-      const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' })
+      const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
       killer.on('error', () => {
         try {
           child.kill()
@@ -381,6 +382,14 @@ function killProcessTree(child: ChildProcess): void {
     child.kill('SIGTERM')
   }
   const timer = setTimeout(() => {
+    // 组长退出不代表组里的后台孙进程也退出:它们可能忽略 SIGTERM 继续写文件。
+    // 因此探测整组是否还活着(kill 0),只有整组 ESRCH 才跳过 SIGKILL。
+    try {
+      process.kill(-pid, 0)
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ESRCH') return
+      // EPERM 等探测失败:组可能仍存在,保守地继续按组发 SIGKILL。
+    }
     try {
       process.kill(-pid, 'SIGKILL')
     } catch {
@@ -418,7 +427,12 @@ function runScript(
       if (runId !== undefined) scriptRunKillers.delete(runId)
       resolve({ ok, output: clipOutput(output), timedOut })
     }
-    if (runId !== undefined) scriptRunKillers.set(runId, () => killProcessTree(child))
+    if (runId !== undefined) {
+      scriptRunKillers.set(runId, () => killProcessTree(child))
+      // stop 可能已经落在 run-start 与 spawn 之间：登记句柄的同一同步段补杀一次，
+      // 否则进程会跑完整个脚本/超时窗口（规格 §8「脚本结束对应子进程」）。
+      if (inFlightRuns.get(runId)?.cancelRequested === true) killProcessTree(child)
+    }
     const timer = setTimeout(() => {
       killProcessTree(child)
       finish(false, `${stdout}${stderr}\n（任务超时，已终止）`, true)
@@ -534,10 +548,19 @@ export async function executeRun(
     ? (await listProjects(routeCtx.profileDir)).find((item) => item.id === automation.projectId)
     : null
   if (automation.projectId && !project) {
+    // 已 started 且被停止的轮次同样按 cancelled 落盘；否则任务行会把它显示成失败。
+    const cancelled = inFlightRuns.get(runId)?.cancelRequested === true
     await finishAutomation(
       routeCtx,
       automation,
-      { runId, startedAt, ok: false, output: MISSING_PROJECT_OUTPUT, ...(sessionId === undefined ? {} : { sessionId }) },
+      {
+        runId,
+        startedAt,
+        ok: false,
+        output: cancelled ? '已停止' : MISSING_PROJECT_OUTPUT,
+        ...(cancelled ? { status: 'cancelled' as const } : {}),
+        ...(sessionId === undefined ? {} : { sessionId }),
+      },
       trigger,
       coalescedCount,
     )

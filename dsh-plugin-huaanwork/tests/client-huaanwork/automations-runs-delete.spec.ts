@@ -83,7 +83,7 @@ function deleteButtonFor(view: HTMLElement, output: string): HTMLButtonElement {
 }
 
 async function mount(options: {
-  onRunDeleted: (sessionId: string, automationId: string) => void;
+  onRunDeleted: (sessionId: string, automationId: string, startedAt: number) => void;
   onChanged: () => void;
   runningIds?: ReadonlySet<string>;
   runs?: Record<string, RunSummary[]>;
@@ -168,7 +168,7 @@ describe("运行记录删除（spec §6）", () => {
     expect(view.textContent).toContain("第二条输出");
     // 目录没删掉要诚实说出来（记录本身已删，列表不再出现）。
     expect(view.textContent).toContain("记录已删除，但会话目录未能删除");
-    expect(onRunDeleted).toHaveBeenCalledWith("s-1", "a1");
+    expect(onRunDeleted).toHaveBeenCalledWith("s-1", "a1", 1000);
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
 

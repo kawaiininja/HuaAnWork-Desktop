@@ -30,6 +30,8 @@ type Props = {
   runs: Record<string, RunSummary[]>;
   /** 正在后台执行的任务 id 集合（run-start 加入 / run-end 移除）。 */
   runningIds: ReadonlySet<string>;
+  /** App 的停止入口：宿主回 stopped:false 时由 App 清掉调用前的在途快照。 */
+  onStopAutomation?: (automationId: string) => Promise<{ stopped: boolean }>;
   /**
    * App 下发的一次性入口意图：create=自动打开该项目的创建表单（待配置）；focus=切到「任务」tab。
    * Task 13：composer 命中自然语言调度短语时，create 意图额外带 schedule/prompt 预填（同 applyTemplate 的一次性赋值语义）。
@@ -54,9 +56,9 @@ type Props = {
   onWorkspaceAligned?: (workspaceRoot: string) => void;
   /**
    * 运行记录删除成功后通知 App 关闭该会话的运行对话标签（规格 §6；默认对话标签不受影响）。
-   * 带上任务 id：App 要按任务把已加载的运行会话全部记进「不要再重建」的抑制集。
+   * 带上任务 id 与被删运行的 startedAt：App 抑制该条及更早的会话，不能挡住更新运行的重建。
    */
-  onRunDeleted?: (sessionId: string, automationId: string) => void;
+  onRunDeleted?: (sessionId: string, automationId: string, startedAt: number) => void;
   /** Task 10：保持系统唤醒设置值（与账户页共用同一持久化字段）。 */
   keepAwake: boolean;
   onToggleKeepAwake: (next: boolean) => void;
@@ -111,6 +113,7 @@ export default function AutomationsView({
   automations,
   runs,
   runningIds,
+  onStopAutomation,
   enterIntent,
   onEnterIntentConsumed,
   onChanged,
@@ -181,7 +184,8 @@ export default function AutomationsView({
   async function stop(automation: AutomationInfo) {
     setError("");
     try {
-      await stopAutomation(automation.id);
+      const requestStop = onStopAutomation ?? stopAutomation;
+      await requestStop(automation.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -483,7 +487,7 @@ function RunsPanel({
 }: {
   automations: AutomationInfo[];
   onChanged: () => void;
-  onRunDeleted?: (sessionId: string, automationId: string) => void;
+  onRunDeleted?: (sessionId: string, automationId: string, startedAt: number) => void;
 }) {
   const [fullRuns, setFullRuns] = useState<Record<string, RunSummary[]>>({});
   const [statusFilter, setStatusFilter] = useState<"all" | RunStatus>("all");
@@ -614,7 +618,7 @@ function RunsPanel({
       }));
       if (sessionDirRemoved === false) setNotice("记录已删除，但会话目录未能删除");
       if (run.sessionId && detail?.sessionId === run.sessionId) setDetail(null);
-      if (run.sessionId) onRunDeleted?.(run.sessionId, automation.id);
+      if (run.sessionId) onRunDeleted?.(run.sessionId, automation.id, run.startedAt);
       void reloadRuns(automation.id);
       onChanged();
     } catch (err) {

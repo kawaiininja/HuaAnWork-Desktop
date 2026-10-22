@@ -154,7 +154,14 @@ import {
   type GoalTurnEvent,
   type GoalTurnState,
 } from "./logic/goalRound.ts";
-import { isRunTabLive, runResultNoteText, runTabsToRebuild } from "./logic/runTabsLogic.ts";
+import {
+  dropRunningRunIds,
+  isRunTabLive,
+  runResultNoteText,
+  runTabsToRebuild,
+  sessionsToSuppressAfterDelete,
+  settleRunningRuns,
+} from "./logic/runTabsLogic.ts";
 import {
   RESULT_ATTACHMENT_FILES,
   attachmentAsAssistant,
@@ -533,12 +540,20 @@ export default function App() {
   /** 运行对话标签的 live 判据按 runId（同一任务的旧标签不显示「停止」）。 */
   const runningRunIds = useMemo(() => new Set(runningRuns.keys()), [runningRuns]);
   const items = activeChat.items;
+  const contentView = useMemo(() => contentItems(items), [items]);
   /**
    * 右侧预览选中的附件项（规格 §5）：选择记在标签上；标签里没有附件项时
    * （如重建后日志未含该条）回落空占位，不显示下载。
    */
   const previewAttachment = activeChat.previewFile ? items.find((item) => item.kind === "attachment") : undefined;
   const previewFile = previewAttachment ? activeChat.previewFile : undefined;
+  const previewContent = useMemo(() => {
+    // 预览页不可见时不解析/渲染：token 流会持续替换 items，不能每次刷新都重算。
+    if (rightTab !== "preview" || !previewAttachment || !previewFile) return undefined;
+    return previewFile === RESULT_ATTACHMENT_FILES[0]
+      ? renderResultMarkdown(previewAttachment.sourceText)
+      : renderResultHtml(previewAttachment.sourceText);
+  }, [previewAttachment, previewFile, rightTab]);
   const sessionFailed = activeChat.sessionFailed;
   /** 相位 → 展示决策；`stopped` 是中性终态，不再显示无响应与结束按钮。 */
   const hostNotice = hostLivenessNotice(hostPhase);
@@ -836,6 +851,9 @@ export default function App() {
       setAutomations(nextAutomations);
       automationsRef.current = nextAutomations;
       setAutomationRuns(listed.runs ?? {});
+      // 运行记录出现即表示该轮已落盘：丢失 run-end 或 stop 返回 stopped:false 时，
+      // 任务行/运行对话的在途状态不能永远停在「停止」。
+      setRunningRuns((prev) => settleRunningRuns(prev, listed.runs ?? {}));
       // 重启重建（规格 L544 修订）：run tab 只由实时 run-start 事件创建进内存，重启即消失；
       // 这里按「每任务最近一次带会话的运行」补出骨架标签，内容首开时懒加载（见 runBackfill effect）。
       // 去重键 run-<runId> 与实时创建相同，幂等；只 append 不重置，chatTabs 恒非空不变量不破。
@@ -875,14 +893,13 @@ export default function App() {
    * 只关自动化运行标签：默认对话标签即使 sessionId 相同也保留。
    * 被关的是当前标签时改选最近的存活标签，选择交给 closeRunTabsForSession 决定。
    *
-   * 同时把该任务当前已加载的全部运行会话记进抑制集：删掉的这条不能在下一次
-   * automation.list 刷新时被 runTabsToRebuild 重建回骨架标签。
+   * 抑制被删会话及其更早的运行：删掉的最新一条不能在下一次 automation.list 刷新时
+   * 被重建；更新的运行仍允许刷新重建，不能连同它们一起误抑制。
    */
-  function handleRunDeleted(sessionId: string, automationId: string) {
+  function handleRunDeleted(sessionId: string, automationId: string, startedAt: number) {
     const suppressed = suppressedRunSessionIdsRef.current;
-    if (sessionId) suppressed.add(sessionId);
-    for (const run of automationRuns[automationId] ?? []) {
-      if (typeof run.sessionId === "string" && run.sessionId) suppressed.add(run.sessionId);
+    for (const id of sessionsToSuppressAfterDelete(automationRuns[automationId] ?? [], sessionId, startedAt)) {
+      suppressed.add(id);
     }
     const result = closeRunTabsForSession(chatTabsRef.current, sessionId, activeTab);
     setChatTabs(result.tabs);
@@ -1187,6 +1204,9 @@ export default function App() {
           if (cancelled) return;
           setSidecarDead(true);
           setTurnActive(false);
+          // 执行进程没了，所有在途运行都不再可能回报 run-end；不清会让任务行、
+          // 运行对话与工作区切换永久卡在「运行中」。
+          setRunningRuns((prev) => (prev.size === 0 ? prev : new Map()));
           if (!payload.ready && !sawReady.current) setPluginFail(PLUGIN_APPLY_FAIL);
           // 用户主动停止不是崩溃：中性脚注、不标失败（失败标签会拉起红色横幅）。
           const exitNotice = hostExitNotice(hostStoppedByUserRef.current);
@@ -1912,9 +1932,25 @@ export default function App() {
   }
 
   /**
+   * 任务行与运行对话共用的停止入口。调用前快照该任务在途 runId；宿主回
+   * stopped:false 时只摘掉快照里的条目。不能按 automationId 清空——调用在飞
+   * 期间可能已经开了新一轮。
+   */
+  async function stopAutomationWithReconcile(automationId: string): Promise<{ stopped: boolean }> {
+    const runIds = [...runningRuns]
+      .filter(([, entry]) => entry.automationId === automationId)
+      .map(([runId]) => runId);
+    const result = await stopAutomation(automationId);
+    if (!result.stopped) {
+      setRunningRuns((prev) => dropRunningRunIds(prev, runIds));
+    }
+    return result;
+  }
+
+  /**
    * 运行对话的「停止」（规格 §8）：只走 automation.stop，不走普通用户回合的
    * stopTurn / session.cancel——那条路径会取消当前会话并改写回合闩锁。
-   * stopped:false 表示调用时已无在途条目（竞态），仍刷新让按钮随宿主读数收敛。
+   * stopped:false 表示调用时已无在途条目（竞态），由 reconciling 包装清掉陈旧条目。
    */
   async function stopRunTab() {
     const automationId = activeChat.automationId;
@@ -1922,7 +1958,7 @@ export default function App() {
     stopRunInFlight.current = true;
     setStopRunPending(true);
     try {
-      await stopAutomation(automationId);
+      await stopAutomationWithReconcile(automationId);
     } catch (error) {
       // 没有全局 toast：会话内脚注是既有的错误呈现方式（同发送路径）。
       noteActive(`停止失败：${error instanceof Error ? error.message : String(error)}`);
@@ -1991,7 +2027,8 @@ export default function App() {
     anchor.href = url;
     anchor.download = file;
     anchor.click();
-    URL.revokeObjectURL(url);
+    // 下载已经发起后再释放；立即 revoke 会让尚未启动的下载拿到失效 URL。
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   /** 宿主先把未回答的计划评审以取消结算，再退出计划模式；评审卡不在屏上时也能用。 */
@@ -2484,6 +2521,7 @@ export default function App() {
               automations={automations}
               runs={automationRuns}
               runningIds={runningAutomationIds}
+              onStopAutomation={stopAutomationWithReconcile}
               enterIntent={automationEnter}
               onEnterIntentConsumed={() => setAutomationEnter(null)}
               onChanged={() => void refreshAutomations()}
@@ -2553,7 +2591,7 @@ export default function App() {
                     onThinkingToggle={toggleThinking}
                     onOpenAttachment={handleOpenAttachment}
                     reasoning={item.kind === "assistant" ? (thinkingBefore(items, index)?.thought ?? "") : ""}
-                    hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(contentItems(items), index) : false}
+                    hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(contentView, index) : false}
                   />
                 ))}
                 {showTurnLine ? (
@@ -2785,13 +2823,13 @@ export default function App() {
                       </button>
                     </p>
                     {previewFile === RESULT_ATTACHMENT_FILES[0] ? (
-                      <pre className="preview-md">{renderResultMarkdown(previewAttachment.sourceText)}</pre>
+                      <pre className="preview-md">{previewContent ?? ""}</pre>
                     ) : (
                       <iframe
                         className="preview-frame"
                         sandbox=""
                         title="结果"
-                        srcDoc={renderResultHtml(previewAttachment.sourceText)}
+                        srcDoc={previewContent ?? ""}
                       />
                     )}
                   </div>

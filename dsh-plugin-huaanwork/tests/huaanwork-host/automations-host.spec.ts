@@ -1142,6 +1142,31 @@ test('stopping a silent script records 已停止 instead of the runner exit-code
   expect(inFlightRunsOf(automation.id)).toEqual([])
 }, 15_000)
 
+test('stopping a script synchronously at run-start kills it before the command runs', async () => {
+  const h = makeHarness()
+  const mark = join(h.neutral, 'pre-spawn-stop-mark')
+  const automation = await scriptTask(h.profileDir, `sleep 1; echo ran > ${quote(mark)}`, { name: '早停脚本' })
+  let stopResult: Promise<{ stopped: boolean }> | undefined
+  h.state.onEvent = (event) => {
+    if (event.event === 'automation/run-start' && event.automationId === automation.id) {
+      // run-start 同步段内联停止:此时 runScript 还没 spawn, kill 句柄尚未登记。
+      stopResult = stopAutomation(automation.id)
+    }
+  }
+
+  await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  expect(stopResult).toBeDefined()
+  await expect(stopResult!).resolves.toEqual({ stopped: true })
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ ok: false, status: 'cancelled' })
+
+  // 修复前 stop 找不到 kill 句柄,脚本会跑完 sleep 1 并写下 mark。
+  await new Promise((resolve) => setTimeout(resolve, 1200))
+  expect(existsSync(mark)).toBe(false)
+  expect(scriptRunKillers.size).toBe(0)
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+}, 15_000)
+
 test('a cancel that lands after run-start but before the agent is built still records cancelled', async () => {
   const h = makeHarness()
   h.state.mode = 'hang'
@@ -1171,6 +1196,30 @@ test('a cancel that lands after run-start but before the agent is built still re
   const runs = await recentRuns(h.profileDir, automation.id)
   expect(runs).toHaveLength(1)
   expect(runs[0]).toMatchObject({ status: 'cancelled', ok: false, output: 'late-ok' })
+}, 15_000)
+
+test('a stopped run whose project vanished records cancelled, not error', async () => {
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '将消失' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '消失项目任务' })
+  writeFileSync(join(h.profileDir, 'projects.json'), `${JSON.stringify({ projects: [] })}\n`)
+  let stopResult: Promise<{ stopped: boolean }> | undefined
+  h.state.onEvent = (event) => {
+    if (event.event === 'automation/run-start' && event.automationId === automation.id) {
+      stopResult = stopAutomation(automation.id)
+    }
+  }
+
+  await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  expect(stopResult).toBeDefined()
+  await expect(stopResult!).resolves.toEqual({ stopped: true })
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ ok: false, status: 'cancelled' })
+  const runs = await recentRuns(h.profileDir, automation.id)
+  expect(runs).toHaveLength(1)
+  expect(runs[0]).toMatchObject({ status: 'cancelled', ok: false, output: '已停止' })
+  await automationTail
+  expect(inFlightRunsOf(automation.id)).toEqual([])
 }, 15_000)
 
 test('stopping after the run record is persisted reports not stopped and adds no second record', async () => {
@@ -1379,5 +1428,31 @@ test.skipIf(process.platform === 'win32')('stopping a script kills the whole pro
   expect(ended).toMatchObject({ ok: false, status: 'cancelled' })
   // 子 shell 本应在启动约 2 秒后写 marker;给足 2.5 秒再断言它没有活下来。
   await new Promise((resolve) => setTimeout(resolve, 2_500))
+  expect(existsSync(marker)).toBe(false)
+}, 15_000)
+
+test.skipIf(process.platform === 'win32')('the SIGKILL grace still kills a TERM-ignoring background descendant after the leader exits', async () => {
+  const h = makeHarness()
+  const started = join(h.neutral, 'term-ignored-started')
+  const marker = join(h.neutral, 'term-ignored-marker')
+  const descendant =
+    'const fs=require("node:fs");' +
+    'process.on("SIGTERM",()=>{});' +
+    'fs.writeFileSync(process.env.STARTED,"1");' +
+    'setTimeout(()=>{fs.writeFileSync(process.env.MARKER,"done");process.exit(0)},3000);' +
+    'setInterval(()=>{},1000)'
+  // 只在组长 bash 的退出码上做判断会漏掉这个后台进程:组长退出后它仍活着,
+  // 宽限期后必须按进程组存活探测补发 SIGKILL,否则 3 秒后它会把 marker 写出来。
+  const command = `STARTED=${quote(started)} MARKER=${quote(marker)} ${quote(process.execPath)} -e ${quote(descendant)} & wait`
+  const automation = await scriptTask(h.profileDir, command, { name: '忽略 TERM 的后台脚本' })
+  await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  await poll(() => existsSync(started))
+
+  await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: true })
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ ok: false, status: 'cancelled' })
+  // SIGTERM 在宽限 2 秒后被 SIGKILL 升级;后台进程本应在 3 秒时写 marker,
+  // 给足 3.5 秒再断言它没有活下来(旧实现只看组长退出会放它跑完)。
+  await new Promise((resolve) => setTimeout(resolve, 3_500))
   expect(existsSync(marker)).toBe(false)
 }, 15_000)

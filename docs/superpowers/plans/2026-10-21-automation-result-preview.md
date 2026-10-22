@@ -8,6 +8,8 @@
 
 **状态:** 计划评审 `docs/superpowers/plans/2026-10-21-automation-result-preview-review.md` 的五条意见经复核**全部成立**（两条事实断言已独立核实：`listAutomations` 无锁读 `stores.ts:331-332`、`nextFireAfter` 对 once 的 `at > from` 语义 `schedule.ts:115`），五条处置均已落入本计划（第 1–4 条订正代码草图与用例、第 5 条订正引用与挂接锚点）。N2-O1 维持「接受窄窗口」。可以开始实施。
 
+**执行状态（2026-10-22）**：Task 1–12 已实施；评审的 3 项 Important 与可落地的 Minor 已处理（stopped:false 收敛、脚本 pre-spawn 停止、Markdown 转义、删除错误报告、预览/下载细节）。全量单测、类型检查与包级 `check` 通过；预览/下载组件级测试与 Windows 实机行为仍按手工/CI 边界保留。
+
 **Architecture:** 客户端纯逻辑进 `client-huaanwork/logic/`（折叠判定、块树、双渲染、文件名→保存路径），App.tsx 只做接线与持有预览选择；宿主侧在 `huaanwork-host/` 新增在途表模块（`automation-inflight.ts`，纯内存、被 host 与删除路径共用），`automations-host.ts` 承担 runId 前移 / 跳过 / 取消 / 停止，`automations-store.ts` 承担 prune 20 / 档位消费 / 删除与回写（注册表锁内**裸读改写**）；主窗口 `will-download` 只接管两个固定附件名。块树是 Markdown 与 HTML 的单一来源。
 
 **Tech Stack:** TypeScript、Vitest、Electron（BrowserWindow session `will-download`）、现有 `dsh-plugin-huaanwork` 测试命令。
@@ -190,7 +192,7 @@ Run: 同 Step 2。Expected: PASS
 - Consumes: 无（不 import Task 1，渲染输入是已折叠的 `sourceText`）
 - Produces: `ResultBlock`（heading/bold-label/paragraph/table/list/empty）、`jsonToBlocks(value)`、`blocksToMarkdown(blocks)`、`blocksToHtmlDocument(blocks)`、`renderResultMarkdown(sourceText)`、`renderResultHtml(sourceText)`
 
-**块规则（规格 §4.3，逐条对应）:** 顶层对象字段→二级标题；嵌套对象逐级加一、最高四级、更深用加粗段落；全对象数组→表格（列按首次出现、跳过 `__proto__`，单元格压平：对象/数组一行 `JSON.stringify`、字符串换行→空格）；其他数组→列表；字符串按原文（不转义 `#`/反引号——表格单元格例外，`\|` 转义只在 Markdown 表格侧做）；数字/布尔/null→文本；`{}`/`[]`→（空对象）/（空数组）。HTML 用同一批块、同一份压平文本，再做 HTML 转义；完整文档含 doctype/utf-8/标题「结果」，无脚本、无外链。
+**块规则（规格 §4.3，逐条对应）:** 顶层对象字段→二级标题；嵌套对象逐级加一、最高四级、更深用加粗段落；全对象数组→表格（列按首次出现、跳过 `__proto__`，单元格压平：对象/数组一行 `JSON.stringify`、字符串换行→空格；元素都是对象但没有任何可见列（`[{}]` 或只有 `__proto__`）→（空对象），不生成零列表格）；其他数组→列表；字符串按原文分段（Markdown 输出用反斜杠转义会改变结构的字符：`\`、反引号、`*`、`_`、`[`、`]`、`<`、`&`、行首 `#`/`>`/`-`/`+`/序号（`1.` 与 `1)` 两种）；表格单元格另转义 `|` 并压平换行）；数字/布尔/null→文本；`{}`/`[]`→（空对象）/（空数组）。HTML 用同一批块、同一份压平文本，再做 HTML 转义；完整文档含 doctype/utf-8/标题「结果」，无脚本、无外链。应用内预览显示转义后的 Markdown 源文本；下载文件由 Markdown 渲染器打开后还原原文。
 
 - [ ] **Step 1: Write the failing test**（覆盖规格 §9 第 1、2 条测试要求）
 
@@ -218,19 +220,20 @@ test("array of objects becomes a table with first-seen column order and __proto_
   assert.ok(!header.includes("__proto__"));
 });
 
-test("table cells escape pipes and flatten newlines; prose strings outside tables do not escape", () => {
+test("table cells escape pipes and flatten newlines; markdown prose escapes structure", () => {
   const table = renderResultMarkdown('[{"文本":"a|b\nc"}]');
   assert.ok(table.includes("a\\|b c"));
-  const prose = renderResultMarkdown('{"说明":"x|y # 不是标题"}');
-  assert.ok(prose.includes("x|y"));
-  assert.ok(prose.includes("# 不是标题"));
+  const prose = renderResultMarkdown('{"说明":"# 不是标题"}');
+  assert.ok(prose.includes("\\# 不是标题"));
+  assert.ok(!prose.includes("\n# 不是标题"));
 });
 
 test("plain arrays become lists; nested objects climb headings then fall to bold labels", () => {
   const md = renderResultMarkdown('{"l1":{"l2":{"l3":{"l4":{"l5":"深"}}}},"arr":[1,2]}');
   assert.ok(md.includes("## l1"));
   assert.ok(md.includes("### l2"));
-  assert.ok(md.includes("#### l4"));
+  assert.ok(md.includes("#### l3"));
+  assert.ok(md.includes("**l4**"));
   assert.ok(md.includes("**l5**"));
   assert.ok(md.includes("- 1"));
 });

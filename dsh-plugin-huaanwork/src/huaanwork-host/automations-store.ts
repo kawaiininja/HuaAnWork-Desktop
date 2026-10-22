@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { Dirent } from 'node:fs'
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
@@ -561,7 +562,13 @@ export async function deleteAutomationRun(
     opts.releaseSession?.(removed.sessionId)
     sessionDirRemoved = await removeSessionDir(opts.sessionsRoot, removed.sessionId)
   }
-  await rewriteLastRunFromRuns(storageRoot, automationId)
+  await rewriteLastRunFromRuns(storageRoot, automationId).catch((error: unknown) => {
+    // 运行记录与目录已经删掉；注册表回写失败不能让客户端以为删除失败。
+    // 下次运行结束或再次删除会以锁内重读的权威数据修正上次运行文案。
+    console.warn(
+      `[automations] failed to rewrite last-run fields after deleting ${automationId}/${runId}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  })
   return { removed: true, sessionDirRemoved }
 }
 
@@ -594,21 +601,31 @@ export async function rewriteLastRunFromRuns(storageRoot: string, automationId: 
 
 /**
  * prune 同款扫描定位会话目录并删除:会话目录布局是 `<sessionsRoot>/<cwd>/<sessionId>`。
- * 找不到(或会话根不可读)视为已删;rm 失败返回 false,其余 cwd 不再尝试。
+ * 找不到 (ENOENT/ENOTDIR) 视为已删;会话根/子目录不可读或 rm 失败返回 false,让界面
+ * 报告「会话目录未能删除」而不是把权限错误谎报成成功。会话根里的普通文件
+ * (如 macOS 的 `.DS_Store`)不是 cwd,直接跳过,不能因此把缺失目录报成失败。
  */
 async function removeSessionDir(sessionsRoot: string, sessionId: string): Promise<boolean> {
-  let cwds: string[]
-  try {
-    cwds = await readdir(sessionsRoot)
-  } catch {
-    return true
+  const missing = (error: unknown): boolean => {
+    const code = (error as { code?: string }).code
+    return code === 'ENOENT' || code === 'ENOTDIR'
   }
-  for (const cwd of cwds) {
-    const cwdDir = join(sessionsRoot, cwd)
+  let roots: Dirent[]
+  try {
+    roots = await readdir(sessionsRoot, { withFileTypes: true })
+  } catch (error) {
+    return missing(error)
+  }
+  let unreadable = false
+  for (const entry of roots) {
+    if (!entry.isDirectory()) continue
+    const cwdDir = join(sessionsRoot, entry.name)
     let entries: string[]
     try {
       entries = await readdir(cwdDir)
-    } catch {
+    } catch (error) {
+      // ENOTDIR/ENOENT:扫描后条目被换成非目录或已消失,它不是会话 cwd。
+      if (!missing(error)) unreadable = true
       continue
     }
     if (!entries.includes(sessionId)) continue
@@ -619,5 +636,5 @@ async function removeSessionDir(sessionsRoot: string, sessionId: string): Promis
       return false
     }
   }
-  return true
+  return !unreadable
 }

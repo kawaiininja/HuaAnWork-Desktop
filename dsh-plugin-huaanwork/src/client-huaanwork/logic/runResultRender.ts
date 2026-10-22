@@ -74,6 +74,8 @@ function arrayBlocks(value: readonly unknown[]): ResultBlock[] {
       // 只有表格列收集跳过 __proto__；对象字段展开保留全部自有键（Object.keys 只返回自有属性）。
       for (const key of objectKeysOf(row)) if (key !== "__proto__" && !columns.includes(key)) columns.push(key);
     }
+    // 空对象数组没有列，Markdown 会退化成 `|  |` 的坏表格；按空对象正文展示。
+    if (columns.length === 0) return [{ kind: "empty", text: "（空对象）" }];
     return [{
       kind: "table",
       columns,
@@ -89,22 +91,48 @@ export function jsonToBlocks(value: unknown): ResultBlock[] {
   return paragraphBlocks(value);
 }
 
-/** Markdown 表格文本：先压平换行，再转义反斜杠、最后转义竖线（`a\|b` 不会拆开表格）。 */
+/**
+ * Markdown 文本转义（规格 §4.3）：写入 Markdown 的原始字符串不能被重新解释成
+ * 标题、列表、代码、强调、链接或 HTML。行首标记单独处理，避免把正文里的 `#`/`-`
+ * 也写成反斜杠；表格单元格另由 escapeCell 处理竖线。
+ */
+const escapeMarkdownText = (text: string): string =>
+  text
+    .replace(/\\/g, "\\\\")
+    .replace(/([`*_\[\]<&~])/g, "\\$1")
+    .replace(/^(\s*)#/, "$1\\#")
+    .replace(/^(\s*)>/, "$1\\>")
+    .replace(/^(\s*)([-+])/, "$1\\$2")
+    // 有序标记既可能是 `1.` 也可能是 `1)`；两种都转义标点，保留缩进与数字。
+    .replace(/^(\s*)(\d+)([.)])(?=\s|$)/, "$1$2\\$3");
+
+/**
+ * 标题文本：GFM 会把行尾的 `#` 串当成闭合标记吞掉（`## Title #` 渲染成
+ * `Title`），故再转义行尾 `#`。前面是奇数个反斜杠时该 `#` 已被转义，不重复处理。
+ */
+const escapeHeadingText = (text: string): string =>
+  escapeMarkdownText(flattenLine(text)).replace(
+    /(^|[^\\])((?:\\\\)*)(#+)(\s*)$/,
+    (_match, before: string, escapedBackslashes: string, hashes: string, tail: string) =>
+      `${before}${escapedBackslashes}${hashes.replace(/#/g, "\\#")}${tail}`,
+  );
+
+/** Markdown 表格文本：先压平换行与 Markdown 文本，再转义竖线（`a\|b` 不会拆开表格）。 */
 const escapeCell = (text: string): string =>
-  flattenLine(text).replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+  escapeMarkdownText(flattenLine(text)).replace(/\|/g, "\\|");
 
 export function blocksToMarkdown(blocks: readonly ResultBlock[]): string {
   const lines: string[] = [];
   for (const block of blocks) {
     switch (block.kind) {
       case "heading":
-        lines.push(`${"#".repeat(block.level)} ${block.text}`, "");
+        lines.push(`${"#".repeat(block.level)} ${escapeHeadingText(block.text)}`, "");
         break;
       case "bold-label":
-        lines.push(`**${block.text}**`, "");
+        lines.push(`**${escapeMarkdownText(flattenLine(block.text))}**`, "");
         break;
       case "paragraph":
-        lines.push(block.text, "");
+        lines.push(escapeMarkdownText(block.text), "");
         break;
       case "table":
         lines.push(`| ${block.columns.map(escapeCell).join(" | ")} |`);
@@ -113,11 +141,11 @@ export function blocksToMarkdown(blocks: readonly ResultBlock[]): string {
         lines.push("");
         break;
       case "list":
-        for (const item of block.items) lines.push(`- ${item}`);
+        for (const item of block.items) lines.push(`- ${escapeMarkdownText(item)}`);
         lines.push("");
         break;
       case "empty":
-        lines.push(block.text, "");
+        lines.push(escapeMarkdownText(block.text), "");
         break;
     }
   }
