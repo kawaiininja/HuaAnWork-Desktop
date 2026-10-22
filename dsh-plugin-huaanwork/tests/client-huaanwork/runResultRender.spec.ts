@@ -186,6 +186,13 @@ test("html document is complete, escaped, script-free", () => {
   assert.ok(!html.includes("http://") && !html.includes("https://"));
 });
 
+test("html document uses a light canvas so dark app themes keep text contrast", () => {
+  const html = renderResultHtml('{"x":"正文"}');
+  assert.ok(html.includes("color-scheme:light"));
+  assert.ok(html.includes("background:#fff"));
+  assert.ok(html.includes("color:#1f2328"));
+});
+
 test("html escapes text in headings, tables and lists too", () => {
   const html = renderResultHtml('{"<h>":"<x>","t":[{"<c>":"<v>"}],"l":["<i>"]}');
   assert.ok(html.includes("<h2>&lt;h&gt;</h2>"));

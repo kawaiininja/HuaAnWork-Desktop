@@ -181,13 +181,15 @@ export default function AutomationsView({
    * 停止任务的在途轮（规格 §8）。stopped:false 表示调用时已无在途条目（竞态），
    * 同样刷新——以宿主读数收敛按钮文案，不把它当失败。
    */
-  async function stop(automation: AutomationInfo) {
+  async function stop(automation: AutomationInfo): Promise<boolean> {
     setError("");
     try {
       const requestStop = onStopAutomation ?? stopAutomation;
       await requestStop(automation.id);
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       onChanged();
     }
@@ -363,26 +365,37 @@ function AutomationRow({
   busy: boolean;
   onToggle: () => void;
   onRun: () => void;
-  onStop: () => Promise<void>;
+  onStop: () => Promise<boolean>;
   onEdit: () => void;
   onRemove: () => void;
 }) {
   const [open, setOpen] = useState(false);
   /** 停止请求在飞：state 管按钮禁用与文案，ref 管同一批事件里的第二次点击（同 M26 P2-3）。 */
   const [stopping, setStopping] = useState(false);
+  /** 停止已被宿主接受：在 run-end 清掉 running 之前保持禁用，避免二次停止。 */
+  const [stopRequested, setStopRequested] = useState(false);
   const stopInFlight = useRef(false);
 
+  useEffect(() => {
+    if (!running) {
+      setStopping(false);
+      setStopRequested(false);
+    }
+  }, [running]);
+
   async function handleStop() {
-    if (stopInFlight.current) return;
+    if (stopInFlight.current || stopRequested) return;
     stopInFlight.current = true;
     setStopping(true);
     try {
-      await onStop();
+      setStopRequested(await onStop());
     } finally {
       stopInFlight.current = false;
       setStopping(false);
     }
   }
+
+  const stopPending = stopping || (stopRequested && running);
 
   return (
     <div className={open ? "automation-row open" : "automation-row"}>
@@ -417,8 +430,8 @@ function AutomationRow({
             <span className="knob" />
           </button>
           {running ? (
-            <button type="button" className="side-action" disabled={stopping} onClick={() => void handleStop()}>
-              {stopping ? "停止中…" : "停止"}
+            <button type="button" className="side-action" disabled={stopPending} onClick={() => void handleStop()}>
+              {stopPending ? "停止中…" : "停止"}
             </button>
           ) : (
             <button type="button" className="side-action" onClick={onRun}>
@@ -761,7 +774,9 @@ function RunsPanel({
               {pendingDelete.automation.name} · {formatRunTime(pendingDelete.run.startedAt)}
             </p>
             <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-              这条运行记录及其会话目录将被一并删除，此操作无法撤销。确定删除吗？
+              {pendingDelete.run.sessionId
+                ? "这条运行记录及其会话目录将被一并删除，此操作无法撤销。确定删除吗？"
+                : "这条运行记录将被删除，此操作无法撤销。确定删除吗？"}
             </p>
             <div className="row" style={{ justifyContent: "flex-end" }}>
               <button

@@ -157,6 +157,7 @@ import {
 import {
   dropRunningRunIds,
   isRunTabLive,
+  runEndNeedsFailureNotice,
   runResultNoteText,
   runTabsToRebuild,
   sessionsToSuppressAfterDelete,
@@ -612,11 +613,15 @@ export default function App() {
     };
   }, [view, ready, sidecarDead]);
 
+  /** 向指定标签追加一条提示；标签已关闭时自然丢弃。 */
+  function noteTab(tabId: string, text: string) {
+    const note: ChatItem = { id: allocId(), kind: "note", text };
+    setChatTabs((prev) => prev.map((tab) => (tab.id === tabId ? { ...tab, items: [...tab.items, note] } : tab)));
+  }
+
   /** 向最近激活的对话标签追加一条提示。 */
   function noteActive(text: string) {
-    const note: ChatItem = { id: allocId(), kind: "note", text };
-    const target = activeTab;
-    setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: [...tab.items, note] } : tab)));
+    noteTab(activeTab, text);
   }
 
   /** 子任务列表：拉取全部项目下的普通任务（非自动化），供侧栏任务区与选中项目卡片共用。 */
@@ -1104,12 +1109,11 @@ export default function App() {
             }
             void refreshAutomations();
             void refreshSessions();
-            // Task 11：非 ok 运行（error/timeout/cancelled）发系统通知；missed 不走这条路径
-            // （missed 从未经过 run-end，见 automation/missed 分支），应用内横幅是它的兜底。
-            if (event.status && event.status !== "ok") {
+            // 只有失败/超时才发系统失败通知；用户主动取消不是失败，missed 走应用内横幅
+            // （missed 从未经过 run-end，见 automation/missed 分支）。
+            if (runEndNeedsFailureNotice(event.status)) {
               const name = automationsRef.current.find((item) => item.id === event.automationId)?.name ?? "任务";
-              const statusLabel =
-                event.status === "timeout" ? "超时" : event.status === "cancelled" ? "已取消" : "失败";
+              const statusLabel = event.status === "timeout" ? "超时" : "失败";
               void notifyRunFailed(`「${name}」运行${statusLabel}`, "点击 HuaAnWork 查看运行详情");
             }
             return;
@@ -1954,6 +1958,7 @@ export default function App() {
    */
   async function stopRunTab() {
     const automationId = activeChat.automationId;
+    const tabId = activeChat.id;
     if (!automationId || sidecarDead || stopRunInFlight.current) return;
     stopRunInFlight.current = true;
     setStopRunPending(true);
@@ -1961,7 +1966,8 @@ export default function App() {
       await stopAutomationWithReconcile(automationId);
     } catch (error) {
       // 没有全局 toast：会话内脚注是既有的错误呈现方式（同发送路径）。
-      noteActive(`停止失败：${error instanceof Error ? error.message : String(error)}`);
+      // 落到点击停止时的标签，不跟着等待期间的当前激活标签走。
+      noteTab(tabId, `停止失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       stopRunInFlight.current = false;
       setStopRunPending(false);

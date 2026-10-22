@@ -42,6 +42,11 @@ function run(runId: string, sessionId: string, startedAt: number, output: string
   return { runId, sessionId, startedAt, endedAt: startedAt + 1000, ok: true, status: "ok", output };
 }
 
+/** 脚本/missed 运行没有会话目录。 */
+function runWithoutSession(runId: string, startedAt: number, output: string): RunSummary {
+  return { runId, startedAt, endedAt: startedAt + 1000, ok: true, status: "ok", output };
+}
+
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
@@ -201,6 +206,22 @@ describe("运行记录删除（spec §6）", () => {
     expect(onChanged).not.toHaveBeenCalled();
   });
 
+  it("does not promise a session directory for a session-less run", async () => {
+    const runs = [runWithoutSession("r1", 1000, "脚本输出")];
+    stubRpc({
+      runs: () => runs,
+      deleteRun: async () => ({ removed: true, sessionDirRemoved: true }),
+    });
+    const view = await mount({ onRunDeleted: vi.fn(), onChanged: vi.fn(), runs: { a1: runs } });
+    await act(async () => {
+      deleteButtonFor(view, "脚本输出").click();
+    });
+    const dialog = view.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog!.textContent).not.toContain("会话目录");
+    expect(dialog!.textContent).toContain("这条运行记录将被删除");
+  });
+
   it("a second click in the same batch never sends a second deleteRun", async () => {
     let runs = [run("r1", "s-1", 1000, "第一条输出")];
     let settle: ((value: DeleteResult) => void) | undefined;
@@ -258,7 +279,34 @@ describe("任务行停止与「上次」文案（规格 §8）", () => {
     const stopCalls = rpc.mock.calls.filter((call) => call[0] === "automation.stop");
     expect(stopCalls).toHaveLength(1);
     expect(stopCalls[0]![1]).toEqual({ id: "a1" });
+    // 宿主接受停止后、run-end 清掉 running 之前，按钮保持禁用，避免二次停止。
+    const pendingStop = buttonByText(view, "停止中…");
+    expect(pendingStop.disabled).toBe(true);
     // 停止后必须向宿主重取读数（按钮文案随后收敛）。
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-enables the stop button when the host rejects the request", async () => {
+    rpc.mockImplementation(async (method) => {
+      if (method === "automation.runs") return { runs: [] };
+      if (method === "automation.stop") throw new Error("stop failed");
+      throw new Error(`unexpected rpc: ${method}`);
+    });
+    const onChanged = vi.fn();
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged,
+      runningIds: new Set(["a1"]),
+      openRuns: false,
+    });
+
+    await act(async () => {
+      buttonByText(view, "停止").click();
+    });
+
+    // 请求失败时不能把按钮永久卡在“停止中…”；用户需要能重试。
+    expect(buttonByText(view, "停止").disabled).toBe(false);
+    expect(view.querySelector(".banner.error")?.textContent).toContain("stop failed");
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
 

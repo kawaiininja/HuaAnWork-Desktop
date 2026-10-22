@@ -259,7 +259,10 @@ test("the composer stop branch for a live run is separate from the turn stop", (
   assert.ok(stopAt >= 0 && stopEnd > stopAt, "stopRunTab is still defined before settleStop");
   const stopBody = APP_SOURCE.slice(stopAt, stopEnd);
   assert.match(stopBody, /const automationId = activeChat\.automationId/);
+  assert.match(stopBody, /const tabId = activeChat\.id/);
   assert.match(stopBody, /await stopAutomationWithReconcile\(automationId\)/);
+  // 停止失败的脚注必须落到点击时的标签，不能落到等待期间切到的当前标签。
+  assert.match(stopBody, /noteTab\(tabId,/);
   assert.doesNotMatch(stopBody, /session\.cancel/);
 });
 

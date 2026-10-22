@@ -75,6 +75,11 @@ export function runResultNoteText(status: RunSummary["status"] | undefined): str
   return "自动化运行完成";
 }
 
+/** 只有失败/超时才发系统失败通知；用户主动取消不是失败，别再弹失败通知。 */
+export function runEndNeedsFailureNotice(status: RunSummary["status"] | undefined): boolean {
+  return status === "error" || status === "timeout";
+}
+
 /** `run-<runId>` 标签的运行 id；非运行标签返回 undefined。 */
 export function runIdOfTab(tabId: string): string | undefined {
   const prefix = "run-";

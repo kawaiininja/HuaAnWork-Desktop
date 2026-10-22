@@ -5,6 +5,7 @@ import type { RunSummary } from "../../src/client-huaanwork/logic/projects.ts";
 import {
   dropRunningRunIds,
   isRunTabLive,
+  runEndNeedsFailureNotice,
   runIdOfTab,
   runResultNoteText,
   runTabsToRebuild,
@@ -18,6 +19,14 @@ function run(partial: Partial<RunSummary> & { runId: string; startedAt: number }
 
 const autoA = { id: "auto-a", name: "任务甲", projectId: "proj-1" };
 const autoB = { id: "auto-b", name: "任务乙", projectId: null };
+
+test("failure notices exclude user-cancelled runs", () => {
+  assert.equal(runEndNeedsFailureNotice("error"), true);
+  assert.equal(runEndNeedsFailureNotice("timeout"), true);
+  assert.equal(runEndNeedsFailureNotice("cancelled"), false);
+  assert.equal(runEndNeedsFailureNotice("ok"), false);
+  assert.equal(runEndNeedsFailureNotice(undefined), false);
+});
 
 test("runTabsToRebuild: latest run with sessionId rebuilds one descriptor", () => {
   const runs = {

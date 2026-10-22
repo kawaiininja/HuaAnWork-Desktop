@@ -196,7 +196,8 @@ export function blocksToHtmlDocument(blocks: readonly ResultBlock[]): string {
     "<head>",
     '<meta charset="utf-8">',
     "<title>结果</title>",
-    "<style>body{font-family:system-ui,-apple-system,sans-serif;margin:24px;color:#1f2328}table{border-collapse:collapse;margin:8px 0}th,td{border:1px solid #d0d7de;padding:6px 10px;text-align:left}h2,h3,h4{margin:20px 0 8px}</style>",
+    // 固定浅色画布：预览 iframe 会叠在应用面板上，深色主题下透明背景会让深色文字失去对比度。
+    "<style>html{color-scheme:light}body{font-family:system-ui,-apple-system,sans-serif;margin:24px;color:#1f2328;background:#fff}table{border-collapse:collapse;margin:8px 0}th,td{border:1px solid #d0d7de;padding:6px 10px;text-align:left}h2,h3,h4{margin:20px 0 8px}</style>",
     "</head>",
     `<body>${body.join("")}</body>`,
     "</html>",
