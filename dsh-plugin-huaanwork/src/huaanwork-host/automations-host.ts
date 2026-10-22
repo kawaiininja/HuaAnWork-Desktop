@@ -48,6 +48,16 @@ export const MISSING_PROJECT_OUTPUT = '任务所属项目不存在，已跳过�
 
 const MERGED_PREFIX_MAX_CHARS = 4 * 1024
 
+/**
+ * runner 失败收尾追加的合成脚注(`\n（退出码 unknown）` / `\n（退出码 1）`)。
+ * 取消结算只有它、没有真实产出时，正文应回落到「已停止」（规格 §8）。
+ */
+const RUNNER_EXIT_CODE_FOOTER = /\s*（退出码 (?:\d+|unknown)）\s*$/u
+
+function stripRunnerExitCodeFooter(output: string): string {
+  return output.replace(RUNNER_EXIT_CODE_FOOTER, '')
+}
+
 /** 自动化运行超时:局部 timedOut 标记决定抛出,catch 侧按类型归因。 */
 class AutomationRunTimeoutError extends Error {}
 
@@ -561,9 +571,11 @@ export async function executeRun(
   }
   // 停止覆盖(规格 §8):标记在落盘前即生效——模型回合后来自己跑完也写 cancelled,
   // 不写 ok;脚本被杀不记 timeout;产出保留已收集文本,什么都没有时正文为「已停止」。
+  // 被杀脚本的 runner 脚注是合成文本,不算产出:先剥掉再判空。
   if (inFlightRuns.get(runId)?.cancelRequested === true) {
     ok = false
     status = 'cancelled'
+    output = stripRunnerExitCodeFooter(output)
     if (!output.trim()) output = '已停止'
   }
   await finishAutomation(

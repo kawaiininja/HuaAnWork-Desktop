@@ -1118,6 +1118,26 @@ test('stopping a started script kills the child, keeps collected output and is n
   expect(runs[0]?.status).not.toBe('timeout')
   expect(runs[0]?.output).toContain('partial-out')
   expect(runs[0]?.output).not.toContain('任务超时')
+  // 合成脚注不算已收集文本:取消结算剥掉 runner 的退出码行。
+  expect(runs[0]?.output).not.toContain('退出码')
+  expect(scriptRunKillers.size).toBe(0)
+  expect(inFlightRunsOf(automation.id)).toEqual([])
+}, 15_000)
+
+test('stopping a silent script records 已停止 instead of the runner exit-code footer', async () => {
+  const h = makeHarness()
+  const automation = await scriptTask(h.profileDir, 'sleep 30', { name: '静默脚本' })
+  const accepted = (await handler('automation.run')(body({ id: automation.id }), h.routeCtx)) as { runId: string }
+  // 等 kill 句柄登记:此时 close 处理器已挂上,stop 必定走脚本通道。
+  await poll(() => scriptRunKillers.has(accepted.runId))
+
+  await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: true })
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ ok: false, status: 'cancelled' })
+  const runs = await recentRuns(h.profileDir, automation.id)
+  expect(runs).toHaveLength(1)
+  // 修复前 runner 合成的「\n（退出码 unknown）」被当成产出落盘。
+  expect(runs[0]).toMatchObject({ status: 'cancelled', ok: false, output: '已停止' })
   expect(scriptRunKillers.size).toBe(0)
   expect(inFlightRunsOf(automation.id)).toEqual([])
 }, 15_000)
