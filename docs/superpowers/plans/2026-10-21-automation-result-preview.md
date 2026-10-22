@@ -8,7 +8,7 @@
 
 **状态:** 计划评审 `docs/superpowers/plans/2026-10-21-automation-result-preview-review.md` 的五条意见经复核**全部成立**（两条事实断言已独立核实：`listAutomations` 无锁读 `stores.ts:331-332`、`nextFireAfter` 对 once 的 `at > from` 语义 `schedule.ts:115`），五条处置均已落入本计划（第 1–4 条订正代码草图与用例、第 5 条订正引用与挂接锚点）。N2-O1 维持「接受窄窗口」。可以开始实施。
 
-**执行状态（2026-10-22）**：Task 1–12 已实施；评审的 3 项 Important 与可落地的 Minor 已处理（stopped:false 收敛、脚本 pre-spawn 停止、Markdown 转义、删除错误报告、预览/下载细节）。全量单测、类型检查与包级 `check` 通过；预览/下载组件级测试与 Windows 实机行为仍按手工/CI 边界保留。
+**执行状态（2026-10-22，真机复验后）**：Task 1–12 已实施；最终整支评审的 6 项 Important 与真机发现的“已停止”文案已修复；随后合并的硬化批次（Markdown 结构字符转义、会话根不可读上报、停止/删除/spawn 竞态、旧运行标签抑制）已修复评审发现的 1 Critical + 2 Important。macOS 真机验收 #1–#7 全部通过：JSON 折叠、md/html 预览与下载、普通文本不折叠、重启回填、删除记录与会话目录、清理保留 20、任务行/运行对话停止；脚本“已停止”与忽略 TERM 的孙进程均复验。全量 `corepack yarn check` EXIT 0（各 workspace 测试文件 13/143/143/77/244/14/5 全过，无 TS 错误）。Windows 实机行为仍按 CI/人工边界保留。
 
 **Architecture:** 客户端纯逻辑进 `client-huaanwork/logic/`（折叠判定、块树、双渲染、文件名→保存路径），App.tsx 只做接线与持有预览选择；宿主侧在 `huaanwork-host/` 新增在途表模块（`automation-inflight.ts`，纯内存、被 host 与删除路径共用），`automations-host.ts` 承担 runId 前移 / 跳过 / 取消 / 停止，`automations-store.ts` 承担 prune 20 / 档位消费 / 删除与回写（注册表锁内**裸读改写**）；主窗口 `will-download` 只接管两个固定附件名。块树是 Markdown 与 HTML 的单一来源。
 
