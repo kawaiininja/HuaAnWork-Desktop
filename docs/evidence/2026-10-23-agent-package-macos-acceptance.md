@@ -5,8 +5,9 @@
 - 模型：完整交互链路使用 `deepseek-chat`；修复工具名白名单后，用默认 `deepseek-flash` 复测到
   `agent_propose` 批准框（见“默认模型复测”）。
 - 结论：**核心链路 PASS，M1 仍未完成**。创建/确认/提交/启用/`@` 运行/更新/重启持久化/关闭/详情均已在真实
-  macOS 应用与真实模型上验证；验收过程中发现并修复 9 个真实接线缺陷 + 1 个验收修复引入的回归，随后 HTTP
-  与 MCP 实机均通过（§7）。catalog-legacy 实机与 Windows 真机仍未验收。
+  macOS 应用与真实模型上验证；验收过程中发现并修复 9 个真实接线缺陷 + 1 个验收修复引入的回归，随后 HTTP、
+  MCP、catalog-legacy（本地 fixture）与 legacy `@agent` 实机均通过（§7、§8）。真实内网 catalog 与 Windows
+  真机仍未验收。
 
 ## 1. 通过项
 
@@ -34,6 +35,7 @@
 | 3 | `@weekly-report` 报 `current dsh runtime does not support subagents` | Host 直接读 `ctx.subagents`；服务实际通过 `ctx.get('subagents')` 暴露 | 增加 direct/get 回落解析（`baae21a24b`） |
 | 4 | 同上，回落仍失败 | rc.1 `SubagentRuntime` 只有 `startActivation(spec)`，没有 `start(provider, request)`；且 activation spec 无 `persona` 字段 | 包运行迁移到 `startActivation`：`provider:'spawn'`、live parent、label、signal、`delivery:'parent'`；persona 以分隔前缀注入子代理 prompt（`00e730c623`） |
 | 5 | 验收修复后全量测试 3 个失败：guardrail lock 层不连续 | 不必要的 `subagent`/`subagent-spawn-in-process` 复挂插断了 lock 层；服务本已激活 | 回退该复挂（`36abfbc905`）；保留 startActivation 迁移 |
+| 6 | legacy `@agent` 在 rc.1 上报 `current dsh runtime does not support subagents` | 仍调用 rc.1 已删除的 `start`；persona 是旧原生字段 | 迁移到 `startActivation`，persona 接入首条 prompt，子会话 allow 限制（`7da171dd62`） |
 
 > 说明：`agent_commit` 成功后模型又重复调用一次已卸载的 `agent_commit`，返回 `unknown tool`，模型据此误报“提交失败”；
 > 实际上包已成功写入（文件与 state 均存在）。这是模型侧后续消息的误导，宿主事件与落盘正确。作为 UX 观察项记录。
@@ -55,21 +57,18 @@ agents-state.json
 
 ## 5. 未验收 / 阻断
 
-- **catalog-legacy 实机运行**：公用机目录 `10.130.209.76:18080` 在验收时超时，广场显示目录错误；legacy 兼容由
-  `agent-package-legacy.spec.ts` 覆盖，未做真实目录实机验收。
-- **legacy `@agent` 兼容（已迁移，待实机复验）**：`agent-invoke.ts` 的 agent 分支已从 rc.1 已删除的
-  `subagents.start(provider, request)` 迁移到 `startActivation`（`provider:'spawn'`、live parent、label、
-  `delivery:'parent'`；rc.1 无 persona 字段，人设作为分隔前缀并入子代理首条 prompt）。`skills.ts` 的
-  `startActivation` 包装按目录条目的 allow 与子会话 schemas 求交后 `restrict`，legacy 分支不挂智能体包工具或
-  注册表。单元测试（`agent-package-tools.spec.ts` 的 `@agent legacy dispatch`）覆盖这些行为，根 `AGENTS.md` 的
-  不可用债行已删除；**尚未做真实目录实机复验**，将在 catalog-legacy fixture 上执行，本轮不声称实机通过。
-  工具 / HTTP / MCP 分支不受影响。
+- **真实内网 catalog**：公用机目录 `10.130.209.76:18080` 在验收时仍超时。改用本地 fixture catalog
+  （127.0.0.1:18080，`legacy-assistant`）完成 catalog-legacy 实机（§8）；真实内网目录的 payload/认证仍需在有网时补验。
+- **legacy `@agent` 残余**：已迁移到 `startActivation` 并在本地 fixture catalog 上通过（§8）：`@legacy-assistant`
+  启动子会话，收到 persona 前缀并返回四段周报。残余：子会话**首轮**工具清单仍可能先拿到完整工具集（wrapper 的
+  allow restrict 在 activation 之后），与包路径的预留 childId 预挂载不同；当前不影响运行与 persona 注入，记为
+  后续硬化项。legacy 分支不挂智能体包工具或注册表。
 - **子代理清理上限 10 分钟**：`afterIdle` 等子会话落定的上限是 `600_000` ms。父回合的 `whenIdle` 可能先于长子会话
   到达（HTTP/MCP 回合本来就会跑过父回合空闲点），原 10 s 会把仍在工作的子代理截断。超时后宿主记一条错误、释放
   activation（发布后的取消归 `dispose()`，不再 abort 发布前 signal）并照常停止子进程；`agent-package-tools.spec.ts`
   用假定时器钉住 599,999 ms 内仍在等待、600,000 ms 触发清理。
 - **Windows 真机**：无 Windows 机器，Task 1/9 仍为 BLOCKED。
-- **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3137 passed / 14 skipped）、typecheck
+- **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3146 passed / 14 skipped）、typecheck
   （0）、`check:desktop-variants`（0）；根 `corepack yarn check` 未在最终树重跑（此前在最终评审前为绿）。
 - **M1 完成声明**：不作出。上述实机项与 Windows 未完成。
 
@@ -127,14 +126,33 @@ MCP server 由运行时拉起到 `127.0.0.1:53182`，子会话拿到回显 `{"he
 
 ### 更新后的门禁
 
-`dsh-plugin-huaanwork` 全量 **3144 passed / 14 skipped**；typecheck 0；`check:desktop-variants` 0（7/64，前缀 6）。
+`dsh-plugin-huaanwork` 全量 **3146 passed / 14 skipped**；typecheck 0；`check:desktop-variants` 0（7/64，前缀 6）。
 根 `corepack yarn check` 仍未在最终树重跑。
 
 ### 仍未完成
 
-- catalog-legacy 实机（目录不可达）
+- 真实内网 catalog 实机（`10.130.209.76:18080` 仍不可达；本地 fixture 已通过，见 §8）
 - Windows 真机
-- legacy `@agent` 已迁移到 `startActivation`，待 catalog-legacy fixture 实机复验（§5）
 - 根 `check` 最终树复跑
 
+legacy `@agent` 已迁移并在本地 fixture catalog 上通过（§8）；残余“子会话首轮工具清单未受 allow 限制”记入 §5/债务表。
+
 测试包 `http-echo`/`mcp-echo`、`agents-state.json`、测试会话与任务条目已清理/隔离；MCP/HTTP 测试进程已停止。
+
+## 8. catalog-legacy 与 legacy `@agent` 实机（本地 fixture）
+
+真实内网 `10.130.209.76:18080` 在验收时仍超时，因此使用本地 fixture catalog（127.0.0.1:18080）走真实 UI：
+
+- `GET /v1/catalog` 返回 `legacy-assistant`（`kind:"agent"`，`permissions:["read"]`）；
+- `GET /v1/catalog/legacy-assistant` 返回 persona 与 `allow:["read","grep"]`；
+- 广场显示「公用机 / v1.0.0 / @legacy-assistant」；启用时弹出权限确认（read）；确认后
+  `agents-enabled.json` 写入 `catalog:legacy-assistant: true`；
+- 「我的智能体」显示卡片「旧目录智能体」；未创建 `agents/legacy-assistant/`；
+- `@legacy-assistant 请把本周工作整理成周报：完成 M1 实现、修复验收缺陷、准备周会。` 启动子会话；子会话首条
+  user message 为旧目录 persona + 用户请求，最终返回「本周进展 / 关键结果 / 问题与风险 / 下周计划」四段周报；
+- 关闭后 `agents-enabled.json` 删除 `catalog:legacy-assistant`，保留原有 3 个用户条目。
+
+结论：catalog-legacy 的列表/启用/关闭/未物化与 legacy `@agent` 的 rc.1 运行通过。残余：legacy 子会话**首轮**
+工具清单仍可能先拿到完整工具集（wrapper 的 allow restrict 在 activation 之后）；不影响 persona 注入与运行，
+记为后续硬化项；真实内网 catalog 的认证/payload 仍需有网时补验。测试 fixture 会话已隔离，profile 的
+`agents_host`/`agents_port` 已恢复为 `10.130.209.76:18080`。
