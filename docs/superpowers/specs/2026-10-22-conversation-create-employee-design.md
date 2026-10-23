@@ -1,7 +1,7 @@
 # 在会话里创建华安数字员工
 
 - 日期：2026-10-22
-- 状态：待用户审阅规格
+- 状态：已被 2026-10-23 融合规格取代（保留为历史设计输入；实施以 `2026-10-23-chat-created-agent-packages-design.md` 为准）
 - 范围：华安工作台（`dsh-plugin-huaanwork`）的会话创建流程、本机员工目录、侧栏「我的员工」，以及 `@` 与「以此身份开新会话」两种调用。包含专属技能包，以及按员工选择的本机 HTTP 工具和会话级 MCP。
 - 不改：`dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/`、`dsh-desktop-next/`、`deepseek-harness/`、`market-server/`、`dsh-community-market/`。
 
