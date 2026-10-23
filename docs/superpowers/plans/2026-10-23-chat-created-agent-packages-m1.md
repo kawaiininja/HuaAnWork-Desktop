@@ -889,7 +889,7 @@ export type AgentPackageDetailResult = AgentPackageDetail | AgentDetail
 
 - [ ] **Step 4: 更新 58→62 的 RPC 计数与期望表**
 
-`tests/client-huaanwork/api.spec.ts` 的 `EXPECTED_ROUTES` 增加四行、测试标题「全表 58 项」改 62、`expect(Object.keys(ROUTES)).toHaveLength(62)`；`tests/huaanwork-host/route-contract.spec.ts` 的两处 `58` 改为 `62`（含测试标题）；`api.ts` 头注释 `58 方法` 改为 `62 方法`。四行必须是：
+`tests/client-huaanwork/api.spec.ts` 的 `EXPECTED_ROUTES` 增加四行、测试标题「全表 58 项」改 62、`expect(Object.keys(ROUTES)).toHaveLength(62)`；`tests/huaanwork-host/route-contract.spec.ts` 的**全部 7 处** `58` 改为 `62`（:8、:64、:67 注释；:333、:342 测试标题；:337、:338 断言），不要只改两处；`api.ts` 头注释 `58 方法` 改为 `62 方法`。四行必须是：
 
 ```ts
 'agent.packageList': { http: 'GET', path: '/huaanwork/agent/package/list' },
@@ -980,7 +980,7 @@ git commit -m "feat: add three-tab agent package UI"
 
 ---
 
-## Task 9: 硬化、迁移验收、双平台与 runbook
+## Task 9: 硬化、兼容验收、双平台与 runbook
 
 **Files:**
 - Create: `docs/huaanwork-agent-packages-m1.md`
@@ -1043,7 +1043,7 @@ git commit -m "test: harden agent package M1 and document operations"
 | persona/SKILL/allowSkills 注入、HTTP/MCP 沙箱运行时 | Task 5 |
 | `agent_skill_run`/`agent_http`/MCP 与 `@` 分发 | Task 6 |
 | 三页签、卡片、启停、catalog-legacy | Task 7、8 |
-| macOS/Windows 验收、迁移、安全负例 | Task 9 |
+| macOS/Windows 验收、catalog-legacy 兼容、安全负例 | Task 9 |
 | 发布/下载/签名/撤销 | 明确不做（M2） |
 
 **Placeholder scan:** 已检查 `TODO/TBD/待定/FIXME`；本计划不含占位步骤。Task 1 的 provider 装配明确要求复制现有 e2e 测试的 boot 方式，不重新发明沙箱。
@@ -1055,10 +1055,13 @@ git commit -m "test: harden agent package M1 and document operations"
 | 审阅项 | 处置 |
 |---|---|
 | P0-1 事件命名 | 全部统一为 `agent/changed`；规格 §6.3、§9.2 同步 |
-| P0-2 58→62 | Task 7 明确更新 `api.spec.ts`、`route-contract.spec.ts` 与 `api.ts` 注释；补四行期望表 |
+| P0-2 58→62 | Task 7 明确更新 `api.spec.ts`、`route-contract.spec.ts`（7 处）与 `api.ts` 注释；补四行期望表 |
 | P0-3 catalog-legacy 状态位置 | 采纳计划：legacy 走旧 `agents-enabled.json`；规格移除 `agents-state.json` 的 legacy 示例并改“旧路径独占读写” |
 | P1-1 确认卡 | 采用结构化卡：`AgentPackageConfirmCard` + `AgentConfirmCard.tsx` + `agent/confirm`；不再用纯文本 note 代替 |
 | P1-2 restrict 交集 | 与 `tools.schemas()` 求交集后再 `restrict`，镜像 `skills.ts` 既有实现 |
 | P1-3 persona 签名 | 测试与实现统一为 `(packageDir, manifest, profileDir)` |
 | P1-4 “迁移”措辞 | 计划标题与规格 M1 测试矩阵/里程碑改为“兼容” |
 | R2 UI “未明示” | 不采纳：用户已明确选择 AgentsView 三页签，规格 R5 记录；其余 R2 结论保留 |
+| 二轮 N-1 route-contract 的 58 | 采纳：`route-contract.spec.ts` 全部 7 处改 62，不只两处 |
+| 二轮 N-2a ChatRow 不存在 | 不采纳：`ChatRow` 存在于 `dsh-plugin-huaanwork/src/client-huaanwork/App.tsx:3344` 且在 `:2591` 使用；计划引用正确 |
+| 二轮 N-2b M1.4 “迁移验收” | 采纳：规格 M1.4 与计划 Task 9 标题都改为“兼容验收” |
