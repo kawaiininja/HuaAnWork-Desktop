@@ -6,7 +6,7 @@
   `agent_propose` 批准框（见“默认模型复测”）。
 - 结论：**核心链路 PASS，M1 仍未完成**。创建/确认/提交/启用/`@` 运行/更新/重启持久化/关闭/详情均已在真实
   macOS 应用与真实模型上验证；验收过程中发现并修复 5 个真实接线缺陷 + 1 个验收修复引入的回归，随后 HTTP
-  实机通过（§7）、MCP 实机部分验证。catalog-legacy 实机与 Windows 真机仍未验收。
+  与 MCP 实机均通过（§7）。catalog-legacy 实机与 Windows 真机仍未验收。
 
 ## 1. 通过项
 
@@ -54,8 +54,9 @@ agents-state.json
 
 ## 5. 未验收 / 阻断
 
-- **HTTP/MCP 实机运行**：HTTP 已在 §7 通过；MCP 只验证到进程启动，挂载与工具暴露未获证据，且该回合落到非预期
-  工作区、归因未定（见 §7）。MCP 空工具、`agent_http`、MCP 客户端等仍有自动化测试与 Task 1 沙箱探针覆盖。
+- **HTTP/MCP 实机运行**：HTTP 与 MCP 均已在 §7 通过。MCP 子会话实际调用 `mcp__mcp-echo__echo` 并拿到
+  `{"hello":"mcp"}`；父会话的总结附带了额外的 bash/curl 自查（父会话本来就不持有包子会话的 MCP 工具），属于
+  UX 观察，不影响工具链结论。
 - **catalog-legacy 实机运行**：公用机目录 `10.130.209.76:18080` 在验收时超时，广场显示目录错误；legacy 兼容由
   `agent-package-legacy.spec.ts` 覆盖，未做真实目录实机验收。
 - **legacy `@agent` 兼容（rc.1 已知破损，非阻断）**：`agent-invoke.ts` 的 agent 分支仍调用 rc.1 已删除的
@@ -91,18 +92,22 @@ agents-state.json
 
 宿主 `@` 回合在真实 UI 中显示该结果。HTTP 进程在回合结束后停止。
 
-### MCP 实机（PARTIAL，未验证）
+### MCP 实机（PASS，含 UX 观察）
 
-创建 `mcp-echo`（`tools.mode: "mcp"`，fixture streamable-HTTP server，`echo` 工具）→ 启用 → `@mcp-echo`。
-MCP 进程启动已验证；MCP 挂载与工具暴露未获证据 —— 进程拉起不能证明工具已挂到子会话，UI 也没有捕获到
-`echo` 工具的调用结果。
+创建 `mcp-echo`（`tools.mode: "mcp"`，fixture streamable-HTTP server，`echo` 工具）→ 启用 → 在单标签会话中
+发送 `@mcp-echo`。子会话实际调用：
 
-该 `@mcp-echo` 回合落到了非预期的活动项目/标签：观测到的 MCP server cwd 是 `代码审查智能体` 项目，而 UI
-当时显示的是 `人机协作平台`。我们**未确定**这是操作者切换导航还是产品路由缺陷，因此记为**未验证**，不记为通过。
-MCP 客户端、空工具拒绝与策略路径由自动化测试覆盖。
+```text
+tool/call mcp__mcp-echo__echo {"hello":"mcp"}
+tool/result {"hello":"mcp"}
+```
 
-复现注记：新开单标签应用会话，先确认输入框的项目标签与 Host workspace 是同一个，再发送 `@mcp-echo` 并捕获
-MCP 工具结果。
+MCP server 由运行时拉起到 `127.0.0.1:53182`，子会话拿到回显 `{"hello":"mcp"}`，回合正常结束。UI 中父会话
+显示了该结果，但父模型同时用 bash/curl 自查了一遍（父会话本来就不持有包子会话的 MCP 工具），所以文案较啰嗦；
+这是 UX/模型行为观察，不影响“MCP 工具调用成功”的结论。
+
+复现注记：新开单标签应用会话，直接在同一个标签完成创建/启用/`@`，不要中途切换项目或标签；MCP server 的
+`cwd` 应与该会话的 Host workspace 一致。
 
 ### HTTP/MCP 验收新增修复
 
@@ -111,15 +116,16 @@ MCP 工具结果。
 | 子代理首轮请求看不到 `agent_http`，直接判定“没有工具” | 子会话首轮模型请求早于 after-start 的 attachment/restrict | 用预留 `childId` 在 `startActivation` 前预挂包工具（`5e278de464`） |
 | 子代理调用 `agent_http` 被策略拒绝（子会话无审批 UI） | attached 运行时工具走 `ask`，auto-deny | `agent_http`/`agent_skill_run` attached 时放行；propose/commit 仍 ask（`6a35263f5c`，注释订正 `06d230584d`） |
 | MCP 包子会话同样无法调用 `mcp__*` | attached MCP 在 smart 模式 ask | holder 标记 package child，attached `mcp__*` 对包子会话放行，普通会话行为不变（`ebbdab6f92`） |
+| `@mcp-echo` 报 `cannot get property "mcpClientImpl" without inject` | `mountSessionMcp` 直接读 `ctx.mcpClientImpl`，Cordis 未 inject 属性访问抛错 | 改为显式 option → `ctx.get('mcpClientImpl')`（try/catch）→ 默认客户端（`2152580e36`） |
+| `@mcp-echo` 报 `cannot get property "tools" without inject` | `mountSessionMcp` 直接读 `ctx.tools?.schemas`，Host 上下文未 inject tools | 改为 direct（try/catch）→ `ctx.get('tools')` 解析（`01a3d2771c`） |
 
 ### 更新后的门禁
 
-`dsh-plugin-huaanwork` 全量 **3137 passed / 14 skipped**；typecheck 0；`check:desktop-variants` 0（7/64，前缀 6）。
+`dsh-plugin-huaanwork` 全量 **3144 passed / 14 skipped**；typecheck 0；`check:desktop-variants` 0（7/64，前缀 6）。
 根 `corepack yarn check` 仍未在最终树重跑。
 
 ### 仍未完成
 
-- MCP 实机工具结果（见上，PARTIAL）
 - catalog-legacy 实机（目录不可达）
 - Windows 真机
 - legacy `@agent` rc.1 兼容（已登记债）
