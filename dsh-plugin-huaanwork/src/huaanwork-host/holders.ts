@@ -33,6 +33,11 @@ declare module '@deepseek-ai/cordis' {
     huaanworkAgentPackageHost: AgentPackageHost
     /** `@slug` 一次运行的子代理请求(技能插件在 subagents.start 里消费)。 */
     huaanworkAgentPackageRequest: { current: AgentPackageSubagentRequest | null }
+    /**
+     * 智能体包回合当前绑定的子会话 id。policy 用它标记 `mcp__*` 调用来自包运行链路:
+     * 子会话没有审批界面,自己挂载的 MCP 工具不能被 ask 自动拒绝。
+     */
+    huaanworkPackageChildSessions: Set<string>
     huaanworkCheckpointUserDataDir: string
   }
 }
@@ -52,6 +57,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkAgentRequest',
   'huaanworkAgentPackageHost',
   'huaanworkAgentPackageRequest',
+  'huaanworkPackageChildSessions',
   'huaanworkCheckpointUserDataDir',
 ] as const
 
@@ -131,6 +137,7 @@ export function installHuaanworkHolders(
   ctx.huaanworkAttachments = emptyAttachments()
   ctx.huaanworkAgentRequest = { current: null }
   ctx.huaanworkAgentPackageRequest = { current: null }
+  ctx.huaanworkPackageChildSessions = new Set<string>()
   ctx.huaanworkAgentCatalog = { current: { items: [] } }
   ctx.huaanworkRouteAgent = { current: null }
   ctx.huaanworkEmit = emit

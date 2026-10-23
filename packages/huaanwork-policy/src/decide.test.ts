@@ -296,6 +296,34 @@ test("unknown mcp tool name denies unless attached", () => {
   assert.equal(guard({ ...call, attached: true }), "deny");
 });
 
+test("attached mcp tools allow in a package runtime child, but not in a normal session", () => {
+  const call = { name: "mcp__issue-tracker__search", args: {}, workspaceRoot: ws, attached: true };
+
+  // 包运行子会话没有审批界面：ask/smart 档也必须放行（guard 同判定）。
+  for (const mode of ["ask", "smart", "full"] as const) {
+    assert.equal(preExecute({ ...call, packageRuntime: true }, mode), "allow", `${mode} preExecute`);
+    assert.equal(guard({ ...call, packageRuntime: true }, mode), "allow", `${mode} guard`);
+    assert.deepEqual(preExecuteExplained({ ...call, packageRuntime: true }, mode), { decision: "allow" }, `${mode} explained`);
+  }
+
+  // 普通会话（没有 packageRuntime 标记）保持原有询问行为。
+  assert.equal(preExecute(call, "smart"), "ask");
+  assert.equal(guard(call, "smart"), "deny");
+  assert.deepEqual(guardExplained(call, "smart"), { decision: "deny", reason: REASON_NEEDS_APPROVAL });
+  assert.equal(preExecute(call, "full"), "allow");
+
+  // 未附加仍然拒绝，且原因点名工具未附加（packageRuntime 不豁免 attached）。
+  const detached = { name: call.name, args: {}, workspaceRoot: ws };
+  for (const mode of ["ask", "smart", "full"] as const) {
+    assert.deepEqual(
+      preExecuteExplained({ ...detached, packageRuntime: true }, mode),
+      { decision: "deny", reason: reasonToolUnattached(call.name) },
+      `${mode} detached`,
+    );
+  }
+  assert.equal(guard({ ...detached, packageRuntime: true }, "smart"), "deny");
+});
+
 test("agent package runtime tools allow when attached and deny when unattached", () => {
   for (const name of ["agent_http", "agent_skill_run"]) {
     const detached = { name, args: {}, workspaceRoot: ws };

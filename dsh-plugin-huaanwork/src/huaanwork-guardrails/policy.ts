@@ -58,6 +58,8 @@ type Context = {
   /** boot 时注入一次的容器，`.current` 随每次 `runAgentTurn` 变化（见上方坑注释）。 */
   huaanworkUnattended?: UnattendedHolder;
   huaanworkAttachments?: AttachmentMaps;
+  /** 智能体包回合绑定的子会话 id;policy 据此放行包自己挂载的 `mcp__*`。 */
+  huaanworkPackageChildSessions?: Set<string>;
   on(
     event: "tools/pre-execute",
     listener: (
@@ -196,6 +198,7 @@ function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
   const workspaceRoot = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd();
   const args = objectArgs(execution.arguments);
   let attached: boolean | undefined = undefined;
+  let packageRuntime: boolean | undefined = undefined;
   if (execution.name === "call_host_tool") {
     const sessionId = sessionIdOfAgentRef(execution.agent);
     const toolName = typeof args.name === "string" ? args.name : "";
@@ -203,6 +206,8 @@ function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
   } else if (execution.name.startsWith("mcp__")) {
     const sessionId = sessionIdOfAgentRef(execution.agent);
     attached = isMcpAttached(ctx.huaanworkAttachments, sessionId, execution.name);
+    // 包运行子会话没有审批界面:标记出来让 decide() 放行它自己挂载的 MCP 工具。
+    packageRuntime = sessionId !== undefined && ctx.huaanworkPackageChildSessions?.has(sessionId) === true;
   } else if (AGENT_PACKAGE_TOOLS.has(execution.name)) {
     const sessionId = sessionIdOfAgentRef(execution.agent);
     attached = isAgentToolAttached(ctx.huaanworkAttachments, sessionId, execution.name);
@@ -217,6 +222,7 @@ function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
     // 本收窄——所有可达判定与原版逐字等价,probe 回归钉在 policy.cordis.spec.ts。
     gitDirty: execution.name === "git_checkout" ? isGitDirty(workspaceRoot) : false,
     ...(attached !== undefined ? { attached } : {}),
+    ...(packageRuntime !== undefined ? { packageRuntime } : {}),
   };
 }
 

@@ -785,6 +785,86 @@ describe('agent package turn cleanup', () => {
     expect(attachments.sessionAgentTools.has('child')).toBe(false)
   })
 
+  test('tracks bound child sessions for the policy and clears them on cleanup', async () => {
+    const profileDir = makeRoot('agent-package-profile-')
+    const packageDir = join(profileDir, 'agents', 'weekly-report')
+    mkdirSync(packageDir, { recursive: true })
+    writeFileSync(
+      join(packageDir, 'agent.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        slug: 'weekly-report',
+        displayName: '周报助手',
+        description: '把一周工作整理成周报',
+        version: '1.0.0',
+        draftId: 'draft-minimal',
+        createdAt: '2026-10-23T00:00:00.000Z',
+        updatedAt: '2026-10-23T00:00:00.000Z',
+        persona: 'persona.md',
+        skill: null,
+        tools: { mode: 'none' },
+        allowSkills: [],
+      }),
+      'utf8',
+    )
+    writeFileSync(join(packageDir, 'persona.md'), '你是周报助手。', 'utf8')
+    writeFileSync(
+      join(profileDir, 'agents-state.json'),
+      JSON.stringify({ 'local:weekly-report': { source: 'local', enabled: true, installedVersion: '1.0.0' } }),
+      'utf8',
+    )
+
+    const childSessions = new Set<string>()
+    const ctx = {
+      huaanworkAttachments: emptyAttachments(),
+      huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
+      huaanworkAgentPackageRequest: { current: null },
+      huaanworkPackageChildSessions: childSessions,
+      subagents: {
+        startActivation: async () => ({
+          childId: 'child',
+          result: Promise.resolve({}),
+          dispose: async () => undefined,
+        }),
+      },
+    }
+    const host = createAgentPackageHost({
+      profileDir,
+      takenSlugs: () => [],
+      createRuntime: async (options) => ({
+        slug: options.manifest.slug,
+        packageDir: options.packageDir,
+        workspaceRoot: options.workspaceRoot,
+        skillScripts: [],
+        runSkillScript: async () => ({ text: '' }),
+      }),
+    })
+    const pkg = await host.findInvocable('weekly-report')
+    const dispatched = await host.dispatch({
+      ctx: ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+
+    // 预留 id 与 activation 实际返回的 id 都算本回合的包子会话。
+    const request = ctx.huaanworkAgentPackageRequest.current as {
+      childId: string
+      bindChild(sessionId: string): void
+    } | null
+    expect(request).not.toBeNull()
+    expect(childSessions.has(request!.childId)).toBe(true)
+    expect(childSessions.has('child')).toBe(true)
+
+    // provider 另分配 id 时 skills.ts 补绑的路径也要登记。
+    request!.bindChild('late-child')
+    expect(childSessions.has('late-child')).toBe(true)
+
+    await dispatched.afterIdle()
+    expect(childSessions.size).toBe(0)
+  })
+
   test('refuses a package whose declared HTTP entry is missing', async () => {
     const profileDir = installHttpPackage()
     rmSync(join(profileDir, 'agents', 'weekly-report', 'tools', 'http', 'server.mjs'))

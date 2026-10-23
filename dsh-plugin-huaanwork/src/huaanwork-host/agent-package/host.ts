@@ -67,6 +67,8 @@ export type AgentPackageDispatchContext = {
   huaanworkWorkspaceRoot?: { current: string }
   huaanworkAttachments?: AttachmentMaps
   huaanworkAgentPackageRequest?: { current: AgentPackageSubagentRequest | null }
+  /** 包回合绑定的子会话 id;清理时逐一移除,供 policy 标记 `mcp__*` 的运行链路。 */
+  huaanworkPackageChildSessions?: Set<string>
   subagents?: SubagentsService
 }
 
@@ -300,8 +302,14 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       let cleanupStarted = false
       let activation: SubagentActivationHandle | undefined
       const boundChildren = new Set<string>()
+      /** 本回合登记进 `huaanworkPackageChildSessions` 的 id;清理时逐一移除。 */
+      const packageChildSessions = new Set<string>()
 
       const bindChild = (childSessionId: string): void => {
+        // Record even before the runtime exists: cleanup must clear every id this turn
+        // added, and a later turn reusing the id must not inherit the package flag.
+        ctx.huaanworkPackageChildSessions?.add(childSessionId)
+        packageChildSessions.add(childSessionId)
         if (runtime === undefined) return
         // `skills.ts` attaches the runtime tools and MCP names before calling this;
         // cleanup detaches them again from every bound child.
@@ -369,6 +377,13 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           if (request !== null && ctx.huaanworkAgentPackageRequest?.current === request) {
             ctx.huaanworkAgentPackageRequest.current = null
           }
+          // Clear the policy's package-runtime marker for every id this turn bound. The
+          // body runs once and Set.delete is idempotent, so repeated cleanup cannot
+          // strip a newer turn's ids (it only ever removes its own).
+          for (const childSessionId of packageChildSessions) {
+            ctx.huaanworkPackageChildSessions?.delete(childSessionId)
+          }
+          packageChildSessions.clear()
         })()
         return cleanupPromise
       }
