@@ -1634,6 +1634,98 @@ button {
   -webkit-box-orient: vertical;
 }
 
+/* ---- 智能体包三页签（Task 8） ---- */
+
+.agent-card-badges {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.agent-update-hint {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.agent-toolkit-group {
+  margin: 4px 0 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.agent-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+}
+
+.agent-detail-section p {
+  margin: 0;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-detail-section pre {
+  margin: 0;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.agent-detail-section ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-muted);
+}
+
+.agent-confirm-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-self: stretch;
+  border-color: var(--approval-border);
+  background: var(--approval-bg);
+}
+
+.agent-confirm-card .ttl {
+  font-weight: 700;
+  color: var(--approval);
+  font-size: 12.5px;
+}
+
+.agent-confirm-rows {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.agent-confirm-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.agent-confirm-row dt {
+  color: var(--text-muted);
+}
+
+.agent-confirm-row dd {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* 空状态页（定时任务） */
 
 .empty-state {

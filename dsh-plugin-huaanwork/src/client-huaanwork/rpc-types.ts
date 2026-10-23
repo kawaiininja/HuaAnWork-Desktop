@@ -150,7 +150,10 @@ export type AgentPackageListResult = {
   catalogError?: string;
 };
 
-/** `agent.packageDetail` 的两侧载荷;调用方按 `source` 收窄。 */
+/**
+ * `agent.packageDetail` 的两侧载荷。调用方按 `'slug' in detail`（或 `files`/`skill`
+ * 存在）收窄；不要按 `source`——legacy 本地工具条目也可能带 `source: 'local'`。
+ */
 export type AgentPackageDetailResult = AgentPackageDetail | AgentDetail;
 
 export type AgentFieldError = { field: string; message: string };

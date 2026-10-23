@@ -7,6 +7,7 @@ import {
   type MutableRefObject,
 } from "react";
 import AccountFooter from "./AccountFooter.tsx";
+import AgentConfirmCard from "./AgentConfirmCard.tsx";
 import AgentsView from "./AgentsView.tsx";
 import AuthGate, { type AuthStatus } from "./AuthGate.tsx";
 import AutomationsView from "./AutomationsView.tsx";
@@ -49,7 +50,6 @@ import {
   atTokenAt,
   parseAtInvoke,
   type AgentListItem,
-  type AgentListResult,
 } from "./logic/agentsLogic.ts";
 import {
   applyHtmlTheme,
@@ -90,6 +90,7 @@ import {
   type TreeNode,
 } from "./api.ts";
 import { createKeepAwakeDriver, shouldHoldKeepAwake } from "./logic/keepAwake.ts";
+import type { AgentPackageConfirmCard } from "./rpc-types.ts";
 import { missedBannerView, nextMissedCount } from "./logic/missedBanner.ts";
 import { parseSchedulePhrase } from "./logic/schedulePhrase.ts";
 import {
@@ -218,6 +219,7 @@ type ChatItem =
   | { id: number; kind: "ask"; card: AskCard }
   | { id: number; kind: "input"; card: InputCard }
   | { id: number; kind: "attachment"; sourceText: string }
+  | { id: number; kind: "agent-confirm"; card: AgentPackageConfirmCard }
   | { id: number; kind: "note"; text: string };
 
 type SessionRow = {
@@ -380,6 +382,8 @@ export default function App() {
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashClosed, setSlashClosed] = useState(false);
   const [atCatalog, setAtCatalog] = useState<AgentListItem[]>([]);
+  /** 智能体包/目录写入事件计数：智能体页据此重拉各面板数据。 */
+  const [agentChangeSignal, setAgentChangeSignal] = useState(0);
   const [atCursor, setAtCursor] = useState(0);
   const [atIndex, setAtIndex] = useState(0);
   const [atClosed, setAtClosed] = useState(false);
@@ -601,7 +605,7 @@ export default function App() {
       .catch(() => {
         if (!cancelled) setSlashCatalog([]);
       });
-    void rpcCall<AgentListResult>("agent.list")
+    void rpcCall<{ items: AgentListItem[] }>("agent.invocableList")
       .then((res) => {
         if (!cancelled) setAtCatalog(Array.isArray(res.items) ? res.items : []);
       })
@@ -1029,6 +1033,32 @@ export default function App() {
         staleIdleRef.current = consumed.stale;
         if (consumed.drop) return;
       }
+          // 智能体包事件：会话内提示、结构化创建确认卡，以及列表刷新信号（面板与 @ 补全共用）。
+          if (event.event === "agent/notice") {
+            noteTab(liveChatRef.current, event.text);
+            return;
+          }
+          if (event.event === "agent/confirm") {
+            setChatTabs((prev) =>
+              prev.map((tab) =>
+                tab.id === liveChatRef.current
+                  ? { ...tab, items: [...tab.items, { id: allocId(), kind: "agent-confirm" as const, card: event.card }] }
+                  : tab,
+              ),
+            );
+            return;
+          }
+          if (event.event === "agent/changed") {
+            setAgentChangeSignal((prev) => prev + 1);
+            void rpcCall<{ items: AgentListItem[] }>("agent.invocableList")
+              .then((res) => {
+                if (!cancelled) setAtCatalog(Array.isArray(res.items) ? res.items : []);
+              })
+              .catch(() => {
+                // 目录暂不可读时保留旧补全数据
+              });
+            return;
+          }
           // 后台任务事件：更新任务运行角标并刷新数据；agent 运行另建运行对话标签承载过程与结果。
           if (event.event === "automation/run-start") {
             automationActiveRef.current = true;
@@ -2548,7 +2578,7 @@ export default function App() {
               onDismissMissedBanner={() => setMissedBanner((prev) => ({ ...prev, dismissed: true }))}
             />
           ) : view === "agents" ? (
-            <AgentsView />
+            <AgentsView agentChangeSignal={agentChangeSignal} />
           ) : view === "knowledge" ? (
             <KnowledgeBaseView />
           ) : view === "market" ? (
@@ -3300,20 +3330,25 @@ function appendToken(items: ChatItem[], text: string): ChatItem[] {
   return [...items, { id: (last?.id ?? 0) + 1, kind: "assistant", text }];
 }
 
-type ContentChatItem = Exclude<ChatItem, { kind: "attachment" }>;
+type ContentChatItem = Exclude<ChatItem, { kind: "attachment" } | { kind: "agent-confirm" }>;
 
 /**
  * 回合核对与思考折叠用的对话内容视图：结果附件是折叠后的 JSON 渲染项，
  * 在内容视图里等价于一整段助手正文（同 id、同位置，正文取 sourceText）。
+ * 创建确认卡映射成空 note——它不参与文件/命令核对，也不结束思考；保留占位
+ * 是为了让 `thinkingBefore` / `hasAssistantTextAfter` 的原始下标继续成立。
  *
  * 这直接决定思考面板的收尾状态：`hasAssistantTextAfter` 只认 assistant，
  * 若附件映射成空 note，运行结束后那条思考仍会展开并显示「进行中」。
  * 回合核对只读 user / tool / plan-review，不读 assistant，因此不受影响。
  */
 function contentItems(items: readonly ChatItem[]): ContentChatItem[] {
-  return items.map((item) =>
-    item.kind === "attachment" ? attachmentAsAssistant(item) : item,
-  );
+  return items.map(contentItem);
+}
+
+function contentItem(item: ChatItem): ContentChatItem {
+  if (item.kind === "agent-confirm") return { id: item.id, kind: "note", text: "" };
+  return item.kind === "attachment" ? attachmentAsAssistant(item) : item;
 }
 
 /** 同一回合只保留一块思考：非 final 追加当前步骤，final 只替换当前步骤，工具调用前已定稿的步骤保留。 */
@@ -3396,6 +3431,7 @@ function ChatRow({
     );
   }
   if (item.kind === "note") return <div className="note">{item.text}</div>;
+  if (item.kind === "agent-confirm") return <AgentConfirmCard card={item.card} />;
   if (item.kind === "todo") {
     return (
       <div className="card todo-card">
