@@ -385,6 +385,70 @@ describe('propose validation', () => {
     expect(fits.ok).toBe(true)
   })
 
+  test('counts the whole SKILL.md markdown toward the 64 KiB combined cap', async () => {
+    const root = makeRoot()
+    writeUserSkill(root, 'tiny-helper', 'c'.repeat(32))
+
+    const front = '---\nname: weekly-report\ndescription: 大\n---\n'
+    const markdown = `${front}${'b'.repeat(32 * 1024 - Buffer.byteLength(front, 'utf8'))}`
+    const persona = 'x'.repeat(32 * 1024)
+    // 只计正文时 frontmatter 的字节余量足以容纳这 32 字节;计整份 SKILL.md 时才超限。
+    const proposed = await proposeAgentPackage(
+      root,
+      'session-skill-full',
+      createProposal({
+        persona,
+        skill: { summary: '大技能', markdown, scripts: [] },
+        allowSkills: ['tiny-helper'],
+      }),
+      [],
+    )
+    expect(proposed.ok).toBe(false)
+    if (proposed.ok) return
+    const capError = proposed.fieldErrors.find((error) => error.field === 'skill')
+    expect(capError?.message).toMatch(/64 KiB/)
+  })
+
+  test('rejects a draft whose files would exceed the 5 MiB whole-package cap', async () => {
+    const root = makeRoot()
+    const script = 'x'.repeat(256 * 1024)
+    const scripts = Array.from({ length: 20 }, (_, index) => ({
+      path: `skill/scripts/part-${index}.mjs`,
+      content: script,
+    }))
+    const proposed = await proposeAgentPackage(
+      root,
+      'session-package-cap',
+      createProposal({ skill: { summary: '大脚本', markdown: proposal.skill.markdown, scripts } }),
+      [],
+    )
+    expect(proposed.ok).toBe(false)
+    if (proposed.ok) return
+    // 逐脚本上限都合法,只有整包字节超限:错误必须落在 package,而不是留给 commit 的写失败。
+    expect(proposed.fieldErrors.map((error) => error.field)).not.toContain('skill.scripts')
+    const capError = proposed.fieldErrors.find((error) => error.field === 'package')
+    expect(capError?.message).toMatch(/5 MiB/)
+    expect(loadAgentPackageDraft(root, 'session-package-cap')).toBeUndefined()
+  })
+
+  test('a rejected proposal leaves an existing draft byte-identical', async () => {
+    const root = makeRoot()
+    const first = await proposeAgentPackage(root, 'session-stable-draft', createProposal(), [])
+    expect(first.ok).toBe(true)
+    if (!first.ok) return
+    const before = readFileSync(draftPath(root, 'session-stable-draft'))
+
+    const rejected = await proposeAgentPackage(
+      root,
+      'session-stable-draft',
+      createProposal({ displayName: '   ', description: '' }),
+      [],
+    )
+    expect(rejected.ok).toBe(false)
+    expect(readFileSync(draftPath(root, 'session-stable-draft')).equals(before)).toBe(true)
+    expect(loadAgentPackageDraft(root, 'session-stable-draft')?.draftId).toBe(first.draftId)
+  })
+
   test('rejects oversized or malformed tool payloads', async () => {
     const root = makeRoot()
     const oversized = await proposeAgentPackage(
@@ -494,6 +558,43 @@ describe('update mode', () => {
     expect(existsSync(draftPath(root, 'session-update'))).toBe(false)
   })
 
+  test('an update rewrites a script body byte-for-byte', async () => {
+    const root = makeRoot()
+    const scriptBody = '#!/usr/bin/env node\r\nconsole.log("周报")\r\n// 末尾无换行'
+    const created = await proposeAgentPackage(
+      root,
+      'session-script-create',
+      createProposal({
+        skill: {
+          summary: proposal.skill.summary,
+          markdown: proposal.skill.markdown,
+          scripts: [{ path: 'skill/scripts/report.mjs', content: scriptBody }],
+        },
+      }),
+      [],
+    )
+    if (!created.ok) throw new Error('propose failed')
+    const committed = await commitAgentPackage(root, 'session-script-create', created.draftId, '可以', [])
+    expect(committed.ok).toBe(true)
+
+    const scriptPath = join(agentPackageDir(root, 'weekly-report'), 'skill', 'scripts', 'report.mjs')
+    expect(readFileSync(scriptPath, 'utf8')).toBe(scriptBody)
+
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    await host.beginUpdate('session-script-update', 'weekly-report')
+    const proposed = await proposeAgentPackage(
+      root,
+      'session-script-update',
+      { mode: 'update', description: '把一周工作整理成一页周报' },
+      [],
+    )
+    expect(proposed.ok).toBe(true)
+    if (!proposed.ok) return
+    const updated = await commitAgentPackage(root, 'session-script-update', proposed.draftId, '确认', [])
+    expect(updated.ok).toBe(true)
+    expect(readFileSync(scriptPath, 'utf8')).toBe(scriptBody)
+  })
+
   test('refuses to rename a package through an update proposal', async () => {
     const root = makeRoot()
     const created = await proposeAgentPackage(root, 'session-rename-create', createProposal(), [])
@@ -586,5 +687,17 @@ describe('host facade', () => {
     expect(host.lastUserText('session-fallback')).toBe('可以')
     host.noteUserText('session-fallback', '')
     expect(host.lastUserText('session-fallback')).toBe('')
+  })
+
+  test('bounds per-session turn text', () => {
+    const root = makeRoot()
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    for (let index = 0; index < 300; index += 1) {
+      host.noteUserText(`session-bound-${index}`, `text-${index}`)
+    }
+    // 上限 256:最早写入的会话被淘汰,较新的仍在;重复写入会把会话移到队尾。
+    expect(host.lastUserText('session-bound-43')).toBeUndefined()
+    expect(host.lastUserText('session-bound-44')).toBe('text-44')
+    expect(host.lastUserText('session-bound-299')).toBe('text-299')
   })
 })

@@ -5,6 +5,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -13,12 +14,14 @@ import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parseAgentPackageManifest } from '../../src/huaanwork-host/agent-package/manifest.ts'
 import {
+  agentPackageBytes,
   agentPackageDir,
   agentPackageStatePath,
   agentPackagesRoot,
   assertAgentPackageSlugFree,
   listLocalAgentPackages,
   readAgentPackage,
+  readAgentPackageFile,
   readAgentPackageState,
   setAgentPackageEnabled,
   writeAgentPackageAtomically,
@@ -457,6 +460,33 @@ describe('agent package store', () => {
     ).not.toThrow()
   })
 
+  test('agentPackageBytes counts exactly the files the writer emits', () => {
+    const root = makeRoot()
+    const manifest = writePackage(root, {
+      manifest: {
+        allowSkills: ['skill-a'],
+        tools: {
+          mode: 'both',
+          http: { entry: 'tools/http/server.mjs' },
+          mcp: { entry: 'tools/mcp/server.mjs' },
+        },
+      },
+    })
+    const packageDir = agentPackageDir(root, manifest.slug)
+    const onDisk = listFiles(packageDir).reduce(
+      (total, relativePath) => total + statSync(join(packageDir, relativePath)).size,
+      0,
+    )
+    const budget = agentPackageBytes({
+      manifest,
+      persona: DEFAULT_PERSONA,
+      skill: DEFAULT_SKILL,
+      httpServer: 'export const http = true\n',
+      mcpServer: 'export const mcp = true\n',
+    })
+    expect(budget).toBe(onDisk)
+  })
+
   test('rejects missing and undeclared entry contents', () => {
     const root = makeRoot()
     const skillManifest = validManifest()
@@ -600,6 +630,21 @@ describe('agent package store', () => {
     expect(listLocalAgentPackages(root)[0]?.broken?.reason).toMatch(/persona/)
     expect(readAgentPackage(root, 'linked')?.persona).toBe('')
     expect(readAgentPackage(root, 'linked')?.files.map((file) => file.path)).not.toContain('persona.md')
+  })
+
+  test.skipIf(process.platform === 'win32')('readAgentPackageFile refuses symlinked segments and invalid slugs', () => {
+    const root = makeRoot()
+    const packageDir = writeRawPackage(root, 'linked-file', { ...VALID, slug: 'linked-file', skill: null })
+    const secret = join(root, 'secret.txt')
+    writeFileSync(secret, 'SECRET', 'utf8')
+    symlinkSync(secret, join(packageDir, 'persona.md'))
+
+    expect(readAgentPackageFile(root, 'linked-file', 'persona.md')).toBeUndefined()
+    expect(readAgentPackageFile(root, 'linked-file', 'missing.md')).toBeUndefined()
+    expect(readAgentPackageFile(root, 'linked-file', '../agent.json')).toBeUndefined()
+    expect(readAgentPackageFile(root, 'linked-file', 'skill/../agent.json')).toBeUndefined()
+    expect(readAgentPackageFile(root, 'Bad Slug', 'persona.md')).toBeUndefined()
+    expect(readAgentPackageFile(root, 'linked-file', 'agent.json')).toBeDefined()
   })
 
   test.skipIf(process.platform === 'win32')('does not list package directories that are symlinks', () => {

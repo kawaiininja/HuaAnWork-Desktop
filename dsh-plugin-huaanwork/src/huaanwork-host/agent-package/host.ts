@@ -45,6 +45,9 @@ export type CreateAgentPackageHostOptions = {
   lastUserText?: (sessionId: string) => string | undefined
 }
 
+/** 每会话原句只保留最近一条;上限防止长驻宿主按会话无限增长。 */
+const MAX_TRACKED_SESSIONS = 256
+
 /**
  * 组装 `AgentPackageHost`。
  *
@@ -64,9 +67,12 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     },
 
     async commit(sessionId, draftId, rawUserText, opts) {
-      return commitAgentPackage(profileDir, sessionId, draftId, rawUserText, takenSlugs(), {
+      // 测试钩子:路由不得把 proposedThisTurn 从线上透传,否则同一轮门禁可被 false 关闭。
+      const result = await commitAgentPackage(profileDir, sessionId, draftId, rawUserText, takenSlugs(), {
         proposedThisTurn: opts?.proposedThisTurn ?? proposedThisTurn.has(sessionId),
       })
+      if (result.ok) proposedThisTurn.delete(sessionId)
+      return result
     },
 
     async cancel(sessionId) {
@@ -90,7 +96,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     },
 
     noteUserText(sessionId, text) {
-      lastText.set(sessionId, text)
+      rememberLastText(lastText, sessionId, text)
       proposedThisTurn.delete(sessionId)
     },
 
@@ -109,4 +115,12 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       setAgentPackageEnabled(profileDir, slug, enabled)
     },
   }
+}
+
+function rememberLastText(lastText: Map<string, string>, sessionId: string, text: string): void {
+  lastText.delete(sessionId)
+  lastText.set(sessionId, text)
+  if (lastText.size <= MAX_TRACKED_SESSIONS) return
+  const oldest = lastText.keys().next().value
+  if (oldest !== undefined) lastText.delete(oldest)
 }

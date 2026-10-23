@@ -8,11 +8,20 @@ import { parseSkillMarkdown } from '../../huaanwork-guardrails/skills.ts'
 import { resolveInvocableSkill } from '../skill-invoke.ts'
 import { parseAgentPackageManifest } from './manifest.ts'
 import {
+  agentPackageBytes,
   agentPackageDir,
   agentPackagesRoot,
   assertAgentPackageSlugFree,
+  isAgentPackageScriptPath,
   listLocalAgentPackages,
+  MAX_ENTRY_BYTES,
+  MAX_PACKAGE_BYTES,
+  MAX_PERSONA_BYTES,
+  MAX_SCRIPT_BYTES,
+  MAX_SCRIPTS,
+  MAX_SKILL_BYTES,
   readAgentPackage,
+  readAgentPackageFile,
   readAgentPackageState,
   setAgentPackageEnabled,
   writeAgentPackageAtomically,
@@ -43,14 +52,11 @@ const MAX_DISPLAY_NAME_LENGTH = 40
 const MAX_DESCRIPTION_LENGTH = 200
 const MAX_SUMMARY_LENGTH = 200
 const MAX_DRAFT_ID_LENGTH = 128
-const MAX_PERSONA_BYTES = 32 * 1024
-const MAX_SKILL_BYTES = 32 * 1024
-const MAX_SCRIPT_BYTES = 256 * 1024
-const MAX_ENTRY_BYTES = 256 * 1024
-const MAX_SCRIPTS = 20
-/** 人设、SKILL.md 正文与每个允许技能的正文合计上限。 */
+/** 人设、整份 SKILL.md 与每个允许技能的正文合计上限。 */
 const MAX_COMBINED_BODY_BYTES = 64 * 1024
 const INITIAL_VERSION = '0.1.0'
+/** 校验期 manifest 的时间戳占位:ISO 时间字节数固定,只用于估算整包大小。 */
+const VALIDATION_TIMESTAMP = '1970-01-01T00:00:00.000Z'
 
 const FORBIDDEN_ALLOW_SKILL = 'create-agent'
 const CONSENT_PHRASES: ReadonlySet<string> = new Set(['可以', '确认', '同意', '就这样', '按这个建'])
@@ -68,8 +74,6 @@ const TOOL_LABELS: Record<AgentPackageToolsMode, string> = {
 const SANDBOX_WARNING = '脚本将在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。'
 const CONSENT_HINT = '回复「可以」创建（默认关闭）；回复「取消」放弃。'
 const NO_SKILL_SUMMARY = '无专属技能包'
-
-const SCRIPT_PATH_RE = /^[A-Za-z0-9._/-]+$/
 
 export type AgentPackageFieldError = { field: string; message: string }
 
@@ -165,7 +169,7 @@ export async function proposeAgentPackage(
     mode: input.mode,
     ...mergeProposal(input, baseRead.base),
   }
-  const fieldErrors = await validateDraft(profileDir, draft, takenSlugs, baseRead.base?.slug)
+  const fieldErrors = await validateDraft(profileDir, draft, takenSlugs)
   if (fieldErrors.length > 0) return { ok: false, fieldErrors }
 
   try {
@@ -235,12 +239,7 @@ export async function commitAgentPackage(
   if (draft === undefined) return refused('没有待确认的草稿')
   if (draft.draftId !== draftId) return refused('draftId 与当前草稿不匹配，草稿未落盘')
 
-  const fieldErrors = await validateDraft(
-    profileDir,
-    draft,
-    takenSlugs,
-    draft.mode === 'update' ? draft.slug : undefined,
-  )
+  const fieldErrors = await validateDraft(profileDir, draft, takenSlugs)
   if (fieldErrors.length > 0) {
     return {
       ok: false,
@@ -255,20 +254,7 @@ export async function commitAgentPackage(
     return refused(`要更新的智能体 @${draft.slug} 不存在，草稿保留`)
   }
 
-  const manifest: AgentPackageManifest = {
-    schemaVersion: AGENT_PACKAGE_SCHEMA_VERSION,
-    slug: draft.slug,
-    displayName: draft.displayName,
-    description: draft.description,
-    version: existing === undefined ? INITIAL_VERSION : bumpPatch(existing.version),
-    draftId: draft.draftId,
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
-    persona: 'persona.md',
-    skill: draft.skill === null ? null : { entry: 'skill/SKILL.md', summary: manifestSkillSummary(draft) },
-    tools: buildToolsEntry(draft),
-    allowSkills: draft.allowSkills,
-  }
+  const manifest = buildManifest(draft, existing, now)
 
   try {
     writeAgentPackageAtomically({
@@ -321,6 +307,8 @@ export async function cancelAgentPackage(profileDir: string, sessionId: string):
     rmSync(target, { force: true })
     return true
   } catch {
+    // 删除失败与「本来就没有草稿」同回 false:残留草稿由下一次 propose 覆盖,
+    // commit 仍会用自己的 draftId 校验兜底。
     return false
   }
 }
@@ -407,16 +395,16 @@ function readUpdateBase(profileDir: string, slug: string): DraftBody {
   const manifest = readOnDiskManifest(profileDir, slug)
   if (manifest === undefined) throw new Error(`智能体 @${slug} 的 agent.json 不可读`)
 
-  const persona = readPackageText(profileDir, slug, 'persona.md')
+  const persona = readAgentPackageFile(profileDir, slug, 'persona.md')
   if (persona === undefined) throw new Error(`智能体 @${slug} 缺少 persona.md`)
 
   let skill: AgentPackageDraftSkill | null = null
   if (manifest.skill !== null) {
-    const markdown = readPackageText(profileDir, slug, 'skill/SKILL.md')
+    const markdown = readAgentPackageFile(profileDir, slug, 'skill/SKILL.md')
     if (markdown === undefined) throw new Error(`智能体 @${slug} 缺少 skill/SKILL.md`)
     const scripts: Array<{ path: string; content: string }> = []
     for (const scriptPath of detail.skill?.scripts ?? []) {
-      const content = readPackageText(profileDir, slug, scriptPath)
+      const content = readAgentPackageFile(profileDir, slug, scriptPath)
       if (content === undefined) throw new Error(`智能体 @${slug} 的技能脚本不可读:${scriptPath}`)
       scripts.push({ path: scriptPath, content })
     }
@@ -449,22 +437,9 @@ function readEntryText(
   relativePath: string,
 ): string | undefined {
   if (!wanted) return undefined
-  const content = readPackageText(profileDir, slug, relativePath)
+  const content = readAgentPackageFile(profileDir, slug, relativePath)
   if (content === undefined) throw new Error(`智能体 @${slug} 缺少 ${relativePath}`)
   return content
-}
-
-/** 只读包内普通相对路径;含 `..`、空段或绝对路径时拒绝。 */
-function readPackageText(profileDir: string, slug: string, relativePath: string): string | undefined {
-  const segments = relativePath.split('/')
-  if (segments.length === 0 || segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
-    return undefined
-  }
-  try {
-    return readFileSync(join(agentPackageDir(profileDir, slug), relativePath), 'utf8')
-  } catch {
-    return undefined
-  }
 }
 
 function mergeProposal(input: AgentPackageProposalInput, base: DraftBody | undefined): DraftBody {
@@ -530,11 +505,32 @@ function pickSummary(
   return derive()
 }
 
+/** 由草稿生成落盘 manifest;校验期也用它估算整包字节,两条路径不会各建一份。 */
+function buildManifest(
+  draft: AgentPackageDraft,
+  existing: AgentPackageManifest | undefined,
+  now: string,
+): AgentPackageManifest {
+  return {
+    schemaVersion: AGENT_PACKAGE_SCHEMA_VERSION,
+    slug: draft.slug,
+    displayName: draft.displayName,
+    description: draft.description,
+    version: existing === undefined ? INITIAL_VERSION : bumpPatch(existing.version),
+    draftId: draft.draftId,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    persona: 'persona.md',
+    skill: draft.skill === null ? null : { entry: 'skill/SKILL.md', summary: manifestSkillSummary(draft) },
+    tools: buildToolsEntry(draft),
+    allowSkills: draft.allowSkills,
+  }
+}
+
 async function validateDraft(
   profileDir: string,
   draft: AgentPackageDraft,
   takenSlugs: readonly string[],
-  baseSlug: string | undefined,
 ): Promise<AgentPackageFieldError[]> {
   const errors: AgentPackageFieldError[] = []
 
@@ -568,11 +564,10 @@ async function validateDraft(
     errors.push({ field: 'skillSummary', message: `技能包要点必须是 1-${MAX_SUMMARY_LENGTH} 个字符` })
   }
 
-  let skillBody = ''
+  let skillMarkdown = ''
   if (draft.skill !== null) {
-    const skillErrors = validateSkill(draft.slug, draft.skill)
-    errors.push(...skillErrors)
-    skillBody = parseSkillMarkdown(draft.skill.markdown).content
+    errors.push(...validateSkill(draft.slug, draft.skill))
+    skillMarkdown = draft.skill.markdown
   }
 
   if (!TOOL_MODES.includes(draft.tools)) {
@@ -584,20 +579,38 @@ async function validateDraft(
   const allowErrors = await collectAllowSkillBodies(profileDir, draft.allowSkills)
   errors.push(...allowErrors.errors)
   if (errors.length === 0) {
+    // 整份 SKILL.md(含 frontmatter)计入上限,与落盘的文件大小约束一致。
     const combined =
       utf8Length(draft.persona) +
-      utf8Length(skillBody) +
+      utf8Length(skillMarkdown) +
       allowErrors.bodies.reduce((total, body) => total + utf8Length(body), 0)
     if (combined > MAX_COMBINED_BODY_BYTES) {
       errors.push({
         field: 'skill',
-        message: `人设、技能正文与允许技能的正文合计不得超过 ${MAX_COMBINED_BODY_BYTES / 1024} KiB(当前 ${combined} 字节)`,
+        message: `人设、整份 SKILL.md 与允许技能的正文合计不得超过 ${MAX_COMBINED_BODY_BYTES / 1024} KiB(当前 ${combined} 字节)`,
+      })
+    }
+  }
+  if (errors.length === 0) {
+    // 与写入路径共用同一字节合计:propose 不能放行 commit 永远写不出的草稿。
+    const existing = draft.mode === 'update' ? readOnDiskManifest(profileDir, draft.slug) : undefined
+    const packageBytes = agentPackageBytes({
+      manifest: buildManifest(draft, existing, VALIDATION_TIMESTAMP),
+      persona: draft.persona,
+      skill: draft.skill,
+      ...(draft.httpServer === undefined ? {} : { httpServer: draft.httpServer }),
+      ...(draft.mcpServer === undefined ? {} : { mcpServer: draft.mcpServer }),
+    })
+    if (packageBytes > MAX_PACKAGE_BYTES) {
+      errors.push({
+        field: 'package',
+        message: `整包(manifest、人设、技能、脚本与工具入口)不得超过 ${MAX_PACKAGE_BYTES / (1024 * 1024)} MiB(当前 ${packageBytes} 字节)`,
       })
     }
   }
 
-  if (draft.mode === 'create' || (baseSlug !== undefined && draft.slug !== baseSlug)) {
-    // slug 格式错误已单独报出;这里只回答「是否重名/已存在」。
+  if (draft.mode === 'create') {
+    // slug 格式错误已单独报出;这里只回答「是否重名/已存在」。更新模式沿用 base.slug,不会撞名。
     if (isValidSlug(draft.slug)) {
       try {
         assertAgentPackageSlugFree(profileDir, draft.slug, takenSlugs)
@@ -635,7 +648,7 @@ function validateSkill(slug: string, skill: AgentPackageDraftSkill): AgentPackag
   const seenPaths = new Set<string>()
   skill.scripts.forEach((script, index) => {
     const field = `skill.scripts[${index}]`
-    if (!isSkillScriptPath(script.path)) {
+    if (!isAgentPackageScriptPath(script.path)) {
       errors.push({ field, message: `技能脚本必须位于 skill/scripts/ 下且不得包含 . 或 .. 段:${script.path}` })
       return
     }
@@ -697,17 +710,6 @@ async function collectAllowSkillBodies(
     }
   }
   return { bodies, errors }
-}
-
-function isSkillScriptPath(scriptPath: string): boolean {
-  if (!SCRIPT_PATH_RE.test(scriptPath)) return false
-  const segments = scriptPath.split('/')
-  return (
-    segments.length >= 3 &&
-    segments[0] === 'skill' &&
-    segments[1] === 'scripts' &&
-    segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..')
-  )
 }
 
 function buildToolsEntry(draft: AgentPackageDraft): AgentPackageManifest['tools'] {

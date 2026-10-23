@@ -27,12 +27,14 @@ const TEMP_PREFIX = '.tmp-'
 const OLD_PREFIX = '.old-'
 const DRAFTS_DIR = '.drafts'
 
-const MAX_PERSONA_BYTES = 32 * 1024
-const MAX_SKILL_BYTES = 32 * 1024
-const MAX_SCRIPT_BYTES = 256 * 1024
-const MAX_ENTRY_BYTES = 256 * 1024
-const MAX_SCRIPTS = 20
-const MAX_PACKAGE_BYTES = 5 * 1024 * 1024
+// 单文件与集合上限。草稿 propose 从这里导入同一组值,校验与落盘不会各写一份。
+export const MAX_PERSONA_BYTES = 32 * 1024
+export const MAX_SKILL_BYTES = 32 * 1024
+export const MAX_SCRIPT_BYTES = 256 * 1024
+export const MAX_ENTRY_BYTES = 256 * 1024
+export const MAX_SCRIPTS = 20
+/** 整包(manifest 文本 + 人设 + 技能 + 脚本 + 工具入口)的字节上限。 */
+export const MAX_PACKAGE_BYTES = 5 * 1024 * 1024
 
 const SCRIPT_PATH_RE = /^[A-Za-z0-9._/-]+$/
 
@@ -44,6 +46,26 @@ export type WriteAgentPackageInput = {
   httpServer?: string
   mcpServer?: string
   replace: boolean
+}
+
+/** 一个包全部落盘文件的内容;字节合计由 `agentPackageBytes` 计算。 */
+export type AgentPackageFileSet = Omit<WriteAgentPackageInput, 'profileDir' | 'replace'>
+
+/**
+ * 包内全部落盘文件的 UTF-8 字节合计。
+ *
+ * `writeAgentPackageAtomically` 的上限检查与草稿 propose 的预检共用这一处计算,
+ * 两边不会各自漂移。
+ */
+export function agentPackageBytes(files: AgentPackageFileSet): number {
+  let total = utf8Length(`${JSON.stringify(files.manifest, null, 2)}\n`) + utf8Length(files.persona)
+  if (files.skill !== null) {
+    total += utf8Length(files.skill.markdown)
+    for (const script of files.skill.scripts) total += utf8Length(script.content)
+  }
+  if (files.httpServer !== undefined) total += utf8Length(files.httpServer)
+  if (files.mcpServer !== undefined) total += utf8Length(files.mcpServer)
+  return total
 }
 
 /** 本地智能体包的根目录 `{profileDir}/agents`。 */
@@ -254,11 +276,13 @@ export function writeAgentPackageAtomically(input: WriteAgentPackageInput): void
   }
 
   const manifestText = `${JSON.stringify(manifest, null, 2)}\n`
-  let totalBytes = utf8Length(manifestText) + personaBytes
-  if (skillMarkdown !== undefined) totalBytes += utf8Length(skillMarkdown)
-  for (const script of skillScripts) totalBytes += utf8Length(script.content)
-  if (httpServer !== undefined) totalBytes += utf8Length(httpServer)
-  if (mcpServer !== undefined) totalBytes += utf8Length(mcpServer)
+  const totalBytes = agentPackageBytes({
+    manifest,
+    persona,
+    skill: skillMarkdown === undefined ? null : { markdown: skillMarkdown, scripts: skillScripts },
+    ...(httpServer === undefined ? {} : { httpServer }),
+    ...(mcpServer === undefined ? {} : { mcpServer }),
+  })
   if (totalBytes > MAX_PACKAGE_BYTES) {
     throw new Error(`智能体包超过 ${MAX_PACKAGE_BYTES} 字节上限`)
   }
@@ -568,15 +592,21 @@ function assertSkillScriptPath(scriptPath: string): void {
   if (!SCRIPT_PATH_RE.test(scriptPath)) {
     throw new Error(`技能脚本路径只能包含字母、数字、点、下划线、斜杠与连字符:${scriptPath}`)
   }
-  const segments = scriptPath.split('/')
-  if (
-    segments.length < 3 ||
-    segments[0] !== 'skill' ||
-    segments[1] !== 'scripts' ||
-    segments.some((segment) => segment === '' || segment === '.' || segment === '..')
-  ) {
+  if (!isAgentPackageScriptPath(scriptPath)) {
     throw new Error(`技能脚本必须位于 skill/scripts/ 下且不得包含 . 或 .. 段:${scriptPath}`)
   }
+}
+
+/** 技能脚本路径只允许 `skill/scripts/` 下的相对路径,不含 `.` 或 `..` 段。 */
+export function isAgentPackageScriptPath(scriptPath: string): boolean {
+  if (!SCRIPT_PATH_RE.test(scriptPath)) return false
+  const segments = scriptPath.split('/')
+  return (
+    segments.length >= 3 &&
+    segments[0] === 'skill' &&
+    segments[1] === 'scripts' &&
+    segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..')
+  )
 }
 
 function assertPackageSlug(slug: string): void {
@@ -633,6 +663,23 @@ function readText(filePath: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * 读取包内的普通文件。
+ *
+ * 含空段、`.`、`..` 或反斜杠的路径,任一段是符号链接,或最终不是普通文件时
+ * 返回 undefined;草稿的更新种子复用同一守卫。
+ */
+export function readAgentPackageFile(
+  profileDir: string,
+  slug: string,
+  relativePath: string,
+): string | undefined {
+  if (!isValidSlug(slug) || relativePath.includes('\\')) return undefined
+  const segments = relativePath.split('/')
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return undefined
+  return readPackageText(agentPackageDir(profileDir, slug), relativePath)
 }
 
 /** 只读取包内普通文件;路径任一段是符号链接、或最终不是普通文件时返回 undefined。 */
