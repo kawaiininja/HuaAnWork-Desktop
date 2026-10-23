@@ -136,14 +136,14 @@ describe('propose and commit', () => {
     expect(existsSync(draftPath(root, 'session-1'))).toBe(false)
 
     const manifest = readManifest(root, 'weekly-report')
-    expect(manifest.version).toBe('0.1.0')
+    expect(manifest.version).toBe('1.0.0')
     expect(manifest.draftId).toBe(proposed.draftId)
     expect(manifest.displayName).toBe('周报小助手')
     expect(manifest.skill?.summary).toBe('整理本周工作')
     expect(readAgentPackageState(root)['local:weekly-report']).toEqual({
       source: 'local',
       enabled: false,
-      installedVersion: '0.1.0',
+      installedVersion: '1.0.0',
     })
     expect(readFileSync(join(agentPackageDir(root, 'weekly-report'), 'skill', 'SKILL.md'), 'utf8')).toBe(
       proposal.skill.markdown,
@@ -542,7 +542,7 @@ describe('update mode', () => {
     expect(updated.ok).toBe(true)
 
     const manifest = readManifest(root, 'weekly-report')
-    expect(manifest.version).toBe('0.1.1')
+    expect(manifest.version).toBe('1.0.1')
     expect(manifest.description).toBe('把一周工作整理成一页周报')
     expect(manifest.displayName).toBe('周报小助手')
     expect(manifest.persona).toBe('persona.md')

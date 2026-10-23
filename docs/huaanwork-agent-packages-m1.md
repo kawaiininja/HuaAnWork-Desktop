@@ -96,7 +96,7 @@ M1 **不包含**发布、签名、下载、安装、广场更新、下架、撤�
 | `slug` | 匹配 `^[a-z0-9]+(?:-[a-z0-9]+)*$`，1–32 字符；不得与本地包、旧目录智能体/工具、本地工具入口重名 |
 | `displayName` | 去首尾空白后 1–40 个 UTF-16 码元；可重复 |
 | `description` | 去首尾空白后 1–200 个 UTF-16 码元 |
-| `version` | semver；新建写 `0.1.0`，同 slug 更新 patch +1（见 §13 的规格差异） |
+| `version` | semver；新建写 `1.0.0`，同 slug 更新 patch +1 |
 | `draftId` | 宿主生成的 UUID；≤128 字符；仅用于 commit 幂等核对 |
 | `persona.md` | 非空 UTF-8，≤32 KiB |
 | `skill/SKILL.md` | ≤32 KiB；frontmatter `name` 必须等于 slug |
@@ -286,7 +286,6 @@ Get-ChildItem "$profileDir\agents" -Directory -Filter '.old-*' -ErrorAction Sile
 
 ## 13. 已知限制与差异
 
-- **版本起点**：设计规格 §5.4 写新建 `version = 1.0.0`；当前实现与测试使用 `0.1.0`。这是待裁定的规格/实现差异，不影响本 runbook 的操作步骤；M2 发布前应统一。
 - 同一会话只允许一个包智能体回合；第二个 `@` 被拒绝而不是排队。
 - 关闭卡片不会中断进行中的回合；回合同样在空闲后停止进程。
 - 包运行时每轮拉起、空闲停止，不跨轮复用进程。

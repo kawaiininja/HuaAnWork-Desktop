@@ -54,7 +54,7 @@ const MAX_SUMMARY_LENGTH = 200
 const MAX_DRAFT_ID_LENGTH = 128
 /** 人设、整份 SKILL.md 与每个允许技能的正文合计上限。 */
 const MAX_COMBINED_BODY_BYTES = 64 * 1024
-const INITIAL_VERSION = '0.1.0'
+const INITIAL_VERSION = '1.0.0'
 /** 校验期 manifest 的时间戳占位:ISO 时间字节数固定,只用于估算整包大小。 */
 const VALIDATION_TIMESTAMP = '1970-01-01T00:00:00.000Z'
 
