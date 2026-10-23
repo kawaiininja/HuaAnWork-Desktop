@@ -1233,4 +1233,108 @@ describe('@slug package dispatch', () => {
     expect(disposeCalls).toBe(1)
     expect(h.maps.sessionAgentTools.size).toBe(0)
   })
+
+  test('resolves subagents through ctx.get when the context has no direct property', async () => {
+    // 真实宿主 Context 不把服务暴露成直接属性;`ctx.get('subagents')` 是唯一入口。
+    const h = dispatchHarness()
+    delete h.ctx.subagents
+    const startCalls: Array<Record<string, unknown>> = []
+    const sandbox = { confine: async (argv: readonly string[]) => ({ argv, enforcement: 'full' }) }
+    h.ctx.get = (name: string) =>
+      name === 'subagents'
+        ? {
+            start: async (_provider: string, request: Record<string, unknown>) => {
+              startCalls.push(request)
+              return { localAgent: { id: 'child', session: { id: 'child' } } }
+            },
+          }
+        : name === 'sandbox'
+          ? sandbox
+          : undefined
+    const pkg = await h.host.findInvocable('weekly-report')
+
+    const dispatched = await h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写周报',
+    })
+
+    expect(startCalls).toHaveLength(1)
+    expect(startCalls[0]?.persona).toContain('SKILL.md 正文')
+    await dispatched.afterIdle()
+  })
+
+  test('still rejects a package turn when neither the property nor the registered service provides start', async () => {
+    const h = dispatchHarness()
+    delete h.ctx.subagents
+    h.ctx.get = () => undefined
+    const pkg = await h.host.findInvocable('weekly-report')
+
+    await expect(
+      h.host.dispatch({ ctx: h.ctx as never, sessionId: 'parent-session', pkg: pkg!, remainder: '写周报' }),
+    ).rejects.toThrow('current dsh runtime does not support subagents')
+  })
+})
+
+describe('@agent legacy dispatch subagents resolution', () => {
+  function legacyAgentHost(): never {
+    return {
+      list: () => ({
+        items: [
+          {
+            name: 'legacy-assistant',
+            source: 'catalog',
+            kind: 'agent',
+            description: '旧目录智能体',
+            version: '1.0.0',
+            permissions: [],
+            enabled: true,
+          },
+        ],
+      }),
+      get: async () => ({ persona: '你是旧目录助手' }),
+    } as never
+  }
+
+  test('starts the spawn subagent through ctx.get when the context has no direct property', async () => {
+    const startCalls: Array<{ provider: string; request: Record<string, unknown> }> = []
+    const ctx = {
+      get: (name: string) =>
+        name === 'subagents'
+          ? {
+              start: async (provider: string, request: Record<string, unknown>) => {
+                startCalls.push({ provider, request })
+                return { localAgent: { id: 'child', session: { id: 'child' } } }
+              },
+            }
+          : undefined,
+    }
+
+    const dispatched = await dispatchAt({
+      host: legacyAgentHost(),
+      ctx: ctx as never,
+      sessionId: 'session-a',
+      name: 'legacy-assistant',
+      remainder: '整理本周进展',
+    })
+
+    expect(startCalls).toHaveLength(1)
+    expect(startCalls[0]?.provider).toBe('spawn')
+    expect(startCalls[0]?.request.persona).toBe('你是旧目录助手')
+    expect(dispatched.text).toBe('整理本周进展')
+    await dispatched.afterIdle()
+  })
+
+  test('rejects when neither the property nor the registered service provides start', async () => {
+    await expect(
+      dispatchAt({
+        host: legacyAgentHost(),
+        ctx: { get: () => undefined } as never,
+        sessionId: 'session-a',
+        name: 'legacy-assistant',
+        remainder: 'x',
+      }),
+    ).rejects.toThrow('current dsh runtime does not support subagents')
+  })
 })

@@ -4,6 +4,7 @@ import { filterAgentAllow } from "@huaanwork/policy/agent-catalog";
 import type { AgentPackageDetail, AgentPackageSubagentRequest } from "./agent-package/types.ts";
 import type { AgentPackageDispatchResult } from "./agent-package/host.ts";
 import type { AgentsHost } from "./agents-host.ts";
+import { resolveSubagents } from "./subagents-service.ts";
 import { readHuaanworkSettingsSync } from "./settings.ts";
 
 /**
@@ -27,7 +28,7 @@ export type AgentInvokeContext = {
   /** `@slug` 包回合请求(由 host dispatch 写入,skills.ts 的 start 包装消费)。 */
   huaanworkAgentPackageRequest?: { current: AgentPackageSubagentRequest | null };
   huaanworkWorkspaceRoot?: { current: string };
-  /** sandbox 服务查找;包进程启动时按需解析。 */
+  /** 全局服务查找:`sandbox`,以及 `subagents` 在直接属性缺席时的回落路径。 */
   get?: (name: string) => unknown;
   subagents?: {
     /** 探针 3 核实的上游签名:start(provider, request),provider 固定 "spawn"。 */
@@ -198,7 +199,8 @@ export async function dispatchAt(opts: {
       throw new Error(`无法加载智能体「${opts.name}」的人设`);
     }
 
-    if (typeof opts.ctx.subagents?.start !== "function") {
+    const subagents = resolveSubagents(opts.ctx);
+    if (subagents === undefined) {
       throw new Error("current dsh runtime does not support subagents");
     }
 
@@ -216,12 +218,12 @@ export async function dispatchAt(opts: {
       // provider 固定 "spawn"（进程内 spawn provider）；parent 在 start 前解析为当前会话 agent，
       // 保证 cwd/取消链归属正确（不再依赖 list()[0] 猜测）
       const parent = opts.resolveParent ? await opts.resolveParent() : undefined;
-      await opts.ctx.subagents.start("spawn", {
+      await subagents.start("spawn", {
         prompt: [{ type: "text", text: prompt }],
         persona,
         ...(parent ? { parent } : {}),
         signal: new AbortController().signal,
-      } as any);
+      });
     } catch (err) {
       if (opts.ctx.huaanworkAgentRequest) {
         opts.ctx.huaanworkAgentRequest.current = undefined;

@@ -3,6 +3,7 @@ import { mountSessionMcp } from '../../huaanwork-guardrails/agent-mcp.ts'
 import { refreshAgentRestrict } from '../../huaanwork-guardrails/present-as.ts'
 import type { AgentListItem } from '../../client-huaanwork/rpc-types.ts'
 import type { AgentsHost } from '../agents-host.ts'
+import { resolveSubagents } from '../subagents-service.ts'
 import {
   beginAgentPackageUpdate,
   cancelAgentPackage,
@@ -46,6 +47,7 @@ import type {
  * `skills.ts` 在 `subagents.start` 包装里消费的请求容器与附件表。
  */
 export type AgentPackageDispatchContext = {
+  /** 全局服务查找:`sandbox`,以及 `subagents` 在直接属性缺席时的回落路径。 */
   get?(name: string): unknown
   huaanworkWorkspaceRoot?: { current: string }
   huaanworkAttachments?: AttachmentMaps
@@ -254,8 +256,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       const { ctx, sessionId, pkg } = input
       if (!pkg.enabled) throw new Error(`智能体「${pkg.slug}」未启用或不存在`)
       if (pkg.broken !== undefined) throw new Error(`智能体「${pkg.slug}」已损坏：${pkg.broken.reason}`)
-      const startSubagent = ctx.subagents?.start
-      if (typeof startSubagent !== 'function') throw new Error('current dsh runtime does not support subagents')
+      const subagents = resolveSubagents(ctx)
+      if (subagents === undefined) throw new Error('current dsh runtime does not support subagents')
 
       // Reserve synchronously, before the first await: two sends in one session must not
       // start two runtimes (and two subagent children) for the same turn.
@@ -379,7 +381,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
 
         const prompt = input.remainder.trim() || pkg.description || '开始协助工作。'
         const parent = input.resolveParent === undefined ? undefined : await input.resolveParent()
-        await startSubagent('spawn', {
+        await subagents.start('spawn', {
           prompt: [{ type: 'text', text: prompt }],
           persona,
           ...(parent === undefined ? {} : { parent }),
