@@ -68,7 +68,7 @@ agents-state.json
   activation（发布后的取消归 `dispose()`，不再 abort 发布前 signal）并照常停止子进程；`agent-package-tools.spec.ts`
   用假定时器钉住 599,999 ms 内仍在等待、600,000 ms 触发清理。
 - **Windows 真机**：无 Windows 机器，Task 1/9 仍为 BLOCKED。
-- **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3146 passed / 14 skipped）、typecheck
+- **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3150 passed / 14 skipped）、typecheck
   （0）、`check:desktop-variants`（0）；根 `corepack yarn check` 未在最终树重跑（此前在最终评审前为绿）。
 - **M1 完成声明**：不作出。上述实机项与 Windows 未完成。
 
@@ -126,7 +126,7 @@ MCP server 由运行时拉起到 `127.0.0.1:53182`，子会话拿到回显 `{"he
 
 ### 更新后的门禁
 
-`dsh-plugin-huaanwork` 全量 **3146 passed / 14 skipped**；typecheck 0；`check:desktop-variants` 0（7/64，前缀 6）。
+`dsh-plugin-huaanwork` 全量 **3150 passed / 14 skipped**；typecheck 0；`check:desktop-variants` 0（7/64，前缀 6）。
 根 `corepack yarn check` 仍未在最终树重跑。
 
 ### 仍未完成
@@ -156,3 +156,12 @@ legacy `@agent` 已迁移并在本地 fixture catalog 上通过（§8）；残�
 工具清单仍可能先拿到完整工具集（wrapper 的 allow restrict 在 activation 之后）；不影响 persona 注入与运行，
 记为后续硬化项；真实内网 catalog 的认证/payload 仍需有网时补验。测试 fixture 会话已隔离，profile 的
 `agents_host`/`agents_port` 已恢复为 `10.130.209.76:18080`。
+
+### 最终代码复跑（并发归属修复后）
+
+并发归属修复 `1e8389be9a` 后，在最终构建上再次用本地 fixture catalog 复跑 `@legacy-assistant`：子会话仍收到
+persona 前缀并返回周报，legacy 路径通过。实机中该回合的父/子代理在**首轮工具清单未受限**的窗口内写入了
+workspace 的 `周报_2026W43.md`（2630 bytes）；该文件已用会话日志中写入前的 `read` 原文精确恢复。这同时印证了
+§5 的 allow 首轮残余是真实可达的写副作用，后续硬化（预留 childId/pre-restrict）应优先处理。
+
+最终门禁：`dsh-plugin-huaanwork` 3150 passed / 14 skipped；typecheck 0；`check:desktop-variants` 0；whitespace 0。
