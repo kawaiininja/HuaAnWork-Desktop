@@ -5,7 +5,7 @@
 - 模型：完整交互链路使用 `deepseek-chat`；修复工具名白名单后，用默认 `deepseek-flash` 复测到
   `agent_propose` 批准框（见“默认模型复测”）。
 - 结论：**核心链路 PASS，M1 仍未完成**。创建/确认/提交/启用/`@` 运行/更新/重启持久化/关闭/详情均已在真实
-  macOS 应用与真实模型上验证；验收过程中发现并修复 5 个真实接线缺陷 + 1 个验收修复引入的回归，随后 HTTP
+  macOS 应用与真实模型上验证；验收过程中发现并修复 9 个真实接线缺陷 + 1 个验收修复引入的回归，随后 HTTP
   与 MCP 实机均通过（§7）。catalog-legacy 实机与 Windows 真机仍未验收。
 
 ## 1. 通过项
@@ -23,6 +23,7 @@
 | 关闭 | 关闭后 `enabled:false`，按钮恢复“启用” |
 | 详情 | 显示人设/技能/工具/文件清单与固定提示“脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。” |
 | catalog-legacy 空态/错误 | 公用机目录不可达时广场显示错误横幅与空态，不崩溃 |
+| HTTP/MCP 实机 | `http-echo` 的 `agent_http` 返回 `{"echo":{"hello":"world"},"at":"http-echo"}`；`mcp-echo` 的子会话调用 `mcp__mcp-echo__echo` 返回 `{"hello":"mcp"}`（§7） |
 
 ## 2. 验收中发现并修复的缺陷
 
@@ -54,9 +55,6 @@ agents-state.json
 
 ## 5. 未验收 / 阻断
 
-- **HTTP/MCP 实机运行**：HTTP 与 MCP 均已在 §7 通过。MCP 子会话实际调用 `mcp__mcp-echo__echo` 并拿到
-  `{"hello":"mcp"}`；父会话的总结附带了额外的 bash/curl 自查（父会话本来就不持有包子会话的 MCP 工具），属于
-  UX 观察，不影响工具链结论。
 - **catalog-legacy 实机运行**：公用机目录 `10.130.209.76:18080` 在验收时超时，广场显示目录错误；legacy 兼容由
   `agent-package-legacy.spec.ts` 覆盖，未做真实目录实机验收。
 - **legacy `@agent` 兼容（rc.1 已知破损，非阻断）**：`agent-invoke.ts` 的 agent 分支仍调用 rc.1 已删除的
@@ -105,6 +103,11 @@ tool/result {"hello":"mcp"}
 MCP server 由运行时拉起到 `127.0.0.1:53182`，子会话拿到回显 `{"hello":"mcp"}`，回合正常结束。UI 中父会话
 显示了该结果，但父模型同时用 bash/curl 自查了一遍（父会话本来就不持有包子会话的 MCP 工具），所以文案较啰嗦；
 这是 UX/模型行为观察，不影响“MCP 工具调用成功”的结论。
+
+归因补充：本次通过的运行使用单标签会话，MCP server 的 `cwd` 为
+`~/.huaanwork/profiles/desktop/workspace`，对应子会话目录
+`--Users-amonmiao-.huaanwork-profiles-desktop-workspace--`，二者一致；此前“项目/标签不匹配”的现象未复现，
+仍按操作导航观察记录（未确认为产品路由缺陷）。
 
 复现注记：新开单标签应用会话，直接在同一个标签完成创建/启用/`@`，不要中途切换项目或标签；MCP server 的
 `cwd` 应与该会话的 Host workspace 一致。
