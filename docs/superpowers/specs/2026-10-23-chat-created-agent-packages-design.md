@@ -1,24 +1,26 @@
-# 会话内创建智能体包（融合设计）
+# 会话内创建智能体包（融合设计：M1 本地版 / M2 发布版）
 
 - 日期：2026-10-23
-- 状态：设计已确认（头脑风暴五节均过），待实施计划
-- 范围：华安工作台（`dsh-plugin-huaanwork`）的会话创建流程、智能体包、AgentsView 三页签、`@` 运行链路，以及 agent-catalog 的签名发布/消费端。M1 覆盖 macOS 与 Windows。
-- 不改：`dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/`、`dsh-desktop-next/`、`deepseek-harness/`、`dsh-community-market/`。`market-server/` 仅做签名原语的共享抽取（见 §8.1），不改其运行时路由、配置或行为。
+- 状态：设计已确认；2026-10-23 范围裁定：M1 只做本地创建/运行/启停，发布+消费整条链路移入 M2。
+- 范围：M1 覆盖 macOS 与 Windows 的会话创建、本地智能体包、AgentsView 三页签、`@` 运行与启停；M2 覆盖审查/签名发布、目录包下载/安装/更新/下架/撤销（§8 只作为 M2 设计保留，不计入 M1）。
+- 不改：`dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/`、`dsh-desktop-next/`、`deepseek-harness/`、`dsh-community-market/`。M1 不改 `market-server/`；M2 若采用签名原语共享，仅做 §8.1 的代码抽取，不改其运行时路由、配置或行为。
 - 来源与取代关系：本规格融合并取代 `2026-10-22-chat-created-agents-design.md`（A）与 `2026-10-22-conversation-create-employee-design.md`（B）作为实施依据。A 提供“一个智能体模型 + 侧栏/页面治理 + 公用机发布”的产品闭环；B 提供“宿主校验草稿 + 明确同意 + 原子落盘 + 包运行时 + 完整校验”的工程纪律。两份草案保留为历史设计输入。
 
 ## 1. 背景与目标
 
-用户在华安工作台的会话框输入“帮我新建一个智能体”“帮我建一个数字员工”或相近说法时，会话进入创建流程；助手以 grill-me 式逐问澄清用途、名称、能力简介、人设边界、技能包与工具选择；用户确认后，宿主在本机写入一个智能体包。建好的智能体出现在左侧「智能体」页面的「我的智能体」页签，展示名称与能力简介，并提供启用、关闭、发布。发布经过管理员审查与 Ed25519 签名后进入公用机目录，其他同事可在「智能体广场」下载、验签、启用并通过 `@标识` 调用。
+用户在华安工作台的会话框输入“帮我新建一个智能体”“帮我建一个数字员工”或相近说法时，会话进入创建流程；助手以 grill-me 式逐问澄清用途、名称、能力简介、人设边界、技能包与工具选择；用户确认后，宿主在本机写入一个智能体包。建好的智能体出现在左侧「智能体」页面的「我的智能体」页签，展示名称与能力简介，M1 提供启用、关闭；M2 再提供发布。M2 的发布经过管理员审查与 Ed25519 签名后进入公用机目录，其他同事可在「智能体广场」下载、验签、启用并通过 `@标识` 调用。
 
-典型场景仍是**个人效率助手**：员工为自己搭建合同审查员、周报生成器等助手，自己建、自己用；发布是顺带分享。管理员审查与签名是分享链路的治理门槛。
+典型场景仍是**个人效率助手**：员工为自己搭建合同审查员、周报生成器等助手，自己建、自己用；发布是顺带分享（M2）。管理员审查与签名是分享链路的治理门槛。
 
-成功标准：
+**M1 成功标准**（本地版）：
 
 1. 会话内两种规范说法与 `/create-agent` 能稳定进入创建流程；澄清一次只问一个问题。
 2. 建成的智能体出现在「我的智能体」，显示名称与能力简介；启用/关闭即时生效。
 3. 选中 HTTP/MCP 的智能体在 `@` 回合里真的能调用其脚本；回合结束进程停止。
-4. 本地包可提交审查；管理员签名后发布；另一台机器能下载、验签、安装、启用并运行。
-5. macOS 与 Windows 都完成真机验收；失败时诚实报错，不静默降级。
+4. macOS 与 Windows 都完成本地创建/运行/启停真机验收；失败时诚实报错，不静默降级。
+5. 旧目录已启用智能体不丢：继续以 `catalog-legacy` 路径可用，界面标“待迁移”。
+
+**M2 成功标准**（发布版，见 §8）：本地包提交审查；管理员签名后发布；另一台机器下载、验签、安装、启用并运行；下架/撤销生效。M1 验收不得声称“发布已交付”。
 
 ## 2. 已确认裁定
 
@@ -26,15 +28,16 @@
 |---|---|
 | R1 | 智能体与数字员工是同一个实体：**智能体包**；“数字员工”只是口语称呼 |
 | R2 | 保留 B 的完整生成脚本能力：专属技能包 + 可生成并本机执行的 HTTP/MCP `server.mjs` |
-| R3 | 发布必须经过管理员审查 + Ed25519 签名，整包分发；消费端验签后才安装/运行 |
+| R3 | **M2**：发布必须经过管理员审查 + Ed25519 签名，整包分发；消费端验签后才安装/运行 |
 | R4 | 运行时使用现有 DSH sandbox；**只保证写限制**，读文件与网络不隔离；审查/签名是来源控制，不是运行时隔离 |
 | R5 | AgentsView 三个页签：**智能体广场 / 我的智能体 / 我的工具包**；取消独立“已启用”页签 |
 | R6 | M1 同时覆盖 macOS 与 Windows；Windows 沙箱 `partial` 是已接受事实，必须有真机验收 |
-| R7 | 发布链路三个凭据：读 token、发布 token、admin token；桌面端不持有 admin token 与签名私钥 |
-| R8 | M1 包含撤销列表；下架只影响广场分发，撤销才禁用已安装副本 |
-| R9 | 审查与签名通过管理员 CLI 完成；M1 不做审查 UI |
+| R7 | **M2**：发布链路三个凭据：读 token、发布 token、admin token；桌面端不持有 admin token 与签名私钥 |
+| R8 | **M2**：包含撤销列表；下架只影响广场分发，撤销才禁用已安装副本 |
+| R9 | **M2**：审查与签名通过管理员 CLI 完成；不做审查 UI |
 | R10 | 新建默认关闭；同 slug 更新纳入 M1，版本由宿主 patch+1 |
 | R11 | M1 脚本无跨轮状态；不做“以此身份开新会话”、知识库、跨智能体依赖分发、多密钥轮换 UI |
+| R12 | **M1 仅本地**：创建、本地包、运行、启停、三页签、macOS+Windows；发布+消费整条链路移入 M2；M1 验收不得声称发布已交付 |
 
 ## 3. 现状与约束（已核实）
 
@@ -53,9 +56,11 @@
 | 模型目录不渲染 `whenToUse`，路由只看名称与截断后的 description | `deepseek-harness/packages/skill/tool-skill/README.md:244` | 不能把“whenToUse 自触发”作为入口机制 |
 | `read`/`read_file`/`glob`/`grep`/`edit`/`write` 对工作区外路径直接拒绝 | `packages/huaanwork-policy/src/decide.ts:78-88`、`paths.ts:12-35` | 子代理不能直接读 `profileDir` 下的包文件；persona/skill 由宿主注入，脚本经宿主工具运行 |
 | DSH sandbox 的策略词汇只有文件效果；Windows 后端 `partial`，读与网络不受限 | `packages/sandbox/sandbox-local/README.md:53`、`sandbox-windows-acl/README.md:125` | 接受 R4；UI 与规格必须诚实说明 |
-| 目录客户端只有 `GET /v1/catalog` 与 `GET /v1/catalog/<name>`；仓库无生产目录服务端 | `agents-host.ts:191-360`、`docs/superpowers/specs/2026-10-13-agents-catalog-integration-design.md:149-159` | 新增 agent-catalog 服务端与包接口 |
-| market-server 已有 `canonicalJson`/Ed25519 sign/verify 与双槽 keyId 校验 | `market-server/src/signing.ts:193-410` | 抽取共享签名原语，不重写 canonicalization |
+| 目录客户端只有 `GET /v1/catalog` 与 `GET /v1/catalog/<name>`；仓库无生产目录服务端 | `agents-host.ts:191-360`、`docs/superpowers/specs/2026-10-13-agents-catalog-integration-design.md:149-159` | **M2**：新增 agent-catalog 服务端与包接口；M1 不需要 |
+| market-server 已有 `canonicalJson`/Ed25519 sign/verify 与双槽 keyId 校验 | `market-server/src/signing.ts:193-410` | **M2**：抽取共享签名原语；M1 不改 market-server |
 | 现有本地入口页签只渲染“删除” | `AgentsView.tsx:330-357` | 新 UI 需要按来源与状态重写卡片动作 |
+
+标 M2 的行只约束二期；M1 不实现 §8、不需要签名包/目录包/撤销/三 token。M1 的目录读取仍是现有 GET 目录（legacy）与本地工具入口。
 
 ## 4. 总体架构
 
@@ -72,11 +77,11 @@
      ▼ 模型调用 agent_commit（宿主核对原句与 draftId）
 [本机智能体包] {profileDir}/agents/{slug}/
      │
-     ├─ 我的智能体：启用/关闭；@ 调用；发布/提交审查；更新
+     ├─ 我的智能体：启用/关闭；@ 调用；本地更新（M1）
      │
-     ├─ 发布：包 → 提交审查 → 管理员审查/签名 → agent-catalog 包仓库
+     ├─ M2：发布：包 → 提交审查 → 管理员审查/签名 → agent-catalog 包仓库
      │
-     └─ 消费：广场下载 → 验签/解包/哈希 → 原子安装 → 启用 → @ 运行
+     └─ M2：消费：广场下载 → 验签/解包/哈希 → 原子安装 → 启用 → @ 运行
 
 [运行时] agent-package-runtime
    persona + SKILL.md + allowSkills 正文 → subagents.start("spawn")
@@ -86,13 +91,17 @@
 
 信任边界：
 
-- **创建者**：本机写包；默认关闭；发布只提交审查。
-- **审查/签名者**：离线私钥 + admin CLI；服务端只持有公钥。
-- **目录服务**：存储已签名包与撤销/下架元数据；读 token 分发。
-- **消费端**：安装时验签；每次运行前复验哈希与签名；撤销即禁用。
-- **沙箱**：限制写；不限制读与网络（R4）。
+- **创建者（M1）**：本机写包；默认关闭；包只在本地使用，不进入目录。
+- **审查/签名者（M2）**：离线私钥 + admin CLI；服务端只持有公钥。
+- **目录服务（M2）**：存储已签名包与撤销/下架元数据；读 token 分发。
+- **消费端（M2）**：安装时验签；每次运行前复验哈希与签名；撤销即禁用。
+- **沙箱（M1）**：限制写；不限制读与网络（R4）。
+
+M1 只实现创建、本地包、运行、启停与三页签；发布/消费分支不接线、不出现在 M1 UI，也不计入 M1 验收。
 
 ## 5. 数据模型
+
+**M1 只使用 `source: local` 与 `catalog-legacy`；`.signature/`、`source: catalog`、`publishStatus`/`publishedVersion` 的发布语义属于 M2。** M1 的本地包没有签名文件，版本号保留给 M2 发布使用。
 
 ### 5.1 包目录
 
@@ -104,8 +113,8 @@
   skill/scripts/...              # 可选，≤20 个
   tools/http/server.mjs          # tools 含 http 时必有
   tools/mcp/server.mjs           # tools 含 mcp 时必有
-  .signature/package-digest.json # 仅从广场安装的包
-  .signature/signature.json      # 仅从广场安装的包
+  .signature/package-digest.json # M2：仅从广场安装的包
+  .signature/signature.json      # M2：仅从广场安装的包
 ```
 
 草稿：`{profileDir}/agents/.drafts/{sessionId}.json`。
@@ -113,7 +122,7 @@
 旧启用表：`{profileDir}/agents-enabled.json` 保持只读，迁移完成后删除对应 `catalog:` 键。
 旧工具入口：`{profileDir}/agents-endpoints.json` 不动，归「我的工具包」。
 
-`.signature/` 不参与 digest 的文件清单；安装时额外允许且只允许这两个文件。包目录本身是签名覆盖内容的唯一权威；启用/发布状态不写进包。
+`.signature/` 属于 M2，不参与 digest 的文件清单；安装时额外允许且只允许这两个文件。包目录本身是签名覆盖内容的唯一权威；启用/发布状态不写进包。
 
 ### 5.2 `agent.json`
 
@@ -142,10 +151,9 @@
   "local:weekly-report": {
     "source": "local",
     "enabled": true,
-    "installedVersion": "1.0.1",
-    "publishStatus": "published",
-    "publishedVersion": "1.0.0"
+    "installedVersion": "1.0.1"
   },
+  // M2：从广场安装的签名包
   "catalog:typo-check": {
     "source": "catalog",
     "enabled": true,
@@ -154,6 +162,8 @@
   }
 }
 ```
+
+M1 的本地条目只读写 `source`/`enabled`/`installedVersion`；`publishStatus`/`publishedVersion` 是 M2 字段，M1 可省略。
 
 过渡期条目示例（旧目录 persona 条目尚未迁移）：
 
@@ -167,14 +177,14 @@
 }
 ```
 
-`publishStatus` 取值：`none`、`pending-review`、`published`、`rejected`、`delisted`、`installed`。`source` 取值 `local`、`catalog`、`catalog-legacy`；`catalog-legacy` 只用于尚未迁移为签名包的旧目录 persona 条目，它仍走旧 `kind:"agent"` 路径，不进入包运行时，也不参与发布。启用态与已发布状态分离；签名包的 manifest 永远不被修改。
+`publishStatus` 取值：`none`、`pending-review`、`published`、`rejected`、`delisted`、`installed`，属于 M2。`source` 取值 `local`、`catalog`、`catalog-legacy`；**M1 只使用 `local` 与 `catalog-legacy`，`catalog` 属于 M2**。`catalog-legacy` 只用于尚未迁移为签名包的旧目录 persona 条目，它仍走旧 `kind:"agent"` 路径，不进入包运行时，也不参与发布。启用态与已发布状态分离；签名包的 manifest 永远不被修改。
 
 ### 5.4 版本、更新与迁移
 
 - 新建：`version = 1.0.0`，默认 `enabled:false`。
-- 同 slug 更新（仅本地包）：`mode:"update"` 走同一 propose/commit；宿主把 patch 位 +1；内容变化后 `publishStatus` 回到 `none`，需要重新提交审查。
-- 广场包更新：只能下载更高版本；安装前校验签名与撤销列表；保留 `enabled`。
-- 旧数据迁移：`agents-enabled.json` 中 `catalog:<name>` 为 true 的条目，如果服务端已有同 slug 的签名包，下载并安装到「我的智能体」并保持启用，成功后删旧键；否则保留旧键与旧 `kind:"agent"` 路径，标为 `catalog-legacy`，界面显示“待迁移，服务端完成签名迁移后自动切换”。**不得用未签名的本地物化包冒充目录包**。目录不可达时保留旧键并继续可用，不因迁移失败让已启用项消失。现有本地工具入口原样留在「我的工具包」。
+- 同 slug 更新（仅本地包）：`mode:"update"` 走同一 propose/commit；宿主把 patch 位 +1。M1 不维护发布状态；M2 接入发布后，内容变化再把 `publishStatus` 置回 `none` 并要求重新提交审查。
+- 广场包更新（M2）：只能下载更高版本；安装前校验签名与撤销列表；保留 `enabled`。
+- 旧数据迁移（M1）：`agents-enabled.json` 中 `catalog:<name>` 为 true 的条目保留旧键与旧 `kind:"agent"` 路径，标为 `catalog-legacy`，界面显示“待迁移”；**M1 不下载、不物化、不伪造签名包**，目录不可达也不让已启用项消失。M2 服务端完成后，客户端再下载同 slug 签名包并保持启用，成功后删旧键。现有本地工具入口原样留在「我的工具包」。
 
 ## 6. 创建链路
 
@@ -289,7 +299,9 @@ HTTP 不复用 `call_host_tool`：后者绑定目录快照与 attached 判定，
 - 同一会话同时只允许一个包智能体回合；第二个 `@` 由现有 followup 队列等待，第一轮结束后重新拉起，不复用进程。
 - 回合失败清理全部子进程；下一句重新拉起。
 
-## 8. 发布、签名、消费
+## 8. M2：发布、签名、消费
+
+本节只属于 M2，不进入 M1 验收；M1 不实现签名、目录包、管理员 CLI、三 token、审计、撤销，也不改 market-server。保留本节是为了二期可以直接接续，不再重新设计。
 
 ### 8.1 包与签名格式
 
@@ -318,7 +330,7 @@ signature.json                       # Ed25519 签名（在 .signature/ 内）
 - `signature.json`：`{ version, algorithm: "Ed25519", keyId, slot, signedAt, signature }`。
 - 不签压缩包字节；文件哈希绑定内容，客户端解包后逐文件复算。
 - **共享签名原语**：`canonicalJson`、Ed25519 sign/verify、keyId/双槽校验已存在于 `market-server/src/signing.ts:193-410`。本规格要求把这些通用原语抽到共享模块（如 `packages/catalog-signing/`），`market-server` 改为从共享模块导入，`agent-catalog-server` 与桌面端共用同一实现；这是对“不改 market-server”边界的唯一显式例外，仅限代码抽取与 import 变化，不改其路由、配置或行为，现有 market-server 测试必须保持通过。若该例外不被接受，退路是在 agent-catalog-server 内复制这三个函数，并用同一 fixture 对 canonicalJson 做逐字节一致性测试；不推荐。
-- 信任根：私钥只在离线签名机；服务端只持公钥。桌面端从 IT 管理的 profile 配置读取 keyring（`keyId` + raw 32-byte hex 公钥 + 可选 `retiredAt`），不在用户设置界面暴露编辑。服务端从部署配置读取同一 keyring 的公钥槽；管理员 CLI 从本地路径读取私钥；二者不共享私钥文件。M1 一个 active key；代码支持双槽轮换，轮换流程走配置/发版，M2 再做 UI。
+- 信任根：私钥只在离线签名机；服务端只持公钥。桌面端从 IT 管理的 profile 配置读取 keyring（`keyId` + raw 32-byte hex 公钥 + 可选 `retiredAt`），不在用户设置界面暴露编辑。服务端从部署配置读取同一 keyring 的公钥槽；管理员 CLI 从本地路径读取私钥；二者不共享私钥文件。M2 一个 active key；代码支持双槽轮换，轮换流程走配置/发版，轮换 UI 留到后续。
 - 安装时验签；**每次 `@` 运行前复验文件哈希与签名**；失败标损坏并拒绝运行。
 
 ### 8.2 角色、凭据与状态机
@@ -389,7 +401,7 @@ none ──提交──> pending-review ──批准/签名──> published ─
 
 下架：广场不再展示，已安装副本仍可使用；卡片显示“已下架”。下架不是安全处置。
 
-撤销：管理员标某 slug/version 不安全；客户端刷新撤销列表后，已安装副本标损坏、禁止启用、正在运行的回合停止；广场不再提供下载。撤销列表在应用启动、进入智能体页以及页面打开期间每 60 秒刷新；目录不可达时使用上次已知列表并显示警告；离线期间被撤销的包可能继续运行到下次刷新，这是已接受风险。M1 不提供 unrevoke UI。
+撤销：管理员标某 slug/version 不安全；客户端刷新撤销列表后，已安装副本标损坏、禁止启用、正在运行的回合停止；广场不再提供下载。撤销列表在应用启动、进入智能体页以及页面打开期间每 60 秒刷新；目录不可达时使用上次已知列表并显示警告；离线期间被撤销的包可能继续运行到下次刷新，这是已接受风险。M2 不提供 unrevoke UI。
 
 移除：仅对从广场下载的包提供本地“移除”（删包目录 + state），不删除本地创建的包。
 
@@ -403,17 +415,17 @@ none ──提交──> pending-review ──批准/签名──> published ─
 
 | 页签 | 内容 | 主要动作 |
 |---|---|---|
-| 智能体广场 | 签名包摘要 + 尚未迁移的旧 persona 目录条目（标“待迁移”）；未安装/已安装/可更新/重名/已撤销状态 | 查看详情；签名包下载/更新；旧条目沿用“启用”走旧路径 |
-| 我的智能体 | 本地创建的包 + 从广场安装的签名包 + 已启用的 `catalog-legacy` 条目 | 启用/关闭；发布；查看审查状态；申请下架；更新；移除（仅下载包）；查看详情 |
-| 我的工具包 | 现有本地工具入口 + 公用机目录中的工具条目（分组显示） | 本地工具保持添加/删除；公用机工具沿用启用/禁用，不改调用路径 |
+| 智能体广场（M1） | 现有公用机目录条目（legacy persona，标“待迁移”）；M2 再加入签名包摘要 | 查看详情；旧条目沿用启用/关闭走旧路径；M1 无下载/更新 |
+| 我的智能体（M1） | 本地创建的包 + 已启用的 `catalog-legacy` 条目；M2 再加入从广场安装的签名包 | 启用/关闭；本地包更新（会话 `/create-agent update <slug>`）；查看详情；M1 无发布/下架/移除 |
+| 我的工具包（M1） | 现有本地工具入口 + 公用机目录中的工具条目（分组显示） | 本地工具保持添加/删除；公用机工具沿用启用/禁用，不改调用路径 |
 
-「我的智能体」卡片固定显示：显示名、能力简介、`@slug`、版本、来源徽标（本地创建/来自广场）、启用态、发布态。损坏/撤销状态下禁用启用与发布。
+M1 不渲染发布、下载、安装、更新广场包、申请下架、移除下载包、撤销状态；这些在 M2 接入。「我的智能体」卡片在 M1 显示显示名、能力简介、`@slug`、版本、来源徽标（本地创建/旧目录）、启用态；发布态在 M2 再加入。损坏状态下禁用启用与更新。
 
-详情页：名称、`@slug`、简介、版本、来源、启用态、发布态、人设摘要、技能摘要、工具模式、文件清单与大小、签名信息（keyId/签名时间/验签结果）。固定提示：**“脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。”**
+详情页：名称、`@slug`、简介、版本、来源、启用态、人设摘要、技能摘要、工具模式、文件清单与大小；发布态与签名信息（keyId/签名时间/验签结果）在 M2 再加入。固定提示：**“脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。”**
 
 空态：
 
-- 广场：`暂无可用智能体；请在公用机目录完成发布。`
+- 广场：`暂无可用智能体；请先配置公用机目录。`
 - 我的智能体：`还没有智能体。在会话里说「帮我新建一个智能体」即可创建。`
 - 我的工具包：沿用现有本地入口空态。
 
@@ -421,22 +433,25 @@ none ──提交──> pending-review ──批准/签名──> published ─
 
 | RPC | 用途 |
 |---|---|
-| `agent.packageList` | 返回已安装包、广场签名包、`catalog-legacy` 条目、目录错误；「智能体广场」与「我的智能体」两个页签的唯一数据源 |
-| `agent.packageDetail` | 单包/单条目的详情（含签名验签结果） |
-| `agent.packageSetEnabled` | 包/`catalog-legacy` 的启用/关闭 |
-| `agent.packagePublish` | 提交审查，返回 `submissionId` |
-| `agent.packagePublishStatus` | 查询审查/发布状态 |
-| `agent.packageRequestDelist` | 提交下架申请 |
-| `agent.packageInstall` | 从广场安装签名包 |
-| `agent.packageUpdate` | 更新已安装目录包 |
-| `agent.packageRemove` | 移除已安装的目录包 |
-| `agent.packageRefresh` | 刷新目录与撤销列表 |
-| `agent.invocableList` | `@` 补全：已启用包 + `catalog-legacy` + 工具 |
-| `agent.list` | 保留现有契约；「我的工具包」的本地工具与公用机工具、旧目录条目继续使用 |
+| `agent.packageList`（M1） | 返回本地包、`catalog-legacy` 条目、现有目录条目与目录错误；M2 再加广场签名包；「智能体广场」与「我的智能体」的数据源 |
+| `agent.packageDetail`（M1） | 本地包/条目的详情；M2 再加签名验签结果 |
+| `agent.packageSetEnabled`（M1） | 本地包/`catalog-legacy` 的启用/关闭 |
+| `agent.invocableList`（M1） | `@` 补全：已启用本地包 + `catalog-legacy` + 工具 |
+| `agent.list`（M1） | 保留现有契约；「我的工具包」的本地工具与公用机工具、旧目录条目继续使用 |
+| `agent.setEnabled`（M1，现有） | 广场现有目录条目的启用/关闭；`agent.packageSetEnabled` 负责本地包与 `catalog-legacy` |
+| `agent.packagePublish`（M2） | 提交审查，返回 `submissionId` |
+| `agent.packagePublishStatus`（M2） | 查询审查/发布状态 |
+| `agent.packageRequestDelist`（M2） | 提交下架申请 |
+| `agent.packageInstall`（M2） | 从广场安装签名包 |
+| `agent.packageUpdate`（M2） | 更新已安装目录包（本地包更新走会话） |
+| `agent.packageRemove`（M2） | 移除已安装的目录包 |
+| `agent.packageRefresh`（M2） | 刷新目录包与撤销列表 |
 
-`agent.changed` 事件在创建提交、启停、安装、更新、移除、发布状态变化后触发，客户端据此重拉 `agent.packageList`。设置面新增 `agents_catalog_publish_token`；keyring 由 IT 管理写入 profile 配置，不在用户设置 UI 暴露编辑。
+`agent.changed` 事件在创建提交、启停、本地更新后触发；M2 再加入安装、更新、移除、发布状态变化。M1 不新增设置项；M2 才新增 `agents_catalog_publish_token` 与 IT 管理的 keyring。
 
-### 9.3 发布状态与动作
+### 9.3 发布状态与动作（M2）
+
+下表只属于 M2；M1 的「我的智能体」卡片只有启用/关闭、本地更新（会话）与查看详情，不显示发布、下载、更新广场包、申请下架或移除下载包。
 
 | 状态 | 卡片 | 动作 |
 |---|---|---|
@@ -450,21 +465,23 @@ none ──提交──> pending-review ──批准/签名──> published ─
 | 已撤销 | “已撤销：原因” | 详情、移除 |
 | 已损坏 | “已损坏：原因” | 详情、移除（下载包） |
 
-发布动作弹窗说明“提交后需管理员审查与签名，不会立即上架”。提交成功后显示 `待审查`；审批由管理员 CLI 完成，客户端通过刷新/重新进入页签获取状态。M1 不做后台推送。
+发布动作弹窗说明“提交后需管理员审查与签名，不会立即上架”。提交成功后显示 `待审查`；审批由管理员 CLI 完成，客户端通过刷新/重新进入页签获取状态。M2 不做后台推送。
 
 ## 10. 错误处理
+
+标 M2 的错误只在二期出现；M1 的本地包没有签名、安装、撤销与下架。
 
 | 场景 | 行为/文案 |
 |---|---|
 | 未启用/不存在 | `智能体「X」未启用或不存在` |
 | 已损坏 | `智能体「X」已损坏：{reason}` |
-| 签名/哈希失败 | `包校验失败，未安装或未运行。请联系管理员` |
-| 版本冲突/降级 | `版本低于已安装版本，已拒绝更新` |
-| 审查拒绝 | `审查未通过：{reason}` |
+| 签名/哈希失败（M2） | `包校验失败，未安装或未运行。请联系管理员` |
+| 版本冲突/降级（M2） | `版本低于已安装版本，已拒绝更新` |
+| 审查拒绝（M2） | `审查未通过：{reason}` |
 | 沙箱不可用 | `当前系统无法启动沙箱，智能体未运行` |
 | 脚本启动失败 | `脚本启动失败：{stderr 前 500 字符}` |
-| 已撤销 | `该版本已被管理员撤销：{reason}` |
-| 已下架 | `已下架，不再提供下载；已安装副本仍可使用` |
+| 已撤销（M2） | `该版本已被管理员撤销：{reason}` |
+| 已下架（M2） | `已下架，不再提供下载；已安装副本仍可使用` |
 | slug 冲突 | `@标识与本地包或工具包冲突，请换一个名称` |
 | 包结构非法 | `包结构非法，已拒绝安装` |
 | 认证失败 | `目录口令错误或权限不足` |
@@ -476,62 +493,80 @@ none ──提交──> pending-review ──批准/签名──> published ─
 
 | 层 | 覆盖 |
 |---|---|
-| 单元（headless） | manifest 校验；canonicalJson 与 market-server 逐字节一致；签名/双槽 keyId；digest；解包路径/symlink/重复/额外文件/zip bomb；状态机；触发正则；审计 |
-| 宿主集成（headless） | propose/commit/取消/幂等；原子写与崩溃恢复；slug 冲突；迁移；`@` 分流；`agent_skill_run`；`agent_http`；MCP 空工具；工具白名单；进程清理；沙箱不可用 fail-closed；启用/关闭/更新/移除 |
-| 服务端集成（headless） | 三 token 分离；提交/批准/拒绝；重复版本；并发；下架申请；撤销；审计；包大小帽 |
-| E2E（headless + 真机） | 创建 → 提交 → CLI 审查/签名 → 发布 → 第二台机器下载/验签/启用 → `@` 调用 → 更新 → 撤销 |
-| 安全负例 | 未签名；篡改文件；错误 key；未知 key；撤销版本；降级；重放旧版本；错误 token；路径穿越；额外脚本 |
+| 单元（M1） | manifest 校验；草稿/确认状态机；触发正则；本地状态/启用；本地更新版本；路径与文件约束 |
+| 宿主集成（M1） | propose/commit/取消/幂等；原子写与崩溃恢复；slug 冲突；`catalog-legacy` 迁移；`@` 分流；`agent_skill_run`；`agent_http`；MCP 空工具；工具白名单；进程清理；沙箱不可用 fail-closed；启用/关闭/更新 |
+| UI/契约（M1） | 三页签渲染；我的智能体卡片；空态；`@` 补全只列已启用项；错误文案 |
+| 单元（M2） | canonicalJson 与 market-server 逐字节一致；签名/双槽 keyId；digest；解包路径/symlink/重复/额外文件/zip bomb；审计 |
+| 服务端集成（M2） | 三 token 分离；提交/批准/拒绝；重复版本；并发；下架申请；撤销；审计；包大小帽 |
+| E2E（M1，headless + 真机） | 创建 → 本地包 → 启用 → `@` 调用 → 关闭；旧 `catalog-legacy` 不丢 |
+| E2E（M2） | 创建 → 提交 → CLI 审查/签名 → 发布 → 第二台机器下载/验签/启用 → `@` 调用 → 更新 → 撤销 |
+| 安全负例（M1） | 路径穿越；声明外脚本；slug 冲突；沙箱不可用 |
+| 安全负例（M2） | 未签名；篡改文件；错误 key；未知 key；撤销版本；降级；重放旧版本；错误 token；额外文件 |
 | 回归 | `corepack yarn test`、`corepack yarn typecheck`、`corepack yarn check`、`corepack yarn check:desktop-variants` |
 
 ### 11.2 真机验收
 
-- macOS 与 Windows 各跑完整创建/运行/发布/消费链路。
-- Windows 记录 sandbox `partial` 执行事实、读/网络边界、安装路径与卸载/退出后的进程清理。
+- M1：macOS 与 Windows 各跑完整创建 → 本地包 → 启用 → `@` 调用 → 关闭链路。
+- M2：macOS 与 Windows 各跑发布 → 下载/验签/安装 → 启用 → 更新 → 撤销链路。
+- Windows 记录 sandbox `partial` 执行事实、读/网络边界、安装路径与退出后的进程清理。
 - Windows 安装器/发行面当前证据弱；没有真机则不能宣布 M1 完成。
-- 测试签名密钥与 fixture 包只用于测试；生产私钥不进 CI、不进仓库。
+- M2 测试签名密钥与 fixture 包只用于测试；生产私钥不进 CI、不进仓库。
 
 ## 12. 里程碑与工作量
 
 | 阶段 | 内容 | 粗略人日 |
 |---|---|---|
-| M1.0 可行性 spike | 沙箱能否启动长驻 Node HTTP/MCP 进程（macOS + Windows）；Electron/Node 启动路径；宿主拦截与技能注入；Windows 解包/安装 | 3–5 |
-| M1.1 包模型与创建 | manifest；草稿/propose/commit/原子写；状态存储；迁移；三页签；会话创建与确认卡；启用/关闭 | 6–9 |
+| M1.0 可行性 spike | 沙箱能否启动长驻 Node HTTP/MCP 进程（macOS + Windows）；Electron/Node 启动路径；宿主拦截与技能注入 | 3–5 |
+| M1.1 包模型与创建 | manifest；草稿/propose/commit/原子写；状态存储；`catalog-legacy` 迁移；三页签；会话创建与确认卡；启用/关闭 | 5–7 |
 | M1.2 运行链路 | `agent_skill_run`；`agent_http`；MCP 挂载；沙箱 runner；工具白名单；生命周期与清理 | 8–12 |
-| M1.3 发布与消费 | agent-catalog 包接口；签名模块抽取；管理员 CLI；三 token；审计；安装/更新/下架/撤销 | 8–12 |
-| M1.4 硬化与验收 | 安全负例；macOS/Windows 真机；文档/runbook；密钥生成与轮换流程；全量门禁 | 5–8 |
+| M1.3 发布与消费 | **移入 M2，不计入 M1** | 0 |
+| M1.4 硬化与验收 | 本地包与运行时负例；macOS/Windows 真机；迁移验收；全量门禁 | 3–5 |
 
-合计约 **30–45 人日**，不含 Windows 真机不可用造成的阻塞。M1.0 结论可能改变 M1.2/M1.3 估算。
+**M1 合计约 19–29 人日**，不含 Windows 真机不可用造成的阻塞。M1.0 结论可能改变 M1.2 估算。
+
+**M2（发布+消费整条链路）约 12–18 人日**：agent-catalog 包接口、签名模块抽取、管理员 CLI、三 token、审计、安装/更新/下架/撤销、签名与安装负例、双平台发布/消费验收。M2 是独立安全项目，可与 M1 分开排期。
 
 ## 13. 实施边界
 
 | 模块 | 职责 |
 |---|---|
-| `dsh-plugin-huaanwork/src/huaanwork-host/agent-package-*` | 包存储、manifest、草稿/提交、状态、迁移、安装/更新/移除、验签 |
-| `dsh-plugin-huaanwork/src/huaanwork-host/agent-package-runtime.ts` | 子代理人设合成、工具名单、HTTP/MCP 进程、沙箱、生命周期 |
-| `dsh-plugin-huaanwork/src/huaanwork-guardrails/agent-skill-tool.ts`、`agent-http-tool.ts` | 两个模型侧宿主工具 |
-| `dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts` | 入口识别、技能注入、`@` 分流、确认原句核对 |
-| `dsh-plugin-huaanwork/src/client-huaanwork/AgentsView.tsx` 等 | 三页签、卡片状态、发布/安装/更新/移除交互 |
-| `skills/create-agent/SKILL.md` | grill-me 访谈协议、只调用宿主接口、确认卡原样转述 |
-| `agent-catalog-server/`（新增） | 目录读、包提交/审批/签名验证、下架申请、撤销、审计 |
-| `agent-catalog-admin/` 或同仓 CLI | pending 列表、bundle 下载、digest 复算、签名、批准/拒绝、下架/撤销 |
-| `packages/catalog-signing/`（新增共享） | canonicalJson、Ed25519 sign/verify、key slot/keyId；market-server 改为引用 |
+| `dsh-plugin-huaanwork/src/huaanwork-host/agent-package-*`（M1） | 本地包存储、manifest、草稿/提交、状态、`catalog-legacy` 迁移、本地更新 |
+| `dsh-plugin-huaanwork/src/huaanwork-host/agent-package-runtime.ts`（M1） | 子代理人设合成、工具名单、HTTP/MCP 进程、沙箱、生命周期 |
+| `dsh-plugin-huaanwork/src/huaanwork-guardrails/agent-skill-tool.ts`、`agent-http-tool.ts`（M1） | 两个模型侧宿主工具 |
+| `dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts`（M1） | 入口识别、技能注入、`@` 分流、确认原句核对 |
+| `dsh-plugin-huaanwork/src/client-huaanwork/AgentsView.tsx` 等（M1） | 三页签、本地包卡片、启停/本地更新交互；M2 再加发布/安装/更新/移除 |
+| `skills/create-agent/SKILL.md`（M1） | grill-me 访谈协议、只调用宿主接口、确认卡原样转述 |
+| `agent-catalog-server/`（M2） | 目录读、包提交/审批/签名验证、下架申请、撤销、审计 |
+| `agent-catalog-admin/` 或同仓 CLI（M2） | pending 列表、bundle 下载、digest 复算、签名、批准/拒绝、下架/撤销 |
+| `packages/catalog-signing/`（M2） | canonicalJson、Ed25519 sign/verify、key slot/keyId；market-server 改为引用 |
 
-zero-touch：Stable/Beta 不新增 variant 白名单；所有桌面改动落在 `dsh-plugin-huaanwork/`。新增目录服务与共享签名模块独立于三包。若共享签名抽取改动 market-server，仅限 import/代码位置，不改运行时行为。
+zero-touch：Stable/Beta 不新增 variant 白名单；所有桌面改动落在 `dsh-plugin-huaanwork/`。M1 不创建 agent-catalog-server/admin/shared signing，也不改 market-server。M2 的新增目录服务与共享签名模块独立于三包；若共享签名抽取改动 market-server，仅限 import/代码位置，不改运行时行为。
 
 ## 14. 已接受风险与明确不做
 
 ### 14.1 已接受风险
 
-- 审查是人工的，不做恶意代码扫描；签名只证明“谁审过”。
-- M1 一个签名密钥；泄露需撤销版本并轮换，双槽轮换只保留能力不做 UI。
-- M1 信任目录服务的列表/下架/撤销元数据；被攻陷的服务端可以隐瞒更新或继续提供旧的合法签名版本。M2 做签名索引 + 防回滚。
-- 读/发布 token 共享，没有按用户身份区分；审计只能到 token 级别。
-- 运行时读与网络不隔离；签名包仍可读取用户文件、发起外联。UI 固定提示，用户启用即知情。
-- 下架不删除已安装副本；撤销才禁用。
+**M1（本地版）**
+
+- 运行时读与网络不隔离；本地包脚本可读取用户文件、发起外联。UI 固定提示，用户启用即知情。
 - Windows sandbox `partial`：只保证写限制；读/网络不保证。
 - 沙箱 runner 能否启动长驻进程未在代码中验证，M1.0 spike 是硬门槛；不通过则 M1.2 需要改设计，不允许无沙箱运行。
+- 生成脚本是模型产物，质量由创建者负责；M1 没有发布审查，脚本只在本机运行。
+- 本地包 M1 不提供删除；损坏时用同 slug 更新修复。
+- M1 不发布、不分享；本地包只在当前 profile 使用。
 
-### 14.2 明确不做（M2 或以后）
+**M2（发布版）**
+
+- 审查是人工的，不做恶意代码扫描；签名只证明“谁审过”。
+- 一个签名密钥；泄露需撤销版本并轮换，双槽轮换只保留能力不做 UI。
+- 信任目录服务的列表/下架/撤销元数据；被攻陷的服务端可以隐瞒更新或继续提供旧的合法签名版本。签名索引 + 防回滚不在 M2 范围。
+- 读/发布 token 共享，没有按用户身份区分；审计只能到 token 级别。
+- 签名包仍可读取用户文件、发起外联；审查/签名不是运行时隔离。
+- 下架不删除已安装副本；撤销才禁用。
+
+### 14.2 M2 之后仍不做
+
+发布+消费整条链路是 M2 的既定范围，不在本节；以下条目在 M2 之后仍不做。
 
 - “以此身份开新会话”与跨轮状态。
 - 知识库挂载。
@@ -545,3 +580,4 @@ zero-touch：Stable/Beta 不新增 variant 白名单；所有桌面改动落在 
 ## 15. 修订记录
 
 - 2026-10-23：融合 A（会话创建 + 侧栏治理 + 目录发布）与 B（宿主门禁 + 包运行时 + 校验）为统一智能体包设计；确定完整脚本能力、审查/签名发布、三页签、macOS+Windows、现有沙箱的真实边界（只限写）。
+- 2026-10-23（范围裁定）：M1 只做本地创建/运行/启停与三页签；发布+消费整条链路移入 M2。M1 估算 19–29 人日，M2 估算 12–18 人日。§8 作为 M2 设计保留，不计入 M1 验收。
