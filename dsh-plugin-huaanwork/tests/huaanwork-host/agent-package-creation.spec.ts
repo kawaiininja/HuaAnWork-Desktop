@@ -135,6 +135,8 @@ function fakeHost(overrides: Partial<AgentPackageHost> = {}): AgentPackageHost {
     listLocal: () => [],
     detail: () => undefined,
     setEnabled: () => undefined,
+    findInvocable: async () => undefined,
+    dispatch: async () => ({ text: '', afterIdle: async () => undefined }),
     ...overrides,
   }
 }

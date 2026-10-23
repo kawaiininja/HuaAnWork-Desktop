@@ -1,6 +1,8 @@
 import { attachHostTool, detachHostTool, type AttachmentMaps } from "../huaanwork-guardrails/agent-attachments.ts";
 import { mountSessionMcp } from "../huaanwork-guardrails/agent-mcp.ts";
 import { filterAgentAllow } from "@huaanwork/policy/agent-catalog";
+import type { AgentPackageDetail, AgentPackageSubagentRequest } from "./agent-package/types.ts";
+import type { AgentPackageDispatchResult } from "./agent-package/host.ts";
 import type { AgentsHost } from "./agents-host.ts";
 import { readHuaanworkSettingsSync } from "./settings.ts";
 
@@ -22,6 +24,11 @@ export type AgentInvokeContext = {
   huaanworkAttachments?: AttachmentMaps;
   huaanworkAgentCatalog?: { current: { items: unknown[] } };
   huaanworkAgentRequest?: { current: unknown };
+  /** `@slug` 包回合请求(由 host dispatch 写入,skills.ts 的 start 包装消费)。 */
+  huaanworkAgentPackageRequest?: { current: AgentPackageSubagentRequest | null };
+  huaanworkWorkspaceRoot?: { current: string };
+  /** sandbox 服务查找;包进程启动时按需解析。 */
+  get?: (name: string) => unknown;
   subagents?: {
     /** 探针 3 核实的上游签名:start(provider, request),provider 固定 "spawn"。 */
     start?: (
@@ -33,6 +40,22 @@ export type AgentInvokeContext = {
       },
     ) => Promise<unknown>;
   };
+};
+
+/** `@slug` 分流读取本地包详情的那一半;与 `packageRuntime` 通常是同一宿主实例。 */
+export type AgentPackageHostFace = {
+  findInvocable(slug: string): Promise<AgentPackageDetail | undefined>;
+};
+
+/** `@slug` 分流执行包回合的那一半。 */
+export type AgentPackageRuntimeFace = {
+  dispatch(input: {
+    ctx: AgentInvokeContext;
+    sessionId: string;
+    pkg: AgentPackageDetail;
+    remainder: string;
+    resolveParent?: () => Promise<unknown>;
+  }): Promise<AgentPackageDispatchResult>;
 };
 
 function readCatalogToken(profileDir?: string): string {
@@ -71,7 +94,23 @@ export async function dispatchAt(opts: {
   /** 解析当前会话的 agent，作为 @agent 子代理的 parent。
    *  仅 agent 分支在 subagents.start 之前调用；http/mcp 分支不触发。 */
   resolveParent?: () => Promise<unknown>;
+  /** 本地智能体包分流;必须在 agentsHost 查找之前,否则目录外的 slug 会直接抛错。 */
+  packageHost?: AgentPackageHostFace;
+  packageRuntime?: AgentPackageRuntimeFace;
 }): Promise<{ text: string; afterIdle: () => Promise<void> }> {
+  if (opts.packageHost !== undefined && opts.packageRuntime !== undefined) {
+    const pkg = await opts.packageHost.findInvocable(opts.name);
+    if (pkg !== undefined) {
+      return opts.packageRuntime.dispatch({
+        ctx: opts.ctx,
+        sessionId: opts.sessionId,
+        pkg,
+        remainder: opts.remainder,
+        ...(opts.resolveParent === undefined ? {} : { resolveParent: opts.resolveParent }),
+      });
+    }
+  }
+
   const item = opts.host.list().items.find((i) => i.name === opts.name);
   if (!item || !item.enabled) {
     throw new Error(`智能体「${opts.name}」未启用或不存在`);

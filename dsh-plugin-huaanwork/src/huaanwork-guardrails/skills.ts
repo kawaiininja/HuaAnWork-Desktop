@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
 import { currentCallerSession, forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
+import { attachAgentTools, type AttachmentMaps } from "./agent-attachments.ts";
+import { refreshAgentRestrict } from "./present-as.ts";
+import type { AgentPackageSubagentRequest } from "../huaanwork-host/agent-package/types.ts";
 
 export const name = "huaanwork-skills";
 export const inject = ["skills", "agents", "tools", "subagents"];
@@ -62,6 +65,10 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
       persona: string;
     } | undefined;
   };
+  /** `@slug` 包回合请求;dispatch 在 start 之前写入,本包装在 start 之后消费。 */
+  huaanworkAgentPackageRequest?: { current?: AgentPackageSubagentRequest | null };
+  /** 会话工具附件表;包运行时工具与 MCP 名字按子会话挂载。 */
+  huaanworkAttachments?: AttachmentMaps;
   on(
     event: "tools/pre-execute" | "agent/created" | "subagent/start" | "subagent/end" | "tools/change",
     listener: (...args: never[]) => unknown,
@@ -216,6 +223,8 @@ export function apply(ctx: Context): void {
   if (start && ctx.subagents) {
     const original = start.bind(ctx.subagents);
     ctx.subagents.start = async (...args: never[]) => {
+      // 在 await 之前取快照:dispatch 的 finally 会在 run 结束后清空容器。
+      const pkg = ctx.huaanworkAgentPackageRequest?.current;
       try {
         const current = ctx.huaanworkAgentRequest?.current;
         if (current) {
@@ -234,6 +243,26 @@ export function apply(ctx: Context): void {
           const allow = current.allow.filter((name) => existing.includes(name));
           tools?.restrict?.({ allow });
         }
+        if (pkg && run?.localAgent) {
+          // header.id 是真实子会话 id;某些 provider 只填 agent/session id,故再回落一次。
+          const childSessionId =
+            sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
+          if (childSessionId) {
+            if (ctx.huaanworkAttachments) {
+              attachAgentTools(ctx.huaanworkAttachments, childSessionId, ["agent_http", "agent_skill_run"]);
+            }
+            // bindChild 同时把 MCP 工具名挂到子会话。必须先于 refreshAgentRestrict:
+            // present-as 只在附件里找非 ALLOWED_TOOLS 的名字,晚挂会让它先前算出的
+            // restrict 继续遮住 mcp__*。
+            pkg.bindChild(childSessionId);
+            refreshAgentRestrict(ctx as never, childSessionId);
+          }
+          const tools = run.localAgent.ctx?.get?.("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
+          const allow = pkg.allow.filter((name) => existing.includes(name));
+          tools?.restrict?.({ allow });
+        }
         if (run?.localAgent) {
           consumePendingSpawn(run.localAgent);
         }
@@ -244,6 +273,9 @@ export function apply(ctx: Context): void {
       } finally {
         if (ctx.huaanworkAgentRequest) {
           ctx.huaanworkAgentRequest.current = undefined;
+        }
+        if (ctx.huaanworkAgentPackageRequest) {
+          ctx.huaanworkAgentPackageRequest.current = null;
         }
       }
     };

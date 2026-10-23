@@ -500,6 +500,96 @@ describe('agent package skill scripts', () => {
   })
 })
 
+describe('agent package skill script lifecycle', () => {
+  function copyFixtureWithHang(): { packageDir: string; workspaceRoot: string } {
+    const packageDir = copyFixture()
+    writeFileSync(
+      join(packageDir, 'skill', 'scripts', 'hang.mjs'),
+      [
+        "import { writeFileSync } from 'node:fs'",
+        "writeFileSync('hang-pid.txt', String(process.pid))",
+        "writeFileSync('hang-state.txt', process.env.AGENT_STATE_DIR ?? '')",
+        'setInterval(() => {}, 1000)',
+        '',
+      ].join('\n'),
+    )
+    return { packageDir, workspaceRoot: makeRoot('agent-package-ws-') }
+  }
+
+  async function readPidFile(workspaceRoot: string, name: string): Promise<number> {
+    return Number(await readPortFile(workspaceRoot, name))
+  }
+
+  function processAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async function waitForProcessExit(pid: number): Promise<void> {
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline) {
+      if (!processAlive(pid)) return
+      await delay(50)
+    }
+    throw new Error(`process ${pid} is still alive`)
+  }
+
+  test('aborting the caller signal kills the running script', { timeout: 20_000 }, async () => {
+    const { packageDir, workspaceRoot } = copyFixtureWithHang()
+    const { runtime } = await startFixture({ manifest: manifestWithMode('none'), packageDir, workspaceRoot })
+    try {
+      const controller = new AbortController()
+      const running = runtime.runSkillScript('skill/scripts/hang.mjs', {}, controller.signal)
+      const pid = await readPidFile(workspaceRoot, 'hang-pid.txt')
+      controller.abort()
+      const result = await running
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('已取消')
+      await waitForProcessExit(pid)
+    } finally {
+      await stopAgentPackageProcesses(runtime)
+    }
+  })
+
+  test('stopping the runtime during a running script kills it and removes the state dir', { timeout: 20_000 }, async () => {
+    const { packageDir, workspaceRoot } = copyFixtureWithHang()
+    const { runtime } = await startFixture({ manifest: manifestWithMode('none'), packageDir, workspaceRoot })
+    const running = runtime.runSkillScript('skill/scripts/hang.mjs', {})
+    const pid = await readPidFile(workspaceRoot, 'hang-pid.txt')
+    const stateDir = readFileSync(join(workspaceRoot, 'hang-state.txt'), 'utf8')
+    expect(stateDir.length).toBeGreaterThan(0)
+    expect(existsSync(stateDir)).toBe(true)
+
+    await stopAgentPackageProcesses(runtime)
+    const result = await running
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('已停止')
+    await waitForProcessExit(pid)
+    expect(existsSync(stateDir)).toBe(false)
+  })
+
+  test('fails the round when the MCP mount exceeds the health budget', { timeout: 20_000 }, async () => {
+    const workspaceRoot = makeRoot('agent-package-ws-')
+    const startedAt = Date.now()
+    await expect(
+      startAgentPackageProcesses({
+        manifest: manifestWithMode('mcp'),
+        packageDir: FIXTURE_DIR,
+        workspaceRoot,
+        getSandbox: () => passthroughSandbox,
+        mountMcp: () => new Promise<readonly string[]>(() => {}),
+      }),
+    ).rejects.toThrow(/脚本启动失败：MCP 服务挂载超时/)
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(4_500)
+    await waitForPortClosed(await readPortFile(workspaceRoot, 'mcp-port.txt'))
+  })
+})
+
 describe('agent package runtime registry', () => {
   test('binds, reads, and deletes runtimes per session', () => {
     const registry = createAgentPackageRuntimeRegistry()

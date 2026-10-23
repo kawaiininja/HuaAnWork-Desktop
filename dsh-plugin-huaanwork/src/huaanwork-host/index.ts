@@ -16,11 +16,15 @@ import { restoreEnabledBundledSkills } from './skills-host.ts'
 import { createAgentsHost } from './agents-host.ts'
 import { setAgentPackageHost, setAgentsDirectory } from './sessions.ts'
 import { createAgentPackageHost } from './agent-package/host.ts'
+import { createAgentPackageRuntimeRegistry, stopAllAgentPackageProcesses } from './agent-package/runtime.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
 import { clearPendingWorkspaceRoot, neutralWorkspaceRoot } from './workspace-state.ts'
 import { registerCallHostTool } from '../huaanwork-guardrails/agent-tool.ts'
-import { registerAgentPackageCreationTools } from '../huaanwork-guardrails/agent-package-tools.ts'
+import {
+  registerAgentPackageCreationTools,
+  registerAgentPackageRuntimeTools,
+} from '../huaanwork-guardrails/agent-package-tools.ts'
 
 export const name = 'huaanwork-host'
 export const inject = ['webServer', 'agents', 'subagents', 'desktopRuntime']
@@ -133,12 +137,15 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   })
   setAgentsDirectory(agentsHost)
   ctx.huaanworkAgentCatalog.current = agentsHost.snapshotForRuntime()
-  // 本地智能体包宿主:创建入口(sessions.ts)、agent_propose/agent_commit 与 Task 7 路由
-  // 共用同一实例。takenSlugs 每次读当前目录快照(公用机条目 + 本地工具),目录变化后
-  // 无需重建宿主;host 自己持有 per-session 原句与「同一轮已 propose」标记。
+  // 本地智能体包宿主:创建入口(sessions.ts)、`@slug` 分流(agent-invoke)、
+  // agent_propose/agent_commit、agent_skill_run/agent_http 与 Task 7 路由共用同一
+  // 实例与会话级运行时登记表。takenSlugs 每次读当前目录快照(公用机条目 + 本地工具),
+  // 目录变化后无需重建宿主;host 自己持有 per-session 原句与「同一轮已 propose」标记。
+  const agentPackageRegistry = createAgentPackageRuntimeRegistry()
   const agentPackageHost = createAgentPackageHost({
     profileDir: config.profileDir,
     takenSlugs: () => agentsHost.snapshotForRuntime().items.map((item) => item.name),
+    registry: agentPackageRegistry,
   })
   setAgentPackageHost(agentPackageHost)
   ctx.huaanworkAgentPackageHost = agentPackageHost
@@ -166,14 +173,19 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
         }
         let unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
         const unregisterPackageTools = registerAgentPackageCreationTools(toolCtx, agentPackageHost)
+        // 运行链路工具全局注册;可见性/执行权由子会话的 sessionAgentTools 附件控制。
+        const unregisterRuntimeTools = registerAgentPackageRuntimeTools(toolCtx, agentPackageRegistry)
         syncHostToolDescription = () => {
           unregister?.()
           unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
         }
         return () => {
           syncHostToolDescription = undefined
+          unregisterRuntimeTools()
           unregisterPackageTools()
           unregister?.()
+          // 插件卸载(应用退出/热替换)时杀掉所有包进程;afterIdle 只管单轮。
+          void stopAllAgentPackageProcesses()
         }
       }, 'huaanwork: host and creation tools registration')
     },

@@ -231,6 +231,8 @@ export async function sendToAgent(
         name: atName,
         remainder,
         resolveParent: resolveAgent,
+        // `@slug` 先认本地包:目录快照里没有的 slug 也必须在 agentsHost 查找前分流。
+        ...(packageHost === undefined ? {} : { packageHost, packageRuntime: packageHost }),
       })
       text = dispatched.text
       afterIdle = dispatched.afterIdle

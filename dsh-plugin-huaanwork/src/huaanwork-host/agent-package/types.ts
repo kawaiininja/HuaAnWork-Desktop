@@ -47,7 +47,11 @@ export type AgentPackageTurnRuntime = {
   httpPort?: number
   mcpNames?: string[]
   skillScripts: string[]
-  runSkillScript(script: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }>
+  runSkillScript(
+    script: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<{ text: string; isError?: boolean }>
 }
 
 export type AgentPackageSubagentRequest = {

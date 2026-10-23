@@ -1,28 +1,49 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { clampTimeoutMs } from '@huaanwork/policy/agent-catalog'
+import { CATALOG_BODY_LIMIT, readCappedText } from '@huaanwork/policy/http-cap'
+import { capToolOutput } from '@huaanwork/policy/truncate'
 import { sessionIdOfAgentRef } from '@huaanwork/policy/channels'
 
 import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
 import type { AttachmentMaps } from './agent-attachments.ts'
 import { detachCreationTools } from '../huaanwork-host/agent-package/creation.ts'
 import type { AgentPackageHost } from '../huaanwork-host/agent-package/host.ts'
-import type { AgentPackageProposalInput, AgentPackageToolsMode } from '../huaanwork-host/agent-package/types.ts'
+import type { AgentPackageRuntimeRegistry } from '../huaanwork-host/agent-package/runtime.ts'
+import { currentCallerSession } from '../huaanwork-host/child-sessions.ts'
+import type {
+  AgentPackageProposalInput,
+  AgentPackageToolsMode,
+  AgentPackageTurnRuntime,
+} from '../huaanwork-host/agent-package/types.ts'
 
 /**
- * 创建流程的两个模型工具(设计 §6.2)。
+ * 本地智能体包的全部模型工具(设计 §6.2、§7.3)。
  *
- * 工具全局注册,可见性由 `sessionAgentTools` 附件 + present-as 的 restrict 控制
- * (与 `call_host_tool` 同一纵深):未挂载的会话既看不到,pre-execute 也会拒绝。
- * 真正的字段校验在宿主 `propose`/`commit`,这里只做工具参数到宿主入参的形状投影。
+ * 创建流程的 `agent_propose` / `agent_commit` 与 `@slug` 运行链路的
+ * `agent_skill_run` / `agent_http` 都全局注册,可见性与执行权由
+ * `sessionAgentTools` 附件 + present-as 的 restrict + policy 的 attached 判定
+ * 三层控制(与 `call_host_tool` 同一纵深)。
  */
 
 export const AGENT_PROPOSE_TOOL = 'agent_propose'
 export const AGENT_COMMIT_TOOL = 'agent_commit'
+export const AGENT_SKILL_RUN_TOOL = 'agent_skill_run'
+export const AGENT_HTTP_TOOL = 'agent_http'
+
+/** Default cooperative timeout for `agent_http`; `clampTimeoutMs` caps it at 150s. */
+const DEFAULT_HTTP_TIMEOUT_MS = 60_000
+/** The tool-call timeout policy's hard ceiling, shared by both runtime tools. */
+const HARD_TOOL_TIMEOUT_MS = 150_000
 
 type ToolContext = {
   tools?: { register(definition: unknown): () => void }
   huaanworkEmit?: (event: RpcEvent) => void
   huaanworkRouteAgent?: { current: unknown }
   huaanworkAttachments?: AttachmentMaps
+  /** Test seam shared with `call_host_tool`: a fake transport for `agent_http`. */
+  fetchImpl?: typeof fetch
+  /** Test seam for the `agent_http` deadline; production always uses the default. */
+  httpTimeoutMs?: number
   /** 工具子插件是桥接对象;present-as 的 restrict 状态挂在根 Context 上。 */
   root?: object
 }
@@ -189,6 +210,156 @@ export function registerAgentPackageCreationTools(ctx: unknown, host: AgentPacka
   const c = ctx as ToolContext
   if (!c.tools?.register) return () => undefined
   const disposers = [c.tools.register(proposeTool(c, host)), c.tools.register(commitTool(c, host))]
+  return () => {
+    for (const dispose of disposers.reverse()) dispose()
+  }
+}
+
+// —— `@slug` 运行链路(设计 §7.3)——
+
+type RuntimeExec = ToolExec & { signal?: AbortSignal }
+
+/** Sessions resolve from the executing subagent, then the last user send as a fallback. */
+function runtimeSessionId(ctx: ToolContext, exec: RuntimeExec | undefined): string | undefined {
+  const agent = (exec?.agent ?? ctx.huaanworkRouteAgent?.current) as AgentRef | undefined
+  return sessionIdOfAgentRef(agent) ?? currentCallerSession()
+}
+
+function runtimeFor(registry: AgentPackageRuntimeRegistry, sessionId: string | undefined): AgentPackageTurnRuntime {
+  const runtime = sessionId === undefined ? undefined : registry.get(sessionId)
+  if (runtime === undefined) throw new Error('当前会话没有运行中的智能体包')
+  return runtime
+}
+
+function skillRunTool(ctx: ToolContext, registry: AgentPackageRuntimeRegistry) {
+  return defineTool({
+    name: AGENT_SKILL_RUN_TOOL,
+    description:
+      '运行当前本地智能体包声明过的技能脚本。script 必须精确写成包内 skill/scripts/ 下的相对路径；args 会作为 JSON 传给脚本。脚本在本机沙箱内以子进程运行，工作目录是当前工作区，单次输出上限 32 KiB，非零退出会返回脚本的错误输出。',
+    parameters: {
+      script: { type: 'string', required: true, description: '技能脚本路径，例如 skill/scripts/report.mjs' },
+      args: { type: 'object', additionalProperties: true, description: '作为 AGENT_SCRIPT_ARGS 传给脚本的参数对象' },
+    },
+    output: textOutput,
+    timeoutMs: HARD_TOOL_TIMEOUT_MS,
+    async execute(args: { script: string; args?: Record<string, unknown> }, exec: RuntimeExec) {
+      const runtime = runtimeFor(registry, runtimeSessionId(ctx, exec))
+      const result = await runtime.runSkillScript(args.script, args.args ?? {}, exec.signal)
+      if (result.isError === true) throw new Error(result.text)
+      return { text: result.text }
+    },
+  })
+}
+
+function httpTool(ctx: ToolContext, registry: AgentPackageRuntimeRegistry) {
+  return defineTool({
+    name: AGENT_HTTP_TOOL,
+    description:
+      '调用当前本地智能体包的 HTTP 工具：把 arguments 对象 POST 到包内服务。服务返回 {ok:true,result} 时本工具返回 result 文本；返回 {ok:false,error}、非 2xx 或连接失败时本次调用失败。默认 60 秒超时，响应读入上限 1 MiB，输出上限 32 KiB。',
+    parameters: {
+      arguments: { type: 'object', additionalProperties: true, description: '传给智能体 HTTP 工具的 arguments 对象；缺省为空对象' },
+    },
+    output: textOutput,
+    timeoutMs: HARD_TOOL_TIMEOUT_MS,
+    async execute(args: { arguments?: Record<string, unknown> }, exec: RuntimeExec) {
+      const runtime = runtimeFor(registry, runtimeSessionId(ctx, exec))
+      const port = runtime.httpPort
+      if (port === undefined) throw new Error(`智能体 @${runtime.slug} 没有启用 HTTP 工具`)
+
+      const timeoutSignal = AbortSignal.timeout(clampTimeoutMs(ctx.httpTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS))
+      const signal = exec.signal === undefined ? timeoutSignal : AbortSignal.any([exec.signal, timeoutSignal])
+      const fetcher = ctx.fetchImpl ?? globalThis.fetch
+
+      let response: Response
+      try {
+        response = await fetcher(`http://127.0.0.1:${String(port)}/invoke`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ arguments: args.arguments ?? {} }),
+          signal,
+        })
+      } catch (error) {
+        throw httpFailure(runtime.slug, error, exec.signal, timeoutSignal)
+      }
+
+      if (!response.ok) {
+        let detail = ''
+        try {
+          detail = (await readCappedText(response.body, CATALOG_BODY_LIMIT)).text.trim().slice(0, 500)
+        } catch {
+          // 错误详情读不到时仍报状态码,不让读取失败掩盖传输错误。
+        }
+        throw new Error(`智能体 @${runtime.slug} 的 HTTP 工具返回 HTTP ${String(response.status)}${detail ? `: ${detail}` : ''}`)
+      }
+
+      let text: string
+      try {
+        text = (await readCappedText(response.body, CATALOG_BODY_LIMIT)).text
+      } catch (error) {
+        throw new Error(`智能体 @${runtime.slug} 的 HTTP 工具响应读取失败：${errorMessage(error).slice(0, 500)}`)
+      }
+
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        throw new Error(`智能体 @${runtime.slug} 的 HTTP 工具返回了无法解析的响应`)
+      }
+      if (!isRecord(parsed)) throw new Error(`智能体 @${runtime.slug} 的 HTTP 工具返回了无法解析的响应`)
+
+      if (parsed.ok === false) {
+        const detail = typeof parsed.error === 'string' && parsed.error.length > 0
+          ? parsed.error
+          : JSON.stringify(parsed.error ?? '执行失败')
+        throw new Error(detail.slice(0, 500))
+      }
+      if (parsed.ok !== true) throw new Error(`智能体 @${runtime.slug} 的 HTTP 工具返回了无法解析的响应`)
+
+      const result = parsed.result
+      const body = typeof result === 'string' ? result : result === undefined ? '' : JSON.stringify(result, null, 2)
+      return { text: capToolOutput(body, '').text }
+    },
+  })
+}
+
+function httpFailure(
+  slug: string,
+  error: unknown,
+  callerSignal: AbortSignal | undefined,
+  timeoutSignal: AbortSignal,
+): Error {
+  if (callerSignal?.aborted === true) return new Error(`智能体 @${slug} 的 HTTP 工具调用已取消`)
+  if (timeoutSignal.aborted || (error as { name?: unknown } | undefined)?.name === 'TimeoutError') {
+    return new Error(`智能体 @${slug} 的 HTTP 工具调用超时`)
+  }
+  return new Error(`智能体 @${slug} 的 HTTP 工具网络请求失败：${errorMessage(error).slice(0, 500)}`)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 注册 `agent_skill_run` / `agent_http`。
+ *
+ * 两个工具全局注册,但只有 `skills.ts` 在 `@slug` 子代理启动后把名字挂进子会话
+ * 的 `sessionAgentTools` 才可见、可执行(Task 4 的 policy 门禁覆盖四个包工具名)。
+ *
+ * @param ctx tools 服务与 holder 的桥接对象(工具子插件内构建)
+ * @param registry 当前进程的会话 → 回合运行时登记表
+ * @returns 同时卸下两个工具的 disposer;缺少 tools 服务时为空 disposer
+ */
+export function registerAgentPackageRuntimeTools(
+  ctx: unknown,
+  registry: AgentPackageRuntimeRegistry,
+): () => void {
+  const c = ctx as ToolContext
+  if (!c.tools?.register) return () => undefined
+  const disposers = [c.tools.register(skillRunTool(c, registry)), c.tools.register(httpTool(c, registry))]
   return () => {
     for (const dispose of disposers.reverse()) dispose()
   }

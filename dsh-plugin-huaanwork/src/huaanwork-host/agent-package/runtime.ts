@@ -15,9 +15,13 @@ export const AGENT_PACKAGE_SANDBOX_UNAVAILABLE = '当前系统无法启动沙箱
 const MAX_PERSONA_BYTES = 64 * 1024
 const MAX_SCRIPT_STDOUT_BYTES = 32 * 1024
 const MAX_STDERR_CHARS = 500
+/** Cap for the host-side copy of each child stream; output truncation happens later. */
+const MAX_CAPTURE_BYTES = 256 * 1024
 const HEALTH_TIMEOUT_MS = 5_000
 const PORT_RETRIES = 3
 const STOP_GRACE_MS = 2_000
+/** M1 has no cross-turn script state; a single script call may not outlive this. */
+const SCRIPT_HARD_CAP_MS = 150_000
 const SCRIPT_START_FAILURE_PREFIX = '脚本启动失败：'
 const DEFAULT_HTTP_ENTRY = 'tools/http/server.mjs'
 const DEFAULT_MCP_ENTRY = 'tools/mcp/server.mjs'
@@ -219,11 +223,16 @@ export async function startAgentPackageProcesses(
   let stopped = false
   let stopPromise: Promise<void> | undefined
   const scriptChildren = new Set<ChildProcess>()
+  /** Spawns still inside `confine`; stop waits for them so no child escapes teardown. */
+  const pendingSpawns = new Set<Promise<unknown>>()
 
   const stop = async (): Promise<void> => {
     if (stopPromise !== undefined) return stopPromise
     stopped = true
     stopPromise = (async () => {
+      // A spawn racing with stop is added to scriptChildren only after this await;
+      // the post-spawn `stopped` check in runSkillScript kills that child.
+      await Promise.allSettled([...pendingSpawns])
       for (const child of [...scriptChildren]) await stopChild(child)
       if (http !== undefined) await stopChild(http.child.child)
       if (mcp !== undefined) await stopChild(mcp.child.child)
@@ -235,11 +244,21 @@ export async function startAgentPackageProcesses(
     return stopPromise
   }
 
+  /**
+   * Run one declared skill script.
+   *
+   * Infrastructure failures (missing sandbox, a sandbox that refuses to confine,
+   * a spawn error) throw. Declared-script failures (undeclared path, non-zero
+   * exit, cancellation, timeout, stopped runtime) return `isError` text: the
+   * script ran or was requested within the declaration, and the model should see
+   * the reason instead of a transport-style crash.
+   */
   const runSkillScript = async (
     script: string,
     args: Record<string, unknown>,
+    callerSignal?: AbortSignal,
   ): Promise<{ text: string; isError?: boolean }> => {
-    if (stopped) return { text: `智能体 @${manifest.slug} 的运行时已停止`, isError: true }
+    if (stopped) return { text: stoppedText(), isError: true }
     if (skillScripts.length === 0) {
       return { text: `智能体 @${manifest.slug} 没有可运行的技能脚本`, isError: true }
     }
@@ -249,10 +268,18 @@ export async function startAgentPackageProcesses(
     } catch (error) {
       return { text: errorMessage(error), isError: true }
     }
+
+    const timeoutSignal = AbortSignal.timeout(SCRIPT_HARD_CAP_MS)
+    const runSignal = callerSignal === undefined ? timeoutSignal : AbortSignal.any([callerSignal, timeoutSignal])
+    if (runSignal.aborted) return { text: abortedText(callerSignal, timeoutSignal), isError: true }
+
+    // Resolve before creating the per-turn state dir so a missing sandbox leaves no residue.
+    const sandbox = getSandbox()
+    if (sandbox === undefined) throw new Error(AGENT_PACKAGE_SANDBOX_UNAVAILABLE)
     if (stateDir === undefined) stateDir = mkdtempSync(join(tmpdir(), 'huaanwork-agent-state-'))
     const dir = stateDir
-    const child = await spawnConfined({
-      getSandbox,
+    const spawn = spawnConfined({
+      getSandbox: () => sandbox,
       scriptPath,
       workspaceRoot,
       env: {
@@ -260,12 +287,44 @@ export async function startAgentPackageProcesses(
         AGENT_WORKSPACE: workspaceRoot,
         AGENT_STATE_DIR: dir,
       },
-      ...(signal === undefined ? {} : { signal }),
+      signal: runSignal,
     })
+    pendingSpawns.add(spawn)
+    let child: SpawnedProcess
+    try {
+      child = await spawn
+    } finally {
+      pendingSpawns.delete(spawn)
+    }
     scriptChildren.add(child.child)
-    child.child.once('close', () => scriptChildren.delete(child.child))
+    const forgetChild = () => scriptChildren.delete(child.child)
+    child.child.once('close', forgetChild)
+
+    if (stopped) {
+      await stopChild(child.child)
+      if (stateDir !== undefined) {
+        removeQuietly(stateDir)
+        stateDir = undefined
+      }
+      return { text: stoppedText(), isError: true }
+    }
+
+    const kill = () => {
+      void stopChild(child.child)
+    }
+    runSignal.addEventListener('abort', kill, { once: true })
+    if (runSignal.aborted) kill()
     const exit = await child.exit
+    runSignal.removeEventListener('abort', kill)
     scriptChildren.delete(child.child)
+
+    if (stopped) return { text: stoppedText(), isError: true }
+    if (timeoutSignal.aborted) {
+      return { text: `技能脚本超时（${String(SCRIPT_HARD_CAP_MS / 1000)} 秒）`, isError: true }
+    }
+    if (callerSignal?.aborted === true) {
+      return { text: `智能体 @${manifest.slug} 的技能脚本已取消`, isError: true }
+    }
     if (exit.code !== 0 || exit.signal !== null) {
       const detail = child.stderr().slice(0, MAX_STDERR_CHARS)
       return {
@@ -275,6 +334,8 @@ export async function startAgentPackageProcesses(
     }
     return { text: truncateUtf8(child.stdout(), MAX_SCRIPT_STDOUT_BYTES) }
   }
+
+  const stoppedText = (): string => `智能体 @${manifest.slug} 的运行时已停止`
 
   const runtime: AgentPackageTurnRuntime = {
     slug: manifest.slug,
@@ -347,8 +408,17 @@ async function startServer(options: StartServerOptions): Promise<StartedServer> 
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
     try {
-      await waitForTcp(child, port, options.signal)
-      const names = options.mount === undefined ? undefined : [...await options.mount(port)]
+      // One health budget covers both TCP readiness and the MCP tool handshake.
+      const deadline = Date.now() + HEALTH_TIMEOUT_MS
+      await waitForTcp(child, port, deadline, options.signal)
+      const remainingMs = deadline - Date.now()
+      if (options.mount !== undefined && remainingMs <= 0) {
+        throw new Error(`${SCRIPT_START_FAILURE_PREFIX}MCP 服务挂载超时`)
+      }
+      const names =
+        options.mount === undefined
+          ? undefined
+          : [...await withDeadline(Promise.resolve(options.mount(port)), remainingMs, 'MCP 服务挂载超时')]
       if (names !== undefined && names.length === 0) {
         throw new Error(`MCP 服务未提供任何工具`)
       }
@@ -412,8 +482,8 @@ async function spawnConfined(options: SpawnConfinedOptions): Promise<SpawnedProc
   })
   runningChildren.add(child)
 
-  let stdout = ''
-  let stderr = ''
+  const stdout = createCapture(MAX_CAPTURE_BYTES)
+  const stderr = createCapture(MAX_CAPTURE_BYTES)
   let exited = false
   let resolveExit: (value: { code: number | null; signal: NodeJS.Signals | null }) => void = () => {}
   const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolvePromise) => {
@@ -421,12 +491,12 @@ async function spawnConfined(options: SpawnConfinedOptions): Promise<SpawnedProc
   })
   child.stdout?.setEncoding('utf8')
   child.stderr?.setEncoding('utf8')
-  child.stdout?.on('data', (chunk: string) => { stdout += chunk })
-  child.stderr?.on('data', (chunk: string) => { stderr += chunk })
+  child.stdout?.on('data', (chunk: string) => { stdout.append(chunk) })
+  child.stderr?.on('data', (chunk: string) => { stderr.append(chunk) })
   child.once('error', (error) => {
     exited = true
     runningChildren.delete(child)
-    stderr += errorMessage(error)
+    stderr.append(errorMessage(error))
     resolveExit({ code: null, signal: null })
   })
   child.once('close', (code, signal) => {
@@ -437,10 +507,32 @@ async function spawnConfined(options: SpawnConfinedOptions): Promise<SpawnedProc
 
   return {
     child,
-    stdout: () => stdout,
-    stderr: () => stderr,
+    stdout: () => stdout.text(),
+    stderr: () => stderr.text(),
     hasExited: () => exited || child.exitCode !== null || child.signalCode !== null,
     exit,
+  }
+}
+
+type Capture = {
+  append(chunk: string): void
+  text(): string
+}
+
+/** Keep at most `limitBytes` of a stream so a chatty child cannot grow host memory. */
+function createCapture(limitBytes: number): Capture {
+  let text = ''
+  let bytes = 0
+  return {
+    append(chunk) {
+      if (bytes >= limitBytes) return
+      const piece = truncateUtf8(chunk, limitBytes - bytes)
+      text += piece
+      bytes += Buffer.byteLength(piece, 'utf8')
+    },
+    text() {
+      return text
+    },
   }
 }
 
@@ -458,8 +550,7 @@ function buildChildEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   return env
 }
 
-async function waitForTcp(child: SpawnedProcess, port: number, signal?: AbortSignal): Promise<void> {
-  const deadline = Date.now() + HEALTH_TIMEOUT_MS
+async function waitForTcp(child: SpawnedProcess, port: number, deadline: number, signal?: AbortSignal): Promise<void> {
   while (Date.now() < deadline) {
     if (signal?.aborted === true) throw new Error('智能体启动已取消')
     if (child.hasExited()) throw startupFailure(child)
@@ -470,6 +561,24 @@ async function waitForTcp(child: SpawnedProcess, port: number, signal?: AbortSig
     await delay(50)
   }
   throw startupFailure(child, `5 秒内无法连接 127.0.0.1:${port}`)
+}
+
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(() => {
+      rejectPromise(new Error(`${SCRIPT_START_FAILURE_PREFIX}${message}`))
+    }, Math.max(0, timeoutMs))
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolvePromise(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        rejectPromise(error)
+      },
+    )
+  })
 }
 
 function startupFailure(child: SpawnedProcess, fallback?: string): Error {
@@ -559,7 +668,7 @@ async function stopChild(child: ChildProcess): Promise<void> {
   if (pid === undefined) return
 
   const closed = new Promise<void>((resolvePromise) => {
-    child.once('exit', () => resolvePromise())
+    // `close` fires after stdio closes, so a stopped child is fully settled here.
     child.once('close', () => resolvePromise())
     child.once('error', () => resolvePromise())
   })
@@ -631,6 +740,12 @@ function removeQuietly(target: string): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function abortedText(callerSignal: AbortSignal | undefined, timeoutSignal: AbortSignal): string {
+  if (callerSignal?.aborted === true) return '技能脚本已取消'
+  if (timeoutSignal.aborted) return `技能脚本超时（${String(SCRIPT_HARD_CAP_MS / 1000)} 秒）`
+  return '技能脚本已取消'
 }
 
 function delay(ms: number): Promise<void> {
