@@ -160,8 +160,9 @@ legacy `@agent` 已迁移并在本地 fixture catalog 上通过（§8）；残�
 ### 最终代码复跑（并发归属修复后）
 
 并发归属修复 `1e8389be9a` 后，在最终构建上再次用本地 fixture catalog 复跑 `@legacy-assistant`：子会话仍收到
-persona 前缀并返回周报，legacy 路径通过。实机中该回合的父/子代理在**首轮工具清单未受限**的窗口内写入了
-workspace 的 `周报_2026W43.md`（2630 bytes）；该文件已用会话日志中写入前的 `read` 原文精确恢复。这同时印证了
-§5 的 allow 首轮残余是真实可达的写副作用，后续硬化（预留 childId/pre-restrict）应优先处理。
+persona 前缀并返回周报，legacy 路径通过。实机中该回合的**父会话**写入了 workspace 的 `周报_2026W43.md`；父会话本就拥有完整工具集，这次写不能单独归因于
+子会话的首轮 allow 残余。文件已用会话日志中写入前的 `read` 原文恢复（2630 bytes / 48 lines，
+sha256 `0f38c2e061f0bdb0c832f90d7a93dec659eb0e048339af2c4a404a886de310c2`）。子会话首轮工具清单未受限的证据是
+子会话请求头的完整 TOOLS 列表（见 §5 与复跑日志），该写只是同一回合的父会话行为。
 
 最终门禁：`dsh-plugin-huaanwork` 3150 passed / 14 skipped；typecheck 0；`check:desktop-variants` 0；whitespace 0。
