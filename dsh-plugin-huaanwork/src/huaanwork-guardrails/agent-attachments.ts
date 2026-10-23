@@ -63,7 +63,7 @@ export function isMcpAttached(maps: AttachmentMaps | undefined, sessionId: strin
 /**
  * 本地智能体包工具(agent_propose/agent_commit/agent_skill_run/agent_http)是否已挂到
  * 该会话。与 MCP 共用 `sessionAgentTools` 附件表;policy 用它给 default 分支补
- * `attached`,present-as 用它放行 schema。
+ * `attached`。present-as 直接读 `sessionAgentTools`,不走本函数。
  */
 export function isAgentToolAttached(maps: AttachmentMaps | undefined, sessionId: string | undefined, toolName: string): boolean {
   return isMcpAttached(maps, sessionId, toolName);

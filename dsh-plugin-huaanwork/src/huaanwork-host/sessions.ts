@@ -139,6 +139,10 @@ export async function sendToAgent(
   const blocked = workNetworkGateError({ allowNetwork: settings.allow_network, baseUrl: settings.base_url })
   if (blocked) throw new Error(blocked)
   noteCallerSession(sessionId)
+  // 每一轮用户原句都记进宿主:同意门禁只认最近一轮,技能/@ 轮若旁路不记,
+  // agent_commit 会读到更早那轮的「可以」(设计 §5)。创建门禁内的记录是同一句,
+  // 重复写入无副作用。
+  getAgentPackageHost()?.noteUserText(sessionId, text)
 
   let afterIdle: (() => Promise<void>) | undefined
   let cleanedUp = false
@@ -188,7 +192,19 @@ export async function sendToAgent(
         routeCtx.emit({ event: 'agent/notice', text: '已取消创建，没有写入智能体。', sessionId })
         return { queued: true, sessionId }
       }
-      if (creationIntent?.kind === 'update') await packageHost.beginUpdate(sessionId, creationIntent.slug)
+      if (creationIntent?.kind === 'update') {
+        try {
+          await packageHost.beginUpdate(sessionId, creationIntent.slug)
+        } catch (error) {
+          // 坏的 update 目标(不存在/已损坏)回一条会话提示,不把整次发送变成路由错误。
+          routeCtx.emit({
+            event: 'agent/notice',
+            text: `无法进入更新模式：${error instanceof Error ? error.message : String(error)}`,
+            sessionId,
+          })
+          return { queued: true, sessionId }
+        }
+      }
       const mode = creationIntent?.kind ?? 'continue'
       text = injectCreateAgentSkill(
         creationIntent ? creationIntent.initialText || text : text,

@@ -22,8 +22,11 @@ import type {
   AgentPackageConfirmCard,
   AgentPackageProposalInput,
 } from '../../src/huaanwork-host/agent-package/types.ts'
-import type { AgentPackageHost } from '../../src/huaanwork-host/agent-package/host.ts'
-import type { CommitResult } from '../../src/huaanwork-host/agent-package/drafts.ts'
+import { createAgentPackageHost, type AgentPackageHost } from '../../src/huaanwork-host/agent-package/host.ts'
+import {
+  loadAgentPackageDraft,
+  type CommitResult,
+} from '../../src/huaanwork-host/agent-package/drafts.ts'
 
 const PRESENT_AS_STATE = Symbol.for('huaanwork.presentAs.restrictState')
 const POLICY = (reason: string) => `huaanwork-policy: ${reason}`
@@ -130,6 +133,18 @@ const proposalArgs = {
     scripts: [{ path: 'skill/scripts/collect.mjs', content: 'export const ok = true\n' }],
   },
   allowSkills: ['pdf'],
+  tools: 'none',
+}
+
+/** 真宿主可落盘的提案:不含需要解析已有技能/脚本的字段。 */
+const committableProposal = {
+  mode: 'create',
+  displayName: '周报小助手',
+  slug: 'weekly-report',
+  description: '把一周工作整理成周报',
+  persona: '你是周报助手。',
+  personaSummary: '写周报',
+  skillSummary: '无专属技能包',
   tools: 'none',
 }
 
@@ -269,11 +284,13 @@ describe('agent_propose', () => {
       ].sort(),
     )
     expect(tool?.parameters.required).toEqual(['mode'])
+    expect(tool?.description).toContain('草稿编号')
+    expect(tool?.description).toContain('不创建智能体包目录')
     dispose()
     expect(h.registered.size).toBe(0)
   })
 
-  test('returns the host card text and emits the structured confirm event', async () => {
+  test('returns the host card text plus a model-only draft id line', async () => {
     const calls: Array<{ sessionId: string; input: AgentPackageProposalInput }> = []
     const host = fakeHost({
       propose: async (sessionId, input) => {
@@ -286,12 +303,14 @@ describe('agent_propose', () => {
     const tool = h.registered.get(AGENT_PROPOSE_TOOL)
 
     const value = await tool?.execute(proposalArgs, execFor('session-a'))
-    expect(value).toEqual({ text: 'CARD TEXT' })
+    expect(value).toEqual({ text: 'CARD TEXT\n草稿编号：draft-1' })
     expect(calls).toEqual([{ sessionId: 'session-a', input: proposalArgs }])
+    // 草稿编号只在工具结果里,确认卡事件保持用户可见字段。
     expect(h.events).toEqual([{ event: 'agent/confirm', card: CARD, sessionId: 'session-a' }])
+    expect(JSON.stringify(h.events)).not.toContain('draft-1')
   })
 
-  test('returns field errors and a notice without a confirm card', async () => {
+  test('returns field errors as an error result and a notice without a confirm card', async () => {
     const host = fakeHost({
       propose: async () => ({ ok: false, fieldErrors: [{ field: 'slug', message: '智能体 @weekly-report 已存在' }] }),
     })
@@ -299,8 +318,9 @@ describe('agent_propose', () => {
     registerAgentPackageCreationTools(h.ctx, host)
     const tool = h.registered.get(AGENT_PROPOSE_TOOL)
 
-    const value = await tool?.execute(proposalArgs, execFor('session-a'))
-    expect(value?.text).toContain('slug: 智能体 @weekly-report 已存在')
+    await expect(tool?.execute(proposalArgs, execFor('session-a'))).rejects.toThrow(
+      /slug: 智能体 @weekly-report 已存在/,
+    )
     expect(h.events.some((event) => event.event === 'agent/confirm')).toBe(false)
     expect(h.events.find((event) => event.event === 'agent/notice')).toMatchObject({ sessionId: 'session-a' })
   })
@@ -343,6 +363,7 @@ describe('agent_commit', () => {
     const tool = h.registered.get(AGENT_COMMIT_TOOL)
     expect(tool?.parameters.required).toEqual(['draftId'])
     expect(tool?.parameters.properties?.draftId).toMatchObject({ type: 'string' })
+    expect(tool?.description).toContain('草稿编号')
 
     const value = await tool?.execute({ draftId: 'draft-1' }, execFor('session-a'))
 
@@ -355,7 +376,29 @@ describe('agent_commit', () => {
     expect(h.restrictCalls).toEqual(['session-a'])
   })
 
-  test('reports a rejected commit without changing state or detaching', async () => {
+  test('update-mode success copy keeps the existing enabled state', async () => {
+    const host = fakeHost({
+      commit: async (_sessionId, draftId): Promise<CommitResult> => ({
+        ok: true,
+        draftId,
+        slug: 'weekly-report',
+        packagePath: '/tmp/agents/weekly-report',
+        card: CARD,
+        cardText: 'CARD TEXT',
+        alreadyCommitted: false,
+        mode: 'update',
+      }),
+    })
+    const h = harness()
+    registerAgentPackageCreationTools(h.ctx, host)
+
+    const value = await h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId: 'draft-1' }, execFor('session-a'))
+    expect(value?.text).toContain('已更新智能体 @weekly-report')
+    expect(value?.text).toContain('原有启用状态保持不变')
+    expect(value?.text).not.toContain('默认关闭')
+  })
+
+  test('reports a rejected commit as an error result without changing state or detaching', async () => {
     const host = fakeHost({
       commit: async (): Promise<CommitResult> => ({ ok: false, error: '用户原句不是同意创建的说法' }),
     })
@@ -363,8 +406,9 @@ describe('agent_commit', () => {
     attachAgentTools(h.maps, 'session-a', [AGENT_PROPOSE_TOOL, AGENT_COMMIT_TOOL])
     registerAgentPackageCreationTools(h.ctx, host)
 
-    const value = await h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId: 'draft-1' }, execFor('session-a'))
-    expect(value?.text).toContain('智能体未写入：用户原句不是同意创建的说法')
+    await expect(
+      h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId: 'draft-1' }, execFor('session-a')),
+    ).rejects.toThrow(/智能体未写入：用户原句不是同意创建的说法/)
     expect(h.events.some((event) => event.event === 'agent/changed')).toBe(false)
     expect(h.events.some((event) => event.event === 'agent/notice')).toBe(false)
     expect(isAgentToolAttached(h.maps, 'session-a', AGENT_COMMIT_TOOL)).toBe(true)
@@ -403,5 +447,35 @@ describe('agent_commit', () => {
 
     await expect(h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId: 'draft-1' }, {})).rejects.toThrow(/会话/)
     expect(calls).toEqual([])
+  })
+})
+
+describe('propose → commit integration', () => {
+  test('the draft id extracted from the propose result commits through the registered commit tool', async () => {
+    const root = makeRoot()
+    const sessionId = 'session-a'
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    const h = harness()
+    attachAgentTools(h.maps, sessionId, [AGENT_PROPOSE_TOOL, AGENT_COMMIT_TOOL])
+    const dispose = registerAgentPackageCreationTools(h.ctx, host)
+
+    const proposed = await h.registered.get(AGENT_PROPOSE_TOOL)?.execute(committableProposal, execFor(sessionId))
+    const proposeText = proposed?.text ?? ''
+    const match = /草稿编号：(\S+)/.exec(proposeText)
+    expect(match).not.toBeNull()
+    const draftId = match?.[1] ?? ''
+    expect(draftId).not.toBe('')
+    // 编号行是工具结果的一部分,但确认卡事件里没有它。
+    expect(proposeText.endsWith(`\n草稿编号：${draftId}`)).toBe(true)
+    expect(JSON.stringify(h.events.find((event) => event.event === 'agent/confirm'))).not.toContain(draftId)
+
+    // 下一轮用户同意:noteUserText 同时清掉「同一轮刚 propose」标记。
+    host.noteUserText(sessionId, '可以')
+
+    const committed = await h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId }, execFor(sessionId))
+    expect(committed?.text).toContain('已写入智能体 @weekly-report')
+    expect(loadAgentPackageDraft(root, sessionId)).toBeUndefined()
+    expect(isAgentToolAttached(h.maps, sessionId, AGENT_COMMIT_TOOL)).toBe(false)
+    dispose()
   })
 })

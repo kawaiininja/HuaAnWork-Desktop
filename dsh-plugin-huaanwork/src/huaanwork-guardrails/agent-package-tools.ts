@@ -115,7 +115,7 @@ function proposeTool(ctx: ToolContext, host: AgentPackageHost) {
   return defineTool({
     name: AGENT_PROPOSE_TOOL,
     description:
-      '提交本地智能体的创建/更新草稿。先按 create-agent 访谈收集字段；宿主校验并返回一段确认卡正文，必须原样贴回会话。本工具只写草稿，不创建任何文件；用户下一轮明确同意后才调用 agent_commit。',
+      '提交本地智能体的创建/更新草稿。先按 create-agent 访谈收集字段；宿主校验并返回一段确认卡正文，必须原样贴回会话。结果末尾另有一行「草稿编号：…」，只供模型使用，不要贴给用户；用户下一轮明确同意后，把该编号原样传给 agent_commit。本工具只写草稿，不创建智能体包目录。',
     parameters: {
       mode: { type: 'string', required: true, description: 'create 或 update' },
       displayName: { type: 'string', description: '显示名，1-40 字' },
@@ -142,10 +142,11 @@ function proposeTool(ctx: ToolContext, host: AgentPackageHost) {
         const details = result.fieldErrors.map((error) => `${error.field}: ${error.message}`).join('\n')
         const text = details ? `提案未通过（草稿未写入）：\n${details}` : '提案未通过（草稿未写入）。'
         emit(ctx, { event: 'agent/notice', text, sessionId })
-        return { text }
+        // 抛出走运行时的错误结果路径(isError:true),让模型明确知道这次提案失败。
+        throw new Error(text)
       }
       emit(ctx, { event: 'agent/confirm', card: result.card, sessionId })
-      return { text: result.cardText }
+      return { text: `${result.cardText}\n草稿编号：${result.draftId}` }
     },
   })
 }
@@ -154,7 +155,7 @@ function commitTool(ctx: ToolContext, host: AgentPackageHost) {
   return defineTool({
     name: AGENT_COMMIT_TOOL,
     description:
-      '把当前会话的待确认草稿写入本地智能体包。只在用户整句明确同意（可以/确认/同意/就这样/按这个建）后调用；draftId 用 agent_propose 返回的值。同一轮刚 propose 不能立即 commit。',
+      '把当前会话的待确认草稿写入本地智能体包。只在用户整句明确同意（可以/确认/同意/就这样/按这个建）后调用；draftId 必须用 agent_propose 结果里「草稿编号：」后面的编号，不要自己编造。同一轮刚 propose 不能立即 commit。',
     parameters: {
       draftId: { type: 'string', required: true, description: 'agent_propose 返回的草稿 id' },
     },
@@ -162,11 +163,13 @@ function commitTool(ctx: ToolContext, host: AgentPackageHost) {
     async execute(args: { draftId: string }, exec: { agent?: unknown }) {
       const sessionId = sessionIdOf(ctx, exec)
       const result = await host.commit(sessionId, args.draftId, host.lastUserText(sessionId) ?? '')
-      if (!result.ok) return { text: `智能体未写入：${result.error}` }
+      if (!result.ok) throw new Error(`智能体未写入：${result.error}`)
 
       const text = result.alreadyCommitted
         ? `智能体 @${result.slug} 已在之前写入。`
-        : `已写入智能体 @${result.slug}。新建的智能体默认关闭；在「我的智能体」启用后即可 @ 调用。`
+        : result.mode === 'update'
+          ? `已更新智能体 @${result.slug}；原有启用状态保持不变。`
+          : `已写入智能体 @${result.slug}。新建的智能体默认关闭；在「我的智能体」启用后即可 @ 调用。`
       emit(ctx, { event: 'agent/notice', text, sessionId })
       emit(ctx, { event: 'agent/changed', slug: result.slug })
       detachCreationTools(ctx, sessionId)

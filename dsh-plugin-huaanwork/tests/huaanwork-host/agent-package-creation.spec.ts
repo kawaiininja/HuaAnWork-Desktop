@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -10,6 +10,7 @@ import {
   isAgentToolAttached,
 } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import {
+  AGENT_COMMIT_TOOL,
   AGENT_PROPOSE_TOOL,
   registerAgentPackageCreationTools,
 } from '../../src/huaanwork-guardrails/agent-package-tools.ts'
@@ -185,6 +186,9 @@ describe('create-agent skill injection', () => {
     const text = injectCreateAgentSkill('帮我新建一个智能体')
     expect(text).toContain('# 已启用技能：create-agent')
     expect(text).toContain('只通过 `agent_propose` 提交草稿')
+    // 模型必须知道草稿编号只给自己看,并原样传给 agent_commit。
+    expect(text).toContain('草稿编号')
+    expect(text).toContain('不要贴给用户')
   })
 
   test('an active draft turns the next message into a continue turn', () => {
@@ -254,7 +258,9 @@ describe('sendToAgent creation gate', () => {
 
     await sendToAgent(ctx, makeRouteCtx(root, events), { text: '帮我新建一个智能体', sessionId })
 
-    expect(noted).toEqual([[sessionId, '帮我新建一个智能体']])
+    // 每轮原句在 sendToAgent 顶部记一次,创建门禁内再记一次(同句重复写入无害)。
+    expect(noted.length).toBeGreaterThan(0)
+    expect(noted.every(([id, text]) => id === sessionId && text === '帮我新建一个智能体')).toBe(true)
     expect(isAgentToolAttached(maps, sessionId, 'agent_propose')).toBe(true)
     expect(isAgentToolAttached(maps, sessionId, 'agent_commit')).toBe(true)
     const message = received[0] as { content: { text: string }[] }
@@ -419,13 +425,76 @@ describe('sendToAgent creation gate', () => {
     const proposed = await proposeAgentPackage(root, sessionId, draftProposal, [])
     expect(proposed.ok).toBe(true)
     expect(loadAgentPackageDraft(root, sessionId)).toBeDefined()
+    attachAgentTools(maps, sessionId, [AGENT_PROPOSE_TOOL, AGENT_COMMIT_TOOL])
+    expect(isAgentToolAttached(maps, sessionId, AGENT_PROPOSE_TOOL)).toBe(true)
 
     await sessionSend(ctx, makeRouteCtx(root, events), { text: '取消', sessionId })
 
     expect(events).toContainEqual({ event: 'agent/notice', text: '已取消创建，没有写入智能体。', sessionId })
     expect(loadAgentPackageDraft(root, sessionId)).toBeUndefined()
     expect(received).toHaveLength(0)
-    expect(isAgentToolAttached(maps, sessionId, 'agent_propose')).toBe(false)
+    expect(isAgentToolAttached(maps, sessionId, AGENT_PROPOSE_TOOL)).toBe(false)
+    expect(isAgentToolAttached(maps, sessionId, AGENT_COMMIT_TOOL)).toBe(false)
+  })
+
+  test('a skill turn after a consent turn cannot commit using the stale consent text', async () => {
+    const root = makeRoot()
+    const events: RpcEvent[] = []
+    const received: unknown[] = []
+    const sessionId = 'huaanwork-0123456789abcdef'
+    const maps = emptyAttachments()
+    const agent = makeAgent(sessionId, received)
+    const ctx = makeSessionCtx(agent, sessionId, maps)
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    setAgentPackageHost(host)
+    mkdirSync(join(root, 'skills', 'weekly-helper'), { recursive: true })
+    writeFileSync(
+      join(root, 'skills', 'weekly-helper', 'SKILL.md'),
+      '---\nname: weekly-helper\ndescription: 整理周报素材\n---\n\n整理吧。\n',
+      'utf8',
+    )
+
+    const proposed = await host.propose(sessionId, draftProposal)
+    expect(proposed.ok).toBe(true)
+    const draftId = proposed.ok ? proposed.draftId : ''
+
+    // 同意轮:用户只说了「可以」,模型没有在这一轮提交。
+    await sendToAgent(ctx, makeRouteCtx(root, events), { text: '可以', sessionId })
+    expect(host.lastUserText(sessionId)).toBe('可以')
+
+    // 技能轮旁路创建门禁,但仍是同一会话的下一轮用户发言;原句必须覆盖「可以」。
+    await sendToAgent(ctx, makeRouteCtx(root, events), { skill: 'weekly-helper', text: '整理今天的内容', sessionId })
+    expect(host.lastUserText(sessionId)).toBe('整理今天的内容')
+
+    const committed = await host.commit(sessionId, draftId, host.lastUserText(sessionId) ?? '')
+    expect(committed.ok).toBe(false)
+    expect(committed.ok ? '' : committed.error).toContain('用户原句不是同意创建的说法')
+    expect(loadAgentPackageDraft(root, sessionId)).toBeDefined()
+  })
+
+  test('/create-agent update <missing> emits a notice instead of failing the send', async () => {
+    const root = makeRoot()
+    const events: RpcEvent[] = []
+    const received: unknown[] = []
+    const sessionId = 'huaanwork-0123456789abcdef'
+    const maps = emptyAttachments()
+    const agent = makeAgent(sessionId, received)
+    const ctx = makeSessionCtx(agent, sessionId, maps)
+    setAgentPackageHost(createAgentPackageHost({ profileDir: root, takenSlugs: () => [] }))
+
+    const result = await sessionSend(ctx, makeRouteCtx(root, events), {
+      text: '/create-agent update no-such-agent',
+      sessionId,
+    })
+
+    expect(result).toEqual({ queued: true, sessionId })
+    expect(events).toContainEqual({
+      event: 'agent/notice',
+      text: '无法进入更新模式：智能体 @no-such-agent 不存在',
+      sessionId,
+    })
+    expect(received).toHaveLength(0)
+    expect(isAgentToolAttached(maps, sessionId, AGENT_PROPOSE_TOOL)).toBe(false)
   })
 
   test('cancel without a draft falls through to a normal turn', async () => {

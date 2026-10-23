@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
 import {
+  INTERNAL_BUNDLED_SKILLS,
   SKILL_NAME_RE,
   SYSTEM_SKILLS,
   getBundledSkill,
@@ -395,6 +396,8 @@ export async function setSkillEnabled(
 ): Promise<{ ok: true }> {
   if (!name) throw new Error('skill.setEnabled requires params.name')
   if (SYSTEM_SKILLS.has(name)) throw new Error(`skill ${name} 为系统技能，始终启用`)
+  // 内部技能由创建入口直接注入正文,不接受开关,也不注册进全局技能目录。
+  if (INTERNAL_BUNDLED_SKILLS.has(name)) throw new Error(`skill ${name} 为内部技能，不能启停`)
   if (!listBundledSkills().some((skill) => skill.name === name)) {
     throw new Error(`skill ${name} is not a bundled skill`)
   }
@@ -428,10 +431,11 @@ export type BundledSkillRegistrar = Parameters<typeof registerBundledSkill>[0]
  * 共用 skillHandles 记账:harness register 同层 first-wins,重复注册拿 no-op
  * disposer——boot 注册不进本表,后续 setEnabled(false) 将无法 dispose、禁用半残。
  * 注册失败(dispose 为 undefined)静默跳过,不让技能恢复拖垮 boot(legacy 容错语义)。
+ * 内部技能(`INTERNAL_BUNDLED_SKILLS`)即使出现在旧开关表里也不恢复注册。
  */
 export function restoreEnabledBundledSkills(storageRoot: string, registrar: BundledSkillRegistrar): void {
   for (const name of Object.keys(readSkillToggles(storageRoot))) {
-    if (SYSTEM_SKILLS.has(name)) continue
+    if (SYSTEM_SKILLS.has(name) || INTERNAL_BUNDLED_SKILLS.has(name)) continue
     const disposeOld = skillHandles.get(name)
     if (disposeOld) {
       disposeOld()

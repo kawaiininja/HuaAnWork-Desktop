@@ -121,6 +121,11 @@ export type CommitResult =
       card: AgentPackageConfirmCard
       cardText: string
       alreadyCommitted: boolean
+      /**
+       * 这次提交是新建还是更新,供成功文案区分「默认关闭」与「启用状态不变」。
+       * 重复提交时草稿可能已被删除,无法还原原始模式,故可缺席。
+       */
+      mode?: 'create' | 'update'
     }
   | { ok: false; error: string; fieldErrors?: AgentPackageFieldError[] }
 
@@ -232,6 +237,7 @@ export async function commitAgentPackage(
       card,
       cardText: renderCardText(card),
       alreadyCommitted: true,
+      ...(stale?.draftId === draftId ? { mode: stale.mode } : {}),
     }
   }
 
@@ -289,6 +295,7 @@ export async function commitAgentPackage(
     card,
     cardText,
     alreadyCommitted: false,
+    mode: draft.mode,
   }
 }
 
