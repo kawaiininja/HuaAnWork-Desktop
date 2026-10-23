@@ -1,0 +1,85 @@
+export const AGENT_PACKAGE_SCHEMA_VERSION = 1 as const
+
+export type AgentPackageToolsMode = 'none' | 'http' | 'mcp' | 'both'
+
+export type AgentPackageManifest = {
+  schemaVersion: typeof AGENT_PACKAGE_SCHEMA_VERSION
+  slug: string
+  displayName: string
+  description: string
+  version: string
+  draftId: string
+  createdAt: string
+  updatedAt: string
+  persona: 'persona.md'
+  skill: { entry: 'skill/SKILL.md'; summary: string } | null
+  tools: {
+    mode: AgentPackageToolsMode
+    http?: { entry: 'tools/http/server.mjs'; argumentsSchema?: unknown }
+    mcp?: { entry: 'tools/mcp/server.mjs' }
+  }
+  allowSkills: string[]
+}
+
+export type AgentPackageState = Record<string, { source: 'local'; enabled: boolean; installedVersion: string }>
+
+export type AgentPackageListItem = {
+  slug: string
+  displayName: string
+  description: string
+  version: string
+  source: 'local' | 'catalog-legacy'
+  enabled: boolean
+  broken?: { reason: string }
+}
+
+export type AgentPackageDetail = AgentPackageListItem & {
+  persona: string
+  skill: { summary: string; markdown: string; scripts: string[] } | null
+  tools: AgentPackageToolsMode
+  files: Array<{ path: string; size: number }>
+}
+
+export type AgentPackageTurnRuntime = {
+  slug: string
+  packageDir: string
+  workspaceRoot: string
+  httpPort?: number
+  mcpNames?: string[]
+  skillScripts: string[]
+  runSkillScript(script: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }>
+}
+
+export type AgentPackageSubagentRequest = {
+  allow: string[]
+  persona: string
+  runtime: AgentPackageTurnRuntime
+  bindChild(sessionId: string): void
+}
+
+export type AgentPackageProposalInput = {
+  mode: 'create' | 'update'
+  displayName?: string
+  slug?: string
+  description?: string
+  persona?: string
+  personaSummary?: string
+  skillSummary?: string
+  skill?: { summary: string; markdown: string; scripts: Array<{ path: string; content: string }> } | null
+  allowSkills?: string[]
+  tools?: AgentPackageToolsMode
+  httpServer?: string
+  mcpServer?: string
+}
+
+export type AgentPackageConfirmCard = {
+  displayName: string
+  slug: string
+  description: string
+  personaSummary: string
+  skillSummary: string
+  tools: AgentPackageToolsMode
+  toolLabel: string
+  warning: string
+  consentHint: string
+}
