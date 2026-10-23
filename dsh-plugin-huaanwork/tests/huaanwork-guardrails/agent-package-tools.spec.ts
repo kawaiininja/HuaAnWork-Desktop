@@ -1500,6 +1500,69 @@ describe('@slug package dispatch', () => {
       h.host.dispatch({ ctx: h.ctx as never, sessionId: 'parent-session', pkg: pkg!, remainder: '写周报' }),
     ).rejects.toThrow('current dsh runtime does not support subagents')
   })
+
+  test('a direct object with only start does not shadow a registered startActivation', async () => {
+    const h = dispatchHarness()
+    const legacyStart = vi.fn(async () => ({}))
+    const originalGet = h.ctx.get as (name: string) => unknown
+    h.ctx.subagents = { start: legacyStart }
+    h.ctx.get = (name: string) =>
+      name === 'subagents'
+        ? {
+            startActivation: async (spec: ActivationSpec) => {
+              h.activationCalls.push(spec)
+              return { childId: 'child', result: Promise.resolve({}), dispose: async () => undefined }
+            },
+          }
+        : originalGet(name)
+    const pkg = await h.host.findInvocable('weekly-report')
+
+    const dispatched = await h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+
+    // 直接属性只有旧签名时,包回合必须回落到全局服务上的 startActivation。
+    expect(h.activationCalls).toHaveLength(1)
+    expect(legacyStart).not.toHaveBeenCalled()
+    await dispatched.afterIdle()
+  })
+
+  test('afterIdle waits up to ten minutes for a slow child, then logs and disposes', async () => {
+    const h = dispatchHarness()
+    const pkg = await h.host.findInvocable('weekly-report')
+    const dispatched = await h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+    const spec = h.activationCalls[0] as ActivationSpec
+
+    vi.useFakeTimers()
+    try {
+      const idle = dispatched.afterIdle()
+      await vi.advanceTimersByTimeAsync(599_999)
+      // 边界内仍在等:HTTP/MCP 子代理可能比父回合的空闲点活得更久。
+      expect(h.activationDisposals).toEqual([])
+      expect(h.stopped).toEqual([])
+      await vi.advanceTimersByTimeAsync(1)
+      await idle
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(h.activationDisposals).toEqual([1])
+    expect(h.stopped).toEqual([h.runtime])
+    expect(h.registry.get('parent-session')).toBeUndefined()
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('10 分钟'))
+    // 发布后的取消归 dispose();cleanup 不再 abort 发布前用的 signal。
+    expect(spec.signal?.aborted).toBe(false)
+  })
 })
 
 describe('@agent legacy dispatch subagents resolution', () => {
@@ -1548,6 +1611,42 @@ describe('@agent legacy dispatch subagents resolution', () => {
     expect(startCalls[0]?.provider).toBe('spawn')
     expect(startCalls[0]?.request.persona).toBe('你是旧目录助手')
     expect(dispatched.text).toBe('整理本周进展')
+    await dispatched.afterIdle()
+  })
+
+  test('a direct object with only startActivation does not shadow a registered start', async () => {
+    const startCalls: Array<{ provider: string; request: Record<string, unknown> }> = []
+    const activationCalls: unknown[] = []
+    const ctx = {
+      subagents: {
+        startActivation: async (spec: unknown) => {
+          activationCalls.push(spec)
+          return { childId: 'child', result: Promise.resolve({}), dispose: async () => undefined }
+        },
+      },
+      get: (name: string) =>
+        name === 'subagents'
+          ? {
+              start: async (provider: string, request: Record<string, unknown>) => {
+                startCalls.push({ provider, request })
+                return { localAgent: { id: 'child', session: { id: 'child' } } }
+              },
+            }
+          : undefined,
+    }
+
+    const dispatched = await dispatchAt({
+      host: legacyAgentHost(),
+      ctx: ctx as never,
+      sessionId: 'session-a',
+      name: 'legacy-assistant',
+      remainder: '整理本周进展',
+    })
+
+    // 直接属性只有新入口时,legacy 分支必须回落到全局服务上的 start。
+    expect(startCalls).toHaveLength(1)
+    expect(startCalls[0]?.provider).toBe('spawn')
+    expect(activationCalls).toEqual([])
     await dispatched.afterIdle()
   })
 

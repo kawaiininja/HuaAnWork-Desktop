@@ -58,8 +58,16 @@ agents-state.json
   Task 1 沙箱探针覆盖，未在真实 UI 中跑“带 HTTP 的 fixture 智能体”。
 - **catalog-legacy 实机运行**：公用机目录 `10.130.209.76:18080` 在验收时超时，广场显示目录错误；legacy 兼容由
   `agent-package-legacy.spec.ts` 覆盖，未做真实目录实机验收。
+- **legacy `@agent` 兼容（rc.1 已知破损，非阻断）**：`agent-invoke.ts` 的 agent 分支仍调用 rc.1 已删除的
+  `subagents.start(provider, request)`，在 rc.1 上必然报 `current dsh runtime does not support subagents`；只有智能体包
+  `@slug` 路径迁移到了 `startActivation`。工具 / HTTP / MCP 分支不受影响。按 2026-10-23 验收修复裁定本轮不迁移，
+  已登记到根 `AGENTS.md` Known tech debt（触发条件 = 下一轮 legacy 智能体兼容 wave）；代码注释指向该行。
+- **子代理清理上限 10 分钟**：`afterIdle` 等子会话落定的上限是 `600_000` ms。父回合的 `whenIdle` 可能先于长子会话
+  到达（HTTP/MCP 回合本来就会跑过父回合空闲点），原 10 s 会把仍在工作的子代理截断。超时后宿主记一条错误、释放
+  activation（发布后的取消归 `dispose()`，不再 abort 发布前 signal）并照常停止子进程；`agent-package-tools.spec.ts`
+  用假定时器钉住 599,999 ms 内仍在等待、600,000 ms 触发清理。
 - **Windows 真机**：无 Windows 机器，Task 1/9 仍为 BLOCKED。
-- **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3127 passed / 14 skipped）、typecheck
+- **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3130 passed / 14 skipped）、typecheck
   （0）、`check:desktop-variants`（0）；根 `corepack yarn check` 未在最终树重跑（此前在最终评审前为绿）。
 - **M1 完成声明**：不作出。上述实机项与 Windows 未完成。
 

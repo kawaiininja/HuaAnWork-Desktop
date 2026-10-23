@@ -199,13 +199,15 @@ export async function dispatchAt(opts: {
       throw new Error(`无法加载智能体「${opts.name}」的人设`);
     }
 
-    const subagents = resolveSubagents(opts.ctx);
-    // legacy `@agent` 仍调用旧签名 `start`;rc.1 的 SubagentRuntime 只有
-    // startActivation,这条分支按既有登记保持原状(预存 breakage,不在本修复范围)。
-    const start = subagents?.start?.bind(subagents);
-    if (subagents === undefined || start === undefined) {
+    const subagents = resolveSubagents(opts.ctx, "start");
+    // legacy `@agent` 仍调用旧签名 `start`;rc.1 的 SubagentRuntime 只有 startActivation,
+    // 这条分支在 rc.1 上不可用,已登记为债(root AGENTS.md 的
+    // 「legacy @agent 路径…」行),等下一轮 legacy 智能体兼容 wave 迁移;
+    // 智能体包 `@slug` 路径已迁移到 startActivation。
+    if (subagents === undefined) {
       throw new Error("current dsh runtime does not support subagents");
     }
+    const start = subagents.start.bind(subagents);
 
     if (opts.ctx.huaanworkAgentRequest) {
       opts.ctx.huaanworkAgentRequest.current = {

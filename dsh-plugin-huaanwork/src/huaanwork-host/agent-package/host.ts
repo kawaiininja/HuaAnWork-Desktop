@@ -148,12 +148,14 @@ export type CreateAgentPackageHostOptions = {
 const MAX_TRACKED_SESSIONS = 256
 
 /**
- * 回合结束后等待子会话结果/释放的上限。
+ * 回合结束后等待子会话结果/释放的上限(10 分钟)。
  *
- * 正常路径在宿主空闲时子会话已经结束,`result` 早已落定;这个上限只兜住
- * 「子进程卡住」的异常路径,避免父会话的 idle 清理被无限期挂起。
+ * 父会话的 `whenIdle` 可能先于长子会话到达:HTTP/MCP 回合本来就会跑过父回合的
+ * 空闲点,短上限会在子代理仍在工作时截断答案。这个上限只兜住「子进程卡住」
+ * 的异常路径,避免父会话的 idle 清理被无限期挂起;超时后记一条错误并释放
+ * activation(`dispose()` 负责发布后的取消),随后照常停止子进程。
  */
-const ACTIVATION_CLEANUP_TIMEOUT_MS = 10_000
+const ACTIVATION_CLEANUP_TIMEOUT_MS = 600_000
 
 /**
  * 组装 `AgentPackageHost`。
@@ -257,12 +259,12 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       const { ctx, sessionId, pkg } = input
       if (!pkg.enabled) throw new Error(`智能体「${pkg.slug}」未启用或不存在`)
       if (pkg.broken !== undefined) throw new Error(`智能体「${pkg.slug}」已损坏：${pkg.broken.reason}`)
-      const subagents = resolveSubagents(ctx)
-      // Bind after the guard so the runtime method keeps its service receiver.
-      const startActivation = subagents?.startActivation?.bind(subagents)
-      if (subagents === undefined || startActivation === undefined) {
+      const subagents = resolveSubagents(ctx, 'startActivation')
+      if (subagents === undefined) {
         throw new Error('current dsh runtime does not support subagents')
       }
+      // Bind after the guard so the runtime method keeps its service receiver.
+      const startActivation = subagents.startActivation.bind(subagents)
 
       // Reserve synchronously, before the first await: two sends in one session must not
       // start two runtimes (and two subagent children) for the same turn.
@@ -286,7 +288,6 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       let cleanupPromise: Promise<void> | undefined
       let cleanupStarted = false
       let activation: SubagentActivationHandle | undefined
-      let activationAbort: AbortController | undefined
       const boundChildren = new Set<string>()
 
       const bindChild = (childSessionId: string): void => {
@@ -314,9 +315,12 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           if (currentActivation !== undefined) {
             try {
               const settled = await settleWithin(currentActivation.result, ACTIVATION_CLEANUP_TIMEOUT_MS)
-              // A child that did not settle within the bound is stuck: cancel it before
-              // asking the manager to release the activation.
-              if (!settled) activationAbort?.abort()
+              if (!settled) {
+                // 发布后的取消归 dispose();这里只记录卡住的事实,不 abort signal。
+                console.error(
+                  `智能体「${pkg.slug}」的子代理在 ${String(ACTIVATION_CLEANUP_TIMEOUT_MS / 60_000)} 分钟内未结束，释放 activation`,
+                )
+              }
               await settleWithin(currentActivation.dispose(), ACTIVATION_CLEANUP_TIMEOUT_MS)
             } catch {
               // 释放是尽力而为:同步抛错的 dispose 不能阻止进程、MCP 与登记的清理。
@@ -411,7 +415,6 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         if (ctx.huaanworkAgentPackageRequest !== undefined) {
           ctx.huaanworkAgentPackageRequest.current = request
         }
-        activationAbort = new AbortController()
         activation = await startActivation({
           provider: 'spawn',
           label: `@${pkg.slug}`,
@@ -421,7 +424,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
             prompt: [{ type: 'text', text: `${persona}\n\n---\n用户请求：\n${prompt}` }],
             parent,
           },
-          signal: activationAbort.signal,
+          // 发布前取消用的 signal;发布后的取消归 `dispose()`(cleanup 调用)。
+          signal: new AbortController().signal,
           delivery: 'parent',
         })
         // The registry binding must exist before the child can call agent_http/agent_skill_run.
