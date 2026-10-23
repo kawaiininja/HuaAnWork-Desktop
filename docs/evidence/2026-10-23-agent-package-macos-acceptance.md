@@ -5,8 +5,8 @@
 - 模型：完整交互链路使用 `deepseek-chat`；修复工具名白名单后，用默认 `deepseek-flash` 复测到
   `agent_propose` 批准框（见“默认模型复测”）。
 - 结论：**核心链路 PASS，M1 仍未完成**。创建/确认/提交/启用/`@` 运行/更新/重启持久化/关闭/详情均已在真实
-  macOS 应用与真实模型上验证；验收过程中发现并修复 5 个真实接线缺陷 + 1 个验收修复引入的回归。HTTP/MCP
-  实机运行、catalog-legacy 实机运行与 Windows 真机仍未验收。
+  macOS 应用与真实模型上验证；验收过程中发现并修复 5 个真实接线缺陷 + 1 个验收修复引入的回归，随后 HTTP
+  实机通过（§7）、MCP 实机部分验证。catalog-legacy 实机与 Windows 真机仍未验收。
 
 ## 1. 通过项
 
@@ -54,8 +54,8 @@ agents-state.json
 
 ## 5. 未验收 / 阻断
 
-- **HTTP/MCP 实机运行**：本轮只验证了 `tools:none` 的包；HTTP/MCP 进程、`agent_http`、MCP 空工具等由自动化测试与
-  Task 1 沙箱探针覆盖，未在真实 UI 中跑“带 HTTP 的 fixture 智能体”。
+- **HTTP/MCP 实机运行**：HTTP 已在 §7 通过；MCP 只到“服务器拉起/挂载”，未捕获实机工具结果。MCP 空工具、
+  `agent_http`、MCP 客户端等仍有自动化测试与 Task 1 沙箱探针覆盖。
 - **catalog-legacy 实机运行**：公用机目录 `10.130.209.76:18080` 在验收时超时，广场显示目录错误；legacy 兼容由
   `agent-package-legacy.spec.ts` 覆盖，未做真实目录实机验收。
 - **legacy `@agent` 兼容（rc.1 已知破损，非阻断）**：`agent-invoke.ts` 的 agent 分支仍调用 rc.1 已删除的
@@ -67,7 +67,7 @@ agents-state.json
   activation（发布后的取消归 `dispose()`，不再 abort 发布前 signal）并照常停止子进程；`agent-package-tools.spec.ts`
   用假定时器钉住 599,999 ms 内仍在等待、600,000 ms 触发清理。
 - **Windows 真机**：无 Windows 机器，Task 1/9 仍为 BLOCKED。
-- **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3130 passed / 14 skipped）、typecheck
+- **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3137 passed / 14 skipped）、typecheck
   （0）、`check:desktop-variants`（0）；根 `corepack yarn check` 未在最终树重跑（此前在最终评审前为绿）。
 - **M1 完成声明**：不作出。上述实机项与 Windows 未完成。
 
@@ -76,3 +76,47 @@ agents-state.json
 验收产生的测试智能体、`agents-state.json`、测试会话与任务条目已清理/隔离到
 `/tmp/huaanwork-accept-quarantine/sessions/`；真实 profile 的模型已恢复为 `deepseek-flash`。隔离副本
 `/tmp/huaanwork-accept-*` 为临时数据，可删除。
+
+## 7. HTTP/MCP 实机补充（2026-10-23 晚）
+
+### HTTP 实机（PASS）
+
+创建 `http-echo`（`tools.mode: "http"`，`tools/http/server.mjs` 回显 `{arguments}`）→ 启用 → 输入
+`@http-echo 请回显 {"hello":"world"}。调用 agent_http，arguments 传 {"hello":"world"}。`；子代理实际调用
+`agent_http`，返回：
+
+```json
+{"echo":{"hello":"world"},"at":"http-echo"}
+```
+
+宿主 `@` 回合在真实 UI 中显示该结果。HTTP 进程在回合结束后停止。
+
+### MCP 实机（PARTIAL）
+
+创建 `mcp-echo`（`tools.mode: "mcp"`，fixture streamable-HTTP server，`echo` 工具）→ 启用 → `@mcp-echo`。
+运行时已拉起 MCP server（`node server.mjs`，cwd 为当前活动 workspace），说明 MCP 进程启动与挂载路径已实际执行；
+但该回合落到了非预期的活动项目/标签，UI 未捕获到 MCP 工具调用的最终结果，因此**不宣称 MCP 实机通过**。MCP
+客户端、空工具拒绝与策略路径由自动化测试覆盖。
+
+### HTTP/MCP 验收新增修复
+
+| 现象 | 根因 | 修复 |
+|---|---|---|
+| 子代理首轮请求看不到 `agent_http`，直接判定“没有工具” | 子会话首轮模型请求早于 after-start 的 attachment/restrict | 用预留 `childId` 在 `startActivation` 前预挂包工具（`5e278de464`） |
+| 子代理调用 `agent_http` 被策略拒绝（子会话无审批 UI） | attached 运行时工具走 `ask`，auto-deny | `agent_http`/`agent_skill_run` attached 时放行；propose/commit 仍 ask（`6a35263f5c`，注释订正 `06d230584d`） |
+| MCP 包子会话同样无法调用 `mcp__*` | attached MCP 在 smart 模式 ask | holder 标记 package child，attached `mcp__*` 对包子会话放行，普通会话行为不变（`ebbdab6f92`） |
+
+### 更新后的门禁
+
+`dsh-plugin-huaanwork` 全量 **3137 passed / 14 skipped**；typecheck 0；`check:desktop-variants` 0（7/64，前缀 6）。
+根 `corepack yarn check` 仍未在最终树重跑。
+
+### 仍未完成
+
+- MCP 实机工具结果（见上，PARTIAL）
+- catalog-legacy 实机（目录不可达）
+- Windows 真机
+- legacy `@agent` rc.1 兼容（已登记债）
+- 根 `check` 最终树复跑
+
+测试包 `http-echo`/`mcp-echo`、`agents-state.json`、测试会话与任务条目已清理/隔离；MCP/HTTP 测试进程已停止。
