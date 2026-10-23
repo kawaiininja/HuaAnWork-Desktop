@@ -40,6 +40,10 @@ export type RpcRequest = {
     | "agent.setEnabled"
     | "agent.addEndpoint"
     | "agent.removeEndpoint"
+    | "agent.packageList"
+    | "agent.packageDetail"
+    | "agent.packageSetEnabled"
+    | "agent.invocableList"
     | "status.get"
     | "project.list"
     | "project.create"
@@ -90,6 +94,8 @@ export type EntrypointKind = "http" | "mcp";
 
 export type AgentListItem = {
   name: string;
+  /** 展示名;本地智能体包带 displayName,目录条目只有 name。 */
+  displayName?: string;
   source: AgentSource;
   kind: AgentKind;
   entrypointKind?: EntrypointKind;
@@ -113,6 +119,39 @@ export type AgentDetail = AgentListItem & {
   timeoutMs?: number;
   argumentsSchema?: unknown;
 };
+
+/**
+ * 本地智能体包列表行。字段与 host `agent-package/types.ts` 的
+ * `AgentPackageListItem` 一致;客户端不从 host 导入。
+ * `source` 是包自己的来源联合,不并入 `AgentSource`。
+ */
+export type AgentPackageListItem = {
+  slug: string;
+  displayName: string;
+  description: string;
+  version: string;
+  source: "local" | "catalog-legacy";
+  enabled: boolean;
+  broken?: { reason: string };
+};
+
+/** 本地智能体包详情;legacy 条目仍是 `AgentDetail`。 */
+export type AgentPackageDetail = AgentPackageListItem & {
+  persona: string;
+  skill: { summary: string; markdown: string; scripts: string[] } | null;
+  tools: "none" | "http" | "mcp" | "both";
+  files: Array<{ path: string; size: number }>;
+};
+
+/** `agent.packageList` 载荷:本地包与 legacy 目录 agent 分列,`catalogError` 透传目录结果。 */
+export type AgentPackageListResult = {
+  packages: AgentPackageListItem[];
+  catalogAgents: AgentListItem[];
+  catalogError?: string;
+};
+
+/** `agent.packageDetail` 的两侧载荷;调用方按 `source` 收窄。 */
+export type AgentPackageDetailResult = AgentPackageDetail | AgentDetail;
 
 export type AgentFieldError = { field: string; message: string };
 export type AgentWriteResult = { ok: true } | { ok: false; fieldErrors: AgentFieldError[] };

@@ -73,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(58 项)——
+// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(62 项)——
 const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'workspace.open': { http: 'POST', path: '/huaanwork/workspace/open' },
   'workspace.close': { http: 'POST', path: '/huaanwork/workspace/close' },
@@ -112,6 +112,10 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'agent.setEnabled': { http: 'POST', path: '/huaanwork/agent/setEnabled' },
   'agent.addEndpoint': { http: 'POST', path: '/huaanwork/agent/addEndpoint' },
   'agent.removeEndpoint': { http: 'POST', path: '/huaanwork/agent/removeEndpoint' },
+  'agent.packageList': { http: 'GET', path: '/huaanwork/agent/package/list' },
+  'agent.packageDetail': { http: 'GET', path: '/huaanwork/agent/package/detail' },
+  'agent.packageSetEnabled': { http: 'POST', path: '/huaanwork/agent/package/setEnabled' },
+  'agent.invocableList': { http: 'GET', path: '/huaanwork/agent/invocable' },
   'status.get': { http: 'GET', path: '/huaanwork/status' },
   'project.list': { http: 'GET', path: '/huaanwork/project/list' },
   'project.create': { http: 'POST', path: '/huaanwork/project/create' },
@@ -136,8 +140,8 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
 }
 
 describe('rpcCall 路由映射', () => {
-  test('全表 58 项与 ROUTE_TABLE 一一对应', () => {
-    expect(Object.keys(ROUTES)).toHaveLength(58)
+  test('全表 62 项与 ROUTE_TABLE 一一对应', () => {
+    expect(Object.keys(ROUTES)).toHaveLength(62)
     const actual = Object.fromEntries(
       Object.entries(ROUTES).map(([method, route]) => [method, { http: route.http, path: route.path }]),
     )
@@ -232,6 +236,9 @@ describe('rpcCall 路由映射', () => {
 
     await rpcCall('agent.get', { name: 'pdf-extract' })
     expect(lastFetchCall().url).toBe('/huaanwork/agent/get?name=pdf-extract')
+
+    await rpcCall('agent.packageDetail', { slug: 'weekly-report' })
+    expect(lastFetchCall().url).toBe('/huaanwork/agent/package/detail?slug=weekly-report')
 
     // 空对象与 undefined:path 不带 query。
     await rpcCall('automation.list', {})

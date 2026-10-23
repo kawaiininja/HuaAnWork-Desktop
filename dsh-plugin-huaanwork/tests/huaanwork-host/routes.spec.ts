@@ -28,6 +28,7 @@ const ALL_METHODS = [
   'plugin.add', 'plugin.remove', 'plugin.list',
   'skill.list', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
   'agent.list', 'agent.get', 'agent.refresh', 'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
+  'agent.packageList', 'agent.packageDetail', 'agent.packageSetEnabled', 'agent.invocableList',
   'status.get',
   'project.list', 'project.create', 'project.open', 'project.remove', 'project.rename',
   'automation.list', 'automation.create', 'automation.update', 'automation.remove', 'automation.stop', 'automation.deleteRun', 'automation.run', 'automation.runs', 'automation.pruneSessions', 'automation.templates',
@@ -35,10 +36,10 @@ const ALL_METHODS = [
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('58 个方法全部登记,无遗漏无重复', () => {
+  test('62 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(58)
+    expect(ROUTE_TABLE).toHaveLength(62)
   })
 
   test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
@@ -109,7 +110,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 58 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 62 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -173,8 +174,13 @@ describe('ROUTE_TABLE registry', () => {
       // Task 6 (M4): plugin 写路径 ×2
       'plugin.add',
       'plugin.remove',
+      // Task 7 (M1 智能体包): 本地包 RPC ×4
+      'agent.packageList',
+      'agent.packageDetail',
+      'agent.packageSetEnabled',
+      'agent.invocableList',
     ])
-    expect(implemented).toHaveLength(58)
+    expect(implemented).toHaveLength(62)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue

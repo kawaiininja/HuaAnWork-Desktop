@@ -145,6 +145,8 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   const agentPackageHost = createAgentPackageHost({
     profileDir: config.profileDir,
     takenSlugs: () => agentsHost.snapshotForRuntime().items.map((item) => item.name),
+    // 包列表/详情/可调用列表与启停路由经同一目录实例合并 legacy 条目。
+    legacy: () => agentsHost,
     registry: agentPackageRegistry,
   })
   setAgentPackageHost(agentPackageHost)

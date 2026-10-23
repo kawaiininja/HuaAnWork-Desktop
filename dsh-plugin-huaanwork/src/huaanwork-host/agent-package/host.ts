@@ -1,6 +1,8 @@
 import { detachAgentTools, type AttachmentMaps } from '../../huaanwork-guardrails/agent-attachments.ts'
 import { mountSessionMcp } from '../../huaanwork-guardrails/agent-mcp.ts'
 import { refreshAgentRestrict } from '../../huaanwork-guardrails/present-as.ts'
+import type { AgentListItem } from '../../client-huaanwork/rpc-types.ts'
+import type { AgentsHost } from '../agents-host.ts'
 import {
   beginAgentPackageUpdate,
   cancelAgentPackage,
@@ -79,6 +81,18 @@ export type AgentPackageDispatchResult = {
 }
 
 /**
+ * `agent.packageList` 载荷:本地包与 legacy 目录 agent 各自成列。
+ *
+ * `catalogAgents` 只按 `kind === 'agent'` 过滤,停用/损坏的目录条目仍列出
+ * (行自报 `enabled`/`broken`);`catalogError` 原样透传目录读取结果。
+ */
+export type AgentPackageListResult = {
+  packages: AgentPackageListItem[]
+  catalogAgents: AgentListItem[]
+  catalogError?: string
+}
+
+/**
  * 智能体创建/管理与运行共用的宿主门面(计划 Task 3 基线;Task 6 追加运行方法,
  * Task 7 在同一导出类型上追加 legacy 方法)。
  *
@@ -103,6 +117,13 @@ export type AgentPackageHost = {
   listLocal(): AgentPackageListItem[]
   detail(slug: string): AgentPackageDetail | undefined
   setEnabled(slug: string, enabled: boolean): void
+  /**
+   * 本地包与 legacy 目录 agent 的合并列表(`agent.packageList`)。
+   * 未注入 legacy 提供方时抛错:装配缺失不能表现为「目录里没有智能体」。
+   */
+  listWithLegacy(): Promise<AgentPackageListResult>
+  /** 已启用且未损坏的本地包与 legacy 条目(agent 与 tool),映射为 `AgentListItem`。 */
+  invocableWithLegacy(): Promise<{ items: AgentListItem[] }>
   /** 本地包详情(含未启用与已损坏),用于 `@slug` 分流。 */
   findInvocable(slug: string): Promise<AgentPackageDetail | undefined>
   /** 启动一次包回合;调用方持有返回的 `afterIdle` 并在回合结束后调用。 */
@@ -113,6 +134,11 @@ export type CreateAgentPackageHostOptions = {
   profileDir: string
   /** 每次调用都读当前值:本地入口与已有智能体的占用名会随会话变化。 */
   takenSlugs: () => readonly string[]
+  /**
+   * legacy 智能体目录(公用机目录 + 本地端点)。回调形式让 `index.ts` 注入
+   * 已建好的目录实例,`host.ts` 不必导入 `sessions.ts`。
+   */
+  legacy?: () => AgentsHost
   /** 会话 → 回合运行时登记表(与 `agent_skill_run` / `agent_http` 共用);缺省时自建。 */
   registry?: AgentPackageRuntimeRegistry
   /** 测试缝:替换真实进程启动。 */
@@ -196,6 +222,26 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       if (detail === undefined) throw new Error(`智能体 @${slug} 不存在`)
       if (detail.broken !== undefined) throw new Error(`智能体 @${slug} 已损坏:${detail.broken.reason}`)
       setAgentPackageEnabled(profileDir, slug, enabled)
+    },
+
+    async listWithLegacy() {
+      const legacyList = requireLegacyHost(options).list()
+      return {
+        packages: listLocalAgentPackages(profileDir),
+        catalogAgents: legacyList.items.filter((item) => item.kind === 'agent'),
+        ...(legacyList.catalogError === undefined ? {} : { catalogError: legacyList.catalogError }),
+      }
+    },
+
+    async invocableWithLegacy() {
+      const localItems = listLocalAgentPackages(profileDir)
+        .filter((pkg) => pkg.enabled && pkg.broken === undefined)
+        .map(toInvocableListItem)
+      // 目录条目保留原 kind/source:tool 与 agent 都可能被 `@` 点名调用。
+      const legacyItems = requireLegacyHost(options)
+        .list()
+        .items.filter((item) => item.enabled && item.broken === undefined)
+      return { items: [...localItems, ...legacyItems] }
     },
 
     async findInvocable(slug) {
@@ -343,6 +389,28 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         throw error
       }
     },
+  }
+}
+
+/** legacy 目录提供方缺失是装配错误:`index.ts` 总是传入已建好的 `agentsHost`。 */
+function requireLegacyHost(options: CreateAgentPackageHostOptions): AgentsHost {
+  const host = options.legacy?.()
+  if (host === undefined) throw new Error('agents directory is not initialized')
+  return host
+}
+
+/** 本地包 → 可调用条目;`name` 取 slug,`permissions` 由调用方的审批护栏负责。 */
+function toInvocableListItem(pkg: AgentPackageListItem): AgentListItem {
+  return {
+    name: pkg.slug,
+    displayName: pkg.displayName,
+    source: 'local',
+    kind: 'agent',
+    description: pkg.description,
+    version: pkg.version,
+    permissions: [],
+    enabled: pkg.enabled,
+    ...(pkg.broken === undefined ? {} : { broken: pkg.broken }),
   }
 }
 

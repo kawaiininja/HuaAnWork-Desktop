@@ -135,6 +135,8 @@ function fakeHost(overrides: Partial<AgentPackageHost> = {}): AgentPackageHost {
     listLocal: () => [],
     detail: () => undefined,
     setEnabled: () => undefined,
+    listWithLegacy: async () => ({ packages: [], catalogAgents: [] }),
+    invocableWithLegacy: async () => ({ items: [] }),
     findInvocable: async () => undefined,
     dispatch: async () => ({ text: '', afterIdle: async () => undefined }),
     ...overrides,
