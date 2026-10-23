@@ -2,7 +2,7 @@
 
 > 工件性质:M1 Task 1 硬门槛证据(macOS 实测 + Windows 阻断记录)
 > Worktree:`feat-chat-created-agent-packages-m1`(基点 `5f2ed71feb`)
-> 探针:`dsh-plugin-huaanwork/scripts/agent-package-sandbox-probe.mjs`
+> 探针:`dsh-plugin-huaanwork/scripts/huaanwork-agent-package-sandbox-probe.mjs`(文件名按控制器裁定落在既有 `scripts/huaanwork-` 单侧前缀下,见 §2)
 > 运行时:`@deepseek-ai/dsh-sandbox-local` / `dsh-sandbox-policy` / `dsh-subprocess-local` 均为 `0.2.1-rc.1`
 
 ## 1. 结论
@@ -16,11 +16,13 @@ macOS 一侧的 M1 关键假设成立:**DSH 沙箱允许在 workspace 内长期�
 
 ## 2. 命令与原始输出
 
-命令(在 worktree 根目录执行,与 brief Step 2 一字不差):
+命令(在 worktree 根目录执行):
 
 ```sh
-node dsh-plugin-huaanwork/scripts/agent-package-sandbox-probe.mjs --platform darwin
+node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-sandbox-probe.mjs --platform darwin
 ```
+
+文件名与计划(brief Step 2)的 `scripts/agent-package-sandbox-probe.mjs` 不同是控制器裁定:原路径不在 beta↔huaanwork 变体守卫的既有单侧前缀内,会以 `Desktop variant source drift is not declared` 让 `node scripts/verify-desktop-variants.mjs` 在提交上为红,而计划禁止新增白名单条目;改名为 `scripts/huaanwork-` 前缀下后守卫不占名额。命令的其余部分与 brief 一致。
 
 stdout 恰一行(exit code `0`):
 
@@ -33,15 +35,15 @@ stdout 恰一行(exit code `0`):
 stderr 诊断(一次完整运行的全部诊断行;EPERM 堆栈按行省略;仅诊断信息,不进入 stdout):
 
 ```text
-[sandbox-probe] workspace=/Users/amonmiao/.huaanwork-sandbox-probe-ws-Wo7SVN
-[sandbox-probe] outside=/Users/amonmiao/.huaanwork-sandbox-probe-out-XtyRlF
-[sandbox-probe] policy={"mode":"workspace-write","workspaceRoot":"/Users/amonmiao/.huaanwork-sandbox-probe-ws-Wo7SVN"}
+[sandbox-probe] workspace=/Users/amonmiao/.huaanwork-sandbox-probe-ws-5aRPDt
+[sandbox-probe] outside=/Users/amonmiao/.huaanwork-sandbox-probe-out-FAsO2s
+[sandbox-probe] policy={"mode":"workspace-write","workspaceRoot":"/Users/amonmiao/.huaanwork-sandbox-probe-ws-5aRPDt"}
 [sandbox-probe] server.runner=sandbox-exec enforcement=full
-[sandbox-probe] server.port=57194
+[sandbox-probe] server.port=58242
 [sandbox-probe] health={"ok":true,"status":200,"body":"ok"}
 [sandbox-probe] insideWrite.code=0 landed=true
 [sandbox-probe] outsideWrite.code=1 landed=false denialEvidence=true
-[sandbox-probe] outsideWrite.stderr=... Error: EPERM: operation not permitted, open '.../.huaanwork-sandbox-probe-out-XtyRlF/denied.txt' ...
+[sandbox-probe] outsideWrite.stderr=... Error: EPERM: operation not permitted, open '.../.huaanwork-sandbox-probe-out-FAsO2s/denied.txt' ...
 [sandbox-probe] outsideRead.code=0 contentMatch=true denialEvidence=false
 [sandbox-probe] confinedNet.code=0 reply={"ok":true,"target":"1.1.1.1:443"} denialEvidence=false
 [sandbox-probe] healthAfterProbes=true
@@ -52,7 +54,7 @@ stderr 诊断(一次完整运行的全部诊断行;EPERM 堆栈按行省略;仅�
 
 | 项 | 值 |
 | --- | --- |
-| 日期 | 2026-10-23 11:33–11:36 CST(首轮 11:33:57,另有多轮复跑与一次负向对照) |
+| 日期 | 2026-10-23 11:33–11:49 CST(首轮 11:33:57;改名后的复核运行 11:47:49;另有复跑、假 runner 负向对照与「首次 health 后即退出」的存活负向对照 11:48:55) |
 | 机器 | `Mac16,8`,arm64(Apple Silicon) |
 | 系统 | macOS 27.0.1(build 26A434) |
 | Node | v22.23.2(`/opt/homebrew/bin/node`) |
@@ -78,7 +80,7 @@ stderr 诊断(一次完整运行的全部诊断行;EPERM 堆栈按行省略;仅�
 
 ## 6. Windows 步骤:BLOCKED
 
-- 应有命令(未执行,须在 Windows 真机):`node dsh-plugin-huaanwork\scripts\agent-package-sandbox-probe.mjs --platform win32`
+- 应有命令(未执行,须在 Windows 真机):`node dsh-plugin-huaanwork\scripts\huaanwork-agent-package-sandbox-probe.mjs --platform win32`
 - 期望(未验证):`{"platform":"win32","enforcement":"partial","httpReady":true,"writeDenied":true,"readOutside":true,"networkOutside":true}` —— `partial` 来自 `windows-acl` runner 的自述(NTFS 硬链接、读不设限等)。
 - 阻断原因:**本次执行环境没有 Windows 真机**,按任务口径记录 `BLOCKED`,不伪造任何 win32 结果,也不把这一支算作 macOS 失败。
 - 探针本身拒绝跨平台贴标签:在 darwin 上跑 `--platform win32` 直接 exit 2,stdout 为空:
@@ -87,7 +89,7 @@ stderr 诊断(一次完整运行的全部诊断行;EPERM 堆栈按行省略;仅�
 [sandbox-probe] refusing to label a darwin run as win32: the win32 probe must run on a real win32 machine
 ```
 
-- 余下未验证面:restricted-token runner 下长驻服务的启动与监听、写边界、读与外网行为。真机跑完后把该 JSON 补进本文件即可闭环,不需要改探针。
+- 余下未验证面:restricted-token runner 下长驻服务的启动与监听、写边界、读与外网行为。预期真机跑完后把该 JSON 补进本文件即可闭环;探针尚未在 Windows 真机运行过,是否需要针对该 runner 调整以实测为准。
 
 ## 7. 探针自身失败路径的负向自检
 
@@ -98,6 +100,19 @@ stderr 诊断(一次完整运行的全部诊断行;EPERM 堆栈按行省略;仅�
 ```
 
 exit code `3`,stderr 打 `BLOCKED: server-not-ready` 与 `BLOCKED: workspace-write control failed`。即:runner 无法执行被包装命令时,长驻服务标记为未就绪、整体判 BLOCKED,不会因为「写越界也失败」而误判成沙箱生效(`writeDenied` 单看会被启动失败伪造,workspace 内写入对照正是为此存在)。该次为人工负向对照,不是产品运行结果。
+
+该 JSON 仍写 `"enforcement":"full"` 不代表 runner 健康:darwin 的 `confine` 只有 Seatbelt 一条候选链、不做可达性探测,`enforcement` 是 runner 自述的静态声明而非实测属性,假 runner 同样会报 `full`;本次 BLOCKED 的判据是 workspace 内写入对照失败,不是 `enforcement` 的取值。
+
+另一次人工负向对照验证「长驻」本身:把同一探针临时复制一份,仅让其生成的 `server.mjs` 在首次回答 `/health` 后 50 ms 退出(临时文件已删除,未进入提交)。首个 health 检查通过,但 siblings 观察后的复检失败,探针按 contradiction 判失败 —— 同一个 `httpReady:true` 的 JSON 配 exit code `1`:
+
+```text
+[sandbox-probe] health={"ok":true,"status":200,"body":"ok"}
+[sandbox-probe] healthAfterProbes=false
+[sandbox-probe] FAIL: server stopped serving during the probe: {"ok":false,"error":"fetch failed"}
+[sandbox-probe] verdict=FAIL
+```
+
+即:服务在观察期间死掉不会再产出 PASS。清理(停子进程、dispose、删临时目录)的异常只记 stderr `cleanup failed (...)` 并继续,不会吞掉那一行 JSON。
 
 ## 8. Gate 判定
 

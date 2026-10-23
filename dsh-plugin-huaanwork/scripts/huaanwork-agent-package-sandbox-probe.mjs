@@ -28,7 +28,7 @@
  *   3  BLOCKED — the confined runtime could not be booted, or an observation
  *      was inconclusive (see the BLOCKED lines on stderr)
  *
- * Usage: node scripts/agent-package-sandbox-probe.mjs --platform darwin
+ * Usage: node scripts/huaanwork-agent-package-sandbox-probe.mjs --platform darwin
  */
 
 import { spawn } from 'node:child_process'
@@ -106,7 +106,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function usage(message) {
   log(message)
-  log('usage: node scripts/agent-package-sandbox-probe.mjs --platform <darwin|win32>')
+  log('usage: node scripts/huaanwork-agent-package-sandbox-probe.mjs --platform <darwin|win32>')
   process.exit(2)
 }
 
@@ -392,17 +392,31 @@ async function main() {
     }
 
     // 6. Liveness after the sibling confined runs: the server must still serve.
+    // The first /health answer only proves the process started; a server that
+    // dies during the observations would otherwise still be reported as PASS.
     if (server !== undefined && facts.httpReady) {
       const after = await checkHealth(server.port)
       log(`healthAfterProbes=${after.ok}`)
+      if (!after.ok) {
+        contradictions.push(`server stopped serving during the probe: ${JSON.stringify(after)}`)
+      }
     }
   } catch (error) {
     blockers.push(`probe-error: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
-    if (server !== undefined) await stopChild(server.child)
-    if (ctx !== undefined) await ctx.fiber.dispose()
-    if (workspace !== undefined) await rm(workspace, { recursive: true, force: true })
-    if (outside !== undefined) await rm(outside, { recursive: true, force: true })
+    // Teardown must never suppress the facts line: a failed stop, dispose, or
+    // rm is reported, then the remaining steps and stdout still run.
+    const teardown = async (label, action) => {
+      try {
+        await action()
+      } catch (error) {
+        log(`cleanup failed (${label}): ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (server !== undefined) await teardown('stop server', () => stopChild(server.child))
+    if (ctx !== undefined) await teardown('dispose context', () => ctx.fiber.dispose())
+    if (workspace !== undefined) await teardown('remove workspace', () => rm(workspace, { recursive: true, force: true }))
+    if (outside !== undefined) await teardown('remove outside dir', () => rm(outside, { recursive: true, force: true }))
   }
 
   for (const blocker of blockers) log(`BLOCKED: ${blocker}`)
