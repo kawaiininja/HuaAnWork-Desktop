@@ -10,8 +10,9 @@ import { GIT_SNAPSHOT_BUDGET_MS } from "./git-budget.ts";
 
 /**
  * 本地智能体包工具:创建流程挂 agent_propose/agent_commit,`@slug` 运行链路挂
- * agent_skill_run/agent_http。四个名字都走 default 分支,故这里统一补 `attached`;
- * 未挂载即 deny,与 call_host_tool 同一纵深。
+ * agent_skill_run/agent_http。四个名字都要在这里补 `attached`——创建链路两个在
+ * decide() 的 default 分支按档位 ask,运行链路两个在显式分支附加即 allow;
+ * 未挂载一律 deny,与 call_host_tool 同一纵深。
  */
 const AGENT_PACKAGE_TOOLS: ReadonlySet<string> = new Set([
   "agent_propose",
