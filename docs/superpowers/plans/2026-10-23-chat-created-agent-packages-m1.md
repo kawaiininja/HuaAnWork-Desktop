@@ -51,6 +51,7 @@
 | `dsh-plugin-huaanwork/src/client-huaanwork/AgentPackagesPanel.tsx` | 我的智能体页签 |
 | `dsh-plugin-huaanwork/src/client-huaanwork/AgentsPlazaPanel.tsx` | 智能体广场页签 |
 | `dsh-plugin-huaanwork/src/client-huaanwork/AgentToolkitPanel.tsx` | 我的工具包页签（含现有 modals） |
+| `dsh-plugin-huaanwork/src/client-huaanwork/AgentConfirmCard.tsx` | 宿主生成的结构化确认卡渲染 |
 | `dsh-plugin-huaanwork/skills/create-agent/SKILL.md` | 宿主注入的 grill-me 访谈技能 |
 | `dsh-plugin-huaanwork/scripts/agent-package-sandbox-probe.mjs` | M1.0 沙箱长驻进程探针 |
 | `dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-store.spec.ts` | store/manifest 测试 |
@@ -61,6 +62,7 @@
 | `dsh-plugin-huaanwork/tests/huaanwork-guardrails/agent-package-tools.spec.ts` | 四个工具的执行与门禁测试 |
 | `dsh-plugin-huaanwork/tests/client-huaanwork/agentPackagesLogic.spec.ts` | 客户端纯函数测试 |
 | `dsh-plugin-huaanwork/tests/client-huaanwork/agent-packages-panel.spec.ts` | 面板渲染/动作测试 |
+| `dsh-plugin-huaanwork/tests/client-huaanwork/agent-confirm-card.spec.ts` | 结构化确认卡渲染测试 |
 | `dsh-plugin-huaanwork/tests/fixtures/agent-package/` | persona、SKILL.md、脚本、HTTP/MCP fixture |
 | `docs/evidence/2026-10-23-agent-package-sandbox-probe.md` | M1.0 探针证据 |
 | `docs/huaanwork-agent-packages-m1.md` | M1 使用/排障 runbook |
@@ -79,11 +81,11 @@
 | `dsh-plugin-huaanwork/src/huaanwork-guardrails/agent-attachments.ts` | `isAgentToolAttached` |
 | `dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts` | package 工具 attached 判定 |
 | `dsh-plugin-huaanwork/src/huaanwork-guardrails/present-as.ts` | 无白名单新增；依赖 `sessionAgentTools` + refresh |
-| `dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts` | RPC 方法、包类型、`agent/changed`、`agent/notice` |
+| `dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts` | RPC 方法、包类型、`agent/changed`、`agent/notice`、`agent/confirm` |
 | `dsh-plugin-huaanwork/src/client-huaanwork/api.ts` | 新路由映射 |
 | `dsh-plugin-huaanwork/src/client-huaanwork/AgentsView.tsx` | 三页签 shell |
 | `dsh-plugin-huaanwork/src/client-huaanwork/AtAgentMenu.tsx` | 显示 displayName |
-| `dsh-plugin-huaanwork/src/client-huaanwork/App.tsx` | `agent.invocableList`、`agent/notice`、`agent/changed` |
+| `dsh-plugin-huaanwork/src/client-huaanwork/App.tsx` | `agent.invocableList`、`agent/notice`、`agent/changed`、`agent/confirm` |
 | `dsh-plugin-huaanwork/src/client-huaanwork/styles.css` | 包卡片/详情的最小样式 |
 
 ---
@@ -282,6 +284,17 @@ export type AgentPackageProposalInput = {
   httpServer?: string
   mcpServer?: string
 }
+export type AgentPackageConfirmCard = {
+  displayName: string
+  slug: string
+  description: string
+  personaSummary: string
+  skillSummary: string
+  tools: AgentPackageToolsMode
+  toolLabel: string
+  warning: string
+  consentHint: string
+}
 ```
 
 `manifest.ts` 的 `parseAgentPackageManifest(raw)` 必须逐项校验 slug/displayName/description/version/draftId/persona/skill/tools/allowSkills，并拒绝 `tools.mode` 与入口不一致、未声明文件的额外字段。返回 `{ ok: true; manifest } | { ok: false; fieldErrors: Array<{field:string;message:string}> }`。
@@ -408,20 +421,31 @@ Expected: FAIL，模块不存在。
 - [ ] **Step 3: 实现草稿与同意/取消**
 
 - 草稿路径 `{profileDir}/agents/.drafts/{sessionId}.json`；`sessionId` 必须是单个路径段，含 `/`、`\`、`..` 直接拒绝。
-- `proposeAgentPackage`：`mode:'create'` 要求完整字段；`mode:'update'` 以现有本地包为 base，允许只提交变化字段并合并；生成 `draftId`；校验 slug 冲突、字段上限、脚本路径、入口文件一致性；返回 `{ ok:true; draftId; card }` 或 `{ ok:false; fieldErrors }`。`card` 必须是宿主生成的原文：
+- `proposeAgentPackage`：`mode:'create'` 要求完整字段；`mode:'update'` 以现有本地包为 base，允许只提交变化字段并合并；生成 `draftId`；校验 slug 冲突、字段上限、脚本路径、入口文件一致性；返回 `{ ok:true; draftId; cardText; card: AgentPackageConfirmCard }` 或 `{ ok:false; fieldErrors }`。`cardText` 必须是宿主生成的原文，`card` 供结构化渲染：
 
 ```ts
 const toolLabel = { none: '不要', http: 'HTTP', mcp: 'MCP', both: 'HTTP 和 MCP' }[draft.tools]
-const card = [
+const card: AgentPackageConfirmCard = {
+  displayName: draft.displayName,
+  slug: draft.slug,
+  description: draft.description,
+  personaSummary: draft.personaSummary,
+  skillSummary: draft.skillSummary,
+  tools: draft.tools,
+  toolLabel,
+  warning: '脚本将在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。',
+  consentHint: '回复「可以」创建（默认关闭）；回复「取消」放弃。',
+}
+const cardText = [
   '请确认是否创建这名智能体：',
-  `显示名：${draft.displayName}`,
-  `@标识：${draft.slug}`,
-  `能力简介：${draft.description}`,
-  `人设要点：${draft.personaSummary}`,
-  `技能包：${draft.skillSummary}`,
-  `工具：${toolLabel}`,
-  '脚本将在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。',
-  '回复「可以」创建（默认关闭）；回复「取消」放弃。',
+  `显示名：${card.displayName}`,
+  `@标识：${card.slug}`,
+  `能力简介：${card.description}`,
+  `人设要点：${card.personaSummary}`,
+  `技能包：${card.skillSummary}`,
+  `工具：${card.toolLabel}`,
+  card.warning,
+  card.consentHint,
 ].join('\n')
 ```
 - `commitAgentPackage`：校验原句是同意、`draftId` 匹配、没有同一轮 propose；写包；新建默认关闭；更新保留启用态并 patch+1；成功后删草稿。相同 `draftId` 且包内 `draftId` 相同则返回已有卡片，不覆盖。host 在 `propose` 成功后记录 `proposedThisTurn`，`commit` 读取并拒绝同轮提交；测试可直接传 `opts.proposedThisTurn`。
@@ -430,7 +454,7 @@ const card = [
 
 - [ ] **Step 4: 实现 host facade**
 
-`host.ts` 导出 `createAgentPackageHost({ profileDir, takenSlugs, lastUserText })`，把 Task 3 的 draft 函数与本任务之前的 store 组合成 `AgentPackageHost`。`lastUserText` 由 `creation.ts` 的 `noteCreationTurn` 写入；host 只读。`hasDraft` 读草稿文件存在性；`beginUpdate` 读取现有本地包并写入 `mode:'update'` 草稿；`detail` 返回本地包详情；`setEnabled` 写状态。所有写路径结束后发 `agent.changed` 由上层路由负责，host 不直接持有 hub。
+`host.ts` 导出 `createAgentPackageHost({ profileDir, takenSlugs, lastUserText })`，把 Task 3 的 draft 函数与本任务之前的 store 组合成 `AgentPackageHost`。`lastUserText` 由 `creation.ts` 的 `noteCreationTurn` 写入；host 只读。`hasDraft` 读草稿文件存在性；`beginUpdate` 读取现有本地包并写入 `mode:'update'` 草稿；`detail` 返回本地包详情；`setEnabled` 写状态。所有写路径结束后发 `agent/changed` 由上层路由负责，host 不直接持有 hub。
 
 - [ ] **Step 5: 运行测试并提交**
 
@@ -459,7 +483,7 @@ git commit -m "feat: add agent package drafts and consent gate"
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-guardrails/agent-attachments.ts`
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts`
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts`
-- Modify: `dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts`（`agent/notice`）
+- Modify: `dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts`（`agent/notice`、`agent/confirm`）
 - Test: `dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-creation.spec.ts`
 - Test: `dsh-plugin-huaanwork/tests/huaanwork-guardrails/agent-package-tools.spec.ts`
 
@@ -584,7 +608,7 @@ parameters: {
 }
 ```
 
-execute 调 `host.propose(sessionId, args)`，把 `card` 文本同时返回并 `ctx.huaanworkEmit({ event: 'agent/notice', text: card, sessionId })`。`agent_commit` 的 parameters 只有 `{ draftId: { type: 'string', required: true } }`；execute 调 `host.commit(sessionId, draftId, host.lastUserText(sessionId))`，成功后 emit `agent/notice` 与 `agent/changed`，并 detach。
+execute 调 `host.propose(sessionId, args)`，把 `cardText` 返回给模型，并 `ctx.huaanworkEmit({ event: 'agent/confirm', card, sessionId })`；信息类提示仍用 `agent/notice`。`agent_commit` 的 parameters 只有 `{ draftId: { type: 'string', required: true } }`；execute 调 `host.commit(sessionId, draftId, host.lastUserText(sessionId))`，成功后 emit `agent/notice` 与 `agent/changed`，并 detach。
 
 - [ ] **Step 6: 接入 sessions.ts**
 
@@ -658,11 +682,13 @@ export type AgentPackageRuntimeRegistry = {
 
 - [ ] **Step 1: 写 fixture 与失败测试**
 
-Fixture 包含 `agent.json`、`persona.md`、`skill/SKILL.md`、`skill/scripts/echo.mjs`、`tools/http/server.mjs`、`tools/mcp/server.mjs`。HTTP server 监听 `AGENT_HTTP_PORT`，`POST /invoke` 返回 `{ok:true,result:{echo:arguments}}`。MCP server 监听 `AGENT_MCP_PORT`，`/mcp` 返回一个 `echo` 工具（用最小 streamable HTTP 实现或已有测试桩）。
+Fixture 包含 `agent.json`、`persona.md`、`skill/SKILL.md`、`skill/scripts/echo.mjs`、`tools/http/server.mjs`、`tools/mcp/server.mjs`。HTTP server 监听 `AGENT_HTTP_PORT`，`POST /invoke` 返回 `{ok:true,result:{echo:arguments}}`。MCP server 监听 `AGENT_MCP_PORT`，`/mcp` 返回一个 `echo` 工具（用最小 streamable HTTP 实现或已有测试桩）。测试文件补 `readFileSync`、`mkdtempSync`、`tmpdir`、`join` imports。
 
 ```ts
 test('composes persona and tool allow list', async () => {
-  const persona = composeAgentPackagePersona(pkgDir)
+  const manifest = JSON.parse(readFileSync(join(pkgDir, 'agent.json'), 'utf8'))
+  const profileDir = mkdtempSync(join(tmpdir(), 'agent-package-profile-'))
+  const persona = composeAgentPackagePersona(pkgDir, manifest, profileDir)
   expect(persona).toContain('你是周报助手')
   expect(persona).toContain('SKILL.md 正文')
   const shell = process.platform === 'win32' ? 'pwsh' : 'bash'
@@ -734,7 +760,7 @@ git commit -m "feat: run agent package HTTP and MCP servers in the sandbox"
 
 - [ ] **Step 1: 写失败测试**
 
-覆盖：`agent_skill_run` 拒绝声明外脚本；正确传 `AGENT_SCRIPT_ARGS` 并截断输出；`agent_http` 解析 `{ok:true,result}`/`{ok:false,error}`、超时、32 KiB 截断；MCP 空工具本轮失败；`@slug` 的 persona 含 SKILL.md；工具名单含 `agent_http`，且不含 `call_host_tool`；afterIdle 停止进程。
+覆盖：`agent_skill_run` 拒绝声明外脚本；正确传 `AGENT_SCRIPT_ARGS` 并截断输出；`agent_http` 解析 `{ok:true,result}`/`{ok:false,error}`、超时、32 KiB 截断；MCP 空工具本轮失败；`@slug` 的 persona 含 SKILL.md；工具名单含 `agent_http`，且不含 `call_host_tool`；allow 含不存在工具名时被与 `tools.schemas()` 的交集过滤（与 skills.ts 既有行为一致）；afterIdle 停止进程。
 
 - [ ] **Step 2: 实现 `agent_skill_run`**
 
@@ -760,7 +786,10 @@ if (pkg && run?.localAgent) {
     pkg.bindChild(childSessionId)
   }
   const tools = run.localAgent.ctx?.get?.('tools')
-  tools?.restrict?.({ allow: pkg.allow })
+  const schemas = tools?.schemas?.() ?? []
+  const existing = schemas.flatMap((s: { name?: string }) => s.name ? [s.name] : [])
+  const allow = pkg.allow.filter((name) => existing.includes(name))
+  tools?.restrict?.({ allow })
 }
 ```
 
@@ -796,11 +825,13 @@ git commit -m "feat: invoke local agent packages with HTTP, MCP, and skill scrip
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-host/routes.ts`
 - Modify: `dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts`
 - Modify: `dsh-plugin-huaanwork/src/client-huaanwork/api.ts`
+- Modify: `dsh-plugin-huaanwork/tests/client-huaanwork/api.spec.ts`
+- Modify: `dsh-plugin-huaanwork/tests/huaanwork-host/route-contract.spec.ts`
 - Test: `dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-routes.spec.ts`
 
 **Interfaces:**
 - Produces RPC：`agent.packageList`、`agent.packageDetail`、`agent.packageSetEnabled`、`agent.invocableList`。
-- Produces event：`{ event: 'agent/changed'; slug?: string }`、`{ event: 'agent/notice'; text: string; sessionId?: string }`。
+- Produces event：`{ event: 'agent/changed'; slug?: string }`、`{ event: 'agent/notice'; text: string; sessionId?: string }`、`{ event: 'agent/confirm'; card: AgentPackageConfirmCard; sessionId?: string }`。
 - Consumes: `getAgentPackageHost()`、`getAgentsDirectory()`。
 
 - [ ] **Step 1: 写失败的路由测试**
@@ -825,24 +856,25 @@ git commit -m "feat: invoke local agent packages with HTTP, MCP, and skill scrip
   const slug = typeof body.slug === 'string' ? body.slug : ''
   if (!slug) throw new RouteError(400, 'bad-request', 'agent.packageSetEnabled requires params.slug')
   const enabled = body.enabled === true
-  if (getAgentPackageHost().detail(slug)) {
+  const isLocalPackage = getAgentPackageHost().listLocal().some((pkg) => pkg.slug === slug)
+  if (isLocalPackage) {
     getAgentPackageHost().setEnabled(slug, enabled)
   } else {
     getAgentsDirectory().setEnabled(slug, enabled, true)
   }
-  ctx.emit({ event: 'agent.changed', slug })
+  ctx.emit({ event: 'agent/changed', slug })
   return { ok: true }
 }) },
 { method: 'agent.invocableList', http: 'GET', path: '/huaanwork/agent/invocable', handler: storeRoute(async () => getAgentPackageHost().invocableWithLegacy()) },
 ```
 
-Task 7 在 `host.ts` 的 `AgentPackageHost` 导出类型上追加 `listWithLegacy(): Promise<AgentPackageListResult>` 与 `invocableWithLegacy(): Promise<{ items: AgentListItem[] }>`。
+Task 7 在 `host.ts` 的 `AgentPackageHost` 导出类型上追加 `listWithLegacy(): Promise<AgentPackageListResult>` 与 `invocableWithLegacy(): Promise<{ items: AgentListItem[] }>`。本地包判断用 `listLocal()`（含 broken），不要用 `detail()`，否则损坏 manifest 会误走 legacy 分支。
 
-`listWithLegacy` 返回 `{ packages, catalogAgents, catalogError }`；`invocableWithLegacy` 返回 `{ items }`，把本地包映射成 `AgentListItem`（`source:'local'`, `kind:'agent'`, `name:slug`, `displayName`, `description`, `version`, `permissions:[]`, `enabled`, `broken`）。`packageSetEnabled` 对本地包写 state，对 catalog-legacy 调 `agentsHost.setEnabled(name, enabled, true)`；两个分支成功后都 `routeCtx.emit({ event: 'agent.changed', slug })`。`packageDetail` 先查本地包，找不到再回退 `agentsHost.get(slug)`。
+`listWithLegacy` 返回 `{ packages, catalogAgents, catalogError }`；`invocableWithLegacy` 返回 `{ items }`，把本地包映射成 `AgentListItem`（`source:'local'`, `kind:'agent'`, `name:slug`, `displayName`, `description`, `version`, `permissions:[]`, `enabled`, `broken`）。`packageSetEnabled` 对本地包写 state，对 catalog-legacy 调 `agentsHost.setEnabled(name, enabled, true)`；两个分支成功后都 `routeCtx.emit({ event: 'agent/changed', slug })`。`packageDetail` 先查本地包，找不到再回退 `agentsHost.get(slug)`。
 
 - [ ] **Step 3: 加 RPC 类型与客户端路由**
 
-在 `rpc-types.ts` 的 `RpcRequest.method` 加四个方法；定义以下类型，`AgentListItem` 加 `displayName?: string`，`RpcEvent` 加 `agent/changed` 与 `agent/notice`：
+在 `rpc-types.ts` 的 `RpcRequest.method` 加四个方法；定义以下类型，`AgentListItem` 加 `displayName?: string`，`RpcEvent` 加 `agent/changed`、`agent/notice` 与 `agent/confirm`：
 
 ```ts
 export type AgentPackageListResult = {
@@ -855,14 +887,25 @@ export type AgentPackageDetailResult = AgentPackageDetail | AgentDetail
 
 `api.ts` 的 `ROUTES` 加四个映射；GET `detail` 用 `objectQuery`。`AgentPackageDetail` 是本地包；legacy 走 `AgentDetail`，客户端按 `source` 收窄。`rpc-types.ts` 的包类型与 host `types.ts` 保持字段一致；客户端不从 host 导入。
 
-- [ ] **Step 4: 运行测试并提交**
+- [ ] **Step 4: 更新 58→62 的 RPC 计数与期望表**
 
-Run: `corepack yarn workspace dsh-plugin-huaanwork test tests/huaanwork-host/agent-package-routes.spec.ts`
+`tests/client-huaanwork/api.spec.ts` 的 `EXPECTED_ROUTES` 增加四行、测试标题「全表 58 项」改 62、`expect(Object.keys(ROUTES)).toHaveLength(62)`；`tests/huaanwork-host/route-contract.spec.ts` 的两处 `58` 改为 `62`（含测试标题）；`api.ts` 头注释 `58 方法` 改为 `62 方法`。四行必须是：
+
+```ts
+'agent.packageList': { http: 'GET', path: '/huaanwork/agent/package/list' },
+'agent.packageDetail': { http: 'GET', path: '/huaanwork/agent/package/detail' },
+'agent.packageSetEnabled': { http: 'POST', path: '/huaanwork/agent/package/setEnabled' },
+'agent.invocableList': { http: 'GET', path: '/huaanwork/agent/invocable' },
+```
+
+- [ ] **Step 5: 运行测试并提交**
+
+Run: `corepack yarn workspace dsh-plugin-huaanwork test tests/huaanwork-host/agent-package-routes.spec.ts tests/client-huaanwork/api.spec.ts tests/huaanwork-host/route-contract.spec.ts`
 
 Expected: PASS。
 
 ```bash
-git add dsh-plugin-huaanwork/src/huaanwork-host/routes.ts dsh-plugin-huaanwork/src/client-huaanwork/{rpc-types.ts,api.ts} dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-routes.spec.ts
+git add dsh-plugin-huaanwork/src/huaanwork-host/routes.ts dsh-plugin-huaanwork/src/client-huaanwork/{rpc-types.ts,api.ts} dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-routes.spec.ts dsh-plugin-huaanwork/tests/client-huaanwork/api.spec.ts dsh-plugin-huaanwork/tests/huaanwork-host/route-contract.spec.ts
 git commit -m "feat: expose agent package RPCs"
 ```
 
@@ -875,16 +918,18 @@ git commit -m "feat: expose agent package RPCs"
 - Create: `dsh-plugin-huaanwork/src/client-huaanwork/AgentPackagesPanel.tsx`
 - Create: `dsh-plugin-huaanwork/src/client-huaanwork/AgentsPlazaPanel.tsx`
 - Create: `dsh-plugin-huaanwork/src/client-huaanwork/AgentToolkitPanel.tsx`
+- Create: `dsh-plugin-huaanwork/src/client-huaanwork/AgentConfirmCard.tsx`
 - Modify: `dsh-plugin-huaanwork/src/client-huaanwork/AgentsView.tsx`
 - Modify: `dsh-plugin-huaanwork/src/client-huaanwork/AtAgentMenu.tsx`
 - Modify: `dsh-plugin-huaanwork/src/client-huaanwork/App.tsx`
 - Modify: `dsh-plugin-huaanwork/src/client-huaanwork/styles.css`
 - Test: `dsh-plugin-huaanwork/tests/client-huaanwork/agentPackagesLogic.spec.ts`
 - Test: `dsh-plugin-huaanwork/tests/client-huaanwork/agent-packages-panel.spec.ts`
+- Test: `dsh-plugin-huaanwork/tests/client-huaanwork/agent-confirm-card.spec.ts`
 
 **Interfaces:**
 - Consumes：Task 7 RPCs、`agent.setEnabled`、`agent.list`、`agent.refresh`、`onSidecarEvent`。
-- Produces：三页签 UI、卡片动作、空态、`agent/notice` 渲染、`@` 补全刷新。
+- Produces：三页签 UI、卡片动作、空态、`AgentConfirmCard` 结构化确认卡、`agent/notice` 信息提示、`@` 补全刷新。
 
 - [ ] **Step 1: 写纯函数测试**
 
@@ -916,11 +961,11 @@ test('update hint uses the slug', () => {
 
 `AtAgentMenu`：名称用 `a.displayName ?? a.name`，副标题保留 `@slug`。
 
-`App.tsx`：把 `agent.list` 的 at 补全数据源改为 `agent.invocableList`；在 `applyEvent` 中处理 `agent/changed`（重拉 `agent.invocableList`）与 `agent/notice`（用 `noteTab(liveChatRef.current, event.text)` 追加 note）。
+`App.tsx` 的 `ChatItem` 联合加 `{ id: number; kind: 'agent-confirm'; card: AgentPackageConfirmCard }`；`ChatRow` 渲染 `<AgentConfirmCard card={item.card} />`，标题为「请确认是否创建这名智能体」，rows 显示名称/slug/简介/人设/技能/工具，底部固定 warning 与 consentHint。`App.tsx` 把 `agent.list` 的 at 补全数据源改为 `agent.invocableList`；在 `applyEvent` 中处理 `agent/changed`（重拉 `agent.invocableList`）、`agent/notice`（用 `noteTab(liveChatRef.current, event.text)` 追加 note）与 `agent/confirm`（把 kind `agent-confirm` 的 item 追加到 `liveChatRef.current`）。
 
 - [ ] **Step 3: 写面板渲染测试**
 
-按 `tests/client-huaanwork/market-view.spec.ts` 的 `createRoot + act` 形态：mock `rpcCall`，渲染 `AgentPackagesPanel`，断言显示名/简介/slug/启用按钮；点击启用调用 `agent.packageSetEnabled`；空态文案正确；没有发布按钮。
+按 `tests/client-huaanwork/market-view.spec.ts` 的 `createRoot + act` 形态：mock `rpcCall`，渲染 `AgentPackagesPanel`，断言显示名/简介/slug/启用按钮；点击启用调用 `agent.packageSetEnabled`；空态文案正确；没有发布按钮。再渲染 `AgentConfirmCard`，断言显示名、slug、warning、consentHint 都在，且没有可点击的「创建」按钮（创建只由用户在会话里回复同意句触发）。
 
 - [ ] **Step 4: 运行测试并提交**
 
@@ -929,7 +974,7 @@ Run: `corepack yarn workspace dsh-plugin-huaanwork test tests/client-huaanwork/a
 Expected: PASS。
 
 ```bash
-git add dsh-plugin-huaanwork/src/client-huaanwork dsh-plugin-huaanwork/tests/client-huaanwork/agentPackagesLogic.spec.ts dsh-plugin-huaanwork/tests/client-huaanwork/agent-packages-panel.spec.ts
+git add dsh-plugin-huaanwork/src/client-huaanwork dsh-plugin-huaanwork/tests/client-huaanwork/agentPackagesLogic.spec.ts dsh-plugin-huaanwork/tests/client-huaanwork/agent-packages-panel.spec.ts dsh-plugin-huaanwork/tests/client-huaanwork/agent-confirm-card.spec.ts
 git commit -m "feat: add three-tab agent package UI"
 ```
 
@@ -943,7 +988,7 @@ git commit -m "feat: add three-tab agent package UI"
 - Modify: `dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-runtime.spec.ts`
 - Modify: `dsh-plugin-huaanwork/tests/client-huaanwork/agent-packages-panel.spec.ts`
 
-- [ ] **Step 1: 补 catalog-legacy 迁移测试**
+- [ ] **Step 1: 补 catalog-legacy 兼容测试**
 
 Seed `agents-enabled.json` 为 `{ "catalog:legacy-assistant": true }`，catalog server 返回同名 persona 条目；断言 `agent.packageList` 把它放进 `catalogAgents` 且 enabled；`agent.packageSetEnabled` 能关闭；没有创建 `agents/legacy-assistant/`。目录不可达时保留旧启用态并显示 catalogError。
 
@@ -1003,4 +1048,17 @@ git commit -m "test: harden agent package M1 and document operations"
 
 **Placeholder scan:** 已检查 `TODO/TBD/待定/FIXME`；本计划不含占位步骤。Task 1 的 provider 装配明确要求复制现有 e2e 测试的 boot 方式，不重新发明沙箱。
 
-**Type consistency:** `AgentPackageManifest`、`AgentPackageListItem`、`AgentPackageDetail`、`AgentPackageListResult`、`AgentPackageHost` 在 Task 2/3/6/7/8 中同名；工具名为 `agent_propose`、`agent_commit`、`agent_skill_run`、`agent_http`；RPC 为 `agent.packageList`、`agent.packageDetail`、`agent.packageSetEnabled`、`agent.invocableList`；事件为 `agent/changed`、`agent/notice`。
+**Type consistency:** `AgentPackageManifest`、`AgentPackageListItem`、`AgentPackageDetail`、`AgentPackageListResult`、`AgentPackageConfirmCard`、`AgentPackageHost` 在 Task 2/3/6/7/8 中同名；工具名为 `agent_propose`、`agent_commit`、`agent_skill_run`、`agent_http`；RPC 为 `agent.packageList`、`agent.packageDetail`、`agent.packageSetEnabled`、`agent.invocableList`；事件为 `agent/changed`、`agent/notice`、`agent/confirm`。
+
+## Review Disposition（2026-10-23）
+
+| 审阅项 | 处置 |
+|---|---|
+| P0-1 事件命名 | 全部统一为 `agent/changed`；规格 §6.3、§9.2 同步 |
+| P0-2 58→62 | Task 7 明确更新 `api.spec.ts`、`route-contract.spec.ts` 与 `api.ts` 注释；补四行期望表 |
+| P0-3 catalog-legacy 状态位置 | 采纳计划：legacy 走旧 `agents-enabled.json`；规格移除 `agents-state.json` 的 legacy 示例并改“旧路径独占读写” |
+| P1-1 确认卡 | 采用结构化卡：`AgentPackageConfirmCard` + `AgentConfirmCard.tsx` + `agent/confirm`；不再用纯文本 note 代替 |
+| P1-2 restrict 交集 | 与 `tools.schemas()` 求交集后再 `restrict`，镜像 `skills.ts` 既有实现 |
+| P1-3 persona 签名 | 测试与实现统一为 `(packageDir, manifest, profileDir)` |
+| P1-4 “迁移”措辞 | 计划标题与规格 M1 测试矩阵/里程碑改为“兼容” |
+| R2 UI “未明示” | 不采纳：用户已明确选择 AgentsView 三页签，规格 R5 记录；其余 R2 结论保留 |

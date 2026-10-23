@@ -119,7 +119,7 @@ M1 只实现创建、本地包、运行、启停与三页签；发布/消费分�
 
 草稿：`{profileDir}/agents/.drafts/{sessionId}.json`。
 状态：`{profileDir}/agents-state.json`。
-旧启用表：`{profileDir}/agents-enabled.json` 保持只读，迁移完成后删除对应 `catalog:` 键。
+旧启用表：`{profileDir}/agents-enabled.json` 由旧路径独占读写；M1 包代码不直接写它，M2 服务端迁移完成后再处理对应 `catalog:` 键。
 旧工具入口：`{profileDir}/agents-endpoints.json` 不动，归「我的工具包」。
 
 `.signature/` 属于 M2，不参与 digest 的文件清单；安装时额外允许且只允许这两个文件。包目录本身是签名覆盖内容的唯一权威；启用/发布状态不写进包。
@@ -165,26 +165,16 @@ M1 只实现创建、本地包、运行、启停与三页签；发布/消费分�
 
 M1 的本地条目只读写 `source`/`enabled`/`installedVersion`；`publishStatus`/`publishedVersion` 是 M2 字段，M1 可省略。
 
-过渡期条目示例（旧目录 persona 条目尚未迁移）：
+过渡期 `catalog-legacy` 的启用态仍在 `agents-enabled.json`，由旧路径读写；M1 不把它写入 `agents-state.json`。`agents-state.json` 的 M1 条目只写 `local:`。
 
-```jsonc
-{
-  "catalog:legacy-assistant": {
-    "source": "catalog-legacy",
-    "enabled": true,
-    "publishStatus": "installed"
-  }
-}
-```
-
-`publishStatus` 取值：`none`、`pending-review`、`published`、`rejected`、`delisted`、`installed`，属于 M2。`source` 取值 `local`、`catalog`、`catalog-legacy`；**M1 只使用 `local` 与 `catalog-legacy`，`catalog` 属于 M2**。`catalog-legacy` 只用于尚未迁移为签名包的旧目录 persona 条目，它仍走旧 `kind:"agent"` 路径，不进入包运行时，也不参与发布。启用态与已发布状态分离；签名包的 manifest 永远不被修改。
+`publishStatus` 取值：`none`、`pending-review`、`published`、`rejected`、`delisted`、`installed`，属于 M2。`source` 取值 `local`、`catalog`、`catalog-legacy`；**M1 的 `agents-state.json` 只写 `local`；`catalog-legacy` 的启用态由 `agents-enabled.json` 旧路径管理；`catalog` 属于 M2**。`catalog-legacy` 只用于尚未迁移为签名包的旧目录 persona 条目，它仍走旧 `kind:"agent"` 路径，不进入包运行时，也不参与发布。启用态与已发布状态分离；签名包的 manifest 永远不被修改。
 
 ### 5.4 版本、更新与迁移
 
 - 新建：`version = 1.0.0`，默认 `enabled:false`。
 - 同 slug 更新（仅本地包）：`mode:"update"` 走同一 propose/commit；宿主把 patch 位 +1。M1 不维护发布状态；M2 接入发布后，内容变化再把 `publishStatus` 置回 `none` 并要求重新提交审查。
 - 广场包更新（M2）：只能下载更高版本；安装前校验签名与撤销列表；保留 `enabled`。
-- 旧数据迁移（M1）：`agents-enabled.json` 中 `catalog:<name>` 为 true 的条目保留旧键与旧 `kind:"agent"` 路径，标为 `catalog-legacy`，界面显示“待迁移”；**M1 不下载、不物化、不伪造签名包**，目录不可达也不让已启用项消失。M2 服务端完成后，客户端再下载同 slug 签名包并保持启用，成功后删旧键。现有本地工具入口原样留在「我的工具包」。
+- 旧数据兼容（M1）：`agents-enabled.json` 中 `catalog:<name>` 为 true 的条目保留旧键与旧 `kind:"agent"` 路径，标为 `catalog-legacy`，界面显示“待迁移”；**M1 不下载、不物化、不伪造签名包**，目录不可达也不让已启用项消失。M2 服务端完成后，客户端再下载同 slug 签名包并保持启用，成功后删旧键。现有本地工具入口原样留在「我的工具包」。
 
 ## 6. 创建链路
 
@@ -229,7 +219,7 @@ M1 的本地条目只读写 `source`/`enabled`/`installedVersion`；`publishStat
 - `agent_commit` 同时满足：当前用户原句是同意、`draftId` 匹配、这一轮没有先 propose。任一不满足都拒绝且不写盘。
 - 原子落盘：先写 `agents/.tmp-{slug}-{random}/`，文件齐了再 rename 到 `agents/{slug}/`。更新同 slug 时先把旧目录 rename 为 `.old-{slug}-{random}`，新目录就位后删旧目录；失败回滚。启动时清理 `.tmp-*`；若正式目录缺失且存在 `.old-*`，恢复旧目录。
 - 幂等：同一 `draftId` 再次 commit，若包内 `agent.json.draftId` 相同，返回已有卡片，不覆盖；成功后删除草稿。
-- 落盘成功发 `agent.changed` 事件；客户端刷新「我的智能体」。新建默认关闭。
+- 落盘成功发 `agent/changed` 事件；客户端刷新「我的智能体」。新建默认关闭。
 
 确认卡文案：
 
@@ -447,7 +437,7 @@ M1 不渲染发布、下载、安装、更新广场包、申请下架、移除�
 | `agent.packageRemove`（M2） | 移除已安装的目录包 |
 | `agent.packageRefresh`（M2） | 刷新目录包与撤销列表 |
 
-`agent.changed` 事件在创建提交、启停、本地更新后触发；M2 再加入安装、更新、移除、发布状态变化。M1 不新增设置项；M2 才新增 `agents_catalog_publish_token` 与 IT 管理的 keyring。
+`agent/changed` 事件在创建提交、启停、本地更新后触发；M2 再加入安装、更新、移除、发布状态变化。结构化确认卡用 `agent/confirm` 事件下发，客户端渲染 `AgentConfirmCard`；取消/成功提示用 `agent/notice`。M1 不新增设置项；M2 才新增 `agents_catalog_publish_token` 与 IT 管理的 keyring。
 
 ### 9.3 发布状态与动作（M2）
 
@@ -494,7 +484,7 @@ M1 不渲染发布、下载、安装、更新广场包、申请下架、移除�
 | 层 | 覆盖 |
 |---|---|
 | 单元（M1） | manifest 校验；草稿/确认状态机；触发正则；本地状态/启用；本地更新版本；路径与文件约束 |
-| 宿主集成（M1） | propose/commit/取消/幂等；原子写与崩溃恢复；slug 冲突；`catalog-legacy` 迁移；`@` 分流；`agent_skill_run`；`agent_http`；MCP 空工具；工具白名单；进程清理；沙箱不可用 fail-closed；启用/关闭/更新 |
+| 宿主集成（M1） | propose/commit/取消/幂等；原子写与崩溃恢复；slug 冲突；`catalog-legacy` 兼容；`@` 分流；`agent_skill_run`；`agent_http`；MCP 空工具；工具白名单；进程清理；沙箱不可用 fail-closed；启用/关闭/更新 |
 | UI/契约（M1） | 三页签渲染；我的智能体卡片；空态；`@` 补全只列已启用项；错误文案 |
 | 单元（M2） | canonicalJson 与 market-server 逐字节一致；签名/双槽 keyId；digest；解包路径/symlink/重复/额外文件/zip bomb；审计 |
 | 服务端集成（M2） | 三 token 分离；提交/批准/拒绝；重复版本；并发；下架申请；撤销；审计；包大小帽 |
@@ -517,7 +507,7 @@ M1 不渲染发布、下载、安装、更新广场包、申请下架、移除�
 | 阶段 | 内容 | 粗略人日 |
 |---|---|---|
 | M1.0 可行性 spike | 沙箱能否启动长驻 Node HTTP/MCP 进程（macOS + Windows）；Electron/Node 启动路径；宿主拦截与技能注入 | 3–5 |
-| M1.1 包模型与创建 | manifest；草稿/propose/commit/原子写；状态存储；`catalog-legacy` 迁移；三页签；会话创建与确认卡；启用/关闭 | 5–7 |
+| M1.1 包模型与创建 | manifest；草稿/propose/commit/原子写；状态存储；`catalog-legacy` 兼容；三页签；会话创建与确认卡；启用/关闭 | 5–7 |
 | M1.2 运行链路 | `agent_skill_run`；`agent_http`；MCP 挂载；沙箱 runner；工具白名单；生命周期与清理 | 8–12 |
 | M1.3 发布与消费 | **移入 M2，不计入 M1** | 0 |
 | M1.4 硬化与验收 | 本地包与运行时负例；macOS/Windows 真机；迁移验收；全量门禁 | 3–5 |
@@ -530,7 +520,7 @@ M1 不渲染发布、下载、安装、更新广场包、申请下架、移除�
 
 | 模块 | 职责 |
 |---|---|
-| `dsh-plugin-huaanwork/src/huaanwork-host/agent-package-*`（M1） | 本地包存储、manifest、草稿/提交、状态、`catalog-legacy` 迁移、本地更新 |
+| `dsh-plugin-huaanwork/src/huaanwork-host/agent-package-*`（M1） | 本地包存储、manifest、草稿/提交、状态、`catalog-legacy` 兼容、本地更新 |
 | `dsh-plugin-huaanwork/src/huaanwork-host/agent-package-runtime.ts`（M1） | 子代理人设合成、工具名单、HTTP/MCP 进程、沙箱、生命周期 |
 | `dsh-plugin-huaanwork/src/huaanwork-guardrails/agent-skill-tool.ts`、`agent-http-tool.ts`（M1） | 两个模型侧宿主工具 |
 | `dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts`（M1） | 入口识别、技能注入、`@` 分流、确认原句核对 |
