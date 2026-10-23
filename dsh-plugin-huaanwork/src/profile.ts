@@ -1547,11 +1547,6 @@ export function prepareDesktopProfile(
     process.platform === 'win32'
       ? { id: 'tool-pwsh', disabled: false, config: { enableRunInBackground: false } }
       : { id: 'tool-bash', disabled: false, config: { enableRunInBackground: false } },
-    // 子代理服务与 spawn 后端在最后一层显式复挂:dsh-base 已挂载、web-app overlay
-    // 只关闭委派工具,本条防止上游 base/overlay 演进后服务静默消失。智能体包直接
-    // 调用 subagents 服务起子代理,模型可见的委派工具仍由 overlay 保持关闭。
-    { id: 'subagent', disabled: false },
-    { id: 'subagent-spawn-in-process', disabled: false, config: { providerName: 'spawn' } },
     // 计划模式在宿主平面复挂(dsh-base 挂载、web-app overlay 关闭);ui-plan 仍关闭,计划卡在华安对话里。
     // section 覆写:上游指引让模型用 `ask_user_question`,但该工具只随 standard preset 提供,
     // 本 profile 的澄清工具是 `request_input`(present-as 仍不允许 `ask_user_question`)。

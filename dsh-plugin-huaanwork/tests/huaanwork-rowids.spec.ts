@@ -68,7 +68,7 @@ describe('row-id 命中断言', () => {
     expect(() => assertHuaanworkRowIdsHit(tampered)).toThrow(/sandbox-policy: expected enabled with override/)
   })
 
-  test('正例:声明的行 id 全命中不抛', () => {
+  test('正例:修正后的 16 条全命中不抛', () => {
     expect(() => assertHuaanworkRowIdsHit(composed)).not.toThrow()
   })
 
