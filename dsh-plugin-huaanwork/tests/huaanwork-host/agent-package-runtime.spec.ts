@@ -684,11 +684,18 @@ describe('agent package turn cleanup', () => {
       ctx: {
         get: (name: string) => (name === 'sandbox' ? passthroughSandbox : undefined),
         huaanworkWorkspaceRoot: { current: workspaceRoot },
-        subagents: { start: async () => ({ localAgent: { id: 'child', session: { id: 'child' } } }) },
+        subagents: {
+          startActivation: async () => ({
+            childId: 'child',
+            result: Promise.resolve({}),
+            dispose: async () => undefined,
+          }),
+        },
       } as never,
       sessionId: 'parent-session',
       pkg: pkg!,
       remainder: '写一份周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
     })
 
     const port = await readPortFile(workspaceRoot, 'http-port.txt')
@@ -732,7 +739,13 @@ describe('agent package turn cleanup', () => {
       huaanworkAttachments: attachments,
       huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
       huaanworkAgentPackageRequest: { current: null },
-      subagents: { start: async () => ({ localAgent: { id: 'child', session: { id: 'child' } } }) },
+      subagents: {
+        startActivation: async () => ({
+          childId: 'child',
+          result: Promise.resolve({}),
+          dispose: async () => undefined,
+        }),
+      },
     }
     const host = createAgentPackageHost({
       profileDir,
@@ -751,6 +764,7 @@ describe('agent package turn cleanup', () => {
       sessionId: 'parent-session',
       pkg: pkg!,
       remainder: '写周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
     })
     // `skills.ts` attaches the package tools before binding the child.
     const request = ctx.huaanworkAgentPackageRequest.current as {

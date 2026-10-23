@@ -778,10 +778,14 @@ function skillsRuntimePackage(options: {
   const maps = emptyAttachments()
   const bindCalls: string[] = []
   const restrictSnapshots: Array<{ sessionId: string; names: string[] }> = []
+  const activationSpecs: ActivationSpec[] = []
   const runtime = fakeTurnRuntime({ mcpNames: ['mcp__weekly-report__echo'] })
   const ctx = {
     skills: { register: () => () => undefined },
     on: () => undefined,
+    agents: {
+      get: (id: string) => (id === childSessionId ? childAgent : undefined),
+    },
     root: {
       [PRESENT_AS_STATE]: {
         restrict: () => undefined,
@@ -809,9 +813,17 @@ function skillsRuntimePackage(options: {
     },
     subagents: {
       start: async () => ({ localAgent: childAgent }),
+      startActivation: async (spec: ActivationSpec) => {
+        activationSpecs.push(spec)
+        return {
+          childId: childSessionId,
+          result: Promise.resolve({}),
+          dispose: async () => undefined,
+        }
+      },
     },
   }
-  return { ctx, childTools, maps, bindCalls, restrictSnapshots }
+  return { ctx, childTools, maps, bindCalls, restrictSnapshots, activationSpecs }
 }
 
 describe('skills.ts package subagent request', () => {
@@ -916,14 +928,111 @@ describe('skills.ts package subagent request', () => {
   })
 })
 
+describe('skills.ts package activation', () => {
+  const activationSpec = {
+    provider: 'spawn',
+    label: '@weekly-report',
+    request: { prompt: [{ type: 'text', text: '写周报' }], parent: { session: { id: 'parent-session' } } },
+    delivery: 'parent',
+  }
+
+  test('attaches package tools to the activation child and intersects its allow list', async () => {
+    const harnessed = skillsRuntimePackage({
+      allow: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo', 'missing_tool'],
+      childNames: ['read', 'glob', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo', 'call_host_tool'],
+    })
+
+    applySkills(harnessed.ctx as never)
+    const activation = await (
+      harnessed.ctx.subagents.startActivation as (spec: unknown) => Promise<unknown>
+    )(activationSpec)
+
+    expect(activation).toMatchObject({ childId: 'child' })
+    // The wrapper forwards the spec unchanged; only the post-activation wiring is added.
+    expect(harnessed.activationSpecs).toEqual([activationSpec])
+    // Tools and MCP names attach to the activation's own child, never the parent session.
+    expect(isAgentToolAttached(harnessed.maps, 'child', AGENT_HTTP_TOOL)).toBe(true)
+    expect(isAgentToolAttached(harnessed.maps, 'child', AGENT_SKILL_RUN_TOOL)).toBe(true)
+    expect(isAgentToolAttached(harnessed.maps, 'child', 'mcp__weekly-report__echo')).toBe(true)
+    expect(isAgentToolAttached(harnessed.maps, 'parent-session', AGENT_HTTP_TOOL)).toBe(false)
+    expect(harnessed.bindCalls).toEqual(['child'])
+    expect(harnessed.restrictSnapshots).toEqual([
+      {
+        sessionId: 'child',
+        names: expect.arrayContaining([AGENT_HTTP_TOOL, AGENT_SKILL_RUN_TOOL, 'mcp__weekly-report__echo']),
+      },
+    ])
+    expect(harnessed.childTools.visible.map((schema) => schema.name)).toEqual([
+      'read',
+      'agent_http',
+      'agent_skill_run',
+      'mcp__weekly-report__echo',
+    ])
+    expect(harnessed.ctx.huaanworkAgentPackageRequest.current).toBeNull()
+  })
+
+  test('leaves an activation started by another session untouched', async () => {
+    const harnessed = skillsRuntimePackage({
+      allow: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
+      childNames: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
+    })
+
+    applySkills(harnessed.ctx as never)
+    await (harnessed.ctx.subagents.startActivation as (spec: unknown) => Promise<unknown>)({
+      ...activationSpec,
+      request: { ...activationSpec.request, parent: { session: { id: 'other-session' } } },
+    })
+
+    expect(harnessed.bindCalls).toEqual([])
+    expect(harnessed.maps.sessionAgentTools.size).toBe(0)
+    expect(harnessed.restrictSnapshots).toEqual([])
+    expect(harnessed.childTools.visible.map((schema) => schema.name)).toEqual([
+      'read',
+      'agent_http',
+      'agent_skill_run',
+      'mcp__weekly-report__echo',
+    ])
+    expect(harnessed.ctx.huaanworkAgentPackageRequest.current).toBeNull()
+  })
+
+  test('clears the package request when the activation fails', async () => {
+    const harnessed = skillsRuntimePackage({ allow: ['read'], childNames: ['read'] })
+    const ctx = {
+      ...harnessed.ctx,
+      subagents: {
+        start: async () => ({ localAgent: harnessed.ctx.agents.get('child') }),
+        startActivation: async () => {
+          throw new Error('activation crash')
+        },
+      },
+    }
+
+    applySkills(ctx as never)
+    await expect(
+      (ctx.subagents.startActivation as () => Promise<unknown>)(),
+    ).rejects.toThrow('activation crash')
+    expect(ctx.huaanworkAgentPackageRequest.current).toBeNull()
+  })
+})
+
 // —— Task 6: @slug host dispatch ——
+
+type ActivationSpec = {
+  provider: string
+  label: string
+  request: { prompt: Array<{ type: string; text: string }>; parent?: unknown; [key: string]: unknown }
+  signal?: AbortSignal
+  delivery: string
+}
 
 type DispatchHarness = {
   host: AgentPackageHost
   ctx: Record<string, unknown>
   registry: ReturnType<typeof createAgentPackageRuntimeRegistry>
   runtime: AgentPackageTurnRuntime & { mcpNames?: string[] }
-  startCalls: Array<Record<string, unknown>>
+  activationCalls: ActivationSpec[]
+  activationDisposals: number[]
+  resolveActivationResult: (value?: unknown) => void
   stopped: AgentPackageTurnRuntime[]
   mcpDisposes: number[]
   maps: AttachmentMaps
@@ -958,7 +1067,14 @@ function dispatchHarness(options: {
     skillScripts: ['skill/scripts/echo.mjs'],
     runSkillScript: async () => ({ text: 'ok' }),
   }
-  const startCalls: Array<Record<string, unknown>> = []
+  const activationCalls: ActivationSpec[] = []
+  const activationDisposals: number[] = []
+  // The test controls when the child result settles; `afterIdle` must await it
+  // before it stops the process.
+  let resolveActivationResult: (value?: unknown) => void = () => undefined
+  const activationResult = new Promise<unknown>((resolve) => {
+    resolveActivationResult = resolve
+  })
   const stopped: AgentPackageTurnRuntime[] = []
   const mcpDisposes: number[] = []
   const restrictSessions: string[] = []
@@ -969,9 +1085,15 @@ function dispatchHarness(options: {
     huaanworkAttachments: maps,
     huaanworkAgentPackageRequest: { current: null },
     subagents: {
-      start: async (_provider: string, request: Record<string, unknown>) => {
-        startCalls.push(request)
-        return { localAgent: { id: 'child', session: { id: 'child' } } }
+      startActivation: async (spec: ActivationSpec) => {
+        activationCalls.push(spec)
+        return {
+          childId: 'child',
+          result: activationResult,
+          dispose: async () => {
+            activationDisposals.push(1)
+          },
+        }
       },
     },
     tools: { schemas: () => [{ name: 'mcp__weekly-report__echo' }] },
@@ -997,7 +1119,20 @@ function dispatchHarness(options: {
       stopped.push(turn)
     },
   })
-  return { host, ctx, registry, runtime, startCalls, stopped, mcpDisposes, maps, restrictSessions, profileDir }
+  return {
+    host,
+    ctx,
+    registry,
+    runtime,
+    activationCalls,
+    activationDisposals,
+    resolveActivationResult,
+    stopped,
+    mcpDisposes,
+    maps,
+    restrictSessions,
+    profileDir,
+  }
 }
 
 describe('@slug package dispatch', () => {
@@ -1058,19 +1193,20 @@ describe('@slug package dispatch', () => {
     })
 
     expect(dispatched.text).toBe('写一份周报')
-    expect(h.startCalls).toHaveLength(1)
-    const request = h.startCalls[0] as {
-      prompt: unknown
-      persona: string
-      parent?: unknown
-      signal?: unknown
-    }
-    expect(request.prompt).toEqual([{ type: 'text', text: '写一份周报' }])
-    // @slug 的人设必须包含 SKILL.md 正文(前端 frontmatter 已剥离)。
-    expect(request.persona).toContain('SKILL.md 正文:先收集本周工作,再生成周报。')
-    expect(request.persona).not.toContain('description: 生成周报')
-    expect(request.parent).toEqual({ id: 'parent-agent' })
-    expect(request.signal).toBeInstanceOf(AbortSignal)
+    expect(h.activationCalls).toHaveLength(1)
+    const spec = h.activationCalls[0] as ActivationSpec
+    expect(spec.provider).toBe('spawn')
+    expect(spec.label).toBe('@weekly-report')
+    expect(spec.delivery).toBe('parent')
+    expect(spec.request.parent).toEqual({ id: 'parent-agent' })
+    expect(spec.signal).toBeInstanceOf(AbortSignal)
+    const childPrompt = spec.request.prompt[0]?.text ?? ''
+    // @slug 的人设必须包含 SKILL.md 正文(前端 frontmatter 已剥离),作为子代理
+    // 首条消息的分隔前缀;rc.1 没有 persona 字段。
+    expect(childPrompt).toContain('SKILL.md 正文:先收集本周工作,再生成周报。')
+    expect(childPrompt).not.toContain('description: 生成周报')
+    expect(childPrompt).toContain('---\n用户请求：\n写一份周报')
+    expect(childPrompt.endsWith('写一份周报')).toBe(true)
 
     const holder = h.ctx.huaanworkAgentPackageRequest as {
       current: { allow: string[]; parentSessionId: string; bindChild(id: string): void } | null
@@ -1087,22 +1223,36 @@ describe('@slug package dispatch', () => {
     // 发现阶段挂到父会话的 MCP 名必须在 dispatch 返回前摘掉;它们只属于包子会话。
     expect(isAgentToolAttached(h.maps, 'parent-session', 'mcp__weekly-report__echo')).toBe(false)
 
-    // 模拟 skills.ts 在 start 之后把运行时工具与 MCP 名挂到子会话并绑定。
+    // host 已按 activation.childId 绑定运行时;skills.ts 另行把工具与 MCP 名挂到子会话。
+    expect(h.registry.get('child')).toBe(h.runtime)
     attachAgentTools(h.maps, 'child', [
       AGENT_HTTP_TOOL,
       AGENT_SKILL_RUN_TOOL,
       'mcp__weekly-report__echo',
     ])
     holder.current?.bindChild('child')
-    expect(h.registry.get('child')).toBe(h.runtime)
     expect(isAgentToolAttached(h.maps, 'child', 'mcp__weekly-report__echo')).toBe(true)
 
-    await dispatched.afterIdle()
+    const idle = dispatched.afterIdle()
+    await new Promise((resolve) => setImmediate(resolve))
+    // 子会话结果尚未落定:afterIdle 必须等它,不能先停进程。
+    expect(h.stopped).toEqual([])
+    expect(h.activationDisposals).toEqual([])
+    h.resolveActivationResult()
+
+    await idle
 
     expect(h.stopped).toEqual([h.runtime])
+    expect(h.activationDisposals).toEqual([1])
     expect(h.registry.get('parent-session')).toBeUndefined()
     expect(h.registry.get('child')).toBeUndefined()
     expect(holder.current).toBeNull()
+    expect(h.mcpDisposes).toEqual([1])
+
+    // cleanup 是幂等的:重复 afterIdle 不再停进程、不再释放 activation。
+    await dispatched.afterIdle()
+    expect(h.stopped).toEqual([h.runtime])
+    expect(h.activationDisposals).toEqual([1])
     expect(h.mcpDisposes).toEqual([1])
     // 子会话的运行时工具与 MCP 名也随回合卸载,并重算 present-as。
     expect(h.maps.sessionAgentTools.size).toBe(0)
@@ -1131,16 +1281,22 @@ describe('@slug package dispatch', () => {
     await expect(h.host.findInvocable('not-a-package')).resolves.toBeUndefined()
   })
 
-  test('cleans up processes, MCP, registry, and holder when start fails', async () => {
+  test('cleans up processes, MCP, registry, and holder when activation fails', async () => {
     const h = dispatchHarness()
-    ;(h.ctx.subagents as { start: unknown }).start = async () => {
+    ;(h.ctx.subagents as { startActivation: unknown }).startActivation = async () => {
       throw new Error('spawn failed')
     }
     const pkg = await h.host.findInvocable('weekly-report')
     const holder = h.ctx.huaanworkAgentPackageRequest as { current: unknown }
 
     await expect(
-      h.host.dispatch({ ctx: h.ctx as never, sessionId: 'parent-session', pkg: pkg!, remainder: 'x' }),
+      h.host.dispatch({
+        ctx: h.ctx as never,
+        sessionId: 'parent-session',
+        pkg: pkg!,
+        remainder: 'x',
+        resolveParent: async () => ({ id: 'parent-agent' }),
+      }),
     ).rejects.toThrow('spawn failed')
 
     expect(h.stopped).toEqual([h.runtime])
@@ -1149,14 +1305,69 @@ describe('@slug package dispatch', () => {
     expect(h.mcpDisposes).toEqual([1])
 
     // 失败路径的 cleanup 必须释放会话预留,同一会话可以立即重试。
-    ;(h.ctx.subagents as { start: unknown }).start = async () => ({ localAgent: { id: 'child', session: { id: 'child' } } })
+    ;(h.ctx.subagents as { startActivation: unknown }).startActivation = async () => ({
+      childId: 'child',
+      result: Promise.resolve({}),
+      dispose: async () => undefined,
+    })
     const retried = await h.host.dispatch({
       ctx: h.ctx as never,
       sessionId: 'parent-session',
       pkg: pkg!,
       remainder: '重试',
+      resolveParent: async () => ({ id: 'parent-agent' }),
     })
     await retried.afterIdle()
+  })
+
+  test('a failed child result does not reject afterIdle and still disposes the activation', async () => {
+    const h = dispatchHarness()
+    ;(h.ctx.subagents as { startActivation: unknown }).startActivation = async () => ({
+      childId: 'child',
+      // Reject after the dispatch returns so cleanup is the observer of the failure.
+      result: new Promise((_resolve, reject) => {
+        setImmediate(() => reject(new Error('child failed')))
+      }),
+      dispose: async () => {
+        h.activationDisposals.push(1)
+      },
+    })
+    const pkg = await h.host.findInvocable('weekly-report')
+    const dispatched = await h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+
+    await expect(dispatched.afterIdle()).resolves.toBeUndefined()
+    expect(h.activationDisposals).toEqual([1])
+    expect(h.stopped).toEqual([h.runtime])
+    expect(h.registry.get('parent-session')).toBeUndefined()
+  })
+
+  test('requires a live parent before starting an activation', async () => {
+    const h = dispatchHarness()
+    const pkg = await h.host.findInvocable('weekly-report')
+    const holder = h.ctx.huaanworkAgentPackageRequest as { current: unknown }
+
+    for (const resolveParent of [undefined, async () => undefined]) {
+      await expect(
+        h.host.dispatch({
+          ctx: h.ctx as never,
+          sessionId: 'parent-session',
+          pkg: pkg!,
+          remainder: '写周报',
+          ...(resolveParent === undefined ? {} : { resolveParent }),
+        }),
+      ).rejects.toThrow(/当前会话没有可用的父会话/)
+    }
+
+    expect(h.activationCalls).toEqual([])
+    expect(h.stopped).toEqual([h.runtime, h.runtime])
+    expect(h.registry.get('parent-session')).toBeUndefined()
+    expect(holder.current).toBeNull()
   })
 
   test('rejects a second package turn in the same session until the first cleans up', async () => {
@@ -1167,22 +1378,31 @@ describe('@slug package dispatch', () => {
       markStarted = resolve
     })
     let finishStart: (() => void) | undefined
-    ;(h.ctx.subagents as { start: unknown }).start = () => {
+    ;(h.ctx.subagents as { startActivation: unknown }).startActivation = () => {
       markStarted()
       return new Promise((resolve) => {
-        finishStart = () => resolve({ localAgent: { id: 'child', session: { id: 'child' } } })
+        finishStart = () =>
+          resolve({ childId: 'child', result: Promise.resolve({}), dispose: async () => undefined })
       })
     }
+    const resolveParent = async (): Promise<{ id: string }> => ({ id: 'parent-agent' })
 
     const first = h.host.dispatch({
       ctx: h.ctx as never,
       sessionId: 'parent-session',
       pkg: pkg!,
       remainder: '第一轮',
+      resolveParent,
     })
     await started
     await expect(
-      h.host.dispatch({ ctx: h.ctx as never, sessionId: 'parent-session', pkg: pkg!, remainder: '第二轮' }),
+      h.host.dispatch({
+        ctx: h.ctx as never,
+        sessionId: 'parent-session',
+        pkg: pkg!,
+        remainder: '第二轮',
+        resolveParent,
+      }),
     ).rejects.toThrow('智能体「weekly-report」无法开始：当前会话已有运行中的智能体包回合（@weekly-report）')
 
     finishStart?.()
@@ -1190,14 +1410,17 @@ describe('@slug package dispatch', () => {
     await dispatched.afterIdle()
 
     // cleanup 释放预留后,同一会话可以开始下一轮。
-    ;(h.ctx.subagents as { start: unknown }).start = async () => ({
-      localAgent: { id: 'child', session: { id: 'child' } },
+    ;(h.ctx.subagents as { startActivation: unknown }).startActivation = async () => ({
+      childId: 'child',
+      result: Promise.resolve({}),
+      dispose: async () => undefined,
     })
     const third = await h.host.dispatch({
       ctx: h.ctx as never,
       sessionId: 'parent-session',
       pkg: pkg!,
       remainder: '第三轮',
+      resolveParent,
     })
     await third.afterIdle()
   })
@@ -1238,14 +1461,14 @@ describe('@slug package dispatch', () => {
     // 真实宿主 Context 不把服务暴露成直接属性;`ctx.get('subagents')` 是唯一入口。
     const h = dispatchHarness()
     delete h.ctx.subagents
-    const startCalls: Array<Record<string, unknown>> = []
+    const activationCalls: ActivationSpec[] = []
     const sandbox = { confine: async (argv: readonly string[]) => ({ argv, enforcement: 'full' }) }
     h.ctx.get = (name: string) =>
       name === 'subagents'
         ? {
-            start: async (_provider: string, request: Record<string, unknown>) => {
-              startCalls.push(request)
-              return { localAgent: { id: 'child', session: { id: 'child' } } }
+            startActivation: async (spec: ActivationSpec) => {
+              activationCalls.push(spec)
+              return { childId: 'child', result: Promise.resolve({}), dispose: async () => undefined }
             },
           }
         : name === 'sandbox'
@@ -1258,14 +1481,16 @@ describe('@slug package dispatch', () => {
       sessionId: 'parent-session',
       pkg: pkg!,
       remainder: '写周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
     })
 
-    expect(startCalls).toHaveLength(1)
-    expect(startCalls[0]?.persona).toContain('SKILL.md 正文')
+    expect(activationCalls).toHaveLength(1)
+    expect(activationCalls[0]?.provider).toBe('spawn')
+    expect(activationCalls[0]?.request.prompt[0]?.text).toContain('SKILL.md 正文')
     await dispatched.afterIdle()
   })
 
-  test('still rejects a package turn when neither the property nor the registered service provides start', async () => {
+  test('still rejects a package turn when neither the property nor the registered service provides startActivation', async () => {
     const h = dispatchHarness()
     delete h.ctx.subagents
     h.ctx.get = () => undefined

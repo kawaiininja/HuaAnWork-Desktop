@@ -200,7 +200,10 @@ export async function dispatchAt(opts: {
     }
 
     const subagents = resolveSubagents(opts.ctx);
-    if (subagents === undefined) {
+    // legacy `@agent` 仍调用旧签名 `start`;rc.1 的 SubagentRuntime 只有
+    // startActivation,这条分支按既有登记保持原状(预存 breakage,不在本修复范围)。
+    const start = subagents?.start?.bind(subagents);
+    if (subagents === undefined || start === undefined) {
       throw new Error("current dsh runtime does not support subagents");
     }
 
@@ -218,7 +221,7 @@ export async function dispatchAt(opts: {
       // provider 固定 "spawn"（进程内 spawn provider）；parent 在 start 前解析为当前会话 agent，
       // 保证 cwd/取消链归属正确（不再依赖 list()[0] 猜测）
       const parent = opts.resolveParent ? await opts.resolveParent() : undefined;
-      await subagents.start("spawn", {
+      await start("spawn", {
         prompt: [{ type: "text", text: prompt }],
         persona,
         ...(parent ? { parent } : {}),

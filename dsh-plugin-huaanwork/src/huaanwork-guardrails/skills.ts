@@ -46,6 +46,12 @@ type SkillRegistration = {
   resourceBase?: { kind: "directory"; path: string };
 };
 
+/** `startActivation` 返回值中包装消费的成员:子会话 id 与本地子 agent。 */
+type ActivationRun = {
+  childId?: unknown;
+  localAgent?: Agent;
+};
+
 type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨 skills/agents/tools/subagents 四服务,无统一类型导出
   skills: {
     register(skill: SkillRegistration): () => void;
@@ -56,7 +62,7 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   };
   subagents?: {
     start(...args: never[]): Promise<{ localAgent?: Agent }>;
-    startActivation?(...args: never[]): Promise<unknown>;
+    startActivation?(...args: never[]): Promise<ActivationRun | undefined>;
   };
   huaanworkAgentRequest?: {
     current?: {
@@ -293,8 +299,47 @@ export function apply(ctx: Context): void {
   if (activation && ctx.subagents) {
     const originalActivation = activation.bind(ctx.subagents);
     ctx.subagents.startActivation = async (...args: never[]) => {
-      const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
-      return startParent.run(parentFromCall, () => originalActivation(...args));
+      // 在 await 之前取快照:host 的 afterIdle 会在回合结束后清空容器。
+      const pkg = ctx.huaanworkAgentPackageRequest?.current;
+      try {
+        const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
+        const run = await startParent.run(parentFromCall, () => originalActivation(...args));
+        // Package requests are keyed to the session that dispatched them: an activation
+        // started by any other session keeps its own tools and attachments.
+        if (pkg && run && parentFromCall !== undefined && pkg.parentSessionId === parentFromCall) {
+          const childSessionId = sessionIdOf(run.childId) ?? sessionIdOf(run.localAgent);
+          if (childSessionId) {
+            if (ctx.huaanworkAttachments) {
+              // MCP 名字在挂载时先落在父会话上(健康检查要求先拿到工具名),发现后由
+              // host 从父会话摘掉;子会话要执行 mcp__* 仍需自己的附件,否则 policy 的
+              // attached 判定会拒绝。
+              attachAgentTools(ctx.huaanworkAttachments, childSessionId, [
+                ...AGENT_PACKAGE_CHILD_TOOLS,
+                ...(pkg.runtime.mcpNames ?? []),
+              ]);
+            }
+            // 绑定必须与附件同批完成,且先于 refreshAgentRestrict:present-as 只在附件里
+            // 找非 ALLOWED_TOOLS 的名字,晚挂会让它先前算出的 restrict 继续遮住 mcp__*。
+            pkg.bindChild(childSessionId);
+            refreshAgentRestrict(ctx as never, childSessionId);
+          }
+          const childAgent =
+            (childSessionId === undefined ? undefined : ctx.agents?.get?.(childSessionId)) ?? run.localAgent;
+          const tools = childAgent?.ctx?.get?.("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          const existing = schemas.flatMap((schema) => (schema.name ? [schema.name] : []));
+          const allow = pkg.allow.filter((name) => existing.includes(name));
+          tools?.restrict?.({ allow });
+        }
+        if (run?.localAgent) {
+          consumePendingSpawn(run.localAgent);
+        }
+        return run;
+      } finally {
+        if (ctx.huaanworkAgentPackageRequest) {
+          ctx.huaanworkAgentPackageRequest.current = null;
+        }
+      }
     };
   }
 }

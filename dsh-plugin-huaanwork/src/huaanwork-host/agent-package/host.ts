@@ -3,7 +3,11 @@ import { mountSessionMcp } from '../../huaanwork-guardrails/agent-mcp.ts'
 import { refreshAgentRestrict } from '../../huaanwork-guardrails/present-as.ts'
 import type { AgentListItem } from '../../client-huaanwork/rpc-types.ts'
 import type { AgentsHost } from '../agents-host.ts'
-import { resolveSubagents } from '../subagents-service.ts'
+import {
+  resolveSubagents,
+  type SubagentActivationHandle,
+  type SubagentsService,
+} from '../subagents-service.ts'
 import {
   beginAgentPackageUpdate,
   cancelAgentPackage,
@@ -44,7 +48,7 @@ import type {
  * `@slug` dispatch 需要的运行时上下文(由 `sessions.ts` 传入真实 cordis Context)。
  *
  * 只声明本模块实际读取的成员:子代理启动、`sandbox` 服务查找、工作区根,以及
- * `skills.ts` 在 `subagents.start` 包装里消费的请求容器与附件表。
+ * `skills.ts` 在 `subagents.startActivation` 包装里消费的请求容器与附件表。
  */
 export type AgentPackageDispatchContext = {
   /** 全局服务查找:`sandbox`,以及 `subagents` 在直接属性缺席时的回落路径。 */
@@ -52,18 +56,7 @@ export type AgentPackageDispatchContext = {
   huaanworkWorkspaceRoot?: { current: string }
   huaanworkAttachments?: AttachmentMaps
   huaanworkAgentPackageRequest?: { current: AgentPackageSubagentRequest | null }
-  subagents?: {
-    start?: (
-      provider: string,
-      request: {
-        prompt: Array<{ type: string; text: string }>
-        persona?: string
-        parent?: unknown
-        signal?: AbortSignal
-        [key: string]: unknown
-      },
-    ) => Promise<unknown>
-  }
+  subagents?: SubagentsService
 }
 
 export type AgentPackageDispatchInput = {
@@ -153,6 +146,14 @@ export type CreateAgentPackageHostOptions = {
 
 /** 每会话原句只保留最近一条;上限防止长驻宿主按会话无限增长。 */
 const MAX_TRACKED_SESSIONS = 256
+
+/**
+ * 回合结束后等待子会话结果/释放的上限。
+ *
+ * 正常路径在宿主空闲时子会话已经结束,`result` 早已落定;这个上限只兜住
+ * 「子进程卡住」的异常路径,避免父会话的 idle 清理被无限期挂起。
+ */
+const ACTIVATION_CLEANUP_TIMEOUT_MS = 10_000
 
 /**
  * 组装 `AgentPackageHost`。
@@ -257,7 +258,11 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       if (!pkg.enabled) throw new Error(`智能体「${pkg.slug}」未启用或不存在`)
       if (pkg.broken !== undefined) throw new Error(`智能体「${pkg.slug}」已损坏：${pkg.broken.reason}`)
       const subagents = resolveSubagents(ctx)
-      if (subagents === undefined) throw new Error('current dsh runtime does not support subagents')
+      // Bind after the guard so the runtime method keeps its service receiver.
+      const startActivation = subagents?.startActivation?.bind(subagents)
+      if (subagents === undefined || startActivation === undefined) {
+        throw new Error('current dsh runtime does not support subagents')
+      }
 
       // Reserve synchronously, before the first await: two sends in one session must not
       // start two runtimes (and two subagent children) for the same turn.
@@ -280,6 +285,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       let request: AgentPackageSubagentRequest | null = null
       let cleanupPromise: Promise<void> | undefined
       let cleanupStarted = false
+      let activation: SubagentActivationHandle | undefined
+      let activationAbort: AbortController | undefined
       const boundChildren = new Set<string>()
 
       const bindChild = (childSessionId: string): void => {
@@ -297,6 +304,24 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         cleanupStarted = true
         if (cleanupPromise !== undefined) return cleanupPromise
         cleanupPromise = (async () => {
+          // Finish the child before releasing what it can still call: the parent can go
+          // idle while the child is still working, so aborting or stopping the runtime
+          // first would truncate the answer. `result` settles only after the manager's
+          // own teardown; capturing it here keeps a failed child turn from rejecting the
+          // parent's idle cleanup. Both waits are bounded so a stuck child cannot block
+          // that cleanup forever.
+          const currentActivation = activation
+          if (currentActivation !== undefined) {
+            try {
+              const settled = await settleWithin(currentActivation.result, ACTIVATION_CLEANUP_TIMEOUT_MS)
+              // A child that did not settle within the bound is stuck: cancel it before
+              // asking the manager to release the activation.
+              if (!settled) activationAbort?.abort()
+              await settleWithin(currentActivation.dispose(), ACTIVATION_CLEANUP_TIMEOUT_MS)
+            } catch {
+              // 释放是尽力而为:同步抛错的 dispose 不能阻止进程、MCP 与登记的清理。
+            }
+          }
           const current = runtime
           if (current !== undefined) {
             try {
@@ -374,19 +399,35 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
 
         const allow = composeAgentPackageToolAllowList(manifest, mcpNames, runtime.skillScripts)
         request = { allow, persona, runtime, parentSessionId: sessionId, bindChild }
-        if (ctx.huaanworkAgentPackageRequest !== undefined) {
-          ctx.huaanworkAgentPackageRequest.current = request
-        }
         registry.bind(sessionId, runtime)
 
         const prompt = input.remainder.trim() || pkg.description || '开始协助工作。'
         const parent = input.resolveParent === undefined ? undefined : await input.resolveParent()
-        await subagents.start('spawn', {
-          prompt: [{ type: 'text', text: prompt }],
-          persona,
-          ...(parent === undefined ? {} : { parent }),
-          signal: new AbortController().signal,
+        if (parent === undefined || parent === null) {
+          throw new Error(`智能体「${pkg.slug}」无法开始：当前会话没有可用的父会话`)
+        }
+        // Publish the request synchronously before the call: the skills wrapper reads it
+        // before its first await, so no sibling activation can claim this turn's request.
+        if (ctx.huaanworkAgentPackageRequest !== undefined) {
+          ctx.huaanworkAgentPackageRequest.current = request
+        }
+        activationAbort = new AbortController()
+        activation = await startActivation({
+          provider: 'spawn',
+          label: `@${pkg.slug}`,
+          request: {
+            // rc.1 的 SubagentStartRequest 没有 persona 字段:人设作为带分隔的前缀
+            // 并入子代理的首条用户消息,用户请求原样保留在后。
+            prompt: [{ type: 'text', text: `${persona}\n\n---\n用户请求：\n${prompt}` }],
+            parent,
+          },
+          signal: activationAbort.signal,
+          delivery: 'parent',
         })
+        // The registry binding must exist before the child can call agent_http/agent_skill_run.
+        if (typeof activation.childId === 'string' && activation.childId.length > 0) {
+          bindChild(activation.childId)
+        }
         return { text: prompt, afterIdle: cleanup }
       } catch (error) {
         await cleanup()
@@ -434,6 +475,29 @@ function readDispatchManifest(profileDir: string, slug: string): AgentPackageMan
     throw new Error(`智能体「${slug}」已损坏：manifest 校验失败（${detail}）`)
   }
   return parsed.manifest
+}
+
+/**
+ * Wait for `promise` to settle or for `timeoutMs` to elapse, whichever is first.
+ *
+ * A rejection is treated exactly like a resolution: cleanup records neither and
+ * must not fail the caller's idle path.
+ *
+ * @param promise — the result or disposal to observe
+ * @param timeoutMs — upper bound for the wait
+ * @returns `true` when the promise settled first, `false` on timeout; never rejects
+ */
+function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      resolve(false)
+    }, timeoutMs)
+    const finish = (): void => {
+      clearTimeout(timer)
+      resolve(true)
+    }
+    promise.then(finish, finish)
+  })
 }
 
 function rememberLastText(lastText: Map<string, string>, sessionId: string, text: string): void {
