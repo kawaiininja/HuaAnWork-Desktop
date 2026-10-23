@@ -10,6 +10,10 @@ import {
   isAgentToolAttached,
 } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import {
+  AGENT_PROPOSE_TOOL,
+  registerAgentPackageCreationTools,
+} from '../../src/huaanwork-guardrails/agent-package-tools.ts'
+import {
   createAgentPackageHost,
   type AgentPackageHost,
 } from '../../src/huaanwork-host/agent-package/host.ts'
@@ -231,7 +235,7 @@ describe('creation tool attachments', () => {
 })
 
 describe('sendToAgent creation gate', () => {
-  test('a create phrase injects the skill, notes the raw turn, and attaches tools until idle', async () => {
+  test('a create phrase injects the skill, notes the raw turn, and keeps tools across idle without a draft', async () => {
     const root = makeRoot()
     const events: RpcEvent[] = []
     const received: unknown[] = []
@@ -260,7 +264,76 @@ describe('sendToAgent creation gate', () => {
     idle.resolve()
     await idle.promise
     await new Promise((done) => setTimeout(done, 0))
-    expect(isAgentToolAttached(maps, sessionId, 'agent_propose')).toBe(false)
+    // 设计 §6.2:访谈跨多轮,第一轮结束时没有草稿也不能卸下工具。
+    expect(isAgentToolAttached(maps, sessionId, 'agent_propose')).toBe(true)
+    expect(isAgentToolAttached(maps, sessionId, 'agent_commit')).toBe(true)
+  })
+
+  test('an interview turn without a draft keeps the tools callable, so the next turn can propose', async () => {
+    const root = makeRoot()
+    const events: RpcEvent[] = []
+    const received: unknown[] = []
+    const sessionId = 'huaanwork-0123456789abcdef'
+    const idle = deferred()
+    const maps = emptyAttachments()
+    const agent = makeAgent(sessionId, received, idle.promise)
+    const ctx = makeSessionCtx(agent, sessionId, maps)
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    setAgentPackageHost(host)
+    const registered = new Map<string, { execute(args: unknown, exec: unknown): Promise<{ text: string }> }>()
+    const disposeTools = registerAgentPackageCreationTools(
+      {
+        tools: {
+          register(definition: unknown) {
+            const tool = definition as {
+              name: string
+              execute(args: unknown, exec: unknown): Promise<{ text: string }>
+            }
+            registered.set(tool.name, tool)
+            return () => registered.delete(tool.name)
+          },
+        },
+        huaanworkEmit: (event: RpcEvent) => events.push(event),
+        huaanworkAttachments: maps,
+        root: restrictRoot({ sessions: [] }),
+      },
+      host,
+    )
+
+    // 第一轮:创建入口命中,但模型这一轮只问问题,没有草稿。
+    await sendToAgent(ctx, makeRouteCtx(root, events), { text: '帮我新建一个智能体', sessionId })
+    idle.resolve()
+    await idle.promise
+    await new Promise((done) => setTimeout(done, 0))
+    expect(loadAgentPackageDraft(root, sessionId)).toBeUndefined()
+    expect(isAgentToolAttached(maps, sessionId, AGENT_PROPOSE_TOOL)).toBe(true)
+
+    // 第二轮是访谈回答:不命中入口说法,也还没有草稿,创建门禁不会重新进入;
+    // 工具必须仍然挂着,模型才能在这一轮提交草稿。
+    await sendToAgent(ctx, makeRouteCtx(root, events), { text: '每周五汇总本周工作', sessionId })
+    await new Promise((done) => setTimeout(done, 0))
+    const answer = received[1] as { content: { text: string }[] }
+    expect(answer.content[0]?.text).toBe('每周五汇总本周工作')
+    expect(isAgentToolAttached(maps, sessionId, AGENT_PROPOSE_TOOL)).toBe(true)
+    expect(isAgentToolAttached(maps, sessionId, 'agent_commit')).toBe(true)
+
+    const value = await registered.get(AGENT_PROPOSE_TOOL)?.execute(
+      {
+        mode: 'create',
+        displayName: '周报小助手',
+        slug: 'weekly-report',
+        description: '把一周工作整理成周报',
+        persona: '你是周报助手。',
+        personaSummary: '写周报',
+        skillSummary: '无专属技能包',
+        tools: 'none',
+      },
+      { agent: { id: sessionId, session: { id: sessionId } } },
+    )
+    expect(value?.text).toContain('@标识：weekly-report')
+    expect(loadAgentPackageDraft(root, sessionId)).toBeDefined()
+    expect(events).toContainEqual({ event: 'agent/confirm', card: expect.objectContaining({ slug: 'weekly-report' }), sessionId })
+    disposeTools()
   })
 
   test('an active draft turns the next message into a continue turn and keeps tools after idle', async () => {

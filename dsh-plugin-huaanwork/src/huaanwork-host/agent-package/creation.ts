@@ -103,7 +103,7 @@ export function attachCreationTools(ctx: CreationContext, sessionId: string): vo
   refreshAgentRestrict(ctx as never, sessionId)
 }
 
-/** 卸下创建工具;commit 成功、取消与「回合结束仍无草稿」三条路径共用。 */
+/** 卸下创建工具;commit 成功与取消两条终态路径共用,访谈中途不卸。 */
 export function detachCreationTools(ctx: CreationContext, sessionId: string): void {
   if (!ctx.huaanworkAttachments) return
   detachAgentTools(ctx.huaanworkAttachments, sessionId, CREATION_TOOLS)

@@ -141,13 +141,11 @@ export async function sendToAgent(
   noteCallerSession(sessionId)
 
   let afterIdle: (() => Promise<void>) | undefined
-  let detachCreationAfterIdle: (() => void) | undefined
   let cleanedUp = false
   const cleanup = async () => {
     if (cleanedUp) return
     cleanedUp = true
     await afterIdle?.()
-    detachCreationAfterIdle?.()
   }
   // followup 受理后立即返回。@ HTTP 工具的 detach 只在 idle 之后跑，
   // 成功路径和 finally 共用这一次登记，避免回合中途解绑或解绑两次。
@@ -197,11 +195,9 @@ export async function sendToAgent(
         mode,
         creationIntent?.kind === 'update' ? creationIntent.slug : undefined,
       )
+      // 工具跨轮保持挂载,只在 commit 成功或取消时卸下(设计 §6.2):
+      // 访谈首轮提出草稿前没有草稿,不能按「回合结束是否有草稿」判断。
       attachCreationTools(ctx, sessionId)
-      // 宿主在回合结束后按草稿存续决定是否卸下创建工具:保留草稿的下一轮仍需 agent_commit。
-      detachCreationAfterIdle = () => {
-        if (!packageHost.hasDraft(sessionId)) detachCreationTools(ctx, sessionId)
-      }
     }
 
     if (atName) {
