@@ -222,6 +222,38 @@ describe("AgentPackagesPanel（我的智能体）", () => {
     expect(container!.textContent).toContain("你是周报助手，按项目汇总进展。");
     expect(container!.textContent).toContain("脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。");
   });
+
+  it("已启用的旧目录智能体可直接关闭，经 agent.packageSetEnabled 写回旧启用表", async () => {
+    const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
+
+    const disable = buttonByText(view, "关闭");
+    expect(disable).toBeDefined();
+    await act(async () => {
+      disable!.click();
+    });
+    await flush();
+
+    expect(rpcMock).toHaveBeenCalledWith("agent.packageSetEnabled", {
+      slug: "legacy-agent",
+      enabled: false,
+    });
+    expect(view.textContent).toContain("已关闭「旧目录助手」");
+    const listCalls = rpcMock.mock.calls.filter(([method]) => method === "agent.packageList");
+    expect(listCalls.length).toBeGreaterThan(1);
+  });
+
+  it("目录不可达时显示 catalogError，已启用的旧条目仍出卡", async () => {
+    listPayload = {
+      ...listResult(),
+      catalogError: "公用机目录请求失败: offline",
+    };
+    const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
+
+    expect(view.textContent).toContain("公用机目录请求失败: offline");
+    // 目录失败不隐藏上次已知的启用条目;关闭入口仍在。
+    expect(view.textContent).toContain("旧目录助手");
+    expect(buttonByText(view, "关闭")).toBeDefined();
+  });
 });
 
 describe("AgentsPlazaPanel（智能体广场）", () => {

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import { parseAgentPackageManifest } from '../../src/huaanwork-host/agent-package/manifest.ts'
+import { createAgentPackageHost } from '../../src/huaanwork-host/agent-package/host.ts'
 import {
   composeAgentPackagePersona,
   composeAgentPackageToolAllowList,
@@ -605,6 +606,64 @@ describe('agent package runtime registry', () => {
     expect(registry.get('session-1')).toBe(runtime)
     registry.delete('session-1')
     expect(registry.get('session-1')).toBeUndefined()
+  })
+})
+
+describe('agent package turn cleanup', () => {
+  /** 把 fixture 装进 profile 的 agents/<slug>/ 并只启用 HTTP 工具模式。 */
+  function installHttpPackage(): string {
+    const profileDir = makeRoot('agent-package-profile-')
+    const packageDir = join(profileDir, 'agents', 'weekly-report')
+    mkdirSync(join(profileDir, 'agents'), { recursive: true })
+    cpSync(FIXTURE_DIR, packageDir, { recursive: true })
+    const manifest = JSON.parse(readFileSync(join(packageDir, 'agent.json'), 'utf8')) as Record<string, unknown>
+    manifest.tools = { mode: 'http', http: { entry: 'tools/http/server.mjs' } }
+    writeFileSync(join(packageDir, 'agent.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+    // store 会把「未选择 MCP 但存在 tools/mcp」标成损坏。
+    rmSync(join(packageDir, 'tools', 'mcp'), { recursive: true, force: true })
+    writeFileSync(
+      join(profileDir, 'agents-state.json'),
+      JSON.stringify({ 'local:weekly-report': { source: 'local', enabled: true, installedVersion: '1.0.0' } }),
+      'utf8',
+    )
+    return profileDir
+  }
+
+  test('afterIdle stops the HTTP process started for a dispatched turn', { timeout: 30_000 }, async () => {
+    const profileDir = installHttpPackage()
+    const workspaceRoot = makeRoot('agent-package-ws-')
+    const host = createAgentPackageHost({ profileDir, takenSlugs: () => [] })
+    const pkg = await host.findInvocable('weekly-report')
+    expect(pkg?.broken).toBeUndefined()
+
+    const dispatched = await host.dispatch({
+      ctx: {
+        get: (name: string) => (name === 'sandbox' ? passthroughSandbox : undefined),
+        huaanworkWorkspaceRoot: { current: workspaceRoot },
+        subagents: { start: async () => ({ localAgent: { id: 'child', session: { id: 'child' } } }) },
+      } as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写一份周报',
+    })
+
+    const port = await readPortFile(workspaceRoot, 'http-port.txt')
+    expect(await portAccepting(port)).toBe(true)
+
+    await dispatched.afterIdle()
+    await waitForPortClosed(port)
+  })
+
+  test('refuses a package whose declared HTTP entry is missing', async () => {
+    const profileDir = installHttpPackage()
+    rmSync(join(profileDir, 'agents', 'weekly-report', 'tools', 'http', 'server.mjs'))
+    const host = createAgentPackageHost({ profileDir, takenSlugs: () => [] })
+    const pkg = await host.findInvocable('weekly-report')
+
+    expect(pkg?.broken?.reason).toContain('tools/http/server.mjs 缺失')
+    await expect(
+      host.dispatch({ ctx: {} as never, sessionId: 'parent-session', pkg: pkg!, remainder: '写周报' }),
+    ).rejects.toThrow(/已损坏.*tools\/http\/server\.mjs 缺失/)
   })
 })
 
