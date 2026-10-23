@@ -94,7 +94,7 @@ export const ROUTES: Record<string, RouteDef> = {
   'agent.removeEndpoint': post('/huaanwork/agent/removeEndpoint'),
   'agent.packageList': { http: 'GET', path: '/huaanwork/agent/package/list' },
   'agent.packageDetail': { http: 'GET', path: '/huaanwork/agent/package/detail', query: objectQuery },
-  'agent.packageSetEnabled': { http: 'POST', path: '/huaanwork/agent/package/setEnabled' },
+  'agent.packageSetEnabled': post('/huaanwork/agent/package/setEnabled'),
   'agent.invocableList': { http: 'GET', path: '/huaanwork/agent/invocable' },
 
   // status

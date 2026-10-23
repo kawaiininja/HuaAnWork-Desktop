@@ -148,6 +148,24 @@ describe('rpcCall 路由映射', () => {
     expect(actual).toEqual(EXPECTED_ROUTES)
   })
 
+  test('agent.packageSetEnabled 声明 body 透传 params(宿主拒绝空 body)', () => {
+    const route = ROUTES['agent.packageSetEnabled']
+    expect(route?.http).toBe('POST')
+    expect(route?.path).toBe('/huaanwork/agent/package/setEnabled')
+    const params = { slug: 'weekly-report', enabled: true }
+    expect(route?.body?.(params)).toEqual(params)
+  })
+
+  test('agent.packageSetEnabled 经 rpcCall 发出 JSON body', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }))
+    await rpcCall('agent.packageSetEnabled', { slug: 'weekly-report', enabled: true })
+    const { url, init } = lastFetchCall()
+    expect(url).toBe('/huaanwork/agent/package/setEnabled')
+    expect(init.method).toBe('POST')
+    expect(init.headers).toEqual({ 'content-type': 'application/json' })
+    expect(JSON.parse(String(init.body))).toEqual({ slug: 'weekly-report', enabled: true })
+  })
+
   test('GET 方法:settings.get → GET /huaanwork/settings', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ allow_network: false }))
     await rpcCall('settings.get')
