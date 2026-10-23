@@ -647,6 +647,17 @@ describe('update mode', () => {
 })
 
 describe('host facade', () => {
+  test('a broken package can be disabled but not enabled', () => {
+    const root = makeRoot()
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    mkdirSync(join(agentPackagesRoot(root), 'broken-agent'), { recursive: true })
+    writeFileSync(join(agentPackagesRoot(root), 'broken-agent', 'agent.json'), '{not json', 'utf8')
+
+    host.setEnabled('broken-agent', false)
+    expect(host.detail('broken-agent')?.enabled).toBe(false)
+    expect(() => host.setEnabled('broken-agent', true)).toThrow(/损坏/)
+  })
+
   test('owns turn text, gates same-turn commits, and exposes the local package surface', async () => {
     const root = makeRoot()
     let taken: readonly string[] = []
@@ -668,6 +679,9 @@ describe('host facade', () => {
     if (!sameTurn.ok) expect(sameTurn.error).toMatch(/同一轮/)
 
     host.noteUserText('session-host', '可以')
+    expect(host.lastUserText('session-host')).toBe('可以')
+    // 生产路径在同一轮还会命中创建/继续创建入口,这里补上标记。
+    host.noteCreationTurn('session-host', '可以')
     const committed = await host.commit('session-host', proposed.draftId, '可以')
     expect(committed.ok).toBe(true)
     expect(host.hasDraft('session-host')).toBe(false)

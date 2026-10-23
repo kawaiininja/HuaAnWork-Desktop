@@ -1136,17 +1136,21 @@ export default function App() {
       // 智能体包事件：会话内提示、结构化创建确认卡，以及列表刷新信号（面板与 @ 补全共用）。
       // 放在自动化会话泄漏门之后，自动化会话的 agent 事件不会写进可见对话标签。
       if (event.event === "agent/notice") {
-        noteTab(liveChatRef.current, event.text);
+        const target = targetTabFor(eventSessionId);
+        if (target) noteTab(target, event.text);
         return;
       }
       if (event.event === "agent/confirm") {
-        setChatTabs((prev) =>
-          prev.map((tab) =>
-            tab.id === liveChatRef.current
-              ? { ...tab, items: [...tab.items, { id: allocId(), kind: "agent-confirm" as const, card: event.card }] }
-              : tab,
-          ),
-        );
+        const target = targetTabFor(eventSessionId);
+        if (target) {
+          setChatTabs((prev) =>
+            prev.map((tab) =>
+              tab.id === target
+                ? { ...tab, items: [...tab.items, { id: allocId(), kind: "agent-confirm" as const, card: event.card }] }
+                : tab,
+            ),
+          );
+        }
         return;
       }
       if (event.event === "agent/changed") {

@@ -127,11 +127,11 @@ export function getAgentPackageHost(): AgentPackageHost | undefined {
 }
 
 /**
- * 记录这一轮的用户原句,供 `agent_commit` 核对同意说法。
+ * 记录这一轮的用户原句并标记本轮命中创建/继续创建入口。
  *
- * 委托给宿主的 per-session 原句表(同一张表也负责清除「同一轮已 propose」标记),
- * 这里不另存一份。
+ * 宿主据此同时完成两件事:覆盖上一轮原句、清除「同一轮已 propose」标记,
+ * 并让 `agent_commit` 只接受创建流程回合的同意句。
  */
 export function noteCreationTurn(sessionId: string, rawText: string): void {
-  agentPackageHost?.noteUserText(sessionId, rawText)
+  agentPackageHost?.noteCreationTurn(sessionId, rawText)
 }

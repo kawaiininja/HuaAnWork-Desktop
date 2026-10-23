@@ -8,6 +8,8 @@
   macOS 应用与真实模型上验证；验收过程中发现并修复 9 个真实接线缺陷 + 1 个验收修复引入的回归，随后 HTTP、
   MCP、catalog-legacy（本地 fixture）与 legacy `@agent` 实机均通过（§7、§8）。真实内网 catalog 与 Windows
   真机仍未验收。
+- **2026-10-24 裁定**：本文件的代理驱动实机验收作为 Task 9 Step 4 的 macOS 证据；真人交互复核列为
+  可选/独立项。M1 仍因 Windows 项未完成而不宣布完成；Windows 交由 GitHub Actions/真机补验。
 
 ## 1. 通过项
 
@@ -67,10 +69,12 @@ agents-state.json
   到达（HTTP/MCP 回合本来就会跑过父回合空闲点），原 10 s 会把仍在工作的子代理截断。超时后宿主记一条错误、释放
   activation（发布后的取消归 `dispose()`，不再 abort 发布前 signal）并照常停止子进程；`agent-package-tools.spec.ts`
   用假定时器钉住 599,999 ms 内仍在等待、600,000 ms 触发清理。
-- **Windows 真机**：无 Windows 机器，Task 1/9 仍为 BLOCKED。
+- **Windows 真机**：无 Windows 机器，Task 1/9 的 Windows 项仍为 BLOCKED；按 2026-10-24 裁定交由
+  GitHub Actions 的 Windows runner/真机补验。macOS Task 9 Step 4 已按同日裁定收口。
 - **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3150 passed / 14 skipped）、typecheck
   （0）、`check:desktop-variants`（0）；根 `corepack yarn check` 未在最终树重跑（此前在最终评审前为绿）。
-- **M1 完成声明**：不作出。上述实机项与 Windows 未完成。
+- **M1 完成声明**：不作出。Windows 项与真实内网 catalog 的 payload/认证仍未验收；macOS Task 9 Step 4
+  已按 2026-10-24 裁定收口。
 
 ## 6. 清理
 

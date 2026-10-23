@@ -282,8 +282,17 @@ describe('agent.packageSetEnabled', () => {
     expect(emitted).toEqual([])
   })
 
-  test('损坏的本地包 ⇒ 400 store-error 且不发事件(不回退 legacy 分支)', async () => {
+  test('损坏的本地包允许关闭,但不回退 legacy 分支', async () => {
     await expect(callRoute('agent.packageSetEnabled', { body: { slug: LOCAL_BROKEN, enabled: false } }))
+      .resolves.toEqual({ ok: true })
+
+    expect(readAgentPackageState(profileDir)[`local:${LOCAL_BROKEN}`]?.enabled).toBe(false)
+    expect(emitted).toEqual([{ event: 'agent/changed', slug: LOCAL_BROKEN }])
+    expect(legacy.setEnabledCalls).toEqual([])
+  })
+
+  test('损坏的本地包启用 ⇒ 400 store-error 且不发事件', async () => {
+    await expect(callRoute('agent.packageSetEnabled', { body: { slug: LOCAL_BROKEN, enabled: true } }))
       .rejects.toMatchObject({ status: 400, code: 'store-error' })
     expect(legacy.setEnabledCalls).toEqual([])
     expect(emitted).toEqual([])

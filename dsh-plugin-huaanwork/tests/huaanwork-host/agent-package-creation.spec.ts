@@ -132,6 +132,7 @@ function fakeHost(overrides: Partial<AgentPackageHost> = {}): AgentPackageHost {
     beginUpdate: async () => undefined,
     lastUserText: () => undefined,
     noteUserText: () => undefined,
+    noteCreationTurn: () => undefined,
     listLocal: () => [],
     detail: () => undefined,
     setEnabled: () => undefined,
@@ -474,6 +475,63 @@ describe('sendToAgent creation gate', () => {
     expect(committed.ok).toBe(false)
     expect(committed.ok ? '' : committed.error).toContain('用户原句不是同意创建的说法')
     expect(loadAgentPackageDraft(root, sessionId)).toBeDefined()
+  })
+
+  test('a skill turn whose text is itself a consent phrase cannot commit an old draft', async () => {
+    const root = makeRoot()
+    const events: RpcEvent[] = []
+    const received: unknown[] = []
+    const sessionId = 'huaanwork-0123456789abcdef'
+    const maps = emptyAttachments()
+    const agent = makeAgent(sessionId, received)
+    const ctx = makeSessionCtx(agent, sessionId, maps)
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    setAgentPackageHost(host)
+    mkdirSync(join(root, 'skills', 'weekly-helper'), { recursive: true })
+    writeFileSync(
+      join(root, 'skills', 'weekly-helper', 'SKILL.md'),
+      '---\nname: weekly-helper\ndescription: 整理周报素材\n---\n\n整理吧。\n',
+      'utf8',
+    )
+
+    const proposed = await host.propose(sessionId, draftProposal)
+    expect(proposed.ok).toBe(true)
+    const draftId = proposed.ok ? proposed.draftId : ''
+
+    // 同意轮:用户只说了「可以」,模型没有在这一轮提交。
+    await sendToAgent(ctx, makeRouteCtx(root, events), { text: '可以', sessionId })
+    expect(host.lastUserText(sessionId)).toBe('可以')
+
+    // 技能轮旁路创建门禁;原文仍是同意句,但不能借此提交上一轮留下的草稿。
+    await sendToAgent(ctx, makeRouteCtx(root, events), { skill: 'weekly-helper', text: '可以', sessionId })
+    expect(host.lastUserText(sessionId)).toBe('可以')
+
+    const committed = await host.commit(sessionId, draftId, host.lastUserText(sessionId) ?? '')
+    expect(committed.ok).toBe(false)
+    expect(committed.ok ? '' : committed.error).toContain('本轮不是创建/继续创建流程')
+    expect(loadAgentPackageDraft(root, sessionId)).toBeDefined()
+  })
+
+  test('a consent turn through sendToAgent marks the creation turn and commits', async () => {
+    const root = makeRoot()
+    const events: RpcEvent[] = []
+    const received: unknown[] = []
+    const sessionId = 'huaanwork-0123456789abcdef'
+    const maps = emptyAttachments()
+    const agent = makeAgent(sessionId, received)
+    const ctx = makeSessionCtx(agent, sessionId, maps)
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    setAgentPackageHost(host)
+
+    const proposed = await host.propose(sessionId, draftProposal)
+    expect(proposed.ok).toBe(true)
+    const draftId = proposed.ok ? proposed.draftId : ''
+
+    await sendToAgent(ctx, makeRouteCtx(root, events), { text: '可以', sessionId })
+
+    const committed = await host.commit(sessionId, draftId, host.lastUserText(sessionId) ?? '')
+    expect(committed.ok).toBe(true)
+    expect(loadAgentPackageDraft(root, sessionId)).toBeUndefined()
   })
 
   test('/create-agent update <missing> emits a notice instead of failing the send', async () => {

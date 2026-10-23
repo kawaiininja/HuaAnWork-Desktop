@@ -176,7 +176,7 @@ function commitTool(ctx: ToolContext, host: AgentPackageHost) {
   return defineTool({
     name: AGENT_COMMIT_TOOL,
     description:
-      '把当前会话的待确认草稿写入本地智能体包。只在用户整句明确同意（可以/确认/同意/就这样/按这个建）后调用；draftId 必须用 agent_propose 结果里「草稿编号：」后面的编号，不要自己编造。同一轮刚 propose 不能立即 commit。',
+      '把当前会话的待确认草稿写入本地智能体包。只在用户整句明确同意（可以/确认/同意/就这样/按这个建）、且本轮仍处于创建/继续创建流程时调用；draftId 必须用 agent_propose 结果里「草稿编号：」后面的编号，不要自己编造。同一轮刚 propose 不能立即 commit。',
     parameters: {
       draftId: { type: 'string', required: true, description: 'agent_propose 返回的草稿 id' },
     },

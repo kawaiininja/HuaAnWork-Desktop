@@ -203,7 +203,8 @@ export async function proposeAgentPackage(
  * @param draftId `propose` 返回的草稿 id
  * @param rawUserText 这一轮用户原句,必须是同意说法
  * @param takenSlugs 已占用的本地入口/工具名
- * @param opts `proposedThisTurn` 为真时拒绝(同一轮刚提出草稿)
+ * @param opts `proposedThisTurn` 为真时拒绝(同一轮刚提出草稿);`creationTurn`
+ *   显式为 false 时拒绝(本轮没有命中创建/继续创建入口,技能/@ 轮的同意句不适用)
  * @returns 落盘路径与确认单,或拒绝原因
  */
 export async function commitAgentPackage(
@@ -212,7 +213,7 @@ export async function commitAgentPackage(
   draftId: string,
   rawUserText: string,
   takenSlugs: readonly string[],
-  opts?: { proposedThisTurn?: boolean },
+  opts?: { proposedThisTurn?: boolean; creationTurn?: boolean },
 ): Promise<CommitResult> {
   if (!isValidSessionId(sessionId)) return refused('会话 id 必须是单个路径段')
   if (typeof rawUserText !== 'string' || !isAgentConsentText(rawUserText)) {
@@ -220,6 +221,10 @@ export async function commitAgentPackage(
   }
   if (opts?.proposedThisTurn === true) {
     return refused('同一轮里刚提出草稿，不能立即提交；请等下一轮用户确认')
+  }
+  // 生产路径由 host 显式传值;直接调用本低层函数的测试/工具不传,保持旧契约。
+  if (opts?.creationTurn === false) {
+    return refused('本轮不是创建/继续创建流程，不能提交草稿')
   }
   if (typeof draftId !== 'string' || !draftId.trim() || draftId.length > MAX_DRAFT_ID_LENGTH) {
     return refused('draftId 无效')

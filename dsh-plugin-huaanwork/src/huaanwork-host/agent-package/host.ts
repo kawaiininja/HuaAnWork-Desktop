@@ -104,10 +104,10 @@ export type AgentPackageListResult = {
  * 智能体创建/管理与运行共用的宿主门面(计划 Task 3 基线;Task 6 追加运行方法,
  * Task 7 在同一导出类型上追加 legacy 方法)。
  *
- * 宿主自己持有每个会话的 `lastUserText` 与「同一轮已提出草稿」标记:
- * `noteUserText` 由创建入口在每一轮用户原句到达时调用(写入新原句并清除
- * 同轮标记),`propose` 成功后置位,`commit` 读取后拒绝同轮提交。写路径
- * 成功后的 `agent/changed` 事件由上层路由发出,本宿主不持有 hub。
+ * 宿主自己持有每个会话的 `lastUserText`、「同一轮已提出草稿」与「本轮命中创建入口」标记:
+ * `noteUserText` 在每一轮用户原句到达时调用(写入新原句并清除两个标记),`noteCreationTurn`
+ * 只在创建/继续创建分支调用;`propose` 成功后置位,`commit` 读取后拒绝同轮提交,并要求
+ * 本轮命中创建流程。写路径成功后的 `agent/changed` 事件由上层路由发出,本宿主不持有 hub。
  */
 export type AgentPackageHost = {
   propose(sessionId: string, input: AgentPackageProposalInput): Promise<ProposeResult>
@@ -121,9 +121,13 @@ export type AgentPackageHost = {
   hasDraft(sessionId: string): boolean
   beginUpdate(sessionId: string, slug: string): Promise<void>
   lastUserText(sessionId: string): string | undefined
+  /** 每轮用户发送都调用:记录原句并清除上一轮的创建流程标记。 */
   noteUserText(sessionId: string, text: string): void
+  /** 只在创建/继续创建分支调用:标记本轮可以接受 `agent_commit`。 */
+  noteCreationTurn(sessionId: string, text: string): void
   listLocal(): AgentPackageListItem[]
   detail(slug: string): AgentPackageDetail | undefined
+  /** 损坏包只允许关闭;启用、更新与运行仍拒绝。 */
   setEnabled(slug: string, enabled: boolean): void
   /**
    * 本地包与 legacy 目录 agent 的合并列表(`agent.packageList`)。
@@ -185,6 +189,22 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
   const stopRuntime = options.stopRuntime ?? stopAgentPackageProcesses
   const lastText = new Map<string, string>()
   const proposedThisTurn = new Set<string>()
+  /**
+   * 本轮是否命中创建/继续创建入口。
+   *
+   * 只在创建分支置位,`noteUserText` 每轮清除:技能/@ 轮即便原文是同意句,
+   * 也不能用旧草稿的 draftId 提交。
+   */
+  const creationTurns = new Set<string>()
+  /** 与 lastText 同一上限:长驻宿主不能按会话无限累积创建回合标记。 */
+  const markCreationTurn = (sessionId: string): void => {
+    creationTurns.delete(sessionId)
+    creationTurns.add(sessionId)
+    if (creationTurns.size > MAX_TRACKED_SESSIONS) {
+      const oldest = creationTurns.values().next().value
+      if (oldest !== undefined) creationTurns.delete(oldest)
+    }
+  }
   /** One live package turn per user session; the value is the slug that holds it. */
   const pendingTurns = new Map<string, string>()
 
@@ -199,6 +219,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       // 测试钩子:路由不得把 proposedThisTurn 从线上透传,否则同一轮门禁可被 false 关闭。
       const result = await commitAgentPackage(profileDir, sessionId, draftId, rawUserText, takenSlugs(), {
         proposedThisTurn: opts?.proposedThisTurn ?? proposedThisTurn.has(sessionId),
+        creationTurn: creationTurns.has(sessionId),
       })
       if (result.ok) proposedThisTurn.delete(sessionId)
       return result
@@ -227,6 +248,13 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     noteUserText(sessionId, text) {
       rememberLastText(lastText, sessionId, text)
       proposedThisTurn.delete(sessionId)
+      creationTurns.delete(sessionId)
+    },
+
+    noteCreationTurn(sessionId, text) {
+      rememberLastText(lastText, sessionId, text)
+      proposedThisTurn.delete(sessionId)
+      markCreationTurn(sessionId)
     },
 
     listLocal() {
@@ -240,7 +268,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     setEnabled(slug, enabled) {
       const detail = readAgentPackage(profileDir, slug)
       if (detail === undefined) throw new Error(`智能体 @${slug} 不存在`)
-      if (detail.broken !== undefined) throw new Error(`智能体 @${slug} 已损坏:${detail.broken.reason}`)
+      if (enabled && detail.broken !== undefined) throw new Error(`智能体 @${slug} 已损坏:${detail.broken.reason}`)
       setAgentPackageEnabled(profileDir, slug, enabled)
     },
 
@@ -463,7 +491,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
             prompt: [{ type: 'text', text: `${persona}\n\n---\n用户请求：\n${prompt}` }],
             parent,
           },
-          // 发布前取消用的 signal;发布后的取消归 `dispose()`(cleanup 调用)。
+          // startActivation 的 API 要求 signal;M1 没有发布前取消源,这里传入不会 abort 的信号。
+          // 发布后的取消归 `dispose()`(cleanup 调用),不依赖该 signal。
           signal: new AbortController().signal,
           delivery: 'parent',
         })

@@ -764,7 +764,7 @@ git commit -m "feat: run agent package HTTP and MCP servers in the sandbox"
 
 - [ ] **Step 2: 实现 `agent_skill_run`**
 
-参数 `{ script: string; args?: Record<string, unknown> }`。工具的 `exec.agent` 用 `sessionIdOfAgentRef` 解析子会话，缺失时回落 `currentCallerSession()`；用该 id 查 `AgentPackageRuntimeRegistry` 后调用 `runtime.runSkillScript(script, args)`。`runSkillScript` 在 runtime 内用 manifest 的 `skill.scripts` 精确匹配 `script`，`realpath` 复检在 `skill/scripts/` 下；`spawnConfined(scriptPath, { AGENT_SCRIPT_ARGS: JSON.stringify(args), AGENT_WORKSPACE: workspaceRoot, AGENT_STATE_DIR: tempDir }, workspaceRoot)`；`AGENT_STATE_DIR` 用 `mkdtemp` 创建、回合 afterIdle 删除，M1 无跨轮状态；输出 32 KiB 截断；非 0 退出返回 stderr 前 500 字符。
+参数 `{ script: string; args?: Record<string, unknown> }`。工具的 `exec.agent` 用 `sessionIdOfAgentRef` 解析子会话，缺失时回落 `currentCallerSession()`；用该 id 查 `AgentPackageRuntimeRegistry` 后调用 `runtime.runSkillScript(script, args)`。`runSkillScript` 在 runtime 内用 `listAgentPackageSkillScripts(packageDir)` 枚举的 `skill/scripts/**` 精确匹配 `script`（manifest 的 `skill` 只有 `entry`/`summary`，脚本声明来自包目录），`realpath` 复检在 `skill/scripts/` 下；`spawnConfined(scriptPath, { AGENT_SCRIPT_ARGS: JSON.stringify(args), AGENT_WORKSPACE: workspaceRoot, AGENT_STATE_DIR: tempDir }, workspaceRoot)`；`AGENT_STATE_DIR` 用 `mkdtemp` 创建、回合 afterIdle 删除，M1 无跨轮状态；输出 32 KiB 截断；非 0 退出返回 stderr 前 500 字符。
 
 - [ ] **Step 3: 实现 `agent_http`**
 

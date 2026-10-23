@@ -234,6 +234,7 @@ export async function dispatchAt(opts: {
         prompt: [{ type: "text", text: promptWithPersona }],
         parent,
       },
+      // API 必填;M1 没有发布前取消源,发布后的取消归 activation.dispose()。
       signal: new AbortController().signal,
       delivery: "parent",
       [HUAANWORK_LEGACY_AGENT_REQUEST]: request,

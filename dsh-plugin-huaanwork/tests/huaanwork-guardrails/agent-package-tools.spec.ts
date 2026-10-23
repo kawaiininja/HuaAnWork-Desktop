@@ -123,6 +123,7 @@ function fakeHost(overrides: Partial<AgentPackageHost> = {}): AgentPackageHost {
     beginUpdate: async () => undefined,
     lastUserText: () => '可以',
     noteUserText: () => undefined,
+    noteCreationTurn: () => undefined,
     listLocal: () => [],
     detail: () => undefined,
     setEnabled: () => undefined,
@@ -496,8 +497,8 @@ describe('propose → commit integration', () => {
     expect(proposeText.endsWith(`\n草稿编号：${draftId}`)).toBe(true)
     expect(JSON.stringify(h.events.find((event) => event.event === 'agent/confirm'))).not.toContain(draftId)
 
-    // 下一轮用户同意:noteUserText 同时清掉「同一轮刚 propose」标记。
-    host.noteUserText(sessionId, '可以')
+    // 下一轮用户同意:创建分支同时覆盖原句、清掉「同一轮刚 propose」标记并标记本轮可提交。
+    host.noteCreationTurn(sessionId, '可以')
 
     const committed = await h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId }, execFor(sessionId))
     expect(committed?.text).toContain('已写入智能体 @weekly-report')

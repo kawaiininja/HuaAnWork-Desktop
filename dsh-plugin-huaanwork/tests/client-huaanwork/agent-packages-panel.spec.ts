@@ -179,6 +179,47 @@ describe("AgentPackagesPanel（我的智能体）", () => {
     expect(labels.some((label) => /发布|下载|移除|卸载/.test(label))).toBe(false);
   });
 
+  it("损坏且已启用的本地包仍可关闭；损坏且未启用的包不能启用", async () => {
+    listPayload = {
+      packages: [
+        {
+          slug: "broken-on",
+          displayName: "损坏已启用",
+          description: "manifest 无法解析",
+          version: "1.0.0",
+          source: "local",
+          enabled: true,
+          broken: { reason: "manifest 无法解析" },
+        },
+        {
+          slug: "broken-off",
+          displayName: "损坏未启用",
+          description: "manifest 无法解析",
+          version: "1.0.0",
+          source: "local",
+          enabled: false,
+          broken: { reason: "manifest 无法解析" },
+        },
+      ],
+      catalogAgents: [],
+    };
+
+    const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
+
+    const disable = buttonByText(view, "关闭");
+    expect(disable).toBeDefined();
+    expect(disable!.disabled).toBe(false);
+
+    const enable = buttonByText(view, "启用");
+    expect(enable).toBeDefined();
+    expect(enable!.disabled).toBe(true);
+
+    await act(async () => {
+      disable!.click();
+    });
+    expect(rpcMock).toHaveBeenCalledWith("agent.packageSetEnabled", { slug: "broken-on", enabled: false });
+  });
+
   it("点击启用调用 agent.packageSetEnabled，随后重拉列表", async () => {
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
 

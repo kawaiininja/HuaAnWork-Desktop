@@ -1,10 +1,10 @@
 # 智能体包 M1 使用与排障（runbook）
 
-> **状态：BLOCKED — M1 未完成验收，不得宣布完成。**
+> **状态：Windows 真机验收 BLOCKED — M1 在 Windows 项完成前不得宣布完成。**
 >
-> - macOS 真机交互验收：`BLOCKED: requires human interactive acceptance`。本次改动由无交互桌面的代理会话完成，未执行创建 → 启用 → `@` 运行 → 关闭 → 更新 → 重启的真人流程。
-> - Windows 真机验收：`BLOCKED`。当前环境没有 Windows 真机，`enforcement:partial`、读/网络不隔离与退出后进程清理均未实机观察。
-> - 自动化门禁（单元测试、typecheck、变体守卫、`corepack yarn check`）只能证明代码与装配，不能替代上两项真机验收。
+> - macOS 真机验收：`PASS（代理驱动实机验收）`。2026-10-24 裁定：Task 9 Step 4 采用代理驱动的真实 macOS 应用 + 真实模型证据，见 `docs/evidence/2026-10-23-agent-package-macos-acceptance.md`；真人交互复核列为可选/独立项，不再是 M1 阻断项。
+> - Windows 真机验收：`BLOCKED`。当前环境没有 Windows 真机；`enforcement:partial`、读/网络不隔离与退出后进程清理尚未由 Windows 实机观察。按 2026-10-24 裁定，该项交由 GitHub Actions 的 Windows runner/真机补验。
+> - 自动化门禁（单元测试、typecheck、变体守卫、`corepack yarn check`）只能证明代码与装配，不能替代 Windows 真机验收。
 >
 > 两项验收的可执行清单见 §11。验收记录模板见 §12。
 
@@ -157,12 +157,14 @@ M1 **不包含**发布、签名、下载、安装、广场更新、下架、撤�
 | `智能体 @标识「<slug>」无效` | slug 不符合命名规则或超长 | 改成小写字母、数字与连字符，≤32 字符 |
 | `脚本启动失败：<stderr 前 500 字符>` | HTTP/MCP 进程提前退出、端口不可用或启动即崩 | 检查入口脚本能否用 Node 直接启动、是否读取 `AGENT_HTTP_PORT`/`AGENT_MCP_PORT`、stderr 原因 |
 | `脚本启动失败：MCP 服务挂载超时` | MCP 服务 5 秒内未完成挂载 | 缩短 MCP 启动；确认服务实现 `/mcp` 且能返回工具 |
-| `MCP 服务未提供任何工具` | MCP 服务挂载成功但工具数为 0 | 至少暴露一个工具；否则本轮失败并停进程 |
+| `MCP 服务「<name>」未提供任何工具` | MCP 服务挂载成功但工具数为 0（自定义挂载回调可能报 `MCP 服务未提供任何工具`） | 至少暴露一个工具；否则本轮失败并停进程 |
+| 其他 MCP 启动/握手错误（非超时，原话由 MCP 客户端决定） | MCP 服务初始化或 handshake 失败 | 查看 Host 日志中该服务的初始化/stderr；确认入口在 5 秒内完成 streamable-http 握手 |
 | `智能体 @<slug> 没有可运行的技能脚本` | 包未声明 `skill/scripts/**` 却调用 `agent_skill_run` | 在包里加入脚本并重新提交更新 |
 | `未声明的技能脚本：<path>` | 模型传了声明集合之外的路径 | 只调用 `skill/scripts/` 下已落盘的脚本 |
-| `智能体「<slug>」已损坏：<原因>`（`@` 运行）/ `智能体 @<slug> 已损坏:<原因>`（启停或 `/create-agent update`，原话为半角冒号） | manifest/人设/技能/入口文件缺失或与 `tools.mode` 不一致 | 按原因补齐文件，或重新创建/更新；损坏包禁止启用与运行 |
+| `智能体「<slug>」已损坏：<原因>`（`@` 运行）/ `智能体 @<slug> 已损坏:<原因>`（启用或 `/create-agent update`，原话为半角冒号） | manifest/人设/技能/入口文件缺失或与 `tools.mode` 不一致 | 按原因补齐文件，或重新创建/更新；损坏包禁止启用与运行，但已启用的损坏包仍可关闭 |
 | `用户原句不是同意创建的说法` | commit 时用户原句不在同意短语表内 | 下一轮只回复 `可以` / `确认` / `同意` / `就这样` / `按这个建` |
 | `同一轮里刚提出草稿，不能立即提交；请等下一轮用户确认` | 同一轮 propose 后立刻 commit | 等下一轮用户回复同意 |
+| `本轮不是创建/继续创建流程，不能提交草稿` | 技能/@ 轮或其他非创建回合里模型调用了 `agent_commit` | 回到创建/继续创建的回合回复同意；不要用技能/@ 轮的原文提交旧草稿 |
 | `没有待确认的草稿` | 草稿已被提交/取消或不存在 | 重新走创建/更新流程 |
 | `公用机目录请求失败: <原因>` / `公用机响应状态错误: <status>` | 旧目录不可达或配置错误 | 检查设置里的公用机 host/port/token；旧启用态会保留 |
 
@@ -251,7 +253,11 @@ Get-ChildItem "$profileDir\agents" -Directory -Filter '.old-*' -ErrorAction Sile
 
 ## 11. 真机验收清单
 
-### Step 4（macOS，`BLOCKED: requires human interactive acceptance`）
+### Step 4（macOS，`PASS（代理驱动实机验收；真人复核可选）`）
+
+2026-10-24 裁定：本项以代理驱动的真实 macOS 应用 + 真实模型证据收口，证据见
+`docs/evidence/2026-10-23-agent-package-macos-acceptance.md`。下列清单保留给真人复核时复用，
+不再是 M1 阻断项。
 
 在一台 macOS 真机上，使用**非生产 profile / 测试工作区**执行：
 
@@ -275,7 +281,7 @@ Get-ChildItem "$profileDir\agents" -Directory -Filter '.old-*' -ErrorAction Sile
 - [ ] 安装/启动后与退出应用后的包进程清理：退出后 `Get-CimInstance Win32_Process` 中不再有 `agents\<slug>\` 子进程。
 - [ ] HTTP/MCP 子进程在 `afterIdle` 后停止；关闭卡片后新 `@` 不再启动。
 
-**在两项清单完成并留下记录前，M1 状态保持 `BLOCKED`。**
+**Windows 清单完成并留下记录前，M1 状态保持 `BLOCKED`；macOS 已按 2026-10-24 裁定收口。**
 
 ## 12. 验收记录
 
@@ -288,7 +294,8 @@ Get-ChildItem "$profileDir\agents" -Directory -Filter '.old-*' -ErrorAction Sile
 - 进程清理证据（命令与输出）。
 - 任何偏离本 runbook 的现象。
 
-当前记录：无。macOS 与 Windows 均为 `BLOCKED`（原因见文首）。
+当前记录：macOS `PASS（代理驱动实机验收）`，证据见
+`docs/evidence/2026-10-23-agent-package-macos-acceptance.md`；Windows `BLOCKED`（原因见文首）。
 
 ## 13. 已知限制与差异
 

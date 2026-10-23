@@ -124,7 +124,7 @@ export default function AgentPackagesPanel({
                 <button
                   type="button"
                   className={card.enabled ? "filter-tab on" : "filter-tab"}
-                  disabled={busySlug === card.slug || card.broken !== undefined}
+                  disabled={busySlug === card.slug || (card.broken !== undefined && !card.enabled)}
                   onClick={() => void toggle(card)}
                 >
                   {card.enabled ? "关闭" : "启用"}

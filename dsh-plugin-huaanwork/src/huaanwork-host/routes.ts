@@ -507,7 +507,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     }),
   }, // Task 2 (M4)
   // agent package(Task 7):本地包与 legacy 目录两条来源。写路径按 `listLocal()`
-  // 判定归属(含损坏包),损坏包的 `setEnabled` 抛错由 storeRoute 映射为 400。
+  // 判定归属(含损坏包);损坏包只允许关闭,启用仍抛错并由 storeRoute 映射为 400。
   { method: 'agent.packageList', http: 'GET', path: '/huaanwork/agent/package/list', handler: storeRoute(async () => requireAgentPackageHost().listWithLegacy()) },
   {
     method: 'agent.packageDetail',
