@@ -232,7 +232,12 @@ export default function AgentToolkitPanel({
   );
 }
 
-function EnableConfirmModal({
+/**
+ * 公用机条目（工具或智能体）的启用确认框：先在框内披露条目声明的能力，
+ * 用户点「确认启用」后才调用 `agent.setEnabled`（`confirmPermissions: true`）。
+ * 广场页签与工具包页签共用；宿主对目录条目的启用同样要求该确认标记。
+ */
+export function EnableConfirmModal({
   item,
   onClose,
   onConfirmed,

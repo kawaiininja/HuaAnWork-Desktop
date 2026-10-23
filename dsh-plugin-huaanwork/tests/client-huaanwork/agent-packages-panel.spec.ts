@@ -49,7 +49,7 @@ const PACKAGE_LIST: AgentPackageListResult = {
       kind: "agent",
       description: "尚未启用的旧目录智能体",
       version: "0.9.1",
-      permissions: [],
+      permissions: ["读取工作区文件", "访问网络"],
       enabled: false,
     },
     {
@@ -235,7 +235,7 @@ describe("AgentsPlazaPanel（智能体广场）", () => {
     expect(view.textContent).not.toContain("周报助手");
   });
 
-  it("点击启用调用 agent.setEnabled 并重拉列表", async () => {
+  it("启用先披露声明的权限，确认前不调用 host，确认后带 confirmPermissions 调用", async () => {
     const view = await mount(createElement(AgentsPlazaPanel, { search: "", refreshToken: 0 }));
 
     const enableButtons = [...view.querySelectorAll("button")].filter(
@@ -247,11 +247,56 @@ describe("AgentsPlazaPanel（智能体广场）", () => {
     });
     await flush();
 
+    // 权限披露：确认框列出目录条目声明的能力，此时宿主尚未收到启用请求。
+    expect(view.textContent).toContain("该公用机条目声明了以下能力：");
+    expect(view.textContent).toContain("读取工作区文件");
+    expect(view.textContent).toContain("访问网络");
+    expect(rpcMock.mock.calls.some(([method]) => method === "agent.setEnabled")).toBe(false);
+
+    // 取消不启用。
+    const cancel = buttonByText(view, "取消");
+    expect(cancel).toBeDefined();
+    await act(async () => {
+      cancel!.click();
+    });
+    await flush();
+    expect(rpcMock.mock.calls.some(([method]) => method === "agent.setEnabled")).toBe(false);
+    expect(buttonByText(view, "确认启用")).toBeUndefined();
+
+    // 再次打开确认框并确认：以 confirmPermissions: true 启用并重拉列表。
+    await act(async () => {
+      buttonByText(view, "启用")!.click();
+    });
+    await flush();
+    const confirm = buttonByText(view, "确认启用");
+    expect(confirm).toBeDefined();
+    await act(async () => {
+      confirm!.click();
+    });
+    await flush();
+
     expect(rpcMock).toHaveBeenCalledWith("agent.setEnabled", {
       name: "legacy-agent-off",
       enabled: true,
       confirmPermissions: true,
     });
+    expect(buttonByText(view, "确认启用")).toBeUndefined();
+    const listCalls = rpcMock.mock.calls.filter(([method]) => method === "agent.packageList");
+    expect(listCalls.length).toBeGreaterThan(1);
+  });
+
+  it("关闭直接生效，不经过权限确认框", async () => {
+    const view = await mount(createElement(AgentsPlazaPanel, { search: "", refreshToken: 0 }));
+
+    const disable = buttonByText(view, "关闭");
+    expect(disable).toBeDefined();
+    await act(async () => {
+      disable!.click();
+    });
+    await flush();
+
+    expect(rpcMock).toHaveBeenCalledWith("agent.setEnabled", { name: "legacy-agent", enabled: false });
+    expect(buttonByText(view, "确认启用")).toBeUndefined();
   });
 
   it("空态文案与产品文案逐字一致", async () => {
