@@ -236,7 +236,7 @@ describe('policy gating for the four package tools', () => {
 
   const TOOL_NAMES = [AGENT_PROPOSE_TOOL, AGENT_COMMIT_TOOL, 'agent_skill_run', 'agent_http']
 
-  test('unattached package tools are denied and attached ones ask in ask mode', async () => {
+  test('unattached package tools are denied; attached runtime tools allow and creation tools ask', async () => {
     const maps = emptyAttachments()
     const { preExecute, guard } = policyHarness(maps)
     const exec = (name: string, sessionId: string) => ({ name, arguments: {}, agent: { session: { id: sessionId } } })
@@ -252,8 +252,17 @@ describe('policy gating for the four package tools', () => {
     )
 
     attachAgentTools(maps, 'session-a', TOOL_NAMES)
-    for (const name of TOOL_NAMES) {
+    // 创建链路仍需人工审批（创建界面弹确认）；运行链路由用户启用包授权，直接放行。
+    for (const name of [AGENT_PROPOSE_TOOL, AGENT_COMMIT_TOOL]) {
       expect(await preExecute(exec(name, 'session-a'), async () => ({ kind: 'allow' }))).toEqual({ kind: 'ask' })
+    }
+    for (const name of ['agent_skill_run', 'agent_http']) {
+      expect(await preExecute(exec(name, 'session-a'), async () => ({ kind: 'allow' }))).toEqual({ kind: 'allow' })
+    }
+    // 真机失败点：guard 曾对附加的运行链路工具返回「需要审批且尚未获得批准」。
+    expect(guard(exec('agent_http', 'session-a'))).toBeUndefined()
+    expect(guard(exec('agent_skill_run', 'session-a'))).toBeUndefined()
+    for (const name of TOOL_NAMES) {
       expect(await preExecute(exec(name, 'session-b'), async () => ({ kind: 'allow' }))).toEqual({
         kind: 'deny',
         reason: POLICY(reasonToolUnattached(name)),

@@ -116,6 +116,12 @@ function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
       return mode === "full" ? ALLOW : askOrDeny(seam);
     case "call_host_tool":
       return input.attached ? (mode === "full" ? ALLOW : askOrDeny(seam)) : deny(reasonToolUnattached(input.name));
+    // 智能体包运行链路工具：用户启用包即等于授权其声明的 HTTP/脚本工具，逐次审批落空——
+    // 子会话没有审批界面，ask 只会被自动拒绝。附加即放行；创建链路的
+    // agent_propose/agent_commit 不走这里，留在 default 分支让创建界面弹确认。
+    case "agent_http":
+    case "agent_skill_run":
+      return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
     default:
       return input.attached ? (mode === "full" ? ALLOW : askOrDeny(seam)) : deny(reasonToolUnattached(input.name));
   }

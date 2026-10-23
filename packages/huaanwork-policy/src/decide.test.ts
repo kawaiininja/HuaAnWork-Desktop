@@ -296,6 +296,40 @@ test("unknown mcp tool name denies unless attached", () => {
   assert.equal(guard({ ...call, attached: true }), "deny");
 });
 
+test("agent package runtime tools allow when attached and deny when unattached", () => {
+  for (const name of ["agent_http", "agent_skill_run"]) {
+    const detached = { name, args: {}, workspaceRoot: ws };
+    assert.equal(preExecute(detached), "deny", `${name} ask`);
+    assert.equal(guard(detached), "deny", `${name} guard`);
+    assert.deepEqual(preExecuteExplained(detached), { decision: "deny", reason: reasonToolUnattached(name) }, `${name} reason`);
+
+    // 子会话没有审批界面：附加即放行，三档一致，不再落到 ask。
+    const attached = { ...detached, attached: true };
+    for (const mode of ["ask", "smart", "full"] as const) {
+      assert.equal(preExecute(attached, mode), "allow", `${name} ${mode} preExecute`);
+      assert.equal(guard(attached, mode), "allow", `${name} ${mode} guard`);
+      assert.deepEqual(preExecuteExplained(attached, mode), { decision: "allow" }, `${name} ${mode} explained`);
+    }
+  }
+});
+
+test("agent_propose/agent_commit keep asking so the consent UI is not bypassed", () => {
+  for (const name of ["agent_propose", "agent_commit"]) {
+    const attached = { name, args: {}, workspaceRoot: ws, attached: true };
+    assert.equal(preExecute(attached, "smart"), "ask", `${name} smart`);
+    assert.deepEqual(
+      guardExplained(attached, "smart"),
+      { decision: "deny", reason: REASON_NEEDS_APPROVAL },
+      `${name} guard`,
+    );
+    assert.equal(preExecute(attached, "ask"), "ask", `${name} ask`);
+    assert.equal(preExecute(attached, "full"), "allow", `${name} full`);
+
+    const detached = { name, args: {}, workspaceRoot: ws };
+    assert.deepEqual(preExecuteExplained(detached, "smart"), { decision: "deny", reason: reasonToolUnattached(name) }, `${name} unattached`);
+  }
+});
+
 test("route tools are allowed when not attached in ask mode", () => {
   for (const name of ["propose_plan", "request_input"]) {
     const call = { name, args: {}, workspaceRoot: ws };
