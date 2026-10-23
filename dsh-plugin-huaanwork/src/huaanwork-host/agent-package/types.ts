@@ -58,6 +58,8 @@ export type AgentPackageSubagentRequest = {
   allow: string[]
   persona: string
   runtime: AgentPackageTurnRuntime
+  /** 发起这次回合的用户会话;`skills.ts` 只在这个 parent 的子代理上套用包工具名单。 */
+  parentSessionId: string
   bindChild(sessionId: string): void
 }
 

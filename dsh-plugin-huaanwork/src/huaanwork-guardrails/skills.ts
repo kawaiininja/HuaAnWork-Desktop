@@ -243,17 +243,26 @@ export function apply(ctx: Context): void {
           const allow = current.allow.filter((name) => existing.includes(name));
           tools?.restrict?.({ allow });
         }
-        if (pkg && run?.localAgent) {
+        // Package requests are keyed to the session that dispatched them: a subagent
+        // started by any other session while this turn is in flight keeps its own tools
+        // and attachments instead of inheriting this package's runtime.
+        if (pkg && run?.localAgent && parentFromCall !== undefined && pkg.parentSessionId === parentFromCall) {
           // header.id 是真实子会话 id;某些 provider 只填 agent/session id,故再回落一次。
           const childSessionId =
             sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
           if (childSessionId) {
             if (ctx.huaanworkAttachments) {
-              attachAgentTools(ctx.huaanworkAttachments, childSessionId, ["agent_http", "agent_skill_run"]);
+              // MCP 名字在挂载时先落在父会话上(健康检查要求先拿到工具名),发现后由
+              // host 从父会话摘掉;子会话要执行 mcp__* 仍需自己的附件,否则 policy 的
+              // attached 判定会拒绝。
+              attachAgentTools(ctx.huaanworkAttachments, childSessionId, [
+                "agent_http",
+                "agent_skill_run",
+                ...(pkg.runtime.mcpNames ?? []),
+              ]);
             }
-            // bindChild 同时把 MCP 工具名挂到子会话。必须先于 refreshAgentRestrict:
-            // present-as 只在附件里找非 ALLOWED_TOOLS 的名字,晚挂会让它先前算出的
-            // restrict 继续遮住 mcp__*。
+            // 绑定必须与附件同批完成,且先于 refreshAgentRestrict:present-as 只在附件里
+            // 找非 ALLOWED_TOOLS 的名字,晚挂会让它先前算出的 restrict 继续遮住 mcp__*。
             pkg.bindChild(childSessionId);
             refreshAgentRestrict(ctx as never, childSessionId);
           }

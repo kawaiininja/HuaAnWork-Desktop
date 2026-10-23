@@ -292,12 +292,18 @@ function httpTool(ctx: ToolContext, registry: AgentPackageRuntimeRegistry) {
         throw new Error(`智能体 @${runtime.slug} 的 HTTP 工具返回 HTTP ${String(response.status)}${detail ? `: ${detail}` : ''}`)
       }
 
-      let text: string
+      let capped: { text: string; truncated: boolean }
       try {
-        text = (await readCappedText(response.body, CATALOG_BODY_LIMIT)).text
+        capped = await readCappedText(response.body, CATALOG_BODY_LIMIT)
       } catch (error) {
         throw new Error(`智能体 @${runtime.slug} 的 HTTP 工具响应读取失败：${errorMessage(error).slice(0, 500)}`)
       }
+      if (capped.truncated) {
+        throw new Error(
+          `智能体 @${runtime.slug} 的 HTTP 工具响应超过 ${String(CATALOG_BODY_LIMIT / (1024 * 1024))} MiB`,
+        )
+      }
+      const text = capped.text
 
       let parsed: unknown
       try {

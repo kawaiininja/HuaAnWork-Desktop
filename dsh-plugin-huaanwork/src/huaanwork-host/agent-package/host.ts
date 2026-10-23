@@ -1,5 +1,6 @@
-import { attachAgentTools, detachAgentTools, type AttachmentMaps } from '../../huaanwork-guardrails/agent-attachments.ts'
+import { detachAgentTools, type AttachmentMaps } from '../../huaanwork-guardrails/agent-attachments.ts'
 import { mountSessionMcp } from '../../huaanwork-guardrails/agent-mcp.ts'
+import { refreshAgentRestrict } from '../../huaanwork-guardrails/present-as.ts'
 import {
   beginAgentPackageUpdate,
   cancelAgentPackage,
@@ -138,6 +139,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
   const stopRuntime = options.stopRuntime ?? stopAgentPackageProcesses
   const lastText = new Map<string, string>()
   const proposedThisTurn = new Set<string>()
+  /** One live package turn per user session; the value is the slug that holds it. */
+  const pendingTurns = new Map<string, string>()
 
   return {
     async propose(sessionId, input) {
@@ -208,29 +211,42 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       const startSubagent = ctx.subagents?.start
       if (typeof startSubagent !== 'function') throw new Error('current dsh runtime does not support subagents')
 
-      const manifest = readDispatchManifest(profileDir, pkg.slug)
-      const packageDir = agentPackageDir(profileDir, pkg.slug)
-      const persona = await composeAgentPackagePersona(packageDir, manifest, profileDir)
-      const workspaceRoot = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd()
+      // Reserve synchronously, before the first await: two sends in one session must not
+      // start two runtimes (and two subagent children) for the same turn.
+      const runningSlug = pendingTurns.get(sessionId)
+      if (runningSlug !== undefined) {
+        throw new Error(
+          `智能体「${pkg.slug}」无法开始：当前会话已有运行中的智能体包回合（@${runningSlug}）`,
+        )
+      }
+      pendingTurns.set(sessionId, pkg.slug)
+      let reservationReleased = false
+      const releaseReservation = (): void => {
+        if (reservationReleased) return
+        reservationReleased = true
+        if (pendingTurns.get(sessionId) === pkg.slug) pendingTurns.delete(sessionId)
+      }
 
       let runtime: AgentPackageTurnRuntime | undefined
       let mcpDispose: (() => Promise<void>) | undefined
       let request: AgentPackageSubagentRequest | null = null
       let cleanupPromise: Promise<void> | undefined
+      let cleanupStarted = false
       const boundChildren = new Set<string>()
 
       const bindChild = (childSessionId: string): void => {
         if (runtime === undefined) return
+        // `skills.ts` attaches the runtime tools and MCP names before calling this;
+        // cleanup detaches them again from every bound child.
         boundChildren.add(childSessionId)
         registry.bind(childSessionId, runtime)
-        // MCP 工具在子代理启动前挂到父会话(健康检查要求先拿到工具名);
-        // 子会话要执行 mcp__* 还需自己的附件,否则 policy 的 attached 判定会拒绝。
-        if (runtime.mcpNames !== undefined && ctx.huaanworkAttachments !== undefined) {
-          attachAgentTools(ctx.huaanworkAttachments, childSessionId, runtime.mcpNames)
-        }
       }
 
       const cleanup = async (): Promise<void> => {
+        // The reservation belongs to this turn and ends with the first cleanup call,
+        // including every failure path that reaches `catch` below.
+        releaseReservation()
+        cleanupStarted = true
         if (cleanupPromise !== undefined) return cleanupPromise
         cleanupPromise = (async () => {
           const current = runtime
@@ -251,11 +267,13 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           if (current !== undefined) {
             // A late afterIdle must not delete a newer turn's binding for the same session.
             if (registry.get(sessionId) === current) registry.delete(sessionId)
+            const childNames = [...new Set([...(request?.allow ?? []), ...(current.mcpNames ?? [])])]
             for (const childSessionId of boundChildren) {
               if (registry.get(childSessionId) === current) registry.delete(childSessionId)
-              if (current.mcpNames !== undefined && ctx.huaanworkAttachments !== undefined) {
-                detachAgentTools(ctx.huaanworkAttachments, childSessionId, current.mcpNames)
+              if (ctx.huaanworkAttachments !== undefined) {
+                detachAgentTools(ctx.huaanworkAttachments, childSessionId, childNames)
               }
+              refreshAgentRestrict(ctx as never, childSessionId)
             }
           }
           if (request !== null && ctx.huaanworkAgentPackageRequest?.current === request) {
@@ -266,6 +284,11 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       }
 
       try {
+        const manifest = readDispatchManifest(profileDir, pkg.slug)
+        const packageDir = agentPackageDir(profileDir, pkg.slug)
+        const persona = await composeAgentPackagePersona(packageDir, manifest, profileDir)
+        const workspaceRoot = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd()
+
         runtime = await createRuntime({
           manifest,
           packageDir,
@@ -278,13 +301,29 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
               serverName: pkg.slug,
               url: `http://127.0.0.1:${String(port)}/mcp`,
             })
+            // The health budget can expire before the mount resolves; the turn is already
+            // over, so release the scope here instead of leaving it (and its names) alive.
+            if (cleanupStarted) {
+              await mounted.dispose()
+              return mounted.names
+            }
             mcpDispose = mounted.dispose
             return mounted.names
           },
         })
 
-        const allow = composeAgentPackageToolAllowList(manifest, runtime.mcpNames ?? [], runtime.skillScripts)
-        request = { allow, persona, runtime, bindChild }
+        const mcpNames = runtime.mcpNames ?? []
+        if (mcpNames.length > 0) {
+          // The mount attaches the names to the parent only so discovery can see them;
+          // after discovery they belong to the package child alone.
+          if (ctx.huaanworkAttachments !== undefined) {
+            detachAgentTools(ctx.huaanworkAttachments, sessionId, mcpNames)
+          }
+          refreshAgentRestrict(ctx as never, sessionId)
+        }
+
+        const allow = composeAgentPackageToolAllowList(manifest, mcpNames, runtime.skillScripts)
+        request = { allow, persona, runtime, parentSessionId: sessionId, bindChild }
         if (ctx.huaanworkAgentPackageRequest !== undefined) {
           ctx.huaanworkAgentPackageRequest.current = request
         }

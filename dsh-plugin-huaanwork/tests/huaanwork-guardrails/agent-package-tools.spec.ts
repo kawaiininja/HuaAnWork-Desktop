@@ -28,7 +28,10 @@ import type {
   AgentPackageTurnRuntime,
 } from '../../src/huaanwork-host/agent-package/types.ts'
 import { createAgentPackageHost, type AgentPackageHost } from '../../src/huaanwork-host/agent-package/host.ts'
-import { createAgentPackageRuntimeRegistry } from '../../src/huaanwork-host/agent-package/runtime.ts'
+import {
+  createAgentPackageRuntimeRegistry,
+  type StartAgentPackageProcessesOptions,
+} from '../../src/huaanwork-host/agent-package/runtime.ts'
 import { dispatchAt } from '../../src/huaanwork-host/agent-invoke.ts'
 import { noteCallerSession, resetChildSessionRegistry } from '../../src/huaanwork-host/child-sessions.ts'
 import {
@@ -710,6 +713,18 @@ describe('agent_http', () => {
     await expect(h.registered.get(AGENT_HTTP_TOOL)?.execute({}, execFor('session-a'))).rejects.toThrow(/无法解析/)
   })
 
+  test('reports a response above the 1 MiB read cap instead of an unparseable envelope', async () => {
+    const registry = createAgentPackageRuntimeRegistry()
+    registry.bind('session-a', fakeTurnRuntime())
+    const { fetchImpl } = recordingFetch(() => new Response('x'.repeat(1024 * 1024 + 1), { status: 200 }))
+    const h = harness({ fetchImpl })
+    registerAgentPackageRuntimeTools(h.ctx, registry)
+
+    await expect(h.registered.get(AGENT_HTTP_TOOL)?.execute({}, execFor('session-a'))).rejects.toThrow(
+      /响应超过 1 MiB/,
+    )
+  })
+
   test('fails when the bound package has no HTTP port', async () => {
     const registry = createAgentPackageRuntimeRegistry()
     registry.bind('session-a', fakeTurnRuntime({ httpPort: undefined }))
@@ -736,8 +751,10 @@ function skillsRuntimePackage(options: {
   allow: string[]
   childNames: string[]
   childSessionId?: string
+  parentSessionId?: string
 }) {
   const childSessionId = options.childSessionId ?? 'child'
+  const parentSessionId = options.parentSessionId ?? 'parent-session'
   const allSchemas = options.childNames.map((name) => ({ name }))
   const childTools = {
     visible: [...allSchemas],
@@ -754,7 +771,7 @@ function skillsRuntimePackage(options: {
   }
   const childAgent = {
     id: childSessionId,
-    session: { id: childSessionId, header: { id: childSessionId, parentSession: 'parent-session' } },
+    session: { id: childSessionId, header: { id: childSessionId, parentSession: parentSessionId } },
     ctx: { get: (name: string) => (name === 'tools' ? childTools : undefined) },
   }
   const maps = emptyAttachments()
@@ -782,10 +799,10 @@ function skillsRuntimePackage(options: {
         allow: options.allow,
         persona: '你是周报助手',
         runtime,
+        parentSessionId,
         bindChild: (sessionId: string) => {
+          // 运行时工具与 MCP 名由 skills.ts 自己挂;这里只按真实 host 记录子会话。
           bindCalls.push(sessionId)
-          // 真实 host 的 bindChild 会把 MCP 工具名挂到子会话;这里同形模拟。
-          attachAgentTools(maps, sessionId, runtime.mcpNames ?? [])
         },
       },
     },
@@ -806,7 +823,9 @@ describe('skills.ts package subagent request', () => {
     })
 
     applySkills(harnessed.ctx as never)
-    await (harnessed.ctx.subagents.start as () => Promise<unknown>)()
+    await (harnessed.ctx.subagents.start as (...args: unknown[]) => Promise<unknown>)('spawn', {
+      parent: 'parent-session',
+    })
 
     expect(harnessed.childTools.visible.map((schema) => schema.name)).toEqual([
       'read',
@@ -816,6 +835,7 @@ describe('skills.ts package subagent request', () => {
     ])
     expect(isAgentToolAttached(harnessed.maps, 'child', AGENT_HTTP_TOOL)).toBe(true)
     expect(isAgentToolAttached(harnessed.maps, 'child', AGENT_SKILL_RUN_TOOL)).toBe(true)
+    expect(isAgentToolAttached(harnessed.maps, 'child', 'mcp__weekly-report__echo')).toBe(true)
     expect(isAgentToolAttached(harnessed.maps, 'parent-session', AGENT_HTTP_TOOL)).toBe(false)
     expect(harnessed.bindCalls).toEqual(['child'])
     // present-as must recompute after both the runtime tools and the MCP names are attached,
@@ -856,9 +876,42 @@ describe('skills.ts package subagent request', () => {
     })
 
     applySkills(harnessed.ctx as never)
-    await (harnessed.ctx.subagents.start as () => Promise<unknown>)()
+    await (harnessed.ctx.subagents.start as (...args: unknown[]) => Promise<unknown>)('spawn', {
+      parent: 'parent-session',
+    })
     expect(harnessed.bindCalls).toEqual(['child-fallback'])
     expect(isAgentToolAttached(harnessed.maps, 'child-fallback', AGENT_SKILL_RUN_TOOL)).toBe(true)
+  })
+
+  test('leaves an unrelated subagent without package attachments or a registry binding', async () => {
+    const harnessed = skillsRuntimePackage({
+      allow: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
+      childNames: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
+    })
+    // A package turn for `parent-session` is in flight; this start belongs to another session.
+    ;(harnessed.ctx.subagents as { start: unknown }).start = async () => ({
+      localAgent: {
+        id: 'other-child',
+        session: { id: 'other-child', header: { id: 'other-child', parentSession: 'other-session' } },
+        ctx: { get: () => harnessed.childTools },
+      },
+    })
+
+    applySkills(harnessed.ctx as never)
+    await (harnessed.ctx.subagents.start as (...args: unknown[]) => Promise<unknown>)('spawn', {
+      parent: 'other-session',
+    })
+
+    expect(harnessed.bindCalls).toEqual([])
+    expect(harnessed.maps.sessionAgentTools.size).toBe(0)
+    expect(harnessed.restrictSnapshots).toEqual([])
+    // The unrelated child keeps its full tool set; no package allow list was applied.
+    expect(harnessed.childTools.visible.map((schema) => schema.name)).toEqual([
+      'read',
+      'agent_http',
+      'agent_skill_run',
+      'mcp__weekly-report__echo',
+    ])
   })
 })
 
@@ -873,6 +926,7 @@ type DispatchHarness = {
   stopped: AgentPackageTurnRuntime[]
   mcpDisposes: number[]
   maps: AttachmentMaps
+  restrictSessions: string[]
   profileDir: string
 }
 
@@ -888,7 +942,10 @@ function writeEnabledPackage(profileDir: string, enabled = true): string {
   return packageDir
 }
 
-function dispatchHarness(options: { enabled?: boolean } = {}): DispatchHarness {
+function dispatchHarness(options: {
+  enabled?: boolean
+  createRuntime?: (startOptions: StartAgentPackageProcessesOptions) => Promise<AgentPackageTurnRuntime>
+} = {}): DispatchHarness {
   const profileDir = makeRoot()
   const packageDir = writeEnabledPackage(profileDir, options.enabled ?? true)
   const registry = createAgentPackageRuntimeRegistry()
@@ -903,6 +960,7 @@ function dispatchHarness(options: { enabled?: boolean } = {}): DispatchHarness {
   const startCalls: Array<Record<string, unknown>> = []
   const stopped: AgentPackageTurnRuntime[] = []
   const mcpDisposes: number[] = []
+  const restrictSessions: string[] = []
   const maps = emptyAttachments()
   const ctx: Record<string, unknown> = {
     get: (name: string) => (name === 'sandbox' ? { confine: async (argv: readonly string[]) => ({ argv, enforcement: 'full' }) } : undefined),
@@ -917,21 +975,28 @@ function dispatchHarness(options: { enabled?: boolean } = {}): DispatchHarness {
     },
     tools: { schemas: () => [{ name: 'mcp__weekly-report__echo' }] },
     plugin: async () => ({ dispose: async () => { mcpDisposes.push(1) } }),
+    root: {
+      [PRESENT_AS_STATE]: {
+        restrict: () => undefined,
+        restrictAll: () => undefined,
+        restrictSession: (sessionId: string) => restrictSessions.push(sessionId),
+      },
+    },
   }
   const host = createAgentPackageHost({
     profileDir,
     takenSlugs: () => [],
     registry,
-    createRuntime: async (startOptions) => {
+    createRuntime: options.createRuntime ?? (async (startOptions) => {
       const names = startOptions.mountMcp === undefined ? undefined : await startOptions.mountMcp(43210)
       if (names !== undefined) runtime.mcpNames = [...names]
       return runtime
-    },
+    }),
     stopRuntime: async (turn) => {
       stopped.push(turn)
     },
   })
-  return { host, ctx, registry, runtime, startCalls, stopped, mcpDisposes, maps, profileDir }
+  return { host, ctx, registry, runtime, startCalls, stopped, mcpDisposes, maps, restrictSessions, profileDir }
 }
 
 describe('@slug package dispatch', () => {
@@ -1006,16 +1071,27 @@ describe('@slug package dispatch', () => {
     expect(request.parent).toEqual({ id: 'parent-agent' })
     expect(request.signal).toBeInstanceOf(AbortSignal)
 
-    const holder = h.ctx.huaanworkAgentPackageRequest as { current: { allow: string[]; bindChild(id: string): void } | null }
+    const holder = h.ctx.huaanworkAgentPackageRequest as {
+      current: { allow: string[]; parentSessionId: string; bindChild(id: string): void } | null
+    }
     expect(holder.current).not.toBeNull()
     // agent_http 来自 http 工具模式,agent_skill_run 来自运行时枚举的脚本;MCP 名来自 mount。
     expect(holder.current?.allow).toEqual(
       expect.arrayContaining(['agent_http', 'agent_skill_run', 'mcp__weekly-report__echo', 'read']),
     )
     expect(holder.current?.allow).not.toContain('call_host_tool')
+    expect(holder.current?.parentSessionId).toBe('parent-session')
     expect(h.registry.get('parent-session')).toBe(h.runtime)
 
-    // 模拟 skills.ts 在 start 之后绑定子会话。
+    // 发现阶段挂到父会话的 MCP 名必须在 dispatch 返回前摘掉;它们只属于包子会话。
+    expect(isAgentToolAttached(h.maps, 'parent-session', 'mcp__weekly-report__echo')).toBe(false)
+
+    // 模拟 skills.ts 在 start 之后把运行时工具与 MCP 名挂到子会话并绑定。
+    attachAgentTools(h.maps, 'child', [
+      AGENT_HTTP_TOOL,
+      AGENT_SKILL_RUN_TOOL,
+      'mcp__weekly-report__echo',
+    ])
     holder.current?.bindChild('child')
     expect(h.registry.get('child')).toBe(h.runtime)
     expect(isAgentToolAttached(h.maps, 'child', 'mcp__weekly-report__echo')).toBe(true)
@@ -1027,7 +1103,9 @@ describe('@slug package dispatch', () => {
     expect(h.registry.get('child')).toBeUndefined()
     expect(holder.current).toBeNull()
     expect(h.mcpDisposes).toEqual([1])
+    // 子会话的运行时工具与 MCP 名也随回合卸载,并重算 present-as。
     expect(h.maps.sessionAgentTools.size).toBe(0)
+    expect(h.restrictSessions).toContain('child')
   })
 
   test('findInvocable still returns disabled and broken packages; dispatch rejects them', async () => {
@@ -1068,5 +1146,90 @@ describe('@slug package dispatch', () => {
     expect(h.registry.get('parent-session')).toBeUndefined()
     expect(holder.current).toBeNull()
     expect(h.mcpDisposes).toEqual([1])
+
+    // 失败路径的 cleanup 必须释放会话预留,同一会话可以立即重试。
+    ;(h.ctx.subagents as { start: unknown }).start = async () => ({ localAgent: { id: 'child', session: { id: 'child' } } })
+    const retried = await h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '重试',
+    })
+    await retried.afterIdle()
+  })
+
+  test('rejects a second package turn in the same session until the first cleans up', async () => {
+    const h = dispatchHarness()
+    const pkg = await h.host.findInvocable('weekly-report')
+    let markStarted: () => void = () => undefined
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    let finishStart: (() => void) | undefined
+    ;(h.ctx.subagents as { start: unknown }).start = () => {
+      markStarted()
+      return new Promise((resolve) => {
+        finishStart = () => resolve({ localAgent: { id: 'child', session: { id: 'child' } } })
+      })
+    }
+
+    const first = h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '第一轮',
+    })
+    await started
+    await expect(
+      h.host.dispatch({ ctx: h.ctx as never, sessionId: 'parent-session', pkg: pkg!, remainder: '第二轮' }),
+    ).rejects.toThrow('智能体「weekly-report」无法开始：当前会话已有运行中的智能体包回合（@weekly-report）')
+
+    finishStart?.()
+    const dispatched = await first
+    await dispatched.afterIdle()
+
+    // cleanup 释放预留后,同一会话可以开始下一轮。
+    ;(h.ctx.subagents as { start: unknown }).start = async () => ({
+      localAgent: { id: 'child', session: { id: 'child' } },
+    })
+    const third = await h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '第三轮',
+    })
+    await third.afterIdle()
+  })
+
+  test('disposes an MCP mount that resolves after the turn has already cleaned up', async () => {
+    let resolveMount: ((scope: { dispose: () => Promise<void> }) => void) | undefined
+    let disposeCalls = 0
+    let mountPromise: Promise<readonly string[]> | undefined
+    const h = dispatchHarness({
+      createRuntime: async (startOptions) => {
+        // 与 5 秒健康预算超时同形:回合失败清理后挂载才完成。
+        mountPromise = Promise.resolve(startOptions.mountMcp?.(43210))
+        throw new Error('脚本启动失败：MCP 服务挂载超时')
+      },
+    })
+    h.ctx.plugin = () =>
+      new Promise((resolve) => {
+        resolveMount = resolve
+      })
+    const pkg = await h.host.findInvocable('weekly-report')
+
+    await expect(
+      h.host.dispatch({ ctx: h.ctx as never, sessionId: 'parent-session', pkg: pkg!, remainder: 'x' }),
+    ).rejects.toThrow('MCP 服务挂载超时')
+
+    resolveMount?.({
+      dispose: async () => {
+        disposeCalls += 1
+      },
+    })
+    await mountPromise
+
+    expect(disposeCalls).toBe(1)
+    expect(h.maps.sessionAgentTools.size).toBe(0)
   })
 })
