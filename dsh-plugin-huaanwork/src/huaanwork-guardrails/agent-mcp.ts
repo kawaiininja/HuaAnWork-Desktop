@@ -8,19 +8,61 @@ export const inject = ["tools"];
 
 export function apply(_ctx: unknown): void {}
 
-export async function mountSessionMcp(opts: {
+/** The MCP client plugin surface `mountSessionMcp` mounts onto the session context. */
+export type McpClientImpl = { apply: Function; inject: string[] };
+
+export type MountSessionMcpOptions = {
   ctx: {
     plugin?: Function;
     tools: { schemas?: Function };
     huaanworkAttachments?: AttachmentMaps;
+    /** Reads an optional Cordis service; hand-built test contexts may omit it. */
+    get?: (name: string) => unknown;
   };
   sessionId: string;
   serverName: string;
   url: string;
   headers?: Record<string, string>;
-  mcpClientImpl?: { apply: Function; inject: string[] }; // optional injection seam for testing
-}): Promise<{ names: string[]; dispose: () => Promise<void> }> {
-  const client = opts.mcpClientImpl ?? (opts.ctx as any)?.mcpClientImpl ?? defaultMcpClient;
+  mcpClientImpl?: McpClientImpl; // optional injection seam for testing
+};
+
+function asMcpClient(value: unknown): McpClientImpl | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as { apply?: unknown };
+  return typeof candidate.apply === "function" ? (candidate as McpClientImpl) : undefined;
+}
+
+/**
+ * Resolves the MCP client plugin: the explicit option, then the optional
+ * `mcpClientImpl` service, then the packaged client.
+ *
+ * The service is read through `ctx.get`. Reading `ctx.mcpClientImpl` as a
+ * property throws `cannot get property "mcpClientImpl" without inject` on a
+ * real Cordis Context, because only the `tools` service is declared.
+ */
+function resolveMcpClient(opts: MountSessionMcpOptions): McpClientImpl {
+  if (opts.mcpClientImpl) return opts.mcpClientImpl;
+  if (typeof opts.ctx.get === "function") {
+    try {
+      const service = asMcpClient(opts.ctx.get("mcpClientImpl"));
+      if (service) return service;
+    } catch {
+      // An unregistered optional service may throw instead of returning undefined.
+    }
+  }
+  return defaultMcpClient;
+}
+
+/**
+ * Mounts one MCP server's tools for a session and attaches their names to it.
+ *
+ * @param opts - Session context, server address, and the optional client seam.
+ * @returns Mounted tool names and the disposal that unmounts them.
+ */
+export async function mountSessionMcp(
+  opts: MountSessionMcpOptions,
+): Promise<{ names: string[]; dispose: () => Promise<void> }> {
+  const client = resolveMcpClient(opts);
   const mcpApply = client.apply;
   const mcpInject = client.inject ?? ["tools"];
 
