@@ -1339,6 +1339,42 @@ virtualStoreDirMaxLength: 60
     })
   })
 
+  it('re-mounts the subagent service and spawn backend without exposing delegation tools', () => {
+    const prepared = prepareDesktopProfile('1', temporaryHome())
+    const rows = new Map(composeEntries([prepared.patches]).map(row => [row.id!, row]))
+
+    // The final huaanwork layer states both rows, so an upstream base/overlay
+    // change cannot drop the service the agent-package runtime calls.
+    expect(prepared.patches).toContainEqual({
+      id: 'subagent',
+      disabled: false,
+    })
+    expect(prepared.patches).toContainEqual({
+      id: 'subagent-spawn-in-process',
+      disabled: false,
+      config: { providerName: 'spawn' },
+    })
+
+    expect(rows.get('subagent')).toMatchObject({ name: '@deepseek-ai/dsh-subagent' })
+    expect(rows.get('subagent')?.disabled).not.toBe(true)
+    expect(rows.get('subagent-spawn-in-process')).toMatchObject({
+      name: '@deepseek-ai/dsh-subagent-spawn-in-process',
+      config: { providerName: 'spawn' },
+    })
+    expect(rows.get('subagent-spawn-in-process')?.disabled).not.toBe(true)
+
+    // Model-facing delegation tools stay disabled: the package runtime starts
+    // the spawn backend directly and the model must not regain subagent tools.
+    for (const id of [
+      'tool-subagent',
+      'tool-subagent-control',
+      'tool-subagent-list-agents',
+      'tool-subagent-fork',
+    ]) {
+      expect(rows.get(id)?.disabled).toBe(true)
+    }
+  })
+
   it('overrides plan-mode guidance with the clarification tool HuaAnWork actually exposes', () => {
     const prepared = prepareDesktopProfile('1', temporaryHome())
     const rows = new Map(composeEntries([prepared.patches]).map(row => [row.id!, row]))

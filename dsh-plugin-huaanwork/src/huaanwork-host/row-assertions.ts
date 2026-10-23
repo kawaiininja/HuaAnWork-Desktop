@@ -27,6 +27,8 @@ export const HUAANWORK_ROW_ASSERTIONS: readonly RowHitAssertion[] = [
   { id: 'tool-fs', intent: 'override' },
   { id: 'tool-fs-search', intent: 'override' },
   shellToolAssertion,
+  { id: 'subagent', intent: 'override' },
+  { id: 'subagent-spawn-in-process', intent: 'override', expectConfig: { providerName: 'spawn' } },
   { id: 'plan-mode', intent: 'override' },
   { id: 'tool-todo', intent: 'override', expectConfig: { allowParallelInProgress: false } },
   { id: 'tool-goal', intent: 'override' },
