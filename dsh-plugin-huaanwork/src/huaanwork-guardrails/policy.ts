@@ -5,8 +5,20 @@ import { join } from "node:path";
 import { preExecuteExplained, type GuardMode, type ToolCall } from "@huaanwork/policy";
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 
-import { isHostAttached, isMcpAttached, type AttachmentMaps } from "./agent-attachments.ts";
+import { isAgentToolAttached, isHostAttached, isMcpAttached, type AttachmentMaps } from "./agent-attachments.ts";
 import { GIT_SNAPSHOT_BUDGET_MS } from "./git-budget.ts";
+
+/**
+ * 本地智能体包工具:创建流程挂 agent_propose/agent_commit,`@slug` 运行链路挂
+ * agent_skill_run/agent_http。四个名字都走 default 分支,故这里统一补 `attached`;
+ * 未挂载即 deny,与 call_host_tool 同一纵深。
+ */
+const AGENT_PACKAGE_TOOLS: ReadonlySet<string> = new Set([
+  "agent_propose",
+  "agent_commit",
+  "agent_skill_run",
+  "agent_http",
+]);
 
 type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:376
   name: string;
@@ -190,6 +202,9 @@ function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
   } else if (execution.name.startsWith("mcp__")) {
     const sessionId = sessionIdOfAgentRef(execution.agent);
     attached = isMcpAttached(ctx.huaanworkAttachments, sessionId, execution.name);
+  } else if (AGENT_PACKAGE_TOOLS.has(execution.name)) {
+    const sessionId = sessionIdOfAgentRef(execution.agent);
+    attached = isAgentToolAttached(ctx.huaanworkAttachments, sessionId, execution.name);
   }
   return {
     name: execution.name,

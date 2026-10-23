@@ -225,6 +225,22 @@ export type SessionDetailRecord =
   | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string }
   | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string };
 
+/**
+ * 本地智能体创建确认卡。字段与 host `agent-package/types.ts` 的
+ * `AgentPackageConfirmCard` 一致;客户端不从 host 导入。
+ */
+export type AgentPackageConfirmCard = {
+  displayName: string;
+  slug: string;
+  description: string;
+  personaSummary: string;
+  skillSummary: string;
+  tools: "none" | "http" | "mcp" | "both";
+  toolLabel: string;
+  warning: string;
+  consentHint: string;
+};
+
 /** 事件归属会话：token/tool/diff/session 事件携带发起回合的会话 id，前端与收集器据此归因。 */
 export type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
@@ -262,6 +278,12 @@ export type RpcEvent =
   | { event: "goal/state"; phase: GoalPhase; roundsStarted?: number; sessionId?: string }
   | { event: "goal/state"; cleared: true; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string }
+  /** 智能体包写入成功/提示;`text` 直接作为会话内提示展示。 */
+  | { event: "agent/notice"; text: string; sessionId?: string }
+  /** 结构化创建确认卡;客户端优先渲染它,模型贴回的纯文本是后备。 */
+  | { event: "agent/confirm"; card: AgentPackageConfirmCard; sessionId?: string }
+  /** 本地智能体包新增/更新/启停后触发,客户端据此刷新列表。 */
+  | { event: "agent/changed"; slug?: string }
   | { event: "sidecar/status"; ready: boolean }
   | { event: "automation/run-start"; automationId: string; runId: string; projectId: string | null; sessionId?: string; trigger?: "manual" | "schedule" | "catchup" }
   | {

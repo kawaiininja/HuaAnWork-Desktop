@@ -427,6 +427,12 @@ export function bundledSkillDir(name: string): string | undefined {
 /** 系统技能：始终启用，不参与开关（承载 explore/test-fix 的 restrict/guard 机制）。 */
 export const SYSTEM_SKILLS: ReadonlySet<string> = new Set(["explore", "test-fix"]);
 
+/**
+ * 宿主内部技能:正文由创建入口直接注入,不注册进全局技能目录,也不在技能中心列出。
+ * `listBundledSkills` 仍返回它们,供新增/导入技能的重名检查。
+ */
+export const INTERNAL_BUNDLED_SKILLS: ReadonlySet<string> = new Set(["create-agent"]);
+
 /** 开关表落点(dshHome = $DSH_HOME/旧, Desktop 组合下是 profileDir);导出给迁移侧同源引用。 */
 export function skillTogglesPath(dshHome: string): string {
   return join(dshHome, "skill-toggles.json");

@@ -59,3 +59,12 @@ export function isMcpAttached(maps: AttachmentMaps | undefined, sessionId: strin
   if (!maps || !sessionId || !executionName) return false;
   return maps.sessionAgentTools.get(sessionId)?.has(executionName) === true;
 }
+
+/**
+ * 本地智能体包工具(agent_propose/agent_commit/agent_skill_run/agent_http)是否已挂到
+ * 该会话。与 MCP 共用 `sessionAgentTools` 附件表;policy 用它给 default 分支补
+ * `attached`,present-as 用它放行 schema。
+ */
+export function isAgentToolAttached(maps: AttachmentMaps | undefined, sessionId: string | undefined, toolName: string): boolean {
+  return isMcpAttached(maps, sessionId, toolName);
+}

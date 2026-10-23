@@ -23,7 +23,7 @@ import {
   type SkillSourceFilter,
   type SkillUpdateInput,
 } from './skills-host.ts'
-import { listBundledSkills, readSkillToggles, SYSTEM_SKILLS } from '../huaanwork-guardrails/skills.ts'
+import { INTERNAL_BUNDLED_SKILLS, listBundledSkills, readSkillToggles, SYSTEM_SKILLS } from '../huaanwork-guardrails/skills.ts'
 import {
   RUNS_LIMIT,
   RUN_STATUSES,
@@ -330,11 +330,14 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     handler: storeRoute(async (_req, ctx) => {
       // 旧 host.ts:1182-1195 语义:toggles 只作用于内置技能,三源合并全局按名排序、同名不去重。
       const toggles = readSkillToggles(ctx.profileDir)
-      const bundled = listBundledSkills().map((skill) => ({
-        ...skill,
-        source: 'bundled' as const,
-        enabled: SYSTEM_SKILLS.has(skill.name) || toggles[skill.name] === true,
-      }))
+      // 内部技能(create-agent)由创建入口注入,不进技能中心;仍留 listBundledSkills 供重名检查。
+      const bundled = listBundledSkills()
+        .filter((skill) => !INTERNAL_BUNDLED_SKILLS.has(skill.name))
+        .map((skill) => ({
+          ...skill,
+          source: 'bundled' as const,
+          enabled: SYSTEM_SKILLS.has(skill.name) || toggles[skill.name] === true,
+        }))
       const user = await listUserSkills(ctx.profileDir)
       const external = await listExternalSkills()
       // 全局按名称排序;跨来源同名不去重(前端以 source:name 为 key 双卡展示,所见即运行时遮蔽关系)

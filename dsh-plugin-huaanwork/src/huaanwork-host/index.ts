@@ -14,11 +14,13 @@ import { registerHuaanworkRoutes } from './routes.ts'
 import { sweepProjectLegacySessionsOncePerProcess } from './session-sweep.ts'
 import { restoreEnabledBundledSkills } from './skills-host.ts'
 import { createAgentsHost } from './agents-host.ts'
-import { setAgentsDirectory } from './sessions.ts'
+import { setAgentPackageHost, setAgentsDirectory } from './sessions.ts'
+import { createAgentPackageHost } from './agent-package/host.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
 import { clearPendingWorkspaceRoot, neutralWorkspaceRoot } from './workspace-state.ts'
 import { registerCallHostTool } from '../huaanwork-guardrails/agent-tool.ts'
+import { registerAgentPackageCreationTools } from '../huaanwork-guardrails/agent-package-tools.ts'
 
 export const name = 'huaanwork-host'
 export const inject = ['webServer', 'agents', 'subagents', 'desktopRuntime']
@@ -131,6 +133,15 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   })
   setAgentsDirectory(agentsHost)
   ctx.huaanworkAgentCatalog.current = agentsHost.snapshotForRuntime()
+  // 本地智能体包宿主:创建入口(sessions.ts)、agent_propose/agent_commit 与 Task 7 路由
+  // 共用同一实例。takenSlugs 每次读当前目录快照(公用机条目 + 本地工具),目录变化后
+  // 无需重建宿主;host 自己持有 per-session 原句与「同一轮已 propose」标记。
+  const agentPackageHost = createAgentPackageHost({
+    profileDir: config.profileDir,
+    takenSlugs: () => agentsHost.snapshotForRuntime().items.map((item) => item.name),
+  })
+  setAgentPackageHost(agentPackageHost)
+  ctx.huaanworkAgentPackageHost = agentPackageHost
   // call_host_tool 注册接线(P1 修复):旧 sidecar 的生产调用在桌面移植时遗失,
   // @点名 HTTP 小工具链路因此断裂。工具全局注册单实例,执行边界在 policy 的会话
   // 附件门禁(decide.ts:111-112:unattached → deny),可见性由 present-as 的
@@ -146,17 +157,25 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           tools: (pc as unknown as { tools?: unknown }).tools,
           huaanworkAgentCatalog: ctx.huaanworkAgentCatalog,
           huaanworkProfileDir: config.profileDir,
+          // 创建工具发事件、读附件与按会话刷新 restrict 所需的 holder 桥接。
+          huaanworkEmit: ctx.huaanworkEmit,
+          huaanworkAgentPackageHost: agentPackageHost,
+          huaanworkAttachments: ctx.huaanworkAttachments,
+          huaanworkRouteAgent: ctx.huaanworkRouteAgent,
+          root: ctx.root,
         }
         let unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
+        const unregisterPackageTools = registerAgentPackageCreationTools(toolCtx, agentPackageHost)
         syncHostToolDescription = () => {
           unregister?.()
           unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
         }
         return () => {
           syncHostToolDescription = undefined
+          unregisterPackageTools()
           unregister?.()
         }
-      }, 'huaanwork: call_host_tool registration')
+      }, 'huaanwork: host and creation tools registration')
     },
   })
   // 统一网络门禁第二层(llm/stream 前置全局监听;AGENTS.md 不变式 9)。
