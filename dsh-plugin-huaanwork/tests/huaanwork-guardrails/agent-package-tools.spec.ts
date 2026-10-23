@@ -814,6 +814,8 @@ function skillsRuntimePackage(options: {
         persona: '你是周报助手',
         runtime,
         parentSessionId,
+        // 真宿主每次 dispatch 都预留一个子会话 id 并写进 spec;包装按它归属包请求。
+        childId: childSessionId,
         bindChild: (sessionId: string) => {
           // 运行时工具与 MCP 名由 skills.ts 自己挂;这里只按真实 host 记录子会话。
           bindCalls.push(sessionId)
@@ -1009,7 +1011,7 @@ describe('skills.ts package activation', () => {
     expect(harnessed.bindCalls).toEqual(['child'])
   })
 
-  test('binds the reserved child id when the provider returns a different one', async () => {
+  test('leaves a provider-assigned child id to the host post-return re-attach', async () => {
     const harnessed = skillsRuntimePackage({
       allow: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
       childNames: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
@@ -1025,10 +1027,20 @@ describe('skills.ts package activation', () => {
       childId: 'reserved-child',
     })
 
-    // 实际子会话拿到包工具;预留 id 也保留登记,回合清理按两者都能找到运行时。
-    expect(isAgentToolAttached(harnessed.maps, 'child', AGENT_HTTP_TOOL)).toBe(true)
+    // 包装只认预留 id;provider 另分配 id 时不做接线,由 host 在 activation
+    // 返回后按实际 id 补挂工具、补绑运行时。
+    expect(isAgentToolAttached(harnessed.maps, 'child', AGENT_HTTP_TOOL)).toBe(false)
     expect(isAgentToolAttached(harnessed.maps, 'reserved-child', AGENT_HTTP_TOOL)).toBe(false)
-    expect(harnessed.bindCalls).toEqual(['child', 'reserved-child'])
+    expect(harnessed.bindCalls).toEqual([])
+    expect(harnessed.restrictSnapshots).toEqual([])
+    // 子会话工具没有被包 allow 收窄;请求容器仍由本次调用清除。
+    expect(harnessed.childTools.visible.map((schema) => schema.name)).toEqual([
+      'read',
+      'agent_http',
+      'agent_skill_run',
+      'mcp__weekly-report__echo',
+    ])
+    expect(harnessed.ctx.huaanworkAgentPackageRequest.current).toBeNull()
   })
 
   test('leaves an activation started by another session untouched', async () => {
@@ -1405,6 +1417,36 @@ describe('@slug package dispatch', () => {
     expect(h.registry.get(retriedChildId!)).toBe(h.runtime)
     await retried.afterIdle()
     expect(h.maps.sessionAgentTools.has(retriedChildId!)).toBe(false)
+  })
+
+  test('re-attaches to a child id a provider assigns instead of the reservation', async () => {
+    const h = dispatchHarness()
+    let reserved: string | undefined
+    ;(h.ctx.subagents as { startActivation: unknown }).startActivation = async (spec: ActivationSpec) => {
+      reserved = spec.childId
+      return { childId: 'provider-child', result: Promise.resolve({}), dispose: async () => undefined }
+    }
+    const pkg = await h.host.findInvocable('weekly-report')
+    const dispatched = await h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+
+    // 预留 id 已由 host 预挂;provider 另分配 id 时,host 在 activation 返回后
+    // 对实际 id 补挂同一批名字并补绑运行时 —— 这是包装跳过该路径后的兜底。
+    expect(reserved).toBeTruthy()
+    expect(isAgentToolAttached(h.maps, 'provider-child', AGENT_HTTP_TOOL)).toBe(true)
+    expect(isAgentToolAttached(h.maps, 'provider-child', AGENT_SKILL_RUN_TOOL)).toBe(true)
+    expect(isAgentToolAttached(h.maps, 'provider-child', 'mcp__weekly-report__echo')).toBe(true)
+    expect(h.registry.get('provider-child')).toBe(h.runtime)
+
+    await dispatched.afterIdle()
+    expect(h.maps.sessionAgentTools.has('provider-child')).toBe(false)
+    expect(h.maps.sessionAgentTools.has(reserved!)).toBe(false)
+    expect(h.registry.get('provider-child')).toBeUndefined()
   })
 
   test('findInvocable still returns disabled and broken packages; dispatch rejects them', async () => {
@@ -1796,7 +1838,11 @@ describe('@agent legacy dispatch', () => {
   }
 
   test('starts spawn through startActivation and restricts the child to the filtered allow list', async () => {
-    const h = legacySkillsHarness({ childNames: ['read', 'bash', 'glob', 'agent_http'] })
+    // 子会话暴露 call_host_tool 与 mcp__*:两者必须在发布前就被 filterAgentAllow 去掉,
+    // 否则与子会话 schemas 的交集会把它们带回来。
+    const h = legacySkillsHarness({
+      childNames: ['read', 'bash', 'glob', 'agent_http', 'call_host_tool', 'mcp__legacy__echo'],
+    })
     const parent = { id: 'parent-agent', session: { id: 'parent-session' } }
 
     const dispatched = await dispatchAt({
@@ -1934,5 +1980,230 @@ describe('@agent legacy dispatch', () => {
     await expect(dispatched.afterIdle()).resolves.toBeUndefined()
     expect(h.disposals).toEqual([1])
     expect(holder.current).toBeUndefined()
+  })
+
+  function legacyCatalogHost(name: string, allow: string[]) {
+    return {
+      list: () => ({
+        items: [
+          {
+            name,
+            source: 'catalog',
+            kind: 'agent',
+            description: '旧目录智能体',
+            version: '1.0.0',
+            permissions: [],
+            enabled: true,
+          },
+        ],
+      }),
+      get: async () => ({ persona: `人设-${name}`, allow }),
+    } as never
+  }
+
+  function childToolsWith(names: readonly string[]) {
+    const all = names.map((name) => ({ name }))
+    const tools = {
+      visible: [...all],
+      schemas() {
+        return tools.visible
+      },
+      restrict({ allow }: { allow: readonly string[] }) {
+        tools.visible = all.filter((schema) => allow.includes(schema.name))
+        return () => undefined
+      },
+      guard() {
+        return () => undefined
+      },
+    }
+    return tools
+  }
+
+  test('overlapping legacy sends keep their own allow lists', async () => {
+    const schemaNames = ['read', 'glob', 'bash', 'edit']
+    const toolsA = childToolsWith(schemaNames)
+    const toolsB = childToolsWith(schemaNames)
+    const agentA = {
+      id: 'legacy-child-a',
+      session: { id: 'legacy-child-a', header: { id: 'legacy-child-a' } },
+      ctx: { get: (name: string) => (name === 'tools' ? toolsA : undefined) },
+    }
+    const agentB = {
+      id: 'legacy-child-b',
+      session: { id: 'legacy-child-b', header: { id: 'legacy-child-b' } },
+      ctx: { get: (name: string) => (name === 'tools' ? toolsB : undefined) },
+    }
+
+    const parentGates = new Map<string, (parent: { session: { id: string } }) => void>()
+    const parentFor = (sessionId: string) =>
+      new Promise<{ session: { id: string } }>((resolve) => parentGates.set(sessionId, resolve))
+
+    let started = 0
+    let releaseProvider: () => void = () => undefined
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve
+    })
+    const specs: Array<{ label?: string }> = []
+    const ctx: Record<string, unknown> = {
+      skills: { register: () => () => undefined },
+      on: () => undefined,
+      agents: {
+        get: (id: string) =>
+          id === 'legacy-child-a' ? agentA : id === 'legacy-child-b' ? agentB : undefined,
+      },
+      huaanworkAgentRequest: { current: undefined as unknown },
+      huaanworkAttachments: emptyAttachments(),
+      subagents: {
+        startActivation: async (spec: { label?: string }) => {
+          specs.push(spec)
+          started += 1
+          await providerGate
+          return spec.label === '@legacy-a'
+            ? { childId: 'legacy-child-a', result: Promise.resolve({}), dispose: async () => undefined }
+            : { childId: 'legacy-child-b', result: Promise.resolve({}), dispose: async () => undefined }
+        },
+      },
+    }
+    applySkills(ctx as never)
+
+    // 两个发送都停在 parent 解析。旧实现先发布再解析:后发者覆盖容器,先发者的
+    // 包装因此认领到后发者的 allow;新实现解析完成后才发布并在 spec 上带调用标记。
+    const first = dispatchAt({
+      host: legacyCatalogHost('legacy-a', ['read']),
+      ctx: ctx as never,
+      sessionId: 'parent-session',
+      name: 'legacy-a',
+      remainder: '任务 A',
+      resolveParent: () => parentFor('parent-a'),
+    })
+    const second = dispatchAt({
+      host: legacyCatalogHost('legacy-b', ['glob', 'bash']),
+      ctx: ctx as never,
+      sessionId: 'parent-session',
+      name: 'legacy-b',
+      remainder: '任务 B',
+      resolveParent: () => parentFor('parent-b'),
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    parentGates.get('parent-b')?.({ session: { id: 'parent-session' } })
+    await new Promise((resolve) => setImmediate(resolve))
+    parentGates.get('parent-a')?.({ session: { id: 'parent-session' } })
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(specs).toHaveLength(2)
+    expect(started).toBe(2)
+    releaseProvider()
+    const [runA, runB] = await Promise.all([first, second])
+
+    expect(toolsA.visible.map((schema) => schema.name)).toEqual(['read'])
+    expect(toolsB.visible.map((schema) => schema.name)).toEqual(['glob', 'bash'])
+    // legacy 子会话不挂任何包附件;两个请求对象都由各自的包装清掉。
+    expect((ctx.huaanworkAttachments as ReturnType<typeof emptyAttachments>).sessionAgentTools.size).toBe(0)
+    expect((ctx.huaanworkAgentRequest as { current: unknown }).current).toBeUndefined()
+    await runA.afterIdle()
+    await runB.afterIdle()
+  })
+
+  test('a legacy child during a package activation gets no package tools or bindings', async () => {
+    const sharedNames = ['read', 'glob', AGENT_HTTP_TOOL, AGENT_SKILL_RUN_TOOL, 'mcp__weekly-report__echo']
+    const packageTools = childToolsWith(sharedNames)
+    const legacyTools = childToolsWith(sharedNames)
+    const packageAgent = {
+      id: 'pkg-child',
+      session: { id: 'pkg-child', header: { id: 'pkg-child' } },
+      ctx: { get: (name: string) => (name === 'tools' ? packageTools : undefined) },
+    }
+    const legacyAgent = {
+      id: 'legacy-child',
+      session: { id: 'legacy-child', header: { id: 'legacy-child' } },
+      ctx: { get: (name: string) => (name === 'tools' ? legacyTools : undefined) },
+    }
+    const maps = emptyAttachments()
+    const bindCalls: string[] = []
+    let started = 0
+    let releaseProvider: () => void = () => undefined
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve
+    })
+    const specs: Array<{ label?: string; childId?: string }> = []
+    const ctx: Record<string, unknown> = {
+      skills: { register: () => () => undefined },
+      on: () => undefined,
+      agents: {
+        get: (id: string) =>
+          id === 'pkg-child' ? packageAgent : id === 'legacy-child' ? legacyAgent : undefined,
+      },
+      huaanworkAttachments: maps,
+      huaanworkAgentRequest: { current: undefined as unknown },
+      huaanworkAgentPackageRequest: {
+        current: {
+          allow: ['read', AGENT_HTTP_TOOL, AGENT_SKILL_RUN_TOOL, 'mcp__weekly-report__echo'],
+          persona: '你是周报助手',
+          runtime: fakeTurnRuntime({ mcpNames: ['mcp__weekly-report__echo'] }),
+          parentSessionId: 'parent-session',
+          childId: 'pkg-child',
+          bindChild: (sessionId: string) => {
+            bindCalls.push(sessionId)
+          },
+        },
+      },
+      root: {
+        [PRESENT_AS_STATE]: {
+          restrict: () => undefined,
+          restrictAll: () => undefined,
+          restrictSession: () => undefined,
+        },
+      },
+      subagents: {
+        startActivation: async (spec: { label?: string; childId?: string }) => {
+          specs.push(spec)
+          started += 1
+          await providerGate
+          return spec.label === '@weekly-report'
+            ? { childId: 'pkg-child', result: Promise.resolve({}), dispose: async () => undefined }
+            : { childId: 'legacy-child', result: Promise.resolve({}), dispose: async () => undefined }
+        },
+      },
+    }
+    applySkills(ctx as never)
+
+    // 包回合已发布请求并停在 provider;同一会话随后发起 legacy `@agent`。
+    // 两者同时在飞时,旧实现只按 parentSessionId 归属,legacy 子会话会命中包请求。
+    const packageRun = (ctx.subagents as { startActivation(spec: unknown): Promise<unknown> }).startActivation({
+      provider: 'spawn',
+      label: '@weekly-report',
+      childId: 'pkg-child',
+      request: { prompt: [], parent: { session: { id: 'parent-session' } } },
+      delivery: 'parent',
+    })
+    const legacyRun = dispatchAt({
+      host: legacyCatalogHost('legacy-assistant', ['read', 'glob']),
+      ctx: ctx as never,
+      sessionId: 'parent-session',
+      name: 'legacy-assistant',
+      remainder: '整理',
+      resolveParent: async () => ({ session: { id: 'parent-session' } }),
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(specs).toHaveLength(2)
+    expect(started).toBe(2)
+    releaseProvider()
+    const [packageActivation, legacyDispatched] = await Promise.all([packageRun, legacyRun])
+    expect(packageActivation).toMatchObject({ childId: 'pkg-child' })
+
+    expect(packageTools.visible.map((schema) => schema.name)).toEqual([
+      'read',
+      AGENT_HTTP_TOOL,
+      AGENT_SKILL_RUN_TOOL,
+      'mcp__weekly-report__echo',
+    ])
+    // legacy 子会话只收窄到自己的 allow,没有包工具、MCP 名或运行时登记。
+    expect(legacyTools.visible.map((schema) => schema.name)).toEqual(['read', 'glob'])
+    expect(bindCalls).toEqual(['pkg-child'])
+    expect(isAgentToolAttached(maps, 'legacy-child', AGENT_HTTP_TOOL)).toBe(false)
+    expect(isAgentToolAttached(maps, 'legacy-child', 'mcp__weekly-report__echo')).toBe(false)
+    expect(isAgentToolAttached(maps, 'pkg-child', AGENT_HTTP_TOOL)).toBe(true)
+    expect((ctx.huaanworkAgentPackageRequest as { current: unknown }).current).toBeNull()
+    expect((ctx.huaanworkAgentRequest as { current: unknown }).current).toBeUndefined()
+    await legacyDispatched.afterIdle()
   })
 })

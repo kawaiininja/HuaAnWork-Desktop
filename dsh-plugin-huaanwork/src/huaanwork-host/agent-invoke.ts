@@ -8,7 +8,14 @@ import {
   type AgentPackageDispatchResult,
 } from "./agent-package/host.ts";
 import type { AgentsHost } from "./agents-host.ts";
-import { resolveSubagents, type SubagentActivationHandle, type SubagentActivationSpec } from "./subagents-service.ts";
+import {
+  HUAANWORK_LEGACY_AGENT_REQUEST,
+  resolveSubagents,
+  type LegacyActivationSpec,
+  type LegacyAgentRequest,
+  type SubagentActivationHandle,
+  type SubagentActivationSpec,
+} from "./subagents-service.ts";
 import { readHuaanworkSettingsSync } from "./settings.ts";
 
 /**
@@ -29,7 +36,7 @@ export type AgentInvokeContext = {
   huaanworkAttachments?: AttachmentMaps;
   huaanworkAgentCatalog?: { current: { items: unknown[] } };
   huaanworkAgentRequest?: { current: unknown };
-  /** `@slug` 包回合请求(由 host dispatch 写入,skills.ts 的 start 包装消费)。 */
+  /** `@slug` 包回合请求(由 host dispatch 写入,skills.ts 的 startActivation 包装消费)。 */
   huaanworkAgentPackageRequest?: { current: AgentPackageSubagentRequest | null };
   huaanworkWorkspaceRoot?: { current: string };
   /** 全局服务查找:`sandbox`,以及 `subagents` 在直接属性缺席时的回落路径。 */
@@ -204,38 +211,43 @@ export async function dispatchAt(opts: {
     }
     const startActivation = subagents.startActivation.bind(subagents);
 
-    if (opts.ctx.huaanworkAgentRequest) {
-      opts.ctx.huaanworkAgentRequest.current = {
-        name: opts.name,
-        allow: filterAgentAllow(detail?.allow),
-        persona,
-      };
-    }
-
     const prompt = opts.remainder.trim() || item.description || "开始协助工作。";
     const promptWithPersona = `${persona}\n\n---\n用户请求：\n${prompt}`;
+    // startActivation 要求 parent 是 ctx.agents 里的同一个活动 Agent 对象,
+    // 缺省时不能猜 list()[0]。先解析父会话:解析失败时不能留下一个可被并发
+    // activation 认领的 legacy 请求。
+    const parent = opts.resolveParent ? await opts.resolveParent() : undefined;
+    if (parent === undefined || parent === null) {
+      throw new Error(`智能体「${opts.name}」无法开始：当前会话没有可用的父会话`);
+    }
+    // 请求对象同时写入全局容器(旧运行时/旧包装的回落)和 activation spec 的符号键;
+    // 包装按 spec 的调用级标记归属请求,重叠的 activation 不会互相认领。
+    const request: LegacyAgentRequest = {
+      name: opts.name,
+      allow: filterAgentAllow(detail?.allow),
+      persona,
+    };
+    const spec: LegacyActivationSpec = {
+      provider: "spawn",
+      label: `@${opts.name}`,
+      request: {
+        prompt: [{ type: "text", text: promptWithPersona }],
+        parent,
+      },
+      signal: new AbortController().signal,
+      delivery: "parent",
+      [HUAANWORK_LEGACY_AGENT_REQUEST]: request,
+    };
     let activation: SubagentActivationHandle;
     try {
-      // startActivation 要求 parent 是 ctx.agents 里的同一个活动 Agent 对象,
-      // 缺省时不能猜 list()[0]。
-      const parent = opts.resolveParent ? await opts.resolveParent() : undefined;
-      if (parent === undefined || parent === null) {
-        throw new Error(`智能体「${opts.name}」无法开始：当前会话没有可用的父会话`);
-      }
-      activation = await startActivation({
-        provider: "spawn",
-        label: `@${opts.name}`,
-        request: {
-          prompt: [{ type: "text", text: promptWithPersona }],
-          parent,
-        },
-        signal: new AbortController().signal,
-        delivery: "parent",
-      });
-    } catch (err) {
+      // 只在调用前一刻发布:包装在第一次 await 之前已从 spec 取到本调用的请求,
+      // 全局容器里的值不会决定归属。
       if (opts.ctx.huaanworkAgentRequest) {
-        opts.ctx.huaanworkAgentRequest.current = undefined;
+        opts.ctx.huaanworkAgentRequest.current = request;
       }
+      activation = await startActivation(spec);
+    } catch (err) {
+      clearLegacyRequest(opts.ctx, request);
       throw err;
     }
 
@@ -244,7 +256,13 @@ export async function dispatchAt(opts: {
       afterIdle: async () => {
         // 子会话可能比父回合的空闲点活得久;等待有上限,结果与释放的失败都不外抛。
         try {
-          await settleWithin(activation.result, ACTIVATION_CLEANUP_TIMEOUT_MS);
+          const settled = await settleWithin(activation.result, ACTIVATION_CLEANUP_TIMEOUT_MS);
+          if (!settled) {
+            // 与包路径同一上限与文案:超时只记录事实,取消归随后的 dispose()。
+            console.error(
+              `智能体「${opts.name}」的子代理在 ${String(ACTIVATION_CLEANUP_TIMEOUT_MS / 60_000)} 分钟内未结束，释放 activation`,
+            );
+          }
         } catch {
           // activation.result 的拒绝已在 settleWithin 内折叠,这里只兜同步抛错的实现。
         }
@@ -253,12 +271,17 @@ export async function dispatchAt(opts: {
         } catch {
           // 释放是尽力而为:同步抛错的 dispose 不能阻止 holder 清理。
         }
-        if (opts.ctx.huaanworkAgentRequest) {
-          opts.ctx.huaanworkAgentRequest.current = undefined;
-        }
+        clearLegacyRequest(opts.ctx, request);
       },
     };
   }
 
   throw new Error(`未知智能体类型：「${(item as { kind?: string }).kind}」`);
+}
+
+/** 只清本次调用发布的请求:重叠的 activation 可能已经写入新的请求。 */
+function clearLegacyRequest(ctx: AgentInvokeContext, request: LegacyAgentRequest): void {
+  if (ctx.huaanworkAgentRequest?.current === request) {
+    ctx.huaanworkAgentRequest.current = undefined;
+  }
 }

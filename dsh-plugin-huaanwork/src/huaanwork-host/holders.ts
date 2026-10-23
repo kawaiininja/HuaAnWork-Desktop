@@ -31,7 +31,7 @@ declare module '@deepseek-ai/cordis' {
     huaanworkAgentRequest: { current: unknown }
     /** 创建/运行共享的包宿主(apply 里注入);读取方一律经 sessions 的 getter 取同一实例。 */
     huaanworkAgentPackageHost: AgentPackageHost
-    /** `@slug` 一次运行的子代理请求(技能插件在 subagents.start 里消费)。 */
+    /** `@slug` 一次运行的子代理请求(技能插件在 subagents.startActivation 里消费)。 */
     huaanworkAgentPackageRequest: { current: AgentPackageSubagentRequest | null }
     /**
      * 智能体包回合当前绑定的子会话 id。policy 用它标记 `mcp__*` 调用来自包运行链路:

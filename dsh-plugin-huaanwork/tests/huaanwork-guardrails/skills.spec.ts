@@ -632,6 +632,40 @@ test("overlapping startActivation calls register each child under its own parent
   assert.deepEqual(childrenOf("huaanwork-overlap-b"), ["overlap-child-b"]);
 });
 
+test("a global legacy request alone does not attribute an activation", async () => {
+  const childTools = createTools(["read", "glob"]);
+  const childAgent: Agent = {
+    id: "child",
+    ctx: { get: (name) => (name === "tools" ? childTools : undefined) },
+  };
+  const request = { name: "code-reviewer", allow: ["read"], persona: "只读审查者" };
+  const holder: { current: typeof request | undefined } = { current: request };
+  const ctx = {
+    skills: { register: () => () => undefined },
+    on: () => undefined,
+    huaanworkAgentRequest: holder,
+    subagents: {
+      start: async () => ({ localAgent: childAgent }),
+      startActivation: async () => ({ childId: "child", result: Promise.resolve({}), dispose: async () => undefined }),
+    },
+  };
+
+  applySkills(ctx as never);
+  await (ctx.subagents.startActivation as (spec: unknown) => Promise<unknown>)({
+    provider: "spawn",
+    label: "@legacy-assistant",
+    request: { prompt: [], parent: { session: { id: "parent-session" } } },
+    delivery: "parent",
+  });
+
+  // spec 没有调用级标记:包装不认领全局容器里的请求,也不清它。
+  assert.deepEqual(
+    childTools.visible.map((schema) => schema.name),
+    ["read", "glob"],
+  );
+  assert.equal(holder.current, request);
+});
+
 test("subagent end drops the child registration so a finished child is never canceled", () => {
   const startListeners: Array<(info: unknown) => void> = [];
   const endListeners: Array<(info: unknown) => void> = [];

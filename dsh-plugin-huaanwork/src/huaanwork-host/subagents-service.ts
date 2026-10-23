@@ -53,6 +53,40 @@ export type SubagentActivationHandle = {
   dispose(): Promise<void>
 }
 
+/**
+ * 调用方 legacy `@agent` 请求的 activation 键。
+ *
+ * activation spec 是普通对象:符号键不可枚举,provider 的字段读取看不到也不受影响,
+ * 但让 `skills.ts` 的包装按本次调用归属请求,而不是读一个并发 activation 也会改写的
+ * 全局容器。`Symbol.for` 与 present-as 的既有状态键同形。
+ */
+export const HUAANWORK_LEGACY_AGENT_REQUEST: unique symbol = Symbol.for('huaanwork.legacy-agent-request')
+
+/** 一次 legacy `@agent` activation 的请求:只收窄子会话工具,不挂包运行时。 */
+export type LegacyAgentRequest = {
+  name: string
+  allow: string[]
+  persona: string
+}
+
+/** 带调用级 legacy 标记的 activation spec;标记只由 `agent-invoke.ts` 的 legacy 分支写入。 */
+export type LegacyActivationSpec = SubagentActivationSpec & {
+  [HUAANWORK_LEGACY_AGENT_REQUEST]?: LegacyAgentRequest
+}
+
+/**
+ * 读取 activation spec 上的 legacy 请求。
+ *
+ * @param spec — `startActivation` 的第一个实参
+ * @returns 本次调用发布的请求;spec 未带标记时为 `undefined`
+ */
+export function legacyAgentRequestOf(spec: unknown): LegacyAgentRequest | undefined {
+  if (typeof spec !== 'object' || spec === null) return undefined
+  return (spec as { [HUAANWORK_LEGACY_AGENT_REQUEST]?: LegacyAgentRequest })[
+    HUAANWORK_LEGACY_AGENT_REQUEST
+  ]
+}
+
 /** 可用的 `subagents` 服务面:至少一个启动入口可调用。 */
 export type SubagentsService = {
   /** 旧签名;rc.1 的 `SubagentRuntime` 不再提供,保留仅为解析回落的类型面。 */
