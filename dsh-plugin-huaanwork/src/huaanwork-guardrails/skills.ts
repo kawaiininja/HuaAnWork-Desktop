@@ -306,12 +306,15 @@ export function apply(ctx: Context): void {
     ctx.subagents.startActivation = async (...args: never[]) => {
       // 在 await 之前取快照:host 的 afterIdle 会在回合结束后清空容器。
       const pkg = ctx.huaanworkAgentPackageRequest?.current;
+      const legacy = ctx.huaanworkAgentRequest?.current;
       try {
         const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
         const run = await startParent.run(parentFromCall, () => originalActivation(...args));
         // Package requests are keyed to the session that dispatched them: an activation
         // started by any other session keeps its own tools and attachments.
+        let packageApplied = false;
         if (pkg && run && parentFromCall !== undefined && pkg.parentSessionId === parentFromCall) {
+          packageApplied = true;
           const childSessionId = sessionIdOf(run.childId) ?? sessionIdOf(run.localAgent);
           if (childSessionId) {
             if (ctx.huaanworkAttachments) {
@@ -344,6 +347,18 @@ export function apply(ctx: Context): void {
           const allow = pkg.allow.filter((name) => existing.includes(name));
           tools?.restrict?.({ allow });
         }
+        // legacy `@agent` 没有智能体包的运行时工具、附件或 registry:只按目录条目
+        // 声明的 allow 收窄子会话工具,交集与旧 `start` 包装一致。
+        if (!packageApplied && legacy && run) {
+          const childSessionId = sessionIdOf(run.childId);
+          const childAgent =
+            childSessionId === undefined ? undefined : ctx.agents?.get?.(childSessionId);
+          const tools = childAgent?.ctx?.get?.("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          const existing = schemas.flatMap((schema) => (schema.name ? [schema.name] : []));
+          const allow = legacy.allow.filter((name) => existing.includes(name));
+          tools?.restrict?.({ allow });
+        }
         if (run?.localAgent) {
           consumePendingSpawn(run.localAgent);
         }
@@ -351,6 +366,10 @@ export function apply(ctx: Context): void {
       } finally {
         if (ctx.huaanworkAgentPackageRequest) {
           ctx.huaanworkAgentPackageRequest.current = null;
+        }
+        // 只清本次快照:重叠的 activation 不能清掉别处新写入的 legacy 请求。
+        if (ctx.huaanworkAgentRequest && ctx.huaanworkAgentRequest.current === legacy) {
+          ctx.huaanworkAgentRequest.current = undefined;
         }
       }
     };

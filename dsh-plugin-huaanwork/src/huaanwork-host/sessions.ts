@@ -30,6 +30,7 @@ import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog } from './session-view.ts'
 import type { RouteContext } from './routes.ts'
+import type { SubagentsService } from './subagents-service.ts'
 
 /**
  * 会话域主链路(旧 sidecar host.ts L1434-1740 移植)。
@@ -68,16 +69,7 @@ export type SessionRuntimeContext = {
     /** 从持久化日志恢复历史会话为 live agent(携带完整上下文)。 */
     resume?: (options: AgentResumeOptions) => Promise<unknown>
   }
-  subagents?: {
-    start?: (
-      provider: string,
-      request: {
-        prompt: Array<{ type: string; text: string }>
-        persona?: string
-        [key: string]: unknown
-      },
-    ) => Promise<unknown>
-  }
+  subagents?: SubagentsService
 }
 
 /**
@@ -166,7 +158,7 @@ export async function sendToAgent(
     // 显式 sessionId(对话标签绑定独立会话):不在场的会话按需 create / resume;
     // 缺省走通道稳定会话(boot 时由 agent-loop config 固定)。
     // 惰性解析:skill/@ 的校验失败必须先于 agent 创建抛错;@agent 时 dispatchAt 在
-    // subagents.start 之前调 resolveAgent(),保证 parent 是当前会话 agent(spec 要求)。
+    // startActivation 之前调 resolveAgent(),保证 parent 是当前会话 agent(spec 要求)。
     let agentPromise: Promise<ListedAgent & { followup: (message: unknown) => void }> | null = null
     const resolveAgent = () =>
       (agentPromise ??= explicitSessionId

@@ -167,8 +167,10 @@ const MAX_TRACKED_SESSIONS = 256
  * 空闲点,短上限会在子代理仍在工作时截断答案。这个上限只兜住「子进程卡住」
  * 的异常路径,避免父会话的 idle 清理被无限期挂起;超时后记一条错误并释放
  * activation(`dispose()` 负责发布后的取消),随后照常停止子进程。
+ *
+ * legacy `@agent` 的 `afterIdle` 复用同一上限与 `settleWithin`。
  */
-const ACTIVATION_CLEANUP_TIMEOUT_MS = 600_000
+export const ACTIVATION_CLEANUP_TIMEOUT_MS = 600_000
 
 /**
  * 组装 `AgentPackageHost`。
@@ -533,7 +535,7 @@ function readDispatchManifest(profileDir: string, slug: string): AgentPackageMan
  * @param timeoutMs — upper bound for the wait
  * @returns `true` when the promise settled first, `false` on timeout; never rejects
  */
-function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+export function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const timer = setTimeout(() => {
       resolve(false)

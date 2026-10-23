@@ -55,9 +55,9 @@ export type SubagentActivationHandle = {
 
 /** 可用的 `subagents` 服务面:至少一个启动入口可调用。 */
 export type SubagentsService = {
-  /** 旧签名;rc.1 的 `SubagentRuntime` 不再提供,legacy `@agent` 仍按它调用。 */
+  /** 旧签名;rc.1 的 `SubagentRuntime` 不再提供,保留仅为解析回落的类型面。 */
   start?: SubagentsStart
-  /** rc.1 的唯一启动入口,智能体包 `@slug` 回合走这里。 */
+  /** rc.1 的唯一启动入口,智能体包 `@slug` 与 legacy `@agent` 都走这里。 */
   startActivation?: (spec: SubagentActivationSpec) => Promise<SubagentActivationHandle>
 }
 

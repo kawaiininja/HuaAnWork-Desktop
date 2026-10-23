@@ -2,9 +2,13 @@ import { attachHostTool, detachHostTool, type AttachmentMaps } from "../huaanwor
 import { mountSessionMcp } from "../huaanwork-guardrails/agent-mcp.ts";
 import { filterAgentAllow } from "@huaanwork/policy/agent-catalog";
 import type { AgentPackageDetail, AgentPackageSubagentRequest } from "./agent-package/types.ts";
-import type { AgentPackageDispatchResult } from "./agent-package/host.ts";
+import {
+  ACTIVATION_CLEANUP_TIMEOUT_MS,
+  settleWithin,
+  type AgentPackageDispatchResult,
+} from "./agent-package/host.ts";
 import type { AgentsHost } from "./agents-host.ts";
-import { resolveSubagents } from "./subagents-service.ts";
+import { resolveSubagents, type SubagentActivationHandle, type SubagentActivationSpec } from "./subagents-service.ts";
 import { readHuaanworkSettingsSync } from "./settings.ts";
 
 /**
@@ -31,15 +35,8 @@ export type AgentInvokeContext = {
   /** 全局服务查找:`sandbox`,以及 `subagents` 在直接属性缺席时的回落路径。 */
   get?: (name: string) => unknown;
   subagents?: {
-    /** 探针 3 核实的上游签名:start(provider, request),provider 固定 "spawn"。 */
-    start?: (
-      provider: string,
-      request: {
-        prompt: Array<{ type: string; text: string }>;
-        persona?: string;
-        [key: string]: unknown;
-      },
-    ) => Promise<unknown>;
+    /** rc.1 的唯一启动入口,provider 固定 "spawn";旧签名 `start` 已不在运行时上。 */
+    startActivation?: (spec: SubagentActivationSpec) => Promise<unknown>;
   };
 };
 
@@ -93,7 +90,7 @@ export async function dispatchAt(opts: {
   name: string;
   remainder: string;
   /** 解析当前会话的 agent，作为 @agent 子代理的 parent。
-   *  仅 agent 分支在 subagents.start 之前调用；http/mcp 分支不触发。 */
+   *  仅 agent 分支在 startActivation 之前调用；http/mcp 分支不触发。 */
   resolveParent?: () => Promise<unknown>;
   /** 本地智能体包分流;必须在 agentsHost 查找之前,否则目录外的 slug 会直接抛错。 */
   packageHost?: AgentPackageHostFace;
@@ -199,15 +196,13 @@ export async function dispatchAt(opts: {
       throw new Error(`无法加载智能体「${opts.name}」的人设`);
     }
 
-    const subagents = resolveSubagents(opts.ctx, "start");
-    // legacy `@agent` 仍调用旧签名 `start`;rc.1 的 SubagentRuntime 只有 startActivation,
-    // 这条分支在 rc.1 上不可用,已登记为债(root AGENTS.md 的
-    // 「legacy @agent 路径…」行),等下一轮 legacy 智能体兼容 wave 迁移;
-    // 智能体包 `@slug` 路径已迁移到 startActivation。
+    // rc.1 的 SubagentRuntime 只有 startActivation;legacy `@agent` 与智能体包 `@slug`
+    // 走同一入口。persona 无原生字段,由下面的分隔前缀并入子代理首条 prompt。
+    const subagents = resolveSubagents(opts.ctx, "startActivation");
     if (subagents === undefined) {
       throw new Error("current dsh runtime does not support subagents");
     }
-    const start = subagents.start.bind(subagents);
+    const startActivation = subagents.startActivation.bind(subagents);
 
     if (opts.ctx.huaanworkAgentRequest) {
       opts.ctx.huaanworkAgentRequest.current = {
@@ -218,16 +213,24 @@ export async function dispatchAt(opts: {
     }
 
     const prompt = opts.remainder.trim() || item.description || "开始协助工作。";
+    const promptWithPersona = `${persona}\n\n---\n用户请求：\n${prompt}`;
+    let activation: SubagentActivationHandle;
     try {
-      // 探针 3 已核实签名 start(provider, request)，persona 为原生字段；
-      // provider 固定 "spawn"（进程内 spawn provider）；parent 在 start 前解析为当前会话 agent，
-      // 保证 cwd/取消链归属正确（不再依赖 list()[0] 猜测）
+      // startActivation 要求 parent 是 ctx.agents 里的同一个活动 Agent 对象,
+      // 缺省时不能猜 list()[0]。
       const parent = opts.resolveParent ? await opts.resolveParent() : undefined;
-      await start("spawn", {
-        prompt: [{ type: "text", text: prompt }],
-        persona,
-        ...(parent ? { parent } : {}),
+      if (parent === undefined || parent === null) {
+        throw new Error(`智能体「${opts.name}」无法开始：当前会话没有可用的父会话`);
+      }
+      activation = await startActivation({
+        provider: "spawn",
+        label: `@${opts.name}`,
+        request: {
+          prompt: [{ type: "text", text: promptWithPersona }],
+          parent,
+        },
         signal: new AbortController().signal,
+        delivery: "parent",
       });
     } catch (err) {
       if (opts.ctx.huaanworkAgentRequest) {
@@ -239,6 +242,17 @@ export async function dispatchAt(opts: {
     return {
       text: prompt,
       afterIdle: async () => {
+        // 子会话可能比父回合的空闲点活得久;等待有上限,结果与释放的失败都不外抛。
+        try {
+          await settleWithin(activation.result, ACTIVATION_CLEANUP_TIMEOUT_MS);
+        } catch {
+          // activation.result 的拒绝已在 settleWithin 内折叠,这里只兜同步抛错的实现。
+        }
+        try {
+          await settleWithin(activation.dispose(), ACTIVATION_CLEANUP_TIMEOUT_MS);
+        } catch {
+          // 释放是尽力而为:同步抛错的 dispose 不能阻止 holder 清理。
+        }
         if (opts.ctx.huaanworkAgentRequest) {
           opts.ctx.huaanworkAgentRequest.current = undefined;
         }

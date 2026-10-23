@@ -1713,8 +1713,18 @@ describe('@slug package dispatch', () => {
   })
 })
 
-describe('@agent legacy dispatch subagents resolution', () => {
-  function legacyAgentHost(): never {
+describe('@agent legacy dispatch', () => {
+  const LEGACY_PERSONA = '你是旧目录助手'
+
+  type LegacyActivationSpec = {
+    provider: string
+    label: string
+    request: { prompt: Array<{ type: string; text: string }>; parent?: unknown }
+    signal?: AbortSignal
+    delivery: string
+  }
+
+  function legacyAgentHost(allow?: unknown): never {
     return {
       list: () => ({
         items: [
@@ -1729,55 +1739,115 @@ describe('@agent legacy dispatch subagents resolution', () => {
           },
         ],
       }),
-      get: async () => ({ persona: '你是旧目录助手' }),
+      get: async () => ({ persona: LEGACY_PERSONA, ...(allow === undefined ? {} : { allow }) }),
     } as never
   }
 
-  test('starts the spawn subagent through ctx.get when the context has no direct property', async () => {
-    const startCalls: Array<{ provider: string; request: Record<string, unknown> }> = []
-    const ctx = {
-      get: (name: string) =>
-        name === 'subagents'
-          ? {
-              start: async (provider: string, request: Record<string, unknown>) => {
-                startCalls.push({ provider, request })
-                return { localAgent: { id: 'child', session: { id: 'child' } } }
-              },
-            }
-          : undefined,
+  /** 真组合形状:skills.ts 包装挂在 ctx.subagents,dispatchAt 经同一属性解析。 */
+  function legacySkillsHarness(options: {
+    childNames: string[]
+    childSessionId?: string
+    activationResult?: Promise<unknown>
+  }) {
+    const childSessionId = options.childSessionId ?? 'legacy-child'
+    const allSchemas = options.childNames.map((name) => ({ name }))
+    const childTools = {
+      visible: [...allSchemas],
+      schemas() {
+        return childTools.visible
+      },
+      restrict({ allow }: { allow: readonly string[] }) {
+        childTools.visible = allSchemas.filter((schema) => allow.includes(schema.name))
+        return () => undefined
+      },
+      guard() {
+        return () => undefined
+      },
     }
+    const childAgent = {
+      id: childSessionId,
+      session: { id: childSessionId, header: { id: childSessionId, parentSession: 'parent-session' } },
+      ctx: { get: (name: string) => (name === 'tools' ? childTools : undefined) },
+    }
+    const activationSpecs: LegacyActivationSpec[] = []
+    const disposals: number[] = []
+    const maps = emptyAttachments()
+    const ctx: Record<string, unknown> = {
+      skills: { register: () => () => undefined },
+      on: () => undefined,
+      agents: { get: (id: string) => (id === childSessionId ? childAgent : undefined) },
+      huaanworkAttachments: maps,
+      huaanworkAgentRequest: { current: undefined as unknown },
+      subagents: {
+        startActivation: async (spec: LegacyActivationSpec) => {
+          activationSpecs.push(spec)
+          return {
+            childId: childSessionId,
+            result: options.activationResult ?? Promise.resolve({ ok: true }),
+            dispose: async () => {
+              disposals.push(1)
+            },
+          }
+        },
+      },
+    }
+    applySkills(ctx as never)
+    return { ctx, childTools, maps, activationSpecs, disposals }
+  }
+
+  test('starts spawn through startActivation and restricts the child to the filtered allow list', async () => {
+    const h = legacySkillsHarness({ childNames: ['read', 'bash', 'glob', 'agent_http'] })
+    const parent = { id: 'parent-agent', session: { id: 'parent-session' } }
 
     const dispatched = await dispatchAt({
-      host: legacyAgentHost(),
-      ctx: ctx as never,
-      sessionId: 'session-a',
+      host: legacyAgentHost(['read', 'bash', 'call_host_tool', 'mcp__legacy__echo', 'missing_tool']),
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
       name: 'legacy-assistant',
       remainder: '整理本周进展',
+      resolveParent: async () => parent,
     })
 
-    expect(startCalls).toHaveLength(1)
-    expect(startCalls[0]?.provider).toBe('spawn')
-    expect(startCalls[0]?.request.persona).toBe('你是旧目录助手')
+    expect(h.activationSpecs).toHaveLength(1)
+    const spec = h.activationSpecs[0]!
+    expect(spec.provider).toBe('spawn')
+    expect(spec.label).toBe('@legacy-assistant')
+    expect(spec.delivery).toBe('parent')
+    expect(spec.request.parent).toBe(parent)
+    expect(spec.signal).toBeInstanceOf(AbortSignal)
+    // rc.1 没有 persona 字段:人设作为带分隔的前缀,用户请求原样保留在后。
+    expect(spec.request.prompt).toEqual([
+      { type: 'text', text: `${LEGACY_PERSONA}\n\n---\n用户请求：\n整理本周进展` },
+    ])
+    // filterAgentAllow 去掉 call_host_tool 与 mcp__*;包装再与子会话 schemas 求交。
+    expect(h.childTools.visible.map((schema) => schema.name)).toEqual(['read', 'bash'])
+    // legacy 分支不得挂智能体包工具或登记包运行时。
+    expect(h.maps.sessionAgentTools.size).toBe(0)
     expect(dispatched.text).toBe('整理本周进展')
+    // 包装在 activation 返回后立即清空 legacy 容器,afterIdle 再清一次是幂等的。
+    const holder = h.ctx.huaanworkAgentRequest as { current: unknown }
+    expect(holder.current).toBeUndefined()
     await dispatched.afterIdle()
+    expect(holder.current).toBeUndefined()
+    expect(h.disposals).toEqual([1])
   })
 
-  test('a direct object with only startActivation does not shadow a registered start', async () => {
-    const startCalls: Array<{ provider: string; request: Record<string, unknown> }> = []
-    const activationCalls: unknown[] = []
+  test('a direct object with only start does not shadow a registered startActivation', async () => {
+    const startCalls: unknown[] = []
+    const activationSpecs: LegacyActivationSpec[] = []
     const ctx = {
       subagents: {
-        startActivation: async (spec: unknown) => {
-          activationCalls.push(spec)
-          return { childId: 'child', result: Promise.resolve({}), dispose: async () => undefined }
+        start: async (...args: unknown[]) => {
+          startCalls.push(args)
+          return { localAgent: { id: 'child', session: { id: 'child' } } }
         },
       },
       get: (name: string) =>
         name === 'subagents'
           ? {
-              start: async (provider: string, request: Record<string, unknown>) => {
-                startCalls.push({ provider, request })
-                return { localAgent: { id: 'child', session: { id: 'child' } } }
+              startActivation: async (spec: LegacyActivationSpec) => {
+                activationSpecs.push(spec)
+                return { childId: 'child', result: Promise.resolve({}), dispose: async () => undefined }
               },
             }
           : undefined,
@@ -1789,24 +1859,80 @@ describe('@agent legacy dispatch subagents resolution', () => {
       sessionId: 'session-a',
       name: 'legacy-assistant',
       remainder: '整理本周进展',
+      resolveParent: async () => ({ id: 'parent-agent' }),
     })
 
-    // 直接属性只有新入口时,legacy 分支必须回落到全局服务上的 start。
-    expect(startCalls).toHaveLength(1)
-    expect(startCalls[0]?.provider).toBe('spawn')
-    expect(activationCalls).toEqual([])
+    // 直接属性只有旧签名时,legacy 分支必须回落到全局服务上的 startActivation。
+    expect(activationSpecs).toHaveLength(1)
+    expect(activationSpecs[0]?.provider).toBe('spawn')
+    expect(startCalls).toEqual([])
     await dispatched.afterIdle()
   })
 
-  test('rejects when neither the property nor the registered service provides start', async () => {
+  test('rejects when neither the property nor the registered service provides startActivation', async () => {
+    const holder = { current: undefined as unknown }
     await expect(
       dispatchAt({
         host: legacyAgentHost(),
-        ctx: { get: () => undefined } as never,
+        ctx: {
+          huaanworkAgentRequest: holder,
+          subagents: {
+            // rc.1 之前的旧服务面:只有 start。
+            start: async () => ({}),
+          },
+          get: () => undefined,
+        } as never,
         sessionId: 'session-a',
         name: 'legacy-assistant',
         remainder: 'x',
       }),
     ).rejects.toThrow('current dsh runtime does not support subagents')
+    expect(holder.current).toBeUndefined()
+  })
+
+  test('requires a live parent before starting an activation', async () => {
+    const h = legacySkillsHarness({ childNames: ['read'] })
+    const holder = h.ctx.huaanworkAgentRequest as { current: unknown }
+
+    for (const resolveParent of [undefined, async () => undefined]) {
+      await expect(
+        dispatchAt({
+          host: legacyAgentHost(),
+          ctx: h.ctx as never,
+          sessionId: 'parent-session',
+          name: 'legacy-assistant',
+          remainder: '整理本周进展',
+          ...(resolveParent === undefined ? {} : { resolveParent }),
+        }),
+      ).rejects.toThrow(/当前会话没有可用的父会话/)
+    }
+
+    expect(h.activationSpecs).toEqual([])
+    expect(holder.current).toBeUndefined()
+  })
+
+  test('afterIdle captures a failed child result, disposes, and clears the holder', async () => {
+    const h = legacySkillsHarness({
+      childNames: ['read'],
+      // Reject after dispatch returns so afterIdle is the observer of the failure.
+      activationResult: new Promise((_resolve, reject) => {
+        setImmediate(() => reject(new Error('child failed')))
+      }),
+    })
+    const holder = h.ctx.huaanworkAgentRequest as { current: unknown }
+
+    const dispatched = await dispatchAt({
+      host: legacyAgentHost(),
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      name: 'legacy-assistant',
+      remainder: '整理本周进展',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+    expect(holder.current).toBeUndefined()
+
+    await expect(dispatched.afterIdle()).resolves.toBeUndefined()
+    expect(h.disposals).toEqual([1])
+    expect(holder.current).toBeUndefined()
   })
 })

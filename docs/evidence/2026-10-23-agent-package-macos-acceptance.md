@@ -57,10 +57,13 @@ agents-state.json
 
 - **catalog-legacy 实机运行**：公用机目录 `10.130.209.76:18080` 在验收时超时，广场显示目录错误；legacy 兼容由
   `agent-package-legacy.spec.ts` 覆盖，未做真实目录实机验收。
-- **legacy `@agent` 兼容（rc.1 已知破损，非阻断）**：`agent-invoke.ts` 的 agent 分支仍调用 rc.1 已删除的
-  `subagents.start(provider, request)`，在 rc.1 上必然报 `current dsh runtime does not support subagents`；只有智能体包
-  `@slug` 路径迁移到了 `startActivation`。工具 / HTTP / MCP 分支不受影响。按 2026-10-23 验收修复裁定本轮不迁移，
-  已登记到根 `AGENTS.md` Known tech debt（触发条件 = 下一轮 legacy 智能体兼容 wave）；代码注释指向该行。
+- **legacy `@agent` 兼容（已迁移，待实机复验）**：`agent-invoke.ts` 的 agent 分支已从 rc.1 已删除的
+  `subagents.start(provider, request)` 迁移到 `startActivation`（`provider:'spawn'`、live parent、label、
+  `delivery:'parent'`；rc.1 无 persona 字段，人设作为分隔前缀并入子代理首条 prompt）。`skills.ts` 的
+  `startActivation` 包装按目录条目的 allow 与子会话 schemas 求交后 `restrict`，legacy 分支不挂智能体包工具或
+  注册表。单元测试（`agent-package-tools.spec.ts` 的 `@agent legacy dispatch`）覆盖这些行为，根 `AGENTS.md` 的
+  不可用债行已删除；**尚未做真实目录实机复验**，将在 catalog-legacy fixture 上执行，本轮不声称实机通过。
+  工具 / HTTP / MCP 分支不受影响。
 - **子代理清理上限 10 分钟**：`afterIdle` 等子会话落定的上限是 `600_000` ms。父回合的 `whenIdle` 可能先于长子会话
   到达（HTTP/MCP 回合本来就会跑过父回合空闲点），原 10 s 会把仍在工作的子代理截断。超时后宿主记一条错误、释放
   activation（发布后的取消归 `dispose()`，不再 abort 发布前 signal）并照常停止子进程；`agent-package-tools.spec.ts`
@@ -131,7 +134,7 @@ MCP server 由运行时拉起到 `127.0.0.1:53182`，子会话拿到回显 `{"he
 
 - catalog-legacy 实机（目录不可达）
 - Windows 真机
-- legacy `@agent` rc.1 兼容（已登记债）
+- legacy `@agent` 已迁移到 `startActivation`，待 catalog-legacy fixture 实机复验（§5）
 - 根 `check` 最终树复跑
 
 测试包 `http-echo`/`mcp-echo`、`agents-state.json`、测试会话与任务条目已清理/隔离；MCP/HTTP 测试进程已停止。
