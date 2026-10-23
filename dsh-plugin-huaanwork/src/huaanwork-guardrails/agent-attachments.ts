@@ -9,6 +9,25 @@ export type AttachmentMaps = {
  */
 export const AGENT_PACKAGE_CHILD_TOOLS = ["agent_http", "agent_skill_run"] as const;
 
+/**
+ * 一次包回合要挂到子会话的工具名:允许名单启用的运行时工具 + 挂载返回的 MCP 名。
+ *
+ * `host.ts` 在 activation 之前按预留子会话 id 预先挂载,`skills.ts` 的包装在
+ * activation 之后按子会话 id 再挂一次;两处必须算出同一份名单,否则安全网要么补上
+ * 本回合未开放的工具,要么漏掉首条请求已需要的 MCP 名。
+ *
+ * @param allow - `composeAgentPackageToolAllowList` 的结果
+ * @param mcpNames - MCP 挂载返回的工具名
+ * @returns 去重后的挂载名单
+ */
+export function agentPackageChildAttachmentNames(
+  allow: readonly string[],
+  mcpNames: readonly string[] = [],
+): string[] {
+  const enabled = AGENT_PACKAGE_CHILD_TOOLS.filter((name) => allow.includes(name))
+  return [...new Set<string>([...enabled, ...mcpNames])]
+}
+
 export function emptyAttachments(): AttachmentMaps {
   return {
     sessionHostTools: new Map(),

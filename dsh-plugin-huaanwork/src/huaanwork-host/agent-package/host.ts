@@ -1,4 +1,15 @@
-import { AGENT_PACKAGE_CHILD_TOOLS, detachAgentTools, type AttachmentMaps } from '../../huaanwork-guardrails/agent-attachments.ts'
+import { randomUUID } from 'node:crypto'
+
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+
+import {
+  AGENT_PACKAGE_CHILD_TOOLS,
+  agentPackageChildAttachmentNames,
+  attachAgentTools,
+  detachAgentTools,
+  type AttachmentMaps,
+} from '../../huaanwork-guardrails/agent-attachments.ts'
 import { mountSessionMcp } from '../../huaanwork-guardrails/agent-mcp.ts'
 import { refreshAgentRestrict } from '../../huaanwork-guardrails/present-as.ts'
 import type { AgentListItem } from '../../client-huaanwork/rpc-types.ts'
@@ -402,14 +413,23 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         }
 
         const allow = composeAgentPackageToolAllowList(manifest, mcpNames, runtime.skillScripts)
-        request = { allow, persona, runtime, parentSessionId: sessionId, bindChild }
-        registry.bind(sessionId, runtime)
-
         const prompt = input.remainder.trim() || pkg.description || '开始协助工作。'
         const parent = input.resolveParent === undefined ? undefined : await input.resolveParent()
         if (parent === undefined || parent === null) {
           throw new Error(`智能体「${pkg.slug}」无法开始：当前会话没有可用的父会话`)
         }
+        // 子代理的首条模型请求在 `skills.ts` 的 activation 包装运行之前就已组装工具清单,
+        // 所以预留子会话 id、按它预先挂载并先登记运行时;包装在 activation 之后做同批
+        // 挂载只是幂等安全网。预留 id 进 request 与 activation spec,provider 必须沿用。
+        const reservedChildId: SessionId = brandString<SessionId>(randomUUID())
+        const childToolNames = agentPackageChildAttachmentNames(allow, mcpNames)
+        if (ctx.huaanworkAttachments !== undefined && childToolNames.length > 0) {
+          attachAgentTools(ctx.huaanworkAttachments, reservedChildId, childToolNames)
+        }
+        bindChild(reservedChildId)
+        request = { allow, persona, runtime, parentSessionId: sessionId, childId: reservedChildId, bindChild }
+        registry.bind(sessionId, runtime)
+
         // Publish the request synchronously before the call: the skills wrapper reads it
         // before its first await, so no sibling activation can claim this turn's request.
         if (ctx.huaanworkAgentPackageRequest !== undefined) {
@@ -418,6 +438,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         activation = await startActivation({
           provider: 'spawn',
           label: `@${pkg.slug}`,
+          // 预留 id 让首条请求就带上包工具;spawn 后端支持续接故接受该字段。
+          childId: reservedChildId,
           request: {
             // rc.1 的 SubagentStartRequest 没有 persona 字段:人设作为带分隔的前缀
             // 并入子代理的首条用户消息,用户请求原样保留在后。
@@ -429,8 +451,13 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           delivery: 'parent',
         })
         // The registry binding must exist before the child can call agent_http/agent_skill_run.
-        if (typeof activation.childId === 'string' && activation.childId.length > 0) {
-          bindChild(activation.childId)
+        const activationChildId = activation.childId
+        if (typeof activationChildId === 'string' && activationChildId.length > 0) {
+          if (activationChildId !== reservedChildId && ctx.huaanworkAttachments !== undefined && childToolNames.length > 0) {
+            // provider 忽略预留 id 时,同一批名字也要挂在它实际分配的 id 上。
+            attachAgentTools(ctx.huaanworkAttachments, activationChildId, childToolNames)
+          }
+          bindChild(activationChildId)
         }
         return { text: prompt, afterIdle: cleanup }
       } catch (error) {

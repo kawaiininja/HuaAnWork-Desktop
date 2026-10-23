@@ -971,6 +971,57 @@ describe('skills.ts package activation', () => {
     expect(harnessed.ctx.huaanworkAgentPackageRequest.current).toBeNull()
   })
 
+  test('re-attaches to the activation child id without duplicating a host pre-attachment', async () => {
+    const harnessed = skillsRuntimePackage({
+      allow: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
+      childNames: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
+    })
+    const request = harnessed.ctx.huaanworkAgentPackageRequest as {
+      current: { childId?: string } | null
+    }
+    // host 已经按预留 id 预先挂载并登记运行时,activation 沿用同一个 id。
+    request.current!.childId = 'child'
+    attachAgentTools(harnessed.maps, 'child', [
+      AGENT_HTTP_TOOL,
+      AGENT_SKILL_RUN_TOOL,
+      'mcp__weekly-report__echo',
+    ])
+
+    applySkills(harnessed.ctx as never)
+    await (harnessed.ctx.subagents.startActivation as (spec: unknown) => Promise<unknown>)({
+      ...activationSpec,
+      childId: 'child',
+    })
+
+    // 安全网重复挂同一批名字不产生重复条目,也不重复绑定同一个子会话。
+    expect([...(harnessed.maps.sessionAgentTools.get('child') ?? [])].sort()).toEqual(
+      [AGENT_HTTP_TOOL, AGENT_SKILL_RUN_TOOL, 'mcp__weekly-report__echo'].sort(),
+    )
+    expect(harnessed.bindCalls).toEqual(['child'])
+  })
+
+  test('binds the reserved child id when the provider returns a different one', async () => {
+    const harnessed = skillsRuntimePackage({
+      allow: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
+      childNames: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
+    })
+    const request = harnessed.ctx.huaanworkAgentPackageRequest as {
+      current: { childId?: string } | null
+    }
+    request.current!.childId = 'reserved-child'
+
+    applySkills(harnessed.ctx as never)
+    await (harnessed.ctx.subagents.startActivation as (spec: unknown) => Promise<unknown>)({
+      ...activationSpec,
+      childId: 'reserved-child',
+    })
+
+    // 实际子会话拿到包工具;预留 id 也保留登记,回合清理按两者都能找到运行时。
+    expect(isAgentToolAttached(harnessed.maps, 'child', AGENT_HTTP_TOOL)).toBe(true)
+    expect(isAgentToolAttached(harnessed.maps, 'reserved-child', AGENT_HTTP_TOOL)).toBe(false)
+    expect(harnessed.bindCalls).toEqual(['child', 'reserved-child'])
+  })
+
   test('leaves an activation started by another session untouched', async () => {
     const harnessed = skillsRuntimePackage({
       allow: ['read', 'agent_http', 'agent_skill_run', 'mcp__weekly-report__echo'],
@@ -1020,6 +1071,7 @@ describe('skills.ts package activation', () => {
 type ActivationSpec = {
   provider: string
   label: string
+  childId?: string
   request: { prompt: Array<{ type: string; text: string }>; parent?: unknown; [key: string]: unknown }
   signal?: AbortSignal
   delivery: string
@@ -1087,8 +1139,9 @@ function dispatchHarness(options: {
     subagents: {
       startActivation: async (spec: ActivationSpec) => {
         activationCalls.push(spec)
+        // 真实的 spawn 后端沿用预留 id;只有个别 provider 会另分配一个。
         return {
-          childId: 'child',
+          childId: spec.childId ?? 'child',
           result: activationResult,
           dispose: async () => {
             activationDisposals.push(1)
@@ -1209,7 +1262,7 @@ describe('@slug package dispatch', () => {
     expect(childPrompt.endsWith('写一份周报')).toBe(true)
 
     const holder = h.ctx.huaanworkAgentPackageRequest as {
-      current: { allow: string[]; parentSessionId: string; bindChild(id: string): void } | null
+      current: { allow: string[]; parentSessionId: string; childId: string; bindChild(id: string): void } | null
     }
     expect(holder.current).not.toBeNull()
     // agent_http 来自 http 工具模式,agent_skill_run 来自运行时枚举的脚本;MCP 名来自 mount。
@@ -1223,15 +1276,19 @@ describe('@slug package dispatch', () => {
     // 发现阶段挂到父会话的 MCP 名必须在 dispatch 返回前摘掉;它们只属于包子会话。
     expect(isAgentToolAttached(h.maps, 'parent-session', 'mcp__weekly-report__echo')).toBe(false)
 
-    // host 已按 activation.childId 绑定运行时;skills.ts 另行把工具与 MCP 名挂到子会话。
-    expect(h.registry.get('child')).toBe(h.runtime)
-    attachAgentTools(h.maps, 'child', [
-      AGENT_HTTP_TOOL,
-      AGENT_SKILL_RUN_TOOL,
-      'mcp__weekly-report__echo',
-    ])
-    holder.current?.bindChild('child')
-    expect(isAgentToolAttached(h.maps, 'child', 'mcp__weekly-report__echo')).toBe(true)
+    // 预留 id 同时写进 activation spec 与 request;host 在 activation 之前就按它挂好
+    // 包工具、MCP 名并登记运行时,子代理的首条请求因此不会缺工具。
+    const childId = spec.childId
+    expect(childId).toBeTruthy()
+    expect(holder.current?.childId).toBe(childId)
+    expect(h.registry.get(childId!)).toBe(h.runtime)
+    expect(isAgentToolAttached(h.maps, childId!, AGENT_HTTP_TOOL)).toBe(true)
+    expect(isAgentToolAttached(h.maps, childId!, AGENT_SKILL_RUN_TOOL)).toBe(true)
+    expect(isAgentToolAttached(h.maps, childId!, 'mcp__weekly-report__echo')).toBe(true)
+    // skills.ts 的安全网再挂一次不产生重复:附件按名字存进 Set。
+    attachAgentTools(h.maps, childId!, [AGENT_HTTP_TOOL, 'mcp__weekly-report__echo'])
+    holder.current?.bindChild(childId!)
+    expect(h.maps.sessionAgentTools.get(childId!)?.size).toBe(3)
 
     const idle = dispatched.afterIdle()
     await new Promise((resolve) => setImmediate(resolve))
@@ -1245,7 +1302,7 @@ describe('@slug package dispatch', () => {
     expect(h.stopped).toEqual([h.runtime])
     expect(h.activationDisposals).toEqual([1])
     expect(h.registry.get('parent-session')).toBeUndefined()
-    expect(h.registry.get('child')).toBeUndefined()
+    expect(h.registry.get(childId!)).toBeUndefined()
     expect(holder.current).toBeNull()
     expect(h.mcpDisposes).toEqual([1])
 
@@ -1256,7 +1313,89 @@ describe('@slug package dispatch', () => {
     expect(h.mcpDisposes).toEqual([1])
     // 子会话的运行时工具与 MCP 名也随回合卸载,并重算 present-as。
     expect(h.maps.sessionAgentTools.size).toBe(0)
-    expect(h.restrictSessions).toContain('child')
+    expect(h.restrictSessions).toContain(childId!)
+  })
+
+  test('attaches the package tools to the reserved child id before startActivation runs', async () => {
+    const h = dispatchHarness()
+    const pkg = await h.host.findInvocable('weekly-report')
+    const observed: Array<{ childId?: string; attached: string[]; bound: boolean }> = []
+    ;(h.ctx.subagents as { startActivation: unknown }).startActivation = async (spec: ActivationSpec) => {
+      const childId = spec.childId ?? ''
+      observed.push({
+        ...(spec.childId === undefined ? {} : { childId: spec.childId }),
+        attached: [...(h.maps.sessionAgentTools.get(childId) ?? [])],
+        bound: h.registry.get(childId) === h.runtime,
+      })
+      return { childId, result: Promise.resolve({}), dispose: async () => undefined }
+    }
+
+    const dispatched = await h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+
+    // 子代理的首条请求在包装运行前组装,所以 activation 被调用的那一刻工具必须已经在位。
+    expect(observed).toHaveLength(1)
+    const seen = observed[0]!
+    expect(seen.childId).toBeTruthy()
+    expect(seen.attached).toEqual(
+      expect.arrayContaining([AGENT_HTTP_TOOL, AGENT_SKILL_RUN_TOOL, 'mcp__weekly-report__echo']),
+    )
+    expect(seen.bound).toBe(true)
+
+    await dispatched.afterIdle()
+    expect(h.maps.sessionAgentTools.has(seen.childId!)).toBe(false)
+    expect(h.registry.get(seen.childId!)).toBeUndefined()
+  })
+
+  test('a failed activation detaches the reserved id and releases the session reservation', async () => {
+    const h = dispatchHarness()
+    const pkg = await h.host.findInvocable('weekly-report')
+    const holder = h.ctx.huaanworkAgentPackageRequest as { current: unknown }
+    let reservedChildId: string | undefined
+    ;(h.ctx.subagents as { startActivation: unknown }).startActivation = async (spec: ActivationSpec) => {
+      reservedChildId = spec.childId
+      throw new Error('spawn failed')
+    }
+
+    await expect(
+      h.host.dispatch({
+        ctx: h.ctx as never,
+        sessionId: 'parent-session',
+        pkg: pkg!,
+        remainder: '写周报',
+        resolveParent: async () => ({ id: 'parent-agent' }),
+      }),
+    ).rejects.toThrow('spawn failed')
+
+    expect(reservedChildId).toBeTruthy()
+    expect(h.maps.sessionAgentTools.has(reservedChildId!)).toBe(false)
+    expect(h.registry.get(reservedChildId!)).toBeUndefined()
+    expect(h.registry.get('parent-session')).toBeUndefined()
+    expect(holder.current).toBeNull()
+
+    // 会话预留已释放:同一会话可以立即重试,并且重试拿到新的预留 id。
+    let retriedChildId: string | undefined
+    ;(h.ctx.subagents as { startActivation: unknown }).startActivation = async (spec: ActivationSpec) => {
+      retriedChildId = spec.childId
+      return { childId: spec.childId ?? 'child', result: Promise.resolve({}), dispose: async () => undefined }
+    }
+    const retried = await h.host.dispatch({
+      ctx: h.ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '重试',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+    expect(retriedChildId).toBeTruthy()
+    expect(retriedChildId).not.toBe(reservedChildId)
+    expect(h.registry.get(retriedChildId!)).toBe(h.runtime)
+    await retried.afterIdle()
+    expect(h.maps.sessionAgentTools.has(retriedChildId!)).toBe(false)
   })
 
   test('findInvocable still returns disabled and broken packages; dispatch rejects them', async () => {

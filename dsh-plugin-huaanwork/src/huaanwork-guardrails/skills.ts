@@ -5,7 +5,12 @@ import { fileURLToPath } from "node:url";
 
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
 import { currentCallerSession, forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
-import { AGENT_PACKAGE_CHILD_TOOLS, attachAgentTools, type AttachmentMaps } from "./agent-attachments.ts";
+import {
+  AGENT_PACKAGE_CHILD_TOOLS,
+  agentPackageChildAttachmentNames,
+  attachAgentTools,
+  type AttachmentMaps,
+} from "./agent-attachments.ts";
 import { refreshAgentRestrict } from "./present-as.ts";
 import type { AgentPackageSubagentRequest } from "../huaanwork-host/agent-package/types.ts";
 
@@ -310,18 +315,26 @@ export function apply(ctx: Context): void {
           const childSessionId = sessionIdOf(run.childId) ?? sessionIdOf(run.localAgent);
           if (childSessionId) {
             if (ctx.huaanworkAttachments) {
+              // host 已按预留子会话 id 预先挂载,这里按 activation 实际返回的 id 再挂一次
+              // 是幂等安全网(provider 忽略预留 id 时也要覆盖到)。
               // MCP 名字在挂载时先落在父会话上(健康检查要求先拿到工具名),发现后由
               // host 从父会话摘掉;子会话要执行 mcp__* 仍需自己的附件,否则 policy 的
               // attached 判定会拒绝。
-              attachAgentTools(ctx.huaanworkAttachments, childSessionId, [
-                ...AGENT_PACKAGE_CHILD_TOOLS,
-                ...(pkg.runtime.mcpNames ?? []),
-              ]);
+              attachAgentTools(
+                ctx.huaanworkAttachments,
+                childSessionId,
+                agentPackageChildAttachmentNames(pkg.allow, pkg.runtime.mcpNames ?? []),
+              );
             }
             // 绑定必须与附件同批完成,且先于 refreshAgentRestrict:present-as 只在附件里
             // 找非 ALLOWED_TOOLS 的名字,晚挂会让它先前算出的 restrict 继续遮住 mcp__*。
             pkg.bindChild(childSessionId);
             refreshAgentRestrict(ctx as never, childSessionId);
+          }
+          // 预留 id 与 activation 返回的 id 一致时 host 已经绑定;只有 provider 另分配
+          // 了 id(或没回传 id)才补绑,避免同一子会话被重复登记。
+          if (pkg.childId && pkg.childId !== childSessionId) {
+            pkg.bindChild(pkg.childId);
           }
           const childAgent =
             (childSessionId === undefined ? undefined : ctx.agents?.get?.(childSessionId)) ?? run.localAgent;
