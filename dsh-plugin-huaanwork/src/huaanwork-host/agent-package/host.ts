@@ -1,4 +1,4 @@
-import { detachAgentTools, type AttachmentMaps } from '../../huaanwork-guardrails/agent-attachments.ts'
+import { AGENT_PACKAGE_CHILD_TOOLS, detachAgentTools, type AttachmentMaps } from '../../huaanwork-guardrails/agent-attachments.ts'
 import { mountSessionMcp } from '../../huaanwork-guardrails/agent-mcp.ts'
 import { refreshAgentRestrict } from '../../huaanwork-guardrails/present-as.ts'
 import type { AgentListItem } from '../../client-huaanwork/rpc-types.ts'
@@ -313,7 +313,9 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           if (current !== undefined) {
             // A late afterIdle must not delete a newer turn's binding for the same session.
             if (registry.get(sessionId) === current) registry.delete(sessionId)
-            const childNames = [...new Set([...(request?.allow ?? []), ...(current.mcpNames ?? [])])]
+            // Detach exactly what `skills.ts` attached to each child; `request.allow`
+            // omits tools the package does not enable, so it cannot mirror the attachment.
+            const childNames = [...new Set([...AGENT_PACKAGE_CHILD_TOOLS, ...(current.mcpNames ?? [])])]
             for (const childSessionId of boundChildren) {
               if (registry.get(childSessionId) === current) registry.delete(childSessionId)
               if (ctx.huaanworkAttachments !== undefined) {

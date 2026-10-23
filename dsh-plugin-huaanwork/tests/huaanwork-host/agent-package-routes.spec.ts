@@ -116,6 +116,8 @@ function fakeAgentsHost(items: AgentListItem[], details: AgentDetail[] = []): Fa
     },
     setEnabled: (name, enabled, confirmPermissions) => {
       setEnabledCalls.push({ name, enabled, confirmPermissions })
+      // Mirrors `agents-host.ts`: enabling a catalog entry requires disclosure.
+      if (enabled && !confirmPermissions) throw new Error('启用智能体必须确认权限')
     },
     addEndpoint: () => ({ ok: true }),
     removeEndpoint: () => {},
@@ -260,13 +262,24 @@ describe('agent.packageSetEnabled', () => {
   })
 
   test('legacy 条目写目录启用表(confirmPermissions=true)并发 agent/changed', async () => {
-    await expect(callRoute('agent.packageSetEnabled', { body: { slug: LEGACY_AGENT, enabled: false } }))
-      .resolves.toEqual({ ok: true })
+    await expect(
+      callRoute('agent.packageSetEnabled', { body: { slug: LEGACY_AGENT, enabled: false, confirmPermissions: true } }),
+    ).resolves.toEqual({ ok: true })
 
     expect(legacy.setEnabledCalls).toEqual([
       { name: LEGACY_AGENT, enabled: false, confirmPermissions: true },
     ])
     expect(emitted).toEqual([{ event: 'agent/changed', slug: LEGACY_AGENT }])
+  })
+
+  test('legacy 启用缺少 confirmPermissions ⇒ 400 且不发事件', async () => {
+    await expect(callRoute('agent.packageSetEnabled', { body: { slug: LEGACY_DISABLED_AGENT, enabled: true } }))
+      .rejects.toMatchObject({ status: 400, code: 'store-error', message: '启用智能体必须确认权限' })
+
+    expect(legacy.setEnabledCalls).toEqual([
+      { name: LEGACY_DISABLED_AGENT, enabled: true, confirmPermissions: false },
+    ])
+    expect(emitted).toEqual([])
   })
 
   test('损坏的本地包 ⇒ 400 store-error 且不发事件(不回退 legacy 分支)', async () => {
@@ -282,6 +295,24 @@ describe('agent.packageSetEnabled', () => {
     await expect(callRoute('agent.packageSetEnabled', { body: ['nope'] }))
       .rejects.toMatchObject({ status: 400, code: 'bad-request' })
     expect(emitted).toEqual([])
+  })
+})
+
+describe('agent.addEndpoint', () => {
+  test('拒绝与现有智能体包重名的本地工具(否则 @ 永远命中包)', async () => {
+    await expect(
+      callRoute('agent.addEndpoint', {
+        body: {
+          name: LOCAL_ENABLED,
+          kind: 'tool',
+          entrypoint: { kind: 'http', url: 'http://192.168.1.2:9/invoke' },
+        },
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: 'bad-request',
+      message: `智能体 @${LOCAL_ENABLED} 与现有智能体包重名，请换一个名称`,
+    })
   })
 })
 

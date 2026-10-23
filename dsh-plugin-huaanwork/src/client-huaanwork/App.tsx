@@ -1033,33 +1033,7 @@ export default function App() {
         staleIdleRef.current = consumed.stale;
         if (consumed.drop) return;
       }
-          // 智能体包事件：会话内提示、结构化创建确认卡，以及列表刷新信号（面板与 @ 补全共用）。
-          if (event.event === "agent/notice") {
-            noteTab(liveChatRef.current, event.text);
-            return;
-          }
-          if (event.event === "agent/confirm") {
-            setChatTabs((prev) =>
-              prev.map((tab) =>
-                tab.id === liveChatRef.current
-                  ? { ...tab, items: [...tab.items, { id: allocId(), kind: "agent-confirm" as const, card: event.card }] }
-                  : tab,
-              ),
-            );
-            return;
-          }
-          if (event.event === "agent/changed") {
-            setAgentChangeSignal((prev) => prev + 1);
-            void rpcCall<{ items: AgentListItem[] }>("agent.invocableList")
-              .then((res) => {
-                if (!cancelled) setAtCatalog(Array.isArray(res.items) ? res.items : []);
-              })
-              .catch(() => {
-                // 目录暂不可读时保留旧补全数据
-              });
-            return;
-          }
-          // 后台任务事件：更新任务运行角标并刷新数据；agent 运行另建运行对话标签承载过程与结果。
+      // 后台任务事件：更新任务运行角标并刷新数据；agent 运行另建运行对话标签承载过程与结果。
           if (event.event === "automation/run-start") {
             automationActiveRef.current = true;
             setRunningRuns((prev) => {
@@ -1159,6 +1133,33 @@ export default function App() {
           // 用户自身会话（huaanwork-chat- / huaanwork-<digest>）与绑定运行标签的事件照常渲染，
           // 并发 Chat 回合不再被全局布尔误伤（「运行中看直播」的路由前提）。
           if (automationActiveRef.current && !isUserSessionId(eventSessionId) && !boundTab) return;
+      // 智能体包事件：会话内提示、结构化创建确认卡，以及列表刷新信号（面板与 @ 补全共用）。
+      // 放在自动化会话泄漏门之后，自动化会话的 agent 事件不会写进可见对话标签。
+      if (event.event === "agent/notice") {
+        noteTab(liveChatRef.current, event.text);
+        return;
+      }
+      if (event.event === "agent/confirm") {
+        setChatTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === liveChatRef.current
+              ? { ...tab, items: [...tab.items, { id: allocId(), kind: "agent-confirm" as const, card: event.card }] }
+              : tab,
+          ),
+        );
+        return;
+      }
+      if (event.event === "agent/changed") {
+        setAgentChangeSignal((prev) => prev + 1);
+        void rpcCall<{ items: AgentListItem[] }>("agent.invocableList")
+          .then((res) => {
+            if (!cancelled) setAtCatalog(Array.isArray(res.items) ? res.items : []);
+          })
+          .catch(() => {
+            // 目录暂不可读时保留旧补全数据
+          });
+        return;
+      }
           const endsTrackedTurn = event.event === "session/end"
             && typeof eventSessionId === "string"
             && eventSessionId.length > 0

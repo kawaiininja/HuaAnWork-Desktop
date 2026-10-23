@@ -483,6 +483,11 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
         throw new RouteError(400, 'bad-request', 'agent.addEndpoint requires object body')
       }
+      const name = (req.body as Record<string, unknown>).name
+      // 包在 `@` 分流里先于本地工具命中:同名工具会永远不可达,写路径直接拒绝。
+      if (typeof name === 'string' && name && getAgentPackageHost()?.listLocal().some((pkg) => pkg.slug === name)) {
+        throw new RouteError(400, 'bad-request', `智能体 @${name} 与现有智能体包重名，请换一个名称`)
+      }
       return getAgentsDirectory().addEndpoint(req.body as Parameters<ReturnType<typeof getAgentsDirectory>['addEndpoint']>[0])
     }),
   }, // Task 2 (M4)
@@ -534,7 +539,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       if (host.listLocal().some((pkg) => pkg.slug === slug)) {
         host.setEnabled(slug, enabled)
       } else {
-        getAgentsDirectory().setEnabled(slug, enabled, true)
+        getAgentsDirectory().setEnabled(slug, enabled, body.confirmPermissions === true)
       }
       // 两条分支都只在写入成功后发事件:客户端据此刷新列表。
       ctx.emit({ event: 'agent/changed', slug })

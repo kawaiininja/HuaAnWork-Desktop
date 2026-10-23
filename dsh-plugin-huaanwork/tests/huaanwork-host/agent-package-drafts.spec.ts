@@ -124,6 +124,7 @@ describe('propose and commit', () => {
     )
     expect(proposed.card.toolLabel).toBe('不要')
     expect(proposed.card.tools).toBe('none')
+    expect(proposed.card.mode).toBe('create')
     expect(existsSync(draftPath(root, 'session-1'))).toBe(true)
     // 草稿目录以点开头,不得出现在包列表里。
     expect(listLocalAgentPackages(root)).toEqual([])
@@ -556,6 +557,29 @@ describe('update mode', () => {
     )
     expect(readAgentPackageState(root)['local:weekly-report']?.enabled).toBe(true)
     expect(existsSync(draftPath(root, 'session-update'))).toBe(false)
+  })
+
+  test('an update renders the update title and keeps the enabled-state hint', async () => {
+    const root = makeRoot()
+    const created = await proposeAgentPackage(root, 'session-update-card-create', createProposal(), [])
+    if (!created.ok) throw new Error('propose failed')
+    const committed = await commitAgentPackage(root, 'session-update-card-create', created.draftId, '可以', [])
+    expect(committed.ok).toBe(true)
+
+    const proposed = await proposeAgentPackage(
+      root,
+      'session-update-card',
+      { mode: 'update', slug: 'weekly-report', description: '把一周工作整理成一页周报' },
+      [],
+    )
+    expect(proposed.ok).toBe(true)
+    if (!proposed.ok) return
+
+    expect(proposed.card.mode).toBe('update')
+    expect(proposed.cardText.split('\n')[0]).toBe('请确认是否更新这名智能体：')
+    expect(proposed.cardText).toContain('回复「可以」更新（启用状态保持不变，版本号 patch+1）；回复「取消」放弃。')
+    expect(proposed.cardText).not.toContain('请确认是否创建这名智能体')
+    expect(proposed.cardText).not.toContain('（默认关闭）')
   })
 
   test('an update rewrites a script body byte-for-byte', async () => {

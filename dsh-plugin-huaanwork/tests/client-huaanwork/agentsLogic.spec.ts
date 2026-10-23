@@ -3,6 +3,7 @@ import { test } from "vitest";
 
 import {
   AGENT_NAME_RE,
+  AGENT_TABS,
   atAgents,
   atTokenAt,
   catalogFormErrors,
@@ -11,7 +12,6 @@ import {
   looksLikeLanUrl,
   parseAtInvoke,
   type AgentListItem,
-  type AgentTab,
 } from "../../src/client-huaanwork/logic/agentsLogic.ts";
 
 // 与 packages/policy/src/network.test.ts 的 LAN_URL_FIXTURES 保持逐字一致
@@ -210,6 +210,12 @@ test("endpointFormErrors validates description and argumentsSchema", () => {
 });
 
 test("AgentTab names the three package tabs", () => {
-  const tabs: AgentTab[] = ["plaza", "mine", "tools"];
-  assert.deepEqual(tabs, ["plaza", "mine", "tools"]);
+  assert.deepEqual(
+    AGENT_TABS.map((tab) => tab.label),
+    ["智能体广场", "我的智能体", "我的工具包"],
+  );
+  assert.deepEqual(
+    AGENT_TABS.map((tab) => tab.id),
+    ["plaza", "mine", "tools"],
+  );
 });

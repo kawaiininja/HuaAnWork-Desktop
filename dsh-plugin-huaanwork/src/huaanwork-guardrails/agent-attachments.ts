@@ -3,6 +3,12 @@ export type AttachmentMaps = {
   sessionAgentTools: Map<string, Set<string>>;
 };
 
+/**
+ * 每个智能体包子会话都会挂上的宿主工具;MCP 名字由调用方另加。
+ * `skills.ts` 用这份字面清单挂载,`host.ts` 的回合清理用同一份摘除。
+ */
+export const AGENT_PACKAGE_CHILD_TOOLS = ["agent_http", "agent_skill_run"] as const;
+
 export function emptyAttachments(): AttachmentMaps {
   return {
     sessionHostTools: new Map(),

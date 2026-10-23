@@ -8,6 +8,7 @@ import AgentConfirmCard from "../../src/client-huaanwork/AgentConfirmCard.tsx";
 import type { AgentPackageConfirmCard } from "../../src/client-huaanwork/rpc-types.ts";
 
 const CARD: AgentPackageConfirmCard = {
+  mode: "create",
   displayName: "周报助手",
   slug: "weekly-report",
   description: "每周汇总项目进展",
@@ -22,13 +23,13 @@ const CARD: AgentPackageConfirmCard = {
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
-async function mount(): Promise<HTMLDivElement> {
+async function mount(card: AgentPackageConfirmCard = CARD): Promise<HTMLDivElement> {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
   await act(async () => {
-    root!.render(createElement(AgentConfirmCard, { card: CARD }));
+    root!.render(createElement(AgentConfirmCard, { card }));
   });
   return container;
 }
@@ -66,5 +67,17 @@ describe("AgentConfirmCard", () => {
     const view = await mount();
 
     expect(view.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("更新草稿显示更新标题与保留启用态的提示", async () => {
+    const view = await mount({
+      ...CARD,
+      mode: "update",
+      consentHint: "回复「可以」更新（启用状态保持不变，版本号 patch+1）；回复「取消」放弃。",
+    });
+
+    expect(view.textContent).toContain("请确认是否更新这名智能体");
+    expect(view.textContent).not.toContain("请确认是否创建这名智能体");
+    expect(view.textContent).toContain("回复「可以」更新（启用状态保持不变，版本号 patch+1）；回复「取消」放弃。");
   });
 });

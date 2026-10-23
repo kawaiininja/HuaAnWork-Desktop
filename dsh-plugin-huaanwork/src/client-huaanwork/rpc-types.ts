@@ -272,6 +272,7 @@ export type SessionDetailRecord =
  * `AgentPackageConfirmCard` 一致;客户端不从 host 导入。
  */
 export type AgentPackageConfirmCard = {
+  mode: "create" | "update";
   displayName: string;
   slug: string;
   description: string;

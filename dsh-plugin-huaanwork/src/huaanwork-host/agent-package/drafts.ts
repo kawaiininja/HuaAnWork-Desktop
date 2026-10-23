@@ -72,7 +72,8 @@ const TOOL_LABELS: Record<AgentPackageToolsMode, string> = {
 }
 
 const SANDBOX_WARNING = '脚本将在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。'
-const CONSENT_HINT = '回复「可以」创建（默认关闭）；回复「取消」放弃。'
+const CONSENT_HINT_CREATE = '回复「可以」创建（默认关闭）；回复「取消」放弃。'
+const CONSENT_HINT_UPDATE = '回复「可以」更新（启用状态保持不变，版本号 patch+1）；回复「取消」放弃。'
 const NO_SKILL_SUMMARY = '无专属技能包'
 
 export type AgentPackageFieldError = { field: string; message: string }
@@ -228,7 +229,10 @@ export async function commitAgentPackage(
   if (alreadyCommitted !== undefined) {
     const stale = loadAgentPackageDraft(profileDir, sessionId)
     if (stale?.draftId === draftId) removeDraft(profileDir, sessionId)
-    const card = cardForStoredPackage(alreadyCommitted.manifest, alreadyCommitted.detail)
+    // A retried commit normally finds its draft gone; host-created packages start at
+    // 1.0.0, so a later version can only come from an update.
+    const mode = stale?.mode ?? (alreadyCommitted.manifest.version === INITIAL_VERSION ? 'create' : 'update')
+    const card = cardForStoredPackage(alreadyCommitted.manifest, alreadyCommitted.detail, mode)
     return {
       ok: true,
       draftId,
@@ -743,6 +747,7 @@ function renderConfirmCard(draft: AgentPackageDraft): {
   cardText: string
 } {
   const card: AgentPackageConfirmCard = {
+    mode: draft.mode,
     displayName: draft.displayName,
     slug: draft.slug,
     description: draft.description,
@@ -751,14 +756,14 @@ function renderConfirmCard(draft: AgentPackageDraft): {
     tools: draft.tools,
     toolLabel: TOOL_LABELS[draft.tools],
     warning: SANDBOX_WARNING,
-    consentHint: CONSENT_HINT,
+    consentHint: draft.mode === 'update' ? CONSENT_HINT_UPDATE : CONSENT_HINT_CREATE,
   }
   return { card, cardText: renderCardText(card) }
 }
 
 function renderCardText(card: AgentPackageConfirmCard): string {
   return [
-    '请确认是否创建这名智能体：',
+    card.mode === 'update' ? '请确认是否更新这名智能体：' : '请确认是否创建这名智能体：',
     `显示名：${card.displayName}`,
     `@标识：${card.slug}`,
     `能力简介：${card.description}`,
@@ -773,8 +778,10 @@ function renderCardText(card: AgentPackageConfirmCard): string {
 function cardForStoredPackage(
   manifest: AgentPackageManifest,
   detail: AgentPackageDetail | undefined,
+  mode: 'create' | 'update',
 ): AgentPackageConfirmCard {
   return {
+    mode,
     displayName: manifest.displayName,
     slug: manifest.slug,
     description: manifest.description,
@@ -783,7 +790,7 @@ function cardForStoredPackage(
     tools: manifest.tools.mode,
     toolLabel: TOOL_LABELS[manifest.tools.mode],
     warning: SANDBOX_WARNING,
-    consentHint: CONSENT_HINT,
+    consentHint: mode === 'update' ? CONSENT_HINT_UPDATE : CONSENT_HINT_CREATE,
   }
 }
 

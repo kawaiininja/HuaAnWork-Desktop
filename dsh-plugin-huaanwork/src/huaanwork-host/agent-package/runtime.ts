@@ -94,9 +94,14 @@ export function createAgentPackageRuntimeRegistry(): AgentPackageRuntimeRegistry
 /**
  * Compose the persona handed to the package subagent.
  *
- * Reads `persona.md`, the `skill/SKILL.md` body (frontmatter stripped), and each
- * `allowSkills` body, then ends with the package's absolute directory. Missing
- * files or unreadable skills throw errors that name the package slug.
+ * Reads `persona.md`, the `skill/SKILL.md` body (frontmatter stripped), each
+ * `allowSkills` body, and a `## 工具` section that tells the model which declared
+ * skill scripts and which HTTP `argumentsSchema` the package exposes. The global
+ * `agent_skill_run` / `agent_http` tools carry static descriptions, so this
+ * section is the model's only per-package capability declaration.
+ *
+ * Missing files or unreadable skills throw errors that name the package slug.
+ * The combined text, including the `## 工具` section, is capped at 64 KiB.
  *
  * @param packageDir - package root containing persona.md and skill/
  * @param manifest - parsed agent.json
@@ -125,6 +130,14 @@ export async function composeAgentPackagePersona(
     }
     sections.push(`## 技能：${name}\n\n${content.trim()}`)
   }
+
+  const scripts = listAgentPackageSkillScripts(packageDir)
+  const toolLines = [`技能脚本：${scripts.length > 0 ? scripts.join('、') : '无'}`]
+  const argumentsSchema = manifest.tools.http?.argumentsSchema
+  if (argumentsSchema !== undefined) {
+    toolLines.push(`HTTP 参数 Schema：${JSON.stringify(argumentsSchema)}`)
+  }
+  sections.push(`## 工具\n\n${toolLines.join('\n')}`)
 
   sections.push(`智能体包目录：${resolve(packageDir)}`)
   const persona = sections.join('\n\n')
@@ -183,7 +196,7 @@ export async function startAgentPackageProcesses(
   options: StartAgentPackageProcessesOptions,
 ): Promise<AgentPackageTurnRuntime> {
   const { manifest, packageDir, workspaceRoot, getSandbox, mountMcp, signal } = options
-  const skillScripts = listSkillScripts(packageDir)
+  const skillScripts = listAgentPackageSkillScripts(packageDir)
   const mode = manifest.tools.mode
   const wantsHttp = mode === 'http' || mode === 'both'
   const wantsMcp = mode === 'mcp' || mode === 'both'
@@ -621,7 +634,17 @@ async function findFreeLoopbackPort(): Promise<number> {
   })
 }
 
-function listSkillScripts(packageDir: string): string[] {
+/**
+ * Enumerate the package's declared skill scripts (`skill/scripts/**`).
+ *
+ * This is the single declaration read by both the turn runtime (`skillScripts`,
+ * `agent_skill_run`) and the composed persona, so the model-visible script list
+ * cannot drift from what the tool accepts.
+ *
+ * @param packageDir - package root containing skill/
+ * @returns sorted `skill/scripts/...` paths; empty when the directory is absent
+ */
+export function listAgentPackageSkillScripts(packageDir: string): string[] {
   const scriptsRoot = join(packageDir, 'skill', 'scripts')
   const scripts: string[] = []
   const walk = (relativeDir: string): void => {

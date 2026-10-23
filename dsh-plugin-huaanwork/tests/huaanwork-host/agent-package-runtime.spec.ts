@@ -2,14 +2,20 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { parseAgentPackageManifest } from '../../src/huaanwork-host/agent-package/manifest.ts'
 import { createAgentPackageHost } from '../../src/huaanwork-host/agent-package/host.ts'
 import {
+  AGENT_PACKAGE_CHILD_TOOLS,
+  attachAgentTools,
+  emptyAttachments,
+} from '../../src/huaanwork-guardrails/agent-attachments.ts'
+import {
   composeAgentPackagePersona,
   composeAgentPackageToolAllowList,
   createAgentPackageRuntimeRegistry,
+  listAgentPackageSkillScripts,
   startAgentPackageProcesses,
   stopAgentPackageProcesses,
   stopAllAgentPackageProcesses,
@@ -181,6 +187,44 @@ describe('agent package persona', () => {
     const persona = await composeAgentPackagePersona(FIXTURE_DIR, { ...loadManifest(), allowSkills: ['report-style'] }, profileDir)
     expect(persona).toContain('内置技能正文:使用条目式。')
     expect(persona.trimEnd().endsWith(FIXTURE_DIR)).toBe(true)
+  })
+
+  test('declares skill scripts and the HTTP arguments schema before the package directory', async () => {
+    const manifest: AgentPackageManifest = {
+      ...loadManifest(),
+      tools: {
+        mode: 'http',
+        http: {
+          entry: 'tools/http/server.mjs',
+          argumentsSchema: {
+            type: 'object',
+            properties: { topic: { type: 'string' } },
+            required: ['topic'],
+          },
+        },
+      },
+    }
+    const persona = await composeAgentPackagePersona(FIXTURE_DIR, manifest, makeRoot('agent-package-profile-'))
+
+    expect(persona).toContain('## 工具')
+    expect(persona).toContain(`技能脚本：${listAgentPackageSkillScripts(FIXTURE_DIR).join('、')}`)
+    expect(persona).toContain(
+      'HTTP 参数 Schema：{"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}',
+    )
+    expect(persona.indexOf('## 工具')).toBeLessThan(persona.lastIndexOf('智能体包目录：'))
+  })
+
+  test('marks a package without scripts as 无 and omits an absent schema', async () => {
+    const packageDir = copyFixture()
+    rmSync(join(packageDir, 'skill', 'scripts'), { recursive: true, force: true })
+    const persona = await composeAgentPackagePersona(
+      packageDir,
+      { ...manifestWithMode('none'), skill: null },
+      makeRoot('agent-package-profile-'),
+    )
+
+    expect(persona).toContain('技能脚本：无')
+    expect(persona).not.toContain('HTTP 参数 Schema：')
   })
 
   test('names the slug when an allowed skill is missing', async () => {
@@ -652,6 +696,79 @@ describe('agent package turn cleanup', () => {
 
     await dispatched.afterIdle()
     await waitForPortClosed(port)
+  })
+
+  test('afterIdle detaches exactly the tools attached to the package child', async () => {
+    const profileDir = makeRoot('agent-package-profile-')
+    const packageDir = join(profileDir, 'agents', 'weekly-report')
+    mkdirSync(packageDir, { recursive: true })
+    writeFileSync(
+      join(packageDir, 'agent.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        slug: 'weekly-report',
+        displayName: '周报助手',
+        description: '把一周工作整理成周报',
+        version: '1.0.0',
+        draftId: 'draft-minimal',
+        createdAt: '2026-10-23T00:00:00.000Z',
+        updatedAt: '2026-10-23T00:00:00.000Z',
+        persona: 'persona.md',
+        skill: null,
+        tools: { mode: 'none' },
+        allowSkills: [],
+      }),
+      'utf8',
+    )
+    writeFileSync(join(packageDir, 'persona.md'), '你是周报助手。', 'utf8')
+    writeFileSync(
+      join(profileDir, 'agents-state.json'),
+      JSON.stringify({ 'local:weekly-report': { source: 'local', enabled: true, installedVersion: '1.0.0' } }),
+      'utf8',
+    )
+
+    const attachments = emptyAttachments()
+    const ctx = {
+      huaanworkAttachments: attachments,
+      huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
+      huaanworkAgentPackageRequest: { current: null },
+      subagents: { start: async () => ({ localAgent: { id: 'child', session: { id: 'child' } } }) },
+    }
+    const host = createAgentPackageHost({
+      profileDir,
+      takenSlugs: () => [],
+      createRuntime: async (options) => ({
+        slug: options.manifest.slug,
+        packageDir: options.packageDir,
+        workspaceRoot: options.workspaceRoot,
+        skillScripts: [],
+        runSkillScript: async () => ({ text: '' }),
+      }),
+    })
+    const pkg = await host.findInvocable('weekly-report')
+    const dispatched = await host.dispatch({
+      ctx: ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写周报',
+    })
+    // `skills.ts` attaches the package tools before binding the child.
+    const request = ctx.huaanworkAgentPackageRequest.current as {
+      runtime: { mcpNames?: string[] }
+      bindChild(sessionId: string): void
+    } | null
+    expect(request).not.toBeNull()
+    attachAgentTools(attachments, 'child', [...AGENT_PACKAGE_CHILD_TOOLS, ...(request!.runtime.mcpNames ?? [])])
+    request!.bindChild('child')
+    expect(attachments.sessionAgentTools.get('child')).toEqual(new Set(AGENT_PACKAGE_CHILD_TOOLS))
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await dispatched.afterIdle()
+    } finally {
+      errorSpy.mockRestore()
+    }
+    expect(attachments.sessionAgentTools.has('child')).toBe(false)
   })
 
   test('refuses a package whose declared HTTP entry is missing', async () => {

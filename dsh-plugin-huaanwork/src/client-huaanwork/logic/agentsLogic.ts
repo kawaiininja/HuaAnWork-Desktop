@@ -246,3 +246,10 @@ export function endpointFormErrors(
 
 /** 智能体页三页签：广场 / 我的智能体 / 我的工具包。各页数据形状不同,过滤在面板内做。 */
 export type AgentTab = "plaza" | "mine" | "tools";
+
+/** 三页签的 id 与可见文案;`AgentsView` 只负责渲染与切换。 */
+export const AGENT_TABS: ReadonlyArray<{ id: AgentTab; label: string }> = [
+  { id: "plaza", label: "智能体广场" },
+  { id: "mine", label: "我的智能体" },
+  { id: "tools", label: "我的工具包" },
+];

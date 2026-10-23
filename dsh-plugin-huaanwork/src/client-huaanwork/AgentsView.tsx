@@ -1,18 +1,19 @@
 import { useEffect, useState } from "react";
 import { rpcCall } from "./api.ts";
-import { atAgents, catalogFormErrors, isAgentInvocable, type AgentDetail, type AgentTab } from "./logic/agentsLogic.ts";
+import {
+  AGENT_TABS,
+  atAgents,
+  catalogFormErrors,
+  isAgentInvocable,
+  type AgentDetail,
+  type AgentTab,
+} from "./logic/agentsLogic.ts";
 import AgentPackagesPanel from "./AgentPackagesPanel.tsx";
 import AgentsPlazaPanel from "./AgentsPlazaPanel.tsx";
 import AgentToolkitPanel from "./AgentToolkitPanel.tsx";
 
 export { atAgents, isAgentInvocable };
 export type { AgentDetail };
-
-const TABS: { id: AgentTab; label: string }[] = [
-  { id: "plaza", label: "智能体广场" },
-  { id: "mine", label: "我的智能体" },
-  { id: "tools", label: "我的工具包" },
-];
 
 /**
  * 智能体页外壳（Task 8）：页面头、公用机配置栏、搜索、三页签切换与刷新。
@@ -190,7 +191,7 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
           aria-label="搜索智能体"
           onChange={(event) => setSearch(event.target.value)}
         />
-        {TABS.map((item) => (
+        {AGENT_TABS.map((item) => (
           <button
             key={item.id}
             type="button"

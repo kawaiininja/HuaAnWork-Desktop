@@ -104,7 +104,7 @@ M1 **不包含**发布、签名、下载、安装、广场更新、下架、撤�
 | 单个技能脚本 | ≤256 KiB |
 | HTTP / MCP 入口文件 | 各 ≤256 KiB |
 | 整包 | manifest + persona + skill + 脚本 + 工具入口合计 ≤5 MiB |
-| 合并人设 | persona + SKILL.md + `allowSkills` 正文合并 ≤64 KiB（propose 时拒绝） |
+| 合并人设 | persona + SKILL.md + `allowSkills` 正文 + `## 工具` 段合计 ≤64 KiB（propose 校验前三项；合成时连工具段一起计数，超限拒绝运行） |
 | 脚本路径 | `^[A-Za-z0-9._/-]+$`，不含 `..`、不以 `/` 开头、不允许符号链接；必须位于 `skill/scripts/` |
 | `tools.mode` | `none` / `http` / `mcp` / `both`；选中项必须有入口文件，未选中项不得有文件 |
 | `argumentsSchema` | 可选；序列化后 ≤1024 字符 |
@@ -129,6 +129,12 @@ M1 **不包含**发布、签名、下载、安装、广场更新、下架、撤�
 - **读取包外文件不受限制；网络访问不受限制。** 包来源审查（M2）不是运行时隔离。
 - 沙箱不可用时 M1 **fail-closed**：报「当前系统无法启动沙箱，智能体未运行」，不会无沙箱运行。
 - Windows 上沙箱自报 `enforcement:partial` 是已接受事实；真机验收必须记录该值及读/网络观察（§11 Step 5）。
+
+能力声明与人设：
+
+- `agent_http` 与 `agent_skill_run` 是**全局注册的工具**，工具描述固定、不带包级信息；模型靠合成人设里的 `## 工具` 段获知本包声明的技能脚本路径（`无` 表示没有脚本）与 HTTP `argumentsSchema`（未声明时省略该行）。
+- 该段与 persona、SKILL.md、`allowSkills` 正文一起计入 64 KiB 人设上限；合成后超限时该回合拒绝启动。
+- 工具段只是面向模型的声明：可执行范围仍由宿主按 `tools.mode` 与脚本声明拼出名单，再对子代理 `tools.restrict({ allow })`。
 
 ## 6. catalog-legacy 的含义
 

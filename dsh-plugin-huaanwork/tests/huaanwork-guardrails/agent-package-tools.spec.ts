@@ -44,6 +44,7 @@ const POLICY = (reason: string) => `huaanwork-policy: ${reason}`
 const FIXTURE_DIR = join(import.meta.dirname, '..', 'fixtures', 'agent-package')
 
 const CARD: AgentPackageConfirmCard = {
+  mode: 'create',
   displayName: '周报小助手',
   slug: 'weekly-report',
   description: '把一周工作整理成周报',

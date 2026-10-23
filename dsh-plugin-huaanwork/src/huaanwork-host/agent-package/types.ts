@@ -79,6 +79,7 @@ export type AgentPackageProposalInput = {
 }
 
 export type AgentPackageConfirmCard = {
+  mode: 'create' | 'update'
   displayName: string
   slug: string
   description: string

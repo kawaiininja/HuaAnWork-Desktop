@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
 import { currentCallerSession, forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
-import { attachAgentTools, type AttachmentMaps } from "./agent-attachments.ts";
+import { AGENT_PACKAGE_CHILD_TOOLS, attachAgentTools, type AttachmentMaps } from "./agent-attachments.ts";
 import { refreshAgentRestrict } from "./present-as.ts";
 import type { AgentPackageSubagentRequest } from "../huaanwork-host/agent-package/types.ts";
 
@@ -256,8 +256,7 @@ export function apply(ctx: Context): void {
               // host 从父会话摘掉;子会话要执行 mcp__* 仍需自己的附件,否则 policy 的
               // attached 判定会拒绝。
               attachAgentTools(ctx.huaanworkAttachments, childSessionId, [
-                "agent_http",
-                "agent_skill_run",
+                ...AGENT_PACKAGE_CHILD_TOOLS,
                 ...(pkg.runtime.mcpNames ?? []),
               ]);
             }
