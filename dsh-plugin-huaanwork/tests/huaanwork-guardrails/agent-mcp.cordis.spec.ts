@@ -438,3 +438,106 @@ test("7. an explicit mcpClientImpl option wins over the service and is never rea
 
   await res.dispose();
 });
+
+test("8. a plain-object context still reads the tools service from the tools property", async () => {
+  const ctx = {
+    tools: {
+      schemas: () => [
+        { name: "mcp__plain__ping" },
+        { name: "mcp__other__ping" },
+        { name: "read" },
+      ],
+    },
+  };
+  assert.equal("get" in ctx, false, "the direct property path must work without get");
+
+  const scopes: string[] = [];
+  const client = {
+    inject: ["tools"],
+    apply: async () => ({
+      dispose: async () => {
+        scopes.push("scope");
+      },
+    }),
+  };
+
+  const res = await mountSessionMcp({
+    ctx: ctx as any,
+    sessionId: "session-plain",
+    serverName: "plain",
+    url: "http://127.0.0.1:8765/mcp",
+    mcpClientImpl: client,
+  });
+
+  assert.deepEqual(res.names, ["mcp__plain__ping"], "only the server-prefixed tool is attached");
+
+  await res.dispose();
+  assert.deepEqual(scopes, ["scope"]);
+});
+
+test("9. a Cordis-like context whose tools property throws resolves the service through ctx.get", async () => {
+  const toolsService = {
+    schemas: () => [{ name: "mcp__guarded__ping" }, { name: "mcp__guarded__extra" }],
+  };
+  const ctx: { get(name: string): unknown } = {
+    get(name: string) {
+      return name === "tools" ? toolsService : undefined;
+    },
+  };
+  Object.defineProperty(ctx, "tools", {
+    get() {
+      throw new Error('cannot get property "tools" without inject');
+    },
+  });
+
+  const scopes: string[] = [];
+  const client = {
+    inject: ["tools"],
+    apply: async () => ({
+      dispose: async () => {
+        scopes.push("scope");
+      },
+    }),
+  };
+
+  const res = await mountSessionMcp({
+    ctx: ctx as any,
+    sessionId: "session-guarded",
+    serverName: "guarded",
+    url: "http://127.0.0.1:8765/mcp",
+    mcpClientImpl: client,
+  });
+
+  assert.deepEqual(res.names, ["mcp__guarded__ping", "mcp__guarded__extra"]);
+
+  await res.dispose();
+  assert.deepEqual(scopes, ["scope"]);
+});
+
+test("10. a context with neither tools nor get uses no schemas and still rejects empty tools", async () => {
+  const ctx = {};
+  assert.equal("tools" in ctx, false);
+  assert.equal("get" in ctx, false);
+
+  let disposed = false;
+  const client = {
+    inject: ["tools"],
+    apply: async () => ({
+      dispose: async () => {
+        disposed = true;
+      },
+    }),
+  };
+
+  await assert.rejects(
+    mountSessionMcp({
+      ctx: ctx as any,
+      sessionId: "session-no-tools",
+      serverName: "no-tools",
+      url: "http://127.0.0.1:8765/mcp",
+      mcpClientImpl: client,
+    }),
+    /MCP 服务「no-tools」未提供任何工具/,
+  );
+  assert.equal(disposed, true, "the mount scope is released when no tool name resolves");
+});

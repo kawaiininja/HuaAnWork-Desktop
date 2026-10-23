@@ -11,10 +11,14 @@ export function apply(_ctx: unknown): void {}
 /** The MCP client plugin surface `mountSessionMcp` mounts onto the session context. */
 export type McpClientImpl = { apply: Function; inject: string[] };
 
+/** The subset of the Cordis tools service `mountSessionMcp` reads. */
+export type ToolsService = { schemas?: Function };
+
 export type MountSessionMcpOptions = {
   ctx: {
     plugin?: Function;
-    tools: { schemas?: Function };
+    /** Present on plain-object test contexts; reading it on a Cordis Context may throw. */
+    tools?: ToolsService;
     huaanworkAttachments?: AttachmentMaps;
     /** Reads an optional Cordis service; hand-built test contexts may omit it. */
     get?: (name: string) => unknown;
@@ -54,6 +58,34 @@ function resolveMcpClient(opts: MountSessionMcpOptions): McpClientImpl {
 }
 
 /**
+ * Resolves the tools service: the `tools` property first, then `ctx.get("tools")`.
+ *
+ * The property read is kept for plain-object contexts and for contexts that
+ * declare `tools` in their injections. A Cordis Context without that
+ * declaration throws `cannot get property "tools" without inject`, so the read
+ * is guarded and the service is then taken from the global service store.
+ *
+ * @param ctx - Session context whose tools service is optional.
+ * @returns The tools service, or `undefined` when the context provides none.
+ */
+function resolveTools(ctx: MountSessionMcpOptions["ctx"]): ToolsService | undefined {
+  try {
+    if (ctx.tools) return ctx.tools;
+  } catch {
+    // An undeclared `tools` property throws on a Cordis Context; `ctx.get` below reads it.
+  }
+  if (typeof ctx.get === "function") {
+    try {
+      const service = ctx.get("tools");
+      if (typeof service === "object" && service !== null) return service as ToolsService;
+    } catch {
+      // An unregistered optional service may throw instead of returning undefined.
+    }
+  }
+  return undefined;
+}
+
+/**
  * Mounts one MCP server's tools for a session and attaches their names to it.
  *
  * @param opts - Session context, server address, and the optional client seam.
@@ -79,8 +111,9 @@ export async function mountSessionMcp(
     ? await opts.ctx.plugin({ inject: mcpInject, apply: (fiber: any) => mcpApply(fiber, config) })
     : await mcpApply(opts.ctx as any, config);
 
-  const schemas = (typeof opts.ctx.tools?.schemas === "function"
-    ? opts.ctx.tools.schemas()
+  const tools = resolveTools(opts.ctx);
+  const schemas = (typeof tools?.schemas === "function"
+    ? tools.schemas()
     : []) as Array<{ name?: string }>;
   const prefix = `mcp__${opts.serverName}__`;
   const names: string[] = [];
