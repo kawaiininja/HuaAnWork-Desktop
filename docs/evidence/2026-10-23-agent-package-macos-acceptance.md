@@ -54,8 +54,8 @@ agents-state.json
 
 ## 5. 未验收 / 阻断
 
-- **HTTP/MCP 实机运行**：HTTP 已在 §7 通过；MCP 只到“服务器拉起/挂载”，未捕获实机工具结果。MCP 空工具、
-  `agent_http`、MCP 客户端等仍有自动化测试与 Task 1 沙箱探针覆盖。
+- **HTTP/MCP 实机运行**：HTTP 已在 §7 通过；MCP 只验证到进程启动，挂载与工具暴露未获证据，且该回合落到非预期
+  工作区、归因未定（见 §7）。MCP 空工具、`agent_http`、MCP 客户端等仍有自动化测试与 Task 1 沙箱探针覆盖。
 - **catalog-legacy 实机运行**：公用机目录 `10.130.209.76:18080` 在验收时超时，广场显示目录错误；legacy 兼容由
   `agent-package-legacy.spec.ts` 覆盖，未做真实目录实机验收。
 - **legacy `@agent` 兼容（rc.1 已知破损，非阻断）**：`agent-invoke.ts` 的 agent 分支仍调用 rc.1 已删除的
@@ -91,12 +91,18 @@ agents-state.json
 
 宿主 `@` 回合在真实 UI 中显示该结果。HTTP 进程在回合结束后停止。
 
-### MCP 实机（PARTIAL）
+### MCP 实机（PARTIAL，未验证）
 
 创建 `mcp-echo`（`tools.mode: "mcp"`，fixture streamable-HTTP server，`echo` 工具）→ 启用 → `@mcp-echo`。
-运行时已拉起 MCP server（`node server.mjs`，cwd 为当前活动 workspace），说明 MCP 进程启动与挂载路径已实际执行；
-但该回合落到了非预期的活动项目/标签，UI 未捕获到 MCP 工具调用的最终结果，因此**不宣称 MCP 实机通过**。MCP
-客户端、空工具拒绝与策略路径由自动化测试覆盖。
+MCP 进程启动已验证；MCP 挂载与工具暴露未获证据 —— 进程拉起不能证明工具已挂到子会话，UI 也没有捕获到
+`echo` 工具的调用结果。
+
+该 `@mcp-echo` 回合落到了非预期的活动项目/标签：观测到的 MCP server cwd 是 `代码审查智能体` 项目，而 UI
+当时显示的是 `人机协作平台`。我们**未确定**这是操作者切换导航还是产品路由缺陷，因此记为**未验证**，不记为通过。
+MCP 客户端、空工具拒绝与策略路径由自动化测试覆盖。
+
+复现注记：新开单标签应用会话，先确认输入框的项目标签与 Host workspace 是同一个，再发送 `@mcp-echo` 并捕获
+MCP 工具结果。
 
 ### HTTP/MCP 验收新增修复
 

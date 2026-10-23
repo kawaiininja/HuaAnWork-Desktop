@@ -63,7 +63,7 @@ export type AgentPackageSubagentRequest = {
   /**
    * activation 之前预留的子会话 id。工具与运行时登记都按它预先完成,所以子代理的
    * 首条模型请求就已带上 `agent_http`/`agent_skill_run`/MCP 名;`skills.ts` 的包装
-   * 只在 activation 另分配了 id 时补绑,不重复绑定。
+   * 会对同一个 id 再绑一次,同一 id 的绑定幂等,provider 另分配 id 时则补绑那个 id。
    */
   childId: string
   bindChild(sessionId: string): void

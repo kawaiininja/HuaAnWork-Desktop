@@ -4,8 +4,9 @@ export type AttachmentMaps = {
 };
 
 /**
- * 每个智能体包子会话都会挂上的宿主工具;MCP 名字由调用方另加。
- * `skills.ts` 用这份字面清单挂载,`host.ts` 的回合清理用同一份摘除。
+ * 智能体包子会话的宿主工具:允许名单启用其中某个名字时才挂到子会话上,MCP 名字由调用方另加。
+ * 包回合的两个挂载点(`host.ts` 的预挂载与 `skills.ts` 的 activation 包装)都经
+ * `agentPackageChildAttachmentNames` 按允许名单算出名单。
  */
 export const AGENT_PACKAGE_CHILD_TOOLS = ["agent_http", "agent_skill_run"] as const;
 

@@ -30,7 +30,11 @@ export type SubagentsStart = (
 export type SubagentActivationSpec = {
   provider: string
   label: string
-  /** 预留子会话 id;只有本地后端接受,spawn 由 provider 自行分配。 */
+  /**
+   * 预留子会话 id:任何实现 `prepareContinuable` 的 provider 都接受(spawn 即实现),
+   * 服务按它创建子会话。Host 在 activation 之前就按这个 id 预挂载工具与运行时,
+   * 首条模型请求要看到它们就依赖该 id 被原样沿用。
+   */
   childId?: string
   request: {
     prompt: Array<{ type: string; text: string }>
