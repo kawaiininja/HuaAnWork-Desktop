@@ -90,7 +90,7 @@ stderr 诊断(一次完整运行的全部诊断行;EPERM 堆栈按行省略;仅�
 ```
 
 - 余下未验证面:restricted-token runner 下长驻服务的启动与监听、写边界、读与外网行为。预期真机跑完后把该 JSON 补进本文件即可闭环;探针尚未在 Windows 真机运行过,是否需要针对该 runner 调整以实测为准。
-- **2026-10-24 后续裁定:** 上面这一节保持为 2026-10-23 的历史记录(当时没有 Windows 机器,没有伪造 JSON)。Windows Step 5 的现行口径改为 GitHub Actions `windows-latest` 探针 `PASS（GHA Windows 探针）`,见 `docs/huaanwork-agent-packages-m1.md` §11 与 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。那次运行的 JSON 贴进新证据文件,不回写本文件的历史 BLOCKED。
+- **2026-10-24 后续裁定:** 上面这一节保持为 2026-10-23 的历史记录(当时没有 Windows 机器,没有伪造 JSON)。Windows Step 5 改为 GitHub Actions `windows-latest` 探针，绿跑记为 `PASS（GHA Windows 探针）`,见 `docs/huaanwork-agent-packages-m1.md` §11 与 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。那次运行的 JSON 贴进新证据文件,不回写本文件的历史 BLOCKED。
 
 ## 7. 探针自身失败路径的负向自检
 

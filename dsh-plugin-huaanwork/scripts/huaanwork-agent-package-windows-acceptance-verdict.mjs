@@ -84,6 +84,43 @@ export function parseCimProcessList(text) {
 }
 
 /**
+ * Host-exit scoring reads `residuals`. The report summary used to keep only
+ * `matches`, so a successful CIM query made `residuals` undefined and `.length`
+ * threw before the phase could be recorded. A missing or non-array list is empty.
+ *
+ * @param {object | null | undefined} query
+ * @returns {{ command: string, scanned: number | null, residuals: unknown[], matches: unknown[], error: string | null }}
+ */
+export function normalizeProcessQuery(query) {
+  const residuals = Array.isArray(query?.residuals)
+    ? query.residuals
+    : Array.isArray(query?.matches)
+      ? query.matches
+      : []
+  return {
+    command: typeof query?.command === 'string' && query.command.length > 0
+      ? query.command
+      : 'Get-CimInstance Win32_Process',
+    scanned: Number.isInteger(query?.scanned) ? query.scanned : null,
+    residuals,
+    matches: residuals,
+    error: typeof query?.error === 'string' ? query.error : null,
+  }
+}
+
+/**
+ * @param {object | null | undefined} query
+ * @returns {{ command: string, scanned: number | null, residuals: unknown[], matches: unknown[], error: string | null, dirty: boolean }}
+ */
+export function scoreHostExitQuery(query) {
+  const normalized = normalizeProcessQuery(query)
+  return {
+    ...normalized,
+    dirty: normalized.residuals.length > 0,
+  }
+}
+
+/**
  * @param {{ name: string, started: boolean, stopped: boolean, residuals?: unknown[], error?: string }} phase
  * @returns {{ hard: string[], blocked: string[] }}
  */

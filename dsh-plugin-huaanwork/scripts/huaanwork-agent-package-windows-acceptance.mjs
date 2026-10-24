@@ -33,7 +33,9 @@ import { fileURLToPath } from 'node:url'
 import {
   decideWindowsAcceptance,
   findResidualProcesses,
+  normalizeProcessQuery,
   parseCimProcessList,
+  scoreHostExitQuery,
 } from './huaanwork-agent-package-windows-acceptance-verdict.mjs'
 
 const FIXTURE_DIR = fileURLToPath(new URL('../tests/fixtures/agent-package', import.meta.url))
@@ -271,7 +273,7 @@ async function residualsFor(slug) {
 async function waitForResidualsClear(slug) {
   const deadline = Date.now() + RESIDUAL_GRACE_MS
   let query = await residualsFor(slug)
-  while (query.residuals.length > 0 && Date.now() < deadline) {
+  while ((query.residuals?.length ?? 0) > 0 && Date.now() < deadline) {
     await delay(500)
     query = await residualsFor(slug)
   }
@@ -426,11 +428,11 @@ async function runIdlePhase({ name, slug, mode }) {
       phase: {
         name,
         started: true,
-        stopped: portClosed && query.residuals.length === 0,
-        residuals: query.residuals,
+        stopped: portClosed && (query.residuals?.length ?? 0) === 0,
+        residuals: query.residuals ?? [],
         ...(portClosed ? {} : { error: `port ${String(port)} still open` }),
       },
-      detail: { ...detail, portClosed, processQuery: summarizeQuery(query) },
+      detail: { ...detail, portClosed, processQuery: normalizeProcessQuery(query) },
     }
   } catch (error) {
     if (dispatched !== undefined && !idleFinished) {
@@ -444,8 +446,8 @@ async function runIdlePhase({ name, slug, mode }) {
     let processQuery = null
     try {
       const query = await residualsFor(slug)
-      residuals = query.residuals
-      processQuery = summarizeQuery(query)
+      residuals = query.residuals ?? []
+      processQuery = normalizeProcessQuery(query)
     } catch (queryError) {
       processQuery = { error: errorText(queryError) }
     }
@@ -482,14 +484,6 @@ async function runIdlePhase({ name, slug, mode }) {
       }
     }
     removeRoot(dirs.root)
-  }
-}
-
-function summarizeQuery(query) {
-  return {
-    command: query.command,
-    scanned: query.scanned,
-    matches: query.residuals,
   }
 }
 
@@ -532,16 +526,16 @@ async function runHostExitPhase() {
     }
   }).filter((event) => event !== null)
   const ready = parsed.find((event) => event.event === 'ready')
-  let query = { command: 'Get-CimInstance Win32_Process', scanned: 0, residuals: [], error: null }
+  let query = normalizeProcessQuery({ command: 'Get-CimInstance Win32_Process', scanned: 0, residuals: [] })
   try {
-    const found = await waitForResidualsClear(slug)
-    query = { ...summarizeQuery(found), error: null }
+    query = normalizeProcessQuery(await waitForResidualsClear(slug))
   } catch (error) {
-    query = { ...query, error: errorText(error) }
+    query = normalizeProcessQuery({ ...query, error: errorText(error) })
   }
   const httpClosed = ready ? await waitForPortClosed(ready.httpPort) : true
   const mcpClosed = ready ? await waitForPortClosed(ready.mcpPort) : true
-  const dirty = query.residuals.length > 0 || !httpClosed || !mcpClosed
+  const scored = scoreHostExitQuery(query)
+  const dirty = scored.dirty || !httpClosed || !mcpClosed
   const childOk = result.code === 0 && ready !== undefined && result.signal !== 'SIGKILL'
   removeRoot(dirs.root)
   if (query.error && !dirty) {
@@ -589,7 +583,7 @@ async function runHostExitPhase() {
       name: 'hostExit',
       started: true,
       stopped: childOk && !dirty,
-      residuals: query.residuals,
+      residuals: scored.residuals,
       ...(!dirty && childOk ? {} : { error: `exit ${String(result.code)}; httpClosed=${String(httpClosed)}; mcpClosed=${String(mcpClosed)}` }),
     },
     detail: {

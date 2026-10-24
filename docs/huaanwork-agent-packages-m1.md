@@ -3,9 +3,10 @@
 > **状态：Windows `PASS（GHA Windows 探针）` — 无界面探针是 Step 5 的验收面；GUI 与真实模型交互为可选项。**
 >
 > - macOS 真机验收：`PASS（代理驱动实机验收）`。2026-10-24 裁定：Task 9 Step 4 采用代理驱动的真实 macOS 应用 + 真实模型证据，见 `docs/evidence/2026-10-23-agent-package-macos-acceptance.md`；真人交互复核列为可选/独立项，不再是 M1 阻断项。
-> - Windows：`PASS（GHA Windows 探针）`。2026-10-24 裁定：GitHub Actions `windows-latest` 上的 workflow **Windows agent package acceptance**（job `windows-agent-package-acceptance`）退出码 0，即满足 Step 5。覆盖沙箱 `enforcement:partial`、读/网络观察、HTTP/MCP 在 `afterIdle` 后停止，以及 Host 退出钩子跑完后 `Get-CimInstance Win32_Process` 不再有 `agents\<slug>\`。这不是 GUI 真机，也不覆盖访谈、确认卡或真实模型 `@slug`；那些保持可选，不阻断。
+> - Windows：`PASS（GHA Windows 探针）`。[run 40058507608](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40058507608) 在 `windows-latest` 上对 `7bd33a5162` 退出码 0。覆盖沙箱 `enforcement:partial`、读/网络观察、HTTP/MCP 在 `afterIdle` 后停止，以及 Host 退出钩子跑完后 `Get-CimInstance Win32_Process` 不再有 `agents\<slug>\`。这不是 GUI 真机，也不覆盖访谈、确认卡或真实模型 `@slug`；那些保持可选，不阻断。
+> - 更早的 [run 40057259357](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40057259357)（`81769a1b8d`，退出码 3）是探针在 `hostExit` 读空进程列表时崩溃，不是残留进程，也不覆盖这次 PASS。
 > - 该 job 只在 `workflow_dispatch` 时运行，不挂在每次 push/PR 的产品 CI 上。单元测试、typecheck、变体守卫和 `corepack yarn check` 仍只证明代码与装配。升成产品门禁的做法见 §11，且不得放宽现有门禁。
-> - 某一次运行的 URL、runner 与探针 JSON 记在 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。本口径在第一次 workflow_dispatch 之前没有 run URL；空 URL 不是「某一次运行已经通过」。
+> - 运行 URL 与探针结论记在 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。退出码不是 0 的运行不写成 PASS。
 >
 > 两项验收的可执行清单见 §11。验收记录模板见 §12。
 
@@ -323,10 +324,10 @@ node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-windows-acceptance.mjs
 - 任何偏离本 runbook 的现象。
 
 当前记录：macOS `PASS（代理驱动实机验收）`，证据见
-`docs/evidence/2026-10-23-agent-package-macos-acceptance.md`。Windows 验收口径为
-`PASS（GHA Windows 探针）`，证据模板见
-`docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。
-该模板在第一次 workflow_dispatch 之前没有 run URL。
+`docs/evidence/2026-10-23-agent-package-macos-acceptance.md`。Windows `PASS（GHA Windows 探针）`，
+绿跑 [run 40058507608](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40058507608)。
+失败尝试 [run 40057259357](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40057259357) 留在同一证据文件
+`docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。GUI 与真实模型交互仍为可选项。
 
 ## 13. 已知限制与差异
 

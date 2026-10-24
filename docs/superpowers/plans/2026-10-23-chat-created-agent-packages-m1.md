@@ -1017,7 +1017,7 @@ Expected: 全绿；`check:desktop-variants` 不新增白名单。若 `check` 的
 
 在 Windows 上重复 Step 4；记录 `enforcement:partial`、读/网络不隔离的观察、安装/退出后的进程清理；没有 Windows 真机则把 M1 标为 `BLOCKED`，不得宣布完成。
 
-2026-10-24 后续裁定：本步的验收面改为 workflow_dispatch 的 GHA Windows 探针，口径 `PASS（GHA Windows 探针）`。GUI 访谈、确认卡与真实模型 `@slug` 改为可选项。现行说明见 `docs/huaanwork-agent-packages-m1.md` §11。上面这段是计划原文。
+2026-10-24 后续裁定：本步的验收面改为 workflow_dispatch 的 GHA Windows 探针。绿跑记为 `PASS（GHA Windows 探针）`。GUI 访谈、确认卡与真实模型 `@slug` 改为可选项。现行说明见 `docs/huaanwork-agent-packages-m1.md` §11。上面这段是计划原文。
 
 - [ ] **Step 6: 写 runbook**
 
