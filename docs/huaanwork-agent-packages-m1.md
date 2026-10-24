@@ -1,11 +1,12 @@
 # 智能体包 M1 使用与排障（runbook）
 
-> **状态：Windows `PASS（GHA Windows 探针）` — 无界面探针是 Step 5 的验收面；GUI 与真实模型交互为可选项。**
+> **状态：Windows 探针已接线，第一次 GHA 运行未通过。job 退出码 0 之前不得记为 PASS。**
 >
 > - macOS 真机验收：`PASS（代理驱动实机验收）`。2026-10-24 裁定：Task 9 Step 4 采用代理驱动的真实 macOS 应用 + 真实模型证据，见 `docs/evidence/2026-10-23-agent-package-macos-acceptance.md`；真人交互复核列为可选/独立项，不再是 M1 阻断项。
-> - Windows：`PASS（GHA Windows 探针）`。2026-10-24 裁定：GitHub Actions `windows-latest` 上的 workflow **Windows agent package acceptance**（job `windows-agent-package-acceptance`）退出码 0，即满足 Step 5。覆盖沙箱 `enforcement:partial`、读/网络观察、HTTP/MCP 在 `afterIdle` 后停止，以及 Host 退出钩子跑完后 `Get-CimInstance Win32_Process` 不再有 `agents\<slug>\`。这不是 GUI 真机，也不覆盖访谈、确认卡或真实模型 `@slug`；那些保持可选，不阻断。
+> - Windows：绿跑之后的标签是 `PASS（GHA Windows 探针）`。GitHub Actions `windows-latest` 上的 workflow **Windows agent package acceptance**（job `windows-agent-package-acceptance`）退出码 0，才满足 Step 5。覆盖沙箱 `enforcement:partial`、读/网络观察、HTTP/MCP 在 `afterIdle` 后停止，以及 Host 退出钩子跑完后 `Get-CimInstance Win32_Process` 不再有 `agents\<slug>\`。这不是 GUI 真机，也不覆盖访谈、确认卡或真实模型 `@slug`；那些保持可选，不阻断。
+> - 2026-10-24 第一次 `workflow_dispatch` 未通过：[run 40057259357](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40057259357)，checkout `81769a1b8d`，退出码 3。沙箱事实与 HTTP/MCP `afterIdle` 通过。`hostExit` 在进程查询摘要只留下 `matches` 之后读取 `residuals.length`，探针崩溃，阶段记为未开始。这不是残留进程，也不是 PASS。
 > - 该 job 只在 `workflow_dispatch` 时运行，不挂在每次 push/PR 的产品 CI 上。单元测试、typecheck、变体守卫和 `corepack yarn check` 仍只证明代码与装配。升成产品门禁的做法见 §11，且不得放宽现有门禁。
-> - 某一次运行的 URL、runner 与探针 JSON 记在 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。本口径在第一次 workflow_dispatch 之前没有 run URL；空 URL 不是「某一次运行已经通过」。
+> - 运行 URL 与探针结论记在 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。退出码不是 0 的运行不写成 PASS。
 >
 > 两项验收的可执行清单见 §11。验收记录模板见 §12。
 
@@ -273,7 +274,7 @@ Get-ChildItem "$profileDir\agents" -Directory -Filter '.old-*' -ErrorAction Sile
 - [ ] 重启应用，确认卡片、启用态与版本仍存在。
 - [ ] 旧 catalog-legacy 条目在「我的智能体」可见且可关闭；关闭后 `agents-enabled.json` 的 `catalog:<name>` 键消失，`agents/<name>/` 仍不存在。
 
-### Step 5（Windows，`PASS（GHA Windows 探针）`；GUI 与真实模型可选）
+### Step 5（Windows，尚未 PASS；绿跑后记为 `PASS（GHA Windows 探针）`；GUI 与真实模型可选）
 
 硬失败面由 workflow **Windows agent package acceptance** 执行（`.github/workflows/windows-agent-package-acceptance.yml`）。它只在 `workflow_dispatch` 时运行。退出码 0 是本步通过；退出码 1 是观察与预期不符；退出码 3 是探针未能开始（BLOCKED，不能当成通过）；退出码 2 是用法错误（含在非 Windows 上把结果标成 win32）。
 
@@ -323,10 +324,9 @@ node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-windows-acceptance.mjs
 - 任何偏离本 runbook 的现象。
 
 当前记录：macOS `PASS（代理驱动实机验收）`，证据见
-`docs/evidence/2026-10-23-agent-package-macos-acceptance.md`。Windows 验收口径为
-`PASS（GHA Windows 探针）`，证据模板见
+`docs/evidence/2026-10-23-agent-package-macos-acceptance.md`。Windows 第一次 GHA
+dispatch 未通过（[run 40057259357](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40057259357)，退出码 3），不得记为 PASS。证据见
 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。
-该模板在第一次 workflow_dispatch 之前没有 run URL。
 
 ## 13. 已知限制与差异
 

@@ -1,8 +1,8 @@
 # 智能体包 M1 Windows GHA 探针证据
 
-验收口径：`PASS（GHA Windows 探针）`。
+绿跑之后的标签：`PASS（GHA Windows 探针）`。第一次 dispatch 未通过，当前不是 PASS。
 
-这是证据模板。第一次 `workflow_dispatch` 绿跑之后，把下面各节的占位换成该次运行的原文。退出码不是 0 的运行不要写成 PASS。本文件在创建时没有 run URL。
+退出码不是 0 的运行不要写成 PASS。下面先记这次失败，绿跑另起一节，不覆盖失败记录。
 
 PASS 的含义：job `windows-agent-package-acceptance` 退出码 0。它证明下面的硬失败项，不证明 GUI 真机。
 
@@ -20,6 +20,20 @@ PASS 的含义：job `windows-agent-package-acceptance` 退出码 0。它证明�
 4. 运行结束后下载 artifact `windows-agent-package-acceptance`，或从 job 日志复制探针 stdout 的那一行 JSON。
 
 本地不能代替这次运行。非 Windows 上执行 `--platform win32` 会退出码 2。
+
+## 失败记录：run 40057259357
+
+| 项 | 值 |
+| --- | --- |
+| 日期 | 2026-10-24 |
+| workflow run URL | https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40057259357 |
+| 结论 | 未通过。退出码 3，verdict `BLOCKED`。不是 `PASS（GHA Windows 探针）`。 |
+| commit | `81769a1b8d9a5bc3ee95c8d6c364bd6216f3d34e` |
+| 探针报告 | artifact `windows-agent-package-acceptance`。job 日志里的 blocker 是 `hostExit:Cannot read properties of undefined (reading 'length')`。 |
+
+通过的部分：沙箱探针退出码 0，`enforcement=partial`，`httpReady`、`writeDenied`、`readOutside`、`networkOutside` 均为 true。`httpAfterIdle` 与 `mcpAfterIdle` 均为 started+stopped，`residuals=[]`，端口关闭。
+
+失败的部分：`hostExit` 的 `started` 为 false。子进程日志打出 `host-exit child slug=win-exit-probe` 之后，父进程把 CIM 查询收成只含 `matches` 的摘要，再读 `residuals.length`。`residuals` 是 undefined，TypeError 被记成 fatal。HTTP/MCP 的空 `matches` 说明这不是残留进程。stderr 里重复的 `refreshAgentRestrict: restrict state not found` 不是这次退出码的原因。
 
 ## 如何把结果填进来
 
@@ -42,7 +56,7 @@ PASS 的含义：job `windows-agent-package-acceptance` 退出码 0。它证明�
 - `sandboxProbe.facts`（`enforcement`、`httpReady`、`writeDenied`、`readOutside`、`networkOutside`）
 - `phases` 里 `httpAfterIdle`、`mcpAfterIdle`、`hostExit` 的 `started` / `stopped` / `residuals`
 - `forceKill`（只是观察；`countsAsHardFail` 应为 false）
-- `details.hostExit.processQuery.command` 与 `matches`
+- `details.hostExit.processQuery.command`、`residuals` 与 `matches`
 
 进程查询是 `Get-CimInstance Win32_Process`。报告只收录命令行含 `agents\<slug>\` 或 `agents/<slug>/` 的行，外加扫描到的进程数。不要把 runner 上其他进程的命令行贴进仓库。
 

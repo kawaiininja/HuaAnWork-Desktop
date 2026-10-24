@@ -8,6 +8,7 @@ import {
   evaluateSandboxFacts,
   findResidualProcesses,
   parseCimProcessList,
+  scoreHostExitQuery,
 } from './huaanwork-agent-package-windows-acceptance-verdict.mjs'
 
 const passingFacts = {
@@ -122,6 +123,23 @@ test('fails when HTTP or MCP is still alive after idle cleanup', () => {
   })
   assert.equal(decision.exitCode, 1)
   assert.deepEqual(decision.hardFailures, ['httpAfterIdle:not-stopped', 'mcpAfterIdle:residuals:1'])
+})
+
+test('host-exit scoring treats a matches-only or empty process query as no residuals', () => {
+  const summarized = {
+    command: 'Get-CimInstance Win32_Process',
+    scanned: 80,
+    matches: [],
+  }
+  const clear = scoreHostExitQuery(summarized)
+  assert.equal(clear.dirty, false)
+  assert.deepEqual(clear.residuals, [])
+  assert.equal(clear.scanned, 80)
+  assert.equal(scoreHostExitQuery(null).dirty, false)
+  assert.equal(scoreHostExitQuery(undefined).dirty, false)
+  assert.equal(scoreHostExitQuery({ residuals: undefined, matches: undefined }).dirty, false)
+  assert.equal(scoreHostExitQuery({ matches: [{ processId: 7, commandLine: 'x' }] }).dirty, true)
+  assert.equal(scoreHostExitQuery({ residuals: [] }).residuals.length, 0)
 })
 
 test('fails when a normal host exit leaves an agents package process', () => {
