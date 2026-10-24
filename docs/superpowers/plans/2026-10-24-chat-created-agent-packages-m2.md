@@ -1187,7 +1187,7 @@ git commit -m "test: verify signed agent package lifecycle across platforms"
 
 实施补充的必要契约：admin 审查下载 `GET /v1/agent-packages/submissions/{id}/bundle`；admin submission metadata 带 `previousVersion/previousDigest` 供 diff；迁移批准 metadata 增加 `migrationFrom`。这些是 §8.4/§8.5 的可执行接线，不赋予管理员绕过签名能力，也不要求 admin token 拥有公共读权限，且不改变旧 `/v1/catalog`。
 
-实施补充的安全收紧：bundle 与目录枚举共用 1024 条目、512 字节规范化路径上限，防止 0 字节条目绕过内容字节预算；四个 bundle build/inspect API 统一 async；已安装 catalog 用精确 metadata 刷新 delisted，不以列表消失推断；rejected 动作按规格收紧为“重新提交、详情”；未安装广场签名卡用 `installed:false` 判别，严格只 install/detail，不进已安装 catalog 分支。这些均不改变签名 manifest 或既有 `/v1/catalog` 契约。
+实施补充的安全收紧：bundle 与目录枚举共用 1024 条目、512 字节规范化路径上限，防止 0 字节条目绕过内容字节预算；四个 bundle build/inspect API 统一 async；已安装 catalog 用精确 metadata 刷新 delisted，不以列表消失推断；rejected 动作按规格收紧为“重新提交、详情”；未安装广场签名卡用 `installed:false` 判别，严格只 install/detail，不进已安装 catalog 分支；首次安装与迁移同样只允许选择该 slug 当前最高 published 版本，直接请求较旧版本按重放拒绝；该限制严于规格 §8.5。这些均不改变签名 manifest 或既有 `/v1/catalog` 契约。
 
 **2. Placeholder scan**
 
