@@ -19,7 +19,8 @@
     "packages/huaanwork-git-tools",
     "packages/huaanwork-web-tools",
     "market-server",
-    "update-server"
+    "update-server",
+    "packages/catalog-signing"
   ],
   "resolutions": {
     "@agents-anywhere/dsh-bridge-next": "file:vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c4b4f6e51bca0.r57f6b0fe.tgz",

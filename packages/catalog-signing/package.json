@@ -1,0 +1,23 @@
+{
+  "name": "@huaanwork/catalog-signing",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zero-dependency canonical-JSON and Ed25519 signing primitives shared by the intranet catalog toolchain (market-server, catalog servers, Desktop)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "yarn test && yarn typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "6.0.3"
+  }
+}

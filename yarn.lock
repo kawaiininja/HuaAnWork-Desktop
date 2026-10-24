@@ -11759,6 +11759,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@huaanwork/catalog-signing@workspace:*, @huaanwork/catalog-signing@workspace:packages/catalog-signing":
+  version: 0.0.0-use.local
+  resolution: "@huaanwork/catalog-signing@workspace:packages/catalog-signing"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:6.0.3"
+  languageName: unknown
+  linkType: soft
+
 "@huaanwork/git-tools@npm:*, @huaanwork/git-tools@workspace:packages/huaanwork-git-tools":
   version: 0.0.0-use.local
   resolution: "@huaanwork/git-tools@workspace:packages/huaanwork-git-tools"
@@ -19413,6 +19422,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "market-server@workspace:market-server"
   dependencies:
+    "@huaanwork/catalog-signing": "workspace:*"
     "@types/node": "npm:^22.20.0"
     dsh-community-market: "workspace:^"
     typescript: "npm:6.0.3"
