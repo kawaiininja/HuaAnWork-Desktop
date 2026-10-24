@@ -1,5 +1,7 @@
 # 会话内创建智能体包 M1 实施代码评审
 
+> **2026-10-24 后续裁定：** Windows Step 5 的验收面改为 GitHub Actions 无界面探针，口径为 `PASS（GHA Windows 探针）`。GUI 与真实模型交互改为可选项。见 `docs/huaanwork-agent-packages-m1.md` §11 与 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。下文「Windows BLOCKED」是本评审当时的结论。本评审没有 workflow run URL。
+
 - **评审日期**：2026-10-24
 - **评审分支**：`feat/chat-created-agent-packages-m1`
 - **评审基线**：`5f2ed71feb111503beb6ebb1df11cbc83ad5ded6`（`docs/chat-created-agents-design` merge-base）

@@ -10,7 +10,7 @@
 | 平台 | 结果 | 说明 |
 | --- | --- | --- |
 | darwin(macOS) | **PASS** | 长驻 HTTP 服务经 `ctx.sandbox.confine` 启动、可访问、可存活;写越界被拒;读越界与外网连通(即这两项**不隔离**,属已知事实而非缺陷) |
-| win32 | **BLOCKED** | 本机无 Windows 真机,未运行、未伪造。按任务口径,这一支不构成 macOS 侧的失败,但 **M1 的 Windows 前提仍未验证**,在真机跑出对应 JSON 前不得宣布 M1 在 Windows 可开工 |
+| win32 | **BLOCKED**（2026-10-23 当时） | 本机无 Windows 真机,未运行、未伪造。这是当时的记录。2026-10-24 起 Windows Step 5 改由 GHA 探针验收,见 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`;本表不回写那次尚未发生的 JSON |
 
 macOS 一侧的 M1 关键假设成立:**DSH 沙箱允许在 workspace 内长期运行一个监听 127.0.0.1 的 Node 服务进程**,写边界生效,读与网络按上游 Seatbelt 配置不设限。
 
@@ -90,6 +90,7 @@ stderr 诊断(一次完整运行的全部诊断行;EPERM 堆栈按行省略;仅�
 ```
 
 - 余下未验证面:restricted-token runner 下长驻服务的启动与监听、写边界、读与外网行为。预期真机跑完后把该 JSON 补进本文件即可闭环;探针尚未在 Windows 真机运行过,是否需要针对该 runner 调整以实测为准。
+- **2026-10-24 后续裁定:** 上面这一节保持为 2026-10-23 的历史记录(当时没有 Windows 机器,没有伪造 JSON)。Windows Step 5 的现行口径改为 GitHub Actions `windows-latest` 探针 `PASS（GHA Windows 探针）`,见 `docs/huaanwork-agent-packages-m1.md` §11 与 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。那次运行的 JSON 贴进新证据文件,不回写本文件的历史 BLOCKED。
 
 ## 7. 探针自身失败路径的负向自检
 
@@ -117,4 +118,4 @@ exit code `3`,stderr 打 `BLOCKED: server-not-ready` 与 `BLOCKED: workspace-wri
 ## 8. Gate 判定
 
 - macOS:`httpReady` / `writeDenied` / `readOutside` / `networkOutside` 四项与 brief 期望完全一致,`enforcement:"full"` ⇒ **门槛通过**,M1 的「沙箱内长驻服务」假设成立。
-- Windows:BLOCKED(无真机) ⇒ **M1 的跨平台前提未闭环**;按 brief Step 3,在真机结果落地前不能宣布 M1 可开工。本任务未改动任何产品代码。
+- Windows:本节写作时为 BLOCKED(无真机)。2026-10-24 起 Step 5 改由 GHA Windows 探针验收,历史结论见 §6 末条;本任务当时未改动任何产品代码。
