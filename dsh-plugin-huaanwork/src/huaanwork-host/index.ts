@@ -171,6 +171,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           huaanworkAgentPackageHost: agentPackageHost,
           huaanworkAttachments: ctx.huaanworkAttachments,
           huaanworkRouteAgent: ctx.huaanworkRouteAgent,
+          // commit 成功后的解绑要等工具结果定稿:上游归一化结果时会按名字重解析工具。
+          huaanworkOnToolResult: (listener: (exec: { callId?: string }) => void) =>
+            (pc as unknown as { on(name: string, callback: (exec: { callId?: string }) => void): () => void })
+              .on('tools/result', listener),
           root: ctx.root,
         }
         let unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())

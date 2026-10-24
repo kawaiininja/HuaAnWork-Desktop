@@ -288,6 +288,67 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
     await expect(sessionSend({}, routeCtx, { text: '@reviewer 看看代码' })).rejects.toThrow(/未启用或不存在/)
   })
 
+  test('@agent injects the parent delivery instruction instead of the bare remainder', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const received: { content: { text: string }[] }[] = []
+    const activationSpecs: { request: { prompt: { text: string }[] } }[] = []
+    const live: ListedAgent & { followup: (message: unknown) => void } = {
+      id: sessionId,
+      session: { id: sessionId },
+      followup: (message) => received.push(message as { content: { text: string }[] }),
+      whenIdle: async () => undefined,
+    }
+    const emptyDirectory = {
+      list: () => ({ items: [] }),
+      refresh: async () => ({ items: [] }),
+      get: async () => undefined,
+      setEnabled: () => undefined,
+      addEndpoint: () => ({ ok: false as const, fieldErrors: [] }),
+      removeEndpoint: () => undefined,
+      snapshotForRuntime: () => ({ items: [] }),
+    }
+    setAgentsDirectory({
+      ...emptyDirectory,
+      list: () => ({
+        items: [
+          {
+            name: 'legacy-assistant',
+            source: 'catalog',
+            kind: 'agent',
+            description: '旧目录智能体',
+            version: '1.0.0',
+            permissions: [],
+            enabled: true,
+          },
+        ],
+      }),
+      get: async () => ({ persona: '你是旧目录助手' }),
+    } as never)
+    try {
+      const ctx = {
+        agents: { get: (id: string) => (id === sessionId ? live : undefined), list: () => [live] },
+        subagents: {
+          startActivation: async (spec: never) => {
+            activationSpecs.push(spec as never)
+            return { childId: 'legacy-child', result: Promise.resolve({ ok: true }), dispose: async () => undefined }
+          },
+        },
+      } as unknown as SessionRuntimeContext
+      await sessionSend(ctx, routeCtx, { text: '@legacy-assistant 整理本周进展', sessionId })
+      expect(received).toHaveLength(1)
+      const text = received[0]!.content[0]!.text
+      expect(text).toContain('整理本周进展')
+      expect(text).toContain('自动回到本会话')
+      expect(text).toContain('不要用 call_host_tool')
+      // 提示只给父会话;子代理首条 prompt 仍是人设 + 用户请求。
+      expect(activationSpecs[0]!.request.prompt[0]!.text).toBe('你是旧目录助手\n\n---\n用户请求：\n整理本周进展')
+    } finally {
+      setAgentsDirectory(emptyDirectory as never)
+    }
+  })
+
   test('skill dispatch wraps the prompt with skill instructions', async () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)

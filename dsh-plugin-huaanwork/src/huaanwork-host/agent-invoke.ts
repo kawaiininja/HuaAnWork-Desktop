@@ -79,6 +79,23 @@ function escapeEnvelopeText(text: string): string {
   return text.replace(/</g, "＜").replace(/>/g, "＞");
 }
 
+/**
+ * 父会话的 `@` 注入文本：子代理结果由宿主自动送回，父会话不要重做同一任务。
+ *
+ * 只拼给父会话(`parentText`),子代理自己的首条 prompt 保持用户原样请求。
+ */
+export function parentSubagentText(name: string, text: string): string {
+  return [
+    text,
+    "",
+    "<host-instruction>",
+    `这个请求已交给子代理 @${name}；子代理的结果会在完成后自动回到本会话。`,
+    "等待期间不要用 call_host_tool、终端命令(bash/curl)或 MCP 工具重复执行同一任务，也不要再次 @ 同一个智能体。",
+    "收到子代理结果后，直接整理并呈现结论；只有结果缺失或失败时才说明情况。",
+    "</host-instruction>",
+  ].join("\n");
+}
+
 export function parseAtInvoke(text: string): { name: string; remainder: string } | undefined {
   const trimmed = text.trim();
   const match = AT_INVOKE_RE.exec(trimmed);
@@ -102,17 +119,18 @@ export async function dispatchAt(opts: {
   /** 本地智能体包分流;必须在 agentsHost 查找之前,否则目录外的 slug 会直接抛错。 */
   packageHost?: AgentPackageHostFace;
   packageRuntime?: AgentPackageRuntimeFace;
-}): Promise<{ text: string; afterIdle: () => Promise<void> }> {
+}): Promise<{ text: string; parentText?: string; afterIdle: () => Promise<void> }> {
   if (opts.packageHost !== undefined && opts.packageRuntime !== undefined) {
     const pkg = await opts.packageHost.findInvocable(opts.name);
     if (pkg !== undefined) {
-      return opts.packageRuntime.dispatch({
+      const dispatched = await opts.packageRuntime.dispatch({
         ctx: opts.ctx,
         sessionId: opts.sessionId,
         pkg,
         remainder: opts.remainder,
         ...(opts.resolveParent === undefined ? {} : { resolveParent: opts.resolveParent }),
       });
+      return { ...dispatched, parentText: parentSubagentText(opts.name, dispatched.text) };
     }
   }
 
@@ -254,6 +272,7 @@ export async function dispatchAt(opts: {
 
     return {
       text: prompt,
+      parentText: parentSubagentText(opts.name, prompt),
       afterIdle: async () => {
         // 子会话可能比父回合的空闲点活得久;等待有上限,结果与释放的失败都不外抛。
         try {
