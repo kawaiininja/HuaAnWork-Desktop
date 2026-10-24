@@ -2,9 +2,20 @@ import { readdir, unlink } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 
 import { workNetworkGateError } from '@huaanwork/policy/network'
+import type { AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
 import { forgetConfirmedTarget, settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
 import { answerRouteInput, cancelRouteInput, clearInvalidRoute, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
+import {
+  attachCreationTools,
+  detectAgentCreationIntent,
+  detectCreateAgentCommand,
+  detachCreationTools,
+  getAgentPackageHost,
+  injectCreateAgentSkill,
+  noteCreationTurn,
+} from './agent-package/creation.ts'
+import { isAgentCancelText } from './agent-package/drafts.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { invokeSkillText } from './skill-invoke.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
@@ -19,6 +30,7 @@ import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog } from './session-view.ts'
 import type { RouteContext } from './routes.ts'
+import type { SubagentsService } from './subagents-service.ts'
 
 /**
  * 会话域主链路(旧 sidecar host.ts L1434-1740 移植)。
@@ -43,6 +55,8 @@ export type SessionRuntimeContext = {
   huaanworkPlanReviews?: Map<string, () => boolean>
   /** 分流工具 `propose_plan` / `request_input` 读取的当前会话 agent(holders.ts 注入容器)。 */
   huaanworkRouteAgent?: { current: unknown }
+  /** 创建工具与 `@slug` 运行工具的会话附件表(holders.ts 注入)。 */
+  huaanworkAttachments?: AttachmentMaps
   /** 工作区热切换时同步的沙箱根;缺席时只改 routeCtx.workspaceRoot holder。 */
   sandboxPolicy?: { workspaceRoot?: string }
   /** cordis Context.get。sandboxPolicy 未注入到本插件时,用它做全局查找。 */
@@ -55,16 +69,7 @@ export type SessionRuntimeContext = {
     /** 从持久化日志恢复历史会话为 live agent(携带完整上下文)。 */
     resume?: (options: AgentResumeOptions) => Promise<unknown>
   }
-  subagents?: {
-    start?: (
-      provider: string,
-      request: {
-        prompt: Array<{ type: string; text: string }>
-        persona?: string
-        [key: string]: unknown
-      },
-    ) => Promise<unknown>
-  }
+  subagents?: SubagentsService
 }
 
 /**
@@ -126,6 +131,10 @@ export async function sendToAgent(
   const blocked = workNetworkGateError({ allowNetwork: settings.allow_network, baseUrl: settings.base_url })
   if (blocked) throw new Error(blocked)
   noteCallerSession(sessionId)
+  // 每一轮用户原句都记进宿主:同意门禁只认最近一轮,技能/@ 轮若旁路不记,
+  // agent_commit 会读到更早那轮的「可以」(设计 §5)。创建门禁内的记录是同一句,
+  // 重复写入无副作用。
+  getAgentPackageHost()?.noteUserText(sessionId, text)
 
   let afterIdle: (() => Promise<void>) | undefined
   let cleanedUp = false
@@ -149,12 +158,55 @@ export async function sendToAgent(
     // 显式 sessionId(对话标签绑定独立会话):不在场的会话按需 create / resume;
     // 缺省走通道稳定会话(boot 时由 agent-loop config 固定)。
     // 惰性解析:skill/@ 的校验失败必须先于 agent 创建抛错;@agent 时 dispatchAt 在
-    // subagents.start 之前调 resolveAgent(),保证 parent 是当前会话 agent(spec 要求)。
+    // startActivation 之前调 resolveAgent(),保证 parent 是当前会话 agent(spec 要求)。
     let agentPromise: Promise<ListedAgent & { followup: (message: unknown) => void }> | null = null
     const resolveAgent = () =>
       (agentPromise ??= explicitSessionId
         ? ensureChannelAgent(ctx, routeCtx, sessionId)
         : waitForAgent(ctx, sessionId))
+
+    // 创建入口(设计 §6.1):规范说法、`/create-agent`(文本或 skill 参数)或已有草稿时,
+    // 在技能/@ 分发与 agent 解析之前接管本轮。未注入宿主门面时整段旁路。
+    const packageHost = getAgentPackageHost()
+    const createSkillEntry = packageHost !== undefined && skillName === 'create-agent'
+    if (createSkillEntry) skillName = undefined
+    const creationIntent =
+      !atName && !skillName
+        ? createSkillEntry
+          ? detectCreateAgentCommand(text)
+          : detectAgentCreationIntent(text)
+        : undefined
+    const activeDraft = !atName && !skillName && packageHost?.hasDraft(sessionId) === true
+    if (packageHost && (creationIntent !== undefined || activeDraft)) {
+      noteCreationTurn(sessionId, text)
+      if (isAgentCancelText(text) && (await packageHost.cancel(sessionId))) {
+        detachCreationTools(ctx, sessionId)
+        routeCtx.emit({ event: 'agent/notice', text: '已取消创建，没有写入智能体。', sessionId })
+        return { queued: true, sessionId }
+      }
+      if (creationIntent?.kind === 'update') {
+        try {
+          await packageHost.beginUpdate(sessionId, creationIntent.slug)
+        } catch (error) {
+          // 坏的 update 目标(不存在/已损坏)回一条会话提示,不把整次发送变成路由错误。
+          routeCtx.emit({
+            event: 'agent/notice',
+            text: `无法进入更新模式：${error instanceof Error ? error.message : String(error)}`,
+            sessionId,
+          })
+          return { queued: true, sessionId }
+        }
+      }
+      const mode = creationIntent?.kind ?? 'continue'
+      text = injectCreateAgentSkill(
+        creationIntent ? creationIntent.initialText || text : text,
+        mode,
+        creationIntent?.kind === 'update' ? creationIntent.slug : undefined,
+      )
+      // 工具跨轮保持挂载,只在 commit 成功或取消时卸下(设计 §6.2):
+      // 访谈首轮提出草稿前没有草稿,不能按「回合结束是否有草稿」判断。
+      attachCreationTools(ctx, sessionId)
+    }
 
     if (atName) {
       const parsedInText = parseAtInvoke(text)
@@ -171,6 +223,8 @@ export async function sendToAgent(
         name: atName,
         remainder,
         resolveParent: resolveAgent,
+        // `@slug` 先认本地包:目录快照里没有的 slug 也必须在 agentsHost 查找前分流。
+        ...(packageHost === undefined ? {} : { packageHost, packageRuntime: packageHost }),
       })
       text = dispatched.text
       afterIdle = dispatched.afterIdle
@@ -469,6 +523,14 @@ export function getAgentsDirectory(): AgentsHost {
   }
   return agentsDirectory
 }
+
+/**
+ * 智能体包宿主单例(创建入口与 Task 7 路由共用)。
+ *
+ * 实例由 `index.ts` 在 agentsHost 之后注入;实现住在 `agent-package/creation.ts`,
+ * 这里按 `setAgentsDirectory` 的同一模式转出公开入口。
+ */
+export { getAgentPackageHost, setAgentPackageHost } from './agent-package/creation.ts'
 
 // 审批归因在 automations-host.ingestAutomationEvent(approval/asked 的 sessionId → runId)。
 // sendToAgent 不调用 assertSessionSendable:用户 session.send/cancel 在 handler 上把关,

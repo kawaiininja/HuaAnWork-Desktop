@@ -780,3 +780,17 @@ test("goal tools survive the static tool filter", () => {
     assert.equal(isRegisteredToolName(name), true, name);
   }
 });
+
+test("agent package tools survive the static tool filter", () => {
+  for (const name of ["agent_propose", "agent_commit", "agent_skill_run", "agent_http"]) {
+    assert.equal(isRegisteredToolName(name), true, name);
+  }
+  // 流式解析曾把 agent_propose 当未知工具静默丢弃,回合退化成 NO_ACTION。
+  const payloads = [
+    JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "a1", function: { name: "agent_propose", arguments: "{\"slug\":\"daily-brief\"}" } }] } }],
+    }),
+  ];
+  assert.equal(parseSseToolCalls(payloads, isRegisteredToolName).length, 1);
+  assert.equal(isRegisteredToolName("agent_unknown"), false);
+});

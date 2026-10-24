@@ -9,6 +9,11 @@ export type ToolCall = {
   workspaceRoot: string;
   gitDirty?: boolean;
   attached?: boolean;
+  /**
+   * 调用方会话是智能体包的运行子会话。子会话没有审批界面，`ask` 只会被自动拒绝；
+   * 因此它自己挂载的 MCP 工具在非 full 档也放行。普通会话不设此字段。
+   */
+  packageRuntime?: boolean;
 };
 
 export type GuardMode = "ask" | "smart" | "full";
@@ -74,6 +79,16 @@ function deny(reason: string): Internal {
 }
 
 function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
+  // MCP 工具名是 `mcp__<slug>__<tool>`，switch 的字面量分支匹配不到前缀；与 default
+  // 分支的唯一差别是 packageRuntime：智能体包子会话没有审批界面，它自己挂载的 MCP
+  // 工具在 ask/smart 档也必须放行，否则调用只会被自动拒绝。
+  if (input.name.startsWith("mcp__")) {
+    return input.attached
+      ? mode === "full" || input.packageRuntime === true
+        ? ALLOW
+        : askOrDeny(seam)
+      : deny(reasonToolUnattached(input.name));
+  }
   switch (input.name) {
     case "read":
     case "read_file":
@@ -116,6 +131,12 @@ function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
       return mode === "full" ? ALLOW : askOrDeny(seam);
     case "call_host_tool":
       return input.attached ? (mode === "full" ? ALLOW : askOrDeny(seam)) : deny(reasonToolUnattached(input.name));
+    // 智能体包运行链路工具：用户启用包即等于授权其声明的 HTTP/脚本工具，逐次审批落空——
+    // 子会话没有审批界面，ask 只会被自动拒绝。附加即放行；创建链路的
+    // agent_propose/agent_commit 不走这里，留在 default 分支让创建界面弹确认。
+    case "agent_http":
+    case "agent_skill_run":
+      return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
     default:
       return input.attached ? (mode === "full" ? ALLOW : askOrDeny(seam)) : deny(reasonToolUnattached(input.name));
   }

@@ -40,6 +40,10 @@ export type RpcRequest = {
     | "agent.setEnabled"
     | "agent.addEndpoint"
     | "agent.removeEndpoint"
+    | "agent.packageList"
+    | "agent.packageDetail"
+    | "agent.packageSetEnabled"
+    | "agent.invocableList"
     | "status.get"
     | "project.list"
     | "project.create"
@@ -90,6 +94,8 @@ export type EntrypointKind = "http" | "mcp";
 
 export type AgentListItem = {
   name: string;
+  /** 展示名;本地智能体包带 displayName,目录条目只有 name。 */
+  displayName?: string;
   source: AgentSource;
   kind: AgentKind;
   entrypointKind?: EntrypointKind;
@@ -113,6 +119,42 @@ export type AgentDetail = AgentListItem & {
   timeoutMs?: number;
   argumentsSchema?: unknown;
 };
+
+/**
+ * 本地智能体包列表行。字段与 host `agent-package/types.ts` 的
+ * `AgentPackageListItem` 一致;客户端不从 host 导入。
+ * `source` 是包自己的来源联合,不并入 `AgentSource`。
+ */
+export type AgentPackageListItem = {
+  slug: string;
+  displayName: string;
+  description: string;
+  version: string;
+  source: "local" | "catalog-legacy";
+  enabled: boolean;
+  broken?: { reason: string };
+};
+
+/** 本地智能体包详情;legacy 条目仍是 `AgentDetail`。 */
+export type AgentPackageDetail = AgentPackageListItem & {
+  persona: string;
+  skill: { summary: string; markdown: string; scripts: string[] } | null;
+  tools: "none" | "http" | "mcp" | "both";
+  files: Array<{ path: string; size: number }>;
+};
+
+/** `agent.packageList` 载荷:本地包与 legacy 目录 agent 分列,`catalogError` 透传目录结果。 */
+export type AgentPackageListResult = {
+  packages: AgentPackageListItem[];
+  catalogAgents: AgentListItem[];
+  catalogError?: string;
+};
+
+/**
+ * `agent.packageDetail` 的两侧载荷。调用方按 `'slug' in detail`（或 `files`/`skill`
+ * 存在）收窄；不要按 `source`——legacy 本地工具条目也可能带 `source: 'local'`。
+ */
+export type AgentPackageDetailResult = AgentPackageDetail | AgentDetail;
 
 export type AgentFieldError = { field: string; message: string };
 export type AgentWriteResult = { ok: true } | { ok: false; fieldErrors: AgentFieldError[] };
@@ -225,6 +267,23 @@ export type SessionDetailRecord =
   | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string }
   | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string };
 
+/**
+ * 本地智能体创建确认卡。字段与 host `agent-package/types.ts` 的
+ * `AgentPackageConfirmCard` 一致;客户端不从 host 导入。
+ */
+export type AgentPackageConfirmCard = {
+  mode: "create" | "update";
+  displayName: string;
+  slug: string;
+  description: string;
+  personaSummary: string;
+  skillSummary: string;
+  tools: "none" | "http" | "mcp" | "both";
+  toolLabel: string;
+  warning: string;
+  consentHint: string;
+};
+
 /** 事件归属会话：token/tool/diff/session 事件携带发起回合的会话 id，前端与收集器据此归因。 */
 export type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
@@ -262,6 +321,12 @@ export type RpcEvent =
   | { event: "goal/state"; phase: GoalPhase; roundsStarted?: number; sessionId?: string }
   | { event: "goal/state"; cleared: true; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string }
+  /** 智能体包写入成功/提示;`text` 直接作为会话内提示展示。 */
+  | { event: "agent/notice"; text: string; sessionId?: string }
+  /** 结构化创建确认卡;客户端优先渲染它,模型贴回的纯文本是后备。 */
+  | { event: "agent/confirm"; card: AgentPackageConfirmCard; sessionId?: string }
+  /** 本地智能体包新增/更新/启停后触发,客户端据此刷新列表。 */
+  | { event: "agent/changed"; slug?: string }
   | { event: "sidecar/status"; ready: boolean }
   | { event: "automation/run-start"; automationId: string; runId: string; projectId: string | null; sessionId?: string; trigger?: "manual" | "schedule" | "catchup" }
   | {

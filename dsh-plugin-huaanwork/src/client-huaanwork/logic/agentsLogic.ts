@@ -4,6 +4,8 @@ export type EntrypointKind = "http" | "mcp";
 
 export type AgentListItem = {
   name: string;
+  /** 展示名;本地智能体包带 displayName,目录条目只有 name。 */
+  displayName?: string;
   source: AgentSource;
   kind: AgentKind;
   entrypointKind?: EntrypointKind;
@@ -242,22 +244,12 @@ export function endpointFormErrors(
   return errors;
 }
 
-export type AgentTab = "discover" | "enabled" | "local";
+/** 智能体页三页签：广场 / 我的智能体 / 我的工具包。各页数据形状不同,过滤在面板内做。 */
+export type AgentTab = "plaza" | "mine" | "tools";
 
-/** 智能体中心列表过滤。 */
-export function filterAgents(
-  items: readonly AgentListItem[],
-  tab: AgentTab,
-  query: string,
-): AgentListItem[] {
-  const scoped =
-    tab === "discover"
-      ? items.filter((item) => item.source === "catalog")
-      : tab === "enabled"
-        ? items.filter((item) => item.enabled === true)
-        : items.filter((item) => item.source === "local");
-
-  const needle = query.trim().toLowerCase();
-  if (!needle) return scoped;
-  return scoped.filter((item) => `${item.name} ${item.description}`.toLowerCase().includes(needle));
-}
+/** 三页签的 id 与可见文案;`AgentsView` 只负责渲染与切换。 */
+export const AGENT_TABS: ReadonlyArray<{ id: AgentTab; label: string }> = [
+  { id: "plaza", label: "智能体广场" },
+  { id: "mine", label: "我的智能体" },
+  { id: "tools", label: "我的工具包" },
+];

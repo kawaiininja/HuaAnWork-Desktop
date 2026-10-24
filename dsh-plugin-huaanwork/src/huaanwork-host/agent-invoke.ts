@@ -1,7 +1,21 @@
 import { attachHostTool, detachHostTool, type AttachmentMaps } from "../huaanwork-guardrails/agent-attachments.ts";
 import { mountSessionMcp } from "../huaanwork-guardrails/agent-mcp.ts";
 import { filterAgentAllow } from "@huaanwork/policy/agent-catalog";
+import type { AgentPackageDetail, AgentPackageSubagentRequest } from "./agent-package/types.ts";
+import {
+  ACTIVATION_CLEANUP_TIMEOUT_MS,
+  settleWithin,
+  type AgentPackageDispatchResult,
+} from "./agent-package/host.ts";
 import type { AgentsHost } from "./agents-host.ts";
+import {
+  HUAANWORK_LEGACY_AGENT_REQUEST,
+  resolveSubagents,
+  type LegacyActivationSpec,
+  type LegacyAgentRequest,
+  type SubagentActivationHandle,
+  type SubagentActivationSpec,
+} from "./subagents-service.ts";
 import { readHuaanworkSettingsSync } from "./settings.ts";
 
 /**
@@ -22,17 +36,31 @@ export type AgentInvokeContext = {
   huaanworkAttachments?: AttachmentMaps;
   huaanworkAgentCatalog?: { current: { items: unknown[] } };
   huaanworkAgentRequest?: { current: unknown };
+  /** `@slug` 包回合请求(由 host dispatch 写入,skills.ts 的 startActivation 包装消费)。 */
+  huaanworkAgentPackageRequest?: { current: AgentPackageSubagentRequest | null };
+  huaanworkWorkspaceRoot?: { current: string };
+  /** 全局服务查找:`sandbox`,以及 `subagents` 在直接属性缺席时的回落路径。 */
+  get?: (name: string) => unknown;
   subagents?: {
-    /** 探针 3 核实的上游签名:start(provider, request),provider 固定 "spawn"。 */
-    start?: (
-      provider: string,
-      request: {
-        prompt: Array<{ type: string; text: string }>;
-        persona?: string;
-        [key: string]: unknown;
-      },
-    ) => Promise<unknown>;
+    /** rc.1 的唯一启动入口,provider 固定 "spawn";旧签名 `start` 已不在运行时上。 */
+    startActivation?: (spec: SubagentActivationSpec) => Promise<unknown>;
   };
+};
+
+/** `@slug` 分流读取本地包详情的那一半;与 `packageRuntime` 通常是同一宿主实例。 */
+export type AgentPackageHostFace = {
+  findInvocable(slug: string): Promise<AgentPackageDetail | undefined>;
+};
+
+/** `@slug` 分流执行包回合的那一半。 */
+export type AgentPackageRuntimeFace = {
+  dispatch(input: {
+    ctx: AgentInvokeContext;
+    sessionId: string;
+    pkg: AgentPackageDetail;
+    remainder: string;
+    resolveParent?: () => Promise<unknown>;
+  }): Promise<AgentPackageDispatchResult>;
 };
 
 function readCatalogToken(profileDir?: string): string {
@@ -69,9 +97,25 @@ export async function dispatchAt(opts: {
   name: string;
   remainder: string;
   /** 解析当前会话的 agent，作为 @agent 子代理的 parent。
-   *  仅 agent 分支在 subagents.start 之前调用；http/mcp 分支不触发。 */
+   *  仅 agent 分支在 startActivation 之前调用；http/mcp 分支不触发。 */
   resolveParent?: () => Promise<unknown>;
+  /** 本地智能体包分流;必须在 agentsHost 查找之前,否则目录外的 slug 会直接抛错。 */
+  packageHost?: AgentPackageHostFace;
+  packageRuntime?: AgentPackageRuntimeFace;
 }): Promise<{ text: string; afterIdle: () => Promise<void> }> {
+  if (opts.packageHost !== undefined && opts.packageRuntime !== undefined) {
+    const pkg = await opts.packageHost.findInvocable(opts.name);
+    if (pkg !== undefined) {
+      return opts.packageRuntime.dispatch({
+        ctx: opts.ctx,
+        sessionId: opts.sessionId,
+        pkg,
+        remainder: opts.remainder,
+        ...(opts.resolveParent === undefined ? {} : { resolveParent: opts.resolveParent }),
+      });
+    }
+  }
+
   const item = opts.host.list().items.find((i) => i.name === opts.name);
   if (!item || !item.enabled) {
     throw new Error(`智能体「${opts.name}」未启用或不存在`);
@@ -159,46 +203,86 @@ export async function dispatchAt(opts: {
       throw new Error(`无法加载智能体「${opts.name}」的人设`);
     }
 
-    if (typeof opts.ctx.subagents?.start !== "function") {
+    // rc.1 的 SubagentRuntime 只有 startActivation;legacy `@agent` 与智能体包 `@slug`
+    // 走同一入口。persona 无原生字段,由下面的分隔前缀并入子代理首条 prompt。
+    const subagents = resolveSubagents(opts.ctx, "startActivation");
+    if (subagents === undefined) {
       throw new Error("current dsh runtime does not support subagents");
     }
-
-    if (opts.ctx.huaanworkAgentRequest) {
-      opts.ctx.huaanworkAgentRequest.current = {
-        name: opts.name,
-        allow: filterAgentAllow(detail?.allow),
-        persona,
-      };
-    }
+    const startActivation = subagents.startActivation.bind(subagents);
 
     const prompt = opts.remainder.trim() || item.description || "开始协助工作。";
+    const promptWithPersona = `${persona}\n\n---\n用户请求：\n${prompt}`;
+    // startActivation 要求 parent 是 ctx.agents 里的同一个活动 Agent 对象,
+    // 缺省时不能猜 list()[0]。先解析父会话:解析失败时不能留下一个可被并发
+    // activation 认领的 legacy 请求。
+    const parent = opts.resolveParent ? await opts.resolveParent() : undefined;
+    if (parent === undefined || parent === null) {
+      throw new Error(`智能体「${opts.name}」无法开始：当前会话没有可用的父会话`);
+    }
+    // 请求对象同时写入全局容器(旧运行时/旧包装的回落)和 activation spec 的符号键;
+    // 包装按 spec 的调用级标记归属请求,重叠的 activation 不会互相认领。
+    const request: LegacyAgentRequest = {
+      name: opts.name,
+      allow: filterAgentAllow(detail?.allow),
+      persona,
+    };
+    const spec: LegacyActivationSpec = {
+      provider: "spawn",
+      label: `@${opts.name}`,
+      request: {
+        prompt: [{ type: "text", text: promptWithPersona }],
+        parent,
+      },
+      // API 必填;M1 没有发布前取消源,发布后的取消归 activation.dispose()。
+      signal: new AbortController().signal,
+      delivery: "parent",
+      [HUAANWORK_LEGACY_AGENT_REQUEST]: request,
+    };
+    let activation: SubagentActivationHandle;
     try {
-      // 探针 3 已核实签名 start(provider, request)，persona 为原生字段；
-      // provider 固定 "spawn"（进程内 spawn provider）；parent 在 start 前解析为当前会话 agent，
-      // 保证 cwd/取消链归属正确（不再依赖 list()[0] 猜测）
-      const parent = opts.resolveParent ? await opts.resolveParent() : undefined;
-      await opts.ctx.subagents.start("spawn", {
-        prompt: [{ type: "text", text: prompt }],
-        persona,
-        ...(parent ? { parent } : {}),
-        signal: new AbortController().signal,
-      } as any);
-    } catch (err) {
+      // 只在调用前一刻发布:包装在第一次 await 之前已从 spec 取到本调用的请求,
+      // 全局容器里的值不会决定归属。
       if (opts.ctx.huaanworkAgentRequest) {
-        opts.ctx.huaanworkAgentRequest.current = undefined;
+        opts.ctx.huaanworkAgentRequest.current = request;
       }
+      activation = await startActivation(spec);
+    } catch (err) {
+      clearLegacyRequest(opts.ctx, request);
       throw err;
     }
 
     return {
       text: prompt,
       afterIdle: async () => {
-        if (opts.ctx.huaanworkAgentRequest) {
-          opts.ctx.huaanworkAgentRequest.current = undefined;
+        // 子会话可能比父回合的空闲点活得久;等待有上限,结果与释放的失败都不外抛。
+        try {
+          const settled = await settleWithin(activation.result, ACTIVATION_CLEANUP_TIMEOUT_MS);
+          if (!settled) {
+            // 与包路径同一上限与文案:超时只记录事实,取消归随后的 dispose()。
+            console.error(
+              `智能体「${opts.name}」的子代理在 ${String(ACTIVATION_CLEANUP_TIMEOUT_MS / 60_000)} 分钟内未结束，释放 activation`,
+            );
+          }
+        } catch {
+          // activation.result 的拒绝已在 settleWithin 内折叠,这里只兜同步抛错的实现。
         }
+        try {
+          await settleWithin(activation.dispose(), ACTIVATION_CLEANUP_TIMEOUT_MS);
+        } catch {
+          // 释放是尽力而为:同步抛错的 dispose 不能阻止 holder 清理。
+        }
+        clearLegacyRequest(opts.ctx, request);
       },
     };
   }
 
   throw new Error(`未知智能体类型：「${(item as { kind?: string }).kind}」`);
+}
+
+/** 只清本次调用发布的请求:重叠的 activation 可能已经写入新的请求。 */
+function clearLegacyRequest(ctx: AgentInvokeContext, request: LegacyAgentRequest): void {
+  if (ctx.huaanworkAgentRequest?.current === request) {
+    ctx.huaanworkAgentRequest.current = undefined;
+  }
 }

@@ -3,11 +3,11 @@ import { test } from "vitest";
 
 import {
   AGENT_NAME_RE,
+  AGENT_TABS,
   atAgents,
   atTokenAt,
   catalogFormErrors,
   endpointFormErrors,
-  filterAgents,
   isAgentInvocable,
   looksLikeLanUrl,
   parseAtInvoke,
@@ -209,17 +209,13 @@ test("endpointFormErrors validates description and argumentsSchema", () => {
   );
 });
 
-test("filterAgents scopes by tab and query", () => {
-  const items: AgentListItem[] = [
-    { name: "cat-1", source: "catalog", kind: "tool", description: "目录工具", version: "1", permissions: [], enabled: true },
-    { name: "cat-2", source: "catalog", kind: "agent", description: "目录智能体", version: "1", permissions: [], enabled: false },
-    { name: "loc-1", source: "local", kind: "tool", description: "本地工具", version: "1", permissions: [], enabled: true },
-  ];
-
-  assert.deepEqual(filterAgents(items, "discover", "").map((i) => i.name), ["cat-1", "cat-2"]);
-  assert.deepEqual(filterAgents(items, "enabled", "").map((i) => i.name), ["cat-1", "loc-1"]);
-  assert.deepEqual(filterAgents(items, "local", "").map((i) => i.name), ["loc-1"]);
-
-  assert.deepEqual(filterAgents(items, "discover", "智能体").map((i) => i.name), ["cat-2"]);
-  assert.deepEqual(filterAgents(items, "discover", "loc").map((i) => i.name), []);
+test("AgentTab names the three package tabs", () => {
+  assert.deepEqual(
+    AGENT_TABS.map((tab) => tab.label),
+    ["智能体广场", "我的智能体", "我的工具包"],
+  );
+  assert.deepEqual(
+    AGENT_TABS.map((tab) => tab.id),
+    ["plaza", "mine", "tools"],
+  );
 });

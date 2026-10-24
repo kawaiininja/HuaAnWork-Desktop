@@ -6,6 +6,8 @@ export type ComposerMentionItem = {
   prefix: "/" | "@";
   source: string;
   description: string;
+  /** 第二行副标题（智能体的 `@slug`）；技能条目不需要。 */
+  subtitle?: string;
 };
 
 export default function ComposerMentionMenu({
@@ -18,7 +20,7 @@ export default function ComposerMentionMenu({
 }: {
   label: string;
   empty: string;
-  items: { key: string; name: string; prefix: "/" | "@"; source: string; description: string }[];
+  items: { key: string; name: string; prefix: "/" | "@"; source: string; description: string; subtitle?: string }[];
   activeIndex: number;
   onHover: (index: number) => void;
   onPick: (index: number) => void;
@@ -43,6 +45,7 @@ export default function ComposerMentionMenu({
           >
             <span className="slash-item-name">{item.prefix}{item.name}</span>
             <span className="slash-item-src">{item.source}</span>
+            {item.subtitle ? <span className="slash-item-src">{item.subtitle}</span> : null}
             <span className="slash-item-desc">{item.description}</span>
           </button>
         ))

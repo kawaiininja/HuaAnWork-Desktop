@@ -2,6 +2,8 @@ import { Context } from '@deepseek-ai/cordis'
 import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
 import type { DesktopPnpm } from '../pnpm.ts'
 import { emptyAttachments, type AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
+import type { AgentPackageHost } from './agent-package/host.ts'
+import type { AgentPackageSubagentRequest } from './agent-package/types.ts'
 import type { HuaanworkEventHub } from './events.ts'
 import type { RouteContext } from './routes.ts'
 import type { SessionRuntimeContext } from './sessions.ts'
@@ -27,6 +29,15 @@ declare module '@deepseek-ai/cordis' {
     huaanworkPlanReviews: Map<string, () => boolean>
     huaanworkEmit: (event: RpcEvent) => void
     huaanworkAgentRequest: { current: unknown }
+    /** 创建/运行共享的包宿主(apply 里注入);读取方一律经 sessions 的 getter 取同一实例。 */
+    huaanworkAgentPackageHost: AgentPackageHost
+    /** `@slug` 一次运行的子代理请求(技能插件在 subagents.startActivation 里消费)。 */
+    huaanworkAgentPackageRequest: { current: AgentPackageSubagentRequest | null }
+    /**
+     * 智能体包回合当前绑定的子会话 id。policy 用它标记 `mcp__*` 调用来自包运行链路:
+     * 子会话没有审批界面,自己挂载的 MCP 工具不能被 ask 自动拒绝。
+     */
+    huaanworkPackageChildSessions: Set<string>
     huaanworkCheckpointUserDataDir: string
   }
 }
@@ -44,6 +55,9 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkPlanReviews',
   'huaanworkEmit',
   'huaanworkAgentRequest',
+  'huaanworkAgentPackageHost',
+  'huaanworkAgentPackageRequest',
+  'huaanworkPackageChildSessions',
   'huaanworkCheckpointUserDataDir',
 ] as const
 
@@ -122,6 +136,8 @@ export function installHuaanworkHolders(
   ctx.huaanworkUnattended = { current: null }
   ctx.huaanworkAttachments = emptyAttachments()
   ctx.huaanworkAgentRequest = { current: null }
+  ctx.huaanworkAgentPackageRequest = { current: null }
+  ctx.huaanworkPackageChildSessions = new Set<string>()
   ctx.huaanworkAgentCatalog = { current: { items: [] } }
   ctx.huaanworkRouteAgent = { current: null }
   ctx.huaanworkEmit = emit

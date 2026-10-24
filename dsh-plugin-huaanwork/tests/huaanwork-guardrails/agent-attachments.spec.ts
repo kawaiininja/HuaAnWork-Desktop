@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import {
+  agentPackageChildAttachmentNames,
   attachAgentTools,
   attachHostTool,
   detachAgentTools,
@@ -72,4 +73,20 @@ test("isHostAttached and isMcpAttached return false for undefined or empty input
   assert.equal(isMcpAttached(maps, undefined, "mcp__git__status"), false);
   assert.equal(isMcpAttached(maps, "", "mcp__git__status"), false);
   assert.equal(isMcpAttached(maps, "session-a", ""), false);
+});
+
+test("agentPackageChildAttachmentNames keeps only enabled package tools plus MCP names", () => {
+  // http 模式没有技能脚本 ⇒ agent_skill_run 不在允许名单;MCP 名与工具名去重后并入。
+  assert.deepEqual(
+    agentPackageChildAttachmentNames(
+      ["read", "agent_http", "mcp__weekly-report__echo"],
+      ["mcp__weekly-report__echo"],
+    ),
+    ["agent_http", "mcp__weekly-report__echo"],
+  );
+  assert.deepEqual(agentPackageChildAttachmentNames(["read", "agent_http", "agent_skill_run"]), [
+    "agent_http",
+    "agent_skill_run",
+  ]);
+  assert.deepEqual(agentPackageChildAttachmentNames(["read"]), []);
 });

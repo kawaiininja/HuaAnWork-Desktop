@@ -1,9 +1,44 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 
 import { emptyAttachments, isMcpAttached } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { mountSessionMcp } from "../../src/huaanwork-guardrails/agent-mcp.ts";
 import { apply as applyPresentAs, refreshAgentRestrict } from "../../src/huaanwork-guardrails/present-as.ts";
+
+// The packaged client connects to a real server; the fallback tests replace it
+// so they can observe which client `mountSessionMcp` resolved.
+const defaultClient = vi.hoisted(() => ({
+  inject: ["tools"],
+  configs: [] as Array<{ serverName: string; url: string }>,
+  apply: async (fiber: any, config: { serverName: string; url: string }) => {
+    defaultClient.configs.push(config);
+    const unregister = fiber.tools.register({ name: `mcp__${config.serverName}__ping` });
+    return {
+      dispose: async () => {
+        unregister();
+      },
+    };
+  },
+}));
+
+vi.mock("@deepseek-ai/dsh-mcp-client", () => defaultClient);
+
+function createFakeClient(toolName: string) {
+  const calls: string[] = [];
+  return {
+    calls,
+    inject: ["tools"],
+    apply: async (fiber: any) => {
+      calls.push(toolName);
+      const unregister = fiber.tools.register({ name: toolName });
+      return {
+        dispose: async () => {
+          unregister();
+        },
+      };
+    },
+  };
+}
 
 type MockAgent = {
   id?: string;
@@ -282,4 +317,227 @@ test("3. timing assertion with refreshAgentRestrict: agent allow list includes m
     !afterDisposeCall.allow.includes(fakeToolName),
     `Agent restrict allow after dispose must NOT include ${fakeToolName}`,
   );
+});
+
+test("4. a context without mcpClientImpl and without get mounts the packaged default client", async () => {
+  const attachments = emptyAttachments();
+  const ctx = createMockContext({ attachments });
+  assert.equal("get" in ctx, false, "test context must not expose get");
+
+  defaultClient.configs.length = 0;
+  const res = await mountSessionMcp({
+    ctx: ctx as any,
+    sessionId: "session-default",
+    serverName: "echo",
+    url: "http://127.0.0.1:8765/mcp",
+  });
+
+  assert.deepEqual(res.names, ["mcp__echo__ping"]);
+  assert.equal(defaultClient.configs.length, 1);
+  assert.equal(defaultClient.configs[0]!.url, "http://127.0.0.1:8765/mcp");
+  assert.equal(isMcpAttached(attachments, "session-default", "mcp__echo__ping"), true);
+
+  await res.dispose();
+  assert.equal(isMcpAttached(attachments, "session-default", "mcp__echo__ping"), false);
+});
+
+test("5. a Cordis context that throws on the mcpClientImpl property falls back instead of crashing", async () => {
+  // A real Cordis Context throws on undeclared property reads; the guardrail
+  // must never read `ctx.mcpClientImpl` as a property.
+  const throwingContext = () => {
+    const ctx = createMockContext({ attachments: emptyAttachments() });
+    Object.defineProperty(ctx, "mcpClientImpl", {
+      get() {
+        throw new Error('cannot get property "mcpClientImpl" without inject');
+      },
+    });
+    return ctx;
+  };
+
+  defaultClient.configs.length = 0;
+
+  // `get` returns no service: the packaged client is the fallback.
+  const emptyGetCtx = Object.assign(throwingContext(), { get: (_name: string) => undefined });
+  const fromEmptyGet = await mountSessionMcp({
+    ctx: emptyGetCtx as any,
+    sessionId: "session-empty-get",
+    serverName: "echo",
+    url: "http://127.0.0.1:8765/mcp",
+  });
+  assert.deepEqual(fromEmptyGet.names, ["mcp__echo__ping"]);
+  assert.equal(defaultClient.configs.length, 1);
+  await fromEmptyGet.dispose();
+
+  // `get` throws for an unregistered optional service: still the fallback.
+  const throwingGetCtx = Object.assign(throwingContext(), {
+    get: (name: string) => {
+      throw new Error(`service "${name}" is not provided`);
+    },
+  });
+  const fromThrowingGet = await mountSessionMcp({
+    ctx: throwingGetCtx as any,
+    sessionId: "session-throwing-get",
+    serverName: "echo",
+    url: "http://127.0.0.1:8765/mcp",
+  });
+  assert.deepEqual(fromThrowingGet.names, ["mcp__echo__ping"]);
+  assert.equal(defaultClient.configs.length, 2);
+  await fromThrowingGet.dispose();
+});
+
+test("6. an mcpClientImpl service read through ctx.get is used", async () => {
+  const attachments = emptyAttachments();
+  const ctx = createMockContext({ attachments });
+  const serviceClient = createFakeClient("mcp__from-service__ping");
+  const withGet = Object.assign(ctx, {
+    get: (name: string) => (name === "mcpClientImpl" ? serviceClient : undefined),
+  });
+
+  defaultClient.configs.length = 0;
+  const res = await mountSessionMcp({
+    ctx: withGet as any,
+    sessionId: "session-service",
+    serverName: "from-service",
+    url: "http://127.0.0.1:8765/mcp",
+  });
+
+  assert.deepEqual(serviceClient.calls, ["mcp__from-service__ping"]);
+  assert.deepEqual(res.names, ["mcp__from-service__ping"]);
+  assert.equal(defaultClient.configs.length, 0, "the packaged client must not run when the service resolves");
+
+  await res.dispose();
+});
+
+test("7. an explicit mcpClientImpl option wins over the service and is never read as a property", async () => {
+  const attachments = emptyAttachments();
+  const ctx = createMockContext({ attachments });
+  Object.defineProperty(ctx, "mcpClientImpl", {
+    get() {
+      throw new Error('cannot get property "mcpClientImpl" without inject');
+    },
+  });
+  const optionClient = createFakeClient("mcp__from-option__ping");
+  const serviceClient = createFakeClient("mcp__from-service__ping");
+  const withGet = Object.assign(ctx, {
+    get: (name: string) => (name === "mcpClientImpl" ? serviceClient : undefined),
+  });
+
+  defaultClient.configs.length = 0;
+  const res = await mountSessionMcp({
+    ctx: withGet as any,
+    sessionId: "session-option",
+    serverName: "from-option",
+    url: "http://127.0.0.1:8765/mcp",
+    mcpClientImpl: optionClient,
+  });
+
+  assert.deepEqual(optionClient.calls, ["mcp__from-option__ping"]);
+  assert.deepEqual(serviceClient.calls, [], "the service must not run when the option is given");
+  assert.equal(defaultClient.configs.length, 0);
+  assert.deepEqual(res.names, ["mcp__from-option__ping"]);
+
+  await res.dispose();
+});
+
+test("8. a plain-object context still reads the tools service from the tools property", async () => {
+  const ctx = {
+    tools: {
+      schemas: () => [
+        { name: "mcp__plain__ping" },
+        { name: "mcp__other__ping" },
+        { name: "read" },
+      ],
+    },
+  };
+  assert.equal("get" in ctx, false, "the direct property path must work without get");
+
+  const scopes: string[] = [];
+  const client = {
+    inject: ["tools"],
+    apply: async () => ({
+      dispose: async () => {
+        scopes.push("scope");
+      },
+    }),
+  };
+
+  const res = await mountSessionMcp({
+    ctx: ctx as any,
+    sessionId: "session-plain",
+    serverName: "plain",
+    url: "http://127.0.0.1:8765/mcp",
+    mcpClientImpl: client,
+  });
+
+  assert.deepEqual(res.names, ["mcp__plain__ping"], "only the server-prefixed tool is attached");
+
+  await res.dispose();
+  assert.deepEqual(scopes, ["scope"]);
+});
+
+test("9. a Cordis-like context whose tools property throws resolves the service through ctx.get", async () => {
+  const toolsService = {
+    schemas: () => [{ name: "mcp__guarded__ping" }, { name: "mcp__guarded__extra" }],
+  };
+  const ctx: { get(name: string): unknown } = {
+    get(name: string) {
+      return name === "tools" ? toolsService : undefined;
+    },
+  };
+  Object.defineProperty(ctx, "tools", {
+    get() {
+      throw new Error('cannot get property "tools" without inject');
+    },
+  });
+
+  const scopes: string[] = [];
+  const client = {
+    inject: ["tools"],
+    apply: async () => ({
+      dispose: async () => {
+        scopes.push("scope");
+      },
+    }),
+  };
+
+  const res = await mountSessionMcp({
+    ctx: ctx as any,
+    sessionId: "session-guarded",
+    serverName: "guarded",
+    url: "http://127.0.0.1:8765/mcp",
+    mcpClientImpl: client,
+  });
+
+  assert.deepEqual(res.names, ["mcp__guarded__ping", "mcp__guarded__extra"]);
+
+  await res.dispose();
+  assert.deepEqual(scopes, ["scope"]);
+});
+
+test("10. a context with neither tools nor get uses no schemas and still rejects empty tools", async () => {
+  const ctx = {};
+  assert.equal("tools" in ctx, false);
+  assert.equal("get" in ctx, false);
+
+  let disposed = false;
+  const client = {
+    inject: ["tools"],
+    apply: async () => ({
+      dispose: async () => {
+        disposed = true;
+      },
+    }),
+  };
+
+  await assert.rejects(
+    mountSessionMcp({
+      ctx: ctx as any,
+      sessionId: "session-no-tools",
+      serverName: "no-tools",
+      url: "http://127.0.0.1:8765/mcp",
+      mcpClientImpl: client,
+    }),
+    /MCP 服务「no-tools」未提供任何工具/,
+  );
+  assert.equal(disposed, true, "the mount scope is released when no tool name resolves");
 });

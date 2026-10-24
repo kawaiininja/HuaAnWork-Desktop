@@ -764,7 +764,7 @@ git commit -m "feat: run agent package HTTP and MCP servers in the sandbox"
 
 - [ ] **Step 2: 实现 `agent_skill_run`**
 
-参数 `{ script: string; args?: Record<string, unknown> }`。工具的 `exec.agent` 用 `sessionIdOfAgentRef` 解析子会话，缺失时回落 `currentCallerSession()`；用该 id 查 `AgentPackageRuntimeRegistry` 后调用 `runtime.runSkillScript(script, args)`。`runSkillScript` 在 runtime 内用 manifest 的 `skill.scripts` 精确匹配 `script`，`realpath` 复检在 `skill/scripts/` 下；`spawnConfined(scriptPath, { AGENT_SCRIPT_ARGS: JSON.stringify(args), AGENT_WORKSPACE: workspaceRoot, AGENT_STATE_DIR: tempDir }, workspaceRoot)`；`AGENT_STATE_DIR` 用 `mkdtemp` 创建、回合 afterIdle 删除，M1 无跨轮状态；输出 32 KiB 截断；非 0 退出返回 stderr 前 500 字符。
+参数 `{ script: string; args?: Record<string, unknown> }`。工具的 `exec.agent` 用 `sessionIdOfAgentRef` 解析子会话，缺失时回落 `currentCallerSession()`；用该 id 查 `AgentPackageRuntimeRegistry` 后调用 `runtime.runSkillScript(script, args)`。`runSkillScript` 在 runtime 内用 `listAgentPackageSkillScripts(packageDir)` 枚举的 `skill/scripts/**` 精确匹配 `script`（manifest 的 `skill` 只有 `entry`/`summary`，脚本声明来自包目录），`realpath` 复检在 `skill/scripts/` 下；`spawnConfined(scriptPath, { AGENT_SCRIPT_ARGS: JSON.stringify(args), AGENT_WORKSPACE: workspaceRoot, AGENT_STATE_DIR: tempDir }, workspaceRoot)`；`AGENT_STATE_DIR` 用 `mkdtemp` 创建、回合 afterIdle 删除，M1 无跨轮状态；输出 32 KiB 截断；非 0 退出返回 stderr 前 500 字符。
 
 - [ ] **Step 3: 实现 `agent_http`**
 
@@ -1016,6 +1016,8 @@ Expected: 全绿；`check:desktop-variants` 不新增白名单。若 `check` 的
 - [ ] **Step 5: Windows 真机验收**
 
 在 Windows 上重复 Step 4；记录 `enforcement:partial`、读/网络不隔离的观察、安装/退出后的进程清理；没有 Windows 真机则把 M1 标为 `BLOCKED`，不得宣布完成。
+
+2026-10-24 后续裁定：本步的验收面改为 workflow_dispatch 的 GHA Windows 探针。绿跑记为 `PASS（GHA Windows 探针）`。GUI 访谈、确认卡与真实模型 `@slug` 改为可选项。现行说明见 `docs/huaanwork-agent-packages-m1.md` §11。上面这段是计划原文。
 
 - [ ] **Step 6: 写 runbook**
 

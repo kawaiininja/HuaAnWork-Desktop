@@ -4,10 +4,11 @@ import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { AgentSource, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
+import type { AgentPackageHost } from './agent-package/host.ts'
 import { isSameOriginLoopbackRequest } from './loopback.ts'
 import { hasGit, listTree } from './native.ts'
 import { addPlugin, listPlugins, PluginCommandError, removePlugin, type PluginPnpmCapability } from './plugins-host.ts'
-import { getAgentsDirectory } from './sessions.ts'
+import { getAgentPackageHost, getAgentsDirectory } from './sessions.ts'
 import { removeSessionFilesById } from './session-sweep.ts'
 import {
   createSkill,
@@ -23,7 +24,7 @@ import {
   type SkillSourceFilter,
   type SkillUpdateInput,
 } from './skills-host.ts'
-import { listBundledSkills, readSkillToggles, SYSTEM_SKILLS } from '../huaanwork-guardrails/skills.ts'
+import { INTERNAL_BUNDLED_SKILLS, listBundledSkills, readSkillToggles, SYSTEM_SKILLS } from '../huaanwork-guardrails/skills.ts'
 import {
   RUNS_LIMIT,
   RUN_STATUSES,
@@ -148,6 +149,15 @@ const requireRuntime = (ctx: RouteContext): SessionRuntimeContext => {
     throw new RouteError(503, 'runtime-unavailable', 'host runtime context is not available')
   }
   return ctx.runtimeCtx
+}
+
+/** 本地智能体包宿主由 `index.ts` 在装配时注入;缺席是装配错误,按 503 报告。 */
+const requireAgentPackageHost = (): AgentPackageHost => {
+  const host = getAgentPackageHost()
+  if (host === undefined) {
+    throw new RouteError(503, 'runtime-unavailable', 'agent package host is not initialized')
+  }
+  return host
 }
 
 export const workspaceRoute = errorRoute('workspace-error')
@@ -330,11 +340,14 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     handler: storeRoute(async (_req, ctx) => {
       // 旧 host.ts:1182-1195 语义:toggles 只作用于内置技能,三源合并全局按名排序、同名不去重。
       const toggles = readSkillToggles(ctx.profileDir)
-      const bundled = listBundledSkills().map((skill) => ({
-        ...skill,
-        source: 'bundled' as const,
-        enabled: SYSTEM_SKILLS.has(skill.name) || toggles[skill.name] === true,
-      }))
+      // 内部技能(create-agent)由创建入口注入,不进技能中心;仍留 listBundledSkills 供重名检查。
+      const bundled = listBundledSkills()
+        .filter((skill) => !INTERNAL_BUNDLED_SKILLS.has(skill.name))
+        .map((skill) => ({
+          ...skill,
+          source: 'bundled' as const,
+          enabled: SYSTEM_SKILLS.has(skill.name) || toggles[skill.name] === true,
+        }))
       const user = await listUserSkills(ctx.profileDir)
       const external = await listExternalSkills()
       // 全局按名称排序;跨来源同名不去重(前端以 source:name 为 key 双卡展示,所见即运行时遮蔽关系)
@@ -470,6 +483,11 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
         throw new RouteError(400, 'bad-request', 'agent.addEndpoint requires object body')
       }
+      const name = (req.body as Record<string, unknown>).name
+      // 包在 `@` 分流里先于本地工具命中:同名工具会永远不可达,写路径直接拒绝。
+      if (typeof name === 'string' && name && getAgentPackageHost()?.listLocal().some((pkg) => pkg.slug === name)) {
+        throw new RouteError(400, 'bad-request', `智能体 @${name} 与现有智能体包重名，请换一个名称`)
+      }
       return getAgentsDirectory().addEndpoint(req.body as Parameters<ReturnType<typeof getAgentsDirectory>['addEndpoint']>[0])
     }),
   }, // Task 2 (M4)
@@ -488,6 +506,47 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { ok: true }
     }),
   }, // Task 2 (M4)
+  // agent package(Task 7):本地包与 legacy 目录两条来源。写路径按 `listLocal()`
+  // 判定归属(含损坏包);损坏包只允许关闭,启用仍抛错并由 storeRoute 映射为 400。
+  { method: 'agent.packageList', http: 'GET', path: '/huaanwork/agent/package/list', handler: storeRoute(async () => requireAgentPackageHost().listWithLegacy()) },
+  {
+    method: 'agent.packageDetail',
+    http: 'GET',
+    path: '/huaanwork/agent/package/detail',
+    handler: storeRoute(async (req) => {
+      const slug = queryParam(req, 'slug') ?? ''
+      if (!slug) throw new RouteError(400, 'bad-request', 'agent.packageDetail requires params.slug')
+      const local = requireAgentPackageHost().detail(slug)
+      if (local !== undefined) return local
+      const legacy = await getAgentsDirectory().get(slug)
+      if (legacy === undefined) throw new RouteError(400, 'not-found', `智能体「${slug}」不存在`)
+      return legacy
+    }),
+  },
+  {
+    method: 'agent.packageSetEnabled',
+    http: 'POST',
+    path: '/huaanwork/agent/package/setEnabled',
+    handler: storeRoute(async (req, ctx) => {
+      if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        throw new RouteError(400, 'bad-request', 'agent.packageSetEnabled requires object body')
+      }
+      const body = req.body as Record<string, unknown>
+      const slug = typeof body.slug === 'string' ? body.slug : ''
+      if (!slug) throw new RouteError(400, 'bad-request', 'agent.packageSetEnabled requires params.slug')
+      const enabled = body.enabled === true
+      const host = requireAgentPackageHost()
+      if (host.listLocal().some((pkg) => pkg.slug === slug)) {
+        host.setEnabled(slug, enabled)
+      } else {
+        getAgentsDirectory().setEnabled(slug, enabled, body.confirmPermissions === true)
+      }
+      // 两条分支都只在写入成功后发事件:客户端据此刷新列表。
+      ctx.emit({ event: 'agent/changed', slug })
+      return { ok: true }
+    }),
+  },
+  { method: 'agent.invocableList', http: 'GET', path: '/huaanwork/agent/invocable', handler: storeRoute(async () => requireAgentPackageHost().invocableWithLegacy()) },
 
   // status (纯内存 handler: 恒返回 { ready: true }, 无 I/O 或异常路径)
   { method: 'status.get', http: 'GET', path: '/huaanwork/status', handler: async () => ({ ready: true }) }, // Task 4

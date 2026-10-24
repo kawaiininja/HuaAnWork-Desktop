@@ -18,10 +18,11 @@ export default function AtAgentMenu({
       empty="没有已启用的智能体。到智能体页打开开关或添加入口。"
       items={agents.map((a) => ({
         key: `${a.source}:${a.name}`,
-        name: a.name,
+        name: a.displayName ?? a.name,
         prefix: "@",
         source: a.kind === "agent" ? "智能体" : "小工具",
         description: a.description,
+        subtitle: `@${a.name}`,
       }))}
       activeIndex={activeIndex}
       onHover={onHover}

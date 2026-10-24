@@ -8,19 +8,93 @@ export const inject = ["tools"];
 
 export function apply(_ctx: unknown): void {}
 
-export async function mountSessionMcp(opts: {
+/** The MCP client plugin surface `mountSessionMcp` mounts onto the session context. */
+export type McpClientImpl = { apply: Function; inject: string[] };
+
+/** The subset of the Cordis tools service `mountSessionMcp` reads. */
+export type ToolsService = { schemas?: Function };
+
+export type MountSessionMcpOptions = {
   ctx: {
     plugin?: Function;
-    tools: { schemas?: Function };
+    /** Present on plain-object test contexts; reading it on a Cordis Context may throw. */
+    tools?: ToolsService;
     huaanworkAttachments?: AttachmentMaps;
+    /** Reads an optional Cordis service; hand-built test contexts may omit it. */
+    get?: (name: string) => unknown;
   };
   sessionId: string;
   serverName: string;
   url: string;
   headers?: Record<string, string>;
-  mcpClientImpl?: { apply: Function; inject: string[] }; // optional injection seam for testing
-}): Promise<{ names: string[]; dispose: () => Promise<void> }> {
-  const client = opts.mcpClientImpl ?? (opts.ctx as any)?.mcpClientImpl ?? defaultMcpClient;
+  mcpClientImpl?: McpClientImpl; // optional injection seam for testing
+};
+
+function asMcpClient(value: unknown): McpClientImpl | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as { apply?: unknown };
+  return typeof candidate.apply === "function" ? (candidate as McpClientImpl) : undefined;
+}
+
+/**
+ * Resolves the MCP client plugin: the explicit option, then the optional
+ * `mcpClientImpl` service, then the packaged client.
+ *
+ * The service is read through `ctx.get`. Reading `ctx.mcpClientImpl` as a
+ * property throws `cannot get property "mcpClientImpl" without inject` on a
+ * real Cordis Context, because only the `tools` service is declared.
+ */
+function resolveMcpClient(opts: MountSessionMcpOptions): McpClientImpl {
+  if (opts.mcpClientImpl) return opts.mcpClientImpl;
+  if (typeof opts.ctx.get === "function") {
+    try {
+      const service = asMcpClient(opts.ctx.get("mcpClientImpl"));
+      if (service) return service;
+    } catch {
+      // An unregistered optional service may throw instead of returning undefined.
+    }
+  }
+  return defaultMcpClient;
+}
+
+/**
+ * Resolves the tools service: the `tools` property first, then `ctx.get("tools")`.
+ *
+ * The property read is kept for plain-object contexts and for contexts that
+ * declare `tools` in their injections. A Cordis Context without that
+ * declaration throws `cannot get property "tools" without inject`, so the read
+ * is guarded and the service is then taken from the global service store.
+ *
+ * @param ctx - Session context whose tools service is optional.
+ * @returns The tools service, or `undefined` when the context provides none.
+ */
+function resolveTools(ctx: MountSessionMcpOptions["ctx"]): ToolsService | undefined {
+  try {
+    if (ctx.tools) return ctx.tools;
+  } catch {
+    // An undeclared `tools` property throws on a Cordis Context; `ctx.get` below reads it.
+  }
+  if (typeof ctx.get === "function") {
+    try {
+      const service = ctx.get("tools");
+      if (typeof service === "object" && service !== null) return service as ToolsService;
+    } catch {
+      // An unregistered optional service may throw instead of returning undefined.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Mounts one MCP server's tools for a session and attaches their names to it.
+ *
+ * @param opts - Session context, server address, and the optional client seam.
+ * @returns Mounted tool names and the disposal that unmounts them.
+ */
+export async function mountSessionMcp(
+  opts: MountSessionMcpOptions,
+): Promise<{ names: string[]; dispose: () => Promise<void> }> {
+  const client = resolveMcpClient(opts);
   const mcpApply = client.apply;
   const mcpInject = client.inject ?? ["tools"];
 
@@ -37,8 +111,9 @@ export async function mountSessionMcp(opts: {
     ? await opts.ctx.plugin({ inject: mcpInject, apply: (fiber: any) => mcpApply(fiber, config) })
     : await mcpApply(opts.ctx as any, config);
 
-  const schemas = (typeof opts.ctx.tools?.schemas === "function"
-    ? opts.ctx.tools.schemas()
+  const tools = resolveTools(opts.ctx);
+  const schemas = (typeof tools?.schemas === "function"
+    ? tools.schemas()
     : []) as Array<{ name?: string }>;
   const prefix = `mcp__${opts.serverName}__`;
   const names: string[] = [];

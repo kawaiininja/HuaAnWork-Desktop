@@ -101,6 +101,17 @@ test("App consumes the two production helpers at their only call sites", () => {
   assert.doesNotMatch(APP_SOURCE, /markApprovalAnswered\(/);
 });
 
+test("agent notices and confirm cards follow their session instead of the live tab", () => {
+  // 回合中新建任务会把 liveChatRef 移到新标签;agent 事件自带 sessionId,
+  // 必须走 targetTabFor,否则旧会话的卡片/提示会落到新标签。
+  const start = APP_SOURCE.indexOf('if (event.event === "agent/notice")');
+  const end = APP_SOURCE.indexOf('if (event.event === "agent/changed")', start);
+  assert.ok(start >= 0 && end > start, "agent notice/confirm branches are still present");
+  const block = APP_SOURCE.slice(start, end);
+  assert.match(block, /targetTabFor\(eventSessionId\)/);
+  assert.doesNotMatch(block, /liveChatRef\.current/);
+});
+
 test("App skips plan-turn outcomes before it lists the workspace tree", () => {
   const start = APP_SOURCE.indexOf("const appendTurnOutcome = async");
   const end = APP_SOURCE.indexOf("const appendGoalStopped", start);

@@ -5,6 +5,15 @@ import { fileURLToPath } from "node:url";
 
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
 import { currentCallerSession, forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
+import {
+  AGENT_PACKAGE_CHILD_TOOLS,
+  agentPackageChildAttachmentNames,
+  attachAgentTools,
+  type AttachmentMaps,
+} from "./agent-attachments.ts";
+import { refreshAgentRestrict } from "./present-as.ts";
+import type { AgentPackageSubagentRequest } from "../huaanwork-host/agent-package/types.ts";
+import { legacyAgentRequestOf, type LegacyAgentRequest } from "../huaanwork-host/subagents-service.ts";
 
 export const name = "huaanwork-skills";
 export const inject = ["skills", "agents", "tools", "subagents"];
@@ -43,6 +52,12 @@ type SkillRegistration = {
   resourceBase?: { kind: "directory"; path: string };
 };
 
+/** `startActivation` 返回值中包装消费的成员:子会话 id 与本地子 agent。 */
+type ActivationRun = {
+  childId?: unknown;
+  localAgent?: Agent;
+};
+
 type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨 skills/agents/tools/subagents 四服务,无统一类型导出
   skills: {
     register(skill: SkillRegistration): () => void;
@@ -53,15 +68,15 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   };
   subagents?: {
     start(...args: never[]): Promise<{ localAgent?: Agent }>;
-    startActivation?(...args: never[]): Promise<unknown>;
+    startActivation?(...args: never[]): Promise<ActivationRun | undefined>;
   };
   huaanworkAgentRequest?: {
-    current?: {
-      name: string;
-      allow: string[];
-      persona: string;
-    } | undefined;
+    current?: LegacyAgentRequest | undefined;
   };
+  /** `@slug` 包回合请求;dispatch 在 startActivation 之前写入,activation 包装消费。 */
+  huaanworkAgentPackageRequest?: { current?: AgentPackageSubagentRequest | null };
+  /** 会话工具附件表;包运行时工具与 MCP 名字按子会话挂载。 */
+  huaanworkAttachments?: AttachmentMaps;
   on(
     event: "tools/pre-execute" | "agent/created" | "subagent/start" | "subagent/end" | "tools/change",
     listener: (...args: never[]) => unknown,
@@ -216,8 +231,10 @@ export function apply(ctx: Context): void {
   if (start && ctx.subagents) {
     const original = start.bind(ctx.subagents);
     ctx.subagents.start = async (...args: never[]) => {
+      // 在 await 之前取快照:dispatch 的 finally 会在 run 结束后清空容器。
+      const pkg = ctx.huaanworkAgentPackageRequest?.current;
+      const current = ctx.huaanworkAgentRequest?.current;
       try {
-        const current = ctx.huaanworkAgentRequest?.current;
         if (current) {
           if (!current.persona || current.persona.trim() === "") {
             throw new Error("智能体人设为空");
@@ -234,6 +251,34 @@ export function apply(ctx: Context): void {
           const allow = current.allow.filter((name) => existing.includes(name));
           tools?.restrict?.({ allow });
         }
+        // Package requests are keyed to the session that dispatched them: a subagent
+        // started by any other session while this turn is in flight keeps its own tools
+        // and attachments instead of inheriting this package's runtime.
+        if (pkg && run?.localAgent && parentFromCall !== undefined && pkg.parentSessionId === parentFromCall) {
+          // header.id 是真实子会话 id;某些 provider 只填 agent/session id,故再回落一次。
+          const childSessionId =
+            sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
+          if (childSessionId) {
+            if (ctx.huaanworkAttachments) {
+              // MCP 名字在挂载时先落在父会话上(健康检查要求先拿到工具名),发现后由
+              // host 从父会话摘掉;子会话要执行 mcp__* 仍需自己的附件,否则 policy 的
+              // attached 判定会拒绝。
+              attachAgentTools(ctx.huaanworkAttachments, childSessionId, [
+                ...AGENT_PACKAGE_CHILD_TOOLS,
+                ...(pkg.runtime.mcpNames ?? []),
+              ]);
+            }
+            // 绑定必须与附件同批完成,且先于 refreshAgentRestrict:present-as 只在附件里
+            // 找非 ALLOWED_TOOLS 的名字,晚挂会让它先前算出的 restrict 继续遮住 mcp__*。
+            pkg.bindChild(childSessionId);
+            refreshAgentRestrict(ctx as never, childSessionId);
+          }
+          const tools = run.localAgent.ctx?.get?.("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
+          const allow = pkg.allow.filter((name) => existing.includes(name));
+          tools?.restrict?.({ allow });
+        }
         if (run?.localAgent) {
           consumePendingSpawn(run.localAgent);
         }
@@ -242,7 +287,16 @@ export function apply(ctx: Context): void {
         }
         return run;
       } finally {
-        if (ctx.huaanworkAgentRequest) {
+        // 只清本次快照:重叠的 activation 不能清掉别处新写入的包/legacy 请求。
+        if (
+          ctx.huaanworkAgentPackageRequest &&
+          pkg !== undefined &&
+          pkg !== null &&
+          ctx.huaanworkAgentPackageRequest.current === pkg
+        ) {
+          ctx.huaanworkAgentPackageRequest.current = null;
+        }
+        if (ctx.huaanworkAgentRequest && current !== undefined && ctx.huaanworkAgentRequest.current === current) {
           ctx.huaanworkAgentRequest.current = undefined;
         }
       }
@@ -253,8 +307,80 @@ export function apply(ctx: Context): void {
   if (activation && ctx.subagents) {
     const originalActivation = activation.bind(ctx.subagents);
     ctx.subagents.startActivation = async (...args: never[]) => {
-      const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
-      return startParent.run(parentFromCall, () => originalActivation(...args));
+      // 在 await 之前取快照:包请求是宿主在 startActivation 之前发布的全局容器;
+      // legacy 请求挂在本次调用的 spec 符号键上,不读全局容器。
+      const pkg = ctx.huaanworkAgentPackageRequest?.current;
+      const legacy = legacyAgentRequestOf(args[0]);
+      try {
+        const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
+        const run = await startParent.run(parentFromCall, () => originalActivation(...args));
+        const childSessionId = run === undefined ? undefined : sessionIdOf(run.childId);
+        // 包请求只认宿主预留的子会话 id:provider 沿用预留 id 才在包装里接线。
+        // 另分配的 id 由 host 的 activation 返回后路径补挂;同会话并发发起的
+        // legacy 子代理因此不会命中另一回合的包请求。
+        let packageApplied = false;
+        if (
+          pkg !== undefined &&
+          pkg !== null &&
+          run !== undefined &&
+          childSessionId !== undefined &&
+          parentFromCall !== undefined &&
+          pkg.parentSessionId === parentFromCall &&
+          pkg.childId === childSessionId
+        ) {
+          packageApplied = true;
+          if (ctx.huaanworkAttachments) {
+            // host 已按预留子会话 id 预先挂载;这里按同一 id 再挂一次是幂等安全网,
+            // 覆盖 provider 沿用预留 id 但 host 预挂之后工具表变化的场景。
+            // MCP 名字在挂载时先落在父会话上(健康检查要求先拿到工具名),发现后由
+            // host 从父会话摘掉;子会话要执行 mcp__* 仍需自己的附件,否则 policy 的
+            // attached 判定会拒绝。
+            attachAgentTools(
+              ctx.huaanworkAttachments,
+              childSessionId,
+              agentPackageChildAttachmentNames(pkg.allow, pkg.runtime.mcpNames ?? []),
+            );
+          }
+          // 绑定必须与附件同批完成,且先于 refreshAgentRestrict:present-as 只在附件里
+          // 找非 ALLOWED_TOOLS 的名字,晚挂会让它先前算出的 restrict 继续遮住 mcp__*。
+          pkg.bindChild(childSessionId);
+          refreshAgentRestrict(ctx as never, childSessionId);
+          const childAgent = ctx.agents?.get?.(childSessionId) ?? run.localAgent;
+          const tools = childAgent?.ctx?.get?.("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          const existing = schemas.flatMap((schema) => (schema.name ? [schema.name] : []));
+          const allow = pkg.allow.filter((name) => existing.includes(name));
+          tools?.restrict?.({ allow });
+        }
+        // legacy `@agent` 没有智能体包的运行时工具、附件或 registry:只按目录条目
+        // 声明的 allow 收窄子会话工具,交集与旧 `start` 包装一致。
+        if (!packageApplied && legacy !== undefined && run !== undefined) {
+          const childAgent =
+            (childSessionId === undefined ? undefined : ctx.agents?.get?.(childSessionId)) ?? run.localAgent;
+          const tools = childAgent?.ctx?.get?.("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          const existing = schemas.flatMap((schema) => (schema.name ? [schema.name] : []));
+          const allow = legacy.allow.filter((name) => existing.includes(name));
+          tools?.restrict?.({ allow });
+        }
+        if (run?.localAgent) {
+          consumePendingSpawn(run.localAgent);
+        }
+        return run;
+      } finally {
+        // 只清本次快照:重叠的 activation 不能清掉别处新写入的包/legacy 请求。
+        if (
+          ctx.huaanworkAgentPackageRequest &&
+          pkg !== undefined &&
+          pkg !== null &&
+          ctx.huaanworkAgentPackageRequest.current === pkg
+        ) {
+          ctx.huaanworkAgentPackageRequest.current = null;
+        }
+        if (ctx.huaanworkAgentRequest && legacy !== undefined && ctx.huaanworkAgentRequest.current === legacy) {
+          ctx.huaanworkAgentRequest.current = undefined;
+        }
+      }
     };
   }
 }
@@ -426,6 +552,12 @@ export function bundledSkillDir(name: string): string | undefined {
 
 /** 系统技能：始终启用，不参与开关（承载 explore/test-fix 的 restrict/guard 机制）。 */
 export const SYSTEM_SKILLS: ReadonlySet<string> = new Set(["explore", "test-fix"]);
+
+/**
+ * 宿主内部技能:正文由创建入口直接注入,不注册进全局技能目录,也不在技能中心列出。
+ * `listBundledSkills` 仍返回它们,供新增/导入技能的重名检查。
+ */
+export const INTERNAL_BUNDLED_SKILLS: ReadonlySet<string> = new Set(["create-agent"]);
 
 /** 开关表落点(dshHome = $DSH_HOME/旧, Desktop 组合下是 profileDir);导出给迁移侧同源引用。 */
 export function skillTogglesPath(dshHome: string): string {

@@ -296,6 +296,68 @@ test("unknown mcp tool name denies unless attached", () => {
   assert.equal(guard({ ...call, attached: true }), "deny");
 });
 
+test("attached mcp tools allow in a package runtime child, but not in a normal session", () => {
+  const call = { name: "mcp__issue-tracker__search", args: {}, workspaceRoot: ws, attached: true };
+
+  // 包运行子会话没有审批界面：ask/smart 档也必须放行（guard 同判定）。
+  for (const mode of ["ask", "smart", "full"] as const) {
+    assert.equal(preExecute({ ...call, packageRuntime: true }, mode), "allow", `${mode} preExecute`);
+    assert.equal(guard({ ...call, packageRuntime: true }, mode), "allow", `${mode} guard`);
+    assert.deepEqual(preExecuteExplained({ ...call, packageRuntime: true }, mode), { decision: "allow" }, `${mode} explained`);
+  }
+
+  // 普通会话（没有 packageRuntime 标记）保持原有询问行为。
+  assert.equal(preExecute(call, "smart"), "ask");
+  assert.equal(guard(call, "smart"), "deny");
+  assert.deepEqual(guardExplained(call, "smart"), { decision: "deny", reason: REASON_NEEDS_APPROVAL });
+  assert.equal(preExecute(call, "full"), "allow");
+
+  // 未附加仍然拒绝，且原因点名工具未附加（packageRuntime 不豁免 attached）。
+  const detached = { name: call.name, args: {}, workspaceRoot: ws };
+  for (const mode of ["ask", "smart", "full"] as const) {
+    assert.deepEqual(
+      preExecuteExplained({ ...detached, packageRuntime: true }, mode),
+      { decision: "deny", reason: reasonToolUnattached(call.name) },
+      `${mode} detached`,
+    );
+  }
+  assert.equal(guard({ ...detached, packageRuntime: true }, "smart"), "deny");
+});
+
+test("agent package runtime tools allow when attached and deny when unattached", () => {
+  for (const name of ["agent_http", "agent_skill_run"]) {
+    const detached = { name, args: {}, workspaceRoot: ws };
+    assert.equal(preExecute(detached), "deny", `${name} ask`);
+    assert.equal(guard(detached), "deny", `${name} guard`);
+    assert.deepEqual(preExecuteExplained(detached), { decision: "deny", reason: reasonToolUnattached(name) }, `${name} reason`);
+
+    // 子会话没有审批界面：附加即放行，三档一致，不再落到 ask。
+    const attached = { ...detached, attached: true };
+    for (const mode of ["ask", "smart", "full"] as const) {
+      assert.equal(preExecute(attached, mode), "allow", `${name} ${mode} preExecute`);
+      assert.equal(guard(attached, mode), "allow", `${name} ${mode} guard`);
+      assert.deepEqual(preExecuteExplained(attached, mode), { decision: "allow" }, `${name} ${mode} explained`);
+    }
+  }
+});
+
+test("agent_propose/agent_commit keep asking so the consent UI is not bypassed", () => {
+  for (const name of ["agent_propose", "agent_commit"]) {
+    const attached = { name, args: {}, workspaceRoot: ws, attached: true };
+    assert.equal(preExecute(attached, "smart"), "ask", `${name} smart`);
+    assert.deepEqual(
+      guardExplained(attached, "smart"),
+      { decision: "deny", reason: REASON_NEEDS_APPROVAL },
+      `${name} guard`,
+    );
+    assert.equal(preExecute(attached, "ask"), "ask", `${name} ask`);
+    assert.equal(preExecute(attached, "full"), "allow", `${name} full`);
+
+    const detached = { name, args: {}, workspaceRoot: ws };
+    assert.deepEqual(preExecuteExplained(detached, "smart"), { decision: "deny", reason: reasonToolUnattached(name) }, `${name} unattached`);
+  }
+});
+
 test("route tools are allowed when not attached in ask mode", () => {
   for (const name of ["propose_plan", "request_input"]) {
     const call = { name, args: {}, workspaceRoot: ws };

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "slug": "weekly-report",
+  "displayName": "周报助手",
+  "description": "把一周工作整理成周报",
+  "version": "1.0.0",
+  "draftId": "draft-agent-package-fixture",
+  "createdAt": "2026-10-23T00:00:00.000Z",
+  "updatedAt": "2026-10-23T00:00:00.000Z",
+  "persona": "persona.md",
+  "skill": {
+    "entry": "skill/SKILL.md",
+    "summary": "生成周报"
+  },
+  "tools": {
+    "mode": "both",
+    "http": {
+      "entry": "tools/http/server.mjs"
+    },
+    "mcp": {
+      "entry": "tools/mcp/server.mjs"
+    }
+  },
+  "allowSkills": []
+}

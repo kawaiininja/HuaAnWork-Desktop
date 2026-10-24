@@ -20,7 +20,7 @@ import {
   REASON_SHELL_HARD_DENY,
   reasonToolUnattached,
 } from "@huaanwork/policy";
-import { attachHostTool, emptyAttachments, isHostAttached } from "../../src/huaanwork-guardrails/agent-attachments.ts";
+import { attachHostTool, attachAgentTools, emptyAttachments, isHostAttached } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 
 /** bundle 给判定原因加的前缀（policy.ts）：pre-execute deny / guard deny。 */
 const POLICY = (reason: string) => `huaanwork-policy: ${reason}`;
@@ -818,6 +818,70 @@ test("toToolCall is fail-closed without execution.agent", async () => {
     reason: POLICY(reasonToolUnattached("call_host_tool")),
   });
   assert.equal(guard?.(sessionB), GUARD(reasonToolUnattached("call_host_tool")));
+});
+
+test("attached mcp tools allow for a package runtime child and still ask for a normal session", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
+  const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-policy-mcp-"));
+  const toolName = "mcp__weekly-report__echo";
+  try {
+    writeFileSync(join(profileDir, "huaanwork-settings.json"), JSON.stringify({ guard_mode: "smart" }), "utf8");
+    const attachments = emptyAttachments();
+    attachAgentTools(attachments, "package-child", [toolName]);
+    attachAgentTools(attachments, "normal-session", [toolName]);
+    const packageChildSessions = new Set(["package-child"]);
+
+    let preExecute: PreExecute | undefined;
+    let guard:
+      | ((execution: {
+          name: string;
+          arguments: Record<string, unknown>;
+          agent?: { id?: string; session?: { id?: string } };
+          callId?: string;
+        }) => string | undefined)
+      | undefined;
+
+    apply({
+      huaanworkWorkspaceRoot: { current: process.cwd() },
+      huaanworkProfileDir: profileDir,
+      huaanworkAttachments: attachments,
+      huaanworkPackageChildSessions: packageChildSessions,
+      on(event: string, listener: PreExecute) {
+        if (event === "tools/pre-execute") preExecute = listener;
+      },
+      tools: {
+        guard(listener: typeof guard) {
+          guard = listener;
+          return () => undefined;
+        },
+      },
+    });
+
+    const call = (sessionId: string, callId: string) => ({
+      name: toolName,
+      arguments: {},
+      agent: { session: { id: sessionId } },
+      callId,
+    });
+
+    // smart 档：包运行子会话没有审批界面，自己挂载的 MCP 工具直接放行（guard 同判定）。
+    const packageChild = call("package-child", "pkg-1");
+    assert.deepEqual(await preExecute?.(packageChild, async () => ({ kind: "allow" })), { kind: "allow" });
+    assert.equal(guard?.(packageChild), undefined);
+
+    // 普通会话保持原有行为：pre-execute ask，guard 无核销时 deny。
+    const normal = call("normal-session", "normal-1");
+    assert.deepEqual(await preExecute?.(normal, async () => ({ kind: "allow" })), { kind: "ask" });
+    assert.equal(guard?.(normal), GUARD_NEEDS_APPROVAL);
+
+    // 清理后（id 移出集合）同一会话回到普通询问，标记不是永久的。
+    packageChildSessions.delete("package-child");
+    assert.deepEqual(await preExecute?.(call("package-child", "pkg-2"), async () => ({ kind: "allow" })), {
+      kind: "ask",
+    });
+  } finally {
+    rmSync(profileDir, { recursive: true, force: true });
+  }
 });
 
 test("re-created attachments maps are empty (reboot contract)", () => {

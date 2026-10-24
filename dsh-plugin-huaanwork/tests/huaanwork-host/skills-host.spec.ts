@@ -550,3 +550,31 @@ describe('restoreEnabledBundledSkills boot 恢复(M4 评审 D2)', () => {
   })
 })
 
+describe('内部技能不可全局启用(设计 §6.1)', () => {
+  test('create-agent 被 setSkillEnabled 与 boot 恢复同时跳过', async () => {
+    const home = makeHome()
+
+    await expect(setSkillEnabled(home, 'create-agent', true)).rejects.toThrow(/内部技能，不能启停/)
+    expect(readSkillToggles(home)['create-agent']).toBeUndefined()
+
+    // 旧开关表里即使残留 create-agent,重启也不得注册进全局技能目录。
+    writeFileSync(
+      join(home, 'skill-toggles.json'),
+      JSON.stringify({ 'create-agent': true, pdf: true }),
+    )
+    const registered: string[] = []
+    const mockRegistrar = {
+      skills: {
+        register: (skill: { name: string }) => {
+          registered.push(skill.name)
+          return () => {}
+        },
+      },
+    }
+    restoreEnabledBundledSkills(home, mockRegistrar)
+
+    expect(registered).toEqual(['pdf'])
+    expect(getSkillHandlesForTest().has('create-agent')).toBe(false)
+  })
+})
+
