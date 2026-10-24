@@ -130,6 +130,18 @@ test('rejects packages whose declared structure is missing or over budget', (t) 
   assert.throws(() => readUnsignedPackageFiles(invalidManifest), /包结构非法/)
 })
 
+test('rejects a package over the 5 MiB total or per-file persona budget', (t) => {
+  const oversized = createValidPackageDir()
+  t.after(() => removeTempDir(oversized))
+  writeFileSync(join(oversized, 'padding.bin'), Buffer.alloc(5 * 1024 * 1024 + 1))
+  assert.throws(() => readUnsignedPackageFiles(oversized), /智能体包超过/)
+
+  const personaOverBudget = createValidPackageDir()
+  t.after(() => removeTempDir(personaOverBudget))
+  writeFileSync(join(personaOverBudget, 'persona.md'), Buffer.alloc(32 * 1024 + 1))
+  assert.throws(() => readUnsignedPackageFiles(personaOverBudget), /persona\.md 超过/)
+})
+
 test('rejects symlinks and signature content in the unsigned entry point', (t) => {
   const linked = createValidPackageDir()
   t.after(() => removeTempDir(linked))

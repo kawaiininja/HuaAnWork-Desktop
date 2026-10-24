@@ -159,7 +159,7 @@ function readPackageContents(
   if (rootStat.isSymbolicLink()) throw structureError('包目录不得是符号链接')
   if (!rootStat.isDirectory()) throw structureError('包路径必须是目录')
 
-  const state: { entries: number; files: AgentPackageFile[] } = { entries: 0, files: [] }
+  const state: { entries: number; bytes: number; files: AgentPackageFile[] } = { entries: 0, bytes: 0, files: [] }
   walkPackageDir(packageDir, '', options, state)
   const manifest = validatePackageStructure(state.files)
   return { manifest, files: state.files }
@@ -169,7 +169,7 @@ function walkPackageDir(
   packageDir: string,
   relativeDir: string,
   options: ReadPackageFilesOptions,
-  state: { entries: number; files: AgentPackageFile[] },
+  state: { entries: number; bytes: number; files: AgentPackageFile[] },
 ): void {
   const absoluteDir = relativeDir === '' ? packageDir : join(packageDir, relativeDir)
   const dirents = readdirSync(absoluteDir, { withFileTypes: true })
@@ -197,6 +197,11 @@ function walkPackageDir(
       continue
     }
     if (options.ignoreSignature === true && SIGNATURE_FILES.has(relativePath)) continue
+    // 先用 lstat 的声明大小累计总量,避免把超大文件整块读进内存后才判超帽。
+    state.bytes += stat.size
+    if (state.bytes > MAX_PACKAGE_BYTES) {
+      throw structureError(`智能体包超过${MAX_PACKAGE_BYTES}字节上限`)
+    }
     state.files.push({ path: relativePath, data: readFileSync(absolutePath) })
   }
 }
