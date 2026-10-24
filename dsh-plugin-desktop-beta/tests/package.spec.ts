@@ -120,8 +120,9 @@ describe('published package surface', () => {
       'packages/huaanwork-web-tools',
       'market-server',
       'update-server',
+      'packages/catalog-signing',
     ]
-    expect(workspaceManifest.workspaces).toHaveLength(12)
+    expect(workspaceManifest.workspaces).toHaveLength(13)
     for (const ws of EXPECTED_WORKSPACES) {
       expect(workspaceManifest.workspaces).toContain(ws)
     }
