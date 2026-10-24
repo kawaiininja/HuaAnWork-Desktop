@@ -1,7 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
+import { createGunzip } from 'node:zlib'
 
 import { canonicalJson, verifyAgentPackageDigestSignature } from '@huaanwork/catalog-signing'
 import type { CatalogKeyringEntry, CatalogSignature } from '@huaanwork/catalog-signing'
@@ -20,6 +21,28 @@ import type { AgentPackageManifest } from './manifest.ts'
 
 /** 单个 bundle(压缩后)与解包后文件总量的共同上限。 */
 export const MAX_AGENT_PACKAGE_BUNDLE_BYTES = 5 * 1024 * 1024
+
+/**
+ * 解压后归档总量上限:内容预算 + 每条 512 字节头与最多 511 字节填充 + 两个 EOF 块。
+ *
+ * 这是内容预算之外唯一允许出现的字节;超过它就意味着文件内容必然顶破
+ * {@link MAX_AGENT_PACKAGE_BUNDLE_BYTES},因此共用同一句错误文案。它同时兜住
+ * 了不进入 `onentry` 的 body:目录头声明的 body(node-tar 会把目录 size 归零,
+ * 那些字节被当作后续块读掉)、PAX/global 扩展头,以及 tar 未知类型的条目。
+ *
+ * PAX 头与条目头共用这份按条目计的余量:路径全部顶到 512 字节、内容又顶到
+ * 5 MiB 的病态包会被保守地判超帽,普通包(两条头之和不到 2 KiB/条)不受影响。
+ */
+const MAX_AGENT_PACKAGE_UNPACKED_BYTES =
+  MAX_AGENT_PACKAGE_BUNDLE_BYTES + MAX_AGENT_PACKAGE_ENTRIES * 1024 + 1024
+
+/**
+ * 单个 PAX/global 扩展头正文上限。
+ *
+ * 门限内的 meta 正文会整块进内存;包的路径上限是 512 字节,PAX 头所需远小于
+ * 64 KiB。超过门限的 meta 条目被 tar 丢弃,其 body 仍由解压总量 meter 计数。
+ */
+const MAX_AGENT_PACKAGE_META_BYTES = 64 * 1024
 
 const SIGNATURE_DIR = '.signature'
 const DIGEST_PATH = `${SIGNATURE_DIR}/package-digest.json`
@@ -113,7 +136,11 @@ export async function inspectSignedAgentPackageBundle(
 ): Promise<SignedAgentPackageInspection> {
   const archive = await unpackCapped(bundle)
   for (const directory of archive.directories) {
-    if (isSignaturePath(directory)) throw structureError('不接受额外的签名目录内容')
+    // 显式 `.signature/` 目录条目只是签名文件的父目录,不是额外内容;
+    // 它下面的任何其他目录(以及任何其他签名文件)仍然拒绝。
+    if (isSignaturePath(directory) && directory !== SIGNATURE_DIR) {
+      throw structureError('不接受额外的签名目录内容')
+    }
   }
 
   const content: AgentPackageFile[] = []
@@ -160,7 +187,7 @@ async function packArchive(input: AgentPackageFile[], allowSignatureFiles: boole
   const files = normalizeBuildFiles(input, allowSignatureFiles)
   const totalBytes = files.reduce((sum, file) => sum + file.data.byteLength, 0)
   if (totalBytes > MAX_AGENT_PACKAGE_BUNDLE_BYTES) {
-    throw structureError(`智能体包超过${MAX_AGENT_PACKAGE_BUNDLE_BYTES}字节上限`)
+    throw packageTooLargeError()
   }
 
   const staging = mkdtempSync(join(tmpdir(), 'huaanwork-agent-package-'))
@@ -198,7 +225,7 @@ function normalizeBuildFiles(
   const seen = new Set<string>()
   const normalized: AgentPackageFile[] = []
   for (const file of files) {
-    const path = normalizeEntryPath(file.path)
+    const path = normalizeEntryPath(file.path, 'file')
     if (isSignaturePath(path) && !(allowSignatureFiles && SIGNATURE_FILES.has(path))) {
       throw structureError('提交包不得包含签名')
     }
@@ -220,13 +247,18 @@ function normalizeBuildFiles(
 /**
  * 流式解包到内存。
  *
- * `onentry` 先把条目计数加一并在超帽时立即中止,再检查路径、预扣声明大小;
- * 每个文件只在条目 `end` 后进入结果数组,因此超帽归档不会保留第 1025 条
- * 及之后的内容。整个归档压缩字节与解包字节都不超过 5 MiB。
+ * 解压由本模块自己完成:gzip 输出先过一道计量 `Transform`,解压总量超过
+ * {@link MAX_AGENT_PACKAGE_UNPACKED_BYTES} 立刻中止。这道计量兜住了所有不会
+ * 经过 `onentry` 的字节(目录头声明的 body、PAX/global 扩展头、tar 未知类型),
+ * 因为 tar 只把 File/Directory 送进 `onentry`,而目录头的 size 会被 tar 归零。
+ *
+ * `onentry` 先把条目计数加一并在超帽时立即中止,再检查路径、按声明大小预扣
+ * 内容预算;每个文件只在条目 `end` 后进入结果数组,因此超帽归档不会保留第
+ * 1025 条及之后的内容。
  */
 function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
   if (bundle.byteLength > MAX_AGENT_PACKAGE_BUNDLE_BYTES) {
-    return Promise.reject(structureError(`智能体包超过${MAX_AGENT_PACKAGE_BUNDLE_BYTES}字节上限`))
+    return Promise.reject(packageTooLargeError())
   }
 
   return new Promise((resolve, reject) => {
@@ -237,12 +269,27 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
     let declaredBytes = 0
     let settled = false
     let parser: Parser | undefined
+
     const source = Readable.from([bundle])
+    const gunzip = createGunzip()
+    let unpackedBytes = 0
+    const meter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        unpackedBytes += chunk.byteLength
+        if (unpackedBytes > MAX_AGENT_PACKAGE_UNPACKED_BYTES) {
+          callback(packageTooLargeError())
+          return
+        }
+        callback(null, chunk)
+      },
+    })
 
     const fail = (error: Error) => {
       if (settled) return
       settled = true
       source.destroy()
+      gunzip.destroy()
+      meter.destroy()
       parser?.abort(error)
       reject(error)
     }
@@ -261,7 +308,7 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
 
       let path: string
       try {
-        path = normalizeEntryPath(entry.path)
+        path = normalizeEntryPath(entry.path, entry.type === 'Directory' ? 'directory' : 'file')
       } catch (error) {
         fail(error instanceof Error ? error : structureError('路径非法'))
         return
@@ -272,6 +319,14 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
         return
       }
 
+      // 每个条目的声明大小都预扣内容预算——包括目录条目:tar 头里的 size 字段
+      // 对它同样有意义,不能因为目录通常没有 body 就跳过记账。
+      declaredBytes += entry.size
+      if (declaredBytes > MAX_AGENT_PACKAGE_BUNDLE_BYTES) {
+        fail(packageTooLargeError())
+        return
+      }
+
       if (entry.type === 'Directory') {
         entryTypes.set(path, 'directory')
         directories.push(path)
@@ -279,11 +334,6 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
       }
 
       entryTypes.set(path, 'file')
-      declaredBytes += entry.size
-      if (declaredBytes > MAX_AGENT_PACKAGE_BUNDLE_BYTES) {
-        fail(structureError(`智能体包超过${MAX_AGENT_PACKAGE_BUNDLE_BYTES}字节上限`))
-        return
-      }
 
       const chunks: Buffer[] = []
       let actualBytes = 0
@@ -307,7 +357,11 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
       entry.on('error', () => fail(structureError('归档条目无法读取')))
     }
 
-    parser = listArchive({ gzip: true, onentry }) as Parser
+    parser = listArchive({
+      gzip: false,
+      maxMetaEntrySize: MAX_AGENT_PACKAGE_META_BYTES,
+      onentry,
+    }) as Parser
     parser.on('error', () => fail(structureError('归档无法解析')))
     parser.on('end', () => {
       if (settled) return
@@ -319,7 +373,9 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
       }
     })
     source.on('error', () => fail(structureError('归档无法读取')))
-    source.pipe(parser)
+    gunzip.on('error', () => fail(structureError('归档无法解析')))
+    meter.on('error', (error: Error) => fail(toStructureError(error, '归档无法解析')))
+    source.pipe(gunzip).pipe(meter).pipe(parser)
   })
 }
 
@@ -344,9 +400,16 @@ function assertNoFileAncestors(paths: readonly string[], filePaths: ReadonlySet<
   }
 }
 
-function normalizeEntryPath(rawPath: string): string {
+/**
+ * 归一化并校验条目路径。
+ *
+ * 目录条目按 tar 规范以 `/` 结尾(node-tar/GNU tar 都这么写),去掉且只去掉
+ * 一个结尾 `/` 后再做空段检查;写成 `a//` 的文件或目录仍然非法。
+ */
+function normalizeEntryPath(rawPath: string, kind: 'file' | 'directory'): string {
   let path = rawPath
   while (path.startsWith('./')) path = path.slice(2)
+  if (kind === 'directory' && path.endsWith('/')) path = path.slice(0, -1)
   if (path === '') throw structureError('路径为空')
   if (path.startsWith('/')) throw structureError('路径必须是相对路径')
   if (DRIVE_PREFIX_RE.test(path)) throw structureError('路径不得包含盘符')
@@ -407,7 +470,7 @@ function collectCapped(stream: Pack): Promise<Buffer> {
       if (settled) return
       total += chunk.byteLength
       if (total > MAX_AGENT_PACKAGE_BUNDLE_BYTES) {
-        fail(structureError(`智能体包超过${MAX_AGENT_PACKAGE_BUNDLE_BYTES}字节上限`))
+        fail(packageTooLargeError())
         return
       }
       chunks.push(chunk)
@@ -428,4 +491,9 @@ function toStructureError(error: unknown, fallback: string): Error {
 
 function structureError(message: string): Error {
   return new Error(`包结构非法：${message}`)
+}
+
+/** 压缩字节、声明内容或解压总量任一超帽时共用的错误。 */
+function packageTooLargeError(): Error {
+  return structureError(`智能体包超过${MAX_AGENT_PACKAGE_BUNDLE_BYTES}字节上限`)
 }

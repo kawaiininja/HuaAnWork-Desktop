@@ -21,7 +21,7 @@ import { VALID_MANIFEST, VALID_PERSONA } from './helpers.ts'
 
 type ArchiveEntry = {
   name: string
-  type?: 'File' | 'Directory' | 'SymbolicLink' | 'Link'
+  type?: 'File' | 'Directory' | 'SymbolicLink' | 'Link' | 'ExtendedHeader'
   linkpath?: string
   content?: string | Buffer
 }
@@ -179,6 +179,61 @@ test('aborts as soon as the unpacked content budget is exceeded', async () => {
   )
 })
 
+test('charges Directory and meta bodies against the unpacked budget', async () => {
+  // node-tar 把目录头的 size 归零,body 不进 onentry;PAX/global 头更是从不进
+  // onentry。两者都必须在解压总量上受同一个预算约束,而不是被静默跳过。
+  const directoryBody = await makeArchive([
+    validAgentJson,
+    validPersona,
+    { name: 'padding', type: 'Directory', content: Buffer.alloc(8 * 1024 * 1024) },
+  ])
+  assert.ok(directoryBody.byteLength < MAX_AGENT_PACKAGE_BUNDLE_BYTES)
+  await assert.rejects(
+    inspectUnsignedAgentPackageBundle(directoryBody),
+    /包结构非法：智能体包超过5242880字节上限/,
+  )
+
+  const extendedHeaderBody = await makeArchive([
+    validAgentJson,
+    validPersona,
+    { name: 'padding.pax', type: 'ExtendedHeader', content: Buffer.alloc(8 * 1024 * 1024) },
+  ])
+  assert.ok(extendedHeaderBody.byteLength < MAX_AGENT_PACKAGE_BUNDLE_BYTES)
+  await assert.rejects(
+    inspectUnsignedAgentPackageBundle(extendedHeaderBody),
+    /包结构非法：智能体包超过5242880字节上限/,
+  )
+})
+
+test('accepts canonical tar directory entries', async () => {
+  const inspected = await inspectUnsignedAgentPackageBundle(
+    await makeArchive([
+      validAgentJson,
+      validPersona,
+      { name: 'skill/', type: 'Directory' },
+      { name: 'skill/agent.md', content: '# 技能' },
+      { name: 'skill/scripts/', type: 'Directory' },
+      { name: 'skill/scripts/run.mjs', content: 'console.log(1)\n' },
+    ]),
+  )
+  assert.deepEqual(
+    inspected.files.map((file) => file.path).sort(),
+    ['agent.json', 'persona.md', 'skill/agent.md', 'skill/scripts/run.mjs'],
+  )
+
+  // 双斜杠不是规范写法,去掉一个结尾 `/` 后仍是空段。
+  await assert.rejects(
+    inspectUnsignedAgentPackageBundle(
+      await makeArchive([
+        validAgentJson,
+        validPersona,
+        { name: 'skill//', type: 'Directory' },
+      ]),
+    ),
+    /包结构非法/,
+  )
+})
+
 test('rejects archives over 1024 entries before parsing later entries', async () => {
   const files = Array.from({ length: 1025 }, (_, index) => ({
     name: `filler-${index}.bin`,
@@ -297,6 +352,45 @@ test('round-trips a signed bundle without counting signature files in the digest
   assert.deepEqual(signed.digest, digest)
   assert.equal(signed.signature.signature, signature.signature)
   assert.ok(signed.digest.files.every((file) => !file.path.startsWith('.signature/')))
+})
+
+test('accepts an explicit .signature directory entry in signed bundles only', async () => {
+  const { keyring, digest, signature } = createSignatureFixture()
+  const signedArchive = await makeArchive([
+    { name: '.signature/', type: 'Directory' },
+    { name: '.signature/package-digest.json', content: canonicalJson(digest) },
+    { name: '.signature/signature.json', content: JSON.stringify(signature) },
+    validAgentJson,
+    validPersona,
+  ])
+
+  const inspected = await inspectSignedAgentPackageBundle(signedArchive, keyring)
+  assert.deepEqual(inspected.files.map((file) => file.path).sort(), ['agent.json', 'persona.md'])
+  assert.deepEqual(inspected.digest, digest)
+
+  // 目录本身不是额外内容,但 `.signature/` 下的其他目录仍然是。
+  await assert.rejects(
+    inspectSignedAgentPackageBundle(
+      await makeArchive([
+        { name: '.signature/', type: 'Directory' },
+        { name: '.signature/extra/', type: 'Directory' },
+        { name: '.signature/package-digest.json', content: canonicalJson(digest) },
+        { name: '.signature/signature.json', content: JSON.stringify(signature) },
+        validAgentJson,
+        validPersona,
+      ]),
+      keyring,
+    ),
+    /包结构非法/,
+  )
+
+  // unsigned 仍然不接受任何签名目录内容,即使目录为空。
+  await assert.rejects(
+    inspectUnsignedAgentPackageBundle(
+      await makeArchive([validAgentJson, validPersona, { name: '.signature/', type: 'Directory' }]),
+    ),
+    /包结构非法/,
+  )
 })
 
 test('rejects signed bundles with extra, missing, or extra-signature files', async () => {
