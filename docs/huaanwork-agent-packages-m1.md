@@ -1,10 +1,11 @@
 # 智能体包 M1 使用与排障（runbook）
 
-> **状态：Windows 真机验收 BLOCKED — M1 在 Windows 项完成前不得宣布完成。**
+> **状态：Windows `PASS（GHA Windows 探针）` — 无界面探针是 Step 5 的验收面；GUI 与真实模型交互为可选项。**
 >
 > - macOS 真机验收：`PASS（代理驱动实机验收）`。2026-10-24 裁定：Task 9 Step 4 采用代理驱动的真实 macOS 应用 + 真实模型证据，见 `docs/evidence/2026-10-23-agent-package-macos-acceptance.md`；真人交互复核列为可选/独立项，不再是 M1 阻断项。
-> - Windows 真机验收：`BLOCKED`。当前环境没有 Windows 真机；`enforcement:partial`、读/网络不隔离与退出后进程清理尚未由 Windows 实机观察。按 2026-10-24 裁定，该项交由 GitHub Actions 的 Windows runner/真机补验。
-> - 自动化门禁（单元测试、typecheck、变体守卫、`corepack yarn check`）只能证明代码与装配，不能替代 Windows 真机验收。
+> - Windows：`PASS（GHA Windows 探针）`。2026-10-24 裁定：GitHub Actions `windows-latest` 上的 workflow **Windows agent package acceptance**（job `windows-agent-package-acceptance`）退出码 0，即满足 Step 5。覆盖沙箱 `enforcement:partial`、读/网络观察、HTTP/MCP 在 `afterIdle` 后停止，以及 Host 退出钩子跑完后 `Get-CimInstance Win32_Process` 不再有 `agents\<slug>\`。这不是 GUI 真机，也不覆盖访谈、确认卡或真实模型 `@slug`；那些保持可选，不阻断。
+> - 该 job 只在 `workflow_dispatch` 时运行，不挂在每次 push/PR 的产品 CI 上。单元测试、typecheck、变体守卫和 `corepack yarn check` 仍只证明代码与装配。升成产品门禁的做法见 §11，且不得放宽现有门禁。
+> - 某一次运行的 URL、runner 与探针 JSON 记在 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。本口径在第一次 workflow_dispatch 之前没有 run URL；空 URL 不是「某一次运行已经通过」。
 >
 > 两项验收的可执行清单见 §11。验收记录模板见 §12。
 
@@ -128,7 +129,7 @@ M1 **不包含**发布、签名、下载、安装、广场更新、下架、撤�
 - 沙箱使用现有 `sandbox-local` 后端与 `workspace-write` 策略，**只约束写**。
 - **读取包外文件不受限制；网络访问不受限制。** 包来源审查（M2）不是运行时隔离。
 - 沙箱不可用时 M1 **fail-closed**：报「当前系统无法启动沙箱，智能体未运行」，不会无沙箱运行。
-- Windows 上沙箱自报 `enforcement:partial` 是已接受事实；真机验收必须记录该值及读/网络观察（§11 Step 5）。
+- Windows 上沙箱自报 `enforcement:partial` 是已接受事实；GHA 探针必须记录该值及读/网络观察（§11 Step 5）。
 
 能力声明与人设：
 
@@ -272,16 +273,43 @@ Get-ChildItem "$profileDir\agents" -Directory -Filter '.old-*' -ErrorAction Sile
 - [ ] 重启应用，确认卡片、启用态与版本仍存在。
 - [ ] 旧 catalog-legacy 条目在「我的智能体」可见且可关闭；关闭后 `agents-enabled.json` 的 `catalog:<name>` 键消失，`agents/<name>/` 仍不存在。
 
-### Step 5（Windows，`BLOCKED`：无 Windows 真机）
+### Step 5（Windows，`PASS（GHA Windows 探针）`；GUI 与真实模型可选）
 
-在 Windows 真机上重复 Step 4，并额外记录：
+硬失败面由 workflow **Windows agent package acceptance** 执行（`.github/workflows/windows-agent-package-acceptance.yml`）。它只在 `workflow_dispatch` 时运行。退出码 0 是本步通过；退出码 1 是观察与预期不符；退出码 3 是探针未能开始（BLOCKED，不能当成通过）；退出码 2 是用法错误（含在非 Windows 上把结果标成 win32）。
 
-- [ ] 沙箱自报的 `enforcement`（预期 `partial`）。可用 `node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-sandbox-probe.mjs --platform win32` 取得 JSON 中的 `enforcement` 字段（必须在 Windows 主机上运行）。
-- [ ] 读工作区外文件与访问公网的观察（预期均成功；沙箱只限制写，这是已接受事实）。
-- [ ] 安装/启动后与退出应用后的包进程清理：退出后 `Get-CimInstance Win32_Process` 中不再有 `agents\<slug>\` 子进程。
-- [ ] HTTP/MCP 子进程在 `afterIdle` 后停止；关闭卡片后新 `@` 不再启动。
+- 沙箱探针 `node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-sandbox-probe.mjs --platform win32` 的 JSON：`enforcement` 为 `partial`，且 `httpReady`、`writeDenied`、`readOutside`、`networkOutside` 均为 `true`。读工作区外与访问公网成功是已接受事实（沙箱只限制写）。
+- HTTP fixture 走 `createAgentPackageHost().dispatch().afterIdle()`。`afterIdle` 之后端口关闭，且 `Get-CimInstance Win32_Process` 中不再有 `agents\<slug>\`。
+- MCP fixture 同样走 `afterIdle`。握手使用 `tests/fixtures/agent-package` 的 JSON-RPC（`initialize` 与 `tools/list`），经注入客户端完成。不启动打包的 MCP 客户端，也不挂模型会话。
+- Host 退出：子进程调用插件卸载时使用的 `stopAllAgentPackageProcesses()`，等它结束并退出后，同一条 CIM 查询不再有 `agents\<slug>\`，HTTP/MCP 端口也不再接受连接。产品卸载回调本身不 await 该调用；探针会等它结束再查询。这不是 Electron GUI 退出。
+- 若仍有残留，探针可以 `taskkill` 清理 runner。该动作只写入报告，不改变退出码。残留本身是硬失败。
 
-**Windows 清单完成并留下记录前，M1 状态保持 `BLOCKED`；macOS 已按 2026-10-24 裁定收口。**
+触发：GitHub → Actions → **Windows agent package acceptance** → Run workflow → 选择含该 workflow 的分支。可选输入 `run_host_liveness` 默认关闭。打开后会先构建包，再跑 `yarn workspace dsh-plugin-huaanwork test:host-liveness-win`。那不是 Step 5：它要编出 `lib/desktop-cli.js`，并等待约 60 秒的挂起 Host。产品 CI 的 `desktop-windows` 已经在打包检查之后跑同一条测试。
+
+本地自检（不替代 Windows job）：
+
+```bash
+node --test dsh-plugin-huaanwork/scripts/huaanwork-host-windows-acceptance.spec.mjs
+node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-windows-acceptance.mjs --platform darwin
+```
+
+第二条必须是退出码 2。在非 Windows 上对 `--platform win32` 同样是退出码 2。
+
+升成产品门禁（写入证据文件的 1–2 次绿跑之后，且不得放宽现有门禁）：
+
+1. 把该 job 移入 `.github/workflows/ci.yml`，条件为 `needs.changes.outputs.product == 'true'`；或给本 workflow 加上 `pull_request` / `push`，并套用同一「仅产品变更才跑」条件。
+2. 不要加 `continue-on-error`。不要从 `yarn check`、`desktop-windows` 或 `test:host-liveness-win` 删步骤。
+3. 把检查名 `windows-agent-package-acceptance` 列为 required 之前，证据文件里要有 1–2 个退出码 0 的 run URL。
+4. 升格后，GUI 访谈、确认卡和真实模型 `@slug` 仍然不在这个 job 里。
+
+下列 GUI 清单保留给可选复核，不再是 M1 阻断项。本探针明确不做：会话访谈、确认卡、真实模型上的 `@slug`。
+
+- [ ] 说“帮我新建一个智能体”并完成访谈。
+- [ ] 回复同意，确认后「我的智能体」出现卡片，且默认关闭。
+- [ ] 启用卡片，用真实模型 `@<slug>` 运行。
+- [ ] 关闭卡片；确认后续 `@` 不再启动。
+- [ ] `/create-agent update <slug>` 更新版本。
+- [ ] 重启应用，确认卡片、启用态与版本仍存在。
+- [ ] 旧 catalog-legacy 条目可关闭。
 
 ## 12. 验收记录
 
@@ -295,7 +323,10 @@ Get-ChildItem "$profileDir\agents" -Directory -Filter '.old-*' -ErrorAction Sile
 - 任何偏离本 runbook 的现象。
 
 当前记录：macOS `PASS（代理驱动实机验收）`，证据见
-`docs/evidence/2026-10-23-agent-package-macos-acceptance.md`；Windows `BLOCKED`（原因见文首）。
+`docs/evidence/2026-10-23-agent-package-macos-acceptance.md`。Windows 验收口径为
+`PASS（GHA Windows 探针）`，证据模板见
+`docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。
+该模板在第一次 workflow_dispatch 之前没有 run URL。
 
 ## 13. 已知限制与差异
 

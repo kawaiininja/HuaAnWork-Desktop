@@ -1017,6 +1017,8 @@ Expected: 全绿；`check:desktop-variants` 不新增白名单。若 `check` 的
 
 在 Windows 上重复 Step 4；记录 `enforcement:partial`、读/网络不隔离的观察、安装/退出后的进程清理；没有 Windows 真机则把 M1 标为 `BLOCKED`，不得宣布完成。
 
+2026-10-24 后续裁定：本步的验收面改为 workflow_dispatch 的 GHA Windows 探针，口径 `PASS（GHA Windows 探针）`。GUI 访谈、确认卡与真实模型 `@slug` 改为可选项。现行说明见 `docs/huaanwork-agent-packages-m1.md` §11。上面这段是计划原文。
+
 - [ ] **Step 6: 写 runbook**
 
 `docs/huaanwork-agent-packages-m1.md` 写明：包目录位置、创建/更新/启停步骤、字段/大小上限、沙箱边界的原话、catalog-legacy 的含义、常见错误（沙箱不可用、slug 冲突、脚本启动失败）、日志位置、如何清理残留 `.tmp-*`/`.old-*`、如何验证 M1 不包含发布。
