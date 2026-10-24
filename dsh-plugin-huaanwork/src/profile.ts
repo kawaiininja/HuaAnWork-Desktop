@@ -76,7 +76,7 @@ import { DesktopShellConfig } from './settings-bridge.ts'
 import { neutralWorkspaceRoot, readPendingWorkspaceRoot } from './huaanwork-host/workspace-state.ts'
 import { HUAANWORK_MARKET_SUBPATH_EXPORT } from './huaanwork-host/market/config.ts'
 import { sessionIdFor } from './huaanwork-host/session-id.ts'
-import { assertHuaanworkRowIdsHit } from './huaanwork-host/row-assertions.ts'
+import { assertHuaanworkRowIdsHit, assertPtcPresetPresentation } from './huaanwork-host/row-assertions.ts'
 import './huaanwork-host/holders.ts'
 
 /** Persistent profile managed by the desktop launcher and the ordinary dsh plugin command. */
@@ -1076,6 +1076,37 @@ function rowConfig(row: EntryOptions | undefined): Record<string, unknown> {
     : {}
 }
 
+/**
+ * `preset-ptc` carries a `tool-presentation` row inside its own `config.plugins`.
+ * The include patch layer recurses only group entries, so a normal top-level
+ * patch cannot reach it. Native is the global tools-row default, not a scoped
+ * preset declaration: an enabled native row calls `presentAs('native')` without
+ * an agent scope and fails upstream. Disable the nested row and let the global
+ * `tools.mode: native` apply; the runtime `presentAs` guard stays as defense.
+ */
+function ptcPresentationOverride(patches: readonly PatchOptions[]): PatchOptions {
+  const rows = composeEntries([[...patches]])
+  const preset = rows.find(row => row.id === 'preset-ptc' && row.name === '@deepseek-ai/dsh-agent-preset')
+  if (preset === undefined) {
+    throw new Error(`${BIN_NAME}: ptc preset entry is missing from the composed profile`)
+  }
+  const config = structuredClone(rowConfig(preset))
+  const plugins = config.plugins
+  if (!Array.isArray(plugins)) {
+    throw new Error(`${BIN_NAME}: ptc preset config.plugins is not an array`)
+  }
+  const presentation = plugins.find(
+    plugin => plugin !== null && typeof plugin === 'object' && !Array.isArray(plugin)
+      && plugin.id === 'tool-presentation'
+      && plugin.name === '@deepseek-ai/dsh-agent-tool-presentation',
+  ) as Record<string, unknown> | undefined
+  if (presentation === undefined) {
+    throw new Error(`${BIN_NAME}: ptc preset is missing its tool-presentation row`)
+  }
+  presentation.disabled = true
+  return { id: 'preset-ptc', name: '@deepseek-ai/dsh-agent-preset', config }
+}
+
 /** Snapshot, validate, and deduplicate the LAN allowlist supplied by the launcher. */
 function preparedLanAddresses(addresses: readonly string[] | undefined): readonly string[] {
   const unique = new Set<string>()
@@ -1521,6 +1552,10 @@ export function prepareDesktopProfile(
     }
   }
   const patches: PatchOptions[] = [...ordinary.patches, ...aaPatches]
+  // Compose the ordinary layers before the guardrail rows: the ptc preset is
+  // inserted by the Web bundle, and its nested presentation row needs the
+  // full-config override appended after the locks.
+  const ptcPresetOverride = ptcPresentationOverride(patches)
   // HuaAnWork guardrail 锁层(M3):disable/config 行与 insert 行全部走内存组合,
   // 与 ui-layout 禁用同层——应用锁在所有用户 bundle 之后生效(spec §6 第 2 条)。
   // spec §14 第 23 条残余(Task 6.9):超期 pendingRoot(写入时刻距今 > 10 分钟——
@@ -1594,6 +1629,7 @@ export function prepareDesktopProfile(
       ],
     },
   )
+  patches.push(ptcPresetOverride)
   const composedRows = composeEntries([patches])
   assertUniqueEntryIds(composedRows)
   assertEffectiveMarketRows(composedRows, effectiveMarket)
@@ -1602,6 +1638,7 @@ export function prepareDesktopProfile(
     if (typeof row.id === 'string') rows.set(row.id, row)
   }
   assertHuaanworkRowIdsHit(rows)
+  assertPtcPresetPresentation(rows)
   const settings = rows.get('settings')
   if (settings?.name !== SETTINGS_PACKAGE) {
     throw new Error(`${BIN_NAME}: desktop profile must use ${SETTINGS_PACKAGE} in the settings row`)

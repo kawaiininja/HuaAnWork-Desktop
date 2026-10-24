@@ -40,6 +40,12 @@ type ToolContext = {
   huaanworkEmit?: (event: RpcEvent) => void
   huaanworkRouteAgent?: { current: unknown }
   huaanworkAttachments?: AttachmentMaps
+  /**
+   * `tools/result` 观察器。commit 成功后的解绑必须等工具结果定稿再做:
+   * 上游会按工具名重新解析工具来归一化结果,执行体内解绑会把成功改写成
+   * `UNKNOWN_TOOL`,连 `concludesTurn` 标记一起丢掉。
+   */
+  huaanworkOnToolResult?: (listener: (exec: { callId?: string }) => void) => () => void
   /** Test seam shared with `call_host_tool`: a fake transport for `agent_http`. */
   fetchImpl?: typeof fetch
   /** Test seam for the `agent_http` deadline; production always uses the default. */
@@ -48,7 +54,7 @@ type ToolContext = {
   root?: object
 }
 
-type ToolExec = { agent?: unknown }
+type ToolExec = { agent?: unknown; callId?: string; concludeTurn?: () => void }
 
 type AgentRef = { id?: string; session?: { id?: string } }
 
@@ -172,7 +178,7 @@ function proposeTool(ctx: ToolContext, host: AgentPackageHost) {
   })
 }
 
-function commitTool(ctx: ToolContext, host: AgentPackageHost) {
+function commitTool(ctx: ToolContext, host: AgentPackageHost, pendingDetach: Map<string, string>) {
   return defineTool({
     name: AGENT_COMMIT_TOOL,
     description:
@@ -181,7 +187,7 @@ function commitTool(ctx: ToolContext, host: AgentPackageHost) {
       draftId: { type: 'string', required: true, description: 'agent_propose 返回的草稿 id' },
     },
     output: textOutput,
-    async execute(args: { draftId: string }, exec: { agent?: unknown }) {
+    async execute(args: { draftId: string }, exec: ToolExec) {
       const sessionId = sessionIdOf(ctx, exec)
       const result = await host.commit(sessionId, args.draftId, host.lastUserText(sessionId) ?? '')
       if (!result.ok) throw new Error(`智能体未写入：${result.error}`)
@@ -193,7 +199,16 @@ function commitTool(ctx: ToolContext, host: AgentPackageHost) {
           : `已写入智能体 @${result.slug}。新建的智能体默认关闭；在「我的智能体」启用后即可 @ 调用。`
       emit(ctx, { event: 'agent/notice', text, sessionId })
       emit(ctx, { event: 'agent/changed', slug: result.slug })
-      detachCreationTools(ctx, sessionId)
+      // 解绑留到工具结果定稿之后;执行体内解绑会让上游的结果归一化找不到工具。
+      if (ctx.huaanworkOnToolResult !== undefined && exec.callId !== undefined) {
+        pendingDetach.set(exec.callId, sessionId)
+      } else {
+        // 没有结果通道的嵌入(单测)也至少让当前调用栈走完再解绑。
+        setTimeout(() => detachCreationTools(ctx, sessionId), 0)
+      }
+      // The commit is terminal; stop the loop here so the model cannot retry
+      // a detached tool and report a false failure.
+      exec.concludeTurn?.()
       return { text }
     },
   })
@@ -209,8 +224,19 @@ function commitTool(ctx: ToolContext, host: AgentPackageHost) {
 export function registerAgentPackageCreationTools(ctx: unknown, host: AgentPackageHost): () => void {
   const c = ctx as ToolContext
   if (!c.tools?.register) return () => undefined
-  const disposers = [c.tools.register(proposeTool(c, host)), c.tools.register(commitTool(c, host))]
+  const pendingDetach = new Map<string, string>()
+  const stopToolResults = c.huaanworkOnToolResult?.((exec) => {
+    const sessionId = exec.callId === undefined ? undefined : pendingDetach.get(exec.callId)
+    if (sessionId === undefined || exec.callId === undefined) return
+    pendingDetach.delete(exec.callId)
+    detachCreationTools(c, sessionId)
+  })
+  const disposers = [
+    c.tools.register(proposeTool(c, host)),
+    c.tools.register(commitTool(c, host, pendingDetach)),
+  ]
   return () => {
+    stopToolResults?.()
     for (const dispose of disposers.reverse()) dispose()
   }
 }

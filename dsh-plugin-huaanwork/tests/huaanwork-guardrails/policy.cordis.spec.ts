@@ -564,7 +564,7 @@ test("presentation plugin rejects code mode and preserves native mode", async ()
   assert.doesNotThrow(() => tools.presentAs("native"));
   assert.equal(mode, "native");
   assert.throws(() => tools.presentAs("ptc"), /disabled/i);
-  assert.deepEqual(events, [{ event: "session/end", ok: false, error: "Code mode is disabled" }]);
+  assert.deepEqual(events, [], "a disabled global presentation must not emit an unscoped session/end");
 });
 
 test("presentation plugin restricts the main agent's scoped tools and detects run_code", async () => {

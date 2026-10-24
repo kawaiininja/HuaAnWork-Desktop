@@ -73,6 +73,7 @@ type Harness = {
   events: RpcEvent[]
   restrictCalls: string[]
   maps: AttachmentMaps
+  emitToolResult(callId: string | undefined): void
 }
 
 function harness(options: { routeAgent?: unknown; fetchImpl?: typeof fetch; httpTimeoutMs?: number } = {}): Harness {
@@ -80,6 +81,7 @@ function harness(options: { routeAgent?: unknown; fetchImpl?: typeof fetch; http
   const events: RpcEvent[] = []
   const restrictCalls: string[] = []
   const maps = emptyAttachments()
+  const toolResultListeners = new Set<(exec: { callId?: string }) => void>()
   const ctx = {
     tools: {
       register(definition: unknown) {
@@ -89,6 +91,10 @@ function harness(options: { routeAgent?: unknown; fetchImpl?: typeof fetch; http
           registered.delete(tool.name)
         }
       },
+    },
+    huaanworkOnToolResult: (listener: (exec: { callId?: string }) => void) => {
+      toolResultListeners.add(listener)
+      return () => toolResultListeners.delete(listener)
     },
     huaanworkEmit: (event: RpcEvent) => events.push(event),
     huaanworkAttachments: maps,
@@ -103,7 +109,16 @@ function harness(options: { routeAgent?: unknown; fetchImpl?: typeof fetch; http
       },
     },
   }
-  return { ctx, registered, events, restrictCalls, maps }
+  return {
+    ctx,
+    registered,
+    events,
+    restrictCalls,
+    maps,
+    emitToolResult(callId) {
+      for (const listener of [...toolResultListeners]) listener({ callId })
+    },
+  }
 }
 
 function fakeHost(overrides: Partial<AgentPackageHost> = {}): AgentPackageHost {
@@ -133,8 +148,13 @@ function fakeHost(overrides: Partial<AgentPackageHost> = {}): AgentPackageHost {
   }
 }
 
-function execFor(sessionId: string): unknown {
-  return { agent: { id: sessionId, session: { id: sessionId } }, signal: new AbortController().signal }
+function execFor(sessionId: string, concludeTurn?: () => void, callId?: string): unknown {
+  return {
+    agent: { id: sessionId, session: { id: sessionId } },
+    signal: new AbortController().signal,
+    ...(callId === undefined ? {} : { callId }),
+    ...(concludeTurn === undefined ? {} : { concludeTurn }),
+  }
 }
 
 const proposalArgs = {
@@ -393,12 +413,26 @@ describe('agent_commit', () => {
     expect(tool?.parameters.properties?.draftId).toMatchObject({ type: 'string' })
     expect(tool?.description).toContain('草稿编号')
 
-    const value = await tool?.execute({ draftId: 'draft-1' }, execFor('session-a'))
+    let concluded = 0
+    const value = await tool?.execute(
+      { draftId: 'draft-1' },
+      execFor('session-a', () => { concluded += 1 }, 'call-commit'),
+    )
 
     expect(commitCalls).toEqual([{ sessionId: 'session-a', draftId: 'draft-1', rawUserText: '可以' }])
     expect(value?.text).toContain('已写入智能体 @weekly-report')
+    expect(concluded).toBe(1)
     expect(h.events).toContainEqual({ event: 'agent/notice', text: value?.text, sessionId: 'session-a' })
     expect(h.events).toContainEqual({ event: 'agent/changed', slug: 'weekly-report' })
+    // 工具结果归一化(上游会按名字重新解析工具)之前不能解绑,否则成功结果会被改写成 UNKNOWN_TOOL。
+    expect(isAgentToolAttached(h.maps, 'session-a', AGENT_PROPOSE_TOOL)).toBe(true)
+    expect(isAgentToolAttached(h.maps, 'session-a', AGENT_COMMIT_TOOL)).toBe(true)
+    expect(h.restrictCalls).toEqual([])
+
+    h.emitToolResult('call-other')
+    expect(isAgentToolAttached(h.maps, 'session-a', AGENT_COMMIT_TOOL)).toBe(true)
+
+    h.emitToolResult('call-commit')
     expect(isAgentToolAttached(h.maps, 'session-a', AGENT_PROPOSE_TOOL)).toBe(false)
     expect(isAgentToolAttached(h.maps, 'session-a', AGENT_COMMIT_TOOL)).toBe(false)
     expect(h.restrictCalls).toEqual(['session-a'])
@@ -420,10 +454,15 @@ describe('agent_commit', () => {
     const h = harness()
     registerAgentPackageCreationTools(h.ctx, host)
 
-    const value = await h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId: 'draft-1' }, execFor('session-a'))
+    let concluded = 0
+    const value = await h.registered.get(AGENT_COMMIT_TOOL)?.execute(
+      { draftId: 'draft-1' },
+      execFor('session-a', () => { concluded += 1 }),
+    )
     expect(value?.text).toContain('已更新智能体 @weekly-report')
     expect(value?.text).toContain('原有启用状态保持不变')
     expect(value?.text).not.toContain('默认关闭')
+    expect(concluded).toBe(1)
   })
 
   test('reports a rejected commit as an error result without changing state or detaching', async () => {
@@ -434,9 +473,14 @@ describe('agent_commit', () => {
     attachAgentTools(h.maps, 'session-a', [AGENT_PROPOSE_TOOL, AGENT_COMMIT_TOOL])
     registerAgentPackageCreationTools(h.ctx, host)
 
+    let concluded = 0
     await expect(
-      h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId: 'draft-1' }, execFor('session-a')),
+      h.registered.get(AGENT_COMMIT_TOOL)?.execute(
+        { draftId: 'draft-1' },
+        execFor('session-a', () => { concluded += 1 }),
+      ),
     ).rejects.toThrow(/智能体未写入：用户原句不是同意创建的说法/)
+    expect(concluded).toBe(0)
     expect(h.events.some((event) => event.event === 'agent/changed')).toBe(false)
     expect(h.events.some((event) => event.event === 'agent/notice')).toBe(false)
     expect(isAgentToolAttached(h.maps, 'session-a', AGENT_COMMIT_TOOL)).toBe(true)
@@ -457,8 +501,13 @@ describe('agent_commit', () => {
     const h = harness()
     registerAgentPackageCreationTools(h.ctx, host)
 
-    const value = await h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId: 'draft-1' }, execFor('session-a'))
+    let concluded = 0
+    const value = await h.registered.get(AGENT_COMMIT_TOOL)?.execute(
+      { draftId: 'draft-1' },
+      execFor('session-a', () => { concluded += 1 }),
+    )
     expect(value?.text).toContain('已在之前写入')
+    expect(concluded).toBe(1)
     expect(h.events).toContainEqual({ event: 'agent/changed', slug: 'weekly-report' })
   })
 
@@ -500,9 +549,15 @@ describe('propose → commit integration', () => {
     // 下一轮用户同意:创建分支同时覆盖原句、清掉「同一轮刚 propose」标记并标记本轮可提交。
     host.noteCreationTurn(sessionId, '可以')
 
-    const committed = await h.registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId }, execFor(sessionId))
+    let concluded = 0
+    const committed = await h.registered.get(AGENT_COMMIT_TOOL)?.execute(
+      { draftId },
+      execFor(sessionId, () => { concluded += 1 }, 'call-integration'),
+    )
     expect(committed?.text).toContain('已写入智能体 @weekly-report')
+    expect(concluded).toBe(1)
     expect(loadAgentPackageDraft(root, sessionId)).toBeUndefined()
+    h.emitToolResult('call-integration')
     expect(isAgentToolAttached(h.maps, sessionId, AGENT_COMMIT_TOOL)).toBe(false)
     dispose()
   })
@@ -1234,9 +1289,41 @@ describe('@slug package dispatch', () => {
     })
 
     expect(result.text).toBe('已交给包运行时')
+    // 父会话注入文本必须提示结果会自动送回;子代理自己的 prompt 不经过这里。
+    expect(result.parentText).toContain('已交给包运行时')
+    expect(result.parentText).toContain('自动回到本会话')
+    expect(result.parentText).toContain('不要用 call_host_tool')
     expect(calls).toEqual([
       expect.objectContaining({ sessionId: 'session-a', pkg, remainder: '写周报' }),
     ])
+  })
+
+  test('HTTP tool dispatch keeps the tool envelope and gets no parentText', async () => {
+    const maps = emptyAttachments()
+    const result = await dispatchAt({
+      host: {
+        list: () => ({
+          items: [
+            {
+              name: 'http-echo',
+              source: 'catalog',
+              kind: 'tool',
+              entrypointKind: 'http',
+              description: '回显',
+              version: '1',
+              permissions: [],
+              enabled: true,
+            },
+          ],
+        }),
+      } as never,
+      ctx: { huaanworkAttachments: maps } as never,
+      sessionId: 'session-a',
+      name: 'http-echo',
+      remainder: '查询',
+    })
+    expect(result.text).toContain('<tool-invoke name="http-echo">')
+    expect(result.parentText).toBeUndefined()
   })
 
   test('a slug with no local package falls through to the legacy lookup', async () => {
@@ -1871,7 +1958,10 @@ describe('@agent legacy dispatch', () => {
     // legacy 分支不得挂智能体包工具或登记包运行时。
     expect(h.maps.sessionAgentTools.size).toBe(0)
     expect(dispatched.text).toBe('整理本周进展')
-    // 包装在 activation 返回后立即清空 legacy 容器,afterIdle 再清一次是幂等的。
+    // 父会话拿到结果自动回送的提示;子代理 prompt 仍只有人设与用户请求。
+    expect(dispatched.parentText).toContain('整理本周进展')
+    expect(dispatched.parentText).toContain('自动回到本会话')
+    expect(spec.request.prompt[0]?.text).not.toContain('自动回到本会话')
     const holder = h.ctx.huaanworkAgentRequest as { current: unknown }
     expect(holder.current).toBeUndefined()
     await dispatched.afterIdle()
