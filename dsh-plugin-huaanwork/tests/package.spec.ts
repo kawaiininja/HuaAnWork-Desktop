@@ -139,8 +139,9 @@ describe('published package surface', () => {
       'market-server',
       'update-server',
       'packages/catalog-signing',
+      'packages/agent-package-format',
     ]
-    expect(workspaceManifest.workspaces).toHaveLength(13)
+    expect(workspaceManifest.workspaces).toHaveLength(14)
     for (const ws of EXPECTED_WORKSPACES) {
       expect(workspaceManifest.workspaces).toContain(ws)
     }

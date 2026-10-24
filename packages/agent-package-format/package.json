@@ -1,0 +1,31 @@
+{
+  "name": "@huaanwork/agent-package-format",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Signed agent-package format shared by the intranet catalog toolchain and Desktop: manifest validation, file/digest enumeration, and directory signature verification",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./digest": "./src/digest.ts",
+    "./bundle": "./src/bundle.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "yarn test && yarn typecheck"
+  },
+  "dependencies": {
+    "@huaanwork/catalog-signing": "workspace:*",
+    "@huaanwork/policy": "workspace:*",
+    "tar": "7.5.22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "6.0.3"
+  }
+}

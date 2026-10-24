@@ -1,25 +1,10 @@
-export const AGENT_PACKAGE_SCHEMA_VERSION = 1 as const
+import type { AgentPackageToolsMode } from '@huaanwork/agent-package-format/manifest'
 
-export type AgentPackageToolsMode = 'none' | 'http' | 'mcp' | 'both'
-
-export type AgentPackageManifest = {
-  schemaVersion: typeof AGENT_PACKAGE_SCHEMA_VERSION
-  slug: string
-  displayName: string
-  description: string
-  version: string
-  draftId: string
-  createdAt: string
-  updatedAt: string
-  persona: 'persona.md'
-  skill: { entry: 'skill/SKILL.md'; summary: string } | null
-  tools: {
-    mode: AgentPackageToolsMode
-    http?: { entry: 'tools/http/server.mjs'; argumentsSchema?: unknown }
-    mcp?: { entry: 'tools/mcp/server.mjs' }
-  }
-  allowSkills: string[]
-}
+export {
+  AGENT_PACKAGE_SCHEMA_VERSION,
+  type AgentPackageManifest,
+  type AgentPackageToolsMode,
+} from '@huaanwork/agent-package-format/manifest'
 
 export type AgentPackageState = Record<string, { source: 'local'; enabled: boolean; installedVersion: string }>
 

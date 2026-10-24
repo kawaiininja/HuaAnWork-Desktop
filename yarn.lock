@@ -11759,6 +11759,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@huaanwork/agent-package-format@npm:*, @huaanwork/agent-package-format@workspace:packages/agent-package-format":
+  version: 0.0.0-use.local
+  resolution: "@huaanwork/agent-package-format@workspace:packages/agent-package-format"
+  dependencies:
+    "@huaanwork/catalog-signing": "workspace:*"
+    "@huaanwork/policy": "workspace:*"
+    "@types/node": "npm:^22.20.0"
+    tar: "npm:7.5.22"
+    typescript: "npm:6.0.3"
+  languageName: unknown
+  linkType: soft
+
 "@huaanwork/catalog-signing@workspace:*, @huaanwork/catalog-signing@workspace:packages/catalog-signing":
   version: 0.0.0-use.local
   resolution: "@huaanwork/catalog-signing@workspace:packages/catalog-signing"
@@ -11786,7 +11798,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@huaanwork/policy@npm:*, @huaanwork/policy@workspace:packages/huaanwork-policy":
+"@huaanwork/policy@npm:*, @huaanwork/policy@workspace:*, @huaanwork/policy@workspace:packages/huaanwork-policy":
   version: 0.0.0-use.local
   resolution: "@huaanwork/policy@workspace:packages/huaanwork-policy"
   dependencies:
@@ -16960,6 +16972,7 @@ __metadata:
     "@electron/asar": "npm:3.4.1"
     "@electron/fuses": "npm:1.8.0"
     "@fontsource-variable/inter": "npm:^5.3.0"
+    "@huaanwork/agent-package-format": "npm:*"
     "@huaanwork/git-tools": "npm:*"
     "@huaanwork/model": "npm:*"
     "@huaanwork/policy": "npm:*"

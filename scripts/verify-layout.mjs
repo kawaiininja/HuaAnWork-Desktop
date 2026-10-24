@@ -46,6 +46,7 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'market-server',
   'update-server',
   'packages/catalog-signing',
+  'packages/agent-package-format',
 ])) {
   fail('the root Yarn workspace must contain the desktop, community-fabric, community-market, market-server, and update-server packages')
 }
