@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { sessionIdFor } from '../src/huaanwork-host/session-id.ts'
 import { neutralWorkspaceRoot, readPendingWorkspaceRoot, writePendingWorkspaceRoot, clearPendingWorkspaceRoot } from '../src/huaanwork-host/workspace-state.ts'
-import { assertHuaanworkRowIdsHit, HUAANWORK_ROW_ASSERTIONS, type RowLike } from '../src/huaanwork-host/row-assertions.ts'
+import { assertHuaanworkRowIdsHit, assertPtcPresetPresentation, HUAANWORK_ROW_ASSERTIONS, type RowLike } from '../src/huaanwork-host/row-assertions.ts'
 
 describe('sessionIdFor', () => {
   test('格式 huaanwork-<16hex> 且与同根稳定、异根不同', () => {
@@ -87,5 +87,52 @@ describe('row-id 命中断言', () => {
     renamedRalph.delete('tool-ralph')
     renamedRalph.set('tool-ralph-v2', { disabled: true })
     expect(() => assertHuaanworkRowIdsHit(renamedRalph)).toThrow(/renamed row/)
+  })
+})
+
+describe('ptc preset presentation assertion', () => {
+  function validPresetRows(): Map<string, RowLike> {
+    return new Map<string, RowLike>([
+      ['preset-ptc', {
+        name: '@deepseek-ai/dsh-agent-preset',
+        config: {
+          id: 'ptc',
+          order: 2,
+          plugins: [
+            { id: 'persona', name: '@deepseek-ai/dsh-persona' },
+            {
+              id: 'tool-presentation',
+              name: '@deepseek-ai/dsh-agent-tool-presentation',
+              disabled: true,
+              config: { mode: 'ptc' },
+            },
+          ],
+        },
+      }],
+    ])
+  }
+
+  test('disabled nested presentation passes', () => {
+    expect(() => assertPtcPresetPresentation(validPresetRows())).not.toThrow()
+  })
+
+  test('re-enabled nested presentation throws', () => {
+    const rows = validPresetRows()
+    const config = (rows.get('preset-ptc')!.config as { plugins: Array<{ disabled?: boolean }> })
+    config.plugins[1]!.disabled = false
+    expect(() => assertPtcPresetPresentation(rows)).toThrow(/must stay disabled/)
+  })
+
+  test('missing nested presentation row throws', () => {
+    const rows = validPresetRows()
+    const config = (rows.get('preset-ptc')!.config as { plugins: unknown[] })
+    config.plugins.splice(1, 1)
+    expect(() => assertPtcPresetPresentation(rows)).toThrow(/tool-presentation row is missing/)
+  })
+
+  test('disabled preset throws', () => {
+    const rows = validPresetRows()
+    rows.get('preset-ptc')!.disabled = true
+    expect(() => assertPtcPresetPresentation(rows)).toThrow(/expected enabled/)
   })
 })

@@ -514,6 +514,21 @@ test("9. a Cordis-like context whose tools property throws resolves the service 
   assert.deepEqual(scopes, ["scope"]);
 });
 
+test("11. a context without an attachment table does not require a present-as state", () => {
+  const errors: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    refreshAgentRestrict({
+      tools: { presentAs: () => () => undefined },
+      agents: { list: () => [] },
+    } as never);
+  } finally {
+    console.error = original;
+  }
+  assert.deepEqual(errors, []);
+});
+
 test("10. a context with neither tools nor get uses no schemas and still rejects empty tools", async () => {
   const ctx = {};
   assert.equal("tools" in ctx, false);

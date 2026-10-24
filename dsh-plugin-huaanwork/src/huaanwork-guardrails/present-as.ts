@@ -7,6 +7,11 @@ function isDisabledPresentationMode(mode: unknown): mode is "ptc" | "both" {
   return mode === "ptc" || mode === "both";
 }
 
+/** Agent disposal can race a scheduled tools/change; Cordis reports it as an inactive scope. */
+function isInactiveContextError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("inactive context");
+}
+
 const ALLOWED_TOOLS = new Set([
   "read",
   "read_file",
@@ -79,6 +84,10 @@ const RESTRICT_STATE = Symbol.for("huaanwork.presentAs.restrictState");
 const contextStates = new WeakMap<object, ContextState>();
 
 export function refreshAgentRestrict(ctx: Context, sessionId?: string): void {
+  // Without an attachment table there is no session-level tool delta to merge;
+  // mount-time and tools/change restrictions already cover the base allowlist.
+  // Contexts such as the Windows acceptance fixture call this while disposing.
+  if (ctx.huaanworkAttachments === undefined) return;
   const root = (ctx as unknown as { root?: object }).root;
   const state =
     (ctx as unknown as Record<symbol, ContextState | undefined>)[RESTRICT_STATE] ??
@@ -101,11 +110,8 @@ export function apply(ctx: Context): void {
   const presentAs = ctx.tools.presentAs.bind(ctx.tools);
   ctx.tools.presentAs = (mode) => {
     if (isDisabledPresentationMode(mode)) {
-      ctx.huaanworkEmit?.({
-        event: "session/end",
-        ok: false,
-        error: "Code mode is disabled",
-      });
+      // No sessionId here: emitting session/end would fall back to the live tab
+      // and mark it failed. The mounting plugin's rejection is the whole signal.
       throw new Error(`tools.presentAs("${mode}") is disabled by HuaAnWork`);
     }
     return presentAs(mode);
@@ -130,7 +136,15 @@ export function apply(ctx: Context): void {
       return [];
     });
     if (allowed.length === 0) return;
-    const disposer = tools.restrict({ allow: allowed });
+    let disposer: (() => void) | undefined;
+    try {
+      disposer = tools.restrict({ allow: allowed });
+    } catch (error) {
+      // The agent can be disposed between list() and restrict(); its tool scope
+      // is gone, so there is nothing left to narrow.
+      if (isInactiveContextError(error)) return;
+      throw error;
+    }
     lifted.set(agent, disposer);
   };
 

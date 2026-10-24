@@ -52,6 +52,41 @@ function deepGet(value: unknown, path: string): unknown {
   return current
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * `preset-ptc` carries its own `tool-presentation` row inside `config.plugins`.
+ * The include patch layer only recurses group entries, so top-level row
+ * assertions cannot see it; this check keeps the nested row disabled so the
+ * global tools-row `mode: native` is the only presentation declaration.
+ */
+export function assertPtcPresetPresentation(rows: ReadonlyMap<string, RowLike>): void {
+  const preset = rows.get('preset-ptc')
+  if (preset === undefined) throw new Error('preset-ptc: missing from the composed profile')
+  if (preset.name !== '@deepseek-ai/dsh-agent-preset') {
+    throw new Error(`preset-ptc: expected @deepseek-ai/dsh-agent-preset, got ${String(preset.name)}`)
+  }
+  if (preset.disabled === true) throw new Error('preset-ptc: expected enabled')
+  if (!isRecord(preset.config)) throw new Error('preset-ptc: config is not an object')
+  const plugins = preset.config.plugins
+  if (!Array.isArray(plugins)) throw new Error('preset-ptc: config.plugins is not an array')
+  const presentation = plugins.find(
+    (plugin) =>
+      isRecord(plugin) &&
+      plugin.id === 'tool-presentation' &&
+      plugin.name === '@deepseek-ai/dsh-agent-tool-presentation',
+  )
+  if (presentation === undefined) {
+    throw new Error('preset-ptc: nested tool-presentation row is missing')
+  }
+  if (!isRecord(presentation)) throw new Error('preset-ptc: nested tool-presentation row is not an object')
+  if (presentation.disabled !== true) {
+    throw new Error('preset-ptc: nested tool-presentation must stay disabled; the global tools row supplies native presentation')
+  }
+}
+
 export function assertHuaanworkRowIdsHit(
   rows: ReadonlyMap<string, RowLike>,
   declared: readonly RowHitAssertion[] = HUAANWORK_ROW_ASSERTIONS,

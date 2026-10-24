@@ -106,6 +106,32 @@ describe('desktop profile composition', {
     expect(minimalPreset).toContain("disabled: !!js process.platform !== 'win32'")
   })
 
+  it('disables the ptc preset nested tool-presentation so the global native mode applies', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const rows = composeEntries([prepared.patches])
+    const preset = rows.find(row => row.id === 'preset-ptc')
+
+    expect(preset).toEqual(expect.objectContaining({ name: '@deepseek-ai/dsh-agent-preset' }))
+    expect(preset?.disabled).toBeFalsy()
+    const config = preset?.config as {
+      id?: string
+      order?: number
+      plugins?: Array<Record<string, unknown>>
+    }
+    expect(config.id).toBe('ptc')
+    expect(config.order).toBe(2)
+    const pluginIds = config.plugins?.map(plugin => plugin.id)
+    expect(pluginIds).toContain('persona')
+    expect(pluginIds).toContain('tool-presentation')
+
+    const presentation = config.plugins?.find(plugin => plugin.id === 'tool-presentation')
+    expect(presentation).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-agent-tool-presentation',
+      disabled: true,
+    }))
+  })
+
   it('reads packaged Cordis skills from the logical ASAR preset root', () => {
     const home = temporaryHome()
     const resources = join(home, 'resources')

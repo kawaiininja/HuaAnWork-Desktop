@@ -310,7 +310,7 @@ test("two work agents in the same session keep independent restrict filters (no 
   assert.deepEqual(toolsOf(subAgent).getActiveAllow(), ["read", "bash"]);
 });
 
-test('presentAs("ptc") 被拒(D1:0.1.6-alpha.2 呈现模式改名后的 run_code 防线)', () => {
+test('presentAs("ptc") is rejected without emitting an unscoped session/end', () => {
   const emitted: Array<{ event: string; ok?: boolean; error?: string }> = [];
   const ctx = {
     huaanworkEmit: (e: { event: string; ok: boolean; error: string }) => { emitted.push(e); },
@@ -328,10 +328,41 @@ test('presentAs("ptc") 被拒(D1:0.1.6-alpha.2 呈现模式改名后的 run_code
     () => (ctx.tools.presentAs as (mode: string) => () => void)("ptc"),
     /disabled by HuaAnWork/,
   );
-  assert.ok(
-    emitted.some((e) => e.event === "session/end" && e.ok === false),
-    "should emit session/end with ok:false",
-  );
+  assert.deepEqual(emitted, [], "a global presentation rejection must not fail the live tab");
+});
+
+test("a disposed agent's inactive-scope restrict is skipped without aborting the sweep", () => {
+  const disposed = createMockAgent({ sessionId: "work-disposed", initialToolNames: ["read"] });
+  disposed.ctx.get("tools")!.restrict = () => {
+    throw new Error("cannot create effect on inactive context");
+  };
+  const live = createMockAgent({ sessionId: "work-live", initialToolNames: ["read"] });
+  const ctx = createMockContext({ agents: [disposed, live], attachments: emptyAttachments() });
+
+  assert.doesNotThrow(() => apply(ctx as never));
+  assert.equal(live.restrictCalls.length, 1, "the live agent is still restricted after the disposed one throws");
+
+  assert.doesNotThrow(() => ctx.emit("tools/change"));
+  assert.equal(live.restrictCalls.length, 2);
+
+  assert.doesNotThrow(() => refreshAgentRestrict(ctx as never));
+  assert.equal(live.restrictCalls.length, 3);
+});
+
+test("refreshAgentRestrict skips contexts without an attachment table and stays loud with one", () => {
+  const errors: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    refreshAgentRestrict(createMockContext({ agents: [] }) as never);
+    assert.deepEqual(errors, [], "no attachment table means nothing to refresh");
+
+    refreshAgentRestrict(createMockContext({ agents: [], attachments: emptyAttachments() }) as never);
+    assert.equal(errors.length, 1);
+    assert.match(String(errors[0]?.[0] ?? ""), /restrict state not found/);
+  } finally {
+    console.error = original;
+  }
 });
 
 test("ALLOWED_TOOLS includes propose_plan and request_input", () => {
