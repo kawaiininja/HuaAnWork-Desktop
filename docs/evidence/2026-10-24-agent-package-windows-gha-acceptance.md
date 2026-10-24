@@ -1,8 +1,8 @@
 # 智能体包 M1 Windows GHA 探针证据
 
-绿跑之后的标签：`PASS（GHA Windows 探针）`。第一次 dispatch 未通过，当前不是 PASS。
+当前结论：`PASS（GHA Windows 探针）`。绿跑是 [run 40058507608](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40058507608)（`7bd33a5162`，job 退出码 0，`decision.verdict` 为 `PASS`）。这是无界面探针，不是 GUI 真机，也不覆盖真实模型。
 
-退出码不是 0 的运行不要写成 PASS。下面先记这次失败，绿跑另起一节，不覆盖失败记录。
+退出码不是 0 的运行不要写成 PASS。失败尝试留在下一节，不拿绿跑覆盖它。
 
 PASS 的含义：job `windows-agent-package-acceptance` 退出码 0。它证明下面的硬失败项，不证明 GUI 真机。
 
@@ -35,35 +35,73 @@ PASS 的含义：job `windows-agent-package-acceptance` 退出码 0。它证明�
 
 失败的部分：`hostExit` 的 `started` 为 false。子进程日志打出 `host-exit child slug=win-exit-probe` 之后，父进程把 CIM 查询收成只含 `matches` 的摘要，再读 `residuals.length`。`residuals` 是 undefined，TypeError 被记成 fatal。HTTP/MCP 的空 `matches` 说明这不是残留进程。stderr 里重复的 `refreshAgentRestrict: restrict state not found` 不是这次退出码的原因。
 
-## 如何把结果填进来
-
-保留命令原文。不要改写探针 JSON，不要删掉失败字段。
+## 绿跑：run 40058507608
 
 | 项 | 值 |
 | --- | --- |
-| 日期 | （待填） |
-| workflow run URL | （待填） |
-| 结论 | （待填：job 退出码 0 才写 `PASS（GHA Windows 探针）`） |
-| commit | （待填，与 run 的 SHA 一致） |
-| runner OS | （待填，例如 `RUNNER_OS` 与报告里的 `runner.osRelease`） |
-| 探针报告 | （待填：artifact 文件名，或把 JSON 贴在下一节） |
+| 日期 | 2026-10-24 |
+| workflow run URL | https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40058507608 |
+| 结论 | `PASS（GHA Windows 探针）`。job `windows-agent-package-acceptance` conclusion `success`。探针 `decision.verdict` 为 `PASS`，`decision.exitCode` 为 0。 |
+| commit | `7bd33a516201496cd84410fc0ae7656e36794a04` |
+| runner OS | `RUNNER_OS=Windows`，`runner.osRelease=10.0.26100`，`arch=x64`，`runner.name=GitHub Actions 1000000513` |
+| 探针报告 | artifact `windows-agent-package-acceptance`（`windows-agent-package-acceptance.json`）。可选的 Host 存活步骤被跳过。 |
+
+`httpAfterIdle`、`mcpAfterIdle`、`hostExit` 都是 `started: true`、`stopped: true`、`residuals: []`。沙箱 `enforcement` 为 `partial`，`httpReady`、`writeDenied`、`readOutside`、`networkOutside` 均为 true。`forceKill.attempted` 为 false，`countsAsHardFail` 为 false。三次 CIM 查询都是 `Get-CimInstance Win32_Process | Select-Object ProcessId, Name, CommandLine`，`scanned` 为 138，`residuals` 与 `matches` 都是空数组。报告里没有其他进程的命令行，下面也不贴。
 
 ### 探针 JSON
 
-把 stdout 的单行 JSON 或 artifact `windows-agent-package-acceptance.json` 贴在这里。至少保留：
+摘自该 run 的 artifact。字段值未改。省略 `sandboxProbe.stderrTail`（沙箱子进程的 EPERM 栈；事实在 `facts`）和临时目录路径。
 
-- `decision.verdict` 与 `decision.exitCode`
-- `sandboxProbe.facts`（`enforcement`、`httpReady`、`writeDenied`、`readOutside`、`networkOutside`）
-- `phases` 里 `httpAfterIdle`、`mcpAfterIdle`、`hostExit` 的 `started` / `stopped` / `residuals`
-- `forceKill`（只是观察；`countsAsHardFail` 应为 false）
-- `details.hostExit.processQuery.command`、`residuals` 与 `matches`
-
-进程查询是 `Get-CimInstance Win32_Process`。报告只收录命令行含 `agents\<slug>\` 或 `agents/<slug>/` 的行，外加扫描到的进程数。不要把 runner 上其他进程的命令行贴进仓库。
+```json
+{
+  "kind": "huaanwork-agent-package-windows-acceptance",
+  "platform": "win32",
+  "commit": "7bd33a516201496cd84410fc0ae7656e36794a04",
+  "runner": {
+    "os": "Windows",
+    "osRelease": "10.0.26100",
+    "name": "GitHub Actions 1000000513",
+    "arch": "x64"
+  },
+  "scope": {
+    "gui": false,
+    "realModel": false
+  },
+  "sandboxProbe": {
+    "exitCode": 0,
+    "facts": {
+      "platform": "win32",
+      "enforcement": "partial",
+      "httpReady": true,
+      "writeDenied": true,
+      "readOutside": true,
+      "networkOutside": true
+    },
+    "timedOut": false
+  },
+  "phases": [
+    { "name": "httpAfterIdle", "started": true, "stopped": true, "residuals": [] },
+    { "name": "mcpAfterIdle", "started": true, "stopped": true, "residuals": [] },
+    { "name": "hostExit", "started": true, "stopped": true, "residuals": [] }
+  ],
+  "forceKill": { "countsAsHardFail": false, "attempted": false, "results": [] },
+  "decision": {
+    "exitCode": 0,
+    "verdict": "PASS",
+    "hardFailures": [],
+    "blockers": [],
+    "forceKillIgnored": []
+  }
+}
+```
 
 ### 进程查询输出
 
 ```text
-（待填：报告中的 processQuery，或 job 日志里对应的 stderr 行）
+command: Get-CimInstance Win32_Process | Select-Object ProcessId, Name, CommandLine
+httpAfterIdle: scanned=138 residuals=[] matches=[] error=null portClosed=true
+mcpAfterIdle:  scanned=138 residuals=[] matches=[] error=null portClosed=true
+hostExit:      scanned=138 residuals=[] matches=[] error=null portsClosed http=true mcp=true childExitCode=0
 ```
 
 ## 硬失败与观察
@@ -84,7 +122,7 @@ PASS 的含义：job `windows-agent-package-acceptance` 退出码 0。它证明�
 
 ## 升成产品门禁
 
-至少 1–2 次本页记录的绿跑之后：
+本页已有 1 次退出码 0 的 run（40058507608）。记录这一次不改 workflow，也不把该检查标成 required。至少 1–2 次本页记录的绿跑之后：
 
 1. 将 job 放入 `.github/workflows/ci.yml`，条件为 `needs.changes.outputs.product == 'true'`，或给本 workflow 增加 `pull_request` / `push` 并使用同一条件。
 2. 不要加 `continue-on-error`，也不要删除 `yarn check`、`desktop-windows` 或 `test:host-liveness-win`。

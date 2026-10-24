@@ -9,7 +9,7 @@
   MCP、catalog-legacy（本地 fixture）与 legacy `@agent` 实机均通过（§7、§8）。真实内网 catalog 与 Windows
   真机仍未验收。
 - **2026-10-24 裁定**：本文件的代理驱动实机验收作为 Task 9 Step 4 的 macOS 证据；真人交互复核列为
-  可选/独立项。同日后续裁定把 Windows Step 5 改为 GHA 无界面探针；job 退出码 0 才记为 `PASS（GHA Windows 探针）`。第一次 dispatch 未通过，见 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。GUI 与真实模型为可选项；见 `docs/huaanwork-agent-packages-m1.md` §11。上文「Windows 真机仍未验收」是这次 macOS 会话当时的范围。
+  可选/独立项。同日后续裁定把 Windows Step 5 改为 GHA 无界面探针。绿跑记为 `PASS（GHA Windows 探针）`，见 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。GUI 与真实模型为可选项；见 `docs/huaanwork-agent-packages-m1.md` §11。上文「Windows 真机仍未验收」是这次 macOS 会话当时的范围。
 
 ## 1. 通过项
 
@@ -69,7 +69,7 @@ agents-state.json
   到达（HTTP/MCP 回合本来就会跑过父回合空闲点），原 10 s 会把仍在工作的子代理截断。超时后宿主记一条错误、释放
   activation（发布后的取消归 `dispose()`，不再 abort 发布前 signal）并照常停止子进程；`agent-package-tools.spec.ts`
   用假定时器钉住 599,999 ms 内仍在等待、600,000 ms 触发清理。
-- **Windows**：2026-10-23 本次 macOS 验收没有 Windows 机器，当时记为 BLOCKED。2026-10-24 后续裁定把 Step 5 改为 GitHub Actions 无界面探针；job 退出码 0 才记为 `PASS（GHA Windows 探针）`。第一次 dispatch 未通过。GUI 与真实模型交互为可选项。见 `docs/huaanwork-agent-packages-m1.md` §11 与 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。macOS Task 9 Step 4 已按同日裁定收口。
+- **Windows**：2026-10-23 本次 macOS 验收没有 Windows 机器，当时记为 BLOCKED。2026-10-24 后续裁定把 Step 5 改为 GitHub Actions 无界面探针，并在绿跑后记为 `PASS（GHA Windows 探针）`。GUI 与真实模型交互为可选项。见 `docs/huaanwork-agent-packages-m1.md` §11 与 `docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md`。macOS Task 9 Step 4 已按同日裁定收口。
 - **完整 headless 门禁**：验收修复后已跑 `dsh-plugin-huaanwork` 全量（3150 passed / 14 skipped）、typecheck
   （0）、`check:desktop-variants`（0）；根 `corepack yarn check` 未在最终树重跑（此前在最终评审前为绿）。
 - **M1 完成声明**：macOS Task 9 Step 4 已按 2026-10-24 裁定收口。Windows Step 5 的验收面随后改为 GHA 探针（见上一条）；真实内网 catalog 的 payload/认证在本文件记录时仍未验收。本文件不引用 Windows workflow run URL。
