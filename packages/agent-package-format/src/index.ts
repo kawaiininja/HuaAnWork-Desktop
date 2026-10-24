@@ -17,3 +17,12 @@ export {
   type AgentPackageFile,
   type VerifiedAgentPackageDirectory,
 } from './digest.ts'
+export {
+  MAX_AGENT_PACKAGE_BUNDLE_BYTES,
+  buildSignedAgentPackageBundle,
+  buildUnsignedAgentPackageBundle,
+  inspectSignedAgentPackageBundle,
+  inspectUnsignedAgentPackageBundle,
+  type SignedAgentPackageInspection,
+  type UnsignedAgentPackageInspection,
+} from './bundle.ts'

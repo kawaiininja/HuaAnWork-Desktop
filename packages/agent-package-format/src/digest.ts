@@ -161,7 +161,7 @@ function readPackageContents(
 
   const state: { entries: number; bytes: number; files: AgentPackageFile[] } = { entries: 0, bytes: 0, files: [] }
   walkPackageDir(packageDir, '', options, state)
-  const manifest = validatePackageStructure(state.files)
+  const manifest = validateAgentPackageFiles(state.files)
   return { manifest, files: state.files }
 }
 
@@ -240,9 +240,10 @@ function assertPathBudget(relativePath: string): void {
  * 解析 `agent.json` 并核对声明与预算。
  *
  * 校验器负责字段形状;这里再核对声明的人设/技能/工具入口确实存在,并落实
- * 脚本数量、单文件与整包字节上限。任何不符都抛 `包结构非法`。
+ * 脚本数量、单文件与整包字节上限。任何不符都抛 `包结构非法`。目录枚举与
+ * bundle 解包(Task 3)共用这一份结构校验,避免两条入口漂移。
  */
-function validatePackageStructure(files: AgentPackageFile[]): AgentPackageManifest {
+export function validateAgentPackageFiles(files: AgentPackageFile[]): AgentPackageManifest {
   const byPath = new Map<string, AgentPackageFile>()
   for (const file of files) byPath.set(file.path, file)
 
