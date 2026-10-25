@@ -14505,6 +14505,19 @@ __metadata:
   languageName: node
   linkType: hard
 
+"agent-catalog-admin@workspace:agent-catalog-admin":
+  version: 0.0.0-use.local
+  resolution: "agent-catalog-admin@workspace:agent-catalog-admin"
+  dependencies:
+    "@huaanwork/agent-package-format": "workspace:*"
+    "@huaanwork/catalog-signing": "workspace:*"
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:6.0.3"
+  bin:
+    agent-catalog-admin: src/cli.ts
+  languageName: unknown
+  linkType: soft
+
 "agent-catalog-server@workspace:agent-catalog-server":
   version: 0.0.0-use.local
   resolution: "agent-catalog-server@workspace:agent-catalog-server"
