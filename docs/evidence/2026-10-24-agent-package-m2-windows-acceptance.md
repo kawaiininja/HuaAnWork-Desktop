@@ -610,6 +610,8 @@ M1（同一 run）：`decision.exitCode:0`、`decision.verdict:"PASS"`、`hardFa
   不同属正常；稳定量（11 个布尔、负例集合与文案、`auditLines:44`、`residualProcesses:0`、
   `cleanup.matches:[]`）与 macOS 权威运行一致。
 - `cleanup.scannedProcesses` 为 138（Windows 进程基数，与 M1 的三相位一致）。
+- 本轮记录本证据的两次文档提交发生在 run 之后（`32db078253`、`2069df57d3`），只改 `docs/`；
+  探针与 workflow 的字节与被运行的 `93c1bb0291` 相同。
 
 ### 9.6 仍然 `BLOCKED` 的部分
 
