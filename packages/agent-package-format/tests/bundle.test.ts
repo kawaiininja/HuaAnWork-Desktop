@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
+import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { Readable } from 'node:stream'
 import test from 'node:test'
-import { gzipSync } from 'node:zlib'
+import { gunzipSync, gzipSync } from 'node:zlib'
 
 import { canonicalJson, generateKeyPair, signAgentPackageDigest } from '@huaanwork/catalog-signing'
-import { Header, Pack, ReadEntry } from 'tar'
+import { Header, Pack, Pax, ReadEntry } from 'tar'
 import { t as listArchive } from 'tar'
 
 import {
@@ -65,6 +66,58 @@ async function makeArchive(entries: ArchiveEntry[]): Promise<Buffer> {
   }
   pack.end()
   return ended
+}
+
+/** Flip one byte in the first header's checksum field, then re-gzip. */
+function corruptFirstHeaderChecksum(archive: Buffer): Buffer {
+  const raw = gunzipSync(archive)
+  // 512-byte header; checksum field is bytes 148..155. Flip one of its digits.
+  raw[148] = raw[148] === 0x30 ? 0x31 : 0x30
+  return gzipSync(raw)
+}
+
+/** Rewrite the 512-byte header checksum after patching a header field. */
+function resealHeaderChecksum(header: Buffer): void {
+  // Checksum bytes count as spaces while summing, then hold the octal result.
+  header.fill(0x20, 148, 156)
+  let sum = 0
+  for (const byte of header) sum += byte
+  header.write(sum.toString(8).padStart(6, '0'), 148, 'ascii')
+  header[154] = 0
+  header[155] = 0x20
+}
+
+/**
+ * Build a tar.gz straight from header blocks, bypassing `Pack`/`ReadEntry`.
+ *
+ * `Pack` writes `normalizeWindowsPath(entry.path)`, so on a Windows host (or
+ * with `TESTING_TAR_FAKE_PLATFORM=win32`) a raw backslash never reaches the
+ * archive. Writing `Header` blocks directly keeps the bytes identical on every
+ * platform, and lets a test pick a typeflag tar cannot encode via `Header`.
+ */
+function makeRawArchive(
+  entries: { path: string; content: string; typeflag?: string; paxPath?: string }[],
+): Buffer {
+  const blocks: Buffer[] = []
+  for (const entry of entries) {
+    if (entry.paxPath !== undefined) {
+      // PAX overrides land in `Header.path` before `ReadEntry` normalizes it.
+      blocks.push(new Pax({ path: entry.paxPath }).encode())
+    }
+    const data = Buffer.from(entry.content)
+    const header = Buffer.alloc(512)
+    new Header({ path: entry.path, type: 'File', size: data.byteLength }).encode(header)
+    if (entry.typeflag !== undefined) {
+      header[156] = entry.typeflag.charCodeAt(0)
+      resealHeaderChecksum(header)
+    }
+    blocks.push(header)
+    const body = Buffer.alloc(Math.ceil(data.byteLength / 512) * 512)
+    data.copy(body)
+    blocks.push(body)
+  }
+  blocks.push(Buffer.alloc(1024))
+  return gzipSync(Buffer.concat(blocks))
 }
 
 /** Read every file entry of an archive without touching the candidate API. */
@@ -143,6 +196,27 @@ test('rejects malicious archive entries and duplicates', async () => {
   )
 })
 
+test('rejects unknown tar entry types instead of silently ignoring them', async () => {
+  const archive = makeRawArchive([
+    { path: 'agent.json', content: JSON.stringify(VALID_MANIFEST) },
+    { path: 'persona.md', content: VALID_PERSONA },
+    { path: 'agent.json/extra', content: 'unexpected', typeflag: 'Y' },
+  ])
+  await assert.rejects(
+    inspectUnsignedAgentPackageBundle(archive),
+    /包结构非法：.*(未知|不支持|忽略)/,
+  )
+})
+
+test('rejects archives whose header checksum cannot be trusted', async () => {
+  // The corrupted header belongs to an extra entry, so dropping it would still
+  // leave a complete package: pre-fix this archive was accepted after a warning.
+  const archive = corruptFirstHeaderChecksum(
+    await makeArchive([{ name: 'extra.txt', content: 'untrusted' }, validAgentJson, validPersona]),
+  )
+  await assert.rejects(inspectUnsignedAgentPackageBundle(archive), /包结构非法/)
+})
+
 test('rejects unsigned archives carrying signature content', async () => {
   await assert.rejects(
     inspectUnsignedAgentPackageBundle(
@@ -194,10 +268,17 @@ test('charges Directory and meta bodies against the unpacked budget', async () =
     /包结构非法：智能体包超过5242880字节上限/,
   )
 
+  // 单个超帽 PAX 头现在会在 `ignoredEntry` 上 fail-closed(见未知类型用例),
+  // 到不了 meter;但门限内的多个 PAX 头仍不进 onentry,必须由解压总量兜住。
+  const metaBody = Buffer.alloc(64 * 1024)
   const extendedHeaderBody = await makeArchive([
     validAgentJson,
     validPersona,
-    { name: 'padding.pax', type: 'ExtendedHeader', content: Buffer.alloc(8 * 1024 * 1024) },
+    ...Array.from({ length: 100 }, (_, index) => ({
+      name: `padding-${index}.pax`,
+      type: 'ExtendedHeader' as const,
+      content: metaBody,
+    })),
   ])
   assert.ok(extendedHeaderBody.byteLength < MAX_AGENT_PACKAGE_BUNDLE_BYTES)
   await assert.rejects(
@@ -561,4 +642,36 @@ test('rejects empty archives and directory/file prefix conflicts', async () => {
     ),
     /目录与文件冲突/,
   )
+})
+
+/** Run the win32 child on the exact archive bytes and require a backslash rejection. */
+function runWindowsNormalizationProbe(archive: Buffer): void {
+  const result = spawnSync(
+    process.execPath,
+    ['--experimental-strip-types', 'fixtures/windows-normalization-probe.ts', archive.toString('base64')],
+    { cwd: import.meta.dirname, env: { ...process.env, TESTING_TAR_FAKE_PLATFORM: 'win32' }, encoding: 'utf8' },
+  )
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /REJECTED/)
+}
+
+test('rejects raw backslash paths on a Windows-normalizing tar', async () => {
+  const header = [
+    { path: 'agent.json', content: JSON.stringify(VALID_MANIFEST) },
+    { path: 'persona.md', content: VALID_PERSONA },
+  ]
+  // Direct header path: tar rewrites `skill\script.mjs` into `skill/script.mjs`
+  // on win32 before onentry, so only the raw header path can reject it there.
+  const direct = makeRawArchive([...header, { path: 'skill\\script.mjs', content: 'console.log(1)' }])
+  await assert.rejects(inspectUnsignedAgentPackageBundle(direct), /反斜杠/)
+  runWindowsNormalizationProbe(direct)
+
+  // PAX path override: applied to `Header.path`, then normalized into
+  // `ReadEntry.path` on win32; the same raw check must still reject it.
+  const viaPax = makeRawArchive([
+    ...header,
+    { path: 'placeholder', content: 'console.log(1)', paxPath: 'skill\\script.mjs' },
+  ])
+  await assert.rejects(inspectUnsignedAgentPackageBundle(viaPax), /反斜杠/)
+  runWindowsNormalizationProbe(viaPax)
 })

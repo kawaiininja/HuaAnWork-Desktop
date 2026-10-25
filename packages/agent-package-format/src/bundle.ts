@@ -355,6 +355,21 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
         return
       }
 
+      // tar normalizes `entry.path` on win32 BEFORE this callback; validate the raw
+      // header path (already PAX-overridden by Header) so a backslash is rejected on
+      // every platform, not silently rewritten into a POSIX separator.
+      const rawHeaderPath = (entry as { header?: { path?: unknown } }).header?.path
+      if (typeof rawHeaderPath === 'string') {
+        if (rawHeaderPath.includes('\\')) {
+          fail(structureError('路径不得包含反斜杠'))
+          return
+        }
+        if (rawHeaderPath.includes('\0')) {
+          fail(structureError('路径不得包含 NUL'))
+          return
+        }
+      }
+
       let path: string
       try {
         path = normalizeEntryPath(entry.path, entry.type === 'Directory' ? 'directory' : 'file')
@@ -413,9 +428,16 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
       // 让魔数检查成为唯一入口,而不是第二道靠 tar 自己兜底。
       zstd: false,
       brotli: false,
+      strict: true,
       maxMetaEntrySize: MAX_AGENT_PACKAGE_META_BYTES,
       onentry,
     }) as Parser
+    // Unknown typeflags are delivered as `ignoredEntry` (ReadEntry.ignore=true),
+    // never as `entry`; without this listener the archive is silently accepted.
+    parser.on('ignoredEntry', () => fail(structureError('归档包含未知或不支持的条目')))
+    // strict:true turns recoverable warnings into `error`; this listener is a
+    // defensive second path for tar versions that still emit `warn`.
+    parser.on('warn', (_code, message) => fail(structureError(`归档解析警告：${String(message)}`)))
     parser.on('error', () => fail(structureError('归档无法解析')))
     parser.on('end', () => {
       if (settled) return
