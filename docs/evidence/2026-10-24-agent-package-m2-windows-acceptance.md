@@ -100,3 +100,20 @@ artifact 文件名:
   读/网络观察由 M1 的 Windows sandbox probe 负责。Windows 上沙箱自报 `partial`、读与网络
   不隔离是已接受事实。
 - 探针每次运行生成新 key/token，`submissionId`、`keyId`、端口每次不同属正常。
+
+## 7. 本轮 root 门禁（macOS 主机；Windows 仍为 `BLOCKED`）
+
+这些结果只证明代码与工具链在 macOS 主机上通过，**不**构成 Windows 运行证据。
+
+| 项 | 结果 |
+| --- | --- |
+| `corepack yarn check` | 0（15 个顶层步骤全过；无跳过/重排） |
+| `corepack yarn check:desktop-variants` | 0（7 / 64 / 前缀 6） |
+| `corepack yarn typecheck` | 0 |
+| `corepack yarn test` | 0 |
+| macOS 探针最终运行 | `PASS`，exit 0，commit `13bb3fc90b`，`residualProcesses=0`；原始 JSON 见 macOS 证据 §4 |
+| Windows GHA | **`BLOCKED`**：未 push，未触发 `workflow_dispatch`；没有 run URL、没有退出码 |
+| 跨机器验收 | **`BLOCKED`**：只有一台 macOS 主机 |
+
+Windows 结论仍然只能由 §2 的 `workflow_dispatch` 运行产生；在看到退出码 0 之前，本文件
+与 runbook 都不得写 `PASS`。
