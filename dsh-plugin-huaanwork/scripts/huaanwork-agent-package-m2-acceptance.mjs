@@ -82,7 +82,6 @@ import {
 } from '../src/huaanwork-host/agent-package/catalog-client.ts'
 import {
   installCatalogAgentPackage,
-  refreshInstalledCatalogPackageStatuses,
   updateCatalogAgentPackage,
 } from '../src/huaanwork-host/agent-package/catalog-install.ts'
 import {
@@ -102,6 +101,10 @@ import {
   readAgentPackageState,
   writeAgentPackageState,
 } from '../src/huaanwork-host/agent-package/store.ts'
+import { createAgentsHost } from '../src/huaanwork-host/agents-host.ts'
+import { ROUTE_TABLE } from '../src/huaanwork-host/routes.ts'
+import { setAgentPackageHost, setAgentsDirectory } from '../src/huaanwork-host/sessions.ts'
+import { readHuaanworkSettingsSync, writeHuaanworkSettings } from '../src/huaanwork-host/settings.ts'
 import { containsPrivateKey, redactReport, redactSecrets } from './huaanwork-acceptance-redaction.mjs'
 
 const LOG = '[agent-package-m2]'
@@ -666,6 +669,39 @@ function configureConsumer(profileDir, port, tokens) {
   })
 }
 
+/**
+ * Configure the consumer catalog client AND persist the same three settings the
+ * client uses to `{profileDir}/huaanwork-settings.json` (Task 13 / I-17).
+ *
+ * `agent.packageRefresh` runs the legacy agents directory refresh through
+ * `getAgentsDirectory().refresh()`, which reads its own settings from disk
+ * (`readHuaanworkSettingsSync`). Persisting the identical values keeps the
+ * legacy `/v1/catalog` fetch pointed at the probe's catalog instead of silently
+ * skipping it as "unconfigured".
+ */
+async function configureConsumerProfile(profileDir, port, tokens) {
+  await writeHuaanworkSettings(profileDir, {
+    agents_host: '127.0.0.1',
+    agents_port: port,
+    agents_catalog_token: tokens.read,
+  })
+  return configureConsumer(profileDir, port, tokens)
+}
+
+/**
+ * Legacy agents host settings reader with a fail-closed guard: an empty endpoint
+ * would make `refresh()` return "not configured" without a `catalogError`, and
+ * the probe would report a delisted card from a refresh that never reached the
+ * catalog.
+ */
+function readSettingsFor(profileDir) {
+  const settings = readHuaanworkSettingsSync(profileDir)
+  if (settings.agents_host === '' || settings.agents_port === '') {
+    throw new Error(`catalog endpoint is missing from ${profileDir}/huaanwork-settings.json`)
+  }
+  return settings
+}
+
 function adminEnv(baseUrl, tokens) {
   return {
     AGENT_CATALOG_URL: baseUrl,
@@ -754,7 +790,7 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
   }
 
   // 3. Install into the second profile.
-  configureConsumer(dirs.consumerProfile, catalog.port, tokens)
+  await configureConsumerProfile(dirs.consumerProfile, catalog.port, tokens)
   const installed = await installCatalogAgentPackage(SLUG, FIRST_VERSION)
   const consumerEntry = stateFor(dirs.consumerProfile)[`catalog:${SLUG}`]
   if (installed.manifest.version !== FIRST_VERSION) {
@@ -795,17 +831,46 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
 
   // 5. Enable + a REAL HTTP fixture dispatch through the real host.
   const activeTurns = createAgentPackageActiveTurnRegistry()
+  const consumerClient = await configureConsumerProfile(dirs.consumerProfile, catalog.port, tokens)
   const security = createAgentCatalogSecurity({
     profileDir: dirs.consumerProfile,
     registry: activeTurns,
-    client: configureConsumer(dirs.consumerProfile, catalog.port, tokens),
+    client: consumerClient,
+  })
+  // Task 13 (I-17): the delisted/revoked cards are asserted on the REAL
+  // `agent.packageRefresh` route, so the probe needs the same wiring `index.ts`
+  // builds at boot — a legacy agents directory, the package host singleton and
+  // a route context carrying the real security surface.
+  const legacyHost = createAgentsHost({
+    storageRoot: dirs.consumerProfile,
+    readSettings: () => readSettingsFor(dirs.consumerProfile),
+    onCatalogChange: () => undefined,
   })
   const host = createAgentPackageHost({
     profileDir: dirs.consumerProfile,
     takenSlugs: () => [],
     activeTurns,
     security,
+    legacy: () => legacyHost,
   })
+  setAgentsDirectory(legacyHost)
+  setAgentPackageHost(host)
+  const routeCtx = {
+    dshHome: dirs.consumerProfile,
+    profileDir: dirs.consumerProfile,
+    workspaceRoot: { current: dirs.workspace },
+    emit: () => undefined,
+    logger: (message) => log(message),
+    runtimeCtx: { huaanworkAgentCatalogSecurity: security },
+    requestRestart: async () => false,
+  }
+
+  async function callPackageRpc(method, request = { params: {}, body: {}, query: new URLSearchParams() }) {
+    const entry = ROUTE_TABLE.find((candidate) => candidate.method === method)
+    if (entry === undefined) throw new Error(`route ${method} not found`)
+    return entry.handler(request, routeCtx)
+  }
+
   host.setEnabled(SLUG, true)
   const enabledEntry = stateFor(dirs.consumerProfile)[`catalog:${SLUG}`]
   if (enabledEntry?.enabled !== true) throw new Error('enable did not persist')
@@ -876,7 +941,7 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
   if (secondPublication.publishStatus !== 'published' || secondPublication.publishedVersion !== SECOND_VERSION) {
     throw new Error(`1.0.1 publication was ${JSON.stringify(secondPublication)}`)
   }
-  configureConsumer(dirs.consumerProfile, catalog.port, tokens)
+  await configureConsumerProfile(dirs.consumerProfile, catalog.port, tokens)
   const updated = await updateCatalogAgentPackage(SLUG, security.stopAgentPackageTurnsForSlug)
   const enabledAfterUpdate = stateFor(dirs.consumerProfile)[`catalog:${SLUG}`]
   if (updated.manifest.version !== SECOND_VERSION) throw new Error('update returned the wrong version')
@@ -937,7 +1002,7 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
   }
   if (!negatives.tamperedContent.ok) throw new Error('tampered content was not refused')
 
-  configureConsumer(dirs.thirdProfile, catalog.port, tokens)
+  await configureConsumerProfile(dirs.thirdProfile, catalog.port, tokens)
   let replayError = null
   try {
     await installCatalogAgentPackage(SLUG, FIRST_VERSION)
@@ -963,16 +1028,36 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
     adminEnv(catalog.baseUrl, tokens),
   )
   const delistApproveStep = requireCliOk(delistApprove, secrets)
-  configureConsumer(dirs.consumerProfile, catalog.port, tokens)
-  const refresh = await refreshInstalledCatalogPackageStatuses()
-  if (refresh.changed !== true) throw new Error('status refresh did not report a change')
+  await configureConsumerProfile(dirs.consumerProfile, catalog.port, tokens)
+  // Task 13 (I-17): the card is asserted on the REAL `agent.packageRefresh`
+  // route (legacy directory → catalog cache → publications → installed
+  // metadata → revocations), not on the helper the route happens to call.
+  const beforeRefreshCard = host.listLocal().find((item) => item.slug === SLUG)
+  if (beforeRefreshCard?.publishStatus !== 'installed') {
+    throw new Error(`card before the refresh was ${JSON.stringify(beforeRefreshCard)}`)
+  }
+  const refreshResult = await callPackageRpc('agent.packageRefresh')
+  const delistedCard = refreshResult.packages.find((item) => item.slug === SLUG && item.source === 'catalog')
+  if (delistedCard?.publishStatus !== 'delisted' || delistedCard.enabled !== true || delistedCard.broken !== undefined) {
+    throw new Error(`packageRefresh card was ${JSON.stringify(delistedCard)}`)
+  }
   const delistedEntry = stateFor(dirs.consumerProfile)[`catalog:${SLUG}`]
-  const delistedCard = host.listLocal().find((item) => item.slug === SLUG)
+  const delistedListCard = (await callPackageRpc('agent.packageList')).packages.find(
+    (item) => item.slug === SLUG && item.source === 'catalog',
+  )
+  if (delistedListCard?.publishStatus !== 'delisted') {
+    throw new Error(`packageList card was ${JSON.stringify(delistedListCard)}`)
+  }
+  const delistedHostCard = host.listLocal().find((item) => item.slug === SLUG)
+  const legacyCatalogAfterDelist = legacyHost.list()
+  if (legacyCatalogAfterDelist.catalogError !== undefined) {
+    throw new Error(`legacy catalog refresh failed: ${legacyCatalogAfterDelist.catalogError}`)
+  }
   if (delistedEntry?.publishStatus !== 'delisted') {
     throw new Error(`installed publishStatus was ${delistedEntry?.publishStatus}`)
   }
-  if (delistedCard?.publishStatus !== 'delisted' || delistedCard?.enabled !== true || delistedCard?.broken !== undefined) {
-    throw new Error(`installed card was ${JSON.stringify(delistedCard)}`)
+  if (delistedHostCard?.publishStatus !== 'delisted' || delistedHostCard?.enabled !== true || delistedHostCard?.broken !== undefined) {
+    throw new Error(`installed card was ${JSON.stringify(delistedHostCard)}`)
   }
   fields.delistedStatusVisible = true
   steps.delistedStatusVisible = {
@@ -980,12 +1065,25 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
     requestId: delistRequest.requestId,
     publishStatus: delistedEntry.publishStatus,
     enabled: delistedEntry.enabled,
-    card: {
-      publishStatus: delistedCard.publishStatus,
-      enabled: delistedCard.enabled,
-      broken: delistedCard.broken ?? null,
+    primary: 'agent.packageRefresh',
+    crossCheck: 'host.listLocal',
+    rpc: {
+      method: 'agent.packageRefresh',
+      card: delistedCard,
+      catalogError: refreshResult.catalogError ?? null,
+      revocationWarning: refreshResult.revocationWarning ?? null,
     },
-    refreshChanged: refresh.changed,
+    list: { method: 'agent.packageList', card: delistedListCard },
+    catalogRefresh: {
+      route: 'agent.packageRefresh → getAgentsDirectory().refresh()',
+      catalogError: legacyCatalogAfterDelist.catalogError ?? null,
+      legacyItems: legacyCatalogAfterDelist.items.length,
+    },
+    statusTransition: {
+      before: beforeRefreshCard.publishStatus,
+      after: delistedCard.publishStatus,
+      via: 'agent.packageRefresh',
+    },
   }
 
   // 8. A delisted installed copy still runs (delist is not a security control).
@@ -1026,8 +1124,18 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
     adminEnv(catalog.baseUrl, tokens),
   )
   const revokeStep = requireCliOk(revoke, secrets)
-  configureConsumer(dirs.consumerProfile, catalog.port, tokens)
-  const revocationRefresh = await security.refreshRevocations()
+  await configureConsumerProfile(dirs.consumerProfile, catalog.port, tokens)
+  // Task 13 (I-17): revocation is applied by the REAL `agent.packageRefresh`
+  // route (its last phase is `security.refreshRevocations()`), so the card
+  // asserted below is what the product's refresh actually returns.
+  const revocationRefresh = await callPackageRpc('agent.packageRefresh')
+  const revokedCard = revocationRefresh.packages.find((item) => item.slug === SLUG && item.source === 'catalog')
+  if (revokedCard?.revoked?.version !== SECOND_VERSION || revokedCard.enabled !== false) {
+    throw new Error(`revoked card was ${JSON.stringify(revokedCard)}`)
+  }
+  // Cross-check only: the route already ran this refresh; calling the security
+  // surface directly proves the same verdict is reachable on that seam too.
+  const revocationCrossCheck = await security.refreshRevocations()
   const revokedEntry = stateFor(dirs.consumerProfile)[`catalog:${SLUG}`]
   if (longTurnActivation.record.disposed !== true) throw new Error('revocation did not dispose the activation')
   if (longTurnActivation.record.resultSettled !== false) {
@@ -1041,7 +1149,15 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
   fields.revocationStoppedActiveTurn = true
   steps.revocationStoppedActiveTurn = {
     cli: revokeStep,
-    warnings: revocationRefresh.warning ?? null,
+    primary: 'agent.packageRefresh',
+    crossCheck: 'security.refreshRevocations',
+    warnings: revocationRefresh.revocationWarning ?? null,
+    crossCheckWarning: revocationCrossCheck.warning ?? null,
+    rpc: {
+      method: 'agent.packageRefresh',
+      card: revokedCard,
+      catalogError: revocationRefresh.catalogError ?? null,
+    },
     session: `${SESSION_PREFIX}-session-3`,
     httpPort: longTurn.httpPort,
     activationDisposed: longTurnActivation.record.disposed,
@@ -1093,14 +1209,19 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
   if (assertError === null || !assertError.includes('撤销')) {
     throw new Error(`assertRunnable did not reject the revoked version: ${String(assertError)}`)
   }
-  const revokedCard = host.listLocal().find((item) => item.slug === SLUG)
-  if (revokedCard?.broken === undefined) throw new Error('the revoked card is not marked broken')
+  const revokedHostCard = host.listLocal().find((item) => item.slug === SLUG)
+  if (revokedHostCard?.broken === undefined) throw new Error('the revoked card is not marked broken')
+  if (revokedHostCard.broken.reason !== revokedCard.broken?.reason) {
+    throw new Error(`the broken reason drifted between channels: ${JSON.stringify(revokedHostCard.broken)}`)
+  }
   fields.revokedEnableRejected = true
   steps.revokedEnableRejected = {
     enableError,
     staleDispatchError,
     assertRunnableError: assertError,
-    cardBroken: revokedCard.broken.reason,
+    primary: 'agent.packageRefresh',
+    crossCheck: 'host.listLocal',
+    cardBroken: revokedHostCard.broken.reason,
   }
 
   // 11. A delisted version is refused at install too. 1.0.1 is delisted here,
@@ -1110,7 +1231,7 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
   // reaches the revocation check. The precise install-time revocation error
   // (`该版本已被管理员撤销：<原因>`) is pinned by the integration test named in
   // `coveredBy` below.
-  configureConsumer(dirs.thirdProfile, catalog.port, tokens)
+  await configureConsumerProfile(dirs.thirdProfile, catalog.port, tokens)
   let delistedInstallError = null
   try {
     await installCatalogAgentPackage(SLUG, SECOND_VERSION)
