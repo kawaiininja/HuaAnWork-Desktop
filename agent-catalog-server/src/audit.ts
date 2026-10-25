@@ -195,8 +195,10 @@ export class AuditLog {
   /**
    * Close every intent that has no result line yet (Task 4 / I-5). Called once
    * at startup, AFTER the state store was opened: an intent is `ok` only when
-   * `state.lastMutation` names its request id, otherwise the change never
-   * committed and the honest result is a 500. Malformed journal lines are
+   * `state.lastMutation` names its request id; otherwise the honest result is a
+   * 500. `lastMutation` is a single slot (R-M2-1), so a mismatch means the
+   * intent did not commit OR a later mutation overwrote the slot — the reason
+   * therefore states only what is actually known. Malformed journal lines are
    * skipped, exactly like a malformed result line.
    */
   async reconcile(state: CatalogState): Promise<void> {
@@ -244,7 +246,7 @@ export class AuditLog {
         ...(intent.delistRequestId === undefined ? {} : { delistRequestId: intent.delistRequestId }),
         reason: committed
           ? 'reconciled after restart: state.lastMutation matches the intent'
-          : 'reconciled after restart: the intent did not commit',
+          : 'reconciled after restart: state.lastMutation does not name this intent (a later mutation may have overwritten it)',
       })
     }
   }

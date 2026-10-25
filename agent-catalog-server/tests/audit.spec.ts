@@ -67,7 +67,7 @@ test('reconciles an intent that committed before the result record was written',
   assert.equal(intents[0]?.requestId, requestId)
 })
 
-test('reconciles an intent that did not commit as an error', async () => {
+test('reconciles an intent that state.lastMutation does not name as an error', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'catalog-audit-'))
   const audit = await AuditLog.open(dir, [])
   const requestId = randomUUID()
@@ -90,11 +90,47 @@ test('reconciles an intent that did not commit as an error', async () => {
   assert.ok(result, 'reconcile must close an intent even when the change never committed')
   assert.equal(result.outcome, 'error')
   assert.equal(result.status, 500)
-  assert.match(String(result.reason), /did not commit/u)
+  assert.match(String(result.reason), /does not name this intent/u)
+  // Single-slot `lastMutation` cannot distinguish "never committed" from "a
+  // later mutation overwrote the slot", so the reason must not claim the former.
+  assert.doesNotMatch(String(result.reason), /did not commit/u)
   // The intent's identity fields are preserved for forensic correlation.
   assert.equal(result.actor, 'publisher-actor')
   assert.equal(result.slug, 'weekly-report')
   assert.equal(result.version, '1.0.0')
+})
+
+test('reconciles the lost result of an earlier commit as an error when a later mutation owns the slot', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'catalog-audit-'))
+  const audit = await AuditLog.open(dir, [])
+  const first = randomUUID()
+  const second = randomUUID()
+  await audit.writeIntent({ action: ACTION, actor: 'publisher-a', requestId: first })
+  await audit.writeIntent({ action: ACTION, actor: 'publisher-b', requestId: second })
+
+  // Both mutations committed; only the FIRST one's result line was lost. The
+  // single slot now names the second request, which is all reconcile can see.
+  const state: CatalogState = {
+    ...emptyCatalogState(),
+    lastMutation: { requestId: second, action: ACTION, at: NOW },
+  }
+  await audit.reconcile(state)
+
+  const lines = await readLines(join(dir, AUDIT_FILE_NAME))
+  const lost = lines.find(line => line.requestId === first)
+  assert.ok(lost, 'the unclosed intent must still be closed with a result line')
+  assert.equal(lost.outcome, 'error')
+  assert.equal(lost.status, 500)
+  assert.equal(lost.actor, 'publisher-a')
+  assert.match(String(lost.reason), /does not name this intent/u)
+  assert.doesNotMatch(String(lost.reason), /did not commit/u)
+
+  // The mutation that still owns the slot reconciles as committed.
+  const latest = lines.find(line => line.requestId === second)
+  assert.ok(latest, 'the slot owner must reconcile too')
+  assert.equal(latest.outcome, 'ok')
+  assert.equal(latest.status, 200)
+  assert.equal(latest.actor, 'publisher-b')
 })
 
 test('does not reconcile an intent whose result record already exists', async () => {
