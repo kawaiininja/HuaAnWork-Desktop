@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer'
 import { randomBytes } from 'node:crypto'
 import { Readable } from 'node:stream'
 import test from 'node:test'
+import { gzipSync } from 'node:zlib'
 
 import { canonicalJson, generateKeyPair, signAgentPackageDigest } from '@huaanwork/catalog-signing'
 import { Header, Pack, ReadEntry } from 'tar'
@@ -315,6 +316,43 @@ test('counts signature entries against the shared 1024 entry cap', async () => {
       [],
     ),
     /条目数超过1024/,
+  )
+})
+
+test('rejects a nested gzip payload before node-tar can inflate it outside the meter', async () => {
+  // 6 MiB 目录 body 只被内层 tar.gz 压成几十 KB,再包一层 gzip 的 bundle 仍远小于
+  // 5 MiB。node-tar 无视 `gzip:false`,会在 meter 之后嗅探 `1f 8b` 再解压一层,
+  // 所以必须在解压后的首字节上拒绝嵌套压缩。
+  const inner = await makeArchive([
+    validAgentJson,
+    validPersona,
+    { name: 'padding', type: 'Directory', content: makeLargeEntryContent() },
+  ])
+  const nestedGzip = gzipSync(inner)
+  assert.ok(nestedGzip.byteLength < MAX_AGENT_PACKAGE_BUNDLE_BYTES)
+  await assert.rejects(
+    inspectUnsignedAgentPackageBundle(nestedGzip),
+    /包结构非法：不支持嵌套压缩/,
+  )
+
+  // zstd 同属 node-tar 会自行嗅探的压缩格式,魔数同样在 meter 上拒绝。
+  const nestedZstd = gzipSync(
+    Buffer.concat([Buffer.from([0x28, 0xb5, 0x2f, 0xfd]), Buffer.alloc(512)]),
+  )
+  assert.ok(nestedZstd.byteLength < MAX_AGENT_PACKAGE_BUNDLE_BYTES)
+  await assert.rejects(
+    inspectUnsignedAgentPackageBundle(nestedZstd),
+    /包结构非法：不支持嵌套压缩/,
+  )
+})
+
+test('rejects a plain double-gzipped archive', async () => {
+  const bundle = await buildUnsignedAgentPackageBundle(validFiles)
+  const doubleGzipped = gzipSync(bundle)
+  assert.ok(doubleGzipped.byteLength < MAX_AGENT_PACKAGE_BUNDLE_BYTES)
+  await assert.rejects(
+    inspectUnsignedAgentPackageBundle(doubleGzipped),
+    /包结构非法：不支持嵌套压缩/,
   )
 })
 

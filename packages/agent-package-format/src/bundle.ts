@@ -44,6 +44,23 @@ const MAX_AGENT_PACKAGE_UNPACKED_BYTES =
  */
 const MAX_AGENT_PACKAGE_META_BYTES = 64 * 1024
 
+/**
+ * node-tar 会在首个数据块上自行嗅探的压缩魔数。
+ *
+ * `gzip:false` 只影响 brotli/zstd 的启发式,不能关掉 gzip 嗅探:payload 以
+ * `1f 8b` 开头时 `Parse.write` 会新建一个 `minizlib.Unzip` 再解压一层,这层
+ * 解压发生在本模块的 meter 之后、不受任何预算约束。zstd(`28 b5 2f fd`)同理,
+ * 即使显式传 `zstd:false` 也保留魔数检查作纵深。合法 bundle 在 gunzip 之后
+ * 必然是 tar 头,不可能以压缩魔数开头。
+ */
+const NESTED_COMPRESSION_MAGIC = [
+  Buffer.from([0x1f, 0x8b]),
+  Buffer.from([0x28, 0xb5, 0x2f, 0xfd]),
+] as const
+const NESTED_COMPRESSION_PREFIX_BYTES = Math.max(
+  ...NESTED_COMPRESSION_MAGIC.map((magic) => magic.byteLength),
+)
+
 const SIGNATURE_DIR = '.signature'
 const DIGEST_PATH = `${SIGNATURE_DIR}/package-digest.json`
 const SIGNATURE_PATH = `${SIGNATURE_DIR}/signature.json`
@@ -252,6 +269,9 @@ function normalizeBuildFiles(
  * 经过 `onentry` 的字节(目录头声明的 body、PAX/global 扩展头、tar 未知类型),
  * 因为 tar 只把 File/Directory 送进 `onentry`,而目录头的 size 会被 tar 归零。
  *
+ * 计量同时检查解压后首个字节的压缩魔数:node-tar 无视 `gzip:false`,遇到
+ * {@link NESTED_COMPRESSION_MAGIC} 会再解压一层,那层解压绕过计量,必须提前拒绝。
+ *
  * `onentry` 先把条目计数加一并在超帽时立即中止,再检查路径、按声明大小预扣
  * 内容预算;每个文件只在条目 `end` 后进入结果数组,因此超帽归档不会保留第
  * 1025 条及之后的内容。
@@ -273,6 +293,21 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
     const source = Readable.from([bundle])
     const gunzip = createGunzip()
     let unpackedBytes = 0
+    let prefixChunks: Buffer[] = []
+    let prefixBytes = 0
+    let prefixChecked = false
+    const emitPrefix = (callback: (error?: Error | null, data?: Buffer) => void) => {
+      const prefix = Buffer.concat(prefixChunks, prefixBytes)
+      prefixChunks = []
+      prefixBytes = 0
+      prefixChecked = true
+      if (hasNestedCompressionMagic(prefix)) {
+        callback(structureError('不支持嵌套压缩'))
+        return
+      }
+      if (prefix.byteLength === 0) callback()
+      else callback(null, prefix)
+    }
     const meter = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
         unpackedBytes += chunk.byteLength
@@ -280,7 +315,21 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
           callback(packageTooLargeError())
           return
         }
-        callback(null, chunk)
+        if (prefixChecked) {
+          callback(null, chunk)
+          return
+        }
+        prefixChunks.push(chunk)
+        prefixBytes += chunk.byteLength
+        if (prefixBytes < NESTED_COMPRESSION_PREFIX_BYTES) {
+          callback()
+          return
+        }
+        emitPrefix(callback)
+      },
+      flush(callback) {
+        if (prefixChecked) callback()
+        else emitPrefix(callback)
       },
     })
 
@@ -319,8 +368,9 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
         return
       }
 
-      // 每个条目的声明大小都预扣内容预算——包括目录条目:tar 头里的 size 字段
-      // 对它同样有意义,不能因为目录通常没有 body 就跳过记账。
+      // 文件按声明大小预扣内容预算。目录条目的 size 在 tar 解码时已被归零
+      // (node-tar 只给非目录头保留 size),所以这一行对目录是空操作;目录头
+      // 声明的 body 从不进入 onentry,真正兜住它的是解压总量 meter。
       declaredBytes += entry.size
       if (declaredBytes > MAX_AGENT_PACKAGE_BUNDLE_BYTES) {
         fail(packageTooLargeError())
@@ -359,6 +409,10 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
 
     parser = listArchive({
       gzip: false,
+      // node-tar 仍会嗅探 gzip(无法关闭);显式关掉 zstd/brotli 的自动解压,
+      // 让魔数检查成为唯一入口,而不是第二道靠 tar 自己兜底。
+      zstd: false,
+      brotli: false,
       maxMetaEntrySize: MAX_AGENT_PACKAGE_META_BYTES,
       onentry,
     }) as Parser
@@ -432,6 +486,14 @@ function normalizeEntryPath(rawPath: string, kind: 'file' | 'directory'): string
 
 function isSignaturePath(path: string): boolean {
   return path.split('/').includes(SIGNATURE_DIR)
+}
+
+/** 解压后的首字节是否是 node-tar 会自动再解压一层的压缩格式。 */
+function hasNestedCompressionMagic(prefix: Buffer): boolean {
+  return NESTED_COMPRESSION_MAGIC.some(
+    (magic) =>
+      prefix.byteLength >= magic.byteLength && prefix.subarray(0, magic.byteLength).equals(magic),
+  )
 }
 
 function encodeCanonicalDocument(value: unknown): string {
