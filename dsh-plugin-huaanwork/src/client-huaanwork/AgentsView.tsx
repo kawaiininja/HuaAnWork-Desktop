@@ -51,6 +51,8 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
   const mountedRef = useRef(true);
   /** 在飞的 packageRefresh；手动/首次刷新共享它，周期 tick 只跳过。 */
   const packageRefreshPromise = useRef<Promise<boolean> | null>(null);
+  /** 在飞的 agent.refresh；首次与手动刷新若同轮相遇则共享，避免重复请求。 */
+  const packageLegacyRefreshPromise = useRef<Promise<boolean> | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -93,7 +95,7 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
    *
    * `wait` 决定在飞时的语义：周期 tick 传 `false`（在飞即跳过本轮，避免重叠）；
    * 首次进入与手动刷新传 `true`（等待并共享在飞请求，手动刷新因此不会被周期
-   * 请求吞掉），调用方在拿到 `true` 后继续自己的 `agent.refresh`。
+   * 请求吞掉），调用方在拿到 `true` 后继续 `runLegacyRefresh`。
    */
   const runPackageRefresh = useCallback(async (wait: boolean): Promise<boolean> => {
     if (packageRefreshPromise.current !== null) {
@@ -117,17 +119,38 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
     }
   }, []);
 
+  /**
+   * 刷新 legacy 目录（`agent.refresh`）。首次进入与手动刷新可能在同一轮
+   * packageRefresh 之后相遇，共享同一个在飞请求即可，不必重复发两次。
+   */
+  const runLegacyRefresh = useCallback(async (): Promise<boolean> => {
+    if (packageLegacyRefreshPromise.current !== null) {
+      return packageLegacyRefreshPromise.current;
+    }
+    const run = (async (): Promise<boolean> => {
+      try {
+        await rpcCall("agent.refresh");
+        return true;
+      } catch (cause) {
+        if (mountedRef.current) setError(catalogErrorMessage(cause));
+        return false;
+      }
+    })();
+    packageLegacyRefreshPromise.current = run;
+    try {
+      return await run;
+    } finally {
+      if (packageLegacyRefreshPromise.current === run) packageLegacyRefreshPromise.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
     void (async () => {
       const refreshed = await runPackageRefresh(true);
       if (!active || !refreshed) return;
-      try {
-        await rpcCall("agent.refresh");
-        if (active) setRefreshToken((prev) => prev + 1);
-      } catch (cause) {
-        if (active) setError(catalogErrorMessage(cause));
-      }
+      const legacyRefreshed = await runLegacyRefresh();
+      if (active && legacyRefreshed) setRefreshToken((prev) => prev + 1);
     })();
     const timer = window.setInterval(() => {
       void (async () => {
@@ -143,7 +166,7 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
       active = false;
       window.clearInterval(timer);
     };
-  }, [runPackageRefresh]);
+  }, [runPackageRefresh, runLegacyRefresh]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -151,8 +174,8 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
     try {
       const refreshed = await runPackageRefresh(true);
       if (!refreshed || !mountedRef.current) return;
-      await rpcCall("agent.refresh");
-      if (!mountedRef.current) return;
+      const legacyRefreshed = await runLegacyRefresh();
+      if (!legacyRefreshed || !mountedRef.current) return;
       setNote("已刷新智能体目录");
       setRefreshToken((prev) => prev + 1);
     } catch (cause) {

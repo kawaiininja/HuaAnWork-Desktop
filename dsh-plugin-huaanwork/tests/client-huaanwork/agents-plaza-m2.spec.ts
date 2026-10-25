@@ -599,6 +599,36 @@ describe("AgentsView 发布口令与刷新周期", () => {
     expect(view.textContent).toContain("已刷新智能体目录");
   });
 
+  it("首次刷新在飞时手动刷新共享同一轮请求，只发一次 agent.refresh", async () => {
+    vi.useFakeTimers();
+    let release: ((value: unknown) => void) | undefined;
+    const pending = new Promise((resolve) => {
+      release = resolve;
+    });
+    handlers["agent.packageRefresh"] = () => pending;
+
+    const view = await mount(createElement(AgentsView, {}));
+    await flush();
+    expect(callsOf("agent.packageRefresh")).toHaveLength(1);
+
+    await click(buttonByText(view, "刷新")!);
+    // 手动刷新等待在飞的首次刷新，不另发一轮 packageRefresh。
+    expect(callsOf("agent.packageRefresh")).toHaveLength(1);
+
+    await act(async () => {
+      release?.(listPayload);
+    });
+    await flush();
+
+    // 同一轮刷新只产生一次 agent.refresh，并且手动刷新的反馈照常出现。
+    expect(
+      rpcMock.mock.calls
+        .map(([method]) => method)
+        .filter((method) => method === "agent.packageRefresh" || method === "agent.refresh"),
+    ).toEqual(["agent.packageRefresh", "agent.refresh"]);
+    expect(view.textContent).toContain("已刷新智能体目录");
+  });
+
   it("等待在飞刷新时卸载：请求返回后不再调用 agent.refresh", async () => {
     vi.useFakeTimers();
     let release: (() => void) | undefined;
