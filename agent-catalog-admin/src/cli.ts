@@ -23,8 +23,9 @@
  * Argument parsing uses `node:util` `parseArgs`; there is no CLI framework.
  */
 
+import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
 import { AgentCatalogAdminClient, CatalogCliError } from './client.ts'
@@ -399,8 +400,25 @@ export async function runCli(
   }
 }
 
-const entry = process.argv[1]
-const isEntryPoint = entry !== undefined && pathToFileURL(resolve(entry)).href === import.meta.url
-if (isEntryPoint) {
+/**
+ * True when this module is the process entry point.
+ *
+ * Both sides go through `realpathSync`: Node resolves the main module (and
+ * therefore `import.meta.url`) to its real path, while `process.argv[1]` keeps
+ * whatever path the caller used — a `bin` symlink, or a cwd that is itself a
+ * symlink (e.g. macOS `/tmp` → `/private/tmp`). Comparing the unresolved
+ * paths would make every such invocation fall through and exit 0 with no
+ * output: silent success is the worst failure shape for a signing CLI.
+ */
+function isEntryPoint(entry: string | undefined): boolean {
+  if (entry === undefined) return false
+  try {
+    return realpathSync(resolve(entry)) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (isEntryPoint(process.argv[1])) {
   process.exitCode = await runCli(process.argv.slice(2))
 }

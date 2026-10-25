@@ -50,7 +50,8 @@ export const READ_TOKEN = 'admin-cli-test-read-token-012345678901234567890'
 export const PUBLISH_TOKEN = 'admin-cli-test-publish-token-012345678901234567'
 export const ADMIN_TOKEN = 'admin-cli-test-admin-token-0123456789012345678901'
 
-const CLI_PATH = join(import.meta.dirname, '..', 'src', 'cli.ts')
+/** The real CLI entry point (already a real path: `import.meta.dirname` is one). */
+export const CLI_PATH = join(import.meta.dirname, '..', 'src', 'cli.ts')
 
 export interface CliResult {
   readonly status: number | null
@@ -89,7 +90,7 @@ export function collectedPrivateKeys(): readonly string[] {
 export function runCli(
   args: readonly string[],
   envOverrides: Record<string, string> = {},
-  options: { readonly cwd?: string } = {},
+  options: { readonly cwd?: string; readonly entry?: string } = {},
 ): Promise<CliResult> {
   const env: Record<string, string | undefined> = {}
   for (const [key, value] of Object.entries(process.env)) {
@@ -98,10 +99,14 @@ export function runCli(
   }
   Object.assign(env, envOverrides)
 
+  // `entry` lets a test launch a symlink/hardlink to the CLI instead of the
+  // real path — the shape a wrapper or a `bin` link produces.
+  const entry = options.entry ?? CLI_PATH
+
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      ['--experimental-strip-types', CLI_PATH, ...args],
+      ['--experimental-strip-types', entry, ...args],
       {
         env,
         cwd: options.cwd ?? process.cwd(),

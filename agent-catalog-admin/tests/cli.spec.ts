@@ -9,7 +9,9 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -22,6 +24,7 @@ import { generateKeyPair } from '@huaanwork/catalog-signing'
 
 import {
   ADMIN_TOKEN,
+  CLI_PATH,
   PUBLISH_TOKEN,
   READ_TOKEN,
   adminEnv,
@@ -102,6 +105,38 @@ async function publishViaCli(
   assert.equal(approved.status, 0, `approve failed: ${approved.stderr}`)
   return submitted
 }
+
+// ---------------------------------------------------------------------------
+// entry point
+// ---------------------------------------------------------------------------
+
+test('runs the command when invoked through a symlinked entry point', async () => {
+  const catalog = await bootTestCatalog()
+  const linkDir = await mkdtemp(join(tmpdir(), 'agent-catalog-admin-link-'))
+  // A `bin` link or a wrapper is exactly this: argv[1] is not the real file.
+  // Before the realpath comparison the CLI compared the unresolved path with
+  // Node's realpath-resolved `import.meta.url`, matched nothing, and exited 0
+  // with no output — a silent success for a signing tool.
+  const linkPath = join(linkDir, 'agent-catalog-admin.ts')
+  await symlink(CLI_PATH, linkPath)
+  try {
+    assert.notEqual(linkPath, realpathSync(CLI_PATH))
+    assert.equal(realpathSync(linkPath), realpathSync(CLI_PATH))
+
+    const pending = await runCli(['pending'], adminEnv(catalog), { entry: linkPath })
+    assert.equal(pending.status, 0, pending.stderr)
+    assert.match(pending.stdout, /待审查提交：无/)
+
+    // Usage errors still surface (exit 2), proving the entry guard ran rather
+    // than the process doing nothing and reporting success.
+    const usage = await runCli([], adminEnv(catalog), { entry: linkPath })
+    assert.equal(usage.status, 2)
+    assert.match(usage.stderr, /缺少子命令/)
+  } finally {
+    await rm(linkDir, { recursive: true, force: true })
+    await catalog.close()
+  }
+})
 
 // ---------------------------------------------------------------------------
 // review + approve
