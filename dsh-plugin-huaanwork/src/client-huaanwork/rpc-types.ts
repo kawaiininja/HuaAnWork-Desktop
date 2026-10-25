@@ -44,6 +44,13 @@ export type RpcRequest = {
     | "agent.packageDetail"
     | "agent.packageSetEnabled"
     | "agent.invocableList"
+    | "agent.packagePublish"
+    | "agent.packagePublishStatus"
+    | "agent.packageRequestDelist"
+    | "agent.packageInstall"
+    | "agent.packageUpdate"
+    | "agent.packageRemove"
+    | "agent.packageRefresh"
     | "status.get"
     | "project.list"
     | "project.create"
@@ -121,7 +128,54 @@ export type AgentDetail = AgentListItem & {
 };
 
 /**
- * 本地智能体包列表行。字段与 host `agent-package/types.ts` 的
+ * 签名广场目录的一项摘要。字段与 host `agent-package/catalog-client.ts` 的
+ * `AgentPackageSummary` 一致;客户端不从 Node-only 包格式模块导入。
+ */
+export type AgentPackageSummary = {
+  slug: string;
+  displayName: string;
+  description: string;
+  version: string;
+  size: number;
+  status: "published";
+  updatedAt: string;
+  migrationFrom?: string;
+};
+
+/** 一条目录撤销记录;服务端 `actor` 只用于审计,不进入桌面状态。 */
+export type AgentPackageRevocation = {
+  slug: string;
+  version: string;
+  reason: string;
+  revokedAt: string;
+};
+
+/** 本地包/已安装目录包的发布状态。 */
+export type AgentPackagePublishStatus =
+  | "none"
+  | "pending-review"
+  | "published"
+  | "rejected"
+  | "delisted"
+  | "installed";
+
+/**
+ * 智能体包详情里的签名信息。
+ *
+ * catalog 包由宿主每次运行 `security.verifyInstalled` 计算;local 包是
+ * `not-applicable`(未签名)。验签失败时 `keyId/signedAt/slot` 无权威来源,
+ * 仍是空串/占位 1,客户端必须以 `verification` 为准。
+ */
+export type AgentPackageSignatureInfo = {
+  keyId: string;
+  signedAt: string;
+  slot: 1 | 2;
+  verification: "valid" | "invalid" | "not-applicable";
+  reason?: string;
+};
+
+/**
+ * 本地智能体包/已安装目录包列表行。字段与 host `agent-package/types.ts` 的
  * `AgentPackageListItem` 一致;客户端不从 host 导入。
  * `source` 是包自己的来源联合,不并入 `AgentSource`。
  */
@@ -130,24 +184,42 @@ export type AgentPackageListItem = {
   displayName: string;
   description: string;
   version: string;
-  source: "local" | "catalog-legacy";
+  source: "local" | "catalog" | "catalog-legacy";
   enabled: boolean;
   broken?: { reason: string };
+  publishStatus?: AgentPackagePublishStatus;
+  publishedVersion?: string;
+  submissionId?: string;
+  reviewReason?: string;
+  delistRequestId?: string;
+  revoked?: AgentPackageRevocation;
+  /** 广场缓存里该 slug 的最高已发布版本;离线且无缓存时缺席。 */
+  latestVersion?: string;
+  /** `latestVersion` 严格高于已安装版本;只在 `source:'catalog'` 行上计算。 */
+  updateAvailable?: boolean;
 };
 
-/** 本地智能体包详情;legacy 条目仍是 `AgentDetail`。 */
+/** 本地智能体包/已安装目录包的详情;legacy 条目仍是 `AgentDetail`。 */
 export type AgentPackageDetail = AgentPackageListItem & {
   persona: string;
   skill: { summary: string; markdown: string; scripts: string[] } | null;
   tools: "none" | "http" | "mcp" | "both";
   files: Array<{ path: string; size: number }>;
+  signature?: AgentPackageSignatureInfo;
 };
 
-/** `agent.packageList` 载荷:本地包与 legacy 目录 agent 分列,`catalogError` 透传目录结果。 */
+/**
+ * `agent.packageList` / `agent.packageRefresh` 载荷:本地/已安装包与 legacy 目录
+ * agent 分列,`catalogPackages` 是签名广场摘要(宿主总会返回;缺省按空表处理,
+ * 兼容只回本地/legacy 的旧载荷),`catalogError` 透传目录结果,
+ * `revocationWarning` 只在刷新撤销列表失败时出现。
+ */
 export type AgentPackageListResult = {
   packages: AgentPackageListItem[];
   catalogAgents: AgentListItem[];
+  catalogPackages?: AgentPackageSummary[];
   catalogError?: string;
+  revocationWarning?: string;
 };
 
 /**

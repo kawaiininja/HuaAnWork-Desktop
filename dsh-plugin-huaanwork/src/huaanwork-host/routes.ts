@@ -3,8 +3,28 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { AgentSource, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
-import type { AgentPackageHost } from './agent-package/host.ts'
+import { compareAgentPackageVersions } from '@huaanwork/agent-package-format/manifest'
+import type {
+  AgentPackageSignatureInfo,
+  AgentSource,
+  RpcEvent,
+  RunSummary,
+} from '../client-huaanwork/rpc-types.ts'
+import { readCachedCatalogPackages, refreshCatalogPackageCache, type AgentPackageSummary } from './agent-package/catalog-client.ts'
+import {
+  AGENT_PACKAGE_VERIFY_FAILURE,
+  installCatalogAgentPackage,
+  refreshInstalledCatalogPackageStatuses,
+  removeCatalogAgentPackage,
+  updateCatalogAgentPackage,
+} from './agent-package/catalog-install.ts'
+import {
+  publishLocalAgentPackage,
+  refreshLocalAgentPackagePublishStatus,
+  requestLocalAgentPackageDelist,
+} from './agent-package/catalog-publish.ts'
+import type { AgentCatalogSecurity } from './agent-package/catalog-security.ts'
+import type { AgentPackageHost, AgentPackageListResult as HostAgentPackageListResult } from './agent-package/host.ts'
 import { isSameOriginLoopbackRequest } from './loopback.ts'
 import { hasGit, listTree } from './native.ts'
 import { addPlugin, listPlugins, PluginCommandError, removePlugin, type PluginPnpmCapability } from './plugins-host.ts'
@@ -182,6 +202,221 @@ function bodyParam(body: unknown, key: string): string | undefined {
   return body && typeof body === 'object' && typeof (body as Record<string, unknown>)[key] === 'string'
     ? (body as Record<string, string>)[key]
     : undefined
+}
+
+// ---------------------------------------------------------------------------
+// M2 智能体包生命周期路由共用面(Task 11)
+// ---------------------------------------------------------------------------
+
+/** Task 10 的安全面挂在 cordis holder 上;`runtimeCtx` 是同一 Context 的窄化视图。 */
+type AgentCatalogSecurityContext = SessionRuntimeContext & {
+  huaanworkAgentCatalogSecurity?: AgentCatalogSecurity
+}
+
+function optionalCatalogSecurity(ctx: RouteContext): AgentCatalogSecurity | undefined {
+  return (ctx.runtimeCtx as AgentCatalogSecurityContext | undefined)?.huaanworkAgentCatalogSecurity
+}
+
+/** 安装/更新/移除/刷新缺少安全面是装配错误:不能在没有撤销与回合停止能力时改包。 */
+function requireCatalogSecurity(ctx: RouteContext): AgentCatalogSecurity {
+  const security = optionalCatalogSecurity(ctx)
+  if (security === undefined) {
+    throw new RouteError(503, 'runtime-unavailable', 'agent catalog security is not initialized')
+  }
+  return security
+}
+
+/** 桌面端不接收 admin token 与签名私钥;请求体/query 出现即拒绝,不进日志。 */
+const AGENT_PACKAGE_SECRET_FIELD = /^(?:admin[_-]?token|private[_-]?key)$/iu
+
+function assertNoAgentPackageSecrets(req: RouteRequest, method: string): void {
+  if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
+    for (const key of Object.keys(req.body)) {
+      if (AGENT_PACKAGE_SECRET_FIELD.test(key)) {
+        throw new RouteError(400, 'bad-request', `${method} does not accept ${key}`)
+      }
+    }
+  }
+  for (const key of req.query.keys()) {
+    if (AGENT_PACKAGE_SECRET_FIELD.test(key)) {
+      throw new RouteError(400, 'bad-request', `${method} does not accept ${key}`)
+    }
+  }
+}
+
+function requireAgentPackageBody(req: RouteRequest, method: string): Record<string, unknown> {
+  assertNoAgentPackageSecrets(req, method)
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    throw new RouteError(400, 'bad-request', `${method} requires object body`)
+  }
+  return req.body as Record<string, unknown>
+}
+
+function requireAgentPackageString(body: Record<string, unknown>, key: string, method: string): string {
+  const value = body[key]
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new RouteError(400, 'bad-request', `${method} requires params.${key}`)
+  }
+  return value
+}
+
+/**
+ * 详情页签名信息(C19):catalog 包每次经 Task 10 的运行前复验计算,local 包
+ * 一律 `not-applicable`。`detail()` 保持同步契约,异步复验只在这一层组合。
+ */
+async function agentPackageSignatureInfo(
+  ctx: RouteContext,
+  slug: string,
+  source: string,
+): Promise<AgentPackageSignatureInfo> {
+  const unsigned: AgentPackageSignatureInfo = {
+    keyId: '',
+    signedAt: '',
+    slot: 1,
+    verification: 'not-applicable',
+  }
+  if (source !== 'catalog') return unsigned
+  const security = optionalCatalogSecurity(ctx)
+  if (security === undefined) {
+    // 没有复验面就不能声称签名有效;UI 按 invalid + 统一文案展示。
+    return { ...unsigned, verification: 'invalid', reason: AGENT_PACKAGE_VERIFY_FAILURE }
+  }
+  try {
+    const verification = await security.verifyInstalled(slug)
+    if (!verification.ok) {
+      return { ...unsigned, verification: 'invalid', reason: verification.reason }
+    }
+    return {
+      keyId: verification.signature.keyId,
+      signedAt: verification.signature.signedAt,
+      slot: verification.signature.slot,
+      verification: 'valid',
+    }
+  } catch (error) {
+    return { ...unsigned, verification: 'invalid', reason: errorText(error) }
+  }
+}
+
+type PublicationFields = {
+  publishStatus?: string
+  publishedVersion?: string
+  submissionId?: string
+  reviewReason?: string
+  delistRequestId?: string
+}
+
+/** 本地发布字段的比较指纹;只关心对外可见字段,不比较时间戳。 */
+function publicationSignature(value: PublicationFields): string {
+  return JSON.stringify([
+    value.publishStatus ?? '',
+    value.publishedVersion ?? '',
+    value.submissionId ?? '',
+    value.reviewReason ?? '',
+    value.delistRequestId ?? '',
+  ])
+}
+
+/**
+ * 刷新每个有发布身份的本地包的审查/下架状态。
+ *
+ * 单项失败保留已有卡片并把原因并入 warning;不回退成「未发布」。
+ */
+async function refreshLocalPublications(
+  host: AgentPackageHost,
+): Promise<{ changed: boolean; warning?: string }> {
+  let changed = false
+  const failures: string[] = []
+  for (const item of host.listLocal()) {
+    if (item.source !== 'local') continue
+    if (item.submissionId === undefined && item.publishedVersion === undefined) continue
+    try {
+      const publication = await refreshLocalAgentPackagePublishStatus(item.slug)
+      if (publicationSignature(publication) !== publicationSignature(item)) changed = true
+    } catch (error) {
+      failures.push(`${item.slug}: ${errorText(error)}`)
+    }
+  }
+  return failures.length === 0
+    ? { changed }
+    : { changed, warning: `本地发布状态刷新失败：${failures.join('；')}` }
+}
+
+function mergeCatalogErrors(...values: Array<string | undefined>): string | undefined {
+  const unique = [
+    ...new Set(values.filter((value): value is string => typeof value === 'string' && value.length > 0)),
+  ]
+  return unique.length === 0 ? undefined : unique.join('；')
+}
+
+/**
+ * 列表载荷 + 广场摘要:已安装的 catalog 行补 `latestVersion`/`updateAvailable`。
+ *
+ * 版本比较只在 host 侧做(renderer 不导入 Node-only 包格式模块);非法版本按
+ * 不可比较处理,不把损坏包误标成可更新。
+ */
+function withCatalogPackages(
+  base: HostAgentPackageListResult,
+  catalogPackages: AgentPackageSummary[],
+): HostAgentPackageListResult & { catalogPackages: AgentPackageSummary[] } {
+  const latestBySlug = new Map<string, string>()
+  for (const summary of catalogPackages) {
+    const current = latestBySlug.get(summary.slug)
+    if (current === undefined || compareAgentVersions(summary.version, current) > 0) {
+      latestBySlug.set(summary.slug, summary.version)
+    }
+  }
+  return {
+    ...base,
+    packages: base.packages.map((item) => {
+      if (item.source !== 'catalog') return item
+      const latestVersion = latestBySlug.get(item.slug)
+      if (latestVersion === undefined) return item
+      return {
+        ...item,
+        latestVersion,
+        updateAvailable: compareAgentVersions(latestVersion, item.version) > 0,
+      }
+    }),
+    catalogPackages,
+  }
+}
+
+function compareAgentVersions(left: string, right: string): -1 | 0 | 1 {
+  try {
+    return compareAgentPackageVersions(left, right)
+  } catch {
+    return 0
+  }
+}
+
+function cachedCatalogPackages(): AgentPackageSummary[] {
+  try {
+    return readCachedCatalogPackages()
+  } catch {
+    // 目录绑定尚未初始化(早期启动/单元测试):广场摘要按空处理,本地包不受影响。
+    return []
+  }
+}
+
+function installedPackageState(slug: string, version: string): {
+  ok: true
+  slug: string
+  version: string
+  enabled: boolean
+  publishStatus: string
+} {
+  const detail = requireAgentPackageHost().detail(slug)
+  return {
+    ok: true,
+    slug,
+    version,
+    enabled: detail?.enabled ?? false,
+    publishStatus: detail?.publishStatus ?? 'installed',
+  }
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 export interface RouteTableEntry {
@@ -508,16 +743,20 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   }, // Task 2 (M4)
   // agent package(Task 7):本地包与 legacy 目录两条来源。写路径按 `listLocal()`
   // 判定归属(含损坏包);损坏包只允许关闭,启用仍抛错并由 storeRoute 映射为 400。
-  { method: 'agent.packageList', http: 'GET', path: '/huaanwork/agent/package/list', handler: storeRoute(async () => requireAgentPackageHost().listWithLegacy()) },
+  // Task 11:列表并上签名广场缓存摘要,已安装 catalog 行补 latestVersion/updateAvailable。
+  { method: 'agent.packageList', http: 'GET', path: '/huaanwork/agent/package/list', handler: storeRoute(async () => withCatalogPackages(await requireAgentPackageHost().listWithLegacy(), cachedCatalogPackages())) },
   {
     method: 'agent.packageDetail',
     http: 'GET',
     path: '/huaanwork/agent/package/detail',
-    handler: storeRoute(async (req) => {
+    handler: storeRoute(async (req, ctx) => {
       const slug = queryParam(req, 'slug') ?? ''
       if (!slug) throw new RouteError(400, 'bad-request', 'agent.packageDetail requires params.slug')
       const local = requireAgentPackageHost().detail(slug)
-      if (local !== undefined) return local
+      if (local !== undefined) {
+        // C19:签名结果只在这一层组合,host.detail() 保持同步契约。
+        return { ...local, signature: await agentPackageSignatureInfo(ctx, slug, local.source) }
+      }
       const legacy = await getAgentsDirectory().get(slug)
       if (legacy === undefined) throw new RouteError(400, 'not-found', `智能体「${slug}」不存在`)
       return legacy
@@ -547,6 +786,136 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     }),
   },
   { method: 'agent.invocableList', http: 'GET', path: '/huaanwork/agent/invocable', handler: storeRoute(async () => requireAgentPackageHost().invocableWithLegacy()) },
+
+  // agent package M2(Task 11):签名广场生命周期。事件沿用 `agent/changed`:
+  // 发布提交由 Task 8 在成功路径发出;其余成功写路径由本层各发一次。
+  {
+    method: 'agent.packagePublish',
+    http: 'POST',
+    path: '/huaanwork/agent/package/publish',
+    handler: storeRoute(async (req) => {
+      const body = requireAgentPackageBody(req, 'agent.packagePublish')
+      const slug = requireAgentPackageString(body, 'slug', 'agent.packagePublish')
+      // Task 8 已在写盘成功后发 `agent/changed`;这里不重复。
+      return publishLocalAgentPackage(slug)
+    }),
+  },
+  {
+    method: 'agent.packagePublishStatus',
+    http: 'GET',
+    path: '/huaanwork/agent/package/publish/status',
+    handler: storeRoute(async (req, ctx) => {
+      assertNoAgentPackageSecrets(req, 'agent.packagePublishStatus')
+      const slug = queryParam(req, 'slug') ?? ''
+      if (!slug) throw new RouteError(400, 'bad-request', 'agent.packagePublishStatus requires params.slug')
+      // 状态未变化时不发事件:客户端已从应答里拿到最新 publication。
+      const before = requireAgentPackageHost().detail(slug)
+      const publication = await refreshLocalAgentPackagePublishStatus(slug)
+      if (before === undefined || publicationSignature(publication) !== publicationSignature(before)) {
+        ctx.emit({ event: 'agent/changed', slug })
+      }
+      return publication
+    }),
+  },
+  {
+    method: 'agent.packageRequestDelist',
+    http: 'POST',
+    path: '/huaanwork/agent/package/delist-request',
+    handler: storeRoute(async (req, ctx) => {
+      const body = requireAgentPackageBody(req, 'agent.packageRequestDelist')
+      const slug = requireAgentPackageString(body, 'slug', 'agent.packageRequestDelist')
+      const reason = requireAgentPackageString(body, 'reason', 'agent.packageRequestDelist')
+      if (reason.trim().length === 0) {
+        throw new RouteError(400, 'bad-request', 'agent.packageRequestDelist requires a non-empty params.reason')
+      }
+      const result = await requestLocalAgentPackageDelist(slug, reason)
+      ctx.emit({ event: 'agent/changed', slug })
+      return result
+    }),
+  },
+  {
+    method: 'agent.packageInstall',
+    http: 'POST',
+    path: '/huaanwork/agent/package/install',
+    handler: storeRoute(async (req, ctx) => {
+      // 安装不停止任何在途回合(Task 9 首次安装没有旧版本);安全面只在需要时取。
+      const body = requireAgentPackageBody(req, 'agent.packageInstall')
+      const slug = requireAgentPackageString(body, 'slug', 'agent.packageInstall')
+      const version = requireAgentPackageString(body, 'version', 'agent.packageInstall')
+      const installed = await installCatalogAgentPackage(slug, version)
+      ctx.emit({ event: 'agent/changed', slug })
+      return installedPackageState(slug, installed.manifest.version)
+    }),
+  },
+  {
+    method: 'agent.packageUpdate',
+    http: 'POST',
+    path: '/huaanwork/agent/package/update',
+    handler: storeRoute(async (req, ctx) => {
+      const body = requireAgentPackageBody(req, 'agent.packageUpdate')
+      const slug = requireAgentPackageString(body, 'slug', 'agent.packageUpdate')
+      // 参数校验先于安全面读取:畸形请求始终是 400,不会因装配缺失变成 503。
+      const security = requireCatalogSecurity(ctx)
+      // Task 9 在任何 rename 之前以 `update` 原因停止该 slug 的在途回合。
+      const updated = await updateCatalogAgentPackage(slug, (target, reason) =>
+        security.stopAgentPackageTurnsForSlug(target, reason),
+      )
+      ctx.emit({ event: 'agent/changed', slug })
+      return installedPackageState(slug, updated.manifest.version)
+    }),
+  },
+  {
+    method: 'agent.packageRemove',
+    http: 'POST',
+    path: '/huaanwork/agent/package/remove',
+    handler: storeRoute(async (req, ctx) => {
+      const body = requireAgentPackageBody(req, 'agent.packageRemove')
+      const slug = requireAgentPackageString(body, 'slug', 'agent.packageRemove')
+      const security = requireCatalogSecurity(ctx)
+      // 本地包由 Task 9 以 `本地创建的智能体不能通过广场移除` 拒绝(400);
+      // 目录包在 rename 之前以 `remove` 原因停止在途回合。
+      await removeCatalogAgentPackage(slug, (target, reason) =>
+        security.stopAgentPackageTurnsForSlug(target, reason),
+      )
+      ctx.emit({ event: 'agent/changed', slug })
+      return { ok: true, removed: true, slug }
+    }),
+  },
+  {
+    method: 'agent.packageRefresh',
+    http: 'POST',
+    path: '/huaanwork/agent/package/refresh',
+    handler: storeRoute(async (req, ctx) => {
+      assertNoAgentPackageSecrets(req, 'agent.packageRefresh')
+      const security = requireCatalogSecurity(ctx)
+      const host = requireAgentPackageHost()
+      // 顺序固定:legacy 目录 → 广场缓存 → 本地发布状态 → 已安装 metadata → 撤销。
+      // 撤销最后应用,返回的卡片已反映本次撤销;刷新失败由 Task 10 保留缓存。
+      const legacyRefresh = await getAgentsDirectory().refresh()
+      const cache = await refreshCatalogPackageCache()
+      const local = await refreshLocalPublications(host)
+      const installed = await refreshInstalledCatalogPackageStatuses()
+      const revocations = await security.refreshRevocations()
+      // 一批状态变化只发一次统一事件(installed metadata 的 changed 与本地发布
+      // 状态变化合并),避免按条目刷屏;客户端据此整表刷新。
+      if (installed.changed || local.changed) {
+        ctx.emit({ event: 'agent/changed' })
+      }
+      const list = await host.listWithLegacy()
+      const catalogError = mergeCatalogErrors(
+        legacyRefresh.catalogError,
+        cache.warning,
+        local.warning,
+        installed.warning,
+        list.catalogError,
+      )
+      return {
+        ...withCatalogPackages(list, cache.items),
+        ...(catalogError === undefined ? {} : { catalogError }),
+        ...(revocations.warning === undefined ? {} : { revocationWarning: revocations.warning }),
+      }
+    }),
+  },
 
   // status (纯内存 handler: 恒返回 { ready: true }, 无 I/O 或异常路径)
   { method: 'status.get', http: 'GET', path: '/huaanwork/status', handler: async () => ({ ready: true }) }, // Task 4

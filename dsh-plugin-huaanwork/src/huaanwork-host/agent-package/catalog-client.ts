@@ -363,7 +363,7 @@ export type CatalogPackageCacheRefresh = {
  */
 export async function refreshCatalogPackageCache(): Promise<CatalogPackageCacheRefresh> {
   const binding = getAgentCatalogBinding()
-  const cached = readCachedCatalogPackages(binding.profileDir)
+  const cached = readCatalogPackageCache(binding.profileDir)
   const settings = binding.readSettings()
   if (catalogRootUrlOrUndefined(settings) === undefined) return { items: cached }
   try {
@@ -381,10 +381,22 @@ export async function refreshCatalogPackageCache(): Promise<CatalogPackageCacheR
  */
 export function readCachedCatalogPackageSlugs(): string[] {
   const binding = getAgentCatalogBinding()
-  return [...new Set(readCachedCatalogPackages(binding.profileDir).map((item) => item.slug))]
+  return [...new Set(readCatalogPackageCache(binding.profileDir).map((item) => item.slug))]
 }
 
-function readCachedCatalogPackages(profileDir: string): AgentPackageSummary[] {
+/**
+ * 最近一次成功缓存的签名广场摘要。`agent.packageList` 用它填
+ * `catalogPackages`;离线/目录未配置时返回上次成功的快照,缺失/损坏按空表处理。
+ *
+ * 与 {@link readCachedCatalogPackageSlugs} 共用同一个磁盘读取与归一化,
+ * 缓存写入方(`writeCatalogPackageCache`)是唯一事实源。
+ */
+export function readCachedCatalogPackages(): AgentPackageSummary[] {
+  const binding = getAgentCatalogBinding()
+  return readCatalogPackageCache(binding.profileDir)
+}
+
+function readCatalogPackageCache(profileDir: string): AgentPackageSummary[] {
   let text: string
   try {
     text = readFileSync(agentCatalogPackagesCachePath(profileDir), 'utf8')

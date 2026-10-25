@@ -21,9 +21,9 @@ export const PLAZA_EMPTY_TEXT = "暂无可用智能体；请先配置公用机�
 export const MINE_EMPTY_TEXT = "还没有智能体。在会话里说「帮我新建一个智能体」即可创建。";
 export const SEARCH_EMPTY_TEXT = "没有匹配的智能体";
 
-export type AgentPackageCardSource = "local" | "catalog-legacy";
+export type AgentPackageCardSource = "local" | "catalog" | "catalog-legacy";
 
-/** 卡片视图形状：本地包与旧目录智能体共用。 */
+/** 卡片视图形状：本地包、已安装广场包与旧目录智能体共用。 */
 export type AgentPackageCard = {
   slug: string;
   displayName: string;
@@ -36,7 +36,9 @@ export type AgentPackageCard = {
 
 /** 卡片来源标识。 */
 export function packageSourceLabel(source: AgentPackageCardSource): string {
-  return source === "local" ? "本地创建" : "旧目录智能体";
+  if (source === "local") return "本地创建";
+  if (source === "catalog") return "来自广场";
+  return "旧目录智能体";
 }
 
 /** 本地包的更新入口：在会话里用 create-agent 的 update 模式。 */
