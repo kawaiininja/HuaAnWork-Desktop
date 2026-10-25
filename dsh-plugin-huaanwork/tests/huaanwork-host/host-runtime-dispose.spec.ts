@@ -32,6 +32,15 @@ afterEach(() => {
   roots = []
 })
 
+/** 轮询等一个条件成立;用于「日志出现即代表 result 等待已超时」这类时序点。 */
+async function waitFor(condition: () => boolean, label: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`等待超时:${label}`)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
 function installLocalPackage(): string {
   const profileDir = mkdtempSync(join(tmpdir(), 'huaanwork-host-dispose-'))
   roots.push(profileDir)
@@ -261,12 +270,16 @@ describe('cleanup failure propagation', () => {
     }
   }
 
-  function makeTimeoutHost(profileDir: string, activeTurns: ReturnType<typeof createAgentPackageActiveTurnRegistry>) {
+  function makeTimeoutHost(
+    profileDir: string,
+    activeTurns: ReturnType<typeof createAgentPackageActiveTurnRegistry>,
+    cleanupTimeoutMs = 20,
+  ) {
     return createAgentPackageHost({
       profileDir,
       takenSlugs: () => [],
       activeTurns,
-      cleanupTimeoutMs: 20,
+      cleanupTimeoutMs,
       createRuntime: async (options): Promise<AgentPackageTurnRuntime> => ({
         slug: options.manifest.slug,
         packageDir: options.packageDir,
@@ -296,8 +309,79 @@ describe('cleanup failure propagation', () => {
       resolveParent: async () => ({ id: 'parent-agent' }),
     })
 
-    // update/remove 走的是 record.cancel ⇒ 清理超时必须到达调用方。
-    await expect(activeTurns.cancelBySlug('weekly-report', 'remove')).rejects.toThrow(/清理失败|dispose/)
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map((value) => String(value)).join(' '))
+    })
+    let failure: unknown
+    try {
+      // update/remove 走的是 record.cancel ⇒ 清理超时必须到达调用方。用户可见只报
+      // 条数:一次 dispose 卡住 = 一条失败(共享 promise 只判定一次,不会记两遍)。
+      await activeTurns.cancelBySlug('weekly-report', 'remove')
+    } catch (error) {
+      failure = error
+    } finally {
+      spy.mockRestore()
+    }
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe('停止智能体回合失败（1 个）')
+    // 具体原因(dispose 超时聚合成「清理失败（1 项）」)只在内部日志里,供诊断。
+    expect(logged.join('\n')).toContain('清理失败（1 项）')
+  })
+
+  test('a stuck child result does not contaminate a cancel that lands during idle cleanup', async () => {
+    const profileDir = installLocalPackage()
+    const activeTurns = createAgentPackageActiveTurnRegistry()
+    // 结果等待必须真的超时一次,再让取消落进同一个收尾;上限放宽到 250ms 只是
+    // 为了让「超时日志出现 → 取消 → 放行 dispose」这段有充足余量。
+    const host = makeTimeoutHost(profileDir, activeTurns, 250)
+    const pkg = await host.findInvocable('weekly-report')
+    expect(pkg?.broken).toBeUndefined()
+
+    let releaseDispose: () => void = () => undefined
+    const disposeGate = new Promise<void>((resolve) => {
+      releaseDispose = resolve
+    })
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map((value) => String(value)).join(' '))
+    })
+    try {
+      const dispatched = await host.dispatch({
+        ctx: {
+          huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+          subagents: {
+            startActivation: async () => ({
+              childId: 'child',
+              // 子代理还在干活:result 永不结算。dispose 正常,只是先卡在 gate 上,
+              // 确保取消落在「result 已超时、收尾尚未完成」的窗口里。
+              result: new Promise(() => undefined),
+              dispose: async () => {
+                await disposeGate
+              },
+            }),
+          },
+        } as never,
+        sessionId: 'parent-session',
+        pkg: pkg!,
+        remainder: '写一份周报',
+        resolveParent: async () => ({ id: 'parent-agent' }),
+      })
+
+      const idle = dispatched.afterIdle()
+      await waitFor(
+        () => logged.some((line) => line.includes('未结束，释放 activation')),
+        'idle cleanup times out the child result',
+      )
+      // 取消在 result 超时之后、dispose 完成之前到达(记录尚未注销)。dispose/stop
+      // 都成功 ⇒ update/remove 必须看到「停止已确认」,不能被 result 超时污染。
+      const cancelling = activeTurns.cancelBySlug('weekly-report', 'remove')
+      releaseDispose()
+      await expect(cancelling).resolves.toBeUndefined()
+      await expect(idle).resolves.toBeUndefined()
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   test('logs cleanup failures on the idle path instead of rejecting afterIdle', async () => {

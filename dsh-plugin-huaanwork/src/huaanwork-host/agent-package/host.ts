@@ -163,10 +163,12 @@ export function createAgentPackageActiveTurnRegistry(): AgentPackageActiveTurnRe
       }),
     )
     if (failures.length > 0) {
-      // 保留计数口径,同时带上每个回合的失败原因:update/remove 的调用方要能从
-      // 这一条 rejection 里看出「停止未确认」的具体形状。
-      const detail = failures.map((failure) => failure.message).join('；')
-      throw new Error(`停止智能体回合失败（${failures.length} 个）：${detail}`)
+      // 用户可见只报条数:原因可能带路径/token,不能进 UI。原因内部记一条日志,
+      // 让「停止未确认」仍可诊断(update/remove 的调用方只看得到计数口径)。
+      console.error(
+        `停止智能体回合失败（${failures.length} 个）：${failures.map((failure) => failure.message).join('；')}`,
+      )
+      throw new Error(`停止智能体回合失败（${failures.length} 个）`)
     }
   }
   return {
@@ -590,36 +592,43 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       const cleanupFailures: Error[] = []
       let cleanupFailureReported = false
 
-      /** 有界等待一步清理;超时记一条失败,不抛(聚合由 cleanup 决定是否上报)。 */
-      const settleCleanupStep = async (promise: Promise<unknown>, label: string): Promise<void> => {
-        const settled = await settleWithin(promise, cleanupTimeoutMs)
-        if (!settled) cleanupFailures.push(new Error(`${label} timed out`))
-      }
-
-      /** dispose 只调用一次;取消与 cleanup 共享同一 promise。 */
+      /**
+       * dispose 只调用一次,超时也**只在这里**判定一次;取消与 cleanup 共享同一
+       * promise。上限若留在调用方,`cancelTurn` 与 `cleanup('cancel')` 会各等
+       * 一个 `cleanupTimeoutMs` 并各记一条失败。
+       */
       const disposeActivation = (handle: SubagentActivationHandle): Promise<void> => {
         disposePromise ??= (async () => {
-          try {
+          // 包一层 async 让同步 throw 也变成 rejection,记录后不再外抛:失败已经
+          // 进了 cleanupFailures,聚合由 cleanup 按调用方 mode 决定是否上报。
+          const observed = (async () => {
             await handle.dispose()
-          } catch (error) {
-            // 释放失败必须可见:先记录,再 rethrow 给 settleWithin 观察。
-            cleanupFailures.push(toError(error))
-            throw error
-          }
+          })().then(
+            () => undefined,
+            (error) => {
+              cleanupFailures.push(toError(error))
+            },
+          )
+          const settled = await settleWithin(observed, cleanupTimeoutMs)
+          if (!settled) cleanupFailures.push(new Error('activation dispose timed out'))
         })()
         return disposePromise
       }
 
-      /** 停 runtime 只调用一次;晚到的 runtime 与 cleanup 共享同一 promise。 */
+      /** 停 runtime 只调用一次并有界一次;晚到的 runtime 与 cleanup 共享同一 promise。 */
       const stopTurnRuntime = (current: AgentPackageTurnRuntime): Promise<void> => {
         stopRuntimePromise ??= (async () => {
-          try {
+          const observed = (async () => {
             await stopRuntime(current)
-          } catch (error) {
-            // 单个子进程拒绝退出不阻塞其余清理,但必须记入本回合的失败集合。
-            cleanupFailures.push(toError(error))
-            throw error
-          }
+          })().then(
+            () => undefined,
+            (error) => {
+              // 单个子进程拒绝退出不阻塞其余清理,但必须记入本回合的失败集合。
+              cleanupFailures.push(toError(error))
+            },
+          )
+          const settled = await settleWithin(observed, cleanupTimeoutMs)
+          if (!settled) cleanupFailures.push(new Error('stopTurnRuntime timed out'))
         })()
         return stopRuntimePromise
       }
@@ -699,7 +708,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
             const currentActivation = activation
             if (currentActivation !== undefined) {
               if (cancelRequested) {
-                await settleCleanupStep(disposeActivation(currentActivation), 'activation dispose')
+                await disposeActivation(currentActivation)
               } else {
                 const settled = await Promise.race([
                   settleWithin(currentActivation.result, cleanupTimeoutMs),
@@ -707,17 +716,18 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
                 ])
                 if (!settled && !cancelRequested) {
                   // 发布后的取消归 dispose();这里只记录卡住的事实,不 abort signal。
-                  cleanupFailures.push(new Error('activation result timed out'))
+                  // result 晚结算是子代理还在干活,不是清理失败:写进 cleanupFailures
+                  // 会让之后 update/remove 的 cancel 路径凭空抛错。
                   console.error(
                     `智能体「${pkg.slug}」的子代理在 ${String(cleanupTimeoutMs / 60_000)} 分钟内未结束，释放 activation`,
                   )
                 }
-                await settleCleanupStep(disposeActivation(currentActivation), 'activation dispose')
+                await disposeActivation(currentActivation)
               }
             }
             const current = runtime
             if (current !== undefined) {
-              await settleCleanupStep(stopTurnRuntime(current), 'turn runtime stop')
+              await stopTurnRuntime(current)
             }
             if (mcpDispose !== undefined) {
               try {
@@ -769,11 +779,11 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         const teardown = (async () => {
           const currentActivation = activation
           if (currentActivation !== undefined) {
-            await settleCleanupStep(disposeActivation(currentActivation), 'activation dispose')
+            await disposeActivation(currentActivation)
           }
           const currentRuntime = runtime
           if (currentRuntime !== undefined) {
-            await settleCleanupStep(stopTurnRuntime(currentRuntime), 'turn runtime stop')
+            await stopTurnRuntime(currentRuntime)
           }
           await cleanup('cancel')
         })()
@@ -837,7 +847,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         // 并 cleanup,禁止继续 startActivation。
         record.runtime = runtime
         if (cancelRequested || signal.aborted) {
-          await settleCleanupStep(stopTurnRuntime(runtime), 'turn runtime stop')
+          await stopTurnRuntime(runtime)
           await cleanup('idle')
           throw cancelError()
         }
@@ -907,7 +917,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         // rejection 在没人 await 时变成 unhandled rejection。
         void activation.result.catch(() => undefined)
         if (cancelRequested || signal.aborted) {
-          await settleCleanupStep(disposeActivation(activation), 'activation dispose')
+          await disposeActivation(activation)
           // The wrapper resumes during `startActivation` and may bind the child after the
           // first cleanup pass already unbound it; dispose the late activation and clear
           // whatever it re-added before failing the turn.
@@ -984,9 +994,10 @@ function toError(value: unknown): Error {
 /**
  * Wait for `promise` to settle or for `timeoutMs` to elapse, whichever is first.
  *
- * A rejection is treated exactly like a resolution: the rejection itself is
- * recorded by the caller's wrapper (`disposeActivation` / `stopTurnRuntime`)
- * and aggregated later; timing out here only means the cleanup did not finish.
+ * A rejection is treated exactly like a resolution here. The bounded cleanup
+ * helpers (`disposeActivation` / `stopTurnRuntime`) record the rejection or the
+ * timeout themselves; the activation-result wait only logs and releases, because
+ * a child still working is not a cleanup failure.
  *
  * @param promise — the result or disposal to observe
  * @param timeoutMs — upper bound for the wait
