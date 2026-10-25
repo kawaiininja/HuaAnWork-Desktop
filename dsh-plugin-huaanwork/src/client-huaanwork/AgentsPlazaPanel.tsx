@@ -5,10 +5,8 @@ import { EnableConfirmModal } from "./AgentToolkitPanel.tsx";
 import {
   catalogErrorMessage,
   filterPackageTab,
-  PLAZA_ALL_INSTALLED_TEXT,
-  PLAZA_EMPTY_TEXT,
   plazaCards,
-  SEARCH_EMPTY_TEXT,
+  plazaEmptyText,
   type AgentPackageCard,
   type PackageNotice,
 } from "./logic/agentPackagesLogic.ts";
@@ -19,7 +17,8 @@ import type { AgentListItem, AgentPackageListResult } from "./rpc-types.ts";
  *
  * 两张来源合并展示：
  * - 签名广场摘要（`catalogPackages`）：本机未安装，动作严格只有下载与详情；
- *   已安装的 slug 由 `plazaCards` 剔除，不会以“下载”卡重复出现；
+ *   已作为 catalog 包安装的 slug 由 `plazaCards` 剔除，不会以“下载”卡重复出现；
+ *   与本机本地包同 slug 的摘要保留并标冲突，只提供详情（同名不等于已安装）；
  * - legacy 目录条目（`catalogAgents`）：沿用启用/关闭（启用先经能力披露确认框）
  *   与查看详情，不伪造下载入口。
  *
@@ -161,11 +160,7 @@ export default function AgentsPlazaPanel({
         <p className="panel-empty">加载中…</p>
       ) : cards.length === 0 ? (
         <p className="panel-empty">
-          {search.trim()
-            ? SEARCH_EMPTY_TEXT
-            : (data?.catalogPackages.length ?? 0) > 0
-              ? PLAZA_ALL_INSTALLED_TEXT
-              : PLAZA_EMPTY_TEXT}
+          {plazaEmptyText(data ?? { packages: [], catalogPackages: [] }, cards.length, search)}
         </p>
       ) : (
         <div className="skill-grid">

@@ -291,6 +291,40 @@ describe("AgentPackagesPanel（我的智能体）", () => {
     expect(rpcMock).toHaveBeenCalledWith("agent.packageSetEnabled", { slug: "broken-on", enabled: false });
   });
 
+  it("broken legacy 卡不渲染启用：已启用时只能关闭或看详情", async () => {
+    listPayload = {
+      packages: [],
+      catalogAgents: [
+        {
+          name: "legacy-broken",
+          displayName: "损坏的旧目录助手",
+          source: "catalog",
+          kind: "agent",
+          description: "manifest 无法解析",
+          version: "0.9.0",
+          permissions: [],
+          enabled: true,
+          broken: { reason: "manifest 无法解析" },
+        },
+      ],
+      catalogPackages: [],
+    };
+
+    const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
+
+    const card = cardBySlug(view, "legacy-broken");
+    expect(view.textContent).toContain("已损坏：manifest 无法解析");
+    expect(buttonLabels(card)).toEqual(["查看详情", "关闭"]);
+    expect(buttonIn(card, "启用")).toBeUndefined();
+
+    await click(buttonIn(card, "关闭")!);
+    await flush();
+    expect(rpcMock).toHaveBeenCalledWith("agent.packageSetEnabled", {
+      slug: "legacy-broken",
+      enabled: false,
+    });
+  });
+
   it("点击启用调用 agent.packageSetEnabled，随后重拉列表", async () => {
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
 

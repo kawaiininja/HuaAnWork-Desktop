@@ -26,9 +26,10 @@ export const PACKAGE_REFRESH_INTERVAL_MS = 60_000;
  * 刷新分两档：
  * - 进入页面 / 手动刷新：先 `agent.packageRefresh`（目录 + 广场缓存 + 本地发布
  *   状态 + 已安装 metadata + 撤销列表），再 `agent.refresh`（legacy 目录）；
- * - 挂载期间每 60 秒只调 `agent.packageRefresh`，用于接收管理员撤销；前后两次
- *   调用不重叠（在飞时跳过本轮），卸载即 `clearInterval`。成功的一轮会自增
- *   刷新计数，让页签重拉 `agent.packageList`，撤销因此无需用户操作即可见。
+ * - 挂载期间每 60 秒只调 `agent.packageRefresh`，用于接收管理员撤销；周期 tick
+ *   在飞时跳过本轮，但手动刷新会**等待/共享**在飞请求，完成后仍执行
+ *   `agent.refresh` 并给出反馈。成功的一轮会自增刷新计数，让页签重拉
+ *   `agent.packageList`，撤销因此无需用户操作即可见；卸载后的返回不再写状态。
  *
  * `agentChangeSignal` 由 App 在收到 `agent/changed` 时自增，面板据此重拉；
  * 刷新按钮与保存配置走同一个信号，不额外引入第二个全局事件监听。
@@ -46,8 +47,17 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
   const [refreshToken, setRefreshToken] = useState(0);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
-  /** 周期刷新与手动刷新的互斥闸：同一时刻只有一个 packageRefresh 在飞。 */
-  const packageRefreshInFlight = useRef(false);
+  /** 卸载后不再写回任何状态（在飞请求返回时静默丢弃）。 */
+  const mountedRef = useRef(true);
+  /** 在飞的 packageRefresh；手动/首次刷新共享它，周期 tick 只跳过。 */
+  const packageRefreshPromise = useRef<Promise<boolean> | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -78,26 +88,39 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
     if (agentChangeSignal > 0) setRefreshToken((prev) => prev + 1);
   }, [agentChangeSignal]);
 
-  /** 只刷新目录/撤销缓存；在飞时跳过，返回是否真正执行了这一轮。 */
-  const runPackageRefresh = useCallback(async (): Promise<boolean> => {
-    if (packageRefreshInFlight.current) return false;
-    packageRefreshInFlight.current = true;
+  /**
+   * 只刷新目录/撤销缓存，返回是否真正执行了这一轮。
+   *
+   * `wait` 决定在飞时的语义：周期 tick 传 `false`（在飞即跳过本轮，避免重叠）；
+   * 首次进入与手动刷新传 `true`（等待并共享在飞请求，手动刷新因此不会被周期
+   * 请求吞掉），调用方在拿到 `true` 后继续自己的 `agent.refresh`。
+   */
+  const runPackageRefresh = useCallback(async (wait: boolean): Promise<boolean> => {
+    if (packageRefreshPromise.current !== null) {
+      return wait ? packageRefreshPromise.current : false;
+    }
+    const run = (async (): Promise<boolean> => {
+      try {
+        await rpcCall("agent.packageRefresh");
+        if (mountedRef.current) setError("");
+        return true;
+      } catch (cause) {
+        if (mountedRef.current) setError(catalogErrorMessage(cause));
+        return false;
+      }
+    })();
+    packageRefreshPromise.current = run;
     try {
-      await rpcCall("agent.packageRefresh");
-      setError("");
-      return true;
-    } catch (cause) {
-      setError(catalogErrorMessage(cause));
-      return false;
+      return await run;
     } finally {
-      packageRefreshInFlight.current = false;
+      if (packageRefreshPromise.current === run) packageRefreshPromise.current = null;
     }
   }, []);
 
   useEffect(() => {
     let active = true;
     void (async () => {
-      const refreshed = await runPackageRefresh();
+      const refreshed = await runPackageRefresh(true);
       if (!active || !refreshed) return;
       try {
         await rpcCall("agent.refresh");
@@ -108,7 +131,8 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
     })();
     const timer = window.setInterval(() => {
       void (async () => {
-        const refreshed = await runPackageRefresh();
+        // 周期 tick 在飞即跳过；手动刷新与首次刷新则共享在飞请求。
+        const refreshed = await runPackageRefresh(false);
         // 撤销在宿主侧应用后只落进撤销缓存/包状态，`agent/changed` 不为纯撤销
         // 发射；成功后自增刷新计数，让两页签重拉 packageList，撤销无需用户操作
         // 即可见。本回调仍不调 agent.refresh。
@@ -125,15 +149,16 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
     setRefreshing(true);
     setError("");
     try {
-      const refreshed = await runPackageRefresh();
-      if (!refreshed) return;
+      const refreshed = await runPackageRefresh(true);
+      if (!refreshed || !mountedRef.current) return;
       await rpcCall("agent.refresh");
+      if (!mountedRef.current) return;
       setNote("已刷新智能体目录");
       setRefreshToken((prev) => prev + 1);
     } catch (cause) {
-      setError(catalogErrorMessage(cause));
+      if (mountedRef.current) setError(catalogErrorMessage(cause));
     } finally {
-      setRefreshing(false);
+      if (mountedRef.current) setRefreshing(false);
     }
   };
 

@@ -30,12 +30,15 @@ import {
   packagePublishStatusLabel,
   packageSourceLabel,
   packageStatusLabel,
+  PLAZA_ALL_INSTALLED_TEXT,
   PLAZA_EMPTY_TEXT,
   plazaCards,
+  plazaEmptyText,
   publicationNotice,
   PUBLISH_CONFIRM_TEXT,
   reviewRejectedText,
   revokedText,
+  SEARCH_EMPTY_TEXT,
   updateHintFor,
   VERIFY_FAILURE_TEXT,
   type AgentPackageCard,
@@ -500,6 +503,131 @@ describe("plazaCards with signed summaries", () => {
       catalogAgents: [{ ...enabledCatalogAgent, name: "fresh-package" }],
     });
     assert.deepEqual(cards, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2 Task 11：本地同名冲突、broken legacy 与广场空态（I-19、M-6）
+// ---------------------------------------------------------------------------
+
+function summary(slug: string, overrides: Partial<AgentPackageSummary> = {}): AgentPackageSummary {
+  return {
+    slug,
+    displayName: `签名包 ${slug}`,
+    description: "来自广场的签名包",
+    version: "2.0.0",
+    size: 1024,
+    status: "published",
+    updatedAt: "2026-10-20T08:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("plazaCards local-slug conflicts (I-19)", () => {
+  test("keeps a remote summary when a local package has the same slug", () => {
+    const cards = plazaCards({
+      packages: [{ ...localPackage, source: "local" }],
+      catalogPackages: [summary("weekly-report")],
+      catalogAgents: [],
+    });
+    const signed = cards.find((item) => item.source === "catalog" && item.slug === "weekly-report");
+    assert.equal(signed?.installed, false);
+    assert.equal(signed?.conflict, "local-slug");
+    assert.deepEqual(packageActions(signed!), ["detail"]);
+  });
+
+  test("does not suppress a signed summary for an installed catalog package", () => {
+    const cards = plazaCards({
+      packages: [{ ...localPackage, source: "catalog", publishStatus: "installed", enabled: true }],
+      catalogPackages: [summary("weekly-report")],
+      catalogAgents: [],
+    });
+    assert.equal(cards.some((card) => card.source === "catalog" && card.installed === false), false);
+    assert.deepEqual(cards, []);
+  });
+
+  test("an unconflicted summary still installs; the conflict flag is not blanket", () => {
+    const cards = plazaCards({
+      packages: [{ ...localPackage, source: "local" }],
+      catalogPackages: [summary("other-pack")],
+      catalogAgents: [],
+    });
+    const signed = cards.find((card) => card.slug === "other-pack");
+    assert.equal(signed?.conflict, undefined);
+    assert.deepEqual(packageActions(signed!), ["install", "detail"]);
+  });
+
+  test("a local-slug conflict keeps the legacy duplicate suppressed by the summary", () => {
+    const cards = plazaCards({
+      packages: [{ ...localPackage, slug: "legacy-agent", source: "local" }],
+      catalogPackages: [summary("legacy-agent")],
+      catalogAgents: [enabledCatalogAgent],
+    });
+    assert.deepEqual(cards.map((card) => card.slug), ["legacy-agent"]);
+    assert.equal(cards[0]?.source, "catalog");
+    assert.equal(cards[0]?.conflict, "local-slug");
+  });
+});
+
+describe("plazaEmptyText (I-19)", () => {
+  test("never says all installed when a local-slug conflict remains", () => {
+    assert.equal(
+      plazaEmptyText(
+        {
+          packages: [{ ...localPackage, source: "local" }],
+          catalogPackages: [summary("weekly-report")],
+        },
+        0,
+        "",
+      ),
+      PLAZA_EMPTY_TEXT,
+    );
+  });
+
+  test("says all installed only when every summary is an installed catalog package", () => {
+    assert.equal(
+      plazaEmptyText(
+        {
+          packages: [{ ...localPackage, source: "catalog", publishStatus: "installed" }],
+          catalogPackages: [summary("weekly-report")],
+        },
+        0,
+        "",
+      ),
+      PLAZA_ALL_INSTALLED_TEXT,
+    );
+  });
+
+  test("query wins over both empty copy and leftover cards", () => {
+    assert.equal(
+      plazaEmptyText({ packages: [], catalogPackages: [summary("weekly-report")] }, 0, " 周报 "),
+      SEARCH_EMPTY_TEXT,
+    );
+    assert.equal(
+      plazaEmptyText({ packages: [], catalogPackages: [] }, 3, "周报"),
+      SEARCH_EMPTY_TEXT,
+    );
+  });
+
+  test("cards present render no empty copy; an empty catalog is not all installed", () => {
+    assert.equal(plazaEmptyText({ packages: [], catalogPackages: [] }, 2, ""), "");
+    assert.equal(
+      plazaEmptyText({ packages: [], catalogPackages: [] }, 0, ""),
+      PLAZA_EMPTY_TEXT,
+    );
+  });
+});
+
+describe("packageActions broken legacy (M-6)", () => {
+  test("broken legacy is close-only even when disabled", () => {
+    const broken = card({ source: "catalog-legacy", broken: { reason: "损坏" } });
+    assert.deepEqual(packageActions({ ...broken, enabled: false }), ["detail"]);
+    assert.deepEqual(packageActions({ ...broken, enabled: true }), ["disable", "detail"]);
+  });
+
+  test("non-broken legacy keeps enable/disable plus detail", () => {
+    assert.deepEqual(packageActions(card({ source: "catalog-legacy", enabled: false })), ["enable", "detail"]);
+    assert.deepEqual(packageActions(card({ source: "catalog-legacy", enabled: true })), ["disable", "detail"]);
   });
 });
 

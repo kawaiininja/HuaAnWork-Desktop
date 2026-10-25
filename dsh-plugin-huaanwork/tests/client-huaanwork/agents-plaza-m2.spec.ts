@@ -331,6 +331,51 @@ describe("AgentsPlazaPanel（广场签名包）", () => {
     // 目录已配置且有条目，只是全部已安装；不能显示“请先配置公用机目录”。
     expect(view.querySelector(".panel-empty")?.textContent).toBe("目录中的智能体都已安装。");
   });
+
+  it("本地同名包不再吞掉远端摘要：摘要卡标冲突，只提供详情", async () => {
+    listPayload = listResult({
+      packages: [{ ...LOCAL_PACKAGE }],
+      catalogPackages: [{ ...SIGNED_SUMMARY, slug: "weekly-report", displayName: "广场周报助手" }],
+      catalogAgents: [],
+    });
+    const view = await mount(createElement(AgentsPlazaPanel, { search: "", refreshToken: 0 }));
+
+    // 本地同名只表示不能安装，不是“已安装”：签名卡必须可见并讲清冲突。
+    const signed = cardBySlug(view, "weekly-report");
+    expect(signed.textContent).toContain("广场周报助手");
+    expect(signed.textContent).toContain("与本地包同名，无法安装");
+    expect(buttonLabels(signed)).toEqual(["查看详情"]);
+    expect(buttonIn(signed, "下载")).toBeUndefined();
+    expect(view.querySelector(".panel-empty")).toBeNull();
+  });
+
+  it("broken legacy 不渲染启用：已启用仍可关闭，未启用只剩详情", async () => {
+    listPayload = listResult({
+      packages: [],
+      catalogAgents: [
+        {
+          ...LEGACY_AGENT,
+          name: "legacy-broken-on",
+          broken: { reason: "manifest 无法解析" },
+          enabled: true,
+        },
+        {
+          ...LEGACY_AGENT,
+          name: "legacy-broken-off",
+          displayName: "损坏未启用",
+          broken: { reason: "manifest 无法解析" },
+          enabled: false,
+        },
+      ],
+      catalogPackages: [],
+    });
+    const view = await mount(createElement(AgentsPlazaPanel, { search: "", refreshToken: 0 }));
+
+    expect(buttonLabels(cardBySlug(view, "legacy-broken-on"))).toEqual(["查看详情", "关闭"]);
+    expect(buttonLabels(cardBySlug(view, "legacy-broken-off"))).toEqual(["查看详情"]);
+    expect(buttonByText(view, "启用")).toBeUndefined();
+    expect(view.textContent).toContain("已损坏：manifest 无法解析");
+  });
 });
 
 describe("AgentsView 发布口令与刷新周期", () => {
@@ -512,6 +557,79 @@ describe("AgentsView 发布口令与刷新周期", () => {
     expect(view.textContent).toContain("已撤销：窃取凭据");
     expect(callsOf("agent.packageList").length).toBeGreaterThan(1);
     // 周期刷新仍只调 packageRefresh，不调 agent.refresh。
+    expect(callsOf("agent.refresh")).toHaveLength(1);
+  });
+
+  it("周期刷新在飞时手动刷新共享该请求，完成后仍执行 agent.refresh 并反馈", async () => {
+    vi.useFakeTimers();
+    let release: (() => void) | undefined;
+    let call = 0;
+    handlers["agent.packageRefresh"] = () => {
+      call += 1;
+      if (call === 2) {
+        return new Promise((resolve) => {
+          release = () => resolve(listPayload);
+        });
+      }
+      return listPayload;
+    };
+
+    const view = await mount(createElement(AgentsView, {}));
+    await flush();
+    expect(callsOf("agent.packageRefresh")).toHaveLength(1);
+    expect(callsOf("agent.refresh")).toHaveLength(1);
+
+    // 第二轮周期刷新在飞：此时手动刷新不能被“在飞即跳过”吞掉。
+    await advance(PACKAGE_REFRESH_INTERVAL_MS);
+    expect(callsOf("agent.packageRefresh")).toHaveLength(2);
+    expect(callsOf("agent.refresh")).toHaveLength(1);
+
+    await click(buttonByText(view, "刷新")!);
+    expect(callsOf("agent.packageRefresh")).toHaveLength(2);
+    expect(callsOf("agent.refresh")).toHaveLength(1);
+
+    await act(async () => {
+      release?.();
+    });
+    await flush();
+
+    // 手动刷新等待在飞请求后继续：agent.refresh 与成功反馈都要发生。
+    expect(callsOf("agent.packageRefresh")).toHaveLength(2);
+    expect(callsOf("agent.refresh")).toHaveLength(2);
+    expect(view.textContent).toContain("已刷新智能体目录");
+  });
+
+  it("等待在飞刷新时卸载：请求返回后不再调用 agent.refresh", async () => {
+    vi.useFakeTimers();
+    let release: (() => void) | undefined;
+    let call = 0;
+    handlers["agent.packageRefresh"] = () => {
+      call += 1;
+      if (call === 2) {
+        return new Promise((resolve) => {
+          release = () => resolve(listPayload);
+        });
+      }
+      return listPayload;
+    };
+
+    await mount(createElement(AgentsView, {}));
+    await flush();
+    await advance(PACKAGE_REFRESH_INTERVAL_MS);
+    await click(buttonByText(container!, "刷新")!);
+
+    await act(async () => {
+      root!.unmount();
+    });
+    root = undefined;
+
+    await act(async () => {
+      release?.();
+    });
+    await flush();
+
+    // 卸载后既不完成手动刷新的 agent.refresh，也不写回任何状态。
+    expect(callsOf("agent.packageRefresh")).toHaveLength(2);
     expect(callsOf("agent.refresh")).toHaveLength(1);
   });
 });

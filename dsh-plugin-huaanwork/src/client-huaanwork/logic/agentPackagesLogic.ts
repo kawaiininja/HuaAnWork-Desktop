@@ -87,6 +87,11 @@ export type AgentPackageCard = {
   updatedAt?: string;
   /** 签名摘要的迁移来源；有值即标“签名迁移包”。 */
   migrationFrom?: string;
+  /**
+   * 广场签名摘要与本机本地包同 slug：不可安装（会覆盖本地包），只保留详情。
+   * 与 `installed === false` 并存——同名不等于已安装。
+   */
+  conflict?: "local-slug";
 };
 
 export type AgentPackageAction =
@@ -125,8 +130,10 @@ export function catalogAgentLabel(item: Pick<AgentListItem, "name" | "displayNam
  * 卡片动作清单（M2 规格的唯一事实源）。
  *
  * - 撤销/目录损坏：只能移除与详情（不再提供启停）。
+ * - 本地损坏 / legacy 损坏：只允许关闭（已启用时）+ 详情，不能发布或再次启用。
+ * - 广场签名摘要与本地包同 slug（`conflict: 'local-slug'`）：只允许详情，
+ *   不提供下载——安装会覆盖本地包；也不能伪装成“已安装”。
  * - legacy：启停 + 详情，永不伪造下载。
- * - 本地损坏：只允许关闭（已启用时）+ 详情，不能发布。
  * - 广场未安装（`installed === false`）：严格只有下载 + 详情。
  * - 已安装目录包：启停 +（可更新时）更新 + 移除 + 详情；下架后去掉更新。
  * - 本地发布状态：待审查只看状态；被拒只重新提交；已发布可申请下架；
@@ -134,8 +141,10 @@ export function catalogAgentLabel(item: Pick<AgentListItem, "name" | "displayNam
  */
 export function packageActions(card: AgentPackageCard): AgentPackageAction[] {
   if (card.revoked || (card.broken && card.source === "catalog")) return ["remove", "detail"];
-  if (card.source === "catalog-legacy") return [card.enabled ? "disable" : "enable", "detail"];
+  // 损坏判定先于 legacy 常规启停：disabled broken 不显示启用，enabled 仍可关闭。
   if (card.broken) return [...(card.enabled ? (["disable"] as const) : []), "detail"];
+  if (card.conflict === "local-slug") return ["detail"];
+  if (card.source === "catalog-legacy") return [card.enabled ? "disable" : "enable", "detail"];
   if (card.source === "catalog" && card.installed === false) return ["install", "detail"];
   if (card.source === "catalog" && card.publishStatus === "delisted") {
     return [card.enabled ? "disable" : "enable", "remove", "detail"];
@@ -339,9 +348,9 @@ function catalogPackageCard(summary: AgentPackageSummary): AgentPackageCard {
 /**
  * 广场卡片：签名摘要优先，legacy 目录条目随后。
  *
- * 已安装的签名包（slug 出现在 `packages` 里）不再出广场卡——宿主返回的
- * `catalogPackages` 是整份目录缓存，不按安装状态过滤；不剔除就会把已安装包
- * 渲染成带“下载”的未安装卡，点击只会收到“已安装，无需重复安装”。
+ * 只有 `source === 'catalog'` 的已安装记录才抑制同名摘要——本地包与目录包可以
+ * 同 slug 共存，本地同名只表示这份摘要不可安装，不能把摘要藏起来谎称“已安装”。
+ * 这类摘要卡保留并标 `conflict: 'local-slug'`（动作只剩详情）。
  *
  * 签名包的 `slug` 或 `migrationFrom` 已覆盖的 legacy 条目不再重复显示
  * （迁移包的签名卡带 `migrationFrom`，标“签名迁移包”）；已安装包的覆盖
@@ -350,11 +359,19 @@ function catalogPackageCard(summary: AgentPackageSummary): AgentPackageCard {
 export function plazaCards(
   result: Pick<AgentPackageListResult, "catalogAgents" | "catalogPackages" | "packages">,
 ): AgentPackageCard[] {
-  const installedSlugs = new Set(result.packages.map((item) => item.slug));
+  const installedCatalogSlugs = new Set(
+    result.packages.filter((item) => item.source === "catalog").map((item) => item.slug),
+  );
+  const localSlugs = new Set(
+    result.packages.filter((item) => item.source === "local").map((item) => item.slug),
+  );
   const summaries = result.catalogPackages;
   const signed = summaries
-    .filter((summary) => !installedSlugs.has(summary.slug))
-    .map(catalogPackageCard);
+    .filter((summary) => !installedCatalogSlugs.has(summary.slug))
+    .map((summary) => ({
+      ...catalogPackageCard(summary),
+      ...(localSlugs.has(summary.slug) ? { conflict: "local-slug" as const } : {}),
+    }));
   const claimed = new Set<string>();
   for (const summary of summaries) {
     claimed.add(summary.slug);
@@ -366,6 +383,27 @@ export function plazaCards(
     .filter((item) => item.kind === "agent" && !claimed.has(item.name))
     .map(catalogAgentCard);
   return [...signed, ...legacy];
+}
+
+/**
+ * 广场空态文案（M2 Task 11）：查询优先；有卡不显示空态；只有“目录里的每一条
+ * 摘要都已经作为 catalog 包安装”时才说“都已安装”。本地同名冲突不算已安装，
+ * 否则会把“无法安装”误报成“全部装好了”。
+ */
+export function plazaEmptyText(
+  result: Pick<AgentPackageListResult, "catalogPackages" | "packages">,
+  cardCount: number,
+  query: string,
+): string {
+  if (query.trim().length > 0) return SEARCH_EMPTY_TEXT;
+  if (cardCount > 0) return "";
+  const installedCatalogSlugs = new Set(
+    result.packages.filter((item) => item.source === "catalog").map((item) => item.slug),
+  );
+  const allInstalled =
+    result.catalogPackages.length > 0
+    && result.catalogPackages.every((summary) => installedCatalogSlugs.has(summary.slug));
+  return allInstalled ? PLAZA_ALL_INSTALLED_TEXT : PLAZA_EMPTY_TEXT;
 }
 
 /**

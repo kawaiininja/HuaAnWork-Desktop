@@ -217,6 +217,10 @@ export function AgentPackageCardView({
             <span className="badge">v{card.version}</span>
             <span className="badge">@{card.slug}</span>
             {card.migrationFrom ? <span className="badge">{MIGRATION_PACKAGE_LABEL}</span> : null}
+            {/* 同名不等于已安装：本地包占用该 slug 时，广场摘要不可安装。 */}
+            {card.conflict === "local-slug" ? (
+              <span className="badge">与本地包同名，无法安装</span>
+            ) : null}
             {/* 目录卡的状态行就是“来自广场”，与来源徽标重复时不再渲染第二个徽标。 */}
             {status && statusTone === "badge" && status !== sourceLabel ? (
               <span className="badge">{status}</span>
