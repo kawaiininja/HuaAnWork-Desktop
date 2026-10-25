@@ -814,7 +814,7 @@ async reconcile(state: CatalogState): Promise<void> {
       ...(intent.delistRequestId === undefined ? {} : { delistRequestId: intent.delistRequestId }),
       reason: committed
         ? 'reconciled after restart: state.lastMutation matches the intent'
-        : 'reconciled after restart: the intent did not commit',
+        : 'reconciled after restart: state.lastMutation does not name this intent (a later mutation may have overwritten it)',
     })
   }
 }

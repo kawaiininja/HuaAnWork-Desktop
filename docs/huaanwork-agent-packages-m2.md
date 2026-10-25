@@ -47,6 +47,7 @@
 {AGENT_CATALOG_DATA_DIR}/
   state.json                          # 唯一持久状态(提交、已发布包、下架申请、撤销)
   audit.jsonl                         # 全请求审计,追加式,每行一条 JSON
+  audit-intents.jsonl                 # 写请求的崩溃恢复日志;启动对账成功后由服务端清空
   submissions/{submissionId}/bundle.tgz
   packages/{slug}/{version}/bundle.tgz
 ```
@@ -56,8 +57,14 @@
 之外**的运维目录（例如 `/srv/huaanwork/...`），不要放在源码树里：升级/重新部署代码时不应
 连带移动或删除目录数据。
 
-备份 = `dataDir` 的**完整**快照。`state.json` 损坏时服务端 fail-closed（`StoreCorruptError`，
-文件保持原样），必须从备份恢复后重启。
+备份 = `dataDir` 的**完整**快照（含 `audit.jsonl` 与 `audit-intents.jsonl`）。`state.json` 损坏时
+服务端 fail-closed（`StoreCorruptError`，文件保持原样），必须从备份恢复后重启。
+
+`audit-intents.jsonl` 只用于崩溃恢复：写请求先落一条 intent，结果行（同 `requestId`）写入
+`audit.jsonl` 后它就没有用了。服务端**每次启动对账成功后都会原子清空它**（tmp + rename，
+权限 0600），因此它不应长期增长。启动对账只处理 **最近 24 小时** 内的 intent；更早的、
+或 `timestamp` 无法解析的条目一律忽略，不会被伪造成 `error/500` 审计行（旧结果可能在已
+归档的 `audit.jsonl` 里）。
 
 ## 3. 启动服务（可复制示例）
 
@@ -216,11 +223,17 @@ node --experimental-strip-types agent-catalog-admin/src/cli.ts revoke <slug> <ve
   记录 `state.json` 的条目数（`packages` 个数、`submissions` 个数）与每日/每周增量。容量
   结论必须由这些**实际数字**得出，并在备份窗口（下一次完整备份到恢复演练）内复核；
   不要把“内网规模可接受”当成已实测结论。
+- **意图日志**：`audit-intents.jsonl` 是写请求的崩溃恢复日志，不是第二份审计。服务端在
+  每次启动对账成功后原子清空它，且只对账最近 24 小时内的 intent；因此它不参与 `audit.jsonl`
+  的长期容量估算，轮换时随完整备份一并归档即可。
 - **手工归档 / 轮换**（固定三步，不新增自动日志框架）：
   1. **停服**（停止 `agent-catalog-server`；期间目录不可用，桌面端只影响广场）。
-  2. **完整备份** `dataDir`（含 `state.json`、`audit.jsonl`、`submissions/`、`packages/`）。
+  2. **完整备份** `dataDir`（含 `state.json`、`audit.jsonl`、`audit-intents.jsonl`、
+     `submissions/`、`packages/`）。
   3. **移走旧 `audit.jsonl`**（改名或移到归档位置，不要删除），然后**启动服务**；服务会
-     重建一个新的空 `audit.jsonl`。
+     重建一个新的空 `audit.jsonl`。正常停服后 `audit-intents.jsonl` 里的 intent 都已有
+     结果行，可以把该文件一并归档/移走（服务启动时也会清空它），这样轮换后的首次启动
+     不会对已归档的历史再做对账。
 - **恢复纪律**：恢复时**不得**用旧备份覆盖较新的审计或 `state.json`。备份只用于“当前文件
   丢失或损坏”的场景；若备份比现网旧，只取缺失部分（例如只补 `packages/` 下的 bundle），
   绝不回滚 `state.json` 与 `audit.jsonl`。
