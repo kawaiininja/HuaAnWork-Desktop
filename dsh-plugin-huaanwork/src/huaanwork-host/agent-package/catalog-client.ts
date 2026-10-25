@@ -155,19 +155,21 @@ export function createAgentCatalogClient(options: CreateAgentCatalogClientOption
     if (isRedirect(response.status)) {
       throw new AgentCatalogClientError('目录请求被重定向，已拒绝', 'redirect', response.status)
     }
-    let body: Buffer
-    try {
-      body = await readCappedBuffer(response, MAX_CATALOG_JSON_BYTES, '目录响应超过 1 MiB 上限', 'response-too-large')
-    } catch (error) {
-      if (error instanceof AgentCatalogClientError) throw error
-      throw new AgentCatalogClientError(AGENT_CATALOG_UNREACHABLE_ERROR, 'unreachable')
-    }
+    // 先按状态码分类再读正文:错误响应(401/403/其它非 2xx)的正文永远不参与
+    // 大小判定,否则一个超大错误页会把「口令错误」误报成「响应超过 1 MiB」。
     if (response.status === 401 || response.status === 403) {
       throw new AgentCatalogClientError(AGENT_CATALOG_AUTH_ERROR, 'auth', response.status)
     }
     if (!response.ok) {
       // 不回显服务端错误正文:它可能包含服务端视角的 token 片段。
       throw new AgentCatalogClientError(`目录请求失败（HTTP ${response.status}）`, 'http', response.status)
+    }
+    let body: Buffer
+    try {
+      body = await readCappedBuffer(response, MAX_CATALOG_JSON_BYTES, '目录响应超过 1 MiB 上限', 'response-too-large')
+    } catch (error) {
+      if (error instanceof AgentCatalogClientError) throw error
+      throw new AgentCatalogClientError(AGENT_CATALOG_UNREACHABLE_ERROR, 'unreachable')
     }
     try {
       return { status: response.status, body: JSON.parse(body.toString('utf8')) as unknown }

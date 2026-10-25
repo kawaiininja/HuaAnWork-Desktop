@@ -29,6 +29,14 @@ import type {
 
 const LOG_FIELD_KEYS = ['slug', 'version', 'submissionId', 'outcome', 'reason'] as const
 
+/**
+ * 网络等待期间本地内容或发布身份发生变化时的统一拒绝文案。
+ *
+ * 上传/刷新/下架都在 await 之后重新读取 state:若内容、提交或版本已经变了,
+ * 旧请求的结果不再对应当前内容,绝不能写回发布字段。
+ */
+const STATE_CHANGED_ERROR = '智能体状态已变化，请刷新后重试'
+
 export type AgentPackageLogOutcome = 'ok' | 'error'
 
 /** 日志字段白名单:不接受 token、Authorization、私钥或任意额外字段。 */
@@ -101,21 +109,37 @@ export async function publishLocalAgentPackage(slug: string): Promise<{ submissi
     const settings = binding.readSettings()
     requirePublishToken(settings)
 
+    // 上传最多 5 秒;期间内容可能被一次 commit 改写。先记下上传前的内容身份,
+    // 上传完成后必须仍然一致,否则旧内容的 submissionId 会落到新版本头上。
+    const submittedVersion = detail.version
+    const submittedEntry = lookup.kind === 'local' ? lookup.entry : undefined
+
     const files = readUnsignedPackageFiles(agentPackageDir(binding.profileDir, slug))
     const bundle = await buildUnsignedAgentPackageBundle(files)
     const submission = await binding.client.submit(bundle)
     if (submission.slug !== slug) throw new Error('目录返回的提交与本地智能体不一致')
+    // 服务端回显的版本必须是上传前捕获的版本;否则说明文件在上传窗口里被换过。
+    if (submission.version !== submittedVersion) throw new Error(STATE_CHANGED_ERROR)
 
-    // 提交期间内容可能被再次 commit;以最新 state 为底,但绝不覆盖 catalog 键。
+    // 写入前重新读取 state 并核对内容身份:live 条目的 installedVersion 必须仍是
+    // 上传前的版本,submissionId 也必须仍是上传前的值(防止并发重复提交)。
     const latest = readAgentPackageState(binding.profileDir)
-    if (latest[`catalog:${slug}`] !== undefined) {
-      throw new Error('智能体状态已变化，请刷新后重试')
+    const live = lookupAgentPackageState(latest, slug)
+    if (live.kind === 'corrupt' || live.kind === 'catalog') throw new Error(STATE_CHANGED_ERROR)
+    if (live.kind === 'none') {
+      if (submittedEntry !== undefined) throw new Error(STATE_CHANGED_ERROR)
+    } else if (
+      live.entry.installedVersion !== submittedVersion ||
+      live.entry.submissionId !== submittedEntry?.submissionId
+    ) {
+      throw new Error(STATE_CHANGED_ERROR)
     }
-    const previous = latest[`local:${slug}`] ?? lookupEntry(lookup)
+
+    const previous = live.kind === 'local' ? live.entry : undefined
     const next: AgentPackageStateEntry = {
       source: 'local',
       enabled: previous?.enabled ?? detail.enabled,
-      installedVersion: previous?.installedVersion || detail.version,
+      installedVersion: previous?.installedVersion || submittedVersion,
       publishStatus: 'pending-review',
       submissionId: submission.submissionId,
       ...(previous?.publishedVersion === undefined
@@ -163,7 +187,10 @@ export async function refreshLocalAgentPackagePublishStatus(
     const detail = readAgentPackage(binding.profileDir, slug)
     const currentVersion =
       detail !== undefined && detail.source === 'local' ? detail.version : lookup.entry.installedVersion
-    let next: AgentPackageStateEntry = { ...lookup.entry }
+    // 网络等待期间本地内容可能被 commit 复位(或重新提交):记下发起刷新时的
+    // 身份,最终写回前必须仍然一致。
+    const initialEntry = lookup.entry
+    let next: AgentPackageStateEntry = { ...initialEntry }
 
     if (next.submissionId !== undefined) {
       const submission = await binding.client.getSubmission(next.submissionId)
@@ -201,7 +228,22 @@ export async function refreshLocalAgentPackagePublishStatus(
 
     const state = readAgentPackageState(binding.profileDir)
     const live = lookupAgentPackageState(state, slug)
-    if (live.kind !== 'local') throw new Error('智能体状态已变化，请刷新后重试')
+    if (live.kind !== 'local') throw new Error(STATE_CHANGED_ERROR)
+    if (
+      live.entry.submissionId !== initialEntry.submissionId ||
+      live.entry.installedVersion !== initialEntry.installedVersion
+    ) {
+      // 刷新期间本地内容被 commit 复位(或重新提交):本次查询到的旧 publication
+      // 字段已不对应当前内容,整次刷新放弃,只返回最新状态、不写任何字段。
+      logAgentPackageAction(binding.logger, action, {
+        slug,
+        version: live.entry.publishedVersion ?? currentVersion,
+        ...(live.entry.submissionId === undefined ? {} : { submissionId: live.entry.submissionId }),
+        outcome: 'ok',
+        reason: 'state-changed',
+      })
+      return toPublication(slug, live.entry)
+    }
     // 以刷新期间落盘的最新条目为底,只覆盖本次查询到的发布字段,避免丢掉
     // 并发写入的 delistRequestId 等 M2 字段。
     const merged: AgentPackageStateEntry = { ...live.entry }
@@ -263,7 +305,15 @@ export async function requestLocalAgentPackageDelist(
 
     const latest = readAgentPackageState(binding.profileDir)
     const live = lookupAgentPackageState(latest, slug)
-    if (live.kind !== 'local') throw new Error('智能体状态已变化，请刷新后重试')
+    if (
+      live.kind !== 'local' ||
+      live.entry.submissionId !== entry.submissionId ||
+      live.entry.installedVersion !== entry.installedVersion ||
+      live.entry.publishStatus !== 'published' ||
+      live.entry.publishedVersion !== entry.publishedVersion
+    ) {
+      throw new Error(STATE_CHANGED_ERROR)
+    }
     const next: AgentPackageStateEntry = { ...live.entry, delistRequestId: request.id }
     writeAgentPackageState(binding.profileDir, {
       ...latest,
@@ -309,12 +359,6 @@ export function resetLocalAgentPackagePublication(profileDir: string, slug: stri
     ...state,
     [key]: next,
   })
-}
-
-function lookupEntry(
-  lookup: ReturnType<typeof lookupAgentPackageState>,
-): AgentPackageStateEntry | undefined {
-  return lookup.kind === 'local' || lookup.kind === 'catalog' ? lookup.entry : undefined
 }
 
 function toPublication(slug: string, entry: AgentPackageStateEntry): LocalAgentPackagePublication {

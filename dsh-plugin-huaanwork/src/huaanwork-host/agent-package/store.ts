@@ -231,15 +231,19 @@ export function setAgentPackageEnabled(profileDir: string, slug: string, enabled
   const lookup = lookupAgentPackageState(state, slug)
   if (lookup.kind === 'corrupt') throw new Error(lookup.reason)
 
+  // 对称守卫:只要目录带 `.signature`,状态键就必须是 catalog:。stale local:
+  // 键同样不能给签名包写启用态,否则 source(来自 .signature)与 enabled(来自
+  // local 键)会来自不同的键。
+  const signed = pathExists(join(agentPackageDir(profileDir, slug), '.signature'))
+  if (signed && lookup.kind !== 'catalog') {
+    throw new Error(`智能体 @${slug} 的签名包缺少 catalog 状态记录，请重新安装`)
+  }
+
   let key: string
   if (lookup.kind === 'catalog') {
     key = lookup.key
   } else if (lookup.kind === 'local') {
     key = lookup.key
-  } else if (pathExists(join(agentPackageDir(profileDir, slug), '.signature'))) {
-    // 签名目录只能由安装流程创建 catalog: 状态;这里替它补写 local: 会把
-    // 无法验签的包洗成「本地创建」。
-    throw new Error(`智能体 @${slug} 的签名包缺少 catalog 状态记录，请重新安装`)
   } else {
     key = `local:${slug}`
   }
@@ -506,7 +510,10 @@ function readAgentPackageFromDir(
   // 来源来自实际证据与 state 键:有 .signature 只能是目录包;否则看是否登记了
   // catalog: 键;都没有才是本地包。损坏状态不得回退成 local。
   const source: AgentPackageSource = signed ? 'catalog' : lookup.kind === 'catalog' ? 'catalog' : 'local'
-  const entry = lookup.kind === 'local' || lookup.kind === 'catalog' ? lookup.entry : undefined
+  // 签名目录只认 catalog: 键;stale local: 键不得给签名包提供 enabled 或任何
+  // 发布字段,否则 source 与 enabled 来自不同的键。
+  const stateEntry = lookup.kind === 'local' || lookup.kind === 'catalog' ? lookup.entry : undefined
+  const entry = signed && lookup.kind !== 'catalog' ? undefined : stateEntry
   const enabled = entry?.enabled === true
   const manifestRead = readManifestFromDir(packageDir, slug)
   const manifest = manifestRead.ok ? manifestRead.manifest : undefined

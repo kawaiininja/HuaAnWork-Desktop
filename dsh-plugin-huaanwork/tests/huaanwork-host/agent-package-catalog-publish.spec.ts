@@ -66,6 +66,7 @@ type RecordedRequest = {
   url: string | undefined
   authorization: string | undefined
   contentType: string | undefined
+  contentLength: string | undefined
   body: Buffer
 }
 
@@ -85,10 +86,15 @@ let packageStatus: 'published' | 'delisted' | 'revoked' = 'published'
 let bundleUrlOverride: string | undefined
 let bundleRedirect: string | undefined
 let bundleBytes = Buffer.from('test-bundle-bytes')
+let bundleChunkedOverflow = false
 let listItems: unknown[] = []
 let listPadding = ''
 let listStatus: number | undefined
 let revocationItems: unknown[] = []
+// 并发用例把网络请求挂在这里:请求到达并记录后才 release。
+let submitGate: Promise<void> | undefined
+let submissionPollGate: Promise<void> | undefined
+let delistGate: Promise<void> | undefined
 
 beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'agent-package-catalog-publish-'))
@@ -103,10 +109,14 @@ beforeEach(async () => {
   bundleUrlOverride = undefined
   bundleRedirect = undefined
   bundleBytes = Buffer.from('test-bundle-bytes')
+  bundleChunkedOverflow = false
   listItems = []
   listPadding = ''
   listStatus = undefined
   revocationItems = []
+  submitGate = undefined
+  submissionPollGate = undefined
+  delistGate = undefined
   resetAgentCatalogForTests()
 
   server = createServer((request, response) => {
@@ -128,7 +138,11 @@ async function stopCatalogServer(): Promise<void> {
   const current = server
   server = undefined
   if (current === undefined) return
-  await new Promise<void>((resolve) => current.close(() => resolve()))
+  await new Promise<void>((resolve) => {
+    current.close(() => resolve())
+    // 被中止的下载会留下半开连接;不等 keep-alive 超时,直接断开。
+    current.closeAllConnections()
+  })
 }
 
 async function readRequestBody(request: IncomingMessage): Promise<Buffer> {
@@ -154,11 +168,13 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       url: request.url,
       authorization: request.headers.authorization,
       contentType: request.headers['content-type'],
+      contentLength: request.headers['content-length'],
       body,
     })
     const pathname = new URL(request.url ?? '/', 'http://localhost').pathname
 
     if (request.method === 'POST' && pathname === '/v1/agent-packages/submissions') {
+      if (submitGate !== undefined) await submitGate
       const inspected = await inspectUnsignedAgentPackageBundle(body)
       submittedSlug = inspected.manifest.slug
       submittedVersion = inspected.manifest.version
@@ -174,6 +190,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     }
 
     if (request.method === 'GET' && pathname === `/v1/agent-packages/submissions/${SUBMISSION_ID}`) {
+      if (submissionPollGate !== undefined) await submissionPollGate
       sendJson(response, 200, {
         submissionId: SUBMISSION_ID,
         slug: submittedSlug,
@@ -188,7 +205,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
 
     if (request.method === 'GET' && pathname === '/v1/agent-packages') {
       if (listStatus !== undefined) {
-        sendJson(response, listStatus, { error: '拒绝' })
+        sendJson(response, listStatus, { error: '拒绝', ...(listPadding === '' ? {} : { padding: listPadding }) })
         return
       }
       sendJson(response, 200, { items: listItems, padding: listPadding })
@@ -202,6 +219,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
 
     const delistMatch = /^\/v1\/agent-packages\/([^/]+)\/([^/]+)\/delist-requests$/.exec(pathname)
     if (request.method === 'POST' && delistMatch !== null) {
+      if (delistGate !== undefined) await delistGate
       const payload = JSON.parse(body.toString('utf8')) as { reason?: unknown }
       sendJson(response, 201, {
         id: DELIST_REQUEST_ID,
@@ -218,6 +236,16 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (request.method === 'GET' && bundleMatch !== null) {
       if (bundleRedirect !== undefined) {
         response.writeHead(302, { location: bundleRedirect })
+        response.end()
+        return
+      }
+      if (bundleChunkedOverflow) {
+        // 不声明 content-length:强制走流式读取分支,由客户端在中途中止并删除。
+        response.writeHead(200, { 'content-type': 'application/gzip' })
+        const chunk = Buffer.alloc(1024 * 1024, 0x61)
+        for (let index = 0; index < 6 && !response.destroyed; index += 1) {
+          response.write(chunk)
+        }
         response.end()
         return
       }
@@ -340,6 +368,24 @@ async function commitExistingUpdate(slug = 'weekly-report'): Promise<void> {
 
 function bodyText(body: Buffer): string {
   return body.toString('latin1')
+}
+
+type Deferred = { promise: Promise<void>; release: () => void }
+
+function deferred(): Deferred {
+  let release = (): void => undefined
+  const promise = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
+}
+
+async function waitFor(condition: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`等待超时:${label}`)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
 }
 
 describe('agent package state model', () => {
@@ -487,6 +533,34 @@ describe('agent package state model', () => {
     expect(listed?.broken?.reason).toMatch(/catalog/)
 
     expect(() => setAgentPackageEnabled(root, 'weekly-report', true)).toThrow(/catalog/)
+  })
+
+  test('a stale local: key cannot enable or publish-field a signed directory', () => {
+    writeSignedPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '1.0.0',
+        submissionId: 'submission-1',
+      },
+    })
+
+    const detail = readAgentPackage(root, 'weekly-report')
+    expect(detail?.source).toBe('catalog')
+    // source 来自 .signature;enabled/发布字段不得来自 stale local: 键。
+    expect(detail?.enabled).toBe(false)
+    expect(detail?.publishStatus).toBeUndefined()
+    expect(detail?.publishedVersion).toBeUndefined()
+    expect(detail?.submissionId).toBeUndefined()
+    expect(detail?.broken?.reason).toMatch(/catalog/)
+
+    const before = rawStateFile()
+    expect(() => setAgentPackageEnabled(root, 'weekly-report', false)).toThrow(/catalog/)
+    expect(() => setAgentPackageEnabled(root, 'weekly-report', true)).toThrow(/catalog/)
+    expect(rawStateFile()).toBe(before)
   })
 
   test('two state keys for one slug report corruption instead of guessing', () => {
@@ -740,6 +814,120 @@ describe('local publication lifecycle', () => {
     expect(requests).toHaveLength(0)
     expect(readAgentPackageState(root)['local:weekly-report']?.submissionId).toBe(SUBMISSION_ID)
   })
+
+  test('a commit during the upload leaves the new content unpublished', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    configure()
+    const gate = deferred()
+    submitGate = gate.promise
+
+    const publishing = publishLocalAgentPackage('weekly-report')
+    await waitFor(
+      () =>
+        requests.some(
+          (request) => request.method === 'POST' && request.url === '/v1/agent-packages/submissions',
+        ),
+      'submit request',
+    )
+    // 上传还挂着时提交一次内容更新:版本 1.0.0 → 1.0.1,发布状态复位。
+    await commitExistingUpdate()
+    submitGate = undefined
+    gate.release()
+
+    await expect(publishing).rejects.toThrow('智能体状态已变化，请刷新后重试')
+
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.installedVersion).toBe('1.0.1')
+    expect(state?.publishStatus).toBe('none')
+    expect(state?.submissionId).toBeUndefined()
+    expect(changedSlugs).toEqual([])
+    expect(loggerLines.some((line) => line.includes('publish.submit') && line.includes('outcome=error'))).toBe(true)
+  })
+
+  test('a commit during a status refresh does not resurrect the cleared submission', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'pending-review',
+        submissionId: SUBMISSION_ID,
+      },
+    })
+    configure()
+    const gate = deferred()
+    submissionPollGate = gate.promise
+
+    const refreshing = refreshLocalAgentPackagePublishStatus('weekly-report')
+    await waitFor(
+      () =>
+        requests.some(
+          (request) =>
+            request.method === 'GET' && request.url === `/v1/agent-packages/submissions/${SUBMISSION_ID}`,
+        ),
+      'status request',
+    )
+    await commitExistingUpdate()
+    submissionPollGate = undefined
+    gate.release()
+
+    const publication = await refreshing
+    expect(publication.publishStatus).toBe('none')
+    expect(publication.submissionId).toBeUndefined()
+
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.installedVersion).toBe('1.0.1')
+    expect(state?.publishStatus).toBe('none')
+    expect(state?.submissionId).toBeUndefined()
+    expect(state?.reviewReason).toBeUndefined()
+    expect(state?.delistRequestId).toBeUndefined()
+  })
+
+  test('a commit during a delist request refuses to attach the request id', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '1.0.0',
+      },
+    })
+    configure()
+    const gate = deferred()
+    delistGate = gate.promise
+
+    const requesting = requestLocalAgentPackageDelist('weekly-report', '内容有误')
+    await waitFor(
+      () =>
+        requests.some(
+          (request) =>
+            request.method === 'POST' &&
+            request.url === '/v1/agent-packages/weekly-report/1.0.0/delist-requests',
+        ),
+      'delist request',
+    )
+    await commitExistingUpdate()
+    delistGate = undefined
+    gate.release()
+
+    await expect(requesting).rejects.toThrow('智能体状态已变化，请刷新后重试')
+
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.installedVersion).toBe('1.0.1')
+    expect(state?.publishStatus).toBe('none')
+    expect(state?.delistRequestId).toBeUndefined()
+  })
 })
 
 describe('catalog cache and taken slugs', () => {
@@ -879,6 +1067,19 @@ describe('catalog client transport limits', () => {
     }
   })
 
+  test('a bundle download writes the file and sends the read token', async () => {
+    configure()
+    const destination = join(root, 'bundle.tgz')
+
+    await getAgentCatalogClient().downloadBundleToFile('weekly-report', '1.0.0', destination)
+
+    expect(readFileSync(destination)).toEqual(bundleBytes)
+    const bundleRequest = requests.find(
+      (request) => request.method === 'GET' && request.url === '/v1/agent-packages/weekly-report/1.0.0/bundle',
+    )
+    expect(bundleRequest?.authorization).toBe(`Bearer ${READ_TOKEN}`)
+  })
+
   test('a bundle larger than 5 MiB aborts and deletes the partial file', async () => {
     configure()
     bundleBytes = Buffer.alloc(5 * 1024 * 1024 + 1, 0x61)
@@ -888,6 +1089,22 @@ describe('catalog client transport limits', () => {
       getAgentCatalogClient().downloadBundleToFile('weekly-report', '1.0.0', destination),
     ).rejects.toThrow(/5 MiB/)
     expect(existsSync(destination)).toBe(false)
+  })
+
+  test('a chunked bundle without content-length aborts mid-stream and deletes the partial file', async () => {
+    configure()
+    bundleChunkedOverflow = true
+    const destination = join(root, 'bundle.tgz')
+
+    await expect(
+      getAgentCatalogClient().downloadBundleToFile('weekly-report', '1.0.0', destination),
+    ).rejects.toThrow(/5 MiB/)
+    expect(existsSync(destination)).toBe(false)
+    const bundleRequest = requests.find(
+      (request) => request.method === 'GET' && request.url === '/v1/agent-packages/weekly-report/1.0.0/bundle',
+    )
+    expect(bundleRequest?.authorization).toBe(`Bearer ${READ_TOKEN}`)
+    expect(bundleRequest?.contentLength).toBeUndefined()
   })
 
   test('a JSON response larger than 1 MiB is rejected', async () => {
@@ -908,6 +1125,14 @@ describe('catalog client transport limits', () => {
 
     listStatus = 500
     await expect(client.listPackages()).rejects.toThrow(/HTTP 500/)
+  })
+
+  test('a 401 with an oversized body still maps to the auth message', async () => {
+    configure()
+    listStatus = 401
+    listPadding = 'x'.repeat(1024 * 1024 + 1)
+
+    await expect(getAgentCatalogClient().listPackages()).rejects.toThrow(AGENT_CATALOG_AUTH_ERROR)
   })
 
   test('logAgentPackageAction only emits whitelisted fields', () => {
