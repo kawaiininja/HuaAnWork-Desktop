@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- 只改 `packages/catalog-signing/`、`packages/agent-package-format/`、`agent-catalog-server/`、`agent-catalog-admin/`、`dsh-plugin-huaanwork/`、根 workspace/门禁清单（含 `scripts/verify-layout.mjs` 与 `scripts/expected-root-gate-scripts.json`）和本计划指定文档；禁止改 `dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/`、`dsh-desktop-next/`、`deepseek-harness/`、`dsh-community-market/`。
+- 只改 `packages/catalog-signing/`、`packages/agent-package-format/`、`agent-catalog-server/`、`agent-catalog-admin/`、`dsh-plugin-huaanwork/`、根 workspace/门禁清单（含 `scripts/verify-layout.mjs` 与 `scripts/expected-root-gate-scripts.json`）和本计划指定文档；禁止改 `dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/`、`dsh-desktop-next/`、`deepseek-harness/`、`dsh-community-market/`。**本计划指定文档另含 R-M2-2 裁定保留的四个计划外文件**——`dsh-plugin-desktop/tests/package.spec.ts`、`dsh-plugin-desktop-beta/tests/package.spec.ts`、`market-server/Dockerfile`、`docs/market-server-deployment.md`，逐项理由与批准见 `docs/evidence/2026-10-25-agent-package-m2-scope-ruling.md`；除这四个文件外不得再新增越界改动。
 - `market-server/` 只允许抽取签名原语及 import/依赖变化；路由、配置、信封、清单和运行时行为不变，现有测试必须原样通过，且不得获得 `tar` 间接依赖。
 - 三个凭据严格分离：桌面读 token=`agents_catalog_token`、发布 token=`agents_catalog_publish_token`；服务端沿用读 token 环境变量 `AGENT_CATALOG_TOKEN`，新增 `AGENT_CATALOG_PUBLISH_TOKEN` 与 `AGENT_CATALOG_ADMIN_TOKEN`。桌面不得保存 admin token 或签名私钥。
 - 私钥只进入管理员 CLI；服务端与桌面只读 raw 32-byte hex 公钥 keyring。生产私钥、生产 token 不进仓库、CI、日志或测试 fixture。
@@ -23,7 +23,7 @@
 - 安装和每次 `@` 运行前都复算所有文件 size/SHA-256 并验签；下架只停止新分发，撤销才禁用已安装副本并中止在途回合。离线使用上次撤销列表并显示警告；不提供 unrevoke。
 - 广场更新只允许更高 semver；更新/移除/撤销先中止对应运行时。首次安装默认关闭；同目录 `catalog-legacy` 迁移保持启用态，成功后删除旧 `catalog:<slug>` 键。
 - 本地包内容每次 commit 变化后 `publishStatus` 回到 `none`；本地包不可删除，目录包才可移除。发布按钮的真实动作是“提交审查”，不做审查 UI、后台审批推送或自动恶意代码扫描。
-- M1 的 `local:` 状态与 `agents-enabled.json` 旧键保持兼容；签名 manifest 不写 `source`、`enabled`、`published`。Stable/Beta/Next 零改动，桌面 variant 白名单维持 7/64、前缀 6，不新增名额。
+- M1 的 `local:` 状态与 `agents-enabled.json` 旧键保持兼容；签名 manifest 不写 `source`、`enabled`、`published`。Stable/Beta/Next 零改动，桌面 variant 白名单 **7/65**、前缀 6（`beta↔huaanwork` 第 65 项 = `scripts/verify-licenses.mjs`，裁定 R-T12-1；计划落笔时的 7/64 已被该裁定取代），此后不新增名额。
 - 全部自动化测试 headless；最终运行 `corepack yarn test`、`corepack yarn typecheck`、`corepack yarn check`、`corepack yarn check:desktop-variants`。macOS 与 Windows 分别完成发布→第二 Profile 下载/验签/启用/运行→更新→撤销证据；另至少做一次 macOS 创建者机器→Windows 消费机器的跨机器验收，不能用同机双 Profile 替代“另一台机器”成功标准。未完成不得宣布 M2 收口。
 - 新共享签名包零运行时依赖；包格式包固定使用仓库已有 `tar@7.5.22`，不升级其他依赖。所有目录写状态用 tmp+rename；同 slug/version 写操作串行，重复版本和并发提交必须有一致失败结果。
 
@@ -74,6 +74,8 @@
 | `dsh-plugin-huaanwork/src/client-huaanwork/logic/agentPackagesLogic.ts`, `styles.css` | 状态标签/动作纯函数与最小样式 |
 | `dsh-plugin-huaanwork/tests/client-huaanwork/agent-packages-panel.spec.ts` | M2 卡片动作、状态、错误和轮询清理测试 |
 | `.github/workflows/windows-agent-package-acceptance.yml` | 追加 M2 headless 双 Profile 探针与报告 artifact，不改既有 M1 步骤 |
+| `dsh-plugin-desktop/tests/package.spec.ts`, `dsh-plugin-desktop-beta/tests/package.spec.ts` | R-M2-2 裁定保留：根 workspace 12→16 的测试 fixture 同步（四个新 workspace 注册后不同步会让既有包测试变红） |
+| `market-server/Dockerfile`, `docs/market-server-deployment.md` | R-M2-2 裁定保留：记录 `market-server/src/signing.ts` 新增的运行期依赖 `@huaanwork/catalog-signing`，以及原始 TS 在 `node_modules` 下的类型剥离限制（新增依赖后的派生镜像未实测，仍是部署门） |
 
 ---
 
@@ -1153,7 +1155,7 @@ corepack yarn check:desktop-variants
 corepack yarn check
 ```
 
-Expected: 全部 exit 0；variant 仍 7/64、前缀 6；market-server signing/envelope 测试全绿；M1 agent-package 测试无回归。若既有 `verify:aa` 并发债务复现，单独重跑失败 workspace 并如实记录，禁止删步骤。
+Expected: 全部 exit 0；variant 仍 7/65、前缀 6；market-server signing/envelope 测试全绿；M1 agent-package 测试无回归。若既有 `verify:aa` 并发债务复现，单独重跑失败 workspace 并如实记录，禁止删步骤。
 
 - [ ] **Step 5: 写验收证据并提交**
 
