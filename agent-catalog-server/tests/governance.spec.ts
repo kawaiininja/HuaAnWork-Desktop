@@ -128,6 +128,38 @@ async function readState(catalog: TestAgentCatalog): Promise<CatalogState> {
   }
 }
 
+/**
+ * Seed `count` complete revocation records without going through the revoke
+ * route (which needs one published package per record). The commit goes
+ * straight to `state.json` through the store, so every record carries the
+ * fields `parseState` requires (`slug`, `version`, `reason`, `revokedAt`,
+ * `actor`) and the document keeps `schemaVersion` plus all four collections.
+ *
+ * `revokedAt` increases by one second per record so the
+ * `(revokedAt, slug, version)` order — and therefore every page boundary — is
+ * deterministic.
+ */
+async function seedRevocations(
+  catalog: TestAgentCatalog,
+  count: number,
+  reasonBytes: number,
+): Promise<void> {
+  const base = Date.parse('2026-10-24T00:00:00.000Z')
+  await catalog.runtime.store.update(draft => {
+    for (let index = 0; index < count; index += 1) {
+      const slug = `revoked-${String(index).padStart(4, '0')}`
+      const version = '1.0.0'
+      draft.revocations[packageKey(slug, version)] = {
+        slug,
+        version,
+        reason: 'r'.repeat(reasonBytes),
+        revokedAt: new Date(base + index * 1_000).toISOString(),
+        actor: 'test',
+      }
+    }
+  })
+}
+
 function requestDelist(
   catalog: TestAgentCatalog,
   slug: string,
@@ -579,6 +611,112 @@ test('revocation is idempotent and a delisted version can be revoked', async () 
     assert.equal(state.delistRequests[request.id]?.status, 'approved')
     assert.equal((await bundle(catalog, delistedSlug, delistedVersion)).status, 410)
     assert.equal((await metadata(catalog, delistedSlug, delistedVersion)).body.status, 'revoked')
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('pages the revocation list and never exceeds the JSON cap', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    // 1500 × 800-byte reasons: the one-shot list is ~1.3 MiB, above the 1 MiB
+    // response cap that used to turn every refresh into a permanent 500.
+    await seedRevocations(catalog, 1500, 800)
+
+    const seen = new Set<string>()
+    let cursor: string | undefined
+    let total = 0
+    let pages = 0
+    for (let page = 0; page < 10; page += 1) {
+      const query = `limit=200${cursor === undefined ? '' : `&cursor=${encodeURIComponent(cursor)}`}`
+      const response = await catalog.request(`/v1/agent-packages/revocations?${query}`, {
+        token: READ_TOKEN,
+      })
+      assert.equal(response.status, 200, JSON.stringify(response.body))
+      assert.ok(Buffer.byteLength(JSON.stringify(response.body)) < 1024 * 1024)
+      const body = response.body as { items: Revocation[]; nextCursor?: string }
+      assert.ok(body.items.length <= 200)
+      for (const item of body.items) {
+        const key = `${item.slug}/${item.version}`
+        assert.equal(seen.has(key), false, `duplicate revocation ${key}`)
+        seen.add(key)
+        // The audit-only actor never leaves the server, page after page.
+        assert.equal('actor' in item, false)
+      }
+      total += body.items.length
+      pages += 1
+      cursor = body.nextCursor
+      if (cursor === undefined) break
+    }
+    assert.equal(total, 1500)
+    assert.equal(seen.size, 1500)
+    // 1500 records at 200 per page: eight pages, the last one short.
+    assert.equal(pages, 8)
+
+    // A cursor past the last record yields an empty final page, not a repeat
+    // of the last page and not another cursor.
+    const tail = Buffer.from(
+      JSON.stringify({ revokedAt: '9999-12-31T00:00:00.000Z', slug: 'zzzz', version: '9.9.9' }),
+      'utf8',
+    ).toString('base64url')
+    const after = await catalog.request(`/v1/agent-packages/revocations?cursor=${tail}`, {
+      token: READ_TOKEN,
+    })
+    assert.equal(after.status, 200)
+    assert.deepEqual(after.body, { items: [] })
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('rejects invalid revocation cursors and page limits', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    const badCursor = await catalog.request('/v1/agent-packages/revocations?cursor=not-a-cursor', {
+      token: READ_TOKEN,
+    })
+    assert.equal(badCursor.status, 400)
+    assert.equal(badCursor.body.code, 'invalid-cursor')
+
+    // Valid base64url, but not the documented `{ revokedAt, slug, version }`.
+    const wrongShape = Buffer.from(JSON.stringify({ slug: 'alpha' }), 'utf8').toString('base64url')
+    const wrongShapeResponse = await catalog.request(
+      `/v1/agent-packages/revocations?cursor=${wrongShape}`,
+      { token: READ_TOKEN },
+    )
+    assert.equal(wrongShapeResponse.status, 400)
+    assert.equal(wrongShapeResponse.body.code, 'invalid-cursor')
+
+    for (const limit of ['0', '201', 'abc', '1.5']) {
+      const response = await catalog.request(`/v1/agent-packages/revocations?limit=${limit}`, {
+        token: READ_TOKEN,
+      })
+      assert.equal(response.status, 400, `limit ${limit}`)
+      assert.equal(response.body.code, 'invalid-limit')
+    }
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('rejects a revocation reason over the byte cap', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    const version = (await publish(catalog)).manifest.version
+
+    const tooLong = await revoke(catalog, SLUG, version, 'x'.repeat(4097))
+    assert.equal(tooLong.status, 400, JSON.stringify(tooLong.body))
+    assert.deepEqual(tooLong.body, { error: '撤销原因过长', code: 'reason-too-long' })
+
+    // Exactly at the byte cap the shared 500-character budget still applies,
+    // so the two guards cannot be reordered without changing this answer.
+    const atCap = await revoke(catalog, SLUG, version, 'x'.repeat(4096))
+    assert.equal(atCap.status, 400)
+    assert.equal(atCap.body.code, 'invalid-reason')
+
+    // Neither attempt revoked the package.
+    assert.equal((await readState(catalog)).revocations[packageKey(SLUG, version)], undefined)
+    assert.equal((await metadata(catalog, SLUG, version)).body.status, 'published')
   } finally {
     await catalog.close()
   }

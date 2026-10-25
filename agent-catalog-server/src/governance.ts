@@ -62,6 +62,7 @@ import type {
   PublishedPackage,
   Revocation,
   RevocationListBody,
+  RevocationListEntry,
 } from './types.ts'
 
 /** Stable audit actions (the route ids of server.ts). */
@@ -80,6 +81,17 @@ const ACTIONS = {
  */
 const DELIST_REQUEST_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
+
+/**
+ * Revocation list paging (I-6). One page is capped at 200 items and each
+ * revocation reason is capped at 4 KiB, so a page stays well below the 1 MiB
+ * JSON response cap (200 × 4 KiB = 800 KiB before field overhead). Without a
+ * page bound the whole list is one response, and a catalog that outgrew the
+ * cap could never refresh again — new revocations would stay invisible.
+ */
+const REVOCATION_PAGE_DEFAULT = 200
+const REVOCATION_PAGE_MAX = 200
+const MAX_REVOCATION_REASON_BYTES = 4096
 
 /** Everything a governance handler may touch (plumbed by the dispatcher). */
 export interface GovernanceHandlerContext {
@@ -158,6 +170,10 @@ function findPendingRequest(
 
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +574,23 @@ export async function revokePackage(
   }
 
   const body = await readJsonObject(context.request)
+  // The byte cap is checked FIRST: a reason that is oversized in bytes is
+  // rejected as such even when it would also blow the character budget, and a
+  // bounded reason is what keeps a 200-item page under the JSON cap.
+  if (body.kind === 'object') {
+    const rawReason = body.value.reason
+    const reasonBytes =
+      typeof rawReason === 'string' ? Buffer.byteLength(rawReason.trim(), 'utf8') : 0
+    if (reasonBytes > MAX_REVOCATION_REASON_BYTES) {
+      return result(400, errorBody('撤销原因过长', 'reason-too-long'), {
+        action,
+        outcome: 'error',
+        reason: `revocation reason exceeds ${String(MAX_REVOCATION_REASON_BYTES)} bytes`,
+        slug,
+        version,
+      })
+    }
+  }
   const parsed = requireReason(body, action, { slug, version })
   if ('rejection' in parsed) return parsed.rejection
   const { reason } = parsed
@@ -621,24 +654,100 @@ export async function revokePackage(
 // GET /v1/agent-packages/revocations
 // ---------------------------------------------------------------------------
 
+/** The sort/projection tuple of a revocation: never the audit-only actor. */
+interface RevocationCursor {
+  readonly revokedAt: string
+  readonly slug: string
+  readonly version: string
+}
+
+/**
+ * The ONE ordering of the revocation list: `(revokedAt, slug, version)`
+ * ascending. The page cursor is the same tuple, so a page boundary can never
+ * fall inside an ambiguous group of equal timestamps.
+ */
+function compareRevocationCursor(left: RevocationCursor, right: RevocationCursor): number {
+  const byTime = compareStrings(left.revokedAt, right.revokedAt)
+  if (byTime !== 0) return byTime
+  const bySlug = compareStrings(left.slug, right.slug)
+  return bySlug !== 0 ? bySlug : compareStrings(left.version, right.version)
+}
+
+/** Explicit projection, never `{ ...record }`: `actor` must not leak. */
+function projectRevocation(record: Revocation): RevocationListEntry {
+  return {
+    slug: record.slug,
+    version: record.version,
+    reason: record.reason,
+    revokedAt: record.revokedAt,
+  }
+}
+
+function encodeRevocationCursor(record: RevocationCursor): string {
+  return Buffer.from(
+    JSON.stringify({
+      revokedAt: record.revokedAt,
+      slug: record.slug,
+      version: record.version,
+    }),
+    'utf8',
+  ).toString('base64url')
+}
+
+/** An opaque cursor, or null when the value is absent/not the documented tuple. */
+function decodeRevocationCursor(raw: string | null): RevocationCursor | null {
+  if (raw === null || raw === '') return null
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as unknown
+    if (!isRecord(parsed)) return null
+    const { revokedAt, slug, version } = parsed
+    if (typeof revokedAt !== 'string' || typeof slug !== 'string' || typeof version !== 'string') {
+      return null
+    }
+    return { revokedAt, slug, version }
+  } catch {
+    return null
+  }
+}
+
 export async function listRevocations(context: GovernanceHandlerContext): Promise<HandlerResult> {
   const action = ACTIONS.revocations
+  const url = new URL(context.request.url ?? '/', 'http://localhost')
+  const rawCursor = url.searchParams.get('cursor')
+  const cursor = decodeRevocationCursor(rawCursor)
+  if (rawCursor !== null && cursor === null) {
+    return result(400, errorBody('撤销游标无效', 'invalid-cursor'), {
+      action,
+      outcome: 'error',
+      reason: 'invalid revocation cursor',
+    })
+  }
+  const rawLimit = url.searchParams.get('limit')
+  const limit = rawLimit === null ? REVOCATION_PAGE_DEFAULT : Number(rawLimit)
+  if (!Number.isInteger(limit) || limit < 1 || limit > REVOCATION_PAGE_MAX) {
+    return result(400, errorBody('撤销分页大小无效', 'invalid-limit'), {
+      action,
+      outcome: 'error',
+      reason: `invalid revocation limit: ${String(rawLimit)}`,
+    })
+  }
+
+  const sorted = Object.values(context.store.read().revocations)
+    .sort(compareRevocationCursor)
+    .map(projectRevocation)
+  // First item strictly AFTER the cursor tuple; a cursor past the end yields
+  // an empty final page (and therefore no nextCursor), never a repeat.
+  const start =
+    cursor === null
+      ? 0
+      : sorted.findIndex(item => compareRevocationCursor(item, cursor) > 0)
+  const pageStart = start === -1 ? sorted.length : start
+  const page = sorted.slice(pageStart, pageStart + limit)
+  const last = page[page.length - 1]
+  const hasMore = last !== undefined && pageStart + page.length < sorted.length
   const body: RevocationListBody = {
-    items: Object.values(context.store.read().revocations)
-      .sort((left, right) => {
-        const byTime = compareStrings(left.revokedAt, right.revokedAt)
-        if (byTime !== 0) return byTime
-        const bySlug = compareStrings(left.slug, right.slug)
-        return bySlug !== 0 ? bySlug : compareStrings(left.version, right.version)
-      })
-      // Explicit projection, never `{ ...record }`: `actor` is the 12-hex
-      // admin-token hash and is audit-only (client contract excludes it).
-      .map(record => ({
-        slug: record.slug,
-        version: record.version,
-        reason: record.reason,
-        revokedAt: record.revokedAt,
-      })),
+    items: page,
+    ...(hasMore ? { nextCursor: encodeRevocationCursor(last) } : {}),
   }
   return result(200, body, { action, outcome: 'ok' })
 }

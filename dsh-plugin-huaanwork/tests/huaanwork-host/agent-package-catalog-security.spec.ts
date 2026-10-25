@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
@@ -23,6 +23,7 @@ import {
   AGENT_CATALOG_UNREACHABLE_ERROR,
   AgentCatalogClientError,
   configureAgentCatalog,
+  createAgentCatalogClient,
   resetAgentCatalogForTests,
   type AgentCatalogClient,
   type AgentCatalogSettings,
@@ -278,6 +279,32 @@ function configureCatalogBinding(client: AgentCatalogClient): void {
     logger: () => undefined,
     client,
   })
+}
+
+/**
+ * The REAL catalog client, backed by canned JSON pages instead of a socket, so
+ * pagination and response normalization are exercised end to end. Pages are
+ * served in order; the last one repeats if the client asks for more.
+ */
+function pagedCatalogClient(pages: ReadonlyArray<unknown>): {
+  client: AgentCatalogClient
+  requests: string[]
+} {
+  const requests: string[] = []
+  let index = 0
+  const client = createAgentCatalogClient({
+    readSettings: () => SETTINGS,
+    fetchImpl: async (input) => {
+      requests.push(String(input))
+      const body = pages[Math.min(index, pages.length - 1)]
+      index += 1
+      return new Response(`${JSON.stringify(body)}\n`, {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      })
+    },
+  })
+  return { client, requests }
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +818,100 @@ describe('catalog revocations', () => {
     expect(result.warning ?? '').toMatch(/目录不可达/)
     await expect(security.assertRunnable(SLUG, '1.0.0')).rejects.toThrow(/缓存撤销/)
     expect(readAgentPackageState(root)[`catalog:${SLUG}`]?.enabled).toBe(false)
+  })
+
+  test('follows every revocation page before the list counts as complete', async () => {
+    const { client, requests } = pagedCatalogClient([
+      {
+        items: [{ slug: 'alpha', version: '1.0.0', reason: '第一页', revokedAt: NOW, actor: 'admin-hash' }],
+        nextCursor: 'page-two',
+      },
+      {
+        items: [
+          { slug: 'bravo', version: '1.0.0', reason: '第二页', revokedAt: NOW },
+          { slug: 'charlie', version: '1.0.0', reason: '第二页', revokedAt: NOW },
+        ],
+      },
+    ])
+
+    await expect(client.getRevocations()).resolves.toEqual([
+      { slug: 'alpha', version: '1.0.0', reason: '第一页', revokedAt: NOW },
+      { slug: 'bravo', version: '1.0.0', reason: '第二页', revokedAt: NOW },
+      { slug: 'charlie', version: '1.0.0', reason: '第二页', revokedAt: NOW },
+    ])
+    // One page per cursor round trip, never a single unpaginated request.
+    expect(requests).toHaveLength(2)
+    expect(requests[0]).toContain('limit=200')
+    expect(requests[0]).not.toContain('cursor=')
+    expect(requests[1]).toContain(`cursor=${encodeURIComponent('page-two')}`)
+  })
+
+  test('rejects any malformed revocation item instead of truncating the list', async () => {
+    const malformed = [
+      // Missing field.
+      { slug: 'missing-field', version: '1.0.0', reason: 'x' },
+      // Wrong type.
+      { slug: 'wrong-type', version: 1, reason: 'x', revokedAt: NOW },
+      // Empty required string.
+      { slug: 'empty-reason', version: '1.0.0', reason: '', revokedAt: NOW },
+      { slug: '', version: '1.0.0', reason: 'x', revokedAt: NOW },
+      // Not an object at all.
+      'not-a-revocation',
+    ]
+    for (const item of malformed) {
+      const { client } = pagedCatalogClient([{ items: [item] }])
+      await expect(client.getRevocations()).rejects.toThrow('目录响应格式错误')
+    }
+  })
+
+  test('rejects a server that never stops paginating', async () => {
+    // Same page every time: the client must stop at its page bound instead of
+    // looping forever (an unbounded refresh would hang the startup path).
+    const { client, requests } = pagedCatalogClient([
+      {
+        items: [{ slug: 'alpha', version: '1.0.0', reason: '永远下一页', revokedAt: NOW }],
+        nextCursor: 'always-more',
+      },
+    ])
+    await expect(client.getRevocations()).rejects.toThrow('撤销列表分页超过上限')
+    expect(requests).toHaveLength(500)
+  })
+
+  test('keeps the previous revocation cache when any page is malformed', async () => {
+    installEnabledCatalogPackage()
+    // A successful refresh establishes the bytes this test protects.
+    const first = catalogSecurity(
+      fakeCatalogClient({ getRevocations: async () => [revocation(SLUG, '1.0.0', '首次成功')] }),
+    )
+    expect(await first.refreshRevocations()).toEqual({})
+    const cachePath = agentCatalogRevocationsPath(root)
+    const cacheBefore = readFileSync(cachePath)
+
+    // Page 1 is valid and carries a cursor; the client must follow it and hit
+    // the malformed second page, which rejects the whole refresh.
+    const { client } = pagedCatalogClient([
+      {
+        items: [{ slug: 'delta', version: '1.0.0', reason: '第一页', revokedAt: NOW }],
+        nextCursor: 'next-page',
+      },
+      { items: [{ slug: 'x', version: 1, reason: '坏条目', revokedAt: NOW }] },
+    ])
+    configureCatalogBinding(client)
+    const second = createAgentCatalogSecurity({
+      profileDir: root,
+      registry: createAgentPackageActiveTurnRegistry(),
+    })
+    const result = await second.refreshRevocations()
+
+    expect(result.warning ?? '').toMatch(/撤销列表刷新失败/)
+    expect(result.warning ?? '').toMatch(/目录响应格式错误/)
+    // Fail closed: the cache bytes are untouched and the earlier revocation
+    // still blocks the installed version.
+    expect(readFileSync(cachePath).equals(cacheBefore)).toBe(true)
+    const state = readAgentPackageState(root)[`catalog:${SLUG}`]
+    expect(state?.enabled).toBe(false)
+    expect(state?.revoked?.reason).toBe('首次成功')
+    await expect(second.assertRunnable(SLUG, '1.0.0')).rejects.toThrow(/首次成功/)
   })
 
   test('a corrupt cache is backed up with a warning instead of being treated as empty', async () => {

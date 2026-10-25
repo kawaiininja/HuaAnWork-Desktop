@@ -199,9 +199,14 @@ export interface RevocationListEntry {
   readonly revokedAt: string
 }
 
-/** `GET /v1/agent-packages/revocations`. */
+/** `GET /v1/agent-packages/revocations` (one page). */
 export interface RevocationListBody {
   readonly items: RevocationListEntry[]
+  /**
+   * The `(revokedAt, slug, version)` tuple of the last item on this page, when
+   * more records follow. Absent on the final page.
+   */
+  readonly nextCursor?: string
 }
 
 export interface CatalogState {

@@ -30,6 +30,16 @@ export const AGENT_CATALOG_UNREACHABLE_ERROR = '目录不可达，请稍后重�
 export const DEFAULT_CATALOG_REQUEST_TIMEOUT_MS = 5_000
 export const MAX_CATALOG_JSON_BYTES = 1024 * 1024
 
+/**
+ * 撤销列表分页(I-6)。单页 200 条与服务端上限一致;500 页(x 200)足以覆盖
+ * 任何有意义的目录规模,同时给一个永远返回游标的坏服务端一个硬止损。
+ *
+ * 客户端必须追平所有页才算刷新成功:截断的列表会把「本页之后已被撤销的
+ * 版本」当成未撤销,这是安全通道不允许的。
+ */
+const REVOCATION_PAGE_LIMIT = 200
+const MAX_REVOCATION_PAGES = 500
+
 export type AgentCatalogSettings = Pick<
   AppSettings,
   'agents_host' | 'agents_port' | 'agents_catalog_token' | 'agents_catalog_publish_token'
@@ -235,12 +245,25 @@ export function createAgentCatalogClient(options: CreateAgentCatalogClientOption
 
     async getRevocations() {
       const { rootUrl, settings } = await catalogRoot()
-      const { body } = await requestJson(
-        `${rootUrl}/v1/agent-packages/revocations`,
-        optionalToken(settings.agents_catalog_token),
-        { method: 'GET' },
-      )
-      return normalizeRevocations(body)
+      const token = optionalToken(settings.agents_catalog_token)
+      const all: AgentPackageRevocation[] = []
+      let cursor: string | undefined
+      for (let page = 0; page < MAX_REVOCATION_PAGES; page += 1) {
+        const query = new URLSearchParams({ limit: String(REVOCATION_PAGE_LIMIT) })
+        if (cursor !== undefined) query.set('cursor', cursor)
+        const { body } = await requestJson(
+          `${rootUrl}/v1/agent-packages/revocations?${query.toString()}`,
+          token,
+          { method: 'GET' },
+        )
+        // Any malformed item rejects the whole page (and therefore the whole
+        // refresh): a truncated list would report revoked versions as live.
+        const { items, nextCursor } = normalizeRevocationsPage(body)
+        all.push(...items)
+        cursor = nextCursor
+        if (cursor === undefined) return all
+      }
+      throw new AgentCatalogClientError('撤销列表分页超过上限', 'invalid-response')
     },
 
     async submit(bundle) {
@@ -710,13 +733,38 @@ function normalizeDelistRequest(raw: unknown, slug: string, version: string): Ag
   }
 }
 
+/**
+ * 一页撤销列表:`items` 与可选的非空 `nextCursor`。
+ *
+ * 任一条目畸形都让整页 reject —— 绝不 `continue` 跳过:跳过一条等于把一个
+ * 已撤销版本当成未撤销放行(I-12)。
+ */
+function normalizeRevocationsPage(body: unknown): {
+  items: AgentPackageRevocation[]
+  nextCursor?: string
+} {
+  if (!isRecord(body) || !Array.isArray(body.items)) {
+    throw new AgentCatalogClientError('目录响应缺少 items 列表', 'invalid-response')
+  }
+  const nextCursor = body.nextCursor
+  if (nextCursor !== undefined && (typeof nextCursor !== 'string' || nextCursor.length === 0)) {
+    throw new AgentCatalogClientError('目录响应格式错误', 'invalid-response')
+  }
+  return {
+    items: normalizeRevocations(body),
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  }
+}
+
 function normalizeRevocations(body: unknown): AgentPackageRevocation[] {
   if (!isRecord(body) || !Array.isArray(body.items)) {
     throw new AgentCatalogClientError('目录响应缺少 items 列表', 'invalid-response')
   }
   const items: AgentPackageRevocation[] = []
   for (const raw of body.items) {
-    if (!isRecord(raw)) continue
+    if (!isRecord(raw)) {
+      throw new AgentCatalogClientError('目录响应格式错误', 'invalid-response')
+    }
     const { slug, version, reason, revokedAt } = raw
     if (
       typeof slug !== 'string' ||
@@ -728,7 +776,7 @@ function normalizeRevocations(body: unknown): AgentPackageRevocation[] {
       typeof revokedAt !== 'string' ||
       revokedAt.length === 0
     ) {
-      continue
+      throw new AgentCatalogClientError('目录响应格式错误', 'invalid-response')
     }
     // 服务端 `actor` 只用于审计,不进入桌面状态。
     items.push({ slug, version, reason, revokedAt })
