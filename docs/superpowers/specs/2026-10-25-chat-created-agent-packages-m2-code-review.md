@@ -349,7 +349,7 @@ BLOCKED**，§五的跨机器项保持未勾选，不得宣布 M2 收口。最�
 
 - [x] I-1～I-19 全部勾选，且每项都有代码、测试和复核证据；I-20 有 R-M2-3 延后裁定与触发条件。
 - [x] M-1～M-7 全部修复，或具有明确的延后裁定、原因和触发条件；无静默残余。
-- [ ] 对整改后的新 HEAD 再做一次独立实现评审，无未处置的 Critical/Important。**未执行**：Task 14 只做范围裁定与门槛复核；M2 收口前必须补一次独立评审。
+- [x] 对整改后的新 HEAD 再做一次独立实现评审，无未处置的 Critical/Important。**已完成（2026-10-25，最终全分支评审）**：0 Critical、2 Important（sidecar latch、audit intent rotation）已由 final fix wave `b2821f27f7`/`68580abfca` 修复并经 scoped re-review 确认；7 项 Minor 按 R-FINAL-1～7 延后并记录触发条件。
 - [x] `corepack yarn test` 通过（exit 0，15 个 workspace 全绿；见范围裁定附录 A）。
 - [x] `corepack yarn typecheck` 通过（exit 0）。
 - [x] `corepack yarn check:desktop-variants` 通过，白名单与裁定一致（7/65/6）。
