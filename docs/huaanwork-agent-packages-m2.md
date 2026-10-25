@@ -180,8 +180,9 @@ node --experimental-strip-types agent-catalog-admin/src/cli.ts revoke <slug> <ve
   **关闭**，需要用户启用。
 - 更新只向上；低于已安装版本按降级拒绝；目录最新版本已下架/撤销时不下载。
 - 更新与移除在改名之前先中止该 slug 的在途回合。
-- 已安装副本在每次 `@slug` 运行前都会从磁盘重新验签并检查撤销列表，失败统一报
-  `包校验失败，未安装或未运行。请联系管理员`。
+- 已安装副本在每次 `@slug` 运行前都会从磁盘重新验签并检查撤销列表，两类失败文案不同：
+  **签名或 digest 失败**报 `包校验失败，未安装或未运行。请联系管理员`；**命中撤销列表**
+  报 `该版本已被管理员撤销：<原因>`。
 - 已安装包的发布状态按**精确 metadata**刷新：下架写 `publishStatus:'delisted'`，撤销交给
   撤销应用写 `enabled:false` + `revoked`。不会因为列表里消失就推断下架。
 
@@ -205,7 +206,8 @@ node --experimental-strip-types agent-catalog-admin/src/cli.ts revoke <slug> <ve
   `500 audit-write-failed`，写请求不会在无审计记录的情况下成功。
 - 字段：`timestamp / action / outcome / status / actor / slug? / version? / submissionId? /
   delistRequestId? / reason?`。`actor` 只是 token 的 SHA-256 前 12 位，不存 token；自由文本
-  中的三个 token 与 PEM 私钥块会被替换成 `[REDACTED]`。
+  中的三个 token 被替换成 `[REDACTED]`，PEM 私钥块（含未终止的块）被替换成
+  `[REDACTED PRIVATE KEY]`。
 - **增长**：每次追加都是「读旧文件 → 追加一行 → 写临时文件 → fsync → rename」，因此单次
   写入成本随文件大小线性增长。它适合按周/按月人工归档，不适合长期不轮换的大文件。
 - **增长监控**（运营方自建，服务本身不报警）：定期记录 `audit.jsonl` 字节数与行数，同时

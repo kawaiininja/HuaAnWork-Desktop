@@ -555,4 +555,3 @@ describe("mineCards with installed catalog packages", () => {
     assert.equal(cards[2]?.revoked?.reason, "后门");
   });
 });
-

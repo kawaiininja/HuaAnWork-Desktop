@@ -1055,20 +1055,27 @@ async function runProbe({ dirs, catalog, tokens, keyring, fields, steps, negativ
     cardBroken: revokedCard.broken.reason,
   }
 
-  // 11. A revoked version is refused at install too (1.0.0 is the latest
-  // published version by now, so this specifically exercises the revocation).
+  // 11. A delisted version is refused at install too. 1.0.1 is delisted here,
+  // so the catalog no longer offers it as the latest version and the client
+  // rejects with catalog absence. This proves the distribution surface, not
+  // the revocation-specific refusal: with 1.0.1 delisted the install path never
+  // reaches the revocation check. The precise install-time revocation error
+  // (`该版本已被管理员撤销：<原因>`) is pinned by the integration test named in
+  // `coveredBy` below.
   configureConsumer(dirs.thirdProfile, catalog.port, tokens)
-  let revokedInstallError = null
+  let delistedInstallError = null
   try {
     await installCatalogAgentPackage(SLUG, SECOND_VERSION)
   } catch (error) {
-    revokedInstallError = errorText(error)
+    delistedInstallError = errorText(error)
   }
-  negatives.revokedVersionInstall = {
-    error: revokedInstallError,
-    ok: revokedInstallError !== null && (revokedInstallError.includes('撤销') || revokedInstallError.includes('目录中没有版本')),
+  negatives.delistedVersionInstall = {
+    error: delistedInstallError,
+    ok: delistedInstallError !== null && delistedInstallError.includes('目录中没有版本'),
+    coveredBy:
+      'dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts:602 「rejects a revoked version and reports the administrator reason」',
   }
-  if (!negatives.revokedVersionInstall.ok) throw new Error('a revoked version was not refused at install')
+  if (!negatives.delistedVersionInstall.ok) throw new Error('a delisted version was not refused at install')
 
   negatives.coveredByIntegrationTests = {
     unsignedOrSignatureCarryingBundle: 'packages/agent-package-format/tests/bundle.test.ts',
