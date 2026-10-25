@@ -14,8 +14,10 @@ import { registerHuaanworkRoutes } from './routes.ts'
 import { sweepProjectLegacySessionsOncePerProcess } from './session-sweep.ts'
 import { restoreEnabledBundledSkills } from './skills-host.ts'
 import { createAgentsHost } from './agents-host.ts'
-import { setAgentPackageHost, setAgentsDirectory } from './sessions.ts'
-import { createAgentPackageHost } from './agent-package/host.ts'
+import { setAgentPackageActiveTurns, setAgentPackageHost, setAgentsDirectory } from './sessions.ts'
+import { createAgentCatalogSecurity } from './agent-package/catalog-security.ts'
+import { recoverCatalogPackageInstalls } from './agent-package/catalog-install.ts'
+import { createAgentPackageActiveTurnRegistry, createAgentPackageHost } from './agent-package/host.ts'
 import {
   configureAgentCatalog,
   readCachedCatalogPackageSlugs,
@@ -127,6 +129,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   let syncHostToolDescription: (() => void) | undefined
   // M2(Task 8):发布/安装共用同一个目录绑定。profileDir、settings 读取、client、
   // logger 与 changed 事件都从这里进入;Task 9/10 复用同一单例,不再各自接线。
+  // Task 10 启动顺序:恢复广场交易 → 唯一的在途回合登记表 → 目录绑定 →
+  // 安全面(keyring + 缓存撤销应用)→ 异步刷新 → 注入 host/sessions。
+  recoverCatalogPackageInstalls(config.profileDir)
+  const agentPackageTurns = createAgentPackageActiveTurnRegistry()
   const catalogClient = configureAgentCatalog({
     profileDir: config.profileDir,
     readSettings: () => readHuaanworkSettingsSync(config.profileDir),
@@ -136,6 +142,27 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     },
   })
   ctx.huaanworkAgentCatalogClient = catalogClient
+  // 运行前安全面:keyring 缺失/非法只让 catalog 包 fail closed;缓存的撤销在构造
+  // 后立刻应用(启动时还没有在途回合),随后异步刷新一次并保留失败告警。
+  const agentCatalogSecurity = createAgentCatalogSecurity({
+    profileDir: config.profileDir,
+    registry: agentPackageTurns,
+  })
+  ctx.huaanworkAgentCatalogSecurity = agentCatalogSecurity
+  const cachedRevocations = agentCatalogSecurity.loadCachedRevocations()
+  if (cachedRevocations.warning !== undefined) {
+    routeCtx.logger(`[agent-catalog] ${cachedRevocations.warning}`)
+  }
+  void agentCatalogSecurity
+    .refreshRevocations()
+    .then((result) => {
+      if (result.warning !== undefined) routeCtx.logger(`[agent-catalog] ${result.warning}`)
+    })
+    .catch((cause: unknown) => {
+      routeCtx.logger(
+        `[agent-catalog] 撤销列表刷新失败:${cause instanceof Error ? cause.message : String(cause)}`,
+      )
+    })
   // 启动时后台拉一次签名广场缓存;失败只记日志并保留旧缓存,不阻塞 boot。
   void refreshCatalogPackageCache()
     .then((result) => {
@@ -179,8 +206,12 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     // 包列表/详情/可调用列表与启停路由经同一目录实例合并 legacy 条目。
     legacy: () => agentsHost,
     registry: agentPackageRegistry,
+    // Task 10:撤销/取消与 catalog-security、sessions 共用同一在途回合登记表。
+    activeTurns: agentPackageTurns,
+    security: agentCatalogSecurity,
   })
   setAgentPackageHost(agentPackageHost)
+  setAgentPackageActiveTurns(agentPackageTurns)
   ctx.huaanworkAgentPackageHost = agentPackageHost
   // call_host_tool 注册接线(P1 修复):旧 sidecar 的生产调用在桌面移植时遗失,
   // @点名 HTTP 小工具链路因此断裂。工具全局注册单实例,执行边界在 policy 的会话
@@ -221,8 +252,12 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           unregisterRuntimeTools()
           unregisterPackageTools()
           unregister?.()
-          // 插件卸载(应用退出/热替换)时杀掉所有包进程;afterIdle 只管单轮。
-          void stopAllAgentPackageProcesses()
+          // 插件卸载(应用退出/热替换):先取消在途包回合(释放 activation 并停
+          // runtime),再杀掉所有包进程;afterIdle 只管单轮。
+          void (async () => {
+            await agentPackageTurns.cancelAll('dispose')
+            await stopAllAgentPackageProcesses()
+          })()
         }
       }, 'huaanwork: host and creation tools registration')
     },

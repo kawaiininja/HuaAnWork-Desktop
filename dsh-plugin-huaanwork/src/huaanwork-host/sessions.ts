@@ -16,6 +16,7 @@ import {
   noteCreationTurn,
 } from './agent-package/creation.ts'
 import { isAgentCancelText } from './agent-package/drafts.ts'
+import type { AgentPackageActiveTurnRegistry } from './agent-package/host.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { invokeSkillText } from './skill-invoke.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
@@ -305,6 +306,12 @@ function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params:
   }
   primary?.cancel?.({ kind: 'user' })
   releaseRouteInput(sessionId)
+  // Task 10:包回合的占位(pendingTurns)只在 record.cancel 的 cleanup 里释放,
+  // 只等 agent 的 idle 会让同一会话一直无法开始新回合。这里同步发起取消
+  // (record.cancel 会立刻 abort 并开始 dispose),不阻塞路由应答。
+  if (agentPackageActiveTurns !== undefined) {
+    void agentPackageActiveTurns.cancelBySessionId(sessionId, 'cancel').catch(() => undefined)
+  }
   return { accepted: true }
 }
 
@@ -531,6 +538,17 @@ export function getAgentsDirectory(): AgentsHost {
  * 这里按 `setAgentsDirectory` 的同一模式转出公开入口。
  */
 export { getAgentPackageHost, setAgentPackageHost } from './agent-package/creation.ts'
+
+/**
+ * 在途包回合登记表(Task 10)。与 host、catalog-security 共用同一实例,
+ * `session.cancel` 必须走它才能连同 `pendingTurns` 占位一起释放。
+ */
+let agentPackageActiveTurns: AgentPackageActiveTurnRegistry | undefined
+
+/** index 在创建 host 之后注入;测试可直接换入自己的实例。 */
+export function setAgentPackageActiveTurns(registry: AgentPackageActiveTurnRegistry | undefined): void {
+  agentPackageActiveTurns = registry
+}
 
 // 审批归因在 automations-host.ingestAutomationEvent(approval/asked 的 sessionId → runId)。
 // sendToAgent 不调用 assertSessionSendable:用户 session.send/cancel 在 handler 上把关,

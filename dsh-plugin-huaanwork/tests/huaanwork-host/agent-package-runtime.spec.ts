@@ -12,6 +12,7 @@ import {
   emptyAttachments,
 } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import {
+  AGENT_PACKAGE_START_CANCELLED,
   composeAgentPackagePersona,
   composeAgentPackageToolAllowList,
   createAgentPackageRuntimeRegistry,
@@ -583,6 +584,22 @@ describe('agent package skill script lifecycle', () => {
     throw new Error(`process ${pid} is still alive`)
   }
 
+  test('an already-aborted caller signal does not spawn the script', { timeout: 20_000 }, async () => {
+    const { packageDir, workspaceRoot } = copyFixtureWithHang()
+    const { runtime } = await startFixture({ manifest: manifestWithMode('none'), packageDir, workspaceRoot })
+    try {
+      const controller = new AbortController()
+      controller.abort()
+      const result = await runtime.runSkillScript('skill/scripts/hang.mjs', {}, controller.signal)
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('已取消')
+      // 未 spawn:脚本连自己的 pid 文件都不会写。
+      expect(existsSync(join(workspaceRoot, 'hang-pid.txt'))).toBe(false)
+    } finally {
+      await stopAgentPackageProcesses(runtime)
+    }
+  })
+
   test('aborting the caller signal kills the running script', { timeout: 20_000 }, async () => {
     const { packageDir, workspaceRoot } = copyFixtureWithHang()
     const { runtime } = await startFixture({ manifest: manifestWithMode('none'), packageDir, workspaceRoot })
@@ -875,6 +892,64 @@ describe('agent package turn cleanup', () => {
     await expect(
       host.dispatch({ ctx: {} as never, sessionId: 'parent-session', pkg: pkg!, remainder: '写周报' }),
     ).rejects.toThrow(/已损坏.*tools\/http\/server\.mjs 缺失/)
+  })
+})
+
+describe('agent package start cancellation', () => {
+  test('refuses to spawn any process when the start signal is already aborted', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    let confineCalls = 0
+    const sandbox: AgentPackageSandbox = {
+      async confine(argv) {
+        confineCalls += 1
+        return { argv, enforcement: 'full' }
+      },
+    }
+    const workspaceRoot = makeRoot('agent-package-ws-')
+    await expect(
+      startAgentPackageProcesses({
+        manifest: manifestWithMode('http'),
+        packageDir: FIXTURE_DIR,
+        workspaceRoot,
+        getSandbox: () => sandbox,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(AGENT_PACKAGE_START_CANCELLED)
+    expect(confineCalls).toBe(0)
+    expect(existsSync(join(workspaceRoot, 'http-port.txt'))).toBe(false)
+  })
+
+  test('aborting while the sandbox prepares the spawn prevents the child process', { timeout: 20_000 }, async () => {
+    const controller = new AbortController()
+    let confineStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      confineStarted = resolve
+    })
+    let releaseConfine = (): void => undefined
+    const confined = new Promise<void>((resolve) => {
+      releaseConfine = resolve
+    })
+    const sandbox: AgentPackageSandbox = {
+      async confine(argv) {
+        confineStarted()
+        await confined
+        return { argv, enforcement: 'full' }
+      },
+    }
+    const workspaceRoot = makeRoot('agent-package-ws-')
+    const starting = startAgentPackageProcesses({
+      manifest: manifestWithMode('http'),
+      packageDir: FIXTURE_DIR,
+      workspaceRoot,
+      getSandbox: () => sandbox,
+      signal: controller.signal,
+    })
+    await started
+    controller.abort()
+    releaseConfine()
+    await expect(starting).rejects.toThrow(AGENT_PACKAGE_START_CANCELLED)
+    expect(existsSync(join(workspaceRoot, 'http-port.txt'))).toBe(false)
   })
 })
 
