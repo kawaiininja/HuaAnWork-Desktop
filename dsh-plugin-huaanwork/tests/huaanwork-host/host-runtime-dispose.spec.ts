@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 
 import {
   createAgentPackageRuntimeDisposer,
+  disposeAgentPackageHostRuntime,
   disposeAgentPackageRuntime,
 } from '../../src/huaanwork-host/index.ts'
 import {
@@ -137,5 +138,105 @@ describe('host runtime disposal', () => {
     releaseStop()
     await disposing
     expect(resolved).toBe(true)
+  })
+
+  /**
+   * 最终评审 Critical 回归:effect cleanup 必须**直接发起**收尾。
+   *
+   * `ctx.effect` 的 cleanup 返回值被 Cordis 当作 disposer 保存。旧实现
+   * `return createAgentPackageRuntimeDisposer(agentPackageTurns)` 返回的是工厂造出的
+   * **函数**,Cordis 只把它存起来、永远不会调用 ⇒ `cancelAll('dispose')` 与
+   * `stopAllAgentPackageProcesses()` 在应用退出/热替换时从不执行。
+   *
+   * 这里走 index.ts 里 effect cleanup 实际调用的同一表达式
+   * (`disposeAgentPackageHostRuntime`),而不是直接调工厂。
+   */
+  test('the effect cleanup entry point starts the teardown instead of returning a function', async () => {
+    const profileDir = installLocalPackage()
+    const turns = createAgentPackageActiveTurnRegistry()
+    const order: string[] = []
+    const stopped: string[] = []
+    let releaseStop: () => void = () => undefined
+    const stopGate = new Promise<void>((resolve) => {
+      releaseStop = resolve
+    })
+    let releaseDispose: () => void = () => undefined
+    const disposeGate = new Promise<void>((resolve) => {
+      releaseDispose = resolve
+    })
+
+    const host = createAgentPackageHost({
+      profileDir,
+      takenSlugs: () => [],
+      activeTurns: turns,
+      createRuntime: async (options): Promise<AgentPackageTurnRuntime> => ({
+        slug: options.manifest.slug,
+        packageDir: options.packageDir,
+        workspaceRoot: options.workspaceRoot,
+        skillScripts: [],
+        runSkillScript: async () => ({ text: '' }),
+      }),
+      stopRuntime: async (runtime) => {
+        stopped.push(runtime.slug)
+      },
+    })
+
+    const pkg = await host.findInvocable('weekly-report')
+    expect(pkg?.broken).toBeUndefined()
+    const dispatched = await host.dispatch({
+      ctx: {
+        huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        subagents: {
+          startActivation: async () => ({
+            childId: 'child',
+            result: new Promise(() => undefined),
+            dispose: async () => {
+              order.push('dispose')
+              // 回合收尾故意拖住:证明 kill 路径不是在 cancelAll 结算之后才启动。
+              await disposeGate
+            },
+          }),
+        },
+      } as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写一份周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+
+    // 回归形状对照:工厂返回的是一个函数(旧 cleanup 的返回值),不是 promise。
+    const factoryShaped = createAgentPackageRuntimeDisposer(turns)
+    expect(typeof factoryShaped).toBe('function')
+    expect(factoryShaped).not.toBeInstanceOf(Promise)
+
+    // effect cleanup 实际执行的表达式;返回值必须是收尾 promise。
+    const cleanup = disposeAgentPackageHostRuntime(turns, () => {
+      order.push('stop-kick')
+      return stopGate
+    })
+    expect(cleanup).toBeInstanceOf(Promise)
+
+    // kill 路径在本次 tick 内同步启动:回合的取消收尾还没跑完,它已经发出。
+    expect(order[0]).toBe('stop-kick')
+
+    let settled = false
+    void cleanup.then(() => {
+      settled = true
+    })
+    // stop-all 未结算 ⇒ 整条收尾不 resolve。
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(settled).toBe(false)
+    releaseStop()
+    // 回合收尾仍未结算 ⇒ 继续等 cancelAll,不是「kill 完就 return」。
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(settled).toBe(false)
+    releaseDispose()
+    await cleanup
+
+    // 收尾完成后:kill 先发、回合与 runtime 都停、没有留下运行中的回合。
+    expect(order).toEqual(['stop-kick', 'dispose'])
+    expect(stopped).toEqual(['weekly-report'])
+    await dispatched.afterIdle()
+    await expect(turns.cancelAll('dispose')).resolves.toBeUndefined()
   })
 })

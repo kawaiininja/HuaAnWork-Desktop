@@ -99,6 +99,22 @@ export function createAgentPackageRuntimeDisposer(
   return () => disposeAgentPackageRuntime(activeTurns, stopAll)
 }
 
+/**
+ * effect cleanup 实际调用的收尾入口(最终评审 Critical 回归修复)。
+ *
+ * `ctx.effect` 的 cleanup 返回值会被 Cordis 当成 disposer **保存**;返回
+ * `createAgentPackageRuntimeDisposer(...)`(一个函数)等于把收尾本身又包了一层
+ * 函数,Cordis 不会调用它 ⇒ `cancelAll('dispose')` 与
+ * `stopAllAgentPackageProcesses()` 在应用退出/热替换时从不执行。
+ * 因此这里必须**直接发起**收尾并返回 promise。
+ */
+export function disposeAgentPackageHostRuntime(
+  activeTurns: AgentPackageActiveTurnRegistry,
+  stopAll?: () => Promise<void>,
+): Promise<void> {
+  return disposeAgentPackageRuntime(activeTurns, stopAll)
+}
+
 export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<void> {
   ctx.huaanworkCheckpointUserDataDir = config.checkpointUserDataDir ?? ''
   // generation 重启防循环:组合期已消费 pendingRoot,首个 effect 立即清除——
@@ -295,9 +311,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           unregisterPackageTools()
           unregister?.()
           // 插件卸载(应用退出/热替换):先同步启动进程 kill 路径,再取消在途包
-          // 回合(释放 activation 并停 runtime),最后等 kill 结算。disposer 返回
-          // promise,Cordis 在卸载时等待整条收尾(最终评审 I2)。
-          return createAgentPackageRuntimeDisposer(agentPackageTurns)
+          // 回合(释放 activation 并停 runtime),最后等 kill 结算。这里必须
+          // **直接调用**收尾并返回 promise——返回工厂函数会被 Cordis 当作
+          // disposer 保存而不执行,收尾永远不会跑(最终评审 Critical 回归)。
+          return disposeAgentPackageHostRuntime(agentPackageTurns)
         }
       }, 'huaanwork: host and creation tools registration')
     },
