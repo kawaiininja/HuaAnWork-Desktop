@@ -26,9 +26,11 @@ export const MAX_AGENT_PACKAGE_BUNDLE_BYTES = 5 * 1024 * 1024
  * 解压后归档总量上限:内容预算 + 每条 512 字节头与最多 511 字节填充 + 两个 EOF 块。
  *
  * 这是内容预算之外唯一允许出现的字节;超过它就意味着文件内容必然顶破
- * {@link MAX_AGENT_PACKAGE_BUNDLE_BYTES},因此共用同一句错误文案。它同时兜住
- * 了不进入 `onentry` 的 body:目录头声明的 body(node-tar 会把目录 size 归零,
- * 那些字节被当作后续块读掉)、PAX/global 扩展头,以及 tar 未知类型的条目。
+ * {@link MAX_AGENT_PACKAGE_BUNDLE_BYTES},因此共用同一句错误文案。meter 兜住
+ * tar 仍会读取、却不进入 `onentry` 的 body:目录头声明的 body(node-tar 会把
+ * 目录 size 归零,那些字节被当作后续块读掉)与门限内的 PAX/global 扩展头。
+ * 超帽的 meta 条目与 tar 未知类型在 `ignoredEntry` 上即 fail-closed(该事件先于
+ * body 读取发出),body 字节不会被 meter 计数。
  *
  * PAX 头与条目头共用这份按条目计的余量:路径全部顶到 512 字节、内容又顶到
  * 5 MiB 的病态包会被保守地判超帽,普通包(两条头之和不到 2 KiB/条)不受影响。
@@ -40,7 +42,8 @@ const MAX_AGENT_PACKAGE_UNPACKED_BYTES =
  * 单个 PAX/global 扩展头正文上限。
  *
  * 门限内的 meta 正文会整块进内存;包的路径上限是 512 字节,PAX 头所需远小于
- * 64 KiB。超过门限的 meta 条目被 tar 丢弃,其 body 仍由解压总量 meter 计数。
+ * 64 KiB。超过门限的 meta 条目在 `ignoredEntry` 上即被拒绝(该事件先于 body
+ * 读取发出),因此不靠解压总量 meter 计数。
  */
 const MAX_AGENT_PACKAGE_META_BYTES = 64 * 1024
 
@@ -265,9 +268,10 @@ function normalizeBuildFiles(
  * 流式解包到内存。
  *
  * 解压由本模块自己完成:gzip 输出先过一道计量 `Transform`,解压总量超过
- * {@link MAX_AGENT_PACKAGE_UNPACKED_BYTES} 立刻中止。这道计量兜住了所有不会
- * 经过 `onentry` 的字节(目录头声明的 body、PAX/global 扩展头、tar 未知类型),
- * 因为 tar 只把 File/Directory 送进 `onentry`,而目录头的 size 会被 tar 归零。
+ * {@link MAX_AGENT_PACKAGE_UNPACKED_BYTES} 立刻中止。这道计量兜住 tar 仍会读取、
+ * 却不进 `onentry` 的字节(目录头声明的 body 与门限内的 PAX/global 扩展头),
+ * 因为 tar 只把 File/Directory 送进 `onentry`,而目录头的 size 会被 tar 归零;
+ * 超帽 meta 与未知类型在 `ignoredEntry` 上已先行拒绝,到不了计量。
  *
  * 计量同时检查解压后首个字节的压缩魔数:node-tar 无视 `gzip:false`,遇到
  * {@link NESTED_COMPRESSION_MAGIC} 会再解压一层,那层解压绕过计量,必须提前拒绝。
