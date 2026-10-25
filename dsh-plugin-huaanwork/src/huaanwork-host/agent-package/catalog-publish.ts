@@ -1,11 +1,23 @@
-import { buildUnsignedAgentPackageBundle } from '@huaanwork/agent-package-format/bundle'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+
+import {
+  buildUnsignedAgentPackageBundle,
+  inspectUnsignedAgentPackageBundle,
+} from '@huaanwork/agent-package-format/bundle'
 import { readUnsignedPackageFiles } from '@huaanwork/agent-package-format/digest'
+import { canonicalJson } from '@huaanwork/catalog-signing'
 
 import {
   AGENT_CATALOG_AUTH_ERROR,
   getAgentCatalogBinding,
+  type AgentCatalogBinding,
   type AgentCatalogSettings,
+  type AgentPackageSubmission,
+  type AgentPackageSubmissionStatus,
 } from './catalog-client.ts'
+import { agentPackagePublishLock } from './publish-lock.ts'
 import {
   agentPackageDir,
   lookupAgentPackageState,
@@ -75,6 +87,11 @@ export type LocalAgentPackagePublication = {
   submissionId?: string
   reviewReason?: string
   delistRequestId?: string
+  /**
+   * 对账未能完成的非致命原因(例如 sidecar 中的提交暂时查不到)。调用方可以
+   * 照常使用其余字段;缺席表示本次刷新没有额外告警。
+   */
+  warning?: string
 }
 
 /** `requestLocalAgentPackageDelist` 的结果;服务端的 request id。 */
@@ -83,14 +100,134 @@ export type LocalAgentPackageDelistResult = {
 }
 
 /**
+ * 一条「已发出、本地尚未确认」的提交(Task 10 / I-15)。
+ *
+ * 键是 slug。`submissionId` 在两种情形下缺席:POST 已发出但响应丢失(201 lost),
+ * 或响应已到但写它之前崩溃。只要 `idempotencyKey` 在,下一次提交带同一个键
+ * 就能从服务端拿回原记录。
+ */
+type PendingSubmission = {
+  submissionId?: string
+  version: string
+  digestSha256: string
+  idempotencyKey: string
+  createdAt: string
+}
+
+const PENDING_SUBMISSIONS_FILE = 'agent-catalog-pending-submissions.json'
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+
+function pendingSubmissionsPath(profileDir: string): string {
+  return join(profileDir, PENDING_SUBMISSIONS_FILE)
+}
+
+/** 缺失/损坏按空表处理:sidecar 只是恢复线索,不是权威状态。 */
+function readPendingSubmissions(profileDir: string): Record<string, PendingSubmission> {
+  let text: string
+  try {
+    text = readFileSync(pendingSubmissionsPath(profileDir), 'utf8')
+  } catch {
+    return {}
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return {}
+  }
+  if (!isRecord(raw)) return {}
+  const entries: Record<string, PendingSubmission> = {}
+  for (const [slug, value] of Object.entries(raw)) {
+    if (!isRecord(value)) continue
+    const { submissionId, version, digestSha256, idempotencyKey, createdAt } = value
+    if (typeof version !== 'string' || version.length === 0) continue
+    if (typeof digestSha256 !== 'string' || digestSha256.length === 0) continue
+    if (typeof idempotencyKey !== 'string' || !UUID_SHAPE.test(idempotencyKey)) continue
+    if (typeof createdAt !== 'string' || createdAt.length === 0) continue
+    if (submissionId !== undefined && (typeof submissionId !== 'string' || submissionId.length === 0)) continue
+    entries[slug] = {
+      ...(submissionId === undefined ? {} : { submissionId }),
+      version,
+      digestSha256,
+      idempotencyKey,
+      createdAt,
+    }
+  }
+  return entries
+}
+
+/** tmp+rename 写入;表为空时删除文件(与写入同样保持单文件原子)。 */
+function writePendingSubmissions(
+  profileDir: string,
+  entries: Record<string, PendingSubmission>,
+): void {
+  const target = pendingSubmissionsPath(profileDir)
+  if (Object.keys(entries).length === 0) {
+    try {
+      rmSync(target, { force: true })
+    } catch {
+      // 删除失败不影响已确认的发布状态:下一次写入会覆盖它。
+    }
+    return
+  }
+  const temp = `${target}.tmp`
+  mkdirSync(dirname(target), { recursive: true })
+  try {
+    writeFileSync(temp, `${JSON.stringify(entries, null, 2)}\n`, 'utf8')
+    renameSync(temp, target)
+  } catch (error) {
+    try {
+      rmSync(temp, { force: true })
+    } catch {
+      // 尽力而为;残留的 .tmp 不影响读取。
+    }
+    throw error
+  }
+}
+
+function recordPendingSubmission(profileDir: string, slug: string, entry: PendingSubmission): void {
+  const entries = readPendingSubmissions(profileDir)
+  entries[slug] = entry
+  writePendingSubmissions(profileDir, entries)
+}
+
+/** 只清自己确认过的那条:并发写者可能已经替换了同一 slug 的线索。 */
+function clearPendingSubmission(
+  profileDir: string,
+  slug: string,
+  submissionId: string | undefined,
+): void {
+  const entries = readPendingSubmissions(profileDir)
+  const current = entries[slug]
+  if (current === undefined || current.submissionId !== submissionId) return
+  delete entries[slug]
+  try {
+    writePendingSubmissions(profileDir, entries)
+  } catch {
+    // state 已经写成;sidecar 残留只会让下一次提交走同键重放,不会丢事实。
+  }
+}
+
+/**
  * 把本地包提交审查。
  *
  * 只允许 `source:'local'`、未损坏、未处于待审查的包;先在本机生成 unsigned
  * bundle 再提交,成功后才写 `pending-review` + submissionId 并触发
  * `agent/changed`。失败不改旧状态。
+ *
+ * 幂等(Task 10 / I-15):同一 profile+slug 的 publish 与 commit 串行;提交前
+ * 把幂等键写进 sidecar,收到响应先落 submissionId 再写 state。任何一步失败
+ * 都留下可重试的线索:重试复用同一个键/ID,不会创建第二条远端 submission。
  */
 export async function publishLocalAgentPackage(slug: string): Promise<{ submissionId: string }> {
   const binding = getAgentCatalogBinding()
+  return agentPackagePublishLock.run(binding.profileDir, slug, () => publishLocalAgentPackageLocked(binding, slug))
+}
+
+async function publishLocalAgentPackageLocked(
+  binding: AgentCatalogBinding,
+  slug: string,
+): Promise<{ submissionId: string }> {
   const action = 'publish.submit'
   try {
     const detail = readAgentPackage(binding.profileDir, slug)
@@ -109,17 +246,72 @@ export async function publishLocalAgentPackage(slug: string): Promise<{ submissi
     const settings = binding.readSettings()
     requirePublishToken(settings)
 
-    // 上传最多 5 秒;期间内容可能被一次 commit 改写。先记下上传前的内容身份,
-    // 上传完成后必须仍然一致,否则旧内容的 submissionId 会落到新版本头上。
+    // 上传最多 5 秒;期间内容可能被一次 commit 改写。publish lock 已把同 slug
+    // 的 commit 挡在外面,下面的内容身份快照仍是写入前的最后一道守卫。
     const submittedVersion = detail.version
     const submittedEntry = lookup.kind === 'local' ? lookup.entry : undefined
 
     const files = readUnsignedPackageFiles(agentPackageDir(binding.profileDir, slug))
     const bundle = await buildUnsignedAgentPackageBundle(files)
-    const submission = await binding.client.submit(bundle)
-    if (submission.slug !== slug) throw new Error('目录返回的提交与本地智能体不一致')
+    // 与目录服务相同的 inspector:本地身份必须等于服务端会重算出的 digest。
+    const inspection = await inspectUnsignedAgentPackageBundle(bundle)
+    const digestSha256 = createHash('sha256')
+      .update(canonicalJson(inspection.digest), 'utf8')
+      .digest('hex')
+
+    const pending = readPendingSubmissions(binding.profileDir)[slug]
+    if (
+      pending !== undefined
+      && (pending.version !== submittedVersion || pending.digestSha256 !== digestSha256)
+    ) {
+      // 内容已变化:旧提交既不能被新内容覆盖提交,也不能被静默丢弃。
+      throw new Error(
+        `上一次提交 ${pending.submissionId ?? pending.idempotencyKey} 仍在对账，请先刷新状态`,
+      )
+    }
+
+    const idempotencyKey = pending?.idempotencyKey ?? randomUUID()
+    if (pending === undefined) {
+      // 键必须先落盘再发请求:上传与本地状态写入之间崩溃时,它是唯一的恢复句柄。
+      recordPendingSubmission(binding.profileDir, slug, {
+        version: submittedVersion,
+        digestSha256,
+        idempotencyKey,
+        createdAt: new Date().toISOString(),
+      })
+    }
+
+    let submissionId: string
+    let submissionVersion: string
+    let submissionStatus: AgentPackageSubmissionStatus
+    let submissionReason: string | undefined
+
+    if (pending?.submissionId !== undefined) {
+      // 已有远端 ID:重试先取真实状态(等待期间 admin 可能已 approve/reject)。
+      const submission = await binding.client.getSubmission(pending.submissionId)
+      if (submission.slug !== slug) throw new Error('目录返回的提交与本地智能体不一致')
+      submissionId = submission.submissionId
+      submissionVersion = submission.version
+      submissionStatus = submission.status
+      submissionReason = submission.reason
+    } else {
+      const submission = await binding.client.submit(bundle, { idempotencyKey })
+      submissionId = submission.submissionId
+      submissionVersion = submission.version
+      submissionStatus = submission.status
+      submissionReason = submission.reason
+      // 远端事实先落 sidecar,再跑任何可能拒绝本次调用的本地守卫(I-15)。
+      recordPendingSubmission(binding.profileDir, slug, {
+        submissionId,
+        version: submittedVersion,
+        digestSha256,
+        idempotencyKey,
+        createdAt: pending?.createdAt ?? new Date().toISOString(),
+      })
+      if (submission.slug !== slug) throw new Error('目录返回的提交与本地智能体不一致')
+    }
     // 服务端回显的版本必须是上传前捕获的版本;否则说明文件在上传窗口里被换过。
-    if (submission.version !== submittedVersion) throw new Error(STATE_CHANGED_ERROR)
+    if (submissionVersion !== submittedVersion) throw new Error(STATE_CHANGED_ERROR)
 
     // 写入前重新读取 state 并核对内容身份:live 条目的 installedVersion 必须仍是
     // 上传前的版本,submissionId 也必须仍是上传前的值(防止并发重复提交)。
@@ -140,25 +332,29 @@ export async function publishLocalAgentPackage(slug: string): Promise<{ submissi
       source: 'local',
       enabled: previous?.enabled ?? detail.enabled,
       installedVersion: previous?.installedVersion || submittedVersion,
-      publishStatus: 'pending-review',
-      submissionId: submission.submissionId,
-      ...(previous?.publishedVersion === undefined
-        ? {}
-        : { publishedVersion: previous.publishedVersion }),
+      ...publicationFields(
+        submissionStatus,
+        submissionId,
+        submissionVersion,
+        submissionReason,
+        previous?.publishedVersion,
+      ),
     }
     writeAgentPackageState(binding.profileDir, {
       ...latest,
       [`local:${slug}`]: next,
     })
+    // state 已确认才清线索;写失败时 sidecar 保留,重试复用同一个 ID。
+    clearPendingSubmission(binding.profileDir, slug, submissionId)
 
     logAgentPackageAction(binding.logger, action, {
       slug,
-      version: submission.version,
-      submissionId: submission.submissionId,
+      version: submissionVersion,
+      submissionId,
       outcome: 'ok',
     })
     binding.emitChanged?.(slug)
-    return { submissionId: submission.submissionId }
+    return { submissionId }
   } catch (error) {
     logAgentPackageAction(binding.logger, action, {
       slug,
@@ -169,9 +365,47 @@ export async function publishLocalAgentPackage(slug: string): Promise<{ submissi
   }
 }
 
+/** 服务端状态 → 本地发布字段;重试发现已 approve/reject 时也写真实结果。 */
+function publicationFields(
+  status: AgentPackageSubmissionStatus,
+  submissionId: string,
+  version: string,
+  reason: string | undefined,
+  previousPublishedVersion: string | undefined,
+): Pick<
+  AgentPackageStateEntry,
+  'publishStatus' | 'submissionId' | 'publishedVersion' | 'reviewReason'
+> {
+  switch (status) {
+    case 'pending-review':
+      return {
+        publishStatus: 'pending-review',
+        submissionId,
+        ...(previousPublishedVersion === undefined
+          ? {}
+          : { publishedVersion: previousPublishedVersion }),
+      }
+    case 'published':
+      return { publishStatus: 'published', submissionId, publishedVersion: version }
+    case 'rejected':
+      return {
+        publishStatus: 'rejected',
+        submissionId,
+        ...(previousPublishedVersion === undefined
+          ? {}
+          : { publishedVersion: previousPublishedVersion }),
+        ...(reason === undefined ? {} : { reviewReason: reason }),
+      }
+  }
+}
+
 /**
  * 按已保存的 submissionId 刷新审查结果,并在已发布时检查目录 metadata 是否
  * 已下架。网络失败直接抛错,state 保持原样。
+ *
+ * 同时负责 sidecar 对账(Task 10 / I-15):上一次 publish 已拿到远端 ID 但
+ * 没写成 state 时,用 `getSubmission` 把真实状态补回来;查询失败保留 sidecar
+ * 并把原因放进 `warning`,不推翻已有发布状态。
  */
 export async function refreshLocalAgentPackagePublishStatus(
   slug: string,
@@ -182,19 +416,64 @@ export async function refreshLocalAgentPackagePublishStatus(
     const lookup = lookupAgentPackageState(readAgentPackageState(binding.profileDir), slug)
     if (lookup.kind === 'corrupt') throw new Error(lookup.reason)
     if (lookup.kind === 'catalog') throw new Error('只有本地创建的智能体才有发布状态')
-    if (lookup.kind === 'none') throw new Error(`智能体 @${slug} 没有本地发布状态`)
 
     const detail = readAgentPackage(binding.profileDir, slug)
+    const pending = readPendingSubmissions(binding.profileDir)[slug]
+    if (lookup.kind === 'none' && pending === undefined) {
+      throw new Error(`智能体 @${slug} 没有本地发布状态`)
+    }
+
     const currentVersion =
-      detail !== undefined && detail.source === 'local' ? detail.version : lookup.entry.installedVersion
+      detail !== undefined && detail.source === 'local'
+        ? detail.version
+        : lookup.kind === 'local'
+          ? lookup.entry.installedVersion
+          : (pending?.version ?? '')
     // 网络等待期间本地内容可能被 commit 复位(或重新提交):记下发起刷新时的
     // 身份,最终写回前必须仍然一致。
-    const initialEntry = lookup.entry
+    const initialEntry: AgentPackageStateEntry =
+      lookup.kind === 'local'
+        ? lookup.entry
+        : {
+            source: 'local',
+            enabled: detail?.enabled ?? false,
+            installedVersion: currentVersion,
+            publishStatus: 'none',
+          }
     let next: AgentPackageStateEntry = { ...initialEntry }
 
-    if (next.submissionId !== undefined) {
-      const submission = await binding.client.getSubmission(next.submissionId)
+    // sidecar 是「远端已受理、本地未确认」的事实,优先于 state 里的旧身份。
+    const pendingId = pending?.submissionId
+    const targetId = pendingId ?? next.submissionId
+    if (targetId === undefined && pending !== undefined) {
+      // 只有幂等键、没有远端 ID(201 丢失)。刷新无法对账,保留线索并提示:
+      // 下一次提交带同一个键会拿回原记录。
+      return {
+        ...toPublication(slug, initialEntry),
+        warning: `上一次提交 ${pending.idempotencyKey} 尚未取得回执，请重新提交以恢复`,
+      }
+    }
+    if (targetId !== undefined) {
+      let submission: AgentPackageSubmission
+      try {
+        submission = await binding.client.getSubmission(targetId)
+      } catch (error) {
+        if (pendingId === undefined) throw error
+        // 对账失败保留 sidecar:它是下一次刷新/提交的唯一线索。
+        logAgentPackageAction(binding.logger, action, {
+          slug,
+          version: pending?.version ?? currentVersion,
+          submissionId: pendingId,
+          outcome: 'ok',
+          reason: 'reconcile-pending',
+        })
+        return {
+          ...toPublication(slug, initialEntry),
+          warning: `上一次提交 ${pendingId} 仍在对账：${errorMessage(error)}`,
+        }
+      }
       if (submission.slug !== slug) throw new Error('目录返回的提交与本地智能体不一致')
+      next.submissionId = submission.submissionId
       switch (submission.status) {
         case 'pending-review':
           next.publishStatus = 'pending-review'
@@ -206,7 +485,10 @@ export async function refreshLocalAgentPackagePublishStatus(
           break
         case 'published':
           next.publishStatus = 'published'
-          next.publishedVersion = currentVersion || submission.version
+          // sidecar 记录的是旧内容的一次提交:当前内容若已变化,不能把它说成
+          // 已发布,只记远端事实的版本。
+          next.publishedVersion =
+            pendingId === undefined ? currentVersion || submission.version : submission.version
           delete next.reviewReason
           break
       }
@@ -228,11 +510,15 @@ export async function refreshLocalAgentPackagePublishStatus(
 
     const state = readAgentPackageState(binding.profileDir)
     const live = lookupAgentPackageState(state, slug)
-    if (live.kind !== 'local') throw new Error(STATE_CHANGED_ERROR)
-    if (
+    if (live.kind === 'corrupt' || live.kind === 'catalog') throw new Error(STATE_CHANGED_ERROR)
+    if (live.kind === 'local' && lookup.kind === 'none') {
+      // 刷新期间有别人先写了状态:本次放弃,sidecar 保留给下一次对账。
+      return toPublication(slug, live.entry)
+    }
+    if (live.kind === 'local' && (
       live.entry.submissionId !== initialEntry.submissionId ||
       live.entry.installedVersion !== initialEntry.installedVersion
-    ) {
+    )) {
       // 刷新期间本地内容被 commit 复位(或重新提交):本次查询到的旧 publication
       // 字段已不对应当前内容,整次刷新放弃,只返回最新状态、不写任何字段。
       logAgentPackageAction(binding.logger, action, {
@@ -244,10 +530,11 @@ export async function refreshLocalAgentPackagePublishStatus(
       })
       return toPublication(slug, live.entry)
     }
+    if (live.kind === 'none' && lookup.kind === 'local') throw new Error(STATE_CHANGED_ERROR)
     // 以刷新期间落盘的最新条目为底,只覆盖本次查询到的发布字段,避免丢掉
     // 并发写入的 delistRequestId 等 M2 字段。
-    const merged: AgentPackageStateEntry = { ...live.entry }
-    merged.publishStatus = next.publishStatus ?? live.entry.publishStatus ?? 'none'
+    const merged: AgentPackageStateEntry = { ...(live.kind === 'local' ? live.entry : initialEntry) }
+    merged.publishStatus = next.publishStatus ?? merged.publishStatus ?? 'none'
     if (next.publishedVersion !== undefined) merged.publishedVersion = next.publishedVersion
     if (next.submissionId !== undefined) merged.submissionId = next.submissionId
     if (next.reviewReason === undefined) delete merged.reviewReason
@@ -256,6 +543,7 @@ export async function refreshLocalAgentPackagePublishStatus(
       ...state,
       [`local:${slug}`]: merged,
     })
+    if (pendingId !== undefined) clearPendingSubmission(binding.profileDir, slug, pendingId)
 
     logAgentPackageAction(binding.logger, action, {
       slug,
@@ -384,4 +672,8 @@ function sanitizeLogValue(value: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

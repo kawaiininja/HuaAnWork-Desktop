@@ -67,6 +67,7 @@ type RecordedRequest = {
   authorization: string | undefined
   contentType: string | undefined
   contentLength: string | undefined
+  idempotencyKey: string | undefined
   body: Buffer
 }
 
@@ -169,6 +170,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       authorization: request.headers.authorization,
       contentType: request.headers['content-type'],
       contentLength: request.headers['content-length'],
+      idempotencyKey: request.headers['x-agent-catalog-idempotency-key'] as string | undefined,
       body,
     })
     const pathname = new URL(request.url ?? '/', 'http://localhost').pathname
@@ -339,6 +341,36 @@ function writeSignedPackage(slug = 'weekly-report', version = '1.0.0'): void {
 
 function seedState(state: AgentPackageState): void {
   writeAgentPackageState(root, state)
+}
+
+const PENDING_SUBMISSIONS_FILE = 'agent-catalog-pending-submissions.json'
+const IDEMPOTENCY_KEY = '33333333-3333-4333-8333-333333333333'
+
+function pendingSubmissionsPath(): string {
+  return join(root, PENDING_SUBMISSIONS_FILE)
+}
+
+function readPendingSubmissions(): Record<string, Record<string, unknown>> {
+  try {
+    return JSON.parse(readFileSync(pendingSubmissionsPath(), 'utf8')) as Record<string, Record<string, unknown>>
+  } catch {
+    return {}
+  }
+}
+
+function seedPendingSubmission(slug: string, entry: Record<string, unknown>): void {
+  writeFileSync(pendingSubmissionsPath(), `${JSON.stringify({ [slug]: entry }, null, 2)}\n`, 'utf8')
+}
+
+/**
+ * 让下一次 `writeAgentPackageState` 失败:它的 tmp 路径被一个目录占住,
+ * `writeFileSync` 抛 EISDIR 且 rename 不会执行。比 mock ESM 导出更接近真实
+ * 磁盘故障,也能在同一个测试里恢复后重试。
+ */
+function blockStateWrite(): string {
+  const blocker = `${agentPackageStatePath(root)}.tmp`
+  mkdirSync(blocker)
+  return blocker
 }
 
 function rawStateFile(): string {
@@ -838,18 +870,254 @@ describe('local publication lifecycle', () => {
       'submit request',
     )
     // 上传还挂着时提交一次内容更新:版本 1.0.0 → 1.0.1,发布状态复位。
-    await commitExistingUpdate()
+    // Task 10 起 commit 会排在 publish lock 后面,必须先放行上传才能收敛。
+    const committing = commitExistingUpdate()
     submitGate = undefined
     gate.release()
 
-    await expect(publishing).rejects.toThrow('智能体状态已变化，请刷新后重试')
+    await expect(publishing).resolves.toEqual({ submissionId: SUBMISSION_ID })
+    await committing
 
     const state = readAgentPackageState(root)['local:weekly-report']
     expect(state?.installedVersion).toBe('1.0.1')
     expect(state?.publishStatus).toBe('none')
     expect(state?.submissionId).toBeUndefined()
-    expect(changedSlugs).toEqual([])
-    expect(loggerLines.some((line) => line.includes('publish.submit') && line.includes('outcome=error'))).toBe(true)
+    // 旧内容的提交确实创建了远端记录(并发出一次 changed),但随后的 commit
+    // 改变内容并把发布状态复位,新内容仍是「未发布」。
+    expect(changedSlugs).toEqual(['weekly-report'])
+    expect(loggerLines.some((line) => line.includes('publish.submit') && line.includes('outcome=ok'))).toBe(true)
+  })
+
+  test('records the remote submission before a local state failure and reuses it on retry', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    configure()
+    const blocker = blockStateWrite()
+
+    await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow()
+
+    // 远端事实先落 sidecar:state 没写成也必须留下 submissionId 与幂等键。
+    const pending = readPendingSubmissions()['weekly-report']
+    expect(pending?.submissionId).toBe(SUBMISSION_ID)
+    expect(pending?.version).toBe('1.0.0')
+    expect(pending?.idempotencyKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    expect(pending?.digestSha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('none')
+
+    rmSync(blocker, { recursive: true, force: true })
+    const retried = await publishLocalAgentPackage('weekly-report')
+
+    expect(retried.submissionId).toBe(SUBMISSION_ID)
+    // 重试复用 sidecar,不再发第二次提交。
+    expect(requests.filter((request) => request.method === 'POST')).toHaveLength(1)
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.publishStatus).toBe('pending-review')
+    expect(state?.submissionId).toBe(SUBMISSION_ID)
+    expect(readPendingSubmissions()['weekly-report']).toBeUndefined()
+  })
+
+  test('recovers a lost 201 by resubmitting with the recorded key', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    configure()
+    const blocker = blockStateWrite()
+    await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow()
+    rmSync(blocker, { recursive: true, force: true })
+
+    // 模拟 201 在返回途中丢失:sidecar 留下键,但没有 submissionId。
+    const recorded = readPendingSubmissions()['weekly-report']
+    if (recorded === undefined) throw new Error('sidecar was not written')
+    seedPendingSubmission('weekly-report', {
+      version: recorded.version,
+      digestSha256: recorded.digestSha256,
+      idempotencyKey: recorded.idempotencyKey,
+      createdAt: recorded.createdAt,
+    })
+
+    const retried = await publishLocalAgentPackage('weekly-report')
+
+    expect(retried.submissionId).toBe(SUBMISSION_ID)
+    const submits = requests.filter((request) => request.method === 'POST')
+    expect(submits).toHaveLength(2)
+    // 第二次提交必须复用同一个幂等键,服务端才能返回原记录。
+    expect(submits[1]?.idempotencyKey).toBe(submits[0]?.idempotencyKey)
+    expect(submits[1]?.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/)
+    expect(readPendingSubmissions()['weekly-report']).toBeUndefined()
+  })
+
+  test('warns without touching state when the sidecar has no remote id', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    seedPendingSubmission('weekly-report', {
+      version: '1.0.0',
+      digestSha256: 'd'.repeat(64),
+      idempotencyKey: IDEMPOTENCY_KEY,
+      createdAt: NOW,
+    })
+    const before = rawStateFile()
+    configure()
+
+    const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
+
+    expect(publication.publishStatus).toBe('none')
+    expect(publication.warning).toContain(IDEMPOTENCY_KEY)
+    expect(readPendingSubmissions()['weekly-report']?.idempotencyKey).toBe(IDEMPOTENCY_KEY)
+    expect(requests).toHaveLength(0)
+    expect(rawStateFile()).toBe(before)
+  })
+
+  test('keeps the stale sidecar and names the pending submission when content changed', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    configure()
+    const blocker = blockStateWrite()
+    await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow()
+    rmSync(blocker, { recursive: true, force: true })
+
+    // 本地内容变化(1.0.0 → 1.0.1)后,旧 sidecar 不能再被新内容覆盖提交。
+    await commitExistingUpdate()
+
+    await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow(
+      new RegExp(`上一次提交 ${SUBMISSION_ID} 仍在对账，请先刷新状态`),
+    )
+    expect(readPendingSubmissions()['weekly-report']?.submissionId).toBe(SUBMISSION_ID)
+    expect(requests.filter((request) => request.method === 'POST')).toHaveLength(1)
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('none')
+  })
+
+  test('reconciles a recorded pending submission through getSubmission on refresh', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    seedPendingSubmission('weekly-report', {
+      submissionId: SUBMISSION_ID,
+      version: '1.0.0',
+      digestSha256: 'a'.repeat(64),
+      idempotencyKey: IDEMPOTENCY_KEY,
+      createdAt: NOW,
+    })
+    submissionStatus = 'published'
+    configure()
+
+    const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
+
+    expect(publication.publishStatus).toBe('published')
+    expect(publication.publishedVersion).toBe('1.0.0')
+    expect(publication.submissionId).toBe(SUBMISSION_ID)
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.publishStatus).toBe('published')
+    expect(state?.publishedVersion).toBe('1.0.0')
+    expect(state?.submissionId).toBe(SUBMISSION_ID)
+    expect(readPendingSubmissions()['weekly-report']).toBeUndefined()
+    const statusRequest = requests.find(
+      (request) => request.method === 'GET' && request.url === `/v1/agent-packages/submissions/${SUBMISSION_ID}`,
+    )
+    expect(statusRequest?.authorization).toBe(`Bearer ${PUBLISH_TOKEN}`)
+  })
+
+  test('keeps the sidecar and returns a warning when reconciliation is unreachable', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    seedPendingSubmission('weekly-report', {
+      submissionId: SUBMISSION_ID,
+      version: '1.0.0',
+      digestSha256: 'b'.repeat(64),
+      idempotencyKey: IDEMPOTENCY_KEY,
+      createdAt: NOW,
+    })
+    configure()
+    await stopCatalogServer()
+
+    const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
+
+    expect(publication.publishStatus).toBe('none')
+    expect(publication.warning).toContain(SUBMISSION_ID)
+    expect(readPendingSubmissions()['weekly-report']?.submissionId).toBe(SUBMISSION_ID)
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('none')
+  })
+
+  test('a commit during the upload waits for the publish lock and is not submitted twice', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    configure()
+    const gate = deferred()
+    submitGate = gate.promise
+
+    const publishing = publishLocalAgentPackage('weekly-report')
+    await waitFor(
+      () =>
+        requests.some(
+          (request) => request.method === 'POST' && request.url === '/v1/agent-packages/submissions',
+        ),
+      'submit request',
+    )
+    let commitDone = false
+    const committing = commitExistingUpdate().then(() => {
+      commitDone = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    // 同一 slug 的 publish 与 commit 共用 publish lock:上传在飞时 commit 必须等待。
+    expect(commitDone).toBe(false)
+
+    submitGate = undefined
+    gate.release()
+    await expect(publishing).resolves.toEqual({ submissionId: SUBMISSION_ID })
+    await committing
+
+    expect(requests.filter((request) => request.method === 'POST')).toHaveLength(1)
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.installedVersion).toBe('1.0.1')
+    expect(state?.publishStatus).toBe('none')
+    expect(state?.submissionId).toBeUndefined()
+    expect(readPendingSubmissions()['weekly-report']).toBeUndefined()
   })
 
   test('a commit during a status refresh does not resurrect the cleared submission', async () => {

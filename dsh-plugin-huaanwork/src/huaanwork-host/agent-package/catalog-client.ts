@@ -119,13 +119,22 @@ export class AgentCatalogClientError extends Error {
   }
 }
 
+/** `POST /submissions` 的可选重试身份(Task 10)。 */
+export type SubmitAgentPackageOptions = {
+  /**
+   * 同一份内容重试时必须复用同一个键:服务端据此返回原 submission 而不是
+   * 新建一条。键只允许 UUID 形状,由发布流程生成。
+   */
+  idempotencyKey?: string
+}
+
 export type AgentCatalogClient = {
   listPackages(): Promise<AgentPackageSummary[]>
   getPackage(slug: string, version: string): Promise<AgentPackageMetadata>
   /** 下载到调用方指定的临时文件;超过 5 MiB 立即中止并删除该文件。 */
   downloadBundleToFile(slug: string, version: string, destination: string): Promise<void>
   getRevocations(): Promise<AgentPackageRevocation[]>
-  submit(bundle: Buffer): Promise<AgentPackageSubmission>
+  submit(bundle: Buffer, options?: SubmitAgentPackageOptions): Promise<AgentPackageSubmission>
   getSubmission(submissionId: string): Promise<AgentPackageSubmission>
   requestDelist(slug: string, version: string, reason: string): Promise<AgentPackageDelistRequest>
 }
@@ -267,7 +276,7 @@ export function createAgentCatalogClient(options: CreateAgentCatalogClientOption
       throw new AgentCatalogClientError('撤销列表分页超过上限', 'invalid-response')
     },
 
-    async submit(bundle) {
+    async submit(bundle, options = {}) {
       const { rootUrl, settings } = await catalogRoot()
       const publishToken = optionalToken(settings.agents_catalog_publish_token)
       if (publishToken === undefined) throw new AgentCatalogClientError(AGENT_CATALOG_AUTH_ERROR, 'auth')
@@ -276,7 +285,12 @@ export function createAgentCatalogClient(options: CreateAgentCatalogClientOption
       }
       const { body } = await requestJson(`${rootUrl}/v1/agent-packages/submissions`, publishToken, {
         method: 'POST',
-        headers: { 'content-type': 'application/gzip' },
+        headers: {
+          'content-type': 'application/gzip',
+          ...(options.idempotencyKey === undefined
+            ? {}
+            : { 'x-agent-catalog-idempotency-key': options.idempotencyKey }),
+        },
         body: new Uint8Array(bundle),
       })
       return normalizeSubmission(body)

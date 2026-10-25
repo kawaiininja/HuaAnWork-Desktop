@@ -134,6 +134,21 @@ const RESERVED_SLUGS: ReadonlySet<string> = new Set(['delist-requests', 'revocat
  */
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u
 const SUBMISSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
+/**
+ * Retry key of the create route (Task 10 / I-15). Deliberately its own regex:
+ * UUID SHAPE only, so a caller cannot smuggle a path or a multi-header value
+ * into the state key. Case-insensitive because a UUID is not case-significant.
+ */
+const IDEMPOTENCY_KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+const IDEMPOTENCY_HEADER = 'x-agent-catalog-idempotency-key'
+/**
+ * Lock namespace for one idempotency key. `SLUG_PATTERN` is lowercase only, so
+ * an uppercase namespace can never collide with a package lock. The key lock
+ * closes the cross-version race: two requests reusing one key for different
+ * versions hold DIFFERENT package locks and would otherwise both create a
+ * record.
+ */
+const IDEMPOTENCY_LOCK_NAMESPACE = 'IDEMPOTENCY'
 
 /** Everything a Task 5 handler may touch (plumbed by the dispatcher). */
 export interface SubmissionHandlerContext {
@@ -311,6 +326,20 @@ export function reasonFromBody(body: JsonBody): string | null {
 function migrationHeaderOf(request: IncomingMessage): string | undefined {
   const raw = request.headers[MIGRATION_HEADER]
   return typeof raw === 'string' ? raw : undefined
+}
+
+type HeaderValue = { readonly invalid: boolean; readonly value?: string }
+
+/**
+ * ONE scalar header value. Node hands a repeated header over as `string[]`;
+ * an idempotency key is a single opaque scalar, so an array is invalid rather
+ * than an arbitrary pick.
+ */
+function headerValue(request: IncomingMessage, name: string): HeaderValue {
+  const raw = request.headers[name]
+  if (raw === undefined) return { invalid: false }
+  if (typeof raw !== 'string') return { invalid: true }
+  return { invalid: false, value: raw }
 }
 
 // ---------------------------------------------------------------------------
@@ -603,6 +632,19 @@ export async function createSubmission(context: SubmissionHandlerContext): Promi
     })
   }
 
+  // Fail before buffering 5 MiB: a malformed retry key can never be repaired by
+  // reading the body. A repeated header (string[]) is invalid too.
+  const idempotency = headerValue(request, IDEMPOTENCY_HEADER)
+  const idempotencyKey = idempotency.value
+  if (idempotency.invalid || (idempotencyKey !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey))) {
+    drain(request)
+    return result(400, errorBody('幂等键无效', 'invalid-idempotency-key'), {
+      action,
+      outcome: 'error',
+      reason: `${IDEMPOTENCY_HEADER} must be exactly one UUID`,
+    })
+  }
+
   const declared = declaredContentLength(request)
   if (declared !== null && declared >= SUBMISSION_BODY_CAP_BYTES) {
     drain(request)
@@ -643,39 +685,86 @@ export async function createSubmission(context: SubmissionHandlerContext): Promi
   const migrationHeader = migrationHeaderOf(request)
   const submissionId = randomUUID()
 
-  const outcome = await store.withPackageLock(slug, version, async () => {
-    const verdict = evaluateSubmission(store.read(), config, { slug, version }, digest, migrationHeader)
-    if (verdict.conflict !== null) return { kind: 'conflict' as const, conflict: verdict.conflict }
-
-    await writeFileAtomic(submissionBundlePath(config.dataDir, submissionId), raw)
-
-    const now = new Date().toISOString()
-    const migrationFrom = verdict.migrationFrom
-    const record = await store.mutate(context.requestId, action, draft => {
-      // The package lock already serialized this `${slug}/${version}`, so a
-      // package that appeared here would mean a bug; refuse to overwrite it.
-      if (draft.packages[packageKey(slug, version)] !== undefined) {
-        throw new Error(`package ${slug}/${version} was committed concurrently`)
+  const create = () =>
+    store.withPackageLock(slug, version, async () => {
+      // The replay lookup MUST share the package lock with the create below:
+      // a lookup outside the lock interleaves with a concurrent request and
+      // both records get written. It deliberately runs BEFORE evaluateSubmission
+      // so a retry after approval still answers with the published record.
+      if (idempotencyKey !== undefined) {
+        const existing = Object.values(store.read().submissions).find(
+          record => record.idempotencyKey === idempotencyKey,
+        )
+        if (existing !== undefined) {
+          if (
+            existing.slug === slug
+            && existing.version === version
+            && sameDigest(existing.digest, digest)
+          ) {
+            return { kind: 'replayed' as const, record: existing }
+          }
+          return {
+            kind: 'conflict' as const,
+            conflict: {
+              status: 409,
+              error: '幂等键已被其他提交使用',
+              code: 'idempotency-conflict',
+              reason: `idempotency key ${idempotencyKey} is bound to ${existing.slug}/${existing.version} (${existing.id})`,
+            },
+          }
+        }
       }
-      const created: Submission = {
-        id: submissionId,
-        slug,
-        version,
-        status: 'pending-review',
-        submittedAt: now,
-        updatedAt: now,
-        actor,
-        digest,
-        ...(migrationFrom === undefined ? {} : { migrationFrom }),
-      }
-      draft.submissions[submissionId] = created
-      return created
+
+      const verdict = evaluateSubmission(store.read(), config, { slug, version }, digest, migrationHeader)
+      if (verdict.conflict !== null) return { kind: 'conflict' as const, conflict: verdict.conflict }
+
+      await writeFileAtomic(submissionBundlePath(config.dataDir, submissionId), raw)
+
+      const now = new Date().toISOString()
+      const migrationFrom = verdict.migrationFrom
+      const record = await store.mutate(context.requestId, action, draft => {
+        // The package lock already serialized this `${slug}/${version}`, so a
+        // package that appeared here would mean a bug; refuse to overwrite it.
+        if (draft.packages[packageKey(slug, version)] !== undefined) {
+          throw new Error(`package ${slug}/${version} was committed concurrently`)
+        }
+        const created: Submission = {
+          id: submissionId,
+          slug,
+          version,
+          status: 'pending-review',
+          submittedAt: now,
+          updatedAt: now,
+          actor,
+          digest,
+          ...(migrationFrom === undefined ? {} : { migrationFrom }),
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        }
+        draft.submissions[submissionId] = created
+        return created
+      })
+      return { kind: 'created' as const, record }
     })
-    return { kind: 'created' as const, record }
-  })
+
+  // Reusing one key for two versions takes two DIFFERENT package locks; the
+  // key-scoped lock is what makes that pair deterministic.
+  const outcome =
+    idempotencyKey === undefined
+      ? await create()
+      : await store.withPackageLock(IDEMPOTENCY_LOCK_NAMESPACE, idempotencyKey, create)
 
   if (outcome.kind === 'conflict') {
     return conflictResult(action, { slug, version }, outcome.conflict)
+  }
+  if (outcome.kind === 'replayed') {
+    return result(200, submissionBody(outcome.record), {
+      action,
+      outcome: 'ok',
+      reason: 'idempotent replay',
+      slug,
+      version,
+      submissionId: outcome.record.id,
+    })
   }
 
   return {

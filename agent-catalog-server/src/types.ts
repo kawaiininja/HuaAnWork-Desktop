@@ -84,6 +84,12 @@ export interface Submission {
   readonly digest: AgentPackageDigest
   reason?: string
   migrationFrom?: string
+  /**
+   * Client-chosen retry key (`X-Agent-Catalog-Idempotency-Key`). One key is
+   * bound to one `slug/version/digest`: a replay returns this record, any other
+   * identity is a conflict. Absent for submissions that carried no key.
+   */
+  readonly idempotencyKey?: string
 }
 
 /** Client-facing submission body (never carries internal actors or markers). */

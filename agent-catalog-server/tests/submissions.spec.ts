@@ -534,6 +534,116 @@ test('treats pending and published duplicates as conflicts', async () => {
   }
 })
 
+// ---------------------------------------------------------------------------
+// Idempotent submission creation (Task 10 / I-15)
+// ---------------------------------------------------------------------------
+
+test('replays a submission for the same idempotency key and content', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    const sameKey = '11111111-1111-4111-8111-111111111111'
+    const firstBundle = await makeBundle()
+    const otherBundle = await makeBundle({ version: '1.0.1' })
+    const otherContent = await makeBundle({}, '完全不同的文案')
+
+    const first = await submit(catalog, firstBundle.bundle, {
+      headers: { 'x-agent-catalog-idempotency-key': sameKey },
+    })
+    assert.equal(first.status, 201)
+
+    // A retried upload (e.g. the 201 was lost on the way back) replays the
+    // ORIGINAL record instead of creating a second submission.
+    const second = await submit(catalog, firstBundle.bundle, {
+      headers: { 'x-agent-catalog-idempotency-key': sameKey },
+    })
+    assert.equal(second.status, 200)
+    assert.equal(second.body.submissionId, first.body.submissionId)
+    assert.deepEqual(second.body, first.body)
+
+    // The key is bound to one identity: another version or another digest is
+    // a conflict, never a fresh submission and never a replay.
+    const otherVersion = await submit(catalog, otherBundle.bundle, {
+      headers: { 'x-agent-catalog-idempotency-key': sameKey },
+    })
+    assert.equal(otherVersion.status, 409)
+    assert.deepEqual(otherVersion.body, {
+      error: '幂等键已被其他提交使用',
+      code: 'idempotency-conflict',
+    })
+    const otherDigest = await submit(catalog, otherContent.bundle, {
+      headers: { 'x-agent-catalog-idempotency-key': sameKey },
+    })
+    assert.equal(otherDigest.status, 409)
+    assert.equal(otherDigest.body.code, 'idempotency-conflict')
+
+    // Replay is answered before the occupancy check: after approval the same
+    // key/content still returns the published record, not a version-conflict.
+    const approved = await approve(catalog, first.body.submissionId, sign(catalog, firstBundle.digest))
+    assert.equal(approved.status, 200)
+    const lateReplay = await submit(catalog, firstBundle.bundle, {
+      headers: { 'x-agent-catalog-idempotency-key': sameKey },
+    })
+    assert.equal(lateReplay.status, 200)
+    assert.equal(lateReplay.body.submissionId, first.body.submissionId)
+    assert.equal(lateReplay.body.status, 'published')
+
+    const state = await readState(catalog)
+    assert.equal(Object.keys(state.submissions).length, 1)
+    assert.equal(state.submissions[first.body.submissionId]?.idempotencyKey, sameKey)
+    assert.equal(Object.keys(state.packages).length, 1)
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('refuses a malformed idempotency key without creating a submission', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    const { bundle } = await makeBundle()
+    for (const key of ['not-a-uuid', '11111111-1111-4111-8111-11111111111', '11111111-1111-4111-8111-111111111111x']) {
+      const response = await submit(catalog, bundle, {
+        headers: { 'x-agent-catalog-idempotency-key': key },
+      })
+      assert.equal(response.status, 400, key)
+      assert.deepEqual(response.body, { error: '幂等键无效', code: 'invalid-idempotency-key' })
+    }
+    assert.equal(Object.keys((await readState(catalog)).submissions).length, 0)
+
+    // The same request without the header keeps the pre-Task-10 semantics.
+    const plain = await submit(catalog, bundle)
+    assert.equal(plain.status, 201)
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('serializes one idempotency key reused for two versions', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    const sameKey = '22222222-2222-4222-8222-222222222222'
+    const first = await makeBundle()
+    const second = await makeBundle({ version: '1.0.1' })
+
+    // Different package locks: only a key-scoped lock can make this pair
+    // deterministic. Exactly one record may carry the key.
+    const [left, right] = await Promise.all([
+      submit(catalog, first.bundle, { headers: { 'x-agent-catalog-idempotency-key': sameKey } }),
+      submit(catalog, second.bundle, { headers: { 'x-agent-catalog-idempotency-key': sameKey } }),
+    ])
+    const statuses = [left.status, right.status].sort()
+    assert.deepEqual(statuses, [201, 409])
+    const loser = left.status === 409 ? left : right
+    assert.equal(loser.body.code, 'idempotency-conflict')
+
+    const state = await readState(catalog)
+    assert.equal(Object.keys(state.submissions).length, 1)
+    const winnerId = left.status === 201 ? left.body.submissionId : right.body.submissionId
+    assert.equal(state.submissions[winnerId]?.idempotencyKey, sameKey)
+  } finally {
+    await catalog.close()
+  }
+})
+
 test('rejects reserved route slugs at submit and at approve', async () => {
   const catalog = await bootTestAgentCatalog()
   try {

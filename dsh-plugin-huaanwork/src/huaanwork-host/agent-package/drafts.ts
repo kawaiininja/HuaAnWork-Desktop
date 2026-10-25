@@ -8,6 +8,7 @@ import { parseSkillMarkdown } from '../../huaanwork-guardrails/skills.ts'
 import { resolveInvocableSkill } from '../skill-invoke.ts'
 import { parseAgentPackageManifest } from './manifest.ts'
 import { resetLocalAgentPackagePublication } from './catalog-publish.ts'
+import { agentPackagePublishLock } from './publish-lock.ts'
 import {
   agentPackageBytes,
   agentPackageDir,
@@ -231,8 +232,32 @@ export async function commitAgentPackage(
     return refused('draftId 无效')
   }
 
+  // 同 slug 的 publish 与 commit 共用一把锁:写包 + 复位发布状态期间,上传不能
+  // 交错。slug 在草稿或已落盘包上才知道,锁内重新读草稿并校验 draftId。
+  const known = findPackageByDraftId(profileDir, draftId)
+  const current = loadAgentPackageDraft(profileDir, sessionId)
+  const lockSlug = known?.slug ?? current?.slug
+  if (lockSlug === undefined) return refused('没有待确认的草稿')
+  return agentPackagePublishLock.run(profileDir, lockSlug, () =>
+    commitAgentPackageLocked(profileDir, sessionId, draftId, takenSlugs),
+  )
+}
+
+async function commitAgentPackageLocked(
+  profileDir: string,
+  sessionId: string,
+  draftId: string,
+  takenSlugs: readonly string[],
+): Promise<CommitResult> {
   const alreadyCommitted = findPackageByDraftId(profileDir, draftId)
   if (alreadyCommitted !== undefined) {
+    // 幂等重试同样要先完成发布状态复位:中断可能发生在包写入之后、reset 之前,
+    // 跳过它会让新内容保留旧的 published/pending 身份(I-16)。
+    try {
+      resetLocalAgentPackagePublication(profileDir, alreadyCommitted.slug)
+    } catch {
+      return refused('发布状态复位失败，请重试，草稿已保留')
+    }
     const stale = loadAgentPackageDraft(profileDir, sessionId)
     if (stale?.draftId === draftId) removeDraft(profileDir, sessionId)
     // A retried commit normally finds its draft gone; host-created packages start at
