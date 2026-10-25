@@ -155,6 +155,12 @@ export interface TestResponse<T = any> {
 export interface BootTestAgentCatalogOptions {
   /** 'fixtures' (default) copies the three M-A0 entries; 'empty' leaves the dir empty; 'missing' never creates it. */
   readonly entriesMode?: 'fixtures' | 'empty' | 'missing'
+  /**
+   * Also generate a slot-2 key retired at this instant. The pair is exposed as
+   * `retiredKey` so a test can sign with a key the server must refuse, and the
+   * parsed keyring carries its `retiredAt` (verification enforces it).
+   */
+  readonly retiredKeyAt?: string
 }
 
 export interface TestAgentCatalog {
@@ -164,7 +170,14 @@ export interface TestAgentCatalog {
   readonly dataDir: string
   readonly entriesDir: string
   readonly keyringPath: string
+  /** The pinned slot-1 public key (verification trust root). */
   readonly keyring: CatalogKeyringEntry
+  /** Every parsed keyring entry, including a retired slot-2 key when configured. */
+  readonly keyringEntries: readonly CatalogKeyringEntry[]
+  /** The full ephemeral slot-1 keypair; `privateKeyPem` signs test digests. */
+  readonly activeKey: TestKeyring
+  /** Present only when `retiredKeyAt` was configured. */
+  readonly retiredKey?: TestKeyring
   readonly auditPath: string
   request: <T = any>(path: string, options?: TestRequestOptions) => Promise<TestResponse<T>>
   readAudit: () => Promise<AuditRecord[]>
@@ -189,6 +202,16 @@ export async function bootTestAgentCatalog(
     }
   }
   const keyring = await createTestKeyring(root)
+  let retiredKey: TestKeyring | undefined
+  if (options.retiredKeyAt !== undefined) {
+    retiredKey = await createTestKeyring(root, 2)
+    // Rewrite the ACTIVE keyring file so it carries both slots: the slot-1 key
+    // above plus a slot-2 key that is already retired at the requested instant.
+    await writeKeyringFile(keyring.path, [
+      { publicKeyHex: keyring.publicKeyHex, slot: 1 },
+      { publicKeyHex: retiredKey.publicKeyHex, slot: 2, retiredAt: options.retiredKeyAt },
+    ])
+  }
 
   // Exercise the real env parsing, then pin the listener to an ephemeral port
   // (`listen(0)`): PORT=0 is intentionally not a valid configured port.
@@ -277,6 +300,9 @@ export async function bootTestAgentCatalog(
     entriesDir,
     keyringPath: keyring.path,
     keyring: { keyId: keyring.keyId, publicKeyHex: keyring.publicKeyHex, slot: keyring.slot },
+    keyringEntries: config.keyring,
+    activeKey: keyring,
+    ...(retiredKey === undefined ? {} : { retiredKey }),
     auditPath,
     request,
     readAudit: async () => {

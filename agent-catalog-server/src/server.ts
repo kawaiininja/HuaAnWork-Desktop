@@ -1,8 +1,9 @@
 /**
- * agent-catalog-server HTTP surface (Task 4 foundation).
+ * agent-catalog-server HTTP surface.
  *
- * Route table (Tasks 5/6 fill the handlers; the AUTH MATRIX below is already
- * final so those tasks never have to rewrite authorization):
+ * Route table (Task 5 installs submissions + public reads; the Task 6
+ * governance routes still answer 501; the AUTH MATRIX below is final so those
+ * tasks never have to rewrite authorization):
  *
  *   read     GET  /v1/catalog, /v1/catalog/{name}
  *            GET  /v1/agent-packages
@@ -10,7 +11,7 @@
  *            GET  /v1/agent-packages/{slug}/{version}/bundle
  *            GET  /v1/agent-packages/revocations
  *   publish  POST /v1/agent-packages/submissions
- *            GET  /v1/agent-packages/submissions/{id}      (creator check in Task 5)
+ *            GET  /v1/agent-packages/submissions/{id}      (creator check in submissions.ts)
  *            POST /v1/agent-packages/{slug}/{version}/delist-requests
  *   admin    GET  /v1/agent-packages/submissions?status=pending
  *            GET  /v1/agent-packages/submissions/{id}      (any submission)
@@ -19,6 +20,9 @@
  *            GET  /v1/agent-packages/delist-requests?status=pending
  *            POST /v1/agent-packages/delist-requests/{id}/approve|reject
  *            POST /v1/agent-packages/{slug}/{version}/revoke
+ *
+ * Task 5 handlers live in submissions.ts and return ordinary `HandlerResult`s
+ * (expected conflicts included) so every outcome is audited before it is sent.
  *
  * Dispatch order is deliberate:
  *
@@ -47,7 +51,19 @@ import { authenticateToken, bearerToken, tokenActor, type AgentCatalogRole } fro
 import type { AgentCatalogConfig } from './config.ts'
 import { findEntry, loadEntries } from './legacy.ts'
 import { CatalogStore } from './store.ts'
-import type { AgentCatalogErrorBody } from './types.ts'
+import {
+  approveSubmission,
+  createSubmission,
+  downloadPackageBundle,
+  downloadSubmissionBundle,
+  getPackageMetadata,
+  getSubmission,
+  listPendingSubmissions,
+  listPublishedPackages,
+  rejectSubmission,
+  type SubmissionHandlerContext,
+} from './submissions.ts'
+import type { AgentCatalogErrorBody, HandlerResult } from './types.ts'
 
 /** JSON response cap: no route may stream a larger JSON body to a client. */
 export const MAX_JSON_RESPONSE_BYTES = 1024 * 1024
@@ -234,22 +250,6 @@ function resolveRoute(method: string, pathname: string): ResolvedRoute | null {
 // ---------------------------------------------------------------------------
 // Responses
 // ---------------------------------------------------------------------------
-
-interface HandlerResult {
-  readonly status: number
-  /** JSON body (`raw` wins when both are present). */
-  readonly body?: unknown
-  readonly raw?: { readonly contentType: string; readonly data: Buffer }
-  readonly headers?: Readonly<Record<string, string>>
-  readonly audit: {
-    readonly action: string
-    readonly outcome: AuditEvent['outcome']
-    readonly reason?: string
-    readonly slug?: string
-    readonly version?: string
-    readonly submissionId?: string
-  }
-}
 
 function jsonResult(
   status: number,
@@ -480,7 +480,7 @@ async function handleRequest(
   // the server-level guard (which is left for `finish` itself).
   let result: HandlerResult
   try {
-    result = await dispatch(route, config)
+    result = await dispatch(route, { request, runtime, config, role: identity, actor })
   } catch (cause) {
     const message = redactSecrets(String((cause as Error)?.message ?? cause), secretList(config))
     console.error(`agent-catalog-server: request handler failed: ${message}`)
@@ -494,7 +494,16 @@ async function handleRequest(
   await finish(response, runtime, result, actor, config)
 }
 
-async function dispatch(route: ResolvedRoute, config: AgentCatalogConfig): Promise<HandlerResult> {
+interface DispatchContext {
+  readonly request: IncomingMessage
+  readonly runtime: AgentCatalogRuntime
+  readonly config: AgentCatalogConfig
+  readonly role: AgentCatalogRole
+  readonly actor: string
+}
+
+async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise<HandlerResult> {
+  const { config } = context
   if (route.legacy) {
     if (route.id === 'catalog.list') {
       return jsonResult(200, { items: loadEntries(config.entriesDir) }, {
@@ -525,15 +534,46 @@ async function dispatch(route: ResolvedRoute, config: AgentCatalogConfig): Promi
     return jsonResult(200, entry, { action: 'catalog.get', outcome: 'ok' })
   }
 
-  // Tasks 5/6 install the handlers for these already-authorized routes.
-  // 501 is deliberate: a reserved route must fail loudly, never pretend to be
-  // an unknown path.
-  return jsonResult(501, errorBody('接口尚未实现', 'not-implemented'), {
-    action: route.id,
-    outcome: 'error',
-    reason: 'handler is introduced by a later task',
-    ...routeAuditContext(route),
-  })
+  const handlers = submissionContext(context)
+  switch (route.id) {
+    case 'agentPackages.list':
+      return listPublishedPackages(handlers)
+    case 'agentPackages.get':
+      return getPackageMetadata(handlers, route.slug ?? '', route.version ?? '')
+    case 'agentPackages.bundle':
+      return downloadPackageBundle(handlers, route.slug ?? '', route.version ?? '')
+    case 'agentPackages.submissions.create':
+      return createSubmission(handlers)
+    case 'agentPackages.submissions.pending':
+      return listPendingSubmissions(handlers)
+    case 'agentPackages.submissions.get':
+      return getSubmission(handlers, route.submissionId ?? '')
+    case 'agentPackages.submissions.bundle':
+      return downloadSubmissionBundle(handlers, route.submissionId ?? '')
+    case 'agentPackages.submissions.approve':
+      return approveSubmission(handlers, route.submissionId ?? '')
+    case 'agentPackages.submissions.reject':
+      return rejectSubmission(handlers, route.submissionId ?? '')
+    default:
+      // Task 6 installs delist requests / revocations. 501 is deliberate: a
+      // reserved route must fail loudly, never pretend to be an unknown path.
+      return jsonResult(501, errorBody('接口尚未实现', 'not-implemented'), {
+        action: route.id,
+        outcome: 'error',
+        reason: 'handler is introduced by a later task',
+        ...routeAuditContext(route),
+      })
+  }
+}
+
+function submissionContext(context: DispatchContext): SubmissionHandlerContext {
+  return {
+    request: context.request,
+    config: context.config,
+    store: context.runtime.store,
+    role: context.role,
+    actor: context.actor,
+  }
 }
 
 /**

@@ -15,11 +15,32 @@
 
 import type { AgentPackageDigest, AgentPackageManifest } from '@huaanwork/agent-package-format'
 import type { CatalogSignature } from '@huaanwork/catalog-signing'
+import type { AuditOutcome } from './audit.ts'
 
 /** The unified error body of every JSON error response. */
 export interface AgentCatalogErrorBody {
   readonly error: string
   readonly code?: string
+}
+
+/**
+ * One handler result, exactly as the dispatcher expects it (`server.ts` audits
+ * `audit` before writing `raw` or `body`).
+ */
+export interface HandlerResult {
+  readonly status: number
+  /** JSON body (`raw` wins when both are present). */
+  readonly body?: unknown
+  readonly raw?: { readonly contentType: string; readonly data: Buffer }
+  readonly headers?: Readonly<Record<string, string>>
+  readonly audit: {
+    readonly action: string
+    readonly outcome: AuditOutcome
+    readonly reason?: string
+    readonly slug?: string
+    readonly version?: string
+    readonly submissionId?: string
+  }
 }
 
 /**
@@ -40,6 +61,11 @@ export type SubmissionStatus = 'pending-review' | 'published' | 'rejected'
  * One agent-package submission (Task 5 owns the lifecycle). `digest` is the
  * digest the SERVER recomputed from the uploaded bundle; the client-provided
  * digest is never trusted or stored.
+ *
+ * `migrationFrom` is INTERNAL bookkeeping: it is set only when the submission
+ * used a legal `X-Agent-Catalog-Migration` exception (matching header plus a
+ * same-name `kind:"agent"` legacy entry). It is never part of the client-facing
+ * submission body; approval copies it onto the published package.
  */
 export interface Submission {
   readonly id: string
@@ -51,6 +77,60 @@ export interface Submission {
   readonly actor: string
   readonly digest: AgentPackageDigest
   reason?: string
+  migrationFrom?: string
+}
+
+/** Client-facing submission body (never carries internal actors or markers). */
+export interface SubmissionResponse {
+  readonly submissionId: string
+  readonly slug: string
+  readonly version: string
+  readonly status: SubmissionStatus
+  readonly submittedAt: string
+  readonly updatedAt: string
+  readonly digest: AgentPackageDigest
+  readonly reason?: string
+}
+
+/**
+ * Admin submission detail: the live `previousVersion`/`previousDigest` of the
+ * highest already-signed record for the slug (delisted/revoked included) so the
+ * offline CLI can diff the candidate against what the catalog serves today.
+ */
+export interface AdminSubmissionResponse extends SubmissionResponse {
+  readonly previousVersion?: string
+  readonly previousDigest?: AgentPackageDigest
+}
+
+/** One item of `GET /v1/agent-packages` (the highest published version). */
+export interface AgentPackageSummary {
+  readonly slug: string
+  readonly displayName: string
+  readonly description: string
+  readonly version: string
+  readonly size: number
+  readonly status: 'published'
+  readonly updatedAt: string
+  readonly migrationFrom?: string
+}
+
+/**
+ * `GET /v1/agent-packages/{slug}/{version}`. Installed clients still receive
+ * delisted/revoked metadata (so they can explain the state); only `published`
+ * records carry `bundleUrl`.
+ */
+export interface AgentPackageMetadata {
+  readonly slug: string
+  readonly version: string
+  readonly status: PackageStatus
+  readonly displayName: string
+  readonly description: string
+  readonly size: number
+  readonly updatedAt: string
+  readonly digest: AgentPackageDigest
+  readonly signature: CatalogSignature
+  readonly migrationFrom?: string
+  readonly bundleUrl?: string
 }
 
 export type PackageStatus = 'published' | 'delisted' | 'revoked'
