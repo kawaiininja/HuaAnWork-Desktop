@@ -258,7 +258,13 @@ export function createAgentCatalogSecurity(options: CreateAgentCatalogSecurityOp
     }
     const applied = applyRevocations(cached.items)
     // 同步入口(启动/离线回落)不阻塞调用方;取消请求已经发起。
-    for (const slug of applied.slugs) void registry.cancelBySlug(slug, 'revoke')
+    for (const slug of applied.slugs) {
+      void registry.cancelBySlug(slug, 'revoke').catch((error: unknown) => {
+        // Task 8:取消路径会把清理失败聚合成 rejection。同步入口没有异步 warning
+        // 通道,记录日志即可——撤销状态已写入 state/内存,运行门仍 fail closed。
+        console.error(`中止在途回合失败：${errorMessage(error)}`)
+      })
+    }
     const warnings = [cached.warning, applied.warning].filter((value): value is string => value !== undefined)
     return {
       items: cached.items,
@@ -280,7 +286,14 @@ export function createAgentCatalogSecurity(options: CreateAgentCatalogSecurityOp
       if (cached.warning !== undefined) parts.push(cached.warning)
       if (cached.parsed) {
         const applied = applyRevocations(cached.items)
-        for (const slug of applied.slugs) await registry.cancelBySlug(slug, 'revoke')
+        for (const slug of applied.slugs) {
+          try {
+            await registry.cancelBySlug(slug, 'revoke')
+          } catch (cancelError) {
+            // Task 8:回合停止失败是 warning,不阻断缓存回落与撤销应用。
+            parts.push(`中止在途回合失败：${errorMessage(cancelError)}`)
+          }
+        }
         if (applied.warning !== undefined) parts.push(applied.warning)
       }
       return { warning: parts.join('；') }
@@ -295,8 +308,18 @@ export function createAgentCatalogSecurity(options: CreateAgentCatalogSecurityOp
     }
     revocations = items
     const applied = applyRevocations(items)
-    for (const slug of applied.slugs) await registry.cancelBySlug(slug, 'revoke')
-    const warnings = [cacheWarning, applied.warning].filter((value): value is string => value !== undefined)
+    const cancelWarnings: string[] = []
+    for (const slug of applied.slugs) {
+      try {
+        await registry.cancelBySlug(slug, 'revoke')
+      } catch (error) {
+        // Task 8:缓存写入/应用照常完成;回合没停下来以 warning 上报。
+        cancelWarnings.push(`中止在途回合失败：${errorMessage(error)}`)
+      }
+    }
+    const warnings = [cacheWarning, applied.warning, ...cancelWarnings].filter(
+      (value): value is string => value !== undefined,
+    )
     return warnings.length > 0 ? { warning: warnings.join('；') } : {}
   }
 

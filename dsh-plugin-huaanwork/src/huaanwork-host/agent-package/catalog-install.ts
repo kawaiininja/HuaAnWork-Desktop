@@ -333,7 +333,21 @@ export function recoverCatalogPackageInstalls(profileDir: string): void {
 // 安装/更新共用路径
 // ---------------------------------------------------------------------------
 
+/**
+ * 首次安装:占住 slug 后跑完整交易(验签、暂存、rename、state 提交)。
+ *
+ * 门禁必须覆盖到 rename/state 提交结束:安装期间同名 `@slug` 不得启动回合,
+ * 第二次安装也不得与本次暂存区交错。
+ */
 async function runCatalogInstall(
+  binding: AgentCatalogBinding,
+  slug: string,
+  version: string,
+): Promise<VerifiedCatalogInstall> {
+  return binding.lifecycle.run(slug, '安装', () => runCatalogInstallLocked(binding, slug, version))
+}
+
+async function runCatalogInstallLocked(
   binding: AgentCatalogBinding,
   slug: string,
   version: string,
@@ -389,7 +403,20 @@ async function runCatalogInstall(
   })
 }
 
+/**
+ * 更新:门禁在 `stopTurns` **之前**获取,并覆盖到 rename 与 state 提交结束。
+ *
+ * 停止失败时交易以 stopTurns 的错误中止,目录/state 都未触碰;门禁随后释放。
+ */
 async function runCatalogUpdate(
+  binding: AgentCatalogBinding,
+  slug: string,
+  stopTurns: AgentPackageTurnStopper,
+): Promise<VerifiedCatalogInstall> {
+  return binding.lifecycle.run(slug, '更新', () => runCatalogUpdateLocked(binding, slug, stopTurns))
+}
+
+async function runCatalogUpdateLocked(
   binding: AgentCatalogBinding,
   slug: string,
   stopTurns: AgentPackageTurnStopper,
@@ -649,7 +676,20 @@ function writeTransaction(stagingDir: string, transaction: CatalogInstallTransac
 // 移除
 // ---------------------------------------------------------------------------
 
+/**
+ * 移除:门禁覆盖 `stopTurns`、目录 rename 与 state 删除。
+ *
+ * 停止失败以 stopTurns 的错误中止,目录/state 不受影响。
+ */
 async function runCatalogRemove(
+  binding: AgentCatalogBinding,
+  slug: string,
+  stopTurns: AgentPackageTurnStopper,
+): Promise<void> {
+  return binding.lifecycle.run(slug, '移除', () => runCatalogRemoveLocked(binding, slug, stopTurns))
+}
+
+async function runCatalogRemoveLocked(
   binding: AgentCatalogBinding,
   slug: string,
   stopTurns: AgentPackageTurnStopper,

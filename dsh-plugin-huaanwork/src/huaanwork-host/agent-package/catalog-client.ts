@@ -7,6 +7,7 @@ import { catalogRootUrl } from '@huaanwork/policy/agent-catalog'
 import { isLanEndpoint } from '@huaanwork/policy/network'
 
 import type { AppSettings } from '../settings.ts'
+import { createAgentPackageLifecycleLock, type AgentPackageLifecycleLock } from './lifecycle.ts'
 import type { AgentPackageRevocation } from './types.ts'
 
 /**
@@ -317,13 +318,23 @@ export type AgentCatalogBinding = {
   readSettings: () => AgentCatalogSettings
   client: AgentCatalogClient
   logger: (message: string) => void
+  /**
+   * per-slug 生命周期门禁(Task 8):update/remove/install 交易与 host 的
+   * `@slug` dispatch 共用同一实例,交易期间不得启动新回合。
+   */
+  lifecycle: AgentPackageLifecycleLock
   /** 状态变化后发 `agent/changed`;由 `index.ts` 接到事件 hub。 */
   emitChanged?: (slug?: string) => void
 }
 
-export type ConfigureAgentCatalogOptions = Omit<AgentCatalogBinding, 'client'> & {
+export type ConfigureAgentCatalogOptions = Omit<AgentCatalogBinding, 'client' | 'lifecycle'> & {
   /** 测试可直接注入 fake client;省略时按 readSettings 构造真实 HTTP 客户端。 */
   client?: AgentCatalogClient
+  /**
+   * 生产由 `index.ts` 注入与 host 共享的实例;省略时自建一份
+   * (只绑定本模块的 install/update/remove,测试与单模块调用仍可用)。
+   */
+  lifecycle?: AgentPackageLifecycleLock
   fetchImpl?: typeof fetch
   timeoutMs?: number
 }
@@ -348,6 +359,7 @@ export function configureAgentCatalog(options: ConfigureAgentCatalogOptions): Ag
     readSettings: options.readSettings,
     client,
     logger: options.logger,
+    lifecycle: options.lifecycle ?? createAgentPackageLifecycleLock(),
     ...(options.emitChanged === undefined ? {} : { emitChanged: options.emitChanged }),
   }
   activeBinding = binding

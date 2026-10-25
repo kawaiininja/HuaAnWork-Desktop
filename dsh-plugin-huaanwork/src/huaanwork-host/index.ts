@@ -22,6 +22,7 @@ import {
   createAgentPackageHost,
   type AgentPackageActiveTurnRegistry,
 } from './agent-package/host.ts'
+import { createAgentPackageLifecycleLock } from './agent-package/lifecycle.ts'
 import {
   configureAgentCatalog,
   readCachedCatalogPackageSlugs,
@@ -86,7 +87,14 @@ export async function disposeAgentPackageRuntime(
   const stopping = stopAll().catch((cause: unknown) => {
     stopFailure = cause
   })
-  await activeTurns.cancelAll('dispose')
+  try {
+    await activeTurns.cancelAll('dispose')
+  } catch (error) {
+    // Task 8:cancelAll 在任一回合清理失败时抛聚合错误。退出路径没有调用方接
+    // 这个 rejection,而且此时进程 kill 已经发起:只记录,不制造 unhandled
+    // rejection,也不跳过对 stopAll 的等待。
+    console.error(error instanceof Error ? error.message : String(error))
+  }
   await stopping
   if (stopFailure !== undefined) throw stopFailure
 }
@@ -191,10 +199,14 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   // 安全面(keyring + 缓存撤销应用)→ 异步刷新 → 注入 host/sessions。
   recoverCatalogPackageInstalls(config.profileDir)
   const agentPackageTurns = createAgentPackageActiveTurnRegistry()
+  // Task 8:同一个 per-slug 门禁交给目录绑定(install/update/remove)与 host
+  // (dispatch),交易期间的同 slug `@slug` 因此在同步阶段被拒。
+  const agentPackageLifecycle = createAgentPackageLifecycleLock()
   const catalogClient = configureAgentCatalog({
     profileDir: config.profileDir,
     readSettings: () => readHuaanworkSettingsSync(config.profileDir),
     logger: routeCtx.logger,
+    lifecycle: agentPackageLifecycle,
     emitChanged: (slug) => {
       ctx.huaanworkEmit(slug === undefined ? { event: 'agent/changed' } : { event: 'agent/changed', slug })
     },
@@ -266,6 +278,8 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     registry: agentPackageRegistry,
     // Task 10:撤销/取消与 catalog-security、sessions 共用同一在途回合登记表。
     activeTurns: agentPackageTurns,
+    // Task 8:与目录绑定共享同一 per-slug 门禁。
+    lifecycle: agentPackageLifecycle,
     security: agentCatalogSecurity,
   })
   setAgentPackageHost(agentPackageHost)

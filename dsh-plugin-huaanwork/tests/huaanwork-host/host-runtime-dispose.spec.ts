@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
   createAgentPackageRuntimeDisposer,
@@ -238,5 +238,95 @@ describe('host runtime disposal', () => {
     expect(stopped).toEqual(['weekly-report'])
     await dispatched.afterIdle()
     await expect(turns.cancelAll('dispose')).resolves.toBeUndefined()
+  })
+})
+
+/**
+ * Task 8(R-T8-1):清理失败不再被吞。
+ *
+ * 取消路径(`record.cancel`,update/remove/revoke 走它)必须把 dispose/stop 的
+ * 超时或拒绝聚合成 rejection;idle 路径(`afterIdle`)只记录日志并 resolve —
+ * 父会话的 idle 清理被一个卡住的子代理拖成 rejection 会把正常的 idle 变成错误。
+ */
+describe('cleanup failure propagation', () => {
+  function neverDisposingActivation(): {
+    childId: string
+    result: Promise<unknown>
+    dispose: () => Promise<void>
+  } {
+    return {
+      childId: 'child',
+      result: new Promise(() => undefined),
+      dispose: () => new Promise(() => undefined),
+    }
+  }
+
+  function makeTimeoutHost(profileDir: string, activeTurns: ReturnType<typeof createAgentPackageActiveTurnRegistry>) {
+    return createAgentPackageHost({
+      profileDir,
+      takenSlugs: () => [],
+      activeTurns,
+      cleanupTimeoutMs: 20,
+      createRuntime: async (options): Promise<AgentPackageTurnRuntime> => ({
+        slug: options.manifest.slug,
+        packageDir: options.packageDir,
+        workspaceRoot: options.workspaceRoot,
+        skillScripts: [],
+        runSkillScript: async () => ({ text: '' }),
+      }),
+      stopRuntime: async () => undefined,
+    })
+  }
+
+  test('reports a dispose timeout from the cancel path instead of silently claiming cleanup succeeded', async () => {
+    const profileDir = installLocalPackage()
+    const activeTurns = createAgentPackageActiveTurnRegistry()
+    const host = makeTimeoutHost(profileDir, activeTurns)
+    const pkg = await host.findInvocable('weekly-report')
+    expect(pkg?.broken).toBeUndefined()
+
+    await host.dispatch({
+      ctx: {
+        huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        subagents: { startActivation: async () => neverDisposingActivation() },
+      } as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写一份周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+
+    // update/remove 走的是 record.cancel ⇒ 清理超时必须到达调用方。
+    await expect(activeTurns.cancelBySlug('weekly-report', 'remove')).rejects.toThrow(/清理失败|dispose/)
+  })
+
+  test('logs cleanup failures on the idle path instead of rejecting afterIdle', async () => {
+    const profileDir = installLocalPackage()
+    const activeTurns = createAgentPackageActiveTurnRegistry()
+    const host = makeTimeoutHost(profileDir, activeTurns)
+    const pkg = await host.findInvocable('weekly-report')
+    expect(pkg?.broken).toBeUndefined()
+
+    const dispatched = await host.dispatch({
+      ctx: {
+        huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        subagents: { startActivation: async () => neverDisposingActivation() },
+      } as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写一份周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map((value) => String(value)).join(' '))
+    })
+    try {
+      await expect(dispatched.afterIdle()).resolves.toBeUndefined()
+    } finally {
+      spy.mockRestore()
+    }
+    expect(logged.join('\n')).toMatch(/清理失败/)
   })
 })
