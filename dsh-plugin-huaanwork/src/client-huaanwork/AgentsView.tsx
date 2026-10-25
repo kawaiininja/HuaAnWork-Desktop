@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { rpcCall } from "./api.ts";
 import {
   AGENT_TABS,
@@ -8,6 +8,7 @@ import {
   type AgentDetail,
   type AgentTab,
 } from "./logic/agentsLogic.ts";
+import { catalogErrorMessage } from "./logic/agentPackagesLogic.ts";
 import AgentPackagesPanel from "./AgentPackagesPanel.tsx";
 import AgentsPlazaPanel from "./AgentsPlazaPanel.tsx";
 import AgentToolkitPanel from "./AgentToolkitPanel.tsx";
@@ -15,9 +16,18 @@ import AgentToolkitPanel from "./AgentToolkitPanel.tsx";
 export { atAgents, isAgentInvocable };
 export type { AgentDetail };
 
+/** 撤销列表的周期刷新间隔：规格要求进入智能体页后每 60 秒刷新一次。 */
+export const PACKAGE_REFRESH_INTERVAL_MS = 60_000;
+
 /**
- * 智能体页外壳（Task 8）：页面头、公用机配置栏、搜索、三页签切换与刷新。
- * 三页签的数据与动作各自在面板内（广场 / 我的智能体 / 我的工具包）。
+ * 智能体页外壳（Task 8 / M2 Task 12）：页面头、公用机配置栏（含发布口令）、
+ * 搜索、三页签切换与刷新。
+ *
+ * 刷新分两档：
+ * - 进入页面 / 手动刷新：先 `agent.packageRefresh`（目录 + 广场缓存 + 本地发布
+ *   状态 + 已安装 metadata + 撤销列表），再 `agent.refresh`（legacy 目录）；
+ * - 挂载期间每 60 秒只调 `agent.packageRefresh`，用于接收管理员撤销；前后两次
+ *   调用不重叠（在飞时跳过本轮），卸载即 `clearInterval`。
  *
  * `agentChangeSignal` 由 App 在收到 `agent/changed` 时自增，面板据此重拉；
  * 刷新按钮与保存配置走同一个信号，不额外引入第二个全局事件监听。
@@ -28,12 +38,15 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
   const [token, setToken] = useState("");
+  const [publishToken, setPublishToken] = useState("");
   const [hostFieldErrors, setHostFieldErrors] = useState<Record<string, string>>({});
   const [savingSettings, setSavingSettings] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  /** 周期刷新与手动刷新的互斥闸：同一时刻只有一个 packageRefresh 在飞。 */
+  const packageRefreshInFlight = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -43,11 +56,13 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
           agents_host?: string;
           agents_port?: number | "";
           agents_catalog_token?: string;
+          agents_catalog_publish_token?: string;
         }>("settings.get");
         if (active && s) {
           setHost(s.agents_host ?? "");
           setPort(s.agents_port ? String(s.agents_port) : "");
           setToken(s.agents_catalog_token ?? "");
+          setPublishToken(s.agents_catalog_publish_token ?? "");
         }
       } catch (cause) {
         if (active) setError(cause instanceof Error ? cause.message : String(cause));
@@ -62,15 +77,54 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
     if (agentChangeSignal > 0) setRefreshToken((prev) => prev + 1);
   }, [agentChangeSignal]);
 
+  /** 只刷新目录/撤销缓存；在飞时跳过，返回是否真正执行了这一轮。 */
+  const runPackageRefresh = useCallback(async (): Promise<boolean> => {
+    if (packageRefreshInFlight.current) return false;
+    packageRefreshInFlight.current = true;
+    try {
+      await rpcCall("agent.packageRefresh");
+      setError("");
+      return true;
+    } catch (cause) {
+      setError(catalogErrorMessage(cause));
+      return false;
+    } finally {
+      packageRefreshInFlight.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const refreshed = await runPackageRefresh();
+      if (!active || !refreshed) return;
+      try {
+        await rpcCall("agent.refresh");
+        if (active) setRefreshToken((prev) => prev + 1);
+      } catch (cause) {
+        if (active) setError(catalogErrorMessage(cause));
+      }
+    })();
+    const timer = window.setInterval(() => {
+      void runPackageRefresh();
+    }, PACKAGE_REFRESH_INTERVAL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [runPackageRefresh]);
+
   const handleRefresh = async () => {
     setRefreshing(true);
     setError("");
     try {
+      const refreshed = await runPackageRefresh();
+      if (!refreshed) return;
       await rpcCall("agent.refresh");
       setNote("已刷新智能体目录");
       setRefreshToken((prev) => prev + 1);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(catalogErrorMessage(cause));
     } finally {
       setRefreshing(false);
     }
@@ -89,6 +143,7 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
         agents_host: host.trim(),
         agents_port: port.trim() ? Number(port.trim()) : "",
         agents_catalog_token: token.trim(),
+        agents_catalog_publish_token: publishToken.trim(),
       });
       if (res && typeof res === "object" && "ok" in res && (res as { ok: boolean }).ok === false) {
         const fieldErrors: Record<string, string> = {};
@@ -171,6 +226,17 @@ export default function AgentsView({ agentChangeSignal = 0 }: { agentChangeSigna
             placeholder="访问口令（可选）"
             aria-label="访问口令"
             onChange={(event) => setToken(event.target.value)}
+          />
+        </div>
+        <div className="agents-config-field">
+          <input
+            className="agents-config-input"
+            type="password"
+            style={{ width: 140 }}
+            value={publishToken}
+            placeholder="发布口令（创建者）"
+            aria-label="发布口令"
+            onChange={(event) => setPublishToken(event.target.value)}
           />
         </div>
         <button

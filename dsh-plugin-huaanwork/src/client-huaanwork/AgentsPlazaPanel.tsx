@@ -1,21 +1,28 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { rpcCall } from "./api.ts";
-import { AgentPackageDetailDialog } from "./AgentPackagesPanel.tsx";
+import { AgentPackageCardView, AgentPackageDetailDialog } from "./AgentPackagesPanel.tsx";
 import { EnableConfirmModal } from "./AgentToolkitPanel.tsx";
 import {
+  catalogErrorMessage,
   filterPackageTab,
   PLAZA_EMPTY_TEXT,
   plazaCards,
   SEARCH_EMPTY_TEXT,
   type AgentPackageCard,
+  type PackageNotice,
 } from "./logic/agentPackagesLogic.ts";
 import type { AgentListItem, AgentPackageListResult } from "./rpc-types.ts";
 
 /**
- * 「智能体广场」页签（Task 8）：只读公用机目录里的智能体（`kind === 'agent'`）。
- * 动作只有查看详情与启用/关闭；启用先经 `EnableConfirmModal` 披露声明的能力，
- * 用户确认后才以 `confirmPermissions: true` 调用 `agent.setEnabled`，关闭直接生效。
- * 工具条目不在本页签。公用机目录不可达时，本地包仍可在「我的智能体」查看——两页取数互不阻塞。
+ * 「智能体广场」页签（Task 8 / M2 Task 12）。
+ *
+ * 两张来源合并展示：
+ * - 签名广场摘要（`catalogPackages`）：本机未安装，动作严格只有下载与详情；
+ * - legacy 目录条目（`catalogAgents`）：沿用启用/关闭（启用先经能力披露确认框）
+ *   与查看详情，不伪造下载入口。
+ *
+ * 同 slug 或签名包 `migrationFrom` 覆盖的 legacy 条目只显示签名卡（标“签名迁移包”）。
+ * 公用机目录不可达时，本地包仍可在「我的智能体」查看——两页取数互不阻塞。
  */
 export default function AgentsPlazaPanel({
   search,
@@ -27,13 +34,38 @@ export default function AgentsPlazaPanel({
   const [data, setData] = useState<AgentPackageListResult | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  /** 列表拉取失败单独存放：动作成功后的重拉不能把动作提示清掉。 */
+  const [loadError, setLoadError] = useState("");
+  const [warning, setWarning] = useState("");
   const [note, setNote] = useState("");
-  const [busyName, setBusyName] = useState("");
+  const [busySlugs, setBusySlugs] = useState<string[]>([]);
   const [detailSlug, setDetailSlug] = useState("");
   /** 待确认启用的目录条目；确认框负责披露能力并发出 `agent.setEnabled`。 */
   const [confirmItem, setConfirmItem] = useState<AgentListItem>();
   /** 本面板动作后的重拉计数；`refreshToken` 来自外壳刷新与 App 的 `agent/changed`。 */
   const [reloadTick, setReloadTick] = useState(0);
+  const busyRef = useRef<Set<string>>(new Set());
+
+  const begin = (slug: string): boolean => {
+    if (busyRef.current.has(slug)) return false;
+    busyRef.current.add(slug);
+    setBusySlugs([...busyRef.current]);
+    return true;
+  };
+
+  const end = (slug: string) => {
+    busyRef.current.delete(slug);
+    setBusySlugs([...busyRef.current]);
+  };
+
+  const showNotice = (notice: PackageNotice) => {
+    setNote("");
+    setWarning("");
+    setError("");
+    if (notice.tone === "note") setNote(notice.text);
+    else if (notice.tone === "warn") setWarning(notice.text);
+    else setError(notice.text);
+  };
 
   useEffect(() => {
     let active = true;
@@ -44,11 +76,13 @@ export default function AgentsPlazaPanel({
         setData({
           packages: Array.isArray(res.packages) ? res.packages : [],
           catalogAgents: Array.isArray(res.catalogAgents) ? res.catalogAgents : [],
+          catalogPackages: Array.isArray(res.catalogPackages) ? res.catalogPackages : [],
           ...(res.catalogError ? { catalogError: res.catalogError } : {}),
+          ...(res.revocationWarning ? { revocationWarning: res.revocationWarning } : {}),
         });
-        setError("");
+        setLoadError("");
       } catch (cause) {
-        if (active) setError(cause instanceof Error ? cause.message : String(cause));
+        if (active) setLoadError(catalogErrorMessage(cause));
       } finally {
         if (active) setLoading(false);
       }
@@ -58,19 +92,21 @@ export default function AgentsPlazaPanel({
     };
   }, [refreshToken, reloadTick]);
 
+  const reload = () => setReloadTick((prev) => prev + 1);
+
   const disable = async (card: AgentPackageCard) => {
-    if (busyName) return;
-    setBusyName(card.slug);
+    if (!begin(card.slug)) return;
     setError("");
+    setWarning("");
     setNote("");
     try {
       await rpcCall("agent.setEnabled", { name: card.slug, enabled: false });
       setNote(`已关闭「${card.displayName}」`);
-      setReloadTick((prev) => prev + 1);
+      reload();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(catalogErrorMessage(cause));
     } finally {
-      setBusyName("");
+      end(card.slug);
     }
   };
 
@@ -82,8 +118,14 @@ export default function AgentsPlazaPanel({
       return;
     }
     setError("");
+    setWarning("");
     setNote("");
     setConfirmItem(item);
+  };
+
+  const toggle = (card: AgentPackageCard) => {
+    if (card.enabled) void disable(card);
+    else requestEnable(card);
   };
 
   const allCards = data ? plazaCards(data) : [];
@@ -93,9 +135,20 @@ export default function AgentsPlazaPanel({
     <div className="agent-plaza-panel">
       {note ? <p className="hint" style={{ marginBottom: 12 }}>{note}</p> : null}
       {error ? <p className="banner error" style={{ marginBottom: 12 }}>{error}</p> : null}
+      {loadError ? <p className="banner error" style={{ marginBottom: 12 }}>{loadError}</p> : null}
+      {warning ? (
+        <p className="banner warn" style={{ marginBottom: 12 }}>
+          {warning}
+        </p>
+      ) : null}
       {data?.catalogError ? (
         <div className="banner warn" style={{ marginBottom: 12 }}>
           {data.catalogError}
+        </div>
+      ) : null}
+      {data?.revocationWarning ? (
+        <div className="banner warn" style={{ marginBottom: 12 }}>
+          {data.revocationWarning}
         </div>
       ) : null}
 
@@ -106,39 +159,18 @@ export default function AgentsPlazaPanel({
       ) : (
         <div className="skill-grid">
           {cards.map((card) => (
-            <div key={`plaza:${card.slug}`} className="skill-card">
-              <div className="top">
-                <span className="av">{card.displayName.slice(0, 1).toUpperCase()}</span>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div className="nm">{card.displayName}</div>
-                  <div className="agent-card-badges">
-                    <span className="badge">公用机</span>
-                    <span className="badge">v{card.version}</span>
-                    <span className="badge">@{card.slug}</span>
-                  </div>
-                </div>
-              </div>
-              {card.broken ? (
-                <div className="banner warn" style={{ margin: "6px 0", fontSize: 12 }}>
-                  已损坏：{card.broken.reason}
-                </div>
-              ) : null}
-              <p>{card.description || "（无描述）"}</p>
-              <div className="page-tools" style={{ marginTop: 8, marginBottom: 0 }}>
-                <button type="button" className="filter-tab" onClick={() => setDetailSlug(card.slug)}>
-                  查看详情
-                </button>
-                <span className="composer-spacer" />
-                <button
-                  type="button"
-                  className={card.enabled ? "filter-tab on" : "filter-tab"}
-                  disabled={busyName === card.slug || card.broken !== undefined}
-                  onClick={() => (card.enabled ? void disable(card) : requestEnable(card))}
-                >
-                  {card.enabled ? "关闭" : "启用"}
-                </button>
-              </div>
-            </div>
+            <AgentPackageCardView
+              key={`plaza:${card.source}:${card.slug}`}
+              card={card}
+              busy={busySlugs.includes(card.slug)}
+              begin={begin}
+              end={end}
+              onToggle={toggle}
+              onDetail={setDetailSlug}
+              onReload={reload}
+              onNotice={showNotice}
+              {...(card.source === "catalog-legacy" ? { sourceBadge: "公用机" } : {})}
+            />
           ))}
         </div>
       )}
@@ -154,7 +186,7 @@ export default function AgentsPlazaPanel({
           onConfirmed={async () => {
             setConfirmItem(undefined);
             setNote(`已启用「${confirmItem.displayName ?? confirmItem.name}」`);
-            setReloadTick((prev) => prev + 1);
+            reload();
           }}
         />
       ) : null}

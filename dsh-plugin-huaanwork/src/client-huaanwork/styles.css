@@ -1649,6 +1649,18 @@ button {
   font-size: 12px;
 }
 
+/* M2 智能体包卡片：动作区允许多按钮换行，包大小单独一行。 */
+
+.agent-package-actions {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.agent-package-size {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
 .agent-toolkit-group {
   margin: 4px 0 10px;
   font-size: 13px;
