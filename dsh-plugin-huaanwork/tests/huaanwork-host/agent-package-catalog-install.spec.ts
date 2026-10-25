@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -1156,6 +1157,44 @@ describe('catalog install crash recovery', () => {
     await pending
     expect(existsSync(formalDir('weekly-report'))).toBe(true)
     expect(installDirs()).toEqual([])
+  })
+
+  test('keeps the legacy key and transaction when no package or backup can be restored', async () => {
+    // 先完成一次正常迁移,再模拟「state 已提交、legacy 未删、正式目录与暂存包都没了」。
+    writeLegacyEnabled({ 'catalog:weekly-report': true })
+    await offer('weekly-report', '1.0.0', { migrationFrom: 'weekly-report' })
+    await install('weekly-report', '1.0.0')
+    const formal = formalDir('weekly-report')
+    const backup = join(root, 'weekly-report-backup')
+    cpSync(formal, backup, { recursive: true })
+    rmSync(formal, { recursive: true, force: true })
+    writeLegacyEnabled({ 'catalog:weekly-report': true })
+    const staging = seedStaging({
+      name: '.install-weekly-report-nopkg',
+      slug: 'weekly-report',
+      targetVersion: '1.0.0',
+      migrationFrom: 'weekly-report',
+    })
+    rmSync(join(staging, 'package'), { recursive: true, force: true })
+
+    recoverCatalogPackageInstalls(root)
+
+    // 没有任何可重建的包:legacy 旧键与交易记录都必须保留,供下次恢复。
+    expect(readLegacyEnabled()).toEqual({ 'catalog:weekly-report': true })
+    expect(existsSync(join(staging, 'transaction.json'))).toBe(true)
+    expect(existsSync(formal)).toBe(false)
+    expect(readAgentPackageState(root)['catalog:weekly-report']?.installedVersion).toBe('1.0.0')
+    expect(readAgentPackageState(root)['catalog:weekly-report']?.enabled).toBe(true)
+    expect(loggerLines.some((line) => line.includes('recover.missing'))).toBe(true)
+
+    // 包被找回后,下一次恢复才允许删 legacy 并清理交易。
+    cpSync(backup, formal, { recursive: true })
+    recoverCatalogPackageInstalls(root)
+
+    expect(readLegacyEnabled()).toEqual({})
+    expect(existsSync(staging)).toBe(false)
+    expect(readAgentPackageVersionFromDir(formal)).toBe('1.0.0')
+    expect(readAgentPackageState(root)['catalog:weekly-report']?.enabled).toBe(true)
   })
 
   test('deletes the legacy key when a migration committed but had not deleted it', async () => {

@@ -447,6 +447,12 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       // 已撤销的目录包只允许关闭,不允许再启用(移除/重装才是出路)。
       const detail = withRevoked(stored)
       if (enabled && detail.broken !== undefined) throw new Error(`智能体 @${slug} 已损坏:${detail.broken.reason}`)
+      // 启用前同步复验签名目录:损坏的包不能靠「打开开关」绕过运行门。
+      if (enabled && stored.source === 'catalog') {
+        if (security === undefined) throw new Error(AGENT_PACKAGE_VERIFY_FAILURE)
+        const verdict = security.verifyInstalledSync(slug)
+        if (!verdict.ok) throw new Error(`智能体 @${slug} 已损坏:${verdict.reason}`)
+      }
       setAgentPackageEnabled(profileDir, slug, enabled)
     },
 
@@ -463,9 +469,12 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
 
     async invocableWithLegacy() {
       recoverCatalogPackageInstalls(profileDir)
-      // 撤销已在同步列表里派生为 broken;@ 补全因此不会出现已撤销的包。
-      const localItems = listLocalAgentPackages(profileDir)
-        .map((item) => withRevoked(item))
+      // @ 补全与运行门同源:每个 catalog 包都异步复验,签名损坏/已撤销的包
+      // 不进入补全(仍保留在同步 listLocal/detail 里供界面展示与移除)。
+      const packages = await Promise.all(
+        listLocalAgentPackages(profileDir).map((item) => decorateCatalogItem(item)),
+      )
+      const localItems = packages
         .filter((pkg) => pkg.enabled && pkg.broken === undefined)
         .map(toInvocableListItem)
       // 目录条目保留原 kind/source:tool 与 agent 都可能被 `@` 点名调用。

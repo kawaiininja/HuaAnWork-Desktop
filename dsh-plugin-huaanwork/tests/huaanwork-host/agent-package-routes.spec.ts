@@ -299,6 +299,11 @@ function fakeSecurity(keys: GeneratedKeyPair): FakeSecurity {
       this.verifyCalls.push(slug)
       return this.verification
     },
+    verifyInstalledSync() {
+      // 同步启用门与异步验签共用同一份编排结果;不计入 verifyCalls(既有断言只
+      // 统计详情/运行路径的异步复验)。
+      return this.verification
+    },
     async assertRunnable() {},
     async stopAgentPackageTurnsForSlug(slug, reason) {
       this.stopped.push({ slug, reason })

@@ -5,7 +5,11 @@ import {
   verifyAgentPackageDirectory,
   type AgentPackageDigest,
 } from '@huaanwork/agent-package-format/digest'
-import type { CatalogKeyringEntry, CatalogSignature } from '@huaanwork/catalog-signing'
+import {
+  canonicalJson,
+  type CatalogKeyringEntry,
+  type CatalogSignature,
+} from '@huaanwork/catalog-signing'
 
 import {
   getAgentCatalogBinding,
@@ -44,6 +48,9 @@ import type { AgentPackageRevocation, AgentPackageState } from './types.ts'
  *   spawn 门由 host 传入的同一 signal 承担;
  * - `verifyInstalled` 每次从磁盘复验,失败只回对外统一文案;`assertRunnable`
  *   把任何失败映射成同一句 `包校验失败`,不泄露本地路径。
+ * - `assertRunnable` 把运行绑定到**已安装身份**:state 的 `installedVersion`、
+ *   `digest.slug/version` 与前后两次复验的 digest 必须全部一致;`verifyInstalledSync`
+ *   是同一验签逻辑的同步版,供 `setEnabled` 这类同步入口使用(不经过测试缝)。
  *
  * 本模块只通过 {@link AgentPackageActiveTurnRegistry} 结构取消回合,不反向访问
  * `host.dispatch` 的闭包;Task 9 的 update/remove 以
@@ -87,8 +94,16 @@ export type AgentCatalogSecurity = {
   /** 每次从磁盘复验已安装的 catalog 包;local 包不适用本方法。 */
   verifyInstalled(slug: string): Promise<AgentPackageVerification>
   /**
-   * 运行前门:撤销/验签失败一律抛出。
+   * 同步复验已安装目录(真实 keyring,不经过测试缝)。
    *
+   * 供同步入口(如 `host.setEnabled`)使用:启用门必须看到真实磁盘,而不是
+   * 既有测试注入的竞态替身。
+   */
+  verifyInstalledSync(slug: string): AgentPackageVerification
+  /**
+   * 运行前门:身份不符、撤销或验签失败一律抛出。
+   *
+   * 先核对 state 的 `installedVersion`,再要求两次复验的 digest 逐字节一致;
    * 复验后重新比对 revocation generation,复验期间到达的撤销不会被漏掉。
    */
   assertRunnable(slug: string, version: string): Promise<void>
@@ -153,16 +168,25 @@ export function createAgentCatalogSecurity(options: CreateAgentCatalogSecurityOp
     return isAgentCatalogConfigured()
   }
 
-  const verifyInstalled = async (slug: string): Promise<AgentPackageVerification> => {
-    if (options.verify !== undefined) return options.verify(slug)
+  /**
+   * 真实目录验签(同步);`options.verify` 测试缝不参与,启用门与运行门共用。
+   *
+   * 任何异常(keyring 缺失、目录缺失、签名/摘要不符)都收敛成同一句对外文案,
+   * 不泄露本地路径。
+   */
+  const verifyInstalledSync = (slug: string): AgentPackageVerification => {
     if (keyring === undefined) return { ok: false, reason: AGENT_PACKAGE_VERIFY_FAILURE }
     try {
       const verified = verifyAgentPackageDirectory(agentPackageDir(profileDir, slug), keyring)
       return { ok: true, digest: verified.digest, signature: verified.signature }
-    } catch (error) {
-      // 目录验签失败已由包格式收敛成统一文案;再兜一层,任何异常都不外泄路径。
-      return { ok: false, reason: errorMessage(error) || AGENT_PACKAGE_VERIFY_FAILURE }
+    } catch {
+      return { ok: false, reason: AGENT_PACKAGE_VERIFY_FAILURE }
     }
+  }
+
+  const verifyInstalled = async (slug: string): Promise<AgentPackageVerification> => {
+    if (options.verify !== undefined) return options.verify(slug)
+    return verifyInstalledSync(slug)
   }
 
   const revocationFor = (slug: string, version?: string): AgentPackageRevocation | undefined => {
@@ -324,12 +348,27 @@ export function createAgentCatalogSecurity(options: CreateAgentCatalogSecurityOp
   }
 
   const assertRunnable = async (slug: string, version: string): Promise<void> => {
+    // 运行前先绑定「已安装身份」:state 说别的版本时,磁盘上即便是一份验签通过
+    // 的包也不能运行(更新/回滚的中间态)。
+    const entry = readAgentPackageState(profileDir)[`${CATALOG_STATE_PREFIX}${slug}`]
+    if (entry === undefined || entry.source !== 'catalog' || entry.installedVersion !== version) {
+      throw new Error(AGENT_PACKAGE_VERIFY_FAILURE)
+    }
     for (let attempt = 0; attempt < MAX_ASSERT_ATTEMPTS; attempt += 1) {
       const snapshot = generation
       const revoked = revocationFor(slug, version)
       if (revoked !== undefined) throw new Error(agentPackageRevokedMessage(revoked))
       const verification = await verifyInstalled(slug)
       if (!verification.ok) throw new Error(AGENT_PACKAGE_VERIFY_FAILURE)
+      // 签名目录必须就是这个 slug、这个版本,而不是「某个能验签的包」。
+      if (verification.digest.slug !== slug || verification.digest.version !== version) {
+        throw new Error(AGENT_PACKAGE_VERIFY_FAILURE)
+      }
+      // 两次复验的 digest 必须逐字节一致:验签期间目录被换掉时拒绝运行。
+      const recheck = await verifyInstalled(slug)
+      if (!recheck.ok || canonicalJson(recheck.digest) !== canonicalJson(verification.digest)) {
+        throw new Error(AGENT_PACKAGE_VERIFY_FAILURE)
+      }
       // 复验期间没有新的撤销应用:可以放行。
       if (snapshot === generation) return
     }
@@ -341,6 +380,7 @@ export function createAgentCatalogSecurity(options: CreateAgentCatalogSecurityOp
     loadCachedRevocations,
     refreshRevocations,
     verifyInstalled,
+    verifyInstalledSync,
     assertRunnable,
     async stopAgentPackageTurnsForSlug(slug, reason) {
       await registry.cancelBySlug(slug, reason)

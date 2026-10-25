@@ -781,7 +781,45 @@ function recoverInstall(profileDir: string, root: string, name: string, names: r
   const entry = readAgentPackageState(profileDir)[key]
 
   if (entry !== undefined && entry.source === 'catalog' && entry.installedVersion === transaction.targetVersion) {
-    // 交易已提交(含迁移):先补删 legacy 旧键,失败则按安装失败语义回滚。
+    // 交易已提交(含迁移):先恢复一个有效正式目录,最后才删证据。
+    const formalVersion = pathExists(formal) ? readAgentPackageVersionFromDir(formal) : undefined
+    const formalValid = formalVersion === transaction.targetVersion
+
+    // 1) 正式目录缺失或版本不符时先尝试重建:staging package 优先,其次 `.old-*`。
+    //    rename 不能覆盖已存在的非空目录,失败时原样保留证据。
+    if (!formalValid) {
+      if (pathExists(stagingPackage)) {
+        try {
+          renameSync(stagingPackage, formal)
+        } catch {
+          // 保留证据,交给下面的判定。
+        }
+      } else if (oldDirs.length > 0) {
+        try {
+          renameSync(oldDirs[0]!, formal)
+        } catch {
+          // 保留证据,交给下面的判定。
+        }
+      }
+    }
+
+    const restoredVersion = pathExists(formal) ? readAgentPackageVersionFromDir(formal) : undefined
+    if (restoredVersion !== transaction.targetVersion) {
+      if (restoredVersion !== undefined) {
+        // 状态新、磁盘旧(不可能由本事务的提交顺序产生):以磁盘为准回滚 state。
+        // 这条既有分支之外不得清理旧的 `.old-*` 证据。
+        restoreTransactionState(profileDir, slug, transaction)
+        removeQuietly(staging)
+        for (const oldDir of oldDirs) removeQuietly(oldDir)
+        return
+      }
+      // 2) 没有可重建的正式目录:保留 legacy、staging、old 与 transaction,
+      //    供下次恢复。先删证据会让 state 永远声称一个磁盘上不存在的版本。
+      logRecover('recover.missing', slug, new Error('no valid package and restore failed'))
+      return
+    }
+
+    // 3) 只有到这里才允许删 legacy;失败仍走 rollbackCommittedInstall。
     if (transaction.migrationFrom !== undefined) {
       const legacyKey = `${LEGACY_KEY_PREFIX}${transaction.migrationFrom}`
       // 无条件补删。旧表的可读性不能由 readLegacyEnabledMap 的宽空表决定:
@@ -797,27 +835,8 @@ function recoverInstall(profileDir: string, root: string, name: string, names: r
         return
       }
     }
-    if (!pathExists(formal)) {
-      if (pathExists(stagingPackage)) {
-        try {
-          renameSync(stagingPackage, formal)
-        } catch {
-          // 交由 .old 分支或下一次恢复。
-        }
-      } else if (oldDirs.length > 0) {
-        try {
-          renameSync(oldDirs[0]!, formal)
-        } catch {
-          // 保留 .old-*;通用恢复还会再试一次。
-        }
-      }
-    } else {
-      const formalVersion = readAgentPackageVersionFromDir(formal)
-      if (formalVersion !== undefined && formalVersion !== transaction.targetVersion) {
-        // 状态新、磁盘旧(不可能由本事务的提交顺序产生):以磁盘为准回滚 state。
-        restoreTransactionState(profileDir, slug, transaction)
-      }
-    }
+
+    // 4) 清理 staging/oldDirs(成功路径)。
     removeQuietly(staging)
     for (const oldDir of oldDirs) removeQuietly(oldDir)
     return

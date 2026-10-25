@@ -160,16 +160,30 @@ type SignedPackage = {
   packageDir: string
 }
 
-/** 按 catalog-install 的最终落盘形态写一个已验签目录(不含安装暂存区)。 */
-function writeSignedPackage(slug: string, version = '1.0.0'): SignedPackage {
-  const manifest = manifestFor(slug, version)
-  const files: AgentPackageFile[] = [
+function packageFiles(manifest: AgentPackageManifest): AgentPackageFile[] {
+  return [
     { path: 'agent.json', data: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8') },
-    { path: 'persona.md', data: Buffer.from(`你是 ${slug}。\n`, 'utf8') },
+    { path: 'persona.md', data: Buffer.from(`你是 ${manifest.slug}。\n`, 'utf8') },
   ]
+}
+
+/** 与 {@link writeSignedPackage} 同一输入形状的 digest,供 verify seam 构造真实结果。 */
+function digestFor(slug: string, version = '1.0.0'): AgentPackageDigest {
+  const manifest = manifestFor(slug, version)
+  return createAgentPackageDigest(manifest, packageFiles(manifest))
+}
+
+/**
+ * 按 catalog-install 的最终落盘形态写一个已验签目录(不含安装暂存区)。
+ *
+ * `directorySlug` 用来制造「签名包属于别的 slug,却落在这个目录」的身份不符。
+ */
+function writeSignedPackage(slug: string, version = '1.0.0', directorySlug = slug): SignedPackage {
+  const manifest = manifestFor(slug, version)
+  const files = packageFiles(manifest)
   const digest = createAgentPackageDigest(manifest, files)
   const signature = signAgentPackageDigest(digest, { privateKeyPem: keyPair.privateKeyPem, slot: 1, signedAt: NOW })
-  const packageDir = agentPackageDir(root, slug)
+  const packageDir = agentPackageDir(root, directorySlug)
   for (const file of files) {
     const target = join(packageDir, file.path)
     mkdirSync(dirname(target), { recursive: true })
@@ -526,6 +540,76 @@ describe('catalog dispatch verification', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 运行前身份绑定
+// ---------------------------------------------------------------------------
+
+describe('catalog installed identity binding', () => {
+  test('refuses to run when the directory is a valid signed v2 but state says v1', async () => {
+    installEnabledCatalogPackage(SLUG, '1.0.0')
+    // 目录被换成一份**验签通过**的 1.0.1:签名本身没问题,但 state 仍说 1.0.0。
+    writeSignedPackage(SLUG, '1.0.1')
+
+    const security = catalogSecurity(fakeCatalogClient())
+    await expect(security.assertRunnable(SLUG, '1.0.0')).rejects.toThrow(
+      new RegExp(AGENT_PACKAGE_VERIFY_FAILURE),
+    )
+  })
+
+  test('refuses to run a revoked version even when state and directory agree', async () => {
+    installEnabledCatalogPackage(SLUG, '1.0.1')
+    const security = catalogSecurity(
+      fakeCatalogClient({ getRevocations: async () => [revocation(SLUG, '1.0.1', '新版脚本外传数据')] }),
+    )
+    await security.refreshRevocations()
+
+    await expect(security.assertRunnable(SLUG, '1.0.1')).rejects.toThrow(/该版本已被管理员撤销：新版脚本外传数据/)
+  })
+
+  test('refuses to run a signed package whose digest belongs to another slug', async () => {
+    // 另一个 slug 的合法签名包落在本 slug 的正式目录里:digest.slug 对不上。
+    writeSignedPackage('other-agent', '1.0.0', SLUG)
+    writeAgentPackageState(root, {
+      ...readAgentPackageState(root),
+      [`catalog:${SLUG}`]: {
+        source: 'catalog',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'installed',
+      },
+    })
+
+    const security = catalogSecurity(fakeCatalogClient())
+    await expect(security.assertRunnable(SLUG, '1.0.0')).rejects.toThrow(
+      new RegExp(AGENT_PACKAGE_VERIFY_FAILURE),
+    )
+  })
+
+  test('refuses to run when the verified digest changes between the two checks', async () => {
+    installEnabledCatalogPackage(SLUG, '1.0.0')
+    const v1 = digestFor(SLUG, '1.0.0')
+    const v2 = digestFor(SLUG, '1.0.1')
+    let verifyCalls = 0
+    const security = createAgentCatalogSecurity({
+      profileDir: root,
+      registry: createAgentPackageActiveTurnRegistry(),
+      client: fakeCatalogClient(),
+      verify: async (): Promise<AgentPackageVerification> => {
+        verifyCalls += 1
+        if (verifyCalls === 1) return { ok: true, digest: v1, signature: {} as CatalogSignature }
+        // 第一次与第二次复验之间目录被换成 1.0.1:digest 必须逐字节一致。
+        writeSignedPackage(SLUG, '1.0.1')
+        return { ok: true, digest: v2, signature: {} as CatalogSignature }
+      },
+    })
+
+    await expect(security.assertRunnable(SLUG, '1.0.0')).rejects.toThrow(
+      new RegExp(AGENT_PACKAGE_VERIFY_FAILURE),
+    )
+    expect(verifyCalls).toBe(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 撤销
 // ---------------------------------------------------------------------------
 
@@ -781,6 +865,7 @@ describe('catalog revocations', () => {
 
   test('a revocation that lands while verifying is not missed (generation re-check)', async () => {
     installEnabledCatalogPackage()
+    const verifiedDigest = digestFor(SLUG)
     const verifyStarted = deferred<void>()
     const verifyGate = deferred<void>()
     let verifyCalls = 0
@@ -794,7 +879,7 @@ describe('catalog revocations', () => {
           verifyStarted.resolve()
           await verifyGate.promise
         }
-        return { ok: true, digest: {} as AgentPackageDigest, signature: {} as CatalogSignature }
+        return { ok: true, digest: verifiedDigest, signature: {} as CatalogSignature }
       },
     })
 
@@ -805,8 +890,9 @@ describe('catalog revocations', () => {
     verifyGate.resolve()
 
     // 复验本身返回 ok;是复检 generation 后的撤销检查让这次运行被拒绝。
+    // 每次尝试先验签再复验 digest,所以这里看到两次 verify。
     await expect(pending).rejects.toThrow(/该版本已被管理员撤销：竞态撤销/)
-    expect(verifyCalls).toBe(1)
+    expect(verifyCalls).toBe(2)
   })
 
   test('offline refresh uses the cached revocations and reports a warning', async () => {
