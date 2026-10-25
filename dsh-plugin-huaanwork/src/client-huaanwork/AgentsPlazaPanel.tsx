@@ -18,11 +18,14 @@ import type { AgentListItem, AgentPackageListResult } from "./rpc-types.ts";
  *
  * 两张来源合并展示：
  * - 签名广场摘要（`catalogPackages`）：本机未安装，动作严格只有下载与详情；
+ *   已安装的 slug 由 `plazaCards` 剔除，不会以“下载”卡重复出现；
  * - legacy 目录条目（`catalogAgents`）：沿用启用/关闭（启用先经能力披露确认框）
  *   与查看详情，不伪造下载入口。
  *
- * 同 slug 或签名包 `migrationFrom` 覆盖的 legacy 条目只显示签名卡（标“签名迁移包”）。
- * 公用机目录不可达时，本地包仍可在「我的智能体」查看——两页取数互不阻塞。
+ * 未安装签名卡的详情只读摘要（不调用 `agent.packageDetail`），并明示签名与文件
+ * 清单需安装后查看。同 slug 或签名包 `migrationFrom` 覆盖的 legacy 条目只显示签名卡
+ * （标“签名迁移包”）。公用机目录不可达时，本地包仍可在「我的智能体」查看——两页
+ * 取数互不阻塞。
  */
 export default function AgentsPlazaPanel({
   search,
@@ -39,7 +42,8 @@ export default function AgentsPlazaPanel({
   const [warning, setWarning] = useState("");
   const [note, setNote] = useState("");
   const [busySlugs, setBusySlugs] = useState<string[]>([]);
-  const [detailSlug, setDetailSlug] = useState("");
+  /** 当前打开详情的卡片；未安装签名卡只读摘要，不带磁盘详情。 */
+  const [detailCard, setDetailCard] = useState<AgentPackageCard>();
   /** 待确认启用的目录条目；确认框负责披露能力并发出 `agent.setEnabled`。 */
   const [confirmItem, setConfirmItem] = useState<AgentListItem>();
   /** 本面板动作后的重拉计数；`refreshToken` 来自外壳刷新与 App 的 `agent/changed`。 */
@@ -166,7 +170,7 @@ export default function AgentsPlazaPanel({
               begin={begin}
               end={end}
               onToggle={toggle}
-              onDetail={setDetailSlug}
+              onDetail={setDetailCard}
               onReload={reload}
               onNotice={showNotice}
               {...(card.source === "catalog-legacy" ? { sourceBadge: "公用机" } : {})}
@@ -175,8 +179,12 @@ export default function AgentsPlazaPanel({
         </div>
       )}
 
-      {detailSlug ? (
-        <AgentPackageDetailDialog slug={detailSlug} onClose={() => setDetailSlug("")} />
+      {detailCard ? (
+        <AgentPackageDetailDialog
+          slug={detailCard.slug}
+          summary={detailCard}
+          onClose={() => setDetailCard(undefined)}
+        />
       ) : null}
 
       {confirmItem ? (

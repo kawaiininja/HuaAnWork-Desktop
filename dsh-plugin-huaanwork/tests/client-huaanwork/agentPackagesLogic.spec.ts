@@ -16,10 +16,12 @@ import {
   DELISTED_NOTICE,
   filterPackageTab,
   formatPackageSize,
+  INSTALL_DETAIL_NOTICE,
   isAgentPackageDetail,
   LOCAL_UNSIGNED_LABEL,
   MIGRATION_PACKAGE_LABEL,
   MINE_EMPTY_TEXT,
+  MISSING_SIGNATURE_LABEL,
   mineCards,
   PACKAGE_SANDBOX_WARNING,
   packageActionLabel,
@@ -308,6 +310,8 @@ describe("M2 product copy", () => {
     assert.equal(VERIFY_FAILURE_TEXT, "包校验失败，未安装或未运行。请联系管理员");
     assert.equal(MIGRATION_PACKAGE_LABEL, "签名迁移包");
     assert.equal(LOCAL_UNSIGNED_LABEL, "本地创建，未签名");
+    assert.equal(MISSING_SIGNATURE_LABEL, "未提供签名信息");
+    assert.equal(INSTALL_DETAIL_NOTICE, "安装后可查看签名与文件清单");
     assert.equal(reviewRejectedText("包含越权指令"), "审查未通过：包含越权指令");
     assert.equal(revokedText({ reason: "窃取凭据" }), "该版本已被管理员撤销：窃取凭据");
   });
@@ -441,28 +445,59 @@ describe("plazaCards with signed summaries", () => {
   ];
 
   test("signed cards win over the migrated legacy entry and are labelled", () => {
-    const cards = plazaCards({ catalogPackages: summaries, catalogAgents: [enabledCatalogAgent] });
+    const cards = plazaCards({
+      packages: [],
+      catalogPackages: summaries,
+      catalogAgents: [enabledCatalogAgent],
+    });
     assert.deepEqual(cards.map((item) => item.slug), ["migrated-agent", "fresh-package"]);
     assert.equal(cards[0]?.source, "catalog");
     assert.equal(cards[0]?.installed, false);
     assert.equal(cards[0]?.migrationFrom, "legacy-agent");
     assert.equal(cards[0]?.size, 2048);
+    assert.equal(cards[0]?.updatedAt, "2026-10-01T00:00:00.000Z");
     assert.equal(cards[0]?.displayName, "迁移后的助手");
     assert.equal(cards[1]?.migrationFrom, undefined);
   });
 
   test("a signed summary with the same slug also suppresses the legacy duplicate", () => {
     const sameSlug: AgentPackageSummary = { ...summaries[1]!, slug: "legacy-agent" };
-    const cards = plazaCards({ catalogPackages: [sameSlug], catalogAgents: [enabledCatalogAgent] });
+    const cards = plazaCards({
+      packages: [],
+      catalogPackages: [sameSlug],
+      catalogAgents: [enabledCatalogAgent],
+    });
     assert.deepEqual(cards.map((item) => item.slug), ["legacy-agent"]);
     assert.equal(cards[0]?.source, "catalog");
   });
 
   test("without signed summaries the legacy cards stay unchanged", () => {
-    const cards = plazaCards({ catalogAgents: [enabledCatalogAgent, disabledCatalogAgent, catalogTool] });
+    const cards = plazaCards({
+      packages: [],
+      catalogAgents: [enabledCatalogAgent, disabledCatalogAgent, catalogTool],
+    });
     assert.deepEqual(cards.map((item) => item.slug), ["legacy-agent", "legacy-agent-off"]);
     assert.equal(cards[0]?.installed, undefined);
     assert.equal(cards[0]?.size, undefined);
+  });
+
+  test("already-installed summaries never render as an uninstalled download card", () => {
+    const installed: AgentPackageListItem = {
+      slug: "fresh-package",
+      displayName: "全新签名包",
+      description: "签名广场新包",
+      version: "1.0.0",
+      source: "catalog",
+      enabled: true,
+      publishStatus: "installed",
+    };
+    const cards = plazaCards({
+      packages: [installed],
+      catalogPackages: [summaries[1]!],
+      // 同名 legacy 条目也不得借尸还魂：被签名摘要（已安装）覆盖。
+      catalogAgents: [{ ...enabledCatalogAgent, name: "fresh-package" }],
+    });
+    assert.deepEqual(cards, []);
   });
 });
 

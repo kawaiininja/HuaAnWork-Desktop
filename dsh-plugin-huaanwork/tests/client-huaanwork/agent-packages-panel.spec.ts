@@ -359,6 +359,70 @@ describe("AgentPackagesPanel（我的智能体）", () => {
     expect(container!.textContent).toContain("256 字节");
   });
 
+  it("验签未通过显示“验签结果：未通过”与原因，不展示 keyId/签名时间", async () => {
+    listPayload = {
+      packages: [
+        {
+          slug: "signed-pack",
+          displayName: "签名广场包",
+          description: "来自广场的签名包",
+          version: "2.1.0",
+          source: "catalog",
+          enabled: true,
+          publishStatus: "installed",
+        },
+      ],
+      catalogAgents: [],
+    };
+    handlers["agent.packageDetail"] = () => ({
+      ...CATALOG_DETAIL,
+      signature: {
+        keyId: "abc123",
+        signedAt: "2026-10-20T08:00:00.000Z",
+        slot: 1,
+        verification: "invalid",
+        reason: "摘要与签名不匹配",
+      },
+    });
+
+    const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
+    await click(buttonIn(cardBySlug(view, "signed-pack"), "查看详情")!);
+    await flush();
+
+    expect(container!.textContent).toContain("验签结果：未通过");
+    expect(container!.textContent).toContain("原因：摘要与签名不匹配");
+    expect(container!.textContent).not.toContain("keyId：abc123");
+    expect(container!.textContent).not.toContain("验签结果：通过");
+  });
+
+  it("目录包 not-applicable 显示未提供签名信息，不冒充本地未签名", async () => {
+    listPayload = {
+      packages: [
+        {
+          slug: "signed-pack",
+          displayName: "签名广场包",
+          description: "来自广场的签名包",
+          version: "2.1.0",
+          source: "catalog",
+          enabled: true,
+          publishStatus: "installed",
+        },
+      ],
+      catalogAgents: [],
+    };
+    handlers["agent.packageDetail"] = () => ({
+      ...CATALOG_DETAIL,
+      signature: { keyId: "", signedAt: "", slot: 1, verification: "not-applicable" },
+    });
+
+    const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
+    await click(buttonIn(cardBySlug(view, "signed-pack"), "查看详情")!);
+    await flush();
+
+    expect(container!.textContent).toContain("未提供签名信息");
+    expect(container!.textContent).not.toContain("本地创建，未签名");
+  });
+
   it("待审查卡只有查看状态与详情；查看到被拒后显示审查文案", async () => {
     listPayload = {
       packages: [{ ...LOCAL_PACKAGE, publishStatus: "pending-review" }],
@@ -497,6 +561,11 @@ describe("AgentPackagesPanel（我的智能体）", () => {
 
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
     expect(view.textContent).toContain("来自广场");
+    // 来源徽标与状态行同文案时只渲染一次（不再出现两个“来自广场”）。
+    const sourceBadges = [...cardBySlug(view, "signed-pack").querySelectorAll(".badge")].filter(
+      (item) => item.textContent?.trim() === "来自广场",
+    );
+    expect(sourceBadges).toHaveLength(1);
     expect(buttonLabels(cardBySlug(view, "signed-pack"))).toEqual([
       "查看详情",
       "关闭",

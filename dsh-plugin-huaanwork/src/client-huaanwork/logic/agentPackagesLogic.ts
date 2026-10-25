@@ -43,6 +43,10 @@ export const VERIFY_FAILURE_TEXT = "包校验失败，未安装或未运行。�
 export const MIGRATION_PACKAGE_LABEL = "签名迁移包";
 /** 本地包详情的签名栏文案。 */
 export const LOCAL_UNSIGNED_LABEL = "本地创建，未签名";
+/** 目录包没有可用签名信息时的详情文案（不得冒充本地包）。 */
+export const MISSING_SIGNATURE_LABEL = "未提供签名信息";
+/** 广场未安装签名卡的详情：签名与文件清单只在安装后可查，不伪造。 */
+export const INSTALL_DETAIL_NOTICE = "安装后可查看签名与文件清单";
 
 /** 审查拒绝文案：有原因时按规格带出。 */
 export function reviewRejectedText(reason: string | undefined): string {
@@ -77,6 +81,8 @@ export type AgentPackageCard = {
   updateAvailable?: boolean;
   /** 广场摘要里的包大小（字节）；只有签名广场卡携带。 */
   size?: number;
+  /** 广场摘要的更新时间；未安装签名卡的详情只读摘要，不查磁盘。 */
+  updatedAt?: string;
   /** 签名摘要的迁移来源；有值即标“签名迁移包”。 */
   migrationFrom?: string;
 };
@@ -321,6 +327,7 @@ function catalogPackageCard(summary: AgentPackageSummary): AgentPackageCard {
     enabled: false,
     installed: false,
     size: summary.size,
+    updatedAt: summary.updatedAt,
     ...(summary.migrationFrom === undefined || summary.migrationFrom.length === 0
       ? {}
       : { migrationFrom: summary.migrationFrom }),
@@ -330,14 +337,22 @@ function catalogPackageCard(summary: AgentPackageSummary): AgentPackageCard {
 /**
  * 广场卡片：签名摘要优先，legacy 目录条目随后。
  *
+ * 已安装的签名包（slug 出现在 `packages` 里）不再出广场卡——宿主返回的
+ * `catalogPackages` 是整份目录缓存，不按安装状态过滤；不剔除就会把已安装包
+ * 渲染成带“下载”的未安装卡，点击只会收到“已安装，无需重复安装”。
+ *
  * 签名包的 `slug` 或 `migrationFrom` 已覆盖的 legacy 条目不再重复显示
- * （迁移包的签名卡带 `migrationFrom`，标“签名迁移包”）。
+ * （迁移包的签名卡带 `migrationFrom`，标“签名迁移包”）；已安装包的覆盖
+ * 同样生效，避免旧目录条目在广场里借尸还魂。
  */
 export function plazaCards(
-  result: Pick<AgentPackageListResult, "catalogAgents" | "catalogPackages">,
+  result: Pick<AgentPackageListResult, "catalogAgents" | "catalogPackages" | "packages">,
 ): AgentPackageCard[] {
+  const installedSlugs = new Set(result.packages.map((item) => item.slug));
   const summaries = result.catalogPackages ?? [];
-  const signed = summaries.map(catalogPackageCard);
+  const signed = summaries
+    .filter((summary) => !installedSlugs.has(summary.slug))
+    .map(catalogPackageCard);
   const claimed = new Set<string>();
   for (const summary of summaries) {
     claimed.add(summary.slug);

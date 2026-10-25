@@ -5,10 +5,12 @@ import {
   DELIST_CONFIRM_TEXT,
   filterPackageTab,
   formatPackageSize,
+  INSTALL_DETAIL_NOTICE,
   isAgentPackageDetail,
   LOCAL_UNSIGNED_LABEL,
   MIGRATION_PACKAGE_LABEL,
   MINE_EMPTY_TEXT,
+  MISSING_SIGNATURE_LABEL,
   mineCards,
   PACKAGE_SANDBOX_WARNING,
   packageActionLabel,
@@ -54,7 +56,8 @@ export default function AgentPackagesPanel({
   const [warning, setWarning] = useState("");
   const [note, setNote] = useState("");
   const [busySlugs, setBusySlugs] = useState<string[]>([]);
-  const [detailSlug, setDetailSlug] = useState("");
+  /** 当前打开详情的卡片；未安装签名卡只读摘要，不带磁盘详情。 */
+  const [detailCard, setDetailCard] = useState<AgentPackageCard>();
   /** 本面板动作后的重拉计数；`refreshToken` 来自外壳刷新与 App 的 `agent/changed`。 */
   const [reloadTick, setReloadTick] = useState(0);
   /** 在飞判定的同步事实源：state 更新是异步的，双击要靠 ref 挡。 */
@@ -161,7 +164,7 @@ export default function AgentPackagesPanel({
               begin={begin}
               end={end}
               onToggle={(target) => void toggle(target)}
-              onDetail={setDetailSlug}
+              onDetail={setDetailCard}
               onReload={reload}
               onNotice={showNotice}
             />
@@ -169,8 +172,8 @@ export default function AgentPackagesPanel({
         </div>
       )}
 
-      {detailSlug ? (
-        <AgentPackageDetailDialog slug={detailSlug} onClose={() => setDetailSlug("")} />
+      {detailCard ? (
+        <AgentPackageDetailDialog slug={detailCard.slug} onClose={() => setDetailCard(undefined)} />
       ) : null}
     </div>
   );
@@ -193,7 +196,7 @@ export function AgentPackageCardView({
   begin: (slug: string) => boolean;
   end: (slug: string) => void;
   onToggle: (card: AgentPackageCard) => void;
-  onDetail: (slug: string) => void;
+  onDetail: (card: AgentPackageCard) => void;
   onReload: () => void;
   onNotice: (notice: PackageNotice) => void;
   /** 来源徽标的覆盖文案；广场沿用 M1 的“公用机”。 */
@@ -201,6 +204,7 @@ export function AgentPackageCardView({
 }) {
   const status = packageStatusLabel(card);
   const statusTone = packageStatusTone(card);
+  const sourceLabel = sourceBadge ?? packageSourceLabel(card.source);
   return (
     <div className="skill-card" data-slug={card.slug}>
       <div className="top">
@@ -208,11 +212,14 @@ export function AgentPackageCardView({
         <div style={{ minWidth: 0, flex: 1 }}>
           <div className="nm">{card.displayName}</div>
           <div className="agent-card-badges">
-            <span className="badge">{sourceBadge ?? packageSourceLabel(card.source)}</span>
+            <span className="badge">{sourceLabel}</span>
             <span className="badge">v{card.version}</span>
             <span className="badge">@{card.slug}</span>
             {card.migrationFrom ? <span className="badge">{MIGRATION_PACKAGE_LABEL}</span> : null}
-            {status && statusTone === "badge" ? <span className="badge">{status}</span> : null}
+            {/* 目录卡的状态行就是“来自广场”，与来源徽标重复时不再渲染第二个徽标。 */}
+            {status && statusTone === "badge" && status !== sourceLabel ? (
+              <span className="badge">{status}</span>
+            ) : null}
           </div>
         </div>
       </div>
@@ -263,7 +270,7 @@ export function AgentPackageCardActions({
   begin: (slug: string) => boolean;
   end: (slug: string) => void;
   onToggle: (card: AgentPackageCard) => void;
-  onDetail: (slug: string) => void;
+  onDetail: (card: AgentPackageCard) => void;
   onReload: () => void;
   onNotice: (notice: PackageNotice) => void;
 }) {
@@ -319,7 +326,7 @@ export function AgentPackageCardActions({
     if (busy) return;
     switch (action) {
       case "detail":
-        onDetail(card.slug);
+        onDetail(card);
         return;
       case "enable":
       case "disable":
@@ -502,22 +509,34 @@ export function AgentPackageCardActions({
 }
 
 /**
- * 包/旧目录智能体的详情弹层：`agent.packageDetail` 返回两侧载荷，按 `slug` 收窄。
+ * 包/旧目录智能体的详情弹层：已安装包与 legacy 条目走 `agent.packageDetail`，
+ * 按 `slug` 收窄两侧载荷。
  *
- * M2 增加发布状态与签名信息：目录包显示 keyId/签名时间/槽位/验签结果，本地包
- * 明示“本地创建，未签名”。底部固定展示本机沙箱提示（两种详情相同）。
+ * 广场未安装签名卡（`summary.installed === false`）**不**调用
+ * `agent.packageDetail`：磁盘上没有这个包，调用只会得到“不存在”。这类详情只读
+ * 目录摘要（名称/简介/版本/大小/更新时间/迁移来源），并明示签名与文件清单需
+ * 安装后查看；不伪造 keyId/signedAt/验签结果。
+ *
+ * M2 增加发布状态与签名信息：已安装目录包显示 keyId/签名时间/槽位/验签结果，
+ * 本地包明示“本地创建，未签名”。底部固定展示本机沙箱提示（所有详情相同）。
  */
 export function AgentPackageDetailDialog({
   slug,
+  summary,
   onClose,
 }: {
   slug: string;
+  /** 广场未安装签名卡的摘要；只有 `installed === false` 时启用摘要详情。 */
+  summary?: AgentPackageCard;
   onClose: () => void;
 }) {
   const [detail, setDetail] = useState<AgentPackageDetailResult | undefined>(undefined);
   const [error, setError] = useState("");
+  const summaryOnly = summary?.installed === false;
+  const summaryDetail = summaryOnly ? summary : undefined;
 
   useEffect(() => {
+    if (summaryOnly) return undefined;
     let active = true;
     void (async () => {
       try {
@@ -532,11 +551,16 @@ export function AgentPackageDetailDialog({
     return () => {
       active = false;
     };
-  }, [slug]);
+  }, [slug, summaryOnly]);
 
   const packageDetail = detail !== undefined && isAgentPackageDetail(detail) ? detail : undefined;
   const legacyDetail = detail !== undefined && !isAgentPackageDetail(detail) ? detail : undefined;
-  const title = packageDetail?.displayName ?? legacyDetail?.displayName ?? legacyDetail?.name ?? slug;
+  const title =
+    summaryDetail?.displayName ??
+    packageDetail?.displayName ??
+    legacyDetail?.displayName ??
+    legacyDetail?.name ??
+    slug;
   const signature = packageDetail?.signature;
 
   return (
@@ -544,7 +568,37 @@ export function AgentPackageDetailDialog({
       <div className="confirm-modal automation-form">
         <h3>{title}</h3>
         {error ? <p className="banner error">{error}</p> : null}
-        {detail === undefined && !error ? <p className="hint">加载中…</p> : null}
+        {detail === undefined && !error && summaryDetail === undefined ? (
+          <p className="hint">加载中…</p>
+        ) : null}
+
+        {summaryDetail ? (
+          <>
+            <div className="agent-card-badges">
+              <span className="badge">{packageSourceLabel("catalog")}</span>
+              <span className="badge">v{summaryDetail.version}</span>
+              <span className="badge">@{summaryDetail.slug}</span>
+              {summaryDetail.migrationFrom ? (
+                <span className="badge">{MIGRATION_PACKAGE_LABEL}</span>
+              ) : null}
+            </div>
+            <p className="hint">{summaryDetail.description || "（无描述）"}</p>
+            <section className="agent-detail-section">
+              <strong>包信息</strong>
+              {summaryDetail.size !== undefined ? (
+                <p>包大小 {formatPackageSize(summaryDetail.size)}</p>
+              ) : null}
+              {summaryDetail.updatedAt ? <p>更新时间：{summaryDetail.updatedAt}</p> : null}
+              {summaryDetail.migrationFrom ? (
+                <p>迁移来源：{summaryDetail.migrationFrom}</p>
+              ) : null}
+            </section>
+            <section className="agent-detail-section">
+              <strong>签名</strong>
+              <p>{INSTALL_DETAIL_NOTICE}</p>
+            </section>
+          </>
+        ) : null}
 
         {packageDetail ? (
           <>
@@ -566,7 +620,7 @@ export function AgentPackageDetailDialog({
               {packageDetail.source === "local" ? (
                 <p>{LOCAL_UNSIGNED_LABEL}</p>
               ) : signature === undefined ? (
-                <p>未提供签名信息</p>
+                <p>{MISSING_SIGNATURE_LABEL}</p>
               ) : signature.verification === "valid" ? (
                 <>
                   <p>keyId：{signature.keyId}</p>
@@ -580,7 +634,7 @@ export function AgentPackageDetailDialog({
                   {signature.reason ? <p>原因：{signature.reason}</p> : null}
                 </>
               ) : (
-                <p>{LOCAL_UNSIGNED_LABEL}</p>
+                <p>{MISSING_SIGNATURE_LABEL}</p>
               )}
             </section>
             <section className="agent-detail-section">

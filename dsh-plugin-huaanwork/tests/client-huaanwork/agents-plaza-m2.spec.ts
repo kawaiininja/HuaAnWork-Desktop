@@ -253,30 +253,61 @@ describe("AgentsPlazaPanel（广场签名包）", () => {
     expect(view.textContent).toContain("签名广场包");
   });
 
-  it("签名卡详情展示签名信息，legacy 卡保留原详情入口", async () => {
-    listPayload = listResult({ catalogPackages: [SIGNED_SUMMARY] });
-    handlers["agent.packageDetail"] = () => ({
-      slug: "signed-pack",
-      displayName: "签名广场包",
-      description: "管理员签名的广场包",
-      version: "2.1.0",
-      source: "catalog",
-      enabled: false,
-      persona: "你是签名广场包。",
-      skill: null,
-      tools: "none",
-      files: [{ path: "manifest.json", size: 256 }],
-      signature: { keyId: "kid-1", signedAt: "2026-10-20T08:00:00.000Z", slot: 2, verification: "valid" },
-    });
+  it("未安装签名卡的详情只读摘要，不调用 packageDetail，也不伪造签名", async () => {
+    listPayload = listResult({ catalogPackages: [SIGNED_SUMMARY, MIGRATED_SUMMARY] });
+    handlers["agent.packageDetail"] = () => {
+      throw new Error("智能体「signed-pack」不存在");
+    };
     const view = await mount(createElement(AgentsPlazaPanel, { search: "", refreshToken: 0 }));
 
     await click(buttonIn(cardBySlug(view, "signed-pack"), "查看详情")!);
     await flush();
 
-    expect(container!.textContent).toContain("keyId：kid-1");
-    expect(container!.textContent).toContain("槽位：2");
-    expect(container!.textContent).toContain("验签结果：通过");
-    expect(container!.textContent).toContain("脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。");
+    // 磁盘上没有未安装的包：详情绝不能落进 packageDetail。
+    expect(callsOf("agent.packageDetail")).toHaveLength(0);
+    expect(view.textContent).toContain("签名广场包");
+    expect(view.textContent).toContain("管理员签名的广场包");
+    expect(view.textContent).toContain("v2.1.0");
+    expect(view.textContent).toContain("包大小 2.0 KB");
+    expect(view.textContent).toContain("更新时间：2026-10-20T08:00:00.000Z");
+    expect(view.textContent).toContain("安装后可查看签名与文件清单");
+    expect(view.textContent).toContain(
+      "脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。",
+    );
+    // 摘要里没有签名事实，不得编造 keyId / 签名时间 / 验签结果。
+    expect(view.textContent).not.toContain("keyId");
+    expect(view.textContent).not.toContain("验签结果");
+
+    await click(buttonByText(view, "关闭")!);
+    await click(buttonIn(cardBySlug(view, "migrated-agent"), "查看详情")!);
+    await flush();
+
+    expect(view.textContent).toContain("迁移来源：legacy-agent");
+    expect(view.textContent).toContain("包大小 700 B");
+    expect(callsOf("agent.packageDetail")).toHaveLength(0);
+  });
+
+  it("已安装的签名摘要不再以“下载”卡出现在广场", async () => {
+    listPayload = listResult({
+      packages: [
+        {
+          slug: "signed-pack",
+          displayName: "签名广场包",
+          description: "管理员签名的广场包",
+          version: "2.1.0",
+          source: "catalog",
+          enabled: true,
+          publishStatus: "installed",
+        },
+      ],
+      catalogPackages: [SIGNED_SUMMARY],
+    });
+    const view = await mount(createElement(AgentsPlazaPanel, { search: "", refreshToken: 0 }));
+
+    // 宿主把整份目录缓存塞进 catalogPackages：已安装的 slug 必须被剔除，
+    // 否则用户会看到一张点“下载”就报“已安装，无需重复安装”的卡。
+    expect(view.querySelector('[data-slug="signed-pack"]')).toBeNull();
+    expect(buttonByText(view, "下载")).toBeUndefined();
   });
 });
 
@@ -418,5 +449,47 @@ describe("AgentsView 发布口令与刷新周期", () => {
     expect(view.textContent).toContain("目录不可达，请稍后重试；本地智能体不受影响");
     expect(view.textContent).toContain("周报助手");
     expect(buttonIn(cardBySlug(view, "weekly-report"), "发布")).toBeDefined();
+  });
+
+  it("轮询成功后重拉列表：撤销到达后无需用户操作即可见", async () => {
+    vi.useFakeTimers();
+    const view = await mount(createElement(AgentsView, {}));
+    await flush();
+
+    await click(buttonByText(view, "我的智能体")!);
+    await flush();
+    expect(view.textContent).toContain("周报助手");
+    expect(view.textContent).not.toContain("已撤销");
+
+    // 宿主在下一轮 packageRefresh 里应用撤销；此后 packageList 返回带 revoked 的行。
+    handlers["agent.packageRefresh"] = () => {
+      listPayload = listResult({
+        packages: [
+          {
+            slug: "signed-pack",
+            displayName: "签名广场包",
+            description: "管理员签名的广场包",
+            version: "2.1.0",
+            source: "catalog",
+            enabled: false,
+            publishStatus: "installed",
+            revoked: {
+              slug: "signed-pack",
+              version: "2.1.0",
+              reason: "窃取凭据",
+              revokedAt: "2026-10-21T00:00:00.000Z",
+            },
+          },
+        ],
+      });
+      return listPayload;
+    };
+
+    await advance(PACKAGE_REFRESH_INTERVAL_MS);
+
+    expect(view.textContent).toContain("已撤销：窃取凭据");
+    expect(callsOf("agent.packageList").length).toBeGreaterThan(1);
+    // 周期刷新仍只调 packageRefresh，不调 agent.refresh。
+    expect(callsOf("agent.refresh")).toHaveLength(1);
   });
 });
