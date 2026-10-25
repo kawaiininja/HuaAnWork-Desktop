@@ -640,3 +640,27 @@ canonical 运行。
 | artifact | `windows-agent-package-acceptance`（本次下载后归档为 `docs/evidence/2026-10-25-agent-package-m2-windows-finalfix.json`） |
 
 跨机器验收仍为 `BLOCKED`（没有第二台 Windows 机器）；不能用本节的同机双 Profile 结果替代。
+
+---
+
+## 11. PR head 上的重复验收（分支 CI 通过后）
+
+§10 的 green run 之后，PR #18 在分支 head `ceac20c475` 触发的 CI run
+[`40222870585`](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40222870585)
+**success**（10/10 checks：`check`、3× `desktop-windows`、3× `desktop-macos`、
+`desktop-linux (beta)`、`upstream-command-windows`、`changes`）。随后在同一 head
+手动 dispatch 了 Windows 验收 workflow：
+
+| 项 | 值 |
+| --- | --- |
+| run | [40223939433](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40223939433) |
+| 事件 / head | `workflow_dispatch` / `ceac20c475`（代码 HEAD `68580abfca`；其后仅 docs） |
+| 时间 | 2026-10-25T19:00:28Z → 19:03:40Z（约 3m09s） |
+| job / steps | `windows-agent-package-acceptance` success；M1 `Windows agent-package acceptance probe` 与 M2 `Windows agent-package M2 acceptance probe` 均 success |
+| M2 JSON | `verdict: PASS`，`exitCode: 0`，`platform: "win32"`，11 个字段全 `true`；`residualProcesses: 0`，`cleanup.scannedProcesses: 143`，`cleanup.matches: []` |
+| 下架/撤销卡片 | 均为 `primary: agent.packageRefresh` |
+| artifact | `windows-agent-package-acceptance`（M1 + M2 JSON；已下载核对） |
+
+这次运行是同一代码 + 文档 head 上的重复确认，不替代 §4 的跨机器验收；跨机器仍
+`BLOCKED`。
+
