@@ -24,6 +24,15 @@
  * intents out of `audit.jsonl` preserves the exact line-count contract of the
  * result log.
  *
+ * The intent journal is crash recovery ONLY, so reconciliation is bounded to a
+ * recent crash window (`AUDIT_INTENT_RECONCILE_WINDOW_MS`): intents older than
+ * that, or with an unparseable timestamp, are never turned into synthetic
+ * results (after the documented `audit.jsonl` rotation their matching results
+ * live in the archive, and replaying them as 500s would fabricate history).
+ * After a successful reconciliation the journal is atomically cleared: results
+ * live in `audit.jsonl`, and a crash during reconciliation is safe because the
+ * next startup skips intents whose result line already exists.
+ *
  * Actor disclosure: the raw token never reaches the log. `actor` is only the
  * first 12 hex characters of the token's SHA-256 (`anonymous` when absent),
  * which lets an operator correlate requests from one credential without
@@ -40,6 +49,12 @@ import type { CatalogState } from './types.ts'
 export const AUDIT_FILE_NAME = 'audit.jsonl'
 export const AUDIT_INTENTS_FILE_NAME = 'audit-intents.jsonl'
 export const AUDIT_FILE_MODE = 0o600
+/**
+ * Only intents this recent can come from the crash that is being recovered.
+ * Older journal lines are history (their results may sit in a rotated
+ * `audit.jsonl`); fabricating 500s for them would invent audit history.
+ */
+export const AUDIT_INTENT_RECONCILE_WINDOW_MS = 24 * 60 * 60 * 1000
 
 export type AuditOutcome = 'ok' | 'denied' | 'error'
 
@@ -200,6 +215,12 @@ export class AuditLog {
    * intent did not commit OR a later mutation overwrote the slot — the reason
    * therefore states only what is actually known. Malformed journal lines are
    * skipped, exactly like a malformed result line.
+   *
+   * Only intents inside `AUDIT_INTENT_RECONCILE_WINDOW_MS` are considered: the
+   * journal exists for crash recovery, not for replaying history. After a
+   * successful pass the journal is cleared atomically. If the process crashes
+   * halfway, the next startup skips the intents whose result lines were already
+   * written and clears the rest.
    */
   async reconcile(state: CatalogState): Promise<void> {
     const readLines = async (path: string): Promise<string[]> => {
@@ -212,12 +233,19 @@ export class AuditLog {
     }
     const intentLines = await readLines(this.intentsPath)
     const resultLines = await readLines(this.path)
+    const now = Date.now()
     const intents = new Map<string, AuditIntent & { timestamp: string }>()
     const results = new Set<string>()
     for (const line of intentLines) {
       try {
         const intent = JSON.parse(line) as AuditIntent & { timestamp: string }
-        if (typeof intent.requestId === 'string') intents.set(intent.requestId, intent)
+        if (typeof intent.requestId !== 'string' || intent.requestId.length === 0) continue
+        if (typeof intent.timestamp !== 'string') continue
+        const decidedAt = Date.parse(intent.timestamp)
+        // Negative ages (a clock that moved backwards) stay inside the window:
+        // they cannot be older than the crash being recovered.
+        if (Number.isNaN(decidedAt) || now - decidedAt > AUDIT_INTENT_RECONCILE_WINDOW_MS) continue
+        intents.set(intent.requestId, intent)
       } catch {
         // A torn intent line means the crash happened before the intent was
         // durable; the handler therefore cannot have run. Nothing to close.
@@ -249,6 +277,9 @@ export class AuditLog {
           : 'reconciled after restart: state.lastMutation does not name this intent (a later mutation may have overwritten it)',
       })
     }
+    // Results are durable in `audit.jsonl`; the journal has no further purpose.
+    // Clearing only after every result was written keeps a crash safe.
+    if (intentLines.length > 0) await this.clearIntents()
   }
 
   private async appendTracked(record: AuditRecord): Promise<void> {
@@ -320,6 +351,19 @@ export class AuditLog {
     return record
   }
 
+  /**
+   * Empty the intent journal atomically (tmp + fsync + rename, mode 0600).
+   * Serialized with intent appends so a concurrent writer cannot lose a line.
+   */
+  private async clearIntents(): Promise<void> {
+    const run = this.intentTail.then(() => this.writeFileAtomic(this.intentsPath, ''))
+    this.intentTail = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    await run
+  }
+
   private async append(record: AuditRecord): Promise<void> {
     await this.appendLine(this.path, record)
   }
@@ -335,8 +379,11 @@ export class AuditLog {
     })
     // Keep the log line-oriented even if the previous writer died mid-line.
     const prefix = existing === '' || existing.endsWith('\n') ? existing : `${existing}\n`
-    const payload = `${prefix}${JSON.stringify(record)}\n`
+    await this.writeFileAtomic(path, `${prefix}${JSON.stringify(record)}\n`)
+  }
 
+  /** Replace a file's whole contents atomically, creating it with the log mode. */
+  private async writeFileAtomic(path: string, payload: string): Promise<void> {
     const tempPath = `${path}.tmp-${String(process.pid)}-${randomBytes(8).toString('hex')}`
     const handle = await openFile(tempPath, 'w', AUDIT_FILE_MODE)
     try {

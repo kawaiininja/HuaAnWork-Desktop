@@ -22,13 +22,24 @@ const NOW = '2026-10-25T00:00:00.000Z'
 const SUBMISSION_ID = '00000000-0000-4000-8000-000000000001'
 const DELIST_ID = '00000000-0000-4000-8000-000000000002'
 
+/** The minimum digest shape the server consumes (approve counts `files`). */
+function digestRecord(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    slug: 'a',
+    version: '1.0.0',
+    manifestSha256: '0'.repeat(64),
+    files: [{ path: 'agent.json', size: 1, sha256: '0'.repeat(64) }],
+  }
+}
+
 /** The minimum shape `parseState` requires of a published package. */
 function publishedRecord(): Record<string, unknown> {
   return {
     slug: 'a',
     version: '1.0.0',
     manifest: { schemaVersion: 1, slug: 'a', version: '1.0.0' },
-    digest: { files: [], manifestSha256: '0'.repeat(64) },
+    digest: digestRecord(),
     signature: {
       version: 1,
       algorithm: 'ed25519',
@@ -57,7 +68,7 @@ function submissionRecord(): Record<string, unknown> {
     submittedAt: NOW,
     updatedAt: NOW,
     actor: 'publisher',
-    digest: { files: [], manifestSha256: '0'.repeat(64) },
+    digest: digestRecord(),
   }
 }
 
@@ -109,6 +120,12 @@ test('reports the precise corrupt field for missing fields, bad enums and mismat
   const invalidDelistStatus = { ...delistRecord(DELIST_ID), status: 'unknown' }
   const missingManifest = publishedRecord()
   delete missingManifest.manifest
+  // `approve` counts digest.files synchronously; a malformed digest used to
+  // pass startup and fail that request with a 500.
+  const missingDigestFiles = submissionRecord()
+  delete (missingDigestFiles.digest as Record<string, unknown>).files
+  const malformedDigestFile = publishedRecord()
+  malformedDigestFile.digest = { ...digestRecord(), files: [{ path: 42, size: 1, sha256: '0'.repeat(64) }] }
 
   const cases: ReadonlyArray<{ readonly field: RegExp; readonly document: unknown }> = [
     { field: /submissions\..*\.id/u, document: { ...base, submissions: { [SUBMISSION_ID]: missingId } } },
@@ -118,6 +135,14 @@ test('reports the precise corrupt field for missing fields, bad enums and mismat
     },
     { field: /packages\..*\.slug/u, document: { ...base, packages: { 'a/1.0.0': missingSlug } } },
     { field: /packages\..*\.manifest/u, document: { ...base, packages: { 'a/1.0.0': missingManifest } } },
+    {
+      field: /submissions\..*\.digest\.files must be an array/u,
+      document: { ...base, submissions: { [SUBMISSION_ID]: missingDigestFiles } },
+    },
+    {
+      field: /packages\..*\.digest\.files\[0\]\.path/u,
+      document: { ...base, packages: { 'a/1.0.0': malformedDigestFile } },
+    },
     {
       field: /delistRequests\..*\.id/u,
       document: { ...base, delistRequests: { [DELIST_ID]: mismatchedDelist } },

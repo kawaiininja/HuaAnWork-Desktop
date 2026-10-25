@@ -19,6 +19,7 @@ import {
   updateCatalogAgentPackage,
 } from './agent-package/catalog-install.ts'
 import {
+  hasPendingAgentPackageSubmission,
   publishLocalAgentPackage,
   refreshLocalAgentPackagePublishStatus,
   requestLocalAgentPackageDelist,
@@ -319,6 +320,10 @@ function publicationSignature(value: PublicationFields): string {
 /**
  * 刷新每个有发布身份的本地包的审查/下架状态。
  *
+ * 「有发布身份」既包括 state 里的 submissionId/publishedVersion,也包括只剩
+ * sidecar 条目的包(Task 10 终审 Important 1):否则一次失败发布留下的旧提交
+ * 永远不会进入刷新,告警也就没有出口。
+ *
  * 单项失败保留已有卡片并把原因并入 warning;不回退成「未发布」。
  */
 async function refreshLocalPublications(
@@ -326,19 +331,29 @@ async function refreshLocalPublications(
 ): Promise<{ changed: boolean; warning?: string }> {
   let changed = false
   const failures: string[] = []
+  const warnings: string[] = []
   for (const item of host.listLocal()) {
     if (item.source !== 'local') continue
-    if (item.submissionId === undefined && item.publishedVersion === undefined) continue
     try {
+      if (
+        item.submissionId === undefined
+        && item.publishedVersion === undefined
+        && !hasPendingAgentPackageSubmission(item.slug)
+      ) continue
       const publication = await refreshLocalAgentPackagePublishStatus(item.slug)
+      if (publication.warning !== undefined) warnings.push(`${item.slug}: ${publication.warning}`)
       if (publicationSignature(publication) !== publicationSignature(item)) changed = true
     } catch (error) {
       failures.push(`${item.slug}: ${errorText(error)}`)
     }
   }
-  return failures.length === 0
+  const combined = [
+    ...(failures.length === 0 ? [] : [`本地发布状态刷新失败：${failures.join('；')}`]),
+    ...(warnings.length === 0 ? [] : [`本地发布状态待对账：${warnings.join('；')}`]),
+  ]
+  return combined.length === 0
     ? { changed }
-    : { changed, warning: `本地发布状态刷新失败：${failures.join('；')}` }
+    : { changed, warning: combined.join('；') }
 }
 
 function mergeCatalogErrors(...values: Array<string | undefined>): string | undefined {

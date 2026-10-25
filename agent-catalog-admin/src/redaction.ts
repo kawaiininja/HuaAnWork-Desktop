@@ -14,7 +14,8 @@
  * MUST stay behaviorally identical — same PEM patterns, same longest-first
  * substitution, same `[REDACTED]` / `[REDACTED PRIVATE KEY]` markers. The
  * acceptance probe keeps a third copy in
- * `dsh-plugin-huaanwork/scripts/acceptance-redaction.mjs` for the same reason.
+ * `dsh-plugin-huaanwork/scripts/huaanwork-acceptance-redaction.mjs` for the
+ * same reason.
  */
 
 const PRIVATE_KEY_BLOCK_PATTERN =

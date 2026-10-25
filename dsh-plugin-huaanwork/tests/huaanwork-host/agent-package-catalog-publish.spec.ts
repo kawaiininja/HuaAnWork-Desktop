@@ -356,6 +356,7 @@ function pendingSubmissionsPath(): string {
   return join(root, PENDING_SUBMISSIONS_FILE)
 }
 
+/** 侧车按 `slug:digestSha256` 分条,条目自身也带 slug。 */
 function readPendingSubmissions(): Record<string, Record<string, unknown>> {
   try {
     return JSON.parse(readFileSync(pendingSubmissionsPath(), 'utf8')) as Record<string, Record<string, unknown>>
@@ -364,8 +365,22 @@ function readPendingSubmissions(): Record<string, Record<string, unknown>> {
   }
 }
 
+function pendingEntriesFor(slug: string): Array<Record<string, unknown>> {
+  return Object.values(readPendingSubmissions()).filter((entry) => entry.slug === slug)
+}
+
+function pendingForContent(slug: string, digestSha256: string): Record<string, unknown> | undefined {
+  return readPendingSubmissions()[`${slug}:${digestSha256}`]
+}
+
 function seedPendingSubmission(slug: string, entry: Record<string, unknown>): void {
-  writeFileSync(pendingSubmissionsPath(), `${JSON.stringify({ [slug]: entry }, null, 2)}\n`, 'utf8')
+  const digestSha256 = entry.digestSha256
+  if (typeof digestSha256 !== 'string') throw new Error('seeded sidecar needs digestSha256')
+  writeFileSync(
+    pendingSubmissionsPath(),
+    `${JSON.stringify({ [`${slug}:${digestSha256}`]: { slug, ...entry } }, null, 2)}\n`,
+    'utf8',
+  )
 }
 
 /**
@@ -921,7 +936,7 @@ describe('local publication lifecycle', () => {
     await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow()
 
     // 远端事实先落 sidecar:state 没写成也必须留下 submissionId 与幂等键。
-    const pending = readPendingSubmissions()['weekly-report']
+    const pending = pendingForContent('weekly-report', await localContentDigest())
     expect(pending?.submissionId).toBe(SUBMISSION_ID)
     expect(pending?.version).toBe('1.0.0')
     expect(pending?.idempotencyKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
@@ -937,7 +952,7 @@ describe('local publication lifecycle', () => {
     const state = readAgentPackageState(root)['local:weekly-report']
     expect(state?.publishStatus).toBe('pending-review')
     expect(state?.submissionId).toBe(SUBMISSION_ID)
-    expect(readPendingSubmissions()['weekly-report']).toBeUndefined()
+    expect(readPendingSubmissions()).toEqual({})
   })
 
   test('recovers a lost 201 by resubmitting with the recorded key', async () => {
@@ -956,7 +971,7 @@ describe('local publication lifecycle', () => {
     rmSync(blocker, { recursive: true, force: true })
 
     // 模拟 201 在返回途中丢失:sidecar 留下键,但没有 submissionId。
-    const recorded = readPendingSubmissions()['weekly-report']
+    const recorded = pendingForContent('weekly-report', await localContentDigest())
     if (recorded === undefined) throw new Error('sidecar was not written')
     seedPendingSubmission('weekly-report', {
       version: recorded.version,
@@ -973,7 +988,7 @@ describe('local publication lifecycle', () => {
     // 第二次提交必须复用同一个幂等键,服务端才能返回原记录。
     expect(submits[1]?.idempotencyKey).toBe(submits[0]?.idempotencyKey)
     expect(submits[1]?.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/)
-    expect(readPendingSubmissions()['weekly-report']).toBeUndefined()
+    expect(readPendingSubmissions()).toEqual({})
   })
 
   test('warns without touching state when the sidecar has no remote id', async () => {
@@ -999,12 +1014,13 @@ describe('local publication lifecycle', () => {
 
     expect(publication.publishStatus).toBe('none')
     expect(publication.warning).toContain(IDEMPOTENCY_KEY)
-    expect(readPendingSubmissions()['weekly-report']?.idempotencyKey).toBe(IDEMPOTENCY_KEY)
+    expect(pendingEntriesFor('weekly-report')).toHaveLength(1)
+    expect(pendingForContent('weekly-report', await localContentDigest())?.idempotencyKey).toBe(IDEMPOTENCY_KEY)
     expect(requests).toHaveLength(0)
     expect(rawStateFile()).toBe(before)
   })
 
-  test('keeps the stale sidecar and names the pending submission when content changed', async () => {
+  test('publishes changed content with a fresh key while the old sidecar stays for reconciliation', async () => {
     writeLocalPackage()
     seedState({
       'local:weekly-report': {
@@ -1015,19 +1031,46 @@ describe('local publication lifecycle', () => {
       },
     })
     configure()
+    const oldDigest = await localContentDigest()
     const blocker = blockStateWrite()
     await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow()
     rmSync(blocker, { recursive: true, force: true })
+    const oldKey = pendingForContent('weekly-report', oldDigest)?.idempotencyKey
+    expect(oldKey).toEqual(expect.any(String))
 
-    // 本地内容变化(1.0.0 → 1.0.1)后,旧 sidecar 不能再被新内容覆盖提交。
+    // 本地内容变化(1.0.0 → 1.0.1)后,旧失败条目仍保留,但不再挡路:
+    // 新内容用新键另起一条,发布成功并带回诚实告警。
     await commitExistingUpdate()
+    const newDigest = await localContentDigest()
+    expect(newDigest).not.toBe(oldDigest)
 
-    await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow(
-      new RegExp(`上一次提交 ${SUBMISSION_ID} 仍在对账，请先刷新状态`),
-    )
-    expect(readPendingSubmissions()['weekly-report']?.submissionId).toBe(SUBMISSION_ID)
-    expect(requests.filter((request) => request.method === 'POST')).toHaveLength(1)
-    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('none')
+    const published = await publishLocalAgentPackage('weekly-report')
+
+    expect(published.submissionId).toBe(SUBMISSION_ID)
+    expect(published.warning).toContain(SUBMISSION_ID)
+    expect(published.warning).toContain('v1.0.0')
+    const submits = requests.filter((request) => request.method === 'POST')
+    expect(submits).toHaveLength(2)
+    expect(submits[1]?.idempotencyKey).not.toBe(submits[0]?.idempotencyKey)
+    const oldEntry = pendingForContent('weekly-report', oldDigest)
+    expect(oldEntry?.submissionId).toBe(SUBMISSION_ID)
+    expect(oldEntry?.idempotencyKey).toBe(oldKey)
+    // 新内容自己的条目在 state 写成功后已清掉。
+    expect(pendingForContent('weekly-report', newDigest)).toBeUndefined()
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('pending-review')
+
+    // 刷新只对账当前内容,旧条目列出但不应用、不丢弃。
+    submissionStatus = 'published'
+    const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
+    expect(publication.publishStatus).toBe('published')
+    expect(publication.publishedVersion).toBe('1.0.1')
+    expect(publication.warning).toContain(SUBMISSION_ID)
+    expect(pendingForContent('weekly-report', oldDigest)?.submissionId).toBe(SUBMISSION_ID)
+    expect(
+      requests.filter(
+        (request) => request.method === 'GET' && request.url?.startsWith('/v1/agent-packages/submissions/'),
+      ),
+    ).toHaveLength(1)
   })
 
   test('reconciles a recorded pending submission through getSubmission on refresh', async () => {
@@ -1059,7 +1102,7 @@ describe('local publication lifecycle', () => {
     expect(state?.publishStatus).toBe('published')
     expect(state?.publishedVersion).toBe('1.0.0')
     expect(state?.submissionId).toBe(SUBMISSION_ID)
-    expect(readPendingSubmissions()['weekly-report']).toBeUndefined()
+    expect(readPendingSubmissions()).toEqual({})
     const statusRequest = requests.find(
       (request) => request.method === 'GET' && request.url === `/v1/agent-packages/submissions/${SUBMISSION_ID}`,
     )
@@ -1080,6 +1123,7 @@ describe('local publication lifecycle', () => {
     const blocker = blockStateWrite()
     await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow()
     rmSync(blocker, { recursive: true, force: true })
+    const oldDigest = await localContentDigest()
     // state 写失败留下 sidecar(v1.0.0 的远端提交);随后 commit 把本地内容改成
     // 1.0.1,但 manifest 永久保留旧 draftId ⇒ 旧提交仍能被解析出来。
     await commitExistingUpdate()
@@ -1089,16 +1133,15 @@ describe('local publication lifecycle', () => {
 
     expect(publication.publishStatus).toBe('none')
     expect(publication.publishedVersion).toBeUndefined()
-    expect(publication.warning).toBe(
-      `上一次提交 ${SUBMISSION_ID} 针对 v1.0.0，当前内容为 v1.0.1；请先处理该提交。`,
-    )
+    expect(publication.warning).toContain(`v1.0.0`)
+    expect(publication.warning).toContain(SUBMISSION_ID)
     const state = readAgentPackageState(root)['local:weekly-report']
     expect(state?.installedVersion).toBe('1.0.1')
     expect(state?.publishStatus).toBe('none')
     expect(state?.publishedVersion).toBeUndefined()
     expect(state?.submissionId).toBeUndefined()
     // sidecar 保留给用户处理,旧提交没有被查询、更没有写到新内容上。
-    expect(readPendingSubmissions()['weekly-report']?.submissionId).toBe(SUBMISSION_ID)
+    expect(pendingForContent('weekly-report', oldDigest)?.submissionId).toBe(SUBMISSION_ID)
     expect(
       requests.filter(
         (request) => request.method === 'GET' && request.url?.startsWith('/v1/agent-packages/submissions/'),
@@ -1116,10 +1159,11 @@ describe('local publication lifecycle', () => {
         publishStatus: 'none',
       },
     })
+    const seededDigest = await localContentDigest()
     seedPendingSubmission('weekly-report', {
       submissionId: SUBMISSION_ID,
       version: '1.0.0',
-      digestSha256: await localContentDigest(),
+      digestSha256: seededDigest,
       idempotencyKey: IDEMPOTENCY_KEY,
       createdAt: NOW,
     })
@@ -1135,10 +1179,9 @@ describe('local publication lifecycle', () => {
     const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
 
     expect(publication.publishStatus).toBe('none')
-    expect(publication.warning).toBe(
-      `上一次提交 ${SUBMISSION_ID} 针对 v1.0.0，内容已变化；请先处理该提交。`,
-    )
-    expect(readPendingSubmissions()['weekly-report']?.submissionId).toBe(SUBMISSION_ID)
+    expect(publication.warning).toContain(SUBMISSION_ID)
+    expect(publication.warning).toContain('v1.0.0')
+    expect(pendingForContent('weekly-report', seededDigest)?.submissionId).toBe(SUBMISSION_ID)
     expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('none')
     expect(requests).toHaveLength(0)
   })
@@ -1153,10 +1196,11 @@ describe('local publication lifecycle', () => {
         publishStatus: 'none',
       },
     })
+    const digest = await localContentDigest()
     seedPendingSubmission('weekly-report', {
       submissionId: SUBMISSION_ID,
       version: '1.0.0',
-      digestSha256: await localContentDigest(),
+      digestSha256: digest,
       idempotencyKey: IDEMPOTENCY_KEY,
       createdAt: NOW,
     })
@@ -1167,7 +1211,7 @@ describe('local publication lifecycle', () => {
 
     expect(publication.publishStatus).toBe('none')
     expect(publication.warning).toContain(SUBMISSION_ID)
-    expect(readPendingSubmissions()['weekly-report']?.submissionId).toBe(SUBMISSION_ID)
+    expect(pendingForContent('weekly-report', digest)?.submissionId).toBe(SUBMISSION_ID)
     expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('none')
   })
 
@@ -1211,7 +1255,7 @@ describe('local publication lifecycle', () => {
     expect(state?.installedVersion).toBe('1.0.1')
     expect(state?.publishStatus).toBe('none')
     expect(state?.submissionId).toBeUndefined()
-    expect(readPendingSubmissions()['weekly-report']).toBeUndefined()
+    expect(readPendingSubmissions()).toEqual({})
   })
 
   test('a commit during a status refresh does not resurrect the cleared submission', async () => {

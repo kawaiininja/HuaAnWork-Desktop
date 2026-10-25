@@ -12,12 +12,17 @@
 
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'vitest'
 
-import { AUDIT_FILE_NAME, AUDIT_INTENTS_FILE_NAME, AuditLog } from '../src/audit.ts'
+import {
+  AUDIT_FILE_NAME,
+  AUDIT_INTENTS_FILE_NAME,
+  AUDIT_INTENT_RECONCILE_WINDOW_MS,
+  AuditLog,
+} from '../src/audit.ts'
 import { createAgentCatalogRuntime } from '../src/server.ts'
 import { emptyCatalogState, type CatalogState } from '../src/types.ts'
 import { ADMIN_TOKEN, PUBLISH_TOKEN, READ_TOKEN, bootTestAgentCatalog } from './helpers.ts'
@@ -61,10 +66,10 @@ test('reconciles an intent that committed before the result record was written',
   assert.equal(result.status, 200)
   assert.match(String(result.reason), /reconciled/u)
 
-  // The intent journal is a separate durable file.
-  const intents = await readLines(join(dir, AUDIT_INTENTS_FILE_NAME))
-  assert.equal(intents.length, 1)
-  assert.equal(intents[0]?.requestId, requestId)
+  // The intent journal is a separate durable file, cleared once its results
+  // are durable in audit.jsonl.
+  const intents = await readFile(join(dir, AUDIT_INTENTS_FILE_NAME), 'utf8')
+  assert.equal(intents, '')
 })
 
 test('reconciles an intent that state.lastMutation does not name as an error', async () => {
@@ -208,6 +213,80 @@ test('refuses a write with 500 audit-write-failed when the intent journal cannot
   } finally {
     await catalog.close()
   }
+})
+
+test('bounds reconciliation to the crash window and clears the journal', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'catalog-audit-'))
+  const audit = await AuditLog.open(dir, [])
+  const now = Date.now()
+  const oldId = randomUUID()
+  const recentId = randomUUID()
+  const malformedId = randomUUID()
+  const day = 24 * 60 * 60 * 1000
+  assert.equal(AUDIT_INTENT_RECONCILE_WINDOW_MS, day)
+  await writeFile(
+    join(dir, AUDIT_INTENTS_FILE_NAME),
+    [
+      JSON.stringify({ timestamp: new Date(now - 30 * day).toISOString(), action: ACTION, actor: 'old', requestId: oldId }),
+      JSON.stringify({ timestamp: new Date(now - 60_000).toISOString(), action: ACTION, actor: 'recent', requestId: recentId }),
+      JSON.stringify({ timestamp: 'not-a-timestamp', action: ACTION, actor: 'malformed', requestId: malformedId }),
+    ].join('\n') + '\n',
+    'utf8',
+  )
+
+  await audit.reconcile(emptyCatalogState())
+
+  const lines = await readLines(join(dir, AUDIT_FILE_NAME))
+  // Only the intent inside the crash window is closed; old and malformed lines
+  // are never turned into synthetic results.
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0]?.requestId, recentId)
+  assert.equal(lines[0]?.actor, 'recent')
+  assert.equal(lines[0]?.outcome, 'error')
+  assert.equal(lines[0]?.status, 500)
+  assert.equal(lines.some(line => line.requestId === oldId || line.requestId === malformedId), false)
+
+  // The journal is crash recovery only; a completed pass clears it.
+  assert.equal(await readFile(join(dir, AUDIT_INTENTS_FILE_NAME), 'utf8'), '')
+})
+
+test('a rotated audit log with only historical intents produces no synthetic error lines', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'catalog-audit-'))
+  const audit = await AuditLog.open(dir, [])
+  const existing = `${JSON.stringify({
+    timestamp: NOW,
+    action: 'catalog.list',
+    outcome: 'ok',
+    status: 200,
+    actor: 'anonymous',
+    requestId: randomUUID(),
+  })}\n`
+  await writeFile(join(dir, AUDIT_FILE_NAME), existing, 'utf8')
+  const now = Date.now()
+  const day = 24 * 60 * 60 * 1000
+  await writeFile(
+    join(dir, AUDIT_INTENTS_FILE_NAME),
+    [0, 1, 2]
+      .map(index =>
+        JSON.stringify({
+          timestamp: new Date(now - (30 + index) * day).toISOString(),
+          action: ACTION,
+          actor: 'historical',
+          requestId: randomUUID(),
+        }),
+      )
+      .join('\n') + '\n',
+    'utf8',
+  )
+
+  // The documented rotation moved audit.jsonl away; the old intents' results
+  // live in the archive, so reconcile must not fabricate a single 500.
+  await audit.reconcile(emptyCatalogState())
+
+  assert.equal(await readFile(join(dir, AUDIT_FILE_NAME), 'utf8'), existing)
+  const lines = await readLines(join(dir, AUDIT_FILE_NAME))
+  assert.equal(lines.filter(line => line.outcome === 'error').length, 0)
+  assert.equal(await readFile(join(dir, AUDIT_INTENTS_FILE_NAME), 'utf8'), '')
 })
 
 test('reconciles a committed mutation at restart and keeps the intent identity fields', async () => {

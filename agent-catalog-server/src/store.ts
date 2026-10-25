@@ -104,6 +104,35 @@ function parseState(path: string, contents: string): CatalogState {
       throw new StoreCorruptError(path, new Error(`${field} is invalid`))
     }
   }
+  /**
+   * Minimal digest shape. The inner schema is owned by the package/signature
+   * validators, but `files` is consumed synchronously by admin approve
+   * (`countSignedInstalledEntries`), so a malformed value must be refused at
+   * startup instead of surfacing as an approve-time 500.
+   */
+  const requireDigest = (value: unknown, field: string): void => {
+    const digest = requireObject(value, field)
+    if (digest.schemaVersion !== 1) {
+      throw new StoreCorruptError(path, new Error(`${field}.schemaVersion must be 1`))
+    }
+    requireString(digest.slug, `${field}.slug`)
+    requireString(digest.version, `${field}.version`)
+    requireString(digest.manifestSha256, `${field}.manifestSha256`)
+    if (!Array.isArray(digest.files)) {
+      throw new StoreCorruptError(path, new Error(`${field}.files must be an array`))
+    }
+    digest.files.forEach((file, index) => {
+      const entry = requireObject(file, `${field}.files[${index}]`)
+      requireString(entry.path, `${field}.files[${index}].path`)
+      if (typeof entry.size !== 'number' || !Number.isFinite(entry.size) || entry.size < 0) {
+        throw new StoreCorruptError(
+          path,
+          new Error(`${field}.files[${index}].size must be a non-negative number`),
+        )
+      }
+      requireString(entry.sha256, `${field}.files[${index}].sha256`)
+    })
+  }
 
   const submissions = document.submissions as Record<string, unknown>
   for (const [key, raw] of Object.entries(submissions)) {
@@ -115,7 +144,7 @@ function parseState(path: string, contents: string): CatalogState {
     requireString(record.updatedAt, `submissions.${key}.updatedAt`)
     requireString(record.actor, `submissions.${key}.actor`)
     requireStatus(record.status, SUBMISSION_STATUSES, `submissions.${key}.status`)
-    requireObject(record.digest, `submissions.${key}.digest`)
+    requireDigest(record.digest, `submissions.${key}.digest`)
     if (record.reason !== undefined) requireString(record.reason, `submissions.${key}.reason`)
     if (record.migrationFrom !== undefined) {
       requireString(record.migrationFrom, `submissions.${key}.migrationFrom`)
@@ -135,7 +164,7 @@ function parseState(path: string, contents: string): CatalogState {
     }
     requireStatus(record.status, PACKAGE_STATUSES, `packages.${key}.status`)
     requireObject(record.manifest, `packages.${key}.manifest`)
-    requireObject(record.digest, `packages.${key}.digest`)
+    requireDigest(record.digest, `packages.${key}.digest`)
     requireObject(record.signature, `packages.${key}.signature`)
     if (typeof record.size !== 'number' || !Number.isFinite(record.size) || record.size < 0) {
       throw new StoreCorruptError(path, new Error(`packages.${key}.size must be a non-negative number`))
