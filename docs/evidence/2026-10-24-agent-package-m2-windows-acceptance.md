@@ -616,4 +616,3 @@ M1（同一 run）：`decision.exitCode:0`、`decision.verdict:"PASS"`、`hardFa
 **跨机器验收**（macOS 创建者 + 离线管理员 + Windows 消费机）：没有第二台 Windows 机器，
 按 §4 的四步执行，不得用同机双 Profile 或 macOS 探针替代。本文件的 `PASS` 只覆盖
 「GitHub Windows runner 上的同机双 Profile 集成测试」。
-
