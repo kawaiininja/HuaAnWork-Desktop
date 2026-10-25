@@ -618,3 +618,26 @@ M1（同一 run）：`decision.exitCode:0`、`decision.verdict:"PASS"`、`hardFa
 **跨机器验收**（macOS 创建者 + 离线管理员 + Windows 消费机）：没有第二台 Windows 机器，
 按 §4 的四步执行，不得用同机双 Profile 或 macOS 探针替代。本文件的 `PASS` 只覆盖
 「GitHub Windows runner 上的同机双 Profile 集成测试」。
+
+---
+
+## 10. 最终代码 HEAD 的复跑（final fix wave 之后）
+
+§9 的 green run 在 `93c1bb0291`；final fix wave 在 `b2821f27f7` 修改了 publish sidecar 与
+audit reconciliation。按〈最终门槛〉“验收须在最终 HEAD 通过”，本节是最终代码 HEAD 的
+canonical 运行。
+
+| 项 | 值 |
+| --- | --- |
+| 代码 HEAD | `68580abfca5160a2d2e9ea6e96ea636f81585089` |
+| 运行 commit | `c966107b19266bdc80f6de01101b07c196aa4694`（其后仅 `docs/` 变更；探针/workflow 字节与代码 HEAD 相同） |
+| workflow run | [40205892750](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40205892750) |
+| runner | `windows-latest`，Node `v22.23.2` |
+| 结果 | job `success`，2m49s；`Windows agent-package acceptance probe` exit 0；`Windows agent-package M2 acceptance probe` exit 0 |
+| M2 JSON | `verdict: PASS`，`exitCode: 0`，`platform: "win32"`，11 个字段全 `true`；`residualProcesses: 0`，`cleanup.scannedProcesses: 135`，`cleanup.matches: []` |
+| 下架卡片 | `primary: agent.packageRefresh`，`publishStatus: delisted`，`enabled: true`，`catalogError: null`，`revocationWarning: null` |
+| 撤销卡片 | `primary: agent.packageRefresh`，`enabled: false`，`revoked.version: 1.0.1`，`activationDisposed: true`，`portClosed: true` |
+| artifact | `windows-agent-package-acceptance`（本次下载后归档为 `docs/evidence/2026-10-25-agent-package-m2-windows-finalfix.json`） |
+
+跨机器验收仍为 `BLOCKED`（没有第二台 Windows 机器）；不能用本节的同机双 Profile 结果替代。
+

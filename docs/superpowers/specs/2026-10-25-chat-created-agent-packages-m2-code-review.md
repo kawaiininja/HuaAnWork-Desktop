@@ -22,10 +22,12 @@
 - Task 13 要求的 HEAD 验收、Windows 验收和跨机器验收尚未完成，因此即使 Important 全部修复，也须重新完成验收后才能宣布 M2 收口。
 
 **整改结果（2026-10-25，Task 14 汇总）**：I-1～I-19 已勾选并附整改提交与回归证据；I-20 按
-裁定 R-M2-3 延后（不实现、不新增第 8 个 RPC）；M-1～M-7 已勾选。macOS 探针在代码 HEAD
-`f2eebef933` PASS、Windows GHA 在 `93c1bb0291` PASS（run `40198346429`）；**跨机器验收仍
-`BLOCKED`**（没有第二台 Windows 机器），因此 **M2 完成判定仍为 BLOCKED**，§五的跨机器项
-保持未勾选，不得宣布 M2 收口。
+裁定 R-M2-3 延后（不实现、不新增第 8 个 RPC）；M-1～M-7 已勾选。macOS 探针在最终代码 HEAD
+`68580abfca` PASS（证据 §10）、Windows GHA 在 `c966107b19`（代码 HEAD `68580abfca`）PASS
+（run [`40205892750`](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40205892750)，
+证据 §10）；**跨机器验收仍 `BLOCKED`**（没有第二台 Windows 机器），因此 **M2 完成判定仍为
+BLOCKED**，§五的跨机器项保持未勾选，不得宣布 M2 收口。最终全量门禁 `corepack yarn check` 在
+`68580abfca` 以 exit 0 通过。
 
 本文所有复选框均表示**整改已完成且验收证据已归档**。初始状态均为未整改；不得仅因代码已改动、测试已增加或既有套件转绿就勾选。**唯一例外是 I-17**：其复选框表示「整改动作与现有可得证据已归档」，跨机器子项仍 `BLOCKED`，由 §五未勾选项单独跟踪；这不是完成声明。
 
@@ -214,9 +216,9 @@
 #### I-17　现有证据不能支撑 HEAD 或 Task 13 验收
 
 - [x] **整改动作完成；跨机器子项仍 `BLOCKED`（见下）**
-  - 整改提交：`650e749af7`（探针改走真实 `agent.packageRefresh` RPC 组合链，`host.listLocal()` 降级为标注的交叉核对）；`f2eebef933`（归档权威 macOS 运行）；`93c1bb0291`（GHA 改用 `--experimental-transform-types`，裁定 R-T13-1 选项 (b)）；`32db078253`、`2069df57d3`、`1c968f9e34`（Windows 证据文档订正）。
-  - **macOS**：代码 HEAD `f2eebef933`，`node --experimental-transform-types scripts/huaanwork-agent-package-m2-acceptance.mjs --platform darwin` **exit 0**，11 个字段全 `true`、`residualProcesses=0`；权威记录 `docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md` §9。
-  - **Windows GHA**：run [`40198346429`](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40198346429)（commit `93c1bb0291`，`windows-latest`，Node `v22.23.2`）：M1 step `0`、M2 step `0`，artifact `windows-agent-package-acceptance`（ID `12601040539`）；记录 `docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md` §9。更早的失败运行 `40195462983` 保留在 §8，不被绿跑覆盖。
+  - 整改提交：`650e749af7`（探针改走真实 `agent.packageRefresh` RPC 组合链，`host.listLocal()` 降级为标注的交叉核对）；`f2eebef933`（归档权威 macOS 运行）；`93c1bb0291`（GHA 改用 `--experimental-transform-types`，裁定 R-T13-1 选项 (b)）；`32db078253`、`2069df57d3`、`1c968f9e34`（Windows 证据文档订正）；final fix wave 之后在最终代码 HEAD `68580abfca` 复跑 macOS，并以 `c966107b19` 触发 Windows GHA run `40205892750`（证据均见各文件 §10）。
+  - **macOS（最终 HEAD）**：代码 HEAD `68580abfca`，`node --experimental-transform-types scripts/huaanwork-agent-package-m2-acceptance.mjs --platform darwin` **exit 0**，11 个字段全 `true`、`residualProcesses=0`；权威记录 `docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md` §10，原始 JSON `docs/evidence/2026-10-25-agent-package-m2-darwin-finalfix.json`。
+  - **Windows GHA（最终 HEAD）**：run [`40205892750`](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40205892750)（运行 commit `c966107b19`，代码 HEAD `68580abfca`，`windows-latest`，Node `v22.23.2`）：M1 step `0`、M2 step `0`，M2 JSON `verdict=PASS`/`exitCode=0`/`residualProcesses=0`，artifact `windows-agent-package-acceptance`；记录 `docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md` §10。更早的绿 run `40198346429` 保留在 §9，失败 run `40195462983` 保留在 §8，均不被覆盖。
   - **跨机器验收：`BLOCKED`**——只有一台 macOS 主机，没有第二台 Windows 机器；不得用同机双 Profile 替代。因此 §五「macOS 创建者 → Windows 消费机」保持未勾选，M2 不宣布收口。
 - **位置**：`docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md:6`、`:603`、`docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md:3`、`:63`、`dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs:919-929`、`:982`
 - **问题**：macOS 证据对应较早的 `c144a73383`；Windows 和跨机器验收仍为 BLOCKED；探针直接调用 helper，绕过了要求的 `agent.packageRefresh` 组合链。
@@ -354,8 +356,8 @@
 - [x] `corepack yarn check` 通过（exit 0，含 `check:whitespace`；无 `verify:aa` 并发复现）；既有 `verify:aa` 并发债务按原纪律处理，未删步骤。
 - [x] `node scripts/verify-layout.mjs` 通过，root workspace 与 gate fixture 同步。
 - [x] huaanwork `verify:licenses`、`verify:closure`、`verify:notices`、`verify:bundled` 通过（均 exit 0），`verify:notices` 后无漂移。
-- [x] macOS 验收在最终 HEAD 通过，并归档原始证据（`f2eebef933`，exit 0，证据 §9）。
-- [x] Windows GHA 探针实际运行通过，并归档 run URL、exit code 和 artifact（run `40198346429`，commit `93c1bb0291`，证据 §9）。
+- [x] macOS 验收在最终 HEAD 通过，并归档原始证据（代码 HEAD `68580abfca`，exit 0，证据 §10，原始 JSON 已归档）。
+- [x] Windows GHA 探针实际运行通过，并归档 run URL、exit code 和 artifact（run `40205892750`，运行 commit `c966107b19` / 代码 HEAD `68580abfca`，证据 §10）。
 - [ ] macOS 创建者机器到 Windows 消费机器的跨机器验收通过，不能用同机双 Profile 替代。**`BLOCKED`（没有第二台 Windows 机器）**。
 - [x] 探针通过真实 `agent.packageRefresh`/RPC 验证下架与撤销的卡片数据，不再以 helper 结果代替产品链路（`650e749af7`）。
 - [x] 所有计划外文件均有明确裁定或已回退，最终 diff 不含未批准越界改动（四个文件，R-M2-2）。
