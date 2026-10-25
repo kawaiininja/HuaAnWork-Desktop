@@ -59,13 +59,20 @@ const UNTERMINATED_PRIVATE_KEY_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[
  * Replace every configured token value and every PEM private-key block.
  * Applied to each free-text field (and thus to `reason`) before JSON encoding,
  * so the replacement cannot break the line's JSON syntax.
+ *
+ * Substitution is LONGEST-FIRST: when one configured token is a prefix of
+ * another, replacing the shorter one first would leave the longer token's tail
+ * (`…-extended`) in the output. Sorting by descending length makes the longest
+ * value win regardless of configuration order; equal lengths keep their order.
  */
 export function redactSecrets(text: string, secrets: readonly string[]): string {
   let redacted = text
     .replace(PRIVATE_KEY_BLOCK_PATTERN, '[REDACTED PRIVATE KEY]')
     .replace(UNTERMINATED_PRIVATE_KEY_PATTERN, '[REDACTED PRIVATE KEY]')
-  for (const secret of secrets) {
-    if (secret === '') continue
+  const ordered = [...new Set(secrets.filter(secret => secret !== ''))].sort(
+    (left, right) => right.length - left.length,
+  )
+  for (const secret of ordered) {
     redacted = redacted.split(secret).join('[REDACTED]')
   }
   return redacted

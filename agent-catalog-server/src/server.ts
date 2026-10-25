@@ -32,11 +32,13 @@
  * matched top-down, so `/submissions`, `/delist-requests` and `/revocations`
  * can never be swallowed by a dynamic slug (plan Task 5 requirement).
  *
- * Every response — including 401/403/404/405 and unknown routes — is audited
- * before it is written (see audit.ts). JSON error bodies are always
- * `{ error, code? }`; JSON responses are capped at 1 MiB. The server never
- * logs the Authorization header and never logs a request line containing a
- * token: path-derived text reaches only the audit log, where it is redacted.
+ * Every response — including 401/403/404/405, unknown routes and unexpected
+ * handler failures (500 `internal`, whose cause is recorded in the audit line
+ * and printed, redacted, to the console) — is audited before it is written
+ * (see audit.ts). JSON error bodies are always `{ error, code? }`; JSON
+ * responses are capped at 1 MiB. The server never logs the Authorization
+ * header and never logs a request line containing a token: path-derived text
+ * reaches only the audit log, where it is redacted.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -470,7 +472,26 @@ async function handleRequest(
     return
   }
 
-  await finish(response, runtime, await dispatch(route, config), actor, config)
+  // A handler failure (an environmental one such as an entries path that is a
+  // regular file, or a bug in code Tasks 5/6 add) still has to leave an AUDIT
+  // RECORD before any response: "every request is audited" is the invariant,
+  // and forensics matter most exactly when a handler blows up. The failure is
+  // therefore converted into an ordinary HandlerResult instead of escaping to
+  // the server-level guard (which is left for `finish` itself).
+  let result: HandlerResult
+  try {
+    result = await dispatch(route, config)
+  } catch (cause) {
+    const message = redactSecrets(String((cause as Error)?.message ?? cause), secretList(config))
+    console.error(`agent-catalog-server: request handler failed: ${message}`)
+    result = jsonResult(500, errorBody('内部错误', 'internal'), {
+      action: route.id,
+      outcome: 'error',
+      reason: `unhandled handler error: ${message}`,
+      ...routeAuditContext(route),
+    })
+  }
+  await finish(response, runtime, result, actor, config)
 }
 
 async function dispatch(route: ResolvedRoute, config: AgentCatalogConfig): Promise<HandlerResult> {
@@ -532,15 +553,15 @@ export function createAgentCatalogServer(
 
   const server = createServer((request, response) => {
     void handleRequest(request, response, config, runtimePromise).catch(cause => {
-      // Last-resort guard: a handler bug must not leak a stack trace or kill
-      // the process. The response (if still writable) is a generic 500.
+      // Last-resort guard, narrowed to failures of `finish` itself (audit or
+      // response plumbing): every handler failure is caught and audited inside
+      // handleRequest. A stack trace still never escapes to the client, and the
+      // body stays the unified `{ error, code }` shape when nothing was sent.
       const message = redactSecrets(String((cause as Error)?.message ?? cause), secretList(config))
       console.error(`agent-catalog-server: request failed: ${message}`)
       if (!response.headersSent) {
-        response.writeHead(500, {
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
-        })
+        sendJson(response, 500, errorBody('内部错误', 'internal'))
+        return
       }
       response.end()
     })

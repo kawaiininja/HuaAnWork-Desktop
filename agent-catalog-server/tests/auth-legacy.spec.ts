@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { test } from 'vitest'
 
 import { generateKeyPair } from '@huaanwork/catalog-signing'
@@ -385,6 +385,15 @@ test('redacts secrets standalone and keeps ordinary text intact', () => {
   const truncated = redactSecrets('before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEsecretbody', TEST_TOKENS)
   assert.equal(truncated, 'before\n[REDACTED PRIVATE KEY]')
 
+  // Redaction runs longest-first: a secret that is a PREFIX of another must
+  // not be replaced first (that would leave the longer one's tail on disk).
+  const shortSecret = 'prefix-secret-012345678901234567890123456789'
+  const longSecret = `${shortSecret}-extended-tail`
+  assert.equal(
+    redactSecrets(`a ${longSecret} b ${shortSecret} c`, [shortSecret, longSecret]),
+    'a [REDACTED] b [REDACTED] c',
+  )
+
   assert.equal(redactSecrets('plain catalog text', TEST_TOKENS), 'plain catalog text')
 })
 
@@ -434,6 +443,59 @@ test('caps JSON responses at 1 MiB instead of streaming an oversized body', asyn
     assert.equal(last?.status, 500)
     assert.equal(last?.outcome, 'error')
   } finally {
+    await catalog.close()
+  }
+})
+
+test('audits an unexpected handler failure instead of answering an unaudited 500', async () => {
+  const catalog = await bootTestAgentCatalog()
+  const originalError = console.error
+  const logs: string[] = []
+  console.error = (...args: unknown[]) => {
+    logs.push(args.map(value => String(value)).join(' '))
+  }
+  try {
+    // A regular FILE where the entries DIRECTORY is expected makes
+    // `readdirSync` throw inside the handler. This is the portable form of the
+    // failure (chmod tricks are not meaningful on Windows) and the shape Tasks
+    // 5/6 multiply: parsing, state and bundle writes all throw from dispatch.
+    await rm(catalog.entriesDir, { recursive: true, force: true })
+    await writeFile(catalog.entriesDir, 'not a directory', 'utf8')
+
+    const listed = await catalog.request('/v1/catalog', { token: READ_TOKEN })
+    assert.equal(listed.status, 500)
+    assert.deepEqual(listed.body, { error: '内部错误', code: 'internal' })
+
+    const single = await catalog.request('/v1/catalog/typo-check', { token: READ_TOKEN })
+    assert.equal(single.status, 500)
+    assert.deepEqual(single.body, { error: '内部错误', code: 'internal' })
+
+    // Exactly one durable record per failed request: the action is derived
+    // from the route, the outcome is `error`, the actor is the token hash and
+    // the reason survives for forensics (redacted).
+    const records = await catalog.readAudit()
+    assert.deepEqual(
+      records.map(record => ({
+        action: record.action,
+        status: record.status,
+        outcome: record.outcome,
+        actor: record.actor,
+      })),
+      [
+        { action: 'catalog.list', status: 500, outcome: 'error', actor: actorOf(READ_TOKEN) },
+        { action: 'catalog.get', status: 500, outcome: 'error', actor: actorOf(READ_TOKEN) },
+      ],
+    )
+    for (const record of records) {
+      assert.match(record.reason ?? '', /ENOTDIR|not a directory/u)
+    }
+    assert.equal(logs.some(line => /request handler failed/u.test(line)), true)
+    const raw = await catalog.readAuditRaw()
+    for (const token of TEST_TOKENS) {
+      assert.equal(raw.includes(token), false, `audit log leaked ${token}`)
+    }
+  } finally {
+    console.error = originalError
     await catalog.close()
   }
 })
@@ -597,8 +659,8 @@ test('resolves relative directories to absolute paths without reading private ke
       AGENT_CATALOG_ENTRIES_DIR: 'relative/entries',
       AGENT_CATALOG_DATA_DIR: 'relative/data',
     })
-    assert.equal(config.entriesDir.startsWith('/'), true)
-    assert.equal(config.dataDir.startsWith('/'), true)
+    assert.equal(isAbsolute(config.entriesDir), true)
+    assert.equal(isAbsolute(config.dataDir), true)
     assert.equal(JSON.stringify(config).includes('PRIVATE KEY'), false)
     assert.equal(JSON.stringify(config).includes(environment.keyring.privateKeyPem), false)
   } finally {
