@@ -990,6 +990,12 @@ export async function approveSubmission(
     // may be adopted; anything else is a conflict, never an overwrite.
     const finalPath = packageBundlePath(context.config.dataDir, slug, version)
     let finalBundle: Buffer = signed
+    // The published signature metadata must describe the bytes actually served.
+    // An adopted bundle carries its OWN signature event (it may differ in
+    // `signedAt`, slot or — after a key rotation — keyId), so the retried
+    // request's signature is never what state records for it.
+    let effectiveSignature: CatalogSignature = signature
+    let adoptedFromDisk = false
     let existing: Buffer | null = null
     try {
       existing = await readFile(finalPath)
@@ -997,15 +1003,27 @@ export async function approveSubmission(
       if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
     }
     if (existing !== null) {
+      let inspected: Awaited<ReturnType<typeof inspectSignedAgentPackageBundle>> | undefined
       let identical = false
       try {
-        const inspected = await inspectSignedAgentPackageBundle(existing, context.config.keyring)
+        inspected = await inspectSignedAgentPackageBundle(existing, context.config.keyring)
         identical = sameDigest(inspected.digest, current.digest)
       } catch {
         identical = false
       }
-      if (!identical) return { kind: 'bundle-conflict' as const }
+      // The adopted signature record is persisted verbatim, so it must obey the
+      // same exact-shape rule the request path enforces (the verifier tolerates
+      // extras; state must not).
+      if (
+        !identical
+        || inspected === undefined
+        || !hasExactSignatureShape(inspected.signature)
+      ) {
+        return { kind: 'bundle-conflict' as const }
+      }
       finalBundle = existing
+      effectiveSignature = inspected.signature
+      adoptedFromDisk = true
     } else {
       await writeFileAtomic(finalPath, signed)
     }
@@ -1023,7 +1041,7 @@ export async function approveSubmission(
         version,
         manifest: unsigned.manifest,
         digest: current.digest,
-        signature,
+        signature: effectiveSignature,
         status: 'published',
         size,
         updatedAt: publishedAt,
@@ -1034,7 +1052,11 @@ export async function approveSubmission(
       live.updatedAt = publishedAt
       return live
     })
-    return { kind: 'approved' as const, submission: updated }
+    return {
+      kind: 'approved' as const,
+      submission: updated,
+      adoptedSignature: adoptedFromDisk ? effectiveSignature : null,
+    }
   })
 
   switch (outcome.kind) {
@@ -1055,6 +1077,13 @@ export async function approveSubmission(
       return result(200, submissionBody(outcome.submission), {
         action,
         outcome: 'ok',
+        // Recovery is auditable: say that the served bytes were adopted from a
+        // previous attempt and which signature event they carry.
+        ...(outcome.adoptedSignature === null
+          ? {}
+          : {
+              reason: `adopted existing signed bundle; signature ${outcome.adoptedSignature.keyId}`,
+            }),
         slug,
         version,
         submissionId,

@@ -36,6 +36,7 @@ import {
 } from './helpers.ts'
 import type { CatalogState, PackageStatus } from '../src/types.ts'
 import { packageKey } from '../src/store.ts'
+import { packageBundlePath } from '../src/submissions.ts'
 
 const PERSONA = '你是测试助手'
 
@@ -1082,6 +1083,59 @@ test('recovers an identical leftover bundle and refuses a conflicting one', asyn
     )
     assert.equal(garbageConflict.status, 409)
     assert.equal(garbageConflict.body.code, 'bundle-conflict')
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('persists the adopted bundle signature, not the retried request signature', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    const made = await makeBundle()
+    const submitted = await submit(catalog, made.bundle)
+    const submissionId = submitted.body.submissionId as string
+    const signatureA = sign(catalog, submitted.body.digest, { signedAt: '2026-10-24T00:00:00.000Z' })
+    const inspectedA = await inspectUnsignedAgentPackageBundle(made.bundle)
+    const bundleA = await buildSignedAgentPackageBundle(inspectedA.files, inspectedA.digest, signatureA)
+    // Simulate `crashed after rename, before the state commit`: A's signed
+    // bundle already sits at the final path while the submission is pending.
+    await mkdir(join(catalog.dataDir, 'packages', made.manifest.slug, made.manifest.version), {
+      recursive: true,
+    })
+    await writeFile(
+      packageBundlePath(catalog.dataDir, made.manifest.slug, made.manifest.version),
+      bundleA,
+    )
+    // The retried approval carries a DIFFERENT signature event (B) over the
+    // same digest. State must describe the bytes it actually adopted (A).
+    const signatureB = sign(catalog, submitted.body.digest, { signedAt: '2026-10-25T00:00:00.000Z' })
+    const response = await approve(catalog, submissionId, signatureB)
+    assert.equal(response.status, 200, JSON.stringify(response.body))
+    const state = await readState(catalog)
+    assert.equal(
+      state.packages[packageKey(made.manifest.slug, made.manifest.version)]?.signature.signedAt,
+      '2026-10-24T00:00:00.000Z',
+    )
+    // The WHOLE persisted signature record is A's event, not a mix of A/B.
+    assert.deepEqual(
+      state.packages[packageKey(made.manifest.slug, made.manifest.version)]?.signature,
+      signatureA,
+    )
+    const downloaded = await catalog.request(
+      `/v1/agent-packages/${made.manifest.slug}/${made.manifest.version}/bundle`,
+      { token: READ_TOKEN },
+    )
+    assert.equal(downloaded.status, 200)
+    const verified = await inspectSignedAgentPackageBundle(downloaded.buffer, catalog.keyringEntries)
+    assert.equal(verified.signature.signedAt, '2026-10-24T00:00:00.000Z')
+
+    // The audit trail names the adoption and the adopted signature's key.
+    const adopted = (await catalog.readAudit()).find(
+      entry => entry.action === 'agentPackages.submissions.approve' && entry.status === 200,
+    )
+    assert.ok(adopted, 'the successful approval must be audited')
+    assert.match(String(adopted.reason), /adopted existing signed bundle/u)
+    assert.match(String(adopted.reason), new RegExp(signatureA.keyId, 'u'))
   } finally {
     await catalog.close()
   }
