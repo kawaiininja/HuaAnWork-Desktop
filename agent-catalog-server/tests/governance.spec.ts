@@ -704,7 +704,7 @@ test('audits governance writes with the request id and never the tokens', async 
   const catalog = await bootTestAgentCatalog()
   try {
     const version = (await publish(catalog)).manifest.version
-    const approvedRequest = (await requestDelist(catalog, SLUG, version, '合规下线')).body as DelistRequest
+    const approvedRequest = (await requestDelist(catalog, SLUG, version, '验收:演示下架')).body as DelistRequest
     assert.equal((await approveDelist(catalog, approvedRequest.id)).status, 200)
 
     const rejectedVersion = '1.0.1'
@@ -725,6 +725,9 @@ test('audits governance writes with the request id and never the tokens', async 
       assert.equal(record.actor, actorOf(PUBLISH_TOKEN))
       assert.equal(typeof record.delistRequestId, 'string')
     }
+    // M-2: the success line carries the trimmed request reason verbatim.
+    assert.match(String(creates[0]?.reason), /验收:演示下架/u)
+    assert.equal(creates[0]?.version, version)
     assert.deepEqual(
       creates.map(record => record.delistRequestId),
       [approvedRequest.id, rejectedRequest.id],

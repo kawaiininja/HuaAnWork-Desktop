@@ -43,8 +43,16 @@
  * responses are capped at 1 MiB. The server never logs the Authorization
  * header and never logs a request line containing a token: path-derived text
  * reaches only the audit log, where it is redacted.
+ *
+ * Mutating requests additionally write a durable intent to
+ * `audit-intents.jsonl` BEFORE the handler runs, and every request id is
+ * stamped on both the intent and the result line (Task 4). If the intent
+ * cannot be written the request is refused with 500 `audit-write-failed` and
+ * the handler never runs; a crash between the state commit and the result line
+ * is closed at startup by `AuditLog.reconcile`.
  */
 
+import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { AuditLog, redactSecrets, type AuditEvent } from './audit.ts'
 import { authenticateToken, bearerToken, tokenActor, type AgentCatalogRole } from './auth.ts'
@@ -56,6 +64,7 @@ import {
   listRevocations,
   rejectDelistRequest,
   revokePackage,
+  type GovernanceHandlerContext,
 } from './governance.ts'
 import { findEntry, loadEntries } from './legacy.ts'
 import { CatalogStore } from './store.ts'
@@ -89,11 +98,15 @@ export interface AgentCatalogRuntime {
 
 /**
  * Open the runtime (state store first: a corrupt state file must refuse
- * startup before any request can be served or audited).
+ * startup before any request can be served or audited). After both files are
+ * open, unclosed write intents are reconciled (Task 4): a crash between the
+ * state commit and its audit result line must not leave an unaudited
+ * successful change.
  */
 export async function createAgentCatalogRuntime(config: AgentCatalogConfig): Promise<AgentCatalogRuntime> {
   const store = await CatalogStore.open(config.dataDir)
   const audit = await AuditLog.open(config.dataDir, [config.readToken, config.publishToken, config.adminToken])
+  await audit.reconcile(store.read())
   return { config, store, audit }
 }
 
@@ -318,6 +331,7 @@ async function finish(
   result: HandlerResult,
   actor: string,
   config: AgentCatalogConfig,
+  requestId: string,
 ): Promise<void> {
   let effective = result
   if (effective.raw === undefined) {
@@ -335,6 +349,7 @@ async function finish(
     ...effective.audit,
     status: effective.status,
     actor,
+    requestId,
   }
   try {
     await runtime.audit.writeAudit(event)
@@ -392,6 +407,10 @@ async function handleRequest(
     return
   }
 
+  // One id per request. It appears in the result line of EVERY response and in
+  // the write intent of every mutating request (Task 4), which is what lets
+  // startup reconciliation pair the two after a crash.
+  const requestId = randomUUID()
   const method = request.method ?? 'GET'
   const presented = bearerToken(request)
   const actor = tokenActor(presented)
@@ -410,6 +429,7 @@ async function handleRequest(
       }),
       actor,
       config,
+      requestId,
     )
     return
   }
@@ -428,6 +448,7 @@ async function handleRequest(
       }),
       actor,
       config,
+      requestId,
     )
     return
   }
@@ -443,6 +464,7 @@ async function handleRequest(
       }),
       actor,
       config,
+      requestId,
     )
     return
   }
@@ -459,6 +481,7 @@ async function handleRequest(
       }),
       actor,
       config,
+      requestId,
     )
     return
   }
@@ -480,6 +503,7 @@ async function handleRequest(
       ),
       actor,
       config,
+      requestId,
     )
     return
   }
@@ -493,6 +517,25 @@ async function handleRequest(
     return
   }
 
+  // Durable intent BEFORE the handler can commit state (Task 4 / I-5). If the
+  // intent cannot be written the write is refused here: the handler never runs,
+  // so there is no state change and nothing for reconciliation to guess about.
+  if (method !== 'GET' && method !== 'HEAD') {
+    try {
+      await runtime.audit.writeIntent({
+        action: route.id,
+        actor,
+        requestId,
+        ...routeAuditContext(route),
+      })
+    } catch (cause) {
+      const message = redactSecrets(String((cause as Error)?.message ?? cause), secretList(config))
+      console.error(`agent-catalog-server: audit intent write failed: ${message}`)
+      sendJson(response, 500, errorBody('审计写入失败', 'audit-write-failed'))
+      return
+    }
+  }
+
   // A handler failure (an environmental one such as an entries path that is a
   // regular file, or a bug in code Tasks 5/6 add) still has to leave an AUDIT
   // RECORD before any response: "every request is audited" is the invariant,
@@ -501,7 +544,7 @@ async function handleRequest(
   // the server-level guard (which is left for `finish` itself).
   let result: HandlerResult
   try {
-    result = await dispatch(route, { request, runtime, config, role: identity, actor })
+    result = await dispatch(route, { request, runtime, config, role: identity, actor, requestId })
   } catch (cause) {
     const message = redactSecrets(String((cause as Error)?.message ?? cause), secretList(config))
     console.error(`agent-catalog-server: request handler failed: ${message}`)
@@ -512,7 +555,7 @@ async function handleRequest(
       ...routeAuditContext(route),
     })
   }
-  await finish(response, runtime, result, actor, config)
+  await finish(response, runtime, result, actor, config, requestId)
 }
 
 interface DispatchContext {
@@ -521,6 +564,8 @@ interface DispatchContext {
   readonly config: AgentCatalogConfig
   readonly role: AgentCatalogRole
   readonly actor: string
+  /** The id of this request; mutations stamp it into `state.lastMutation`. */
+  readonly requestId: string
 }
 
 async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise<HandlerResult> {
@@ -559,6 +604,7 @@ async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise
   }
 
   const handlers = submissionContext(context)
+  const governance = governanceContext(context)
   switch (route.id) {
     case 'agentPackages.list':
       return listPublishedPackages(handlers)
@@ -579,17 +625,17 @@ async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise
     case 'agentPackages.submissions.reject':
       return rejectSubmission(handlers, route.submissionId ?? '')
     case 'agentPackages.delistRequests.create':
-      return createDelistRequest(handlers, route.slug ?? '', route.version ?? '')
+      return createDelistRequest(governance, route.slug ?? '', route.version ?? '')
     case 'agentPackages.delistRequests.pending':
-      return listDelistRequests(handlers)
+      return listDelistRequests(governance)
     case 'agentPackages.delistRequests.approve':
-      return approveDelistRequest(handlers, route.delistRequestId ?? '')
+      return approveDelistRequest(governance, route.delistRequestId ?? '')
     case 'agentPackages.delistRequests.reject':
-      return rejectDelistRequest(handlers, route.delistRequestId ?? '')
+      return rejectDelistRequest(governance, route.delistRequestId ?? '')
     case 'agentPackages.revoke':
-      return revokePackage(handlers, route.slug ?? '', route.version ?? '')
+      return revokePackage(governance, route.slug ?? '', route.version ?? '')
     case 'agentPackages.revocations.list':
-      return listRevocations(handlers)
+      return listRevocations(governance)
     default:
       // Unreachable while AGENT_PACKAGE_ROUTES and this switch agree. It must
       // still answer with the unified body: adding a route id without a handler
@@ -610,6 +656,18 @@ function submissionContext(context: DispatchContext): SubmissionHandlerContext {
     store: context.runtime.store,
     role: context.role,
     actor: context.actor,
+    requestId: context.requestId,
+  }
+}
+
+/** The governance handlers only need the state store (no entries/keyring). */
+function governanceContext(context: DispatchContext): GovernanceHandlerContext {
+  return {
+    request: context.request,
+    store: context.runtime.store,
+    role: context.role,
+    actor: context.actor,
+    requestId: context.requestId,
   }
 }
 

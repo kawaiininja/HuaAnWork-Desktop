@@ -206,6 +206,13 @@ export interface RevocationListBody {
 
 export interface CatalogState {
   schemaVersion: 1
+  /**
+   * The request id of the LAST committed mutation (Task 4). It binds a state
+   * commit to its durable audit intent: after a crash between the commit and
+   * the audit result line, startup reconciliation compares this id with each
+   * unclosed intent to decide whether the change actually happened.
+   */
+  lastMutation?: { requestId: string; action: string; at: string }
   submissions: Record<string, Submission>
   packages: Record<string, PublishedPackage>
   delistRequests: Record<string, DelistRequest>

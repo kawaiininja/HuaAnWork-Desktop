@@ -142,6 +142,8 @@ export interface SubmissionHandlerContext {
   readonly store: CatalogStore
   readonly role: AgentCatalogRole
   readonly actor: string
+  /** The request whose durable audit intent this mutation must be bound to. */
+  readonly requestId: string
 }
 
 interface Conflict {
@@ -649,7 +651,7 @@ export async function createSubmission(context: SubmissionHandlerContext): Promi
 
     const now = new Date().toISOString()
     const migrationFrom = verdict.migrationFrom
-    const record = await store.update(draft => {
+    const record = await store.mutate(context.requestId, action, draft => {
       // The package lock already serialized this `${slug}/${version}`, so a
       // package that appeared here would mean a bug; refuse to overwrite it.
       if (draft.packages[packageKey(slug, version)] !== undefined) {
@@ -1010,7 +1012,7 @@ export async function approveSubmission(
 
     const size = finalBundle.byteLength
     const publishedAt = new Date().toISOString()
-    const updated = await context.store.update(draft => {
+    const updated = await context.store.mutate(context.requestId, action, draft => {
       const live = draft.submissions[submissionId]
       if (live === undefined || live.status !== 'pending-review') {
         throw new Error(`submission ${submissionId} changed while approving`)
@@ -1104,7 +1106,7 @@ export async function rejectSubmission(
         },
       }
     }
-    const updated = await context.store.update(draft => {
+    const updated = await context.store.mutate(context.requestId, action, draft => {
       const live = draft.submissions[submissionId]
       if (live === undefined || live.status !== 'pending-review') {
         throw new Error(`submission ${submissionId} changed while rejecting`)
@@ -1122,6 +1124,8 @@ export async function rejectSubmission(
   return result(200, submissionBody(outcome.submission), {
     action,
     outcome: 'ok',
+    // M-2: the decider's (trimmed) reason is part of the success record.
+    reason: `rejection reason: ${reason}`,
     slug,
     version,
     submissionId,

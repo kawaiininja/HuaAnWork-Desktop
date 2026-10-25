@@ -87,6 +87,8 @@ export interface GovernanceHandlerContext {
   readonly store: CatalogStore
   readonly role: AgentCatalogRole
   readonly actor: string
+  /** The request whose durable audit intent this mutation must be bound to. */
+  readonly requestId: string
 }
 
 interface Conflict {
@@ -301,7 +303,7 @@ export async function createDelistRequest(
       actor: context.actor,
       createdAt: new Date().toISOString(),
     }
-    await context.store.update(draft => {
+    await context.store.mutate(context.requestId, action, draft => {
       if (draft.packages[packageKey(slug, version)]?.status !== 'published') {
         throw new Error(`package ${slug}/${version} changed while requesting delisting`)
       }
@@ -344,6 +346,8 @@ export async function createDelistRequest(
         audit: {
           action,
           outcome: 'ok',
+          // M-2: the creator's (trimmed) reason is part of the success record.
+          reason: outcome.request.reason,
           slug,
           version,
           delistRequestId: outcome.request.id,
@@ -420,7 +424,7 @@ export async function approveDelistRequest(
       if (pkg === undefined) return { kind: 'package-missing' as const }
 
       const resolvedAt = new Date().toISOString()
-      const updated = await context.store.update(draft => {
+      const updated = await context.store.mutate(context.requestId, action, draft => {
         const live = draft.delistRequests[requestId]
         if (live === undefined || live.status !== 'pending') {
           throw new Error(`delist request ${requestId} changed while approving`)
@@ -505,7 +509,7 @@ export async function rejectDelistRequest(
         return { kind: 'conflict' as const, status: current.status }
       }
       // Only the request changes; the package stays published.
-      const updated = await context.store.update(draft => {
+      const updated = await context.store.mutate(context.requestId, action, draft => {
         const live = draft.delistRequests[requestId]
         if (live === undefined || live.status !== 'pending') {
           throw new Error(`delist request ${requestId} changed while rejecting`)
@@ -572,7 +576,7 @@ export async function revokePackage(
       revokedAt: new Date().toISOString(),
       actor: context.actor,
     }
-    await context.store.update(draft => {
+    await context.store.mutate(context.requestId, action, draft => {
       const packageRecord = draft.packages[packageKey(slug, version)]
       if (packageRecord === undefined) {
         throw new Error(`package ${slug}/${version} vanished while revoking`)

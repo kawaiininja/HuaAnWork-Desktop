@@ -53,7 +53,23 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** Validate a parsed state document without trusting the disk. */
+const SUBMISSION_STATUSES: ReadonlySet<string> = new Set(['pending-review', 'published', 'rejected'])
+const PACKAGE_STATUSES: ReadonlySet<string> = new Set(['published', 'delisted', 'revoked'])
+const DELIST_STATUSES: ReadonlySet<string> = new Set(['pending', 'approved', 'rejected'])
+
+/**
+ * Validate a parsed state document without trusting the disk.
+ *
+ * The four collections are checked record by record (Task 4 / M-3): required
+ * fields and their JSON types, status enums, and the identity relationships
+ * (`packages`/`revocations` key === `${slug}/${version}`, `delistRequests` key
+ * === `id`). A semantically broken document is an operator error exactly like
+ * invalid JSON: it is never "repaired" by dropping or re-keying records.
+ *
+ * `manifest`/`digest`/`signature` only have to be plain objects here — their
+ * inner shape is owned by the package/signature validators and re-checked at
+ * read time; duplicating those schemas in the store would let them drift.
+ */
 function parseState(path: string, contents: string): CatalogState {
   let document: unknown
   try {
@@ -72,6 +88,104 @@ function parseState(path: string, contents: string): CatalogState {
       throw new StoreCorruptError(path, new Error(`${collection} must be an object`))
     }
   }
+
+  const requireString = (value: unknown, field: string, nonEmpty = true): string => {
+    if (typeof value !== 'string' || (nonEmpty && value.length === 0)) {
+      throw new StoreCorruptError(path, new Error(`${field} must be a non-empty string`))
+    }
+    return value
+  }
+  const requireObject = (value: unknown, field: string): Record<string, unknown> => {
+    if (!isPlainObject(value)) throw new StoreCorruptError(path, new Error(`${field} must be an object`))
+    return value
+  }
+  const requireStatus = (value: unknown, allowed: ReadonlySet<string>, field: string): void => {
+    if (typeof value !== 'string' || !allowed.has(value)) {
+      throw new StoreCorruptError(path, new Error(`${field} is invalid`))
+    }
+  }
+
+  const submissions = document.submissions as Record<string, unknown>
+  for (const [key, raw] of Object.entries(submissions)) {
+    const record = requireObject(raw, `submissions.${key}`)
+    requireString(record.id, `submissions.${key}.id`)
+    requireString(record.slug, `submissions.${key}.slug`)
+    requireString(record.version, `submissions.${key}.version`)
+    requireString(record.submittedAt, `submissions.${key}.submittedAt`)
+    requireString(record.updatedAt, `submissions.${key}.updatedAt`)
+    requireString(record.actor, `submissions.${key}.actor`)
+    requireStatus(record.status, SUBMISSION_STATUSES, `submissions.${key}.status`)
+    requireObject(record.digest, `submissions.${key}.digest`)
+    if (record.reason !== undefined) requireString(record.reason, `submissions.${key}.reason`)
+    if (record.migrationFrom !== undefined) {
+      requireString(record.migrationFrom, `submissions.${key}.migrationFrom`)
+    }
+  }
+
+  const packages = document.packages as Record<string, unknown>
+  for (const [key, raw] of Object.entries(packages)) {
+    const record = requireObject(raw, `packages.${key}`)
+    const slug = requireString(record.slug, `packages.${key}.slug`)
+    const version = requireString(record.version, `packages.${key}.version`)
+    if (packageKey(slug, version) !== key) {
+      throw new StoreCorruptError(
+        path,
+        new Error(`packages.${key} does not match its slug/version (${packageKey(slug, version)})`),
+      )
+    }
+    requireStatus(record.status, PACKAGE_STATUSES, `packages.${key}.status`)
+    requireObject(record.manifest, `packages.${key}.manifest`)
+    requireObject(record.digest, `packages.${key}.digest`)
+    requireObject(record.signature, `packages.${key}.signature`)
+    if (typeof record.size !== 'number' || !Number.isFinite(record.size) || record.size < 0) {
+      throw new StoreCorruptError(path, new Error(`packages.${key}.size must be a non-negative number`))
+    }
+    requireString(record.updatedAt, `packages.${key}.updatedAt`)
+    requireString(record.actor, `packages.${key}.actor`)
+    if (record.migrationFrom !== undefined) {
+      requireString(record.migrationFrom, `packages.${key}.migrationFrom`)
+    }
+  }
+
+  const delistRequests = document.delistRequests as Record<string, unknown>
+  for (const [key, raw] of Object.entries(delistRequests)) {
+    const record = requireObject(raw, `delistRequests.${key}`)
+    const id = requireString(record.id, `delistRequests.${key}.id`)
+    if (id !== key) {
+      throw new StoreCorruptError(path, new Error(`delistRequests.${key}.id does not match its key`))
+    }
+    requireString(record.slug, `delistRequests.${key}.slug`)
+    requireString(record.version, `delistRequests.${key}.version`)
+    requireString(record.reason, `delistRequests.${key}.reason`)
+    requireString(record.actor, `delistRequests.${key}.actor`)
+    requireString(record.createdAt, `delistRequests.${key}.createdAt`)
+    requireStatus(record.status, DELIST_STATUSES, `delistRequests.${key}.status`)
+    if (record.resolvedAt !== undefined) requireString(record.resolvedAt, `delistRequests.${key}.resolvedAt`)
+  }
+
+  const revocations = document.revocations as Record<string, unknown>
+  for (const [key, raw] of Object.entries(revocations)) {
+    const record = requireObject(raw, `revocations.${key}`)
+    const slug = requireString(record.slug, `revocations.${key}.slug`)
+    const version = requireString(record.version, `revocations.${key}.version`)
+    if (packageKey(slug, version) !== key) {
+      throw new StoreCorruptError(
+        path,
+        new Error(`revocations.${key} does not match its slug/version (${packageKey(slug, version)})`),
+      )
+    }
+    requireString(record.reason, `revocations.${key}.reason`)
+    requireString(record.revokedAt, `revocations.${key}.revokedAt`)
+    requireString(record.actor, `revocations.${key}.actor`)
+  }
+
+  if (document.lastMutation !== undefined) {
+    const mutation = requireObject(document.lastMutation, 'lastMutation')
+    requireString(mutation.requestId, 'lastMutation.requestId')
+    requireString(mutation.action, 'lastMutation.action')
+    requireString(mutation.at, 'lastMutation.at')
+  }
+
   return document as unknown as CatalogState
 }
 
@@ -143,6 +257,27 @@ export class CatalogStore {
       () => undefined,
     )
     return run
+  }
+
+  /**
+   * A mutating operation bound to the audit intent of ONE request (Task 4).
+   * The request id is stamped onto the draft BEFORE the mutator runs, so the
+   * commit and the id always travel together: a crash after the commit lets
+   * startup reconciliation decide, from `state.lastMutation`, whether the
+   * matching intent actually happened.
+   *
+   * Only real mutations go through this method; conflict/replay paths return
+   * before touching the state and must not fake a commit.
+   */
+  mutate<T>(
+    requestId: string,
+    action: string,
+    mutator: (draft: CatalogState) => T | Promise<T>,
+  ): Promise<T> {
+    return this.update(draft => {
+      draft.lastMutation = { requestId, action, at: new Date().toISOString() }
+      return mutator(draft)
+    })
   }
 
   /**

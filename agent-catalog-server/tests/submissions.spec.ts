@@ -659,6 +659,34 @@ test('allows a higher version of the same slug but freezes rejected version cont
   }
 })
 
+test('audits the trimmed rejection reason with the submission identity and no tokens', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    const bundle = await makeBundle({ slug: 'reject-audit' })
+    const submitted = await submit(catalog, bundle.bundle)
+    const id = submitted.body.submissionId as string
+    assert.equal((await reject(catalog, id, { reason: '  证据不足  ' })).status, 200)
+
+    const record = (await catalog.readAudit()).find(
+      entry => entry.action === 'agentPackages.submissions.reject',
+    )
+    assert.ok(record, 'the successful reject must be audited')
+    assert.equal(record.status, 200)
+    assert.equal(record.outcome, 'ok')
+    assert.match(String(record.reason), /rejection reason: 证据不足/u)
+    assert.equal(record.slug, 'reject-audit')
+    assert.equal(record.version, '1.0.0')
+    assert.equal(record.submissionId, id)
+
+    const raw = await catalog.readAuditRaw()
+    for (const token of [READ_TOKEN, PUBLISH_TOKEN, ADMIN_TOKEN]) {
+      assert.equal(raw.includes(token), false, `audit log leaked ${token}`)
+    }
+  } finally {
+    await catalog.close()
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Legacy directory entries and the migration exception
 // ---------------------------------------------------------------------------
