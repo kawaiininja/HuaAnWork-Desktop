@@ -503,6 +503,78 @@ describe('catalog dispatch verification', () => {
 // ---------------------------------------------------------------------------
 
 describe('catalog revocations', () => {
+  test('unconfigured catalog root skips the refresh without a false warning', async () => {
+    let getRevocationCalls = 0
+    const client = fakeCatalogClient({
+      getRevocations: async () => {
+        getRevocationCalls += 1
+        return []
+      },
+    })
+    // M1-only 用户:设置面从未配置 agents_host/agents_port。绑定仍在(client 可
+    // 用),但安全面必须按「未配置」跳过 —— 否则每轮刷新都报「目录不可达」。
+    configureAgentCatalog({
+      profileDir: root,
+      readSettings: () => ({
+        agents_host: '',
+        agents_port: 0,
+        agents_catalog_token: '',
+        agents_catalog_publish_token: '',
+      }),
+      logger: () => undefined,
+      client,
+    })
+    const security = createAgentCatalogSecurity({
+      profileDir: root,
+      registry: createAgentPackageActiveTurnRegistry(),
+    })
+
+    const result = await security.refreshRevocations()
+    expect(result).toEqual({})
+    expect(getRevocationCalls).toBe(0)
+    // 未配置不等于出错:没有 warning,也没有落盘缓存。
+    expect(readdirSync(root).filter((name) => name.startsWith('agent-catalog-revocations'))).toEqual([])
+  })
+
+  test('a cancel request releases the session reservation before dispose settles', async () => {
+    installEnabledCatalogPackage()
+    const turns = createAgentPackageActiveTurnRegistry()
+    const security = catalogSecurity(fakeCatalogClient(), turns)
+    const disposeGate = deferred<void>()
+    let disposeCalls = 0
+    let activationIndex = 0
+    const harness = makeTurnHarness({
+      security,
+      turns,
+      startActivation: async () => {
+        activationIndex += 1
+        const index = activationIndex
+        return {
+          childId: `child-${String(index)}`,
+          result: index === 1 ? new Promise(() => undefined) : Promise.resolve({}),
+          dispose: async () => {
+            disposeCalls += 1
+            if (index === 1) await disposeGate.promise
+          },
+        }
+      },
+    })
+
+    const first = await harness.dispatch()
+    expect(first.afterIdle).toBeTypeOf('function')
+
+    // 取消请求(不 await):收尾会卡在 activation dispose 上。名额必须在
+    // 请求时刻同步释放,否则下一条消息会被「已有运行中的智能体包回合」拒绝。
+    const cancelling = harness.turns.cancelBySessionId('parent-session', 'cancel')
+    const second = await harness.dispatch()
+    expect(second.text).toContain('写一份周报')
+
+    disposeGate.resolve()
+    await cancelling
+    expect(disposeCalls).toBeGreaterThanOrEqual(1)
+    await second.afterIdle()
+  })
+
   test('revocation aborts an in-flight dispatch with the revocation reason', async () => {
     installEnabledCatalogPackage()
     const activationGate = deferred<FakeActivation>()

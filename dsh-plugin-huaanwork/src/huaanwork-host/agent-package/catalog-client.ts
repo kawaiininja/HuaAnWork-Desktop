@@ -342,6 +342,16 @@ export function getAgentCatalogClient(): AgentCatalogClient {
   return getAgentCatalogBinding().client
 }
 
+/**
+ * 当前设置是否配置了可用的目录根(`agents_host`/`agents_port` 经现有 LAN 校验)。
+ *
+ * M1-only 用户(从未配置公用机目录)没有目录根:目录请求只会抛出
+ * `目录不可达…`,不应每轮刷新都产生一条撤销告警。调用方据此跳过刷新。
+ */
+export function isAgentCatalogConfigured(): boolean {
+  return catalogRootUrlOrUndefined(getAgentCatalogBinding().readSettings()) !== undefined
+}
+
 /** 测试隔离用;生产代码只在 `index.ts` 启动时配置一次。 */
 export function resetAgentCatalogForTests(): void {
   activeBinding = undefined

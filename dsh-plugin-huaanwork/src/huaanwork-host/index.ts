@@ -17,7 +17,11 @@ import { createAgentsHost } from './agents-host.ts'
 import { setAgentPackageActiveTurns, setAgentPackageHost, setAgentsDirectory } from './sessions.ts'
 import { createAgentCatalogSecurity } from './agent-package/catalog-security.ts'
 import { recoverCatalogPackageInstalls } from './agent-package/catalog-install.ts'
-import { createAgentPackageActiveTurnRegistry, createAgentPackageHost } from './agent-package/host.ts'
+import {
+  createAgentPackageActiveTurnRegistry,
+  createAgentPackageHost,
+  type AgentPackageActiveTurnRegistry,
+} from './agent-package/host.ts'
 import {
   configureAgentCatalog,
   readCachedCatalogPackageSlugs,
@@ -56,6 +60,44 @@ export const Config: z<HuaanworkHostConfig> = z.object({
     disabled: z.boolean().default(false),
   }).default({ disabled: false }),
 })
+
+/**
+ * 应用退出时的智能体包收尾(最终评审 I2)。
+ *
+ * `cancelAll('dispose')` 会等每个回合的 `activation.dispose()`(上限 600s)和
+ * runtime 停止;若只 `void` 发起整条链路,应用可能在 SIGTERM 到达 detached
+ * 子进程之前就退出,留下孤儿进程。因此:
+ *
+ *   1. **同步启动**进程 kill 路径(`stopAll`)——信号在本次 tick 内发出;
+ *   2. 等待 `cancelAll('dispose')`(保留「先取消回合、再等停止完成」的顺序);
+ *   3. 等第 1 步的 kill 路径结算。
+ *
+ * 返回的 promise 作为 effect disposer 的返回值,Cordis 在 fiber 卸载时会 await
+ * 它(`Disposable<Promise<void>>`),所以 `ctx.fiber.dispose()` 也等到收尾完成。
+ */
+export async function disposeAgentPackageRuntime(
+  activeTurns: AgentPackageActiveTurnRegistry,
+  stopAll: () => Promise<void> = stopAllAgentPackageProcesses,
+): Promise<void> {
+  let stopFailure: unknown
+  // Attach the catch immediately: cancellation may take up to 600s, and an
+  // early rejection of `stopAll` must not surface as an unhandled rejection
+  // while we are still waiting for it.
+  const stopping = stopAll().catch((cause: unknown) => {
+    stopFailure = cause
+  })
+  await activeTurns.cancelAll('dispose')
+  await stopping
+  if (stopFailure !== undefined) throw stopFailure
+}
+
+/** 与 effect disposer 同形的工厂(测试缝可替换 `stopAll`)。 */
+export function createAgentPackageRuntimeDisposer(
+  activeTurns: AgentPackageActiveTurnRegistry,
+  stopAll?: () => Promise<void>,
+): () => Promise<void> {
+  return () => disposeAgentPackageRuntime(activeTurns, stopAll)
+}
 
 export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<void> {
   ctx.huaanworkCheckpointUserDataDir = config.checkpointUserDataDir ?? ''
@@ -252,12 +294,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           unregisterRuntimeTools()
           unregisterPackageTools()
           unregister?.()
-          // 插件卸载(应用退出/热替换):先取消在途包回合(释放 activation 并停
-          // runtime),再杀掉所有包进程;afterIdle 只管单轮。
-          void (async () => {
-            await agentPackageTurns.cancelAll('dispose')
-            await stopAllAgentPackageProcesses()
-          })()
+          // 插件卸载(应用退出/热替换):先同步启动进程 kill 路径,再取消在途包
+          // 回合(释放 activation 并停 runtime),最后等 kill 结算。disposer 返回
+          // promise,Cordis 在卸载时等待整条收尾(最终评审 I2)。
+          return createAgentPackageRuntimeDisposer(agentPackageTurns)
         }
       }, 'huaanwork: host and creation tools registration')
     },

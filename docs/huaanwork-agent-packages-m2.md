@@ -240,6 +240,18 @@ node --experimental-strip-types agent-catalog-admin/src/cli.ts revoke <slug> <ve
 | 整包（manifest+人设+技能+入口） | 5 MiB | 同上 |
 | 审查原因 | 1–500 字符 | CLI 用法错误（exit 2） |
 
+**评审 C9 的后果：签名条目计入同一个 1024 条目帽。** unsigned 检查只数内容条目，
+而签名 bundle 会再追加 `.signature/package-digest.json` 与 `.signature/signature.json`；
+两者与内容共用 `MAX_AGENT_PACKAGE_ENTRIES = 1024`。因此处在边界的内容包**能通过提交
+（unsigned 检查），却在审批/签名阶段失败**：2026-10-24 以真实构建路径实测，1022 条内容
+（含 `agent.json`、`persona.md`）仍可通过验签，**1023–1024 条内容**的包 unsigned 通过，
+`buildSignedAgentPackageBundle` / `inspectSignedAgentPackageBundle` 报
+`包结构非法：条目数超过1024`。发布者应把内容条目控制在 **1022 条以内**，不要把 1024
+当成可用预算。评审原文给出 1022–1024 的区间；本次实测把下界订正为 1023（1022 仍通过），
+“边界包会在审批阶段失败”的结论不变。回归钉见
+`packages/agent-package-format/tests/bundle.test.ts` 的
+「counts signature entries against the shared 1024 entry cap」。
+
 其它高频文案：
 
 | 文案（原话） | 含义 | 处置 |

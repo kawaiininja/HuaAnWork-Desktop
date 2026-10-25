@@ -500,8 +500,12 @@ test('revokes versions, hides them and serves exact revocation records', async (
     const items = revocations.body.items as Revocation[]
     assert.equal(items.length, 2)
     for (const item of items) {
-      assert.deepEqual(Object.keys(item).sort(), ['actor', 'reason', 'revokedAt', 'slug', 'version'])
+      // Public projection: `actor` is the admin-token hash and must never leak
+      // to a read-token holder (final-review M1).
+      assert.deepEqual(Object.keys(item).sort(), ['reason', 'revokedAt', 'slug', 'version'])
+      assert.equal('actor' in item, false)
     }
+    assert.equal(JSON.stringify(revocations.body).includes(actorOf(ADMIN_TOKEN)), false)
 
     // Stable order: revokedAt first, then slug/version. Force a tie to pin the
     // tie-break, then distinct times to pin the precedence.
@@ -555,7 +559,12 @@ test('revocation is idempotent and a delisted version can be revoked', async () 
     const audit = await catalog.readAudit()
     const revocations = audit.filter(record => record.action === 'agentPackages.revoke')
     assert.equal(revocations.length, 2)
+    // Spec §8.6: the administrator's reason is part of every revoke audit line,
+    // including the idempotent replay (which keeps the FIRST stored record but
+    // must still record what THIS request asked for).
+    assert.match(String(revocations[0]?.reason), /第一次撤销/u)
     assert.match(String(revocations[1]?.reason), /idempotent/u)
+    assert.match(String(revocations[1]?.reason), /第二次理由不同/u)
 
     // A delisted version can still be revoked (delist is not a security action).
     const delistedSlug = 'withdrawn-report'
@@ -738,6 +747,7 @@ test('audits governance writes with the request id and never the tokens', async 
     assert.equal(revocations[0]?.version, '1.0.0')
     assert.equal(revocations[0]?.status, 200)
     assert.equal(revocations[0]?.actor, actorOf(ADMIN_TOKEN))
+    assert.match(String(revocations[0]?.reason), /不安全/u)
 
     const raw = await catalog.readAuditRaw()
     for (const token of [READ_TOKEN, PUBLISH_TOKEN, ADMIN_TOKEN]) {

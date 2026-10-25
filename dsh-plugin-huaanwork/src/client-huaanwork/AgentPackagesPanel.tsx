@@ -22,6 +22,7 @@ import {
   packageToolsLabel,
   PUBLISH_CONFIRM_TEXT,
   publicationNotice,
+  revokedText,
   SEARCH_EMPTY_TEXT,
   updateHintFor,
   type AgentPackageAction,
@@ -614,6 +615,7 @@ export function AgentPackageDetailDialog({
               {packageDetail.publishedVersion ? (
                 <p>已发布版本 v{packageDetail.publishedVersion}</p>
               ) : null}
+              {packageDetail.revoked ? <p>{revokedText(packageDetail.revoked)}</p> : null}
             </section>
             <section className="agent-detail-section">
               <strong>签名</strong>

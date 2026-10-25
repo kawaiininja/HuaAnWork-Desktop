@@ -592,11 +592,13 @@ export async function revokePackage(
       return notFoundPackage(action, slug, version)
     case 'replayed':
       // Idempotent: the FIRST reason/revokedAt/actor wins, and no state is
-      // written (the package timestamp does not move either).
+      // written (the package timestamp does not move either). The submitted
+      // reason is still audited (spec §8.6 requires 原因); `redactSecrets`
+      // runs on the free text before serialization.
       return result(200, outcome.revocation, {
         action,
         outcome: 'ok',
-        reason: 'idempotent replay: the first revocation is kept',
+        reason: `idempotent replay: the first revocation is kept; submitted reason: ${reason}`,
         slug,
         version,
       })
@@ -604,6 +606,7 @@ export async function revokePackage(
       return result(200, outcome.revocation, {
         action,
         outcome: 'ok',
+        reason: `revocation reason: ${reason}`,
         slug,
         version,
       })
@@ -617,12 +620,21 @@ export async function revokePackage(
 export async function listRevocations(context: GovernanceHandlerContext): Promise<HandlerResult> {
   const action = ACTIONS.revocations
   const body: RevocationListBody = {
-    items: Object.values(context.store.read().revocations).sort((left, right) => {
-      const byTime = compareStrings(left.revokedAt, right.revokedAt)
-      if (byTime !== 0) return byTime
-      const bySlug = compareStrings(left.slug, right.slug)
-      return bySlug !== 0 ? bySlug : compareStrings(left.version, right.version)
-    }),
+    items: Object.values(context.store.read().revocations)
+      .sort((left, right) => {
+        const byTime = compareStrings(left.revokedAt, right.revokedAt)
+        if (byTime !== 0) return byTime
+        const bySlug = compareStrings(left.slug, right.slug)
+        return bySlug !== 0 ? bySlug : compareStrings(left.version, right.version)
+      })
+      // Explicit projection, never `{ ...record }`: `actor` is the 12-hex
+      // admin-token hash and is audit-only (client contract excludes it).
+      .map(record => ({
+        slug: record.slug,
+        version: record.version,
+        reason: record.reason,
+        revokedAt: record.revokedAt,
+      })),
   }
   return result(200, body, { action, outcome: 'ok' })
 }

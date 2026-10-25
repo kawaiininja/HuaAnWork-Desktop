@@ -458,6 +458,54 @@ test('treats pending and published duplicates as conflicts', async () => {
   }
 })
 
+test('rejects reserved route slugs at submit and at approve', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    // Submit: a package named like a static route would be shadowed forever.
+    for (const slug of ['submissions', 'delist-requests', 'revocations']) {
+      const made = await makeBundle({ slug })
+      const response = await submit(catalog, made.bundle)
+      assert.equal(response.status, 400, `slug ${slug}`)
+      assert.deepEqual(response.body, {
+        error: `标识「${slug}」是目录保留路径，不能用作包名`,
+        code: 'reserved-slug',
+      })
+    }
+    const state = await readState(catalog)
+    assert.equal(Object.keys(state.submissions).length, 0)
+    assert.equal(Object.keys(state.packages).length, 0)
+
+    // Approve: a record that predates the submit guard must not become
+    // publishable either (the approve guard runs before signature/bundle I/O).
+    const made = await makeBundle({ slug: 'submissions' })
+    const submissionId = '00000000-0000-4000-8000-0000000000aa'
+    const now = new Date().toISOString()
+    await catalog.runtime.store.update(draft => {
+      draft.submissions[submissionId] = {
+        id: submissionId,
+        slug: 'submissions',
+        version: '1.0.0',
+        status: 'pending-review',
+        submittedAt: now,
+        updatedAt: now,
+        actor: actorOf(PUBLISH_TOKEN),
+        digest: made.digest,
+      }
+    })
+    const approved = await approve(catalog, submissionId, sign(catalog, made.digest))
+    assert.equal(approved.status, 400)
+    assert.deepEqual(approved.body, {
+      error: '标识「submissions」是目录保留路径，不能用作包名',
+      code: 'reserved-slug',
+    })
+    const after = await readState(catalog)
+    assert.equal(Object.keys(after.packages).length, 0)
+    assert.equal(after.submissions[submissionId]?.status, 'pending-review')
+  } finally {
+    await catalog.close()
+  }
+})
+
 test('lets exactly one of two concurrent identical submissions win', async () => {
   const catalog = await bootTestAgentCatalog()
   try {

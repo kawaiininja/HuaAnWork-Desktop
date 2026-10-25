@@ -419,6 +419,32 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * 刷新已安装 metadata 与撤销列表,并保证**撤销刷新不被 installed 失败跳过**。
+ *
+ * `agent.packageRefresh` 的撤销刷新是安全相关的(撤销要尽快禁用/中止在途回合),
+ * 而 installed metadata 刷新只是发布状态展示。最终评审 M8:先把 installed 的
+ * 异常记下来,照常执行撤销刷新,再把原异常抛回调用方(路由错误文案不变)。
+ */
+export async function refreshInstalledThenRevocations(
+  refreshInstalled: () => Promise<{ warning?: string; changed: boolean }>,
+  refreshRevocations: () => Promise<{ warning?: string }>,
+): Promise<{
+  installed: { warning?: string; changed: boolean }
+  revocations: { warning?: string }
+}> {
+  let installed: { warning?: string; changed: boolean } | undefined
+  let installedFailure: unknown
+  try {
+    installed = await refreshInstalled()
+  } catch (cause) {
+    installedFailure = cause
+  }
+  const revocations = await refreshRevocations()
+  if (installed === undefined) throw installedFailure
+  return { installed, revocations }
+}
+
 export interface RouteTableEntry {
   method: string
   http: 'GET' | 'POST' | 'PUT'
@@ -894,8 +920,10 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const legacyRefresh = await getAgentsDirectory().refresh()
       const cache = await refreshCatalogPackageCache()
       const local = await refreshLocalPublications(host)
-      const installed = await refreshInstalledCatalogPackageStatuses()
-      const revocations = await security.refreshRevocations()
+      const { installed, revocations } = await refreshInstalledThenRevocations(
+        refreshInstalledCatalogPackageStatuses,
+        () => security.refreshRevocations(),
+      )
       // 一批状态变化只发一次统一事件(installed metadata 的 changed 与本地发布
       // 状态变化合并),避免按条目刷屏;客户端据此整表刷新。
       if (installed.changed || local.changed) {

@@ -5,6 +5,7 @@ import { EnableConfirmModal } from "./AgentToolkitPanel.tsx";
 import {
   catalogErrorMessage,
   filterPackageTab,
+  PLAZA_ALL_INSTALLED_TEXT,
   PLAZA_EMPTY_TEXT,
   plazaCards,
   SEARCH_EMPTY_TEXT,
@@ -159,7 +160,13 @@ export default function AgentsPlazaPanel({
       {loading && !data ? (
         <p className="panel-empty">加载中…</p>
       ) : cards.length === 0 ? (
-        <p className="panel-empty">{search.trim() ? SEARCH_EMPTY_TEXT : PLAZA_EMPTY_TEXT}</p>
+        <p className="panel-empty">
+          {search.trim()
+            ? SEARCH_EMPTY_TEXT
+            : (data?.catalogPackages.length ?? 0) > 0
+              ? PLAZA_ALL_INSTALLED_TEXT
+              : PLAZA_EMPTY_TEXT}
+        </p>
       ) : (
         <div className="skill-grid">
           {cards.map((card) => (

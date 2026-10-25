@@ -114,6 +114,13 @@ const ACTIONS = {
 
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
 /**
+ * Static top-level segments of `/v1/agent-packages/*` (server.ts). A package
+ * using one of these as its slug can be submitted, but its metadata/bundle
+ * URLs are shadowed by the static route forever — reject it at submit AND at
+ * approve (a record written before this guard must not become publishable).
+ */
+const RESERVED_SLUGS: ReadonlySet<string> = new Set(['delist-requests', 'revocations', 'submissions'])
+/**
  * Loose semver SHAPE for path safety: three numeric parts then optional
  * prerelease/build. Stored versions already passed the strict manifest parser;
  * this guard only keeps `..`-like URL segments away from a state key/path.
@@ -375,6 +382,20 @@ function legacyConflict(
   }
 }
 
+/**
+ * A slug that collides with a static route can never be fetched: reject with a
+ * clear 400 instead of publishing an unreachable package.
+ */
+function reservedSlugConflict(slug: string): Conflict | null {
+  if (!RESERVED_SLUGS.has(slug)) return null
+  return {
+    status: 400,
+    error: `标识「${slug}」是目录保留路径，不能用作包名`,
+    code: 'reserved-slug',
+    reason: `slug ${slug} is shadowed by a static catalog route`,
+  }
+}
+
 interface SubmitVerdict {
   readonly conflict: Conflict | null
   /** Set only when this submission legally migrates a legacy agent entry. */
@@ -580,6 +601,11 @@ export async function createSubmission(context: SubmissionHandlerContext): Promi
     })
   }
 
+  // A reserved slug would shadow every metadata/bundle URL; refuse BEFORE any
+  // bundle is written or submission recorded.
+  const reserved = reservedSlugConflict(slug)
+  if (reserved !== null) return conflictResult(action, { slug, version }, reserved)
+
   const migrationHeader = migrationHeaderOf(request)
   const submissionId = randomUUID()
 
@@ -765,6 +791,20 @@ export async function approveSubmission(
       action,
       outcome: 'error',
       reason: `submission ${submissionId} is ${snapshot.status}`,
+      slug: snapshot.slug,
+      version: snapshot.version,
+      submissionId,
+    })
+  }
+
+  // Defense in depth for records created before the submit guard: approving a
+  // reserved slug would publish an unreachable package.
+  const reserved = reservedSlugConflict(snapshot.slug)
+  if (reserved !== null) {
+    return result(reserved.status, errorBody(reserved.error, reserved.code), {
+      action,
+      outcome: 'error',
+      reason: reserved.reason,
       slug: snapshot.slug,
       version: snapshot.version,
       submissionId,

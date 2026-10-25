@@ -187,9 +187,21 @@ export interface Revocation {
   readonly actor: string
 }
 
+/**
+ * Client-facing revocation item. `actor` is server audit material only: every
+ * read-token holder must not learn the 12-hex admin-token hash, so the list
+ * route maps the internal {@link Revocation} down to exactly these fields.
+ */
+export interface RevocationListEntry {
+  readonly slug: string
+  readonly version: string
+  readonly reason: string
+  readonly revokedAt: string
+}
+
 /** `GET /v1/agent-packages/revocations`. */
 export interface RevocationListBody {
-  readonly items: Revocation[]
+  readonly items: RevocationListEntry[]
 }
 
 export interface CatalogState {

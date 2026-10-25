@@ -66,6 +66,7 @@ const PACKAGE_LIST: AgentPackageListResult = {
       enabled: true,
     },
   ],
+  catalogPackages: [],
 };
 
 const PACKAGE_DETAIL: AgentPackageDetail = {
@@ -274,6 +275,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
         },
       ],
       catalogAgents: [],
+      catalogPackages: [],
     };
 
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
@@ -343,6 +345,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
         },
       ],
       catalogAgents: [],
+      catalogPackages: [],
     };
     handlers["agent.packageDetail"] = () => CATALOG_DETAIL;
 
@@ -373,6 +376,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
         },
       ],
       catalogAgents: [],
+      catalogPackages: [],
     };
     handlers["agent.packageDetail"] = () => ({
       ...CATALOG_DETAIL,
@@ -409,6 +413,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
         },
       ],
       catalogAgents: [],
+      catalogPackages: [],
     };
     handlers["agent.packageDetail"] = () => ({
       ...CATALOG_DETAIL,
@@ -427,6 +432,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
     listPayload = {
       packages: [{ ...LOCAL_PACKAGE, publishStatus: "pending-review" }],
       catalogAgents: [],
+      catalogPackages: [],
     };
     handlers["agent.packagePublishStatus"] = () => ({
       slug: "weekly-report",
@@ -449,6 +455,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
     listPayload = {
       packages: [{ ...LOCAL_PACKAGE, publishStatus: "rejected", reviewReason: "缺少人设", enabled: true }],
       catalogAgents: [],
+      catalogPackages: [],
     };
 
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
@@ -483,6 +490,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
         },
       ],
       catalogAgents: [],
+      catalogPackages: [],
     };
 
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
@@ -515,6 +523,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
     listPayload = {
       packages: [{ ...LOCAL_PACKAGE, publishStatus: "delisted", publishedVersion: "1.2.0" }],
       catalogAgents: [],
+      catalogPackages: [],
     };
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
 
@@ -557,6 +566,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
         },
       ],
       catalogAgents: [],
+      catalogPackages: [],
     };
 
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
@@ -595,6 +605,7 @@ describe("AgentPackagesPanel（我的智能体）", () => {
         },
       ],
       catalogAgents: [],
+      catalogPackages: [],
     };
 
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
@@ -630,11 +641,31 @@ describe("AgentPackagesPanel（我的智能体）", () => {
         },
       ],
       catalogAgents: [],
+      catalogPackages: [],
     };
+
+    handlers["agent.packageDetail"] = () => ({
+      ...CATALOG_DETAIL,
+      slug: "signed-pack",
+      version: "2.0.0",
+      revoked: {
+        slug: "signed-pack",
+        version: "2.0.0",
+        reason: "窃取凭据",
+        revokedAt: "2026-10-21T00:00:00.000Z",
+      },
+    });
 
     const view = await mount(createElement(AgentPackagesPanel, { search: "", refreshToken: 0 }));
     expect(view.textContent).toContain("已撤销：窃取凭据");
     expect(buttonLabels(cardBySlug(view, "signed-pack"))).toEqual(["查看详情", "移除"]);
+
+    // 详情弹层也必须给出撤销原因，不能让“验签结果：通过”独自误导用户。
+    await click(buttonIn(cardBySlug(view, "signed-pack"), "查看详情")!);
+    await flush();
+    expect(container!.textContent).toContain("该版本已被管理员撤销：窃取凭据");
+    await click(buttonByText(container!, "关闭")!);
+    await flush();
 
     await click(buttonIn(cardBySlug(view, "signed-pack"), "移除")!);
     await click(buttonByText(view, "确认移除")!);
@@ -685,6 +716,7 @@ describe("AgentPackagesPanel per-slug 在飞守卫", () => {
         { ...LOCAL_PACKAGE, slug: "fast-b", displayName: "快卡" },
       ],
       catalogAgents: [],
+      catalogPackages: [],
     };
     let releaseSlow: (() => void) | undefined;
     handlers["agent.packageSetEnabled"] = (params) => {

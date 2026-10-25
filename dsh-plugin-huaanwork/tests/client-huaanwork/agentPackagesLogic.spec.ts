@@ -83,6 +83,7 @@ function listResult(overrides: Partial<AgentPackageListResult> = {}): AgentPacka
   return {
     packages: [localPackage],
     catalogAgents: [enabledCatalogAgent, disabledCatalogAgent, catalogTool],
+    catalogPackages: [],
     ...overrides,
   };
 }
@@ -474,6 +475,7 @@ describe("plazaCards with signed summaries", () => {
   test("without signed summaries the legacy cards stay unchanged", () => {
     const cards = plazaCards({
       packages: [],
+      catalogPackages: [],
       catalogAgents: [enabledCatalogAgent, disabledCatalogAgent, catalogTool],
     });
     assert.deepEqual(cards.map((item) => item.slug), ["legacy-agent", "legacy-agent-off"]);

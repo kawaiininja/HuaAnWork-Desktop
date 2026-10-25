@@ -42,7 +42,7 @@ import type {
   AgentPackageStateEntry,
 } from '../../src/huaanwork-host/agent-package/types.ts'
 import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
-import { ROUTE_TABLE, type RouteContext } from '../../src/huaanwork-host/routes.ts'
+import { refreshInstalledThenRevocations, ROUTE_TABLE, type RouteContext } from '../../src/huaanwork-host/routes.ts'
 import { setAgentPackageHost, setAgentsDirectory } from '../../src/huaanwork-host/sessions.ts'
 
 /**
@@ -1018,6 +1018,26 @@ describe('agent.packageRefresh', () => {
     ])
     expect(result.catalogError).toContain('目录拉取失败')
     expect(result.revocationWarning).toBe('撤销列表刷新失败：离线')
+  })
+
+  test('a throwing installed-status refresh still applies the revocation list', async () => {
+    let installedCalls = 0
+    let revocationCalls = 0
+    await expect(
+      refreshInstalledThenRevocations(
+        async () => {
+          installedCalls += 1
+          throw new Error('installed metadata refresh exploded')
+        },
+        async () => {
+          revocationCalls += 1
+          return { warning: '撤销列表刷新失败：offline' }
+        },
+      ),
+    ).rejects.toThrow('installed metadata refresh exploded')
+    // 安全相关刷新不被跳过;原错误仍原样抛回路由。
+    expect(installedCalls).toBe(1)
+    expect(revocationCalls).toBe(1)
   })
 
   test('a single local publication failure keeps the local cards and adds a warning', async () => {

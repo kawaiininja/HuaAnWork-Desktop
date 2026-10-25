@@ -25,6 +25,8 @@ export const PACKAGE_SANDBOX_WARNING =
   "脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。";
 
 export const PLAZA_EMPTY_TEXT = "暂无可用智能体；请先配置公用机目录。";
+/** 目录已配置且非空、但所有条目都已安装时的广场空态(不是“未配置”)。 */
+export const PLAZA_ALL_INSTALLED_TEXT = "目录中的智能体都已安装。";
 export const MINE_EMPTY_TEXT = "还没有智能体。在会话里说「帮我新建一个智能体」即可创建。";
 export const SEARCH_EMPTY_TEXT = "没有匹配的智能体";
 
@@ -349,7 +351,7 @@ export function plazaCards(
   result: Pick<AgentPackageListResult, "catalogAgents" | "catalogPackages" | "packages">,
 ): AgentPackageCard[] {
   const installedSlugs = new Set(result.packages.map((item) => item.slug));
-  const summaries = result.catalogPackages ?? [];
+  const summaries = result.catalogPackages;
   const signed = summaries
     .filter((summary) => !installedSlugs.has(summary.slug))
     .map(catalogPackageCard);
@@ -371,7 +373,7 @@ export function plazaCards(
  * legacy 条目。legacy 条目若与包行同 slug（迁移后的旧名）不重复显示。
  */
 export function mineCards(
-  result: Pick<AgentPackageListResult, "packages" | "catalogAgents" | "catalogPackages">,
+  result: Pick<AgentPackageListResult, "packages" | "catalogAgents">,
 ): AgentPackageCard[] {
   const installedSlugs = new Set(result.packages.map((item) => item.slug));
   const legacy = result.catalogAgents

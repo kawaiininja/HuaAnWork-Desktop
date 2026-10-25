@@ -309,6 +309,28 @@ describe("AgentsPlazaPanel（广场签名包）", () => {
     expect(view.querySelector('[data-slug="signed-pack"]')).toBeNull();
     expect(buttonByText(view, "下载")).toBeUndefined();
   });
+
+  it("目录条目全部已安装时显示“都已安装”，不误报为未配置", async () => {
+    listPayload = listResult({
+      packages: [
+        {
+          slug: "signed-pack",
+          displayName: "签名广场包",
+          description: "管理员签名的广场包",
+          version: "2.1.0",
+          source: "catalog",
+          enabled: true,
+          publishStatus: "installed",
+        },
+      ],
+      catalogAgents: [],
+      catalogPackages: [SIGNED_SUMMARY],
+    });
+    const view = await mount(createElement(AgentsPlazaPanel, { search: "", refreshToken: 0 }));
+
+    // 目录已配置且有条目，只是全部已安装；不能显示“请先配置公用机目录”。
+    expect(view.querySelector(".panel-empty")?.textContent).toBe("目录中的智能体都已安装。");
+  });
 });
 
 describe("AgentsView 发布口令与刷新周期", () => {

@@ -9,6 +9,7 @@ import type { CatalogKeyringEntry, CatalogSignature } from '@huaanwork/catalog-s
 
 import {
   getAgentCatalogBinding,
+  isAgentCatalogConfigured,
   type AgentCatalogClient,
 } from './catalog-client.ts'
 import {
@@ -78,7 +79,10 @@ export type AgentCatalogSecurity = {
    * 撤销保持有效。
    */
   loadCachedRevocations(): { items: AgentPackageRevocation[]; warning?: string }
-  /** 拉取并应用撤销列表;失败保留缓存、按缓存继续撤销并返回 warning。 */
+  /**
+   * 拉取并应用撤销列表;失败保留缓存、按缓存继续撤销并返回 warning。
+   * 目录未配置(`agents_host`/`agents_port` 为空)时不发请求、不返回 warning。
+   */
   refreshRevocations(): Promise<{ warning?: string }>
   /** 每次从磁盘复验已安装的 catalog 包;local 包不适用本方法。 */
   verifyInstalled(slug: string): Promise<AgentPackageVerification>
@@ -103,6 +107,11 @@ export type CreateAgentCatalogSecurityOptions = {
   registry: AgentPackageActiveTurnRegistry
   /** 测试缝:替代目录绑定里的 client;缺省在每次网络操作时读单例绑定。 */
   client?: AgentCatalogClient
+  /**
+   * 测试缝:目录是否已配置。缺省读绑定设置(`agents_host`/`agents_port`)。
+   * 注入 `client` 而不注入本项时按「已配置」处理(测试替身不依赖设置面)。
+   */
+  isCatalogConfigured?: () => boolean
   /** 测试缝:替代磁盘验签(用于构造复验期间的竞态)。 */
   verify?: (slug: string) => AgentPackageVerification | Promise<AgentPackageVerification>
 }
@@ -132,6 +141,17 @@ export function createAgentCatalogSecurity(options: CreateAgentCatalogSecurityOp
   let generation = 0
 
   const resolveClient = (): AgentCatalogClient => options.client ?? getAgentCatalogBinding().client
+
+  /**
+   * M1-only 用户没有目录根(`agents_host`/`agents_port` 为空):此时任何目录请求
+   * 都只会得到 `目录不可达…`,刷新撤销列表必须整段跳过,否则每轮刷新都会挂一条
+   * 假的撤销告警。测试替身(`options.client`)不经过设置面,按已配置处理。
+   */
+  const catalogConfigured = (): boolean => {
+    if (options.isCatalogConfigured !== undefined) return options.isCatalogConfigured()
+    if (options.client !== undefined) return true
+    return isAgentCatalogConfigured()
+  }
 
   const verifyInstalled = async (slug: string): Promise<AgentPackageVerification> => {
     if (options.verify !== undefined) return options.verify(slug)
@@ -247,6 +267,9 @@ export function createAgentCatalogSecurity(options: CreateAgentCatalogSecurityOp
   }
 
   const refreshRevocations = async (): Promise<{ warning?: string }> => {
+    // 未配置目录根 = 没有可拉取的撤销源,也没有可报告的目录故障:静默跳过
+    // (与 `refreshCatalogPackageCache` 的未配置语义一致)。
+    if (!catalogConfigured()) return {}
     let items: AgentPackageRevocation[]
     try {
       items = await resolveClient().getRevocations()

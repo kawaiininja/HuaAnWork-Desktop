@@ -210,14 +210,14 @@ export type AgentPackageDetail = AgentPackageListItem & {
 
 /**
  * `agent.packageList` / `agent.packageRefresh` 载荷:本地/已安装包与 legacy 目录
- * agent 分列,`catalogPackages` 是签名广场摘要(宿主总会返回;缺省按空表处理,
- * 兼容只回本地/legacy 的旧载荷),`catalogError` 透传目录结果,
+ * agent 分列,`catalogPackages` 是签名广场摘要(**宿主总会返回**,空目录/未配置
+ * 时是空数组;契约要求必填,不允许缺省),`catalogError` 透传目录结果,
  * `revocationWarning` 只在刷新撤销列表失败时出现。
  */
 export type AgentPackageListResult = {
   packages: AgentPackageListItem[];
   catalogAgents: AgentListItem[];
-  catalogPackages?: AgentPackageSummary[];
+  catalogPackages: AgentPackageSummary[];
   catalogError?: string;
   revocationWarning?: string;
 };

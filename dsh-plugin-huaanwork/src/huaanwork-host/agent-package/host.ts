@@ -109,6 +109,13 @@ export type AgentPackageActiveTurnRecord = {
   runtime?: AgentPackageTurnRuntime
   activation?: SubagentActivationHandle
   cancel(reason: AgentPackageTurnCancelReason): Promise<void>
+  /**
+   * 释放本回合在 dispatch 里同步占下的「每会话一个包回合」名额
+   * (`pendingTurns`)。取消**请求**到达时就调用(先于等待 dispose/停进程),
+   * 否则同一会话的下一条消息要等最长 600s 的 activation dispose 才能开始。
+   * 实现内部按 sessionId + slug 身份校验,晚到的释放不会抹掉更新的回合。
+   */
+  releaseReservation?: () => void
 }
 
 /**
@@ -138,6 +145,9 @@ export function createAgentPackageActiveTurnRegistry(): AgentPackageActiveTurnRe
     // 取调用瞬间的快照:取消期间新登记的回合由 dispatch 的撤销 generation
     // /运行前复验负责,不在这里补刀。
     const matching = [...records].filter(predicate)
+    // 先同步释放名额:取消的收尾(`cancel` → dispose → 停 runtime)可能很慢,
+    // 下一回合不应因此被拒。身份校验在 releaseReservation 内部完成。
+    for (const record of matching) record.releaseReservation?.()
     await Promise.all(
       matching.map(async (record) => {
         try {
@@ -709,6 +719,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         version: pkg.version,
         controller,
         cancel: (reason) => cancelTurn(reason),
+        releaseReservation,
       }
       // 登记必须早于第一次 await(尤其 security.assertRunnable):撤销刷新据此
       // 找到正在启动的回合,并 abort 同一个 signal。
