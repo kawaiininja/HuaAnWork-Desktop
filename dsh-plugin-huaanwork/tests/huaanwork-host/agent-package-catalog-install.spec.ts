@@ -629,6 +629,19 @@ describe('verified catalog install', () => {
     expect(readAgentPackageState(root)['catalog:weekly-report']?.installedVersion).toBe('1.0.1')
   })
 
+  test('aborts before any rename when the state file cannot be read', async () => {
+    await offer('weekly-report', '1.0.0')
+    // 状态路径是目录 ⇒ readFileSync 报 EISDIR(非 ENOENT):快照不得当成空表。
+    mkdirSync(agentPackageStatePath(root))
+
+    await expect(install('weekly-report', '1.0.0')).rejects.toThrow(/智能体状态不可读/)
+
+    expect(existsSync(formalDir('weekly-report'))).toBe(false)
+    expect(installDirs()).toEqual([])
+    expect(oldDirs()).toEqual([])
+    expect(readdirSync(agentPackageStatePath(root))).toEqual([])
+  })
+
   test('logs install outcomes without tokens or bundle content', async () => {
     await offer('weekly-report', '1.0.0')
     await install('weekly-report', '1.0.0')
@@ -761,6 +774,34 @@ describe('verified catalog update', () => {
     expect(readAgentPackageVersionFromDir(formalDir('weekly-report'))).toBe('1.0.0')
     expect(installDirs()).toEqual([])
     expect(oldDirs()).toEqual([])
+  })
+
+  test('keeps the transaction when the rollback cannot restore the old state', async () => {
+    await seedInstalled('weekly-report', '1.0.0', true)
+    const beforeState = stateText()
+    const beforeFiles = snapshotDir(formalDir('weekly-report'))
+    await offer('weekly-report', '1.0.1')
+
+    // 占住 state 写入与回滚恢复的两个临时路径:提交失败后回滚也恢复不了 state。
+    mkdirSync(`${agentPackageStatePath(root)}.tmp`)
+    mkdirSync(`${agentPackageStatePath(root)}.restore-tmp`)
+
+    await expect(updateCatalogAgentPackage('weekly-report', async () => undefined)).rejects.toThrow()
+
+    // 目录已回滚,但 state 恢复失败 ⇒ 交易必须保留给下一次读路径继续对账。
+    expect(readAgentPackageVersionFromDir(formalDir('weekly-report'))).toBe('1.0.0')
+    expect(snapshotDir(formalDir('weekly-report'))).toEqual(beforeFiles)
+    expect(stateText()).toBe(beforeState)
+    expect(oldDirs()).toEqual([])
+    expect(installDirs()).toHaveLength(1)
+    const [stagingName] = installDirs()
+    expect(existsSync(join(agentsRoot(), stagingName!, 'transaction.json'))).toBe(true)
+
+    // 下一次读路径的恢复清掉残留暂存区,目录/state 保持不变。
+    recoverCatalogPackageInstalls(root)
+    expect(installDirs()).toEqual([])
+    expect(readAgentPackageVersionFromDir(formalDir('weekly-report'))).toBe('1.0.0')
+    expect(stateText()).toBe(beforeState)
   })
 })
 
@@ -1086,6 +1127,104 @@ describe('catalog install crash recovery', () => {
     expect(existsSync(formalDir('legacy-assistant'))).toBe(false)
     expect(readAgentPackageState(root)['catalog:legacy-assistant']).toBeUndefined()
     expect(installDirs()).toEqual([])
+  })
+
+  test('rolls a committed migration back when agents-enabled.json is corrupt', async () => {
+    writeLegacyEnabled({ 'catalog:legacy-assistant': true })
+    await offer('legacy-assistant', '1.0.0', { migrationFrom: 'legacy-assistant' })
+    await install('legacy-assistant', '1.0.0')
+    // 崩溃窗口:state 已提交为迁移态、legacy 旧键尚未删除。
+    writeLegacyEnabled({ 'catalog:legacy-assistant': true })
+    const staging = seedStaging({
+      name: '.install-legacy-corrupt',
+      slug: 'legacy-assistant',
+      targetVersion: '1.0.0',
+      migrationFrom: 'legacy-assistant',
+    })
+    // 旧启用表损坏:宽空表会把「读不出来」误判成「键不存在」而直接清交易。
+    const corrupt = '{"catalog:legacy-assistant":'
+    writeFileSync(agentsEnabledPath(root), corrupt, 'utf8')
+
+    recoverCatalogPackageInstalls(root)
+
+    // 补删失败 ⇒ 按安装失败回滚新 formal/state,保留损坏的旧表原样。
+    expect(existsSync(formalDir('legacy-assistant'))).toBe(false)
+    expect(readAgentPackageState(root)['catalog:legacy-assistant']).toBeUndefined()
+    expect(readFileSync(agentsEnabledPath(root), 'utf8')).toBe(corrupt)
+    expect(existsSync(staging)).toBe(false)
+    expect(installDirs()).toEqual([])
+    expect(loggerLines.some((line) => line.includes('recover.migration'))).toBe(true)
+  })
+
+  test('a direct store read leaves a pending catalog backup to catalog recovery', async () => {
+    await seedInstalled('weekly-report', '1.0.0', true)
+    const staging = seedStaging({
+      name: '.install-weekly-report-pending',
+      slug: 'weekly-report',
+      targetVersion: '1.0.1',
+      previousState: {
+        source: 'catalog',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'installed',
+      },
+    })
+    const old = join(agentsRoot(), '.old-weekly-report-pending')
+    renameSync(formalDir('weekly-report'), old)
+    renameSync(join(staging, 'package'), formalDir('weekly-report'))
+
+    // catalog-publish 等直接读路径只经过 store 的通用恢复:不得先删掉唯一备份。
+    readAgentPackage(root, 'weekly-report')
+
+    expect(oldDirs()).toEqual(['.old-weekly-report-pending'])
+    expect(readAgentPackageVersionFromDir(formalDir('weekly-report'))).toBe('1.0.1')
+    expect(existsSync(staging)).toBe(true)
+
+    recoverCatalogPackageInstalls(root)
+
+    expect(readAgentPackageVersionFromDir(formalDir('weekly-report'))).toBe('1.0.0')
+    expect(readAgentPackageState(root)['catalog:weekly-report']?.installedVersion).toBe('1.0.0')
+    expect(oldDirs()).toEqual([])
+    expect(installDirs()).toEqual([])
+  })
+
+  test('host.propose reconciles an interrupted update before the generic .old-* sweep', async () => {
+    await seedInstalled('weekly-report', '1.0.0', true)
+    const staging = seedStaging({
+      name: '.install-weekly-report-window',
+      slug: 'weekly-report',
+      targetVersion: '1.0.1',
+      previousState: {
+        source: 'catalog',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'installed',
+      },
+    })
+    const old = join(agentsRoot(), '.old-weekly-report-window')
+    renameSync(formalDir('weekly-report'), old)
+    // 新 formal 已就位、state 仍是旧版本、`.old-*` 尚在:通用清理若先跑会删掉备份。
+    renameSync(join(staging, 'package'), formalDir('weekly-report'))
+
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    const result = await host.propose('session-1', {
+      mode: 'create',
+      slug: 'another-agent',
+      displayName: '另一个智能体',
+      description: '用于验证恢复顺序',
+      persona: '你是另一个智能体。',
+    })
+
+    expect(result.ok).toBe(true)
+    expect(readAgentPackageVersionFromDir(formalDir('weekly-report'))).toBe('1.0.0')
+    expect(readAgentPackageState(root)['catalog:weekly-report']).toMatchObject({
+      enabled: true,
+      installedVersion: '1.0.0',
+    })
+    expect(existsSync(staging)).toBe(false)
+    expect(oldDirs()).toEqual([])
+    expect(installDirs()).toEqual([])
+    expect(host.listLocal().map((item) => item.slug)).toEqual(['weekly-report'])
   })
 
   test('reverts or finishes .remove-* leftovers by whether the state still exists', async () => {

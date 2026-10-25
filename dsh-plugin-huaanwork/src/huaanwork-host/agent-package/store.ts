@@ -29,6 +29,8 @@ import type {
 
 const TEMP_PREFIX = '.tmp-'
 const OLD_PREFIX = '.old-'
+const INSTALL_PREFIX = '.install-'
+const CATALOG_TRANSACTION_FILE = 'transaction.json'
 const DRAFTS_DIR = '.drafts'
 
 // 单文件与集合上限。草稿 propose 从这里导入同一组值,校验与落盘不会各写一份。
@@ -693,6 +695,11 @@ function recoverAgentPackages(profileDir: string): void {
     return
   }
 
+  // C17:`catalog-publish` 等直接读路径只经过这里,不经过 host 的 catalog 恢复。
+  // 一笔未完成的广场安装/更新把旧目录放在 `.old-*` 里,通用清理的
+  // 「formal 已存在就删备份」会先毁掉唯一能还原的旧目录。先让位给
+  // `recoverCatalogPackageInstalls`,由它按 transaction.json 决定去留。
+  const pendingCatalogSlugs = pendingCatalogTransactionSlugs(root, entries)
   for (const entry of entries) {
     if (entry.name === DRAFTS_DIR) continue
     if (entry.name.startsWith(TEMP_PREFIX)) {
@@ -703,6 +710,7 @@ function recoverAgentPackages(profileDir: string): void {
 
     const slug = slugFromSuffixedName(entry.name, OLD_PREFIX)
     if (slug === undefined) continue
+    if (pendingCatalogSlugs.has(slug)) continue
     const oldDir = join(root, entry.name)
     const finalDir = join(root, slug)
     try {
@@ -715,6 +723,24 @@ function recoverAgentPackages(profileDir: string): void {
       // 恢复失败时保留 .old-*;下一次读路径会重试。
     }
   }
+}
+
+/**
+ * 有未完成 catalog 安装交易的 slug。
+ *
+ * 判定标准是暂存区里已有 `transaction.json`:此时才存在一笔可恢复的
+ * 「旧目录已 rename、state 未/已写」交易。没有交易记录的 `.install-*` 只是
+ * 下载中途的残留,不影响通用 `.old-*` 清理。
+ */
+function pendingCatalogTransactionSlugs(root: string, entries: readonly Dirent[]): Set<string> {
+  const slugs = new Set<string>()
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(INSTALL_PREFIX)) continue
+    const slug = slugFromSuffixedName(entry.name, INSTALL_PREFIX)
+    if (slug === undefined) continue
+    if (pathExists(join(root, entry.name, CATALOG_TRANSACTION_FILE))) slugs.add(slug)
+  }
+  return slugs
 }
 
 function writePackageFile(packageDir: string, relativePath: string, content: string): void {

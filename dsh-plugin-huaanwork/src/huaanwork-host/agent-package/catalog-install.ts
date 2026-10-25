@@ -451,6 +451,8 @@ async function performVerifiedInstall(
   const stagingPackage = join(staging, STAGING_PACKAGE_DIR)
   let oldDir: string | undefined
   let installedNew = false
+  /** 回滚未能把磁盘与 state 一起恢复:暂存区要留给下一次读路径继续对账。 */
+  let keepStagingForRecovery = false
   // 下载/验签期间 staging 里还没有 transaction.json;登记后恢复扫描不得把它当残留删掉。
   activeOperations.add(staging)
 
@@ -498,7 +500,10 @@ async function performVerifiedInstall(
         }
       }
     } catch (error) {
-      rollbackInstall(profileDir, formal, oldDir, installedNew, stateSnapshot)
+      // 回滚自己也可能失败(磁盘只读等):状态或目录没能恢复时保留
+      // staging/transaction.json,让下一次读路径的安装恢复按交易记录继续对账,
+      // 而不是把唯一的重建证据一并删掉。
+      keepStagingForRecovery = !rollbackInstall(profileDir, formal, oldDir, installedNew, stateSnapshot)
       throw error
     }
 
@@ -507,9 +512,10 @@ async function performVerifiedInstall(
     removeQuietly(staging)
     return inspection
   } catch (error) {
-    // 失败路径总是清掉暂存区:提交段已在上面回滚,交易记录不再需要;残留的
-    // `.install-*` 只会让下一次读路径重复处理同一笔已失败的安装。
-    removeQuietly(staging)
+    // 提交段已回滚且磁盘与 state 一致时清掉暂存区:交易记录不再需要,残留的
+    // `.install-*` 只会让下一次读路径重复处理同一笔已失败的安装。回滚未能
+    // 收敛时保留 transaction.json,由下一次读路径的恢复继续处理。
+    if (!keepStagingForRecovery) removeQuietly(staging)
     throw error
   } finally {
     activeOperations.delete(staging)
@@ -543,29 +549,45 @@ function commitAgentState(profileDir: string, plan: InstallPlan): void {
   writeAgentPackageState(profileDir, state)
 }
 
-/** 回滚:恢复 state 快照,删除本次换入的新 formal,把 `.old-*` 改回正式目录。 */
+/**
+ * 回滚:恢复 state 快照,删除本次换入的新 formal,把 `.old-*` 改回正式目录。
+ *
+ * @returns 磁盘与 state 是否都已回到提交前;`false` 时调用方必须保留
+ *   `transaction.json`,由下一次读路径的安装恢复继续对账。
+ */
 function rollbackInstall(
   profileDir: string,
   formal: string,
   oldDir: string | undefined,
   installedNew: boolean,
   snapshot: StateSnapshot,
-): void {
+): boolean {
+  let stateRestored = false
   try {
     restoreAgentState(profileDir, snapshot)
+    stateRestored = true
   } catch {
-    // 恢复失败不得覆盖原始错误;旧 state 与新 state 的差异由下一次安装覆盖。
+    // 恢复失败不得覆盖原始错误;交易记录保留给下一次读路径继续对账。
   }
   // 只有本次真的把新包 rename 进 formal 时才删它:首次安装撞到既有目录的失败
   // 路径绝不能删除那个既有目录。
-  if (installedNew && pathExists(formal)) removeQuietly(formal)
+  let directoryRestored = true
+  if (installedNew && pathExists(formal)) {
+    try {
+      rmSync(formal, { recursive: true, force: true })
+    } catch {
+      directoryRestored = false
+    }
+  }
   if (oldDir !== undefined && pathExists(oldDir)) {
     try {
       renameSync(oldDir, formal)
     } catch {
       // 恢复失败时保留 `.old-*`;下一次读路径的恢复会重试。
+      directoryRestored = false
     }
   }
+  return stateRestored && directoryRestored
 }
 
 /** 把验签结果写入暂存包目录:内容文件 + 两个 `.signature` 文件,每级防 symlink。 */
@@ -722,15 +744,17 @@ function recoverInstall(profileDir: string, root: string, name: string, names: r
     // 交易已提交(含迁移):先补删 legacy 旧键,失败则按安装失败语义回滚。
     if (transaction.migrationFrom !== undefined) {
       const legacyKey = `${LEGACY_KEY_PREFIX}${transaction.migrationFrom}`
-      if (readLegacyEnabledMap(profileDir)[legacyKey] === true) {
-        try {
-          deleteLegacyEnabledKey(profileDir, legacyKey)
-        } catch (error) {
-          rollbackCommittedInstall(profileDir, slug, formal, oldDirs, transaction)
-          removeQuietly(staging)
-          logRecover('recover.migration', slug, error)
-          return
-        }
+      // 无条件补删。旧表的可读性不能由 readLegacyEnabledMap 的宽空表决定:
+      // 不可读/损坏时它会折叠成 {},据此跳过补删会把 legacy 键留在原处并清掉
+      // 交易/旧目录,留下 legacy/catalog 双份补全。deleteLegacyEnabledKey 对
+      // ENOENT 与键不存在都是 no-op,不可读/损坏则抛错,走下面的回滚分支。
+      try {
+        deleteLegacyEnabledKey(profileDir, legacyKey)
+      } catch (error) {
+        rollbackCommittedInstall(profileDir, slug, formal, oldDirs, transaction)
+        removeQuietly(staging)
+        logRecover('recover.migration', slug, error)
+        return
       }
     }
     if (!pathExists(formal)) {
@@ -927,15 +951,24 @@ function assertNoLocalEndpointConflict(profileDir: string, slug: string): void {
 function snapshotAgentState(profileDir: string): StateSnapshot {
   try {
     return { exists: true, text: readFileSync(agentPackageStatePath(profileDir), 'utf8') }
-  } catch {
-    return { exists: false, text: '' }
+  } catch (error) {
+    // 只有 ENOENT 才是「状态文件不存在」。其他读取错误不能折叠成空快照:
+    // 回滚会据此 rmSync 整个 state 文件,连带删掉其它智能体的条目。
+    // 快照在任何 rename 之前读取,这里抛出即为干净中止。
+    if (isEnoent(error)) return { exists: false, text: '' }
+    throw new Error(`智能体状态不可读，已中止安装：${errorMessage(error)}`, { cause: error })
   }
 }
 
-/** 回滚 state 时按原始字节写回,保证旧 state 不被重新序列化。 */
+/**
+ * 回滚 state 时按原始字节写回,保证旧 state 不被重新序列化。
+ *
+ * 写入失败必须向上抛:调用方据此保留交易记录,下一次读路径继续对账。
+ */
 function restoreAgentState(profileDir: string, snapshot: StateSnapshot): void {
   const filePath = agentPackageStatePath(profileDir)
   if (!snapshot.exists) {
+    // rmSync 失败同样要抛出:状态没能回到「不存在」就不是一次完成的回滚。
     rmSync(filePath, { force: true })
     return
   }

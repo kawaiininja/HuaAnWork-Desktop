@@ -211,12 +211,16 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
 
   return {
     async propose(sessionId, input) {
+      // C17: 草稿校验会触发 store 的通用 `.old-*` 清理,catalog 恢复必须先跑。
+      recoverCatalogPackageInstalls(profileDir)
       const result = await proposeAgentPackage(profileDir, sessionId, input, takenSlugs())
       if (result.ok) proposedThisTurn.add(sessionId)
       return result
     },
 
     async commit(sessionId, draftId, rawUserText, opts) {
+      // C17: 提交路径会列出/覆盖包目录,必须在通用清理之前恢复广场交易。
+      recoverCatalogPackageInstalls(profileDir)
       // 测试钩子:路由不得把 proposedThisTurn 从线上透传,否则同一轮门禁可被 false 关闭。
       const result = await commitAgentPackage(profileDir, sessionId, draftId, rawUserText, takenSlugs(), {
         proposedThisTurn: opts?.proposedThisTurn ?? proposedThisTurn.has(sessionId),
@@ -227,15 +231,20 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     },
 
     async cancel(sessionId) {
+      recoverCatalogPackageInstalls(profileDir)
       proposedThisTurn.delete(sessionId)
       return cancelAgentPackage(profileDir, sessionId)
     },
 
     hasDraft(sessionId) {
+      // 每轮消息都会走这里;广场安装的崩溃恢复同样必须先于 store 的通用清理。
+      recoverCatalogPackageInstalls(profileDir)
       return loadAgentPackageDraft(profileDir, sessionId) !== undefined
     },
 
     async beginUpdate(sessionId, slug) {
+      // C17: 读取更新基底会走 store 的通用恢复。
+      recoverCatalogPackageInstalls(profileDir)
       await beginAgentPackageUpdate(profileDir, sessionId, slug)
       proposedThisTurn.delete(sessionId)
     },
