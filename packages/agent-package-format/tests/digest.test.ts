@@ -13,6 +13,7 @@ import {
   verifyAgentPackageDigest,
   verifyAgentPackageDirectory,
 } from '../src/index.ts'
+import { MAX_SIGNATURE_DOCUMENT_BYTES, readPackageFiles } from '../src/digest.ts'
 import {
   VALID_MANIFEST,
   VALID_PERSONA,
@@ -140,6 +141,42 @@ test('rejects a package over the 5 MiB total or per-file persona budget', (t) =>
   t.after(() => removeTempDir(personaOverBudget))
   writeFileSync(join(personaOverBudget, 'persona.md'), Buffer.alloc(32 * 1024 + 1))
   assert.throws(() => readUnsignedPackageFiles(personaOverBudget), /persona\.md 超过/)
+})
+
+test('charges signature documents to the 5 MiB directory budget and caps one document', (t) => {
+  const oversizedDocument = createValidPackageDir()
+  t.after(() => removeTempDir(oversizedDocument))
+  writePackageFiles(oversizedDocument, {
+    '.signature/package-digest.json': Buffer.alloc(1024 * 1024, 0x20),
+    '.signature/signature.json': Buffer.from('{}'),
+  })
+  assert.throws(
+    () => readPackageFiles(oversizedDocument, { ignoreSignature: true }),
+    /签名文档超过.*字节上限/,
+  )
+
+  // Each document stays below the single-document cap; together they push the
+  // directory past 5 MiB, so the aggregate budget has to see them.
+  const overTotal = createValidPackageDir()
+  t.after(() => removeTempDir(overTotal))
+  writeFileSync(join(overTotal, 'padding.bin'), Buffer.alloc(5 * 1024 * 1024 - 8 * 1024))
+  writePackageFiles(overTotal, {
+    '.signature/package-digest.json': Buffer.alloc(48 * 1024, 0x20),
+    '.signature/signature.json': Buffer.alloc(48 * 1024, 0x20),
+  })
+  assert.throws(
+    () => readPackageFiles(overTotal, { ignoreSignature: true }),
+    /智能体包超过.*字节上限/,
+  )
+
+  // Exactly at the single-document cap is still legal.
+  const atCap = createValidPackageDir()
+  t.after(() => removeTempDir(atCap))
+  writePackageFiles(atCap, {
+    '.signature/package-digest.json': Buffer.alloc(MAX_SIGNATURE_DOCUMENT_BYTES, 0x20),
+    '.signature/signature.json': Buffer.from('{}'),
+  })
+  assert.doesNotThrow(() => readPackageFiles(atCap, { ignoreSignature: true }))
 })
 
 test('rejects symlinks and signature content in the unsigned entry point', (t) => {

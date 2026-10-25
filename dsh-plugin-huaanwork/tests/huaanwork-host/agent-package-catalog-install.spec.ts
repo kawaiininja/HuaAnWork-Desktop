@@ -12,15 +12,18 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import {
   buildSignedAgentPackageBundle,
+  buildUnsignedAgentPackageBundle,
   MAX_AGENT_PACKAGE_BUNDLE_BYTES,
 } from '@huaanwork/agent-package-format/bundle'
 import { createAgentPackageDigest, type AgentPackageFile } from '@huaanwork/agent-package-format/digest'
 import type { AgentPackageManifest } from '@huaanwork/agent-package-format/manifest'
 import {
+  canonicalJson,
   fingerprintPublicKeyHex,
   generateKeyPair,
   signAgentPackageDigest,
@@ -323,6 +326,65 @@ async function signedBundle(slug: string, version: string, options: OfferOptions
   return buildSignedAgentPackageBundle(bundled, digest, signature)
 }
 
+/**
+ * 旧服务端能产出的 signed bundle:签名前不做安装条目预算预检,所以 1022 个内容
+ * 文件(安装后 1025 个条目)的包曾经可以发布。当前 builder 会在签名前拒绝该输入,
+ * 因此这里用公共 builder 打 unsigned 归档,再在 tar 的两个 EOF 块前追加签名
+ * 文件;digest 与签名仍是真实有效的,安装侧必须自行拒绝。
+ */
+async function makeBundleWithFileCount(
+  slug: string,
+  version: string,
+  count: number,
+): Promise<Buffer> {
+  const manifest = manifestFor(slug, version)
+  const files: AgentPackageFile[] = [
+    ...filesFor(manifest),
+    ...Array.from({ length: count - 2 }, (_, index) => ({
+      path: `filler-${String(index).padStart(4, '0')}.md`,
+      data: Buffer.alloc(0),
+    })),
+  ]
+  const digest = createAgentPackageDigest(manifest, files)
+  const signature = signAgentPackageDigest(digest, {
+    privateKeyPem: keyPair.privateKeyPem,
+    slot: 1,
+    signedAt: NOW,
+  })
+  const raw = gunzipSync(await buildUnsignedAgentPackageBundle(files))
+  const trailer = Buffer.alloc(1024)
+  if (!raw.subarray(raw.byteLength - trailer.byteLength).equals(trailer)) {
+    throw new Error('unexpected tar trailer')
+  }
+  return gzipSync(Buffer.concat([
+    raw.subarray(0, raw.byteLength - trailer.byteLength),
+    tarFileBlocks('.signature/package-digest.json', Buffer.from(canonicalJson(digest), 'utf8')),
+    tarFileBlocks('.signature/signature.json', Buffer.from(JSON.stringify(signature), 'utf8')),
+    trailer,
+  ]))
+}
+
+/** 单个普通文件的 POSIX ustar 头 + 512 字节对齐正文。 */
+function tarFileBlocks(path: string, data: Buffer): Buffer {
+  const header = Buffer.alloc(512)
+  header.write(path, 0, 100, 'utf8')
+  header.write('0000644\0', 100, 8, 'ascii')
+  header.write('0000000\0', 108, 8, 'ascii')
+  header.write('0000000\0', 116, 8, 'ascii')
+  header.write(`${data.byteLength.toString(8).padStart(11, '0')}\0`, 124, 12, 'ascii')
+  header.write('00000000000\0', 136, 12, 'ascii')
+  header.fill(0x20, 148, 156)
+  header.write('0', 156, 1, 'ascii')
+  header.write('ustar\0', 257, 6, 'ascii')
+  header.write('00', 263, 2, 'ascii')
+  let checksum = 0
+  for (const byte of header) checksum += byte
+  header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii')
+  const body = Buffer.alloc(Math.ceil(data.byteLength / 512) * 512)
+  data.copy(body)
+  return Buffer.concat([header, body])
+}
+
 async function offer(slug: string, version: string, options: OfferOptions = {}): Promise<void> {
   const bundle = options.bundleOverride ?? (await signedBundle(slug, version, options))
   packages = packages.filter((pkg) => !(pkg.slug === slug && pkg.version === version))
@@ -615,6 +677,27 @@ describe('verified catalog install', () => {
     oversizedBundle = true
     await expect(install('weekly-report', '1.0.0')).rejects.toThrow(/5 MiB/)
     expect(existsSync(formalDir('weekly-report'))).toBe(false)
+    expect(installDirs()).toEqual([])
+  })
+
+  test('refuses a signed bundle that overflows the installed entry budget', async () => {
+    // Control: the same appended-signature layout is valid at exactly 1024
+    // installed entries (1021 content), so the fixture itself is well-formed.
+    await offer('boundary-agent', '1.0.0', {
+      bundleOverride: await makeBundleWithFileCount('boundary-agent', '1.0.0', 1021),
+    })
+    await install('boundary-agent', '1.0.0')
+    expect(existsSync(formalDir('boundary-agent'))).toBe(true)
+
+    // 1022 content + 2 signature files + `.signature` = 1025 installed entries;
+    // the archive itself has only 1024 file entries, so the install-side signed
+    // projection has to reject it before anything reaches the formal directory.
+    await offer('weekly-report', '1.0.0', {
+      bundleOverride: await makeBundleWithFileCount('weekly-report', '1.0.0', 1022),
+    })
+    await expect(install('weekly-report', '1.0.0')).rejects.toThrow(/条目数超过1024/)
+    expect(existsSync(formalDir('weekly-report'))).toBe(false)
+    expect(readAgentPackageState(root)['catalog:weekly-report']).toBeUndefined()
     expect(installDirs()).toEqual([])
   })
 

@@ -17,6 +17,7 @@ import {
   MAX_AGENT_PACKAGE_BUNDLE_BYTES,
   buildSignedAgentPackageBundle,
   buildUnsignedAgentPackageBundle,
+  createAgentPackageDigest,
   inspectSignedAgentPackageBundle,
   inspectUnsignedAgentPackageBundle,
   type AgentPackageDigest,
@@ -75,6 +76,18 @@ async function makeBundle(
   const bundle = await buildUnsignedAgentPackageBundle(files)
   const inspected = await inspectUnsignedAgentPackageBundle(bundle)
   return { bundle, manifest, digest: inspected.digest }
+}
+
+/** `count` content files: the valid pair plus zero-byte fillers at the root. */
+function contentFiles(count: number): AgentPackageFile[] {
+  return [
+    { path: 'agent.json', data: Buffer.from(JSON.stringify(manifestFor())) },
+    { path: 'persona.md', data: Buffer.from(PERSONA) },
+    ...Array.from({ length: count - 2 }, (_, index) => ({
+      path: `filler-${String(index).padStart(4, '0')}.md`,
+      data: Buffer.alloc(0),
+    })),
+  ]
 }
 
 function sign(
@@ -290,6 +303,68 @@ test('accepts gzip parameters but refuses other content types and oversized uplo
     // Content-Type parameters are accepted (only the media type is pinned).
     const withParameters = await submit(catalog, bundle, { contentType: 'Application/GZIP; charset=binary' })
     assert.equal(withParameters.status, 201)
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('rejects an unsigned submission that cannot fit the signed entry budget', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    // 1022 content + 2 signature files + `.signature` = 1025 installed entries.
+    // The unsigned bytes are legal on their own; submit must reject them before
+    // they can become a pending submission that approval could never sign.
+    const tooMany = await submit(catalog, await buildUnsignedAgentPackageBundle(contentFiles(1022)))
+    assert.equal(tooMany.status, 400)
+    assert.equal(tooMany.body.code, 'invalid-bundle')
+    assert.match(String(tooMany.body.error), /条目数超过1024/u)
+    const empty = await readState(catalog)
+    assert.deepEqual(empty.submissions, {})
+    await assert.rejects(() => readdir(join(catalog.dataDir, 'submissions')))
+
+    // 1021 content + 3 installed entries = 1024: submit and approve both pass.
+    const boundary = await submit(catalog, await buildUnsignedAgentPackageBundle(contentFiles(1021)))
+    assert.equal(boundary.status, 201, JSON.stringify(boundary.body))
+    const approved = await approve(catalog, boundary.body.submissionId, sign(catalog, boundary.body.digest))
+    assert.equal(approved.status, 200, JSON.stringify(approved.body))
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('refuses to approve a stored submission that cannot fit the signed entry budget', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    // A submission accepted before the submit-time guard existed: the stored
+    // unsigned bytes are legal, but the signed projection exceeds the budget.
+    // Approval must answer a client-visible 4xx, never a 500.
+    const files = contentFiles(1022)
+    const manifest = manifestFor()
+    const digest = createAgentPackageDigest(manifest, files)
+    const submissionId = '00000000-0000-4000-8000-0000000000bb'
+    const now = new Date().toISOString()
+    const submissionDir = join(catalog.dataDir, 'submissions', submissionId)
+    await mkdir(submissionDir, { recursive: true })
+    await writeFile(join(submissionDir, 'bundle.tgz'), await buildUnsignedAgentPackageBundle(files))
+    await catalog.runtime.store.update(draft => {
+      draft.submissions[submissionId] = {
+        id: submissionId,
+        slug: manifest.slug,
+        version: manifest.version,
+        status: 'pending-review',
+        submittedAt: now,
+        updatedAt: now,
+        actor: actorOf(PUBLISH_TOKEN),
+        digest,
+      }
+    })
+
+    const approved = await approve(catalog, submissionId, sign(catalog, digest))
+    assert.equal(approved.status, 422)
+    assert.deepEqual(approved.body, { error: '包条目数超过上限', code: 'package-too-many-entries' })
+    const after = await readState(catalog)
+    assert.equal(Object.keys(after.packages).length, 0)
+    assert.equal(after.submissions[submissionId]?.status, 'pending-review')
   } finally {
     await catalog.close()
   }

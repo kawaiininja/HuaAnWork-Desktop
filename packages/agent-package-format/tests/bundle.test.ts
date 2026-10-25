@@ -36,6 +36,18 @@ const validFiles: AgentPackageFile[] = [
   { path: 'persona.md', data: Buffer.from(VALID_PERSONA) },
 ]
 
+/** `count` content files: the valid pair plus zero-byte fillers at the root. */
+function contentFiles(count: number): AgentPackageFile[] {
+  return [
+    { path: 'agent.json', data: Buffer.from(JSON.stringify(VALID_MANIFEST)) },
+    { path: 'persona.md', data: Buffer.from(VALID_PERSONA) },
+    ...Array.from({ length: count - 2 }, (_, index) => ({
+      path: `filler-${String(index).padStart(4, '0')}.md`,
+      data: Buffer.alloc(0),
+    })),
+  ]
+}
+
 /**
  * Build an arbitrary (possibly malicious) tar.gz in memory with `tar`'s Pack.
  * Entries are handed over as raw tar headers so names such as `/absolute`,
@@ -340,15 +352,18 @@ test('rejects archives over 1024 entries before parsing later entries', async ()
   )
 })
 
-test('accepts exactly 1024 entries and exactly 512-byte paths', async () => {
-  const filler = Array.from({ length: 1022 }, (_, index) => ({
+test('accepts exactly the installed entry budget and exactly 512-byte paths', async () => {
+  // 1021 content + 2 signature files + `.signature` = exactly 1024 installed
+  // entries. A 1024-entry archive can no longer be installed, so the unsigned
+  // inspection must stop one file short of the archive-level cap.
+  const filler = Array.from({ length: 1019 }, (_, index) => ({
     name: `filler-${index}.bin`,
     content: '',
   }))
   const boundary = await inspectUnsignedAgentPackageBundle(
     await makeArchive([validAgentJson, validPersona, ...filler]),
   )
-  assert.equal(boundary.files.length, 1024)
+  assert.equal(boundary.files.length, 1021)
 
   const exactly512 = `a/${'b'.repeat(255)}/${'c'.repeat(254)}`
   assert.equal(Buffer.byteLength(exactly512, 'utf8'), 512)
@@ -396,6 +411,46 @@ test('counts signature entries against the shared 1024 entry cap', async () => {
       ]),
       [],
     ),
+    /条目数超过1024/,
+  )
+})
+
+test('reserves the two signature files and the .signature directory in the 1024-entry budget', async () => {
+  // 1022 content + 2 signature + `.signature` dir = 1025 installed entries. The
+  // unsigned build itself stays legal (it does not reserve signature slots), so
+  // the rejection must come from the signed projection the inspector applies.
+  const tooMany = await buildUnsignedAgentPackageBundle(contentFiles(1022))
+  await assert.rejects(inspectUnsignedAgentPackageBundle(tooMany), /条目数超过1024/)
+
+  // 1021 content + 3 installed entries = 1024: the signed projection is legal.
+  const boundary = await buildUnsignedAgentPackageBundle(contentFiles(1021))
+  const inspected = await inspectUnsignedAgentPackageBundle(boundary)
+  const key = generateKeyPair()
+  const signature = signAgentPackageDigest(inspected.digest, {
+    privateKeyPem: key.privateKeyPem, slot: 1, signedAt: '2026-10-24T00:00:00.000Z',
+  })
+  const signed = await buildSignedAgentPackageBundle(
+    inspected.files, inspected.digest, signature,
+  )
+  await assert.doesNotReject(inspectSignedAgentPackageBundle(signed, [
+    { keyId: signature.keyId, publicKeyHex: key.publicKeyHex, slot: 1 },
+  ]))
+})
+
+test('counts implicit parent directories before accepting a signed bundle', async () => {
+  const files = [
+    { path: 'agent.json', data: Buffer.from(JSON.stringify(VALID_MANIFEST)) },
+    { path: 'persona.md', data: Buffer.from(VALID_PERSONA) },
+    ...Array.from({ length: 600 }, (_, index) => ({
+      path: `nested-${String(index).padStart(3, '0')}/file.md`,
+      data: Buffer.alloc(0),
+    })),
+  ]
+  // 602 files + 600 implicit parents + `.signature` + 2 documents = 1205
+  // installed entries. Unsigned builds do not reserve signature slots; the
+  // signed projection applied at submit/install time is where the parents count.
+  await assert.rejects(
+    inspectUnsignedAgentPackageBundle(await buildUnsignedAgentPackageBundle(files)),
     /条目数超过1024/,
   )
 })

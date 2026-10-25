@@ -57,6 +57,10 @@ import {
   type AgentPackageDigest,
 } from '@huaanwork/agent-package-format'
 import {
+  MAX_AGENT_PACKAGE_ENTRIES,
+  countSignedInstalledEntries,
+} from '@huaanwork/agent-package-format/digest'
+import {
   canonicalJson,
   verifyAgentPackageDigestSignature,
   type CatalogSignature,
@@ -856,6 +860,22 @@ export async function approveSubmission(
   }
 
   const { slug, version } = snapshot
+
+  // A submission stored before the submit-time entry guard can still be pending.
+  // The reviewed digest is the authoritative content manifest, so the signed
+  // projection is checked BEFORE the stored bundle is re-inspected: post-fix
+  // `inspectUnsignedAgentPackageBundle` rejects those same bytes, and that
+  // branch answers 500 ("stored bundle unusable") instead of a client-visible 4xx.
+  if (countSignedInstalledEntries(snapshot.digest.files) > MAX_AGENT_PACKAGE_ENTRIES) {
+    return result(422, errorBody('包条目数超过上限', 'package-too-many-entries'), {
+      action,
+      outcome: 'error',
+      reason: `submission ${submissionId} cannot form a signed bundle within ${MAX_AGENT_PACKAGE_ENTRIES} entries`,
+      slug,
+      version,
+      submissionId,
+    })
+  }
 
   // Re-read the EXACT bytes the review covered and confirm they still hash to
   // the digest the administrator signed.

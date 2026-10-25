@@ -12,6 +12,7 @@ import type { Pack, Parser, ReadEntry } from 'tar'
 import {
   MAX_AGENT_PACKAGE_ENTRIES,
   MAX_AGENT_PACKAGE_PATH_BYTES,
+  assertInstalledEntryBudget,
   createAgentPackageDigest,
   validateAgentPackageFiles,
   verifyAgentPackageDigest,
@@ -26,11 +27,13 @@ export const MAX_AGENT_PACKAGE_BUNDLE_BYTES = 5 * 1024 * 1024
  * 解压后归档总量上限:内容预算 + 每条 512 字节头与最多 511 字节填充 + 两个 EOF 块。
  *
  * 这是内容预算之外唯一允许出现的字节;超过它就意味着文件内容必然顶破
- * {@link MAX_AGENT_PACKAGE_BUNDLE_BYTES},因此共用同一句错误文案。meter 兜住
- * tar 仍会读取、却不进入 `onentry` 的 body:目录头声明的 body(node-tar 会把
- * 目录 size 归零,那些字节被当作后续块读掉)与门限内的 PAX/global 扩展头。
- * 超帽的 meta 条目与 tar 未知类型在 `ignoredEntry` 上即 fail-closed(该事件先于
- * body 读取发出),body 字节不会被 meter 计数。
+ * {@link MAX_AGENT_PACKAGE_BUNDLE_BYTES},因此共用同一句错误文案。meter 挂在
+ * gunzip 输出上、位于 tar 之前,所以 tar 仍会读取却不会作为条目内容交出的 body
+ * 同样被计数:目录头声明的 body(node-tar 会把目录 size 归零,那些字节被当作
+ * 后续块读掉)与门限内的 PAX/global 扩展头。`onentry` 收到的并不只有
+ * File/Directory(Link、SymbolicLink 等同样会到达);超帽的 meta 条目与 tar 未知
+ * 类型在 `ignoredEntry` 上即 fail-closed(该事件先于 body 被当作条目内容读取
+ * 发出),但不能据此声称这些字节从未被 meter 计数。
  *
  * PAX 头与条目头共用这份按条目计的余量:路径全部顶到 512 字节、内容又顶到
  * 5 MiB 的病态包会被保守地判超帽,普通包(两条头之和不到 2 KiB/条)不受影响。
@@ -43,7 +46,7 @@ const MAX_AGENT_PACKAGE_UNPACKED_BYTES =
  *
  * 门限内的 meta 正文会整块进内存;包的路径上限是 512 字节,PAX 头所需远小于
  * 64 KiB。超过门限的 meta 条目在 `ignoredEntry` 上即被拒绝(该事件先于 body
- * 读取发出),因此不靠解压总量 meter 计数。
+ * 被当作条目内容读取发出),不必等解压总量 meter 发现;meter 仍会看到这些字节。
  */
 const MAX_AGENT_PACKAGE_META_BYTES = 64 * 1024
 
@@ -135,6 +138,9 @@ export async function inspectUnsignedAgentPackageBundle(
     throw structureError('提交包不得包含签名')
   }
   const manifest = validateAgentPackageFiles(archive.files)
+  // Unsigned builds do not reserve signature slots, so submit-time inspection
+  // must charge the signed projection: content + `.signature/` + two documents.
+  assertInstalledEntryBudget([...archive.files, { path: DIGEST_PATH }, { path: SIGNATURE_PATH }])
   return {
     manifest,
     files: archive.files,
@@ -183,6 +189,9 @@ export async function inspectSignedAgentPackageBundle(
   }
 
   const manifest = validateAgentPackageFiles(content)
+  // Charge the final install layout, not just the archive's explicit entries:
+  // implicit parent directories, `.signature/` and both documents all count.
+  assertInstalledEntryBudget([...content, digestFile, signatureFile])
 
   let digest: AgentPackageDigest
   let signature: CatalogSignature
@@ -261,6 +270,9 @@ function normalizeBuildFiles(
     normalized.map((file) => file.path),
     new Set(normalized.map((file) => file.path)),
   )
+  // Only signed builds already carry the two signature files; unsigned builds
+  // stay buildable and are rejected at inspection time via the signed projection.
+  if (allowSignatureFiles) assertInstalledEntryBudget(normalized)
   return normalized.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
 }
 
@@ -268,10 +280,10 @@ function normalizeBuildFiles(
  * 流式解包到内存。
  *
  * 解压由本模块自己完成:gzip 输出先过一道计量 `Transform`,解压总量超过
- * {@link MAX_AGENT_PACKAGE_UNPACKED_BYTES} 立刻中止。这道计量兜住 tar 仍会读取、
- * 却不进 `onentry` 的字节(目录头声明的 body 与门限内的 PAX/global 扩展头),
- * 因为 tar 只把 File/Directory 送进 `onentry`,而目录头的 size 会被 tar 归零;
- * 超帽 meta 与未知类型在 `ignoredEntry` 上已先行拒绝,到不了计量。
+ * {@link MAX_AGENT_PACKAGE_UNPACKED_BYTES} 立刻中止。计量位于 tar 之前,所以
+ * 目录头声明的 body(其 size 会被 tar 归零,不会作为条目内容交给 `onentry`)与
+ * 门限内的 PAX/global 扩展头同样被计数;超帽 meta 与未知类型则在 tar 层
+ * (`ignoredEntry`,早于 body 被当作条目内容读取)先行拒绝。
  *
  * 计量同时检查解压后首个字节的压缩魔数:node-tar 无视 `gzip:false`,遇到
  * {@link NESTED_COMPRESSION_MAGIC} 会再解压一层,那层解压绕过计量,必须提前拒绝。
@@ -389,7 +401,7 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
 
       // 文件按声明大小预扣内容预算。目录条目的 size 在 tar 解码时已被归零
       // (node-tar 只给非目录头保留 size),所以这一行对目录是空操作;目录头
-      // 声明的 body 从不进入 onentry,真正兜住它的是解压总量 meter。
+      // 声明的 body 不会作为条目内容到达 onentry,真正兜住它的是解压总量 meter。
       declaredBytes += entry.size
       if (declaredBytes > MAX_AGENT_PACKAGE_BUNDLE_BYTES) {
         fail(packageTooLargeError())

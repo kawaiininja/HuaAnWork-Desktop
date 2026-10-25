@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { lstatSync, readFileSync, readdirSync } from 'node:fs'
+import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { canonicalJson, verifyAgentPackageDigestSignature } from '@huaanwork/catalog-signing'
@@ -12,6 +12,8 @@ import type { AgentPackageManifest } from './manifest.ts'
 export const MAX_AGENT_PACKAGE_ENTRIES = 1024
 /** 目录枚举上限:单个规范化相对路径的 UTF-8 字节数。 */
 export const MAX_AGENT_PACKAGE_PATH_BYTES = 512
+/** 单份签名文档读取上限。digest/signature 都是小 JSON,64 KiB 足够且防止内存放大。 */
+export const MAX_SIGNATURE_DOCUMENT_BYTES = 64 * 1024
 
 const MAX_PERSONA_BYTES = 32 * 1024
 const MAX_SKILL_BYTES = 32 * 1024
@@ -53,6 +55,46 @@ export type ReadPackageFilesOptions = {
    * 公开的 unsigned 入口(`readUnsignedPackageFiles`)不开放此选项。
    */
   ignoreSignature?: boolean
+}
+
+/**
+ * 安装后目录会被枚举到的全部条目:每个文件本身 + 所有唯一隐式父目录。
+ *
+ * 传入的 `files` 必须是最终安装布局(签名包要包含 `.signature/` 两个文件):
+ * 归档里可能没有显式目录条目,但安装目录枚举会看到这些父目录,两条入口的
+ * 预算必须按同一口径计算。
+ */
+export function countInstalledPackageEntries(
+  files: readonly Pick<AgentPackageFile, 'path'>[],
+): number {
+  const entries = new Set<string>()
+  for (const file of files) {
+    const segments = file.path.split('/')
+    for (let index = 1; index <= segments.length; index += 1) {
+      entries.add(segments.slice(0, index).join('/'))
+    }
+  }
+  return entries.size
+}
+
+/** unsigned 内容 + 两个签名文件组成的最终安装布局条目数。 */
+export function countSignedInstalledEntries(
+  files: readonly Pick<AgentPackageFile, 'path'>[],
+): number {
+  return countInstalledPackageEntries([
+    ...files,
+    { path: `${SIGNATURE_DIR}/package-digest.json` },
+    { path: `${SIGNATURE_DIR}/signature.json` },
+  ])
+}
+
+/** 拒绝安装后会超过 {@link MAX_AGENT_PACKAGE_ENTRIES} 的条目布局。 */
+export function assertInstalledEntryBudget(
+  files: readonly Pick<AgentPackageFile, 'path'>[],
+): void {
+  if (countInstalledPackageEntries(files) > MAX_AGENT_PACKAGE_ENTRIES) {
+    throw structureError(`条目数超过${MAX_AGENT_PACKAGE_ENTRIES}`)
+  }
 }
 
 /**
@@ -196,8 +238,18 @@ function walkPackageDir(
       walkPackageDir(packageDir, relativePath, options, state)
       continue
     }
-    if (options.ignoreSignature === true && SIGNATURE_FILES.has(relativePath)) continue
     // 先用 lstat 的声明大小累计总量,避免把超大文件整块读进内存后才判超帽。
+    // 签名文档同样占用安装目录的字节预算,只是不进入 digest 的文件集。
+    if (options.ignoreSignature === true && SIGNATURE_FILES.has(relativePath)) {
+      state.bytes += stat.size
+      if (state.bytes > MAX_PACKAGE_BYTES) {
+        throw structureError(`智能体包超过${MAX_PACKAGE_BYTES}字节上限`)
+      }
+      if (stat.size > MAX_SIGNATURE_DOCUMENT_BYTES) {
+        throw structureError(`签名文档超过${MAX_SIGNATURE_DOCUMENT_BYTES}字节上限`)
+      }
+      continue
+    }
     state.bytes += stat.size
     if (state.bytes > MAX_PACKAGE_BYTES) {
       throw structureError(`智能体包超过${MAX_PACKAGE_BYTES}字节上限`)
@@ -300,7 +352,12 @@ function assertWithinBudget(path: string, size: number, limit: number): void {
 }
 
 function readSignatureDocument(packageDir: string, name: 'package-digest.json' | 'signature.json'): unknown {
-  return JSON.parse(readFileSync(join(packageDir, SIGNATURE_DIR, name), 'utf8')) as unknown
+  const path = join(packageDir, SIGNATURE_DIR, name)
+  // 目录枚举与这次读取之间文件可能被替换:读前再按实际大小执行单文档上限。
+  if (statSync(path).size > MAX_SIGNATURE_DOCUMENT_BYTES) {
+    throw structureError(`签名文档超过${MAX_SIGNATURE_DOCUMENT_BYTES}字节上限`)
+  }
+  return JSON.parse(readFileSync(path, 'utf8')) as unknown
 }
 
 function structureError(message: string): Error {
