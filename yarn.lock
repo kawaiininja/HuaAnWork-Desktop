@@ -11771,7 +11771,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@huaanwork/catalog-signing@workspace:*, @huaanwork/catalog-signing@workspace:packages/catalog-signing":
+"@huaanwork/catalog-signing@npm:*, @huaanwork/catalog-signing@workspace:*, @huaanwork/catalog-signing@workspace:packages/catalog-signing":
   version: 0.0.0-use.local
   resolution: "@huaanwork/catalog-signing@workspace:packages/catalog-signing"
   dependencies:
@@ -17000,6 +17000,7 @@ __metadata:
     "@electron/fuses": "npm:1.8.0"
     "@fontsource-variable/inter": "npm:^5.3.0"
     "@huaanwork/agent-package-format": "npm:*"
+    "@huaanwork/catalog-signing": "npm:*"
     "@huaanwork/git-tools": "npm:*"
     "@huaanwork/model": "npm:*"
     "@huaanwork/policy": "npm:*"

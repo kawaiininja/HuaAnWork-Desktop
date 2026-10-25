@@ -19,6 +19,7 @@ import {
   type SubagentActivationHandle,
   type SubagentsService,
 } from '../subagents-service.ts'
+import { recoverCatalogPackageInstalls } from './catalog-install.ts'
 import {
   beginAgentPackageUpdate,
   cancelAgentPackage,
@@ -258,14 +259,18 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     },
 
     listLocal() {
+      // C17: 广场安装的崩溃恢复必须先于 store 的通用 `.old-*` 清理。
+      recoverCatalogPackageInstalls(profileDir)
       return listLocalAgentPackages(profileDir)
     },
 
     detail(slug) {
+      recoverCatalogPackageInstalls(profileDir)
       return readAgentPackage(profileDir, slug)
     },
 
     setEnabled(slug, enabled) {
+      recoverCatalogPackageInstalls(profileDir)
       const detail = readAgentPackage(profileDir, slug)
       if (detail === undefined) throw new Error(`智能体 @${slug} 不存在`)
       if (enabled && detail.broken !== undefined) throw new Error(`智能体 @${slug} 已损坏:${detail.broken.reason}`)
@@ -273,6 +278,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     },
 
     async listWithLegacy() {
+      recoverCatalogPackageInstalls(profileDir)
       const legacyList = requireLegacyHost(options).list()
       return {
         packages: listLocalAgentPackages(profileDir),
@@ -282,6 +288,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     },
 
     async invocableWithLegacy() {
+      recoverCatalogPackageInstalls(profileDir)
       const localItems = listLocalAgentPackages(profileDir)
         .filter((pkg) => pkg.enabled && pkg.broken === undefined)
         .map(toInvocableListItem)
@@ -295,10 +302,12 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     async findInvocable(slug) {
       // 已停用/已损坏也要返回详情:分流先认出「这是本地包」,再由 dispatch 给出
       // 规范错误,而不是落回 agentsHost 的「不存在」分支。
+      recoverCatalogPackageInstalls(profileDir)
       return readAgentPackage(profileDir, slug)
     },
 
     async dispatch(input) {
+      recoverCatalogPackageInstalls(profileDir)
       const { ctx, sessionId, pkg } = input
       if (!pkg.enabled) throw new Error(`智能体「${pkg.slug}」未启用或不存在`)
       if (pkg.broken !== undefined) throw new Error(`智能体「${pkg.slug}」已损坏：${pkg.broken.reason}`)

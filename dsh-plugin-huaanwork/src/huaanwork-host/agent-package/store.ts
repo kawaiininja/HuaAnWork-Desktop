@@ -280,7 +280,7 @@ export function listLocalAgentPackages(profileDir: string): AgentPackageListItem
 
   const items: AgentPackageListItem[] = []
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith('.') || !isValidSlug(entry.name)) continue
+    if (!entry.isDirectory() || entry.name.startsWith('.') || !isValidAgentPackageSlug(entry.name)) continue
     const detail = readAgentPackageFromDir(profileDir, entry.name, state)
     if (detail === undefined) continue
     items.push(toListItem(detail))
@@ -294,7 +294,7 @@ export function listLocalAgentPackages(profileDir: string): AgentPackageListItem
  * 因为损坏就回落到同名的 legacy 目录条目。
  */
 export function readAgentPackage(profileDir: string, slug: string): AgentPackageDetail | undefined {
-  if (!isValidSlug(slug)) return undefined
+  if (!isValidAgentPackageSlug(slug)) return undefined
   recoverAgentPackages(profileDir)
   try {
     if (!lstatSync(agentPackageDir(profileDir, slug)).isDirectory()) return undefined
@@ -761,12 +761,18 @@ export function isAgentPackageScriptPath(scriptPath: string): boolean {
 }
 
 function assertPackageSlug(slug: string): void {
-  if (!isValidSlug(slug)) {
+  if (!isValidAgentPackageSlug(slug)) {
     throw new Error(`智能体 @标识「${slug}」无效`)
   }
 }
 
-function isValidSlug(slug: string): boolean {
+/**
+ * slug 形状校验。目录名、状态键与广场安装请求共用这一条规则。
+ *
+ * 导出给 catalog 安装/恢复使用:解析 `.install-*`/`.remove-*` 目录名与交易
+ * 记录时不能各自复制一份正则。
+ */
+export function isValidAgentPackageSlug(slug: string): boolean {
   return slug.length <= 32 && AGENT_NAME_RE.test(slug)
 }
 
@@ -775,7 +781,7 @@ function slugFromSuffixedName(name: string, prefix: string): string | undefined 
   const separator = rest.lastIndexOf('-')
   if (separator <= 0) return undefined
   const slug = rest.slice(0, separator)
-  return isValidSlug(slug) ? slug : undefined
+  return isValidAgentPackageSlug(slug) ? slug : undefined
 }
 
 function randomSuffix(): string {
@@ -827,7 +833,7 @@ export function readAgentPackageFile(
   slug: string,
   relativePath: string,
 ): string | undefined {
-  if (!isValidSlug(slug) || relativePath.includes('\\')) return undefined
+  if (!isValidAgentPackageSlug(slug) || relativePath.includes('\\')) return undefined
   const segments = relativePath.split('/')
   if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return undefined
   return readPackageText(agentPackageDir(profileDir, slug), relativePath)
@@ -861,6 +867,26 @@ function pathHasSymlinkSegment(baseDir: string, relativePath: string): boolean {
     }
   }
   return false
+}
+
+/**
+ * 只读取一个包目录的 manifest 版本,不做任何恢复扫描。
+ *
+ * catalog 安装恢复必须在 M1 的通用 `.old-*` 清理**之前**判断磁盘版本是否已是
+ * 事务的目标版本;`readAgentPackage` 会先跑通用恢复,因此不能用它。
+ * manifest 损坏时仍返回 `version` 原文(恢复只做字符串比较,不解析清单)。
+ */
+export function readAgentPackageVersionFromDir(packageDir: string): string | undefined {
+  const text = readPackageText(packageDir, 'agent.json')
+  if (text === undefined) return undefined
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(raw)) return undefined
+  return typeof raw.version === 'string' && raw.version.length > 0 ? raw.version : undefined
 }
 
 function nonEmptyString(value: unknown): string | undefined {
