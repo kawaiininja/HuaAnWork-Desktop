@@ -35,6 +35,9 @@
  *   - `PublishedPackage.size` is the FINAL signed bundle byte count; list and
  *     detail responses only use the stored, validated manifest (never a client
  *     field).
+ *   - The list, metadata and bundle routes derive listability, `bundleUrl` and
+ *     the 410 verdict from ONE helper (`packageDistributionStatus`, types.ts);
+ *     none of them tests `record.status` itself.
  *
  * All failures are ordinary `HandlerResult`s so the dispatcher can audit them
  * before answering (server.ts); expected conflicts are never thrown.
@@ -63,8 +66,8 @@ import type { AgentCatalogRole } from './auth.ts'
 import type { AgentCatalogConfig } from './config.ts'
 import { findEntry } from './legacy.ts'
 import { packageKey, type CatalogStore } from './store.ts'
+import { packageDistributionStatus, type AdminSubmissionResponse } from './types.ts'
 import type {
-  AdminSubmissionResponse,
   AgentPackageMetadata,
   AgentPackageSummary,
   CatalogState,
@@ -243,12 +246,20 @@ function declaredContentLength(request: IncomingMessage): number | null {
   return Number(raw.trim())
 }
 
-type JsonBody =
+/** One parsed JSON request body (shared with the governance handlers). */
+export type JsonBody =
   | { readonly kind: 'object'; readonly value: Record<string, unknown> }
+  /** A body that is not JSON / not an object (whitespace counts as invalid). */
   | { readonly kind: 'invalid' }
   | { readonly kind: 'too-large' }
+  /** No body at all (an optional-body route may accept this). */
+  | { readonly kind: 'empty' }
 
-async function readJsonObject(request: IncomingMessage): Promise<JsonBody> {
+/**
+ * Read a JSON object body under the shared cap. Exported because the governance
+ * handlers (Task 6) must not grow a second body reader with a different cap.
+ */
+export async function readJsonObject(request: IncomingMessage): Promise<JsonBody> {
   let raw: Buffer
   try {
     raw = await readCappedBody(request, MAX_JSON_REQUEST_BYTES)
@@ -256,6 +267,7 @@ async function readJsonObject(request: IncomingMessage): Promise<JsonBody> {
     if (cause instanceof BodyTooLargeError) return { kind: 'too-large' }
     return { kind: 'invalid' }
   }
+  if (raw.byteLength === 0) return { kind: 'empty' }
   let parsed: unknown
   try {
     parsed = JSON.parse(raw.toString('utf8'))
@@ -266,6 +278,18 @@ async function readJsonObject(request: IncomingMessage): Promise<JsonBody> {
     return { kind: 'invalid' }
   }
   return { kind: 'object', value: parsed as Record<string, unknown> }
+}
+
+/**
+ * The ONE reason rule of the write surface: a trimmed string of 1-500
+ * characters, or `null` when the body carries none/invalid. Shared by reject,
+ * delist request and revoke so the budget can never drift between them.
+ */
+export function reasonFromBody(body: JsonBody): string | null {
+  if (body.kind !== 'object') return null
+  const raw = body.value.reason
+  const reason = typeof raw === 'string' ? raw.trim() : ''
+  return reason.length < 1 || reason.length > MAX_REASON_LENGTH ? null : reason
 }
 
 function migrationHeaderOf(request: IncomingMessage): string | undefined {
@@ -488,7 +512,8 @@ function notFoundSubmission(action: string, submissionId: string): HandlerResult
   })
 }
 
-function payloadTooLarge(action: string): HandlerResult {
+/** Shared 413 result (governance bodies are capped identically). */
+export function payloadTooLarge(action: string): HandlerResult {
   return result(413, errorBody('请求体过大', 'payload-too-large'), {
     action,
     outcome: 'error',
@@ -963,9 +988,8 @@ export async function rejectSubmission(
 
   const body = await readJsonObject(context.request)
   if (body.kind === 'too-large') return payloadTooLarge(action)
-  const rawReason = body.kind === 'object' ? body.value.reason : undefined
-  const reason = typeof rawReason === 'string' ? rawReason.trim() : ''
-  if (reason.length < 1 || reason.length > MAX_REASON_LENGTH) {
+  const reason = reasonFromBody(body)
+  if (reason === null) {
     return result(400, errorBody(`原因需为 1-${String(MAX_REASON_LENGTH)} 个字符`, 'invalid-reason'), {
       action,
       outcome: 'error',
@@ -1024,8 +1048,8 @@ export async function listPublishedPackages(context: SubmissionHandlerContext): 
   const action = ACTIONS.list
   const best = new Map<string, PublishedPackage>()
   for (const record of Object.values(context.store.read().packages)) {
-    // Delisted/revoked records are excluded from the catalog listing.
-    if (record.status !== 'published') continue
+    // ONE distribution rule decides catalog visibility (delisted/revoked are out).
+    if (!packageDistributionStatus(record).listed) continue
     const current = best.get(record.slug)
     if (current === undefined || compareAgentPackageVersions(record.version, current.version) > 0) {
       best.set(record.slug, record)
@@ -1052,15 +1076,27 @@ export async function listPublishedPackages(context: SubmissionHandlerContext): 
 // GET /v1/agent-packages/{slug}/{version}[, /bundle]
 // ---------------------------------------------------------------------------
 
-function findPackage(
-  context: SubmissionHandlerContext,
+/**
+ * The shared package lookup (identity guard + state read). Exported for the
+ * governance handlers (Task 6) so path-segment validation cannot drift.
+ */
+export function findPackageRecord(
+  store: Pick<CatalogStore, 'read'>,
   slug: string,
   version: string,
 ): PublishedPackage | undefined {
   // Path segments are attacker-controlled; only validated identities may reach
   // a state key (and therefore a filesystem path).
   if (!SLUG_PATTERN.test(slug) || !VERSION_PATTERN.test(version)) return undefined
-  return context.store.read().packages[packageKey(slug, version)]
+  return store.read().packages[packageKey(slug, version)]
+}
+
+function findPackage(
+  context: SubmissionHandlerContext,
+  slug: string,
+  version: string,
+): PublishedPackage | undefined {
+  return findPackageRecord(context.store, slug, version)
 }
 
 export async function getPackageMetadata(
@@ -1080,10 +1116,12 @@ export async function getPackageMetadata(
     })
   }
 
+  // The SAME distribution rule the list and bundle routes consult.
+  const distribution = packageDistributionStatus(record)
   const body: AgentPackageMetadata = {
     slug: record.slug,
     version: record.version,
-    status: record.status,
+    status: distribution.status,
     displayName: record.manifest.displayName,
     description: record.manifest.description,
     size: record.size,
@@ -1092,8 +1130,8 @@ export async function getPackageMetadata(
     signature: record.signature,
     ...(record.migrationFrom === undefined ? {} : { migrationFrom: record.migrationFrom }),
     // Installed clients keep the metadata to explain a withdrawal, but only a
-    // published version advertises downloadable bytes.
-    ...(record.status === 'published'
+    // downloadable version advertises downloadable bytes.
+    ...(distribution.downloadable
       ? {
           bundleUrl: `/v1/agent-packages/${encodeURIComponent(record.slug)}/${encodeURIComponent(record.version)}/bundle`,
         }
@@ -1123,12 +1161,14 @@ export async function downloadPackageBundle(
       version,
     })
   }
-  if (record.status === 'delisted' || record.status === 'revoked') {
-    const delisted = record.status === 'delisted'
-    return result(410, errorBody(delisted ? '版本已下架' : '版本已撤销', delisted ? 'package-delisted' : 'package-revoked'), {
+  // The exact 410 body/code comes from the shared helper, never from a local
+  // `status === 'delisted' || status === 'revoked'` test.
+  const distribution = packageDistributionStatus(record)
+  if (!distribution.downloadable) {
+    return result(410, errorBody(distribution.error, distribution.code), {
       action,
       outcome: 'error',
-      reason: `package ${slug}/${version} is ${record.status}`,
+      reason: `package ${slug}/${version} is ${distribution.status}`,
       slug: record.slug,
       version: record.version,
     })

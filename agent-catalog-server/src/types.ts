@@ -9,8 +9,9 @@
  *   delistRequests   request id
  *   revocations      `${slug}/${version}`
  *
- * Task 4 introduces the shape and the store; Tasks 5/6 fill the handlers and
- * may add fields to the records (never new top-level collections).
+ * Task 4 introduces the shape and the store; Task 5 fills the submission and
+ * read handlers, Task 6 adds the governance handlers. Later tasks may add fields
+ * to the records (never new top-level collections).
  */
 
 import type { AgentPackageDigest, AgentPackageManifest } from '@huaanwork/agent-package-format'
@@ -40,6 +41,11 @@ export interface HandlerResult {
     readonly slug?: string
     readonly version?: string
     readonly submissionId?: string
+    /**
+     * Delist request id (Task 6). Every governance response and audit record
+     * carries it; it is a request id, NOT a submission id.
+     */
+    readonly delistRequestId?: string
   }
 }
 
@@ -167,6 +173,11 @@ export interface DelistRequest {
   resolvedAt?: string
 }
 
+/** `GET /v1/agent-packages/delist-requests?status=pending`. */
+export interface DelistRequestListBody {
+  readonly items: DelistRequest[]
+}
+
 /** One revocation record (Task 6 owns the write path). */
 export interface Revocation {
   readonly slug: string
@@ -174,6 +185,11 @@ export interface Revocation {
   readonly reason: string
   readonly revokedAt: string
   readonly actor: string
+}
+
+/** `GET /v1/agent-packages/revocations`. */
+export interface RevocationListBody {
+  readonly items: Revocation[]
 }
 
 export interface CatalogState {
@@ -187,6 +203,62 @@ export interface CatalogState {
 /** The key of a package record in `packages` and `revocations`. */
 export function packageKey(slug: string, version: string): string {
   return `${slug}/${version}`
+}
+
+/**
+ * Every distribution decision a package version can have, derived from ONE
+ * function (Task 6):
+ *
+ *   listed        appears in `GET /v1/agent-packages`
+ *   downloadable  `GET .../bundle` serves the signed bytes
+ *   error/code    the exact 410 body when the bundle is withheld
+ *
+ * The list, metadata and bundle routes MUST read this instead of testing
+ * `record.status` themselves: three independent tests are how a catalog starts
+ * advertising a bundle it then refuses to serve.
+ *
+ * Metadata stays readable for every state (installed clients have to be able to
+ * explain why a version stopped updating); only `downloadable` gates the bytes
+ * and only `listed` gates the catalog entry.
+ */
+export type PackageDistribution =
+  | { readonly status: 'published'; readonly listed: true; readonly downloadable: true }
+  | {
+      readonly status: 'delisted'
+      readonly listed: false
+      readonly downloadable: false
+      readonly error: string
+      readonly code: 'package-delisted'
+    }
+  | {
+      readonly status: 'revoked'
+      readonly listed: false
+      readonly downloadable: false
+      readonly error: string
+      readonly code: 'package-revoked'
+    }
+
+export function packageDistributionStatus(record: Pick<PublishedPackage, 'status'>): PackageDistribution {
+  switch (record.status) {
+    case 'published':
+      return { status: 'published', listed: true, downloadable: true }
+    case 'delisted':
+      return {
+        status: 'delisted',
+        listed: false,
+        downloadable: false,
+        error: '版本已下架',
+        code: 'package-delisted',
+      }
+    case 'revoked':
+      return {
+        status: 'revoked',
+        listed: false,
+        downloadable: false,
+        error: '版本已撤销',
+        code: 'package-revoked',
+      }
+  }
 }
 
 /** A fresh, empty `CatalogState` (the initial state of a new data dir). */

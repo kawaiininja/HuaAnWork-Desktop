@@ -1,9 +1,8 @@
 /**
  * agent-catalog-server HTTP surface.
  *
- * Route table (Task 5 installs submissions + public reads; the Task 6
- * governance routes still answer 501; the AUTH MATRIX below is final so those
- * tasks never have to rewrite authorization):
+ * Route table (Task 5 installs submissions + public reads; Task 6 installs the
+ * delist/revocation governance routes):
  *
  *   read     GET  /v1/catalog, /v1/catalog/{name}
  *            GET  /v1/agent-packages
@@ -21,8 +20,9 @@
  *            POST /v1/agent-packages/delist-requests/{id}/approve|reject
  *            POST /v1/agent-packages/{slug}/{version}/revoke
  *
- * Task 5 handlers live in submissions.ts and return ordinary `HandlerResult`s
- * (expected conflicts included) so every outcome is audited before it is sent.
+ * Task 5 handlers live in submissions.ts, Task 6 handlers in governance.ts; both
+ * return ordinary `HandlerResult`s (expected conflicts included) so every
+ * outcome is audited before it is sent.
  *
  * Dispatch order is deliberate:
  *
@@ -49,6 +49,14 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { AuditLog, redactSecrets, type AuditEvent } from './audit.ts'
 import { authenticateToken, bearerToken, tokenActor, type AgentCatalogRole } from './auth.ts'
 import type { AgentCatalogConfig } from './config.ts'
+import {
+  approveDelistRequest,
+  createDelistRequest,
+  listDelistRequests,
+  listRevocations,
+  rejectDelistRequest,
+  revokePackage,
+} from './governance.ts'
 import { findEntry, loadEntries } from './legacy.ts'
 import { CatalogStore } from './store.ts'
 import {
@@ -93,7 +101,7 @@ export async function createAgentCatalogRuntime(config: AgentCatalogConfig): Pro
 // Routing
 // ---------------------------------------------------------------------------
 
-type PatternSegment = string | ':slug' | ':version' | ':id'
+type PatternSegment = string | ':slug' | ':version' | ':id' | ':requestId'
 
 interface RouteDefinition {
   readonly id: string
@@ -103,9 +111,10 @@ interface RouteDefinition {
 }
 
 /**
- * Ordered static-first table. `:id` routes appear after every literal route
- * with the same prefix length, which is what protects
- * `/submissions/{id}` from being read as `/{slug}/{version}`.
+ * Ordered static-first table. `:id`/`:requestId` routes appear after every
+ * literal route with the same prefix length, which is what protects
+ * `/submissions/{id}` and `/delist-requests/{id}/approve` from being read as
+ * `/{slug}/{version}` (and keeps the two capture kinds apart in the audit).
  */
 const AGENT_PACKAGE_ROUTES: readonly RouteDefinition[] = [
   { id: 'agentPackages.list', path: [], method: 'GET', roles: ['read'] },
@@ -116,8 +125,8 @@ const AGENT_PACKAGE_ROUTES: readonly RouteDefinition[] = [
   { id: 'agentPackages.submissions.approve', path: ['submissions', ':id', 'approve'], method: 'POST', roles: ['admin'] },
   { id: 'agentPackages.submissions.reject', path: ['submissions', ':id', 'reject'], method: 'POST', roles: ['admin'] },
   { id: 'agentPackages.delistRequests.pending', path: ['delist-requests'], method: 'GET', roles: ['admin'] },
-  { id: 'agentPackages.delistRequests.approve', path: ['delist-requests', ':id', 'approve'], method: 'POST', roles: ['admin'] },
-  { id: 'agentPackages.delistRequests.reject', path: ['delist-requests', ':id', 'reject'], method: 'POST', roles: ['admin'] },
+  { id: 'agentPackages.delistRequests.approve', path: ['delist-requests', ':requestId', 'approve'], method: 'POST', roles: ['admin'] },
+  { id: 'agentPackages.delistRequests.reject', path: ['delist-requests', ':requestId', 'reject'], method: 'POST', roles: ['admin'] },
   { id: 'agentPackages.revocations.list', path: ['revocations'], method: 'GET', roles: ['read'] },
   { id: 'agentPackages.get', path: [':slug', ':version'], method: 'GET', roles: ['read'] },
   { id: 'agentPackages.bundle', path: [':slug', ':version', 'bundle'], method: 'GET', roles: ['read'] },
@@ -135,6 +144,8 @@ interface ResolvedRoute {
   readonly slug?: string
   readonly version?: string
   readonly submissionId?: string
+  /** Delist request id (`:requestId`); never a submission id. */
+  readonly delistRequestId?: string
 }
 
 const AGENT_PACKAGE_PREFIX = '/v1/agent-packages'
@@ -190,6 +201,7 @@ function withCaptures(
     slug?: string
     version?: string
     submissionId?: string
+    delistRequestId?: string
   } = {
     id: definition.id,
     roles: definition.roles,
@@ -199,6 +211,7 @@ function withCaptures(
   if (captures.slug !== undefined) route.slug = captures.slug
   if (captures.version !== undefined) route.version = captures.version
   if (captures.id !== undefined) route.submissionId = captures.id
+  if (captures.requestId !== undefined) route.delistRequestId = captures.requestId
   return route
 }
 
@@ -347,11 +360,19 @@ function secretList(config: AgentCatalogConfig): readonly string[] {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-function routeAuditContext(route: ResolvedRoute): Pick<AuditEvent, 'slug' | 'version' | 'submissionId'> {
-  const context: { slug?: string; version?: string; submissionId?: string } = {}
+function routeAuditContext(
+  route: ResolvedRoute,
+): Pick<AuditEvent, 'slug' | 'version' | 'submissionId' | 'delistRequestId'> {
+  const context: {
+    slug?: string
+    version?: string
+    submissionId?: string
+    delistRequestId?: string
+  } = {}
   if (route.slug !== undefined) context.slug = route.slug
   if (route.version !== undefined) context.version = route.version
   if (route.submissionId !== undefined) context.submissionId = route.submissionId
+  if (route.delistRequestId !== undefined) context.delistRequestId = route.delistRequestId
   return context
 }
 
@@ -554,13 +575,26 @@ async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise
       return approveSubmission(handlers, route.submissionId ?? '')
     case 'agentPackages.submissions.reject':
       return rejectSubmission(handlers, route.submissionId ?? '')
+    case 'agentPackages.delistRequests.create':
+      return createDelistRequest(handlers, route.slug ?? '', route.version ?? '')
+    case 'agentPackages.delistRequests.pending':
+      return listDelistRequests(handlers)
+    case 'agentPackages.delistRequests.approve':
+      return approveDelistRequest(handlers, route.delistRequestId ?? '')
+    case 'agentPackages.delistRequests.reject':
+      return rejectDelistRequest(handlers, route.delistRequestId ?? '')
+    case 'agentPackages.revoke':
+      return revokePackage(handlers, route.slug ?? '', route.version ?? '')
+    case 'agentPackages.revocations.list':
+      return listRevocations(handlers)
     default:
-      // Task 6 installs delist requests / revocations. 501 is deliberate: a
-      // reserved route must fail loudly, never pretend to be an unknown path.
-      return jsonResult(501, errorBody('接口尚未实现', 'not-implemented'), {
+      // Unreachable while AGENT_PACKAGE_ROUTES and this switch agree. It must
+      // still answer with the unified body: adding a route id without a handler
+      // is a programming error, never an unknown path.
+      return jsonResult(500, errorBody('内部错误', 'unhandled-route'), {
         action: route.id,
         outcome: 'error',
-        reason: 'handler is introduced by a later task',
+        reason: 'the resolved route has no handler',
         ...routeAuditContext(route),
       })
   }

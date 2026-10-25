@@ -42,6 +42,8 @@ export interface AuditEvent {
   readonly slug?: string
   readonly version?: string
   readonly submissionId?: string
+  /** Delist request id (Task 6); never a submission id. */
+  readonly delistRequestId?: string
   /** Human-readable cause; ALWAYS redacted before serialization. */
   readonly reason?: string
 }
@@ -149,6 +151,7 @@ export class AuditLog {
       slug?: string
       version?: string
       submissionId?: string
+      delistRequestId?: string
       reason?: string
     } = {
       timestamp: new Date().toISOString(),
@@ -161,6 +164,9 @@ export class AuditLog {
     if (event.version !== undefined) record.version = redactSecrets(event.version, this.secrets)
     if (event.submissionId !== undefined) {
       record.submissionId = redactSecrets(event.submissionId, this.secrets)
+    }
+    if (event.delistRequestId !== undefined) {
+      record.delistRequestId = redactSecrets(event.delistRequestId, this.secrets)
     }
     if (event.reason !== undefined) record.reason = redactSecrets(event.reason, this.secrets)
     return record
