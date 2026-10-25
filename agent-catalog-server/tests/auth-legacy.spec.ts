@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
-import { test } from 'vitest'
+import { test, vi } from 'vitest'
 
 import { generateKeyPair } from '@huaanwork/catalog-signing'
 import { redactSecrets } from '../src/audit.ts'
@@ -162,6 +162,34 @@ test('skips a broken entry file with a warning and treats a missing entries dir 
     assert.deepEqual(single.body, { error: '条目不存在' })
   } finally {
     await emptyCatalog.close()
+  }
+})
+
+test('redacts secrets in malformed legacy entry diagnostics', async () => {
+  // A token the server actually knows (minted for a different role than the
+  // request presents); an arbitrary `sk-` string is not a configured secret and
+  // therefore not something the redactor can recognize.
+  const token = ADMIN_TOKEN
+  const pem = '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----'
+  const catalog = await bootTestAgentCatalog()
+  // Both the file name (the logged path) and the file content (the parser
+  // message excerpt) carry the secret; neither may reach the log verbatim.
+  await writeFile(join(catalog.entriesDir, `${token}.json`), `${token}\n${pem}`, 'utf8')
+  const errors: string[] = []
+  const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    errors.push(args.map(value => String(value)).join(' '))
+  })
+  try {
+    const listed = await catalog.request('/v1/catalog', { token: READ_TOKEN })
+    assert.equal(listed.status, 200)
+    const joined = errors.join('\n')
+    assert.equal(joined.includes(token), false)
+    assert.equal(joined.includes('BEGIN PRIVATE KEY'), false)
+    assert.match(joined, /\[REDACTED/u)
+    assert.match(joined, /条目文件解析失败/u)
+  } finally {
+    spy.mockRestore()
+    await catalog.close()
   }
 })
 

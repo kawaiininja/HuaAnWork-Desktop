@@ -22,10 +22,12 @@
  *     `MAX_AGENT_PACKAGE_BUNDLE_BYTES + 1`, so an oversized body is refused with
  *     413 instead of being read into memory.
  *   - Conflicts are version-scoped for packages (same slug + different version
- *     is the update path) and name-scoped for legacy directory entries. The
- *     only exception is an explicit, matching `X-Agent-Catalog-Migration` header
- *     for a same-name `kind:"agent"` entry; tools never migrate. Conflicts are
- *     re-checked at approval so a slug cannot be occupied while pending.
+ *     is the update path) and name-scoped for legacy directory entries (EVERY
+ *     entry carrying the name is inspected). The only exception is an explicit,
+ *     matching `X-Agent-Catalog-Migration` header for exactly one same-name
+ *     `kind:"agent"` entry; tools never migrate, and duplicates are ambiguous.
+ *     Conflicts are re-checked at approval so a slug cannot be occupied while
+ *     pending.
  *   - Approval verifies the admin signature against the PINNED keyring over the
  *     STORED digest, rebuilds the signed bundle, self-checks it, writes
  *     `packages/{slug}/{version}/bundle.tgz` via temp+rename, and only then
@@ -66,9 +68,10 @@ import {
   type CatalogSignature,
 } from '@huaanwork/catalog-signing'
 
+import { redactSecrets } from './audit.ts'
 import type { AgentCatalogRole } from './auth.ts'
 import type { AgentCatalogConfig } from './config.ts'
-import { findEntry } from './legacy.ts'
+import { findEntries, type LegacyRedactor } from './legacy.ts'
 import { packageKey, type CatalogStore } from './store.ts'
 import { packageDistributionStatus, type AdminSubmissionResponse } from './types.ts'
 import type {
@@ -361,23 +364,48 @@ function hasExactSignatureShape(value: unknown): boolean {
   return keys.length === SIGNATURE_FIELDS.size && keys.every(key => SIGNATURE_FIELDS.has(key))
 }
 
-/** The exception is EXERCISED only for a matching header plus an agent entry. */
+/**
+ * Legacy parser warnings are written to the process log; a malformed entry file
+ * may carry a token or a PEM block in its path/content, so the read is routed
+ * through the same redaction the audit log uses.
+ */
+function legacyRedactorFor(config: AgentCatalogConfig): LegacyRedactor {
+  const secrets = [config.readToken, config.publishToken, config.adminToken]
+  return text => redactSecrets(text, secrets)
+}
+
+/**
+ * The exception is EXERCISED only for a matching header plus exactly ONE
+ * same-name agent entry. Any ambiguity (>1 entry) forfeits migration.
+ */
 function migrationFromFor(
-  entry: LegacyCatalogEntry | undefined,
+  entries: readonly LegacyCatalogEntry[],
   slug: string,
   header: string | undefined,
 ): string | undefined {
-  return header === slug && entry?.kind === 'agent' ? slug : undefined
+  return header === slug && entries.length === 1 && entries[0]?.kind === 'agent' ? slug : undefined
 }
 
+/**
+ * Legacy directory names are name-scoped: EVERY entry with the same name is
+ * inspected, so file order can neither unlock migration nor hide a conflict.
+ */
 function legacyConflict(
-  entry: LegacyCatalogEntry | undefined,
+  entries: readonly LegacyCatalogEntry[],
   slug: string,
   migrationFrom: string | undefined,
 ): Conflict | null {
-  if (entry === undefined) return null
-  const legalMigration = migrationFrom === slug && entry.kind === 'agent'
-  if (legalMigration) return null
+  if (entries.length === 0) return null
+  if (entries.length > 1) {
+    return {
+      status: 409,
+      error: `标识与目录条目冲突：${slug}`,
+      code: 'legacy-conflict',
+      reason: `${String(entries.length)} legacy entries with the same name occupy ${slug}; the conflict is ambiguous`,
+    }
+  }
+  const entry = entries[0]!
+  if (migrationFrom === slug && entry.kind === 'agent') return null
   return {
     status: 409,
     error: `标识与目录条目冲突：${slug}`,
@@ -415,8 +443,8 @@ function evaluateSubmission(
   migrationHeader: string | undefined,
 ): SubmitVerdict {
   const { slug, version } = manifest
-  const entry = findEntry(config.entriesDir, slug)
-  const migrationFrom = migrationFromFor(entry, slug, migrationHeader)
+  const entries = findEntries(config.entriesDir, slug, legacyRedactorFor(config))
+  const migrationFrom = migrationFromFor(entries, slug, migrationHeader)
 
   const existingPackage = state.packages[packageKey(slug, version)]
   if (existingPackage !== undefined) {
@@ -476,7 +504,7 @@ function evaluateSubmission(
 
   // Legacy directory entries are name-scoped (any version) and only the
   // explicit, legal migration unlocks the exception.
-  return { conflict: legacyConflict(entry, slug, migrationFrom), migrationFrom }
+  return { conflict: legacyConflict(entries, slug, migrationFrom), migrationFrom }
 }
 
 /** Conflict verdict re-run at approval time (occupancy may have changed). */
@@ -494,8 +522,8 @@ function findApproveConflict(
       reason: `package ${submission.slug}/${submission.version} already exists with status ${existing.status}`,
     }
   }
-  const entry = findEntry(config.entriesDir, submission.slug)
-  return legacyConflict(entry, submission.slug, submission.migrationFrom)
+  const entries = findEntries(config.entriesDir, submission.slug, legacyRedactorFor(config))
+  return legacyConflict(entries, submission.slug, submission.migrationFrom)
 }
 
 /** Highest signed record for a slug (delisted/revoked included), if any. */

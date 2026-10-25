@@ -526,8 +526,11 @@ interface DispatchContext {
 async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise<HandlerResult> {
   const { config } = context
   if (route.legacy) {
+    // Malformed legacy files are reported on the process log; their path/content
+    // can carry a token or PEM block, so both reads share the audit redaction.
+    const redact = (text: string): string => redactSecrets(text, secretList(config))
     if (route.id === 'catalog.list') {
-      return jsonResult(200, { items: loadEntries(config.entriesDir) }, {
+      return jsonResult(200, { items: loadEntries(config.entriesDir, redact) }, {
         action: 'catalog.list',
         outcome: 'ok',
       })
@@ -544,7 +547,7 @@ async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise
         reason: 'malformed percent-encoding in the entry name',
       })
     }
-    const entry = findEntry(config.entriesDir, name)
+    const entry = findEntry(config.entriesDir, name, redact)
     if (entry === undefined) {
       return jsonResult(404, errorBody('条目不存在'), {
         action: 'catalog.get',

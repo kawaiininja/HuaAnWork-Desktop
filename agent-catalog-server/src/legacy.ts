@@ -17,8 +17,16 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LegacyCatalogEntry } from './types.ts'
 
+/** Central redaction hook for parser diagnostics (tokens, PEM blocks). */
+export type LegacyRedactor = (text: string) => string
+
+const identityRedactor: LegacyRedactor = text => text
+
 /** Load every entry of `dir`; malformed files are skipped with a warning. */
-export function loadEntries(dir: string): LegacyCatalogEntry[] {
+export function loadEntries(
+  dir: string,
+  redact: LegacyRedactor = identityRedactor,
+): LegacyCatalogEntry[] {
   if (!existsSync(dir)) return []
   const items: LegacyCatalogEntry[] = []
   for (const file of readdirSync(dir)) {
@@ -33,16 +41,36 @@ export function loadEntries(dir: string): LegacyCatalogEntry[] {
       if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
         items.push(parsed as LegacyCatalogEntry)
       } else {
-        console.error(`条目文件解析失败,已跳过: ${path} (expected a JSON object)`)
+        console.error(redact(`条目文件解析失败,已跳过: ${path} (expected a JSON object)`))
       }
     } catch (error) {
-      console.error(`条目文件解析失败,已跳过: ${path} (${(error as Error).message})`)
+      console.error(redact(`条目文件解析失败,已跳过: ${path} (${(error as Error).message})`))
     }
   }
   return items
 }
 
-/** Find one entry by its `name` field; undefined when absent. */
-export function findEntry(dir: string, name: string): LegacyCatalogEntry | undefined {
-  return loadEntries(dir).find(item => item.name === name)
+/**
+ * Every entry whose `name` matches. Submission conflict checks need ALL of
+ * them: two files can legally hold the same name, and the migration exception
+ * must never be unlocked by whichever file happened to be read first.
+ */
+export function findEntries(
+  dir: string,
+  name: string,
+  redact: LegacyRedactor = identityRedactor,
+): LegacyCatalogEntry[] {
+  return loadEntries(dir, redact).filter(item => item.name === name)
+}
+
+/**
+ * Find one entry by its `name` field; undefined when absent. First match wins,
+ * exactly like M-A0 (the legacy read route keeps that behaviour).
+ */
+export function findEntry(
+  dir: string,
+  name: string,
+  redact: LegacyRedactor = identityRedactor,
+): LegacyCatalogEntry | undefined {
+  return loadEntries(dir, redact).find(item => item.name === name)
 }

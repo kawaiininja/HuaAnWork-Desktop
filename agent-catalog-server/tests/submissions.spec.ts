@@ -766,6 +766,47 @@ test('re-checks legacy conflicts at approval time', async () => {
   }
 })
 
+test('checks every legacy entry with the same name, independent of file order', async () => {
+  const cases: ReadonlyArray<Record<string, Record<string, unknown>>> = [
+    // An agent named first must not unlock the migration exception on its own.
+    {
+      'a-agent.json': { name: 'weekly-report', kind: 'agent' },
+      'z-tool.json': { name: 'weekly-report', kind: 'tool' },
+    },
+    // ...and neither may a tool named first mask the ambiguity.
+    {
+      'a-tool.json': { name: 'weekly-report', kind: 'tool' },
+      'z-agent.json': { name: 'weekly-report', kind: 'agent' },
+    },
+    // Two agents are ambiguous even though the matching header names the slug.
+    {
+      'a-one.json': { name: 'weekly-report', kind: 'agent' },
+      'z-two.json': { name: 'weekly-report', kind: 'agent' },
+    },
+    // Two tools can never be migrated.
+    {
+      'a-one.json': { name: 'weekly-report', kind: 'tool' },
+      'z-two.json': { name: 'weekly-report', kind: 'tool' },
+    },
+  ]
+  for (const files of cases) {
+    const catalog = await bootTestAgentCatalog()
+    try {
+      for (const [file, body] of Object.entries(files)) {
+        await writeFile(join(catalog.entriesDir, file), JSON.stringify(body), 'utf8')
+      }
+      const { bundle } = await makeBundle()
+      const response = await submit(catalog, bundle, {
+        headers: { 'x-agent-catalog-migration': 'weekly-report' },
+      })
+      assert.equal(response.status, 409, `${Object.keys(files).join('+')} must conflict`)
+      assert.equal(response.body.code, 'legacy-conflict')
+    } finally {
+      await catalog.close()
+    }
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Admin review surface
 // ---------------------------------------------------------------------------
