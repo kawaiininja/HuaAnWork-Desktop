@@ -3,10 +3,12 @@
 当前结论：**`PASS（本机探针）`**。最终探针运行退出码 **0**，11 个字段全为 `true`，
 `residualProcesses` 为 **0**。
 
-最终一次运行（归档于 §4）的 HEAD 是代码提交 **`13bb3fc90b`**（干净工作树），探针报告的
-`commit` 即该 SHA。本证据文件的更新是它的**下一个提交**（内容提交无法在自身内部写出自身
-SHA；精确值用 `git log -1 --format=%H -- docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md`
-查询）。提交前的那次运行只算**中间运行**（见 §2 的运行计数）。
+最终一次运行（归档于 §4）的 HEAD 是代码提交 **`c144a73383`**
+（`fix: close final review findings`，干净工作树），探针报告的 `commit` 即该 SHA。本证据
+文件的更新是它的**下一个提交**（`docs: archive final M2 acceptance evidence`；内容提交无法
+在自身内部写出自身 SHA；精确值用
+`git log -1 --format=%H -- docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md`
+查询）。最终评审修复轮之前的运行（`13bb3fc90b`）只算**中间运行**（见 §2 的运行计数）。
 
 这不是 GUI 真机，也不是跨机器验收。它证明的是：真实目录服务 + 真实离线 CLI 子进程 +
 两个 Profile 的签名包生命周期（发布 → 审查/签名 → 第二 Profile 安装 → 启用 → 真实 HTTP
@@ -19,35 +21,37 @@ SHA；精确值用 `git log -1 --format=%H -- docs/evidence/2026-10-24-agent-pac
 
 | 项 | 值 |
 | --- | --- |
-| 日期 | 2026-10-25（本机时间；最终运行的审计时间戳为 2026-10-25T04:31Z） |
+| 日期 | 2026-10-25（本机时间；最终运行的审计时间戳为 2026-10-25T05:23Z） |
 | 机器 | MacBook Pro（Mac16,8，Apple M4 Pro，24 GB） |
 | OS | macOS 27.0.1（build 26A434）；`os.release()` 报告 `27.0.0` |
 | Node | v22.23.2（本机默认；类型剥离默认开启，未加额外 flag） |
 | 架构 | arm64 |
 | 分支 / worktree | `feat/agent-packages-m2`，`.worktrees/m2-agent-packages` |
-| 最终探针运行时的 HEAD | `13bb3fc90bfccc99dacb0a98ae5331a0a6f9ca08`（代码提交；探针报告同值） |
-| 工作树状态 | 运行前 `git status --porcelain` 为空（干净树）。本证据文件的更新是紧跟其后的独立提交 |
+| 最终探针运行时的 HEAD | `c144a73383ded88bb183698bc1144d2a5f5ed681`（`fix: close final review findings`；探针报告同值） |
+| 工作树状态 | 运行前 `git status --porcelain` 为空（干净树）：本文件的待更新改动先临时 `git stash`，运行结束后恢复。本证据文件的更新是紧跟代码提交的独立提交 |
 
 ## 2. 命令
 
 ```bash
 cd /Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/.worktrees/m2-agent-packages
 node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs \
-  --platform darwin --out /tmp/agent-package-m2-darwin-postcommit.json
+  --platform darwin --out /tmp/agent-package-m2-darwin-final.json
 echo "EXIT=$?"
 ```
 
-结果：`EXIT=0`。同一命令在本任务中共运行**五次**，计数与 §4 归档的最终运行一致：
+结果：`EXIT=0`。同一命令在本任务中共运行**六次**，计数与 §4 归档的最终运行一致：
 
 1. 早期调试失败（参数/环境未就绪），无归档；
 2. 早期调试失败，无归档；
 3. 成功，HEAD `b952477a81`，**工作树含未提交的 Task 13 改动**——这是**中间运行**，其 JSON
    曾归档在 `cacba698fe` 的旧版本证据里；
 4. 成功，提交 `cacba698fe` 的干净工作树，但**未归档 JSON**（仅当时口头记录，不作为证据）；
-5. **最终运行**：提交 `13bb3fc90b` 的干净工作树，`EXIT=0`、`residualProcesses=0`、
-   `auditLines=37`，原始 JSON 见 §4。
+5. **中间运行**：提交 `13bb3fc90b` 的干净工作树，`EXIT=0`、`residualProcesses=0`、
+   `auditLines=37`——它属于最终评审修复轮**之前**的代码树，已被第 6 次取代；
+6. **最终运行**：提交 `c144a73383`（最终评审修复轮）的干净工作树，`EXIT=0`、
+   `residualProcesses=0`、`auditLines=37`，原始 JSON 见 §4。
 
-只有第 5 次是最终运行。第 3、4 次与它字段相同、运行期标识（submissionId/keyId/端口/
+只有第 6 次是最终运行。第 3–6 次与它字段相同、运行期标识（submissionId/keyId/端口/
 tempRoot）不同属正常。
 
 ## 3. 临时测试环境说明
@@ -62,13 +66,261 @@ tempRoot）不同属正常。
   重放与下架安装负例的空 Profile；`workspace/`：HTTP fixture 子进程的工作目录；
 - 三个 token 每次随机生成且两两不同；报告与日志里不出现 token 或私钥。
 
-`tempRoot`（最终报告原值 `/var/folders/.../T/huaanwork-m2-accept-qrIzBv`）在运行结束后已被
+`tempRoot`（最终报告原值 `/var/folders/.../T/huaanwork-m2-accept-pHDRub`）在运行结束后已被
 删除，因此不能用来重放；重放请重新执行 §2 的命令。
 
-## 4. 最终探针原始 JSON（提交 `13bb3fc90b`，干净工作树）
+## 4. 最终探针原始 JSON（提交 `c144a73383`，干净工作树）
 
-以下为 `/tmp/agent-package-m2-darwin-postcommit.json` 原文，未修改字段值；探针报告的
-`commit` 与运行 HEAD 一致。
+以下为 `/tmp/agent-package-m2-darwin-final.json` 原文（`node -e` 仅做 2 空格缩进，
+字段值未改动）；探针报告的 `commit` 与运行 HEAD 一致。
+
+```json
+{
+  "submitted": true,
+  "reviewedAndSigned": true,
+  "secondProfileInstalled": true,
+  "signatureVerified": true,
+  "enabledAndHttpRan": true,
+  "updatedPreservingEnabled": true,
+  "delistedInstalledStillRan": true,
+  "delistedStatusVisible": true,
+  "revocationStoppedActiveTurn": true,
+  "revokedEnableRejected": true,
+  "residualProcesses": 0,
+  "kind": "huaanwork-agent-package-m2-acceptance",
+  "platform": "darwin",
+  "commit": "c144a73383ded88bb183698bc1144d2a5f5ed681",
+  "runner": {
+    "os": "darwin",
+    "osRelease": "27.0.0",
+    "name": "MacBook-Pro-14.local",
+    "arch": "arm64",
+    "node": "v22.23.2"
+  },
+  "scope": {
+    "server": "agent-catalog-server in-process, real HTTP, ephemeral loopback port",
+    "adminCli": "agent-catalog-admin/src/cli.ts spawned as a child process",
+    "gui": false,
+    "realModel": false,
+    "note": "No GUI, no model interview and no packaged app. The sandbox is a passthrough seam; sandbox enforcement is covered by the M1 Windows sandbox probe."
+  },
+  "environment": {
+    "note": "entriesDir, dataDir, keyring, profiles and workspace are throwaway directories under the OS temp dir; the Ed25519 keypair is generated per run and never committed; all three tokens are random per run."
+  },
+  "tempRoot": "/var/folders/fc/j0sprzg92_926g51qh0pyp9w0000gn/T/huaanwork-m2-accept-pHDRub",
+  "steps": {
+    "submitted": {
+      "submissionId": "b931c45d-9300-4e58-b37d-7a52b76e78b5",
+      "slug": "m2-acceptance-agent",
+      "version": "1.0.0",
+      "publishStatus": "pending-review",
+      "catalogList": {
+        "items": []
+      }
+    },
+    "reviewedAndSigned": {
+      "cli": [
+        {
+          "command": "agent-catalog-admin pending",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin review",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin approve",
+          "exitCode": 0
+        }
+      ],
+      "publishedStatus": "published",
+      "signedKeyId": "4ea41140aa78714c8cd4b4f0b9e1d058fcc7e563631f441b4b53a2fd442bad9d",
+      "receipt": "/var/folders/fc/j0sprzg92_926g51qh0pyp9w0000gn/T/huaanwork-m2-accept-pHDRub/review-1.0.0/review.json",
+      "creatorPublishStatus": "published"
+    },
+    "secondProfileInstalled": {
+      "profile": "consumer-profile",
+      "version": "1.0.0",
+      "enabled": false,
+      "publishStatus": "installed",
+      "creatorProfileState": "published"
+    },
+    "signatureVerified": {
+      "keyId": "4ea41140aa78714c8cd4b4f0b9e1d058fcc7e563631f441b4b53a2fd442bad9d",
+      "slot": 1,
+      "version": "1.0.0",
+      "digestFiles": 4,
+      "note": "verifyAgentPackageDirectory re-reads the installed directory and checks keyId-authoritative Ed25519."
+    },
+    "enabledAndHttpRan": {
+      "version": "1.0.0",
+      "httpPort": 63884,
+      "health": {
+        "status": 200,
+        "body": "ok"
+      },
+      "invoke": {
+        "ok": true,
+        "result": {
+          "echo": {
+            "task": "m2-acceptance",
+            "version": "1.0.0"
+          }
+        }
+      },
+      "activationDisposed": true,
+      "portClosedAfterIdle": true,
+      "sandbox": "passthrough (M2 checks signed-package lifecycle; M1 probe owns sandbox enforcement)"
+    },
+    "updatedPreservingEnabled": {
+      "cli": [
+        {
+          "command": "agent-catalog-admin review",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin approve",
+          "exitCode": 0
+        }
+      ],
+      "from": "1.0.0",
+      "to": "1.0.1",
+      "enabled": true,
+      "publishStatus": "installed"
+    },
+    "delistedStatusVisible": {
+      "cli": [
+        {
+          "command": "agent-catalog-admin delist-requests",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin delist-approve",
+          "exitCode": 0
+        }
+      ],
+      "requestId": "1be3d7c7-ed35-4789-8bef-70ce13be9be8",
+      "publishStatus": "delisted",
+      "enabled": true,
+      "card": {
+        "publishStatus": "delisted",
+        "enabled": true,
+        "broken": null
+      },
+      "refreshChanged": true
+    },
+    "delistedInstalledStillRan": {
+      "version": "1.0.1",
+      "invoke": {
+        "ok": true,
+        "result": {
+          "echo": {
+            "task": "m2-acceptance",
+            "version": "1.0.1"
+          }
+        }
+      },
+      "note": "delisted metadata changes the card, not the runtime; revocation is the security control.",
+      "portClosedAfterIdle": true
+    },
+    "revocationStoppedActiveTurn": {
+      "cli": {
+        "command": "agent-catalog-admin revoke",
+        "exitCode": 0
+      },
+      "warnings": null,
+      "session": "m2-acceptance-session-3",
+      "httpPort": 63904,
+      "activationDisposed": true,
+      "activationResultPending": true,
+      "portClosed": true,
+      "state": {
+        "enabled": false,
+        "revokedVersion": "1.0.1",
+        "revokedReason": "M2 验收:撤销当前版本"
+      }
+    },
+    "revokedEnableRejected": {
+      "enableError": "智能体 @m2-acceptance-agent 已损坏:该版本已被管理员撤销：M2 验收:撤销当前版本",
+      "staleDispatchError": "该版本已被管理员撤销：M2 验收:撤销当前版本",
+      "assertRunnableError": "该版本已被管理员撤销：M2 验收:撤销当前版本",
+      "cardBroken": "该版本已被管理员撤销：M2 验收:撤销当前版本"
+    },
+    "finalState": {
+      "creator": {
+        "source": "local",
+        "enabled": true,
+        "installedVersion": "1.0.1",
+        "publishStatus": "published",
+        "publishedVersion": "1.0.1",
+        "submissionId": "0d1ca094-a67d-43c1-a49a-2b9a549cffef",
+        "delistRequestId": "1be3d7c7-ed35-4789-8bef-70ce13be9be8"
+      },
+      "consumer": {
+        "source": "catalog",
+        "enabled": false,
+        "installedVersion": "1.0.1",
+        "publishStatus": "delisted",
+        "revoked": {
+          "slug": "m2-acceptance-agent",
+          "version": "1.0.1",
+          "reason": "M2 验收:撤销当前版本",
+          "revokedAt": "2026-10-25T05:23:49.319Z"
+        }
+      },
+      "auditLines": 37
+    }
+  },
+  "negatives": {
+    "wrongToken": {
+      "status": 401,
+      "body": {
+        "error": "口令错误"
+      },
+      "ok": true
+    },
+    "unknownKey": {
+      "error": "包校验失败，未安装或未运行。请联系管理员",
+      "ok": true
+    },
+    "tamperedContent": {
+      "error": "包校验失败，未安装或未运行。请联系管理员",
+      "ok": true
+    },
+    "olderVersionReplay": {
+      "error": "该版本不是目录中的最新版本，已拒绝安装",
+      "ok": true
+    },
+    "delistedVersionInstall": {
+      "error": "目录中没有版本 1.0.1",
+      "ok": true,
+      "coveredBy": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts:602 「rejects a revoked version and reports the administrator reason」"
+    },
+    "coveredByIntegrationTests": {
+      "unsignedOrSignatureCarryingBundle": "packages/agent-package-format/tests/bundle.test.ts",
+      "extraFilesAndMismatchedManifest": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts",
+      "retiredAndWrongKeys": "agent-catalog-server/tests/submissions.spec.ts",
+      "tooManyEntriesAndLongPaths": "packages/agent-package-format/tests/bundle.test.ts",
+      "downgradeAndDelistedLatest": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts",
+      "wrongPublishOrAdminToken": "agent-catalog-server/tests/auth-legacy.spec.ts",
+      "revocationAndActiveTurn": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-security.spec.ts"
+    }
+  },
+  "cleanup": {
+    "scannedProcesses": 815,
+    "matches": [],
+    "command": "ps -ax -o pid=,command=",
+    "note": "Matches are processes whose command line references the throwaway temp root; the probe itself is excluded."
+  },
+  "verdict": "PASS",
+  "exitCode": 0
+}
+```
+
+### 4.1 中间运行归档（提交 `13bb3fc90b`，非最终证据）
+
+以下是最终评审修复轮**之前**的中间运行原文（`/tmp/agent-package-m2-darwin-postcommit.json`），
+保留以便对照；最终结论只取 §4。探针报告的 `commit` 与当时 HEAD 一致。
 
 ```json
 {
@@ -327,7 +579,7 @@ tempRoot）不同属正常。
 | `delistedStatusVisible` | `refreshInstalledCatalogPackageStatuses()` 报告 `changed:true`；已安装卡 `publishStatus:'delisted'`、`enabled:true`、无 `broken`。 |
 | `revocationStoppedActiveTurn` | 长回合 activation 的 result 永不结算；CLI `revoke` 后 `refreshRevocations()` 立刻 dispose activation（`activationDisposed:true`、`activationResultPending:true`）、停止 HTTP 子进程（端口关闭）、state 写 `enabled:false` + `revoked`。 |
 | `revokedEnableRejected` | 对已撤销版本：`setEnabled(true)` 被拒绝、stale 详情 dispatch 被拒绝、`assertRunnable` 被拒绝、卡片标 `broken`；四处文案都是撤销原因 `该版本已被管理员撤销：<原因>`（与签名失败的统一文案 `包校验失败，未安装或未运行。请联系管理员` 不同）。 |
-| `residualProcesses` | 停止所有运行时后 `ps -ax -o pid=,command=` 扫描 819 个进程，命令行引用临时目录的进程为 0。 |
+| `residualProcesses` | 停止所有运行时后 `ps -ax -o pid=,command=` 扫描 815 个进程，命令行引用临时目录的进程为 0。 |
 
 探针内的安全负例（同一次运行，全部为 `ok:true`）：
 
@@ -335,8 +587,8 @@ tempRoot）不同属正常。
 - 未知 key → `包校验失败，未安装或未运行。请联系管理员`；
 - 篡改 persona（复制一份后改动）→ 同一句失败文案；
 - 旧版本重放（1.0.1 已发布时安装 1.0.0）→ `该版本不是目录中的最新版本，已拒绝安装`；
-- 已下架版本安装（`delistedVersionInstall`：1.0.1 此时已下架，随后才被撤销）→
-  `目录中没有版本 1.0.1`。这条只证明**下架使该版本从目录的可安装集合中消失**；由于安装
+- 已下架版本安装（`delistedVersionInstall`：1.0.1 先被下架，**随后在本次负例之前已被撤销**）→
+  `目录中没有版本 1.0.1`。这条只证明**下架/目录缺席使该版本从可安装集合中消失**；由于安装
   路径在版本选择阶段就拒绝，它**没有**走到撤销检查，因此不证明撤销专属文案。撤销专属的
   安装期文案 `该版本已被管理员撤销：<原因>` 由
   `dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts:602`
@@ -348,33 +600,39 @@ tempRoot）不同属正常。
 key、降级、错误发布/管理 token、撤销与在途回合）由既有集成测试覆盖，文件见 JSON 的
 `negatives.coveredByIntegrationTests`；`corepack yarn test` 本轮全绿（见 §6）。
 
-## 6. 本轮门禁（同一工作树）
+## 6. 最终树门禁（代码提交 `c144a73383`）
+
+五项命令**各自单独执行**并记录真实退出码；其中 `corepack yarn check` 的 15 个顶层步骤
+全部执行，无删除、跳过或重排。其余条目是 `check` 链内部的步骤，未在链外重复运行。
 
 | 命令 | 退出码 | 备注 |
 | --- | --- | --- |
-| `node scripts/verify-layout.mjs` | 0 | 16 个 workspace 一致；上游 `1600d8a1e1` |
-| `corepack yarn check:desktop-variants` | 0 | stable↔beta 7、beta↔huaanwork 64、`oneSidedPrefixes` 6 |
-| `corepack yarn typecheck` | 0 | 含四个新 workspace |
-| `corepack yarn test` | 0 | 含 `@huaanwork/catalog-signing`、`@huaanwork/agent-package-format`、`agent-catalog-server`（143 files）、`agent-catalog-admin`（14 tests） |
-| `corepack yarn check` | **0** | 全链 15 个顶层步骤全部成功；第一轮曾因 HEAD 上既有的 `check:whitespace` 缺陷失败，该缺陷已由 `13bb3fc90b` 删除 EOF 空行修复（C22 授权） |
-| `corepack yarn check:layout` | 0 | 含 bilingual docs、architecture、vendored runtime、desktop variants、icons、layout、gate scripts、readme versions |
-| `corepack yarn test:aa-connector` | 0 | |
-| `corepack yarn workspace dsh-community-fabric check` | 0 | |
-| `corepack yarn workspace dsh-community-market check` | 0 | |
-| `corepack yarn workspace dsh-plugin-desktop check` | 0 | |
-| `corepack yarn workspace dsh-plugin-desktop-beta check` | 0 | |
-| `corepack yarn workspace dsh-desktop-next check` | 0 | |
-| `corepack yarn workspace dsh-plugin-huaanwork check` | 0 | 含 M1 agent-package 测试与 `verify:aa`；顺序执行，未复现并发 flake |
-| `corepack yarn workspace market-server check` | 0 | 含 signing/envelope 测试 |
-| `corepack yarn workspace update-server check` | 0 | |
-| `corepack yarn workspace @huaanwork/catalog-signing check` | 0 | |
-| `corepack yarn workspace @huaanwork/agent-package-format check` | 0 | |
-| `corepack yarn workspace agent-catalog-server check` | 0 | |
-| `corepack yarn workspace agent-catalog-admin check` | 0 | |
+| `corepack yarn check` | **0** | 15 个顶层步骤全部成功；`verify:aa` 并发 flake 未复现 |
+| `corepack yarn check:desktop-variants` | 0 | 单独执行；stable↔beta 7、beta↔huaanwork 64、`oneSidedPrefixes` 6 |
+| `node scripts/verify-layout.mjs` | 0 | 单独执行；`verify-layout: all Desktop workspaces including Next and upstream 1600d8a1e1 are consistent` |
+| `corepack yarn typecheck` | 0 | 单独执行；11 个 workspace（含四个新 workspace） |
+| `corepack yarn test` | 0 | 单独执行；15 个 workspace（含 `@huaanwork/catalog-signing`、`@huaanwork/agent-package-format`、`agent-catalog-server` 143 files、`agent-catalog-admin` 14 tests） |
+| `corepack yarn check:layout` | 0 | `check` 链内执行；10 个子命令：`test:market-release`、`test:aa-release`、`check:bilingual-docs`、`check:architecture`、`check:vendored-runtime`、`check:desktop-variants`、`icons:check`、`verify-layout`、`test:gate-scripts`、`check:readme-versions` |
+| `corepack yarn test:aa-connector` | 0 | `check` 链内执行 |
+| `corepack yarn workspace dsh-community-fabric check` | 0 | `check` 链内执行 |
+| `corepack yarn workspace dsh-community-market check` | 0 | `check` 链内执行 |
+| `corepack yarn workspace dsh-plugin-desktop check` | 0 | `check` 链内执行 |
+| `corepack yarn workspace dsh-plugin-desktop-beta check` | 0 | `check` 链内执行 |
+| `corepack yarn workspace dsh-desktop-next check` | 0 | `check` 链内执行 |
+| `corepack yarn workspace dsh-plugin-huaanwork check` | 0 | `check` 链内执行；含 M1 agent-package 测试与 `verify:aa` |
+| `corepack yarn workspace market-server check` | 0 | `check` 链内执行；含 signing/envelope 测试 |
+| `corepack yarn workspace update-server check` | 0 | `check` 链内执行 |
+| `corepack yarn workspace @huaanwork/catalog-signing check` | 0 | `check` 链内执行 |
+| `corepack yarn workspace @huaanwork/agent-package-format check` | 0 | `check` 链内执行 |
+| `corepack yarn workspace agent-catalog-server check` | 0 | `check` 链内执行 |
+| `corepack yarn workspace agent-catalog-admin check` | 0 | `check` 链内执行 |
 
-`corepack yarn check` 在代码提交 `13bb3fc90b` 之上、包含本证据文件最终内容的同一工作树上
+`corepack yarn check` 在代码提交 `c144a73383` 之上、包含本证据文件最终内容的同一工作树上
 执行，退出码 0；随后该工作树成为本证据文件的提交（与代码提交仅差文档）。没有删除、跳过
-或重排任何门禁步骤，也没有出现 `verify:aa` 并发 flake。
+或重排任何门禁步骤，也没有出现 `verify:aa` 并发 flake。由于本文件的文字在 `check` 之后
+还有补写，最终字节上另行重跑了两个文档型子门禁：`corepack yarn check:whitespace` 退出 0、
+`corepack yarn check:bilingual-docs` 退出 0（`55 records and 110 documents are consistent`），
+`node scripts/verify-layout.mjs` 在最终字节上复跑同样退出 0。
 
 ## 7. 未做与已知边界
 
