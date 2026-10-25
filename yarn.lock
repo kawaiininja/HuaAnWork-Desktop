@@ -11759,7 +11759,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@huaanwork/agent-package-format@npm:*, @huaanwork/agent-package-format@workspace:packages/agent-package-format":
+"@huaanwork/agent-package-format@npm:*, @huaanwork/agent-package-format@workspace:*, @huaanwork/agent-package-format@workspace:packages/agent-package-format":
   version: 0.0.0-use.local
   resolution: "@huaanwork/agent-package-format@workspace:packages/agent-package-format"
   dependencies:
@@ -14504,6 +14504,20 @@ __metadata:
   checksum: 10c0/c2c9ab7599692d594b6a161559ada307b7a624fa4c7b03e3afdb5a5e31cd0e53269115b620fcab024c5ac6a6f37fa5eb2e004f076ad30f5f7e6b8b671f7b35fe
   languageName: node
   linkType: hard
+
+"agent-catalog-server@workspace:agent-catalog-server":
+  version: 0.0.0-use.local
+  resolution: "agent-catalog-server@workspace:agent-catalog-server"
+  dependencies:
+    "@huaanwork/agent-package-format": "workspace:*"
+    "@huaanwork/catalog-signing": "workspace:*"
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  bin:
+    agent-catalog-server: src/index.ts
+  languageName: unknown
+  linkType: soft
 
 "ajv-formats@npm:^2.1.1":
   version: 2.1.1

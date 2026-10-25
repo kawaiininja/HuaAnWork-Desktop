@@ -1,0 +1,19 @@
+{
+  "name": "task-orch",
+  "version": "0.1.0",
+  "kind": "tool",
+  "entrypoint": { "kind": "http", "url": "http://10.130.209.76:8787/agent-invoke" },
+  "description": "定时任务编排:手动触发、查任务/执行记录/告警、暂停恢复调度。",
+  "whenToUse": "用户要触发或查看定时任务、查告警时。",
+  "argumentsSchema": {
+    "type": "object",
+    "properties": {
+      "action": { "type": "string", "enum": ["run", "list", "runs", "show", "pause", "resume", "alerts", "health"] },
+      "taskId": { "type": "string", "description": "run/pause/resume 用" },
+      "execId": { "type": "string", "description": "show 用" },
+      "limit": { "type": "number", "description": "runs/alerts 用,默认10上限50" }
+    },
+    "required": ["action"]
+  },
+  "permissions": ["触发与查看定时任务", "调用任务配置的 HTTP 端点"]
+}

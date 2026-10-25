@@ -1,0 +1,21 @@
+{
+  "name": "code-review",
+  "version": "1.0.0",
+  "kind": "tool",
+  "entrypoint": { "kind": "http", "url": "http://10.130.209.76:18082/invoke" },
+  "description": "审查目录源码(安全>规范>性能>可维护性)。异步:submit 提交 → status 查进度 → result 分页取报告。submit 后把 jobId 告诉用户;status 为 running 时结束回合,勿连续轮询。",
+  "whenToUse": "用户要审查某目录下的代码质量与安全问题时。",
+  "argumentsSchema": {
+    "type": "object",
+    "properties": {
+      "action": { "type": "string", "enum": ["submit", "status", "result"] },
+      "root": { "type": "string", "description": "submit:待审父目录绝对路径" },
+      "include": { "type": "string", "description": "submit:逗号分隔子文件夹名,最多3个" },
+      "task": { "type": "string", "description": "submit:审查重点(可选)" },
+      "jobId": { "type": "string", "description": "status/result:作业号" },
+      "offset": { "type": "number", "description": "result:分页偏移字符数" }
+    },
+    "required": ["action"]
+  },
+  "permissions": ["读取本机目录源码", "调用大模型"]
+}

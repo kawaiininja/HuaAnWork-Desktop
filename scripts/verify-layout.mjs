@@ -47,8 +47,9 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'update-server',
   'packages/catalog-signing',
   'packages/agent-package-format',
+  'agent-catalog-server',
 ])) {
-  fail('the root Yarn workspace must contain the desktop, community-fabric, community-market, market-server, and update-server packages')
+  fail('the root Yarn workspace must contain the desktop, community-fabric, community-market, market-server, update-server, catalog-signing, agent-package-format, and agent-catalog-server packages')
 }
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', stablePlugin],

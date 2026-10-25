@@ -1,0 +1,19 @@
+{
+  "name": "typo-check",
+  "version": "0.1.0",
+  "kind": "tool",
+  "entrypoint": { "kind": "http", "url": "http://10.130.209.76:18081/invoke" },
+  "description": "检测 docx 错别字。异步:submit 提交(文档须在公用机共享目录)→ status 查进度 → result 分页取报告。submit 后把 jobId 告诉用户;status 为 running 时告知预计时长后结束回合,勿连续轮询。",
+  "whenToUse": "用户要检查一份文档的错别字、用词错误时。",
+  "argumentsSchema": {
+    "type": "object",
+    "properties": {
+      "action": { "type": "string", "enum": ["submit", "status", "result"] },
+      "path": { "type": "string", "description": "submit:共享目录内 docx 绝对路径" },
+      "jobId": { "type": "string", "description": "status/result:作业号" },
+      "offset": { "type": "number", "description": "result:分页偏移字符数" }
+    },
+    "required": ["action"]
+  },
+  "permissions": ["读取共享目录内的文档", "调用大模型"]
+}
