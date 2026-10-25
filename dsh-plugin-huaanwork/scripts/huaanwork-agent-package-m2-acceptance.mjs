@@ -30,6 +30,12 @@
  * 3 BLOCKED (the probe could not start: server/fixture/infrastructure),
  * 2 usage. A blocked or failed step NEVER prints PASS.
  *
+ * Secret hygiene (Task 7 / I-8): the three per-run tokens and the throwaway
+ * signing key are registered in `activeSecrets` as soon as they exist. Every log
+ * line, every quoted CLI failure and the whole JSON report are redacted against
+ * that list (`scripts/huaanwork-acceptance-redaction.mjs`), so neither a CI log nor the
+ * `--out` artifact can carry a credential.
+ *
  * The `--platform` value must equal `process.platform`: a darwin run can never
  * be labelled win32 (and vice versa). See docs/huaanwork-agent-packages-m2.md
  * for the runbook and docs/evidence/2026-10-24-agent-package-m2-*-acceptance.md
@@ -96,6 +102,7 @@ import {
   readAgentPackageState,
   writeAgentPackageState,
 } from '../src/huaanwork-host/agent-package/store.ts'
+import { containsPrivateKey, redactReport, redactSecrets } from './huaanwork-acceptance-redaction.mjs'
 
 const LOG = '[agent-package-m2]'
 const FIXTURE_DIR = fileURLToPath(new URL('../tests/fixtures/agent-package', import.meta.url))
@@ -107,6 +114,14 @@ const SECOND_VERSION = '1.0.1'
 const SESSION_PREFIX = 'm2-acceptance'
 const RESIDUAL_GRACE_MS = 5_000
 const CLI_TIMEOUT_MS = 90_000
+
+/**
+ * Every secret live in this process (Task 7 / I-8): the three per-run tokens and
+ * the throwaway signing key, appended as soon as they exist. `log`, the CLI
+ * failure paths and the final report all redact against this list, so a value
+ * cannot escape through a code path that forgot to pass an explicit list.
+ */
+const activeSecrets = []
 
 /**
  * Obvious throwaway test tokens (>= 32 chars, pairwise distinct). They are
@@ -121,7 +136,18 @@ function makeTokens() {
   }
 }
 
-const log = (message) => process.stderr.write(`${LOG} ${message}\n`)
+/** Register token values as redaction targets (raw and trimmed, like the CLI). */
+function registerSecrets(values) {
+  for (const value of values) {
+    if (typeof value !== 'string' || value.length === 0) continue
+    activeSecrets.push(value)
+    const trimmed = value.trim()
+    if (trimmed !== value && trimmed.length > 0) activeSecrets.push(trimmed)
+  }
+}
+
+const log = (message) =>
+  process.stderr.write(`${LOG} ${redactSecrets(message, activeSecrets)}\n`)
 
 function usage(message) {
   log(message)
@@ -347,11 +373,30 @@ function runCli(args, env) {
   }))
 }
 
+/**
+ * Assert one CLI invocation succeeded AND printed no secret (Task 7 / I-8).
+ *
+ * On failure the output is the most interesting thing we have — and the most
+ * dangerous: it echoes server-provided text. The output is therefore scanned
+ * BEFORE it is quoted. When it already carries a secret the message says so and
+ * quotes nothing (the raw bytes are known to be unsafe; redacting them would
+ * still ship an attacker-influenced fragment into a CI log). Otherwise the
+ * failure text is quoted through `redactSecrets`.
+ */
 function requireCliOk(invocation, secrets) {
   if (invocation.exitCode !== 0) {
+    const combined = `${invocation.stderr}\n${invocation.stdout}`
+    const leaked = secrets.some(
+      (secret) => secret.length >= 16 && combined.includes(secret),
+    )
+    if (leaked || containsPrivateKey(combined)) {
+      throw new Error(
+        `CLI ${invocation.args[0]} failed and its output contained a secret (redacted)`,
+      )
+    }
     throw new Error(
       `CLI ${invocation.args[0]} exited ${String(invocation.exitCode)}: ` +
-        `${invocation.stderr.trim() || invocation.stdout.trim()}`,
+        redactSecrets(combined.trim(), secrets),
     )
   }
   for (const secret of secrets) {
@@ -359,6 +404,9 @@ function requireCliOk(invocation, secrets) {
     if (invocation.stdout.includes(secret) || invocation.stderr.includes(secret)) {
       throw new Error(`CLI ${invocation.args[0]} printed a secret`)
     }
+  }
+  if (containsPrivateKey(invocation.stdout) || containsPrivateKey(invocation.stderr)) {
+    throw new Error(`CLI ${invocation.args[0]} printed a private key`)
   }
   return {
     command: `agent-catalog-admin ${invocation.args[0]}`,
@@ -1163,7 +1211,9 @@ async function main() {
   let probeError = null
   try {
     const tokens = makeTokens()
+    registerSecrets([tokens.read, tokens.publish, tokens.admin])
     const pair = generateKeyPair()
+    registerSecrets([pair.privateKeyPem])
     const keyId = fingerprintPublicKeyHex(pair.publicKeyHex)
     const keyring = { keyId, publicKeyHex: pair.publicKeyHex, slot: 1 }
     writeFileSync(
@@ -1218,7 +1268,7 @@ async function main() {
     }
   } catch (error) {
     report.residualProcesses = -1
-    report.cleanup = { error: errorText(error) }
+    report.cleanup = { error: redactSecrets(errorText(error), activeSecrets) }
     probeError ??= new Error(`residual process scan failed: ${errorText(error)}`)
   }
 
@@ -1246,7 +1296,7 @@ async function main() {
       report.exitCode = 1
       exitCode = 1
     }
-    report.error = errorText(probeError)
+    report.error = redactSecrets(errorText(probeError), activeSecrets)
   } else {
     const fieldsWithoutResiduals = [
       'submitted',
@@ -1275,10 +1325,16 @@ async function main() {
     }
   }
 
-  if (blocked !== null) report.blocked = blocked
-  if (args.out) writeFileSync(args.out, `${JSON.stringify(report, null, 2)}\n`)
-  writeSummary(report.verdict, report.exitCode)
-  process.stdout.write(`${JSON.stringify(report)}\n`, () => {
+  if (blocked !== null) report.blocked = redactSecrets(blocked, activeSecrets)
+  // Final safety net (Task 7 / I-8): the report carries free text chosen by the
+  // server, the CLI and the OS (`error`, `blocked`, `cleanup.*`, `negatives.*`,
+  // a CLI line quoted inside a step). Every string is redacted before the JSON
+  // reaches `--out`, the step summary or stdout — a failed run must prove the
+  // failure without publishing a credential.
+  const safeReport = redactReport(report, activeSecrets)
+  if (args.out) writeFileSync(args.out, `${JSON.stringify(safeReport, null, 2)}\n`)
+  writeSummary(safeReport.verdict, safeReport.exitCode)
+  process.stdout.write(`${JSON.stringify(safeReport)}\n`, () => {
     process.exit(exitCode)
   })
 }

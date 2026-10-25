@@ -21,6 +21,11 @@
  * The private key is read ONLY from `--private-key`, is never printed, and is
  * read only after every receipt/digest check AND the explicit `--yes`.
  * Argument parsing uses `node:util` `parseArgs`; there is no CLI framework.
+ *
+ * Every stdout/stderr write goes through `safeIo`, which redacts the three
+ * configured token values and any PEM private-key block (see `redaction.ts`):
+ * `review` prints a server-provided manifest and the client echoes remote error
+ * bodies, so output is untrusted free text.
  */
 
 import { realpathSync } from 'node:fs'
@@ -29,6 +34,7 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
 import { AgentCatalogAdminClient, CatalogCliError } from './client.ts'
+import { redactSecrets } from './redaction.ts'
 import {
   approveSubmissionFromReceipt,
   migrateLegacyEntry,
@@ -360,42 +366,77 @@ async function execute(
 }
 
 /**
+ * Configured credential values, raw AND trimmed.
+ *
+ * `requireEnv` trims before a token is sent, and an env value read through
+ * `$(cat token)` legitimately carries a trailing newline; redacting both forms
+ * keeps a server echo of the trimmed value covered too. Empty values are
+ * dropped: substituting an empty string would corrupt the whole output.
+ */
+function configuredSecrets(env: NodeJS.ProcessEnv): readonly string[] {
+  const configured = [
+    env.AGENT_CATALOG_ADMIN_TOKEN,
+    env.AGENT_CATALOG_TOKEN,
+    env.AGENT_CATALOG_PUBLISH_TOKEN,
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0)
+  return [...configured, ...configured.map((value) => value.trim())].filter(
+    (value) => value.length > 0,
+  )
+}
+
+/**
  * Run one CLI invocation. Returns the process exit code (0 ok, 1 operation
  * failure, 2 usage error). Exported so tests can also drive it in-process.
+ *
+ * EVERY write leaves through `safeIo`: the manifest printed by `review` and the
+ * remote error bodies echoed by the client are free text chosen by the server /
+ * the submitting operator, so each line is redacted before it reaches the
+ * terminal. Exit codes and the message wording are unchanged — only a secret is
+ * replaced with `[REDACTED]`.
  */
 export async function runCli(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
   io: CliIo = CONSOLE_IO,
 ): Promise<number> {
+  const secrets = configuredSecrets(env)
+  const safeIo: CliIo = {
+    stdout: (text) => {
+      io.stdout(redactSecrets(text, secrets))
+    },
+    stderr: (text) => {
+      io.stderr(redactSecrets(text, secrets))
+    },
+  }
+
   let args: CommandLine
   try {
     args = parseCommandLine(argv)
   } catch (cause) {
     if (cause instanceof UsageError) {
-      io.stderr(`错误：${cause.message}`)
-      io.stderr(USAGE)
+      safeIo.stderr(`错误：${cause.message}`)
+      safeIo.stderr(USAGE)
       return 2
     }
-    io.stderr(`内部错误：${cause instanceof Error ? cause.message : String(cause)}`)
+    safeIo.stderr(`内部错误：${cause instanceof Error ? cause.message : String(cause)}`)
     return 1
   }
 
   try {
-    await execute(args, env, io)
+    await execute(args, env, safeIo)
     return 0
   } catch (cause) {
     if (cause instanceof UsageError) {
-      io.stderr(`错误：${cause.message}`)
-      io.stderr('')
-      io.stderr(USAGE)
+      safeIo.stderr(`错误：${cause.message}`)
+      safeIo.stderr('')
+      safeIo.stderr(USAGE)
       return 2
     }
     if (cause instanceof CatalogCliError) {
-      io.stderr(`错误：${cause.message}`)
+      safeIo.stderr(`错误：${cause.message}`)
       return 1
     }
-    io.stderr(`内部错误：${cause instanceof Error ? cause.message : String(cause)}`)
+    safeIo.stderr(`内部错误：${cause instanceof Error ? cause.message : String(cause)}`)
     return 1
   }
 }

@@ -806,3 +806,52 @@ test('no CLI stdout/stderr and no audit trail contains a token or private-key ma
     }
   }
 })
+
+// ---------------------------------------------------------------------------
+// centralized redaction (Task 7 / I-8)
+// ---------------------------------------------------------------------------
+
+test('redacts catalog tokens and PEM blocks from review output and errors', async () => {
+  const catalog = await bootTestCatalog()
+  // An obvious throwaway token, used ONLY as the CLI credential value in this
+  // test: redaction is driven by the configured env values, so the manifest and
+  // the remote error below can carry the exact same string.
+  const token = 'redaction-test-publish-token-0123456789abcdef'
+  const pem = '-----BEGIN PRIVATE KEY-----\nMIIBVwIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----'
+  try {
+    // A manifest is server-provided free text: `review` prints the whole
+    // manifest, so a token in the description would reach stdout verbatim.
+    const submitted = await submitTestPackage(catalog, { description: `周报 ${token}` })
+    const dir = await reviewDir(catalog, 'redaction')
+    const review = await runCli(
+      ['review', submitted.submission.submissionId, '--out', dir],
+      { ...adminEnv(catalog), AGENT_CATALOG_PUBLISH_TOKEN: token },
+    )
+    assert.equal(review.status, 0, review.stderr)
+    assert.equal(review.stdout.includes(token), false)
+    assert.equal(review.stderr.includes(token), false)
+    assert.match(review.stdout, /\[REDACTED\]/)
+
+    // The other leak path: a remote error body echoed into stderr, here
+    // carrying both the token and a private-key block.
+    const stub = await startStubServer(() => ({
+      status: 500,
+      body: JSON.stringify({ error: `拒绝失败：${token}`, code: pem }),
+    }))
+    try {
+      const failing = await runCli(['reject', 'sub-1', '--reason', 'x'], {
+        ...adminEnv(catalog),
+        AGENT_CATALOG_URL: stub.baseUrl,
+        AGENT_CATALOG_PUBLISH_TOKEN: token,
+      })
+      assert.equal(failing.status, 1)
+      assert.equal(failing.stderr.includes(token), false)
+      assert.equal(failing.stderr.includes('BEGIN PRIVATE KEY'), false)
+      assert.match(failing.stderr, /\[REDACTED PRIVATE KEY\]/)
+    } finally {
+      await stub.close()
+    }
+  } finally {
+    await catalog.close()
+  }
+})
