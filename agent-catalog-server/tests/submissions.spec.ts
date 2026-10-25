@@ -596,6 +596,34 @@ test('replays a submission for the same idempotency key and content', async () =
   }
 })
 
+test('treats upper and lower case spellings of one idempotency key as the same key', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    const upper = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'
+    const lower = upper.toLowerCase()
+    const { bundle } = await makeBundle()
+
+    const first = await submit(catalog, bundle, {
+      headers: { 'x-agent-catalog-idempotency-key': upper },
+    })
+    assert.equal(first.status, 201)
+
+    // 同一 UUID 的另一种拼法必须重放,而不是创建第二条记录/拿第二把锁。
+    const replay = await submit(catalog, bundle, {
+      headers: { 'x-agent-catalog-idempotency-key': lower },
+    })
+    assert.equal(replay.status, 200)
+    assert.equal(replay.body.submissionId, first.body.submissionId)
+
+    const state = await readState(catalog)
+    assert.equal(Object.keys(state.submissions).length, 1)
+    // 统一小写后再落盘:另一种拼法不带大小写身份。
+    assert.equal(state.submissions[first.body.submissionId]?.idempotencyKey, lower)
+  } finally {
+    await catalog.close()
+  }
+})
+
 test('refuses a malformed idempotency key without creating a submission', async () => {
   const catalog = await bootTestAgentCatalog()
   try {

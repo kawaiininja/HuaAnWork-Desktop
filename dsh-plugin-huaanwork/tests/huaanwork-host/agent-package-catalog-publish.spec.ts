@@ -1,11 +1,17 @@
+import { createHash } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
-import { inspectUnsignedAgentPackageBundle } from '@huaanwork/agent-package-format/bundle'
+import {
+  buildUnsignedAgentPackageBundle,
+  inspectUnsignedAgentPackageBundle,
+} from '@huaanwork/agent-package-format/bundle'
+import { readUnsignedPackageFiles } from '@huaanwork/agent-package-format/digest'
 import { parseAgentPackageManifest } from '@huaanwork/agent-package-format/manifest'
+import { canonicalJson } from '@huaanwork/catalog-signing'
 
 import {
   AGENT_CATALOG_AUTH_ERROR,
@@ -360,6 +366,17 @@ function readPendingSubmissions(): Record<string, Record<string, unknown>> {
 
 function seedPendingSubmission(slug: string, entry: Record<string, unknown>): void {
   writeFileSync(pendingSubmissionsPath(), `${JSON.stringify({ [slug]: entry }, null, 2)}\n`, 'utf8')
+}
+
+/**
+ * 与 publish 完全相同的内容身份:sidecar 对账现在要求版本 + digest 都匹配
+ * 当前内容,测试必须写入真实的摘要而不是占位值。
+ */
+async function localContentDigest(slug = 'weekly-report'): Promise<string> {
+  const files = readUnsignedPackageFiles(agentPackageDir(root, slug))
+  const bundle = await buildUnsignedAgentPackageBundle(files)
+  const inspection = await inspectUnsignedAgentPackageBundle(bundle)
+  return createHash('sha256').update(canonicalJson(inspection.digest), 'utf8').digest('hex')
 }
 
 /**
@@ -971,7 +988,7 @@ describe('local publication lifecycle', () => {
     })
     seedPendingSubmission('weekly-report', {
       version: '1.0.0',
-      digestSha256: 'd'.repeat(64),
+      digestSha256: await localContentDigest(),
       idempotencyKey: IDEMPOTENCY_KEY,
       createdAt: NOW,
     })
@@ -1026,7 +1043,7 @@ describe('local publication lifecycle', () => {
     seedPendingSubmission('weekly-report', {
       submissionId: SUBMISSION_ID,
       version: '1.0.0',
-      digestSha256: 'a'.repeat(64),
+      digestSha256: await localContentDigest(),
       idempotencyKey: IDEMPOTENCY_KEY,
       createdAt: NOW,
     })
@@ -1049,6 +1066,83 @@ describe('local publication lifecycle', () => {
     expect(statusRequest?.authorization).toBe(`Bearer ${PUBLISH_TOKEN}`)
   })
 
+  test('does not apply a stale sidecar to newer content after a commit', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    configure()
+    const blocker = blockStateWrite()
+    await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow()
+    rmSync(blocker, { recursive: true, force: true })
+    // state 写失败留下 sidecar(v1.0.0 的远端提交);随后 commit 把本地内容改成
+    // 1.0.1,但 manifest 永久保留旧 draftId ⇒ 旧提交仍能被解析出来。
+    await commitExistingUpdate()
+    submissionStatus = 'published'
+
+    const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
+
+    expect(publication.publishStatus).toBe('none')
+    expect(publication.publishedVersion).toBeUndefined()
+    expect(publication.warning).toBe(
+      `上一次提交 ${SUBMISSION_ID} 针对 v1.0.0，当前内容为 v1.0.1；请先处理该提交。`,
+    )
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.installedVersion).toBe('1.0.1')
+    expect(state?.publishStatus).toBe('none')
+    expect(state?.publishedVersion).toBeUndefined()
+    expect(state?.submissionId).toBeUndefined()
+    // sidecar 保留给用户处理,旧提交没有被查询、更没有写到新内容上。
+    expect(readPendingSubmissions()['weekly-report']?.submissionId).toBe(SUBMISSION_ID)
+    expect(
+      requests.filter(
+        (request) => request.method === 'GET' && request.url?.startsWith('/v1/agent-packages/submissions/'),
+      ),
+    ).toHaveLength(0)
+  })
+
+  test('does not apply a sidecar from different content at the same version', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    seedPendingSubmission('weekly-report', {
+      submissionId: SUBMISSION_ID,
+      version: '1.0.0',
+      digestSha256: await localContentDigest(),
+      idempotencyKey: IDEMPOTENCY_KEY,
+      createdAt: NOW,
+    })
+    // 版本号没变、内容变了:digest 必须单独把关。
+    writeFileSync(
+      join(agentPackageDir(root, 'weekly-report'), 'persona.md'),
+      '# 周报小助手\n把一周工作整理成周报。改过的人设。',
+      'utf8',
+    )
+    submissionStatus = 'published'
+    configure()
+
+    const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
+
+    expect(publication.publishStatus).toBe('none')
+    expect(publication.warning).toBe(
+      `上一次提交 ${SUBMISSION_ID} 针对 v1.0.0，内容已变化；请先处理该提交。`,
+    )
+    expect(readPendingSubmissions()['weekly-report']?.submissionId).toBe(SUBMISSION_ID)
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('none')
+    expect(requests).toHaveLength(0)
+  })
+
   test('keeps the sidecar and returns a warning when reconciliation is unreachable', async () => {
     writeLocalPackage()
     seedState({
@@ -1062,7 +1156,7 @@ describe('local publication lifecycle', () => {
     seedPendingSubmission('weekly-report', {
       submissionId: SUBMISSION_ID,
       version: '1.0.0',
-      digestSha256: 'b'.repeat(64),
+      digestSha256: await localContentDigest(),
       idempotencyKey: IDEMPOTENCY_KEY,
       createdAt: NOW,
     })

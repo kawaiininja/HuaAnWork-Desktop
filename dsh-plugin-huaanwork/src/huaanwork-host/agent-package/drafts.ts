@@ -251,15 +251,17 @@ async function commitAgentPackageLocked(
 ): Promise<CommitResult> {
   const alreadyCommitted = findPackageByDraftId(profileDir, draftId)
   if (alreadyCommitted !== undefined) {
-    // 幂等重试同样要先完成发布状态复位:中断可能发生在包写入之后、reset 之前,
-    // 跳过它会让新内容保留旧的 published/pending 身份(I-16)。
-    try {
-      resetLocalAgentPackagePublication(profileDir, alreadyCommitted.slug)
-    } catch {
-      return refused('发布状态复位失败，请重试，草稿已保留')
-    }
     const stale = loadAgentPackageDraft(profileDir, sessionId)
-    if (stale?.draftId === draftId) removeDraft(profileDir, sessionId)
+    if (stale?.draftId === draftId) {
+      // 只有「包已写入、reset 未跑、草稿仍在」的中断态才复位。manifest 永久保留
+      // draftId,已完成提交的旧 draftId 重放时不能清掉更新的一次发布(I-16)。
+      try {
+        resetLocalAgentPackagePublication(profileDir, alreadyCommitted.slug)
+      } catch {
+        return refused('发布状态复位失败，请重试，草稿已保留')
+      }
+      removeDraft(profileDir, sessionId)
+    }
     // A retried commit normally finds its draft gone; host-created packages start at
     // 1.0.0, so a later version can only come from an update.
     const mode = stale?.mode ?? (alreadyCommitted.manifest.version === INITIAL_VERSION ? 'create' : 'update')

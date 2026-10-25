@@ -635,8 +635,8 @@ export async function createSubmission(context: SubmissionHandlerContext): Promi
   // Fail before buffering 5 MiB: a malformed retry key can never be repaired by
   // reading the body. A repeated header (string[]) is invalid too.
   const idempotency = headerValue(request, IDEMPOTENCY_HEADER)
-  const idempotencyKey = idempotency.value
-  if (idempotency.invalid || (idempotencyKey !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey))) {
+  const rawIdempotencyKey = idempotency.value
+  if (idempotency.invalid || (rawIdempotencyKey !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(rawIdempotencyKey))) {
     drain(request)
     return result(400, errorBody('幂等键无效', 'invalid-idempotency-key'), {
       action,
@@ -644,6 +644,10 @@ export async function createSubmission(context: SubmissionHandlerContext): Promi
       reason: `${IDEMPOTENCY_HEADER} must be exactly one UUID`,
     })
   }
+  // A UUID is not case-significant: normalize BEFORE the replay lookup, the
+  // key-scoped lock and the store write, so `AAAA…` and `aaaa…` cannot create
+  // two records or take two different locks.
+  const idempotencyKey = rawIdempotencyKey?.toLowerCase()
 
   const declared = declaredContentLength(request)
   if (declared !== null && declared >= SUBMISSION_BODY_CAP_BYTES) {

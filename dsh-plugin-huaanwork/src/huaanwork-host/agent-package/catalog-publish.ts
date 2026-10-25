@@ -26,6 +26,7 @@ import {
   writeAgentPackageState,
 } from './store.ts'
 import type {
+  AgentPackageDetail,
   AgentPackagePublishStatus,
   AgentPackageStateEntry,
 } from './types.ts'
@@ -251,13 +252,7 @@ async function publishLocalAgentPackageLocked(
     const submittedVersion = detail.version
     const submittedEntry = lookup.kind === 'local' ? lookup.entry : undefined
 
-    const files = readUnsignedPackageFiles(agentPackageDir(binding.profileDir, slug))
-    const bundle = await buildUnsignedAgentPackageBundle(files)
-    // 与目录服务相同的 inspector:本地身份必须等于服务端会重算出的 digest。
-    const inspection = await inspectUnsignedAgentPackageBundle(bundle)
-    const digestSha256 = createHash('sha256')
-      .update(canonicalJson(inspection.digest), 'utf8')
-      .digest('hex')
+    const { bundle, digestSha256 } = await readLocalContentIdentity(binding.profileDir, slug)
 
     const pending = readPendingSubmissions(binding.profileDir)[slug]
     if (
@@ -441,6 +436,23 @@ export async function refreshLocalAgentPackagePublishStatus(
             publishStatus: 'none',
           }
     let next: AgentPackageStateEntry = { ...initialEntry }
+
+    // sidecar 是「远端已受理、本地未确认」的事实,但它只属于写入时的那份内容。
+    // commit 复位 state 后 sidecar 仍在:旧提交的 pending/published/rejected 绝不能
+    // 落到新内容上。版本或内容摘要不匹配时只告警,state 与 sidecar 都保持原样。
+    if (pending !== undefined) {
+      const stale = await stalePendingWarning(binding, slug, detail, pending)
+      if (stale !== undefined) {
+        logAgentPackageAction(binding.logger, action, {
+          slug,
+          version: pending.version,
+          ...(pending.submissionId === undefined ? {} : { submissionId: pending.submissionId }),
+          outcome: 'ok',
+          reason: 'stale-pending',
+        })
+        return { ...toPublication(slug, initialEntry), warning: stale }
+      }
+    }
 
     // sidecar 是「远端已受理、本地未确认」的事实,优先于 state 里的旧身份。
     const pendingId = pending?.submissionId
@@ -647,6 +659,61 @@ export function resetLocalAgentPackagePublication(profileDir: string, slug: stri
     ...state,
     [key]: next,
   })
+}
+
+/**
+ * 当前本地包的内容身份:unsigned bundle 与 publish/refresh 共用的 digest。
+ *
+ * 算法与目录服务一致:对 inspector 复算出的 canonical digest 取 sha256。
+ * sidecar 对账必须用同一算法,否则同版本的不同内容会被误当作同一次提交。
+ */
+async function readLocalContentIdentity(
+  profileDir: string,
+  slug: string,
+): Promise<{ bundle: Buffer; digestSha256: string }> {
+  const files = readUnsignedPackageFiles(agentPackageDir(profileDir, slug))
+  const bundle = await buildUnsignedAgentPackageBundle(files)
+  // 与目录服务相同的 inspector:本地身份必须等于服务端会重算出的 digest。
+  const inspection = await inspectUnsignedAgentPackageBundle(bundle)
+  const digestSha256 = createHash('sha256')
+    .update(canonicalJson(inspection.digest), 'utf8')
+    .digest('hex')
+  return { bundle, digestSha256 }
+}
+
+/**
+ * sidecar 对账前的身份核对:条目必须是当前本地内容的提交。
+ *
+ * 返回告警文案表示不能应用该条目(state 不写、sidecar 不清);返回 undefined
+ * 表示版本与内容摘要都匹配,可以照常对账。内容不可读(包已删除/损坏)同样
+ * 视为不匹配:旧提交的结果不能落到说不清身份的本地条目上。
+ */
+async function stalePendingWarning(
+  binding: AgentCatalogBinding,
+  slug: string,
+  detail: AgentPackageDetail | undefined,
+  pending: PendingSubmission,
+): Promise<string | undefined> {
+  const reference = pending.submissionId ?? pending.idempotencyKey
+  const localVersion = detail !== undefined && detail.source === 'local' ? detail.version : undefined
+  let digestSha256: string | undefined
+  if (localVersion !== undefined) {
+    try {
+      digestSha256 = (await readLocalContentIdentity(binding.profileDir, slug)).digestSha256
+    } catch {
+      digestSha256 = undefined
+    }
+  }
+  if (localVersion === undefined || digestSha256 === undefined) {
+    return `上一次提交 ${reference} 针对 v${pending.version}，当前内容不可读；请先处理该提交。`
+  }
+  if (localVersion !== pending.version) {
+    return `上一次提交 ${reference} 针对 v${pending.version}，当前内容为 v${localVersion}；请先处理该提交。`
+  }
+  if (digestSha256 !== pending.digestSha256) {
+    return `上一次提交 ${reference} 针对 v${pending.version}，内容已变化；请先处理该提交。`
+  }
+  return undefined
 }
 
 function toPublication(slug: string, entry: AgentPackageStateEntry): LocalAgentPackagePublication {
