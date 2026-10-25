@@ -348,18 +348,18 @@
 - [x] I-1～I-19 全部勾选，且每项都有代码、测试和复核证据；I-20 有 R-M2-3 延后裁定与触发条件。
 - [x] M-1～M-7 全部修复，或具有明确的延后裁定、原因和触发条件；无静默残余。
 - [ ] 对整改后的新 HEAD 再做一次独立实现评审，无未处置的 Critical/Important。**未执行**：Task 14 只做范围裁定与门槛复核；M2 收口前必须补一次独立评审。
-- [ ] `corepack yarn test` 通过。**待最终门槛**（结果见范围裁定附录 A）。
-- [ ] `corepack yarn typecheck` 通过。**待最终门槛**。
-- [ ] `corepack yarn check:desktop-variants` 通过，白名单与裁定一致（7/65/6）。**待最终门槛**。
-- [ ] `corepack yarn check` 通过；既有 `verify:aa` 并发债务按原纪律处理，不删步骤。**待最终门槛**。
-- [ ] `node scripts/verify-layout.mjs` 通过，root workspace 与 gate fixture 同步。**待最终门槛**。
-- [ ] huaanwork `verify:licenses`、`verify:closure`、`verify:notices`、`verify:bundled` 通过，`verify:notices` 后无漂移。**待最终门槛**。
+- [x] `corepack yarn test` 通过（exit 0，15 个 workspace 全绿；见范围裁定附录 A）。
+- [x] `corepack yarn typecheck` 通过（exit 0）。
+- [x] `corepack yarn check:desktop-variants` 通过，白名单与裁定一致（7/65/6）。
+- [x] `corepack yarn check` 通过（exit 0，含 `check:whitespace`；无 `verify:aa` 并发复现）；既有 `verify:aa` 并发债务按原纪律处理，未删步骤。
+- [x] `node scripts/verify-layout.mjs` 通过，root workspace 与 gate fixture 同步。
+- [x] huaanwork `verify:licenses`、`verify:closure`、`verify:notices`、`verify:bundled` 通过（均 exit 0），`verify:notices` 后无漂移。
 - [x] macOS 验收在最终 HEAD 通过，并归档原始证据（`f2eebef933`，exit 0，证据 §9）。
 - [x] Windows GHA 探针实际运行通过，并归档 run URL、exit code 和 artifact（run `40198346429`，commit `93c1bb0291`，证据 §9）。
 - [ ] macOS 创建者机器到 Windows 消费机器的跨机器验收通过，不能用同机双 Profile 替代。**`BLOCKED`（没有第二台 Windows 机器）**。
 - [x] 探针通过真实 `agent.packageRefresh`/RPC 验证下架与撤销的卡片数据，不再以 helper 结果代替产品链路（`650e749af7`）。
 - [x] 所有计划外文件均有明确裁定或已回退，最终 diff 不含未批准越界改动（四个文件，R-M2-2）。
-- [ ] `git diff --check <base>..<final-head>` 通过，最终工作区干净。**待最终门槛**。
+- [x] `git diff --check <base>..<final-head>` 通过，最终工作区干净（exit 0；`git status --porcelain` 空）。
 
 ---
 

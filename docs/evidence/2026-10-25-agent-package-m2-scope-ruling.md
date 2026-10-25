@@ -68,10 +68,53 @@ M2 计划与整改计划中的 `7/64`、`7/64/6` 引用同步改为 `7/65`、`7/
 ## 三、最终门槛
 
 在本文所在的最终代码 HEAD 上按下列顺序执行（不并行）。命令、退出码与关键输出见
-〈附录 A：最终门槛原始记录〉；本节表格在门槛执行后追加。
+〈附录 A：最终门槛原始记录〉。
 
-<!-- GATE_TABLE -->
+| # | 命令 | 退出码 | 关键输出 |
+|---|---|---|---|
+| 1 | `corepack yarn test` | **0** | 15 个 workspace 全绿；代表性计数：stable/beta `143 passed (143)`、`261 passed \| 4 skipped (265)`、`77 passed (77)`、`14 passed (14)`；node:test 各组 `# fail 0` |
+| 2 | `corepack yarn typecheck` | **0** | 11 个 workspace 逐个通过；末行 `contract-types: 4 generated type files are current` |
+| 3 | `corepack yarn check:desktop-variants` | **0** | `stable↔beta allowlist 7 (oneSidedPrefixes 0), beta↔huaanwork allowlist 65 (oneSidedPrefixes 6)`；11 个 node:test 全 `ok` |
+| 4 | `corepack yarn check` | **0** | 含 `check:whitespace`、`check:layout`、aa connector 与 13 个 workspace `check`；`verify-layout: ... consistent`、`verify-profile-boot: minimal preset, plugin manager, and disabled hmr lock passed`、`verify-bundled-runtime: 131 files checked; 9 bundled packages are inlined; tar is compiled into lib` |
+| 5 | `node scripts/verify-layout.mjs` | **0** | `verify-layout: all Desktop workspaces including Next and upstream 1600d8a1e1 are consistent` |
+| 6a | `cd dsh-plugin-huaanwork && corepack yarn verify:licenses` | **0** | `verify-licenses: 636 packages checked (9 bundled); 2 use notice-required licenses (LGPL-3.0-or-later)` |
+| 6b | `corepack yarn verify:closure` | **0** | `verify-runtime-closure: 316 first-party nodes form a closed reachable runtime graph.` |
+| 6c | `corepack yarn verify:notices` | **0** | 重生成后 `git status --porcelain dsh-plugin-huaanwork/THIRD_PARTY_NOTICES.md` 为空 ⇒ **无漂移** |
+| 6d | `corepack yarn verify:bundled` | **0** | `verify-bundled-runtime: 131 files checked; 9 bundled packages are inlined; tar is compiled into lib` |
+| 7 | `git diff --check c411d12d89..HEAD` | **0** | 无输出 |
+| 8 | `git status --porcelain` | — | 空（门槛表提交后复核，见附录 A 末尾） |
+
+门槛第一次尝试时 **gate 4 在 `check:whitespace` 处失败（exit 1）**：
+`docs/superpowers/plans/2026-10-25-chat-created-agent-packages-m2-remediation.md:2387: new blank line at EOF`。
+修复 = 删除该计划文件末尾多出的 3 个空行（提交 `cd9c715756`），随后从 gate 1 起重跑全部门槛并
+全部通过。失败与修复都保留在记录里，不以重跑覆盖。
 
 ## 附录 A：最终门槛原始记录
 
-<!-- GATE_LOG -->
+全部门槛在 **`cd9c7157565d81b4d3dc66c3becf1ecc589b6686`**（`docs: trim the remediation plan's
+trailing blank line`，工作树干净）上按顺序单独执行；该提交之后只有本证据文档的表格提交，
+不改代码、计划或门禁。原始日志保存在执行机的 `/tmp/m2-task14-gates/`（不随仓库分发），
+下表是可复核的命令与退出码摘要。
+
+| # | 命令 | 退出码 | 备注 / 关键输出 |
+|---|---|---|---|
+| 1a | `corepack yarn test` | 0 | 在 `a776fd3b40` 上首跑（该提交仅含证据文档）。 |
+| 1b | `corepack yarn test` | **0** | 在 `cd9c715756` 重跑；15 个 workspace 全绿，0 fail。 |
+| 2a | `corepack yarn typecheck` | 0 | 在 `a776fd3b40` 上首跑。 |
+| 2b | `corepack yarn typecheck` | **0** | 在 `cd9c715756` 重跑；`contract-types: 4 generated type files are current`。 |
+| 3a | `corepack yarn check:desktop-variants` | 0 | 在 `a776fd3b40` 上首跑；7/65/6。 |
+| 3b | `corepack yarn check:desktop-variants` | **0** | 在 `cd9c715756` 重跑；`stable↔beta allowlist 7 (oneSidedPrefixes 0), beta↔huaanwork allowlist 65 (oneSidedPrefixes 6)`。 |
+| 4-0 | `corepack yarn check` | **1** | **首次尝试失败**：`check:whitespace` 报 `docs/superpowers/plans/2026-10-25-chat-created-agent-packages-m2-remediation.md:2387: new blank line at EOF`。未删步骤、未跳步骤；修复见下。 |
+| — | `node -e "…replace(/\n+$/,'\n')"` + `git commit` | 0 | 删除该计划文件末尾 3 个空行，提交 `cd9c715756`。 |
+| 4 | `corepack yarn check` | **0** | 在 `cd9c715756` 全量通过；含 `check:whitespace`、`check:layout`、`test:aa-connector` 与 13 个 workspace `check`。关键行：`verify-layout: all Desktop workspaces including Next and upstream 1600d8a1e1 are consistent`；`verify-profile-boot: minimal preset, plugin manager, and disabled hmr lock passed`；`verify-bundled-runtime: 131 files checked; 9 bundled packages are inlined; tar is compiled into lib`；`verify-licenses: 636 packages checked (9 bundled)`；`verify-runtime-closure: 316 first-party nodes form a closed reachable runtime graph.` 无 `verify:aa` 并发复现。 |
+| 5 | `node scripts/verify-layout.mjs` | **0** | `verify-layout: all Desktop workspaces including Next and upstream 1600d8a1e1 are consistent` |
+| 6a | `corepack yarn verify:licenses`（cwd `dsh-plugin-huaanwork`） | **0** | `verify-licenses: 636 packages checked (9 bundled); 2 use notice-required licenses (LGPL-3.0-or-later)` |
+| 6b | `corepack yarn verify:closure` | **0** | `verify-runtime-closure: 316 first-party nodes form a closed reachable runtime graph.` |
+| 6c | `corepack yarn verify:notices` | **0** | 重生成 `THIRD_PARTY_NOTICES.md`；随后 `git status --porcelain dsh-plugin-huaanwork/THIRD_PARTY_NOTICES.md` 空 ⇒ 无漂移 |
+| 6d | `corepack yarn verify:bundled` | **0** | `verify-bundled-runtime: 131 files checked; 9 bundled packages are inlined; tar is compiled into lib` |
+| 7 | `git diff --check c411d12d89..HEAD` | **0** | 在 `cd9c715756` 测得，无输出 |
+| 8 | `git status --porcelain` | — | 在 `cd9c715756` 测得，输出为空 |
+
+阅读顺序：1a/2a/3a 是首跑，4 首次失败在 `check:whitespace`；修复提交为纯文档空行删除，
+因此 1b/2b/3b 在修复后的同一 HEAD 重跑，4～8 全部在该 HEAD 执行。最终 HEAD（本表所在提交）
+上的 `git diff --check` 与 `git status` 复核结果记录在同目录的 Task 14 报告中。
