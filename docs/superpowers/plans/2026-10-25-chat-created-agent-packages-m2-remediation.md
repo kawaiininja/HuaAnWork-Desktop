@@ -2384,6 +2384,3 @@ export function createDeferred<T>() {
 2. **Inline Execution**：在当前会话按 executing-plans 分批执行，每个 Task 结束设检查点。
 
 执行前先确认 R-M2-1～R-M2-6 六项裁定；R-M2-2 未确认前不要动 `dsh-plugin-desktop*/tests`，R-M2-3 未确认前不要新增第 8 个 RPC。
-
-
-
