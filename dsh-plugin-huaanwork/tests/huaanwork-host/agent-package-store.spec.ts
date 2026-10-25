@@ -366,13 +366,14 @@ describe('agent package store', () => {
       source: 'local',
       enabled: true,
       installedVersion: '1.0.0',
+      publishStatus: 'none',
     })
     expect(listLocalAgentPackages(root)[0]?.enabled).toBe(true)
     setAgentPackageEnabled(root, 'weekly-report', false)
     expect(readAgentPackageState(root)['local:weekly-report']?.enabled).toBe(false)
   })
 
-  test('tolerates malformed state and keeps only local entries', () => {
+  test('tolerates malformed state and keeps only whitelisted keys', () => {
     const root = makeRoot()
     writeFileSync(agentPackageStatePath(root), '{ nope', 'utf8')
     expect(readAgentPackageState(root)).toEqual({})
@@ -382,12 +383,14 @@ describe('agent package store', () => {
         'local:kept': { source: 'local', enabled: true, installedVersion: '1.0.0' },
         'local:broken': { source: 'local', enabled: 'yes' },
         'catalog:m2': { source: 'catalog', enabled: true, installedVersion: '1.0.0' },
+        'local:wrong-source': { source: 'catalog', enabled: true, installedVersion: '1.0.0' },
       }),
       'utf8',
     )
     expect(readAgentPackageState(root)).toEqual({
-      'local:kept': { source: 'local', enabled: true, installedVersion: '1.0.0' },
-      'local:broken': { source: 'local', enabled: false, installedVersion: '' },
+      'local:kept': { source: 'local', enabled: true, installedVersion: '1.0.0', publishStatus: 'none' },
+      'local:broken': { source: 'local', enabled: false, installedVersion: '', publishStatus: 'none' },
+      'catalog:m2': { source: 'catalog', enabled: true, installedVersion: '1.0.0', publishStatus: 'installed' },
     })
   })
 

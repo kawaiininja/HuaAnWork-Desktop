@@ -1,0 +1,941 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+
+import { inspectUnsignedAgentPackageBundle } from '@huaanwork/agent-package-format/bundle'
+import { parseAgentPackageManifest } from '@huaanwork/agent-package-format/manifest'
+
+import {
+  AGENT_CATALOG_AUTH_ERROR,
+  AGENT_CATALOG_UNREACHABLE_ERROR,
+  agentCatalogPackagesCachePath,
+  configureAgentCatalog,
+  getAgentCatalogClient,
+  readCachedCatalogPackageSlugs,
+  refreshCatalogPackageCache,
+  resetAgentCatalogForTests,
+  type AgentCatalogSettings,
+} from '../../src/huaanwork-host/agent-package/catalog-client.ts'
+import {
+  logAgentPackageAction,
+  publishLocalAgentPackage,
+  refreshLocalAgentPackagePublishStatus,
+  requestLocalAgentPackageDelist,
+} from '../../src/huaanwork-host/agent-package/catalog-publish.ts'
+import {
+  agentPackageDir,
+  agentPackageStatePath,
+  listLocalAgentPackages,
+  readAgentPackage,
+  readAgentPackageState,
+  setAgentPackageEnabled,
+  writeAgentPackageAtomically,
+  writeAgentPackageState,
+} from '../../src/huaanwork-host/agent-package/store.ts'
+import type { AgentPackageManifest, AgentPackageState } from '../../src/huaanwork-host/agent-package/types.ts'
+import { beginAgentPackageUpdate, commitAgentPackage, loadAgentPackageDraft } from '../../src/huaanwork-host/agent-package/drafts.ts'
+import { bootHuaanworkHost, hostConfig } from './startup-sweep-fixture.ts'
+
+const READ_TOKEN = 'read-token-0123456789abcdef'
+const PUBLISH_TOKEN = 'publish-token-0123456789abcdef'
+const ADMIN_TOKEN = 'admin-token-never-sent'
+const PRIVATE_KEY_MARKER = 'PRIVATE KEY MATERIAL'
+const SUBMISSION_ID = '11111111-1111-4111-8111-111111111111'
+const DELIST_REQUEST_ID = '22222222-2222-4222-8222-222222222222'
+const NOW = '2026-10-24T00:00:00.000Z'
+
+const VALID = {
+  schemaVersion: 1,
+  slug: 'weekly-report',
+  displayName: '周报小助手',
+  description: '把一周工作整理成周报',
+  version: '1.0.0',
+  draftId: 'draft-catalog-publish',
+  createdAt: NOW,
+  updatedAt: NOW,
+  persona: 'persona.md',
+  skill: null,
+  tools: { mode: 'none' },
+  allowSkills: [],
+}
+
+type RecordedRequest = {
+  method: string | undefined
+  url: string | undefined
+  authorization: string | undefined
+  contentType: string | undefined
+  body: Buffer
+}
+
+let root = ''
+let server: Server | undefined
+let port = 0
+let requests: RecordedRequest[] = []
+let settings: AgentCatalogSettings
+let loggerLines: string[] = []
+let changedSlugs: Array<string | undefined> = []
+
+let submissionStatus: 'pending-review' | 'published' | 'rejected' = 'pending-review'
+let submissionReason: string | undefined
+let submittedSlug = 'weekly-report'
+let submittedVersion = '1.0.0'
+let packageStatus: 'published' | 'delisted' | 'revoked' = 'published'
+let bundleUrlOverride: string | undefined
+let bundleRedirect: string | undefined
+let bundleBytes = Buffer.from('test-bundle-bytes')
+let listItems: unknown[] = []
+let listPadding = ''
+let listStatus: number | undefined
+let revocationItems: unknown[] = []
+
+beforeEach(async () => {
+  root = mkdtempSync(join(tmpdir(), 'agent-package-catalog-publish-'))
+  requests = []
+  loggerLines = []
+  changedSlugs = []
+  submissionStatus = 'pending-review'
+  submissionReason = undefined
+  submittedSlug = 'weekly-report'
+  submittedVersion = '1.0.0'
+  packageStatus = 'published'
+  bundleUrlOverride = undefined
+  bundleRedirect = undefined
+  bundleBytes = Buffer.from('test-bundle-bytes')
+  listItems = []
+  listPadding = ''
+  listStatus = undefined
+  revocationItems = []
+  resetAgentCatalogForTests()
+
+  server = createServer((request, response) => {
+    void handleRequest(request, response)
+  })
+  await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('test server did not bind a port')
+  port = address.port
+})
+
+afterEach(async () => {
+  resetAgentCatalogForTests()
+  await stopCatalogServer()
+  rmSync(root, { recursive: true, force: true })
+})
+
+async function stopCatalogServer(): Promise<void> {
+  const current = server
+  server = undefined
+  if (current === undefined) return
+  await new Promise<void>((resolve) => current.close(() => resolve()))
+}
+
+async function readRequestBody(request: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  }
+  return Buffer.concat(chunks)
+}
+
+function sendJson(response: ServerResponse, status: number, body: unknown): void {
+  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  response.end(`${JSON.stringify(body)}\n`)
+}
+
+async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  response.on('error', () => undefined)
+  request.on('error', () => undefined)
+  try {
+    const body = await readRequestBody(request)
+    requests.push({
+      method: request.method,
+      url: request.url,
+      authorization: request.headers.authorization,
+      contentType: request.headers['content-type'],
+      body,
+    })
+    const pathname = new URL(request.url ?? '/', 'http://localhost').pathname
+
+    if (request.method === 'POST' && pathname === '/v1/agent-packages/submissions') {
+      const inspected = await inspectUnsignedAgentPackageBundle(body)
+      submittedSlug = inspected.manifest.slug
+      submittedVersion = inspected.manifest.version
+      sendJson(response, 201, {
+        submissionId: SUBMISSION_ID,
+        slug: submittedSlug,
+        version: submittedVersion,
+        status: 'pending-review',
+        submittedAt: NOW,
+        updatedAt: NOW,
+      })
+      return
+    }
+
+    if (request.method === 'GET' && pathname === `/v1/agent-packages/submissions/${SUBMISSION_ID}`) {
+      sendJson(response, 200, {
+        submissionId: SUBMISSION_ID,
+        slug: submittedSlug,
+        version: submittedVersion,
+        status: submissionStatus,
+        submittedAt: NOW,
+        updatedAt: NOW,
+        ...(submissionReason === undefined ? {} : { reason: submissionReason }),
+      })
+      return
+    }
+
+    if (request.method === 'GET' && pathname === '/v1/agent-packages') {
+      if (listStatus !== undefined) {
+        sendJson(response, listStatus, { error: '拒绝' })
+        return
+      }
+      sendJson(response, 200, { items: listItems, padding: listPadding })
+      return
+    }
+
+    if (request.method === 'GET' && pathname === '/v1/agent-packages/revocations') {
+      sendJson(response, 200, { items: revocationItems })
+      return
+    }
+
+    const delistMatch = /^\/v1\/agent-packages\/([^/]+)\/([^/]+)\/delist-requests$/.exec(pathname)
+    if (request.method === 'POST' && delistMatch !== null) {
+      const payload = JSON.parse(body.toString('utf8')) as { reason?: unknown }
+      sendJson(response, 201, {
+        id: DELIST_REQUEST_ID,
+        slug: decodeURIComponent(delistMatch[1] ?? ''),
+        version: decodeURIComponent(delistMatch[2] ?? ''),
+        status: 'pending',
+        reason: typeof payload.reason === 'string' ? payload.reason : '',
+        createdAt: NOW,
+      })
+      return
+    }
+
+    const bundleMatch = /^\/v1\/agent-packages\/([^/]+)\/([^/]+)\/bundle$/.exec(pathname)
+    if (request.method === 'GET' && bundleMatch !== null) {
+      if (bundleRedirect !== undefined) {
+        response.writeHead(302, { location: bundleRedirect })
+        response.end()
+        return
+      }
+      response.writeHead(200, {
+        'content-type': 'application/gzip',
+        'content-length': String(bundleBytes.byteLength),
+      })
+      response.end(bundleBytes)
+      return
+    }
+
+    const metadataMatch = /^\/v1\/agent-packages\/([^/]+)\/([^/]+)$/.exec(pathname)
+    if (request.method === 'GET' && metadataMatch !== null) {
+      const slug = decodeURIComponent(metadataMatch[1] ?? '')
+      const version = decodeURIComponent(metadataMatch[2] ?? '')
+      sendJson(response, 200, {
+        slug,
+        version,
+        status: packageStatus,
+        displayName: '周报小助手',
+        description: '把一周工作整理成周报',
+        size: bundleBytes.byteLength,
+        updatedAt: NOW,
+        ...(packageStatus === 'published'
+          ? {
+              bundleUrl:
+                bundleUrlOverride ?? `/v1/agent-packages/${encodeURIComponent(slug)}/${encodeURIComponent(version)}/bundle`,
+            }
+          : {}),
+      })
+      return
+    }
+
+    sendJson(response, 404, { error: 'Not Found', code: 'not-found' })
+  } catch (error) {
+    if (!response.headersSent) {
+      sendJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    response.end()
+  }
+}
+
+function configuredSettings(overrides: Partial<AgentCatalogSettings> = {}): AgentCatalogSettings {
+  return {
+    agents_host: '127.0.0.1',
+    agents_port: port,
+    agents_catalog_token: READ_TOKEN,
+    agents_catalog_publish_token: PUBLISH_TOKEN,
+    ...overrides,
+  }
+}
+
+function configure(overrides: Partial<AgentCatalogSettings> = {}): void {
+  settings = configuredSettings(overrides)
+  loggerLines = []
+  changedSlugs = []
+  configureAgentCatalog({
+    profileDir: root,
+    readSettings: () => settings,
+    logger: (line) => loggerLines.push(line),
+    emitChanged: (slug) => changedSlugs.push(slug),
+  })
+}
+
+function validManifest(slug = 'weekly-report', version = '1.0.0'): AgentPackageManifest {
+  const parsed = parseAgentPackageManifest({ ...VALID, slug, version })
+  if (!parsed.ok) throw new Error(`fixture manifest invalid: ${JSON.stringify(parsed.fieldErrors)}`)
+  return parsed.manifest
+}
+
+function writeLocalPackage(slug = 'weekly-report', version = '1.0.0'): AgentPackageManifest {
+  const manifest = validManifest(slug, version)
+  writeAgentPackageAtomically({
+    profileDir: root,
+    manifest,
+    persona: '# 周报小助手\n把一周工作整理成周报。',
+    skill: null,
+    replace: false,
+  })
+  return manifest
+}
+
+function writeSignedPackage(slug = 'weekly-report', version = '1.0.0'): void {
+  writeLocalPackage(slug, version)
+  const signatureDir = join(agentPackageDir(root, slug), '.signature')
+  mkdirSync(signatureDir, { recursive: true })
+  writeFileSync(join(signatureDir, 'package-digest.json'), '{}\n', 'utf8')
+  writeFileSync(join(signatureDir, 'signature.json'), '{}\n', 'utf8')
+}
+
+function seedState(state: AgentPackageState): void {
+  writeAgentPackageState(root, state)
+}
+
+function rawStateFile(): string {
+  return readFileSync(agentPackageStatePath(root), 'utf8')
+}
+
+function summaryFor(slug: string): Record<string, unknown> {
+  return {
+    slug,
+    displayName: `广场 ${slug}`,
+    description: '来自签名广场',
+    version: '1.0.0',
+    size: 10,
+    status: 'published',
+    updatedAt: NOW,
+  }
+}
+
+async function commitExistingUpdate(slug = 'weekly-report'): Promise<void> {
+  const sessionId = 'session-update'
+  await beginAgentPackageUpdate(root, sessionId, slug)
+  const draft = loadAgentPackageDraft(root, sessionId)
+  if (draft === undefined) throw new Error('update draft was not written')
+  const result = await commitAgentPackage(root, sessionId, draft.draftId, '可以', [])
+  if (!result.ok) throw new Error(result.error)
+}
+
+function bodyText(body: Buffer): string {
+  return body.toString('latin1')
+}
+
+describe('agent package state model', () => {
+  test('keeps whitelisted M2 fields, drops unknown fields, and defaults publish status by source', () => {
+    seedState({
+      'local:local-one': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '0.9.0',
+        submissionId: 'submission-1',
+        reviewReason: '补充说明',
+        delistRequestId: 'delist-1',
+        revoked: {
+          slug: 'local-one',
+          version: '0.9.0',
+          reason: '不安全',
+          revokedAt: NOW,
+          actor: 'admin',
+        },
+        unknownField: 'dropped',
+      } as never,
+      'catalog:catalog-one': {
+        source: 'catalog',
+        enabled: false,
+        installedVersion: '2.0.0',
+      } as never,
+      'local:wrong-source': { source: 'catalog', enabled: true, installedVersion: '1.0.0' } as never,
+      'catalog:wrong-source': { source: 'local', enabled: true, installedVersion: '1.0.0' } as never,
+      'other:elsewhere': { source: 'local', enabled: true, installedVersion: '1.0.0' } as never,
+    })
+
+    const state = readAgentPackageState(root)
+    expect(state['local:local-one']).toEqual({
+      source: 'local',
+      enabled: true,
+      installedVersion: '1.0.0',
+      publishStatus: 'published',
+      publishedVersion: '0.9.0',
+      submissionId: 'submission-1',
+      reviewReason: '补充说明',
+      delistRequestId: 'delist-1',
+      revoked: { slug: 'local-one', version: '0.9.0', reason: '不安全', revokedAt: NOW },
+    })
+    expect(state['catalog:catalog-one']).toEqual({
+      source: 'catalog',
+      enabled: false,
+      installedVersion: '2.0.0',
+      publishStatus: 'installed',
+    })
+    expect(state['local:wrong-source']).toBeUndefined()
+    expect(state['catalog:wrong-source']).toBeUndefined()
+    expect(state['other:elsewhere']).toBeUndefined()
+  })
+
+  test('local enable toggle preserves every M2 field and never writes a second key', () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '0.9.0',
+        submissionId: 'submission-1',
+        reviewReason: '补充说明',
+        delistRequestId: 'delist-1',
+        revoked: { slug: 'weekly-report', version: '0.9.0', reason: '不安全', revokedAt: NOW },
+      },
+    })
+
+    setAgentPackageEnabled(root, 'weekly-report', false)
+
+    const state = readAgentPackageState(root)
+    expect(Object.keys(state)).toEqual(['local:weekly-report'])
+    expect(state['local:weekly-report']).toEqual({
+      source: 'local',
+      enabled: false,
+      installedVersion: '1.0.0',
+      publishStatus: 'published',
+      publishedVersion: '0.9.0',
+      submissionId: 'submission-1',
+      reviewReason: '补充说明',
+      delistRequestId: 'delist-1',
+      revoked: { slug: 'weekly-report', version: '0.9.0', reason: '不安全', revokedAt: NOW },
+    })
+    expect(readAgentPackage(root, 'weekly-report')).toMatchObject({
+      source: 'local',
+      enabled: false,
+      publishStatus: 'published',
+      publishedVersion: '0.9.0',
+    })
+  })
+
+  test('catalog enable toggle writes the catalog key only and keeps M2 fields', () => {
+    writeSignedPackage()
+    seedState({
+      'catalog:weekly-report': {
+        source: 'catalog',
+        enabled: false,
+        installedVersion: '1.0.0',
+        publishStatus: 'installed',
+        publishedVersion: '0.9.0',
+        submissionId: 'submission-1',
+        reviewReason: '补充说明',
+        delistRequestId: 'delist-1',
+        revoked: { slug: 'weekly-report', version: '0.9.0', reason: '不安全', revokedAt: NOW },
+      },
+    })
+
+    setAgentPackageEnabled(root, 'weekly-report', true)
+
+    const raw = JSON.parse(rawStateFile()) as Record<string, unknown>
+    expect(Object.keys(raw)).toEqual(['catalog:weekly-report'])
+    expect(readAgentPackageState(root)['catalog:weekly-report']).toEqual({
+      source: 'catalog',
+      enabled: true,
+      installedVersion: '1.0.0',
+      publishStatus: 'installed',
+      publishedVersion: '0.9.0',
+      submissionId: 'submission-1',
+      reviewReason: '补充说明',
+      delistRequestId: 'delist-1',
+      revoked: { slug: 'weekly-report', version: '0.9.0', reason: '不安全', revokedAt: NOW },
+    })
+    expect(readAgentPackage(root, 'weekly-report')).toMatchObject({
+      source: 'catalog',
+      enabled: true,
+      publishStatus: 'installed',
+    })
+    expect(listLocalAgentPackages(root)[0]).toMatchObject({ source: 'catalog', enabled: true })
+  })
+
+  test('a signed directory without catalog state is catalog-broken and never local', () => {
+    writeSignedPackage()
+
+    const detail = readAgentPackage(root, 'weekly-report')
+    expect(detail?.source).toBe('catalog')
+    expect(detail?.enabled).toBe(false)
+    expect(detail?.broken?.reason).toMatch(/catalog/)
+
+    const listed = listLocalAgentPackages(root)[0]
+    expect(listed?.source).toBe('catalog')
+    expect(listed?.broken?.reason).toMatch(/catalog/)
+
+    expect(() => setAgentPackageEnabled(root, 'weekly-report', true)).toThrow(/catalog/)
+  })
+
+  test('two state keys for one slug report corruption instead of guessing', () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': { source: 'local', enabled: true, installedVersion: '1.0.0' },
+      'catalog:weekly-report': { source: 'catalog', enabled: false, installedVersion: '1.0.0' },
+    })
+
+    expect(readAgentPackage(root, 'weekly-report')?.broken?.reason).toMatch(/状态损坏/)
+    expect(listLocalAgentPackages(root)[0]?.broken?.reason).toMatch(/状态损坏/)
+    expect(() => setAgentPackageEnabled(root, 'weekly-report', true)).toThrow(/状态损坏/)
+    expect(() => setAgentPackageEnabled(root, 'weekly-report', false)).toThrow(/状态损坏/)
+  })
+})
+
+describe('local publication lifecycle', () => {
+  test('submit stores pending status and never uses read/admin credentials', async () => {
+    writeLocalPackage()
+    configure()
+
+    const result = await publishLocalAgentPackage('weekly-report')
+    expect(result.submissionId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('pending-review')
+    expect(readAgentPackageState(root)['local:weekly-report']?.submissionId).toBe(result.submissionId)
+
+    const submitRequest = requests.find(
+      (request) => request.method === 'POST' && request.url === '/v1/agent-packages/submissions',
+    )
+    expect(submitRequest).toBeDefined()
+    expect(submitRequest?.authorization).toBe(`Bearer ${PUBLISH_TOKEN}`)
+    expect(submitRequest?.contentType).toBe('application/gzip')
+    expect(submitRequest?.body.subarray(0, 2).toString('hex')).toBe('1f8b')
+
+    const text = bodyText(submitRequest?.body ?? Buffer.alloc(0))
+    for (const secret of [READ_TOKEN, PUBLISH_TOKEN, ADMIN_TOKEN, PRIVATE_KEY_MARKER, 'Authorization']) {
+      expect(text.includes(secret)).toBe(false)
+    }
+
+    expect(changedSlugs).toEqual(['weekly-report'])
+    expect(loggerLines.some((line) => line.includes('publish.submit') && line.includes('outcome=ok'))).toBe(true)
+    for (const line of loggerLines) {
+      expect(line.includes(READ_TOKEN)).toBe(false)
+      expect(line.includes(PUBLISH_TOKEN)).toBe(false)
+      expect(line.includes(ADMIN_TOKEN)).toBe(false)
+      expect(line.includes('Authorization')).toBe(false)
+    }
+  })
+
+  test('local content commit resets publication but preserves enabled', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '1.0.0',
+        submissionId: 'submission-1',
+        reviewReason: '旧说明',
+        delistRequestId: 'delist-1',
+        revoked: { slug: 'weekly-report', version: '1.0.0', reason: '旧撤销', revokedAt: NOW },
+      },
+    })
+
+    await commitExistingUpdate()
+
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.enabled).toBe(true)
+    expect(state?.installedVersion).toBe('1.0.1')
+    expect(state?.publishStatus).toBe('none')
+    expect(state?.submissionId).toBeUndefined()
+    expect(state?.reviewReason).toBeUndefined()
+    expect(state?.delistRequestId).toBeUndefined()
+    expect(state?.revoked).toBeUndefined()
+    expect(state?.publishedVersion).toBe('1.0.0')
+  })
+
+  test('a rejected submission records the review reason', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'pending-review',
+        submissionId: SUBMISSION_ID,
+      },
+    })
+    submissionStatus = 'rejected'
+    submissionReason = '脚本权限过大'
+    configure()
+
+    const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
+
+    expect(publication.publishStatus).toBe('rejected')
+    expect(publication.reviewReason).toBe('脚本权限过大')
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.publishStatus).toBe('rejected')
+    expect(state?.reviewReason).toBe('脚本权限过大')
+    expect(state?.submissionId).toBe(SUBMISSION_ID)
+    expect(state?.enabled).toBe(true)
+    const statusRequest = requests.find(
+      (request) => request.method === 'GET' && request.url === `/v1/agent-packages/submissions/${SUBMISSION_ID}`,
+    )
+    expect(statusRequest?.authorization).toBe(`Bearer ${PUBLISH_TOKEN}`)
+  })
+
+  test('an approved submission becomes published with the manifest version', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'pending-review',
+        submissionId: SUBMISSION_ID,
+      },
+    })
+    submissionStatus = 'published'
+    configure()
+
+    const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
+
+    expect(publication.publishStatus).toBe('published')
+    expect(publication.publishedVersion).toBe('1.0.0')
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.publishStatus).toBe('published')
+    expect(state?.publishedVersion).toBe('1.0.0')
+    expect(state?.reviewReason).toBeUndefined()
+    expect(state?.enabled).toBe(true)
+  })
+
+  test('delisted catalog metadata flips an already published local package', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '1.0.0',
+      },
+    })
+    packageStatus = 'delisted'
+    configure()
+
+    const publication = await refreshLocalAgentPackagePublishStatus('weekly-report')
+
+    expect(publication.publishStatus).toBe('delisted')
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('delisted')
+    expect(readAgentPackageState(root)['local:weekly-report']?.enabled).toBe(true)
+    const metadataRequest = requests.find(
+      (request) => request.method === 'GET' && request.url === '/v1/agent-packages/weekly-report/1.0.0',
+    )
+    expect(metadataRequest?.authorization).toBe(`Bearer ${READ_TOKEN}`)
+  })
+
+  test('delist requires a published package and stores the request id', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '1.0.0',
+      },
+    })
+    configure()
+
+    const result = await requestLocalAgentPackageDelist('weekly-report', '  内容有误  ')
+
+    expect(result.requestId).toBe(DELIST_REQUEST_ID)
+    expect(readAgentPackageState(root)['local:weekly-report']?.delistRequestId).toBe(DELIST_REQUEST_ID)
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('published')
+    const delistRequest = requests.find(
+      (request) =>
+        request.method === 'POST' &&
+        request.url === '/v1/agent-packages/weekly-report/1.0.0/delist-requests',
+    )
+    expect(delistRequest?.authorization).toBe(`Bearer ${PUBLISH_TOKEN}`)
+    expect(delistRequest?.contentType).toBe('application/json')
+    expect(JSON.parse(delistRequest?.body.toString('utf8') ?? '{}')).toEqual({ reason: '内容有误' })
+
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    await expect(requestLocalAgentPackageDelist('weekly-report', '内容有误')).rejects.toThrow(/已发布/)
+  })
+
+  test('missing publish token reports the auth error and leaves state unchanged', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: false,
+        installedVersion: '1.0.0',
+        publishStatus: 'none',
+      },
+    })
+    configure({ agents_catalog_publish_token: '' })
+
+    await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow(AGENT_CATALOG_AUTH_ERROR)
+    expect(requests).toHaveLength(0)
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('none')
+    expect(readAgentPackageState(root)['local:weekly-report']?.submissionId).toBeUndefined()
+  })
+
+  test('network failure preserves the previous publication state', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '1.0.0',
+        submissionId: SUBMISSION_ID,
+      },
+    })
+    configure()
+    const before = rawStateFile()
+    await stopCatalogServer()
+
+    await expect(refreshLocalAgentPackagePublishStatus('weekly-report')).rejects.toThrow(
+      AGENT_CATALOG_UNREACHABLE_ERROR,
+    )
+    expect(rawStateFile()).toBe(before)
+  })
+
+  test('a duplicate pending submission is not sent again', async () => {
+    writeLocalPackage()
+    seedState({
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'pending-review',
+        submissionId: SUBMISSION_ID,
+      },
+    })
+    configure()
+
+    await expect(publishLocalAgentPackage('weekly-report')).rejects.toThrow(/审查中/)
+    expect(requests).toHaveLength(0)
+    expect(readAgentPackageState(root)['local:weekly-report']?.submissionId).toBe(SUBMISSION_ID)
+  })
+})
+
+describe('catalog cache and taken slugs', () => {
+  test('cache refresh writes the documented shape and keeps the previous cache on failure', async () => {
+    configure()
+    listItems = [summaryFor('plaza-agent'), summaryFor('plaza-second')]
+
+    const refreshed = await refreshCatalogPackageCache()
+    expect(refreshed.warning).toBeUndefined()
+    expect(refreshed.items.map((item) => item.slug)).toEqual(['plaza-agent', 'plaza-second'])
+    expect(readCachedCatalogPackageSlugs()).toEqual(['plaza-agent', 'plaza-second'])
+
+    const cachePath = agentCatalogPackagesCachePath(root)
+    const written = JSON.parse(readFileSync(cachePath, 'utf8')) as {
+      schemaVersion: number
+      fetchedAt: string
+      items: Array<{ slug: string }>
+    }
+    expect(written.schemaVersion).toBe(1)
+    expect(written.fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(written.items.map((item) => item.slug)).toEqual(['plaza-agent', 'plaza-second'])
+    expect(requests[0]?.authorization).toBe(`Bearer ${READ_TOKEN}`)
+
+    const before = readFileSync(cachePath, 'utf8')
+    await stopCatalogServer()
+    const failed = await refreshCatalogPackageCache()
+    expect(failed.warning).toMatch(/目录不可达/)
+    expect(failed.items.map((item) => item.slug)).toEqual(['plaza-agent', 'plaza-second'])
+    expect(readFileSync(cachePath, 'utf8')).toBe(before)
+  })
+
+  test('cached plaza slugs are rejected by the host takenSlugs', async () => {
+    const config = hostConfig(root)
+    const cachePath = agentCatalogPackagesCachePath(config.profileDir)
+    mkdirSync(dirname(cachePath), { recursive: true })
+    writeFileSync(
+      cachePath,
+      `${JSON.stringify({ schemaVersion: 1, fetchedAt: NOW, items: [summaryFor('plaza-agent')] }, null, 2)}\n`,
+      'utf8',
+    )
+
+    const booted = await bootHuaanworkHost(config)
+    try {
+      const result = await booted.ctx.huaanworkAgentPackageHost.propose('session-plaza', {
+        mode: 'create',
+        displayName: '广场重名',
+        slug: 'plaza-agent',
+        description: '与广场条目重名',
+        persona: '你是广场助手。',
+        tools: 'none',
+      })
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.fieldErrors.some((error) => error.field === 'slug' && /重名/.test(error.message))).toBe(true)
+    } finally {
+      await booted.ctx.fiber.dispose()
+    }
+  })
+
+  test('cache readers ignore corrupt files', () => {
+    configure()
+    writeFileSync(agentCatalogPackagesCachePath(root), '{ not json', 'utf8')
+    expect(readCachedCatalogPackageSlugs()).toEqual([])
+  })
+})
+
+describe('catalog client transport limits', () => {
+  test('read operations use the read token and drop audit-only revocation actors', async () => {
+    configure()
+    listItems = [summaryFor('plaza-agent')]
+    revocationItems = [
+      { slug: 'plaza-agent', version: '1.0.0', reason: '不安全', revokedAt: NOW, actor: 'admin' },
+    ]
+
+    const client = getAgentCatalogClient()
+    const packages = await client.listPackages()
+    expect(packages.map((item) => item.slug)).toEqual(['plaza-agent'])
+    const revocations = await client.getRevocations()
+    expect(revocations).toEqual([{ slug: 'plaza-agent', version: '1.0.0', reason: '不安全', revokedAt: NOW }])
+    for (const request of requests) {
+      expect(request.authorization).toBe(`Bearer ${READ_TOKEN}`)
+    }
+  })
+
+  test('a cross-origin bundleUrl is rejected without sending the token', async () => {
+    const altRequests: string[] = []
+    const altServer = createServer((request, response) => {
+      altRequests.push(request.url ?? '')
+      response.writeHead(200, { 'content-type': 'application/gzip' })
+      response.end('stolen')
+    })
+    await new Promise<void>((resolve) => altServer.listen(0, '127.0.0.1', resolve))
+    const address = altServer.address()
+    if (address === null || typeof address === 'string') throw new Error('alt server did not bind')
+    const altUrl = `http://127.0.0.1:${address.port}`
+
+    try {
+      configure()
+      bundleUrlOverride = `${altUrl}/v1/agent-packages/weekly-report/1.0.0/bundle`
+      const destination = join(root, 'bundle.tgz')
+
+      await expect(
+        getAgentCatalogClient().downloadBundleToFile('weekly-report', '1.0.0', destination),
+      ).rejects.toThrow(/下载地址|其他来源|拒绝/)
+      expect(altRequests).toEqual([])
+      expect(existsSync(destination)).toBe(false)
+      expect(
+        requests.every((request) => request.authorization !== `Bearer ${READ_TOKEN}` || !request.url?.startsWith(altUrl)),
+      ).toBe(true)
+    } finally {
+      await new Promise<void>((resolve) => altServer.close(() => resolve()))
+    }
+  })
+
+  test('a redirect on the bundle route is refused without following it', async () => {
+    const altRequests: string[] = []
+    const altServer = createServer((request, response) => {
+      altRequests.push(request.url ?? '')
+      response.writeHead(200)
+      response.end('stolen')
+    })
+    await new Promise<void>((resolve) => altServer.listen(0, '127.0.0.1', resolve))
+    const address = altServer.address()
+    if (address === null || typeof address === 'string') throw new Error('alt server did not bind')
+
+    try {
+      configure()
+      bundleRedirect = `http://127.0.0.1:${address.port}/v1/agent-packages/weekly-report/1.0.0/bundle`
+      const destination = join(root, 'bundle.tgz')
+      await expect(
+        getAgentCatalogClient().downloadBundleToFile('weekly-report', '1.0.0', destination),
+      ).rejects.toThrow(/重定向/)
+      expect(altRequests).toEqual([])
+      expect(existsSync(destination)).toBe(false)
+    } finally {
+      await new Promise<void>((resolve) => altServer.close(() => resolve()))
+    }
+  })
+
+  test('a bundle larger than 5 MiB aborts and deletes the partial file', async () => {
+    configure()
+    bundleBytes = Buffer.alloc(5 * 1024 * 1024 + 1, 0x61)
+    const destination = join(root, 'bundle.tgz')
+
+    await expect(
+      getAgentCatalogClient().downloadBundleToFile('weekly-report', '1.0.0', destination),
+    ).rejects.toThrow(/5 MiB/)
+    expect(existsSync(destination)).toBe(false)
+  })
+
+  test('a JSON response larger than 1 MiB is rejected', async () => {
+    configure()
+    listPadding = 'x'.repeat(1024 * 1024 + 1)
+
+    await expect(getAgentCatalogClient().listPackages()).rejects.toThrow(/1 MiB/)
+  })
+
+  test('401 and 403 map to the auth message and other statuses stay generic', async () => {
+    configure()
+    const client = getAgentCatalogClient()
+
+    for (const status of [401, 403]) {
+      listStatus = status
+      await expect(client.listPackages()).rejects.toThrow(AGENT_CATALOG_AUTH_ERROR)
+    }
+
+    listStatus = 500
+    await expect(client.listPackages()).rejects.toThrow(/HTTP 500/)
+  })
+
+  test('logAgentPackageAction only emits whitelisted fields', () => {
+    const lines: string[] = []
+    const forged = {
+      slug: 'weekly-report',
+      version: '1.0.0',
+      submissionId: SUBMISSION_ID,
+      outcome: 'error' as const,
+      reason: '目录不可达',
+      token: PUBLISH_TOKEN,
+      adminToken: ADMIN_TOKEN,
+      authorization: `Bearer ${READ_TOKEN}`,
+      privateKey: PRIVATE_KEY_MARKER,
+    }
+    logAgentPackageAction(
+      (line) => lines.push(line),
+      'publish.submit',
+      forged as unknown as Parameters<typeof logAgentPackageAction>[2],
+    )
+
+    expect(lines).toHaveLength(1)
+    const line = lines[0] ?? ''
+    expect(line).toContain('publish.submit')
+    expect(line).toContain('slug=weekly-report')
+    expect(line).toContain(`submissionId=${SUBMISSION_ID}`)
+    for (const secret of [READ_TOKEN, PUBLISH_TOKEN, ADMIN_TOKEN, PRIVATE_KEY_MARKER, 'Bearer']) {
+      expect(line.includes(secret)).toBe(false)
+    }
+  })
+})

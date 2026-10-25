@@ -16,6 +16,11 @@ import { restoreEnabledBundledSkills } from './skills-host.ts'
 import { createAgentsHost } from './agents-host.ts'
 import { setAgentPackageHost, setAgentsDirectory } from './sessions.ts'
 import { createAgentPackageHost } from './agent-package/host.ts'
+import {
+  configureAgentCatalog,
+  readCachedCatalogPackageSlugs,
+  refreshCatalogPackageCache,
+} from './agent-package/catalog-client.ts'
 import { createAgentPackageRuntimeRegistry, stopAllAgentPackageProcesses } from './agent-package/runtime.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
@@ -120,6 +125,27 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   // P1 修复(2026-10-14,A4-1 证据 §二):目录变更时同步重注册 call_host_tool,
   // 刷新其描述中的可用小工具清单(execute 本就读 live holder,不受陈旧描述影响)。
   let syncHostToolDescription: (() => void) | undefined
+  // M2(Task 8):发布/安装共用同一个目录绑定。profileDir、settings 读取、client、
+  // logger 与 changed 事件都从这里进入;Task 9/10 复用同一单例,不再各自接线。
+  const catalogClient = configureAgentCatalog({
+    profileDir: config.profileDir,
+    readSettings: () => readHuaanworkSettingsSync(config.profileDir),
+    logger: routeCtx.logger,
+    emitChanged: (slug) => {
+      ctx.huaanworkEmit(slug === undefined ? { event: 'agent/changed' } : { event: 'agent/changed', slug })
+    },
+  })
+  ctx.huaanworkAgentCatalogClient = catalogClient
+  // 启动时后台拉一次签名广场缓存;失败只记日志并保留旧缓存,不阻塞 boot。
+  void refreshCatalogPackageCache()
+    .then((result) => {
+      if (result.warning !== undefined) routeCtx.logger(`[agent-catalog] ${result.warning}`)
+    })
+    .catch((cause: unknown) => {
+      routeCtx.logger(
+        `[agent-catalog] 目录缓存刷新失败:${cause instanceof Error ? cause.message : String(cause)}`,
+      )
+    })
   const agentsHost = createAgentsHost({
     storageRoot: config.profileDir,
     readSettings: () => {
@@ -144,7 +170,12 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   const agentPackageRegistry = createAgentPackageRuntimeRegistry()
   const agentPackageHost = createAgentPackageHost({
     profileDir: config.profileDir,
-    takenSlugs: () => agentsHost.snapshotForRuntime().items.map((item) => item.name),
+    // 本地工具/已有智能体 + 最近一次成功拉取的签名广场 slug:离线时也能拒绝
+    // 已知的广场重名;服务端提交/批准仍做权威冲突检查。
+    takenSlugs: () => [
+      ...agentsHost.snapshotForRuntime().items.map((item) => item.name),
+      ...readCachedCatalogPackageSlugs(),
+    ],
     // 包列表/详情/可调用列表与启停路由经同一目录实例合并 legacy 条目。
     legacy: () => agentsHost,
     registry: agentPackageRegistry,

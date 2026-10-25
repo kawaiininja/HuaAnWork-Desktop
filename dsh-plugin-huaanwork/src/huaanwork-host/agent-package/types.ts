@@ -6,16 +6,57 @@ export {
   type AgentPackageToolsMode,
 } from '@huaanwork/agent-package-format/manifest'
 
-export type AgentPackageState = Record<string, { source: 'local'; enabled: boolean; installedVersion: string }>
+export type AgentPackageSource = 'local' | 'catalog'
+
+/** 本地包的发布状态;`installed` 只用于从广场安装的签名包。 */
+export type AgentPackagePublishStatus =
+  | 'none'
+  | 'pending-review'
+  | 'published'
+  | 'rejected'
+  | 'delisted'
+  | 'installed'
+
+/**
+ * 一条目录撤销记录。与服务端 Revocation 的客户端字段一致:服务端的 `actor`
+ * 只用于审计,不进入桌面状态。
+ */
+export type AgentPackageRevocation = {
+  slug: string
+  version: string
+  reason: string
+  revokedAt: string
+}
+
+/** `agents-state.json` 的一条。M2 可选字段在 M1 创建的条目上可以缺席。 */
+export type AgentPackageStateEntry = {
+  source: AgentPackageSource
+  enabled: boolean
+  installedVersion: string
+  publishStatus?: AgentPackagePublishStatus
+  publishedVersion?: string
+  submissionId?: string
+  reviewReason?: string
+  delistRequestId?: string
+  revoked?: AgentPackageRevocation
+}
+
+export type AgentPackageState = Record<string, AgentPackageStateEntry>
 
 export type AgentPackageListItem = {
   slug: string
   displayName: string
   description: string
   version: string
-  source: 'local' | 'catalog-legacy'
+  source: AgentPackageSource
   enabled: boolean
   broken?: { reason: string }
+  publishStatus?: AgentPackagePublishStatus
+  publishedVersion?: string
+  submissionId?: string
+  reviewReason?: string
+  delistRequestId?: string
+  revoked?: AgentPackageRevocation
 }
 
 export type AgentPackageDetail = AgentPackageListItem & {

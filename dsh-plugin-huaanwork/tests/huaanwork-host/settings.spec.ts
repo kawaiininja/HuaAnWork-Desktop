@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
@@ -186,6 +186,26 @@ describe('settings logic ported from sidecar', () => {
     expect(parsed.agents_host).toBe('')
     expect(parsed.agents_port).toBe('')
     expect(parsed.agents_catalog_token).toBe('')
+    expect(parsed.agents_catalog_publish_token).toBe('')
+  })
+
+  test('parseSettings keeps old settings without a publish token valid and trims a configured one', () => {
+    expect(parseSettings({ agents_host: '192.168.10.20', agents_port: 8080 }).agents_catalog_publish_token).toBe('')
+    expect(parseSettings({ agents_catalog_publish_token: '  publish-secret  ' }).agents_catalog_publish_token).toBe(
+      'publish-secret',
+    )
+    expect(parseSettings({ agents_catalog_publish_token: 42 }).agents_catalog_publish_token).toBe('')
+  })
+
+  test('mergeSettings saves and clears the publish token without touching the read token', () => {
+    const current = mergeSettings(parseSettings({}), {
+      agents_catalog_token: 'read-secret',
+      agents_catalog_publish_token: '  publish-secret  ',
+    })
+    expect(current.agents_catalog_token).toBe('read-secret')
+    expect(current.agents_catalog_publish_token).toBe('publish-secret')
+    expect(mergeSettings(current, { theme: 'dark' }).agents_catalog_publish_token).toBe('publish-secret')
+    expect(mergeSettings(current, { agents_catalog_publish_token: '   ' }).agents_catalog_publish_token).toBe('')
   })
 
   test('mergeSettings writes agents fields and preserves them across theme', () => {
@@ -283,6 +303,28 @@ describe('settings disk storage in profileDir', () => {
       expect(updated.theme).toBe('dark')
       const readBack = await readHuaanworkSettings(dir)
       expect(readBack.theme).toBe('dark')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an old settings file without a publish token stays valid and the token persists on disk', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hw-settings-test-'))
+    try {
+      writeFileSync(
+        join(dir, 'huaanwork-settings.json'),
+        JSON.stringify({ model: 'qwen', agents_host: '192.168.10.20', agents_port: 8080 }),
+        'utf8',
+      )
+      const legacy = await readHuaanworkSettings(dir)
+      expect(legacy.agents_catalog_publish_token).toBe('')
+      expect(legacy.agents_host).toBe('192.168.10.20')
+
+      const saved = await writeHuaanworkSettings(dir, { agents_catalog_publish_token: ' publish-secret ' })
+      expect(saved.agents_catalog_publish_token).toBe('publish-secret')
+      expect((await readHuaanworkSettings(dir)).agents_catalog_publish_token).toBe('publish-secret')
+      const raw = JSON.parse(readFileSync(join(dir, 'huaanwork-settings.json'), 'utf8')) as Record<string, unknown>
+      expect(raw.agents_catalog_publish_token).toBe('publish-secret')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

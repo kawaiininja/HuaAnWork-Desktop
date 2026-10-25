@@ -7,6 +7,7 @@ import { AGENT_NAME_RE } from '@huaanwork/policy/agent-catalog'
 import { parseSkillMarkdown } from '../../huaanwork-guardrails/skills.ts'
 import { resolveInvocableSkill } from '../skill-invoke.ts'
 import { parseAgentPackageManifest } from './manifest.ts'
+import { resetLocalAgentPackagePublication } from './catalog-publish.ts'
 import {
   agentPackageBytes,
   agentPackageDir,
@@ -268,6 +269,9 @@ export async function commitAgentPackage(
   if (draft.mode === 'update' && existing === undefined) {
     return refused(`要更新的智能体 @${draft.slug} 不存在，草稿保留`)
   }
+  if (draft.mode === 'update' && readAgentPackage(profileDir, draft.slug)?.source !== 'local') {
+    return refused(`智能体 @${draft.slug} 来自智能体广场，不能在这里更新`)
+  }
 
   const manifest = buildManifest(draft, existing, now)
 
@@ -292,6 +296,14 @@ export async function commitAgentPackage(
     setAgentPackageEnabled(profileDir, draft.slug, enabled)
   } catch (error) {
     return refused(`写入启用状态失败:${errorMessage(error)}`)
+  }
+
+  // 本地内容变化后旧发布结果不再代表当前内容:只清发布/下架/撤销字段,
+  // enabled、installedVersion 与 publishedVersion 保留(后者作为历史)。
+  try {
+    resetLocalAgentPackagePublication(profileDir, draft.slug)
+  } catch (error) {
+    return refused(`写入发布状态失败:${errorMessage(error)}`)
   }
 
   removeDraft(profileDir, sessionId)
@@ -407,6 +419,9 @@ function resolveUpdateBase(
 function readUpdateBase(profileDir: string, slug: string): DraftBody {
   const detail = readAgentPackage(profileDir, slug)
   if (detail === undefined) throw new Error(`智能体 @${slug} 不存在`)
+  if (detail.source !== 'local') {
+    throw new Error(`智能体 @${slug} 来自智能体广场，不能在这里更新`)
+  }
   if (detail.broken !== undefined) throw new Error(`智能体 @${slug} 已损坏:${detail.broken.reason}`)
   const manifest = readOnDiskManifest(profileDir, slug)
   if (manifest === undefined) throw new Error(`智能体 @${slug} 的 agent.json 不可读`)

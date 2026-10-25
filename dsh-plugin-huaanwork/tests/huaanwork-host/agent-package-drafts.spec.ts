@@ -145,6 +145,7 @@ describe('propose and commit', () => {
       source: 'local',
       enabled: false,
       installedVersion: '1.0.0',
+      publishStatus: 'none',
     })
     expect(readFileSync(join(agentPackageDir(root, 'weekly-report'), 'skill', 'SKILL.md'), 'utf8')).toBe(
       proposal.skill.markdown,

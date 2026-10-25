@@ -521,12 +521,12 @@ function requireLegacyHost(options: CreateAgentPackageHostOptions): AgentsHost {
   return host
 }
 
-/** 本地包 → 可调用条目;`name` 取 slug,`permissions` 由调用方的审批护栏负责。 */
+/** 本地/已安装包 → 可调用条目;`name` 取 slug,`permissions` 由调用方的审批护栏负责。 */
 function toInvocableListItem(pkg: AgentPackageListItem): AgentListItem {
   return {
     name: pkg.slug,
     displayName: pkg.displayName,
-    source: 'local',
+    source: pkg.source,
     kind: 'agent',
     description: pkg.description,
     version: pkg.version,

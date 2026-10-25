@@ -3,6 +3,7 @@ import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
 import type { DesktopPnpm } from '../pnpm.ts'
 import { emptyAttachments, type AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
 import type { AgentPackageHost } from './agent-package/host.ts'
+import type { AgentCatalogClient } from './agent-package/catalog-client.ts'
 import type { AgentPackageSubagentRequest } from './agent-package/types.ts'
 import type { HuaanworkEventHub } from './events.ts'
 import type { RouteContext } from './routes.ts'
@@ -39,6 +40,8 @@ declare module '@deepseek-ai/cordis' {
      */
     huaanworkPackageChildSessions: Set<string>
     huaanworkCheckpointUserDataDir: string
+    /** 签名广场 HTTP 客户端(发布/安装共用同一绑定);index 启动时注入。 */
+    huaanworkAgentCatalogClient: AgentCatalogClient
   }
 }
 
@@ -59,6 +62,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkAgentPackageRequest',
   'huaanworkPackageChildSessions',
   'huaanworkCheckpointUserDataDir',
+  'huaanworkAgentCatalogClient',
 ] as const
 
 let installed = false

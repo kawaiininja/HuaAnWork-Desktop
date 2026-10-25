@@ -38,6 +38,8 @@ export type AppSettings = {
   agents_port: number | ''
   /** 局域网智能体目录 Bearer 鉴权 token：缺省 ""。 */
   agents_catalog_token: string
+  /** 智能体目录发布 token（提交审查、查询自己的提交、申请下架）：缺省 ""。 */
+  agents_catalog_publish_token: string
 }
 
 export const DEFAULT_BASE_URL = 'http://127.0.0.1:11434/v1'
@@ -65,6 +67,7 @@ export const defaultSettings: AppSettings = {
   agents_host: '',
   agents_port: '',
   agents_catalog_token: '',
+  agents_catalog_publish_token: '',
 }
 
 export function emptySettings(): AppSettings {
@@ -183,6 +186,8 @@ export function parseSettings(raw: unknown): AppSettings {
     agents_host: typeof rec.agents_host === 'string' ? rec.agents_host.trim() : '',
     agents_port: parseAgentsPort(rec.agents_port),
     agents_catalog_token: typeof rec.agents_catalog_token === 'string' ? rec.agents_catalog_token.trim() : '',
+    agents_catalog_publish_token:
+      typeof rec.agents_catalog_publish_token === 'string' ? rec.agents_catalog_publish_token.trim() : '',
     ...mirrorActive(models, asString(rec.active_model_id)),
   }
 }
@@ -210,6 +215,10 @@ export function mergeSettings(current: AppSettings, params: unknown): AppSetting
     rec.agents_port !== undefined ? parseAgentsPort(rec.agents_port, current.agents_port) : current.agents_port
   const agentsCatalogToken =
     typeof rec.agents_catalog_token === 'string' ? rec.agents_catalog_token.trim() : current.agents_catalog_token
+  const agentsCatalogPublishToken =
+    typeof rec.agents_catalog_publish_token === 'string'
+      ? rec.agents_catalog_publish_token.trim()
+      : current.agents_catalog_publish_token
 
   if (Array.isArray(rec.models)) {
     models = []
@@ -261,6 +270,7 @@ export function mergeSettings(current: AppSettings, params: unknown): AppSetting
     agents_host: agentsHost,
     agents_port: agentsPort,
     agents_catalog_token: agentsCatalogToken,
+    agents_catalog_publish_token: agentsCatalogPublishToken,
     ...mirrorActive(models, activeId),
   }
 }
