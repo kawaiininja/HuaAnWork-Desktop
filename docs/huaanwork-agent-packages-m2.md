@@ -309,16 +309,21 @@ node --experimental-strip-types agent-catalog-admin/src/cli.ts migrate-legacy <s
 macOS：
 
 ```bash
-node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs \
+node --experimental-transform-types dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs \
   --platform darwin --out /tmp/agent-package-m2-darwin.json
 ```
 
 Windows（GHA，`workflow_dispatch`）：
 
 ```bash
-node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs \
+node --experimental-transform-types dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs \
   --platform win32 --out windows-agent-package-m2-acceptance.json
 ```
+
+> `--experimental-transform-types` 是必需的：探针静态 import `src/huaanwork-host/routes.ts`，
+> 其 `RouteError` 使用 TypeScript 参数属性，strip-only 模式无法加载（会以
+> `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` 在 import 阶段失败）。该 flag 只改变 TS 语法转译方式，
+> 不改变探针逻辑或断言；admin CLI 子进程仍用 `--experimental-strip-types`。
 
 退出码：`0` PASS；`1` FAIL（字段为 false 或断言失败，报告里有 `error` / `failedField`）；
 `3` BLOCKED（服务/环境起不来）；`2` 用法错误（含在非对应平台把结果标成 darwin/win32）。

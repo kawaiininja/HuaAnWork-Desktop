@@ -65,7 +65,11 @@ jobs:
       - name: Windows agent-package acceptance probe
         run: node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-windows-acceptance.mjs --platform win32 --out windows-agent-package-acceptance.json
       - name: Windows agent-package M2 acceptance probe
-        run: node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs --platform win32 --out windows-agent-package-m2-acceptance.json
+        # --experimental-transform-types is required: the M2 probe imports
+        # src/huaanwork-host/routes.ts, whose RouteError uses TypeScript
+        # parameter properties that strip-only mode cannot load. M1 does not
+        # import that module and stays on plain node.
+        run: node --experimental-transform-types dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs --platform win32 --out windows-agent-package-m2-acceptance.json
       - name: Upload acceptance report
         if: always()
         uses: actions/upload-artifact@v7

@@ -19,6 +19,10 @@
 `git log -1 --format=%H -- docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md`
 查询）。最终评审修复轮之前的运行（`13bb3fc90b`）只算**中间运行**（见 §2 的运行计数）。
 
+> **2026-10-25 fix round 1（裁定 R-T13-1）**：**权威运行是 §9**。它在代码提交
+> `f2eebef933` 上以 `node --experimental-transform-types …` 执行，退出码 0；§8 是同一代码
+> 的首次成功运行（以 transform-types 手工绕开 strip-only 的 import 限制），保留不删。
+
 这不是 GUI 真机，也不是跨机器验收。它证明的是：真实目录服务 + 真实离线 CLI 子进程 +
 两个 Profile 的签名包生命周期（发布 → 审查/签名 → 第二 Profile 安装 → 启用 → 真实 HTTP
 运行 → 1.0.1 更新保留启用态 → 下架后已安装卡 `delisted` 且仍可运行 → 长回合撤销被中止 →
@@ -733,6 +737,11 @@ brief 的字面命令与 Windows workflow 重新可用——(a) 把 `RouteError`
 白名单名额）；(b) 在运行命令与 `windows-agent-package-acceptance.yml` 的 M2 step 上加
 `--experimental-transform-types`。本轮**没有**改这两个白名单外文件。
 
+> **收尾（2026-10-25 fix round 1，裁定 R-T13-1）**：采纳**选项 (b)**。探针 usage 注释、
+> runbook（`docs/huaanwork-agent-packages-m2.md` §14）、workflow 的 M2 step 与本节之后的
+> 运行统一改用 `--experimental-transform-types`；`RouteError` 与产品源码一行未动。改用该
+> flag 后的权威运行见 **§9**，§8.2 命令 B 保留为同一条命令的首次成功记录。
+
 ### 8.3 运行环境
 
 | 项 | 值 |
@@ -1101,3 +1110,401 @@ ps -ax -o pid=,command= | grep -F "huaanwork-m2-accept-" | grep -v "grep -F"
   PASS，M2 step 因同一 strip-only import 问题失败。详见
   `2026-10-24-agent-package-m2-windows-acceptance.md` §8。跨机器验收仍为 `BLOCKED`（没有
   第二台 Windows 机器）。
+
+## 9. 权威运行：`--experimental-transform-types`（fix round 1，2026-10-25）
+
+本节是**当前权威**的 macOS 证据。§8 保留为同一份探针代码的首次成功运行（手工加
+`--experimental-transform-types` 绕开 strip-only）；§8.2 命令 A（strip-only 失败）同样保留，
+它是本轮换 flag 的依据。
+
+### 9.1 这一轮改了什么
+
+裁定 **R-T13-1** 选择「加 flag」而不是重构 `RouteError`：
+
+- `dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs` 的文件头
+  usage 注释与 `usage()` 打印的用法行改为 `node --experimental-transform-types …`；
+- `.github/workflows/windows-agent-package-acceptance.yml` 的 **M2 step** 改用
+  `node --experimental-transform-types`（M1 step 保持无 flag 的 `node`，它不 import
+  `routes.ts`）；
+- `docs/huaanwork-agent-packages-m2.md` §14 的两条探针命令同步加上该 flag；
+- 探针的 **CLI 子进程**仍是 `--experimental-strip-types`（admin CLI 不 import `routes.ts`，
+  不受影响），产品源码、路由接线、断言逻辑**一行未改**。
+
+`--experimental-transform-types` 只改变 TS 语法的转译方式（在 strip 之上增加参数属性、enum
+等转换），因此除 import 可行性外，本运行与 §8.6 的行为等价。
+
+### 9.2 命令与退出码
+
+```bash
+cd dsh-plugin-huaanwork
+node --experimental-transform-types scripts/huaanwork-agent-package-m2-acceptance.mjs \
+  --platform darwin --out /tmp/agent-package-m2-darwin-fix1.json
+echo "EXIT=$?"
+```
+
+结果：**`EXIT=0`**。stderr 有一条
+`ExperimentalWarning: Transform Types is an experimental feature and might change at any time`
+—— Node `v22.23.2` 上该 flag 仍标注实验性；它只影响 TS 转译，不进入报告 JSON。
+
+### 9.3 运行环境
+
+| 项 | 值 |
+| --- | --- |
+| 日期 | 2026-10-25（撤销审计时间戳 `2026-10-25T13:30:16.723Z`） |
+| HEAD | `f2eebef933cd3ab425ec55c2d8b9fecf14d31984`（探针报告 `commit` 同值；相对代码提交 `650e749af7` 只多了上一轮的证据提交） |
+| 工作树 | 运行前把本轮三处改动（探针注释、workflow、runbook）`git stash`，**已跟踪树干净**；运行后 `git stash pop` 恢复。两份未跟踪的规划/评审文档未提交、未参与运行 |
+| 机器 / OS / Node | MacBook-Pro-14.local（arm64）/ Darwin 27.0.0 / Node v22.23.2（`process.features.typescript === 'strip'`，必需显式 flag） |
+| 运行命令 | `node --experimental-transform-types … --out /tmp/agent-package-m2-darwin-fix1.json` |
+
+### 9.4 关键字段（RPC 证据）
+
+| 字段 | 值 / 证据源 |
+| --- | --- |
+| 11 个布尔字段 | 全 `true`（`submitted` … `revokedEnableRejected`） |
+| `delistedStatusVisible.primary` / `crossCheck` | `agent.packageRefresh` / `host.listLocal`（断言只读 RPC） |
+| `delistedStatusVisible.rpc.card` | `publishStatus:'delisted'`、`enabled:true`、无 `broken`、`version:'1.0.1'`、`latestVersion:'1.0.0'` |
+| `delistedStatusVisible.list.card` | `agent.packageList` 返回同一卡片 |
+| `delistedStatusVisible.catalogRefresh` | `catalogError:null`、`legacyItems:0` |
+| `revocationStoppedActiveTurn.primary` / `crossCheck` | `agent.packageRefresh` / `security.refreshRevocations` |
+| `revocationStoppedActiveTurn.rpc.card` | `revoked.version:'1.0.1'`、`enabled:false`、`broken.reason` 与撤销文案一致、`catalogError:null` |
+| `warnings` / `crossCheckWarning` | 均为 `null` |
+| `revokedEnableRejected.cardBroken` | 与 RPC 卡片 `broken.reason` 逐字相同 |
+| `residualProcesses` | `0`（`cleanup.scannedProcesses:821`，`matches:[]`） |
+| `verdict` / `exitCode` | `PASS` / `0` |
+
+### 9.5 进程清单
+
+按真实临时目录前缀复扫（探针已自行回收全部子进程）：
+
+```text
+ps -ax -o pid=,command= | grep -F "huaanwork-m2-accept-" | grep -v "grep -F"
+（无输出）
+ps -ax -o pid=,command= | wc -l
+     820
+```
+
+探针自身的扫描：`cleanup.command = "ps -ax -o pid=,command="`、`scannedProcesses:821`、
+`matches:[]`，与人工复扫一致。brief 里的
+`grep -F "$(mktemp -u /tmp/agent-package-m2-)"` 仍只命中执行它的 shell 自身，故沿用前缀复扫。
+
+### 9.6 原始 JSON（`/tmp/agent-package-m2-darwin-fix1.json`，未改动字段值）
+
+```json
+{
+  "submitted": true,
+  "reviewedAndSigned": true,
+  "secondProfileInstalled": true,
+  "signatureVerified": true,
+  "enabledAndHttpRan": true,
+  "updatedPreservingEnabled": true,
+  "delistedInstalledStillRan": true,
+  "delistedStatusVisible": true,
+  "revocationStoppedActiveTurn": true,
+  "revokedEnableRejected": true,
+  "residualProcesses": 0,
+  "kind": "huaanwork-agent-package-m2-acceptance",
+  "platform": "darwin",
+  "commit": "f2eebef933cd3ab425ec55c2d8b9fecf14d31984",
+  "runner": {
+    "os": "darwin",
+    "osRelease": "27.0.0",
+    "name": "MacBook-Pro-14.local",
+    "arch": "arm64",
+    "node": "v22.23.2"
+  },
+  "scope": {
+    "server": "agent-catalog-server in-process, real HTTP, ephemeral loopback port",
+    "adminCli": "agent-catalog-admin/src/cli.ts spawned as a child process",
+    "gui": false,
+    "realModel": false,
+    "note": "No GUI, no model interview and no packaged app. The sandbox is a passthrough seam; sandbox enforcement is covered by the M1 Windows sandbox probe."
+  },
+  "environment": {
+    "note": "entriesDir, dataDir, keyring, profiles and workspace are throwaway directories under the OS temp dir; the Ed25519 keypair is generated per run and never committed; all three tokens are random per run."
+  },
+  "tempRoot": "/var/folders/fc/j0sprzg92_926g51qh0pyp9w0000gn/T/huaanwork-m2-accept-LmPbrk",
+  "steps": {
+    "submitted": {
+      "submissionId": "496f5783-10f8-47d0-a3d0-cd9cd9355bc9",
+      "slug": "m2-acceptance-agent",
+      "version": "1.0.0",
+      "publishStatus": "pending-review",
+      "catalogList": {
+        "items": []
+      }
+    },
+    "reviewedAndSigned": {
+      "cli": [
+        {
+          "command": "agent-catalog-admin pending",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin review",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin approve",
+          "exitCode": 0
+        }
+      ],
+      "publishedStatus": "published",
+      "signedKeyId": "3387f071e46dfb04a36c347b3ab54d7da9521a847cf543fa3cb7b4a4e45bb86f",
+      "receipt": "/var/folders/fc/j0sprzg92_926g51qh0pyp9w0000gn/T/huaanwork-m2-accept-LmPbrk/review-1.0.0/review.json",
+      "creatorPublishStatus": "published"
+    },
+    "secondProfileInstalled": {
+      "profile": "consumer-profile",
+      "version": "1.0.0",
+      "enabled": false,
+      "publishStatus": "installed",
+      "creatorProfileState": "published"
+    },
+    "signatureVerified": {
+      "keyId": "3387f071e46dfb04a36c347b3ab54d7da9521a847cf543fa3cb7b4a4e45bb86f",
+      "slot": 1,
+      "version": "1.0.0",
+      "digestFiles": 4,
+      "note": "verifyAgentPackageDirectory re-reads the installed directory and checks keyId-authoritative Ed25519."
+    },
+    "enabledAndHttpRan": {
+      "version": "1.0.0",
+      "httpPort": 54617,
+      "health": {
+        "status": 200,
+        "body": "ok"
+      },
+      "invoke": {
+        "ok": true,
+        "result": {
+          "echo": {
+            "task": "m2-acceptance",
+            "version": "1.0.0"
+          }
+        }
+      },
+      "activationDisposed": true,
+      "portClosedAfterIdle": true,
+      "sandbox": "passthrough (M2 checks signed-package lifecycle; M1 probe owns sandbox enforcement)"
+    },
+    "updatedPreservingEnabled": {
+      "cli": [
+        {
+          "command": "agent-catalog-admin review",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin approve",
+          "exitCode": 0
+        }
+      ],
+      "from": "1.0.0",
+      "to": "1.0.1",
+      "enabled": true,
+      "publishStatus": "installed"
+    },
+    "delistedStatusVisible": {
+      "cli": [
+        {
+          "command": "agent-catalog-admin delist-requests",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin delist-approve",
+          "exitCode": 0
+        }
+      ],
+      "requestId": "d580f9e2-5718-4103-a0df-2d8abd27fbb1",
+      "publishStatus": "delisted",
+      "enabled": true,
+      "primary": "agent.packageRefresh",
+      "crossCheck": "host.listLocal",
+      "rpc": {
+        "method": "agent.packageRefresh",
+        "card": {
+          "slug": "m2-acceptance-agent",
+          "displayName": "M2 验收助手",
+          "description": "M2 双 Profile 验收用的签名智能体包",
+          "version": "1.0.1",
+          "source": "catalog",
+          "enabled": true,
+          "publishStatus": "delisted",
+          "latestVersion": "1.0.0",
+          "updateAvailable": false
+        },
+        "catalogError": null,
+        "revocationWarning": null
+      },
+      "list": {
+        "method": "agent.packageList",
+        "card": {
+          "slug": "m2-acceptance-agent",
+          "displayName": "M2 验收助手",
+          "description": "M2 双 Profile 验收用的签名智能体包",
+          "version": "1.0.1",
+          "source": "catalog",
+          "enabled": true,
+          "publishStatus": "delisted",
+          "latestVersion": "1.0.0",
+          "updateAvailable": false
+        }
+      },
+      "catalogRefresh": {
+        "route": "agent.packageRefresh → getAgentsDirectory().refresh()",
+        "catalogError": null,
+        "legacyItems": 0
+      },
+      "statusTransition": {
+        "before": "installed",
+        "after": "delisted",
+        "via": "agent.packageRefresh"
+      }
+    },
+    "delistedInstalledStillRan": {
+      "version": "1.0.1",
+      "invoke": {
+        "ok": true,
+        "result": {
+          "echo": {
+            "task": "m2-acceptance",
+            "version": "1.0.1"
+          }
+        }
+      },
+      "note": "delisted metadata changes the card, not the runtime; revocation is the security control.",
+      "portClosedAfterIdle": true
+    },
+    "revocationStoppedActiveTurn": {
+      "cli": {
+        "command": "agent-catalog-admin revoke",
+        "exitCode": 0
+      },
+      "primary": "agent.packageRefresh",
+      "crossCheck": "security.refreshRevocations",
+      "warnings": null,
+      "crossCheckWarning": null,
+      "rpc": {
+        "method": "agent.packageRefresh",
+        "card": {
+          "slug": "m2-acceptance-agent",
+          "displayName": "M2 验收助手",
+          "description": "M2 双 Profile 验收用的签名智能体包",
+          "version": "1.0.1",
+          "source": "catalog",
+          "enabled": false,
+          "publishStatus": "delisted",
+          "revoked": {
+            "slug": "m2-acceptance-agent",
+            "version": "1.0.1",
+            "reason": "M2 验收:撤销当前版本",
+            "revokedAt": "2026-10-25T13:30:16.723Z"
+          },
+          "broken": {
+            "reason": "该版本已被管理员撤销：M2 验收:撤销当前版本"
+          },
+          "latestVersion": "1.0.0",
+          "updateAvailable": false
+        },
+        "catalogError": null
+      },
+      "session": "m2-acceptance-session-3",
+      "httpPort": 54639,
+      "activationDisposed": true,
+      "activationResultPending": true,
+      "portClosed": true,
+      "state": {
+        "enabled": false,
+        "revokedVersion": "1.0.1",
+        "revokedReason": "M2 验收:撤销当前版本"
+      }
+    },
+    "revokedEnableRejected": {
+      "enableError": "智能体 @m2-acceptance-agent 已损坏:该版本已被管理员撤销：M2 验收:撤销当前版本",
+      "staleDispatchError": "该版本已被管理员撤销：M2 验收:撤销当前版本",
+      "assertRunnableError": "该版本已被管理员撤销：M2 验收:撤销当前版本",
+      "primary": "agent.packageRefresh",
+      "crossCheck": "host.listLocal",
+      "cardBroken": "该版本已被管理员撤销：M2 验收:撤销当前版本"
+    },
+    "finalState": {
+      "creator": {
+        "source": "local",
+        "enabled": true,
+        "installedVersion": "1.0.1",
+        "publishStatus": "published",
+        "publishedVersion": "1.0.1",
+        "submissionId": "7b05540d-600e-454d-995c-d5fa4b6730f2",
+        "delistRequestId": "d580f9e2-5718-4103-a0df-2d8abd27fbb1"
+      },
+      "consumer": {
+        "source": "catalog",
+        "enabled": false,
+        "installedVersion": "1.0.1",
+        "publishStatus": "delisted",
+        "revoked": {
+          "slug": "m2-acceptance-agent",
+          "version": "1.0.1",
+          "reason": "M2 验收:撤销当前版本",
+          "revokedAt": "2026-10-25T13:30:16.723Z"
+        }
+      },
+      "auditLines": 44
+    }
+  },
+  "negatives": {
+    "wrongToken": {
+      "status": 401,
+      "body": {
+        "error": "口令错误"
+      },
+      "ok": true
+    },
+    "unknownKey": {
+      "error": "包校验失败，未安装或未运行。请联系管理员",
+      "ok": true
+    },
+    "tamperedContent": {
+      "error": "包校验失败，未安装或未运行。请联系管理员",
+      "ok": true
+    },
+    "olderVersionReplay": {
+      "error": "该版本不是目录中的最新版本，已拒绝安装",
+      "ok": true
+    },
+    "delistedVersionInstall": {
+      "error": "目录中没有版本 1.0.1",
+      "ok": true,
+      "coveredBy": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts:602 「rejects a revoked version and reports the administrator reason」"
+    },
+    "coveredByIntegrationTests": {
+      "unsignedOrSignatureCarryingBundle": "packages/agent-package-format/tests/bundle.test.ts",
+      "extraFilesAndMismatchedManifest": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts",
+      "retiredAndWrongKeys": "agent-catalog-server/tests/submissions.spec.ts",
+      "tooManyEntriesAndLongPaths": "packages/agent-package-format/tests/bundle.test.ts",
+      "downgradeAndDelistedLatest": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts",
+      "wrongPublishOrAdminToken": "agent-catalog-server/tests/auth-legacy.spec.ts",
+      "revocationAndActiveTurn": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-security.spec.ts"
+    }
+  },
+  "cleanup": {
+    "scannedProcesses": 821,
+    "matches": [],
+    "command": "ps -ax -o pid=,command=",
+    "note": "Matches are processes whose command line references the throwaway temp root; the probe itself is excluded."
+  },
+  "verdict": "PASS",
+  "exitCode": 0
+}
+```
+
+### 9.7 与 §8 的差异
+
+- **HEAD**：`f2eebef933`（上一轮的证据提交）vs `650e749af7`（探针代码提交）。两者之间只
+  有一份文档提交，探针逻辑逐字相同。
+- **随机量不同属正常**：`submissionId`（`496f5783…` / `7b05540d…`）、`signedKeyId`、
+  `requestId`、`tempRoot`、各端口、`revokedAt` 每次运行都变。
+- **稳定量一致**：11 个布尔、`negative` 集合与文案、`auditLines:44`、`residualProcesses:0`、
+  `cleanup.matches:[]`；`cleanup.scannedProcesses` 由 819 变为 821（系统进程数波动）。
+- **本轮未重跑** `corepack yarn check`（Task 14 收口门禁）；改动只涉及探针 usage 注释、
+  workflow 的 M2 step 与文档命令文本，未触碰产品源码。
+

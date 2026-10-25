@@ -41,8 +41,11 @@
  * for the runbook and docs/evidence/2026-10-24-agent-package-m2-*-acceptance.md
  * for the recorded runs.
  *
- * Usage:
- *   node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs \
+ * Usage (the static import of `src/huaanwork-host/routes.ts` pulls in a class
+ * that uses TypeScript parameter properties, which strip-only mode cannot
+ * load, so the probe must run with `--experimental-transform-types`):
+ *   node --experimental-transform-types \
+ *     dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs \
  *     --platform darwin --out /tmp/agent-package-m2-darwin.json
  */
 
@@ -154,7 +157,7 @@ const log = (message) =>
 
 function usage(message) {
   log(message)
-  log('usage: node scripts/huaanwork-agent-package-m2-acceptance.mjs --platform <darwin|win32> [--out <file>]')
+  log('usage: node --experimental-transform-types scripts/huaanwork-agent-package-m2-acceptance.mjs --platform <darwin|win32> [--out <file>]')
   process.exit(2)
 }
 
