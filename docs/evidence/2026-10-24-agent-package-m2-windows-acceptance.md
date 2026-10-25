@@ -640,4 +640,3 @@ canonical 运行。
 | artifact | `windows-agent-package-acceptance`（本次下载后归档为 `docs/evidence/2026-10-25-agent-package-m2-windows-finalfix.json`） |
 
 跨机器验收仍为 `BLOCKED`（没有第二台 Windows 机器）；不能用本节的同机双 Profile 结果替代。
-

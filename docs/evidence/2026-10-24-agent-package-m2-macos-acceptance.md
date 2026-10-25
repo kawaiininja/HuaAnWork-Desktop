@@ -1530,4 +1530,3 @@ audit reconciliation，并在 `68580abfca` 更新文档。按〈最终门槛〉�
 
 最终代码 HEAD 的 `corepack yarn check` 在同一提交上以 exit 0 通过（Task 14 之后的
 final fix wave 复跑）；本节的复跑证明 final fix wave 没有破坏真实发布/刷新/下架/撤销链路。
-
