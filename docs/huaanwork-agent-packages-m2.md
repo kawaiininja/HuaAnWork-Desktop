@@ -1,18 +1,20 @@
 # 智能体包 M2 部署与离线签名 runbook
 
-> **状态（2026-10-24，Task 13 记录）**
+> **状态（2026-10-25 fix round 1 更新）**
 >
-> - **macOS 双 Profile 探针：`PASS（本机探针）`。** 命令与原始 JSON 见
->   `docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md`；探针退出码 0，
->   11 个字段全为 `true`，`residualProcesses` 为 0。
-> - **Windows：`BLOCKED`，不是 PASS。** 本环境不能推送分支，也就无法触发
->   `workflow_dispatch`（C21）。待执行的命令与 runbook 步骤已写入
->   `docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md`；Windows 证据文件
->   没有退出码 0 的 run，因此**不得**把它写成通过。
+> - **macOS 双 Profile 探针：`PASS（本机探针）`，退出码 0。** 权威运行（commit
+>   `f2eebef933`，`node --experimental-transform-types`）见
+>   `docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md` §9；11 个字段全为
+>   `true`，`residualProcesses` 为 0。
+> - **Windows GHA 探针：`PASS`，退出码 0。** run
+>   `40198346429`（commit `93c1bb0291`，M1 step 与 M2 step 均 exit 0），原始 JSON 见
+>   `docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md` §9。此前的失败运行
+>   `40195462983` 保留在该文件 §8（根因是 strip-only 无法 import `routes.ts`，已由
+>   `--experimental-transform-types` 处置，裁定 R-T13-1）。
 > - **跨机器验收（macOS 创建者 + Windows 消费机 + 离线管理员）：`BLOCKED`。** 本环境只有
->   一台机器，同机双 Profile 只算集成测试，不能替代跨机器验收。
-> - 因为 macOS 与 Windows **没有都通过**，本轮 runbook **不写**“M2 双平台验收 PASS”。
->   只有两份证据都出现退出码 0 的运行后，才能改用那句话。
+>   一台机器（且没有第二台 Windows 机器），同机双 Profile 只算集成测试，不能替代跨机器验收。
+> - 因此可以写「M2 双平台**本机/GHA 探针** PASS」，但**不得**读成 M2 完整收口：跨机器验收
+>   仍为 `BLOCKED`，需要两台机器各留原始证据与进程清单。
 >
 > M2 的验收面是：签名包的发布、离线审查与签名、第二 Profile 验签安装、启用与真实 HTTP
 > 运行、更新保留启用态、下架后的已安装卡状态、撤销中止在途回合，以及无残留进程。它
@@ -337,10 +339,10 @@ node --experimental-transform-types dsh-plugin-huaanwork/scripts/huaanwork-agent
 
 | 平台 | 状态 | 证据 |
 | --- | --- | --- |
-| macOS 双 Profile 探针 | `PASS（本机探针）` | `docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md` |
-| Windows GHA 探针 | `BLOCKED`（未运行；本环境不能 push/触发 workflow） | `docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md` |
+| macOS 双 Profile 探针 | `PASS（本机探针）`，exit 0 | `docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md` §9（权威运行） |
+| Windows GHA 探针 | `PASS`，exit 0（run `40198346429`，commit `93c1bb0291`） | `docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md` §9 |
 | 跨机器验收（macOS 创建者 + Windows 消费机 + 离线管理员） | `BLOCKED`（只有一台机器） | 同上两份证据的“跨机器”章节 |
 
-出现 Windows 退出码 0 的 run 之后，把 run URL 与原始 JSON 追加到 Windows 证据文件；只有
-macOS 与 Windows **都**为 PASS 时，才可以把状态改成“M2 双平台验收 PASS”。跨机器验收仍需
-两台机器各留原始证据与进程清单。
+macOS 与 Windows **都**为 PASS（同机双 Profile 集成测试）。跨机器验收仍需两台机器各留原始
+证据与进程清单，因此在它完成之前描述 M2 时只能写「双平台本机/GHA 探针 PASS，跨机器
+`BLOCKED`」。

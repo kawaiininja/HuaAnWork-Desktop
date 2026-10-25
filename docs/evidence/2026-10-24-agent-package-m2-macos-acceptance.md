@@ -1507,4 +1507,3 @@ ps -ax -o pid=,command= | wc -l
   `cleanup.matches:[]`；`cleanup.scannedProcesses` 由 819 变为 821（系统进程数波动）。
 - **本轮未重跑** `corepack yarn check`（Task 14 收口门禁）；改动只涉及探针 usage 注释、
   workflow 的 M2 step 与文档命令文本，未触碰产品源码。
-
