@@ -18,7 +18,7 @@ import {
   type GeneratedKeyPair,
 } from '@huaanwork/catalog-signing'
 
-import { emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
+import { attachAgentTools, emptyAttachments, type AttachmentMaps } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import {
   AGENT_CATALOG_UNREACHABLE_ERROR,
   AgentCatalogClientError,
@@ -59,6 +59,7 @@ import type {
   AgentPackageDetail,
   AgentPackageRevocation,
   AgentPackageState,
+  AgentPackageSubagentRequest,
   AgentPackageTurnRuntime,
 } from '../../src/huaanwork-host/agent-package/types.ts'
 import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
@@ -317,13 +318,26 @@ type TurnHarness = {
   pkg: () => Promise<AgentPackageDetail>
 }
 
+/**
+ * `startActivation` 收到的启动面:足够让假 activation 像 `skills.ts` 的包装一样
+ * 在同一段 await 里把预留子会话绑定回宿主。
+ */
+type FakeActivationStart = {
+  /** 宿主传给 `startActivation` 的预留子会话 id;provider 沿用它时才走包包装。 */
+  childId: string | undefined
+  /** 包装在第一个 await 之前快照的包请求;`bindChild` 就在这个对象上。 */
+  packageRequest: AgentPackageSubagentRequest | null
+  /** 宿主与包装共享的附件表,包装在这里挂包工具。 */
+  attachments: AttachmentMaps
+}
+
 type TurnHarnessOptions = {
   slug?: string
   security?: AgentCatalogSecurity
   turns?: AgentPackageActiveTurnRegistry
   createRuntime?: (options: StartAgentPackageProcessesOptions) => Promise<AgentPackageTurnRuntime>
   stopRuntime?: (runtime: AgentPackageTurnRuntime) => Promise<void>
-  startActivation?: () => Promise<FakeActivation>
+  startActivation?: (start: FakeActivationStart) => Promise<FakeActivation>
 }
 
 function makeTurnHarness(options: TurnHarnessOptions = {}): TurnHarness {
@@ -364,9 +378,18 @@ function makeTurnHarness(options: TurnHarnessOptions = {}): TurnHarness {
     huaanworkAgentPackageRequest: { current: null },
     huaanworkPackageChildSessions: new Set<string>(),
     subagents: {
-      startActivation: async () => {
+      startActivation: async (spec: { childId?: string } = {}) => {
         activationStarts += 1
-        if (options.startActivation !== undefined) return options.startActivation()
+        // 与 `skills.ts` 一致:包请求在第一个 await 之前快照,activation 返回前
+        // 由包装调用 `bindChild` —— 这正是取消期间晚到绑定的来源。
+        const packageRequest = ctx.huaanworkAgentPackageRequest?.current ?? null
+        if (options.startActivation !== undefined) {
+          return options.startActivation({
+            childId: spec.childId,
+            packageRequest,
+            attachments: ctx.huaanworkAttachments,
+          })
+        }
         return {
           childId: `child-${String(activationStarts)}`,
           result: Promise.resolve({}),
@@ -592,6 +615,69 @@ describe('catalog revocations', () => {
 
     // 占位已释放;下一次 dispatch 在撤销后按规范拒绝,而不是「回合运行中」。
     await expect(harness.dispatch()).rejects.toThrow(/该版本已被管理员撤销/)
+  })
+
+  test('a cancel during startActivation clears the wrapper’s late child binding', async () => {
+    installEnabledCatalogPackage()
+    const turns = createAgentPackageActiveTurnRegistry()
+    const security = catalogSecurity(
+      fakeCatalogClient({ getRevocations: async () => [revocation(SLUG, '1.0.0', '不安全脚本')] }),
+      turns,
+    )
+    const activationStarted = deferred<void>()
+    const resumeWrapper = deferred<void>()
+    let disposeCalls = 0
+    let lateChildId: string | undefined
+    let attachedDuringWrapper = false
+    const harness = makeTurnHarness({
+      security,
+      turns,
+      startActivation: async ({ childId, packageRequest, attachments }) => {
+        lateChildId = childId
+        activationStarted.resolve()
+        await resumeWrapper.promise
+        // 包装恢复:与 skills.ts 同序 —— 先挂工具,再 bindChild(childSessionId)。
+        if (childId !== undefined) {
+          attachAgentTools(attachments, childId, ['agent_http'])
+          packageRequest?.bindChild(childId)
+          attachedDuringWrapper = attachments.sessionAgentTools.has(childId)
+        }
+        return {
+          childId: childId ?? 'child',
+          result: new Promise(() => undefined),
+          dispose: async () => {
+            disposeCalls += 1
+          },
+        }
+      },
+    })
+
+    const running = harness.dispatch()
+    await activationStarted.promise
+
+    // 取消落在 startActivation 期间:第一次 cleanup 跑完时 activation 还不存在,
+    // 预留子会话的解绑与标记清除已经发生过一次。
+    await security.refreshRevocations()
+    expect(disposeCalls).toBe(0)
+
+    // 包装此刻才恢复,把已被清掉的预留子会话重新挂回宿主(这就是泄漏形状)。
+    resumeWrapper.resolve()
+    await expect(running).rejects.toThrow(/该版本已被管理员撤销：不安全脚本/)
+
+    expect(attachedDuringWrapper).toBe(true)
+    expect(lateChildId).toBeDefined()
+    const childId = lateChildId as string
+    // 晚到 activation 只 dispose 一次;它的绑定必须在抛出前被再清一遍。
+    expect(disposeCalls).toBe(1)
+    expect(harness.stopCalls()).toBe(1)
+    const ctx = harness.ctx as {
+      huaanworkPackageChildSessions: Set<string>
+      huaanworkAttachments: AttachmentMaps
+    }
+    expect(ctx.huaanworkPackageChildSessions.has(childId)).toBe(false)
+    expect(ctx.huaanworkAttachments.sessionAgentTools.has(childId)).toBe(false)
+    expect(harness.runtimes.get(childId)).toBeUndefined()
+    expect(harness.runtimes.get('parent-session')).toBeUndefined()
   })
 
   test('a revocation that lands while verifying is not missed (generation re-check)', async () => {

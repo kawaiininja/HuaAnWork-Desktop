@@ -504,6 +504,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       let cancelRequested = false
       let cancelReason: AgentPackageTurnCancelReason | undefined
       let cancelPromise: Promise<void> | undefined
+      /** 收尾链路正在同步建立(共享 promise 尚未赋值)时的重入标志。 */
+      let cancelling = false
       let disposePromise: Promise<void> | undefined
       let stopRuntimePromise: Promise<void> | undefined
       let unregister: (() => void) | undefined
@@ -575,6 +577,39 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         registry.bind(childSessionId, runtime)
       }
 
+      /**
+       * Undo everything this turn attached to a child session: the registry binding,
+       * the tool attachments, `present-as`'s restrict and the policy's package-runtime
+       * marker.
+       *
+       * Repeatable by design. When cancellation lands while `startActivation` is still
+       * pending, `skills.ts` resumes after the first cleanup pass and calls `bindChild`,
+       * which re-adds the child to every one of those places. The late-activation branch
+       * disposes the activation and then runs this once more, so a revoked turn cannot
+       * leave behind a stale policy exemption for an id the policy treats as dead.
+       */
+      const releaseChildBindings = (): void => {
+        const current = runtime
+        // Detach exactly what `skills.ts` attached to each child; `request.allow`
+        // omits tools the package does not enable, so it cannot mirror the attachment.
+        const childNames = [...new Set([...AGENT_PACKAGE_CHILD_TOOLS, ...(current?.mcpNames ?? [])])]
+        for (const childSessionId of boundChildren) {
+          if (current !== undefined && registry.get(childSessionId) === current) registry.delete(childSessionId)
+          if (ctx.huaanworkAttachments !== undefined) {
+            detachAgentTools(ctx.huaanworkAttachments, childSessionId, childNames)
+          }
+          refreshAgentRestrict(ctx as never, childSessionId)
+        }
+        boundChildren.clear()
+        // Clear the policy's marker for every id this turn bound. `Set.delete` is
+        // idempotent and only ever removes this turn's ids, so repeated passes cannot
+        // strip a newer turn's markers.
+        for (const childSessionId of packageChildSessions) {
+          ctx.huaanworkPackageChildSessions?.delete(childSessionId)
+        }
+        packageChildSessions.clear()
+      }
+
       const cleanup = async (): Promise<void> => {
         // The reservation belongs to this turn and ends with the first cleanup call,
         // including every failure path that reaches `catch` below.
@@ -624,27 +659,11 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
             if (current !== undefined) {
               // A late afterIdle must not delete a newer turn's binding for the same session.
               if (registry.get(sessionId) === current) registry.delete(sessionId)
-              // Detach exactly what `skills.ts` attached to each child; `request.allow`
-              // omits tools the package does not enable, so it cannot mirror the attachment.
-              const childNames = [...new Set([...AGENT_PACKAGE_CHILD_TOOLS, ...(current.mcpNames ?? [])])]
-              for (const childSessionId of boundChildren) {
-                if (registry.get(childSessionId) === current) registry.delete(childSessionId)
-                if (ctx.huaanworkAttachments !== undefined) {
-                  detachAgentTools(ctx.huaanworkAttachments, childSessionId, childNames)
-                }
-                refreshAgentRestrict(ctx as never, childSessionId)
-              }
             }
+            releaseChildBindings()
             if (request !== null && ctx.huaanworkAgentPackageRequest?.current === request) {
               ctx.huaanworkAgentPackageRequest.current = null
             }
-            // Clear the policy's package-runtime marker for every id this turn bound. The
-            // body runs once and Set.delete is idempotent, so repeated cleanup cannot
-            // strip a newer turn's ids (it only ever removes its own).
-            for (const childSessionId of packageChildSessions) {
-              ctx.huaanworkPackageChildSessions?.delete(childSessionId)
-            }
-            packageChildSessions.clear()
           } finally {
             // 清理完成后注销登记:unregister 幂等,且只在表里仍是本 record 时删除,
             // 晚到的清理不会抹掉同 session 的新回合登记。
@@ -661,11 +680,15 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
        */
       const cancelTurn = (reason: AgentPackageTurnCancelReason): Promise<void> => {
         if (cancelPromise !== undefined) return cancelPromise
+        // `abort` 可能同步触发监听器重入本函数:共享 promise 必须先于 abort 建立,
+        // 并且用 `cancelling` 覆盖「收尾链路同步建立中」的窗口,否则会起两条收尾
+        // 链路,后到的 reason 覆盖先到的。
+        if (cancelling) return Promise.resolve().then(() => cancelPromise ?? Promise.resolve())
+        cancelling = true
         cancelRequested = true
         cancelReason = reason
-        controller.abort(cancelError())
-        openCancelGate()
-        cancelPromise = (async () => {
+        const error = cancelError()
+        const teardown = (async () => {
           const currentActivation = activation
           if (currentActivation !== undefined) {
             await settleWithin(disposeActivation(currentActivation), ACTIVATION_CLEANUP_TIMEOUT_MS)
@@ -674,6 +697,9 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           if (currentRuntime !== undefined) await stopTurnRuntime(currentRuntime)
           await cleanup()
         })()
+        cancelPromise = teardown
+        openCancelGate()
+        controller.abort(error)
         return cancelPromise
       }
 
@@ -801,6 +827,10 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         void activation.result.catch(() => undefined)
         if (cancelRequested || signal.aborted) {
           await settleWithin(disposeActivation(activation), ACTIVATION_CLEANUP_TIMEOUT_MS)
+          // The wrapper resumes during `startActivation` and may bind the child after the
+          // first cleanup pass already unbound it; dispose the late activation and clear
+          // whatever it re-added before failing the turn.
+          releaseChildBindings()
           await cleanup()
           throw cancelError()
         }
