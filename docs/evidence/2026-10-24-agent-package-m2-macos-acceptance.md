@@ -1507,3 +1507,27 @@ ps -ax -o pid=,command= | wc -l
   `cleanup.matches:[]`；`cleanup.scannedProcesses` 由 819 变为 821（系统进程数波动）。
 - **本轮未重跑** `corepack yarn check`（Task 14 收口门禁）；改动只涉及探针 usage 注释、
   workflow 的 M2 step 与文档命令文本，未触碰产品源码。
+
+---
+
+## 10. 最终代码 HEAD 的复跑（final fix wave 之后）
+
+§9 的探针来源是 `f2eebef933`；最终 fix wave 在 `b2821f27f7` 修改了 publish sidecar 与
+audit reconciliation，并在 `68580abfca` 更新文档。按〈最终门槛〉“验收须在最终 HEAD 通过”
+的要求，本节是最终代码 HEAD 的 canonical 运行。
+
+| 项 | 值 |
+| --- | --- |
+| 代码 HEAD | `68580abfca5160a2d2e9ea6e96ea636f81585089` |
+| 命令 | `node --experimental-transform-types scripts/huaanwork-agent-package-m2-acceptance.mjs --platform darwin --out /tmp/agent-package-m2-darwin-finalfix.json` |
+| 退出码 | **0** |
+| verdict | **PASS** |
+| 11 个字段 | 全部 `true` |
+| `residualProcesses` | `0`；`cleanup.scannedProcesses: 814`，`cleanup.matches: []` |
+| 下架卡片 | `primary: agent.packageRefresh`；`publishStatus: delisted`，`enabled: true`，`statusTransition.installed → delisted`，`catalogError: null`，`revocationWarning: null` |
+| 撤销卡片 | `primary: agent.packageRefresh`；`enabled: false`，`revoked.version: 1.0.1`，`broken.reason: 该版本已被管理员撤销：M2 验收:撤销当前版本`；`activationDisposed: true`，`portClosed: true` |
+| 原始 JSON | `docs/evidence/2026-10-25-agent-package-m2-darwin-finalfix.json`（完整 probe 输出，10,208 字节） |
+
+最终代码 HEAD 的 `corepack yarn check` 在同一提交上以 exit 0 通过（Task 14 之后的
+final fix wave 复跑）；本节的复跑证明 final fix wave 没有破坏真实发布/刷新/下架/撤销链路。
+

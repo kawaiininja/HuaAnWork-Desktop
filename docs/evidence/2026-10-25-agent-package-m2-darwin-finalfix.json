@@ -1,0 +1,305 @@
+{
+  "submitted": true,
+  "reviewedAndSigned": true,
+  "secondProfileInstalled": true,
+  "signatureVerified": true,
+  "enabledAndHttpRan": true,
+  "updatedPreservingEnabled": true,
+  "delistedInstalledStillRan": true,
+  "delistedStatusVisible": true,
+  "revocationStoppedActiveTurn": true,
+  "revokedEnableRejected": true,
+  "residualProcesses": 0,
+  "kind": "huaanwork-agent-package-m2-acceptance",
+  "platform": "darwin",
+  "commit": "68580abfca5160a2d2e9ea6e96ea636f81585089",
+  "runner": {
+    "os": "darwin",
+    "osRelease": "27.0.0",
+    "name": "MacBook-Pro-14.local",
+    "arch": "arm64",
+    "node": "v22.23.2"
+  },
+  "scope": {
+    "server": "agent-catalog-server in-process, real HTTP, ephemeral loopback port",
+    "adminCli": "agent-catalog-admin/src/cli.ts spawned as a child process",
+    "gui": false,
+    "realModel": false,
+    "note": "No GUI, no model interview and no packaged app. The sandbox is a passthrough seam; sandbox enforcement is covered by the M1 Windows sandbox probe."
+  },
+  "environment": {
+    "note": "entriesDir, dataDir, keyring, profiles and workspace are throwaway directories under the OS temp dir; the Ed25519 keypair is generated per run and never committed; all three tokens are random per run."
+  },
+  "tempRoot": "/var/folders/fc/j0sprzg92_926g51qh0pyp9w0000gn/T/huaanwork-m2-accept-mapaKQ",
+  "steps": {
+    "submitted": {
+      "submissionId": "f382461f-9f52-4ea7-8790-04288135f1f4",
+      "slug": "m2-acceptance-agent",
+      "version": "1.0.0",
+      "publishStatus": "pending-review",
+      "catalogList": {
+        "items": []
+      }
+    },
+    "reviewedAndSigned": {
+      "cli": [
+        {
+          "command": "agent-catalog-admin pending",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin review",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin approve",
+          "exitCode": 0
+        }
+      ],
+      "publishedStatus": "published",
+      "signedKeyId": "884f80ecd7be10c263229f434f4b523006e9fdf9de7a3f771c6906f311ae815e",
+      "receipt": "/var/folders/fc/j0sprzg92_926g51qh0pyp9w0000gn/T/huaanwork-m2-accept-mapaKQ/review-1.0.0/review.json",
+      "creatorPublishStatus": "published"
+    },
+    "secondProfileInstalled": {
+      "profile": "consumer-profile",
+      "version": "1.0.0",
+      "enabled": false,
+      "publishStatus": "installed",
+      "creatorProfileState": "published"
+    },
+    "signatureVerified": {
+      "keyId": "884f80ecd7be10c263229f434f4b523006e9fdf9de7a3f771c6906f311ae815e",
+      "slot": 1,
+      "version": "1.0.0",
+      "digestFiles": 4,
+      "note": "verifyAgentPackageDirectory re-reads the installed directory and checks keyId-authoritative Ed25519."
+    },
+    "enabledAndHttpRan": {
+      "version": "1.0.0",
+      "httpPort": 54452,
+      "health": {
+        "status": 200,
+        "body": "ok"
+      },
+      "invoke": {
+        "ok": true,
+        "result": {
+          "echo": {
+            "task": "m2-acceptance",
+            "version": "1.0.0"
+          }
+        }
+      },
+      "activationDisposed": true,
+      "portClosedAfterIdle": true,
+      "sandbox": "passthrough (M2 checks signed-package lifecycle; M1 probe owns sandbox enforcement)"
+    },
+    "updatedPreservingEnabled": {
+      "cli": [
+        {
+          "command": "agent-catalog-admin review",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin approve",
+          "exitCode": 0
+        }
+      ],
+      "from": "1.0.0",
+      "to": "1.0.1",
+      "enabled": true,
+      "publishStatus": "installed"
+    },
+    "delistedStatusVisible": {
+      "cli": [
+        {
+          "command": "agent-catalog-admin delist-requests",
+          "exitCode": 0
+        },
+        {
+          "command": "agent-catalog-admin delist-approve",
+          "exitCode": 0
+        }
+      ],
+      "requestId": "5cee34e5-ff98-402a-8bb8-710eed37bf53",
+      "publishStatus": "delisted",
+      "enabled": true,
+      "primary": "agent.packageRefresh",
+      "crossCheck": "host.listLocal",
+      "rpc": {
+        "method": "agent.packageRefresh",
+        "card": {
+          "slug": "m2-acceptance-agent",
+          "displayName": "M2 验收助手",
+          "description": "M2 双 Profile 验收用的签名智能体包",
+          "version": "1.0.1",
+          "source": "catalog",
+          "enabled": true,
+          "publishStatus": "delisted",
+          "latestVersion": "1.0.0",
+          "updateAvailable": false
+        },
+        "catalogError": null,
+        "revocationWarning": null
+      },
+      "list": {
+        "method": "agent.packageList",
+        "card": {
+          "slug": "m2-acceptance-agent",
+          "displayName": "M2 验收助手",
+          "description": "M2 双 Profile 验收用的签名智能体包",
+          "version": "1.0.1",
+          "source": "catalog",
+          "enabled": true,
+          "publishStatus": "delisted",
+          "latestVersion": "1.0.0",
+          "updateAvailable": false
+        }
+      },
+      "catalogRefresh": {
+        "route": "agent.packageRefresh → getAgentsDirectory().refresh()",
+        "catalogError": null,
+        "legacyItems": 0
+      },
+      "statusTransition": {
+        "before": "installed",
+        "after": "delisted",
+        "via": "agent.packageRefresh"
+      }
+    },
+    "delistedInstalledStillRan": {
+      "version": "1.0.1",
+      "invoke": {
+        "ok": true,
+        "result": {
+          "echo": {
+            "task": "m2-acceptance",
+            "version": "1.0.1"
+          }
+        }
+      },
+      "note": "delisted metadata changes the card, not the runtime; revocation is the security control.",
+      "portClosedAfterIdle": true
+    },
+    "revocationStoppedActiveTurn": {
+      "cli": {
+        "command": "agent-catalog-admin revoke",
+        "exitCode": 0
+      },
+      "primary": "agent.packageRefresh",
+      "crossCheck": "security.refreshRevocations",
+      "warnings": null,
+      "crossCheckWarning": null,
+      "rpc": {
+        "method": "agent.packageRefresh",
+        "card": {
+          "slug": "m2-acceptance-agent",
+          "displayName": "M2 验收助手",
+          "description": "M2 双 Profile 验收用的签名智能体包",
+          "version": "1.0.1",
+          "source": "catalog",
+          "enabled": false,
+          "publishStatus": "delisted",
+          "revoked": {
+            "slug": "m2-acceptance-agent",
+            "version": "1.0.1",
+            "reason": "M2 验收:撤销当前版本",
+            "revokedAt": "2026-10-25T15:09:33.066Z"
+          },
+          "broken": {
+            "reason": "该版本已被管理员撤销：M2 验收:撤销当前版本"
+          },
+          "latestVersion": "1.0.0",
+          "updateAvailable": false
+        },
+        "catalogError": null
+      },
+      "session": "m2-acceptance-session-3",
+      "httpPort": 54472,
+      "activationDisposed": true,
+      "activationResultPending": true,
+      "portClosed": true,
+      "state": {
+        "enabled": false,
+        "revokedVersion": "1.0.1",
+        "revokedReason": "M2 验收:撤销当前版本"
+      }
+    },
+    "revokedEnableRejected": {
+      "enableError": "智能体 @m2-acceptance-agent 已损坏:该版本已被管理员撤销：M2 验收:撤销当前版本",
+      "staleDispatchError": "该版本已被管理员撤销：M2 验收:撤销当前版本",
+      "assertRunnableError": "该版本已被管理员撤销：M2 验收:撤销当前版本",
+      "primary": "agent.packageRefresh",
+      "crossCheck": "host.listLocal",
+      "cardBroken": "该版本已被管理员撤销：M2 验收:撤销当前版本"
+    },
+    "finalState": {
+      "creator": {
+        "source": "local",
+        "enabled": true,
+        "installedVersion": "1.0.1",
+        "publishStatus": "published",
+        "publishedVersion": "1.0.1",
+        "submissionId": "655443c3-21e7-4272-b16c-a8e9727cda91",
+        "delistRequestId": "5cee34e5-ff98-402a-8bb8-710eed37bf53"
+      },
+      "consumer": {
+        "source": "catalog",
+        "enabled": false,
+        "installedVersion": "1.0.1",
+        "publishStatus": "delisted",
+        "revoked": {
+          "slug": "m2-acceptance-agent",
+          "version": "1.0.1",
+          "reason": "M2 验收:撤销当前版本",
+          "revokedAt": "2026-10-25T15:09:33.066Z"
+        }
+      },
+      "auditLines": 44
+    }
+  },
+  "negatives": {
+    "wrongToken": {
+      "status": 401,
+      "body": {
+        "error": "口令错误"
+      },
+      "ok": true
+    },
+    "unknownKey": {
+      "error": "包校验失败，未安装或未运行。请联系管理员",
+      "ok": true
+    },
+    "tamperedContent": {
+      "error": "包校验失败，未安装或未运行。请联系管理员",
+      "ok": true
+    },
+    "olderVersionReplay": {
+      "error": "该版本不是目录中的最新版本，已拒绝安装",
+      "ok": true
+    },
+    "delistedVersionInstall": {
+      "error": "目录中没有版本 1.0.1",
+      "ok": true,
+      "coveredBy": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts:602 「rejects a revoked version and reports the administrator reason」"
+    },
+    "coveredByIntegrationTests": {
+      "unsignedOrSignatureCarryingBundle": "packages/agent-package-format/tests/bundle.test.ts",
+      "extraFilesAndMismatchedManifest": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts",
+      "retiredAndWrongKeys": "agent-catalog-server/tests/submissions.spec.ts",
+      "tooManyEntriesAndLongPaths": "packages/agent-package-format/tests/bundle.test.ts",
+      "downgradeAndDelistedLatest": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-install.spec.ts",
+      "wrongPublishOrAdminToken": "agent-catalog-server/tests/auth-legacy.spec.ts",
+      "revocationAndActiveTurn": "dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-catalog-security.spec.ts"
+    }
+  },
+  "cleanup": {
+    "scannedProcesses": 814,
+    "matches": [],
+    "command": "ps -ax -o pid=,command=",
+    "note": "Matches are processes whose command line references the throwaway temp root; the probe itself is excluded."
+  },
+  "verdict": "PASS",
+  "exitCode": 0
+}
