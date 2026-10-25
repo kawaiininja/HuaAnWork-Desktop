@@ -555,6 +555,32 @@ describe('catalog installed identity binding', () => {
     )
   })
 
+  test('refuses to run when the disk version is requested but state names another version', async () => {
+    installEnabledCatalogPackage(SLUG, '1.0.0')
+    // dispatch 传进来的版本来自磁盘(`findInvocable` → `host.dispatch`),所以
+    // 未更新的 state 会让请求身份与已安装身份错位:这里请求 1.0.1、磁盘也是
+    // 验签通过的 1.0.1,但 state 仍说 1.0.0 ⇒ 必须拒绝,而不是只靠 digest 版本腿。
+    writeSignedPackage(SLUG, '1.0.1')
+    expect(readAgentPackageState(root)[`catalog:${SLUG}`]?.installedVersion).toBe('1.0.0')
+
+    const security = catalogSecurity(fakeCatalogClient())
+    await expect(security.assertRunnable(SLUG, '1.0.1')).rejects.toThrow(
+      new RegExp(AGENT_PACKAGE_VERIFY_FAILURE),
+    )
+  })
+
+  test('refuses to run a valid directory with no catalog state entry', async () => {
+    // 目录本身验签通过,但 state 里没有 `catalog:<slug>` 条目:没有可绑定的
+    // 已安装身份 ⇒ fail closed,不能把「目录看起来没问题」当成可运行。
+    writeSignedPackage(SLUG, '1.0.0')
+    expect(readAgentPackageState(root)[`catalog:${SLUG}`]).toBeUndefined()
+
+    const security = catalogSecurity(fakeCatalogClient())
+    await expect(security.assertRunnable(SLUG, '1.0.0')).rejects.toThrow(
+      new RegExp(AGENT_PACKAGE_VERIFY_FAILURE),
+    )
+  })
+
   test('refuses to run a revoked version even when state and directory agree', async () => {
     installEnabledCatalogPackage(SLUG, '1.0.1')
     const security = catalogSecurity(
