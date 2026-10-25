@@ -251,6 +251,12 @@ export const PAIRS = [
       'scripts/verify-mac-runtime.ts',
       'scripts/verify-mac-smoke.ts',
       'scripts/verify-packaged-runtime.ts',
+      // M2 Task 12 (I-4): 两侧都存在但内容确实分叉。huaanwork 的许可证图多走一遍
+      // pushed 进 lib/ 的 bundled 闭包(三个 @huaanwork/* 与 tar 及其依赖),
+      // notices 因此多出 Bundling 列与逐包许可证原文;beta 只遍历安装态 production 图,
+      // 既没有 bundled 闭包也没有这几段文案。trim 到同形会让 beta 凭空长出
+      // huaanwork 专有的打包边界逻辑。裁定 R-T12-1:占 1 个名额。
+      'scripts/verify-licenses.mjs',
     ],
     oneSidedPaths: [],
     oneSidedPrefixes: [

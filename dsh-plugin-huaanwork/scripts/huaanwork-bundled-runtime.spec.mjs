@@ -11,7 +11,7 @@ import {
   importSpecifiers,
   packageNameOf,
   verifyBundledRuntime,
-} from './verify-bundled-runtime.mjs'
+} from './huaanwork-verify-bundled-runtime.mjs'
 
 const packageRoot = join(import.meta.dirname, '..')
 const markerSources = {

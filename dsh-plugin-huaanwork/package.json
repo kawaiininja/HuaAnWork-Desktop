@@ -190,7 +190,7 @@
     "test:host-liveness-win": "vitest run tests/host-liveness-win.spec.ts",
     "gen:styles": "node scripts/gen-huaanwork-styles.ts",
     "verify:closure": "node --test scripts/runtime-closure.spec.mjs && node scripts/verify-runtime-closure.mjs",
-    "verify:bundled": "node --test scripts/bundled-runtime.spec.mjs && node scripts/verify-bundled-runtime.mjs",
+    "verify:bundled": "node --test scripts/huaanwork-bundled-runtime.spec.mjs && node scripts/huaanwork-verify-bundled-runtime.mjs",
     "verify:cli": "node scripts/verify-cli-runtime.mjs",
     "verify:loader": "node scripts/verify-loader-boot.mjs",
     "verify:profile": "node scripts/verify-profile-boot.mjs",

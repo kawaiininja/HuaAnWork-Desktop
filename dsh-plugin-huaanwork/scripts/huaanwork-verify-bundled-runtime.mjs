@@ -11,7 +11,7 @@
  * - external: it must be a production dependency that resolves from this
  *   package (the license graph then covers it as an installed package).
  *
- * @module scripts/verify-bundled-runtime
+ * @module scripts/huaanwork-verify-bundled-runtime
  */
 
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'

@@ -10,7 +10,7 @@
  *   tsdown (see `deps.alwaysBundle` in `tsdown.config.ts`). Their code ships
  *   inside the application even though it never appears in the installer's
  *   `node_modules` tree, so it needs the same license proof. The boundary of
- *   that closure is pinned by `scripts/verify-bundled-runtime.mjs`.
+ *   that closure is pinned by `scripts/huaanwork-verify-bundled-runtime.mjs`.
  *
  * Fails when a package has no license field and no LICENSE file, or when its
  * license is not on the redistribution allowlist.
