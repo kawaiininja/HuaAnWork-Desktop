@@ -73,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(62 项)——
+// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(69 项)——
 const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'workspace.open': { http: 'POST', path: '/huaanwork/workspace/open' },
   'workspace.close': { http: 'POST', path: '/huaanwork/workspace/close' },
@@ -116,6 +116,13 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'agent.packageDetail': { http: 'GET', path: '/huaanwork/agent/package/detail' },
   'agent.packageSetEnabled': { http: 'POST', path: '/huaanwork/agent/package/setEnabled' },
   'agent.invocableList': { http: 'GET', path: '/huaanwork/agent/invocable' },
+  'agent.packagePublish': { http: 'POST', path: '/huaanwork/agent/package/publish' },
+  'agent.packagePublishStatus': { http: 'GET', path: '/huaanwork/agent/package/publish/status' },
+  'agent.packageRequestDelist': { http: 'POST', path: '/huaanwork/agent/package/delist-request' },
+  'agent.packageInstall': { http: 'POST', path: '/huaanwork/agent/package/install' },
+  'agent.packageUpdate': { http: 'POST', path: '/huaanwork/agent/package/update' },
+  'agent.packageRemove': { http: 'POST', path: '/huaanwork/agent/package/remove' },
+  'agent.packageRefresh': { http: 'POST', path: '/huaanwork/agent/package/refresh' },
   'status.get': { http: 'GET', path: '/huaanwork/status' },
   'project.list': { http: 'GET', path: '/huaanwork/project/list' },
   'project.create': { http: 'POST', path: '/huaanwork/project/create' },
@@ -140,8 +147,8 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
 }
 
 describe('rpcCall 路由映射', () => {
-  test('全表 62 项与 ROUTE_TABLE 一一对应', () => {
-    expect(Object.keys(ROUTES)).toHaveLength(62)
+  test('全表 69 项与 ROUTE_TABLE 一一对应', () => {
+    expect(Object.keys(ROUTES)).toHaveLength(69)
     const actual = Object.fromEntries(
       Object.entries(ROUTES).map(([method, route]) => [method, { http: route.http, path: route.path }]),
     )
@@ -164,6 +171,36 @@ describe('rpcCall 路由映射', () => {
     expect(init.method).toBe('POST')
     expect(init.headers).toEqual({ 'content-type': 'application/json' })
     expect(JSON.parse(String(init.body))).toEqual({ slug: 'weekly-report', enabled: true })
+  })
+
+  test('M2 七条:publishStatus 走 query,其余 POST 透传 body', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}))
+    await rpcCall('agent.packagePublishStatus', { slug: 'weekly-report' })
+    expect(lastFetchCall().url).toBe('/huaanwork/agent/package/publish/status?slug=weekly-report')
+
+    await rpcCall('agent.packagePublish', { slug: 'weekly-report' })
+    expect(lastFetchCall().url).toBe('/huaanwork/agent/package/publish')
+    expect(JSON.parse(String(lastFetchCall().init.body))).toEqual({ slug: 'weekly-report' })
+
+    await rpcCall('agent.packageRequestDelist', { slug: 'weekly-report', reason: '暂时下架' })
+    expect(lastFetchCall().url).toBe('/huaanwork/agent/package/delist-request')
+    expect(JSON.parse(String(lastFetchCall().init.body))).toEqual({ slug: 'weekly-report', reason: '暂时下架' })
+
+    await rpcCall('agent.packageInstall', { slug: 'plaza-agent', version: '1.2.0' })
+    expect(lastFetchCall().url).toBe('/huaanwork/agent/package/install')
+    expect(JSON.parse(String(lastFetchCall().init.body))).toEqual({ slug: 'plaza-agent', version: '1.2.0' })
+
+    await rpcCall('agent.packageUpdate', { slug: 'plaza-agent' })
+    expect(lastFetchCall().url).toBe('/huaanwork/agent/package/update')
+    expect(JSON.parse(String(lastFetchCall().init.body))).toEqual({ slug: 'plaza-agent' })
+
+    await rpcCall('agent.packageRemove', { slug: 'plaza-agent' })
+    expect(lastFetchCall().url).toBe('/huaanwork/agent/package/remove')
+    expect(JSON.parse(String(lastFetchCall().init.body))).toEqual({ slug: 'plaza-agent' })
+
+    await rpcCall('agent.packageRefresh')
+    expect(lastFetchCall().url).toBe('/huaanwork/agent/package/refresh')
+    expect(lastFetchCall().init.body).toBe('null')
   })
 
   test('GET 方法:settings.get → GET /huaanwork/settings', async () => {

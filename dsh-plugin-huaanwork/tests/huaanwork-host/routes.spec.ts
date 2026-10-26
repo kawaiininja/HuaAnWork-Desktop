@@ -29,6 +29,7 @@ const ALL_METHODS = [
   'skill.list', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
   'agent.list', 'agent.get', 'agent.refresh', 'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
   'agent.packageList', 'agent.packageDetail', 'agent.packageSetEnabled', 'agent.invocableList',
+  'agent.packagePublish', 'agent.packagePublishStatus', 'agent.packageRequestDelist', 'agent.packageInstall', 'agent.packageUpdate', 'agent.packageRemove', 'agent.packageRefresh',
   'status.get',
   'project.list', 'project.create', 'project.open', 'project.remove', 'project.rename',
   'automation.list', 'automation.create', 'automation.update', 'automation.remove', 'automation.stop', 'automation.deleteRun', 'automation.run', 'automation.runs', 'automation.pruneSessions', 'automation.templates',
@@ -36,10 +37,10 @@ const ALL_METHODS = [
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('62 个方法全部登记,无遗漏无重复', () => {
+  test('69 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(62)
+    expect(ROUTE_TABLE).toHaveLength(69)
   })
 
   test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
@@ -110,7 +111,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 62 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 69 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -179,8 +180,16 @@ describe('ROUTE_TABLE registry', () => {
       'agent.packageDetail',
       'agent.packageSetEnabled',
       'agent.invocableList',
+      // Task 11 (M2 智能体包): 签名广场生命周期 RPC ×7
+      'agent.packagePublish',
+      'agent.packagePublishStatus',
+      'agent.packageRequestDelist',
+      'agent.packageInstall',
+      'agent.packageUpdate',
+      'agent.packageRemove',
+      'agent.packageRefresh',
     ])
-    expect(implemented).toHaveLength(62)
+    expect(implemented).toHaveLength(69)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue

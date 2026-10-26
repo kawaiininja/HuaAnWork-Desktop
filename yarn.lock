@@ -11759,6 +11759,27 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@huaanwork/agent-package-format@npm:*, @huaanwork/agent-package-format@workspace:*, @huaanwork/agent-package-format@workspace:packages/agent-package-format":
+  version: 0.0.0-use.local
+  resolution: "@huaanwork/agent-package-format@workspace:packages/agent-package-format"
+  dependencies:
+    "@huaanwork/catalog-signing": "workspace:*"
+    "@huaanwork/policy": "workspace:*"
+    "@types/node": "npm:^22.20.0"
+    tar: "npm:7.5.22"
+    typescript: "npm:6.0.3"
+  languageName: unknown
+  linkType: soft
+
+"@huaanwork/catalog-signing@npm:*, @huaanwork/catalog-signing@workspace:*, @huaanwork/catalog-signing@workspace:packages/catalog-signing":
+  version: 0.0.0-use.local
+  resolution: "@huaanwork/catalog-signing@workspace:packages/catalog-signing"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:6.0.3"
+  languageName: unknown
+  linkType: soft
+
 "@huaanwork/git-tools@npm:*, @huaanwork/git-tools@workspace:packages/huaanwork-git-tools":
   version: 0.0.0-use.local
   resolution: "@huaanwork/git-tools@workspace:packages/huaanwork-git-tools"
@@ -11777,7 +11798,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@huaanwork/policy@npm:*, @huaanwork/policy@workspace:packages/huaanwork-policy":
+"@huaanwork/policy@npm:*, @huaanwork/policy@workspace:*, @huaanwork/policy@workspace:packages/huaanwork-policy":
   version: 0.0.0-use.local
   resolution: "@huaanwork/policy@workspace:packages/huaanwork-policy"
   dependencies:
@@ -14484,6 +14505,33 @@ __metadata:
   languageName: node
   linkType: hard
 
+"agent-catalog-admin@workspace:agent-catalog-admin":
+  version: 0.0.0-use.local
+  resolution: "agent-catalog-admin@workspace:agent-catalog-admin"
+  dependencies:
+    "@huaanwork/agent-package-format": "workspace:*"
+    "@huaanwork/catalog-signing": "workspace:*"
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:6.0.3"
+  bin:
+    agent-catalog-admin: src/cli.ts
+  languageName: unknown
+  linkType: soft
+
+"agent-catalog-server@workspace:agent-catalog-server":
+  version: 0.0.0-use.local
+  resolution: "agent-catalog-server@workspace:agent-catalog-server"
+  dependencies:
+    "@huaanwork/agent-package-format": "workspace:*"
+    "@huaanwork/catalog-signing": "workspace:*"
+    "@types/node": "npm:^22.20.0"
+    typescript: "npm:6.0.3"
+    vitest: "npm:4.1.8"
+  bin:
+    agent-catalog-server: src/index.ts
+  languageName: unknown
+  linkType: soft
+
 "ajv-formats@npm:^2.1.1":
   version: 2.1.1
   resolution: "ajv-formats@npm:2.1.1"
@@ -16951,6 +16999,8 @@ __metadata:
     "@electron/asar": "npm:3.4.1"
     "@electron/fuses": "npm:1.8.0"
     "@fontsource-variable/inter": "npm:^5.3.0"
+    "@huaanwork/agent-package-format": "npm:*"
+    "@huaanwork/catalog-signing": "npm:*"
     "@huaanwork/git-tools": "npm:*"
     "@huaanwork/model": "npm:*"
     "@huaanwork/policy": "npm:*"
@@ -19413,6 +19463,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "market-server@workspace:market-server"
   dependencies:
+    "@huaanwork/catalog-signing": "workspace:*"
     "@types/node": "npm:^22.20.0"
     dsh-community-market: "workspace:^"
     typescript: "npm:6.0.3"

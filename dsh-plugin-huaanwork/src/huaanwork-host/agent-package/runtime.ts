@@ -12,6 +12,9 @@ import type { AgentPackageManifest, AgentPackageTurnRuntime } from './types.ts'
 /** Fail-closed message shared by every path that would otherwise spawn unconfined. */
 export const AGENT_PACKAGE_SANDBOX_UNAVAILABLE = '当前系统无法启动沙箱，智能体未运行'
 
+/** 启动期 signal 已 abort:不再 spawn 任何进程(撤销/取消在进程启动前生效)。 */
+export const AGENT_PACKAGE_START_CANCELLED = '智能体启动已取消'
+
 const MAX_PERSONA_BYTES = 64 * 1024
 const MAX_SCRIPT_STDOUT_BYTES = 32 * 1024
 const MAX_STDERR_CHARS = 500
@@ -196,6 +199,8 @@ export async function startAgentPackageProcesses(
   options: StartAgentPackageProcessesOptions,
 ): Promise<AgentPackageTurnRuntime> {
   const { manifest, packageDir, workspaceRoot, getSandbox, mountMcp, signal } = options
+  // 每次 spawn/materialize 前都检查启动 signal:撤销/取消到达后不得再起新进程。
+  assertStartable(signal)
   const skillScripts = listAgentPackageSkillScripts(packageDir)
   const mode = manifest.tools.mode
   const wantsHttp = mode === 'http' || mode === 'both'
@@ -205,6 +210,7 @@ export async function startAgentPackageProcesses(
   let mcp: StartedServer | undefined
   try {
     if (wantsHttp) {
+      assertStartable(signal)
       http = await startServer({
         getSandbox,
         workspaceRoot,
@@ -216,6 +222,7 @@ export async function startAgentPackageProcesses(
       })
     }
     if (wantsMcp) {
+      assertStartable(signal)
       mcp = await startServer({
         getSandbox,
         workspaceRoot,
@@ -412,6 +419,8 @@ type StartServerOptions = {
 async function startServer(options: StartServerOptions): Promise<StartedServer> {
   let lastError: Error | undefined
   for (let attempt = 0; attempt <= PORT_RETRIES; attempt += 1) {
+    // 每次重试都是一次新的 spawn:signal 已 abort 时不再重试。
+    assertStartable(options.signal)
     const port = await findFreeLoopbackPort()
     const child = await spawnConfined({
       getSandbox: options.getSandbox,
@@ -428,6 +437,7 @@ async function startServer(options: StartServerOptions): Promise<StartedServer> 
       if (options.mount !== undefined && remainingMs <= 0) {
         throw new Error(`${SCRIPT_START_FAILURE_PREFIX}MCP 服务挂载超时`)
       }
+      assertStartable(options.signal)
       const names =
         options.mount === undefined
           ? undefined
@@ -463,6 +473,7 @@ type SpawnConfinedOptions = {
 }
 
 async function spawnConfined(options: SpawnConfinedOptions): Promise<SpawnedProcess> {
+  assertStartable(options.signal)
   const sandbox = options.getSandbox()
   if (sandbox === undefined) throw new Error(AGENT_PACKAGE_SANDBOX_UNAVAILABLE)
 
@@ -479,6 +490,9 @@ async function spawnConfined(options: SpawnConfinedOptions): Promise<SpawnedProc
     }
     throw error
   }
+  // confine 可能耗时;它返回后 signal 已 abort 时禁止 spawn(撤销与进程启动之间的
+  // 最后一个门)。sandbox.confine 收到的同一个 signal 也可能已抛错,这里兜底。
+  assertStartable(options.signal)
 
   const [command, ...args] = prepared.argv
   if (command === undefined) {
@@ -494,6 +508,11 @@ async function spawnConfined(options: SpawnConfinedOptions): Promise<SpawnedProc
     windowsHide: true,
   })
   runningChildren.add(child)
+  // spawn 与 abort 同时到达时,新进程已经起来:立即收敛,而不是把它留在运行态。
+  if (options.signal?.aborted === true) {
+    await stopChild(child)
+    throw new Error(AGENT_PACKAGE_START_CANCELLED)
+  }
 
   const stdout = createCapture(MAX_CAPTURE_BYTES)
   const stderr = createCapture(MAX_CAPTURE_BYTES)
@@ -563,9 +582,14 @@ function buildChildEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   return env
 }
 
+/** 启动期 signal 已 abort 时抛出;spawn/materialize 前的统一门。 */
+function assertStartable(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw new Error(AGENT_PACKAGE_START_CANCELLED)
+}
+
 async function waitForTcp(child: SpawnedProcess, port: number, deadline: number, signal?: AbortSignal): Promise<void> {
   while (Date.now() < deadline) {
-    if (signal?.aborted === true) throw new Error('智能体启动已取消')
+    if (signal?.aborted === true) throw new Error(AGENT_PACKAGE_START_CANCELLED)
     if (child.hasExited()) throw startupFailure(child)
     if (await canConnect(port)) {
       if (child.hasExited()) throw startupFailure(child)

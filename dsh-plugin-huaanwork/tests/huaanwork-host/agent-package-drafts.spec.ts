@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { listBundledSkills, setSkillToggle } from '../../src/huaanwork-guardrails/skills.ts'
 import {
+  beginAgentPackageUpdate,
   cancelAgentPackage,
   commitAgentPackage,
   isAgentCancelText,
@@ -16,12 +17,15 @@ import { createAgentPackageHost } from '../../src/huaanwork-host/agent-package/h
 import { parseAgentPackageManifest } from '../../src/huaanwork-host/agent-package/manifest.ts'
 import {
   agentPackageDir,
+  agentPackageStatePath,
   agentPackagesRoot,
   listLocalAgentPackages,
   readAgentPackageState,
   setAgentPackageEnabled,
+  writeAgentPackageAtomically,
+  writeAgentPackageState,
 } from '../../src/huaanwork-host/agent-package/store.ts'
-import type { AgentPackageProposalInput } from '../../src/huaanwork-host/agent-package/types.ts'
+import type { AgentPackageManifest, AgentPackageProposalInput } from '../../src/huaanwork-host/agent-package/types.ts'
 
 const proposal = {
   displayName: '周报小助手',
@@ -77,6 +81,28 @@ function createProposal(overrides: Partial<AgentPackageProposalInput> = {}): Age
 function writeUserSkill(root: string, name: string, body = '正文'): void {
   mkdirSync(join(root, 'skills', name), { recursive: true })
   writeFileSync(join(root, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: 演示\n---\n${body}\n`, 'utf8')
+}
+
+/**
+ * 写入「包已落盘、publish reset 尚未执行」的中间态:manifest 带同一 draftId,
+ * 草稿文件保持原样,供幂等 commit 重试走到 `alreadyCommitted` 分支。
+ */
+function writeInterruptedCommitPackage(root: string, draftId: string): void {
+  const manifest: AgentPackageManifest = {
+    schemaVersion: 1,
+    slug: proposal.slug,
+    displayName: proposal.displayName,
+    description: proposal.description,
+    version: '1.0.0',
+    draftId,
+    createdAt: '2026-10-24T00:00:00.000Z',
+    updatedAt: '2026-10-24T00:00:00.000Z',
+    persona: 'persona.md',
+    skill: null,
+    tools: { mode: 'none' },
+    allowSkills: [],
+  }
+  writeAgentPackageAtomically({ profileDir: root, manifest, persona: proposal.persona, skill: null, replace: false })
 }
 
 describe('consent and cancel phrases', () => {
@@ -145,6 +171,7 @@ describe('propose and commit', () => {
       source: 'local',
       enabled: false,
       installedVersion: '1.0.0',
+      publishStatus: 'none',
     })
     expect(readFileSync(join(agentPackageDir(root, 'weekly-report'), 'skill', 'SKILL.md'), 'utf8')).toBe(
       proposal.skill.markdown,
@@ -212,6 +239,135 @@ describe('propose and commit', () => {
     expect(second.alreadyCommitted).toBe(true)
     expect(second.packagePath).toBe(first.packagePath)
     expect(readFileSync(personaPath, 'utf8')).toBe('人工改过的人设')
+  })
+
+  test('an idempotent commit retry resets publication before deleting the draft', async () => {
+    const root = makeRoot()
+    const proposed = await proposeAgentPackage(root, 'session-retry', createProposal(), [])
+    if (!proposed.ok) throw new Error('propose failed')
+
+    // 模拟「包已写入、reset 未跑、草稿仍在」的中断态。
+    writeInterruptedCommitPackage(root, proposed.draftId)
+    writeAgentPackageState(root, {
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '1.0.0',
+        submissionId: 'submission-1',
+        reviewReason: '旧说明',
+        delistRequestId: 'delist-1',
+      },
+    })
+
+    const retried = await commitAgentPackage(root, 'session-retry', proposed.draftId, '可以', [])
+    expect(retried.ok).toBe(true)
+    if (!retried.ok) return
+    expect(retried.alreadyCommitted).toBe(true)
+    expect(existsSync(draftPath(root, 'session-retry'))).toBe(false)
+
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.publishStatus).toBe('none')
+    expect(state?.submissionId).toBeUndefined()
+    expect(state?.reviewReason).toBeUndefined()
+    expect(state?.delistRequestId).toBeUndefined()
+    expect(state?.publishedVersion).toBe('1.0.0')
+    expect(state?.enabled).toBe(true)
+  })
+
+  test('keeps the draft when the publication reset fails', async () => {
+    const root = makeRoot()
+    const proposed = await proposeAgentPackage(root, 'session-reset-fail', createProposal(), [])
+    if (!proposed.ok) throw new Error('propose failed')
+    writeInterruptedCommitPackage(root, proposed.draftId)
+    writeAgentPackageState(root, {
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '1.0.0',
+        submissionId: 'submission-1',
+      },
+    })
+
+    // 让 reset 的状态写入失败:tmp 路径被目录占住。
+    const blocker = `${agentPackageStatePath(root)}.tmp`
+    mkdirSync(blocker)
+
+    const retried = await commitAgentPackage(root, 'session-reset-fail', proposed.draftId, '可以', [])
+    expect(retried.ok).toBe(false)
+    if (retried.ok) return
+    expect(retried.error).toContain('发布状态复位失败')
+    expect(loadAgentPackageDraft(root, 'session-reset-fail')?.draftId).toBe(proposed.draftId)
+    expect(readAgentPackageState(root)['local:weekly-report']?.publishStatus).toBe('published')
+    rmSync(blocker, { recursive: true, force: true })
+  })
+
+  test('a completed commit retry keeps a newer publication instead of resetting it', async () => {
+    const root = makeRoot()
+    const proposed = await proposeAgentPackage(root, 'session-replay', createProposal(), [])
+    if (!proposed.ok) throw new Error('propose failed')
+    const first = await commitAgentPackage(root, 'session-replay', proposed.draftId, '可以', [])
+    expect(first.ok).toBe(true)
+
+    // 用户随后发布了更新的一次版本;manifest 永久保留旧 draftId。
+    writeAgentPackageState(root, {
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.1',
+        publishStatus: 'published',
+        publishedVersion: '1.0.1',
+        submissionId: 'submission-new',
+      },
+    })
+
+    const retried = await commitAgentPackage(root, 'session-replay', proposed.draftId, '可以', [])
+    expect(retried.ok).toBe(true)
+    if (!retried.ok) return
+    expect(retried.alreadyCommitted).toBe(true)
+
+    // 已完成提交后的旧 draftId 重放不得复位更新的发布(I-16)。
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.publishStatus).toBe('published')
+    expect(state?.publishedVersion).toBe('1.0.1')
+    expect(state?.submissionId).toBe('submission-new')
+  })
+
+  test('a stale draftId does not reset a newer publication or delete a different draft', async () => {
+    const root = makeRoot()
+    const proposed = await proposeAgentPackage(root, 'session-old', createProposal(), [])
+    if (!proposed.ok) throw new Error('propose failed')
+    const first = await commitAgentPackage(root, 'session-old', proposed.draftId, '可以', [])
+    expect(first.ok).toBe(true)
+
+    writeAgentPackageState(root, {
+      'local:weekly-report': {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.1',
+        publishStatus: 'published',
+        publishedVersion: '1.0.1',
+        submissionId: 'submission-new',
+      },
+    })
+    // 同一会话已经有一份新草稿(draftId 不同)。
+    await beginAgentPackageUpdate(root, 'session-old', 'weekly-report')
+    const newerDraft = loadAgentPackageDraft(root, 'session-old')
+    expect(newerDraft?.draftId).not.toBe(proposed.draftId)
+
+    const retried = await commitAgentPackage(root, 'session-old', proposed.draftId, '可以', [])
+    expect(retried.ok).toBe(true)
+    if (!retried.ok) return
+    expect(retried.alreadyCommitted).toBe(true)
+
+    const state = readAgentPackageState(root)['local:weekly-report']
+    expect(state?.publishStatus).toBe('published')
+    expect(state?.submissionId).toBe('submission-new')
+    // 旧 draftId 的重放不能顺手删掉这份新草稿。
+    expect(loadAgentPackageDraft(root, 'session-old')?.draftId).toBe(newerDraft?.draftId)
   })
 
   test('commit without a draft reports that nothing is pending', async () => {

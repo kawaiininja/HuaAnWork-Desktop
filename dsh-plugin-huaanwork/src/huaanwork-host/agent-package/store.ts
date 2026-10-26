@@ -19,12 +19,18 @@ import type {
   AgentPackageDetail,
   AgentPackageListItem,
   AgentPackageManifest,
+  AgentPackagePublishStatus,
+  AgentPackageRevocation,
+  AgentPackageSource,
   AgentPackageState,
+  AgentPackageStateEntry,
   AgentPackageToolsMode,
 } from './types.ts'
 
 const TEMP_PREFIX = '.tmp-'
 const OLD_PREFIX = '.old-'
+const INSTALL_PREFIX = '.install-'
+const CATALOG_TRANSACTION_FILE = 'transaction.json'
 const DRAFTS_DIR = '.drafts'
 
 // 单文件与集合上限。草稿 propose 从这里导入同一组值,校验与落盘不会各写一份。
@@ -83,9 +89,22 @@ export function agentPackageStatePath(profileDir: string): string {
   return join(profileDir, 'agents-state.json')
 }
 
+const PUBLISH_STATUSES: ReadonlySet<AgentPackagePublishStatus> = new Set([
+  'none',
+  'pending-review',
+  'published',
+  'rejected',
+  'delisted',
+  'installed',
+])
+
 /**
- * 读取 `agents-state.json`。缺失、无法解析或结构不符时返回空表;只保留
- * `local:` 条目(M1 的本地包);损坏条目的 `installedVersion` 回落为空串。
+ * 读取 `agents-state.json`。
+ *
+ * 缺失、无法解析或结构不符时返回空表。只保留键前缀与 `source` 一致的条目:
+ * `local:` 必须 `source:'local'`,`catalog:` 必须 `source:'catalog'`;其余键与
+ * 未知字段一律丢弃。本地条目缺省 `publishStatus:'none'`,目录条目缺省
+ * `publishStatus:'installed'`;损坏条目的 `installedVersion` 回落为空串。
  */
 export function readAgentPackageState(profileDir: string): AgentPackageState {
   const text = readText(agentPackageStatePath(profileDir))
@@ -98,19 +117,98 @@ export function readAgentPackageState(profileDir: string): AgentPackageState {
   }
   if (!isRecord(parsed)) return {}
 
-  const entries: Array<[string, { source: 'local'; enabled: boolean; installedVersion: string }]> = []
+  const entries: Array<[string, AgentPackageStateEntry]> = []
   for (const [key, value] of Object.entries(parsed)) {
-    if (!key.startsWith('local:') || !isRecord(value) || value.source !== 'local') continue
-    entries.push([
-      key,
-      {
-        source: 'local',
-        enabled: value.enabled === true,
-        installedVersion: typeof value.installedVersion === 'string' ? value.installedVersion : '',
-      },
-    ])
+    const entry = parseAgentPackageStateEntry(key, value)
+    if (entry !== undefined) entries.push(entry)
   }
   return Object.fromEntries(entries)
+}
+
+function parseAgentPackageStateEntry(
+  key: string,
+  value: unknown,
+): [string, AgentPackageStateEntry] | undefined {
+  if (!isRecord(value)) return undefined
+  let expected: AgentPackageSource
+  if (key.startsWith('local:')) expected = 'local'
+  else if (key.startsWith('catalog:')) expected = 'catalog'
+  else return undefined
+  const slug = key.slice(key.indexOf(':') + 1)
+  if (!slug) return undefined
+  if (value.source !== expected) return undefined
+
+  const entry: AgentPackageStateEntry = {
+    source: expected,
+    enabled: value.enabled === true,
+    installedVersion: typeof value.installedVersion === 'string' ? value.installedVersion : '',
+    publishStatus:
+      typeof value.publishStatus === 'string' && PUBLISH_STATUSES.has(value.publishStatus as AgentPackagePublishStatus)
+        ? (value.publishStatus as AgentPackagePublishStatus)
+        : expected === 'local'
+          ? 'none'
+          : 'installed',
+  }
+  if (typeof value.publishedVersion === 'string' && value.publishedVersion.length > 0) {
+    entry.publishedVersion = value.publishedVersion
+  }
+  if (typeof value.submissionId === 'string' && value.submissionId.length > 0) {
+    entry.submissionId = value.submissionId
+  }
+  if (typeof value.reviewReason === 'string' && value.reviewReason.length > 0) {
+    entry.reviewReason = value.reviewReason
+  }
+  if (typeof value.delistRequestId === 'string' && value.delistRequestId.length > 0) {
+    entry.delistRequestId = value.delistRequestId
+  }
+  const revoked = parseAgentPackageRevocation(value.revoked)
+  if (revoked !== undefined) entry.revoked = revoked
+  return [key, entry]
+}
+
+function parseAgentPackageRevocation(value: unknown): AgentPackageRevocation | undefined {
+  if (!isRecord(value)) return undefined
+  const { slug, version, reason, revokedAt } = value
+  if (
+    typeof slug !== 'string' ||
+    slug.length === 0 ||
+    typeof version !== 'string' ||
+    version.length === 0 ||
+    typeof reason !== 'string' ||
+    reason.length === 0 ||
+    typeof revokedAt !== 'string' ||
+    revokedAt.length === 0
+  ) {
+    return undefined
+  }
+  return { slug, version, reason, revokedAt }
+}
+
+export type AgentPackageStateLookup =
+  | { kind: 'none' }
+  | { kind: 'local'; key: string; entry: AgentPackageStateEntry }
+  | { kind: 'catalog'; key: string; entry: AgentPackageStateEntry }
+  | { kind: 'corrupt'; reason: string }
+
+/**
+ * 按 slug 查一条 state。两个键同时存在时报状态损坏、不猜测来源。
+ *
+ * 读路径用 `broken` 卡片展示该原因;写路径(`setAgentPackageEnabled`)直接抛错。
+ */
+export function lookupAgentPackageState(state: AgentPackageState, slug: string): AgentPackageStateLookup {
+  const localKey = `local:${slug}`
+  const catalogKey = `catalog:${slug}`
+  const local = state[localKey]
+  const catalog = state[catalogKey]
+  if (local !== undefined && catalog !== undefined) {
+    return {
+      kind: 'corrupt',
+      reason: `状态损坏：智能体 @${slug} 同时存在 local: 与 catalog: 条目，无法判断来源`,
+    }
+  }
+  if (catalog !== undefined) return { kind: 'catalog', key: catalogKey, entry: catalog }
+  if (local !== undefined) return { kind: 'local', key: localKey, entry: local }
+  return { kind: 'none' }
 }
 
 /** 状态文件整体重写:写 `agents-state.json.tmp`,再 rename 覆盖正式文件。 */
@@ -127,17 +225,43 @@ export function writeAgentPackageState(profileDir: string, state: AgentPackageSt
   }
 }
 
-/** 设置本地包的启用态;不存在的包也允许记录(界面在包落盘前可先写默认值)。 */
+/** 设置包的启用态;不存在的包也允许记录(界面在包落盘前可先写默认值)。 */
 export function setAgentPackageEnabled(profileDir: string, slug: string, enabled: boolean): void {
   assertPackageSlug(slug)
   recoverAgentPackages(profileDir)
   const state = readAgentPackageState(profileDir)
-  const key = `local:${slug}`
+  const lookup = lookupAgentPackageState(state, slug)
+  if (lookup.kind === 'corrupt') throw new Error(lookup.reason)
+
+  // 对称守卫:只要目录带 `.signature`,状态键就必须是 catalog:。stale local:
+  // 键同样不能给签名包写启用态,否则 source(来自 .signature)与 enabled(来自
+  // local 键)会来自不同的键。
+  const signed = pathExists(join(agentPackageDir(profileDir, slug), '.signature'))
+  if (signed && lookup.kind !== 'catalog') {
+    throw new Error(`智能体 @${slug} 的签名包缺少 catalog 状态记录，请重新安装`)
+  }
+
+  let key: string
+  if (lookup.kind === 'catalog') {
+    key = lookup.key
+  } else if (lookup.kind === 'local') {
+    key = lookup.key
+  } else {
+    key = `local:${slug}`
+  }
+
   const manifest = readManifestFromDir(agentPackageDir(profileDir, slug), slug)
-  const installedVersion = manifest.ok ? manifest.manifest.version : state[key]?.installedVersion ?? ''
+  const previous = state[key]
+  const installedVersion = manifest.ok ? manifest.manifest.version : previous?.installedVersion ?? ''
+  const next: AgentPackageStateEntry = {
+    ...previous,
+    source: key.startsWith('catalog:') ? 'catalog' : 'local',
+    enabled,
+    installedVersion,
+  }
   writeAgentPackageState(profileDir, {
     ...state,
-    [key]: { source: 'local', enabled, installedVersion },
+    [key]: next,
   })
 }
 
@@ -158,7 +282,7 @@ export function listLocalAgentPackages(profileDir: string): AgentPackageListItem
 
   const items: AgentPackageListItem[] = []
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith('.') || !isValidSlug(entry.name)) continue
+    if (!entry.isDirectory() || entry.name.startsWith('.') || !isValidAgentPackageSlug(entry.name)) continue
     const detail = readAgentPackageFromDir(profileDir, entry.name, state)
     if (detail === undefined) continue
     items.push(toListItem(detail))
@@ -172,7 +296,7 @@ export function listLocalAgentPackages(profileDir: string): AgentPackageListItem
  * 因为损坏就回落到同名的 legacy 目录条目。
  */
 export function readAgentPackage(profileDir: string, slug: string): AgentPackageDetail | undefined {
-  if (!isValidSlug(slug)) return undefined
+  if (!isValidAgentPackageSlug(slug)) return undefined
   recoverAgentPackages(profileDir)
   try {
     if (!lstatSync(agentPackageDir(profileDir, slug)).isDirectory()) return undefined
@@ -379,6 +503,20 @@ function readAgentPackageFromDir(
   const packageDir = agentPackageDir(profileDir, slug)
   const files = listPackageFiles(packageDir)
   const reasons: string[] = []
+  const lookup = lookupAgentPackageState(state, slug)
+  const signed = pathExists(join(packageDir, '.signature'))
+  if (lookup.kind === 'corrupt') reasons.push(lookup.reason)
+  if (signed && lookup.kind !== 'catalog') {
+    reasons.push('签名包缺少 catalog: 状态记录，不能按本地包处理，请重新安装')
+  }
+  // 来源来自实际证据与 state 键:有 .signature 只能是目录包;否则看是否登记了
+  // catalog: 键;都没有才是本地包。损坏状态不得回退成 local。
+  const source: AgentPackageSource = signed ? 'catalog' : lookup.kind === 'catalog' ? 'catalog' : 'local'
+  // 签名目录只认 catalog: 键;stale local: 键不得给签名包提供 enabled 或任何
+  // 发布字段,否则 source 与 enabled 来自不同的键。
+  const stateEntry = lookup.kind === 'local' || lookup.kind === 'catalog' ? lookup.entry : undefined
+  const entry = signed && lookup.kind !== 'catalog' ? undefined : stateEntry
+  const enabled = entry?.enabled === true
   const manifestRead = readManifestFromDir(packageDir, slug)
   const manifest = manifestRead.ok ? manifestRead.manifest : undefined
 
@@ -435,14 +573,23 @@ function readAgentPackageFromDir(
     mode = 'none'
   }
 
+  const publishStatus: AgentPackagePublishStatus | undefined =
+    entry?.publishStatus ?? (source === 'local' ? 'none' : undefined)
+
   return {
     slug,
     displayName,
     description,
     version,
-    source: 'local',
-    enabled: state[`local:${slug}`]?.enabled === true,
+    source,
+    enabled,
     ...(reasons.length > 0 ? { broken: { reason: reasons.join('；') } } : {}),
+    ...(publishStatus === undefined ? {} : { publishStatus }),
+    ...(entry?.publishedVersion === undefined ? {} : { publishedVersion: entry.publishedVersion }),
+    ...(entry?.submissionId === undefined ? {} : { submissionId: entry.submissionId }),
+    ...(entry?.reviewReason === undefined ? {} : { reviewReason: entry.reviewReason }),
+    ...(entry?.delistRequestId === undefined ? {} : { delistRequestId: entry.delistRequestId }),
+    ...(entry?.revoked === undefined ? {} : { revoked: entry.revoked }),
     persona,
     skill,
     tools: mode,
@@ -459,6 +606,12 @@ function toListItem(detail: AgentPackageDetail): AgentPackageListItem {
     source: detail.source,
     enabled: detail.enabled,
     ...(detail.broken === undefined ? {} : { broken: detail.broken }),
+    ...(detail.publishStatus === undefined ? {} : { publishStatus: detail.publishStatus }),
+    ...(detail.publishedVersion === undefined ? {} : { publishedVersion: detail.publishedVersion }),
+    ...(detail.submissionId === undefined ? {} : { submissionId: detail.submissionId }),
+    ...(detail.reviewReason === undefined ? {} : { reviewReason: detail.reviewReason }),
+    ...(detail.delistRequestId === undefined ? {} : { delistRequestId: detail.delistRequestId }),
+    ...(detail.revoked === undefined ? {} : { revoked: detail.revoked }),
   }
 }
 
@@ -542,6 +695,11 @@ function recoverAgentPackages(profileDir: string): void {
     return
   }
 
+  // C17:`catalog-publish` 等直接读路径只经过这里,不经过 host 的 catalog 恢复。
+  // 一笔未完成的广场安装/更新把旧目录放在 `.old-*` 里,通用清理的
+  // 「formal 已存在就删备份」会先毁掉唯一能还原的旧目录。先让位给
+  // `recoverCatalogPackageInstalls`,由它按 transaction.json 决定去留。
+  const pendingCatalogSlugs = pendingCatalogTransactionSlugs(root, entries)
   for (const entry of entries) {
     if (entry.name === DRAFTS_DIR) continue
     if (entry.name.startsWith(TEMP_PREFIX)) {
@@ -552,6 +710,7 @@ function recoverAgentPackages(profileDir: string): void {
 
     const slug = slugFromSuffixedName(entry.name, OLD_PREFIX)
     if (slug === undefined) continue
+    if (pendingCatalogSlugs.has(slug)) continue
     const oldDir = join(root, entry.name)
     const finalDir = join(root, slug)
     try {
@@ -564,6 +723,24 @@ function recoverAgentPackages(profileDir: string): void {
       // 恢复失败时保留 .old-*;下一次读路径会重试。
     }
   }
+}
+
+/**
+ * 有未完成 catalog 安装交易的 slug。
+ *
+ * 判定标准是暂存区里已有 `transaction.json`:此时才存在一笔可恢复的
+ * 「旧目录已 rename、state 未/已写」交易。没有交易记录的 `.install-*` 只是
+ * 下载中途的残留,不影响通用 `.old-*` 清理。
+ */
+function pendingCatalogTransactionSlugs(root: string, entries: readonly Dirent[]): Set<string> {
+  const slugs = new Set<string>()
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(INSTALL_PREFIX)) continue
+    const slug = slugFromSuffixedName(entry.name, INSTALL_PREFIX)
+    if (slug === undefined) continue
+    if (pathExists(join(root, entry.name, CATALOG_TRANSACTION_FILE))) slugs.add(slug)
+  }
+  return slugs
 }
 
 function writePackageFile(packageDir: string, relativePath: string, content: string): void {
@@ -610,12 +787,18 @@ export function isAgentPackageScriptPath(scriptPath: string): boolean {
 }
 
 function assertPackageSlug(slug: string): void {
-  if (!isValidSlug(slug)) {
+  if (!isValidAgentPackageSlug(slug)) {
     throw new Error(`智能体 @标识「${slug}」无效`)
   }
 }
 
-function isValidSlug(slug: string): boolean {
+/**
+ * slug 形状校验。目录名、状态键与广场安装请求共用这一条规则。
+ *
+ * 导出给 catalog 安装/恢复使用:解析 `.install-*`/`.remove-*` 目录名与交易
+ * 记录时不能各自复制一份正则。
+ */
+export function isValidAgentPackageSlug(slug: string): boolean {
   return slug.length <= 32 && AGENT_NAME_RE.test(slug)
 }
 
@@ -624,7 +807,7 @@ function slugFromSuffixedName(name: string, prefix: string): string | undefined 
   const separator = rest.lastIndexOf('-')
   if (separator <= 0) return undefined
   const slug = rest.slice(0, separator)
-  return isValidSlug(slug) ? slug : undefined
+  return isValidAgentPackageSlug(slug) ? slug : undefined
 }
 
 function randomSuffix(): string {
@@ -676,7 +859,7 @@ export function readAgentPackageFile(
   slug: string,
   relativePath: string,
 ): string | undefined {
-  if (!isValidSlug(slug) || relativePath.includes('\\')) return undefined
+  if (!isValidAgentPackageSlug(slug) || relativePath.includes('\\')) return undefined
   const segments = relativePath.split('/')
   if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return undefined
   return readPackageText(agentPackageDir(profileDir, slug), relativePath)
@@ -710,6 +893,26 @@ function pathHasSymlinkSegment(baseDir: string, relativePath: string): boolean {
     }
   }
   return false
+}
+
+/**
+ * 只读取一个包目录的 manifest 版本,不做任何恢复扫描。
+ *
+ * catalog 安装恢复必须在 M1 的通用 `.old-*` 清理**之前**判断磁盘版本是否已是
+ * 事务的目标版本;`readAgentPackage` 会先跑通用恢复,因此不能用它。
+ * manifest 损坏时仍返回 `version` 原文(恢复只做字符串比较,不解析清单)。
+ */
+export function readAgentPackageVersionFromDir(packageDir: string): string | undefined {
+  const text = readPackageText(packageDir, 'agent.json')
+  if (text === undefined) return undefined
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(raw)) return undefined
+  return typeof raw.version === 'string' && raw.version.length > 0 ? raw.version : undefined
 }
 
 function nonEmptyString(value: unknown): string | undefined {

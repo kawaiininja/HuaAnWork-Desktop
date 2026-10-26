@@ -1,18 +1,48 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+
+import { buildSignedAgentPackageBundle } from '@huaanwork/agent-package-format/bundle'
+import { createAgentPackageDigest, type AgentPackageFile } from '@huaanwork/agent-package-format/digest'
+import {
+  fingerprintPublicKeyHex,
+  generateKeyPair,
+  signAgentPackageDigest,
+  type GeneratedKeyPair,
+} from '@huaanwork/catalog-signing'
+
 import type { AgentDetail, AgentListItem, RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
+import {
+  configureAgentCatalog,
+  refreshCatalogPackageCache,
+  resetAgentCatalogForTests,
+  type AgentCatalogClient,
+  type AgentCatalogSettings,
+  type AgentPackageMetadata,
+  type AgentPackageSubmission,
+  type AgentPackageSummary,
+} from '../../src/huaanwork-host/agent-package/catalog-client.ts'
+import { AGENT_CATALOG_KEYRING_FILE } from '../../src/huaanwork-host/agent-package/catalog-install.ts'
+import type {
+  AgentCatalogSecurity,
+  AgentPackageVerification,
+} from '../../src/huaanwork-host/agent-package/catalog-security.ts'
 import { createAgentPackageHost } from '../../src/huaanwork-host/agent-package/host.ts'
 import {
   agentPackageDir,
   readAgentPackageState,
   setAgentPackageEnabled,
   writeAgentPackageAtomically,
+  writeAgentPackageState,
 } from '../../src/huaanwork-host/agent-package/store.ts'
-import type { AgentPackageManifest } from '../../src/huaanwork-host/agent-package/types.ts'
+import type {
+  AgentPackageManifest,
+  AgentPackageRevocation,
+  AgentPackageStateEntry,
+} from '../../src/huaanwork-host/agent-package/types.ts'
 import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
-import { ROUTE_TABLE, type RouteContext } from '../../src/huaanwork-host/routes.ts'
+import { refreshInstalledThenRevocations, ROUTE_TABLE, type RouteContext } from '../../src/huaanwork-host/routes.ts'
 import { setAgentPackageHost, setAgentsDirectory } from '../../src/huaanwork-host/sessions.ts'
 
 /**
@@ -31,14 +61,54 @@ const LEGACY_DISABLED_AGENT = 'off-agent'
 const LEGACY_BROKEN_AGENT = 'broken-legacy'
 const LEGACY_TOOL = 'translator'
 
+const NOW = '2026-10-25T00:00:00.000Z'
+const CATALOG_PACKAGE = 'plaza-agent'
+const CATALOG_VERSION = '1.2.0'
+const CATALOG_NEXT_VERSION = '1.3.0'
+const SUBMISSION_ID = '11111111-1111-4111-8111-111111111111'
+const DELIST_REQUEST_ID = 'delist-request-1'
+const READ_TOKEN = 'test-read-token-0123456789abcdef'
+const PUBLISH_TOKEN = 'test-publish-token-0123456789abcdef'
+
 let roots: string[] = []
 let profileDir: string
 let emitted: RpcEvent[] = []
 let legacy: FakeAgentsHost
+let keyPair: GeneratedKeyPair
+let catalog: CatalogFixture
+let security: FakeSecurity
 
 type FakeAgentsHost = AgentsHost & {
   setEnabledCalls: Array<{ name: string; enabled: boolean; confirmPermissions: boolean }>
   detailLookups: string[]
+  refreshCalls: number
+  listError: string | undefined
+  refreshError: string | undefined
+}
+
+/** 假目录客户端:列表/元数据/提交/下架全部由用例直接编排,不触网络。 */
+type CatalogFixture = {
+  summaries: AgentPackageSummary[]
+  bundles: Map<string, Buffer>
+  metadataStatus: Map<string, 'published' | 'delisted' | 'revoked'>
+  submissions: Map<string, AgentPackageSubmission>
+  submitResponse: AgentPackageSubmission
+  offline: boolean
+  /** 调用顺序探针:refresh 必须按 legacy → cache → local → installed → revocations 执行。 */
+  calls: string[]
+}
+
+type FakeSecurity = AgentCatalogSecurity & {
+  stopped: Array<{ slug: string; reason: 'revoke' | 'update' | 'remove' }>
+  verifyCalls: string[]
+  refreshCalls: number
+  verification: AgentPackageVerification
+  revocation: AgentPackageRevocation | undefined
+  revocationWarning: string | undefined
+}
+
+function keyOf(slug: string, version: string): string {
+  return `${slug}@${version}`
 }
 
 function makeRoot(): string {
@@ -81,6 +151,193 @@ function writeBrokenPackage(root: string, slug: string): void {
   writeFileSync(join(agentPackageDir(root, slug), 'agent.json'), '{ not json', 'utf8')
 }
 
+function packageFiles(manifest: AgentPackageManifest): AgentPackageFile[] {
+  return [
+    { path: 'agent.json', data: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8') },
+    { path: 'persona.md', data: Buffer.from(`# ${manifest.displayName}\n`, 'utf8') },
+  ]
+}
+
+function summaryFor(slug: string, version: string): AgentPackageSummary {
+  return {
+    slug,
+    displayName: `${slug} 助手`,
+    description: '来自签名广场',
+    version,
+    size: 1024,
+    status: 'published',
+    updatedAt: NOW,
+  }
+}
+
+/** 生成并登记一个可用目录包(签名密钥来自本次用例的 keyring)。 */
+async function offerPackage(slug: string, version: string): Promise<void> {
+  const manifest = manifestFor(slug)
+  manifest.version = version
+  const files = packageFiles(manifest)
+  const digest = createAgentPackageDigest(manifest, files)
+  const signature = signAgentPackageDigest(digest, {
+    privateKeyPem: keyPair.privateKeyPem,
+    slot: 1,
+    signedAt: NOW,
+  })
+  catalog.bundles.set(keyOf(slug, version), await buildSignedAgentPackageBundle(files, digest, signature))
+  catalog.summaries = [
+    ...catalog.summaries.filter((summary) => summary.slug !== slug),
+    summaryFor(slug, version),
+  ]
+}
+
+function writeKeyring(profileDir: string, keys: GeneratedKeyPair): void {
+  writeFileSync(
+    join(profileDir, AGENT_CATALOG_KEYRING_FILE),
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        keys: [{ keyId: fingerprintPublicKeyHex(keys.publicKeyHex), publicKeyHex: keys.publicKeyHex, slot: 1 }],
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  )
+}
+
+function catalogSettings(): AgentCatalogSettings {
+  return {
+    agents_host: '127.0.0.1',
+    agents_port: 18080,
+    agents_catalog_token: READ_TOKEN,
+    agents_catalog_publish_token: PUBLISH_TOKEN,
+  }
+}
+
+function fakeCatalogClient(fixture: CatalogFixture): AgentCatalogClient {
+  return {
+    async listPackages() {
+      fixture.calls.push('catalog.list')
+      if (fixture.offline) throw new Error('目录不可达')
+      return fixture.summaries
+    },
+    async getPackage(slug, version) {
+      fixture.calls.push(`catalog.metadata:${slug}@${version}`)
+      const status = fixture.metadataStatus.get(keyOf(slug, version)) ?? 'published'
+      const metadata: AgentPackageMetadata = {
+        slug,
+        version,
+        status,
+        displayName: `${slug} 助手`,
+        description: '来自签名广场',
+        size: fixture.bundles.get(keyOf(slug, version))?.byteLength ?? 1024,
+        updatedAt: NOW,
+        ...(status === 'published'
+          ? { bundleUrl: `/v1/agent-packages/${encodeURIComponent(slug)}/${encodeURIComponent(version)}/bundle` }
+          : {}),
+      }
+      return metadata
+    },
+    async downloadBundleToFile(slug, version, destination) {
+      fixture.calls.push(`catalog.download:${slug}@${version}`)
+      const bundle = fixture.bundles.get(keyOf(slug, version))
+      if (bundle === undefined) throw new Error(`missing bundle ${slug}@${version}`)
+      writeFileSync(destination, bundle)
+    },
+    async getRevocations() {
+      fixture.calls.push('catalog.revocations')
+      return []
+    },
+    async submit() {
+      fixture.calls.push('catalog.submit')
+      return fixture.submitResponse
+    },
+    async getSubmission(submissionId) {
+      fixture.calls.push(`catalog.submission:${submissionId}`)
+      const submission = fixture.submissions.get(submissionId)
+      if (submission === undefined) throw new Error(`missing submission ${submissionId}`)
+      return submission
+    },
+    async requestDelist(slug, version, reason) {
+      fixture.calls.push(`catalog.delist:${slug}@${version}`)
+      return {
+        id: DELIST_REQUEST_ID,
+        slug,
+        version,
+        status: 'pending',
+        reason,
+        createdAt: NOW,
+      }
+    },
+  }
+}
+
+function fakeSecurity(keys: GeneratedKeyPair): FakeSecurity {
+  const digest = {
+    schemaVersion: 1 as const,
+    slug: CATALOG_PACKAGE,
+    version: CATALOG_VERSION,
+    manifestSha256: '0'.repeat(64),
+    files: [],
+  }
+  const signature = signAgentPackageDigest(digest, {
+    privateKeyPem: keys.privateKeyPem,
+    slot: 2,
+    signedAt: NOW,
+  })
+  return {
+    stopped: [],
+    verifyCalls: [],
+    refreshCalls: 0,
+    verification: { ok: true, digest, signature },
+    revocation: undefined,
+    revocationWarning: undefined,
+    loadCachedRevocations: () => ({ items: [] }),
+    async refreshRevocations() {
+      this.refreshCalls += 1
+      return this.revocationWarning === undefined ? {} : { warning: this.revocationWarning }
+    },
+    async verifyInstalled(slug) {
+      this.verifyCalls.push(slug)
+      return this.verification
+    },
+    verifyInstalledSync() {
+      // 同步启用门与异步验签共用同一份编排结果;不计入 verifyCalls(既有断言只
+      // 统计详情/运行路径的异步复验)。
+      return this.verification
+    },
+    async assertRunnable() {},
+    async stopAgentPackageTurnsForSlug(slug, reason) {
+      this.stopped.push({ slug, reason })
+    },
+    revocationFor() {
+      return this.revocation
+    },
+  }
+}
+
+/** 落一个已安装的目录包目录 + `catalog:<slug>` 状态(不依赖真实签名)。 */
+function seedInstalledCatalogPackage(
+  root: string,
+  slug: string,
+  version: string,
+  entry: Partial<AgentPackageStateEntry> = {},
+): void {
+  const dir = agentPackageDir(root, slug)
+  mkdirSync(dir, { recursive: true })
+  const manifest = manifestFor(slug)
+  manifest.version = version
+  writeFileSync(join(dir, 'agent.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  writeFileSync(join(dir, 'persona.md'), `# ${slug}\n负责 ${slug}。`, 'utf8')
+  const state = readAgentPackageState(root)
+  state[`catalog:${slug}`] = {
+    source: 'catalog',
+    enabled: false,
+    installedVersion: version,
+    publishStatus: 'installed',
+    ...entry,
+  }
+  writeAgentPackageState(root, state)
+}
+
 function legacyItem(overrides: Partial<AgentListItem> & { name: string }): AgentListItem {
   const { name, ...rest } = overrides
   return {
@@ -103,19 +360,30 @@ function catalogDetail(name: string): AgentDetail {
 }
 
 function fakeAgentsHost(items: AgentListItem[], details: AgentDetail[] = []): FakeAgentsHost {
-  const setEnabledCalls: FakeAgentsHost['setEnabledCalls'] = []
-  const detailLookups: string[] = []
-  return {
-    setEnabledCalls,
-    detailLookups,
-    list: () => ({ items, catalogError: '目录拉取失败' }),
-    refresh: async () => ({ items, catalogError: '目录拉取失败' }),
+  const host: FakeAgentsHost = {
+    setEnabledCalls: [],
+    detailLookups: [],
+    refreshCalls: 0,
+    listError: '目录拉取失败',
+    refreshError: '目录拉取失败',
+    list: () => ({
+      items,
+      ...(host.listError === undefined ? {} : { catalogError: host.listError }),
+    }),
+    refresh: async () => {
+      host.refreshCalls += 1
+      catalog.calls.push('legacy.refresh')
+      return {
+        items,
+        ...(host.refreshError === undefined ? {} : { catalogError: host.refreshError }),
+      }
+    },
     get: async (name) => {
-      detailLookups.push(name)
+      host.detailLookups.push(name)
       return details.find((detail) => detail.name === name)
     },
     setEnabled: (name, enabled, confirmPermissions) => {
-      setEnabledCalls.push({ name, enabled, confirmPermissions })
+      host.setEnabledCalls.push({ name, enabled, confirmPermissions })
       // Mirrors `agents-host.ts`: enabling a catalog entry requires disclosure.
       if (enabled && !confirmPermissions) throw new Error('启用智能体必须确认权限')
     },
@@ -123,6 +391,7 @@ function fakeAgentsHost(items: AgentListItem[], details: AgentDetail[] = []): Fa
     removeEndpoint: () => {},
     snapshotForRuntime: () => ({ items: [] }),
   }
+  return host
 }
 
 async function callRoute(
@@ -135,6 +404,8 @@ async function callRoute(
     emit: (event: RpcEvent) => {
       emitted.push(event)
     },
+    // Task 10 的安全面经 cordis holder 注入;路由测试用同形 holder 传假实现。
+    runtimeCtx: { huaanworkAgentCatalogSecurity: security },
   } as unknown as RouteContext
   return entry.handler(
     { params: {}, body: options.body, query: new URLSearchParams(options.query ?? {}) },
@@ -150,6 +421,35 @@ beforeEach(() => {
   writeBrokenPackage(profileDir, LOCAL_BROKEN)
   // 损坏包即便状态表里是启用,也不得进入可调用列表。
   setAgentPackageEnabled(profileDir, LOCAL_BROKEN, true)
+
+  keyPair = generateKeyPair()
+  writeKeyring(profileDir, keyPair)
+  catalog = {
+    summaries: [],
+    bundles: new Map(),
+    metadataStatus: new Map(),
+    submissions: new Map(),
+    submitResponse: {
+      submissionId: SUBMISSION_ID,
+      slug: LOCAL_ENABLED,
+      version: '1.0.0',
+      status: 'pending-review',
+      submittedAt: NOW,
+      updatedAt: NOW,
+    },
+    offline: false,
+    calls: [],
+  }
+  security = fakeSecurity(keyPair)
+  configureAgentCatalog({
+    profileDir,
+    readSettings: catalogSettings,
+    client: fakeCatalogClient(catalog),
+    logger: () => {},
+    emitChanged: (slug) => {
+      emitted.push(slug === undefined ? { event: 'agent/changed' } : { event: 'agent/changed', slug })
+    },
+  })
 
   legacy = fakeAgentsHost(
     [
@@ -168,12 +468,14 @@ beforeEach(() => {
       profileDir,
       takenSlugs: () => [],
       legacy: () => legacy,
+      security,
     }),
   )
 })
 
 afterEach(() => {
   setAgentPackageHost(undefined)
+  resetAgentCatalogForTests()
   for (const root of roots) rmSync(root, { recursive: true, force: true })
   roots = []
 })
@@ -357,5 +659,541 @@ describe('agent.invocableList', () => {
       enabled: true,
     })
     expect(result.items.find((item) => item.name === LEGACY_TOOL)).toMatchObject({ kind: 'tool' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M2(Task 11):七个签名广场生命周期 RPC
+// ---------------------------------------------------------------------------
+
+describe('agent.packageList (M2)', () => {
+  test('returns cached catalog summaries and update availability for installed catalog packages', async () => {
+    await offerPackage(CATALOG_PACKAGE, CATALOG_NEXT_VERSION)
+    const refreshed = await refreshCatalogPackageCache()
+    expect(refreshed.warning).toBeUndefined()
+    seedInstalledCatalogPackage(profileDir, CATALOG_PACKAGE, CATALOG_VERSION)
+
+    const result = (await callRoute('agent.packageList')) as {
+      packages: Array<{
+        slug: string
+        source: string
+        latestVersion?: string
+        updateAvailable?: boolean
+        publishStatus?: string
+      }>
+      catalogPackages: AgentPackageSummary[]
+    }
+
+    expect(result.catalogPackages).toEqual([
+      expect.objectContaining({ slug: CATALOG_PACKAGE, version: CATALOG_NEXT_VERSION }),
+    ])
+    const installed = result.packages.find((pkg) => pkg.slug === CATALOG_PACKAGE)
+    expect(installed).toMatchObject({
+      source: 'catalog',
+      latestVersion: CATALOG_NEXT_VERSION,
+      updateAvailable: true,
+      publishStatus: 'installed',
+    })
+    // 本地包不参与广场版本比较。
+    expect(result.packages.find((pkg) => pkg.slug === LOCAL_ENABLED)?.latestVersion).toBeUndefined()
+  })
+
+  test('returns no updateAvailable when the cache is empty (offline, never refreshed)', async () => {
+    seedInstalledCatalogPackage(profileDir, CATALOG_PACKAGE, CATALOG_VERSION)
+    const result = (await callRoute('agent.packageList')) as {
+      packages: Array<{ slug: string; latestVersion?: string; updateAvailable?: boolean }>
+      catalogPackages: AgentPackageSummary[]
+    }
+    expect(result.catalogPackages).toEqual([])
+    expect(result.packages.find((pkg) => pkg.slug === CATALOG_PACKAGE)?.latestVersion).toBeUndefined()
+  })
+})
+
+describe('agent.packagePublish', () => {
+  test('submits the local package and lets Task 8 emit exactly one agent/changed', async () => {
+    catalog.submissions.set(SUBMISSION_ID, catalog.submitResponse)
+
+    await expect(callRoute('agent.packagePublish', { body: { slug: LOCAL_ENABLED } }))
+      .resolves.toEqual({ submissionId: SUBMISSION_ID })
+
+    expect(readAgentPackageState(profileDir)[`local:${LOCAL_ENABLED}`]).toMatchObject({
+      publishStatus: 'pending-review',
+      submissionId: SUBMISSION_ID,
+    })
+    expect(emitted).toEqual([{ event: 'agent/changed', slug: LOCAL_ENABLED }])
+    expect(catalog.calls).toContain('catalog.submit')
+  })
+
+  test('missing slug / non-object body → 400 without submitting', async () => {
+    await expect(callRoute('agent.packagePublish', { body: {} }))
+      .rejects.toMatchObject({ status: 400, code: 'bad-request' })
+    await expect(callRoute('agent.packagePublish', { body: ['nope'] }))
+      .rejects.toMatchObject({ status: 400, code: 'bad-request' })
+    expect(catalog.calls).not.toContain('catalog.submit')
+    expect(emitted).toEqual([])
+  })
+})
+
+describe('agent.packagePublishStatus', () => {
+  test('refreshes the submission status and emits agent/changed', async () => {
+    writeAgentPackageState(profileDir, {
+      ...readAgentPackageState(profileDir),
+      [`local:${LOCAL_ENABLED}`]: {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'pending-review',
+        submissionId: SUBMISSION_ID,
+      },
+    })
+    catalog.submissions.set(SUBMISSION_ID, {
+      ...catalog.submitResponse,
+      status: 'published',
+      updatedAt: NOW,
+    })
+
+    const result = (await callRoute('agent.packagePublishStatus', { query: { slug: LOCAL_ENABLED } })) as {
+      slug: string
+      publishStatus: string
+      publishedVersion?: string
+      submissionId?: string
+    }
+
+    expect(result).toMatchObject({
+      slug: LOCAL_ENABLED,
+      publishStatus: 'published',
+      publishedVersion: '1.0.0',
+      submissionId: SUBMISSION_ID,
+    })
+    expect(emitted).toEqual([{ event: 'agent/changed', slug: LOCAL_ENABLED }])
+
+    // 再次查询但状态未变:不发事件。
+    emitted = []
+    await callRoute('agent.packagePublishStatus', { query: { slug: LOCAL_ENABLED } })
+    expect(emitted).toEqual([])
+  })
+
+  test('missing slug → 400', async () => {
+    await expect(callRoute('agent.packagePublishStatus'))
+      .rejects.toMatchObject({ status: 400, code: 'bad-request' })
+    expect(emitted).toEqual([])
+  })
+})
+
+describe('agent.packageRequestDelist', () => {
+  function seedPublishedLocal(): void {
+    writeAgentPackageState(profileDir, {
+      ...readAgentPackageState(profileDir),
+      [`local:${LOCAL_ENABLED}`]: {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'published',
+        publishedVersion: '1.0.0',
+        submissionId: SUBMISSION_ID,
+      },
+    })
+  }
+
+  test('submits {slug, reason} and returns the request id', async () => {
+    seedPublishedLocal()
+
+    await expect(
+      callRoute('agent.packageRequestDelist', { body: { slug: LOCAL_ENABLED, reason: '暂时下架' } }),
+    ).resolves.toEqual({ requestId: DELIST_REQUEST_ID })
+
+    expect(readAgentPackageState(profileDir)[`local:${LOCAL_ENABLED}`]?.delistRequestId).toBe(DELIST_REQUEST_ID)
+    expect(emitted).toEqual([{ event: 'agent/changed', slug: LOCAL_ENABLED }])
+    expect(catalog.calls).toContain(`catalog.delist:${LOCAL_ENABLED}@1.0.0`)
+  })
+
+  test('blank reason → 400 before any network call', async () => {
+    seedPublishedLocal()
+    await expect(
+      callRoute('agent.packageRequestDelist', { body: { slug: LOCAL_ENABLED, reason: '   ' } }),
+    ).rejects.toMatchObject({ status: 400, code: 'bad-request' })
+    expect(catalog.calls).not.toContain(`catalog.delist:${LOCAL_ENABLED}@1.0.0`)
+    expect(emitted).toEqual([])
+  })
+
+  test('missing reason → 400', async () => {
+    seedPublishedLocal()
+    await expect(callRoute('agent.packageRequestDelist', { body: { slug: LOCAL_ENABLED } }))
+      .rejects.toMatchObject({ status: 400, code: 'bad-request' })
+  })
+})
+
+describe('agent.packageInstall', () => {
+  test('installs {slug, version} and returns the resulting state', async () => {
+    await offerPackage(CATALOG_PACKAGE, CATALOG_VERSION)
+
+    const result = (await callRoute('agent.packageInstall', {
+      body: { slug: CATALOG_PACKAGE, version: CATALOG_VERSION },
+    })) as { ok: boolean; slug: string; version: string; enabled: boolean; publishStatus: string }
+
+    expect(result).toEqual({
+      ok: true,
+      slug: CATALOG_PACKAGE,
+      version: CATALOG_VERSION,
+      enabled: false,
+      publishStatus: 'installed',
+    })
+    expect(readAgentPackageState(profileDir)[`catalog:${CATALOG_PACKAGE}`]).toMatchObject({
+      installedVersion: CATALOG_VERSION,
+      publishStatus: 'installed',
+      enabled: false,
+    })
+    expect(existsSync(agentPackageDir(profileDir, CATALOG_PACKAGE))).toBe(true)
+    expect(emitted).toEqual([{ event: 'agent/changed', slug: CATALOG_PACKAGE }])
+  })
+
+  test('missing version → 400 without downloading anything', async () => {
+    await offerPackage(CATALOG_PACKAGE, CATALOG_VERSION)
+    await expect(callRoute('agent.packageInstall', { body: { slug: CATALOG_PACKAGE } }))
+      .rejects.toMatchObject({ status: 400, code: 'bad-request' })
+    expect(catalog.calls).not.toContain(`catalog.download:${CATALOG_PACKAGE}@${CATALOG_VERSION}`)
+    expect(emitted).toEqual([])
+  })
+})
+
+describe('agent.packageUpdate', () => {
+  test('passes the security stopper with reason update and emits once', async () => {
+    await offerPackage(CATALOG_PACKAGE, CATALOG_VERSION)
+    await callRoute('agent.packageInstall', { body: { slug: CATALOG_PACKAGE, version: CATALOG_VERSION } })
+    emitted = []
+    security.stopped = []
+    await offerPackage(CATALOG_PACKAGE, CATALOG_NEXT_VERSION)
+
+    const result = (await callRoute('agent.packageUpdate', { body: { slug: CATALOG_PACKAGE } })) as {
+      ok: boolean
+      version: string
+      publishStatus: string
+    }
+
+    expect(result).toMatchObject({
+      ok: true,
+      slug: CATALOG_PACKAGE,
+      version: CATALOG_NEXT_VERSION,
+      publishStatus: 'installed',
+    })
+    expect(security.stopped).toEqual([{ slug: CATALOG_PACKAGE, reason: 'update' }])
+    expect(readAgentPackageState(profileDir)[`catalog:${CATALOG_PACKAGE}`]?.installedVersion)
+      .toBe(CATALOG_NEXT_VERSION)
+    expect(emitted).toEqual([{ event: 'agent/changed', slug: CATALOG_PACKAGE }])
+  })
+
+  test('missing slug → 400', async () => {
+    await expect(callRoute('agent.packageUpdate', { body: {} }))
+      .rejects.toMatchObject({ status: 400, code: 'bad-request' })
+  })
+})
+
+describe('agent.packageRemove', () => {
+  test('passes the security stopper with reason remove and deletes the installed package', async () => {
+    await offerPackage(CATALOG_PACKAGE, CATALOG_VERSION)
+    await callRoute('agent.packageInstall', { body: { slug: CATALOG_PACKAGE, version: CATALOG_VERSION } })
+    emitted = []
+    security.stopped = []
+
+    await expect(callRoute('agent.packageRemove', { body: { slug: CATALOG_PACKAGE } }))
+      .resolves.toEqual({ ok: true, removed: true, slug: CATALOG_PACKAGE })
+
+    expect(security.stopped).toEqual([{ slug: CATALOG_PACKAGE, reason: 'remove' }])
+    expect(readAgentPackageState(profileDir)[`catalog:${CATALOG_PACKAGE}`]).toBeUndefined()
+    expect(existsSync(agentPackageDir(profileDir, CATALOG_PACKAGE))).toBe(false)
+    expect(emitted).toEqual([{ event: 'agent/changed', slug: CATALOG_PACKAGE }])
+  })
+
+  test('local package remove → 400 本地创建的智能体不能通过广场移除', async () => {
+    await expect(callRoute('agent.packageRemove', { body: { slug: LOCAL_ENABLED } }))
+      .rejects.toMatchObject({
+        status: 400,
+        code: 'store-error',
+        message: '本地创建的智能体不能通过广场移除',
+      })
+    expect(emitted).toEqual([])
+  })
+
+  test('missing slug → 400', async () => {
+    await expect(callRoute('agent.packageRemove', { body: {} }))
+      .rejects.toMatchObject({ status: 400, code: 'bad-request' })
+  })
+})
+
+describe('agent.packageRefresh', () => {
+  function seedPendingLocal(): void {
+    writeAgentPackageState(profileDir, {
+      ...readAgentPackageState(profileDir),
+      [`local:${LOCAL_ENABLED}`]: {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'pending-review',
+        submissionId: SUBMISSION_ID,
+      },
+    })
+    catalog.submissions.set(SUBMISSION_ID, {
+      ...catalog.submitResponse,
+      status: 'published',
+      updatedAt: NOW,
+    })
+  }
+
+  test('refreshes legacy, cache, local publications, installed metadata and revocations in order', async () => {
+    legacy.refreshError = undefined
+    legacy.listError = undefined
+    await offerPackage(CATALOG_PACKAGE, CATALOG_VERSION)
+    await callRoute('agent.packageInstall', { body: { slug: CATALOG_PACKAGE, version: CATALOG_VERSION } })
+    // 已安装版本在广场被下架;同时广场出现更高版本。
+    catalog.metadataStatus.set(keyOf(CATALOG_PACKAGE, CATALOG_VERSION), 'delisted')
+    await offerPackage(CATALOG_PACKAGE, CATALOG_NEXT_VERSION)
+    seedPendingLocal()
+    security.revocationWarning = '撤销列表刷新失败：离线'
+    emitted = []
+    catalog.calls = []
+    security.refreshCalls = 0
+
+    const result = (await callRoute('agent.packageRefresh')) as {
+      packages: Array<{
+        slug: string
+        source: string
+        publishStatus?: string
+        publishedVersion?: string
+        latestVersion?: string
+        updateAvailable?: boolean
+      }>
+      catalogAgents: AgentListItem[]
+      catalogPackages: AgentPackageSummary[]
+      catalogError?: string
+      revocationWarning?: string
+    }
+
+    const installed = result.packages.find((pkg) => pkg.slug === CATALOG_PACKAGE)
+    expect(installed).toMatchObject({
+      source: 'catalog',
+      publishStatus: 'delisted',
+      latestVersion: CATALOG_NEXT_VERSION,
+      updateAvailable: true,
+    })
+    const local = result.packages.find((pkg) => pkg.slug === LOCAL_ENABLED)
+    expect(local).toMatchObject({ publishStatus: 'published', publishedVersion: '1.0.0' })
+    expect(result.catalogPackages).toEqual([
+      expect.objectContaining({ slug: CATALOG_PACKAGE, version: CATALOG_NEXT_VERSION }),
+    ])
+    expect(result.catalogError).toBeUndefined()
+    expect(result.revocationWarning).toBe('撤销列表刷新失败：离线')
+    // installed metadata + local publication 都变化,仍只发一次统一事件。
+    expect(emitted).toEqual([{ event: 'agent/changed' }])
+    expect(security.refreshCalls).toBe(1)
+    expect(legacy.refreshCalls).toBe(1)
+
+    const order = catalog.calls
+    expect(order[0]).toBe('legacy.refresh')
+    expect(order.indexOf('catalog.list')).toBeGreaterThan(order.indexOf('legacy.refresh'))
+    expect(order.indexOf(`catalog.submission:${SUBMISSION_ID}`)).toBeGreaterThan(order.indexOf('catalog.list'))
+    expect(order.filter((call) => call === `catalog.metadata:${CATALOG_PACKAGE}@${CATALOG_VERSION}`).length)
+      .toBeGreaterThan(0)
+
+    // 第二次刷新没有状态变化:不再发事件。
+    emitted = []
+    await callRoute('agent.packageRefresh')
+    expect(emitted).toEqual([])
+  })
+
+  test('offline refresh keeps local packages, the cached catalog and reports catalogError + revocationWarning', async () => {
+    legacy.refreshError = '目录拉取失败'
+    legacy.listError = '目录拉取失败'
+    await offerPackage(CATALOG_PACKAGE, CATALOG_NEXT_VERSION)
+    await refreshCatalogPackageCache()
+    catalog.calls = []
+    catalog.offline = true
+    security.revocationWarning = '撤销列表刷新失败：离线'
+
+    const result = (await callRoute('agent.packageRefresh')) as {
+      packages: Array<{ slug: string }>
+      catalogPackages: AgentPackageSummary[]
+      catalogError?: string
+      revocationWarning?: string
+    }
+
+    expect(result.packages.map((pkg) => pkg.slug)).toContain(LOCAL_ENABLED)
+    // 安全刷新失败不清缓存:上次成功的目录摘要仍在响应里。
+    expect(result.catalogPackages).toEqual([
+      expect.objectContaining({ slug: CATALOG_PACKAGE, version: CATALOG_NEXT_VERSION }),
+    ])
+    expect(result.catalogError).toContain('目录拉取失败')
+    expect(result.revocationWarning).toBe('撤销列表刷新失败：离线')
+  })
+
+  test('a throwing installed-status refresh still applies the revocation list', async () => {
+    let installedCalls = 0
+    let revocationCalls = 0
+    await expect(
+      refreshInstalledThenRevocations(
+        async () => {
+          installedCalls += 1
+          throw new Error('installed metadata refresh exploded')
+        },
+        async () => {
+          revocationCalls += 1
+          return { warning: '撤销列表刷新失败：offline' }
+        },
+      ),
+    ).rejects.toThrow('installed metadata refresh exploded')
+    // 安全相关刷新不被跳过;原错误仍原样抛回路由。
+    expect(installedCalls).toBe(1)
+    expect(revocationCalls).toBe(1)
+  })
+
+  test('a single local publication failure keeps the local cards and adds a warning', async () => {
+    legacy.refreshError = undefined
+    legacy.listError = undefined
+    writeAgentPackageState(profileDir, {
+      ...readAgentPackageState(profileDir),
+      [`local:${LOCAL_ENABLED}`]: {
+        source: 'local',
+        enabled: true,
+        installedVersion: '1.0.0',
+        publishStatus: 'pending-review',
+        submissionId: SUBMISSION_ID,
+      },
+    })
+    // 没有对应 submission ⇒ 单项刷新失败。
+    const result = (await callRoute('agent.packageRefresh')) as {
+      packages: Array<{ slug: string; publishStatus?: string }>
+      catalogError?: string
+    }
+    expect(result.packages.map((pkg) => pkg.slug)).toContain(LOCAL_ENABLED)
+    expect(result.packages.find((pkg) => pkg.slug === LOCAL_ENABLED)?.publishStatus).toBe('pending-review')
+    expect(result.catalogError).toContain('本地发布状态刷新失败')
+  })
+})
+
+describe('agent.packageDetail (M2)', () => {
+  test('catalog package composes the security verification result', async () => {
+    seedInstalledCatalogPackage(profileDir, CATALOG_PACKAGE, CATALOG_VERSION)
+    const expectedKeyId = fingerprintPublicKeyHex(keyPair.publicKeyHex)
+
+    const detail = (await callRoute('agent.packageDetail', { query: { slug: CATALOG_PACKAGE } })) as {
+      slug: string
+      source: string
+      signature: {
+        keyId: string
+        signedAt: string
+        slot: number
+        verification: string
+        reason?: string
+      }
+    }
+
+    expect(detail.source).toBe('catalog')
+    expect(detail.signature).toEqual({
+      keyId: expectedKeyId,
+      signedAt: NOW,
+      slot: 2,
+      verification: 'valid',
+    })
+    expect(security.verifyCalls).toEqual([CATALOG_PACKAGE])
+  })
+
+  test('catalog package with a failed verification reports invalid + reason', async () => {
+    seedInstalledCatalogPackage(profileDir, CATALOG_PACKAGE, CATALOG_VERSION)
+    security.verification = { ok: false, reason: '包校验失败，未安装或未运行。请联系管理员' }
+
+    const detail = (await callRoute('agent.packageDetail', { query: { slug: CATALOG_PACKAGE } })) as {
+      signature: { verification: string; reason?: string }
+    }
+
+    expect(detail.signature).toMatchObject({
+      verification: 'invalid',
+      reason: '包校验失败，未安装或未运行。请联系管理员',
+    })
+  })
+
+  test('local package is not-applicable and never calls verifyInstalled', async () => {
+    const detail = (await callRoute('agent.packageDetail', { query: { slug: LOCAL_ENABLED } })) as {
+      signature: { verification: string }
+    }
+    expect(detail.signature.verification).toBe('not-applicable')
+    expect(security.verifyCalls).toEqual([])
+  })
+})
+
+describe('M2 security guards', () => {
+  test('packageSetEnabled rejects enabling a revoked catalog package but allows disabling while keeping M2 fields', async () => {
+    const revocation: AgentPackageRevocation = {
+      slug: CATALOG_PACKAGE,
+      version: CATALOG_VERSION,
+      reason: '管理员撤销',
+      revokedAt: NOW,
+    }
+    seedInstalledCatalogPackage(profileDir, CATALOG_PACKAGE, CATALOG_VERSION, {
+      enabled: true,
+      publishStatus: 'delisted',
+      submissionId: 'submission-1',
+      delistRequestId: 'delist-1',
+      revoked: revocation,
+    })
+    security.revocation = revocation
+
+    await expect(
+      callRoute('agent.packageSetEnabled', { body: { slug: CATALOG_PACKAGE, enabled: true } }),
+    ).rejects.toMatchObject({ status: 400, code: 'store-error' })
+    expect(emitted).toEqual([])
+
+    await expect(
+      callRoute('agent.packageSetEnabled', { body: { slug: CATALOG_PACKAGE, enabled: false } }),
+    ).resolves.toEqual({ ok: true })
+
+    expect(readAgentPackageState(profileDir)[`catalog:${CATALOG_PACKAGE}`]).toMatchObject({
+      enabled: false,
+      publishStatus: 'delisted',
+      submissionId: 'submission-1',
+      delistRequestId: 'delist-1',
+      revoked: revocation,
+    })
+    expect(emitted).toEqual([{ event: 'agent/changed', slug: CATALOG_PACKAGE }])
+  })
+
+  test('packageSetEnabled rejects enabling a broken catalog package but allows disabling', async () => {
+    seedInstalledCatalogPackage(profileDir, CATALOG_PACKAGE, CATALOG_VERSION, {
+      enabled: true,
+      publishStatus: 'installed',
+      submissionId: 'submission-2',
+    })
+    writeFileSync(join(agentPackageDir(profileDir, CATALOG_PACKAGE), 'agent.json'), '{ not json', 'utf8')
+
+    await expect(
+      callRoute('agent.packageSetEnabled', { body: { slug: CATALOG_PACKAGE, enabled: true } }),
+    ).rejects.toMatchObject({ status: 400, code: 'store-error' })
+    await expect(
+      callRoute('agent.packageSetEnabled', { body: { slug: CATALOG_PACKAGE, enabled: false } }),
+    ).resolves.toEqual({ ok: true })
+
+    expect(readAgentPackageState(profileDir)[`catalog:${CATALOG_PACKAGE}`]).toMatchObject({
+      enabled: false,
+      publishStatus: 'installed',
+      submissionId: 'submission-2',
+    })
+  })
+
+  test('every M2 handler rejects admin token and privateKey fields', async () => {
+    const cases: Array<[string, { body?: unknown; query?: Record<string, string> }]> = [
+      ['agent.packagePublish', { body: { slug: LOCAL_ENABLED, adminToken: 'secret' } }],
+      ['agent.packagePublishStatus', { query: { slug: LOCAL_ENABLED, privateKey: 'secret' } }],
+      ['agent.packageRequestDelist', { body: { slug: LOCAL_ENABLED, reason: 'x', admin_token: 'secret' } }],
+      ['agent.packageInstall', { body: { slug: CATALOG_PACKAGE, version: CATALOG_VERSION, privateKey: 'secret' } }],
+      ['agent.packageUpdate', { body: { slug: CATALOG_PACKAGE, private_key: 'secret' } }],
+      ['agent.packageRemove', { body: { slug: CATALOG_PACKAGE, adminToken: 'secret' } }],
+      ['agent.packageRefresh', { body: { privateKey: 'secret' } }],
+    ]
+    for (const [method, options] of cases) {
+      await expect(callRoute(method, options)).rejects.toMatchObject({
+        status: 400,
+        code: 'bad-request',
+      })
+    }
+    expect(emitted).toEqual([])
+    expect(catalog.calls).toEqual([])
   })
 })

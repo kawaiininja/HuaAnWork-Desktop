@@ -1,0 +1,27 @@
+{
+  "name": "agent-catalog-admin",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "description": "Offline administrator CLI for the HuaAnWork intranet agent catalog: review, sign, approve/reject, delist, revoke, and legacy persona migration",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "bin": "src/cli.ts",
+  "scripts": {
+    "build": "echo \"agent-catalog-admin: TypeScript sources run directly; no build output\"",
+    "start": "node --experimental-strip-types src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.spec.ts",
+    "check": "yarn run typecheck && yarn run test"
+  },
+  "dependencies": {
+    "@huaanwork/agent-package-format": "workspace:*",
+    "@huaanwork/catalog-signing": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "6.0.3"
+  }
+}

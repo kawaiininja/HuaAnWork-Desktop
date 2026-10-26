@@ -4,14 +4,28 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { createAgentPackageDigest } from '@huaanwork/agent-package-format/digest'
+import {
+  canonicalJson,
+  fingerprintPublicKeyHex,
+  generateKeyPair,
+  signAgentPackageDigest,
+} from '@huaanwork/catalog-signing'
+
+import { createAgentCatalogSecurity } from '../../src/huaanwork-host/agent-package/catalog-security.ts'
 import { parseAgentPackageManifest } from '../../src/huaanwork-host/agent-package/manifest.ts'
-import { createAgentPackageHost } from '../../src/huaanwork-host/agent-package/host.ts'
+import {
+  createAgentPackageActiveTurnRegistry,
+  createAgentPackageHost,
+} from '../../src/huaanwork-host/agent-package/host.ts'
+import { readAgentPackageState } from '../../src/huaanwork-host/agent-package/store.ts'
 import {
   AGENT_PACKAGE_CHILD_TOOLS,
   attachAgentTools,
   emptyAttachments,
 } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import {
+  AGENT_PACKAGE_START_CANCELLED,
   composeAgentPackagePersona,
   composeAgentPackageToolAllowList,
   createAgentPackageRuntimeRegistry,
@@ -26,6 +40,7 @@ import type {
   AgentPackageToolsMode,
   AgentPackageTurnRuntime,
 } from '../../src/huaanwork-host/agent-package/types.ts'
+import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 
 const FIXTURE_DIR = join(import.meta.dirname, '..', 'fixtures', 'agent-package')
 const SANDBOX_UNAVAILABLE_MESSAGE = '当前系统无法启动沙箱，智能体未运行'
@@ -583,6 +598,22 @@ describe('agent package skill script lifecycle', () => {
     throw new Error(`process ${pid} is still alive`)
   }
 
+  test('an already-aborted caller signal does not spawn the script', { timeout: 20_000 }, async () => {
+    const { packageDir, workspaceRoot } = copyFixtureWithHang()
+    const { runtime } = await startFixture({ manifest: manifestWithMode('none'), packageDir, workspaceRoot })
+    try {
+      const controller = new AbortController()
+      controller.abort()
+      const result = await runtime.runSkillScript('skill/scripts/hang.mjs', {}, controller.signal)
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('已取消')
+      // 未 spawn:脚本连自己的 pid 文件都不会写。
+      expect(existsSync(join(workspaceRoot, 'hang-pid.txt'))).toBe(false)
+    } finally {
+      await stopAgentPackageProcesses(runtime)
+    }
+  })
+
   test('aborting the caller signal kills the running script', { timeout: 20_000 }, async () => {
     const { packageDir, workspaceRoot } = copyFixtureWithHang()
     const { runtime } = await startFixture({ manifest: manifestWithMode('none'), packageDir, workspaceRoot })
@@ -878,6 +909,64 @@ describe('agent package turn cleanup', () => {
   })
 })
 
+describe('agent package start cancellation', () => {
+  test('refuses to spawn any process when the start signal is already aborted', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    let confineCalls = 0
+    const sandbox: AgentPackageSandbox = {
+      async confine(argv) {
+        confineCalls += 1
+        return { argv, enforcement: 'full' }
+      },
+    }
+    const workspaceRoot = makeRoot('agent-package-ws-')
+    await expect(
+      startAgentPackageProcesses({
+        manifest: manifestWithMode('http'),
+        packageDir: FIXTURE_DIR,
+        workspaceRoot,
+        getSandbox: () => sandbox,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(AGENT_PACKAGE_START_CANCELLED)
+    expect(confineCalls).toBe(0)
+    expect(existsSync(join(workspaceRoot, 'http-port.txt'))).toBe(false)
+  })
+
+  test('aborting while the sandbox prepares the spawn prevents the child process', { timeout: 20_000 }, async () => {
+    const controller = new AbortController()
+    let confineStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => {
+      confineStarted = resolve
+    })
+    let releaseConfine = (): void => undefined
+    const confined = new Promise<void>((resolve) => {
+      releaseConfine = resolve
+    })
+    const sandbox: AgentPackageSandbox = {
+      async confine(argv) {
+        confineStarted()
+        await confined
+        return { argv, enforcement: 'full' }
+      },
+    }
+    const workspaceRoot = makeRoot('agent-package-ws-')
+    const starting = startAgentPackageProcesses({
+      manifest: manifestWithMode('http'),
+      packageDir: FIXTURE_DIR,
+      workspaceRoot,
+      getSandbox: () => sandbox,
+      signal: controller.signal,
+    })
+    await started
+    controller.abort()
+    releaseConfine()
+    await expect(starting).rejects.toThrow(AGENT_PACKAGE_START_CANCELLED)
+    expect(existsSync(join(workspaceRoot, 'http-port.txt'))).toBe(false)
+  })
+})
+
 describe('agent package sandbox fail-closed', () => {
   test('refuses to start processes without a sandbox service', async () => {
     await expect(
@@ -910,5 +999,126 @@ describe('agent package sandbox fail-closed', () => {
     const { runtime } = await startFixture({ manifest: manifestWithMode('none'), getSandbox: () => undefined })
     await expect(runtime.runSkillScript('skill/scripts/echo.mjs', {})).rejects.toThrow(SANDBOX_UNAVAILABLE_MESSAGE)
     await stopAgentPackageProcesses(runtime)
+  })
+})
+
+describe('agent package catalog damage', () => {
+  const CATALOG_NOW = '2026-10-25T00:00:00.000Z'
+  const CATALOG_SLUG = 'weekly-report'
+
+  /**
+   * 一个结构完好、签名有效的 catalog 包(真实 keyring + Ed25519 签名)。
+   *
+   * 落盘形态与 catalog-install 一致:内容文件 + `.signature/` 两份文档;
+   * state 标记 `enabled:true`,模拟「升级/修改前本来是可用的」。
+   */
+  function writeCatalogPackage(): { profileDir: string; packageDir: string; host: ReturnType<typeof createAgentPackageHost> } {
+    const profileDir = makeRoot('agent-package-profile-')
+    const keyPair = generateKeyPair()
+    writeFileSync(
+      join(profileDir, 'agent-catalog-keyring.json'),
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          keys: [{ keyId: fingerprintPublicKeyHex(keyPair.publicKeyHex), publicKeyHex: keyPair.publicKeyHex, slot: 1 }],
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    )
+
+    const packageDir = join(profileDir, 'agents', CATALOG_SLUG)
+    mkdirSync(packageDir, { recursive: true })
+    const manifest: AgentPackageManifest = {
+      schemaVersion: 1,
+      slug: CATALOG_SLUG,
+      displayName: '周报助手',
+      description: '把一周工作整理成周报',
+      version: '1.0.0',
+      draftId: 'draft-signed',
+      createdAt: CATALOG_NOW,
+      updatedAt: CATALOG_NOW,
+      persona: 'persona.md',
+      skill: null,
+      tools: { mode: 'none' },
+      allowSkills: [],
+    }
+    const files = [
+      { path: 'agent.json', data: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8') },
+      { path: 'persona.md', data: Buffer.from('你是周报助手。\n', 'utf8') },
+    ]
+    for (const file of files) writeFileSync(join(packageDir, file.path), file.data)
+    const digest = createAgentPackageDigest(manifest, files)
+    const signature = signAgentPackageDigest(digest, {
+      privateKeyPem: keyPair.privateKeyPem,
+      slot: 1,
+      signedAt: CATALOG_NOW,
+    })
+    mkdirSync(join(packageDir, '.signature'), { recursive: true })
+    writeFileSync(join(packageDir, '.signature', 'package-digest.json'), canonicalJson(digest), 'utf8')
+    writeFileSync(join(packageDir, '.signature', 'signature.json'), JSON.stringify(signature), 'utf8')
+    writeFileSync(
+      join(profileDir, 'agents-state.json'),
+      JSON.stringify({
+        [`catalog:${CATALOG_SLUG}`]: {
+          source: 'catalog',
+          enabled: true,
+          installedVersion: '1.0.0',
+          publishStatus: 'installed',
+        },
+      }),
+      'utf8',
+    )
+
+    const security = createAgentCatalogSecurity({
+      profileDir,
+      registry: createAgentPackageActiveTurnRegistry(),
+    })
+    // 空 legacy 目录:`invocableWithLegacy` 的装配要求,不影响本地包断言。
+    const legacy = { list: () => ({ items: [] }) } as unknown as AgentsHost
+    const host = createAgentPackageHost({ profileDir, takenSlugs: () => [], security, legacy: () => legacy })
+    return { profileDir, packageDir, host }
+  }
+
+  test('does not enable, dispatch, or list a signature-invalid catalog package', async () => {
+    const { profileDir, packageDir, host } = writeCatalogPackage()
+    // 签名之后篡改人设:结构仍然完好(store 不报 broken),但目录验签必然失败。
+    writeFileSync(join(packageDir, 'persona.md'), '被篡改的人设\n', 'utf8')
+
+    // 已启用状态下的启用操作同样要过验签,不能靠「本来就是开的」绕过。
+    expect(() => host.setEnabled(CATALOG_SLUG, true)).toThrow(/包校验失败/)
+
+    // 同步列表仍展示启用态(界面要能给出移除入口),但 @ 补全不再列出它。
+    const listed = host.listLocal().find((item) => item.slug === CATALOG_SLUG)
+    expect(listed?.enabled).toBe(true)
+    const invocable = await host.invocableWithLegacy()
+    expect(invocable.items.some((item) => item.name === CATALOG_SLUG)).toBe(false)
+
+    // 运行门与补全同源:dispatch 仍然 fail closed。
+    const detail = host.detail(CATALOG_SLUG)
+    expect(detail).toBeDefined()
+    await expect(
+      host.dispatch({
+        ctx: {
+          huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
+          subagents: {
+            startActivation: async () => ({
+              childId: 'child',
+              result: Promise.resolve({}),
+              dispose: async () => undefined,
+            }),
+          },
+        } as never,
+        sessionId: 'parent-session',
+        pkg: detail!,
+        remainder: '写一份周报',
+        resolveParent: async () => ({ id: 'parent-agent' }),
+      }),
+    ).rejects.toThrow(/包校验失败/)
+
+    // 损坏包仍允许关闭(移除/重装才是出路)。
+    host.setEnabled(CATALOG_SLUG, false)
+    expect(readAgentPackageState(profileDir)[`catalog:${CATALOG_SLUG}`]?.enabled).toBe(false)
   })
 })

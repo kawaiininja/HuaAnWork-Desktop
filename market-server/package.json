@@ -17,6 +17,7 @@
     "check": "yarn run typecheck && yarn run test"
   },
   "dependencies": {
+    "@huaanwork/catalog-signing": "workspace:*",
     "dsh-community-market": "workspace:^"
   },
   "devDependencies": {

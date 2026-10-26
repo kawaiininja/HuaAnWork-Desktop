@@ -5,7 +5,7 @@ import { ROUTE_TABLE, type RouteTableEntry } from '../../src/huaanwork-host/rout
 /**
  * 路由契约跨端交叉测试 (M3 评审 D6):
  * 验证客户端 ROUTES (src/client-huaanwork/api.ts) 与
- * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 62 个方法在
+ * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 69 个方法在
  * HTTP Method、Path 与返回载荷键集上的严格双向一致性。
  */
 
@@ -26,6 +26,9 @@ export const OPTIONAL_KEYS_WHITELIST: Record<string, string[]> = {
   'agent.list': ['catalogError'],
   'agent.refresh': ['catalogError'],
   'agent.packageList': ['catalogError'],
+  // 发布状态随 submission 阶段变化:只在对应阶段出现。
+  'agent.packagePublishStatus': ['publishedVersion', 'submissionId', 'reviewReason', 'delistRequestId'],
+  'agent.packageRefresh': ['catalogError', 'revocationWarning'],
 }
 
 /**
@@ -62,10 +65,10 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.pruneSessions': ['removed'],
 }
 
-/** 62 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
+/** 69 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
 export const METHODS_501 = new Set<string>([])
 
-/** 客户端 62 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
+/** 客户端 69 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
 export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   // workspace
   'workspace.open': ['workspaceRoot'],
@@ -145,10 +148,18 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'agent.setEnabled': ['ok'],
   'agent.addEndpoint': ['ok'],
   'agent.removeEndpoint': ['ok'],
-  'agent.packageList': ['packages', 'catalogAgents'],
+  'agent.packageList': ['packages', 'catalogAgents', 'catalogPackages'],
   'agent.packageDetail': [], // returns AgentPackageDetail | AgentDetail
   'agent.packageSetEnabled': ['ok'],
   'agent.invocableList': ['items'],
+  // M2(Task 11):签名广场生命周期
+  'agent.packagePublish': ['submissionId'],
+  'agent.packagePublishStatus': ['slug', 'publishStatus'],
+  'agent.packageRequestDelist': ['requestId'],
+  'agent.packageInstall': ['ok', 'slug', 'version', 'enabled', 'publishStatus'],
+  'agent.packageUpdate': ['ok', 'slug', 'version', 'enabled', 'publishStatus'],
+  'agent.packageRemove': ['ok', 'removed', 'slug'],
+  'agent.packageRefresh': ['packages', 'catalogAgents', 'catalogPackages'],
 
   // status
   'status.get': ['ready'],
@@ -265,10 +276,25 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'agent.setEnabled': ['ok'],
   'agent.addEndpoint': ['ok'],
   'agent.removeEndpoint': ['ok'],
-  'agent.packageList': ['packages', 'catalogAgents', 'catalogError'],
+  'agent.packageList': ['packages', 'catalogAgents', 'catalogPackages', 'catalogError'],
   'agent.packageDetail': [],
   'agent.packageSetEnabled': ['ok'],
   'agent.invocableList': ['items'],
+  // M2(Task 11):签名广场生命周期(可选键见 OPTIONAL_KEYS_WHITELIST)
+  'agent.packagePublish': ['submissionId'],
+  'agent.packagePublishStatus': [
+    'slug',
+    'publishStatus',
+    'publishedVersion',
+    'submissionId',
+    'reviewReason',
+    'delistRequestId',
+  ],
+  'agent.packageRequestDelist': ['requestId'],
+  'agent.packageInstall': ['ok', 'slug', 'version', 'enabled', 'publishStatus'],
+  'agent.packageUpdate': ['ok', 'slug', 'version', 'enabled', 'publishStatus'],
+  'agent.packageRemove': ['ok', 'removed', 'slug'],
+  'agent.packageRefresh': ['packages', 'catalogAgents', 'catalogPackages', 'catalogError', 'revocationWarning'],
 
   // status
   'status.get': ['ready'],
@@ -339,16 +365,16 @@ export function verifyMethodContract(
 }
 
 describe('Route Contract Cross-Test (D6)', () => {
-  test('双端方法总数恰好 62 且集合完全一致', () => {
+  test('双端方法总数恰好 69 且集合完全一致', () => {
     const clientMethods = Object.keys(ROUTES).sort()
     const serverMethods = ROUTE_TABLE.map((r) => r.method).sort()
 
-    expect(clientMethods.length).toBe(62)
-    expect(serverMethods.length).toBe(62)
+    expect(clientMethods.length).toBe(69)
+    expect(serverMethods.length).toBe(69)
     expect(clientMethods).toEqual(serverMethods)
   })
 
-  test('62 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
+  test('69 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const [method, clientRoute] of Object.entries(ROUTES)) {
@@ -373,6 +399,66 @@ describe('Route Contract Cross-Test (D6)', () => {
           optionalKeys,
         ),
       ).not.toThrow()
+    }
+  })
+
+  test('M2 七条签名广场路由:HTTP、Path 与必含键精确匹配', () => {
+    const expected: Record<string, { http: 'GET' | 'POST'; path: string; keys: string[] }> = {
+      'agent.packagePublish': {
+        http: 'POST',
+        path: '/huaanwork/agent/package/publish',
+        keys: ['submissionId'],
+      },
+      'agent.packagePublishStatus': {
+        http: 'GET',
+        path: '/huaanwork/agent/package/publish/status',
+        keys: ['slug', 'publishStatus'],
+      },
+      'agent.packageRequestDelist': {
+        http: 'POST',
+        path: '/huaanwork/agent/package/delist-request',
+        keys: ['requestId'],
+      },
+      'agent.packageInstall': {
+        http: 'POST',
+        path: '/huaanwork/agent/package/install',
+        keys: ['ok', 'slug', 'version', 'enabled', 'publishStatus'],
+      },
+      'agent.packageUpdate': {
+        http: 'POST',
+        path: '/huaanwork/agent/package/update',
+        keys: ['ok', 'slug', 'version', 'enabled', 'publishStatus'],
+      },
+      'agent.packageRemove': {
+        http: 'POST',
+        path: '/huaanwork/agent/package/remove',
+        keys: ['ok', 'removed', 'slug'],
+      },
+      'agent.packageRefresh': {
+        http: 'POST',
+        path: '/huaanwork/agent/package/refresh',
+        keys: ['packages', 'catalogAgents', 'catalogPackages'],
+      },
+    }
+    const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
+    for (const [method, route] of Object.entries(expected)) {
+      const clientRoute = ROUTES[method]
+      const serverRoute = serverRouteMap.get(method)
+      expect(clientRoute).toBeDefined()
+      expect(serverRoute).toBeDefined()
+      if (!clientRoute || !serverRoute) continue
+      expect(clientRoute.http).toBe(route.http)
+      expect(serverRoute.http).toBe(route.http)
+      expect(clientRoute.path).toBe(route.path)
+      expect(serverRoute.path).toBe(route.path)
+      verifyMethodContract(
+        method,
+        clientRoute,
+        serverRoute,
+        route.keys,
+        SERVER_EXPECTED_KEYS[method] ?? [],
+        OPTIONAL_KEYS_WHITELIST[method] ?? [],
+      )
     }
   })
 

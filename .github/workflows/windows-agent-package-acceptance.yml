@@ -1,11 +1,17 @@
-# Windows agent-package M1 Step 5 probe.
+# Windows agent-package acceptance probes.
+#
+# M1 Step 5 (sandbox/HTTP/MCP/host-exit) and the M2 cross-profile
+# signed-package lifecycle probe (catalog server, offline CLI review/approve,
+# install into a second profile, real HTTP dispatch, update, delist, revoke)
+# run as two independent steps.
 #
 # This workflow is workflow_dispatch only. Push and pull_request CI do not run
 # it, and it is not a required check. Default product gates (yarn check,
 # desktop-windows, test:host-liveness-win) are unchanged.
 #
 # Promote it to a product gate only after one or two green runs are recorded in
-# docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md:
+# docs/evidence/2026-10-24-agent-package-windows-gha-acceptance.md (M1) and
+# docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md (M2):
 #   1. Move this job into ci.yml with
 #      `if: needs.changes.outputs.product == 'true'`, or add pull_request/push
 #      triggers here with that same product-change guard.
@@ -58,12 +64,20 @@ jobs:
         run: node --test dsh-plugin-huaanwork/scripts/huaanwork-host-windows-acceptance.spec.mjs
       - name: Windows agent-package acceptance probe
         run: node dsh-plugin-huaanwork/scripts/huaanwork-agent-package-windows-acceptance.mjs --platform win32 --out windows-agent-package-acceptance.json
+      - name: Windows agent-package M2 acceptance probe
+        # --experimental-transform-types is required: the M2 probe imports
+        # src/huaanwork-host/routes.ts, whose RouteError uses TypeScript
+        # parameter properties that strip-only mode cannot load. M1 does not
+        # import that module and stays on plain node.
+        run: node --experimental-transform-types dsh-plugin-huaanwork/scripts/huaanwork-agent-package-m2-acceptance.mjs --platform win32 --out windows-agent-package-m2-acceptance.json
       - name: Upload acceptance report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: windows-agent-package-acceptance
-          path: windows-agent-package-acceptance.json
+          path: |
+            windows-agent-package-acceptance.json
+            windows-agent-package-m2-acceptance.json
           if-no-files-found: warn
       - name: Build HuaAnWork for the optional host liveness test
         if: inputs.run_host_liveness

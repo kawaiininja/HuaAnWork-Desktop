@@ -39,12 +39,26 @@
  *
  * Canonical form: the signature covers `canonicalJson(manifest)` — a
  * deterministic JSON serialization (object keys sorted recursively, no
- * insignificant whitespace). Both the offline signer and the verifiers
- * (server-side Task 2, wrapper-side Task 4/5) must use the same
- * canonicalization; it is defined here and mirrored by the wrapper.
+ * insignificant whitespace). The canonicalizer and the Ed25519 primitives are
+ * the zero-dependency shared implementation in `@huaanwork/catalog-signing`
+ * (packages/catalog-signing); this module keeps only the market-owned trust
+ * surface (envelope, manifest types, reason strings, `verifyWithKeySlots`,
+ * `signManifest`) and re-exports the generic primitives for existing callers.
+ * Both the offline signer and the verifiers (server-side Task 2, wrapper-side
+ * Task 4/5) must use the same canonicalization.
  */
 
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign as cryptoSign, verify as cryptoVerify } from 'node:crypto'
+import { createPrivateKey, createPublicKey } from 'node:crypto'
+import {
+  canonicalJson,
+  extractRawPublicKeyHex,
+  fingerprintPublicKeyHex,
+  generateKeyPair,
+  publicKeyFromHex,
+  signCanonical,
+  verifyCanonical,
+  type GeneratedKeyPair,
+} from '@huaanwork/catalog-signing'
 
 // ---------------------------------------------------------------------------
 // Constants (normative; mirrored by the wrapper verifier)
@@ -187,108 +201,25 @@ export interface VerificationContext {
 }
 
 // ---------------------------------------------------------------------------
-// Canonical JSON
+// Generic primitives (canonical JSON + Ed25519)
+//
+// The byte-compatible implementation lives in the zero-dependency shared
+// package `@huaanwork/catalog-signing` (packages/catalog-signing); it is
+// re-exported here so existing market-server callers keep the same surface.
+// The P9 "publicKeyFromHex never throws" contract is implemented in the shared
+// package and still pinned end-to-end by market-server's own signing tests
+// through this re-export.
 // ---------------------------------------------------------------------------
 
-function canonicalize(value: unknown): string {
-  if (value === null) return 'null'
-  switch (typeof value) {
-    case 'boolean':
-      return value ? 'true' : 'false'
-    case 'number':
-      if (!Number.isFinite(value)) throw new Error(`canonicalJson: non-finite number ${String(value)}`)
-      return JSON.stringify(value)
-    case 'string':
-      return JSON.stringify(value)
-    case 'object': {
-      if (Array.isArray(value)) {
-        return `[${value.map((item) => canonicalize(item)).join(',')}]`
-      }
-      const record = value as Record<string, unknown>
-      const keys = Object.keys(record).sort()
-      return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(record[key])}`).join(',')}}`
-    }
-    default:
-      throw new Error(`canonicalJson: unsupported value type ${typeof value}`)
-  }
+export {
+  canonicalJson,
+  fingerprintPublicKeyHex,
+  generateKeyPair,
+  publicKeyFromHex,
+  signCanonical,
+  verifyCanonical,
 }
-
-/** Deterministic JSON serialization; the exact bytes that get signed. */
-export function canonicalJson(value: unknown): string {
-  return canonicalize(value)
-}
-
-// ---------------------------------------------------------------------------
-// Ed25519 primitives (node:crypto only, zero dependencies)
-// ---------------------------------------------------------------------------
-
-export interface GeneratedKeyPair {
-  /** Raw 32-byte Ed25519 public key, lowercase hex — the pinnable format. */
-  readonly publicKeyHex: string
-  /** PKCS#8 PEM private key. Offline material: chmod 0600, never committed. */
-  readonly privateKeyPem: string
-}
-
-export function generateKeyPair(): GeneratedKeyPair {
-  const { publicKey, privateKey } = generateKeyPairSync('ed25519')
-  return {
-    publicKeyHex: extractRawPublicKeyHex(publicKey),
-    privateKeyPem: privateKey.export({ format: 'pem', type: 'pkcs8' }) as string,
-  }
-}
-
-const ED25519_SPKI_DER_LENGTH = 44
-const ED25519_RAW_KEY_LENGTH = 32
-
-/** The pinned public-key format: 64 hex characters (raw 32-byte Ed25519 key). */
-const ED25519_RAW_KEY_HEX_PATTERN = /^[0-9a-fA-F]{64}$/u
-
-/** Extract the raw 32-byte key from an SPKI DER Ed25519 public key (last 32 bytes). */
-function extractRawPublicKeyHex(publicKey: import('node:crypto').KeyObject): string {
-  const spki = publicKey.export({ format: 'der', type: 'spki' })
-  if (spki.length !== ED25519_SPKI_DER_LENGTH) {
-    throw new Error(`unexpected Ed25519 SPKI length ${spki.length}`)
-  }
-  return spki.subarray(ED25519_SPKI_DER_LENGTH - ED25519_RAW_KEY_LENGTH).toString('hex')
-}
-
-/** sha256 hex fingerprint of the raw public key bytes; doubles as keyId. */
-export function fingerprintPublicKeyHex(publicKeyHex: string): string {
-  return createHash('sha256').update(Buffer.from(publicKeyHex, 'hex')).digest('hex')
-}
-
-/**
- * Rebuild a node KeyObject from the pinned raw-hex format (via JWK, no PEM
- * needed). NEVER throws (Task 6.5, P9): the pinned format is exactly 64 hex
- * characters — anything else (bad characters, wrong length, trailing garbage)
- * returns null, and callers must handle the null explicitly (verifyCanonical →
- * false, the verify chain → `invalid-signature`). The old implementation threw
- * on a wrong decoded length, which falsified this contract.
- */
-export function publicKeyFromHex(publicKeyHex: string): import('node:crypto').KeyObject | null {
-  if (!ED25519_RAW_KEY_HEX_PATTERN.test(publicKeyHex)) return null
-  const raw = Buffer.from(publicKeyHex, 'hex')
-  return createPublicKey({
-    format: 'jwk',
-    key: { kty: 'OKP', crv: 'Ed25519', x: raw.toString('base64url') },
-  })
-}
-
-/** Sign the canonical bytes of a manifest with a PKCS#8 PEM private key. */
-export function signCanonical(canonical: string, privateKeyPem: string): string {
-  return cryptoSign(null, Buffer.from(canonical, 'utf8'), createPrivateKey(privateKeyPem)).toString('base64')
-}
-
-/**
- * Verify a base64 Ed25519 signature over the canonical bytes with a raw-hex
- * public key. A malformed key (null from publicKeyFromHex) answers false —
- * never a throw (P9).
- */
-export function verifyCanonical(canonical: string, signatureBase64: string, publicKeyHex: string): boolean {
-  const publicKey = publicKeyFromHex(publicKeyHex)
-  if (publicKey === null) return false
-  return cryptoVerify(null, Buffer.from(canonical, 'utf8'), publicKey, Buffer.from(signatureBase64, 'base64'))
-}
+export type { GeneratedKeyPair }
 
 // ---------------------------------------------------------------------------
 // Envelope anti-replay: pure field check

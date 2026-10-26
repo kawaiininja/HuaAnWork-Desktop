@@ -84,10 +84,18 @@ docker run --rm -p 8787:8787 \
 
 **登记偏离：该镜像是「基座」镜像——只含服务端自身代码，必须由部署方补上依赖
 闭包才能启动**（spec §11 的形状不变：`market-server/Dockerfile` 仍是非 root、
-只拷 `package.json` + `src`）。原因：market-server 运行期 import
-`dsh-community-market/contracts`，它解析到该包的 `lib/contracts/index.js`
-（**git-ignored 构建产物**，无自动构建钩子）；该子路径还 import `ajv`，并在
-运行期读本包 `docs/schemas/*.schema.json`。补闭包是**有顺序的**三步：
+只拷 `package.json` + `src`）。闭包现在有**两个** workspace 依赖（2026-10-24
+最终评审 I1 订正）：
+
+1. `dsh-community-market/contracts`，解析到该包的 `lib/contracts/index.js`
+   （**git-ignored 构建产物**，无自动构建钩子）；该子路径还 import `ajv`，并在
+   运行期读本包 `docs/schemas/*.schema.json`。
+2. `@huaanwork/catalog-signing`（`market-server/src/signing.ts` 的**运行期 value
+   import**：`canonicalJson` / `signCanonical` / `verifyCanonical` / key helper）。
+   它的 `package.json` `exports` 直接指向**原始 TypeScript** `./src/index.ts`，
+   没有构建产物。零运行时依赖，但不进闭包会在 import 期直接失败。
+
+补闭包是**有顺序的**三步：
 
 **(i) 先产出构建产物**（与〈启动〉同一前置，不可省）：
 
@@ -112,11 +120,30 @@ docker run --rm -p 8787:8787 -w /repo/market-server \
 ```
 
 该形态不搬闭包：仓库工作区的 `node_modules/` 由 (i) 的 install 提供
-（`market-server/node_modules/dsh-community-market` 是工作区符号链接），
-`lib/` 由 (i) 的 build 提供。
+（`market-server/node_modules/dsh-community-market` 与
+`market-server/node_modules/@huaanwork/catalog-signing` 都是工作区符号链接），
+`lib/` 由 (i) 的 build 提供。`@huaanwork/catalog-signing` 的原始 TS 能在这个形态
+下运行，是因为 Node 按**解析后的真实路径**判断：符号链接指向
+`packages/catalog-signing/src/index.ts`（在 `node_modules` 之外），类型剥离不被
+拒绝。**这是当前唯一已按真实依赖闭包验证过的容器形态**。
 
 ② **构造派生镜像**——把闭包落到 `/app/node_modules`。在构建机上装配只含闭包的
-目录，再叠到基座镜像上：
+目录，再叠到基座镜像上。**注意 `@huaanwork/catalog-signing` 不能按原样拷 TS**：
+Node 对 `node_modules` 下的文件拒绝类型剥离
+（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`，`--experimental-strip-types` 与
+`--experimental-transform-types` 都一样；2026-10-24 以 Node `v22.23.2` 实测），
+而该包的 `exports` 恰好指向 `./src/index.ts`。派生镜像要么：
+
+- **携带编译后的 JS 副本**：先给 `@huaanwork/catalog-signing` 加一个真正的 emit
+  构建（当前 `package.json` 没有 `build`，`tsconfig.json` 是 `noEmit: true`；
+  编译时还要处理 `.ts` 后缀 import），再把编译目录与一份把 `exports` 指向 JS 的
+  `package.json` 拷进闭包；或
+- **继续使用 ① 的仓库工作区挂载**（本里程碑推荐，且是唯一实测形态）。
+
+“给共享包加 emit 构建、重写 `exports`、在 `/app` 布局复跑启动”是**部署前置任务，
+本轮未做**；没有新增依赖后的派生镜像构建证据。下面的装配命令只展示
+`dsh-community-market` 的闭包搬运，`@huaanwork/catalog-signing` 的编译副本必须按
+上述方式另行加入，否则按 (iii) 的签名失败：
 
 ```bash
 # 在仓库根、已完成 (i)：
@@ -148,17 +175,27 @@ docker build -t huaanwork/market-server:closure /tmp/market-server-closure
 **真复制**（不要 `cp -al` 硬链接、不要符号链接，搬运到部署机会失效）。注意
 `focus` 会把整个安装裁成这一条生产闭包（其它工作区的 devDependencies 与被按需
 下载的原生二进制一并被裁掉）：之后若要重建 `lib/`（如升级），先
-`corepack yarn install --immutable` 复原完整安装。本节的
-文件集已按 `/app` 布局在 `/tmp` 模拟启动实测（2026-09-30 修复轮：构建 → 装配 →
+`corepack yarn install --immutable` 复原完整安装。**实测边界（诚实登记）**：本节
+的文件集曾在 `/app` 布局用 `/tmp` 模拟启动（2026-09-30 修复轮：构建 → 装配 →
 `node --experimental-strip-types src/index.ts`，`listening` 横幅、`/healthz`、
-`/v1/plugins` 均通过）；镜像构建本身仍是部署门（本机无 Docker daemon）。
+`/v1/plugins` 均通过），但那次模拟早于 `@huaanwork/catalog-signing` 成为
+`market-server` 的运行期依赖；**新增依赖后的派生镜像未实测**，镜像构建本身仍是
+部署门（本机无 Docker daemon）。在完成上面的编译副本前置前，只有 ① 的工作区
+挂载形态可用。
 
-**(iii) 缺闭包的两类失败签名**（都在 import 期、监听前退出）：
+**(iii) 缺闭包或形态错误的失败签名**（都在 import 期、监听前退出）：
 
 - `ERR_MODULE_NOT_FOUND: Cannot find package 'dsh-community-market'` ⇒
   `/app/node_modules` 里完全没有该包（闭包未提供）。
 - `ERR_MODULE_NOT_FOUND: Cannot find module '…/dsh-community-market/lib/contracts/index.js'`
   ⇒ 包在，但 (i) 的 `lib/` 构建产物缺失或未拷入（等价于在全新克隆里跳过 build）。
+- `ERR_MODULE_NOT_FOUND: Cannot find package '@huaanwork/catalog-signing'` ⇒
+  闭包漏掉了 2026-10-24 新增的签名/规范化依赖（`market-server/src/signing.ts` 的
+  运行期 value import）。
+- `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING: Stripping types is currently
+  unsupported for files under node_modules, for ".../node_modules/@huaanwork/
+  catalog-signing/src/index.ts"` ⇒ 把该包的原始 TS 原样拷进了 `/app/node_modules`；
+  必须换成编译后的 JS 副本（并让 `exports` 指向它），或改用 ① 的仓库工作区挂载。
 
 ## 环境配置（前四项必需、fail-closed；admin token 可选）
 

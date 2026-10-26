@@ -62,6 +62,17 @@ export default defineConfig([
     dts: false,
     clean: false,
     sourcemap: true,
+    deps: {
+      // 这些包导出原始 TypeScript,只能随构建内联,不能留作运行期外部依赖。
+      // 显式声明后,即使它们日后移入 dependencies 也不会被静默外置;
+      // 打包边界由 scripts/huaanwork-verify-bundled-runtime.mjs 与
+      // scripts/verify-licenses.mjs 的 bundled 闭包共同钉住。
+      alwaysBundle: [
+        '@huaanwork/agent-package-format',
+        '@huaanwork/catalog-signing',
+        '@huaanwork/policy',
+      ],
+    },
   },
   {
     name: `${PACKAGE_NAME}/bin`,

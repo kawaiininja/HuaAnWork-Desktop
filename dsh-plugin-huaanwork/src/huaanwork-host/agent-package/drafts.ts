@@ -7,6 +7,8 @@ import { AGENT_NAME_RE } from '@huaanwork/policy/agent-catalog'
 import { parseSkillMarkdown } from '../../huaanwork-guardrails/skills.ts'
 import { resolveInvocableSkill } from '../skill-invoke.ts'
 import { parseAgentPackageManifest } from './manifest.ts'
+import { resetLocalAgentPackagePublication } from './catalog-publish.ts'
+import { agentPackagePublishLock } from './publish-lock.ts'
 import {
   agentPackageBytes,
   agentPackageDir,
@@ -230,10 +232,36 @@ export async function commitAgentPackage(
     return refused('draftId 无效')
   }
 
+  // 同 slug 的 publish 与 commit 共用一把锁:写包 + 复位发布状态期间,上传不能
+  // 交错。slug 在草稿或已落盘包上才知道,锁内重新读草稿并校验 draftId。
+  const known = findPackageByDraftId(profileDir, draftId)
+  const current = loadAgentPackageDraft(profileDir, sessionId)
+  const lockSlug = known?.slug ?? current?.slug
+  if (lockSlug === undefined) return refused('没有待确认的草稿')
+  return agentPackagePublishLock.run(profileDir, lockSlug, () =>
+    commitAgentPackageLocked(profileDir, sessionId, draftId, takenSlugs),
+  )
+}
+
+async function commitAgentPackageLocked(
+  profileDir: string,
+  sessionId: string,
+  draftId: string,
+  takenSlugs: readonly string[],
+): Promise<CommitResult> {
   const alreadyCommitted = findPackageByDraftId(profileDir, draftId)
   if (alreadyCommitted !== undefined) {
     const stale = loadAgentPackageDraft(profileDir, sessionId)
-    if (stale?.draftId === draftId) removeDraft(profileDir, sessionId)
+    if (stale?.draftId === draftId) {
+      // 只有「包已写入、reset 未跑、草稿仍在」的中断态才复位。manifest 永久保留
+      // draftId,已完成提交的旧 draftId 重放时不能清掉更新的一次发布(I-16)。
+      try {
+        resetLocalAgentPackagePublication(profileDir, alreadyCommitted.slug)
+      } catch {
+        return refused('发布状态复位失败，请重试，草稿已保留')
+      }
+      removeDraft(profileDir, sessionId)
+    }
     // A retried commit normally finds its draft gone; host-created packages start at
     // 1.0.0, so a later version can only come from an update.
     const mode = stale?.mode ?? (alreadyCommitted.manifest.version === INITIAL_VERSION ? 'create' : 'update')
@@ -268,6 +296,9 @@ export async function commitAgentPackage(
   if (draft.mode === 'update' && existing === undefined) {
     return refused(`要更新的智能体 @${draft.slug} 不存在，草稿保留`)
   }
+  if (draft.mode === 'update' && readAgentPackage(profileDir, draft.slug)?.source !== 'local') {
+    return refused(`智能体 @${draft.slug} 来自智能体广场，不能在这里更新`)
+  }
 
   const manifest = buildManifest(draft, existing, now)
 
@@ -292,6 +323,14 @@ export async function commitAgentPackage(
     setAgentPackageEnabled(profileDir, draft.slug, enabled)
   } catch (error) {
     return refused(`写入启用状态失败:${errorMessage(error)}`)
+  }
+
+  // 本地内容变化后旧发布结果不再代表当前内容:只清发布/下架/撤销字段,
+  // enabled、installedVersion 与 publishedVersion 保留(后者作为历史)。
+  try {
+    resetLocalAgentPackagePublication(profileDir, draft.slug)
+  } catch (error) {
+    return refused(`写入发布状态失败:${errorMessage(error)}`)
   }
 
   removeDraft(profileDir, sessionId)
@@ -407,6 +446,9 @@ function resolveUpdateBase(
 function readUpdateBase(profileDir: string, slug: string): DraftBody {
   const detail = readAgentPackage(profileDir, slug)
   if (detail === undefined) throw new Error(`智能体 @${slug} 不存在`)
+  if (detail.source !== 'local') {
+    throw new Error(`智能体 @${slug} 来自智能体广场，不能在这里更新`)
+  }
   if (detail.broken !== undefined) throw new Error(`智能体 @${slug} 已损坏:${detail.broken.reason}`)
   const manifest = readOnDiskManifest(profileDir, slug)
   if (manifest === undefined) throw new Error(`智能体 @${slug} 的 agent.json 不可读`)
