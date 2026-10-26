@@ -1,21 +1,17 @@
 # 智能体包 M2 Windows GHA 验收证据
 
-当前结论（2026-10-25 fix round 1 更新）：**M2 的 Windows step `PASS`（exit 0）**——run
-`40198346429`（commit `93c1bb0291`，`workflow_dispatch`）。修复方式是裁定 **R-T13-1** 的选项
-(b)：workflow 的 M2 step 改用 `node --experimental-transform-types`（该探针静态 import
-`routes.ts`，其 `RouteError` 用 TypeScript 参数属性，strip-only 无法加载）。同一次 run 里
-**M1 探针也 PASS**。证据见 §9。
+当前结论（2026-10-25 R-ACCEPT-1 更新）：**Windows 平台验收 PASS**——PR head 上的 run
+`40223939433`（commit `ceac20c475`，代码 HEAD `68580abfca`，`workflow_dispatch`）M1/M2 均
+exit 0；M2 JSON `verdict=PASS`、`platform=win32`、`residualProcesses=0`、`cleanup.matches=[]`。
+分支 CI run `40222870585` 10/10 success。
 
-历史：同一天的首次运行 `40195462983`（commit `650e749af7`）**M2 step FAILED（exit 1）**，根因
-是 workflow 当时用无 flag 的 `node`，与产品行为无关；M1 在那一轮同样 PASS。该失败原文保留在
-§8，不删除、不被后来的绿跑覆盖。
+跨机器验收：按 owner 裁定 **R-ACCEPT-1** 由本次 Windows GHA 替代（owner waiver）——**不写成
+“跨机器验收实际通过”**；残余风险=未验证真实 macOS→Windows 机器/OS 边界；获得第二台 Windows
+机器时按 §4 四步补跑。M2 记为 **complete with waiver**，不 tag/release。
 
-跨机器验收仍为 **`BLOCKED`**（没有第二台 Windows 机器）。
-
-> 2026-10-24 的历史记录（§1–§7 的部分行文）写的是「未运行 / `BLOCKED`」，原因是当时环境
-> 不能 push。后续环境**可以** push（`origin` 已配置、`gh` 已认证），因此按任务要求实际推了
-> 分支并触发 `workflow_dispatch`。**跨机器验收的 `BLOCKED` 没有变**：它需要第二台 Windows
-> 机器，**不得**用 macOS 探针或同机双 Profile 冒充。
+历史：run `40195462983`（M2 FAILED，无 flag）保留在 §8；run `40198346429`（首个 PASS）在
+§9；run `40205892750`（最终代码 HEAD）在 §10；run `40223939433`（PR head 复跑）在 §11。
+§1–§10 中的 `BLOCKED` 行文是当时状态，当前状态以本段 + §11 为准。
 
 
 ## 1. 状态
@@ -24,7 +20,7 @@
 | --- | --- |
 | 结论（M2 Windows step） | **`PASS`**（exit 0；run `40198346429`，见 §9） |
 | 结论（M1 Windows probe，同一 run） | `PASS`（exit 0，见 §9.3） |
-| 结论（跨机器验收） | `BLOCKED`（没有第二台 Windows 机器，见 §4） |
+| 结论（跨机器验收） | 按 R-ACCEPT-1 由 Windows GHA 替代（owner waiver；见 §11） |
 | 运行日期 | 2026-10-25T13:36:01Z（run 创建）；job 于 2026-10-25T13:40:22Z 成功结束（4m18s） |
 | workflow run URL | <https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40198346429> |
 | 退出码 | M1 step `0` / M2 step `0` |
@@ -78,7 +74,7 @@ Profile 集成测试**；跨机器验收仍是 `BLOCKED`，`docs/huaanwork-agent
 起不来）；`2` 用法错误。**退出码不是 0 的运行不要写成 PASS**；失败的尝试留在 §5，不拿后来
 的绿跑覆盖它。
 
-## 4. 跨机器验收（同样 `BLOCKED`）
+## 4. 跨机器验收（历史；当前按 R-ACCEPT-1 替代，见 §11）
 
 同机双 Profile 只算集成测试，不能替代这一组。需要三处材料同时具备：
 
@@ -134,10 +130,10 @@ artifact 文件名: windows-agent-package-acceptance（ID 12599578870；仅含 M
 | macOS 探针最终运行 | `PASS`，exit 0；权威运行是 macOS 证据 §9（commit `f2eebef933`，`--experimental-transform-types`），`residualProcesses=0` |
 | Windows GHA | **`PASS`**：run `40198346429`（commit `93c1bb0291`）；M1 step `0`、M2 step `0`，见 §9 |
 | Windows GHA（历史失败） | run `40195462983`（commit `650e749af7`）：M1 `0`、M2 `1`（结构性 strip-only），见 §8 |
-| 跨机器验收 | **`BLOCKED`**：只有一台 macOS 主机 |
+| 跨机器验收 | **历史 `BLOCKED`**；2026-10-25 后按 R-ACCEPT-1 由 Windows GHA 替代（见 §11） |
 
 Windows 结论仍然只能由 §2 的 `workflow_dispatch` 运行产生；跨机器验收需要第二台 Windows
-机器。
+机器（2026-10-25 后按 R-ACCEPT-1 由 Windows GHA 替代，见 §11）。
 
 ## 8. 2026-10-25 首次运行（Task 13 补救轮；M2 step FAILED——历史，保留）
 
@@ -234,7 +230,7 @@ Node.js v22.23.2
 ### 8.6 当时仍然 `BLOCKED` 的部分
 
 - **跨机器验收**（macOS 创建者 + 离线管理员 + Windows 消费机）：没有第二台 Windows 机器，
-  按 §4 的四步执行，不得用同机双 Profile 替代（**现在仍是 `BLOCKED`**）。
+  按 §4 的四步执行，不得用同机双 Profile 替代（历史 `BLOCKED`；后由 R-ACCEPT-1 替代，见 §11）。
 - **Windows M2 探针重跑**：依赖 §8.5 的 (a) 或 (b) 先落地 —— 已由 (b) 完成，重跑见 §9。
 
 ## 9. 2026-10-25 fix round 1 实际运行（M2 step PASS）
@@ -617,7 +613,7 @@ M1（同一 run）：`decision.exitCode:0`、`decision.verdict:"PASS"`、`hardFa
 
 **跨机器验收**（macOS 创建者 + 离线管理员 + Windows 消费机）：没有第二台 Windows 机器，
 按 §4 的四步执行，不得用同机双 Profile 或 macOS 探针替代。本文件的 `PASS` 只覆盖
-「GitHub Windows runner 上的同机双 Profile 集成测试」。
+「GitHub Windows runner 上的同机双 Profile 集成测试」。（历史；后由 R-ACCEPT-1 替代，见 §11。）
 
 ---
 
@@ -639,7 +635,7 @@ canonical 运行。
 | 撤销卡片 | `primary: agent.packageRefresh`，`enabled: false`，`revoked.version: 1.0.1`，`activationDisposed: true`，`portClosed: true` |
 | artifact | `windows-agent-package-acceptance`（本次下载后归档为 `docs/evidence/2026-10-25-agent-package-m2-windows-finalfix.json`） |
 
-跨机器验收仍为 `BLOCKED`（没有第二台 Windows 机器）；不能用本节的同机双 Profile 结果替代。
+跨机器验收在 R-ACCEPT-1 之前为 `BLOCKED`；2026-10-25 后按 owner waiver 由 Windows GHA 替代（见 §11），不写成跨机器 PASS。
 
 ---
 
@@ -661,5 +657,6 @@ canonical 运行。
 | 下架/撤销卡片 | 均为 `primary: agent.packageRefresh` |
 | artifact | `windows-agent-package-acceptance`（M1 + M2 JSON；已下载核对） |
 
-这次运行是同一代码 + 文档 head 上的重复确认，不替代 §4 的跨机器验收；跨机器仍
-`BLOCKED`。
+按 owner 裁定 **R-ACCEPT-1**，本次 Windows GHA run 作为跨机器验收的替代（owner waiver），
+M2 记为 **complete with waiver**；**不是“跨机器验收实际通过”**。残余风险：未验证真实
+macOS→Windows 机器/OS 边界；获得第二台 Windows 机器时按 §4 四步补跑。

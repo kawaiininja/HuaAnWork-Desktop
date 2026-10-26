@@ -19,16 +19,19 @@
 `git log -1 --format=%H -- docs/evidence/2026-10-24-agent-package-m2-macos-acceptance.md`
 查询）。最终评审修复轮之前的运行（`13bb3fc90b`）只算**中间运行**（见 §2 的运行计数）。
 
-> **2026-10-25 fix round 1（裁定 R-T13-1）**：**权威运行是 §9**。它在代码提交
-> `f2eebef933` 上以 `node --experimental-transform-types …` 执行，退出码 0；§8 是同一代码
-> 的首次成功运行（以 transform-types 手工绕开 strip-only 的 import 限制），保留不删。
+> **2026-10-25 fix round 1（裁定 R-T13-1）**：§9 是 fix round 1 的运行；final fix wave 后
+> 的**权威运行是 §10**（代码 HEAD `68580abfca`，`--experimental-transform-types`，exit 0）。
+> §8 是同一代码的首次成功运行（以 transform-types 手工绕开 strip-only 的 import 限制），
+> 保留不删。
 
 这不是 GUI 真机，也不是跨机器验收。它证明的是：真实目录服务 + 真实离线 CLI 子进程 +
 两个 Profile 的签名包生命周期（发布 → 审查/签名 → 第二 Profile 安装 → 启用 → 真实 HTTP
 运行 → 1.0.1 更新保留启用态 → 下架后已安装卡 `delisted` 且仍可运行 → 长回合撤销被中止 →
 撤销版本不可再启用/分发），以及退出时零残留进程。
 
-跨机器验收（macOS 创建者 + Windows 消费机 + 离线管理员）为 **`BLOCKED`**，见 §7。
+跨机器验收（macOS 创建者 + Windows 消费机 + 离线管理员）按 owner 裁定 **R-ACCEPT-1** 由
+Windows GHA 替代（owner waiver；**不是“跨机器验收实际通过”**），见 Windows 证据 §11；
+残余风险与补跑触发条件见该节。§7 的 `BLOCKED` 行文是 waiver 之前的历史状态。
 
 ## 1. 运行环境
 
@@ -654,11 +657,12 @@ key、降级、错误发布/管理 token、撤销与在途回合）由既有集�
 - **沙箱是 passthrough**：本探针验证签名包生命周期；沙箱 `enforcement`、写入拒绝、读/网络
   观察由 M1 的 Windows sandbox probe 负责。真实产品的 dispatch 使用真实
   `sandbox-local`（探针只替换了 `confine`）。
-- **同机双 Profile 只是集成测试**，不替代跨机器验收。
-- **Windows 未运行**：本环境不能 push 分支/触发 `workflow_dispatch`（C21）。Windows 结论在
-  `docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md` 记为 `BLOCKED`。
-- **跨机器验收 `BLOCKED`**：只有一台机器。需要 macOS 创建者、Windows 消费机与离线管理员
-  各留原始证据与进程清单；步骤见 Windows 证据文件 §4。
+- **同机双 Profile 只是集成测试**，不替代跨机器验收；2026-10-25 后按 R-ACCEPT-1 由 Windows
+  GHA 替代（owner waiver，见 Windows 证据 §11）。
+- **Windows 未运行（历史）**：本节写于环境不能 push 时；后续已实际运行并通过，见
+  `docs/evidence/2026-10-24-agent-package-m2-windows-acceptance.md` §9/§10/§11。
+- **跨机器验收 `BLOCKED`（历史）**：只有一台机器；后由 R-ACCEPT-1 替代（见 Windows 证据
+  §11）。获得第二台 Windows 机器时仍按 Windows 证据 §4 四步补跑。
 - 探针每次运行生成新 key/token，因此两次运行的 submissionId、keyId、端口不同属正常。
 
 ## 8. 补救轮最终运行（代码提交 `650e749af7`，2026-10-25）
@@ -1108,8 +1112,8 @@ ps -ax -o pid=,command= | grep -F "huaanwork-m2-accept-" | grep -v "grep -F"
   `submissionId` / `keyId` / 端口 / `tempRoot` 不同属正常）。
 - Windows：本轮环境**可以** push 并触发 GHA，已实际运行；M1 Windows 探针在该提交上
   PASS，M2 step 因同一 strip-only import 问题失败。详见
-  `2026-10-24-agent-package-m2-windows-acceptance.md` §8。跨机器验收仍为 `BLOCKED`（没有
-  第二台 Windows 机器）。
+  `2026-10-24-agent-package-m2-windows-acceptance.md` §8。跨机器验收当时为 `BLOCKED`
+  （历史；后由 R-ACCEPT-1 替代，见 Windows 证据 §11）。
 
 ## 9. 权威运行：`--experimental-transform-types`（fix round 1，2026-10-25）
 
