@@ -315,6 +315,34 @@ jobs:
           DSH_MAC_SMOKE_ARCH: ${{ github.event_name == 'pull_request' && 'arm64' || 'universal' }}
         run: yarn workspace ${{ matrix.workspace }} dist:mac-smoke
 
+  # Current-tree secret scan. Does not walk git history and does not depend on
+  # the product/docs classifier, so a docs-only pull request still runs it.
+  # Allowlists live in .gitleaks.toml. gitleaks >= 8.30 is required so
+  # `targetRules` stays rule-scoped.
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=8.30.1
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${archive}" | sha256sum -c
+          tar -xzf "$archive" gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Scan the current tree
+        shell: bash
+        run: gitleaks detect --no-git --redact --config .gitleaks.toml --verbose
+
   # Upstream toolchain smoke: the portable-shell scripts must resolve the
   # pinned submodule's own Yarn/pnpm release on Windows.
   upstream-command-windows:

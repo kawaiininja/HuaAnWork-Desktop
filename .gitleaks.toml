@@ -1,0 +1,63 @@
+# Current-tree secret scan for HuaAnWork Desktop.
+#
+# Extends the built-in gitleaks rules. Every allowlist below is rule-scoped
+# (`targetRules`) so a path that is noisy for generic-api-key still reports a
+# private key. CI runs `gitleaks detect --no-git` (see .github/workflows/ci.yml)
+# and must use gitleaks >= 8.30, which is the version that applies `targetRules`.
+# An older binary may ignore that field and treat these blocks as global.
+
+title = "HuaAnWork Desktop"
+
+minVersion = "8.30.0"
+
+[extend]
+useDefault = true
+
+# Documentation, agent notes, and bilingual hash records.
+#
+# `generic-api-key` matches assignment-shaped text, not just credentials:
+# - `*.i18n.yaml` lines are `<source path>: <git blob sha1>`. A filename that
+#   contains api, token, credential, or key makes that sha1 look like a key.
+# - `docs/` and `.agents/notes/` quote example tokens (`sk-invalid-for-m9-test`,
+#   redaction-test snippets) and captured localhost smoke URLs
+#   (`http://127.0.0.1:<port>/?token=` from M8 evidence logs).
+# Those paths are allowlisted for this one rule. A private key under docs/
+# still reports. Historical copies of the same paths are covered too; this
+# does not rewrite git history.
+[[allowlists]]
+description = "Docs, agent notes, and i18n blob-hash records (generic-api-key only)."
+targetRules = ["generic-api-key"]
+paths = [
+  '''(?:^|/)docs/''',
+  '''(?:^|/)\.agents/notes/''',
+  '''\.i18n\.ya?ml$''',
+]
+
+# README star-history widgets. The chart URL's public `sealed_token` query is
+# what generic-api-key extracts. The allowlist matches that URL on README
+# files only, so a real key elsewhere in a README still reports.
+[[allowlists]]
+description = "Public star-history chart sealed_token embeds in README files."
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''(?:^|/)README(?:\.[^/]+)?\.md$''']
+regexes = ['''https://api\.star-history\.com/chart\?''']
+
+# Shared Ed25519 signing vectors (fixtureVersion 3).
+#
+# These PKCS#8 private keys are real throwaway test keys, not a production
+# trust root. Production pins are empty on purpose: the huaanwork market
+# config refuses to embed this fixture because the private keys are in-repo
+# (`dsh-plugin-huaanwork/src/huaanwork-host/market/config.ts`). Operator keys
+# are generated outside any git worktree by `market-server/scripts/gen-signing-key.mjs`.
+#
+# The fixture stays byte-for-byte. It is the cross-package compatibility
+# contract for market-server, `packages/catalog-signing`, and the huaanwork
+# verifier, and the M2 plan forbids regenerating fixtureVersion 3. The
+# fixture's own comment says never to reuse the keys for real signing.
+# This allowlist is the single file and the private-key rule only.
+[[allowlists]]
+description = "Throwaway fixtureVersion 3 market signing vectors."
+targetRules = ["private-key"]
+paths = ['''(?:^|/)market-server/tests/fixtures/signing-vectors\.json$''']

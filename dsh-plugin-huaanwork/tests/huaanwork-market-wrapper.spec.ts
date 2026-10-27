@@ -19,7 +19,8 @@ import {
   name,
 } from '../src/huaanwork-host/market/index.ts'
 
-const THROWAWAY_TEST_KEY_HEX = '64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69'
+// 32-byte Ed25519 public key used only as a publicKeyHex fixture. Not a secret.
+const THROWAWAY_TEST_KEY_HEX = '64322a78276819bd7312efdbbe338ba69b74035ce772a21c9dda63773d45ab69' // gitleaks:allow
 
 function envWith(origin?: string): NodeJS.ProcessEnv {
   const env: Record<string, string | undefined> = {}
