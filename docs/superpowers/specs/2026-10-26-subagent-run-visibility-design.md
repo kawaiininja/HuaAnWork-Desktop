@@ -947,3 +947,14 @@ NO UNRESOLVED DECISIONS
 - **仍 Blocked**：Host 重启后的失效视图、清理未确认横幅、60 秒提醒与预算/失败文案；Windows 未验证。多标签修复提交 `52618cb8b8` 同时删除了提交 `6c1f139e44` 带入的结尾空行；提交后整条 `corepack yarn check` 复跑 15 步全绿（exit 0、无 `not ok`）。
 
 本条只记录真机事实与判定，不勾选 §10.1 复选框，也不改动已批准行为；逐条判定与日志指针见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈E-05 真实组合补充（2026-10-27）〉。
+
+### 收口验收补充（2026-10-27）
+
+在隔离的同一临时 profile 副本中做收口验收，新增**验收专用、环境变量门控、默认惰性**的故障注入钩子（`HUAANWORK_ACCEPTANCE_HOOKS=1` 总开关；`HUAANWORK_ACCEPTANCE_CLEANUP_TIMEOUT_MS`、`HUAANWORK_ACCEPTANCE_DISPOSE_FAILURE` 仅在开关打开时生效；未设置时生产行为不变，且不属产品可配置项）。本节的故障均经真实 UI/注册表/清理路径注入，不是生产自然失败。
+
+- **判为 PASS**：A-08（legacy 与 package 均报 `stopCause: cleanup-budget` / `cleanupBudgetMs: 5000`）、B-05（注入慢 dispose 后「停止中」可见）、B-06（双 cancel 均 `accepted`、终态 `already-terminal`）、B-08（注入 dispose 超时后保持停止中，不伪报停止）、B-10（错误 parent/未知 runId 均 404 且零副作用）、C-04（停止中与终态后注入更高 revision 活帧均不复活动）、C-06（注入更高 revision 工具帧未被旧快照回滚）、D-01（WS 帧仅含生命周期/工具名/计时/告警）、D-05、D-06、A-12（长名称截断且保留全名）。A-14 升为部分（60 秒停止等待已观察）。
+- **客户端缺陷与修复**：注入暴露两处真实缺陷——终态 run 被更高 revision 活帧复活、`stopping` 被活帧回退。`logic/subagentRuns.ts` 的 `reduceRunUpdate` 增加终态守卫与停止守卫（终态→终态、`stopping`→`stopping`/终态仍按 revision 合并），`tests/client-huaanwork/subagentRuns.spec.ts` 47/47。
+- **失效视图只由代际注入验证**：以新代际空快照替换 `subagent.list` 后卡原位失效（`data-stale`、终止禁用、计时冻结），仅证明客户端代际切换路径；**真实 Host-only 重启仍无受支持手段，C-07/C-09 维持 Blocked**，不得据此记为 Host 重启通过。
+- **仍 Blocked / 未验证**：真实 Host-only 重启、C-02/C-03 与 D-02 的真机注入（Host 内部，仅单测）、A-07 的 5 分钟提醒、A-14 的 finalizing 与 max-tokens/refusal 文案、A-04 并发工具、B-04 确切在途点、C-08 全局 200、真实读屏音频、真实内网目录与 Windows；C-02/C-03 保持自动化专用。
+- **门禁**：定向 52 文件 / 752 用例、`yarn typecheck`、`yarn test`（vitest 8513 passed / 37 skipped；node:test 166 pass / 2 skipped）、`yarn check:desktop-variants`（11/11，allowlist 7/65 未变）、`yarn check`（15 步全绿）、`git diff --check` 全部通过；无提交。
+- **结论不变**：按 §10.1 的「验收通过判定」，功能**仍未完全验收**；本节不勾选 §10.1 复选框，也不改动已批准行为。逐条判定、证据与日志指针见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈收口验收补充（2026-10-27，验收钩子与故障注入）〉。

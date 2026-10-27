@@ -25,7 +25,12 @@ import type {
  *
  * generation 切换只由 snapshot 建立:来自其他代际的 `subagent/run` 事件一律忽略,
  * 避免旧代际的迟到帧把新代际的活跃卡误标失效。同代事件按 revision 合并,
- * 迟到或重复的旧帧不会回滚卡片。
+ * 迟到或重复的旧帧不会回滚卡片。终态卡只接受终态投影:更高的 revision 也不能把
+ * `completed`/`failed`/`stopped` 改写回活跃相位(设计 §5.2「终态后忽略迟到活动,
+ * 不复活旧 run」);terminal→terminal 仍按 revision 合并,以便迟到的清理告警落卡。
+ * `stopping` 卡不能回退到停止受理前的活动相位(`starting`/`reasoning`/`generating`/`tool`),
+ * 更高的 revision 也不改写停止中卡片的活动、原因与时间(设计 §5.2);但 `stopping`
+ * 与终态投影照常按 revision 合并,停止不会被误挡。
  *
  * `expanded`、确认态等 UI 状态不进入这里的 run 对象(设计 D26),由调用方按 runId
  * 另行保存。纯函数:不修改入参 state 或其中的 run 对象;有实际变化时返回新的
@@ -42,6 +47,17 @@ export const TERMINAL_RUN_PHASES: ReadonlySet<SubagentRunPhase> = new Set<Subage
 /** 每父会话与全局的终态历史上限,与 Host registry 的默认值一致。 */
 const TERMINAL_PER_PARENT = 20;
 const TERMINAL_GLOBAL = 200;
+
+/**
+ * 停止受理前的活动相位。`stopping` 卡不得回退进入这些相位(设计 §5.2),
+ * 无论来帧 revision 多高;`finalizing` 是收尾方向,不在其中。
+ */
+const STOPPING_REGRESSION_PHASES: ReadonlySet<SubagentRunPhase> = new Set<SubagentRunPhase>([
+  "starting",
+  "reasoning",
+  "generating",
+  "tool",
+]);
 
 /** 客户端 run 视图:Host 投影 + 只在本端存在的失效标记。 */
 export type SubagentRunView = SubagentRunProjection & { stale?: boolean; staleAt?: number };
@@ -108,6 +124,24 @@ function reduceRunUpdate(state: SubagentRunsState, event: SubagentRunUpdateEvent
   const existing = state.runs.get(incoming.runId);
   // stale 卡片只供回看:既不复活成活跃,也不被迟到事件改写成终态。
   if (existing?.stale === true) return state;
+  // 终态后忽略迟到的活动帧:终态只能是终态,更高的 revision 也不能复活旧 run。
+  // terminal→terminal 仍走下一条 revision 合并(清理告警可以晚于终态投影到达)。
+  if (
+    existing !== undefined &&
+    TERMINAL_RUN_PHASES.has(existing.phase) &&
+    !TERMINAL_RUN_PHASES.has(incoming.phase)
+  ) {
+    return state;
+  }
+  // 停止已受理后不得回退到停止前的活动相位:来帧整体忽略,相位、活动工具、
+  // 停止原因与时间戳都保持停止时的样子(设计 §5.2)。stopping/终态投影照常合并。
+  if (
+    existing !== undefined &&
+    existing.phase === "stopping" &&
+    STOPPING_REGRESSION_PHASES.has(incoming.phase)
+  ) {
+    return state;
+  }
   // 同代事件按 revision 合并,迟到或重复的旧帧不回滚已经更新的卡片。
   if (existing !== undefined && existing.revision >= incoming.revision) return state;
   const runs = new Map(state.runs);

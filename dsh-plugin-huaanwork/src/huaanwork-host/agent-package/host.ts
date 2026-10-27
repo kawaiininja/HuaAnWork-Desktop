@@ -14,6 +14,7 @@ import { mountSessionMcp } from '../../huaanwork-guardrails/agent-mcp.ts'
 import { refreshAgentRestrict } from '../../huaanwork-guardrails/present-as.ts'
 import type { AgentListItem } from '../../client-huaanwork/rpc-types.ts'
 import type { AgentsHost } from '../agents-host.ts'
+import { acceptanceCleanupTimeoutMs, acceptanceDisposeFailure } from '../acceptance-hooks.ts'
 import {
   resolveSubagents,
   type SubagentActivationHandle,
@@ -319,8 +320,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
   const security = options.security
   const createRuntime = options.createRuntime ?? startAgentPackageProcesses
   const stopRuntime = options.stopRuntime ?? stopAgentPackageProcesses
-  /** 所有 dispose/停进程等待的上限;测试可缩短(默认 10 分钟)。 */
-  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? ACTIVATION_CLEANUP_TIMEOUT_MS
+  /** 所有 dispose/停进程等待的上限;测试可缩短(默认 10 分钟,验收缝可覆盖)。 */
+  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? acceptanceCleanupTimeoutMs(ACTIVATION_CLEANUP_TIMEOUT_MS)
   const lastText = new Map<string, string>()
   const proposedThisTurn = new Set<string>()
   /**
@@ -647,6 +648,25 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
          */
         const disposeActivation = (handle: SubagentActivationHandle): Promise<void> => {
           disposePromise ??= (async () => {
+            // 验收注入缝(A-08/B-05):主开关关闭时恒为 none,真实路径不变。
+            const acceptanceFailure = acceptanceDisposeFailure()
+            if (acceptanceFailure === 'reject') {
+              cleanupFailures.push({
+                code: 'activation-dispose-failed',
+                error: new Error('acceptance dispose failure'),
+              })
+              activationDisposeSettled = true
+              return
+            }
+            if (acceptanceFailure === 'hang') {
+              await new Promise<void>((resolve) => setTimeout(resolve, cleanupTimeoutMs))
+              cleanupFailures.push({
+                code: 'activation-dispose-timeout',
+                error: new Error('acceptance dispose timed out'),
+              })
+              activationDisposeSettled = true
+              return
+            }
             // 包一层 async 让同步 throw 也变成 rejection,记录后不再外抛:失败已经
             // 进了 cleanupFailures,聚合由 cleanup 按调用方 mode 决定是否上报。
             const observed = (async () => {

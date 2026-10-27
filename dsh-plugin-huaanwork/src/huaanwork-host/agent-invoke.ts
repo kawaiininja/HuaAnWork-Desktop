@@ -4,6 +4,7 @@ import { attachHostTool, detachHostTool, type AttachmentMaps } from "../huaanwor
 import { mountSessionMcp } from "../huaanwork-guardrails/agent-mcp.ts";
 import { filterAgentAllow } from "@huaanwork/policy/agent-catalog";
 import type { SubagentCleanupWarning } from "../client-huaanwork/rpc-types.ts";
+import { acceptanceCleanupTimeoutMs, acceptanceDisposeFailure } from "./acceptance-hooks.ts";
 import type { AgentPackageDetail, AgentPackageSubagentRequest } from "./agent-package/types.ts";
 import {
   ACTIVATION_CLEANUP_TIMEOUT_MS,
@@ -246,6 +247,8 @@ export async function dispatchAt(opts: {
     let cancelRequested = false;
     let cleanupPromise: Promise<void> | undefined;
     let resultObserved: Promise<void> | undefined;
+    /** 验收注入缝:主开关关闭时恒等于 ACTIVATION_CLEANUP_TIMEOUT_MS。 */
+    const cleanupTimeoutMs = acceptanceCleanupTimeoutMs(ACTIVATION_CLEANUP_TIMEOUT_MS);
 
     /** 观察权威 result:resolve → settleResult,reject → rejectResult(绝不走只表示启动失败的 failRun)。 */
     const observeResult = (handle: SubagentActivationHandle): Promise<void> => {
@@ -264,7 +267,8 @@ export async function dispatchAt(opts: {
      * 本次 dispatch 唯一的清理实现。四条路径共用它,实际清理 promise 只创建一个:
      * 已发布 activation 的取消、未发布 activation 的取消、正常 afterIdle、超预算 afterIdle。
      *
-     * - idle:按 ACTIVATION_CLEANUP_TIMEOUT_MS 等真实 result,到期才记收尾预算;等待带
+     * - idle:按 cleanupTimeoutMs(默认 ACTIVATION_CLEANUP_TIMEOUT_MS)等真实 result,
+     *   到期才记收尾预算;等待带
      *   取消 gate,定向取消接管后立即放行,不再等满预算,也不误记 `cleanup-budget-exceeded`。
      * - cancel:不等 graceful result,直接 dispose;result 由 observeResult 另行观察。
      * - 从未发布 activation:没有 activation 资源要释放,局部请求清理即全部清理。
@@ -280,16 +284,16 @@ export async function dispatchAt(opts: {
             return;
           }
           if (mode === "idle" && !cancelRequested) {
-            const waited = await waitForLegacyResult(observeResult(activation), controller.signal);
+            const waited = await waitForLegacyResult(observeResult(activation), controller.signal, cleanupTimeoutMs);
             if (waited === "timeout") {
               // 与包路径同一上限与文案:超时只记录事实,取消归随后的 dispose()。
-              subagentRuns.noteCleanupBudget(runId, ACTIVATION_CLEANUP_TIMEOUT_MS);
+              subagentRuns.noteCleanupBudget(runId, cleanupTimeoutMs);
               console.error(
-                `智能体「${opts.name}」的子代理在 ${String(ACTIVATION_CLEANUP_TIMEOUT_MS / 60_000)} 分钟内未结束，释放 activation`,
+                `智能体「${opts.name}」的子代理在 ${String(cleanupTimeoutMs / 60_000)} 分钟内未结束，释放 activation`,
               );
             }
           }
-          const disposal = await disposeLegacyActivation(activation);
+          const disposal = await disposeLegacyActivation(activation, cleanupTimeoutMs);
           if (disposal === "fulfilled") {
             ok = true;
           } else if (disposal === "rejected") {
@@ -426,10 +430,22 @@ function clearLegacyRequest(ctx: AgentInvokeContext, request: LegacyAgentRequest
 /**
  * 有界 dispose,并区分三种结局:只有 fulfilled 才算清理确认。同步抛错与 rejection
  * 同归 `rejected`;超时不当成功,也不把失败抛给调用方。
+ *
+ * 验收注入缝(A-08/B-05):`acceptanceDisposeFailure()` 非 `none` 时直接返回对应
+ * 结局,不触碰真实 activation;主开关关闭时该函数恒为 `none`。
+ *
+ * @param timeoutMs dispose 等待上限(默认生产常量)
  */
 async function disposeLegacyActivation(
   activation: SubagentActivationHandle,
+  timeoutMs = ACTIVATION_CLEANUP_TIMEOUT_MS,
 ): Promise<"fulfilled" | "rejected" | "timeout"> {
+  const failure = acceptanceDisposeFailure();
+  if (failure === "reject") return "rejected";
+  if (failure === "hang") {
+    await new Promise<void>((resolve) => setTimeout(resolve, timeoutMs));
+    return "timeout";
+  }
   let rejected = false;
   let disposal: Promise<void>;
   try {
@@ -440,7 +456,7 @@ async function disposeLegacyActivation(
   const observed = disposal.catch(() => {
     rejected = true;
   });
-  const settled = await settleWithin(observed, ACTIVATION_CLEANUP_TIMEOUT_MS);
+  const settled = await settleWithin(observed, timeoutMs);
   if (!settled) return "timeout";
   return rejected ? "rejected" : "fulfilled";
 }
@@ -451,10 +467,12 @@ async function disposeLegacyActivation(
  *
  * @param observed — 已挂上 settleResult/rejectResult 的观察 promise
  * @param signal — 本次调用保存的 controller signal
+ * @param timeoutMs — 收尾预算(默认生产常量)
  */
 function waitForLegacyResult(
   observed: Promise<void>,
   signal: AbortSignal,
+  timeoutMs = ACTIVATION_CLEANUP_TIMEOUT_MS,
 ): Promise<"settled" | "timeout" | "cancelled"> {
   return new Promise((resolve) => {
     let done = false;
@@ -471,7 +489,7 @@ function waitForLegacyResult(
       finish("cancelled");
       return;
     }
-    timer = setTimeout(() => finish("timeout"), ACTIVATION_CLEANUP_TIMEOUT_MS);
+    timer = setTimeout(() => finish("timeout"), timeoutMs);
     signal.addEventListener("abort", onAbort, { once: true });
     void observed.then(
       () => finish("settled"),

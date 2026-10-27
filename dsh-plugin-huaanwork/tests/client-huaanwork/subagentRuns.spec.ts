@@ -289,6 +289,163 @@ test("a stale run is display-only: no event makes it live or terminal again", ()
   );
 });
 
+test("a completed run is never revived by a higher-revision live projection", () => {
+  const done = run({ runId: "a", phase: "completed", revision: 5, endedAt: 2_000 });
+  const before = state([done], { revision: 5 });
+  const next = reduceSubagentRuns(
+    before,
+    runEvent(run({ runId: "a", revision: 25, phase: "reasoning", activeTools: [] })),
+  );
+  assert.equal(next, before, "a live frame after the terminal phase is a no-op");
+  assert.equal(next.runs.get("a"), done, "the stored run object is untouched");
+  assert.equal(next.runs.get("a")?.phase, "completed");
+  assert.equal(next.runs.get("a")?.revision, 5, "the ignored frame cannot advance the run revision");
+  assert.equal(next.revision, 5, "the ignored frame cannot advance the state revision");
+});
+
+test("failed and stopped runs ignore non-terminal projections at any revision", () => {
+  for (const phase of ["failed", "stopped"] as const) {
+    const terminal = run({
+      runId: "a",
+      phase,
+      revision: 5,
+      endedAt: 2_000,
+      ...(phase === "failed" ? { stopReason: "error" as SubagentStopReason } : {}),
+    });
+    const before = state([terminal], { revision: 5 });
+    const next = reduceSubagentRuns(
+      before,
+      runEvent(
+        run({
+          runId: "a",
+          revision: 30,
+          phase: "tool",
+          activeTools: [tool("t1", "read_file", 2_100)],
+        }),
+      ),
+    );
+    assert.equal(next, before, phase);
+    assert.equal(next.runs.get("a"), terminal, phase);
+    assert.equal(next.runs.get("a")?.phase, phase);
+    assert.equal(next.runs.get("a")?.endedAt, 2_000, phase);
+  }
+});
+
+test("a terminal run accepts a later terminal projection carrying a cleanup warning", () => {
+  const done = run({ runId: "a", phase: "completed", revision: 5, endedAt: 2_000 });
+  const before = state([done], { revision: 5 });
+  const warning = { code: "cleanup-failed", severity: "error" as const };
+  const next = reduceSubagentRuns(
+    before,
+    runEvent(
+      run({ runId: "a", phase: "completed", revision: 9, endedAt: 2_000, cleanupWarnings: [warning] }),
+    ),
+  );
+  assert.notEqual(next, before, "terminal-to-terminal updates still merge");
+  assert.equal(next.runs.get("a")?.phase, "completed");
+  assert.equal(next.runs.get("a")?.revision, 9);
+  assert.equal(next.revision, 9);
+  assert.deepEqual(next.runs.get("a")?.cleanupWarnings, [warning]);
+  assert.deepEqual(subagentAlerts(next.runs.get("a")!, 10_000), [{
+    code: "cleanup-failed",
+    severity: "error",
+    text: "清理失败",
+  }]);
+});
+
+test("a stopping run ignores a higher-revision reasoning projection", () => {
+  const tools = [tool("t1", "read_file", 1_100)];
+  const stopping = run({
+    runId: "a",
+    phase: "stopping",
+    revision: 5,
+    stopRequestedAt: 1_200,
+    stopReason: "aborted",
+    stopCause: "targeted-cancel",
+    lastActivity: 1_150,
+    activeTools: tools,
+  });
+  const before = state([stopping], { revision: 5 });
+  const next = reduceSubagentRuns(
+    before,
+    runEvent(
+      run({ runId: "a", revision: 25, phase: "reasoning", activeTools: [], lastActivity: 9_000 }),
+    ),
+  );
+  assert.equal(next, before, "a live frame cannot regress a stopping run to reasoning");
+  assert.equal(next.runs.get("a"), stopping, "the stored run object is untouched");
+  const stored = next.runs.get("a");
+  assert.ok(stored);
+  assert.equal(stored.phase, "stopping");
+  assert.deepEqual(stored.activeTools, tools, "active tools stay at the stopping snapshot");
+  assert.equal(stored.stopReason, "aborted");
+  assert.equal(stored.stopCause, "targeted-cancel");
+  assert.equal(stored.stopRequestedAt, 1_200);
+  assert.equal(stored.lastActivity, 1_150, "the ignored frame cannot refresh the activity time");
+  assert.equal(stored.revision, 5, "the ignored frame cannot advance the run revision");
+  assert.equal(next.revision, 5, "the ignored frame cannot advance the state revision");
+});
+
+test("a stopping run ignores a higher-revision tool projection", () => {
+  const stopping = run({ runId: "a", phase: "stopping", revision: 5, stopRequestedAt: 1_200 });
+  const before = state([stopping], { revision: 5 });
+  const next = reduceSubagentRuns(
+    before,
+    runEvent(
+      run({ runId: "a", revision: 25, phase: "tool", activeTools: [tool("t1", "grep", 3_000)] }),
+    ),
+  );
+  assert.equal(next, before, "a tool frame cannot restart a stopping card");
+  assert.equal(next.runs.get("a")?.phase, "stopping");
+  assert.deepEqual(next.runs.get("a")?.activeTools, []);
+  assert.equal(next.runs.get("a")?.revision, 5);
+});
+
+test("a stopping run still accepts a higher-revision terminal projection", () => {
+  const stopping = run({ runId: "a", phase: "stopping", revision: 5, stopRequestedAt: 1_200 });
+  const before = state([stopping], { revision: 5 });
+  const next = reduceSubagentRuns(
+    before,
+    runEvent(run({ runId: "a", phase: "stopped", revision: 25, stopRequestedAt: 1_200, endedAt: 3_000 })),
+  );
+  assert.notEqual(next, before, "stopping may still converge to a terminal phase");
+  assert.equal(next.runs.get("a")?.phase, "stopped");
+  assert.equal(next.runs.get("a")?.endedAt, 3_000);
+  assert.equal(next.runs.get("a")?.revision, 25);
+  assert.equal(next.revision, 25);
+  assert.equal(isSubagentRunActive(next.runs.get("a")!), false);
+});
+
+test("a stopping run still merges a newer stopping projection", () => {
+  const stopping = run({ runId: "a", phase: "stopping", revision: 5, stopRequestedAt: 1_200 });
+  const before = state([stopping], { revision: 5 });
+  const warning = { code: "runtime-stop-failed", severity: "error" as const };
+  const next = reduceSubagentRuns(
+    before,
+    runEvent(
+      run({ runId: "a", phase: "stopping", revision: 7, stopRequestedAt: 1_200, cleanupWarnings: [warning] }),
+    ),
+  );
+  assert.notEqual(next, before, "stopping-to-stopping updates are not blocked");
+  assert.equal(next.runs.get("a")?.phase, "stopping");
+  assert.equal(next.runs.get("a")?.revision, 7);
+  assert.deepEqual(next.runs.get("a")?.cleanupWarnings, [warning]);
+});
+
+test("a stale run ignores any later projection and keeps its stale view", () => {
+  const stale: SubagentRunView = { ...run({ runId: "a", revision: 4 }), stale: true, staleAt: 100 };
+  const before = state([], { runs: new Map([["a", stale]]), revision: 4 });
+  const next = reduceSubagentRuns(
+    before,
+    runEvent(run({ runId: "a", revision: 99, phase: "reasoning", activeTools: [] })),
+  );
+  assert.equal(next, before);
+  assert.equal(next.runs.get("a"), stale);
+  assert.equal(next.runs.get("a")?.stale, true);
+  assert.equal(next.runs.get("a")?.staleAt, 100);
+  assert.equal(next.runs.get("a")?.phase, "generating", "the stale view keeps its original phase");
+});
+
 test("disconnect freezes once, events keep the freeze and only a snapshot clears it", () => {
   const before = state([run({ runId: "a", revision: 3 })]);
   const frozen = reduceSubagentRuns(before, { type: "disconnect", at: 5_000 });

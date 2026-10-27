@@ -391,6 +391,8 @@ stderr 中的 `refreshAgentRestrict: restrict state not found` 仍是既有负�
 
 ## E-05 真实组合补充（2026-10-27）
 
+> **注（2026-10-27 收口）**：本文末〈收口验收补充（2026-10-27，验收钩子与故障注入）〉取代本节列出的同名条目（以及〈真机验收（2026-10-27，Electron 44 + deepseek-flash）〉中同名的行），未被该节改判的条目保持本节判定。
+
 本节把控制器在活应用中补采的第二批事实（`.superpowers/sdd/2026-10-26-subagent-run-visibility/e05-acceptance-facts.md`）转写为判定，取代〈真机验收（2026-10-27，Electron 44 + deepseek-flash）〉中列出的同名条目。判定口径与该节一致：**PASS** = 条目在真机上被完整观察；**部分** = 仅部分子项被观察；**Blocked** = 完全未执行或未观察。本节只使用该事实文件，不补充未观测的结论。
 
 ### 环境与 legacy 夹具
@@ -472,3 +474,91 @@ stderr 中的 `refreshAgentRestrict: restrict state not found` 仍是既有负�
 - legacy 通道经本地夹具目录打通后，完成与取消链路在真机上均被观察；A-06、A-10、B-01（含兄弟隔离）、B-03、C-01、C-05、E-03、E-04 由 Blocked/部分改为 PASS，A-07、A-13、E-06 保持部分，E-05 聚合为部分。
 - **仍 Blocked**：Host 重启后的失效视图（C-07/C-09）、清理未确认横幅（B-08）、60 秒提醒与预算/失败文案（A-14）；**Windows 未验证**。门禁 5 因提交内的结尾空行在本树上红，其余门禁绿。
 - 因此按设计 §10.1 的验收通过判定，**功能验收仍未完成**：E-05 只到部分，C-07/C-09、B-08、A-14 与 Windows 无真机证据。本节的 PASS 只覆盖上表列出的条目，不构成整体放行。
+
+## 收口验收补充（2026-10-27，验收钩子与故障注入）
+
+本节把控制器在活应用中补采的第三批事实（`.superpowers/sdd/2026-10-26-subagent-run-visibility/closure-acceptance-facts.md`）转写为判定，取代〈真机验收（2026-10-27，Electron 44 + deepseek-flash）〉与〈E-05 真实组合补充（2026-10-27）〉中本节列出的同名条目。判定口径不变：**PASS** = 条目在真机上被完整观察；**部分** = 仅部分子项被观察；**Blocked** = 完全未执行或未观察。本节只使用该事实文件，不补充未观测的结论，也不把 Blocked 改判为 PASS。
+
+### 环境与验收专用钩子
+
+| 项 | 事实 |
+| --- | --- |
+| 隔离 | 沿用临时 profile `/tmp/huaanwork-accept-20261027-142256`（临时 `DSH_HOME` + `--user-data-dir`）；用户真实 profile 未修改 |
+| 运行时 | Electron 44；模型 `deepseek-flash` |
+| 夹具 | legacy 目录夹具 `127.0.0.1:18080`，三条 spec-valid 条目 `legacy-demo` / `legacy-broken` / `long-name`；真实内网目录仍未验证 |
+| 被测树 | 钩子与两处客户端修复按**当前工作树**重新构建后运行；无提交 |
+
+- **验收专用钩子（新增，环境变量门控，默认惰性）**：`HUAANWORK_ACCEPTANCE_HOOKS=1` 是总开关，未设为 `1` 时全部钩子关闭、生产行为与之前一致（由 `tests/huaanwork-host/acceptance-hooks.spec.ts` 的 5 条用例与评审共同钉住）；开启后 `HUAANWORK_ACCEPTANCE_CLEANUP_TIMEOUT_MS` 覆盖清理预算、`HUAANWORK_ACCEPTANCE_DISPOSE_FAILURE=reject|hang` 注入 dispose 拒绝/挂起。它们是验收夹具而非产品可配置项，不得作为配置对外暴露。
+- 因此本轮 A-08、A-14、B-05、B-08 等条目的「故障」是**经真实 UI / 注册表 / 清理路径注入的故障**，不是生产环境下的自然失败。判 PASS 的含义是「该条目的界面与 Host 语义在这种注入故障下被观察到」，不等于该故障已在生产中发生或被验证过。
+
+### 取代上表的判定
+
+| 条目 | 本节判定 | 被取代的旧判定 | 事实依据 |
+| --- | --- | --- | --- |
+| A-03 生命周期完整 | 部分 | 部分 | 捕获到一条 `phase: "finalizing"` 的 `subagent/run` 帧；卡片「正在确认执行结果」文案未在 25 ms 轮询窗口内被目视到，该文案仍由单测钉住 |
+| A-04 工具状态准确 | 部分 | 部分 | 要求两次并行 `bash` 的提示仍只产生一个串行工具；**并发工具未在 GUI 中观察** |
+| A-05 终态映射诚实 | 部分 | 部分 | `@legacy-broken` 渲染「失败 · 执行出错」（截图 31）；max-tokens 与 refusal 未被诱发 |
+| A-07 耗时与静默提示 | 部分 | 部分 | 本轮仍未观察 5 分钟无活动提醒；该子项在事实文件的「仍 Blocked」清单里 |
+| A-08 收尾预算语义 | **PASS** | Blocked | 5 秒预算 + 父 idle 且子仍在运行：`subagent.list` 对 legacy 与 package 均报 `stopCause: cleanup-budget`、`cleanupBudgetMs: 5000`；展开卡显示「父会话空闲后等待收尾超过 5 秒，已开始强制释放」（事实文件记为截图 32） |
+| A-11 可访问性 | 部分 | 部分 | CDP 可访问树：单个 `role=status`（`aria-live=polite`、`aria-atomic=true`），卡片按钮可访问名为「终止 @doc-clerk 本次运行」「展开 @doc-clerk 详情」；真实读屏音频未采证 |
+| A-12 视觉层级与工具展示 | **PASS** | 部分 | 长 legacy 名称 `legacy-long-name-for-subagent-run-card-acceptance`：`title` 承载全名、`text-overflow: ellipsis`、`scrollWidth 370 > clientWidth 275`、终止按钮未被挤开（截图 34） |
+| A-13 终态与失效视图 | 部分 | 部分 | 失效视图的**客户端代际路径 PASS（注入新代际空快照）**：卡原位变「状态不可恢复 · Host 已重启，结果未确认」、`data-stale=true`、终止禁用、计时冻结、末次已知状态「正在执行工具」（截图 37）；**真实 Host-only 重启 Blocked**（整应用重启同时重建渲染器与注册表） |
+| A-14 文案与提醒 | 部分 | Blocked | 停止等待在约 61 秒出现「停止已受理超过 1 分钟，资源释放仍未确认；可离开此卡稍后查看，无需重复点击」（截图 33）；清理告警文案与预算文案被观察；**finalizing 文案未捕获，max-tokens/refusal 文案未诱发** |
+| A-16 动效、窄窗口与读屏 | 部分 | 部分 | 与 A-11 共用同一 CDP 可访问树证据；真实读屏音频未采证，减动效与 380 px 沿用前节 |
+| B-04 package 启动中终止 | 部分 | 部分 | 本轮未改判：`createRuntime` 与 `startActivation` 的**确切在途点**仍未被真机命中（事实文件列入仍 Blocked 的子项） |
+| B-05 停止过程可见 | **PASS** | Blocked | 注入慢 dispose：取消期间卡保持「停止中 · bash」约 5 秒（耗时与最近活动继续更新、终止禁用），随后命中清理超时（截图 29） |
+| B-06 幂等与终态处理 | **PASS** | Blocked | 同一活跃 run 的两次并行 `subagent.cancel` 均返回 `accepted`，run 以 `stopped` + `stopCause: targeted-cancel` 收敛且无重复清理告警；终态后再次取消返回 `already-terminal` |
+| B-08 清理失败不伪报 | **PASS** | Blocked | 注入 dispose 超时：5 秒超时后卡显示「子代理释放超时，清理未确认」并**保持停止中**，从未变 `stopped`（截图 30）；无伪报停止 |
+| B-10 定向取消边界 | **PASS** | Blocked | 错误 parent 与未知 runId 均返回 HTTP 404 `subagent-run-not-found`，run 仍为 `tool`（零副作用） |
+| C-04 停止后迟到事件 | **PASS** | Blocked | 注入更高 revision 的 `reasoning` 投影：`stopping` 期间卡不回退（仍收敛为 `stopped`），终态后再注入仍为 `stopped`；首轮尝试暴露了真实客户端缺陷（见下） |
+| C-06 snapshot/WS 竞态 | **PASS** | Blocked | 活 run 上注入更高 revision、工具为 `injected_tool` 的 `subagent/run`，卡显示该工具；随后以真实（较旧）快照触发 ready 对账**未回滚**（截图 35） |
+| C-07 Host 代际切换 | **Blocked（真实 Host 重启）／客户端代际路径 PASS（注入）** | Blocked | 以新代际空快照替换 `subagent.list` 并触发 ready 对账：卡原位失效（截图 37）；**真实 Host-only 重启仍无受支持手段**，整应用重启会同时重建渲染器与注册表，故本条真机维度保持 Blocked |
+| C-08 历史有界 | 部分 | Blocked | 同一父会话 21 条快速 legacy run → 客户端 20 张卡、Host 快照 20 条（每父上限生效）；**全局 200 上限未被触发** |
+| C-09 Host 重启 | **Blocked（真实 Host 重启）／客户端失效视图 PASS（注入）** | Blocked | 同 C-07：注入验证的是客户端代际变化路径，不构成 Host 重启证据，本条真机维度保持 Blocked |
+| D-01 投影不泄密 | **PASS** | 部分 | `Network.webSocketFrameReceived` 采到 5 帧 `subagent/run`：键仅为生命周期/工具名/计时/告警；对 prompt、参数、输出、reasoning、`lastAssistantMessage` 的正则匹配全部为空 |
+| D-03 路由安全不放宽 | 部分 | Blocked | 所有非页面/伪造 Origin 的 HTTP 请求返回 403（未放宽），但 webserver 更外层的鉴权连同源 curl 一起拒绝 ⇒ 路由级 origin 检查未能在 GUI 中隔离验证，该检查仍以自动化路由测试为证据 |
+| D-05 既有取消语义不变 | **PASS** | Blocked | 包子会话运行期间用 composer 做父级停止：子卡变「已停止」，父状态无卡死 |
+| D-06 普通会话无回归 | **PASS** | 部分 | 新标签三条普通消息均得到正常助手回复，且**零**运行卡 |
+| E-05 真实组合（聚合） | 部分 | 部分 | 清理预算/清理失败/停止等待/迟到事件/快照竞态/父级停止已在真机执行；**真实 Host 重启、5 分钟提醒、finalizing 与 max-tokens/refusal 文案、并发工具、全局 200、真实内网目录、Windows 仍未验证**，故不能整体判 PASS |
+| E-06 平台证据诚实 | 部分 | 部分 | macOS 覆盖面继续扩大（注入慢 dispose/超时、60 秒停止等待、代际切换、长名称、WS 帧隐私）；**Windows 与真实内网目录仍未验证**，未用 CI 或夹具冒充 |
+
+- **C-02 / C-03 维持自动化专用（Host 内部）**：旧 `subagent/end` 与重复结算的次序只有注册表单测；渲染器 CDP 无法注入 Host 生命周期事件，故真机维度不做判定、也不计入 PASS。
+- **D-02 维持单测**：真实 activation parent 不匹配没有生产路径可构造错配的 `hostRunId`，本轮未执行。
+
+### 故障注入发现的客户端缺陷与修复
+
+| 缺陷 | 现象 | 修法（`dsh-plugin-huaanwork/src/client-huaanwork/logic/subagentRuns.ts`） |
+| --- | --- | --- |
+| 终态复活（§8） | 已完成 run 收到更高 revision 的 `reasoning` 帧后从 `completed` 变回 `reasoning`，违反设计 §5.2「终态后忽略迟到活动」 | `reduceRunUpdate` 在 stale 早退与 revision 合并之间新增终态守卫：既有 run 为 `completed`/`failed`/`stopped` 且来帧非终态时直接返回原 `state`，与 revision 高低无关；终态→终态仍在守卫之后按 revision 合并，清理告警晚到仍可落卡 |
+| 停止回退（§9） | `stopping` 卡片被更高 revision 的活跃帧改回 `reasoning`/`tool`，违反设计 §5.2「`stopping` 期间不得回退到 reasoning/generating/tool」 | 在终态守卫之后、revision 合并之前新增停止守卫：既有相位为 `stopping`、来帧相位属于 `starting`/`reasoning`/`generating`/`tool` 时整帧忽略；`stopping`→`stopping` 与 `stopping`→终态不受影响；`finalizing` 属收尾方向、不在阻止集合内 |
+
+- **回归钉**：`tests/client-huaanwork/subagentRuns.spec.ts` **47/47 通过**（本节记录的 8 条新钉——终态守卫 4 条、停止守卫 4 条——均在套件内，另含「终态仍接受更高 revision 的清理告警」与「stopping 仍合入更新的 stopping」两条反向钉）。
+- 两处缺陷都由本轮故障注入暴露，不是本轮新引入的功能面；修复只动 `reduceRunUpdate` 与其 spec，未改 Host、UI、snapshot 合并与 active/cap 逻辑。
+
+### 门禁（严格串行，当前工作树）
+
+| # | 命令 | 退出码 | 计数/关键输出 | 结果 | 日志 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `corepack yarn workspace dsh-plugin-huaanwork test <brief 的 11 个目标>` | 0 | `Test Files 52 passed (52)`；**`Tests 752 passed (752)`**（无 skipped、无 fail） | PASS | `logs/closure-gate1-targeted-tests.log` |
+| 2 | `corepack yarn typecheck` | 0 | 11 个 workspace 的 `tsc` 全绿（无诊断）；尾行 `contract-types: 4 generated type files are current` | PASS | `logs/closure-gate2-typecheck.log` |
+| 3 | `corepack yarn test` | 0 | vitest 8 个 workspace：**8513 passed / 37 skipped**（desktop 1812/11、beta 1822/11、huaanwork **3523/14**、market 303、next 641/1、market-server 244、update-server 88、agent-catalog-server 80）；`node:test` 168 tests / 166 pass / 2 skipped / 0 fail | PASS | `logs/closure-gate3-test.log` |
+| 4 | `corepack yarn check:desktop-variants` | 0 | `1..11` 全 `ok`，`# pass 11 / # fail 0`；stable↔beta src 214 / scripts 33、beta↔huaanwork src 168 / scripts 21 对齐；allowlist 7（oneSidedPrefixes 0）与 65（oneSidedPrefixes 6）未变 | PASS | `logs/closure-gate4-desktop-variants.log` |
+| 5 | `corepack yarn check` | 0 | 15 步全绿、无 `not ok`；vitest 合计 **8513 passed / 37 skipped**；`node:test` 178 tests / 178 pass / 0 fail；`verify:aa` 无并发冲突签名；huaanwork 3523/14 | PASS | `logs/closure-gate5-check.log` |
+| — | `git diff --check` | 0 | 无输出（无行尾空白、无冲突标记） | PASS | `logs/closure-git-diff-check.log` |
+
+- 每份日志尾部记录 `exit=` 与 `FINISHED_UTC`（门禁 2–5 另记 `STARTED_UTC`），退出码不依赖人工判读。
+- 本轮 `verify:aa` 未出现并发冲突签名，`update-server` 的 `hdiutil` 用例全部通过；因此不需要单包复跑，也不存在把真红写成 flake 的情形。
+- huaanwork 的 `yarn test` 计数（门禁 3/5）较上一节 +13（3510 → **3523**），来自 `acceptance-hooks.spec.ts` 的 5 条与客户端 reducer 的 8 条新钉；门禁 1 的定向用例为 **752**（上一节 744，+8）。
+
+### 证据路径（git-ignored 暂存，不随提交分发）
+
+- 截图（目录内 29–37 共 8 张）：`29-stopping-visible.png`（B-05 停止中）、`30-cleanup-warning-still-stopping.png`（B-08 清理未确认仍停止中）、`31-failed-terminal.png`（A-05 失败终态）、`33-stop-wait-60s.png`（A-14 60 秒停止等待）、`34-long-name.png`（A-12 长名称）、`35-live-injected-tool.png`（C-06 注入工具未被旧快照回滚）、`36-terminal-not-revived.png`（C-04 修复后终态未被复活；事实文件未逐字引用该文件名）、`37-host-restart-stale.png`（C-07/C-09/A-13 注入新代际后的失效视图）。
+- **编号缺口如实登记**：`32`（事实文件在 A-08 记为 `screenshot 32`）与 `38`、`39` 在 `screenshots/` 目录中**不存在**；A-08 的依据是同事实文件中的 `subagent.list` 观测（`stopCause: cleanup-budget`、`cleanupBudgetMs: 5000`）与卡片文案，不依赖该文件名。
+- 门禁日志：`logs/closure-gate1-targeted-tests.log`、`closure-gate2-typecheck.log`、`closure-gate3-test.log`、`closure-gate4-desktop-variants.log`、`closure-gate5-check.log`、`closure-git-diff-check.log`。
+- 事实与修复来源：`.superpowers/sdd/2026-10-26-subagent-run-visibility/closure-acceptance-facts.md`、`acceptance-hooks-report.md`、`final-fix-report.md` §8/§9。
+
+### 结论（本节）
+
+- 本轮把上一节仍 Blocked 的 A-08、B-05、B-06、B-08、B-10、D-05 与部分 Blocked 的 C-04、C-06 判为 PASS；A-05、A-11、A-12、C-08、D-01、D-03、D-06、E-06 的覆盖面扩大；A-14 由 Blocked 升为部分（60 秒停止等待已观察，finalizing 与 max-tokens/refusal 文案未捕获）。
+- **仍 Blocked / 未验证**：真实 Host-only 重启（C-07/C-09，客户端失效视图只由注入的新代际快照验证）、C-02/C-03 与 D-02 的真机注入（Host 内部，仅单测）、D-07/D-08 的真机维度（代码/变体守卫证据）、A-07 的 5 分钟无活动提醒、A-14 的 finalizing 与 max-tokens/refusal 文案、A-04 的并发工具、B-04 的确切在途点、C-08 的全局 200 上限、真实读屏音频、真实内网目录与 Windows。
+- 因此按设计 §10.1 的「验收通过判定」（A–D 全部通过、E-01～E-05 通过），**本功能仍未完全验收**：A-03/A-04/A-05/A-11/A-13/A-16/B-04/C-08/D-03 仍为部分，C-07/C-09 与上述注入项、Windows 仍 Blocked，E-05 与 E-06 仍是部分。本节与前述各节的 PASS 只覆盖各自表格明确列出的子项，不构成整体放行，也不勾选设计 §10.1 的复选框。
