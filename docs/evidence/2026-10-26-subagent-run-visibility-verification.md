@@ -562,3 +562,23 @@ stderr 中的 `refreshAgentRestrict: restrict state not found` 仍是既有负�
 - 本轮把上一节仍 Blocked 的 A-08、B-05、B-06、B-08、B-10、D-05 与部分 Blocked 的 C-04、C-06 判为 PASS；A-05、A-11、A-12、C-08、D-01、D-03、D-06、E-06 的覆盖面扩大；A-14 由 Blocked 升为部分（60 秒停止等待已观察，finalizing 与 max-tokens/refusal 文案未捕获）。
 - **仍 Blocked / 未验证**：真实 Host-only 重启（C-07/C-09，客户端失效视图只由注入的新代际快照验证）、C-02/C-03 与 D-02 的真机注入（Host 内部，仅单测）、D-07/D-08 的真机维度（代码/变体守卫证据）、A-07 的 5 分钟无活动提醒、A-14 的 finalizing 与 max-tokens/refusal 文案、A-04 的并发工具、B-04 的确切在途点、C-08 的全局 200 上限、真实读屏音频、真实内网目录与 Windows。
 - 因此按设计 §10.1 的「验收通过判定」（A–D 全部通过、E-01～E-05 通过），**本功能仍未完全验收**：A-03/A-04/A-05/A-11/A-13/A-16/B-04/C-08/D-03 仍为部分，C-07/C-09 与上述注入项、Windows 仍 Blocked，E-05 与 E-06 仍是部分。本节与前述各节的 PASS 只覆盖各自表格明确列出的子项，不构成整体放行，也不勾选设计 §10.1 的复选框。
+
+## Host 重启排查（2026-10-27）
+
+目标：为 C-07/C-09/A-13 取得**真实 Host 重启且保留 renderer/客户端状态**的证据（不是代际快照注入）。
+
+### 尝试
+
+在隔离临时 profile 中用验收专用、`HUAANWORK_ACCEPTANCE_HOOKS=1` 门控的 supervisor 诊断（**已回退，不随本提交分发**）：固定 Web 端口 43120，`stop` 旧 Host utility process 后重新 `fork` 新 Host；另尝试在重启窗口挂起 shell 的 renderer surface watchdog/recovery（`canRecoverRenderer` 返回 false）。生产路径未改变。
+
+### 事实
+
+- **Host 进程级重拉成功**：旧 Host PID `43952` → 新 Host PID `45676`，两者均监听 `127.0.0.1:43120`；Host 日志出现新 generation boot（`run 1793109418559` → `run 1793109754936`），新 Host 正常挂载。
+- **renderer 未存活**：切换点后 CDP page target 消失；主进程（`43944`）仍存活且新 Host 是其子进程；主日志出现 `renderer surface watchdog: page has no visible content` → `automatic renderer recovery attempt 1` → `automatic renderer recovery healthy`。即使挂起 surface watchdog/recovery，renderer 仍在切换点消失。
+- **结论**：真实 Host 重启下，客户端状态（运行卡、snapshot 对账所需的 React 状态）无法保留。C-07/C-09/A-13 的真实 stale 视图 **Blocked by shell 的 renderer lifecycle/recovery model**，不是 registry 缺陷；此前的 stale 证据仍仅是客户端代际注入。
+
+### 建议
+
+1. 若产品要求真实 Host-only 重启并显示失效卡：需要一个独立的产品级 “Host restart mode”——在旧 Host 停止到新 Host 绑定同一固定端口期间，抑制 renderer recovery/window teardown、保持 SPA，待新 Host ready 后让 WS 重连并由 snapshot 对账。涉及 supervisor + Electron shell + client，超出本功能的验收范围。
+2. 否则把 C-07/C-09 记录为架构限制，A-13 的 stale 子项保持 Blocked（客户端路径已由注入验证）。
+3. 保留的 App 修复：`sidecar/status` ready 时清除 `sidecarDead` 闩锁，修复瞬时断连后应用一直 dead 的既有问题，也是未来 Host restart mode 的前置修复。

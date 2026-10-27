@@ -392,6 +392,27 @@ test("the ready reconcile runs before the sidecar event gates so every reconnect
   );
 });
 
+test("the sidecar/status ready branch clears the dead latch a disconnect set", () => {
+  // 产品钉:onSidecarExit 置位 sidecarDead,而 ready 是唯一能撤销它的地方。
+  // 去掉这一行,一次瞬时断连 (C-07 真机:宿主换代期间 WS 断开) 之后即使已重连,
+  // 发送、停止与自动化也永久禁用,只能重启应用。
+  assert.match(APP_SOURCE, /setSidecarDead\(true\)/, "the exit handler still latches the dead state");
+
+  const readyAt = APP_SOURCE.indexOf('if (event.event === "sidecar/status" && event.ready) {');
+  assert.ok(readyAt >= 0, "the handler still reacts to sidecar/status ready");
+  const readyEnd = APP_SOURCE.indexOf('if (event.event === "session/end"', readyAt);
+  assert.ok(readyEnd > readyAt, "the ready branch still ends before the session/end handling");
+  const readyBody = APP_SOURCE.slice(readyAt, readyEnd);
+  assert.match(readyBody, /setSidecarDead\(false\);/, "ready must clear the dead latch inside the ready branch");
+
+  // 撤销必须发生在 ready 分支内,不能在 ready 之外顺手清:否则任何未就绪的通知都会解锁界面。
+  assert.equal(
+    (APP_SOURCE.match(/setSidecarDead\(false\)/g) ?? []).length,
+    1,
+    "exactly one clear site, inside the ready branch",
+  );
+});
+
 /**
  * 多标签运行卡回归门(E-05 真机 Important):切回/重开一个已有会话时若用历史回放覆盖标签,
  * 客户端专属的 subagent-run 卡片会全部消失——真机实测「标签 A 有 5 张卡,点一次侧栏归零」。

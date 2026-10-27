@@ -958,3 +958,9 @@ NO UNRESOLVED DECISIONS
 - **仍 Blocked / 未验证**：真实 Host-only 重启、C-02/C-03 与 D-02 的真机注入（Host 内部，仅单测）、A-07 的 5 分钟提醒、A-14 的 finalizing 与 max-tokens/refusal 文案、A-04 并发工具、B-04 确切在途点、C-08 全局 200、真实读屏音频、真实内网目录与 Windows；C-02/C-03 保持自动化专用。
 - **门禁**：定向 52 文件 / 752 用例、`yarn typecheck`、`yarn test`（vitest 8513 passed / 37 skipped；node:test 166 pass / 2 skipped）、`yarn check:desktop-variants`（11/11，allowlist 7/65 未变）、`yarn check`（15 步全绿）、`git diff --check` 全部通过；无提交。
 - **结论不变**：按 §10.1 的「验收通过判定」，功能**仍未完全验收**；本节不勾选 §10.1 复选框，也不改动已批准行为。逐条判定、证据与日志指针见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈收口验收补充（2026-10-27，验收钩子与故障注入）〉。
+
+### Host 重启排查（2026-10-27）
+
+为 C-07/C-09/A-13 尝试真实 Host 重启：验收专用、master-gated 的 supervisor 诊断（已回退，不随提交分发）成功把 Host utility process 从 PID `43952` 换成 `45676`，两者都重新绑定固定端口 `127.0.0.1:43120`，新 Host 正常 boot；但在切换窗口内 renderer 被 shell 的 surface watchdog/recovery 接管，CDP page target 消失（主进程仍存活）。即使挂起 watchdog/recovery，renderer 仍未存活。
+
+结论：**Host 进程级重拉可行，但当前 shell 的 renderer lifecycle/recovery 模型不能保留 SPA 与客户端状态**，因此 C-07/C-09/A-13 的**真实** stale 视图仍 Blocked（客户端代际切换路径已由注入验证）。若产品要求真实 Host-only 重启，需要独立的 “Host restart mode”：在 Host 停机窗口抑制 renderer recovery/window teardown、保持 SPA，待新 Host ready 后 WS 重连并由 snapshot 对账；这涉及 supervisor + shell + client，超出本功能验收范围。保留的 App 修复是 `sidecar/status` ready 时清除 `sidecarDead` 闩锁（瞬时断连恢复，亦是未来 Host restart mode 的前置修复）。

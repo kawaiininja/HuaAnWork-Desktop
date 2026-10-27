@@ -1136,6 +1136,10 @@ export default function App() {
       // 所有早退闸门:sidecar/status 没有会话归属,后台自动化运行期间也照样对账,
       // 否则断线重连后 run 卡会停在冻结态(计时冻结、终止禁用)直到下一次重连。
       if (event.event === "sidecar/status" && event.ready) {
+        // 产品修复:ready 说明新的执行进程已接管同一来源。断连时置位的死锁存
+        // (setSidecarDead(true))只有这里能撤销——否则一次瞬时断连之后,即使宿主
+        // 已重连成功,发送/停止/自动化仍被永久禁用,只能重启应用。
+        setSidecarDead(false);
         reconcileEpochRef.current += 1;
         reconcileBoundSubagentRuns();
       }
