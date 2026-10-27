@@ -777,6 +777,8 @@ export default function App() {
           ...prev,
           { id, label: task.name, items, sessionFailed: false, projectId: task.projectId, pendingPick: false, taskId: task.id, sessionId },
         ]);
+        // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理运行卡补回来。
+        void reconcileSubagentRuns(id, sessionId);
       } catch (error) {
         // resume/open 失败：退化为项目上下文空标签 + 错误提示。
         // 不绑旧 sessionId（避免向损坏会话写消息），也不写 taskId（计划评审 P2-2）：
@@ -1616,6 +1618,8 @@ export default function App() {
         setChatTabs((prev) =>
           prev.map((item) => (item.id === tabId ? { ...item, items, runPlaceholder: false } : item)),
         );
+        // 历史回放只有消息条目:补拉宿主快照,把重启前的子代理运行卡补回来。
+        void reconcileSubagentRuns(tabId, sessionId);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setChatTabs((prev) =>
@@ -2478,11 +2482,11 @@ export default function App() {
       return;
     }
     setResumeBusy(false);
-    const items = historyToChatItems(view);
     const existing = chatTabs.find((tab) => tab.sessionId === sessionId);
     if (existing) {
+      // 已有标签的运行态（含子代理运行卡）是权威的:只撤失败标记,不用历史快照覆盖。
       setChatTabs((prev) =>
-        prev.map((tab) => (tab.id === existing.id ? { ...tab, items, sessionFailed: false } : tab)),
+        prev.map((tab) => (tab.id === existing.id && tab.sessionFailed ? { ...tab, sessionFailed: false } : tab)),
       );
       setActiveTab(existing.id);
     } else {
@@ -2492,9 +2496,11 @@ export default function App() {
       // 防御：恢复的标签一律不绑项目（评审 P2-4），杜绝『有历史却命中懒创建』
       setChatTabs((prev) => [
         ...prev,
-        { id, label, items, sessionFailed: false, projectId: null, pendingPick: false, sessionId },
+        { id, label, items: historyToChatItems(view), sessionFailed: false, projectId: null, pendingPick: false, sessionId },
       ]);
       setActiveTab(id);
+      // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理运行卡补回来。
+      void reconcileSubagentRuns(id, sessionId);
     }
     setHistoryView(null);
     setView("main");

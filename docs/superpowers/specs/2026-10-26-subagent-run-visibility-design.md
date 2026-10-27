@@ -935,3 +935,15 @@ NO UNRESOLVED DECISIONS
 - **最终树门禁复跑（CSS 修复后，严格串行）**：定向 52 文件 / **742** 用例 PASS；`typecheck` PASS；`yarn test` vitest **8498** / 37 skipped、node:test 166 / 2 skipped；变体守卫 11/11（allowlist 7/0、65/6 未变）；`yarn check` 第 1 次因 `update-server` 的 `hdiutil create` 环境失败在 87/88 中断（此后 4 个 workspace 未跑），整条重跑 15 步全绿（huaanwork **3508** / 14 skipped），两份日志都保留。
 - **结论不变**：按设计 §10.1 的验收通过判定，功能**仍未完全验收**——E-03/E-04 只覆盖 package 路径、E-05 整条 Blocked、legacy 与 Windows 无真机证据。本节不勾选 §10.1 复选框。
 
+### E-05 真实组合补充（2026-10-27）
+
+在隔离的临时 profile 副本（`/tmp/huaanwork-accept-20261027-142256`，用户真实 profile 未改）中补跑 E-05 真实组合；legacy 通道通过本地夹具目录（`127.0.0.1:18080`，一条 spec-valid `kind: "agent"` 条目 `legacy-demo`）打通，真实内网目录 `10.130.209.76:18080` 仍不可达。
+
+- **legacy PASS（夹具）**：真实 spawn 的完成链路（`启动中 → 思考中 → 正在执行工具 · bash → 生成中 → 已完成`）与启动中/工具相位两处定向取消均被观察，父流无子内容。
+- **多标签 PASS + 缺陷/修复**：标签间切换各自保留运行卡、无跨标签泄漏；期间发现「点开已开标签时用历史覆盖活 `items`、运行卡归零」，修复为已有标签只激活、历史标签与自动化回填后调用 `reconcileSubagentRuns(tabId, sessionId)`，修复后切换与 renderer reload 恢复均复验（legacy 活会话 reload 后无法经 UI 重开属既有 resume 行为，记为 Blocked）。
+- **同名并发 + 兄弟隔离 PASS**：父 idle 时同一标签两条同名 legacy 卡各自独立计时/活动/工具，取消其一不影响另一。
+- **父 idle PASS**：composer 回到「发送」后子运行卡继续更新（耗时、最近活动），终止入口可用；5 分钟无活动提醒未观察。
+- **WS 冻结/重连 PASS**：断连期间冻结标记 + 终止禁用 + 耗时冻结，约 1 s 自动重连后由快照对账恢复；应用级 `sidecarDead`/「会话已失败」闩锁是既有相邻行为，不是运行卡。
+- **仍 Blocked**：Host 重启后的失效视图、清理未确认横幅、60 秒提醒与预算/失败文案；Windows 未验证。门禁复跑中 `corepack yarn check` 因提交 `6c1f139e44` 带入的结尾空行在 `check:whitespace` 红，其余步骤隔离复跑全绿。
+
+本条只记录真机事实与判定，不勾选 §10.1 复选框，也不改动已批准行为；逐条判定与日志指针见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈E-05 真实组合补充（2026-10-27）〉。

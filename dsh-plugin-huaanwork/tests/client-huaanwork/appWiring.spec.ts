@@ -391,3 +391,89 @@ test("the ready reconcile runs before the sidecar event gates so every reconnect
       + "until the next reconnect (a manual send cannot clear it either)",
   );
 });
+
+/**
+ * 多标签运行卡回归门(E-05 真机 Important):切回/重开一个已有会话时若用历史回放覆盖标签,
+ * 客户端专属的 subagent-run 卡片会全部消失——真机实测「标签 A 有 5 张卡,点一次侧栏归零」。
+ * 历史回放只有消息条目,运行卡只能由宿主快照(subagent.list)补回。
+ */
+test("resuming an existing session tab activates it without replaying history over live run cards", () => {
+  const resumeAt = APP_SOURCE.indexOf("async function resumeFromView(");
+  assert.ok(resumeAt >= 0, "resumeFromView is still defined");
+  const resumeEnd = APP_SOURCE.indexOf("async function resumeHistorySession(", resumeAt);
+  assert.ok(resumeEnd > resumeAt, "resumeFromView is still followed by resumeHistorySession");
+  const body = APP_SOURCE.slice(resumeAt, resumeEnd);
+
+  const existingAt = body.indexOf("if (existing) {");
+  assert.ok(existingAt >= 0, "resumeFromView still branches on an existing tab matched by sessionId");
+  const elseAt = body.indexOf("} else {", existingAt);
+  assert.ok(elseAt > existingAt, "the existing-tab branch is still followed by the new-tab branch");
+  const existingBranch = body.slice(existingAt, elseAt);
+  const newBranch = body.slice(elseAt);
+
+  assert.match(existingBranch, /setActiveTab\(existing\.id\)/, "an existing tab is still activated");
+  assert.doesNotMatch(
+    existingBranch,
+    /historyToChatItems/,
+    "the existing-tab branch must not replay history: history items carry no subagent-run cards, "
+      + "so overwriting the live tab with them drops every run card in every open tab "
+      + "(E-05 live: 5 cards on tab A became 0 after one sidebar click)",
+  );
+  assert.doesNotMatch(
+    existingBranch,
+    /\bitems\b/,
+    "the existing-tab branch must not replace the tab's items: the live tab state (including "
+      + "client-only subagent-run cards) is authoritative, and a history replay empties it "
+      + "(E-05 live: 5 cards on tab A became 0 after one sidebar click)",
+  );
+
+  // 历史回放只留给新建标签的分支,且新建后必须补拉宿主快照把运行卡补回来。
+  assert.equal(
+    (body.match(/historyToChatItems\(/g) ?? []).length,
+    1,
+    "historyToChatItems(view) is computed exactly once, inside the new-tab branch only",
+  );
+  assert.match(newBranch, /items: historyToChatItems\(view\)/, "the new-tab branch still seeds items from history");
+  assert.match(
+    newBranch,
+    /void reconcileSubagentRuns\(id, sessionId\)/,
+    "the new-tab branch must reconcile with the tab id + sessionId: a tab first opened after an app "
+      + "restart otherwise shows history messages with zero subagent-run cards",
+  );
+});
+
+test("history-load paths reconcile the host snapshot so run cards survive a fresh open", () => {
+  // selectSubtask 的「有会话」历史分支:回放只产生消息条目,必须按 id + sessionId 对账。
+  const selectAt = APP_SOURCE.indexOf("async function selectSubtask(");
+  assert.ok(selectAt >= 0, "selectSubtask is still defined");
+  const selectEnd = APP_SOURCE.indexOf("async function renameSubtask(", selectAt);
+  assert.ok(selectEnd > selectAt, "selectSubtask is still followed by renameSubtask");
+  const selectBody = APP_SOURCE.slice(selectAt, selectEnd);
+
+  const historyAt = selectBody.indexOf("historyToChatItems(view)");
+  assert.ok(historyAt >= 0, "selectSubtask's history branch still replays the session history");
+  const createAt = selectBody.indexOf("setChatTabs((prev) => [", historyAt);
+  assert.ok(createAt > historyAt, "selectSubtask still creates the tab from the replayed history");
+  const selectReconcileAt = selectBody.indexOf("void reconcileSubagentRuns(id, sessionId)", createAt);
+  assert.ok(
+    selectReconcileAt > createAt,
+    "selectSubtask's history branch must reconcile with the tab id + sessionId right after creating the tab: "
+      + "without it a subtask first opened after an app restart shows zero subagent-run cards "
+      + "even though the host still holds the runs",
+  );
+
+  // 重启重建的运行对话骨架回填历史后同样对账(用实际的 tabId 变量,不是当前激活标签)。
+  const backfillAt = APP_SOURCE.indexOf("const runBackfillBusyRef = useRef<Set<string>>(new Set());");
+  assert.ok(backfillAt >= 0, "the automation run-tab backfill effect is still present");
+  const backfillEnd = APP_SOURCE.indexOf("}, [activeTab, chatTabs, automationRuns]);", backfillAt);
+  assert.ok(backfillEnd > backfillAt, "the backfill effect still ends with its dependency list");
+  const backfillBody = APP_SOURCE.slice(backfillAt, backfillEnd);
+  const backfillWriteAt = backfillBody.indexOf("runPlaceholder: false");
+  assert.ok(backfillWriteAt >= 0, "the backfill still replaces the placeholder items");
+  const backfillReconcileAt = backfillBody.indexOf("void reconcileSubagentRuns(tabId, sessionId)", backfillWriteAt);
+  assert.ok(
+    backfillReconcileAt > backfillWriteAt,
+    "the run-tab backfill must reconcile with its own tabId + sessionId after rebuilding the items: "
+      + "otherwise a run tab restored after restart loses its subagent-run cards",
+  );
+});
