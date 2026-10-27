@@ -5,7 +5,7 @@ import { ROUTE_TABLE, type RouteTableEntry } from '../../src/huaanwork-host/rout
 /**
  * 路由契约跨端交叉测试 (M3 评审 D6):
  * 验证客户端 ROUTES (src/client-huaanwork/api.ts) 与
- * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 69 个方法在
+ * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 71 个方法在
  * HTTP Method、Path 与返回载荷键集上的严格双向一致性。
  */
 
@@ -65,10 +65,10 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.pruneSessions': ['removed'],
 }
 
-/** 69 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
+/** 71 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
 export const METHODS_501 = new Set<string>([])
 
-/** 客户端 69 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
+/** 客户端 71 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
 export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   // workspace
   'workspace.open': ['workspaceRoot'],
@@ -86,6 +86,10 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'session.remove': ['removed'],
   'session.new': ['sessionId'],
   'session.resume': ['ok'],
+
+  // subagent
+  'subagent.list': ['runs', 'generation', 'revision'],
+  'subagent.cancel': ['status', 'runId'],
 
   // settings
   'settings.get': [
@@ -214,6 +218,10 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'session.remove': ['removed'],
   'session.new': ['sessionId'],
   'session.resume': ['ok'],
+
+  // subagent
+  'subagent.list': ['runs', 'generation', 'revision'],
+  'subagent.cancel': ['status', 'runId'],
 
   // settings
   'settings.get': [
@@ -365,16 +373,16 @@ export function verifyMethodContract(
 }
 
 describe('Route Contract Cross-Test (D6)', () => {
-  test('双端方法总数恰好 69 且集合完全一致', () => {
+  test('双端方法总数恰好 71 且集合完全一致', () => {
     const clientMethods = Object.keys(ROUTES).sort()
     const serverMethods = ROUTE_TABLE.map((r) => r.method).sort()
 
-    expect(clientMethods.length).toBe(69)
-    expect(serverMethods.length).toBe(69)
+    expect(clientMethods.length).toBe(71)
+    expect(serverMethods.length).toBe(71)
     expect(clientMethods).toEqual(serverMethods)
   })
 
-  test('69 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
+  test('71 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const [method, clientRoute] of Object.entries(ROUTES)) {

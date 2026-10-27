@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, vi } from "vitest";
 
+import { createSubagentRunRegistry } from "../../src/huaanwork-host/subagent-runs.ts";
+
 // Transparent spawnSync wrapper: the snapshot tests below assert the blocking
 // budget on the real calls; every other test still executes the real binary.
 vi.mock("node:child_process", async (importOriginal) => {
@@ -26,15 +28,51 @@ type ToolResult = {
 };
 
 type Execute = (
-  execution: { name: string; callId?: string; arguments?: unknown },
+  execution: {
+    name: string;
+    callId?: string;
+    arguments?: unknown;
+    agent?: { id?: string; session?: { id?: string } };
+  },
   next: () => Promise<ToolResult>,
 ) => Promise<ToolResult>;
 
-function createCtx(workspaceRoot = "/tmp/pinned") {
+type Runs = ReturnType<typeof createSubagentRunRegistry>;
+
+const PARENT_SESSION = "huaanwork-parent-session";
+const CHILD_SESSION = "huaanwork-child-session";
+const parentAgent = { session: { id: PARENT_SESSION } };
+const childAgent = { session: { id: CHILD_SESSION } };
+
+function createRuns(): Runs {
+  return createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+}
+
+/**
+ * 登记一个 @ 运行并把 child 会话绑到它:此后 `ownsChild(childId)` 为真。
+ * 预留与上游绑定都走真实入口,不直接改 registry 内部索引。
+ */
+function registerChild(runs: Runs, childId = CHILD_SESSION, parentSessionId = PARENT_SESSION): string {
+  const runId = runs.begin({ parentSessionId, kind: "legacy", label: "@review" });
+  runs.reserveChild(runId, childId);
+  runs.bindUpstreamStart({ hostRunId: runId, upstreamRunId: `upstream-${childId}`, childId });
+  return runId;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function createCtx(workspaceRoot = "/tmp/pinned", subagentRuns?: Runs) {
   const listeners: Record<string, ((...args: never[]) => unknown)[]> = {};
   const emitted: unknown[] = [];
   const ctx = {
     huaanworkWorkspaceRoot: { current: workspaceRoot },
+    ...(subagentRuns === undefined ? {} : { huaanworkSubagentRuns: subagentRuns }),
     huaanworkEmit(event: unknown) {
       emitted.push(event);
     },
@@ -471,4 +509,216 @@ test("bridge reads failure markers from the uncapped shell result, past the 32 K
   assert.equal(ends[0]?.isError, true);
   assert.equal(ends[1]?.isError, undefined);
   assert.equal(ends[2]?.isError, undefined);
+});
+
+test("bridge routes a known child's reasoning and text into the run projection only", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const runs = createRuns();
+  const runId = registerChild(runs);
+  const { ctx, listeners, emitted } = createCtx("/tmp/pinned", runs);
+  apply(ctx as never);
+  const wrap = listeners["llm/stream"]?.[0] as (
+    options: { sessionId?: string; purpose?: string },
+    next: () => AsyncIterable<StreamChunk>,
+  ) => AsyncIterable<StreamChunk>;
+
+  async function* reasoning() {
+    yield { type: "reasoning-delta" as const, index: 0, text: "先想" };
+    yield { type: "block-end" as const, index: 0, block: { type: "reasoning" as const, text: "先想" } };
+  }
+  const reasoningChunks: StreamChunk[] = [];
+  for await (const chunk of wrap({ sessionId: CHILD_SESSION }, reasoning)) reasoningChunks.push(chunk);
+  assert.equal(reasoningChunks.length, 2, "child chunks still pass through the stream unchanged");
+  assert.equal(emitted.filter((event) => (event as { event?: string }).event === "reasoning").length, 0);
+  assert.equal(runs.get(runId)?.phase, "reasoning");
+
+  async function* answer() {
+    yield { type: "text-delta" as const, index: 1, text: "答" };
+    yield { type: "finish" as const, reason: { kind: "stop" } };
+  }
+  const answerChunks: StreamChunk[] = [];
+  for await (const chunk of wrap({ sessionId: CHILD_SESSION }, answer)) answerChunks.push(chunk);
+  assert.equal(answerChunks.length, 2);
+  assert.equal(emitted.filter((event) => (event as { event?: string }).event === "token").length, 0);
+  assert.equal(runs.get(runId)?.phase, "generating");
+  assert.deepEqual(emitted, [], "a known child reaches the parent stream only through run projections");
+});
+
+test("bridge ends concurrent child tools by callId and emits no tool or diff events", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const root = mkdtempSync(join(tmpdir(), "huaanwork-bridge-child-tools-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "-q", "--template=/dev/null"], { cwd: root }).status, 0);
+    writeFileSync(join(root, "brand-new.txt"), "hello from child\n");
+    vi.mocked(spawnSync).mockClear();
+    const runs = createRuns();
+    const runId = registerChild(runs);
+    const { ctx, listeners, emitted } = createCtx(root, runs);
+    apply(ctx as never);
+    const execute = listeners["tools/execute"]?.[0] as Execute;
+
+    const first = deferred<ToolResult>();
+    const second = deferred<ToolResult>();
+    const firstRun = execute({ name: "git_diff", callId: "call-a", agent: childAgent }, () => first.promise);
+    const secondRun = execute(
+      { name: "write", callId: "call-b", arguments: { path: "x.txt", content: "y" }, agent: childAgent },
+      () => second.promise,
+    );
+    assert.deepEqual(runs.get(runId)?.activeTools.map((tool) => tool.callId), ["call-a", "call-b"]);
+    assert.equal(runs.get(runId)?.phase, "tool");
+
+    first.resolve({
+      isError: false,
+      value: { stdout: "diff --git a/a.txt b/a.txt\n", stderr: "" },
+      content: [{ type: "text", text: "diff --git a/a.txt b/a.txt\n" }],
+    });
+    const firstResult = await firstRun;
+    assert.deepEqual(firstResult.content, [{ type: "text", text: "diff --git a/a.txt b/a.txt\n" }]);
+    assert.deepEqual(runs.get(runId)?.activeTools.map((tool) => tool.callId), ["call-b"]);
+
+    second.resolve({ isError: false, content: [{ type: "text", text: "ok" }] });
+    const secondResult = await secondRun;
+    assert.deepEqual(secondResult.content, [{ type: "text", text: "ok" }]);
+    assert.deepEqual(runs.get(runId)?.activeTools, []);
+    assert.equal(runs.get(runId)?.phase, "generating");
+
+    assert.deepEqual(emitted, [], "child tools must not reach the parent stream as tool/start, tool/end or diff");
+    assert.equal(vi.mocked(spawnSync).mock.calls.length, 0, "a child tool must not take a git snapshot");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed child tool stays a per-tool fact and does not decide the run", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const runs = createRuns();
+  const runId = registerChild(runs);
+  const { ctx, listeners, emitted } = createCtx("/tmp/pinned", runs);
+  apply(ctx as never);
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+  await execute({ name: "bash", callId: "call-fail", arguments: { command: "pnpm test" }, agent: childAgent }, async () => ({
+    isError: true,
+    content: [{ type: "text", text: "boom" }],
+  }));
+  assert.deepEqual(emitted, []);
+  assert.deepEqual(runs.get(runId)?.activeTools, []);
+  assert.equal(runs.get(runId)?.phase, "generating");
+  assert.equal(runs.get(runId)?.failure, undefined);
+  assert.equal(runs.get(runId)?.stopReason, undefined);
+});
+
+test("bridge keeps a known child's goal and compaction session events out of the parent stream", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const runs = createRuns();
+  registerChild(runs);
+  const { ctx, listeners, emitted } = createCtx("/tmp/pinned", runs);
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as (
+    session: { id: string },
+    event: { type: string; data?: unknown },
+  ) => void;
+
+  const child = { id: CHILD_SESSION };
+  onSessionEvent(child, { type: "compaction/end", data: {} });
+  onSessionEvent(child, { type: "user/message", data: { source: { kind: "goal", goalId: "g", revision: 1, round: 2 } } });
+  onSessionEvent(child, { type: "goal/change", data: { goal: { phase: "active" }, roundsStarted: 1 } });
+  onSessionEvent(child, { type: "goal/change", data: { operation: "clear" } });
+  onSessionEvent(child, {
+    type: "goal/change",
+    data: { goal: { phase: "blocked", blockedReason: { code: "round-limit", message: "x" } }, roundsStarted: 3 },
+  });
+  assert.deepEqual(emitted, [], "child goal and compaction projections must not reach the parent session");
+
+  onSessionEvent({ id: PARENT_SESSION }, { type: "goal/change", data: { goal: { phase: "active" }, roundsStarted: 1 } });
+  assert.deepEqual(emitted, [{ event: "goal/state", phase: "active", roundsStarted: 1, sessionId: PARENT_SESSION }]);
+});
+
+test("bridge projects a known child's idle as finalizing while the parent idle still ends the turn", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const runs = createRuns();
+  const runId = registerChild(runs);
+  const { ctx, listeners, emitted } = createCtx("/tmp/pinned", runs);
+  apply(ctx as never);
+  const status = listeners["agent/status"]?.[0] as (payload: { status: string; agent?: { session?: { id?: string } } }) => void;
+
+  status({ status: "idle", agent: childAgent });
+  assert.equal(runs.get(runId)?.phase, "finalizing");
+  assert.equal(emitted.filter((event) => (event as { event?: string }).event === "session/end").length, 0);
+
+  status({ status: "idle", agent: parentAgent });
+  assert.deepEqual(
+    emitted.filter((event) => (event as { event?: string }).event === "session/end"),
+    [{ event: "session/end", ok: true, sessionId: PARENT_SESSION }],
+  );
+});
+
+test("bridge records a cleaned child error without ending the turn or failing the run", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const runs = createRuns();
+  const runId = registerChild(runs);
+  const { ctx, listeners, emitted } = createCtx("/tmp/pinned", runs);
+  apply(ctx as never);
+  const error = listeners["agent/error"]?.[0] as (payload: { error: unknown; agent?: { session?: { id?: string } } }) => void;
+
+  error({
+    error: Object.assign(new Error("HuaAnWork model request aborted by caller"), { code: "ABORTED" }),
+    agent: childAgent,
+  });
+  assert.deepEqual(emitted, [], "a child abort must not end the parent turn");
+
+  const noisy = new Error(`child failed\n    at handler (/tmp/x.ts:1:1)\n    at run (/tmp/x.ts:2:2) ${"detail ".repeat(80)}`);
+  error({ error: noisy, agent: childAgent });
+  assert.equal(emitted.filter((event) => (event as { event?: string }).event === "session/end").length, 0);
+  assert.equal(runs.get(runId)?.phase, "starting", "a child error must not change the run phase");
+  assert.equal(runs.get(runId)?.failure, undefined);
+
+  // 只有权威 result 决定终态;错误文案此时才作为原因出现,且已折行并截断。
+  runs.settleResult(runId, { stopReason: "error" });
+  const failure = runs.get(runId)?.failure ?? "";
+  assert.equal(failure.includes("\n"), false);
+  assert.equal(failure.length, 200);
+  assert.match(failure, /^child failed at handler \(\/tmp\/x\.ts:1:1\) at run \(\/tmp\/x\.ts:2:2\) detail /);
+});
+
+test("bridge keeps an unregistered session unchanged while a registry is present", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const runs = createRuns();
+  const runId = registerChild(runs);
+  const { ctx, listeners, emitted } = createCtx("/tmp/pinned", runs);
+  apply(ctx as never);
+
+  const wrap = listeners["llm/stream"]?.[0] as (
+    options: { sessionId?: string },
+    next: () => AsyncIterable<StreamChunk>,
+  ) => AsyncIterable<StreamChunk>;
+  async function* ordinary() {
+    yield { type: "reasoning-delta" as const, index: 0, text: "想" };
+    yield { type: "block-end" as const, index: 0, block: { type: "reasoning" as const, text: "想" } };
+    yield { type: "text-delta" as const, index: 1, text: "答" };
+  }
+  for await (const _chunk of wrap({ sessionId: PARENT_SESSION }, ordinary)) {
+    // drain
+  }
+  assert.deepEqual(emitted, [
+    { event: "reasoning", text: "想", sessionId: PARENT_SESSION },
+    { event: "reasoning", text: "想", sessionId: PARENT_SESSION, final: true },
+    { event: "token", text: "答", sessionId: PARENT_SESSION },
+  ]);
+
+  emitted.length = 0;
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+  await execute({ name: "read", callId: "call-parent", arguments: { path: "a.md" }, agent: parentAgent }, async () => ({
+    isError: false,
+    content: [{ type: "text", text: "ok" }],
+  }));
+  assert.deepEqual(emitted, [
+    { event: "tool/start", name: "read", callId: "call-parent", sessionId: PARENT_SESSION },
+    { event: "tool/end", name: "read", callId: "call-parent", sessionId: PARENT_SESSION },
+  ]);
+
+  emitted.length = 0;
+  const status = listeners["agent/status"]?.[0] as (payload: { status: string; agent?: { session?: { id?: string } } }) => void;
+  status({ status: "idle", agent: parentAgent });
+  assert.deepEqual(emitted, [{ event: "session/end", ok: true, sessionId: PARENT_SESSION }]);
+  assert.equal(runs.get(runId)?.phase, "starting", "parent activity must not touch the child run");
 });

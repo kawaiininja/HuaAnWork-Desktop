@@ -19,6 +19,7 @@ import {
   type SubagentActivationHandle,
   type SubagentsService,
 } from '../subagents-service.ts'
+import type { SubagentRunRegistry } from '../subagent-runs.ts'
 import { AGENT_PACKAGE_VERIFY_FAILURE, recoverCatalogPackageInstalls } from './catalog-install.ts'
 import { agentPackageRevokedMessage, type AgentCatalogSecurity } from './catalog-security.ts'
 import {
@@ -73,6 +74,11 @@ export type AgentPackageDispatchContext = {
   /** 包回合绑定的子会话 id;清理时逐一移除,供 policy 标记 `mcp__*` 的运行链路。 */
   huaanworkPackageChildSessions?: Set<string>
   subagents?: SubagentsService
+  /**
+   * 统一子代理 run 登记表(Task 5)。`index.ts` 注入与 routes/legacy `@agent`
+   * 共用的实例;缺席时 `dispatch()` 响亮拒绝,不产生不可见、不可取消的回合。
+   */
+  huaanworkSubagentRuns?: SubagentRunRegistry
 }
 
 export type AgentPackageDispatchInput = {
@@ -81,6 +87,8 @@ export type AgentPackageDispatchInput = {
   sessionId: string
   pkg: AgentPackageDetail
   remainder: string
+  /** 发起本次 @ 的用户消息 id;只随 run 投影原样返回,不参与身份或权限判断。 */
+  clientMessageId?: string
   /** 解析当前会话 agent 作为子代理 parent;失败时不启动子代理。 */
   resolveParent?: () => Promise<unknown>
 }
@@ -495,460 +503,574 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
     },
 
     async dispatch(input) {
-      recoverCatalogPackageInstalls(profileDir)
       const { ctx, sessionId, pkg } = input
-      // 安装/更新/移除交易占住 slug 时不得启动新回合:它在同步阶段就先拒绝,
-      // 早于 pendingTurns 预留与任何 activation。交易可能正把正式目录改名,
-      // 此处返回「正在更新/移除」比让回合在半提交的目录上启动更诚实。
-      if (options.lifecycle?.isBusy(pkg.slug)) {
-        throw new Error(`智能体「${pkg.slug}」正在更新或移除，请稍后重试`)
-      }
-      // 目录包的撤销状态先看一眼:详情可能在撤销前取得(stale pkg),这里也要
-      // 得到撤销文案,而不是「未启用或不存在」。
-      if (pkg.source === 'catalog') {
-        const revoked = security === undefined ? pkg.revoked : security.revocationFor(pkg.slug)
-        if (revoked !== undefined) throw new Error(agentPackageRevokedMessage(revoked))
-        // 没有复验面就不能声称目录包可运行;本地包不经过这条。
-        if (security === undefined) throw new Error(AGENT_PACKAGE_VERIFY_FAILURE)
-      }
-      if (!pkg.enabled) throw new Error(`智能体「${pkg.slug}」未启用或不存在`)
-      if (pkg.broken !== undefined) throw new Error(`智能体「${pkg.slug}」已损坏：${pkg.broken.reason}`)
-      const subagents = resolveSubagents(ctx, 'startActivation')
-      if (subagents === undefined) {
-        throw new Error('current dsh runtime does not support subagents')
-      }
-      // Bind after the guard so the runtime method keeps its service receiver.
-      const startActivation = subagents.startActivation.bind(subagents)
-
-      // Reserve synchronously, before the first await: two sends in one session must not
-      // start two runtimes (and two subagent children) for the same turn.
-      const runningSlug = pendingTurns.get(sessionId)
-      if (runningSlug !== undefined) {
-        throw new Error(
-          `智能体「${pkg.slug}」无法开始：当前会话已有运行中的智能体包回合（@${runningSlug}）`,
-        )
-      }
-      pendingTurns.set(sessionId, pkg.slug)
-      let reservationReleased = false
-      const releaseReservation = (): void => {
-        if (reservationReleased) return
-        reservationReleased = true
-        if (pendingTurns.get(sessionId) === pkg.slug) pendingTurns.delete(sessionId)
-      }
-
-      let runtime: AgentPackageTurnRuntime | undefined
-      let mcpDispose: (() => Promise<void>) | undefined
-      let request: AgentPackageSubagentRequest | null = null
-      let cleanupPromise: Promise<void> | undefined
-      let cleanupStarted = false
+      // 运行记录必须早于任何校验与 await:客户端要能在启动中看到并定向取消这次 @,
+      // 失败或未启用的回合也要留下终结事实,而不是一张永远 starting 的卡。
+      const subagentRuns = ctx.huaanworkSubagentRuns
+      if (subagentRuns === undefined) throw new Error('subagent run registry is not initialized')
+      const runId = subagentRuns.begin({
+        parentSessionId: sessionId,
+        kind: 'package',
+        label: `@${pkg.slug}`,
+        packageVersion: pkg.version,
+        ...(input.clientMessageId === undefined ? {} : { clientMessageId: input.clientMessageId }),
+      })
+      /** 本回合清理失败(带稳定 code);只有空集合才允许确认清理成功。 */
+      const cleanupFailures: AgentPackageCleanupFailure[] = []
       let activation: SubagentActivationHandle | undefined
       /**
-       * 取消状态(本回合唯一的取消源)。
+       * dispose 已有结论(成功 / 拒绝 / 超时)才为 true。
        *
-       * `cancelRequested`/`cancelReason` 在第一次 cancel 时写入;`cancelPromise`
-       * 让并发 cancel 与 dispose 重入共享同一收尾;`cancelGate` 让 M1 的
-       * 「先等 activation.result」在取消到达时立刻放行。
+       * 晚到的 activation 可能在清理快照之后才归入本回合:那一轮清理确认没有覆盖它,
+       * 在它的 dispose 落定前不允许任何确认把 run 推向 `stopped`。
        */
-      const controller = new AbortController()
-      const signal = controller.signal
-      let cancelRequested = false
-      let cancelReason: AgentPackageTurnCancelReason | undefined
-      let cancelPromise: Promise<void> | undefined
-      /** 收尾链路正在同步建立(共享 promise 尚未赋值)时的重入标志。 */
-      let cancelling = false
-      let disposePromise: Promise<void> | undefined
-      let stopRuntimePromise: Promise<void> | undefined
-      let unregister: (() => void) | undefined
-      let openCancelGate: () => void = () => undefined
-      const cancelGate = new Promise<void>((resolve) => {
-        openCancelGate = resolve
-      })
-      const boundChildren = new Set<string>()
-      /** 本回合登记进 `huaanworkPackageChildSessions` 的 id;清理时逐一移除。 */
-      const packageChildSessions = new Set<string>()
-
+      let activationDisposeSettled = false
       /**
-       * 取消/失败的统一错误。
+       * owner 清理确认的唯一判据:零失败 + 晚到 activation 的 dispose 已有结论。
        *
-       * 撤销优先取当前生效的撤销记录,让 rejection 文案与撤销卡片一致
-       * (`该版本已被管理员撤销：<原因>`);其余来源给出可定位的停止原因。
+       * `cleanup()` 与 dispatch 外层 catch 共用它:后者若只看失败集合,就会替尚未
+       * dispose 的 activation 作保,让 result 观察者提前发布 `stopped`。两个变量都在
+       * `try` 之外声明,否则外层 catch 看不到判据。
        */
-      const cancelError = (): Error => {
-        if (cancelReason === 'revoke') {
+      const cleanupOk = (): boolean =>
+        cleanupFailures.length === 0 && (activation === undefined || activationDisposeSettled)
+      try {
+        recoverCatalogPackageInstalls(profileDir)
+        // 安装/更新/移除交易占住 slug 时不得启动新回合:它在同步阶段就先拒绝,
+        // 早于 pendingTurns 预留与任何 activation。交易可能正把正式目录改名,
+        // 此处返回「正在更新/移除」比让回合在半提交的目录上启动更诚实。
+        if (options.lifecycle?.isBusy(pkg.slug)) {
+          throw new Error(`智能体「${pkg.slug}」正在更新或移除，请稍后重试`)
+        }
+        // 目录包的撤销状态先看一眼:详情可能在撤销前取得(stale pkg),这里也要
+        // 得到撤销文案,而不是「未启用或不存在」。
+        if (pkg.source === 'catalog') {
           const revoked = security === undefined ? pkg.revoked : security.revocationFor(pkg.slug)
-          return revoked === undefined
-            ? new Error('该版本已被管理员撤销')
-            : new Error(agentPackageRevokedMessage(revoked))
+          if (revoked !== undefined) throw new Error(agentPackageRevokedMessage(revoked))
+          // 没有复验面就不能声称目录包可运行;本地包不经过这条。
+          if (security === undefined) throw new Error(AGENT_PACKAGE_VERIFY_FAILURE)
         }
-        if (cancelReason === 'update') return new Error(`智能体「${pkg.slug}」正在更新，本回合已停止`)
-        if (cancelReason === 'remove') return new Error(`智能体「${pkg.slug}」已移除，本回合已停止`)
-        if (cancelReason === 'dispose') return new Error(`智能体「${pkg.slug}」的回合已停止：应用正在退出`)
-        return new Error(`智能体「${pkg.slug}」的回合已取消`)
-      }
+        if (!pkg.enabled) throw new Error(`智能体「${pkg.slug}」未启用或不存在`)
+        if (pkg.broken !== undefined) throw new Error(`智能体「${pkg.slug}」已损坏：${pkg.broken.reason}`)
+        const subagents = resolveSubagents(ctx, 'startActivation')
+        if (subagents === undefined) {
+          throw new Error('current dsh runtime does not support subagents')
+        }
+        // Bind after the guard so the runtime method keeps its service receiver.
+        const startActivation = subagents.startActivation.bind(subagents)
 
-      /** 取消/abort 已生效时抛出取消原因;每个 await 之后都要重新过一遍。 */
-      const assertLive = (): void => {
-        if (cancelRequested || signal.aborted) throw cancelError()
-      }
-
-      /**
-       * 本回合清理中已发生的失败(dispose 拒绝/超时、停进程拒绝/超时)。
-       *
-       * 取消路径(`cleanup('cancel')`)把聚合错误抛给调用方;idle 路径只记录。
-       * 失败一旦记录不会因后续重试成功而消失——调用方要看到「这次收尾没有干净
-       * 完成」,而不是被最后一次成功覆盖。
-       */
-      const cleanupFailures: Error[] = []
-      let cleanupFailureReported = false
-
-      /**
-       * dispose 只调用一次,超时也**只在这里**判定一次;取消与 cleanup 共享同一
-       * promise。上限若留在调用方,`cancelTurn` 与 `cleanup('cancel')` 会各等
-       * 一个 `cleanupTimeoutMs` 并各记一条失败。
-       */
-      const disposeActivation = (handle: SubagentActivationHandle): Promise<void> => {
-        disposePromise ??= (async () => {
-          // 包一层 async 让同步 throw 也变成 rejection,记录后不再外抛:失败已经
-          // 进了 cleanupFailures,聚合由 cleanup 按调用方 mode 决定是否上报。
-          const observed = (async () => {
-            await handle.dispose()
-          })().then(
-            () => undefined,
-            (error) => {
-              cleanupFailures.push(toError(error))
-            },
+        // Reserve synchronously, before the first await: two sends in one session must not
+        // start two runtimes (and two subagent children) for the same turn.
+        const runningSlug = pendingTurns.get(sessionId)
+        if (runningSlug !== undefined) {
+          throw new Error(
+            `智能体「${pkg.slug}」无法开始：当前会话已有运行中的智能体包回合（@${runningSlug}）`,
           )
-          const settled = await settleWithin(observed, cleanupTimeoutMs)
-          if (!settled) cleanupFailures.push(new Error('activation dispose timed out'))
-        })()
-        return disposePromise
-      }
+        }
+        pendingTurns.set(sessionId, pkg.slug)
+        let reservationReleased = false
+        const releaseReservation = (): void => {
+          if (reservationReleased) return
+          reservationReleased = true
+          if (pendingTurns.get(sessionId) === pkg.slug) pendingTurns.delete(sessionId)
+        }
 
-      /** 停 runtime 只调用一次并有界一次;晚到的 runtime 与 cleanup 共享同一 promise。 */
-      const stopTurnRuntime = (current: AgentPackageTurnRuntime): Promise<void> => {
-        stopRuntimePromise ??= (async () => {
-          const observed = (async () => {
-            await stopRuntime(current)
-          })().then(
-            () => undefined,
-            (error) => {
-              // 单个子进程拒绝退出不阻塞其余清理,但必须记入本回合的失败集合。
-              cleanupFailures.push(toError(error))
-            },
-          )
-          const settled = await settleWithin(observed, cleanupTimeoutMs)
-          if (!settled) cleanupFailures.push(new Error('stopTurnRuntime timed out'))
-        })()
-        return stopRuntimePromise
-      }
+        let runtime: AgentPackageTurnRuntime | undefined
+        let mcpDispose: (() => Promise<void>) | undefined
+        let request: AgentPackageSubagentRequest | null = null
+        let cleanupPromise: Promise<void> | undefined
+        let cleanupStarted = false
+        /**
+         * 取消状态(本回合唯一的取消源)。
+         *
+         * `cancelRequested`/`cancelReason` 在第一次 cancel 时写入;`cancelPromise`
+         * 让并发 cancel 与 dispose 重入共享同一收尾;`cancelGate` 让 M1 的
+         * 「先等 activation.result」在取消到达时立刻放行。
+         */
+        const controller = new AbortController()
+        const signal = controller.signal
+        let cancelRequested = false
+        let cancelReason: AgentPackageTurnCancelReason | undefined
+        let cancelPromise: Promise<void> | undefined
+        /** 收尾链路正在同步建立(共享 promise 尚未赋值)时的重入标志。 */
+        let cancelling = false
+        let disposePromise: Promise<void> | undefined
+        let stopRuntimePromise: Promise<void> | undefined
+        let unregister: (() => void) | undefined
+        let openCancelGate: () => void = () => undefined
+        const cancelGate = new Promise<void>((resolve) => {
+          openCancelGate = resolve
+        })
+        const boundChildren = new Set<string>()
+        /** 本回合登记进 `huaanworkPackageChildSessions` 的 id;清理时逐一移除。 */
+        const packageChildSessions = new Set<string>()
 
-      const bindChild = (childSessionId: string): void => {
-        // Record even before the runtime exists: cleanup must clear every id this turn
-        // added, and a later turn reusing the id must not inherit the package flag.
-        ctx.huaanworkPackageChildSessions?.add(childSessionId)
-        packageChildSessions.add(childSessionId)
-        if (runtime === undefined) return
-        // `skills.ts` attaches the runtime tools and MCP names before calling this;
-        // cleanup detaches them again from every bound child.
-        boundChildren.add(childSessionId)
-        registry.bind(childSessionId, runtime)
-      }
-
-      /**
-       * Undo everything this turn attached to a child session: the registry binding,
-       * the tool attachments, `present-as`'s restrict and the policy's package-runtime
-       * marker.
-       *
-       * Repeatable by design. When cancellation lands while `startActivation` is still
-       * pending, `skills.ts` resumes after the first cleanup pass and calls `bindChild`,
-       * which re-adds the child to every one of those places. The late-activation branch
-       * disposes the activation and then runs this once more, so a revoked turn cannot
-       * leave behind a stale policy exemption for an id the policy treats as dead.
-       */
-      const releaseChildBindings = (): void => {
-        const current = runtime
-        // Detach exactly what `skills.ts` attached to each child; `request.allow`
-        // omits tools the package does not enable, so it cannot mirror the attachment.
-        const childNames = [...new Set([...AGENT_PACKAGE_CHILD_TOOLS, ...(current?.mcpNames ?? [])])]
-        for (const childSessionId of boundChildren) {
-          if (current !== undefined && registry.get(childSessionId) === current) registry.delete(childSessionId)
-          if (ctx.huaanworkAttachments !== undefined) {
-            detachAgentTools(ctx.huaanworkAttachments, childSessionId, childNames)
+        /**
+         * 取消/失败的统一错误。
+         *
+         * 撤销优先取当前生效的撤销记录,让 rejection 文案与撤销卡片一致
+         * (`该版本已被管理员撤销：<原因>`);其余来源给出可定位的停止原因。
+         */
+        const cancelError = (): Error => {
+          if (cancelReason === 'revoke') {
+            const revoked = security === undefined ? pkg.revoked : security.revocationFor(pkg.slug)
+            return revoked === undefined
+              ? new Error('该版本已被管理员撤销')
+              : new Error(agentPackageRevokedMessage(revoked))
           }
-          refreshAgentRestrict(ctx as never, childSessionId)
+          if (cancelReason === 'update') return new Error(`智能体「${pkg.slug}」正在更新，本回合已停止`)
+          if (cancelReason === 'remove') return new Error(`智能体「${pkg.slug}」已移除，本回合已停止`)
+          if (cancelReason === 'dispose') return new Error(`智能体「${pkg.slug}」的回合已停止：应用正在退出`)
+          return new Error(`智能体「${pkg.slug}」的回合已取消`)
         }
-        boundChildren.clear()
-        // Clear the policy's marker for every id this turn bound. `Set.delete` is
-        // idempotent and only ever removes this turn's ids, so repeated passes cannot
-        // strip a newer turn's markers.
-        for (const childSessionId of packageChildSessions) {
-          ctx.huaanworkPackageChildSessions?.delete(childSessionId)
-        }
-        packageChildSessions.clear()
-      }
 
-      /**
-       * 释放本回合资源;`mode` 决定清理失败如何上报。
-       *
-       * - `'cancel'`:update/remove/revoke/用户停止走这里,调用方必须收到明确失败
-       *   (rename 前的停止未确认就不能继续);
-       * - `'idle'`:父会话 `afterIdle` 的常规收尾,卡住的子代理/进程只记录日志,
-       *   不把正常的 idle 变成 rejection。
-       *
-       * 收尾本身只跑一次(共享 `cleanupPromise`);聚合按**每个调用方**的 mode
-       * 判定,所以先到的 idle 清理不会把后到的取消路径降级成静默成功。
-       */
-      const cleanup = async (mode: 'idle' | 'cancel'): Promise<void> => {
-        // The reservation belongs to this turn and ends with the first cleanup call,
-        // including every failure path that reaches `catch` below.
-        releaseReservation()
-        cleanupStarted = true
-        cleanupPromise ??= (async () => {
-          try {
-            // Finish the child before releasing what it can still call: the parent can go
-            // idle while the child is still working, so aborting or stopping the runtime
-            // first would truncate the answer. `result` settles only after the manager's
-            // own teardown; capturing it here keeps a failed child turn from rejecting the
-            // parent's idle cleanup. Both waits are bounded so a stuck child cannot block
-            // that cleanup forever.
-            //
-            // 取消是例外:它必须立刻 dispose 并停止进程,绝不能先等一个可能永不结算的
-            // graceful result。`cancelGate` 让已经开始的 M1 等待在取消到达时立即放行。
+        /** 取消/abort 已生效时抛出取消原因;每个 await 之后都要重新过一遍。 */
+        const assertLive = (): void => {
+          if (cancelRequested || signal.aborted) throw cancelError()
+        }
+
+        /**
+         * 本回合清理中已发生的失败(dispose 拒绝/超时、停进程拒绝/超时)。
+         *
+         * 取消路径(`cleanup('cancel')`)把聚合错误抛给调用方;idle 路径只记录。
+         * 失败一旦记录不会因后续重试成功而消失——调用方要看到「这次收尾没有干净
+         * 完成」,而不是被最后一次成功覆盖。
+         */
+        let cleanupFailureReported = false
+        /** 本回合是否已按「无失败」确认过清理;result 晚结算时据此补一次幂等确认。 */
+        let cleanupConfirmed = false
+
+        /**
+         * dispose 只调用一次,超时也**只在这里**判定一次;取消与 cleanup 共享同一
+         * promise。上限若留在调用方,`cancelTurn` 与 `cleanup('cancel')` 会各等
+         * 一个 `cleanupTimeoutMs` 并各记一条失败。
+         */
+        const disposeActivation = (handle: SubagentActivationHandle): Promise<void> => {
+          disposePromise ??= (async () => {
+            // 包一层 async 让同步 throw 也变成 rejection,记录后不再外抛:失败已经
+            // 进了 cleanupFailures,聚合由 cleanup 按调用方 mode 决定是否上报。
+            const observed = (async () => {
+              await handle.dispose()
+            })().then(
+              () => undefined,
+              (error) => {
+                cleanupFailures.push({ code: 'activation-dispose-failed', error: toError(error) })
+              },
+            )
+            const settled = await settleWithin(observed, cleanupTimeoutMs)
+            if (!settled) {
+              cleanupFailures.push({
+                code: 'activation-dispose-timeout',
+                error: new Error('activation dispose timed out'),
+              })
+            }
+            // 不管成功还是失败,dispose 都已有结论;失败已在上面进入 cleanupFailures,
+            // 后续确认据此给出 `ok: false`。
+            activationDisposeSettled = true
+          })()
+          return disposePromise
+        }
+
+        /** 停 runtime 只调用一次并有界一次;晚到的 runtime 与 cleanup 共享同一 promise。 */
+        const stopTurnRuntime = (current: AgentPackageTurnRuntime): Promise<void> => {
+          stopRuntimePromise ??= (async () => {
+            const observed = (async () => {
+              await stopRuntime(current)
+            })().then(
+              () => undefined,
+              (error) => {
+                // 单个子进程拒绝退出不阻塞其余清理,但必须记入本回合的失败集合。
+                cleanupFailures.push({ code: 'runtime-stop-failed', error: toError(error) })
+              },
+            )
+            const settled = await settleWithin(observed, cleanupTimeoutMs)
+            if (!settled) {
+              cleanupFailures.push({
+                code: 'runtime-stop-timeout',
+                error: new Error('stopTurnRuntime timed out'),
+              })
+            }
+          })()
+          return stopRuntimePromise
+        }
+
+        const bindChild = (childSessionId: string): void => {
+          // Record even before the runtime exists: cleanup must clear every id this turn
+          // added, and a later turn reusing the id must not inherit the package flag.
+          ctx.huaanworkPackageChildSessions?.add(childSessionId)
+          packageChildSessions.add(childSessionId)
+          if (runtime === undefined) return
+          // `skills.ts` attaches the runtime tools and MCP names before calling this;
+          // cleanup detaches them again from every bound child.
+          boundChildren.add(childSessionId)
+          registry.bind(childSessionId, runtime)
+        }
+
+        /**
+         * Undo everything this turn attached to a child session: the registry binding,
+         * the tool attachments, `present-as`'s restrict and the policy's package-runtime
+         * marker.
+         *
+         * Repeatable by design. When cancellation lands while `startActivation` is still
+         * pending, `skills.ts` resumes after the first cleanup pass and calls `bindChild`,
+         * which re-adds the child to every one of those places. The late-activation branch
+         * disposes the activation and then runs this once more, so a revoked turn cannot
+         * leave behind a stale policy exemption for an id the policy treats as dead.
+         */
+        const releaseChildBindings = (): void => {
+          const current = runtime
+          // Detach exactly what `skills.ts` attached to each child; `request.allow`
+          // omits tools the package does not enable, so it cannot mirror the attachment.
+          const childNames = [...new Set([...AGENT_PACKAGE_CHILD_TOOLS, ...(current?.mcpNames ?? [])])]
+          for (const childSessionId of boundChildren) {
+            if (current !== undefined && registry.get(childSessionId) === current) registry.delete(childSessionId)
+            if (ctx.huaanworkAttachments !== undefined) {
+              detachAgentTools(ctx.huaanworkAttachments, childSessionId, childNames)
+            }
+            refreshAgentRestrict(ctx as never, childSessionId)
+          }
+          boundChildren.clear()
+          // Clear the policy's marker for every id this turn bound. `Set.delete` is
+          // idempotent and only ever removes this turn's ids, so repeated passes cannot
+          // strip a newer turn's markers.
+          for (const childSessionId of packageChildSessions) {
+            ctx.huaanworkPackageChildSessions?.delete(childSessionId)
+          }
+          packageChildSessions.clear()
+        }
+
+        /**
+         * 释放本回合资源;`mode` 决定清理失败如何上报。
+         *
+         * - `'cancel'`:update/remove/revoke/用户停止走这里,调用方必须收到明确失败
+         *   (rename 前的停止未确认就不能继续);
+         * - `'idle'`:父会话 `afterIdle` 的常规收尾,卡住的子代理/进程只记录日志,
+         *   不把正常的 idle 变成 rejection。
+         *
+         * 收尾本身只跑一次(共享 `cleanupPromise`);聚合按**每个调用方**的 mode
+         * 判定,所以先到的 idle 清理不会把后到的取消路径降级成静默成功。
+         */
+        const cleanup = async (mode: 'idle' | 'cancel'): Promise<void> => {
+          // The reservation belongs to this turn and ends with the first cleanup call,
+          // including every failure path that reaches `catch` below.
+          releaseReservation()
+          cleanupStarted = true
+          cleanupPromise ??= (async () => {
+            try {
+              // Finish the child before releasing what it can still call: the parent can go
+              // idle while the child is still working, so aborting or stopping the runtime
+              // first would truncate the answer. `result` settles only after the manager's
+              // own teardown; capturing it here keeps a failed child turn from rejecting the
+              // parent's idle cleanup. Both waits are bounded so a stuck child cannot block
+              // that cleanup forever.
+              //
+              // 取消是例外:它必须立刻 dispose 并停止进程,绝不能先等一个可能永不结算的
+              // graceful result。`cancelGate` 让已经开始的 M1 等待在取消到达时立即放行。
+              const currentActivation = activation
+              if (currentActivation !== undefined) {
+                if (cancelRequested) {
+                  await disposeActivation(currentActivation)
+                } else {
+                  const settled = await Promise.race([
+                    settleWithin(currentActivation.result, cleanupTimeoutMs),
+                    cancelGate.then(() => false),
+                  ])
+                  if (!settled && !cancelRequested) {
+                    // 发布后的取消归 dispose();这里只记录卡住的事实,不 abort signal。
+                    // result 晚结算是子代理还在干活,不是清理失败:写进 cleanupFailures
+                    // 会让之后 update/remove 的 cancel 路径凭空抛错。
+                    subagentRuns.noteCleanupBudget(runId, cleanupTimeoutMs)
+                    console.error(
+                      `智能体「${pkg.slug}」的子代理在 ${String(cleanupTimeoutMs / 60_000)} 分钟内未结束，释放 activation`,
+                    )
+                  }
+                  await disposeActivation(currentActivation)
+                }
+              }
+              const current = runtime
+              if (current !== undefined) {
+                await stopTurnRuntime(current)
+              }
+              if (mcpDispose !== undefined) {
+                try {
+                  await mcpDispose()
+                } catch {
+                  // MCP 客户端 scope 可能已随子进程退出;失败不阻止其余清理。
+                }
+              }
+              if (current !== undefined) {
+                // A late afterIdle must not delete a newer turn's binding for the same session.
+                if (registry.get(sessionId) === current) registry.delete(sessionId)
+              }
+              releaseChildBindings()
+              if (request !== null && ctx.huaanworkAgentPackageRequest?.current === request) {
+                ctx.huaanworkAgentPackageRequest.current = null
+              }
+            } finally {
+              // 清理完成后注销登记:unregister 幂等,且只在表里仍是本 record 时删除,
+              // 晚到的清理不会抹掉同 session 的新回合登记。
+              unregister?.()
+            }
+          })()
+          await cleanupPromise
+          // owner 清理确认:结构化告警随失败集合发布;只有「零失败 + 晚到 activation
+          // 已 dispose」才算清理成功。必须在聚合抛出/日志之前调用,取消路径的
+          // rejection 也不会漏掉确认。
+          //
+          // `ok` 还要求晚到 activation 的 dispose 已有结论:清理快照可能早于 activation
+          // 归入本回合,那一轮「零失败」只证明当时的资源清干净了,不能替尚未 dispose 的
+          // activation 作保,否则 result 观察者会据此提前发布 `stopped`。
+          const failed = cleanupFailures.length > 0
+          const ok = cleanupOk()
+          if (ok) cleanupConfirmed = true
+          subagentRuns.confirmCleanup(runId, {
+            ok,
+            warnings: cleanupFailures.map(({ code }) => ({ code, severity: 'error' as const })),
+          })
+          // 聚合与日志只按真实失败判定:activation 尚未 dispose 落定不是失败,下一次
+          // cleanup 会在 dispose 落定后重新确认。
+          if (!failed) return
+          const error = new Error(`智能体「${pkg.slug}」清理失败（${cleanupFailures.length} 项）`)
+          if (mode === 'cancel') throw error
+          // idle 只记录一次:同一回合的 dispatch catch 与 afterIdle 可能都走这里。
+          if (!cleanupFailureReported) {
+            cleanupFailureReported = true
+            console.error(error.message)
+          }
+        }
+
+        /**
+         * result 晚结算时补一次幂等确认:只有本回合清理确已成功(含晚到 activation 的
+         * dispose 落定)且没有任何清理失败时才确认,绝不发裸 `ok: true`。
+         */
+        const confirmObservedCleanup = (): void => {
+          if (!cleanupConfirmed || cleanupFailures.length > 0) return
+          subagentRuns.confirmCleanup(runId, { ok: true, warnings: [] })
+        }
+
+        /**
+         * 取消本回合:先 abort(阻止后续 spawn),再立即 dispose 已运行的
+         * activation(不等 graceful result),最后停 runtime 并等待 cleanup。
+         * 并发/重入共享同一 cancelPromise,不会双停,也不会删除更新的登记。
+         */
+        const cancelTurn = (reason: AgentPackageTurnCancelReason): Promise<void> => {
+          if (cancelPromise !== undefined) return cancelPromise
+          // `abort` 可能同步触发监听器重入本函数:共享 promise 必须先于 abort 建立,
+          // 并且用 `cancelling` 覆盖「收尾链路同步建立中」的窗口,否则会起两条收尾
+          // 链路,后到的 reason 覆盖先到的。
+          if (cancelling) return Promise.resolve().then(() => cancelPromise ?? Promise.resolve())
+          cancelling = true
+          cancelRequested = true
+          cancelReason = reason
+          const error = cancelError()
+          const teardown = (async () => {
             const currentActivation = activation
             if (currentActivation !== undefined) {
-              if (cancelRequested) {
-                await disposeActivation(currentActivation)
-              } else {
-                const settled = await Promise.race([
-                  settleWithin(currentActivation.result, cleanupTimeoutMs),
-                  cancelGate.then(() => false),
-                ])
-                if (!settled && !cancelRequested) {
-                  // 发布后的取消归 dispose();这里只记录卡住的事实,不 abort signal。
-                  // result 晚结算是子代理还在干活,不是清理失败:写进 cleanupFailures
-                  // 会让之后 update/remove 的 cancel 路径凭空抛错。
-                  console.error(
-                    `智能体「${pkg.slug}」的子代理在 ${String(cleanupTimeoutMs / 60_000)} 分钟内未结束，释放 activation`,
-                  )
-                }
-                await disposeActivation(currentActivation)
-              }
+              await disposeActivation(currentActivation)
             }
-            const current = runtime
-            if (current !== undefined) {
-              await stopTurnRuntime(current)
+            const currentRuntime = runtime
+            if (currentRuntime !== undefined) {
+              await stopTurnRuntime(currentRuntime)
             }
-            if (mcpDispose !== undefined) {
-              try {
-                await mcpDispose()
-              } catch {
-                // MCP 客户端 scope 可能已随子进程退出;失败不阻止其余清理。
-              }
-            }
-            if (current !== undefined) {
-              // A late afterIdle must not delete a newer turn's binding for the same session.
-              if (registry.get(sessionId) === current) registry.delete(sessionId)
-            }
-            releaseChildBindings()
-            if (request !== null && ctx.huaanworkAgentPackageRequest?.current === request) {
-              ctx.huaanworkAgentPackageRequest.current = null
-            }
-          } finally {
-            // 清理完成后注销登记:unregister 幂等,且只在表里仍是本 record 时删除,
-            // 晚到的清理不会抹掉同 session 的新回合登记。
-            unregister?.()
-          }
-        })()
-        await cleanupPromise
-        if (cleanupFailures.length === 0) return
-        const error = new Error(`智能体「${pkg.slug}」清理失败（${cleanupFailures.length} 项）`)
-        if (mode === 'cancel') throw error
-        // idle 只记录一次:同一回合的 dispatch catch 与 afterIdle 可能都走这里。
-        if (!cleanupFailureReported) {
-          cleanupFailureReported = true
-          console.error(error.message)
+            await cleanup('cancel')
+          })()
+          cancelPromise = teardown
+          openCancelGate()
+          controller.abort(error)
+          return cancelPromise
         }
-      }
+        // 定向取消闭包只到本回合:cancelTurn 保留原有的 abort + dispose + 停进程语义,
+        // registry 的 requestCancel 只是另一个入口,不另建第二套收尾。
+        subagentRuns.attachCancel(runId, () => cancelTurn('cancel'))
 
-      /**
-       * 取消本回合:先 abort(阻止后续 spawn),再立即 dispose 已运行的
-       * activation(不等 graceful result),最后停 runtime 并等待 cleanup。
-       * 并发/重入共享同一 cancelPromise,不会双停,也不会删除更新的登记。
-       */
-      const cancelTurn = (reason: AgentPackageTurnCancelReason): Promise<void> => {
-        if (cancelPromise !== undefined) return cancelPromise
-        // `abort` 可能同步触发监听器重入本函数:共享 promise 必须先于 abort 建立,
-        // 并且用 `cancelling` 覆盖「收尾链路同步建立中」的窗口,否则会起两条收尾
-        // 链路,后到的 reason 覆盖先到的。
-        if (cancelling) return Promise.resolve().then(() => cancelPromise ?? Promise.resolve())
-        cancelling = true
-        cancelRequested = true
-        cancelReason = reason
-        const error = cancelError()
-        const teardown = (async () => {
-          const currentActivation = activation
-          if (currentActivation !== undefined) {
-            await disposeActivation(currentActivation)
-          }
-          const currentRuntime = runtime
-          if (currentRuntime !== undefined) {
-            await stopTurnRuntime(currentRuntime)
-          }
-          await cleanup('cancel')
-        })()
-        cancelPromise = teardown
-        openCancelGate()
-        controller.abort(error)
-        return cancelPromise
-      }
-
-      const record: AgentPackageActiveTurnRecord = {
-        sessionId,
-        slug: pkg.slug,
-        version: pkg.version,
-        controller,
-        cancel: (reason) => cancelTurn(reason),
-        releaseReservation,
-      }
-      // 登记必须早于第一次 await(尤其 security.assertRunnable):撤销刷新据此
-      // 找到正在启动的回合,并 abort 同一个 signal。
-      unregister = activeTurns.register(record)
-
-      try {
-        assertLive()
-        const manifest = readDispatchManifest(profileDir, pkg.slug)
-        const packageDir = agentPackageDir(profileDir, pkg.slug)
-        const persona = await composeAgentPackagePersona(packageDir, manifest, profileDir)
-        assertLive()
-        const workspaceRoot = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd()
-
-        // 运行前复验(第一次,createRuntime 之前):目录包每次 dispatch 都重验,
-        // 撤销/篡改在这里 fail closed。record 已登记,期间到达的撤销也能 abort。
-        if (pkg.source === 'catalog' && security !== undefined) {
-          await security.assertRunnable(pkg.slug, pkg.version)
+        const record: AgentPackageActiveTurnRecord = {
+          sessionId,
+          slug: pkg.slug,
+          version: pkg.version,
+          controller,
+          cancel: (reason) => cancelTurn(reason),
+          releaseReservation,
         }
-        assertLive()
+        // 登记必须早于第一次 await(尤其 security.assertRunnable):撤销刷新据此
+        // 找到正在启动的回合,并 abort 同一个 signal。
+        unregister = activeTurns.register(record)
 
-        runtime = await createRuntime({
-          manifest,
-          packageDir,
-          workspaceRoot,
-          signal,
-          getSandbox: () => ctx.get?.('sandbox') as AgentPackageSandbox | undefined,
-          mountMcp: async (port) => {
-            const mounted = await mountSessionMcp({
-              ctx: ctx as never,
-              sessionId,
-              serverName: pkg.slug,
-              url: `http://127.0.0.1:${String(port)}/mcp`,
-            })
-            // The health budget can expire before the mount resolves; the turn is already
-            // over, so release the scope here instead of leaving it (and its names) alive.
-            if (cleanupStarted) {
-              await mounted.dispose()
+        try {
+          assertLive()
+          const manifest = readDispatchManifest(profileDir, pkg.slug)
+          const packageDir = agentPackageDir(profileDir, pkg.slug)
+          const persona = await composeAgentPackagePersona(packageDir, manifest, profileDir)
+          assertLive()
+          const workspaceRoot = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd()
+
+          // 运行前复验(第一次,createRuntime 之前):目录包每次 dispatch 都重验,
+          // 撤销/篡改在这里 fail closed。record 已登记,期间到达的撤销也能 abort。
+          if (pkg.source === 'catalog' && security !== undefined) {
+            await security.assertRunnable(pkg.slug, pkg.version)
+          }
+          assertLive()
+
+          runtime = await createRuntime({
+            manifest,
+            packageDir,
+            workspaceRoot,
+            signal,
+            getSandbox: () => ctx.get?.('sandbox') as AgentPackageSandbox | undefined,
+            mountMcp: async (port) => {
+              const mounted = await mountSessionMcp({
+                ctx: ctx as never,
+                sessionId,
+                serverName: pkg.slug,
+                url: `http://127.0.0.1:${String(port)}/mcp`,
+              })
+              // The health budget can expire before the mount resolves; the turn is already
+              // over, so release the scope here instead of leaving it (and its names) alive.
+              if (cleanupStarted) {
+                await mounted.dispose()
+                return mounted.names
+              }
+              mcpDispose = mounted.dispose
               return mounted.names
+            },
+          })
+          // 晚到 runtime:取消可能发生在 createRuntime 期间。先写回 record,再停掉它
+          // 并 cleanup,禁止继续 startActivation。
+          record.runtime = runtime
+          if (cancelRequested || signal.aborted) {
+            await stopTurnRuntime(runtime)
+            await cleanup('idle')
+            throw cancelError()
+          }
+          // 运行前复验(第二次,runtime 之后):createRuntime 期间到达的撤销即使
+          // abort 了 signal,也以撤销文案结束而不是笼统的取消。
+          if (pkg.source === 'catalog' && security !== undefined) {
+            await security.assertRunnable(pkg.slug, pkg.version)
+          }
+          assertLive()
+
+          const mcpNames = runtime.mcpNames ?? []
+          if (mcpNames.length > 0) {
+            // The mount attaches the names to the parent only so discovery can see them;
+            // after discovery they belong to the package child alone.
+            if (ctx.huaanworkAttachments !== undefined) {
+              detachAgentTools(ctx.huaanworkAttachments, sessionId, mcpNames)
             }
-            mcpDispose = mounted.dispose
-            return mounted.names
-          },
-        })
-        // 晚到 runtime:取消可能发生在 createRuntime 期间。先写回 record,再停掉它
-        // 并 cleanup,禁止继续 startActivation。
-        record.runtime = runtime
-        if (cancelRequested || signal.aborted) {
-          await stopTurnRuntime(runtime)
-          await cleanup('idle')
-          throw cancelError()
-        }
-        // 运行前复验(第二次,runtime 之后):createRuntime 期间到达的撤销即使
-        // abort 了 signal,也以撤销文案结束而不是笼统的取消。
-        if (pkg.source === 'catalog' && security !== undefined) {
-          await security.assertRunnable(pkg.slug, pkg.version)
-        }
-        assertLive()
-
-        const mcpNames = runtime.mcpNames ?? []
-        if (mcpNames.length > 0) {
-          // The mount attaches the names to the parent only so discovery can see them;
-          // after discovery they belong to the package child alone.
-          if (ctx.huaanworkAttachments !== undefined) {
-            detachAgentTools(ctx.huaanworkAttachments, sessionId, mcpNames)
+            refreshAgentRestrict(ctx as never, sessionId)
           }
-          refreshAgentRestrict(ctx as never, sessionId)
-        }
 
-        const allow = composeAgentPackageToolAllowList(manifest, mcpNames, runtime.skillScripts)
-        const prompt = input.remainder.trim() || pkg.description || '开始协助工作。'
-        const parent = input.resolveParent === undefined ? undefined : await input.resolveParent()
-        assertLive()
-        if (parent === undefined || parent === null) {
-          throw new Error(`智能体「${pkg.slug}」无法开始：当前会话没有可用的父会话`)
-        }
-        // 子代理的首条模型请求在 `skills.ts` 的 activation 包装运行之前就已组装工具清单,
-        // 所以预留子会话 id、按它预先挂载并先登记运行时;包装在 activation 之后做同批
-        // 挂载只是幂等安全网。预留 id 进 request 与 activation spec,provider 必须沿用。
-        const reservedChildId: SessionId = brandString<SessionId>(randomUUID())
-        const childToolNames = agentPackageChildAttachmentNames(allow, mcpNames)
-        if (ctx.huaanworkAttachments !== undefined && childToolNames.length > 0) {
-          attachAgentTools(ctx.huaanworkAttachments, reservedChildId, childToolNames)
-        }
-        bindChild(reservedChildId)
-        request = { allow, persona, runtime, parentSessionId: sessionId, childId: reservedChildId, bindChild }
-        registry.bind(sessionId, runtime)
-
-        // Publish the request synchronously before the call: the skills wrapper reads it
-        // before its first await, so no sibling activation can claim this turn's request.
-        if (ctx.huaanworkAgentPackageRequest !== undefined) {
-          ctx.huaanworkAgentPackageRequest.current = request
-        }
-        assertLive()
-        activation = await startActivation({
-          provider: 'spawn',
-          label: `@${pkg.slug}`,
-          // 预留 id 让首条请求就带上包工具;spawn 后端支持续接故接受该字段。
-          childId: reservedChildId,
-          request: {
-            // rc.1 的 SubagentStartRequest 没有 persona 字段:人设作为带分隔的前缀
-            // 并入子代理的首条用户消息,用户请求原样保留在后。
-            prompt: [{ type: 'text', text: `${persona}\n\n---\n用户请求：\n${prompt}` }],
-            parent,
-          },
-          // 与 createRuntime 同一个 signal:撤销/取消在 spawn 前生效,
-          // runtime.ts 的每次 spawn 也会检查 aborted。
-          signal,
-          delivery: 'parent',
-        })
-        // 晚到 activation:取消发生在 startActivation 期间时,必须立即 dispose 这个
-        // 新 activation 并 cleanup,不能留下「取消时还没 activation,所以永不 dispose」
-        // 的活回合。
-        record.activation = activation
-        // 取消路径不会等 graceful result;这里仍挂一个观察者,避免子代理迟到的
-        // rejection 在没人 await 时变成 unhandled rejection。
-        void activation.result.catch(() => undefined)
-        if (cancelRequested || signal.aborted) {
-          await disposeActivation(activation)
-          // The wrapper resumes during `startActivation` and may bind the child after the
-          // first cleanup pass already unbound it; dispose the late activation and clear
-          // whatever it re-added before failing the turn.
-          releaseChildBindings()
-          await cleanup('idle')
-          throw cancelError()
-        }
-        // The registry binding must exist before the child can call agent_http/agent_skill_run.
-        const activationChildId = activation.childId
-        if (typeof activationChildId === 'string' && activationChildId.length > 0) {
-          if (activationChildId !== reservedChildId && ctx.huaanworkAttachments !== undefined && childToolNames.length > 0) {
-            // provider 忽略预留 id 时,同一批名字也要挂在它实际分配的 id 上。
-            attachAgentTools(ctx.huaanworkAttachments, activationChildId, childToolNames)
+          const allow = composeAgentPackageToolAllowList(manifest, mcpNames, runtime.skillScripts)
+          const prompt = input.remainder.trim() || pkg.description || '开始协助工作。'
+          const parent = input.resolveParent === undefined ? undefined : await input.resolveParent()
+          assertLive()
+          if (parent === undefined || parent === null) {
+            throw new Error(`智能体「${pkg.slug}」无法开始：当前会话没有可用的父会话`)
           }
-          bindChild(activationChildId)
+          // 子代理的首条模型请求在 `skills.ts` 的 activation 包装运行之前就已组装工具清单,
+          // 所以预留子会话 id、按它预先挂载并先登记运行时;包装在 activation 之后做同批
+          // 挂载只是幂等安全网。预留 id 进 request 与 activation spec,provider 必须沿用。
+          const reservedChildId: SessionId = brandString<SessionId>(randomUUID())
+          // 预留 id 先归到本 run:provider 沿用则 activity 从第一条就落在选中卡片上。
+          subagentRuns.reserveChild(runId, reservedChildId)
+          const childToolNames = agentPackageChildAttachmentNames(allow, mcpNames)
+          if (ctx.huaanworkAttachments !== undefined && childToolNames.length > 0) {
+            attachAgentTools(ctx.huaanworkAttachments, reservedChildId, childToolNames)
+          }
+          bindChild(reservedChildId)
+          request = {
+            runId,
+            allow,
+            persona,
+            runtime,
+            parentSessionId: sessionId,
+            childId: reservedChildId,
+            bindChild,
+          }
+          registry.bind(sessionId, runtime)
+
+          // Publish the request synchronously before the call: the skills wrapper reads it
+          // before its first await, so no sibling activation can claim this turn's request.
+          if (ctx.huaanworkAgentPackageRequest !== undefined) {
+            ctx.huaanworkAgentPackageRequest.current = request
+          }
+          assertLive()
+          activation = await startActivation({
+            provider: 'spawn',
+            label: `@${pkg.slug}`,
+            // 预留 id 让首条请求就带上包工具;spawn 后端支持续接故接受该字段。
+            childId: reservedChildId,
+            request: {
+              // rc.1 的 SubagentStartRequest 没有 persona 字段:人设作为带分隔的前缀
+              // 并入子代理的首条用户消息,用户请求原样保留在后。
+              prompt: [{ type: 'text', text: `${persona}\n\n---\n用户请求：\n${prompt}` }],
+              parent,
+            },
+            // 与 createRuntime 同一个 signal:撤销/取消在 spawn 前生效,
+            // runtime.ts 的每次 spawn 也会检查 aborted。
+            signal,
+            delivery: 'parent',
+          })
+          // 晚到 activation:取消发生在 startActivation 期间时,必须立即 dispose 这个
+          // 新 activation 并 cleanup,不能留下「取消时还没 activation,所以永不 dispose」
+          // 的活回合。
+          record.activation = activation
+          // 晚到的 activation 是清理快照之后出现的新资源:此前「零失败」的确认只覆盖了
+          // 当时的资源,必须作废;后续 cleanup 会在这次 dispose 落定后重新确认。
+          cleanupConfirmed = false
+          // registry 把确认当持久状态保存,只清本地标志不够:必须同时撤回成功结论,
+          // 否则这个尚未 dispose 的 activation 会拼出伪 `stopped`。新结论到达后
+          // (含 dispose 落定的重新确认)照常收敛。
+          subagentRuns.confirmCleanup(runId, { ok: false, warnings: [] })
+          // provider 可能忽略预留 id:按实际 childId 重绑定,活动本体随之迁移。
+          subagentRuns.bindActivation(runId, { childId: activation.childId })
+          // 权威 result 只观察一次:resolve/reject 分别上报,绝不再走只表示启动失败的
+          // failRun。观察器兼做 unhandled rejection 的兜底。
+          void activation.result.then(
+            (result) => {
+              subagentRuns.settleResult(runId, { stopReason: stopReasonOfResult(result) })
+              // 清理先于 result 确认时,补一次幂等确认;stopped 仍要求 executionEnded,
+              // 且清理必须真的成功(见 `confirmObservedCleanup`)。
+              confirmObservedCleanup()
+            },
+            (error) => {
+              subagentRuns.rejectResult(runId, error instanceof Error ? error.message : String(error))
+              confirmObservedCleanup()
+            },
+          )
+          if (cancelRequested || signal.aborted) {
+            await disposeActivation(activation)
+            // The wrapper resumes during `startActivation` and may bind the child after the
+            // first cleanup pass already unbound it; dispose the late activation and clear
+            // whatever it re-added before failing the turn.
+            releaseChildBindings()
+            await cleanup('idle')
+            throw cancelError()
+          }
+          // The registry binding must exist before the child can call agent_http/agent_skill_run.
+          const activationChildId = activation.childId
+          if (typeof activationChildId === 'string' && activationChildId.length > 0) {
+            if (activationChildId !== reservedChildId && ctx.huaanworkAttachments !== undefined && childToolNames.length > 0) {
+              // provider 忽略预留 id 时,同一批名字也要挂在它实际分配的 id 上。
+              attachAgentTools(ctx.huaanworkAttachments, activationChildId, childToolNames)
+            }
+            bindChild(activationChildId)
+          }
+          return { text: prompt, afterIdle: () => cleanup('idle') }
+        } catch (error) {
+          await cleanup('idle')
+          // 取消/撤销期间任何启动失败都以取消原因结束:用户看到的应是撤销或停止,
+          // 而不是被 abort 触发的底层错误(如「智能体启动已取消」)。
+          if (cancelRequested || signal.aborted) throw cancelError()
+          throw error
         }
-        return { text: prompt, afterIdle: () => cleanup('idle') }
       } catch (error) {
-        await cleanup('idle')
-        // 取消/撤销期间任何启动失败都以取消原因结束:用户看到的应是撤销或停止,
-        // 而不是被 abort 触发的底层错误(如「智能体启动已取消」)。
-        if (cancelRequested || signal.aborted) throw cancelError()
+        // 启动校验/外层 dispatch 失败:先登记「执行已终结」再原样抛出。取消闩会吸收
+        // failRun,保持 stopping;随后补一次幂等确认,让启动期取消在执行终结事实到达
+        // 之后仍能转为 stopped(确认先于 failRun 时不会误发 stopped)。
+        subagentRuns.failRun(runId, error instanceof Error ? error.message : String(error))
+        subagentRuns.confirmCleanup(runId, {
+          ok: cleanupOk(),
+          warnings: cleanupFailures.map(({ code }) => ({ code, severity: 'error' as const })),
+        })
         throw error
       }
     },
@@ -998,6 +1120,22 @@ function readDispatchManifest(profileDir: string, slug: string): AgentPackageMan
 /** 清理失败可以是任意 throw 值;统一成 Error 才能按条数聚合上报。 */
 function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value))
+}
+
+/** 包回合清理失败的稳定分类:UI 按 code 映射文案,不解析错误文本。 */
+type AgentPackageCleanupFailureCode =
+  | 'activation-dispose-failed'
+  | 'activation-dispose-timeout'
+  | 'runtime-stop-failed'
+  | 'runtime-stop-timeout'
+
+type AgentPackageCleanupFailure = { code: AgentPackageCleanupFailureCode; error: Error }
+
+/** activation.result 的 stopReason;provider 没给字符串时由 registry 归为 `unknown`。 */
+function stopReasonOfResult(result: unknown): string {
+  if (typeof result !== 'object' || result === null) return ''
+  const reason = (result as { stopReason?: unknown }).stopReason
+  return typeof reason === 'string' ? reason : ''
 }
 
 /**

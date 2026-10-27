@@ -4,12 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "vitest";
 
+import type { AgentPackageSubagentRequest } from "../../src/huaanwork-host/agent-package/types.ts";
 import {
   childrenOf,
   forgetChildSession,
   noteCallerSession,
   resetChildSessionRegistry,
 } from "../../src/huaanwork-host/child-sessions.ts";
+import { createSubagentRunRegistry } from "../../src/huaanwork-host/subagent-runs.ts";
+import {
+  HUAANWORK_LEGACY_AGENT_REQUEST,
+  HUAANWORK_SUBAGENT_RUN_ID,
+} from "../../src/huaanwork-host/subagents-service.ts";
 import { apply as applyLimits } from "../../src/huaanwork-guardrails/limits.ts";
 import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
@@ -758,4 +764,505 @@ test("subagent start error still clears current request", async () => {
     { message: "subprocess crash" },
   );
   assert.equal(ctx.huaanworkAgentRequest.current, undefined);
+});
+
+// ── 上游 start/end 与 Host run 的配对(Task 6)────────────────────────────────
+// `startActivation` 包装把本次 Host runId 放进第二条 ALS,`subagent/start` 在同一个
+// 异步作用域里派发,监听器据此绑定 upstream run;`subagent/end` 严格按 upstreamRunId
+// 结算。模型自主创建的嵌套子代理没有 Host runId,只保留原有 parent-child 登记。
+
+type ActivationFixture = {
+  childId: string;
+  localAgent?: Agent;
+  result: Promise<unknown>;
+  dispose: () => Promise<void>;
+};
+
+/** 只收集 subagent 生命周期监听器的 ctx;用例各自补齐服务面后再 apply。 */
+function lifecycleContext() {
+  const listeners: Record<string, Array<(info: unknown) => void>> = {};
+  const ctx: Record<string, unknown> = {
+    skills: { register: () => () => undefined },
+    on(event: string, listener: (info: unknown) => void) {
+      (listeners[event] ??= []).push(listener);
+    },
+  };
+  return {
+    ctx,
+    emit(event: string, info: unknown) {
+      for (const listener of listeners[event] ?? []) listener(info);
+    },
+  };
+}
+
+function activateOf(ctx: Record<string, unknown>): (spec: unknown) => Promise<unknown> {
+  return (ctx.subagents as { startActivation(spec: unknown): Promise<unknown> }).startActivation;
+}
+
+function liveParent(sessionId: string): { session: { id: string } } {
+  return { session: { id: sessionId } };
+}
+
+test("subagent/start binds the activation host run id through AsyncLocalStorage", async () => {
+  const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+  const { ctx, emit } = lifecycleContext();
+  const runId = registry.begin({ parentSessionId: "parent-1", kind: "legacy", label: "@reviewer" });
+  let disposeCalls = 0;
+  Object.assign(ctx, {
+    huaanworkSubagentRuns: registry,
+    subagents: {
+      async startActivation(spec: { childId: string }): Promise<ActivationFixture> {
+        emit("subagent/start", { runId: "upstream-1", provider: "spawn", id: spec.childId, local: true });
+        return {
+          childId: spec.childId,
+          result: new Promise(() => undefined),
+          dispose: async () => {
+            disposeCalls += 1;
+          },
+        };
+      },
+    },
+  });
+  applySkills(ctx as never);
+
+  await activateOf(ctx)({
+    provider: "spawn",
+    label: "@reviewer",
+    childId: "child-1",
+    request: { prompt: [], parent: liveParent("parent-1") },
+    delivery: "parent",
+    [HUAANWORK_SUBAGENT_RUN_ID]: runId,
+  });
+
+  assert.equal(registry.get(runId)?.upstreamRunId, "upstream-1");
+  assert.equal(registry.get(runId)?.childId, "child-1");
+  assert.equal(disposeCalls, 0);
+
+  // ALS 作用域不外溢:activation 结束后同一 child 的 start 不再改写已绑定的 run。
+  emit("subagent/start", { runId: "upstream-late", provider: "spawn", id: "child-1", local: true });
+  assert.equal(registry.get(runId)?.upstreamRunId, "upstream-1");
+});
+
+test("a package activation binds the upstream start through its package request run id", async () => {
+  const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+  const { ctx, emit } = lifecycleContext();
+  const runId = registry.begin({
+    parentSessionId: "parent-1",
+    kind: "package",
+    label: "@pkg",
+    packageVersion: "1.0.0",
+  });
+  const pkg: AgentPackageSubagentRequest = {
+    runId,
+    allow: [],
+    persona: "包人设",
+    runtime: {
+      slug: "pkg",
+      packageDir: "/tmp/pkg",
+      workspaceRoot: "/tmp",
+      skillScripts: [],
+      runSkillScript: async () => ({ text: "" }),
+    },
+    parentSessionId: "parent-1",
+    childId: "reserved-1",
+    bindChild: () => undefined,
+  };
+  Object.assign(ctx, {
+    huaanworkSubagentRuns: registry,
+    huaanworkAgentPackageRequest: { current: pkg },
+    subagents: {
+      async startActivation(): Promise<ActivationFixture> {
+        emit("subagent/start", { runId: "upstream-pkg", provider: "spawn", id: "child-9", local: true });
+        return {
+          childId: "child-9",
+          result: new Promise(() => undefined),
+          dispose: async () => undefined,
+        };
+      },
+    },
+  });
+  applySkills(ctx as never);
+
+  await activateOf(ctx)({
+    provider: "spawn",
+    label: "@pkg",
+    childId: "reserved-1",
+    request: { prompt: [], parent: liveParent("parent-1") },
+    delivery: "parent",
+  });
+
+  // activation spec 没有 legacy 符号键:Host runId 取自包请求(Task 5 的 runId)。
+  assert.equal(registry.get(runId)?.upstreamRunId, "upstream-pkg");
+  // provider 另分配 childId 时包装不套用包工具;upstream 绑定仍落在本 run。
+  assert.equal(registry.get(runId)?.childId, "child-9");
+});
+
+test("a foreign activation during a published package request never claims the package run", async () => {
+  const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+  const { ctx, emit } = lifecycleContext();
+  const runId = registry.begin({ parentSessionId: "session-a", kind: "package", label: "@pkg" });
+  registry.reserveChild(runId, "reserved-1");
+  const pkg: AgentPackageSubagentRequest = {
+    runId,
+    allow: [],
+    persona: "包人设",
+    runtime: {
+      slug: "pkg",
+      packageDir: "/tmp/pkg",
+      workspaceRoot: "/tmp",
+      skillScripts: [],
+      runSkillScript: async () => ({ text: "" }),
+    },
+    parentSessionId: "session-a",
+    childId: "reserved-1",
+    bindChild: () => undefined,
+  };
+  let disposeCalls = 0;
+  Object.assign(ctx, {
+    huaanworkSubagentRuns: registry,
+    huaanworkAgentPackageRequest: { current: pkg },
+    subagents: {
+      async startActivation(spec: { childId: string }): Promise<ActivationFixture> {
+        // 并发落进包发行窗口、且 spec 不带任何 run 标记的 activation(模型 subagent 工具):
+        // 包请求是全局容器,不得把它的 runId 当成这次调用的 Host run。
+        emit("subagent/start", { runId: "upstream-foreign", provider: "spawn", id: spec.childId, local: true });
+        return {
+          childId: spec.childId,
+          result: new Promise(() => undefined),
+          dispose: async () => {
+            disposeCalls += 1;
+          },
+        };
+      },
+    },
+  });
+  applySkills(ctx as never);
+  const activate = activateOf(ctx);
+
+  // 另一会话的 activation:父会话与 pkg.parentSessionId 不同。
+  await activate({
+    provider: "spawn",
+    label: "@foreign",
+    childId: "foreign-child",
+    request: { prompt: [], parent: liveParent("session-b") },
+    delivery: "parent",
+  });
+  // 没有 parent 的 activation:调用方会话同样不是 session-a。包装会清掉本次快照,
+  // 重新发布以保持第二段仍在包发行窗口内。
+  (ctx.huaanworkAgentPackageRequest as { current: AgentPackageSubagentRequest | null }).current = pkg;
+  await activate({
+    provider: "spawn",
+    label: "@foreign-no-parent",
+    childId: "foreign-child-2",
+    request: { prompt: [], parent: undefined },
+    delivery: "parent",
+  });
+
+  // 包 run 保持原预留 identity,既没被重绑定,也没被伪 parent mismatch 释放。
+  assert.equal(disposeCalls, 0);
+  assert.equal(registry.get(runId)?.childId, "reserved-1");
+  assert.equal(registry.get(runId)?.upstreamRunId, undefined);
+  assert.equal(registry.get(runId)?.phase, "starting");
+  assert.equal(registry.ownsChild("foreign-child"), false);
+  assert.equal(registry.ownsChild("foreign-child-2"), false);
+
+  // 外来 activation 的 end 也不得结算包 run 的候选。
+  emit("subagent/end", {
+    runId: "upstream-foreign",
+    provider: "spawn",
+    id: "foreign-child",
+    local: true,
+    stopReason: "error",
+  });
+  assert.equal(registry.get(runId)?.phase, "starting");
+  assert.equal(registry.get(runId)?.stopReason, undefined);
+  assert.deepEqual(registry.get(runId)?.cleanupWarnings, []);
+});
+
+test("a same-session activation without the reserved child id never adopts the package run", async () => {
+  const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+  const { ctx, emit } = lifecycleContext();
+  const runId = registry.begin({ parentSessionId: "session-a", kind: "package", label: "@pkg" });
+  registry.reserveChild(runId, "reserved-child");
+  let bindChildCalls = 0;
+  const pkg: AgentPackageSubagentRequest = {
+    runId,
+    allow: [],
+    persona: "包人设",
+    runtime: {
+      slug: "pkg",
+      packageDir: "/tmp/pkg",
+      workspaceRoot: "/tmp",
+      skillScripts: [],
+      runSkillScript: async () => ({ text: "" }),
+    },
+    parentSessionId: "session-a",
+    childId: "reserved-child",
+    bindChild: () => {
+      bindChildCalls += 1;
+    },
+  };
+  let disposeCalls = 0;
+  Object.assign(ctx, {
+    huaanworkSubagentRuns: registry,
+    huaanworkAgentPackageRequest: { current: pkg },
+    subagents: {
+      async startActivation(spec: { childId?: string }): Promise<ActivationFixture> {
+        // 父会话谓词成立,但这次 activation 没有 Host runId 符号键、childId 也不是预留值:
+        // 包请求只属于携带预留子会话 id 的那次 activation,不得被这里借用。
+        const childId = spec.childId ?? "provider-assigned";
+        emit("subagent/start", { runId: "upstream-foreign", provider: "spawn", id: childId, local: true });
+        return {
+          childId,
+          result: new Promise(() => undefined),
+          dispose: async () => {
+            disposeCalls += 1;
+          },
+        };
+      },
+    },
+  });
+  applySkills(ctx as never);
+  const activate = activateOf(ctx);
+
+  // 同一父会话(session-a),childId 不同。
+  await activate({
+    provider: "spawn",
+    label: "@same-session-other-child",
+    childId: "foreign-child",
+    request: { prompt: [], parent: liveParent("session-a") },
+    delivery: "parent",
+  });
+  // 同一父会话,spec 不带 childId;provider 自行分配 id。
+  (ctx.huaanworkAgentPackageRequest as { current: AgentPackageSubagentRequest | null }).current = pkg;
+  await activate({
+    provider: "spawn",
+    label: "@same-session-no-child",
+    request: { prompt: [], parent: liveParent("session-a") },
+    delivery: "parent",
+  });
+
+  // 包 run 保持预留 identity:没被重绑定,也没有被伪 parent mismatch 释放。
+  assert.equal(disposeCalls, 0);
+  assert.equal(registry.get(runId)?.childId, "reserved-child");
+  assert.equal(registry.get(runId)?.upstreamRunId, undefined);
+  assert.equal(registry.get(runId)?.phase, "starting");
+  // 外来 activation 没有被当成包回合:包绑定与工具限制都不执行。
+  assert.equal(bindChildCalls, 0);
+  assert.equal(registry.ownsChild("reserved-child"), true);
+  assert.equal(registry.ownsChild("foreign-child"), false);
+  assert.equal(registry.ownsChild("provider-assigned"), false);
+  assert.deepEqual(registry.get(runId)?.cleanupWarnings, []);
+});
+
+test("an old upstream end settles only the run that owns its upstream run id", async () => {
+  const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+  const { ctx, emit } = lifecycleContext();
+  const oldRunId = registry.begin({ parentSessionId: "parent-1", kind: "legacy", label: "@old" });
+  const newRunId = registry.begin({ parentSessionId: "parent-1", kind: "legacy", label: "@new" });
+  let upstream = "";
+  Object.assign(ctx, {
+    huaanworkSubagentRuns: registry,
+    subagents: {
+      async startActivation(spec: { childId: string }): Promise<ActivationFixture> {
+        emit("subagent/start", { runId: upstream, provider: "spawn", id: spec.childId, local: true });
+        return {
+          childId: spec.childId,
+          result: new Promise(() => undefined),
+          dispose: async () => undefined,
+        };
+      },
+    },
+  });
+  applySkills(ctx as never);
+  const activate = activateOf(ctx);
+  const specFor = (runId: string, childId: string) => ({
+    provider: "spawn",
+    label: "@legacy",
+    childId,
+    request: { prompt: [], parent: liveParent("parent-1") },
+    delivery: "parent",
+    [HUAANWORK_SUBAGENT_RUN_ID]: runId,
+  });
+
+  upstream = "upstream-old";
+  await activate(specFor(oldRunId, "child-a"));
+  registry.settleResult(oldRunId, { stopReason: "completed" });
+  upstream = "upstream-new";
+  await activate(specFor(newRunId, "child-b"));
+  assert.equal(registry.get(oldRunId)?.upstreamRunId, "upstream-old");
+  assert.equal(registry.get(newRunId)?.upstreamRunId, "upstream-new");
+
+  // 旧 run 的 end 迟到:只结算旧 run(result 已 completed ⇒ 只补 upstream-end-error)。
+  emit("subagent/end", { runId: "upstream-old", provider: "spawn", id: "child-a", local: true, stopReason: "error" });
+  assert.deepEqual(registry.get(oldRunId)?.cleanupWarnings, [{ code: "upstream-end-error", severity: "error" }]);
+  // 新 run 不被旧 end 改写或清理。
+  assert.equal(registry.get(newRunId)?.phase, "starting");
+  assert.equal(registry.get(newRunId)?.stopReason, undefined);
+  assert.deepEqual(registry.get(newRunId)?.cleanupWarnings, []);
+  assert.equal(registry.get(newRunId)?.upstreamRunId, "upstream-new");
+});
+
+test("a nested subagent without a host run id only keeps the parent-child registration", async () => {
+  const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+  const { ctx, emit } = lifecycleContext();
+  Object.assign(ctx, {
+    huaanworkSubagentRuns: registry,
+    agents: {
+      get: (id: string) =>
+        id === "nested-child" ? { session: { header: { parentSession: "nested-parent" } } } : undefined,
+    },
+    subagents: {
+      startActivation: async (): Promise<ActivationFixture> => {
+        throw new Error("this fixture has no activation");
+      },
+    },
+  });
+  applySkills(ctx as never);
+
+  // 模型自主创建的嵌套子代理:没有 Host runId(不在任何 activation 的 ALS 作用域里)。
+  emit("subagent/start", { runId: "upstream-nested", provider: "spawn", id: "nested-child", local: true });
+
+  assert.deepEqual(childrenOf("nested-parent"), ["nested-child"]);
+  assert.equal(registry.ownsChild("nested-child"), false);
+  assert.deepEqual(registry.snapshot("nested-parent").runs, []);
+});
+
+test("a nested activation inside an outer run shadows the host run id", async () => {
+  const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+  const { ctx, emit } = lifecycleContext();
+  const runId = registry.begin({ parentSessionId: "parent-1", kind: "legacy", label: "@outer" });
+  Object.assign(ctx, {
+    huaanworkSubagentRuns: registry,
+    subagents: {
+      // 模型自主的嵌套子代理走同一个被包装的入口;包装以 undefined 覆盖 ALS,
+      // 嵌套 start 因此不会绑定到外层 run。
+      async startActivation(spec: { label: string; childId: string }): Promise<ActivationFixture> {
+        if (spec.label === "@outer") {
+          await activateOf(ctx)({
+            provider: "spawn",
+            label: "@nested",
+            childId: "nested-child",
+            request: { prompt: [], parent: liveParent("child-1") },
+            delivery: "parent",
+          });
+          emit("subagent/start", { runId: "upstream-outer", provider: "spawn", id: spec.childId, local: true });
+        } else {
+          emit("subagent/start", { runId: "upstream-nested", provider: "spawn", id: spec.childId, local: true });
+        }
+        return {
+          childId: spec.childId,
+          result: new Promise(() => undefined),
+          dispose: async () => undefined,
+        };
+      },
+    },
+  });
+  applySkills(ctx as never);
+
+  await activateOf(ctx)({
+    provider: "spawn",
+    label: "@outer",
+    childId: "child-1",
+    request: { prompt: [], parent: liveParent("parent-1") },
+    delivery: "parent",
+    [HUAANWORK_SUBAGENT_RUN_ID]: runId,
+  });
+
+  assert.equal(registry.get(runId)?.upstreamRunId, "upstream-outer");
+  assert.equal(registry.get(runId)?.childId, "child-1");
+  assert.equal(registry.ownsChild("nested-child"), false);
+});
+
+test("a mismatched activation parent is disposed and rejected before any tool restrict", async () => {
+  const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+  const { ctx, emit } = lifecycleContext();
+  const runId = registry.begin({ parentSessionId: "parent-a", kind: "legacy", label: "@legacy" });
+  const childTools = createTools(["read", "glob"]);
+  const originalRestrict = childTools.restrict.bind(childTools);
+  let restrictCalls = 0;
+  childTools.restrict = (filter) => {
+    restrictCalls += 1;
+    return originalRestrict(filter);
+  };
+  const localAgent: Agent = {
+    id: "child-1",
+    ctx: { get: (name) => (name === "tools" ? childTools : undefined) },
+  };
+  let disposeCalls = 0;
+  Object.assign(ctx, {
+    huaanworkSubagentRuns: registry,
+    subagents: {
+      // 上游正常发布 activation:测试证明的是包装层 fail closed,不是上游拒绝。
+      startActivation: async (): Promise<ActivationFixture> => {
+        emit("subagent/start", { runId: "upstream-mismatch", provider: "spawn", id: "child-1", local: true });
+        return {
+          childId: "child-1",
+          localAgent,
+          result: new Promise(() => undefined),
+          dispose: async () => {
+            disposeCalls += 1;
+          },
+        };
+      },
+    },
+  });
+  applySkills(ctx as never);
+
+  await assert.rejects(
+    activateOf(ctx)({
+      provider: "spawn",
+      label: "@legacy",
+      childId: "child-1",
+      // 另一个 live Agent 作父会话:ALS/activation parent 都是 parent-b,registry 是 parent-a。
+      request: { prompt: [], parent: liveParent("parent-b") },
+      delivery: "parent",
+      // 带 legacy 请求 ⇒ 若校验晚于 restrict,restrictCalls 会大于 0。
+      [HUAANWORK_LEGACY_AGENT_REQUEST]: { name: "legacy", allow: ["read"], persona: "只读审查者" },
+      [HUAANWORK_SUBAGENT_RUN_ID]: runId,
+    }),
+    { message: "subagent activation parent mismatch" },
+  );
+
+  assert.equal(disposeCalls, 1);
+  assert.equal(restrictCalls, 0);
+  assert.deepEqual(childTools.visible.map((schema) => schema.name), ["read", "glob"]);
+  assert.equal(registry.get(runId)?.phase, "starting");
+  // 监听器在登记表 parent 与 activation parent 不一致时不绑定:run 的 identity 不变。
+  assert.equal(registry.get(runId)?.upstreamRunId, undefined);
+  assert.equal(registry.get(runId)?.childId, undefined);
+});
+
+test("a dispose failure never replaces the parent mismatch error", async () => {
+  const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
+  const { ctx } = lifecycleContext();
+  const runId = registry.begin({ parentSessionId: "parent-a", kind: "legacy", label: "@legacy" });
+  let disposeCalls = 0;
+  Object.assign(ctx, {
+    huaanworkSubagentRuns: registry,
+    subagents: {
+      startActivation: async (): Promise<ActivationFixture> => ({
+        childId: "child-1",
+        result: new Promise(() => undefined),
+        dispose: async () => {
+          disposeCalls += 1;
+          throw new Error("dispose failed");
+        },
+      }),
+    },
+  });
+  applySkills(ctx as never);
+
+  await assert.rejects(
+    activateOf(ctx)({
+      provider: "spawn",
+      label: "@legacy",
+      childId: "child-1",
+      request: { prompt: [], parent: liveParent("parent-b") },
+      delivery: "parent",
+      [HUAANWORK_SUBAGENT_RUN_ID]: runId,
+    }),
+    { message: "subagent activation parent mismatch" },
+  );
+  assert.equal(disposeCalls, 1);
 });

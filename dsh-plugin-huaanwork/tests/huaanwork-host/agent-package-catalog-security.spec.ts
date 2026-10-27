@@ -66,6 +66,7 @@ import type {
 import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
 import { sessionCancel, setAgentPackageActiveTurns } from '../../src/huaanwork-host/sessions.ts'
+import { createSubagentRunRegistry } from '../../src/huaanwork-host/subagent-runs.ts'
 
 /**
  * Task 10:撤销缓存、运行前复验与在途回合中止。
@@ -418,6 +419,7 @@ function makeTurnHarness(options: TurnHarnessOptions = {}): TurnHarness {
     huaanworkAttachments: emptyAttachments(),
     huaanworkAgentPackageRequest: { current: null },
     huaanworkPackageChildSessions: new Set<string>(),
+    huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
     subagents: {
       startActivation: async (spec: { childId?: string } = {}) => {
         activationStarts += 1

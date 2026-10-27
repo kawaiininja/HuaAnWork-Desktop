@@ -13,6 +13,12 @@ import {
   createAgentPackageHost,
 } from '../../src/huaanwork-host/agent-package/host.ts'
 import type { AgentPackageTurnRuntime } from '../../src/huaanwork-host/agent-package/types.ts'
+import { createSubagentRunRegistry } from '../../src/huaanwork-host/subagent-runs.ts'
+
+/** 每次 dispatch 都需要 run 登记表;这些用例只关心 runtime 收尾,事件直接丢弃。 */
+function newRunRegistry() {
+  return createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
+}
 
 /**
  * 应用退出收尾(最终评审 I2)。
@@ -101,6 +107,7 @@ describe('host runtime disposal', () => {
     const dispatched = await host.dispatch({
       ctx: {
         huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        huaanworkSubagentRuns: newRunRegistry(),
         subagents: {
           startActivation: async () => ({
             childId: 'child',
@@ -195,6 +202,7 @@ describe('host runtime disposal', () => {
     const dispatched = await host.dispatch({
       ctx: {
         huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        huaanworkSubagentRuns: newRunRegistry(),
         subagents: {
           startActivation: async () => ({
             childId: 'child',
@@ -301,6 +309,7 @@ describe('cleanup failure propagation', () => {
     await host.dispatch({
       ctx: {
         huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        huaanworkSubagentRuns: newRunRegistry(),
         subagents: { startActivation: async () => neverDisposingActivation() },
       } as never,
       sessionId: 'parent-session',
@@ -350,6 +359,7 @@ describe('cleanup failure propagation', () => {
       const dispatched = await host.dispatch({
         ctx: {
           huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+          huaanworkSubagentRuns: newRunRegistry(),
           subagents: {
             startActivation: async () => ({
               childId: 'child',
@@ -394,6 +404,7 @@ describe('cleanup failure propagation', () => {
     const dispatched = await host.dispatch({
       ctx: {
         huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        huaanworkSubagentRuns: newRunRegistry(),
         subagents: { startActivation: async () => neverDisposingActivation() },
       } as never,
       sessionId: 'parent-session',

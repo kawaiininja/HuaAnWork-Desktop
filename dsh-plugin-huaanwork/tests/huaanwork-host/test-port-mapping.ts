@@ -76,7 +76,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'loop.test.ts',
     title: '@agent persona catalog: bridged tokens, session.list single tab, and clean cancel',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:196',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:207',
   },
   {
     file: 'loop.test.ts',
@@ -142,7 +142,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'session.list filters sessions by project root',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:556',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:1137',
   },
   {
     file: 'automations-host.test.ts',
@@ -238,7 +238,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'stream network gate blocks public endpoints unless allow_network is on',
     label: '本任务补',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:680',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:1261',
   },
   {
     file: 'automations-host.test.ts',
@@ -376,6 +376,6 @@ export const testPortMapping: TestPortRow[] = [
     file: 'unified-channel.test.ts',
     title: 'startHost sweeps legacy chat-auto run sessions and leaves user chat sessions',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:689',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:1270',
   },
 ]

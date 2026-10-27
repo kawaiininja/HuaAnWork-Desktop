@@ -38,6 +38,7 @@ import {
 import AtAgentMenu from "./AtAgentMenu.tsx";
 import SlashSkillMenu from "./SlashSkillMenu.tsx";
 import SkillsView from "./SkillsView.tsx";
+import SubagentRunCard from "./SubagentRunCard.tsx";
 import {
   isReservedSlash,
   parseSlashInvoke,
@@ -45,6 +46,22 @@ import {
   slashTokenAt,
   type SkillInfo,
 } from "./logic/skillsLogic.ts";
+import type {
+  AgentPackageConfirmCard,
+  SubagentCancelResult,
+  SubagentRunProjection,
+  SubagentRunSnapshot,
+} from "./rpc-types.ts";
+import {
+  insertSubagentRunCard,
+  isSubagentRunActive,
+  parentTurnLine,
+  reduceSubagentRuns,
+  subagentNeedsStartTime,
+  type SubagentRunEvent,
+  type SubagentRunsState,
+  type SubagentRunView,
+} from "./logic/subagentRuns.ts";
 import {
   atAgents,
   atTokenAt,
@@ -90,7 +107,6 @@ import {
   type TreeNode,
 } from "./api.ts";
 import { createKeepAwakeDriver, shouldHoldKeepAwake } from "./logic/keepAwake.ts";
-import type { AgentPackageConfirmCard } from "./rpc-types.ts";
 import { missedBannerView, nextMissedCount } from "./logic/missedBanner.ts";
 import { parseSchedulePhrase } from "./logic/schedulePhrase.ts";
 import {
@@ -220,6 +236,7 @@ type ChatItem =
   | { id: number; kind: "input"; card: InputCard }
   | { id: number; kind: "attachment"; sourceText: string }
   | { id: number; kind: "agent-confirm"; card: AgentPackageConfirmCard }
+  | { id: number; kind: "subagent-run"; runId: string }
   | { id: number; kind: "note"; text: string };
 
 type SessionRow = {
@@ -263,6 +280,12 @@ export type RightTab = "preview" | "progress" | "files" | "diff";
 type AuthPhase = "unknown" | "needs-register" | "logged-out" | "logged-in";
 
 const SUGGESTIONS = ["修掉这个仓库里失败的测试", "解释这个仓库的整体结构", "把最近的改动整理成一次 commit"];
+
+/** 子代理 run 的初始客户端状态;reducer 只读入参,可安全共享。 */
+const INITIAL_SUBAGENT_RUNS: SubagentRunsState = { revision: 0, runs: new Map(), connection: "live" };
+
+/** snapshot 对账失败后只重试一次(设计 D6),间隔与 WS 重连首档退避同量级。 */
+const SUBAGENT_RECONCILE_RETRY_MS = 1_000;
 
 const ICON_PROPS = {
   viewBox: "0 0 16 16",
@@ -424,6 +447,16 @@ export default function App() {
     at: number;
   }>({ tabId: "", latest: "quiet", at: 0 });
   const [now, setNow] = useState(() => Date.now());
+  /** 子代理 run 的权威客户端投影(设计 D6–D8);UI 展开/确认态留在下方独立 state。 */
+  const [subagentRuns, setSubagentRuns] = useState<SubagentRunsState>(INITIAL_SUBAGENT_RUNS);
+  /** reducer 状态镜像:挂载期注册的事件闭包据此读取最新 run(取消确认、对账)。 */
+  const subagentRunsRef = useRef<SubagentRunsState>(INITIAL_SUBAGENT_RUNS);
+  /** 对账代际:断连与 ready 都推进它,迟到的 snapshot 应答据此丢弃(设计 D6)。 */
+  const reconcileEpochRef = useRef(0);
+  const [expandedByRunId, setExpandedByRunId] = useState<Record<string, boolean>>({});
+  const [confirmingRunId, setConfirmingRunId] = useState<string | null>(null);
+  const [cancelBusyByRunId, setCancelBusyByRunId] = useState<Record<string, boolean>>({});
+  const [cancelErrorByRunId, setCancelErrorByRunId] = useState<Record<string, string>>({});
   const turnTabRef = useRef<string | null>(null);
   const turnSessionRef = useRef<string | null>(null);
   /** 目标相位 + 每回合结论闸门；状态机本身在 logic/goalRound.ts，便于脱离界面单测。 */
@@ -544,8 +577,32 @@ export default function App() {
   );
   /** 运行对话标签的 live 判据按 runId（同一任务的旧标签不显示「停止」）。 */
   const runningRunIds = useMemo(() => new Set(runningRuns.keys()), [runningRuns]);
+  /** 任一父会话仍有非终态、非失效的 run 时共享 1 秒 tick 继续走(设计 D4/D6)。 */
+  const hasAnyActiveSubagentRun = useMemo(
+    () => [...subagentRuns.runs.values()].some(isSubagentRunActive),
+    [subagentRuns],
+  );
   const items = activeChat.items;
   const contentView = useMemo(() => contentItems(items), [items]);
+  /** 运行卡不进入内容视图,下标会与 `items` 错位;思考收尾判断按 id 取内容视图下标。 */
+  const contentIndexById = useMemo(
+    () => new Map(contentView.map((entry, index) => [entry.id, index] as const)),
+    [contentView],
+  );
+  /** 运行卡的渲染输入:共享 now 驱动全部卡片,UI 展开/确认/错误按 runId 另存。 */
+  const subagentChat: SubagentChatView = {
+    runs: subagentRuns.runs,
+    now,
+    frozenAt: subagentRuns.frozenAt,
+    expandedByRunId,
+    confirmingRunId,
+    cancelBusyByRunId,
+    cancelErrorByRunId,
+    onToggleExpanded: toggleSubagentExpanded,
+    onRequestCancel: requestCancelSubagent,
+    onConfirmCancel: (runId) => void confirmCancelSubagent(runId),
+    onDismissCancel: dismissCancelSubagent,
+  };
   /**
    * 右侧预览选中的附件项（规格 §5）：选择记在标签上；标签里没有附件项时
    * （如重建后日志未含该条）回落空占位，不显示下载。
@@ -562,11 +619,19 @@ export default function App() {
   const sessionFailed = activeChat.sessionFailed;
   /** 相位 → 展示决策；`stopped` 是中性终态，不再显示无响应与结束按钮。 */
   const hostNotice = hostLivenessNotice(hostPhase);
-  const showTurnLine = turnActive && turnPulse.tabId === activeChat.id;
-  const turnLine = turnStatus({
-    latest: turnPulse.latest,
-    runningTool: runningToolName(items),
-    quietMs: Math.max(0, now - turnPulse.at),
+  /** 当前 tab 的父会话是否有活跃运行卡(设计 D4:stale 与终态都不算活跃)。 */
+  const hasActiveChild = activeChat.sessionId !== undefined
+    && [...subagentRuns.runs.values()].some(
+      (run) => run.parentSessionId === activeChat.sessionId && isSubagentRunActive(run),
+    );
+  const showTurnLine = hasActiveChild || (turnActive && turnPulse.tabId === activeChat.id);
+  const turnLine = parentTurnLine({
+    hasActiveChild,
+    current: turnStatus({
+      latest: turnPulse.latest,
+      runningTool: runningToolName(items),
+      quietMs: Math.max(0, now - turnPulse.at),
+    }),
   });
   const slashToken = slashTokenAt(draft, slashCursor);
   const slashOpen = Boolean(slashToken && !isReservedSlash(slashToken.query) && !slashClosed);
@@ -1022,8 +1087,56 @@ export default function App() {
       if (!target) return;
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, sessionFailed: failed } : tab)));
     };
+    /**
+     * 子代理 run 事件只进 reducer 与运行卡,绝不进入父消息流(设计 D8 / §7)。
+     * 实时事件不传 `allowSnapshotFallback`:只有 `clientMessageId` 精确命中本 tab
+     * 某条用户消息时才挂卡,不按 active tab 或最后一个用户消息猜测归属。
+     */
+    const applySubagentEvent = (event: SubagentRunEvent) => {
+      setSubagentRuns((prev) => reduceSubagentRuns(prev, { type: "event", event }));
+      if (event.event === "subagent/run") {
+        const run = event.run;
+        setChatTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.sessionId !== run.parentSessionId) return tab;
+            const nextItems = insertSubagentRunCard(tab.items, {
+              runId: run.runId,
+              ...(run.clientMessageId === undefined ? {} : { clientMessageId: run.clientMessageId }),
+              allocateId: allocId,
+            });
+            return nextItems === tab.items ? tab : { ...tab, items: nextItems };
+          }),
+        );
+        return;
+      }
+      // 终态历史被淘汰:卡片从所有标签移除,该 run 的 UI 状态一并清掉。
+      const { runId } = event;
+      setChatTabs((prev) =>
+        prev.map((tab) => {
+          const nextItems = tab.items.filter((item) => item.kind !== "subagent-run" || item.runId !== runId);
+          return nextItems.length === tab.items.length ? tab : { ...tab, items: nextItems };
+        }),
+      );
+      setExpandedByRunId((prev) => withoutKey(prev, runId));
+      setCancelBusyByRunId((prev) => withoutKey(prev, runId));
+      setCancelErrorByRunId((prev) => withoutKey(prev, runId));
+      setConfirmingRunId((prev) => (prev === runId ? null : prev));
+    };
     const applyEvent = (event: RpcEvent) => {
       if (cancelled) return;
+      // 子代理事件在父消息流之前拦截:它们没有父会话的 token/tool 语义。
+      if (event.event === "subagent/run" || event.event === "subagent/run-remove") {
+        applySubagentEvent(event);
+        return;
+      }
+      // WS ready 后对所有已绑定父会话补拉 snapshot;ready 本身不解除冻结,
+      // 只有对账完成的 snapshot 才清 frozenAt(设计 D6/D7)。此步必须早于下方
+      // 所有早退闸门:sidecar/status 没有会话归属,后台自动化运行期间也照样对账,
+      // 否则断线重连后 run 卡会停在冻结态(计时冻结、终止禁用)直到下一次重连。
+      if (event.event === "sidecar/status" && event.ready) {
+        reconcileEpochRef.current += 1;
+        reconcileBoundSubagentRuns();
+      }
       if (event.event === "session/end" && isStopPending(stopPendingRef.current, event.sessionId)) {
         heldEndsRef.current.push(event);
         return;
@@ -1243,6 +1356,12 @@ export default function App() {
           if (cancelled) return;
           setSidecarDead(true);
           setTurnActive(false);
+          // WS 断开:run 卡保留最后已知归属并冻结计时,不把断连当作 run 失败;
+          // 迟到的对账应答由 epoch 丢弃,冻结只由下一次 snapshot 对账解除(设计 D7)。
+          if (!payload.ready) {
+            reconcileEpochRef.current += 1;
+            setSubagentRuns((prev) => reduceSubagentRuns(prev, { type: "disconnect", at: Date.now() }));
+          }
           // 执行进程没了，所有在途运行都不再可能回报 run-end；不清会让任务行、
           // 运行对话与工作区切换永久卡在「运行中」。
           setRunningRuns((prev) => (prev.size === 0 ? prev : new Map()));
@@ -1416,10 +1535,20 @@ export default function App() {
   }, [chatTabs]);
 
   useEffect(() => {
-    if (!turnActive) return;
+    subagentRunsRef.current = subagentRuns;
+  }, [subagentRuns]);
+
+  /** 切 tab 取消确认态:确认对象可能已不在当前标签里(设计 D17 的 UI 边界)。 */
+  useEffect(() => {
+    setConfirmingRunId((prev) => (prev === null ? prev : null));
+  }, [activeTab]);
+
+  useEffect(() => {
+    // 分享同一秒表:父回合或任一子代理 run 活跃时都走;每张运行卡不得自建 interval。
+    if (!turnActive && !hasAnyActiveSubagentRun) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [turnActive]);
+  }, [turnActive, hasAnyActiveSubagentRun]);
 
   useEffect(() => {
     const bridge = hostLivenessBridge();
@@ -1576,6 +1705,117 @@ export default function App() {
     const id = nextId.current;
     nextId.current += 1;
     return id;
+  }
+
+  /**
+   * snapshot 对账(设计 D6):补拉父会话的权威 run 清单。
+   *
+   * - 请求前捕获对账代际,断连或再次 ready 后到达的应答直接丢弃;
+   * - 成功才 dispatch `snapshot`(唯一能清除断连冻结的动作),并为该 tab 里
+   *   尚无卡片的 run 补卡;快照路径允许回退到该 tab 最后一条用户消息;
+   * - 失败只在同一代际内重试一次,之后留给下一次 ready 或发送触发。
+   */
+  async function reconcileSubagentRuns(
+    chatId: string,
+    parentSessionId: string,
+    allowRetry = true,
+  ): Promise<void> {
+    const epoch = reconcileEpochRef.current;
+    let snapshot: SubagentRunSnapshot;
+    try {
+      snapshot = await rpcCall<SubagentRunSnapshot>("subagent.list", { parentSessionId });
+    } catch {
+      if (!allowRetry || epoch !== reconcileEpochRef.current) return;
+      setTimeout(() => {
+        if (epoch !== reconcileEpochRef.current) return;
+        void reconcileSubagentRuns(chatId, parentSessionId, false);
+      }, SUBAGENT_RECONCILE_RETRY_MS);
+      return;
+    }
+    if (epoch !== reconcileEpochRef.current) return;
+    setSubagentRuns((prev) => reduceSubagentRuns(prev, { type: "snapshot", snapshot, at: Date.now() }));
+    anchorSnapshotSubagentCards(chatId, parentSessionId, snapshot.runs);
+  }
+
+  /**
+   * 为快照里尚无卡片的 run 补卡。只改 `chatId` 指定的标签(绝不按 active tab
+   * 归属),且只接受属于该父会话的 run;回退锚点由 `allowSnapshotFallback` 限定。
+   */
+  function anchorSnapshotSubagentCards(
+    chatId: string,
+    parentSessionId: string,
+    runs: readonly SubagentRunProjection[],
+  ): void {
+    if (!Array.isArray(runs) || runs.length === 0) return;
+    setChatTabs((prev) =>
+      prev.map((tab) => {
+        if (tab.id !== chatId) return tab;
+        let nextItems = tab.items;
+        for (const run of runs) {
+          if (run.parentSessionId !== parentSessionId) continue;
+          nextItems = insertSubagentRunCard(nextItems, {
+            runId: run.runId,
+            ...(run.clientMessageId === undefined ? {} : { clientMessageId: run.clientMessageId }),
+            allowSnapshotFallback: true,
+            allocateId: allocId,
+          });
+        }
+        return nextItems === tab.items ? tab : { ...tab, items: nextItems };
+      }),
+    );
+  }
+
+  /** WS ready 后对每个绑定了会话的标签各对账一次;同一会话只跑一次。 */
+  function reconcileBoundSubagentRuns(): void {
+    const seen = new Set<string>();
+    for (const tab of chatTabsRef.current) {
+      const sessionId = tab.sessionId;
+      if (!sessionId || seen.has(sessionId)) continue;
+      seen.add(sessionId);
+      void reconcileSubagentRuns(tab.id, sessionId);
+    }
+  }
+
+  /** 运行卡展开态只存 runId → 布尔,不进 reducer run 对象(设计 D26)。 */
+  function toggleSubagentExpanded(runId: string): void {
+    setExpandedByRunId((prev) => ({ ...prev, [runId]: prev[runId] !== true }));
+  }
+
+  /** 点「终止」只打开卡内二次确认,不发送任何 RPC。 */
+  function requestCancelSubagent(runId: string): void {
+    setConfirmingRunId(runId);
+    setCancelErrorByRunId((prev) => withoutKey(prev, runId));
+  }
+
+  function dismissCancelSubagent(runId: string): void {
+    setConfirmingRunId((prev) => (prev === runId ? null : prev));
+  }
+
+  /**
+   * 定向终止(设计 D17 / B-05):只对仍活跃的 run 调 `subagent.cancel`,
+   * 不碰父回合的 `turnActive` / 停止票据;失败写回该卡的错误行。
+   * 确认期间 run 已终态或失效时关闭确认且零 RPC。
+   */
+  async function confirmCancelSubagent(runId: string): Promise<void> {
+    setConfirmingRunId((prev) => (prev === runId ? null : prev));
+    const run = subagentRunsRef.current.runs.get(runId);
+    if (!run || !isSubagentRunActive(run)) {
+      setCancelErrorByRunId((prev) => withoutKey(prev, runId));
+      return;
+    }
+    setCancelBusyByRunId((prev) => ({ ...prev, [runId]: true }));
+    setCancelErrorByRunId((prev) => withoutKey(prev, runId));
+    try {
+      await rpcCall<SubagentCancelResult>("subagent.cancel", {
+        parentSessionId: run.parentSessionId,
+        runId,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCancelErrorByRunId((prev) => ({ ...prev, [runId]: message }));
+    } finally {
+      setCancelBusyByRunId((prev) => withoutKey(prev, runId));
+    }
   }
 
   /** 新建项目流程：Tauri 选文件夹 → 命名模态 → 创建并打开。 */
@@ -1917,11 +2157,19 @@ export default function App() {
       setTurnActive(true);
       stopping.current = false;
       try {
-        await rpcCall("session.send", {
+        const sent = await rpcCall<{ queued: true; sessionId: string }>("session.send", {
           text: invokedAt ? invokedAt.remainder : invokedSkill ? invokedSkill.remainder : text,
           ...(sessionId ? { sessionId } : {}),
-          ...(invokedAt ? { at: { name: invokedAt.name } } : invokedSkill ? { skill: invokedSkill.name } : {}),
+          ...(invokedAt
+            ? { at: { name: invokedAt.name, clientMessageId: String(userMsg.id) } }
+            : invokedSkill
+              ? { skill: invokedSkill.name }
+              : {}),
         });
+        // 对账以应答的 sessionId 为准:本地 mint 的 id 可能不是 sidecar 实际使用的会话。
+        if (typeof sent.sessionId === "string" && sent.sessionId) {
+          void reconcileSubagentRuns(chatId, sent.sessionId);
+        }
       } catch (error) {
         setTurnActive(false);
         if (stopping.current) {
@@ -2627,12 +2875,17 @@ export default function App() {
                     key={item.id}
                     item={item}
                     blocked={blocked}
+                    subagent={subagentChat}
                     onAnswer={answer}
                     onInput={answerInput}
                     onThinkingToggle={toggleThinking}
                     onOpenAttachment={handleOpenAttachment}
                     reasoning={item.kind === "assistant" ? (thinkingBefore(items, index)?.thought ?? "") : ""}
-                    hasAssistantText={item.kind === "thinking" ? hasAssistantTextAfter(contentView, index) : false}
+                    hasAssistantText={
+                      item.kind === "thinking"
+                        ? hasAssistantTextAfter(contentView, contentIndexById.get(item.id) ?? -1)
+                        : false
+                    }
                   />
                 ))}
                 {showTurnLine ? (
@@ -3335,23 +3588,41 @@ function appendToken(items: ChatItem[], text: string): ChatItem[] {
   return [...items, { id: (last?.id ?? 0) + 1, kind: "assistant", text }];
 }
 
-type ContentChatItem = Exclude<ChatItem, { kind: "attachment" } | { kind: "agent-confirm" }>;
+type ContentChatItem = Exclude<
+  ChatItem,
+  { kind: "attachment" } | { kind: "agent-confirm" } | { kind: "subagent-run" }
+>;
+
+/** 删除记录里的一个键;原本不存在时返回入参,React 状态可跳过更新。 */
+function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
 
 /**
  * 回合核对与思考折叠用的对话内容视图：结果附件是折叠后的 JSON 渲染项，
  * 在内容视图里等价于一整段助手正文（同 id、同位置，正文取 sourceText）。
- * 创建确认卡映射成空 note——它不参与文件/命令核对，也不结束思考；保留占位
- * 是为了让 `thinkingBefore` / `hasAssistantTextAfter` 的原始下标继续成立。
+ * 创建确认卡映射成空 note——它不参与文件/命令核对，也不结束思考；用占位而不是
+ * 删除，是为了让其余条目的相对顺序与 `thinkingBefore` 的 items 下标保持稳定。
+ * 子代理运行卡没有内容和回合语义，直接从内容视图里剔除；`hasAssistantTextAfter`
+ * 因此改用 id 映射后的内容视图下标（见调用方），不能再直接用 `items` 下标。
  *
  * 这直接决定思考面板的收尾状态：`hasAssistantTextAfter` 只认 assistant，
  * 若附件映射成空 note，运行结束后那条思考仍会展开并显示「进行中」。
  * 回合核对只读 user / tool / plan-review，不读 assistant，因此不受影响。
  */
 function contentItems(items: readonly ChatItem[]): ContentChatItem[] {
-  return items.map(contentItem);
+  const visible: ContentChatItem[] = [];
+  for (const item of items) {
+    if (item.kind === "subagent-run") continue;
+    visible.push(contentItem(item));
+  }
+  return visible;
 }
 
-function contentItem(item: ChatItem): ContentChatItem {
+function contentItem(item: Exclude<ChatItem, { kind: "subagent-run" }>): ContentChatItem {
   if (item.kind === "agent-confirm") return { id: item.id, kind: "note", text: "" };
   return item.kind === "attachment" ? attachmentAsAssistant(item) : item;
 }
@@ -3381,9 +3652,25 @@ function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId
   return [...items, created];
 }
 
+/** 运行卡渲染所需的 reducer 投影与 App 侧 UI 状态；UI 状态不写进 reducer run 对象。 */
+type SubagentChatView = {
+  runs: ReadonlyMap<string, SubagentRunView>;
+  now: number;
+  frozenAt?: number;
+  expandedByRunId: Readonly<Record<string, boolean>>;
+  confirmingRunId: string | null;
+  cancelBusyByRunId: Readonly<Record<string, boolean>>;
+  cancelErrorByRunId: Readonly<Record<string, string>>;
+  onToggleExpanded(runId: string): void;
+  onRequestCancel(runId: string): void;
+  onConfirmCancel(runId: string): void;
+  onDismissCancel(runId: string): void;
+};
+
 function ChatRow({
   item,
   blocked,
+  subagent,
   onAnswer,
   onInput,
   onThinkingToggle,
@@ -3393,6 +3680,7 @@ function ChatRow({
 }: {
   item: ChatItem;
   blocked: boolean;
+  subagent: SubagentChatView;
   onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
   onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
   onThinkingToggle?: (itemId: number, userToggled: "expand" | "collapse") => void;
@@ -3400,6 +3688,30 @@ function ChatRow({
   reasoning?: string;
   hasAssistantText?: boolean;
 }) {
+  if (item.kind === "subagent-run") {
+    // 卡片只读 reducer 投影；run 已被移除时渲染为空，不保留过期卡片。
+    const run = subagent.runs.get(item.runId);
+    if (!run) return null;
+    const sameParentRuns = [...subagent.runs.values()].filter(
+      (other) => other.parentSessionId === run.parentSessionId,
+    );
+    return (
+      <SubagentRunCard
+        run={run}
+        now={subagent.now}
+        frozenAt={subagent.frozenAt}
+        duplicateLabel={subagentNeedsStartTime(run, sameParentRuns)}
+        expanded={subagent.expandedByRunId[run.runId] === true}
+        confirming={subagent.confirmingRunId === run.runId}
+        cancelBusy={subagent.cancelBusyByRunId[run.runId] === true || run.phase === "stopping"}
+        cancelError={subagent.cancelErrorByRunId[run.runId]}
+        onToggleExpanded={subagent.onToggleExpanded}
+        onRequestCancel={subagent.onRequestCancel}
+        onConfirmCancel={subagent.onConfirmCancel}
+        onDismissCancel={subagent.onDismissCancel}
+      />
+    );
+  }
   if (item.kind === "user") return <div className="bubble user">{item.text}</div>;
   if (item.kind === "thinking") {
     if (!shouldRenderThinking(item.thought)) return null;

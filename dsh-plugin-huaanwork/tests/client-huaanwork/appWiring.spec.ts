@@ -358,3 +358,36 @@ test("folded attachments use the assistant mapping and deleted runs stay suppres
   assert.match(APP_SOURCE, /sessionsToSuppressAfterDelete\(/);
   assert.match(APP_SOURCE, /suppressedRunSessionIdsRef\.current,\s*\);/);
 });
+
+test("the ready reconcile runs before the sidecar event gates so every reconnect unfreezes runs", () => {
+  // 契约钉:sidecar/status 不携带 sessionId,而自动化闸门对 undefined 判定为非用户会话
+  // 并早退。若 ready 对账留在闸门之后,后台自动化运行期间的重连永远到不了 snapshot:
+  // 卡片停在「连接中断，状态可能滞后」,计时冻结、终止禁用,直到下一次重连才恢复,
+  // 手动发送也被自动化挡住,无法自救。
+  const handlerAt = APP_SOURCE.indexOf("const applyEvent = (event: RpcEvent) => {");
+  const handlerEnd = APP_SOURCE.indexOf("applySidecarEventRef.current = applyEvent;", handlerAt);
+  assert.ok(handlerAt >= 0 && handlerEnd > handlerAt, "the sidecar event handler is still a named applyEvent closure");
+  const handler = APP_SOURCE.slice(handlerAt, handlerEnd);
+
+  const readyAt = handler.indexOf('if (event.event === "sidecar/status" && event.ready) {');
+  assert.ok(readyAt >= 0, "the handler still reacts to sidecar/status ready");
+  const reconcileAt = handler.indexOf("reconcileBoundSubagentRuns()", readyAt);
+  assert.ok(reconcileAt > readyAt, "sidecar/status ready still reconciles every bound tab");
+  assert.equal(
+    (handler.match(/reconcileBoundSubagentRuns\(\)/g) ?? []).length,
+    1,
+    "exactly one ready reconcile call site (a second copy left after the gates would resurrect the freeze)",
+  );
+
+  const gateAt = handler.indexOf(
+    "if (automationActiveRef.current && !isUserSessionId(eventSessionId) && !boundTab) return;",
+  );
+  assert.ok(gateAt >= 0, "the automation route gate is still present");
+  assert.ok(
+    reconcileAt < gateAt,
+    "reconcileBoundSubagentRuns() must run before the automation gate: sidecar/status has no sessionId, "
+      + "so the gate returns early while a background automation runs and the post-reconnect reconcile is "
+      + "unreachable — cards keep 连接中断，状态可能滞后, timers stay frozen and 终止 stays disabled "
+      + "until the next reconnect (a manual send cannot clear it either)",
+  );
+});

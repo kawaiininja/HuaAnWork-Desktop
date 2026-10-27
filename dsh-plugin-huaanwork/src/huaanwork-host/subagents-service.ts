@@ -62,6 +62,15 @@ export type SubagentActivationHandle = {
  */
 export const HUAANWORK_LEGACY_AGENT_REQUEST: unique symbol = Symbol.for('huaanwork.legacy-agent-request')
 
+/**
+ * 调用方 legacy `@agent` 请求的 Host run id。
+ *
+ * 与 legacy 请求标记同形:`Symbol.for` 键不可枚举,provider 的字段读取看不到,
+ * 但 bridge/guardrail 在 `startActivation` 作用域里能按本次调用归属 run,
+ * 不必按 slug、显示名或「最近一次发送」猜。
+ */
+export const HUAANWORK_SUBAGENT_RUN_ID: unique symbol = Symbol.for('huaanwork.subagent-run-id')
+
 /** 一次 legacy `@agent` activation 的请求:只收窄子会话工具,不挂包运行时。 */
 export type LegacyAgentRequest = {
   name: string
@@ -72,6 +81,7 @@ export type LegacyAgentRequest = {
 /** 带调用级 legacy 标记的 activation spec;标记只由 `agent-invoke.ts` 的 legacy 分支写入。 */
 export type LegacyActivationSpec = SubagentActivationSpec & {
   [HUAANWORK_LEGACY_AGENT_REQUEST]?: LegacyAgentRequest
+  [HUAANWORK_SUBAGENT_RUN_ID]?: string
 }
 
 /**
@@ -85,6 +95,18 @@ export function legacyAgentRequestOf(spec: unknown): LegacyAgentRequest | undefi
   return (spec as { [HUAANWORK_LEGACY_AGENT_REQUEST]?: LegacyAgentRequest })[
     HUAANWORK_LEGACY_AGENT_REQUEST
   ]
+}
+
+/**
+ * 读取 activation spec 上的 Host run id。
+ *
+ * @param spec — `startActivation` 的第一个实参
+ * @returns 本次调用登记的 run id;spec 未带标记或值不是非空字符串时为 `undefined`
+ */
+export function subagentRunIdOf(spec: unknown): string | undefined {
+  if (typeof spec !== 'object' || spec === null) return undefined
+  const runId = (spec as { [HUAANWORK_SUBAGENT_RUN_ID]?: unknown })[HUAANWORK_SUBAGENT_RUN_ID]
+  return typeof runId === 'string' && runId.length > 0 ? runId : undefined
 }
 
 /** 可用的 `subagents` 服务面:至少一个启动入口可调用。 */

@@ -17,6 +17,7 @@ import { parseAgentPackageManifest } from '../../src/huaanwork-host/agent-packag
 import {
   createAgentPackageActiveTurnRegistry,
   createAgentPackageHost,
+  type AgentPackageHost,
 } from '../../src/huaanwork-host/agent-package/host.ts'
 import { readAgentPackageState } from '../../src/huaanwork-host/agent-package/store.ts'
 import {
@@ -34,6 +35,7 @@ import {
   stopAgentPackageProcesses,
   stopAllAgentPackageProcesses,
   type AgentPackageSandbox,
+  type StartAgentPackageProcessesOptions,
 } from '../../src/huaanwork-host/agent-package/runtime.ts'
 import type {
   AgentPackageManifest,
@@ -41,6 +43,14 @@ import type {
   AgentPackageTurnRuntime,
 } from '../../src/huaanwork-host/agent-package/types.ts'
 import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
+import {
+  createSubagentRunRegistry,
+  type SubagentRunRegistry,
+} from '../../src/huaanwork-host/subagent-runs.ts'
+import type {
+  SubagentActivationHandle,
+  SubagentActivationSpec,
+} from '../../src/huaanwork-host/subagents-service.ts'
 
 const FIXTURE_DIR = join(import.meta.dirname, '..', 'fixtures', 'agent-package')
 const SANDBOX_UNAVAILABLE_MESSAGE = '当前系统无法启动沙箱，智能体未运行'
@@ -715,6 +725,7 @@ describe('agent package turn cleanup', () => {
       ctx: {
         get: (name: string) => (name === 'sandbox' ? passthroughSandbox : undefined),
         huaanworkWorkspaceRoot: { current: workspaceRoot },
+        huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
         subagents: {
           startActivation: async () => ({
             childId: 'child',
@@ -770,6 +781,7 @@ describe('agent package turn cleanup', () => {
       huaanworkAttachments: attachments,
       huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
       huaanworkAgentPackageRequest: { current: null },
+      huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async () => ({
           childId: 'child',
@@ -851,6 +863,7 @@ describe('agent package turn cleanup', () => {
       huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
       huaanworkAgentPackageRequest: { current: null },
       huaanworkPackageChildSessions: childSessions,
+      huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async () => ({
           childId: 'child',
@@ -904,7 +917,14 @@ describe('agent package turn cleanup', () => {
 
     expect(pkg?.broken?.reason).toContain('tools/http/server.mjs 缺失')
     await expect(
-      host.dispatch({ ctx: {} as never, sessionId: 'parent-session', pkg: pkg!, remainder: '写周报' }),
+      host.dispatch({
+        ctx: {
+          huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
+        } as never,
+        sessionId: 'parent-session',
+        pkg: pkg!,
+        remainder: '写周报',
+      }),
     ).rejects.toThrow(/已损坏.*tools\/http\/server\.mjs 缺失/)
   })
 })
@@ -1102,6 +1122,7 @@ describe('agent package catalog damage', () => {
       host.dispatch({
         ctx: {
           huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
+          huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
           subagents: {
             startActivation: async () => ({
               childId: 'child',
@@ -1120,5 +1141,667 @@ describe('agent package catalog damage', () => {
     // 损坏包仍允许关闭(移除/重装才是出路)。
     host.setEnabled(CATALOG_SLUG, false)
     expect(readAgentPackageState(profileDir)[`catalog:${CATALOG_SLUG}`]?.enabled).toBe(false)
+  })
+})
+
+describe('agent package subagent run projection', () => {
+  const MINIMAL_MANIFEST = {
+    schemaVersion: 1,
+    slug: 'weekly-report',
+    displayName: '周报助手',
+    description: '把一周工作整理成周报',
+    version: '1.0.0',
+    draftId: 'draft-run',
+    createdAt: '2026-10-26T00:00:00.000Z',
+    updatedAt: '2026-10-26T00:00:00.000Z',
+    persona: 'persona.md',
+    skill: null,
+    tools: { mode: 'none' },
+    allowSkills: [],
+  } as const
+
+  /** 最小可运行本地包:无工具/无技能,运行链只走 persona 与子代理。 */
+  function installRunPackage(enabled = true): string {
+    const profileDir = makeRoot('agent-package-profile-')
+    const packageDir = join(profileDir, 'agents', 'weekly-report')
+    mkdirSync(packageDir, { recursive: true })
+    writeFileSync(join(packageDir, 'agent.json'), `${JSON.stringify(MINIMAL_MANIFEST, null, 2)}\n`, 'utf8')
+    writeFileSync(join(packageDir, 'persona.md'), '你是周报助手。', 'utf8')
+    writeFileSync(
+      join(profileDir, 'agents-state.json'),
+      JSON.stringify({ 'local:weekly-report': { source: 'local', enabled, installedVersion: '1.0.0' } }),
+      'utf8',
+    )
+    return profileDir
+  }
+
+  type Deferred<T> = {
+    promise: Promise<T>
+    resolve: (value: T) => void
+    reject: (error: unknown) => void
+  }
+
+  function deferred<T>(): Deferred<T> {
+    let resolve: (value: T) => void = () => undefined
+    let reject: (error: unknown) => void = () => undefined
+    const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise
+      reject = rejectPromise
+    })
+    return { promise, resolve, reject }
+  }
+
+  /** 跨受控 Promise 链的宏任务等待(真实 timers,无文件 I/O)。 */
+  async function waitForCondition(condition: () => boolean, label: string, timeoutMs = 1_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!condition()) {
+      if (Date.now() > deadline) throw new Error(`等待超时:${label}`)
+      await delay(5)
+    }
+  }
+
+  /** 只跨受控 fixture 的 Promise 链:微任务轮询即可。 */
+  async function flushMicrotasks(condition: () => boolean, attempts = 100): Promise<void> {
+    for (let attempt = 0; attempt < attempts && !condition(); attempt += 1) await Promise.resolve()
+  }
+
+  type RunHarnessOptions = {
+    enabled?: boolean
+    cleanupTimeoutMs?: number
+    createRuntime?: (start: StartAgentPackageProcessesOptions) => Promise<AgentPackageTurnRuntime>
+    stopRuntime?: (runtime: AgentPackageTurnRuntime) => Promise<void>
+    startActivation?: (spec: SubagentActivationSpec) => Promise<SubagentActivationHandle>
+  }
+
+  type RunHarness = {
+    profileDir: string
+    runs: SubagentRunRegistry
+    ctx: Record<string, unknown>
+    host: ReturnType<typeof createAgentPackageHost>
+    dispatch: (
+      sessionId: string,
+      extra?: { clientMessageId?: string },
+    ) => Promise<Awaited<ReturnType<AgentPackageHost['dispatch']>>>
+  }
+
+  function runHarness(options: RunHarnessOptions = {}): RunHarness {
+    const profileDir = installRunPackage(options.enabled ?? true)
+    const runs = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
+    const ctx: Record<string, unknown> = {
+      get: () => undefined,
+      huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+      huaanworkAgentPackageRequest: { current: null },
+      huaanworkSubagentRuns: runs,
+      subagents: {
+        startActivation:
+          options.startActivation ??
+          (async (spec: SubagentActivationSpec) => ({
+            childId: spec.childId ?? 'child',
+            result: Promise.resolve({ stopReason: 'completed' }),
+            dispose: async () => undefined,
+          })),
+      },
+    }
+    const host = createAgentPackageHost({
+      profileDir,
+      takenSlugs: () => [],
+      ...(options.cleanupTimeoutMs === undefined ? {} : { cleanupTimeoutMs: options.cleanupTimeoutMs }),
+      createRuntime:
+        options.createRuntime ??
+        (async (start) => ({
+          slug: start.manifest.slug,
+          packageDir: start.packageDir,
+          workspaceRoot: start.workspaceRoot,
+          skillScripts: [],
+          runSkillScript: async () => ({ text: '' }),
+        })),
+      stopRuntime: options.stopRuntime ?? (async () => undefined),
+    })
+    const dispatch = async (sessionId: string, extra: { clientMessageId?: string } = {}) => {
+      const pkg = await host.findInvocable('weekly-report')
+      if (pkg === undefined) throw new Error('fixture package missing')
+      return host.dispatch({
+        ctx: ctx as never,
+        sessionId,
+        pkg,
+        remainder: '写一份周报',
+        resolveParent: async () => ({ id: 'parent-agent' }),
+        ...extra,
+      })
+    }
+    return { profileDir, runs, ctx, host, dispatch }
+  }
+
+  async function firstRunId(runs: SubagentRunRegistry, sessionId: string): Promise<string> {
+    let runId = ''
+    await waitForCondition(() => {
+      runId = runs.snapshot(sessionId).runs[0]?.runId ?? ''
+      return runId !== ''
+    }, `run for ${sessionId}`)
+    return runId
+  }
+
+  function runtimeFor(start: StartAgentPackageProcessesOptions, label: string): AgentPackageTurnRuntime {
+    return {
+      slug: start.manifest.slug,
+      packageDir: start.packageDir,
+      workspaceRoot: label,
+      skillScripts: [],
+      runSkillScript: async () => ({ text: '' }),
+    }
+  }
+
+  test('one package dispatch projects exactly one run with version, message id, and request run id', async () => {
+    const harness = runHarness()
+    const dispatched = await harness.dispatch('parent-session', { clientMessageId: 'msg-1' })
+
+    const runs = harness.runs.snapshot('parent-session').runs
+    expect(runs).toHaveLength(1)
+    const run = runs[0]!
+    expect(run.kind).toBe('package')
+    expect(run.label).toBe('@weekly-report')
+    expect(run.packageVersion).toBe('1.0.0')
+    expect(run.clientMessageId).toBe('msg-1')
+    const request = harness.ctx.huaanworkAgentPackageRequest as {
+      current: { runId: string; childId: string } | null
+    }
+    expect(request.current?.runId).toBe(run.runId)
+    expect(run.childId).toBe(request.current?.childId)
+
+    await dispatched.afterIdle()
+    const settled = harness.runs.get(run.runId)!
+    expect(settled.phase).toBe('completed')
+    expect(settled.cleanupWarnings).toEqual([])
+    expect(settled.cleanupBudgetMs).toBeUndefined()
+  })
+
+  test('a disabled package fails the run instead of leaving it starting', async () => {
+    const harness = runHarness({ enabled: false })
+    await expect(harness.dispatch('parent-session')).rejects.toThrow('智能体「weekly-report」未启用或不存在')
+
+    const runs = harness.runs.snapshot('parent-session').runs
+    expect(runs).toHaveLength(1)
+    expect(runs[0]!.phase).toBe('failed')
+    expect(runs[0]!.failure).toContain('未启用或不存在')
+  })
+
+  test('dispatch fails loudly when the run registry was not injected', async () => {
+    const harness = runHarness()
+    const ctx = { ...harness.ctx }
+    delete ctx.huaanworkSubagentRuns
+    const pkg = await harness.host.findInvocable('weekly-report')
+    await expect(
+      harness.host.dispatch({
+        ctx: ctx as never,
+        sessionId: 'parent-session',
+        pkg: pkg!,
+        remainder: '写一份周报',
+        resolveParent: async () => ({ id: 'parent-agent' }),
+      }),
+    ).rejects.toThrow(/subagent run registry is not initialized/)
+  })
+
+  test('cancelling during createRuntime stops the selected late runtime only', async () => {
+    const gateA = deferred<AgentPackageTurnRuntime>()
+    const gateB = deferred<AgentPackageTurnRuntime>()
+    const createStartedA = deferred<void>()
+    const createStartedB = deferred<void>()
+    const stopsA: string[] = []
+    const stopsB: string[] = []
+    const first = runHarness({
+      createRuntime: (start) => {
+        createStartedA.resolve()
+        return gateA.promise.then((runtime) => runtime ?? runtimeFor(start, 'runtime-a'))
+      },
+      stopRuntime: async (runtime) => {
+        stopsA.push(runtime.workspaceRoot)
+      },
+    })
+    const second = runHarness({
+      createRuntime: (start) => {
+        createStartedB.resolve()
+        return gateB.promise.then((runtime) => runtime ?? runtimeFor(start, 'runtime-b'))
+      },
+      stopRuntime: async (runtime) => {
+        stopsB.push(runtime.workspaceRoot)
+      },
+    })
+
+    const dispatchA = first.dispatch('session-a')
+    void dispatchA.catch(() => undefined)
+    const runA = await firstRunId(first.runs, 'session-a')
+    await createStartedA.promise
+    const dispatchB = second.dispatch('session-b')
+    const runB = await firstRunId(second.runs, 'session-b')
+    await createStartedB.promise
+
+    // createRuntime 仍在途时取消:晚到的 runtime 必须被停,回合以取消结束。
+    expect((await first.runs.requestCancel('session-a', runA)).status).toBe('accepted')
+    expect(first.runs.get(runA)?.phase).toBe('stopping')
+    gateA.resolve(undefined as never)
+    await expect(dispatchA).rejects.toThrow(/回合已取消/)
+    expect(stopsA).toHaveLength(1)
+    expect(first.runs.get(runA)?.phase).toBe('stopped')
+
+    // 兄弟 run 完全不受影响:它仍在启动中,进程从未被停。
+    expect(second.runs.get(runB)?.phase).toBe('starting')
+    expect(stopsB).toHaveLength(0)
+
+    gateB.resolve(undefined as never)
+    const dispatchedB = await dispatchB
+    await dispatchedB.afterIdle()
+    expect(second.runs.get(runB)?.phase).toBe('completed')
+    expect(stopsB).toHaveLength(1)
+  })
+
+  test('cancelling during startActivation disposes the selected late activation only', async () => {
+    const activationA = deferred<SubagentActivationHandle>()
+    const activationB = deferred<SubagentActivationHandle>()
+    const activationStartedA = deferred<void>()
+    const activationStartedB = deferred<void>()
+    const disposalsA: string[] = []
+    const disposalsB: string[] = []
+    const stopsA: string[] = []
+    const stopsB: string[] = []
+    const first = runHarness({
+      createRuntime: async (start) => runtimeFor(start, 'runtime-a'),
+      stopRuntime: async (runtime) => {
+        stopsA.push(runtime.workspaceRoot)
+      },
+      startActivation: () => {
+        activationStartedA.resolve()
+        return activationA.promise
+      },
+    })
+    const second = runHarness({
+      createRuntime: async (start) => runtimeFor(start, 'runtime-b'),
+      stopRuntime: async (runtime) => {
+        stopsB.push(runtime.workspaceRoot)
+      },
+      startActivation: () => {
+        activationStartedB.resolve()
+        return activationB.promise
+      },
+    })
+
+    const dispatchA = first.dispatch('session-a')
+    void dispatchA.catch(() => undefined)
+    const runA = await firstRunId(first.runs, 'session-a')
+    await activationStartedA.promise
+    const dispatchB = second.dispatch('session-b')
+    const runB = await firstRunId(second.runs, 'session-b')
+    await activationStartedB.promise
+
+    // startActivation 仍在途时取消:晚到的 activation 必须 dispose,不得继续运行。
+    expect((await first.runs.requestCancel('session-a', runA)).status).toBe('accepted')
+    expect(first.runs.get(runA)?.phase).toBe('stopping')
+    activationA.resolve({
+      childId: 'child-a',
+      result: new Promise(() => undefined),
+      dispose: async () => {
+        disposalsA.push('child-a')
+      },
+    })
+    await expect(dispatchA).rejects.toThrow(/回合已取消/)
+    expect(disposalsA).toEqual(['child-a'])
+    expect(stopsA).toHaveLength(1)
+    expect(first.runs.get(runA)?.phase).toBe('stopped')
+
+    expect(second.runs.get(runB)?.phase).toBe('starting')
+    expect(disposalsB).toHaveLength(0)
+    expect(stopsB).toHaveLength(0)
+
+    activationB.resolve({
+      childId: 'child-b',
+      result: Promise.resolve({ stopReason: 'completed' }),
+      dispose: async () => {
+        disposalsB.push('child-b')
+      },
+    })
+    const dispatchedB = await dispatchB
+    await dispatchedB.afterIdle()
+    expect(disposalsB).toEqual(['child-b'])
+    expect(second.runs.get(runB)?.phase).toBe('completed')
+  })
+
+  test('a deferred runtime stop keeps the selected run stopping until cleanup is confirmed', async () => {
+    const stopGate = deferred<void>()
+    const stoppedA: string[] = []
+    const stoppedB: string[] = []
+    const first = runHarness({
+      createRuntime: async (start) => runtimeFor(start, 'runtime-a'),
+      stopRuntime: async (runtime) => {
+        stoppedA.push(runtime.workspaceRoot)
+        await stopGate.promise
+      },
+      startActivation: async (spec) => ({
+        childId: spec.childId ?? 'child-a',
+        // 权威结果已到(aborted),但停止闩接管后仍要等清理确认才 stopped。
+        result: Promise.resolve({ stopReason: 'aborted' }),
+        dispose: async () => undefined,
+      }),
+    })
+    const second = runHarness({
+      createRuntime: async (start) => runtimeFor(start, 'runtime-b'),
+      stopRuntime: async (runtime) => {
+        stoppedB.push(runtime.workspaceRoot)
+      },
+    })
+
+    const dispatchA = await first.dispatch('session-a')
+    const runA = await firstRunId(first.runs, 'session-a')
+    const dispatchB = await second.dispatch('session-b')
+    const runB = await firstRunId(second.runs, 'session-b')
+
+    const accepted = await first.runs.requestCancel('session-a', runA)
+    expect(accepted.status).toBe('accepted')
+    expect(first.runs.get(runA)?.phase).toBe('stopping')
+    await flushMicrotasks(() => stoppedA.length === 1)
+    expect(stoppedA).toEqual(['runtime-a'])
+    // runtime stop 尚未确认:不得提前报 stopped。
+    expect(first.runs.get(runA)?.phase).toBe('stopping')
+
+    stopGate.resolve()
+    await flushMicrotasks(() => first.runs.get(runA)?.phase === 'stopped')
+    expect(first.runs.get(runA)?.phase).toBe('stopped')
+    // 定向取消只停选中的 run,兄弟 runtime 的 stop 调用次数为零。
+    expect(stoppedA).toEqual(['runtime-a'])
+    expect(stoppedB).toHaveLength(0)
+    expect(second.runs.get(runB)?.phase).toBe('completed')
+
+    await dispatchA.afterIdle()
+    await dispatchB.afterIdle()
+  })
+
+  test('a rejected activation result after a targeted cancel keeps stopping until cleanup confirms', async () => {
+    const result = deferred<unknown>()
+    const disposeGate = deferred<void>()
+    let disposeCalls = 0
+    const harness = runHarness({
+      startActivation: async (spec) => ({
+        childId: spec.childId ?? 'child',
+        result: result.promise,
+        dispose: async () => {
+          disposeCalls += 1
+          await disposeGate.promise
+        },
+      }),
+    })
+
+    const dispatched = await harness.dispatch('parent-session')
+    const runId = await firstRunId(harness.runs, 'parent-session')
+    expect((await harness.runs.requestCancel('parent-session', runId)).status).toBe('accepted')
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+    await flushMicrotasks(() => disposeCalls === 1)
+    expect(disposeCalls).toBe(1)
+
+    result.reject(new Error('子代理结果失败'))
+    await flushMicrotasks(() => harness.runs.get(runId)?.failure !== undefined)
+    // 停止闩已接管:rejection 只保留 failure,不得提前发布 failed。
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+    expect(harness.runs.get(runId)?.failure).toContain('子代理结果失败')
+
+    disposeGate.resolve()
+    await flushMicrotasks(() => harness.runs.get(runId)?.phase === 'stopped')
+    expect(harness.runs.get(runId)?.phase).toBe('stopped')
+    expect(harness.runs.get(runId)?.failure).toContain('子代理结果失败')
+    expect(disposeCalls).toBe(1)
+    await dispatched.afterIdle()
+  })
+
+  test('a short cleanup budget marks the run stopping and only converges after dispose (A-08)', async () => {
+    const result = deferred<unknown>()
+    const disposeGate = deferred<void>()
+    let disposeCalls = 0
+    const harness = runHarness({
+      cleanupTimeoutMs: 20,
+      startActivation: async (spec) => ({
+        childId: spec.childId ?? 'child',
+        result: result.promise,
+        dispose: async () => {
+          disposeCalls += 1
+          await disposeGate.promise
+          // 真实 dispose 会终止子代理:result 以 rejection 结算。
+          result.reject(new Error('子代理已停止'))
+        },
+      }),
+    })
+    const dispatched = await harness.dispatch('parent-session')
+    const runId = await firstRunId(harness.runs, 'parent-session')
+
+    // 父未 idle:还没有任何清理等待,时间流逝不得写 cleanupBudgetMs。
+    await delay(40)
+    expect(harness.runs.get(runId)?.cleanupBudgetMs).toBeUndefined()
+    expect(harness.runs.get(runId)?.phase).toBe('starting')
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const cleanup = dispatched.afterIdle()
+      await waitForCondition(() => harness.runs.get(runId)?.cleanupBudgetMs === 20, 'cleanup budget recorded')
+      await waitForCondition(() => disposeCalls === 1, 'dispose starts after the budget')
+      // registry 契约(W10):未终态的预算到期只写 cleanupBudgetMs + stopCause,
+      // 不追加 cleanup-budget-exceeded;客户端由这两个字段派生横幅。
+      expect(harness.runs.get(runId)?.stopCause).toBe('cleanup-budget')
+      expect(harness.runs.get(runId)?.phase).toBe('stopping')
+      expect(harness.runs.get(runId)?.cleanupWarnings).toEqual([])
+      // dispose 未确认前不得伪报 stopped。
+      expect(harness.runs.get(runId)?.phase).toBe('stopping')
+
+      disposeGate.resolve()
+      await cleanup
+    } finally {
+      errorSpy.mockRestore()
+    }
+
+    const run = harness.runs.get(runId)!
+    expect(run.phase).toBe('stopped')
+    expect(run.cleanupBudgetMs).toBe(20)
+    expect(run.stopCause).toBe('cleanup-budget')
+    expect(run.cleanupWarnings).toEqual([])
+    expect(disposeCalls).toBe(1)
+  })
+
+  test('a deferred late-activation dispose keeps the cancelled run stopping until dispose settles', async () => {
+    const activation = deferred<SubagentActivationHandle>()
+    const activationStarted = deferred<void>()
+    const disposeGate = deferred<void>()
+    let disposeCalls = 0
+    const harness = runHarness({
+      startActivation: () => {
+        activationStarted.resolve()
+        return activation.promise
+      },
+    })
+
+    const dispatched = harness.dispatch('parent-session')
+    void dispatched.catch(() => undefined)
+    const runId = await firstRunId(harness.runs, 'parent-session')
+    await activationStarted.promise
+
+    // activation 尚未发布:取消路径的清理确认覆盖不到即将晚到的 activation。
+    expect((await harness.runs.requestCancel('parent-session', runId)).status).toBe('accepted')
+    await flushMicrotasks(() => false, 50)
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+
+    activation.resolve({
+      childId: 'child-late',
+      // 权威结果已结算(aborted):观察者会立刻上报执行终结。
+      result: Promise.resolve({ stopReason: 'aborted' }),
+      dispose: async () => {
+        disposeCalls += 1
+        await disposeGate.promise
+      },
+    })
+    await flushMicrotasks(() => disposeCalls === 1)
+    await flushMicrotasks(() => false, 20)
+    // 执行终结 + 早先「零失败」的确认不得拼出 stopped:dispose 仍在途。
+    expect(disposeCalls).toBe(1)
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+    expect(harness.runs.get(runId)?.cleanupWarnings).toEqual([])
+
+    disposeGate.resolve()
+    await flushMicrotasks(() => harness.runs.get(runId)?.phase === 'stopped')
+    expect(harness.runs.get(runId)?.phase).toBe('stopped')
+    expect(harness.runs.get(runId)?.cleanupWarnings).toEqual([])
+    await expect(dispatched).rejects.toThrow(/回合已取消/)
+  })
+
+  test('a rejected late-activation dispose never publishes stopped', async () => {
+    const activation = deferred<SubagentActivationHandle>()
+    const activationStarted = deferred<void>()
+    const disposeGate = deferred<void>()
+    let disposeCalls = 0
+    const harness = runHarness({
+      startActivation: () => {
+        activationStarted.resolve()
+        return activation.promise
+      },
+    })
+
+    const dispatched = harness.dispatch('parent-session')
+    void dispatched.catch(() => undefined)
+    const runId = await firstRunId(harness.runs, 'parent-session')
+    await activationStarted.promise
+    expect((await harness.runs.requestCancel('parent-session', runId)).status).toBe('accepted')
+    await flushMicrotasks(() => false, 50)
+
+    activation.resolve({
+      childId: 'child-late',
+      result: Promise.resolve({ stopReason: 'aborted' }),
+      dispose: async () => {
+        disposeCalls += 1
+        await disposeGate.promise
+        throw new Error('dispose failed')
+      },
+    })
+    await flushMicrotasks(() => disposeCalls === 1)
+    await flushMicrotasks(() => false, 20)
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      disposeGate.resolve()
+      await expect(dispatched).rejects.toThrow(/回合已取消/)
+    } finally {
+      errorSpy.mockRestore()
+    }
+
+    const run = harness.runs.get(runId)!
+    expect(run.phase).toBe('stopping')
+    expect(run.cleanupWarnings).toEqual([{ code: 'activation-dispose-failed', severity: 'error' }])
+    await delay(20)
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+  })
+
+  test('a late-activation dispose timeout leaves the run stopping with an error warning', async () => {
+    const activation = deferred<SubagentActivationHandle>()
+    const activationStarted = deferred<void>()
+    let disposeCalls = 0
+    const harness = runHarness({
+      cleanupTimeoutMs: 20,
+      startActivation: () => {
+        activationStarted.resolve()
+        return activation.promise
+      },
+    })
+
+    const dispatched = harness.dispatch('parent-session')
+    void dispatched.catch(() => undefined)
+    const runId = await firstRunId(harness.runs, 'parent-session')
+    await activationStarted.promise
+    expect((await harness.runs.requestCancel('parent-session', runId)).status).toBe('accepted')
+    await flushMicrotasks(() => false, 50)
+
+    activation.resolve({
+      childId: 'child-late',
+      result: Promise.resolve({ stopReason: 'aborted' }),
+      dispose: () => {
+        disposeCalls += 1
+        return new Promise(() => undefined)
+      },
+    })
+    await flushMicrotasks(() => disposeCalls === 1)
+    await flushMicrotasks(() => false, 20)
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await expect(dispatched).rejects.toThrow(/回合已取消/)
+    } finally {
+      errorSpy.mockRestore()
+    }
+
+    const run = harness.runs.get(runId)!
+    expect(run.phase).toBe('stopping')
+    expect(run.cleanupWarnings).toEqual([{ code: 'activation-dispose-timeout', severity: 'error' }])
+    await delay(20)
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+  })
+
+  test('a failed runtime stop on the cancel path never publishes stopped', async () => {
+    const runtimeGate = deferred<AgentPackageTurnRuntime>()
+    const createStarted = deferred<void>()
+    const harness = runHarness({
+      createRuntime: (start) => {
+        createStarted.resolve()
+        return runtimeGate.promise.then((runtime) => runtime ?? runtimeFor(start, 'runtime-a'))
+      },
+      stopRuntime: async () => {
+        throw new Error('stop failed')
+      },
+    })
+
+    const dispatched = harness.dispatch('parent-session')
+    void dispatched.catch(() => undefined)
+    const runId = await firstRunId(harness.runs, 'parent-session')
+    await createStarted.promise
+    expect((await harness.runs.requestCancel('parent-session', runId)).status).toBe('accepted')
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      runtimeGate.resolve(undefined as never)
+      await expect(dispatched).rejects.toThrow(/回合已取消/)
+    } finally {
+      errorSpy.mockRestore()
+    }
+
+    const run = harness.runs.get(runId)!
+    expect(run.phase).toBe('stopping')
+    expect(run.cleanupWarnings).toEqual([{ code: 'runtime-stop-failed', severity: 'error' }])
+    await delay(20)
+    expect(harness.runs.get(runId)?.phase).toBe('stopping')
+  })
+
+  test('cleanup failures are projected as coded error warnings', async () => {
+    const harness = runHarness({
+      cleanupTimeoutMs: 20,
+      startActivation: async (spec) => ({
+        childId: spec.childId ?? 'child',
+        result: Promise.resolve({ stopReason: 'completed' }),
+        dispose: () => new Promise(() => undefined),
+      }),
+      stopRuntime: async () => {
+        throw new Error('stop failed')
+      },
+    })
+    const dispatched = await harness.dispatch('parent-session')
+    const runId = await firstRunId(harness.runs, 'parent-session')
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await dispatched.afterIdle()
+    } finally {
+      errorSpy.mockRestore()
+    }
+
+    const run = harness.runs.get(runId)!
+    // 执行结果自然完成:清理失败只追加结构化告警,不改相位。
+    expect(run.phase).toBe('completed')
+    expect(run.cleanupWarnings).toEqual([
+      { code: 'activation-dispose-timeout', severity: 'error' },
+      { code: 'runtime-stop-failed', severity: 'error' },
+    ])
+    expect(run.cleanupBudgetMs).toBeUndefined()
   })
 })
