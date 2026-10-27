@@ -364,6 +364,8 @@ stderr 中的 `refreshAgentRestrict: restrict state not found` 仍是既有负�
 | E-05 真实组合场景 | Blocked | 多 tab、同名并发、父 idle 后子代理继续运行、WS 重连、清理未确认提示均未执行。 |
 | E-06 平台证据诚实 | 部分 | macOS：package 路径有真机证据、legacy/断连/重启无；Windows：**未验证**，未用 CI 冒充真机。 |
 
+> **E-05 补充（2026-10-27）**：本文末〈E-05 真实组合补充（2026-10-27）〉取代上表中 A-06、A-07、A-10、A-13、B-01、B-03、C-01、C-05、E-03、E-04、E-06 各行，并取代本节〈结论〉里「E-05 整条 Blocked」的表述；未在该补充中改判的条目（C-07/C-09、B-08、A-14、Windows）保持原判定，上表本身不改写。
+
 ### 真机缺陷与修复：reduced-motion 下活跃圆点仍在脉冲
 
 - **现象（A-16/D22）**：`matchMedia('(prefers-reduced-motion: reduce)').matches === true` 时，活跃运行卡圆点的 `getComputedStyle(dot).animationName` 仍为 `tool-pulse`。
@@ -386,3 +388,87 @@ stderr 中的 `refreshAgentRestrict: restrict state not found` 仍是既有负�
 - **package 路径的完成与定向取消已经在真实 Electron 应用中验证**：卡锚定、启动即显、真实工具名、完成/已停止终态、卡内确认 + 焦点 + Escape、父流隔离、父级停止反映、深色/380 px/减动效复用均按事实文件记录。
 - **仍然 Blocked / 未验证**：legacy `@agent` 全链路（目录 host 不可达）、A-06/A-07 的父 idle 真机子项、A-08 真实短预算、C-05…C-09 的断连重连与 Host 重启失效视图、B-05/B-06/B-07/B-08/B-10 的停止过程/幂等/竞态/清理失败/边界、A-10 与 C-01 的多 tab 与同名并发、A-11/A-16 的真实读屏播报、A-14 的 60 秒提醒与预算横幅文案、以及 **Windows 平台（未验证）**。
 - 因此按设计 §10.1 的「验收通过判定」，**功能仍未完全验收**：E-03/E-04 只覆盖 package 路径，E-05 整条 Blocked，E-06 的 Windows 与 legacy 侧无证据。本节的 PASS 只覆盖上表明确列出的子项，不构成整体放行。
+
+## E-05 真实组合补充（2026-10-27）
+
+本节把控制器在活应用中补采的第二批事实（`.superpowers/sdd/2026-10-26-subagent-run-visibility/e05-acceptance-facts.md`）转写为判定，取代〈真机验收（2026-10-27，Electron 44 + deepseek-flash）〉中列出的同名条目。判定口径与该节一致：**PASS** = 条目在真机上被完整观察；**部分** = 仅部分子项被观察；**Blocked** = 完全未执行或未观察。本节只使用该事实文件，不补充未观测的结论。
+
+### 环境与 legacy 夹具
+
+| 项 | 事实 |
+| --- | --- |
+| 隔离 | 沿用同一临时 profile 副本 `/tmp/huaanwork-accept-20261027-142256`（临时 `DSH_HOME` + `--user-data-dir`）；用户真实 profile 未修改 |
+| 运行时 | Electron 44.0.0；模型 `deepseek-flash` |
+| legacy 通道 | 仅为 legacy 路径把临时 profile 的 `agents_host` 指向本地夹具目录 `127.0.0.1:18080`，该目录按契约提供一条 `kind: "agent"` 条目 `legacy-demo`（inline persona，允许 `bash`/`read_file`/`glob`/`grep`） |
+| 真实内网目录 | `10.130.209.76:18080` 仍不可达；未以夹具冒充内网目录可用 |
+| 被测树 | 多标签修复在真机复验时仍未提交；该修复随后提交为 `52618cb8b8`（`fix: preserve subagent run cards across tab switches`），提交后重新执行了最终树门禁（见本节末行）。真机事实采集于外层 HEAD `6c1f139e44` + 未提交多标签修复的工作树 |
+
+夹具给的是真实 legacy `@agent` 执行路径（真实 spawn、真实模型回合、真实工具），但它不是内网目录：内网目录的可用性、条目内容与网络条件仍未验证。
+
+### 取代上表的判定
+
+| 条目 | 本节判定 | 被取代的旧判定 | 事实依据 |
+| --- | --- | --- | --- |
+| A-06 父 idle 后仍可用 | **PASS** | Blocked | 父回合只回「已委派」；子会话进入 `正在执行工具 · bash` 后 composer 由「停止」回到「发送」（父回合 idle），运行卡继续更新（耗时 00:00 → 00:15、最近活动递增、终止可用） |
+| A-07 耗时与静默提示 | **部分** | 部分 | 父 idle 期间耗时与「最近活动」持续更新属实；**5 分钟无活动提醒未观察**（运行均短于 5 分钟），该子项仍无真机证据 |
+| A-10 多标签归属正确 | **PASS** | Blocked | 标签 A（legacy 已完成卡）与标签 B（package `@doc-clerk` 已完成卡）经侧栏来回切换后各自保留卡片、无跨标签泄漏（截图 21–24）；期间发现并修复一处多标签缺陷（见下） |
+| A-13 终态与失效视图 | **部分** | 部分 | **冻结视图 PASS**：断连期间卡片显示「连接中断，状态可能滞后」、终止禁用、耗时冻结（截图 27），重连后恢复（截图 28）；**Host 重启后的 stale 视图仍 Blocked**（见下） |
+| B-01 legacy 运行中终止 | **PASS** | 部分（package PASS；legacy Blocked） | 工具相位的 legacy 卡卡内确认 → `已停止`（00:01，截图 18），父会话不受影响；**兄弟隔离**：取消同标签并发的第二张卡（00:10 → 已停止）不影响第一张，第一张自然完成（00:33） |
+| B-03 legacy 启动中终止 | **PASS** | Blocked | `启动中` 相位卡内确认 → `已停止`（00:00，截图 17） |
+| C-01 同名与同 slug 并发 | **PASS** | Blocked | 父 idle 时同一标签并发两条 `@legacy-demo`（20:11:52 与 20:12:14）：两张卡各自独立计时/活动/工具，取消其一不影响另一 |
+| C-05 WS 断线重连 | **PASS** | Blocked | 见〈WebSocket 断连与自动重连〉：冻结、禁用终止、自动重连与快照对账复原均被观察 |
+| E-03 真实完成链路 | **PASS** | 部分（package PASS；legacy Blocked） | legacy `@legacy-demo` 完整相位 `启动中 → 思考中 → 正在执行工具 · bash → 生成中 → 已完成`（00:04，截图 16）；package `@doc-clerk` 完成卡此前已 PASS |
+| E-04 真实取消链路 | **PASS** | 部分（package PASS；legacy Blocked） | legacy 启动中与工具相位两处定向取消均收敛为 `已停止`（截图 17、18）；package 两处此前已 PASS；兄弟隔离见 B-01 |
+| E-06 平台证据诚实 | **部分** | 部分 | macOS 覆盖面扩大（legacy 完成/取消、多标签、同名并发、父 idle、断连重连）；**Windows 仍未验证**，未用 CI 冒充真机 |
+| E-05 真实组合（聚合） | **部分** | Blocked | 多标签、同名并发、父 idle、断连重连已执行；Host 重启失效视图与清理未确认仍 Blocked，故本条不能整体判 PASS |
+
+### 仍为 Blocked 的条目（本节未改判）
+
+| 条目 | 状态 | 原因（事实文件） |
+| --- | --- | --- |
+| C-07 Host 代际切换 / C-09 Host 重启失效视图 | Blocked | Host 是 Electron utility process，没有只重启它而保留渲染器的受支持手段；整应用重启同时重建渲染器与注册表（无控制面持久化），D6 的 stale 视图在本环境无法构造。渲染器 reload 冒烟不等价，不得记为 Host 重启 |
+| B-08 清理失败不伪报 | Blocked | 没有生产通道可以挂住 dispose/runtime stop，清理未确认横幅未能诱发 |
+| A-14 60 秒提醒与预算文案 | Blocked | 所有运行都在 60 秒内结束且干净；停止等待 60 秒、清理预算横幅、finalizing 细节与 failed 终态文案均未观察 |
+| Windows 平台 | 未验证 | 无任何 Windows 真机执行证据 |
+
+### 多标签缺陷与修复（A-10 期间发现）
+
+- **现象**：标签 A 保留 legacy 运行卡时，点侧栏打开一个**已经开着**的会话，该标签的 `items` 被历史回放（`resumeFromView` 的 `historyToChatItems(view)`）整体覆盖；客户端专属的运行卡不在历史回放里，覆盖后又没有向 `subagent.list` 对账 ⇒ 切回后卡片归零，随后点开的新会话同样为 0 张卡。
+- **修复**（`dsh-plugin-huaanwork/src/client-huaanwork/App.tsx`；本节只记录，不改源码，细节见 `final-fix-report.md` §7）：已有标签只激活、不再写 `items`；新建历史标签分支与自动化运行标签回填写完后调用 `reconcileSubagentRuns(tabId, sessionId)`，由快照回退补回卡片。reducer、Host 与既有对账路径未改。
+- **修复后复验（重建后的活应用）**：标签 A/B 来回切换各自保留卡片（截图 23、24）；渲染器 `Page.reload` 后打开 package 会话，卡片由 Host 实时快照恢复（截图 26）。
+- **一处未恢复且不属于卡片缺陷**：reload 后无法经 UI 重新打开 legacy 的活稳定会话——`session.open` 返回 129 条记录但视图保持为空，属既有的活会话/resume 行为 ⇒ **legacy 快照恢复 Blocked**，不记为运行卡缺陷。
+
+### WebSocket 断连与自动重连（C-05 / A-13 冻结视图）
+
+- 定位方式：CDP `Runtime.queryObjects(WebSocket.prototype)` 找到事件 WebSocket 后直接 close，不重载渲染器。
+- 断连期间：活动卡显示「最近活动 8 秒前 · 连接中断，状态可能滞后」，**终止按钮禁用**，耗时冻结在 00:12（截图 27）。
+- 约 1 s 后客户端自动重连，快照对账清除冻结标记并重新启用终止；耗时从 00:13 继续，运行于 00:25 完成（截图 28）。
+- **相邻的既有行为（不是运行卡）**：一次瞬时 WS 关闭仍会触发应用级「会话已失败…」「执行进程已结束…」横幅与 `sidecarDead` 闩锁（composer 占位符「sidecar 已退出」），且重连后不解除；运行卡自身已恢复，父会话界面在 reload 前仍标记为失败。该行为先于本功能存在，本节不据此改判任何条目，只登记其可观测面。
+
+### 门禁复跑（多标签修复后，严格串行）
+
+五条命令逐条等待退出后再启动下一条；每份日志尾部追加 `EXIT_CODE=` 与 `FINISHED_UTC=`，退出码不依赖人工判读。
+
+| # | 命令 | 退出码 | 计数/关键输出 | 结果 | 日志 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 定向测试（brief 的 10 个目标） | 0 | `Test Files 52 passed (52)`；**`Tests 744 passed (744)`**（较上一轮 +2，即多标签修复的两条契约钉） | PASS | `logs/e05-step1-targeted-tests.log` |
+| 2 | `corepack yarn typecheck` | 0 | 11 个 workspace 全绿（无诊断）；尾行 `contract-types: 4 generated type files are current` | PASS | `logs/e05-typecheck.log` |
+| 3 | `corepack yarn test` | 0 | vitest **8500 passed / 37 skipped**（desktop 1812/11、beta 1822/11、huaanwork 3510/14、market 303、next 641/1、market-server 244、update-server 88、agent-catalog-server 80）；node:test 168 tests / 166 pass / 2 skipped / 0 fail | PASS | `logs/e05-test.log` |
+| 4 | `corepack yarn check:desktop-variants` | 0 | `# pass 11 / # fail 0`；stable↔beta src 214 / scripts 33、beta↔huaanwork src 168 / scripts 21 对齐；allowlist 7（oneSidedPrefixes 0）与 65（oneSidedPrefixes 6）未变 | PASS | `logs/e05-check-desktop-variants.log` |
+| 5 | `corepack yarn check`（第 1 步 `check:whitespace` 即退出） | **1** | `docs/superpowers/specs/2026-10-26-subagent-run-visibility-design.md:937: new blank line at EOF.` | **FAIL（提交内空白缺陷，非环境）** | `logs/e05-check.log` |
+| 5′ | `corepack yarn check` 的其余步骤（隔离复跑） | 0 | `check:layout`、`test:aa-connector` 与 13 个 workspace/包 `check` 全绿；huaanwork 3510/14、update-server 88/88（本轮 `hdiutil` 用例全部通过）；`verify:aa` 无并发冲突签名 | PASS | `logs/e05-check-remainder.log` |
+| 5″ | 提交 `52618cb8b8` 后，`corepack yarn check` 整条 | 0 | 15 步全绿；`check:whitespace` 通过（设计文档结尾空行随该提交删除）；日志中无 `not ok`；`update-server` 的 `hdiutil` 用例通过 | PASS | `logs/e05-check-after-commit.log` |
+
+门禁 5 的第一次失败如实保留为历史：`check:whitespace` 执行 `git diff --check <merge-base(origin/master, HEAD)> HEAD`，比对的是**提交**而非工作树；命中的第 937 行由提交 `6c1f139e44`（2026-10-27 14:46:21 +08:00，晚于 14:39–14:42 的绿灯复跑）带入。该空白缺陷已随多标签修复提交 `52618cb8b8` 一并修正（设计文档结尾空行与 `appWiring.spec.ts` 的行尾空行），并在提交后的树上整条重跑 `corepack yarn check` 通过（上表 5″，exit 0、无 `not ok`）。5′ 的隔离复跑为同一 `check` 链去掉 `check:whitespace` 后的逐条执行；首次隔离运行时输出重定向误绑定到链尾命令、只留下末段输出，该日志保留为 `logs/e05-check-remainder-partial.log`，结论以 5″ 的整条复跑为准。除已修复的空白缺陷外，本轮无测试失败、无超时、无 `verify:aa` flake，也未出现 `update-server` 的 `hdiutil` 环境失败。
+
+### 证据路径（git-ignored 暂存，不随提交分发）
+
+- 截图 13 张（16–28）：`screenshots/16-legacy-completed.png`（legacy 完成卡）、`17-legacy-cancel-startup.png`（启动中取消）、`18-legacy-cancel-tool.png`（工具相位取消）、`19-multitab-new-card.png`、`20-multitab-old-session.png`、`21-multitab-legacy-card.png`、`22-multitab-package-card.png`、`23-multitab-legacy-preserved.png`、`24-multitab-package-preserved.png`、`25-reload-legacy-restored.png`（reload 后打开 legacy 会话的尝试：视图为空，见上）、`26-reload-package-restored.png`（package 卡由快照恢复）、`27-ws-frozen.png`（断连冻结）、`28-ws-recovered.png`（重连恢复）。
+- 门禁日志：`logs/e05-step1-targeted-tests.log`、`logs/e05-typecheck.log`、`logs/e05-test.log`、`logs/e05-check-desktop-variants.log`、`logs/e05-check.log`、`logs/e05-check-remainder.log`、`logs/e05-check-remainder-partial.log`（各含 `STARTED_UTC` / `EXIT_CODE` / `FINISHED_UTC`）。
+- 事实与修复来源：`.superpowers/sdd/2026-10-26-subagent-run-visibility/e05-acceptance-facts.md`、`final-fix-report.md` §7。
+
+### 结论（本节）
+
+- legacy 通道经本地夹具目录打通后，完成与取消链路在真机上均被观察；A-06、A-10、B-01（含兄弟隔离）、B-03、C-01、C-05、E-03、E-04 由 Blocked/部分改为 PASS，A-07、A-13、E-06 保持部分，E-05 聚合为部分。
+- **仍 Blocked**：Host 重启后的失效视图（C-07/C-09）、清理未确认横幅（B-08）、60 秒提醒与预算/失败文案（A-14）；**Windows 未验证**。门禁 5 因提交内的结尾空行在本树上红，其余门禁绿。
+- 因此按设计 §10.1 的验收通过判定，**功能验收仍未完成**：E-05 只到部分，C-07/C-09、B-08、A-14 与 Windows 无真机证据。本节的 PASS 只覆盖上表列出的条目，不构成整体放行。

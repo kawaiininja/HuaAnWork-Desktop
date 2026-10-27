@@ -944,6 +944,6 @@ NO UNRESOLVED DECISIONS
 - **同名并发 + 兄弟隔离 PASS**：父 idle 时同一标签两条同名 legacy 卡各自独立计时/活动/工具，取消其一不影响另一。
 - **父 idle PASS**：composer 回到「发送」后子运行卡继续更新（耗时、最近活动），终止入口可用；5 分钟无活动提醒未观察。
 - **WS 冻结/重连 PASS**：断连期间冻结标记 + 终止禁用 + 耗时冻结，约 1 s 自动重连后由快照对账恢复；应用级 `sidecarDead`/「会话已失败」闩锁是既有相邻行为，不是运行卡。
-- **仍 Blocked**：Host 重启后的失效视图、清理未确认横幅、60 秒提醒与预算/失败文案；Windows 未验证。门禁复跑中 `corepack yarn check` 因提交 `6c1f139e44` 带入的结尾空行在 `check:whitespace` 红，其余步骤隔离复跑全绿。
+- **仍 Blocked**：Host 重启后的失效视图、清理未确认横幅、60 秒提醒与预算/失败文案；Windows 未验证。多标签修复提交 `52618cb8b8` 同时删除了提交 `6c1f139e44` 带入的结尾空行；提交后整条 `corepack yarn check` 复跑 15 步全绿（exit 0、无 `not ok`）。
 
 本条只记录真机事实与判定，不勾选 §10.1 复选框，也不改动已批准行为；逐条判定与日志指针见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈E-05 真实组合补充（2026-10-27）〉。
