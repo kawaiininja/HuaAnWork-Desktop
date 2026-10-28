@@ -563,22 +563,37 @@ stderr 中的 `refreshAgentRestrict: restrict state not found` 仍是既有负�
 - **仍 Blocked / 未验证**：真实 Host-only 重启（C-07/C-09，客户端失效视图只由注入的新代际快照验证）、C-02/C-03 与 D-02 的真机注入（Host 内部，仅单测）、D-07/D-08 的真机维度（代码/变体守卫证据）、A-07 的 5 分钟无活动提醒、A-14 的 finalizing 与 max-tokens/refusal 文案、A-04 的并发工具、B-04 的确切在途点、C-08 的全局 200 上限、真实读屏音频、真实内网目录与 Windows。
 - 因此按设计 §10.1 的「验收通过判定」（A–D 全部通过、E-01～E-05 通过），**本功能仍未完全验收**：A-03/A-04/A-05/A-11/A-13/A-16/B-04/C-08/D-03 仍为部分，C-07/C-09 与上述注入项、Windows 仍 Blocked，E-05 与 E-06 仍是部分。本节与前述各节的 PASS 只覆盖各自表格明确列出的子项，不构成整体放行，也不勾选设计 §10.1 的复选框。
 
-## Host 重启排查（2026-10-27）
+## Host 重启排查（2026-10-27，复核订正；2026-10-28 代码复核）
 
-目标：为 C-07/C-09/A-13 取得**真实 Host 重启且保留 renderer/客户端状态**的证据（不是代际快照注入）。
+目标：为 C-07/C-09/A-13 取得**真实 Host 重启且保留 renderer/客户端状态**的证据（不是代际快照注入）。本节取代本文件此前把根因归于 surface watchdog/recovery、并建议登记为「架构限制」的结论。
 
-### 尝试
+### 原始尝试与观测（按当次记录保留）
 
-在隔离临时 profile 中用验收专用、`HUAANWORK_ACCEPTANCE_HOOKS=1` 门控的 supervisor 诊断（**已回退，不随本提交分发**）：固定 Web 端口 43120，`stop` 旧 Host utility process 后重新 `fork` 新 Host；另尝试在重启窗口挂起 shell 的 renderer surface watchdog/recovery（`canRecoverRenderer` 返回 false）。生产路径未改变。
+在隔离临时 profile 中用验收专用、`HUAANWORK_ACCEPTANCE_HOOKS=1` 门控的 supervisor 诊断（**已回退，不随当前源码分发**）：固定 Web 端口 43120，`stop` 旧 Host utility process 后重新 `fork` 新 Host；另尝试在重启窗口挂起 shell 的 renderer surface watchdog/recovery（`canRecoverRenderer` 返回 false）。生产路径未改变。
 
-### 事实
+当次记录报告：旧 Host PID `43952` → 新 Host PID `45676`，两者均绑定 `127.0.0.1:43120`；切换点后 CDP page target 消失，主进程（`43944`）仍存活；挂起 surface watchdog/recovery 后 page target 仍消失。诊断 diff 与完整 CDP target 事件流未归档，故这些是**历史观测**，不能单独证明 renderer 进程死亡：导航/reload、WebContents 销毁、target URL 改变或采集过滤均可表现为 page target not found。
 
-- **Host 进程级重拉成功**：旧 Host PID `43952` → 新 Host PID `45676`，两者均监听 `127.0.0.1:43120`；Host 日志出现新 generation boot（`run 1793109418559` → `run 1793109754936`），新 Host 正常挂载。
-- **renderer 未存活**：切换点后 CDP page target 消失；主进程（`43944`）仍存活且新 Host 是其子进程；主日志出现 `renderer surface watchdog: page has no visible content` → `automatic renderer recovery attempt 1` → `automatic renderer recovery healthy`。即使挂起 surface watchdog/recovery，renderer 仍在切换点消失。
-- **结论**：真实 Host 重启下，客户端状态（运行卡、snapshot 对账所需的 React 状态）无法保留。C-07/C-09/A-13 的真实 stale 视图 **Blocked by shell 的 renderer lifecycle/recovery model**，不是 registry 缺陷；此前的 stale 证据仍仅是客户端代际注入。
+### 证据订正：撤回 watchdog/recovery 归因
 
-### 建议
+1. **被引用的 run id 是 Electron main 启动头，不是 Host generation boot。** `start()` 在 Host fork 之前调用 `logSink.writeHeader()` 写入 `run ${Date.now()}`（`main.ts` 的 `start()`，`:468-535`，写入点 `:529`）；Host 侧 logger（`host-bootstrap.ts:73` 的 `LogFileSink`，写入 `userData/logs/host/`）不写该头。因此 `run 1793109418559` → `run 1793109754936` 不能作为同一 main 进程内 Host 换代的证据。若它们就是当次记录所指的前后代，则与「同一 main 仍存活」的叙述冲突，至少说明日志混合了两次 main 启动。
+2. **watchdog/recovery 三行不在该切换窗口。** 原始主日志 `userData/logs/dsh-2026-10-27.log:34-36` 的 `page has no visible content` → `automatic renderer recovery attempt 1` → `healthy` 位于第 37 行旧 run 与第 40 行新 run **之前**，属于更早的 main run；`LogFileSink` 使用同步 `appendFileSync`（`log-files.ts` 的 `append()`，`:195-223`），不能以异步乱序解释。（2026-10-28 复核：该文件当时仍保留在 `/tmp/huaanwork-accept-20261027-142256/userData/logs/dsh-2026-10-27.log`，共 11 个 main run 头，`:34-36` 确为 watchdog 三连，`:37`/`:40` 确为两次 main 启动。）
+3. 因而原材料只支持「曾尝试 Host 重拉，且 CDP 观测到的 page target 消失」，**不支持「recovery 在切换点销毁 renderer」**。撤回「Blocked by shell 的 renderer lifecycle/recovery model」与「应登记为架构限制」；registry 仍无缺陷证据，客户端代际注入仍只证明客户端路径。
 
-1. 若产品要求真实 Host-only 重启并显示失效卡：需要一个独立的产品级 “Host restart mode”——在旧 Host 停止到新 Host 绑定同一固定端口期间，抑制 renderer recovery/window teardown、保持 SPA，待新 Host ready 后让 WS 重连并由 snapshot 对账。涉及 supervisor + Electron shell + client，超出本功能的验收范围。
-2. 否则把 C-07/C-09 记录为架构限制，A-13 的 stale 子项保持 Blocked（客户端路径已由注入验证）。
-3. 保留的 App 修复：`sidecar/status` ready 时清除 `sidecarDead` 闩锁，修复瞬时断连后应用一直 dead 的既有问题，也是未来 Host restart mode 的前置修复。
+### 代码根因链：Host teardown 连带销毁 native shell（高置信，待事件日志钉证；2026-10-28 代码复核）
+
+若诊断的 `stop` 复用了当前 `startIsolatedDesktopHost.stop()`（原始记录正是如此描述），代码中存在两条不经过 watchdog/recovery、足以解释全部现象的销毁路径：
+
+- **graceful stop 路径**：shell 注册是 Host Cordis effect（`src/index.ts` 的 `ctx.effect()`，`:454-524`；`runtime.schedule()` 调用点 `:469`）。Host effect dispose 时，`createHostRuntime.schedule()` 返回的 disposer 发送 `shell:dispose`（`host-runtime-bridge.ts:99-109`）；main 侧处理器取出并 await shell disposer（同文件 `bindNativeRuntime()` 的 `shell:dispose`，`:228`）；`ElectronDesktopRuntime.schedule()` 的 disposer 调用 `generation.release()`（`electron-runtime.ts:283-309`，释放点 `:299`）；最终 `ElectronShellGeneration.release()` 执行 `window.destroy()`（`electron-shell-generation.ts:908-934`，销毁点 `:933`）。
+- **强杀/兜底路径**：`startIsolatedDesktopHost.stop()` 在正常确认退出的路径上会 `await releaseNative()`（`host-process.ts:233-250`，调用点 `:248`）；`bindNativeRuntime()` 返回的清理函数 dispose 所有 shells（`host-runtime-bridge.ts:244-247`），随后汇入同一 `generation.release()` → `window.destroy()` 链。**该调用不在 `finally` 中**：若 Host 终止未在 1 秒内确认，`Promise.race` 抛错会跳过它（`:242-246`），此时窗口是否存活取决于 graceful `shell:dispose` 是否已完成；不得把「任何 stop 都必然销毁窗口」写成无条件结论。
+
+2026-10-28 复核：两条链的每一环都在当前工作树逐行对上（文件与行号见上）；`run` 头只有 main 写（`main.ts:529`），Host 侧 sink 无该头；watchdog 的 `active()` 要求窗口未销毁（`electron-shell-generation.ts:272-279`），`release()` 先 `stop()` 再 `destroy()`（`:912`、`:933`）。仍缺的是同一 main 进程内按时间顺序的 `shell:dispose`/`releaseNative` → `generation.release` → `window.destroy` 事件记录，故本节把该链记为**高置信静态推断**，不记为已证实。
+
+所以「挂起 watchdog/recovery 后 renderer 仍消失」不是矛盾，反而与 **Host 停止附带 native-shell teardown** 完全吻合。当前缺口应准确表述为：**BrowserWindow/WebContents 的所有权随 Host effect/native binding 被终止，缺少 Host 换代期间的 shell 保留与接管（handover）机制**；不是已证明 shell 架构无法保留 SPA。最终动态钉证只需在下一次复验中按时间顺序捕获 `shell:dispose` / `releaseNative` → `generation.release` → `window.destroy`，并同时记录 WebContents ID、navigation/crash 事件与新旧 Host 的实际监听端口；若 terminate 未被确认，另行记录 `Promise.race` 抛错后的窗口状态。
+
+### 当前验收判定与处置
+
+- C-07/C-09/A-13 的真实 stale 视图仍为 **Blocked by 未实现的 native-shell handover**（不是已证实的架构限制）；不得把整应用重启、renderer reload 或新代际快照注入记为真实 Host-only 重启通过。
+- **「不是架构限制」是范围裁定，不是代码事实。** shell 生命周期绑在 Host binding 上是当前设计；实现 handover 需要改 main/supervisor、native bridge、`ElectronDesktopRuntime` 与回调重绑。且生产环境没有 Host-only 重启入口（Host 崩溃 → 恢复对话框 → 整应用 relaunch，`electron-runtime.ts:752-766`）⇒ 建 handover 等于新增产品能力，不是纯验收手段。须显式选择：建能力 / 改 C-07/C-09 验收口径 / 记超范围；未裁定前不得把 handover 当既定验收路径。
+- **端口稳定性有边界**：端口是持久化设置（默认 43120，冲突时最多顺延 32 个），顺延会让保留 renderer 的 `location.host` 失效 ⇒ handover 必须有显式失败语义（见设计文档不变量 3）。
+- 保留的 App 修复：`sidecar/status ready` 时清除 `sidecarDead` 闩锁（`App.tsx:1138-1144`），修复瞬时断连后发送/停止/自动化永久不可用的既有问题。该修复独立成立，但不构成 Host 重启根因或真机通过证据。
+- 解决方案与最小复验判据见 `docs/superpowers/specs/2026-10-26-subagent-run-visibility-design.md`〈Host 重启排查（2026-10-27，复核订正；2026-10-28 代码复核）〉：**main/supervisor 持有 shell，旧 Host 解绑不毁窗，新 Host adopt 并 rebound 回调，既有 WS ready → snapshot 对账完成失效视图**。方案当前仅为设计记录，尚未实施。

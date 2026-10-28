@@ -959,8 +959,39 @@ NO UNRESOLVED DECISIONS
 - **门禁**：定向 52 文件 / 752 用例、`yarn typecheck`、`yarn test`（vitest 8513 passed / 37 skipped；node:test 166 pass / 2 skipped）、`yarn check:desktop-variants`（11/11，allowlist 7/65 未变）、`yarn check`（15 步全绿）、`git diff --check` 全部通过；无提交。
 - **结论不变**：按 §10.1 的「验收通过判定」，功能**仍未完全验收**；本节不勾选 §10.1 复选框，也不改动已批准行为。逐条判定、证据与日志指针见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈收口验收补充（2026-10-27，验收钩子与故障注入）〉。
 
-### Host 重启排查（2026-10-27）
+### Host 重启排查（2026-10-27，复核订正；2026-10-28 代码复核）
 
-为 C-07/C-09/A-13 尝试真实 Host 重启：验收专用、master-gated 的 supervisor 诊断（已回退，不随提交分发）成功把 Host utility process 从 PID `43952` 换成 `45676`，两者都重新绑定固定端口 `127.0.0.1:43120`，新 Host 正常 boot；但在切换窗口内 renderer 被 shell 的 surface watchdog/recovery 接管，CDP page target 消失（主进程仍存活）。即使挂起 watchdog/recovery，renderer 仍未存活。
+本节取代此前「surface watchdog/recovery 导致 renderer 丢失，需要暂停 recovery 的 Host restart mode，否则登记架构限制」的结论。证据订正与原始日志指针见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md` 同名节：被引用的 run id 实为 `main.ts:start()` 写入的 main 启动头（`:529`），watchdog/recovery 三行位于两次被引用 run 之前，均不能证明切换时由 recovery 销毁 renderer。
 
-结论：**Host 进程级重拉可行，但当前 shell 的 renderer lifecycle/recovery 模型不能保留 SPA 与客户端状态**，因此 C-07/C-09/A-13 的**真实** stale 视图仍 Blocked（客户端代际切换路径已由注入验证）。若产品要求真实 Host-only 重启，需要独立的 “Host restart mode”：在 Host 停机窗口抑制 renderer recovery/window teardown、保持 SPA，待新 Host ready 后 WS 重连并由 snapshot 对账；这涉及 supervisor + shell + client，超出本功能验收范围。保留的 App 修复是 `sidecar/status` ready 时清除 `sidecarDead` 闩锁（瞬时断连恢复，亦是未来 Host restart mode 的前置修复）。
+#### 根因与准确边界
+
+代码给出了更直接且能解释「挂起 recovery 仍丢页面」的所有权链：Host 的 `ctx.effect()` 注册 native shell（`src/index.ts:454-524`），graceful dispose 经 `shell:dispose` 调到 main（`host-runtime-bridge.ts:99-109`、`:228`）；同时 `startIsolatedDesktopHost.stop()` 在正常确认退出的路径上会 `releaseNative()` 并 dispose 所有 shells（`host-process.ts:233-250`、`host-runtime-bridge.ts:244-247`）。两条路径都汇入 `ElectronDesktopRuntime.schedule()` disposer 的 `generation.release()`（`electron-runtime.ts:283-309`），最终由 `ElectronShellGeneration.release()` 执行 `window.destroy()`（`electron-shell-generation.ts:908-934`）。`releaseNative()` **不在 `finally` 中**：Host 终止未在 1 秒内确认时 `Promise.race` 抛错会跳过它（`host-process.ts:242-246`），此时窗口是否存活取决于 graceful `shell:dispose` 是否已完成。
+
+因此根因是 **Host effect/native binding 拥有 shell 生命周期，Host-only 停止连带销毁 BrowserWindow/WebContents**，不是 watchdog/recovery 必然重载页面，也不是 registry 缺陷。该结论是 2026-10-28 复核后的**高置信静态推断**：代码链逐环对上（含 `run` 头只由 main 写、Host 侧 sink 无该头），但尚缺同一 main 进程内按时间顺序的 `shell:dispose`/`releaseNative` → `generation.release` → `window.destroy` 动态记录。当前实现缺少的是 **native-shell handover**；C-07/C-09/A-13 的真实 stale 视图保持 Blocked，但不得登记为不可突破的「架构限制」。方案尚未实施，既有代际注入仍只证明客户端失效视图路径。
+
+**范围裁定（未决）**：生产环境没有 Host-only 重启入口（Host 崩溃 → 恢复对话框 → 整应用 relaunch，`electron-runtime.ts:752-766`），因此 handover 不是验收补丁而是新产品能力。须先选择：建 handover / 改 C-07/C-09 验收口径 / 记超范围；未裁定前不得把下述方案当作既定验收路径。
+
+#### 方案：main/supervisor 持有 shell，Host 换代时保留并接管
+
+不采用「重启窗口暂停 watchdog/recovery」作为主体方案。根本修法是把 BrowserWindow/WebContents 的所有权上移到 Electron main/supervisor；Host 只持有可断开的 native-shell lease，并提供配置与回调端点。
+
+一次计划内 Host 重启按以下不变量实现：
+
+1. **旧 Host 只解绑，不毁窗**：进入重启前设置 single-flight 的 restarting/retaining 状态；停止 RPC、liveness 与 utility process；使旧 Host 回调失效。此期间的 `shell:dispose` 与 `releaseNative()` 只释放 per-Host binding，不释放底层 `ElectronShellGeneration`。
+2. **新 Host adopt 既有 shell**：新 Host 的 `shell:schedule` 不再次 `runtime.schedule()` / `mountScheduled()` / `loadURL()`，而是接管保留的 shell generation，并把 requestQuit、mode change、setup、locale/theme、remote-control 等回调重新绑定到新 Host RPC。旧 callback id 不得跨代误路由；tray 等不承载 React 状态的资源可重建，但不得泄漏旧注册。
+3. **连接条件保持稳定**：验收路径继续固定 Web 端口并复用 renderer token/access header，使既有 document 的 origin 与鉴权语义不变；不为本次验收引入反向代理、service worker 或 React 状态持久化。端口是持久化启动设置（默认 43120，冲突时最多顺延 32 个，`desktop-port.ts:4-7`、`profile.ts:727-728`）；**顺延会让保留 renderer 的 `location.host` 失效**，因此 handover 必须把「新 Host 必须拿到原端口」作为硬条件，拿不到时显式失败或走整应用重启，不得留下半接管的窗口。
+4. **最终退出与失败仍闭合**：真正的应用退出必须无视 retaining 状态并完整 dispose shell；新 Host boot 失败时保留当前页面的断连视图并提供原生恢复入口，不留下半接管 callback、重复 shell 或无法退出的窗口。重启与最终退出必须 single-flight，迟到的旧代 dispose 不得误删新代 binding。旧 Host 停止到新 Host 接管之间没有可用 Host 回调；保留窗口的退出/托盘等动作必须有 main 级 fallback（或显式禁用），不得因旧回调失效而让窗口无法退出。
+5. **客户端复用既有重连契约**：`api.ts:209-226` 已在 WS close 后退避重连、onopen 发 ready；`App.tsx:1138-1144` 已在 ready 后清 `sidecarDead` 并触发 `reconcileBoundSubagentRuns()`，`App.tsx:1726-1784` 完成 snapshot 对账。无需另建一套客户端 restart mode；可选增强仅是计划重启后主动唤醒重连，避免最长 30 秒退避，不是验收前置。
+
+验收触发入口可以继续使用 `HUAANWORK_ACCEPTANCE_HOOKS=1` 总开关、默认惰性，不新增用户可见的重启按钮；但 shell 保留与接管本身是产品级能力（见上方〈范围裁定〉），必须走真实、可清理的 supervisor/native-bridge 路径，不得再用 `Reflect.deleteProperty`、restart timer 或跳过必要清理来制造一次性通过。
+
+#### 最小复验与通过判据
+
+保持 watchdog/recovery **开启**，先补边界事件证据，再执行 Host-only 重启：
+
+1. 给 `shell:dispose`、`releaseNative`、`generation.release()`、`window.destroy()`、`render-process-gone`、主框架 navigation/reload 记录统一时间戳；同时记录 main/Host/renderer PID、WebContents ID、Host registry generation、新旧 Host 的实际监听端口与被保留 document 的 origin 是否一致。CDP 使用 browser-level target 事件与完整 target 列表，不以「URL 含 43120 的 page target 是否存在」单独判定 renderer 生死。若 stop 的 terminate 未被确认，记录 `Promise.race` 抛错后的窗口状态，不得把「必然销毁」当默认事实。
+2. 重启前在页面写入随机 canary 并记录 `performance.timeOrigin`。新 Host ready 后，canary 与 timeOrigin 必须不变，证明原 document/React 状态存活；main run id 不得新增，Host PID 与 registry generation 必须改变。
+3. 断连期间旧卡保持冻结；新 generation 的空 `subagent.list` 快照到达后，旧活跃/停止未确认卡原位变为「状态不可恢复 · Host 已重启，结果未确认」，终止禁用、计时冻结，不推导 completed/failed/stopped。满足后才可把 C-07/C-09/A-13 的真实 stale 子项改判 PASS。
+4. 另覆盖新 Host boot 失败与最终应用退出：失败不毁既有 document、不残留旧 RPC 回调；最终退出仍销毁窗口并释放全部资源。另覆盖端口不可复用（被占用、必须顺延）的失败路径：显式失败或整应用重启，不得留下半接管窗口。两条边界未闭合前不得把 handover 方案记为完成。
+
+`sidecarDead` ready 清除闩锁的 App 修复保留，它独立修复瞬时断连后的永久禁用；该修复与既有门禁均不替代上述真实 Host-only 重启证据。
