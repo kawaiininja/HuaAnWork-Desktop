@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "slug": "doc-clerk",
+  "displayName": "资料整理员·小安",
+  "description": "Windows GHA 子代理运行验收夹具：真实 @ 完成与定向取消。",
+  "version": "1.0.0",
+  "draftId": "00000000-0000-4000-8000-000000000006",
+  "createdAt": "2026-10-28T00:00:00.000Z",
+  "updatedAt": "2026-10-28T00:00:00.000Z",
+  "persona": "persona.md",
+  "skill": null,
+  "tools": {
+    "mode": "none"
+  },
+  "allowSkills": []
+}
