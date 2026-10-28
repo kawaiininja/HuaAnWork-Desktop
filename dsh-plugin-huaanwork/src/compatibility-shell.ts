@@ -25,7 +25,7 @@ export class CompatibilityShell {
 
   constructor(
     private readonly window: BrowserWindow,
-    private readonly spec: DesktopShellSpec,
+    private spec: DesktopShellSpec,
     private readonly platform: DesktopPlatform,
     preload: string,
     private readonly actions: CompatibilityShellActions,
@@ -89,6 +89,12 @@ export class CompatibilityShell {
     if (!this.disposed && !this.chrome.isDestroyed()) {
       this.chrome.send(COMPATIBILITY_CHROME_STATE, this.state())
     }
+  }
+
+  /** Route chrome commands to a replacement Host without reloading either document. */
+  adoptSpec(spec: DesktopShellSpec): void {
+    this.spec = spec
+    this.refresh()
   }
 
   private async updateRemoteControl(): Promise<void> {

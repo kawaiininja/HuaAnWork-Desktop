@@ -3,6 +3,7 @@ import { basename, dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DesktopShellSpec } from '../src/runtime.ts'
+import { COMPATIBILITY_CHROME_CHANNEL } from '../src/compatibility-chrome-contract.ts'
 import { desktopTrayLabel } from '../src/tray-locale.ts'
 import { DESKTOP_FRAME_HEIGHT } from '../src/window-chrome.ts'
 import { DESKTOP_PRODUCT_NAME } from '../src/product-identity.ts'
@@ -508,6 +509,113 @@ describe('Electron desktop runtime', () => {
     await release()
     expect(electron.browserWindowOff).toHaveBeenCalledWith('page-title-updated', titleListener)
     expect(electron.trays[0]?.off).toHaveBeenCalledWith('click', expect.any(Function))
+  })
+
+  it('adopts a mounted shell without reloading and supersedes the old disposer', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const oldQuit = vi.fn()
+    const newQuit = vi.fn()
+    const oldRelease = runtime.schedule({ ...spec, requestQuit: oldQuit })
+    const launcher = runtime.registerTrayItem({
+      group: 'tools', order: 1, label: () => 'Launcher action', invoke: () => {},
+    })
+    await runtime.mountScheduled()
+    const window = electron.browserWindows[0]!
+
+    runtime.beginHostShellAdoption()
+    const newRelease = runtime.schedule({ ...spec, requestQuit: newQuit })
+    runtime.completeHostShellAdoption()
+    await runtime.mountScheduled()
+
+    expect(electron.browserWindows).toHaveLength(1)
+    expect(electron.trays).toHaveLength(1)
+    expect(electron.loadURL).toHaveBeenCalledOnce()
+    const template = electron.menuTemplates.at(-1) as { label?: string; click?: () => void }[]
+    expect(template).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Launcher action' }),
+      expect.objectContaining({ label: 'Quit' }),
+    ]))
+    template.find(item => item.label === 'Quit')?.click?.()
+    expect(oldQuit).not.toHaveBeenCalled()
+    expect(newQuit).toHaveBeenCalledExactlyOnceWith(0)
+
+    await oldRelease()
+    expect(window.destroy).not.toHaveBeenCalled()
+    expect(launcher).toBeDefined()
+    await newRelease()
+    expect(window.destroy).toHaveBeenCalledOnce()
+    launcher.dispose()
+  })
+
+  it('rebinds the remote-control offer to the adopted Host', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const remoteSeenPath = '/tmp/dsh-desktop-user-data/remote-control-offer-seen'
+    try {
+      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+      const runtime = new ElectronDesktopRuntime(async () => {})
+      const oldEnable = vi.fn(async () => {})
+      const newEnable = vi.fn(async () => {})
+      const oldRelease = runtime.schedule({
+        ...spec,
+        readRemoteControl: vi.fn(async () => false),
+        enableRemoteControl: oldEnable,
+      })
+      await runtime.mountScheduled()
+
+      runtime.beginHostShellAdoption()
+      const newRelease = runtime.schedule({
+        ...spec,
+        readRemoteControl: vi.fn(async () => false),
+        enableRemoteControl: newEnable,
+      })
+      runtime.completeHostShellAdoption()
+
+      const mainFrame = { url: new URL('../src/native-ui/compatibility-chrome.html', import.meta.url).href }
+      Object.assign(electron.chromeWebContents, { mainFrame })
+      const handler = electron.chromeWebContents.ipc.handle.mock.calls
+        .find(([name]) => name === COMPATIBILITY_CHROME_CHANNEL)?.[1]
+      await handler?.({ sender: electron.chromeWebContents, senderFrame: mainFrame }, 'remote-control')
+      expect(oldEnable).not.toHaveBeenCalled()
+      expect(newEnable).toHaveBeenCalledOnce()
+
+      await oldRelease()
+      await newRelease()
+    } finally {
+      try { unlinkSync(remoteSeenPath) } catch { /* the marker is absent when the offer did not open */ }
+    }
+  })
+
+  it.each([
+    ['origin', { url: 'http://127.0.0.1:43121/' }],
+    ['renderer access header', { rendererAccessHeader: { name: 'x-dsh-desktop-renderer', value: 'changed' } }],
+  ] as const)('rejects adoption when the %s changes and retains final cleanup', async (_field, change) => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+    const window = electron.browserWindows[0]!
+
+    runtime.beginHostShellAdoption()
+    expect(() => runtime.schedule({ ...spec, ...change })).toThrow('Host restart changed')
+    runtime.cancelHostShellAdoption()
+    await release()
+    expect(window.destroy).toHaveBeenCalledOnce()
+  })
+
+  it('arms shell adoption only once and only for a mounted generation', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    expect(() => runtime.beginHostShellAdoption()).toThrow('mounted shell')
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+    runtime.beginHostShellAdoption()
+    expect(() => runtime.completeHostShellAdoption()).toThrow('did not complete')
+    expect(() => runtime.beginHostShellAdoption()).toThrow('already armed')
+    runtime.cancelHostShellAdoption()
+    await release()
   })
 
   it('limits setup persistence to the active renderer main frame and releases its handler', async () => {

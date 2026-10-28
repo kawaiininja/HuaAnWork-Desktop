@@ -195,7 +195,7 @@ function isZoomShortcut(input: Electron.Input): 'in' | 'out' | 'reset' | undefin
 export interface ElectronShellGenerationOptions {
   readonly setupOnboarding?: import('./setup-onboarding-bridge.ts').DesktopOnboardingBridge | undefined
   readonly platform: ElectronPlatformStrategy
-  readonly spec: DesktopShellSpec
+  spec: DesktopShellSpec
   readonly preloadPath: string
   readonly pickDirectory: () => Promise<string | null>
   readonly buildApplicationMenuItems: () => readonly Electron.MenuItemConstructorOptions[]
@@ -700,6 +700,14 @@ export class ElectronShellGeneration {
       await this.release()
       throw cause
     }
+  }
+
+  /** Rebind Host-owned callbacks while keeping the window, renderer, and recovery state. */
+  adoptSpec(spec: DesktopShellSpec): void {
+    if (this.released || !this.mounted) throw new Error('dsh-plugin-desktop: shell adoption requires a mounted generation')
+    this.options.spec = spec
+    this.compatibilityShell?.adoptSpec(spec)
+    this.refreshTrayMenu()
   }
 
   show(): void {

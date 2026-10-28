@@ -967,9 +967,9 @@ NO UNRESOLVED DECISIONS
 
 代码给出了更直接且能解释「挂起 recovery 仍丢页面」的所有权链：Host 的 `ctx.effect()` 注册 native shell（`src/index.ts:454-524`），graceful dispose 经 `shell:dispose` 调到 main（`host-runtime-bridge.ts:99-109`、`:228`）；同时 `startIsolatedDesktopHost.stop()` 在正常确认退出的路径上会 `releaseNative()` 并 dispose 所有 shells（`host-process.ts:233-250`、`host-runtime-bridge.ts:244-247`）。两条路径都汇入 `ElectronDesktopRuntime.schedule()` disposer 的 `generation.release()`（`electron-runtime.ts:283-309`），最终由 `ElectronShellGeneration.release()` 执行 `window.destroy()`（`electron-shell-generation.ts:908-934`）。`releaseNative()` **不在 `finally` 中**：Host 终止未在 1 秒内确认时 `Promise.race` 抛错会跳过它（`host-process.ts:242-246`），此时窗口是否存活取决于 graceful `shell:dispose` 是否已完成。
 
-因此根因是 **Host effect/native binding 拥有 shell 生命周期，Host-only 停止连带销毁 BrowserWindow/WebContents**，不是 watchdog/recovery 必然重载页面，也不是 registry 缺陷。该结论是 2026-10-28 复核后的**高置信静态推断**：代码链逐环对上（含 `run` 头只由 main 写、Host 侧 sink 无该头），但尚缺同一 main 进程内按时间顺序的 `shell:dispose`/`releaseNative` → `generation.release` → `window.destroy` 动态记录。当前实现缺少的是 **native-shell handover**；C-07/C-09/A-13 的真实 stale 视图保持 Blocked，但不得登记为不可突破的「架构限制」。方案尚未实施，既有代际注入仍只证明客户端失效视图路径。
+因此根因是 **Host effect/native binding 拥有 shell 生命周期，Host-only 停止连带销毁 BrowserWindow/WebContents**，不是 watchdog/recovery 必然重载页面，也不是 registry 缺陷。该结论是 2026-10-28 复核后的**高置信静态推断**：代码链逐环对上（含 `run` 头只由 main 写、Host 侧 sink 无该头），但尚缺同一 main 进程内按时间顺序的 `shell:dispose`/`releaseNative` → `generation.release` → `window.destroy` 动态记录。此前缺少的是 **native-shell handover**；该能力现已按下方最小范围实现并通过真实 Host 验收，不是不可突破的「架构限制」。
 
-**范围裁定（未决）**：生产环境没有 Host-only 重启入口（Host 崩溃 → 恢复对话框 → 整应用 relaunch，`electron-runtime.ts:752-766`），因此 handover 不是验收补丁而是新产品能力。须先选择：建 handover / 改 C-07/C-09 验收口径 / 记超范围；未裁定前不得把下述方案当作既定验收路径。
+**范围裁定（已按最小范围实施）**：本轮只新增验收门控的 Host-only 替换能力，不新增用户可见重启按钮、自动崩溃重启或通用 Host 控制面。生产默认不注册重启 IPC，既有 Host 崩溃恢复与整应用 relaunch 语义不变。实现必须同时保留 shell、重绑回调、校验 origin/header、处理失败并完成最终退出，不是单纯验收补丁。
 
 #### 方案：main/supervisor 持有 shell，Host 换代时保留并接管
 
@@ -995,3 +995,11 @@ NO UNRESOLVED DECISIONS
 4. 另覆盖新 Host boot 失败与最终应用退出：失败不毁既有 document、不残留旧 RPC 回调；最终退出仍销毁窗口并释放全部资源。另覆盖端口不可复用（被占用、必须顺延）的失败路径：显式失败或整应用重启，不得留下半接管窗口。两条边界未闭合前不得把 handover 方案记为完成。
 
 `sidecarDead` ready 清除闩锁的 App 修复保留，它独立修复瞬时断连后的永久禁用；该修复与既有门禁均不替代上述真实 Host-only 重启证据。
+
+#### 实施与真实验收结果（2026-10-28）
+
+上述方案已按最小范围落地：native bridge 的 retain/preserve release 同时覆盖两条毁窗路径；runtime 在 adoption 时校验 origin/header、更新 shell/compatibility/remote-control 回调并转移唯一 active disposer；supervisor 以 single-flight 完成旧 Host 解绑、新 Host fork/boot 与最终释放。验收 IPC 仅在 `HUAANWORK_ACCEPTANCE_HOOKS=1` 时注册，未改变默认生产路径、既有整应用重启或变体白名单。
+
+真实 Electron 验收满足第 1–3 条判据：Host PID `31844 → 32918`，main run 未新增，canary 与 `performance.timeOrigin` 不变；真实新代际空快照产生 1 张原位失效卡，终止禁用、最后状态为「正在执行工具」，相隔 1250 ms 的耗时均为 `00:32`。最终应用 exit 0，旧/新 Host、renderer、main 无残留。第 4 条中的 boot/adoption 失败、origin/header 漂移、终止未确认和最终释放由定向测试覆盖，remote-control 的旧 RPC 捕获缺陷已修复并补回归钉。
+
+证据见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈实施与真实验收判定（2026-10-28）〉、`.superpowers/sdd/2026-10-26-subagent-run-visibility/host-restart-handover-facts.md`、`host-restart-handover-result.json` 与 `screenshots/40-host-restart-real-stale.png`。因此 **C-07、C-09 与 A-13 的真实 Host 重启/stale 子项为 PASS**；其他未验证项不变，不据此勾选 §10.1 的整体验收。

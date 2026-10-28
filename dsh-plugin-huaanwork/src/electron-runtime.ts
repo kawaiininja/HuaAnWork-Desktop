@@ -189,6 +189,10 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private currentLocale: DesktopLocale = 'en'
   private scheduled: DesktopShellSpec | undefined
   private mountTask: Promise<void> | undefined
+  private adoptingHostShell = false
+  private activeShellDisposer: (() => Promise<void>) | undefined
+  private shellDisposerBeforeAdoption: (() => Promise<void>) | undefined
+  private shellThemeSourceToRestore: typeof nativeTheme.themeSource | undefined
   private quitting = false
   private readonly trayItems = new Map<symbol, DesktopTrayItem>()
   private terminalSpec: DesktopTerminalSpec | undefined
@@ -204,6 +208,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   /** powerSaveBlocker.start 返回的 id;未持有时为 undefined。重复 hold/release 幂等。 */
   private keepAwakeBlockerId: number | undefined
   private hostStoppedRecovery: Promise<void> | undefined
+  private remoteOffer: RemoteControlOffer | undefined
 
   constructor(
     private readonly restart: (target?: 'recovery' | 'safe-mode') => Promise<void>,
@@ -279,16 +284,69 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     this.rendererHealthGate?.stop()
   }
 
+  /** Arm adoption before the old Host can dispose its native shell effect. */
+  beginHostShellAdoption(): void {
+    if (this.adoptingHostShell) throw new Error('dsh-plugin-desktop: Host shell adoption is already armed')
+    if (this.generation === undefined || this.mountTask === undefined || this.scheduled === undefined) {
+      throw new Error('dsh-plugin-desktop: Host shell adoption requires a mounted shell')
+    }
+    this.adoptingHostShell = true
+    this.shellDisposerBeforeAdoption = this.activeShellDisposer
+  }
+
+  /** Prove the replacement Host actually adopted the shell before releasing its predecessor. */
+  completeHostShellAdoption(): void {
+    if (this.adoptingHostShell || this.activeShellDisposer === this.shellDisposerBeforeAdoption) {
+      throw new Error('dsh-plugin-desktop: Host shell adoption did not complete')
+    }
+    this.shellDisposerBeforeAdoption = undefined
+  }
+
+  /** Abort arming without discarding the active shell owner or its final cleanup path. */
+  cancelHostShellAdoption(): void {
+    this.adoptingHostShell = false
+    this.shellDisposerBeforeAdoption = undefined
+  }
+
   /** @inheritdoc */
   schedule(spec: DesktopShellSpec): () => Promise<void> {
+    if (this.adoptingHostShell) return this.adoptHostShell(spec)
     if (this.scheduled !== undefined || this.mountTask !== undefined) {
       throw new Error('dsh-plugin-desktop: a native shell generation is already registered')
     }
-    const previousThemeSource = nativeTheme.themeSource
+    this.shellThemeSourceToRestore = nativeTheme.themeSource
     this.scheduled = spec
+    return this.createShellDisposer(spec)
+  }
+
+  private adoptHostShell(spec: DesktopShellSpec): () => Promise<void> {
+    const current = this.scheduled
+    const generation = this.generation
+    if (current === undefined || generation === undefined || this.mountTask === undefined) {
+      throw new Error('dsh-plugin-desktop: Host shell adoption requires a mounted shell')
+    }
+    const sameOrigin = new URL(current.url).origin === new URL(spec.url).origin
+    const sameHeader = current.rendererAccessHeader.name === spec.rendererAccessHeader.name
+      && current.rendererAccessHeader.value === spec.rendererAccessHeader.value
+    if (!sameOrigin || !sameHeader) {
+      throw new Error('dsh-plugin-desktop: Host restart changed the renderer origin or access header')
+    }
+    this.scheduled = spec
+    generation.adoptSpec(spec)
+    this.remoteOffer = this.createRemoteControlOffer(spec)
+    if (this.platform !== 'linux') nativeTheme.themeSource = spec.readThemeSource()
+    this.rebuildTrayMenu()
+    this.rebuildApplicationMenu()
+    this.adoptingHostShell = false
+    return this.createShellDisposer(spec)
+  }
+
+  private createShellDisposer(spec: DesktopShellSpec): () => Promise<void> {
     let disposed = false
-    return async () => {
-      if (disposed) return
+    const dispose = async (): Promise<void> => {
+      // Adoption transfers the one real shell owner. Releasing an older Host
+      // bridge afterwards must not destroy the generation adopted by its successor.
+      if (disposed || this.activeShellDisposer !== dispose) return
       disposed = true
       try {
         await this.mountTask
@@ -300,13 +358,34 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         } finally {
           this.generation = undefined
           this.mountTask = undefined
+          this.remoteOffer = undefined
+          if (this.activeShellDisposer === dispose) this.activeShellDisposer = undefined
           if (this.scheduled === spec) {
-            if (this.platform !== 'linux') nativeTheme.themeSource = previousThemeSource
+            if (this.platform !== 'linux' && this.shellThemeSourceToRestore !== undefined) {
+              nativeTheme.themeSource = this.shellThemeSourceToRestore
+            }
             this.scheduled = undefined
+            this.shellThemeSourceToRestore = undefined
           }
         }
       }
     }
+    this.activeShellDisposer = dispose
+    return dispose
+  }
+
+  private createRemoteControlOffer(spec: DesktopShellSpec): RemoteControlOffer | undefined {
+    if (!spec.readRemoteControl || !spec.enableRemoteControl) return undefined
+    return new RemoteControlOffer({
+      path: join(app.getPath('userData'), 'remote-control-offer-seen'),
+      readEnabled: spec.readRemoteControl,
+      enable: spec.enableRemoteControl,
+      confirm: async copy => (await this.showDesktopMessageBox({
+        type: 'question', title: copy.title, message: copy.message, detail: copy.detail,
+        buttons: [copy.confirm, copy.cancel], defaultId: 1, cancelId: 1, noLink: true,
+      })).response === 0,
+      reportError: cause => this.logError(`Remote control notice: ${String(cause)}`),
+    })
   }
 
   /** @inheritdoc */
@@ -317,16 +396,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
     if (this.mountTask === undefined) {
       this.setLocalePreference(spec.readLocalePreference())
-      const remoteOffer = spec.readRemoteControl && spec.enableRemoteControl ? new RemoteControlOffer({
-        path: join(app.getPath('userData'), 'remote-control-offer-seen'),
-        readEnabled: spec.readRemoteControl,
-        enable: spec.enableRemoteControl,
-        confirm: async copy => (await this.showDesktopMessageBox({
-          type: 'question', title: copy.title, message: copy.message, detail: copy.detail,
-          buttons: [copy.confirm, copy.cancel], defaultId: 1, cancelId: 1, noLink: true,
-        })).response === 0,
-        reportError: cause => this.logError(`Remote control notice: ${String(cause)}`),
-      }) : undefined
+      this.remoteOffer = this.createRemoteControlOffer(spec)
       const generation = new ElectronShellGeneration({
         platform: this.platformStrategy,
         spec,
@@ -334,7 +404,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         pickDirectory: () => this.pickDirectory(),
         buildApplicationMenuItems: () => this.buildApplicationMenuItems(),
         isQuitting: () => this.quitting,
-        buildTrayTemplate: () => this.buildTrayTemplate(spec),
+        buildTrayTemplate: () => this.buildTrayTemplate(this.scheduled ?? spec),
         stopRendererBootMonitoring: () => { this.stopRendererBootMonitoring() },
         abortRendererBootMonitoring: cause => { this.rendererHealthGate?.stop(cause) },
         failRendererBoot: error => { this.failRendererBoot('renderer-failed', error) },
@@ -345,10 +415,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         platformLoginTitle: () => PLATFORM_LOGIN_TITLE[this.currentLocale],
         setupOnboarding: this.setupOnboarding,
         chromeActions: {
-          ...(remoteOffer ? { remoteControl: {
-            read: () => remoteOffer.read(),
+          ...(this.remoteOffer ? { remoteControl: {
+            read: () => this.remoteOffer?.read() ?? Promise.resolve({ enabled: false, seen: true }),
             open: async () => {
-              try { await remoteOffer.open(this.locale) }
+              const offer = this.remoteOffer
+              if (offer === undefined) return
+              try { await offer.open(this.locale) }
               catch (cause) {
                 this.logError(`Remote control activation failed: ${String(cause)}`)
                 const copy = remoteControlOfferCopy[this.locale]

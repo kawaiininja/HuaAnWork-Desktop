@@ -5,6 +5,10 @@ import { SETUP_ONBOARDING_CHANNEL } from './setup-onboarding-bridge.ts'
 import { DESKTOP_FILE_PATH_BRIDGE } from './file-path-bridge-contract.ts'
 import { DESKTOP_NATIVE_DIRECTORY_PICKER_CHANNEL } from './directory-picker-contract.ts'
 import {
+  ACCEPTANCE_HOST_RESTART_CHANNEL,
+  type AcceptanceHostRestartResult,
+} from './huaanwork-host/acceptance-host-restart.ts'
+import {
   HOST_LIVENESS_CHANNEL,
   HOST_LIVENESS_READ_CHANNEL,
   HOST_LIVENESS_STOP_CHANNEL,
@@ -62,4 +66,8 @@ contextBridge.exposeInMainWorld('huaanworkHostLiveness', {
   },
   reportTurns: (turns: number) => { ipcRenderer.send(HOST_LIVENESS_TURNS_CHANNEL, turns) },
   requestStop: () => ipcRenderer.invoke(HOST_LIVENESS_STOP_CHANNEL),
+})
+
+contextBridge.exposeInMainWorld('huaanworkAcceptance', {
+  restartHost: (): Promise<AcceptanceHostRestartResult> => ipcRenderer.invoke(ACCEPTANCE_HOST_RESTART_CHANNEL),
 })

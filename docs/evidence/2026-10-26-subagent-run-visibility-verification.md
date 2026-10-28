@@ -590,10 +590,14 @@ stderr 中的 `refreshAgentRestrict: restrict state not found` 仍是既有负�
 
 所以「挂起 watchdog/recovery 后 renderer 仍消失」不是矛盾，反而与 **Host 停止附带 native-shell teardown** 完全吻合。当前缺口应准确表述为：**BrowserWindow/WebContents 的所有权随 Host effect/native binding 被终止，缺少 Host 换代期间的 shell 保留与接管（handover）机制**；不是已证明 shell 架构无法保留 SPA。最终动态钉证只需在下一次复验中按时间顺序捕获 `shell:dispose` / `releaseNative` → `generation.release` → `window.destroy`，并同时记录 WebContents ID、navigation/crash 事件与新旧 Host 的实际监听端口；若 terminate 未被确认，另行记录 `Promise.race` 抛错后的窗口状态。
 
-### 当前验收判定与处置
+### 实施与真实验收判定（2026-10-28）
 
-- C-07/C-09/A-13 的真实 stale 视图仍为 **Blocked by 未实现的 native-shell handover**（不是已证实的架构限制）；不得把整应用重启、renderer reload 或新代际快照注入记为真实 Host-only 重启通过。
-- **「不是架构限制」是范围裁定，不是代码事实。** shell 生命周期绑在 Host binding 上是当前设计；实现 handover 需要改 main/supervisor、native bridge、`ElectronDesktopRuntime` 与回调重绑。且生产环境没有 Host-only 重启入口（Host 崩溃 → 恢复对话框 → 整应用 relaunch，`electron-runtime.ts:752-766`）⇒ 建 handover 等于新增产品能力，不是纯验收手段。须显式选择：建能力 / 改 C-07/C-09 验收口径 / 记超范围；未裁定前不得把 handover 当既定验收路径。
-- **端口稳定性有边界**：端口是持久化设置（默认 43120，冲突时最多顺延 32 个），顺延会让保留 renderer 的 `location.host` 失效 ⇒ handover 必须有显式失败语义（见设计文档不变量 3）。
-- 保留的 App 修复：`sidecar/status ready` 时清除 `sidecarDead` 闩锁（`App.tsx:1138-1144`），修复瞬时断连后发送/停止/自动化永久不可用的既有问题。该修复独立成立，但不构成 Host 重启根因或真机通过证据。
-- 解决方案与最小复验判据见 `docs/superpowers/specs/2026-10-26-subagent-run-visibility-design.md`〈Host 重启排查（2026-10-27，复核订正；2026-10-28 代码复核）〉：**main/supervisor 持有 shell，旧 Host 解绑不毁窗，新 Host adopt 并 rebound 回调，既有 WS ready → snapshot 对账完成失效视图**。方案当前仅为设计记录，尚未实施。
+本节取代前述各表/节中「真实 Host-only 重启 Blocked」「native-shell handover 未实施」「范围未决」的旧状态；其他条目的历史判定与仍未验证项不因此改变。
+
+- **已按最小范围实现 handover**：`HostNativeRuntimeBinding.retainShell()` / `release({ preserveShell })`（`host-runtime-bridge.ts:173-177`、`:270-283`）同时截断 graceful `shell:dispose` 与兜底 native release 的毁窗路径；`ElectronDesktopRuntime` 在 `beginHostShellAdoption()` → `adoptHostShell()` 期间校验原 origin 与 renderer access header、更新 shell/compatibility spec 和 remote-control offer，并以 `activeShellDisposer` 让旧代 disposer 失效（`electron-runtime.ts:288-377`）；supervisor 以 single-flight 更换 utility process（`host-process.ts:334-383`）。未改 Stable/Beta、upstream、`startup-generation.ts`、共享 renderer-action/boot 协议或变体白名单。
+- **验收入口默认惰性**：只有 `HUAANWORK_ACCEPTANCE_HOOKS=1` 时才注册 `huaanwork:acceptance-host-restart` main IPC（`host-process.ts:397-403`）；preload 仅转发该调用（`preload.ts:70-73`）。未新增自动崩溃重启、用户可见设置、反向代理、watchdog 暂停或 React 状态持久化。既有整应用重启语义未改。
+- **真实 Host-only 重启 PASS（macOS）**：隔离副本 `/tmp/huaanwork-host-restart-be6iRg` 中，真实 composer 经原生 CDP 输入启动 `@legacy-demo` 活跃卡；未注入 registry generation 或替换 `subagent.list`。验收驱动返回 `oldPid 31844 → newPid 32918`、`sameDocument: true`、`sameMainRun: true`、`staleCardCount: 1`。随机 canary 与 `performance.timeOrigin` 不变，main 日志没有新增 run 头。
+- **真实 stale 视图 PASS**：新 Host 的真实空快照把旧卡原位改为「状态不可恢复 · Host 已重启，结果未确认」；`data-stale=true`、终止禁用、最后状态保留「正在执行工具」，耗时在相隔 1250 ms 的两次读取中均为 `00:32`，未推导 completed/failed/stopped。截图 `screenshots/40-host-restart-real-stale.png`；机器结果 `.superpowers/sdd/2026-10-26-subagent-run-visibility/host-restart-handover-result.json`，完整事实 `host-restart-handover-facts.md`。
+- **失败与退出边界**：定向测试覆盖 boot/adoption 失败、origin/header 漂移、arming 失败重试、旧 Host 终止未确认、并发重启与最终释放；remote-control offer 的旧 RPC 捕获缺陷已修复并有回归钉。真实应用最终 exit 0，旧/新 Host、renderer、main 残留进程数为 0；本地 fixture catalog 已停止。
+- **最终门禁**：handover 定向 6 文件 / **160 用例** + CDP 证据断言 **4/4**；`yarn typecheck` 通过；根 `yarn test` 中 huaanwork **3539 passed / 14 skipped**，其他 workspace 零失败；变体守卫 **11/11** 且 allowlist 7/65/6 未变；修复后完整 `yarn check` **exit 0**；`git diff --check` 与 `check:whitespace` 通过。
+- 因此 **C-07、C-09 及 A-13 的真实 Host 重启/stale 子项改判 PASS**。A-13 的其他既有部分项、E-05/E-06 的其他缺口与 Windows 未验证不变；本节不构成设计 §10.1 的整体放行。`sidecarDead` ready 清除闩锁仍是独立的断连恢复修复，不替代上述证据。
