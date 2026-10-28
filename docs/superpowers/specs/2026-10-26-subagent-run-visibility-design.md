@@ -955,7 +955,7 @@ NO UNRESOLVED DECISIONS
 - **判为 PASS**：A-08（legacy 与 package 均报 `stopCause: cleanup-budget` / `cleanupBudgetMs: 5000`）、B-05（注入慢 dispose 后「停止中」可见）、B-06（双 cancel 均 `accepted`、终态 `already-terminal`）、B-08（注入 dispose 超时后保持停止中，不伪报停止）、B-10（错误 parent/未知 runId 均 404 且零副作用）、C-04（停止中与终态后注入更高 revision 活帧均不复活动）、C-06（注入更高 revision 工具帧未被旧快照回滚）、D-01（WS 帧仅含生命周期/工具名/计时/告警）、D-05、D-06、A-12（长名称截断且保留全名）。A-14 升为部分（60 秒停止等待已观察）。
 - **客户端缺陷与修复**：注入暴露两处真实缺陷——终态 run 被更高 revision 活帧复活、`stopping` 被活帧回退。`logic/subagentRuns.ts` 的 `reduceRunUpdate` 增加终态守卫与停止守卫（终态→终态、`stopping`→`stopping`/终态仍按 revision 合并），`tests/client-huaanwork/subagentRuns.spec.ts` 47/47。
 - **失效视图只由代际注入验证**：以新代际空快照替换 `subagent.list` 后卡原位失效（`data-stale`、终止禁用、计时冻结），仅证明客户端代际切换路径；**真实 Host-only 重启仍无受支持手段，C-07/C-09 维持 Blocked**，不得据此记为 Host 重启通过。
-- **仍 Blocked / 未验证**：真实 Host-only 重启、C-02/C-03 与 D-02 的真机注入（Host 内部，仅单测）、A-07 的 5 分钟提醒、A-14 的 finalizing 与 max-tokens/refusal 文案、A-04 并发工具、B-04 确切在途点、C-08 全局 200、真实读屏音频、真实内网目录与 Windows；C-02/C-03 保持自动化专用。
+- **仍 Blocked / 未验证**：真实 Host-only 重启、C-02/C-03 与 D-02 的真机注入（Host 内部，仅单测）、A-07 的 5 分钟提醒、A-14 的 finalizing 与 max-tokens/refusal 文案、A-04 并发工具、B-04 确切在途点、B-07 cancel/end 竞态、C-08 全局 200、真实读屏音频、真实内网目录与 Windows；C-02/C-03 保持自动化专用。（Host-only 重启已于 2026-10-28 改判 PASS；B-07 是此前摘要漏列，正式表一直为 Blocked。）
 - **门禁**：定向 52 文件 / 752 用例、`yarn typecheck`、`yarn test`（vitest 8513 passed / 37 skipped；node:test 166 pass / 2 skipped）、`yarn check:desktop-variants`（11/11，allowlist 7/65 未变）、`yarn check`（15 步全绿）、`git diff --check` 全部通过；无提交。
 - **结论不变**：按 §10.1 的「验收通过判定」，功能**仍未完全验收**；本节不勾选 §10.1 复选框，也不改动已批准行为。逐条判定、证据与日志指针见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈收口验收补充（2026-10-27，验收钩子与故障注入）〉。
 
@@ -1003,3 +1003,32 @@ NO UNRESOLVED DECISIONS
 真实 Electron 验收满足第 1–3 条判据：Host PID `31844 → 32918`，main run 未新增，canary 与 `performance.timeOrigin` 不变；真实新代际空快照产生 1 张原位失效卡，终止禁用、最后状态为「正在执行工具」，相隔 1250 ms 的耗时均为 `00:32`。最终应用 exit 0，旧/新 Host、renderer、main 无残留。第 4 条中的 boot/adoption 失败、origin/header 漂移、终止未确认和最终释放由定向测试覆盖，remote-control 的旧 RPC 捕获缺陷已修复并补回归钉。
 
 证据见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈实施与真实验收判定（2026-10-28）〉、`.superpowers/sdd/2026-10-26-subagent-run-visibility/host-restart-handover-facts.md`、`host-restart-handover-result.json` 与 `screenshots/40-host-restart-real-stale.png`。因此 **C-07、C-09 与 A-13 的真实 Host 重启/stale 子项为 PASS**；其他未验证项不变，不据此勾选 §10.1 的整体验收。
+
+### 验收判定订正（2026-10-28）
+
+本节只订正验收记录，不改行为、不勾选 §10.1；逐条证据见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈验收判定订正（2026-10-28）〉。判定口径：真机条目看「用户可见场景是否被真实 `@` 路径观察」，内部不变量仍由单测钉住；一条含多个子项时，全部子项有证据才记 PASS。
+
+- **A-01 改为 PASS**：package 与 legacy 均已真机观察「一条显式 `@` 一张卡、卡紧贴该用户消息、标题/版本正确」（package 截图 05；legacy 截图 16，E-05 夹具路径）。`clientMessageId` 的精确锚定仍由自动化钉住（`subagentRuns.spec.ts:1022`、`:1077`）；legacy 使用本地 spec-valid 夹具而非真实内网目录，该环境限制记 E-06。
+- **A-12 降为「部分」**：此前只凭长名称截断记 PASS，但「并发工具默认前 2 个 + `+N`，可展开完整在途列表」未在 GUI 观察，与 A-04 同缺口。
+- **E-05 改为 PASS**：设计 E-05 的五个子项（多 tab、同名并发、父 idle、WS 重连、清理未确认）均已有真机证据；Host 重启、5 分钟提醒、finalizing、全局 200、Windows、真实内网目录不属于 E-05 子项。
+- **C-05 降为「部分」**：活跃 run 的断连/重连已观察，但「停止未确认 run 不丢失」未观察。
+- **A-05 / A-14 剩余子项补全**：A-05 还差 max-tokens/refusal/unknown 与单工具失败不决定 run 失败；A-14 还差 finalizing 文案、stopReason 文案完整性、提醒优先级/单条/可展开、60 秒重连不重置、非琥珀结构化样式。
+- **B-03 保持 PASS 的边界**：启动中取消覆盖 `startActivation()` 未返回的用户可见场景；晚到 activation 的立即 dispose 是内部不变量，由单测钉住。B-04 要求分别命中两个在途点，故仍为部分。
+- **A-13 保持「部分」**：终态单行、WS 冻结/重连、Host 重启 stale 均已真机 PASS；唯一剩余子项是「手动展开不被后续事件重置」（仅 `SubagentRunCard.spec.ts:376` 单测；截图 30 的清理未确认卡只观察到收起态）。renderer reload 后无法经 UI 重开 legacy 活稳定会话属既有 resume 行为，不计入 A-13。
+- **B-07 补回剩余清单**：正式表一直为 Blocked（真机未构造 cancel/end 竞态），此前收口摘要漏列；状态不变。
+- **owner 裁定（2026-10-28，R-ACC-1～R-ACC-5）**：
+  - R-ACC-1：C-02/C-03 属 Host 内部时序，以 registry 单测为充分证据，不再要求真机注入。
+  - R-ACC-2：D-02 以单测为充分证据，且不新增可伪造 parent 的 Host IPC。
+  - R-ACC-3：D-07/D-08 以代码/变体守卫审计为充分证据。
+  - R-ACC-4：B-07 不可 waiver，B-06 幂等不等于 cancel/end 竞态，必须按收口清单 T2.2 实做。
+  - R-ACC-5：Windows/真实内网目录仅作 E-06 环境记录，未执行标注未验证，不作为 waiver 或勾选 §10.1 的依据。
+- **订正后计数**：49 项中 **34 PASS（含 R-ACC-1/2/3 的自动化充分裁定）、14 部分、1 Blocked（B-07）**；未 PASS 共 **15** 项，其中 **14 项属于 A–D**，是 §10.1 的直接缺口；E-06 为平台证据诚实项，按 R-ACC-5 如实标注即可。E-01～E-05 已全部 PASS。
+- **仍不勾选 §10.1**：按「A–D 全部通过、E-01～E-05 通过」的判定，功能仍未完全验收。剩余项的收口方式见 `docs/superpowers/plans/2026-10-28-subagent-run-visibility-acceptance-closure.md`。
+
+### 验收豁免与 Windows 验收路径（2026-10-28，owner）
+
+- **R-ACC-6（A-11 / A-16 真实读屏豁免）**：本轮不再采集 VoiceOver/NVDA 真实播报音频；保留 CDP AX 树、键盘/焦点、44px、reduced-motion、280px 证据。真实 AT 播报未验证，获 AT 环境后补做。
+- **R-ACC-7（C-08 全局 200 豁免）**：本轮不再用 201 条真实 run 触发全局 200；保留每父 20 真机证据与全局淘汰单测。全局 200 真机行为未验证，出现低成本批量通道后补做。
+- **R-ACC-8（Windows 验收路径）**：Windows 验收改在 GitHub 虚拟机执行，**当前未执行、未验证**；GHA 打包/CI 绿不得冒充真实 `@` 验收。真实内网目录不在豁免范围内，仍未验证。
+- **豁免后计数**：49 项中 **45 PASS、1 部分（E-06）、3 豁免（A-11、A-16、C-08）、0 Blocked**。A–D 条目已全部 PASS 或豁免，E-01～E-05 全部 PASS。
+- **整体结论**：本功能记为 **complete with waiver**，不是 49/49 全量 PASS；豁免项不勾选 §10.1，Windows 待 GHA 验收完成后才可在 E-06 更新为已验证。逐条证据与豁免边界见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈验收豁免与 Windows 验收路径（2026-10-28，owner）〉。

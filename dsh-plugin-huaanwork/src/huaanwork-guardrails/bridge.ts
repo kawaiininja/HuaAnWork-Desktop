@@ -4,6 +4,7 @@ import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { capToolOutput } from "@huaanwork/policy/truncate";
 
 import { isShellTool, resultTextFailed, shellCommandOf } from "../client-huaanwork/logic/commandOutcome.ts";
+import { acceptanceInjectToolName, acceptanceToolFailure } from "../huaanwork-host/acceptance-hooks.ts";
 import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
 import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
 import {
@@ -109,12 +110,21 @@ export function apply(ctx: Context): void {
         });
       } else {
         child.runs.startTool(child.childId, tool);
+        // 验收钩子:在真实工具旁注入一个并发工具,用于观察 callId 独立记录与 +N。
+        const injectedName = acceptanceInjectToolName();
+        if (injectedName !== undefined) {
+          child.runs.startTool(child.childId, { name: injectedName, callId: "acceptance-injected" });
+          child.runs.startTool(child.childId, { name: `${injectedName}-b`, callId: "acceptance-injected-b" });
+        }
       }
       const result = await next();
       const capped = capResult(result);
       if (child !== undefined) {
         // 子代理工具只进 run 投影:失败保留为单工具事实,不改相位、不决定 run 终态。
         child.runs.endTool(child.childId, tool);
+        if (acceptanceToolFailure()) {
+          child.runs.noteChildError(child.childId, `acceptance injected tool failure: ${execution.name}`);
+        }
       } else {
         emit(ctx, {
           event: "tool/end",

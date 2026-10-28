@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as setNodeTimeout } from 'node:timers'
 
+import {
+  acceptanceExtraWarnings,
+  acceptanceHoldEndMs,
+  acceptanceHoldFinalizingMs,
+  acceptanceTerminalReason,
+} from './acceptance-hooks.ts'
 import type {
   RpcEvent,
   SubagentCancelResult,
@@ -120,6 +126,8 @@ type RunRecord = {
   cancelStarted: boolean
   /** 终态历史淘汰顺序;首次进入终态时分配,越小越旧。 */
   terminalOrder?: number
+  /** 验收钩子暂存的延迟结果;只在 `HOLD_END`/`HOLD_FINALIZING` 打开时使用。 */
+  pendingResult?: { stopReason: string }
 }
 
 const DEFAULT_ACTIVITY_FLUSH_MS = 1_000
@@ -386,6 +394,26 @@ export function createSubagentRunRegistry(options: SubagentRunRegistryOptions): 
     return tools.findIndex((activity) => activity.name === tool.name)
   }
 
+  /**
+   * 应用权威 resolved result。验收钩子可在此替换终态原因或追加告警;正常路径与
+   * 延迟路径都经由此处,保证 `stopLatched`/`stopping` 语义不被注入改变。
+   */
+  function settleResultNow(record: RunRecord, result: { stopReason: string }): void {
+    if (isTerminalPhase(record.run.phase)) return
+    if (record.resultState !== 'pending') return
+    const stopReason = acceptanceTerminalReason() ?? normalizeStopReason(result.stopReason)
+    record.resultState = 'resolved'
+    record.executionEnded = true
+    record.run.stopReason = stopReason
+    applyOutcome(record, stopReason)
+    for (const warning of acceptanceExtraWarnings()) appendWarning(record, warning)
+    if (record.candidateEnd === 'error' && stopReason !== 'error') {
+      appendWarning(record, { code: 'upstream-end-error', severity: 'error' })
+    }
+    touch(record)
+    publish(record)
+  }
+
   function activityPhase(record: RunRecord, idlePhase: 'reasoning' | 'generating'): void {
     if (record.run.phase === 'stopping') return
     record.run.phase = record.run.activeTools.length > 0 ? 'tool' : idlePhase
@@ -533,17 +561,27 @@ export function createSubagentRunRegistry(options: SubagentRunRegistryOptions): 
       const record = records.get(runId)
       if (record === undefined) return
       if (isTerminalPhase(record.run.phase)) return
-      if (record.resultState === 'resolved') return
-      const stopReason = normalizeStopReason(result.stopReason)
-      record.resultState = 'resolved'
-      record.executionEnded = true
-      record.run.stopReason = stopReason
-      applyOutcome(record, stopReason)
-      if (record.candidateEnd === 'error' && stopReason !== 'error') {
-        appendWarning(record, { code: 'upstream-end-error', severity: 'error' })
+      if (record.resultState !== 'pending') return
+      const holdMs =
+        acceptanceHoldEndMs() > 0
+          ? acceptanceHoldEndMs()
+          : record.run.phase === 'finalizing'
+            ? acceptanceHoldFinalizingMs()
+            : 0
+      if (holdMs > 0) {
+        if (record.pendingResult === undefined) {
+          record.pendingResult = result
+          setNodeTimeout(() => {
+            const current = records.get(runId)
+            if (current === undefined || current.pendingResult === undefined) return
+            const pending = current.pendingResult
+            delete current.pendingResult
+            settleResultNow(current, pending)
+          }, holdMs)
+        }
+        return
       }
-      touch(record)
-      publish(record)
+      settleResultNow(record, result)
     },
 
     rejectResult(runId, message) {

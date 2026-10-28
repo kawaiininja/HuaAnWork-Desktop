@@ -3,6 +3,8 @@
 本文件只记录本次实际执行的自动化门禁，以及因未获图形启动授权而未执行的真机项。脚本日志在 `.superpowers/sdd/2026-10-26-subagent-run-visibility/logs/`（git-ignored 暂存区），不随提交分发。
 
 > **状态更新（2026-10-27）**：本文 §1–§7 与「最终修复后复跑」记录的「未启动图形应用、真机项全部 Blocked」已被文末〈真机验收（2026-10-27，Electron 44 + deepseek-flash）〉取代；自动化门禁的记录与判定口径保持不变，凡涉及真机条目的判定以新章节为准。
+>
+> **最终判定订正（2026-10-28）**：文末〈验收判定订正（2026-10-28）〉统一了子项判定口径：A-01 改为 PASS、A-12 与 C-05 降为部分、E-05 改为 PASS、列明 A-13 的剩余子项，并补回此前摘要漏列的 B-07；其余条目按各节最新判定，不因本订正改判。
 
 ## 1. 结论
 
@@ -560,7 +562,7 @@ stderr 中的 `refreshAgentRestrict: restrict state not found` 仍是既有负�
 ### 结论（本节）
 
 - 本轮把上一节仍 Blocked 的 A-08、B-05、B-06、B-08、B-10、D-05 与部分 Blocked 的 C-04、C-06 判为 PASS；A-05、A-11、A-12、C-08、D-01、D-03、D-06、E-06 的覆盖面扩大；A-14 由 Blocked 升为部分（60 秒停止等待已观察，finalizing 与 max-tokens/refusal 文案未捕获）。
-- **仍 Blocked / 未验证**：真实 Host-only 重启（C-07/C-09，客户端失效视图只由注入的新代际快照验证）、C-02/C-03 与 D-02 的真机注入（Host 内部，仅单测）、D-07/D-08 的真机维度（代码/变体守卫证据）、A-07 的 5 分钟无活动提醒、A-14 的 finalizing 与 max-tokens/refusal 文案、A-04 的并发工具、B-04 的确切在途点、C-08 的全局 200 上限、真实读屏音频、真实内网目录与 Windows。
+- **仍 Blocked / 未验证**：真实 Host-only 重启（C-07/C-09，客户端失效视图只由注入的新代际快照验证）、C-02/C-03 与 D-02 的真机注入（Host 内部，仅单测）、D-07/D-08 的真机维度（代码/变体守卫证据）、A-07 的 5 分钟无活动提醒、A-14 的 finalizing 与 max-tokens/refusal 文案、A-04 的并发工具、B-04 的确切在途点、C-08 的全局 200 上限、真实读屏音频、真实内网目录与 Windows。（本节摘要漏列 B-07 cancel/end 竞态；其正式状态一直是 Blocked，以文末〈验收判定订正（2026-10-28）〉为准。）
 - 因此按设计 §10.1 的「验收通过判定」（A–D 全部通过、E-01～E-05 通过），**本功能仍未完全验收**：A-03/A-04/A-05/A-11/A-13/A-16/B-04/C-08/D-03 仍为部分，C-07/C-09 与上述注入项、Windows 仍 Blocked，E-05 与 E-06 仍是部分。本节与前述各节的 PASS 只覆盖各自表格明确列出的子项，不构成整体放行，也不勾选设计 §10.1 的复选框。
 
 ## Host 重启排查（2026-10-27，复核订正；2026-10-28 代码复核）
@@ -601,3 +603,231 @@ stderr 中的 `refreshAgentRestrict: restrict state not found` 仍是既有负�
 - **失败与退出边界**：定向测试覆盖 boot/adoption 失败、origin/header 漂移、arming 失败重试、旧 Host 终止未确认、并发重启与最终释放；remote-control offer 的旧 RPC 捕获缺陷已修复并有回归钉。真实应用最终 exit 0，旧/新 Host、renderer、main 残留进程数为 0；本地 fixture catalog 已停止。
 - **最终门禁**：handover 定向 6 文件 / **160 用例** + CDP 证据断言 **4/4**；`yarn typecheck` 通过；根 `yarn test` 中 huaanwork **3539 passed / 14 skipped**，其他 workspace 零失败；变体守卫 **11/11** 且 allowlist 7/65/6 未变；修复后完整 `yarn check` **exit 0**；`git diff --check` 与 `check:whitespace` 通过。
 - 因此 **C-07、C-09 及 A-13 的真实 Host 重启/stale 子项改判 PASS**。A-13 的其他既有部分项、E-05/E-06 的其他缺口与 Windows 未验证不变；本节不构成设计 §10.1 的整体放行。`sidecarDead` ready 清除闩锁仍是独立的断连恢复修复，不替代上述证据。
+
+## 验收判定订正（2026-10-28）
+
+本节只订正验收表的口径与漏项，不新增测试证据、不改产品行为、不勾选 §10.1；其余条目的判定以各节最新记录为准。
+
+### 判定口径
+
+- 真机条目按「用户可见场景是否被真实 `@` 路径观察」判定；内部不变量（如晚到 activation dispose、`stopRequestedAt` 的时间源）仍由单测钉住。
+- 一个条目包含多个子项时，只有全部子项都有证据才记 PASS；不能用其中一个子项的观察覆盖整条。
+- 无 GUI 维度的条目（Host 内部时序、代码/变体守卫审计）是否接受自动化证据，需 owner 显式裁定，不得默认算 PASS；真实 `@` 场景不能用 waiver 代替执行。
+
+### A-01 改为 PASS
+
+原〈真机验收（2026-10-27）〉表写「PASS（package）／legacy Blocked」，但该表采集时 legacy 尚无可用目录。〈E-05 真实组合补充（2026-10-27）〉已用本地 spec-valid 夹具 `legacy-demo` 打通 legacy 路径：事实文件 `.superpowers/sdd/2026-10-26-subagent-run-visibility/e05-acceptance-facts.md` 的「Legacy `@agent` (E-03/E-04 legacy, A-01 legacy, B-03)」写明 `@legacy-demo` 卡在用户消息后立即出现、每条显式 `@` 一张卡、标题为 `@legacy-demo`（无版本），截图 16；package 侧此前已由截图 05 证明「消息下方紧邻一张卡、每条 `@` 各自成卡」。两条路径的标题、运行实例和可见位置均满足 A-01，故改为 **PASS**。
+
+边界：`clientMessageId` 的精确锚定仍由自动化钉住（`subagentRuns.spec.ts:1022` 的「a run card anchors after the user message named by clientMessageId in its own tab」与 `:1077` 的「a matched anchor inserts directly after that message and keeps later items in order」）；真机证据证明的是可见位置与一 `@` 一卡，不是内部键值。legacy 用的是本地夹具而非真实内网目录，该环境限制记在 E-06，不回写到 A-01。
+
+### A-12 降为「部分」
+
+此前〈收口验收补充〉把 A-12 记为 PASS，依据只有长名称截断；但设计 A-12 还包含「并发工具默认前 2 个 + `+N`，可展开完整在途列表」，而并发工具在 GUI 中未被观察（与 A-04 同一缺口）。因此 A-12 降为 **部分**：三行层级、同名 `HH:MM:SS`、长名称截断已真机 PASS；并发工具展示仍未验证。
+
+### E-05 改为 PASS
+
+设计 E-05 只有五个子项：多 tab、同名并发、父 idle 后子代理仍运行、WS 重连、清理未确认提示。五项均已有真机证据：
+
+- 多 tab：E-05 截图 21–24，切换后各自保留卡片、无跨标签泄漏；
+- 同名并发：E-05 同一标签两条 `@legacy-demo` 各自独立计时/工具，取消其一不影响另一；
+- 父 idle：E-05 composer 回到「发送」后卡片继续更新、终止可用；
+- WS 重连：E-05 截图 27/28，断连冻结、重连后快照对账恢复；
+- 清理未确认：收口节截图 30，dispose 超时后保持停止中并显示「清理未确认」。
+
+因此 E-05 改为 **PASS**。Host 重启、5 分钟提醒、finalizing、全局 200、Windows、真实内网目录不属于 E-05 子项，不再用来压低 E-05。
+
+### C-05 降为「部分」
+
+设计 C-05 要求「活跃 run 和停止未确认 run 不丢失」。现有真机证据只覆盖活跃 run 的断连冻结与重连恢复（E-05 截图 27/28）；停止未确认 run 在断连/重连后的保留未观察。故 C-05 降为 **部分**，剩余子项为「stopping / cleanup-unconfirmed run 的重连保留」。
+
+### A-05 / A-14 的剩余子项补全
+
+- A-05：除 max-tokens/refusal 外，还包括 `unknown` 不得显示成功、单个工具失败不直接决定整个 run 失败；后两项目前只有自动化证据（`bridge.spec.ts:592`），真机未诱发。
+- A-14：除 finalizing 文案外，还包括各 stopReason 固定文案的完整性、提醒按优先级单条展示且全部可展开、60 秒提醒在重连后不重置、运行卡提醒不使用琥珀且由结构化 warning code/severity 决定样式。60 秒停止等待已观察（截图 33），但上述其余子项未全部真机验证。
+
+### B-03 保持 PASS 的边界
+
+B-03 的场景是「`startActivation()` 尚未返回时取消」；卡片处于「启动中」即 activation 发布前，真机启动中取消（截图 17）覆盖该用户可见场景。晚到 activation 的立即 dispose 是内部不变量，由 `sessions.spec.ts:503` 等单测钉住。B-04 要求分别命中 `createRuntime` 与 `startActivation` 两个在途点，真机只观察到一次笼统的启动中取消，故仍为部分。二者不是口径不一致。
+
+### A-13 保持「部分」，剩余子项写明
+
+A-13 已完成的子项：
+
+- 终态收为单行、每次运行独立：`gui-acceptance-facts.md` #8，截图 02（package 完成）、13（package 已停止）、16（legacy 完成）、18（legacy 工具相位取消）；
+- WS 断连冻结并标记滞后、重连恢复：E-05 截图 27/28；
+- Host 重启后旧活跃卡原位失效且不猜结果：2026-10-28 截图 40。
+
+剩余子项只有 **「手动展开不被后续事件重置」**：自动化钉在 `SubagentRunCard.spec.ts:376`，真机未构造「展开带告警/详情的卡后再收到后续事件」的场景；截图 30 的清理未确认卡只观察到收起态，没有展开后的后续事件。因此 A-13 不能改判 PASS，但剩余项从此前笼统的「其他既有部分项」收窄为这一条。
+
+另：renderer reload 后无法经 UI 重开 legacy 活稳定会话（`session.open` 返回 129 条但视图为空）是既有 live-session/resume 行为，不是运行卡缺陷，也不计入 A-13。
+
+### B-07 补回剩余清单
+
+正式 A–E 表中 B-07 一直是 **Blocked**（真机未构造 cancel/end 竞态；`subagent-runs.spec.ts:101/246` 与 `agent-package-runtime.spec.ts:1516` 为自动化证据）；但〈E-05 补充〉与〈收口验收补充〉末尾的「仍 Blocked/未验证」摘要漏列了它。现补回：B-07 仍在剩余项内，状态不变。
+
+### 验收裁定（2026-10-28，owner）
+
+以下五条由 owner 在本对话中批准落实，编号 R-ACC-1～R-ACC-5。它们只改变「无 GUI 维度条目能否以自动化证据视为通过」的口径，不把真实 `@` 场景或未执行的平台验证写成 PASS。
+
+- **R-ACC-1（C-02 / C-03：自动化充分）**：旧 `subagent/end` 按 `upstreamRunId` 结算、重复到达只生成一次终态，属于 Host 内部时序，渲染器 CDP 无法注入 Host lifecycle。registry 单测已覆盖该行为，故 C-02/C-03 以自动化证据视为通过，不再要求真机注入。
+- **R-ACC-2（D-02：自动化充分，不建伪造 parent 路径）**：没有生产路径制造 activation parent 错配；单测已钉「parent 不一致先 dispose 再拒绝、restrict 不执行」（`skills.spec.ts:1177`、`:1236`）。为验收新增可伪造 parent 的 Host IPC 会扩大安全面，故 D-02 以自动化证据视为通过，且不新增该类 IPC。
+- **R-ACC-3（D-07 / D-08：代码/变体守卫审计充分）**：非目标未混入与代码边界没有 GUI 维度；`git status` 仅限 `dsh-plugin-huaanwork/` 与 `docs/`、Stable/Beta 源码零改动、变体守卫 11/11 且白名单计数不变即为充分证据，故 D-07/D-08 视为通过。
+- **R-ACC-4（B-07：不可 waiver，必须实做）**：B-06 的双 cancel 幂等不等于 cancel/end 竞态；B-07 是真实 `@` 场景的时序验收，不能用 waiver 或 B-06 的证据代替，必须按收口清单 T2.2 构造两种顺序。
+- **R-ACC-5（Windows / 真实内网目录：仅作 E-06 环境记录，非验收 waiver）**：未执行的 Windows 与真实内网目录在 E-06 如实标注「未验证」；可选择后续补做，但不以 waiver 改变验收状态、不压低 E-05、不作为勾选 §10.1 的依据。
+
+### 订正后的计数
+
+| 分类 | 数量 | 条目 |
+| --- | --- | --- |
+| PASS（真机/门禁/自动化充分裁定） | 34 | A-01、A-02、A-06、A-08、A-09、A-10、A-15；B-01、B-02、B-03、B-05、B-06、B-08、B-09、B-10；C-01、C-02*、C-03*、C-04、C-06、C-07、C-09；D-01、D-02*、D-04、D-05、D-06、D-07*、D-08*；E-01、E-02、E-03、E-04、E-05 |
+| 部分 | 14 | A-03、A-04、A-05、A-07、A-11、A-12、A-13、A-14、A-16；B-04；C-05、C-08；D-03；E-06 |
+| Blocked | 1 | B-07 |
+| 合计 | 49 | — |
+
+`*` 表示按 R-ACC-1/2/3 以自动化证据视为通过，不是真机 PASS；其中 C-02/C-03 由 R-ACC-1、D-02 由 R-ACC-2、D-07/D-08 由 R-ACC-3 覆盖。
+
+- 34 + 14 + 1 = 49；未 PASS 共 **15** 项，其中 **14 项属于 A–D**，是 §10.1「A–D 全部通过」的直接缺口；E-06 是平台证据诚实项，按 R-ACC-5 如实标注即可。
+- E-01～E-05 已全部 PASS；整体放行只剩 A–D 的 14 项 + E-06 的诚实记录。
+- B-07 是唯一的 Blocked 项，按 R-ACC-4 必须实做，不能用 waiver 代替。
+- 本节不勾选 §10.1；按「A–D 全部通过、E-01～E-05 通过」的判定，功能仍未完全验收。
+
+## 验收收口执行记录（2026-10-28）
+
+本节记录收口清单的实际执行进展与阻塞，不改变上述判定与计数。
+
+### 验收钩子实现（T1/T2 前置）
+
+已在 `dsh-plugin-huaanwork` 实现默认惰性的验收钩子，全部经 `HUAANWORK_ACCEPTANCE_HOOKS=1` 总开关门控，未设置时生产行为不变：
+
+| 环境变量 | 用途 | 插入点 |
+| --- | --- | --- |
+| `HUAANWORK_ACCEPTANCE_HOLD_FINALIZING_MS` | 保持 `finalizing` 相位 N ms，供目视文案 | `subagent-runs.ts` 的 `settleResult` 延迟 |
+| `HUAANWORK_ACCEPTANCE_HOLD_END_MS` | 延迟自然结果发布，构造 cancel/end 竞态 | 同上 |
+| `HUAANWORK_ACCEPTANCE_PACKAGE_DELAY_POINT` / `..._MS` | 分别在 `createRuntime` / `startActivation` 前延迟 | `agent-package/host.ts` 两个 await 点 |
+| `HUAANWORK_ACCEPTANCE_INJECT_TOOL_NAME` | 在真实 child 工具旁注入一个并发工具 | `bridge.ts` 的 `tools/execute` |
+| `HUAANWORK_ACCEPTANCE_TERMINAL_REASON` | 把 resolved result 的终态原因替换为 `max-tokens` / `refusal` / `unknown` | `subagent-runs.ts` 的 `settleResultNow` |
+| `HUAANWORK_ACCEPTANCE_TOOL_FAILURE` | 把 child 工具标记为失败但不决定 run 终态 | `bridge.ts` 的 `endTool` 后 `noteChildError` |
+| `HUAANWORK_ACCEPTANCE_EXTRA_WARNINGS` | 结果发布时追加 info + error 两条告警 | `subagent-runs.ts` 的 `settleResultNow` |
+
+回归钉：`tests/huaanwork-host/acceptance-hooks.spec.ts` 共 **8 条**（主开关、默认惰性、合法/非法值回落），全部通过。
+
+### 门禁结果（钩子实现后，严格串行）
+
+| 门禁 | 结果 | 计数/说明 |
+| --- | --- | --- |
+| `corepack yarn typecheck` | PASS | 11 个 workspace 全绿 |
+| `corepack yarn workspace dsh-plugin-huaanwork test` | PASS | **3542 passed / 14 skipped**（含 acceptance-hooks 新增 3 条） |
+| `corepack yarn check:desktop-variants` | PASS | 11/11，allowlist 7/0、65/6 未变 |
+| `corepack yarn check`（第 1 次） | FAIL | 第 11 步 `update-server` 的 `artifact-validate.spec.ts` 因 `hdiutil create` 失败（87/88）；该 workspace 未被本次改动触及 |
+| `corepack yarn workspace update-server test tests/artifact-validate.spec.ts` | PASS | 隔离复跑 **88/88**，证实为宿主 `hdiutil` 环境 flake |
+| `corepack yarn check`（第 2 次整条） | PASS | 15 步全绿、无 `not ok`；日志 `.superpowers/acceptance-closure/logs/check-retry.log` |
+
+### D-03 路由级 origin 检查的证据边界
+
+GUI 中 webserver 外层鉴权连 same-origin curl 也拒绝，因此路由级 origin 检查不能在 GUI 中单独隔离。该检查以 `dsh-plugin-huaanwork/tests/huaanwork-host/routes.spec.ts:314` 的集成测试为证据：非 loopback / 伪造 Origin 返回 403、同源 loopback 返回 200、回环别名放行、非回环 Host 403。**外层鉴权拒绝不等于路由级 origin 拒绝**，本记录不把前者冒充后者。
+
+### 当前阻塞：真实模型配置不可用
+
+T1/T2 的真机场景需要真实 `@` 运行。本次在新隔离环境（`.superpowers/acceptance-closure/`）中创建本地账户后，默认模型端点为 `http://127.0.0.1:11434/v1`，该地址无服务；环境变量中无 `DEEPSEEK_API_KEY` / `DSH_API_KEY`。发送测试消息得到 `HuaAnWork model request to http://127.0.0.1:11434/v1 failed`，无法产生真实子代理运行。
+
+此前已配置好的隔离 profile（含 deepseek-flash 模型与 `@doc-clerk` 包）位于 `/tmp/huaanwork-accept-20261027-142256/userData`，因包含账户/凭据信息，当前权限模式不允许复制到工作区。因此 **T1/T2 的真机场景本轮未执行**，A–D 的 14 个缺口与 B-07 保持原状态，计数仍为 **34 PASS / 14 部分 / 1 Blocked**。
+
+继续执行需要 owner 提供以下任一条件：
+
+1. 可用于验收的 DeepSeek API key（或等效模型端点与凭据），用于在新隔离环境中配置 `deepseek-flash`/`deepseek-chat`；或
+2. 明确授权使用此前已配置的隔离 profile（含模型与包），并允许复制到工作区。
+
+在获得上述条件前，T1/T2 的真机场景按 Blocked 记录，不写成 PASS。
+
+## 验收收口场景执行结果（2026-10-28）
+
+owner 已授权使用此前配置的隔离 profile（含模型与包）。以下场景在隔离环境（`.superpowers/acceptance-closure/`，DSH_HOME 与 userData 均为工作区内副本）中执行，应用以 `HUAANWORK_ACCEPTANCE_HOOKS=1` 启动，CDP 9333，fixture catalog `127.0.0.1:18080`。证据 JSON 保存在 `.superpowers/acceptance-closure/logs/`。
+
+### 执行环境
+
+| 项 | 值 |
+| --- | --- |
+| 平台 | macOS arm64，Electron 44 |
+| 模型 | deepseek（复制 profile 的当前 active model） |
+| 包 | `@doc-clerk` v1.0.0（已启用） |
+| legacy 目录 | 本地 fixture catalog `127.0.0.1:18080`（`legacy-demo` / `legacy-broken` / `long-name`） |
+| 隔离 | `DSH_HOME` 与 `--user-data-dir` 均为工作区内副本；用户真实 profile 未修改 |
+
+### 场景判定
+
+| 场景 | 判定 | 证据文件 | 说明 |
+| --- | --- | --- | --- |
+| T1.1 A-03/A-14 finalizing 文案 | **PASS** | `t1-1-finalizing.json` | `HOLD_FINALIZING_MS=3000`，卡片在 finalizing 相位显示「正在确认执行结果」约 2 秒 |
+| T1.2 A-05/A-14 max-tokens 文案 | **PASS** | `t1-2-max-tokens.json` | `TERMINAL_REASON=max-tokens` → `failed` +「未完成 · 达到模型输出上限」 |
+| T1.2 A-05/A-14 refusal 文案 | **PASS** | `t1-2-refusal.json` | `TERMINAL_REASON=refusal` → `failed` +「未完成 · 子代理拒绝执行」 |
+| T1.3 A-07 5 分钟无活动提醒 | **PASS** | `t1-3-inactivity-reminder.json` | 卡片显示「已 5 分钟没有新活动」而非超时，未自动停止 |
+| T1.4 A-04/A-12 并发工具与 tool/end 隔离 | **PASS** | `t1-4-concurrent-tools.json` | 两工具并发显示；bash 结束后 injected_tool 仍保留 |
+| T1.4 A-12 前 2 + `+N` 与展开 | **PASS** | `t1-4-plus-n-and-expand.json` | 三工具时显示前 2 + `+1`；展开显示完整在途列表 |
+| T1.6 A-13 手动展开不被后续事件重置 | **PASS** | `t1-6-expand-persist.json` | 展开后发起新 run，原卡 `aria-expanded` 保持 true |
+| T1.8 C-05 停止未确认 run 重连保留 | **PASS** | `t1-8-stopping-reconnect.json` | 断连冻结 `data-frozen=true`，重连后 stopping/清理未确认保留 |
+| T1.9 A-05 unknown 终态 | **PASS** | `t1-9-unknown.json` | `TERMINAL_REASON=unknown` → `failed` +「失败 · 原因未知」 |
+| T1.9 A-05 单工具失败不决定 run 失败 | **PASS** | `t1-9-tool-failure.json` | 工具标记失败后 run 仍 completed |
+| T1.9 A-14 提醒优先级/非琥珀结构化样式 | **PASS** | `t1-9-alerts-style.json` | error 用 `role=alert` 红色、info 用普通文本蓝色，无琥珀；未知 code 统一「清理状态需要关注」 |
+| T1.9 A-14 60 秒提醒与重连不重置 | **PASS** | `t1-9-60s-reconnect.json` | 「停止已受理超过 1 分钟…」在重连后仍显示，未重置 |
+| T2.1 B-04 createRuntime 在途终止 | **PASS** | `t2-1-createRuntime.json` | 延迟 5s 内取消，晚到 runtime 被 dispose，未继续 startActivation |
+| T2.1 B-04 startActivation 在途终止 | **PASS** | `t2-1-startActivation.json` | 延迟 5s 内取消，晚到 activation 被 dispose，未继续执行 |
+| T2.2 B-07 cancel/end 竞态 | **PASS** | `t2-2-cancel-end-race.json` | 顺序 1：cancel 先受理，原始 completed 只留 stopReason，phase=stopped；顺序 2：end 先完成，cancel 返回 `already-terminal` |
+| T1.5 A-11/A-16 真实读屏 | **Blocked** | — | 无 VoiceOver/NVDA 音频采集环境；CDP AX 树已在此前验证，真实播报未执行 |
+| T1.7 C-08 全局 200 上限 | **Blocked** | — | 201 条真实 run 成本过高；每父 20 已在此前验证，全局 200 未在真机触发，自动化已覆盖淘汰逻辑 |
+| T3.2 真实内网目录 | **未验证** | — | `10.130.209.76:18080` 不可达；按 R-ACC-5 记录为 E-06 环境限制，不压低 E-05 |
+| T3.3 Windows | **未验证** | — | 无 Windows 真机；按 R-ACC-5 记录为 E-06 环境限制 |
+
+### 执行后计数
+
+| 分类 | 数量 | 条目 |
+| --- | --- | --- |
+| PASS（真机/门禁/自动化充分裁定） | **45** | A-01、A-02、A-03、A-04、A-05、A-06、A-07、A-08、A-09、A-10、A-12、A-13、A-14、A-15；B-01、B-02、B-03、B-04、B-05、B-06、B-07、B-08、B-09、B-10；C-01、C-02*、C-03*、C-04、C-05、C-06、C-07、C-09；D-01、D-02*、D-03、D-04、D-05、D-06、D-07*、D-08*；E-01、E-02、E-03、E-04、E-05 |
+| 部分 | **4** | A-11、A-16、C-08、E-06 |
+| Blocked | **0** | — |
+| 合计 | 49 | — |
+
+`*` 表示按 R-ACC-1/2/3 以自动化证据视为通过，不是真机 PASS。
+
+- 45 + 4 + 0 = 49；未 PASS 共 **4** 项，其中 **3 项属于 A–D**（A-11、A-16、C-08），E-06 为平台证据诚实项。
+- A-11/A-16 需真实辅助技术环境，C-08 需 201 条真实 run；三者均无法在当前环境完成，按 Blocked/未验证记录，不写成 PASS。
+- E-01～E-05 已全部 PASS；整体放行只剩 A-11/A-16（读屏）、C-08（全局 200）与 E-06（Windows/内网目录）的环境限制。
+- 本节不勾选 §10.1；按「A–D 全部通过、E-01～E-05 通过」的判定，功能仍未完全验收，但剩余缺口已收窄为环境/成本限制，而非未实现的产品行为。
+
+## 验收豁免与 Windows 验收路径（2026-10-28，owner）
+
+owner 决定豁免 A-11/A-16 与 C-08，并将 Windows 验收放到 GitHub 虚拟机执行。豁免只表示接受残余风险，**不等于这些条目已真机通过**；§10.1 复选框对豁免项仍不勾选。
+
+### R-ACC-6：A-11 / A-16 真实读屏豁免
+
+- **豁免内容**：不再要求本轮采集 VoiceOver/NVDA 的真实播报音频。
+- **保留证据**：CDP 可访问树（单个 `role=status`、`aria-live=polite`、可访问名）、键盘/Esc 与焦点返回、44px 命中区、reduced-motion 无脉冲、280px 无横向滚动。
+- **未验证边界**：真实辅助技术的播报时序、打断行为与清理失败只 alert 一次的听觉表现未验证；若存在 AT 专属问题，本轮不能发现。
+- **触发条件**：获得可用 AT 环境时，按 T1.5 的六项核对补做。
+
+### R-ACC-7：C-08 全局 200 上限豁免
+
+- **豁免内容**：不再要求本轮用 201 条真实 run 触发全局 200 淘汰。
+- **保留证据**：每父 20 上限已由 21 条真实 legacy run 验证；Host registry 与客户端 reducer 的每父 20 / 全局 200 淘汰、活跃与 stopping 不淘汰由单测覆盖（`subagent-runs.spec.ts`、`subagentRuns.spec.ts`）。
+- **未验证边界**：全局 200 在真实应用中的淘汰与 snapshot 对账未触发；该行为目前只有自动化证据。
+- **触发条件**：出现低成本批量 run 通道时按 T1.7 补做（分散至少 11 个父会话，按父聚合，不能以单父快照冒充全局证据）。
+
+### R-ACC-8：Windows 验收路径改为 GitHub 虚拟机（未执行）
+
+- **决定**：Windows 验收将在 GitHub 虚拟机（GHA）上执行，不在本机验收。
+- **当前状态**：**未执行、未验证**。本记录不是 Windows 真机 PASS，也不是 waiver 后的通过；在 GHA 运行完成并落证据前，Windows 在 E-06 中保持「未验证」。
+- **证据要求**：GHA 上需执行真实 `@` 完成与取消链路，记录平台、构建类型、Desktop SHA、Harness pin、测试人与日志；GHA 打包/CI 绿不能替代真实 `@` 验收。
+- **真实内网目录**：不在本次豁免范围内；`10.130.209.76:18080` 仍不可达，E-06 继续标注未验证。
+
+### 豁免后的计数
+
+| 分类 | 数量 | 条目 |
+| --- | --- | --- |
+| PASS（真机/门禁/自动化充分裁定） | 45 | 与〈验收收口场景执行结果（2026-10-28）〉的 PASS 表一致 |
+| 部分 | 1 | E-06（Windows 待 GHA、真实内网目录未验证） |
+| 豁免（owner 接受残余风险，非 PASS） | 3 | A-11、A-16（R-ACC-6）、C-08（R-ACC-7） |
+| Blocked | 0 | — |
+| 合计 | 49 | — |
+
+- 45 + 1 + 3 + 0 = 49；A–D 的条目已全部 PASS 或经 owner 豁免，E-01～E-05 全部 PASS。
+- 因此本子代理功能可记为 **complete with waiver**：A-11/A-16、C-08 豁免，Windows 待 GHA 验收，真实内网目录未验证。不得写成 49/49 全量 PASS，也不得把豁免项勾进 §10.1。
+- Windows GHA 验收完成并落证据后，E-06 才可更新为 Windows 已验证；否则整体状态保持 complete with waiver。

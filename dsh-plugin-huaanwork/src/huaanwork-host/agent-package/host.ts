@@ -14,7 +14,7 @@ import { mountSessionMcp } from '../../huaanwork-guardrails/agent-mcp.ts'
 import { refreshAgentRestrict } from '../../huaanwork-guardrails/present-as.ts'
 import type { AgentListItem } from '../../client-huaanwork/rpc-types.ts'
 import type { AgentsHost } from '../agents-host.ts'
-import { acceptanceCleanupTimeoutMs, acceptanceDisposeFailure } from '../acceptance-hooks.ts'
+import { acceptanceCleanupTimeoutMs, acceptanceDisposeFailure, acceptancePackageDelayMs, acceptancePackageDelayPoint } from '../acceptance-hooks.ts'
 import {
   resolveSubagents,
   type SubagentActivationHandle,
@@ -322,6 +322,15 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
   const stopRuntime = options.stopRuntime ?? stopAgentPackageProcesses
   /** 所有 dispose/停进程等待的上限;测试可缩短(默认 10 分钟,验收缝可覆盖)。 */
   const cleanupTimeoutMs = options.cleanupTimeoutMs ?? acceptanceCleanupTimeoutMs(ACTIVATION_CLEANUP_TIMEOUT_MS)
+
+  /** 验收钩子:在指定包 await 点延迟,用于命中 createRuntime/startActivation 在途取消。 */
+  async function acceptancePackageDelay(point: 'createRuntime' | 'startActivation'): Promise<void> {
+    if (acceptancePackageDelayPoint() !== point) return
+    const ms = acceptancePackageDelayMs()
+    if (ms <= 0) return
+    await new Promise<void>((resolve) => setTimeout(resolve, ms))
+  }
+
   const lastText = new Map<string, string>()
   const proposedThisTurn = new Set<string>()
   /**
@@ -929,6 +938,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
             await security.assertRunnable(pkg.slug, pkg.version)
           }
           assertLive()
+          await acceptancePackageDelay('createRuntime')
 
           runtime = await createRuntime({
             manifest,
@@ -1013,6 +1023,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
             ctx.huaanworkAgentPackageRequest.current = request
           }
           assertLive()
+          await acceptancePackageDelay('startActivation')
           activation = await startActivation({
             provider: 'spawn',
             label: `@${pkg.slug}`,
