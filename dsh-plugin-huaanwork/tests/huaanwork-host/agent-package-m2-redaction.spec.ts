@@ -15,7 +15,10 @@ import { redactSecrets } from '../../scripts/huaanwork-acceptance-redaction.mjs'
 
 describe('acceptance probe redaction', () => {
   it('redacts tokens and PEM blocks before a failure report is written', () => {
-    const secret = 'sk-live-0123456789abcdef'
+    // Redaction fixture only. "example" is a generic-api-key stopword, so this
+    // is not reported as a credential. The helper redacts the configured value;
+    // it does not need a live-looking token.
+    const secret = 'sk-example-0123456789abcdef'
     const pem = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----'
     const text = redactSecrets(`failed ${secret} ${pem}`, [secret]) as string
     assert.equal(text.includes(secret), false)

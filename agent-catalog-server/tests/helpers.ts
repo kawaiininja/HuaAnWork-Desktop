@@ -326,9 +326,14 @@ export function actorOf(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 12)
 }
 
-/** A syntactically complete (but throwaway) PEM block for redaction tests. */
+/**
+ * PEM-shaped block for redaction tests. The body is the word "dummy" and is
+ * far shorter than a PKCS#8 key, so it is not key material and the private-key
+ * scanner rule (which requires a long body) does not match it. Do not replace
+ * this with a generated key.
+ */
 export const FAKE_PRIVATE_KEY_PEM = [
   '-----BEGIN PRIVATE KEY-----',
-  'MC4CAQAwBQYDK2VwBCIEIB0dummy0dummy0dummy0dummy0dummy0dummy0dummy',
+  'dummy',
   '-----END PRIVATE KEY-----',
 ].join('\n')
