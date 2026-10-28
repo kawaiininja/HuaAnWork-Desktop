@@ -531,9 +531,10 @@ export function createSubagentRunRegistry(options: SubagentRunRegistryOptions): 
       const record = activeRecordOfChild(childId)
       if (record === undefined) return
       const index = findToolIndex(record.run.activeTools, tool)
-      if (index >= 0) record.run.activeTools.splice(index, 1)
+      if (index < 0) return
+      record.run.activeTools.splice(index, 1)
       record.run.lastActivity = clock()
-      if (index >= 0 && record.run.activeTools.length === 0 && record.run.phase !== 'stopping') {
+      if (record.run.activeTools.length === 0 && record.run.phase !== 'stopping') {
         record.run.phase = 'generating'
       }
       touch(record)

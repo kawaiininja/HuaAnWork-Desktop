@@ -438,6 +438,23 @@ describe("SubagentRunCard terminal card", () => {
     expect(view.textContent).not.toContain("失败 · 执行出错");
   });
 
+  it("终态详情不展示过期的取消 RPC 错误，仍保留真实清理告警", async () => {
+    const spies = createSpies();
+    const view = await mount(
+      createElement(Harness, {
+        run: TERMINAL_RUN,
+        now: 999_999,
+        spies,
+        cancelError: "无法连接 Host",
+      }),
+    );
+
+    await click(buttonByLabel(view, "展开 @代码审查 详情"));
+
+    expect(view.textContent).not.toContain("无法连接 Host");
+    expect(view.textContent).toContain("子代理释放失败，清理未确认");
+  });
+
   it("终态卡没有终止按钮", async () => {
     const spies = createSpies();
     const run: SubagentRunView = {

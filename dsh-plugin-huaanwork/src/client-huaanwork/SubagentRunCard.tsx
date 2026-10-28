@@ -134,7 +134,9 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
       ? alerts
       : alerts.slice(0, 1);
 
-  const alertElements = buildAlertElements(cancelError, visibleAlerts);
+  // 取消 RPC 错误属于活跃操作；终态详情只保留执行失败与真实清理告警。
+  const visibleCancelError = terminal ? undefined : cancelError;
+  const alertElements = buildAlertElements(visibleCancelError, visibleAlerts);
   const sortedTools = [...run.activeTools].sort(compareTools);
   const elapsed = formatElapsed(subagentElapsedMs(run, now, frozenAt));
   const statusDetail = subagentStatusDetail(run);
@@ -147,7 +149,7 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
     (run.failure !== undefined && run.failure !== "") ||
     alerts.length > 0 ||
     sortedTools.length > 0 ||
-    cancelError !== undefined;
+    visibleCancelError !== undefined;
   const showExpand = !terminal || hasTerminalDetails;
 
   const expandButton = (): ReactElement => (

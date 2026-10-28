@@ -1,7 +1,7 @@
 # HuaAnWork `@子代理` 运行可观测性与定向终止设计
 
 - 日期：2026-10-26
-- 状态：**待评估，未实施**。本文只记录调研结论和推荐方案，不代表任何界面、RPC 或宿主能力已经落地。
+- 状态：**已实施，complete with waiver（2026-10-28）**。本文 §1–§11 记录调研、设计与评审输入；实现与验收状态以文末验收记录为准。
 - 范围：HuaAnWork 高级模式中由用户显式发起的 legacy `@agent` 与智能体包 `@slug`。模型自主创建的嵌套子代理不在首轮范围内。
 - 基线：外层仓库 HEAD `1895210b749d3af028e3977ea165f5f0a267a68e`；`deepseek-harness` pin `1600d8a1e140dcde43a1a0941940a0480712c011`（`0.2.1-rc.1`）。
 - 约束：不修改 `deepseek-harness/`，不修改 Stable/Beta 源码，不新增变体白名单。行号以本次基线为准，后续实施须同时按符号名重新定位。
@@ -547,7 +547,7 @@ bridge 对已知 child 的事件改为更新 registry 并发送 run 投影；不
 
 ---
 
-本文是设计输入，不是实施完成证据。当前会话页仍没有上述运行卡、定向取消 RPC 或重连运行 snapshot。
+本文是设计输入，不是单独的实施完成证据。上述运行卡、定向取消 RPC 与重连运行 snapshot 已实现；当前验收结论为 **complete with waiver**，不是 49/49 全量 PASS。豁免、Windows 与真实内网目录边界见文末验收记录及 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`。
 
 ---
 

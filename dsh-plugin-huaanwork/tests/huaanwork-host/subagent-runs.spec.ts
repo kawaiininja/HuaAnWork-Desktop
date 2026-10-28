@@ -264,6 +264,25 @@ describe('subagent run registry', () => {
     expect(registry.get(runId)?.lastActivity).toBe(1_004)
   })
 
+  test('unmatched or duplicate tool ends do not refresh activity or publish a revision', () => {
+    const clock = { now: 1_000 }
+    const { registry } = recordingRegistry(clock)
+    const runId = registry.begin({ parentSessionId: 'parent', kind: 'legacy', label: '@review' })
+    registry.reserveChild(runId, 'child-activity')
+    registry.startTool('child-activity', { callId: 'call-activity', name: 'read_file' })
+    clock.now = 1_004
+    registry.endTool('child-activity', { callId: 'call-activity', name: 'read_file' })
+    const revision = registry.get(runId)?.revision
+
+    clock.now = 1_005
+    registry.endTool('child-activity', { callId: 'call-activity', name: 'read_file' })
+    clock.now = 1_006
+    registry.endTool('child-activity', { callId: 'missing-call', name: 'read_file' })
+
+    expect(registry.get(runId)?.lastActivity).toBe(1_004)
+    expect(registry.get(runId)?.revision).toBe(revision)
+  })
+
   test('non-success stop reasons fail the run', () => {
     const { registry } = recordingRegistry({ now: 7_000 })
     for (const reason of ['max-tokens', 'refusal', 'future-unknown-reason']) {
