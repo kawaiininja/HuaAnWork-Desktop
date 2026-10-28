@@ -24,7 +24,7 @@ it('preserves the Web URL and authentication while projecting shell and tray cal
     schedule: (value: DesktopShellSpec) => { shell = value; return disposeShell },
     registerTrayItem: (value: DesktopTrayItem) => { tray = value; return { refresh() {}, dispose: disposeTray } },
   } as unknown as DesktopRuntime
-  const release = bindNativeRuntime(parent, native)
+  const binding = bindNativeRuntime(parent, native)
   try {
     const runtime = createHostRuntime(child, runtimeSnapshot(native))
     let language: 'zh' | undefined
@@ -60,7 +60,84 @@ it('preserves the Web URL and authentication while projecting shell and tray cal
     expect(await response.json()).toEqual({ version: '2.0.8-beta.1' })
     await stopShell()
     expect(disposeShell).toHaveBeenCalledOnce()
-  } finally { await release(); parent.close(); child.close(); port1.close(); port2.close() }
+  } finally { await binding.release(); parent.close(); child.close(); port1.close(); port2.close() }
+})
+
+it('retains the shell through graceful Host disposal and destroys it only on final release', async () => {
+  const { port1, port2 } = new MessageChannel()
+  const [parent, child] = [port1, port2].map(port => new HostRpc({
+    send: value => port.postMessage(value),
+    listen: receive => { port.on('message', receive); return () => { port.off('message', receive) } },
+  })) as [HostRpc, HostRpc]
+  const disposeShell = vi.fn(async () => {})
+  const native = {
+    platform: 'win32', locale: 'en', setLocalePreference() {},
+    updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.7-beta.1', statePath: '/tmp/update' },
+    schedule: () => disposeShell,
+    registerTrayItem: () => ({ refresh() {}, dispose() {} }),
+  } as unknown as DesktopRuntime
+  const binding = bindNativeRuntime(parent, native)
+  try {
+    const runtime = createHostRuntime(child, runtimeSnapshot(native))
+    const stopShell = runtime.schedule({
+      url: 'http://127.0.0.1:1234/', authenticationUrl: 'http://127.0.0.1:1234/?token=fixture',
+      rendererAccessHeader: { name: 'x-dsh-desktop-renderer', value: 'fixture' },
+      readLocalePreference: () => 'en', readThemeSource: () => 'dark',
+      requestQuit() {}, requestModeChange: async () => {},
+    } as unknown as DesktopShellSpec)
+    await runtime.mountScheduled()
+
+    binding.retainShell()
+    await stopShell()
+    expect(disposeShell).not.toHaveBeenCalled()
+
+    await binding.release()
+    expect(disposeShell).toHaveBeenCalledOnce()
+  } finally {
+    await binding.release()
+    parent.close(); child.close(); port1.close(); port2.close()
+  }
+})
+
+it('preserve release detaches trays and RPC handlers but keeps the shell for final release', async () => {
+  const handlers = new Map<string, (args: any[], signal: AbortSignal) => unknown>()
+  const parent = {
+    call: () => Promise.resolve(undefined),
+    handle: (name: string, handler: (args: any[], signal: AbortSignal) => unknown) => {
+      handlers.set(name, handler)
+      return () => { handlers.delete(name) }
+    },
+  } as unknown as HostRpc
+  const disposeShell = vi.fn(async () => {})
+  const disposeTray = vi.fn()
+  const native = {
+    platform: 'win32', locale: 'en',
+    updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
+    schedule: () => disposeShell,
+    registerTrayItem: () => ({ refresh() {}, dispose: disposeTray }),
+  } as unknown as DesktopRuntime
+  const binding = bindNativeRuntime(parent, native)
+  const signal = new AbortController().signal
+  await handlers.get('shell:schedule')!([
+    'callback:1',
+    { url: 'http://127.0.0.1:1234/' },
+    'en',
+    'dark',
+    false,
+    false,
+  ], signal)
+  await handlers.get('tray:set')!([
+    'tray:1',
+    { group: 'tools', order: 1, id: 'plugin-action', label: 'Plugin action', invoke: 'callback:1:invoke' },
+  ], signal)
+
+  await binding.release({ preserveShell: true })
+  expect(disposeTray).toHaveBeenCalledOnce()
+  expect(handlers.size).toBe(0)
+  expect(disposeShell).not.toHaveBeenCalled()
+
+  await binding.release()
+  expect(disposeShell).toHaveBeenCalledOnce()
 })
 
 it('pins the confirmed-restart RPC seam: method name, interactive flag, boolean verdict flow', async () => {
@@ -107,7 +184,7 @@ it('pins the confirmed-restart RPC seam: method name, interactive flag, boolean 
     registerTrayItem: () => ({ refresh() {}, dispose() {} }),
     requestConfirmedRestart: async () => verdict,
   } as unknown as DesktopRuntime
-  const release = bindNativeRuntime(parent, native)
+  const binding = bindNativeRuntime(parent, native)
   try {
     const handler = handlers.get('native:requestConfirmedRestart')
     expect(handler, 'native:requestConfirmedRestart must be registered on the main side').toBeTypeOf('function')
@@ -116,7 +193,7 @@ it('pins the confirmed-restart RPC seam: method name, interactive flag, boolean 
     await expect(handler!([], signal)).resolves.toBe(true)
     verdict = false
     await expect(handler!([], signal)).resolves.toBe(false)
-  } finally { await release() }
+  } finally { await binding.release() }
 })
 
 it('pins the keep-awake RPC seam: method name, non-interactive timeout, boolean hold flow', async () => {
@@ -155,7 +232,7 @@ it('pins the keep-awake RPC seam: method name, non-interactive timeout, boolean 
     registerTrayItem: () => ({ refresh() {}, dispose() {} }),
     setKeepAwake: async (hold: boolean) => { seen.push(hold) },
   } as unknown as DesktopRuntime
-  const release = bindNativeRuntime(parent, native)
+  const binding = bindNativeRuntime(parent, native)
   try {
     const handler = handlers.get('native:setKeepAwake')
     expect(handler, 'native:setKeepAwake must be registered on the main side').toBeTypeOf('function')
@@ -164,7 +241,7 @@ it('pins the keep-awake RPC seam: method name, non-interactive timeout, boolean 
     await handler!([false], signal)
     expect(seen).toEqual([true, false])
     await expect(handler!([1], signal)).rejects.toThrow('native:setKeepAwake requires a boolean hold')
-  } finally { await release() }
+  } finally { await binding.release() }
 
   const bareHandlers = new Map<string, (args: any[], signal: AbortSignal) => unknown>()
   const bareParent = {
@@ -180,9 +257,9 @@ it('pins the keep-awake RPC seam: method name, non-interactive timeout, boolean 
     schedule: () => async () => {},
     registerTrayItem: () => ({ refresh() {}, dispose() {} }),
   } as unknown as DesktopRuntime
-  const releaseBare = bindNativeRuntime(bareParent, bare)
+  const bindingBare = bindNativeRuntime(bareParent, bare)
   try {
     const handler = bareHandlers.get('native:setKeepAwake')
     await expect(handler!([true], new AbortController().signal)).rejects.toBeInstanceOf(KeepAwakeUnavailableError)
-  } finally { await releaseBare() }
+  } finally { await bindingBare.release() }
 })

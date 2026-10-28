@@ -33,6 +33,7 @@ import {
   type StartAgentPackageProcessesOptions,
 } from '../../src/huaanwork-host/agent-package/runtime.ts'
 import { dispatchAt } from '../../src/huaanwork-host/agent-invoke.ts'
+import { createSubagentRunRegistry } from '../../src/huaanwork-host/subagent-runs.ts'
 import { noteCallerSession, resetChildSessionRegistry } from '../../src/huaanwork-host/child-sessions.ts'
 import {
   loadAgentPackageDraft,
@@ -1213,6 +1214,7 @@ function dispatchHarness(options: {
     huaanworkWorkspaceRoot: { current: '/tmp/workspace' },
     huaanworkAttachments: maps,
     huaanworkAgentPackageRequest: { current: null },
+    huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
     subagents: {
       startActivation: async (spec: ActivationSpec) => {
         activationCalls.push(spec)
@@ -1279,6 +1281,7 @@ describe('@slug package dispatch', () => {
       sessionId: 'session-a',
       name: 'weekly-report',
       remainder: '写周报',
+      clientMessageId: 'msg-1',
       packageHost: { findInvocable: async () => pkg },
       packageRuntime: {
         dispatch: async (input) => {
@@ -1294,7 +1297,12 @@ describe('@slug package dispatch', () => {
     expect(result.parentText).toContain('自动回到本会话')
     expect(result.parentText).toContain('不要用 call_host_tool')
     expect(calls).toEqual([
-      expect.objectContaining({ sessionId: 'session-a', pkg, remainder: '写周报' }),
+      expect.objectContaining({
+        sessionId: 'session-a',
+        pkg,
+        remainder: '写周报',
+        clientMessageId: 'msg-1',
+      }),
     ])
   })
 
@@ -1908,6 +1916,8 @@ describe('@agent legacy dispatch', () => {
       agents: { get: (id: string) => (id === childSessionId ? childAgent : undefined) },
       huaanworkAttachments: maps,
       huaanworkAgentRequest: { current: undefined as unknown },
+      // legacy 执行链要求注入的 run registry(Task 4);本文件只关心工具收窄。
+      huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async (spec: LegacyActivationSpec) => {
           activationSpecs.push(spec)
@@ -1988,6 +1998,7 @@ describe('@agent legacy dispatch', () => {
               },
             }
           : undefined,
+      huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
     }
 
     const dispatched = await dispatchAt({
@@ -2018,6 +2029,7 @@ describe('@agent legacy dispatch', () => {
             start: async () => ({}),
           },
           get: () => undefined,
+          huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
         } as never,
         sessionId: 'session-a',
         name: 'legacy-assistant',
@@ -2064,7 +2076,9 @@ describe('@agent legacy dispatch', () => {
       sessionId: 'parent-session',
       name: 'legacy-assistant',
       remainder: '整理本周进展',
-      resolveParent: async () => ({ id: 'parent-agent' }),
+      // Task 6 fail-closed 绑定核对 activation parent 与 run parent:parent 必须是本会话
+      // 的 live agent(session.id = 发起 @ 的 sessionId),与上一个 legacy 用例同形。
+      resolveParent: async () => ({ id: 'parent-agent', session: { id: 'parent-session' } }),
     })
     expect(holder.current).toBeUndefined()
 
@@ -2144,6 +2158,7 @@ describe('@agent legacy dispatch', () => {
       },
       huaanworkAgentRequest: { current: undefined as unknown },
       huaanworkAttachments: emptyAttachments(),
+      huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async (spec: { label?: string }) => {
           specs.push(spec)
@@ -2225,6 +2240,7 @@ describe('@agent legacy dispatch', () => {
       },
       huaanworkAttachments: maps,
       huaanworkAgentRequest: { current: undefined as unknown },
+      huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       huaanworkAgentPackageRequest: {
         current: {
           allow: ['read', AGENT_HTTP_TOOL, AGENT_SKILL_RUN_TOOL, 'mcp__weekly-report__echo'],

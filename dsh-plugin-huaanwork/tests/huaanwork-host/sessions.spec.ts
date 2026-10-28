@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   childrenOf,
   registerChildSession,
@@ -41,6 +41,17 @@ import {
 import { emptySettings, readHuaanworkSettings, writeHuaanworkSettings } from '../../src/huaanwork-host/settings.ts'
 import { assertStreamNetworkAllowed } from '../../src/huaanwork-host/net-gate.ts'
 import { sweepProjectLegacySessions } from '../../src/huaanwork-host/session-sweep.ts'
+import { ACTIVATION_CLEANUP_TIMEOUT_MS } from '../../src/huaanwork-host/agent-package/host.ts'
+import { dispatchAt } from '../../src/huaanwork-host/agent-invoke.ts'
+import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
+import {
+  HUAANWORK_SUBAGENT_RUN_ID,
+  type SubagentActivationHandle,
+} from '../../src/huaanwork-host/subagents-service.ts'
+import {
+  createSubagentRunRegistry,
+  type SubagentRunRegistry,
+} from '../../src/huaanwork-host/subagent-runs.ts'
 
 // —— 用例移植自旧 sidecar session-history.test.ts(L61-69 / L115-153 / L220-241)
 // 与 host.ts 会话 case 语义;存储 fixture 钉死读路径 <dshHome>/sessions ——
@@ -293,7 +304,8 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
     const routeCtx = makeRouteCtx(root)
     const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
     const received: { content: { text: string }[] }[] = []
-    const activationSpecs: { request: { prompt: { text: string }[] } }[] = []
+    const activationSpecs: { request: { prompt: { text: string }[] }; childId?: string; signal?: AbortSignal }[] = []
+    const registry = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
     const live: ListedAgent & { followup: (message: unknown) => void } = {
       id: sessionId,
       session: { id: sessionId },
@@ -335,6 +347,7 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
             return { childId: 'legacy-child', result: Promise.resolve({ ok: true }), dispose: async () => undefined }
           },
         },
+        huaanworkSubagentRuns: registry,
       } as unknown as SessionRuntimeContext
       await sessionSend(ctx, routeCtx, { text: '@legacy-assistant 整理本周进展', sessionId })
       expect(received).toHaveLength(1)
@@ -344,6 +357,15 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
       expect(text).toContain('不要用 call_host_tool')
       // 提示只给父会话;子代理首条 prompt 仍是人设 + 用户请求。
       expect(activationSpecs[0]!.request.prompt[0]!.text).toBe('你是旧目录助手\n\n---\n用户请求：\n整理本周进展')
+      // 预留 childId 是 Host 生成的 UUID;provider 返回实际 id 后重绑定。
+      expect(activationSpecs[0]!.childId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      )
+      const runs = registry.snapshot(sessionId).runs
+      expect(runs).toHaveLength(1)
+      expect(runs[0]!.kind).toBe('legacy')
+      expect(runs[0]!.label).toBe('@legacy-assistant')
+      expect(runs[0]!.childId).toBe('legacy-child')
     } finally {
       setAgentsDirectory(emptyDirectory as never)
     }
@@ -382,6 +404,565 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
     expect(calls).toEqual([
       { method: 'create', options: { sessionId, meta: { cwd: routeCtx.workspaceRoot.current }, agentOptions: { provider: 'deepseek-official', model: 'local' } } },
     ])
+  })
+})
+
+/**
+ * legacy `@agent` 执行链与子代理 run registry 的接线(设计 §5.1/§5.2)。
+ *
+ * 每条用例都钉一条取消/清理路径,并以 run 的真实相位收敛为准:只有执行终结且
+ * 清理确认后才是 `stopped`,accepted/abort/dispose 发起都不算。
+ */
+describe('legacy @agent 运行链接线', () => {
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+  /** catalog 目录:一个 `kind: 'agent'` 条目 + 固定人设(与既有 @agent 用例同一形状)。 */
+  function legacyCatalogDirectory(): { host: AgentsHost; restore: () => void } {
+    const emptyDirectory = {
+      list: () => ({ items: [] }),
+      refresh: async () => ({ items: [] }),
+      get: async () => undefined,
+      setEnabled: () => undefined,
+      addEndpoint: () => ({ ok: false as const, fieldErrors: [] }),
+      removeEndpoint: () => undefined,
+      snapshotForRuntime: () => ({ items: [] }),
+    }
+    const host = {
+      ...emptyDirectory,
+      list: () => ({
+        items: [
+          {
+            name: 'legacy-assistant',
+            source: 'catalog',
+            kind: 'agent',
+            description: '旧目录智能体',
+            version: '1.0.0',
+            permissions: [],
+            enabled: true,
+          },
+        ],
+      }),
+      get: async () => ({ persona: '你是旧目录助手' }),
+    } as unknown as AgentsHost
+    setAgentsDirectory(host)
+    return { host, restore: () => setAgentsDirectory(emptyDirectory as never) }
+  }
+
+  function legacyLiveAgent(
+    sessionId: string,
+    whenIdle?: () => Promise<void>,
+  ): ListedAgent & { followup: (message: unknown) => void } {
+    return {
+      id: sessionId,
+      session: { id: sessionId },
+      followup: () => undefined,
+      whenIdle: whenIdle ?? (async () => undefined),
+    }
+  }
+
+  function legacyRunContext(options: {
+    sessionId: string
+    live: ListedAgent & { followup: (message: unknown) => void }
+    registry: SubagentRunRegistry
+    startActivation: (spec: { childId?: string; signal?: AbortSignal }) => Promise<SubagentActivationHandle>
+  }): SessionRuntimeContext {
+    return {
+      agents: {
+        get: (id: string) => (id === options.sessionId ? options.live : undefined),
+        list: () => [options.live],
+      },
+      subagents: { startActivation: options.startActivation },
+      huaanworkSubagentRuns: options.registry,
+    } as unknown as SessionRuntimeContext
+  }
+
+  function newRegistry(): SubagentRunRegistry {
+    return createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
+  }
+
+  /**
+   * 等 run 出现。send 路径先做真实 settings 文件 I/O 才进 dispatchAt(评审 F-9),
+   * 微任务轮询跨不过这个宏任务边界,必须用 `vi.waitFor`。
+   */
+  async function runIdOf(
+    registry: SubagentRunRegistry,
+    sessionId: string,
+    clientMessageId?: string,
+  ): Promise<string> {
+    let runId = ''
+    await vi.waitFor(() => {
+      const run = registry
+        .snapshot(sessionId)
+        .runs.find((candidate) => clientMessageId === undefined || candidate.clientMessageId === clientMessageId)
+      runId = run?.runId ?? ''
+      expect(runId).toBeTruthy()
+    })
+    return runId
+  }
+
+  test('legacy cancel aborts before activation and disposes a late activation', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { restore } = legacyCatalogDirectory()
+    let resolveActivation!: (value: SubagentActivationHandle) => void
+    const activationPromise = new Promise<SubagentActivationHandle>((resolve) => {
+      resolveActivation = resolve
+    })
+    let disposeCalls = 0
+    const registry = newRegistry()
+    const specs: { childId?: string; signal?: AbortSignal }[] = []
+    const ctx = legacyRunContext({
+      sessionId,
+      live: legacyLiveAgent(sessionId),
+      registry,
+      startActivation: (spec) => {
+        specs.push(spec)
+        return activationPromise
+      },
+    })
+    try {
+      const sent = sessionSend(ctx, routeCtx, {
+        text: '整理本周进展',
+        sessionId,
+        at: { name: 'legacy-assistant', clientMessageId: '42' },
+      })
+      const runId = await runIdOf(registry, sessionId)
+      expect((await registry.requestCancel(sessionId, runId)).status).toBe('accepted')
+      expect(registry.get(runId)?.phase).toBe('stopping')
+      // 启动中的 abort 挂在保存的 controller 上,而不是一次性匿名 signal。
+      expect(specs[0]?.signal?.aborted).toBe(true)
+      resolveActivation({
+        childId: 'legacy-child',
+        result: Promise.resolve({ stopReason: 'aborted' }),
+        dispose: async () => {
+          disposeCalls += 1
+        },
+      })
+      await expect(sent).rejects.toThrow(/取消/)
+      // 晚到 activation:绑定 → 立即 dispose → 结果观察与 dispose 都结束后才 stopped。
+      expect(disposeCalls).toBe(1)
+      expect(registry.get(runId)?.phase).toBe('stopped')
+      expect(registry.get(runId)?.childId).toBe('legacy-child')
+      expect(registry.get(runId)?.clientMessageId).toBe('42')
+    } finally {
+      restore()
+    }
+  })
+
+  test('legacy run reserves a UUID child, rebinds to the provider child, and observes a rejected result', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { host, restore } = legacyCatalogDirectory()
+    const registry = newRegistry()
+    const specs: { childId?: string; signal?: AbortSignal; [HUAANWORK_SUBAGENT_RUN_ID]?: string }[] = []
+    let rejectActivation!: (error: Error) => void
+    const activationResult = new Promise((_resolve, reject) => {
+      rejectActivation = reject
+    })
+    const live = legacyLiveAgent(sessionId)
+    const ctx = legacyRunContext({
+      sessionId,
+      live,
+      registry,
+      startActivation: async (spec) => {
+        specs.push(spec)
+        return { childId: 'provider-assigned-child', result: activationResult, dispose: async () => undefined }
+      },
+    })
+    try {
+      await dispatchAt({
+        host,
+        ctx,
+        sessionId,
+        name: 'legacy-assistant',
+        remainder: '整理本周进展',
+        resolveParent: async () => live,
+      })
+      const runs = registry.snapshot(sessionId).runs
+      expect(runs).toHaveLength(1)
+      const runId = runs[0]!.runId
+      expect(specs[0]!.childId).toMatch(UUID_RE)
+      expect(specs[0]![HUAANWORK_SUBAGENT_RUN_ID]).toBe(runId)
+      // provider 未沿用预留 id:活动归因改绑到实际 childId。
+      expect(runs[0]!.childId).toBe('provider-assigned-child')
+      rejectActivation(new Error('子代理结果失败'))
+      // result rejection 走 rejectResult(执行失败),不是只表示启动失败的 failRun。
+      await vi.waitFor(() => {
+        expect(registry.get(runId)?.phase).toBe('failed')
+      })
+      expect(registry.get(runId)?.failure).toContain('子代理结果失败')
+    } finally {
+      restore()
+    }
+  })
+
+  test('cancel before the activation is published stops the run without dispose or an afterIdle wait', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { restore } = legacyCatalogDirectory()
+    const registry = newRegistry()
+    const specs: { childId?: string; signal?: AbortSignal }[] = []
+    let releaseIdle!: () => void
+    const idle = new Promise<void>((resolve) => {
+      releaseIdle = resolve
+    })
+    const live = legacyLiveAgent(sessionId, () => idle)
+    const ctx = legacyRunContext({
+      sessionId,
+      live,
+      registry,
+      startActivation: (spec) => {
+        specs.push(spec)
+        // 取消后才拒绝,始终不返回 activation:启动根本没有发布。
+        return new Promise<SubagentActivationHandle>((_resolve, reject) => {
+          spec.signal?.addEventListener('abort', () => reject(new Error('子代理启动已取消')))
+        })
+      },
+    })
+    try {
+      const sent = sessionSend(ctx, routeCtx, {
+        text: '整理本周进展',
+        sessionId,
+        at: { name: 'legacy-assistant', clientMessageId: '启动中' },
+      })
+      const runId = await runIdOf(registry, sessionId)
+      expect((await registry.requestCancel(sessionId, runId)).status).toBe('accepted')
+      await expect(sent).rejects.toThrow(/取消/)
+      expect(specs[0]?.signal?.aborted).toBe(true)
+      expect(registry.get(runId)?.phase).toBe('stopped')
+      // dispatchAt 抛错时 afterIdle 根本不会发布:父回合仍未 idle,run 已 stopped。
+      expect(registry.get(runId)?.cleanupBudgetMs).toBeUndefined()
+    } finally {
+      releaseIdle()
+      restore()
+    }
+  })
+
+  test('cancel of a published activation stays stopping until dispose resolves and leaves the sibling alone', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { restore } = legacyCatalogDirectory()
+    const registry = newRegistry()
+    const disposeGates: (() => void)[] = []
+    const disposeCalls: number[] = []
+    let started = 0
+    // 父回合保持未 idle:afterIdle 不会自己跑,清理只可能来自定向取消。
+    let releaseIdle!: () => void
+    const idle = new Promise<void>((resolve) => {
+      releaseIdle = resolve
+    })
+    const ctx = legacyRunContext({
+      sessionId,
+      live: legacyLiveAgent(sessionId, () => idle),
+      registry,
+      startActivation: async () => {
+        const index = started++
+        disposeCalls[index] = 0
+        const gate = new Promise<void>((resolve) => {
+          disposeGates[index] = resolve
+        })
+        return {
+          childId: `legacy-child-${String(index)}`,
+          result: Promise.resolve({ stopReason: 'aborted' }),
+          dispose: async () => {
+            disposeCalls[index]! += 1
+            await gate
+          },
+        }
+      },
+    })
+    try {
+      await sessionSend(ctx, routeCtx, {
+        text: '第一件',
+        sessionId,
+        at: { name: 'legacy-assistant', clientMessageId: 'first' },
+      })
+      await sessionSend(ctx, routeCtx, {
+        text: '第二件',
+        sessionId,
+        at: { name: 'legacy-assistant', clientMessageId: 'second' },
+      })
+      const runs = registry.snapshot(sessionId).runs
+      const runA = runs.find((run) => run.clientMessageId === 'first')!
+      const runB = runs.find((run) => run.clientMessageId === 'second')!
+      // 权威 aborted 已到但停止意图接管后仍停在 stopping,直到清理确认。
+      await vi.waitFor(() => {
+        expect(registry.get(runA.runId)?.phase).toBe('stopping')
+      })
+      expect((await registry.requestCancel(sessionId, runA.runId)).status).toBe('accepted')
+      await vi.waitFor(() => {
+        expect(disposeCalls[0]).toBe(1)
+      })
+      expect(registry.get(runA.runId)?.phase).toBe('stopping')
+      disposeGates[0]!()
+      await vi.waitFor(() => {
+        expect(registry.get(runA.runId)?.phase).toBe('stopped')
+      })
+      // 定向取消只作用于选中的 run:兄弟 activation 既不 dispose 也不进 stopped。
+      expect(registry.get(runB.runId)?.phase).toBe('stopping')
+      expect(disposeCalls[1]).toBe(0)
+    } finally {
+      for (const release of disposeGates) release?.()
+      releaseIdle()
+      restore()
+    }
+  })
+
+  test('afterIdle confirms cleanup only after the real result and dispose finish', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { host, restore } = legacyCatalogDirectory()
+    const registry = newRegistry()
+    let disposeCalls = 0
+    const live = legacyLiveAgent(sessionId)
+    const ctx = legacyRunContext({
+      sessionId,
+      live,
+      registry,
+      startActivation: async () => ({
+        childId: 'legacy-child',
+        result: Promise.resolve({ stopReason: 'completed' }),
+        dispose: async () => {
+          disposeCalls += 1
+        },
+      }),
+    })
+    try {
+      const dispatched = await dispatchAt({
+        host,
+        ctx,
+        sessionId,
+        name: 'legacy-assistant',
+        remainder: '整理本周进展',
+        resolveParent: async () => live,
+      })
+      const runId = registry.snapshot(sessionId).runs[0]!.runId
+      await vi.waitFor(() => {
+        expect(registry.get(runId)?.phase).toBe('completed')
+      })
+      await dispatched.afterIdle()
+      const run = registry.get(runId)!
+      expect(disposeCalls).toBe(1)
+      // 成功结果不因后续清理改写,也不追加收尾预算。
+      expect(run.phase).toBe('completed')
+      expect(run.cleanupWarnings).toEqual([])
+      expect(run.cleanupBudgetMs).toBeUndefined()
+      // 重复 afterIdle 共享同一清理 Promise,不二次 dispose。
+      await dispatched.afterIdle()
+      expect(disposeCalls).toBe(1)
+    } finally {
+      restore()
+    }
+  })
+
+  test('a rejected dispose keeps the natural phase and only adds the dispose warning', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { host, restore } = legacyCatalogDirectory()
+    const phases: string[] = []
+    try {
+      for (const stopReason of ['completed', 'error'] as const) {
+        const registry = newRegistry()
+        const live = legacyLiveAgent(sessionId)
+        const ctx = legacyRunContext({
+          sessionId,
+          live,
+          registry,
+          startActivation: async () => ({
+            childId: `legacy-child-${stopReason}`,
+            result: Promise.resolve({ stopReason }),
+            dispose: async () => {
+              throw new Error('释放失败')
+            },
+          }),
+        })
+        const dispatched = await dispatchAt({
+          host,
+          ctx,
+          sessionId,
+          name: 'legacy-assistant',
+          remainder: '整理本周进展',
+          resolveParent: async () => live,
+        })
+        const runId = registry.snapshot(sessionId).runs[0]!.runId
+        const natural = stopReason === 'completed' ? 'completed' : 'failed'
+        await vi.waitFor(() => {
+          expect(registry.get(runId)?.phase).toBe(natural)
+        })
+        await dispatched.afterIdle()
+        const run = registry.get(runId)!
+        expect(run.phase).toBe(natural)
+        expect(run.cleanupWarnings).toEqual([{ code: 'activation-dispose-failed', severity: 'error' }])
+        expect(run.cleanupBudgetMs).toBeUndefined()
+        phases.push(run.phase)
+      }
+      expect(phases).toEqual(['completed', 'failed'])
+    } finally {
+      restore()
+    }
+  })
+
+  test('a targeted cancel wakes an idle result wait without the cleanup budget', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { host, restore } = legacyCatalogDirectory()
+    const registry = newRegistry()
+    let settleActivation!: (value: { stopReason: string }) => void
+    const activationResult = new Promise((resolve) => {
+      settleActivation = resolve
+    })
+    let releaseDispose!: () => void
+    const disposeGate = new Promise<void>((resolve) => {
+      releaseDispose = resolve
+    })
+    let disposeCalls = 0
+    const live = legacyLiveAgent(sessionId)
+    const ctx = legacyRunContext({
+      sessionId,
+      live,
+      registry,
+      startActivation: async () => ({
+        childId: 'legacy-child',
+        result: activationResult,
+        dispose: async () => {
+          disposeCalls += 1
+          await disposeGate
+        },
+      }),
+    })
+    const dispatched = await dispatchAt({
+      host,
+      ctx,
+      sessionId,
+      name: 'legacy-assistant',
+      remainder: '整理本周进展',
+      resolveParent: async () => live,
+    })
+    const runId = registry.snapshot(sessionId).runs[0]!.runId
+    try {
+      // 正常 afterIdle 已开始等 real result;取消必须唤醒这次等待,而不是等满预算。
+      const cleanup = dispatched.afterIdle()
+      expect(disposeCalls).toBe(0)
+      expect((await registry.requestCancel(sessionId, runId)).status).toBe('accepted')
+      await vi.waitFor(() => {
+        expect(disposeCalls).toBe(1)
+      })
+      expect(registry.get(runId)?.cleanupBudgetMs).toBeUndefined()
+      expect(registry.get(runId)?.cleanupWarnings).toEqual([])
+      expect(registry.get(runId)?.phase).toBe('stopping')
+      settleActivation({ stopReason: 'aborted' })
+      releaseDispose()
+      await cleanup
+      expect(disposeCalls).toBe(1)
+      expect(registry.get(runId)?.phase).toBe('stopped')
+    } finally {
+      releaseDispose()
+      restore()
+    }
+  })
+
+  test('a short cleanup budget marks the run stopping once and converges after dispose (A-08)', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { host, restore } = legacyCatalogDirectory()
+    const registry = newRegistry()
+    let settleActivation!: (value: { stopReason: string }) => void
+    const activationResult = new Promise((resolve) => {
+      settleActivation = resolve
+    })
+    let releaseDispose!: () => void
+    const disposeGate = new Promise<void>((resolve) => {
+      releaseDispose = resolve
+    })
+    let disposeCalls = 0
+    const live = legacyLiveAgent(sessionId)
+    const ctx = legacyRunContext({
+      sessionId,
+      live,
+      registry,
+      startActivation: async () => ({
+        childId: 'legacy-child',
+        result: activationResult,
+        // dispose 同时结算 aborted result 并成功返回:释放即执行终结。
+        dispose: async () => {
+          disposeCalls += 1
+          await disposeGate
+          settleActivation({ stopReason: 'aborted' })
+        },
+      }),
+    })
+    const dispatched = await dispatchAt({
+      host,
+      ctx,
+      sessionId,
+      name: 'legacy-assistant',
+      remainder: '整理本周进展',
+      resolveParent: async () => live,
+    })
+    const runId = registry.snapshot(sessionId).runs[0]!.runId
+    try {
+      vi.useFakeTimers()
+      // 父未 idle:还没有任何清理等待,推进预算不得写 cleanupBudgetMs。
+      await vi.advanceTimersByTimeAsync(ACTIVATION_CLEANUP_TIMEOUT_MS)
+      expect(registry.get(runId)?.cleanupBudgetMs).toBeUndefined()
+      const cleanup = dispatched.afterIdle()
+      await vi.advanceTimersByTimeAsync(ACTIVATION_CLEANUP_TIMEOUT_MS)
+      // 预算到期先记事实再 dispose;stopped 要等 dispose 与结果观察都结束。
+      expect(registry.get(runId)?.cleanupBudgetMs).toBe(ACTIVATION_CLEANUP_TIMEOUT_MS)
+      expect(registry.get(runId)?.stopCause).toBe('cleanup-budget')
+      expect(registry.get(runId)?.phase).toBe('stopping')
+      // registry 契约(Task 2):`cleanup-budget-exceeded` 只在「已终态才发现预算到期」
+      // 时追加;未终态走 cleanupBudgetMs + stopCause + stopping,不重复记告警。
+      expect(registry.get(runId)?.cleanupWarnings).toEqual([])
+      releaseDispose()
+      await cleanup
+      expect(disposeCalls).toBe(1)
+      expect(registry.get(runId)?.phase).toBe('stopped')
+      expect(registry.get(runId)?.stopReason).toBe('aborted')
+    } finally {
+      vi.useRealTimers()
+      restore()
+    }
+  })
+
+  test('the legacy branch fails loudly when the run registry was not injected', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { host, restore } = legacyCatalogDirectory()
+    const live = legacyLiveAgent(sessionId)
+    const ctx = {
+      agents: { get: (id: string) => (id === sessionId ? live : undefined), list: () => [live] },
+      subagents: {
+        startActivation: async () => ({
+          childId: 'legacy-child',
+          result: Promise.resolve({}),
+          dispose: async () => undefined,
+        }),
+      },
+    } as unknown as SessionRuntimeContext
+    try {
+      await expect(
+        dispatchAt({
+          host,
+          ctx,
+          sessionId,
+          name: 'legacy-assistant',
+          remainder: '整理本周进展',
+          resolveParent: async () => live,
+        }),
+      ).rejects.toThrow(/subagent run registry is not initialized/)
+    } finally {
+      restore()
+    }
   })
 })
 

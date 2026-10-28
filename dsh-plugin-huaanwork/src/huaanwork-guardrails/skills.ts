@@ -13,7 +13,12 @@ import {
 } from "./agent-attachments.ts";
 import { refreshAgentRestrict } from "./present-as.ts";
 import type { AgentPackageSubagentRequest } from "../huaanwork-host/agent-package/types.ts";
-import { legacyAgentRequestOf, type LegacyAgentRequest } from "../huaanwork-host/subagents-service.ts";
+import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
+import {
+  legacyAgentRequestOf,
+  subagentRunIdOf,
+  type LegacyAgentRequest,
+} from "../huaanwork-host/subagents-service.ts";
 
 export const name = "huaanwork-skills";
 export const inject = ["skills", "agents", "tools", "subagents"];
@@ -52,10 +57,12 @@ type SkillRegistration = {
   resourceBase?: { kind: "directory"; path: string };
 };
 
-/** `startActivation` 返回值中包装消费的成员:子会话 id 与本地子 agent。 */
+/** `startActivation` 返回值中包装消费的成员:子会话 id、本地子 agent 与释放。 */
 type ActivationRun = {
   childId?: unknown;
   localAgent?: Agent;
+  /** fail closed 时释放本次 activation;上游 handle 恒有该方法。 */
+  dispose?(): Promise<void>;
 };
 
 type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨 skills/agents/tools/subagents 四服务,无统一类型导出
@@ -75,6 +82,14 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   };
   /** `@slug` 包回合请求;dispatch 在 startActivation 之前写入,activation 包装消费。 */
   huaanworkAgentPackageRequest?: { current?: AgentPackageSubagentRequest | null };
+  /**
+   * 子代理 run 权威状态机(index 注入)。activation 包装把本次 Host runId 与上游
+   * `subagent/start` 的 runId 对齐并核对三方 parent;缺席时只保留原有登记与工具护栏。
+   */
+  huaanworkSubagentRuns?: Pick<
+    SubagentRunRegistry,
+    "bindUpstreamStart" | "settleUpstreamEnd" | "parentSessionIdOf"
+  >;
   /** 会话工具附件表;包运行时工具与 MCP 名字按子会话挂载。 */
   huaanworkAttachments?: AttachmentMaps;
   on(
@@ -132,6 +147,10 @@ export function apply(ctx: Context): void {
   let restricting = false;
   // subagent/start 在 start 的异步链内同步派发且载荷不带 parent；按调用隔离，重叠的 start 不会互相覆盖。
   const startParent = new AsyncLocalStorage<string | undefined>();
+  // startActivation 的 Host runId 作用域：subagent/start 在同一异步链里派发，
+  // 监听器据此把上游 run 绑定到本次 @ 的运行卡；没有 runId 时显式覆盖为 undefined，
+  // 模型自主创建的嵌套子代理不会误绑到外层 run。
+  const startRun = new AsyncLocalStorage<string | undefined>();
 
   ctx.skills.register(loadSkill("explore.md"));
   ctx.skills.register(loadSkill("test-fix.md"));
@@ -198,8 +217,25 @@ export function apply(ctx: Context): void {
     consumePendingSpawn(agent);
   }) as never);
 
-  ctx.on("subagent/start", ((info: { id?: string }) => {
+  ctx.on("subagent/start", ((info: { id?: string; runId?: string }) => {
     if (!info.id) return;
+    // Host runId 由 startActivation 包装经 ALS 带到这里。上游 runId 与 childId 都非空
+    // 才绑定:模型自主创建的嵌套子代理没有 Host runId,只保留下面的父会话登记。
+    const hostRunId = startRun.getStore();
+    if (hostRunId !== undefined && typeof info.runId === "string" && info.runId.length > 0) {
+      // 登记表 parent 已知时只认与本次 activation 父会话一致的那次 start:不一致的
+      // 绑定会被下面的包装判为 parent mismatch 并 dispose,而 rebind 已经改写了 run 的
+      // identity。parent 未知(测试里 start 可能先于登记)仍交给 registry 按 runId 查。
+      const registryParent = ctx.huaanworkSubagentRuns?.parentSessionIdOf(hostRunId);
+      const activationParent = startParent.getStore();
+      if (registryParent === undefined || registryParent === activationParent) {
+        ctx.huaanworkSubagentRuns?.bindUpstreamStart({
+          hostRunId,
+          upstreamRunId: info.runId,
+          childId: info.id,
+        });
+      }
+    }
     const child = ctx.agents?.get?.(info.id);
     // 事件载荷只有 { runId, provider, id, local },没有 parent;父会话取自子会话 header,
     // 冷恢复路径靠它,start 包装路径靠下面的 AsyncLocalStorage。
@@ -210,7 +246,15 @@ export function apply(ctx: Context): void {
 
   // 与 subagent/start 成对的结束事件(载荷 id 即子会话 id):子会话结束后从登记表摘掉,
   // 否则取消父会话时会对已经退出的会话重复发起取消,登记表也无界增长。
-  ctx.on("subagent/end", ((info: { id?: string }) => {
+  ctx.on("subagent/end", ((info: { id?: string; runId?: string; stopReason?: string }) => {
+    // 严格按 upstreamRunId 配对:旧 end 只结算旧 run,未知 id 由 registry 忽略,
+    // 不得按 childId 或「最近一次 start」改写新 run 的状态或登记。
+    if (typeof info.runId === "string" && info.runId.length > 0) {
+      ctx.huaanworkSubagentRuns?.settleUpstreamEnd({
+        upstreamRunId: info.runId,
+        stopReason: info.stopReason ?? "unknown",
+      });
+    }
     if (typeof info.id === "string" && info.id.length > 0) forgetChildSession(info.id);
   }) as never);
 
@@ -311,9 +355,43 @@ export function apply(ctx: Context): void {
       // legacy 请求挂在本次调用的 spec 符号键上,不读全局容器。
       const pkg = ctx.huaanworkAgentPackageRequest?.current;
       const legacy = legacyAgentRequestOf(args[0]);
+      const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
+      // Host runId 与请求同一批快照:legacy 写在 spec 符号键上,包写在请求对象上。
+      // 符号键随本次 spec 走,直接采信;全局包请求只属于发布它、且带着预留子会话 id
+      // 的那次 activation —— 同一窗口里别的 activation(模型 subagent 工具、同会话
+      // 并发发起的其他子代理)没带符号或 childId 不符时不得继承它的 run,否则监听器
+      // 会改写该 run 的 childId/upstreamRunId。
+      const specChildId = (args[0] as { childId?: unknown } | undefined)?.childId;
+      const hostRunId =
+        subagentRunIdOf(args[0]) ??
+        (pkg !== undefined &&
+        pkg !== null &&
+        pkg.parentSessionId === parentFromCall &&
+        specChildId === pkg.childId
+          ? pkg.runId
+          : undefined);
       try {
-        const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
-        const run = await startParent.run(parentFromCall, () => originalActivation(...args));
+        const run = await startRun.run(hostRunId, () =>
+          startParent.run(parentFromCall, () => originalActivation(...args)),
+        );
+        // fail closed:激活的父会话与登记表里的 run parent 必须是同一个。三方 parent
+        // 不一致时先释放本次 activation,再拒绝启动;后续 restrict/refresh/bindChild
+        // 一律不执行。没有 Host runId 的嵌套子代理不在本检查范围内。
+        if (hostRunId !== undefined) {
+          const activationParent = sessionIdOf(parentFromStartArgs(args));
+          const registryParent = ctx.huaanworkSubagentRuns?.parentSessionIdOf(hostRunId);
+          if (
+            registryParent !== undefined &&
+            (activationParent !== registryParent || parentFromCall !== registryParent)
+          ) {
+            try {
+              await run?.dispose?.();
+            } catch {
+              // 释放失败不能顶替不一致错误,也不能留下未处理的 rejection。
+            }
+            throw new Error("subagent activation parent mismatch");
+          }
+        }
         const childSessionId = run === undefined ? undefined : sessionIdOf(run.childId);
         // 包请求只认宿主预留的子会话 id:provider 沿用预留 id 才在包装里接线。
         // 另分配的 id 由 host 的 activation 返回后路径补挂;同会话并发发起的

@@ -71,7 +71,9 @@ export type RpcRequest = {
     | "task.create"
     | "task.remove"
     | "task.bindSession"
-    | "task.rename";
+    | "task.rename"
+    | "subagent.list"
+    | "subagent.cancel";
   params?: unknown;
 };
 
@@ -356,6 +358,61 @@ export type AgentPackageConfirmCard = {
   consentHint: string;
 };
 
+/**
+ * 一次显式 @ 调用的展示相位。`stopping` 表示停止/强制释放已开始但尚未确认完成；
+ * `stopped` 只在执行终结与所需清理都确认后出现（见设计 §5.2）。
+ */
+export type SubagentRunPhase =
+  | 'starting'
+  | 'reasoning'
+  | 'generating'
+  | 'tool'
+  | 'finalizing'
+  | 'stopping'
+  | 'completed'
+  | 'failed'
+  | 'stopped'
+
+/** 权威执行结果的原因；无法识别的一律归为 `unknown`，绝不当作成功。 */
+export type SubagentStopReason = 'completed' | 'aborted' | 'error' | 'max-tokens' | 'refusal' | 'unknown'
+
+/** 结构化清理告警：UI 按稳定 `code` 映射文案，不解析任意错误文本。 */
+export type SubagentCleanupWarning = { code: string; severity: 'info' | 'error' }
+
+/** 一个仍在运行的子代理工具活动；`id` 是 registry 内部标识，`callId` 来自上游事件。 */
+export type SubagentToolActivity = { id: string; callId?: string; name: string; startedAt: number }
+
+/** 单次子代理 run 的权威展示投影（WS 与 snapshot 共用同一形状）。 */
+export type SubagentRunProjection = {
+  runId: string
+  parentSessionId: string
+  clientMessageId?: string
+  childId?: string
+  upstreamRunId?: string
+  kind: 'legacy' | 'package'
+  label: string
+  packageVersion?: string
+  phase: SubagentRunPhase
+  activeTools: SubagentToolActivity[]
+  startedAt: number
+  endedAt?: number
+  lastActivity?: number
+  stopRequestedAt?: number
+  stopReason?: SubagentStopReason
+  stopCause?: 'targeted-cancel' | 'cleanup-budget' | 'aborted'
+  cleanupBudgetMs?: number
+  cleanupWarnings: SubagentCleanupWarning[]
+  failure?: string
+  generation: string
+  revision: number
+}
+
+/** `subagent.list` 的对账快照：捕获时的 generation/revision 与同形状的 run 投影。 */
+export type SubagentRunSnapshot = { generation: string; revision: number; runs: SubagentRunProjection[] }
+
+/** `subagent.cancel` 的结果；`already-terminal` 不重新取消。 */
+export type SubagentCancelResult = { status: 'accepted' | 'already-terminal'; runId: string }
+
 /** 事件归属会话：token/tool/diff/session 事件携带发起回合的会话 id，前端与收集器据此归因。 */
 export type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
@@ -412,4 +469,8 @@ export type RpcEvent =
       durationMs?: number;
     }
   | { event: "automation/missed"; automationId: string; projectId: string | null; coalescedCount: number; missedAt: number }
-  | { event: "automation/widget"; automationId: string; projectId: string | null; time: number };
+  | { event: "automation/widget"; automationId: string; projectId: string | null; time: number }
+  /** 子代理 run 的权威投影；`activityFlushMs > 0` 时高频 token/reasoning 合并发布。 */
+  | { event: "subagent/run"; run: SubagentRunProjection }
+  /** 终态历史被淘汰；客户端只在 generation/revision 匹配时删除该 run。 */
+  | { event: "subagent/run-remove"; runId: string; parentSessionId: string; generation: string; revision: number };

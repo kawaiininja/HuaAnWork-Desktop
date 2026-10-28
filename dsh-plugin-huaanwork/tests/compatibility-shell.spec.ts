@@ -196,6 +196,20 @@ describe('isolated compatibility shell', () => {
     shell.dispose()
   })
 
+  it('adopts new Host callbacks without replacing the compatibility document', async () => {
+    const { shell, handler, event, spec, webContents } = fixture()
+    await shell.load()
+    const nextSpec = { ...spec, mode: 'extended', requestModeChange: vi.fn(async () => {}) } as DesktopShellSpec
+    shell.adoptSpec(nextSpec)
+
+    await handler(event(), 'mode-advanced')
+    expect(nextSpec.requestModeChange).toHaveBeenCalledExactlyOnceWith('advanced')
+    expect(spec.requestModeChange).not.toHaveBeenCalled()
+    expect(handler(event(), 'state')).toMatchObject({ mode: 'extended' })
+    expect(webContents.loadFile).toHaveBeenCalledOnce()
+    shell.dispose()
+  })
+
   it('returns persistence and update failures to the original inline error UI', async () => {
     const { shell, handler, event, spec, actions } = fixture()
     await shell.load()

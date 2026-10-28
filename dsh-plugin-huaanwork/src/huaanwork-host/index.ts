@@ -6,6 +6,7 @@ import type { ConfirmedRestartRuntime } from '../host-runtime-bridge.ts'
 import { sweepLegacyChatAutoSessions } from './automation-sweep.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
+import { createSubagentRunRegistry } from './subagent-runs.ts'
 import { installNetworkGate } from './net-gate.ts'
 import { startAutomationScheduler } from './automation-scheduler.ts'
 import { bindAutomationRuntime, type AutomationRuntime } from './automations-host.ts'
@@ -142,6 +143,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     }
     return runtime.requestConfirmedRestart()
   })
+  // 子代理 run 权威状态机(设计 §5.2):holders 安装后创建一次,经 ctx 注入;
+  // 事件与路由共用同一个 hub.broadcast(routeCtx.emit)。
+  const subagentRuns = createSubagentRunRegistry({ emit: routeCtx.emit })
+  ctx.huaanworkSubagentRuns = subagentRuns
   // 执行体与 collector 接线。调度 tick 走同一 enqueueAutomation,不直接调 executeRun。
   const runtime = ctx as unknown as AutomationRuntime
   bindAutomationRuntime(runtime, routeCtx)

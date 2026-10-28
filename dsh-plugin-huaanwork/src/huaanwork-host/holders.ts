@@ -9,6 +9,7 @@ import type { AgentPackageSubagentRequest } from './agent-package/types.ts'
 import type { HuaanworkEventHub } from './events.ts'
 import type { RouteContext } from './routes.ts'
 import type { SessionRuntimeContext } from './sessions.ts'
+import type { SubagentRunRegistry } from './subagent-runs.ts'
 
 export interface HuaanworkHostConfig {
   dshHome: string
@@ -48,6 +49,8 @@ declare module '@deepseek-ai/cordis' {
      * index 在 host 之前创建并注入;holder 只读,不参与构造。
      */
     huaanworkAgentCatalogSecurity: AgentCatalogSecurity
+    /** 子代理 run 权威状态机(设计 §5.2);index 在 holders 安装后创建并注入。 */
+    huaanworkSubagentRuns: SubagentRunRegistry
   }
 }
 
@@ -70,6 +73,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkCheckpointUserDataDir',
   'huaanworkAgentCatalogClient',
   'huaanworkAgentCatalogSecurity',
+  'huaanworkSubagentRuns',
 ] as const
 
 let installed = false

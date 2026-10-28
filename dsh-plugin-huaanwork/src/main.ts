@@ -1660,6 +1660,7 @@ async function start(): Promise<void> {
           desktopPnpmBootstrap, logDirectory: join(desktopUserDataDir, 'logs', 'host') },
         runtime, rendererToken: browserAccess.rendererHeader.value,
         prepareCertificate: prepareHostCertificate,
+        logHostRestart: message => { electronLogger.info(message) },
         bindHost: host => generation.bindHost(host), requestQuit,
         onFailure: (error, exit) => {
           electronLogger.error(formatUnexpectedHostExit(error, exit))

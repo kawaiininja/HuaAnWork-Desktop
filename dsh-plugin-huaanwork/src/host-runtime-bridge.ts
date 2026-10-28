@@ -69,7 +69,7 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Conf
   const callbacks = (handlers: Record<string, (...args: any[]) => unknown>) => {
     const id = `callback:${++sequence}`
     const releases = Object.entries(handlers).map(([name, handler]) => rpc.handle(`${id}:${name}`, args => handler(...args)))
-    return { id, release: () => releases.forEach(dispose => dispose()) }
+    return { id, release: () => releases.forEach(dispose => { dispose() }) }
   }
   // Electron resolves the system fallback; the startup snapshot may still be English.
   let localeSync = Promise.resolve()
@@ -137,7 +137,7 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Conf
       }
       trayPublishers.set(id, publish)
       publish()
-      return { refresh: publish, dispose() { trayPublishers.delete(id); releases.forEach(release => release()); void send('tray:dispose', [id]) } }
+      return { refresh: publish, dispose() { trayPublishers.delete(id); releases.forEach(release => { release() }); void send('tray:dispose', [id]) } }
     },
     show() { void send('native:show') },
     notifyAttention(value) { void send('native:notifyAttention', [value]) },
@@ -170,12 +170,22 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Conf
   return runtime
 }
 
+export interface HostNativeRuntimeBinding {
+  /** Keep the mounted shell when the old Host gracefully disposes its effects. */
+  retainShell(): void
+  /** Detach this Host's native resources; only final mode destroys retained shells. */
+  release(options?: { preserveShell?: boolean }): Promise<void>
+}
+
 /** Install only the declared native surface; never expose arbitrary Electron APIs. */
-export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): () => Promise<void> {
+export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): HostNativeRuntimeBinding {
   const trays = new Map<string, DesktopTrayItemRegistration>()
   const shells = new Map<string, () => Promise<void>>()
+  const retainedShells = new Map<string, () => Promise<void>>()
   const preferences = new Map<string, { locale: any; theme: any }>()
   const releases: (() => void)[] = []
+  let retainingShell = false
+  let detached = false
   const handle = (name: string, fn: (args: any[], signal: AbortSignal) => unknown) => { releases.push(rpc.handle(name, fn)) }
   const callback = (method: string, args: unknown[] = []) => rpc.call(method, args)
   const report = (promise: Promise<unknown>) => { void promise.catch(error => process.stderr.write(`${String(error)}\n`)) }
@@ -225,7 +235,14 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): () => 
     if (!state) throw new Error('Host shell is unavailable')
     state.locale = locale; state.theme = theme
   })
-  handle('shell:dispose', async ([id]) => { const dispose = shells.get(id); shells.delete(id); preferences.delete(id); await dispose?.() })
+  handle('shell:dispose', async ([id]) => {
+    const dispose = shells.get(id)
+    shells.delete(id)
+    preferences.delete(id)
+    if (dispose === undefined) return
+    if (retainingShell) retainedShells.set(id, dispose)
+    else await dispose()
+  })
   handle('tray:set', ([id, data]) => {
     trays.get(id)?.dispose()
     const project = (entry: any) => ({ ...entry, label: () => entry.label, enabled: () => entry.enabled,
@@ -241,9 +258,27 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): () => 
   handle('update:showManualCheckResult', ([result]) => runtime.updates.showManualCheckResult(result))
   handle('update:downloadAndOpen', ([version, channel, expectedSha256], signal) => runtime.updates.downloadAndOpen(version, signal, channel, expectedSha256))
   handle('update:notify', ([value]) => runtime.updates.notify(value))
-  return async () => {
-    trays.forEach(tray => tray.dispose()); trays.clear()
-    await Promise.all([...shells.values()].map(dispose => dispose())); shells.clear(); preferences.clear()
-    releases.forEach(release => release())
+  const detachHostResources = (): void => {
+    if (detached) return
+    detached = true
+    trays.forEach(tray => { tray.dispose() })
+    trays.clear()
+    releases.forEach(release => { release() })
+    releases.length = 0
+  }
+  return {
+    retainShell() { retainingShell = true },
+    async release(options = {}) {
+      retainingShell = options.preserveShell === true
+      detachHostResources()
+      if (retainingShell) {
+        for (const [id, dispose] of shells) retainedShells.set(id, dispose)
+      } else {
+        await Promise.all([...shells.values(), ...retainedShells.values()].map(dispose => dispose()))
+        retainedShells.clear()
+      }
+      shells.clear()
+      preferences.clear()
+    },
   }
 }

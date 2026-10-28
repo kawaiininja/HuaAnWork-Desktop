@@ -43,6 +43,7 @@ import {
   writeAgentPackageState,
 } from '../../src/huaanwork-host/agent-package/store.ts'
 import type { AgentPackageState } from '../../src/huaanwork-host/agent-package/types.ts'
+import { createSubagentRunRegistry } from '../../src/huaanwork-host/subagent-runs.ts'
 
 /**
  * Task 8:per-slug 生命周期门禁(I-11)。
@@ -279,6 +280,7 @@ function dispatchInput(): {
   return {
     ctx: {
       huaanworkWorkspaceRoot: { current: join(root, 'workspace') },
+      huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async () => {
           throw new Error('dispatch must be rejected by the lifecycle gate')

@@ -11,15 +11,20 @@ import {
   type ElectronLivenessApi, type IsolatedHostExit, type IsolatedHostOptions,
 } from '../src/host-process.ts'
 
-function fixture() {
-  const child = Object.assign(new EventEmitter(), {
-    stdout: new EventEmitter(), stderr: new EventEmitter(),
-    postMessage: vi.fn((message: { kind: string; id: number; method?: string }) => {
-      if (message.kind === 'call') queueMicrotask(() => child.emit('message', { kind: 'result', id: message.id, value: { pid: 123 } }))
-    }),
-    kill: vi.fn(() => { queueMicrotask(() => child.emit('exit', 0)); return true }),
+function fixture(pids: number[] = [123]) {
+  const children = pids.map(pid => {
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(), stderr: new EventEmitter(),
+      postMessage: vi.fn((message: { kind: string; id: number; method?: string }) => {
+        if (message.kind === 'call') queueMicrotask(() => child.emit('message', { kind: 'result', id: message.id, value: { pid } }))
+      }),
+      kill: vi.fn(() => { queueMicrotask(() => child.emit('exit', 0)); return true }),
+    })
+    return child
   })
-  state.fork.mockReturnValue(child)
+  const child = children[0]!
+  state.fork.mockReset()
+  state.fork.mockImplementation(() => children[Math.min(state.fork.mock.calls.length - 1, children.length - 1)])
   let host!: DesktopStartupGenerationHost
   const onFailure = vi.fn()
   const options = {
@@ -28,7 +33,7 @@ function fixture() {
     rendererToken: 'fixture', prepareCertificate: async () => ({ failureCode: 'fixture' }),
     bindHost: (value: DesktopStartupGenerationHost) => { host = value }, requestQuit() {}, onFailure,
   } as unknown as IsolatedHostOptions
-  return { child, options, onFailure, host: () => host }
+  return { child, children, options, onFailure, host: () => host }
 }
 
 /** The Electron surface the liveness probe normally gets from `require('electron')`. */
@@ -59,7 +64,7 @@ function livenessHarness(dialogResponse: number) {
   const child = { kill: vi.fn(() => true) }
   const onUserStop = vi.fn()
   return {
-    api, rpc, child, onUserStop, published, send,
+    api, rpc, child, onUserStop, published, send, handlers,
     reportTurns: (turns: number) =>
       (listeners.get(HOST_LIVENESS_TURNS_CHANNEL) as ((event: unknown, turns: number) => void) | undefined)?.({}, turns),
     stop: () => (handlers.get(HOST_LIVENESS_STOP_CHANNEL) as (() => Promise<boolean>) | undefined)?.(),
@@ -181,5 +186,138 @@ it('keeps the Host alive when the liveness stop is cancelled', async () => {
     dispose()
   } finally {
     vi.useRealTimers()
+  }
+})
+
+const ACCEPTANCE_HOST_RESTART_CHANNEL = 'huaanwork:acceptance-host-restart'
+
+function adoptionHarness(options: IsolatedHostOptions) {
+  const adoption = {
+    beginHostShellAdoption: vi.fn(),
+    completeHostShellAdoption: vi.fn(),
+    cancelHostShellAdoption: vi.fn(),
+  }
+  options.runtime = { ...options.runtime, ...adoption }
+  return adoption
+}
+
+it('replaces the Host once for concurrent acceptance restarts and disposes the newest child', async () => {
+  vi.stubEnv('HUAANWORK_ACCEPTANCE_HOOKS', '1')
+  try {
+    const f = fixture([123, 456, 789])
+    const h = livenessHarness(1)
+    f.options.livenessApi = h.api
+    const adoption = adoptionHarness(f.options)
+    await startIsolatedDesktopHost(f.options)
+    const restart = h.handlers.get(ACCEPTANCE_HOST_RESTART_CHANNEL) as () => Promise<{ oldPid: number; newPid: number }>
+    expect(restart).toBeTypeOf('function')
+
+    const [first, concurrent] = await Promise.all([restart(), restart()])
+    expect(first).toEqual({ oldPid: 123, newPid: 456 })
+    expect(concurrent).toEqual(first)
+    expect(state.fork).toHaveBeenCalledTimes(2)
+    expect(adoption.beginHostShellAdoption).toHaveBeenCalledOnce()
+    expect(adoption.completeHostShellAdoption).toHaveBeenCalledOnce()
+    expect(f.onFailure).not.toHaveBeenCalled()
+
+    await expect(restart()).resolves.toEqual({ oldPid: 456, newPid: 789 })
+    expect(state.fork).toHaveBeenCalledTimes(3)
+    await f.host().fiber.dispose()
+    expect(f.children[2]!.kill).toHaveBeenCalledOnce()
+    expect(h.handlers.has(ACCEPTANCE_HOST_RESTART_CHANNEL)).toBe(false)
+    await expect(restart()).rejects.toThrow('disposed')
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
+it.each(['boot', 'adoption'] as const)('preserves final cleanup after a new Host %s failure without retrying', async failure => {
+  vi.stubEnv('HUAANWORK_ACCEPTANCE_HOOKS', '1')
+  try {
+    const f = fixture([123, 456])
+    const h = livenessHarness(1)
+    f.options.livenessApi = h.api
+    const adoption = adoptionHarness(f.options)
+    if (failure === 'adoption') adoption.completeHostShellAdoption.mockImplementation(() => { throw new Error('adoption refused') })
+    if (failure === 'boot') {
+      f.children[1]!.postMessage.mockImplementation(message => {
+        if (message.kind !== 'call') return
+        queueMicrotask(() => f.children[1]!.emit('message', message.method === 'boot'
+          ? { kind: 'result', id: message.id, error: 'boot refused' }
+          : { kind: 'result', id: message.id, value: { pid: 456 } }))
+      })
+    }
+    await startIsolatedDesktopHost(f.options)
+    const restart = h.handlers.get(ACCEPTANCE_HOST_RESTART_CHANNEL) as () => Promise<unknown>
+    await expect(restart()).rejects.toThrow(failure === 'boot' ? 'boot refused' : 'adoption refused')
+    expect(state.fork).toHaveBeenCalledTimes(2)
+    expect(adoption.cancelHostShellAdoption).toHaveBeenCalled()
+    expect(f.onFailure).toHaveBeenCalledOnce()
+
+    await f.host().fiber.dispose()
+    expect(f.children[1]!.kill).toHaveBeenCalledOnce()
+    expect(state.fork).toHaveBeenCalledTimes(2)
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
+it('clears the single-flight latch when adoption arming fails', async () => {
+  vi.stubEnv('HUAANWORK_ACCEPTANCE_HOOKS', '1')
+  try {
+    const f = fixture([123, 456])
+    const h = livenessHarness(1)
+    f.options.livenessApi = h.api
+    await startIsolatedDesktopHost(f.options)
+    const restart = h.handlers.get(ACCEPTANCE_HOST_RESTART_CHANNEL) as () => Promise<{ oldPid: number; newPid: number }>
+    await expect(restart()).rejects.toThrow('adoption support')
+
+    adoptionHarness(f.options)
+    await expect(restart()).resolves.toEqual({ oldPid: 123, newPid: 456 })
+    expect(state.fork).toHaveBeenCalledTimes(2)
+    await f.host().fiber.dispose()
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
+it('keeps final cleanup available when the old Host does not confirm termination', async () => {
+  vi.stubEnv('HUAANWORK_ACCEPTANCE_HOOKS', '1')
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+  try {
+    const f = fixture([123, 456])
+    const h = livenessHarness(1)
+    f.options.livenessApi = h.api
+    const adoption = adoptionHarness(f.options)
+    f.children[0]!.kill.mockImplementation(() => true)
+    await startIsolatedDesktopHost(f.options)
+    const restart = h.handlers.get(ACCEPTANCE_HOST_RESTART_CHANNEL) as () => Promise<unknown>
+    const pending = restart()
+    await vi.advanceTimersByTimeAsync(1_000)
+    await expect(pending).rejects.toThrow('termination was not confirmed')
+    expect(state.fork).toHaveBeenCalledOnce()
+    expect(adoption.cancelHostShellAdoption).toHaveBeenCalled()
+    expect(f.onFailure).not.toHaveBeenCalled()
+
+    await f.host().fiber.dispose()
+    expect(state.fork).toHaveBeenCalledOnce()
+  } finally {
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+  }
+})
+
+it('registers no acceptance restart handler when the master gate is off', async () => {
+  vi.stubEnv('HUAANWORK_ACCEPTANCE_HOOKS', '0')
+  try {
+    const f = fixture()
+    const h = livenessHarness(1)
+    f.options.livenessApi = h.api
+    await startIsolatedDesktopHost(f.options)
+    expect(h.handlers.has(ACCEPTANCE_HOST_RESTART_CHANNEL)).toBe(false)
+    expect(state.fork).toHaveBeenCalledOnce()
+    await f.host().fiber.dispose()
+  } finally {
+    vi.unstubAllEnvs()
   }
 })

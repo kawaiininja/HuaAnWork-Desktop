@@ -23,6 +23,7 @@ import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 const ALL_METHODS = [
   'workspace.open', 'workspace.close',
   'session.send', 'session.cancel', 'session.approve', 'session.reject', 'session.exitPlanMode', 'session.answerInput', 'session.list', 'session.open', 'session.remove', 'session.new', 'session.resume',
+  'subagent.list', 'subagent.cancel',
   'settings.get', 'settings.set',
   'auth.status', 'auth.register', 'auth.login', 'auth.logout', 'auth.changePassword',
   'plugin.add', 'plugin.remove', 'plugin.list',
@@ -37,10 +38,10 @@ const ALL_METHODS = [
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('69 个方法全部登记,无遗漏无重复', () => {
+  test('71 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(69)
+    expect(ROUTE_TABLE).toHaveLength(71)
   })
 
   test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
@@ -111,7 +112,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 69 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 71 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -188,8 +189,11 @@ describe('ROUTE_TABLE registry', () => {
       'agent.packageUpdate',
       'agent.packageRemove',
       'agent.packageRefresh',
+      // Task 3 (子代理 run 可见性):list/cancel
+      'subagent.list',
+      'subagent.cancel',
     ])
-    expect(implemented).toHaveLength(69)
+    expect(implemented).toHaveLength(71)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue

@@ -169,7 +169,7 @@ it.skipIf(process.platform !== 'win32')(
     const grandchildPidFile = join(home, 'grandchild.pid')
     let child: ChildProcess | undefined
     let rpc: HostRpc | undefined
-    let releaseNative: (() => Promise<void>) | undefined
+    let releaseNative: ReturnType<typeof bindNativeRuntime> | undefined
     let pnpm: ReturnType<typeof installDesktopPnpmRuntime> | undefined
     let stopLiveness = () => {}
     let hostPid: number | undefined
@@ -202,7 +202,7 @@ it.skipIf(process.platform !== 'win32')(
         if (grandchildPid !== undefined && pidAlive(grandchildPid)) await forceKill(grandchildPid)
       } finally {
         try { rpc?.close() } catch { /* the channel is already gone when the Host dies */ }
-        await releaseNative?.().catch(() => {})
+        await releaseNative?.release().catch(() => {})
         try { pnpm?.dispose() } catch { /* temp runtime dir is removed below */ }
         child?.stdout?.destroy()
         child?.stderr?.destroy()

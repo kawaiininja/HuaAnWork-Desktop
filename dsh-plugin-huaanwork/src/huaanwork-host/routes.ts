@@ -95,6 +95,7 @@ import {
   type SessionRuntimeContext,
 } from './sessions.ts'
 import { closeWorkspace, openWorkspace } from './workspace.ts'
+import { SubagentRunNotFoundError, type SubagentRunRegistry } from './subagent-runs.ts'
 import {
   createAutomation,
   deleteAutomationRun,
@@ -164,12 +165,22 @@ export const errorRoute = (code: string) => (fn: (req: RouteRequest, ctx: RouteC
 }
 
 export const sessionRoute = errorRoute('session-error')
+const subagentRoute = errorRoute('subagent-error')
 
 const requireRuntime = (ctx: RouteContext): SessionRuntimeContext => {
   if (!ctx.runtimeCtx) {
     throw new RouteError(503, 'runtime-unavailable', 'host runtime context is not available')
   }
   return ctx.runtimeCtx
+}
+
+/** 子代理 run registry 由 index.ts 在 holders 安装后注入;缺席是装配错误,按 503 报告。 */
+const requireSubagentRuns = (ctx: RouteContext): SubagentRunRegistry => {
+  const runs = requireRuntime(ctx).huaanworkSubagentRuns
+  if (runs === undefined) {
+    throw new RouteError(503, 'runtime-unavailable', 'subagent run registry is not initialized')
+  }
+  return runs
 }
 
 /** 本地智能体包宿主由 `index.ts` 在装配时注入;缺席是装配错误,按 503 报告。 */
@@ -500,6 +511,38 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   // 纯内存 handler: 仅根据 workspaceRoot 字符串生成或复用 session ID, 无 I/O
   { method: 'session.new', http: 'POST', path: '/huaanwork/session/new', handler: async (req, ctx) => sessionNew(ctx, req.body) }, // Task 7
   { method: 'session.resume', http: 'POST', path: '/huaanwork/session/resume', handler: sessionRoute(async (req, ctx) => sessionResume(requireRuntime(ctx), ctx, req.body)) }, // Task 7
+
+  // subagent:只读对账快照与定向取消。cancel 只认 parentSessionId + runId 精确匹配,
+  // 未知/跨父会话与不存在同形(404,零副作用);handler 不 await 清理闭包。
+  {
+    method: 'subagent.list',
+    http: 'GET',
+    path: '/huaanwork/subagent/list',
+    handler: subagentRoute(async (req, ctx) => {
+      const parentSessionId = queryParam(req, 'parentSessionId')
+      if (!parentSessionId) throw new RouteError(400, 'bad-request', 'subagent.list requires params.parentSessionId')
+      return requireSubagentRuns(ctx).snapshot(parentSessionId)
+    }),
+  },
+  {
+    method: 'subagent.cancel',
+    http: 'POST',
+    path: '/huaanwork/subagent/cancel',
+    handler: subagentRoute(async (req, ctx) => {
+      const parentSessionId = bodyParam(req.body, 'parentSessionId')
+      if (!parentSessionId) throw new RouteError(400, 'bad-request', 'subagent.cancel requires params.parentSessionId')
+      const runId = bodyParam(req.body, 'runId')
+      if (!runId) throw new RouteError(400, 'bad-request', 'subagent.cancel requires params.runId')
+      try {
+        return await requireSubagentRuns(ctx).requestCancel(parentSessionId, runId)
+      } catch (error) {
+        if (error instanceof SubagentRunNotFoundError) {
+          throw new RouteError(404, 'subagent-run-not-found', error.message)
+        }
+        throw error
+      }
+    }),
+  },
 
   // settings (纯配置读/写: 读路径内部已容错 ENOENT/SyntaxError 回退 emptySettings; 写路径先手抛校验后持久化)
   { method: 'settings.get', http: 'GET', path: '/huaanwork/settings', handler: async (_req, ctx) => readHuaanworkSettings(ctx.profileDir) },

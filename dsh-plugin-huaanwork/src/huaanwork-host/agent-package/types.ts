@@ -81,6 +81,13 @@ export type AgentPackageTurnRuntime = {
 }
 
 export type AgentPackageSubagentRequest = {
+  /**
+   * 本回合在统一子代理 run 登记表里的 id(Task 5)。
+   *
+   * `skills.ts` 的 activation 包装据此把上游 start/end 归属到同一张运行卡
+   * (Task 6),不在包装里另建卡或按 slug 猜。
+   */
+  runId: string
   allow: string[]
   persona: string
   runtime: AgentPackageTurnRuntime

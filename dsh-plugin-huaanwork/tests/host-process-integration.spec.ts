@@ -17,7 +17,7 @@ it.each([false, true])('boots a separate Web Host with client plugins (AA enable
   const token = Buffer.alloc(32, 7).toString('base64url')
   let child: ReturnType<typeof fork> | undefined
   let rpc: HostRpc | undefined
-  let releaseNative: (() => Promise<void>) | undefined
+  let releaseNative: ReturnType<typeof bindNativeRuntime> | undefined
   let pnpm: ReturnType<typeof installDesktopPnpmRuntime> | undefined
   let stderr = ''
   try {
@@ -119,7 +119,7 @@ it.each([false, true])('boots a separate Web Host with client plugins (AA enable
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stderr}`)
   } finally {
-    await releaseNative?.()
+    await releaseNative?.release()
     rpc?.close()
     if (child && child.exitCode === null) { const exit = once(child, 'exit'); child.kill(); await exit }
     pnpm?.dispose()

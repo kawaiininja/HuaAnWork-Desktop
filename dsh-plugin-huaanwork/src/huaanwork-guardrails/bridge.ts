@@ -4,7 +4,9 @@ import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { capToolOutput } from "@huaanwork/policy/truncate";
 
 import { isShellTool, resultTextFailed, shellCommandOf } from "../client-huaanwork/logic/commandOutcome.ts";
+import { acceptanceInjectToolName, acceptanceToolFailure } from "../huaanwork-host/acceptance-hooks.ts";
 import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
+import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
 import {
   createGitWorkBudget,
   GIT_SNAPSHOT_BUDGET_MS,
@@ -59,8 +61,16 @@ type ToolResult = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
   huaanworkEmit?: (event: RpcEvent) => void;
+  /** 子代理 run 权威状态机;fixture 与旧运行时可以缺席,缺席时所有事件照旧广播。 */
+  huaanworkSubagentRuns?: ChildRunActivity;
   on(event: string, listener: (...args: never[]) => unknown, options?: boolean | { global?: boolean; prepend?: boolean }): void;
 };
+
+/** bridge 消费的最小 registry 面:已知 child 的活动只更新 run 投影。 */
+type ChildRunActivity = Pick<
+  SubagentRunRegistry,
+  "ownsChild" | "noteReasoning" | "noteToken" | "startTool" | "endTool" | "childIdle" | "noteChildError"
+>;
 
 const DIFF_AFTER = new Set([
   "write",
@@ -71,6 +81,9 @@ const DIFF_AFTER = new Set([
   "bash",
   "pwsh",
 ]);
+
+/** 子代理错误文案上限:一行清理过的文本,不携带堆栈。 */
+const CHILD_ERROR_TEXT_LIMIT = 200;
 
 export const name = "huaanwork-bridge";
 export const inject = ["tools"];
@@ -85,27 +98,47 @@ export function apply(ctx: Context): void {
     "tools/execute",
     (async (execution: ToolExecution, next: () => Promise<ToolResult>) => {
       const sessionId = sessionIdOfAgentRef(execution.agent);
-      emit(ctx, {
-        event: "tool/start",
-        name: execution.name,
-        ...(execution.callId === undefined ? {} : { callId: execution.callId }),
-        ...(sessionId === undefined ? {} : { sessionId }),
-        ...startDetail(execution),
-      });
+      const child = childActivityOf(ctx, sessionId);
+      const tool = { name: execution.name, ...(execution.callId === undefined ? {} : { callId: execution.callId }) };
+      if (child === undefined) {
+        emit(ctx, {
+          event: "tool/start",
+          name: execution.name,
+          ...(execution.callId === undefined ? {} : { callId: execution.callId }),
+          ...(sessionId === undefined ? {} : { sessionId }),
+          ...startDetail(execution),
+        });
+      } else {
+        child.runs.startTool(child.childId, tool);
+        // 验收钩子:在真实工具旁注入一个并发工具,用于观察 callId 独立记录与 +N。
+        const injectedName = acceptanceInjectToolName();
+        if (injectedName !== undefined) {
+          child.runs.startTool(child.childId, { name: injectedName, callId: "acceptance-injected" });
+          child.runs.startTool(child.childId, { name: `${injectedName}-b`, callId: "acceptance-injected-b" });
+        }
+      }
       const result = await next();
       const capped = capResult(result);
-      emit(ctx, {
-        event: "tool/end",
-        name: execution.name,
-        ...(execution.callId === undefined ? {} : { callId: execution.callId }),
-        ...(sessionId === undefined ? {} : { sessionId }),
-        ...(capped.truncated ? { truncated: true, text: capped.text } : {}),
-        ...(toolFailed(execution.name, result) ? { isError: true as const } : {}),
-      });
-      if (execution.name === "git_diff") {
-        emit(ctx, { event: "diff", text: capped.text, ...(sessionId === undefined ? {} : { sessionId }) });
-      } else if (DIFF_AFTER.has(execution.name)) {
-        emitGitDiff(ctx, sessionId);
+      if (child !== undefined) {
+        // 子代理工具只进 run 投影:失败保留为单工具事实,不改相位、不决定 run 终态。
+        child.runs.endTool(child.childId, tool);
+        if (acceptanceToolFailure()) {
+          child.runs.noteChildError(child.childId, `acceptance injected tool failure: ${execution.name}`);
+        }
+      } else {
+        emit(ctx, {
+          event: "tool/end",
+          name: execution.name,
+          ...(execution.callId === undefined ? {} : { callId: execution.callId }),
+          ...(sessionId === undefined ? {} : { sessionId }),
+          ...(capped.truncated ? { truncated: true, text: capped.text } : {}),
+          ...(toolFailed(execution.name, result) ? { isError: true as const } : {}),
+        });
+        if (execution.name === "git_diff") {
+          emit(ctx, { event: "diff", text: capped.text, ...(sessionId === undefined ? {} : { sessionId }) });
+        } else if (DIFF_AFTER.has(execution.name)) {
+          emitGitDiff(ctx, sessionId);
+        }
       }
       return { ...result, content: [{ type: "text", text: capped.text }] };
     }) as never,
@@ -115,6 +148,8 @@ export function apply(ctx: Context): void {
   // 压缩收尾信号：compaction/end 只写会话日志，不经 llm/stream。无 error 才算压缩完成，失败不提示。
   ctx.on("session/event", ((session: { id?: string } | undefined, event: { type?: string; data?: unknown } | undefined) => {
     const sessionId = typeof session?.id === "string" && session.id ? session.id : undefined;
+    // 已知 child 的目标/压缩事件不进父消息流:run 投影不消费它们,父会话也不该被改写。
+    if (childActivityOf(ctx, sessionId) !== undefined) return;
     const scope = sessionId === undefined ? {} : { sessionId };
     if (event?.type === "compaction/end") {
       if (objectValue(event.data).error !== undefined) return;
@@ -156,11 +191,22 @@ export function apply(ctx: Context): void {
   ctx.on("agent/status", ((payload: { status?: string; agent?: AgentRef }) => {
     if (payload?.status !== "idle") return;
     const sessionId = sessionIdOfAgentRef(payload.agent);
+    const child = childActivityOf(ctx, sessionId);
+    if (child !== undefined) {
+      child.runs.childIdle(child.childId);
+      return;
+    }
     emit(ctx, { event: "session/end", ok: true, ...(sessionId === undefined ? {} : { sessionId }) });
   }) as never, { global: true });
 
   ctx.on("agent/error", ((payload: { error?: unknown; agent?: AgentRef }) => {
     const sessionId = sessionIdOfAgentRef(payload.agent);
+    const child = childActivityOf(ctx, sessionId);
+    if (child !== undefined) {
+      // 子代理错误只留清理过的一行文案;终态由权威 result/end 决定,不在此结束回合。
+      child.runs.noteChildError(child.childId, childErrorMessage(payload?.error));
+      return;
+    }
     if (isAbortError(payload?.error)) {
       emit(ctx, { event: "session/end", ok: true, cancelled: true, ...(sessionId === undefined ? {} : { sessionId }) });
       return;
@@ -180,30 +226,55 @@ async function* mapTokens(
   purpose: string | undefined,
   stream: AsyncIterable<StreamChunk>,
 ): AsyncIterable<StreamChunk> {
+  // 非回合流（compaction / session-title 等辅助模型调用）的 text-delta / reasoning 不是回合产出：
+  // 照常透传 chunks，但不发 token 或 reasoning 事件——否则会被运行收集器按 sessionId 误归集为该次任务的产出。
+  // 已知 child 的回合流同理只驱动 run 投影:正文与思考正文都不进入父消息流。
+  const child = purpose === undefined ? childActivityOf(ctx, sessionId) : undefined;
   for await (const chunk of stream) {
-    // 非回合流（compaction / session-title 等辅助模型调用）的 text-delta / reasoning 不是回合产出：
-    // 照常透传 chunks，但不发 token 或 reasoning 事件——否则会被运行收集器按 sessionId 误归集为该次任务的产出。
-    if (purpose === undefined && chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
-      emit(ctx, { event: "token", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
-    }
-    if (purpose === undefined && chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
-      emit(ctx, { event: "reasoning", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
-    }
-    if (
-      purpose === undefined
-      && chunk?.type === "block-end"
-      && chunk.block?.type === "reasoning"
-      && typeof chunk.block.text === "string"
-    ) {
-      emit(ctx, {
-        event: "reasoning",
-        text: chunk.block.text,
-        final: true,
-        ...(sessionId === undefined ? {} : { sessionId }),
-      });
+    if (purpose === undefined) {
+      if (child === undefined) {
+        if (chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
+          emit(ctx, { event: "token", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
+        }
+        if (chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
+          emit(ctx, { event: "reasoning", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
+        }
+        if (
+          chunk?.type === "block-end"
+          && chunk.block?.type === "reasoning"
+          && typeof chunk.block.text === "string"
+        ) {
+          emit(ctx, {
+            event: "reasoning",
+            text: chunk.block.text,
+            final: true,
+            ...(sessionId === undefined ? {} : { sessionId }),
+          });
+        }
+      } else if (chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
+        child.runs.noteReasoning(child.childId);
+      } else if (chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
+        child.runs.noteToken(child.childId);
+      } else if (chunk?.type === "block-end" && chunk.block?.type === "reasoning" && typeof chunk.block.text === "string") {
+        child.runs.noteReasoning(child.childId);
+      }
     }
     yield chunk;
   }
+}
+
+/**
+ * 已知 child 会话及其 run registry；未登记的会话返回 undefined，调用方保持原有广播。
+ * registry 缺席（fixture、旧运行时）时同样按未登记处理。
+ */
+function childActivityOf(
+  ctx: Context,
+  sessionId: string | undefined,
+): { runs: ChildRunActivity; childId: string } | undefined {
+  if (sessionId === undefined) return undefined;
+  const runs = ctx.huaanworkSubagentRuns;
+  if (runs === undefined || !runs.ownsChild(sessionId)) return undefined;
+  return { runs, childId: sessionId };
 }
 
 function capResult(result: ToolResult): { text: string; truncated: boolean } {
@@ -349,6 +420,11 @@ function errorText(result: ToolResult): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? "unknown error");
+}
+
+/** 子代理错误只保留清理过的一行文案:折行、去首尾空白并截断,堆栈不进入 run 投影。 */
+function childErrorMessage(error: unknown): string {
+  return errorMessage(error).replace(/\s+/g, " ").trim().slice(0, CHILD_ERROR_TEXT_LIMIT);
 }
 
 function isAbortError(error: unknown): boolean {

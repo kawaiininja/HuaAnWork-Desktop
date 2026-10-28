@@ -16,7 +16,13 @@ import {
   reduceLiveness,
   type Liveness,
 } from './huaanwork-host/host-liveness.ts'
-import { bindNativeRuntime, runtimeSnapshot } from './host-runtime-bridge.ts'
+import { bindNativeRuntime, runtimeSnapshot, type HostNativeRuntimeBinding } from './host-runtime-bridge.ts'
+import { acceptanceHooksEnabled } from './huaanwork-host/acceptance-hooks.ts'
+import {
+  ACCEPTANCE_HOST_RESTART_CHANNEL,
+  type AcceptanceHostRestartResult,
+  type HostShellAdoptionRuntime,
+} from './huaanwork-host/acceptance-host-restart.ts'
 import type { DesktopHostOptions } from './host-bootstrap.ts'
 import type { DesktopRuntime } from './runtime.ts'
 import type { DesktopStartupGenerationHost } from './startup-generation.ts'
@@ -35,6 +41,8 @@ export interface IsolatedHostOptions {
    * recovery dialog and no automatic restart, only a plain record of the stop.
    */
   onStoppedByUser?(exit: IsolatedHostExit): void
+  /** Acceptance-only lifecycle evidence; unset keeps the normal production log shape. */
+  logHostRestart?(message: string): void
   /**
    * Test seam: the Electron surface the liveness probe, dialog, and renderer
    * publish would use. Production leaves it unset and looks `electron` up.
@@ -184,12 +192,23 @@ export function beginHostLiveness(
   }
 }
 
-export async function startIsolatedDesktopHost(options: IsolatedHostOptions): Promise<void> {
+interface IsolatedHostSession {
+  pid: number
+  readonly binding: HostNativeRuntimeBinding
+  ready: Promise<void>
+  stop(preserveShell: boolean): Promise<void>
+  exitInfo(): IsolatedHostExit
+}
+
+/** Own one utility-process generation; the outer supervisor owns replacement order. */
+function createIsolatedHostSession(
+  options: IsolatedHostOptions,
+  suppressFailure: () => boolean,
+): IsolatedHostSession {
   const forkedAt = performance.now()
   const child = utilityProcess.fork(fileURLToPath(new URL('./host-process-entry.js', import.meta.url)), [], {
     serviceName: 'DSH Host', stdio: 'pipe', cwd: process.cwd(), env: { ...process.env },
   })
-  // Keep normal Host logs in its own files; stderr includes bootstrap failures.
   child.stdout?.on('data', (data: Buffer) => { process.stdout.write(data) })
   const stderrDecoder = new StringDecoder('utf8')
   let stderrTail = ''
@@ -201,61 +220,185 @@ export async function startIsolatedDesktopHost(options: IsolatedHostOptions): Pr
     send: message => child.postMessage(message),
     listen: receive => { child.on('message', receive); return () => { child.removeListener('message', receive) } },
   }, 120_000)
-  const releaseNative = bindNativeRuntime(rpc, options.runtime)
+  const binding = bindNativeRuntime(rpc, options.runtime)
   rpc.handle('certificate', () => options.prepareCertificate())
   rpc.handle('quit', ([code]) => { setImmediate(() => options.requestQuit(code)) })
   const exitGate = createHostExitGate()
   let exited = false
+  let exitCode = -1
   let stopLiveness = () => {}
   let resolveExit!: () => void
   const exit = new Promise<void>(resolve => { resolveExit = resolve })
+  const session: IsolatedHostSession = {
+    pid: -1,
+    binding,
+    ready: Promise.resolve(),
+    stop: async () => {},
+    exitInfo: () => ({
+      exitCode,
+      uptimeMs: Math.max(0, performance.now() - forkedAt),
+      stderrTail,
+    }),
+  }
   child.once('exit', (code) => {
     stopLiveness()
     exited = true
+    exitCode = code
     rpc.close(`DSH Host exited (${code})`)
     resolveExit()
-    const exitInfo: IsolatedHostExit = {
-      exitCode: code,
-      uptimeMs: Math.max(0, performance.now() - forkedAt),
-      stderrTail,
-    }
     const disposition = exitGate.disposition()
-    if (disposition === 'failure') {
+    if (disposition === 'failure' && !suppressFailure()) {
       options.onFailure(
         new Error(`DSH Host exited (${code}); restart the application to reconnect`),
-        exitInfo,
+        session.exitInfo(),
       )
     } else if (disposition === 'user-stop') {
-      options.onStoppedByUser?.(exitInfo)
+      options.onStoppedByUser?.(session.exitInfo())
     }
   })
   let stopTask: Promise<void> | undefined
-  const stop = (): Promise<void> => stopTask ??= (async () => {
-    exitGate.markStopping()
-    stopLiveness()
-    if (!exited) {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 3_000)
-      try { await rpc.call('stop', [], controller.signal) } catch { /* terminate an unresponsive Host */ }
-      finally { clearTimeout(timeout) }
-      if (!exited) child.kill()
-      const timeoutExit = new Promise<never>((_resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('DSH Host termination was not confirmed')), 1_000)
-        void exit.then(() => clearTimeout(timer))
-      })
-      await Promise.race([exit, timeoutExit])
+  session.stop = (preserveShell): Promise<void> => {
+    if (stopTask !== undefined) {
+      if (preserveShell) return stopTask
+      return stopTask.catch(() => {}).then(async () => { await binding.release() })
     }
-    await releaseNative()
-    rpc.close()
-  })()
-  options.bindHost({ fiber: { dispose: stop } })
-  try {
+    stopTask = (async () => {
+      exitGate.markStopping()
+      stopLiveness()
+      if (preserveShell) binding.retainShell()
+      if (!exited) {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 3_000)
+        try { await rpc.call('stop', [], controller.signal) } catch { /* terminate an unresponsive Host */ }
+        finally { clearTimeout(timeout) }
+        if (!exited) child.kill()
+        const timeoutExit = new Promise<never>((_resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('DSH Host termination was not confirmed')), 1_000)
+          void exit.then(() => clearTimeout(timer))
+        })
+        await Promise.race([exit, timeoutExit])
+      }
+      await binding.release({ preserveShell })
+      rpc.close()
+    })()
+    return stopTask
+  }
+  session.ready = (async () => {
     const { desktopLaunchEnvironment, ...host } = options.host
-    await rpc.call('boot', [{ ...host, launchEnvironmentLayers: serializeHostEnvironment(desktopLaunchEnvironment) }, runtimeSnapshot(options.runtime), options.rendererToken])
+    const boot = await rpc.call<{ pid?: unknown }>('boot', [{ ...host, launchEnvironmentLayers: serializeHostEnvironment(desktopLaunchEnvironment) }, runtimeSnapshot(options.runtime), options.rendererToken])
+    if (typeof boot.pid !== 'number') throw new Error('DSH Host boot returned no pid')
+    session.pid = boot.pid
     exitGate.markBooted()
     stopLiveness = beginHostLiveness(rpc, child, () => exitGate.markStoppedByUser(), options.livenessApi)
+  })()
+  return session
+}
+
+function hostShellAdoptionRuntime(runtime: IsolatedHostOptions['runtime']): HostShellAdoptionRuntime {
+  const candidate = runtime as Partial<HostShellAdoptionRuntime>
+  if (typeof candidate.beginHostShellAdoption !== 'function'
+    || typeof candidate.completeHostShellAdoption !== 'function'
+    || typeof candidate.cancelHostShellAdoption !== 'function') {
+    throw new Error('dsh-plugin-desktop: Host restart requires shell adoption support')
+  }
+  return candidate as HostShellAdoptionRuntime
+}
+
+export async function startIsolatedDesktopHost(options: IsolatedHostOptions): Promise<void> {
+  let current: IsolatedHostSession | undefined
+  const retainedBindings = new Set<HostNativeRuntimeBinding>()
+  let plannedRestart = false
+  let disposed = false
+  let restartTask: Promise<AcceptanceHostRestartResult> | undefined
+  let disposeTask: Promise<void> | undefined
+  let acceptanceRegistered = false
+  const electronApi = options.livenessApi ?? electronLivenessApi()
+  const log = (message: string): void => { options.logHostRestart?.(message) }
+
+  const dispose = (): Promise<void> => disposeTask ??= (async () => {
+    disposed = true
+    if (acceptanceRegistered) electronApi.ipcMain?.removeHandler(ACCEPTANCE_HOST_RESTART_CHANNEL)
+    acceptanceRegistered = false
+    if (restartTask !== undefined) await restartTask.catch(() => {})
+    if (current !== undefined) {
+      const session = current
+      current = undefined
+      retainedBindings.add(session.binding)
+      await session.stop(false)
+    }
+    for (const binding of retainedBindings) await binding.release()
+    retainedBindings.clear()
+    log('dsh-plugin-desktop: Host supervisor final dispose complete')
+  })()
+
+  const restart = (): Promise<AcceptanceHostRestartResult> => {
+    if (disposed) return Promise.reject(new Error('dsh-plugin-desktop: Host supervisor is disposed'))
+    if (restartTask !== undefined) return restartTask
+    const task = (async () => {
+      const previous = current
+      let adoption: HostShellAdoptionRuntime | undefined
+      let oldStopped = false
+      let next: IsolatedHostSession | undefined
+      try {
+        if (previous === undefined) throw new Error('dsh-plugin-desktop: no running Host generation to replace')
+        adoption = hostShellAdoptionRuntime(options.runtime)
+        adoption.beginHostShellAdoption()
+        plannedRestart = true
+        log(`dsh-plugin-desktop: Host restart begin (old pid ${previous.pid})`)
+        retainedBindings.add(previous.binding)
+        await previous.stop(true)
+        oldStopped = true
+        if (current === previous) current = undefined
+        log('dsh-plugin-desktop: Host restart old generation detached; shell retained')
+        next = createIsolatedHostSession(options, () => plannedRestart || disposed)
+        current = next
+        await next.ready
+        adoption.completeHostShellAdoption()
+        for (const binding of retainedBindings) await binding.release()
+        retainedBindings.clear()
+        const result = { oldPid: previous.pid, newPid: next.pid }
+        log(`dsh-plugin-desktop: Host restart adopted (new pid ${next.pid})`)
+        return result
+      } catch (cause) {
+        if (next !== undefined) {
+          retainedBindings.add(next.binding)
+          await next.stop(true).catch(() => {})
+          if (current === next) current = undefined
+        }
+        adoption?.cancelHostShellAdoption()
+        if (oldStopped) {
+          const detail = cause instanceof Error ? cause.message : String(cause)
+          options.logHostRestart?.(`dsh-plugin-desktop: Host restart failed: ${detail}`)
+          options.onFailure(
+            new Error(`DSH Host restart failed; restart the application to reconnect: ${detail}`),
+            (next ?? previous)!.exitInfo(),
+          )
+        }
+        throw cause
+      } finally {
+        plannedRestart = false
+      }
+    })()
+    restartTask = task
+    const clear = (): void => { if (restartTask === task) restartTask = undefined }
+    void task.then(clear, clear)
+    return task
+  }
+
+  // One stable handle survives every child generation and needs no changes in
+  // DesktopStartupGeneration, including when startup aborts before boot completes.
+  options.bindHost({ fiber: { dispose } })
+  try {
+    current = createIsolatedHostSession(options, () => plannedRestart || disposed)
+    await current.ready
   } catch (cause) {
-    await stop()
+    await dispose()
     throw cause
+  }
+
+  if (acceptanceHooksEnabled() && electronApi.ipcMain !== undefined) {
+    electronApi.ipcMain.removeHandler(ACCEPTANCE_HOST_RESTART_CHANNEL)
+    electronApi.ipcMain.handle(ACCEPTANCE_HOST_RESTART_CHANNEL, () => restart())
+    acceptanceRegistered = true
   }
 }

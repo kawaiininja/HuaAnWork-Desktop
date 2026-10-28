@@ -149,14 +149,25 @@ function scriptReply(turns, body) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (!message || typeof message !== 'object' || message.role !== 'user') continue
-    if (typeof message.content !== 'string') continue
-    if (isRuntimeContextSnapshot(message.content)) continue
+    const content = messageText(message.content)
+    if (content === '') continue
+    if (isRuntimeContextSnapshot(content)) continue
     for (const turn of turns) {
-      if (turn.match.test(message.content)) return turn.reply
+      if (turn.match.test(content)) return turn.reply
     }
     return DEFAULT_REPLY
   }
   return DEFAULT_REPLY
+}
+
+/** Prompt text parts arrive as an array for subagent activations and as a string elsewhere. */
+function messageText(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((part) => (part && typeof part === 'object' && typeof part.text === 'string' ? part.text : ''))
+    .filter((text) => text !== '')
+    .join('\n')
 }
 
 function isRuntimeContextSnapshot(content) {

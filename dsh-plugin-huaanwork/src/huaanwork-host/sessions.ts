@@ -32,6 +32,7 @@ import { readHuaanworkSettings } from './settings.ts'
 import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog } from './session-view.ts'
 import type { RouteContext } from './routes.ts'
 import type { SubagentsService } from './subagents-service.ts'
+import type { SubagentRunRegistry } from './subagent-runs.ts'
 
 /**
  * 会话域主链路(旧 sidecar host.ts L1434-1740 移植)。
@@ -71,6 +72,8 @@ export type SessionRuntimeContext = {
     resume?: (options: AgentResumeOptions) => Promise<unknown>
   }
   subagents?: SubagentsService
+  /** 子代理 run 权威状态机(holders.ts 注入);执行链与 subagent.* 路由读同一实例。 */
+  huaanworkSubagentRuns?: SubagentRunRegistry
 }
 
 /**
@@ -116,6 +119,7 @@ export async function sendToAgent(
   const sessionId = explicitSessionId ?? sessionIdFor(routeCtx.workspaceRoot.current)
   let skillName = objectString(params, 'skill')
   const rawAtName = objectAtName(params)
+  const atClientMessageId = objectAtClientMessageId(params)
   if (skillName && rawAtName) {
     routeCtx.logger('session.send: at overrides skill')
     skillName = undefined
@@ -224,6 +228,9 @@ export async function sendToAgent(
         name: atName,
         remainder,
         resolveParent: resolveAgent,
+        // 客户端在 session.send 时用 at.clientMessageId 带上本次用户消息 id;Host 只把
+        // 它随 run 投影原样返回,用于把运行卡片锚定到这条消息之后。
+        ...(atClientMessageId === undefined ? {} : { clientMessageId: atClientMessageId }),
         // `@slug` 先认本地包:目录快照里没有的 slug 也必须在 agentsHost 查找前分流。
         ...(packageHost === undefined ? {} : { packageHost, packageRuntime: packageHost }),
       })
@@ -488,6 +495,22 @@ function objectAtName(params: unknown): string | undefined {
   const name = (at as Record<string, unknown>).name
   if (typeof name !== 'string') return undefined
   const trimmed = name.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+/**
+ * 本次 `session.send` 对应的用户消息 id(`at.clientMessageId`)。
+ *
+ * 只在 `at` 里读,与 `objectAtName` 同形(字符串、去空白后非空);它不是取消
+ * capability,也不参与 runId 生成或权限判断,只用于把运行卡片锚定到这条消息。
+ */
+function objectAtClientMessageId(params: unknown): string | undefined {
+  if (!params || typeof params !== 'object') return undefined
+  const at = (params as Record<string, unknown>).at
+  if (!at || typeof at !== 'object') return undefined
+  const clientMessageId = (at as Record<string, unknown>).clientMessageId
+  if (typeof clientMessageId !== 'string') return undefined
+  const trimmed = clientMessageId.trim()
   return trimmed.length > 0 ? trimmed : undefined
 }
 

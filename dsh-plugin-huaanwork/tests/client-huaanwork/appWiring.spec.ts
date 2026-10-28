@@ -358,3 +358,143 @@ test("folded attachments use the assistant mapping and deleted runs stay suppres
   assert.match(APP_SOURCE, /sessionsToSuppressAfterDelete\(/);
   assert.match(APP_SOURCE, /suppressedRunSessionIdsRef\.current,\s*\);/);
 });
+
+test("the ready reconcile runs before the sidecar event gates so every reconnect unfreezes runs", () => {
+  // 契约钉:sidecar/status 不携带 sessionId,而自动化闸门对 undefined 判定为非用户会话
+  // 并早退。若 ready 对账留在闸门之后,后台自动化运行期间的重连永远到不了 snapshot:
+  // 卡片停在「连接中断，状态可能滞后」,计时冻结、终止禁用,直到下一次重连才恢复,
+  // 手动发送也被自动化挡住,无法自救。
+  const handlerAt = APP_SOURCE.indexOf("const applyEvent = (event: RpcEvent) => {");
+  const handlerEnd = APP_SOURCE.indexOf("applySidecarEventRef.current = applyEvent;", handlerAt);
+  assert.ok(handlerAt >= 0 && handlerEnd > handlerAt, "the sidecar event handler is still a named applyEvent closure");
+  const handler = APP_SOURCE.slice(handlerAt, handlerEnd);
+
+  const readyAt = handler.indexOf('if (event.event === "sidecar/status" && event.ready) {');
+  assert.ok(readyAt >= 0, "the handler still reacts to sidecar/status ready");
+  const reconcileAt = handler.indexOf("reconcileBoundSubagentRuns()", readyAt);
+  assert.ok(reconcileAt > readyAt, "sidecar/status ready still reconciles every bound tab");
+  assert.equal(
+    (handler.match(/reconcileBoundSubagentRuns\(\)/g) ?? []).length,
+    1,
+    "exactly one ready reconcile call site (a second copy left after the gates would resurrect the freeze)",
+  );
+
+  const gateAt = handler.indexOf(
+    "if (automationActiveRef.current && !isUserSessionId(eventSessionId) && !boundTab) return;",
+  );
+  assert.ok(gateAt >= 0, "the automation route gate is still present");
+  assert.ok(
+    reconcileAt < gateAt,
+    "reconcileBoundSubagentRuns() must run before the automation gate: sidecar/status has no sessionId, "
+      + "so the gate returns early while a background automation runs and the post-reconnect reconcile is "
+      + "unreachable — cards keep 连接中断，状态可能滞后, timers stay frozen and 终止 stays disabled "
+      + "until the next reconnect (a manual send cannot clear it either)",
+  );
+});
+
+test("the sidecar/status ready branch clears the dead latch a disconnect set", () => {
+  // 产品钉:onSidecarExit 置位 sidecarDead,而 ready 是唯一能撤销它的地方。
+  // 去掉这一行,一次瞬时断连 (C-07 真机:宿主换代期间 WS 断开) 之后即使已重连,
+  // 发送、停止与自动化也永久禁用,只能重启应用。
+  assert.match(APP_SOURCE, /setSidecarDead\(true\)/, "the exit handler still latches the dead state");
+
+  const readyAt = APP_SOURCE.indexOf('if (event.event === "sidecar/status" && event.ready) {');
+  assert.ok(readyAt >= 0, "the handler still reacts to sidecar/status ready");
+  const readyEnd = APP_SOURCE.indexOf('if (event.event === "session/end"', readyAt);
+  assert.ok(readyEnd > readyAt, "the ready branch still ends before the session/end handling");
+  const readyBody = APP_SOURCE.slice(readyAt, readyEnd);
+  assert.match(readyBody, /setSidecarDead\(false\);/, "ready must clear the dead latch inside the ready branch");
+
+  // 撤销必须发生在 ready 分支内,不能在 ready 之外顺手清:否则任何未就绪的通知都会解锁界面。
+  assert.equal(
+    (APP_SOURCE.match(/setSidecarDead\(false\)/g) ?? []).length,
+    1,
+    "exactly one clear site, inside the ready branch",
+  );
+});
+
+/**
+ * 多标签运行卡回归门(E-05 真机 Important):切回/重开一个已有会话时若用历史回放覆盖标签,
+ * 客户端专属的 subagent-run 卡片会全部消失——真机实测「标签 A 有 5 张卡,点一次侧栏归零」。
+ * 历史回放只有消息条目,运行卡只能由宿主快照(subagent.list)补回。
+ */
+test("resuming an existing session tab activates it without replaying history over live run cards", () => {
+  const resumeAt = APP_SOURCE.indexOf("async function resumeFromView(");
+  assert.ok(resumeAt >= 0, "resumeFromView is still defined");
+  const resumeEnd = APP_SOURCE.indexOf("async function resumeHistorySession(", resumeAt);
+  assert.ok(resumeEnd > resumeAt, "resumeFromView is still followed by resumeHistorySession");
+  const body = APP_SOURCE.slice(resumeAt, resumeEnd);
+
+  const existingAt = body.indexOf("if (existing) {");
+  assert.ok(existingAt >= 0, "resumeFromView still branches on an existing tab matched by sessionId");
+  const elseAt = body.indexOf("} else {", existingAt);
+  assert.ok(elseAt > existingAt, "the existing-tab branch is still followed by the new-tab branch");
+  const existingBranch = body.slice(existingAt, elseAt);
+  const newBranch = body.slice(elseAt);
+
+  assert.match(existingBranch, /setActiveTab\(existing\.id\)/, "an existing tab is still activated");
+  assert.doesNotMatch(
+    existingBranch,
+    /historyToChatItems/,
+    "the existing-tab branch must not replay history: history items carry no subagent-run cards, "
+      + "so overwriting the live tab with them drops every run card in every open tab "
+      + "(E-05 live: 5 cards on tab A became 0 after one sidebar click)",
+  );
+  assert.doesNotMatch(
+    existingBranch,
+    /\bitems\b/,
+    "the existing-tab branch must not replace the tab's items: the live tab state (including "
+      + "client-only subagent-run cards) is authoritative, and a history replay empties it "
+      + "(E-05 live: 5 cards on tab A became 0 after one sidebar click)",
+  );
+
+  // 历史回放只留给新建标签的分支,且新建后必须补拉宿主快照把运行卡补回来。
+  assert.equal(
+    (body.match(/historyToChatItems\(/g) ?? []).length,
+    1,
+    "historyToChatItems(view) is computed exactly once, inside the new-tab branch only",
+  );
+  assert.match(newBranch, /items: historyToChatItems\(view\)/, "the new-tab branch still seeds items from history");
+  assert.match(
+    newBranch,
+    /void reconcileSubagentRuns\(id, sessionId\)/,
+    "the new-tab branch must reconcile with the tab id + sessionId: a tab first opened after an app "
+      + "restart otherwise shows history messages with zero subagent-run cards",
+  );
+});
+
+test("history-load paths reconcile the host snapshot so run cards survive a fresh open", () => {
+  // selectSubtask 的「有会话」历史分支:回放只产生消息条目,必须按 id + sessionId 对账。
+  const selectAt = APP_SOURCE.indexOf("async function selectSubtask(");
+  assert.ok(selectAt >= 0, "selectSubtask is still defined");
+  const selectEnd = APP_SOURCE.indexOf("async function renameSubtask(", selectAt);
+  assert.ok(selectEnd > selectAt, "selectSubtask is still followed by renameSubtask");
+  const selectBody = APP_SOURCE.slice(selectAt, selectEnd);
+
+  const historyAt = selectBody.indexOf("historyToChatItems(view)");
+  assert.ok(historyAt >= 0, "selectSubtask's history branch still replays the session history");
+  const createAt = selectBody.indexOf("setChatTabs((prev) => [", historyAt);
+  assert.ok(createAt > historyAt, "selectSubtask still creates the tab from the replayed history");
+  const selectReconcileAt = selectBody.indexOf("void reconcileSubagentRuns(id, sessionId)", createAt);
+  assert.ok(
+    selectReconcileAt > createAt,
+    "selectSubtask's history branch must reconcile with the tab id + sessionId right after creating the tab: "
+      + "without it a subtask first opened after an app restart shows zero subagent-run cards "
+      + "even though the host still holds the runs",
+  );
+
+  // 重启重建的运行对话骨架回填历史后同样对账(用实际的 tabId 变量,不是当前激活标签)。
+  const backfillAt = APP_SOURCE.indexOf("const runBackfillBusyRef = useRef<Set<string>>(new Set());");
+  assert.ok(backfillAt >= 0, "the automation run-tab backfill effect is still present");
+  const backfillEnd = APP_SOURCE.indexOf("}, [activeTab, chatTabs, automationRuns]);", backfillAt);
+  assert.ok(backfillEnd > backfillAt, "the backfill effect still ends with its dependency list");
+  const backfillBody = APP_SOURCE.slice(backfillAt, backfillEnd);
+  const backfillWriteAt = backfillBody.indexOf("runPlaceholder: false");
+  assert.ok(backfillWriteAt >= 0, "the backfill still replaces the placeholder items");
+  const backfillReconcileAt = backfillBody.indexOf("void reconcileSubagentRuns(tabId, sessionId)", backfillWriteAt);
+  assert.ok(
+    backfillReconcileAt > backfillWriteAt,
+    "the run-tab backfill must reconcile with its own tabId + sessionId after rebuilding the items: "
+      + "otherwise a run tab restored after restart loses its subagent-run cards",
+  );
+});
