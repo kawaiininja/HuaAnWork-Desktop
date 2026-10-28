@@ -71,7 +71,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Build HuaAnWork
         timeout-minutes: 25
-        run: yarn workspace dsh-plugin-huaanwork build
+        run: |
+          yarn workspace dsh-community-market build
+          yarn workspace dsh-plugin-huaanwork build
       - name: Verdict self-check
         run: node --test dsh-plugin-huaanwork/scripts/huaanwork-subagent-run-windows-acceptance.spec.mjs
       - name: Real @ completion and cancellation on Windows
