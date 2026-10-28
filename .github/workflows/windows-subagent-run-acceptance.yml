@@ -8,17 +8,26 @@
 # fixture; the JSON report records both boundaries. The job uploads screenshots,
 # app/stub/catalog logs, the desktop SHA and the Harness pin.
 #
-# This workflow is workflow_dispatch only. Push and pull_request CI do not run
-# it, and it is not a required check. The existing desktop-windows job keeps
-# owning the installer/portable build and the Windows Host liveness gate.
+# It runs on pull requests that touch this harness and can also be dispatched
+# manually once the file exists on the default branch. It is not a required
+# check; the existing desktop-windows job keeps owning the installer/portable
+# build and the Windows Host liveness gate.
 #
-# Run it on the exact PR head SHA, then link the run in E-06. A green but never
-# dispatched PR check does not satisfy the Windows acceptance path (R-ACC-8).
+# The checkout pins the PR head SHA, so the uploaded report records the exact
+# commit under acceptance. Link the run in E-06; a green build alone does not
+# satisfy the Windows acceptance path (R-ACC-8).
 
 name: Windows subagent run acceptance
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/windows-subagent-run-acceptance.yml'
+      - 'dsh-plugin-huaanwork/scripts/huaanwork-subagent-run-windows-*'
+      - 'dsh-plugin-huaanwork/scripts/huaanwork-stub-llm.mjs'
+      - 'dsh-plugin-huaanwork/tests/fixtures/subagent-run-acceptance/**'
 
 permissions:
   contents: read
@@ -34,6 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
           submodules: recursive
       - uses: actions/setup-node@v6
