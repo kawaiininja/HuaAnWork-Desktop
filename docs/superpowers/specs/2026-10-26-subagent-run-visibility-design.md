@@ -1029,6 +1029,6 @@ NO UNRESOLVED DECISIONS
 
 - **R-ACC-6（A-11 / A-16 真实读屏豁免）**：本轮不再采集 VoiceOver/NVDA 真实播报音频；保留 CDP AX 树、键盘/焦点、44px、reduced-motion、280px 证据。真实 AT 播报未验证，获 AT 环境后补做。
 - **R-ACC-7（C-08 全局 200 豁免）**：本轮不再用 201 条真实 run 触发全局 200；保留每父 20 真机证据与全局淘汰单测。全局 200 真机行为未验证，出现低成本批量通道后补做。
-- **R-ACC-8（Windows 验收路径）**：Windows 验收改在 GitHub 虚拟机执行，**当前未执行、未验证**；GHA 打包/CI 绿不得冒充真实 `@` 验收。真实内网目录不在豁免范围内，仍未验证。
+- **R-ACC-8（Windows 验收路径）**：Windows 验收改在 GitHub 虚拟机执行，**2026-10-28 已执行并落证据**（run `40707139817`，head `87528fc0f6`；真实 `@` package/legacy 完成与定向取消；stub 模型 + 本地夹具，非 Windows 真机）。GHA 打包/CI 绿不得冒充真实 `@` 验收。真实内网目录不在豁免范围内，仍未验证。
 - **豁免后计数**：49 项中 **45 PASS、1 部分（E-06）、3 豁免（A-11、A-16、C-08）、0 Blocked**。A–D 条目已全部 PASS 或豁免，E-01～E-05 全部 PASS。
-- **整体结论**：本功能记为 **complete with waiver**，不是 49/49 全量 PASS；豁免项不勾选 §10.1，Windows 待 GHA 验收完成后才可在 E-06 更新为已验证。逐条证据与豁免边界见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈验收豁免与 Windows 验收路径（2026-10-28，owner）〉。
+- **整体结论**：本功能记为 **complete with waiver**，不是 49/49 全量 PASS；豁免项不勾选 §10.1。Windows GHA 验收已完成（run `40707139817`，head `87528fc0f6`），E-06 的 Windows 项更新为 GHA VM 已验证；真实内网目录仍未验证，E-06 整体仍为部分。逐条证据与豁免边界见 `docs/evidence/2026-10-26-subagent-run-visibility-verification.md`〈验收豁免与 Windows 验收路径（2026-10-28，owner）〉与〈Windows GHA 验收（2026-10-28，已执行）〉。

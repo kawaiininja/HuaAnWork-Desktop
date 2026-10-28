@@ -775,7 +775,7 @@ owner 已授权使用此前配置的隔离 profile（含模型与包）。以下
 | T1.5 A-11/A-16 真实读屏 | **Blocked** | — | 无 VoiceOver/NVDA 音频采集环境；CDP AX 树已在此前验证，真实播报未执行 |
 | T1.7 C-08 全局 200 上限 | **Blocked** | — | 201 条真实 run 成本过高；每父 20 已在此前验证，全局 200 未在真机触发，自动化已覆盖淘汰逻辑 |
 | T3.2 真实内网目录 | **未验证** | — | `10.130.209.76:18080` 不可达；按 R-ACC-5 记录为 E-06 环境限制，不压低 E-05 |
-| T3.3 Windows | **未验证** | — | 无 Windows 真机；按 R-ACC-5 记录为 E-06 环境限制 |
+| T3.3 Windows | **已验证（GHA VM）** | run 40707139817 | 2026-10-28：真实 `@` package/legacy 完成与定向取消、卡片锚定与父会话可用；stub 模型 + 本地夹具，非 Windows 真机；见〈Windows GHA 验收（2026-10-28，已执行）〉 |
 
 ### 执行后计数
 
@@ -811,23 +811,39 @@ owner 决定豁免 A-11/A-16 与 C-08，并将 Windows 验收放到 GitHub 虚�
 - **未验证边界**：全局 200 在真实应用中的淘汰与 snapshot 对账未触发；该行为目前只有自动化证据。
 - **触发条件**：出现低成本批量 run 通道时按 T1.7 补做（分散至少 11 个父会话，按父聚合，不能以单父快照冒充全局证据）。
 
-### R-ACC-8：Windows 验收路径改为 GitHub 虚拟机（未执行）
+### R-ACC-8：Windows 验收路径改为 GitHub 虚拟机（2026-10-28 已执行）
 
 - **决定**：Windows 验收将在 GitHub 虚拟机（GHA）上执行，不在本机验收。
-- **当前状态**：**未执行、未验证**。本记录不是 Windows 真机 PASS，也不是 waiver 后的通过；在 GHA 运行完成并落证据前，Windows 在 E-06 中保持「未验证」。
+- **当前状态**：**已执行并落证据**（run `40707139817`，head `87528fc0f60f4a367c98a5f5ff568d55b6fddf24`）。本记录不是 Windows 真机 PASS；它是按 R-ACC-8 指定的 GHA 路径完成的真实 `@` UI 验收，输入边界见下节。
 - **证据要求**：GHA 上需执行真实 `@` 完成与取消链路，记录平台、构建类型、Desktop SHA、Harness pin、测试人与日志；GHA 打包/CI 绿不能替代真实 `@` 验收。
 - **真实内网目录**：不在本次豁免范围内；`10.130.209.76:18080` 仍不可达，E-06 继续标注未验证。
+
+### Windows GHA 验收（2026-10-28，已执行）
+
+- **运行**：[run 40707139817](https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40707139817)（workflow `Windows subagent run acceptance`，job `122882192790`）；head SHA `87528fc0f60f4a367c98a5f5ff568d55b6fddf24`，Harness pin `1600d8a1e140dcde43a1a0941940a0480712c011`。
+- **最终 head 复跑**：本 run 在 harness 代码提交 `87528fc0f6` 上执行；E-06 文档更新只改文档，同一 workflow 会在最终 PR head 上复跑，以该次 artifact 记录的 SHA 为合并前最终验收证据（run 见 PR #21 的 checks/actions）。
+- **环境**：GitHub-hosted Windows VM（`win25-vs2026`，Windows 10.0.26100，X64，runner `GitHub Actions 1000000703`）；workspace Electron build（unsigned、unpackaged）；HuaAnWork `0.1.0` + DSH `0.2.1-rc.1`。执行者为自动化 CDP 驱动（workflow artifact 内含 driver/app/stub/catalog 日志）。
+- **输入边界**：模型为 loopback stub（`allow_network=false`），legacy 目录为 `127.0.0.1` 本地 fixture（`legacy-demo`），package 为本地 `@doc-clerk` v1.0.0 夹具；**不是真实模型，也不是真实内网目录**。
+- **四个真实 `@` 场景**（每个都从 composer 输入并发送，四次发送共 4 张卡，全部锚定在各自用户消息之后）：
+  - package-complete：相位 `starting → tool → generating → completed`，观察到真实工具活动，终态「已完成」；
+  - package-cancel：活跃卡 → 卡内「终止」→「确认终止」→「已停止」；
+  - legacy-complete：相位 `tool → generating → completed`，观察到真实工具活动，终态「已完成」；
+  - legacy-cancel：活跃卡 → 确认终止 →「已停止」；
+  - 取消后父会话继续可用（`PARENT continue acceptance after the cancelled runs.` 收到回复）。
+- **证据**：run artifact `windows-subagent-run-acceptance` 内含 facts JSON（平台、SHA、Harness pin、场景、锚定、相位、截图清单）、6 张 1024×720 截图，以及 app/stub/legacy 日志。截图与日志只存 GitHub artifact，不进公开仓库。
+- **诚实边界**：这是 **GHA 虚拟机**验收，不是 Windows 真机 PASS；使用 stub 模型与本地夹具，真实内网目录仍未验证；兄弟并发与真实读屏不在本 run 覆盖范围（分别由单测与 A-11/A-16 waiver 承担）；installer/portable 构建由 `desktop-windows` CI 覆盖，不是本 run 的验收对象。应用在事实采集后被 `taskkill /T /F` 强制结束，driver 日志中的 app exit 1 是该强制停止，不是场景失败。
+- **判定**：E-06 的 Windows 项从「未验证」更新为「GHA VM 已验证」；真实内网目录仍为「未验证」，因此 E-06 整体仍为**部分**，§10.1 仍不勾选。
 
 ### 豁免后的计数
 
 | 分类 | 数量 | 条目 |
 | --- | --- | --- |
 | PASS（真机/门禁/自动化充分裁定） | 45 | 与〈验收收口场景执行结果（2026-10-28）〉的 PASS 表一致 |
-| 部分 | 1 | E-06（Windows 待 GHA、真实内网目录未验证） |
+| 部分 | 1 | E-06（真实内网目录未验证；Windows GHA 已验证） |
 | 豁免（owner 接受残余风险，非 PASS） | 3 | A-11、A-16（R-ACC-6）、C-08（R-ACC-7） |
 | Blocked | 0 | — |
 | 合计 | 49 | — |
 
 - 45 + 1 + 3 + 0 = 49；A–D 的条目已全部 PASS 或经 owner 豁免，E-01～E-05 全部 PASS。
-- 因此本子代理功能可记为 **complete with waiver**：A-11/A-16、C-08 豁免，Windows 待 GHA 验收，真实内网目录未验证。不得写成 49/49 全量 PASS，也不得把豁免项勾进 §10.1。
-- Windows GHA 验收完成并落证据后，E-06 才可更新为 Windows 已验证；否则整体状态保持 complete with waiver。
+- 因此本子代理功能可记为 **complete with waiver**：A-11/A-16、C-08 豁免，Windows GHA 已验证（VM 路径），真实内网目录未验证。不得写成 49/49 全量 PASS，也不得把豁免项勾进 §10.1。
+- Windows GHA 验收已完成并落证据（run `40707139817`）；E-06 的剩余缺口是真实内网目录。整体状态保持 complete with waiver。
