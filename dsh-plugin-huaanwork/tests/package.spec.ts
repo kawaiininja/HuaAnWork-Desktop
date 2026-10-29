@@ -1140,22 +1140,18 @@ describe('published package surface', () => {
     expect(scripts['dist:mac-smoke:huaanwork']).toContain('huaanwork-verify-provisioning.mjs --smoke')
   })
 
-  it('runs platform package gates before reusing native packaging outputs', () => {
-    const windowsJob = ciWorkflow.slice(
-      ciWorkflow.indexOf('  desktop-windows:'),
-      ciWorkflow.indexOf('  desktop-linux:'),
-    )
-    const linuxJob = ciWorkflow.slice(
-      ciWorkflow.indexOf('  desktop-linux:'),
-      ciWorkflow.indexOf('  desktop-macos:'),
-    )
-    const macosJob = ciWorkflow.slice(
-      ciWorkflow.indexOf('  desktop-macos:'),
-      ciWorkflow.indexOf('  upstream-command-windows:'),
-    )
+  it('runs the HuaAnWork platform package gates before reusing native packaging outputs', () => {
+    const jobs = splitWorkflowJobs(ciWorkflow)
+    expect(jobs['desktop-windows'], 'ci.yml must define a "desktop-windows" job').toBeDefined()
+    expect(jobs['desktop-macos'], 'ci.yml must define a "desktop-macos" job').toBeDefined()
+    const windowsJob = jobs['desktop-windows']!
+    const macosJob = jobs['desktop-macos']!
+
+    // HuaAnWork has no Linux distribution line: the job must be gone, not re-targeted.
+    expect(jobs['desktop-linux']).toBeUndefined()
 
     expect(windowsJob).not.toContain('- run: yarn check')
-    expect(windowsJob).toContain('workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]')
+    expect(windowsJob).toContain('workspace: [dsh-plugin-huaanwork]')
     expect(windowsJob).toContain('- run: yarn workspace ${{ matrix.workspace }} check:win-package:platform')
     expect(windowsJob).toContain('timeout-minutes: 60')
     expect(windowsJob).toContain("if: matrix.workspace == 'dsh-plugin-huaanwork'")
@@ -1165,18 +1161,24 @@ describe('published package surface', () => {
     expect(windowsJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:win-portable')
     expect(windowsJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')
     expect(windowsJob.match(/DSH_WINDOWS_PACKAGE_COMPRESSION: store/g)).toHaveLength(2)
-
-    expect(linuxJob).toContain('fromJSON(\'["dsh-plugin-desktop", "dsh-plugin-desktop-beta"]\')')
-    expect(linuxJob).not.toContain('dsh-plugin-huaanwork')
+    // Matrix-form cache paths keep the single-cell matrix honest instead of hardcoding a name.
+    expect(windowsJob).toContain('${{ matrix.workspace }}/.desktop-build/downloads')
 
     expect(macosJob).not.toContain('- run: yarn check')
-    expect(macosJob).toContain('workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]')
+    expect(macosJob).toContain('workspace: [dsh-plugin-huaanwork]')
     expect(macosJob).toContain('- run: yarn workspace ${{ matrix.workspace }} check:mac-package:platform')
     expect(macosJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:mac-smoke')
     expect(macosJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')
     expect(macosJob).toContain("DSH_MAC_SMOKE_ARCH: ${{ github.event_name == 'pull_request' && 'arm64' || 'universal' }}")
     expect(macosJob).toContain("HUAANWORK_ALLOW_UNPROVISIONED_SMOKE: '1'")
+    expect(macosJob).toContain('${{ matrix.workspace }}/.desktop-build/downloads')
     expect(macosJob).not.toContain('- run: yarn dist:mac-smoke')
+
+    // The AA-skip step is HuaAnWork-only; the retired Stable pull-request special case is gone.
+    expect(ciWorkflow).toContain("for (const workspace of ['dsh-plugin-huaanwork'])")
+    expect(ciWorkflow).not.toMatch(/dsh-plugin-desktop(?:-beta)?/u)
+    expect(ciWorkflow).not.toContain('dsh-desktop-next')
+    expect(ciWorkflow).not.toContain('Verify Next window controls')
   })
 
   it('ships a release workflow that uploads artifacts and holds no signing secrets', () => {
