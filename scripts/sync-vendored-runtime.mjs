@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, join, relative, resolve } from 'node:path'
+import { marketPeerRange, ownsMarketRuntime } from './vendored-runtime-policy.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const upstreamPath = join(root, 'upstream.json')
@@ -56,17 +57,16 @@ const otherVersions = [...new Set(
 const marketPath = join(root, 'dsh-community-market', 'package.json')
 const pluginPaths = [
   join(root, upstream.package, 'package.json'),
-  // dsh-community-market DSH deps are governed by the beta channel's vendored runtime;
-  // huaanwork inherits from the same resolved vendor tree via upstream.channels.huaanwork.
-  ...(channel === 'beta' ? [marketPath] : []),
+  // HuaAnWork owns the market DSH dependency check: dsh-community-market's build
+  // dependencies follow the active channel's vendored runtime tree.
+  ...(ownsMarketRuntime(channel) ? [marketPath] : []),
 ]
-// Stable and Beta both load the market bundle, and dsh 0.2 refuses a bundle
+// The market bundle loads in every desktop channel, and dsh 0.2 refuses a bundle
 // whose dsh peers exclude the running runtime, so its peers accept every
-// channel's version while its build dependencies follow Beta.
+// channel's version while its build dependencies follow HuaAnWork.
 // The third leg is the dormant alpha.1 lane retained in the frozen market peer
 // string; Next has consumed rc.1 since R-M9-R1. Remove it when the lane is retired.
-const marketPeerRange = [...new Set([...['stable', 'beta'].map(name => upstreamDocument.channels?.[name]?.sourceVersion), '0.2.1-alpha.1'])].join(' || ')
-const expectedRange = (path, field) => path === marketPath && field === 'peerDependencies' ? marketPeerRange : version
+const expectedRange = (path, field) => path === marketPath && field === 'peerDependencies' ? marketPeerRange(upstreamDocument) : version
 
 const vendorRelative = `vendor/dsh-runtime/${version}`
 const vendorDirectory = join(root, ...vendorRelative.split('/'))
