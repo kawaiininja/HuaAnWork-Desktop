@@ -305,9 +305,9 @@ jobs:
       - name: Build macOS smoke artifact
         env:
           DSH_PACKAGE_CHECK_ALREADY_RAN: '1'
-          # R-M7-8:smoke 路径现在也跑 provisioning 守卫(与三条发行命令一致),但 CI 按
-          # D-M6-17 零 secrets、且 R2 部署位未交付 ⇒ provisioning 实测缺 4 项。故 CI 的
-          # 未签名冒烟必须**显式声明**豁免。发行路径不带 --smoke,不受此 env 影响。
+          # R-M7-8:smoke 路径现在也跑 provisioning 守卫(与三条发行命令一致)。CI 按
+          # D-M6-17 零 secrets 显式声明豁免;它只在检出仍有占位 provisioning 值时生效,
+          # 已钉入真实值的检出不受其影响。发行路径不带 --smoke,不受此 env 影响。
           HUAANWORK_ALLOW_UNPROVISIONED_SMOKE: '1'
           # The universal merge alone takes 9-17 minutes, so pull requests
           # package only the runner's native arm64 app. Pushes to master and
