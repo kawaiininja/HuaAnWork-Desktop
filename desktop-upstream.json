@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "repository": "https://github.com/anywhere-labs/dsh-desktop.git",
   "ref": "upstream/master",
-  "reviewedCommit": "44084bdae0d44cac56948a223048d9c31541d0d0",
+  "reviewedCommit": "092e2ecef750d10db43cedbab8e81fd48c8de38e",
   "sourcePackage": "dsh-plugin-desktop-beta",
   "watchedPaths": [
     "package.json",

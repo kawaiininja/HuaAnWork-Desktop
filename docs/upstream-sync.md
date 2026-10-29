@@ -21,6 +21,7 @@
 - 它必须是当前抓取的 `upstream/master` 的**祖先**；看板用 `git merge-base --is-ancestor reviewedCommit upstreamSha` 校验，不满足即报错，绝不输出零。
 - 它只向前推进，且只在**整批完成**后推进（§4）。推进是人工编辑 JSON 并提交，看板不写回任何状态。
 - 初始值 `44084bdae0d44cac56948a223048d9c31541d0d0`（2026-10-17，`chore(ci,test): prune obsolete tests and cache packaging downloads (#1399)`）是最后一次完整合并的上游侧提交。计算规则：在 `git rev-list --merges --parents HEAD`（新→旧）中，取第一个满足「其第二父提交是 `upstream/master` 祖先」（`git merge-base --is-ancestor <parent> upstream/master`）的父提交。该值恰好也是当时的合并点，但**此后不得把 merge-base 重新当作基准**：只认 `reviewedCommit`。若仓库历史变化导致计算结果不同，以实际计算值创建配置，并重新实测首批待审清单。
+- 现值 `092e2ecef750d10db43cedbab8e81fd48c8de38e`（2026-10-29，首期 selective shelf 完成后推进；批次登记与证据见 §4）。
 
 ### 明确否定三种错误基准
 
@@ -123,6 +124,27 @@ node scripts/upstream-sync-dashboard.mjs --json   # 机器可读
 ### 依赖与打包文件
 
 若某个 `PORT` 触及依赖闭包（`package.json`、`yarn.lock`、`.yarnrc.yml`、`patches/`、`vendor/`、`upstream.json`），以**本地**解析结果为准重新生成，不得把上游的锁文件或补丁整段搬入。移植与其依赖解析必须走独立提交，保持可回滚。
+
+### 已完成的审阅批次（批次登记）
+
+每完成一批，在本表**追加**一行；区间、完整 SHA 与证据文件是唯一可追溯凭据。§8 的历史快照不改写。
+
+| 批次 | 区间（完整 SHA） | 提交数 | 逐文件结论 | 证据 | `reviewedCommit` 推进 |
+| --- | --- | --- | --- | --- | --- |
+| 首期 selective shelf（2026-10-29，Task 13） | `44084bdae0d44cac56948a223048d9c31541d0d0..092e2ecef750d10db43cedbab8e81fd48c8de38e` | 56（其中 14 个是零 direct file 的 merge 容器） | 2622 条 direct file：`SKIP` 2602、`ALREADY` 20、`PORT` 0（另有 14 条 merge 容器占位行，同为 `SKIP`） | `docs/evidence/2026-10-29-single-desktop-upstream-shelf.md` | `44084bdae0d44cac56948a223048d9c31541d0d0` → `092e2ecef750d10db43cedbab8e81fd48c8de38e` |
+
+读数（**本地 ref，未 fetch**：本次运行环境离线，`git fetch upstream` 连接超时；`upstream/master` 最后一次前移是 2026-10-26 到 `092e2ecef7`）：
+
+```text
+upstream-sync-dashboard: as-of 2026-10-29T23:06:56.106Z / upstream commit 2026-10-24T19:10:34+08:00
+  ref      = upstream/master @ 092e2ecef750d10db43cedbab8e81fd48c8de38e
+  reviewed = 092e2ecef750d10db43cedbab8e81fd48c8de38e
+  pending  = 0 commits
+```
+
+- 本批**无 `PORT`**：`7b3cddd2fe` 的跨 Profile 默认启用 browser 属产品行为变化，按本计划边界判 `SKIP`，登记到既有「huaanwork 未吸收上游 2.1 功能面」债（`AGENTS.md` 债表），不得作为本批夹带移植。
+- 20 条 `ALREADY` 只覆盖已有等价或更新实现的文件（AA artifact/connector、`dshmarket` 1.70.2 patch、meshcall-router 的 `x64ArchFiles`、`package-win` 压缩覆盖等）；同一提交的其余文件继承 commit-default。
+- 若 `upstream/master` 在本批之后前进，新提交保持 pending，必须另起一批处置，**不得**随本货架一起标记已审。
 
 ---
 
