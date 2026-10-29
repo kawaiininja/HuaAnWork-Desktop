@@ -1,135 +1,163 @@
 # 上游同步准则与基准定义 (Upstream Synchronization Guide)
 
-本文档定义 HuaAnWork-Desktop 对上游项目（`anywhere-labs/dsh-desktop`）进行同步时的唯一基准、纪律约束、落后量统计口径与永久 override 清单（裁定 R-M7-3，Task 6.1）。
+本文档定义 HuaAnWork-Desktop 单桌面仓对上游项目（`anywhere-labs/dsh-desktop`）的同步模型：**selective review**。仓库不再整仓合并上游，也不再维护 Stable / Beta / Next 三个参考桌面树；同步的唯一基准是 `desktop-upstream.json` 里的 `reviewedCommit`，执行方式是逐提交、逐文件的审阅与处置。
 
-> **过渡说明（2026-10-29，单桌面改造阶段 A）**：下文 §1–§7 是「整仓合并」时代的同步规则，服务的是 Stable / Beta / Next 多桌面变体共存的仓库。阶段 A 的活跃产品已单化为 HuaAnWork，三个参考树不再是 workspace，整仓合并流程也不再是同步的执行方式。阶段 B 将由 `desktop-upstream.json` 的 `reviewedCommit` 与 selective review 取代 §1–§7；§8 的历史快照原样保留。
+§1–§7 是现行规则；§8 起是整仓合并时代的看板读数快照，**只作历史阅读**。快照里的文件名、§6 条目编号（如「§6 第 1 条」）、Scope A/B/C 口径与结构性计数都是当时的记录，可能已被现行规则取代，不得据此推断当前清单或机制。
 
----
+## 1. 基准定义：`desktop-upstream.json` 是唯一真相源
 
-## 1. 基准定义（唯一真相源）
+仓库根的 `desktop-upstream.json` 是同步基准的唯一真相源，字段固定：
 
-- **唯一有效基准 ref**：`UPSTREAM_REF = upstream/master`
-  其中 `upstream` 远端地址恒为 `https://github.com/anywhere-labs/dsh-desktop.git`。
-- **唯一动态基准 merge-base**：`MERGE_BASE = git merge-base HEAD upstream/master`
-  截至 2026-10-07，当前值为 `a934d988610605078001d7c22bbaa2435cbeb385`（2026-09-18）。
-  **严禁在任何脚本或文档中硬编码 `a934d98861`**：M8 处置孤儿提交或进行 rebase 后，该散列值会发生变化，必须通过 `git merge-base` 动态解析。
+- `schemaVersion`：当前恒为 `1`；其他值一律拒绝加载。
+- `repository`：`https://github.com/anywhere-labs/dsh-desktop.git`。看板会把它与 `git remote get-url upstream` 逐字比对。
+- `ref`：`upstream/master`。
+- `reviewedCommit`：**已完整审阅并处置到的上游提交**，40 位完整小写 SHA。
+- `sourcePackage`：历史端口来源标注，当前为 `dsh-plugin-desktop-beta`。参考树退出活跃构建面后，它不再提供任何可机器比对的对照物，也不是完整性或等价性判据（见 §7）。
+- `watchedPaths`：看板分诊用的上游路径清单。以 `/` 结尾的条目按前缀匹配（目录型，如 `scripts/`、`vendor/`）；不带 `/` 的条目按整路径精确匹配（文件型，如 `package.json`、`deepseek-harness`）。清单作用于**上游提交里的路径**，不是本地工作树路径，因此可以（也应当）继续命名上游独有、本地已不存在的参考树目录。
+
+### `reviewedCommit` 的语义
+
+- 它表示「这条提交及之前的全部上游提交都已审阅完毕」，**不是**上游最新 tip，**不是** `git merge-base`，**不是** fork 的 `HEAD`，也**不是**某个 tag。
+- 它必须是当前抓取的 `upstream/master` 的**祖先**；看板用 `git merge-base --is-ancestor reviewedCommit upstreamSha` 校验，不满足即报错，绝不输出零。
+- 它只向前推进，且只在**整批完成**后推进（§4）。推进是人工编辑 JSON 并提交，看板不写回任何状态。
+- 初始值 `44084bdae0d44cac56948a223048d9c31541d0d0`（2026-10-17，`chore(ci,test): prune obsolete tests and cache packaging downloads (#1399)`）是最后一次完整合并的上游侧提交。计算规则：在 `git rev-list --merges --parents HEAD`（新→旧）中，取第一个满足「其第二父提交是 `upstream/master` 祖先」（`git merge-base --is-ancestor <parent> upstream/master`）的父提交。该值恰好也是当时的合并点，但**此后不得把 merge-base 重新当作基准**：只认 `reviewedCommit`。若仓库历史变化导致计算结果不同，以实际计算值创建配置，并重新实测首批待审清单。
 
 ### 明确否定三种错误基准
 
-在进行同步分析与落后量统计时，必须**明确否定**以下三种错误基准：
-
-1. ❌ **错误基准 1：fork 自己的 `origin/master`**
-   - **否定理由**：在当前仓库内，`origin/master` 解析为 fork 自身的远端仓库（`kawaiininja/HuaAnWork-Desktop`）。若拿 `origin/master` 作为基准计算落后量，落后提交数恒为 0，会产生「完全无落后」的彻底误判。
-2. ❌ **错误基准 2：本地镜像 master `upstream-local/master`**
-   - **否定理由**：`upstream-local/master` 指向本地镜像目录（`../DSH Desktop`）的本地 `master` 分支，该分支曾携带 3 个从未推送到上游的孤儿提交（`d1d8c81b5a`、`eb56d3a1c1`、`5737bcceb6`），且停留在 2026-09-19，不能代表上游官方最新状态。
-   - **重置记录**：该镜像已于 2026-10-09（Task 1.1 / R-M8-1）通过 `git fetch origin && git reset --hard origin/master` 重置至上游官方 tip（`ca52ce2cd9ac872358e9a9464902e3c7ee4d494f`），3 个孤儿提交已不在其 `master` 分支上；即便如此，本地镜像仍可能因未及时 fetch 发生漂移，不可作为同步基准。
-3. ❌ **错误基准 3：`master...upstream-local/master` 的左/右计数（如 `195  0`）**
-   - **否定理由**：右侧计数恒为 0，仅仅是因为本地镜像刚好停在 fork 的历史分支点附近，若将右侧 0 误读为落后量，会得出「已完全跟上上游」的致命错误结论（评估 L6）。
+1. ❌ fork 自己的 `origin/master`：落后量恒为 0，会得出「完全无落后」的彻底误判。
+2. ❌ 本地镜像的 `upstream-local/master`：镜像可能停在旧提交、携带从未推送的孤儿提交，或干脆不存在（使用纪律见 §2）。
+3. ❌ `master...upstream-local/master` 的左/右计数（如 `195  0`）：右侧 0 只是镜像恰好停在历史分支点附近，误读为落后量会得出「已完全跟上上游」的错误结论。
 
 ---
 
-## 2. 镜像的使用纪律（Ref-Only 比较）
+## 2. Remote 与本地镜像的使用纪律
 
-本地镜像目录 `../DSH Desktop` 曾长期处于脏工作树状态（实测有 47 个既有 ` D` 删除项与 submodule ` m` 修改，包含 `vendor/dsh-runtime/0.1.5-rc.2/*.tgz`、`0.1.6-alpha.2/*.tgz`、`assets/*.png` 等；目录 mtime 为 09-18/09-23，非任何评估造成）。
+### 每个 clone 与 worktree 独立配置 remote
 
-### 镜像重置事件记录（2026-10-09，Task 1.1 / R-M8-1）：
-- **重置日期**：2026-10-09
-- **重置前 ref**：`5737bcceb62994903f931b8f6ae8e50065204ecf`（包含 3 个孤儿提交）
-- **重置后 ref**：`ca52ce2cd9ac872358e9a9464902e3c7ee4d494f`（对齐官方 tip `origin/master`）
-- **说明**：重置后镜像仍仅作历史只读副本备查，不作为同步基准。
-
-### 纪律要求：
-1. **禁止直接检查镜像工作树**：严禁使用 `ls`、`git status` 或读取工作树文件来判断「上游是否存在某文件/某改动」。
-2. **只允许 ref 层面只读比较**：必须使用 Git 底层对象查询命令对镜像 ref（如 `origin/master`）进行只读比对：
-   - `git ls-tree <ref> <path>`
-   - `git show <ref>:<path>`
-   - `git cat-file -e <ref>:<path>`
-3. **关键陷阱警示**：
-   在镜像工作树中被删除的文件恰恰包含 `vendor/dsh-runtime/0.1.6-alpha.2/*.tgz`，而「上游是否删除了 fork 硬钉的 runtime」是 M7 评估的关键结论之一。如果误查工作树文件，会把「本地工作树被删」当成「上游删除了该 runtime」，导致**结论碰巧正确但事实依据全错**。
-4. **定位说明**：在添加了 `upstream` remote 之后，本地镜像仅作为「离线可用的一份历史副本」保留备查，**不再作为同步基准**。
-
----
-
-## 3. 每个 Clone 与 Worktree 独立配置 Remote
-
-Git 的 `.git/config` 本地配置文件不纳入版本控制。因此，为当前仓库建立真 `upstream` remote 是**每台开发机、每个独立 worktree 的一次性前置操作**：
+`.git/config` 不纳入版本控制，真 `upstream` remote 是每台开发机、每个 worktree 的一次性前置操作：
 
 ```bash
 git remote add upstream https://github.com/anywhere-labs/dsh-desktop.git
 git fetch upstream --tags
 ```
 
-若 remote 已存在但 URL 不正确，使用以下命令校正：
+remote 已存在但 URL 不正确时：
 
 ```bash
 git remote set-url upstream https://github.com/anywhere-labs/dsh-desktop.git
 git fetch upstream --tags
 ```
 
-**看板脚本约束**：Task 6.2 的 `upstream-sync-dashboard.mjs` 脚本在检测到 `upstream` remote 或 `upstream/master` 缺失时，必须**立即明确报错并引导查阅本文档本小节**，严禁静默降级或吞错输出 0。
+看板检测到 `upstream` remote 缺失、URL 与配置不符、或 `ref` 无法解析时，必须**立即报错并指向本文档**，严禁静默降级或吞错输出 0。
+
+### 本地镜像只作离线只读副本
+
+`../DSH Desktop` 这类本地镜像可能不存在、可能漂移，且曾长期处于脏工作树状态（含既有删除项与 submodule 修改）。纪律要求：
+
+1. **禁止直接检查镜像工作树**：不得用 `ls`、`git status` 或读取工作树文件判断「上游是否存在某文件/某改动」。
+2. **只允许 ref 层面只读比较**：`git ls-tree <ref> <path>`、`git show <ref>:<path>`、`git cat-file -e <ref>:<path>`。
+3. 镜像不是基准：「落后多少」只以 `desktop-upstream.json` 与抓取后的 `upstream/master` 为准。
 
 ---
 
-## 4. 落后量的登记口径与时效限定
+## 3. 看板：只读报告与 as-of / 完整 SHA 的登记口径
 
-任何关于「fork 落后上游 N 个提交」或「文件冲突面 M 个」的声称，必须显式附加 **as-of 时间戳** 与 **所使用的完整 ref 及 SHA**，严禁使用孤立的绝对数字。
+```bash
+node scripts/upstream-sync-dashboard.mjs          # 文本
+node scripts/upstream-sync-dashboard.mjs --json   # 机器可读
+```
 
-- **历史评估基准**（不可直接继承为现值）：
-  - as-of `2026-10-03 07:26:28 +0900`
-  - 引用 ref：镜像内 `origin/master` @ `1030515b4358b39633c80d5857cab6114b9e3ba8`
-  - 测得落后量：341 commits
-- **Task 6.1 实测基准**：
-  - as-of `2026-10-03 17:44:59 +0800`
-  - 引用 ref：`upstream/master` @ `a1ff68b2960753ab1f6c90565bf3d9e3f3b7ae91`
-  - 测得落后量：`git rev-list --count a934d98861..upstream/master` = **344 commits**
-- **失效模式防范**：严禁在后续讨论中不加限定地直接引用历史数字，必须通过只读看板脚本重新刷新并登记当前时刻的 as-of 数据。
+直接执行时只接受 `--json` 一个可选参数；其他参数一律报 usage 错误。
+
+成功结果字段：
+
+- 顶层：`ok`、`asOf`、`repository`、`ref`、`upstreamSha`、`upstreamCommitDate`、`reviewedCommit`、`sourcePackage`、`pendingCount`、`commits`。
+- 每个 commit：`sha`、`date`、`subject`、`files.watched`、`files.unwatched`。
+
+行为约定：
+
+1. **不截断**：文本与 `--json` 都输出全部提交与全部 direct files。文本模式逐行列出 `watched:` / `unwatched:`，零 direct files 的提交显式标注 `(zero direct files)`；旧版「… and N more」式截断已退役。
+2. **每个 direct file 恰好归类一次**：命中 `watchedPaths` 进 `watched`，否则进 `unwatched`；两边不重叠、不遗漏。
+3. **merge 只算 direct files**：文件枚举用 `git diff-tree --no-commit-id --name-only -r --root`，不使用 `-m`，因此 merge 容器不重复子提交的文件（通常就是 `(zero direct files)`）。不使用重命名检测：改名会以「旧路径 + 新路径」两行出现，两行都会被分类。
+4. **只读、不是门禁**：脚本需要 `git fetch upstream` 后的本地 ref，离线必然失败，因此【绝对不得接进 `package.json` 的任何 scripts，也不得接进任何 gate】。它的回归测试（`scripts/upstream-sync-dashboard.test.mjs`）是 hermetic 的：只用临时 Git 仓库，不访问网络、不创建也不读取任何参考桌面树。
+5. **失败语义**：配置缺失、字段缺失或非法 SHA → `cannot load desktop-upstream.json ...`；remote URL 不符、ref 不可用、或 `reviewedCommit` 不是祖先 → `upstream ref is unavailable, or reviewedCommit is not an ancestor ...`。两种错误都指向本文档，且绝不输出零。
+
+### as-of 与完整 SHA 的登记口径
+
+任何「落后 N 个提交」「本轮触及 M 个文件」的声称，必须同时给出：
+
+- `asOf`（看板运行时刻，UTC ISO）；
+- `reviewedCommit` 与 `upstreamSha` 的**完整 40 位 SHA**（正文可写短 SHA 便于阅读，但落盘证据必须是完整值）；
+- `upstreamCommitDate`（上游提交时间）与 `pendingCount`。
+
+新读数**追加**到证据文档，不改写旧快照（§8 的「不得覆盖历史记录」规则继续适用）。看板运行前先 `git fetch upstream`；未 fetch 的读数只是本地 ref 的陈旧值，必须如实注明。
 
 ---
 
-## 5. 同步的执行纪律
+## 4. 逐提交、逐文件的处置口径与整批推进
 
-依据裁定 R-M7-3 与架构债表要求，实施上游大同步时必须严格遵守以下执行纪律：
+### 枚举范围
 
-1. **必须在独立分支/Worktree 执行**：阶段 B 的大同步操作严禁在主工作树上直接进行，必须新建隔离分支（如 `sync/upstream-v2`）或全新 worktree。
-2. **大文件冲突合并原则**：
-   - `yarn.lock`（上游漂移 13,947 行）与根目录 `package.json`（上游 1,811 行）：**严禁手工逐行三方合并**。必须采用「以最新上游版本为基底，在此基础上重放 fork 增量配置并重新执行依赖安装解析」的策略。
-   - `upstream.json` 与 vendored runtime：存在 **modify-delete** 结构性冲突，必须按 fork 既有决策保留或受控替换。
-3. **Submodule Pin 独立提交**：
-   `deepseek-harness` submodule pin 更新（如 `ddefc45fbc → 639ed01539`）必须与 Desktop 业务行为代码修改严格分开，单独生成独立 commit（遵循 `AGENTS.md:37` 规范）。
+待审清单 = `git rev-list --reverse --topo-order reviewedCommit..upstreamSha`，按拓扑序（旧→新）覆盖**全部**提交：不抽样、不跳过 merge 容器、不只审「看起来相关」的提交。`pendingCount` 必须等于 `git rev-list --count reviewedCommit..upstreamSha`。
+
+### 逐文件结论
+
+每个提交的 `watched` 与 `unwatched` 文件都要看：`watchedPaths` 只是默认覆盖面，不是「只看这些就够」的边界（根级文档、workflow、打包脚本都可能是 `unwatched` 却仍与产品相关）。每个 direct file 登记且只登记一个结论：
+
+| 结论 | 含义 | 证据要求 |
+| --- | --- | --- |
+| `SKIP` | 不适用于本产品，或属于上游自有设施 | 一句话理由，说明为什么与本产品无关 |
+| `ALREADY` | fork 已有等价或更新的实现 | 本地路径 + 符号名（必要时附测试名或命令输出） |
+| `PORT` | 需要移植进 HuaAnWork | 必须另行立项或裁定，不得在审阅批次里夹带移植 |
+
+`PORT` 只是分诊结论，不等于授权改动；产品行为变化必须走自己的计划与门禁。
+
+### 整批完成才推进
+
+1. 本批**全部**提交与**全部** direct file 都有结论并落盘后，才把 `reviewedCommit` 推进到本批 `upstreamSha`。
+2. 不得边审边推：中途推进会让未审提交从 `reviewedCommit..upstreamSha` 区间里静默消失。
+3. 推进动作 = 人工编辑 `desktop-upstream.json` + 单独提交 + 在证据里给出推进前后的完整 SHA。
+4. 需要补审历史时，只能把 `reviewedCommit` 回退到仍是 `upstreamSha` 祖先的提交，并在证据里说明原因；回退到非祖先提交会被看板拒绝。
+5. `watchedPaths` 的增删只改变分诊口径，必须随理由一起提交；不得为了让某一批「看起来更小」而临时删条目。
+
+### 依赖与打包文件
+
+若某个 `PORT` 触及依赖闭包（`package.json`、`yarn.lock`、`.yarnrc.yml`、`patches/`、`vendor/`、`upstream.json`），以**本地**解析结果为准重新生成，不得把上游的锁文件或补丁整段搬入。移植与其依赖解析必须走独立提交，保持可回滚。
+
+---
+
+## 5. DeepSeek Harness pin 与 Desktop selective review 相互独立
+
+`deepseek-harness/` 是 pinned submodule，其 pin 记录在 `upstream.json` 的 active channel（`commit` / `sourceVersion` / `runtimePackageVersion`），并拥有自己的 pnpm workspace。两条线互相独立：
+
+1. 上游 Desktop 提交里的 `deepseek-harness` gitlink 变化，在 selective review 中只是一个 `watched` 文件条目（`watchedPaths` 里的 `deepseek-harness`）；它**不**意味着本仓要升级子模组。
+2. Harness 升级是独立动作：必须连同 vendored runtime、`patches/`、根 `resolutions` 与 lockfile 一起验证，并**单独提交**子模组 pin（遵循 AGENTS.md 的 submodule 纪律）。
+3. Harness 升级**不推进** `reviewedCommit`；`reviewedCommit` 只跟踪 Desktop 侧 `upstream/master` 的审阅进度。反之，审阅 Desktop 提交也不授权改动 Harness pin。
 
 ---
 
 ## 6. 永久 Fork-Owned Override 清单
 
-在多次同步迭代中，以下文件属于 fork 自有的永久性守卫或配置，每次同步都必须完整保留 fork 版本，压制上游对应文件的覆盖：
+本清单只列**当前仍有活跃消费方**的 fork 自有 fixture 与守卫。上游若出现同名文件，以 fork 版本为准；历史名单（含已退役项）见 §8 起的历史快照，那里出现的旧文件名属于历史，不代表现行清单。
 
-1. **`scripts/verify-desktop-variants.mjs`**：
-   - 上游已将该文件缩减至 36 行、`allowedDifferences` 仅剩 1 项并引入 `normalizeIdentity`；
-   - M8 Phase 3（R-M8-3，Task 3.1）重塑之后，fork 仍整体保留本文件。它仍是本清单第 1 条永久 override。差异清单不再是「22/6 与 19/0」预算：身份拼法由规范化吸收，结构性清单为 stable↔beta 7 项、beta↔huaanwork 64 项、只存在于 right 的前缀 6 项(M9 后计数,以 AGENTS 债表为准)。计数与理由见 `AGENTS.md` 债表变体守卫行。
-2. **`scripts/expected-root-gate-scripts.json`**：
-   - 纯 fork 自有的根门禁脚本逐字锁定 fixture（`fixtureVersion: 2`），上游无此文件。
-3. **`scripts/market-manifest-byte-budget.json`**：
-   - Task 4.1 引入的跨包清单字节上限配置，作为单源真相维护。
-4. **跨边界读取 gate fixture 的 5 处测试与实现文件**：
-   - `dsh-plugin-desktop/tests/package.spec.ts`
-   - `dsh-plugin-desktop-beta/tests/package.spec.ts`
-   - `dsh-plugin-huaanwork/tests/package.spec.ts`
-   - `market-server/src/manifest-prepare.ts`
-   - `dsh-plugin-huaanwork/tests/huaanwork-host/market-verify.spec.ts`
+1. **`scripts/expected-root-gate-scripts.json`**
+   - 纯 fork 自有的根门禁脚本逐字锁定 fixture（`fixtureVersion: 3`），上游无此文件。
+   - 消费方：`scripts/expected-root-gate-scripts.test.mjs`（`test:gate-scripts`）；`dsh-plugin-huaanwork/tests/package.spec.ts` 在运行时用 `readFileSync` 跨边界读取。
+2. **`scripts/market-manifest-byte-budget.json`**
+   - 清单字节上限的单一真相源（Task 4.1 引入），读写两侧不得互相 import。
+   - 消费方：`market-server/src/manifest-prepare.ts`、`market-server/tests/manifest-byte-cap.spec.ts`、`dsh-plugin-huaanwork/tests/huaanwork-host/market-verify.spec.ts`。
+3. **`dsh-plugin-huaanwork/tests/package.spec.ts`**
+   - fork 专有包（上游无对侧文件）的门禁断言，包含对第 1 条 fixture 的跨边界读取。
+4. **已退役（2026-10-30，Task 12）**：变体守卫脚本及其测试、以及两个参考桌面包的 `tests/package.spec.ts` 不再是 override。三个参考树已退出 workspace 并在阶段 B 物理删除，守卫没有活跃消费方，其 `allowedDifferences` / `oneSidedPrefixes` 名额不再有执行者。**不得**为了让「旧冲突面看起来一致」而重新引入三包守卫或等价清单（见 §7）。
 
 ---
 
-## 7. 阶段 A 与阶段 B 的边界界定
+## 7. 覆盖范围与明确的不声明
 
-- **阶段 A（Phase 6：当前范围）**：
-  - 仅负责机制建设与**不落地的可行性 Spike**（包括：真 `upstream` remote 接入、同步准则文档建立、只读看板脚本、冲突面分类与漂移基线盘点）。
-  - 本阶段不落地任何业务代码合并，不修改已有工作树的主功能。
-- **阶段 B（另立 M8）**：
-  - 一次性大同步至 `0.2.0-rc.2`（估算 15–25 人日），将在独立里程碑 M8 中开展。
-  - 以下三个前置裁定**随 M8 计划另行裁决，本阶段严禁预先裁定**：
-    1. 3 个孤儿提交（`d1d8c81b5a`/`eb56d3a1c1`/`5737bcceb6`）的丢弃或重写；
-    2. 基座跟进 `dsh-desktop-stable`/`beta` 还是迁往 `dsh-desktop-next`；
-    3. 白名单预算模型采用「一次性临时预算」还是「长期分级收敛模型」。
+- **watchedPaths 只提供覆盖与分诊**：它决定一个上游 direct file 进 `watched` 还是 `unwatched`，不决定是否需要移植，也不验证移植是否正确。
+- **三包机器同形核对已经消失**：参考树退出活跃构建面后，不存在「三包逐字节相同」或「变体白名单命中」这类机器核对。`sourcePackage` 只是历史来源标注，不是对照物。
+- **显式不声明完整性或等价性**：selective review 的证据（逐提交/逐文件结论表、`ALREADY` 指向的本地符号）只证明「这一批的每个文件都被看过并给了结论」，**不**证明 HuaAnWork 与上游 Beta 在功能、行为或测试覆盖上等价，也**不**证明上游所有能力都已搬入。完整性只能由具体功能面计划单独声明。
+- **不得误补三包守卫**：不得用「重建三包 diff 或守卫」来替代逐文件证据；这会重新引入已退役的维护面，并与单桌面拓扑冲突。
 
 ---
 

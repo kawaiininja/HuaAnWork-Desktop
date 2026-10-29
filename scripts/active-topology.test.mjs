@@ -8,6 +8,7 @@ test('reference-only desktop tools do not re-enter the root test glob', () => {
     'verify-desktop-variants.test.mjs',
     'export-app-icons.test.mjs',
     'inspector-compat.test.mjs',
-    'upstream-sync-dashboard.test.mjs',
   ]) assert.equal(tests.includes(retired), false, `${retired} must not run in Phase A`)
+  // The selective-review dashboard is a live, hermetic report: its test belongs in the root glob.
+  assert.equal(tests.includes('upstream-sync-dashboard.test.mjs'), true)
 })
