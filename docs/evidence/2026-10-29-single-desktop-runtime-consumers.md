@@ -1,6 +1,6 @@
 # 单桌面维护 · 阶段 B 运行期消费方与 market peer 政策(已裁定)
 
-> **性质**:Task 9 实测证据 + 用户裁定记录。本轮只写文档:**未运行** `sync-vendored-runtime.mjs --write`、**未删除**任何 vendor 目录或 patch、**未修改** `upstream.json` 或任何包 manifest、**未运行** `yarn install`。
+> **性质**:Task 9 实测证据 + 用户裁定记录;§10 追加 Task 11 的删除执行结果。Task 9 本轮只写文档:**未运行** `sync-vendored-runtime.mjs --write`、**未删除**任何 vendor 目录或 patch、**未修改** `upstream.json` 或任何包 manifest、**未运行** `yarn install`。**Task 11 已于 2026-10-30 按 §6 精确删除,见 §10**;§1–§9 保持 Task 9 当时的读数原样,不因删除而回改。
 > **状态**:**两个政策字段已于 2026-10-30 由用户明确裁定**(`stableHistorical: "retain"` / `dormantAlpha1: "retire"`,见 §7)。最终 market peer range = `0.2.0-rc.2 || 0.2.1-rc.1`。裁定已落定,Task 10 才可执行 `--write`;Task 11 才删资产。**裁定不等于删除计划变更**(见 §5、§6)。
 
 ## 0. 基线
@@ -382,3 +382,120 @@ node -e "const p=require('./dsh-community-market/package.json'); \
     .filter(([k])=>/^@deepseek-ai\/dsh($|-)/u.test(k)).map(([,v])=>v)); \
   console.log(Object.keys(p.peerDependencies).length, [...r])"  # 期望 47 / 三腿单串
 ```
+
+## 10. Task 11 执行结果:六个 retired lane 与七组 patch 已删除(2026-10-30)
+
+> **本节点改写 §8.1 的「没做」清单**:§1–§9 是 Task 9 的实测与裁定记录,保持原样;§10 是 Task 11 执行后的实际状态。
+> **前置**:Task 10 已完成于 `881681b4fd`(`refactor(runtime): make market peer history an explicit policy`)—— `upstream.json` 只剩 `huaanwork` 通道 + `marketPeerPolicy`,market peer 为 `0.2.0-rc.2 || 0.2.1-rc.1`,根 `resolutions` 收敛为 **697** 条(682 rc.1 + 15 非 DSH),lock 对 rc.2 / alpha.1 的 vendor 解析引用均为 **0**(§8.2 的不可交换顺序已满足)。
+
+### 10.1 先写失败测试(RED)
+
+`dsh-plugin-huaanwork/tests/package.spec.ts` 新增守卫(从 `node:fs` 增 import `readdirSync`),断言 `vendor/dsh-runtime/` 与 `patches/` 的 DSH 版本族**只有**当前 runtime lane:
+
+```ts
+it('keeps only the active DSH runtime vendor lane and patch family', () => {
+  expect(readdirSync(new URL('vendor/dsh-runtime', workspaceRoot))).toEqual([runtimeVersion])
+  const dshPatchVersions = readdirSync(new URL('patches', workspaceRoot))
+    .filter(name => name.startsWith('dsh'))
+    .map(name => name.match(/@([^@]+)\.patch$/u)?.[1])
+  expect(new Set(dshPatchVersions)).toEqual(new Set([runtimeVersion]))
+})
+```
+
+`corepack yarn workspace dsh-plugin-huaanwork vitest run tests/package.spec.ts` 删除前实测(RED,逐字截取):
+
+```
+ FAIL  tests/package.spec.ts > published package surface > keeps only the active DSH runtime vendor lane and patch family
+AssertionError: expected [ '0.1.7-alpha.2', '0.1.7-rc.1', …(5) ] to deeply equal [ '0.2.1-rc.1' ]
+
+- Expected
++ Received
+
+  [
++   "0.1.7-alpha.2",
++   "0.1.7-rc.1",
++   "0.1.7-rc.2",
++   "0.2.0-rc.1",
++   "0.2.0-rc.2",
++   "0.2.1-alpha.1",
+    "0.2.1-rc.1",
+  ]
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 74 passed | 1 skipped (76)
+```
+
+### 10.2 实际删除
+
+`git rm` 只按 §6 的已记录版本精确执行;命令与 brief Step 2 逐字一致。
+
+| 删除的 vendor 目录 | 删除前跟踪文件数 |
+| --- | ---: |
+| `vendor/dsh-runtime/0.1.7-alpha.2/` | 310 |
+| `vendor/dsh-runtime/0.1.7-rc.1/` | 310 |
+| `vendor/dsh-runtime/0.1.7-rc.2/` | 318 |
+| `vendor/dsh-runtime/0.2.0-rc.1/` | 319 |
+| `vendor/dsh-runtime/0.2.0-rc.2/` | 319 |
+| `vendor/dsh-runtime/0.2.1-alpha.1/` | 322 |
+| **合计** | **6 目录 / 1898 个跟踪文件** |
+
+| 删除的 patch 族 | 个数 |
+| --- | ---: |
+| `patches/*@0.1.5-rc.2.patch` | 12 |
+| `patches/*@0.1.7-alpha.2.patch` | 18 |
+| `patches/*@0.1.7-rc.1.patch` | 19 |
+| `patches/*@0.1.7-rc.2.patch` | 21 |
+| `patches/*@0.2.0-rc.1.patch` | 21 |
+| `patches/*@0.2.0-rc.2.patch` | 22 |
+| `patches/*@0.2.1-alpha.1.patch` | 21 |
+| **合计** | **134** |
+
+- 暂存区合计:`2032 files changed, 20421 deletions(-)`(1898 vendor 文件 + 134 patch;vendor 为二进制 tarball,行数不计)。
+- `patches/` 从 **165** → **31** 个文件。
+- 未删除(硬排除项全部保持):`vendor/dsh-runtime/0.2.1-rc.1/`(342 个跟踪文件 = 341 tarball + `manifest.json`)、`patches/*@0.2.1-rc.1.patch`(22)、`.yarn/patches/dshmarket-desktop.patch`、9 个非 DSH patch(`app-builder-lib@26.15.7`、`fs-ext@2.1.1`、`node-pty@1.2.0-beta.15`、`open@11.0.1`、`open@11.0.4`、`pi-ai@0.87.1`、`pi-ai@1.0.2`、`pnpm@11.8.0`、`vscode-ripgrep@1.18.0`)、`vendor/agents-anywhere/`(17 MiB,provenance commit `64c3f67`)。三棵参考树无任何暂存文件(暂存删除里 `dsh-plugin-desktop*`/`dsh-desktop-next/` 命中 = 0)。
+
+**保留 lane** = `vendor/dsh-runtime/0.2.1-rc.1/`(341 包,manifest commit `1600d8a1e14`)+ `patches/*@0.2.1-rc.1.patch` 22 个。`vendor/dsh-runtime` 体积 **143 MiB → 25 MiB**。
+
+### 10.3 `git grep` 复核(删除后)
+
+```bash
+# a) §4 的原命令(排除 docs / 三棵参考树 / vendor / lock / 根 manifest / AGENTS.md)
+git grep -l -E 'vendor/dsh-runtime/(0\.1\.7-alpha\.2|0\.1\.7-rc\.1|0\.1\.7-rc\.2|0\.2\.0-rc\.1|0\.2\.0-rc\.2|0\.2\.1-alpha\.1)' \
+  -- ':!docs' ':!dsh-plugin-desktop' ':!dsh-plugin-desktop-beta' ':!dsh-desktop-next' \
+  ':!vendor' ':!yarn.lock' ':!package.json' ':!AGENTS.md'
+# 结果:无任何命中(删除前唯一命中 upstream.json,Task 10 已收敛为单通道 rc.1)
+
+# b) 全仓(含 docs)指向已删 lane 的 vendor 路径
+git grep -c -E 'vendor/dsh-runtime/(0\.1\.5-rc\.2|0\.1\.7-alpha\.2|0\.1\.7-rc\.1|0\.1\.7-rc\.2|0\.2\.0-rc\.1|0\.2\.0-rc\.2|0\.2\.1-alpha\.1)' -- docs
+# 结果:docs 10 文件 / 41 处历史记录(计划、M9 epic 等),有意不回改
+git grep -l -E 'vendor/dsh-runtime/(0\.1\.5-rc\.2|0\.1\.7-alpha\.2|0\.1\.7-rc\.1|0\.1\.7-rc\.2|0\.2\.0-rc\.1|0\.2\.0-rc\.2|0\.2\.1-alpha\.1)' -- ':!docs'
+# 结果:无非文档命中
+
+# c) `vendor/dsh-runtime` 的存活引用(排除 docs / vendor / lock / 参考树)
+git grep -ln 'vendor/dsh-runtime'
+# AGENTS.md / package.json(全部 rc.1 解析)/ scripts/sync-vendored-runtime.mjs(按通道拼路径)
+# / upstream.json(单通道 rc.1)/ dsh-plugin-huaanwork/tests/package.spec.ts(新守卫)
+```
+
+补充核对:lock 里已删 lane 的 vendor 路径命中 **0**;`grep -c 'vendor/dsh-runtime/0.2.1-rc.1/' yarn.lock` = **638**;根 `resolutions` 697 条中 rc.1 占 682。仍出现旧版本**字符串**(非路径)的活跃文件均为注释 / 政策串 / 任意 fixture(如 `vendored-runtime-policy.mjs` 的 `0.2.0-rc.2` 保留腿、`vendored-runtime-policy.test.mjs` 的四政策断言、`verify-profile-boot.mjs:109` 的伪造 peer、`platform-login.ts:10` 的历史注释),与资产是否存在无关。
+
+### 10.4 Step 3 门禁(串行执行,全部 PASS)
+
+| 命令 | 结果 |
+| --- | --- |
+| `corepack yarn workspace dsh-plugin-huaanwork vitest run tests/package.spec.ts` | `Test Files 1 passed (1)` / `Tests 75 passed, 1 skipped (76)`(GREEN) |
+| `corepack yarn check:vendored-runtime` | `sync-vendored-runtime: huaanwork 341 packages from 1600d8a1e1 are verified` |
+| `corepack yarn aa:check` | exit 0;`Selected AA main at 64c3f67ee3b270c1740da4da9dfae56d6217c8e4` / `AA release verified: HuaAnWork uses 64c3f67ee3b2…`(AA `main` 仍为 provenance 记录的 `64c3f67`,未前进 ⇒ 未运行 `aa:prepare-release`) |
+| `corepack yarn install --immutable` | exit 0;`Done with warnings in 1s 408ms`(仅既有 `YN0002`/`YN0086` peer 提示;lockfile 未变) |
+| `find vendor/dsh-runtime -mindepth 1 -maxdepth 1 -type d -print` | 见下 |
+
+```
+$ find vendor/dsh-runtime -mindepth 1 -maxdepth 1 -type d -print
+vendor/dsh-runtime/0.2.1-rc.1
+```
+
+### 10.5 边界
+
+- 删除的是**资产**,不是政策:market peer 仍为 `0.2.0-rc.2 || 0.2.1-rc.1`(§7.2 的 `stableHistorical: retain` 只保留字符串腿,§5 已声明它不要求保留 rc.2 的 vendor 目录 / 22 个 patch / resolutions)。
+- 新增的 `package.spec.ts` 守卫让「资产消失」可回归:任何旧 lane 目录或旧 DSH patch 族被重新引入都会变红。
+- `git grep` 的 docs 命中是历史计划与 M9 epic 的原文,**不是**活的消费方;后续若要统一口径,属于文档整理而非本任务的删除范围。

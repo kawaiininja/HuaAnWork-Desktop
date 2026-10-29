@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -400,6 +401,14 @@ describe('published package surface', () => {
   // repository-wide and `SettingsProvider` became `SettingsForms`, so neither
   // `settingsNamespace` nor `installSettingsSection` has a delegate left to
   // forward to. See `patch-forward/DECISIONS.md` for the recorded downgrade.
+
+  it('keeps only the active DSH runtime vendor lane and patch family', () => {
+    expect(readdirSync(new URL('vendor/dsh-runtime', workspaceRoot))).toEqual([runtimeVersion])
+    const dshPatchVersions = readdirSync(new URL('patches', workspaceRoot))
+      .filter(name => name.startsWith('dsh'))
+      .map(name => name.match(/@([^@]+)\.patch$/u)?.[1])
+    expect(new Set(dshPatchVersions)).toEqual(new Set([runtimeVersion]))
+  })
 
   it('resolves every DSH package only through the active HuaAnWork runtime', () => {
     const dshResolutions = Object.entries(workspaceManifest.resolutions ?? {})
