@@ -27,6 +27,10 @@ function fixture(t) {
   return { root, write, install }
 }
 
+test('targets only the active HuaAnWork workspace', () => {
+  assert.deepEqual(MARKET_WORKSPACES, ['dsh-plugin-huaanwork'])
+})
+
 test('refreshes all editions and rechecks the tag on every invocation', async t => {
   const { root, install } = fixture(t)
   let version = '1.59.0', queries = 0, installs = 0
@@ -48,8 +52,8 @@ test('check is read-only and rejects stale installed copies', async t => {
   await assert.rejects(prepareMarket(root, { check: true, fetcher: reply('1.59.0'), runInstall: () => assert.fail('must not install') }), /market:prepare/)
   assert.equal(readFileSync(join(root, 'yarn.lock'), 'utf8'), 'original lock\n')
   await prepareMarket(root, { fetcher: reply('1.59.0'), runInstall: install })
-  write('dsh-desktop-next/node_modules/dshmarket/package.json', { name: 'dshmarket', version: '1.0.0' })
-  await assert.rejects(prepareMarket(root, { check: true, fetcher: reply('1.59.0') }), /dsh-desktop-next/)
+  write('dsh-plugin-huaanwork/node_modules/dshmarket/package.json', { name: 'dshmarket', version: '1.0.0' })
+  await assert.rejects(prepareMarket(root, { check: true, fetcher: reply('1.59.0') }), /dsh-plugin-huaanwork/)
 })
 
 test('restores manifests and the lockfile after an interrupted installation', async t => {
