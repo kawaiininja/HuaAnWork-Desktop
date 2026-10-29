@@ -11,11 +11,13 @@ const SERVER_WORKSPACE_MODULE = /(?:^|\/)(?:market-server|update-server)(?:\/|$)
 const MARKET_SOURCE_ROOTS = ['dsh-community-market/src', 'market-server/src', 'update-server/src']
 // 反向规则(round3 R10):桌面插件源不得 import market-server 服务端内部
 // (market-server 是独立服务端工作区,消费面经 wrapper + 上游 contracts,不直通服务端代码)。
+// Task 5(单桌面、单代码):受检根只剩**活跃**拓扑。Stable/Beta 两棵参考树已退出
+// 根测试 glob 与架构门——它们只作为参考保留,不在本产品的构建与发布路径上;把它们
+// 留在受检根,只会让守卫跟着一棵即将删除的树漂移。包名禁令(DESKTOP_MODULE)保持
+// 不变,所以未来 market 代码仍不得 import 历史实现。
 const DESKTOP_SOURCE_ROOTS = [
-  'dsh-plugin-desktop/src',
-  'dsh-plugin-desktop-beta/src',
   'dsh-plugin-huaanwork/src',
-  // M7 Task 1.4(M14 盲区 B):fork 自有的三个 workspace 此前完全不在受检根内,
+  // M7 Task 1.4(M14 盲区 B):fork 自有的四个 workspace 此前完全不在受检根内,
   // 可以 import 任何东西而不触发本守卫,而 root `test` 确实在跑它们。
   // 注意这里扫的是**目录路径**,不是包名(包名是 @huaanwork/policy 等);
   // 任何将来基于 import 说明符的规则必须改用 @huaanwork/ 前缀。

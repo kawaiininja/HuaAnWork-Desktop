@@ -2034,7 +2034,7 @@
     "test": "yarn workspace dsh-plugin-huaanwork test && yarn workspace dsh-community-market test && yarn workspace @huaanwork/policy test && yarn workspace @huaanwork/model test && yarn workspace @huaanwork/git-tools test && yarn workspace @huaanwork/web-tools test && yarn workspace market-server test && yarn workspace update-server test && yarn workspace @huaanwork/catalog-signing test && yarn workspace @huaanwork/agent-package-format test && yarn workspace agent-catalog-server test && yarn workspace agent-catalog-admin test",
     "test:bilingual-docs": "node --test scripts/bilingual-docs.test.mjs",
     "check:bilingual-docs": "yarn test:bilingual-docs && node scripts/verify-bilingual-docs.mjs",
-    "test:architecture-gates": "node --test scripts/market-dependency-direction.test.mjs",
+    "test:architecture-gates": "node --test scripts/market-dependency-direction.test.mjs scripts/active-topology.test.mjs",
     "check:architecture": "yarn test:architecture-gates && node scripts/verify-market-dependency-direction.mjs",
     "test:gate-scripts": "node --test scripts/expected-root-gate-scripts.test.mjs",
     "test:scripts": "node --test scripts/*.test.mjs",
