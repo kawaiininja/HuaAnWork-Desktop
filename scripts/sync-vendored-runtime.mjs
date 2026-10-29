@@ -20,7 +20,7 @@ const channelFlag = process.argv.indexOf('--channel')
 const requestedChannel = channelFlag === -1 ? undefined : process.argv[channelFlag + 1]
 
 if (mode !== '--write' && mode !== '--check') {
-  throw new Error('usage: node scripts/sync-vendored-runtime.mjs <--write|--check> [--channel stable|beta|huaanwork]')
+  throw new Error('usage: node scripts/sync-vendored-runtime.mjs <--write|--check> [--channel huaanwork]')
 }
 
 const readJson = path => JSON.parse(readFileSync(path, 'utf8'))
@@ -34,7 +34,7 @@ const fail = message => { throw new Error(`sync-vendored-runtime: ${message}`) }
 
 const upstreamDocument = readJson(upstreamPath)
 const channel = requestedChannel ?? upstreamDocument.activeChannel
-if (channel !== 'stable' && channel !== 'beta' && channel !== 'huaanwork') fail(`unknown release channel ${JSON.stringify(channel)}`)
+if (channel !== 'huaanwork') fail(`unknown release channel ${JSON.stringify(channel)}`)
 const upstream = upstreamDocument.channels?.[channel]
 if (upstream === undefined || typeof upstream !== 'object') fail(`missing upstream metadata for ${channel}`)
 const version = upstream.sourceVersion
@@ -62,10 +62,9 @@ const pluginPaths = [
   ...(ownsMarketRuntime(channel) ? [marketPath] : []),
 ]
 // The market bundle loads in every desktop channel, and dsh 0.2 refuses a bundle
-// whose dsh peers exclude the running runtime, so its peers accept every
-// channel's version while its build dependencies follow HuaAnWork.
-// The third leg is the dormant alpha.1 lane retained in the frozen market peer
-// string; Next has consumed rc.1 since R-M9-R1. Remove it when the lane is retired.
+// whose dsh peers exclude the running runtime, so its peers accept the active
+// HuaAnWork runtime plus whatever history `upstream.json.marketPeerPolicy` retains;
+// its build dependencies follow HuaAnWork alone.
 const expectedRange = (path, field) => path === marketPath && field === 'peerDependencies' ? marketPeerRange(upstreamDocument) : version
 
 const vendorRelative = `vendor/dsh-runtime/${version}`

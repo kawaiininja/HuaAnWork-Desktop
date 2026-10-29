@@ -1,16 +1,26 @@
-// Phase A keeps all three channels pinned, so the market peer string still spells
-// out every channel's version. HuaAnWork alone owns the market DSH dependency check.
+// HuaAnWork alone owns the market DSH dependency check.
 export function ownsMarketRuntime(channel) {
   return channel === 'huaanwork'
 }
 
-// The market bundle loads in every desktop channel, and dsh 0.2 refuses a bundle
-// whose dsh peers exclude the running runtime, so its peers accept the stable and
-// beta versions plus the dormant alpha.1 lane. The channel set, order, and values
-// are frozen for Phase A: this must keep producing 0.2.0-rc.2 || 0.2.1-rc.1 || 0.2.1-alpha.1.
+// The market bundle's DSH peers must accept every host runtime it can still load in.
+// Only the active HuaAnWork lane is derived from metadata: the historical Stable leg
+// and the dormant alpha.1 leg are explicit policy fields (`marketPeerPolicy`), so
+// changing either one is a reviewed data edit rather than a rewrite of this function.
 export function marketPeerRange(upstreamDocument) {
+  const active = upstreamDocument.channels?.[upstreamDocument.activeChannel]?.sourceVersion
+  if (upstreamDocument.activeChannel !== 'huaanwork' || typeof active !== 'string' || active.length === 0) {
+    throw new Error('HuaAnWork active sourceVersion is required')
+  }
+  const policy = upstreamDocument.marketPeerPolicy
+  for (const field of ['stableHistorical', 'dormantAlpha1']) {
+    if (!['retain', 'retire'].includes(policy?.[field])) {
+      throw new Error(`marketPeerPolicy.${field} must be retain or retire`)
+    }
+  }
   return [...new Set([
-    ...['stable', 'beta'].map(name => upstreamDocument.channels?.[name]?.sourceVersion),
-    '0.2.1-alpha.1',
+    ...(policy.stableHistorical === 'retain' ? ['0.2.0-rc.2'] : []),
+    active,
+    ...(policy.dormantAlpha1 === 'retain' ? ['0.2.1-alpha.1'] : []),
   ])].join(' || ')
 }

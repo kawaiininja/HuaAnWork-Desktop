@@ -98,12 +98,8 @@ const EXPECTED_WORKSPACES = [
 const ciWorkflow = readFileSync(new URL('.github/workflows/ci.yml', workspaceRoot), 'utf8')
 const productIdentity = readFileSync(new URL('src/product-identity.ts', packageRoot), 'utf8')
 const main = readFileSync(new URL('src/main.ts', packageRoot), 'utf8')
-const upstreamMetadata = JSON.parse(readFileSync(
-  new URL('upstream.json', workspaceRoot), 'utf8',
-)) as { channels: { stable: { runtimePackageVersion: string } } }
-const stableRuntimeVersion = upstreamMetadata.channels.stable.runtimePackageVersion
-// Derived, not hand-written: the beta channel's pinned core is the single source of
-// truth for every `patch:` selector asserted below, so a core bump does not require
+// Derived, not hand-written: the HuaAnWork channel's pinned core is the single source
+// of truth for every `patch:` selector asserted below, so a core bump does not require
 // editing an assertion that was already correct.
 const runtimeVersion = String(manifest.dependencies?.['@deepseek-ai/dsh'])
 const dshResolution = (name: string): unknown =>
@@ -405,36 +401,14 @@ describe('published package surface', () => {
   // `settingsNamespace` nor `installSettingsSection` has a delegate left to
   // forward to. See `patch-forward/DECISIONS.md` for the recorded downgrade.
 
-  it('resolves both release channels through their recorded runtime families', () => {
+  it('resolves every DSH package only through the active HuaAnWork runtime', () => {
     const dshResolutions = Object.entries(workspaceManifest.resolutions ?? {})
       .filter(([selector]) => /^@deepseek-ai\/dsh(?:@|-)/u.test(selector))
-    const stableResolutions = dshResolutions.filter(([selector]) =>
-      selector.endsWith(`@npm:${stableRuntimeVersion}`)
-      || selector.endsWith(`@npm:^${stableRuntimeVersion}`))
-    const betaResolutions = dshResolutions.filter(([selector]) =>
-      selector.endsWith(`@npm:${runtimeVersion}`)
-      || selector.endsWith(`@npm:^${runtimeVersion}`))
-    // Dormant alpha.1 lane: retained after R-M9-R1 moved Next to rc.1.
-    const alpha1Resolutions = dshResolutions.filter(([selector]) =>
-      selector.endsWith('@npm:0.2.1-alpha.1')
-      || selector.endsWith('@npm:^0.2.1-alpha.1'))
-
-    expect(stableResolutions.length).toBeGreaterThan(0)
-    expect(betaResolutions.length).toBeGreaterThan(0)
-    expect(alpha1Resolutions.length).toBeGreaterThan(0)
-    expect(new Set([...stableResolutions, ...betaResolutions, ...alpha1Resolutions].map(([selector]) => selector)).size)
-      .toBe(dshResolutions.length)
-    for (const [selector, resolution] of stableResolutions) {
-      expect([stableRuntimeVersion, `^${stableRuntimeVersion}`]).toContain(selector.split('@npm:')[1])
-      expect(String(resolution)).toContain(stableRuntimeVersion)
-    }
-    for (const [selector, resolution] of betaResolutions) {
-      expect([runtimeVersion, `^${runtimeVersion}`]).toContain(selector.split('@npm:')[1])
-      expect(String(resolution)).toContain(runtimeVersion)
-    }
-    for (const [selector, resolution] of alpha1Resolutions) {
-      expect(['0.2.1-alpha.1', '^0.2.1-alpha.1']).toContain(selector.split('@npm:')[1])
-      expect(String(resolution)).toContain('0.2.1-alpha.1')
+    expect(dshResolutions.length).toBeGreaterThan(0)
+    for (const [selector, resolution] of dshResolutions) {
+      expect([runtimeVersion, `^${runtimeVersion}`], selector)
+        .toContain(selector.split('@npm:')[1])
+      expect(String(resolution), selector).toContain(`vendor/dsh-runtime/${runtimeVersion}/`)
     }
   })
 
