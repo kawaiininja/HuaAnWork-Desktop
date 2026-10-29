@@ -30,8 +30,8 @@
 | [Community Market 设计](../dsh-community-market/README.zh.md) | 规划中的插件市场壳、可扩展目录来源、用户选择、安装确认和安全边界 |
 | [Market 目录提供方合同](../dsh-community-market/docs/catalog-provider-contract.zh.md) | 面向后续实现团队的 Schema、query 参数、多来源和适配器规范 |
 | [架构说明](architecture.md) | Electron、Host、Web carrier、profile 和打包之间的关系 |
-| [Desktop service 参考](../dsh-plugin-desktop/docs/plugin-services.md) | `desktopProfiles`、`desktopPnpm` 的稳定 contract 和 TypeScript 示例 |
-| [包级参考](../dsh-plugin-desktop/README.md) | 完整的构建、运行、发布和已知限制 |
+| [Desktop service 参考](../dsh-plugin-huaanwork/docs/plugin-services.md) | `desktopProfiles`、`desktopPnpm` 的稳定 contract 和 TypeScript 示例 |
+| [包级参考](../dsh-plugin-huaanwork/README.md) | 完整的构建、运行、发布和已知限制 |
 
 ## README 文件怎么分工
 
@@ -41,7 +41,7 @@
 - [`README.en.md`](../README.en.md)：英文产品入口，与中文 README 保持同一产品范围。
 - [`README.zh.md`](../README.zh.md)：旧中文路径的兼容页，不维护独立内容。
 
-`README.i18n.yaml` 只记录这两个正式入口的双语 hash，不是用户指南。`dsh-plugin-desktop/README.md` 和 `dsh-plugin-desktop/README.zh.md` 是 npm 包随包发布的包级参考；它们比根 README 更技术化。`dsh-plugin-desktop/docs/` 是稳定 API 合同，不是营销页。`.agents/notes/implemented/` 是日期化的维护者决策记录，适合追溯取舍，不替代用户文档。
+`README.i18n.yaml` 只记录这两个正式入口的双语 hash，不是用户指南。`dsh-plugin-huaanwork/README.md` 和 `dsh-plugin-huaanwork/README.zh.md` 是 HuaAnWork 包随包发布的包级参考，比根 README 更技术化；三个只读参考目录（`dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/`、`dsh-desktop-next/`）里的包级文档不再维护。`dsh-plugin-huaanwork/docs/` 是稳定 API 合同，不是营销页。`.agents/notes/implemented/` 是日期化的维护者决策记录，适合追溯取舍，不替代用户文档。
 
 `deepseek-harness/` 是固定版本的官方上游子模块。它自己的 README 和 `docs/` 属于上游项目，不能当作 Desktop 文档，也不在本仓库的产品文档统计中。
 

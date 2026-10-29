@@ -61,7 +61,7 @@ If an automatic installation starts but the official manager reports a failure, 
 - [Catalog provider contract](docs/catalog-provider-contract.md)
 - [Catalog adapter guide](docs/catalog-adapter-guide.md)
 - [Security](SECURITY.md)
-- [Desktop plugin services](../dsh-plugin-desktop/docs/plugin-services.md)
+- [Desktop plugin services](../dsh-plugin-huaanwork/docs/plugin-services.md)
 
 ## License and attribution
 

@@ -30,8 +30,8 @@ Ordinary users can start with the [user guide](user-guide.en.md) and never need 
 | [Community Market design](../dsh-community-market/README.md) | The proposed market shell, extensible catalog sources, user selection, install confirmation, and safety boundary |
 | [Market catalog provider contract](../dsh-community-market/docs/catalog-provider-contract.md) | Schemas, query parameters, multi-source behavior, and adapter rules for the implementation team |
 | [Architecture](architecture.en.md) | Electron, Host, the Web carrier, profiles, and packaging |
-| [Desktop service reference](../dsh-plugin-desktop/docs/plugin-services.md) | Stable `desktopProfiles` and `desktopPnpm` contracts with TypeScript examples |
-| [Package reference](../dsh-plugin-desktop/README.md) | Detailed build, runtime, release, and limitation notes |
+| [Desktop service reference](../dsh-plugin-huaanwork/docs/plugin-services.md) | Stable `desktopProfiles` and `desktopPnpm` contracts with TypeScript examples |
+| [Package reference](../dsh-plugin-huaanwork/README.md) | Detailed build, runtime, release, and limitation notes |
 
 ## How the README files are organized
 
@@ -41,7 +41,7 @@ The outer repository has two formal product READMEs plus one legacy compatibilit
 - [`README.en.md`](../README.en.md): the English product entry point with the same product scope.
 - [`README.zh.md`](../README.zh.md): a legacy Chinese-path compatibility page with no independent content.
 
-`README.i18n.yaml` records the bilingual blob hashes for those two formal entry points; it is not a user guide. `dsh-plugin-desktop/README.md` and `dsh-plugin-desktop/README.zh.md` ship with the npm package and are the more technical package reference. `dsh-plugin-desktop/docs/` contains stable API contracts rather than marketing copy. `.agents/notes/implemented/` contains dated maintainer decision records and does not replace user documentation.
+`README.i18n.yaml` records the bilingual blob hashes for those two formal entry points; it is not a user guide. `dsh-plugin-huaanwork/README.md` and `dsh-plugin-huaanwork/README.zh.md` ship with the HuaAnWork package and are the more technical package reference; package-level documentation inside the three read-only reference directories (`dsh-plugin-desktop/`, `dsh-plugin-desktop-beta/`, `dsh-desktop-next/`) is no longer maintained. `dsh-plugin-huaanwork/docs/` contains stable API contracts rather than marketing copy. `.agents/notes/implemented/` contains dated maintainer decision records and does not replace user documentation.
 
 `deepseek-harness/` is the pinned upstream submodule. Its README and `docs/` belong to the upstream project, not to the Desktop product, and are excluded from the outer documentation inventory.
 

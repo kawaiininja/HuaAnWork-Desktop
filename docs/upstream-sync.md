@@ -2,6 +2,8 @@
 
 本文档定义 HuaAnWork-Desktop 对上游项目（`anywhere-labs/dsh-desktop`）进行同步时的唯一基准、纪律约束、落后量统计口径与永久 override 清单（裁定 R-M7-3，Task 6.1）。
 
+> **过渡说明（2026-10-29，单桌面改造阶段 A）**：下文 §1–§7 是「整仓合并」时代的同步规则，服务的是 Stable / Beta / Next 多桌面变体共存的仓库。阶段 A 的活跃产品已单化为 HuaAnWork，三个参考树不再是 workspace，整仓合并流程也不再是同步的执行方式。阶段 B 将由 `desktop-upstream.json` 的 `reviewedCommit` 与 selective review 取代 §1–§7；§8 的历史快照原样保留。
+
 ---
 
 ## 1. 基准定义（唯一真相源）

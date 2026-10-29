@@ -61,7 +61,7 @@ Renderer 在安装时不会提交 package name 或 package-manager 命令，只�
 - [目录提供方合同](docs/catalog-provider-contract.zh.md)
 - [目录适配器指南](docs/catalog-adapter-guide.zh.md)
 - [安全策略](SECURITY.zh.md)
-- [Desktop 插件服务](../dsh-plugin-desktop/docs/plugin-services.zh.md)
+- [Desktop 插件服务](../dsh-plugin-huaanwork/docs/plugin-services.zh.md)
 
 ## 许可证与归属
 
