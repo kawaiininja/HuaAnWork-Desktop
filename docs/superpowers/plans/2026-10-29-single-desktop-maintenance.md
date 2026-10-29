@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 执行真相源：`docs/superpowers/specs/2026-10-26-single-desktop-maintenance-design.md` 与本计划。设计评审和计划评审只作本地复核背景，执行所需结论已全部固化在本计划；两份文档的 SHA-256 分别为 `4745292b7dc81bc90a0c465e439ee255310456ef5e987d03ef6035fd2d21d1ef`、`abbbbce2a768c70d46da410990a5c038b2c54da24623342646ac02cd511367e1`，不要求把它们纳入分支。计划基线为 `b5ef3e84a7951941480b50a8749fe6714b8c9fc7`，开工时必须重钉。
+- 执行真相源：`docs/superpowers/specs/2026-10-26-single-desktop-maintenance-design.md` 与本计划。设计评审和计划评审已随分支基线提交，执行所需结论已全部固化在本计划；两份文档的 SHA-256 分别为 `4745292b7dc81bc90a0c465e439ee255310456ef5e987d03ef6035fd2d21d1ef`、`abbbbce2a768c70d46da410990a5c038b2c54da24623342646ac02cd511367e1`。计划基线为 `b5ef3e84a7951941480b50a8749fe6714b8c9fc7`，开工时必须重钉。
 - 新分支固定为 `refactor/huaanwork-single-desktop-maintenance`；不直接推 master、不自动合并、不触发发布、不 force-push。设计 §2 已明确授权本分支提交、推送和 `workflow_dispatch`。
 - 阶段 A 中 `dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/`、`dsh-desktop-next/` 的 tracked 内容必须零改动；只有 Task 8 的完整硬门禁通过并落盘后才能开始 Task 9。
 - 使用 Corepack Yarn `4.18.0`；lockfile 只能由包管理器重解，禁止手工拼装。所有根门禁串行执行，不并行跑 `check` / `test`，避免既有 AA/lib 竞态。
@@ -22,7 +22,7 @@
 - 阶段 B 在删除 Stable/Beta 通道元数据或执行任何 `sync-vendored-runtime.mjs --write` 之前，必须完成 Task 9 的消费方扫描和用户裁定。
 - macOS 证据只写 unsigned smoke；只有 provisioning 守卫确有缺项时才允许 `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE=1`，并写 unsigned/unprovisioned smoke。Windows 证据只写 CI 打包与运行时检查，不写真实第二台机器或跨机器验收。
 - Task 1 创建分支后以及每个后续任务的第一个 shell，都自行执行 `BASE_SHA="$(git rev-parse master)"`、`BRANCH="$(git branch --show-current)"` 并校验 `BRANCH=refactor/huaanwork-single-desktop-maintenance`；不得依赖前一任务的环境变量。若 Task 1 已重钉基线，以重钉后的 master 为准。
-- 不提交开工前已有的未跟踪 `.gstack/` 和评审文档；所有暂存使用显式路径。保留已有 tracked 设计修订和 CI provisioning 注释修订。
+- 不提交开工前已有的未跟踪 `.gstack/`；两份评审文档已随分支基线提交（见评审修订记录）。所有暂存使用显式路径。保留已有 tracked 设计修订和 CI provisioning 注释修订。
 - 证据文档记录被验证代码的完整 SHA；随后提交证据时，证据提交不得夹带代码变化。任何失败停留在当前阶段，不用后续删除掩盖问题。
 
 ### 评审修订记录（2026-10-29）
