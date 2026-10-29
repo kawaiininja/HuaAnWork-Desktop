@@ -80,12 +80,28 @@ const workspaceManifest = JSON.parse(readFileSync(new URL('package.json', worksp
   resolutions?: Record<string, unknown>
   scripts?: Record<string, unknown>
 }
+const EXPECTED_WORKSPACES = [
+  'dsh-plugin-huaanwork',
+  'dsh-community-fabric',
+  'dsh-community-market',
+  'packages/huaanwork-policy',
+  'packages/huaanwork-model',
+  'packages/huaanwork-git-tools',
+  'packages/huaanwork-web-tools',
+  'market-server',
+  'update-server',
+  'packages/catalog-signing',
+  'packages/agent-package-format',
+  'agent-catalog-server',
+  'agent-catalog-admin',
+]
 const ciWorkflow = readFileSync(new URL('.github/workflows/ci.yml', workspaceRoot), 'utf8')
 const productIdentity = readFileSync(new URL('src/product-identity.ts', packageRoot), 'utf8')
 const main = readFileSync(new URL('src/main.ts', packageRoot), 'utf8')
-const stableRuntimeVersion = (JSON.parse(readFileSync(
-  new URL('dsh-plugin-desktop/package.json', workspaceRoot), 'utf8',
-)) as { dependencies: Record<string, string> }).dependencies['@deepseek-ai/dsh']
+const upstreamMetadata = JSON.parse(readFileSync(
+  new URL('upstream.json', workspaceRoot), 'utf8',
+)) as { channels: { stable: { runtimePackageVersion: string } } }
+const stableRuntimeVersion = upstreamMetadata.channels.stable.runtimePackageVersion
 // Derived, not hand-written: the beta channel's pinned core is the single source of
 // truth for every `patch:` selector asserted below, so a core bump does not require
 // editing an assertion that was already correct.
@@ -115,40 +131,19 @@ describe('published package surface', () => {
   })
 
   it('runs desktop and community market typechecks from the root command', () => {
-    expect(ROOT_GATE_SCRIPTS.fixtureVersion).toBe(2)
+    expect(ROOT_GATE_SCRIPTS.fixtureVersion).toBe(3)
     expect(workspaceManifest.scripts?.typecheck).toBe(ROOT_GATE_SCRIPTS.typecheck)
   })
 
   it('runs desktop and community market tests from the root command', () => {
-    expect(ROOT_GATE_SCRIPTS.fixtureVersion).toBe(2)
+    expect(ROOT_GATE_SCRIPTS.fixtureVersion).toBe(3)
     expect(workspaceManifest.scripts?.test).toBe(ROOT_GATE_SCRIPTS.test)
   })
 
   it('declares the unified workspace topology and gate layout', () => {
-    const EXPECTED_WORKSPACES = [
-      'dsh-plugin-desktop',
-      'dsh-plugin-desktop-beta',
-      'dsh-desktop-next',
-      'dsh-plugin-huaanwork',
-      'dsh-community-fabric',
-      'dsh-community-market',
-      'packages/huaanwork-policy',
-      'packages/huaanwork-model',
-      'packages/huaanwork-git-tools',
-      'packages/huaanwork-web-tools',
-      'market-server',
-      'update-server',
-      'packages/catalog-signing',
-      'packages/agent-package-format',
-      'agent-catalog-server',
-      'agent-catalog-admin',
-    ]
-    expect(workspaceManifest.workspaces).toHaveLength(16)
-    for (const ws of EXPECTED_WORKSPACES) {
-      expect(workspaceManifest.workspaces).toContain(ws)
-    }
+    expect(workspaceManifest.workspaces).toEqual(EXPECTED_WORKSPACES)
     expect(workspaceManifest.scripts?.['check:layout']).toBe(
-      'yarn test:market-release && yarn test:aa-release && yarn check:bilingual-docs && yarn check:architecture && yarn check:vendored-runtime && yarn check:desktop-variants && yarn icons:check && node scripts/verify-layout.mjs && yarn test:gate-scripts && yarn check:readme-versions',
+      'yarn test:market-release && yarn test:aa-release && yarn check:bilingual-docs && yarn check:architecture && yarn check:vendored-runtime && node scripts/verify-layout.mjs && yarn test:gate-scripts && yarn check:readme-versions',
     )
   })
 
@@ -165,16 +160,10 @@ describe('published package surface', () => {
     expect(dshmarketResolutions).toHaveLength(1)
     expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.70.2')
 
-    const stableManifest = JSON.parse(readFileSync(
-      new URL('dsh-plugin-desktop/package.json', workspaceRoot), 'utf8',
-    )) as { dependencies?: Record<string, string> }
-    const huaanworkManifest = JSON.parse(readFileSync(
-      new URL('dsh-plugin-huaanwork/package.json', workspaceRoot), 'utf8',
-    )) as { dependencies?: Record<string, string> }
-
-    expect(stableManifest.dependencies?.dshmarket).toBe('1.70.2')
-    expect(huaanworkManifest.dependencies?.dshmarket).toBe('1.70.2')
-    expect(huaanworkManifest.dependencies?.dshmarket).toBe(stableManifest.dependencies?.dshmarket)
+    expect(manifest.dependencies?.dshmarket).toBe('1.70.2')
+    expect(workspaceManifest.resolutions?.['dshmarket@npm:1.70.2']).toBe(
+      'patch:dshmarket@npm%3A1.70.2#./.yarn/patches/dshmarket-desktop.patch',
+    )
   })
 
   it('registers both npm launcher names', () => {
@@ -1094,6 +1083,27 @@ describe('published package surface', () => {
     expect(manifest.devDependencies?.['builder-util']).toBe('26.15.3')
   })
 
+  it('maps unsuffixed desktop entry points only to HuaAnWork', () => {
+    const scripts = workspaceManifest.scripts ?? {}
+    for (const [plain, suffixed] of Object.entries({
+      dev: 'dev:huaanwork',
+      'package:dir': 'package:dir:huaanwork',
+      'dist:mac': 'dist:mac:huaanwork',
+      'dist:mac-smoke': 'dist:mac-smoke:huaanwork',
+      'dist:win': 'dist:win:huaanwork',
+      'dist:win-portable': 'dist:win-portable:huaanwork',
+    })) expect(scripts[plain]).toBe(scripts[suffixed])
+    expect(scripts.start).toBe('yarn market:prepare && yarn workspace dsh-plugin-huaanwork start')
+    expect(scripts['check:vendored-runtime']).toBe('node scripts/sync-vendored-runtime.mjs --check --channel huaanwork')
+    for (const name of [
+      'dist:linux', 'dev:beta', 'start:beta', 'package:dir:beta', 'dist:mac:beta',
+      'dist:mac-smoke:beta', 'dist:win:beta', 'dist:win-portable:beta',
+      'dev:next', 'start:next', 'check:next', 'package:dir:next', 'dist:mac:next',
+      'dist:mac-smoke:next', 'dist:win:next', 'test:desktop-variants',
+      'check:desktop-variants', 'icons:export', 'icons:check', 'test:inspector-compat',
+    ]) expect(scripts[name], name).toBeUndefined()
+  })
+
   it('exposes the same distribution entry points as the upstream editions', () => {
     const scripts = workspaceManifest.scripts ?? {}
     for (const name of [
@@ -1258,11 +1268,10 @@ describe('published package surface', () => {
     }
   })
 
-  it('ships HuaAnWork-branded icons rather than the upstream artwork', () => {
+  it('ships the recorded HuaAnWork-branded icon', () => {
     const ours = readFileSync(new URL('build/app-icon.png', packageRoot))
-    const beta = readFileSync(new URL('../dsh-plugin-desktop-beta/build/app-icon.png', packageRoot))
     expect(createHash('sha256').update(ours).digest('hex'))
-      .not.toBe(createHash('sha256').update(beta).digest('hex'))
+      .toBe('532052effd6ad27a3dc3be0b0504d2d6a2e33be98a6c95971153dcb6153c5e47')
   })
 
   it('generates the mac icon from the branded source at build time', async () => {

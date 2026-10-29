@@ -73,6 +73,11 @@ test('does not accept an offline or malformed latest response', async () => {
 test('all root launch, build and packaging entry points prepare the market first', () => {
   const { scripts } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const entrypoints = Object.entries(scripts).filter(([name]) => /^(build$|dev(?::|$)|start(?::|$)|package:dir|dist:)/.test(name))
-  assert.ok(entrypoints.length >= 18)
+  assert.deepEqual(entrypoints.map(([name]) => name).sort(), [
+    'build', 'dev', 'dev:huaanwork', 'dev:update-server', 'start',
+    'package:dir', 'package:dir:huaanwork',
+    'dist:mac', 'dist:mac-smoke', 'dist:mac:huaanwork', 'dist:mac-smoke:huaanwork',
+    'dist:win', 'dist:win-portable', 'dist:win:huaanwork', 'dist:win-portable:huaanwork', 'dist:win-sign:huaanwork',
+  ].sort())
   for (const [name, command] of entrypoints) assert.ok(command.startsWith('yarn market:prepare && '), name)
 })
