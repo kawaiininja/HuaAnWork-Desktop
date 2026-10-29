@@ -21,7 +21,13 @@ function loadConnector(workspace, environment) {
   const start = source.indexOf('// src/host/connector/logs.ts')
   const end = source.indexOf('// src/host/desktop/detect.ts', start)
   assert.ok(start >= 0 && end > start)
-  return runInNewContext(`${source.slice(start, end)}; ({ SourceConnector, ConnectorLogs })`, {
+  // environment.ts owns the PyPI index rule the spawned uv process inherits.
+  // Evaluate only those declarations: the rest of that region needs Host-only
+  // globals (createRequire, userInfo) this sandbox deliberately omits.
+  const indexStart = source.indexOf('const PYPI_SIMPLE =')
+  const indexEnd = source.indexOf('async function resolveUv(', indexStart)
+  assert.ok(indexStart >= 0 && indexEnd > indexStart)
+  return runInNewContext(`${source.slice(indexStart, indexEnd)}${source.slice(start, end)}; ({ SourceConnector, ConnectorLogs })`, {
     execFile, promisify, stripVTControlCharacters, join, relative, dirname, createHash, setTimeout, clearTimeout,
     access, cp, mkdtemp, readFile, readdir, rename, rm,
     process: { platform: process.platform, env: environment },
@@ -95,7 +101,9 @@ for (const workspace of AA_WORKSPACES) {
     const connector = new SourceConnector(
       { stateRoot, connectorSourceDir: source, uvPath: 'uv' },
       (_command, args, options) => { launched = options; launchedArgs = args; return child },
-      () => ({ syncIntervalSeconds: 30 }),
+      // The product always merges stored settings over DEFAULT_CONNECTOR_SETTINGS,
+      // so an unset mirror is an empty string rather than a missing key.
+      () => ({ syncIntervalSeconds: 30, uvPypiIndexUrl: '' }),
       1000,
       async () => {},
       noopDiagnostics,
@@ -117,6 +125,11 @@ for (const workspace of AA_WORKSPACES) {
     // patch, does not trim entries.
     assert.equal(launched.env.no_proxy, 'internal.test, ::1 ')
     assert.equal(launched.env.HTTPS_PROXY, env.HTTPS_PROXY)
+    // An unset mirror still pins uv and pip to the official index explicitly.
+    assert.equal(launched.env.PIP_INDEX_URL, 'https://pypi.org/simple')
+    assert.equal(launched.env.UV_DEFAULT_INDEX, 'https://pypi.org/simple')
+    assert.equal(launched.env.UV_INDEX_URL, 'https://pypi.org/simple')
+    assert.ok(!('UV_INDEX' in launched.env))
     assert.deepEqual(env, original)
     assert.ok(launched.cwd.startsWith(join(stateRoot, 'connector-source') + sep))
     assert.equal(launchedArgs[launchedArgs.indexOf('--directory') + 1], launched.cwd)

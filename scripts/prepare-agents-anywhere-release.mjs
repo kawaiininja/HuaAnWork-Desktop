@@ -157,7 +157,7 @@ function prepare() {
   console.log(`Selected AA ${sourceRef} at ${commit}`)
   if (verifyRelease || process.argv.includes('--check')) {
     assertPreparedAaRelease(root, commit)
-    console.log(`AA release verified: all Desktop channels use ${commit}`)
+    console.log(`AA release verified: HuaAnWork uses ${commit}`)
     return
   }
   const packagePaths = AA_WORKSPACES.map(workspace => `${workspace}/package.json`)

@@ -12,6 +12,10 @@ const commit = 'a'.repeat(40)
 const version = '0.1.0-dev.0.desktop.caaaaaaaaaaaa.r12345678'
 const artifact = `agents-anywhere-dsh-bridge-next-${version}.tgz`
 
+test('targets only HuaAnWork runtime peers', () => {
+  assert.deepEqual(AA_WORKSPACES, ['dsh-plugin-huaanwork'])
+})
+
 function fixture(t, desktopVersion = version) {
   const artifact = `agents-anywhere-dsh-bridge-next-${desktopVersion}.tgz`
   const root = mkdtempSync(join(tmpdir(), 'dsh-aa-policy-'))
@@ -25,13 +29,13 @@ function fixture(t, desktopVersion = version) {
     change(data)
     write(path, data)
   }
-  const runtimePeers = Object.fromEntries(AA_PEERS.map(name => [name, '0.1.5-rc.2 || 0.1.6-alpha.2']))
+  const runtimePeers = Object.fromEntries(AA_PEERS.map(name => [name, '0.1.5-rc.2']))
   write('package.json', { resolutions: { [AA_PACKAGE]: aaConnectorResolution(artifact) } })
-  for (const [index, workspace] of AA_WORKSPACES.entries()) {
+  for (const workspace of AA_WORKSPACES) {
     write(`${workspace}/package.json`, {
       dependencies: {
         [AA_PACKAGE]: `file:../vendor/agents-anywhere/${artifact}`,
-        ...Object.fromEntries(AA_PEERS.map(name => [name, index === 0 ? '0.1.5-rc.2' : '0.1.6-alpha.2'])),
+        ...Object.fromEntries(AA_PEERS.map(name => [name, '0.1.5-rc.2'])),
       },
     })
     write(`${workspace}/node_modules/${AA_PACKAGE}/package.json`, { version: desktopVersion, peerDependencies: runtimePeers })
@@ -44,7 +48,7 @@ function fixture(t, desktopVersion = version) {
   return { root, patch }
 }
 
-test('accepts the latest AA across Stable, Beta and Next runtime peers', t => {
+test('accepts the latest AA across HuaAnWork runtime peers', t => {
   const { root } = fixture(t)
   assert.equal(assertPreparedAaRelease(root, commit).commit, commit)
 })
@@ -68,7 +72,7 @@ test('rejects a resolution pinned to a previous AA artifact', t => {
   assert.throws(() => assertPreparedAaRelease(root, commit), /resolution references a different AA artifact/)
 })
 
-test('pins the AA staging type graph while keeping both Desktop runtime peer ranges', t => {
+test('pins the AA staging type graph while keeping the active runtime peer range', t => {
   const { root } = fixture(t)
   const packagePath = join(root, 'staged')
   mkdirSync(packagePath)
@@ -96,16 +100,10 @@ test('pins the AA staging type graph while keeping both Desktop runtime peer ran
   assert.equal(staged.resolutions.react, '18.3.1')
 })
 
-test('rejects the former stable-old/beta-new split even if the tarball is valid', t => {
+test('rejects a workspace manifest pinned to a previous AA artifact', t => {
   const { root, patch } = fixture(t)
-  patch('dsh-plugin-desktop/package.json', data => { data.dependencies[AA_PACKAGE] = 'file:../vendor/agents-anywhere/old.tgz' })
-  assert.throws(() => assertPreparedAaRelease(root, commit), /dsh-plugin-desktop references a different AA artifact/)
-})
-
-test('rejects a Next install left on the old AA artifact', t => {
-  const { root, patch } = fixture(t)
-  patch('dsh-desktop-next/package.json', data => { data.dependencies[AA_PACKAGE] = 'file:../vendor/agents-anywhere/old.tgz' })
-  assert.throws(() => assertPreparedAaRelease(root, commit), /dsh-desktop-next references a different AA artifact/)
+  patch('dsh-plugin-huaanwork/package.json', data => { data.dependencies[AA_PACKAGE] = 'file:../vendor/agents-anywhere/old.tgz' })
+  assert.throws(() => assertPreparedAaRelease(root, commit), /dsh-plugin-huaanwork references a different AA artifact/)
 })
 
 test('rejects a prepared artifact after AA main advances', t => {
@@ -115,13 +113,13 @@ test('rejects a prepared artifact after AA main advances', t => {
 
 test('rejects stale installed code despite updated manifests and provenance', t => {
   const { root, patch } = fixture(t)
-  patch(`dsh-plugin-desktop/node_modules/${AA_PACKAGE}/package.json`, data => { data.version = '0.1.0-old' })
+  patch(`dsh-plugin-huaanwork/node_modules/${AA_PACKAGE}/package.json`, data => { data.version = '0.1.0-old' })
   assert.throws(() => assertPreparedAaRelease(root, commit), /outdated installed AA package/)
 })
 
 test('requires rebuilding the AA peer patch after a Desktop runtime update', t => {
   const { root, patch } = fixture(t)
-  patch('dsh-plugin-desktop-beta/package.json', data => { data.dependencies[AA_PEERS[0]] = '0.1.6-alpha.3' })
+  patch('dsh-plugin-huaanwork/package.json', data => { data.dependencies[AA_PEERS[0]] = '0.1.6-alpha.3' })
   assert.throws(() => assertPreparedAaRelease(root, commit), /runtime peers have changed/)
 })
 
@@ -131,7 +129,7 @@ test('rejects corrupted or replaced vendor bytes', t => {
   assert.throws(() => assertPreparedAaRelease(root, commit), /checksum mismatch/)
 })
 
-test('repairs the 0644 uv payload for both Mac architectures in all channels', { skip: process.platform === 'win32' }, t => {
+test('repairs the 0644 uv payload for both Mac architectures in HuaAnWork', { skip: process.platform === 'win32' }, t => {
   const { root } = fixture(t)
   const files = AA_WORKSPACES.flatMap(workspace => ['arm64', 'x64'].map(arch =>
     join(root, workspace, 'node_modules', '@dataiku', `uv-darwin-${arch}`, 'bin', 'uv')))
