@@ -39,6 +39,9 @@ describe('package integration contract', () => {
     marketPeerPolicy: { stableHistorical: 'retain' | 'retire'; dormantAlpha1: 'retain' | 'retire' }
     channels: { huaanwork: { sourceVersion: string } }
   }
+  // upstream.json 是所有包共享的单一事实源:渠道一旦被改写,market 的 peer 区间
+  // 与 vendor 解析都会静默偏到另一条轨道,所以运行时钉住当前唯一在役渠道。
+  expect(upstream.activeChannel).toBe('huaanwork')
   const expectedPeerRange = [
     ...(upstream.marketPeerPolicy.stableHistorical === 'retain' ? ['0.2.0-rc.2'] : []),
     upstream.channels.huaanwork.sourceVersion,

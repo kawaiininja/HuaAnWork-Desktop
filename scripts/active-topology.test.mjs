@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { test } from 'node:test'
+
+test('upstream.json carries exactly the supported top-level keys', () => {
+  const upstream = JSON.parse(readFileSync(new URL('../upstream.json', import.meta.url), 'utf8'))
+  assert.deepEqual(Object.keys(upstream).sort(), ['activeChannel', 'channels', 'marketPeerPolicy', 'repository'])
+  assert.equal(upstream.activeChannel, 'huaanwork')
+})
+
+test('no reference-only script survives', () => {
+  assert.deepEqual(readdirSync(new URL('./', import.meta.url)).filter(name => name.endsWith('.reference.mjs')), [])
+})
 
 test('reference-only desktop tools do not re-enter the root test glob', () => {
   const tests = readdirSync(new URL('./', import.meta.url)).filter(name => name.endsWith('.test.mjs'))

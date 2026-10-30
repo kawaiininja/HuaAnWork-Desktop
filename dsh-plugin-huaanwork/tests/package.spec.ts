@@ -111,7 +111,7 @@ const GUARD_SCRIPT = 'dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning
 /** 按 `jobs:` 下的顶层 job 键切块,使断言能落到单个 job 而非整份文本。 */
 function splitWorkflowJobs(workflow: string): Record<string, string> {
   const jobsStart = workflow.search(/^jobs:$/mu)
-  assert.notStrictEqual(jobsStart, -1, 'release.yml must have a top-level jobs: key')
+  assert.notStrictEqual(jobsStart, -1, 'the workflow must have a top-level jobs: key')
   const body = workflow.slice(jobsStart)
   const marks = [...body.matchAll(/^ {2}([A-Za-z0-9_-]+):$/gmu)]
   const out: Record<string, string> = {}
@@ -1143,8 +1143,15 @@ describe('published package surface', () => {
     const windowsJob = jobs['desktop-windows']!
     const macosJob = jobs['desktop-macos']!
 
-    // HuaAnWork has no Linux distribution line: the job must be gone, not re-targeted.
-    expect(jobs['desktop-linux']).toBeUndefined()
+    // HuaAnWork has no Linux distribution line: the job set is pinned, so the retired
+    // `desktop-linux` job cannot return under its old name or any new one.
+    expect(Object.keys(jobs).sort()).toEqual([
+      'changes', 'check', 'desktop-macos', 'desktop-windows', 'gitleaks', 'upstream-command-windows',
+    ])
+    // `check` stays the plain root gate: the Chromium install for the retired Next
+    // window regression used to live here, so a browser install must not reappear.
+    expect(jobs.check).toContain('run: yarn check')
+    expect(jobs.check).not.toMatch(/chromium|playwright install/iu)
 
     expect(windowsJob).not.toContain('- run: yarn check')
     expect(windowsJob).toContain('workspace: [dsh-plugin-huaanwork]')
@@ -1153,8 +1160,9 @@ describe('published package surface', () => {
     expect(windowsJob).toContain("if: matrix.workspace == 'dsh-plugin-huaanwork'")
     expect(windowsJob).toContain('timeout-minutes: 5')
     expect(windowsJob).toContain('yarn workspace dsh-plugin-huaanwork test:host-liveness-win')
-    expect(windowsJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:win')
-    expect(windowsJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:win-portable')
+    // 锚定行尾:`dist:win` 不得被 `dist:win-portable` 的前缀假通过。
+    expect(windowsJob).toMatch(/^ {8}run: yarn workspace \$\{\{ matrix\.workspace \}\} dist:win$/mu)
+    expect(windowsJob).toMatch(/^ {8}run: yarn workspace \$\{\{ matrix\.workspace \}\} dist:win-portable$/mu)
     expect(windowsJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')
     expect(windowsJob.match(/DSH_WINDOWS_PACKAGE_COMPRESSION: store/g)).toHaveLength(2)
     // Matrix-form cache paths keep the single-cell matrix honest instead of hardcoding a name.
