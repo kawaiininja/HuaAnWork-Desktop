@@ -92,8 +92,9 @@ node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs
 
 - **`aa:check` 红先判因,不要当回归处理**:报错若是 `artifact is not from the latest AA main commit.
   Run corepack yarn aa:prepare-release.`,含义就是 **AA `main` 已前进、旧制品随之 fail-closed** —— 这是
-  设计行为,不是本仓回归。其余报错(checksum mismatch、runtime peers 变化、安装的 AA 包过旧、
-  resolution 指向旧制品)才当真实回归处置。
+  设计行为,不是本仓回归。报错来自 `git ls-remote`(出网失败、仓库不可达)时先恢复网络重跑,不要进入
+  重做流程;其余报错(checksum mismatch、runtime peers 变化、安装的 AA 包过旧、resolution 指向旧制品)
+  才当真实回归处置。
 - **`main` 前进后的重做顺序(打包前,逐条串行)**:
 
   ```bash
