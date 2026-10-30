@@ -2,7 +2,7 @@
 # sha256 manifest and uploads them. Signing is a separate operator step.
 #
 # D-M6-17 (no signing credentials in CI): the repository has no signing
-# credentials, and ci.yml:171-176 already states the principle for its macOS job
+# credentials, and ci.yml:172-176 already states the principle for its macOS job
 # ("the signed release is built manually on a credentialed machine ... No signing
 # secrets ever reach this job"). This workflow therefore produces
 # signable-later unsigned artifacts, and R1 signs on a credentialed machine
