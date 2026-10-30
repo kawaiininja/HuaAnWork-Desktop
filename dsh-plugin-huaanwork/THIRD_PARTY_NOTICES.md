@@ -8,7 +8,7 @@ This list records package names, versions, licenses, and how each package ships.
 | Package | Version | License | Bundling |
 | --- | --- | --- | --- |
 | @agentclientprotocol/sdk | 1.4.0 | Apache-2.0 | installed |
-| @agents-anywhere/dsh-bridge-next | 2.1.0-desktop.c4b4f6e51bca0.r57f6b0fe | MIT | installed |
+| @agents-anywhere/dsh-bridge-next | 2.1.0-desktop.c64c3f67ee3b2.r7f334f77 | MIT | installed |
 | @anthropic-ai/sdk | 0.129.0 | MIT | installed |
 | @aws-sdk/client-bedrock-runtime | 3.1127.0 | Apache-2.0 | installed |
 | @aws-sdk/core | 3.978.1 | Apache-2.0 | installed |
@@ -464,7 +464,7 @@ This list records package names, versions, licenses, and how each package ships.
 | diff | 9.0.0 | BSD-3-Clause | installed |
 | dijkstrajs | 1.0.3 | MIT | installed |
 | dsh-community-market | 0.1.0-dev.0 | MIT | installed |
-| dshmarket | 1.66.47 | MIT | installed |
+| dshmarket | 1.73.5 | MIT | installed |
 | ecdsa-sig-formatter | 1.0.11 | Apache-2.0 | installed |
 | ee-first | 1.1.1 | MIT | installed |
 | emoji-regex | 8.0.0 | MIT | installed |
