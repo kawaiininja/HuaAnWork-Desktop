@@ -103,11 +103,11 @@ Exit **1** before any packaging. The wrapper's first step is `yarn market:prepar
 Error: Market preparation failed; manifests and lockfile restored. Rerun yarn install before continuing.
 ```
 
-This is the same external market drift recorded in phase A (R8), one minor version further along: npm `latest` is now `1.73.5` (phase A observed `1.73.3`) while the checkout pins `1.70.2`, and the committed Desktop patch does not apply to `1.73.5`, so `prepare-dsh-market.mjs` fails closed instead of shipping a market without its Desktop safeguards. Nothing was masked: `market:check` was not run, `market:prepare` was not retried or bypassed, and the script restored `package.json`, the workspace manifest and `yarn.lock` (`git status --porcelain` afterwards listed only `?? .gstack/`). The smoke below was built from that restored, pinned `1.70.2` state.
+This is the external market drift (R6), one minor version further along: npm `latest` is now `1.73.5` (phase A observed `1.73.3`) while the checkout pins `1.70.2`, and the committed Desktop patch does not apply to `1.73.5`, so `prepare-dsh-market.mjs` fails closed instead of shipping a market without its Desktop safeguards. The workspace-level substitute used in the next subsection is accepted under ruling R8. Nothing was masked: `market:check` was not run, `market:prepare` was not retried or bypassed, and the script restored `package.json`, the workspace manifest and `yarn.lock` (`git status --porcelain` afterwards listed only `?? .gstack/`). The smoke below was built from that restored, pinned `1.70.2` state.
 
 ### Substituted workspace smoke — exit 0, same entry point CI uses
 
-Because the root wrapper cannot get past its market refresh on this machine, the smoke was produced with the workspace-level command CI runs (`.github/workflows/ci.yml:201` for `check:mac-package:platform`, `:225` for `dist:mac-smoke`), including the same non-secret environment CI sets there:
+Because the root wrapper cannot get past its market refresh on this machine, the smoke was produced with the workspace-level command CI runs (`.github/workflows/ci.yml:211` for `check:mac-package:platform`, `:223` for `dist:mac-smoke`, whose `Build macOS smoke artifact` step begins at `:212`), including the same non-secret environment CI sets there:
 
 ```bash
 corepack yarn workspace dsh-plugin-huaanwork check:mac-package:platform     # exit 0, 7 files / 182 tests passed, 1 skipped
@@ -227,7 +227,7 @@ The parent of the evidence commit is `cbd392fbc7f25eadc4c21be6adae905ca8973e28`,
 
 - No push to `master`, no merge, no pull request, no release, no tag. The only ref pushed is `refactor/huaanwork-single-desktop-maintenance`.
 - No signed or notarized macOS artifact, no Gatekeeper result, no deployment delivery, no intranet origin reachability.
-- No second-machine Windows acceptance; the Windows evidence is one GitHub-hosted runner's package and liveness run, and `verify-win-installer.ts` remains unexecuted against a real artifact (standing debt).
+- No second-machine Windows acceptance: the Windows evidence is one GitHub-hosted runner's package and liveness run. That runner **did** execute `verify-win-installer.ts` against the artifacts it built — `dist\HuaAnWork-0.1.0-x64-Setup.exe` and `dist\win-unpacked\HuaAnWork.exe`, which is where the `Windows installer verification passed: …` line quoted in Step 4 comes from — because `dist:win` invokes the verifier (`dsh-plugin-huaanwork/scripts/package-win.ts:201-206`). What remains uncovered is verification of the downloadable release artifacts, not the CI-built ones: `release.yml:186-189` uploads only the installer, the portable archive and `SHA256SUMS.txt`, never `win-unpacked/`, so the published set cannot be re-verified the way the verifier does it; and no real second machine has run it. The `AGENTS.md` debt row still reading that `verify-win-installer.ts` has never been executed against a real artifact is stale as of this run — noted here as a documentation follow-up, deliberately not edited in this commit.
 - No `dshmarket` freshness: `market:check` is red for the external `1.73.5` vs `1.70.2` reason and was not run, and the root smoke wrapper cannot get past `market:prepare` on this machine. The smoke above uses the committed pinned `1.70.2` market, which is what CI also packages.
 - No provisioning coverage from the smoke or from CI `check`; the guard's exit 0 is the explicit local run recorded in Step 2.
 - No claim that the harness pin moved: it is `1600d8a1e1` at `PHASE_B_SHA`, unchanged since phase A.
