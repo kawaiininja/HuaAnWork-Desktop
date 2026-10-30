@@ -2,13 +2,13 @@
 
 - 记录时间：2026-10-30（本地 UTC+8）
 - 仓库：`/Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop`（`kawaiininja/HuaAnWork-Desktop`），分支 `refactor/huaanwork-followups`
-- 快照 HEAD（记录时）：`cb48083b51`（`docs: record the dshmarket upgrade acceptance`）
+- 快照 HEAD（记录时）：`cb48083b517af32b820fa575e64e22422530c07a`（短 `cb48083b51`，`docs: record the dshmarket upgrade acceptance`）；其父提交（F1 的代码提交）为 `6547000e6acc04707c6d0894625539d56f82497f`（短 `6547000e6a`，`chore(market): upgrade dshmarket and rebase the desktop patch`）
 - 性质：`docs/evidence/2026-10-30-single-desktop-followups.md` 登记的 F1–F13 的验收证据汇总。**本文件当前只含 F2 段**；F1 的证据在 `docs/evidence/2026-10-30-dshmarket-1.73.5-upgrade.md`，F3–F13 由 Task 13 在本文件补齐。
 - 总则：本文件的每一项都是**只读核验记录**。F2 按用户裁定（2026-10-30）不创建、不修改任何分支保护或 ruleset。
 
 ## F2（P0）GitHub required checks 对齐 —— 仅证据核验
 
-对应登记：`docs/evidence/2026-10-30-single-desktop-followups.md` §F2「Github required checks 对齐」（现状：CI 只剩六个 job；分支保护若仍按旧的 `desktop-linux` 或三桌面 cell 名配置，PR 会永久 pending）。
+对应登记：`docs/evidence/2026-10-30-single-desktop-followups.md` §F2「GitHub required checks 对齐」（现状：CI 只剩六个 job；分支保护若仍按旧的 `desktop-linux` 或三桌面 cell 名配置，PR 会永久 pending）。
 
 ### 1. 核验时间与对象
 
@@ -136,7 +136,7 @@ upstream-command-windows	completed	success
 
 两条必须记录的差异事实：
 
-1. **`origin/master` 的 `ci.yml` 仍是三 workspace 矩阵**：`git show origin/master:.github/workflows/ci.yml` 在 `:178` 与 `:277` 两处为 `workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]`，并另有 `desktop-linux` job（`origin/master` 的 `ci.yml:229`）。单桌面收窄（`ci.yml` −100/+7 行）只存在于本分支、尚未合并：快照 HEAD `cb48083b51` 时 `git rev-list --count origin/master..HEAD` = **25**，加上本证据提交后为 **26**（两个数字都可复现，差异只是这条 docs 提交本身）。上面 12 个 check 名里多出的 6 个旧名——`desktop-linux (dsh-plugin-desktop)`、`desktop-linux (dsh-plugin-desktop-beta)`、`desktop-macos (dsh-plugin-desktop)`、`desktop-macos (dsh-plugin-desktop-beta)`、`desktop-windows (dsh-plugin-desktop)`、`desktop-windows (dsh-plugin-desktop-beta)`——正是这批将被删除的三桌面 cell。
+1. **`origin/master` 的 `ci.yml` 仍是三 workspace 矩阵**：`git show origin/master:.github/workflows/ci.yml` 在 `:178` 与 `:277` 两处为 `workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]`，并另有 `desktop-linux` job（`origin/master` 的 `ci.yml:229`）。单桌面收窄（`ci.yml` −100/+7 行）只存在于本分支、尚未合并。ahead 计数按提交逐一复现（命令 `git rev-list --count origin/master..<提交>`；本文件每多一条 docs 提交，分支头部的计数就 +1）：`cb48083b51`（快照 HEAD）= **25**、`5c8116755b`（首条证据提交）= **26**、`b5b95e4af7`（ahead 计数订正提交）= **27**——2026-10-30 复核时在 `b5b95e4af7` 上实跑 `git rev-list --count origin/master..HEAD` 输出 `27`；引用任何数字都必须绑定提交，不写脱离提交的「当前 HEAD 计数」。上面 12 个 check 名里多出的 6 个旧名——`desktop-linux (dsh-plugin-desktop)`、`desktop-linux (dsh-plugin-desktop-beta)`、`desktop-macos (dsh-plugin-desktop)`、`desktop-macos (dsh-plugin-desktop-beta)`、`desktop-windows (dsh-plugin-desktop)`、`desktop-windows (dsh-plugin-desktop-beta)`——都是合并后将被删除的旧配置，但来源不同：其中 4 个 `desktop-{macos,windows} (dsh-plugin-desktop|dsh-plugin-desktop-beta)` 来自 master 的三 cell 矩阵（`origin/master` 的 `ci.yml:178` / `:277`，每个 job 3 个 cell，`dsh-plugin-huaanwork` cell 即现行名）；2 个 `desktop-linux (...)` 来自 master 独立的 `desktop-linux` job（`ci.yml:229`），其矩阵表达式按事件选择 cell——push 为 2 个 cell（`dsh-plugin-desktop` + `dsh-plugin-desktop-beta`），PR 为 1 个 cell（仅 `dsh-plugin-desktop-beta`，`ci.yml:237`）——并非三 cell 矩阵。
 2. **六个目标 check 名当前全部可在 master 上直接观测到**：`changes`、`check`、`gitleaks`、`upstream-command-windows`（裸名）+ `desktop-macos (dsh-plugin-huaanwork)`、`desktop-windows (dsh-plugin-huaanwork)`（矩阵后缀名）。即：若在本分支合并前就按这六个名字启用保护，同样能被现有 workflow 产出，旧名只是额外的非必需 check；合并后旧名自然消失，不会留下永不上报的 required 名。反之，若用**裸 job id**（`desktop-windows` / `desktop-macos`）配置 required checks，则永远不会有同名 check 上报，必然永久 pending —— 这是 F2 真正的命名陷阱。
 
 ### 5. 结论
@@ -162,7 +162,8 @@ upstream-command-windows	completed	success
 
 ### 8. 仓库设置零变更声明
 
-- 本项执行的全部 GitHub 交互都是 `gh api` 的 **GET**：`branches/master/protection`、`branches/master`、`rulesets`、仓库元数据、`commits/master`、`commits/{sha}/check-runs`。没有使用 `-X` / `--method` / `-f` / `--input`，没有任何 PUT/POST/PATCH/DELETE。
+- 本项执行的 GitHub 交互都是**只读**的：`gh api` 一律 **GET**（`branches/master/protection`、`branches/master`、`rulesets`、仓库元数据、`commits/master`、`commits/{sha}/check-runs`），另有一次 `gh auth status`（§1，只读认证状态查询）。没有使用 `-X` / `--method` / `-f` / `--input`，没有任何 PUT/POST/PATCH/DELETE。
+- 提交后复核：两条证据提交完成后再次查询，`branches/master/protection` 仍为 `404 Branch not protected`、`rulesets` 仍为 `[]`、`protected=false`；2026-10-30 本次修正复核时又复跑一次，结果相同 ⇒ 提交前后仓库设置零漂移。
 - 未执行 `gh repo edit`、`gh api -X PUT .../protection`、`gh ruleset`（写子命令）等任何设置变更命令。
 - 本地只做了只读 git 读取与一次 `git fetch origin master`（仅更新本地 remote-tracking ref，不改远端）。
 - 工作树在核验前后均为「仅 `?? .gstack/`（未跟踪，不提交）」，本任务只提交本文件。
