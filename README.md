@@ -162,7 +162,7 @@ DSH Desktop 是基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek
 
 ## 开发
 
-`dsh-plugin-huaanwork/` 是唯一活跃的桌面源码树。`dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/` 与 `dsh-desktop-next/` 仅作为只读参考暂存，不是 workspace，不参与日常构建、测试、打包或版本刷新。外层仓库使用 Yarn，固定的 `deepseek-harness/` 子模块继续使用自己的 pnpm workspace。从仓库根目录执行：
+`dsh-plugin-huaanwork/` 是唯一活跃的桌面源码树。外层仓库使用 Yarn，固定的 `deepseek-harness/` 子模块继续使用自己的 pnpm workspace。从仓库根目录执行：
 
 ```sh
 git submodule update --init --recursive

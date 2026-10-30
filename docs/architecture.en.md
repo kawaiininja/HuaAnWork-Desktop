@@ -59,7 +59,7 @@ The launcher-private `desktopRuntime`, `desktopPnpmBootstrap`, Electron executab
 
 Release artifacts use Electron Builder and `app.asar`, while dependencies that must be physical (for example pnpm, node-pty, and Windows ACL/native files) live under `app.asar.unpacked`. The packaged-runtime gate checks both archive entries and physical runtime entries; profile fallback links must not target virtual ASAR paths that Node cannot resolve.
 
-The outer workspace uses Yarn. The pinned `deepseek-harness/` submodule keeps its own pnpm workspace. The only active desktop source is `dsh-plugin-huaanwork/`; `dsh-plugin-desktop/`, `dsh-plugin-desktop-beta/`, and `dsh-desktop-next/` are read-only reference directories, not workspaces, and take no part in build, test, packaging, or version refresh. No desktop code edits the upstream submodule.
+The outer workspace uses Yarn. The pinned `deepseek-harness/` submodule keeps its own pnpm workspace. The only desktop code is `dsh-plugin-huaanwork/`, and no desktop code edits the upstream submodule.
 
 ## Release-channel protocol
 

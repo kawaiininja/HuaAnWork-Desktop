@@ -409,13 +409,6 @@ try {
     },
   })
   const html = await response.text()
-  if (process.argv.includes('--onboarding')) {
-    const { verifyDesktopOnboardingBrowser } = await import('../../scripts/verify-desktop-onboarding-browser.mjs')
-    await verifyDesktopOnboardingBrowser({
-      url: expectedUrl, cookie,
-      headers: { [BROWSER_ACCESS.rendererHeader.name]: BROWSER_ACCESS.rendererHeader.value },
-    })
-  }
   if (response.status !== 200) {
     throw new Error(`assembled Web root returned HTTP ${String(response.status)}`)
   }

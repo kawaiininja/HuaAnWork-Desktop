@@ -9,17 +9,9 @@ node_modules/
 *.tsbuildinfo
 .build/
 
-dsh-plugin-desktop/dist/
-dsh-plugin-desktop/lib/
 dsh-community-market/lib/
 
 .env.yarn
-dsh-desktop-next/lib/
-dsh-desktop-next/dist/
-dsh-desktop-next/.desktop-next/
-dsh-desktop-next/.desktop-build/
-dsh-plugin-desktop/.desktop-build/
-dsh-plugin-desktop-beta/.desktop-build/
 
 .worktrees/
 # M5 market-server offline signing keys — private key must never be committed

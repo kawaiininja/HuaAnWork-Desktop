@@ -35,7 +35,7 @@ corepack yarn dev     # 有图形环境时启动应用
 ### 仓库边界（开始前务必了解）
 
 - `deepseek-harness/` 是固定版本的上游子模块，**桌面开发不修改其中的任何文件**；上游内容更新走独立的 pin 提交。
-- 桌面代码位于 `dsh-plugin-huaanwork/`，它是唯一活跃的桌面源码树；`dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/` 与 `dsh-desktop-next/` 仅作只读参考保留，不是 workspace。`dsh-community-fabric/` 保存社区标准 Draft，`dsh-community-market/` 保存市场壳设计。两个社区 package 当前都只有文档、尚不可加载，自有 package 共用外层 Yarn workspace。
+- 桌面代码位于 `dsh-plugin-huaanwork/`，它是仓库里唯一的桌面源码树。`dsh-community-fabric/` 保存社区标准 Draft，`dsh-community-market/` 保存市场壳设计。两个社区 package 当前都只有文档、尚不可加载，自有 package 共用外层 Yarn workspace。
 - 构建、类型检查、单元测试和冒烟检查必须保持 headless-safe。
 
 ### 提交与 PR

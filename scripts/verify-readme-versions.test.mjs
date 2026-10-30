@@ -14,20 +14,14 @@ test('the huaanwork READMEs agree with their own package.json version', () => {
   assert.ok(result.checked >= 2, `expected at least the two huaanwork READMEs, checked ${String(result.checked)}`)
 })
 
-test('scope is huaanwork only, with stable/beta drift registered as an M28 item', () => {
+test('scope is huaanwork only and registers no out-of-scope README', () => {
   assert.deepStrictEqual(
     README_VERSION_SCOPES.map(scope => scope.packageDir),
     ['dsh-plugin-huaanwork'],
   )
-  assert.deepStrictEqual(
-    README_VERSION_SCOPES[0].outOfScopeRegistered,
-    [
-      'dsh-plugin-desktop/README.md',
-      'dsh-plugin-desktop/README.zh.md',
-      'dsh-plugin-desktop-beta/README.md',
-      'dsh-plugin-desktop-beta/README.zh.md',
-    ],
-  )
+  for (const scope of README_VERSION_SCOPES) {
+    assert.deepStrictEqual(scope.outOfScopeRegistered, [])
+  }
 })
 
 test('a drifted README version makes the guard exit non-zero', () => {
@@ -104,5 +98,8 @@ test('the CLI prints what it checked and exits non-zero on drift', () => {
   })
   assert.match(out, /^verify-readme-versions: /u)
   assert.match(out, /dsh-plugin-huaanwork/u)
-  assert.match(out, /out of scope \(M28\)/u)
+  // No README is out of scope any more: the retired Stable/Beta trees are deleted,
+  // so the CLI must not append an empty "out of scope" clause or an M28 deferral.
+  assert.doesNotMatch(out, /out of scope/u)
+  assert.doesNotMatch(out, /M28/u)
 })

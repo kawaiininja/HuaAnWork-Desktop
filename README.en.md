@@ -162,7 +162,7 @@ Also, and you.
 
 ## Development
 
-`dsh-plugin-huaanwork/` is the only active desktop source tree. `dsh-plugin-desktop/`, `dsh-plugin-desktop-beta/`, and `dsh-desktop-next/` are retained read-only references: they are not workspaces and take no part in daily builds, tests, packaging, or version refresh. The outer repository uses Yarn, while the pinned `deepseek-harness/` submodule keeps its own pnpm workspace. From the repository root:
+`dsh-plugin-huaanwork/` is the only active desktop source tree. The outer repository uses Yarn, while the pinned `deepseek-harness/` submodule keeps its own pnpm workspace. From the repository root:
 
 ```sh
 git submodule update --init --recursive

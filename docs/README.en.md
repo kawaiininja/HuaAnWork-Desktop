@@ -41,7 +41,7 @@ The outer repository has two formal product READMEs plus one legacy compatibilit
 - [`README.en.md`](../README.en.md): the English product entry point with the same product scope.
 - [`README.zh.md`](../README.zh.md): a legacy Chinese-path compatibility page with no independent content.
 
-`README.i18n.yaml` records the bilingual blob hashes for those two formal entry points; it is not a user guide. `dsh-plugin-huaanwork/README.md` and `dsh-plugin-huaanwork/README.zh.md` ship with the HuaAnWork package and are the more technical package reference; package-level documentation inside the three read-only reference directories (`dsh-plugin-desktop/`, `dsh-plugin-desktop-beta/`, `dsh-desktop-next/`) is no longer maintained. `dsh-plugin-huaanwork/docs/` contains stable API contracts rather than marketing copy. `.agents/notes/implemented/` contains dated maintainer decision records and does not replace user documentation.
+`README.i18n.yaml` records the bilingual blob hashes for those two formal entry points; it is not a user guide. `dsh-plugin-huaanwork/README.md` and `dsh-plugin-huaanwork/README.zh.md` ship with the HuaAnWork package and are the more technical package reference; the upstream Stable, Beta, and Next reference trees were deleted in single-desktop Phase B (2026-10-30), so their package-level documentation no longer exists. `dsh-plugin-huaanwork/docs/` contains stable API contracts rather than marketing copy. `.agents/notes/implemented/` contains dated maintainer decision records and does not replace user documentation.
 
 `deepseek-harness/` is the pinned upstream submodule. Its README and `docs/` belong to the upstream project, not to the Desktop product, and are excluded from the outer documentation inventory.
 

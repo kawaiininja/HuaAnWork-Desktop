@@ -144,6 +144,15 @@ describe('published package surface', () => {
     )
   })
 
+  it('has one owned desktop source tree and no active reference-workspace dependency', () => {
+    for (const directory of ['dsh-plugin-desktop', 'dsh-plugin-desktop-beta', 'dsh-desktop-next']) {
+      expect(existsSync(new URL(directory, workspaceRoot)), directory).toBe(false)
+    }
+    const scripts = Object.values(workspaceManifest.scripts ?? {}).join('\n')
+    expect(scripts).not.toMatch(/dsh-plugin-desktop|dsh-desktop-next/u)
+    expect(workspaceManifest.workspaces).toEqual(EXPECTED_WORKSPACES)
+  })
+
   it('enforces modern resolutions and aligned dshmarket dependency', () => {
     const resolutionKeys = Object.keys(workspaceManifest.resolutions ?? {})
     const resolutionValues = Object.values(workspaceManifest.resolutions ?? {})

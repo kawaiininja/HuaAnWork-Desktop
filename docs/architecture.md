@@ -59,7 +59,7 @@ Launcher 私有的 `desktopRuntime`、`desktopPnpmBootstrap`、Electron executab
 
 发布包使用 Electron Builder 和 `app.asar`，但需要物理 unpack 的依赖（例如 pnpm、node-pty、Windows ACL/native 文件）会放在 `app.asar.unpacked`。Packaged runtime gate 会检查 ASAR 入口和物理运行时入口，profile fallback 不能把符号链接指向无法被 Node 解析的虚拟 ASAR 路径。
 
-根 workspace 使用 Yarn；固定的 `deepseek-harness/` 子模块保持上游自己的 pnpm workspace。活跃桌面代码只有 `dsh-plugin-huaanwork/`；`dsh-plugin-desktop/`、`dsh-plugin-desktop-beta/` 与 `dsh-desktop-next/` 是只读参考目录，不是 workspace，不参与构建、测试、打包或版本刷新。任何桌面代码都不修改上游子模块。
+根 workspace 使用 Yarn；固定的 `deepseek-harness/` 子模块保持上游自己的 pnpm workspace。桌面代码只有 `dsh-plugin-huaanwork/`，任何桌面代码都不修改上游子模块。
 
 ## 发行通道协议
 
