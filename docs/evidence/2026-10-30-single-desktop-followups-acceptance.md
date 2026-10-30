@@ -68,7 +68,7 @@
 | 6 | `corepack yarn workspace dsh-plugin-huaanwork verify:notices` | 0 | 1 s | `verify-licenses: 636 packages checked (9 bundled); 2 use notice-required licenses (LGPL-3.0-or-later)`；生成后 `git diff` 为空（字节一致） |
 
 - **unsigned macOS smoke 本轮未重跑**：本波只改测试文件、CI 注释、脚本头部注释与 Markdown，没有影响打包产物的代码变化（`dshmarket-compat.spec.ts` 不进入发行包）；F1 的 smoke 读数仍以其自身记录的 `6547000e6a` 为准，本轮不声称 smoke 覆盖 HEAD。
-- 本轮未推送、未跑 CI；`market:check` 仍依赖执行时 npm latest 为 `1.73.5`。
+- 本轮未推送、未跑 CI；`market:check` 仍依赖执行时 npm latest 为 `1.73.5`。**`FINAL_SHA=051a257630` 之后唯一的改动（收口后补记）**：一次**行数中性**的 `.github/workflows/ci.yml` 注释压缩——`Build macOS smoke artifact` 步骤里关于 provisioning guard 的说明由 7 行压回 3 行（净 −4 行），env 行 `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE: '1'` 本身未改，语义仍为「本步骤跑的是 workspace `dist:mac-smoke`（`node scripts/package-mac.ts`），不执行 guard；该 env 在此路径无读者，仅因 `tests/package.spec.ts` 钉住 job 形状而保留；guard 覆盖来自 root `dist:*` 链（**`dist:win-sign:huaanwork` 除外**，该链不前置 guard）以及显式的本地命令」。无行为变化，故上表六条门禁读数与 `FINAL_SHA` 保持不变；压缩由 `tests/package.spec.ts` 与 `check:whitespace` 复验。压缩后再逐条复核本文档与 phase-a / phase-b 引用的行号，全部落在最终文件上：`HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` = `:218`、`DSH_MAC_SMOKE_ARCH` = `:222`、smoke 的 `run:` = `:223`、`upstream-command-windows` job 键 = `:255`、其 `if:` = `:257`（另 `desktop-macos` 的 `if:` = `:178`、`check:mac-package:platform` = `:211`、`Build macOS smoke artifact` 步骤名 = `:212`）。
 
 ### 历史读数（终审修复前，`FINAL_SHA` = `aa837f9124`）
 

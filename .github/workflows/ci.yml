@@ -212,13 +212,9 @@ jobs:
       - name: Build macOS smoke artifact
         env:
           DSH_PACKAGE_CHECK_ALREADY_RAN: '1'
-          # The workspace smoke command below is `dist:mac-smoke` =
-          # `node scripts/package-mac.ts`; it does not run the provisioning guard, so
-          # HUAANWORK_ALLOW_UNPROVISIONED_SMOKE is inert on this path (no reader).
-          # It is kept because tests/package.spec.ts asserts this exact job shape.
-          # Guard coverage comes from the root `dist:*` chains (which prepend
-          # huaanwork-verify-provisioning.mjs) and the explicit local
-          # `node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs --smoke`.
+          # This job runs the workspace `dist:mac-smoke` (`node scripts/package-mac.ts`), never the guard, so
+          # `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` is inert and kept only for the job shape `tests/package.spec.ts`
+          # pins. Guard coverage: root `dist:*` chains except `dist:win-sign:huaanwork`, plus the explicit local command.
           HUAANWORK_ALLOW_UNPROVISIONED_SMOKE: '1'
           # The universal merge alone takes 9-17 minutes, so pull requests
           # package only the runner's native arm64 app. Pushes to master and
