@@ -30,6 +30,33 @@
 | F12 | P3 | `verify-profile-boot --onboarding` 静默 no-op | 下一次脚本清理 |
 | F13 | P3 | AA `main` 移动目标流程化 | 下一次发布清单更新 |
 
+## 关闭记录（Task 13，2026-10-30）
+
+本节只**追加**关闭状态；上方〈总表〉与下方 §F1–§F13 的原始登记文本保留为历史记录，不改写。逐条结论、验证命令与边界的完整记录见 `docs/evidence/2026-10-30-single-desktop-followups-acceptance.md`。
+
+| ID | 结论 | 关闭提交 | 证据指针 |
+| --- | --- | --- | --- |
+| F1 | 完成（本地六门禁 + unsigned macOS smoke） | `6547000e6a`（代码）+ `cb48083b51`（证据） | acceptance §F1；`docs/evidence/2026-10-30-dshmarket-1.73.5-upgrade.md` |
+| F2 | 已核验（仅证据；仓库设置零变更） | `5c8116755b` / `b5b95e4af7` / `6c0eac45ec` | acceptance §F2 |
+| F3 | 完成 | `bdc56930ad` | acceptance 总表 F3 |
+| F4 | 完成 | `06bd5f0dfe` | acceptance 总表 F4 |
+| F5 | 完成（数字按实测订正） | `912e7ef238` / `fe5b1a5e69` / `9235b91c0c` | acceptance 总表 F5；`runtime-consumers.md` 的 41/47/46/47 读数记录 |
+| F6 | 完成 | `38368e0d8a` | acceptance 总表 F6 |
+| F7 | 完成 | `e75c13f2c5` | acceptance 总表 F7 |
+| F8 | 完成（按 2026-10-30 产品裁定） | `756a299920` | acceptance §F8 |
+| F9 | 完成 | `4d1efc6daa` + `31d23adf6b` | acceptance 总表 F9 |
+| F10 | 完成 | `48b622e9ca` | acceptance 总表 F10 |
+| F11 | 完成 | `24720c229b` | acceptance 总表 F11 |
+| F12 | 完成（严格 argv；`--onboarding` 分支已在此前删除） | `24720c229b` | acceptance 总表 F12 与〈F12 登记现状〉 |
+| F13 | 完成 | `24720c229b` + `aa837f9124` | acceptance 总表 F13；`docs/release-checklist.md` §0.1 |
+
+口径订正（不改写上方原文）：
+
+- **F1**：登记验收含「CI 绿」，但本计划未推送、未跑分支 CI，因此 F1 的收口口径是**本地门禁 + unsigned macOS smoke**，不声称 CI 证据。
+- **F2**：登记的六个 job 名单对本分支成立；`origin/master` 合并前仍是三 cell 矩阵。若启用保护，required check 名必须使用矩阵后缀形式（`desktop-windows (dsh-plugin-huaanwork)` / `desktop-macos (dsh-plugin-huaanwork)`），裸 job id 会永久 pending。
+- **F5**：`runtime-consumers.md:470` 的 docs 命中数实测为 41（本节写入前）→ 47（`96dc22189c`）→ 46（`fe5fc0a73d`）→ 47（`9235b91c0c` 自引路径后）；登记文本的「HEAD 为 47」不是单值事实，以证据文档的多读数记录为准。shelf 的「5 条 `ALREADY`」是 5 条 claim 分布在 10 行（跨三棵已删除树），已逐行补本地等价路径。
+- **F12**：登记的「`--onboarding` 仍被接受但无操作」在当前 HEAD 已不成立——该分支已在 `cbd392fbc7` 删除；本计划只补严格参数守卫（未知参数 exit 2，位于首个副作用之前）。
+
 ---
 
 ## F1（P0）`dshmarket` 升级与 Desktop patch 适配
