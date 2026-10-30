@@ -4,10 +4,11 @@
 怎么验收、失败怎么处置。目标读者是执行发行的人(R1)——每一节都按「照着做即可」的标准写,
 不需要再作判断。
 
-> **可达性标注（M9，2026-10-05）**：本清单共 **18** 个编号节（3 个 `##` + 15 个 `###`）。
-> 按裁定 R-6（签名凭据触发式延后）与 R2（部署位未交付）的当前状态，其中 **16 节当前不可达、
-> 且从未被任何人照着做过一次**；只有 §1.7（universal 构建注意）与 §1.8（未签名期的诚实标注）
-> 是可达且已实跑过的（§1.8 的路径由 M6 的 Task 7.3 实跑，§1.7 的面由 M7 的 Task 0.3 实跑）。
+> **可达性标注（M9，2026-10-05；§0.1 为 2026-10-30 新增，可达性判定见附录）**：本清单共 **19** 个
+> 编号节（3 个 `##` + 16 个 `###`）。按裁定 R-6（签名凭据触发式延后）与 R2（部署位未交付）的当前
+> 状态，其中 **16 节当前不可达、且从未被任何人照着做过一次**；§1.7（universal 构建注意）与
+> §1.8（未签名期的诚实标注）是可达且已实跑过的（§1.8 的路径由 M6 的 Task 7.3 实跑，§1.7 的面由
+> M7 的 Task 0.3 实跑），§0.1 可达但〈main 前进后重做〉整条分支尚未按本节完整实跑。
 > 「不可达」的判据是逐节的，见文末〈逐节可达性判定〉附录 —— **判据随前置解除而变化，
 > 故看附录、不要只看这里的分数**。冒烟记录 `docs/huaanwork-release-smoke-2026-10-01.md`
 > 已逐项标注 exercised 层级，本清单此前不回指它，现补上。
@@ -77,6 +78,42 @@ node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs
 守卫**不覆盖** `dist:win-sign:huaanwork`(§2 的签名路径,它的命令串保持 Task 4.6 原样):该命令内部会先跑
 一次未签名打包,故发行当天按上面第 5 步单独跑一次守卫;守卫的口径不因签名路径而放宽。市场服务端的部署、
 轮换与吊销见 [`market-server-deployment.md`](./market-server-deployment.md)。
+
+### 0.1 AA 制品与 main 移动目标
+
+**打包前还有一道新鲜度核对:AA 的 `main` 是移动目标。** `corepack yarn aa:check`
+(`scripts/prepare-agents-anywhere-release.mjs --check`)**每次**都用 `git ls-remote` 现解析 Agents Anywhere
+`main` 的最新提交,再要求归档制品逐项对得上它:`vendor/agents-anywhere/provenance.json` 的 `commit` /
+`sha256` / `desktopVersion`(版本串里的 `desktop.c<提交前 12 位>` 标记)、root `package.json` 的
+`resolutions`,以及 `dsh-plugin-huaanwork` 的依赖行(判定在 `scripts/agents-anywhere-release-policy.mjs`
+的 `assertPreparedAaRelease`)。**它是只读校验,不写任何文件。** 当前归档制品的 provenance 为
+`c64c3f67ee3b2.r7f334f77` —— **该值以 `vendor/agents-anywhere/provenance.json` 的 `desktopVersion`
+为准**,本节数字只作对照(AA 每前进一次就变)。
+
+- **`aa:check` 红先判因,不要当回归处理**:报错若是 `artifact is not from the latest AA main commit.
+  Run corepack yarn aa:prepare-release.`,含义就是 **AA `main` 已前进、旧制品随之 fail-closed** —— 这是
+  设计行为,不是本仓回归。其余报错(checksum mismatch、runtime peers 变化、安装的 AA 包过旧、
+  resolution 指向旧制品)才当真实回归处置。
+- **`main` 前进后的重做顺序(打包前,逐条串行)**:
+
+  ```bash
+  corepack yarn aa:prepare-release
+  corepack yarn test:aa-connector
+  corepack yarn test:aa-release
+  ```
+
+  `aa:prepare-release` 按 `main` 最新提交重建归档制品,并改写 `provenance.json`、制品文件、workspace
+  依赖行与 root `resolutions`,随后重装依赖(`yarn.lock` 随之重解)——**产物、provenance 与这两条测试
+  必须在同一个提交里入库**。`test:aa-connector` 跑的是 `dsh-plugin-huaanwork/node_modules` 里**已安装**的
+  AA 制品,故必须在 `aa:prepare-release` **之后**跑;`test:aa-release` 钉 provenance / resolution /
+  安装版本三者一致(`rejects a prepared artifact after AA main advances` 与 `rejects stale installed
+  code despite updated manifests and provenance` 就是这两条)。两者都已含在 `corepack yarn check` 中,
+  但 **`check` 不能替代 `aa:prepare-release`**:它读的是当前制品,不会替你跟上 `main`。
+- **不得跳过校验发版**:root 的 `dev` / `dev:huaanwork`、`package:dir` / `package:dir:huaanwork` 与
+  **全部 `dist:*`** 命令链都在 `market:prepare` 之后紧跟 `corepack yarn aa:prepare-release`,手工流程里
+  省掉它只会让后面的打包用上旧制品。签名管线另有一道:`release-mac.ts` 在 `yarn run check` 之前跑
+  `prepare-agents-anywhere-release.mjs --verify-release`(要求官方仓库 + `main`);Windows 命令链没有
+  这一步,所以手工核对不能省。
 
 ## 1. macOS 签名与公证
 
@@ -435,6 +472,7 @@ signtool verify /pa /v dsh-plugin-huaanwork\dist\HuaAnWork-<version>-x64-Setup.e
 | 节 | 标题 | 依赖的前置 | 可达性 | 判定说明 |
 |---|---|---|---|---|
 | §0 | 发行 provisioning | ②④ | **不可达** | 本身即要求 provisioning 与部署位 |
+| §0.1 | AA 制品与 main 移动目标 | 无（只读命令需出网解析 AA main） | **可达** | 命令今天可跑；〈main 前进后重做〉分支尚未完整实跑 |
 | §1 | macOS 签名与公证 | ①② | **不可达** | 需 Developer ID 证书与公证凭据 |
 | §1.1 | 前置(缺一不可) | ① | **不可达** | 需 Apple Developer Program 会员与凭据 |
 | §1.2 | 凭据注入:18 个环境变量名 | ① | **不可达** | 凭据未采购；但 env 名单已被测试机械钉住（26 passed） |
@@ -453,4 +491,4 @@ signtool verify /pa /v dsh-plugin-huaanwork\dist\HuaAnWork-<version>-x64-Setup.e
 | §2.6 | 未签名期的诚实标注 | ①③ | **不可达** | 需 Windows 环境运行安装器 |
 | §2.7 | 失败处置 | ①③ | **不可达** | 需真实硬件令牌报错场景 |
 
-总结：共 18 个编号节，当前可达 2 节（§1.7、§1.8），当前不可达 16 节。判据随前置解除而动态变化。
+总结：共 19 个编号节，当前可达 3 节（§0.1、§1.7、§1.8），当前不可达 16 节。判据随前置解除而动态变化。

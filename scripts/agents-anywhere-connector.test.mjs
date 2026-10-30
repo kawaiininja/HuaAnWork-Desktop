@@ -86,6 +86,9 @@ for (const workspace of AA_WORKSPACES) {
       NO_PROXY: 'localhost,127.0.0.1,::1,[::1],.example.com',
       no_proxy: 'internal.test, [::1] ',
       HTTPS_PROXY: 'http://127.0.0.1:7890',
+      // An inherited index: without it the "UV_INDEX is absent" assertion below
+      // would hold even if upstream stopped dropping the key.
+      UV_INDEX: 'https://inherit.example/simple',
     }
     const original = { ...env }
     const { SourceConnector } = loadConnector(workspace, env)
@@ -129,7 +132,13 @@ for (const workspace of AA_WORKSPACES) {
     assert.equal(launched.env.PIP_INDEX_URL, 'https://pypi.org/simple')
     assert.equal(launched.env.UV_DEFAULT_INDEX, 'https://pypi.org/simple')
     assert.equal(launched.env.UV_INDEX_URL, 'https://pypi.org/simple')
-    assert.ok(!('UV_INDEX' in launched.env))
+    // The fixture inherits UV_INDEX above: the connector must drop it in favour
+    // of the explicit keys it writes, and must do so on its own copy.
+    assert.ok(
+      !('UV_INDEX' in launched.env),
+      `connector must drop the inherited UV_INDEX and write only UV_DEFAULT_INDEX/UV_INDEX_URL/PIP_INDEX_URL; got ${String(launched.env.UV_INDEX)}`,
+    )
+    assert.equal(env.UV_INDEX, 'https://inherit.example/simple')
     assert.deepEqual(env, original)
     assert.ok(launched.cwd.startsWith(join(stateRoot, 'connector-source') + sep))
     assert.equal(launchedArgs[launchedArgs.indexOf('--directory') + 1], launched.cwd)
