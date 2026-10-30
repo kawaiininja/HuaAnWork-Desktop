@@ -2,7 +2,7 @@
 
 - 记录时间：2026-10-30（本地 UTC+8）
 - 仓库：`/Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop`（`kawaiininja/HuaAnWork-Desktop`），分支 `refactor/huaanwork-followups`
-- **`FINAL_SHA`（Task 13 全量门禁的被验证提交）**：`aa837f9124fec6ddfe820660150b2b8ea98a6706`（短 `aa837f9124`，`docs: separate AA network failures from stale-main triage`）
+- **`FINAL_SHA`（Task 13 全量门禁的被验证提交）**：`051a25763048d380ebb0ef35efc1879b08028278`（短 `051a257630`，`fix: address the final whole-branch review findings`）。上一轮 `FINAL_SHA` 为 `aa837f9124fec6ddfe820660150b2b8ea98a6706`（短 `aa837f9124`）；终审修复波次改动了测试文件 `dsh-plugin-huaanwork/tests/dshmarket-compat.spec.ts`，旧读数不再覆盖新 HEAD，已重跑并保留为〈Task 13 全量门禁〉下的历史读数
 - 需求登记表：`docs/evidence/2026-10-30-single-desktop-followups.md`（F1–F13 的原始现状/范围/验收）；逐任务报告在 `.superpowers/sdd/2026-10-30-single-desktop-followups/task-N-report.md`（本地执行记录，不随仓库提交）
 - 性质：F1–F13 的收口验收证据汇总。**§F2 为 Task 3 原件**（其记录时的快照 HEAD 为 `cb48083b51`，F1 的代码提交 `6547000e6a` 是其父提交），本次不改写；F1、F3–F13 的结论、提交、验证与边界见下方总表与分项，Task 13 的全量门禁见〈Task 13 全量门禁〉。
 - 总则：本文件的每一项都是**记录**，不是新的实现变更。F2 按用户裁定（2026-10-30）不创建、不修改任何分支保护或 ruleset。
@@ -13,7 +13,7 @@
 | --- | --- | --- | --- | --- | --- |
 | F1 | P0 | 完成（本地门禁 + unsigned macOS smoke） | 代码 `6547000e6a`；证据 `cb48083b51` | 见 §F1：`market:check`、`build`、`typecheck`、`test`、`check`、`dist:mac-smoke:huaanwork` 全部 exit 0 | 未跑 CI、未推送；未做 Windows 打包；`market:check` 依赖执行时 npm latest 未前进（当时 `1.73.5`） |
 | F2 | P0 | **已核验（仅证据）** | `5c8116755b` / `b5b95e4af7` / `6c0eac45ec` | `gh api` 只读核验：master 无经典保护（404）、rulesets `[]`、六 job 名单与矩阵后缀 check 名；见 §F2 | **仓库设置零变更**（无 PUT/POST/PATCH/DELETE）；未创建 PR 验证 skipped required check 语义 |
-| F3 | P1 | 完成 | `bdc56930ad` | `check:layout` 0；`test:architecture-gates` 16/16；workspace `typecheck` 0；`git grep -nE 'Both Desktop editions\|verify-desktop-variants\|loads in every desktop channel\|pins every channel\|registered upstream-sync exception\|must not run in Phase A' -- dsh-plugin-huaanwork/src scripts`（表格内 `\|` 是 Markdown 转义，实际正则分隔符为 `|`）→ 3 命中，全为 `scripts/active-topology.test.mjs:18,28,33` 的守卫字面量；`dsh-plugin-huaanwork/src` 0 命中 | 含原登记未列的第 8 文件 `jobs-bridge.ts`（同句注释）；`active-topology.test.mjs` 的三处 `verify-desktop-variants` 字面量是守卫载荷，必须保留 |
+| F3 | P1 | 完成 | `bdc56930ad` | `check:layout` 0；`test:architecture-gates` 16/16；workspace `typecheck` 0；`git grep -nE 'Both Desktop editions\|verify-desktop-variants\|loads in every desktop channel\|pins every channel\|registered upstream-sync exception\|must not run in Phase A' -- dsh-plugin-huaanwork/src scripts`（表格内 `\|` 是 Markdown 转义，实际命令用竖线）→ 3 命中，全为 `scripts/active-topology.test.mjs:18,28,33` 的守卫字面量；`dsh-plugin-huaanwork/src` 0 命中 | 含原登记未列的第 8 文件 `jobs-bridge.ts`（同句注释）；`active-topology.test.mjs` 的三处 `verify-desktop-variants` 字面量是守卫载荷，必须保留 |
 | F4 | P1 | 完成 | `06bd5f0dfe` | `package.spec.ts` 76 passed / 1 skipped (77)；`prepare-dsh-market.test.mjs` 6/6；旧标题 grep 零命中 | 仅 2 文件；`AGENTS.md` 与本登记表引用的旧标题为登记期历史文本 |
 | F5 | P1 | 完成（数字按实测订正） | `912e7ef238` / `fe5b1a5e69` / `9235b91c0c` | 每条数字/行号在 HEAD 复现（见证据文档）；`check:whitespace` / `check:bilingual-docs` / `check:readme-versions` 全 0 | docs 命中数经历 41→47→46→47 四次读数，shelf「5 条 `ALREADY`」实为 10 行；原文保留为历史记录 |
 | F6 | P1 | 完成 | `38368e0d8a` | `verify:notices` 两次字节一致；`verify:licenses` 0；AA 行 = provenance `c64c3f67ee3b2.r7f334f77`，dshmarket 行 = `1.73.5` | 生成器按包名去重（`js-yaml`/`undici` 旧行）是既有行为，未改生成器 |
@@ -54,9 +54,25 @@
 
 登记文本称「Task 14 删除唯一 import 后仍接受 `--onboarding` 但什么也不做」。该描述在当前 HEAD 已不成立：`--onboarding` 分支已在 `cbd392fbc7` 删除，脚本对未知参数此前是**静默忽略**。本计划（`24720c229b`）补的是严格 argv 守卫：`argv.length > 2` ⇒ `verify-profile-boot: unknown arguments: <args>` + `exit 2`，且守卫位于第一个副作用（临时 Profile home 的 `mkdtempSync`）之前。验证以「`--onboarding` exit 2、stderr 精确」与「临时 Profile home 数量前后不变（零副作用）」以及真实调用方 `verify:profile` exit 0 为依据。
 
-## Task 13 全量门禁（`FINAL_SHA` = `aa837f9124`）
+## Task 13 全量门禁（`FINAL_SHA` = `051a257630`，终审修复后重跑）
 
-执行前 `npm view dshmarket version` → `1.73.5`（与 F1 目标一致）。六条命令**严格串行**（一次一条；`check` 内含 `verify:aa`，未与其他门禁并行）。工作树在每个门禁前后均只有未跟踪的 `?? .gstack/`；各门禁未改写任何受版本控制的文件（含 `market:prepare` 与会重写 notices 的 `verify:notices`）。
+终审（whole-branch review）修复提交 `051a25763048d380ebb0ef35efc1879b08028278`（`fix: address the final whole-branch review findings`）改动了测试文件 `dsh-plugin-huaanwork/tests/dshmarket-compat.spec.ts`，原 Task 13 在 `aa837f9124` 上的读数不再覆盖 HEAD，故在该提交上**原样重跑**六条命令。执行前 `npm view dshmarket version` → `1.73.5`（与 F1 目标一致）。六条命令**严格串行**（一次一条；`check` 内含 `verify:aa`，未与其他门禁并行）。工作树在每个门禁前后均只有未跟踪的 `?? .gstack/`；各门禁未改写任何受版本控制的文件（含 `market:prepare` 与会重写 notices 的 `verify:notices`）。
+
+| # | 命令 | Exit | 耗时 | 关键输出 |
+| --- | --- | --- | --- | --- |
+| 1 | `corepack yarn market:check` | 0 | 2 s | `dshmarket latest verified: 1.73.5 in HuaAnWork` |
+| 2 | `corepack yarn build` | 0 | 14 s | client/native-ui `✓ built`；四个 server workspace `TypeScript sources run directly; no build output` |
+| 3 | `corepack yarn typecheck` | 0 | 23 s | `contract-types: 4 generated type files are current` |
+| 4 | `corepack yarn test` | 0 | 83 s | huaanwork 267 passed / 4 skipped（271），3547 passed / 14 skipped（3561）；market 303、market-server 244、update-server 88、agent-catalog 80；node:test 7 块 `# fail 0` |
+| 5 | `corepack yarn check` | 0 | 156 s | closure 316、bundled 131、licenses 636、operations 7/18、`verify:aa`（`verify-profile-boot … passed`）、bilingual 50/100、layout 对齐 `1600d8a1e1`、readme-versions 4 |
+| 6 | `corepack yarn workspace dsh-plugin-huaanwork verify:notices` | 0 | 1 s | `verify-licenses: 636 packages checked (9 bundled); 2 use notice-required licenses (LGPL-3.0-or-later)`；生成后 `git diff` 为空（字节一致） |
+
+- **unsigned macOS smoke 本轮未重跑**：本波只改测试文件、CI 注释、脚本头部注释与 Markdown，没有影响打包产物的代码变化（`dshmarket-compat.spec.ts` 不进入发行包）；F1 的 smoke 读数仍以其自身记录的 `6547000e6a` 为准，本轮不声称 smoke 覆盖 HEAD。
+- 本轮未推送、未跑 CI；`market:check` 仍依赖执行时 npm latest 为 `1.73.5`。
+
+### 历史读数（终审修复前，`FINAL_SHA` = `aa837f9124`）
+
+Task 13 原收口在被验证提交 `aa837f9124fec6ddfe820660150b2b8ea98a6706`（`docs: separate AA network failures from stale-main triage`）上的读数保留如下，作为历史（当时测试文件尚未被终审修复改动）：
 
 | # | 命令 | Exit | 耗时 | 关键输出 |
 | --- | --- | --- | --- | --- |
@@ -74,7 +90,7 @@
 - **F2 未改仓库设置**：全部 GitHub 交互为只读（GET / `gh auth status`），提交前后保护状态、ruleset、`protected` 字段均无漂移。
 - `market:check` 的通过**依赖执行时 npm latest 未前进**（Task 13 执行时为 `1.73.5`，`2026-10-30` 复核）；latest 前进后按设计 fail-closed，需要重跑 `market:prepare`，这不是回归。
 - macOS smoke 为 **unsigned**（R-6 口径）；签名、公证与安装器升级路径未验证。
-- 本文件的收口动作只改文档：无代码、测试、lockfile、依赖或子模组变化；`.gstack/` 未跟踪、未提交。
+- Task 13 的收口提交只改文档；终审修复提交 `051a257630` 另改了一个测试文件（`dshmarket-compat.spec.ts` 删除死 mock）、`ci.yml` 与 `scripts/upstream-sync-dashboard.mjs` 的注释；两轮均无 lockfile、依赖版本或子模组变化，`.gstack/` 未跟踪、未提交。
 
 ## F2（P0）GitHub required checks 对齐 —— 仅证据核验
 
