@@ -450,7 +450,7 @@ AssertionError: expected [ '0.1.7-alpha.2', '0.1.7-rc.1', …(5) ] to deeply equ
 | `patches/*@0.2.1-alpha.1.patch` | 21 |
 | **合计** | **134** |
 
-- 该提交合计:**`2034 files changed, 127 insertions(+), 20422 deletions(-)`**(复测:`git show --shortstat --format='' 96dc22189c`;构成 = 1898 vendor 文件 + 134 patch + 本文件 `+118/−1` 与 `dsh-plugin-huaanwork/tests/package.spec.ts` `+9`。原记的 `2032 files changed, 20421 deletions(-)` 在 HEAD 复测差 2 文件 / 1 行,属记录误差)。行数口径:**`manifest.json` 计入**——1898 个 vendor 文件中有 6 个是该 lane 的 `manifest.json`(合计 13 298 行删除),其余 1892 个为二进制 tarball、不计行(复测:`git show --numstat --format='' 96dc22189c -- vendor/`,字段 1 为 `-` 的行数 = 1892)。
+- 该提交合计:**`2034 files changed, 127 insertions(+), 20422 deletions(-)`**(复测:`git show --shortstat --format='' 96dc22189c`;构成 = 1898 vendor 文件 + 134 patch + 本文件 `+118/−1` 与 `dsh-plugin-huaanwork/tests/package.spec.ts` `+9`,逐文件读数见 `git show --numstat --format='' 96dc22189c`。原记的 `2032 files changed, 20421 deletions(-)` 在 HEAD 复测差 2 文件 / 1 行,属记录误差)。行数口径:**`manifest.json` 计入**——1898 个 vendor 文件中有 6 个是该 lane 的 `manifest.json`(合计 13 298 行删除),其余 1892 个为二进制 tarball、不计行(复测:`git show --numstat --format='' 96dc22189c -- vendor/`,字段 1 为 `-` 的行数 = 1892;6 个 `manifest.json` 的 `numstat` 第二个字段之和 = 13 298)。
 - `patches/` 从 **165** → **31** 个文件。
 - 未删除(硬排除项全部保持):`vendor/dsh-runtime/0.2.1-rc.1/`(342 个跟踪文件 = 341 tarball + `manifest.json`)、`patches/*@0.2.1-rc.1.patch`(22)、`.yarn/patches/dshmarket-desktop.patch`、9 个非 DSH patch(`app-builder-lib@26.15.7`、`fs-ext@2.1.1`、`node-pty@1.2.0-beta.15`、`open@11.0.1`、`open@11.0.4`、`pi-ai@0.87.1`、`pi-ai@1.0.2`、`pnpm@11.8.0`、`vscode-ripgrep@1.18.0`)、`vendor/agents-anywhere/`(17 MiB,provenance commit `64c3f67`)。三棵参考树无任何暂存文件(暂存删除里 `dsh-plugin-desktop*`/`dsh-desktop-next/` 命中 = 0)。
 
