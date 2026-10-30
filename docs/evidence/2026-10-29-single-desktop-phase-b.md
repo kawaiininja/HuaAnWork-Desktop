@@ -231,3 +231,117 @@ The parent of the evidence commit is `cbd392fbc7f25eadc4c21be6adae905ca8973e28`,
 - No `dshmarket` freshness: `market:check` is red for the external `1.73.5` vs `1.70.2` reason and was not run, and the root smoke wrapper cannot get past `market:prepare` on this machine. The smoke above uses the committed pinned `1.70.2` market, which is what CI also packages.
 - No provisioning coverage from the smoke or from CI `check`; the guard's exit 0 is the explicit local run recorded in Step 2.
 - No claim that the harness pin moved: it is `1600d8a1e1` at `PHASE_B_SHA`, unchanged since phase A.
+
+---
+
+# Addendum — final review fix wave (2026-10-30)
+
+**This section is an addendum.** The phase-B record above is kept intact and describes `PHASE_B_SHA` and its CI run; everything below refers to the later `FINAL_SHA` produced by the final whole-branch review's fix wave.
+
+The final review returned **"With fixes"** with three Important findings. All three were documentation / test-wiring defects — no product source, packaging input, version, AA/market asset, workflow, or submodule pin changed — and they are fixed in one commit.
+
+| Field | Value |
+|---|---|
+| **`FINAL_SHA`** | **`4a6dbebe37f5fd5e3d3371574d4f05068cea41ce`** (`docs: correct single-desktop acceptance records and wire core tests`) |
+| Parent | `337c7c1843` (`docs: correct phase B acceptance wording`) |
+| Files changed | 4 — `docs/architecture.md`, `docs/architecture.en.md`, `AGENTS.md`, `package.json` (one script string) |
+| Branch | `refactor/huaanwork-single-desktop-maintenance` |
+| CI run | run `40994970656`, `conclusion=success`, 6/6 jobs — https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40994970656 |
+| Harness pin at `FINAL_SHA` | `1600d8a1e140dcde43a1a0941940a0480712c011` (unchanged since phase A) |
+
+## Finding 1 (Important) — false live architecture claim
+
+`docs/architecture.md:66` and `docs/architecture.en.md:66` still described `upstream.json` as carrying `stable` / `beta` records "as vendored-runtime channel metadata". After Task 10 that file has exactly one channel; the stable historical leg is a market peer string, not a channel record.
+
+Fix, in both languages, with the rest of the paragraph and the channel-protocol text untouched: `upstream.json` `activeChannel` is `huaanwork` and its `channels` map holds the `huaanwork` record alone; the historical Stable leg is **not** a channel record and survives only as the `marketPeerPolicy.stableHistorical` market peer string `0.2.0-rc.2`; `DESKTOP_RELEASE_IDENTITIES` `stable` / `beta` are historical identity only.
+
+## Finding 2 (Important) — false Windows debt row
+
+`AGENTS.md:58` claimed the Windows artifacts did not exist and that `verify-win-installer.ts` had never run against a real artifact, citing `ci.yml:140-148`. Both were false: `dist:win` runs the verifier after electron-builder (`dsh-plugin-huaanwork/scripts/package-win.ts:201-206`), and the phase-A run `40908689112` and phase-B run `40988746000` both logged `Windows installer verification passed` for the CI-built installer and `dist/win-unpacked/HuaAnWork.exe` (Step 4 above, `:208`).
+
+Fix: the row is retitled **Windows 发行制品校验零证据** with a 2026-10-30 correction date; it records the CI-built-artifact verification and both run IDs; the stale `ci.yml` line references are replaced by the current workflow — `:155` runs `check:win-package:platform`, `Build Windows installer` starts at `:160` and runs `dist:win` at `:165`, `Build Windows portable archive` at `:166`. The real remaining gaps are kept and not downgraded: (1) `release.yml:186-189` uploads only the installer, the portable archive and `SHA256SUMS.txt`, so the **downloadable release artifacts** cannot be re-verified the way the verifier does it; (2) `update-server/scripts/publish-release.mjs --platform windows` has never been run; (3) no second machine has run it, so the real macOS→Windows boundary is unverified. The M3 cross-milestone gap (workspace switching on Windows, spec §14 item 21) and the trigger conditions (a Windows host becomes available, **or** release-artifact verification is scheduled) are unchanged. This discharges the follow-up that the last bullet of "What this record does not claim" deliberately deferred to a documentation fix.
+
+## Finding 3 (Important) — new core tests never ran in CI
+
+`package.json`'s `test:architecture-gates` ran only `market-dependency-direction.test.mjs` and `active-topology.test.mjs`; the new `scripts/vendored-runtime-policy.test.mjs` and the hermetic `scripts/upstream-sync-dashboard.test.mjs` ran only through the unwired `test:scripts`.
+
+Fix: `test:architecture-gates` now runs all four files. `check:architecture`, `check:layout`, and `scripts/expected-root-gate-scripts.json` were not modified, so the read-only dashboard is still not a gate — only its hermetic test joins the architecture gate. The gate's own test count moved from 11 to 16, both locally and in the CI `check` job (`# tests 16`, `# pass 16` in run `40994970656`).
+
+## Gates on `FINAL_SHA`, run serially
+
+Every command below ran alone, in this order, on `4a6dbebe37`. `git diff --check` exited 0 with no output before the gates started.
+
+| # | Command | Exit | Key output |
+|---|---|---|---|
+| 1 | `corepack yarn install --immutable` | 0 | `Done with warnings in 1s 398ms`; the pre-existing `YN0002`/`YN0086` peer notices, no resolution change |
+| 2 | `corepack yarn check` | 0 | full chain green — `test:architecture-gates` **16/16**; `verify-bilingual-docs: 50 records and 100 documents are consistent`; `verify-market-dependency-direction: 441 tracked source files … 8 market wrapper files carry no registry bypass`; `sync-vendored-runtime: huaanwork 341 packages from 1600d8a1e1 are verified`; `verify-layout: HuaAnWork and retained workspaces are consistent with upstream 1600d8a1e1`; `test:gate-scripts` 1/1; `check:readme-versions` 3/3; workspace totals `dsh-plugin-huaanwork` 267 files / 3547 passed (14 skipped, 3561), `dsh-community-market` 13 files / 303, `market-server` 14 / 244, `update-server` 5 / 88, `agent-catalog-server` 5 / 80, all remaining packages green |
+| 3 | `corepack yarn typecheck` | 0 | only `contract-types: 4 generated type files are current` |
+| 4 | `corepack yarn test` | 0 | twelve workspaces green: `dsh-plugin-huaanwork` 267 files / 3547 passed (14 skipped), `dsh-community-market` 13 / 303, `@huaanwork/policy` 64 (62 passed, 2 skipped), `@huaanwork/model` 10, `@huaanwork/git-tools` 8, `@huaanwork/web-tools` 19, `market-server` 14 / 244, `update-server` 5 / 88, `@huaanwork/catalog-signing` 13, `@huaanwork/agent-package-format` 35, `agent-catalog-server` 5 / 80, `agent-catalog-admin` 15 — 0 failures |
+| 5 | `corepack yarn aa:check` | 0 | `Selected AA main at 64c3f67ee3b270c1740da4da9dfae56d6217c8e4`; `AA release verified: HuaAnWork uses 64c3f67ee3b270c1740da4da9dfae56d6217c8e4` — AA `main` had not advanced, so nothing failed for drift and `aa:prepare-release` was not run |
+| 6 | `node scripts/upstream-sync-dashboard.mjs --json` | 0 | `ok: true`, `upstreamSha` = `reviewedCommit` = `092e2ecef750d10db43cedbab8e81fd48c8de38e`, `pendingCount: 0`, and `git rev-list --count 092e2ece…..upstream/master` = **0**, so pending equals the rev-list count |
+
+## CI for `FINAL_SHA`
+
+```bash
+git push origin refactor/huaanwork-single-desktop-maintenance    # 337c7c1843..4a6dbebe37
+gh workflow run ci.yml --ref refactor/huaanwork-single-desktop-maintenance --repo kawaiininja/HuaAnWork-Desktop
+```
+
+The dispatch returned run `40994970656` directly and its `headSha` already equalled `FINAL_SHA`, so the registration match succeeded on the first poll (no polling extension was needed). `gh run watch --exit-status` exited 0.
+
+| Field | Value |
+|---|---|
+| Run ID | `40994970656` |
+| URL | https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40994970656 |
+| Event / branch | `workflow_dispatch` / `refactor/huaanwork-single-desktop-maintenance` |
+| `headSha` | `4a6dbebe37f5fd5e3d3371574d4f05068cea41ce` (= `FINAL_SHA`) |
+| Created / updated | `2026-10-30T03:01:07Z` / `2026-10-30T03:25:01Z` |
+| Status / conclusion | `completed` / **`success`** |
+
+| Job | Conclusion | URL |
+|---|---|---|
+| `changes` | success | https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40994970656/job/123865861141 |
+| `gitleaks` | success | https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40994970656/job/123865861491 |
+| `desktop-macos (dsh-plugin-huaanwork)` | success | https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40994970656/job/123865996659 |
+| `check` | success | https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40994970656/job/123865996724 |
+| `upstream-command-windows` | success | https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40994970656/job/123865996742 |
+| `desktop-windows (dsh-plugin-huaanwork)` | success | https://github.com/kawaiininja/HuaAnWork-Desktop/actions/runs/40994970656/job/123865996842 |
+
+Six jobs, all success — the same matrix as the phase-B run, with no job added or dropped. Two details carry the fix wave into CI: the `check` job's `Run yarn check` step now logs `# tests 16` / `# pass 16` for the architecture gates (the two new files executing in CI, Finding 3), and `desktop-windows` again logged `Windows installer verification passed: D:\a\HuaAnWork-Desktop\HuaAnWork-Desktop\dsh-plugin-huaanwork\dist\HuaAnWork-0.1.0-x64-Setup.exe` plus `Windows portable verification passed: …\HuaAnWork-0.1.0-x64-Portable.zip`.
+
+## Why the phase-B smoke remains valid
+
+The fix commit changes two architecture documents, one `AGENTS.md` debt row, and one `package.json` script string.
+
+```bash
+git diff --name-only 337c7c1843..4a6dbebe37
+# AGENTS.md  docs/architecture.en.md  docs/architecture.md  package.json
+```
+
+No product source file, packaging input, version field, AA or market asset, workflow, reference-tree history, or submodule pin is in that set, and `package.json` changes only the argument list of `test:architecture-gates` (no dependency, version, or runtime entry). The unsigned macOS DMG and the Windows artifacts produced in Step 2 and Step 4 are therefore still representative of `FINAL_SHA`, and the smoke was deliberately **not** re-run; re-running it would re-package byte-identical inputs. The smoke is not a gate for a docs/test-wiring-only change.
+
+The full span from the phase-B code SHA is the same set plus this evidence file, which `337c7c1843` edited for wording before this fix wave:
+
+```bash
+git diff --name-only cbd392fbc7..4a6dbebe37
+# AGENTS.md  docs/architecture.en.md  docs/architecture.md
+# docs/evidence/2026-10-29-single-desktop-phase-b.md  package.json
+```
+
+## This addendum's evidence commit
+
+```bash
+git add docs/evidence/2026-10-29-single-desktop-phase-b.md
+git commit -m "docs: append the final review fix wave to phase B evidence"
+test -z "$(git diff --name-only "$FINAL_SHA"..HEAD -- . ':(exclude)docs/evidence/2026-10-29-single-desktop-phase-b.md')"
+git push origin refactor/huaanwork-single-desktop-maintenance
+```
+
+The evidence commit's parent is `4a6dbebe37f5fd5e3d3371574d4f05068cea41ce`, and the diff against `FINAL_SHA` contains this file only.
+
+## What this addendum does not claim
+
+- No new smoke, no new signed or notarized artifact, no release, no tag, no `master` push, no merge — the only ref pushed is the feature branch.
+- No claim that the three findings exhausted the review: only the three Important findings in scope were fixed; nothing else in the review was acted on.
+- No claim that the Windows release face is now covered: the row's remaining gaps (downloadable release artifacts, `publish-release.mjs --platform windows`, second machine) are unchanged by this fix wave.
+- No AA or market refresh: `aa:check` passed on the existing artifact and `market:check` was not run (the external `1.73.5` vs `1.70.2` drift recorded above is untouched).
