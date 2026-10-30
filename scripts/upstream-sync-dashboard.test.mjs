@@ -7,6 +7,10 @@ import { test } from 'node:test'
 import { collectUpstreamReview, formatDashboard } from './upstream-sync-dashboard.mjs'
 
 const REPOSITORY = 'https://github.com/anywhere-labs/dsh-desktop.git'
+// Two arbitrary SHAs for the fixture's gitlink entries. Git only needs mode 160000 and a
+// 40-hex object name; the commit they name does not have to exist locally, exactly like a
+// submodule pin in an uninitialized checkout.
+const GITLINK_COMMITS = ['0123456789abcdef0123456789abcdef01234567', '89abcdef0123456789abcdef0123456789abcdef']
 function writeConfig(root, reviewedCommit, { path = 'desktop-upstream.json', watchedPaths = ['scripts/'] } = {}) {
   writeFileSync(isAbsolute(path) ? path : join(root, path), `${JSON.stringify({
     schemaVersion: 1,
@@ -18,7 +22,7 @@ function writeConfig(root, reviewedCommit, { path = 'desktop-upstream.json', wat
   }, null, 2)}\n`)
 }
 
-function dashboardFixture(t, { nonAscii = false, watchedPaths = ['scripts/'] } = {}) {
+function dashboardFixture(t, { nonAscii = false, watchedPaths = ['scripts/'], gitlink = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'single-desktop-upstream-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
@@ -36,6 +40,14 @@ function dashboardFixture(t, { nonAscii = false, watchedPaths = ['scripts/'] } =
   git(['config', 'user.email', 'dashboard@example.invalid'])
   git(['remote', 'add', 'upstream', REPOSITORY])
   commit('README.md', 'base\n', 'base')
+  // `docs/` must exist as a directory at reviewedCommit, otherwise the directory-shaped
+  // watchedPaths case below only exercises the missing-path branch and a regression that
+  // dropped the mode whitelist would stay green.
+  commit('docs/base.md', 'base docs\n', 'base docs')
+  if (gitlink) {
+    git(['update-index', '--add', '--cacheinfo', `160000,${GITLINK_COMMITS[0]},deepseek-harness`])
+    git(['commit', '-m', 'base gitlink'])
+  }
   const reviewedCommit = git(['rev-parse', 'HEAD'])
   writeConfig(root, reviewedCommit, { watchedPaths })
   git(['checkout', '-b', 'side', reviewedCommit])
@@ -44,6 +56,10 @@ function dashboardFixture(t, { nonAscii = false, watchedPaths = ['scripts/'] } =
   commit('scripts/change.mjs', 'export const value = 1\n', 'watched change')
   commit('docs/note.md', 'note\n', 'unwatched change')
   if (nonAscii) commit('docs/中文.md', '中文\n', 'non-ascii change')
+  if (gitlink) {
+    git(['update-index', '--cacheinfo', `160000,${GITLINK_COMMITS[1]},deepseek-harness`])
+    git(['commit', '-m', 'gitlink bump'])
+  }
   git(['merge', '--no-ff', 'side', '-m', 'merge container'])
   const tip = git(['rev-parse', 'HEAD'])
   git(['update-ref', 'refs/remotes/upstream/master', tip])
@@ -98,10 +114,22 @@ test('classifies non-ASCII paths without git quotePath escaping', t => {
 })
 
 test('fails loudly for a directory-shaped watchedPaths entry missing its trailing slash', t => {
-  const { root } = dashboardFixture(t, { watchedPaths: ['docs'] })
+  const { root, git, reviewedCommit } = dashboardFixture(t, { watchedPaths: ['docs'] })
+  assert.match(git(['ls-tree', reviewedCommit, '--', 'docs']), /^040000 tree /u,
+    'fixture must contain a directory (040000 tree) at reviewedCommit')
   const result = collectUpstreamReview({ root })
   assert.equal(result.ok, false)
   assert.match(result.error, /"docs"/u)
   assert.match(result.error, /must end with "\/"/u)
   assert.match(result.error, /docs\/upstream-sync\.md/u)
+})
+
+test('accepts a submodule gitlink watched by exact path and classifies its update', t => {
+  const { root, git, reviewedCommit } = dashboardFixture(t, { gitlink: true, watchedPaths: ['deepseek-harness'] })
+  assert.match(git(['ls-tree', reviewedCommit, '--', 'deepseek-harness']), /^160000 commit /u,
+    'fixture must contain a gitlink (160000 commit) at reviewedCommit')
+  const result = collectUpstreamReview({ root })
+  assert.equal(result.ok, true, result.error)
+  const commit = result.commits.find(commit => commit.subject === 'gitlink bump')
+  assert.deepEqual(commit.files, { watched: ['deepseek-harness'], unwatched: [] })
 })
