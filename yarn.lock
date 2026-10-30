@@ -10620,7 +10620,7 @@ __metadata:
     class-variance-authority: "npm:^0.7.1"
     clsx: "npm:^2.1.1"
     dsh-community-market: "npm:0.1.0-dev.0"
-    dshmarket: "npm:1.70.2"
+    dshmarket: "npm:1.73.5"
     electron: "npm:44.0.0"
     electron-builder: "npm:26.15.7"
     fs-ext: "npm:2.1.1"
@@ -10656,9 +10656,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"dshmarket@npm:1.70.2":
-  version: 1.70.2
-  resolution: "dshmarket@npm:1.70.2"
+"dshmarket@npm:1.73.5":
+  version: 1.73.5
+  resolution: "dshmarket@npm:1.73.5"
   dependencies:
     js-yaml: "npm:^4.3.2"
     undici: "npm:^7.29.1"
@@ -10671,13 +10671,13 @@ __metadata:
       optional: true
     "@deepseek-ai/schemastery":
       optional: true
-  checksum: 10c0/28681fb4b2256e1dd50d2b126eb506d331143efb54a7eb24dae7675e663da2beea0dd1563a418c53efeb7e197c1e1d022ca5b61f94a24ce9b2df5494216d6843
+  checksum: 10c0/fe7ec6c367d66aad7af868eb2373d5c1e8a155b08214a21feab5f24e10453be0df87a11b021660ed17f6d76c9f6196cc0e52e80bb1c9f26965fcb89838757d70
   languageName: node
   linkType: hard
 
-"dshmarket@patch:dshmarket@npm%3A1.70.2#./.yarn/patches/dshmarket-desktop.patch::locator=deepseek-harness-desktop%40workspace%3A.":
-  version: 1.70.2
-  resolution: "dshmarket@patch:dshmarket@npm%3A1.70.2#./.yarn/patches/dshmarket-desktop.patch::version=1.70.2&hash=bf7d69&locator=deepseek-harness-desktop%40workspace%3A."
+"dshmarket@patch:dshmarket@npm%3A1.73.5#./.yarn/patches/dshmarket-desktop.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 1.73.5
+  resolution: "dshmarket@patch:dshmarket@npm%3A1.73.5#./.yarn/patches/dshmarket-desktop.patch::version=1.73.5&hash=871015&locator=deepseek-harness-desktop%40workspace%3A."
   dependencies:
     js-yaml: "npm:^4.3.2"
     undici: "npm:^7.29.1"
@@ -10690,7 +10690,7 @@ __metadata:
       optional: true
     "@deepseek-ai/schemastery":
       optional: true
-  checksum: 10c0/5dd75c7419351fd6a83fe45d397e5c993316742bcccd331ac643b5b7674065e80bb2fb4938dd82695ddb8fe712dd738d65c6c013a17afe4c025a3cc547538fd4
+  checksum: 10c0/e1a608c8be228d626f35ad8f181b7c5d2a3a51e9d52efea5c0e6f532a5be765c0fa384b04bcc17ffbb7ba9df6633467b907a25587dc5b4a2b7ed2dd80b91473d
   languageName: node
   linkType: hard
 
