@@ -52,11 +52,27 @@ export function collectUpstreamReview({ root = repoRoot, upstreamRef, configPath
     return { ok: false, error: `upstream ref is unavailable, or reviewedCommit is not an ancestor: ${String(error)}; see docs/upstream-sync.md` }
   }
   const lines = value => value ? value.split('\n').filter(Boolean) : []
+  const isFileEntry = path => {
+    const [entry] = lines(git(['ls-tree', config.reviewedCommit, '--', path]))
+    if (!entry) return false
+    const [mode] = entry.split(' ')
+    // `cat-file -e <commit>:<path>` 无法区分文件与目录(tree 也存在),submodule gitlink
+    // 的目标对象又不在本仓;ls-tree 的 mode 同时覆盖两点:160000 是 diff-tree 里按
+    // 单路径(文件型)出现的 submodule pin,只有 040000 才是必须写成 `<path>/` 的目录。
+    return mode === '100644' || mode === '100755' || mode === '120000' || mode === '160000'
+  }
+  const invalidWatch = config.watchedPaths.find(path => !path.endsWith('/') && !isFileEntry(path))
+  if (invalidWatch !== undefined) {
+    return {
+      ok: false,
+      error: `watchedPaths entry "${invalidWatch}" in desktop-upstream.json does not resolve to a file at reviewedCommit ${config.reviewedCommit}; directory entries must end with "/"; see docs/upstream-sync.md`,
+    }
+  }
   const shas = lines(git(['rev-list', '--reverse', '--topo-order', `${config.reviewedCommit}..${upstreamSha}`]))
   const isWatched = file => config.watchedPaths.some(path => path.endsWith('/') ? file.startsWith(path) : file === path)
   const commits = shas.map(sha => {
     const [date, subject] = git(['show', '-s', '--format=%cI%x00%s', sha]).split('\0')
-    const files = lines(git(['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha]))
+    const files = lines(git(['-c', 'core.quotePath=false', 'diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha]))
     return {
       sha, date, subject,
       files: {
