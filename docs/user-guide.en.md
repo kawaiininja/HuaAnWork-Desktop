@@ -1,52 +1,49 @@
-# DSH Desktop User Guide
+# HuaAnWork User Guide
 
 ## Installation and first launch
 
-Download the macOS or Windows installer from the product download page. DSH Desktop includes Electron, Node, and its pinned DSH dependencies, so normal users do not need to install Node.js or pnpm separately.
+Get the macOS or Windows installer from your organization's HuaAnWork distribution channel. The installer includes Electron, Node.js, and its pinned DSH dependencies, so ordinary users do not need to install Node.js or pnpm separately.
 
-On first launch, the application prepares the default profile and starts the official DSH Web surface locally. Closing the window normally hides it; use **Quit** from the tray when you want to stop the application and Host process.
+On first launch, the application prepares the default profile and starts the official DSH Web surface locally; follow the on-screen prompt to create an account or sign in. Closing the window normally hides it; use **Quit** from the tray when you want to stop the application and Host process.
 
 ## Launching with a folder
 
 Besides choosing a directory inside the interface, you can name a folder when the application starts. The folder is registered as a workspace and opened. A folder that is already a workspace is simply opened again; nothing is duplicated.
 
-- **Windows drag and drop**: drop the folder onto the **DSH Desktop** desktop shortcut or its Start menu entry. A stopped application starts first; a running one comes to the front and opens the workspace.
-- **Command line**: stable uses `dsh-desktop <folder>` and Beta uses `dsh-desktop-beta <folder>`. Relative paths resolve against the current directory. The installed EXE accepts one folder argument as well.
+- **Windows drag and drop**: drop the folder onto the **HuaAnWork** desktop shortcut or its Start menu entry. A stopped application starts first; a running one comes to the front and opens the workspace.
+- **Command line**: run `huaanwork <folder>`. Relative paths resolve against the current directory. The installed executable also accepts one absolute folder argument.
 
-When the path does not exist, names a file, or lives on unsupported storage such as exFAT, FAT32, or a network drive, the application shows a native message and registers nothing. Launching with a folder is one-shot: a later restart triggered from settings does not reopen it.
+When the path does not exist, names a file, or lives on unsupported Windows storage such as exFAT, FAT32, or a network drive, the application shows a native message and registers nothing. Launching with a folder is one-shot: a later restart triggered from settings does not reopen it.
 
-Known limits: a DSH Desktop icon pinned to the Windows taskbar does not accept drops yet (that needs a folder association, planned separately); Linux supports the command line only; macOS supports neither route yet.
+Known limit: a HuaAnWork icon pinned to the Windows taskbar does not accept drops yet. HuaAnWork ships for macOS and Windows only.
 
 ## Profiles
 
-A profile is a composition of DSH bundles, dependencies, and patches. The tray **Profile** menu lists existing profiles and the lazy `desktop` and `web` defaults.
+A profile is a composition of DSH bundles, dependencies, and patches. The first launch creates a `desktop` profile automatically; the tray **Profile** menu lists existing profiles and offers **New Profile…**.
 
-Selecting a profile performs an orderly restart. The new profile becomes the last-known-good choice only after the Host, window, and browser client all start successfully; a failed startup returns to the previous working choice. Official profiles normally use the same DSH home, so sessions, settings, and storage do not need to be migrated. A custom configuration (patch) can deliberately redirect a persistence root, in which case that profile's configuration wins.
+Selecting a profile performs an orderly restart. If the new profile cannot start, use the Recovery Assistant to switch back to a working profile or repair the configuration. Built-in profiles normally share the same DSH home, so sessions, settings, and storage usually do not need to be migrated. A custom configuration (patch) that deliberately redirects a persistence root wins for that profile.
 
-Switching profiles does not silently copy plugins from the old profile into the new one. Use an explicit profile in the terminal when preparing another profile, or use the default commands after switching.
+Switching profiles does not copy plugins from the old profile into the new one. Use an explicit profile in the terminal when preparing another profile, or use the default commands after switching.
 
 ## Window modes and materials
 
-- **Compatibility mode** keeps the selected profile's official layout/sidebar/conversation composition intact below a separate 36-pixel Desktop frame. The frame is draggable, its icon actions remain clickable, and official dialogs stay inside the unrelated content viewport below it.
-- **Extended window** installs the Desktop-owned layout and sidebar surface, then hosts the official sidebar, conversation, and details occupants inside it. The 36-pixel top frame and left sidebar surface form one inverted-L material region with a rounded inner corner.
-- **Enhanced mode** retains its dedicated root registration and compact internal captions: macOS uses a 20-pixel content inset with a 32-pixel drag region, while Windows uses a 32-pixel caption row. It does not reuse the independent extended frame.
+- **Compatibility mode** keeps the selected profile's official layout and adds an independent desktop control bar above it; it offers the best compatibility.
+- **Extended mode** adds an independent titlebar and sidebar around the official content area, with optional glass.
+- **Enhanced mode** uses a desktop layout with adjusted sidebars, content panels, and window controls.
 
-macOS custom-window modes can turn the transparent material on or off. Windows has no material choice and always uses an opaque window. Legacy Windows Acrylic and Mica preferences are safely treated as off; Acrylic is also migrated when its settings file is writable. Changing mode or material restarts the application; it does not hot-swap root slots or native materials in a live renderer. Linux provides compatibility mode only.
+On macOS, custom-window modes can turn the glass background on or off. Windows has no material choice and always uses an opaque window. Legacy Windows Acrylic and Mica preferences are safely treated as off, and Acrylic is also migrated when its settings file is writable. Changing mode or material restarts the application; it does not hot-swap the interface or native material in a live renderer.
 
 ## Local Web port
 
-Desktop lets the operating system choose a random local Web port by default (`dsh-desktop.port: 0`), which avoids collisions with other services. Browser `localStorage` is isolated by origin, so UI plugins that store settings there need a fixed port to read the same settings after Desktop restarts:
+The application starts its local Web service at port `43120` by default, and that service binds only to `127.0.0.1`. If the port is already in use, it tries up to 32 subsequent ports. You can also choose a port in the desktop settings; `0` asks the operating system for a random port. Changing the port performs an orderly restart.
 
-```yaml
-dsh-desktop:
-  port: 43189
-```
+A port change also changes the page origin. UI plugins that rely on browser `localStorage` are isolated by origin, so keep a fixed port for them when their settings must survive a restart.
 
-The port must be an integer from `0` through `65535`. Changing it performs an orderly restart. The service binds only to `127.0.0.1` by default; it listens on all network interfaces only after you acknowledge the danger prompt and explicitly allow LAN access in Desktop settings. If another program already uses a fixed port, Desktop cannot start; release that port or change the setting back to `0` or another available port.
+To open the current profile in an ordinary browser, enable browser access in the desktop settings; it is available only in compatibility mode. With the "local network" scope, the application provides an HTTPS entry point for other devices on the same LAN, but each device must first install and trust the certificate provided by this computer. The application shows a risk confirmation before enabling access.
 
 ## Plugin management
 
-Plugins are extensions that add capabilities to DSH, such as models, tools, interfaces, and workflows. DSH Desktop uses the same plugin system as official Harness, so official plugins install and work directly; multiple plugins follow the same conventions and can be installed and used together.
+Plugins are extensions that add capabilities to DSH, such as models, tools, interfaces, and workflows. HuaAnWork uses the official Harness plugin system, so official plugins install and work directly; multiple plugins follow the same conventions and can be installed and used together.
 
 Ordinary DSH plugins use the upstream CLI semantics:
 
@@ -56,7 +53,7 @@ dsh plugin --profile desktop remove <plugin>
 dsh plugin --profile desktop update
 ```
 
-In the terminal opened from the DSH Desktop tray, bare `dsh` and plugin commands without `--profile` default to the active profile:
+In the terminal opened from the HuaAnWork tray, bare `dsh` and plugin commands without `--profile` default to the active profile:
 
 ```sh
 dsh plugin add <plugin>
@@ -64,38 +61,38 @@ dsh plugin remove <plugin>
 dsh plugin update
 ```
 
-An explicit `--profile <name>` always wins. Restart DSH Desktop after plugin changes so the new bundle enters the Loader composition.
+An explicit `--profile <name>` always wins. Restart HuaAnWork after plugin changes so the new bundle enters the Loader composition.
 
 ## Opening the terminal
 
-Choose **Open DSH Terminal** from the tray, Desktop settings, or the Desktop frame. The settings action has a restart menu beside it for an ordinary restart or **Restart in Recovery Mode**; both require confirmation. macOS opens Terminal; Windows prefers Windows Terminal and falls back to PowerShell or Command Prompt when it is unavailable.
+Choose **Open DSH Terminal** from the tray, desktop settings, or the window control bar. The settings action has a restart menu beside it for an ordinary restart or **Restart in Recovery Mode**; both require confirmation. macOS opens Terminal; Windows prefers Windows Terminal and falls back to PowerShell or Command Prompt when it is unavailable.
 
-The welcome text shows the application version, active profile, profile directory, and DSH home. Desktop creates private `dsh`, `pnpm`, and `node` shims in its user-data directory and prepends that directory only for the new terminal process. It does not modify the system PATH or the user's shell files.
+The welcome text shows the application version, active profile, profile directory, and DSH home. HuaAnWork creates private `dsh`, `pnpm`, and `node` shims in its user-data directory and prepends that directory only for the new terminal process. It does not modify the system PATH or the user's shell files.
 
 ## Updates
 
-Packaged macOS and Windows applications check `https://www.dshdesktop.cn/api/desktop/version` in the background. Startup is not blocked; network errors, non-200 responses, invalid versions, and a server version that is not newer remain silent in the background. A newer version updates the tray and raises one non-blocking system notification per version instead of opening a download confirmation automatically; clicking the notification reveals Desktop.
+HuaAnWork has a single distribution channel. Packaged macOS and Windows applications check the deployment update service in the background; unless overridden, the default is the intranet address `http://update.intranet.lan:8790` with the path `/api/desktop/version`. Startup is not blocked; network errors, non-200 responses, invalid versions, and a server version that is not newer remain silent in the background. A newer version updates the tray and raises one non-blocking system notification per version instead of opening a download confirmation automatically; clicking the notification reveals the application.
 
-**Check for Updates…** in the tray checks the current release channel: stable receives only stable updates, while Beta receives only Beta updates. It shows a result even when the installed version is current and reports a retry message when the check fails. Beta also provides **Install Stable Edition…**, which installs stable alongside Beta. Cancelling never requests the counted download endpoint.
+**Check for Updates…** in the tray checks that distribution channel manually. It shows a result even when the installed version is current and reports a retry message when the check fails. When a newer version exists, it first asks whether to download it.
 
-After confirmation, the app first opens the native **Save Update Installer** dialog, defaulting to the Downloads directory. You can choose another directory and filename; cancelling the dialog does not start a download. After the destination is confirmed, the app requests the fixed platform download URL and remembers the installer location. macOS opens the DMG for the user to replace the application in Applications; Windows prepares the NSIS installer and then asks whether to quit and start installation. After the upgrade completes and the app starts again, it asks whether to delete the installer to free disk space or keep it. Download or installer failures do not damage the current version, and the tray operation can be retried.
+After confirmation, the app opens the native **Save Update Installer** dialog, defaulting to the Downloads directory. You can choose another directory and filename; cancelling the dialog does not start a download. Only after the destination is confirmed does the app request the current platform's installer from the update service, and it remembers the installer location. macOS opens the DMG for the user to replace the application in Applications; Windows prepares the NSIS installer and then asks whether to restart and run it. After the upgrade completes and the app starts again, it asks whether to delete the installer to free disk space or keep it. Download or installer failures do not damage the current version, and the tray operation can be retried.
 
 ## Troubleshooting
 
-Desktop confirmations, warnings, and operation results open as separate shadcn-backed modal Desktop windows rather than as overlays inside the official page. The Recovery window first shows why it opened and then provides **Plugin management**, **Rollback**, **Switch Profile**, and **Diagnostics** tabs. Its top utility frame and the Profile creation frame intentionally contain no duplicate title.
+HuaAnWork confirmations, warnings, and operation results open as separate desktop modal windows rather than as overlays inside the official page. The Recovery Assistant first shows why it opened and then provides quick recovery, plugin management, rollback, profile switching, reset and data management, and diagnostics.
 
-- **The application reaches the tray**: right-click the tray icon and choose **Export Diagnostics…**. After the privacy confirmation, Desktop creates a `diagnostics-*.zip` archive and reveals it in the file manager.
-- **The application crashes repeatedly before the tray appears**: run the installed executable directly with the recovery option. The default Windows installation command is below; replace the path if you selected another installation directory.
+- **The application reaches the tray**: right-click the tray icon and choose **Export Diagnostics…**. After the privacy confirmation, the app creates a `diagnostics-*.zip` archive and reveals it in the file manager.
+- **The application crashes repeatedly before the tray appears**: run the installed executable directly with the recovery option. The command below assumes the installer's default location; replace the path if you selected another installation directory.
 
   ```powershell
-  & "$env:LOCALAPPDATA\Programs\DSH Desktop\DSH Desktop.exe" --export-diagnostics
+  & "$env:LOCALAPPDATA\Programs\HuaAnWork\HuaAnWork.exe" --export-diagnostics
   ```
 
-  For npm installs, stable uses `dsh-desktop --export-diagnostics` and Beta uses `dsh-desktop-beta --export-diagnostics`. This command does not start Host, profiles, plugins, or a window. It prints the absolute diagnostics ZIP path when complete.
-- **Diagnostic archive contents**: recent application logs, local Crashpad `.dmp` files, the active-run marker, and `system-info.txt`. System information records Desktop, Electron, Node, platform, and architecture versions. Recognized credentials are masked in logs, but local paths, workspace IDs, session IDs, and crash-time memory fragments may remain. Review the archive before public upload and send sensitive dumps only through a trusted channel.
+  For npm installs, run `huaanwork --export-diagnostics`. This command does not start Host, profiles, plugins, or a window. It prints the absolute diagnostics ZIP path when complete.
+- **Diagnostic archive contents**: recent application logs, local Crashpad `.dmp` files, the active-run marker, and `system-info.txt`. System information records the HuaAnWork, Electron, Node, platform, and architecture versions. Recognized credentials are masked in logs, but local paths, workspace IDs, session IDs, and crash-time memory fragments may remain. Review the archive before sharing and send sensitive dumps only through a trusted channel.
 - **The window disappeared**: check the system tray; closing the window is not quitting.
 - **A plugin is missing**: confirm the command targeted the intended profile and restart the application.
-- **A terminal command is missing**: open a fresh Desktop terminal from the tray; Desktop does not modify the global PATH.
+- **A terminal command is missing**: open a fresh HuaAnWork terminal from the tray; HuaAnWork does not modify the global PATH.
 - **No update notification appeared**: background failures are silent; use the manual tray check to see the result.
 
 The lower-level lifecycle, packaging, and platform limits belong to the developer documentation; see the [documentation index](README.md).
