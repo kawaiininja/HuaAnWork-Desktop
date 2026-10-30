@@ -61,7 +61,7 @@ const pluginPaths = [
   // dependencies follow the active channel's vendored runtime tree.
   ...(ownsMarketRuntime(channel) ? [marketPath] : []),
 ]
-// The market bundle loads in every desktop channel, and dsh 0.2 refuses a bundle
+// The market bundle loads in HuaAnWork, and dsh 0.2 refuses a bundle
 // whose dsh peers exclude the running runtime, so its peers accept the active
 // HuaAnWork runtime plus whatever history `upstream.json.marketPeerPolicy` retains;
 // its build dependencies follow HuaAnWork alone.

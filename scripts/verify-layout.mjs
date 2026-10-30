@@ -19,7 +19,7 @@ const market = readJson('dsh-community-market/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
 
 if (huaanworkPlugin.name !== 'dsh-plugin-huaanwork') fail('the HuaAnWork Desktop workspace must publish as dsh-plugin-huaanwork')
-if (!['stable', 'beta', 'huaanwork'].includes(upstream.activeChannel)) fail('the pinned upstream checkout must follow a declared release channel')
+if (upstream.activeChannel !== 'huaanwork') fail('the pinned upstream checkout must follow the huaanwork channel')
 const activeUpstream = upstream.channels?.[upstream.activeChannel]
 if (activeUpstream === undefined) fail('the active upstream channel is missing')
 

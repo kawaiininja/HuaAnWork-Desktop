@@ -10,7 +10,7 @@ export const AA_PEERS = ['@deepseek-ai/dsh-typert-protocol', '@deepseek-ai/dsh-l
 
 export function aaConnectorResolution(artifact) {
   // Upstream absorbed the former httpx/NO_PROXY, RPC-log and content-hash
-  // patches; the resolution now only pins every channel to one artifact.
+  // patches; the resolution now only pins HuaAnWork to one artifact.
   return `file:vendor/agents-anywhere/${artifact}`
 }
 
