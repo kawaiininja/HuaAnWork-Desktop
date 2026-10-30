@@ -63,7 +63,7 @@ Launcher 私有的 `desktopRuntime`、`desktopPnpmBootstrap`、Electron executab
 
 ## 发行通道协议
 
-当前产品只发布 `huaanwork` 一个发行通道：它是 `dsh-plugin-huaanwork` npm 包与 `HuaAnWork` 系统应用，身份以 `dsh-plugin-huaanwork/src/product-identity.ts` 为唯一来源。`upstream.json` 的 `activeChannel` 也是 `huaanwork`；其中的 `stable` / `beta` 记录与 `DESKTOP_RELEASE_IDENTITIES` 的同名项只作为 vendored runtime 的通道元数据和历史身份保留，不代表本仓仍在构建对应桌面产品。
+当前产品只发布 `huaanwork` 一个发行通道：它是 `dsh-plugin-huaanwork` npm 包与 `HuaAnWork` 系统应用，身份以 `dsh-plugin-huaanwork/src/product-identity.ts` 为唯一来源。`upstream.json` 的 `activeChannel` 也是 `huaanwork`，且它的 `channels` 只含 `huaanwork` 这一条通道记录；历史 Stable 腿不以通道记录形式存在，只作为 `marketPeerPolicy.stableHistorical` 的 market peer 字符串 `0.2.0-rc.2` 保留。`DESKTOP_RELEASE_IDENTITIES` 的 `stable` / `beta` 项只是历史身份，不代表本仓仍在构建对应桌面产品。
 
 版本检查和安装包下载均携带 `X-DSH-Desktop-Channel: huaanwork`。检查请求还携带当前版本；下载请求携带 `X-DSH-Desktop-Target-Version`，服务端必须返回与请求一致的通道与版本。响应中的通道或版本形状与请求不符时，客户端把响应视为无效，不会静默跨通道下载。
 

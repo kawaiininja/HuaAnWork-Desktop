@@ -63,7 +63,7 @@ The outer workspace uses Yarn. The pinned `deepseek-harness/` submodule keeps it
 
 ## Release-channel protocol
 
-The product publishes a single release channel, `huaanwork`: the `dsh-plugin-huaanwork` npm package and the `HuaAnWork` system application, with `dsh-plugin-huaanwork/src/product-identity.ts` as the single source of identity. `upstream.json` records `activeChannel: huaanwork`; its `stable` / `beta` entries and the same-named `DESKTOP_RELEASE_IDENTITIES` entries remain as vendored-runtime channel metadata and historical identity only, and do not mean this repository still builds those desktop products.
+The product publishes a single release channel, `huaanwork`: the `dsh-plugin-huaanwork` npm package and the `HuaAnWork` system application, with `dsh-plugin-huaanwork/src/product-identity.ts` as the single source of identity. `upstream.json` records `activeChannel: huaanwork` and its `channels` map holds the `huaanwork` record alone; the historical Stable leg is not a channel record and survives only as the `marketPeerPolicy.stableHistorical` market peer string `0.2.0-rc.2`. The `stable` / `beta` entries of `DESKTOP_RELEASE_IDENTITIES` remain historical identity only and do not mean this repository still builds those desktop products.
 
 Version checks and installer downloads send `X-DSH-Desktop-Channel: huaanwork`. A check also sends the current version, while a download sends `X-DSH-Desktop-Target-Version`; the service must echo the requested channel and version. When the response channel or version shape does not match the request, the client treats the response as invalid and does not silently cross channels.
 
