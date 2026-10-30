@@ -36,7 +36,7 @@
 
 | ID | 结论 | 关闭提交 | 证据指针 |
 | --- | --- | --- | --- |
-| F1 | 完成（本地六门禁 + unsigned macOS smoke） | `6547000e6a`（代码）+ `cb48083b51`（证据） | acceptance §F1；`docs/evidence/2026-10-30-dshmarket-1.73.5-upgrade.md` |
+| F1 | 完成（本地五条门禁命令 + unsigned macOS smoke，共 6 条命令） | `6547000e6a`（代码）+ `cb48083b51`（证据） | acceptance §F1；`docs/evidence/2026-10-30-dshmarket-1.73.5-upgrade.md` |
 | F2 | 已核验（仅证据；仓库设置零变更） | `5c8116755b` / `b5b95e4af7` / `6c0eac45ec` | acceptance §F2 |
 | F3 | 完成 | `bdc56930ad` | acceptance 总表 F3 |
 | F4 | 完成 | `06bd5f0dfe` | acceptance 总表 F4 |
@@ -67,7 +67,7 @@
 - 审查 `1.70.2 → 1.73.5` 的 host-provided npm versions、channel/self-update、hold-young-releases 等 Desktop patch 触点。
 - 重做 `.yarn/patches/dshmarket-desktop.patch`；更新 `dsh-plugin-huaanwork/package.json` 的 `dshmarket` pin、root `resolutions` 与 `yarn.lock`（只由包管理器重解）。
 - 同步 `dsh-plugin-huaanwork/tests/package.spec.ts` 的 `dshmarket@npm:1.70.2` 钉与相关断言。
-- 跑 `corepack yarn market:prepare`、`corepack yarn market:check`、完整四门禁与 macOS smoke；重新打包验证 Desktop patch 仍生效。
+- 跑 `corepack yarn market:prepare`、`corepack yarn market:check`、完整门禁命令集与 macOS smoke；重新打包验证 Desktop patch 仍生效。
 
 **验收**：在线 `market:check` exit 0；root `dev`/`build`/`dist:*` 的 `market:prepare` 通过；无离线旧制品、跳过校验或手工改坏 peer range；CI 绿。
 

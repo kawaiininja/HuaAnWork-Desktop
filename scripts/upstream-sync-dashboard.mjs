@@ -9,9 +9,11 @@
  * 关键纪律:
  * 1. 只读脚本:仅读取本地 git ref 与工作树里的配置文件,绝不运行 git fetch,
  *    绝不写回任何状态。推进 `reviewedCommit` 是人工动作(见 docs/upstream-sync.md)。
- * 2. 依赖 fetch 后的本地 ref,离线或缺少 upstream remote 时无法给出结果 —— 此时
- *    报错并以非零码退出,绝不静默输出 0。因此【绝对不得接进 package.json 任何
- *    scripts,也不得接进任何 gate】。
+ * 2. 只依赖本地 git ref:本地已解析出 upstream/master 时可完全离线工作(读数只是
+ *    最后一次 fetch 的陈旧值)。只有缺少该 ref、remote URL 与配置不符、reviewedCommit
+ *    不是该 ref 的祖先,或 watchedPaths 的某个非目录型条目在 reviewedCommit 解析不到
+ *    文件时,才报错并以非零码退出,绝不静默输出 0。因此【绝对不得接进 package.json
+ *    任何 scripts,也不得接进任何 gate】。
  * 3. 不读取、不比较三个参考桌面树;watchedPaths 只提供覆盖面与分诊,不验证移植的
  *    完整性或等价性。
  * 4. 输出不截断:文本与 --json 都给出全部提交与全部 direct files、as-of 时间与完整

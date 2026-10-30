@@ -82,8 +82,10 @@ node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs
 ### 0.1 AA 制品与 main 移动目标
 
 **打包前还有一道新鲜度核对:AA 的 `main` 是移动目标。** `corepack yarn aa:check`
-(`scripts/prepare-agents-anywhere-release.mjs --check`)**每次**都用 `git ls-remote` 现解析 Agents Anywhere
-`main` 的最新提交,再要求归档制品逐项对得上它:`vendor/agents-anywhere/provenance.json` 的 `commit` /
+(`scripts/prepare-agents-anywhere-release.mjs --check`)默认**每次**都用 `git ls-remote` 现解析 Agents
+Anywhere `main` 的最新提交(唯一例外:`DSH_AA_SOURCE_REF` 是 40 位十六进制提交时,`resolveCommit()`
+在 `scripts/prepare-agents-anywhere-release.mjs:129-130` 直接采用该值、跳过 `git ls-remote`),
+再要求归档制品逐项对得上它:`vendor/agents-anywhere/provenance.json` 的 `commit` /
 `sha256` / `desktopVersion`(版本串里的 `desktop.c<提交前 12 位>` 标记)、root `package.json` 的
 `resolutions`,以及 `dsh-plugin-huaanwork` 的依赖行(判定在 `scripts/agents-anywhere-release-policy.mjs`
 的 `assertPreparedAaRelease`)。**它是只读校验,不写任何文件。** 当前归档制品的 provenance 为
@@ -114,7 +116,8 @@ node dsh-plugin-huaanwork/scripts/huaanwork-verify-provisioning.mjs
   **全部 `dist:*`** 命令链都在 `market:prepare` 之后紧跟 `corepack yarn aa:prepare-release`,手工流程里
   省掉它只会让后面的打包用上旧制品。签名管线另有一道:`release-mac.ts` 在 `yarn run check` 之前跑
   `prepare-agents-anywhere-release.mjs --verify-release`(要求官方仓库 + `main`);Windows 命令链没有
-  这一步,所以手工核对不能省。
+  `--verify-release` 这一步(root 的 `dist:win*` 链仍先跑 `aa:prepare-release`,缺的只是签名管线那道
+  只读的 `--verify-release` 校验),所以手工核对不能省。
 
 ## 1. macOS 签名与公证
 

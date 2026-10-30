@@ -10,7 +10,7 @@ HuaAnWork is a DeepSeek Harness desktop client for Windows and macOS. It package
 
 ## Is this an official DeepSeek product?
 
-No. HuaAnWork is not an official DeepSeek product; DeepSeek Harness is the runtime it is built on. HuaAnWork is maintained and distributed by the product team.
+No. HuaAnWork is not an official DeepSeek product; DeepSeek Harness is the runtime it is built on. HuaAnWork is not affiliated with or endorsed by DeepSeek. Installers come from your organization's HuaAnWork distribution channel.
 
 ## Which operating systems are supported?
 

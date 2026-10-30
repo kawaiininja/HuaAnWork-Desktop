@@ -479,7 +479,7 @@ git grep -ln 'vendor/dsh-runtime'
 
 b) 的 docs 计数有四个可复现读数(同一 `git grep -c` 表达式,逐文件求和):`96dc22189c^`(本小节写入前)= **10 文件 / 41 行**;`96dc22189c`(本小节写入后)= **10 文件 / 47 行**;`fe5fc0a73d`(feat(upstream): report the selective review backlog)之后 = **9 文件 / 46 行**;HEAD = **9 文件 / 47 行**。差额构成:`fe5fc0a73d` 重写 `docs/upstream-sync.md`,该文件原有的 1 行旧 lane vendor 路径(`vendor/dsh-runtime/0.1.5-rc.2/*.tgz`)随重写消失,故文件数 `10 → 9`、行数 `47 → 46`;随后 `912e7ef238`(F5 订正)在上文段落里引用同一路径字面量,令本文件命中 `20 → 21`,行数 `46 → 47`、文件数不变。即 HEAD 的 47 = `fe5fc0a73d` 之后的 46 + 本节自引 1。复测:`git grep -c -E '<上式>' -- docs | awk -F: '{s+=$NF} END{print s}'` 与 `git grep -c -E '<上式>' 96dc22189c -- docs | awk -F: '{s+=$NF} END{print s}'`;若排除本文件的解释性自引(`':!docs/evidence/2026-10-29-single-desktop-runtime-consumers.md'`)则为 **8 文件 / 26 行**。
 
-补充核对:lock 里已删 lane 的 vendor 路径命中 **0**;`grep -c 'vendor/dsh-runtime/0.2.1-rc.1/' yarn.lock` = **638**;根 `resolutions` 697 条中 rc.1 占 682。仍出现旧版本**字符串**(非路径)的活跃文件均为注释 / 政策串 / 任意 fixture(如 `vendored-runtime-policy.mjs` 的 `0.2.0-rc.2` 保留腿、`vendored-runtime-policy.test.mjs` 的四政策断言、`verify-profile-boot.mjs:109` 的伪造 peer、`platform-login.ts:10` 的历史注释),与资产是否存在无关。
+补充核对:lock 里已删 lane 的 vendor 路径命中 **0**;`grep -c 'vendor/dsh-runtime/0.2.1-rc.1/' yarn.lock` = **638**;根 `resolutions` 697 条中 rc.1 占 682。仍出现旧版本**字符串**(非路径)的活跃文件均为注释 / 政策串 / 任意 fixture(如 `vendored-runtime-policy.mjs` 的 `0.2.0-rc.2` 保留腿、`vendored-runtime-policy.test.mjs` 的四政策断言、`verify-profile-boot.mjs:118` 的伪造 peer、`platform-login.ts:10` 的历史注释),与资产是否存在无关。
 
 ### 10.4 Step 3 门禁(串行执行,全部 PASS)
 

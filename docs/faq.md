@@ -10,7 +10,7 @@ HuaAnWork 是面向 Windows 和 macOS 的 DeepSeek Harness 桌面客户端。它
 
 ## 这是 DeepSeek 官方产品吗？
 
-不是。HuaAnWork 不是 DeepSeek 官方产品；DeepSeek Harness 是它使用的底层运行时。HuaAnWork 由本产品维护团队独立维护和分发。
+不是。HuaAnWork 不是 DeepSeek 官方产品；DeepSeek Harness 是它使用的底层运行时。HuaAnWork 不隶属于 DeepSeek，也未获得 DeepSeek 官方背书。安装包由组织内部的 HuaAnWork 分发渠道提供。
 
 ## 支持哪些操作系统？
 

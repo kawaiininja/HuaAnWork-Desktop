@@ -4,7 +4,7 @@
 
 Get the macOS or Windows installer from your organization's HuaAnWork distribution channel. The installer includes Electron, Node.js, and its pinned DSH dependencies, so ordinary users do not need to install Node.js or pnpm separately.
 
-On first launch, the application prepares the default profile and starts the official DSH Web surface locally; follow the on-screen prompt to create an account or sign in. Closing the window normally hides it; use **Quit** from the tray when you want to stop the application and Host process.
+On first launch, the application prepares the default profile and starts the official DSH Web surface locally; if your organization requires sign-in, use the account it provides. Closing the window normally hides it; use **Quit** from the tray when you want to stop the application and Host process.
 
 ## Launching with a folder
 
