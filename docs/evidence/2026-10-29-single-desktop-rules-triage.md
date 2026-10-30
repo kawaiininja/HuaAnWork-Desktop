@@ -107,7 +107,7 @@ $ grep -n 'all three workspaces' AGENTS.md
 
 ## 3. 允许保留的命中清单（Step 3 grep 全量）
 
-`rg -n 'dsh-plugin-desktop' <12 个活文档>` 在本次提交后的**全部**输出（8 行；`dsh-plugin-desktop-beta` 因同前缀一并命中）：
+`rg -n 'dsh-plugin-desktop' <12 个活文档>` 在本提交（`156e71d0a2`）时的**全部**输出（8 行；`dsh-plugin-desktop-beta` 因同前缀一并命中）：
 
 | 文件:行 | 命中内容（摘要） | 分类 | 保留理由 |
 | --- | --- | --- | --- |
@@ -121,6 +121,17 @@ $ grep -n 'all three workspaces' AGENTS.md
 | `docs/README.en.md:44` | 同上 | 历史身份 / 只读参考树路径 | 同上 |
 
 根 README 另有两处同类命中（不在 Step 3 的 12 个文件列表内）：`README.md:165`、`README.en.md:165`，均为「唯一活跃树 + 三个只读参考目录」句中的目录名，分类同上。
+
+**HEAD 复测（2026-10-30，F5）**：同一 grep 在上述 12 个活文档上只剩 **2 行** —— `docs/architecture.md:56` 与 `docs/architecture.en.md:56`（上游 npm contract / 历史身份，见上表）；根 README 的 `:165` 两行现为 **0 命中**。复测：
+
+```bash
+git grep -n 'dsh-plugin-desktop' -- CONTRIBUTING.md CONTRIBUTING.en.md docs/architecture.md docs/architecture.en.md \
+  docs/README.md docs/README.en.md docs/plugin-development.md docs/plugin-development.en.md \
+  docs/why-desktop.md docs/why-desktop.en.md dsh-community-market/README.md dsh-community-market/README.zh.md
+git grep -c 'dsh-plugin-desktop' -- README.md README.en.md   # 无命中
+```
+
+上表的其余 6 行（`CONTRIBUTING{,.en}.md:38`、`docs/README{,.en}.md:44`、`docs/architecture{,.en}.md:62`）与根 README 的两行，都由阶段 B 的 `cbd392fbc7`（refactor: remove inactive desktop source trees）随参考树删除一并消除（该提交对这 8 个文档各 `1/1` 行改动：`git show --numstat --format='' cbd392fbc7 -- CONTRIBUTING.md CONTRIBUTING.en.md docs/README.md docs/README.en.md docs/architecture.md docs/architecture.en.md README.md README.en.md`）。因此上表是 `156e71d0a2` 的历史快照，当前仍适用的允许保留条目是 2 条。
 
 `DESKTOP_RELEASE_IDENTITIES.stable/beta`、迁移字符串与 `.agents/notes/` 未被本任务改写，属「上游 npm contract / 历史身份」类别，原样保留。
 

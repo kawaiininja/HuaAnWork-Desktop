@@ -80,7 +80,7 @@ node scripts/upstream-sync-dashboard.mjs --json   # 机器可读
 1. **不截断**：文本与 `--json` 都输出全部提交与全部 direct files。文本模式逐行列出 `watched:` / `unwatched:`，零 direct files 的提交显式标注 `(zero direct files)`；旧版「… and N more」式截断已退役。
 2. **每个 direct file 恰好归类一次**：命中 `watchedPaths` 进 `watched`，否则进 `unwatched`；两边不重叠、不遗漏。
 3. **merge 只算 direct files**：文件枚举用 `git diff-tree --no-commit-id --name-only -r --root`，不使用 `-m`，因此 merge 容器不重复子提交的文件（通常就是 `(zero direct files)`）。不使用重命名检测：改名会以「旧路径 + 新路径」两行出现，两行都会被分类。
-4. **只读、不是门禁**：脚本需要 `git fetch upstream` 后的本地 ref，离线必然失败，因此【绝对不得接进 `package.json` 的任何 scripts，也不得接进任何 gate】。它的回归测试（`scripts/upstream-sync-dashboard.test.mjs`）是 hermetic 的：只用临时 Git 仓库，不访问网络、不创建也不读取任何参考桌面树。
+4. **只读、不是门禁**：脚本只读本地 git ref，从不执行 `git fetch`。本地已有可解析的 `upstream/master` ref 时，它**可以完全离线工作**（实测：把 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 指向关闭端口后运行 `node scripts/upstream-sync-dashboard.mjs --json`，仍返回 `ok: true`、`upstreamSha` 与 `pendingCount`）；只有当本地没有该 ref、remote URL 与 `desktop-upstream.json` 不一致，或 `reviewedCommit` 不是该 ref 的祖先时才会报错退出。读数时效仍取决于最后一次 `git fetch upstream`：未 fetch 的读数只是本地 ref 的陈旧值（见下节〈as-of 与完整 SHA 的登记口径〉），不是「离线必然失败」。因此【绝对不得接进 `package.json` 的任何 scripts，也不得接进任何 gate】。它的回归测试（`scripts/upstream-sync-dashboard.test.mjs`）是 hermetic 的：只用临时 Git 仓库，不访问网络、不创建也不读取任何参考桌面树。
 5. **失败语义**：配置缺失、字段缺失或非法 SHA → `cannot load desktop-upstream.json ...`；remote URL 不符、ref 不可用、或 `reviewedCommit` 不是祖先 → `upstream ref is unavailable, or reviewedCommit is not an ancestor ...`。两种错误都指向本文档，且绝不输出零。
 
 ### as-of 与完整 SHA 的登记口径

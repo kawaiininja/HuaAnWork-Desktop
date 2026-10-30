@@ -169,7 +169,7 @@ HEAD 实测输出(逐字):
 
 ### 3.2 差异原因(已用 git 核实)
 
-阶段 A Task 1 的 `a0ffa551f8` 从根 `workspaces` 删除了 `dsh-plugin-desktop`、`dsh-plugin-desktop-beta`、`dsh-desktop-next`,并连带重解 `yarn.lock`(该提交 `yarn.lock` +1776/−9107 行)。后果:
+阶段 A Task 1 的 `a0ffa551f8` 从根 `workspaces` 删除了 `dsh-plugin-desktop`、`dsh-plugin-desktop-beta`、`dsh-desktop-next`,并连带重解 `yarn.lock`(该提交 `yarn.lock` **+1762/−9070** 行;复测:`git show --shortstat --format='' a0ffa551f8 -- yarn.lock`)。旧记的 `+1776/−9107` 不是 lock 单文件读数:该值等于本提交 `yarn.lock` 与 `package.json` 之和(`git show --numstat a0ffa551f8` 给出 `package.json` +14/−37、`yarn.lock` +1762/−9070)。后果:
 
 - `git show b5ef3e84a7:yarn.lock | grep -c 'vendor/dsh-runtime/0.2.0-rc.2/'` = **600**;`HEAD` 同命令 = **0**。
 - `git diff b5ef3e84a7..HEAD -- yarn.lock` 删除 600 行 rc.2 vendor 引用、新增 **0** 行 ⇒ split 口径 900 → 0。
@@ -450,7 +450,7 @@ AssertionError: expected [ '0.1.7-alpha.2', '0.1.7-rc.1', …(5) ] to deeply equ
 | `patches/*@0.2.1-alpha.1.patch` | 21 |
 | **合计** | **134** |
 
-- 暂存区合计:`2032 files changed, 20421 deletions(-)`(1898 vendor 文件 + 134 patch;vendor 为二进制 tarball,行数不计)。
+- 该提交合计:**`2034 files changed, 127 insertions(+), 20422 deletions(-)`**(复测:`git show --shortstat --format='' 96dc22189c`;构成 = 1898 vendor 文件 + 134 patch + 本文件 `+118/−1` 与 `dsh-plugin-huaanwork/tests/package.spec.ts` `+9`。原记的 `2032 files changed, 20421 deletions(-)` 在 HEAD 复测差 2 文件 / 1 行,属记录误差)。行数口径:**`manifest.json` 计入**——1898 个 vendor 文件中有 6 个是该 lane 的 `manifest.json`(合计 13 298 行删除),其余 1892 个为二进制 tarball、不计行(复测:`git show --numstat --format='' 96dc22189c -- vendor/`,字段 1 为 `-` 的行数 = 1892)。
 - `patches/` 从 **165** → **31** 个文件。
 - 未删除(硬排除项全部保持):`vendor/dsh-runtime/0.2.1-rc.1/`(342 个跟踪文件 = 341 tarball + `manifest.json`)、`patches/*@0.2.1-rc.1.patch`(22)、`.yarn/patches/dshmarket-desktop.patch`、9 个非 DSH patch(`app-builder-lib@26.15.7`、`fs-ext@2.1.1`、`node-pty@1.2.0-beta.15`、`open@11.0.1`、`open@11.0.4`、`pi-ai@0.87.1`、`pi-ai@1.0.2`、`pnpm@11.8.0`、`vscode-ripgrep@1.18.0`)、`vendor/agents-anywhere/`(17 MiB,provenance commit `64c3f67`)。三棵参考树无任何暂存文件(暂存删除里 `dsh-plugin-desktop*`/`dsh-desktop-next/` 命中 = 0)。
 
@@ -467,7 +467,7 @@ git grep -l -E 'vendor/dsh-runtime/(0\.1\.7-alpha\.2|0\.1\.7-rc\.1|0\.1\.7-rc\.2
 
 # b) 全仓(含 docs)指向已删 lane 的 vendor 路径
 git grep -c -E 'vendor/dsh-runtime/(0\.1\.5-rc\.2|0\.1\.7-alpha\.2|0\.1\.7-rc\.1|0\.1\.7-rc\.2|0\.2\.0-rc\.1|0\.2\.0-rc\.2|0\.2\.1-alpha\.1)' -- docs
-# 结果:docs 10 文件 / 41 处历史记录(计划、M9 epic 等),有意不回改
+# 结果(HEAD):docs 9 文件 / 46 个匹配行(计划、M9 epic 等),有意不回改
 git grep -l -E 'vendor/dsh-runtime/(0\.1\.5-rc\.2|0\.1\.7-alpha\.2|0\.1\.7-rc\.1|0\.1\.7-rc\.2|0\.2\.0-rc\.1|0\.2\.0-rc\.2|0\.2\.1-alpha\.1)' -- ':!docs'
 # 结果:无非文档命中
 
@@ -476,6 +476,8 @@ git grep -ln 'vendor/dsh-runtime'
 # AGENTS.md / package.json(全部 rc.1 解析)/ scripts/sync-vendored-runtime.mjs(按通道拼路径)
 # / upstream.json(单通道 rc.1)/ dsh-plugin-huaanwork/tests/package.spec.ts(新守卫)
 ```
+
+b) 的 docs 计数有三个可复现读数(同一 `git grep -c` 表达式,逐文件求和):`96dc22189c^`(本小节写入前)= **10 文件 / 41 行**;`96dc22189c`(本小节写入后)= **10 文件 / 47 行**;HEAD = **9 文件 / 46 行**。`47 → 46` 与 `10 → 9` 的差额由 `fe5fc0a73d`(feat(upstream): report the selective review backlog)重写 `docs/upstream-sync.md` 造成——该文件原有的 1 行旧 lane vendor 路径(`vendor/dsh-runtime/0.1.5-rc.2/*.tgz`)随重写消失,而 `f2ef9026ce` 之后读数未再变化。复测:`git grep -c -E '<上式>' -- docs | awk -F: '{s+=$NF} END{print s}'`,以及 `git grep -c -E '<上式>' 96dc22189c -- docs | awk -F: '{s+=$NF} END{print s}'`。
 
 补充核对:lock 里已删 lane 的 vendor 路径命中 **0**;`grep -c 'vendor/dsh-runtime/0.2.1-rc.1/' yarn.lock` = **638**;根 `resolutions` 697 条中 rc.1 占 682。仍出现旧版本**字符串**(非路径)的活跃文件均为注释 / 政策串 / 任意 fixture(如 `vendored-runtime-policy.mjs` 的 `0.2.0-rc.2` 保留腿、`vendored-runtime-policy.test.mjs` 的四政策断言、`verify-profile-boot.mjs:109` 的伪造 peer、`platform-login.ts:10` 的历史注释),与资产是否存在无关。
 

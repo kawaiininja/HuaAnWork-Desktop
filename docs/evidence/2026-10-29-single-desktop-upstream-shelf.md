@@ -985,15 +985,15 @@
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-desktop-next/package.json | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-desktop-next/scripts/verify-window-controls.mjs | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-desktop-next/tests/package.spec.ts | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
-| 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop-beta/package.json | ALREADY | fork 已把 meshcall-router-darwin-* 纳入 mac x64ArchFiles |
+| 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop-beta/package.json | ALREADY | fork 已把 meshcall-router-darwin-* 纳入 mac x64ArchFiles；本地等价：`dsh-plugin-huaanwork/package.json:511` 的 `build.mac.x64ArchFiles`（含 `meshcall-router-darwin-*/**`） |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop-beta/scripts/verify-packaged-runtime.ts | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
-| 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop-beta/scripts/verify-profile-boot.mjs | ALREADY | fork 已读取 AA 2.1.0 manager-lock 租约 |
+| 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop-beta/scripts/verify-profile-boot.mjs | ALREADY | fork 已读取 AA 2.1.0 manager-lock 租约；本地等价：`dsh-plugin-huaanwork/scripts/verify-profile-boot.mjs:427-428`（AA 段 `existsSync(join(userInfo().homedir, '.agents-anywhere', 'dsh-bridge', '.manager-lock.json'))`；该文件是顶层脚本，无函数符号） |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop-beta/tests/host-process-integration.spec.ts | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop-beta/tests/primary-runtime.spec.ts | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop-beta/tests/safe-mode.spec.ts | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
-| 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop/package.json | ALREADY | fork 已把 meshcall-router-darwin-* 纳入 mac x64ArchFiles |
+| 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop/package.json | ALREADY | fork 已把 meshcall-router-darwin-* 纳入 mac x64ArchFiles；本地等价：`dsh-plugin-huaanwork/package.json:511` 的 `build.mac.x64ArchFiles`（含 `meshcall-router-darwin-*/**`） |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop/scripts/verify-packaged-runtime.ts | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
-| 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop/scripts/verify-profile-boot.mjs | ALREADY | fork 已读取 AA 2.1.0 manager-lock 租约 |
+| 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop/scripts/verify-profile-boot.mjs | ALREADY | fork 已读取 AA 2.1.0 manager-lock 租约；本地等价：`dsh-plugin-huaanwork/scripts/verify-profile-boot.mjs:427-428`（AA 段 `existsSync(join(userInfo().homedir, '.agents-anywhere', 'dsh-bridge', '.manager-lock.json'))`；该文件是顶层脚本，无函数符号） |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop/tests/host-process-integration.spec.ts | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop/tests/primary-runtime.spec.ts | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
 | 2f6e721d475910a26665397616fd3798adc5d0fb | dsh-plugin-desktop/tests/safe-mode.spec.ts | SKIP | 上游 CI 硬化不整批移植；safe-mode Windows 清理测试修复登记为后续独立测试任务 |
@@ -1026,14 +1026,14 @@
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | .github/workflows/ci.yml | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop-beta/scripts/package-linux.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop-beta/scripts/package-mac.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
-| eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop-beta/scripts/package-win.ts | ALREADY | fork 已有 windowsCompressionOverride，CI 已使用 store |
+| eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop-beta/scripts/package-win.ts | ALREADY | fork 已有 windowsCompressionOverride，CI 已使用 store；本地等价：`dsh-plugin-huaanwork/scripts/package-win.ts:29` 的 `windowsCompressionOverride()`（调用点 `:158`） |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop-beta/tests/package-linux.spec.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop-beta/tests/package-mac.spec.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop-beta/tests/package-win.spec.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop-beta/tests/package.spec.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop/scripts/package-linux.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop/scripts/package-mac.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
-| eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop/scripts/package-win.ts | ALREADY | fork 已有 windowsCompressionOverride，CI 已使用 store |
+| eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop/scripts/package-win.ts | ALREADY | fork 已有 windowsCompressionOverride，CI 已使用 store；本地等价：`dsh-plugin-huaanwork/scripts/package-win.ts:29` 的 `windowsCompressionOverride()`（调用点 `:158`） |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop/tests/package-linux.spec.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop/tests/package-mac.spec.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
 | eef3a8873ef057d5bd5c5f04a60c2e00a979e33d | dsh-plugin-desktop/tests/package-win.spec.ts | SKIP | 上游 CI 性能优化，不是单桌面正确性维护；本计划独立收窄 CI |
@@ -2611,7 +2611,7 @@
 | 7a884a519b7001dfee63b7a49187169a83791d79 | yarn.lock | SKIP | rc.3 适配；HuaAnWork 保持 rc.1 |
 | 013e494cf552cd6b4482abf7550c6a746ccc65e2 | (merge container, zero direct files) | SKIP | merge 容器；子提交已独立裁定 |
 | bc297e7a95d56a5edec7d7dd65bc174c0ec14a8c | dsh-desktop-next/package.json | SKIP | Next 框架迁移后的 packaging/landlock 修复，不适用于当前 HuaAnWork 工具链 |
-| bc297e7a95d56a5edec7d7dd65bc174c0ec14a8c | dsh-desktop-next/scripts/packaging-command.ts | ALREADY | fork 现有 mapping 使用不同的 dsh-plugin-desktop-beta 替换顺序，不具该 replaceAll 缺陷 |
+| bc297e7a95d56a5edec7d7dd65bc174c0ec14a8c | dsh-desktop-next/scripts/packaging-command.ts | ALREADY | fork 现有 mapping 使用不同的 dsh-plugin-desktop-beta 替换顺序，不具该 replaceAll 缺陷；本地等价：单桌面化后**不存在**跨包名替换表 —— `dsh-plugin-huaanwork/` 下无 `packaging-command.ts`，且 `git grep -c 'dsh-plugin-desktop-beta' -- dsh-plugin-huaanwork/scripts` = 0；打包参数由 `scripts/package-mac.ts:134-152`（`packageMacSmoke`）与 `scripts/package-win.ts` 直接拼出 |
 | bc297e7a95d56a5edec7d7dd65bc174c0ec14a8c | dsh-desktop-next/tests/main-lifecycle.spec.ts | SKIP | Next 框架迁移后的 packaging/landlock 修复，不适用于当前 HuaAnWork 工具链 |
 | bc297e7a95d56a5edec7d7dd65bc174c0ec14a8c | dsh-desktop-next/tests/package.spec.ts | SKIP | Next 框架迁移后的 packaging/landlock 修复，不适用于当前 HuaAnWork 工具链 |
 | bc297e7a95d56a5edec7d7dd65bc174c0ec14a8c | dsh-desktop-next/tests/packaging-command.spec.ts | SKIP | Next 框架迁移后的 packaging/landlock 修复，不适用于当前 HuaAnWork 工具链 |
@@ -2637,9 +2637,9 @@
 | 7cd28c1c598694b204e7311e3f609b44d0fbeba9 | package.json | SKIP | 上游 beta-only CI 不适用于 HuaAnWork；本计划已有独立单产品 CI |
 | 9847a9bb633dbf17e6d6050b0706b2ab2cbda9bb | (merge container, zero direct files) | SKIP | merge 容器；子提交已独立裁定 |
 | bc6ae423eda7c21f121a2c41b83b8274499b2485 | .yarn/patches/dshmarket-desktop.patch | ALREADY | fork 1.70.2 patch 已保留等价自更新与 channel 修复 |
-| bc6ae423eda7c21f121a2c41b83b8274499b2485 | dsh-desktop-next/package.json | ALREADY | fork 已是 dshmarket 1.70.2 及更新 patch，上游 1.70.1 被更新实现覆盖 |
-| bc6ae423eda7c21f121a2c41b83b8274499b2485 | dsh-plugin-desktop-beta/package.json | ALREADY | fork 已是 dshmarket 1.70.2 及更新 patch，上游 1.70.1 被更新实现覆盖 |
-| bc6ae423eda7c21f121a2c41b83b8274499b2485 | dsh-plugin-desktop/package.json | ALREADY | fork 已是 dshmarket 1.70.2 及更新 patch，上游 1.70.1 被更新实现覆盖 |
+| bc6ae423eda7c21f121a2c41b83b8274499b2485 | dsh-desktop-next/package.json | ALREADY | fork 已是 dshmarket 1.70.2 及更新 patch，上游 1.70.1 被更新实现覆盖；本地等价：`dsh-plugin-huaanwork/package.json:398` 的 `dshmarket` 依赖（评估时为 `1.70.2`，F1 升级后现为 `1.73.5`）+ `.yarn/patches/dshmarket-desktop.patch` |
+| bc6ae423eda7c21f121a2c41b83b8274499b2485 | dsh-plugin-desktop-beta/package.json | ALREADY | fork 已是 dshmarket 1.70.2 及更新 patch，上游 1.70.1 被更新实现覆盖；本地等价：`dsh-plugin-huaanwork/package.json:398` 的 `dshmarket` 依赖（评估时为 `1.70.2`，F1 升级后现为 `1.73.5`）+ `.yarn/patches/dshmarket-desktop.patch` |
+| bc6ae423eda7c21f121a2c41b83b8274499b2485 | dsh-plugin-desktop/package.json | ALREADY | fork 已是 dshmarket 1.70.2 及更新 patch，上游 1.70.1 被更新实现覆盖；本地等价：`dsh-plugin-huaanwork/package.json:398` 的 `dshmarket` 依赖（评估时为 `1.70.2`，F1 升级后现为 `1.73.5`）+ `.yarn/patches/dshmarket-desktop.patch` |
 | bc6ae423eda7c21f121a2c41b83b8274499b2485 | package.json | ALREADY | fork 已是 dshmarket 1.70.2 及更新 patch，上游 1.70.1 被更新实现覆盖 |
 | bc6ae423eda7c21f121a2c41b83b8274499b2485 | yarn.lock | ALREADY | fork 已是 dshmarket 1.70.2 及更新 patch，上游 1.70.1 被更新实现覆盖 |
 | 092e2ecef750d10db43cedbab8e81fd48c8de38e | (merge container, zero direct files) | SKIP | merge 容器；子提交已独立裁定 |
