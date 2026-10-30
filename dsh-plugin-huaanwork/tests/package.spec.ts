@@ -1096,7 +1096,7 @@ describe('published package surface', () => {
     ]) expect(scripts[name], name).toBeUndefined()
   })
 
-  it('exposes the same distribution entry points as the upstream editions', () => {
+  it('exposes the HuaAnWork distribution entry points', () => {
     const scripts = workspaceManifest.scripts ?? {}
     for (const name of [
       'dev:huaanwork', 'package:dir:huaanwork',
@@ -1105,12 +1105,16 @@ describe('published package surface', () => {
     ]) {
       expect(scripts[name], name).toBeTypeOf('string')
     }
-    // 与 stable/beta 同构:每条都先跑 aa:prepare-release 再构建 community-market
-    for (const name of ['dist:win:huaanwork', 'dist:win-portable:huaanwork']) {
+    // 每条都先跑 aa:prepare-release 再构建 community-market
+    for (const [name, command] of [
+      ['dist:win:huaanwork', 'yarn workspace dsh-plugin-huaanwork dist:win'],
+      ['dist:win-portable:huaanwork', 'yarn workspace dsh-plugin-huaanwork dist:win-portable'],
+    ] as const) {
       const script = scripts[name] as string
       expect(script.startsWith('yarn market:prepare && yarn aa:prepare-release && ')).toBe(true)
       expect(script).toContain('yarn workspace dsh-community-market build && ')
-      expect(script).toContain('yarn workspace dsh-plugin-huaanwork dist:win')
+      // 精确命中结尾:`dist:win` 不得被 `dist:win-portable` 的前缀假通过。
+      expect(script.endsWith(command), name).toBe(true)
     }
   })
 
@@ -1714,14 +1718,14 @@ describe('published package surface', () => {
   })
 })
 
-describe('huaanwork product identity after the M6 channel switch', () => {
+describe('huaanwork product identity', () => {
   it('runs on its own release channel', () => {
     expect(DESKTOP_RELEASE_IDENTITIES.huaanwork.releaseChannel).toBe('huaanwork')
     expect(DESKTOP_RELEASE_CHANNEL).toBe('huaanwork')
     expect(DESKTOP_PRODUCT_IDENTITY).toBe(DESKTOP_RELEASE_IDENTITIES.huaanwork)
   })
 
-  it('keeps the two upstream editions byte-for-byte intact', () => {
+  it('keeps the historical upstream identities intact', () => {
     expect(DESKTOP_RELEASE_IDENTITIES.stable).toEqual({
       releaseChannel: 'stable',
       packageName: 'dsh-plugin-desktop',

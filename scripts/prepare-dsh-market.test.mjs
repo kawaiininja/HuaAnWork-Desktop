@@ -31,7 +31,7 @@ test('targets only the active HuaAnWork workspace', () => {
   assert.deepEqual(MARKET_WORKSPACES, ['dsh-plugin-huaanwork'])
 })
 
-test('refreshes all editions and rechecks the tag on every invocation', async t => {
+test('refreshes the active HuaAnWork workspace and rechecks the tag on every invocation', async t => {
   const { root, install } = fixture(t)
   let version = '1.59.0', queries = 0, installs = 0
   const options = { fetcher: async (...args) => { queries++; return reply(version)(...args) }, runInstall: () => { installs++; install() } }
