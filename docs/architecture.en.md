@@ -53,26 +53,26 @@ The profile name and absolute directory come from `desktopProfiles.current`; the
 
 `desktopPnpm.run()` runs bundled pnpm directly. `runPlugin()` uses packaged DSH CLI semantics so profile initialization, relative sources, and bundle reconciliation remain authoritative. Both operations belong to the current generation and use the subprocess service for complete process-tree ownership.
 
-The launcher-private `desktopRuntime`, `desktopPnpmBootstrap`, Electron executable, Node helpers, and ABI environment are not third-party APIs. The stable package exposes `dsh-plugin-desktop/profile-service` and `dsh-plugin-desktop/pnpm`; the Beta package exposes the corresponding `dsh-plugin-desktop-beta/*` paths.
+The launcher-private `desktopRuntime`, `desktopPnpmBootstrap`, Electron executable, Node helpers, and ABI environment are not third-party APIs. The active desktop package `dsh-plugin-huaanwork` exposes its public contracts as `dsh-plugin-huaanwork/profile-service` and `dsh-plugin-huaanwork/pnpm`; `dsh-plugin-desktop/profile-service`, `dsh-plugin-desktop/pnpm`, and `dsh-plugin-desktop-beta/*` are the same-named npm contracts of the upstream package and the retired Beta variant, retained as historical identity only and no longer build targets of this repository.
 
 ## Packaging and runtime closure
 
 Release artifacts use Electron Builder and `app.asar`, while dependencies that must be physical (for example pnpm, node-pty, and Windows ACL/native files) live under `app.asar.unpacked`. The packaged-runtime gate checks both archive entries and physical runtime entries; profile fallback links must not target virtual ASAR paths that Node cannot resolve.
 
-The outer workspace uses Yarn. The pinned `deepseek-harness/` submodule keeps its own pnpm workspace. Stable and Beta Desktop sources live in `dsh-plugin-desktop/` and `dsh-plugin-desktop-beta/`, with a variant-alignment gate protecting shared behavior; neither package edits the upstream submodule.
+The outer workspace uses Yarn. The pinned `deepseek-harness/` submodule keeps its own pnpm workspace. The only desktop code is `dsh-plugin-huaanwork/`, and no desktop code edits the upstream submodule.
 
 ## Release-channel protocol
 
-Stable and Beta are separate physical npm packages and system applications; Git branches do not define the channels. Stable uses `dsh-plugin-desktop`, `DSH Desktop`, and `ai.deepseek.dsh.desktop`; Beta uses `dsh-plugin-desktop-beta`, `DSH Desktop Beta`, and `ai.deepseek.dsh.desktop.beta`. `upstream.json` records both channels' upstream versions, commits, and vendored-runtime manifests. Exact root resolutions ensure that each workspace resolves only its own DSH runtime.
+The product publishes a single release channel, `huaanwork`: the `dsh-plugin-huaanwork` npm package and the `HuaAnWork` system application, with `dsh-plugin-huaanwork/src/product-identity.ts` as the single source of identity. `upstream.json` records `activeChannel: huaanwork` and its `channels` map holds the `huaanwork` record alone; the historical Stable leg is not a channel record and survives only as the `marketPeerPolicy.stableHistorical` market peer string `0.2.0-rc.2`. The `stable` / `beta` entries of `DESKTOP_RELEASE_IDENTITIES` remain historical identity only and do not mean this repository still builds those desktop products.
 
-Version checks and installer downloads send `X-DSH-Desktop-Channel: stable|beta`. A check also sends the current version, while a download sends `X-DSH-Desktop-Target-Version`; the service must echo the requested channel and version. Legacy clients without the channel header are treated as stable. A Beta client requires an explicit `channel: "beta"` response. Stable accepts only release SemVer, while Beta accepts only `-beta.N`. Automatic Beta updates query only Beta. **Install Stable Edition** is a separate explicit operation that may select a lower version and installs Stable alongside Beta.
+Version checks and installer downloads send `X-DSH-Desktop-Channel: huaanwork`. A check also sends the current version, while a download sends `X-DSH-Desktop-Target-Version`; the service must echo the requested channel and version. When the response channel or version shape does not match the request, the client treats the response as invalid and does not silently cross channels.
 
-The service must implement these selection and echo rules, with complete platform artifacts for both channels, before a Beta release becomes discoverable. Otherwise the client treats the response as invalid and will not silently cross channels.
+The service must implement these selection and echo rules, with complete platform artifacts for every platform, before any release becomes discoverable.
 
 ## Maintainer reading
 
-- [Desktop service contract](../dsh-plugin-desktop/docs/plugin-services.md)
-- [Package README](../dsh-plugin-desktop/README.md)
+- [Desktop service contract](../dsh-plugin-huaanwork/docs/plugin-services.md)
+- [Package README](../dsh-plugin-huaanwork/README.md)
 - [Pinned upstream and isolated Yarn workspace](../.agents/notes/implemented/process/2026-08-15-pinned-upstream-and-isolated-yarn-workspace.md)
 - [Profile and pnpm services decision](../.agents/notes/implemented/architecture/2026-08-15-desktop-profile-and-pnpm-services.md)
 - [Advanced shell decision](../.agents/notes/implemented/architecture/2026-08-15-desktop-advanced-shell.md)

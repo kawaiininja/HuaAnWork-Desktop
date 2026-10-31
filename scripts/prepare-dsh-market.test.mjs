@@ -27,7 +27,11 @@ function fixture(t) {
   return { root, write, install }
 }
 
-test('refreshes all editions and rechecks the tag on every invocation', async t => {
+test('targets only the active HuaAnWork workspace', () => {
+  assert.deepEqual(MARKET_WORKSPACES, ['dsh-plugin-huaanwork'])
+})
+
+test('refreshes the active HuaAnWork workspace and rechecks the tag on every invocation', async t => {
   const { root, install } = fixture(t)
   let version = '1.59.0', queries = 0, installs = 0
   const options = { fetcher: async (...args) => { queries++; return reply(version)(...args) }, runInstall: () => { installs++; install() } }
@@ -48,8 +52,8 @@ test('check is read-only and rejects stale installed copies', async t => {
   await assert.rejects(prepareMarket(root, { check: true, fetcher: reply('1.59.0'), runInstall: () => assert.fail('must not install') }), /market:prepare/)
   assert.equal(readFileSync(join(root, 'yarn.lock'), 'utf8'), 'original lock\n')
   await prepareMarket(root, { fetcher: reply('1.59.0'), runInstall: install })
-  write('dsh-desktop-next/node_modules/dshmarket/package.json', { name: 'dshmarket', version: '1.0.0' })
-  await assert.rejects(prepareMarket(root, { check: true, fetcher: reply('1.59.0') }), /dsh-desktop-next/)
+  write('dsh-plugin-huaanwork/node_modules/dshmarket/package.json', { name: 'dshmarket', version: '1.0.0' })
+  await assert.rejects(prepareMarket(root, { check: true, fetcher: reply('1.59.0') }), /dsh-plugin-huaanwork/)
 })
 
 test('restores manifests and the lockfile after an interrupted installation', async t => {
@@ -73,6 +77,11 @@ test('does not accept an offline or malformed latest response', async () => {
 test('all root launch, build and packaging entry points prepare the market first', () => {
   const { scripts } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const entrypoints = Object.entries(scripts).filter(([name]) => /^(build$|dev(?::|$)|start(?::|$)|package:dir|dist:)/.test(name))
-  assert.ok(entrypoints.length >= 18)
+  assert.deepEqual(entrypoints.map(([name]) => name).sort(), [
+    'build', 'dev', 'dev:huaanwork', 'dev:update-server', 'start',
+    'package:dir', 'package:dir:huaanwork',
+    'dist:mac', 'dist:mac-smoke', 'dist:mac:huaanwork', 'dist:mac-smoke:huaanwork',
+    'dist:win', 'dist:win-portable', 'dist:win:huaanwork', 'dist:win-portable:huaanwork', 'dist:win-sign:huaanwork',
+  ].sort())
   for (const [name, command] of entrypoints) assert.ok(command.startsWith('yarn market:prepare && '), name)
 })

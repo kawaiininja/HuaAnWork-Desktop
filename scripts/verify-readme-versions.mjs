@@ -8,11 +8,9 @@
  * 权威版本源 = **各 workspace 自己的 package.json.version**。root package.json
  * **没有 version 字段**(它是 private 的 workspace 根),故不存在「根版本」可比。
  *
- * 范围:当前只覆盖 dsh-plugin-huaanwork 的两个 README(R-M7-4 说的「4 处」= 2 文件 × 2 行)。
- * stable/beta 的 4 处同名漂移(README 写 2.0.5 / 2.0.5-beta.2,而 package.json 是
- * 2.0.12 / 2.0.12-beta.1)按评估 §6.3 第 23 条归 **M28** —— 那两个 README 是上游所有,
- * 在 fork 侧改它们会扩大上游同步冲突面。范围显式登记在 outOfScopeRegistered 里,
- * 输出的 `out of scope (M28)` 一行就是为了让「守卫绿」不被误读成「全仓 README 都对」。
+ * 范围:单桌面改造后只剩 dsh-plugin-huaanwork 的两个 README(R-M7-4 说的「4 处」
+ * = 2 文件 × 2 行)。旧 Stable/Beta README 的两个 deferred scope 随参考树在阶段 B
+ * 物理删除而消失,故 `outOfScopeRegistered` 为空,CLI 不再输出 out-of-scope 行。
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -26,12 +24,8 @@ export const README_VERSION_SCOPES = [
     // 用「产品名前缀 + 版本 + 平台后缀」的模式匹配,而不是裸版本串 —— 裸串会误伤
     // README 里的 Node 版本(22.23.2)、vendored runtime 版本(0.1.6-alpha.2)等。
     artifactPattern: /HuaAnWork-(\d+\.\d+\.\d+(?:-[\w.]+)?)-x64-(?:Setup\.exe|Portable\.zip)/gu,
-    outOfScopeRegistered: [
-      'dsh-plugin-desktop/README.md',
-      'dsh-plugin-desktop/README.zh.md',
-      'dsh-plugin-desktop-beta/README.md',
-      'dsh-plugin-desktop-beta/README.zh.md',
-    ],
+    // 已无任何登记在外的 README:本仓只发布 HuaAnWork 一个桌面产品。
+    outOfScopeRegistered: [],
   },
 ]
 
@@ -99,9 +93,14 @@ if (isDirectExecution) {
     process.exit(1)
   }
   const scopedList = README_VERSION_SCOPES.map(scope => scope.packageDir).join(', ')
+  // Only registered out-of-scope READMEs are worth printing; an empty registration must
+  // not turn into an "out of scope: " clause with nothing after it.
+  const outOfScopeClause = outOfScope.length === 0
+    ? ''
+    : `; ${String(outOfScope.length)} README(s) out of scope: ${outOfScope.join(', ')}`
   process.stdout.write(
     `verify-readme-versions: ${String(checked)} hardcoded artifact version string(s) in ` +
-    `${String(README_VERSION_SCOPES.length)} scoped package(s) (${scopedList}) match their own package.json; ` +
-    `${String(outOfScope.length)} README(s) out of scope (M28): ${outOfScope.join(', ')}\n`,
+    `${String(README_VERSION_SCOPES.length)} scoped package(s) (${scopedList}) match their own package.json` +
+    `${outOfScopeClause}\n`,
   )
 }

@@ -177,21 +177,28 @@ test('keeps the registry-bypass shape guard green on the real tracked tree (Task
   )), /must not bypass the signed manifest/u)
 })
 
-test('DESKTOP_SOURCE_ROOTS covers the fork-owned huaanwork workspaces (M14 blindspot B)', async () => {
+// Task 5(单桌面、单代码):扫描根收窄到**活跃**拓扑——HuaAnWork 与 fork 自有四包。
+// Stable/Beta 两棵参考树不再是受检根(参考树退役后仍留在这里,要么让守卫扫一棵
+// 不存在的树,要么把已离职实现的依赖方向当成活的约束);但它们的包名必须继续被
+// 禁止(见上方合成负例与 DESKTOP_MODULE),否则未来 market 代码可以引用历史实现
+// 而不触发本守卫。
+test('DESKTOP_SOURCE_ROOTS scans only the active HuaAnWork topology', async () => {
   const source = readFileSync(join(import.meta.dirname, 'market-dependency-direction.mjs'), 'utf8')
   const block = source.slice(
     source.indexOf('const DESKTOP_SOURCE_ROOTS = ['),
     source.indexOf(']', source.indexOf('const DESKTOP_SOURCE_ROOTS = [')),
   )
   for (const root of [
-    'dsh-plugin-desktop/src',
-    'dsh-plugin-desktop-beta/src',
     'dsh-plugin-huaanwork/src',
     'packages/huaanwork-policy/src',
     'packages/huaanwork-model/src',
     'packages/huaanwork-git-tools/src',
+    'packages/huaanwork-web-tools/src',
   ]) {
     assert.ok(block.includes(`'${root}'`), `DESKTOP_SOURCE_ROOTS must include ${root}`)
+  }
+  for (const retired of ['dsh-plugin-desktop/src', 'dsh-plugin-desktop-beta/src']) {
+    assert.equal(block.includes(`'${retired}'`), false, `DESKTOP_SOURCE_ROOTS must not scan the reference tree ${retired}`)
   }
 })
 

@@ -10,6 +10,6 @@ process.stdout.write(
   `${String(result.wrapperFileCount)} market wrapper files carry no registry bypass of the signed manifest ` +
   `(no runExternalMarketPluginInstall / --registry / --prefer-offline); ` +
   `note: this guard verifies import specifiers only -- runtime filesystem cross-reads are not covered ` +
-  `(e.g. the three packages' tests/package.spec.ts readFileSync of scripts/expected-root-gate-scripts.json, ` +
-  `a registered upstream-sync exception) and are guarded separately\n`,
+  `(e.g. dsh-plugin-huaanwork/tests/package.spec.ts readFileSync of scripts/expected-root-gate-scripts.json; ` +
+  `reading shared root fixtures that way is an in-repo convention covered by each fixture's own guard) and are guarded separately\n`,
 )

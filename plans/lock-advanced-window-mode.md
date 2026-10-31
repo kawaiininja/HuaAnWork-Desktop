@@ -1,3 +1,6 @@
+> **历史计划（2026 年 10 月）——不可执行。**
+> 本文件写作于三桌面时期：`dsh-plugin-desktop`、`dsh-plugin-desktop-beta`、`dsh-desktop-next` 三棵源码树已于 2026-10-30 删除；文中反复引用的 `scripts/verify-desktop-variants.mjs` / `scripts/verify-desktop-variants.test.mjs` 与 `check:desktop-variants` 命令也已删除。下文（含其中的命令、22 条白名单口径与 TODO 勾选状态）只作为历史记录保留，**不要照此执行**；当前仓库的构建、门禁与上游同步规则以 `AGENTS.md` 与 `docs/upstream-sync.md` 为准。
+
 # 固定 HuaAnWork 窗口模式为增强模式
 
 ## TL;DR

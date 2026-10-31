@@ -19,6 +19,15 @@ import { prepareDesktopProfile } from '../lib/profile.js'
 import { DesktopProfileService } from '../lib/profile-service.js'
 import { createDesktopProfileBoot } from '../lib/profile-context.js'
 
+// This smoke takes no options, and the former `--onboarding` switch went with the
+// onboarding-only assertions. Reject any argument before the first side effect
+// (the temporary Profile home below): a flag that used to narrow the smoke must
+// fail loudly instead of silently running the full boot the caller did not ask for.
+if (process.argv.length > 2) {
+  console.error('verify-profile-boot: unknown arguments: ' + process.argv.slice(2).join(' '))
+  process.exit(2)
+}
+
 /** Loader entry id of the Desktop shell row, which 0.1.7 uses as its settings namespace. */
 const DESKTOP_SETTINGS_ENTRY_ID = 'desktop-shell'
 /**
@@ -409,13 +418,6 @@ try {
     },
   })
   const html = await response.text()
-  if (process.argv.includes('--onboarding')) {
-    const { verifyDesktopOnboardingBrowser } = await import('../../scripts/verify-desktop-onboarding-browser.mjs')
-    await verifyDesktopOnboardingBrowser({
-      url: expectedUrl, cookie,
-      headers: { [BROWSER_ACCESS.rendererHeader.name]: BROWSER_ACCESS.rendererHeader.value },
-    })
-  }
   if (response.status !== 200) {
     throw new Error(`assembled Web root returned HTTP ${String(response.status)}`)
   }

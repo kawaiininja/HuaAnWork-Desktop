@@ -29,12 +29,30 @@ const providerFixture = () => readJson('../docs/examples/catalog-provider-page.e
 const snapshotFixture = () => readJson('../docs/examples/catalog-snapshot.example.json')
 
 describe('package integration contract', () => {
-  it('loads the Client through the official settings, sidebar, and shell features', () => {
-    const manifest = readJson('../package.json') as {
-      dsh?: { client?: { inject?: string[] } }
-      peerDependencies?: Record<string, string>
-    }
+  const manifest = readJson('../package.json') as {
+    dsh?: { client?: { inject?: string[] } }
+    peerDependencies?: Record<string, string>
+    peerDependenciesMeta?: Record<string, { optional?: boolean }>
+  }
+  const upstream = readJson('../../upstream.json') as {
+    activeChannel: 'huaanwork'
+    marketPeerPolicy: { stableHistorical: 'retain' | 'retire'; dormantAlpha1: 'retain' | 'retire' }
+    channels: { huaanwork: { sourceVersion: string } }
+  }
+  // upstream.json 是所有包共享的单一事实源:渠道一旦被改写,market 的 peer 区间
+  // 与 vendor 解析都会静默偏到另一条轨道,所以运行时钉住当前唯一在役渠道。
+  expect(upstream.activeChannel).toBe('huaanwork')
+  const expectedPeerRange = [
+    ...(upstream.marketPeerPolicy.stableHistorical === 'retain' ? ['0.2.0-rc.2'] : []),
+    upstream.channels.huaanwork.sourceVersion,
+    ...(upstream.marketPeerPolicy.dormantAlpha1 === 'retain' ? ['0.2.1-alpha.1'] : []),
+  ].join(' || ')
+  const dshPeers = Object.entries(manifest.peerDependencies ?? {})
+    .filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+  expect(dshPeers.length).toBeGreaterThan(0)
+  for (const [name, range] of dshPeers) expect(range, name).toBe(expectedPeerRange)
 
+  it('loads the Client through the official settings, sidebar, and shell features', () => {
     expect(manifest.dsh?.client?.inject).toEqual([
       '@deepseek-ai/dsh-client-locale',
       '@deepseek-ai/dsh-client-ui-layout',
@@ -42,22 +60,19 @@ describe('package integration contract', () => {
       '@deepseek-ai/dsh-client-ui-settings',
       '@deepseek-ai/dsh-client-ui-sidebar',
     ])
-    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-file-upload', '0.2.0-rc.2 || 0.2.1-rc.1 || 0.2.1-alpha.1')
-    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-ui-layout', '0.2.0-rc.2 || 0.2.1-rc.1 || 0.2.1-alpha.1')
-    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-ui-renderer', '0.2.0-rc.2 || 0.2.1-rc.1 || 0.2.1-alpha.1')
-    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-ui-session', '0.2.0-rc.2 || 0.2.1-rc.1 || 0.2.1-alpha.1')
-    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-ui-settings', '0.2.0-rc.2 || 0.2.1-rc.1 || 0.2.1-alpha.1')
-    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-ui-sidebar', '0.2.0-rc.2 || 0.2.1-rc.1 || 0.2.1-alpha.1')
-    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-client-ui-workspace', '0.2.0-rc.2 || 0.2.1-rc.1 || 0.2.1-alpha.1')
+    for (const name of [
+      '@deepseek-ai/dsh-client-file-upload',
+      '@deepseek-ai/dsh-client-ui-layout',
+      '@deepseek-ai/dsh-client-ui-renderer',
+      '@deepseek-ai/dsh-client-ui-session',
+      '@deepseek-ai/dsh-client-ui-settings',
+      '@deepseek-ai/dsh-client-ui-sidebar',
+      '@deepseek-ai/dsh-client-ui-workspace',
+    ]) expect(manifest.peerDependencies, name).toHaveProperty(name, expectedPeerRange)
   })
 
   it('keeps durable storage an optional peer so market still starts without it', () => {
-    const manifest = readJson('../package.json') as {
-      peerDependencies?: Record<string, string>
-      peerDependenciesMeta?: Record<string, { optional?: boolean }>
-    }
-
-    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-storage-domain', '0.2.0-rc.2 || 0.2.1-rc.1 || 0.2.1-alpha.1')
+    expect(manifest.peerDependencies).toHaveProperty('@deepseek-ai/dsh-storage-domain', expectedPeerRange)
     expect(manifest.peerDependenciesMeta?.['@deepseek-ai/dsh-storage-domain']).toEqual({ optional: true })
     expect(manifest.peerDependenciesMeta?.['@deepseek-ai/dsh-storage']).toEqual({ optional: true })
   })

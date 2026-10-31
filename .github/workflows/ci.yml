@@ -93,23 +93,17 @@ jobs:
         run: yarn install --immutable
       - name: Temporarily skip AA profile smoke in CI
         if: needs.changes.outputs.product == 'true'
-        env:
-          EVENT_NAME: ${{ github.event_name }}
         # Remove this step after AA Host service activation is fixed.
         # Local checks and the standalone verify:aa command remain available.
         run: |
           node --input-type=module <<'NODE'
           import { readFileSync, writeFileSync } from 'node:fs'
-          for (const workspace of ['dsh-plugin-desktop', 'dsh-plugin-desktop-beta', 'dsh-plugin-huaanwork']) {
+          for (const workspace of ['dsh-plugin-huaanwork']) {
             const path = `${workspace}/package.json`
             const manifest = JSON.parse(readFileSync(path, 'utf8'))
             const smoke = ' && yarn run verify:aa'
             if (!manifest.scripts.check.includes(smoke)) throw new Error(`AA check not found in ${workspace}`)
-            // On pull requests, verify-desktop-variants already gates shared Desktop source,
-            // so Stable runs build + closure + license checks while Beta runs the full suite.
-            manifest.scripts.check = workspace === 'dsh-plugin-desktop' && process.env.EVENT_NAME === 'pull_request'
-              ? 'yarn run build && yarn run verify:closure && yarn run verify:licenses'
-              : manifest.scripts.check.replace(smoke, '')
+            manifest.scripts.check = manifest.scripts.check.replace(smoke, '')
             writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`)
           }
           NODE
@@ -117,51 +111,6 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: yarn check
-      - name: Cache Playwright browsers
-        id: playwright-cache
-        if: needs.changes.outputs.product == 'true'
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock') }}
-      - name: Install Chromium for Next window regression
-        if: needs.changes.outputs.product == 'true'
-        run: |
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
-            yarn workspace dsh-desktop-next exec playwright install-deps chromium
-          else
-            yarn workspace dsh-desktop-next exec playwright install --with-deps chromium
-          fi
-      - name: Verify Next window controls, onboarding, protocol, and sidebar Browser in parallel
-        id: sidebar-browser
-        if: needs.changes.outputs.product == 'true'
-        timeout-minutes: 5
-        env:
-          ELECTRON_ENABLE_LOGGING: '1'
-        run: |
-          set -euo pipefail
-          mkdir -p sidebar-browser-ci-logs
-          # Ubuntu runners have GNU timeout; keep the fallback for runners
-          # where --kill-after is unavailable.
-          if timeout --help >/dev/null 2>&1 && timeout --help 2>&1 | grep -q -- '--kill-after'; then
-            electron_timeout="timeout --kill-after=10s 120s"
-          else
-            echo "GNU timeout is unavailable; running Electron without the 120s kill wrapper." >&2
-            electron_timeout=""
-          fi
-          node scripts/run-parallel.mjs \
-            "yarn workspace dsh-desktop-next verify:window-controls" \
-            "yarn workspace dsh-desktop-next verify:onboarding" \
-            "${electron_timeout} xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:protocol --no-sandbox" \
-            "${electron_timeout} xvfb-run --auto-servernum yarn workspace dsh-desktop-next verify:sidebar-browser --no-sandbox" \
-            2>&1 | tee sidebar-browser-ci-logs/verify-next-electron.log
-      - name: Upload sidebar-browser logs
-        if: (failure() || cancelled()) && (steps.sidebar-browser.outcome == 'failure' || steps.sidebar-browser.outcome == 'cancelled')
-        uses: actions/upload-artifact@v7
-        with:
-          name: sidebar-browser-logs
-          path: sidebar-browser-ci-logs/
-          if-no-files-found: warn
 
   # Windows-only logic and unsigned NSIS/portable builds on a real Windows runner:
   # updates, window options, pwsh sandbox, volume diagnostics, and packaging.
@@ -175,7 +124,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]
+        workspace: [dsh-plugin-huaanwork]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -224,48 +173,6 @@ jobs:
   # release is built manually on a credentialed machine, so an unsigned DMG
   # here catches Intel and Apple Silicon packaging regressions before a manual
   # release. No signing secrets ever reach this job.
-  # Linux x64 distribution artifacts: unsigned AppImage and Debian package
-  # built on a stock ubuntu runner, mirroring the Windows packaging job.
-  desktop-linux:
-    needs: changes
-    if: needs.changes.outputs.product == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        workspace: ${{ github.event_name == 'pull_request' && fromJSON('["dsh-plugin-desktop-beta"]') || fromJSON('["dsh-plugin-desktop", "dsh-plugin-desktop-beta"]') }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-          submodules: recursive
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22.23.2
-      - run: corepack enable
-      - name: Resolve Yarn cache folder
-        id: yarn-cache
-        run: echo "dir=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
-        with:
-          path: ${{ steps.yarn-cache.outputs.dir }}
-          key: yarn-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock', '.yarnrc.yml') }}
-      - name: Cache Electron Builder downloads
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/electron
-            ~/.cache/electron-builder
-          key: packaging-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('yarn.lock') }}
-      - run: yarn install --immutable
-      - run: yarn workspace ${{ matrix.workspace }} check:linux-package:platform
-      - name: Build Linux AppImage and Debian package
-        env:
-          DSH_PACKAGE_CHECK_ALREADY_RAN: '1'
-        run: yarn workspace ${{ matrix.workspace }} dist:linux
-
   desktop-macos:
     needs: changes
     if: needs.changes.outputs.product == 'true'
@@ -274,7 +181,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta, dsh-plugin-huaanwork]
+        workspace: [dsh-plugin-huaanwork]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -305,9 +212,9 @@ jobs:
       - name: Build macOS smoke artifact
         env:
           DSH_PACKAGE_CHECK_ALREADY_RAN: '1'
-          # R-M7-8:smoke 路径现在也跑 provisioning 守卫(与三条发行命令一致),但 CI 按
-          # D-M6-17 零 secrets、且 R2 部署位未交付 ⇒ provisioning 实测缺 4 项。故 CI 的
-          # 未签名冒烟必须**显式声明**豁免。发行路径不带 --smoke,不受此 env 影响。
+          # This job runs the workspace `dist:mac-smoke` (`node scripts/package-mac.ts`), never the guard, so
+          # `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE` is inert and kept only for the job shape `tests/package.spec.ts`
+          # pins. Guard coverage: root `dist:*` chains except `dist:win-sign:huaanwork`, plus the explicit local command.
           HUAANWORK_ALLOW_UNPROVISIONED_SMOKE: '1'
           # The universal merge alone takes 9-17 minutes, so pull requests
           # package only the runner's native arm64 app. Pushes to master and

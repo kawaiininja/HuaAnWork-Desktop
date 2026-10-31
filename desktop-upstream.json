@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/anywhere-labs/dsh-desktop.git",
+  "ref": "upstream/master",
+  "reviewedCommit": "092e2ecef750d10db43cedbab8e81fd48c8de38e",
+  "sourcePackage": "dsh-plugin-desktop-beta",
+  "watchedPaths": [
+    "package.json",
+    "yarn.lock",
+    "upstream.json",
+    ".yarnrc.yml",
+    ".yarn/",
+    ".gitmodules",
+    ".gitignore",
+    ".github/",
+    "scripts/",
+    "patches/",
+    "vendor/",
+    "assets/",
+    "deepseek-harness",
+    "dsh-community-market/",
+    "dsh-community-fabric/",
+    "dsh-plugin-desktop/",
+    "dsh-plugin-desktop-beta/",
+    "dsh-desktop-next/"
+  ]
+}

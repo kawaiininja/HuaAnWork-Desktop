@@ -1,219 +1,143 @@
 /**
- * 上游落后量与冲突面看板脚本 (M17.2; 依据评估 M17 交付②)。
+ * 上游 selective review 看板 (Task 12; 依据 2026-10-29 单桌面维护计划)。
  *
  * 为什么需要它:
- * 记录从 fork merge-base 到 upstream/master 的落后 commit 数与三个重叠冲突面
- * (白名单面、三包同形面、永久 override 面)，用于大同步 (Phase B / M8) 的风险估算。
+ * 单桌面仓库不再整仓合并上游,而是按 `desktop-upstream.json` 的 `reviewedCommit`
+ * 逐提交、逐文件审阅从该基点到 `upstream/master` 的全部待审提交。本脚本只做
+ * 只读枚举与分诊(watched / unwatched),供人工或审阅流程登记处置结论。
  *
  * 关键纪律:
- * 1. 只读脚本，仅读取本地现有 git ref 与工作树源码，绝不运行 git fetch。
- * 2. 本脚本依赖 git fetch upstream 后的本地 ref，在无网络环境或缺少 upstream
- *    remote 时无法运行，因此【绝对不得接进 package.json 任何 scripts、绝不得接进 gate】。
- * 3. 动态求 merge-base (git merge-base HEAD <upstreamRef>)，不硬编码历史 SHA。
- * 4. upstream remote 缺失时显式报错并指向 docs/upstream-sync.md §1 和 §3，
- *    绝不隐式回落到其他任何 remote 或分支。
+ * 1. 只读脚本:仅读取本地 git ref 与工作树里的配置文件,绝不运行 git fetch,
+ *    绝不写回任何状态。推进 `reviewedCommit` 是人工动作(见 docs/upstream-sync.md)。
+ * 2. 只依赖本地 git ref:本地已解析出 upstream/master 时可完全离线工作(读数只是
+ *    最后一次 fetch 的陈旧值)。只有缺少该 ref、remote URL 与配置不符、reviewedCommit
+ *    不是该 ref 的祖先,或 watchedPaths 的某个目录型条目在 reviewedCommit 解析不到
+ *    tree、非目录型条目解析不到文件时,才报错并以非零码退出,绝不静默输出 0。因此
+ *    【绝对不得接进 package.json 任何 scripts,也不得接进任何 gate】。
+ * 3. 不读取、不比较三个参考桌面树;watchedPaths 只提供覆盖面与分诊,不验证移植的
+ *    完整性或等价性。
+ * 4. 输出不截断:文本与 --json 都给出全部提交与全部 direct files、as-of 时间与完整
+ *    SHA,便于把结果原样落入证据文档。
  */
 
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync } from 'node:fs'
-import { join, relative, resolve, sep } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { PAIRS } from './verify-desktop-variants.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 
-function listFiles(dir, base = dir) {
-  const result = []
+export function collectUpstreamReview({ root = repoRoot, upstreamRef, configPath } = {}) {
+  let config
   try {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name)
-      if (entry.isDirectory()) result.push(...listFiles(path, base))
-      else if (entry.isFile()) result.push(relative(base, path).split(sep).join('/'))
+    config = JSON.parse(readFileSync(configPath ?? join(root, 'desktop-upstream.json'), 'utf8'))
+    if (config.schemaVersion !== 1 || typeof config.repository !== 'string'
+      || typeof config.ref !== 'string' || !/^[0-9a-f]{40}$/u.test(config.reviewedCommit)
+      || typeof config.sourcePackage !== 'string' || !Array.isArray(config.watchedPaths)
+      || config.watchedPaths.length === 0 || config.watchedPaths.some(path => typeof path !== 'string' || path.length === 0)) {
+      throw new Error('invalid desktop-upstream.json schema')
     }
-  } catch {
-    // directory doesn't exist
+  } catch (error) {
+    return { ok: false, error: `cannot load desktop-upstream.json: ${String(error)}; see docs/upstream-sync.md` }
   }
-  return result
-}
-
-export function collectUpstreamLag({ root = repoRoot, upstreamRef = 'upstream/master' } = {}) {
-  // 1. Verify upstream ref exists; fail loudly with explicit pointer without falling back
+  const ref = upstreamRef ?? config.ref
+  const git = args => execFileSync('git', args, {
+    cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim()
+  const gitRaw = args => execFileSync('git', args, {
+    cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let upstreamSha
   try {
-    execFileSync('git', ['rev-parse', '--verify', upstreamRef], {
-      cwd: root,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-  } catch {
+    if (git(['remote', 'get-url', 'upstream']) !== config.repository) throw new Error('upstream remote URL differs from desktop-upstream.json')
+    upstreamSha = git(['rev-parse', '--verify', `${ref}^{commit}`])
+    git(['rev-parse', '--verify', `${config.reviewedCommit}^{commit}`])
+    execFileSync('git', ['merge-base', '--is-ancestor', config.reviewedCommit, upstreamSha], { cwd: root, stdio: 'ignore' })
+  } catch (error) {
+    return { ok: false, error: `upstream ref is unavailable, or reviewedCommit is not an ancestor: ${String(error)}; see docs/upstream-sync.md` }
+  }
+  const lines = value => value ? value.split('\n').filter(Boolean) : []
+  const isFileEntry = path => {
+    const [entry] = lines(git(['ls-tree', config.reviewedCommit, '--', path]))
+    if (!entry) return false
+    const [mode] = entry.split(' ')
+    // `cat-file -e <commit>:<path>` 无法区分文件与目录(tree 也存在),submodule gitlink
+    // 的目标对象又不在本仓;ls-tree 的 mode 同时覆盖两点:160000 是 diff-tree 里按
+    // 单路径(文件型)出现的 submodule pin,只有 040000 才是必须写成 `<path>/` 的目录。
+    return mode === '100644' || mode === '100755' || mode === '120000' || mode === '160000'
+  }
+  const isDirectoryEntry = path => {
+    const [entry] = lines(git(['ls-tree', config.reviewedCommit, '--', path.replace(/\/$/u, '')]))
+    return entry?.startsWith('040000 tree ') === true
+  }
+  const invalidWatch = config.watchedPaths.find(path => path.endsWith('/') ? !isDirectoryEntry(path) : !isFileEntry(path))
+  if (invalidWatch !== undefined) {
+    const shape = invalidWatch.endsWith('/') ? 'directory' : 'file'
+    const slashHint = shape === 'file' ? '; directory entries must end with "/"' : ''
     return {
       ok: false,
-      error: 'the "upstream" remote is not configured or not fetched; see docs/upstream-sync.md §1 and §3',
+      error: `watchedPaths entry "${invalidWatch}" in desktop-upstream.json does not resolve to a ${shape} at reviewedCommit ${config.reviewedCommit}${slashHint}; see docs/upstream-sync.md`,
     }
   }
-
-  // 2. Dynamic merge-base calculation
-  let mergeBase
-  try {
-    mergeBase = execFileSync('git', ['merge-base', 'HEAD', upstreamRef], {
-      cwd: root,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim()
-  } catch (err) {
+  const shas = lines(git(['rev-list', '--reverse', '--topo-order', `${config.reviewedCommit}..${upstreamSha}`]))
+  const isWatched = file => config.watchedPaths.some(path => path.endsWith('/') ? file.startsWith(path) : file === path)
+  const commits = shas.map(sha => {
+    const [date, subject] = git(['show', '-s', '--format=%cI%x00%s', sha]).split('\0')
+    // `-c` includes what a merge commit itself introduced (conflict resolutions and
+    // merge-only files) without `-m`'s repetition of clean parent-side files. `-z`
+    // keeps paths byte-exact, including double quotes that `core.quotePath=false`
+    // still C-quotes.
+    const files = gitRaw(['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', '-c', '-z', sha])
+      .split('\0').filter(Boolean)
     return {
-      ok: false,
-      error: `failed to find merge-base between HEAD and ${upstreamRef}: ${String(err)}`,
+      sha, date, subject,
+      files: {
+        watched: files.filter(isWatched),
+        unwatched: files.filter(file => !isWatched(file)),
+      },
     }
-  }
-
-  // 3. Upstream SHA & commit dates
-  const upstreamSha = execFileSync('git', ['rev-parse', upstreamRef], { cwd: root, encoding: 'utf8' }).trim()
-  const upstreamCommitDate = execFileSync('git', ['show', '-s', '--format=%cI', upstreamSha], {
-    cwd: root,
-    encoding: 'utf8',
-  }).trim()
-  const mergeBaseCommitDate = execFileSync('git', ['show', '-s', '--format=%cI', mergeBase], {
-    cwd: root,
-    encoding: 'utf8',
-  }).trim()
-
-  const asOf = new Date().toISOString()
-  const behindCount = Number(
-    execFileSync('git', ['rev-list', '--count', `${mergeBase}..${upstreamRef}`], {
-      cwd: root,
-      encoding: 'utf8',
-    }).trim(),
-  )
-  const aheadCount = Number(
-    execFileSync('git', ['rev-list', '--count', `${upstreamRef}..HEAD`], {
-      cwd: root,
-      encoding: 'utf8',
-    }).trim(),
-  )
-
-  // 4. Git diff between mergeBase and upstreamRef
-  const diffOutput = execFileSync('git', ['diff', '--name-only', mergeBase, upstreamRef], {
-    cwd: root,
-    encoding: 'utf8',
-  }).trim()
-  const diffFiles = diffOutput ? diffOutput.split('\n').map(s => s.trim()).filter(Boolean) : []
-  const diffSet = new Set(diffFiles)
-
-  // Scope A: whitelist (beta↔huaanwork 22 + stable↔beta 19 -> deduplicated 36)
-  const norm = p => (p.startsWith('src/') || p.startsWith('scripts/')) ? p : `src/${p}`
-  const whitelistSet = new Set([
-    ...PAIRS[0].allowedDifferences.map(norm),
-    ...PAIRS[1].allowedDifferences.map(norm),
-  ])
-  const whitelistHitsSet = new Set()
-  for (const file of diffFiles) {
-    for (const pkg of ['dsh-plugin-desktop', 'dsh-plugin-desktop-beta']) {
-      if (file.startsWith(`${pkg}/`)) {
-        const rel = file.slice(pkg.length + 1)
-        if (whitelistSet.has(rel)) {
-          whitelistHitsSet.add(rel)
-        }
-      }
-    }
-  }
-  const whitelistHits = [...whitelistHitsSet].sort()
-
-  // Scope B: threePackageIdentical (src/ files identical across all 3 packages)
-  const pkgs = ['dsh-plugin-desktop', 'dsh-plugin-desktop-beta', 'dsh-plugin-huaanwork']
-  const sets = pkgs.map(p => new Set(listFiles(join(root, p, 'src'))))
-  const union = new Set([...sets[0], ...sets[1], ...sets[2]])
-  const inAll = [...union].filter(f => sets.every(s => s.has(f)))
-  const sha = f => pkgs.map(p => createHash('sha256').update(readFileSync(join(root, p, 'src', f))).digest('hex'))
-  const identical = inAll.filter(f => {
-    const h = sha(f)
-    return h[0] === h[1] && h[1] === h[2]
-  }).sort()
-
-  const threePkgHitsSet = new Set()
-  for (const f of identical) {
-    if (diffSet.has(`dsh-plugin-desktop/src/${f}`) || diffSet.has(`dsh-plugin-desktop-beta/src/${f}`)) {
-      threePkgHitsSet.add(f)
-    }
-  }
-  const threePkgHits = [...threePkgHitsSet].sort()
-
-  // Scope C: permanentOverride (parsed from docs/upstream-sync.md Section 6)
-  const docText = readFileSync(join(root, 'docs/upstream-sync.md'), 'utf8')
-  const sec6Match = docText.match(/## 6\.\s+永久 Fork-Owned Override 清单([\s\S]*?)(?=## 7\.|$)/u)
-  if (!sec6Match) {
-    throw new Error('docs/upstream-sync.md Section 6 not found')
-  }
-  const rawMatches = [...sec6Match[1].matchAll(/`([^`\n]+)`/gu)].map(m => m[1].trim())
-  const overridePaths = [...new Set(rawMatches.filter(p => p.includes('/') && !p.includes(' ')))].sort()
-  const overrideHits = overridePaths.filter(p => diffSet.has(p)).sort()
-
+  })
   return {
     ok: true,
-    asOf,
-    upstreamCommitDate,
-    ref: upstreamRef,
+    asOf: new Date().toISOString(),
+    repository: config.repository,
+    ref,
     upstreamSha,
-    mergeBase,
-    mergeBaseCommitDate,
-    behindCount,
-    aheadCount,
-    overlap: {
-      whitelist: {
-        hits: whitelistHits.length,
-        denominator: whitelistSet.size,
-        hitFiles: whitelistHits,
-      },
-      threePackageIdentical: {
-        hits: threePkgHits.length,
-        denominator: identical.length,
-        hitFiles: threePkgHits,
-      },
-      permanentOverride: {
-        hits: overrideHits.length,
-        denominator: overridePaths.length,
-        hitFiles: overrideHits,
-      },
-    },
+    upstreamCommitDate: git(['show', '-s', '--format=%cI', upstreamSha]),
+    reviewedCommit: config.reviewedCommit,
+    sourcePackage: config.sourcePackage,
+    pendingCount: commits.length,
+    commits,
   }
-}
-
-function formatHitsList(files) {
-  if (!files || files.length === 0) return ''
-  const limit = 20
-  const shown = files.slice(0, limit)
-  const truncation = files.length > limit ? `\n        … and ${String(files.length - limit)} more` : ''
-  return `\n      hits (${String(files.length)}):\n` + shown.map(f => `        - ${f}`).join('\n') + truncation
 }
 
 export function formatDashboard(result) {
-  if (!result.ok) {
-    return `upstream-sync-dashboard: error: ${result.error}\n`
+  if (!result.ok) return `upstream-sync-dashboard: error: ${result.error}\n`
+  const lines = [
+    `upstream-sync-dashboard: as-of ${result.asOf} / upstream commit ${result.upstreamCommitDate}`,
+    `  ref      = ${result.ref} @ ${result.upstreamSha}`,
+    `  reviewed = ${result.reviewedCommit}`,
+    `  source   = ${result.sourcePackage}`,
+    `  pending  = ${String(result.pendingCount)} commits`,
+  ]
+  for (const commit of result.commits) {
+    lines.push(`  ${commit.sha} ${commit.date} ${commit.subject}`)
+    for (const file of commit.files.watched) lines.push(`    watched: ${file}`)
+    for (const file of commit.files.unwatched) lines.push(`    unwatched: ${file}`)
+    if (commit.files.watched.length + commit.files.unwatched.length === 0) lines.push('    (zero direct files)')
   }
-
-  const { whitelist, threePackageIdentical, permanentOverride } = result.overlap
-  return (
-    `upstream-sync-dashboard: as-of ${result.asOf} / upstream commit ${result.upstreamCommitDate}\n` +
-    `  ref        = ${result.ref} @ ${result.upstreamSha}\n` +
-    `  merge-base = ${result.mergeBase} (${result.mergeBaseCommitDate})\n` +
-    `  behind     = ${String(result.behindCount)} commits   ahead = ${String(result.aheadCount)} commits\n` +
-    `  overlap (三个口径分别计,不相加):\n` +
-    `    whitelist            : ${String(whitelist.hits)}/${String(whitelist.denominator)}  (beta↔huaanwork 22 + stable↔beta 19, 去重后 ${String(whitelist.denominator)})` +
-    formatHitsList(whitelist.hitFiles) + '\n' +
-    `    threePackageIdentical: ${String(threePackageIdentical.hits)}/${String(threePackageIdentical.denominator)}  (三包 src/ 逐字节相同的隐含同步面)` +
-    formatHitsList(threePackageIdentical.hitFiles) + '\n' +
-    `    permanentOverride    : ${String(permanentOverride.hits)}/${String(permanentOverride.denominator)}  (docs/upstream-sync.md §6 列的 fork-owned 文件)` +
-    formatHitsList(permanentOverride.hitFiles) + '\n' +
-    `  note: read-only. Not wired into any gate. Re-run after \`git fetch upstream\` and record the as-of pair.\n`
-  )
+  lines.push('  note: read-only; not a gate. Re-run after git fetch upstream and record as-of plus full SHAs.')
+  return `${lines.join('\n')}\n`
 }
 
 const isDirectExecution = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 if (isDirectExecution) {
-  const result = collectUpstreamLag({ root: repoRoot })
+  const args = process.argv.slice(2)
+  if (args.some(arg => arg !== '--json') || args.length > 1) throw new Error('usage: node scripts/upstream-sync-dashboard.mjs [--json]')
+  const result = collectUpstreamReview({ root: repoRoot })
   if (!result.ok) {
-    process.stderr.write(`upstream-sync-dashboard: error: ${result.error}\n`)
+    process.stderr.write(formatDashboard(result))
     process.exit(1)
   }
-  process.stdout.write(formatDashboard(result))
+  process.stdout.write(args.includes('--json') ? `${JSON.stringify(result, null, 2)}\n` : formatDashboard(result))
 }

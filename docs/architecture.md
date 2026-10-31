@@ -53,26 +53,26 @@ profile 的名字和绝对目录由 `desktopProfiles.current` 提供，不能从
 
 `desktopPnpm.run()` 直接跑内置 pnpm；`runPlugin()` 通过打包的 DSH CLI 维持 profile 初始化、相对 source 和 bundle reconcile。两者都属于当前 generation，并由 subprocess service 管理完整进程树。
 
-Launcher 私有的 `desktopRuntime`、`desktopPnpmBootstrap`、Electron executable、Node helper 和 ABI 环境不是第三方 API。稳定包的公开 contract 是 `dsh-plugin-desktop/profile-service` 与 `dsh-plugin-desktop/pnpm`；Beta 包提供对应的 `dsh-plugin-desktop-beta/*` 路径。
+Launcher 私有的 `desktopRuntime`、`desktopPnpmBootstrap`、Electron executable、Node helper 和 ABI 环境不是第三方 API。当前活跃桌面包 `dsh-plugin-huaanwork` 通过 `dsh-plugin-huaanwork/profile-service` 与 `dsh-plugin-huaanwork/pnpm` 暴露公开 contract；`dsh-plugin-desktop/profile-service`、`dsh-plugin-desktop/pnpm` 与 `dsh-plugin-desktop-beta/*` 是上游包和已退役 Beta 变体的同名 npm contract，只作为历史身份保留，不是本仓的构建目标。
 
 ## 打包与运行时闭包
 
 发布包使用 Electron Builder 和 `app.asar`，但需要物理 unpack 的依赖（例如 pnpm、node-pty、Windows ACL/native 文件）会放在 `app.asar.unpacked`。Packaged runtime gate 会检查 ASAR 入口和物理运行时入口，profile fallback 不能把符号链接指向无法被 Node 解析的虚拟 ASAR 路径。
 
-根 workspace 使用 Yarn；固定的 `deepseek-harness/` 子模块保持上游自己的 pnpm workspace。稳定版与 Beta 的桌面代码分别位于 `dsh-plugin-desktop/` 和 `dsh-plugin-desktop-beta/`，共享功能由变体同步检查约束；两者都不修改上游子模块。
+根 workspace 使用 Yarn；固定的 `deepseek-harness/` 子模块保持上游自己的 pnpm workspace。桌面代码只有 `dsh-plugin-huaanwork/`，任何桌面代码都不修改上游子模块。
 
 ## 发行通道协议
 
-稳定版与 Beta 是两个实体 npm 包和两个系统应用，不由 Git 分支区分。稳定版使用 `dsh-plugin-desktop`、`DSH Desktop` 与 `ai.deepseek.dsh.desktop`；Beta 使用 `dsh-plugin-desktop-beta`、`DSH Desktop Beta` 与 `ai.deepseek.dsh.desktop.beta`。`upstream.json` 同时记录两个通道的上游版本、提交和 vendored runtime 清单，根级精确 resolution 保证每个 workspace 只能解析自己的 DSH 运行时。
+当前产品只发布 `huaanwork` 一个发行通道：它是 `dsh-plugin-huaanwork` npm 包与 `HuaAnWork` 系统应用，身份以 `dsh-plugin-huaanwork/src/product-identity.ts` 为唯一来源。`upstream.json` 的 `activeChannel` 也是 `huaanwork`，且它的 `channels` 只含 `huaanwork` 这一条通道记录；历史 Stable 腿不以通道记录形式存在，只作为 `marketPeerPolicy.stableHistorical` 的 market peer 字符串 `0.2.0-rc.2` 保留。`DESKTOP_RELEASE_IDENTITIES` 的 `stable` / `beta` 项只是历史身份，不代表本仓仍在构建对应桌面产品。
 
-版本检查和安装包下载均携带 `X-DSH-Desktop-Channel: stable|beta`。检查请求还携带当前版本；下载请求携带 `X-DSH-Desktop-Target-Version`，服务端必须返回与请求一致的通道与版本。没有通道 header 的旧客户端按稳定版处理；Beta 客户端则必须收到明确的 `channel: "beta"` 响应。稳定通道只接受正式 SemVer，Beta 通道只接受 `-beta.N`。Beta 自动更新只查询 Beta；“安装稳定版”是独立的显式操作，允许选择较低版本并将稳定版安装在 Beta 旁边。
+版本检查和安装包下载均携带 `X-DSH-Desktop-Channel: huaanwork`。检查请求还携带当前版本；下载请求携带 `X-DSH-Desktop-Target-Version`，服务端必须返回与请求一致的通道与版本。响应中的通道或版本形状与请求不符时，客户端把响应视为无效，不会静默跨通道下载。
 
-服务端必须在 Beta 发布前先支持上述选择与回显规则，并为两个通道分别准备完整的平台产物。否则客户端会把响应视为无效，不会静默跨通道下载。
+服务端必须在发布任何版本前支持上述回显与选择规则，并为每个平台准备完整产物。
 
 ## 维护者深入阅读
 
-- [Desktop service contract](../dsh-plugin-desktop/docs/plugin-services.md)
-- [Package README](../dsh-plugin-desktop/README.md)
+- [Desktop service contract](../dsh-plugin-huaanwork/docs/plugin-services.md)
+- [Package README](../dsh-plugin-huaanwork/README.md)
 - [Pinned upstream and isolated Yarn workspace](../.agents/notes/implemented/process/2026-08-15-pinned-upstream-and-isolated-yarn-workspace.md)
 - [Profile and pnpm services decision](../.agents/notes/implemented/architecture/2026-08-15-desktop-profile-and-pnpm-services.md)
 - [Advanced shell decision](../.agents/notes/implemented/architecture/2026-08-15-desktop-advanced-shell.md)

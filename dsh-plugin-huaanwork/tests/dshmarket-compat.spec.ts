@@ -46,12 +46,6 @@ vi.mock('undici', async importOriginal => ({
   ...await importOriginal<Record<string, unknown>>(),
   fetch: registryFetch,
 }))
-// dshmarket 1.66.22 ships its own undici, so the hoisted mock above does not
-// see the registry calls. Mock that copy too.
-vi.mock('../node_modules/dshmarket/node_modules/undici', async importOriginal => ({
-  ...await importOriginal<Record<string, unknown>>(),
-  fetch: registryFetch,
-}))
 const temporaryProfiles: string[] = []
 
 afterEach(() => {
@@ -105,17 +99,18 @@ function installMarketFixture(profileDir: string, options: { validPatch: boolean
   if (options.validPatch) writeFileSync(join(packageDir, 'cordis.patch.yml'), '[]\n')
 }
 
-async function mountUpdateRoute(
+async function mountMarketRoutes(
   profileDir: string,
   commandRuntime: MarketCommandRuntime,
-): Promise<{ route: MarketRoute; dispose: () => void }> {
+  channel?: 'beta',
+): Promise<{ routes: Map<string, MarketRoute>; dispose: () => void }> {
   const require = createRequire(import.meta.url)
   const manifest = require.resolve('dshmarket/package.json')
   const routesUrl = pathToFileURL(join(dirname(manifest), 'lib', 'routes.js')).href
   const loaded = await import(routesUrl) as {
     mountMarketRoutes: (
       host: object,
-      config: { profile: string; profileDirectory: string; allowRestart: boolean },
+      config: { profile: string; profileDirectory: string; allowRestart: boolean; channel?: 'beta' },
       commandRuntime: MarketCommandRuntime,
       agentsLookup: () => { list(): unknown[] },
     ) => () => void
@@ -130,10 +125,31 @@ async function mountUpdateRoute(
     },
     loader: { entries: () => [] },
     plugin: () => ({ await: async () => undefined, dispose: () => undefined }),
-  }, { profile: 'desktop', profileDirectory: profileDir, allowRestart: false }, commandRuntime, () => ({ list: () => [] }))
+  }, {
+    profile: 'desktop',
+    profileDirectory: profileDir,
+    allowRestart: false,
+    ...(channel === undefined ? {} : { channel }),
+  }, commandRuntime, () => ({ list: () => [] }))
+  return { routes, dispose }
+}
+
+async function mountUpdateRoute(
+  profileDir: string,
+  commandRuntime: MarketCommandRuntime,
+): Promise<{ route: MarketRoute; dispose: () => void }> {
+  const { routes, dispose } = await mountMarketRoutes(profileDir, commandRuntime)
   const route = routes.get('/dsh-market/update')
   if (route === undefined) throw new Error('update route was not registered')
   return { route, dispose }
+}
+
+function writeEmptyProfile(profileDir: string): void {
+  writeProfileManifest(profileDir, {
+    name: 'dsh-profile-desktop',
+    private: true,
+    dependencies: {},
+  })
 }
 
 async function invokeUpdate(route: MarketRoute, compatVersion?: string, name = 'dshmarket'): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -213,6 +229,54 @@ describe('dsh-market Desktop install compatibility', () => {
     const client = readFileSync(join(dirname(manifest), 'client', 'client.js'), 'utf8')
     expect(client).toContain('installed["dshmarket"] !== void 0 || updates["dshmarket"] !== void 0')
     expect(client).toContain('const status = updates[self]')
+  })
+
+  it('checks the market against the selected beta channel even when the Profile omits it', async () => {
+    for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) {
+      vi.stubEnv(name, '')
+    }
+    registryFetch.mockImplementation(async input => {
+      const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+      return new Response(
+        JSON.stringify({ version: url.endsWith('/dshmarket/beta') ? '2.0.0-beta.1' : '1.0.0' }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    })
+    const profileDir = mkdtempSync(join(tmpdir(), 'dshmarket-beta-channel-'))
+    temporaryProfiles.push(profileDir)
+    writeEmptyProfile(profileDir)
+    const runPlugin = vi.fn(async (): Promise<RouteRuntimeResult> => ({
+      exitCode: 0, timedOut: false, cancelled: false, stdout: '', stderr: '',
+    }))
+    const { routes, dispose } = await mountMarketRoutes(profileDir, {
+      runPlugin,
+      probePnpm: async () => true,
+      provisionPnpm: async () => ({ ok: true }),
+      cancelActive: () => false,
+    }, 'beta')
+
+    const route = routes.get('/dsh-market/updates')
+    if (route === undefined) throw new Error('updates route was not registered')
+    let status = 0
+    let body = ''
+    await route(
+      { method: 'GET', url: '/dsh-market/updates?force=1' },
+      {
+        writeHead(code: number) { status = code },
+        end(chunk?: string) { body = chunk ?? '' },
+      },
+    )
+    dispose()
+
+    expect(status).toBe(200)
+    expect(JSON.parse(body).updates.dshmarket).toMatchObject({
+      latest: '2.0.0-beta.1',
+      updateAvailable: true,
+    })
+    expect(registryFetch.mock.calls.some(([input]) => {
+      const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+      return url.endsWith('/dshmarket/beta')
+    })).toBe(true)
   })
 
   it.each([

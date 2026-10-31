@@ -1,8 +1,8 @@
 # HuaAnWork 单桌面、单代码维护两阶段设计
 
-> 状态：2026-10-26 设计已获用户批准，待实施计划。
-> 实施分支：`refactor/huaanwork-single-desktop`。
-> 基线：`1895210b749d3af028e3977ea165f5f0a267a68e`（设计调查时的 master HEAD）。
+> 状态：2026-10-26 设计已获用户批准；2026-10-29 按复核意见修订，待实施计划。
+> 实施分支：开工时新建 `refactor/huaanwork-single-desktop-maintenance`；旧名 `refactor/huaanwork-single-desktop` 已随 PR #21 的合并历史使用，不续用。
+> 基线：`b5ef3e84a7951941480b50a8749fe6714b8c9fc7`（2026-10-29 复核时的 master HEAD；实施计划开工时须再次重钉）。
 
 ## 1. 背景与问题
 
@@ -55,6 +55,7 @@
 最终仓库只有 `dsh-plugin-huaanwork/` 一个自有、可编辑的活跃桌面源码树；只读上游子模组不计入自有实现数量。以下输入不是另外的桌面产品，继续保留：
 
 - `dsh-community-market/` 及 HuaAnWork 使用的 contracts；
+- `dsh-community-fabric/` 的社区互操作 RFC 文档骨架；继续作为 workspace 参与根 `check`，不声明可加载入口；
 - `market-server/`、`update-server/`、`agent-catalog-server/`、`agent-catalog-admin/`；
 - `packages/` 下的 `@huaanwork/*` 与签名、包格式模块；
 - `vendor/dsh-runtime/` 中仍有消费方的运行时制品；
@@ -81,7 +82,7 @@
 - 从根 workspaces 移除三个参考桌面包。
 - 根 `build`、`typecheck`、`test`、`check` 只检查 HuaAnWork 和仍需保留的非桌面 workspaces。
 - 无后缀 `dev`、`start`、`package:dir`、`dist:mac*`、`dist:win*` 改为 HuaAnWork；移除 Stable、Beta、Next 的活跃命令。
-- HuaAnWork 没有 Linux 发行线，因此移除 Stable/Beta 的 Linux 命令和 CI job，不新增虚假的 HuaAnWork Linux 验证。
+- HuaAnWork 没有 Linux 发行线，因此移除 Stable 的根 Linux 命令以及 Stable/Beta 的 Linux CI job 及其矩阵，不新增虚假的 HuaAnWork Linux 验证。
 - CI 删除 Stable/Beta 矩阵和 Next 专项步骤；AA-skip 处理只修改 HuaAnWork。
 - 分支 CI 通过既有 `workflow_dispatch` 触发，不为了本项工作放宽成分支 push 自动运行。
 
@@ -91,11 +92,11 @@
 - AA 准备只读取和验证 HuaAnWork；受影响的 artifact、provenance、manifest 与 lockfile 按现有 AA 纪律一起更新。
 - `verify-layout.mjs` 改为单活跃桌面拓扑，不再读取或验证参考包。
 - `activeChannel` 改为 `huaanwork`，`check:vendored-runtime` 只检查该通道。
-- `dsh-community-market` 的 DSH 依赖同步归属从 Beta 改为 HuaAnWork；阶段 A 保持当前已解析运行时版本不变。
+- `dsh-community-market` 的 DSH 依赖同步与校验归属从 Beta 改为 HuaAnWork；阶段 A 保留三通道，现有 market peer range 的构造及值不变，已解析运行时版本不变；其旧通道派生逻辑在阶段 B 按 §7.1 处置。
 - 多桌面 variant 守卫、漂移分类和仅供 Stable/Beta/Next 使用的工具退出活跃门禁；根测试 glob 不得暗中继续执行这些参考工具。
 - Stable/Beta/Next 的通用图标导出检查退出根门禁。HuaAnWork 继续使用自己的 `generate-mac-app-icon.mjs`、`gen-windows-ico`、托盘生成和包测试，不复制一套不需要的新图标流水线。
 - HuaAnWork 包测试中读取 Stable/Beta 清单、图标和旧 CI 矩阵的断言改成单产品结构与行为断言。
-- 根说明和 Agent 规则改成单一活跃桌面；历史设计和证据文档保留原貌。
+- 根说明和 Agent 规则改成单一活跃桌面。将 `AGENTS.md` 流程段及活债表中涉及 Stable/Beta/Next、variant 守卫和跨包读取的条目逐行标记为“关闭 / 改写 / 保留”，其余债项确认保留；不得以“历史文档保留”为由留下指向已退役命令的活规则。指向已退役命令、门禁和跨包读取的规则随阶段 A 改写；zero-touch 等参考目录保护规则在阶段 A 继续有效，阶段 B 删除目录后关闭。阶段 A 仍不修改参考树 tracked 内容。历史设计和证据文档保留原貌。
 
 ### 5.4 阶段 A 的行为约束
 
@@ -112,13 +113,14 @@
 2. `corepack yarn check`
 3. `corepack yarn typecheck`
 4. `corepack yarn test`
-5. 本机 `corepack yarn dist:mac-smoke:huaanwork`
+5. 本机 `corepack yarn dist:mac-smoke:huaanwork`；仅当该检出的 provisioning 守卫仍有缺项时，允许使用 `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE=1 corepack yarn dist:mac-smoke:huaanwork`
 6. 推送阶段 A 分支，在该 SHA 上手动 dispatch 完整 CI，所有保留 job 成功，包括 Windows installer/portable 与 macOS 打包
 
 证据口径：
 
 - Windows 证据是现有 CI 的打包与运行时检查，不声称真实第二台机器或跨机器验收已经通过。
 - macOS 证据是 unsigned smoke，不声称签名或公证已经通过。
+- provisioning 证据须记录守卫结果、是否使用上述豁免及当时缺项；使用豁免时只能写 unsigned / unprovisioned smoke，不得写成已完成 provisioning 或可发行。静态守卫通过不等于内网部署交付或 origin 可达性验收。
 - 任何一项失败都停留在阶段 A；修复后重新验证受影响门禁，不用阶段 B 的删除掩盖问题。
 - 只有阶段 A SHA、CI run 和本地验证结果落盘后，才允许开始阶段 B。
 
@@ -128,6 +130,7 @@
 
 - 从已验证的阶段 A SHA 继续，删除三个参考桌面目录。
 - 清理剩余专用脚本、测试、workspace/CI 引用和失效规则。
+- 在删除 Stable/Beta 通道元数据或执行任何 `sync-vendored-runtime.mjs --write` 前，先裁定并改造 `dsh-community-market` 的 peer range 政策：活跃 HuaAnWork runtime 必须被覆盖；Stable 历史腿与 dormant alpha.1 腿分别按消费方证据决定保留或退役；保留历史腿时改为显式政策字段或常量，不得继续从待删除通道推导。同步更新构造、测试和验证。此项是删除旧通道元数据的前置门，不阻断阶段 B 的调查和其他清理工作。
 - `upstream.json` 只保留 HuaAnWork 活跃通道。
 - 对旧 runtime resolutions、`vendor/dsh-runtime/` 和 `patches/` 先做消费方扫描；只删除证明无消费方的条目和资产。
 - 重新生成 lockfile，并验证市场、AA 和 HuaAnWork 的运行时闭包。
@@ -148,12 +151,17 @@
 
 改造现有 `scripts/upstream-sync-dashboard.mjs`：
 
+- 移除对 variant 守卫 `PAIRS` 的 import、三包 `src/` 磁盘扫描及对应报告面，不让这些已退役能力在参考目录缺失后静默退化为空报告；
 - 按 `reviewedCommit..upstream/master` 报告待审提交和触及文件；
 - remote 或 ref 缺失时明确失败，不静默输出零；
 - 不再用 merge-base 落后量表示选择性移植后的未处理量，因为移植提交不形成祖先关系；
 - 保留 as-of 时间和完整 SHA 的报告纪律。
 
 每批上游处置在 `docs/evidence/` 记录“已移植”或“不移植及理由”以及对应 upstream SHA。需要的改变进入 HuaAnWork，不再整仓合并 Stable/Beta/Next。只有整批提交都完成处置后才推进 `reviewedCommit`。
+
+三包 variant 守卫和 dashboard Scope B 随参考树删除退役后，fork 内三包同形与漂移的机器核对随之消失。`watchedPaths` 和处置证据只提供上游覆盖与分诊，不验证移植的完整性或等价性；`docs/upstream-sync.md` 必须明示这层“由机器核对转为人工逐提交处置”的能力变化，避免后人误补已失去比较对象的三包守卫。若需要移植等价性的机器验证，须另行设计。
+
+实施计划的排期以 `reviewedCommit..upstream/master` 的首期实际货架实测为准，逐提交、逐文件列出移植或跳过裁定。既有功能对齐欠账中的“新增 15 + 合并 25”只描述存量差异，历史整仓冲突数和 runtime 补丁重锚人日也只作背景参照，不得直接换算为首期选择性移植工作量。
 
 `deepseek-harness` 的运行时更新与 outer desktop 的选择性移植保持两条独立证据链，子模组 pin 仍单独提交。
 
@@ -165,7 +173,7 @@
 2. `corepack yarn check`
 3. `corepack yarn typecheck`
 4. `corepack yarn test`
-5. 本机 `corepack yarn dist:mac-smoke:huaanwork`
+5. 本机 `corepack yarn dist:mac-smoke:huaanwork`；仅当该检出的 provisioning 守卫仍有缺项时，允许使用 `HUAANWORK_ALLOW_UNPROVISIONED_SMOKE=1 corepack yarn dist:mac-smoke:huaanwork`
 6. 阶段 B SHA 上的完整分支 CI
 
 另增加结构验收：
@@ -173,6 +181,7 @@
 - 三个参考桌面目录不存在；
 - 根 workspaces 不含三个包名；
 - 活跃脚本、测试和 CI 不依赖已删除目录；
+- `dsh-community-market` 的 peer range 与已裁定政策一致，不再从已删除通道推导；
 - 允许的历史兼容字符串不被误报为另一个桌面实现；
 - `desktop-upstream.json` 的基线和 dashboard 报告可由本地 ref 复现。
 
@@ -202,7 +211,7 @@
 | `.github/workflows/ci.yml` | 只保留 HuaAnWork 和共享检查 | 复核无残留矩阵或步骤 |
 | `upstream.json` | `activeChannel: huaanwork` | 只保留活跃通道 |
 | `desktop-upstream.json` | 不引入 | 新增选择性移植审阅基线 |
-| market、AA、runtime 脚本 | 改为 HuaAnWork 单活跃输入 | 清理旧通道与无消费方资产生成规则 |
+| market、AA、runtime 脚本 | 改为 HuaAnWork 单活跃输入 | 先落实 market peer range 政策，再清理旧通道与无消费方资产生成规则 |
 | variant、icons、layout、README 等根工具 | 退役多桌面活跃职责，保留 HuaAnWork 自有链 | 删除剩余参考专用实现 |
 | `dsh-plugin-huaanwork/tests/` | 改单产品拓扑和行为断言 | 增加目录与依赖消失的结构断言 |
 | 三个参考桌面目录 | tracked 内容不变 | 删除 |

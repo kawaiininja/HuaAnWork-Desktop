@@ -13,19 +13,13 @@ const fail = message => { throw new Error(`verify-layout: ${message}`) }
 
 const workspace = readJson('package.json')
 const upstream = readJson('upstream.json')
-const stablePlugin = readJson('dsh-plugin-desktop/package.json')
-const betaPlugin = readJson('dsh-plugin-desktop-beta/package.json')
 const huaanworkPlugin = readJson('dsh-plugin-huaanwork/package.json')
-const nextDesktop = readJson('dsh-desktop-next/package.json')
-const nextReference = readJson('dsh-desktop-next/upstream-reference.json')
 const fabric = readJson('dsh-community-fabric/package.json')
 const market = readJson('dsh-community-market/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
 
-if (stablePlugin.name !== 'dsh-plugin-desktop') fail('the stable Desktop workspace must retain dsh-plugin-desktop')
-if (betaPlugin.name !== 'dsh-plugin-desktop-beta') fail('the Beta Desktop workspace must publish as dsh-plugin-desktop-beta')
 if (huaanworkPlugin.name !== 'dsh-plugin-huaanwork') fail('the HuaAnWork Desktop workspace must publish as dsh-plugin-huaanwork')
-if (!['stable', 'beta', 'huaanwork'].includes(upstream.activeChannel)) fail('the pinned upstream checkout must follow a declared release channel')
+if (upstream.activeChannel !== 'huaanwork') fail('the pinned upstream checkout must follow the huaanwork channel')
 const activeUpstream = upstream.channels?.[upstream.activeChannel]
 if (activeUpstream === undefined) fail('the active upstream channel is missing')
 
@@ -33,9 +27,6 @@ if (workspace.packageManager !== 'yarn@4.18.0') {
   fail('the product workspace must pin yarn@4.18.0')
 }
 if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
-  'dsh-plugin-desktop',
-  'dsh-plugin-desktop-beta',
-  'dsh-desktop-next',
   'dsh-plugin-huaanwork',
   'dsh-community-fabric',
   'dsh-community-market',
@@ -50,12 +41,9 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'agent-catalog-server',
   'agent-catalog-admin',
 ])) {
-  fail('the root Yarn workspace must contain the desktop, community-fabric, community-market, market-server, update-server, catalog-signing, agent-package-format, agent-catalog-server, and agent-catalog-admin packages')
+  fail('the root Yarn workspace must contain only the HuaAnWork desktop, community-fabric, community-market, market-server, update-server, catalog-signing, agent-package-format, agent-catalog-server, and agent-catalog-admin packages')
 }
 for (const [name, manifest] of [
-  ['dsh-plugin-desktop', stablePlugin],
-  ['dsh-plugin-desktop-beta', betaPlugin],
-  ['dsh-desktop-next', nextDesktop],
   ['dsh-plugin-huaanwork', huaanworkPlugin],
   ['dsh-community-fabric', fabric],
   ['dsh-community-market', market],
@@ -77,12 +65,6 @@ if (claudeTarget !== 'AGENTS.md') {
 for (const legacyFile of [
   'pnpm-lock.yaml',
   'pnpm-workspace.yaml',
-  'dsh-plugin-desktop/pnpm-lock.yaml',
-  'dsh-plugin-desktop/pnpm-workspace.yaml',
-  'dsh-plugin-desktop-beta/pnpm-lock.yaml',
-  'dsh-plugin-desktop-beta/pnpm-workspace.yaml',
-  'dsh-desktop-next/pnpm-lock.yaml',
-  'dsh-desktop-next/pnpm-workspace.yaml',
   'dsh-plugin-huaanwork/pnpm-lock.yaml',
   'dsh-plugin-huaanwork/pnpm-workspace.yaml',
   'dsh-community-fabric/pnpm-lock.yaml',
@@ -104,9 +86,6 @@ if (typeof upstreamPackage.packageManager !== 'string' || !upstreamPackage.packa
 
 for (const [owner, manifest] of [
   ['root', workspace],
-  ['stable desktop', stablePlugin],
-  ['beta desktop', betaPlugin],
-  ['next desktop', nextDesktop],
   ['huaanwork desktop', huaanworkPlugin],
   ['fabric', fabric],
   ['market', market],
@@ -139,7 +118,7 @@ if (run('git', ['remote', 'get-url', 'origin'], upstreamDir) !== upstream.reposi
 if (upstreamPackage.version !== activeUpstream.sourceVersion) {
   fail('deepseek-harness package version differs from upstream.json')
 }
-for (const [channel, plugin] of [['stable', stablePlugin], ['beta', betaPlugin], ['huaanwork', huaanworkPlugin]]) {
+for (const [channel, plugin] of [['huaanwork', huaanworkPlugin]]) {
   const metadata = upstream.channels?.[channel]
   if (metadata?.package !== plugin.name) fail(`${channel} upstream metadata points at the wrong package`)
   for (const name of Object.keys(plugin.dependencies).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))) {
@@ -149,9 +128,4 @@ for (const [channel, plugin] of [['stable', stablePlugin], ['beta', betaPlugin],
   }
 }
 
-if (nextDesktop.name !== 'dsh-desktop-next' || nextDesktop.private !== true) fail('Next must remain a private experimental package')
-for (const [name, version] of Object.entries(nextDesktop.dependencies)) {
-  if ((name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) && version !== nextReference.version) fail(`Next ${name} must match the pinned upstream family`)
-}
-
-process.stdout.write(`verify-layout: all Desktop workspaces including Next and upstream ${activeUpstream.commit.slice(0, 10)} are consistent\n`)
+process.stdout.write(`verify-layout: HuaAnWork and retained workspaces are consistent with upstream ${activeUpstream.commit.slice(0, 10)}\n`)
