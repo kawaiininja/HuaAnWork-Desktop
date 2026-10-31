@@ -113,7 +113,7 @@ function splitWorkflowJobs(workflow: string): Record<string, string> {
   const jobsStart = workflow.search(/^jobs:$/mu)
   assert.notStrictEqual(jobsStart, -1, 'the workflow must have a top-level jobs: key')
   const body = workflow.slice(jobsStart)
-  const marks = [...body.matchAll(/^ {2}([A-Za-z0-9_-]+):$/gmu)]
+  const marks = [...body.matchAll(/^ {2}["']?([A-Za-z0-9_-]+)["']?:$/gmu)]
   const out: Record<string, string> = {}
   marks.forEach((m, i) => {
     out[m[1]!] = body.slice(m.index, marks[i + 1]?.index ?? body.length)
@@ -1136,6 +1136,19 @@ describe('published package surface', () => {
     expect(scripts['dist:mac-smoke:huaanwork']).toContain('huaanwork-verify-provisioning.mjs --smoke')
   })
 
+  it('parses quoted workflow job keys before comparing the job set', () => {
+    const jobs = splitWorkflowJobs([
+      'jobs:',
+      '  plain:',
+      '    runs-on: ubuntu-latest',
+      '  "quoted-job":',
+      '    runs-on: ubuntu-latest',
+      "  'single-quoted':",
+      '    runs-on: ubuntu-latest',
+    ].join('\n'))
+    expect(Object.keys(jobs)).toEqual(['plain', 'quoted-job', 'single-quoted'])
+  })
+
   it('runs the HuaAnWork platform package gates before reusing native packaging outputs', () => {
     const jobs = splitWorkflowJobs(ciWorkflow)
     expect(jobs['desktop-windows'], 'ci.yml must define a "desktop-windows" job').toBeDefined()
@@ -1150,7 +1163,7 @@ describe('published package surface', () => {
     ])
     // `check` stays the plain root gate: the Chromium install for the retired Next
     // window regression used to live here, so a browser install must not reappear.
-    expect(jobs.check).toContain('run: yarn check')
+    expect(jobs.check).toMatch(/^ {8}run: yarn check$/mu)
     expect(jobs.check).not.toMatch(/chromium|playwright install/iu)
 
     expect(windowsJob).not.toContain('- run: yarn check')

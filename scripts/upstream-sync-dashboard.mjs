@@ -11,9 +11,9 @@
  *    绝不写回任何状态。推进 `reviewedCommit` 是人工动作(见 docs/upstream-sync.md)。
  * 2. 只依赖本地 git ref:本地已解析出 upstream/master 时可完全离线工作(读数只是
  *    最后一次 fetch 的陈旧值)。只有缺少该 ref、remote URL 与配置不符、reviewedCommit
- *    不是该 ref 的祖先,或 watchedPaths 的某个非目录型条目在 reviewedCommit 解析不到
- *    文件时,才报错并以非零码退出,绝不静默输出 0。因此【绝对不得接进 package.json
- *    任何 scripts,也不得接进任何 gate】。
+ *    不是该 ref 的祖先,或 watchedPaths 的某个目录型条目在 reviewedCommit 解析不到
+ *    tree、非目录型条目解析不到文件时,才报错并以非零码退出,绝不静默输出 0。因此
+ *    【绝对不得接进 package.json 任何 scripts,也不得接进任何 gate】。
  * 3. 不读取、不比较三个参考桌面树;watchedPaths 只提供覆盖面与分诊,不验证移植的
  *    完整性或等价性。
  * 4. 输出不截断:文本与 --json 都给出全部提交与全部 direct files、as-of 时间与完整
@@ -44,6 +44,9 @@ export function collectUpstreamReview({ root = repoRoot, upstreamRef, configPath
   const git = args => execFileSync('git', args, {
     cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   }).trim()
+  const gitRaw = args => execFileSync('git', args, {
+    cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
   let upstreamSha
   try {
     if (git(['remote', 'get-url', 'upstream']) !== config.repository) throw new Error('upstream remote URL differs from desktop-upstream.json')
@@ -63,18 +66,29 @@ export function collectUpstreamReview({ root = repoRoot, upstreamRef, configPath
     // 单路径(文件型)出现的 submodule pin,只有 040000 才是必须写成 `<path>/` 的目录。
     return mode === '100644' || mode === '100755' || mode === '120000' || mode === '160000'
   }
-  const invalidWatch = config.watchedPaths.find(path => !path.endsWith('/') && !isFileEntry(path))
+  const isDirectoryEntry = path => {
+    const [entry] = lines(git(['ls-tree', config.reviewedCommit, '--', path.replace(/\/$/u, '')]))
+    return entry?.startsWith('040000 tree ') === true
+  }
+  const invalidWatch = config.watchedPaths.find(path => path.endsWith('/') ? !isDirectoryEntry(path) : !isFileEntry(path))
   if (invalidWatch !== undefined) {
+    const shape = invalidWatch.endsWith('/') ? 'directory' : 'file'
+    const slashHint = shape === 'file' ? '; directory entries must end with "/"' : ''
     return {
       ok: false,
-      error: `watchedPaths entry "${invalidWatch}" in desktop-upstream.json does not resolve to a file at reviewedCommit ${config.reviewedCommit}; directory entries must end with "/"; see docs/upstream-sync.md`,
+      error: `watchedPaths entry "${invalidWatch}" in desktop-upstream.json does not resolve to a ${shape} at reviewedCommit ${config.reviewedCommit}${slashHint}; see docs/upstream-sync.md`,
     }
   }
   const shas = lines(git(['rev-list', '--reverse', '--topo-order', `${config.reviewedCommit}..${upstreamSha}`]))
   const isWatched = file => config.watchedPaths.some(path => path.endsWith('/') ? file.startsWith(path) : file === path)
   const commits = shas.map(sha => {
     const [date, subject] = git(['show', '-s', '--format=%cI%x00%s', sha]).split('\0')
-    const files = lines(git(['-c', 'core.quotePath=false', 'diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha]))
+    // `-c` includes what a merge commit itself introduced (conflict resolutions and
+    // merge-only files) without `-m`'s repetition of clean parent-side files. `-z`
+    // keeps paths byte-exact, including double quotes that `core.quotePath=false`
+    // still C-quotes.
+    const files = gitRaw(['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', '-c', '-z', sha])
+      .split('\0').filter(Boolean)
     return {
       sha, date, subject,
       files: {

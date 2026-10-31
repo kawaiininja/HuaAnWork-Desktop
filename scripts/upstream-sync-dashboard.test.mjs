@@ -22,7 +22,13 @@ function writeConfig(root, reviewedCommit, { path = 'desktop-upstream.json', wat
   }, null, 2)}\n`)
 }
 
-function dashboardFixture(t, { nonAscii = false, watchedPaths = ['scripts/'], gitlink = false } = {}) {
+function dashboardFixture(t, {
+  nonAscii = false,
+  quotedPath = false,
+  conflictMerge = false,
+  watchedPaths = ['scripts/'],
+  gitlink = false,
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'single-desktop-upstream-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
@@ -44,6 +50,9 @@ function dashboardFixture(t, { nonAscii = false, watchedPaths = ['scripts/'], gi
   // watchedPaths case below only exercises the missing-path branch and a regression that
   // dropped the mode whitelist would stay green.
   commit('docs/base.md', 'base docs\n', 'base docs')
+  // The default watchedPaths entry is directory-shaped, so it must also exist at
+  // reviewedCommit rather than being created only by the pending commits.
+  commit('scripts/base.mjs', 'export const base = true\n', 'base scripts')
   if (gitlink) {
     git(['update-index', '--add', '--cacheinfo', `160000,${GITLINK_COMMITS[0]},deepseek-harness`])
     git(['commit', '-m', 'base gitlink'])
@@ -51,16 +60,31 @@ function dashboardFixture(t, { nonAscii = false, watchedPaths = ['scripts/'], gi
   const reviewedCommit = git(['rev-parse', 'HEAD'])
   writeConfig(root, reviewedCommit, { watchedPaths })
   git(['checkout', '-b', 'side', reviewedCommit])
-  git(['commit', '--allow-empty', '-m', 'side'])
+  if (conflictMerge) {
+    commit('scripts/conflict.mjs', 'export const value = "side"\n', 'side conflict')
+    commit('docs/side-only.md', 'side only\n', 'side only')
+  } else {
+    git(['commit', '--allow-empty', '-m', 'side'])
+  }
   git(['checkout', 'master'])
   commit('scripts/change.mjs', 'export const value = 1\n', 'watched change')
   commit('docs/note.md', 'note\n', 'unwatched change')
   if (nonAscii) commit('docs/中文.md', '中文\n', 'non-ascii change')
+  if (quotedPath) commit('docs/say "hi".md', 'quoted\n', 'quoted path change')
+  if (conflictMerge) commit('scripts/conflict.mjs', 'export const value = "master"\n', 'master conflict')
   if (gitlink) {
     git(['update-index', '--cacheinfo', `160000,${GITLINK_COMMITS[1]},deepseek-harness`])
     git(['commit', '-m', 'gitlink bump'])
   }
-  git(['merge', '--no-ff', 'side', '-m', 'merge container'])
+  if (conflictMerge) {
+    assert.throws(() => git(['merge', '--no-ff', 'side', '-m', 'merge container']))
+    write('scripts/conflict.mjs', 'export const value = "resolved"\n')
+    write('docs/merge-only.md', 'merge only\n')
+    git(['add', 'scripts/conflict.mjs', 'docs/merge-only.md'])
+    git(['commit', '-m', 'merge container'])
+  } else {
+    git(['merge', '--no-ff', 'side', '-m', 'merge container'])
+  }
   const tip = git(['rev-parse', 'HEAD'])
   git(['update-ref', 'refs/remotes/upstream/master', tip])
   return { root, git, reviewedCommit, tip }
@@ -105,12 +129,53 @@ test('formats full SHAs and does not truncate files or require reference trees',
   assert.match(text, /docs\/note\.md/u)
 })
 
+test('reports merge-only and conflict-resolution files without repeating clean side changes', t => {
+  const { root } = dashboardFixture(t, { conflictMerge: true })
+  const result = collectUpstreamReview({ root })
+  assert.equal(result.ok, true, result.error)
+  const commit = result.commits.find(commit => commit.subject === 'merge container')
+  assert.deepEqual(commit.files, {
+    watched: ['scripts/conflict.mjs'],
+    unwatched: ['docs/merge-only.md'],
+  })
+})
+
 test('classifies non-ASCII paths without git quotePath escaping', t => {
   const { root } = dashboardFixture(t, { nonAscii: true, watchedPaths: ['docs/'] })
   const result = collectUpstreamReview({ root })
   assert.equal(result.ok, true, result.error)
   const commit = result.commits.find(commit => commit.subject === 'non-ascii change')
   assert.deepEqual(commit.files, { watched: ['docs/中文.md'], unwatched: [] })
+})
+
+test('classifies paths containing double quotes without C-style quoting', t => {
+  const { root } = dashboardFixture(t, { quotedPath: true, watchedPaths: ['docs/'] })
+  const result = collectUpstreamReview({ root })
+  assert.equal(result.ok, true, result.error)
+  const commit = result.commits.find(commit => commit.subject === 'quoted path change')
+  assert.deepEqual(commit.files, { watched: ['docs/say "hi".md'], unwatched: [] })
+})
+
+test('fails loudly for a missing upstream remote or a mismatched repository URL', t => {
+  const { root, git } = dashboardFixture(t)
+  git(['remote', 'remove', 'upstream'])
+  const missing = collectUpstreamReview({ root })
+  assert.equal(missing.ok, false)
+  assert.match(missing.error, /docs\/upstream-sync\.md/u)
+
+  git(['remote', 'add', 'upstream', 'https://github.com/example/other.git'])
+  const mismatched = collectUpstreamReview({ root })
+  assert.equal(mismatched.ok, false)
+  assert.match(mismatched.error, /upstream remote URL differs from desktop-upstream\.json/u)
+})
+
+test('fails loudly for a directory-shaped watchedPaths entry that is missing at reviewedCommit', t => {
+  const { root } = dashboardFixture(t, { watchedPaths: ['scriptss/'] })
+  const result = collectUpstreamReview({ root })
+  assert.equal(result.ok, false)
+  assert.match(result.error, /"scriptss\/"/u)
+  assert.match(result.error, /does not resolve to a directory/u)
+  assert.match(result.error, /docs\/upstream-sync\.md/u)
 })
 
 test('fails loudly for a directory-shaped watchedPaths entry missing its trailing slash', t => {
