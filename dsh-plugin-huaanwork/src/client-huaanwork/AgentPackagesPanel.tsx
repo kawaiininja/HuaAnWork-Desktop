@@ -572,6 +572,7 @@ export function AgentPackageDetailDialog({
     <div className="settings-overlay" role="dialog" aria-label={`智能体详情：${title}`}>
       <div className="confirm-modal automation-form">
         <h3>{title}</h3>
+        <div className="automation-form-body">
         {error ? <p className="banner error">{error}</p> : null}
         {detail === undefined && !error && summaryDetail === undefined ? (
           <p className="hint">加载中…</p>
@@ -696,6 +697,7 @@ export function AgentPackageDetailDialog({
         <p className="banner warn" style={{ margin: 0 }}>
           {PACKAGE_SANDBOX_WARNING}
         </p>
+        </div>
         <div className="page-tools" style={{ margin: "10px 0 0" }}>
           <span className="composer-spacer" />
           <button type="button" className="filter-tab" onClick={onClose}>

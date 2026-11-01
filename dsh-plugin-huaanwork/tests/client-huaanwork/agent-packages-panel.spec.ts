@@ -363,6 +363,16 @@ describe("AgentPackagesPanel（我的智能体）", () => {
     expect(container!.textContent).toContain("persona.md");
     expect(container!.textContent).toContain("128 字节");
     expect(container!.textContent).toContain("脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。");
+
+    const dialog = container!.querySelector<HTMLElement>('[role="dialog"]')!;
+    const modal = dialog.querySelector<HTMLElement>(":scope > .confirm-modal")!;
+    const scrollBody = modal.querySelector<HTMLElement>(":scope > .automation-form-body");
+    const footer = modal.querySelector<HTMLElement>(":scope > .page-tools");
+    expect(scrollBody).not.toBeNull();
+    expect(scrollBody?.contains(dialog.querySelector(".agent-detail-section"))).toBe(true);
+    expect(footer).not.toBeNull();
+    await click(buttonIn(footer!, "关闭")!);
+    expect(container!.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it("目录签名包详情显示 keyId、签名时间、槽位与验签结果", async () => {
