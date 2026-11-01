@@ -164,11 +164,11 @@ describe('published package surface', () => {
     }
     const dshmarketResolutions = resolutionKeys.filter(k => k.startsWith('dshmarket@npm:'))
     expect(dshmarketResolutions).toHaveLength(1)
-    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.73.5')
+    expect(dshmarketResolutions[0]).toBe('dshmarket@npm:1.73.7')
 
-    expect(manifest.dependencies?.dshmarket).toBe('1.73.5')
-    expect(workspaceManifest.resolutions?.['dshmarket@npm:1.73.5']).toBe(
-      'patch:dshmarket@npm%3A1.73.5#./.yarn/patches/dshmarket-desktop.patch',
+    expect(manifest.dependencies?.dshmarket).toBe('1.73.7')
+    expect(workspaceManifest.resolutions?.['dshmarket@npm:1.73.7']).toBe(
+      'patch:dshmarket@npm%3A1.73.7#./.yarn/patches/dshmarket-desktop.patch',
     )
   })
 

@@ -14,9 +14,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@agents-anywhere/dsh-bridge-next@file:vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c64c3f67ee3b2.r7f334f77.tgz::locator=deepseek-harness-desktop%40workspace%3A.":
-  version: 2.1.0-desktop.c64c3f67ee3b2.r7f334f77
-  resolution: "@agents-anywhere/dsh-bridge-next@file:vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c64c3f67ee3b2.r7f334f77.tgz#vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c64c3f67ee3b2.r7f334f77.tgz::hash=c5c140&locator=deepseek-harness-desktop%40workspace%3A."
+"@agents-anywhere/dsh-bridge-next@file:vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c46f5479651eb.r7f334f77.tgz::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 2.1.0-desktop.c46f5479651eb.r7f334f77
+  resolution: "@agents-anywhere/dsh-bridge-next@file:vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c46f5479651eb.r7f334f77.tgz#vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c46f5479651eb.r7f334f77.tgz::hash=f3f50b&locator=deepseek-harness-desktop%40workspace%3A."
   dependencies:
     "@dataiku/uv": "npm:0.12.0"
     clsx: "npm:2.1.1"
@@ -30,7 +30,7 @@ __metadata:
     "@deepseek-ai/dsh-typert-protocol": 0.2.1-rc.1
     "@deepseek-ai/schemastery": ~3.18.4
     react: ^18.3.1
-  checksum: 10c0/f16da9e0b0dcb4f2e89559017f452b3c0480aac281bac6096c204a7eb86727c6aff083dadf2ebf1d7ef1f0730379fa07728611d89a41eda637d72b1f1b6facb7
+  checksum: 10c0/09d4ae7e29b2f2bf964fbd6e3059bad5c7be5c98715e4168f559283e03277dbb984c7caf53f5837b88a05e098ef545be76c3ea7d31ba4da4f81ed7b0bfe8a460
   languageName: node
   linkType: hard
 
@@ -10420,7 +10420,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "dsh-plugin-huaanwork@workspace:dsh-plugin-huaanwork"
   dependencies:
-    "@agents-anywhere/dsh-bridge-next": "file:../vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c64c3f67ee3b2.r7f334f77.tgz"
+    "@agents-anywhere/dsh-bridge-next": "file:../vendor/agents-anywhere/agents-anywhere-dsh-bridge-next-2.1.0-desktop.c46f5479651eb.r7f334f77.tgz"
     "@base-ui/react": "npm:^1.7.0"
     "@deepseek-ai/cordis": "npm:4.0.5"
     "@deepseek-ai/cordis-plugin-group": "npm:1.0.5"
@@ -10620,7 +10620,7 @@ __metadata:
     class-variance-authority: "npm:^0.7.1"
     clsx: "npm:^2.1.1"
     dsh-community-market: "npm:0.1.0-dev.0"
-    dshmarket: "npm:1.73.5"
+    dshmarket: "npm:1.73.7"
     electron: "npm:44.0.0"
     electron-builder: "npm:26.15.7"
     fs-ext: "npm:2.1.1"
@@ -10656,9 +10656,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"dshmarket@npm:1.73.5":
-  version: 1.73.5
-  resolution: "dshmarket@npm:1.73.5"
+"dshmarket@npm:1.73.7":
+  version: 1.73.7
+  resolution: "dshmarket@npm:1.73.7"
   dependencies:
     js-yaml: "npm:^4.3.2"
     undici: "npm:^7.29.1"
@@ -10671,13 +10671,13 @@ __metadata:
       optional: true
     "@deepseek-ai/schemastery":
       optional: true
-  checksum: 10c0/fe7ec6c367d66aad7af868eb2373d5c1e8a155b08214a21feab5f24e10453be0df87a11b021660ed17f6d76c9f6196cc0e52e80bb1c9f26965fcb89838757d70
+  checksum: 10c0/ae0f063c0fe61895230404bad58fad9086413181b266870d3bb2c01412e77b385c24c42144e80b503e70e3e3e4bfe357f69abee956368ab77f098c366761e2b8
   languageName: node
   linkType: hard
 
-"dshmarket@patch:dshmarket@npm%3A1.73.5#./.yarn/patches/dshmarket-desktop.patch::locator=deepseek-harness-desktop%40workspace%3A.":
-  version: 1.73.5
-  resolution: "dshmarket@patch:dshmarket@npm%3A1.73.5#./.yarn/patches/dshmarket-desktop.patch::version=1.73.5&hash=871015&locator=deepseek-harness-desktop%40workspace%3A."
+"dshmarket@patch:dshmarket@npm%3A1.73.7#./.yarn/patches/dshmarket-desktop.patch::locator=deepseek-harness-desktop%40workspace%3A.":
+  version: 1.73.7
+  resolution: "dshmarket@patch:dshmarket@npm%3A1.73.7#./.yarn/patches/dshmarket-desktop.patch::version=1.73.7&hash=871015&locator=deepseek-harness-desktop%40workspace%3A."
   dependencies:
     js-yaml: "npm:^4.3.2"
     undici: "npm:^7.29.1"
@@ -10690,7 +10690,7 @@ __metadata:
       optional: true
     "@deepseek-ai/schemastery":
       optional: true
-  checksum: 10c0/e1a608c8be228d626f35ad8f181b7c5d2a3a51e9d52efea5c0e6f532a5be765c0fa384b04bcc17ffbb7ba9df6633467b907a25587dc5b4a2b7ed2dd80b91473d
+  checksum: 10c0/3e45c539074b88cef046d57ad63c2be91d57f262f91c906608e750a042d08f26102d6a3062e28c4ae6a600d8e38ea7c9a8de7c7f5cb8cdbcd982688915e71a5f
   languageName: node
   linkType: hard
 
