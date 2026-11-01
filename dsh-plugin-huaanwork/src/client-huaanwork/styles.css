@@ -1160,6 +1160,18 @@ button {
   overflow: hidden;
 }
 
+.composer-context {
+  margin: 10px 14px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .composer textarea {
   appearance: none;
   border: 0;

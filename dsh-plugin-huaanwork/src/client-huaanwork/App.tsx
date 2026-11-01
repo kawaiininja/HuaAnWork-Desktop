@@ -127,7 +127,15 @@ import {
   withThinkingToggle,
   type ThinkingSteps,
 } from "./logic/thinkingPanel.ts";
-import { closeOpenInputs, inputCardStatus, settleInputCard, type InputCard } from "./logic/inputCard.ts";
+import {
+  appendOpenInput,
+  closeOpenInputs,
+  dispatchComposerSubmission,
+  inputCardStatus,
+  latestOpenInput,
+  settleInputCard,
+  type InputCard,
+} from "./logic/inputCard.ts";
 import { toolRowIcon } from "./logic/commandOutcome.ts";
 import {
   answerApprovalInTabs,
@@ -434,6 +442,7 @@ export default function App() {
   const [keepAwakeUnavailable, setKeepAwakeUnavailable] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
   const [turnActive, setTurnActive] = useState(false);
+  const [inputReplyPending, setInputReplyPending] = useState(false);
   const [hostPhase, setHostPhase] = useState<HostLivenessPhase>("ok");
   /**
    * 套接字关闭回调只挂载一次，读不到最新的 hostPhase；用户主动停止的标记放在
@@ -554,6 +563,7 @@ export default function App() {
   const nextId = useRef(1);
   const stopping = useRef(false);
   const sendingRef = useRef(false);
+  const inputReplyPendingRef = useRef(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   /** 拥有当前 sidecar 流的对话标签（token/tool/approval 事件写入它）。 */
@@ -583,6 +593,7 @@ export default function App() {
     [subagentRuns],
   );
   const items = activeChat.items;
+  const pendingInput = latestOpenInput(items);
   const contentView = useMemo(() => contentItems(items), [items]);
   /** 运行卡不进入内容视图,下标会与 `items` 错位;思考收尾判断按 id 取内容视图下标。 */
   const contentIndexById = useMemo(
@@ -2375,23 +2386,40 @@ export default function App() {
   }
 
   /** `request_input` 卡片：提交的文字回到同一回合；取消结束这次调用并停止回合。 */
-  async function answerInput(itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) {
-    if (sidecarDead || card.state !== "open") return;
-    let handled = false;
+  async function answerInput(itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }): Promise<boolean> {
+    if (sidecarDead || card.state !== "open" || inputReplyPendingRef.current) return false;
+    inputReplyPendingRef.current = true;
+    setInputReplyPending(true);
     try {
       const result = await rpcCall<{ handled?: boolean }>("session.answerInput", { sessionId: card.sessionId, ...reply });
-      handled = result?.handled === true;
+      const handled = result?.handled === true;
+      // 宿主那边已不在等（回合已结束或问题被替换）：卡片关掉，不显示「已回答」。
+      const state = !handled ? "closed" : "cancel" in reply ? "cancelled" : "answered";
+      const answerText = state === "answered" && "answer" in reply ? reply.answer : undefined;
+      setChatTabs((prev) => prev.map((tab) => {
+        const items = settleInputCard(tab.items, itemId, state, answerText);
+        return items === tab.items ? tab : { ...tab, items };
+      }));
+      return handled;
     } catch (error) {
       noteActive(error instanceof Error ? error.message : String(error));
-      return;
+      return false;
+    } finally {
+      inputReplyPendingRef.current = false;
+      setInputReplyPending(false);
     }
-    // 宿主那边已不在等（回合已结束或问题被替换）：卡片关掉，不显示「已回答」。
-    const state = !handled ? "closed" : "cancel" in reply ? "cancelled" : "answered";
-    const answerText = state === "answered" && "answer" in reply ? reply.answer : undefined;
-    setChatTabs((prev) => prev.map((tab) => {
-      const items = settleInputCard(tab.items, itemId, state, answerText);
-      return items === tab.items ? tab : { ...tab, items };
-    }));
+  }
+
+  async function submitComposer() {
+    if (sidecarDead || hostPhase !== "ok" || inputReplyPendingRef.current) return;
+    const submittedDraft = draft;
+    const result = await dispatchComposerSubmission(activeChat.items, submittedDraft, {
+      answer: (itemId, card, answer) => answerInput(itemId, card, { answer }),
+      send,
+    });
+    if (result.kind === "answer" && result.answered) {
+      setDraft((current) => (current === submittedDraft ? "" : current));
+    }
   }
 
   /**
@@ -2911,17 +2939,18 @@ export default function App() {
               className="composer"
               onSubmit={(event) => {
                 event.preventDefault();
-                void send();
+                void submitComposer();
               }}
             >
-              {slashOpen ? (
+              {pendingInput ? <div className="composer-context">正在回答：{pendingInput.card.question}</div> : null}
+              {!pendingInput && slashOpen ? (
                 <SlashSkillMenu
                   skills={slashMatches}
                   activeIndex={slashIndex}
                   onHover={setSlashIndex}
                   onPick={pickSlashSkill}
                 />
-              ) : atOpen ? (
+              ) : !pendingInput && atOpen ? (
                 <AtAgentMenu
                   agents={atMatches}
                   activeIndex={atIndex}
@@ -2934,13 +2963,15 @@ export default function App() {
                 value={draft}
                 rows={3}
                 placeholder={
-                  runTabLive
-                    ? "后台任务运行中，请稍候再发送消息。"
-                    : blocked
-                      ? "sidecar 已退出"
-                      : workspace
-                        ? "描述你的任务… 输入 / 调用技能，输入 @ 点名智能体"
-                        : "尽管问，或派个任务… 输入 / 调用技能，输入 @ 点名智能体"
+                  pendingInput
+                    ? "请输入回答，Enter 提交，Shift+Enter 换行"
+                    : runTabLive
+                      ? "后台任务运行中，请稍候再发送消息。"
+                      : blocked
+                        ? "sidecar 已退出"
+                        : workspace
+                          ? "描述你的任务… 输入 / 调用技能，输入 @ 点名智能体"
+                          : "尽管问，或派个任务… 输入 / 调用技能，输入 @ 点名智能体"
                 }
                 disabled={blocked || runTabLive}
                 onChange={(event) => {
@@ -2957,7 +2988,7 @@ export default function App() {
                   setAtCursor(event.currentTarget.selectionStart);
                 }}
                 onKeyDown={(event) => {
-                  if (slashOpen) {
+                  if (!pendingInput && slashOpen) {
                     if (event.key === "ArrowDown") {
                       event.preventDefault();
                       setSlashIndex((index) => (slashMatches.length ? (index + 1) % slashMatches.length : 0));
@@ -2984,7 +3015,7 @@ export default function App() {
                       pickSlashSkill(slashMatches[slashIndex]);
                       return;
                     }
-                  } else if (atOpen) {
+                  } else if (!pendingInput && atOpen) {
                     if (event.key === "ArrowDown") {
                       event.preventDefault();
                       setAtIndex((index) => (atMatches.length ? (index + 1) % atMatches.length : 0));
@@ -3014,7 +3045,7 @@ export default function App() {
                   }
                   if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                     event.preventDefault();
-                    void send();
+                    void submitComposer();
                   }
                 }}
               />
@@ -3072,7 +3103,16 @@ export default function App() {
                   </button>
                 ) : null}
                 <span className="composer-spacer" />
-                {turnActive && activeTab === turnTabRef.current ? (
+                {pendingInput ? (
+                  <button
+                    type="submit"
+                    className="send"
+                    aria-label="提交回答"
+                    disabled={blocked || inputReplyPending || !draft.trim() || hostPhase !== "ok"}
+                  >
+                    ↑
+                  </button>
+                ) : turnActive && activeTab === turnTabRef.current ? (
                   <button type="button" className="send stop" disabled={blocked} onClick={() => void stopTurn()}>
                     停止
                   </button>
@@ -3519,10 +3559,7 @@ function handleEvent(
       break;
     }
     case "input/asked":
-      setItems((prev) => [
-        ...prev,
-        { id: allocId(), kind: "input", card: { question: event.question, sessionId: event.sessionId, state: "open" } },
-      ], event.sessionId);
+      setItems((prev) => appendOpenInput(prev, allocId(), event.question, event.sessionId), event.sessionId);
       break;
     case "diff":
       setDiff(event.text);
@@ -3863,8 +3900,8 @@ function PlanCard({
   );
 }
 
-/** 模型用 `request_input` 提的问题：在对话里作答，提交或取消后这一回合才继续。 */
-function InputCardView({
+/** 模型用 `request_input` 提的问题：在底部会话框作答，取消后这一回合停止。 */
+export function InputCardView({
   itemId,
   card,
   blocked,
@@ -3875,7 +3912,6 @@ function InputCardView({
   blocked: boolean;
   onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
 }) {
-  const [reply, setReply] = useState("");
   const status = inputCardStatus(card);
   return (
     <div className="card ask-card">
@@ -3884,22 +3920,11 @@ function InputCardView({
       {status ? (
         <p style={{ margin: 0 }}>{status}</p>
       ) : (
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (reply.trim()) onInput(itemId, card, { answer: reply.trim() });
-          }}
-        >
-          <textarea rows={3} value={reply} disabled={blocked} onChange={(event) => setReply(event.target.value)} />
-          <div className="row">
-            <button type="submit" className="btn approve" disabled={blocked || !reply.trim()}>
-              提交
-            </button>
-            <button type="button" className="btn reject" disabled={blocked} onClick={() => onInput(itemId, card, { cancel: true })}>
-              取消
-            </button>
-          </div>
-        </form>
+        <div className="row">
+          <button type="button" className="btn reject" disabled={blocked} onClick={() => onInput(itemId, card, { cancel: true })}>
+            取消
+          </button>
+        </div>
       )}
     </div>
   );

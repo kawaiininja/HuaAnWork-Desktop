@@ -12,6 +12,21 @@ function isOpenInput(item: Item): item is Item & { card: InputCard } {
   return item.kind === "input" && (item.card as InputCard | undefined)?.state === "open";
 }
 
+export function latestOpenInput(items: readonly Item[]): (Item & { card: InputCard }) | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (isOpenInput(item)) return item;
+  }
+  return undefined;
+}
+
+export function appendOpenInput<T extends Item>(items: T[], id: number, question: string, sessionId: string): T[] {
+  return [
+    ...closeOpenInputs(items),
+    { id, kind: "input", card: { question, sessionId, state: "open" } } as T,
+  ];
+}
+
 export function settleInputCard<T extends Item>(
   items: T[],
   id: number,
@@ -35,6 +50,30 @@ export function closeOpenInputs<T extends Item>(items: T[]): T[] {
 export function inputCardStatus(card: { state: InputCard["state"]; answer?: string }): string | undefined {
   if (card.state === "answered") return `已回答：${card.answer ?? ""}`;
   if (card.state === "cancelled") return "已取消";
-  if (card.state === "closed") return "回合已结束，这个问题不再等待回答";
+  if (card.state === "closed") return "问题已关闭，不再等待回答";
   return undefined;
+}
+
+export type ComposerSubmissionResult =
+  | { kind: "message" }
+  | { kind: "empty" }
+  | { kind: "answer"; answered: boolean };
+
+export async function dispatchComposerSubmission(
+  items: readonly Item[],
+  draft: string,
+  handlers: {
+    answer: (itemId: number, card: InputCard, answer: string) => Promise<boolean>;
+    send: () => Promise<void>;
+  },
+): Promise<ComposerSubmissionResult> {
+  const pending = latestOpenInput(items);
+  if (!pending) {
+    await handlers.send();
+    return { kind: "message" };
+  }
+  const answer = draft.trim();
+  if (!answer) return { kind: "empty" };
+  const answered = await handlers.answer(pending.id, pending.card, answer);
+  return { kind: "answer", answered };
 }
