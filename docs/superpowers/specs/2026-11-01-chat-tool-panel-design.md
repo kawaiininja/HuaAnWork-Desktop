@@ -1,7 +1,7 @@
 # 会话内工具面板设计
 
 - 日期：2026-11-01
-- 状态：已按第一轮评审的校准结论修订，待书面规格审阅
+- 状态：已按第一、二轮评审结论修订，待书面规格审阅
 - 实施边界：仅 HuaAnWork 桌面客户端及其现有工具事件、历史恢复链路
 
 ## 1. 背景与目标
@@ -71,7 +71,7 @@
 5. 根据条目、按回合提供的 `turnFinal`、`connectionLost` 和可见正文输入，计算面板标题、调用数、执行/完成/失败/中断/未确认/结果未记录状态及默认展开状态。
 6. 按工具名生成通用中文说明。
 
-虚拟面板行只存在于最终渲染视图，不加入持久化的 `ChatItem` 联合。`contentItems` 等既有内容视图仍消费扁平数组。纯逻辑模块保持无副作用，但输入不局限于条目数组：`turnFinal` 表示这个用户回合已确定不再继续，`connectionLost` 表示事件套接字已断开，二者由 App 提供。§5.1 的“事件与当前目标相位 → `turnFinal`”判定也放在本模块的纯函数中；App 只提供事件归属、当前相位并按标签保存结果，不在事件处理器里复制一套判断。
+虚拟面板行只存在于最终渲染视图，不加入持久化的 `ChatItem` 联合。`contentItems` 等既有内容视图仍消费扁平数组。纯逻辑模块保持无副作用，但输入不局限于条目数组：`turnFinal` 表示这个用户回合已确定不再继续，`connectionLost` 表示事件套接字已断开，二者由 App 提供。§5.1 的“事件、当前目标相位与 `goalRound` 结算动作 → `turnFinal`”判定也放在本模块的纯函数中；App 只提供事件归属、当前相位、实际 `reduceGoalTurn` 动作并按标签保存结果，不在事件处理器里复制一套判断。
 
 面板是回合级聚合视图，不承担工具与穿插审批卡之间的精确时间排序展示；审批卡仍按扁平数组中的既有位置渲染并保持可操作。
 
@@ -112,10 +112,11 @@
 
 - `session/end` 为取消、失败或 `userStopped`：设置 `turnFinal=true`，即使工具全部 `end`。
 - `goal/round-limit`：设置 `turnFinal=true`。
+- `goal/state` 进入 `complete`，且本次实际 `reduceGoalTurn` 返回 `outcome`：立即设置 `turnFinal=true`，不等待下一次 `session/end`。重复 `complete` 或其他未返回 `outcome` 的 `goal/state` 不得重新翻转状态。
 - 成功的 `session/end` 且该会话当前目标相位为 `active`：这是官方续轮中间点，保持 `turnFinal=false`。
 - 成功的 `session/end` 且目标相位为 `paused`、`blocked`、`complete`，或该会话没有目标相位：设置 `turnFinal=true`。相位读取现有 `goalRound` 状态记录，不另造目标状态机。
 
-因此，目标 `active` 的中间结束不得收起面板或标记未确认，后续 `goal/round` 仍属于同一个用户回合和同一个工具面板。裸 `session/end` 必须经上述规则判定，瞬时全局 `turnActive=false` 不是直接的收起条件；任何结束信号只能作用于其归属标签和回合。
+因此，`completeFirst` 与 `endFirst` 都能结束面板：后者在 `active` 的中间 `session/end` 时保持展开，在后到的 `complete` 产生 `outcome` 时立即结束，不要求第二次 `session/end`；其后的结束事件只保持既有 final 状态。目标 `active` 的中间结束本身不得收起面板或标记未确认，后续 `goal/round` 仍属于同一个用户回合和同一个工具面板。裸 `session/end` 必须经上述规则判定，瞬时全局 `turnActive=false` 不是直接的收起条件；任何结束信号只能作用于其归属标签和回合。
 
 ### 5.2 收起标题
 
@@ -277,6 +278,7 @@
 - `turnFinal` 能收起无正文且工具全部结束的回合，手动选择优先。
 - 目标 `active` 的中间 `session/end` 不设置 `turnFinal`、不收起、不标未确认，后续 `goal/round` 复用同一面板。
 - 无目标及 `paused` / `blocked` / `complete` 相位的成功结束，以及取消、失败和 `goal/round-limit`，按规则设置 `turnFinal`。
+- `completeFirst` 与 `endFirst` 都在实际 `outcome` 边沿设置 `turnFinal`；`endFirst` 不需要第二次 `session/end`，重复 `complete` 和后续结束保持幂等。
 - 断连时标题和单项不计执行中；历史 `resultMissing` 显示结果未记录而不是完成。
 - 当前 `ALLOWED_TOOLS` 的名称映射逐项有断言，说明不含参数，未识别工具使用回退文案。
 - 无 `callId` 的同名并发调用每次只结束最早一个运行项。
@@ -308,7 +310,7 @@
 - 历史截断文本保留未落入 capped 正文的 shell 失败标记。
 - 旧历史缺结果写入 `status="end"`、`hasResult=false`、`resultMissing=true`，显示结果未记录而不是完成或空输出。
 
-会话结束测试明确落在两处：`toolPanel.spec.ts` 覆盖纯状态迁移，`tests/client-huaanwork/appWiring.spec.ts` 钉住 App 对 `turnFinal`、`connectionLost` 和归属标签的实际接线。覆盖取消/失败只中断当前回合未结束工具、正常 `turnFinal` 缺终态显示未确认、目标 `active` 的中间结束不误结算，以及迟到的真实工具终态覆盖此前的中断或未确认标记。
+会话结束测试明确落在两处：`toolPanel.spec.ts` 覆盖纯状态迁移，`tests/client-huaanwork/appWiring.spec.ts` 钉住 App 对 `turnFinal`、`connectionLost` 和归属标签的实际接线。覆盖取消/失败只中断当前回合未结束工具、正常 `turnFinal` 缺终态显示未确认、目标 `active` 的中间结束不误结算、`goal/state complete` 的实际 `outcome` 动作立即设置 final，以及迟到的真实工具终态覆盖此前的中断或未确认标记。`appWiring.spec.ts` 必须使用 `reduceGoalTurn` 的真实返回动作，不以“看到 complete”代替边沿判定。
 
 扩展 `tests/client-huaanwork/turnStatus.spec.ts`：`toolsUnconfirmed` 显示“工具状态未确认”，不显示“正在执行工具”，也不回落为“正在思考”；`runningToolName` 不再把断连、中断或未确认工具算作运行中。`appWiring.spec.ts` 还要钉住 `showTurnLine` 在 `turnActive=false` 但当前标签 `toolsUnconfirmed=true` 时仍可见。扩展 `tests/client-huaanwork/outcomeCheck.spec.ts`：中断或未确认的必要命令仍按既有规则记为“命令未通过”，与面板状态并存。
 
@@ -344,6 +346,7 @@ corepack yarn check
 - Host 断连：面板标题和受影响单项显示状态未确认，回合条显示“工具状态未确认”，不得再显示“正在执行工具”或“正在思考”；ready 后按真实事件恢复。
 - `hostPhase` 为 `suspect` / `stoppable` 且套接字未断时，不单独改写工具状态；`stopped` 本身不算断连。
 - 目标 `active` 的中间 `session/end` 不收起、不标未确认，后续 `goal/round` 仍使用同一面板。
+- `active` 的中间 `session/end` 后，由 `goal/state complete` 产生实际 `outcome`：即使没有第二次 `session/end` 也立即 final；重复 `complete` 不改变状态。
 
 未在真实图形环境执行的项目不得声称真机验收通过。
 
