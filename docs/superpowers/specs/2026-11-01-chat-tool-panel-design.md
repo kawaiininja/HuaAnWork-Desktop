@@ -118,6 +118,8 @@
 
 因此，`completeFirst` 与 `endFirst` 都能结束面板：后者在 `active` 的中间 `session/end` 时保持展开，在后到的 `complete` 产生 `outcome` 时立即结束，不要求第二次 `session/end`；其后的结束事件只保持既有 final 状态。目标 `active` 的中间结束本身不得收起面板或标记未确认，后续 `goal/round` 仍属于同一个用户回合和同一个工具面板。裸 `session/end` 必须经上述规则判定，瞬时全局 `turnActive=false` 不是直接的收起条件；任何结束信号只能作用于其归属标签和回合。
 
+历史日志中的官方 goal 续轮 `user/message` 必须携带可识别的 `goalRound` 元数据，并在恢复为可聊标签时映射为同一回合的续轮 note，不得生成新的 `user` 条目或额外面板。只读 `HistoryDetailPane` 仍消费原始 `user` 记录并逐条显示原文，不因该恢复规则改变日志形态。
+
 ### 5.2 收起标题
 
 标题统一包含调用数 `N`：
@@ -206,7 +208,7 @@
 - 保存输出、失败和截断标记。
 - 清除该工具的中断或未确认标记；迟到的真实终态优先于此前的推断，但不覆盖其他工具状态。
 
-匹配优先使用 `callId`。无 `callId` 时按“同名且仍在运行”选择最早一个匹配项，每次结束事件只更新一项，避免同名并发调用同时被套用同一结果。
+匹配优先使用 `callId`。无 `callId` 时，从当前标签的全部扁平工具条目中按“同名且 `status === "start"`”选择最早一个匹配项，包括之前回合的迟到终态；`interrupted` / `unconfirmed` 是可被真实终态清除的推断标记，不排除匹配。不得因为出现新 `user` 而把旧终态错套到新回合的同名工具。每次结束事件只更新一项，避免同名并发调用同时被套用同一结果。
 
 工具结果返回给既有执行链的路径保持现状；本设计只增加客户端事件中的展示数据，不改变执行结果处理语义。
 
@@ -222,7 +224,9 @@
 
 历史结果文本不能只保存 `capped.text`。必须保留 `session-view.ts` 的现有顺序：先从完整 shell 结果提取失败标记，再 capped，最后把未留在截断正文里的标记拼回 `text`；`isError` 继续包含这些标记判定。这样既保留截断事实，也不丢失败详情。
 
-`historyItemsFromRecords` 将 `tool-call` 与后续 `tool-result` 配对：
+`historyItemsFromRecords` 将 `tool-call` 与后续 `tool-result` 配对。`SessionDetailRecord` 的 `user` 变体增加可选 `goalRound?: number`：`session-view.ts` 只对 `source.kind="goal"` 且 `round>0` 的官方续轮消息写入该字段，同时保留原 `kind="user"`、时间和正文，供只读历史页按原样逐条展示。可聊标签恢复时，带 `goalRound` 的记录经现有 `goalRoundLabel(goalRound)` 映射为 note，而不是新的用户回合；续轮前后的工具因此仍聚合到原始用户回合的同一个面板。
+
+配对规则如下：
 
 - 优先按 `callId` 配对。
 - 结果缺少 `callId` 时，只在本用户回合内配对到最早一个尚未配对结果的工具调用，不跨回合猜测。
@@ -281,11 +285,13 @@
 - `completeFirst` 与 `endFirst` 都在实际 `outcome` 边沿设置 `turnFinal`；`endFirst` 不需要第二次 `session/end`，重复 `complete` 和后续结束保持幂等。
 - 断连时标题和单项不计执行中；历史 `resultMissing` 显示结果未记录而不是完成。
 - 当前 `ALLOWED_TOOLS` 的名称映射逐项有断言，说明不含参数，未识别工具使用回退文案。
-- 无 `callId` 的同名并发调用每次只结束最早一个运行项。
+- 无 `callId` 的同名并发调用每次只结束最早一个开始态项；旧回合的迟到终态仍可跨回合命中最早匹配项，不得错套新回合的同名工具。
 
 ### 8.2 组件测试
 
-新增 `tests/client-huaanwork/ToolPanel.spec.ts`，使用现有 jsdom + React Harness 模式：
+新增 `tests/client-huaanwork/ToolPanelComponent.spec.ts`，使用现有 jsdom + React Harness 模式：
+
+> 文件名订正（ledger Task 7 裁定）：计划原写的 `ToolPanel.spec.ts` 在本仓库的大小写不敏感 APFS 卷上与纯逻辑 spec `toolPanel.spec.ts` 是同一文件（`core.ignorecase=true`），故组件 spec 改用 `ToolPanelComponent.spec.ts`，逻辑 spec 沿用既有名字。
 
 - 面板与工具详情的点击、键盘和 `aria-expanded`。
 - 参数、结果、空输出、结果未记录、失败、截断、中断与未确认展示，包括对应单项状态词和面板标题。
@@ -309,6 +315,7 @@
 - 无法配对的失败仍保留会话提示。
 - 历史截断文本保留未落入 capped 正文的 shell 失败标记。
 - 旧历史缺结果写入 `status="end"`、`hasResult=false`、`resultMissing=true`，显示结果未记录而不是完成或空输出。
+- `session-view.spec.ts` 钉住 goal 续轮记录保留原用户正文并携带 `goalRound`；`sessionChannel.spec.ts` 钉住该记录恢复为续轮 note、不产生新 `user` 条目，配合投影测试保证续轮前后只有一个面板。
 
 会话结束测试明确落在两处：`toolPanel.spec.ts` 覆盖纯状态迁移，`tests/client-huaanwork/appWiring.spec.ts` 钉住 App 对 `turnFinal`、`connectionLost` 和归属标签的实际接线。覆盖取消/失败只中断当前回合未结束工具、正常 `turnFinal` 缺终态显示未确认、目标 `active` 的中间结束不误结算、`goal/state complete` 的实际 `outcome` 动作立即设置 final，以及迟到的真实工具终态覆盖此前的中断或未确认标记。`appWiring.spec.ts` 必须使用 `reduceGoalTurn` 的真实返回动作，不以“看到 complete”代替边沿判定。
 
@@ -337,7 +344,7 @@ corepack yarn check
 3. 正文出现后默认收起；手动展开后切换标签再返回，面板仍按手动选择展开。自动化运行回复折叠为附件时也能收起。
 4. 工具失败但回合继续时，仅该工具和面板摘要显示失败事实；若涉及用户要求的命令，“命令未通过”脚注可与具体工具状态并存。
 5. 运行中取消后，未结束工具显示中断，已完成工具结果不变；全部工具已结束且无正文时也能凭 `turnFinal` 收起。
-6. 从只读历史页选择“继续此会话”：新历史可查看结果，旧历史缺结果时单项与标题显示结果未记录。返回只读 `HistoryDetailPane`，确认它仍是逐条日志，不是聚合面板。
+6. 从只读历史页选择“继续此会话”：新历史可查看结果，旧历史缺结果时单项与标题显示结果未记录；含目标续轮的历史恢复为续轮 note 且仍只有一个回合面板。返回只读 `HistoryDetailPane`，确认它仍是逐条日志，goal 续轮原始用户消息仍逐条可见，不是聚合面板。
 7. 分别触发并操作特殊卡片：① 发起需要审批的命令并批准或拒绝；② 触发 `request_input`，从底部输入框提交答案，另一次取消；③ 执行携带 `todos` 的 `todo_write`，确认待办卡更新；④ 显式调用一个子代理，确认运行卡出现、状态更新且活跃时可按既有流程终止。
 8. 连续两个回合各自保留独立工具面板，后台标签的结束事件不改变当前标签面板。
 

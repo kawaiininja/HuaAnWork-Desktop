@@ -1,4 +1,5 @@
 import type { SessionDetailRecord } from "../rpc-types.ts";
+import { goalRoundLabel } from "./goalRound.ts";
 
 /**
  * 自动化运行会话 id 前缀。
@@ -91,28 +92,82 @@ export type HistoryChatItem =
   | { kind: "user"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "assistant"; text: string }
-  | { kind: "tool"; name: string; callId?: string }
+  | {
+      kind: "tool";
+      name: string;
+      callId?: string;
+      args?: string;
+      command?: string;
+      output?: string;
+      hasResult: boolean;
+      resultMissing?: boolean;
+      truncated?: boolean;
+      isError?: boolean;
+    }
   | { kind: "note"; text: string };
 
 /**
- * 历史会话记录 → 对话流条目：user/assistant 按原文还原，tool-call 成工具卡（已完成态），
- * 失败的 tool-result 折叠为一条提示（成功的结果不重复占位）。
+ * 历史会话记录 → 对话流条目：user/assistant 按原文还原，tool-call 成工具卡，
+ * tool-result 按 callId 配对回调用（缺 callId 时只在当前用户回合内按顺序配对）；
+ * 配不上的失败结果折叠为一条提示，配不上的成功结果不产出条目。
+ * 官方 goal 续轮记录只恢复为与实时 goal/round 同文案的 note，不切分用户回合。
  */
 export function historyItemsFromRecords(records: readonly HistoryRecord[]): HistoryChatItem[] {
   const items: HistoryChatItem[] = [];
   for (const record of records) {
     if (record.kind === "user") {
-      items.push({ kind: "user", text: record.text });
-    } else if (record.kind === "thinking") {
+      if (record.goalRound !== undefined) {
+        items.push({ kind: "note", text: goalRoundLabel(record.goalRound) });
+      } else {
+        items.push({ kind: "user", text: record.text });
+      }
+      continue;
+    }
+    if (record.kind === "thinking") {
       items.push({ kind: "thinking", text: record.text });
-    } else if (record.kind === "assistant") {
+      continue;
+    }
+    if (record.kind === "assistant") {
       items.push({ kind: "assistant", text: record.text });
-    } else if (record.kind === "tool-call") {
+      continue;
+    }
+    if (record.kind === "tool-call") {
       items.push({
         kind: "tool",
         name: record.name || "tool",
         ...(record.callId ? { callId: record.callId } : {}),
+        ...(record.args === undefined ? {} : { args: record.args }),
+        ...(record.command === undefined ? {} : { command: record.command }),
+        hasResult: false,
+        resultMissing: true,
       });
+      continue;
+    }
+
+    let turnStart = 0;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      if (items[index]?.kind === "user") {
+        turnStart = index + 1;
+        break;
+      }
+    }
+    let match = -1;
+    if (record.callId) {
+      match = items.findIndex((item) => item.kind === "tool" && item.callId === record.callId && item.hasResult === false);
+    } else {
+      match = items.findIndex((item, index) => index >= turnStart && item.kind === "tool" && item.hasResult === false);
+    }
+    if (match >= 0) {
+      const tool = items[match];
+      if (tool?.kind !== "tool") continue;
+      items[match] = {
+        ...tool,
+        output: record.text,
+        hasResult: true,
+        resultMissing: undefined,
+        ...(record.truncated === true ? { truncated: true } : {}),
+        ...(record.isError ? { isError: true } : {}),
+      };
     } else if (record.isError) {
       const text = record.text.replace(/\s+/g, " ").trim().slice(0, 200);
       items.push({ kind: "note", text: `工具调用失败：${text || "未知错误"}` });

@@ -335,11 +335,11 @@ export type SessionSummary = {
 
 /** `session.open` 返回的可读会话记录，按日志顺序排列。 */
 export type SessionDetailRecord =
-  | { kind: "user"; time: number; text: string }
+  | { kind: "user"; time: number; text: string; goalRound?: number }
   | { kind: "thinking"; time: number; text: string }
   | { kind: "assistant"; time: number; text: string }
   | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string }
-  | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string };
+  | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string; truncated?: boolean };
 
 /**
  * 本地智能体创建确认卡。字段与 host `agent-package/types.ts` 的
@@ -422,6 +422,8 @@ export type RpcEvent =
       name: string;
       callId?: string;
       sessionId?: string;
+      /** 参数摘要（单行、限长），供会话内工具卡展示。 */
+      args?: string;
       /** bash / pwsh 调用的 command 参数,供回合结束核对「要求的命令」。 */
       command?: string;
       /** todo_write 的完整替换列表。 */

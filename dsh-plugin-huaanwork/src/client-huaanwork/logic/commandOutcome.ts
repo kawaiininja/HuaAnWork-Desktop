@@ -62,6 +62,28 @@ export function toolRowIcon(card: { status: "start" | "end"; isError?: boolean }
  */
 export const TOOL_LABEL_MAX_CHARS = 200;
 
+/**
+ * 工具参数的展示摘要:解析实时对象或历史 JSON 字符串,压成一行并限长。
+ * 实时 bridge 与历史会话详情共用同一份单行化/上限规则;序列化失败时返回 undefined,
+ * 调用方据此省略该字段而不是渲染一段假摘要。
+ */
+export function formatToolArguments(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parsed = parseToolArguments(value);
+  let encoded: string;
+  if (typeof parsed === "string") {
+    encoded = parsed;
+  } else {
+    try {
+      encoded = JSON.stringify(parsed) ?? "";
+    } catch {
+      return undefined;
+    }
+  }
+  const flat = encoded.replace(/\s+/g, " ").trim();
+  return flat.length <= TOOL_LABEL_MAX_CHARS ? flat : `${flat.slice(0, TOOL_LABEL_MAX_CHARS)}…`;
+}
+
 /** 历史工具行标签:命令优先、参数兜底;压成一行并限长,避免超长命令撑爆详情。 */
 export function toolArgumentLabel(tool: { command?: string; args?: string }): string | undefined {
   for (const candidate of [tool.command, tool.args]) {

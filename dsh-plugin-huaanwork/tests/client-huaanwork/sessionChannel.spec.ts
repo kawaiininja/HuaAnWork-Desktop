@@ -27,28 +27,69 @@ test("chatTabTitle prefers the first user message", () => {
   assert.equal(chatTabHasConversation({ items: [{ kind: "user", text: "hi" }] }), true);
 });
 
-test("historyItemsFromRecords maps roles, tool calls and failed results", () => {
+test("history maps goal continuation records to notes without splitting the user turn", () => {
   const items = historyItemsFromRecords([
-    { kind: "user", time: 1, text: "改一下 README" },
-    { kind: "assistant", time: 2, text: "好的" },
-    { kind: "tool-call", time: 3, name: "write", callId: "c1", args: "{}" },
-    { kind: "tool-result", time: 4, callId: "c1", isError: false, text: "done" },
-    { kind: "tool-call", time: 5, name: "bash", callId: "c2" },
-    { kind: "tool-result", time: 6, callId: "c2", isError: true, text: "  权限不足\n请重试  " },
+    { kind: "user", time: 1, text: "完成目标" },
+    { kind: "tool-call", time: 2, name: "read", callId: "r1" },
+    { kind: "tool-result", time: 3, callId: "r1", isError: false, text: "第一轮结果" },
+    { kind: "user", time: 4, text: "官方续轮提示", goalRound: 1 },
+    { kind: "tool-call", time: 5, name: "grep", callId: "g1" },
   ]);
-  assert.deepEqual(items, [
-    { kind: "user", text: "改一下 README" },
-    { kind: "assistant", text: "好的" },
-    { kind: "tool", name: "write", callId: "c1" },
-    { kind: "tool", name: "bash", callId: "c2" },
-    { kind: "note", text: "工具调用失败：权限不足 请重试" },
+  assert.deepEqual(items.map((item) => item.kind), ["user", "tool", "note", "tool"]);
+  assert.deepEqual(items[2], { kind: "note", text: "正在按目标继续，第 1/4 轮，这还不是验收结果" });
+  assert.equal(items.filter((item) => item.kind === "user").length, 1);
+});
+
+test("history pairs success, failure, empty and truncated results into their tool cards", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "读取并运行" },
+    { kind: "tool-call", time: 2, name: "read", callId: "r1", args: '{"path":"a.md"}' },
+    { kind: "tool-result", time: 3, callId: "r1", isError: false, text: "内容" },
+    { kind: "tool-call", time: 4, name: "read", callId: "r2" },
+    { kind: "tool-result", time: 5, callId: "r2", isError: false, text: "" },
+    { kind: "tool-call", time: 6, name: "bash", callId: "b1", command: "pnpm test" },
+    { kind: "tool-result", time: 7, callId: "b1", isError: true, truncated: true, text: "…（已截断） [exit code: 1]" },
   ]);
-  // 空记录与纯工具成功结果不产出噪声条目。
+  const tools = items.filter((item) => item.kind === "tool");
+  assert.deepEqual(tools.map((item) => item.kind === "tool" ? [item.hasResult, item.output, item.isError, item.truncated] : []), [
+    [true, "内容", undefined, undefined],
+    [true, "", undefined, undefined],
+    [true, "…（已截断） [exit code: 1]", true, true],
+  ]);
+  assert.equal(tools[0]?.kind === "tool" ? tools[0].args : undefined, '{"path":"a.md"}');
+  assert.equal(tools[2]?.kind === "tool" ? tools[2].command : undefined, "pnpm test");
+  assert.equal(items.some((item) => item.kind === "note"), false, "paired failures do not become extra chat notes");
+});
+
+test("history pairs missing-callId results in order within one user turn only", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "第一回合" },
+    { kind: "tool-call", time: 2, name: "grep", callId: "a" },
+    { kind: "tool-call", time: 3, name: "grep", callId: "b" },
+    { kind: "tool-result", time: 4, isError: false, text: "first" },
+    { kind: "tool-result", time: 5, isError: false, text: "second" },
+    { kind: "user", time: 6, text: "第二回合" },
+    { kind: "tool-result", time: 7, isError: false, text: "must not cross a user boundary" },
+    { kind: "tool-call", time: 8, name: "read", callId: "old" },
+  ]);
+  const tools = items.filter((item) => item.kind === "tool");
+  assert.deepEqual(tools.map((item) => item.kind === "tool" ? item.output : undefined), ["first", "second", undefined]);
+  assert.equal(tools[2]?.kind === "tool" && tools[2].resultMissing, true);
+  assert.equal(items.some((item) => item.kind === "tool" && item.output === "must not cross a user boundary"), false);
+});
+
+test("history keeps unmatched failures as notes and marks unmatched calls as result missing", () => {
   assert.deepEqual(historyItemsFromRecords([]), []);
-  assert.deepEqual(
-    historyItemsFromRecords([{ kind: "tool-result", time: 1, isError: false, text: "ok" }]),
-    [],
-  );
+  const items = historyItemsFromRecords([
+    { kind: "tool-call", time: 1, name: "read", callId: "old" },
+    { kind: "tool-result", time: 2, callId: "unknown", isError: true, text: "  权限不足\n请重试  " },
+    { kind: "tool-result", time: 3, callId: "also-unknown", isError: false, text: "orphan success" },
+  ]);
+  assert.deepEqual(items[0], {
+    kind: "tool", name: "read", callId: "old", hasResult: false, resultMissing: true,
+  });
+  assert.deepEqual(items[1], { kind: "note", text: "工具调用失败：权限不足 请重试" });
+  assert.equal(items.length, 2, "orphan success does not invent a tool call");
 });
 
 test("history restores a collapsed thinking record", () => {

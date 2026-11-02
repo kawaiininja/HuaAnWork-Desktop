@@ -3,7 +3,12 @@ import { spawnSync } from "node:child_process";
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { capToolOutput } from "@huaanwork/policy/truncate";
 
-import { isShellTool, resultTextFailed, shellCommandOf } from "../client-huaanwork/logic/commandOutcome.ts";
+import {
+  formatToolArguments,
+  isShellTool,
+  resultTextFailed,
+  shellCommandOf,
+} from "../client-huaanwork/logic/commandOutcome.ts";
 import { acceptanceInjectToolName, acceptanceToolFailure } from "../huaanwork-host/acceptance-hooks.ts";
 import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
 import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
@@ -22,6 +27,8 @@ type RpcEvent =
       name: string;
       callId?: string;
       sessionId?: string;
+      /** 参数摘要（单行、限长），供会话内工具卡展示。 */
+      args?: string;
       command?: string;
       todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
     }
@@ -131,7 +138,8 @@ export function apply(ctx: Context): void {
           name: execution.name,
           ...(execution.callId === undefined ? {} : { callId: execution.callId }),
           ...(sessionId === undefined ? {} : { sessionId }),
-          ...(capped.truncated ? { truncated: true, text: capped.text } : {}),
+          text: capped.text,
+          ...(capped.truncated ? { truncated: true } : {}),
           ...(toolFailed(execution.name, result) ? { isError: true as const } : {}),
         });
         if (execution.name === "git_diff") {
@@ -348,20 +356,22 @@ function porcelainUntrackedPath(line: string): string | undefined {
 
 const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
 
-/** tool/start 的附加信息:todo_write 的待办列表、bash / pwsh 的 command 参数。 */
+/** tool/start 的附加信息:参数摘要、todo_write 的待办列表、bash / pwsh 的 command 参数。 */
 function startDetail(execution: ToolExecution): Partial<Extract<RpcEvent, { event: "tool/start" }>> {
-  const args = objectValue(execution.arguments);
-  if (execution.name === "todo_write" && Array.isArray(args.todos)) {
-    const todos = args.todos.flatMap((entry) => {
+  const formattedArgs = formatToolArguments(execution.arguments);
+  const args = formattedArgs === undefined ? {} : { args: formattedArgs };
+  const objectArgs = objectValue(execution.arguments);
+  if (execution.name === "todo_write" && Array.isArray(objectArgs.todos)) {
+    const todos = objectArgs.todos.flatMap((entry) => {
       const todo = objectValue(entry);
       return typeof todo.content === "string" && typeof todo.status === "string" && TODO_STATUSES.has(todo.status)
         ? [{ content: todo.content, status: todo.status as "pending" | "in_progress" | "completed" }]
         : [];
     });
-    return { todos };
+    return { ...args, todos };
   }
   const command = shellCommandOf(execution.name, execution.arguments);
-  return command === undefined ? {} : { command };
+  return { ...args, ...(command === undefined ? {} : { command }) };
 }
 
 /** 工具报错,或 shell 结果文本里已带失败标记。失败标记在截断前从原文读取。 */

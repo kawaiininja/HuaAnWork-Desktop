@@ -3,6 +3,13 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
 import { answerApprovalInTabs } from "../../src/client-huaanwork/logic/chatTabs.ts";
+import {
+  INITIAL_GOAL_TURN_STATE,
+  reduceGoalTurn,
+  type GoalTurnEvent,
+  type GoalTurnState,
+} from "../../src/client-huaanwork/logic/goalRound.ts";
+import { reduceTurnFinal, type TurnFinalEvent } from "../../src/client-huaanwork/logic/toolPanel.ts";
 import { clearFailuresInTabs } from "../../src/client-huaanwork/logic/hostStop.ts";
 import { foldRunAssistantItems } from "../../src/client-huaanwork/logic/runResultAttachments.ts";
 
@@ -454,7 +461,7 @@ test("resuming an existing session tab activates it without replaying history ov
     1,
     "historyToChatItems(view) is computed exactly once, inside the new-tab branch only",
   );
-  assert.match(newBranch, /items: historyToChatItems\(view\)/, "the new-tab branch still seeds items from history");
+  assert.match(newBranch, /\bitems,/, "the new-tab branch still seeds items from history");
   assert.match(
     newBranch,
     /void reconcileSubagentRuns\(id, sessionId\)/,
@@ -497,4 +504,62 @@ test("history-load paths reconcile the host snapshot so run cards survive a fres
     "the run-tab backfill must reconcile with its own tabId + sessionId after rebuilding the items: "
       + "otherwise a run tab restored after restart loses its subagent-run cards",
   );
+});
+
+test("App turn final wiring consumes actual goal actions and sidecarDead only", () => {
+  let state: GoalTurnState = INITIAL_GOAL_TURN_STATE;
+  let final = false;
+  const observed: boolean[] = [];
+  const events: GoalTurnEvent[] = [
+    { kind: "turn-started", sessionId: "s" },
+    { kind: "goal-state", phase: "active", sessionId: "s" },
+    { kind: "session-end", sessionId: "s", ok: true },
+    { kind: "goal-state", phase: "complete", sessionId: "s" },
+  ];
+  for (const event of events) {
+    const result = reduceGoalTurn(state, event);
+    state = result.state;
+    const input: TurnFinalEvent = event.kind === "session-end"
+      ? { kind: "session-end", ok: event.ok, cancelled: event.cancelled === true }
+      : { kind: "goal-action", action: result.action };
+    final = reduceTurnFinal(final, input, state.phases[event.sessionId ?? ""]);
+    observed.push(final);
+  }
+  assert.deepEqual(observed, [false, false, false, true], "only the real complete outcome settles endFirst");
+
+  assert.match(APP_SOURCE, /applyTurnFinalToTabs\(prev, tabId, event, goalTurnRef\.current\.phases\[sessionId \?\? ""\]\)/);
+  assert.equal((APP_SOURCE.match(/applyFinalForTab\(targetTabFor\(/g) ?? []).length, 3);
+  assert.match(APP_SOURCE, /setItems\(\(prev\) => applyToolEnd\(prev, event\), event\.sessionId\)/);
+  assert.match(APP_SOURCE, /applyFinalForTab\(tabId, ticket\.sessionId, \{ kind: "session-end", ok: false, cancelled: true \}\)/);
+  assert.match(APP_SOURCE, /kind: "goal-action", action/);
+  assert.match(APP_SOURCE, /kind: "session-end", ok: event\.ok, cancelled: event\.cancelled === true \|\| userStopped/);
+  assert.match(APP_SOURCE, /runningToolName\(items, sidecarDead\)/);
+  assert.match(APP_SOURCE, /toolsUnconfirmed\(items, sidecarDead\)/);
+  assert.match(APP_SOURCE, /hasActiveChild \|\| unconfirmedTools \|\| \(turnActive && turnPulse\.tabId === activeChat\.id\)/);
+  assert.doesNotMatch(APP_SOURCE, /runningToolName\(items, hostPhase\)/);
+
+  const exitAt = APP_SOURCE.indexOf("await onSidecarExit((payload) => {");
+  const exitEnd = APP_SOURCE.indexOf("hostExitNotice(hostStoppedByUserRef.current)", exitAt);
+  assert.ok(exitAt >= 0 && exitEnd > exitAt);
+  const exitBody = APP_SOURCE.slice(exitAt, exitEnd);
+  assert.match(exitBody, /setSidecarDead\(true\)/);
+  assert.doesNotMatch(exitBody, /applyTurnFinal|applyFinalForTab|turnFinalByUserId/);
+});
+
+test("all three history consumers seed final turns and read-only history is not projected", () => {
+  assert.equal((APP_SOURCE.match(/historicalTurnFinalByUserId\(items\)/g) ?? []).length, 3);
+  const history = readFileSync(new URL("../../src/client-huaanwork/HistoryDetailPane.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(history, /ToolPanel|projectToolPanels/);
+});
+
+test("App projects only the final chat rows and persists panel toggle on the anchor item", () => {
+  assert.match(APP_SOURCE, /const toolRows = useMemo\(\(\) => projectToolPanels\(items, \{/);
+  assert.match(APP_SOURCE, /contentItems: contentView/);
+  assert.match(APP_SOURCE, /turnFinalByUserId: activeChat\.turnFinalByUserId/);
+  assert.match(APP_SOURCE, /connectionLost: sidecarDead/);
+  assert.match(APP_SOURCE, /withToolPanelToggle\(tab\.items, anchorId, next\)/);
+  assert.match(APP_SOURCE, /toolRows\.map\(\(row\) =>/);
+  assert.doesNotMatch(APP_SOURCE, /items\.map\(\(item, index\) => \(\s*<ChatRow/);
+  assert.match(APP_SOURCE, /turnChecks\(contentItems\(items\)\)/);
+  assert.match(APP_SOURCE, /insertBeforeToolRow\(prev, ask, event\.callId\)/);
 });

@@ -65,6 +65,8 @@ function toolCall(callId: string, name: string, args: Record<string, unknown>, s
 }
 
 function toolResult(callId: string, text: string, seq: number, time: number, isError = false) {
+  // 真实 v4 日志:结果是 role "tool" 的消息,文本在消息自己的 content 里,
+  // callId 与 isError 位于消息顶层。
   return {
     type: 'tool/result',
     seq,
@@ -75,9 +77,11 @@ function toolResult(callId: string, text: string, seq: number, time: number, isE
       step: 0,
       message: {
         id: `m${seq}`,
-        role: 'user',
+        role: 'tool',
         source: { kind: 'tool', callId },
-        content: [{ type: 'tool-result', toolCallId: callId, isError, content: [{ type: 'text', text }] }],
+        toolCallId: callId,
+        content: [{ type: 'text', text }],
+        isError,
       },
     },
   }
@@ -182,6 +186,77 @@ describe('detailRecords', () => {
     expect(records[3]).toMatchObject({ kind: 'tool-result', callId: 'c1', isError: true, text: '1 failing' })
   })
 
+  test('still parses the legacy nested tool-result block', () => {
+    // 旧日志形状:结果是 role "user" 的消息,文本与 isError 都在内嵌 tool-result 块里,
+    // callId 只出现在 source.callId 上(没有消息级 toolCallId)。
+    const log = sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      {
+        type: 'tool/result',
+        seq: 2,
+        time: T0 + 4,
+        surfaceOp: 'append',
+        data: {
+          turn: 0,
+          step: 0,
+          message: {
+            id: 'm2',
+            role: 'user',
+            source: { kind: 'tool', callId: 'c1' },
+            content: [
+              { type: 'tool-result', toolCallId: 'c1', isError: true, content: [{ type: 'text', text: '1 failing' }] },
+            ],
+          },
+        },
+      },
+    ])
+    const record = detailRecords(log).find((entry) => entry.kind === 'tool-result')
+    expect(record).toMatchObject({ kind: 'tool-result', callId: 'c1', isError: true, text: '1 failing' })
+  })
+
+  test('resolves the callId from the message toolCallId before source.callId', () => {
+    // 消息同时带 toolCallId 与 source.callId 时,marker 判定必须用前者键到的工具名:
+    // 用 source.callId 会键到 read 而不是 shell,失败标记就丢了。
+    const log = sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      toolCall('c-other', 'read', { path: 'a.md' }, 2, T0 + 4),
+      {
+        type: 'tool/result',
+        seq: 3,
+        time: T0 + 5,
+        surfaceOp: 'append',
+        data: {
+          turn: 0,
+          step: 0,
+          message: {
+            id: 'm3',
+            role: 'tool',
+            source: { kind: 'tool', callId: 'c-other' },
+            toolCallId: 'c1',
+            content: [{ type: 'text', text: '1 failing\n[exit code: 1]' }],
+            isError: false,
+          },
+        },
+      },
+    ])
+    const record = detailRecords(log).find((entry) => entry.kind === 'tool-result')
+    expect(record).toMatchObject({ kind: 'tool-result', callId: 'c1', isError: true })
+  })
+
+  test('retains goal continuation metadata without dropping the read-only user record', () => {
+    const records = detailRecords(sessionLog([
+      HEADER,
+      userMessage('原始目标', 1, T0 + 3),
+      userMessage('官方续轮提示', 2, T0 + 4, { kind: 'goal', goalId: 'g', round: 2 }),
+    ]))
+    expect(records).toEqual([
+      { kind: 'user', time: T0 + 3, text: '原始目标' },
+      { kind: 'user', time: T0 + 4, text: '官方续轮提示', goalRound: 2 },
+    ])
+  })
+
   test('keeps the shell command on tool-call records and never invents an exit code', () => {
     const log = sessionLog([
       HEADER,
@@ -260,7 +335,7 @@ describe('detailRecords', () => {
       toolResult('c1', middleMarker, 2, T0 + 4),
     ])
     const record = detailRecords(log).find((entry) => entry.kind === 'tool-result')
-    expect(record).toMatchObject({ kind: 'tool-result', isError: true })
+    expect(record).toMatchObject({ kind: 'tool-result', truncated: true, isError: true })
     if (record?.kind !== 'tool-result') throw new Error('expected tool-result record')
     expect(record.text.split('[exit code: 1]')).toHaveLength(2)
     expect(record.text.startsWith('x')).toBe(true)
@@ -274,6 +349,7 @@ describe('detailRecords', () => {
     const retained = `开头${'汉'.repeat(9000)}结尾`
     const [kept] = detailRecords(sessionLog([HEADER, toolResult('c1', retained, 1, T0 + 3)]))
     if (kept?.kind !== 'tool-result') throw new Error('expected tool-result record')
+    expect(kept).toMatchObject({ truncated: false })
     expect(kept.text).toBe(retained)
 
     // 12003 个字符 / 36003 字节:按字节判定才截断;中文头部和尾部都保留。

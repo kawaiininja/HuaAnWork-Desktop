@@ -8,8 +8,13 @@ const THINKING_GRACE_MS = 2_000;
 export function turnStatus(input: {
   latest: "reasoning" | "text" | "tool" | "quiet";
   runningTool: string | null;
+  /** 本回合有工具状态未知（断连或回合终结时没有结果）：不得回落成「正在思考」。 */
+  toolsUnconfirmed?: boolean;
   quietMs: number;
 }): { text: string; alert: boolean } {
+  if (input.toolsUnconfirmed === true) {
+    return { text: "工具状态未确认", alert: input.quietMs >= ALERT_MS };
+  }
   if (input.runningTool) {
     return { text: `正在执行工具 ${input.runningTool}`, alert: input.quietMs >= ALERT_MS };
   }

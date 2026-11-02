@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import { runningToolName, toolsUnconfirmed, type ToolPanelItem } from "../../src/client-huaanwork/logic/toolPanel.ts";
 import { resolveStopSession, turnStatus } from "../../src/client-huaanwork/logic/turnStatus.ts";
 
 test("turn status names thinking only while reasoning is current", () => {
@@ -32,6 +33,26 @@ test("turn status names thinking only while reasoning is current", () => {
     text: "正在执行工具 bash",
     alert: true,
   });
+});
+
+test("unconfirmed tools have a dedicated status and never fall back to running or thinking", () => {
+  assert.deepEqual(
+    turnStatus({ latest: "reasoning", runningTool: null, toolsUnconfirmed: true, quietMs: 0 }),
+    { text: "工具状态未确认", alert: false },
+  );
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user" },
+    { id: 2, kind: "tool", card: { key: "a", name: "bash", status: "start" } },
+    { id: 3, kind: "tool", card: { key: "b", name: "read", status: "start", interrupted: true } },
+  ];
+  assert.equal(runningToolName(items, true), null);
+  assert.equal(toolsUnconfirmed(items, true), true);
+  assert.equal(runningToolName(items, false), "bash");
+  const inferred = items.map((item) => item.kind === "tool"
+    ? { ...item, card: { ...item.card, unconfirmed: true } }
+    : item);
+  assert.equal(runningToolName(inferred, false), null);
+  assert.equal(toolsUnconfirmed(inferred, false), true);
 });
 
 test("stop cancels the in-flight session before the tab state catches up", () => {

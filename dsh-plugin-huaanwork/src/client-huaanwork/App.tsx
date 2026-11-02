@@ -136,7 +136,17 @@ import {
   settleInputCard,
   type InputCard,
 } from "./logic/inputCard.ts";
-import { toolRowIcon } from "./logic/commandOutcome.ts";
+import {
+  applyToolEnd,
+  applyTurnFinalToTabs,
+  historicalTurnFinalByUserId,
+  projectToolPanels,
+  runningToolName,
+  toolsUnconfirmed,
+  withToolPanelToggle,
+  type PanelToggle,
+  type TurnFinalEvent,
+} from "./logic/toolPanel.ts";
 import {
   answerApprovalInTabs,
   askCardWaitsForClick,
@@ -196,6 +206,7 @@ import {
 } from "./logic/runResultAttachments.ts";
 import { renderResultHtml, renderResultMarkdown } from "./logic/runResultRender.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
+import ToolPanel from "./ToolPanel.tsx";
 
 /**
  * 用户对话会话 id（事件路由用）：huaanwork-chat- 旧会话与 huaanwork-<16hex digest> 新会话。
@@ -220,9 +231,19 @@ type ToolCard = {
   truncated?: boolean;
   /** 超长工具输出裁成头尾之后的正文，对话里直接显示。 */
   output?: string;
+  /** 参数摘要（单行、限长）；实时事件与会话历史共用同一格式化规则。 */
+  args?: string;
   /** bash / pwsh 的 command 参数与结果是否出错：回合结束核对「要求的命令」用。 */
   command?: string;
   isError?: boolean;
+  /** 该工具已收到结果（成功或失败），面板据此区分「结果缺失」。 */
+  hasResult?: boolean;
+  /** 回合在工具结束前中断：不当作失败，单独标记。 */
+  interrupted?: boolean;
+  /** 结果未确认（例如断连）：面板不宣称成功或失败。 */
+  unconfirmed?: boolean;
+  /** 回合已终结但该工具始终没有结果。 */
+  resultMissing?: boolean;
 };
 
 /** 审批卡 = 逻辑层展示形状（answered/autoContinue/actionable）+ App 侧的原因、摘要与调用标识。 */
@@ -238,7 +259,7 @@ type ChatItem =
   | { id: number; kind: "user"; text: string }
   | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse" }
   | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse" }
-  | { id: number; kind: "tool"; card: ToolCard }
+  | { id: number; kind: "tool"; card: ToolCard; panelToggled?: "expand" | "collapse" }
   | { id: number; kind: "todo"; todos: TodoEntry[] }
   | { id: number; kind: "ask"; card: AskCard }
   | { id: number; kind: "input"; card: InputCard }
@@ -279,6 +300,8 @@ type ChatTab = {
   runPlaceholder?: boolean;
   /** 右侧「预览」打开的结果附件（规格 §5）：选择记在标签上，换标签再回来沿用该标签上次的选择。 */
   previewFile?: ResultAttachmentFile;
+  /** 每个用户消息回合是否已终结（按用户消息条目 id 归因）；面板据此区分「进行中」与「中断」。 */
+  turnFinalByUserId?: Readonly<Record<number, boolean>>;
 };
 
 type SessionMenu = { sessionId: string; x: number; y: number };
@@ -595,6 +618,12 @@ export default function App() {
   const items = activeChat.items;
   const pendingInput = latestOpenInput(items);
   const contentView = useMemo(() => contentItems(items), [items]);
+  /** 最终消息区把平铺工具行投影成每回合一个面板；扁平 `items` 仍是执行与核对的唯一来源。 */
+  const toolRows = useMemo(() => projectToolPanels(items, {
+    contentItems: contentView,
+    turnFinalByUserId: activeChat.turnFinalByUserId,
+    connectionLost: sidecarDead,
+  }), [items, contentView, activeChat.turnFinalByUserId, sidecarDead]);
   /** 运行卡不进入内容视图,下标会与 `items` 错位;思考收尾判断按 id 取内容视图下标。 */
   const contentIndexById = useMemo(
     () => new Map(contentView.map((entry, index) => [entry.id, index] as const)),
@@ -635,12 +664,14 @@ export default function App() {
     && [...subagentRuns.runs.values()].some(
       (run) => run.parentSessionId === activeChat.sessionId && isSubagentRunActive(run),
     );
-  const showTurnLine = hasActiveChild || (turnActive && turnPulse.tabId === activeChat.id);
+  const unconfirmedTools = toolsUnconfirmed(items, sidecarDead);
+  const showTurnLine = hasActiveChild || unconfirmedTools || (turnActive && turnPulse.tabId === activeChat.id);
   const turnLine = parentTurnLine({
     hasActiveChild,
     current: turnStatus({
       latest: turnPulse.latest,
-      runningTool: runningToolName(items),
+      runningTool: runningToolName(items, sidecarDead),
+      toolsUnconfirmed: unconfirmedTools,
       quietMs: Math.max(0, now - turnPulse.at),
     }),
   });
@@ -786,7 +817,17 @@ export default function App() {
         const items = historyToChatItems(view);
         setChatTabs((prev) => [
           ...prev,
-          { id, label: task.name, items, sessionFailed: false, projectId: task.projectId, pendingPick: false, taskId: task.id, sessionId },
+          {
+            id,
+            label: task.name,
+            items,
+            sessionFailed: false,
+            projectId: task.projectId,
+            pendingPick: false,
+            taskId: task.id,
+            sessionId,
+            turnFinalByUserId: historicalTurnFinalByUserId(items),
+          },
         ]);
         // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理运行卡补回来。
         void reconcileSubagentRuns(id, sessionId);
@@ -999,6 +1040,15 @@ export default function App() {
   useEffect(() => {
     keepAwakeDriver.refresh(shouldHoldKeepAwake(keepAwake, automations));
   }, [keepAwake, automations, keepAwakeDriver]);
+
+  /**
+   * 把一次回合终结结算到拥有该会话的标签。只有真实的 goal 动作或真实结束
+   * 会走到这里；断连只影响展示（`sidecarDead`），从不结算回合。
+   */
+  function applyFinalForTab(tabId: string | undefined, sessionId: string | undefined, event: TurnFinalEvent) {
+    if (!tabId) return;
+    setChatTabs((prev) => applyTurnFinalToTabs(prev, tabId, event, goalTurnRef.current.phases[sessionId ?? ""]));
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -1342,10 +1392,12 @@ export default function App() {
                 sessionId: event.sessionId,
                 ...(stopped ? { stopped: true as const } : {}),
               });
+            applyFinalForTab(targetTabFor(event.sessionId), event.sessionId, { kind: "goal-action", action });
             if (action.kind === "outcome") void appendTurnOutcome(event.sessionId);
           }
           if (event.event === "goal/round-limit") {
             const action = noteGoalEvent({ kind: "goal-round-limit", round: event.round, sessionId: eventSessionId });
+            applyFinalForTab(targetTabFor(eventSessionId), eventSessionId, { kind: "goal-action", action });
             if (action.kind === "goal-stopped") void appendGoalStopped(action.round, eventSessionId);
           }
           if (event.event === "session/end") {
@@ -1355,6 +1407,7 @@ export default function App() {
               ok: event.ok,
               ...(event.cancelled === true || userStopped ? { cancelled: true as const } : {}),
             });
+            applyFinalForTab(targetTabFor(eventSessionId), eventSessionId, { kind: "session-end", ok: event.ok, cancelled: event.cancelled === true || userStopped });
             if (action.kind === "outcome") void appendTurnOutcome(eventSessionId);
           }
           if (event.event === "sidecar/status" && event.ready && authPhaseRef.current !== "logged-in") {
@@ -1631,7 +1684,9 @@ export default function App() {
         const run = (automationRuns[automationId] ?? []).find((item) => item.sessionId === sessionId);
         if (run) items.push({ id: allocId(), kind: "note", text: runResultNoteText(run.status) });
         setChatTabs((prev) =>
-          prev.map((item) => (item.id === tabId ? { ...item, items, runPlaceholder: false } : item)),
+          prev.map((item) => (item.id === tabId
+            ? { ...item, items, runPlaceholder: false, turnFinalByUserId: historicalTurnFinalByUserId(items) }
+            : item)),
         );
         // 历史回放只有消息条目:补拉宿主快照,把重启前的子代理运行卡补回来。
         void reconcileSubagentRuns(tabId, sessionId);
@@ -2224,6 +2279,7 @@ export default function App() {
       await rpcCall("session.cancel", { sessionId });
       const settled = settleStop(ticket, true);
       if (settled.arm && tabId) {
+        applyFinalForTab(tabId, ticket.sessionId, { kind: "session-end", ok: false, cancelled: true });
         setChatTabs((prev) => prev.map((tab) => (
           tab.id === tabId
             ? { ...tab, items: [...interruptTurnItems(tab.items), { id: allocId(), kind: "note" as const, text: "已停止" }] }
@@ -2311,6 +2367,14 @@ export default function App() {
   function toggleThinking(itemId: number, userToggled: "expand" | "collapse") {
     setChatTabs((prev) => prev.map((tab) => {
       const items = withThinkingToggle(tab.items, itemId, userToggled);
+      return items === tab.items ? tab : { ...tab, items: [...items] };
+    }));
+  }
+
+  /** 手动展开/收起记在锚点工具条目上：随标签保留，压过按回合状态的自动折叠。 */
+  function toggleToolPanel(anchorId: number, next: PanelToggle) {
+    setChatTabs((prev) => prev.map((tab) => {
+      const items = withToolPanelToggle(tab.items, anchorId, next);
       return items === tab.items ? tab : { ...tab, items: [...items] };
     }));
   }
@@ -2471,7 +2535,19 @@ export default function App() {
         return {
           id: allocId(),
           kind: "tool",
-          card: { key: callId ?? `tool-${allocId()}`, name: item.name, ...(callId ? { callId } : {}), status: "end" },
+          card: {
+            key: callId ?? `tool-${allocId()}`,
+            name: item.name,
+            ...(callId ? { callId } : {}),
+            status: "end",
+            ...(item.args === undefined ? {} : { args: item.args }),
+            ...(item.command === undefined ? {} : { command: item.command }),
+            ...(item.output === undefined ? {} : { output: item.output }),
+            hasResult: item.hasResult,
+            ...(item.resultMissing === true ? { resultMissing: true } : {}),
+            ...(item.truncated === true ? { truncated: true } : {}),
+            ...(item.isError === true ? { isError: true } : {}),
+          },
         };
       }
       if (item.kind === "user") return { id: allocId(), kind: "user", text: item.text };
@@ -2525,10 +2601,20 @@ export default function App() {
       const id = `work-${nextChatSeq.current}`;
       nextChatSeq.current += 1;
       const label = view.title && view.title !== sessionId ? view.title.slice(0, 24) : `任务 ${nextChatSeq.current - 1}`;
+      const items = historyToChatItems(view);
       // 防御：恢复的标签一律不绑项目（评审 P2-4），杜绝『有历史却命中懒创建』
       setChatTabs((prev) => [
         ...prev,
-        { id, label, items: historyToChatItems(view), sessionFailed: false, projectId: null, pendingPick: false, sessionId },
+        {
+          id,
+          label,
+          items,
+          sessionFailed: false,
+          projectId: null,
+          pendingPick: false,
+          sessionId,
+          turnFinalByUserId: historicalTurnFinalByUserId(items),
+        },
       ]);
       setActiveTab(id);
       // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理运行卡补回来。
@@ -2908,20 +2994,22 @@ export default function App() {
                     </div>
                   </div>
                 ) : null}
-                {items.map((item, index) => (
+                {toolRows.map((row) => row.kind === "panel" ? (
+                  <ToolPanel key={row.id} panel={row.panel} onToggle={toggleToolPanel} />
+                ) : (
                   <ChatRow
-                    key={item.id}
-                    item={item}
+                    key={row.item.id}
+                    item={row.item}
                     blocked={blocked}
                     subagent={subagentChat}
                     onAnswer={answer}
                     onInput={answerInput}
                     onThinkingToggle={toggleThinking}
                     onOpenAttachment={handleOpenAttachment}
-                    reasoning={item.kind === "assistant" ? (thinkingBefore(items, index)?.thought ?? "") : ""}
+                    reasoning={row.item.kind === "assistant" ? (thinkingBefore(items, row.index)?.thought ?? "") : ""}
                     hasAssistantText={
-                      item.kind === "thinking"
-                        ? hasAssistantTextAfter(contentView, contentIndexById.get(item.id) ?? -1)
+                      row.item.kind === "thinking"
+                        ? hasAssistantTextAfter(contentView, contentIndexById.get(row.item.id) ?? -1)
                         : false
                     }
                   />
@@ -3513,33 +3601,14 @@ function handleEvent(
             name: event.name,
             callId: event.callId,
             status: "start",
+            ...(event.args === undefined ? {} : { args: event.args }),
             ...(event.command === undefined ? {} : { command: event.command }),
           },
         },
       ], event.sessionId);
       break;
     case "tool/end":
-      setItems((prev) =>
-        prev.map((item) => {
-          if (item.kind !== "tool") return item;
-          const match = event.callId
-            ? item.card.callId === event.callId
-            : item.card.name === event.name && item.card.status === "start";
-            return match
-            ? {
-                ...item,
-                card: {
-                  ...item.card,
-                  status: "end",
-                  truncated: event.truncated,
-                  ...(event.text ? { output: event.text } : {}),
-                  ...(event.isError ? { isError: true } : {}),
-                },
-              }
-            : item;
-        }),
-        event.sessionId,
-      );
+      setItems((prev) => applyToolEnd(prev, event), event.sessionId);
       break;
     case "approval/asked": {
       const ask: ChatItem = {
@@ -3725,7 +3794,7 @@ function ChatRow({
   reasoning = "",
   hasAssistantText = false,
 }: {
-  item: ChatItem;
+  item: Exclude<ChatItem, { kind: "tool" }>;
   blocked: boolean;
   subagent: SubagentChatView;
   onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
@@ -3805,19 +3874,6 @@ function ChatRow({
             <span className="badge">{todoLabel(todo.status)}</span> {todo.content}
           </div>
         ))}
-      </div>
-    );
-  }
-  if (item.kind === "tool") {
-    return (
-      <div>
-        <div className={item.card.status === "start" ? "tool-row running" : "tool-row"}>
-          <span className="tool-icon">{toolRowIcon(item.card)}</span>
-          <strong>{item.card.name}</strong>
-          <span className="muted">{item.card.status === "start" ? "运行中" : "结束"}</span>
-          {item.card.truncated ? <span className="badge">已截断</span> : null}
-        </div>
-        {item.card.output ? <pre className="thinking-body">{item.card.output}</pre> : null}
       </div>
     );
   }
@@ -3937,15 +3993,6 @@ function thinkingBefore(items: readonly ChatItem[], index: number): Extract<Chat
     if (item.kind === "thinking") return item;
   }
   return undefined;
-}
-
-function runningToolName(items: readonly ChatItem[]): string | null {
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    const item = items[i];
-    if (!item || item.kind === "user") return null;
-    if (item.kind === "tool" && item.card.status === "start") return item.card.name;
-  }
-  return null;
 }
 
 function activityKind(event: RpcEvent): "reasoning" | "text" | "tool" | null {

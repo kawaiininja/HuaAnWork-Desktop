@@ -144,6 +144,16 @@ test("a tool card that has not ended is not a pass", () => {
   assert.deepEqual(turnOutcomeNotes(checks, []), ["命令未通过：pnpm test"]);
 });
 
+test("interrupted and unconfirmed required commands remain not-pass alongside panel states", () => {
+  for (const flag of ["interrupted", "unconfirmed"] as const) {
+    const checks = turnChecks([
+      { kind: "user", text: "跑 `pnpm test`" },
+      { kind: "tool", card: { name: "bash", command: "pnpm test", status: "start", [flag]: true } },
+    ]);
+    assert.deepEqual(turnOutcomeNotes(checks, []), ["命令未通过：pnpm test"]);
+  }
+});
+
 test("outcome notes go to a user chat tab only, never a child session or an automation tab", () => {
   const tabs = [
     { id: "work-1", sessionId: "huaanwork-aaaaaaaaaaaaaaaa" },

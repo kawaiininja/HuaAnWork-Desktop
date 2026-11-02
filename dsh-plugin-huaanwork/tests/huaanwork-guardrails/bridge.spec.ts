@@ -487,12 +487,58 @@ test("bridge carries todo_write todos and shell commands on tool/start, and isEr
     event: "tool/start",
     name: "todo_write",
     callId: "t1",
+    args: '{"todos":[{"content":"写报告","status":"in_progress"},{"content":"核对","status":"weird"},{"content":3,"status":"pending"}]}',
     todos: [{ content: "写报告", status: "in_progress" }],
   });
-  assert.deepEqual(starts[1], { event: "tool/start", name: "bash", callId: "b1", command: "pnpm test" });
+  assert.deepEqual(starts[1], {
+    event: "tool/start", name: "bash", callId: "b1", args: '{"command":"pnpm test"}', command: "pnpm test",
+  });
   const ends = emitted.filter((event) => (event as { event?: string }).event === "tool/end") as { isError?: boolean }[];
   assert.equal(ends[0]?.isError, undefined);
   assert.equal(ends[1]?.isError, true);
+});
+
+test("bridge sends display args and always sends capped tool result text without changing execution results", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+
+  const returned = await execute(
+    { name: "read", callId: "r1", arguments: { path: "a.md" } },
+    async () => ({ isError: false, content: [{ type: "text", text: "ordinary output" }] }),
+  );
+  assert.equal(returned.content[0]?.text, "ordinary output");
+  assert.deepEqual(emitted[0], {
+    event: "tool/start", name: "read", callId: "r1", args: '{"path":"a.md"}',
+  });
+  assert.deepEqual(emitted[1], {
+    event: "tool/end", name: "read", callId: "r1", text: "ordinary output",
+  });
+
+  emitted.length = 0;
+  await execute({ name: "read", callId: "empty", arguments: undefined }, async () => ({ isError: false, content: [] }));
+  const emptyEnd = emitted.find((event) => (event as { event?: string }).event === "tool/end") as { text?: unknown };
+  assert.equal(Object.hasOwn(emptyEnd, "text"), true);
+  assert.equal(emptyEnd.text, "");
+
+  emitted.length = 0;
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  await execute({ name: "read", callId: "circular", arguments: circular }, async () => ({ isError: false, content: [] }));
+  assert.deepEqual(emitted[0], { event: "tool/start", name: "read", callId: "circular" });
+});
+
+test("host and client tool-start unions both declare args without duplicating tool-end truncation", () => {
+  const bridge = readFileSync(new URL("../../src/huaanwork-guardrails/bridge.ts", import.meta.url), "utf8");
+  const client = readFileSync(new URL("../../src/client-huaanwork/rpc-types.ts", import.meta.url), "utf8");
+  for (const source of [bridge, client]) {
+    const startAt = source.indexOf('event: "tool/start"');
+    const endAt = source.indexOf('event: "tool/end"', startAt);
+    assert.ok(startAt >= 0 && endAt > startAt);
+    assert.match(source.slice(startAt, endAt), /args\?: string/);
+    assert.equal((source.slice(endAt, endAt + 240).match(/truncated\?: boolean/g) ?? []).length, 1);
+  }
 });
 
 test("bridge reads failure markers from the uncapped shell result, past the 32 KiB head cap", async () => {
@@ -712,8 +758,20 @@ test("bridge keeps an unregistered session unchanged while a registry is present
     content: [{ type: "text", text: "ok" }],
   }));
   assert.deepEqual(emitted, [
-    { event: "tool/start", name: "read", callId: "call-parent", sessionId: PARENT_SESSION },
-    { event: "tool/end", name: "read", callId: "call-parent", sessionId: PARENT_SESSION },
+    {
+      event: "tool/start",
+      name: "read",
+      callId: "call-parent",
+      sessionId: PARENT_SESSION,
+      args: '{"path":"a.md"}',
+    },
+    {
+      event: "tool/end",
+      name: "read",
+      callId: "call-parent",
+      sessionId: PARENT_SESSION,
+      text: "ok",
+    },
   ]);
 
   emitted.length = 0;

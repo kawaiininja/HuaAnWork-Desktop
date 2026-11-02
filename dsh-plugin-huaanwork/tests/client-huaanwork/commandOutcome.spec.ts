@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { failureMarkers, resultTextFailed, shellCommandOf, toolArgumentLabel, toolRowIcon } from "../../src/client-huaanwork/logic/commandOutcome.ts";
+import {
+  failureMarkers,
+  formatToolArguments,
+  resultTextFailed,
+  shellCommandOf,
+  toolArgumentLabel,
+  toolRowIcon,
+} from "../../src/client-huaanwork/logic/commandOutcome.ts";
 
 test("failure markers follow the rc.1 bash renderResult lines", () => {
   assert.equal(resultTextFailed("ok\n[exit code: 1]"), true);
@@ -42,6 +49,19 @@ test("a failed tool row shows a cross, not a check", () => {
   assert.equal(toolRowIcon({ status: "start" }), "●");
   assert.equal(toolRowIcon({ status: "end" }), "✓");
   assert.equal(toolRowIcon({ status: "end", isError: true }), "✗");
+});
+
+test("formatToolArguments matches history single-line labels and survives serialization failure", () => {
+  assert.equal(formatToolArguments({ path: "a.md", note: "一  行\n换行" }), '{"path":"a.md","note":"一 行\\n换行"}');
+  assert.equal(formatToolArguments('{"command":"pnpm test"}'), '{"command":"pnpm test"}');
+  assert.equal(formatToolArguments("not json"), "not json");
+  assert.equal(formatToolArguments(undefined), undefined);
+  assert.equal(formatToolArguments(null), undefined);
+  const long = { text: "x".repeat(201) };
+  assert.equal(formatToolArguments(long), `${JSON.stringify(long).slice(0, 200)}…`);
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  assert.equal(formatToolArguments(circular), undefined);
 });
 
 test("history tool rows show the command over args and clip it to one display line", () => {

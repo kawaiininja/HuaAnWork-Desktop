@@ -3,10 +3,9 @@ import { zstdDecompressSync } from 'node:zlib'
 
 import { capToolOutput } from '@huaanwork/policy/truncate'
 import {
-  TOOL_LABEL_MAX_CHARS,
   failureMarkers,
+  formatToolArguments,
   isShellTool,
-  parseToolArguments,
   shellCommandOf,
 } from '../client-huaanwork/logic/commandOutcome.ts'
 import type { SessionDetailRecord, SessionSummary } from '../client-huaanwork/rpc-types.ts'
@@ -83,7 +82,9 @@ function scanZstdFrameEnd(buffer: Buffer, start: number): number | undefined {
  * - `user/message`:data 即消息 `{ role: "user", content: [{ type: "text", text }], source?: { kind } }`
  * - `assistant/message`:`data.message.content` 为 `reasoning` / `text` / `tool-call` 块
  * - `tool/call`:`data: { turn, step, callId, name, arguments }`
- * - `tool/result`:`data.message.content[0]` 为 `tool-result` 块(含 isError 与文本)
+ * - `tool/result`:结果为工具消息;真实 v4 日志把文本放在 `data.message.content`
+ *   的 `text` 块里,并带消息级 `toolCallId` / `isError`;旧日志则把文本与
+ *   `isError` 包在内嵌的 `tool-result` 块里(两种形状都解析)
  * - `session/title`:`data: { title, messageSeqs, source }`(取最后一条为准)
  *
  * 解析必须容错:未知事件、坏行、缺字段一律跳过,绝不让列表因单个
@@ -186,10 +187,21 @@ export function detailRecords(text: string): SessionDetailRecord[] {
     const time = typeof event.time === 'number' ? event.time : 0
     switch (event.type) {
       case 'user/message': {
+        const source = asObject(data.source)
         const kind = sourceKind(data)
         if (kind === 'plugin' || kind === 'tool') break
         const messageText = firstTextOfMessage(data)
-        if (messageText) records.push({ kind: 'user', time, text: messageText })
+        const goalRound = kind === 'goal' && typeof source.round === 'number' && source.round > 0
+          ? source.round
+          : undefined
+        if (messageText) {
+          records.push({
+            kind: 'user',
+            time,
+            text: messageText,
+            ...(goalRound === undefined ? {} : { goalRound }),
+          })
+        }
         break
       }
       case 'assistant/message': {
@@ -209,7 +221,7 @@ export function detailRecords(text: string): SessionDetailRecord[] {
       }
       case 'tool/call': {
         const name = typeof data.name === 'string' ? data.name : ''
-        const args = formatArgs(data.arguments)
+        const args = formatToolArguments(data.arguments)
         const command = shellCommandOf(name, data.arguments)
         if (typeof data.callId === 'string') toolNames.set(data.callId, name)
         records.push({
@@ -224,20 +236,20 @@ export function detailRecords(text: string): SessionDetailRecord[] {
       }
       case 'tool/result': {
         const message = asObject(data.message)
-        const block = Array.isArray(message.content)
-          ? message.content.map(asObject).find((entry) => entry.type === 'tool-result')
-          : undefined
-        const content = Array.isArray(block?.content) ? block.content : []
-        const resultText = content
-          .map(asObject)
-          .filter((entry) => entry.type === 'text' && typeof entry.text === 'string')
-          .map((entry) => entry.text as string)
-          .join('\n')
-          .trim()
+        const blocks = Array.isArray(message.content) ? message.content.map(asObject) : []
+        const nested = blocks.find((entry) => entry.type === 'tool-result')
+        // 真实 v4 的文本在消息自己的 content 里;旧日志的文本只在内嵌的 tool-result 块里。
+        const ownText = firstTextOfMessage(message)
+        const legacyText = nested === undefined ? '' : firstTextOfMessage(nested)
+        const resultText = ownText || legacyText
         const source = asObject(message.source)
+        // v4 的 callId 在消息自身的 toolCallId 上;旧形状只有 source.callId。
+        const messageCallId = typeof message.toolCallId === 'string' ? message.toolCallId : undefined
+        const sourceCallId = typeof source.callId === 'string' ? source.callId : undefined
+        const callId = messageCallId ?? sourceCallId
         // 失败标记在未截断的结果文本里解析(截断会丢掉中段);
         // 只对 shell 工具解析,避免读到文件里引用的标记文字。
-        const markers = typeof source.callId === 'string' && isShellTool(toolNames.get(source.callId) ?? '')
+        const markers = callId !== undefined && isShellTool(toolNames.get(callId) ?? '')
           ? failureMarkers(resultText)
           : []
         // 与实时桥同一截断形状:保留头、尾和中间的截断标记;上限用 capToolOutput 的默认值
@@ -248,9 +260,10 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         records.push({
           kind: 'tool-result',
           time,
-          ...(typeof source.callId === 'string' ? { callId: source.callId } : {}),
-          isError: block?.isError === true || markers.length > 0,
+          ...(callId === undefined ? {} : { callId }),
+          isError: message.isError === true || nested?.isError === true || markers.length > 0,
           text,
+          truncated: capped.truncated,
         })
         break
       }
@@ -292,23 +305,6 @@ function firstTextOfMessage(message: Json): string {
 
 function messageHasVisibleText(message: Json): boolean {
   return firstTextOfMessage(message).length > 0
-}
-
-function formatArgs(value: unknown): string | undefined {
-  if (value === undefined || value === null) return undefined
-  const parsed = parseToolArguments(value)
-  let encoded: string
-  if (typeof parsed === 'string') {
-    // 不是合法 JSON 的字符串原样展示,避免多包一层引号。
-    encoded = parsed
-  } else {
-    try {
-      encoded = JSON.stringify(parsed) ?? ''
-    } catch {
-      return undefined
-    }
-  }
-  return clipText(encoded, TOOL_LABEL_MAX_CHARS, '…')
 }
 
 /** 单行化并按需截断;超长时追加省略标记。 */
