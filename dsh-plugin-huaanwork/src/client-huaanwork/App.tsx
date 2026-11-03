@@ -2639,10 +2639,15 @@ export default function App() {
     setView("main");
   }
 
-  /** 「继续此会话」按钮：从历史详情视图恢复（resumeFromView 的历史面板入口）。 */
+  /** 「继续此会话」按钮：从历史详情视图恢复；打开失败的历史页先重试打开。 */
   async function resumeHistorySession() {
     const view = historyView;
-    if (view) await resumeFromView(view);
+    if (!view) return;
+    if (view.records.length === 0) {
+      await openFreeSession(view.sessionId);
+      return;
+    }
+    await resumeFromView({ ...view, error: undefined });
   }
 
   async function removeSession(sessionId: string) {

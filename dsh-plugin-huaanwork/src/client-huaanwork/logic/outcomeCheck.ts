@@ -102,7 +102,18 @@ export type TodoEntry = { content: string; status: TodoStatus };
 type TurnItem =
   | { kind: "user"; text: string }
   | { kind: "ask"; card: { toolName: string; summary?: string } }
-  | { kind: "tool"; card: { name: string; command?: string; isError?: boolean; status?: "start" | "end" } }
+  | {
+      kind: "tool";
+      card: {
+        name: string;
+        command?: string;
+        isError?: boolean;
+        status?: "start" | "end";
+        interrupted?: boolean;
+        unconfirmed?: boolean;
+        resultMissing?: boolean;
+      };
+    }
   | { kind: "assistant" | "thinking" | "note" | "todo" | "input" };
 
 export type TurnChecks = {
@@ -137,8 +148,12 @@ export function turnChecks(items: readonly TurnItem[]): TurnChecks {
       toolResults.push({
         name: item.card.name,
         ...(item.card.command === undefined ? {} : { command: item.card.command }),
-        // 没结束的工具卡不算通过。
-        isError: item.card.isError === true || item.card.status === "start",
+        // 没结束、或没有验证为成功结束的工具卡都不算通过。
+        isError: item.card.isError === true
+          || item.card.status === "start"
+          || item.card.interrupted === true
+          || item.card.unconfirmed === true
+          || item.card.resultMissing === true,
       });
     }
   }

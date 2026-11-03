@@ -568,6 +568,22 @@ test("all three history consumers seed final turns and read-only history is not 
   assert.doesNotMatch(history, /ToolPanel|projectToolPanels/);
 });
 
+test("the history pane keeps the continue action on an error view", () => {
+  const history = readFileSync(new URL("../../src/client-huaanwork/HistoryDetailPane.tsx", import.meta.url), "utf8");
+  assert.match(history, /\{canResume \? \(/);
+  assert.doesNotMatch(history, /canResume && !view\.error/);
+});
+
+test("resumeHistorySession retries opening an empty error view", () => {
+  const start = APP_SOURCE.indexOf("async function resumeHistorySession(");
+  const end = APP_SOURCE.indexOf("async function removeSession(", start);
+  assert.ok(start >= 0 && end > start, "resumeHistorySession is still followed by removeSession");
+  const body = APP_SOURCE.slice(start, end);
+  assert.match(body, /view\.records\.length === 0/);
+  assert.match(body, /openFreeSession\(view\.sessionId\)/);
+  assert.match(body, /resumeFromView\(\{ \.\.\.view, error: undefined \}\)/);
+});
+
 test("App projects only the final chat rows and persists panel toggle on the anchor item", () => {
   assert.match(APP_SOURCE, /const toolRows = useMemo\(\(\) => projectToolPanels\(items, \{/);
   assert.match(APP_SOURCE, /contentItems: contentView/);

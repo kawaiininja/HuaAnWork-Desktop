@@ -154,6 +154,22 @@ test("interrupted and unconfirmed required commands remain not-pass alongside pa
   }
 });
 
+test("historical end cards without a verified result are not a pass", () => {
+  for (const flag of ["interrupted", "unconfirmed", "resultMissing"] as const) {
+    const checks = turnChecks([
+      { kind: "user", text: "跑 `pnpm test`" },
+      { kind: "tool", card: { name: "bash", command: "pnpm test", status: "end", [flag]: true } },
+    ]);
+    assert.deepEqual(turnOutcomeNotes(checks, []), ["命令未通过：pnpm test"]);
+  }
+
+  const finished = turnChecks([
+    { kind: "user", text: "跑 `pnpm test`" },
+    { kind: "tool", card: { name: "bash", command: "pnpm test", status: "end", isError: false } },
+  ]);
+  assert.deepEqual(turnOutcomeNotes(finished, []), ["已完成：自动核对 1 项均通过"]);
+});
+
 test("outcome notes go to a user chat tab only, never a child session or an automation tab", () => {
   const tabs = [
     { id: "work-1", sessionId: "huaanwork-aaaaaaaaaaaaaaaa" },

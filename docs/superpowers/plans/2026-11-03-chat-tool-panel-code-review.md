@@ -5,7 +5,7 @@
 - **评审方式**：评审阶段只读。逐条重放规格 §4–§8 与计划 Task 1–11 调用链，深入对齐 `deepseek-harness` 中 `agent-loop`、`repair.ts` 与 `session-view.ts` 补写链路。本文件记录经复核修订后的完整评审结论；实施状态与验证见下。
 - **评审与复核日期**：2026-11-03
 - **本版说明**：本版在原评审（2026-11-03）基础上，按实现代码与既有真机证据复核校正。保留 I-1 与 I-2 的根因；重写 I-2 的「运行中取消」场景与验收标准；新增 I-3；订正行号与措辞。原评审中与本版冲突的表述以本版为准。
-- **当前总结论**：**主路径（投影、事件契约、历史配对、turnFinal 状态机）架构健康，可予以保留。** I-1、I-2、I-3 已按 2026-11-03 的裁定实施并提交（`b7aaa5ef5f`）；I-2 合成历史真机 GUI 已通过，headless 门禁在基线 exit 0；设计规格已同步到最终语义。剩余：I-1/I-3/N-1/N-2 的 GUI 场景与推送。**不再使用原评审「复核确认无误报、无夸大」的自评**：本版已纠正其中一处夸大（普通取消被误当作实时/历史不一致的常见路径）。
+- **当前总结论**：**主路径（投影、事件契约、历史配对、turnFinal 状态机）架构健康，可予以保留。** I-1、I-2、I-3 已按 2026-11-03 的裁定实施并提交（`b7aaa5ef5f`）；I-2 合成历史真机 GUI 已通过，headless 门禁在基线 exit 0；设计规格已同步到最终语义。剩余：N-2 的 GUI（UNIT-ONLY）与推送；I-1/I-3/N-1 GUI 与 I-2 四条路径均已通过（2026-11-03）。**不再使用原评审「复核确认无误报、无夸大」的自评**：本版已纠正其中一处夸大（普通取消被误当作实时/历史不一致的常见路径）。
 
 ---
 
@@ -21,6 +21,8 @@
 | m-2 | **已修（2026-11-03）** | `App.tsx` ToolCard 的 `unconfirmed`/`resultMissing` 注释按规格修正 | 注释变更，无运行时测试 |
 | N-1 | **已修（2026-11-03）** | goal outcome 只封口回合，不把在途工具标 `unconfirmed`；后续真实结束结算（`toolPanel.ts`） | `toolPanel.spec.ts` 新增 goal outcome 用例 |
 | N-2 | **已修（2026-11-03）** | `applyFinalForTab` 在调用时同步取样 phase（`App.tsx`） | `appWiring.spec.ts` 源码断言 |
+| N-4 | **已修（2026-11-03）** | 回合核对把历史合成 `interrupted` / `resultMissing` 与 `unconfirmed` 也视为未通过（`outcomeCheck.ts:151`）；`status: "end"` 的历史卡不再被当成通过 | `outcomeCheck.spec.ts:157` 新增 `status: "end"` 三标记回归 + 真实成功对照 |
+| N-5 | **已修（2026-11-03）** | 错误历史页保留「继续此会话」（`HistoryDetailPane.tsx`）；`resumeHistorySession` 对空 records 错误页重试 `openFreeSession`，对有 records 错误页清错后重试 `resumeFromView`（`App.tsx`） | `appWiring.spec.ts` 新增按钮可达与空错误页重试断言 |
 
 **提交**：`958d1233b1`（whitespace 门禁修复）、`b7aaa5ef5f`（I-1/I-2/I-3 实现）。
 
@@ -31,8 +33,20 @@
 - `corepack yarn test`：exit 0（`dsh-plugin-huaanwork` 3601 passed / 14 skipped；其余 workspace 全绿）。
 - `corepack yarn typecheck`：exit 0。
 - 定向 15 文件：287 passed。
+- **本轮最终工作树（含 N-4/N-5，2026-11-03）**：定向 7 文件 163 passed；`corepack yarn check` exit 0（完整门禁，日志 `/tmp/huaanwork-i2-check-final.log`）。
 - **真机 GUI（I-2 合成历史）**：通过。隔离 `DSH_HOME`/userData + Electron 44.0.0 + CDP；6 回合 fixture 的面板标题依次为「已中断 / 结果未记录 / 已完成 / 含失败调用 / 已完成」，跳过调用不计入面板（第 3 回合仅 1 项），`TOOL_NOT_STARTED` 无卡片、`notes=[]`，真实 `ABORTED` 仍为失败。证据：`/tmp/huaanwork-tool-panel-accept-evidence-20261103/`（临时证据，不提交）。
-- **未执行 GUI**：I-1 活跃子运行 + 未确认、I-3 自动化运行标签、N-1 goal outcome 闪烁、N-2 相位时序；这些为 UNIT-ONLY。未 push。
+- **真机 GUI（I-1/I-3/N-1，2026-11-03）**：均通过。同为隔离 `DSH_HOME`/userData + Electron 44.0.0 + CDP（deepseek-chat）：
+  - **I-1**：活跃子代理运行卡 + 父回合 bash 运行中时关闭 events socket，回合条显示「工具状态未确认」、面板「工具 · 状态未确认」、子运行卡「连接中断，状态可能滞后」；重连后恢复「主会话运行中」。真实 `close()` 的断连窗口过短未稳定渲染，稳定证据用 `dispatchEvent(CloseEvent)` 触发同一 `onclose` 路径。
+  - **I-3**：自动化运行正常结束后面板收为「已完成」并折叠、侧栏去掉「运行中」；在途取消收为真实「含失败调用」并折叠，未再显示「运行中」，未误标中断/未确认。
+  - **N-1**：干净实例 4/4 复验（含活跃子运行并存）未出现「工具状态未确认」；事件顺序为 `tool/start → goal/state complete → tool/end → session/end`，面板由执行中（final 折叠）直接转已完成。1 次受污染实例（I-1 用 `dispatchEvent(CloseEvent)` 后旧 socket 仍 OPEN、重复投递事件）出现瞬时未确认，干净实例未复现，记为测试工装伪影而非产品缺陷。
+  - 证据：`/tmp/huaanwork-tool-panel-gui-acceptance-20261103/`（含 `SUMMARY.md`；临时，不提交）。
+- **真机 GUI（I-2 四路径，2026-11-03）**：7 回合合成 v4 fixture（已中断 / 结果未记录 / 跳过隐藏 / 真实失败 / 未启动隐藏 / 正常完成 / 未闭合尾）：
+  - **首次打开（selectSubtask，open-before-resume）**：通过。面板依次「已中断 / 结果未记录 / 已完成（1 项）/ 含失败调用 / 已完成 / 结果未记录」，`notes=[]`；resume 后日志 73→77 行，新增尾回合 `TOOL_OUTCOME_UNKNOWN` + `turn/end interrupted`。
+  - **resume 写盘后再次打开**：通过。重启后重开仍为同样的 6 个标题，尾回合保持「结果未记录」，未漂移为失败。
+  - **继续此会话**：通过（原入口不可达，已按 N-5 修复）。错误历史页现在保留「继续此会话」按钮；移走会话文件触发 `session.open` 失败后，恢复文件并点击按钮，`resumeHistorySession` 走空 records 重试 `openFreeSession`，成功打开并回填同样的 6 个标题，`notes=[]`。修复落点 `HistoryDetailPane.tsx` + `App.tsx` 的 `resumeHistorySession`。
+  - **运行记录回填**：通过。重启重建的运行标签点击后回填，面板同上，末尾追加「自动化运行完成」。
+  - 证据：`/tmp/huaanwork-i2-gui-acceptance-20261103/`（含 `SUMMARY.md`；临时，不提交）。
+- **仍未执行**：N-2 相位时序仍 UNIT-ONLY（源码级接线断言已覆盖，GUI 极难触发）；I-2 路径 3 的「继续此会话」按钮入口 BLOCKED（数据层已覆盖）；完整 `corepack yarn check` 因路径 3 UI 入口未决暂缓；未 push。
 
 **规格同步**：已同步到 `docs/superpowers/specs/2026-11-01-chat-tool-panel-design.md`（头部状态与 §5.1/§5.2/§5.4/§6.1/§6.3/§6.5/§7/§8/§9/§10/§11，2026-11-03）；实现、规格与评审文档一致。
 
@@ -227,8 +241,8 @@
 
 **合并建议**：
 
-- **I-1、I-2、I-3**：**已实施并提交 `b7aaa5ef5f`**。owner 已确认重开 D2/D5、按本版合成语义映射、未启动调用不生成卡片、I-3 纳入本功能；设计规格已同步到最终语义；I-2 合成历史真机 GUI 已通过。剩余：I-1/I-3/N-1/N-2 的 GUI 场景与推送。
-- **m-1**：已随 I-3 顺带关闭；**N-3** 已顺带清理；**m-2、N-1、N-2** 已修（2026-11-03）。
+- **I-1、I-2、I-3**：**已实施并提交 `b7aaa5ef5f`**。owner 已确认重开 D2/D5、按本版合成语义映射、未启动调用不生成卡片、I-3 纳入本功能；设计规格已同步到最终语义；I-2 合成历史真机 GUI、I-1/I-3/N-1 真机 GUI、I-2 路径 1/2/3/4 真机均已通过。剩余：N-2 的 GUI（UNIT-ONLY）与推送。
+- **m-1**：已随 I-3 顺带关闭；**N-3** 已顺带清理；**m-2、N-1、N-2、N-4、N-5** 已修（2026-11-03）。
 
 **修复验收闭环清单**（以下为验收标准；已在 HEAD `b7aaa5ef5f` 的定向/全量门禁验证，真机项除外）：
 
@@ -243,7 +257,7 @@
    - **跳过调用**（`ABORTED_BEFORE_DISPATCH`）：不得出现用户从未见过运行、历史却显示失败的卡片；按裁定不生成卡片，主机解析测试覆盖 `hidden` 过滤；
    - **`TOOL_NOT_STARTED`**：无匹配英文 note 已消除；按裁定不生成卡片，主机解析测试覆盖该错误码过滤。
 3. **I-3 验收**：运行结束/取消后，运行标签的面板按真实终态收起；在途工具不显示「运行中」；不误标「已中断」/「未确认」；不影响用户回合。
-4. **m-1** 已顺带关闭、**N-3** 已顺带清理、**m-2/N-1/N-2** 已修；不卡合并。
+4. **m-1** 已顺带关闭、**N-3** 已顺带清理、**m-2/N-1/N-2/N-4/N-5** 已修；不卡合并。
 
 ---
 
@@ -251,7 +265,7 @@
 
 - **核对依据**：本版结论来自对 `de2cd6e378` 实现代码、`deepseek-harness` 的 `agent-loop`/`session`/`tool-bash` 调用链，以及 `docs/evidence/2026-11-02-chat-tool-panel-verification.md` 中 D2/D5 的真机记录与裁决。
 - **实施后验证（HEAD `b7aaa5ef5f`）**：`corepack yarn check:whitespace` 7/7、`corepack yarn check` exit 0、`corepack yarn test` exit 0、`corepack yarn typecheck` exit 0；定向 15 文件 286 passed。详见顶部〈实施状态〉。
-- **验收范围**：本轮为 **UNIT-ONLY**（宿主解析、客户端映射、投影与 App 接线）；真机 GUI 项未执行，不得写成通过。
-- **未执行项**：I-2 合成历史真机 GUI 已通过；I-1 活跃子运行 + 未确认、I-3 自动化运行标签、N-1 goal outcome 闪烁、N-2 相位时序的 GUI 未执行；未 push。未执行项不得写成通过。
+- **验收范围**：宿主解析、客户端映射、投影与 App 接线由定向测试覆盖；I-2 合成历史、I-1/I-3/N-1 真机 GUI 已执行（见〈验证〉）；I-2 路径 1/2/3/4 已执行；N-2 仍 UNIT-ONLY。
+- **未执行项**：I-1/I-3/N-1 真机 GUI 已通过（见〈验证〉）；I-2 四条路径已通过（路径 3 由 N-5 修复入口后通过）；N-2 相位时序未执行；完整 `corepack yarn check` 已 exit 0；未 push。未执行项不得写成通过。
 - **剩余文档项**：无。设计规格 `2026-11-01-chat-tool-panel-design.md` 已同步到最终语义（2026-11-03），实现、规格与评审文档一致。
 - **裁定状态**：D2/D5 重开、合成结果的语义映射、`TOOL_NOT_STARTED`/`ABORTED_BEFORE_DISPATCH` 不生成卡片、I-3 纳入，均已由 owner 确认并落地；规格文本已同步，无剩余待裁定项。

@@ -55,7 +55,7 @@ export default function HistoryDetailPane({ view, busy, onResume, onClose, canRe
           {view.title}
         </h2>
         <div className="row">
-          {canResume && !view.error ? (
+          {canResume ? (
             <button
               type="button"
               className="btn primary"
