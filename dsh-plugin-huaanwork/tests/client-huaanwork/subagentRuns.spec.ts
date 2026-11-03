@@ -1094,3 +1094,22 @@ test("the parent line summarizes an active child run and otherwise keeps the tur
   const current = { text: "正在执行工具 read_file", alert: true };
   assert.equal(parentTurnLine({ hasActiveChild: false, current }), current);
 });
+
+test("unconfirmed tools keep their dedicated line even while a child run is active", () => {
+  const unconfirmed = { text: "工具状态未确认", alert: true };
+  assert.deepEqual(
+    parentTurnLine({ hasActiveChild: true, toolsUnconfirmed: true, current: unconfirmed }),
+    unconfirmed,
+    "the unconfirmed line outranks the active-child summary",
+  );
+  assert.deepEqual(
+    parentTurnLine({ hasActiveChild: true, toolsUnconfirmed: false, current: { text: "正在思考", alert: false } }),
+    { text: "主会话运行中", alert: false },
+    "a resolved tool state still falls back to the child summary",
+  );
+  assert.equal(
+    parentTurnLine({ hasActiveChild: false, toolsUnconfirmed: true, current: unconfirmed }),
+    unconfirmed,
+    "without an active child the turn status is already the unconfirmed line",
+  );
+});

@@ -111,6 +111,22 @@ test("connection loss demotes only unresolved running tools without rewriting fa
   assert.equal(toolEntryStatus({ key: "1", name: "read", status: "end", hasResult: false, resultMissing: true }, false), "resultMissing");
 });
 
+test("a historical synthetic interruption outranks the end status", () => {
+  assert.equal(
+    toolEntryStatus({ key: "1", name: "bash", status: "end", interrupted: true }, false),
+    "interrupted",
+    "history restores synthetic interruptions with status=end; they must not render as done",
+  );
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user" },
+    { id: 2, kind: "tool", card: { key: "1", name: "bash", status: "end", interrupted: true } },
+  ];
+  assert.equal(
+    panelAt(projectToolPanels(items, { contentItems: content(items), connectionLost: false }), 1).title,
+    "工具 · 已中断 · 1 项调用",
+  );
+});
+
 test("panel toggle is stored only on the anchor tool item", () => {
   const items = [tool(2, "read"), tool(3, "grep")];
   const changed = withToolPanelToggle(items, 2, "collapse");
@@ -363,6 +379,38 @@ test("tab settlement interrupts or unconfirms only the current turn on the ownin
 
 test("history seed marks every restored user turn final", () => {
   assert.deepEqual(historicalTurnFinalByUserId([{ id: 1, kind: "user" }, tool(2, "read"), { id: 3, kind: "user" }]), { 1: true, 3: true });
+});
+
+test("a tab without user entries settles its synthetic turn and collapses its panel", () => {
+  const tabs: Array<{ id: string; items: ToolPanelItem[]; turnFinalWithoutUser?: boolean }> = [
+    { id: "run", items: [tool(2, "bash", "b1")] },
+  ];
+  const cancelled = applyTurnFinalToTabs(tabs, "run", { kind: "session-end", ok: false, cancelled: true }, undefined);
+  assert.equal(cancelled[0]?.turnFinalWithoutUser, true);
+  assert.equal(cardAt(cancelled[0]!.items, 0).interrupted, true);
+  const rows = projectToolPanels(cancelled[0]!.items, {
+    contentItems: cancelled[0]!.items,
+    connectionLost: false,
+    turnFinalWithoutUser: cancelled[0]?.turnFinalWithoutUser,
+  });
+  assert.equal(panelAt(rows, 0).title, "工具 · 已中断 · 1 项调用");
+  assert.equal(panelAt(rows, 0).expanded, false);
+  assert.equal(
+    applyTurnFinalToTabs(cancelled, "run", { kind: "session-end", ok: false, cancelled: true }, undefined),
+    cancelled,
+    "the same settlement never runs twice",
+  );
+
+  const normal = applyTurnFinalToTabs(tabs, "run", { kind: "session-end", ok: true, cancelled: false }, undefined);
+  assert.equal(cardAt(normal[0]!.items, 0).unconfirmed, true);
+  assert.equal(cardAt(normal[0]!.items, 0).interrupted, undefined);
+
+  const runOk = applyTurnFinalToTabs(tabs, "run", { kind: "run-end", interrupted: false }, undefined);
+  assert.equal(runOk[0]?.turnFinalWithoutUser, true);
+  assert.equal(cardAt(runOk[0]!.items, 0).unconfirmed, true);
+  const runFailed = applyTurnFinalToTabs(tabs, "run", { kind: "run-end", interrupted: true }, undefined);
+  assert.equal(cardAt(runFailed[0]!.items, 0).interrupted, true);
+  assert.equal(reduceTurnFinal(false, { kind: "run-end", interrupted: false }, undefined), true);
 });
 
 test("a later user closes the old panel, starts non-final, and preserves the old manual choice", () => {

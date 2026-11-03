@@ -339,7 +339,16 @@ export type SessionDetailRecord =
   | { kind: "thinking"; time: number; text: string }
   | { kind: "assistant"; time: number; text: string }
   | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string }
-  | { kind: "tool-result"; time: number; callId?: string; isError: boolean; text: string; truncated?: boolean };
+  | {
+      kind: "tool-result";
+      time: number;
+      callId?: string;
+      isError: boolean;
+      text: string;
+      truncated?: boolean;
+      /** 宿主按 `data.error.code` 与 `turn/end` reason 归一化的合成结果；hidden 记录已在 detailRecords 内过滤。 */
+      synthetic?: "interrupted" | "resultMissing" | "hidden";
+    };
 
 /**
  * 本地智能体创建确认卡。字段与 host `agent-package/types.ts` 的

@@ -61,6 +61,49 @@ test("history pairs success, failure, empty and truncated results into their too
   assert.equal(items.some((item) => item.kind === "note"), false, "paired failures do not become extra chat notes");
 });
 
+test("synthetic interrupted and resultMissing records restore honest cards without failure", () => {
+  const interrupted = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "运行命令" },
+    { kind: "tool-call", time: 2, name: "bash", callId: "b1", command: "sleep 20" },
+    {
+      kind: "tool-result",
+      time: 3,
+      callId: "b1",
+      isError: true,
+      text: "The tool call was interrupted after it was recorded.",
+      synthetic: "interrupted",
+    },
+  ]).find((item) => item.kind === "tool");
+  assert.deepEqual(interrupted && interrupted.kind === "tool"
+    ? [interrupted.hasResult, interrupted.interrupted, interrupted.resultMissing, interrupted.isError, interrupted.output]
+    : [], [false, true, undefined, undefined, undefined]);
+
+  const missing = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "运行命令" },
+    { kind: "tool-call", time: 2, name: "bash", callId: "b1" },
+    {
+      kind: "tool-result",
+      time: 3,
+      callId: "b1",
+      isError: true,
+      text: "The tool call was interrupted after it was recorded.",
+      synthetic: "resultMissing",
+    },
+  ]).find((item) => item.kind === "tool");
+  assert.deepEqual(missing && missing.kind === "tool"
+    ? [missing.hasResult, missing.interrupted, missing.resultMissing, missing.isError, missing.output]
+    : [], [false, undefined, true, undefined, undefined]);
+});
+
+test("unmatched synthetic results never become an English failure note", () => {
+  for (const synthetic of ["interrupted", "resultMissing", "hidden"] as const) {
+    const items = historyItemsFromRecords([
+      { kind: "tool-result", time: 1, isError: true, text: "The tool call was interrupted before the Harness recorded it as started.", synthetic },
+    ]);
+    assert.deepEqual(items, [], synthetic);
+  }
+});
+
 test("history pairs missing-callId results in order within one user turn only", () => {
   const items = historyItemsFromRecords([
     { kind: "user", time: 1, text: "第一回合" },

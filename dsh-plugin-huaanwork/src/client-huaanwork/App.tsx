@@ -302,6 +302,8 @@ type ChatTab = {
   previewFile?: ResultAttachmentFile;
   /** 每个用户消息回合是否已终结（按用户消息条目 id 归因）；面板据此区分「进行中」与「中断」。 */
   turnFinalByUserId?: Readonly<Record<number, boolean>>;
+  /** 没有用户消息条目的标签（自动化运行记录等）用同一个合成回合结算。 */
+  turnFinalWithoutUser?: boolean;
 };
 
 type SessionMenu = { sessionId: string; x: number; y: number };
@@ -622,8 +624,9 @@ export default function App() {
   const toolRows = useMemo(() => projectToolPanels(items, {
     contentItems: contentView,
     turnFinalByUserId: activeChat.turnFinalByUserId,
+    turnFinalWithoutUser: activeChat.turnFinalWithoutUser,
     connectionLost: sidecarDead,
-  }), [items, contentView, activeChat.turnFinalByUserId, sidecarDead]);
+  }), [items, contentView, activeChat.turnFinalByUserId, activeChat.turnFinalWithoutUser, sidecarDead]);
   /** 运行卡不进入内容视图,下标会与 `items` 错位;思考收尾判断按 id 取内容视图下标。 */
   const contentIndexById = useMemo(
     () => new Map(contentView.map((entry, index) => [entry.id, index] as const)),
@@ -668,6 +671,7 @@ export default function App() {
   const showTurnLine = hasActiveChild || unconfirmedTools || (turnActive && turnPulse.tabId === activeChat.id);
   const turnLine = parentTurnLine({
     hasActiveChild,
+    toolsUnconfirmed: unconfirmedTools,
     current: turnStatus({
       latest: turnPulse.latest,
       runningTool: runningToolName(items, sidecarDead),
@@ -803,10 +807,10 @@ export default function App() {
           .catch(() => undefined);
         return;
       }
-      // 有会话：resume 恢复完整上下文 + 载入历史，直接可聊。
+      // 有会话：先读历史再 resume。resume 会把未闭合尾回合修补成合成结果并写盘，
+      // 先读才能拿到修补前的真实日志；openFreeSession 也采用同一顺序。
       const sessionId = task.sessionId;
       try {
-        await rpcCall("session.resume", { sessionId });
         const opened = await rpcCall<{ records?: SessionDetailRecord[] }>("session.open", { sessionId });
         const view: SessionLogView = {
           sessionId,
@@ -814,6 +818,7 @@ export default function App() {
           log: "",
           records: Array.isArray(opened.records) ? opened.records : [],
         };
+        await rpcCall("session.resume", { sessionId });
         const items = historyToChatItems(view);
         setChatTabs((prev) => [
           ...prev,
@@ -827,6 +832,7 @@ export default function App() {
             taskId: task.id,
             sessionId,
             turnFinalByUserId: historicalTurnFinalByUserId(items),
+            turnFinalWithoutUser: true,
           },
         ]);
         // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理运行卡补回来。
@@ -1289,6 +1295,11 @@ export default function App() {
                       : tab,
                   ),
                 );
+                // 运行的权威结束事件；session/end 可能被 stale-idle 闸门丢弃。
+                applyFinalForTab(target, event.sessionId, {
+                  kind: "run-end",
+                  interrupted: !event.ok || event.status === "cancelled",
+                });
               }
             }
             void refreshAutomations();
@@ -1685,7 +1696,7 @@ export default function App() {
         if (run) items.push({ id: allocId(), kind: "note", text: runResultNoteText(run.status) });
         setChatTabs((prev) =>
           prev.map((item) => (item.id === tabId
-            ? { ...item, items, runPlaceholder: false, turnFinalByUserId: historicalTurnFinalByUserId(items) }
+            ? { ...item, items, runPlaceholder: false, turnFinalByUserId: historicalTurnFinalByUserId(items), turnFinalWithoutUser: true }
             : item)),
         );
         // 历史回放只有消息条目:补拉宿主快照,把重启前的子代理运行卡补回来。
@@ -2545,6 +2556,7 @@ export default function App() {
             ...(item.output === undefined ? {} : { output: item.output }),
             hasResult: item.hasResult,
             ...(item.resultMissing === true ? { resultMissing: true } : {}),
+            ...(item.interrupted === true ? { interrupted: true } : {}),
             ...(item.truncated === true ? { truncated: true } : {}),
             ...(item.isError === true ? { isError: true } : {}),
           },
@@ -2614,6 +2626,7 @@ export default function App() {
           pendingPick: false,
           sessionId,
           turnFinalByUserId: historicalTurnFinalByUserId(items),
+          turnFinalWithoutUser: true,
         },
       ]);
       setActiveTab(id);

@@ -87,6 +87,33 @@ function toolResult(callId: string, text: string, seq: number, time: number, isE
   }
 }
 
+function turnEnd(kind: string, seq: number, time: number) {
+  return { type: 'turn/end', seq, time, data: { turn: 0, reason: { kind } } }
+}
+
+/** 修复/调度器写入的合成 tool/result:消息 isError 为 true,错误码在 data.error 上。 */
+function syntheticToolResult(callId: string, code: string, text: string, seq: number, time: number) {
+  return {
+    type: 'tool/result',
+    seq,
+    time,
+    surfaceOp: 'append',
+    data: {
+      turn: 0,
+      step: 0,
+      message: {
+        id: `m${seq}`,
+        role: 'tool',
+        source: { kind: 'tool', callId },
+        toolCallId: callId,
+        content: [{ type: 'text', text }],
+        isError: true,
+      },
+      error: { name: 'AbortError', code },
+    },
+  }
+}
+
 const FULL_LOG = sessionLog([
   HEADER,
   { type: 'turn/start', seq: 1, time: T0 + 3, data: { turn: 0 } },
@@ -414,6 +441,64 @@ describe('detailRecords', () => {
     expect(record!.text.endsWith('TAIL')).toBe(true)
     expect(record!.text).toContain('…（已截断）')
     expect(record!.text).toBe(capToolOutput(`HEAD${'x'.repeat(40_000)}TAIL`, '').text)
+  })
+
+  test('classifies synthetic outcome-unknown by the turn end reason', () => {
+    const synthetic = 'The tool call was interrupted after it was recorded, but no result was durably recorded.'
+    for (const kind of ['aborted', 'error']) {
+      const records = detailRecords(sessionLog([
+        HEADER,
+        toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+        syntheticToolResult('c1', 'TOOL_OUTCOME_UNKNOWN', synthetic, 2, T0 + 4),
+        turnEnd(kind, 3, T0 + 5),
+      ]))
+      expect(records.find((record) => record.kind === 'tool-result')).toMatchObject({
+        synthetic: 'interrupted',
+        isError: true,
+      })
+    }
+
+    const crashed = detailRecords(sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      syntheticToolResult('c1', 'TOOL_OUTCOME_UNKNOWN', synthetic, 2, T0 + 4),
+      turnEnd('interrupted', 3, T0 + 5),
+    ]))
+    expect(crashed.find((record) => record.kind === 'tool-result')).toMatchObject({
+      synthetic: 'resultMissing',
+      isError: true,
+    })
+  })
+
+  test('drops synthetic not-started and aborted-before-dispatch records entirely', () => {
+    const notStarted = detailRecords(sessionLog([
+      HEADER,
+      syntheticToolResult('c1', 'TOOL_NOT_STARTED', 'The tool call was interrupted before the Harness recorded it as started.', 1, T0 + 3),
+      turnEnd('interrupted', 2, T0 + 4),
+    ]))
+    expect(notStarted).toEqual([])
+
+    const skipped = detailRecords(sessionLog([
+      HEADER,
+      toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+      syntheticToolResult('c1', 'ABORTED_BEFORE_DISPATCH', 'Error: tool call aborted before dispatch', 2, T0 + 4),
+      turnEnd('aborted', 3, T0 + 5),
+    ]))
+    expect(skipped).toEqual([])
+  })
+
+  test('keeps real aborted and timeout results as real failures', () => {
+    for (const code of ['ABORTED', 'TOOL_TIMEOUT']) {
+      const records = detailRecords(sessionLog([
+        HEADER,
+        toolCall('c1', 'bash', { command: 'pnpm test' }, 1, T0 + 3),
+        syntheticToolResult('c1', code, 'Error: tool call aborted', 2, T0 + 4),
+        turnEnd('aborted', 3, T0 + 5),
+      ]))
+      const result = records.find((record) => record.kind === 'tool-result')
+      expect(result).toMatchObject({ isError: true })
+      expect(result?.synthetic).toBeUndefined()
+    }
   })
 })
 

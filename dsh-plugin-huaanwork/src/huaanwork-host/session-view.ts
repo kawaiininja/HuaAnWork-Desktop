@@ -94,6 +94,11 @@ function scanZstdFrameEnd(buffer: Buffer, start: number): number | undefined {
 /** 标题最长保留 80 字符,避免超长首条消息把列表/弹窗撑爆。 */
 const TITLE_MAX_CHARS = 80
 
+/** 合成工具结果错误码;真实错误码(ABORTED、TOOL_TIMEOUT 等)不在此列。 */
+const TOOL_OUTCOME_UNKNOWN = 'TOOL_OUTCOME_UNKNOWN'
+const TOOL_NOT_STARTED = 'TOOL_NOT_STARTED'
+const TOOL_ABORTED_BEFORE_DISPATCH = 'ABORTED_BEFORE_DISPATCH'
+
 type Json = Record<string, unknown>
 
 /** 解析会话日志首行 header;非 `type: "session"` 行返回 undefined。 */
@@ -180,9 +185,17 @@ export function detailRecords(text: string): SessionDetailRecord[] {
   const records: SessionDetailRecord[] = []
   const toolNames = new Map<string, string>()
   const lines = text.split('\n')
-  for (const line of lines.slice(1)) {
-    const event = parseJsonLine(line)
-    if (!event) continue
+  const events = lines.slice(1).map(parseJsonLine).filter((event): event is Json => event !== undefined)
+  const turnEndReasons = new Map<number, string>()
+  for (const event of events) {
+    if (event.type !== 'turn/end') continue
+    const data = asObject(event.data)
+    const reason = asObject(data.reason)
+    if (typeof data.turn === 'number' && typeof reason.kind === 'string') {
+      turnEndReasons.set(data.turn, reason.kind)
+    }
+  }
+  for (const event of events) {
     const data = asObject(event.data)
     const time = typeof event.time === 'number' ? event.time : 0
     switch (event.type) {
@@ -247,6 +260,10 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         const messageCallId = typeof message.toolCallId === 'string' ? message.toolCallId : undefined
         const sourceCallId = typeof source.callId === 'string' ? source.callId : undefined
         const callId = messageCallId ?? sourceCallId
+        const error = asObject(data.error)
+        const code = typeof error.code === 'string' ? error.code : undefined
+        const turn = typeof data.turn === 'number' ? data.turn : undefined
+        const synthetic = syntheticToolOutcome(code, turn === undefined ? undefined : turnEndReasons.get(turn))
         // 失败标记在未截断的结果文本里解析(截断会丢掉中段);
         // 只对 shell 工具解析,避免读到文件里引用的标记文字。
         const markers = callId !== undefined && isShellTool(toolNames.get(callId) ?? '')
@@ -264,6 +281,7 @@ export function detailRecords(text: string): SessionDetailRecord[] {
           isError: message.isError === true || nested?.isError === true || markers.length > 0,
           text,
           truncated: capped.truncated,
+          ...(synthetic === undefined ? {} : { synthetic }),
         })
         break
       }
@@ -271,7 +289,31 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         break
     }
   }
-  return records
+  const hiddenCallIds = new Set<string>()
+  for (const record of records) {
+    if (record.kind === 'tool-result' && record.synthetic === 'hidden' && record.callId !== undefined) {
+      hiddenCallIds.add(record.callId)
+    }
+  }
+  return records.filter((record) => {
+    if (record.kind === 'tool-result' && record.synthetic === 'hidden') return false
+    if (record.kind === 'tool-call' && record.callId !== undefined && hiddenCallIds.has(record.callId)) return false
+    return true
+  })
+}
+
+/**
+ * 合成 closer 的展示归一：崩溃恢复的 outcome-unknown 记「结果未记录」；
+ * 取消/失败回合的 outcome-unknown 记「已中断」；未启动调用整条丢弃。
+ * 真实错误码（ABORTED、TOOL_TIMEOUT 等）不在此列，保持真实失败。
+ */
+function syntheticToolOutcome(
+  code: string | undefined,
+  turnEndReason: string | undefined,
+): 'interrupted' | 'resultMissing' | 'hidden' | undefined {
+  if (code === TOOL_NOT_STARTED || code === TOOL_ABORTED_BEFORE_DISPATCH) return 'hidden'
+  if (code !== TOOL_OUTCOME_UNKNOWN) return undefined
+  return turnEndReason === 'aborted' || turnEndReason === 'error' ? 'interrupted' : 'resultMissing'
 }
 
 function parseJsonLine(line: string): Json | undefined {

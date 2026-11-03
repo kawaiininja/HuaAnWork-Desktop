@@ -313,18 +313,23 @@ export function insertSubagentRunCard<T extends { id: number; kind: string }>(
 }
 
 /**
- * 父回合状态行(设计 D4):父会话有活跃运行卡时只说明「主会话运行中」,
- * 子代理的工具与活动详情留在各自的运行卡里;没有活跃子运行卡时保持原有
- * `turnStatus` 输出。该函数只决定展示,不改变任何回合或取消状态。
+ * 父回合状态行(设计 D4):父会话有活跃运行卡且工具状态已明确时只说明
+ * 「主会话运行中」;存在未确认工具时保留 `turnStatus` 的「工具状态未确认」,
+ * 与面板标题、单项口径一致。子代理的工具与活动详情留在各自的运行卡里;
+ * 没有活跃子运行卡时保持原有 `turnStatus` 输出。该函数只决定展示,
+ * 不改变任何回合或取消状态。
  *
- * @param input 是否存在活跃子运行卡,以及原本要展示的回合状态
+ * @param input 是否存在活跃子运行卡、工具状态是否未确认,以及原本要展示的回合状态
  * @returns 父状态行的文案与告警级别
  */
 export function parentTurnLine(input: {
   hasActiveChild: boolean;
+  toolsUnconfirmed?: boolean;
   current: { text: string; alert: boolean };
 }): { text: string; alert: boolean } {
-  return input.hasActiveChild ? { text: "主会话运行中", alert: false } : input.current;
+  return input.hasActiveChild && input.toolsUnconfirmed !== true
+    ? { text: "主会话运行中", alert: false }
+    : input.current;
 }
 
 /**

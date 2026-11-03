@@ -101,6 +101,7 @@ export type HistoryChatItem =
       output?: string;
       hasResult: boolean;
       resultMissing?: boolean;
+      interrupted?: boolean;
       truncated?: boolean;
       isError?: boolean;
     }
@@ -160,15 +161,37 @@ export function historyItemsFromRecords(records: readonly HistoryRecord[]): Hist
     if (match >= 0) {
       const tool = items[match];
       if (tool?.kind !== "tool") continue;
-      items[match] = {
-        ...tool,
-        output: record.text,
-        hasResult: true,
-        resultMissing: undefined,
-        ...(record.truncated === true ? { truncated: true } : {}),
-        ...(record.isError ? { isError: true } : {}),
-      };
-    } else if (record.isError) {
+      if (record.synthetic === "hidden") continue;
+      items[match] = record.synthetic === "interrupted"
+        ? {
+            ...tool,
+            output: undefined,
+            hasResult: false,
+            resultMissing: undefined,
+            interrupted: true,
+            isError: undefined,
+            truncated: undefined,
+          }
+        : record.synthetic === "resultMissing"
+          ? {
+              ...tool,
+              output: undefined,
+              hasResult: false,
+              resultMissing: true,
+              interrupted: undefined,
+              isError: undefined,
+              truncated: undefined,
+            }
+          : {
+              ...tool,
+              output: record.text,
+              hasResult: true,
+              resultMissing: undefined,
+              interrupted: undefined,
+              ...(record.truncated === true ? { truncated: true } : {}),
+              ...(record.isError ? { isError: true } : {}),
+            };
+    } else if (record.isError && record.synthetic === undefined) {
       const text = record.text.replace(/\s+/g, " ").trim().slice(0, 200);
       items.push({ kind: "note", text: `工具调用失败：${text || "未知错误"}` });
     }

@@ -39,8 +39,9 @@ export function toolPanelCard(item: ToolPanelItem): ToolPanelCard | undefined {
 
 export function toolEntryStatus(card: ToolPanelCard, connectionLost: boolean): ToolEntryStatus {
   if (card.resultMissing === true) return "resultMissing";
-  if (card.status === "end") return card.isError === true ? "failed" : "done";
+  // 历史合成中断结果以 status="end" 落卡；实时迟到的真实终态会先清除 interrupted。
   if (card.interrupted === true) return "interrupted";
+  if (card.status === "end") return card.isError === true ? "failed" : "done";
   if (card.unconfirmed === true || connectionLost) return "unconfirmed";
   return "running";
 }
@@ -115,7 +116,8 @@ export function withToolPanelToggle<T extends ToolPanelItem>(
 
 export type TurnFinalEvent =
   | { kind: "session-end"; ok: boolean; cancelled: boolean }
-  | { kind: "goal-action"; action: GoalTurnAction };
+  | { kind: "goal-action"; action: GoalTurnAction }
+  | { kind: "run-end"; interrupted: boolean };
 
 export function reduceTurnFinal(
   current: boolean | undefined,
@@ -124,6 +126,7 @@ export function reduceTurnFinal(
 ): boolean {
   if (current === true) return true;
   if (event.kind === "goal-action") return event.action.kind !== "none";
+  if (event.kind === "run-end") return true;
   if (!event.ok || event.cancelled) return true;
   return phase !== "active";
 }
@@ -149,7 +152,12 @@ function finalizeTurnTools<T extends ToolPanelItem>(items: readonly T[], mode: "
 
 export function applyTurnFinalToTabs<
   I extends ToolPanelItem,
-  T extends { id: string; items: I[]; turnFinalByUserId?: Readonly<Record<number, boolean>> },
+  T extends {
+    id: string;
+    items: I[];
+    turnFinalByUserId?: Readonly<Record<number, boolean>>;
+    turnFinalWithoutUser?: boolean;
+  },
 >(
   tabs: readonly T[],
   tabId: string | undefined,
@@ -166,19 +174,22 @@ export function applyTurnFinalToTabs<
       break;
     }
   }
-  if (userId === undefined) return tabs as T[];
-  const wasFinal = tab.turnFinalByUserId?.[userId] === true;
-  const final = reduceTurnFinal(wasFinal, event, phase);
-  if (!final) return tabs as T[];
-  const items = wasFinal
-    ? tab.items
-    : finalizeTurnTools(tab.items, event.kind === "session-end" && (!event.ok || event.cancelled) ? "interrupted" : "unconfirmed");
+  const wasFinal = userId === undefined
+    ? tab.turnFinalWithoutUser === true
+    : tab.turnFinalByUserId?.[userId] === true;
+  if (!reduceTurnFinal(wasFinal, event, phase)) return tabs as T[];
   if (wasFinal) return tabs as T[];
+  const interrupted = event.kind === "session-end"
+    ? !event.ok || event.cancelled
+    : event.kind === "run-end" && event.interrupted;
+  const items = finalizeTurnTools(tab.items, interrupted ? "interrupted" : "unconfirmed");
   return tabs.map((candidate) => candidate.id === tabId
     ? {
         ...candidate,
         items,
-        turnFinalByUserId: { ...candidate.turnFinalByUserId, [userId]: true },
+        ...(userId === undefined
+          ? { turnFinalWithoutUser: true }
+          : { turnFinalByUserId: { ...candidate.turnFinalByUserId, [userId]: true } }),
       }
     : candidate);
 }
@@ -304,6 +315,7 @@ export function projectToolPanels<T extends ToolPanelItem>(
   options: {
     contentItems: readonly ToolPanelContentItem[];
     turnFinalByUserId?: Readonly<Record<number, boolean>>;
+    turnFinalWithoutUser?: boolean;
     connectionLost: boolean;
   },
 ): ToolPanelRow<T>[] {
@@ -322,7 +334,9 @@ export function projectToolPanels<T extends ToolPanelItem>(
     start,
     end: items.length,
     userId,
-    final: userId !== undefined && options.turnFinalByUserId?.[userId] === true,
+    final: userId === undefined
+      ? options.turnFinalWithoutUser === true
+      : options.turnFinalByUserId?.[userId] === true,
   });
 
   const rows: ToolPanelRow<T>[] = [];
