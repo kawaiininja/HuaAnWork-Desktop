@@ -413,6 +413,23 @@ test("a tab without user entries settles its synthetic turn and collapses its pa
   assert.equal(reduceTurnFinal(false, { kind: "run-end", interrupted: false }, undefined), true);
 });
 
+test("a goal outcome seals the turn without unconfirming in-flight tools", () => {
+  const tabs: Array<{ id: string; items: ToolPanelItem[]; turnFinalByUserId?: Readonly<Record<number, boolean>> }> = [
+    { id: "a", items: [{ id: 1, kind: "user" }, tool(2, "update_goal", "g1")] },
+  ];
+  const sealed = applyTurnFinalToTabs(tabs, "a", { kind: "goal-action", action: { kind: "outcome" } }, "complete");
+  assert.deepEqual(sealed[0]?.turnFinalByUserId, { 1: true });
+  assert.equal(cardAt(sealed[0]!.items, 1).unconfirmed, undefined);
+  assert.equal(cardAt(sealed[0]!.items, 1).interrupted, undefined);
+
+  const ended = applyToolEnd(sealed[0]!.items, { name: "update_goal", callId: "g1", text: "done" });
+  assert.equal(cardAt(ended, 1).status, "end");
+  assert.equal(cardAt(ended, 1).unconfirmed, undefined);
+
+  const settled = applyTurnFinalToTabs(sealed, "a", { kind: "session-end", ok: true, cancelled: false }, "complete");
+  assert.equal(cardAt(settled[0]!.items, 1).unconfirmed, true, "a real turn end still flags a genuinely stuck tool");
+});
+
 test("a later user closes the old panel, starts non-final, and preserves the old manual choice", () => {
   const items: ToolPanelItem[] = [
     { id: 1, kind: "user" },

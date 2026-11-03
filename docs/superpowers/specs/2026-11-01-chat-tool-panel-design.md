@@ -1,7 +1,7 @@
 # 会话内工具面板设计
 
 - 日期：2026-11-01
-- 状态：已按第一、二轮评审结论修订，待书面规格审阅
+- 状态：已按第一、二轮评审、代码评审复核与 owner 裁定同步（2026-11-03）；实现已落地（`b7aaa5ef5f`），实施后订正见 §11
 - 实施边界：仅 HuaAnWork 桌面客户端及其现有工具事件、历史恢复链路
 
 ## 1. 背景与目标
@@ -116,6 +116,10 @@
 - 成功的 `session/end` 且该会话当前目标相位为 `active`：这是官方续轮中间点，保持 `turnFinal=false`。
 - 成功的 `session/end` 且目标相位为 `paused`、`blocked`、`complete`，或该会话没有目标相位：设置 `turnFinal=true`。相位读取现有 `goalRound` 状态记录，不另造目标状态机。
 
+`goal/state complete` 产生实际 `outcome` 时只封口回合（立即 `turnFinal=true`），不把仍在途的工具标 `unconfirmed`；这些工具由后续真实 `tool/end` 或 `session/end` 结算。`session/end`/`run-end` 仍按 §7 处理真正缺终态的工具。
+
+没有用户条目的标签（例如实时自动化运行标签）没有 `user` 回合可归属：按标签维护一个合成回合的终态 `turnFinalWithoutUser`。`session/end` 与 `automation/run-end` 都可以结算它；先到者生效，重复事件幂等；`automation/run-end` 的 `ok=false` 或 `status="cancelled"`、`"error"`、`"timeout"` 按回合失败/取消处理。历史恢复的无用户片段同样按该终态默认收起。该合成回合不改变用户回合的 `turnFinalByUserId`。
+
 因此，`completeFirst` 与 `endFirst` 都能结束面板：后者在 `active` 的中间 `session/end` 时保持展开，在后到的 `complete` 产生 `outcome` 时立即结束，不要求第二次 `session/end`；其后的结束事件只保持既有 final 状态。目标 `active` 的中间结束本身不得收起面板或标记未确认，后续 `goal/round` 仍属于同一个用户回合和同一个工具面板。裸 `session/end` 必须经上述规则判定，瞬时全局 `turnActive=false` 不是直接的收起条件；任何结束信号只能作用于其归属标签和回合。
 
 历史日志中的官方 goal 续轮 `user/message` 必须携带可识别的 `goalRound` 元数据，并在恢复为可聊标签时映射为同一回合的续轮 note，不得生成新的 `user` 条目或额外面板。只读 `HistoryDetailPane` 仍消费原始 `user` 记录并逐条显示原文，不因该恢复规则改变日志形态。
@@ -132,6 +136,8 @@
 - `工具 · 结果未记录 · N 项调用`
 
 状态优先级为：执行中、含失败调用、已中断、状态未确认、结果未记录、已完成。单工具仍保留自身真实状态，标题优先级不改变单项详情。断连时先把受影响的开始态工具从“执行中”集合剔除，再按上述优先级计算；因此没有其他更高优先级状态时，标题必须是“状态未确认”，不能继续显示“执行中”。
+
+历史恢复的合成中断结果以 `status="end"` 落卡时，单项状态仍为「已中断」；`interrupted` 优先于 `status="end"` 的完成/失败判定。真实终态到达时会清除 `interrupted`，不得让推断态盖住真实失败。未启动/跳过调用被宿主隐藏，不进入调用数或状态优先级。
 
 ### 5.3 工具列表与通用说明
 
@@ -168,6 +174,8 @@
 - 旧历史只有调用、没有结果：结果区显示 `历史记录未保存结果`，单项状态显示 `结果未记录`；没有其他更高优先级状态时，面板标题也显示 `结果未记录`。
 - 已中断或未确认且没有结果：显示对应状态，不显示“无输出”。
 - 结果被截断：显示 `已截断` 和现有 capped 文本。
+- 历史合成结果：`interrupted` → 结果区显示「已中断」；`resultMissing` → 「历史记录未保存结果」；都不展示合成结果里的模型指令文本，客户端卡片不设置 `isError`。
+- 未启动/跳过调用（`TOOL_NOT_STARTED`、`ABORTED_BEFORE_DISPATCH`）：不生成工具卡，也不生成英文失败提示；它们不计入调用数或面板标题。
 
 “结果未记录”只说明日志缺少结果记录，不声称工具成功、失败或仍在运行。参数和结果自动换行；其中的 HTML、脚本样式文本或 Markdown 不执行。
 
@@ -185,9 +193,13 @@
 
 保留现有 `output`、`command`、`truncated`、`isError`、`status` 和 `callId`。实时运行中的有效状态为 `status === "start"` 且没有中断、未确认或结果缺失标记；`runningToolName` 等消费方也采用这一定义。`turnFinal` 的正常结束缺终态与 `resultMissing` 是两种不同语义，不得互相复用。
 
+历史合成结果由宿主归一化为 `SessionDetailRecord.tool-result.synthetic`：`interrupted`、`resultMissing` 或 `hidden`。`hidden` 在 `detailRecords` 返回前过滤；可聊历史与只读历史页都不显示这些从未 dispatch 的调用。客户端映射为 `interrupted`/`resultMissing` 时不设置 `isError`（宿主记录保留原始 `isError` 事实）。
+
 面板的 `connectionLost` 只取 `sidecarDead`。`hostPhase === "suspect" | "stoppable"` 在套接字仍开放时只沿用现有探活横幅，不单独改写工具状态；`hostPhase === "stopped"` 是用户主动停止，本身不算断连，按现有停止与回合事件处理。若套接字同时关闭，`sidecarDead` 仍独立生效。
 
 `connectionLost=true` 时，尚未结束且没有中断/未确认标记的工具统一展示为“状态未确认”，不计入“执行中”，不写入新的执行终态。面板标题、单项状态和回合条共同使用这一展示态：`runningToolName` 不再返回这些工具，回合条另增 `toolsUnconfirmed` 输入并显示 `工具状态未确认`，不得仅清空工具名后回落成“正在思考”或“没有新结果”。`showTurnLine` 也必须包含当前标签的 `toolsUnconfirmed`，因为断连会把 `turnActive` 置为 false；不能沿用只看 `turnActive` 的可见条件而让专用文案消失。已完成工具保留完成或失败事实。
+
+`toolsUnconfirmed` 优先于活跃子运行摘要：即使当前标签存在活跃子代理运行，回合条也必须保留「工具状态未确认」，不得被 `parentTurnLine` 的「主会话运行中」覆写。
 
 ### 6.2 实时开始事件
 
@@ -207,6 +219,8 @@
 - `hasResult` 设为 `true`，即使 `text` 是空串。
 - 保存输出、失败和截断标记。
 - 清除该工具的中断或未确认标记；迟到的真实终态优先于此前的推断，但不覆盖其他工具状态。
+
+真实终态优先的范围：取消时工具返回的真实 `isError` 结果（例如 `TOOL_ABORTED`）和 `TOOL_TIMEOUT` 属于真实失败，历史恢复仍显示「失败」；只有日志中不存在真实终态、只有合成 closer 时才走 `interrupted`/`resultMissing` 映射（D5 裁定）。
 
 匹配优先使用 `callId`。无 `callId` 时，从当前标签的全部扁平工具条目中按“同名且 `status === "start"`”选择最早一个匹配项，包括之前回合的迟到终态；`interrupted` / `unconfirmed` 是可被真实终态清除的推断标记，不排除匹配。不得因为出现新 `user` 而把旧终态错套到新回合的同名工具。每次结束事件只更新一项，避免同名并发调用同时被套用同一结果。
 
@@ -234,7 +248,17 @@
 - 已配对的失败结果进入对应工具卡，不再额外生成会话区失败提示。
 - 无法配对的失败结果仍生成现有失败提示，避免历史信息丢失。
 - 无法配对的成功结果不新增孤立工具调用。
-- 旧历史只有调用而没有可配对结果时，保留 `status="end"` 表示它不是在途实时调用，同时设置 `hasResult=false`、`resultMissing=true`；单项与标题按“结果未记录”展示，不得落入“完成”或“成功且无输出”。
+- 旧历史只有调用而没有可配对结果时，保留 `status="end"` 表示它不是在途实时调用，同时设置 `hasResult=false`、`resultMissing=true`；单项与标题按“结果未记录”展示，不得落入“完成”或“成功且无输出”。若 resume 已把未闭合尾回合修补为合成结果，则按 `synthetic` 映射显示「已中断」或「结果未记录」，而不是失败。
+
+`session-view.ts` 同时解析 `tool/result` 的 `data.error.code` 与同一 turn 的 `turn/end` `reason.kind`，在 `SessionDetailRecord.tool-result` 上写入 `synthetic?: "interrupted" | "resultMissing" | "hidden"`：
+
+- 真实结果（含 `TOOL_ABORTED`、`TOOL_TIMEOUT`）→ 不设 `synthetic`，保留失败/完成事实；
+- `TOOL_OUTCOME_UNKNOWN` + `reason.kind` 为 `aborted`/`error` → `synthetic="interrupted"`；
+- `TOOL_OUTCOME_UNKNOWN` + 其他 reason（含 `interrupted`、无 `turn/end`）→ `synthetic="resultMissing"`；
+- `ABORTED_BEFORE_DISPATCH` → `synthetic="hidden"`，并移除配对的 `tool/call`；
+- `TOOL_NOT_STARTED` → `synthetic="hidden"`。
+
+`hidden` 在 `detailRecords` 返回前过滤；可聊历史与只读历史页都不显示这些从未 dispatch 的调用。`selectSubtask` 先 `session.open` 再 `session.resume`，避免 resume 的崩溃修补写盘污染首次读取；已污染日志仍由上述映射兜底。
 
 本路径只覆盖只读历史页通过“继续此会话”恢复为可聊标签后的面板。`HistoryDetailPane` 继续保持逐条 `tool-call` / `tool-result` 日志，不改成聚合面板，其空结果展示不属于本次验收对象。
 
@@ -252,9 +276,15 @@
 
 取消或失败使用户回合进入 `turnFinal`，即使所有工具都已 `end`、没有思考或正文也能据此收起。只将当前回合尚未结束的工具标为 `interrupted`，已完成工具的输出、失败与截断事实不变，不得把之前回合的条目一并改写。
 
+### 合成结果与未启动调用
+
+- 真实结果优先：取消时工具返回的真实 `isError`（例如 `TOOL_ABORTED`）与 `TOOL_TIMEOUT` 仍显示失败；不得把真实终态改写成「已中断」或「结果未记录」。
+- 只有合成 closer：`turn/end` reason 为 `aborted`/`error` 时显示「已中断」；其他 reason（含 `interrupted`、无 `turn/end`）显示「结果未记录」；客户端卡片不设置 `isError`，不展示模型指令文本。
+- 未启动/跳过调用：`TOOL_NOT_STARTED` 与 `ABORTED_BEFORE_DISPATCH` 不生成工具卡、不生成英文失败提示，也不进入调用数或面板标题；`hidden` 记录在宿主返回前过滤。
+
 ### 正常回合结束但工具终态缺失
 
-只有已确定 `turnFinal` 的正常回合结束时，仍为开始态的工具才标为 `unconfirmed`，显示“状态未确认”，不按成功处理，也不误标为用户中断。目标仍为 `active` 的续轮中间 `session/end` 不得设置该标记。
+只有已确定 `turnFinal` 的正常回合结束时，仍为开始态的工具才标为 `unconfirmed`，显示“状态未确认”，不按成功处理，也不误标为用户中断。目标仍为 `active` 的续轮中间 `session/end` 不得设置该标记。goal outcome 边沿只封口回合，不在此列；真实回合结束（`session/end`/`run-end`）仍按本节处理。
 
 ### Host 断连
 
@@ -286,6 +316,9 @@
 - 断连时标题和单项不计执行中；历史 `resultMissing` 显示结果未记录而不是完成。
 - 当前 `ALLOWED_TOOLS` 的名称映射逐项有断言，说明不含参数，未识别工具使用回退文案。
 - 无 `callId` 的同名并发调用每次只结束最早一个开始态项；旧回合的迟到终态仍可跨回合命中最早匹配项，不得错套新回合的同名工具。
+- 无用户条目的合成回合：`turnFinalWithoutUser` 能结算，`session/end` 与 `run-end` 都收起面板；历史合成中断卡片的 `interrupted` 优先于 `status="end"`。
+- goal outcome 只封口回合，不把在途工具标 `unconfirmed`；后续真实 `tool/end` 或 `session/end` 才结算。
+- `TOOL_NOT_STARTED`/`ABORTED_BEFORE_DISPATCH` 的 `hidden` 记录不生成卡片，也不生成英文 note。
 
 ### 8.2 组件测试
 
@@ -315,9 +348,11 @@
 - 无法配对的失败仍保留会话提示。
 - 历史截断文本保留未落入 capped 正文的 shell 失败标记。
 - 旧历史缺结果写入 `status="end"`、`hasResult=false`、`resultMissing=true`，显示结果未记录而不是完成或空输出。
+- 合成 `interrupted`/`resultMissing` 配对恢复为对应状态，且不设置 `isError`；`hidden` 不生成卡片；无匹配合成结果不生成英文 note。
+- `session-view.spec.ts` 解析 `data.error.code` 与 `turn/end` reason：`TOOL_OUTCOME_UNKNOWN` + `aborted`/`error` → `interrupted`，+ 其他 reason（含 `interrupted`/无 reason）→ `resultMissing`；`TOOL_NOT_STARTED`/`ABORTED_BEFORE_DISPATCH` 过滤；真实 `ABORTED`/`TOOL_TIMEOUT` 保持失败。
 - `session-view.spec.ts` 钉住 goal 续轮记录保留原用户正文并携带 `goalRound`；`sessionChannel.spec.ts` 钉住该记录恢复为续轮 note、不产生新 `user` 条目，配合投影测试保证续轮前后只有一个面板。
 
-会话结束测试明确落在两处：`toolPanel.spec.ts` 覆盖纯状态迁移，`tests/client-huaanwork/appWiring.spec.ts` 钉住 App 对 `turnFinal`、`connectionLost` 和归属标签的实际接线。覆盖取消/失败只中断当前回合未结束工具、正常 `turnFinal` 缺终态显示未确认、目标 `active` 的中间结束不误结算、`goal/state complete` 的实际 `outcome` 动作立即设置 final，以及迟到的真实工具终态覆盖此前的中断或未确认标记。`appWiring.spec.ts` 必须使用 `reduceGoalTurn` 的真实返回动作，不以“看到 complete”代替边沿判定。
+会话结束测试明确落在两处：`toolPanel.spec.ts` 覆盖纯状态迁移，`tests/client-huaanwork/appWiring.spec.ts` 钉住 App 对 `turnFinal`、`connectionLost` 和归属标签的实际接线。覆盖取消/失败只中断当前回合未结束工具、正常 `turnFinal` 缺终态显示未确认、目标 `active` 的中间结束不误结算、`goal/state complete` 的实际 `outcome` 动作立即设置 final，以及迟到的真实工具终态覆盖此前的中断或未确认标记。`appWiring.spec.ts` 必须使用 `reduceGoalTurn` 的真实返回动作，不以“看到 complete”代替边沿判定。另需钉住 `turnFinalWithoutUser`/`run-end`、`selectSubtask` 的 open-before-resume，以及 `parentTurnLine` 收到 `toolsUnconfirmed` 后仍保留「工具状态未确认」。
 
 扩展 `tests/client-huaanwork/turnStatus.spec.ts`：`toolsUnconfirmed` 显示“工具状态未确认”，不显示“正在执行工具”，也不回落为“正在思考”；`runningToolName` 不再把断连、中断或未确认工具算作运行中。`appWiring.spec.ts` 还要钉住 `showTurnLine` 在 `turnActive=false` 但当前标签 `toolsUnconfirmed=true` 时仍可见。扩展 `tests/client-huaanwork/outcomeCheck.spec.ts`：中断或未确认的必要命令仍按既有规则记为“命令未通过”，与面板状态并存。
 
@@ -335,6 +370,8 @@ corepack yarn check
 
 任何网络、环境或平台阻塞都如实记录；局部测试通过不得写成全量门禁通过。
 
+实施后（2026-11-03，HEAD `b7aaa5ef5f`）三条命令均 exit 0；实际执行结果记录在 `docs/superpowers/plans/2026-11-03-chat-tool-panel-code-review.md` 的〈实施状态〉。§9 真机项未执行，不得写成通过。
+
 ## 9. 真实界面验收
 
 图形应用启动需单独明确执行。开发版中至少走查：
@@ -347,6 +384,8 @@ corepack yarn check
 6. 从只读历史页选择“继续此会话”：新历史可查看结果，旧历史缺结果时单项与标题显示结果未记录；含目标续轮的历史恢复为续轮 note 且仍只有一个回合面板。返回只读 `HistoryDetailPane`，确认它仍是逐条日志，goal 续轮原始用户消息仍逐条可见，不是聚合面板。
 7. 分别触发并操作特殊卡片：① 发起需要审批的命令并批准或拒绝；② 触发 `request_input`，从底部输入框提交答案，另一次取消；③ 执行携带 `todos` 的 `todo_write`，确认待办卡更新；④ 显式调用一个子代理，确认运行卡出现、状态更新且活跃时可按既有流程终止。
 8. 连续两个回合各自保留独立工具面板，后台标签的结束事件不改变当前标签面板。
+9. 实时自动化运行标签：运行结束与取消后，工具面板按真实终态收起；在途工具不显示「运行中」，不影响用户回合的面板。
+10. 历史恢复的合成结果：取消/失败合成显示「已中断」，崩溃恢复显示「结果未记录」；未启动/跳过调用不出现卡片或英文 note。
 
 以下场景可用自动化或受控模拟覆盖，并在验收记录中明确标为模拟：
 
@@ -363,6 +402,19 @@ corepack yarn check
 - 工具说明、状态、参数摘要和结果符合已确认交互。
 - 工具执行与审批语义不变，特殊卡片无回归。
 - 实时与历史对空结果、结果未记录、失败、截断、中断和未确认有一致且诚实的展示。
+- 合成 closer 不显示为真实失败：取消/失败合成 → 已中断；崩溃恢复 → 结果未记录；未启动/跳过调用不生成卡片或英文 note。
 - 断连时面板标题、单项与回合条口径一致；目标续轮中间结束不误收起、不误标未确认。
+- 无用户条目的运行标签在 run-end/cancel 后正确收起；活跃子运行与未确认工具并存时，回合条仍显示「工具状态未确认」。
 - 新增与既有自动化测试通过，完整门禁实际执行结果已记录。
 - 真实界面走查完成，或未执行部分被明确标注，不以类型检查代替界面验收。
+
+## 11. 实施后订正（2026-11-03）
+
+本节记录规格与实现的最终同步点；代码提交 `b7aaa5ef5f`，评审与验证见 `docs/superpowers/plans/2026-11-03-chat-tool-panel-code-review.md` 的〈实施状态〉。
+
+- **回合条优先级**：`toolsUnconfirmed` 为真时，即使存在活跃子运行，也保留「工具状态未确认」，不被「主会话运行中」覆写（§5.1、§6.1）。
+- **合成结果**：宿主按 `data.error.code` 与 `turn/end` reason 归一化 `SessionDetailRecord.tool-result.synthetic`；真实 `ABORTED`/`TOOL_TIMEOUT` 保持失败；取消/失败合成 → `interrupted`；崩溃恢复 → `resultMissing`；`TOOL_NOT_STARTED`/`ABORTED_BEFORE_DISPATCH` → `hidden`（§5.4、§6.3、§6.5、§7）。
+- **历史读取顺序**：`selectSubtask` 先 `session.open` 再 `session.resume`，避免 resume 修补写盘污染首次读取（§6.5）。
+- **无用户运行标签**：`turnFinalWithoutUser` + `run-end` 结算合成回合；历史无用户片段同样默认收起（§5.1、§6.5）。
+- **goal outcome**：只封口回合，不把在途工具标 `unconfirmed`；后续真实 `tool/end` 或 `session/end` 结算（§5.1、§7）。
+- **验证范围**：headless 门禁通过；I-2 合成历史真机 GUI 已通过；I-1/I-3/N-1/N-2 的 GUI 未执行，留待 §9 验收。

@@ -530,7 +530,11 @@ test("App turn final wiring consumes actual goal actions and sidecarDead only", 
   }
   assert.deepEqual(observed, [false, false, false, true], "only the real complete outcome settles endFirst");
 
-  assert.match(APP_SOURCE, /applyTurnFinalToTabs\(prev, tabId, event, goalTurnRef\.current\.phases\[sessionId \?\? ""\]\)/);
+  assert.match(
+    APP_SOURCE,
+    /const phase = goalTurnRef\.current\.phases\[sessionId \?\? ""\];\s*setChatTabs\(\(prev\) => applyTurnFinalToTabs\(prev, tabId, event, phase\)\)/,
+    "the goal phase must be sampled before the deferred state updater runs",
+  );
   assert.equal((APP_SOURCE.match(/applyFinalForTab\(targetTabFor\(/g) ?? []).length, 3);
   assert.match(APP_SOURCE, /setItems\(\(prev\) => applyToolEnd\(prev, event\), event\.sessionId\)/);
   assert.match(APP_SOURCE, /applyFinalForTab\(tabId, ticket\.sessionId, \{ kind: "session-end", ok: false, cancelled: true \}\)/);

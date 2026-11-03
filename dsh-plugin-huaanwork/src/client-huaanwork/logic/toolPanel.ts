@@ -178,11 +178,15 @@ export function applyTurnFinalToTabs<
     ? tab.turnFinalWithoutUser === true
     : tab.turnFinalByUserId?.[userId] === true;
   if (!reduceTurnFinal(wasFinal, event, phase)) return tabs as T[];
-  if (wasFinal) return tabs as T[];
+  // goal outcome 只封口回合；在途工具由后续真实 tool/end 或 session/end 结算，避免闪报未确认。
+  const shouldFinalizeTools = !(event.kind === "goal-action" && event.action.kind === "outcome");
   const interrupted = event.kind === "session-end"
     ? !event.ok || event.cancelled
     : event.kind === "run-end" && event.interrupted;
-  const items = finalizeTurnTools(tab.items, interrupted ? "interrupted" : "unconfirmed");
+  const items = shouldFinalizeTools
+    ? finalizeTurnTools(tab.items, interrupted ? "interrupted" : "unconfirmed")
+    : tab.items;
+  if (wasFinal && items === tab.items) return tabs as T[];
   return tabs.map((candidate) => candidate.id === tabId
     ? {
         ...candidate,

@@ -240,9 +240,9 @@ type ToolCard = {
   hasResult?: boolean;
   /** 回合在工具结束前中断：不当作失败，单独标记。 */
   interrupted?: boolean;
-  /** 结果未确认（例如断连）：面板不宣称成功或失败。 */
+  /** 已确定 turnFinal 的正常回合结束时仍未收到终态：面板不宣称成功或失败。 */
   unconfirmed?: boolean;
-  /** 回合已终结但该工具始终没有结果。 */
+  /** 历史恢复时只有调用记录、没有可配对结果记录。 */
   resultMissing?: boolean;
 };
 
@@ -1053,7 +1053,9 @@ export default function App() {
    */
   function applyFinalForTab(tabId: string | undefined, sessionId: string | undefined, event: TurnFinalEvent) {
     if (!tabId) return;
-    setChatTabs((prev) => applyTurnFinalToTabs(prev, tabId, event, goalTurnRef.current.phases[sessionId ?? ""]));
+    // 相位在事件处理时同步取样，避免 React 延后执行 updater 时读到已跳变的相位。
+    const phase = goalTurnRef.current.phases[sessionId ?? ""];
+    setChatTabs((prev) => applyTurnFinalToTabs(prev, tabId, event, phase));
   }
 
   useEffect(() => {
