@@ -596,4 +596,3 @@ git diff --check
 - 三条命令**串行**执行，期间未运行其他门禁（规避 `verify:aa` 已知并发竞态）；未执行 `market:check` / `aa:check` / CI / 打包，未启动图形应用，未触碰生产数据。
 - 顺序诚实说明：三条门禁跑在**最终代码树**上；其后只追加/订正了本节所在的未跟踪证据文档（`:325` 一处措辞在 `check` 之后才修），因此 `check` 不覆盖该文档的最后一次编辑。为此在文档定稿后补跑了文档守卫 `corepack yarn check:bilingual-docs`：exit **0**，`verify-bilingual-docs: 50 records and 100 documents are consistent`（本文件为中文单语证据，不在该守卫的 50 组双语记录内；未跟踪文件也不在 `check:whitespace` 的 `git ls-files` 范围内）。
 - `check` 的整体 exit 0 为直接观察；链内单步 exit code 未逐一捕获，只记录了可观察的阶段输出（与 Task 10/14 同口径）。
-
