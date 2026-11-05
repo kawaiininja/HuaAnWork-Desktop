@@ -73,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(71 项)——
+// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(72 项)——
 const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'workspace.open': { http: 'POST', path: '/huaanwork/workspace/open' },
   'workspace.close': { http: 'POST', path: '/huaanwork/workspace/close' },
@@ -146,11 +146,12 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'task.remove': { http: 'POST', path: '/huaanwork/task/remove' },
   'task.bindSession': { http: 'POST', path: '/huaanwork/task/bindSession' },
   'task.rename': { http: 'POST', path: '/huaanwork/task/rename' },
+  'task.setModel': { http: 'POST', path: '/huaanwork/task/setModel' },
 }
 
 describe('rpcCall 路由映射', () => {
-  test('全表 71 项与 ROUTE_TABLE 一一对应', () => {
-    expect(Object.keys(ROUTES)).toHaveLength(71)
+  test('全表 72 项与 ROUTE_TABLE 一一对应', () => {
+    expect(Object.keys(ROUTES)).toHaveLength(72)
     const actual = Object.fromEntries(
       Object.entries(ROUTES).map(([method, route]) => [method, { http: route.http, path: route.path }]),
     )

@@ -26,6 +26,17 @@ export function childrenOf(parentSessionId: string): readonly string[] {
   return [...(registry().children.get(parentSessionId) ?? [])]
 }
 
+/**
+ * 沿 `registerChildSession` 的登记表向父级走一层。
+ * 不读 `currentCallerSession()`：调用方传进来的子会话 id 才是唯一依据。
+ */
+export function parentSessionOf(childSessionId: string): string | undefined {
+  for (const [parentSessionId, children] of registry().children) {
+    if (children.has(childSessionId)) return parentSessionId
+  }
+  return undefined
+}
+
 /** 父会话删除后不再需要它的子会话名单;重新登记时从空表开始。 */
 export function forgetChildSessions(parentSessionId: string): void {
   registry().children.delete(parentSessionId)

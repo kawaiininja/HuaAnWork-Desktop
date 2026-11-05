@@ -1,9 +1,14 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { createGitTools, type GitCommandResult } from "@huaanwork/git-tools";
+import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
+
+import { sessionWorkspaceRoot } from "./sandbox-cwd.ts";
 
 type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:376
   name: string;
   arguments: unknown;
+  /** 上游执行对象携带的 agent 引用;宿主据此取会话可写根。 */
+  agent?: { id?: string; session?: { id?: string } };
 };
 
 type PreExecuteDecision = // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:426(PreToolDecision)
@@ -20,6 +25,7 @@ type GitOutput = {
 
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
+  huaanworkSessionRoots?: Map<string, string>;
   on(
     event: "tools/pre-execute",
     listener: (execution: ToolExecution, next: () => Promise<PreExecuteDecision>) => Promise<PreExecuteDecision>,
@@ -54,19 +60,20 @@ const output = {
 export const inject = ["tools"];
 
 export function apply(ctx: Context): void {
-  const git = () => createGitTools(workspaceRoot(ctx));
+  const git = (sessionId?: string) => createGitTools(workspaceRoot(ctx, sessionId));
 
   ctx.on(
     "tools/pre-execute",
     async (execution, next) => {
       const decision = await next();
       if (decision.kind !== "ask") return decision;
+      const sessionId = sessionIdOfAgentRef(execution.agent as never);
       if (execution.name === "git_commit") {
         const message = stringArg(execution.arguments, "message");
-        return { kind: "ask", reason: await git().commitAskSummary(message) };
+        return { kind: "ask", reason: await git(sessionId).commitAskSummary(message) };
       }
       if (execution.name === "git_push") {
-        return { kind: "ask", reason: await git().pushAskSummary() };
+        return { kind: "ask", reason: await git(sessionId).pushAskSummary() };
       }
       return decision;
     },
@@ -80,8 +87,8 @@ export function apply(ctx: Context): void {
       parameters: {},
       output,
       isConcurrencySafe: () => true,
-      async execute() {
-        return toOutput(await git().status());
+      async execute(_args, exec) {
+        return toOutput(await git(sessionIdOfAgentRef(exec.agent)).status());
       },
     }),
   );
@@ -95,8 +102,8 @@ export function apply(ctx: Context): void {
       },
       output,
       isConcurrencySafe: () => true,
-      async execute(args) {
-        return toOutput(await git().diff(args.path));
+      async execute(args, exec) {
+        return toOutput(await git(sessionIdOfAgentRef(exec.agent)).diff(args.path));
       },
     }),
   );
@@ -109,9 +116,9 @@ export function apply(ctx: Context): void {
         name: { type: "string", description: "Create this branch. Omit to list branches." },
       },
       output,
-      async execute(args) {
-        if (args.name === undefined) return toOutput(await git().branchList());
-        return toOutput(await git().branchCreate(args.name));
+      async execute(args, exec) {
+        if (args.name === undefined) return toOutput(await git(sessionIdOfAgentRef(exec.agent)).branchList());
+        return toOutput(await git(sessionIdOfAgentRef(exec.agent)).branchCreate(args.name));
       },
     }),
   );
@@ -124,8 +131,8 @@ export function apply(ctx: Context): void {
         ref: { type: "string", required: true, description: "Branch or commit to check out." },
       },
       output,
-      async execute(args) {
-        const result = await git().checkout(args.ref);
+      async execute(args, exec) {
+        const result = await git(sessionIdOfAgentRef(exec.agent)).checkout(args.ref);
         if (result.error) throw new Error(result.error);
         return {
           stdout: result.stdout,
@@ -145,8 +152,8 @@ export function apply(ctx: Context): void {
         message: { type: "string", required: true, description: "Commit message." },
       },
       output,
-      async execute(args) {
-        return toOutput(await git().commit(args.message));
+      async execute(args, exec) {
+        return toOutput(await git(sessionIdOfAgentRef(exec.agent)).commit(args.message));
       },
     }),
   );
@@ -160,15 +167,15 @@ export function apply(ctx: Context): void {
         branch: { type: "string", description: "Remote branch name." },
       },
       output,
-      async execute(args) {
-        return toOutput(await git().push(args.remote, args.branch));
+      async execute(args, exec) {
+        return toOutput(await git(sessionIdOfAgentRef(exec.agent)).push(args.remote, args.branch));
       },
     }),
   );
 }
 
-function workspaceRoot(ctx: Context): string {
-  return ctx.huaanworkWorkspaceRoot?.current ?? process.cwd();
+function workspaceRoot(ctx: Context, sessionId?: string): string {
+  return sessionWorkspaceRoot(ctx, sessionId);
 }
 
 function toOutput(result: GitCommandResult): GitOutput {

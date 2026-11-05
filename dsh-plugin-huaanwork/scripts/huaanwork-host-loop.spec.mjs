@@ -484,9 +484,12 @@ function mainAgent() {
 
 test('文本回合:token 帧 + session/end ok + 会话列表标题非空', { timeout: TEST_TIMEOUT_MS }, async () => {
   drainEvents()
-  const sending = post('/huaanwork/session/send', { text: '你好,请自我介绍' })
+  const sending = post('/huaanwork/session/send', { text: '你好,请自我介绍', tabId: 'tab-text' })
   const sent = await sending
-  assert.equal(sent.queued, true)
+  assert.deepEqual(
+    { queued: sent.queued, waiting: sent.waiting, started: sent.started },
+    { queued: true, waiting: false, started: true },
+  )
   assert.equal(typeof sent.sessionId, 'string')
   await waitForEvent(
     (event) => event?.event === 'session/end' && event.sessionId === sent.sessionId && event.ok === true,
@@ -507,7 +510,7 @@ test('文本回合:token 帧 + session/end ok + 会话列表标题非空', { tim
 
 test('工具审批 approve:approval/asked → approve → tool/start → tool/end → session/end ok', { timeout: TEST_TIMEOUT_MS }, async () => {
   drainEvents()
-  const sending = post('/huaanwork/session/send', { text: '请审批:运行 ls 查看文件' })
+  const sending = post('/huaanwork/session/send', { text: '请审批:运行 ls 查看文件', tabId: 'tab-approve' })
   const asked = await waitForEvent(
     (event) => event?.event === 'approval/asked' && event.toolName === 'bash' && typeof event.approvalRequestId === 'string',
     'approval/asked for bash',
@@ -527,12 +530,15 @@ test('工具审批 approve:approval/asked → approve → tool/start → tool/en
     'session/end ok after approval',
   )
   const sent = await sending
-  assert.equal(sent.queued, true)
+  assert.deepEqual(
+    { queued: sent.queued, waiting: sent.waiting, started: sent.started },
+    { queued: true, waiting: false, started: true },
+  )
 })
 
 test('工具审批 reject:拒绝后工具不执行,回合以拒绝收尾(不崩、不挂起)', { timeout: TEST_TIMEOUT_MS }, async () => {
   drainEvents()
-  const sending = post('/huaanwork/session/send', { text: '再次请审批:运行 ls(这次拒绝)' })
+  const sending = post('/huaanwork/session/send', { text: '再次请审批:运行 ls(这次拒绝)', tabId: 'tab-reject' })
   const asked = await waitForEvent(
     (event) => event?.event === 'approval/asked' && event.toolName === 'bash' && typeof event.approvalRequestId === 'string',
     'approval/asked for bash',
@@ -540,7 +546,10 @@ test('工具审批 reject:拒绝后工具不执行,回合以拒绝收尾(不崩�
   const answered = await post('/huaanwork/session/reject', { approvalRequestId: asked.approvalRequestId })
   assert.equal(answered.handled, true)
   const sent = await sending
-  assert.equal(sent.queued, true)
+  assert.deepEqual(
+    { queued: sent.queued, waiting: sent.waiting, started: sent.started },
+    { queued: true, waiting: false, started: true },
+  )
   await waitForEvent(
     (event) => event?.event === 'session/end',
     'session/end closing the rejected turn',
@@ -563,12 +572,15 @@ test('run_code / web_search 缺席:主 agent schemas 不含禁用工具', { time
 
 test('session.cancel:挂起回合被取消收尾,进程不挂', { timeout: TEST_TIMEOUT_MS }, async () => {
   drainEvents()
-  const sending = post('/huaanwork/session/send', { text: 'hang:这个回合请挂起不要结束' })
+  const sending = post('/huaanwork/session/send', { text: 'hang:这个回合请挂起不要结束', tabId: 'tab-cancel' })
   await sleep(500)
   const cancelled = await post('/huaanwork/session/cancel', {})
   assert.equal(cancelled.accepted, true)
   const sent = await sending
-  assert.equal(sent.queued, true)
+  assert.deepEqual(
+    { queued: sent.queued, waiting: sent.waiting, started: sent.started },
+    { queued: true, waiting: false, started: true },
+  )
   await waitForEvent(
     (event) => event?.event === 'session/end' && (event.cancelled === true || event.ok === true),
     'session/end after cancel',
@@ -700,7 +712,7 @@ test('scheduler:错过宽限记 missed 并推进,不执行', { timeout: TEST_TIM
   }
 })
 
-test('scheduler:run-once catchup 同根入队,跨根顺延不入队', { timeout: TEST_TIMEOUT_MS }, async () => {
+test('scheduler:run-once catchup 同根与跨根各自补跑一次并推进,各自恰好广播一次 missed', { timeout: TEST_TIMEOUT_MS }, async () => {
   await reconnectEvents()
   const root = ctx.huaanworkWorkspaceRoot.current
   const listed = await get('/huaanwork/project/list')
@@ -724,7 +736,7 @@ test('scheduler:run-once catchup 同根入队,跨根顺延不入队', { timeout:
       id: 'catchup-cross',
       projectId: other.id,
       kind: 'script',
-      command: 'echo should-not-run',
+      command: 'echo catchup-cross-ran',
       schedule: { kind: 'daily', time: '09:00' },
       missedPolicy: 'run-once',
       nextRunAt: stale,
@@ -744,22 +756,36 @@ test('scheduler:run-once catchup 同根入队,跨根顺延不入队', { timeout:
     assert.equal(run?.status, 'ok')
     assert.ok(same.automation?.nextRunAt > Date.now(), 'catchup advances nextRunAt')
     assert.ok(stubSaw(/trigger="catchup"/), 'stub LLM saw the catchup envelope')
-    await waitForEvent(
-      (event) => event?.event === 'automation/missed' && event.automationId === 'catchup-cross',
-      'cross-root catchup still emits missed',
+    // 新契约:跨根 catchup 不再因前台根忙碌而滞留——它在所属项目根上同样补跑一次。
+    const crossEnded = await waitForEvent(
+      (event) => event?.event === 'automation/run-end' && event.automationId === 'catchup-cross' && event.ok === true,
+      'catchup-cross run-end ok on its own project root',
     )
-    await sleep(200)
-    const cross = await automationRow('catchup-cross')
-    assert.equal(cross.runs.length, 0, 'cross-root catchup must not run')
-    assert.equal(cross.automation?.nextRunAt, stale, 'cross-root catchup stays pending')
+    assert.equal(crossEnded.ok, true)
+    const cross = await pollAutomation(
+      'catchup-cross',
+      (row) => row.runs.some((item) => item.status === 'ok'),
+      'cross-root catchup run record',
+    )
+    const crossRun = cross.runs.at(-1)
+    assert.equal(crossRun?.trigger, 'catchup')
+    assert.equal(crossRun?.status, 'ok')
+    assert.ok(cross.automation?.nextRunAt > stale, 'cross-root catchup advances nextRunAt past the stale slot')
     assert.equal(cross.automation?.enabled, true)
-    assert.ok(
-      events.filter((event) => event?.event === 'automation/missed' && event.automationId === 'catchup-cross').length === 1,
+    assert.equal(
+      events.filter((event) => event?.event === 'automation/missed' && event.automationId === 'catchup-same').length,
+      1,
+      'same-root catchup emits missed once',
+    )
+    assert.equal(
+      events.filter((event) => event?.event === 'automation/missed' && event.automationId === 'catchup-cross').length,
+      1,
       'cross-root catchup emits missed once',
     )
     assert.equal(
       events.filter((event) => event?.event === 'automation/run-start' && event.automationId === 'catchup-cross').length,
-      0,
+      1,
+      'cross-root catchup starts exactly once',
     )
   } finally {
     writeAutomations([])
@@ -828,7 +854,7 @@ test('scheduler:once 错过宽限后自停', { timeout: TEST_TIMEOUT_MS }, async
   }
 })
 
-test('scheduler:同根 due 按 projectId 分组,跨根与中立顺延,项目已删除仍执行', { timeout: TEST_TIMEOUT_MS }, async () => {
+test('scheduler:同根 due 按可写根串行,跨根与中立到期并发执行,项目已删除仍执行并记失败', { timeout: TEST_TIMEOUT_MS }, async () => {
   await reconnectEvents()
   const root = ctx.huaanworkWorkspaceRoot.current
   const listed = await get('/huaanwork/project/list')
@@ -848,37 +874,37 @@ test('scheduler:同根 due 按 projectId 分组,跨根与中立顺延,项目已�
   ])
   try {
     await pollAutomation('a-1', (row) => row.runs.some((run) => run.ok), 'a-1 ran')
-    await pollAutomation('a-2', (row) => row.runs.some((run) => run.ok), 'a-2 ran')
+    // 新契约:跨根与中立到期任务不再因前台项目根忙碌而滞留——各自在所属根执行并推进。
+    const cross = await pollAutomation('b-1', (row) => row.runs.some((run) => run.ok), 'cross-root due runs on its own root')
+    const neutral = await pollAutomation('n-1', (row) => row.runs.some((run) => run.ok), 'neutral due runs on the neutral root')
+    await pollAutomation('a-2', (row) => row.runs.some((run) => run.ok), 'a-2 ran after a-1 released the root')
     const missing = await pollAutomation(
       'm-1',
       (row) => row.runs.some((run) => run.output.includes('任务所属项目不存在')),
-      'deleted project still executes',
+      'deleted project still executes and records its failure',
     )
     assert.equal(missing.runs.at(-1).ok, false)
-    await sleep(250)
-    const cross = await automationRow('b-1')
-    const neutral = await automationRow('n-1')
-    assert.equal(cross.runs.length, 0, 'cross-root due stays queued')
-    assert.equal(cross.automation.nextRunAt, crossNext)
+    assert.ok(cross.automation.nextRunAt > crossNext, 'cross-root due advances nextRunAt')
     assert.equal(cross.automation.enabled, true)
-    assert.equal(neutral.runs.length, 0, 'neutral task defers while workspace is a project root')
-    assert.equal(neutral.automation.nextRunAt, neutralNext)
+    assert.ok(neutral.automation.nextRunAt > neutralNext, 'neutral due advances nextRunAt')
+    assert.equal(neutral.automation.enabled, true)
     const started = events.flatMap((event) => (
       event?.event === 'automation/run-start' ? [event.automationId] : []
     ))
-    const grouped = started.filter((id) => id === 'a-1' || id === 'a-2' || id === 'm-1')
-    const firstA1 = grouped.indexOf('a-1')
-    const firstA2 = grouped.indexOf('a-2')
-    const firstM1 = grouped.indexOf('m-1')
-    assert.ok(firstA1 >= 0 && firstA2 >= 0 && firstM1 >= 0, `expected a-1, a-2, m-1 to start, got ${grouped.join(',')}`)
-    assert.ok(Math.max(firstA1, firstA2) < firstM1, `same project must enqueue as one group before the next, got ${grouped.join(',')}`)
-    assert.equal(started.includes('b-1') || started.includes('n-1'), false)
+    const firstA1 = started.indexOf('a-1')
+    const firstA2 = started.indexOf('a-2')
+    const firstB1 = started.indexOf('b-1')
+    const firstN1 = started.indexOf('n-1')
+    assert.ok(firstA1 >= 0 && firstA2 >= 0, `expected a-1 and a-2 to start on the shared root, got ${started.join(',')}`)
+    assert.ok(firstA1 < firstA2, `same writable root must run one writer at a time (a-1 before a-2), got ${started.join(',')}`)
+    assert.ok(firstB1 >= 0, 'cross-root due starts on its own project root')
+    assert.ok(firstN1 >= 0, 'neutral due starts on the neutral root')
   } finally {
     writeAutomations([])
   }
 })
 
-test('scheduler:generation 重启补 cancelled,中立根上的中立任务会执行', { timeout: BOOT_WATCHDOG_MS }, async () => {
+test('scheduler:generation 重启补 cancelled,中立任务与项目任务各自在所属根执行', { timeout: BOOT_WATCHDOG_MS }, async () => {
   const root = ctx.huaanworkWorkspaceRoot.current
   const listed = await get('/huaanwork/project/list')
   const project = listed.projects.find((item) => item.root === root)
@@ -927,10 +953,14 @@ test('scheduler:generation 重启补 cancelled,中立根上的中立任务会执
       'neutral task runs on the neutral root',
     )
     assert.match(neutral.runs.at(-1).output, /neutral-due/)
-    await sleep(250)
-    const projectDue = await automationRow('project-due')
-    assert.equal(projectDue.runs.length, 0, 'project task defers on the neutral root')
-    assert.equal(projectDue.automation.nextRunAt, projectDueAt)
+    // 新契约:项目任务在所属项目根执行,不因前台回到中立根而错误推迟。
+    const projectDue = await pollAutomation(
+      'project-due',
+      (row) => row.runs.some((run) => run.ok),
+      'project task runs on its own project root while the foreground is neutral',
+    )
+    assert.match(projectDue.runs.at(-1).output, /project-due/)
+    assert.ok(projectDue.automation.nextRunAt > projectDueAt, 'project due advances nextRunAt after running')
     assert.equal(projectDue.automation.enabled, true)
   } finally {
     writeAutomations([])

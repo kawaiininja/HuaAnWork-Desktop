@@ -39,6 +39,7 @@ import {
 } from '../../src/huaanwork-host/sessions.ts'
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
 import { resetChildSessionRegistry } from '../../src/huaanwork-host/child-sessions.ts'
+import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 
 const PRESENT_AS_STATE = Symbol.for('huaanwork.presentAs.restrictState')
 
@@ -113,9 +114,21 @@ function makeAgent(sessionId: string, received: unknown[], idle?: Promise<void>)
   }
 }
 
-function makeSessionCtx(agent: ListedAgent, sessionId: string, maps = emptyAttachments()): SessionRuntimeContext {
+function testScheduler(): TurnScheduler {
+  return createTurnScheduler({ maxConcurrentTurns: () => 8, modelExists: () => true })
+}
+
+function makeSessionCtx(
+  agent: ListedAgent,
+  sessionId: string,
+  maps = emptyAttachments(),
+  scheduler: TurnScheduler = testScheduler(),
+): SessionRuntimeContext {
   return {
     huaanworkAttachments: maps,
+    huaanworkSessionModels: new Map(),
+    huaanworkSessionRoots: new Map(),
+    huaanworkTurnScheduler: scheduler,
     agents: {
       get: (id) => (id === sessionId ? agent : undefined),
       list: () => [agent],
@@ -432,9 +445,13 @@ describe('sendToAgent creation gate', () => {
     expect(loadAgentPackageDraft(root, sessionId)).toBeDefined()
     attachAgentTools(maps, sessionId, [AGENT_PROPOSE_TOOL, AGENT_COMMIT_TOOL])
     expect(isAgentToolAttached(maps, sessionId, AGENT_PROPOSE_TOOL)).toBe(true)
+    ctx.huaanworkSessionModels?.set(sessionId, 'previous-model')
 
-    await sessionSend(ctx, makeRouteCtx(root, events), { text: '取消', sessionId })
+    const result = await sessionSend(ctx, makeRouteCtx(root, events), { text: '取消', sessionId, tabId: 'tab-a' })
 
+    expect(result).toEqual({ queued: true, waiting: false, started: false, sessionId })
+    // 没有 followup:不写本次模型键,也不清掉发送前已有的绑定。
+    expect(ctx.huaanworkSessionModels?.get(sessionId)).toBe('previous-model')
     expect(events).toContainEqual({ event: 'agent/notice', text: '已取消创建，没有写入智能体。', sessionId })
     expect(loadAgentPackageDraft(root, sessionId)).toBeUndefined()
     expect(received).toHaveLength(0)
@@ -547,9 +564,10 @@ describe('sendToAgent creation gate', () => {
     const result = await sessionSend(ctx, makeRouteCtx(root, events), {
       text: '/create-agent update no-such-agent',
       sessionId,
+      tabId: 'tab-a',
     })
 
-    expect(result).toEqual({ queued: true, sessionId })
+    expect(result).toEqual({ queued: true, waiting: false, started: false, sessionId })
     expect(events).toContainEqual({
       event: 'agent/notice',
       text: '无法进入更新模式：智能体 @no-such-agent 不存在',
@@ -568,10 +586,70 @@ describe('sendToAgent creation gate', () => {
     const ctx = makeSessionCtx(agent, sessionId)
     setAgentPackageHost(fakeHost({ cancel: async () => false }))
 
-    await sessionSend(ctx, makeRouteCtx(root, events), { text: '取消', sessionId })
+    await sessionSend(ctx, makeRouteCtx(root, events), { text: '取消', sessionId, tabId: 'tab-a' })
     const message = received[0] as { content: { text: string }[] }
     expect(message.content[0]?.text).toBe('取消')
     expect(events.some((event) => event.event === 'agent/notice')).toBe(false)
+  })
+
+  test('a queued creation cancel fails without starting', async () => {
+    const root = makeRoot()
+    const events: RpcEvent[] = []
+    const received: unknown[] = []
+    const sessionId = 'huaanwork-0123456789abcdef'
+    const idle = deferred()
+    const maps = emptyAttachments()
+    const agent = makeAgent(sessionId, received, idle.promise)
+    const ctx = makeSessionCtx(agent, sessionId, maps)
+    setAgentPackageHost(createAgentPackageHost({ profileDir: root, takenSlugs: () => [] }))
+    const proposed = await proposeAgentPackage(root, sessionId, draftProposal, [])
+    expect(proposed.ok).toBe(true)
+
+    const routeCtx = makeRouteCtx(root, events)
+    await sessionSend(ctx, routeCtx, { text: '帮我新建一个智能体', sessionId, tabId: 'tab-a' })
+    const queued = await sessionSend(ctx, routeCtx, { text: '取消', sessionId, tabId: 'tab-a' })
+    expect(queued).toMatchObject({ queued: true, waiting: true, started: false })
+
+    idle.resolve()
+    await vi.waitFor(() => expect(events.some((event) => event.event === 'session/queue-fail')).toBe(true))
+    expect(events.some((event) => event.event === 'session/queue-start')).toBe(false)
+    expect(events).toContainEqual({ event: 'agent/notice', text: '已取消创建，没有写入智能体。', sessionId })
+    const failure = events.find((event) => event.event === 'session/queue-fail')
+    expect(failure).toMatchObject({ reason: '已取消创建，没有写入智能体。' })
+    expect(received).toHaveLength(1)
+    expect(loadAgentPackageDraft(root, sessionId)).toBeUndefined()
+  })
+
+  test('a queued update failure fails without starting', async () => {
+    const root = makeRoot()
+    const events: RpcEvent[] = []
+    const received: unknown[] = []
+    const sessionId = 'huaanwork-0123456789abcdef'
+    const idle = deferred()
+    const agent = makeAgent(sessionId, received, idle.promise)
+    const ctx = makeSessionCtx(agent, sessionId)
+    setAgentPackageHost(createAgentPackageHost({ profileDir: root, takenSlugs: () => [] }))
+
+    const routeCtx = makeRouteCtx(root, events)
+    await sessionSend(ctx, routeCtx, { text: '普通一轮', sessionId, tabId: 'tab-a' })
+    const queued = await sessionSend(ctx, routeCtx, {
+      text: '/create-agent update no-such-agent',
+      sessionId,
+      tabId: 'tab-a',
+    })
+    expect(queued).toMatchObject({ queued: true, waiting: true, started: false })
+
+    idle.resolve()
+    await vi.waitFor(() => expect(events.some((event) => event.event === 'session/queue-fail')).toBe(true))
+    expect(events.some((event) => event.event === 'session/queue-start')).toBe(false)
+    expect(events).toContainEqual({
+      event: 'agent/notice',
+      text: '无法进入更新模式：智能体 @no-such-agent 不存在',
+      sessionId,
+    })
+    const failure = events.find((event) => event.event === 'session/queue-fail')
+    expect(failure).toMatchObject({ reason: '无法进入更新模式：智能体 @no-such-agent 不存在' })
+    expect(received).toHaveLength(1)
   })
 
   test('no injected host leaves the send path unchanged', async () => {
@@ -582,7 +660,7 @@ describe('sendToAgent creation gate', () => {
     const agent = makeAgent(sessionId, received)
     const ctx = makeSessionCtx(agent, sessionId)
 
-    await sessionSend(ctx, makeRouteCtx(root, events), { text: '帮我新建一个智能体', sessionId })
+    await sessionSend(ctx, makeRouteCtx(root, events), { text: '帮我新建一个智能体', sessionId, tabId: 'tab-a' })
     const message = received[0] as { content: { text: string }[] }
     expect(message.content[0]?.text).toBe('帮我新建一个智能体')
   })

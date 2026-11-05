@@ -5,7 +5,7 @@ import { ROUTE_TABLE, type RouteTableEntry } from '../../src/huaanwork-host/rout
 /**
  * 路由契约跨端交叉测试 (M3 评审 D6):
  * 验证客户端 ROUTES (src/client-huaanwork/api.ts) 与
- * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 71 个方法在
+ * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 72 个方法在
  * HTTP Method、Path 与返回载荷键集上的严格双向一致性。
  */
 
@@ -19,6 +19,8 @@ export const OPTIONAL_KEYS_WHITELIST: Record<string, string[]> = {
   'project.open': ['restarting'],
   'plugin.add': ['restarting'],
   'plugin.remove': ['restarting'],
+  // 手动触发被准入跳过时只多这一个键(queued:false + waiting:true);成功启动不含 waiting。
+  'automation.run': ['waiting'],
   'auth.status': ['username'],
   'auth.register': ['username'],
   'auth.login': ['username'],
@@ -29,6 +31,8 @@ export const OPTIONAL_KEYS_WHITELIST: Record<string, string[]> = {
   // 发布状态随 submission 阶段变化:只在对应阶段出现。
   'agent.packagePublishStatus': ['publishedVersion', 'submissionId', 'reviewReason', 'delistRequestId'],
   'agent.packageRefresh': ['catalogError', 'revocationWarning'],
+  // 只有排队分支带 queueItemId;已开始/创建取消的分支没有这个键。
+  'session.send': ['queueItemId'],
 }
 
 /**
@@ -65,17 +69,17 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.pruneSessions': ['removed'],
 }
 
-/** 71 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
+/** 72 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
 export const METHODS_501 = new Set<string>([])
 
-/** 客户端 71 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
+/** 客户端 72 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
 export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   // workspace
   'workspace.open': ['workspaceRoot'],
   'workspace.close': ['workspaceRoot'],
 
   // session
-  'session.send': ['ok'],
+  'session.send': ['queued', 'waiting', 'started', 'sessionId'],
   'session.cancel': ['ok'],
   'session.approve': ['ok'],
   'session.reject': ['ok'],
@@ -193,6 +197,7 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'task.remove': ['removed'],
   'task.bindSession': ['task'],
   'task.rename': ['task'],
+  'task.setModel': ['task'],
 }
 
 /**
@@ -207,7 +212,7 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'workspace.close': ['workspaceRoot'],
 
   // session
-  'session.send': ['ok'],
+  'session.send': ['queued', 'waiting', 'started', 'sessionId'],
   'session.cancel': ['ok'],
   'session.approve': ['ok'],
   'session.reject': ['ok'],
@@ -332,6 +337,7 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'task.remove': ['removed'],
   'task.bindSession': ['task'],
   'task.rename': ['task'],
+  'task.setModel': ['task'],
 }
 
 /** 契约对比核心函数: 严格断言 HTTP 动词、Path 以及双端必含键集合双向严格相等。 */
@@ -373,16 +379,16 @@ export function verifyMethodContract(
 }
 
 describe('Route Contract Cross-Test (D6)', () => {
-  test('双端方法总数恰好 71 且集合完全一致', () => {
+  test('双端方法总数恰好 72 且集合完全一致', () => {
     const clientMethods = Object.keys(ROUTES).sort()
     const serverMethods = ROUTE_TABLE.map((r) => r.method).sort()
 
-    expect(clientMethods.length).toBe(71)
-    expect(serverMethods.length).toBe(71)
+    expect(clientMethods.length).toBe(72)
+    expect(serverMethods.length).toBe(72)
     expect(clientMethods).toEqual(serverMethods)
   })
 
-  test('71 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
+  test('72 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const [method, clientRoute] of Object.entries(ROUTES)) {

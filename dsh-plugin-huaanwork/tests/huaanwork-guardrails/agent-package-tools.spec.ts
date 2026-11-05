@@ -374,7 +374,8 @@ describe('agent_propose', () => {
     expect(h.events.find((event) => event.event === 'agent/notice')).toMatchObject({ sessionId: 'session-a' })
   })
 
-  test('resolves the session from the route-agent fallback', async () => {
+  test('fails instead of using a pre-written route-agent slot when the execution carries no agent', async () => {
+    // 预先写入的全局槽属于别的会话;没有执行 agent 时这次调用必须失败,且不写任何事件。
     const calls: string[] = []
     const host = fakeHost({
       propose: async (sessionId) => {
@@ -384,8 +385,12 @@ describe('agent_propose', () => {
     })
     const h = harness({ routeAgent: { id: 'huaanwork', session: { id: 'session-route' } } })
     registerAgentPackageCreationTools(h.ctx, host)
-    await h.registered.get(AGENT_PROPOSE_TOOL)?.execute(proposalArgs, {})
-    expect(calls).toEqual(['session-route'])
+
+    await expect(h.registered.get(AGENT_PROPOSE_TOOL)?.execute(proposalArgs, {})).rejects.toThrow(
+      '当前没有可用于创建智能体的会话',
+    )
+    expect(calls).toEqual([])
+    expect(h.events).toEqual([])
   })
 })
 
@@ -659,7 +664,8 @@ describe('agent_skill_run', () => {
     ).rejects.toThrow(/没有运行中的智能体包/)
   })
 
-  test('falls back to the current caller session when the execution carries no agent', async () => {
+  test('fails instead of using the last caller session when the execution carries no agent', async () => {
+    // 最后发送会话属于别的会话;没有执行 agent 时这次调用必须失败,脚本不得运行。
     const calls: string[] = []
     const registry = createAgentPackageRuntimeRegistry()
     registry.bind('session-caller', runtimeWithScript(async (script) => {
@@ -670,10 +676,10 @@ describe('agent_skill_run', () => {
     registerAgentPackageRuntimeTools(h.ctx, registry)
     noteCallerSession('session-caller')
 
-    await expect(h.registered.get(AGENT_SKILL_RUN_TOOL)?.execute({ script: 'skill/scripts/echo.mjs' }, {})).resolves.toEqual({
-      text: 'ok',
-    })
-    expect(calls).toEqual(['skill/scripts/echo.mjs'])
+    await expect(
+      h.registered.get(AGENT_SKILL_RUN_TOOL)?.execute({ script: 'skill/scripts/echo.mjs' }, {}),
+    ).rejects.toThrow('当前会话没有运行中的智能体包')
+    expect(calls).toEqual([])
   })
 })
 

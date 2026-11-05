@@ -794,3 +794,133 @@ test("agent package tools survive the static tool filter", () => {
   assert.equal(parseSseToolCalls(payloads, isRegisteredToolName).length, 1);
   assert.equal(isRegisteredToolName("agent_unknown"), false);
 });
+
+describe("session-bound model selection", () => {
+  function profileWithSettings(settings: Record<string, unknown>): string {
+    const root = mkdtempSync(join(tmpdir(), "huaanwork-session-model-"));
+    writeFileSync(join(root, "huaanwork-settings.json"), JSON.stringify(settings), "utf8");
+    return root;
+  }
+
+  const twoModels = [
+    { id: "active", name: "Active", base_url: "http://127.0.0.1:11434/v1", model: "qwen", api_key: "" },
+    { id: "pinned", name: "Pinned", base_url: "http://127.0.0.2:9999/v1", model: "llama", api_key: "pk" },
+  ];
+
+  test("stream requests the model pinned to the session instead of the global active model", async () => {
+    const original = globalThis.fetch;
+    const urls: string[] = [];
+    globalThis.fetch = async (input) => {
+      urls.push(String(input));
+      return sseResponse([{ choices: [{ delta: { content: "ok" } }] }, "[DONE]"]);
+    };
+    try {
+      const profileDir = profileWithSettings({
+        base_url: "http://127.0.0.1:11434/v1", model: "qwen", api_key: "",
+        models: twoModels, active_model_id: "active", allow_network: false,
+      });
+      const adapter = new HuaAnWorkAdapter(profileDir, new Map([["s1", "pinned"]]));
+      await collect(adapter.stream(userOptions({ sessionId: "s1" as GenerateOptions["sessionId"] })));
+      assert.deepEqual(urls, ["http://127.0.0.2:9999/v1/chat/completions"]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("stream refuses a session-bound public endpoint under the LAN-only gate without calling fetch", async () => {
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return sseResponse([{ choices: [{ delta: { content: "ok" } }] }, "[DONE]"]);
+    };
+    try {
+      const profileDir = profileWithSettings({
+        base_url: "http://127.0.0.1:11434/v1", model: "qwen", api_key: "",
+        models: [
+          twoModels[0],
+          { id: "cloud", name: "Cloud", base_url: "https://api.example.com/v1", model: "cloud", api_key: "k" },
+        ],
+        active_model_id: "active",
+        allow_network: false,
+      });
+      const adapter = new HuaAnWorkAdapter(profileDir, new Map([["s1", "cloud"]]));
+      await expect(collect(adapter.stream(userOptions({ sessionId: "s1" as GenerateOptions["sessionId"] }))))
+        .rejects.toThrow(/公网/);
+      assert.equal(calls, 0);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("stream reports a deleted session-bound model instead of falling back to the active one", async () => {
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return sseResponse([{ choices: [{ delta: { content: "ok" } }] }, "[DONE]"]);
+    };
+    try {
+      const profileDir = profileWithSettings({
+        base_url: "http://127.0.0.1:11434/v1", model: "qwen", api_key: "",
+        models: [twoModels[0]], active_model_id: "active", allow_network: false,
+      });
+      const adapter = new HuaAnWorkAdapter(profileDir, new Map([["s1", "deleted"]]));
+      await expect(collect(adapter.stream(userOptions({ sessionId: "s1" as GenerateOptions["sessionId"] }))))
+        .rejects.toThrow("模型不存在");
+      assert.equal(calls, 0);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("stream uses flat settings for a session pinned to the synthesized default entry", async () => {
+    const original = globalThis.fetch;
+    const urls: string[] = [];
+    let body: { model?: string } | undefined;
+    globalThis.fetch = async (input, init) => {
+      urls.push(String(input));
+      body = JSON.parse(String(init?.body)) as { model?: string };
+      return sseResponse([{ choices: [{ delta: { content: "ok" } }] }, "[DONE]"]);
+    };
+    try {
+      // 扁平设置:没有 `models` 数组,parseSettings 合成 id='default' 的条目。
+      const profileDir = profileWithSettings({
+        base_url: "http://127.0.0.1:4242/v1", model: "qwen", api_key: "", allow_network: false,
+      });
+      const adapter = new HuaAnWorkAdapter(profileDir, new Map([["s1", "default"]]));
+      await collect(adapter.stream(userOptions({ sessionId: "s1" as GenerateOptions["sessionId"] })));
+      assert.deepEqual(urls, ["http://127.0.0.1:4242/v1/chat/completions"]);
+      assert.equal(body?.model, "qwen");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("stream re-reads the session model table so a table created after apply still pins the model", async () => {
+    const original = globalThis.fetch;
+    const urls: string[] = [];
+    globalThis.fetch = async (input) => {
+      urls.push(String(input));
+      return sseResponse([{ choices: [{ delta: { content: "ok" } }] }, "[DONE]"]);
+    };
+    try {
+      const profileDir = profileWithSettings({
+        base_url: "http://127.0.0.1:11434/v1", model: "qwen", api_key: "",
+        models: twoModels, active_model_id: "active", allow_network: false,
+      });
+      // 构造时表还不存在(Loader 里宿主 apply 尚未运行),之后才可见。
+      let table: Map<string, string> | undefined;
+      const adapter = new HuaAnWorkAdapter(profileDir, () => table);
+      await collect(adapter.stream(userOptions({ sessionId: "s1" as GenerateOptions["sessionId"] })));
+      table = new Map([["s1", "pinned"]]);
+      await collect(adapter.stream(userOptions({ sessionId: "s1" as GenerateOptions["sessionId"] })));
+      assert.deepEqual(urls, [
+        "http://127.0.0.1:11434/v1/chat/completions",
+        "http://127.0.0.2:9999/v1/chat/completions",
+      ]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});

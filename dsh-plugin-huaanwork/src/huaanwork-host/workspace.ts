@@ -1,7 +1,6 @@
 import { existsSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { RouteError, type RouteContext } from './routes.ts'
-import { assertAutomationIdle } from './sessions.ts'
 import { neutralWorkspaceRoot } from './workspace-state.ts'
 
 /**
@@ -37,10 +36,9 @@ function pinWorkspace(routeCtx: RouteContext, target: string): void {
 
 /**
  * workspace.open:校验目录后在进程内切到目标根。
- * assertAutomationIdle 先于一切;已在目标根时短路,不改 holder。
+ * 后台会话按自己的根表运行,前台切换只改 holder;已在目标根时短路。
  */
 export async function openWorkspace(routeCtx: RouteContext, root: string): Promise<WorkspaceResult> {
-  assertAutomationIdle()
   if (!root) {
     throw new RouteError(400, 'validation', 'workspace.open requires root')
   }
@@ -60,7 +58,6 @@ export async function openWorkspace(routeCtx: RouteContext, root: string): Promi
  * 已在中立根时短路;否则与 open 一样进程内切换,不重启。
  */
 export async function closeWorkspace(routeCtx: RouteContext): Promise<WorkspaceResult> {
-  assertAutomationIdle()
   const neutral = neutralWorkspaceRoot(routeCtx.profileDir)
   if (resolve(routeCtx.workspaceRoot.current) === resolve(neutral)) {
     return { workspaceRoot: routeCtx.workspaceRoot.current }

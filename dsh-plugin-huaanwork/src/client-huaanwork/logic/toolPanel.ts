@@ -1,3 +1,4 @@
+import { isUnstartedUserItem } from "./concurrentTurn.ts";
 import type { GoalPhase, GoalTurnAction } from "./goalRound.ts";
 import { resolveThinking } from "./thinkingPanel.ts";
 
@@ -28,6 +29,12 @@ export type ToolPanelItem =
       panelToggled?: PanelToggle;
       text?: string;
       sourceText?: string;
+      /** 排队中、尚未开始执行的用户消息；由 `session.send` 的应答写回。 */
+      queueItemId?: string;
+      /** 本次 `session.send` 已抛错且未启动的用户消息；只在本标签内标记。 */
+      sendRejected?: boolean;
+      /** 没有开启回合的用户消息：宿主回 `started: false`，或排队项出队失败/被取消。 */
+      notStarted?: boolean;
     };
 
 export type ToolEntryStatus = "running" | "done" | "failed" | "interrupted" | "unconfirmed" | "resultMissing";
@@ -46,10 +53,15 @@ export function toolEntryStatus(card: ToolPanelCard, connectionLost: boolean): T
   return "running";
 }
 
-/** 当前用户回合的起始下标；供回合投影与结算复用。 */
+/**
+ * 当前用户回合的起始下标；供回合投影与结算复用。
+ * 排队中（带 `queueItemId`）、本次已抛错（`sendRejected`）或宿主没启动（`notStarted`）
+ * 的用户消息没有开启回合，不能把正在执行的回合截断。
+ */
 export function currentTurnStart(items: readonly ToolPanelItem[]): number {
   for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index]?.kind === "user") return index + 1;
+    const item = items[index];
+    if (item?.kind === "user" && !isUnstartedUserItem(item)) return index + 1;
   }
   return 0;
 }
@@ -131,8 +143,12 @@ export function reduceTurnFinal(
   return phase !== "active";
 }
 
-function finalizeTurnTools<T extends ToolPanelItem>(items: readonly T[], mode: "interrupted" | "unconfirmed"): T[] {
-  const start = currentTurnStart(items);
+function finalizeTurnTools<T extends ToolPanelItem>(
+  items: readonly T[],
+  mode: "interrupted" | "unconfirmed",
+  activeUserId: number | undefined,
+): T[] {
+  const start = turnStartFor(items, activeUserId);
   let changed = false;
   const next = items.map((item, index) => {
     const card = index >= start ? toolPanelCard(item) : undefined;
@@ -150,6 +166,19 @@ function finalizeTurnTools<T extends ToolPanelItem>(items: readonly T[], mode: "
   return changed ? next : items as T[];
 }
 
+/**
+ * 一次回合终结结算到拥有该会话的标签。
+ *
+ * 终态按「实际活动的用户消息」结算，不按最后一条用户消息：排队中（`queueItemId`）
+ * 与本次发送已抛错（`sendRejected`）的消息不算活动回合。
+ *
+ * @param tabs 全部标签
+ * @param tabId 事件所属标签
+ * @param event 终态事件
+ * @param phase 事件所属会话的目标相位，`active` 时是目标续轮的中间结束
+ * @param activeUserId 该标签当前活动用户消息的条目 id；未给出时取最后一条已启动的用户消息
+ * @returns 更新后的标签；无需结算时返回入参本身
+ */
 export function applyTurnFinalToTabs<
   I extends ToolPanelItem,
   T extends {
@@ -163,17 +192,12 @@ export function applyTurnFinalToTabs<
   tabId: string | undefined,
   event: TurnFinalEvent,
   phase: GoalPhase | undefined,
+  activeUserId?: number,
 ): T[] {
   if (!tabId) return tabs as T[];
   const tab = tabs.find((candidate) => candidate.id === tabId);
   if (!tab) return tabs as T[];
-  let userId: number | undefined;
-  for (let index = tab.items.length - 1; index >= 0; index -= 1) {
-    if (tab.items[index]?.kind === "user") {
-      userId = tab.items[index]?.id;
-      break;
-    }
-  }
+  const userId = activeUserId === undefined ? latestStartedUserItemId(tab.items) : activeUserId;
   const wasFinal = userId === undefined
     ? tab.turnFinalWithoutUser === true
     : tab.turnFinalByUserId?.[userId] === true;
@@ -184,7 +208,7 @@ export function applyTurnFinalToTabs<
     ? !event.ok || event.cancelled
     : event.kind === "run-end" && event.interrupted;
   const items = shouldFinalizeTools
-    ? finalizeTurnTools(tab.items, interrupted ? "interrupted" : "unconfirmed")
+    ? finalizeTurnTools(tab.items, interrupted ? "interrupted" : "unconfirmed", userId)
     : tab.items;
   if (wasFinal && items === tab.items) return tabs as T[];
   return tabs.map((candidate) => candidate.id === tabId
@@ -200,6 +224,24 @@ export function applyTurnFinalToTabs<
 
 export function historicalTurnFinalByUserId(items: readonly { id: number; kind: string }[]): Record<number, true> {
   return Object.fromEntries(items.flatMap((item) => item.kind === "user" ? [[item.id, true] as const] : []));
+}
+
+/** 最后一条已启动的用户消息条目 id；等待中与本次已抛错的消息不算。 */
+function latestStartedUserItemId(items: readonly ToolPanelItem[]): number | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.kind === "user" && !isUnstartedUserItem(item)) return item.id;
+  }
+  return undefined;
+}
+
+/** 活动用户消息之后的条目才算本回合；找不到该消息时回落到「最后一条已启动的用户消息」之后。 */
+function turnStartFor(items: readonly ToolPanelItem[], activeUserId: number | undefined): number {
+  if (activeUserId !== undefined) {
+    const index = items.findIndex((item) => item.id === activeUserId);
+    if (index >= 0) return index + 1;
+  }
+  return currentTurnStart(items);
 }
 
 /** 当前回合仍在运行的工具名；断连只会把未结束的工具降为「未确认」，不再算运行中。 */
@@ -329,7 +371,8 @@ export function projectToolPanels<T extends ToolPanelItem>(
   let userId: number | undefined;
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
-    if (item?.kind !== "user") continue;
+    // 排队中或没启动的用户消息还没开启回合，不能把正在执行的回合切成已终结的段。
+    if (item?.kind !== "user" || isUnstartedUserItem(item)) continue;
     if (index > start) segments.push({ start, end: index, userId, final: true });
     start = index;
     userId = item.id;

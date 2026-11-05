@@ -449,3 +449,24 @@ test("a later user closes the old panel, starts non-final, and preserves the old
   assert.equal(manualPanels[0]?.expanded, true, "manual expand survives tab-style reconstruction");
   assert.equal(manualPanels[1]?.expanded, true);
 });
+
+test("turn final settles the active user message", () => {
+  // 活动回合后面还挂着一条等待中的用户消息（带 queueItemId）：终态仍落在活动消息上。
+  const tabs: Array<{ id: string; items: ToolPanelItem[]; turnFinalByUserId?: Readonly<Record<number, boolean>> }> = [
+    {
+      id: "a",
+      items: [
+        { id: 1, kind: "user" },
+        tool(2, "bash", "busy"),
+        { id: 3, kind: "user", queueItemId: "q1" },
+        { id: 4, kind: "user", sendRejected: true },
+      ],
+    },
+  ];
+  const settled = applyTurnFinalToTabs(tabs, "a", { kind: "session-end", ok: true, cancelled: false }, undefined, 1);
+  assert.deepEqual(settled[0]?.turnFinalByUserId, { 1: true }, "the end settles the active message, not the trailing waiting one");
+  assert.equal(cardAt(settled[0]!.items, 1).unconfirmed, true, "the active turn's stuck tool is still reported");
+  // 不传活动 id 时也不能把等待项或本次已抛错的消息当成最新用户回合。
+  const fallback = applyTurnFinalToTabs(tabs, "a", { kind: "session-end", ok: true, cancelled: false }, undefined);
+  assert.deepEqual(fallback[0]?.turnFinalByUserId, { 1: true });
+});

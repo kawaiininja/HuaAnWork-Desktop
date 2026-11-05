@@ -1,20 +1,25 @@
 /**
- * 调度器 tick(Task 5)。间隔只走 HUAANWORK_AUTOMATION_TICK_MS,不睡 60 秒。
- * agent 回合用进程内 double,不 boot lib/。
+ * 调度器 tick(Task 5/8)。间隔只走 HUAANWORK_AUTOMATION_TICK_MS,不睡 60 秒。
+ * agent 回合用进程内 double,不 boot lib/。Task 8 起直接入队的用例先准入:
+ * enqueueAutomation 只执行已经占坑的运行,调度 tick 与 automation.run 才是准入点。
  */
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 
 import type { AutomationInfo, RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
-import { startAutomationScheduler } from '../../src/huaanwork-host/automation-scheduler.ts'
+import { inFlightRuns } from '../../src/huaanwork-host/automation-inflight.ts'
+import { automationRunSessionId } from '../../src/huaanwork-host/automation-session-ids.ts'
+import { evaluateDueAutomations, startAutomationScheduler } from '../../src/huaanwork-host/automation-scheduler.ts'
 import {
   MISSING_PROJECT_OUTPUT,
-  automationTail,
   bindAutomationRuntime,
   enqueueAutomation,
   type AutomationRuntime,
+  type AutomationTrigger,
 } from '../../src/huaanwork-host/automations-host.ts'
 import {
   MISSED_GRACE_MS,
@@ -24,15 +29,29 @@ import {
   normalizeAutomationInput,
 } from '../../src/huaanwork-host/automations-store.ts'
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
-import { sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
-import { sessionSendBlockers, type ListedAgent } from '../../src/huaanwork-host/sessions.ts'
-import { createProject, findAutomation, listAutomations, recentRuns } from '../../src/huaanwork-host/stores.ts'
+import { freshSessionIdFor } from '../../src/huaanwork-host/session-id.ts'
+import {
+  sessionSend,
+  setReevaluateDueAutomations,
+  type ListedAgent,
+} from '../../src/huaanwork-host/sessions.ts'
+import {
+  createProject,
+  findAutomation,
+  listAutomations,
+  listProjects,
+  recentRuns,
+} from '../../src/huaanwork-host/stores.ts'
+import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 
 const previousTick = process.env.HUAANWORK_AUTOMATION_TICK_MS
 const dirs: string[] = []
 const stops: Array<() => void> = []
 const live: Harness[] = []
+const scriptSlotWaiters: Array<() => void> = []
+
+type State = { maxConcurrentTurns: number }
 
 type Harness = {
   profileDir: string
@@ -41,9 +60,12 @@ type Harness = {
   followups: string[]
   runtime: AutomationRuntime
   routeCtx: RouteContext
-  release: () => void
+  scheduler: TurnScheduler
+  state: State
+  releaseFiles: string[]
+  release: (sessionId?: string) => void
   hang: () => void
-  installUserAgent: (whenIdle: () => Promise<void>) => void
+  installUserAgent: (whenIdle: () => Promise<void>, sessionId?: string) => void
 }
 
 function quote(value: string): string {
@@ -59,11 +81,12 @@ function makeHarness(current?: string): Harness {
   const followups: string[] = []
   const releases = new Map<string, () => void>()
   const agents = new Map<string, ListedAgent>()
+  const state: State = { maxConcurrentTurns: 3 }
   let hang = false
   const box: { routeCtx?: RouteContext } = {}
   const runtime = {
     huaanworkApprovals: new Map(),
-    huaanworkUnattended: { current: undefined },
+    huaanworkUnattended: new Map(),
     agents: {
       async create(options: { sessionId: string }) {
         const sessionId = options.sessionId
@@ -105,6 +128,14 @@ function makeHarness(current?: string): Harness {
     requestRestart: async () => false,
   }
   box.routeCtx = routeCtx
+  bindAutomationRuntime(runtime, routeCtx)
+  const scheduler = createTurnScheduler({
+    maxConcurrentTurns: () => state.maxConcurrentTurns,
+    modelExists: () => true,
+  })
+  runtime.huaanworkTurnScheduler = scheduler
+  runtime.huaanworkSessionModels = new Map()
+  runtime.huaanworkSessionRoots = new Map()
   const harness: Harness = {
     profileDir,
     neutral,
@@ -112,21 +143,31 @@ function makeHarness(current?: string): Harness {
     followups,
     runtime,
     routeCtx,
-    release() {
-      hang = false
-      for (const resolve of releases.values()) resolve()
-      releases.clear()
+    scheduler,
+    state,
+    releaseFiles: [],
+    release(sessionId?: string) {
+      if (sessionId === undefined) hang = false
+      const ids = sessionId === undefined ? [...releases.keys()] : [sessionId]
+      for (const id of ids) releases.get(id)?.()
     },
     hang() {
       hang = true
     },
-    installUserAgent(whenIdle) {
-      const sessionId = sessionIdFor(routeCtx.workspaceRoot.current)
-      agents.set(sessionId, {
-        id: sessionId,
-        session: { id: sessionId },
+    installUserAgent(whenIdle, sessionId) {
+      const id = sessionId ?? `huaanwork-user-${agents.size}`
+      let resolveIdle: (() => void) | undefined
+      const idle = new Promise<void>((resolve) => {
+        resolveIdle = resolve
+      })
+      // 工厂只用于观察/计数;占位由 h.release() 显式解除。
+      void whenIdle()
+      releases.set(id, () => resolveIdle?.())
+      agents.set(id, {
+        id,
+        session: { id },
         followup() {},
-        whenIdle,
+        whenIdle: () => idle,
       })
     },
   }
@@ -142,6 +183,9 @@ function readText(message: unknown): string {
 
 function start(h: Harness, opts?: { disabled?: boolean }): void {
   bindAutomationRuntime(h.runtime, h.routeCtx)
+  setReevaluateDueAutomations(() => {
+    void evaluateDueAutomations()
+  })
   stops.push(startAutomationScheduler(h.runtime, h.routeCtx, opts))
 }
 
@@ -153,6 +197,10 @@ function holdCommand(mark: string, release: string): string {
   const script =
     'const fs=require("node:fs"); fs.writeFileSync(process.env.MARK,"1"); const end=Date.now()+8000; while(!fs.existsSync(process.env.RELEASE)&&Date.now()<end){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,40)}'
   return `MARK=${quote(mark)} RELEASE=${quote(release)} ${quote(process.execPath)} -e ${quote(script)}`
+}
+
+function cwdCommand(): string {
+  return `${quote(process.execPath)} -e ${quote('process.stdout.write(process.cwd())')}`
 }
 
 async function poll(predicate: () => boolean | Promise<boolean>, timeoutMs = 4_000): Promise<void> {
@@ -190,19 +238,96 @@ async function arm(profileDir: string, id: string, nextRunAt: number): Promise<v
   await advanceNextRunAt(profileDir, id, nextRunAt)
 }
 
+/** 自管准入的执行:直接入队前先占坑(调度 tick 与 automation.run 之外的唯一测试路径)。 */
+async function admitAndEnqueue(
+  h: Harness,
+  automation: AutomationInfo,
+  opts: { trigger: AutomationTrigger; runId?: string; coalescedCount?: number },
+): Promise<{ runId: string; root: string; done: Promise<void> }> {
+  const runId = opts.runId ?? randomUUID()
+  const project = automation.projectId
+    ? (await listProjects(h.profileDir)).find((item) => item.id === automation.projectId)
+    : undefined
+  const root = resolve(project?.root ?? h.neutral)
+  const sessionId =
+    automation.kind === 'agent' ? automationRunSessionId(automation.id, runId) : `script:${runId}`
+  const admitted = h.scheduler.admitAutomation({
+    automationId: automation.id,
+    sessionId,
+    root,
+    runId,
+    countsTowardCap: automation.kind === 'agent',
+  })
+  expect(admitted).toEqual({ kind: 'start', root })
+  const done = enqueueAutomation(automation, {
+    trigger: opts.trigger,
+    runId,
+    root,
+    ...(opts.coalescedCount === undefined ? {} : { coalescedCount: opts.coalescedCount }),
+  })
+  return { runId, root, done }
+}
+
 afterEach(async () => {
   for (const stop of stops.splice(0)) stop()
-  for (const harness of live.splice(0)) harness.release()
-  await Promise.race([automationTail, new Promise((resolve) => setTimeout(resolve, 3_000))])
-  sessionSendBlockers.workspaceDisplaced = false
-  sessionSendBlockers.agentAutomationQueued = 0
-  sessionSendBlockers.agentAutomationActive = 0
+  for (const harness of live.splice(0)) {
+    harness.release()
+    for (const file of harness.releaseFiles) {
+      try {
+        writeFileSync(file, '1')
+      } catch {
+        // 目录可能已不在;槽位脚本最多再等到自身超时。
+      }
+    }
+  }
+  setReevaluateDueAutomations(undefined)
+  const deadline = Date.now() + 3_000
+  while ((inFlightRuns.size > 0 || scriptSlotWaiters.length > 0) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  inFlightRuns.clear()
   if (previousTick === undefined) delete process.env.HUAANWORK_AUTOMATION_TICK_MS
   else process.env.HUAANWORK_AUTOMATION_TICK_MS = previousTick
   while (dirs.length > 0) {
     const dir = dirs.pop()
     if (dir) rmSync(dir, { recursive: true, force: true })
   }
+})
+test('scheduler tick records a missed run for stale automations without executing', async () => {
+  useTick(20)
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '同根' })
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hw-sched-other-'))
+  dirs.push(elsewhere)
+  const other = await createProject(h.profileDir, { root: elsewhere, name: '别处' })
+  const skipped = await makeTask(h.profileDir, { projectId: project.id, name: '跳过', missedPolicy: 'skip' })
+  const catchup = await makeTask(h.profileDir, { projectId: project.id, name: '补跑', missedPolicy: 'run-once' })
+  const remote = await makeTask(h.profileDir, { projectId: other.id, name: '跨根补跑', missedPolicy: 'run-once' })
+  const stale = Date.now() - MISSED_GRACE_MS - 5_000
+  await arm(h.profileDir, skipped.id, stale)
+  await arm(h.profileDir, catchup.id, stale)
+  await arm(h.profileDir, remote.id, stale)
+  start(h)
+
+  await poll(() => runEvents(h.events, 'automation/run-end', catchup.id).length === 1)
+  await poll(() => runEvents(h.events, 'automation/run-end', remote.id).length === 1)
+  await poll(() => runEvents(h.events, 'automation/missed', skipped.id).length >= 1)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+
+  const skippedRun = (await recentRuns(h.profileDir, skipped.id)).at(-1)
+  expect(skippedRun).toMatchObject({ status: 'missed', trigger: 'schedule' })
+  expect(runEvents(h.events, 'automation/run-start', skipped.id)).toHaveLength(0)
+  expect((await findAutomation(h.profileDir, skipped.id)).nextRunAt).toBeGreaterThan(Date.now() - 1_000)
+
+  const catchupRun = (await recentRuns(h.profileDir, catchup.id)).at(-1)
+  expect(catchupRun).toMatchObject({ trigger: 'catchup', ok: true })
+  expect(catchupRun?.coalescedCount).toBeGreaterThan(0)
+  expect(runEvents(h.events, 'automation/missed', catchup.id)).toHaveLength(1)
+
+  const remoteRun = (await recentRuns(h.profileDir, remote.id)).at(-1)
+  expect(remoteRun).toMatchObject({ trigger: 'catchup', ok: true })
+  expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBeGreaterThan(stale)
+  expect(runEvents(h.events, 'automation/missed', remote.id)).toHaveLength(1)
 })
 
 test('empty registry ticks do not write or displace the workspace', async () => {
@@ -212,7 +337,6 @@ test('empty registry ticks do not write or displace the workspace', async () => 
   await new Promise((resolve) => setTimeout(resolve, 120))
   expect(h.events).toEqual([])
   expect(await listAutomations(h.profileDir)).toEqual([])
-  expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
 })
 
 test('tick interval 0 and config disabled do not fire a due task', async () => {
@@ -231,10 +355,9 @@ test('tick interval 0 and config disabled do not fire a due task', async () => {
   await new Promise((resolve) => setTimeout(resolve, 80))
   expect(runEvents(h.events, 'automation/run-start', due.id)).toHaveLength(0)
   expect((await findAutomation(h.profileDir, due.id)).enabled).toBe(true)
-  expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
 })
 
-test('same-root due agents enqueue through the serial tail, grouped together', async () => {
+test('same-root due agents start one at a time and the other stays due until release', async () => {
   useTick(20)
   const h = makeHarness()
   h.hang()
@@ -251,115 +374,177 @@ test('same-root due agents enqueue through the serial tail, grouped together', a
     prompt: '后做',
     name: '后做',
   })
-  await arm(h.profileDir, first.id, Date.now() - 1_000)
-  await arm(h.profileDir, second.id, Date.now() - 1_000)
+  const dueAt = Date.now() - 1_000
+  await arm(h.profileDir, first.id, dueAt)
+  await arm(h.profileDir, second.id, dueAt)
   start(h)
 
-  await poll(() => h.followups.length === 1 && sessionSendBlockers.agentAutomationQueued === 2)
+  await poll(() => h.followups.length === 1)
   expect(h.followups[0]).toContain('<automation-fire')
   expect(h.followups[0]).toContain('trigger="schedule"')
-  expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
+  // 同根第二条不 followup、保持到期、不落 missed。
+  expect(runEvents(h.events, 'automation/run-start', second.id)).toHaveLength(0)
+  expect((await findAutomation(h.profileDir, second.id)).nextRunAt).toBe(dueAt)
+  expect((await recentRuns(h.profileDir, second.id)).some((run) => run.status === 'missed')).toBe(false)
+
   h.release()
   await poll(() => h.followups.length === 2 && runEvents(h.events, 'automation/run-end', second.id).length === 1)
-  for (const stop of stops.splice(0)) stop()
-  await automationTail
   const stored = await findAutomation(h.profileDir, first.id)
   expect(stored.lastStatus).toBe('ok')
   expect(stored.nextRunAt).toBeGreaterThan(Date.now())
 })
 
-test('cross-root due stays due and a deleted project still runs', async () => {
+test('a due task on another project root runs there, and a deleted project still records its failure', async () => {
   useTick(20)
   const h = makeHarness()
   const elsewhere = mkdtempSync(join(tmpdir(), 'hw-sched-other-'))
   dirs.push(elsewhere)
   const other = await createProject(h.profileDir, { root: elsewhere, name: '别处' })
-  const cross = await makeTask(h.profileDir, { projectId: other.id, name: '跨根' })
+  const cross = await makeTask(h.profileDir, { projectId: other.id, name: '跨根', command: cwdCommand() })
   const missing = await makeTask(h.profileDir, { projectId: 'deleted-project', name: '已删项目' })
-  const crossAt = Date.now() - 1_000
-  await arm(h.profileDir, cross.id, crossAt)
+  await arm(h.profileDir, cross.id, Date.now() - 1_000)
   await arm(h.profileDir, missing.id, Date.now() - 1_000)
   start(h)
 
+  await poll(() => runEvents(h.events, 'automation/run-end', cross.id).length === 1)
   await poll(() => runEvents(h.events, 'automation/run-end', missing.id).length === 1)
-  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect((await recentRuns(h.profileDir, cross.id))[0]?.output).toBe(await realpath(elsewhere))
   const ended = runEvents(h.events, 'automation/run-end', missing.id)[0]
   expect(ended).toMatchObject({ ok: false })
   expect((await recentRuns(h.profileDir, missing.id))[0]?.output).toBe(MISSING_PROJECT_OUTPUT)
-  const kept = await findAutomation(h.profileDir, cross.id)
-  expect(kept.enabled).toBe(true)
-  expect(kept.nextRunAt).toBe(crossAt)
-  expect(runEvents(h.events, 'automation/run-start', cross.id)).toHaveLength(0)
-  expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
+  expect(h.routeCtx.workspaceRoot.current).toBe(h.neutral)
 })
 
-test('missed skip records a run, run-once catchup enqueues, cross-root catchup does not', async () => {
+test('catchup waits for the root writer and the concurrent cap', { timeout: 15_000 }, async () => {
   useTick(20)
   const h = makeHarness()
-  const project = await createProject(h.profileDir, { root: h.neutral, name: '同根' })
-  const elsewhere = mkdtempSync(join(tmpdir(), 'hw-sched-other-'))
+  h.state.maxConcurrentTurns = 1
+  h.hang()
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hw-sched-busy-'))
   dirs.push(elsewhere)
-  const other = await createProject(h.profileDir, { root: elsewhere, name: '别处' })
-  const skipped = await makeTask(h.profileDir, { projectId: project.id, name: '跳过', missedPolicy: 'skip' })
-  const catchup = await makeTask(h.profileDir, { projectId: project.id, name: '补跑', missedPolicy: 'run-once' })
-  const remote = await makeTask(h.profileDir, { projectId: other.id, name: '跨根补跑', missedPolicy: 'run-once' })
+  const other = await createProject(h.profileDir, { root: elsewhere, name: '占用' })
+  const capProject = await createProject(h.profileDir, { root: h.neutral, name: '名额' })
+  const catchup = await makeTask(h.profileDir, {
+    projectId: other.id,
+    kind: 'agent',
+    prompt: '补跑',
+    name: '补跑',
+    missedPolicy: 'run-once',
+  })
+  const holder = await makeTask(h.profileDir, {
+    projectId: capProject.id,
+    kind: 'agent',
+    prompt: '占名额',
+    name: '占名额',
+    schedule: { kind: 'manual' },
+  })
+  const mark = join(elsewhere, 'catchup-script-mark')
+  const release = join(elsewhere, 'catchup-script-release')
+  h.releaseFiles.push(release)
+  // 脚本写者占住 catchup 的根,但不占并发名额。
+  const script = await makeTask(h.profileDir, {
+    projectId: other.id,
+    name: '占根脚本',
+    schedule: { kind: 'manual' },
+    command: holdCommand(mark, release),
+  })
   const stale = Date.now() - MISSED_GRACE_MS - 5_000
-  await arm(h.profileDir, skipped.id, stale)
   await arm(h.profileDir, catchup.id, stale)
-  await arm(h.profileDir, remote.id, stale)
+
+  const scriptRun = await admitAndEnqueue(h, script, { trigger: 'manual' })
+  await poll(() => existsSync(mark))
+  const { runId: holderRunId } = await admitAndEnqueue(h, holder, { trigger: 'manual' })
+  await poll(() => h.followups.length === 1)
   start(h)
 
-  await poll(() => runEvents(h.events, 'automation/run-end', catchup.id).length === 1)
-  await poll(() => runEvents(h.events, 'automation/missed', skipped.id).length >= 1)
-  await poll(() => runEvents(h.events, 'automation/missed', remote.id).length >= 1)
-  await new Promise((resolve) => setTimeout(resolve, 60))
+  // 根上有写者且名额已满:逾期 run-once 不执行、不记失败运行、不推进。
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(runEvents(h.events, 'automation/run-start', catchup.id)).toHaveLength(0)
+  expect(await recentRuns(h.profileDir, catchup.id)).toEqual([])
+  expect((await findAutomation(h.profileDir, catchup.id)).nextRunAt).toBe(stale)
 
-  const skippedRun = (await recentRuns(h.profileDir, skipped.id)).at(-1)
-  expect(skippedRun).toMatchObject({ status: 'missed', trigger: 'schedule' })
-  expect(runEvents(h.events, 'automation/run-start', skipped.id)).toHaveLength(0)
-  expect((await findAutomation(h.profileDir, skipped.id)).nextRunAt).toBeGreaterThan(Date.now() - 1_000)
+  // 释放根写者后名额仍被占用:继续跳过,仍不落 missed。
+  writeFileSync(release, '1')
+  await poll(() => runEvents(h.events, 'automation/run-end', script.id).length === 1)
+  await scriptRun.done
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(runEvents(h.events, 'automation/run-start', catchup.id)).toHaveLength(0)
+  expect((await recentRuns(h.profileDir, catchup.id)).some((run) => run.status === 'missed')).toBe(false)
+  expect((await findAutomation(h.profileDir, catchup.id)).nextRunAt).toBe(stale)
 
-  const catchupRun = (await recentRuns(h.profileDir, catchup.id)).at(-1)
-  expect(catchupRun).toMatchObject({ trigger: 'catchup', ok: true })
-  expect(catchupRun?.coalescedCount).toBeGreaterThan(0)
-  const missed = runEvents(h.events, 'automation/missed', catchup.id)[0]
-  expect(missed).toMatchObject({ event: 'automation/missed' })
-
-  expect(runEvents(h.events, 'automation/run-start', remote.id)).toHaveLength(0)
-  expect(await recentRuns(h.profileDir, remote.id)).toEqual([])
-  expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBe(stale)
-  expect(runEvents(h.events, 'automation/missed', remote.id).length).toBe(1)
-  expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
+  // 名额释放后的后续 tick 才补跑。
+  h.release(automationRunSessionId(holder.id, holderRunId))
+  await poll(() => runEvents(h.events, 'automation/run-start', catchup.id).length === 1)
+  await poll(() => runEvents(h.events, 'automation/missed', catchup.id).length === 1)
+  expect((await findAutomation(h.profileDir, catchup.id)).nextRunAt).toBeGreaterThan(stale)
 })
 
-test('cross-root run-once catchup stays pending, emits missed once, and runs after the workspace matches', async () => {
+test('a busy foreground channel agent does not keep another project root due', async () => {
   useTick(20)
   const h = makeHarness()
   const elsewhere = mkdtempSync(join(tmpdir(), 'hw-sched-other-'))
   dirs.push(elsewhere)
   const other = await createProject(h.profileDir, { root: elsewhere, name: '别处' })
-  const remote = await makeTask(h.profileDir, { projectId: other.id, name: '跨根补跑一次', missedPolicy: 'run-once' })
-  const stale = Date.now() - MISSED_GRACE_MS - 5_000
-  await arm(h.profileDir, remote.id, stale)
+  const grouped = await makeTask(h.profileDir, { projectId: other.id, name: '别组' })
+  const neutralTask = await makeTask(h.profileDir, { projectId: null, name: '中立下一组' })
+  const dueAt = Date.now() - 1_000
+  await arm(h.profileDir, grouped.id, dueAt)
+  await arm(h.profileDir, neutralTask.id, dueAt)
+  h.installUserAgent(() => new Promise<void>(() => undefined))
   start(h)
 
-  await poll(() => runEvents(h.events, 'automation/missed', remote.id).length >= 1)
-  await new Promise((resolve) => setTimeout(resolve, 80))
-  expect(runEvents(h.events, 'automation/missed', remote.id).length).toBe(1)
-  expect(runEvents(h.events, 'automation/run-start', remote.id)).toHaveLength(0)
-  expect(await recentRuns(h.profileDir, remote.id)).toEqual([])
-  expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBe(stale)
-
-  for (const stop of stops.splice(0)) stop()
-  h.events.length = 0
-  h.routeCtx.workspaceRoot.current = elsewhere
-  start(h)
-  await poll(() => runEvents(h.events, 'automation/run-end', remote.id).length === 1)
-  const catchupRun = (await recentRuns(h.profileDir, remote.id)).at(-1)
-  expect(catchupRun).toMatchObject({ trigger: 'catchup', ok: true })
-  expect((await findAutomation(h.profileDir, remote.id)).nextRunAt).toBeGreaterThan(stale)
-  expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
+  await poll(() => runEvents(h.events, 'automation/run-end', grouped.id).length === 1)
+  await poll(() => runEvents(h.events, 'automation/run-end', neutralTask.id).length === 1)
+  expect(runEvents(h.events, 'automation/run-start', neutralTask.id)).toHaveLength(1)
 })
+
+test('neutral tasks run when the current root is the neutral root', async () => {
+  useTick(20)
+  const h = makeHarness()
+  mkdirSync(h.neutral, { recursive: true })
+  const task = await makeTask(h.profileDir, { projectId: null, name: '中立' })
+  await arm(h.profileDir, task.id, Date.now() - 1_000)
+  start(h)
+  await poll(() => runEvents(h.events, 'automation/run-end', task.id).length === 1)
+  expect((await recentRuns(h.profileDir, task.id))[0]?.output).toBe('tick-ok')
+})
+
+test('a due task still runs while a script task holds another root', async () => {
+  useTick(20)
+  const h = makeHarness()
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hw-sched-other-'))
+  dirs.push(elsewhere)
+  const other = await createProject(h.profileDir, { root: elsewhere, name: '别处' })
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '同根' })
+  const mark = join(elsewhere, 'script-mark')
+  const release = join(elsewhere, 'script-release')
+  const script = await makeTask(h.profileDir, {
+    projectId: other.id,
+    name: '慢脚本',
+    schedule: { kind: 'manual' },
+    command: holdCommand(mark, release),
+  })
+  const agent = await makeTask(h.profileDir, {
+    projectId: project.id,
+    kind: 'agent',
+    prompt: '生成产出',
+    name: '到期 agent',
+  })
+  await arm(h.profileDir, agent.id, Date.now() - 1_000)
+  const { done } = await admitAndEnqueue(h, script, { trigger: 'manual' })
+  try {
+    await poll(() => existsSync(mark) && runEvents(h.events, 'automation/run-start', script.id).length === 1)
+    start(h)
+
+    await poll(() => runEvents(h.events, 'automation/run-end', agent.id).length === 1)
+    expect(runEvents(h.events, 'automation/run-end', script.id)).toHaveLength(0)
+    expect((await recentRuns(h.profileDir, agent.id))[0]?.trigger).toBe('schedule')
+  } finally {
+    writeFileSync(release, '1')
+  }
+  await poll(() => runEvents(h.events, 'automation/run-end', script.id).length === 1)
+  await done
+}, 15_000)
 
 test('expired tasks disable without a missed record, and a missed once disables itself', async () => {
   useTick(20)
@@ -409,78 +594,6 @@ test('a new scheduler cancels residual running rows and leaves this generation a
   expect((await findAutomation(h.profileDir, current.id)).lastStatus).toBe('running')
 })
 
-test('agentIdle between groups keeps the later group due', { timeout: 10_000 }, async () => {
-  useTick(20)
-  const h = makeHarness()
-  const project = await createProject(h.profileDir, { root: h.neutral, name: '同根' })
-  const grouped = await makeTask(h.profileDir, { projectId: project.id, name: '同组' })
-  const neutralTask = await makeTask(h.profileDir, { projectId: null, name: '中立下一组' })
-  const dueAt = Date.now() - 1_000
-  await arm(h.profileDir, grouped.id, dueAt)
-  await arm(h.profileDir, neutralTask.id, dueAt)
-  let idleCalls = 0
-  h.installUserAgent(() => {
-    idleCalls += 1
-    if (idleCalls >= 3) return new Promise(() => {})
-    return Promise.resolve()
-  })
-  start(h)
-
-  await poll(() => runEvents(h.events, 'automation/run-end', grouped.id).length === 1)
-  await poll(() => idleCalls >= 3, 3_000)
-  for (const stop of stops.splice(0)) stop()
-  await new Promise((resolve) => setTimeout(resolve, 1_200))
-  expect(runEvents(h.events, 'automation/run-start', neutralTask.id)).toHaveLength(0)
-  expect((await findAutomation(h.profileDir, neutralTask.id)).nextRunAt).toBe(dueAt)
-  expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
-})
-
-test('neutral tasks run when the current root is the neutral root', async () => {
-  useTick(20)
-  const h = makeHarness()
-  mkdirSync(h.neutral, { recursive: true })
-  const task = await makeTask(h.profileDir, { projectId: null, name: '中立' })
-  await arm(h.profileDir, task.id, Date.now() - 1_000)
-  start(h)
-  await poll(() => runEvents(h.events, 'automation/run-end', task.id).length === 1)
-  expect((await recentRuns(h.profileDir, task.id))[0]?.output).toBe('tick-ok')
-  expect(sessionSendBlockers.workspaceDisplaced).toBe(false)
-})
-
-test('a due agent still enqueues while a script task is running', async () => {
-  useTick(20)
-  const h = makeHarness()
-  const project = await createProject(h.profileDir, { root: h.neutral, name: '同根' })
-  const mark = join(h.neutral, 'script-mark')
-  const release = join(h.neutral, 'script-release')
-  const script = await makeTask(h.profileDir, {
-    projectId: project.id,
-    name: '慢脚本',
-    schedule: { kind: 'manual' },
-    command: holdCommand(mark, release),
-  })
-  const agent = await makeTask(h.profileDir, {
-    projectId: project.id,
-    kind: 'agent',
-    prompt: '生成产出',
-    name: '到期 agent',
-  })
-  await arm(h.profileDir, agent.id, Date.now() - 1_000)
-  bindAutomationRuntime(h.runtime, h.routeCtx)
-  try {
-    void enqueueAutomation(script, { trigger: 'manual' })
-    await poll(() => existsSync(mark) && runEvents(h.events, 'automation/run-start', script.id).length === 1)
-    start(h)
-
-    await poll(() => runEvents(h.events, 'automation/run-end', agent.id).length === 1)
-    expect(runEvents(h.events, 'automation/run-end', script.id)).toHaveLength(0)
-    expect((await recentRuns(h.profileDir, agent.id))[0]?.trigger).toBe('schedule')
-  } finally {
-    writeFileSync(release, '1')
-  }
-  await poll(() => runEvents(h.events, 'automation/run-end', script.id).length === 1)
-}, 15_000)
-
 test('a due once task disables itself after firing and does not record missed', async () => {
   useTick(20)
   const h = makeHarness()
@@ -502,4 +615,37 @@ test('a due once task disables itself after firing and does not record missed', 
   expect(stored.nextRunAt).toBeUndefined()
   await new Promise((resolve) => setTimeout(resolve, 80))
   expect((await recentRuns(h.profileDir, once.id)).some((run) => run.status === 'missed')).toBe(false)
+})
+
+test('an admission skip survives the missed grace window', async () => {
+  useTick(20)
+  const h = makeHarness()
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hw-sched-busy-'))
+  dirs.push(elsewhere)
+  const project = await createProject(h.profileDir, { root: elsewhere, name: '占用' })
+  const due = await makeTask(h.profileDir, { projectId: project.id, kind: 'agent', prompt: '稍后', name: '稍后' })
+  const firstDue = Date.now() - 1_000
+  await arm(h.profileDir, due.id, firstDue)
+  const userSession = freshSessionIdFor(elsewhere)
+  h.installUserAgent(() => new Promise(() => undefined), userSession)
+  await sessionSend(h.runtime, h.routeCtx, {
+    text: '占住这个根',
+    sessionId: userSession,
+    tabId: 'tab-root',
+    modelId: 'default',
+  })
+  start(h)
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(runEvents(h.events, 'automation/run-start', due.id)).toHaveLength(0)
+  expect((await recentRuns(h.profileDir, due.id)).some((run) => run.status === 'missed')).toBe(false)
+  const lateDue = Date.now() - MISSED_GRACE_MS - 5_000
+  await arm(h.profileDir, due.id, lateDue)
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  const stored = await findAutomation(h.profileDir, due.id)
+  expect(stored.enabled).toBe(true)
+  expect(stored.nextRunAt).toBe(lateDue)
+  expect((await recentRuns(h.profileDir, due.id)).some((run) => run.status === 'missed')).toBe(false)
+  h.release()
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(runEvents(h.events, 'automation/run-start', due.id)).toHaveLength(1)
 })

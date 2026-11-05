@@ -19,6 +19,7 @@ import {
   removeTasksOfProject,
   renameProject,
   renameTask,
+  setTaskModel,
   touchProject,
 } from '../../src/huaanwork-host/stores.ts'
 import type { AutomationInfo } from '../../src/client-huaanwork/rpc-types.ts'
@@ -192,6 +193,75 @@ describe('tasks 读路径(旧 tasks.test.ts 用例)', () => {
 
     // 无子任务的项目级联为空数组。
     expect(await removeTasksOfProject(home, 'p1')).toEqual([])
+  })
+})
+
+describe('setTaskModel(Task 9:子任务记住模型)', () => {
+  test('setTaskModel keeps an existing task readable without the field', async () => {
+    const dir = makeHome()
+    const project = await createProject(dir, { root: mkdtempSync(join(tmpdir(), 'huaanwork-task-root-')) })
+    const task = await createTask(dir, { projectId: project.id, name: '周报' })
+    expect(task.modelId).toBeUndefined()
+    const saved = await setTaskModel(dir, { taskId: task.id, modelId: 'local-model' })
+    expect(saved.modelId).toBe('local-model')
+    expect((await listTasks(dir, project.id))[0]?.modelId).toBe('local-model')
+  })
+
+  test('旧记录没有 modelId 仍可读;改写模型不丢其它字段', async () => {
+    const home = makeHome()
+    writeJson(home, 'tasks.json', {
+      tasks: [{ id: 't1', projectId: 'p1', name: '旧任务', createdAt: 1, sessionId: 's1' }],
+    })
+    expect((await listTasks(home))[0]).toMatchObject({ id: 't1', name: '旧任务', sessionId: 's1' })
+
+    const saved = await setTaskModel(home, { taskId: 't1', modelId: 'm2' })
+    expect(saved).toMatchObject({ id: 't1', name: '旧任务', createdAt: 1, sessionId: 's1', modelId: 'm2' })
+  })
+
+  test('modelId 存在但不是非空字符串时忽略该字段,不丢弃整条任务', async () => {
+    const home = makeHome()
+    writeJson(home, 'tasks.json', {
+      tasks: [
+        { id: 'empty', projectId: 'p1', name: '空串', createdAt: 1, modelId: '' },
+        { id: 'blank', projectId: 'p1', name: '空白', createdAt: 2, modelId: '   ' },
+        { id: 'number', projectId: 'p1', name: '数字', createdAt: 3, modelId: 7 },
+        { id: 'kept', projectId: 'p1', name: '合法', createdAt: 4, modelId: 'm1' },
+      ],
+    })
+
+    const listed = await listTasks(home)
+    expect(listed.map((task) => task.id)).toEqual(['empty', 'blank', 'number', 'kept'])
+    expect(listed[0]!.modelId).toBeUndefined()
+    expect(listed[1]!.modelId).toBeUndefined()
+    expect(listed[2]!.modelId).toBeUndefined()
+    expect(listed[3]!.modelId).toBe('m1')
+
+    // 被忽略的字段随后可以正常写入。
+    const saved = await setTaskModel(home, { taskId: 'empty', modelId: 'm2' })
+    expect(saved.modelId).toBe('m2')
+  })
+
+  test('空 modelId 与不存在的任务都抛错,且不写坏注册表', async () => {
+    const home = makeHome()
+    const task = await createTask(home, { projectId: 'p1', name: 't' }, 1)
+
+    await expect(setTaskModel(home, { taskId: task.id, modelId: '  ' })).rejects.toThrow(/任务模型不存在/)
+    await expect(setTaskModel(home, { taskId: 'missing', modelId: 'm1' })).rejects.toThrow(/was not found/)
+
+    // 任务列表检查不在这里:未登记的模型 id 照样落盘,准入侧负责拒绝。
+    const saved = await setTaskModel(home, { taskId: task.id, modelId: 'unlisted-model' })
+    expect(saved.modelId).toBe('unlisted-model')
+    expect((await listTasks(home))[0]!.modelId).toBe('unlisted-model')
+  })
+
+  test('并发 setTaskModel 全部保留(任务锁内写入)', async () => {
+    const home = makeHome()
+    const tasks = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => createTask(home, { projectId: 'p1', name: `子任务 ${i}` }, 1000 + i)),
+    )
+    await Promise.all(tasks.map((task) => setTaskModel(home, { taskId: task.id, modelId: `m-${task.id}` })))
+    const listed = await listTasks(home)
+    expect(listed.map((task) => task.modelId)).toEqual(tasks.map((task) => `m-${task.id}`))
   })
 })
 

@@ -63,6 +63,8 @@ export type TaskInfo = {
   name: string;
   createdAt: number;
   sessionId?: string;
+  /** 该子任务首次真正开始执行时用的模型条目 id；还没跑过就不存在（旧 tasks.json 无此字段）。 */
+  modelId?: string;
 };
 
 export type AutomationDraft = {

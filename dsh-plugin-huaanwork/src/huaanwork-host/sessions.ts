@@ -1,7 +1,7 @@
+import { existsSync, statSync } from 'node:fs'
 import { readdir, unlink } from 'node:fs/promises'
-import { join, resolve, sep } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-import { workNetworkGateError } from '@huaanwork/policy/network'
 import type { AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
 import { forgetConfirmedTarget, settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
 import { answerRouteInput, cancelRouteInput, clearInvalidRoute, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
@@ -29,6 +29,10 @@ import {
 } from './child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
 import { readHuaanworkSettings } from './settings.ts'
+import { resolveSessionModel } from './session-models.ts'
+import { listProjects, listTasks, setTaskModel } from './stores.ts'
+import type { QueueItem, TurnScheduler } from './turn-scheduler.ts'
+import { writableRootForSession } from './writable-root.ts'
 import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog } from './session-view.ts'
 import type { RouteContext } from './routes.ts'
 import type { SubagentsService } from './subagents-service.ts'
@@ -74,47 +78,58 @@ export type SessionRuntimeContext = {
   subagents?: SubagentsService
   /** 子代理 run 权威状态机(holders.ts 注入);执行链与 subagent.* 路由读同一实例。 */
   huaanworkSubagentRuns?: SubagentRunRegistry
+  /** 会话 → 模型条目 id 的绑定表(holders.ts 注入);`followup` 受理后写入。 */
+  huaanworkSessionModels?: Map<string, string>
+  /** 会话 → 可写根(holders.ts 注入);创建/恢复前写入。 */
+  huaanworkSessionRoots?: Map<string, string>
+  /** 唯一回合调度器(holders.ts 注入);用户发送准入与排队出队共用。 */
+  huaanworkTurnScheduler?: TurnScheduler
 }
 
 /**
- * 发送侧阻塞源。agent 两源由 automations-host 入队/链尾写入;
- * workspaceDisplaced 恒 false(方案①,无进程内位移)。
+ * 发送侧阻塞源:只保留 `workspaceDisplaced`。
+ * 自动化的排队/运行计数(Task 8 前由 automations-host 入队与链尾增减)已随按根准入
+ * 退役:现在写者是调度器的根名额,发送与取消不再读任何自动化计数。
  */
 export const sessionSendBlockers = {
   /**
    * 恒 false。非 P1-4 未收口的恒假死检查,而是 Desktop 无进程内位移的必然结果(方案①,评审 P1-7)。
-   * 自动化执行体不写此源。
+   * 自动化执行体不写此源;仍由 `assertSessionSendable` 读作显式位移闸。
    */
   workspaceDisplaced: false,
-  /** agent 任务入队即 +1,本次 run 链尾完成时 -1。script 不动。 */
-  agentAutomationQueued: 0,
-  /** agent 任务入队即 +1,本次 run 链尾完成时 -1。script 不动。 */
-  agentAutomationActive: 0,
-}
-
-/** 旧 host.ts:484。workspace.open/close 与 session.new 共用;agent 队列计数由 automations-host 写入。 */
-export const assertAutomationIdle = (): void => {
-  if (sessionSendBlockers.agentAutomationQueued > 0 || sessionSendBlockers.workspaceDisplaced) {
-    throw new Error('后台自动化任务运行中，请稍候再试')
-  }
 }
 
 /**
- * 发送侧阻塞(旧 host.ts:498):
- * 1) 位移中(workspaceRoot ≠ userRoot:跨项目 agent 任务运行中,或恢复被跳过/进行中):
- *    任何会话的 send/cancel 都拒绝。
- * 2) 同项目 agent 任务运行期间阻塞会话发送。
+ * 发送侧阻塞(旧 host.ts:498 的位移源):
+ * 恒 false 的 `workspaceDisplaced` 仍保留为显式位移闸;自动化已按可写根准入,
+ * 不再用全局计数拒绝其它根上的发送或取消。
  */
 const assertSessionSendable = (): void => {
   if (sessionSendBlockers.workspaceDisplaced) throw new Error('后台任务正在其他项目运行，工作区切换中，请稍候再试')
-  if (sessionSendBlockers.agentAutomationActive > 0) throw new Error('后台自动化任务运行中，请稍候再试')
+}
+
+/** 一次已准入的用户回合:根与模型由 `sessionSend`/出队复检算好。 */
+export type AgentTurnAdmission = {
+  root: string
+  modelId: string
+  /** 本次准入的唯一释放器:`scheduler.release` → 消费 `drainQueue()`。 */
+  release: () => void
+}
+
+export type SendResult = {
+  queued: true
+  sessionId: string
+  started: boolean
+  /** 未启动但已经用 `agent/notice` 告知用户的原因;排队出队据此填 queue-fail。 */
+  reason?: string
 }
 
 export async function sendToAgent(
   ctx: SessionRuntimeContext,
   routeCtx: RouteContext,
   params: unknown,
-): Promise<{ queued: true; sessionId: string }> {
+  admission?: AgentTurnAdmission,
+): Promise<SendResult> {
   const explicitSessionId = objectString(params, 'sessionId')
   const sessionId = explicitSessionId ?? sessionIdFor(routeCtx.workspaceRoot.current)
   let skillName = objectString(params, 'skill')
@@ -131,10 +146,6 @@ export async function sendToAgent(
     throw new Error('session.send requires params.text')
   }
 
-  // 联网门禁:未开公网时仅允许本机与局域网模型端点。
-  const settings = await readHuaanworkSettings(routeCtx.profileDir)
-  const blocked = workNetworkGateError({ allowNetwork: settings.allow_network, baseUrl: settings.base_url })
-  if (blocked) throw new Error(blocked)
   noteCallerSession(sessionId)
   // 每一轮用户原句都记进宿主:同意门禁只认最近一轮,技能/@ 轮若旁路不记,
   // agent_commit 会读到更早那轮的「可以」(设计 §5)。创建门禁内的记录是同一句,
@@ -143,7 +154,11 @@ export async function sendToAgent(
 
   let afterIdle: (() => Promise<void>) | undefined
   let cleanedUp = false
+  const releaseOnce = admission?.release
   const cleanup = async () => {
+    // 每次 idle 回调都经过同一个释放器;releaseOnce 自身幂等,晚到的第二次回调
+    // 不会放掉接手的那一回合。
+    releaseOnce?.()
     if (cleanedUp) return
     cleanedUp = true
     await afterIdle?.()
@@ -151,6 +166,7 @@ export async function sendToAgent(
   // followup 受理后立即返回。@ HTTP 工具的 detach 只在 idle 之后跑，
   // 成功路径和 finally 共用这一次登记，避免回合中途解绑或解绑两次。
   let detachScheduled = false
+  let followupAccepted = false
   let acceptedAgent: { whenIdle?: () => Promise<void> } | undefined
   const scheduleDetachAfterIdle = () => {
     if (detachScheduled) return
@@ -186,20 +202,22 @@ export async function sendToAgent(
       noteCreationTurn(sessionId, text)
       if (isAgentCancelText(text) && (await packageHost.cancel(sessionId))) {
         detachCreationTools(ctx, sessionId)
-        routeCtx.emit({ event: 'agent/notice', text: '已取消创建，没有写入智能体。', sessionId })
-        return { queued: true, sessionId }
+        const notice = '已取消创建，没有写入智能体。'
+        routeCtx.emit({ event: 'agent/notice', text: notice, sessionId })
+        return { queued: true, sessionId, started: false, reason: notice }
       }
       if (creationIntent?.kind === 'update') {
         try {
           await packageHost.beginUpdate(sessionId, creationIntent.slug)
         } catch (error) {
           // 坏的 update 目标(不存在/已损坏)回一条会话提示,不把整次发送变成路由错误。
+          const notice = `无法进入更新模式：${error instanceof Error ? error.message : String(error)}`
           routeCtx.emit({
             event: 'agent/notice',
-            text: `无法进入更新模式：${error instanceof Error ? error.message : String(error)}`,
+            text: notice,
             sessionId,
           })
-          return { queued: true, sessionId }
+          return { queued: true, sessionId, started: false, reason: notice }
         }
       }
       const mode = creationIntent?.kind ?? 'continue'
@@ -250,11 +268,20 @@ export async function sendToAgent(
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
     })
+    followupAccepted = true
+    if (admission !== undefined) {
+      // 只在 followup 受理后公布绑定:创建取消/更新失败没有交给模型,不改旧绑定。
+      ctx.huaanworkSessionModels?.set(sessionId, admission.modelId)
+      if (ctx.huaanworkSessionRoots?.has(sessionId) !== true) {
+        ctx.huaanworkSessionRoots?.set(sessionId, admission.root)
+      }
+    }
     scheduleDetachAfterIdle()
   } finally {
+    if (!followupAccepted) releaseOnce?.()
     scheduleDetachAfterIdle()
   }
-  return { queued: true, sessionId }
+  return { queued: true, sessionId, started: true }
 }
 
 /** 按会话 id 精确定位 live agent(不做通道默认回落)。 */
@@ -267,7 +294,8 @@ function findAgentBySession(ctx: SessionRuntimeContext, sessionId: string): List
 /**
  * 确保指定会话有 live agent:
  * 已 live 直接复用;磁盘上有持久化日志则 resume(恢复完整上下文);否则以该 id 新建。
- * 跨工作区防护:持久化会话的 cwd 与当前工作区不一致时拒绝接管(AGENTS.md 不变式 6)。
+ * 根来自 `huaanworkSessionRoots`,未命中才按项目/任务/header 推导;持久化会话的
+ * `cwd` 必须落在该根内,否则拒绝接管(AGENTS.md 不变式 6)。两条路径都不读前台根。
  */
 async function ensureChannelAgent(
   ctx: SessionRuntimeContext,
@@ -279,16 +307,31 @@ async function ensureChannelAgent(
 
   const agentOptions = { provider: 'deepseek-official', model: 'local' }
   const persisted = await findSessionHeader(join(routeCtx.dshHome, 'sessions'), sessionId)
+  const roots = ctx.huaanworkSessionRoots
+  let root = roots?.get(sessionId)
+  if (root === undefined) {
+    const projects = await listProjects(routeCtx.profileDir)
+    const tasks = await listTasks(routeCtx.profileDir)
+    root = writableRootForSession({
+      profileDir: routeCtx.profileDir,
+      sessionId,
+      projects,
+      tasks,
+      headerCwd: typeof persisted?.cwd === 'string' ? persisted.cwd : undefined,
+    })
+  }
   if (persisted) {
     const cwd = typeof persisted.cwd === 'string' ? persisted.cwd : ''
-    if (cwd && resolve(cwd) !== resolve(routeCtx.workspaceRoot.current)) {
+    if (cwd && !isInside(root, cwd)) {
       throw new Error('该会话属于其他工作区，请先打开对应项目后再继续。')
     }
     if (typeof ctx.agents?.resume !== 'function') throw new Error('current dsh runtime cannot resume persisted sessions')
+    roots?.set(sessionId, root)
     await ctx.agents.resume({ resumeSessionId: sessionId, agentOptions })
   } else {
     if (typeof ctx.agents?.create !== 'function') throw new Error('current dsh runtime cannot create session agents')
-    await ctx.agents.create({ sessionId, meta: { cwd: routeCtx.workspaceRoot.current }, agentOptions })
+    roots?.set(sessionId, root)
+    await ctx.agents.create({ sessionId, meta: { cwd: root }, agentOptions })
   }
 
   const deadline = Date.now() + 15_000
@@ -298,6 +341,12 @@ async function ensureChannelAgent(
     await new Promise((done) => setTimeout(done, 25))
   }
   throw new Error(`agent for session ${sessionId} did not become ready`)
+}
+
+/** 「等于根或在根之内」,与 writable-root / sandbox-cwd 同规则。 */
+function isInside(root: string, candidate: string): boolean {
+  const rel = relative(resolve(root), resolve(candidate))
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
 function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): { accepted: true } {
@@ -411,18 +460,45 @@ async function openSession(sessionsRoot: string, params: unknown): Promise<unkno
   }
 }
 
+/** 递归收集已登记的后代会话;父会话删除时它们的模型/根键一并清掉。 */
+function descendantSessionIds(sessionId: string): string[] {
+  const collected: string[] = []
+  const seen = new Set<string>()
+  const pending = [...childrenOf(sessionId)]
+  while (pending.length > 0) {
+    const id = pending.shift()!
+    if (seen.has(id)) continue
+    seen.add(id)
+    collected.push(id)
+    pending.push(...childrenOf(id))
+  }
+  return collected
+}
+
 /**
  * 删除会话前必须先释放的运行态：等待中的卡片、绑定的 live agent、子会话登记、
  * 坏参数计数与上一份已确认的计划目标。`session.remove` 与 task/project 级联删除
  * 两条路径共用同一实现，避免只清文件、留下会继承到同名新会话的旧状态。
  */
 export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, sessionId: string): void {
+  // 后代名单在 forgetChildSessions 之前快照:登记表清空后就查不到了。
+  const descendants = descendantSessionIds(sessionId)
   releaseRouteInput(sessionId)
   if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })
+  // 等待项一并收掉:否则下一次 drain 会对已删除会话走 sendToAgent → ensureChannelAgent,
+  // 无 header 后重新 create,已删除会话被复活并执行排队文本(最终评审 Important 2)。
+  // 只动队列,不碰活动写者:删除会话不是对执行中回合的提前 release。
+  ctx?.huaanworkTurnScheduler?.cancelQueuedItemsForSession(sessionId)
   forgetChildSessions(sessionId)
   forgetChildSession(sessionId)
   clearInvalidRoute(sessionId)
   forgetConfirmedTarget(sessionId)
+  if (ctx) {
+    for (const id of [sessionId, ...descendants]) {
+      ctx.huaanworkSessionModels?.delete(id)
+      ctx.huaanworkSessionRoots?.delete(id)
+    }
+  }
 }
 
 async function removeSession(
@@ -579,12 +655,210 @@ export function setAgentPackageActiveTurns(registry: AgentPackageActiveTurnRegis
 
 // —— route handlers(旧 host.ts:978-1012 的 case 语义;错误消息逐字)——
 
+// —— 回合调度接线(Task 6)——
+
+/**
+ * 到期自动化的一次评估(Task 8)。index.ts 注入 automation-scheduler 导出的
+ * `evaluateDueAutomations`;sessions.ts 不反过来 import 调度器,避免循环依赖。
+ */
+let reevaluateDueAutomations: (() => void) | undefined
+
+/** Task 8 在 index.ts 注入单次评估函数;传 undefined 恢复空实现。 */
+export function setReevaluateDueAutomations(fn: (() => void) | undefined): void {
+  reevaluateDueAutomations = fn
+}
+
+/**
+ * 只消费一次用户队列,再评估一次到期自动化,不释放任何回合名额
+ * (F1/GUI 3.4:settings.set 调大并发上限后的主动排空——等待项无需活动回合
+ * release 即可出队;调度器按当前上限与根写者自检,名额已满时是 no-op)。
+ * 与 `releaseAndDrain` 共用同一套顺序,不复制两份。
+ */
+export function drainUserQueue(ctx: SessionRuntimeContext, routeCtx: RouteContext): void {
+  const scheduler = ctx.huaanworkTurnScheduler
+  if (scheduler === undefined) return
+  for (const item of scheduler.drainQueue()) void startQueuedItem(ctx, routeCtx, item)
+  reevaluateDueAutomations?.()
+}
+
+/**
+ * 释放一个回合名额,再消费一次用户队列,最后再评估一次到期自动化
+ * (Task 8:automations-host 复用同一个释放器,不复制这套顺序)。
+ */
+export function releaseAndDrain(ctx: SessionRuntimeContext, routeCtx: RouteContext, sessionId: string): void {
+  const scheduler = ctx.huaanworkTurnScheduler
+  if (scheduler === undefined) return
+  scheduler.release(sessionId)
+  drainUserQueue(ctx, routeCtx)
+}
+
+/** 每次准入一个释放器:晚到的第二次 idle 回调不会放掉接手的那一回合。 */
+function createReleaseOnce(
+  ctx: SessionRuntimeContext,
+  routeCtx: RouteContext,
+  sessionId: string,
+): () => void {
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    releaseAndDrain(ctx, routeCtx, sessionId)
+  }
+}
+
+/**
+ * 队列项出队后重新复检根目录、模型条目与网络门禁,通过才把同一组
+ * text/skill/at 交给 `sendToAgent`。失败项只发 `session/queue-fail` 并释放名额,
+ * 不重新入队,也不发 `session/queue-start`。
+ */
+async function startQueuedItem(
+  ctx: SessionRuntimeContext,
+  routeCtx: RouteContext,
+  item: QueueItem,
+): Promise<void> {
+  const releaseOnce = createReleaseOnce(ctx, routeCtx, item.sessionId)
+  const fail = (reason: string): void => {
+    routeCtx.emit({
+      event: 'session/queue-fail',
+      sessionId: item.sessionId,
+      tabId: item.tabId,
+      queueItemId: item.queueItemId,
+      reason,
+    })
+    releaseOnce()
+  }
+
+  try {
+    if (!existsSync(item.root) || !statSync(item.root).isDirectory()) {
+      fail('可写根目录不存在')
+      return
+    }
+    const settings = await readHuaanworkSettings(routeCtx.profileDir)
+    const resolved = resolveSessionModel({
+      sessionId: item.sessionId,
+      table: new Map([[item.sessionId, item.modelId]]),
+      models: settings.models,
+      active: { base_url: settings.base_url, model: settings.model, api_key: settings.api_key },
+      allowNetwork: settings.allow_network,
+    })
+    if (!resolved.ok) {
+      fail(resolved.reason)
+      return
+    }
+    const result = await sendToAgent(
+      ctx,
+      routeCtx,
+      {
+        text: item.text,
+        sessionId: item.sessionId,
+        ...(item.skill === undefined ? {} : { skill: item.skill }),
+        ...(item.at === undefined ? {} : { at: item.at }),
+      },
+      { root: item.root, modelId: item.modelId, release: releaseOnce },
+    )
+    if (!result.started) {
+      fail(result.reason ?? '排队回合未能启动')
+      return
+    }
+    // 出队且 followup 受理后才写回任务模型(排队期间不写)。
+    await rememberTaskModel(routeCtx, item.sessionId, item.modelId)
+    routeCtx.emit({
+      event: 'session/queue-start',
+      sessionId: item.sessionId,
+      tabId: item.tabId,
+      queueItemId: item.queueItemId,
+    })
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error))
+  }
+}
+
+/**
+ * 子任务记住本次准入的模型:只在回合真正交给模型之后调用(排队期间不写,避免选择先于事实落盘)。
+ * 已有 modelId 的任务不被改写;写盘失败只记日志——回合已经开始,不能把发送报告成失败。
+ */
+async function rememberTaskModel(routeCtx: RouteContext, sessionId: string, modelId: string): Promise<void> {
+  try {
+    const task = (await listTasks(routeCtx.profileDir)).find((item) => item.sessionId === sessionId)
+    if (task === undefined || task.modelId !== undefined) return
+    await setTaskModel(routeCtx.profileDir, { taskId: task.id, modelId })
+  } catch (error) {
+    routeCtx.logger(`session.send: 子任务模型写回失败(${sessionId}):${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * 用户发送:先载入项目/任务/header 推导可写根,按本次 `modelId` 过门禁与调度器
+ * 准入,然后交给 `sendToAgent`。只占名额不等待回合:已开始返回 `started: true`,
+ * 排队返回 `waiting: true`。
+ */
 export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): Promise<unknown> {
-  assertSessionSendable()
-  return sendToAgent(ctx, routeCtx, params)
+  const text = objectString(params, 'text') ?? ''
+  const skillName = objectString(params, 'skill')
+  const atName = objectAtName(params) ?? (skillName === undefined ? parseAtInvoke(text)?.name : undefined)
+  if (!text && !skillName && !atName) throw new Error('session.send requires params.text')
+  const tabId = objectString(params, 'tabId')
+  if (!tabId) throw new Error('session.send 缺少标签')
+
+  const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
+  const projects = await listProjects(routeCtx.profileDir)
+  const tasks = await listTasks(routeCtx.profileDir)
+  const header = await findSessionHeader(join(routeCtx.dshHome, 'sessions'), sessionId)
+  const root = writableRootForSession({
+    profileDir: routeCtx.profileDir,
+    sessionId,
+    projects,
+    tasks,
+    headerCwd: typeof header?.cwd === 'string' ? header.cwd : undefined,
+  })
+  if (!existsSync(root) || !statSync(root).isDirectory()) {
+    throw new Error('可写根目录不存在')
+  }
+  const settings = await readHuaanworkSettings(routeCtx.profileDir)
+  const modelId = objectString(params, 'modelId') ?? settings.active_model_id
+  const resolved = resolveSessionModel({
+    sessionId,
+    table: new Map([[sessionId, modelId]]),
+    models: settings.models,
+    active: { base_url: settings.base_url, model: settings.model, api_key: settings.api_key },
+    allowNetwork: settings.allow_network,
+  })
+  if (!resolved.ok) throw new Error(resolved.reason)
+  const scheduler = ctx.huaanworkTurnScheduler
+  if (scheduler === undefined) throw new Error('回合调度器未初始化')
+
+  const clientMessageId = objectAtClientMessageId(params)
+  const admitted = scheduler.admitUserTurn({
+    sessionId,
+    tabId,
+    text,
+    modelId,
+    root,
+    ...(skillName === undefined ? {} : { skill: skillName }),
+    ...(atName === undefined ? {} : { at: { name: atName, ...(clientMessageId === undefined ? {} : { clientMessageId }) } }),
+  })
+  if (admitted.kind === 'error') throw new Error(admitted.reason)
+  if (admitted.kind === 'queued') {
+    return { queued: true, waiting: true, started: false, sessionId, queueItemId: admitted.queueItemId }
+  }
+
+  const releaseOnce = createReleaseOnce(ctx, routeCtx, sessionId)
+  const result = await sendToAgent(ctx, routeCtx, params, {
+    root: admitted.root,
+    modelId,
+    release: releaseOnce,
+  })
+  if (result.started) await rememberTaskModel(routeCtx, sessionId, modelId)
+  return { queued: true, waiting: false, started: result.started, sessionId }
 }
 
 export function sessionCancel(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): unknown {
+  const queueItemId = objectString(params, 'queueItemId')
+  if (queueItemId !== undefined) {
+    // 只移除等待项:活动写者仍在执行,不能顺手取消它的 agent 或释放名额。
+    ctx.huaanworkTurnScheduler?.cancelQueuedItem(queueItemId)
+    return { accepted: true }
+  }
   assertSessionSendable()
   return cancelAgent(ctx, routeCtx, params)
 }
@@ -608,7 +882,11 @@ export async function sessionRemove(
 }
 
 export function sessionNew(routeCtx: RouteContext, params: unknown): { sessionId: string; cwd: string } {
-  const cwd = routeCtx.workspaceRoot.current
+  // 请求带现存绝对目录时为新会话用它;否则仍用前台根。两种情况都不移动工作区。
+  const requested = objectString(params, 'cwd')
+  const cwd = requested !== undefined && isAbsolute(requested) && existsSync(requested) && statSync(requested).isDirectory()
+    ? resolve(requested)
+    : routeCtx.workspaceRoot.current
   const sessionId = objectBool(params, 'fresh')
     ? freshSessionIdFor(cwd)
     : sessionIdFor(cwd)
@@ -620,7 +898,6 @@ export async function sessionResume(
   routeCtx: RouteContext,
   params: unknown,
 ): Promise<{ sessionId: string; resumed: true }> {
-  assertAutomationIdle()
   const sessionId = objectString(params, 'sessionId')
   if (!sessionId) throw new Error('session.resume requires params.sessionId')
   const persisted = await findSessionHeader(join(routeCtx.dshHome, 'sessions'), sessionId)

@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
+import { registerChildSession, resetChildSessionRegistry } from "../../src/huaanwork-host/child-sessions.ts";
 import { answererDecision, apply, forgetConfirmedTarget, settlePlanReview } from "../../src/huaanwork-guardrails/question-answerer.ts";
 
 test("a missing answerer never releases a write", () => {
@@ -225,9 +226,9 @@ test("an unattended plan review settles as keep-planning instead of waiting for 
     huaanworkWorkspaceRoot: { current: tmpdir() },
     huaanworkApprovals: approvals,
     huaanworkPlanReviews: reviews,
-    huaanworkUnattended: {
-      current: { runId: "run-1", automationId: "auto-1", allow: new Set<string>() },
-    },
+    huaanworkUnattended: new Map([
+      ["unattended-1", { runId: "run-1", automationId: "auto-1", allow: new Set<string>(), sessionId: "unattended-1" }],
+    ]),
     huaanworkEmit(event) {
       if (event.event === "approval/asked") events.push(event);
     },
@@ -257,15 +258,13 @@ test("an unattended scope only declines plan reviews from its own session", asyn
     huaanworkWorkspaceRoot: { current: tmpdir() },
     huaanworkApprovals: approvals,
     huaanworkPlanReviews: new Map(),
-    // 宿主在作用域里带上运行自己的会话(automations-host 的 runAgentTurn)。
-    huaanworkUnattended: {
-      current: {
-        runId: "run-2",
-        automationId: "auto-2",
-        allow: new Set<string>(),
-        sessionId: "automation-1",
-      },
-    },
+    // 宿主在无人值守运行开始时按本次运行的会话写入共享表(automations-host 的 runAgentTurn)。
+    huaanworkUnattended: new Map([
+      [
+        "automation-1",
+        { runId: "run-2", automationId: "auto-2", allow: new Set<string>(), sessionId: "automation-1" },
+      ],
+    ]),
     huaanworkEmit(event) {
       if (event.event === "approval/asked") events.push(event);
     },
@@ -294,6 +293,52 @@ test("an unattended scope only declines plan reviews from its own session", asyn
   assert.deepEqual(attended.answers, [{ id: "plan-review", selected: ["Approve"] }]);
   assert.equal(events.length, 1);
   assert.equal(events[0]?.autoContinue, true);
+});
+
+test("a subagent inherits the unattended scope of its registered parent session", async () => {
+  resetChildSessionRegistry();
+  registerChildSession("automation-parent", "automation-child");
+  try {
+    const events: Asked[] = [];
+    const approvals = new Map<string, (result: ApprovalResult) => void>();
+    let listener: Listener | undefined;
+    apply({
+      huaanworkProfileDir: modeDir("smart"),
+      huaanworkWorkspaceRoot: { current: tmpdir() },
+      huaanworkApprovals: approvals,
+      huaanworkPlanReviews: new Map(),
+      huaanworkUnattended: new Map([
+        [
+          "automation-parent",
+          {
+            runId: "run-child",
+            automationId: "auto-child",
+            allow: new Set<string>(),
+            sessionId: "automation-parent",
+          },
+        ],
+      ]),
+      huaanworkEmit(event) {
+        if (event.event === "approval/asked") events.push(event);
+      },
+      on(_name, fn) {
+        listener = fn as Listener;
+      },
+    });
+
+    // 子会话自己没有条目,但登记表指向自动化父会话:沿用父会话的无人值守范围。
+    const inherited = await listener!(
+      { questions: [reviewWith("c1", "# 汇总\n\n读 `docs/a.md`")], agent: { session: { id: "automation-child" } } },
+      async () => {
+        throw new Error("next");
+      },
+    );
+    assert.deepEqual(inherited.answers, [{ id: "plan-review", selected: ["Keep planning"] }]);
+    assert.equal(events.length, 0);
+    assert.equal(approvals.size, 0);
+  } finally {
+    resetChildSessionRegistry();
+  }
 });
 
 test("full mode confirms only when the target changed from the last confirmed plan", async () => {

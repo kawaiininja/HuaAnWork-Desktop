@@ -14,7 +14,7 @@ import {
   type RouteContext,
 } from '../../src/huaanwork-host/routes.ts'
 import { hasGit, listTree, type TreeNode } from '../../src/huaanwork-host/native.ts'
-import { getAgentsDirectory, sessionSendBlockers, setAgentsDirectory } from '../../src/huaanwork-host/sessions.ts'
+import { getAgentsDirectory, setAgentsDirectory } from '../../src/huaanwork-host/sessions.ts'
 import { createAgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 import { readPendingWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 import { WORKSPACE_SCAN_DEPTH } from '../../src/client-huaanwork/logic/outcomeCheck.ts'
@@ -34,14 +34,14 @@ const ALL_METHODS = [
   'status.get',
   'project.list', 'project.create', 'project.open', 'project.remove', 'project.rename',
   'automation.list', 'automation.create', 'automation.update', 'automation.remove', 'automation.stop', 'automation.deleteRun', 'automation.run', 'automation.runs', 'automation.pruneSessions', 'automation.templates',
-  'task.list', 'task.create', 'task.remove', 'task.bindSession', 'task.rename',
+  'task.list', 'task.create', 'task.remove', 'task.bindSession', 'task.rename', 'task.setModel',
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('71 个方法全部登记,无遗漏无重复', () => {
+  test('72 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(71)
+    expect(ROUTE_TABLE).toHaveLength(72)
   })
 
   test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
@@ -112,7 +112,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 71 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 72 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -162,6 +162,7 @@ describe('ROUTE_TABLE registry', () => {
       'task.remove',
       'task.bindSession',
       'task.rename',
+      'task.setModel',
       // Task 1 (M4): skill 写路径 ×6
       'skill.create',
       'skill.update',
@@ -193,7 +194,7 @@ describe('ROUTE_TABLE registry', () => {
       'subagent.list',
       'subagent.cancel',
     ])
-    expect(implemented).toHaveLength(71)
+    expect(implemented).toHaveLength(72)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -509,8 +510,9 @@ describe('HTTP dispatch & security checks', () => {
     expect(json).toEqual({ workspaceRoot: current })
   })
 
-  test('workspace 域非 RouteError 错误以 400 + 原文信封抵达客户端(automation-idle)', async () => {
-    sessionSendBlockers.agentAutomationQueued = 1
+  test('workspace.close 切回中立根并返回 200', async () => {
+    const previous = routeCtx.workspaceRoot.current
+    routeCtx.workspaceRoot.current = join(profileTempDir, 'repo-busy')
     try {
       const res = await fetch(`${baseUrl}/huaanwork/workspace/close`, {
         method: 'POST',
@@ -521,13 +523,11 @@ describe('HTTP dispatch & security checks', () => {
         },
         body: '{}',
       })
-      expect(res.status).toBe(400)
+      expect(res.status).toBe(200)
       const json = await res.json()
-      expect(json).toEqual({
-        error: { code: 'workspace-error', message: '后台自动化任务运行中，请稍候再试' },
-      })
+      expect(json).toEqual({ workspaceRoot: join(profileTempDir, 'workspace') })
     } finally {
-      sessionSendBlockers.agentAutomationQueued = 0
+      routeCtx.workspaceRoot.current = previous
     }
   })
 
@@ -606,6 +606,21 @@ describe('HTTP dispatch & security checks', () => {
     const getJson = await getRes.json()
     expect(getJson.theme).toBe('dark')
     expect(getJson.allow_network).toBe(true)
+  })
+
+  test('PUT /huaanwork/settings 写入并发上限在无运行时上下文时仍 200(主动排空无副作用)', async () => {
+    const res = await fetch(`${baseUrl}/huaanwork/settings`, {
+      method: 'PUT',
+      headers: {
+        Host: host,
+        Origin: baseUrl,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ max_concurrent_turns: 5 }),
+    })
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json.max_concurrent_turns).toBe(5)
   })
 
   test('auth 域全生命周期: 状态 -> 注册 -> 登出 -> 错密拒绝 -> 正确登录 -> 改密', async () => {
@@ -927,6 +942,36 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
       body: JSON.stringify({ taskId: task.id, name: '新任务名' }),
     }))
     expect((await renamed.json()).task.name).toBe('新任务名')
+
+    // setModel:落盘并回读;空 modelId 400;缺 taskId 400(Task 9)。
+    const modeled = await fetch(`${baseUrl}/huaanwork/task/setModel`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId: task.id, modelId: 'm2' }),
+    }))
+    expect(modeled.status).toBe(200)
+    expect(await modeled.json()).toMatchObject({ task: { id: task.id, modelId: 'm2' } })
+    const afterModel = await (await fetch(`${baseUrl}/huaanwork/task/list`, authed())).json()
+    expect(afterModel.tasks.find((t: { id: string }) => t.id === task.id).modelId).toBe('m2')
+
+    const blankModel = await fetch(`${baseUrl}/huaanwork/task/setModel`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId: task.id, modelId: '  ' }),
+    }))
+    expect(blankModel.status).toBe(400)
+    expect(await blankModel.json()).toEqual({
+      error: { code: 'store-error', message: '任务模型不存在' },
+    })
+    const noModel = await fetch(`${baseUrl}/huaanwork/task/setModel`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId: task.id }),
+    }))
+    expect(noModel.status).toBe(400)
+    expect(await noModel.json()).toEqual({
+      error: { code: 'store-error', message: 'task.setModel requires params.modelId' },
+    })
 
     const removed = await fetch(`${baseUrl}/huaanwork/task/remove`, authed({
       method: 'POST',

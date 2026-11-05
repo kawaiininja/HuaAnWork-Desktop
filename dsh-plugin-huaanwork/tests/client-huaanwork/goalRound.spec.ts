@@ -281,3 +281,18 @@ test("a background goal round never drives the tracked turn and never blocks sen
   ]);
   assert.deepEqual(kinds(background), ["none", "none", "none"]);
 });
+
+test("a queued send does not clear the running turn goal window", () => {
+  const opened = reduceGoalTurn(INITIAL_GOAL_TURN_STATE, { kind: "turn-started", sessionId: SESSION });
+  const paused = reduceGoalTurn(opened.state, { kind: "goal-state", phase: "paused", sessionId: SESSION });
+  assert.deepEqual(paused.state.suppressed, [SESSION]);
+  // 排队发送不开窗：同一会话直接结束，上一回合的暂停结论不被放掉。
+  const ended = reduceGoalTurn(paused.state, { kind: "session-end", sessionId: SESSION, ok: true });
+  assert.deepEqual(ended.action, { kind: "none" });
+  // 对照：结束前多插一次 turn-started 就等于提前开窗，暂停结论丢失、误写验收结论。
+  const reopened = reduceGoalTurn(
+    reduceGoalTurn(paused.state, { kind: "turn-started", sessionId: SESSION }).state,
+    { kind: "session-end", sessionId: SESSION, ok: true },
+  );
+  assert.deepEqual(reopened.action, { kind: "outcome" });
+});

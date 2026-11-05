@@ -23,6 +23,8 @@ import Settings, {
   PLUGIN_APPLY_FAIL,
   ModelChip,
   applySettingsModels,
+  modelDisplayName,
+  resolveSendModelId,
   type ModelEntry,
   type ModelSettingsPayload,
   type SettingsSection,
@@ -87,6 +89,7 @@ import {
   projectRootName,
   renameTask,
   removeTask,
+  setTaskModel,
   stopAutomation,
   type AutomationInfo,
   type AutomationSchedule,
@@ -139,6 +142,7 @@ import {
 import {
   applyToolEnd,
   applyTurnFinalToTabs,
+  currentTurnStart,
   historicalTurnFinalByUserId,
   projectToolPanels,
   runningToolName,
@@ -156,6 +160,18 @@ import {
   type ApprovalCardView,
 } from "./logic/chatTabs.ts";
 import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, sessionStopRequested, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
+import {
+  isUnstartedUserItem,
+  noteDiffForTab,
+  noteSendResult,
+  noteTurnEnded,
+  noteWaitingCancelled,
+  noteWaitingFailed,
+  noteWaitingStarted,
+  releaseWaitingItem,
+  sendOpensTurn,
+  type TabRunState,
+} from "./logic/concurrentTurn.ts";
 import {
   HOST_UNRESPONSIVE_TEXT,
   clearFailuresInTabs,
@@ -181,7 +197,6 @@ import {
 } from "./logic/outcomeCheck.ts";
 import {
   INITIAL_GOAL_TURN_STATE,
-  goalRoundDrivesTurn,
   goalRoundLabel,
   goalRoundStopped,
   reduceGoalTurn,
@@ -256,7 +271,17 @@ type AskCard = ApprovalCardView & {
 };
 
 type ChatItem =
-  | { id: number; kind: "user"; text: string }
+  | {
+      id: number;
+      kind: "user";
+      text: string;
+      /** 排队中、尚未开始执行的本次发送；由 `session.send` 的应答写回。 */
+      queueItemId?: string;
+      /** 本次 `session.send` 已抛错且未启动；只在本标签内标记。 */
+      sendRejected?: boolean;
+      /** 宿主应答 `started: false`，或排队项出队失败/被取消：这条消息没有开启回合。 */
+      notStarted?: boolean;
+    }
   | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse" }
   | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse" }
   | { id: number; kind: "tool"; card: ToolCard; panelToggled?: "expand" | "collapse" }
@@ -307,6 +332,64 @@ type ChatTab = {
 };
 
 type SessionMenu = { sessionId: string; x: number; y: number };
+
+/** 回合进度的最近一次活动种类：思考、正文、工具结果或静默。 */
+type PulseKind = "reasoning" | "text" | "tool" | "quiet";
+
+/**
+ * 一条标签自己的回合身份与停止票据。另一个标签开始回合不会改动这份记录，
+ * 因此 A 的停止请求在飞时 B 仍可独立发起停止。
+ */
+type TabTurn = {
+  /** 本标签正在跟踪的会话；没有回合或回合被取消后为 null。 */
+  sessionId: string | null;
+  /** 本标签的回合代际：只有本标签真正开始新回合才 +1。 */
+  epoch: number;
+  /** 本标签活动回合的用户消息 id；终态结算落到它。 */
+  activeUserId: number | null;
+  /** 取消请求尚未返回。这期间的 session/end 先搁下，返回后才决定算不算用户停止。 */
+  pending: StopTicket | null;
+  /** 用户已停止、闩锁仍扣着的会话。 */
+  stopSessionId: string | null;
+  latchOwner: number | null;
+  stopping: boolean;
+};
+
+const IDLE_TAB_TURN: TabTurn = {
+  sessionId: null,
+  epoch: 0,
+  activeUserId: null,
+  pending: null,
+  stopSessionId: null,
+  latchOwner: null,
+  stopping: false,
+};
+
+/** 没有回合记录的标签按空闲处理；`waitingIds` 只在事件闭包里由发送应答追加。 */
+const IDLE_TAB_RUN: TabRunState = { running: false, waitingIds: [] };
+
+/** `session.send` 的应答：排队只占位，`started: true` 才真正开始执行。 */
+type SessionSendResult = {
+  queued?: boolean;
+  waiting: boolean;
+  started: boolean;
+  sessionId?: string;
+  queueItemId?: string;
+};
+
+/**
+ * 一次 `session.send` 在应答回来之前的身份与早到事件。fetch 应答与 WebSocket 事件
+ * 不保证先后，所以发送前先记下标签与本地消息 id，把还不能结算的事件按到达顺序暂存。
+ */
+type PendingSend = {
+  tabId: string;
+  /** 本次插入的用户消息 id；等待项与回合身份都按它回写。 */
+  userId: number;
+  /** 发送前已知道的会话 id；没有它的发送无法匹配早到事件。 */
+  sessionId?: string;
+  /** 应答回来之前到达、尚不能结算的事件，按到达顺序。 */
+  buffered: RpcEvent[];
+};
 
 type View = "main" | "skills" | "automations" | "agents" | "knowledge" | "market";
 export type RightTab = "preview" | "progress" | "files" | "diff";
@@ -443,7 +526,8 @@ export default function App() {
   const [atCursor, setAtCursor] = useState(0);
   const [atIndex, setAtIndex] = useState(0);
   const [atClosed, setAtClosed] = useState(false);
-  const [diff, setDiff] = useState("");
+  /** 差异按标签保存：有会话 id 时只写它绑定的标签，当前标签读到的是自己的那份。 */
+  const [diffsByTab, setDiffsByTab] = useState<Readonly<Record<string, string>>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("model");
   const [theme, setTheme] = useState<ThemePref>("system");
@@ -466,7 +550,12 @@ export default function App() {
   /** 上一次持有系统防睡眠断言的尝试是否失败（或该 OS 不支持）；驱动设置页静态提示。 */
   const [keepAwakeUnavailable, setKeepAwakeUnavailable] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
-  const [turnActive, setTurnActive] = useState(false);
+  /**
+   * 每个标签的回合执行状态（`running` + 等待项）。界面读 state；事件闭包读镜像 ref，
+   * 由 `writeTabRun` 同步写两处，避免同一批事件里读到上一次渲染的快照。
+   */
+  const [tabRuns, setTabRuns] = useState<Readonly<Record<string, TabRunState>>>({});
+  const tabRunsRef = useRef<Record<string, TabRunState>>({});
   const [inputReplyPending, setInputReplyPending] = useState(false);
   const [hostPhase, setHostPhase] = useState<HostLivenessPhase>("ok");
   /**
@@ -474,12 +563,10 @@ export default function App() {
    * ref 里，close 时据此给中性脚注而不是把标签标成失败。
    */
   const hostStoppedByUserRef = useRef(false);
-  /** 当前未结束回合的最近一次 reasoning 增量、正文增量或工具结果。句子只由 turnStatus 算出。 */
-  const [turnPulse, setTurnPulse] = useState<{
-    tabId: string;
-    latest: "reasoning" | "text" | "tool" | "quiet";
-    at: number;
-  }>({ tabId: "", latest: "quiet", at: 0 });
+  /** 每个标签最近一次 reasoning 增量、正文增量或工具结果的时间。句子只由 turnStatus 算出。 */
+  const [turnPulseByTab, setTurnPulseByTab] = useState<
+    Readonly<Record<string, { latest: PulseKind; at: number }>>
+  >({});
   const [now, setNow] = useState(() => Date.now());
   /** 子代理 run 的权威客户端投影(设计 D6–D8);UI 展开/确认态留在下方独立 state。 */
   const [subagentRuns, setSubagentRuns] = useState<SubagentRunsState>(INITIAL_SUBAGENT_RUNS);
@@ -491,21 +578,37 @@ export default function App() {
   const [confirmingRunId, setConfirmingRunId] = useState<string | null>(null);
   const [cancelBusyByRunId, setCancelBusyByRunId] = useState<Record<string, boolean>>({});
   const [cancelErrorByRunId, setCancelErrorByRunId] = useState<Record<string, string>>({});
-  const turnTabRef = useRef<string | null>(null);
-  const turnSessionRef = useRef<string | null>(null);
+  /**
+   * 每条标签自己的回合身份与停止票据；进程里不再有唯一的回合槽。
+   * 界面只看 `tabRuns`（执行态）与 `turnPulseByTab`（进度），事件闭包读这份 ref。
+   */
+  const tabTurnsRef = useRef<Record<string, TabTurn>>({});
+  /**
+   * 在飞的发送：按标签各存一份（同一标签在飞时不会二次发送）。应答回来前到达的
+   * 早到事件暂存在这里，等身份写回后按原顺序重放。
+   */
+  const pendingSendsRef = useRef<Map<string, PendingSend>>(new Map());
+  /** 每个标签最近一条 `agent/notice` 的原文：queue-fail 与它同因时不再插第二条脚注。 */
+  const lastAgentNoticeRef = useRef<Record<string, string>>({});
+  /**
+   * 等待项与它挂的那条用户消息的对应关系。应答写回 `queueItemId` 与随后的重放
+   * 在同一批同步更新里，`chatTabsRef` 这时还看不到新状态，故用这张表做权威索引。
+   */
+  const queueOwnersRef = useRef<Map<string, { tabId: string; userId: number }>>(new Map());
   /** 目标相位 + 每回合结论闸门；状态机本身在 logic/goalRound.ts，便于脱离界面单测。 */
   const goalTurnRef = useRef<GoalTurnState>(INITIAL_GOAL_TURN_STATE);
-  const turnEpochRef = useRef(0);
+  /** 停止票据编号：跨标签唯一，用来区分先后两次取消。 */
   const stopSeqRef = useRef(0);
-  const userStopSessionRef = useRef<string | null>(null);
-  const latchOwnerRef = useRef<number | null>(null);
-  /** 取消请求尚未返回。这期间的 session/end 先搁下，返回后才决定算不算用户停止。 */
-  const stopPendingRef = useRef<StopTicket | null>(null);
   /** 停止对应的那条空闲结束。用户已经发出更新的一轮时，这条结束不能写进新消息。 */
   const staleIdleRef = useRef<StaleIdle[]>([]);
   const heldEndsRef = useRef<RpcEvent[]>([]);
   const applySidecarEventRef = useRef<(event: RpcEvent) => void>(() => {});
   const [activeTab, setActiveTab] = useState<string>("work-1");
+  /** 当前标签的稳定引用：挂载期注册的事件闭包用它判断改动是否落在可见标签上。 */
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
   useEffect(() => {
     const next = resolveActiveTab(activeTab, chatTabs);
     if (next !== activeTab) setActiveTab(next);
@@ -515,9 +618,10 @@ export default function App() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
-  const [modelLabel, setModelLabel] = useState("");
   const [savedModels, setSavedModels] = useState<ModelEntry[]>([]);
   const [activeModelId, setActiveModelId] = useState("");
+  /** 发送区按标签记录的模型选择；未选择的标签回落到子任务模型或全局当前模型。 */
+  const [modelPickByTab, setModelPickByTab] = useState<Readonly<Record<string, string>>>({});
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   /** Work 侧边栏当前选中的子任务 id（驱动高亮与主区域对话切换）。 */
@@ -577,6 +681,8 @@ export default function App() {
   const keepAwakeDriver = keepAwakeDriverRef.current;
   const activeProjectIdRef = useRef<string | null>(null);
   const workspaceRef = useRef<string | null>(null);
+  /** 中立根（未归属项目的「任务」会话目录）。宿主没有只读查询，经 workspace.close 取到后缓存。 */
+  const neutralRootRef = useRef<string | null>(null);
   const sessionsRef = useRef<SessionRow[]>([]);
   /** session.new 返回的目录。列表刷新晚于回合结束，核对先用这份。 */
   const sessionCwdRef = useRef(new Map<string, string>());
@@ -586,12 +692,15 @@ export default function App() {
     }
   }
   const nextId = useRef(1);
-  const stopping = useRef(false);
-  const sendingRef = useRef(false);
+  /** 在途发送按标签 id 记录：只挡同一标签的重入，不挡另一个标签。 */
+  const sendingRef = useRef<Set<string>>(new Set());
   const inputReplyPendingRef = useRef(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  /** 拥有当前 sidecar 流的对话标签（token/tool/approval 事件写入它）。 */
+  /**
+   * 最近一次发送或新建的标签：只用于「事件没有会话 id」时的回落标签。
+   * 回合身份按标签各存一份（`tabTurnsRef`），这里不再代表唯一的回合槽。
+   */
   const liveChatRef = useRef("work-1");
   const nextChatSeq = useRef(2);
   const newTaskRef = useRef<() => void>(() => undefined);
@@ -600,11 +709,233 @@ export default function App() {
   /** chatTabs 的稳定引用：事件回调（挂载期注册，deps 为 []）按 sessionId 查找目标标签用。 */
   const chatTabsRef = useRef<ChatTab[]>([]);
 
+  function tabRunOf(tabId: string): TabRunState {
+    return tabRunsRef.current[tabId] ?? IDLE_TAB_RUN;
+  }
+
+  /**
+   * 写一个标签的回合执行状态：ref 立即生效（同一批事件读到最新值），state 触发渲染。
+   * 状态没变时返回入参本身，不制造无谓的重渲染。
+   */
+  function writeTabRun(tabId: string, update: (prev: TabRunState) => TabRunState): void {
+    const prev = tabRunOf(tabId);
+    const next = update(prev);
+    if (next === prev) return;
+    const runs = { ...tabRunsRef.current, [tabId]: next };
+    tabRunsRef.current = runs;
+    setTabRuns(runs);
+  }
+
+  function tabTurnOf(tabId: string | null | undefined): TabTurn {
+    const own = tabId === null || tabId === undefined ? undefined : tabTurnsRef.current[tabId];
+    return own ?? IDLE_TAB_TURN;
+  }
+
+  function patchTabTurn(tabId: string, patch: Partial<TabTurn>): void {
+    tabTurnsRef.current = { ...tabTurnsRef.current, [tabId]: { ...tabTurnOf(tabId), ...patch } };
+  }
+
+  /** 持有该等待项的用户消息所在标签；找不到时返回 undefined。 */
+  function queueItemTab(queueItemId: string): string | undefined {
+    if (!queueItemId) return undefined;
+    const owner = queueOwnersRef.current.get(queueItemId);
+    if (owner !== undefined) return owner.tabId;
+    return chatTabsRef.current.find((tab) =>
+      tab.items.some((item) => item.kind === "user" && item.queueItemId === queueItemId),
+    )?.id;
+  }
+
+  /**
+   * 标签被删除、子任务或会话被清理时，一并丢掉它的在途发送与排队归属。
+   * 留下这些记录会让迟到的 queue-start 命中一个已不存在的标签，把执行态卡成 `running`。
+   */
+  function pruneTabBookkeeping(tabId: string): void {
+    pendingSendsRef.current.delete(tabId);
+    for (const [queueItemId, owner] of queueOwnersRef.current) {
+      if (owner.tabId === tabId) queueOwnersRef.current.delete(queueItemId);
+    }
+  }
+
+  function pendingSendOfTab(tabId: string): PendingSend | undefined {
+    return pendingSendsRef.current.get(tabId);
+  }
+
+  function pendingSendOfSession(sessionId: string | undefined): PendingSend | undefined {
+    if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
+    for (const pending of pendingSendsRef.current.values()) {
+      if (pending.sessionId === sessionId) return pending;
+    }
+    return undefined;
+  }
+
+  /**
+   * 回合真正开始的唯一初始化点：直接 `started: true` 的应答与 `session/queue-start`
+   * 都走这里。只推进本标签自己的 epoch，并记下这次的活动用户消息。
+   */
+  function openTurnForTab(tabId: string, sessionId: string | null, userId: number): void {
+    patchTabTurn(tabId, {
+      epoch: tabTurnOf(tabId).epoch + 1,
+      sessionId,
+      activeUserId: userId,
+      stopping: false,
+      stopSessionId: null,
+      latchOwner: null,
+    });
+    // 新用户回合重新开结算窗口：上一回合的「结论已写」不能挡住这一回合。
+    goalTurnRef.current = reduceGoalTurn(goalTurnRef.current, {
+      kind: "turn-started",
+      ...(sessionId === null ? {} : { sessionId }),
+    }).state;
+    const at = Date.now();
+    setTurnPulseByTab((prev) => ({ ...prev, [tabId]: { latest: "quiet", at } }));
+    setNow(at);
+  }
+
+  /**
+   * 撤掉该等待项的等待文案；返回它挂的那条用户消息 id。
+   * `outcome` 说明等待项的结局：`"started"` 是出队开始执行，消息成为活动回合；
+   * `"unstarted"` 是出队失败或被用户取消，消息留在列表里但仍算未启动，
+   * 不会去抢上一回合的终态与 outcome。
+   */
+  function clearQueueItem(
+    tabId: string,
+    queueItemId: string,
+    outcome: "started" | "unstarted" = "started",
+  ): number | undefined {
+    const owner = queueOwnersRef.current.get(queueItemId);
+    const scan = chatTabsRef.current
+      .find((item) => item.id === tabId)
+      ?.items.find((item) => item.kind === "user" && item.queueItemId === queueItemId);
+    const userId = owner?.userId ?? (scan?.kind === "user" ? scan.id : undefined);
+    queueOwnersRef.current.delete(queueItemId);
+    if (userId === undefined) return undefined;
+    setChatTabs((prev) => prev.map((candidate) => (
+      candidate.id === tabId
+        ? {
+            ...candidate,
+            items: candidate.items.map((item) => (
+              item.kind === "user" && item.queueItemId === queueItemId
+                ? (outcome === "started" ? startUserItem(item) : releaseWaitingItem(item, false))
+                : item
+            )),
+          }
+        : candidate
+    )));
+    return userId;
+  }
+
+  /**
+   * 排队项出队并真正开始：先定位它挂的用户消息，找不到就只收等待项、不碰该标签的执行态，
+   * 否则标签会带着 `running` 却没有可结算的会话（`session/end` 再也命不中，标签永久转圈）。
+   * 找得到时才走与直接应答相同的回合初始化。
+   * 该标签上别的发送的 pending 由它自己的应答清理，这里不按标签删除。
+   */
+  function beginQueuedTurn(tabId: string, sessionId: string, queueItemId: string): void {
+    const userId = clearQueueItem(tabId, queueItemId);
+    writeTabRun(tabId, (state) => queuedTurnRunState(state, queueItemId, userId !== undefined));
+    if (userId === undefined) return;
+    openTurnForTab(tabId, sessionId, userId);
+  }
+
+  /**
+   * 排队项出队后复检失败：只去掉这条等待，不把执行中的回合改成结束。
+   * 失败的那条用户消息留在列表里，但标成未启动——它没有成为回合，不能劫持上一回合的终态。
+   * 宿主已经用 `agent/notice` 说过同一个原因时，只保留原来那条。
+   */
+  function failQueuedTurn(tabId: string, queueItemId: string, reason: string): void {
+    writeTabRun(tabId, (state) => noteWaitingFailed(state, queueItemId));
+    clearQueueItem(tabId, queueItemId, "unstarted");
+    if (lastAgentNoticeRef.current[tabId] === reason) {
+      delete lastAgentNoticeRef.current[tabId];
+      return;
+    }
+    noteTab(tabId, reason);
+  }
+
+  /**
+   * 取出本次发送暂存的早到事件并清掉它的 pending：直接开始的回合按原顺序全部重放；
+   * 排队应答只重放 `queueItemId` 与它一致的那几条；没启动的应答只丢弃本次缓冲。
+   * 清理只针对本次记录，别的发送的 pending 不受影响。
+   */
+  function takePendingBuffer(pending: PendingSend, sent: SessionSendResult): RpcEvent[] {
+    const buffered = pending.buffered;
+    pending.buffered = [];
+    if (pendingSendsRef.current.get(pending.tabId) === pending) pendingSendsRef.current.delete(pending.tabId);
+    if (sendOpensTurn(sent)) return buffered;
+    if (sent.waiting && sent.queueItemId !== undefined) {
+      const queueItemId = sent.queueItemId;
+      return buffered.filter((event) => (
+        (event.event === "session/queue-start" || event.event === "session/queue-fail")
+        && event.queueItemId === queueItemId
+      ));
+    }
+    return [];
+  }
+
+  /** 本次发送失败：只丢弃它自己的 pending 与缓冲，别的发送的事件不进这份失败缓冲。 */
+  function dropPending(pending: PendingSend): void {
+    pending.buffered = [];
+    if (pendingSendsRef.current.get(pending.tabId) === pending) pendingSendsRef.current.delete(pending.tabId);
+  }
+
+  /** 会话绑定的标签；事件归属按它计算，不存在时返回 undefined。 */
+  function tabIdForSession(sessionId: string | undefined): string | undefined {
+    if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
+    return chatTabsRef.current.find((tab) => tab.sessionId === sessionId)?.id;
+  }
+
+  /**
+   * 拥有该会话回合的标签：先按绑定找，再按标签自己的回合记录找
+   * （刚铸造的会话在 chatTabsRef 提交前还看不到绑定）。
+   */
+  function turnTabForSession(sessionId: string | undefined): string | undefined {
+    const bound = tabIdForSession(sessionId);
+    if (bound !== undefined) return bound;
+    if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
+    for (const [tabId, turn] of Object.entries(tabTurnsRef.current)) {
+      if (turn.sessionId === sessionId) return tabId;
+    }
+    return undefined;
+  }
+
+  /** 该会话的停止票据/闩锁归属：取消在飞的标签，或已扣闩锁的标签。 */
+  function stopOwnerForSession(sessionId: string | undefined): { tabId: string; turn: TabTurn } | undefined {
+    if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
+    for (const [tabId, turn] of Object.entries(tabTurnsRef.current)) {
+      if (turn.pending?.sessionId === sessionId || turn.stopSessionId === sessionId) return { tabId, turn };
+    }
+    return undefined;
+  }
+
+  /** 该会话上用户已发起停止：取消在飞，或取消成功、闩锁仍扣着。 */
+  function stopRequestedForSession(sessionId: string | undefined): boolean {
+    const owner = stopOwnerForSession(sessionId);
+    return owner !== undefined && sessionStopRequested(owner.turn.pending, owner.turn.stopSessionId, sessionId);
+  }
+
+  /** 事件把某个标签置为执行中/已结束：按会话找标签，找不到就不动任何标签。 */
+  function setTurnRunningForSession(active: boolean, sessionId?: string): void {
+    const tabId = turnTabForSession(sessionId);
+    if (tabId === undefined) return;
+    writeTabRun(tabId, (state) => {
+      if (!active) return noteTurnEnded(state);
+      return state.running ? state : { running: true, waitingIds: state.waitingIds };
+    });
+  }
+
   useEffect(() => {
     authPhaseRef.current = authPhase;
   }, [authPhase]);
 
   const activeChat = chatTabs.find((tab) => tab.id === activeTab) ?? chatTabs[0];
+  /** 当前标签发送时使用的模型：本标签选择 > 子任务记住的模型 > 全局当前模型。 */
+  const activeTabTask = activeChat.taskId
+    ? projectTasks.find((task) => task.id === activeChat.taskId)
+    : undefined;
+  const sendModelId = resolveSendModelId(modelPickByTab, activeChat.id, activeTabTask?.modelId, activeModelId);
+  const sendModelLabel = modelDisplayName(savedModels.find((entry) => entry.id === sendModelId), "");
+  /** 当前标签自己的 diff：另一个标签的 diff 留在它自己那份里，不会被这里读到。 */
+  const diff = diffsByTab[activeChat.id] ?? "";
   /** 任务级「运行中」：任一在途运行属于该任务即算（任务行停止按钮与各类禁用的判据）。 */
   const runningAutomationIds = useMemo(
     () => new Set([...runningRuns.values()].map((entry) => entry.automationId)),
@@ -617,6 +948,12 @@ export default function App() {
     () => [...subagentRuns.runs.values()].some(isSubagentRunActive),
     [subagentRuns],
   );
+  /** 占名额的执行中标签数：排队的标签不算，另一个标签开始回合也不改这一份。 */
+  const runningTurnCount = useMemo(
+    () => Object.values(tabRuns).filter((state) => state.running).length,
+    [tabRuns],
+  );
+  const anyTabRunning = runningTurnCount > 0;
   const items = activeChat.items;
   const pendingInput = latestOpenInput(items);
   const contentView = useMemo(() => contentItems(items), [items]);
@@ -668,15 +1005,18 @@ export default function App() {
       (run) => run.parentSessionId === activeChat.sessionId && isSubagentRunActive(run),
     );
   const unconfirmedTools = toolsUnconfirmed(items, sidecarDead);
-  const showTurnLine = hasActiveChild || unconfirmedTools || (turnActive && turnPulse.tabId === activeChat.id);
+  /** 当前标签自己的执行态与进度；另一个标签的回合不影响这一标签的句子。 */
+  const activeTabRunning = tabRuns[activeChat.id]?.running === true;
+  const activePulse = turnPulseByTab[activeChat.id];
+  const showTurnLine = hasActiveChild || unconfirmedTools || activeTabRunning;
   const turnLine = parentTurnLine({
     hasActiveChild,
     toolsUnconfirmed: unconfirmedTools,
     current: turnStatus({
-      latest: turnPulse.latest,
+      latest: activePulse?.latest ?? "quiet",
       runningTool: runningToolName(items, sidecarDead),
       toolsUnconfirmed: unconfirmedTools,
-      quietMs: Math.max(0, now - turnPulse.at),
+      quietMs: Math.max(0, now - (activePulse?.at ?? now)),
     }),
   });
   const slashToken = slashTokenAt(draft, slashCursor);
@@ -762,10 +1102,6 @@ export default function App() {
    * 有会话的子任务直接恢复为可聊标签（无「继续此会话」跳转）；预铸必须排在对齐完成之后（复审 N1）。
    */
   async function selectSubtask(task: TaskInfo): Promise<void> {
-    if (automationActiveRef.current) {
-      noteActive("后台任务运行中，请稍候再切换任务。");
-      return;
-    }
     if (selectBusy) return;
     setSelectBusy(true);
     setView("main");
@@ -789,13 +1125,17 @@ export default function App() {
       const id = `work-${nextChatSeq.current}`;
       nextChatSeq.current += 1;
       if (!task.sessionId) {
-        // 空子任务：建标签后预铸独立会话（此时工作区已对齐，session.new 按新根铸造）。
+        // 空子任务：建标签后预铸独立会话。项目根显式作为 cwd，宿主不改前台工作区。
+        const projectRoot = projects.find((item) => item.id === task.projectId)?.root;
         setChatTabs((prev) => [
           ...prev,
           { id, label: task.name, items: [], sessionFailed: false, projectId: task.projectId, pendingPick: false, taskId: task.id },
         ]);
         setActiveTab(id);
-        void rpcCall<{ sessionId?: string; cwd?: string }>("session.new", { fresh: true })
+        void rpcCall<{ sessionId?: string; cwd?: string }>("session.new", {
+          fresh: true,
+          ...(projectRoot ? { cwd: projectRoot } : {}),
+        })
           .then((minted) => {
             rememberMinted(minted);
             if (typeof minted.sessionId === "string" && minted.sessionId) {
@@ -896,27 +1236,30 @@ export default function App() {
     setSelectedTaskId((current) => (current === task.id ? null : current));
     const seedId = `work-${nextChatSeq.current}`;
     nextChatSeq.current += 1;
-    const trackedSession = turnSessionRef.current;
-    if (task.sessionId && trackedSession === task.sessionId && canStartStop(stopPendingRef.current)) {
+    // 只处理绑定该会话的标签：其它标签正在执行的回合不受删除影响。
+    const removedTabId = tabIdForSession(task.sessionId);
+    const removedTurn = tabTurnOf(removedTabId);
+    if (removedTabId !== undefined && task.sessionId && removedTurn.sessionId === task.sessionId && canStartStop(removedTurn.pending)) {
       const sessionId = task.sessionId;
-      const ticket: StopTicket = { id: stopSeqRef.current + 1, sessionId, epoch: turnEpochRef.current };
+      const ticket: StopTicket = { id: stopSeqRef.current + 1, sessionId, epoch: removedTurn.epoch };
       stopSeqRef.current = ticket.id;
-      turnTabRef.current = null;
-      turnSessionRef.current = null;
-      setTurnActive(false);
-      stopPendingRef.current = ticket;
+      patchTabTurn(removedTabId, { sessionId: null, stopping: true, pending: ticket });
+      writeTabRun(removedTabId, noteTurnEnded);
       void rpcCall("session.cancel", { sessionId }).then(() => {
-        settleStop(ticket, true);
+        settleStop(removedTabId, ticket, true);
       }).catch(() => {
-        settleStop(ticket, false);
+        settleStop(removedTabId, ticket, false);
       });
-    } else if (task.sessionId && trackedSession === task.sessionId) {
-      turnTabRef.current = null;
-      turnSessionRef.current = null;
-      setTurnActive(false);
+    } else if (removedTabId !== undefined && task.sessionId && removedTurn.sessionId === task.sessionId) {
+      patchTabTurn(removedTabId, { sessionId: null });
+      writeTabRun(removedTabId, noteTurnEnded);
     }
     const matchesRemoved = (tab: { taskId?: string; sessionId?: string }) =>
       Boolean((tab.taskId && tab.taskId === task.id) || (task.sessionId && tab.sessionId === task.sessionId));
+    // 被删标签的在途发送与排队归属随标签一起清掉：迟到的队列事件不能再把它们拉回执行中。
+    for (const tab of chatTabsRef.current) {
+      if (matchesRemoved(tab)) pruneTabBookkeeping(tab.id);
+    }
     const seed = { id: seedId, label: "对话", items: [], sessionFailed: false, projectId: null, pendingPick: false };
     setChatTabs((prev) => {
       const filtered = prev.filter((tab) => !matchesRemoved(tab));
@@ -944,6 +1287,7 @@ export default function App() {
   async function ensureNeutralWorkspace(): Promise<void> {
     const closed = await rpcCall<{ workspaceRoot?: string }>("workspace.close");
     const root = typeof closed.workspaceRoot === "string" ? closed.workspaceRoot : "";
+    if (root) neutralRootRef.current = root;
     if (!root || workspaceRef.current === root) return;
     setWorkspace(root);
     workspaceRef.current = root;
@@ -951,6 +1295,30 @@ export default function App() {
     activeProjectIdRef.current = null;
     setGitWarning("");
     await rebindTabSession("work-1");
+  }
+
+  /** 中立根：`workspace.close` 的应答恒为中立根；只取一次并缓存，避免每次新建会话都切前台根。 */
+  async function neutralWorkspaceRoot(): Promise<string | undefined> {
+    if (neutralRootRef.current) return neutralRootRef.current;
+    try {
+      const closed = await rpcCall<{ workspaceRoot?: string }>("workspace.close");
+      const root = typeof closed.workspaceRoot === "string" ? closed.workspaceRoot : "";
+      if (!root) return undefined;
+      neutralRootRef.current = root;
+      return root;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 这条标签新建会话时使用的 cwd：已绑定项目用项目根，未绑定项目用中立根。
+   * 宿主把该目录只用于这条新会话，不改 `workspaceRoot.current`；前台工作区与界面状态都不动。
+   */
+  async function sessionCwdForTab(tab: ChatTab | undefined): Promise<string | undefined> {
+    const project = tab?.projectId ? projects.find((item) => item.id === tab.projectId) : undefined;
+    if (project) return project.root;
+    return neutralWorkspaceRoot();
   }
 
   /** 启动后为默认对话标签绑定稳定会话（跨重启延续上下文）。 */
@@ -1055,7 +1423,11 @@ export default function App() {
     if (!tabId) return;
     // 相位在事件处理时同步取样，避免 React 延后执行 updater 时读到已跳变的相位。
     const phase = goalTurnRef.current.phases[sessionId ?? ""];
-    setChatTabs((prev) => applyTurnFinalToTabs(prev, tabId, event, phase));
+    // 终态落到该标签活动回合的用户消息；没记录过活动消息时回落到最后一条已启动的用户消息，
+    // 排队中或本次已抛错的消息都不算活动回合。
+    const activeUserId = tabTurnOf(tabId).activeUserId
+      ?? latestUserItemId(chatTabsRef.current.find((tab) => tab.id === tabId)?.items ?? []);
+    setChatTabs((prev) => applyTurnFinalToTabs(prev, tabId, event, phase, activeUserId));
   }
 
   useEffect(() => {
@@ -1073,7 +1445,12 @@ export default function App() {
     };
     /** 带会话 id 的事件只进绑定标签。删掉的会话不再回落到当前对话。 */
     const targetTabFor = (sessionId?: string): string | undefined =>
-      eventTargetTab(sessionId, chatTabsRef.current, liveChatRef.current, turnSessionRef.current);
+      eventTargetTab(
+        sessionId,
+        chatTabsRef.current,
+        liveChatRef.current,
+        tabTurnOf(liveChatRef.current).sessionId,
+      );
     const setChannelItems = (updater: (prev: ChatItem[]) => ChatItem[], sessionId?: string) => {
       const target = targetTabFor(sessionId);
       if (!target) return;
@@ -1099,8 +1476,10 @@ export default function App() {
       const turn = pending ?? await readTurnItems(sessionId);
       if (!turn) return undefined;
       const { tabId, items } = turn;
-      const turnUserId = latestUserItemId(items);
-      const checks = turnChecks(contentItems(items));
+      // 以该标签记录的活动消息为准：应答未回窗口里刚插入的那条还不能接走本回合的核对。
+      const turnUserId = turnUserIdFor(tabTurnOf(tabId), items);
+      // 核对只读本回合那条用户消息：排在后面的排队消息还没开始，不能改文件/命令要求。
+      const checks = turnChecks(contentItems(items), turnUserId);
       const listedCwd = lookupSessionCwd(sessionId, sessionsRef.current, sessionCwdRef.current);
       const root = outcomeWorkspace(workspaceRef.current, listedCwd);
       let tree: TreeNode[] = [];
@@ -1212,12 +1591,45 @@ export default function App() {
         reconcileEpochRef.current += 1;
         reconcileBoundSubagentRuns();
       }
-      if (event.event === "session/end" && isStopPending(stopPendingRef.current, event.sessionId)) {
-        heldEndsRef.current.push(event);
-        return;
-      }
+      /**
+       * 本次发送的应答还没回来：把尚不能结算的早到事件按到达顺序暂存。
+       * 上一回合仍在执行时它的事件照常即时处理——不能为了新发送而缓冲。
+       */
+      const holdEarlyEvent = (incoming: RpcEvent): boolean => {
+        if (incoming.event === "session/queue-start" || incoming.event === "session/queue-fail") {
+          // 已能匹配某条等待消息的队列事件照常即时处理。
+          if (queueItemTab(incoming.queueItemId) !== undefined) return false;
+          const pending = pendingSendOfTab(incoming.tabId);
+          if (pending === undefined) return false;
+          pending.buffered.push(incoming);
+          return true;
+        }
+        const isGoalEvent = incoming.event === "session/end" || incoming.event === "goal/state"
+          || incoming.event === "goal/round" || incoming.event === "goal/round-limit";
+        if (!isGoalEvent) return false;
+        const sessionId = sessionIdOfEvent(incoming);
+        const pending = pendingSendOfSession(sessionId);
+        if (pending === undefined) return false;
+        if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;
+        // 跨标签同会话:任一标签正把这个会话作为执行中的回合跟踪时,这条事件属于
+        // 那个回合,必须照常即时结算——进本发送的 pending 缓冲会被 waiting 应答的
+        // 按 queueItemId 过滤丢弃,那个标签将永久 running(最终评审 Important 1)。
+        const turnTab = turnTabForSession(sessionId);
+        if (turnTab !== undefined && tabRunOf(turnTab).running && tabTurnOf(turnTab).sessionId === sessionId) return false;
+        pending.buffered.push(incoming);
+        return true;
+      };
+      if (holdEarlyEvent(event)) return;
       if (event.event === "session/end") {
-        const consumed = consumeStaleIdle(staleIdleRef.current, event, turnEpochRef.current);
+        // 停止票据与代际都按事件所属标签读取：另一个标签的当前 epoch 不能判定这一条结束。
+        const eventTabId = tabIdForSession(event.sessionId);
+        const eventEpoch = tabTurnOf(eventTabId).epoch;
+        const owner = stopOwnerForSession(event.sessionId);
+        if (owner !== undefined && isStopPending(owner.turn.pending, event.sessionId)) {
+          heldEndsRef.current.push(event);
+          return;
+        }
+        const consumed = consumeStaleIdle(staleIdleRef.current, event, eventEpoch);
         staleIdleRef.current = consumed.stale;
         if (consumed.drop) return;
       }
@@ -1330,7 +1742,10 @@ export default function App() {
       // 放在自动化会话泄漏门之后，自动化会话的 agent 事件不会写进可见对话标签。
       if (event.event === "agent/notice") {
         const target = targetTabFor(eventSessionId);
-        if (target) noteTab(target, event.text);
+        if (target) {
+          lastAgentNoticeRef.current[target] = event.text;
+          noteTab(target, event.text);
+        }
         return;
       }
       if (event.event === "agent/confirm") {
@@ -1357,46 +1772,68 @@ export default function App() {
           });
         return;
       }
-          const endsTrackedTurn = event.event === "session/end"
-            && typeof eventSessionId === "string"
-            && eventSessionId.length > 0
-            && turnTabRef.current !== null
-            && targetTabFor(eventSessionId) === turnTabRef.current;
+      // 排队项出队/复检失败：早到的那条已在上方按 pending 暂存，这里只处理能归属的。
+      if (event.event === "session/queue-start") {
+        beginQueuedTurn(queueItemTab(event.queueItemId) ?? event.tabId, event.sessionId, event.queueItemId);
+        return;
+      }
+      if (event.event === "session/queue-fail") {
+        failQueuedTurn(queueItemTab(event.queueItemId) ?? event.tabId, event.queueItemId, event.reason);
+        return;
+      }
+      // 差异按标签：只写该会话绑定的标签；不是可见标签时不改它、也不把右栏切到 diff。
+      if (event.event === "diff") {
+        const diffTab = tabIdForSession(event.sessionId);
+        if (diffTab !== undefined) {
+          setDiffsByTab((prev) => noteDiffForTab(prev, diffTab, event.text));
+          if (activeTabRef.current === diffTab) setRightTab("diff");
+        }
+        return;
+      }
+          // 回合身份、停止票据与代际都按事件所属标签读取：另一个标签的回合不参与判定。
+          const endTab = event.event === "session/end" ? targetTabFor(eventSessionId) ?? turnTabForSession(eventSessionId) : undefined;
+          const endTurn = tabTurnOf(endTab);
           const userStopped = event.event === "session/end"
             && typeof eventSessionId === "string"
             && eventSessionId.length > 0
-            && eventSessionId === userStopSessionRef.current;
-          // 官方续轮只属于当前跟踪的用户回合时才恢复全局回合态；后台目标不能卡住发送。
-          const goalRoundDrives = event.event === "goal/round"
-            && goalRoundDrivesTurn(eventSessionId, turnSessionRef.current);
-          handleEvent(event, allocId, setReady, setChannelItems, setDiff, setTurnActive, setChannelSessionFailed, async () => {
+            && stopOwnerForSession(eventSessionId)?.turn.stopSessionId === eventSessionId;
+          // 目标仍 active 时这条结束是官方续轮的中间结束：不清执行态、不撤停止按钮。
+          const goalIntermediate = event.event === "session/end"
+            && endTab !== undefined
+            && event.ok
+            && event.cancelled !== true
+            && !userStopped
+            && goalTurnRef.current.phases[eventSessionId ?? ""] === "active";
+          const endsTrackedTurn = event.event === "session/end"
+            && endTab !== undefined
+            && !goalIntermediate
+            && endTurn.sessionId === eventSessionId;
+          // 官方续轮只恢复该标签自己的执行态；后台目标不能卡住其它标签。
+          const goalRoundTab = event.event === "goal/round" ? turnTabForSession(eventSessionId) : undefined;
+          const goalRoundDrives = goalRoundTab !== undefined && tabTurnOf(goalRoundTab).sessionId === eventSessionId;
+          handleEvent(event, allocId, setReady, setChannelItems, setTurnRunningForSession, setChannelSessionFailed, async () => {
             await refreshSessions();
           }, sawReady, endsTrackedTurn, userStopped, goalRoundDrives);
-          if (event.event === "session/end" && endsTrackedTurn) {
-            turnTabRef.current = null;
-            if (event.cancelled || !event.ok || userStopped) turnSessionRef.current = null;
+          if (event.event === "session/end" && endsTrackedTurn && endTab !== undefined) {
+            // 取消/失败的终局摘掉会话跟踪；正常结束留着它，目标续轮还要按会话判断。
+            if (event.cancelled || !event.ok || userStopped) patchTabTurn(endTab, { sessionId: null });
           }
           if (userStopped && !event.cancelled) {
-            userStopSessionRef.current = null;
-            if (turnSessionRef.current === eventSessionId) turnSessionRef.current = null;
-            stopping.current = false;
-          }
-          if (goalRoundDrives) {
-            const goalTab = chatTabsRef.current.find((tab) => tab.sessionId === eventSessionId)?.id;
-            if (goalTab) turnTabRef.current = goalTab;
+            // 停止闩锁只释放这一条会话自己的那份，别的标签的闩锁不动。
+            const owner = stopOwnerForSession(eventSessionId);
+            if (owner !== undefined) patchTabTurn(owner.tabId, { stopSessionId: null, stopping: false });
           }
           const kind = activityKind(event);
-          const turnTab = turnTabRef.current;
-          if (kind && turnTab && targetTabFor(eventSessionId) === turnTab) {
+          const pulseTab = tabIdForSession(eventSessionId);
+          if (kind && pulseTab !== undefined && tabTurnOf(pulseTab).sessionId === eventSessionId) {
             const at = Date.now();
-            setTurnPulse({ tabId: turnTab, latest: kind, at });
+            setTurnPulseByTab((prev) => ({ ...prev, [pulseTab]: { latest: kind, at } }));
             setNow(at);
           }
           if (event.event === "goal/state") {
             // 用户停止时官方驱动先在空闲处理里暂停目标，随后才是取消结束；
             // 只看现存停止信号（取消在飞 / 已扣闩锁），这条终态只结算、不写结论。
-            const stopped = "phase" in event
-              && sessionStopRequested(stopPendingRef.current, userStopSessionRef.current, event.sessionId);
+            const stopped = "phase" in event && stopRequestedForSession(event.sessionId);
             const action = "cleared" in event
               ? noteGoalEvent({ kind: "goal-cleared", sessionId: event.sessionId })
               : noteGoalEvent({
@@ -1426,10 +1863,6 @@ export default function App() {
           if (event.event === "sidecar/status" && event.ready && authPhaseRef.current !== "logged-in") {
             pullAuthStatusRef.current();
           }
-          if (event.event === "diff") {
-            setDiff(event.text);
-            setRightTab("diff");
-          }
     };
     applySidecarEventRef.current = applyEvent;
     void (async () => {
@@ -1438,7 +1871,9 @@ export default function App() {
         await onSidecarExit((payload) => {
           if (cancelled) return;
           setSidecarDead(true);
-          setTurnActive(false);
+          // 执行进程没了：所有标签的回合都不可能再回报结束，执行态一并清空。
+          tabRunsRef.current = {};
+          setTabRuns({});
           // WS 断开:run 卡保留最后已知归属并冻结计时,不把断连当作 run 失败;
           // 迟到的对账应答由 epoch 丢弃,冻结只由下一次 snapshot 对账解除(设计 D7)。
           if (!payload.ready) {
@@ -1475,7 +1910,6 @@ export default function App() {
     const next = applySettingsModels(settings);
     setSavedModels(next.models);
     setActiveModelId(next.activeId);
-    setModelLabel(next.label);
     setWorkAllowNetwork(settings.allow_network === true);
     setKeepAwake(settings.keep_awake !== false);
     setGuardMode(parseGuardMode(settings.guard_mode));
@@ -1485,15 +1919,24 @@ export default function App() {
     try {
       hydrateModels(await rpcCall<ModelSettingsPayload>("settings.get"));
     } catch {
-      setModelLabel("");
+      // 设置页关闭时刷新失败：保留现有模型列表，等下次设置读写再同步。
     }
   }, [hydrateModels]);
 
-  async function selectModel(id: string) {
+  /**
+   * 发送区选择模型：只改这个标签（不切全局当前模型）。标签已绑定子任务时用 Task 9 的
+   * `task.setModel` 写回任务；还没有任务的标签先记在本地，发送时随 `session.send` 交给宿主。
+   */
+  async function selectTabModel(id: string) {
+    const tab = chatTabs.find((item) => item.id === activeTab);
+    if (!tab) return;
+    setModelPickByTab((prev) => ({ ...prev, [tab.id]: id }));
+    if (!tab.taskId) return;
     try {
-      hydrateModels(await rpcCall<ModelSettingsPayload>("settings.set", { active_model_id: id }));
-    } catch {
-      await refreshModelLabel();
+      const saved = await setTaskModel({ taskId: tab.taskId, modelId: id });
+      setProjectTasks((prev) => prev.map((task) => (task.id === saved.task.id ? saved.task : task)));
+    } catch (error) {
+      noteTab(tab.id, `模型选择未保存：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -1627,11 +2070,11 @@ export default function App() {
   }, [activeTab]);
 
   useEffect(() => {
-    // 分享同一秒表:父回合或任一子代理 run 活跃时都走;每张运行卡不得自建 interval。
-    if (!turnActive && !hasAnyActiveSubagentRun) return;
+    // 分享同一秒表:任一标签的回合或任一子代理 run 活跃时都走;每张运行卡不得自建 interval。
+    if (!anyTabRunning && !hasAnyActiveSubagentRun) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [turnActive, hasAnyActiveSubagentRun]);
+  }, [anyTabRunning, hasAnyActiveSubagentRun]);
 
   useEffect(() => {
     const bridge = hostLivenessBridge();
@@ -1643,8 +2086,8 @@ export default function App() {
       // WebSocket 关闭可能先于停止确认到达:撤回关闭路径误标在标签上的失败横幅。
       clearFailuresInTabs(phase, setChatTabs);
     };
-    // 探活上报的是「在跑几轮」:同一任务两条并发脚本运行要算两轮,不能按任务 id 去重。
-    const report = () => bridge.reportTurns((turnActive ? 1 : 0) + runningRuns.size);
+    // 探活上报的是「在跑几轮」:占名额的执行中标签 + 在途运行,不能按任务 id 去重。
+    const report = () => bridge.reportTurns(runningTurnCount + runningRuns.size);
     report();
     void bridge.read().then((state) => {
       if (!alive) return;
@@ -1659,7 +2102,7 @@ export default function App() {
       alive = false;
       stop();
     };
-  }, [turnActive, runningRuns]);
+  }, [runningTurnCount, runningRuns]);
 
   /**
    * 重启重建的运行对话骨架：首次打开时懒加载运行日志回填内容（不调 session.resume、
@@ -1880,7 +2323,7 @@ export default function App() {
 
   /**
    * 定向终止(设计 D17 / B-05):只对仍活跃的 run 调 `subagent.cancel`,
-   * 不碰父回合的 `turnActive` / 停止票据;失败写回该卡的错误行。
+   * 不碰父回合的执行态 / 停止票据;失败写回该卡的错误行。
    * 确认期间 run 已终态或失效时关闭确认且零 RPC。
    */
   async function confirmCancelSubagent(runId: string): Promise<void> {
@@ -1907,10 +2350,6 @@ export default function App() {
 
   /** 新建项目流程：Tauri 选文件夹 → 命名模态 → 创建并打开。 */
   async function createProjectFlow() {
-    if (automationActiveRef.current) {
-      noteActive("后台任务运行中，请稍候再切换项目。");
-      return;
-    }
     const selected = await pickDirectory();
     if (!selected) return;
     setCreatingError("");
@@ -1933,10 +2372,6 @@ export default function App() {
   }
 
   async function openProjectById(projectId: string) {
-    if (automationActiveRef.current) {
-      noteActive("后台任务运行中，请稍候再切换项目。");
-      return;
-    }
     try {
       const opened = await openProjectRpc(projectId);
       await applyOpenedProject(opened.project, opened.workspaceRoot);
@@ -2121,7 +2556,11 @@ export default function App() {
     // 子态二复用标签的预铸会话（规格 §2.4）；子态一强制 mint fresh。
     let sessionId = createdNow ? undefined : tab.sessionId;
     if (!sessionId) {
-      const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", { fresh: true });
+      const projectRoot = tab.projectId ? projects.find((item) => item.id === tab.projectId)?.root : undefined;
+      const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", {
+        fresh: true,
+        ...(projectRoot ? { cwd: projectRoot } : {}),
+      });
       rememberMinted(minted);
       sessionId = typeof minted.sessionId === "string" && minted.sessionId ? minted.sessionId : undefined;
       if (!sessionId) throw new Error("session.new 未返回会话 id");
@@ -2139,47 +2578,16 @@ export default function App() {
     const text = draft.trim();
     const invokedSkill = parseSlashInvoke(text);
     const invokedAt = parseAtInvoke(text);
-    if ((!text && !invokedAt) || sidecarDead || turnActive || hostPhase !== "ok") return;
+    if ((!text && !invokedAt) || sidecarDead || hostPhase !== "ok") return;
     if (tryOpenAutomationFromDraft(text)) return;
-    if (automationActiveRef.current) {
-      noteActive("后台任务运行中，请稍候再发送消息。");
-      return;
-    }
-    // 同步重入护栏（R3-1）：覆盖到 setTurnActive(true) 之前的整段异步前奏。
-    if (sendingRef.current) return;
-    sendingRef.current = true;
+    // 同步重入护栏（R3-1）：按标签记录，覆盖到回合真正开始之前的整段异步前奏。
+    // 它只挡同一标签的重入，不挡另一个标签。
+    const chatId = activeTab;
+    if (sendingRef.current.has(chatId)) return;
+    sendingRef.current.add(chatId);
     try {
-      const chatId = activeTab;
       liveChatRef.current = chatId;
-      // 未归属项目的 work 标签（新建未选项目的任务、从历史恢复的未归属会话）发送前先把工作区
-      // 对齐中立根：否则会话会以「最近打开的项目」目录为 cwd 落盘/被拒发。对齐失败（如后台任务
-      // 运行中）不发送。默认标签 work-1 跟随当前工作区，不在此列。
       const sendingTab = chatTabs.find((tab) => tab.id === chatId);
-      if (sendingTab && sendingTab.projectId == null && chatId !== "work-1") {
-        try {
-          await ensureNeutralWorkspace();
-        } catch (error) {
-          noteActive(error instanceof Error ? error.message : String(error));
-          return;
-        }
-      }
-      // 运行对话标签续聊（规格 L544 修订）：sidecar cwd 守卫要求工作区 == 运行会话目录，
-      // 项目 run tab 发送前先对齐到运行所属项目（中立 run tab 已被上方 ensureNeutralWorkspace
-      // 覆盖；run tab 必有 sessionId，下方懒绑定块自动跳过）。用 alignWorkspaceOnly 而非
-      // openProjectById：后者经 applyOpenedProject 会改写标签绑定。已在该项目时跳过，
-      // 避免重复 re-boot。对齐失败不发送，draft 保留（同上方中立对齐的降级模式）。
-      if (
-        sendingTab?.automationId &&
-        sendingTab.projectId != null &&
-        sendingTab.projectId !== activeProjectIdRef.current
-      ) {
-        try {
-          await alignWorkspaceOnly(sendingTab.projectId);
-        } catch (error) {
-          noteActive(error instanceof Error ? error.message : String(error));
-          return;
-        }
-      }
       // 子任务收编守卫（规格 §2.5）：项目上下文标签发送前必须有绑定的子任务会话。
       let sessionId = sendingTab?.sessionId;
       const needsSubtask =
@@ -2202,11 +2610,15 @@ export default function App() {
         }
       }
 
-      // 懒绑定会话：默认标签绑定通道稳定会话（跨重启延续），其余中立标签铸造独立会话。
+      // 懒绑定会话：默认标签绑定通道稳定会话（跨重启延续），其余标签铸造独立会话。
+      // cwd 只属于这条新会话：已绑定项目用项目根，未绑定项目用中立根。宿主不改前台工作区，
+      // 因此这里也不再为了铸造会话去切工作区（ensureNeutralWorkspace / alignWorkspaceOnly）。
       if (!sessionId) {
         try {
+          const cwd = await sessionCwdForTab(sendingTab);
           const minted = await rpcCall<{ sessionId?: string; cwd?: string }>("session.new", {
             fresh: chatId !== "work-1",
+            ...(cwd ? { cwd } : {}),
           });
           rememberMinted(minted);
           if (typeof minted.sessionId === "string" && minted.sessionId) {
@@ -2223,75 +2635,158 @@ export default function App() {
         noteActive("子任务会话尚未就绪，消息未发送。请重试。");
         return;
       }
+      // 本次发送的模型：本标签选择 > 子任务记住的模型 > 全局当前模型。
+      const sendingTask = sendingTab?.taskId
+        ? projectTasks.find((item) => item.id === sendingTab.taskId)
+        : undefined;
+      const modelId = resolveSendModelId(modelPickByTab, chatId, sendingTask?.modelId, activeModelId);
       // 注意：pendingPick 标签在此不再绑定 activeProjectId——项目归属只来自用户在 chip 里的显式选择
       // （applyOpenedProject），未选择的会话留在中立根，按 cwd 分组落入侧栏「任务」区。
-      const userMsg: ChatItem = { id: allocId(), kind: "user", text };
+      // 插入即标未启动：应答回来之前这条消息还没有开启回合，流式条目与终态选择都不能
+      // 停在它后面。只有 started 应答（或排队项真正出队）才清掉这个标记。
+      const userMsg: ChatItem = { id: allocId(), kind: "user", text, notStarted: true };
       setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, items: [...tab.items, userMsg] } : tab)));
       setDraft("");
-      const started = Date.now();
-      turnEpochRef.current += 1;
-      turnTabRef.current = chatId;
-      turnSessionRef.current = sessionId ?? null;
-      // 新用户回合重新开结算窗口：上一回合的「结论已写」不能挡住这一回合。
-      goalTurnRef.current = reduceGoalTurn(goalTurnRef.current, {
-        kind: "turn-started",
-        ...(sessionId === undefined ? {} : { sessionId }),
-      }).state;
-      userStopSessionRef.current = null;
-      latchOwnerRef.current = null;
-      setTurnPulse({ tabId: chatId, latest: "quiet", at: started });
-      setNow(started);
-      setTurnActive(true);
-      stopping.current = false;
+      // 应答与 WebSocket 事件不保证先后：发送前先记下本次发送的身份（标签 + 本地消息 id），
+      // 应答回来之前到达的事件按到达顺序暂存。pending 本身不开目标窗、不增加 epoch。
+      const pending: PendingSend = {
+        tabId: chatId,
+        userId: userMsg.id,
+        ...(sessionId ? { sessionId } : {}),
+        buffered: [],
+      };
+      pendingSendsRef.current.set(chatId, pending);
       try {
-        const sent = await rpcCall<{ queued: true; sessionId: string }>("session.send", {
+        const sent = await rpcCall<SessionSendResult>("session.send", {
           text: invokedAt ? invokedAt.remainder : invokedSkill ? invokedSkill.remainder : text,
+          tabId: chatId,
           ...(sessionId ? { sessionId } : {}),
+          ...(modelId ? { modelId } : {}),
           ...(invokedAt
             ? { at: { name: invokedAt.name, clientMessageId: String(userMsg.id) } }
             : invokedSkill
               ? { skill: invokedSkill.name }
               : {}),
         });
+        // 先写回身份：排队只追加等待项，started:true 才真正开始执行。
+        writeTabRun(chatId, (state) => noteSendResult(state, sent));
+        if (sent.waiting && sent.queueItemId !== undefined) {
+          // 等待文案挂在已经插入的同一条用户消息上，不是标签级另一份列表。
+          const queueItemId = sent.queueItemId;
+          queueOwnersRef.current.set(queueItemId, { tabId: chatId, userId: userMsg.id });
+          setChatTabs((prev) => prev.map((tab) => (
+            tab.id === chatId
+              ? {
+                  ...tab,
+                  items: tab.items.map((item) => (
+                    item.kind === "user" && item.id === userMsg.id ? { ...item, queueItemId } : item
+                  )),
+                }
+              : tab
+          )));
+        } else if (!sent.started) {
+          // 宿主既没开始也没排队：这条消息不开启回合，也不参与最新用户消息的选择。
+          setChatTabs((prev) => prev.map((tab) => (
+            tab.id === chatId
+              ? {
+                  ...tab,
+                  items: tab.items.map((item) => (
+                    item.kind === "user" && item.id === userMsg.id ? { ...item, notStarted: true } : item
+                  )),
+                }
+              : tab
+          )));
+        }
+        if (sendOpensTurn(sent)) {
+          // 回合真正开始：清掉插入时的未启动标记，这条消息从此是本标签的活动用户消息。
+          setChatTabs((prev) => prev.map((tab) => (
+            tab.id === chatId
+              ? {
+                  ...tab,
+                  items: tab.items.map((item) => (
+                    item.kind === "user" && item.id === userMsg.id ? startUserItem(item) : item
+                  )),
+                }
+              : tab
+          )));
+          // 回合真正开始：只增加这条标签的 epoch，并记下这次的活动用户消息。
+          openTurnForTab(
+            chatId,
+            typeof sent.sessionId === "string" && sent.sessionId ? sent.sessionId : sessionId ?? null,
+            userMsg.id,
+          );
+        }
         // 对账以应答的 sessionId 为准:本地 mint 的 id 可能不是 sidecar 实际使用的会话。
         if (typeof sent.sessionId === "string" && sent.sessionId) {
           void reconcileSubagentRuns(chatId, sent.sessionId);
         }
+        // 身份写回、回合初始化之后，最后按原顺序重放本次暂存的早到事件。
+        for (const buffered of takePendingBuffer(pending, sent)) applySidecarEventRef.current(buffered);
       } catch (error) {
-        setTurnActive(false);
-        if (stopping.current) {
-          stopping.current = false;
-          return;
-        }
+        // 只失败这一次发送：同标签正在执行的回合的停止闩锁、stopping、epoch 与执行态都不动。
+        // 本次用户消息标成未启动，失败原因仍追加到发送标签（闩锁扣着也追加）。
+        dropPending(pending);
         const note: ChatItem = { id: allocId(), kind: "note", text: error instanceof Error ? error.message : String(error) };
         setChatTabs((prev) =>
-          prev.map((tab) => (tab.id === chatId ? { ...tab, sessionFailed: true, items: [...tab.items, note] } : tab)),
+          prev.map((tab) =>
+            tab.id === chatId
+              ? {
+                  ...tab,
+                  // 该标签仍有正在执行的回合时，这条发送失败不是会话失败。
+                  ...(tabRunOf(chatId).running ? {} : { sessionFailed: true }),
+                  items: [
+                    ...tab.items.map((item) => (
+                      item.kind === "user" && item.id === userMsg.id ? { ...item, sendRejected: true } : item
+                    )),
+                    note,
+                  ],
+                }
+              : tab,
+          ),
         );
       }
     } finally {
-      sendingRef.current = false;
+      // 只清理本次发送的在途标记。
+      sendingRef.current.delete(chatId);
+    }
+  }
+
+  /**
+   * 等待消息上的取消：只移掉这一条排队项，正在执行的回合照旧。
+   * 取消后的消息留在列表里但标成未启动，不参与最新用户消息与终态选择。
+   * 宿主不为取消回报事件，等待文案在本地撤掉；停止按钮仍只停整条回合。
+   */
+  async function cancelWaiting(queueItemId: string) {
+    if (sidecarDead) return;
+    const tabId = queueItemTab(queueItemId);
+    if (tabId === undefined) return;
+    writeTabRun(tabId, (state) => noteWaitingCancelled(state, queueItemId));
+    clearQueueItem(tabId, queueItemId, "unstarted");
+    try {
+      await rpcCall("session.cancel", { queueItemId });
+    } catch (error) {
+      noteTab(tabId, `取消失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   async function stopTurn() {
-    if (sidecarDead || !turnActive || !canStartStop(stopPendingRef.current)) return;
-    const tabId = turnTabRef.current;
-    const tabSession = tabId ? chatTabs.find((tab) => tab.id === tabId)?.sessionId : undefined;
-    const sessionId = resolveStopSession(turnSessionRef.current, tabSession);
+    const tabId = activeChat.id;
+    const turn = tabTurnOf(tabId);
+    if (sidecarDead || !tabRunOf(tabId).running || !canStartStop(turn.pending)) return;
+    const tabSession = chatTabs.find((tab) => tab.id === tabId)?.sessionId;
+    const sessionId = resolveStopSession(turn.sessionId, tabSession);
     if (!sessionId) return;
-    const ticket: StopTicket = { id: stopSeqRef.current + 1, sessionId, epoch: turnEpochRef.current };
+    const ticket: StopTicket = { id: stopSeqRef.current + 1, sessionId, epoch: turn.epoch };
     stopSeqRef.current = ticket.id;
-    stopping.current = true;
-    stopPendingRef.current = ticket;
+    patchTabTurn(tabId, { stopping: true, pending: ticket });
     const noteFor = (text: string) => {
-      if (!tabId) return;
       const note: ChatItem = { id: allocId(), kind: "note", text };
       setChatTabs((prev) => prev.map((tab) => (tab.id === tabId ? { ...tab, items: [...tab.items, note] } : tab)));
     };
     try {
       await rpcCall("session.cancel", { sessionId });
-      const settled = settleStop(ticket, true);
-      if (settled.arm && tabId) {
+      const settled = settleStop(tabId, ticket, true);
+      if (settled.arm) {
         applyFinalForTab(tabId, ticket.sessionId, { kind: "session-end", ok: false, cancelled: true });
         setChatTabs((prev) => prev.map((tab) => (
           tab.id === tabId
@@ -2300,8 +2795,8 @@ export default function App() {
         )));
       }
     } catch (error) {
-      stopping.current = false;
-      const settled = settleStop(ticket, false);
+      patchTabTurn(tabId, { stopping: false });
+      const settled = settleStop(tabId, ticket, false);
       if (settled.note) noteFor(error instanceof Error ? error.message : String(error));
     }
   }
@@ -2346,27 +2841,32 @@ export default function App() {
     }
   }
 
-  /** 取消返回后才扣闩锁。轮次已经前进就只丢掉旧结束，不动新的一轮。 */
-  function settleStop(ticket: StopTicket, ok: boolean): { arm: boolean; note: boolean } {
+  /**
+   * 取消返回后才扣闩锁。比较的是这张标签自己的代际：轮次已经前进就只丢掉旧结束，
+   * 不动新的一轮；另一个标签的回合不参与判定。
+   */
+  function settleStop(tabId: string, ticket: StopTicket, ok: boolean): { arm: boolean; note: boolean } {
+    const turn = tabTurnOf(tabId);
     const done = finishStop({
       ticket,
-      pending: stopPendingRef.current,
-      currentEpoch: turnEpochRef.current,
+      pending: turn.pending,
+      currentEpoch: turn.epoch,
       ok,
-      latchOwner: latchOwnerRef.current,
+      latchOwner: turn.latchOwner,
     });
-    stopPendingRef.current = done.pending;
-    staleIdleRef.current = rememberStale(staleIdleRef.current, done.stale);
+    const patch: Partial<TabTurn> = { pending: done.pending };
     if (done.clearLatch) {
-      userStopSessionRef.current = null;
-      latchOwnerRef.current = null;
+      patch.stopSessionId = null;
+      patch.latchOwner = null;
     }
     if (done.arm) {
-      userStopSessionRef.current = ticket.sessionId;
-      latchOwnerRef.current = ticket.id;
-      setTurnActive(false);
-      stopping.current = false;
+      patch.stopSessionId = ticket.sessionId;
+      patch.latchOwner = ticket.id;
+      patch.stopping = false;
     }
+    patchTabTurn(tabId, patch);
+    staleIdleRef.current = rememberStale(staleIdleRef.current, done.stale);
+    if (done.arm) writeTabRun(tabId, noteTurnEnded);
     releaseHeldEnds(ticket.sessionId);
     return { arm: done.arm, note: done.note };
   }
@@ -2654,17 +3154,28 @@ export default function App() {
     if (deleteBusy) return;
     setDeleteBusy(true);
     try {
-      if (sessionId === turnSessionRef.current) {
+      // 只处理把这条会话当回合跟踪的标签：其它标签正在执行的回合不受删除影响。
+      const sessionTabId = tabIdForSession(sessionId);
+      if (sessionTabId !== undefined && tabTurnOf(sessionTabId).sessionId === sessionId) {
         try {
           await rpcCall("session.cancel", { sessionId });
         } catch {
           // 日志马上删掉；取消失败也不再把停止按钮留在一个没有会话的标签上。
         }
-        turnTabRef.current = null;
-        turnSessionRef.current = null;
-        setTurnActive(false);
+        patchTabTurn(sessionTabId, {
+          sessionId: null,
+          pending: null,
+          stopSessionId: null,
+          latchOwner: null,
+          stopping: false,
+        });
+        writeTabRun(sessionTabId, noteTurnEnded);
       }
       await rpcCall("session.remove", { sessionId });
+      // 会话日志没了，沿用它的标签也拿不到可归属的排队项：清掉在途发送与等待项归属。
+      for (const tab of chatTabsRef.current) {
+        if (tab.sessionId === sessionId) pruneTabBookkeeping(tab.id);
+      }
       setSessions((prev) => prev.filter((session, index) => String(session.id ?? `session-${index}`) !== sessionId));
       setHistoryView((view) => (view?.sessionId === sessionId ? null : view));
       setChatTabs((prev) => prev.map((tab) => (
@@ -2696,7 +3207,7 @@ export default function App() {
   const showRightPane = view === "main";
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const pendingAsk = hasPendingAsk(chatTabs);
-  const logoutDisabled = turnActive || pendingAsk;
+  const logoutDisabled = anyTabRunning || pendingAsk;
 
   function openSettings(section?: SettingsSection) {
     if (section) setSettingsSection(section);
@@ -2885,7 +3396,7 @@ export default function App() {
               <button
                 type="button"
                 className="side-action"
-                disabled={runningAutomationIds.size > 0 || sidecarDead}
+                disabled={sidecarDead}
                 onClick={() => void createProjectFlow()}
               >
                 ＋ 新建
@@ -2897,7 +3408,7 @@ export default function App() {
               activeProjectId={activeProjectId}
               subtasks={projectTasks}
               selectedTaskId={selectedTaskId}
-              disabled={runningAutomationIds.size > 0 || sidecarDead || selectBusy}
+              disabled={sidecarDead || selectBusy}
               onOpened={(project, root) => void applyOpenedProject(project, root)}
               onChanged={() => {
                 void refreshProjects();
@@ -3026,6 +3537,7 @@ export default function App() {
                     onInput={answerInput}
                     onThinkingToggle={toggleThinking}
                     onOpenAttachment={handleOpenAttachment}
+                    onCancelWaiting={(queueItemId) => void cancelWaiting(queueItemId)}
                     reasoning={row.item.kind === "assistant" ? (thinkingBefore(items, row.index)?.thought ?? "") : ""}
                     hasAssistantText={
                       row.item.kind === "thinking"
@@ -3196,12 +3708,12 @@ export default function App() {
                         ? `📁 ${workspaceName(workspace)}`
                         : "📁 选择项目"}
                 </button>
-                {modelLabel ? (
+                {sendModelLabel ? (
                   <ModelChip
-                    label={modelLabel}
+                    label={sendModelLabel}
                     models={savedModels}
-                    activeId={activeModelId}
-                    onSelect={(id) => void selectModel(id)}
+                    activeId={sendModelId}
+                    onSelect={(id) => void selectTabModel(id)}
                     onManage={() => openSettings("model")}
                   />
                 ) : null}
@@ -3220,7 +3732,7 @@ export default function App() {
                   >
                     ↑
                   </button>
-                ) : turnActive && activeTab === turnTabRef.current ? (
+                ) : tabRuns[activeChat.id]?.running === true ? (
                   <button type="button" className="send stop" disabled={blocked} onClick={() => void stopTurn()}>
                     停止
                   </button>
@@ -3582,8 +4094,7 @@ function handleEvent(
   allocId: () => number,
   setReady: (ready: boolean) => void,
   setItems: (updater: (prev: ChatItem[]) => ChatItem[], sessionId?: string) => void,
-  setDiff: (text: string) => void,
-  setTurnActive: (active: boolean) => void,
+  setTurnRunning: (running: boolean, sessionId?: string) => void,
   setSessionFailed: (failed: boolean, sessionId?: string) => void,
   refreshRecent: () => Promise<void>,
   sawReady: MutableRefObject<boolean>,
@@ -3600,7 +4111,7 @@ function handleEvent(
       }
       break;
     case "token":
-      setItems((prev) => appendToken(prev, event.text), event.sessionId);
+      setItems((prev) => appendToken(prev, event.text, allocId), event.sessionId);
       break;
     case "reasoning":
       setItems((prev) => applyReasoning(prev, event.text, event.final === true, allocId), event.sessionId);
@@ -3611,9 +4122,8 @@ function handleEvent(
         setItems((prev) => upsertTodoItem(prev, todos, allocId), event.sessionId);
         break;
       }
-      setItems((prev) => [
-        ...prev,
-        {
+      setItems(
+        (prev) => insertTurnItem(prev, {
           id: allocId(),
           kind: "tool",
           card: {
@@ -3624,8 +4134,9 @@ function handleEvent(
             ...(event.args === undefined ? {} : { args: event.args }),
             ...(event.command === undefined ? {} : { command: event.command }),
           },
-        },
-      ], event.sessionId);
+        }),
+        event.sessionId,
+      );
       break;
     case "tool/end":
       setItems((prev) => applyToolEnd(prev, event), event.sessionId);
@@ -3644,27 +4155,24 @@ function handleEvent(
           actionable: event.actionable,
         },
       };
-      setItems((prev) => (event.toolName === "plan-review" ? insertBeforeToolRow(prev, ask, event.callId) : [...prev, ask]), event.sessionId);
+      setItems((prev) => (event.toolName === "plan-review" ? insertBeforeToolRow(prev, ask, event.callId) : insertTurnItem(prev, ask)), event.sessionId);
       break;
     }
     case "input/asked":
-      setItems((prev) => appendOpenInput(prev, allocId(), event.question, event.sessionId), event.sessionId);
-      break;
-    case "diff":
-      setDiff(event.text);
+      setItems((prev) => appendOpenInputInTurn(prev, allocId(), event.question, event.sessionId), event.sessionId);
       break;
     case "compaction/done":
       // 固定提示走聊天 note，不进思考面板。
-      setItems((prev) => [...prev, { id: allocId(), kind: "note", text: COMPACTION_NOTE }], event.sessionId);
+      setItems((prev) => insertTurnItem(prev, { id: allocId(), kind: "note", text: COMPACTION_NOTE }), event.sessionId);
       break;
     case "goal/round":
-      // 官方驱动器开了新一轮：只有当前跟踪的会话才恢复全局回合态；
-      // 后台会话的续轮只把说明写进它自己的标签，不能卡住发送。
-      if (drivesTrackedTurn) setTurnActive(true);
-      setItems((prev) => [...prev, { id: allocId(), kind: "note", text: goalRoundLabel(event.round) }], event.sessionId);
+      // 官方驱动器开了新一轮：只恢复事件所属标签的执行态；后台会话的续轮
+      // 只把说明写进它自己的标签，不能卡住其它标签。
+      if (drivesTrackedTurn) setTurnRunning(true, event.sessionId);
+      setItems((prev) => insertTurnItem(prev, { id: allocId(), kind: "note", text: goalRoundLabel(event.round) }), event.sessionId);
       break;
     case "session/end":
-      if (endsTrackedTurn) setTurnActive(false);
+      if (endsTrackedTurn) setTurnRunning(false, event.sessionId);
       // 回合结束刷新会话列表（任务区/最近对话）。日志写回是 ~200ms 批处理，
       // 等一拍再拉，避免新会话因 messageCount 仍为 0 被空壳过滤漏掉。
       setTimeout(() => void refreshRecent(), 600);
@@ -3675,53 +4183,121 @@ function handleEvent(
       if (event.cancelled || userStopped) break;
       if (!event.ok) {
         setSessionFailed(true, event.sessionId);
-        setItems((prev) => [
-          ...prev,
-          { id: allocId(), kind: "note", text: event.error ?? "会话失败（保留 diff，不回滚）" },
-        ], event.sessionId);
+        setItems(
+          (prev) => insertTurnItem(prev, { id: allocId(), kind: "note", text: event.error ?? "会话失败（保留 diff，不回滚）" }),
+          event.sessionId,
+        );
       }
       break;
   }
 }
 
-/** 本回合只保留最新一份待办列表（todo_write 每次发送完整替换列表）。 */
-function upsertTodoItem(items: ChatItem[], todos: TodoEntry[], allocId: () => number): ChatItem[] {
-  let turnStart = 0;
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    if (items[i]?.kind === "user") {
-      turnStart = i + 1;
-      break;
-    }
+/**
+ * 活动回合的写入位置：第一条未启动用户消息之前，没有就追加到末尾。
+ * 排队中（带 `queueItemId`）、本次已抛错（`sendRejected`）或宿主没启动（`notStarted`）
+ * 的消息虽然排在后面，但还没开启回合，流式条目必须落在它们前面。
+ * 标签还没有任何已启动回合时（首条消息刚插入、应答未回），这条消息就是回合的开头，
+ * 写入位置是末尾——不能把流式正文插到问题前面。
+ */
+function turnAppendIndex(items: readonly ChatItem[]): number {
+  const turnStart = currentTurnStart(items);
+  if (turnStart === 0) return items.length;
+  for (let index = turnStart; index < items.length; index += 1) {
+    const item = items[index];
+    if (item?.kind === "user" && isUnstartedUserItem(item)) return index;
   }
-  const at = items.findIndex((item, index) => index >= turnStart && item.kind === "todo");
-  if (at < 0) return [...items, { id: allocId(), kind: "todo", todos }];
-  return items.map((item, index) => (index === at ? { ...item, todos } : item));
+  return items.length;
 }
 
-/** 计划卡画在本回合 `exit_plan_mode` 那一行工具之前；找不到那一行就追加在末尾。 */
-function insertBeforeToolRow(items: ChatItem[], card: ChatItem, callId: string | undefined): ChatItem[] {
-  let turnStart = 0;
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    if (items[i]?.kind === "user") {
-      turnStart = i + 1;
-      break;
-    }
-  }
+/**
+ * 这条用户消息真正成为活动回合：去掉等待项与插入时的未启动标记。
+ * 直接应答 `started: true` 与排队项真正出队都走这里。
+ */
+export function startUserItem<T extends { queueItemId?: string; notStarted?: boolean }>(item: T): T {
+  const {
+    queueItemId: _queueItemId,
+    notStarted: _notStarted,
+    ...started
+  } = item;
+  return started as T;
+}
+
+/** 本回合内的条目（工具行、审批卡、脚注）写在本回合的写入位置；没有排队消息时追加到末尾。 */
+export function insertTurnItem(items: ChatItem[], item: ChatItem): ChatItem[] {
+  const at = turnAppendIndex(items);
+  return [...items.slice(0, at), item, ...items.slice(at)];
+}
+
+/**
+ * `request_input` 的卡片：先关掉没人回答的旧卡，再放进本回合的写入位置。
+ * `appendOpenInput` 只会追加到末尾，这里把新卡挪回活动回合内，排队消息之后不再落卡片。
+ */
+export function appendOpenInputInTurn(items: ChatItem[], id: number, question: string, sessionId: string): ChatItem[] {
+  const withCard = appendOpenInput(items, id, question, sessionId);
+  const card = withCard[withCard.length - 1];
+  if (!card) return withCard;
+  return insertTurnItem(withCard.slice(0, -1), card);
+}
+
+/**
+ * 本回合核对与结算归属的用户消息：以该标签记录的活动消息为准；
+ * 还没记录（历史标签、自动化运行标签）时回落到最后一条已启动的用户消息。
+ * 应答回来之前刚插入的那条（带 `notStarted`）不会被选中。
+ */
+export function turnUserIdFor(
+  turn: Pick<TabTurn, "activeUserId">,
+  items: Parameters<typeof latestUserItemId>[0],
+): number | undefined {
+  return turn.activeUserId ?? latestUserItemId(items);
+}
+
+/**
+ * 排队项出队时该标签的新状态：归属消息还在才开始执行并置 `running`；
+ * 归属消息已被取消或删除时只收掉这条等待项，不碰该标签的回合态
+ * （同一标签上可能有另一个真正执行中的回合，不能替它结束）。
+ *
+ * @param state 该标签当前的回合状态
+ * @param queueItemId 出队的排队项
+ * @param hasOwner 该排队项是否仍挂着一条未启动的用户消息
+ * @returns 更新后的状态
+ */
+export function queuedTurnRunState(state: TabRunState, queueItemId: string, hasOwner: boolean): TabRunState {
+  return hasOwner
+    ? noteWaitingStarted(state, queueItemId)
+    : noteWaitingCancelled(state, queueItemId);
+}
+
+/** 本回合只保留最新一份待办列表（todo_write 每次发送完整替换列表）。 */
+export function upsertTodoItem(items: ChatItem[], todos: TodoEntry[], allocId: () => number): ChatItem[] {
+  const turnStart = currentTurnStart(items);
+  const at = items.findIndex((item, index) => index >= turnStart && item.kind === "todo");
+  if (at >= 0) return items.map((item, index) => (index === at ? { ...item, todos } : item));
+  const insertAt = turnAppendIndex(items);
+  return [...items.slice(0, insertAt), { id: allocId(), kind: "todo", todos }, ...items.slice(insertAt)];
+}
+
+/** 计划卡画在本回合 `exit_plan_mode` 那一行工具之前；找不到那一行就落在排队消息之前。 */
+export function insertBeforeToolRow(items: ChatItem[], card: ChatItem, callId: string | undefined): ChatItem[] {
+  const turnStart = currentTurnStart(items);
   const at = items.findIndex(
     (item, index) =>
       index >= turnStart &&
       item.kind === "tool" &&
       (callId ? item.card.callId === callId : item.card.name === "exit_plan_mode"),
   );
-  return at >= 0 ? [...items.slice(0, at), card, ...items.slice(at)] : [...items, card];
+  if (at >= 0) return [...items.slice(0, at), card, ...items.slice(at)];
+  const insertAt = turnAppendIndex(items);
+  return [...items.slice(0, insertAt), card, ...items.slice(insertAt)];
 }
 
-function appendToken(items: ChatItem[], text: string): ChatItem[] {
-  const last = items.at(-1);
+/** 流式正文接在活动回合末尾；排队消息把末尾顶开时仍写回它自己那个回合。 */
+export function appendToken(items: ChatItem[], text: string, allocId: () => number): ChatItem[] {
+  const insertAt = turnAppendIndex(items);
+  const last = insertAt > 0 ? items[insertAt - 1] : undefined;
   if (last?.kind === "assistant") {
-    return [...items.slice(0, -1), { ...last, text: last.text + text }];
+    return [...items.slice(0, insertAt - 1), { ...last, text: last.text + text }, ...items.slice(insertAt)];
   }
-  return [...items, { id: (last?.id ?? 0) + 1, kind: "assistant", text }];
+  return [...items.slice(0, insertAt), { id: allocId(), kind: "assistant", text }, ...items.slice(insertAt)];
 }
 
 type ContentChatItem = Exclude<
@@ -3764,14 +4340,8 @@ function contentItem(item: Exclude<ChatItem, { kind: "subagent-run" }>): Content
 }
 
 /** 同一回合只保留一块思考：非 final 追加当前步骤，final 只替换当前步骤，工具调用前已定稿的步骤保留。 */
-function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number): ChatItem[] {
-  let turnStart = 0;
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    if (items[i]?.kind === "user") {
-      turnStart = i + 1;
-      break;
-    }
-  }
+export function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number): ChatItem[] {
+  const turnStart = currentTurnStart(items);
   const existing = items.findIndex((item, index) => index >= turnStart && item.kind === "thinking");
   if (existing >= 0) {
     const current = items[existing];
@@ -3785,7 +4355,8 @@ function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId
   const created: ChatItem = { id: allocId(), kind: "thinking", thought: thinkingStepsText(steps), interrupted: false, steps };
   const assistantAt = items.findIndex((item, index) => index >= turnStart && item.kind === "assistant");
   if (assistantAt >= 0) return [...items.slice(0, assistantAt), created, ...items.slice(assistantAt)];
-  return [...items, created];
+  const insertAt = turnAppendIndex(items);
+  return [...items.slice(0, insertAt), created, ...items.slice(insertAt)];
 }
 
 /** 运行卡渲染所需的 reducer 投影与 App 侧 UI 状态；UI 状态不写进 reducer run 对象。 */
@@ -3811,6 +4382,7 @@ function ChatRow({
   onInput,
   onThinkingToggle,
   onOpenAttachment,
+  onCancelWaiting,
   reasoning = "",
   hasAssistantText = false,
 }: {
@@ -3821,6 +4393,8 @@ function ChatRow({
   onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
   onThinkingToggle?: (itemId: number, userToggled: "expand" | "collapse") => void;
   onOpenAttachment?: (file: ResultAttachmentFile) => void;
+  /** 等待中的用户消息：取消这一条排队项。 */
+  onCancelWaiting?: (queueItemId: string) => void;
   reasoning?: string;
   hasAssistantText?: boolean;
 }) {
@@ -3848,7 +4422,23 @@ function ChatRow({
       />
     );
   }
-  if (item.kind === "user") return <div className="bubble user">{item.text}</div>;
+  if (item.kind === "user") {
+    if (item.queueItemId !== undefined) {
+      const queueItemId = item.queueItemId;
+      return (
+        <div className="bubble user">
+          {item.text}
+          <div className="note">
+            等待当前任务
+            <button type="button" className="chip" disabled={blocked} onClick={() => onCancelWaiting?.(queueItemId)}>
+              取消
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return <div className="bubble user">{item.text}</div>;
+  }
   if (item.kind === "thinking") {
     if (!shouldRenderThinking(item.thought)) return null;
     return (

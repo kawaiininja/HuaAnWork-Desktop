@@ -7,6 +7,8 @@ import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 
 import { isAgentToolAttached, isHostAttached, isMcpAttached, type AttachmentMaps } from "./agent-attachments.ts";
 import { GIT_SNAPSHOT_BUDGET_MS } from "./git-budget.ts";
+import { sessionWorkspaceRoot } from "./sandbox-cwd.ts";
+import { parentSessionOf } from "../huaanwork-host/child-sessions.ts";
 
 /**
  * 本地智能体包工具:创建流程挂 agent_propose/agent_commit,`@slug` 运行链路挂
@@ -28,26 +30,30 @@ type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/too
   agent?: { id?: string; session?: { id?: string } };
 };
 
-/** 无人值守授权范围（Phase 2，方案 A）：只在 `runAgentTurn` 执行期间由 host.ts 设置。 */
+/**
+ * 无人值守授权范围（Phase 2，方案 A）：只在 `runAgentTurn` 执行期间由 automations-host
+ * 按本次运行的会话 id 写入共享表，运行结束即删除。
+ */
 export type UnattendedScope = { runId: string; automationId: string; allow: Set<string>; sessionId?: string };
 
 /**
- * `.current` 的读写坑（真实 Cordis 踩过，勿改回直接 `ctx.currentUnattended = ...`）：
+ * 按会话保存无人值守范围的容器（`holders.ts` 在 boot 时装一张空 Map）。
+ *
+ * 容器读写的坑（真实 Cordis 踩过，勿改回直接 `ctx.currentUnattended = ...`）：
  * Cordis 的 Context 是按 fiber 建的 Proxy，自定义属性只有在 boot 的 `prepare` 回调里
  * （fiber 尚未 active）赋值一次，才会真正落到所有插件共享的根 target 上，之后从任意插件的
  * 作用域读取都能命中；boot 完成后再对同一个属性重新赋值（如运行期 `ctx.foo = x`），
  * 从其他插件的 ctx 读回来会直接抛 `cannot get property "foo" without inject`——
  * `huaanworkAllowedOnce`/`huaanworkWorkspaceRoot` 之所以能读到，是因为它们只在 `prepare`
- * 里赋值过；per-run 会变的 `currentUnattended` 做不到「只赋值一次」，所以只能反过来：
- * boot 时赋值一次一个「容器」（`holders.ts` 装的是 `{ current: null }`），此后永远只
- * mutate 容器的 `.current` 字段——容器本身是普通 JS 对象，不受 Cordis Proxy 管辖，读写
- * 不再受 inject 限制。`current` 因此兼具「可选」（旧调用方没装容器）与「可为 null」
- * （boot 的空槽）两种缺席形态。
+ * 里赋值过；per-run 会变的无人值守范围做不到「只赋值一次」，所以只能反过来：
+ * boot 时赋值一次一个「容器」（`holders.ts` 装的是 `new Map()`），此后永远只 mutate
+ * 容器里的条目——Map 本身是普通 JS 对象，不受 Cordis Proxy 管辖，读写不再受 inject 限制。
+ * 容器缺席（旧调用方没装）按「没有无人值守运行」处理。
  *
- * 导出只为编译期钉：三种形态的赋值由 `tests/huaanwork-host/policy-type.spec.ts` 在
- * tsconfig.tests.json 覆盖的目录里钉住，收窄成非 nullable（或去掉 `?`）会让 typecheck 变红。
+ * 键是本次运行的会话 id；范围只接管该会话（及其已登记的子会话，见
+ * {@link unattendedScopeFor}），并发运行的其它会话各查各的键。
  */
-export type UnattendedHolder = { current?: UnattendedScope | null };
+export type UnattendedHolder = Map<string, UnattendedScope>;
 
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
@@ -55,7 +61,7 @@ type Context = {
   /** 保留兼容旧调用方；护栏设置与审计已改由 huaanworkProfileDir 权威解析。 */
   huaanworkDshHome?: string;
   huaanworkProfileDir?: string;
-  /** boot 时注入一次的容器，`.current` 随每次 `runAgentTurn` 变化（见上方坑注释）。 */
+  /** boot 时注入一次的空 Map，条目随每次 `runAgentTurn` 按会话写入/删除（见上方坑注释）。 */
   huaanworkUnattended?: UnattendedHolder;
   huaanworkAttachments?: AttachmentMaps;
   /** 智能体包回合绑定的子会话 id;policy 据此放行包自己挂载的 `mcp__*`。 */
@@ -97,7 +103,7 @@ export function apply(ctx: Context): void {
     // 而不是对着一句 huaanwork-policy 脑补出「网络被封」「申请提权」之类的错误应对。
     if (decision === "deny") return { kind: "deny", reason: `huaanwork-policy: ${reason ?? "策略拒绝"}` };
     if (decision === "ask") {
-      // Phase 2（方案 A）：命中当前运行的无人值守白名单则降级为 allow；未开启/未命中时
+      // Phase 2（方案 A）：命中本次执行所属会话的无人值守白名单则降级为 allow；未开启/未命中时
       // 原样返回 ask，行为与关闭时逐字节一致（不变量：unattended 不改变 ask 判定本身）。
       if (degradeIfUnattended(execution, ctx)) return { kind: "allow" };
       return { kind: "ask" };
@@ -123,6 +129,25 @@ export function apply(ctx: Context): void {
 }
 
 /**
+ * 取本次执行所属会话的无人值守范围。会话自己没有条目时沿 `registerChildSession`
+ * 的登记表回退一层到父会话：自动化运行派生的子代理沿用父会话的范围，其它会话不受影响。
+ *
+ * @param scopes boot 时注入的按会话容器；缺席即没有无人值守运行
+ * @param sessionId 本次执行所属会话；缺席（执行上下文没有 agent）时不可命中
+ * @returns 该会话（或已登记的父会话）的运行范围，未命中时为 `undefined`
+ */
+export function unattendedScopeFor(
+  scopes: UnattendedHolder | undefined,
+  sessionId: string | undefined,
+): UnattendedScope | undefined {
+  if (!scopes || sessionId === undefined) return undefined;
+  const direct = scopes.get(sessionId);
+  if (direct) return direct;
+  const parent = parentSessionOf(sessionId);
+  return parent === undefined ? undefined : scopes.get(parent);
+}
+
+/**
  * pre-execute 判定为 ask 时的无人值守降级（Phase 2，方案 A）。命中白名单时把
  * `execution.callId` 写进 `ctx.huaanworkAllowedOnce`——这正是 approval.ts 拿到
  * `allowed-once` 结果时做的事，`guard()` 已有的 `huaanworkAllowedOnce.delete` 分支据此
@@ -131,7 +156,7 @@ export function apply(ctx: Context): void {
  * 没有 callId 的调用无法安全降级（guard 无法按 callId 精确核销一次性放行），原样走 ask。
  */
 function degradeIfUnattended(execution: ToolExecution, ctx: Context): boolean {
-  const unattended = ctx.huaanworkUnattended?.current;
+  const unattended = unattendedScopeFor(ctx.huaanworkUnattended, sessionIdOfAgentRef(execution.agent));
   const callId = execution.callId;
   if (!unattended || typeof callId !== "string" || !unattended.allow.has(execution.name)) return false;
   ctx.huaanworkAllowedOnce ??= new Set();
@@ -195,7 +220,7 @@ function readExistingAuditLines(path: string): string[] {
 }
 
 function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
-  const workspaceRoot = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd();
+  const workspaceRoot = sessionWorkspaceRoot(ctx, sessionIdOfAgentRef(execution.agent));
   const args = objectArgs(execution.arguments);
   let attached: boolean | undefined = undefined;
   let packageRuntime: boolean | undefined = undefined;

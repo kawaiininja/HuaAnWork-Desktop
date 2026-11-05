@@ -92,6 +92,10 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   >;
   /** 会话工具附件表;包运行时工具与 MCP 名字按子会话挂载。 */
   huaanworkAttachments?: AttachmentMaps;
+  /** 宿主创建的会话模型绑定表(Task 6 登记);这里只在子会话开始/结束时复制与删除。 */
+  huaanworkSessionModels?: Map<string, string>;
+  /** 宿主创建的会话可写根表(Task 6 登记);子会话开始/结束时同样复制与删除。 */
+  huaanworkSessionRoots?: Map<string, string>;
   on(
     event: "tools/pre-execute" | "agent/created" | "subagent/start" | "subagent/end" | "tools/change",
     listener: (...args: never[]) => unknown,
@@ -240,7 +244,11 @@ export function apply(ctx: Context): void {
     // 事件载荷只有 { runId, provider, id, local },没有 parent;父会话取自子会话 header,
     // 冷恢复路径靠它,start 包装路径靠下面的 AsyncLocalStorage。
     const parentId = sessionIdOf(child?.session?.header?.parentSession) ?? startParent.getStore();
-    if (parentId && parentId !== info.id) registerChildSession(parentId, info.id);
+    if (parentId && parentId !== info.id) {
+      registerChildSession(parentId, info.id);
+      inheritSessionModel(ctx.huaanworkSessionModels, parentId, info.id);
+      inheritSessionRoot(ctx.huaanworkSessionRoots, parentId, info.id);
+    }
     if (child) consumePendingSpawn(child);
   }) as never);
 
@@ -255,7 +263,11 @@ export function apply(ctx: Context): void {
         stopReason: info.stopReason ?? "unknown",
       });
     }
-    if (typeof info.id === "string" && info.id.length > 0) forgetChildSession(info.id);
+    if (typeof info.id === "string" && info.id.length > 0) {
+      forgetChildSession(info.id);
+      ctx.huaanworkSessionModels?.delete(info.id);
+      ctx.huaanworkSessionRoots?.delete(info.id);
+    }
   }) as never);
 
   ctx.on("tools/change", (() => {
@@ -461,6 +473,33 @@ export function apply(ctx: Context): void {
       }
     };
   }
+}
+
+/**
+ * 子会话继承父会话的模型绑定:父会话没有绑定时不写。
+ * 按父会话 id 直读登记表,不读 `currentCallerSession()`。
+ */
+function inheritSessionModel(
+  table: Map<string, string> | undefined,
+  parentSessionId: string,
+  childSessionId: string,
+): void {
+  if (!table) return;
+  const bound = table.get(parentSessionId);
+  if (bound === undefined) return;
+  table.set(childSessionId, bound);
+}
+
+/** 子代理继承父会话的可写根:父根缺失时不写,避免凭空造出一个根。 */
+function inheritSessionRoot(
+  table: Map<string, string> | undefined,
+  parentSessionId: string,
+  childSessionId: string,
+): void {
+  if (!table) return;
+  const root = table.get(parentSessionId);
+  if (root === undefined) return;
+  table.set(childSessionId, root);
 }
 
 function sessionIdOf(value: unknown): string | undefined {

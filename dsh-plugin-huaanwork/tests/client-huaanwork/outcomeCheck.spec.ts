@@ -370,3 +370,36 @@ test("a required path deeper than the workspace scan is unverified, not missing"
     "未核对（超出扫描深度）：C:\\w\\a\\b\\c\\d\\e\\f\\g\\report.md",
   ]);
 });
+
+test("a waiting user message does not drop the active outcome", () => {
+  type TurnItem = { id: number; kind: "user" | "assistant" | "note"; text?: string; queueItemId?: string; sendRejected?: boolean };
+  const items: TurnItem[] = [
+    { id: 1, kind: "user" },
+    { id: 2, kind: "assistant" },
+    { id: 3, kind: "user", queueItemId: "q1" },
+    { id: 4, kind: "user", sendRejected: true },
+  ];
+  const notes: TurnItem[] = [{ id: 9, kind: "note", text: "已完成：自动核对 1 项均通过" }];
+  assert.equal(latestUserItemId(items), 1, "a waiting or rejected send is not the latest started turn");
+  assert.deepEqual(appendOutcomeNotes(items, 1, notes), [...items, ...notes], "the running turn keeps its outcome");
+  // 队列事件把等待项变成真正启动的回合后，新回合重新成为最新用户消息。
+  const started: TurnItem[] = [{ id: 1, kind: "user" }, { id: 2, kind: "assistant" }, { id: 3, kind: "user" }];
+  assert.equal(latestUserItemId(started), 3);
+  assert.equal(appendOutcomeNotes(started, 1, notes), started, "the earlier turn's outcome is dropped");
+});
+
+test("the recorded active message wins while a newer message has not started", () => {
+  type TurnItem = { id: number; kind: "user"; text: string; queueItemId?: string; notStarted?: boolean };
+  // 应答未回的窗口里最后一条消息还没有标记：只有该标签记录的活动 id 能阻止它改掉本回合的核对要求。
+  const unmarked: TurnItem[] = [
+    { id: 1, kind: "user", text: "生成 report.md，并运行 `pnpm test`" },
+    { id: 2, kind: "user", text: "生成 other.md，并运行 `pnpm build`" },
+  ];
+  assert.equal(latestUserItemId(unmarked), 2, "without the active id the fallback would read the newer message");
+  assert.deepEqual(turnChecks(unmarked, 1).requiredFiles, ["report.md"]);
+  assert.deepEqual(turnChecks(unmarked, 1).requiredCommands, ["pnpm test"]);
+  // 插入时标了未启动的消息同样被排除。
+  const marked: TurnItem[] = [unmarked[0]!, { ...unmarked[1]!, notStarted: true }];
+  assert.equal(latestUserItemId(marked), 1);
+  assert.deepEqual(turnChecks(marked).requiredFiles, ["report.md"]);
+});

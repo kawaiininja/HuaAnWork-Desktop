@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { RouteError, type RouteContext } from '../../src/huaanwork-host/routes.ts'
-import { sessionSendBlockers } from '../../src/huaanwork-host/sessions.ts'
 import {
   clearPendingWorkspaceRoot,
   neutralWorkspaceRoot,
@@ -22,9 +21,6 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  // 自动化门禁用例会拨动 blockers,归位避免跨用例泄漏。
-  sessionSendBlockers.agentAutomationQueued = 0
-  sessionSendBlockers.workspaceDisplaced = false
   rmSync(profileDir, { recursive: true, force: true })
 })
 
@@ -134,16 +130,6 @@ describe('openWorkspace', () => {
     expect(requestRestart).not.toHaveBeenCalled()
     rmSync(target, { recursive: true, force: true })
   })
-
-  test('后台自动化非空闲 → open 拒绝(旧 assertAutomationIdle 文案),不写不重启', async () => {
-    const target = mkdtempSync(join(tmpdir(), 'hw-ws-busy-'))
-    sessionSendBlockers.agentAutomationQueued = 1
-    const { ctx, requestRestart } = makeRouteCtx()
-    await expect(openWorkspace(ctx, target)).rejects.toThrow('后台自动化任务运行中，请稍候再试')
-    expect(requestRestart).not.toHaveBeenCalled()
-    expect(existsSync(join(profileDir, 'huaanwork-workspace.json'))).toBe(false)
-    rmSync(target, { recursive: true, force: true })
-  })
 })
 
 describe('closeWorkspace', () => {
@@ -164,14 +150,6 @@ describe('closeWorkspace', () => {
     const { ctx, requestRestart } = makeRouteCtx()
     ctx.workspaceRoot.current = neutral
     await expect(closeWorkspace(ctx)).resolves.toEqual({ workspaceRoot: neutral })
-    expect(requestRestart).not.toHaveBeenCalled()
-    expect(existsSync(join(profileDir, 'huaanwork-workspace.json'))).toBe(false)
-  })
-
-  test('后台自动化非空闲 → close 拒绝(旧 assertAutomationIdle 文案),不写不重启', async () => {
-    sessionSendBlockers.workspaceDisplaced = true
-    const { ctx, requestRestart } = makeRouteCtx()
-    await expect(closeWorkspace(ctx)).rejects.toThrow('后台自动化任务运行中，请稍候再试')
     expect(requestRestart).not.toHaveBeenCalled()
     expect(existsSync(join(profileDir, 'huaanwork-workspace.json'))).toBe(false)
   })

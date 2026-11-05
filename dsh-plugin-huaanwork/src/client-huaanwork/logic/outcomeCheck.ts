@@ -1,3 +1,4 @@
+import { isUnstartedUserItem } from "./concurrentTurn.ts";
 import { planModeActive, type PlanModeItem } from "./planConfirm.ts";
 
 export function outcomeGaps(input: {
@@ -99,8 +100,8 @@ export function todoLabel(status: string): string {
 
 export type TodoEntry = { content: string; status: TodoStatus };
 
-type TurnItem =
-  | { kind: "user"; text: string }
+type TurnItem = { id?: number } & (
+  | { kind: "user"; text: string; queueItemId?: string; sendRejected?: boolean; notStarted?: boolean }
   | { kind: "ask"; card: { toolName: string; summary?: string } }
   | {
       kind: "tool";
@@ -114,7 +115,8 @@ type TurnItem =
         resultMissing?: boolean;
       };
     }
-  | { kind: "assistant" | "thinking" | "note" | "todo" | "input" };
+  | { kind: "assistant" | "thinking" | "note" | "todo" | "input" }
+);
 
 export type TurnChecks = {
   requiredFiles: string[];
@@ -124,16 +126,34 @@ export type TurnChecks = {
   didWork: boolean;
 };
 
-/** 本回合（最后一条用户消息之后）要核对的文件、命令与已记录的工具结果。 */
-export function turnChecks(items: readonly TurnItem[]): TurnChecks {
+/**
+ * 本回合（本次活动的用户消息之后）要核对的文件、命令与已记录的工具结果。
+ * 排队中、本次已抛错或宿主没启动的用户消息没有开启回合，既不提供核对文本，
+ * 也不把正在执行的回合截断。给了 `activeUserId` 时以它为准；找不到该条时
+ * 回落到最后一条已启动的用户消息。
+ *
+ * @param items 对话内容视图
+ * @param activeUserId 本回合活动的用户消息条目 id
+ * @returns 本回合的必核文件、必核命令与工具结果
+ */
+export function turnChecks(items: readonly TurnItem[], activeUserId?: number): TurnChecks {
   let start = 0;
   let userText = "";
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    const item = items[i];
-    if (item?.kind === "user") {
-      start = i + 1;
-      userText = item.text;
-      break;
+  const activeIndex = activeUserId === undefined
+    ? -1
+    : items.findIndex((item) => item.id === activeUserId && item.kind === "user" && !isUnstartedUserItem(item));
+  if (activeIndex >= 0) {
+    const active = items[activeIndex];
+    start = activeIndex + 1;
+    userText = active?.kind === "user" ? active.text : "";
+  } else {
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const item = items[i];
+      if (item?.kind === "user" && !isUnstartedUserItem(item)) {
+        start = i + 1;
+        userText = item.text;
+        break;
+      }
     }
   }
   const files = extractRequiredFiles(userText);
@@ -308,12 +328,20 @@ export function eventTargetTab(
   return tabs.some((tab) => tab.id === liveTabId) ? liveTabId : undefined;
 }
 
-export function latestUserItemId(items: readonly { id: number; kind: string }[]): number | undefined {
-  return items.findLast((item) => item.kind === "user")?.id;
+export function latestUserItemId(
+  items: readonly { id: number; kind: string; queueItemId?: string; sendRejected?: boolean; notStarted?: boolean }[],
+): number | undefined {
+  return items.findLast((item) => item.kind === "user" && !isUnstartedUserItem(item))?.id;
 }
 
-/** 异步核对返回时，标签上已有更新的用户消息就丢掉上一回合的结论。 */
-export function appendOutcomeNotes<T extends { id: number; kind: string }>(
+/**
+ * 异步核对返回时，标签上已有更新的用户消息就丢掉上一回合的结论。
+ * 仍在排队（带 `queueItemId`）、本次发送已抛错（`sendRejected`）或宿主没启动
+ * （`notStarted`）的消息不算更新的回合。
+ */
+export function appendOutcomeNotes<
+  T extends { id: number; kind: string; queueItemId?: string; sendRejected?: boolean; notStarted?: boolean },
+>(
   items: readonly T[],
   turnUserId: number | undefined,
   notes: readonly T[],

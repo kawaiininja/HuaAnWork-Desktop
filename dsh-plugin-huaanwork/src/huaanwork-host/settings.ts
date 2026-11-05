@@ -40,10 +40,13 @@ export type AppSettings = {
   agents_catalog_token: string
   /** 智能体目录发布 token（提交审查、查询自己的提交、申请下架）：缺省 ""。 */
   agents_catalog_publish_token: string
+  /** 同时运行的自动化轮次上限：缺省 3，范围 1–8。 */
+  max_concurrent_turns: number
 }
 
 export const DEFAULT_BASE_URL = 'http://127.0.0.1:11434/v1'
 export const DEFAULT_AUTOMATION_TIMEOUT_MS = 10 * 60_000
+export const DEFAULT_MAX_CONCURRENT_TURNS = 3
 
 const DEFAULT_ENTRY: ModelEntry = {
   id: 'default',
@@ -68,6 +71,7 @@ export const defaultSettings: AppSettings = {
   agents_port: '',
   agents_catalog_token: '',
   agents_catalog_publish_token: '',
+  max_concurrent_turns: DEFAULT_MAX_CONCURRENT_TURNS,
 }
 
 export function emptySettings(): AppSettings {
@@ -93,6 +97,14 @@ function parseGuardMode(value: unknown): GuardMode {
 /** 正整数毫秒解析；非法值回落缺省（自动化超时）。 */
 function parsePositiveMs(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback
+}
+
+/** 并发轮次上限解析：仅接受整数，越界夹紧到 1–8，非法值回落缺省 3。 */
+export function parseConcurrentTurns(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return DEFAULT_MAX_CONCURRENT_TURNS
+  if (value < 1) return 1
+  if (value > 8) return 8
+  return value
 }
 
 /** 智能体公用机端口解析：合法端口 1-65535（数字或纯数字字符串），""/null/undefined 返回 ""，其余非法值返回 fallback。 */
@@ -188,6 +200,7 @@ export function parseSettings(raw: unknown): AppSettings {
     agents_catalog_token: typeof rec.agents_catalog_token === 'string' ? rec.agents_catalog_token.trim() : '',
     agents_catalog_publish_token:
       typeof rec.agents_catalog_publish_token === 'string' ? rec.agents_catalog_publish_token.trim() : '',
+    max_concurrent_turns: parseConcurrentTurns(rec.max_concurrent_turns),
     ...mirrorActive(models, asString(rec.active_model_id)),
   }
 }
@@ -219,6 +232,10 @@ export function mergeSettings(current: AppSettings, params: unknown): AppSetting
     typeof rec.agents_catalog_publish_token === 'string'
       ? rec.agents_catalog_publish_token.trim()
       : current.agents_catalog_publish_token
+  const maxConcurrentTurns =
+    rec.max_concurrent_turns !== undefined
+      ? parseConcurrentTurns(rec.max_concurrent_turns)
+      : current.max_concurrent_turns
 
   if (Array.isArray(rec.models)) {
     models = []
@@ -271,6 +288,7 @@ export function mergeSettings(current: AppSettings, params: unknown): AppSetting
     agents_port: agentsPort,
     agents_catalog_token: agentsCatalogToken,
     agents_catalog_publish_token: agentsCatalogPublishToken,
+    max_concurrent_turns: maxConcurrentTurns,
     ...mirrorActive(models, activeId),
   }
 }

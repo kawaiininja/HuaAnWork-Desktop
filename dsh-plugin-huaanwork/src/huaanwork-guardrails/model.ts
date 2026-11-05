@@ -26,6 +26,9 @@ import {
 } from "@huaanwork/model";
 
 import { preferControlCalls } from "./route-tools.ts";
+import { parentSessionOf } from "../huaanwork-host/child-sessions.ts";
+import { readHuaanworkSettingsSync } from "../huaanwork-host/settings.ts";
+import { resolveSessionModel, type SessionModelTable } from "../huaanwork-host/session-models.ts";
 
 const PROVIDER = "deepseek-official";
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
@@ -79,6 +82,8 @@ type ModelSettings = {
 
 type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/llm/src/index.ts(LlmAdapter 已 import;ctx.llm 无单独类型导出)
   huaanworkProfileDir?: string;
+  /** 宿主创建的会话模型绑定表(Task 6 登记);`stream` 每次读取当前值,不固化引用。 */
+  huaanworkSessionModels?: SessionModelTable;
   llm: {
     registerAdapter(providers: string[], adapter: LlmAdapter): unknown;
   };
@@ -220,7 +225,12 @@ async function* readModelStream(
 }
 
 export class HuaAnWorkAdapter extends LlmAdapter {
-  constructor(private readonly profileDir?: string) {
+  constructor(
+    private readonly profileDir?: string,
+    // Loader 并发创建组条目:模型插件的 `apply` 可能早于宿主创建 Map,所以这里接受
+    // getter,由 `stream` 每次读取当前表,而不是在 `apply` 时固化一个可能为空的引用。
+    private readonly sessionModels?: SessionModelTable | (() => SessionModelTable | undefined),
+  ) {
     super();
   }
 
@@ -253,7 +263,32 @@ export class HuaAnWorkAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const settings = loadSettings(this.profileDir);
+    // 选条目与联网门禁同源:绑定的会话用自己那条,否则用全局 active。门禁拦住时
+    // 在发请求之前抛出原因,不静默改打别的端点。
+    const profileDir = this.profileDir ?? process.env.HUAANWORK_PROFILE_DIR ?? "";
+    // 设置只读一次,`models` 与 `active` 来自同一次解析:扁平设置(没有 `models` 数组)
+    // 由 parseSettings 合成 `default` 条目,否则 Task 6 把该 id 写进绑定的会话会被误报
+    // 「模型不存在」。空 profile 目录不落到相对路径读文件(与 loadSettings 的缺省守卫一致)。
+    const hostSettings = profileDir ? readHuaanworkSettingsSync(profileDir) : undefined;
+    const table = typeof this.sessionModels === "function" ? this.sessionModels() : this.sessionModels;
+    const resolved = resolveSessionModel({
+      sessionId: options.sessionId,
+      table: table ?? new Map(),
+      models: hostSettings?.models ?? [],
+      active: {
+        base_url: hostSettings?.base_url ?? DEFAULT_BASE_URL,
+        model: hostSettings?.model ?? "",
+        api_key: hostSettings?.api_key ?? "",
+      },
+      allowNetwork: hostSettings?.allow_network ?? false,
+      parentOf: parentSessionOf,
+    });
+    if (!resolved.ok) throw new Error(resolved.reason);
+    const settings: ModelSettings = {
+      base_url: resolved.base_url,
+      model: resolved.model,
+      api_key: resolved.api_key,
+    };
     // deepseek-flash 经常在 reasoning 里写「接下来调用某工具」，然后 finish_reason=stop，
     // 正文只有一句开场白，甚至没有正文。短 preamble 也当作未完成，带上思考再要一次；
     // 第二次仍没有工具调用或实质正文就报 NO_ACTION，不把第二段思考当成已经完成的答复。
@@ -286,7 +321,10 @@ export class HuaAnWorkAdapter extends LlmAdapter {
 }
 
 export function apply(ctx: Context): void {
-  ctx.llm.registerAdapter([PROVIDER], new HuaAnWorkAdapter(ctx.huaanworkProfileDir));
+  ctx.llm.registerAdapter(
+    [PROVIDER],
+    new HuaAnWorkAdapter(ctx.huaanworkProfileDir, () => ctx.huaanworkSessionModels),
+  );
 }
 
 type StoredModelEntry = {

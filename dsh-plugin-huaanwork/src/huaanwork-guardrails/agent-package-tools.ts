@@ -9,7 +9,6 @@ import type { AttachmentMaps } from './agent-attachments.ts'
 import { detachCreationTools } from '../huaanwork-host/agent-package/creation.ts'
 import type { AgentPackageHost } from '../huaanwork-host/agent-package/host.ts'
 import type { AgentPackageRuntimeRegistry } from '../huaanwork-host/agent-package/runtime.ts'
-import { currentCallerSession } from '../huaanwork-host/child-sessions.ts'
 import type {
   AgentPackageProposalInput,
   AgentPackageToolsMode,
@@ -38,7 +37,6 @@ const HARD_TOOL_TIMEOUT_MS = 150_000
 type ToolContext = {
   tools?: { register(definition: unknown): () => void }
   huaanworkEmit?: (event: RpcEvent) => void
-  huaanworkRouteAgent?: { current: unknown }
   huaanworkAttachments?: AttachmentMaps
   /**
    * `tools/result` 观察器。commit 成功后的解绑必须等工具结果定稿再做:
@@ -84,9 +82,12 @@ const textOutput = {
   },
 }
 
-function sessionIdOf(ctx: ToolContext, exec: ToolExec | undefined): string {
-  const agent = (exec?.agent ?? ctx.huaanworkRouteAgent?.current) as AgentRef | undefined
-  const sessionId = sessionIdOfAgentRef(agent)
+/**
+ * 会话只来自本次执行上下文里的 agent；不再回退到进程级 route-agent 单槽——
+ * 并发后那一格属于别的会话。没有 agent 时该次工具调用直接失败并写回本会话。
+ */
+function sessionIdOf(exec: ToolExec | undefined): string {
+  const sessionId = sessionIdOfAgentRef(exec?.agent as AgentRef | undefined)
   if (!sessionId) throw new Error('当前没有可用于创建智能体的会话')
   return sessionId
 }
@@ -163,7 +164,7 @@ function proposeTool(ctx: ToolContext, host: AgentPackageHost) {
     },
     output: textOutput,
     async execute(args: AgentProposeArgs, exec: { agent?: unknown }) {
-      const sessionId = sessionIdOf(ctx, exec)
+      const sessionId = sessionIdOf(exec)
       const result = await host.propose(sessionId, proposalFromArgs(args))
       if (!result.ok) {
         const details = result.fieldErrors.map((error) => `${error.field}: ${error.message}`).join('\n')
@@ -188,7 +189,7 @@ function commitTool(ctx: ToolContext, host: AgentPackageHost, pendingDetach: Map
     },
     output: textOutput,
     async execute(args: { draftId: string }, exec: ToolExec) {
-      const sessionId = sessionIdOf(ctx, exec)
+      const sessionId = sessionIdOf(exec)
       const result = await host.commit(sessionId, args.draftId, host.lastUserText(sessionId) ?? '')
       if (!result.ok) throw new Error(`智能体未写入：${result.error}`)
 
@@ -245,10 +246,12 @@ export function registerAgentPackageCreationTools(ctx: unknown, host: AgentPacka
 
 type RuntimeExec = ToolExec & { signal?: AbortSignal }
 
-/** Sessions resolve from the executing subagent, then the last user send as a fallback. */
-function runtimeSessionId(ctx: ToolContext, exec: RuntimeExec | undefined): string | undefined {
-  const agent = (exec?.agent ?? ctx.huaanworkRouteAgent?.current) as AgentRef | undefined
-  return sessionIdOfAgentRef(agent) ?? currentCallerSession()
+/**
+ * Sessions resolve from the executing agent only; the removed process-wide fallbacks
+ * (route-agent slot, last user send) belong to other sessions under concurrency.
+ */
+function runtimeSessionId(exec: RuntimeExec | undefined): string | undefined {
+  return sessionIdOfAgentRef(exec?.agent as AgentRef | undefined)
 }
 
 function runtimeFor(registry: AgentPackageRuntimeRegistry, sessionId: string | undefined): AgentPackageTurnRuntime {
@@ -257,7 +260,7 @@ function runtimeFor(registry: AgentPackageRuntimeRegistry, sessionId: string | u
   return runtime
 }
 
-function skillRunTool(ctx: ToolContext, registry: AgentPackageRuntimeRegistry) {
+function skillRunTool(registry: AgentPackageRuntimeRegistry) {
   return defineTool({
     name: AGENT_SKILL_RUN_TOOL,
     description:
@@ -269,7 +272,7 @@ function skillRunTool(ctx: ToolContext, registry: AgentPackageRuntimeRegistry) {
     output: textOutput,
     timeoutMs: HARD_TOOL_TIMEOUT_MS,
     async execute(args: { script: string; args?: Record<string, unknown> }, exec: RuntimeExec) {
-      const runtime = runtimeFor(registry, runtimeSessionId(ctx, exec))
+      const runtime = runtimeFor(registry, runtimeSessionId(exec))
       const result = await runtime.runSkillScript(args.script, args.args ?? {}, exec.signal)
       if (result.isError === true) throw new Error(result.text)
       return { text: result.text }
@@ -288,7 +291,7 @@ function httpTool(ctx: ToolContext, registry: AgentPackageRuntimeRegistry) {
     output: textOutput,
     timeoutMs: HARD_TOOL_TIMEOUT_MS,
     async execute(args: { arguments?: Record<string, unknown> }, exec: RuntimeExec) {
-      const runtime = runtimeFor(registry, runtimeSessionId(ctx, exec))
+      const runtime = runtimeFor(registry, runtimeSessionId(exec))
       const port = runtime.httpPort
       if (port === undefined) throw new Error(`智能体 @${runtime.slug} 没有启用 HTTP 工具`)
 
@@ -391,7 +394,7 @@ export function registerAgentPackageRuntimeTools(
 ): () => void {
   const c = ctx as ToolContext
   if (!c.tools?.register) return () => undefined
-  const disposers = [c.tools.register(skillRunTool(c, registry)), c.tools.register(httpTool(c, registry))]
+  const disposers = [c.tools.register(skillRunTool(registry)), c.tools.register(httpTool(c, registry))]
   return () => {
     for (const dispose of disposers.reverse()) dispose()
   }

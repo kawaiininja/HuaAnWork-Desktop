@@ -12,6 +12,7 @@ import {
 } from '../../huaanwork-guardrails/agent-attachments.ts'
 import { mountSessionMcp } from '../../huaanwork-guardrails/agent-mcp.ts'
 import { refreshAgentRestrict } from '../../huaanwork-guardrails/present-as.ts'
+import { sessionWorkspaceRoot } from '../../huaanwork-guardrails/sandbox-cwd.ts'
 import type { AgentListItem } from '../../client-huaanwork/rpc-types.ts'
 import type { AgentsHost } from '../agents-host.ts'
 import { acceptanceCleanupTimeoutMs, acceptanceDisposeFailure, acceptancePackageDelayMs, acceptancePackageDelayPoint } from '../acceptance-hooks.ts'
@@ -930,7 +931,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           const packageDir = agentPackageDir(profileDir, pkg.slug)
           const persona = await composeAgentPackagePersona(packageDir, manifest, profileDir)
           assertLive()
-          const workspaceRoot = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd()
+          const workspaceRoot = sessionWorkspaceRoot(ctx, sessionId)
 
           // 运行前复验(第一次,createRuntime 之前):目录包每次 dispatch 都重验,
           // 撤销/篡改在这里 fail closed。record 已登记,期间到达的撤销也能 abort。

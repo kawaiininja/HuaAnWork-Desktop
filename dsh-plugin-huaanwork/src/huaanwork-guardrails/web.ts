@@ -2,8 +2,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { webFetch } from "@huaanwork/web-tools";
 import { screenshot } from "@huaanwork/web-tools/screenshot";
+
+import { sessionWorkspaceRoot } from "./sandbox-cwd.ts";
 
 type AttachmentStore = {
   saveImages(
@@ -14,6 +17,7 @@ type AttachmentStore = {
 type Context = {
   huaanworkProfileDir?: string;
   huaanworkWorkspaceRoot?: { current: string };
+  huaanworkSessionRoots?: Map<string, string>;
   /** Cordis：未 inject 的服务不会挂在 ctx 上。attachments 用 inject 回调记下。 */
   inject?(names: readonly string[], callback: (inner: { get?(name: string): AttachmentStore | undefined; attachments?: AttachmentStore }) => void): void;
   tools: {
@@ -77,7 +81,7 @@ export const inject = ["tools"];
 
 export function apply(ctx: Context): void {
   const checkNetwork = () => readAllowNetwork(ctx.huaanworkProfileDir);
-  const workspaceRoot = () => ctx.huaanworkWorkspaceRoot?.current ?? process.cwd();
+  const workspaceRoot = (sessionId?: string) => sessionWorkspaceRoot(ctx, sessionId);
   // tool-fs 用 ctx.inject(['attachments']) 才拿得到 store（deepseek-harness/.../tool-fs/src/index.ts）。
   // 直接读 ctx.attachments 在只 inject 了 tools 的插件上是空的，图片块永远不会出现。
   // 工具本身始终注册：服务未挂载时 saveImage 留空，只走路径兜底。
@@ -117,14 +121,14 @@ export function apply(ctx: Context): void {
         waitMs: { type: "number", description: "Extra wait after load, max 10000." },
       },
       output: shotOutput,
-      async execute(args) {
+      async execute(args, exec) {
         const saveImage = attachments
           ? async (png: Uint8Array, name: string) =>
               (await attachments!.saveImages([{ data: png, mediaType: "image/png", name }]))[0]
           : undefined;
         return screenshot(args, {
           checkNetwork,
-          workspaceRoot: workspaceRoot(),
+          workspaceRoot: workspaceRoot(sessionIdOfAgentRef(exec.agent)),
           ...(saveImage ? { saveImage } : {}),
         }) as never;
       },

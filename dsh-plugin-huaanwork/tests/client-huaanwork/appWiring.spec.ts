@@ -4,14 +4,28 @@ import { test } from "vitest";
 
 import { answerApprovalInTabs } from "../../src/client-huaanwork/logic/chatTabs.ts";
 import {
+  isUnstartedUserItem,
+  noteSendResult,
+  noteTurnEnded,
+  noteWaitingCancelled,
+  noteWaitingFailed,
+  noteWaitingStarted,
+  releaseWaitingItem,
+  sendOpensTurn,
+} from "../../src/client-huaanwork/logic/concurrentTurn.ts";
+import {
   INITIAL_GOAL_TURN_STATE,
   reduceGoalTurn,
   type GoalTurnEvent,
   type GoalTurnState,
 } from "../../src/client-huaanwork/logic/goalRound.ts";
-import { reduceTurnFinal, type TurnFinalEvent } from "../../src/client-huaanwork/logic/toolPanel.ts";
+import { applyTurnFinalToTabs, projectToolPanels, reduceTurnFinal, type TurnFinalEvent } from "../../src/client-huaanwork/logic/toolPanel.ts";
+import { consumeStaleIdle, finishStop } from "../../src/client-huaanwork/logic/stopGate.ts";
+import { appendOutcomeNotes, latestUserItemId, turnChecks } from "../../src/client-huaanwork/logic/outcomeCheck.ts";
+import { interruptTurnItems } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 import { clearFailuresInTabs } from "../../src/client-huaanwork/logic/hostStop.ts";
 import { foldRunAssistantItems } from "../../src/client-huaanwork/logic/runResultAttachments.ts";
+import * as AppModule from "../../src/client-huaanwork/App.tsx";
 
 /**
  * App 两条回调接线的回归门（评审:helper 单测全绿但 App 调用被删仍绿）:
@@ -138,8 +152,8 @@ test("App skips plan-turn outcomes before it lists the workspace tree", () => {
   const turnBody = APP_SOURCE.slice(turnStart, turnEnd);
   assert.match(turnBody, /if \(checks\.requiredFiles\.length > 0 && root\) \{/);
   // 两个针都要真命中：indexOf 未命中返回 -1，单靠大小比较会变成永真断言
-  // （readTurn 现在核对的是 contentItems(items)，旧的 "turnChecks(items)" 已不在源码里）。
-  const checksAt = turnBody.indexOf("turnChecks(contentItems(items))");
+  // （readTurn 现在核对的是带活动用户消息的 contentItems(items)，旧的 "turnChecks(items)" 已不在源码里）。
+  const checksAt = turnBody.indexOf("turnChecks(contentItems(items), turnUserId)");
   const listTreeAt = turnBody.indexOf("listTree(root, WORKSPACE_SCAN_DEPTH)");
   assert.ok(checksAt >= 0, "readTurn still computes the turn checks (rename the needle with it)");
   assert.ok(listTreeAt >= 0, "readTurn still lists the workspace tree");
@@ -349,8 +363,13 @@ test("live-run state is run-scoped: run-end deletes only its own runId and turns
     APP_SOURCE,
     /setRunningRuns\(\(prev\) => \{\s*const next = new Map\(prev\);\s*next\.set\(event\.runId, \{ automationId: event\.automationId \}\);/,
   );
-  // 探活上报的是在跑轮数,不是任务数。
-  assert.match(APP_SOURCE, /bridge\.reportTurns\(\(turnActive \? 1 : 0\) \+ runningRuns\.size\)/);
+  // 探活上报的是在跑轮数,不是任务数:占名额的执行中标签 + 在途运行。
+  assert.match(APP_SOURCE, /bridge\.reportTurns\(runningTurnCount \+ runningRuns\.size\)/);
+  assert.match(
+    APP_SOURCE,
+    /const runningTurnCount = useMemo\(\s*\(\) => Object\.values\(tabRuns\)\.filter\(\(state\) => state\.running\)\.length,/,
+    "the turn count is derived from per-tab running state, not a process-wide boolean",
+  );
   // 运行标签 live 判据按 runId;任务行仍用派生的任务 id 集合。
   assert.match(APP_SOURCE, /isRunTabLive\(activeChat\.id, runningRunIds\)/);
   assert.match(APP_SOURCE, /isRunTabLive\(tab\.id, runningRunIds\)/);
@@ -532,9 +551,19 @@ test("App turn final wiring consumes actual goal actions and sidecarDead only", 
 
   assert.match(
     APP_SOURCE,
-    /const phase = goalTurnRef\.current\.phases\[sessionId \?\? ""\];\s*setChatTabs\(\(prev\) => applyTurnFinalToTabs\(prev, tabId, event, phase\)\)/,
+    /const phase = goalTurnRef\.current\.phases\[sessionId \?\? ""\];/,
     "the goal phase must be sampled before the deferred state updater runs",
   );
+  // 终态按该标签自己的活动用户消息结算（排队中/已抛错的消息不参与）。
+  const finalBody = functionBody("function applyFinalForTab(", "useEffect(() => {");
+  const phaseAt = finalBody.indexOf('const phase = goalTurnRef.current.phases[sessionId ?? ""];');
+  const activeAt = finalBody.indexOf("const activeUserId = tabTurnOf(tabId).activeUserId");
+  const finalCallAt = finalBody.indexOf(
+    "setChatTabs((prev) => applyTurnFinalToTabs(prev, tabId, event, phase, activeUserId));",
+  );
+  assert.ok(phaseAt >= 0, "applyFinalForTab samples the goal phase synchronously");
+  assert.ok(activeAt > phaseAt, "the active user message is read after the phase");
+  assert.ok(finalCallAt > activeAt, "the deferred updater receives the recorded active user message id");
   assert.equal((APP_SOURCE.match(/applyFinalForTab\(targetTabFor\(/g) ?? []).length, 3);
   assert.match(APP_SOURCE, /setItems\(\(prev\) => applyToolEnd\(prev, event\), event\.sessionId\)/);
   assert.match(APP_SOURCE, /applyFinalForTab\(tabId, ticket\.sessionId, \{ kind: "session-end", ok: false, cancelled: true \}\)/);
@@ -550,7 +579,12 @@ test("App turn final wiring consumes actual goal actions and sidecarDead only", 
     /parentTurnLine\(\{\s*hasActiveChild,\s*toolsUnconfirmed: unconfirmedTools,\s*current: turnStatus\(/,
     "the parent line must receive the unconfirmed flag so an active child cannot hide it",
   );
-  assert.match(APP_SOURCE, /hasActiveChild \|\| unconfirmedTools \|\| \(turnActive && turnPulse\.tabId === activeChat\.id\)/);
+  assert.match(APP_SOURCE, /const activeTabRunning = tabRuns\[activeChat\.id\]\?\.running === true;/);
+  assert.match(
+    APP_SOURCE,
+    /hasActiveChild \|\| unconfirmedTools \|\| activeTabRunning/,
+    "the parent turn line follows the visible tab's own running state",
+  );
   assert.doesNotMatch(APP_SOURCE, /runningToolName\(items, hostPhase\)/);
 
   const exitAt = APP_SOURCE.indexOf("await onSidecarExit((payload) => {");
@@ -593,6 +627,875 @@ test("App projects only the final chat rows and persists panel toggle on the anc
   assert.match(APP_SOURCE, /withToolPanelToggle\(tab\.items, anchorId, next\)/);
   assert.match(APP_SOURCE, /toolRows\.map\(\(row\) =>/);
   assert.doesNotMatch(APP_SOURCE, /items\.map\(\(item, index\) => \(\s*<ChatRow/);
-  assert.match(APP_SOURCE, /turnChecks\(contentItems\(items\)\)/);
+  assert.match(APP_SOURCE, /turnChecks\(contentItems\(items\), turnUserId\)/);
   assert.match(APP_SOURCE, /insertBeforeToolRow\(prev, ask, event\.callId\)/);
+});
+
+/** 按函数名切片：锚到下一段已知定义，避免固定字符窗口随注释增长失去意义。 */
+function functionBody(startNeedle: string, endNeedle: string): string {
+  const start = APP_SOURCE.indexOf(startNeedle);
+  const end = APP_SOURCE.indexOf(endNeedle, start);
+  assert.ok(start >= 0, `${startNeedle} is still defined`);
+  assert.ok(end > start, `${startNeedle} is still followed by ${endNeedle}`);
+  return APP_SOURCE.slice(start, end);
+}
+
+test("background automations no longer lock project navigation", () => {
+  // 拆除自动化全局锁：点项目、点子任务、新建项目都不再早退。
+  assert.doesNotMatch(functionBody("async function selectSubtask(", "async function renameSubtask("), /automationActiveRef/);
+  assert.doesNotMatch(functionBody("async function createProjectFlow(", "async function confirmCreateProject("), /automationActiveRef/);
+  assert.doesNotMatch(functionBody("async function openProjectById(", "async function rebindTabSession("), /automationActiveRef/);
+  // 项目列表与「新建项目」只按 sidecar 存活/选择在飞禁用，自动化在跑不再禁用。
+  assert.doesNotMatch(APP_SOURCE, /disabled=\{runningAutomationIds\.size > 0 \|\| sidecarDead\}/);
+  assert.doesNotMatch(APP_SOURCE, /disabled=\{runningAutomationIds\.size > 0 \|\| sidecarDead \|\| selectBusy\}/);
+  assert.match(APP_SOURCE, /disabled=\{sidecarDead \|\| selectBusy\}/);
+});
+
+test("send carries the tab id and selected model and mints under the tab's own root", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  // 后台任务不再挡住发送；发送前的整段工作区对齐只为铸造会话，已由 session.new 的 cwd 取代。
+  assert.doesNotMatch(body, /automationActiveRef/);
+  assert.doesNotMatch(body, /ensureNeutralWorkspace\(\)/);
+  assert.doesNotMatch(body, /alignWorkspaceOnly\(/);
+  // 在途发送按标签 id 挡重入：只挡同一标签，不挡另一个标签。
+  assert.match(body, /if \(sendingRef\.current\.has\(chatId\)\) return;/);
+  assert.match(body, /sendingRef\.current\.add\(chatId\)/);
+  assert.match(body, /sendingRef\.current\.delete\(chatId\)/);
+  // cwd 只属于这条新会话：标签已有项目用项目根，未绑定用中立根。
+  assert.match(body, /const cwd = await sessionCwdForTab\(sendingTab\);/);
+  assert.match(body, /"session\.new", \{\s*fresh: chatId !== "work-1",\s*\.\.\.\(cwd \? \{ cwd \} : \{\}\),/);
+  // 发送参数带当前标签 id、所选 modelId，以及本次 skill 或 at。
+  assert.match(body, /tabId: chatId,/);
+  assert.match(body, /const modelId = resolveSendModelId\(modelPickByTab, chatId, sendingTask\?\.modelId, activeModelId\);/);
+  assert.match(body, /\.\.\.\(modelId \? \{ modelId \} : \{\}\),/);
+  assert.match(body, /\{ at: \{ name: invokedAt\.name, clientMessageId: String\(userMsg\.id\) \} \}/);
+  assert.match(body, /\{ skill: invokedSkill\.name \}/);
+});
+
+test("a mint uses the tab project root, else the neutral root read from workspace.close", () => {
+  assert.match(
+    APP_SOURCE,
+    /const sendModelId = resolveSendModelId\(modelPickByTab, activeChat\.id, activeTabTask\?\.modelId, activeModelId\);/,
+  );
+  const cwdBody = functionBody("async function sessionCwdForTab(", "async function bindDefaultTabSessions(");
+  assert.match(cwdBody, /projects\.find\(\(item\) => item\.id === tab\.projectId\)/);
+  assert.match(cwdBody, /return neutralWorkspaceRoot\(\)/);
+  // 中立根只有 workspace.close 一条查询路径；取到即缓存，且不把应答写进前台工作区状态。
+  const neutralBody = functionBody("async function neutralWorkspaceRoot(", "async function sessionCwdForTab(");
+  assert.match(neutralBody, /"workspace\.close"/);
+  assert.match(neutralBody, /neutralRootRef\.current = root/);
+  assert.doesNotMatch(neutralBody, /setWorkspace\(/);
+});
+
+test("the composer model chip picks the tab model and persists it on a bound task", () => {
+  assert.match(APP_SOURCE, /activeId=\{sendModelId\}/);
+  assert.match(APP_SOURCE, /onSelect=\{\(id\) => void selectTabModel\(id\)\}/);
+  const body = functionBody("async function selectTabModel(", "async function applyThemePref(");
+  // 选择先记在本标签；已有子任务时经 Task 9 的 task.setModel 写回，不切全局当前模型。
+  assert.match(body, /setModelPickByTab\(\(prev\) => \(\{ \.\.\.prev, \[tab\.id\]: id \}\)\)/);
+  assert.match(body, /if \(!tab\.taskId\) return;/);
+  assert.match(body, /await setTaskModel\(\{ taskId: tab\.taskId, modelId: id \}\)/);
+  assert.match(body, /setProjectTasks\(\(prev\) => prev\.map\(\(task\) => \(task\.id === saved\.task\.id \? saved\.task : task\)\)\)/);
+  assert.doesNotMatch(body, /settings\.set/);
+});
+
+/**
+ * 从 `source` 里 `startNeedle` 之后的第一处 `{` 开始按花括号配对取出整块。
+ * 只用于不含模板字符串/正则字面量的函数体；注释里不写花括号。
+ */
+function blockAfter(source: string, startNeedle: string): { start: number; body: string } {
+  const at = source.indexOf(startNeedle);
+  assert.ok(at >= 0, `${startNeedle} is still present`);
+  const open = source.indexOf("{", at);
+  assert.ok(open >= 0, `${startNeedle} is followed by a block`);
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = open; i < source.length; i += 1) {
+    const ch = source[i];
+    if (quote !== null) {
+      if (ch === "\\") i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return { start: open, body: source.slice(open + 1, i) };
+    }
+  }
+  assert.fail(`${startNeedle} block is unterminated`);
+}
+
+test("a queued send preserves the running turn stop latch", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  // 进程级单槽早退已删除：发送不再被另一个标签的回合挡住，也不在应答前自称执行中。
+  assert.doesNotMatch(body, /turnActive/);
+  const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
+  const stateAt = body.indexOf("writeTabRun(chatId, (state) => noteSendResult(state, sent))");
+  const gateAt = body.indexOf("if (sendOpensTurn(sent)) {");
+  assert.ok(sendAt >= 0, "send still awaits the session.send response");
+  assert.ok(stateAt > sendAt, "the tab's run state is written from the response");
+  assert.ok(gateAt > stateAt, "the start branch runs after noteSendResult");
+
+  // epoch、turn-started、活动消息、进度与闩锁清理全部只在 started 初始化里：排队应答碰不到执行中的回合。
+  const gate = blockAfter(body, "if (sendOpensTurn(sent)) {").body;
+  assert.match(gate, /openTurnForTab\(/, "the started-only branch opens the turn through the single init point");
+  assert.equal(
+    (body.match(/openTurnForTab\(/g) ?? []).length,
+    1,
+    "send() has exactly one turn-opening call site",
+  );
+  const openBody = functionBody("function openTurnForTab(", "function clearQueueItem(");
+  for (const needle of [
+    "epoch: tabTurnOf(tabId).epoch + 1",
+    "activeUserId: userId",
+    "stopSessionId: null",
+    "latchOwner: null",
+    "stopping: false",
+    'kind: "turn-started"',
+    "setTurnPulseByTab(",
+  ]) {
+    assert.ok(openBody.includes(needle), `${needle} stays inside the started-only init`);
+  }
+  const beforeResponse = body.slice(0, gateAt);
+  for (const needle of ["epoch:", "turn-started", "setTurnPulseByTab(", "stopSessionId", "latchOwner"]) {
+    assert.ok(!beforeResponse.includes(needle), `${needle} is not written before the started branch`);
+  }
+
+  // 排队只追加等待项，执行中的标签保持 running；不开始回合就不发 turn-started。
+  assert.equal(sendOpensTurn({ waiting: true, started: false }), false);
+  assert.deepEqual(
+    noteSendResult({ running: true, waitingIds: [] }, { waiting: true, started: false, queueItemId: "q1" }),
+    { running: true, waitingIds: ["q1"] },
+  );
+
+  // 停止票据按标签自己的代际扣闩：另一个标签的排队不影响 A 的取消成功。
+  const armed = finishStop({
+    ticket: { id: 1, sessionId: "a-session", epoch: 1 },
+    pending: { id: 1, sessionId: "a-session", epoch: 1 },
+    currentEpoch: 1,
+    ok: true,
+    latchOwner: null,
+  });
+  assert.equal(armed.arm, true);
+  assert.deepEqual(armed.stale, { sessionId: "a-session", epoch: 1 });
+  const stopBody = functionBody("async function stopTurn(", "async function stopAutomationWithReconcile(");
+  assert.match(stopBody, /const turn = tabTurnOf\(tabId\);/);
+  assert.match(stopBody, /const ticket: StopTicket = \{ id: stopSeqRef\.current \+ 1, sessionId, epoch: turn\.epoch \};/);
+  // A 的结束仍记成用户停止：闩锁按该会话自己的标签读取，也只释放它自己那份。
+  assert.match(
+    APP_SOURCE,
+    /const userStopped = event\.event === "session\/end"[\s\S]*?stopOwnerForSession\(eventSessionId\)\?\.turn\.stopSessionId === eventSessionId/,
+  );
+  assert.match(
+    APP_SOURCE,
+    /const owner = stopOwnerForSession\(eventSessionId\);\s*if \(owner !== undefined\) patchTabTurn\(owner\.tabId, \{ stopSessionId: null, stopping: false \}\);/,
+  );
+});
+
+test("a goal intermediate end keeps the tab running", () => {
+  // 相位仍 active 的结束是续轮中间结束：状态机不写结论，App 也不清执行态。
+  let state = reduceGoalTurn(INITIAL_GOAL_TURN_STATE, { kind: "turn-started", sessionId: "s" }).state;
+  state = reduceGoalTurn(state, { kind: "goal-state", phase: "active", sessionId: "s" }).state;
+  const ended = reduceGoalTurn(state, { kind: "session-end", sessionId: "s", ok: true });
+  assert.deepEqual(ended.action, { kind: "none" }, "an active goal round never settles on the round end");
+  assert.equal(ended.state.phases.s, "active", "the goal phase is still active after the intermediate end");
+
+  assert.match(
+    APP_SOURCE,
+    /const goalIntermediate = event\.event === "session\/end"[\s\S]*?event\.ok[\s\S]*?event\.cancelled !== true[\s\S]*?!userStopped[\s\S]*?goalTurnRef\.current\.phases\[eventSessionId \?\? ""\] === "active";/,
+  );
+  assert.match(
+    APP_SOURCE,
+    /const endsTrackedTurn = event\.event === "session\/end"[\s\S]*?!goalIntermediate[\s\S]*?&& endTurn\.sessionId === eventSessionId;/,
+    "an intermediate end must not clear the tab's running state",
+  );
+  // 停止按钮与进度条读该标签自己的执行态；另一个标签的回合不影响它。
+  assert.match(APP_SOURCE, /tabRuns\[activeChat\.id\]\?\.running === true \? \(/);
+  // 续轮只恢复事件所属标签的执行态。
+  assert.match(APP_SOURCE, /if \(drivesTrackedTurn\) setTurnRunning\(true, event\.sessionId\);/);
+  assert.match(APP_SOURCE, /const goalRoundTab = event\.event === "goal\/round" \? turnTabForSession\(eventSessionId\) : undefined;/);
+  assert.match(
+    APP_SOURCE,
+    /const goalRoundDrives = goalRoundTab !== undefined && tabTurnOf\(goalRoundTab\)\.sessionId === eventSessionId;/,
+  );
+  assert.doesNotMatch(APP_SOURCE, /goalRoundDrivesTurn\(/);
+});
+
+test("stale idle uses the event tab epoch", () => {
+  // 同一张停止票据：按标签自己的代际判定会扣闩；拿另一个标签的当前代际判定会被当成旧回合。
+  const ticket = { id: 7, sessionId: "a", epoch: 1 };
+  const own = finishStop({ ticket, pending: ticket, currentEpoch: 1, ok: true, latchOwner: null });
+  const otherTab = finishStop({ ticket, pending: ticket, currentEpoch: 2, ok: true, latchOwner: null });
+  assert.equal(own.arm, true);
+  assert.equal(own.stale?.epoch, 1);
+  assert.equal(otherTab.arm, false, "another tab's epoch must not decide this turn's stop");
+  assert.deepEqual(otherTab.stale, { sessionId: "a", epoch: 1 });
+
+  // 旧结束只按自己标签的代际消费：另一个标签推进代际不影响这条结束。
+  const marker = [{ sessionId: "a", epoch: 1 }];
+  assert.deepEqual(consumeStaleIdle(marker, { sessionId: "a" }, 1), { drop: false, stale: [] });
+  assert.deepEqual(consumeStaleIdle(marker, { sessionId: "a" }, 2), { drop: true, stale: [] });
+
+  assert.match(
+    APP_SOURCE,
+    /const eventTabId = tabIdForSession\(event\.sessionId\);\s*const eventEpoch = tabTurnOf\(eventTabId\)\.epoch;/,
+    "the stale-idle check reads the epoch of the tab that owns the event's session",
+  );
+  assert.match(APP_SOURCE, /consumeStaleIdle\(staleIdleRef\.current, event, eventEpoch\)/);
+  assert.doesNotMatch(APP_SOURCE, /turnEpochRef/, "no process-wide epoch remains");
+  // 造票据与收票据同样用这张标签自己的代际。
+  assert.match(functionBody("async function stopTurn(", "async function stopAutomationWithReconcile("), /epoch: turn\.epoch/);
+  assert.match(functionBody("function settleStop(", "function releaseHeldEnds("), /currentEpoch: turn\.epoch/);
+});
+
+test("a rejected send leaves the running turn stop latch", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  // 只取 session.send 的那个 catch：前面铸造子任务会话的 catch 不在这里。
+  const sendAt = body.indexOf("const sent = await rpcCall<SessionSendResult>");
+  assert.ok(sendAt >= 0, "send still awaits the session.send response");
+  const catchAt = body.indexOf("} catch (error) {", sendAt);
+  assert.ok(catchAt > sendAt, "the session.send rejection path is still present");
+  const catchBody = blockAfter(body.slice(catchAt), "catch (error) {").body;
+  // 本次消息标成未启动；失败原因仍然追加（停止闩锁扣着也追加，不提前 return）。
+  assert.match(catchBody, /item\.kind === "user" && item\.id === userMsg\.id \? \{ \.\.\.item, sendRejected: true \} : item/);
+  assert.match(catchBody, /items: \[\s*\.\.\.tab\.items\.map\([\s\S]*?\),\s*note,\s*\]/);
+  assert.doesNotMatch(catchBody, /^\s*return;/m);
+  // 仍执行中的标签不标 sessionFailed。
+  assert.match(catchBody, /tabRunOf\(chatId\)\.running \? \{\} : \{ sessionFailed: true \}/);
+  // 不清同标签正在执行回合的停止闩锁、stopping、epoch 或执行态。
+  for (const needle of [
+    "latchOwner",
+    "stopSessionId",
+    "stopping:",
+    "stopping.current",
+    "epoch:",
+    "patchTabTurn(",
+    "writeTabRun(",
+    "turn-started",
+    "setTurnPulseByTab(",
+  ]) {
+    assert.ok(!catchBody.includes(needle), `the catch must not touch ${needle}`);
+  }
+
+  const finallyBody = blockAfter(body, "} finally {").body;
+  assert.match(finallyBody, /sendingRef\.current\.delete\(chatId\);/);
+  assert.doesNotMatch(finallyBody, /patchTabTurn|writeTabRun|setChatTabs/);
+
+  // 失败的消息不参与最新用户消息与终态选择：终态仍落在 A 的活动消息上。
+  const items = [
+    { id: 1, kind: "user" as const },
+    { id: 2, kind: "user" as const, sendRejected: true },
+  ];
+  assert.equal(latestUserItemId(items), 1);
+  const tabs = [{ id: "a", items, turnFinalByUserId: {}, turnFinalWithoutUser: false }];
+  const settled = applyTurnFinalToTabs(tabs, "a", { kind: "session-end", ok: false, cancelled: true }, undefined, 1);
+  assert.deepEqual(settled[0]?.turnFinalByUserId, { 1: true });
+});
+
+/** 本次发送在应答回来之前暂存早到事件的闸门（挂载期事件闭包里的一份声明）。 */
+function earlyEventGate(): string {
+  return functionBody(
+    "const holdEarlyEvent = (incoming: RpcEvent): boolean => {",
+    "if (holdEarlyEvent(event)) return;",
+  );
+}
+
+test("queued send opens the goal window only when the turn starts", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
+  const gateAt = body.indexOf("if (sendOpensTurn(sent)) {");
+  assert.ok(sendAt >= 0, "send still awaits the session.send response");
+  assert.ok(gateAt > sendAt, "the turn only opens after the response says it started");
+  assert.match(blockAfter(body, "if (sendOpensTurn(sent)) {").body, /openTurnForTab\(/);
+  assert.doesNotMatch(
+    body.slice(0, gateAt),
+    /openTurnForTab\(/,
+    "nothing opens a goal window or bumps the epoch before the started response",
+  );
+
+  // 唯一的初始化点：epoch、turn-started、活动消息与进度都在这里。
+  const openBody = functionBody("function openTurnForTab(", "function clearQueueItem(");
+  assert.match(openBody, /epoch: tabTurnOf\(tabId\)\.epoch \+ 1/);
+  assert.match(openBody, /kind: "turn-started"/);
+  assert.match(openBody, /activeUserId: userId/);
+  assert.match(openBody, /setTurnPulseByTab\(/);
+  assert.equal((openBody.match(/epoch:/g) ?? []).length, 1, "one turn start bumps the epoch exactly once");
+
+  // queue-start 走同一段初始化，且在清掉等待文案之后。
+  const queueBranchAt = APP_SOURCE.indexOf('if (event.event === "session/queue-start") {');
+  assert.ok(queueBranchAt >= 0, "the queue-start branch is wired");
+  assert.match(
+    APP_SOURCE.slice(queueBranchAt),
+    /beginQueuedTurn\(queueItemTab\(event\.queueItemId\) \?\? event\.tabId, event\.sessionId, event\.queueItemId\);/,
+  );
+  const beginBody = functionBody("function beginQueuedTurn(", "function failQueuedTurn(");
+  const stateAt = beginBody.indexOf("queuedTurnRunState(state, queueItemId, userId !== undefined)");
+  const openAt = beginBody.indexOf("openTurnForTab(tabId, sessionId, userId)");
+  assert.ok(stateAt >= 0, "the queued turn settles its own waiting item through the shared state decision");
+  assert.ok(openAt > stateAt, "the epoch and goal window open after the waiting item is consumed");
+  const stateBody = functionBody("export function queuedTurnRunState(", "export function upsertTodoItem(");
+  assert.match(stateBody, /noteWaitingStarted\(state, queueItemId\)/, "an owned start still sets the tab running");
+});
+
+test("a queued response backfills the inserted user message", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
+  const pendingAt = body.indexOf("pendingSendsRef.current.set(chatId, pending)");
+  assert.ok(pendingAt >= 0 && pendingAt < sendAt, "the pending identity exists before the send leaves the client");
+  const stateAt = body.indexOf("writeTabRun(chatId, (state) => noteSendResult(state, sent))");
+  const backfillAt = body.indexOf('item.kind === "user" && item.id === userMsg.id ? { ...item, queueItemId } : item');
+  assert.ok(stateAt > sendAt, "the tab's run state comes from the response");
+  assert.ok(backfillAt > stateAt, "the queue item id is written back onto the already inserted message");
+  assert.match(body, /queueOwnersRef\.current\.set\(queueItemId, \{ tabId: chatId, userId: userMsg\.id \}\)/);
+  // 宿主没启动也没有排队项：这条消息只标 notStarted，不写等待、不占回合。
+  assert.match(body, /} else if \(!sent\.started\) \{/);
+  assert.match(body, /item\.kind === "user" && item\.id === userMsg\.id \? \{ \.\.\.item, notStarted: true \} : item/);
+
+  // 等待文案挂在带 queueItemId 的那条用户消息上，不挂在标签级另一份列表。
+  const rowAt = APP_SOURCE.indexOf("function ChatRow(");
+  const rowEnd = APP_SOURCE.indexOf("\nfunction PlanCard(", rowAt);
+  assert.ok(rowAt >= 0 && rowEnd > rowAt, "ChatRow is still a top-level component before PlanCard");
+  const row = APP_SOURCE.slice(rowAt, rowEnd);
+  assert.match(row, /if \(item\.queueItemId !== undefined\) \{/);
+  assert.match(row, /等待当前任务/);
+  assert.match(row, /onCancelWaiting\?\.\(queueItemId\)/);
+  assert.match(APP_SOURCE, /onCancelWaiting=\{\(queueItemId\) => void cancelWaiting\(queueItemId\)\}/);
+
+  // 等待消息的取消只带这条 queueItemId；停止按钮仍只停整条回合。
+  const cancelBody = functionBody("async function cancelWaiting(", "async function stopTurn(");
+  assert.match(cancelBody, /noteWaitingCancelled\(state, queueItemId\)/);
+  assert.match(cancelBody, /await rpcCall\("session\.cancel", \{ queueItemId \}\);/);
+  assert.doesNotMatch(cancelBody, /sessionId/);
+  assert.match(functionBody("async function stopTurn(", "async function stopAutomationWithReconcile("), /await rpcCall\("session\.cancel", \{ sessionId \}\);/);
+  assert.doesNotMatch(
+    functionBody("async function stopTurn(", "async function stopAutomationWithReconcile("),
+    /queueItemId/,
+    "the composer stop never cancels a single waiting item",
+  );
+
+  // A 的终态仍落在 A 的活动消息上：后面那条等待消息与没启动的消息都不参与选择。
+  const items = [
+    { id: 1, kind: "user" as const },
+    { id: 2, kind: "user" as const, queueItemId: "q1" },
+    { id: 3, kind: "user" as const, notStarted: true },
+  ];
+  assert.equal(latestUserItemId(items), 1);
+  const tabs = [{ id: "a", items, turnFinalByUserId: {}, turnFinalWithoutUser: false }];
+  assert.deepEqual(
+    applyTurnFinalToTabs(tabs, "a", { kind: "session-end", ok: true, cancelled: false }, undefined, 1)[0]?.turnFinalByUserId,
+    { 1: true },
+  );
+});
+
+test("queue fail does not duplicate the emitted notice", () => {
+  const failBody = functionBody("function failQueuedTurn(", "function takePendingBuffer(");
+  const removedAt = failBody.indexOf("noteWaitingFailed(state, queueItemId)");
+  const sameAt = failBody.indexOf("if (lastAgentNoticeRef.current[tabId] === reason) {");
+  const noteAt = failBody.indexOf("noteTab(tabId, reason);");
+  assert.ok(removedAt >= 0, "the waiting item is dropped");
+  assert.ok(sameAt > removedAt, "the duplicate check runs on the waiting item's own tab");
+  assert.ok(noteAt > sameAt, "an identical agent/notice suppresses the second footnote");
+  assert.match(failBody, /delete lastAgentNoticeRef\.current\[tabId\];/, "the notice is consumed once");
+  assert.match(failBody, /noteTab\(tabId, reason\);/, "a recheck failure without a notice still shows its reason");
+  assert.match(
+    APP_SOURCE,
+    /lastAgentNoticeRef\.current\[target\] = event\.text;/,
+    "agent/notice records the text it appended",
+  );
+  // 只去掉这条等待，不把执行中的回合改成结束。
+  assert.deepEqual(noteWaitingFailed({ running: true, waitingIds: ["q1"] }, "q1"), { running: true, waitingIds: [] });
+});
+
+test("a queue-failed user message does not hijack the previous turn outcome", () => {
+  type Item = { id: number; kind: "user" | "assistant"; text: string; queueItemId?: string; notStarted?: boolean };
+  // A 执行、B 排队：标签状态完全按 App 接线的顺序推一遍。
+  let run = noteSendResult({ running: false, waitingIds: [] }, { waiting: false, started: true });
+  run = noteSendResult(run, { waiting: true, started: false, queueItemId: "q1" });
+  assert.deepEqual(run, { running: true, waitingIds: ["q1"] });
+  let items: Item[] = [
+    { id: 1, kind: "user", text: "A" },
+    { id: 2, kind: "user", text: "B", queueItemId: "q1" },
+  ];
+  // B 出队复检失败：等待项消失，B 的消息留在列表里但标成未启动。
+  run = noteWaitingFailed(run, "q1");
+  items = items.map((item) => item.queueItemId === "q1" ? releaseWaitingItem(item, false) : item);
+  assert.deepEqual(items[1], { id: 2, kind: "user", text: "B", queueItemId: undefined, notStarted: true });
+  assert.deepEqual(run, { running: true, waitingIds: [] }, "a failed queue item never ends the running turn");
+
+  // A 的 session/end：活动消息仍是 A，失败那条既不承载终态也不丢 A 的结论。
+  const activeUserId = latestUserItemId(items);
+  assert.equal(activeUserId, 1);
+  const settled = applyTurnFinalToTabs(
+    [{ id: "a", items, turnFinalByUserId: {}, turnFinalWithoutUser: false }],
+    "a",
+    { kind: "session-end", ok: true, cancelled: false },
+    undefined,
+    activeUserId,
+  );
+  assert.deepEqual(settled[0]?.turnFinalByUserId, { 1: true });
+  const conclusion: Item = { id: 3, kind: "assistant", text: "结论" };
+  assert.deepEqual(appendOutcomeNotes(items, activeUserId, [conclusion]), [...items, conclusion]);
+
+  // 反证：同两条消息不标未启动时，B 会抢走「最新用户消息」，A 的结论被丢弃。
+  const unmarked: Item[] = [
+    { id: 1, kind: "user", text: "A" },
+    { id: 2, kind: "user", text: "B" },
+  ];
+  assert.equal(latestUserItemId(unmarked), 2);
+  assert.equal(appendOutcomeNotes(unmarked, 1, [conclusion]).length, 2, "without the mark the previous conclusion is lost");
+
+  // 接线：出队失败按未启动收尾，出队开始去掉等待与插入时的未启动标记。
+  assert.match(
+    functionBody("function clearQueueItem(", "function beginQueuedTurn("),
+    /outcome === "started" \? startUserItem\(item\) : releaseWaitingItem\(item, false\)/,
+  );
+  assert.match(
+    functionBody("function failQueuedTurn(", "function takePendingBuffer("),
+    /clearQueueItem\(tabId, queueItemId, "unstarted"\);/,
+    "a queue failure keeps the message but marks it unstarted",
+  );
+  assert.match(
+    functionBody("function beginQueuedTurn(", "function failQueuedTurn("),
+    /clearQueueItem\(tabId, queueItemId\);/,
+    "a queue item that really starts is not marked unstarted",
+  );
+});
+
+test("a cancelled waiting message is not the latest user message", () => {
+  type Item = { id: number; kind: "user"; text: string; queueItemId?: string; notStarted?: boolean };
+  const waiting: Item[] = [
+    { id: 1, kind: "user", text: "A" },
+    { id: 2, kind: "user", text: "B", queueItemId: "q1" },
+  ];
+  // 用户取消：等待项撤掉，消息留在列表里但同样标成未启动。
+  assert.deepEqual(noteWaitingCancelled({ running: true, waitingIds: ["q1"] }, "q1"), {
+    running: true,
+    waitingIds: [],
+  });
+  const cancelled = waiting.map((item) => item.queueItemId === "q1" ? releaseWaitingItem(item, false) : item);
+  assert.equal(isUnstartedUserItem(cancelled[1] ?? {}), true);
+  assert.equal(latestUserItemId(cancelled), 1, "the cancelled message never becomes the latest user message");
+  const settled = applyTurnFinalToTabs(
+    [{ id: "a", items: cancelled, turnFinalByUserId: {}, turnFinalWithoutUser: false }],
+    "a",
+    { kind: "session-end", ok: false, cancelled: true },
+    undefined,
+    latestUserItemId(cancelled),
+  );
+  assert.deepEqual(settled[0]?.turnFinalByUserId, { 1: true }, "the cancelled message cannot take A's terminal state");
+  assert.match(
+    functionBody("async function cancelWaiting(", "async function stopTurn("),
+    /clearQueueItem\(tabId, queueItemId, "unstarted"\);/,
+    "cancelling a waiting item marks its message unstarted",
+  );
+});
+
+test("early session end is buffered until the started response", () => {
+  const holdSource = earlyEventGate();
+  assert.match(holdSource, /incoming\.event === "session\/end"/);
+  assert.match(holdSource, /pendingSendOfSession\(sessionId\)/);
+  const goalCheckAt = holdSource.indexOf("if (!isGoalEvent) return false;");
+  const goalPushAt = holdSource.lastIndexOf("pending.buffered.push(incoming);");
+  assert.ok(goalCheckAt >= 0, "only goal and end events take the buffering path");
+  assert.ok(goalPushAt > goalCheckAt, "an early end does reach this send's buffer");
+
+  const gateAt = APP_SOURCE.indexOf("if (holdEarlyEvent(event)) return;");
+  assert.ok(gateAt >= 0, "the early-event gate is wired into the sidecar event handler");
+  const stopGateAt = APP_SOURCE.indexOf('if (event.event === "session/end") {', gateAt);
+  const heldAt = APP_SOURCE.indexOf("heldEndsRef.current.push(event);", gateAt);
+  assert.ok(stopGateAt > gateAt, "the early end is held before the stop-ticket gate");
+  assert.ok(heldAt > gateAt, "the early end never reaches the held-end queue while its send is pending");
+
+  // 身份写回 → 初始化回合 → 重放；started:false 只丢本次缓冲。
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const openAt = body.indexOf("openTurnForTab(");
+  const replayAt = body.indexOf("for (const buffered of takePendingBuffer(pending, sent)) applySidecarEventRef.current(buffered);");
+  assert.ok(openAt >= 0, "send opens the turn through the shared init point");
+  assert.ok(replayAt > openAt, "buffered events replay after the identity is written and the window opens");
+  const takeBody = functionBody("function takePendingBuffer(", "function dropPending(");
+  assert.match(takeBody, /if \(sendOpensTurn\(sent\)\) return buffered;/);
+  assert.match(takeBody, /return \[\];/, "a started:false response only discards this send's buffer");
+
+  // 重放后的结束仍清 running，终态落在本次用户消息上。
+  const running = noteSendResult({ running: false, waitingIds: [] }, { waiting: false, started: true });
+  assert.equal(running.running, true);
+  assert.deepEqual(noteTurnEnded(running), { running: false, waitingIds: [] });
+});
+
+test("early queue start is buffered until the queued response", () => {
+  const holdSource = earlyEventGate();
+  const knownAt = holdSource.indexOf("if (queueItemTab(incoming.queueItemId) !== undefined) return false;");
+  const firstPushAt = holdSource.indexOf("pending.buffered.push(incoming);");
+  assert.ok(knownAt >= 0, "a queue event that already matches a waiting message is handled immediately");
+  assert.ok(firstPushAt > knownAt, "an unknown queue item is buffered only after that check");
+  assert.match(holdSource, /pendingSendOfTab\(incoming\.tabId\)/, "queue events are buffered per tab");
+
+  // 排队应答只重放与本条 queueItemId 一致的队列事件，其他未知 id 不得套用。
+  const takeBody = functionBody("function takePendingBuffer(", "function dropPending(");
+  assert.match(takeBody, /sent\.waiting && sent\.queueItemId !== undefined/);
+  assert.match(takeBody, /event\.queueItemId === queueItemId/);
+  assert.match(takeBody, /\(event\.event === "session\/queue-start" \|\| event\.event === "session\/queue-fail"\)/);
+
+  // 重放 queue-start 之后：等待项清空、running 为真，两者不并存。
+  const waiting = noteSendResult({ running: true, waitingIds: [] }, { waiting: true, started: false, queueItemId: "q1" });
+  assert.deepEqual(waiting, { running: true, waitingIds: ["q1"] });
+  const started = noteWaitingStarted(waiting, "q1");
+  assert.deepEqual(started, { running: true, waitingIds: [] });
+});
+
+test("pending send does not buffer the previous turn events", () => {
+  const holdSource = earlyEventGate();
+  const runningGuardAt = holdSource.indexOf(
+    "if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;",
+  );
+  const lastPushAt = holdSource.lastIndexOf("pending.buffered.push(incoming);");
+  assert.ok(runningGuardAt >= 0, "a running turn on the same session keeps its events out of the buffer");
+  assert.ok(lastPushAt > runningGuardAt, "the running-turn guard runs before the goal events are buffered");
+
+  // B 的 waiting 应答不撤销 A 的停止闩锁或终态。
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const waitingBranch = blockAfter(body, "if (sent.waiting && sent.queueItemId !== undefined) {").body;
+  for (const needle of ["patchTabTurn(", "stopSessionId", "latchOwner", "stopping", "writeTabRun("]) {
+    assert.ok(!waitingBranch.includes(needle), `the waiting branch must not touch ${needle}`);
+  }
+  const a = { running: true, waitingIds: [] as string[] };
+  assert.deepEqual(noteSendResult(a, { waiting: true, started: false, queueItemId: "qb" }), {
+    running: true,
+    waitingIds: ["qb"],
+  });
+  const ticket = { id: 3, sessionId: "a-session", epoch: 1 };
+  const armed = finishStop({ ticket, pending: ticket, currentEpoch: 1, ok: true, latchOwner: null });
+  assert.equal(armed.arm, true, "another tab's queued send leaves A's stop ticket armed");
+});
+
+test("a cross-tab running turn's session end is never buffered into another tab's pending send", () => {
+  const holdSource = earlyEventGate();
+  // 既有本标签规则不变:pending 自己的标签正在执行同会话上一回合时事件照常即时处理。
+  const sameTabGuardAt = holdSource.indexOf(
+    "if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;",
+  );
+  assert.ok(sameTabGuardAt >= 0, "the same-tab running-turn guard is intact");
+
+  // 最终评审 Important 1:标签 A 正在执行会话 S,标签 B 也绑定 S 并发送(同根排队)。
+  // B 的应答未回时 A 的 session/end 到达:它属于 A 的执行中回合,必须照常即时结算。
+  // 若被放进 B 的 pending 缓冲,B 的 waiting 应答只重放匹配 queueItemId 的队列事件,
+  // A 的结束会被丢弃,A 永久 running。
+  const crossTabLookupAt = holdSource.indexOf("const turnTab = turnTabForSession(sessionId);");
+  assert.ok(crossTabLookupAt > sameTabGuardAt, "an any-tab turn lookup runs after the same-tab guard");
+  const crossTabGuardAt = holdSource.indexOf(
+    "if (turnTab !== undefined && tabRunOf(turnTab).running && tabTurnOf(turnTab).sessionId === sessionId) return false;",
+  );
+  assert.ok(crossTabGuardAt > crossTabLookupAt, "the any-tab guard judges the running turn via tabRunOf/tabTurnOf");
+  const lastPushAt = holdSource.lastIndexOf("pending.buffered.push(incoming);");
+  assert.ok(lastPushAt > crossTabGuardAt, "goal events are buffered only after the any-tab running guard");
+
+  // 行为钉:A 的结束即时结算(执行态落下),B 的 waiting 应答只写 B 自己的等待位,
+  // 不触碰 A 的停止闩锁与 epoch(生产 reducer 实测,非 helper 布尔)。
+  const settled = noteTurnEnded({ running: true, waitingIds: [] });
+  assert.deepEqual(settled, { running: false, waitingIds: [] }, "A's end settles A's run state immediately");
+  const a = { running: true, waitingIds: [] as string[] };
+  assert.deepEqual(noteSendResult(a, { waiting: true, started: false, queueItemId: "qb" }), {
+    running: true,
+    waitingIds: ["qb"],
+  });
+  const ticket = { id: 3, sessionId: "s-shared", epoch: 1 };
+  const armed = finishStop({ ticket, pending: ticket, currentEpoch: 1, ok: true, latchOwner: null });
+  assert.equal(armed.arm, true, "B's queued send on the shared session leaves A's stop ticket armed");
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const waitingBranch = blockAfter(body, "if (sent.waiting && sent.queueItemId !== undefined) {").body;
+  for (const needle of ["openTurnForTab(", "patchTabTurn(", "writeTabRun("]) {
+    assert.ok(!waitingBranch.includes(needle), `the waiting branch must not touch ${needle}`);
+  }
+});
+
+test("the diff follows the session's own tab", () => {
+  assert.doesNotMatch(APP_SOURCE, /setDiff\(/, "the process-wide diff setter is gone");
+  assert.match(APP_SOURCE, /setDiffsByTab\(\(prev\) => noteDiffForTab\(prev, diffTab, event\.text\)\)/);
+  assert.match(APP_SOURCE, /const diff = diffsByTab\[activeChat\.id\] \?\? "";/, "the pane shows the visible tab's own diff");
+  const diffAt = APP_SOURCE.indexOf('if (event.event === "diff") {');
+  assert.ok(diffAt >= 0, "the diff branch is still wired");
+  const diffBody = blockAfter(APP_SOURCE.slice(diffAt), 'if (event.event === "diff") {').body;
+  assert.match(diffBody, /const diffTab = tabIdForSession\(event\.sessionId\);/);
+  assert.match(diffBody, /if \(diffTab !== undefined\) \{/, "no session id writes no tab at all");
+  assert.match(diffBody, /if \(activeTabRef\.current === diffTab\) setRightTab\("diff"\);/, "a background diff never switches the pane");
+});
+
+/** 活动回合 + 一条排队中（带 `queueItemId`）的用户消息：B 还没开始执行。 */
+function turnWithQueuedMessage(): Parameters<typeof AppModule.appendToken>[0] {
+  return [
+    { id: 1, kind: "user", text: "A 的请求" },
+    { id: 2, kind: "tool", card: { key: "tool-1", name: "bash", callId: "call-1", status: "start" } },
+    { id: 3, kind: "user", text: "B 的请求", queueItemId: "q-b" },
+  ];
+}
+
+test("a queued user message does not split the running turn", () => {
+  const items = turnWithQueuedMessage();
+
+  // 工具面板：B 不终结 A 的段，运行中的面板保持展开。
+  const rows = projectToolPanels(items, { contentItems: [], connectionLost: false });
+  const panels = rows.filter((row) => row.kind === "panel");
+  assert.equal(panels.length, 1, "one running turn projects one panel");
+  assert.equal(panels[0]?.kind === "panel" ? panels[0].panel.expanded : false, true);
+  assert.ok(rows.some((row) => row.kind === "item" && row.item.kind === "user" && row.item.id === 3), "the queued message still renders");
+
+  // 正文：A 的流式 token 写回 A 的回合，不新开在 B 后面。
+  const streamed = AppModule.appendToken(items, "输出", () => 90);
+  assert.equal(streamed.length, items.length + 1);
+  assert.equal(streamed[2]?.kind, "assistant", "the stream lands before the queued message");
+  assert.equal(streamed.at(-1)?.kind, "user", "the queued message stays last");
+  const continued = AppModule.appendToken(streamed, "续写", () => 91);
+  assert.equal(continued.length, streamed.length, "a later token extends the same assistant item");
+  assert.equal(continued[2]?.kind === "assistant" ? continued[2].text : "", "输出续写");
+
+  // 思考：只保留一块，且落在 B 之前。
+  const thought = AppModule.applyReasoning(items, "先想一下", false, () => 92);
+  assert.equal(thought[2]?.kind, "thinking", "reasoning stays inside the running turn");
+  assert.equal(thought.at(-1)?.kind, "user");
+  const moreThought = AppModule.applyReasoning(thought, "再想一下", false, () => 93);
+  assert.equal(
+    moreThought.filter((item) => item.kind === "thinking").length,
+    1,
+    "a second reasoning event extends the same thinking block",
+  );
+
+  // 待办：todo_write 替换本回合那一份，不在 B 后面追加第二份。
+  const todos = [{ content: "写报告", status: "pending" as const }];
+  const todoItems = AppModule.upsertTodoItem(items, todos, () => 94);
+  assert.equal(todoItems[2]?.kind, "todo", "the todo list lands inside the running turn");
+  assert.equal(todoItems.at(-1)?.kind, "user");
+  const nextTodos = [{ content: "写报告", status: "completed" as const }];
+  const replaced = AppModule.upsertTodoItem(todoItems, nextTodos, () => 95);
+  assert.equal(replaced.length, todoItems.length, "the next todo_write replaces this turn's list");
+  assert.equal(replaced.filter((item) => item.kind === "todo").length, 1);
+
+  // 计划卡：仍画在自己那行工具之前，不落到 B 后面。
+  const planItems = AppModule.insertBeforeToolRow(
+    turnWithQueuedMessage(),
+    { id: 96, kind: "note", text: "计划" },
+    "call-1",
+  );
+  assert.equal(planItems[1]?.kind, "note", "the plan card sits before its own tool row");
+  assert.equal(planItems.at(-1)?.kind, "user", "the queued message stays last");
+});
+
+/** 活动回合 + 一条刚插入、`session.send` 应答还没回来的用户消息（还没有 queueItemId）。 */
+function turnWithInsertedMessage(): Parameters<typeof AppModule.appendToken>[0] {
+  return [
+    { id: 1, kind: "user", text: "A 的请求" },
+    { id: 2, kind: "tool", card: { key: "tool-1", name: "bash", callId: "call-1", status: "start" } },
+    { id: 3, kind: "user", text: "B 的请求", notStarted: true },
+  ];
+}
+
+test("a just-inserted user message stays inside the running turn's append window", () => {
+  const items = turnWithInsertedMessage();
+  // 插入时即标未启动：应答回来之前这条消息不参与「最新用户消息」的选择。
+  const insertedMessage = items[2];
+  assert.ok(insertedMessage?.kind === "user");
+  assert.equal(isUnstartedUserItem(insertedMessage), true);
+  assert.equal(latestUserItemId(items), 1);
+
+  // 工具面板不为它切段：A 的面板仍是运行中、展开。
+  const panels = projectToolPanels(items, { contentItems: [], connectionLost: false })
+    .filter((row) => row.kind === "panel");
+  assert.equal(panels.length, 1, "the inserted message does not cut the running turn's panel");
+  assert.equal(panels[0]?.kind === "panel" ? panels[0].panel.expanded : false, true);
+
+  // 流式正文、思考、待办、计划卡与工具行都写回 A，不落到 B 后面。
+  const streamed = AppModule.appendToken(items, "输出", () => 90);
+  assert.equal(streamed[2]?.kind, "assistant", "the stream lands before the inserted message");
+  assert.equal(streamed.at(-1)?.kind, "user", "the inserted message stays last");
+  const thought = AppModule.applyReasoning(items, "先想一下", false, () => 91);
+  assert.equal(thought[2]?.kind, "thinking");
+  assert.equal(thought.at(-1)?.kind, "user");
+  const todo = AppModule.upsertTodoItem(items, [{ content: "写报告", status: "pending" as const }], () => 92);
+  assert.equal(todo[2]?.kind, "todo");
+  assert.equal(todo.at(-1)?.kind, "user");
+  const plan = AppModule.insertBeforeToolRow(items, { id: 93, kind: "note", text: "计划" }, "call-1");
+  assert.equal(plan[1]?.kind, "note");
+  assert.equal(plan.at(-1)?.kind, "user");
+  const row = AppModule.insertTurnItem(items, { id: 94, kind: "note", text: "工具行" });
+  assert.equal(row[2]?.id, 94);
+  assert.equal(row.at(-1)?.kind, "user");
+
+  // 标签上还没有任何已启动回合时（首条消息刚插入），写入位置仍是末尾：正文不能跑到问题前面。
+  const fresh = [{ id: 3, kind: "user" as const, text: "B 的请求", notStarted: true }];
+  const freshStream = AppModule.appendToken(fresh, "输出", () => 95);
+  assert.equal(freshStream[0]?.kind, "user");
+  assert.equal(freshStream.at(-1)?.kind, "assistant");
+});
+
+test("the sent message is unstarted until the started response clears it", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  assert.match(
+    body,
+    /const userMsg: ChatItem = \{ id: allocId\(\), kind: "user", text, notStarted: true \};/,
+    "the just-inserted message carries the unstarted marker before the response",
+  );
+  const gate = blockAfter(body, "if (sendOpensTurn(sent)) {").body;
+  assert.match(gate, /startUserItem\(item\)/, "only the started response clears the marker");
+  assert.equal((body.match(/startUserItem\(/g) ?? []).length, 1, "send clears the marker at exactly one point");
+  // 排队项真正出队：等待项与插入标记一起清掉；失败/取消保留消息但标未启动。
+  const clearBody = functionBody("function clearQueueItem(", "function beginQueuedTurn(");
+  assert.match(
+    clearBody,
+    /outcome === "started" \? startUserItem\(item\) : releaseWaitingItem\(item, false\)/,
+    "a queue item that really starts drops both markers; a failed or cancelled one stays unstarted",
+  );
+  assert.deepEqual(
+    AppModule.startUserItem({ id: 3, kind: "user", text: "B", queueItemId: "q-b", notStarted: true }),
+    { id: 3, kind: "user", text: "B" },
+  );
+  assert.equal(isUnstartedUserItem(AppModule.startUserItem({ id: 3, kind: "user", notStarted: true })), false);
+});
+
+test("the pre-response window reads the active message for its outcome checks", () => {
+  const items = [
+    { id: 1, kind: "user" as const, text: "生成 report.md，并运行 `pnpm test`" },
+    { id: 2, kind: "tool" as const, card: { name: "bash", command: "pnpm test", status: "end" as const, isError: false } },
+    { id: 3, kind: "user" as const, text: "生成 other.md，并运行 `pnpm build`" },
+  ];
+  // 没有标记时原始回落会读到刚插入的那条；该标签记录的活动消息必须压过它。
+  assert.equal(latestUserItemId(items), 3);
+  const turnUserId = AppModule.turnUserIdFor({ activeUserId: 1 }, items);
+  assert.equal(turnUserId, 1, "the tab's recorded active message wins over the inserted one");
+  const checks = turnChecks(items, turnUserId);
+  assert.deepEqual(checks.requiredFiles, ["report.md"]);
+  assert.deepEqual(checks.requiredCommands, ["pnpm test"]);
+  // 没有记录活动消息（历史标签）时回落到最后一条已启动的用户消息。
+  const marked = [
+    { id: 1, kind: "user" as const, text: "A" },
+    { id: 2, kind: "user" as const, text: "B", notStarted: true },
+  ];
+  assert.equal(AppModule.turnUserIdFor({ activeUserId: null }, marked), 1);
+  // readTurn 用这条规则选消息，不再直接取最后一条用户消息。
+  const readBody = functionBody("const readTurn = async (", "const appendTurnNotes = (");
+  assert.match(readBody, /const turnUserId = turnUserIdFor\(tabTurnOf\(tabId\), items\);/);
+  assert.doesNotMatch(readBody, /latestUserItemId\(items\)/);
+});
+
+test("turn-owned rows land before a just-inserted user message", () => {
+  const items = turnWithInsertedMessage();
+  // 工具行、审批卡、失败/目标脚注都进本回合的写入位置，不落到排队消息后面。
+  const toolRow = AppModule.insertTurnItem(items, {
+    id: 90,
+    kind: "tool",
+    card: { key: "tool-2", name: "read", callId: "call-2", status: "start" },
+  });
+  assert.equal(toolRow[2]?.id, 90, "a tool row starts inside the running turn");
+  assert.equal(toolRow.at(-1)?.kind, "user");
+  const askRow = AppModule.insertTurnItem(items, {
+    id: 91,
+    kind: "ask",
+    card: { approvalRequestId: "req-1", toolName: "bash" },
+  });
+  assert.equal(askRow[2]?.id, 91, "an approval card starts inside the running turn");
+  assert.equal(askRow.at(-1)?.kind, "user");
+  const noteRow = AppModule.insertTurnItem(items, { id: 92, kind: "note", text: "会话失败" });
+  assert.equal(noteRow[2]?.id, 92, "a failure or goal note belongs to the running turn");
+  assert.equal(noteRow.at(-1)?.kind, "user");
+  // 没有排队消息时行为不变：追加到末尾。
+  const plain = items.slice(0, 2);
+  assert.equal(AppModule.insertTurnItem(plain, { id: 93, kind: "note", text: "脚注" }).at(-1)?.id, 93);
+
+  // request_input 卡片同样落在排队消息之前，并把上一张没人回答的卡关掉。
+  const withOpenInput: Parameters<typeof AppModule.appendOpenInputInTurn>[0] = [
+    { id: 1, kind: "user", text: "A 的请求" },
+    { id: 2, kind: "input", card: { question: "旧问题", sessionId: "s", state: "open" } },
+    { id: 3, kind: "user", text: "B 的请求", notStarted: true },
+  ];
+  const withInput = AppModule.appendOpenInputInTurn(withOpenInput, 94, "新问题", "s");
+  assert.equal(withInput[2]?.kind, "input", "the question card lands before the queued message");
+  assert.equal(withInput.at(-1)?.kind, "user");
+  assert.equal(withInput[1]?.kind === "input" ? withInput[1].card.state : "", "closed");
+
+  // 接线：各分支都走同一插入点，没有任何一处继续追加到末尾。
+  const h = functionBody("function handleEvent(", "function turnAppendIndex(");
+  assert.equal(
+    (h.match(/insertTurnItem\(prev, /g) ?? []).length,
+    5,
+    "tool row, approval, compaction, goal and failure notes share the append position",
+  );
+  assert.match(h, /insertTurnItem\(prev, ask\)/);
+  assert.match(h, /appendOpenInputInTurn\(prev, allocId\(\), event\.question, event\.sessionId\)/);
+  assert.doesNotMatch(h, /\.\.\.prev/, "no chat row is appended after a queued message");
+});
+
+test("stopping the running turn interrupts its items despite a queued message", () => {
+  const items: Array<{ id: number; kind: string; interrupted?: boolean; queueItemId?: string }> = [
+    { id: 1, kind: "user" },
+    { id: 2, kind: "thinking", interrupted: false },
+    { id: 3, kind: "assistant", interrupted: false },
+    { id: 4, kind: "user", queueItemId: "q-b" },
+  ];
+  const next = interruptTurnItems(items);
+  assert.equal(next[1]?.interrupted, true, "the running turn's thinking is marked interrupted");
+  assert.equal(next[2]?.interrupted, true, "the running turn's answer is marked interrupted");
+  assert.equal(next[3]?.kind, "user");
+  assert.equal(next[3]?.interrupted, undefined, "the queued message is not a turn and stays untouched");
+});
+
+test("an owner-less queue start leaves the running tab and foreign pending alone", () => {
+  // 归属消息已被取消或删除：只收等待项，不碰该标签的执行态。
+  assert.deepEqual(
+    AppModule.queuedTurnRunState({ running: true, waitingIds: ["q-b"] }, "q-b", false),
+    { running: true, waitingIds: [] },
+    "an owner-less queue start never ends a genuinely running tab",
+  );
+  assert.deepEqual(
+    AppModule.queuedTurnRunState({ running: false, waitingIds: ["q-b"] }, "q-b", false),
+    { running: false, waitingIds: [] },
+  );
+  // 归属消息还在：清等待项并真正开回合。
+  assert.deepEqual(
+    AppModule.queuedTurnRunState({ running: false, waitingIds: ["q-b"] }, "q-b", true),
+    { running: true, waitingIds: [] },
+  );
+
+  // App 必须先定位归属消息，再写执行态；找不到就直接返回。
+  const body = functionBody("function beginQueuedTurn(", "function failQueuedTurn(");
+  const ownerAt = body.indexOf("const userId = clearQueueItem(tabId, queueItemId);");
+  const stateAt = body.indexOf("queuedTurnRunState(state, queueItemId, userId !== undefined)");
+  assert.ok(ownerAt >= 0, "the owner lookup is still the first step");
+  assert.ok(stateAt > ownerAt, "the tab's run state is written only after the owner is known");
+  assert.match(body, /if \(userId === undefined\) return;/, "an owner-less queue start never opens a turn");
+  // 不能按标签删掉别的发送的 pending：那条记录只由它自己的应答清理。
+  assert.doesNotMatch(body, /pendingSendsRef/, "an owner-less queue start never touches another send's pending");
+  assert.match(
+    functionBody("function takePendingBuffer(", "function dropPending("),
+    /pendingSendsRef\.current\.get\(pending\.tabId\) === pending/,
+    "a replayed response removes only its own pending",
+  );
+  assert.match(
+    functionBody("function dropPending(", "function tabIdForSession("),
+    /pendingSendsRef\.current\.get\(pending\.tabId\) === pending/,
+    "a failed send drops only its own pending",
+  );
+  // 删除子任务 / 会话时一并清掉这些表，迟到的队列事件不会再拉回已删标签。
+  assert.match(functionBody("async function removeSubtask(", "async function refreshSessions("), /pruneTabBookkeeping\(tab\.id\)/);
+  assert.match(functionBody("async function removeSession(", "const blocked = sidecarDead;"), /pruneTabBookkeeping\(tab\.id\)/);
+});
+
+test("a queued message does not change the running turn outcome checks", () => {
+  const items: Parameters<typeof turnChecks>[0] = [
+    { id: 1, kind: "user", text: "生成 report.md，并运行 `pnpm test`" },
+    { id: 2, kind: "tool", card: { name: "bash", command: "pnpm test", status: "end", isError: false } },
+    { id: 3, kind: "user", text: "生成 other.md，并运行 `pnpm build`", queueItemId: "q-b" },
+  ];
+  // 活动用户消息是 A：文件与命令都只按 A 的文本核对。
+  const checks = turnChecks(items, 1);
+  assert.deepEqual(checks.requiredFiles, ["report.md"]);
+  assert.deepEqual(checks.requiredCommands, ["pnpm test"]);
+  // 没传活动消息时也不能读排队的 B。
+  const fallback = turnChecks(items);
+  assert.deepEqual(fallback.requiredFiles, ["report.md"]);
+  assert.deepEqual(fallback.requiredCommands, ["pnpm test"]);
+  // App 的结算把活动消息 id 交给核对，而不是只传内容视图。
+  assert.match(APP_SOURCE, /turnChecks\(contentItems\(items\), turnUserId\)/);
 });

@@ -2,6 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
 import type { DesktopPnpm } from '../pnpm.ts'
 import { emptyAttachments, type AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
+import type { UnattendedScope } from '../huaanwork-guardrails/policy.ts'
 import type { AgentPackageHost } from './agent-package/host.ts'
 import type { AgentCatalogClient } from './agent-package/catalog-client.ts'
 import type { AgentCatalogSecurity } from './agent-package/catalog-security.ts'
@@ -10,6 +11,7 @@ import type { HuaanworkEventHub } from './events.ts'
 import type { RouteContext } from './routes.ts'
 import type { SessionRuntimeContext } from './sessions.ts'
 import type { SubagentRunRegistry } from './subagent-runs.ts'
+import type { TurnScheduler } from './turn-scheduler.ts'
 
 export interface HuaanworkHostConfig {
   dshHome: string
@@ -24,7 +26,11 @@ declare module '@deepseek-ai/cordis' {
     huaanworkAllowedOnce: Set<string>
     huaanworkDshHome: string
     huaanworkProfileDir: string
-    huaanworkUnattended: { current: unknown }
+    /**
+     * 按会话保存的无人值守范围（`runAgentTurn` 写入本次运行的会话，运行结束删除）。
+     * 读取方一律只查本次执行所属会话，不再有进程级单槽。
+     */
+    huaanworkUnattended: Map<string, UnattendedScope>
     huaanworkAttachments: AttachmentMaps
     huaanworkAgentCatalog: { current: { items: unknown[] } }
     huaanworkRouteAgent: { current: unknown }
@@ -51,6 +57,12 @@ declare module '@deepseek-ai/cordis' {
     huaanworkAgentCatalogSecurity: AgentCatalogSecurity
     /** 子代理 run 权威状态机(设计 §5.2);index 在 holders 安装后创建并注入。 */
     huaanworkSubagentRuns: SubagentRunRegistry
+    /** 会话 → 模型条目 id 的绑定表(Task 6);模型适配器与网络门禁共读同一实例。 */
+    huaanworkSessionModels: Map<string, string>
+    /** 会话 → 可写根(Task 6);沙箱、工具执行与排队出队共用同一实例。 */
+    huaanworkSessionRoots: Map<string, string>
+    /** 唯一回合调度器(Task 6);用户发送与自动化准入共用。 */
+    huaanworkTurnScheduler: TurnScheduler
   }
 }
 
@@ -74,6 +86,9 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkAgentCatalogClient',
   'huaanworkAgentCatalogSecurity',
   'huaanworkSubagentRuns',
+  'huaanworkSessionModels',
+  'huaanworkSessionRoots',
+  'huaanworkTurnScheduler',
 ] as const
 
 let installed = false
@@ -148,7 +163,7 @@ export function installHuaanworkHolders(
   ctx.huaanworkAllowedOnce = new Set<string>()
   ctx.huaanworkApprovals = new Map()
   ctx.huaanworkPlanReviews = new Map()
-  ctx.huaanworkUnattended = { current: null }
+  ctx.huaanworkUnattended = new Map()
   ctx.huaanworkAttachments = emptyAttachments()
   ctx.huaanworkAgentRequest = { current: null }
   ctx.huaanworkAgentPackageRequest = { current: null }

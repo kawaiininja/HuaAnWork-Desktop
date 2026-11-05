@@ -142,10 +142,22 @@ function isTaskInfo(value: unknown): value is TaskInfo {
   )
 }
 
+/**
+ * `modelId` 是可选记忆:存在但不是非空字符串时只忽略该字段,不丢弃整条任务。
+ * `isTaskInfo` 因此不要求它,只在这里收敛。
+ */
+function withValidTaskModel(task: TaskInfo): TaskInfo {
+  if (typeof task.modelId === 'string' && task.modelId.trim()) return task
+  delete task.modelId
+  return task
+}
+
 async function readTaskRegistry(storageRoot: string): Promise<TaskRegistry> {
   try {
     const parsed = JSON.parse(await readFile(taskRegistryPath(storageRoot), 'utf8')) as Partial<TaskRegistry>
-    return { tasks: Array.isArray(parsed.tasks) ? parsed.tasks.filter(isTaskInfo) : [] }
+    return {
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks.filter(isTaskInfo).map(withValidTaskModel) : [],
+    }
   } catch (error: unknown) {
     if ((error as { code?: string }).code === 'ENOENT') return { tasks: [] }
     throw error
@@ -218,6 +230,28 @@ export async function renameTask(
     const task = registry.tasks.find((item) => item.id === taskId)
     if (!task) throw new Error(`task ${taskId} was not found`)
     task.name = name
+    await writeTaskRegistry(storageRoot, registry)
+    return task
+  })
+}
+
+/**
+ * 记住子任务用的模型条目 id(首次真正开始执行时由发送侧写回)。
+ * 模型是否在清单里由发送准入判定,这里不做列表检查;空 modelId 直接拒绝。
+ */
+export async function setTaskModel(
+  storageRoot: string,
+  input: { taskId: string; modelId: string },
+): Promise<TaskInfo> {
+  const taskId = input.taskId.trim()
+  const modelId = input.modelId.trim()
+  if (!taskId) throw new Error('setModel requires taskId')
+  if (!modelId) throw new Error('任务模型不存在')
+  return withTaskRegistryLock(async () => {
+    const registry = await readTaskRegistry(storageRoot)
+    const task = registry.tasks.find((item) => item.id === taskId)
+    if (!task) throw new Error(`task ${taskId} was not found`)
+    task.modelId = modelId
     await writeTaskRegistry(storageRoot, registry)
     return task
   })

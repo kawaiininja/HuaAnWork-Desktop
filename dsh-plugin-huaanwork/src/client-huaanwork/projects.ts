@@ -114,6 +114,11 @@ export function renameTask(params: { taskId: string; name: string }): Promise<{ 
   return rpcCall("task.rename", params);
 }
 
+/** 记住该子任务用的模型条目 id；返回写回后的任务（界面直接拿这份回填）。 */
+export function setTaskModel(params: { taskId: string; modelId: string }): Promise<{ task: TaskInfo }> {
+  return rpcCall("task.setModel", params);
+}
+
 /** 触发方式的可读描述（任务行副标题用）。实现在 scheduleText.ts（纯函数，node 测试可直接加载）。 */
 export function describeSchedule(schedule: AutomationSchedule): string {
   return describeScheduleText(schedule);

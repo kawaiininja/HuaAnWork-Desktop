@@ -1,6 +1,5 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
 import { resolve as pathResolve } from 'node:path'
 
 import type { AutomationInfo, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
@@ -18,11 +17,10 @@ import {
   updateAutomation,
 } from './automations-store.ts'
 import type { RouteContext } from './routes.ts'
-import { sessionIdFor } from './session-id.ts'
+import { resolveSessionModel } from './session-models.ts'
 import {
-  findSessionAgent,
+  releaseAndDrain,
   sendToAgent,
-  sessionSendBlockers,
   type ListedAgent,
   type SessionRuntimeContext,
 } from './sessions.ts'
@@ -31,18 +29,15 @@ import { listProjects, recentRuns } from './stores.ts'
 import { neutralWorkspaceRoot } from './workspace-state.ts'
 
 /**
- * 自动化执行体与入队层(旧 host.ts 入队/执行体,方案①同根限定)。
+ * 自动化执行体与入队层(旧 host.ts 入队/执行体)。
  *
- * agent 任务走 automationTail 串行链(并发恒 1);script 走上限 2 的槽位池,两者互不阻塞。
- * 不移植 restoreUserRoot / 进程内热切换:到达执行体的任务在当前 workspaceRoot 下运行。
- * schedule/catchup 若目标根 ≠ 当前根,本入口直接返回、不入队(Task 5 调度器消费同一入口)。
- * 手动运行由路由先热切换到目标根再入队;调度跨根不入队。项目已删除不算跨根,放行执行体记失败。
+ * Task 8 起 agent 与 script 都按目标根的写者名额互斥:准入只发生在调度 tick 与
+ * `automation.run` 两处,`enqueueAutomation` 只执行已经占坑的运行。
+ * agent 自动化直接调用执行体,不再串 `automationTail`;script 保留上限 2 的槽位池,
+ * 槽位在该次准入成功之后获取。两类运行都用各自的准入根(项目根或中立根),不读前台根。
+ * 项目已删除不算准入失败:执行体照旧记一次失败运行。
  */
 
-/** 绑定项目已不在当前根时,手动 run 的拒绝文案。 */
-export const MANUAL_CROSS_PROJECT_MESSAGE = '请先切换到该项目再手动运行'
-/** 中立任务的目标根(中立根)≠ 当前根时,手动 run 的拒绝文案。 */
-export const MANUAL_CROSS_NEUTRAL_MESSAGE = '该任务未归属项目,请先回到默认工作区再运行'
 /** 绑定项目已删除:执行体记一次失败运行,不顺延、不按跨根拒绝。 */
 export const MISSING_PROJECT_OUTPUT = '任务所属项目不存在，已跳过执行'
 
@@ -65,14 +60,18 @@ export type AutomationTrigger = 'manual' | 'schedule' | 'catchup'
 
 export type AutomationRunMeta = {
   trigger: AutomationTrigger
+  /** 准入时确定的运行 id;写者键由它派生,不再在入队时二次生成。 */
+  runId: string
+  /** 本次准入成功占下的可写根(项目根或中立根,已 resolve)。 */
+  root: string
   coalescedCount?: number
-  runId?: string
 }
 
-export type AutomationRootDecision =
-  | { kind: 'same' }
-  | { kind: 'missing-project' }
-  | { kind: 'cross'; message: string }
+/** 准入已占下的可写根与这次运行唯一的写者释放器。 */
+export type AutomationAdmission = {
+  root: string
+  release: () => void
+}
 
 type UnattendedScope = {
   runId: string
@@ -82,7 +81,7 @@ type UnattendedScope = {
 }
 
 export type AutomationRuntime = SessionRuntimeContext & {
-  huaanworkUnattended?: { current: UnattendedScope | undefined }
+  huaanworkUnattended?: Map<string, UnattendedScope>
   huaanworkEmit?: (event: RpcEvent) => void
 }
 
@@ -96,12 +95,6 @@ export const automationCollector = new Map<string, { runId: string; text: string
 
 /** 审批按 runId 归集:运行结束只拒绝本运行遗留的审批。 */
 const runPendingApprovals = new Map<string, Set<string>>()
-
-/**
- * agent 串行链。并发安全(blocker 账本)由这条链保证:绕过它则计数失效。
- * 链尾只归还两个计数,不调用 restoreUserRoot(方案①无进程内位移可恢复)。
- */
-export let automationTail: Promise<void> = Promise.resolve()
 
 export const SCRIPT_AUTOMATION_CONCURRENCY = 2
 let scriptAutomationRunning = 0
@@ -187,44 +180,24 @@ export function bindAutomationRuntime(ctx: AutomationRuntime, routeCtx: RouteCon
   bound = { ctx, routeCtx }
 }
 
-/** 单 agent 是否空闲(旧 host.ts agentIdle)。不移植 liveAgentsIdle。 */
-export async function agentIdle(routeCtx: RouteContext): Promise<boolean> {
-  const runtime = routeCtx.runtimeCtx
-  if (!runtime) return true
-  const agent = findSessionAgent(runtime, sessionIdFor(routeCtx.workspaceRoot.current))
-  if (typeof agent?.whenIdle !== 'function') return true
-  try {
-    return await Promise.race([
-      agent.whenIdle().then(() => true),
-      new Promise<boolean>((resolve) => {
-        const timer = setTimeout(() => resolve(false), 1_000)
-        timer.unref?.()
-      }),
-    ])
-  } catch {
-    return true
-  }
+/**
+ * 单次到期评估需要的绑定(automation-scheduler 的 evaluateDueAutomations 消费)。
+ * 未绑定时返回 undefined:调度器尚未接线不算错误。
+ */
+export function boundAutomationRuntime(): BoundRuntime | undefined {
+  return bound
 }
 
 /**
- * 目标根 vs 当前根。项目已删除不算跨根;中立任务的目标根是 neutralWorkspaceRoot。
+ * 准入与执行体共用的目标根:项目根;项目不存在或无项目时用中立根。
+ * 项目已删除仍按中立根准入,执行体照旧记一次 missing-project 失败。
  */
-export async function automationRootDecision(
-  routeCtx: RouteContext,
-  automation: AutomationInfo,
-): Promise<AutomationRootDecision> {
+export async function automationAdmissionRoot(routeCtx: RouteContext, automation: AutomationInfo): Promise<string> {
   if (automation.projectId) {
     const project = (await listProjects(routeCtx.profileDir)).find((item) => item.id === automation.projectId)
-    if (!project) return { kind: 'missing-project' }
-    if (pathResolve(project.root) !== pathResolve(routeCtx.workspaceRoot.current)) {
-      return { kind: 'cross', message: MANUAL_CROSS_PROJECT_MESSAGE }
-    }
-    return { kind: 'same' }
+    if (project) return pathResolve(project.root)
   }
-  if (pathResolve(neutralWorkspaceRoot(routeCtx.profileDir)) !== pathResolve(routeCtx.workspaceRoot.current)) {
-    return { kind: 'cross', message: MANUAL_CROSS_NEUTRAL_MESSAGE }
-  }
-  return { kind: 'same' }
+  return pathResolve(neutralWorkspaceRoot(routeCtx.profileDir))
 }
 
 const automationTimeout = (routeCtx: RouteContext): number =>
@@ -278,26 +251,48 @@ async function runAgentTurn(
   runId: string,
   trigger: AutomationTrigger,
   coalescedCount: number | undefined,
+  admission: AutomationAdmission,
+  onHandoff: () => void,
 ): Promise<string> {
+  // 启动时快照全局当前模型:本次生成始终解析它,之后改选择不影响这一轮。
+  const settings = readHuaanworkSettingsSync(routeCtx.profileDir)
+  const activeModelId = settings.active_model_id
+  const resolved = resolveSessionModel({
+    sessionId,
+    table: new Map([[sessionId, activeModelId]]),
+    models: settings.models,
+    active: { base_url: settings.base_url, model: settings.model, api_key: settings.api_key },
+    allowNetwork: settings.allow_network,
+  })
+  // 模型绑定过不了门禁:按失败运行落盘(executeRun 的 catch),不能记成 admission skip,
+  // 否则调度器会每个 tick 永久重试同一条。
+  if (!resolved.ok) throw new Error(resolved.reason)
   const mergedPrefix = await mergedRunPrefix(routeCtx, automation)
   const body = [...(mergedPrefix ? ['上次成功运行的产出（截断至 4 KB）：', mergedPrefix] : []), automation.prompt ?? ''].join('\n')
   const missed = coalescedCount ?? 0
   const prompt = `<automation-fire name="${escapeXmlAttr(automation.name)}" trigger="${trigger}" missed="${missed}">\n${body}\n</automation-fire>`
+  // 根表在 create/resume 与沙箱读取之前登记;模型表由 sendToAgent 在受理后写入。
+  const root = pathResolve(admission.root)
+  ctx.huaanworkSessionRoots?.set(sessionId, root)
   automationCollector.set(sessionId, { runId, text: '' })
   let timedOut = false
   let timer: ReturnType<typeof setTimeout> | undefined
-  // 只 mutate 容器的 .current,不重新赋值 huaanworkUnattended 本身。
-  const holder = ctx.huaanworkUnattended
-  if (holder) {
-    const allow = automation.unattended?.enabled ? sanitizeUnattendedAllow(automation.unattended.allow) : undefined
-    holder.current = allow
-      ? { runId, automationId: automation.id, allow: new Set(allow), sessionId }
-      : undefined
+  // 无人值守范围只写本次运行的会话键;并发运行的其它会话各查各的键。
+  const unattended = ctx.huaanworkUnattended
+  const allow = automation.unattended?.enabled ? sanitizeUnattendedAllow(automation.unattended.allow) : undefined
+  if (unattended && allow) {
+    unattended.set(sessionId, { runId, automationId: automation.id, allow: new Set(allow), sessionId })
   }
   // sendToAgent 在 followup 受理后即返回;自动化要的是整轮产出,故 turn 还要等到 idle。
-  // 超时与 drain 都作用在这个 turn 上。
+  // 超时与 drain 都作用在这个 turn 上。受理与 idle 两条路径都用同一个 releaseOnce。
   const turn = (async () => {
-    await sendToAgent(ctx, routeCtx, { text: prompt, sessionId })
+    onHandoff()
+    await sendToAgent(
+      ctx,
+      routeCtx,
+      { text: prompt, sessionId },
+      { root, modelId: activeModelId, release: admission.release },
+    )
     await automationSessionAgent(ctx, sessionId)?.whenIdle?.()
   })()
   try {
@@ -316,9 +311,9 @@ async function runAgentTurn(
     if (timedOut) {
       cancelAutomationSession(ctx, sessionId)
       // D1(出口级):超时后的 settle 等待必须有自身截止。取消未命中(agent 尚未建成、
-      // 或卡在不可取消的回合)时 turn 可能永不 settle——无截止会把 automationTail
-      // 楔死、sessionSendBlockers 计数悬挂、collector/unattended holder 泄漏。
-      // 截止内 settle 保住「超时 turn 结束前下一个 agent 不启动」的串行意图;
+      // 或卡在不可取消的回合)时 turn 可能永不 settle——无截止会让 collector/unattended
+      // holder 泄漏,并让本根写者在回合真正结束前一直被这个超时轮占着。
+      // 截止内 settle 保住「超时 turn 结束前下一个同根回合不启动」的串行意图;
       // 到期放弃 turn(其晚期 settle 因 collector 已清而为 no-op)并按 legacy 语义抛超时。
       let drainTimer: ReturnType<typeof setTimeout> | undefined
       await Promise.race([
@@ -335,7 +330,10 @@ async function runAgentTurn(
   } finally {
     if (timer) clearTimeout(timer)
     automationCollector.delete(sessionId)
-    if (holder) holder.current = undefined
+    unattended?.delete(sessionId)
+    // 只清本次运行的这两个键;写者释放由 sendToAgent 的准入释放器负责。
+    ctx.huaanworkSessionRoots?.delete(sessionId)
+    ctx.huaanworkSessionModels?.delete(sessionId)
   }
 }
 
@@ -403,6 +401,11 @@ function killProcessTree(child: ChildProcess): void {
   timer.unref?.()
 }
 
+/**
+ * 运行脚本并等到子进程真正 `close`。超时只负责杀进程树,完成 Promise 仍等 `close`:
+ * 释放根写者必须发生在进程树退出之后,否则下一轮会在尚未收尾的目录里并发写。
+ * 启动失败(`error`)没有可等的进程,按启动失败结算。
+ */
 function runScript(
   command: string,
   cwd: string,
@@ -420,7 +423,8 @@ function runScript(
     let stdout = ''
     let stderr = ''
     let settled = false
-    const finish = (ok: boolean, output: string, timedOut = false) => {
+    let timedOut = false
+    const finish = (ok: boolean, output: string) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
@@ -434,8 +438,8 @@ function runScript(
       if (inFlightRuns.get(runId)?.cancelRequested === true) killProcessTree(child)
     }
     const timer = setTimeout(() => {
+      timedOut = true
       killProcessTree(child)
-      finish(false, `${stdout}${stderr}\n（任务超时，已终止）`, true)
     }, timeoutMs)
     timer.unref?.()
     child.stdout?.on('data', (chunk: Buffer | string) => {
@@ -446,7 +450,8 @@ function runScript(
     })
     child.on('error', (error) => finish(false, `${stdout}${stderr}\n${error.message}`))
     child.on('close', (code) => {
-      if (code === 0) finish(true, stdout)
+      if (timedOut) finish(false, `${stdout}${stderr}\n（任务超时，已终止）`)
+      else if (code === 0) finish(true, stdout)
       else finish(false, `${stdout}${stderr ? `\n${stderr}` : ''}\n（退出码 ${code ?? 'unknown'}）`)
     })
   })
@@ -508,7 +513,9 @@ async function finishAutomation(
 }
 
 /**
- * 执行体。不含跨根热切换:调用方已保证同根,或项目已删除(记失败后 return)。
+ * 执行体。写者名额由调用方(调度 tick / automation.run)在准入时占上;
+ * 本函数只负责执行与释放:交接给子进程/模型回合之前的所有 return 与拒绝都释放,
+ * 交接之后由子进程 `close` 或 `sendToAgent` 的回合结束释放。
  * ctx 必须穿透到 sendToAgent 的首参。
  */
 export async function executeRun(
@@ -517,6 +524,7 @@ export async function executeRun(
   automation: AutomationInfo,
   trigger: AutomationTrigger,
   runId: string,
+  admission: AutomationAdmission,
   coalescedCount?: number,
 ): Promise<void> {
   // ── 同步段不变量(规格 §8 / 评审注记 2)────────────────────────────
@@ -528,86 +536,113 @@ export async function executeRun(
   const entry = inFlightRuns.get(runId)
   if (entry?.cancelRequested) {
     inFlightRuns.delete(runId) // 档位已由停止侧消费（slotConsumed），执行体不再消费
+    admission.release()
     return
   }
   if (entry) entry.phase = 'started'
   const startedAt = Date.now()
   const sessionId = automation.kind === 'agent' ? automationRunSessionId(automation.id, runId) : undefined
-  routeCtx.emit({
-    event: 'automation/run-start',
-    automationId: automation.id,
-    runId,
-    projectId: automation.projectId,
-    trigger,
-    ...(sessionId === undefined ? {} : { sessionId }),
-  })
-  // ── 同步段结束（以上不得有 await）────────────────────────────────
-  await markAutomation(routeCtx.profileDir, automation.id, { lastRunAt: startedAt, lastStatus: 'running' })
+  // agent 一旦把回合交给 sendToAgent 就由它负责释放;脚本与所有早退在下面统一释放。
+  // 释放必须覆盖发射与 markAutomation 本身:准入方已经占坑,执行体在这里拒绝
+  // (注册表不可写、磁盘满)时没有回合接手,不释放就会把根写者与 started 条目永久留在表里。
+  let handedOff = false
+  try {
+    routeCtx.emit({
+      event: 'automation/run-start',
+      automationId: automation.id,
+      runId,
+      projectId: automation.projectId,
+      trigger,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    })
+    // ── 同步段结束（以上不得有 await）────────────────────────────────
+    await markAutomation(routeCtx.profileDir, automation.id, { lastRunAt: startedAt, lastStatus: 'running' })
 
-  const project = automation.projectId
-    ? (await listProjects(routeCtx.profileDir)).find((item) => item.id === automation.projectId)
-    : null
-  if (automation.projectId && !project) {
-    // 已 started 且被停止的轮次同样按 cancelled 落盘；否则任务行会把它显示成失败。
-    const cancelled = inFlightRuns.get(runId)?.cancelRequested === true
+    const project = automation.projectId
+      ? (await listProjects(routeCtx.profileDir)).find((item) => item.id === automation.projectId)
+      : null
+    if (automation.projectId && !project) {
+      // 已 started 且被停止的轮次同样按 cancelled 落盘；否则任务行会把它显示成失败。
+      const cancelled = inFlightRuns.get(runId)?.cancelRequested === true
+      await finishAutomation(
+        routeCtx,
+        automation,
+        {
+          runId,
+          startedAt,
+          ok: false,
+          output: cancelled ? '已停止' : MISSING_PROJECT_OUTPUT,
+          ...(cancelled ? { status: 'cancelled' as const } : {}),
+          ...(sessionId === undefined ? {} : { sessionId }),
+        },
+        trigger,
+        coalescedCount,
+      )
+      return
+    }
+
+    let ok = true
+    let output = ''
+    let status: 'ok' | 'error' | 'timeout' | 'cancelled' = 'ok'
+    try {
+      if (automation.kind === 'agent') {
+        output = await runAgentTurn(
+          ctx,
+          routeCtx,
+          automation,
+          sessionId!,
+          runId,
+          trigger,
+          coalescedCount,
+          admission,
+          () => {
+            handedOff = true
+          },
+        )
+      } else {
+        const result = await runScript(
+          automation.command ?? '',
+          admission.root,
+          automationTimeout(routeCtx),
+          runId,
+        )
+        ok = result.ok
+        output = result.output
+        if (result.timedOut) status = 'timeout'
+        else if (!result.ok) status = 'error'
+      }
+    } catch (error: unknown) {
+      ok = false
+      status = error instanceof AutomationRunTimeoutError ? 'timeout' : 'error'
+      output = error instanceof Error ? error.message : String(error)
+    } finally {
+      rejectRunPendingApprovals(ctx, runId)
+    }
+    // 停止覆盖(规格 §8):标记在落盘前即生效——模型回合后来自己跑完也写 cancelled,
+    // 不写 ok;脚本被杀不记 timeout;产出保留已收集文本,什么都没有时正文为「已停止」。
+    // 被杀脚本的 runner 脚注是合成文本,不算产出:先剥掉再判空。
+    if (inFlightRuns.get(runId)?.cancelRequested === true) {
+      ok = false
+      status = 'cancelled'
+      output = stripRunnerExitCodeFooter(output)
+      if (!output.trim()) output = '已停止'
+    }
     await finishAutomation(
       routeCtx,
       automation,
-      {
-        runId,
-        startedAt,
-        ok: false,
-        output: cancelled ? '已停止' : MISSING_PROJECT_OUTPUT,
-        ...(cancelled ? { status: 'cancelled' as const } : {}),
-        ...(sessionId === undefined ? {} : { sessionId }),
-      },
+      { runId, startedAt, ok, output, status, ...(sessionId === undefined ? {} : { sessionId }) },
       trigger,
       coalescedCount,
     )
-    return
-  }
-
-  let ok = true
-  let output = ''
-  let status: 'ok' | 'error' | 'timeout' | 'cancelled' = 'ok'
-  try {
-    if (automation.kind === 'agent') {
-      output = await runAgentTurn(ctx, routeCtx, automation, sessionId!, runId, trigger, coalescedCount)
-    } else {
-      const result = await runScript(
-        automation.command ?? '',
-        routeCtx.workspaceRoot.current,
-        automationTimeout(routeCtx),
-        runId,
-      )
-      ok = result.ok
-      output = result.output
-      if (result.timedOut) status = 'timeout'
-      else if (!result.ok) status = 'error'
-    }
-  } catch (error: unknown) {
-    ok = false
-    status = error instanceof AutomationRunTimeoutError ? 'timeout' : 'error'
-    output = error instanceof Error ? error.message : String(error)
   } finally {
-    rejectRunPendingApprovals(ctx, runId)
+    // 脚本:runScript 只在 close 后返回,这里释放正好落在进程树退出之后。
+    // 早退(排队期间被停、项目已删除)、执行体拒绝(如 markAutomation 写盘失败)
+    // 与启动失败同样经过这里。未交接就摘条目:否则 stop 会命中一条永远不会结束的轮。
+    if (!handedOff) {
+      inFlightRuns.delete(runId)
+      admission.release()
+    }
   }
-  // 停止覆盖(规格 §8):标记在落盘前即生效——模型回合后来自己跑完也写 cancelled,
-  // 不写 ok;脚本被杀不记 timeout;产出保留已收集文本,什么都没有时正文为「已停止」。
-  // 被杀脚本的 runner 脚注是合成文本,不算产出:先剥掉再判空。
-  if (inFlightRuns.get(runId)?.cancelRequested === true) {
-    ok = false
-    status = 'cancelled'
-    output = stripRunnerExitCodeFooter(output)
-    if (!output.trim()) output = '已停止'
-  }
-  await finishAutomation(
-    routeCtx,
-    automation,
-    { runId, startedAt, ok, output, status, ...(sessionId === undefined ? {} : { sessionId }) },
-    trigger,
-    coalescedCount,
-  )
 }
 
 /**
@@ -675,42 +710,48 @@ export function releaseScriptSlot(): void {
   scriptAutomationRunning -= 1
 }
 
-async function runBound(
-  automation: AutomationInfo,
-  meta: AutomationRunMeta,
-): Promise<void> {
-  const { ctx, routeCtx } = requireBound()
-  if (meta.runId === undefined) throw new Error('automation run reached the executor without a runId')
-  const runId = meta.runId
-  if (meta.coalescedCount === undefined) {
-    await executeRun(ctx, routeCtx, automation, meta.trigger, runId)
-  } else {
-    await executeRun(ctx, routeCtx, automation, meta.trigger, runId, meta.coalescedCount)
+/** 一次准入唯一的写者释放器:释放根 → 消费用户队列 → 再评估到期自动化。 */
+function createAdmissionRelease(
+  ctx: AutomationRuntime,
+  routeCtx: RouteContext,
+  sessionId: string,
+): () => void {
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    releaseAndDrain(ctx, routeCtx, sessionId)
   }
 }
 
-/** agent 并发恒 1。两计数在本次 run 完成时归位,中间没有 restore 时点。 */
+/**
+ * agent 自动化执行。写者已由准入方占上,这里直接跑;不再串 `automationTail`,
+ * 也不再写全局 blocker 计数。释放只经过 `createAdmissionRelease` 的一个实例。
+ */
 export function enqueueAgentAutomation(automation: AutomationInfo, meta: AutomationRunMeta): Promise<void> {
-  // workspaceDisplaced 不写:非 P1-4 未收口的恒假死检查,而是 Desktop 无进程内位移的必然结果(方案①,评审 P1-7)。
-  sessionSendBlockers.agentAutomationQueued += 1
-  sessionSendBlockers.agentAutomationActive += 1
-  const run = automationTail.then(() => runBound(automation, meta))
-  const settled = run.catch((error: unknown) => {
-    logFailure(error)
-  })
-  automationTail = settled.then(() => {
-    sessionSendBlockers.agentAutomationQueued -= 1
-    sessionSendBlockers.agentAutomationActive -= 1
-  })
-  return settled
+  const { ctx, routeCtx } = requireBound()
+  const admission: AutomationAdmission = {
+    root: pathResolve(meta.root),
+    release: createAdmissionRelease(ctx, routeCtx, automationRunSessionId(automation.id, meta.runId)),
+  }
+  return executeRun(ctx, routeCtx, automation, meta.trigger, meta.runId, admission, meta.coalescedCount).catch(
+    (error: unknown) => {
+      logFailure(error)
+    },
+  )
 }
 
-/** script 不位移、不占 agent 计数,排空后也不恢复工作区。 */
+/** script 不占并发名额;槽位在准入成功后才获取,进程 `close` 后才释放根。 */
 export function enqueueScriptAutomation(automation: AutomationInfo, meta: AutomationRunMeta): Promise<void> {
+  const { ctx, routeCtx } = requireBound()
+  const admission: AutomationAdmission = {
+    root: pathResolve(meta.root),
+    release: createAdmissionRelease(ctx, routeCtx, `script:${meta.runId}`),
+  }
   return (async () => {
     await acquireScriptSlot()
     try {
-      await runBound(automation, meta)
+      await executeRun(ctx, routeCtx, automation, meta.trigger, meta.runId, admission, meta.coalescedCount)
     } catch (error: unknown) {
       logFailure(error)
     } finally {
@@ -719,47 +760,22 @@ export function enqueueScriptAutomation(automation: AutomationInfo, meta: Automa
   })()
 }
 
-let enqueueGate: Promise<void> = Promise.resolve()
-
 /**
- * 手动触发与调度触发的唯一分派入口。
- * schedule/catchup 跨根:不入队、不执行(保持 due 由调用方负责)。manual 不再次判定。
+ * 已准入运行的唯一分派入口。写者名额与目标根由调用方(调度 tick / automation.run)
+ * 占上;这里不再判定跨根,也不再自己准入。
  */
-export function enqueueAutomation(
-  automation: AutomationInfo,
-  meta: AutomationRunMeta = { trigger: 'schedule' },
-): Promise<void> {
-  if (meta.trigger !== 'manual') {
-    const { routeCtx } = requireBound()
-    let runPromise: Promise<void> | undefined
-    const step = enqueueGate.then(async () => {
-      const decision = await automationRootDecision(routeCtx, automation)
-      if (decision.kind === 'cross') return
-      runPromise = dispatchEnqueue(automation, meta)
-    })
-    enqueueGate = step.catch((error: unknown) => {
-      logFailure(error)
-    })
-    return step.then(() => runPromise)
-  }
-  return dispatchEnqueue(automation, meta)
-}
-
-function dispatchEnqueue(automation: AutomationInfo, meta: AutomationRunMeta): Promise<void> {
-  // runId 在真正入队的同步段确定并写表(规格 §8;跨根放弃在到达这里之前已 return)。
-  const runId = meta.runId ?? randomUUID()
+export function enqueueAutomation(automation: AutomationInfo, meta: AutomationRunMeta): Promise<void> {
   startInFlightRun({
     automationId: automation.id,
-    runId,
+    runId: meta.runId,
     trigger: meta.trigger,
     kind: automation.kind,
     phase: 'queued',
     cancelRequested: false,
     slotConsumed: false,
   })
-  const withRunId = { ...meta, runId }
   return automation.kind === 'agent'
-    ? enqueueAgentAutomation(automation, withRunId)
-    : enqueueScriptAutomation(automation, withRunId)
+    ? enqueueAgentAutomation(automation, meta)
+    : enqueueScriptAutomation(automation, meta)
 }
 

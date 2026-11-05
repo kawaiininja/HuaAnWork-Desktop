@@ -126,6 +126,35 @@ test("a following user message ends the scan", () => {
   assert.equal(hasAssistantTextAfter(items, 0), false);
 });
 
+test("a queued user message does not end the answer scan", () => {
+  // 排队中、刚插入（应答未回）或已抛错的消息没有开启下一回合，不能把上一块的思考判成「未生成」。
+  const waiting = [
+    { kind: "thinking" as const, thought: "先看文件" },
+    { kind: "user" as const, queueItemId: "q1" },
+    { kind: "assistant" as const, text: "这是答案" },
+  ];
+  assert.equal(hasAssistantTextAfter(waiting, 0), true, "a waiting message is not a turn boundary");
+  const inserted = [
+    { kind: "thinking" as const, thought: "先看文件" },
+    { kind: "user" as const, notStarted: true },
+    { kind: "assistant" as const, text: "这是答案" },
+  ];
+  assert.equal(hasAssistantTextAfter(inserted, 0), true, "a just-inserted message is not a turn boundary");
+  const rejected = [
+    { kind: "thinking" as const, thought: "先看文件" },
+    { kind: "user" as const, sendRejected: true },
+    { kind: "assistant" as const, text: "这是答案" },
+  ];
+  assert.equal(hasAssistantTextAfter(rejected, 0), true, "a rejected send is not a turn boundary");
+  // 真正的下一回合仍然结束扫描，不会把下一轮的答案算到这一块思考上。
+  const nextTurn = [
+    { kind: "thinking" as const, thought: "先看文件" },
+    { kind: "user" as const },
+    { kind: "assistant" as const, text: "下一轮的答案" },
+  ];
+  assert.equal(hasAssistantTextAfter(nextTurn, 0), false);
+});
+
 test("a folded result attachment counts as assistant text after a finished thinking panel", () => {
   // 运行结束后内容视图里的附件项：映射成 assistant 才算「已生成」。
   const withAttachment = [

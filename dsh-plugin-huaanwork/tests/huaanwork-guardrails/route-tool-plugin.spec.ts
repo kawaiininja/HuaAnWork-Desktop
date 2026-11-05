@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { test, expect } from "vitest";
+import { registerChildSession, resetChildSessionRegistry } from "../../src/huaanwork-host/child-sessions.ts";
 import { preferControlCalls } from "../../src/huaanwork-guardrails/route-tools.ts";
 import {
   answerRouteInput,
@@ -13,12 +14,11 @@ import {
 type Exec = { agent?: unknown; signal?: AbortSignal };
 type Registered = { name: string; description: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> };
 
-function routeTools(emitted: unknown[], emit = true, unattended?: { sessionId?: string; [key: string]: unknown }) {
+function routeTools(emitted: unknown[], emit = true, unattended?: Map<string, { sessionId?: string }>) {
   const tools = new Map<string, Registered>();
   apply({
-    huaanworkRouteAgent: { current: null },
     ...(emit ? { huaanworkEmit: (event: unknown) => { emitted.push(event); } } : {}),
-    ...(unattended ? { huaanworkUnattended: { current: unattended } } : {}),
+    ...(unattended ? { huaanworkUnattended: unattended } : {}),
     planMode: { set() { return "queued"; } },
     tools: { register(definition: Registered) { tools.set(definition.name, definition); } },
   });
@@ -38,13 +38,12 @@ test("a control call drops sibling ordinary calls before they are emitted", () =
 test("propose_plan execute enters plan mode for the current agent", async () => {
   const agent = { id: "huaanwork-0123456789abcdef" };
   const seen: unknown[] = [];
-  const tools = new Map<string, { execute: (args: unknown) => Promise<unknown> }>();
+  const tools = new Map<string, { execute: (args: unknown, exec?: Exec) => Promise<unknown> }>();
   apply({
-    huaanworkRouteAgent: { current: agent },
     planMode: { set(next: unknown, active: boolean) { seen.push([next, active]); return "queued"; } },
-    tools: { register(definition: { name: string; execute: (args: unknown) => Promise<unknown> }) { tools.set(definition.name, definition); } },
+    tools: { register(definition: { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }) { tools.set(definition.name, definition); } },
   });
-  await tools.get("propose_plan")?.execute({ objective: "汇总三份材料" });
+  await tools.get("propose_plan")?.execute({ objective: "汇总三份材料" }, { agent });
   assert.deepEqual(seen, [[agent, true]]);
 });
 
@@ -55,8 +54,9 @@ test("propose_plan tells the model to submit the plan body through exit_plan_mod
   assert.doesNotMatch(description, /计划正文之后再写/);
 });
 
-test("route tools act on the executing agent, not the shared holder", async () => {
-  const sent = { id: "huaanwork-aaaaaaaaaaaaaaaa", cancel() {} };
+test("route tools act on the executing agent, never on a pre-written route-agent slot", async () => {
+  // 预先写入的全局槽必须被完全忽略:并发后它属于别的会话。
+  const sent = { id: "huaanwork-aaaaaaaaaaaaaaaa", cancelled: 0, cancel() { this.cancelled += 1; } };
   const later = { id: "huaanwork-bbbbbbbbbbbbbbbb", cancelled: 0, cancel() { this.cancelled += 1; } };
   const seen: unknown[] = [];
   const tools = new Map<string, { execute: (args: unknown, exec?: Exec) => Promise<unknown> }>();
@@ -74,6 +74,21 @@ test("route tools act on the executing agent, not the shared holder", async () =
   assert.equal(cancelRouteInput(later.id), true);
   await assert.rejects(waiting!, /用户取消了这个问题/);
   assert.equal(later.cancelled, 1);
+  assert.equal(sent.cancelled, 0);
+});
+
+test("a call without an executing agent fails instead of using a pre-written route-agent slot", async () => {
+  const sent = { id: "huaanwork-cccccccccccccccc", cancel() {} };
+  const tools = new Map<string, { execute: (args: unknown, exec?: Exec) => Promise<unknown> }>();
+  apply({
+    huaanworkRouteAgent: { current: sent },
+    huaanworkEmit: () => undefined,
+    planMode: { set() { return "queued"; } },
+    tools: { register(definition: { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }) { tools.set(definition.name, definition); } },
+  });
+
+  await assert.rejects(tools.get("propose_plan")!.execute({ objective: "汇总三份材料" }, {}), /当前没有可以进入计划模式的会话/);
+  await assert.rejects(tools.get("request_input")!.execute({ question: "发给谁？" }, {}), /当前没有可以提问的会话/);
 });
 
 test("request_input shows the question in the chat and returns the submitted answer", async () => {
@@ -111,10 +126,16 @@ test("request_input does not wait when no chat can show the question", async () 
   assert.equal(answerRouteInput(agent.id, "x"), false);
 });
 
+test("one unattended scope does not answer another session", () => {
+  const scopes = new Map<string, { sessionId: string }>([['auto-a', { sessionId: 'auto-a' }]])
+  expect(scopes.get('auto-b')).toBeUndefined()
+  expect(scopes.get('auto-a')?.sessionId).toBe('auto-a')
+})
+
 test("request_input fails closed under the matching unattended scope instead of parking", async () => {
   const emitted: unknown[] = [];
   const agent = { id: "huaanwork-9999999999999999" };
-  const tools = routeTools(emitted, true, { runId: "run-1", automationId: "auto-1", sessionId: agent.id });
+  const tools = routeTools(emitted, true, new Map([[agent.id, { sessionId: agent.id }]]));
   await assert.rejects(
     tools.get("request_input")!.execute({ question: "发给谁？" }, { agent }),
     /无人值守运行没有可以回答这个问题的人/,
@@ -124,13 +145,34 @@ test("request_input fails closed under the matching unattended scope instead of 
   assert.equal(answerRouteInput(agent.id, "late"), false);
 
   // 其他会话(人在自动化运行期间)照常等卡片,不被错误地降级。
-  const attended = routeTools(emitted, true, { runId: "run-2", automationId: "auto-2", sessionId: "automation-1" });
+  const attended = routeTools(emitted, true, new Map([["automation-1", { sessionId: "automation-1" }]]));
   const human = { id: "huaanwork-aaaaaaaaaaaaaaaa" };
   const waiting = attended.get("request_input")!.execute({ question: "哪一份？" }, { agent: human });
   await Promise.resolve();
   assert.deepEqual(emitted, [{ event: "input/asked", question: "哪一份？", sessionId: human.id }]);
   assert.equal(answerRouteInput(human.id, "甲"), true);
   assert.deepEqual(await waiting, { text: "甲" });
+});
+
+test("a subagent inherits the unattended scope registered for its parent session", async () => {
+  resetChildSessionRegistry();
+  registerChildSession("huaanwork-parent-automation", "huaanwork-child-subagent");
+  try {
+    const emitted: unknown[] = [];
+    const tools = routeTools(
+      emitted,
+      true,
+      new Map([["huaanwork-parent-automation", { sessionId: "huaanwork-parent-automation" }]]),
+    );
+    // 子会话自己没有条目:沿登记表回溯到自动化父会话的无人值守范围。
+    await assert.rejects(
+      tools.get("request_input")!.execute({ question: "发给谁？" }, { agent: { id: "huaanwork-child-subagent" } }),
+      /无人值守运行没有可以回答这个问题的人/,
+    );
+    assert.deepEqual(emitted, []);
+  } finally {
+    resetChildSessionRegistry();
+  }
 });
 
 test("control-tool execute validates through the shared classifier, not a copy", async () => {
@@ -153,7 +195,6 @@ test("control-tool execute validates through the shared classifier, not a copy",
 test("a throwing chat emit does not leave the question waiting", async () => {
   const tools = new Map<string, { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }>();
   apply({
-    huaanworkRouteAgent: { current: null },
     huaanworkEmit: () => {
       throw new Error("chat is gone");
     },

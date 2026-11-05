@@ -72,6 +72,7 @@ export type RpcRequest = {
     | "task.remove"
     | "task.bindSession"
     | "task.rename"
+    | "task.setModel"
     | "subagent.list"
     | "subagent.cancel";
   params?: unknown;
@@ -318,6 +319,8 @@ export type TaskInfo = {
   createdAt: number;
   /** 该子任务绑定的唯一会话；未发生首条消息时不存在（旧 tasks.json 无此字段，天然兼容）。 */
   sessionId?: string;
+  /** 首次真正开始执行时用的模型条目 id；排队期间不写，旧 tasks.json 无此字段。 */
+  modelId?: string;
 };
 
 /** `session.list` 行：会话日志的摘要投影（标题、时间、统计）。 */
@@ -461,6 +464,10 @@ export type RpcEvent =
   | { event: "goal/state"; phase: GoalPhase; roundsStarted?: number; sessionId?: string }
   | { event: "goal/state"; cleared: true; sessionId?: string }
   | { event: "session/end"; ok: boolean; error?: string; cancelled?: boolean; sessionId?: string }
+  /** 排队项真正出队并受理 `followup` 后发出;客户端这时才把等待消息变成活动回合。 */
+  | { event: "session/queue-start"; sessionId: string; tabId: string; queueItemId: string }
+  /** 排队项出队后未能启动;`reason` 可能是已经展示过的 `agent/notice` 原文。 */
+  | { event: "session/queue-fail"; sessionId: string; tabId: string; queueItemId: string; reason: string }
   /** 智能体包写入成功/提示;`text` 直接作为会话内提示展示。 */
   | { event: "agent/notice"; text: string; sessionId?: string }
   /** 结构化创建确认卡;客户端优先渲染它,模型贴回的纯文本是后备。 */

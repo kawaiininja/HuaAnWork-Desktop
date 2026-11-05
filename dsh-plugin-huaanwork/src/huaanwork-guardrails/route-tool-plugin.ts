@@ -1,6 +1,7 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 
+import { unattendedScopeFor, type UnattendedScope } from "./policy.ts";
 import { classifyToolCalls } from "./route-tools.ts";
 
 export const name = "huaanwork-route-tools";
@@ -11,13 +12,6 @@ const STOPPED_TEXT = "回合已停止，这个问题不再等待回答";
 /** 无人值守运行没有可点击的人：request_input 必须立刻失败，不能停到自动化超时。 */
 export const UNATTENDED_NO_ANSWERER_TEXT = "无人值守运行没有可以回答这个问题的人";
 
-/** 与 question-answerer 同一作用域语义：带 sessionId 时只接管该会话，旧形状按全局处理。 */
-function unattendedOwnsInput(scope: { sessionId?: string } | null | undefined, sessionId: string): boolean {
-  if (!scope) return false;
-  if (scope.sessionId === undefined) return true;
-  return scope.sessionId === sessionId;
-}
-
 type Agent = {
   id?: string;
   session?: { id?: string };
@@ -27,9 +21,8 @@ type Agent = {
 type Exec = { agent?: unknown; signal?: AbortSignal };
 
 type Context = {
-  huaanworkRouteAgent?: { current: unknown };
-  /** boot 时注入的容器；无人值守运行期间 `.current` 非空，boot 时初始化为 null（policy.ts / question-answerer 同源）。 */
-  huaanworkUnattended?: { current?: { sessionId?: string } | null };
+  /** boot 时注入的按会话容器；无人值守运行只给自己的会话写条目（policy.ts 同源）。 */
+  huaanworkUnattended?: Map<string, UnattendedScope>;
   huaanworkEmit?: (
     event:
       | { event: "session/end"; ok: false; error: string; sessionId?: string }
@@ -101,9 +94,9 @@ const textOutput = {
 };
 
 export function apply(ctx: Context): void {
-  // `huaanworkRouteAgent` 是单槽，后一次发送会覆盖它；执行上下文带了 agent 就以它为准。
+  // 执行上下文里的 agent 是唯一的会话依据:并发后进程级单槽属于别的会话。
   const currentAgent = (exec: Exec | undefined): Agent | undefined => {
-    const agent = exec?.agent ?? ctx.huaanworkRouteAgent?.current;
+    const agent = exec?.agent;
     return agent && typeof agent === "object" ? (agent as Agent) : undefined;
   };
 
@@ -118,7 +111,8 @@ export function apply(ctx: Context): void {
 
   const waitForInput = (agent: Agent, sessionId: string, question: string, signal: AbortSignal | undefined) => {
     // 无人值守自动化没有人类卡片：立刻以工具错误结束，而不是把整轮停到超时。
-    if (unattendedOwnsInput(ctx.huaanworkUnattended?.current, sessionId)) {
+    // 只查本次会话（及其已登记的父会话）的范围，别的运行的条目不影响这里。
+    if (unattendedScopeFor(ctx.huaanworkUnattended, sessionId)) {
       return Promise.reject(new Error(UNATTENDED_NO_ANSWERER_TEXT));
     }
     let pending: PendingInput | undefined;

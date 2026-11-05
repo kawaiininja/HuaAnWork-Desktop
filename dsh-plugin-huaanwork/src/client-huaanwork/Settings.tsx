@@ -29,9 +29,27 @@ export type ModelSettingsPayload = {
   keep_awake?: boolean;
   /** 护栏策略档位：ask / smart / full；缺省按 ask 处理。 */
   guard_mode?: string;
+  /** 同时执行的项目任务上限；宿主写入生效值（1–8，缺省 3）。 */
+  max_concurrent_turns?: number;
 };
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
+
+/** 设置页尚未读到宿主值时显示的缺省上限（与宿主 DEFAULT_MAX_CONCURRENT_TURNS 一致）。 */
+const DEFAULT_MAX_CONCURRENT_TURNS = 3;
+
+/**
+ * 发送区实际使用的模型 id：本标签的选择 > 子任务记住的模型 > 全局当前模型。
+ * 新任务没有任务记录时落到 `active_model_id`；已有 `task.modelId` 时用它的值。
+ */
+export function resolveSendModelId(
+  picks: Readonly<Record<string, string>>,
+  tabId: string,
+  taskModelId: string | undefined,
+  activeModelId: string,
+): string {
+  return picks[tabId] ?? taskModelId ?? activeModelId;
+}
 
 export function modelDisplayName(entry: Pick<ModelEntry, "name" | "model"> | undefined, fallback = "未设置模型"): string {
   if (!entry) return fallback;
@@ -297,6 +315,7 @@ export default function Settings({
   const [status, setStatus] = useState("");
   const [workAllowNetwork, setWorkAllowNetwork] = useState(false);
   const [keepAwake, setKeepAwakeSetting] = useState(true);
+  const [maxConcurrentTurns, setMaxConcurrentTurns] = useState(DEFAULT_MAX_CONCURRENT_TURNS);
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -305,6 +324,9 @@ export default function Settings({
     const next = applySettingsModels(payload);
     setModels(next.models);
     setActiveId(next.activeId);
+    if (typeof payload.max_concurrent_turns === "number") {
+      setMaxConcurrentTurns(payload.max_concurrent_turns);
+    }
     onModelsChange?.(payload);
   }
 
@@ -317,6 +339,7 @@ export default function Settings({
         setActiveId(next.activeId);
         setWorkAllowNetwork(payload.allow_network === true);
         setKeepAwakeSetting(payload.keep_awake !== false);
+        setMaxConcurrentTurns(payload.max_concurrent_turns ?? DEFAULT_MAX_CONCURRENT_TURNS);
       } catch (error) {
         setStatus(error instanceof Error ? error.message : String(error));
       }
@@ -343,6 +366,24 @@ export default function Settings({
       setKeepAwakeSetting(payload.keep_awake !== false);
       onModelsChange?.(payload);
       setStatus(next ? "已开启保持系统唤醒" : "已关闭保持系统唤醒");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** 同时进行的任务数：写入 settings.json，宿主把 1–8 之外的值夹到边界并回写生效值。 */
+  async function changeMaxConcurrentTurns(value: string) {
+    const requested = Number(value);
+    if (value.trim() === "" || !Number.isFinite(requested)) return;
+    setMaxConcurrentTurns(requested);
+    try {
+      const payload = await rpcCall<ModelSettingsPayload>("settings.set", {
+        max_concurrent_turns: requested,
+      });
+      if (typeof payload.max_concurrent_turns === "number") {
+        setMaxConcurrentTurns(payload.max_concurrent_turns);
+      }
+      onModelsChange?.(payload);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -549,6 +590,19 @@ export default function Settings({
                     添加模型
                   </button>
                 )}
+                <h3>任务</h3>
+                <label>
+                  同时进行的任务数
+                  <input
+                    type="number"
+                    min={1}
+                    max={8}
+                    step={1}
+                    value={maxConcurrentTurns}
+                    onChange={(event) => void changeMaxConcurrentTurns(event.target.value)}
+                  />
+                </label>
+                <p className="hint">同一时间可以执行的项目任务数；超出范围按 1 或 8 生效。</p>
                 <h3>插件</h3>
                 <p className="hint">
                   插件的安装与卸载已移至「插件市场」页的「本地安装」页签（仅本地目录或 .tgz；内网市场宕机时仍可用）。

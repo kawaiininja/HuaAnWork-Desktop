@@ -18,6 +18,7 @@ import {
   GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS,
   type GitWorkBudget,
 } from "./git-budget.ts";
+import { sessionWorkspaceRoot } from "./sandbox-cwd.ts";
 
 type RpcEvent =
   | { event: "token"; text: string; sessionId?: string }
@@ -67,6 +68,11 @@ type ToolResult = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/
 
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
+  huaanworkSessionRoots?: Map<string, string>;
+  /** 唯一调度器:缺 sessionId 的 diff 只在恰好一个回合占名额时补上它的会话。 */
+  huaanworkTurnScheduler?: { soleCapWriterSessionId(): string | undefined };
+  /** Cordis logger;缺席时 console 兜底由调用点决定。 */
+  logger?: { info?(message: string): void };
   huaanworkEmit?: (event: RpcEvent) => void;
   /** 子代理 run 权威状态机;fixture 与旧运行时可以缺席,缺席时所有事件照旧广播。 */
   huaanworkSubagentRuns?: ChildRunActivity;
@@ -294,11 +300,22 @@ function capResult(result: ToolResult): { text: string; truncated: boolean } {
 }
 
 function emitGitDiff(ctx: Context, sessionId: string | undefined): void {
-  const root = ctx.huaanworkWorkspaceRoot?.current ?? process.cwd();
+  // 缺 sessionId 时只在恰好一个回合占名额时补上它的会话;多于一个/没有则保持
+  // 无归属并记一条,不能拿 activeTurnCount 猜。
+  let target = sessionId;
+  if (target === undefined) {
+    const sole = ctx.huaanworkTurnScheduler?.soleCapWriterSessionId();
+    if (sole !== undefined) {
+      target = sole;
+    } else {
+      ctx.logger?.info?.('[huaanwork] diff emitted without a session: no sole active turn');
+    }
+  }
+  const root = sessionWorkspaceRoot(ctx, target);
   try {
     const text = workspaceDiff(root);
     if (text === undefined) return;
-    emit(ctx, { event: "diff", text, ...(sessionId === undefined ? {} : { sessionId }) });
+    emit(ctx, { event: "diff", text, ...(target === undefined ? {} : { sessionId: target }) });
   } catch {
     return;
   }

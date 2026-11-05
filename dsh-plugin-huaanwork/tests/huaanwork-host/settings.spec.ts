@@ -27,6 +27,20 @@ describe('settings logic ported from sidecar', () => {
     expect(kept2.automation_timeout_ms).toBe(2000)
   })
 
+  test('parseSettings clamps max_concurrent_turns to 1..8 and defaults to 3', () => {
+    expect(parseSettings({}).max_concurrent_turns).toBe(3)
+    expect(parseSettings({ max_concurrent_turns: 3 }).max_concurrent_turns).toBe(3)
+    expect(parseSettings({ max_concurrent_turns: 0 }).max_concurrent_turns).toBe(1)
+    expect(parseSettings({ max_concurrent_turns: -2 }).max_concurrent_turns).toBe(1)
+    expect(parseSettings({ max_concurrent_turns: 9 }).max_concurrent_turns).toBe(8)
+    expect(parseSettings({ max_concurrent_turns: 1.5 }).max_concurrent_turns).toBe(3)
+    expect(parseSettings({ max_concurrent_turns: '4' }).max_concurrent_turns).toBe(3)
+    const saved = mergeSettings(parseSettings({}), { max_concurrent_turns: 9 })
+    expect(saved.max_concurrent_turns).toBe(8)
+    const kept = mergeSettings(parseSettings({ max_concurrent_turns: 4 }), { theme: 'dark' })
+    expect(kept.max_concurrent_turns).toBe(4)
+  })
+
   test('parseSettings synthesizes one entry from legacy flat fields', () => {
     const got = parseSettings({ base_url: 'http://127.0.0.1:9/v1', model: 'qwen', api_key: '', theme: 'dark' })
     expect(got.theme).toBe('dark')

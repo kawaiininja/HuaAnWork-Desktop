@@ -7,15 +7,21 @@ import { sweepLegacyChatAutoSessions } from './automation-sweep.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
 import { createSubagentRunRegistry } from './subagent-runs.ts'
+import { createTurnScheduler } from './turn-scheduler.ts'
 import { installNetworkGate } from './net-gate.ts'
-import { startAutomationScheduler } from './automation-scheduler.ts'
+import { startAutomationScheduler, evaluateDueAutomations } from './automation-scheduler.ts'
 import { bindAutomationRuntime, type AutomationRuntime } from './automations-host.ts'
 import { registerKeepAwakeRoute } from './keep-awake-route.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
 import { sweepProjectLegacySessionsOncePerProcess } from './session-sweep.ts'
 import { restoreEnabledBundledSkills } from './skills-host.ts'
 import { createAgentsHost } from './agents-host.ts'
-import { setAgentPackageActiveTurns, setAgentPackageHost, setAgentsDirectory } from './sessions.ts'
+import {
+  setAgentPackageActiveTurns,
+  setAgentPackageHost,
+  setAgentsDirectory,
+  setReevaluateDueAutomations,
+} from './sessions.ts'
 import { createAgentCatalogSecurity } from './agent-package/catalog-security.ts'
 import { recoverCatalogPackageInstalls } from './agent-package/catalog-install.ts'
 import {
@@ -147,9 +153,23 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   // 事件与路由共用同一个 hub.broadcast(routeCtx.emit)。
   const subagentRuns = createSubagentRunRegistry({ emit: routeCtx.emit })
   ctx.huaanworkSubagentRuns = subagentRuns
+  // Task 6:唯一回合调度器与两张会话表。routeCtx.runtimeCtx 就是同一个 ctx,
+  // sessionSend、出队、模型适配器、沙箱与工具执行读到的都是这里的同一引用。
+  const turnScheduler = createTurnScheduler({
+    maxConcurrentTurns: () => readHuaanworkSettingsSync(config.profileDir).max_concurrent_turns,
+    modelExists: (modelId) =>
+      readHuaanworkSettingsSync(config.profileDir).models.some((model) => model.id === modelId),
+  })
+  ctx.huaanworkSessionModels = new Map()
+  ctx.huaanworkSessionRoots = new Map()
+  ctx.huaanworkTurnScheduler = turnScheduler
   // 执行体与 collector 接线。调度 tick 走同一 enqueueAutomation,不直接调 executeRun。
   const runtime = ctx as unknown as AutomationRuntime
   bindAutomationRuntime(runtime, routeCtx)
+  // Task 8:用户队列出完(或脚本进程 close)后按同一段「列出到期项并准入」再评估一次。
+  setReevaluateDueAutomations(() => {
+    void evaluateDueAutomations()
+  })
   // —— 启动存量清扫(G6,Task 6.12;旧 host.ts:922/936 同位置语义;裁定 D-M6-24 / R-6.12-1)——
   // 在 apply() 内执行 ⇒ 每次进程启动都会跑,天然晚于
   // main.ts 的一次性迁移钩子:迁移搬进来的 legacy chat-auto 日志由同一次启动清掉。

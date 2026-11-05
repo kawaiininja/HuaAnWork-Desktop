@@ -64,6 +64,7 @@ import {
   renameProject,
   renameTask,
   readAutomationTemplates,
+  setTaskModel,
   touchProject,
 } from './stores.ts'
 import {
@@ -80,7 +81,6 @@ import {
   authStatus,
 } from './auth.ts'
 import {
-  assertAutomationIdle,
   sessionAnswerApproval,
   sessionAnswerInput,
   sessionCancel,
@@ -92,6 +92,7 @@ import {
   sessionRemove,
   sessionResume,
   sessionSend,
+  drainUserQueue,
   type SessionRuntimeContext,
 } from './sessions.ts'
 import { closeWorkspace, openWorkspace } from './workspace.ts'
@@ -104,7 +105,14 @@ import {
   removeAutomation,
   updateAutomation,
 } from './automations-store.ts'
-import { agentIdle, automationCollector, automationRootDecision, enqueueAutomation, stopAutomation } from './automations-host.ts'
+import { automationRunSessionId } from './automation-session-ids.ts'
+import {
+  automationAdmissionRoot,
+  automationCollector,
+  enqueueAutomation,
+  stopAutomation,
+} from './automations-host.ts'
+import type { TurnScheduler } from './turn-scheduler.ts'
 
 export interface RouteRequest {
   params: Record<string, string>
@@ -172,6 +180,13 @@ const requireRuntime = (ctx: RouteContext): SessionRuntimeContext => {
     throw new RouteError(503, 'runtime-unavailable', 'host runtime context is not available')
   }
   return ctx.runtimeCtx
+}
+
+/** 回合调度器由 index.ts 在 holders 安装后注入;缺席是装配错误。 */
+const requireTurnScheduler = (ctx: RouteContext): TurnScheduler => {
+  const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
+  if (!scheduler) throw new RouteError(503, 'runtime-unavailable', '回合调度器未初始化')
+  return scheduler
 }
 
 /** 子代理 run registry 由 index.ts 在 holders 安装后注入;缺席是装配错误,按 503 报告。 */
@@ -560,7 +575,18 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
           throw new RouteError(400, 'validation', fieldErrors.map((e) => e.message).join('; '))
         }
       }
-      return writeHuaanworkSettings(ctx.profileDir, req.body)
+      const written = await writeHuaanworkSettings(ctx.profileDir, req.body)
+      // F1(GUI 3.4):保存含 max_concurrent_turns 的写入后主动排空一次用户队列——
+      // 上限恢复时等待项无需等活动回合释放;调度器按当前上限/根写者自检,
+      // 名额已满或上限调低时是 no-op。运行时上下文缺席(装配早期)时静默跳过,
+      // 设置写入本身不受影响。
+      if (
+        Object.prototype.hasOwnProperty.call(paramObj, 'max_concurrent_turns') &&
+        ctx.runtimeCtx !== undefined
+      ) {
+        drainUserQueue(ctx.runtimeCtx, ctx)
+      }
+      return written
     },
   },
 
@@ -1048,6 +1074,12 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     handler: storeRoute(async (req, ctx) => {
       const projectId = bodyParam(req.body, 'projectId')
       if (!projectId) throw new Error('project.remove requires params.projectId')
+      const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
+      if (scheduler) {
+        for (const automation of await listAutomations(ctx.profileDir)) {
+          if (automation.projectId === projectId) scheduler.clearAdmissionSkip(automation.id)
+        }
+      }
       const removed = await removeProject(ctx.profileDir, projectId)
       // 自动化运行会话也是会话日志:删目录前同样释放运行态(等待中的输入、live agent、
       // 子会话登记、坏参数计数与已确认计划目标),与 session.remove / 任务级联同口径。
@@ -1125,7 +1157,13 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       }
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.update requires params.id')
-      return { automation: await updateAutomation(ctx.profileDir, id, req.body as Record<string, unknown>) }
+      const updated = await updateAutomation(ctx.profileDir, id, req.body as Record<string, unknown>)
+      // 停用或改期后不再沿用上一次准入留下的跳过标记(否则会在新时点被提前重试)。
+      const patch = req.body as Record<string, unknown>
+      if (patch.enabled !== undefined || patch.schedule !== undefined) {
+        ctx.runtimeCtx?.huaanworkTurnScheduler?.clearAdmissionSkip(id)
+      }
+      return { automation: updated }
     }),
   }, // Task 3 (M4)
   {
@@ -1139,6 +1177,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
         releaseSessionRuntime(ctx.runtimeCtx, sessionId),
       )
+      ctx.runtimeCtx?.huaanworkTurnScheduler?.clearAdmissionSkip(id)
       return { removed: true }
     }),
   }, // Task 3 (M4)
@@ -1174,24 +1213,28 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     method: 'automation.run',
     http: 'POST',
     path: '/huaanwork/automation/run',
-    // 手动运行先热切换到任务所属目录（未归属项目则回到中立根），再入队。
-    // 调度跨根仍不入队。fire-and-forget:不得 await 执行体。
+    // 手动运行的唯一准入点:目标根是任务所属项目(无项目用中立根),不改前台根。
+    // skip 返回 waiting;成功则把已经占坑的 root/runId 交给执行体,fire-and-forget。
     handler: workspaceRoute(async (req, ctx) => {
-      assertAutomationIdle()
-      if (!(await agentIdle(ctx))) throw new Error('当前对话仍在进行，请先完成或停止后再运行任务')
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.run requires params.id')
       const automation = await findAutomation(ctx.profileDir, id)
-      if (automation.projectId) {
-        const project = (await listProjects(ctx.profileDir)).find((item) => item.id === automation.projectId)
-        if (project) await openWorkspace(ctx, project.root)
-      } else {
-        await closeWorkspace(ctx)
-      }
-      const decision = await automationRootDecision(ctx, automation)
-      if (decision.kind === 'cross') throw new Error(decision.message)
+      const scheduler = requireTurnScheduler(ctx)
       const runId = randomUUID()
-      void enqueueAutomation(automation, { trigger: 'manual', runId })
+      const root = await automationAdmissionRoot(ctx, automation)
+      const sessionId =
+        automation.kind === 'agent' ? automationRunSessionId(automation.id, runId) : `script:${runId}`
+      const admitted = scheduler.admitAutomation({
+        automationId: automation.id,
+        sessionId,
+        root,
+        runId,
+        countsTowardCap: automation.kind === 'agent',
+      })
+      if (admitted.kind === 'skip') {
+        return { queued: false, waiting: true, runId, workspaceRoot: ctx.workspaceRoot.current }
+      }
+      void enqueueAutomation(automation, { trigger: 'manual', runId, root: admitted.root })
       return { queued: true, runId, workspaceRoot: ctx.workspaceRoot.current }
     }),
   }, // Task 4 (M4)
@@ -1289,6 +1332,18 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { task: await renameTask(ctx.profileDir, { taskId, name }) }
     }),
   }, // Task 10
+  {
+    method: 'task.setModel',
+    http: 'POST',
+    path: '/huaanwork/task/setModel',
+    handler: storeRoute(async (req, ctx) => {
+      const taskId = bodyParam(req.body, 'taskId')
+      const modelId = bodyParam(req.body, 'modelId')
+      if (!taskId) throw new Error('task.setModel requires params.taskId')
+      if (!modelId) throw new Error('task.setModel requires params.modelId')
+      return { task: await setTaskModel(ctx.profileDir, { taskId, modelId }) }
+    }),
+  }, // Task 9(子任务记住模型)
 ]
 
 export const NATIVE_ROUTES: readonly NativeRouteEntry[] = [

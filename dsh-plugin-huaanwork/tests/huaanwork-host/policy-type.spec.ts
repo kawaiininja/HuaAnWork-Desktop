@@ -2,23 +2,24 @@ import { describe, expect, test } from 'vitest'
 import type { UnattendedHolder, UnattendedScope } from '../../src/huaanwork-guardrails/policy.ts'
 
 // 编译期钉：本文件在 tests/huaanwork-host/ 下，由 tsconfig.tests.json 覆盖
-// （tests/huaanwork-guardrails/ 整个目录被排除在 typecheck 之外），所以下面四个赋值
+// （tests/huaanwork-guardrails/ 整个目录被排除在 typecheck 之外），所以下面几行
 // 由 `corepack yarn workspace dsh-plugin-huaanwork typecheck` 真实检查。
 //
-// 要钉的契约：holders.ts 装容器的初始值就是 `{ current: null }`（既不是 undefined
-// 也不是缺席），旧调用方还可以根本不写 `current`。把 policy.ts 的
-// `current?: UnattendedScope | null` 收窄回非 nullable（或删掉 `?`）时，对应的赋值
-// 会在 typecheck 里报错——运行时用例（policy.cordis.spec.ts）跑得过不代表类型如实。
-const bootSlot: UnattendedHolder = { current: null }
-const absentSlot: UnattendedHolder = {}
+// 要钉的契约：holders.ts 装的初始值就是一张空 `Map`（既不是 `{ current: null }`
+// 也不是 `undefined`），无人值守范围按会话 id 作为键写入。把 `UnattendedHolder`
+// 改回单槽容器（`.current`）或收窄键/值类型时，下面的赋值会在 typecheck 里报错——
+// 运行时用例（policy.cordis.spec.ts）跑得过不代表类型如实。
+const emptySlot: UnattendedHolder = new Map()
 const scope: UnattendedScope = { runId: 'run-1', automationId: 'auto-1', allow: new Set(['read']) }
-const filledSlot: UnattendedHolder = { current: scope }
+const filledSlot: UnattendedHolder = new Map([['session-1', scope]])
 
-describe('UnattendedHolder 的类型契约', () => {
-  test('boot 空槽、缺席 current 与已填槽三种形态都保持可赋值且语义不变', () => {
+describe('UnattendedHolder 的按会话契约', () => {
+  test('空表与按会话写入两种形态都保持可赋值，且其它会话查不到', () => {
     // 运行时只是把上面几个常量用掉（noUnusedLocals），真正的断言发生在 typecheck。
-    expect(bootSlot.current).toBeNull()
-    expect(absentSlot).toEqual({})
-    expect(filledSlot.current).toBe(scope)
+    expect(emptySlot.size).toBe(0)
+    expect(filledSlot.get('session-1')).toBe(scope)
+    expect(filledSlot.get('session-2')).toBeUndefined()
+    filledSlot.delete('session-1')
+    expect(filledSlot.size).toBe(0)
   })
 })

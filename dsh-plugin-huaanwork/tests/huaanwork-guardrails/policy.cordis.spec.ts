@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it, test, vi } from "vitest";
+import { registerChildSession, resetChildSessionRegistry } from "../../src/huaanwork-host/child-sessions.ts";
 import { readGuardMode, writeUnattendedAudit } from "../../src/huaanwork-guardrails/policy.ts";
 
 // F-2 pin(2026-10-16 裁定):透明包装 spawnSync 以便计数,实际执行仍走原实现,
@@ -324,30 +325,30 @@ function applyPolicyWithUnattended(ctx: Record<string, unknown>) {
   };
 }
 
-test("unattended off (ctx.huaanworkUnattended.current unset): ask path is byte-for-byte identical to baseline", async () => {
+test("unattended off (no holder): ask path is byte-for-byte identical to baseline", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
   const allowedOnce = new Set<string>();
   const harness = applyPolicyWithUnattended({ huaanworkAllowedOnce: allowedOnce });
   apply(harness.ctx as never);
 
-  const call = { name: "git_push", arguments: {}, callId: "call-off" };
+  const call = { name: "git_push", arguments: {}, agent: { session: { id: "session-off" } }, callId: "call-off" };
   assert.deepEqual(await harness.preExecute(call), { kind: "ask" });
   assert.equal(harness.guard(call), GUARD_NEEDS_APPROVAL);
   assert.equal(allowedOnce.size, 0);
 });
 
-test("unattended holder in its boot shape (current: null): ask path is unchanged", async () => {
+test("unattended holder in its boot shape (empty Map): ask path is unchanged", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
   const allowedOnce = new Set<string>();
-  // holders.ts 装容器的初始值就是 null（既不是 undefined 也不是缺席）：类型必须如实
-  // 写 `UnattendedScope | null`，运行时也必须与「未启用」逐字节同路径。
+  // holders.ts 装容器的初始值就是一张空 Map（既不是 undefined 也不是单槽 `{ current: null }`）：
+  // 类型必须如实写 `Map<string, UnattendedScope>`，运行时也必须与「未启用」逐字节同路径。
   const harness = applyPolicyWithUnattended({
     huaanworkAllowedOnce: allowedOnce,
-    huaanworkUnattended: { current: null },
+    huaanworkUnattended: new Map(),
   });
   apply(harness.ctx as never);
 
-  const call = { name: "git_push", arguments: {}, callId: "call-boot-null" };
+  const call = { name: "git_push", arguments: {}, agent: { session: { id: "session-boot" } }, callId: "call-boot-empty" };
   assert.deepEqual(await harness.preExecute(call), { kind: "ask" });
   assert.equal(harness.guard(call), GUARD_NEEDS_APPROVAL);
   assert.equal(allowedOnce.size, 0);
@@ -360,21 +361,25 @@ test("unattended enabled and callId's tool is in allow: pre-execute degrades ask
   const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-policy-audit-"));
   try {
     const allowedOnce = new Set<string>();
+    const sessionId = "huaanwork-auto-auto-1-run-1";
     const harness = applyPolicyWithUnattended({
       huaanworkAllowedOnce: allowedOnce,
       huaanworkProfileDir: profileDir,
-      huaanworkUnattended: {
-        current: {
-          runId: "run-1",
-          automationId: "auto-1",
-          allow: new Set([shellName]),
-          sessionId: "huaanwork-auto-auto-1-run-1",
-        },
-      },
+      huaanworkUnattended: new Map([
+        [
+          sessionId,
+          {
+            runId: "run-1",
+            automationId: "auto-1",
+            allow: new Set([shellName]),
+            sessionId,
+          },
+        ],
+      ]),
     });
     apply(harness.ctx as never);
 
-    const call = { name: shellName, arguments: { command: "ls -la" }, callId: "call-1" };
+    const call = { name: shellName, arguments: { command: "ls -la" }, agent: { session: { id: sessionId } }, callId: "call-1" };
     assert.deepEqual(await harness.preExecute(call), { kind: "allow" });
     assert.ok(allowedOnce.has("call-1"), "callId must be recorded in huaanworkAllowedOnce");
     assert.equal(harness.guard(call), undefined, "guard() must pass the degraded callId through unchanged");
@@ -410,16 +415,17 @@ test("audit file caps retained lines and trims the oldest ones on append (review
 
     const allowedOnce = new Set<string>();
     const shellName = process.platform === "win32" ? "pwsh" : "bash";
+    const sessionId = "session-cap";
     const harness = applyPolicyWithUnattended({
       huaanworkAllowedOnce: allowedOnce,
       huaanworkProfileDir: profileDir,
-      huaanworkUnattended: {
-        current: { runId: "run-cap", automationId: "auto-cap", allow: new Set([shellName]) },
-      },
+      huaanworkUnattended: new Map([
+        [sessionId, { runId: "run-cap", automationId: "auto-cap", allow: new Set([shellName]), sessionId }],
+      ]),
     });
     apply(harness.ctx as never);
 
-    const call = { name: shellName, arguments: { command: "ls -la" }, callId: "call-cap" };
+    const call = { name: shellName, arguments: { command: "ls -la" }, agent: { session: { id: sessionId } }, callId: "call-cap" };
     assert.deepEqual(await harness.preExecute(call), { kind: "allow" });
 
     const lines = readFileSync(auditPath, "utf8").trim().split("\n");
@@ -438,14 +444,53 @@ test("unattended enabled but tool is outside allow: pre-execute still returns as
   const allowedOnce = new Set<string>();
   const harness = applyPolicyWithUnattended({
     huaanworkAllowedOnce: allowedOnce,
-    huaanworkUnattended: { current: { runId: "run-2", automationId: "auto-2", allow: new Set(["read"]) } },
+    huaanworkUnattended: new Map([["session-outside", { runId: "run-2", automationId: "auto-2", allow: new Set(["read"]) }]]),
   });
   apply(harness.ctx as never);
 
-  const call = { name: "git_push", arguments: {}, callId: "call-outside" };
+  const call = { name: "git_push", arguments: {}, agent: { session: { id: "session-outside" } }, callId: "call-outside" };
   assert.deepEqual(await harness.preExecute(call), { kind: "ask" });
   assert.equal(harness.guard(call), GUARD_NEEDS_APPROVAL);
   assert.equal(allowedOnce.size, 0);
+});
+
+test("another session's unattended scope never degrades this session's call", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
+  const shellName = process.platform === "win32" ? "pwsh" : "bash";
+  const allowedOnce = new Set<string>();
+  const harness = applyPolicyWithUnattended({
+    huaanworkAllowedOnce: allowedOnce,
+    huaanworkUnattended: new Map([["session-automation", { runId: "run-other", automationId: "auto-other", allow: new Set([shellName]) }]]),
+  });
+  apply(harness.ctx as never);
+
+  // 自动化运行期间,人在另一个会话里发起的同一条命令仍然要审批。
+  const call = { name: shellName, arguments: { command: "ls -la" }, agent: { session: { id: "session-human" } }, callId: "call-other" };
+  assert.deepEqual(await harness.preExecute(call), { kind: "ask" });
+  assert.equal(allowedOnce.size, 0);
+});
+
+test("a subagent inherits the unattended scope registered for its parent session", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
+  const shellName = process.platform === "win32" ? "pwsh" : "bash";
+  const allowedOnce = new Set<string>();
+  resetChildSessionRegistry();
+  registerChildSession("session-automation-parent", "session-automation-child");
+  try {
+    const harness = applyPolicyWithUnattended({
+      huaanworkAllowedOnce: allowedOnce,
+      huaanworkUnattended: new Map([
+        ["session-automation-parent", { runId: "run-child", automationId: "auto-child", allow: new Set([shellName]) }],
+      ]),
+    });
+    apply(harness.ctx as never);
+
+    const call = { name: shellName, arguments: { command: "ls -la" }, agent: { session: { id: "session-automation-child" } }, callId: "call-child" };
+    assert.deepEqual(await harness.preExecute(call), { kind: "allow" });
+    assert.ok(allowedOnce.has("call-child"));
+  } finally {
+    resetChildSessionRegistry();
+  }
 });
 
 test("run_code stays denied regardless of unattended (present-as already rejects code mode; this is the second insurance)", async () => {
@@ -455,11 +500,11 @@ test("run_code stays denied regardless of unattended (present-as already rejects
   // run_code 的判定是 "deny"（不是 "ask"），永远不会进入降级分支。
   const harness = applyPolicyWithUnattended({
     huaanworkAllowedOnce: allowedOnce,
-    huaanworkUnattended: { current: { runId: "run-3", automationId: "auto-3", allow: new Set(["run_code"]) } },
+    huaanworkUnattended: new Map([["session-run-code", { runId: "run-3", automationId: "auto-3", allow: new Set(["run_code"]) }]]),
   });
   apply(harness.ctx as never);
 
-  const call = { name: "run_code", arguments: {}, callId: "call-run-code" };
+  const call = { name: "run_code", arguments: {}, agent: { session: { id: "session-run-code" } }, callId: "call-run-code" };
   assert.deepEqual(await harness.preExecute(call), {
     kind: "deny",
     reason: POLICY(reasonToolUnattached("run_code")),
@@ -474,11 +519,11 @@ test("unattended degrade without callId does not enter allowedOnce and falls bac
   const allowedOnce = new Set<string>();
   const harness = applyPolicyWithUnattended({
     huaanworkAllowedOnce: allowedOnce,
-    huaanworkUnattended: { current: { runId: "run-4", automationId: "auto-4", allow: new Set([shellName]) } },
+    huaanworkUnattended: new Map([["session-no-call-id", { runId: "run-4", automationId: "auto-4", allow: new Set([shellName]) }]]),
   });
   apply(harness.ctx as never);
 
-  const call = { name: shellName, arguments: { command: "ls -la" } }; // no callId
+  const call = { name: shellName, arguments: { command: "ls -la" }, agent: { session: { id: "session-no-call-id" } } }; // no callId
   assert.deepEqual(await harness.preExecute(call), { kind: "ask" });
   assert.equal(allowedOnce.size, 0);
 });
@@ -487,26 +532,26 @@ test("invariant 4: with an active unattended scope, guard() alone still denies a
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
   const allowedOnce = new Set<string>();
   // Active unattended scope whose allow includes ask-class tools — same shape a real
-  // automation run would set on ctx.huaanworkUnattended.current. The degrade only ever
+  // automation run would write into the shared map. The degrade only ever
   // happens inside the tools/pre-execute handler (it's the only place that writes to
   // huaanworkAllowedOnce); if a boot-overlay strips/never wires up pre-execute, guard()
   // must still fall back to its own decide()-based deny — it can never express "ask" and
-  // must never independently consult ctx.huaanworkUnattended.
+  // must never independently consult the unattended map.
   const shellName = process.platform === "win32" ? "pwsh" : "bash";
   const harness = applyPolicyWithUnattended({
     huaanworkAllowedOnce: allowedOnce,
-    huaanworkUnattended: {
-      current: { runId: "run-5", automationId: "auto-5", allow: new Set(["git_push", shellName]) },
-    },
+    huaanworkUnattended: new Map([
+      ["session-stripped", { runId: "run-5", automationId: "auto-5", allow: new Set(["git_push", shellName]) }],
+    ]),
   });
   apply(harness.ctx as never);
 
   // Deliberately never call harness.preExecute(...) — simulates pre-execute being
   // stripped by a boot-overlay patch. Only tools.guard() is exercised.
-  const gitCall = { name: "git_push", arguments: {}, callId: "call-stripped-git" };
+  const gitCall = { name: "git_push", arguments: {}, agent: { session: { id: "session-stripped" } }, callId: "call-stripped-git" };
   assert.equal(harness.guard(gitCall), GUARD_NEEDS_APPROVAL);
 
-  const bashCall = { name: shellName, arguments: { command: "ls -la" }, callId: "call-stripped-bash" };
+  const bashCall = { name: shellName, arguments: { command: "ls -la" }, agent: { session: { id: "session-stripped" } }, callId: "call-stripped-bash" };
   assert.equal(harness.guard(bashCall), GUARD_NEEDS_APPROVAL);
 
   assert.equal(allowedOnce.size, 0, "guard() alone must never populate huaanworkAllowedOnce");

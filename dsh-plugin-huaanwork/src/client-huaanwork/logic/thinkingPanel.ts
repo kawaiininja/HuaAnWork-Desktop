@@ -1,3 +1,5 @@
+import { isUnstartedUserItem } from "./concurrentTurn.ts";
+
 const CLOSED_THINK = /<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi;
 const OPEN_THINK = /<think(?:ing)?>[\s\S]*$/i;
 const THINK_TAGS = ["<think>", "<thinking>", "</think>", "</thinking>"];
@@ -50,11 +52,21 @@ export function thinkingChrome(input: {
   return { title, expanded: !input.hasAssistantText };
 }
 
-/** 用户取消或回合失败：只改当前用户消息之后的思考和正文，标题因此变成「思考 · 已中断」。 */
-export function interruptTurnItems<T extends { kind: string; interrupted?: boolean }>(items: readonly T[]): T[] {
+/**
+ * 用户取消或回合失败：只改当前用户消息之后的思考和正文，标题因此变成「思考 · 已中断」。
+ * 排队中、本次已抛错或宿主没启动的用户消息没有开启回合，不能把正在执行的回合截断。
+ */
+export function interruptTurnItems<T extends {
+  kind: string;
+  interrupted?: boolean;
+  queueItemId?: string;
+  sendRejected?: boolean;
+  notStarted?: boolean;
+}>(items: readonly T[]): T[] {
   let turnStart = 0;
   for (let i = items.length - 1; i >= 0; i -= 1) {
-    if (items[i]?.kind === "user") {
+    const item = items[i];
+    if (item?.kind === "user" && !isUnstartedUserItem(item)) {
       turnStart = i + 1;
       break;
     }
@@ -114,7 +126,7 @@ export function thinkingStepsText(steps: ThinkingSteps): string {
 type TurnItem =
   | { kind: "thinking"; thought: string }
   | { kind: "assistant"; text: string }
-  | { kind: "user" }
+  | { kind: "user"; queueItemId?: string; sendRejected?: boolean; notStarted?: boolean }
   | { kind: "tool" }
   | { kind: "ask" }
   | { kind: "input" }
@@ -126,7 +138,8 @@ export function hasAssistantTextAfter(items: readonly TurnItem[], index: number)
   if (current?.kind !== "thinking") return false;
   for (let i = index + 1; i < items.length; i += 1) {
     const item = items[i];
-    if (item.kind === "user") return false;
+    // 排队中、刚插入（应答未回）或已抛错的用户消息没有开启下一回合，不结束这里的扫描。
+    if (item.kind === "user" && !isUnstartedUserItem(item)) return false;
     if (item.kind === "assistant") {
       const visible = resolveThinking({ reasoning: current.thought, assistantText: item.text }).visible.trim();
       if (visible.length > 0) return true;
