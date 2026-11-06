@@ -159,7 +159,7 @@ import {
   resolveActiveTab,
   type ApprovalCardView,
 } from "./logic/chatTabs.ts";
-import { canStartStop, consumeStaleIdle, finishStop, isStopPending, rememberStale, sessionStopRequested, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
+import { canStartStop, consumeBufferedStaleEnds, consumeStaleIdle, finishStop, isStopPending, rememberStale, sessionStopRequested, takeHeldEnds, type StopTicket, type StaleIdle } from "./logic/stopGate.ts";
 import {
   isUnstartedUserItem,
   noteDiffForTab,
@@ -853,6 +853,26 @@ export default function App() {
   }
 
   /**
+   * 丢弃本次发送的缓冲之前，先把其中已经接住的停止后空闲结束送进过期标记：
+   * 属于当前轮的结束用掉标记，该会话的停止闩锁随之释放；属于更新一轮的结束只让标记失效。
+   * 否则残留标记会把下一回合自己的结束当成旧停止的空闲结束丢掉，停止按钮留在界面上。
+   */
+  function discardBufferedStopEnds(buffered: readonly RpcEvent[]): void {
+    const consumed = consumeBufferedStaleEnds(
+      staleIdleRef.current,
+      buffered,
+      (sessionId) => tabTurnOf(tabIdForSession(sessionId)).epoch,
+    );
+    staleIdleRef.current = consumed.stale;
+    for (const sessionId of consumed.clearedSessionIds) {
+      const owner = stopOwnerForSession(sessionId);
+      if (owner !== undefined) {
+        patchTabTurn(owner.tabId, { stopSessionId: null, latchOwner: null, stopping: false });
+      }
+    }
+  }
+
+  /**
    * 取出本次发送暂存的早到事件并清掉它的 pending：直接开始的回合按原顺序全部重放；
    * 排队应答只重放 `queueItemId` 与它一致的那几条；没启动的应答只丢弃本次缓冲。
    * 清理只针对本次记录，别的发送的 pending 不受影响。
@@ -862,6 +882,8 @@ export default function App() {
     pending.buffered = [];
     if (pendingSendsRef.current.get(pending.tabId) === pending) pendingSendsRef.current.delete(pending.tabId);
     if (sendOpensTurn(sent)) return buffered;
+    // 这次发送不重放缓冲：被丢掉的结束不能带走过期标记，先按当前轮次消化它们。
+    discardBufferedStopEnds(buffered);
     if (sent.waiting && sent.queueItemId !== undefined) {
       const queueItemId = sent.queueItemId;
       return buffered.filter((event) => (
@@ -874,6 +896,8 @@ export default function App() {
 
   /** 本次发送失败：只丢弃它自己的 pending 与缓冲，别的发送的事件不进这份失败缓冲。 */
   function dropPending(pending: PendingSend): void {
+    // 失败同样丢掉缓冲，里面的停止后空闲结束要先消化，不能留下过期标记。
+    discardBufferedStopEnds(pending.buffered);
     pending.buffered = [];
     if (pendingSendsRef.current.get(pending.tabId) === pending) pendingSendsRef.current.delete(pending.tabId);
   }
@@ -1608,6 +1632,10 @@ export default function App() {
           || incoming.event === "goal/round" || incoming.event === "goal/round-limit";
         if (!isGoalEvent) return false;
         const sessionId = sessionIdOfEvent(incoming);
+        // 停止后的空闲结束属于上一回合：停止闩锁还扣着或过期标记仍在时，它必须随即走
+        // 主链的搁置/过期标记处理——排队、未启动或失败的应答会连同缓冲一起丢掉它，
+        // 残留标记随之吞掉下一回合自己的结束（R-2）。
+        if (stopRequestedForSession(sessionId) || staleIdleRef.current.some((item) => item.sessionId === sessionId)) return false;
         const pending = pendingSendOfSession(sessionId);
         if (pending === undefined) return false;
         if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;

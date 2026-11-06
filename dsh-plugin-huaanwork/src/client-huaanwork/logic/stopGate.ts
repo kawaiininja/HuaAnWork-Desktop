@@ -99,6 +99,34 @@ export function consumeStaleIdle(
 }
 
 /**
+ * 下一次发送的缓冲里已经接住了停止后的空闲结束、而这条发送又不会重放缓冲时，丢弃前先把
+ * 这些结束送进过期标记：属于当前轮的非取消结束用掉标记，调用方据此清掉该会话的停止闩锁；
+ * 属于更新一轮的结束只让标记失效，不能留着去吞掉下一回合自己的结束。
+ * 其它事件、没有标记的会话与取消结束都不动标记。
+ */
+export function consumeBufferedStaleEnds(
+  stale: readonly StaleIdle[],
+  buffered: readonly { event: string; sessionId?: string; cancelled?: boolean }[],
+  currentEpochOf: (sessionId: string) => number,
+): { stale: StaleIdle[]; clearedSessionIds: string[] } {
+  let next = [...stale];
+  const clearedSessionIds: string[] = [];
+  for (const event of buffered) {
+    if (event.event !== "session/end") continue;
+    const sessionId = event.sessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) continue;
+    const marker = next.find((item) => item.sessionId === sessionId);
+    if (marker === undefined) continue;
+    const epoch = currentEpochOf(sessionId);
+    next = consumeStaleIdle(next, event, epoch).stale;
+    if (!event.cancelled && marker.epoch === epoch && !clearedSessionIds.includes(sessionId)) {
+      clearedSessionIds.push(sessionId);
+    }
+  }
+  return { stale: next, clearedSessionIds };
+}
+
+/**
  * 只取出这次取消对应的结束事件，其它会话的仍留在队列里。
  * 事件联合里有的成员不带 sessionId，由调用方给出读取方式，避免用一个更窄的结构类型假装它一定有。
  */

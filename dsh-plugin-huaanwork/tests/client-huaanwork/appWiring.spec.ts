@@ -20,7 +20,7 @@ import {
   type GoalTurnState,
 } from "../../src/client-huaanwork/logic/goalRound.ts";
 import { applyTurnFinalToTabs, projectToolPanels, reduceTurnFinal, type TurnFinalEvent } from "../../src/client-huaanwork/logic/toolPanel.ts";
-import { consumeStaleIdle, finishStop } from "../../src/client-huaanwork/logic/stopGate.ts";
+import { consumeBufferedStaleEnds, consumeStaleIdle, finishStop } from "../../src/client-huaanwork/logic/stopGate.ts";
 import { appendOutcomeNotes, latestUserItemId, turnChecks } from "../../src/client-huaanwork/logic/outcomeCheck.ts";
 import { interruptTurnItems } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 import { clearFailuresInTabs } from "../../src/client-huaanwork/logic/hostStop.ts";
@@ -1211,6 +1211,59 @@ test("a cross-tab running turn's session end is never buffered into another tab'
   for (const needle of ["openTurnForTab(", "patchTabTurn(", "writeTabRun("]) {
     assert.ok(!waitingBranch.includes(needle), `the waiting branch must not touch ${needle}`);
   }
+});
+
+test("a stopped session's idle end never enters the next send's buffer", () => {
+  // 停止成功之后 agent 的 idle 结束常常晚于下一次发送的应答：它一旦进了这次缓冲，
+  // waiting/started:false/抛错的应答会连同缓冲一起丢掉它，残留标记随即吞掉下一回合
+  // 自己的结束，停止按钮永久留着（R-2）。
+  const holdSource = earlyEventGate();
+  const goalCheckAt = holdSource.indexOf("if (!isGoalEvent) return false;");
+  const stopGuardAt = holdSource.indexOf("stopRequestedForSession(sessionId)");
+  const staleGuardAt = holdSource.indexOf("staleIdleRef.current.some((item) => item.sessionId === sessionId)");
+  const goalPushAt = holdSource.lastIndexOf("pending.buffered.push(incoming);");
+  assert.ok(goalCheckAt >= 0, "only goal and end events take the buffering path");
+  assert.ok(stopGuardAt > goalCheckAt, "a stop still in effect processes the end immediately");
+  assert.ok(staleGuardAt > stopGuardAt, "a leftover stale marker processes the end immediately");
+  assert.ok(goalPushAt > staleGuardAt, "the stop guards run before any goal event is buffered");
+
+  // 兜底：这次发送不会重放缓冲时，丢弃前先把其中的结束送进过期标记。
+  const takeBody = functionBody("function takePendingBuffer(", "function dropPending(");
+  const replayAt = takeBody.indexOf("if (sendOpensTurn(sent)) return buffered;");
+  const discardAt = takeBody.indexOf("discardBufferedStopEnds(buffered);");
+  const filterAt = takeBody.indexOf("if (sent.waiting && sent.queueItemId !== undefined) {");
+  const emptyAt = takeBody.indexOf("return [];");
+  assert.ok(replayAt >= 0, "a started response still replays the buffer as-is");
+  assert.ok(discardAt > replayAt, "only buffers this send will not replay need the fallback");
+  assert.ok(
+    filterAt > discardAt && emptyAt > discardAt,
+    "queued and unstarted responses consume the caught ends before dropping the buffer",
+  );
+
+  const dropBody = functionBody("function dropPending(", "function tabIdForSession(");
+  const dropDiscardAt = dropBody.indexOf("discardBufferedStopEnds(pending.buffered);");
+  const clearAt = dropBody.indexOf("pending.buffered = [];");
+  assert.ok(dropDiscardAt >= 0, "a rejected send still consumes the ends it caught");
+  assert.ok(clearAt > dropDiscardAt, "the fallback runs before the failed send's buffer is cleared");
+
+  // 该会话的停止闩锁由 shim 清掉，主链的过期标记处理仍在。
+  const discardBody = functionBody("function discardBufferedStopEnds(", "function takePendingBuffer(");
+  assert.match(discardBody, /consumeBufferedStaleEnds\(/);
+  assert.match(discardBody, /staleIdleRef\.current = consumed\.stale;/);
+  assert.match(discardBody, /stopOwnerForSession\(sessionId\)/);
+  assert.match(discardBody, /stopSessionId: null, latchOwner: null, stopping: false/);
+  assert.match(APP_SOURCE, /if \(event\.event === "session\/end"\) \{[\s\S]*?consumeStaleIdle\(staleIdleRef\.current, event, eventEpoch\)/);
+
+  // 行为钉：缓冲里的当前轮结束用掉标记并清闩锁；更新一轮的结束只让标记失效。
+  const marker = [{ sessionId: "s-shared", epoch: 3 }];
+  assert.deepEqual(
+    consumeBufferedStaleEnds(marker, [{ event: "session/end", sessionId: "s-shared" }], () => 3),
+    { stale: [], clearedSessionIds: ["s-shared"] },
+  );
+  assert.deepEqual(
+    consumeBufferedStaleEnds(marker, [{ event: "session/end", sessionId: "s-shared" }], () => 4),
+    { stale: [], clearedSessionIds: [] },
+  );
 });
 
 test("the diff follows the session's own tab", () => {

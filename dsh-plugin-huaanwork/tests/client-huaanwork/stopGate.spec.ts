@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import {
   canStartStop,
+  consumeBufferedStaleEnds,
   consumeStaleIdle,
   finishStop,
   isStopPending,
@@ -64,6 +65,60 @@ test("an idle end from the stopped turn is dropped after a newer send", () => {
   assert.deepEqual(consumeStaleIdle([], { sessionId: "huaanwork-weather" }, 5), {
     drop: false,
     stale: [],
+  });
+});
+
+test("a buffered idle end from the stopped turn uses up its stale marker", () => {
+  const marker = { sessionId: "huaanwork-weather", epoch: 3 };
+  const consumed = consumeBufferedStaleEnds(
+    [marker],
+    [{ event: "session/end", sessionId: "huaanwork-weather" }],
+    () => 3,
+  );
+  assert.deepEqual(consumed.stale, [], "当前轮的空闲结束用掉标记");
+  assert.deepEqual(consumed.clearedSessionIds, ["huaanwork-weather"]);
+});
+
+test("a buffered idle end from a newer turn drops the marker but not the stop latch", () => {
+  const marker = { sessionId: "huaanwork-weather", epoch: 3 };
+  const consumed = consumeBufferedStaleEnds(
+    [marker],
+    [{ event: "session/end", sessionId: "huaanwork-weather" }],
+    () => 4,
+  );
+  // 这条结束属于新的一轮：丢弃它，但标记不能留下来吞掉下一回合自己的结束。
+  assert.deepEqual(consumed.stale, [], "标记失效，不再毒害后续回合");
+  assert.deepEqual(consumed.clearedSessionIds, [], "它不是被停止的那一轮的空闲结束");
+});
+
+test("a cancelled buffered end leaves the stale marker in place", () => {
+  const marker = { sessionId: "huaanwork-weather", epoch: 3 };
+  const cancelled = [{ event: "session/end", sessionId: "huaanwork-weather", cancelled: true }];
+  const current = consumeBufferedStaleEnds([marker], cancelled, () => 3);
+  assert.deepEqual(current.stale, [marker], "取消结束只用掉标记会丢掉随后的空闲结束");
+  assert.deepEqual(current.clearedSessionIds, []);
+  // 更新一轮的取消结束同样保留标记。
+  const newer = consumeBufferedStaleEnds([marker], cancelled, () => 4);
+  assert.deepEqual(newer.stale, [marker]);
+  assert.deepEqual(newer.clearedSessionIds, []);
+});
+
+test("buffered events that are not an end for a marked session leave markers alone", () => {
+  const marker = { sessionId: "huaanwork-weather", epoch: 3 };
+  const consumed = consumeBufferedStaleEnds(
+    [marker],
+    [
+      { event: "goal/state", sessionId: "huaanwork-weather" },
+      { event: "session/end", sessionId: "other" },
+      { event: "session/end" },
+    ],
+    () => 3,
+  );
+  assert.deepEqual(consumed.stale, [marker]);
+  assert.deepEqual(consumed.clearedSessionIds, []);
+  assert.deepEqual(consumeBufferedStaleEnds([], [{ event: "session/end", sessionId: "a" }], () => 1), {
+    stale: [],
+    clearedSessionIds: [],
   });
 });
 
