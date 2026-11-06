@@ -114,6 +114,8 @@ export type AgentTurnAdmission = {
   modelId: string
   /** 本次准入的唯一释放器:`scheduler.release` → 消费 `drainQueue()`。 */
   release: () => void
+  /** 出队后、followup 前的协作取消判据(排队项取消或删除会话时置真)。 */
+  cancelled?: () => boolean
 }
 
 export type SendResult = {
@@ -181,15 +183,23 @@ export async function sendToAgent(
   }
 
   try {
+    // 出队后已被取消(取消等待项或删除会话):不再创建/恢复 agent,名额由 finally 释放。
+    if (admission?.cancelled?.()) return { queued: true, sessionId, started: false, reason: '已取消' }
     // 显式 sessionId(对话标签绑定独立会话):不在场的会话按需 create / resume;
     // 缺省走通道稳定会话(boot 时由 agent-loop config 固定)。
     // 惰性解析:skill/@ 的校验失败必须先于 agent 创建抛错;@agent 时 dispatchAt 在
     // startActivation 之前调 resolveAgent(),保证 parent 是当前会话 agent(spec 要求)。
     let agentPromise: Promise<ListedAgent & { followup: (message: unknown) => void }> | null = null
     const resolveAgent = () =>
-      (agentPromise ??= explicitSessionId
-        ? ensureChannelAgent(ctx, routeCtx, sessionId, admission?.root)
-        : waitForAgent(ctx, sessionId))
+      (agentPromise ??= (async () => {
+        const resolved = explicitSessionId
+          ? await ensureChannelAgent(ctx, routeCtx, sessionId, admission?.root)
+          : await waitForAgent(ctx, sessionId)
+        // create/resume 已经落盘,但取消发生在等待期间:抛错以阻止 @ 的 dispatchAt
+        // 发布 activation,也阻止后续 followup。
+        if (admission?.cancelled?.()) throw new Error('已取消')
+        return resolved
+      })())
 
     // 创建入口(设计 §6.1):规范说法、`/create-agent`(文本或 skill 参数)或已有草稿时,
     // 在技能/@ 分发与 agent 解析之前接管本轮。未注入宿主门面时整段旁路。
@@ -265,6 +275,9 @@ export async function sendToAgent(
 
     const agent = await resolveAgent()
     acceptedAgent = agent
+    // followup 前的最后一次检查(取消不经过任何 await 就能落到这一步):
+    // `afterIdle` 已由 @ 激活登记时,finally 会把名额交给 idle 清理而不是提前释放。
+    if (admission?.cancelled?.()) return { queued: true, sessionId, started: false, reason: '已取消' }
     clearInvalidRoute(sessionId)
     if (ctx.huaanworkRouteAgent) ctx.huaanworkRouteAgent.current = agent
     agent.followup({
@@ -724,16 +737,21 @@ async function startQueuedItem(
   routeCtx: RouteContext,
   item: QueueItem,
 ): Promise<void> {
+  const scheduler = ctx.huaanworkTurnScheduler
   const releaseOnce = createReleaseOnce(ctx, routeCtx, item.sessionId)
   const fail = (reason: string): void => {
-    routeCtx.emit({
-      event: 'session/queue-fail',
-      sessionId: item.sessionId,
-      tabId: item.tabId,
-      queueItemId: item.queueItemId,
-      reason,
-    })
-    releaseOnce()
+    try {
+      routeCtx.emit({
+        event: 'session/queue-fail',
+        sessionId: item.sessionId,
+        tabId: item.tabId,
+        queueItemId: item.queueItemId,
+        reason,
+      })
+    } finally {
+      // emit 抛错也必须让出名额,否则后续等待项永远起不来。
+      releaseOnce()
+    }
   }
 
   try {
@@ -762,22 +780,30 @@ async function startQueuedItem(
         ...(item.skill === undefined ? {} : { skill: item.skill }),
         ...(item.at === undefined ? {} : { at: item.at }),
       },
-      { root: item.root, modelId: item.modelId, release: releaseOnce },
+      {
+        root: item.root,
+        modelId: item.modelId,
+        release: releaseOnce,
+        cancelled: () => scheduler?.isStartCancelled(item.queueItemId) === true,
+      },
     )
     if (!result.started) {
       fail(result.reason ?? '排队回合未能启动')
       return
     }
-    // 出队且 followup 受理后才写回任务模型(排队期间不写)。
-    await rememberTaskModel(routeCtx, item.sessionId, item.modelId)
+    // followup 受理即公布启动:其后的写回 await 会重新打开「取消找不着消息」的窗口。
     routeCtx.emit({
       event: 'session/queue-start',
       sessionId: item.sessionId,
       tabId: item.tabId,
       queueItemId: item.queueItemId,
     })
+    // 出队且 followup 受理后才写回任务模型(排队期间不写)。
+    await rememberTaskModel(routeCtx, item.sessionId, item.modelId)
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error))
+  } finally {
+    scheduler?.finishStart(item.queueItemId)
   }
 }
 

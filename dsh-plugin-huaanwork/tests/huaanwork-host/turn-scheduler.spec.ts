@@ -173,6 +173,73 @@ test('cancelQueuedItemsForSession removes only that session’s queued items', (
   expect(turns.activeTurnCount()).toBe(1)
 })
 
+test('a drained item is not cancelled until cancelQueuedItem marks it, and finishStart clears both maps', () => {
+  const turns = scheduler(1)
+  turns.admitUserTurn({ sessionId: 'a', tabId: 'ta', text: 'run', modelId: 'm1', root: '/proj-a' })
+  expect(turns.admitUserTurn({ sessionId: 'b', tabId: 'tb', text: 'wait', modelId: 'm1', root: '/proj-b' })).toMatchObject({
+    kind: 'queued',
+    queueItemId: 'q1',
+  })
+  turns.release('a')
+  // 出队即登记为 starting:默认未取消,取消后置真。
+  expect(turns.drainQueue().map((item) => item.queueItemId)).toEqual(['q1'])
+  expect(turns.isStartCancelled('q1')).toBe(false)
+  turns.cancelQueuedItem('q1')
+  expect(turns.isStartCancelled('q1')).toBe(true)
+
+  // finishStart 清掉 starting 与取消标记:此后再取消同一 id 是 no-op。
+  turns.finishStart('q1')
+  expect(turns.isStartCancelled('q1')).toBe(false)
+  turns.cancelQueuedItem('q1')
+  expect(turns.isStartCancelled('q1')).toBe(false)
+})
+
+test('cancelling a still-queued item removes it without marking a start', () => {
+  const turns = scheduler(1)
+  turns.admitUserTurn({ sessionId: 'a', tabId: 'ta', text: 'run', modelId: 'm1', root: '/proj-a' })
+  expect(turns.admitUserTurn({ sessionId: 'b', tabId: 'tb', text: 'wait', modelId: 'm1', root: '/proj-b' })).toMatchObject({
+    kind: 'queued',
+    queueItemId: 'q1',
+  })
+  turns.cancelQueuedItem('q1')
+  // 从未启动过:移除等待项不等于取消一次在途启动。
+  expect(turns.isStartCancelled('q1')).toBe(false)
+  turns.release('a')
+  expect(turns.drainQueue()).toEqual([])
+})
+
+test('cancelQueuedItemsForSession marks a starting item and still returns the queued count', () => {
+  const turns = scheduler(2)
+  turns.admitUserTurn({ sessionId: 'a', tabId: 'ta', text: 'run', modelId: 'm1', root: '/proj-a' })
+  turns.admitUserTurn({ sessionId: 'b', tabId: 'tb', text: 'run', modelId: 'm1', root: '/proj-b' })
+  expect(turns.admitUserTurn({ sessionId: 'victim', tabId: 'tv1', text: 'start', modelId: 'm1', root: '/proj-a' })).toMatchObject({
+    kind: 'queued',
+    queueItemId: 'q1',
+  })
+  expect(turns.admitUserTurn({ sessionId: 'other', tabId: 'to', text: 'other', modelId: 'm1', root: '/proj-c' })).toMatchObject({
+    kind: 'queued',
+    queueItemId: 'q2',
+  })
+  expect(turns.admitUserTurn({ sessionId: 'victim', tabId: 'tv2', text: 'wait', modelId: 'm1', root: '/proj-d' })).toMatchObject({
+    kind: 'queued',
+    queueItemId: 'q3',
+  })
+
+  // 让 victim 的第一条出队(进入 starting),另一条仍在队列。
+  turns.release('a')
+  expect(turns.drainQueue().map((item) => item.queueItemId)).toEqual(['q1'])
+  expect(turns.isStartCancelled('q1')).toBe(false)
+
+  // 删除会话:starting 项被标记取消,返回值仍是移除的等待项条数。
+  expect(turns.cancelQueuedItemsForSession('victim')).toBe(1)
+  expect(turns.isStartCancelled('q1')).toBe(true)
+  // q3 从未启动过,不进 cancelledStarts。
+  expect(turns.isStartCancelled('q3')).toBe(false)
+
+  turns.finishStart('q1')
+  expect(turns.isStartCancelled('q1')).toBe(false)
+})
+
 test('cancelQueuedItemsForSession does not release an active writer of that session', () => {
   const turns = scheduler(3)
   // 同一会话在同根上一条执行、一条排队;删除会话只应收掉等待项。

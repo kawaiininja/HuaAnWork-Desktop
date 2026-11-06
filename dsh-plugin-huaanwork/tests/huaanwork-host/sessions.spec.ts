@@ -2642,4 +2642,109 @@ describe('session.send 调度器接线', () => {
     await h.send({ text: 'hello', sessionId: 'free-session', tabId: 'tab-c', modelId: 'm2' })
     expect(readFileSync(join(root, 'tasks.json'), 'utf8')).toBe(tasksBefore)
   })
+
+  // R-4:出队后、followup 之前取消必须拦住在途启动。B 的 create 挂闸,
+  // 取消发生在这段窗口内;放闸后 B 的文本不得送达 agent。
+  test('session.cancel during the dequeue→followup window stops the queued text', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 1 })
+    const projectA = makeProject(root, 'project-a')
+    const projectB = makeProject(root, 'project-b')
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: projectA, sessionId: 'a' },
+      { projectId: 'pb', projectRoot: projectB, sessionId: 'b' },
+    ])
+    const idleA = makeDeferred()
+    h.addAgent('a', () => idleA.promise)
+    // b 既无 live agent 也无持久化日志:出队后走 create,在该 await 上挂闸。
+    const createEntered = makeDeferred()
+    const createGate = makeDeferred()
+    const agents = h.ctx.agents!
+    const baseCreate = agents.create!
+    agents.create = async (payload) => {
+      createEntered.resolve()
+      await createGate.promise
+      return baseCreate(payload)
+    }
+
+    await h.send({ text: 'active', sessionId: 'a', tabId: 'tab-a', modelId: 'm1' })
+    const queuedB = await h.send({ text: 'queued-b', sessionId: 'b', tabId: 'tab-b', modelId: 'm1' })
+    expect(queuedB).toMatchObject({ waiting: true, started: false })
+
+    idleA.resolve()
+    await createEntered.promise
+    // B 已出队并持有根写者,但还没有 followup。
+    expect(h.followupsBySession.get('b') ?? []).toEqual([])
+    expect(h.scheduler.activeTurnCount()).toBe(1)
+
+    expect(sessionCancel(h.ctx, h.routeCtx, { sessionId: 'b', queueItemId: queuedB.queueItemId })).toEqual({
+      accepted: true,
+    })
+    createGate.resolve()
+
+    await vi.waitFor(() =>
+      expect(h.queueEvents()).toContainEqual({
+        event: 'session/queue-fail',
+        sessionId: 'b',
+        tabId: 'tab-b',
+        queueItemId: queuedB.queueItemId,
+        reason: '已取消',
+      }),
+    )
+    expect(h.followupsBySession.get('b') ?? []).toEqual([])
+    expect(h.queueEvents().some(
+      (event) => event.event === 'session/queue-start' && 'sessionId' in event && event.sessionId === 'b',
+    )).toBe(false)
+    await vi.waitFor(() => expect(h.scheduler.activeTurnCount()).toBe(0))
+    expect(h.releaseCalls).toContain('b')
+  })
+
+  // R-4:删除会话同样要拦住在途启动——resume 挂闸时删除 B,放闸后不得 followup。
+  test('session.remove during the dequeue→followup window stops a persisted session’s text', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 1 })
+    const projectA = makeProject(root, 'project-a')
+    const projectB = makeProject(root, 'project-b')
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: projectA, sessionId: 'a' },
+      { projectId: 'pb', projectRoot: projectB, sessionId: 'b' },
+    ])
+    // b 有持久化日志:ensureChannelAgent 走 resume,在该 await 上挂闸。
+    writePersistedSession(h.routeCtx.dshHome, 'b', projectB)
+    const idleA = makeDeferred()
+    h.addAgent('a', () => idleA.promise)
+    const resumeEntered = makeDeferred()
+    const resumeGate = makeDeferred()
+    const agents = h.ctx.agents!
+    const baseResume = agents.resume!
+    agents.resume = async (payload) => {
+      resumeEntered.resolve()
+      await resumeGate.promise
+      return baseResume(payload)
+    }
+
+    await h.send({ text: 'active', sessionId: 'a', tabId: 'tab-a', modelId: 'm1' })
+    await h.send({ text: 'queued-b', sessionId: 'b', tabId: 'tab-b', modelId: 'm1' })
+
+    idleA.resolve()
+    await resumeEntered.promise
+    expect(h.followupsBySession.get('b') ?? []).toEqual([])
+    await expect(sessionRemove(h.ctx, h.routeCtx, { sessionId: 'b' })).resolves.toEqual({ removed: true })
+    resumeGate.resolve()
+
+    await vi.waitFor(() =>
+      expect(h.queueEvents()).toContainEqual({
+        event: 'session/queue-fail',
+        sessionId: 'b',
+        tabId: 'tab-b',
+        queueItemId: expect.any(String),
+        reason: '已取消',
+      }),
+    )
+    expect(h.followupsBySession.get('b') ?? []).toEqual([])
+    expect(h.queueEvents().some(
+      (event) => event.event === 'session/queue-start' && 'sessionId' in event && event.sessionId === 'b',
+    )).toBe(false)
+    await vi.waitFor(() => expect(h.scheduler.activeTurnCount()).toBe(0))
+  })
 })

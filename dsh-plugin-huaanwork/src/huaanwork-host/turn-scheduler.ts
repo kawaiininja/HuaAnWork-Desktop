@@ -51,8 +51,12 @@ export type TurnScheduler = {
   }): AdmitAutomationResult
   release(sessionId: string): void
   cancelQueuedItem(queueItemId: string): void
-  /** 删除会话时收掉它的全部等待项;只动队列,不碰任何活动写者。返回取消条数。 */
+  /** 删除会话时收掉它的全部等待项,并把该会话在途启动标记为取消;只动队列,不碰任何活动写者。返回取消条数。 */
   cancelQueuedItemsForSession(sessionId: string): number
+  /** 出队后、启动完成前(取消标记置真)是否已被取消;供 `sendToAgent` 的准入判据。 */
+  isStartCancelled(queueItemId: string): boolean
+  /** 一次出队启动结束(成功、失败或取消都算):清掉 starting 与取消标记。 */
+  finishStart(queueItemId: string): void
   clearAdmissionSkip(automationId: string): void
   drainQueue(): QueueItem[]
   isAdmissionSkipped(automationId: string): boolean
@@ -74,6 +78,10 @@ export function createTurnScheduler(options: {
   const rootWriters = new Map<string, RootWriter>()
   /** 用户消息等待队列,按入队时间扫描。 */
   const queue: QueueItem[] = []
+  /** 已出队、尚未完成启动的项:取消与删除据此拦住在途启动。 */
+  const starting = new Map<string, { sessionId: string }>()
+  /** 启动途中被取消的 queueItemId;`finishStart` 统一清除。 */
+  const cancelledStarts = new Set<string>()
   /** 最近一次准入被跳过的自动化;成功准入或显式清除时移除。 */
   const admissionSkips = new Set<string>()
   /** 执行中的占名额回合数(用户回合 + 会调用模型的自动化)。 */
@@ -133,7 +141,12 @@ export function createTurnScheduler(options: {
 
     cancelQueuedItem(queueItemId) {
       const index = queue.findIndex((item) => item.queueItemId === queueItemId)
-      if (index >= 0) queue.splice(index, 1)
+      if (index >= 0) {
+        // 还在等待队列里:直接移除,从未启动,不产生取消标记。
+        queue.splice(index, 1)
+        return
+      }
+      if (starting.has(queueItemId)) cancelledStarts.add(queueItemId)
     },
 
     cancelQueuedItemsForSession(sessionId) {
@@ -144,7 +157,19 @@ export function createTurnScheduler(options: {
         queue.splice(index, 1)
         removed += 1
       }
+      for (const [queueItemId, item] of starting) {
+        if (item.sessionId === sessionId) cancelledStarts.add(queueItemId)
+      }
       return removed
+    },
+
+    isStartCancelled(queueItemId) {
+      return cancelledStarts.has(queueItemId)
+    },
+
+    finishStart(queueItemId) {
+      starting.delete(queueItemId)
+      cancelledStarts.delete(queueItemId)
     },
 
     clearAdmissionSkip(automationId) {
@@ -162,6 +187,7 @@ export function createTurnScheduler(options: {
         queue.splice(index, 1)
         rootWriters.set(item.root, { kind: 'user', sessionId: item.sessionId })
         activeTurns += 1
+        starting.set(item.queueItemId, { sessionId: item.sessionId })
         started.push(item)
       }
       return started
