@@ -54,14 +54,11 @@ test("propose_plan tells the model to submit the plan body through exit_plan_mod
   assert.doesNotMatch(description, /计划正文之后再写/);
 });
 
-test("route tools act on the executing agent, never on a pre-written route-agent slot", async () => {
-  // 预先写入的全局槽必须被完全忽略:并发后它属于别的会话。
-  const sent = { id: "huaanwork-aaaaaaaaaaaaaaaa", cancelled: 0, cancel() { this.cancelled += 1; } };
+test("route tools act on the executing agent", async () => {
   const later = { id: "huaanwork-bbbbbbbbbbbbbbbb", cancelled: 0, cancel() { this.cancelled += 1; } };
   const seen: unknown[] = [];
   const tools = new Map<string, { execute: (args: unknown, exec?: Exec) => Promise<unknown> }>();
   apply({
-    huaanworkRouteAgent: { current: sent },
     huaanworkEmit: () => undefined,
     planMode: { set(next: unknown, active: boolean) { seen.push([next, active]); return "queued"; } },
     tools: { register(definition: { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }) { tools.set(definition.name, definition); } },
@@ -74,14 +71,11 @@ test("route tools act on the executing agent, never on a pre-written route-agent
   assert.equal(cancelRouteInput(later.id), true);
   await assert.rejects(waiting!, /用户取消了这个问题/);
   assert.equal(later.cancelled, 1);
-  assert.equal(sent.cancelled, 0);
 });
 
-test("a call without an executing agent fails instead of using a pre-written route-agent slot", async () => {
-  const sent = { id: "huaanwork-cccccccccccccccc", cancel() {} };
+test("a call without an executing agent fails", async () => {
   const tools = new Map<string, { execute: (args: unknown, exec?: Exec) => Promise<unknown> }>();
   apply({
-    huaanworkRouteAgent: { current: sent },
     huaanworkEmit: () => undefined,
     planMode: { set() { return "queued"; } },
     tools: { register(definition: { name: string; execute: (args: unknown, exec?: Exec) => Promise<unknown> }) { tools.set(definition.name, definition); } },

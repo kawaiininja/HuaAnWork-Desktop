@@ -77,7 +77,7 @@ type Harness = {
   emitToolResult(callId: string | undefined): void
 }
 
-function harness(options: { routeAgent?: unknown; fetchImpl?: typeof fetch; httpTimeoutMs?: number } = {}): Harness {
+function harness(options: { fetchImpl?: typeof fetch; httpTimeoutMs?: number } = {}): Harness {
   const registered = new Map<string, CapturedTool>()
   const events: RpcEvent[] = []
   const restrictCalls: string[] = []
@@ -99,7 +99,6 @@ function harness(options: { routeAgent?: unknown; fetchImpl?: typeof fetch; http
     },
     huaanworkEmit: (event: RpcEvent) => events.push(event),
     huaanworkAttachments: maps,
-    huaanworkRouteAgent: { current: options.routeAgent },
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
     ...(options.httpTimeoutMs === undefined ? {} : { httpTimeoutMs: options.httpTimeoutMs }),
     root: {
@@ -374,8 +373,7 @@ describe('agent_propose', () => {
     expect(h.events.find((event) => event.event === 'agent/notice')).toMatchObject({ sessionId: 'session-a' })
   })
 
-  test('fails instead of using a pre-written route-agent slot when the execution carries no agent', async () => {
-    // 预先写入的全局槽属于别的会话;没有执行 agent 时这次调用必须失败,且不写任何事件。
+  test('fails when the execution carries no agent', async () => {
     const calls: string[] = []
     const host = fakeHost({
       propose: async (sessionId) => {
@@ -383,7 +381,7 @@ describe('agent_propose', () => {
         return { ok: true, draftId: 'draft-1', slug: 'weekly-report', mode: 'create', card: CARD, cardText: 'CARD TEXT' }
       },
     })
-    const h = harness({ routeAgent: { id: 'huaanwork', session: { id: 'session-route' } } })
+    const h = harness()
     registerAgentPackageCreationTools(h.ctx, host)
 
     await expect(h.registered.get(AGENT_PROPOSE_TOOL)?.execute(proposalArgs, {})).rejects.toThrow(

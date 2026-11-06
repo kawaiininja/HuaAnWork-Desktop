@@ -58,8 +58,6 @@ export type SessionRuntimeContext = {
   huaanworkApprovals?: ApprovalMap
   /** question-answerer 登记的未回答 plan-review 结算器(holders.ts 注入容器)。 */
   huaanworkPlanReviews?: Map<string, () => boolean>
-  /** 分流工具 `propose_plan` / `request_input` 读取的当前会话 agent(holders.ts 注入容器)。 */
-  huaanworkRouteAgent?: { current: unknown }
   /** 创建工具与 `@slug` 运行工具的会话附件表(holders.ts 注入)。 */
   huaanworkAttachments?: AttachmentMaps
   /** 工作区热切换时同步的沙箱根;缺席时只改 routeCtx.workspaceRoot holder。 */
@@ -83,28 +81,6 @@ export type SessionRuntimeContext = {
   huaanworkSessionRoots?: Map<string, string>
   /** 唯一回合调度器(holders.ts 注入);用户发送准入与排队出队共用。 */
   huaanworkTurnScheduler?: TurnScheduler
-}
-
-/**
- * 发送侧阻塞源:只保留 `workspaceDisplaced`。
- * 自动化的排队/运行计数(Task 8 前由 automations-host 入队与链尾增减)已随按根准入
- * 退役:现在写者是调度器的根名额,发送与取消不再读任何自动化计数。
- */
-export const sessionSendBlockers = {
-  /**
-   * 恒 false。非 P1-4 未收口的恒假死检查,而是 Desktop 无进程内位移的必然结果(方案①,评审 P1-7)。
-   * 自动化执行体不写此源;仍由 `assertSessionSendable` 读作显式位移闸。
-   */
-  workspaceDisplaced: false,
-}
-
-/**
- * 发送侧阻塞(旧 host.ts:498 的位移源):
- * 恒 false 的 `workspaceDisplaced` 仍保留为显式位移闸;自动化已按可写根准入,
- * 不再用全局计数拒绝其它根上的发送或取消。
- */
-const assertSessionSendable = (): void => {
-  if (sessionSendBlockers.workspaceDisplaced) throw new Error('后台任务正在其他项目运行，工作区切换中，请稍候再试')
 }
 
 /** 一次已准入的用户回合:根与模型由 `sessionSend`/出队复检算好。 */
@@ -282,7 +258,6 @@ export async function sendToAgent(
       return { queued: true, sessionId, started: false, reason: '已取消' }
     }
     clearInvalidRoute(sessionId)
-    if (ctx.huaanworkRouteAgent) ctx.huaanworkRouteAgent.current = agent
     agent.followup({
       id: `huaanwork-${Date.now()}`,
       role: 'user',
@@ -679,8 +654,6 @@ export function setAgentPackageActiveTurns(registry: AgentPackageActiveTurnRegis
 }
 
 // 审批归因在 automations-host.ingestAutomationEvent(approval/asked 的 sessionId → runId)。
-// sendToAgent 不调用 assertSessionSendable:用户 session.send/cancel 在 handler 上把关,
-// 自动化执行体直调本函数以绕过该门。
 
 // —— route handlers(旧 host.ts:978-1012 的 case 语义;错误消息逐字)——
 
@@ -919,7 +892,6 @@ export function sessionCancel(ctx: SessionRuntimeContext, routeCtx: RouteContext
     ctx.huaanworkTurnScheduler?.cancelQueuedItem(queueItemId)
     return { accepted: true }
   }
-  assertSessionSendable()
   return cancelAgent(ctx, routeCtx, params)
 }
 
