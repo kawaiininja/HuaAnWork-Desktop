@@ -12,7 +12,9 @@ import {
   parentSessionOf,
   resetChildSessionRegistry,
 } from "../../src/huaanwork-host/child-sessions.ts";
+import { sendToAgent } from "../../src/huaanwork-host/sessions.ts";
 import { createSubagentRunRegistry } from "../../src/huaanwork-host/subagent-runs.ts";
+import { createTurnScheduler } from "../../src/huaanwork-host/turn-scheduler.ts";
 import {
   HUAANWORK_LEGACY_AGENT_REQUEST,
   HUAANWORK_SUBAGENT_RUN_ID,
@@ -737,19 +739,33 @@ test("a cold-resumed child stays on its header parent and a header-less child re
 
 test("a no-parent subagent never inherits a model, root, or registration from another session", async () => {
   // 模型自主创建的嵌套子代理:args 不带 parent,子会话 header 也没有 parentSession。
-  // 进程级没有「最后一次发送的会话」可回落,这类子代理不得继承任何会话的模型/可写根。
+  // 种子只走真实发送路径:修复前 sendToAgent 会把发起的会话写进进程级调用槽,
+  // 修复后不再写;这里不直接碰任何槽 API,旧码靠生产写入留下可被继承的父会话。
+  // 这类子代理不得继承任何会话的模型/可写根,也不得登记到那个会话名下。
   const startListeners: Array<(info: unknown) => void> = [];
   const models = new Map<string, string>([["sentinel-parent", "model-sentinel"]]);
   const roots = new Map<string, string>([["sentinel-parent", "/tmp/sentinel-root"]]);
-  const children = new Map<string, unknown>([["nested-child", { session: { header: {} } }]]);
+  const agents = new Map<string, unknown>([
+    [
+      "sentinel-parent",
+      {
+        id: "sentinel-parent",
+        session: { id: "sentinel-parent" },
+        followup: () => undefined,
+        whenIdle: async () => undefined,
+      },
+    ],
+    ["nested-child", { session: { header: {} } }],
+  ]);
   const ctx = {
     skills: { register: () => () => undefined },
     on(event: string, listener: (info: unknown) => void) {
       if (event === "subagent/start") startListeners.push(listener);
     },
-    agents: { get: (id: string) => children.get(id) },
+    agents: { get: (id: string) => agents.get(id) },
     huaanworkSessionModels: models,
     huaanworkSessionRoots: roots,
+    huaanworkTurnScheduler: createTurnScheduler({ maxConcurrentTurns: () => 64, modelExists: () => true }),
     subagents: {
       async startActivation(): Promise<unknown> {
         for (const listener of startListeners) {
@@ -760,14 +776,33 @@ test("a no-parent subagent never inherits a model, root, or registration from an
     },
   };
   applySkills(ctx as never);
-  await (ctx.subagents.startActivation as () => Promise<unknown>)();
 
-  assert.equal(models.has("nested-child"), false);
-  assert.equal(roots.has("nested-child"), false);
-  assert.deepEqual(childrenOf("sentinel-parent"), []);
-  // 槽本身不存在:没有「最后发送的会话」可回落。
-  assert.equal("noteCallerSession" in childSessions, false);
-  assert.equal("currentCallerSession" in childSessions, false);
+  const root = mkdtempSync(join(tmpdir(), "huaanwork-no-parent-"));
+  try {
+    // 不带 admission:槽写入(旧码)发生在准入之前,这里只关心发起会话是谁。
+    await sendToAgent(
+      ctx as never,
+      {
+        dshHome: join(root, "dsh"),
+        profileDir: root,
+        workspaceRoot: { current: join(root, "workspace") },
+        emit: () => undefined,
+        logger: () => undefined,
+        requestRestart: async () => true,
+      },
+      { text: "seed", sessionId: "sentinel-parent" },
+    );
+    await (ctx.subagents.startActivation as () => Promise<unknown>)();
+
+    assert.equal(models.has("nested-child"), false);
+    assert.equal(roots.has("nested-child"), false);
+    assert.deepEqual(childrenOf("sentinel-parent"), []);
+    // 槽本身不存在:没有「最后发送的会话」可回落。
+    assert.equal("noteCallerSession" in childSessions, false);
+    assert.equal("currentCallerSession" in childSessions, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("subagent start error still clears current request", async () => {
