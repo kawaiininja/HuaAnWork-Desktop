@@ -411,9 +411,10 @@ function killProcessTree(child: ChildProcess): void {
 /**
  * 运行脚本并等到子进程真正 `close`。超时只负责杀进程树,完成 Promise 仍等 `close`:
  * 释放根写者必须发生在进程树退出之后,否则下一轮会在尚未收尾的目录里并发写。
- * 启动失败(`error`)没有可等的进程,按启动失败结算。
+ * 只有启动失败(`error` 且 Node 未赋 `pid`)没有可等的进程,按启动失败结算;
+ * spawn 成功之后的 error(如 kill 失败)进程可能仍活着,同样等 `close`。
  */
-function runScript(
+export function runScript(
   command: string,
   cwd: string,
   timeoutMs: number,
@@ -431,6 +432,7 @@ function runScript(
     let stderr = ''
     let settled = false
     let timedOut = false
+    let spawnError: Error | undefined
     const finish = (ok: boolean, output: string) => {
       if (settled) return
       settled = true
@@ -455,9 +457,15 @@ function runScript(
     child.stderr?.on('data', (chunk: Buffer | string) => {
       if (stderr.length < OUTPUT_MAX_CHARS * 2) stderr += chunk.toString()
     })
-    child.on('error', (error) => finish(false, `${stdout}${stderr}\n${error.message}`))
+    // spawn 失败时 Node 不给 `pid`:没有可等的进程,立即结算。spawn 成功之后的
+    // error(如 kill 失败)进程可能仍在写,先存下错误、等 close 再结算。
+    child.on('error', (error) => {
+      if (child.pid === undefined) finish(false, `${stdout}${stderr}\n${error.message}`)
+      else spawnError ??= error
+    })
     child.on('close', (code) => {
       if (timedOut) finish(false, `${stdout}${stderr}\n（任务超时，已终止）`)
+      else if (spawnError !== undefined) finish(false, `${stdout}${stderr}\n${spawnError.message}\n（退出码 ${code ?? 'unknown'}）`)
       else if (code === 0) finish(true, stdout)
       else finish(false, `${stdout}${stderr ? `\n${stderr}` : ''}\n（退出码 ${code ?? 'unknown'}）`)
     })
