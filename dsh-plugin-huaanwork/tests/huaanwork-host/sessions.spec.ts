@@ -111,14 +111,14 @@ function idleScheduler(): TurnScheduler {
 function sessionLog(entries: Record<string, unknown>[]): string {  return `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`
 }
 
-/** 造一条带 cwd 的持久化会话日志到 <dshHome>/sessions/<dir>/<id>/session.jsonl。 */
-function writePersistedSession(dshHome: string, id: string, cwd: string): void {
+/** 造一条持久化会话日志到 <dshHome>/sessions/<dir>/<id>/session.jsonl;省略 `cwd` 时 header 不含该字段。 */
+function writePersistedSession(dshHome: string, id: string, cwd?: string): void {
   const dir = join(dshHome, 'sessions', 'repo', id)
   mkdirSync(dir, { recursive: true })
   writeFileSync(
     join(dir, 'session.jsonl'),
     sessionLog([
-      { type: 'session', version: 0, id, createdAt: 1_000, cwd, delegationDepth: 0 },
+      { type: 'session', version: 0, id, createdAt: 1_000, ...(cwd === undefined ? {} : { cwd }), delegationDepth: 0 },
       { type: 'user/message', seq: 1, time: 1_100, data: { role: 'user', content: [{ type: 'text', text: '旧任务' }], source: { kind: 'user' } } },
     ]),
     'utf8',
@@ -452,6 +452,17 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
     expect(calls).toEqual([
       { method: 'create', options: { sessionId, meta: { cwd: routeCtx.workspaceRoot.current }, agentOptions: { provider: 'deepseek-official', model: 'local' } } },
     ])
+  })
+
+  test('an explicit persisted session without cwd is rejected before resume (fail closed)', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    writePersistedSession(routeCtx.dshHome, 'huaanwork-nocwd')
+    const { ctx, calls } = fakeAgentsRegistry()
+    await expect(
+      sessionSend(ctx, routeCtx, { text: '继续', sessionId: 'huaanwork-nocwd', tabId: 'tab-nocwd' }),
+    ).rejects.toThrow(/工作区/)
+    expect(calls).toEqual([])
   })
 })
 
@@ -1311,6 +1322,16 @@ describe('session.resume (旧 host.ts:994-1002 / session-history.test.ts:L155-24
     writePersistedSession(routeCtx.dshHome, 'huaanwork-other', otherWorkspace)
     const { ctx, calls } = fakeAgentsRegistry()
     await expect(sessionResume(ctx, routeCtx, { sessionId: 'huaanwork-other' })).rejects.toThrow(/工作区/)
+    expect(calls).toEqual([])
+  })
+
+  test('rejects a persisted session without cwd instead of resuming (fail closed)', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    // 历史日志可以缺 cwd:工作目录无法验证,不能继续恢复。
+    writePersistedSession(routeCtx.dshHome, 'huaanwork-nocwd')
+    const { ctx, calls } = fakeAgentsRegistry()
+    await expect(sessionResume(ctx, routeCtx, { sessionId: 'huaanwork-nocwd' })).rejects.toThrow(/工作区/)
     expect(calls).toEqual([])
   })
 

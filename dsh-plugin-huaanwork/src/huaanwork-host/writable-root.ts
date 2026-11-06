@@ -1,12 +1,13 @@
 import { isAbsolute, relative, resolve } from 'node:path'
 
 import { sessionIdFor } from './session-id.ts'
-import { neutralWorkspaceRoot } from './workspace-state.ts'
+import { neutralWorkspaceRoot, neutralWorkspaceRootPath } from './workspace-state.ts'
 
 /**
  * 会话可写根推导(规格 §5.1.1)。同步纯推导:projects / tasks / headerCwd 都由
  * 调用方先异步载入再传入,这里不读盘、不调 listProjects / listTasks /
  * findSessionHeader,也不检查根目录是否存在(不存在的根由会话发送路径拒绝启动)。
+ * 推导本身不建目录:只有中立根作为结果返回时才创建 `<profile>/workspace`。
  *
  * 推导顺序(逐级回落,前一级命中即返回):
  * 1. 任务绑定:某任务 `sessionId` 正是本会话 ⇒ 用该任务 `projectId` 在 `projects`
@@ -39,17 +40,18 @@ export function writableRootForSession(input: {
     if (sessionId === stable || sessionId.startsWith(`${stable}-`)) return resolve(project.root)
   }
 
-  // 中立根也承载通道默认会话的稳定 id(规格 §5.1.1 第 2 步)。求值一次:命中即返回,
-  // 未命中则作为第 4 级的回落值复用。返回值语义不变;唯一附带影响是 `neutralWorkspaceRoot`
-  // 的 mkdirSync 现在最迟在第 3 级之前发生(此前只在第 4 级),该调用幂等。
-  const neutralRoot = resolve(neutralWorkspaceRoot(profileDir))
+  // 中立根也承载通道默认会话的稳定 id(规格 §5.1.1 第 2 步)。比较只用纯路径:
+  // 中立目录只在它以结果身份被返回时创建,项目根推导不再顺带 mkdir。
+  const neutralRoot = resolve(neutralWorkspaceRootPath(profileDir))
   const neutralStable = sessionIdFor(neutralRoot)
-  if (sessionId === neutralStable || sessionId.startsWith(`${neutralStable}-`)) return neutralRoot
+  if (sessionId === neutralStable || sessionId.startsWith(`${neutralStable}-`)) {
+    return resolve(neutralWorkspaceRoot(profileDir))
+  }
 
   const cwdRoot = soleContainingProjectRoot(projects, headerCwd)
   if (cwdRoot !== undefined) return cwdRoot
 
-  return neutralRoot
+  return resolve(neutralWorkspaceRoot(profileDir))
 }
 
 /**

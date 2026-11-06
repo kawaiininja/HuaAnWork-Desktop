@@ -2,7 +2,7 @@
  * 可写根推导(Task 3,规格 §5.1.1)。被测函数是同步纯推导:projects / tasks /
  * headerCwd 都由调用方预先载入,函数不读盘、不异步、不检查目录是否存在。
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -46,6 +46,37 @@ test('unknown session falls back to the neutral workspace', () => {
     projects: [],
     tasks: [],
   })).toBe(neutralWorkspaceRoot(profile))
+})
+
+test('a project derivation does not create the neutral workspace', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'huaanwork-side-effect-profile-'))
+  const project = mkdtempSync(join(tmpdir(), 'huaanwork-side-effect-project-'))
+  dirs.push(profile, project)
+  const neutralPath = join(profile, 'workspace')
+  // 非稳定 id + cwd 落在项目内:推导要走到中立根的稳定 id 比较之后才命中项目,
+  // 正是此前会顺带 mkdir 的路径。
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: 'legacy',
+    projects: [{ id: 'p', root: project }],
+    tasks: [],
+    headerCwd: join(project, 'notes'),
+  })).toBe(resolve(project))
+  expect(existsSync(neutralPath)).toBe(false)
+})
+
+test('the neutral derivation creates the neutral workspace', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'huaanwork-neutral-create-profile-'))
+  dirs.push(profile)
+  const neutralPath = join(profile, 'workspace')
+  expect(existsSync(neutralPath)).toBe(false)
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: 'legacy',
+    projects: [],
+    tasks: [],
+  })).toBe(resolve(neutralPath))
+  expect(existsSync(neutralPath)).toBe(true)
 })
 
 test('a task binding wins over a session id prefix from another project', () => {
@@ -182,11 +213,14 @@ test('a task whose project is gone falls through to the remaining rules', () => 
   dirs.push(profile, project)
   const neutral = resolve(neutralWorkspaceRoot(profile))
   const projects = [{ id: 'p', root: project }]
+  // 会话与悬挂任务必须共用同一个 id:两个 id 不同时第一条断言靠稳定 id 前缀就能过,
+  // 走不到「任务指向已消失项目 → 继续回落」这条路径。
+  const danglingTaskSession = freshSessionIdFor(project)
   expect(writableRootForSession({
     profileDir: profile,
-    sessionId: freshSessionIdFor(project),
+    sessionId: danglingTaskSession,
     projects,
-    tasks: [{ projectId: 'deleted', sessionId: freshSessionIdFor(project) }],
+    tasks: [{ projectId: 'deleted', sessionId: danglingTaskSession }],
   })).toBe(resolve(project))
   expect(writableRootForSession({
     profileDir: profile,

@@ -321,8 +321,9 @@ function findAgentBySession(ctx: SessionRuntimeContext, sessionId: string): List
  * 确保指定会话有 live agent:
  * 已 live 直接复用;磁盘上有持久化日志则 resume(恢复完整上下文);否则以该 id 新建。
  * 根取调用方传入的 `admissionRoot`(准入时冻结的根),未传入才查 `huaanworkSessionRoots`,
- * 仍未命中才按项目/任务/header 推导;持久化会话的 `cwd` 必须落在该根内,否则拒绝接管
- * (AGENTS.md 不变式 6)。两条路径都不读前台根。
+ * 仍未命中才按项目/任务/header 推导;持久化会话的 `cwd` 必须存在且落在该根内,否则
+ * 拒绝接管(缺 `cwd` 时工作目录不可验证,同样 fail closed;AGENTS.md 不变式 6)。两条
+ * 路径都不读前台根。
  */
 async function ensureChannelAgent(
   ctx: SessionRuntimeContext,
@@ -350,7 +351,7 @@ async function ensureChannelAgent(
   }
   if (persisted) {
     const cwd = typeof persisted.cwd === 'string' ? persisted.cwd : ''
-    if (cwd && !isInside(root, cwd)) {
+    if (!cwd || !isInside(root, cwd)) {
       throw new Error('该会话属于其他工作区，请先打开对应项目后再继续。')
     }
     if (typeof ctx.agents?.resume !== 'function') throw new Error('current dsh runtime cannot resume persisted sessions')

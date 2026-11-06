@@ -36,9 +36,14 @@ export interface ReadPendingWorkspaceRootOptions {
   readonly onDrop?: (drop: PendingRootDrop) => void
 }
 
+/** 中立根的纯路径推导(不创建目录):推导阶段只比较路径。 */
+export function neutralWorkspaceRootPath(profileDir: string): string {
+  return join(profileDir, 'workspace')
+}
+
 /** 中立根:profile 目录下的 workspace(spec §4.2:旧 $DSH_HOME/workspace 概念落 profile 目录)。 */
 export function neutralWorkspaceRoot(profileDir: string): string {
-  const root = join(profileDir, 'workspace')
+  const root = neutralWorkspaceRootPath(profileDir)
   mkdirSync(root, { recursive: true })
   return root
 }
