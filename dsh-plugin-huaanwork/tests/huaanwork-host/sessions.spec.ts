@@ -2033,6 +2033,41 @@ describe('session.send 调度器接线', () => {
     )).toBe(false)
   })
 
+  // R-5:准入时冻结的根对该回合权威。排队期间任务改绑到另一个项目根后,
+  // 出队创建 agent 仍必须落在排队时的根上,否则写者锁与 agent 的 cwd/沙箱根不一致。
+  test('a queued turn creates its agent on the root frozen at admission', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 1 })
+    const projectA = makeProject(root, 'project-a')
+    const projectB = makeProject(root, 'project-b')
+    const projectC = makeProject(root, 'project-c')
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: projectA, sessionId: 'a' },
+      { projectId: 'pb', projectRoot: projectB, sessionId: 'b' },
+    ])
+    const idleA = makeDeferred()
+    h.addAgent('a', () => idleA.promise)
+    // b 没有 live agent、也没有持久化日志:出队后走 create 路径。
+
+    await h.send({ text: 'active', sessionId: 'a', tabId: 'tab-a', modelId: 'm1' })
+    const queuedB = await h.send({ text: 'queued-b', sessionId: 'b', tabId: 'tab-b', modelId: 'm1' })
+    expect(queuedB).toMatchObject({ waiting: true, started: false })
+
+    // 排队期间把 b 的任务改绑到第三个项目根:再次推导就会得到 projectC。
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: projectA, sessionId: 'a' },
+      { projectId: 'pc', projectRoot: projectC, sessionId: 'b' },
+    ])
+
+    idleA.resolve()
+    await vi.waitFor(() => expect(h.followupsBySession.get('b')).toEqual(['queued-b']))
+
+    const created = h.createCalls.find((call) => call.sessionId === 'b')
+    expect(created?.meta?.cwd).toBe(resolve(projectB))
+    expect(created?.rootAtCreate).toBe(resolve(projectB))
+    expect(h.roots.get('b')).toBe(resolve(projectB))
+  })
+
   // 最终评审 Important 2:删除会话必须收掉它在调度器里的等待项,否则下一次
   // drain 会对已删除会话走 sendToAgent → ensureChannelAgent,无 header 后重新
   // create,已删除会话被复活并执行排队文本。

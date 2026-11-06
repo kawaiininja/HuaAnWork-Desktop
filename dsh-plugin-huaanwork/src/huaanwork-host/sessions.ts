@@ -188,7 +188,7 @@ export async function sendToAgent(
     let agentPromise: Promise<ListedAgent & { followup: (message: unknown) => void }> | null = null
     const resolveAgent = () =>
       (agentPromise ??= explicitSessionId
-        ? ensureChannelAgent(ctx, routeCtx, sessionId)
+        ? ensureChannelAgent(ctx, routeCtx, sessionId, admission?.root)
         : waitForAgent(ctx, sessionId))
 
     // 创建入口(设计 §6.1):规范说法、`/create-agent`(文本或 skill 参数)或已有草稿时,
@@ -300,13 +300,15 @@ function findAgentBySession(ctx: SessionRuntimeContext, sessionId: string): List
 /**
  * 确保指定会话有 live agent:
  * 已 live 直接复用;磁盘上有持久化日志则 resume(恢复完整上下文);否则以该 id 新建。
- * 根来自 `huaanworkSessionRoots`,未命中才按项目/任务/header 推导;持久化会话的
- * `cwd` 必须落在该根内,否则拒绝接管(AGENTS.md 不变式 6)。两条路径都不读前台根。
+ * 根取调用方传入的 `admissionRoot`(准入时冻结的根),未传入才查 `huaanworkSessionRoots`,
+ * 仍未命中才按项目/任务/header 推导;持久化会话的 `cwd` 必须落在该根内,否则拒绝接管
+ * (AGENTS.md 不变式 6)。两条路径都不读前台根。
  */
 async function ensureChannelAgent(
   ctx: SessionRuntimeContext,
   routeCtx: RouteContext,
   sessionId: string,
+  admissionRoot?: string,
 ): Promise<ListedAgent & { followup: (message: unknown) => void }> {
   const live = findAgentBySession(ctx, sessionId)
   if (typeof live?.followup === 'function') return live as ListedAgent & { followup: (message: unknown) => void }
@@ -314,7 +316,7 @@ async function ensureChannelAgent(
   const agentOptions = { provider: 'deepseek-official', model: 'local' }
   const persisted = await findSessionHeader(join(routeCtx.dshHome, 'sessions'), sessionId)
   const roots = ctx.huaanworkSessionRoots
-  let root = roots?.get(sessionId)
+  let root = admissionRoot ?? roots?.get(sessionId)
   if (root === undefined) {
     const projects = await listProjects(routeCtx.profileDir)
     const tasks = await listTasks(routeCtx.profileDir)
