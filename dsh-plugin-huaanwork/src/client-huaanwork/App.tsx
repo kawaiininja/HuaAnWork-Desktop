@@ -835,6 +835,8 @@ export default function App() {
     writeTabRun(tabId, (state) => queuedTurnRunState(state, queueItemId, userId !== undefined));
     if (userId === undefined) return;
     openTurnForTab(tabId, sessionId, userId);
+    // 宿主在 queue-start 之后才写回本次模型；出队后拉一次任务列表，让任务记录参与下一次解析。
+    void refreshTasks();
   }
 
   /**
@@ -2669,6 +2671,11 @@ export default function App() {
         ? projectTasks.find((item) => item.id === sendingTab.taskId)
         : undefined;
       const modelId = resolveSendModelId(modelPickByTab, chatId, sendingTask?.modelId, activeModelId);
+      // 本次实际送出的 id 记为本标签的选择（评审 P-1）：宿主在 followup 之后才把它写回任务，
+      // 刷新前改全局模型不影响这个标签的下一次发送；任务刷新后仍以 task.modelId 为准。
+      if (modelId) {
+        setModelPickByTab((prev) => (prev[chatId] === modelId ? prev : { ...prev, [chatId]: modelId }));
+      }
       // 注意：pendingPick 标签在此不再绑定 activeProjectId——项目归属只来自用户在 chip 里的显式选择
       // （applyOpenedProject），未选择的会话留在中立根，按 cwd 分组落入侧栏「任务」区。
       // 插入即标未启动：应答回来之前这条消息还没有开启回合，流式条目与终态选择都不能
@@ -2699,6 +2706,9 @@ export default function App() {
         });
         // 先写回身份：排队只追加等待项，started:true 才真正开始执行。
         writeTabRun(chatId, (state) => noteSendResult(state, sent));
+        // 宿主在 started 应答前（followup 之后）或 queue-start 之后才写回本次模型；刷新任务列表，
+        // 让下一次发送按 task.modelId 解析，而不是回落到可能已变化的全局模型。
+        if (sent.started === true || sent.waiting === true) void refreshTasks();
         if (sent.waiting && sent.queueItemId !== undefined) {
           // 等待文案挂在已经插入的同一条用户消息上，不是标签级另一份列表。
           const queueItemId = sent.queueItemId;

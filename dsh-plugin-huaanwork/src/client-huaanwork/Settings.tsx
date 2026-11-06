@@ -37,6 +37,23 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
 
 /** 设置页尚未读到宿主值时显示的缺省上限（与宿主 DEFAULT_MAX_CONCURRENT_TURNS 一致）。 */
 const DEFAULT_MAX_CONCURRENT_TURNS = 3;
+/** 宿主接受的并发上限范围（与宿主 parseConcurrentTurns 一致）；越界值在客户端先夹紧。 */
+const MIN_CONCURRENT_TURNS = 1;
+const MAX_CONCURRENT_TURNS = 8;
+
+/**
+ * 并发上限的客户端夹紧：与宿主 `parseConcurrentTurns` 同规则——非整数回落缺省 3，
+ * 越界夹到 1–8，其余原样。输入框先写夹紧值，宿主回写的生效值仍会覆盖它。
+ *
+ * @param value 输入框读到的数字
+ * @returns 落在 1–8 内的整数；非整数时回落缺省上限
+ */
+export function clampConcurrentTurns(value: number): number {
+  if (!Number.isInteger(value)) return DEFAULT_MAX_CONCURRENT_TURNS;
+  if (value < MIN_CONCURRENT_TURNS) return MIN_CONCURRENT_TURNS;
+  if (value > MAX_CONCURRENT_TURNS) return MAX_CONCURRENT_TURNS;
+  return value;
+}
 
 /**
  * 发送区实际使用的模型 id：本标签的选择 > 子任务记住的模型 > 全局当前模型。
@@ -371,14 +388,15 @@ export default function Settings({
     }
   }
 
-  /** 同时进行的任务数：写入 settings.json，宿主把 1–8 之外的值夹到边界并回写生效值。 */
+  /** 同时进行的任务数：客户端按宿主的 1–8 规则先夹紧，再写状态与 settings.json；宿主回写的生效值仍为准。 */
   async function changeMaxConcurrentTurns(value: string) {
     const requested = Number(value);
     if (value.trim() === "" || !Number.isFinite(requested)) return;
-    setMaxConcurrentTurns(requested);
+    const clamped = clampConcurrentTurns(requested);
+    setMaxConcurrentTurns(clamped);
     try {
       const payload = await rpcCall<ModelSettingsPayload>("settings.set", {
-        max_concurrent_turns: requested,
+        max_concurrent_turns: clamped,
       });
       if (typeof payload.max_concurrent_turns === "number") {
         setMaxConcurrentTurns(payload.max_concurrent_turns);
@@ -595,8 +613,8 @@ export default function Settings({
                   同时进行的任务数
                   <input
                     type="number"
-                    min={1}
-                    max={8}
+                    min={MIN_CONCURRENT_TURNS}
+                    max={MAX_CONCURRENT_TURNS}
                     step={1}
                     value={maxConcurrentTurns}
                     onChange={(event) => void changeMaxConcurrentTurns(event.target.value)}

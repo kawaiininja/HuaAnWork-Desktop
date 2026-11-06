@@ -7,6 +7,7 @@ vi.mock("../../src/client-huaanwork/api.ts", () => ({ rpcCall: vi.fn() }));
 
 import { rpcCall } from "../../src/client-huaanwork/api.ts";
 import Settings, {
+  clampConcurrentTurns,
   resolveSendModelId,
   type ModelSettingsPayload,
 } from "../../src/client-huaanwork/Settings.tsx";
@@ -92,6 +93,24 @@ it("resolves the send model from the tab pick, then the task model, then the act
   expect(resolveSendModelId({}, "work-2", undefined, "active-model")).toBe("active-model");
 });
 
+it("keeps a recorded pick after the global active model changes", () => {
+  // 发送时记下的 id 就是下一次发送的默认值：全局模型换了也不改这个标签的选择（P-1）。
+  const picks = { "work-2": "sent-model" };
+  expect(resolveSendModelId(picks, "work-2", undefined, "old-active")).toBe("sent-model");
+  expect(resolveSendModelId(picks, "work-2", undefined, "new-active")).toBe("sent-model");
+});
+
+it("clamps the concurrent turn limit exactly like the host parser", () => {
+  // 与宿主 parseConcurrentTurns 同规则：非整数回落缺省 3，越界夹到 1–8。
+  expect(clampConcurrentTurns(0)).toBe(1);
+  expect(clampConcurrentTurns(9)).toBe(8);
+  expect(clampConcurrentTurns(3.5)).toBe(3);
+  expect(clampConcurrentTurns(4)).toBe(4);
+  expect(clampConcurrentTurns(-2)).toBe(1);
+  expect(clampConcurrentTurns(1)).toBe(1);
+  expect(clampConcurrentTurns(8)).toBe(8);
+});
+
 it("writes the concurrent turn limit from the model section and shows the effective value", async () => {
   rpc.mockImplementation(async (method, params) => {
     if (method === "settings.get") return { ...BASE_SETTINGS };
@@ -118,8 +137,31 @@ it("writes the concurrent turn limit from the model section and shows the effect
   expect(rpc).toHaveBeenCalledWith("settings.set", { max_concurrent_turns: 5 });
   expect(input.value).toBe("5");
 
-  // 宿主把 12 夹到上限 8 并回写生效值：输入框显示的是生效值，不是用户敲的字面量。
+  // 客户端先夹紧再写状态与 RPC：超上限的 12 不会以原值离开输入框，也不会以原值发给宿主。
   await changeNumber(input, "12");
-  expect(rpc).toHaveBeenCalledWith("settings.set", { max_concurrent_turns: 12 });
+  expect(rpc).toHaveBeenCalledWith("settings.set", { max_concurrent_turns: 8 });
+  expect(rpc).not.toHaveBeenCalledWith("settings.set", { max_concurrent_turns: 12 });
   expect(input.value).toBe("8");
+
+  // 非整数与低于下限同样按宿主规则夹紧。
+  await changeNumber(input, "3.5");
+  expect(rpc).toHaveBeenCalledWith("settings.set", { max_concurrent_turns: 3 });
+  await changeNumber(input, "0");
+  expect(rpc).toHaveBeenCalledWith("settings.set", { max_concurrent_turns: 1 });
+  expect(input.value).toBe("1");
+});
+
+it("keeps the host's effective value after the optimistic clamp", async () => {
+  // 客户端夹紧只是先行显示；宿主仍是权威，回写的生效值要覆盖本地状态。
+  rpc.mockImplementation(async (method) => {
+    if (method === "settings.get") return { ...BASE_SETTINGS };
+    if (method === "settings.set") return { ...BASE_SETTINGS, max_concurrent_turns: 5 };
+    return {};
+  });
+
+  const view = await mountSettings();
+  const input = concurrencyInput(view);
+  await changeNumber(input, "7");
+  expect(rpc).toHaveBeenCalledWith("settings.set", { max_concurrent_turns: 7 });
+  expect(input.value).toBe("5");
 });

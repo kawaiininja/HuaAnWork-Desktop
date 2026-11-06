@@ -672,6 +672,54 @@ test("send carries the tab id and selected model and mints under the tab's own r
   assert.match(body, /\{ skill: invokedSkill\.name \}/);
 });
 
+test("send records the id it actually sends before the RPC so the next send keeps it", () => {
+  // P-1：宿主在 followup 之后才把 modelId 写回任务，刷新前改全局模型会把新 id 写进会话绑定。
+  // 发送前把实际送出的 id 记进本标签的选择，下一次发送就按这个 id 走。
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const resolveAt = body.indexOf("const modelId = resolveSendModelId(");
+  const recordAt = body.indexOf(
+    "setModelPickByTab((prev) => (prev[chatId] === modelId ? prev : { ...prev, [chatId]: modelId }))",
+  );
+  const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
+  assert.ok(resolveAt >= 0, "send still resolves the model it will send");
+  assert.ok(recordAt > resolveAt, "the sent id is recorded after it is resolved");
+  assert.ok(sendAt > recordAt, "the id is recorded before the session.send RPC leaves the client");
+
+  // 只有非空 id 才记：没有可送模型时不能把空串写成本标签的选择。
+  const beforeSend = body.slice(resolveAt, sendAt);
+  assert.match(beforeSend, /if \(modelId\) \{/, "an empty model id is never recorded as a pick");
+  assert.equal(
+    (body.match(/setModelPickByTab\(/g) ?? []).length,
+    1,
+    "send records exactly one pick: the id it sends",
+  );
+});
+
+test("a started or queued send refreshes tasks so the host's task-model write-back lands", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
+  assert.ok(sendAt >= 0, "send still awaits the session.send response");
+  const catchAt = body.indexOf("} catch (error) {", sendAt);
+  assert.ok(catchAt > sendAt, "the session.send rejection path is still present");
+  assert.doesNotMatch(
+    body.slice(0, sendAt),
+    /refreshTasks\(/,
+    "no task refresh before the response says the turn started or queued",
+  );
+  assert.match(
+    body.slice(sendAt, catchAt),
+    /if \(sent\.started === true \|\| sent\.waiting === true\) void refreshTasks\(\);/,
+    "a started or queued response refreshes the task list so task.modelId can win the next send",
+  );
+
+  // 出队 start 的模型写回发生在 queue-start 之后：beginQueuedTurn 开回合后再拉一次任务列表。
+  const beginBody = functionBody("function beginQueuedTurn(", "function failQueuedTurn(");
+  const openAt = beginBody.indexOf("openTurnForTab(tabId, sessionId, userId)");
+  const refreshAt = beginBody.indexOf("void refreshTasks()");
+  assert.ok(openAt >= 0, "the queued start still opens the turn");
+  assert.ok(refreshAt > openAt, "the dequeue refresh runs after the turn opens");
+});
+
 test("a mint uses the tab project root, else the neutral root read from workspace.close", () => {
   assert.match(
     APP_SOURCE,
