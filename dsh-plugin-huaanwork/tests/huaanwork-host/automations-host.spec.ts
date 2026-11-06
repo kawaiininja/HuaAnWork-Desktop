@@ -1668,6 +1668,29 @@ test('a skipped manual run leaves the run list and schedule alone', { timeout: 1
   }
 })
 
+test('a skipped manual run does not poison the scheduled missed-grace exemption', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '手动跳过' })
+  const userSession = sessionIdFor(h.neutral)
+  h.installUserAgent(userSession, () => new Promise<void>(() => undefined))
+  await sessionSend(h.runtime, h.routeCtx, {
+    text: '占住前台',
+    sessionId: userSession,
+    tabId: 'tab-user',
+    modelId: 'default',
+  })
+  const automation = await agentTask(h.profileDir, {
+    projectId: project.id,
+    name: '定时任务',
+    schedule: { kind: 'interval', minutes: 5 },
+  })
+
+  const skipped = await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
+  expect(skipped).toMatchObject({ queued: false, waiting: true, workspaceRoot: h.neutral })
+  // admissionSkips 只服务定时调度的 missed 豁免:手动跳过不得登记。
+  expect(h.scheduler.isAdmissionSkipped(automation.id)).toBe(false)
+})
+
 test('a second run of a started task is admission-skipped and stop cancels the single run', { timeout: 15_000 }, async () => {
   const h = makeHarness()
   h.state.mode = 'hang'

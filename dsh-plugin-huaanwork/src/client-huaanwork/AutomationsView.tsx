@@ -171,6 +171,11 @@ export default function AutomationsView({
     setError("");
     try {
       const started = await runAutomation(automation.id);
+      if (!started.queued) {
+        // 手动运行没有补跑队列：准入跳过时宿主不会启动这次运行，界面必须说明并留在原工作区。
+        if (started.waiting) setError("同一项目根上已有任务在运行，本次手动运行未开始。");
+        return;
+      }
       if (started.workspaceRoot) onWorkspaceAligned?.(started.workspaceRoot);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

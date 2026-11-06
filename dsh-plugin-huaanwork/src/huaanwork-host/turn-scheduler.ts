@@ -48,6 +48,11 @@ export type TurnScheduler = {
     root: string
     runId?: string
     countsTowardCap: boolean
+    /**
+     * 跳过时是否登记 `admissionSkips`(默认 true)。定时调度靠它把跳过项留在待准入列表、
+     * 不落 missed;手动运行没有重评估队列,须传 false 以免污染定时触发的豁免。
+     */
+    recordSkip?: boolean
   }): AdmitAutomationResult
   release(sessionId: string): void
   cancelQueuedItem(queueItemId: string): void
@@ -82,7 +87,7 @@ export function createTurnScheduler(options: {
   const starting = new Map<string, { sessionId: string }>()
   /** 启动途中被取消的 queueItemId;`finishStart` 统一清除。 */
   const cancelledStarts = new Set<string>()
-  /** 最近一次准入被跳过的自动化;成功准入或显式清除时移除。 */
+  /** 定时调度最近一次准入被跳过的自动化;成功准入或显式清除时移除。手动运行不写这里。 */
   const admissionSkips = new Set<string>()
   /** 执行中的占名额回合数(用户回合 + 会调用模型的自动化)。 */
   let activeTurns = 0
@@ -113,12 +118,13 @@ export function createTurnScheduler(options: {
 
     admitAutomation(input) {
       const root = resolvePath(input.root)
+      const recordSkip = input.recordSkip !== false
       if (rootWriters.has(root)) {
-        admissionSkips.add(input.automationId)
+        if (recordSkip) admissionSkips.add(input.automationId)
         return { kind: 'skip', reason: 'root-busy' }
       }
       if (input.countsTowardCap && activeTurns >= options.maxConcurrentTurns()) {
-        admissionSkips.add(input.automationId)
+        if (recordSkip) admissionSkips.add(input.automationId)
         return { kind: 'skip', reason: 'cap-full' }
       }
       rootWriters.set(root, {

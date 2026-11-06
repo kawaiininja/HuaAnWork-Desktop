@@ -90,6 +90,7 @@ function deleteButtonFor(view: HTMLElement, output: string): HTMLButtonElement {
 async function mount(options: {
   onRunDeleted: (sessionId: string, automationId: string, startedAt: number) => void;
   onChanged: () => void;
+  onWorkspaceAligned?: (workspaceRoot: string) => void;
   runningIds?: ReadonlySet<string>;
   runs?: Record<string, RunSummary[]>;
   /** 默认进「运行记录」tab；任务行用例留在「任务」tab。 */
@@ -108,6 +109,7 @@ async function mount(options: {
         runs: options.runs ?? {},
         runningIds: options.runningIds ?? new Set<string>(),
         onChanged: options.onChanged,
+        onWorkspaceAligned: options.onWorkspaceAligned,
         onRunDeleted: options.onRunDeleted,
         keepAwake: false,
         onToggleKeepAwake: () => undefined,
@@ -253,6 +255,57 @@ describe("运行记录删除（spec §6）", () => {
     });
     expect(view.querySelector('[role="dialog"]')).toBeNull();
     expect(view.textContent).not.toContain("第一条输出");
+  });
+});
+
+describe("手动运行准入反馈（P-4e）", () => {
+  it("says the manual run did not start when admission skipped it and keeps the workspace", async () => {
+    rpc.mockImplementation(async (method) => {
+      if (method === "automation.run") {
+        return { queued: false, waiting: true, runId: "r1", workspaceRoot: "/projects/other" };
+      }
+      throw new Error(`unexpected rpc: ${method}`);
+    });
+    const onWorkspaceAligned = vi.fn();
+
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      onWorkspaceAligned,
+      openRuns: false,
+    });
+    await act(async () => {
+      buttonByText(view, "立即运行").click();
+    });
+
+    expect(rpc.mock.calls.filter((call) => call[0] === "automation.run")).toHaveLength(1);
+    expect(view.querySelector(".banner.error")?.textContent).toContain(
+      "同一项目根上已有任务在运行，本次手动运行未开始。",
+    );
+    expect(onWorkspaceAligned).not.toHaveBeenCalled();
+  });
+
+  it("aligns the workspace after a started manual run", async () => {
+    rpc.mockImplementation(async (method) => {
+      if (method === "automation.run") {
+        return { queued: true, runId: "r1", workspaceRoot: "/projects/other" };
+      }
+      throw new Error(`unexpected rpc: ${method}`);
+    });
+    const onWorkspaceAligned = vi.fn();
+
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      onWorkspaceAligned,
+      openRuns: false,
+    });
+    await act(async () => {
+      buttonByText(view, "立即运行").click();
+    });
+
+    expect(onWorkspaceAligned).toHaveBeenCalledWith("/projects/other");
+    expect(view.querySelector(".banner.error")).toBeNull();
   });
 });
 

@@ -91,6 +91,50 @@ test('admission skip is remembered until release of that automation', () => {
   expect(turns.isAdmissionSkipped('auto-1')).toBe(false)
 })
 
+test('a manual admission skip is not remembered for the missed-grace exemption', () => {
+  const turns = scheduler(1)
+  turns.admitUserTurn({ sessionId: 'a1', tabId: 't', text: 'run', modelId: 'm1', root: '/proj-a' })
+  // 同根忙:手动运行跳过,返回 skip 但不登记 admissionSkips。
+  expect(turns.admitAutomation({
+    automationId: 'manual-1',
+    sessionId: 'auto-session',
+    root: '/proj-a',
+    countsTowardCap: true,
+    recordSkip: false,
+  })).toEqual({ kind: 'skip', reason: 'root-busy' })
+  expect(turns.isAdmissionSkipped('manual-1')).toBe(false)
+  // 名额满(目标根空闲)同样不登记。
+  expect(turns.admitAutomation({
+    automationId: 'manual-2',
+    sessionId: 'auto-session-2',
+    root: '/proj-b',
+    countsTowardCap: true,
+    recordSkip: false,
+  })).toEqual({ kind: 'skip', reason: 'cap-full' })
+  expect(turns.isAdmissionSkipped('manual-2')).toBe(false)
+})
+
+test('a scheduled skip is remembered and a later successful admission clears it', () => {
+  const turns = scheduler(1)
+  turns.admitUserTurn({ sessionId: 'a1', tabId: 't', text: 'run', modelId: 'm1', root: '/proj-a' })
+  expect(turns.admitAutomation({
+    automationId: 'auto-1',
+    sessionId: 'auto-session',
+    root: '/proj-b',
+    countsTowardCap: true,
+  })).toEqual({ kind: 'skip', reason: 'cap-full' })
+  expect(turns.isAdmissionSkipped('auto-1')).toBe(true)
+  turns.release('a1')
+  expect(turns.admitAutomation({
+    automationId: 'auto-1',
+    sessionId: 'auto-session',
+    root: '/proj-b',
+    runId: 'r1',
+    countsTowardCap: true,
+  })).toEqual({ kind: 'start', root: resolve('/proj-b') })
+  expect(turns.isAdmissionSkipped('auto-1')).toBe(false)
+})
+
 test('automation start occupies the root and release frees it', () => {
   const turns = scheduler(3)
   expect(turns.admitAutomation({

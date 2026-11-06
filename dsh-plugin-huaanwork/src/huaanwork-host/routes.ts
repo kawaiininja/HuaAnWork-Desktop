@@ -1215,6 +1215,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     path: '/huaanwork/automation/run',
     // 手动运行的唯一准入点:目标根是任务所属项目(无项目用中立根),不改前台根。
     // skip 返回 waiting;成功则把已经占坑的 root/runId 交给执行体,fire-and-forget。
+    // 手动跳过不登记 admissionSkips:那只服务定时调度的 missed 豁免,手动运行没有重评估队列。
     handler: workspaceRoute(async (req, ctx) => {
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.run requires params.id')
@@ -1230,6 +1231,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         root,
         runId,
         countsTowardCap: automation.kind === 'agent',
+        recordSkip: false,
       })
       if (admitted.kind === 'skip') {
         return { queued: false, waiting: true, runId, workspaceRoot: ctx.workspaceRoot.current }
