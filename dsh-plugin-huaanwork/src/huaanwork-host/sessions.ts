@@ -124,6 +124,11 @@ export type SendResult = {
   started: boolean
   /** 未启动但已经用 `agent/notice` 告知用户的原因;排队出队据此填 queue-fail。 */
   reason?: string
+  /**
+   * 内部标志:启动在 followup 前被取消,但 `@` 激活已经发布。名额仍由 idle 清理持有,
+   * 调用方不得现在释放(否则子代理仍在写根时另开写者)。
+   */
+  releaseDeferred?: true
 }
 
 export async function sendToAgent(
@@ -276,8 +281,13 @@ export async function sendToAgent(
     const agent = await resolveAgent()
     acceptedAgent = agent
     // followup 前的最后一次检查(取消不经过任何 await 就能落到这一步):
-    // `afterIdle` 已由 @ 激活登记时,finally 会把名额交给 idle 清理而不是提前释放。
-    if (admission?.cancelled?.()) return { queued: true, sessionId, started: false, reason: '已取消' }
+    // `afterIdle` 已由 @ 激活登记时,finally 会把名额交给 idle 清理而不是提前释放,
+    // 调用方也必须据此延后自己的释放(见 `releaseDeferred`)。
+    if (admission?.cancelled?.()) {
+      return afterIdle === undefined
+        ? { queued: true, sessionId, started: false, reason: '已取消' }
+        : { queued: true, sessionId, started: false, reason: '已取消', releaseDeferred: true }
+    }
     clearInvalidRoute(sessionId)
     if (ctx.huaanworkRouteAgent) ctx.huaanworkRouteAgent.current = agent
     agent.followup({
@@ -739,7 +749,10 @@ async function startQueuedItem(
 ): Promise<void> {
   const scheduler = ctx.huaanworkTurnScheduler
   const releaseOnce = createReleaseOnce(ctx, routeCtx, item.sessionId)
-  const fail = (reason: string): void => {
+  /** 取消时已发布 `@` 激活:名额归 idle 清理,`fail` 不得提前释放。 */
+  let deferred = false
+  const fail = (reason: string, defer = false): void => {
+    deferred ||= defer
     try {
       routeCtx.emit({
         event: 'session/queue-fail',
@@ -749,8 +762,8 @@ async function startQueuedItem(
         reason,
       })
     } finally {
-      // emit 抛错也必须让出名额,否则后续等待项永远起不来。
-      releaseOnce()
+      // emit 抛错也必须让出名额,否则后续等待项永远起不来;延后的名额由 idle 清理释放。
+      if (!deferred) releaseOnce()
     }
   }
 
@@ -788,7 +801,7 @@ async function startQueuedItem(
       },
     )
     if (!result.started) {
-      fail(result.reason ?? '排队回合未能启动')
+      fail(result.reason ?? '排队回合未能启动', result.releaseDeferred === true)
       return
     }
     // followup 受理即公布启动:其后的写回 await 会重新打开「取消找不着消息」的窗口。

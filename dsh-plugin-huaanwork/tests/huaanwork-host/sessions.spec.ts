@@ -959,6 +959,119 @@ describe('legacy @agent 运行链接线', () => {
     }
   })
 
+  test('a pre-followup cancel with a published activation defers the release to the idle cleanup', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { restore } = legacyCatalogDirectory()
+    const registry = newRegistry()
+    const idle = manualIdle()
+    let idleRegistrations = 0
+    const live = legacyLiveAgent(sessionId, () => {
+      idleRegistrations += 1
+      return idle.whenIdle()
+    })
+    let cancelled = false
+    let settleActivation!: (value: { stopReason: string }) => void
+    const activationResult = new Promise<{ stopReason: string }>((resolve) => {
+      settleActivation = resolve
+    })
+    const releases: string[] = []
+    const ctx = legacyRunContext({
+      sessionId,
+      live,
+      registry,
+      // 取消发生在 activation 发布之后:子代理已可运行,启动本身不能撤回。
+      startActivation: async () => {
+        cancelled = true
+        return {
+          childId: 'legacy-child',
+          result: activationResult,
+          dispose: async () => undefined,
+        }
+      },
+    })
+    try {
+      const sent = await sendToAgent(
+        ctx,
+        routeCtx,
+        { text: '整理本周进展', sessionId, at: { name: 'legacy-assistant' } },
+        {
+          root: routeCtx.workspaceRoot.current,
+          modelId: 'local',
+          release: () => {
+            releases.push('release')
+          },
+          cancelled: () => cancelled,
+        },
+      )
+      expect(sent).toEqual({
+        queued: true,
+        sessionId,
+        started: false,
+        reason: '已取消',
+        releaseDeferred: true,
+      })
+      expect(idleRegistrations).toBe(1)
+
+      // 父会话第一次 idle:子代理结果仍未结算,名额归 idle 清理,不能提前释放。
+      idle.fire(0)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(releases).toEqual([])
+
+      settleActivation({ stopReason: 'completed' })
+      await vi.waitFor(() => {
+        expect(idleRegistrations).toBe(2)
+      })
+      expect(releases).toEqual([])
+
+      idle.fire(1)
+      await vi.waitFor(() => {
+        expect(releases).toEqual(['release'])
+      })
+    } finally {
+      restore()
+    }
+  })
+
+  test('a pre-dispatch cancel without an activation releases immediately and reports no releaseDeferred', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const registry = newRegistry()
+    const releases: string[] = []
+    // 与生产一致:准入释放器本身只生效一次(`createReleaseOnce`),早退与清理各调一次也无害。
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      releases.push('release')
+    }
+    const ctx = legacyRunContext({
+      sessionId,
+      live: legacyLiveAgent(sessionId),
+      registry,
+      startActivation: async () => {
+        throw new Error('取消后不应启动 activation')
+      },
+    })
+    const sent = await sendToAgent(
+      ctx,
+      routeCtx,
+      { text: '整理本周进展', sessionId },
+      {
+        root: routeCtx.workspaceRoot.current,
+        modelId: 'local',
+        release,
+        cancelled: () => true,
+      },
+    )
+    expect(sent).toEqual({ queued: true, sessionId, started: false, reason: '已取消' })
+    expect(sent.releaseDeferred).toBeUndefined()
+    // 没有已发布激活:等待项的 finally 就是唯一的释放点。
+    expect(releases).toEqual(['release'])
+  })
+
   test('a rejected dispose keeps the natural phase and only adds the dispose warning', async () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)
@@ -2746,5 +2859,101 @@ describe('session.send 调度器接线', () => {
       (event) => event.event === 'session/queue-start' && 'sessionId' in event && event.sessionId === 'b',
     )).toBe(false)
     await vi.waitFor(() => expect(h.scheduler.activeTurnCount()).toBe(0))
+  })
+
+  // R-4 尾项:取消落在 @ 激活发布之后。queue-fail 不得提前释放根写者,名额归
+  // 子代理 idle 清理,否则会与仍在写根的子代理重叠(R-1 的单写者窗口)。
+  test('a queued @ turn cancelled after activation keeps the root writer until the subagent cleanup', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 1 })
+    const projectA = makeProject(root, 'project-a')
+    const projectB = makeProject(root, 'project-b')
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: projectA, sessionId: 'a' },
+      { projectId: 'pb', projectRoot: projectB, sessionId: 'b' },
+    ])
+    const idleA = makeDeferred()
+    h.addAgent('a', () => idleA.promise)
+    const emptyDirectory = {
+      list: () => ({ items: [] }),
+      refresh: async () => ({ items: [] }),
+      get: async () => undefined,
+      setEnabled: () => undefined,
+      addEndpoint: () => ({ ok: false as const, fieldErrors: [] }),
+      removeEndpoint: () => undefined,
+      snapshotForRuntime: () => ({ items: [] }),
+    }
+    setAgentsDirectory({
+      ...emptyDirectory,
+      list: () => ({
+        items: [
+          {
+            name: 'legacy-assistant',
+            source: 'catalog',
+            kind: 'agent',
+            description: '旧目录智能体',
+            version: '1.0.0',
+            permissions: [],
+            enabled: true,
+          },
+        ],
+      }),
+      get: async () => ({ persona: '你是旧目录助手' }),
+    } as never)
+    h.ctx.huaanworkSubagentRuns = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
+    let settleActivation!: (value: { stopReason: string }) => void
+    const activationResult = new Promise<{ stopReason: string }>((resolve) => {
+      settleActivation = resolve
+    })
+    let queuedB: Record<string, unknown> = {}
+    h.ctx.subagents = {
+      // 取消发生在 activation 发布之后:同一启动的取消标记置真,
+      // sendToAgent 在 followup 前读到并声明释放延后。
+      startActivation: async () => {
+        h.scheduler.cancelQueuedItem(queuedB.queueItemId as string)
+        return {
+          childId: 'legacy-child',
+          result: activationResult,
+          dispose: async () => undefined,
+        }
+      },
+    } as never
+
+    try {
+      await h.send({ text: 'active', sessionId: 'a', tabId: 'tab-a', modelId: 'm1' })
+      queuedB = await h.send({
+        text: '整理本周进展',
+        sessionId: 'b',
+        tabId: 'tab-b',
+        modelId: 'm1',
+        at: { name: 'legacy-assistant' },
+      })
+      expect(queuedB).toMatchObject({ waiting: true, started: false })
+
+      idleA.resolve()
+      await vi.waitFor(() =>
+        expect(h.queueEvents()).toContainEqual({
+          event: 'session/queue-fail',
+          sessionId: 'b',
+          tabId: 'tab-b',
+          queueItemId: queuedB.queueItemId,
+          reason: '已取消',
+        }),
+      )
+      expect(h.followupsBySession.get('b') ?? []).toEqual([])
+      expect(h.queueEvents().some(
+        (event) => event.event === 'session/queue-start' && 'sessionId' in event && event.sessionId === 'b',
+      )).toBe(false)
+      // 子代理激活已发布、清理未完成:名额必须仍由 B 持有。
+      expect(h.scheduler.activeTurnCount()).toBe(1)
+      expect(h.releaseCalls).not.toContain('b')
+
+      // 激活结算、父会话 idle 之后,清理负责唯一一次释放。
+      settleActivation({ stopReason: 'completed' })
+      await vi.waitFor(() => expect(h.scheduler.activeTurnCount()).toBe(0))
+      expect(h.releaseCalls).toContain('b')
+    } finally {
+      setAgentsDirectory(emptyDirectory as never)
+    }
   })
 })
