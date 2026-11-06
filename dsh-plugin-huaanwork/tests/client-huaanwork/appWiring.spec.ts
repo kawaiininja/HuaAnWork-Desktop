@@ -686,8 +686,13 @@ test("send records the id it actually sends before the RPC so the next send keep
   assert.ok(sendAt > recordAt, "the id is recorded before the session.send RPC leaves the client");
 
   // 只有非空 id 才记：没有可送模型时不能把空串写成本标签的选择。
+  // 守卫与写入一起匹配：没有守卫的裸 setModelPickByTab 不算通过。
   const beforeSend = body.slice(resolveAt, sendAt);
-  assert.match(beforeSend, /if \(modelId\) \{/, "an empty model id is never recorded as a pick");
+  assert.match(
+    beforeSend,
+    /if \(modelId\) \{\s*setModelPickByTab\(\(prev\) => \(prev\[chatId\] === modelId \? prev : \{ \.\.\.prev, \[chatId\]: modelId \}\)\);\s*\}/,
+    "the setter is wrapped in the truthiness guard so an empty id is never recorded as a pick",
+  );
   assert.equal(
     (body.match(/setModelPickByTab\(/g) ?? []).length,
     1,
@@ -709,7 +714,7 @@ test("a started or queued send refreshes tasks so the host's task-model write-ba
   assert.match(
     body.slice(sendAt, catchAt),
     /if \(sent\.started === true \|\| sent\.waiting === true\) void refreshTasks\(\);/,
-    "a started or queued response refreshes the task list so task.modelId can win the next send",
+    "a started or queued response refreshes the task list so views without a recorded pick see the task model",
   );
 
   // 出队 start 的模型写回发生在 queue-start 之后：beginQueuedTurn 开回合后再拉一次任务列表。

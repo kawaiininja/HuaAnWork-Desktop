@@ -2671,8 +2671,9 @@ export default function App() {
         ? projectTasks.find((item) => item.id === sendingTab.taskId)
         : undefined;
       const modelId = resolveSendModelId(modelPickByTab, chatId, sendingTask?.modelId, activeModelId);
-      // 本次实际送出的 id 记为本标签的选择（评审 P-1）：宿主在 followup 之后才把它写回任务，
-      // 刷新前改全局模型不影响这个标签的下一次发送；任务刷新后仍以 task.modelId 为准。
+      // 本次实际送出的 id 记为本标签的选择（评审 P-1）：宿主在 followup 之后才把它写回任务。
+      // 记录一旦存在，resolveSendModelId 就先取它，之后的全局模型变化和任务刷新都不会改变下一次
+      // 发送的模型；只有 chip 的显式选择（selectTabModel）能覆盖这条记录。
       if (modelId) {
         setModelPickByTab((prev) => (prev[chatId] === modelId ? prev : { ...prev, [chatId]: modelId }));
       }
@@ -2707,7 +2708,8 @@ export default function App() {
         // 先写回身份：排队只追加等待项，started:true 才真正开始执行。
         writeTabRun(chatId, (state) => noteSendResult(state, sent));
         // 宿主在 started 应答前（followup 之后）或 queue-start 之后才写回本次模型；刷新任务列表，
-        // 让下一次发送按 task.modelId 解析，而不是回落到可能已变化的全局模型。
+        // 让还没有本地选择的视图（模型 chip、任务列表）读到新的 task.modelId。本标签的发送选择已在
+        // 上方记录，下一次发送按它解析，而不是按 task.modelId。
         if (sent.started === true || sent.waiting === true) void refreshTasks();
         if (sent.waiting && sent.queueItemId !== undefined) {
           // 等待文案挂在已经插入的同一条用户消息上，不是标签级另一份列表。

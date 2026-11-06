@@ -105,6 +105,9 @@ it("clamps the concurrent turn limit exactly like the host parser", () => {
   expect(clampConcurrentTurns(0)).toBe(1);
   expect(clampConcurrentTurns(9)).toBe(8);
   expect(clampConcurrentTurns(3.5)).toBe(3);
+  // 范围内的小数区分「非整数回落缺省」与「向零截断」：截断会得到 7 / 8，回落缺省才是 3。
+  expect(clampConcurrentTurns(7.5)).toBe(3);
+  expect(clampConcurrentTurns(8.5)).toBe(3);
   expect(clampConcurrentTurns(4)).toBe(4);
   expect(clampConcurrentTurns(-2)).toBe(1);
   expect(clampConcurrentTurns(1)).toBe(1);
