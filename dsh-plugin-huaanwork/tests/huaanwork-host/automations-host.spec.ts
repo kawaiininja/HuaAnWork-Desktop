@@ -1111,7 +1111,7 @@ test('agent timeout cancels the session and settles the turn before the next age
   expect(h.state.inFlight).toBe(0)
 })
 
-test('agent timeout with an ineffective cancel drains the turn, returns the writer, and cleans up', { timeout: 15_000 }, async () => {
+test('agent timeout with an ineffective cancel drains the turn but keeps root/model bindings until it settles', { timeout: 15_000 }, async () => {
   const h = makeHarness()
   h.state.mode = 'hang'
   h.state.ignoreCancel = true
@@ -1132,11 +1132,13 @@ test('agent timeout with an ineffective cancel drains the turn, returns the writ
   const firstRun = await startAutomation(h, first, { trigger: 'manual', runId: 'drain-1' })
   await poll(() => h.followups.length === 1)
   const secondRun = await startAutomation(h, second, { trigger: 'manual', runId: 'drain-2' })
+  const firstSession = automationRunSessionId(first.id, 'drain-1')
+  const secondSession = automationRunSessionId(second.id, 'drain-2')
   await firstRun.done
   await secondRun.done
 
   // cancel 都被调用过(取消路径确实走过),但 turn 从未被 settle——release 不触发。
-  expect(h.state.cancels).toEqual([h.followups[0]?.sessionId, h.followups[1]?.sessionId])
+  expect(h.state.cancels).toEqual([firstSession, secondSession])
   expect(h.state.inFlight).toBeGreaterThan(0)
   // drain 截止到期 → 仍按超时收尾:run 记录、collector/holder 清理。
   const firstRuns = await recentRuns(h.profileDir, first.id)
@@ -1145,6 +1147,21 @@ test('agent timeout with an ineffective cancel drains the turn, returns the writ
   expect(secondRuns[0]?.status).toBe('timeout')
   expect(automationCollector.size).toBe(0)
   expect(h.runtime.huaanworkUnattended?.size).toBe(0)
+  // drain 只是放弃等待,回合与其工具仍在跑:根/模型绑定必须保留到 turn 真正 settle,
+  // 否则残留工具调用会回落到前台根与全局模型。
+  expect(h.runtime.huaanworkSessionRoots?.get(firstSession)).toBe(rootA)
+  expect(h.runtime.huaanworkSessionRoots?.get(secondSession)).toBe(rootB)
+  expect(h.runtime.huaanworkSessionModels?.get(firstSession)).toBe('default')
+  expect(h.runtime.huaanworkSessionModels?.get(secondSession)).toBe('default')
+
+  // 结算两个被放弃的回合:绑定随 turn 结束删除。
+  h.release(firstSession)
+  h.release(secondSession)
+  await poll(() => h.runtime.huaanworkSessionRoots?.size === 0 && h.runtime.huaanworkSessionModels?.size === 0)
+  expect(h.runtime.huaanworkSessionRoots?.has(firstSession)).toBe(false)
+  expect(h.runtime.huaanworkSessionRoots?.has(secondSession)).toBe(false)
+  expect(h.runtime.huaanworkSessionModels?.has(firstSession)).toBe(false)
+  expect(h.runtime.huaanworkSessionModels?.has(secondSession)).toBe(false)
 })
 
 test.skipIf(process.platform === 'win32')('a timed-out script releases its root only after the child closes', { timeout: 20_000 }, async () => {

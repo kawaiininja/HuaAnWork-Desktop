@@ -295,6 +295,15 @@ async function runAgentTurn(
     )
     await automationSessionAgent(ctx, sessionId)?.whenIdle?.()
   })()
+  // 本次运行的根/模型绑定只在 turn 真正 settle 时解除:drain 截止只是放弃等待,
+  // 回合与其工具仍可能在跑,提前删除会让它们回落到前台根与全局模型。派生 promise
+  // 的拒绝在这里消费(原 turn 的拒绝仍由 Promise.race / turn.catch 处理)。
+  void turn
+    .finally(() => {
+      ctx.huaanworkSessionRoots?.delete(sessionId)
+      ctx.huaanworkSessionModels?.delete(sessionId)
+    })
+    .catch(() => undefined)
   try {
     await Promise.race([
       turn,
@@ -331,9 +340,7 @@ async function runAgentTurn(
     if (timer) clearTimeout(timer)
     automationCollector.delete(sessionId)
     unattended?.delete(sessionId)
-    // 只清本次运行的这两个键;写者释放由 sendToAgent 的准入释放器负责。
-    ctx.huaanworkSessionRoots?.delete(sessionId)
-    ctx.huaanworkSessionModels?.delete(sessionId)
+    // 写者释放由 sendToAgent 的准入释放器负责;根/模型绑定随 turn settle 解除(见上)。
   }
 }
 
