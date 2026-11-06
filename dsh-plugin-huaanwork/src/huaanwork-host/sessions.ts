@@ -116,6 +116,8 @@ export type AgentTurnAdmission = {
   release: () => void
   /** 出队后、followup 前的协作取消判据(排队项取消或删除会话时置真)。 */
   cancelled?: () => boolean
+  /** followup 前中断且 `@` 激活已发布:名额归 idle 清理,调用方不得现在释放。 */
+  deferRelease?: () => void
 }
 
 export type SendResult = {
@@ -124,11 +126,6 @@ export type SendResult = {
   started: boolean
   /** 未启动但已经用 `agent/notice` 告知用户的原因;排队出队据此填 queue-fail。 */
   reason?: string
-  /**
-   * 内部标志:启动在 followup 前被取消,但 `@` 激活已经发布。名额仍由 idle 清理持有,
-   * 调用方不得现在释放(否则子代理仍在写根时另开写者)。
-   */
-  releaseDeferred?: true
 }
 
 export async function sendToAgent(
@@ -282,11 +279,9 @@ export async function sendToAgent(
     acceptedAgent = agent
     // followup 前的最后一次检查(取消不经过任何 await 就能落到这一步):
     // `afterIdle` 已由 @ 激活登记时,finally 会把名额交给 idle 清理而不是提前释放,
-    // 调用方也必须据此延后自己的释放(见 `releaseDeferred`)。
+    // 并通过 `deferRelease` 让调用方同样延后自己的释放。
     if (admission?.cancelled?.()) {
-      return afterIdle === undefined
-        ? { queued: true, sessionId, started: false, reason: '已取消' }
-        : { queued: true, sessionId, started: false, reason: '已取消', releaseDeferred: true }
+      return { queued: true, sessionId, started: false, reason: '已取消' }
     }
     clearInvalidRoute(sessionId)
     if (ctx.huaanworkRouteAgent) ctx.huaanworkRouteAgent.current = agent
@@ -307,7 +302,11 @@ export async function sendToAgent(
     scheduleDetachAfterIdle()
   } finally {
     // 已启动子代理时根写者归 idle 清理持有:立即释放会与仍在写根的子代理重叠。
-    if (!followupAccepted && afterIdle === undefined) releaseOnce?.()
+    // 返回 `started: false` 与 followup 抛错都走同一出口,调用方经 `deferRelease` 得知延后。
+    if (!followupAccepted) {
+      if (afterIdle === undefined) releaseOnce?.()
+      else admission?.deferRelease?.()
+    }
     scheduleDetachAfterIdle()
   }
   return { queued: true, sessionId, started: true }
@@ -749,10 +748,9 @@ async function startQueuedItem(
 ): Promise<void> {
   const scheduler = ctx.huaanworkTurnScheduler
   const releaseOnce = createReleaseOnce(ctx, routeCtx, item.sessionId)
-  /** 取消时已发布 `@` 激活:名额归 idle 清理,`fail` 不得提前释放。 */
+  /** `@` 激活已发布时启动未完成(取消返回或 followup 抛错):名额归 idle 清理,`fail` 不得提前释放。 */
   let deferred = false
-  const fail = (reason: string, defer = false): void => {
-    deferred ||= defer
+  const fail = (reason: string): void => {
     try {
       routeCtx.emit({
         event: 'session/queue-fail',
@@ -798,10 +796,15 @@ async function startQueuedItem(
         modelId: item.modelId,
         release: releaseOnce,
         cancelled: () => scheduler?.isStartCancelled(item.queueItemId) === true,
+        // sendToAgent 在 `@` 激活已发布时(取消返回或 followup 抛错)回调此处,
+        // 让 `fail` 跳过提前释放;名额由 idle 清理的唯一一次 `releaseOnce` 接手。
+        deferRelease: () => {
+          deferred = true
+        },
       },
     )
     if (!result.started) {
-      fail(result.reason ?? '排队回合未能启动', result.releaseDeferred === true)
+      fail(result.reason ?? '排队回合未能启动')
       return
     }
     // followup 受理即公布启动:其后的写回 await 会重新打开「取消找不着消息」的窗口。

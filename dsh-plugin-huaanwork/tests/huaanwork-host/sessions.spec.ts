@@ -911,6 +911,7 @@ describe('legacy @agent 运行链接线', () => {
       settleActivation = resolve
     })
     const releases: string[] = []
+    let deferred = false
     const ctx = legacyRunContext({
       sessionId,
       live,
@@ -933,10 +934,15 @@ describe('legacy @agent 运行链接线', () => {
             release: () => {
               releases.push('release')
             },
+            deferRelease: () => {
+              deferred = true
+            },
           },
         ),
       ).rejects.toThrow('父会话已结束')
-      // 子代理已启动:失败出口不能抢先释放根写者,只能交给 idle 清理。
+      // 子代理已启动:失败出口不能抢先释放根写者,只能交给 idle 清理;
+      // 抛错与取消返回走同一出口,调用方经 `deferRelease` 得知必须延后释放。
+      expect(deferred).toBe(true)
       expect(releases).toEqual([])
       expect(idleRegistrations).toBe(1)
 
@@ -977,6 +983,7 @@ describe('legacy @agent 运行链接线', () => {
       settleActivation = resolve
     })
     const releases: string[] = []
+    let deferred = false
     const ctx = legacyRunContext({
       sessionId,
       live,
@@ -1003,15 +1010,14 @@ describe('legacy @agent 运行链接线', () => {
             releases.push('release')
           },
           cancelled: () => cancelled,
+          deferRelease: () => {
+            deferred = true
+          },
         },
       )
-      expect(sent).toEqual({
-        queued: true,
-        sessionId,
-        started: false,
-        reason: '已取消',
-        releaseDeferred: true,
-      })
+      expect(sent).toEqual({ queued: true, sessionId, started: false, reason: '已取消' })
+      // 激活已发布:调用方经回调得知名额归 idle 清理,不能现在释放。
+      expect(deferred).toBe(true)
       expect(idleRegistrations).toBe(1)
 
       // 父会话第一次 idle:子代理结果仍未结算,名额归 idle 清理,不能提前释放。
@@ -1034,12 +1040,13 @@ describe('legacy @agent 运行链接线', () => {
     }
   })
 
-  test('a pre-dispatch cancel without an activation releases immediately and reports no releaseDeferred', async () => {
+  test('a pre-dispatch cancel without an activation releases immediately and does not defer', async () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)
     const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
     const registry = newRegistry()
     const releases: string[] = []
+    let deferred = false
     // 与生产一致:准入释放器本身只生效一次(`createReleaseOnce`),早退与清理各调一次也无害。
     let released = false
     const release = () => {
@@ -1064,12 +1071,15 @@ describe('legacy @agent 运行链接线', () => {
         modelId: 'local',
         release,
         cancelled: () => true,
+        deferRelease: () => {
+          deferred = true
+        },
       },
     )
     expect(sent).toEqual({ queued: true, sessionId, started: false, reason: '已取消' })
-    expect(sent.releaseDeferred).toBeUndefined()
-    // 没有已发布激活:等待项的 finally 就是唯一的释放点。
+    // 没有已发布激活:等待项的 finally 就是唯一的释放点,不发生延后。
     expect(releases).toEqual(['release'])
+    expect(deferred).toBe(false)
   })
 
   test('a rejected dispose keeps the natural phase and only adds the dispose warning', async () => {
@@ -2949,6 +2959,95 @@ describe('session.send 调度器接线', () => {
       expect(h.releaseCalls).not.toContain('b')
 
       // 激活结算、父会话 idle 之后,清理负责唯一一次释放。
+      settleActivation({ stopReason: 'completed' })
+      await vi.waitFor(() => expect(h.scheduler.activeTurnCount()).toBe(0))
+      expect(h.releaseCalls).toContain('b')
+    } finally {
+      setAgentsDirectory(emptyDirectory as never)
+    }
+  })
+
+  test('a queued @ turn whose followup throws keeps the root writer until the subagent cleanup', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 1 })
+    const projectA = makeProject(root, 'project-a')
+    const projectB = makeProject(root, 'project-b')
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: projectA, sessionId: 'a' },
+      { projectId: 'pb', projectRoot: projectB, sessionId: 'b' },
+    ])
+    const idleA = makeDeferred()
+    h.addAgent('a', () => idleA.promise)
+    h.addAgent('b')
+    // followup 在 activation 发布之后抛错:与取消返回同一出口,名额仍归 idle 清理。
+    h.ctx.agents!.get!('b')!.followup = () => {
+      throw new Error('父会话已结束')
+    }
+    const emptyDirectory = {
+      list: () => ({ items: [] }),
+      refresh: async () => ({ items: [] }),
+      get: async () => undefined,
+      setEnabled: () => undefined,
+      addEndpoint: () => ({ ok: false as const, fieldErrors: [] }),
+      removeEndpoint: () => undefined,
+      snapshotForRuntime: () => ({ items: [] }),
+    }
+    setAgentsDirectory({
+      ...emptyDirectory,
+      list: () => ({
+        items: [
+          {
+            name: 'legacy-assistant',
+            source: 'catalog',
+            kind: 'agent',
+            description: '旧目录智能体',
+            version: '1.0.0',
+            permissions: [],
+            enabled: true,
+          },
+        ],
+      }),
+      get: async () => ({ persona: '你是旧目录助手' }),
+    } as never)
+    h.ctx.huaanworkSubagentRuns = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
+    let settleActivation!: (value: { stopReason: string }) => void
+    const activationResult = new Promise<{ stopReason: string }>((resolve) => {
+      settleActivation = resolve
+    })
+    h.ctx.subagents = {
+      startActivation: async () => ({
+        childId: 'legacy-child',
+        result: activationResult,
+        dispose: async () => undefined,
+      }),
+    } as never
+
+    try {
+      await h.send({ text: 'active', sessionId: 'a', tabId: 'tab-a', modelId: 'm1' })
+      const queuedB = await h.send({
+        text: '整理本周进展',
+        sessionId: 'b',
+        tabId: 'tab-b',
+        modelId: 'm1',
+        at: { name: 'legacy-assistant' },
+      })
+      expect(queuedB).toMatchObject({ waiting: true, started: false })
+
+      idleA.resolve()
+      await vi.waitFor(() =>
+        expect(h.queueEvents()).toContainEqual({
+          event: 'session/queue-fail',
+          sessionId: 'b',
+          tabId: 'tab-b',
+          queueItemId: queuedB.queueItemId,
+          reason: '父会话已结束',
+        }),
+      )
+      expect(h.followupsBySession.get('b') ?? []).toEqual([])
+      // 异常出口同样不能提前释放:激活已发布、清理未完成,名额必须仍由 B 持有。
+      expect(h.scheduler.activeTurnCount()).toBe(1)
+      expect(h.releaseCalls).not.toContain('b')
+
       settleActivation({ stopReason: 'completed' })
       await vi.waitFor(() => expect(h.scheduler.activeTurnCount()).toBe(0))
       expect(h.releaseCalls).toContain('b')
