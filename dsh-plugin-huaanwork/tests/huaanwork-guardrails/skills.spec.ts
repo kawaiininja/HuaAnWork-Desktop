@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { afterEach, test } from "vitest";
 
 import type { AgentPackageSubagentRequest } from "../../src/huaanwork-host/agent-package/types.ts";
+import * as childSessions from "../../src/huaanwork-host/child-sessions.ts";
 import {
   childrenOf,
   forgetChildSession,
-  noteCallerSession,
+  parentSessionOf,
   resetChildSessionRegistry,
 } from "../../src/huaanwork-host/child-sessions.ts";
 import { createSubagentRunRegistry } from "../../src/huaanwork-host/subagent-runs.ts";
@@ -713,7 +714,7 @@ test("subagent end drops the child registration so a finished child is never can
   forgetChildSession("end-child-2");
 });
 
-test("a cold-resumed child stays on its own parent, never the last sibling send", () => {
+test("a cold-resumed child stays on its header parent and a header-less child registers nowhere", () => {
   const startListeners: Array<(info: unknown) => void> = [];
   const agents = new Map<string, unknown>([
     ["cold-child-with-header", { session: { header: { parentSession: "huaanwork-cold-a" } } }],
@@ -727,15 +728,46 @@ test("a cold-resumed child stays on its own parent, never the last sibling send"
     agents: { get: (id: string) => agents.get(id) },
   };
   applySkills(ctx as never);
-  noteCallerSession("huaanwork-cold-b");
-  try {
-    for (const listener of startListeners) listener({ id: "cold-child-with-header", local: true });
-    for (const listener of startListeners) listener({ id: "cold-child-no-header", local: true });
-    assert.deepEqual(childrenOf("huaanwork-cold-a"), ["cold-child-with-header"]);
-    assert.deepEqual(childrenOf("huaanwork-cold-b"), []);
-  } finally {
-    noteCallerSession(undefined);
-  }
+  for (const listener of startListeners) listener({ id: "cold-child-with-header", local: true });
+  for (const listener of startListeners) listener({ id: "cold-child-no-header", local: true });
+  assert.deepEqual(childrenOf("huaanwork-cold-a"), ["cold-child-with-header"]);
+  // 没有 header parent 的子会话不登记到任何会话:没有调用槽可回落。
+  assert.equal(parentSessionOf("cold-child-no-header"), undefined);
+});
+
+test("a no-parent subagent never inherits a model, root, or registration from another session", async () => {
+  // 模型自主创建的嵌套子代理:args 不带 parent,子会话 header 也没有 parentSession。
+  // 进程级没有「最后一次发送的会话」可回落,这类子代理不得继承任何会话的模型/可写根。
+  const startListeners: Array<(info: unknown) => void> = [];
+  const models = new Map<string, string>([["sentinel-parent", "model-sentinel"]]);
+  const roots = new Map<string, string>([["sentinel-parent", "/tmp/sentinel-root"]]);
+  const children = new Map<string, unknown>([["nested-child", { session: { header: {} } }]]);
+  const ctx = {
+    skills: { register: () => () => undefined },
+    on(event: string, listener: (info: unknown) => void) {
+      if (event === "subagent/start") startListeners.push(listener);
+    },
+    agents: { get: (id: string) => children.get(id) },
+    huaanworkSessionModels: models,
+    huaanworkSessionRoots: roots,
+    subagents: {
+      async startActivation(): Promise<unknown> {
+        for (const listener of startListeners) {
+          listener({ runId: "upstream-nested", provider: "spawn", id: "nested-child", local: true });
+        }
+        return { childId: "nested-child", result: new Promise(() => undefined), dispose: async () => undefined };
+      },
+    },
+  };
+  applySkills(ctx as never);
+  await (ctx.subagents.startActivation as () => Promise<unknown>)();
+
+  assert.equal(models.has("nested-child"), false);
+  assert.equal(roots.has("nested-child"), false);
+  assert.deepEqual(childrenOf("sentinel-parent"), []);
+  // 槽本身不存在:没有「最后发送的会话」可回落。
+  assert.equal("noteCallerSession" in childSessions, false);
+  assert.equal("currentCallerSession" in childSessions, false);
 });
 
 test("subagent start error still clears current request", async () => {

@@ -21,7 +21,7 @@ export type ResolveSessionModelInput = {
   /** 无绑定时使用的全局激活条目（settings 镜像出的 base_url/model/api_key）。 */
   active: SessionModelEndpoint
   allowNetwork: boolean
-  /** 向父会话走一层；不读 `currentCallerSession()`。 */
+  /** 向父会话走一层；父会话只来自登记表，没有进程级调用槽可回落。 */
   parentOf?: ((sessionId: string) => string | undefined) | undefined
 }
 

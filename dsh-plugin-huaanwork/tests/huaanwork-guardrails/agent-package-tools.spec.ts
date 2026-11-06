@@ -34,7 +34,7 @@ import {
 } from '../../src/huaanwork-host/agent-package/runtime.ts'
 import { dispatchAt } from '../../src/huaanwork-host/agent-invoke.ts'
 import { createSubagentRunRegistry } from '../../src/huaanwork-host/subagent-runs.ts'
-import { noteCallerSession, resetChildSessionRegistry } from '../../src/huaanwork-host/child-sessions.ts'
+import { resetChildSessionRegistry } from '../../src/huaanwork-host/child-sessions.ts'
 import {
   loadAgentPackageDraft,
   type CommitResult,
@@ -664,17 +664,16 @@ describe('agent_skill_run', () => {
     ).rejects.toThrow(/没有运行中的智能体包/)
   })
 
-  test('fails instead of using the last caller session when the execution carries no agent', async () => {
-    // 最后发送会话属于别的会话;没有执行 agent 时这次调用必须失败,脚本不得运行。
+  test('fails instead of guessing a session when the execution carries no agent', async () => {
+    // 执行上下文没有 agent、父链也给不出会话 id 时这次调用必须失败,脚本不得运行。
     const calls: string[] = []
     const registry = createAgentPackageRuntimeRegistry()
-    registry.bind('session-caller', runtimeWithScript(async (script) => {
+    registry.bind('session-a', runtimeWithScript(async (script) => {
       calls.push(script)
       return { text: 'ok' }
     }))
     const h = harness()
     registerAgentPackageRuntimeTools(h.ctx, registry)
-    noteCallerSession('session-caller')
 
     await expect(
       h.registered.get(AGENT_SKILL_RUN_TOOL)?.execute({ script: 'skill/scripts/echo.mjs' }, {}),

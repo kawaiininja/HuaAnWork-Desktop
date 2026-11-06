@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
-import { currentCallerSession, forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
+import { forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
 import {
   AGENT_PACKAGE_CHILD_TOOLS,
   agentPackageChildAttachmentNames,
@@ -242,7 +242,8 @@ export function apply(ctx: Context): void {
     }
     const child = ctx.agents?.get?.(info.id);
     // 事件载荷只有 { runId, provider, id, local },没有 parent;父会话取自子会话 header,
-    // 冷恢复路径靠它,start 包装路径靠下面的 AsyncLocalStorage。
+    // 冷恢复路径靠它,start 包装路径靠下面的 AsyncLocalStorage。两者都没有就不登记:
+    // 模型自主创建的嵌套子代理不继承任何进程级会话的模型或可写根。
     const parentId = sessionIdOf(child?.session?.header?.parentSession) ?? startParent.getStore();
     if (parentId && parentId !== info.id) {
       registerChildSession(parentId, info.id);
@@ -297,8 +298,8 @@ export function apply(ctx: Context): void {
           }
         }
         // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写。
-        // 事件载荷没有 parent；父会话 id 取这次 start 的 parent，缺省用发起调用的用户会话。
-        const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
+        // 事件载荷没有 parent；父会话只取这次 start 的 parent，缺省即无父会话。
+        const parentFromCall = sessionIdOf(parentFromStartArgs(args));
         const run: any = await startParent.run(parentFromCall, () => original(...args));
         if (current && run?.localAgent) {
           const tools = run.localAgent.ctx?.get?.("tools");
@@ -367,7 +368,7 @@ export function apply(ctx: Context): void {
       // legacy 请求挂在本次调用的 spec 符号键上,不读全局容器。
       const pkg = ctx.huaanworkAgentPackageRequest?.current;
       const legacy = legacyAgentRequestOf(args[0]);
-      const parentFromCall = sessionIdOf(parentFromStartArgs(args)) ?? currentCallerSession();
+      const parentFromCall = sessionIdOf(parentFromStartArgs(args));
       // Host runId 与请求同一批快照:legacy 写在 spec 符号键上,包写在请求对象上。
       // 符号键随本次 spec 走,直接采信;全局包请求只属于发布它、且带着预留子会话 id
       // 的那次 activation —— 同一窗口里别的 activation(模型 subagent 工具、同会话
@@ -477,7 +478,7 @@ export function apply(ctx: Context): void {
 
 /**
  * 子会话继承父会话的模型绑定:父会话没有绑定时不写。
- * 按父会话 id 直读登记表,不读 `currentCallerSession()`。
+ * 父会话 id 只来自调用方显式传入的 parent,不读任何进程级调用槽。
  */
 function inheritSessionModel(
   table: Map<string, string> | undefined,

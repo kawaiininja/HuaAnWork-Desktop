@@ -25,7 +25,6 @@ import {
   childrenOf,
   forgetChildSession,
   forgetChildSessions,
-  noteCallerSession,
 } from './child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
 import { readHuaanworkSettings } from './settings.ts'
@@ -150,7 +149,6 @@ export async function sendToAgent(
     throw new Error('session.send requires params.text')
   }
 
-  noteCallerSession(sessionId)
   // 每一轮用户原句都记进宿主:同意门禁只认最近一轮,技能/@ 轮若旁路不记,
   // agent_commit 会读到更早那轮的「可以」(设计 §5)。创建门禁内的记录是同一句,
   // 重复写入无副作用。
