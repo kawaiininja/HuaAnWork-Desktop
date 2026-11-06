@@ -891,6 +891,74 @@ describe('legacy @agent 运行链接线', () => {
     }
   })
 
+  test('a rejected followup still holds the root writer until the subagent cleanup and the next idle', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { restore } = legacyCatalogDirectory()
+    const registry = newRegistry()
+    const idle = manualIdle()
+    let idleRegistrations = 0
+    const live = legacyLiveAgent(sessionId, () => {
+      idleRegistrations += 1
+      return idle.whenIdle()
+    })
+    live.followup = () => {
+      throw new Error('父会话已结束')
+    }
+    let settleActivation!: (value: { stopReason: string }) => void
+    const activationResult = new Promise<{ stopReason: string }>((resolve) => {
+      settleActivation = resolve
+    })
+    const releases: string[] = []
+    const ctx = legacyRunContext({
+      sessionId,
+      live,
+      registry,
+      startActivation: async () => ({
+        childId: 'legacy-child',
+        result: activationResult,
+        dispose: async () => undefined,
+      }),
+    })
+    try {
+      await expect(
+        sendToAgent(
+          ctx,
+          routeCtx,
+          { text: '整理本周进展', sessionId, at: { name: 'legacy-assistant' } },
+          {
+            root: routeCtx.workspaceRoot.current,
+            modelId: 'local',
+            release: () => {
+              releases.push('release')
+            },
+          },
+        ),
+      ).rejects.toThrow('父会话已结束')
+      // 子代理已启动:失败出口不能抢先释放根写者,只能交给 idle 清理。
+      expect(releases).toEqual([])
+      expect(idleRegistrations).toBe(1)
+
+      idle.fire(0)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(releases).toEqual([])
+
+      settleActivation({ stopReason: 'completed' })
+      await vi.waitFor(() => {
+        expect(idleRegistrations).toBe(2)
+      })
+      expect(releases).toEqual([])
+
+      idle.fire(1)
+      await vi.waitFor(() => {
+        expect(releases).toEqual(['release'])
+      })
+    } finally {
+      restore()
+    }
+  })
+
   test('a rejected dispose keeps the natural phase and only adds the dispose warning', async () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)

@@ -283,7 +283,8 @@ export async function sendToAgent(
     }
     scheduleDetachAfterIdle()
   } finally {
-    if (!followupAccepted) releaseOnce?.()
+    // 已启动子代理时根写者归 idle 清理持有:立即释放会与仍在写根的子代理重叠。
+    if (!followupAccepted && afterIdle === undefined) releaseOnce?.()
     scheduleDetachAfterIdle()
   }
   return { queued: true, sessionId, started: true }
