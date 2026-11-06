@@ -821,6 +821,76 @@ describe('legacy @agent 运行链接线', () => {
     }
   })
 
+  test('the root writer stays held until the subagent result and the parent summary turn are idle', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = freshSessionIdFor(routeCtx.workspaceRoot.current)
+    const { restore } = legacyCatalogDirectory()
+    const registry = newRegistry()
+    const idle = manualIdle()
+    let idleRegistrations = 0
+    const followups: unknown[] = []
+    const live = legacyLiveAgent(sessionId, () => {
+      idleRegistrations += 1
+      return idle.whenIdle()
+    })
+    live.followup = (message) => {
+      followups.push(message)
+    }
+    let settleActivation!: (value: { stopReason: string }) => void
+    const activationResult = new Promise<{ stopReason: string }>((resolve) => {
+      settleActivation = resolve
+    })
+    const releases: string[] = []
+    const ctx = legacyRunContext({
+      sessionId,
+      live,
+      registry,
+      startActivation: async () => ({
+        childId: 'legacy-child',
+        result: activationResult,
+        dispose: async () => undefined,
+      }),
+    })
+    try {
+      await sendToAgent(
+        ctx,
+        routeCtx,
+        { text: '整理本周进展', sessionId, at: { name: 'legacy-assistant' } },
+        {
+          root: routeCtx.workspaceRoot.current,
+          modelId: 'local',
+          release: () => {
+            releases.push('release')
+          },
+        },
+      )
+      expect(followups).toHaveLength(1)
+      expect(idleRegistrations).toBe(1)
+
+      // 父会话第一次 idle:子代理结果仍未结算,根写者不能先放。
+      idle.fire(0)
+      expect(releases).toEqual([])
+
+      // 上游结算顺序:先给父会话 followup 摘要回合,再结算 activation.result。
+      live.followup({ id: 'summary', role: 'user', content: [{ type: 'text', text: '子代理完成摘要' }] })
+      expect(followups).toHaveLength(2)
+      settleActivation({ stopReason: 'completed' })
+      await vi.waitFor(() => {
+        expect(idleRegistrations).toBe(2)
+      })
+      expect(releases).toEqual([])
+
+      // 摘要回合结束(第二次 idle)后才释放,且只释放一次。
+      idle.fire(1)
+      await vi.waitFor(() => {
+        expect(releases).toEqual(['release'])
+      })
+    } finally {
+      restore()
+    }
+  })
+
   test('a rejected dispose keeps the natural phase and only adds the dispose warning', async () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)

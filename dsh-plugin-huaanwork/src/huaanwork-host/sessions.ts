@@ -156,12 +156,17 @@ export async function sendToAgent(
   let cleanedUp = false
   const releaseOnce = admission?.release
   const cleanup = async () => {
-    // 每次 idle 回调都经过同一个释放器;releaseOnce 自身幂等,晚到的第二次回调
-    // 不会放掉接手的那一回合。
-    releaseOnce?.()
     if (cleanedUp) return
     cleanedUp = true
-    await afterIdle?.()
+    try {
+      // @agent 的子代理可能仍在写根:先等它的清理收尾,再等被 `delivery: 'parent'`
+      // 摘要回合唤醒的父会话重新 idle。finally 保证清理抛错也不会把根写者留在手上。
+      if (afterIdle === undefined) return
+      await afterIdle()
+      await acceptedAgent?.whenIdle?.()
+    } finally {
+      releaseOnce?.()
+    }
   }
   // followup 受理后立即返回。@ HTTP 工具的 detach 只在 idle 之后跑，
   // 成功路径和 finally 共用这一次登记，避免回合中途解绑或解绑两次。
