@@ -4,10 +4,10 @@ import { sessionIdFor } from './session-id.ts'
 import { neutralWorkspaceRoot, neutralWorkspaceRootPath } from './workspace-state.ts'
 
 /**
- * 会话可写根推导(规格 §5.1.1)。同步纯推导:projects / tasks / headerCwd 都由
+ * 会话可写根推导(规格 §5.1.1)。同步推导:projects / tasks / headerCwd 都由
  * 调用方先异步载入再传入,这里不读盘、不调 listProjects / listTasks /
  * findSessionHeader,也不检查根目录是否存在(不存在的根由会话发送路径拒绝启动)。
- * 推导本身不建目录:只有中立根作为结果返回时才创建 `<profile>/workspace`。
+ * 推导唯一的副作用在结果上:只有中立根作为结果返回时创建 `<profile>/workspace`。
  *
  * 推导顺序(逐级回落,前一级命中即返回):
  * 1. 任务绑定:某任务 `sessionId` 正是本会话 ⇒ 用该任务 `projectId` 在 `projects`

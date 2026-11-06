@@ -224,7 +224,8 @@ export function apply(ctx: Context): void {
   ctx.on("subagent/start", ((info: { id?: string; runId?: string }) => {
     if (!info.id) return;
     // Host runId 由 startActivation 包装经 ALS 带到这里。上游 runId 与 childId 都非空
-    // 才绑定:模型自主创建的嵌套子代理没有 Host runId,只保留下面的父会话登记。
+    // 才绑定:模型自主创建的嵌套子代理没有 Host runId,不绑运行卡;父会话登记只看
+    // 子会话 header 与本次 activation 的父会话(见下),两处都没有就不登记。
     const hostRunId = startRun.getStore();
     if (hostRunId !== undefined && typeof info.runId === "string" && info.runId.length > 0) {
       // 登记表 parent 已知时只认与本次 activation 父会话一致的那次 start:不一致的

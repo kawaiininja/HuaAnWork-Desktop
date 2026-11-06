@@ -143,11 +143,11 @@
 
 排队和 `started:false` 不得清除正在执行回合的停止闩锁、`stopping` 或既有进度。`goal/round` 只恢复事件所属标签的 `running`；目标相位仍为 `active` 的中间 `session/end` 不清执行态、不撤停止按钮，非 active 的真正终局才清理。`consumeStaleIdle`、停止票据的构造与结算都只读取事件所属标签的 epoch，不用另一标签的当前值判定旧结束。
 
-fetch 应答与 WebSocket 事件不保证先后。客户端在 RPC 前以 `tabId + 本地 userMsg.id` 建 pending 记录，pending 本身不开目标窗。直接发送尚未应答时，若没有正在执行的同会话回合，早到的 `session/end` 与 goal 事件进入本次缓冲；若上一回合仍执行，它的事件必须即时处理。未知 queueItemId 的早到 `session/queue-start` / `session/queue-fail` 也进入本次缓冲，已能匹配其他等待消息的事件不得被扣住。应答先写回 started/queueItemId，再初始化对应回合并按原顺序重放；`started:false` 只丢弃本次缓冲。`agent/notice` 不缓冲。
+fetch 应答与 WebSocket 事件不保证先后。客户端的每标签发送护栏在 RPC 之前就挡住了同一标签的第二次发送，所以 pending 只按标签记一条（记录里带本地 `userMsg.id` 作为本轮身份），标签键已经唯一，不另外叠加消息 id；pending 本身不开目标窗。直接发送尚未应答时，若没有正在执行的同会话回合，早到的 `session/end` 与 goal 事件进入本次缓冲；若上一回合仍执行，它的事件必须即时处理。未知 queueItemId 的早到 `session/queue-start` / `session/queue-fail` 也进入本次缓冲，已能匹配其他等待消息的事件不得被扣住。应答先写回 started/queueItemId，再初始化对应回合并按原顺序重放；`started:false` 只丢弃本次缓冲。`agent/notice` 不缓冲。
 
 审批卡继续按 `approvalRequestId` 回写到持有该卡的标签。回答一条卡不会提交到另一条会话。
 
-带 `sessionId` 的差异事件只记入该会话的标签。没有 `sessionId` 时，仅当占名额的执行中回合恰好一个，记入那个标签；同时有多个时不记入任何标签，并写一条宿主日志。当前标签只显示自己已记下的差异。
+带 `sessionId` 的差异事件只记入该会话的标签。没有 `sessionId` 时，仅当占名额的执行中回合恰好一个，归给那个会话；没有或不止一个时，宿主不做这次快照也不发事件（客户端本来就会丢弃无归属的 diff）。当前标签只显示自己已记下的差异。
 
 ## 5. 架构
 

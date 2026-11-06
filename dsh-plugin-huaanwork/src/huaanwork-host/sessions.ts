@@ -314,6 +314,8 @@ async function ensureChannelAgent(
   const roots = ctx.huaanworkSessionRoots
   let root = admissionRoot ?? roots?.get(sessionId)
   if (root === undefined) {
+    // 缺 cwd 的会话也先推导再校验:回落的中立根在 `<profile>/workspace` 下,profile
+    // 启动时已建,这里只是幂等的同一目录;随后仍按持久化 cwd 做 fail-closed 检查。
     const projects = await listProjects(routeCtx.profileDir)
     const tasks = await listTasks(routeCtx.profileDir)
     root = writableRootForSession({
@@ -652,8 +654,6 @@ let agentPackageActiveTurns: AgentPackageActiveTurnRegistry | undefined
 export function setAgentPackageActiveTurns(registry: AgentPackageActiveTurnRegistry | undefined): void {
   agentPackageActiveTurns = registry
 }
-
-// 审批归因在 automations-host.ingestAutomationEvent(approval/asked 的 sessionId → runId)。
 
 // —— route handlers(旧 host.ts:978-1012 的 case 语义;错误消息逐字)——
 

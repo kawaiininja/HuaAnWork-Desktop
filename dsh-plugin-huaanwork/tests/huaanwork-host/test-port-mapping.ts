@@ -220,7 +220,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'session.send is rejected with a workspace-switch message while displaced by a cross-project agent task',
     label: '裁定不移植',
-    evidence: '旧 automations-host.test.ts:1417 依赖运行期工作区被切走。不移植清单旧 :668-676 / :700-721;workspaceDisplaced 恒 false',
+    evidence: '旧 automations-host.test.ts:1417 依赖运行期工作区被切走。不移植清单旧 :668-676 / :700-721;没有发送侧的工作区位移拦截',
   },
   {
     file: 'automations-host.test.ts',

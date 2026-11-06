@@ -694,10 +694,37 @@ test("send records the id it actually sends before the RPC so the next send keep
     "the setter is wrapped in the truthiness guard so an empty id is never recorded as a pick",
   );
   assert.equal(
-    (body.match(/setModelPickByTab\(/g) ?? []).length,
+    (beforeSend.match(/setModelPickByTab\(/g) ?? []).length,
     1,
-    "send records exactly one pick: the id it sends",
+    "send records exactly one pick before the RPC: the id it sends",
   );
+});
+
+test("a rejected send drops the pick it recorded, unless the user already picked anew", () => {
+  const picks = { "work-2": "sent-model", "work-3": "other-model" };
+  const cleared = AppModule.clearSentModelPick(picks, "work-2", "sent-model");
+  assert.deepEqual(cleared, { "work-3": "other-model" }, "the failed send's own pick is rolled back");
+  assert.equal("work-2" in cleared, false);
+
+  // 发送在飞期间用户换了选择：失败不能把新选择一起撤掉。
+  const newer = { "work-2": "newer-model" };
+  assert.equal(AppModule.clearSentModelPick(newer, "work-2", "sent-model"), newer, "a newer pick is preserved");
+  // 没有可撤的 id 时原样返回同一个对象，不制造无意义的状态更新。
+  assert.equal(AppModule.clearSentModelPick(picks, "work-2", undefined), picks, "an undefined sent id rolls nothing back");
+  assert.equal(AppModule.clearSentModelPick(picks, "work-2", ""), picks, "an empty sent id rolls nothing back");
+  assert.equal(AppModule.clearSentModelPick(picks, "work-9", "sent-model"), picks, "another tab's pick is untouched");
+});
+
+test("the send rejection path rolls the recorded pick back through the helper", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
+  assert.ok(sendAt >= 0, "send still awaits the session.send response");
+  const catchAt = body.indexOf("} catch (error) {", sendAt);
+  assert.ok(catchAt > sendAt, "the session.send rejection path is still present");
+  const catchBlock = body.slice(catchAt, body.indexOf("} finally {", catchAt));
+  assert.match(catchBlock, /dropPending\(pending\)/);
+  // 失败路径必须经 helper 撤回本次送出 id 的记录；用户已换的新选择由 helper 保留。
+  assert.match(catchBlock, /setModelPickByTab\(\(prev\) => clearSentModelPick\(prev, chatId, modelId\)\)/);
 });
 
 test("a started or queued send refreshes tasks so the host's task-model write-back lands", () => {

@@ -796,13 +796,51 @@ test("a no-parent subagent never inherits a model, root, or registration from an
 
     assert.equal(models.has("nested-child"), false);
     assert.equal(roots.has("nested-child"), false);
-    assert.deepEqual(childrenOf("sentinel-parent"), []);
+    assert.equal(parentSessionOf("nested-child"), undefined);
     // 槽本身不存在:没有「最后发送的会话」可回落。
     assert.equal("noteCallerSession" in childSessions, false);
     assert.equal("currentCallerSession" in childSessions, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("an explicit parent in the activation args still inherits the model and root", async () => {
+  // 去掉调用槽不得连带压掉正常的继承:activation 的 args 带 parent、子会话 header
+  // 没有 parentSession 时,子会话仍复制父会话的模型/可写根并登记在父会话名下。
+  const startListeners: Array<(info: unknown) => void> = [];
+  const models = new Map<string, string>([["explicit-parent", "model-sentinel"]]);
+  const roots = new Map<string, string>([["explicit-parent", "/tmp/sentinel-root"]]);
+  const agents = new Map<string, unknown>([
+    ["explicit-child", { session: { header: {} } }],
+  ]);
+  const ctx = {
+    skills: { register: () => () => undefined },
+    on(event: string, listener: (info: unknown) => void) {
+      if (event === "subagent/start") startListeners.push(listener);
+    },
+    agents: { get: (id: string) => agents.get(id) },
+    huaanworkSessionModels: models,
+    huaanworkSessionRoots: roots,
+    subagents: {
+      async startActivation(): Promise<unknown> {
+        for (const listener of startListeners) {
+          listener({ runId: "upstream-explicit", provider: "spawn", id: "explicit-child", local: true });
+        }
+        return { childId: "explicit-child", result: new Promise(() => undefined), dispose: async () => undefined };
+      },
+    },
+  };
+  applySkills(ctx as never);
+
+  await (ctx.subagents.startActivation as (spec: unknown) => Promise<unknown>)({
+    request: { parent: "explicit-parent" },
+  });
+
+  assert.equal(models.get("explicit-child"), "model-sentinel");
+  assert.equal(roots.get("explicit-child"), "/tmp/sentinel-root");
+  assert.equal(parentSessionOf("explicit-child"), "explicit-parent");
+  assert.deepEqual(childrenOf("explicit-parent"), ["explicit-child"]);
 });
 
 test("subagent start error still clears current request", async () => {

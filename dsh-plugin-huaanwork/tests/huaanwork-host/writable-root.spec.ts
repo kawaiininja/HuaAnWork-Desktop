@@ -1,6 +1,7 @@
 /**
- * 可写根推导(Task 3,规格 §5.1.1)。被测函数是同步纯推导:projects / tasks /
- * headerCwd 都由调用方预先载入,函数不读盘、不异步、不检查目录是否存在。
+ * 可写根推导(Task 3,规格 §5.1.1)。被测函数是同步推导:projects / tasks /
+ * headerCwd 都由调用方预先载入,函数不读盘、不异步、不检查目录是否存在;
+ * 唯一的副作用是中立根作为结果返回时创建 `<profile>/workspace`。
  */
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'

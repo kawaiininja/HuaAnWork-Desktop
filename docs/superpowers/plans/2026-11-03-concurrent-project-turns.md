@@ -22,6 +22,8 @@
 
 **2026-11-05 R8-M1 复审补遗：** R8-M1 专项复审通过。Task 9 的方法计数同步补上第四处 `market-routes.spec.ts`（「ROUTE_TABLE 不受影响(表外注册,71 不破)」的断言值与测试标题随 71→72 一起改），并把它加入 Task 9 的 Files、Step 4 运行命令与提交清单。
 
+**2026-11-06 P 波订正：** 三轮复核的 P-1..P-4 处置与规格对齐：pending 记录保持按标签一条（每标签发送护栏串行化发送，标签键已唯一）；无 `sessionId` 且没有唯一占名额回合时，宿主不做 diff 快照、不发事件；持久化会话缺 `cwd` 时按现有「其他工作区」消息 fail closed，不靠推导出的根放行。
+
 **Tech Stack:** TypeScript ESM、Vitest、现有 `huaanwork-settings.json` / `projects.json` / `tasks.json`、Yarn 4.18.0 / Corepack。不新增依赖，不修改 `deepseek-harness/`。
 
 ## Global Constraints

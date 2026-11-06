@@ -308,7 +308,7 @@ function emitGitDiff(ctx: Context, sessionId: string | undefined): void {
     if (sole !== undefined) {
       target = sole;
     } else {
-      ctx.logger?.info?.('[huaanwork] diff emitted without a session: no sole active turn');
+      ctx.logger?.info?.('[huaanwork] diff snapshot skipped: no owning session');
       return;
     }
   }

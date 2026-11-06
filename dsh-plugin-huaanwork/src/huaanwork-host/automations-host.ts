@@ -346,7 +346,8 @@ async function runAgentTurn(
 
 /**
  * 在跑脚本的 kill 句柄,按 runId 索引(规格 §8「脚本结束对应子进程」)。
- * 只登记到 `finish`(exit/error/timeout 任一先到)为止;停止侧命中即杀进程树。
+ * 只登记到 `finish` 为止:`finish` 等 `close`(spawn 失败没有进程可等,随即结算),
+ * 停止侧命中即杀进程树。
  */
 export const scriptRunKillers = new Map<string, () => void>()
 

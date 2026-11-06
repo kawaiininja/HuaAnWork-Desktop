@@ -2767,6 +2767,9 @@ export default function App() {
         // 只失败这一次发送：同标签正在执行的回合的停止闩锁、stopping、epoch 与执行态都不动。
         // 本次用户消息标成未启动，失败原因仍追加到发送标签（闩锁扣着也追加）。
         dropPending(pending);
+        // 失败不留下本次记下的选择：留在标签上就成了下一次发送的默认值（例如该模型
+        // 刚被删除），会再失败一次直到用户重新选择。发送在飞期间用户换的选择保留。
+        setModelPickByTab((prev) => clearSentModelPick(prev, chatId, modelId));
         const note: ChatItem = { id: allocId(), kind: "note", text: error instanceof Error ? error.message : String(error) };
         setChatTabs((prev) =>
           prev.map((tab) =>
@@ -4261,6 +4264,28 @@ export function startUserItem<T extends { queueItemId?: string; notStarted?: boo
     ...started
   } = item;
   return started as T;
+}
+
+/**
+ * 发送失败时撤回本次发送记下的标签模型选择。
+ *
+ * 只撤与本次送出 id 相同的那条记录：发送在飞期间用户换了选择就保留新的，
+ * 别让一条失败的发送覆盖用户的操作。
+ *
+ * @param picks 当前按标签记录的发送选择
+ * @param tabId 本次发送失败的标签
+ * @param sentId 本次实际送出的模型 id
+ * @returns 去掉本条记录的新对象；没有可撤的记录时原样返回入参
+ */
+export function clearSentModelPick(
+  picks: Readonly<Record<string, string>>,
+  tabId: string,
+  sentId: string | undefined,
+): Readonly<Record<string, string>> {
+  if (sentId === undefined || sentId.length === 0 || picks[tabId] !== sentId) return picks;
+  const next = { ...picks };
+  delete next[tabId];
+  return next;
 }
 
 /** 本回合内的条目（工具行、审批卡、脚注）写在本回合的写入位置；没有排队消息时追加到末尾。 */
