@@ -300,8 +300,8 @@ function capResult(result: ToolResult): { text: string; truncated: boolean } {
 }
 
 function emitGitDiff(ctx: Context, sessionId: string | undefined): void {
-  // 缺 sessionId 时只在恰好一个回合占名额时补上它的会话;多于一个/没有则保持
-  // 无归属并记一条,不能拿 activeTurnCount 猜。
+  // 缺 sessionId 时只在恰好一个回合占名额时补上它的会话;多于一个/没有则不做这次快照:
+  // 客户端丢弃无归属的 diff,快照只会在无关目录上白跑。不能拿 activeTurnCount 猜。
   let target = sessionId;
   if (target === undefined) {
     const sole = ctx.huaanworkTurnScheduler?.soleCapWriterSessionId();
@@ -309,6 +309,7 @@ function emitGitDiff(ctx: Context, sessionId: string | undefined): void {
       target = sole;
     } else {
       ctx.logger?.info?.('[huaanwork] diff emitted without a session: no sole active turn');
+      return;
     }
   }
   const root = sessionWorkspaceRoot(ctx, target);

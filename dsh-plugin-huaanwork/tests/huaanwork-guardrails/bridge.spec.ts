@@ -41,8 +41,10 @@ type Runs = ReturnType<typeof createSubagentRunRegistry>;
 
 const PARENT_SESSION = "huaanwork-parent-session";
 const CHILD_SESSION = "huaanwork-child-session";
+const SNAPSHOT_OWNER = "huaanwork-diff-owner";
 const parentAgent = { session: { id: PARENT_SESSION } };
 const childAgent = { session: { id: CHILD_SESSION } };
+const ownerAgent = { id: SNAPSHOT_OWNER };
 
 function createRuns(): Runs {
   return createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
@@ -67,12 +69,15 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
-function createCtx(workspaceRoot = "/tmp/pinned", subagentRuns?: Runs) {
+type SoleWriter = { soleCapWriterSessionId(): string | undefined };
+
+function createCtx(workspaceRoot = "/tmp/pinned", subagentRuns?: Runs, scheduler?: SoleWriter) {
   const listeners: Record<string, ((...args: never[]) => unknown)[]> = {};
   const emitted: unknown[] = [];
   const ctx = {
     huaanworkWorkspaceRoot: { current: workspaceRoot },
     ...(subagentRuns === undefined ? {} : { huaanworkSubagentRuns: subagentRuns }),
+    ...(scheduler === undefined ? {} : { huaanworkTurnScheduler: scheduler }),
     huaanworkEmit(event: unknown) {
       emitted.push(event);
     },
@@ -202,14 +207,18 @@ test("bridge diff snapshot includes untracked new files", async () => {
     apply(ctx as never);
     const execute = listeners["tools/execute"]?.[0] as Execute;
     await execute(
-      { name: "write", callId: "w1" },
+      { name: "write", callId: "w1", agent: ownerAgent },
       async () => ({
         isError: false,
         content: [{ type: "text", text: "ok" }],
       }),
     );
-    const diff = emitted.find((event) => (event as { event?: string }).event === "diff") as { text?: string };
+    const diff = emitted.find((event) => (event as { event?: string }).event === "diff") as {
+      text?: string;
+      sessionId?: string;
+    };
     assert.ok(diff?.text?.includes("brand-new.txt"), diff?.text);
+    assert.equal(diff.sessionId, SNAPSHOT_OWNER, "an owned snapshot stays attributed to its session");
     const status = spawnSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
     assert.match(status.stdout, /\?\? brand-new\.txt/);
     assert.equal(writes.length, 0);
@@ -272,7 +281,7 @@ test("write lands on disk and the diff snapshot is nonempty", async () => {
     const { ctx, listeners, emitted } = createCtx(root);
     apply(ctx as never);
     const execute = listeners["tools/execute"]?.[0] as Execute;
-    await execute({ name: "write", callId: "w-land", arguments: { path: "a.txt", content: "hi" } }, async () => {
+    await execute({ name: "write", callId: "w-land", arguments: { path: "a.txt", content: "hi" }, agent: ownerAgent }, async () => {
       writeFileSync(join(root, "a.txt"), "hi");
       return { isError: false, content: [{ type: "text", text: "ok" }] };
     });
@@ -280,6 +289,64 @@ test("write lands on disk and the diff snapshot is nonempty", async () => {
     const diff = emitted.find((event) => (event as { event?: string }).event === "diff") as { text?: string };
     assert.ok(diff?.text && diff.text.length > 0, "diff snapshot must be nonempty");
     assert.ok(diff.text.includes("a.txt"), diff.text);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a write with no owning session skips the snapshot and emits no diff", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const root = mkdtempSync(join(tmpdir(), "huaanwork-bridge-ownerless-"));
+  const executeWrite = async (scheduler?: SoleWriter): Promise<unknown[]> => {
+    const { ctx, listeners, emitted } = createCtx(root, undefined, scheduler);
+    apply(ctx as never);
+    const execute = listeners["tools/execute"]?.[0] as Execute;
+    await execute({ name: "write", callId: "w-ownerless" }, async () => ({
+      isError: false,
+      content: [{ type: "text", text: "ok" }],
+    }));
+    return emitted;
+  };
+  try {
+    assert.equal(spawnSync("git", ["init", "-q", "--template=/dev/null"], { cwd: root }).status, 0);
+    writeFileSync(join(root, "brand-new.txt"), "hello from an ownerless write\n");
+    vi.mocked(spawnSync).mockClear();
+
+    // 没有调度器,或调度器看不出唯一的占名额写者:都不猜归属。
+    const withoutScheduler = await executeWrite();
+    const withAmbiguousScheduler = await executeWrite({ soleCapWriterSessionId: () => undefined });
+    for (const emitted of [withoutScheduler, withAmbiguousScheduler]) {
+      assert.equal(
+        emitted.some((event) => (event as { event?: string }).event === "diff"),
+        false,
+        "the client drops an ownerless diff, so the host must not emit one",
+      );
+    }
+    assert.equal(vi.mocked(spawnSync).mock.calls.length, 0, "no owner means no git snapshot");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a sole capacity-holding writer still owns the snapshot without a session id", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const root = mkdtempSync(join(tmpdir(), "huaanwork-bridge-sole-writer-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "-q", "--template=/dev/null"], { cwd: root }).status, 0);
+    writeFileSync(join(root, "brand-new.txt"), "hello from the sole writer\n");
+    const { ctx, listeners, emitted } = createCtx(root, undefined, { soleCapWriterSessionId: () => SNAPSHOT_OWNER });
+    apply(ctx as never);
+    const execute = listeners["tools/execute"]?.[0] as Execute;
+    await execute({ name: "write", callId: "w-sole" }, async () => ({
+      isError: false,
+      content: [{ type: "text", text: "ok" }],
+    }));
+    const diff = emitted.find((event) => (event as { event?: string }).event === "diff") as {
+      text?: string;
+      sessionId?: string;
+    };
+    assert.ok(diff?.text?.includes("brand-new.txt"), diff?.text);
+    assert.equal(diff.sessionId, SNAPSHOT_OWNER, "the sole writer becomes the snapshot owner");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
