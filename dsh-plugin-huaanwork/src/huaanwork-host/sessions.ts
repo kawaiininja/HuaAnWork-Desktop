@@ -124,7 +124,7 @@ export type SendResult = {
   queued: true
   sessionId: string
   started: boolean
-  /** 未启动但已经用 `agent/notice` 告知用户的原因;排队出队据此填 queue-fail。 */
+  /** 未启动的原因;排队出队据此填 queue-fail。取消路径没有前置 `agent/notice`,由客户端自行渲染。 */
   reason?: string
 }
 
@@ -738,8 +738,9 @@ function createReleaseOnce(
 
 /**
  * 队列项出队后重新复检根目录、模型条目与网络门禁,通过才把同一组
- * text/skill/at 交给 `sendToAgent`。失败项只发 `session/queue-fail` 并释放名额,
- * 不重新入队,也不发 `session/queue-start`。
+ * text/skill/at 交给 `sendToAgent`。失败项只发 `session/queue-fail`,不重新入队,
+ * 也不发 `session/queue-start`;名额由本函数释放,除非启动已延后给 `@` 激活的 idle 清理。
+ * 启动受理(已发 `session/queue-start`)之后的失败只记日志:回合已在跑,名额不得回收。
  */
 async function startQueuedItem(
   ctx: SessionRuntimeContext,
@@ -750,6 +751,8 @@ async function startQueuedItem(
   const releaseOnce = createReleaseOnce(ctx, routeCtx, item.sessionId)
   /** `@` 激活已发布时启动未完成(取消返回或 followup 抛错):名额归 idle 清理,`fail` 不得提前释放。 */
   let deferred = false
+  /** followup 已受理:其后的事件或写回失败不得回退成失败项,名额归 idle 清理。 */
+  let started = false
   const fail = (reason: string): void => {
     try {
       routeCtx.emit({
@@ -807,6 +810,7 @@ async function startQueuedItem(
       fail(result.reason ?? '排队回合未能启动')
       return
     }
+    started = true
     // followup 受理即公布启动:其后的写回 await 会重新打开「取消找不着消息」的窗口。
     routeCtx.emit({
       event: 'session/queue-start',
@@ -817,6 +821,13 @@ async function startQueuedItem(
     // 出队且 followup 受理后才写回任务模型(排队期间不写)。
     await rememberTaskModel(routeCtx, item.sessionId, item.modelId)
   } catch (error) {
+    if (started) {
+      // 回合已经在跑:失败的只是启动后的事件/写回,不能回收名额或补发 queue-fail。
+      routeCtx.logger(
+        `session.send: 排队回合已启动,启动后事件失败(${item.sessionId}):${error instanceof Error ? error.message : String(error)}`,
+      )
+      return
+    }
     fail(error instanceof Error ? error.message : String(error))
   } finally {
     scheduler?.finishStart(item.queueItemId)

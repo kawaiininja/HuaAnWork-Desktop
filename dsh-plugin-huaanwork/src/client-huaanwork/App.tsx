@@ -866,7 +866,8 @@ export default function App() {
     staleIdleRef.current = consumed.stale;
     for (const sessionId of consumed.clearedSessionIds) {
       const owner = stopOwnerForSession(sessionId);
-      if (owner !== undefined) {
+      // 只释放这个会话自己的停止闩锁：owner 可能因 pending 命中，闩锁却属于别的会话，不能顺手清掉。
+      if (owner !== undefined && owner.turn.stopSessionId === sessionId) {
         patchTabTurn(owner.tabId, { stopSessionId: null, latchOwner: null, stopping: false });
       }
     }

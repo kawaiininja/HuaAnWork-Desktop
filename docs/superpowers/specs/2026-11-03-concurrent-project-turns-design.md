@@ -188,9 +188,9 @@ fetch 应答与 WebSocket 事件不保证先后。客户端在 RPC 前以 `tabId
 3. **持久化 `cwd` 回退**：若会话日志 `header.cwd` 位于且仅位于一个 `projects.json` 项目根之内，可写根取该项目根。这一步兜住任务绑定丢失但 `cwd` 仍有效的历史会话，避免它们被错误收进中立工作区后拒绝恢复。
 4. **中立回落**：以上均未命中，返回 `neutralWorkspaceRoot(profileDir)`。
 
-推导结果在 `sendToAgent` 准入时计算一次，随队列项保存，执行时不再重新推导。`ensureChannelAgent` 和 `sessionResume` 接收推导好的根作为参数，不再读 `routeCtx.workspaceRoot.current`。
+推导结果在 `sendToAgent` 准入时计算一次，随队列项保存，执行时不再重新推导。`ensureChannelAgent` 接收准入时冻结的根作为参数；没有准入的 `sessionResume` 由 `ensureChannelAgent` 在内部按同一顺序推导。两者都不读 `routeCtx.workspaceRoot.current`。
 
-`ctx.huaanworkSessionRoots` 的登记不随模型表推迟：它必须在 `agents.create` / `agents.resume` 之前写入，供会话创建和沙箱夹紧使用；项目级 Agent 自动化在 `sendToAgent` 前写入已知目标根。没调用 `followup` 的早退不改变这条根规则——已经为创建/恢复登记的真实根保持有效，不删除、不改回前台；自动化运行自己的根键仍在其 `finally` 清理，`sessionRemove` 与 `subagent/end` 按各自规则清理。
+`ctx.huaanworkSessionRoots` 的登记不随模型表推迟：它必须在 `agents.create` / `agents.resume` 之前写入，供会话创建和沙箱夹紧使用；项目级 Agent 自动化在 `sendToAgent` 前写入已知目标根。没调用 `followup` 的早退不改变这条根规则——已经为创建/恢复登记的真实根保持有效，不删除、不改回前台；自动化的根键与模型键在回合真正 settle 时删除，drain 到期只停止等待、不删除工具仍可读到的绑定，`sessionRemove` 与 `subagent/end` 按各自规则清理。
 
 会话日志的 `header.cwd` 在创建时写入推导根，恢复时校验 `cwd` 在该根之内（`isInside` 检查，非严格相等）。
 

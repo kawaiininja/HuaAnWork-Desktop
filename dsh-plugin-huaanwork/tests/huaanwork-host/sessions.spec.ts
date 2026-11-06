@@ -3055,4 +3055,49 @@ describe('session.send 调度器接线', () => {
       setAgentsDirectory(emptyDirectory as never)
     }
   })
+
+  test('a throwing queue-start emit keeps the root writer until the queued turn is idle', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 1 })
+    const projectA = makeProject(root, 'project-a')
+    const projectB = makeProject(root, 'project-b')
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: projectA, sessionId: 'a' },
+      { projectId: 'pb', projectRoot: projectB, sessionId: 'b' },
+    ])
+    const idleA = makeDeferred()
+    const idleB = makeDeferred()
+    h.addAgent('a', () => idleA.promise)
+    h.addAgent('b', () => idleB.promise)
+    const record = h.routeCtx.emit
+    // followup 已受理,queue-start 的 emit 才抛错:回合已经交给模型,不能回退成失败项。
+    h.routeCtx.emit = (event) => {
+      if (event.event === 'session/queue-start') throw new Error('emit failed')
+      record(event)
+    }
+
+    await h.send({ text: 'active', sessionId: 'a', tabId: 'tab-a', modelId: 'm1' })
+    const queuedB = await h.send({
+      text: '整理本周进展',
+      sessionId: 'b',
+      tabId: 'tab-b',
+      modelId: 'm1',
+    })
+    expect(queuedB).toMatchObject({ waiting: true, started: false })
+
+    idleA.resolve()
+    await vi.waitFor(() => expect(h.followupsBySession.get('b') ?? []).toEqual(['整理本周进展']))
+    // emit 抛错与其后的 catch 在同一条微任务链内:多走一轮宏任务再断言。
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(h.queueEvents().some(
+      (event) => event.event === 'session/queue-fail' && 'sessionId' in event && event.sessionId === 'b',
+    )).toBe(false)
+    // 回合已在跑:名额仍由 B 持有,不得提前释放给下一个同根等待项。
+    expect(h.scheduler.activeTurnCount()).toBe(1)
+    expect(h.releaseCalls).not.toContain('b')
+
+    idleB.resolve()
+    await vi.waitFor(() => expect(h.scheduler.activeTurnCount()).toBe(0))
+    expect(h.releaseCalls).toContain('b')
+  })
 })

@@ -122,6 +122,23 @@ test("buffered events that are not an end for a marked session leave markers alo
   });
 });
 
+test("a consumed buffered end keeps a later turn's idle end", () => {
+  // 停止落在第 3 轮：标记与下一次发送缓冲里的第 3 轮空闲结束相遇，标记被用掉。
+  const marker = { sessionId: "huaanwork-weather", epoch: 3 };
+  const consumed = consumeBufferedStaleEnds(
+    [marker],
+    [{ event: "session/end", sessionId: "huaanwork-weather" }],
+    () => 3,
+  );
+  assert.deepEqual(consumed.stale, []);
+  assert.deepEqual(consumed.clearedSessionIds, ["huaanwork-weather"]);
+  // 第 4 轮自己的空闲结束不能再被残留标记吞掉。
+  assert.deepEqual(consumeStaleIdle(consumed.stale, { sessionId: "huaanwork-weather" }, 4), {
+    drop: false,
+    stale: [],
+  });
+});
+
 test("releasing a cancel returns only that session's held ends", () => {
   const held = [
     { sessionId: "huaanwork-weather", cancelled: true },

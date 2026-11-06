@@ -51,7 +51,7 @@ export type TurnScheduler = {
   }): AdmitAutomationResult
   release(sessionId: string): void
   cancelQueuedItem(queueItemId: string): void
-  /** 删除会话时收掉它的全部等待项,并把该会话在途启动标记为取消;只动队列,不碰任何活动写者。返回取消条数。 */
+  /** 删除会话时收掉它的全部等待项,并把该会话在途启动标记为取消;只动队列,不碰任何活动写者。返回移除的等待项条数,在途启动只标记、不计入。 */
   cancelQueuedItemsForSession(sessionId: string): number
   /** 出队后、启动完成前(取消标记置真)是否已被取消;供 `sendToAgent` 的准入判据。 */
   isStartCancelled(queueItemId: string): boolean
