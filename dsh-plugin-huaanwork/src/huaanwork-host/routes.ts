@@ -1234,7 +1234,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         recordSkip: false,
       })
       if (admitted.kind === 'skip') {
-        return { queued: false, waiting: true, runId, workspaceRoot: ctx.workspaceRoot.current }
+        // 跳过原因随应答透传:界面按 root-busy / cap-full 给不同文案。
+        return { queued: false, waiting: true, reason: admitted.reason, runId, workspaceRoot: ctx.workspaceRoot.current }
       }
       void enqueueAutomation(automation, { trigger: 'manual', runId, root: admitted.root })
       return { queued: true, runId, workspaceRoot: ctx.workspaceRoot.current }

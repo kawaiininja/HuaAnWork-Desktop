@@ -18,6 +18,7 @@ import {
   resetRouteToolState,
 } from '../../src/huaanwork-guardrails/route-tool-plugin.ts'
 import {
+  releaseSessionRuntime,
   sendToAgent,
   sessionAnswerApproval,
   sessionAnswerInput,
@@ -86,7 +87,28 @@ function makeDeferred<T = void>() {
   return { promise, resolve }
 }
 
-/** 手动 idle:每次 `whenIdle()` 登记一个回调,可对同一次登记触发多次以模拟迟到的重复通知。 */
+/**
+ * 生产侧 `createReleaseOnce` 的幂等语义:同一准入的释放器多次调用只生效一次。
+ * `snapshot` 在释放回调内同步取一次值:生产代码先还原临时绑定再让出名额,
+ * 这里用它钉住「还原发生在 release 之前」。
+ */
+function idempotentRelease(snapshot?: () => unknown) {
+  const calls: string[] = []
+  const snapshots: unknown[] = []
+  let released = false
+  return {
+    calls,
+    snapshots,
+    release: () => {
+      if (released) return
+      released = true
+      snapshots.push(snapshot?.())
+      calls.push('release')
+    },
+  }
+}
+
+/** 手动 idle:每次 `whenIdle()` 登记一个回调,可对同一次触发多次以模拟迟到的重复通知。 */
 function manualIdle() {
   const pending: (() => void)[] = []
   return {
@@ -166,6 +188,73 @@ function fakeAgentsRegistry() {
     },
   }
   return { ctx, agents, calls }
+}
+
+/** catalog 目录:一个 `kind: 'agent'` 条目 + 固定人设(与既有 @agent 用例同一形状)。 */
+function legacyCatalogDirectory(): { host: AgentsHost; restore: () => void } {
+  const emptyDirectory = {
+    list: () => ({ items: [] }),
+    refresh: async () => ({ items: [] }),
+    get: async () => undefined,
+    setEnabled: () => undefined,
+    addEndpoint: () => ({ ok: false as const, fieldErrors: [] }),
+    removeEndpoint: () => undefined,
+    snapshotForRuntime: () => ({ items: [] }),
+  }
+  const host = {
+    ...emptyDirectory,
+    list: () => ({
+      items: [
+        {
+          name: 'legacy-assistant',
+          source: 'catalog',
+          kind: 'agent',
+          description: '旧目录智能体',
+          version: '1.0.0',
+          permissions: [],
+          enabled: true,
+        },
+      ],
+    }),
+    get: async () => ({ persona: '你是旧目录助手' }),
+  } as unknown as AgentsHost
+  setAgentsDirectory(host)
+  return { host, restore: () => setAgentsDirectory(emptyDirectory as never) }
+}
+
+function legacyLiveAgent(
+  sessionId: string,
+  whenIdle?: () => Promise<void>,
+): ListedAgent & { followup: (message: unknown) => void } {
+  return {
+    id: sessionId,
+    session: { id: sessionId },
+    followup: () => undefined,
+    whenIdle: whenIdle ?? (async () => undefined),
+  }
+}
+
+function legacyRunContext(options: {
+  sessionId: string
+  live: ListedAgent & { followup: (message: unknown) => void }
+  registry: SubagentRunRegistry
+  startActivation: (spec: { childId?: string; signal?: AbortSignal }) => Promise<SubagentActivationHandle>
+}): SessionRuntimeContext {
+  return {
+    huaanworkTurnScheduler: idleScheduler(),
+    huaanworkSessionModels: new Map(),
+    huaanworkSessionRoots: new Map(),
+    agents: {
+      get: (id: string) => (id === options.sessionId ? options.live : undefined),
+      list: () => [options.live],
+    },
+    subagents: { startActivation: options.startActivation },
+    huaanworkSubagentRuns: options.registry,
+  } as unknown as SessionRuntimeContext
+}
+
+function newRegistry(): SubagentRunRegistry {
+  return createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
 }
 
 let tmpRoot: string | undefined
@@ -474,73 +563,6 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
  */
 describe('legacy @agent 运行链接线', () => {
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-
-  /** catalog 目录:一个 `kind: 'agent'` 条目 + 固定人设(与既有 @agent 用例同一形状)。 */
-  function legacyCatalogDirectory(): { host: AgentsHost; restore: () => void } {
-    const emptyDirectory = {
-      list: () => ({ items: [] }),
-      refresh: async () => ({ items: [] }),
-      get: async () => undefined,
-      setEnabled: () => undefined,
-      addEndpoint: () => ({ ok: false as const, fieldErrors: [] }),
-      removeEndpoint: () => undefined,
-      snapshotForRuntime: () => ({ items: [] }),
-    }
-    const host = {
-      ...emptyDirectory,
-      list: () => ({
-        items: [
-          {
-            name: 'legacy-assistant',
-            source: 'catalog',
-            kind: 'agent',
-            description: '旧目录智能体',
-            version: '1.0.0',
-            permissions: [],
-            enabled: true,
-          },
-        ],
-      }),
-      get: async () => ({ persona: '你是旧目录助手' }),
-    } as unknown as AgentsHost
-    setAgentsDirectory(host)
-    return { host, restore: () => setAgentsDirectory(emptyDirectory as never) }
-  }
-
-  function legacyLiveAgent(
-    sessionId: string,
-    whenIdle?: () => Promise<void>,
-  ): ListedAgent & { followup: (message: unknown) => void } {
-    return {
-      id: sessionId,
-      session: { id: sessionId },
-      followup: () => undefined,
-      whenIdle: whenIdle ?? (async () => undefined),
-    }
-  }
-
-  function legacyRunContext(options: {
-    sessionId: string
-    live: ListedAgent & { followup: (message: unknown) => void }
-    registry: SubagentRunRegistry
-    startActivation: (spec: { childId?: string; signal?: AbortSignal }) => Promise<SubagentActivationHandle>
-  }): SessionRuntimeContext {
-    return {
-      huaanworkTurnScheduler: idleScheduler(),
-      huaanworkSessionModels: new Map(),
-      huaanworkSessionRoots: new Map(),
-      agents: {
-        get: (id: string) => (id === options.sessionId ? options.live : undefined),
-        list: () => [options.live],
-      },
-      subagents: { startActivation: options.startActivation },
-      huaanworkSubagentRuns: options.registry,
-    } as unknown as SessionRuntimeContext
-  }
-
-  function newRegistry(): SubagentRunRegistry {
-    return createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
-  }
 
   /**
    * 等 run 出现。send 路径先做真实 settings 文件 I/O 才进 dispatchAt(评审 F-9),
@@ -3120,5 +3142,411 @@ describe('session.send 调度器接线', () => {
     idleB.resolve()
     await vi.waitFor(() => expect(h.scheduler.activeTurnCount()).toBe(0))
     expect(h.releaseCalls).toContain('b')
+  })
+
+  // —— 准入绑定时点(Important-1)与取消复查(Minor-2) ——
+
+  test('an @ turn exposes the admitted model and root while it dispatches', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root)
+    const project = makeProject(root, 'project-a')
+    bindProjects(root, [{ projectId: 'pa', projectRoot: project, sessionId: 's1' }])
+    h.addAgent('s1')
+    const { restore } = legacyCatalogDirectory()
+    let modelAtActivation: string | undefined
+    let rootAtActivation: string | undefined
+    h.ctx.huaanworkSubagentRuns = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
+    h.ctx.subagents = {
+      startActivation: async () => {
+        modelAtActivation = h.models.get('s1')
+        rootAtActivation = h.roots.get('s1')
+        return { childId: 'legacy-child', result: Promise.resolve({ ok: true }), dispose: async () => undefined }
+      },
+    } as never
+    try {
+      const sent = await h.send({
+        text: '@legacy-assistant 整理本周进展',
+        sessionId: 's1',
+        tabId: 'tab-a',
+        modelId: 'm2',
+      })
+      expect(sent).toMatchObject({ started: true })
+      // 包运行时与子代理在 dispatchAt 内读这两张表:准入值必须已经可见。
+      expect(modelAtActivation).toBe('m2')
+      expect(rootAtActivation).toBe(resolve(project))
+    } finally {
+      restore()
+    }
+  })
+
+  test('a model switch on an @ turn reaches the subagent activation', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root)
+    const project = makeProject(root, 'project-a')
+    bindProjects(root, [{ projectId: 'pa', projectRoot: project, sessionId: 's1' }])
+    h.addAgent('s1')
+    // 上一轮绑定 m1:本轮改选 m2 时,子代理不得再复制到旧模型。
+    h.models.set('s1', 'm1')
+    h.roots.set('s1', resolve(project))
+    const { restore } = legacyCatalogDirectory()
+    let modelAtActivation: string | undefined
+    h.ctx.huaanworkSubagentRuns = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
+    h.ctx.subagents = {
+      startActivation: async () => {
+        modelAtActivation = h.models.get('s1')
+        return { childId: 'legacy-child', result: Promise.resolve({ ok: true }), dispose: async () => undefined }
+      },
+    } as never
+    try {
+      await h.send({
+        text: '@legacy-assistant 整理本周进展',
+        sessionId: 's1',
+        tabId: 'tab-a',
+        modelId: 'm2',
+      })
+      expect(modelAtActivation).toBe('m2')
+    } finally {
+      restore()
+    }
+  })
+
+  test('a send whose followup throws restores the previous model and keeps the registered root', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root)
+    const project = makeProject(root, 'project-a')
+    bindProjects(root, [{ projectId: 'pa', projectRoot: project, sessionId: 's1' }])
+    h.addAgent('s1')
+    h.models.set('s1', 'm1')
+    h.roots.set('s1', resolve(project))
+    h.ctx.agents!.get!('s1')!.followup = () => {
+      throw new Error('父会话已结束')
+    }
+    await expect(h.send({ text: 'work', sessionId: 's1', tabId: 'tab-a', modelId: 'm2' }))
+      .rejects.toThrow('父会话已结束')
+    expect(h.models.get('s1')).toBe('m1')
+    expect(h.roots.get('s1')).toBe(resolve(project))
+  })
+
+  test('a send whose followup throws removes the provisional entries when no live agent is bound', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root)
+    const channelId = sessionIdFor(h.routeCtx.workspaceRoot.current)
+    // 默认频道会话:resolvable 的 agent 不是以该 sessionId 登记的,findAgentBySession 看不到它。
+    h.addAgent('huaanwork')
+    h.ctx.agents!.get!('huaanwork')!.followup = () => {
+      throw new Error('父会话已结束')
+    }
+    const releases = idempotentRelease()
+    await expect(
+      sendToAgent(h.ctx, h.routeCtx, { text: 'work' }, {
+        root: resolve(neutralWorkspaceRoot(root)),
+        modelId: 'm2',
+        release: releases.release,
+      }),
+    ).rejects.toThrow('父会话已结束')
+    expect(h.models.has(channelId)).toBe(false)
+    expect(h.roots.has(channelId)).toBe(false)
+    expect(releases.calls).toEqual(['release'])
+  })
+
+  test('a followup that removes or replaces the bindings is not undone by the restore path', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root)
+    const channelId = sessionIdFor(h.routeCtx.workspaceRoot.current)
+    // 默认频道会话:resolvable 的 agent 不是以该 sessionId 登记的,findAgentBySession 看不到它,
+    // 根分支的 live-agent 守卫放行,只有所有权守卫能挡住删除。
+    h.addAgent('huaanwork')
+    h.models.set(channelId, 'm1')
+    // 模拟 `session.remove` 落在临时写入之后、followup 抛错之前:同一个 stub 同时清掉模型
+    // 并把根换成别人的值。还原只允许撤回本回合自己写下的绑定。
+    h.ctx.agents!.get!('huaanwork')!.followup = () => {
+      h.models.delete(channelId)
+      h.roots.set(channelId, '/replaced-by-another-writer')
+      throw new Error('父会话已结束')
+    }
+    const releases = idempotentRelease()
+    await expect(
+      sendToAgent(h.ctx, h.routeCtx, { text: 'work' }, {
+        root: resolve(neutralWorkspaceRoot(root)),
+        modelId: 'm2',
+        release: releases.release,
+      }),
+    ).rejects.toThrow('父会话已结束')
+    // 旧实现会把发送前的 m1 写回去(复活已删除会话的模型),并删掉别人的根。
+    expect(h.models.has(channelId)).toBe(false)
+    expect(h.roots.get(channelId)).toBe('/replaced-by-another-writer')
+    expect(releases.calls).toEqual(['release'])
+  })
+
+  test('an @ dispatch whose activation start throws removes the provisional entries', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root)
+    const channelId = sessionIdFor(h.routeCtx.workspaceRoot.current)
+    h.addAgent('huaanwork')
+    const { restore } = legacyCatalogDirectory()
+    h.ctx.huaanworkSubagentRuns = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined })
+    h.ctx.subagents = {
+      startActivation: async () => {
+        throw new Error('子代理启动失败')
+      },
+    } as never
+    const releases = idempotentRelease()
+    try {
+      await expect(
+        sendToAgent(h.ctx, h.routeCtx, { text: '@legacy-assistant 整理本周进展' }, {
+          root: resolve(neutralWorkspaceRoot(root)),
+          modelId: 'm2',
+          release: releases.release,
+        }),
+      ).rejects.toThrow('子代理启动失败')
+      // 没有 followup、也没有要等的 afterIdle:临时写入的两张表都撤回。
+      expect(h.models.has(channelId)).toBe(false)
+      expect(h.roots.has(channelId)).toBe(false)
+      expect(releases.calls).toEqual(['release'])
+    } finally {
+      restore()
+    }
+  })
+
+  test('a live session rejects an admission root that differs from its registered root', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const projectA = makeProject(root, 'project-a')
+    const projectB = makeProject(root, 'project-b')
+    const sessionId = freshSessionIdFor(projectA)
+    const live = legacyLiveAgent(sessionId)
+    const followups: unknown[] = []
+    live.followup = (message) => followups.push(message)
+    const ctx = legacyRunContext({
+      sessionId,
+      live,
+      registry: newRegistry(),
+      startActivation: async () => {
+        throw new Error('不应启动 activation')
+      },
+    })
+    ctx.huaanworkSessionRoots!.set(sessionId, resolve(projectA))
+    const releases = idempotentRelease()
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '继续', sessionId }, {
+        root: resolve(projectB),
+        modelId: 'm1',
+        release: releases.release,
+      }),
+    ).rejects.toThrow(/其他工作区/)
+    expect(followups).toEqual([])
+    expect(ctx.huaanworkSessionRoots!.get(sessionId)).toBe(resolve(projectA))
+    expect(releases.calls).toEqual(['release'])
+  })
+
+  test('session.send keeps the registered root when the task binding moved to another project', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 1 })
+    const projectA = makeProject(root, 'project-a')
+    const projectC = makeProject(root, 'project-c')
+    // 任务此刻已改绑到 projectC,但会话日志的 cwd 与已登记根都还在 projectA。
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: projectA, sessionId: 'a' },
+      { projectId: 'pc', projectRoot: projectC, sessionId: 's1' },
+    ])
+    writePersistedSession(h.routeCtx.dshHome, 's1', projectA)
+    h.roots.set('s1', resolve(projectA))
+    const idleA = makeDeferred()
+    h.addAgent('a', () => idleA.promise)
+
+    await h.send({ text: 'active', sessionId: 'a', tabId: 'tab-a', modelId: 'm1' })
+    const queued = await h.send({ text: 'queued', sessionId: 's1', tabId: 'tab-s1', modelId: 'm1' })
+    expect(queued).toMatchObject({ waiting: true, started: false })
+
+    idleA.resolve()
+    await vi.waitFor(() => expect(h.followupsBySession.get('s1')).toEqual(['queued']))
+    // 出队仍用登记根 resume:重新推导会得到 projectC,与持久化 cwd 冲突而被拒绝。
+    const resumed = h.createCalls.find((call) => call.sessionId === 's1')
+    expect(resumed?.rootAtCreate).toBe(resolve(projectA))
+    expect(h.roots.get('s1')).toBe(resolve(projectA))
+    expect(h.queueEvents()).toContainEqual({
+      event: 'session/queue-start',
+      sessionId: 's1',
+      tabId: 'tab-s1',
+      queueItemId: expect.any(String),
+    })
+  })
+
+  test('a queued cancellation during the header read stops before resume and restores the bindings', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const project = makeProject(root, 'project-a')
+    writePersistedSession(routeCtx.dshHome, 's1', project)
+    const { ctx, calls } = fakeAgentsRegistry()
+    // 第一次是 sendToAgent 入口检查;header 读取之后的新检查才看到取消。
+    const cancelled = vi.fn().mockReturnValueOnce(false).mockReturnValue(true)
+    // 释放回调里同步快照两张表:还原必须已经发生,不能等到名额让出之后。
+    const releases = idempotentRelease(() => [
+      ctx.huaanworkSessionModels!.get('s1'),
+      ctx.huaanworkSessionRoots!.get('s1'),
+    ])
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '继续', sessionId: 's1' }, {
+        root: resolve(project),
+        modelId: 'm1',
+        release: releases.release,
+        cancelled,
+      }),
+    ).rejects.toThrow(/已取消/)
+    expect(calls).toEqual([])
+    expect(ctx.huaanworkSessionModels!.has('s1')).toBe(false)
+    expect(ctx.huaanworkSessionRoots!.has('s1')).toBe(false)
+    expect(releases.calls).toEqual(['release'])
+    expect(releases.snapshots).toEqual([[undefined, undefined]])
+  })
+
+  test('a cancelled first send keeps the provisional root once resume produced a live agent', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const project = makeProject(root, 'project-a')
+    writePersistedSession(routeCtx.dshHome, 's1', project)
+    const { ctx, agents, calls } = fakeAgentsRegistry()
+    // 入口、header 之后、写根之前的检查都放行;取消落在 resume 已经建出 live agent
+    // 之后的检查上。根是本次准入临时写下的(没有预置条目),但 create/resume 已用它
+    // 建出 agent,所以不得撤回(设计 §5.1.1)——这条与「预置根保持有效」是两个分支。
+    const cancelled = vi.fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true)
+    const releases = idempotentRelease()
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '继续', sessionId: 's1' }, {
+        root: resolve(project),
+        modelId: 'm1',
+        release: releases.release,
+        cancelled,
+      }),
+    ).rejects.toThrow(/已取消/)
+    expect(cancelled).toHaveBeenCalledTimes(4)
+    expect(calls.map((call) => call.method)).toEqual(['resume'])
+    expect(agents.has('s1')).toBe(true)
+    expect(ctx.huaanworkSessionRoots!.get('s1')).toBe(resolve(project))
+    // 模型没有 live agent 这一层保护:临时写入的本次模型仍然撤回。
+    expect(ctx.huaanworkSessionModels!.has('s1')).toBe(false)
+    expect(releases.calls).toEqual(['release'])
+  })
+
+  test('an @ HTTP tool that fails before creating a live agent restores the provisional bindings and detaches before release', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const projectA = makeProject(root, 'project-a')
+    const projectB = makeProject(root, 'project-b')
+    // 持久化 cwd 在 projectB,与本次准入根 projectA 不一致:ensureChannelAgent 在 resume 前拒绝,没有建出 live agent。
+    writePersistedSession(routeCtx.dshHome, 's1', projectB)
+    const { ctx, calls } = fakeAgentsRegistry()
+    const maps = emptyAttachments()
+    ctx.huaanworkAttachments = maps
+    const emptyDirectory = {
+      list: () => ({ items: [] }),
+      refresh: async () => ({ items: [] }),
+      get: async () => undefined,
+      setEnabled: () => undefined,
+      addEndpoint: () => ({ ok: false as const, fieldErrors: [] }),
+      removeEndpoint: () => undefined,
+      snapshotForRuntime: () => ({ items: [] }),
+    }
+    setAgentsDirectory({
+      ...emptyDirectory,
+      list: () => ({
+        items: [
+          {
+            name: 'tool',
+            source: 'local',
+            kind: 'tool',
+            entrypointKind: 'http',
+            description: '查询',
+            version: '1',
+            permissions: [],
+            enabled: true,
+          },
+        ],
+      }),
+    })
+    let deferred = false
+    const releases = idempotentRelease(() => ({
+      model: ctx.huaanworkSessionModels!.get('s1'),
+      root: ctx.huaanworkSessionRoots!.get('s1'),
+      toolAttached: maps.sessionHostTools.get('s1')?.has('tool') === true,
+    }))
+    try {
+      await expect(
+        sendToAgent(ctx, routeCtx, { text: '@tool 查询', sessionId: 's1' }, {
+          root: resolve(projectA),
+          modelId: 'm2',
+          release: releases.release,
+          deferRelease: () => {
+            deferred = true
+          },
+        }),
+      ).rejects.toThrow(/其他工作区/)
+      expect(calls).toEqual([])
+      expect(deferred).toBe(true)
+      // 没有建出 live agent:sendToAgent 退出时两张表已撤回本次临时写入。
+      expect(ctx.huaanworkSessionModels!.has('s1')).toBe(false)
+      expect(ctx.huaanworkSessionRoots!.has('s1')).toBe(false)
+      await vi.waitFor(() => expect(releases.calls).toEqual(['release']))
+      // 释放名额前 afterIdle 已卸载工具,且两张表都没有残留本次临时写入。
+      expect(releases.snapshots).toEqual([
+        { model: undefined, root: undefined, toolAttached: false },
+      ])
+    } finally {
+      setAgentsDirectory(emptyDirectory as never)
+    }
+  })
+
+  test('a session without a live agent rejects an admission root that differs from its registered root without overwriting it', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const projectA = makeProject(root, 'project-a')
+    const projectB = makeProject(root, 'project-b')
+    const { ctx, agents, calls } = fakeAgentsRegistry()
+    ctx.huaanworkSessionRoots!.set('s1', resolve(projectA))
+    const releases = idempotentRelease()
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '继续', sessionId: 's1' }, {
+        root: resolve(projectB),
+        modelId: 'm1',
+        release: releases.release,
+      }),
+    ).rejects.toThrow(/其他工作区/)
+    expect(calls).toEqual([])
+    expect(agents.has('s1')).toBe(false)
+    expect(ctx.huaanworkSessionRoots!.get('s1')).toBe(resolve(projectA))
+    expect(ctx.huaanworkSessionModels!.has('s1')).toBe(false)
+    expect(releases.calls).toEqual(['release'])
+  })
+
+  test('an immediate session.send whose session is removed during the header read stops before resume and releases the slot', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root)
+    const project = makeProject(root, 'project-a')
+    bindProjects(root, [{ projectId: 'pa', projectRoot: project, sessionId: 's1' }])
+    writePersistedSession(h.routeCtx.dshHome, 's1', project)
+    // 准入返回 kind: 'start' 后 sendToAgent 同步登记临时绑定并进入 ensureChannelAgent 的
+    // findSessionHeader(磁盘 I/O 挂起);此时触发 releaseSessionRuntime 模拟并发删除。
+    const baseAdmit = h.scheduler.admitUserTurn.bind(h.scheduler)
+    h.scheduler.admitUserTurn = (input) => {
+      const admitted = baseAdmit(input)
+      queueMicrotask(() => {
+        releaseSessionRuntime(h.ctx, 's1')
+      })
+      return admitted
+    }
+
+    await expect(
+      h.send({ text: '继续', sessionId: 's1', tabId: 'tab-s1', modelId: 'm1' }),
+    ).rejects.toThrow(/已取消/)
+    expect(h.createCalls).toEqual([])
+    expect(h.followupsBySession.get('s1') ?? []).toEqual([])
+    expect(h.roots.has('s1')).toBe(false)
+    expect(h.models.has('s1')).toBe(false)
+    expect(h.scheduler.activeTurnCount()).toBe(0)
+    expect(h.releaseCalls).toEqual(['s1'])
   })
 })

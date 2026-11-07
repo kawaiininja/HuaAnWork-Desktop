@@ -257,8 +257,11 @@ test("a turn that ran a tool and names no file or command still needs a human lo
 });
 
 test("a session directory still checks the file when no project is open", () => {
-  assert.equal(outcomeWorkspace(null, "/w"), "/w");
-  assert.equal(outcomeWorkspace("/project", "/w"), "/project");
+  // 标签不属于任何项目、前台也没有项目:唯一可用的根是会话自己的目录。
+  assert.equal(
+    outcomeWorkspace({ sessionCwd: "/w", tabProjectId: null, foregroundWorkspace: null, foregroundProjectId: null }),
+    "/w",
+  );
   assert.deepEqual(
     turnOutcomeNotes(
       turnChecks([
@@ -268,6 +271,68 @@ test("a session directory still checks the file when no project is open", () => 
       [{ path: "/w/notes", children: [{ path: "/w/notes/a.md" }] }],
     ),
     ["已完成：自动核对 1 项均通过"],
+  );
+});
+
+test("a background turn checks its own root, never the project the user is viewing", () => {
+  // 后台回合在项目 A 里结束、前台看项目 B：会话 cwd 属于 A，核对不能跑去 B 的树里找文件。
+  assert.equal(
+    outcomeWorkspace({
+      sessionCwd: "/w",
+      tabProjectId: "p-a",
+      foregroundWorkspace: "/project",
+      foregroundProjectId: "p-b",
+    }),
+    "/w",
+  );
+  // 没有会话 cwd 时用标签所属项目根，同样优先于前台。
+  assert.equal(
+    outcomeWorkspace({
+      projectRoot: "/proj-a",
+      tabProjectId: "p-a",
+      foregroundWorkspace: "/proj-b",
+      foregroundProjectId: "p-b",
+    }),
+    "/proj-a",
+  );
+});
+
+test("an unrelated foreground project is never borrowed as the turn's root", () => {
+  // 中立标签（不属于任何项目）在前台打开着项目：根未知，不能扫前台的树。
+  assert.equal(
+    outcomeWorkspace({ tabProjectId: null, foregroundWorkspace: "/proj-b", foregroundProjectId: "p-b" }),
+    "",
+  );
+  // 标签属于项目 A、前台是项目 B 且两边都拿不到自己的根：仍然不借用。
+  assert.equal(
+    outcomeWorkspace({ tabProjectId: "p-a", foregroundWorkspace: "/proj-b", foregroundProjectId: "p-b" }),
+    "",
+  );
+});
+
+test("the foreground root is used only when tab and foreground share a context", () => {
+  // 两边都是中立上下文：前缀是中立根，用它是安全的。
+  assert.equal(
+    outcomeWorkspace({ tabProjectId: null, foregroundWorkspace: "/neutral", foregroundProjectId: null }),
+    "/neutral",
+  );
+  // 同一个项目、标签自己拿不到项目根：前台根就是该项目的根。
+  assert.equal(
+    outcomeWorkspace({ tabProjectId: "p-a", foregroundWorkspace: "/proj-a", foregroundProjectId: "p-a" }),
+    "/proj-a",
+  );
+  // 什么都没有时是未知根。
+  assert.equal(outcomeWorkspace({ tabProjectId: null }), "");
+});
+
+test("the turn's own root is trimmed and falls through blank values", () => {
+  assert.equal(outcomeWorkspace({ sessionCwd: "  /w  ", tabProjectId: "p-a" }), "/w");
+  // 只有空白的 cwd 不算根，退回标签的项目根。
+  assert.equal(outcomeWorkspace({ sessionCwd: "   ", projectRoot: "/proj-a", tabProjectId: "p-a" }), "/proj-a");
+  // 两边都只有空白：不做树核对。
+  assert.equal(
+    outcomeWorkspace({ sessionCwd: "  ", projectRoot: " ", tabProjectId: "p-a", foregroundWorkspace: "  " }),
+    "",
   );
 });
 

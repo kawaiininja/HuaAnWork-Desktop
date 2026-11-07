@@ -635,3 +635,42 @@ git status --short   # 改动面 = §13.4 基线 + 本波次 6 个允许文件�
 - `corepack yarn check` exit 0。日志 `/tmp/concurrent-followup-root-check.log`；HuaAnWork 汇总 `276 passed | 4 skipped (280)` 文件、`3725 passed | 14 skipped (3739)` 用例，`verify:host` 35/35，其余下游检查也通过。
 - 随后 `corepack yarn test` exit 0。日志 `/tmp/concurrent-followup-root-test.log`；HuaAnWork 同为 3725 passed / 14 skipped / 0 failed，其余 workspace 汇总 fail 0。
 - 上述日志为临时文件，以本节文本为持久记录。未执行 CI、Windows/Linux 真机或打包；未提交、未推送。
+
+## 17. 2026-11-07 评审修复波次门禁（含 2026-11-06 评审 Important-1/2、Minor-1/2/3）
+
+本节记录 `docs/superpowers/plans/2026-11-06-concurrent-project-turns-code-review.md` 修复波次（Task 1–4 + 最终整体审查收口）完成后的门禁复跑，**不改写 §16 的历史计数**。
+
+- 命令：`corepack yarn workspace dsh-plugin-huaanwork test`；退出码 `0`。汇总 `Test Files 277 passed | 4 skipped (281)`、`Tests 3784 passed | 14 skipped (3798)`、0 failed。对比基线 `1 failed | 3781 passed | 14 skipped (3796)`：唯一失败是 `test-port-mapping.spec.ts` 指向 `automations-host.spec.ts:662` 的空行，证据行重映射后清零；执行总数 +2、通过数 +3 是新增的 live-agent 根保留回归、最终整体审查的绑定所有权回归，加上该失败转绿。
+- 命令：`corepack yarn workspace dsh-plugin-huaanwork typecheck`；退出码 `0`，无输出。
+- 命令：`corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-host/test-port-mapping.spec.ts`；退出码 `0`，`Test Files 1 passed (1)`、`Tests 1 passed (1)`。
+- 命令：`BASE_SHA=$(git rev-parse HEAD) corepack yarn check`；退出码 `0`（最终工作树重跑，覆盖插件 `build` / `typecheck` / `test` 与全仓 verify 链；插件汇总同上）。`BASE_SHA` 设为 HEAD 是因为本轮改动未提交，默认的 `merge-base(origin/master, HEAD)..HEAD` 仍会读到提交历史里已存在的 `plan-review.md` 末尾空行（`10b1e35f01` 引入，工作树已修正）；`git diff --check` 对工作树退出 `0`。
+
+已修复项（每条一行）：
+
+- **Important-1**（`sendToAgent` 在 `dispatchAt` 之后才写模型/根表）：模型与根改为 `dispatchAt` 之前临时写入、`followup` 受理后保持、未启动且没有 `afterIdle` 清理时还原；已登记的根不被新准入改写，live agent 与登记根不一致时在 `followup` 之前按未启动失败。回归在 `tests/huaanwork-host/sessions.spec.ts`（准入绑定时点、还原、live-root 不匹配，以及本轮新增 `a cancelled first send keeps the provisional root once resume produced a live agent`）。
+- **Important-2**（交付物核对优先扫前台根）：`outcomeWorkspace` 改为会话 `cwd` → 标签项目根 → 仅当标签与前台同上下文才用前台根；回归 `tests/client-huaanwork/outcomeCheck.spec.ts` 33 例。
+- **Minor-1**（未真正开始的回合不回滚模型选择）：`started:false`、排队期 `session/queue-fail`、`cancelWaiting` 与 `send()` 的 `catch` 都经 `restoreModelPick` 回滚发送前的选择，且只在当前选择仍等于本次送出的 id 时生效；回归 `tests/client-huaanwork/appWiring.spec.ts` 60 例。
+- **Minor-2**（`ensureChannelAgent` 与 `session.remove` 的窄竞态）：在 header 读取之后、写根与 `create` / `resume` 之前补一次 `cancelled` 复查；回归 `tests/huaanwork-host/sessions.spec.ts` 的排队取消用例（该用例本轮同时钉住「还原先于 release」）。
+- **Minor-3**（手动运行跳过不区分 `root-busy` 与 `cap-full`）：`automation.run` 的跳过应答透传 `reason`，界面按两种原因给不同文案；回归 `tests/huaanwork-host/automations-host.spec.ts`（同根跳过断言 `reason: 'root-busy'`）、`tests/client-huaanwork/automations-runs-delete.spec.ts` 与 `tests/huaanwork-host/route-contract.spec.ts` 的可选键白名单。
+- 同波次 Task 4（测试与文档加固）：`tests/huaanwork-host/test-port-mapping.ts` 重映射 18 条证据行（`sessions.spec.ts` 4 条、`automations-host.spec.ts` 14 条）；`src/huaanwork-host/automations-host.ts` 的模型表注释订正为「dispatch 前临时写入、受理后保持」；计划文档按临时绑定 / 未启动还原 / 登记根复用 / `recordSkip` / 手动运行模型回滚订正。
+- 最终整体审查收口（Minor）：未启动还原增加「只撤销本轮自己写入的值」所有权守卫 —— 模型条目在还原时已被删除或改成别的值则不动，根条目在删除前还要求值等于本轮写入的 `admission.root`；新增回归 `a followup that removes or replaces the bindings is not undone by the restore path`（`tests/huaanwork-host/sessions.spec.ts`）。计划文档的“发送前已有模型键”措辞限定到还原路径，规格 §5.2.1 同步该所有权限定。
+
+历史命名注记：本文更早的历史小节（如 §3 条款对照表与 §17 之前各行）可能仍使用改名前的测试名 `automation binds its startup model after followup`，该用例的当前标题是 `automation binds its startup model before dispatch and confirms it at followup`（同一条用例，仅标题变了）。
+
+未执行项：本轮**没有**运行 CI、Windows/macOS 真机或打包；§16.4 的全仓门禁结论只属那一轮，本节的 `check` 结论按上面的 `BASE_SHA=HEAD` 口径记录。未提交、未推送。
+
+## 18. 2026-11-07 Grok 复核残余项修复门禁（§A.2 与 §A.3 第 1–3 条）
+
+本节记录 `docs/superpowers/plans/2026-11-06-concurrent-project-turns-code-review.md` §A（Grok 复核）中列出的 1 条残余项（§A.2）与 3 条 Minor（§A.3 第 1–3 条）按优先级逐条修复后的门禁复跑，**不改写 §17 的历史计数**。
+
+- 命令：`corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/sessions.spec.ts tests/huaanwork-host/turn-scheduler.spec.ts tests/huaanwork-host/test-port-mapping.spec.ts tests/client-huaanwork/appWiring.spec.ts`；退出码 `0`，`Test Files 4 passed (4)`、`Tests 168 passed (168)`。
+- 命令：`corepack yarn workspace dsh-plugin-huaanwork test`；退出码 `0`，汇总 `Test Files 277 passed | 4 skipped (281)`、`Tests 3788 passed | 14 skipped (3802)`、0 failed（较 §17 的 3784 passed +4 条新增回归用例）。
+- 命令：`corepack yarn workspace dsh-plugin-huaanwork typecheck`；退出码 `0`，无输出。
+- 命令：`git diff --check`；退出码 `0`，无输出。
+
+已修复项（按优先级）：
+
+- **优先级 1 — Grok §A.2**（`@` HTTP/MCP 在 live agent 出现前失败时不还原临时根/模型）：`sendToAgent` 的 `restoreProvisionalBindings` 改为幂等；当 `!followupAccepted && afterIdle !== undefined` 时，若 `findAgentBySession(ctx, sessionId) === undefined`，在 `admission?.deferRelease?.()` 之前立即调用 `restoreProvisionalBindings()`，并在 `cleanup` 的 `finally` 中于 `releaseOnce?.()` 之前兜底调用 `if (!followupAccepted) restoreProvisionalBindings?.()`，确保卸载工具钩子（`afterIdle`）照常跑完、且在释放写者名额前已还原临时写入的根与模型。规格 §5.1.1 / §5.2.1 与实施计划同步更新为「`followup` 未受理且没有留下仍需等待 `afterIdle` 收尾的存活 `agent` 时还原」。新增回归 `an @ HTTP tool that fails before creating a live agent restores the provisional bindings and detaches before release`（`tests/huaanwork-host/sessions.spec.ts:3434-3500`）。
+- **优先级 2 — Grok §A.3 #1**（无 live agent 时 `ensureChannelAgent` 仍可能用不同 `admissionRoot` 覆盖已登记根）：`ensureChannelAgent` 抽出 `assertMatchesRegisteredRoot()`，在入口（`findAgentBySession` 之前）以及异步读取 header/project/task 之后、`roots?.set(sessionId, root)` 之前均校验 `ctx.huaanworkSessionRoots?.get(sessionId)`，若已存在且与 `admissionRoot` 不一致则立即抛错拒绝，不覆盖已登记根。规格 §5.1.1 与实施计划同步更新。新增回归 `a session without a live agent rejects an admission root that differs from its registered root without overwriting it`（`tests/huaanwork-host/sessions.spec.ts:3502-3523`）。
+- **优先级 3 — Grok §A.3 #2**（立即开始的 `session.send` 未向 `sendToAgent` 传入 `cancelled` 回调）：`sessions.ts` 新增 `directStarts` 集合与 `cancelDirectStarts`，在 `releaseSessionRuntime`（`session.remove`）与 `cancelAgent`（`session.cancel`）中同步标记取消，并在 `sessionSend` 的 `admitted.kind === 'start'` 分支向 `sendToAgent` 传入 `cancelled: () => directStart.cancelled`，使 header 扫描期间并发删除或取消会话能在 `create` / `resume` 之前中止并释放名额。新增回归 `an immediate session.send whose session is removed during the header read stops before resume and releases the slot`（`tests/huaanwork-host/sessions.spec.ts:3525-3551`）。
+- **优先级 4 — Grok §A.3 #3**（同标签多条排队发送时，较早一条失败或取消会清掉后续排队项仍需使用的模型选择或丢失队列前基准）：`App.tsx` 新增 `QueuedModelOwner` 与 `restoreQueuedModelPick`，`rollbackQueuedModelPick` 在 `clearQueueItem` 前同步将当前项的 `previousModelPick` 交接给同标签后续紧邻且 `previousModelPick === owner.modelId` 的排队项，且只要同标签后续仍有携带 `modelId` 的排队项就保留 `modelPickByTab[tabId]` 不回退，并为 `setModelPickByTab` 提供独立克隆快照以保证同批多次回滚与 React StrictMode 下的纯度与幂等性。新增回归 `rolling back an earlier queued send keeps a later queued send's pick and hands off the pre-queue baseline`（覆盖同模型空基准、同模型非空基准、异模型 `m1 -> m2` 交接回滚、交替模型 `m1 -> m2 -> m1` 尾项取消回退四种情形，`tests/client-huaanwork/appWiring.spec.ts:845-930`）。

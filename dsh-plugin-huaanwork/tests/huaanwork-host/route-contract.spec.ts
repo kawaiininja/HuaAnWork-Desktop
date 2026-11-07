@@ -19,8 +19,9 @@ export const OPTIONAL_KEYS_WHITELIST: Record<string, string[]> = {
   'project.open': ['restarting'],
   'plugin.add': ['restarting'],
   'plugin.remove': ['restarting'],
-  // 手动触发被准入跳过时只多这一个键(queued:false + waiting:true);成功启动不含 waiting。
-  'automation.run': ['waiting'],
+  // 手动触发被准入跳过时只多这两个键(queued:false + waiting:true + reason);
+  // 成功启动不含 waiting 与 reason。
+  'automation.run': ['waiting', 'reason'],
   'auth.status': ['username'],
   'auth.register': ['username'],
   'auth.login': ['username'],

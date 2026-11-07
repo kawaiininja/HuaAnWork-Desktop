@@ -271,7 +271,8 @@ async function runAgentTurn(
   const body = [...(mergedPrefix ? ['上次成功运行的产出（截断至 4 KB）：', mergedPrefix] : []), automation.prompt ?? ''].join('\n')
   const missed = coalescedCount ?? 0
   const prompt = `<automation-fire name="${escapeXmlAttr(automation.name)}" trigger="${trigger}" missed="${missed}">\n${body}\n</automation-fire>`
-  // 根表在 create/resume 与沙箱读取之前登记;模型表由 sendToAgent 在受理后写入。
+  // 根表在 create/resume 与沙箱读取之前登记;模型表由 sendToAgent 在 dispatch 前临时写入、
+  // 受理后保持(未启动则还原)。自动化宿主自己不预写模型表。
   const root = pathResolve(admission.root)
   ctx.huaanworkSessionRoots?.set(sessionId, root)
   automationCollector.set(sessionId, { runId, text: '' })

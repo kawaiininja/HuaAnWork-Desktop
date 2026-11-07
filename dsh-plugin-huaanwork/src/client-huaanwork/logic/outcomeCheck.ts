@@ -180,11 +180,27 @@ export function turnChecks(items: readonly TurnItem[], activeUserId?: number): T
   return { requiredFiles: unique(files), requiredCommands: extractRequiredCommands(userText), toolResults, didWork };
 }
 
-/** 打开了项目就核对该目录；否则用会话自己的工作目录。两者都没有才算没读到工作区。 */
-export function outcomeWorkspace(workspace: string | null | undefined, sessionCwd: string | null | undefined): string {
-  if (typeof workspace === "string" && workspace.length > 0) return workspace;
-  if (typeof sessionCwd === "string" && sessionCwd.length > 0) return sessionCwd;
-  return "";
+function trimmedText(value: string | null | undefined): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * 回合结束核对该扫哪个工作区根：先认回合自己的根（会话 cwd，其次是标签所属项目的根）。
+ * 只有标签与前台处于同一上下文（两边都不属于项目，或属于同一个项目）才借用前台根；
+ * 其余情况返回空串，表示根未知——宁可不核对，也不去无关的前台项目里找本回合的文件。
+ */
+export function outcomeWorkspace(input: {
+  sessionCwd?: string | null;
+  projectRoot?: string | null;
+  tabProjectId: string | null;
+  foregroundWorkspace?: string | null;
+  foregroundProjectId?: string | null;
+}): string {
+  const own = trimmedText(input.sessionCwd) || trimmedText(input.projectRoot);
+  if (own) return own;
+  // 同一上下文：两边都没有项目，或都指向同一个项目。前台没有项目时标签有项目也算不同上下文。
+  const sameContext = (input.foregroundProjectId ?? null) === input.tabProjectId;
+  return sameContext ? trimmedText(input.foregroundWorkspace) : "";
 }
 
 /** 列表里已有目录就用列表；刚铸出、列表还没跟上时用铸造时记下的目录。 */

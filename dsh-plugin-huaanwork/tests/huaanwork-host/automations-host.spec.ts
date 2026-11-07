@@ -390,7 +390,7 @@ test('a second manual run on one root waits until the first releases', { timeout
 
   // 同根第二条不再抛「后台自动化任务运行中」,而是等待:不 followup、没有在途条目。
   const skipped = await handler('automation.run')(body({ id: second.id }), h.routeCtx)
-  expect(skipped).toMatchObject({ queued: false, waiting: true, workspaceRoot: h.neutral })
+  expect(skipped).toMatchObject({ queued: false, waiting: true, reason: 'root-busy', workspaceRoot: h.neutral })
   expect((skipped as { runId: string }).runId).toEqual(expect.any(String))
   await new Promise((resolve) => setTimeout(resolve, 60))
   expect(h.followups).toHaveLength(1)
@@ -427,6 +427,7 @@ test('agents on different roots overlap while the same root keeps one writer', {
   expect(await handler('automation.run')(body({ id: sameRoot.id }), h.routeCtx)).toMatchObject({
     queued: false,
     waiting: true,
+    reason: 'root-busy',
   })
   await new Promise((resolve) => setTimeout(resolve, 60))
   expect(h.followups).toHaveLength(1)
@@ -446,6 +447,7 @@ test('agents on different roots overlap while the same root keeps one writer', {
   expect(await handler('automation.run')(body({ id: blocked.id }), h.routeCtx)).toMatchObject({
     queued: false,
     waiting: true,
+    reason: 'root-busy',
   })
   await new Promise((resolve) => setTimeout(resolve, 80))
   expect(existsSync(mark)).toBe(false)
@@ -464,7 +466,7 @@ test('agents on different roots overlap while the same root keeps one writer', {
   await waitRunEnd(h.events, elsewhere.id)
 })
 
-test('automation binds its startup model after followup', { timeout: 15_000 }, async () => {
+test('automation binds its startup model before dispatch and confirms it at followup', { timeout: 15_000 }, async () => {
   const h = makeHarness()
   h.state.mode = 'hang'
   const project = await createProject(h.profileDir, { root: h.neutral, name: '模型' })
@@ -499,10 +501,10 @@ test('automation binds its startup model after followup', { timeout: 15_000 }, a
   const accepted = (await handler('automation.run')(body({ id: automation.id }), h.routeCtx)) as { runId: string }
   await poll(() => h.followups.length === 1)
   const sessionId = `huaanwork-auto-${automation.id}-${accepted.runId}`
-  // followup 入口:模型键尚未写入,根键已是目标项目。
-  expect(modelAtFollowup).toBeUndefined()
+  // followup 入口:模型键已在 dispatch 前写入,根键已是目标项目。
+  expect(modelAtFollowup).toBe('model-a')
   expect(rootAtFollowup).toBe(resolve(h.neutral))
-  // 受理后由 sendToAgent 按启动时快照写入;之后改全局当前模型不影响本次运行。
+  // 受理后保留 dispatch 前写入的启动时快照;之后改全局当前模型不影响本次运行。
   expect(h.runtime.huaanworkSessionModels?.get(sessionId)).toBe('model-a')
   writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ active_model_id: 'model-b' }))
   expect(h.runtime.huaanworkSessionModels?.get(sessionId)).toBe('model-a')
@@ -575,6 +577,7 @@ test('the script slot pool caps at two across roots and one root keeps one write
   expect(await handler('automation.run')(body({ id: sameRoot.id }), h.routeCtx)).toMatchObject({
     queued: false,
     waiting: true,
+    reason: 'root-busy',
   })
   expect(inFlightRunsOf(sameRoot.id)).toEqual([])
 
@@ -959,8 +962,38 @@ test('a busy foreground turn skips its own root but not another project root', {
 
   // 同根才跳过。
   const skipped = await handler('automation.run')(body({ id: sameRootTask.id }), h.routeCtx)
-  expect(skipped).toMatchObject({ queued: false, waiting: true, workspaceRoot: h.neutral })
+  expect(skipped).toMatchObject({ queued: false, waiting: true, reason: 'root-busy', workspaceRoot: h.neutral })
   expect(inFlightRunsOf(sameRootTask.id)).toEqual([])
+})
+
+test('a manual run on another root reports cap-full when the global cap is full', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.maxConcurrentTurns = 1
+  const other = mkdtempSync(join(tmpdir(), 'hw-auto-cap-'))
+  dirs.push(other)
+  const otherProject = await createProject(h.profileDir, { root: other, name: '别的项目' })
+  const elsewhereTask = await agentTask(h.profileDir, { projectId: otherProject.id })
+  const userSession = sessionIdFor(h.neutral)
+  h.installUserAgent(userSession, () => new Promise<void>(() => undefined))
+  await sessionSend(h.runtime, h.routeCtx, {
+    text: '占住名额',
+    sessionId: userSession,
+    tabId: 'tab-user',
+    modelId: 'default',
+  })
+
+  // 目标根没有写者,但全局名额已被前台回合占满:跳过原因必须是 cap-full。
+  const skipped = await handler('automation.run')(body({ id: elsewhereTask.id }), h.routeCtx)
+  expect(skipped).toMatchObject({
+    queued: false,
+    waiting: true,
+    reason: 'cap-full',
+    workspaceRoot: h.neutral,
+  })
+  expect((skipped as { runId: string }).runId).toEqual(expect.any(String))
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  expect(h.followups).toHaveLength(0)
+  expect(inFlightRunsOf(elsewhereTask.id)).toEqual([])
 })
 
 test('interval run keeps the nextRunAt computed at start', async () => {
@@ -1652,7 +1685,7 @@ test('a skipped manual run leaves the run list and schedule alone', { timeout: 1
 
   for (const automation of [manual, once]) {
     const skipped = await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
-    expect(skipped).toMatchObject({ queued: false, waiting: true })
+    expect(skipped).toMatchObject({ queued: false, waiting: true, reason: 'root-busy' })
     expect((skipped as { runId: string }).runId).toEqual(expect.any(String))
   }
   await new Promise((resolve) => setTimeout(resolve, 80))
@@ -1686,7 +1719,7 @@ test('a skipped manual run does not poison the scheduled missed-grace exemption'
   })
 
   const skipped = await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
-  expect(skipped).toMatchObject({ queued: false, waiting: true, workspaceRoot: h.neutral })
+  expect(skipped).toMatchObject({ queued: false, waiting: true, reason: 'root-busy', workspaceRoot: h.neutral })
   // admissionSkips 只服务定时调度的 missed 豁免:手动跳过不得登记。
   expect(h.scheduler.isAdmissionSkipped(automation.id)).toBe(false)
 })
@@ -1703,7 +1736,7 @@ test('a second run of a started task is admission-skipped and stop cancels the s
   const started = (await handler('automation.run')(body({ id: automation.id }), h.routeCtx)) as { runId: string }
   await poll(() => h.followups.length === 1 && inFlightRuns.get(started.runId)?.phase === 'started')
   const skipped = await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
-  expect(skipped).toMatchObject({ queued: false, waiting: true })
+  expect(skipped).toMatchObject({ queued: false, waiting: true, reason: 'root-busy' })
   expect(inFlightRunsOf(automation.id)).toHaveLength(1)
 
   await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: true })

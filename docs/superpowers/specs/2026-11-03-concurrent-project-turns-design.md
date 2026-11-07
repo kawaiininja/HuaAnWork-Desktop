@@ -188,9 +188,9 @@ fetch 应答与 WebSocket 事件不保证先后。客户端的每标签发送护
 3. **持久化 `cwd` 回退**：若会话日志 `header.cwd` 位于且仅位于一个 `projects.json` 项目根之内，可写根取该项目根。这一步兜住任务绑定丢失但 `cwd` 仍有效的历史会话，避免它们被错误收进中立工作区后拒绝恢复。
 4. **中立回落**：以上均未命中，返回 `neutralWorkspaceRoot(profileDir)`。
 
-推导结果在 `sendToAgent` 准入时计算一次，随队列项保存，执行时不再重新推导。`ensureChannelAgent` 接收准入时冻结的根作为参数；没有准入的 `sessionResume` 由 `ensureChannelAgent` 在内部按同一顺序推导。两者都不读 `routeCtx.workspaceRoot.current`。
+推导结果在 `sendToAgent` 准入时计算一次，随队列项保存，执行时不再重新推导。`session.send` 准入时若 `ctx.huaanworkSessionRoots` 已登记该会话的根，就直接沿用登记根，不再重新推导：已登记的根是该会话的写者锁与沙箱根，任务改绑或项目登记变化都不移动它。`ensureChannelAgent` 接收准入时冻结的根作为参数；只要 `ctx.huaanworkSessionRoots` 已登记该会话的根，准入根与登记根不一致时就在 `create` / `resume` / `followup` 之前按未启动失败，不覆盖已登记根，也不把写者锁与沙箱根拆开。没有准入的 `sessionResume` 由 `ensureChannelAgent` 在内部按同一顺序推导。两者都不读 `routeCtx.workspaceRoot.current`。
 
-`ctx.huaanworkSessionRoots` 的登记不随模型表推迟：它必须在 `agents.create` / `agents.resume` 之前写入，供会话创建和沙箱夹紧使用；项目级 Agent 自动化在 `sendToAgent` 前写入已知目标根。没调用 `followup` 的早退不改变这条根规则——已经为创建/恢复登记的真实根保持有效，不删除、不改回前台；自动化的根键与模型键在回合真正 settle 时删除，drain 到期只停止等待、不删除工具仍可读到的绑定，`sessionRemove` 与 `subagent/end` 按各自规则清理。
+`ctx.huaanworkSessionRoots` 的登记不随模型表推迟：它必须在 `agents.create` / `agents.resume` 之前写入，供会话创建和沙箱夹紧使用；项目级 Agent 自动化在 `sendToAgent` 前写入已知目标根。`sendToAgent` 在 `dispatchAt` 之前为尚无根条目的会话临时登记本轮准入的根（只为缺席的会话写，已登记的根不覆盖），让包运行时与 `subagent/start` 在启动前就读到本轮根；若本轮未受理 `followup` 且尚未建出 live agent（含 `@` HTTP/MCP 已返回卸工具的 `afterIdle`、但随后的 `resolveAgent` 在建出 live agent 前失败的情形），则在释放名额前撤回这条临时登记；`create` / `resume` 已用该根建出 live agent 时保留。没调用 `followup` 的早退不改变这条根规则——已经为创建/恢复登记的真实根保持有效，不删除、不改回前台；自动化的根键与模型键在回合真正 settle 时删除，drain 到期只停止等待、不删除工具仍可读到的绑定，`sessionRemove` 与 `subagent/end` 按各自规则清理。
 
 会话日志的 `header.cwd` 在创建时写入推导根，恢复时校验 `cwd` 在该根之内（`isInside` 检查，非严格相等）。
 
@@ -204,7 +204,7 @@ fetch 应答与 WebSocket 事件不保证先后。客户端的每标签发送护
 
 上游 `GenerateOptions` 已包含 `sessionId` 字段（`deepseek-harness/packages/llm/llm/src/types.ts:564`），且 agent-loop 在 `buildRequest` 中写入 `sessionId: this.session.id`（`agent.ts:700`）。`PreparedLlmCall.stream` 与 `LlmRuntime.stream` 均透传完整 `GenerateOptions`，因此 `HuaAnWorkAdapter.stream(options)` 可直接读取 `options.sessionId`，无需修改上游。
 
-宿主侧新增 `ctx.huaanworkSessionModels: Map<string, string>`（`sessionId → modelId`），在 `followup` 受理后写入，会话结束或删除时清除。没调用 `followup` 就返回时不写入，也不删除这次发送之前已经存在的模型键。这个受理后规则只适用于模型表；可写根的登记时点见 §5.1.1，不把根表一并推迟。会调用模型的自动化在 `runAgentTurn` 开始时保存当时的 `activeModelId` 并显式传给 `sendToAgent`，由后者在受理后绑定，不预写模型表，也不读取之后的全局选择。`HuaAnWorkAdapter` 的 `apply(ctx)` 读取该 Map 引用。
+宿主侧新增 `ctx.huaanworkSessionModels: Map<string, string>`（`sessionId → modelId`）。`sendToAgent` 在 `dispatchAt` 之前先把本轮准入的 `modelId` 临时写入：子代理在 `dispatchAt` 内的 `subagent/start` 同步复制父会话模型，晚到 `followup` 才写会让子代理继承上一轮的模型。`followup` 受理后保留这条绑定；未受理 `followup` 时在释放名额前还原为发送前的值（发送前没有该键就删除；若已建出 live agent 且有 `afterIdle` 在跑则等 `afterIdle` 收尾后再还原），还原只撤销本轮自己写入的值——条目已被删除或改成别的值时不动。会话结束或删除时清除。这个临时写入与还原由 `sendToAgent` 拥有，只适用于模型表；可写根的登记时点见 §5.1.1，不把根表一并推迟。会调用模型的自动化在 `runAgentTurn` 开始时保存当时的 `activeModelId` 并显式传给 `sendToAgent`，不自己预写模型表，也不读取之后的全局选择；临时的写入与还原同样只发生在 `sendToAgent` 内。`HuaAnWorkAdapter` 的 `apply(ctx)` 读取该 Map 引用。
 
 `stream` 中的读取顺序：
 

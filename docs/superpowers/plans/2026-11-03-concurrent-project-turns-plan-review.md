@@ -659,7 +659,3 @@
 1. 为 R8-M1 写明抛错路径的四条收口，不得用「排队和 `started: false` 已经保护执行态」代替 `catch` / `finally`。
 2. 增加 `a rejected send leaves the running turn stop latch`，并把它列入 Task 11 的条款表。断言覆盖闩锁、失败原因、终态仍落在 A，以及 pending 不残留。
 3. 上述修订落盘后再做一次只看 R8-M1 的复审。通过前仍不从 Task 1 开工。
-
-
-
-

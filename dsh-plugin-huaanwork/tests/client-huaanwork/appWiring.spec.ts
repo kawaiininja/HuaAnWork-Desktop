@@ -160,6 +160,36 @@ test("App skips plan-turn outcomes before it lists the workspace tree", () => {
   assert.ok(listTreeAt > checksAt, "the tree listing stays inside the required-files branch");
 });
 
+test("the outcome check scans the turn's own root, not whichever project is on screen", () => {
+  // 项目列表进入事件闭包：回合结束核对要按标签的 projectId 找项目根。
+  assert.match(APP_SOURCE, /const projectsRef = useRef<ProjectInfo\[\]>\(\[\]\);/);
+  assert.match(
+    APP_SOURCE,
+    /workspaceRef\.current = workspace;\s*sessionsRef\.current = sessions;\s*projectsRef\.current = projects;\s*\}, \[workspace, sessions, projects\]\);/,
+    "the project list is synced into the ref alongside workspace and sessions",
+  );
+  // 标签 ID 与它自己的 projectId 一起读出：核对不靠前台标签猜归属。
+  const itemsBody = functionBody("const readTurnItems = async", "const readTurn = async");
+  assert.match(itemsBody, /const tabId = outcomeTargetTab\(sessionId, chatTabsRef\.current, liveChatRef\.current\);/);
+  assert.match(itemsBody, /const projectId = chatTabsRef\.current\.find\(\(tab\) => tab\.id === tabId\)\?\.projectId \?\? null;/);
+  assert.match(itemsBody, /return \{ tabId, items, projectId \};/);
+
+  const body = functionBody("const readTurn = async (", "const appendTurnNotes = (");
+  assert.match(body, /const listedCwd = lookupSessionCwd\(sessionId, sessionsRef\.current, sessionCwdRef\.current\);/);
+  assert.match(
+    body,
+    /const projectRoot = turn\.projectId === null\s*\? undefined\s*: projectsRef\.current\.find\(\(project\) => project\.id === turn\.projectId\)\?\.root;/,
+    "the tab's own project root is looked up from the project list",
+  );
+  assert.match(
+    body,
+    /const root = outcomeWorkspace\(\{\s*sessionCwd: listedCwd,\s*projectRoot,\s*tabProjectId: turn\.projectId,\s*foregroundWorkspace: workspaceRef\.current,\s*foregroundProjectId: activeProjectIdRef\.current,\s*\}\);/,
+    "the root decision gets the turn's ids and the foreground only as a context-checked fallback",
+  );
+  // 根未知时 treeKnown 为 false：文件项如实记为未核对，不报「缺少文件」。
+  assert.match(body, /const treeKnown = checks\.requiredFiles\.length === 0 \|\| root\.length > 0;/);
+});
+
 type FoldableItem = {
   id: number;
   kind: "note" | "assistant" | "tool" | "attachment";
@@ -700,19 +730,42 @@ test("send records the id it actually sends before the RPC so the next send keep
   );
 });
 
-test("a rejected send drops the pick it recorded, unless the user already picked anew", () => {
+test("an unsent turn's pick is restored to the pre-send value, unless the user already picked anew", () => {
   const picks = { "work-2": "sent-model", "work-3": "other-model" };
-  const cleared = AppModule.clearSentModelPick(picks, "work-2", "sent-model");
-  assert.deepEqual(cleared, { "work-3": "other-model" }, "the failed send's own pick is rolled back");
-  assert.equal("work-2" in cleared, false);
+  const restored = AppModule.restoreModelPick(picks, "work-2", "sent-model", "previous-model");
+  assert.deepEqual(
+    restored,
+    { "work-2": "previous-model", "work-3": "other-model" },
+    "the unsent turn's own pick goes back to what the tab had before the send",
+  );
 
-  // 发送在飞期间用户换了选择：失败不能把新选择一起撤掉。
+  // 发送前没有选择：还原成「没有记录」，而不是留下这次送出的 id。
+  const deleted = AppModule.restoreModelPick(picks, "work-2", "sent-model", undefined);
+  assert.deepEqual(deleted, { "work-3": "other-model" }, "no previous pick means the record is dropped");
+  assert.equal("work-2" in deleted, false);
+  assert.deepEqual(
+    AppModule.restoreModelPick(picks, "work-2", "sent-model", ""),
+    { "work-3": "other-model" },
+    "an empty previous pick is treated as no pick",
+  );
+
+  // 发送前就是同一个 id：记录本来就对，不制造无意义的状态更新。
+  assert.equal(
+    AppModule.restoreModelPick(picks, "work-2", "sent-model", "sent-model"),
+    picks,
+    "restoring the same id changes nothing",
+  );
+  // 发送在飞期间用户换了选择：回滚不能把新选择一起撤掉。
   const newer = { "work-2": "newer-model" };
-  assert.equal(AppModule.clearSentModelPick(newer, "work-2", "sent-model"), newer, "a newer pick is preserved");
+  assert.equal(
+    AppModule.restoreModelPick(newer, "work-2", "sent-model", "previous-model"),
+    newer,
+    "a newer pick is preserved",
+  );
   // 没有可撤的 id 时原样返回同一个对象，不制造无意义的状态更新。
-  assert.equal(AppModule.clearSentModelPick(picks, "work-2", undefined), picks, "an undefined sent id rolls nothing back");
-  assert.equal(AppModule.clearSentModelPick(picks, "work-2", ""), picks, "an empty sent id rolls nothing back");
-  assert.equal(AppModule.clearSentModelPick(picks, "work-9", "sent-model"), picks, "another tab's pick is untouched");
+  assert.equal(AppModule.restoreModelPick(picks, "work-2", undefined, "previous-model"), picks, "an undefined sent id rolls nothing back");
+  assert.equal(AppModule.restoreModelPick(picks, "work-2", "", "previous-model"), picks, "an empty sent id rolls nothing back");
+  assert.equal(AppModule.restoreModelPick(picks, "work-9", "sent-model", "previous-model"), picks, "another tab's pick is untouched");
 });
 
 test("the send rejection path rolls the recorded pick back through the helper", () => {
@@ -723,8 +776,157 @@ test("the send rejection path rolls the recorded pick back through the helper", 
   assert.ok(catchAt > sendAt, "the session.send rejection path is still present");
   const catchBlock = body.slice(catchAt, body.indexOf("} finally {", catchAt));
   assert.match(catchBlock, /dropPending\(pending\)/);
-  // 失败路径必须经 helper 撤回本次送出 id 的记录；用户已换的新选择由 helper 保留。
-  assert.match(catchBlock, /setModelPickByTab\(\(prev\) => clearSentModelPick\(prev, chatId, modelId\)\)/);
+  // 失败路径必须经 helper 还原本次送出 id 的记录（发送前的选择，没有则删掉）；
+  // 用户已换的新选择由 helper 保留。
+  assert.match(
+    catchBlock,
+    /setModelPickByTab\(\(prev\) => restoreModelPick\(prev, chatId, modelId, previousModelPick\)\)/,
+  );
+});
+
+test("every non-starting send path rolls the implicit pick back, a started one keeps it", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
+  assert.ok(sendAt >= 0, "send still awaits the session.send response");
+  // 发送前的选择要在写入本次选择之前记下：回滚只能还原到那个值。
+  const previousAt = body.indexOf("const previousModelPick = modelPickByTab[chatId];");
+  const recordAt = body.indexOf("setModelPickByTab((prev) => (prev[chatId] === modelId ? prev : { ...prev, [chatId]: modelId }))");
+  assert.ok(previousAt >= 0, "send captures the tab's pick before the send");
+  assert.ok(previousAt < recordAt, "the pre-send pick is captured before this send's pick is recorded");
+
+  // started: false（没开始也没排队）也回滚，而不是只标 notStarted。
+  const notStartedAt = body.indexOf("} else if (!sent.started) {");
+  assert.ok(notStartedAt > sendAt, "the started:false branch is still present");
+  const notStartedEnd = body.indexOf("if (sendOpensTurn(sent)) {", notStartedAt);
+  // 结束锚点必须真实存在且在起点之后:门一旦被删/改名,切片会一路吃到 catch 或函数尾,
+  // 断言就可能靠别的分支通过。
+  assert.ok(
+    notStartedEnd > notStartedAt,
+    "the started:false branch still ends at the sendOpensTurn gate",
+  );
+  const notStartedBlock = body.slice(notStartedAt, notStartedEnd);
+  assert.match(
+    notStartedBlock,
+    /setModelPickByTab\(\(prev\) => restoreModelPick\(prev, chatId, modelId, previousModelPick\)\)/,
+    "a response that neither started nor queued the turn rolls its pick back",
+  );
+  // 排队中失败/取消走归属记录里的模型与发送前选择；归属记录本身也要带上这两项。
+  assert.match(
+    body,
+    /queueOwnersRef\.current\.set\(queueItemId, \{\s*tabId: chatId,\s*userId: userMsg\.id,\s*\.\.\.\(modelId \? \{ modelId \} : \{\}\),\s*\.\.\.\(previousModelPick \? \{ previousModelPick \} : \{\}\),\s*\}\)/,
+    "the queue owner carries the sent model and the pre-send pick",
+  );
+  assert.match(
+    APP_SOURCE,
+    /function rollbackQueuedModelPick\(queueItemId: string\): void \{\s*const owner = queueOwnersRef\.current\.get\(queueItemId\);\s*if \(!owner\) return;\s*const owners = new Map\(Array\.from\(queueOwnersRef\.current, \(\[id, entry\]\) => \[id, \{ \.\.\.entry \}\]\)\);\s*restoreQueuedModelPick\(\{\}, queueOwnersRef\.current, queueItemId\);\s*setModelPickByTab\(\(prev\) => restoreQueuedModelPick\(prev, owners, queueItemId\)\);\s*\}/,
+    "the queued rollback hands off synchronously on queueOwnersRef and restores through the queue-aware helper",
+  );
+
+  const failBody = functionBody("function failQueuedTurn(", "function discardBufferedStopEnds(");
+  const failRollbackAt = failBody.indexOf("rollbackQueuedModelPick(queueItemId)");
+  const failClearAt = failBody.indexOf("clearQueueItem(tabId, queueItemId, \"unstarted\")");
+  assert.ok(failRollbackAt >= 0, "a failed queue item rolls its pick back");
+  assert.ok(failRollbackAt < failClearAt, "the owner is read before clearQueueItem drops it");
+
+  const cancelBody = functionBody("async function cancelWaiting(", "async function stopTurn(");
+  const cancelRollbackAt = cancelBody.indexOf("rollbackQueuedModelPick(queueItemId)");
+  const cancelClearAt = cancelBody.indexOf("clearQueueItem(tabId, queueItemId, \"unstarted\")");
+  assert.ok(cancelRollbackAt >= 0, "cancelling a waiting message rolls its pick back");
+  assert.ok(cancelRollbackAt < cancelClearAt, "the owner is read before clearQueueItem drops it");
+
+  // 出队真正开始（queue-start）不回滚：宿主这时已经把模型写回任务。
+  assert.doesNotMatch(
+    functionBody("function beginQueuedTurn(", "function failQueuedTurn("),
+    /restoreModelPick|restoreQueuedModelPick/,
+    "a dequeued turn keeps the pick it was sent with",
+  );
+});
+
+test("rolling back an earlier queued send keeps a later queued send's pick and hands off the pre-queue baseline", () => {
+  // 1. 标签原本无选择（previousModelPick: undefined），连续排队 q1、q2（同为 m1）：
+  //    先取消/失败 q1 时保留 picks["work-2"] === "m1"，并把 undefined 基准交接给 q2；
+  //    随后 q2 也取消/失败时删掉 picks["work-2"]，恢复 q1 之前的空基准。
+  const ownersWithoutBaseline = new Map<string, AppModule.QueuedModelOwner>([
+    ["q1", { tabId: "work-2", userId: 1, modelId: "m1" }],
+    ["q2", { tabId: "work-2", userId: 2, modelId: "m1", previousModelPick: "m1" }],
+  ]);
+  const initialPicks = { "work-2": "m1", "work-3": "other-model" };
+  const afterQ1Cancelled = AppModule.restoreQueuedModelPick(initialPicks, ownersWithoutBaseline, "q1");
+  assert.equal(afterQ1Cancelled, initialPicks, "q2 is still queued with m1 so the tab pick stays m1");
+  assert.equal(afterQ1Cancelled["work-2"], "m1");
+  assert.equal(
+    ownersWithoutBaseline.get("q2")?.previousModelPick,
+    undefined,
+    "q1 hands its undefined pre-queue baseline off to q2",
+  );
+  assert.equal("previousModelPick" in (ownersWithoutBaseline.get("q2") ?? {}), false);
+
+  ownersWithoutBaseline.delete("q1");
+  const afterQ2Cancelled = AppModule.restoreQueuedModelPick(afterQ1Cancelled, ownersWithoutBaseline, "q2");
+  assert.deepEqual(
+    afterQ2Cancelled,
+    { "work-3": "other-model" },
+    "cancelling q2 afterwards drops work-2 back to the pre-q1 empty baseline",
+  );
+  assert.equal("work-2" in afterQ2Cancelled, false);
+
+  // 2. 标签原本已选 m0（previousModelPick: "m0"），连续排队 q1、q2（同为 m1）：
+  //    先取消/失败 q1 保留 "m1" 并把 "m0" 交接给 q2；随后取消/失败 q2 还原为 "m0"。
+  const ownersWithM0 = new Map<string, AppModule.QueuedModelOwner>([
+    ["q1", { tabId: "work-2", userId: 1, modelId: "m1", previousModelPick: "m0" }],
+    ["q2", { tabId: "work-2", userId: 2, modelId: "m1", previousModelPick: "m1" }],
+  ]);
+  const afterQ1WithM0 = AppModule.restoreQueuedModelPick(initialPicks, ownersWithM0, "q1");
+  assert.equal(afterQ1WithM0, initialPicks, "q2 still needs m1 while waiting");
+  assert.equal(
+    ownersWithM0.get("q2")?.previousModelPick,
+    "m0",
+    "q1 hands its m0 baseline off to q2",
+  );
+
+  ownersWithM0.delete("q1");
+  const afterQ2WithM0 = AppModule.restoreQueuedModelPick(afterQ1WithM0, ownersWithM0, "q2");
+  assert.deepEqual(
+    afterQ2WithM0,
+    { "work-2": "m0", "work-3": "other-model" },
+    "cancelling q2 afterwards restores the pre-q1 m0 baseline",
+  );
+
+  // 3. 不同模型排队（q1: m1/previous m0，q2: m2/previous m1）：
+  //    先取消/失败 q1 保留 m2 并把 m0 交接给 q2；随后取消/失败 q2 还原为 m0。
+  const ownersDifferentModels = new Map<string, AppModule.QueuedModelOwner>([
+    ["q1", { tabId: "work-2", userId: 1, modelId: "m1", previousModelPick: "m0" }],
+    ["q2", { tabId: "work-2", userId: 2, modelId: "m2", previousModelPick: "m1" }],
+  ]);
+  const picksWithM2 = { "work-2": "m2", "work-3": "other-model" };
+  const afterQ1Diff = AppModule.restoreQueuedModelPick(picksWithM2, ownersDifferentModels, "q1");
+  assert.equal(afterQ1Diff, picksWithM2, "q2 already switched the tab to m2 so cancelling q1 keeps m2");
+  assert.equal(
+    ownersDifferentModels.get("q2")?.previousModelPick,
+    "m0",
+    "q1 still hands its m0 baseline off to q2",
+  );
+
+  ownersDifferentModels.delete("q1");
+  const afterQ2Diff = AppModule.restoreQueuedModelPick(afterQ1Diff, ownersDifferentModels, "q2");
+  assert.deepEqual(
+    afterQ2Diff,
+    { "work-2": "m0", "work-3": "other-model" },
+    "cancelling q2 afterwards restores the pre-q1 m0 baseline",
+  );
+
+  // 4. 交替模型排队（q1: m1 -> q2: m2 -> q3: m1）：先取消末尾的 q3 时不能被更早的 q1 挡住，必须还原为 q2 的 m2。
+  const ownersAlternating = new Map<string, AppModule.QueuedModelOwner>([
+    ["q1", { tabId: "work-2", userId: 1, modelId: "m1", previousModelPick: "m0" }],
+    ["q2", { tabId: "work-2", userId: 2, modelId: "m2", previousModelPick: "m1" }],
+    ["q3", { tabId: "work-2", userId: 3, modelId: "m1", previousModelPick: "m2" }],
+  ]);
+  const afterQ3Cancelled = AppModule.restoreQueuedModelPick(initialPicks, ownersAlternating, "q3");
+  assert.deepEqual(
+    afterQ3Cancelled,
+    { "work-2": "m2", "work-3": "other-model" },
+    "cancelling the tail q3 restores q2's m2 even though an earlier q1 also used m1",
+  );
 });
 
 test("a started or queued send refreshes tasks so the host's task-model write-back lands", () => {
@@ -1031,7 +1233,10 @@ test("a queued response backfills the inserted user message", () => {
   const backfillAt = body.indexOf('item.kind === "user" && item.id === userMsg.id ? { ...item, queueItemId } : item');
   assert.ok(stateAt > sendAt, "the tab's run state comes from the response");
   assert.ok(backfillAt > stateAt, "the queue item id is written back onto the already inserted message");
-  assert.match(body, /queueOwnersRef\.current\.set\(queueItemId, \{ tabId: chatId, userId: userMsg\.id \}\)/);
+  assert.match(
+    body,
+    /queueOwnersRef\.current\.set\(queueItemId, \{\s*tabId: chatId,\s*userId: userMsg\.id,\s*\.\.\.\(modelId \? \{ modelId \} : \{\}\),\s*\.\.\.\(previousModelPick \? \{ previousModelPick \} : \{\}\),\s*\}\)/,
+  );
   // 宿主没启动也没有排队项：这条消息只标 notStarted，不写等待、不占回合。
   assert.match(body, /} else if \(!sent\.started\) \{/);
   assert.match(body, /item\.kind === "user" && item\.id === userMsg\.id \? \{ \.\.\.item, notStarted: true \} : item/);

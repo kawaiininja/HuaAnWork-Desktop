@@ -593,8 +593,9 @@ export default function App() {
   /**
    * 等待项与它挂的那条用户消息的对应关系。应答写回 `queueItemId` 与随后的重放
    * 在同一批同步更新里，`chatTabsRef` 这时还看不到新状态，故用这张表做权威索引。
+   * 记下本次送出的模型与发送前本标签的选择：排队项未真正开始（失败或取消）时用它回滚。
    */
-  const queueOwnersRef = useRef<Map<string, { tabId: string; userId: number }>>(new Map());
+  const queueOwnersRef = useRef<Map<string, QueuedModelOwner>>(new Map());
   /** 目标相位 + 每回合结论闸门；状态机本身在 logic/goalRound.ts，便于脱离界面单测。 */
   const goalTurnRef = useRef<GoalTurnState>(INITIAL_GOAL_TURN_STATE);
   /** 停止票据编号：跨标签唯一，用来区分先后两次取消。 */
@@ -684,6 +685,8 @@ export default function App() {
   /** 中立根（未归属项目的「任务」会话目录）。宿主没有只读查询，经 workspace.close 取到后缓存。 */
   const neutralRootRef = useRef<string | null>(null);
   const sessionsRef = useRef<SessionRow[]>([]);
+  /** 项目列表的稳定引用：回合结束核对要按标签的 projectId 找项目根，事件闭包读不到最新 state。 */
+  const projectsRef = useRef<ProjectInfo[]>([]);
   /** session.new 返回的目录。列表刷新晚于回合结束，核对先用这份。 */
   const sessionCwdRef = useRef(new Map<string, string>());
   function rememberMinted(minted: { sessionId?: string; cwd?: string }) {
@@ -825,6 +828,18 @@ export default function App() {
   }
 
   /**
+   * 排队项没有真正开始（出队失败或被用户取消）：把这次发送记下的标签模型选择还原成发送前的值。
+   * 必须在 `clearQueueItem` 之前调用——它一删归属记录，就找不到本次送出的模型与原来的选择了。
+   */
+  function rollbackQueuedModelPick(queueItemId: string): void {
+    const owner = queueOwnersRef.current.get(queueItemId);
+    if (!owner) return;
+    const owners = new Map(Array.from(queueOwnersRef.current, ([id, entry]) => [id, { ...entry }]));
+    restoreQueuedModelPick({}, queueOwnersRef.current, queueItemId);
+    setModelPickByTab((prev) => restoreQueuedModelPick(prev, owners, queueItemId));
+  }
+
+  /**
    * 排队项出队并真正开始：先定位它挂的用户消息，找不到就只收等待项、不碰该标签的执行态，
    * 否则标签会带着 `running` 却没有可结算的会话（`session/end` 再也命不中，标签永久转圈）。
    * 找得到时才走与直接应答相同的回合初始化。
@@ -846,6 +861,8 @@ export default function App() {
    */
   function failQueuedTurn(tabId: string, queueItemId: string, reason: string): void {
     writeTabRun(tabId, (state) => noteWaitingFailed(state, queueItemId));
+    // 这一条没有开始：发送时记下的模型选择跟着撤回（模型可能正是失败原因，例如已被删除）。
+    rollbackQueuedModelPick(queueItemId);
     clearQueueItem(tabId, queueItemId, "unstarted");
     if (lastAgentNoticeRef.current[tabId] === reason) {
       delete lastAgentNoticeRef.current[tabId];
@@ -1487,6 +1504,8 @@ export default function App() {
     const readTurnItems = async (sessionId?: string) => {
       const tabId = outcomeTargetTab(sessionId, chatTabsRef.current, liveChatRef.current);
       if (!tabId) return undefined;
+      // 核对要按标签自己的项目取根：后台回合结束时的前台项目可能是另一个。
+      const projectId = chatTabsRef.current.find((tab) => tab.id === tabId)?.projectId ?? null;
       // chatTabsRef 在提交后才同步，可能还看不到同一批事件里的 tool/end。
       // 函数式更新按队列顺序执行，拿到的 prev 已含这批事件；这里只读取，不改状态。
       const items = await new Promise<ChatItem[] | undefined>((resolve) => {
@@ -1496,10 +1515,10 @@ export default function App() {
         });
       });
       if (!items || !items.some((item) => item.kind === "user")) return undefined;
-      return { tabId, items };
+      return { tabId, items, projectId };
     };
     /** 读出本回合要核对的内容；只认用户对话标签，工作区树只在确有必核文件时列出。 */
-    const readTurn = async (sessionId?: string, pending?: { tabId: string; items: ChatItem[] }) => {
+    const readTurn = async (sessionId?: string, pending?: { tabId: string; items: ChatItem[]; projectId: string | null }) => {
       const turn = pending ?? await readTurnItems(sessionId);
       if (!turn) return undefined;
       const { tabId, items } = turn;
@@ -1508,7 +1527,17 @@ export default function App() {
       // 核对只读本回合那条用户消息：排在后面的排队消息还没开始，不能改文件/命令要求。
       const checks = turnChecks(contentItems(items), turnUserId);
       const listedCwd = lookupSessionCwd(sessionId, sessionsRef.current, sessionCwdRef.current);
-      const root = outcomeWorkspace(workspaceRef.current, listedCwd);
+      // 回合自己的根优先：先会话 cwd，再标签所属项目根；只有与前台同一上下文才借用前台根。
+      const projectRoot = turn.projectId === null
+        ? undefined
+        : projectsRef.current.find((project) => project.id === turn.projectId)?.root;
+      const root = outcomeWorkspace({
+        sessionCwd: listedCwd,
+        projectRoot,
+        tabProjectId: turn.projectId,
+        foregroundWorkspace: workspaceRef.current,
+        foregroundProjectId: activeProjectIdRef.current,
+      });
       let tree: TreeNode[] = [];
       const treeKnown = checks.requiredFiles.length === 0 || root.length > 0;
       if (checks.requiredFiles.length > 0 && root) {
@@ -2200,7 +2229,8 @@ export default function App() {
   useEffect(() => {
     workspaceRef.current = workspace;
     sessionsRef.current = sessions;
-  }, [workspace, sessions]);
+    projectsRef.current = projects;
+  }, [workspace, sessions, projects]);
 
   // 进入自动化页面时拉取数据（页面为跨项目全局视图，无需聚焦项目）
   useEffect(() => {
@@ -2671,6 +2701,8 @@ export default function App() {
         ? projectTasks.find((item) => item.id === sendingTab.taskId)
         : undefined;
       const modelId = resolveSendModelId(modelPickByTab, chatId, sendingTask?.modelId, activeModelId);
+      // 这次写入的选择要能撤回：先记下发送前本标签的选择，没有真正开始的应答按它还原。
+      const previousModelPick = modelPickByTab[chatId];
       // 本次实际送出的 id 记为本标签的选择（评审 P-1）：宿主在 followup 之后才把它写回任务。
       // 记录一旦存在，resolveSendModelId 就先取它，之后的全局模型变化和任务刷新都不会改变下一次
       // 发送的模型；只有 chip 的显式选择（selectTabModel）能覆盖这条记录。
@@ -2714,7 +2746,13 @@ export default function App() {
         if (sent.waiting && sent.queueItemId !== undefined) {
           // 等待文案挂在已经插入的同一条用户消息上，不是标签级另一份列表。
           const queueItemId = sent.queueItemId;
-          queueOwnersRef.current.set(queueItemId, { tabId: chatId, userId: userMsg.id });
+          // 归属记录带上本次送出的模型与发送前的选择：排队项没开始（失败/取消）时按它回滚。
+          queueOwnersRef.current.set(queueItemId, {
+            tabId: chatId,
+            userId: userMsg.id,
+            ...(modelId ? { modelId } : {}),
+            ...(previousModelPick ? { previousModelPick } : {}),
+          });
           setChatTabs((prev) => prev.map((tab) => (
             tab.id === chatId
               ? {
@@ -2727,6 +2765,8 @@ export default function App() {
           )));
         } else if (!sent.started) {
           // 宿主既没开始也没排队：这条消息不开启回合，也不参与最新用户消息的选择。
+          // 它也没让宿主记住本次模型：这次记下的选择撤回，别当成下一次发送的默认值。
+          setModelPickByTab((prev) => restoreModelPick(prev, chatId, modelId, previousModelPick));
           setChatTabs((prev) => prev.map((tab) => (
             tab.id === chatId
               ? {
@@ -2769,7 +2809,7 @@ export default function App() {
         dropPending(pending);
         // 失败不留下本次记下的选择：留在标签上就成了下一次发送的默认值（例如该模型
         // 刚被删除），会再失败一次直到用户重新选择。发送在飞期间用户换的选择保留。
-        setModelPickByTab((prev) => clearSentModelPick(prev, chatId, modelId));
+        setModelPickByTab((prev) => restoreModelPick(prev, chatId, modelId, previousModelPick));
         const note: ChatItem = { id: allocId(), kind: "note", text: error instanceof Error ? error.message : String(error) };
         setChatTabs((prev) =>
           prev.map((tab) =>
@@ -2805,6 +2845,8 @@ export default function App() {
     const tabId = queueItemTab(queueItemId);
     if (tabId === undefined) return;
     writeTabRun(tabId, (state) => noteWaitingCancelled(state, queueItemId));
+    // 这条消息不会开始了：发送时记下的模型选择还原，别让取消掉的那次发送决定下一次。
+    rollbackQueuedModelPick(queueItemId);
     clearQueueItem(tabId, queueItemId, "unstarted");
     try {
       await rpcCall("session.cancel", { queueItemId });
@@ -4267,25 +4309,79 @@ export function startUserItem<T extends { queueItemId?: string; notStarted?: boo
 }
 
 /**
- * 发送失败时撤回本次发送记下的标签模型选择。
+ * 撤回本次发送记下的标签模型选择，还原到发送前的值。
  *
- * 只撤与本次送出 id 相同的那条记录：发送在飞期间用户换了选择就保留新的，
- * 别让一条失败的发送覆盖用户的操作。
+ * 只动与本次送出 id 相同的那条记录：发送在飞期间用户换了选择就保留新的，
+ * 别让一条没开始的发送覆盖用户的操作。发送前本来没有选择时删掉这条记录。
  *
  * @param picks 当前按标签记录的发送选择
- * @param tabId 本次发送失败的标签
+ * @param tabId 本次发送所在的标签
  * @param sentId 本次实际送出的模型 id
- * @returns 去掉本条记录的新对象；没有可撤的记录时原样返回入参
+ * @param previous 发送前本标签的选择（可能为空）
+ * @returns 还原后的新对象；没有可还原的记录时原样返回入参
  */
-export function clearSentModelPick(
+export function restoreModelPick(
   picks: Readonly<Record<string, string>>,
   tabId: string,
   sentId: string | undefined,
+  previous: string | undefined,
 ): Readonly<Record<string, string>> {
   if (sentId === undefined || sentId.length === 0 || picks[tabId] !== sentId) return picks;
-  const next = { ...picks };
-  delete next[tabId];
-  return next;
+  if (previous === undefined || previous.length === 0) {
+    const next = { ...picks };
+    delete next[tabId];
+    return next;
+  }
+  // 发送前的选择就是这次送出的 id：记录本来就对，不制造无意义的状态更新。
+  if (previous === sentId) return picks;
+  return { ...picks, [tabId]: previous };
+}
+
+export interface QueuedModelOwner {
+  tabId: string;
+  userId: number;
+  modelId?: string;
+  previousModelPick?: string;
+}
+
+/**
+ * 排队项没有真正开始（出队失败或被取消）时回滚模型选择：
+ * 1. 若同标签后续紧邻排队项的 `previousModelPick` 继承自本条的 `modelId`，把本条的发送前基准交接给它；
+ * 2. 若同标签在本条之后仍有后续排队项携带模型，保留标签上的当前选择；
+ * 3. 否则走 `restoreModelPick` 还原到本条发送前的选择。
+ */
+export function restoreQueuedModelPick(
+  picks: Readonly<Record<string, string>>,
+  owners: ReadonlyMap<string, QueuedModelOwner>,
+  queueItemId: string,
+): Readonly<Record<string, string>> {
+  const owner = owners.get(queueItemId);
+  if (!owner) return picks;
+  let afterOwner = false;
+  let checkedNext = false;
+  let keepCurrentPick = false;
+  for (const [id, candidate] of owners) {
+    if (id === queueItemId) {
+      afterOwner = true;
+      continue;
+    }
+    if (!afterOwner || candidate.tabId !== owner.tabId) continue;
+    if (!checkedNext) {
+      checkedNext = true;
+      if (owner.modelId !== undefined && candidate.previousModelPick === owner.modelId) {
+        if (owner.previousModelPick) {
+          candidate.previousModelPick = owner.previousModelPick;
+        } else {
+          delete candidate.previousModelPick;
+        }
+      }
+    }
+    if (candidate.modelId !== undefined) {
+      keepCurrentPick = true;
+    }
+  }
+  if (keepCurrentPick) return picks;
+  return restoreModelPick(picks, owner.tabId, owner.modelId, owner.previousModelPick);
 }
 
 /** 本回合内的条目（工具行、审批卡、脚注）写在本回合的写入位置；没有排队消息时追加到末尾。 */

@@ -14,6 +14,8 @@
 
 **2026-11-04 Map 规则复审吸收：** 可写根与模型不再共用写入时点。根表在 create/resume 前登记，自动化在 `sendToAgent` 前登记；模型表只在 `followup` 受理后登记。自动化把启动时的 `activeModelId` 显式传给 `sendToAgent`，不再预写模型表。新增首建会话根与自动化启动模型两条回归。
 
+**2026-11-07 评审修复订正：** 上一段的「模型表只在 `followup` 受理后登记」已不成立。按 `docs/superpowers/plans/2026-11-06-concurrent-project-turns-code-review.md` 的 Important-1 与 Grok §A.2，模型表改由 `sendToAgent` 在 `dispatchAt` 之前临时写入本次准入的 `modelId`，`followup` 受理后保持；未受理 `followup` 时在释放名额前还原为发送前的值（原先没有键就删除；若已建出 live agent 且有 `afterIdle` 在跑则等 `afterIdle` 收尾后再还原）。根表在 `dispatchAt` 前为尚无条目的会话临时写入准入根，未受理 `followup` 且尚未建出 live agent 时一并撤回，已登记的根不随新准入改写、`session.send` 直接复用登记根。
+
 **2026-11-04 第七轮开放项吸收：** 排队和 `started:false` 不再清停止闩锁或重置进度；goal active 的中间结束不清 running，stale idle 与停止票据都读所属标签 epoch。`queueItemId` 在应答后写回已插入的用户消息。queue-fail 与既有 notice 去重，源码测试同时覆盖 send 与 queue-start，接口函数计数和 Architecture 应答表述同步订正。
 
 **2026-11-04 第八轮竞态吸收：** fetch 应答与 WebSocket 事件不保证先后。每次发送在 RPC 前建立 pending 关联，早到的 session/end、queue-start、queue-fail 先按本次发送缓冲；应答先写回 started/queueItemId，再初始化对应回合并按序重放。started:false 只丢弃本次缓冲，同标签上一回合的事件不得被一并延迟。
@@ -32,7 +34,7 @@
 - `max_concurrent_turns` 是整数。缺省、缺失、非整数、非有限数为 3；小于 1 生效为 1；大于 8 生效为 8。读取不改写文件。用户保存时写下生效值。
 - 同一可写根同时只有一个写者。子目录不另算一根。子代理不另占名额，沿用父会话的模型绑定。
 - `session.send` 的应答在「已开始」「已排队」或「未启动」时返回，不等待 `whenIdle`。返回体是 `{ queued: true, waiting: boolean, started: boolean, sessionId: string, queueItemId?: string }`。`waiting: true` 时 `started` 为 false。`waiting: false` 且 `started: true` 表示 `followup` 已受理。`waiting: false` 且 `started: false` 表示没有把回合交给 agent：创建取消和更新失败提示走这条，HTTP 正常返回，不抛错，不把标签标成发送失败。网络门禁、缺文本、缺 `tabId`、根不存在、模型不在列表中仍抛错。`whenIdle` 之后的 `release` 是应答之后的延续，并且必须接着消费 `drainQueue()`。`drainQueue` 在 `activeTurns >= max` 时不再取出。出队后的复检失败、出队后抛错、出队后 `started: false` 都要 `releaseAndDrain`，不能只 `release`。这三种都不发 `session/queue-start`。`session.cancel` 不立刻 `release`。`session.resume` 不走 `admitUserTurn`。
-- `huaanworkSessionRoots` 与 `huaanworkSessionModels` 不共用写入时点。根表在 `agents.create` / `agents.resume` 前登记；项目级 Agent 自动化在 `sendToAgent` 前登记，因为创建会话和沙箱夹紧都需要它。模型表只在 `followup` 受理后写入。没调用 `followup` 就返回时，不写模型表，也不删除这次发送之前已经存在的模型键。根表始终保存会话的真实可写根：本次已为创建/恢复登记的有效根不因无 `followup` 而删除或改回前台；自动化运行自己的两个键仍在其 `finally` 中清理，`sessionRemove` / `subagent/end` 按既有规则清理。
+- `huaanworkSessionRoots` 与 `huaanworkSessionModels` 不共用写入时点。根表在 `agents.create` / `agents.resume` 前登记；项目级 Agent 自动化在 `sendToAgent` 前登记，因为创建会话和沙箱夹紧都需要它。模型表由 `sendToAgent` 在 `dispatchAt` 之前临时写入本次准入的 `modelId`，`followup` 受理后保持；未受理 `followup` 时在释放名额前还原为发送前的值（原先没有键就删除；若已建出 live agent 且有 `afterIdle` 在跑则等 `afterIdle` 收尾后再还原），还原时不得把发送前已存在的模型键改成别的值。根表始终保存会话的真实可写根：`session.send` 直接复用已登记的根，新准入不改写它；本次已为创建/恢复登记的有效根不因无 `followup` 而删除或改回前台，尚未建出 live agent 就失败时撤回本轮临时根；自动化运行自己的两个键仍在其 `finally` 中清理，`sessionRemove` / `subagent/end` 按既有规则清理。已登记根的会话锁在它登记过的根上：准入根与登记根不一致时，在 `create` / `resume` / `followup` 之前按未启动失败（「该会话属于其他工作区」），且不覆盖已登记根。
 - 客户端只在直接应答 `started: true`，或收到 `session/queue-start` 时，才增加该标签的 epoch、发出 `turn-started`、把该标签 `running` 设为 true，并记下活动用户消息。排队应答和 `started: false` 不做这些事。`session/queue-fail` 只去掉对应等待项；仍在执行的上一回合保持 `running`。epoch 按标签 id 存放。一个标签排队或另一个标签开始回合，都不改变正在执行的标签的 epoch。`finishStop` 比较该标签自己的 epoch。
 - 排队和 `started: false` 还不得清除正在执行回合的 `userStopSessionRef`、`latchOwnerRef`、`stopping` 或既有进度。`goal/round` 只恢复事件所属标签的 `running`；目标相位仍为 `active` 的中间 `session/end` 不清该标签的 `running`，真正终局才清理。`consumeStaleIdle`、`stopTurn` 造票据、`settleStop` 与 `finishStop` 全部读取事件所属标签的 epoch，不拿另一标签的当前值判定旧结束。
 - fetch 应答与 WebSocket 事件不保证先后。每次 `send()` 在 RPC 前以 `tabId + 本地 userMsg.id` 建一条 pending 记录，保存已知 sessionId，但 pending 本身不开目标窗、不增加 epoch。未知 queueItemId 的 `session/queue-start` / `session/queue-fail` 若落在该标签的 pending 期间，按标签和到达顺序暂存；已能匹配其他等待消息的队列事件仍即时处理。直接 pending 且该标签没有正在执行的同会话回合时，匹配 sessionId 的早到 `session/end` 与 goal 事件也暂存；若上一回合仍在执行，它的事件必须照常即时处理，不能为了新发送而缓冲。应答回来后，先写回 started/queueItemId，再在 started:true 或重放 queue-start 的时点初始化回合，最后按原顺序重放本次事件；started:false 只丢弃本次缓冲。`agent/notice` 不缓冲，创建取消和更新失败仍即时展示。
@@ -40,7 +42,7 @@
 - 不向 `session.header` 写入 `writableRoot`。上游 `SessionStore.prepare` 只保留既有 header 字段，构造后 `deepFreeze`。可写根只放在 `ctx.huaanworkSessionRoots`。
 - 调度器不推导根、不读磁盘。`admitUserTurn` 的 `root` 由调用方先 `await writableRootForSession(...)` 得到。根路径不是现存目录时，该次不启动，标签显示原因，不入队。
 - `admitAutomation` 每次运行只调用一次。调度 tick 和 `automation.run` 是仅有的两个入口，二者不叠在同一次运行上。`enqueueAgentAutomation` / `enqueueScriptAutomation` 不再准入。脚本写者的键是 `` `script:${runId}` ``。
-- 模型绑定在回合真正开始时写入 `huaanworkSessionModels`，下一次准入覆盖，`sessionRemove` 时删除。不在 `whenIdle` 删除，避免回合刚结束的标题生成改读全局模型。子代理在 `subagent/start` 时复制父会话的模型 id 和可写根；`subagent/end` 只删除子会话这两个键。父会话删除前先快照后代 id，再级联删除后代键。解析时不读 `currentCallerSession()`。
+- 模型绑定的时点是「dispatch 前临时写入，受理后保持，未启动还原」：`sendToAgent` 在 `dispatchAt` 之前先写 `huaanworkSessionModels`，`followup` 受理后保留，未受理时在释放名额前还原为发送前的值（原先没有键就删除；若已建出 live agent 且有 `afterIdle` 在跑则等 `afterIdle` 收尾后再还原）。下一次准入覆盖，`sessionRemove` 时删除。不在 `whenIdle` 删除，避免回合刚结束的标题生成改读全局模型。子代理在 `subagent/start` 时复制父会话的模型 id 和可写根；`subagent/end` 只删除子会话这两个键。父会话删除前先快照后代 id，再级联删除后代键。解析时不读 `currentCallerSession()`。
 - `huaanworkSessionModels` 与 `huaanworkSessionRoots` 写在 Cordis `ctx` 上。赋值前必须进 `holders.ts` 的 module augmentation 和 `HUAANWORK_CONTEXT_PROPS`。route context、guardrails 与 sessions 读同一 Map 引用。未登记就赋值会在真实 Host 上抛 `cannot set property ... without provide`。
 - `admitAutomation` 成功时写入 `rootWriters`。`countsTowardCap` 只决定是否 `activeTurns += 1`。脚本成功也占根，不占并发名额。调度器对传入的 `root` 做 `path.resolve`，再作为写者、队列和释放的键。调度器仍不读盘、不 `stat`。
 - 每次成功准入在调用方创建一个 `releaseOnce`。同一回合的 idle 成功、idle 失败、followup 前抛错、尚未交接的 return，都只能调用这一个函数。它内部只调用一次 `release` + `drainQueue`。已经把执行权交给 `followup` 之后，只有该回合的 `whenIdle` 可以调用它。已经把执行权交给脚本子进程之后，只有该进程的 `close` 可以调用它。不要直接调用 `scheduler.release`。
@@ -207,7 +209,7 @@ export function createTurnScheduler(options: {
   createId?: () => string
 }): {
   admitUserTurn(input: { sessionId: string; tabId: string; text: string; modelId: string; root: string; skill?: string; at?: { name: string; clientMessageId?: string } }): AdmitUserResult
-  admitAutomation(input: { automationId: string; sessionId: string; root: string; runId?: string; countsTowardCap: boolean }): AdmitAutomationResult
+  admitAutomation(input: { automationId: string; sessionId: string; root: string; runId?: string; countsTowardCap: boolean; recordSkip?: boolean }): AdmitAutomationResult
   release(sessionId: string): void
   cancelQueuedItem(queueItemId: string): void
   clearAdmissionSkip(automationId: string): void
@@ -381,7 +383,7 @@ Expected: FAIL，模块不存在。
 
 `admitUserTurn` 与 `admitAutomation` 都先 `path.resolve(root)`。之后的写者键、队列项和返回值里的 `root` 用这个结果。不回调外部函数，不 `stat`。用户路径：模型不存在返回 `{ kind: 'error', reason: '模型不存在' }`，不入队。解析后的根已有写者，或 `activeTurnCount >= max` 时入队，并把本次的 `skill`、`at` 原样放进 `QueueItem`。否则写入 `rootWriters`（`kind: 'user'`）并 `activeTurns += 1`。`drainQueue` 返回的项仍带这两项。
 
-`admitAutomation`：解析后的根已有写者，返回 `{ kind: 'skip', reason: 'root-busy' }`。`countsTowardCap && activeTurns >= max` 返回 `{ kind: 'skip', reason: 'cap-full' }`。两种 skip 都 `admissionSkips.add(automationId)`，不写 `rootWriters`。成功时写入 `rootWriters`，记录 `sessionId` 与可选 `runId`。`countsTowardCap === true` 时 `kind` 为 `agent-automation` 且 `activeTurns += 1`；否则 `kind` 为 `script-automation` 且不增加 `activeTurns`。成功时 `admissionSkips.delete(automationId)`。不要在本函数里判断目录是否存在。
+`admitAutomation`：解析后的根已有写者，返回 `{ kind: 'skip', reason: 'root-busy' }`。`countsTowardCap && activeTurns >= max` 返回 `{ kind: 'skip', reason: 'cap-full' }`。两种 skip 在 `recordSkip !== false` 时都 `admissionSkips.add(automationId)`，不写 `rootWriters`；`recordSkip === false` 只用于手动运行（`automation.run` 传 `recordSkip: false`），手动跳过不写入 `admissionSkips`，因此不进入定时调度的 missed 宽限豁免。成功时写入 `rootWriters`，记录 `sessionId` 与可选 `runId`。`countsTowardCap === true` 时 `kind` 为 `agent-automation` 且 `activeTurns += 1`；否则 `kind` 为 `script-automation` 且不增加 `activeTurns`。成功时 `admissionSkips.delete(automationId)`。不要在本函数里判断目录是否存在。
 
 `soleCapWriterSessionId` 统计 `kind` 为 `user` 或 `agent-automation` 的写者。恰好一个时返回它的 `sessionId`，否则返回 `undefined`。`script-automation` 不计入。
 
@@ -725,7 +727,7 @@ test('session.send returns before the turn is idle and queues a second writer on
 - 开始执行后 `huaanworkSessionModels.get(sessionId)` 是本次 `modelId`，`huaanworkSessionRoots.get(sessionId)` 是推导根。`whenIdle` 之后这两项仍在。`sessionRemove` 之后都没有。
 - `session.new` 传入另一个现存目录作为 `cwd` 时，返回该目录，且 `workspaceRoot.current` 不变。
 - 前台根改去另一个项目后，已经写入根表的会话在 `git` / `policy` 用的根仍是原来的根。测试名写 `foreground switch leaves the background session root`。可以只断言导出的 `sessionWorkspaceRoot(ctx, sessionId)`，不必真的跑 Git。
-- 前台停在项目 A，首次为项目 B 的新会话调用 `sessionSend`。在 `agents.create` 的桩里断言 `huaanworkSessionRoots.get(sessionId)` 已是 B 且 `meta.cwd` 是 B，不是 A；`followup` 受理后模型表才是本次 `modelId`。测试名写 `first project creation keeps its root while another is foreground`。另用创建取消断言 `started:false` 时不写本次模型键、预置的旧模型键仍保留。
+- 前台停在项目 A，首次为项目 B 的新会话调用 `sessionSend`。在 `agents.create` 的桩里断言 `huaanworkSessionRoots.get(sessionId)` 已是 B 且 `meta.cwd` 是 B，不是 A；dispatch 前模型表已临时写入本次 `modelId`，`followup` 受理后保持。测试名写 `first project creation keeps its root while another is foreground`。另用创建取消断言 `started:false` 时本次模型键已还原：原先没有键就不存在，预置的旧模型键仍保留；未受理时在释放名额前还原。
 
 `workspace.spec.ts` 里「后台自动化非空闲 → open/close 拒绝」改为：计数器非 0 时 `openWorkspace` / `closeWorkspace` 仍然切到目标目录。`routes.spec.ts` 里把 `agentAutomationQueued = 1` 后期望 `workspace.close` 400 的用例改成期望 200。
 
@@ -768,7 +770,7 @@ const admitted = scheduler.admitUserTurn({ sessionId, tabId, text, modelId, root
 
 `modelId` 缺省时用当时的 `active_model_id`。本任务不写 `tasks.json`。子任务尚无 `modelId` 时的写回放在 Task 9，那里 `setTaskModel` 已经存在。
 
-`admitted.kind === 'error'` 时抛 `admitted.reason`。`queued` 时返回 `{ queued: true, waiting: true, started: false, sessionId, queueItemId }`，不写两张 Map，不 `followup`。`start` 时把准入的 `root`、`modelId` 随其余参数一起交给 `sendToAgent`。显式会话的根表由下面的 `ensureChannelAgent` 在 create/resume 前登记。`sendToAgent` 只有在调用了 `followup` 之后才写 `huaanworkSessionModels.set(sessionId, modelId)`；通道默认会话若此前没有根表项，此时再按准入 `root` 补记，然后返回 `{ queued: true, sessionId, started: true }`。没调用 `followup` 就返回时，不写模型表，也不删除这次发送之前已经存在的模型键，返回 `{ queued: true, sessionId, started: false }`。`ensureChannelAgent` 已为创建/恢复登记的真实根保留，不因这条早退删除或改回前台。`session.send` 把结果补成 `waiting: false`。`sendToAgent` 里删掉对 `settings.base_url` 的直接门禁；准入已经按本次 `modelId` 判断过。不要在 `whenIdle` 里 `delete` 这两张表。
+`admitted.kind === 'error'` 时抛 `admitted.reason`。`queued` 时返回 `{ queued: true, waiting: true, started: false, sessionId, queueItemId }`，不写两张 Map，不 `followup`。`start` 时把准入的 `root`、`modelId` 随其余参数一起交给 `sendToAgent`。显式会话的根表由下面的 `ensureChannelAgent` 在 create/resume 前登记。`sendToAgent` 在 `dispatchAt` 之前先临时写入 `huaanworkSessionModels.set(sessionId, modelId)`（包运行时与子代理在 `dispatchAt` 内同步读这两张表，准入值必须已可见），`followup` 受理后保持并再写一次兜底；通道默认会话若此前没有根表项，此时再按准入 `root` 补记，然后返回 `{ queued: true, sessionId, started: true }`。没调用 `followup` 就返回时，在释放名额前还原这次临时写入（原先没有键就删除，有旧键就写回旧值；若已建出 live agent 且有 `afterIdle` 在跑则等 `afterIdle` 收尾后再还原），返回 `{ queued: true, sessionId, started: false }`。`ensureChannelAgent` 已为创建/恢复登记的真实根保留，不因这条早退删除或改回前台；尚未建出 live agent 就失败时撤回本轮临时根。`session.send` 把结果补成 `waiting: false`。`sendToAgent` 里删掉对 `settings.base_url` 的直接门禁；准入已经按本次 `modelId` 判断过。不要在 `whenIdle` 里 `delete` 这两张表。
 
 每次成功准入创建一个 `releaseOnce`。不要在回合外直接调用 `scheduler.release`。
 
@@ -789,9 +791,9 @@ function createReleaseOnce(sessionId: string): () => void {
 }
 ```
 
-`whenIdle` 的成功和失败回调都调用这一次准入的 `releaseOnce`，不要各写一次 `releaseAndDrain`。`followup` 已经受理之后，只有这次 `whenIdle` 可以调用它。`followup` 之前抛错，或 `sendToAgent` 在没有调用 `followup` 时返回（创建取消、更新失败提示），调用这同一个 `releaseOnce`，并且不要再登记 `whenIdle`。没调用 `followup` 的返回不写模型表，也不删除该会话原有的模型键；根表只保留本次创建/恢复所登记的真实根，不能为了迎合早退而删掉有效根或改回前台。创建取消和更新失败提示仍只 `emit` 原来的 `agent/notice`。直接 `session.send` 对这两条返回 `{ queued: true, waiting: false, started: false, sessionId }`，不抛错。网络门禁、缺文本、缺标签、根不存在、模型不在列表中这些错误仍抛回这次 HTTP。不要 `await whenIdle()` 再返回 HTTP 应答。
+`whenIdle` 的成功和失败回调都调用这一次准入的 `releaseOnce`，不要各写一次 `releaseAndDrain`。`followup` 已经受理之后，只有这次 `whenIdle` 可以调用它。`followup` 之前抛错，或 `sendToAgent` 在没有调用 `followup` 时返回（创建取消、更新失败提示），调用这同一个 `releaseOnce`，并且不要再登记 `whenIdle`。没调用 `followup` 的返回要把 dispatch 前临时写入的模型键还原为发送前的值（原先没有键就删除，有旧键就写回旧值），不能把本回合的 `modelId` 留在表里；根表只保留本次创建/恢复所登记的真实根，不能为了迎合早退而删掉有效根或改回前台。创建取消和更新失败提示仍只 `emit` 原来的 `agent/notice`。直接 `session.send` 对这两条返回 `{ queued: true, waiting: false, started: false, sessionId }`，不抛错。网络门禁、缺文本、缺标签、根不存在、模型不在列表中这些错误仍抛回这次 HTTP。不要 `await whenIdle()` 再返回 HTTP 应答。
 
-`startQueuedItem` 再次检查根目录仍存在、`modelId` 仍在列表里、网络门禁仍通过。复检失败时先 `emit session/queue-fail`，再调用该项自己的 `releaseOnce`。不要只 `scheduler.release`，也不要发 `session/queue-start`。`drainQueue` 在名额用尽时已经停住，失败项独占这次返回数组时，后面的合格项还在调度器队列里；只 `release` 不会再出队。失败项不要重新入队。复检通过后把队列项里的 `root`、`modelId` 一并交给 `sendToAgent`，其余参数使用队列项里的 `text`、`skill`、`at`，不重新解析文本。根表仍由 `ensureChannelAgent` 在 create/resume 前登记；`followup` 受理后才写模型表，再 `emit({ event: 'session/queue-start', sessionId, tabId, queueItemId })`。`queue-start` 使用队列项里的 `tabId`。`sendToAgent` 抛错或返回 `started: false` 时不发 `queue-start`，改发 `session/queue-fail`，并调用该项自己的 `releaseOnce`。创建取消和更新失败走 `started: false` 这一支，`reason` 用已经发给用户的那句 notice。`queue-fail` 只结束这条等待项，不把同一标签上仍在执行的上一回合标成结束。
+`startQueuedItem` 再次检查根目录仍存在、`modelId` 仍在列表里、网络门禁仍通过。复检失败时先 `emit session/queue-fail`，再调用该项自己的 `releaseOnce`。不要只 `scheduler.release`，也不要发 `session/queue-start`。`drainQueue` 在名额用尽时已经停住，失败项独占这次返回数组时，后面的合格项还在调度器队列里；只 `release` 不会再出队。失败项不要重新入队。复检通过后把队列项里的 `root`、`modelId` 一并交给 `sendToAgent`，其余参数使用队列项里的 `text`、`skill`、`at`，不重新解析文本。根表仍由 `ensureChannelAgent` 在 create/resume 前登记；模型键在 dispatch 前已由 `sendToAgent` 临时写入本次 `modelId`，`followup` 受理后保持，再 `emit({ event: 'session/queue-start', sessionId, tabId, queueItemId })`。`queue-start` 使用队列项里的 `tabId`。`sendToAgent` 抛错或返回 `started: false` 时不发 `queue-start`，改发 `session/queue-fail`，并调用该项自己的 `releaseOnce`（未受理 `followup` 时，临时写入的模型键与尚未建出 live agent 的临时根由 `sendToAgent` 在释放名额前还原）。创建取消和更新失败走 `started: false` 这一支，`reason` 用已经发给用户的那句 notice。`queue-fail` 只结束这条等待项，不把同一标签上仍在执行的上一回合标成结束。
 
 `reevaluateDueAutomations` 由 `index.ts` 注入，指向 Task 8 导出的单次评估函数。Task 8 落地前用空函数占位，避免循环依赖：`sessions.ts` 不 import `automation-scheduler.ts`。用户项先出队，然后才评估到期自动化。
 
@@ -962,7 +964,7 @@ test('an admission skip survives the missed grace window', async () => {
 
 在 `automations-host.spec.ts` 增加一个重叠测试：两个不同 `project.root` 的 agent 自动化都调用 `followup` 之后，才 `release` 第一条。同一 `project.root` 的第二条在第一条 `release` 之前，`followups.length` 仍为 1。脚本自动化的目标根已有写者时，不调用脚本执行函数。项目级 agent 自动化 `followup` 时，`huaanworkSessionRoots.get(本次 automationRunSessionId)` 是该项目根，不是中立工作区；运行结束并释放之后，这个键和对应的模型键都不在。
 
-再加 `automation binds its startup model after followup`：启动时 `active_model_id` 为 `model-a`，在 `followup` 桩的入口断言本次模型键尚未写入、根键已是目标项目；让 `sendToAgent` 按统一规则在受理后写模型键，随后把全局当前模型改成 `model-b`，本次生成仍解析 `model-a`。运行 `finally` 后本次根键和模型键都清理。另设一条未受理 `followup` 的失败分支，证明不留下本次模型键。
+再加 `automation binds its startup model before dispatch and confirms it at followup`：启动时 `active_model_id` 为 `model-a`，在 `followup` 桩的入口断言本次模型键已是 `model-a`（dispatch 前已由 `sendToAgent` 临时写入）、根键已是目标项目；受理后保持该绑定，随后把全局当前模型改成 `model-b`，本次生成仍解析 `model-a`。运行 `finally` 后本次根键和模型键都清理。另设一条未受理 `followup` 的失败分支，证明临时写入的模型键已还原、本次键不在。
 
 再加 `a queued script stopped while waiting for a slot releases its root`：脚本已经准入、还在等槽时被 stop，轮到执行后从 `cancelRequested` 早退。早退之后同根用户发送可以 `followup`。超时用例里，`runScript` 的 Promise 在 `close` 之前不得 resolve；下一条同根回合不得与尚未 `close` 的进程树重叠。
 
@@ -986,11 +988,11 @@ Expected: FAIL。tick 仍在 `agentAutomationQueued > 0` 或 `agentIdle` 为假�
 
 每条到期自动化在调度器里调用一次 `admitAutomation`。传入的 `root` 是该自动化所属项目的 `root`；没有项目时用中立根。不要对 `automationRunSessionId(...)` 调用 `writableRootForSession`。那个 id 对不上任务绑定，也不匹配 `sessionIdFor(项目根)` 加 `-` 的前缀，推导结果会变成中立工作区。agent 的 `sessionId` 用 `automationRunSessionId(automation.id, runId)`，`countsTowardCap: true`。脚本的 `sessionId` 用 `` `script:${runId}` ``，`countsTowardCap: false`。不要把脚本的 `sessionId` 留成 `undefined`。`skip` 时不 `appendRun`、不 `advanceNextRunAt`、不停用，也不要在执行体里再准入一次。`start` 之后调用执行体。
 
-`enqueueAgentAutomation` 不再串 `automationTail`，也不再调用 `admitAutomation`。这一次准入只有一个 `releaseOnce`。`whenIdle` 结束和尚未 `followup` 的失败都调用它，不要各写一次释放。`runAgentTurn` 开始时先读取并保存当时的 `activeModelId`，在 `sendToAgent` 之前只写根表：`huaanworkSessionRoots.set(sessionId, path.resolve(root))`，用的是这次准入已经知道的项目根或中立根，供 create/resume 与沙箱使用。调用 `sendToAgent` 时显式传入这个 `activeModelId` 和同一个 root；由 `sendToAgent` 在 `followup` 受理后写 `huaanworkSessionModels`，不要在受理前预写模型表，也不要让它改读后来的全局 `active_model_id`。`sendToAgent` / `ensureChannelAgent` 看见表里已有根就用它，不得再推导成中立工作区。`finally` 只删除这次运行的这两个键，不第二次释放写者。绑定模型通不过网络门禁时记一次失败运行并调用这同一个 `releaseOnce`，不要记成 admission skip，否则会每个 tick 永久重试。
+`enqueueAgentAutomation` 不再串 `automationTail`，也不再调用 `admitAutomation`。这一次准入只有一个 `releaseOnce`。`whenIdle` 结束和尚未 `followup` 的失败都调用它，不要各写一次释放。`runAgentTurn` 开始时先读取并保存当时的 `activeModelId`，在 `sendToAgent` 之前只写根表：`huaanworkSessionRoots.set(sessionId, path.resolve(root))`，用的是这次准入已经知道的项目根或中立根，供 create/resume 与沙箱使用。调用 `sendToAgent` 时显式传入这个 `activeModelId` 和同一个 root；模型键由 `sendToAgent` 在 `dispatchAt` 之前临时写入、`followup` 受理后保持（未受理则还原），自动化宿主不要自己预写模型表，也不要让它改读后来的全局 `active_model_id`。`sendToAgent` / `ensureChannelAgent` 看见表里已有根就用它，不得再推导成中立工作区。`finally` 只删除这次运行的这两个键，不第二次释放写者。绑定模型通不过网络门禁时记一次失败运行并调用这同一个 `releaseOnce`，不要记成 admission skip，否则会每个 tick 永久重试。
 
 脚本执行的 cwd 用该自动化的项目根；没有项目时用中立根。传入调度器的 `root` 用 `path.resolve` 之后的路径，与用户准入的键相同。不要把 `routeCtx.workspaceRoot.current` 传给 `runScript`。槽位在这一次准入成功之后获取。`runScript` 的完成 Promise 在超时杀进程后也要等到子进程 `close`，不能在 `kill` 之后立刻 resolve。`releaseOnce` 只挂在实际 `close`、启动失败，以及 `executeRun` 里尚未把执行权交给子进程的 return（含 `cancelRequested` 早退和项目已删除的早退）。等槽期间被 stop、轮到后从早退返回的脚本，必须走这个 `releaseOnce`，否则根写者会留下。交接给子进程之后，不要在 `await runScript` 之前再释放一次。
 
-`routes.ts` 的 `automation.run` 删除 `openWorkspace`、`closeWorkspace`、`assertAutomationIdle` 和 `agentIdle(ctx)` 那一行。这里是手动运行的唯一准入点，不要再进会自己准入的 enqueue。`skip` 时返回 `{ queued: false, waiting: true, runId, workspaceRoot: ctx.workspaceRoot.current }`。成功启动时仍返回 `{ queued: true, runId, workspaceRoot: ctx.workspaceRoot.current }`。两种都保留 `workspaceRoot`，避免路由契约的必含键被拆掉。`waiting` 只在 skip 时出现，把它写进 `route-contract.spec.ts` 的 `OPTIONAL_KEYS_WHITELIST['automation.run']`。不把前台根改成目标项目。
+`routes.ts` 的 `automation.run` 删除 `openWorkspace`、`closeWorkspace`、`assertAutomationIdle` 和 `agentIdle(ctx)` 那一行。这里是手动运行的唯一准入点，不要再进会自己准入的 enqueue。`skip` 时返回 `{ queued: false, waiting: true, reason: admitted.reason, runId, workspaceRoot: ctx.workspaceRoot.current }`（`reason` 取 `root-busy` / `cap-full`）。成功启动时仍返回 `{ queued: true, runId, workspaceRoot: ctx.workspaceRoot.current }`。两种都保留 `workspaceRoot`，避免路由契约的必含键被拆掉。`waiting` 与 `reason` 只在 skip 分支出现，把它们写进 `route-contract.spec.ts` 的 `OPTIONAL_KEYS_WHITELIST['automation.run']`，即 `['waiting', 'reason']`。不把前台根改成目标项目。
 
 导出 `evaluateDueAutomations`。它复用 tick 里「列出到期项并准入」的那段，不另写一套 skip 规则。Task 6 的注入在这里接上真实函数。
 
@@ -1171,6 +1173,8 @@ Expected: FAIL，模块不存在。
 
 `send()` 保持现有顺序：先按本地 `userMsg.id` 把用户消息插入标签，再以 `tabId + userMsg.id` 建 pending 记录并调用 `session.send`。pending 只保存本次已知 sessionId 和早到事件，不增加 epoch、不发 `turn-started`、不清停止闩锁。若该标签没有正在执行的同会话回合，匹配 sessionId 的早到 `session/end` 与 goal 事件进入本次 pending；若上一回合仍执行，它的事件照常即时处理。未知 queueItemId 的 queue-start/queue-fail 在 pending 期间按标签和到达顺序入本次缓冲，已能匹配其他等待消息的队列事件不得被扣住。
 
+发送前还要记下这次选择（评审 P-1）：`send()` 解析出本次 `modelId` 后，先保存该标签发送前的选择（`previousModelPick = modelPickByTab[chatId]`），再把本次 `modelId` 记为该标签的选择，然后才调用 `session.send`。记录一旦存在，后续解析优先取它，全局模型变化与任务刷新都不改变下一次发送的模型；只有 chip 的显式选择能覆盖。未真正开始的四条路径都要撤回这条记录：`started:false` 分支、排队期 `session/queue-fail`（`failQueuedTurn`）、`cancelWaiting`、以及 `send()` 的 `catch`。回滚只在当前选择仍等于本次送出的 id 时发生——有发送前的值就还原为它，没有就删除该标签的记录；发送在飞期间用户的显式改选不得被覆盖。排队项的归属记录要带上 `modelId` 与 `previousModelPick`，`failQueuedTurn` / `cancelWaiting` 在 `clearQueueItem` 之前读它再回滚（两者共用一个回滚函数）。
+
 应答回来后先写回身份：`waiting:true` 时按本地 `userMsg.id` 把 `queueItemId` 写回**已经插入的同一条用户消息**并显示「等待当前任务」，只更新 `waitingIds` 不算完成；`started:false` 不写 queueItemId、不标等待、不记活动回合，并只丢弃本次缓冲。随后 `sendOpensTurn` 为 true 时才增加该标签 epoch、发出 `turn-started` 并记下活动 `ChatItem.id`。对 waiting 应答，只重放 queueItemId 与应答一致的缓存 queue-start/queue-fail；重放 queue-start 的时点才执行同样的 epoch/turn-started/active 初始化。其他未知 id 不得套用到这条消息。直接 started:true 的缓存 `session/end` 与 goal 事件在初始化后按原到达顺序重放，保证早到结束最终仍清 running，而不是被应答覆盖成假运行。
 
 `session.send` 的 `catch` 不得沿用现有的无条件 `setTurnActive(false)`、`stopping.current = false` 后提前 return、或无条件 `sessionFailed: true`。它要给本次 `userMsg` 标上 `sendRejected: true`，并把错误原因作为 note 追加到发送标签；停止闩锁仍扣着时也必须追加。该标签仍有正在执行的回合时，保留其 `userStopSessionRef`、`latchOwnerRef`、`stopping`、epoch、`running` 和 `sessionFailed` 原状态。`catch` 删除本次 pending 与缓冲，`finally` 再按 `tabId + userMsg.id` 做幂等清理；不得清除其他发送的 pending，也不得让上一回合事件进入这次已失败的缓冲。
@@ -1258,7 +1262,7 @@ rg -n "session.send without a tab throws" dsh-plugin-huaanwork/tests/huaanwork-h
 rg -n "a queued creation cancel fails without starting" dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-creation.spec.ts
 rg -n "a queued update failure fails without starting" dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-creation.spec.ts
 rg -n "first project creation keeps its root while another is foreground" dsh-plugin-huaanwork/tests/huaanwork-host/sessions.spec.ts
-rg -n "automation binds its startup model after followup" dsh-plugin-huaanwork/tests/huaanwork-host/automations-host.spec.ts
+rg -n "automation binds its startup model before dispatch and confirms it at followup" dsh-plugin-huaanwork/tests/huaanwork-host/automations-host.spec.ts
 rg -n "a send that does not start leaves the tab idle" dsh-plugin-huaanwork/tests/client-huaanwork/concurrentTurn.spec.ts
 rg -n "a queued send does not clear the running turn goal window" dsh-plugin-huaanwork/tests/client-huaanwork/goalRound.spec.ts
 rg -n "queued send opens the goal window only when the turn starts" dsh-plugin-huaanwork/tests/client-huaanwork/appWiring.spec.ts
@@ -1311,8 +1315,8 @@ Expected: 每条 rg exit 0，且只命中测试名或它的 `test(` / `it(` 行�
 | 有文本但没有标签时拒绝发送 | `session.send without a tab throws 缺少标签` | `sessions.spec.ts` |
 | 排队中的创建取消不启动回合 | `a queued creation cancel fails without starting` | `agent-package-creation.spec.ts` |
 | 排队中的更新失败不启动回合 | `a queued update failure fails without starting` | `agent-package-creation.spec.ts` |
-| 前台在另一项目时，首建会话在 create 前已登记自己的根，受理后才写模型 | `first project creation keeps its root while another is foreground` | `sessions.spec.ts` |
-| 自动化根在发送前登记，启动时模型在 followup 受理后绑定且不读后来的全局模型 | `automation binds its startup model after followup` | `automations-host.spec.ts` |
+| 前台在另一项目时，首建会话在 create 前已登记自己的根，dispatch 前已临时写入模型、受理后保持 | `first project creation keeps its root while another is foreground` | `sessions.spec.ts` |
+| 自动化根在发送前登记，dispatch 前已临时写入模型、followup 受理后保持，且不读后来的全局模型 | `automation binds its startup model before dispatch and confirms it at followup` | `automations-host.spec.ts` |
 | 未启动的发送不把标签标成执行中 | `a send that does not start leaves the tab idle` | `concurrentTurn.spec.ts` |
 | 排队发送不提前清掉上一回合的目标暂停 | `a queued send does not clear the running turn goal window` | `goalRound.spec.ts` |
 | epoch 和 turn-started 发生在回合真正开始之后 | `queued send opens the goal window only when the turn starts` | `appWiring.spec.ts` |

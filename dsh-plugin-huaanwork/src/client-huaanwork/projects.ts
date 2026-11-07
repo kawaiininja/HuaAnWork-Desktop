@@ -77,8 +77,14 @@ export function deleteAutomationRun(
   return rpcCall("automation.deleteRun", { id: automationId, runId });
 }
 
-/** 手动运行：`queued: false` 表示准入跳过（`waiting: true`），宿主没有启动这次运行。 */
-export function runAutomation(id: string): Promise<{ queued: boolean; waiting?: boolean; runId?: string; workspaceRoot: string }> {
+/** 手动运行：`queued: false` 表示准入跳过（`waiting: true`），`reason` 区分同根忙与名额已满。 */
+export function runAutomation(id: string): Promise<{
+  queued: boolean;
+  waiting?: boolean;
+  reason?: "root-busy" | "cap-full";
+  runId?: string;
+  workspaceRoot: string;
+}> {
   return rpcCall("automation.run", { id });
 }
 

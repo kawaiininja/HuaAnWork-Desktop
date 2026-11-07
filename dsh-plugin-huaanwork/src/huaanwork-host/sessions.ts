@@ -75,9 +75,17 @@ export type SessionRuntimeContext = {
   subagents?: SubagentsService
   /** 子代理 run 权威状态机(holders.ts 注入);执行链与 subagent.* 路由读同一实例。 */
   huaanworkSubagentRuns?: SubagentRunRegistry
-  /** 会话 → 模型条目 id 的绑定表(holders.ts 注入);`followup` 受理后写入。 */
+  /**
+   * 会话 → 模型条目 id 的绑定表(holders.ts 注入)。`sendToAgent` 在 `dispatchAt`
+   * 之前先写入本轮准入的模型(子代理在其中的 `subagent/start` 同步复制父会话模型),
+   * `followup` 受理后保留;未受理 `followup` 时在让出名额前还原为发送前的值(或删除)。
+   */
   huaanworkSessionModels?: Map<string, string>
-  /** 会话 → 可写根(holders.ts 注入);创建/恢复前写入。 */
+  /**
+   * 会话 → 可写根(holders.ts 注入)。`sendToAgent` 在 `dispatchAt` 之前为尚无条目的
+   * 会话临时登记本轮准入的根(包运行时在解析父会话之前就读它);已登记的根不随新准入
+   * 改写,为 create / resume 登记的真实根在回合未启动时也保持有效。
+   */
   huaanworkSessionRoots?: Map<string, string>
   /** 唯一回合调度器(holders.ts 注入);用户发送准入与排队出队共用。 */
   huaanworkTurnScheduler?: TurnScheduler
@@ -131,6 +139,8 @@ export async function sendToAgent(
   getAgentPackageHost()?.noteUserText(sessionId, text)
 
   let afterIdle: (() => Promise<void>) | undefined
+  /** 未启动早退时撤回本轮临时写入的模型/根;只在本轮自己写过临时值时存在。 */
+  let restoreProvisionalBindings: (() => void) | undefined
   let cleanedUp = false
   const releaseOnce = admission?.release
   const cleanup = async () => {
@@ -143,6 +153,7 @@ export async function sendToAgent(
       await afterIdle()
       await acceptedAgent?.whenIdle?.()
     } finally {
+      if (!followupAccepted) restoreProvisionalBindings?.()
       releaseOnce?.()
     }
   }
@@ -169,7 +180,7 @@ export async function sendToAgent(
     const resolveAgent = () =>
       (agentPromise ??= (async () => {
         const resolved = explicitSessionId
-          ? await ensureChannelAgent(ctx, routeCtx, sessionId, admission?.root)
+          ? await ensureChannelAgent(ctx, routeCtx, sessionId, admission?.root, admission?.cancelled)
           : await waitForAgent(ctx, sessionId)
         // create/resume 已经落盘,但取消发生在等待期间:抛错以阻止 @ 的 dispatchAt
         // 发布 activation,也阻止后续 followup。
@@ -222,6 +233,45 @@ export async function sendToAgent(
       attachCreationTools(ctx, sessionId)
     }
 
+    // 准入绑定必须在 dispatchAt 之前可见:包运行时在解析父会话之前就读根表(会以该根
+    // 启动 HTTP / MCP 子进程与脚本),子代理在 dispatchAt 内的 `subagent/start` 里同步
+    // 复制父会话的模型与根。已登记的根是该会话的写者锁与沙箱根,不随新准入改写。
+    if (admission !== undefined) {
+      const models = ctx.huaanworkSessionModels
+      const roots = ctx.huaanworkSessionRoots
+      const admittedModelId = admission.modelId
+      const admittedRoot = admission.root
+      const previousModel = models?.get(sessionId)
+      const hadModel = models?.has(sessionId) === true
+      const hadRoot = roots?.has(sessionId) === true
+      let restored = false
+      models?.set(sessionId, admittedModelId)
+      if (!hadRoot) roots?.set(sessionId, admittedRoot)
+      restoreProvisionalBindings = () => {
+        if (restored) return
+        restored = true
+        // 所有权守卫:只撤回本次准入自己写下的值。`session.remove` 可能在本回合的
+        // finally 之前清掉条目,无条件还原会复活一个已删除会话的旧模型;被别的写者
+        // 改写过的条目也不属于本回合,不得覆盖。
+        if (models?.get(sessionId) === admittedModelId) {
+          if (hadModel) {
+            if (previousModel !== undefined) models.set(sessionId, previousModel)
+          } else {
+            models.delete(sessionId)
+          }
+        }
+        // create / resume 已用这条根建出 live agent 时根保持有效(设计 §5.1.1):
+        // 只有本次准入自己写下、且没有留下 agent 的条目才撤回;同样不覆盖别人的根。
+        if (
+          !hadRoot &&
+          roots?.get(sessionId) === admittedRoot &&
+          findAgentBySession(ctx, sessionId) === undefined
+        ) {
+          roots.delete(sessionId)
+        }
+      }
+    }
+
     if (atName) {
       const parsedInText = parseAtInvoke(text)
       const remainder =
@@ -266,7 +316,8 @@ export async function sendToAgent(
     })
     followupAccepted = true
     if (admission !== undefined) {
-      // 只在 followup 受理后公布绑定:创建取消/更新失败没有交给模型,不改旧绑定。
+      // 确认与 safety net:绑定已在 dispatchAt 之前临时写入(见上),这里再写一次,
+      // 兜住回合进行中 `session.remove` 清掉条目后 followup 仍被受理的情形。
       ctx.huaanworkSessionModels?.set(sessionId, admission.modelId)
       if (ctx.huaanworkSessionRoots?.has(sessionId) !== true) {
         ctx.huaanworkSessionRoots?.set(sessionId, admission.root)
@@ -277,8 +328,20 @@ export async function sendToAgent(
     // 已启动子代理时根写者归 idle 清理持有:立即释放会与仍在写根的子代理重叠。
     // 返回 `started: false` 与 followup 抛错都走同一出口,调用方经 `deferRelease` 得知延后。
     if (!followupAccepted) {
-      if (afterIdle === undefined) releaseOnce?.()
-      else admission?.deferRelease?.()
+      if (afterIdle === undefined) {
+        // 先还原本次准入前的模型/根,再让出名额:被 drain 的下一回合不得看见
+        // 本回合未启动的临时绑定。
+        restoreProvisionalBindings?.()
+        releaseOnce?.()
+      } else {
+        // @ HTTP/MCP 不解析父会话就返回卸工具的 afterIdle;若随后的 resolveAgent 在
+        // 建出 live agent 前失败,此处没有子代理在跑,立即撤回临时绑定,卸工具与
+        // 释放名额仍交由 cleanup 收尾。
+        if (findAgentBySession(ctx, sessionId) === undefined) {
+          restoreProvisionalBindings?.()
+        }
+        admission?.deferRelease?.()
+      }
     }
     scheduleDetachAfterIdle()
   }
@@ -298,20 +361,40 @@ function findAgentBySession(ctx: SessionRuntimeContext, sessionId: string): List
  * 根取调用方传入的 `admissionRoot`(准入时冻结的根),未传入才查 `huaanworkSessionRoots`,
  * 仍未命中才按项目/任务/header 推导;持久化会话的 `cwd` 必须存在且落在该根内,否则
  * 拒绝接管(缺 `cwd` 时工作目录不可验证,同样 fail closed;AGENTS.md 不变式 6)。两条
- * 路径都不读前台根。
+ * 路径都不读前台根。已登记根的会话锁在它登记过的根上:准入根不一致时在 `create` /
+ * `resume` / `followup` 之前按未启动失败,也不覆盖已登记根。`cancelled` 在 header 读取
+ * 与根推导之后各复查一次,期间被删除或取消的排队项不得再写根、`create` / `resume`。
  */
 async function ensureChannelAgent(
   ctx: SessionRuntimeContext,
   routeCtx: RouteContext,
   sessionId: string,
   admissionRoot?: string,
+  cancelled?: () => boolean,
 ): Promise<ListedAgent & { followup: (message: unknown) => void }> {
+  const roots = ctx.huaanworkSessionRoots
+  // 已登记根的会话锁在它登记过的根上:准入根不一致时按未启动失败,不能拆开写者锁与沙箱根,也不得覆盖已登记根。
+  const assertMatchesRegisteredRoot = () => {
+    const registeredRoot = roots?.get(sessionId)
+    if (
+      admissionRoot !== undefined &&
+      registeredRoot !== undefined &&
+      registeredRoot.length > 0 &&
+      resolve(registeredRoot) !== resolve(admissionRoot)
+    ) {
+      throw new Error('该会话属于其他工作区，请先打开对应项目后再继续。')
+    }
+  }
+  assertMatchesRegisteredRoot()
   const live = findAgentBySession(ctx, sessionId)
-  if (typeof live?.followup === 'function') return live as ListedAgent & { followup: (message: unknown) => void }
+  if (typeof live?.followup === 'function') {
+    return live as ListedAgent & { followup: (message: unknown) => void }
+  }
 
   const agentOptions = { provider: 'deepseek-official', model: 'local' }
   const persisted = await findSessionHeader(join(routeCtx.dshHome, 'sessions'), sessionId)
-  const roots = ctx.huaanworkSessionRoots
+  // header 读取期间删除的会话不得再被 create / resume 复活(Minor-2)。
+  if (cancelled?.()) throw new Error('已取消')
   let root = admissionRoot ?? roots?.get(sessionId)
   if (root === undefined) {
     // 缺 cwd 的会话也先推导再校验:回落的中立根在 `<profile>/workspace` 下,profile
@@ -326,6 +409,9 @@ async function ensureChannelAgent(
       headerCwd: typeof persisted?.cwd === 'string' ? persisted.cwd : undefined,
     })
   }
+  // 推导（含其中的磁盘读取）之后、写根与 create / resume 之前的最后一次取消与登记根复查。
+  if (cancelled?.()) throw new Error('已取消')
+  assertMatchesRegisteredRoot()
   if (persisted) {
     const cwd = typeof persisted.cwd === 'string' ? persisted.cwd : ''
     if (!cwd || !isInside(root, cwd)) {
@@ -357,6 +443,7 @@ function isInside(root: string, candidate: string): boolean {
 
 function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): { accepted: true } {
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
+  cancelDirectStarts([sessionId, ...descendantSessionIds(sessionId)])
   // 只取消绑定在该会话上的 agent;通道默认 agent 可能正在跑兄弟会话,不能替它按停止。
   const primary = findAgentBySession(ctx, sessionId)
   const childIds = new Set(childrenOf(sessionId))
@@ -489,6 +576,7 @@ function descendantSessionIds(sessionId: string): string[] {
 export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, sessionId: string): void {
   // 后代名单在 forgetChildSessions 之前快照:登记表清空后就查不到了。
   const descendants = descendantSessionIds(sessionId)
+  cancelDirectStarts([sessionId, ...descendants])
   releaseRouteInput(sessionId)
   if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })
   // 等待项一并收掉:否则下一次 drain 会对已删除会话走 sendToAgent → ensureChannelAgent,
@@ -659,6 +747,18 @@ export function setAgentPackageActiveTurns(registry: AgentPackageActiveTurnRegis
 
 // —— 回合调度接线(Task 6)——
 
+type DirectStart = { sessionId: string; cancelled: boolean }
+
+/** 在途立即启动(`session.send` 准入 `kind: 'start'` 至 `sendToAgent` 结束);删除或取消会话时置真。 */
+const directStarts = new Set<DirectStart>()
+
+function cancelDirectStarts(sessionIds: Iterable<string>): void {
+  const targets = new Set(sessionIds)
+  for (const entry of directStarts) {
+    if (targets.has(entry.sessionId)) entry.cancelled = true
+  }
+}
+
 /**
  * 到期自动化的一次评估(Task 8)。index.ts 注入 automation-scheduler 导出的
  * `evaluateDueAutomations`;sessions.ts 不反过来 import 调度器,避免循环依赖。
@@ -821,9 +921,9 @@ async function rememberTaskModel(routeCtx: RouteContext, sessionId: string, mode
 }
 
 /**
- * 用户发送:先载入项目/任务/header 推导可写根,按本次 `modelId` 过门禁与调度器
- * 准入,然后交给 `sendToAgent`。只占名额不等待回合:已开始返回 `started: true`,
- * 排队返回 `waiting: true`。
+ * 用户发送:已登记根的会话沿用登记根,其余先载入项目/任务/header 推导可写根;
+ * 按本次 `modelId` 过门禁与调度器准入,然后交给 `sendToAgent`。只占名额不等待回合:
+ * 已开始返回 `started: true`,排队返回 `waiting: true`。
  */
 export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): Promise<unknown> {
   const text = objectString(params, 'text') ?? ''
@@ -834,16 +934,24 @@ export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteCon
   if (!tabId) throw new Error('session.send 缺少标签')
 
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
-  const projects = await listProjects(routeCtx.profileDir)
-  const tasks = await listTasks(routeCtx.profileDir)
-  const header = await findSessionHeader(join(routeCtx.dshHome, 'sessions'), sessionId)
-  const root = writableRootForSession({
-    profileDir: routeCtx.profileDir,
-    sessionId,
-    projects,
-    tasks,
-    headerCwd: typeof header?.cwd === 'string' ? header.cwd : undefined,
-  })
+  // 已登记根的会话保持原根:任务改绑或项目登记变化都不把它挪到新根(设计 §5.1.1),
+  // 否则写者锁与沙箱根会分开,下一次恢复也会因持久化 cwd 不在新根内被拒绝。
+  const registeredRoot = ctx.huaanworkSessionRoots?.get(sessionId)
+  let root: string
+  if (typeof registeredRoot === 'string' && registeredRoot.length > 0) {
+    root = registeredRoot
+  } else {
+    const projects = await listProjects(routeCtx.profileDir)
+    const tasks = await listTasks(routeCtx.profileDir)
+    const header = await findSessionHeader(join(routeCtx.dshHome, 'sessions'), sessionId)
+    root = writableRootForSession({
+      profileDir: routeCtx.profileDir,
+      sessionId,
+      projects,
+      tasks,
+      headerCwd: typeof header?.cwd === 'string' ? header.cwd : undefined,
+    })
+  }
   if (!existsSync(root) || !statSync(root).isDirectory()) {
     throw new Error('可写根目录不存在')
   }
@@ -876,11 +984,19 @@ export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteCon
   }
 
   const releaseOnce = createReleaseOnce(ctx, routeCtx, sessionId)
-  const result = await sendToAgent(ctx, routeCtx, params, {
-    root: admitted.root,
-    modelId,
-    release: releaseOnce,
-  })
+  const directStart: DirectStart = { sessionId, cancelled: false }
+  directStarts.add(directStart)
+  let result: SendResult
+  try {
+    result = await sendToAgent(ctx, routeCtx, params, {
+      root: admitted.root,
+      modelId,
+      release: releaseOnce,
+      cancelled: () => directStart.cancelled,
+    })
+  } finally {
+    directStarts.delete(directStart)
+  }
   if (result.started) await rememberTaskModel(routeCtx, sessionId, modelId)
   return { queued: true, waiting: false, started: result.started, sessionId }
 }

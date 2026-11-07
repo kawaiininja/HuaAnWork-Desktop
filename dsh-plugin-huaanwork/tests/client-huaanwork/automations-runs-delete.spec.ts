@@ -262,7 +262,7 @@ describe("手动运行准入反馈（P-4e）", () => {
   it("says the manual run did not start when admission skipped it and keeps the workspace", async () => {
     rpc.mockImplementation(async (method) => {
       if (method === "automation.run") {
-        return { queued: false, waiting: true, runId: "r1", workspaceRoot: "/projects/other" };
+        return { queued: false, waiting: true, reason: "root-busy", runId: "r1", workspaceRoot: "/projects/other" };
       }
       throw new Error(`unexpected rpc: ${method}`);
     });
@@ -281,6 +281,32 @@ describe("手动运行准入反馈（P-4e）", () => {
     expect(rpc.mock.calls.filter((call) => call[0] === "automation.run")).toHaveLength(1);
     expect(view.querySelector(".banner.error")?.textContent).toContain(
       "同一项目根上已有任务在运行，本次手动运行未开始。",
+    );
+    expect(onWorkspaceAligned).not.toHaveBeenCalled();
+  });
+
+  it("says the concurrency cap was reached when admission skipped it as cap-full", async () => {
+    rpc.mockImplementation(async (method) => {
+      if (method === "automation.run") {
+        return { queued: false, waiting: true, reason: "cap-full", runId: "r1", workspaceRoot: "/projects/other" };
+      }
+      throw new Error(`unexpected rpc: ${method}`);
+    });
+    const onWorkspaceAligned = vi.fn();
+
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      onWorkspaceAligned,
+      openRuns: false,
+    });
+    await act(async () => {
+      buttonByText(view, "立即运行").click();
+    });
+
+    expect(rpc.mock.calls.filter((call) => call[0] === "automation.run")).toHaveLength(1);
+    expect(view.querySelector(".banner.error")?.textContent).toContain(
+      "已达到同时进行的任务数上限，本次手动运行未开始。",
     );
     expect(onWorkspaceAligned).not.toHaveBeenCalled();
   });
