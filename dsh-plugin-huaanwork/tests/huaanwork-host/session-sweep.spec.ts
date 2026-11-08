@@ -82,6 +82,32 @@ describe('startup project legacy sweep (旧 host.ts:936 语义)', () => {
     expect(existsSync(plainSession)).toBe(false)
     await booted.ctx.fiber.dispose()
   })
+
+  test('protects sibling neutral namespaces and still sweeps an unreferenced auto-project session', async () => {
+    const root = freshRoot()
+    const config = hostConfig(root)
+    const autoProject = join(config.profileDir, 'workspace-projects', 'p-auto')
+    mkdirSync(autoProject, { recursive: true })
+    writeJsonFile(join(config.profileDir, 'projects.json'), {
+      projects: [
+        { id: 'ancestor', name: 'Ancestor', root, createdAt: 1 },
+        { id: 'p-auto', name: 'Auto', root: autoProject, createdAt: 2 },
+      ],
+    })
+    const sessionsRoot = join(config.dshHome, 'sessions')
+    const keptNeutral = writeSessionLog(sessionsRoot, 'neutral', 'huaanwork-aaaaaaaaaaaaaaaa', join(config.profileDir, 'workspace'))
+    const keptSession = writeSessionLog(sessionsRoot, 'fresh', 'huaanwork-bbbbbbbbbbbbbbbb', join(config.profileDir, 'workspace-sessions', 's1'))
+    const keptAutomation = writeSessionLog(sessionsRoot, 'legacy-auto', 'huaanwork-cccccccccccccccc', join(config.profileDir, 'workspace-automations', 'a1'))
+    const swept = writeSessionLog(sessionsRoot, 'auto-project', 'huaanwork-dddddddddddddddd', autoProject)
+
+    const booted = await bootHuaanworkHost(config)
+
+    expect(existsSync(keptNeutral)).toBe(true)
+    expect(existsSync(keptSession)).toBe(true)
+    expect(existsSync(keptAutomation)).toBe(true)
+    expect(existsSync(swept)).toBe(false)
+    await booted.ctx.fiber.dispose()
+  })
 })
 
 /** 计数桩:readdir / readEntryNames / readHeader(= 整份日志读 + 解压)/ remove 各自计数。 */

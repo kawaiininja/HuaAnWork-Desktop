@@ -2,7 +2,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import type { AutomationInfo, AutomationSchedule, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
+import type { AutomationInfo, AutomationSchedule, ProjectInfo, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
 import { inFlightRuns, startInFlightRun } from '../../src/huaanwork-host/automation-inflight.ts'
 import {
   AUTOMATION_SESSION_RETAIN_LIMIT,
@@ -24,7 +24,19 @@ import {
 } from '../../src/huaanwork-host/automations-store.ts'
 import { humanizeCron, nextFireAfter, parseCron, periodOf } from '../../src/huaanwork-host/schedule.ts'
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
-import { RUNS_LIMIT, listAutomations, recentRuns, removeAutomationsOfProject, runsPath } from '../../src/huaanwork-host/stores.ts'
+import {
+  RUNS_LIMIT,
+  createProject,
+  listAutomations,
+  listProjects,
+  recentRuns,
+  removeAutomationsOfProject,
+  removeProject,
+  runsPath,
+  withAutomationRegistryLock,
+  writeAutomationRegistry,
+} from '../../src/huaanwork-host/stores.ts'
+import { autoProjectRootPath } from '../../src/huaanwork-host/workspace-state.ts'
 
 // 写路径与纯函数用例移植自旧 sidecar automations.test.ts(属于本层的部分)
 // 与 schedule.test.ts 15 例。node:test assert → vitest expect。
@@ -53,6 +65,18 @@ function agentInput(overrides: Record<string, unknown> = {}): Record<string, unk
     widget: true,
     enabled: true,
     ...overrides,
+  }
+}
+
+function makeCtx(home: string, logs: string[] = []) {
+  return {
+    dshHome: home,
+    profileDir: home,
+    workspaceRoot: { current: home },
+    emit: () => {},
+    logger: (message: string) => { logs.push(message) },
+    requestRestart: async () => false,
+    runtimeCtx: { agents: { get: (_id: string) => undefined } },
   }
 }
 
@@ -578,17 +602,28 @@ describe('automations-store 写路径与纯函数', () => {
     expect((await listAutomations(home, 'p1')).map((item) => item.id)).toEqual([bound.id])
   })
 
-  test('issue #2: updateAutomation ignores projectId — binding is immutable after creation', async () => {
+  test('issue #2: updateAutomation rebinds a non-empty projectId and never clears an existing binding', async () => {
     const home = makeHome()
     const bound = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+
+    // 非空字符串 = 改绑,并落盘到新归属。
     const rebound = await updateAutomation(home, bound.id, { projectId: 'p2', name: '改名' }, T0 + 1)
-    expect(rebound.projectId).toBe('p1')
+    expect(rebound.projectId).toBe('p2')
     expect(rebound.name).toBe('改名')
-    const unbound = await updateAutomation(home, bound.id, { projectId: null }, T0 + 2)
-    expect(unbound.projectId).toBe('p1')
+    expect((await listAutomations(home, 'p2')).map((item) => item.id)).toEqual([bound.id])
+    expect(await listAutomations(home, 'p1')).toEqual([])
+
+    // null / 空串 / 非字符串都不清空已有归属(仍读回 'p2')。
+    expect((await updateAutomation(home, bound.id, { projectId: null }, T0 + 2)).projectId).toBe('p2')
+    expect((await updateAutomation(home, bound.id, { projectId: '' }, T0 + 3)).projectId).toBe('p2')
+    expect((await updateAutomation(home, bound.id, { projectId: '   ' }, T0 + 4)).projectId).toBe('p2')
+    expect((await updateAutomation(home, bound.id, { projectId: 42 }, T0 + 5)).projectId).toBe('p2')
+    expect((await listAutomations(home, 'p2')).map((item) => item.id)).toEqual([bound.id])
+
+    // 中立任务:空值不会凭空绑定,非空值可以绑上。
     const neutral = await createAutomation(home, normalizeAutomationInput(agentInput({ projectId: undefined }), T0), T0)
-    const patched = await updateAutomation(home, neutral.id, { projectId: 'p1' }, T0 + 3)
-    expect(patched.projectId).toBe(null)
+    expect((await updateAutomation(home, neutral.id, { projectId: '' }, T0 + 6)).projectId).toBe(null)
+    expect((await updateAutomation(home, neutral.id, { projectId: 'p1' }, T0 + 7)).projectId).toBe('p1')
   })
 
   test('issue #2: removeAutomationsOfProject leaves unbound automations intact', async () => {
@@ -642,7 +677,17 @@ describe('automations-store 写路径与纯函数', () => {
     )
     expect(Object.keys(created as object).sort()).toEqual(['automation'])
     const automation = (created as { automation: AutomationInfo }).automation
-    expect(automation.projectId).toBe(null)
+    // 不传 projectId(等价于 projectId: null)⇒ 自动建同名项目并归属到它,目录已落盘。
+    const autoProjectId = automation.projectId
+    expect(typeof autoProjectId).toBe('string')
+    expect(autoProjectId).not.toBe('')
+    const autoProject = (await listProjects(home)).find((item) => item.id === autoProjectId)
+    expect(autoProject).toMatchObject({
+      id: autoProjectId,
+      name: '每日早报',
+      root: autoProjectRootPath(home, autoProjectId!),
+    })
+    expect(existsSync(autoProject!.root)).toBe(true)
     expect(automation.name).toBe('每日早报')
 
     await expect(
@@ -681,6 +726,221 @@ describe('automations-store 写路径与纯函数', () => {
     expect(await listAutomations(home)).toEqual([])
     expect(existsSync(runSessionDir)).toBe(false)
     expect(releasedSessions).toEqual([runSessionId])
+    // 删任务不连带删自动建的项目:它可能已被用户复用/改名,按常规项目删除处理。
+    expect((await listProjects(home)).some((item) => item.id === autoProjectId)).toBe(true)
+  })
+
+  test('automation.create pre-checks MAX_AUTOMATIONS and automation.update guards projectId rebinding', async () => {
+    const home = makeHome()
+    const ctx = makeCtx(home)
+    const create = ROUTE_TABLE.find((route) => route.method === 'automation.create')!
+    const update = ROUTE_TABLE.find((route) => route.method === 'automation.update')!
+
+    for (let i = 0; i < MAX_AUTOMATIONS; i += 1) {
+      await createAutomation(home, normalizeAutomationInput(agentInput({ name: `任务-${i}` }), T0), T0)
+    }
+    // 上限预检在建目录与项目登记之前:超限请求不留空项目、不留目录。
+    await expect(
+      create.handler(
+        { params: {}, body: { name: '超限', kind: 'agent', schedule: { kind: 'manual' }, prompt: 'x' }, query: new URLSearchParams() },
+        ctx,
+      ),
+    ).rejects.toThrow(/上限/)
+    expect(await listProjects(home)).toEqual([])
+    const projectsDir = join(home, 'workspace-projects')
+    expect(existsSync(projectsDir) ? readdirSync(projectsDir) : []).toEqual([])
+
+    // 改绑:目标项目必须已存在;空串 / null / 非字符串一律拒绝。
+    mkdirSync(join(home, 'p1-root'))
+    mkdirSync(join(home, 'p2-root'))
+    await createProject(home, { id: 'p1', name: 'P1', root: join(home, 'p1-root') })
+    await createProject(home, { id: 'p2', name: 'P2', root: join(home, 'p2-root') })
+    const seed = (await listAutomations(home))[0]!
+    expect(seed.projectId).toBe('p1')
+
+    const rebound = await update.handler(
+      { params: {}, body: { id: seed.id, projectId: 'p2' }, query: new URLSearchParams() },
+      ctx,
+    )
+    expect((rebound as { automation: AutomationInfo }).automation.projectId).toBe('p2')
+    await expect(
+      update.handler({ params: {}, body: { id: seed.id, projectId: 'missing' }, query: new URLSearchParams() }, ctx),
+    ).rejects.toThrow(/was not found/)
+    for (const invalid of ['', 42, null]) {
+      await expect(
+        update.handler({ params: {}, body: { id: seed.id, projectId: invalid }, query: new URLSearchParams() }, ctx),
+      ).rejects.toThrow('automation.update requires a non-empty projectId')
+    }
+
+    // 在途轮守卫:改绑被拒且归属不变;不碰 projectId 的改名仍然放行。
+    startInFlightRun({
+      automationId: seed.id,
+      runId: 'update-in-flight',
+      trigger: 'manual',
+      kind: 'agent',
+      phase: 'queued',
+      cancelRequested: false,
+      slotConsumed: false,
+    })
+    try {
+      await expect(
+        update.handler({ params: {}, body: { id: seed.id, projectId: 'p1' }, query: new URLSearchParams() }, ctx),
+      ).rejects.toThrow(/正在运行/)
+      expect((await listAutomations(home)).find((item) => item.id === seed.id)?.projectId).toBe('p2')
+
+      const renamed = await update.handler(
+        { params: {}, body: { id: seed.id, name: '改名' }, query: new URLSearchParams() },
+        ctx,
+      )
+      expect((renamed as { automation: AutomationInfo }).automation.name).toBe('改名')
+    } finally {
+      inFlightRuns.delete('update-in-flight')
+    }
+  })
+
+  test('automation.create rolls back the auto-created project when createAutomation fails after the directory exists', async () => {
+    const home = makeHome()
+    const ctx = makeCtx(home)
+    const create = ROUTE_TABLE.find((route) => route.method === 'automation.create')!
+    // 让 writeAutomationRegistry 的临时文件路径不可写：目录存在时 writeFile 报 EISDIR。
+    // 此时 mkdir 与 createProject 都已经成功，正好落在回滚分支上。
+    const tmpPath = join(home, 'automations.json.tmp')
+    mkdirSync(tmpPath)
+    try {
+      await expect(
+        create.handler(
+          { params: {}, body: { name: '回滚', kind: 'agent', schedule: { kind: 'manual' }, prompt: 'x' }, query: new URLSearchParams() },
+          ctx,
+        ),
+      ).rejects.toThrow()
+    } finally {
+      rmSync(tmpPath, { recursive: true, force: true })
+    }
+    // 项目登记与物理目录都被撤掉：不留孤儿项目、不留空目录。
+    expect(await listProjects(home)).toEqual([])
+    const projectsDir = join(home, 'workspace-projects')
+    expect(existsSync(projectsDir) ? readdirSync(projectsDir) : []).toEqual([])
+  })
+
+  test.skipIf(process.platform === 'win32')('automation.create cleans the directory it created when createProject itself fails', async () => {
+    const home = makeHome()
+    const ctx = makeCtx(home)
+    const create = ROUTE_TABLE.find((route) => route.method === 'automation.create')!
+    // 可读不可写：预检 listProjects 正常，writeProjectRegistry 的 writeFile 报 EACCES。
+    writeFileSync(join(home, 'projects.json'), '{"projects":[]}\n', 'utf8')
+    chmodSync(join(home, 'projects.json'), 0o444)
+    try {
+      await expect(
+        create.handler(
+          { params: {}, body: { name: '登记失败', kind: 'agent', schedule: { kind: 'manual' }, prompt: 'x' }, query: new URLSearchParams() },
+          ctx,
+        ),
+      ).rejects.toThrow(/EACCES/)
+    } finally {
+      chmodSync(join(home, 'projects.json'), 0o644)
+    }
+    // 目录已建但未登记 ⇒ 必须按所有权清掉，不留未登记空目录。
+    const projectsDir = join(home, 'workspace-projects')
+    expect(existsSync(projectsDir) ? readdirSync(projectsDir) : []).toEqual([])
+    expect(await listProjects(home)).toEqual([])
+  })
+
+  type RollbackMode = 'nonempty' | 'referenced' | 'already-removed' | 'remove-fails' | 'read-fails'
+
+  async function failAutoProjectCreate(home: string, mode: RollbackMode, logs: string[]) {
+    const ctx = makeCtx(home, logs)
+    const create = ROUTE_TABLE.find((route) => route.method === 'automation.create')!
+    const tmpPath = join(home, 'automations.json.tmp')
+    const automationsPath = join(home, 'automations.json')
+    const projectsPath = join(home, 'projects.json')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const locked = withAutomationRegistryLock(() => gate)
+    // 立即接住成功/失败，避免故障注入阶段出现未处理 rejection。
+    const creating = create.handler(
+      { params: {}, body: { name: `回滚-${mode}`, kind: 'agent', schedule: { kind: 'manual' }, prompt: 'x' }, query: new URLSearchParams() },
+      ctx,
+    ).then(() => ({ error: undefined as unknown }), (error: unknown) => ({ error }))
+    let project: ProjectInfo | undefined
+    let setupError: unknown
+    try {
+      await vi.waitFor(async () => { expect(await listProjects(home)).toHaveLength(1) })
+      project = (await listProjects(home))[0]!
+      if (mode === 'nonempty') writeFileSync(join(project.root, 'keep.txt'), 'keep', 'utf8')
+      if (mode === 'referenced') {
+        const other: AutomationInfo = {
+          id: 'other-automation',
+          ...normalizeAutomationInput({ name: '占用', kind: 'agent', schedule: { kind: 'manual' }, prompt: 'x', projectId: project.id }),
+          createdAt: T0,
+        }
+        await writeAutomationRegistry(home, { automations: [other] })
+      }
+      if (mode === 'already-removed') await removeProject(home, project.id)
+      if (mode === 'remove-fails') chmodSync(projectsPath, 0o444)
+      if (mode === 'read-fails') {
+        await writeAutomationRegistry(home, { automations: [] })
+        chmodSync(automationsPath, 0o000)
+      } else {
+        // 除 read-fails 外,其余模式让原请求在写 automations.json.tmp 时失败。
+        mkdirSync(tmpPath)
+      }
+    } catch (error) {
+      setupError = error
+    } finally {
+      release()
+      await locked
+    }
+    const { error } = await creating
+    if (mode === 'read-fails' && existsSync(automationsPath)) chmodSync(automationsPath, 0o644)
+    if (mode === 'remove-fails' && existsSync(projectsPath)) chmodSync(projectsPath, 0o644)
+    rmSync(tmpPath, { recursive: true, force: true })
+    if (setupError) throw setupError
+    expect(error).toBeInstanceOf(Error)
+    if (mode === 'remove-fails') expect(String(error)).toContain('EISDIR') // 原始错误不被补偿错误替换
+    return { project: project! }
+  }
+
+  for (const mode of ['nonempty', 'referenced'] as const) {
+    test(`automation.create preserves the registered project and directory on ${mode}`, async () => {
+      const home = makeHome()
+      const logs: string[] = []
+      const { project } = await failAutoProjectCreate(home, mode, logs)
+      expect((await listProjects(home)).some((item) => item.id === project.id)).toBe(true)
+      expect(existsSync(project.root)).toBe(true)
+      expect(logs.some((line) => line.includes(project.id) || line.includes(project.root))).toBe(true)
+      if (mode === 'nonempty') expect(readFileSync(join(project.root, 'keep.txt'), 'utf8')).toBe('keep')
+      if (mode === 'referenced') {
+        expect((await listAutomations(home)).some((item) => item.projectId === project.id)).toBe(true)
+      }
+    })
+  }
+
+  test('automation.create does not recreate a project root that was concurrently removed from the registry', async () => {
+    const home = makeHome()
+    const logs: string[] = []
+    const { project } = await failAutoProjectCreate(home, 'already-removed', logs)
+    expect(await listProjects(home)).toEqual([])
+    expect(existsSync(project.root)).toBe(false)
+    expect(logs).toEqual([])
+  })
+
+  // 以下两种权限故障都只模拟 POSIX 非 root 环境，与既有 chmod 先例一致。
+  test.skipIf(process.platform === 'win32')('automation.create restores the empty root when registry removal fails', async () => {
+    const home = makeHome()
+    const logs: string[] = []
+    const { project } = await failAutoProjectCreate(home, 'remove-fails', logs)
+    expect((await listProjects(home)).some((item) => item.id === project.id)).toBe(true)
+    expect(existsSync(project.root)).toBe(true)
+    expect(logs.some((line) => line.includes(project.id))).toBe(true)
+  })
+
+  test.skipIf(process.platform === 'win32')('automation.create keeps the project when references cannot be read', async () => {
+    const home = makeHome()
+    const logs: string[] = []
+    const { project } = await failAutoProjectCreate(home, 'read-fails', logs)
+    expect((await listProjects(home)).some((item) => item.id === project.id)).toBe(true)
+    expect(existsSync(project.root)).toBe(true)
+    expect(logs.some((line) => line.includes(project.root))).toBe(true)
   })
 
   test('project.remove releases automation run sessions before deleting their logs', async () => {

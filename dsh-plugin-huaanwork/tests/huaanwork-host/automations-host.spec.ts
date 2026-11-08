@@ -9,16 +9,19 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 
 import type { AutomationInfo, ProjectInfo, RpcEvent, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
 import { inFlightRuns, inFlightRunsOf } from '../../src/huaanwork-host/automation-inflight.ts'
 import { automationRunSessionId } from '../../src/huaanwork-host/automation-session-ids.ts'
 import {
+  MISSING_PROJECT_OUTPUT,
+  automationAdmissionRoot,
   automationCollector,
   bindAutomationRuntime,
   enqueueAutomation,
+  hasInFlightAutomationRun,
   scriptRunKillers,
   scriptSlotWaiters,
   stopAutomation,
@@ -29,9 +32,9 @@ import { createAutomation, normalizeAutomationInput, updateAutomation } from '..
 import { ROUTE_TABLE, type RouteContext, type RouteHandler, type RouteRequest } from '../../src/huaanwork-host/routes.ts'
 import { sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import { AGENT_ID, sessionSend, type ListedAgent } from '../../src/huaanwork-host/sessions.ts'
-import { createProject, listAutomations, listProjects, recentRuns } from '../../src/huaanwork-host/stores.ts'
+import { createProject, listAutomations, recentRuns } from '../../src/huaanwork-host/stores.ts'
 import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
-import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
+import { neutralAutomationRootPath, neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 
 type Mode = 'immediate' | 'hang' | 'throw'
 
@@ -285,12 +288,9 @@ function shellName(): string {
   return process.platform === 'win32' ? 'pwsh' : 'bash'
 }
 
+/** 与生产准入同一判据:项目根,或该任务自己的 workspace-automations 根(纯路径,不建目录)。 */
 async function admissionRoot(h: Harness, automation: AutomationInfo): Promise<string> {
-  if (automation.projectId) {
-    const project = (await listProjects(h.profileDir)).find((item) => item.id === automation.projectId)
-    if (project) return resolve(project.root)
-  }
-  return resolve(h.neutral)
+  return await automationAdmissionRoot(h.routeCtx, automation)
 }
 
 /**
@@ -869,7 +869,7 @@ test('a manual run uses the task project root without moving the foreground root
   await waitRunEnd(h.events, neutralTask.id)
 })
 
-test('unbound agent runs on the neutral root and a vanished project still queues a failed run', { timeout: 15_000 }, async () => {
+test('unbound automation runs in its own workspace-automations root and a vanished project still queues a failed run', { timeout: 15_000 }, async () => {
   const h = makeHarness()
   h.state.reply = '中立产出'
   const neutralAgent = await agentTask(h.profileDir, { name: '每天一个为什么', prompt: '讲个冷知识' })
@@ -885,7 +885,33 @@ test('unbound agent runs on the neutral root and a vanished project still queues
   const script = await scriptTask(h.profileDir, nodeEval('process.stdout.write(process.cwd())'), { name: '中立脚本' })
   await handler('automation.run')(body({ id: script.id }), h.routeCtx)
   await waitRunEnd(h.events, script.id)
-  expect((await recentRuns(h.profileDir, script.id))[0]?.output).toBe(await realpath(h.neutral))
+  // 存量 projectId: null 的脚本在自己的 workspace-automations 根里跑,不再占用中立根。
+  expect((await recentRuns(h.profileDir, script.id))[0]?.output).toBe(
+    await realpath(neutralAutomationRootPath(h.profileDir, script.id)),
+  )
+
+  // 前台默认会话正占着 <profileDir>/workspace 时,无项目的任务仍可立即准入并跑完:
+  // 它有自己的根,不和前台默认会话抢中立根(root-busy 不应出现在这条路径上)。
+  expect(
+    h.scheduler.admitAutomation({
+      automationId: 'work-1-probe',
+      sessionId: 'work-1',
+      root: h.neutral,
+      runId: 'work-1-probe',
+      countsTowardCap: true,
+    }),
+  ).toEqual({ kind: 'start', root: h.neutral })
+  try {
+    const whileBusy = await agentTask(h.profileDir, { name: '前台占用时的冷知识', prompt: '讲个冷知识' })
+    expect(whileBusy.projectId).toBeNull()
+    expect(await handler('automation.run')(body({ id: whileBusy.id }), h.routeCtx)).toMatchObject({ queued: true })
+    await waitRunEnd(h.events, whileBusy.id)
+    expect((await recentRuns(h.profileDir, whileBusy.id))[0]).toMatchObject({ ok: true, output: '中立产出' })
+  } finally {
+    // 释放的是准入时登记的 sessionId('work-1'),不是 runId:release 按会话摘 rootWriters,
+    // 写错键等于没释放,后面的用例会继承被占的中立根。
+    h.scheduler.release('work-1')
+  }
 
   const project = await createProject(h.profileDir, { root: h.neutral, name: '将消失' })
   const ghost = await scriptTask(h.profileDir, nodeEval("process.stdout.write('x')"), {
@@ -897,7 +923,46 @@ test('unbound agent runs on the neutral root and a vanished project still queues
   expect(queued).toMatchObject({ queued: true })
   const failed = await waitRunEnd(h.events, ghost.id)
   expect(failed).toMatchObject({ ok: false })
-  expect((await recentRuns(h.profileDir, ghost.id))[0]?.output).toMatch(/任务所属项目不存在/)
+  expect((await recentRuns(h.profileDir, ghost.id))[0]?.output).toBe(MISSING_PROJECT_OUTPUT)
+  // 准入只推导路径:已删项目的失败运行不留下空目录。
+  expect(existsSync(neutralAutomationRootPath(h.profileDir, ghost.id))).toBe(false)
+})
+
+test('an unbound automation whose root path is blocked by a file fails the run and releases admission', async () => {
+  const h = makeHarness()
+  const script = await scriptTask(h.profileDir, 'echo never', { name: '被文件挡住' })
+  expect(script.projectId).toBeNull()
+  // 在 <profileDir>/workspace-automations/<id> 上先放一个同名文件:
+  // neutralAutomationRoot 的 mkdirSync(recursive) 对它必抛。
+  const blocked = neutralAutomationRootPath(h.profileDir, script.id)
+  mkdirSync(dirname(blocked), { recursive: true })
+  writeFileSync(blocked, 'not a directory', 'utf8')
+
+  // startAutomation 先真实准入,再返回可等待执行完成的 done;本文件没有 runOnce。
+  const { root, done } = await startAutomation(h, script)
+  await done
+
+  const [run] = await recentRuns(h.profileDir, script.id)
+  expect(run?.ok).toBe(false)
+  // 挡住 mkdir 的形态随平台/Node 而异:目标本身是文件 → EEXIST,中间段是文件 → ENOTDIR。
+  expect(run?.output).toMatch(/EEXIST|ENOTDIR/)
+  expect((await listAutomations(h.profileDir)).find((item) => item.id === script.id)?.lastStatus).not.toBe('running')
+  // 准入已释放:同一根可以再次准入。
+  // 注意不能用 activeTurnCount() 证明释放——脚本不计入 cap
+  // (turn-scheduler.ts:72 `countsTowardCap = kind !== 'script-automation'`,
+  //  :135 只在 countsTowardCap 时 +1,:206-208 返回 activeTurns),
+  // 本用例全程 activeTurns 恒为 0,那条断言无论释放与否都会通过。
+  // 直接探测 rootWriters:用 startAutomation 返回的同一个 root 键。
+  const probe = h.scheduler.admitAutomation({
+    automationId: script.id,
+    sessionId: 'probe-after-failure',
+    root,
+    runId: 'probe-after-failure',
+    countsTowardCap: false,
+    recordSkip: false,
+  })
+  expect(probe).toEqual({ kind: 'start', root })
+  h.scheduler.release('probe-after-failure')
 })
 
 test('pruneSessions keeps collector and recorded sessions', { timeout: 15_000 }, async () => {
@@ -1386,6 +1451,8 @@ test('a manual run keeps the caller supplied runId in flight and in the persiste
 
   const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'manual-fixed-1' })
   await poll(() => inFlightRunsOf(automation.id).length === 1)
+  // 供 automation.update 改绑守卫消费的只读判定:在途期间为真。
+  expect(hasInFlightAutomationRun(automation.id)).toBe(true)
   expect(inFlightRunsOf(automation.id)).toMatchObject([
     {
       automationId: automation.id,
@@ -1399,6 +1466,7 @@ test('a manual run keeps the caller supplied runId in flight and in the persiste
   h.release()
   await run.done
   expect(inFlightRunsOf(automation.id)).toEqual([])
+  expect(hasInFlightAutomationRun(automation.id)).toBe(false)
   expect((await recentRuns(h.profileDir, automation.id))[0]?.runId).toBe('manual-fixed-1')
 })
 
@@ -1871,4 +1939,53 @@ test.skipIf(process.platform === 'win32')('the SIGKILL grace still kills a TERM-
   // 给足 3.5 秒再断言它没有活下来(旧实现只看组长退出会放它跑完)。
   await new Promise((resolve) => setTimeout(resolve, 3_500))
   expect(existsSync(marker)).toBe(false)
+})
+
+test('rebinding keeps the admitted run on the old root and moves the next run to the new root', async () => {
+  const h = makeHarness()
+  const roots = mkdtempSync(join(tmpdir(), 'hw-auto-rebind-'))
+  dirs.push(roots)
+  const p1Root = join(roots, 'p1')
+  const p2Root = join(roots, 'p2')
+  mkdirSync(p1Root)
+  mkdirSync(p2Root)
+  const p1 = await createProject(h.profileDir, { root: p1Root, name: 'P1' })
+  const p2 = await createProject(h.profileDir, { root: p2Root, name: 'P2' })
+  const release = join(roots, 'release-first')
+  h.releaseFiles.push(release)
+  const task = await scriptTask(h.profileDir, holdCommand('first-cwd.txt', release), {
+    projectId: p1.id,
+    name: '改绑',
+  })
+
+  const first = await startAutomation(h, task)
+  expect(first.root).toBe(resolve(p1.root))
+  await poll(() => existsSync(join(p1.root, 'first-cwd.txt')))
+
+  // 模拟「update 的在途检查之后、注册表写入之前，另一轮已按旧根准入」的窗口。
+  // 路由自身的在途拒绝由本任务既有 automation.update 用例另行验证。
+  const rebound = await updateAutomation(h.profileDir, task.id, {
+    projectId: p2.id,
+    command: nodeEval('process.stdout.write(process.cwd())'),
+  })
+  expect(await automationAdmissionRoot(h.routeCtx, rebound)).toBe(resolve(p2.root))
+  expect(existsSync(join(p2.root, 'first-cwd.txt'))).toBe(false)
+
+  writeFileSync(release, '1')
+  await first.done
+  await waitRunEnd(h.events, task.id, 1)
+  expect(existsSync(join(p1.root, 'first-cwd.txt'))).toBe(true)
+  expect(existsSync(join(p2.root, 'first-cwd.txt'))).toBe(false)
+
+  const second = await startAutomation(h, rebound)
+  expect(second.root).toBe(resolve(p2.root))
+  await second.done
+  await waitRunEnd(h.events, task.id, 2)
+  // recentRuns 按时间顺序返回：appendRun 写的是 `[...existing, clipped]`
+  // （automations-store.ts），recentRuns 再 `runs.slice(-limit)`（stores.ts）。
+  // 所以 [0] 是首轮（holdCommand，无 stdout），[1] 才是第二轮的 cwd 输出。
+  // 既有顺序证据：automations-store.spec.ts:1179 在 [r1,r2] 删掉 r2 后断言 ['r1']。
+  expect((await recentRuns(h.profileDir, task.id))[1]?.output).toBe(await realpath(p2.root))
+  // 旧项目目录与其中的产物不搬家、不删除。
+  expect(existsSync(p1.root)).toBe(true)
 })

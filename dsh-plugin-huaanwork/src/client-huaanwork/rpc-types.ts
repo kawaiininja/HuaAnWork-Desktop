@@ -266,7 +266,7 @@ export type AutomationSchedule =
  * `isAutomationInfo` 的宽松校验是这条保证的唯一依据，不要改严。
  *
  * issue #2：`projectId` 可为 `null`（中立归属，不绑定任何项目）；旧记录均为
- * string，向前兼容。归属在创建后不可改（update 白名单不含 projectId）。
+ * string，向前兼容。
  */
 export type AutomationInfo = {
   id: string;

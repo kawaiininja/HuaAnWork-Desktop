@@ -106,3 +106,17 @@ function withoutWaitingOrSame(state: TabRunState, queueItemId: string): TabRunSt
   if (!state.waitingIds.includes(queueItemId)) return state;
   return { running: state.running, waitingIds: state.waitingIds.filter((id) => id !== queueItemId) };
 }
+
+/**
+ * `session.new` 铸造失败时给用户看哪一句。两种归属都不发送(设计 D2):
+ * 中立标签显示真实错误——目录建不出来这件事必须可见;项目标签沿用
+ * `App.tsx` 既有守卫那一句,避免同一种失败出现两种措辞。
+ * 只做判定,不做副作用:调用方负责 noteActive 与 return。
+ */
+export function sessionMintFailureNote(input: {
+  error: unknown;
+  tabProjectId: string | null | undefined;
+}): string {
+  if (input.tabProjectId != null) return "子任务会话尚未就绪，消息未发送。请重试。";
+  return input.error instanceof Error ? input.error.message : String(input.error);
+}

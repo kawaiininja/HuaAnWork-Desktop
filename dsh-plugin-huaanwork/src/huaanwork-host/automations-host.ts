@@ -26,7 +26,7 @@ import {
 } from './sessions.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
 import { listProjects, recentRuns } from './stores.ts'
-import { neutralWorkspaceRoot } from './workspace-state.ts'
+import { neutralAutomationRoot, neutralAutomationRootPath } from './workspace-state.ts'
 
 /**
  * 自动化执行体与入队层(旧 host.ts 入队/执行体)。
@@ -34,7 +34,8 @@ import { neutralWorkspaceRoot } from './workspace-state.ts'
  * Task 8 起 agent 与 script 都按目标根的写者名额互斥:准入只发生在调度 tick 与
  * `automation.run` 两处,`enqueueAutomation` 只执行已经占坑的运行。
  * agent 自动化直接调用执行体,不再串 `automationTail`;script 保留上限 2 的槽位池,
- * 槽位在该次准入成功之后获取。两类运行都用各自的准入根(项目根或中立根),不读前台根。
+ * 槽位在该次准入成功之后获取。两类运行都用各自的准入根(项目根,或该任务自己的
+ * `workspace-automations` 根),不读前台根。
  * 项目已删除不算准入失败:执行体照旧记一次失败运行。
  */
 
@@ -62,13 +63,14 @@ export type AutomationRunMeta = {
   trigger: AutomationTrigger
   /** 准入时确定的运行 id;写者键由它派生,不再在入队时二次生成。 */
   runId: string
-  /** 本次准入成功占下的可写根(项目根或中立根,已 resolve)。 */
+  /** 本次准入成功占下的可写根(项目根或该任务自己的自动化根,已 resolve)。 */
   root: string
   coalescedCount?: number
 }
 
 /** 准入已占下的可写根与这次运行唯一的写者释放器。 */
 export type AutomationAdmission = {
+  /** 项目根,或该任务自己的 `workspace-automations` 根。 */
   root: string
   release: () => void
 }
@@ -189,15 +191,24 @@ export function boundAutomationRuntime(): BoundRuntime | undefined {
 }
 
 /**
- * 准入与执行体共用的目标根:项目根;项目不存在或无项目时用中立根。
- * 项目已删除仍按中立根准入,执行体照旧记一次 missing-project 失败。
+ * 准入与执行体共用的目标根:项目根;无项目(或项目已删)时用该任务自己的
+ * `<profileDir>/workspace-automations/<automationId>`。
+ *
+ * 只推导路径、不建目录:准入不落盘(前台默认会话占着中立根时,存量未绑定任务
+ * 也因为根不同而不会被 root-busy 挡住);目录由执行体在真正跑之前按需创建。
+ * 项目已删除仍按上面的独立根准入,执行体照旧记一次 missing-project 失败而不建目录。
  */
 export async function automationAdmissionRoot(routeCtx: RouteContext, automation: AutomationInfo): Promise<string> {
   if (automation.projectId) {
     const project = (await listProjects(routeCtx.profileDir)).find((item) => item.id === automation.projectId)
     if (project) return pathResolve(project.root)
   }
-  return pathResolve(neutralWorkspaceRoot(routeCtx.profileDir))
+  return pathResolve(neutralAutomationRootPath(routeCtx.profileDir, automation.id))
+}
+
+/** 该任务是否有在途轮(供 `automation.update` 的改绑守卫等只读判定)。 */
+export function hasInFlightAutomationRun(automationId: string): boolean {
+  return inFlightRunsOf(automationId).length > 0
 }
 
 const automationTimeout = (routeCtx: RouteContext): number =>
@@ -602,6 +613,12 @@ export async function executeRun(
     let output = ''
     let status: 'ok' | 'error' | 'timeout' | 'cancelled' = 'ok'
     try {
+      // 存量未绑定任务的根按需创建:必须在内层 try 里、markAutomation 已把 lastStatus
+      // 写成 running 之后——建目录失败要走同一个 catch 记失败,并由 finally 收口
+      // (finishAutomation + 释放准入)。已删项目的早退在上面,不创建空目录。
+      if (!automation.projectId) {
+        neutralAutomationRoot(routeCtx.profileDir, automation.id)
+      }
       if (automation.kind === 'agent') {
         output = await runAgentTurn(
           ctx,

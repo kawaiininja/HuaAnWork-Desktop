@@ -48,6 +48,61 @@ export function neutralWorkspaceRoot(profileDir: string): string {
   return root
 }
 
+/** 校验 id 为合法的单层目录名（非空、不含 / 或 \、不为 . 或 ..）。不合法直接抛错拒绝，绝不回退到共享中立根。 */
+export function assertSafePathSegment(id: string, label: string): string {
+  const trimmed = id.trim()
+  if (
+    !trimmed ||
+    trimmed === '.' ||
+    trimmed === '..' ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\') ||
+    trimmed.includes('\0')
+  ) {
+    throw new Error(`非法 ${label}: ${id}`)
+  }
+  return trimmed
+}
+
+/** 独立中立会话根目录父容器：<profileDir>/workspace-sessions */
+export function neutralSessionsBaseDir(profileDir: string): string {
+  return join(profileDir, 'workspace-sessions')
+}
+
+/** 独立中立会话根的纯路径推导（不创建目录，无磁盘写副作用）。 */
+export function neutralSessionRootPath(profileDir: string, sessionId: string): string {
+  return join(neutralSessionsBaseDir(profileDir), assertSafePathSegment(sessionId, 'sessionId'))
+}
+
+/** 独立中立会话根（确保目录存在，仅在 sessionNew 确认分配给新会话时调用）。 */
+export function neutralSessionRoot(profileDir: string, sessionId: string): string {
+  const root = neutralSessionRootPath(profileDir, sessionId)
+  mkdirSync(root, { recursive: true })
+  return root
+}
+
+/** 自动化自动创建的项目目录路径：<profileDir>/workspace-projects/<projectId>（纯路径）。 */
+export function autoProjectRootPath(profileDir: string, projectId: string): string {
+  return join(profileDir, 'workspace-projects', assertSafePathSegment(projectId, 'projectId'))
+}
+
+/** 存量未绑定自动化根目录父容器：<profileDir>/workspace-automations */
+export function neutralAutomationsBaseDir(profileDir: string): string {
+  return join(profileDir, 'workspace-automations')
+}
+
+/** 存量未绑定自动化根的纯路径推导（不创建目录）。 */
+export function neutralAutomationRootPath(profileDir: string, automationId: string): string {
+  return join(neutralAutomationsBaseDir(profileDir), assertSafePathSegment(automationId, 'automationId'))
+}
+
+/** 存量未绑定自动化根（确保目录存在，仅在 projectId === null 真正执行前调用）。 */
+export function neutralAutomationRoot(profileDir: string, automationId: string): string {
+  const root = neutralAutomationRootPath(profileDir, automationId)
+  mkdirSync(root, { recursive: true })
+  return root
+}
+
 /**
  * 读取待切换根(组合期唯一读取点:profile.ts)。返回 null = 无待切换。
  *

@@ -10,6 +10,7 @@ import type {
   TaskInfo,
 } from '../client-huaanwork/rpc-types.ts'
 import { AUTO_SESSION_PREFIX } from './automation-session-ids.ts'
+import { assertSafePathSegment } from './workspace-state.ts'
 
 /**
  * M4 域存储读路径(Task 10):projects / tasks / automations 的注册表与运行历史,
@@ -56,58 +57,107 @@ function isProjectInfo(value: unknown): value is ProjectInfo {
   )
 }
 
+/**
+ * 项目注册表读改写互斥链(与 tasks/automations 的锁同款):
+ * create/rename/remove/touch 会交错(建项目与自动建项目、改名与最近打开时间),
+ * 串行化避免后写覆盖先写丢条目。读函数不加锁——读者看到完整旧态或新态即可。
+ */
+let projectRegistryLock: Promise<unknown> = Promise.resolve()
+
+export function withProjectRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = projectRegistryLock.then(fn)
+  // 操作抛错不能弄断链:吞掉错误后链继续。
+  projectRegistryLock = run.catch(() => undefined)
+  return run
+}
+
 export async function listProjects(storageRoot: string): Promise<ProjectInfo[]> {
   return (await readProjectRegistry(storageRoot)).projects
     .slice()
     .sort((a, b) => (b.lastOpenedAt ?? b.createdAt) - (a.lastOpenedAt ?? a.createdAt))
 }
 
-export async function createProject(storageRoot: string, params: { name?: string; root: string }): Promise<ProjectInfo> {
-  const root = typeof params.root === 'string' ? params.root.trim() : ''
-  if (!root) throw new Error('project.create requires params.root')
-  const info = await stat(root).catch(() => undefined)
-  if (!info?.isDirectory()) throw new Error(`project.create requires an existing directory: ${root}`)
+export async function createProject(
+  storageRoot: string,
+  params: { id?: string; name?: string; root: string },
+): Promise<ProjectInfo> {
+  return withProjectRegistryLock(async () => {
+    const root = typeof params.root === 'string' ? params.root.trim() : ''
+    if (!root) throw new Error('project.create requires params.root')
+    const info = await stat(root).catch(() => undefined)
+    if (!info?.isDirectory()) throw new Error(`project.create requires an existing directory: ${root}`)
 
-  const registry = await readProjectRegistry(storageRoot)
-  if (registry.projects.some((project) => project.root === root)) {
-    throw new Error(`该目录已是项目：${registry.projects.find((project) => project.root === root)?.name ?? root}`)
-  }
+    const registry = await readProjectRegistry(storageRoot)
+    if (registry.projects.some((project) => project.root === root)) {
+      throw new Error(`该目录已是项目：${registry.projects.find((project) => project.root === root)?.name ?? root}`)
+    }
 
-  const name = (typeof params.name === 'string' ? params.name.trim() : '') || basename(root) || root
-  const project: ProjectInfo = { id: randomUUID(), name, root, createdAt: Date.now() }
-  registry.projects.push(project)
-  await writeProjectRegistry(storageRoot, registry)
-  return project
+    // 调用方给 id 时以安全段校验为准(自动建项目把 id 当目录名用);不给则随机。
+    const id = typeof params.id === 'string' && params.id.trim()
+      ? assertSafePathSegment(params.id, 'projectId')
+      : randomUUID()
+    if (registry.projects.some((project) => project.id === id)) {
+      throw new Error(`project ${id} already exists`)
+    }
+    const name = (typeof params.name === 'string' ? params.name.trim() : '') || basename(root) || root
+    const project: ProjectInfo = { id, name, root, createdAt: Date.now() }
+    registry.projects.push(project)
+    await writeProjectRegistry(storageRoot, registry)
+    return project
+  })
 }
 
 export async function renameProject(storageRoot: string, projectId: string, name: string): Promise<ProjectInfo> {
   const trimmed = name.trim()
   if (!trimmed) throw new Error('project.rename requires a non-empty name')
-  const registry = await readProjectRegistry(storageRoot)
-  const project = registry.projects.find((item) => item.id === projectId)
-  if (!project) throw new Error(`project ${projectId} was not found`)
-  project.name = trimmed
-  await writeProjectRegistry(storageRoot, registry)
-  return project
+  return withProjectRegistryLock(async () => {
+    const registry = await readProjectRegistry(storageRoot)
+    const project = registry.projects.find((item) => item.id === projectId)
+    if (!project) throw new Error(`project ${projectId} was not found`)
+    project.name = trimmed
+    await writeProjectRegistry(storageRoot, registry)
+    return project
+  })
 }
 
 export async function removeProject(storageRoot: string, projectId: string): Promise<ProjectInfo> {
-  const registry = await readProjectRegistry(storageRoot)
-  const index = registry.projects.findIndex((item) => item.id === projectId)
-  if (index < 0) throw new Error(`project ${projectId} was not found`)
-  const removed = registry.projects[index]!
-  registry.projects.splice(index, 1)
-  await writeProjectRegistry(storageRoot, registry)
-  return removed
+  return withProjectRegistryLock(async () => {
+    const registry = await readProjectRegistry(storageRoot)
+    const index = registry.projects.findIndex((item) => item.id === projectId)
+    if (index < 0) throw new Error(`project ${projectId} was not found`)
+    const removed = registry.projects[index]!
+    registry.projects.splice(index, 1)
+    await writeProjectRegistry(storageRoot, registry)
+    return removed
+  })
 }
 
 /** 记录项目最近一次被打开(切换工作区)的时间,用于列表排序。 */
 export async function touchProject(storageRoot: string, projectId: string): Promise<void> {
-  const registry = await readProjectRegistry(storageRoot)
-  const project = registry.projects.find((item) => item.id === projectId)
-  if (!project) return
-  project.lastOpenedAt = Date.now()
-  await writeProjectRegistry(storageRoot, registry)
+  return withProjectRegistryLock(async () => {
+    const registry = await readProjectRegistry(storageRoot)
+    const project = registry.projects.find((item) => item.id === projectId)
+    if (!project) return
+    project.lastOpenedAt = Date.now()
+    await writeProjectRegistry(storageRoot, registry)
+  })
+}
+
+/**
+ * 自动建项目失败时该整体撤掉还是保留现场(B3)。
+ * 只有「本次创建、仍为空、仍无引用」三条同时成立才可以撤:
+ * - `dirEntries === undefined` 表示目录读不到,无法证明为空 ⇒ 保留;
+ * - 目录非空 ⇒ 里面可能已经是别人的产物 ⇒ 保留;
+ * - 已被别的自动化绑定 ⇒ 撤掉注册表条目会抽掉别人的归属 ⇒ 保留。
+ * 保留现场时调用方必须**连注册表条目一起保留**并写日志,不得只留目录。
+ */
+export function autoProjectRollbackAction(input: {
+  dirEntries: readonly string[] | undefined
+  referencedByAutomations: boolean
+}): 'remove' | 'keep' {
+  if (input.dirEntries === undefined) return 'keep'
+  if (input.dirEntries.length > 0) return 'keep'
+  return input.referencedByAutomations ? 'keep' : 'remove'
 }
 
 // —— tasks(旧 tasks.ts 逐字;参数 dshHome → storageRoot)——

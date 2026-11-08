@@ -38,7 +38,7 @@ import {
 import { createAgentPackageRuntimeRegistry, stopAllAgentPackageProcesses } from './agent-package/runtime.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
-import { clearPendingWorkspaceRoot, neutralWorkspaceRoot } from './workspace-state.ts'
+import { clearPendingWorkspaceRoot, neutralAutomationsBaseDir, neutralSessionsBaseDir, neutralWorkspaceRoot } from './workspace-state.ts'
 import { registerCallHostTool } from '../huaanwork-guardrails/agent-tool.ts'
 import {
   registerAgentPackageCreationTools,
@@ -194,11 +194,17 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     const registeredProjectRoots = (await listProjects(config.profileDir)).map((project) => project.root)
     // 中立根排除在 protectedRoots:registeredProjectRoots 可能是中立根的祖先目录(项目根注册在
     // profileDir 之上),此时 cwd 前缀比较会误命中中立根下的游离会话——规格 §1.3 要求它们永不清扫。
+    // 平级的中立命名空间同理(独立会话根 / 存量未绑定自动化根):它们与项目根只差一层目录名,
+    // 祖先项目根的前缀比较会一并命中,必须逐个排除,否则启动即删掉刚铸造的独立会话目录。
     const sweptProjectLegacy = await sweepProjectLegacySessionsOncePerProcess(
       join(config.dshHome, 'sessions'),
       registeredProjectRoots,
       referencedSessionIds,
-      [neutralWorkspaceRoot(config.profileDir)],
+      [
+        neutralWorkspaceRoot(config.profileDir),
+        neutralSessionsBaseDir(config.profileDir),
+        neutralAutomationsBaseDir(config.profileDir),
+      ],
     )
     if (sweptProjectLegacy.ran && (sweptProjectLegacy.removed > 0 || sweptProjectLegacy.skipped > 0)) {
       routeCtx.logger(`[sessions] swept ${sweptProjectLegacy.removed} project legacy session logs, skipped ${sweptProjectLegacy.skipped}`)

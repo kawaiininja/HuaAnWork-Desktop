@@ -1541,6 +1541,35 @@ describe('errorRoute wrapper factory & handler error injection (N1)', () => {
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
+
+  test('session.new 的铸造失败以 400 session-error 原样到达调用方', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'hw-session-new-'))
+    try {
+      // <profileDir>/workspace-sessions 先占成普通文件:铸造 <base>/<sessionId> 的 mkdir 必抛。
+      writeFileSync(join(tempDir, 'workspace-sessions'), 'file-not-dir')
+      const failCtx: RouteContext = {
+        dshHome: join(tempDir, 'dsh'),
+        profileDir: tempDir,
+        workspaceRoot: { current: join(tempDir, 'workspace') },
+        emit: () => {},
+        logger: () => {},
+        requestRestart: async () => true,
+      }
+      const sessionNewRoute = ROUTE_TABLE.find((r) => r.method === 'session.new')!
+      const error = await sessionNewRoute
+        .handler({ params: {}, body: { fresh: true }, query: new URLSearchParams() }, failCtx)
+        .catch((err: unknown) => err)
+      // 原文里的 ENOTDIR/ENOENT 是客户端看到的真实原因,不能只断言一个通用 400。
+      expect(error).toBeInstanceOf(RouteError)
+      if (error instanceof RouteError) {
+        expect(error.status).toBe(400)
+        expect(error.code).toBe('session-error')
+        expect(error.message).toMatch(/ENOTDIR|ENOENT|not a directory/i)
+      }
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('automation.stop 成功路径(Task 8)', () => {

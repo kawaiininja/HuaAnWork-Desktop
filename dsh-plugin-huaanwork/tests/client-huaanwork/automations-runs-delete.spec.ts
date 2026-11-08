@@ -15,7 +15,7 @@ vi.mock("../../src/client-huaanwork/api.ts", () => ({ rpcCall: vi.fn() }));
 
 import { rpcCall } from "../../src/client-huaanwork/api.ts";
 import AutomationsView, { lastRunLabel } from "../../src/client-huaanwork/AutomationsView.tsx";
-import type { AutomationInfo, RunSummary } from "../../src/client-huaanwork/logic/projects.ts";
+import type { AutomationInfo, ProjectInfo, RunSummary } from "../../src/client-huaanwork/logic/projects.ts";
 
 type DeleteResult = { removed: boolean; sessionDirRemoved: boolean };
 
@@ -54,11 +54,19 @@ let container: HTMLDivElement | undefined;
 function stubRpc(options: {
   runs: () => RunSummary[];
   deleteRun: (automationId: string, runId: string) => Promise<DeleteResult>;
+  /** 表单模态的保存应答；不传时原样回一份任务（编辑表单只读 nextRunAt）。 */
+  update?: (automationId: string, patch: Record<string, unknown>) => Promise<AutomationInfo>;
 }) {
   rpc.mockImplementation(async (method, params) => {
     if (method === "automation.runs") return { runs: options.runs() };
     if (method === "automation.deleteRun") {
       return options.deleteRun(String(params?.id), String(params?.runId));
+    }
+    // 创建表单挂载即取模板；模板加载失败被组件静默吞掉，这里给一份空列表让路径确定。
+    if (method === "automation.templates") return { templates: [] };
+    if (method === "automation.update") {
+      const update = options.update ?? (async () => AUTOMATION);
+      return { automation: await update(String(params?.id), params ?? {}) };
     }
     if (method === "session.open") return { log: "", records: [] };
     throw new Error(`unexpected rpc: ${method}`);
@@ -87,6 +95,34 @@ function deleteButtonFor(view: HTMLElement, output: string): HTMLButtonElement {
   return button;
 }
 
+const PROJECT_ALPHA: ProjectInfo = { id: "p-alpha", name: "Alpha 项目", root: "/tmp/alpha", createdAt: 1 };
+const PROJECT_BETA: ProjectInfo = { id: "p-beta", name: "Beta 项目", root: "/tmp/beta", createdAt: 2 };
+
+function selectByLabel(view: HTMLElement, label: string): HTMLSelectElement {
+  const select = view.querySelector(`select[aria-label="${label}"]`);
+  if (!(select instanceof HTMLSelectElement)) throw new Error(`select not found: ${label}`);
+  return select;
+}
+
+/** 当前选中项的下拉显示文案（不是 value：空值的默认项自带文案）。 */
+function selectedText(select: HTMLSelectElement): string {
+  return select.selectedOptions[0]?.textContent ?? "";
+}
+
+function optionByValue(select: HTMLSelectElement, value: string): HTMLOptionElement {
+  const option = [...select.options].find((item) => item.value === value);
+  if (option === undefined) throw new Error(`option not found: ${value}`);
+  return option;
+}
+
+/** 受控 select 的 change：先写 DOM 值再派发事件，React 从事件目标读新值。 */
+async function pickProject(select: HTMLSelectElement, value: string): Promise<void> {
+  await act(async () => {
+    select.value = value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
 async function mount(options: {
   onRunDeleted: (sessionId: string, automationId: string, startedAt: number) => void;
   onChanged: () => void;
@@ -95,6 +131,10 @@ async function mount(options: {
   runs?: Record<string, RunSummary[]>;
   /** 默认进「运行记录」tab；任务行用例留在「任务」tab。 */
   openRuns?: boolean;
+  /** 归属项目下拉的数据源（默认空列表：零项目也照常展示表单）。 */
+  projects?: ProjectInfo[];
+  /** 覆盖默认的单条任务（编辑态用例需要带归属的任务）。 */
+  automations?: AutomationInfo[];
 }): Promise<HTMLDivElement> {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   container = document.createElement("div");
@@ -103,9 +143,9 @@ async function mount(options: {
   await act(async () => {
     root!.render(
       createElement(AutomationsView, {
-        projects: [],
+        projects: options.projects ?? [],
         activeProjectId: null,
-        automations: [AUTOMATION],
+        automations: options.automations ?? [AUTOMATION],
         runs: options.runs ?? {},
         runningIds: options.runningIds ?? new Set<string>(),
         onChanged: options.onChanged,
@@ -255,6 +295,166 @@ describe("运行记录删除（spec §6）", () => {
     });
     expect(view.querySelector('[role="dialog"]')).toBeNull();
     expect(view.textContent).not.toContain("第一条输出");
+  });
+});
+
+describe("归属项目字段（设计 §3.3.3：创建自动建项目 / 编辑可改绑）", () => {
+  it("a create form defaults to auto-creating a same-named project and says so", async () => {
+    stubRpc({ runs: () => [], deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      openRuns: false,
+      projects: [PROJECT_ALPHA, PROJECT_BETA],
+    });
+
+    await act(async () => {
+      buttonByText(view, "＋ 新建任务").click();
+    });
+
+    const dialog = view.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const select = selectByLabel(dialog as HTMLElement, "归属项目");
+    // 创建态的默认项不是「不绑定」：宿主会自动创建同名项目并绑定。
+    expect(select.selectedOptions[0]?.value).toBe("");
+    expect(selectedText(select)).toBe("自动创建同名项目（推荐）");
+    expect(select.disabled).toBe(false);
+    expect(dialog!.textContent).toContain("将自动为您创建同名项目并绑定");
+    // 已有项目仍可显式选择（不是二选一的单选项）。
+    expect(optionByValue(select, PROJECT_BETA.id).textContent).toBe(PROJECT_BETA.name);
+  });
+
+  it("an edit form rebinds the project and sends projectId in automation.update", async () => {
+    const update = vi.fn(async (automationId: string, patch: Record<string, unknown>) => {
+      return { ...AUTOMATION, id: automationId, projectId: String(patch.projectId) };
+    });
+    stubRpc({ runs: () => [], deleteRun: async () => ({ removed: true, sessionDirRemoved: true }), update });
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      openRuns: false,
+      projects: [PROJECT_ALPHA, PROJECT_BETA],
+      automations: [{ ...AUTOMATION, projectId: PROJECT_ALPHA.id }],
+    });
+
+    await act(async () => {
+      buttonByText(view, "编辑").click();
+    });
+    const dialog = view.querySelector('[role="dialog"]') as HTMLElement;
+    const select = selectByLabel(dialog, "归属项目");
+    expect(selectedText(select)).toBe(PROJECT_ALPHA.name);
+    expect(select.disabled).toBe(false);
+
+    await pickProject(select, PROJECT_BETA.id);
+    await act(async () => {
+      buttonByText(dialog, "保存").click();
+    });
+
+    const updateCalls = rpc.mock.calls.filter((call) => call[0] === "automation.update");
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0]![1]).toMatchObject({ id: AUTOMATION.id, projectId: PROJECT_BETA.id });
+    // 补丁只带显式字段：整条 automation 展开会把 enabled/createdAt 一并写回宿主。
+    expect(updateCalls[0]![1]).not.toHaveProperty("enabled");
+    expect(updateCalls[0]![1]).not.toHaveProperty("createdAt");
+  });
+
+  it("saving an unchanged project select omits projectId from automation.update", async () => {
+    const update = vi.fn(async (automationId: string) => ({
+      ...AUTOMATION,
+      id: automationId,
+      projectId: PROJECT_ALPHA.id,
+    }));
+    stubRpc({ runs: () => [], deleteRun: async () => ({ removed: true, sessionDirRemoved: true }), update });
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      openRuns: false,
+      projects: [PROJECT_ALPHA, PROJECT_BETA],
+      automations: [{ ...AUTOMATION, projectId: PROJECT_ALPHA.id }],
+    });
+
+    await act(async () => {
+      buttonByText(view, "编辑").click();
+    });
+    const dialog = view.querySelector('[role="dialog"]') as HTMLElement;
+    expect(selectedText(selectByLabel(dialog, "归属项目"))).toBe(PROJECT_ALPHA.name);
+
+    await act(async () => {
+      buttonByText(dialog, "保存").click();
+    });
+
+    const updateCalls = rpc.mock.calls.filter((call) => call[0] === "automation.update");
+    expect(updateCalls).toHaveLength(1);
+    // OMIT 分支：绑定没变就不带 projectId（null 不可回写，见 AutomationPatch），
+    // 但显式字段仍照常发送。
+    expect(updateCalls[0]![1]).not.toHaveProperty("projectId");
+    expect(updateCalls[0]![1]).toMatchObject({
+      id: AUTOMATION.id,
+      name: AUTOMATION.name,
+      kind: "agent",
+      schedule: { kind: "manual" },
+    });
+  });
+
+  it("keeps the edit form's project select disabled while the task is running", async () => {
+    stubRpc({ runs: () => [], deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      openRuns: false,
+      runningIds: new Set([AUTOMATION.id]),
+      projects: [PROJECT_ALPHA, PROJECT_BETA],
+      automations: [{ ...AUTOMATION, projectId: PROJECT_ALPHA.id }],
+    });
+
+    await act(async () => {
+      buttonByText(view, "编辑").click();
+    });
+    const dialog = view.querySelector('[role="dialog"]') as HTMLElement;
+    expect(selectByLabel(dialog, "归属项目").disabled).toBe(true);
+    expect(dialog.textContent).toContain("任务正在运行，请等待运行结束或停止后再修改归属项目");
+  });
+
+  it("shows a legacy unbound task as a disabled placeholder it can rebind from", async () => {
+    stubRpc({ runs: () => [], deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      openRuns: false,
+      projects: [PROJECT_ALPHA, PROJECT_BETA],
+    });
+
+    await act(async () => {
+      buttonByText(view, "编辑").click();
+    });
+    const dialog = view.querySelector('[role="dialog"]') as HTMLElement;
+    const select = selectByLabel(dialog, "归属项目");
+    const placeholder = optionByValue(select, "");
+    expect(placeholder.disabled).toBe(true);
+    expect(placeholder.textContent).toBe("未绑定项目（历史任务，可选择项目绑定）");
+    expect(select.disabled).toBe(false);
+  });
+
+  it("marks a deleted project binding as rebind-required instead of silently dropping it", async () => {
+    stubRpc({ runs: () => [], deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      openRuns: false,
+      projects: [PROJECT_ALPHA, PROJECT_BETA],
+      automations: [{ ...AUTOMATION, projectId: "gone" }],
+    });
+
+    await act(async () => {
+      buttonByText(view, "编辑").click();
+    });
+    const dialog = view.querySelector('[role="dialog"]') as HTMLElement;
+    const select = selectByLabel(dialog, "归属项目");
+    const dangling = optionByValue(select, "gone");
+    expect(dangling.disabled).toBe(true);
+    expect(dangling.textContent).toBe("原归属项目已删除（请选择新项目）");
+    // 仍可直接选一个新项目改绑。
+    expect(selectByLabel(dialog, "归属项目").disabled).toBe(false);
   });
 });
 

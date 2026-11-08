@@ -1,7 +1,8 @@
 /**
- * 可写根推导(Task 3,规格 §5.1.1)。被测函数是同步推导:projects / tasks /
- * headerCwd 都由调用方预先载入,函数不读盘、不异步、不检查目录是否存在;
- * 唯一的副作用是中立根作为结果返回时创建 `<profile>/workspace`。
+ * 可写根推导(规格 §3.2.3)。被测函数是同步推导:projects / tasks / headerCwd 都由
+ * 调用方预先载入,函数不异步、不调 listProjects / listTasks / findSessionHeader;
+ * 唯一允许的读盘是中立前缀会话对 `workspace-sessions/<sessionId>` 至多两次
+ * existsSync + statSync 检查,唯一副作用是中立根作为结果返回时创建 `<profile>/workspace`。
  */
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,7 +10,14 @@ import { join, resolve } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 
 import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
-import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
+import {
+  neutralAutomationRoot,
+  neutralAutomationRootPath,
+  neutralSessionRoot,
+  neutralSessionRootPath,
+  neutralSessionsBaseDir,
+  neutralWorkspaceRoot,
+} from '../../src/huaanwork-host/workspace-state.ts'
 import { writableRootForSession } from '../../src/huaanwork-host/writable-root.ts'
 
 const dirs: string[] = []
@@ -228,5 +236,135 @@ test('a task whose project is gone falls through to the remaining rules', () => 
     sessionId: 'legacy',
     projects,
     tasks: [{ projectId: 'deleted', sessionId: 'legacy' }],
+  })).toBe(neutral)
+})
+
+test('minted fresh neutral session resolves to its workspace-sessions sibling root without side effects on unknown ids', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'huaanwork-fresh-neutral-'))
+  dirs.push(profile)
+  const neutral = resolve(neutralWorkspaceRoot(profile))
+  const mintedId = freshSessionIdFor(neutral)
+  const mintedRoot = resolve(neutralSessionRoot(profile, mintedId))
+
+  // 1. 刚由 session.new 铸造（目录已存在，尚未落首条 headerCwd）⇒ 返回该独立子根
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: mintedId,
+    projects: [],
+    tasks: [],
+  })).toBe(mintedRoot)
+
+  // 2. 已落盘在独立根（或其子目录）上的会话 ⇒ 返回该独立子根（即使不靠 existsSync 分支）
+  const persistedId = freshSessionIdFor(neutral)
+  const persistedRoot = resolve(neutralSessionRootPath(profile, persistedId))
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: persistedId,
+    projects: [],
+    tasks: [],
+    headerCwd: join(persistedRoot, 'subdir'),
+  })).toBe(persistedRoot)
+  expect(existsSync(persistedRoot)).toBe(false)
+
+  // 3. 未经 session.new 铸造的未知/伪造中立前缀 id ⇒ 回落 neutralRoot 且绝不创建 workspace-sessions 目录
+  const unmintedId = `${sessionIdFor(neutral)}-deadbeef`
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: unmintedId,
+    projects: [],
+    tasks: [],
+  })).toBe(neutral)
+  expect(existsSync(neutralSessionRootPath(profile, unmintedId))).toBe(false)
+})
+
+test('legacy neutral sessions with headerCwd equal to or inside <profileDir>/workspace stay on <profileDir>/workspace', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'huaanwork-legacy-neutral-'))
+  dirs.push(profile)
+  const neutral = resolve(neutralWorkspaceRoot(profile))
+  const legacyId = freshSessionIdFor(neutral)
+
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: legacyId,
+    projects: [],
+    tasks: [],
+    headerCwd: neutral,
+  })).toBe(neutral)
+
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: legacyId,
+    projects: [],
+    tasks: [],
+    headerCwd: join(neutral, 'docs', 'notes'),
+  })).toBe(neutral)
+  expect(existsSync(neutralSessionsBaseDir(profile))).toBe(false)
+})
+
+test('legacy unbound automation session with headerCwd under workspace-automations resolves to its automation root', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'huaanwork-legacy-auto-root-'))
+  dirs.push(profile)
+  const autoRoot = resolve(neutralAutomationRoot(profile, 'auto-legacy-1'))
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: 'huaanwork-auto-auto-legacy-1-run1',
+    projects: [],
+    tasks: [],
+    headerCwd: autoRoot,
+  })).toBe(autoRoot)
+})
+
+test('an unminted neutral-prefixed session with headerCwd under workspace-automations stays on <profileDir>/workspace (D4)', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'huaanwork-neutral-auto-cwd-'))
+  dirs.push(profile)
+  const neutral = resolve(neutralWorkspaceRoot(profile))
+  // 合法中立前缀但从未经 session.new 铸造,headerCwd 落在自动化目录:第 3 级就停在中立根,
+  // 不再走第 5 级的自动化目录识别。
+  const unmintedId = `${sessionIdFor(neutral)}-deadbeef`
+  const autoRoot = neutralAutomationRootPath(profile, 'auto-legacy-1')
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: unmintedId,
+    projects: [],
+    tasks: [],
+    headerCwd: join(autoRoot, 'notes'),
+  })).toBe(neutral)
+  expect(existsSync(autoRoot)).toBe(false)
+  expect(existsSync(neutralSessionRootPath(profile, unmintedId))).toBe(false)
+})
+
+test('invalid path segment in sessionId with neutral prefix throws instead of falling back to neutral root', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'huaanwork-bad-seg-'))
+  dirs.push(profile)
+  const neutral = resolve(neutralWorkspaceRoot(profile))
+  const neutralStable = sessionIdFor(neutral)
+  expect(() =>
+    writableRootForSession({
+      profileDir: profile,
+      sessionId: `${neutralStable}-../escape`,
+      projects: [],
+      tasks: [],
+    }),
+  ).toThrow(/非法 sessionId/)
+})
+
+test('a project registered on the neutral workspace does not capture a minted fresh session', () => {
+  const profile = mkdtempSync(join(tmpdir(), 'huaanwork-workspace-project-'))
+  dirs.push(profile)
+  const neutral = resolve(neutralWorkspaceRoot(profile))
+  const mintedId = freshSessionIdFor(neutral)
+  const mintedRoot = resolve(neutralSessionRoot(profile, mintedId))
+  const projects = [{ id: 'workspace-as-project', root: neutral }]
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: mintedId,
+    projects,
+    tasks: [],
+  })).toBe(mintedRoot)
+  expect(writableRootForSession({
+    profileDir: profile,
+    sessionId: sessionIdFor(neutral),
+    projects,
+    tasks: [],
   })).toBe(neutral)
 })

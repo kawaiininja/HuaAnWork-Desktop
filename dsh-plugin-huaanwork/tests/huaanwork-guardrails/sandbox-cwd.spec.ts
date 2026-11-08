@@ -9,6 +9,13 @@ import {
   registerChildSession,
   resetChildSessionRegistry,
 } from "../../src/huaanwork-host/child-sessions.ts";
+import {
+  assertSafePathSegment,
+  autoProjectRootPath,
+  neutralAutomationRootPath,
+  neutralSessionRootPath,
+  neutralWorkspaceRootPath,
+} from "../../src/huaanwork-host/workspace-state.ts";
 
 type StubHeader = { id?: string; cwd?: string; parentSession?: string };
 type StubOptions = { meta?: { cwd?: string; parentSession?: string } };
@@ -256,3 +263,51 @@ test("an unregistered session without a parent keeps the foreground root", () =>
 function resolveSame(path: string): string {
   return path;
 }
+
+test("assertSafePathSegment rejects empty, dot, and path-separator segments", () => {
+  assert.equal(assertSafePathSegment("huaanwork-0123456789abcdef-12345678", "sessionId"), "huaanwork-0123456789abcdef-12345678");
+  for (const bad of ["", "   ", ".", "..", "a/b", "a\\b", "../workspace", "a\0b"]) {
+    assert.throws(() => assertSafePathSegment(bad, "sessionId"), /非法 sessionId/);
+  }
+});
+
+test("sibling roots under profileDir are mutually isolated under pinnedCwd", () => {
+  const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-sibling-profile-"));
+  try {
+    const neutralRoot = neutralWorkspaceRootPath(profileDir);
+    const sessionA = neutralSessionRootPath(profileDir, "huaanwork-aaaaaaaaaaaaaaaa-11111111");
+    const sessionB = neutralSessionRootPath(profileDir, "huaanwork-aaaaaaaaaaaaaaaa-22222222");
+    const autoProject = autoProjectRootPath(profileDir, "proj-1");
+    const legacyAuto = neutralAutomationRootPath(profileDir, "auto-1");
+
+    // 1. 默认会话 (allowedRoot = <profileDir>/workspace) 不能写进任何平级新根，全部夹回 neutralRoot
+    for (const target of [
+      sessionA,
+      join(sessionA, "secret.txt"),
+      autoProject,
+      join(autoProject, "src", "index.ts"),
+      legacyAuto,
+    ]) {
+      assert.equal(
+        pinnedCwd({ huaanworkWorkspaceRoot: { current: neutralRoot } }, target, neutralRoot),
+        neutralRoot,
+      );
+    }
+
+    // 2. 两个独立中立会话互不包含，越界访问对方或默认根均被夹回自身根
+    assert.equal(
+      pinnedCwd({ huaanworkWorkspaceRoot: { current: neutralRoot } }, join(sessionB, "file.txt"), sessionA),
+      sessionA,
+    );
+    assert.equal(
+      pinnedCwd({ huaanworkWorkspaceRoot: { current: neutralRoot } }, join(neutralRoot, "file.txt"), sessionA),
+      sessionA,
+    );
+    assert.equal(
+      pinnedCwd({ huaanworkWorkspaceRoot: { current: neutralRoot } }, join(sessionA, "sub", "ok.txt"), sessionA),
+      join(sessionA, "sub", "ok.txt"),
+    );
+  } finally {
+    rmSync(profileDir, { recursive: true, force: true });
+  }
+});
