@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   RUNS_LIMIT,
+  autoProjectRollbackAction,
   bindTaskSession,
   createProject,
   createTask,
@@ -124,6 +125,63 @@ describe('projects 读路径(旧 projects.test.ts 用例)', () => {
   test('projects.json 缺失时返回空表', async () => {
     const home = makeHome()
     expect(await listProjects(home)).toEqual([])
+  })
+
+  test('并发 createProject(含显式 id)与 renameProject 不丢条目(项目注册表互斥链)', async () => {
+    const home = makeHome()
+    const seedRoot = join(home, 'seed')
+    mkdirSync(seedRoot, { recursive: true })
+    const seed = await createProject(home, { id: 'seed', name: '初始名', root: seedRoot })
+
+    const roots = Array.from({ length: 8 }, (_, i) => join(home, `repo-${i}`))
+    for (const root of roots) mkdirSync(root, { recursive: true })
+
+    // 读改写周期交错:无锁时后写覆盖先写,创建条目与改名一起丢。
+    await Promise.all([
+      renameProject(home, seed.id, '改名后'),
+      ...roots.map((root, i) => createProject(home, { id: `custom-${i}`, name: `项目 ${i}`, root })),
+    ])
+
+    const listed = await listProjects(home)
+    expect(listed.map((project) => project.id).sort()).toEqual(
+      [...roots.map((_, i) => `custom-${i}`), 'seed'].sort(),
+    )
+    expect(listed.find((project) => project.id === 'seed')?.name).toBe('改名后')
+    expect(listed.filter((project) => project.id === 'seed')).toHaveLength(1)
+  })
+
+  test('createProject 使用调用方 id;重复 id 抛错且注册表仍只有一条', async () => {
+    const home = makeHome()
+    const rootA = join(home, 'repo-a')
+    const rootB = join(home, 'repo-b')
+    mkdirSync(rootA, { recursive: true })
+    mkdirSync(rootB, { recursive: true })
+
+    const created = await createProject(home, { id: 'custom-id', name: 'P', root: rootA })
+    expect(created.id).toBe('custom-id')
+    expect(created.name).toBe('P')
+    expect((await listProjects(home)).map((project) => project.id)).toEqual(['custom-id'])
+
+    // 不同 root、同 id:必须抛错,且注册表不多出一条。
+    await expect(createProject(home, { id: 'custom-id', name: 'Q', root: rootB })).rejects.toThrow(/custom-id/)
+    expect((await listProjects(home)).map((project) => project.id)).toEqual(['custom-id'])
+
+    // 显式 id 也走安全段校验。
+    await expect(createProject(home, { id: '../escape', root: rootB })).rejects.toThrow(/非法/)
+    expect((await listProjects(home)).map((project) => project.id)).toEqual(['custom-id'])
+  })
+})
+
+describe('autoProjectRollbackAction(B3 回滚判定)', () => {
+  test('autoProjectRollbackAction only removes a directory this request created and nobody reused', () => {
+    // 沿用本文件既有 Vitest expect，不新增 node:assert 导入。
+    expect(autoProjectRollbackAction({ dirEntries: [], referencedByAutomations: false })).toBe('remove')
+    // 目录里已经有东西 ⇒ 保留现场（注册表条目一并保留，见 Task 6）。
+    expect(autoProjectRollbackAction({ dirEntries: ['notes.md'], referencedByAutomations: false })).toBe('keep')
+    // 已被别的自动化绑定 ⇒ 保留现场，否则会把别人的归属抽掉。
+    expect(autoProjectRollbackAction({ dirEntries: [], referencedByAutomations: true })).toBe('keep')
+    // 目录读不到（undefined）⇒ 无法证明为空 ⇒ 保留现场，不得递归抢删。
+    expect(autoProjectRollbackAction({ dirEntries: undefined, referencedByAutomations: false })).toBe('keep')
   })
 })
 

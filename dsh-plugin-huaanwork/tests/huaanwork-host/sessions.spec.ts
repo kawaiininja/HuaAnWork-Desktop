@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -48,7 +48,7 @@ import {
   writeHuaanworkSettings,
 } from '../../src/huaanwork-host/settings.ts'
 import { assertStreamNetworkAllowed } from '../../src/huaanwork-host/net-gate.ts'
-import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
+import { neutralSessionsBaseDir, neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 import { sessionWorkspaceRoot } from '../../src/huaanwork-guardrails/sandbox-cwd.ts'
 import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
@@ -292,7 +292,7 @@ describe('sessionIdFor / freshSessionIdFor (旧 session-history.test.ts:L61-69)'
 })
 
 describe('session.new (旧 host.ts:988-992)', () => {
-  test('mints stable vs fresh ids', () => {
+  test('mints stable root for default session and isolated workspace-sessions roots for fresh neutral sessions', () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)
     const stable = sessionNew(routeCtx, {})
@@ -300,9 +300,24 @@ describe('session.new (旧 host.ts:988-992)', () => {
     expect(stable.cwd).toBe(routeCtx.workspaceRoot.current)
     const freshA = sessionNew(routeCtx, { fresh: true })
     const freshB = sessionNew(routeCtx, { fresh: true })
-    expect(freshA.cwd).toBe(routeCtx.workspaceRoot.current)
     expect(freshA.sessionId).not.toBe(freshB.sessionId)
     expect(freshA.sessionId).toMatch(/^huaanwork-[0-9a-f]{16}-[0-9a-f]{8}$/)
+    expect(freshA.cwd).toBe(join(routeCtx.profileDir, 'workspace-sessions', freshA.sessionId))
+    expect(freshB.cwd).toBe(join(routeCtx.profileDir, 'workspace-sessions', freshB.sessionId))
+    expect(existsSync(freshA.cwd)).toBe(true)
+    expect(existsSync(freshB.cwd)).toBe(true)
+  })
+
+  test('a fresh session with an existing project cwd keeps that cwd and mints no workspace-sessions root', () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const project = join(root, 'project-a')
+    mkdirSync(project, { recursive: true })
+    const created = sessionNew(routeCtx, { fresh: true, cwd: project })
+    // 已有目录(非中立根)只换 id 后缀:不铸造兄弟根,连父容器都不该出现。
+    expect(created.cwd).toBe(resolve(project))
+    expect(created.sessionId.startsWith(`${sessionIdFor(project)}-`)).toBe(true)
+    expect(existsSync(neutralSessionsBaseDir(routeCtx.profileDir))).toBe(false)
   })
 })
 
@@ -1372,6 +1387,20 @@ describe('session.resume (旧 host.ts:994-1002 / session-history.test.ts:L155-24
     const resumed = await sessionResume(ctx, routeCtx, { sessionId })
     expect(resumed.resumed).toBe(true)
   })
+
+  test('legacy neutral-prefix sessions whose cwd is the workspace or inside it still resume', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const workspace = resolve(neutralWorkspaceRoot(routeCtx.profileDir))
+    const onRoot = freshSessionIdFor(workspace)
+    const nested = freshSessionIdFor(workspace)
+    writePersistedSession(routeCtx.dshHome, onRoot, workspace)
+    writePersistedSession(routeCtx.dshHome, nested, join(workspace, 'sub'))
+    const { ctx } = fakeAgentsRegistry()
+
+    await expect(sessionResume(ctx, routeCtx, { sessionId: onRoot })).resolves.toEqual({ sessionId: onRoot, resumed: true })
+    await expect(sessionResume(ctx, routeCtx, { sessionId: nested })).resolves.toEqual({ sessionId: nested, resumed: true })
+  })
 })
 
 describe('session.cancel (旧 host.ts:1560)', () => {
@@ -1515,6 +1544,18 @@ describe('session.open / session.remove (旧 host.ts:1381/1395)', () => {
     await expect(sessionRemove({}, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
     await expect(sessionOpen(routeCtx, { sessionId })).rejects.toThrow(/was not found/)
   })
+
+  test('sessionRemove deletes the sibling directory of a fresh neutral session', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const fresh = sessionNew(routeCtx, { fresh: true })
+    writePersistedSession(routeCtx.dshHome, fresh.sessionId, fresh.cwd)
+    expect(existsSync(fresh.cwd)).toBe(true)
+
+    await expect(sessionRemove(undefined, routeCtx, { sessionId: fresh.sessionId })).resolves.toEqual({ removed: true })
+
+    expect(existsSync(fresh.cwd)).toBe(false)
+  })
 })
 
 describe('session.remove lifecycle', () => {
@@ -1571,6 +1612,50 @@ describe('session.remove lifecycle', () => {
     expect(childrenOf('parent-of-removed')).not.toContain(sessionId)
     expect(noteInvalidRoute(sessionId).endTurn).toBe(false)
     await expect(sessionOpen(routeCtx, { sessionId })).rejects.toThrow(/was not found/)
+  })
+
+  test('sessionRemove only ever touches the minted sibling root, never the shared workspace or a project root', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const workspace = resolve(neutralWorkspaceRoot(routeCtx.profileDir))
+    const projectRoot = join(root, 'project-a')
+    mkdirSync(projectRoot, { recursive: true })
+    // 存量中立前缀会话：cwd 是共享 workspace，本身没有兄弟根。
+    const legacyId = `${sessionIdFor(workspace)}-legacy01`
+    writePersistedSession(routeCtx.dshHome, legacyId, workspace)
+    // 项目会话：id 与中立前缀无关。
+    writePersistedSession(routeCtx.dshHome, 'project-session-1', projectRoot)
+    // 两个根里各放一个文件：任何越界递归删除都会留下痕迹。
+    writeFileSync(join(workspace, 'keep.txt'), 'neutral', 'utf8')
+    writeFileSync(join(projectRoot, 'keep.txt'), 'project', 'utf8')
+
+    await expect(sessionRemove(undefined, routeCtx, { sessionId: legacyId })).resolves.toEqual({ removed: true })
+    await expect(sessionRemove(undefined, routeCtx, { sessionId: 'project-session-1' })).resolves.toEqual({ removed: true })
+
+    expect(existsSync(join(workspace, 'keep.txt'))).toBe(true)
+    expect(existsSync(join(projectRoot, 'keep.txt'))).toBe(true)
+    // 连兄弟根的父容器都不该被创建出来。
+    expect(existsSync(neutralSessionsBaseDir(routeCtx.profileDir))).toBe(false)
+  })
+
+  test.skipIf(process.platform === 'win32')('sessionRemove logs and still reports removed when the sibling root cannot be deleted', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const fresh = sessionNew(routeCtx, { fresh: true })
+    writePersistedSession(routeCtx.dshHome, fresh.sessionId, fresh.cwd)
+    const logs: string[] = []
+    const loggingCtx: RouteContext = { ...routeCtx, logger: (message: string) => { logs.push(message) } }
+    // POSIX mode bits 才可制造这次失败；Windows 与既有先例一致显式 skip（automations-store.spec.ts:1107/:1131）。
+    // 父目录只读 ⇒ 非 root POSIX 用户删不掉里面的会话根；root 运行不属于本用例的验证环境。
+    const base = neutralSessionsBaseDir(routeCtx.profileDir)
+    chmodSync(base, 0o555)
+    try {
+      // 日志已经删掉、删除照样报成功；rm 失败只记日志，不抛给调用方。
+      await expect(sessionRemove(undefined, loggingCtx, { sessionId: fresh.sessionId })).resolves.toEqual({ removed: true })
+      expect(logs.some((line) => line.includes(fresh.sessionId))).toBe(true)
+    } finally {
+      chmodSync(base, 0o755)
+    }
   })
 
   /** full 模式答一次计划评审,把目标记为该会话的已确认基线;这里返回评审监听器与事件。 */
@@ -2090,6 +2175,27 @@ describe('session.send 调度器接线', () => {
       queueItemId: expect.any(String),
     })
     idleA2.resolve()
+  })
+
+  test('two fresh neutral sessions start together when the cap is at least 2', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 2 })
+    const freshA = sessionNew(h.routeCtx, { fresh: true })
+    const freshB = sessionNew(h.routeCtx, { fresh: true })
+    const idleA = makeDeferred()
+    const idleB = makeDeferred()
+    h.addAgent(freshA.sessionId, () => idleA.promise)
+    h.addAgent(freshB.sessionId, () => idleB.promise)
+
+    const sentA = await h.send({ text: 'a', sessionId: freshA.sessionId, tabId: 'tab-a', modelId: 'm1' })
+    const sentB = await h.send({ text: 'b', sessionId: freshB.sessionId, tabId: 'tab-b', modelId: 'm1' })
+
+    expect(sentA).toMatchObject({ started: true, waiting: false })
+    expect(sentB).toMatchObject({ started: true, waiting: false })
+    expect(h.followupsBySession.get(freshA.sessionId)).toEqual(['a'])
+    expect(h.followupsBySession.get(freshB.sessionId)).toEqual(['b'])
+    idleA.resolve()
+    idleB.resolve()
   })
 
   test('cancelling a running turn keeps the slot until the turn is idle', async () => {

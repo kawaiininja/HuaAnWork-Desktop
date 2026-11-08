@@ -71,7 +71,10 @@ export const UNATTENDED_DEFAULT_ALLOW: UnattendedToolName[] = [
 ]
 
 export type AutomationInput = {
-  /** 项目归属:null = 中立。创建后不可改(update 白名单不含 projectId)。 */
+  /**
+   * 项目归属:null = 中立。更新路由可把 `projectId` 改绑到一个非空且已存在的项目 id
+   * (存在性由路由守卫,存储层只认「非空字符串」),不能改回 `null`。
+   */
   projectId: string | null
   name: string
   kind: 'agent' | 'script'
@@ -312,6 +315,10 @@ export async function updateAutomation(
 
     const next = { ...automation }
     if (typeof patch.name === 'string' && patch.name.trim()) next.name = patch.name.trim()
+    // 改绑只认非空字符串:null / 空串 / 非字符串一律忽略,永不清空已有归属。
+    if (typeof patch.projectId === 'string' && patch.projectId.trim()) {
+      next.projectId = patch.projectId.trim()
+    }
     if (patch.kind === 'agent' || patch.kind === 'script') next.kind = patch.kind
     if (patch.schedule !== undefined) next.schedule = normalizeSchedule(patch.schedule)
     const prompt = optionalString(patch.prompt)

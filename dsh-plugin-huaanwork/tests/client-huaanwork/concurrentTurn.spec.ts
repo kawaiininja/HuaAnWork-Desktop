@@ -10,6 +10,7 @@ import {
   noteWaitingStarted,
   releaseWaitingItem,
   sendOpensTurn,
+  sessionMintFailureNote,
   type TabRunState,
 } from "../../src/client-huaanwork/logic/concurrentTurn.ts";
 
@@ -101,4 +102,21 @@ test("a waiting item that fails or is cancelled keeps its message but never beco
   });
   assert.equal(isUnstartedUserItem(releaseWaitingItem(message, false)), true);
   assert.equal(message.queueItemId, "q1", "the helper never mutates the waiting message");
+});
+
+test("session.new failure shows the real error on a neutral tab and the existing copy on a project tab", () => {
+  // 中立标签（projectId 为 null 或缺失）：目录建不出来这件事必须可见，显示真实错误。
+  assert.equal(
+    sessionMintFailureNote({ error: new Error("ENOSPC: no space left on device"), tabProjectId: null }),
+    "ENOSPC: no space left on device",
+  );
+  assert.equal(sessionMintFailureNote({ error: new Error("EACCES"), tabProjectId: undefined }), "EACCES");
+  // 字符串非 Error 原样可见。
+  assert.equal(sessionMintFailureNote({ error: "磁盘已满", tabProjectId: null }), "磁盘已满");
+
+  // 项目标签：与 App.tsx:2695-2698 既有守卫同一句，避免同一种失败出现两种措辞。
+  assert.equal(
+    sessionMintFailureNote({ error: new Error("EACCES"), tabProjectId: "p1" }),
+    "子任务会话尚未就绪，消息未发送。请重试。",
+  );
 });

@@ -38,7 +38,7 @@ type Props = {
    */
   enterIntent?: {
     mode: "create" | "focus";
-    /** issue #2：可空——create 一律为 null(表单内下拉默认「不绑定」);focus 允许无归属任务。 */
+    /** create 一律为 null（表单默认自动建同名项目）；focus 允许无归属任务。 */
     projectId: string | null;
     schedule?: AutomationSchedule;
     prompt?: string;
@@ -71,7 +71,7 @@ type Tab = "tasks" | "runs" | "board";
 type Editing =
   | {
       mode: "create";
-      /** 创建表单项目下拉的初始值;issue #2 起所有入口一律传 null(默认不绑定)。 */
+      /** 创建表单归属下拉的初始值：所有入口一律传 null（默认自动建同名项目）。 */
       projectId: string | null;
       /** Task 13：composer 命中自然语言调度短语时的预填（一次性赋值，用户仍可改动任意字段）。 */
       schedule?: AutomationSchedule;
@@ -125,7 +125,7 @@ export default function AutomationsView({
   missedBanner,
   onDismissMissedBanner,
 }: Props) {
-  // 注意:Props 里的 activeProjectId 不再用于创建归属(issue #2 起创建一律默认不绑定),仅为兼容 App 调用保留。
+  // 注意:Props 里的 activeProjectId 不再用于创建归属(创建一律以 null 进表单，默认自动建同名项目),仅为兼容 App 调用保留。
   const [tab, setTab] = useState<Tab>("tasks");
   const [editing, setEditing] = useState<Editing | null>(null);
   const [confirming, setConfirming] = useState<AutomationInfo | null>(null);
@@ -148,7 +148,7 @@ export default function AutomationsView({
   }, [enterIntent, onEnterIntentConsumed]);
 
   // 项目选择器已移除（2026-09-10）：任务 / 运行记录 / 看板均为跨项目全局视图。
-  // issue #2：「新建任务」不再隐式归属——一律以 null 进表单,绑定由表单内项目下拉显式选择。
+  // 设计 §3.3.3：新建任务一律以 null 进表单，由表单默认「自动创建同名项目」，也可改选已有项目。
   const projectNameOf = useMemo(() => {
     const names = new Map(projects.map((project) => [project.id, project.name]));
     return (id: string | null) => (id ? (names.get(id) ?? "") : "");
@@ -321,6 +321,7 @@ export default function AutomationsView({
         <AutomationFormModal
           editing={editing}
           projects={projects}
+          running={editing.mode === "edit" && runningIds.has(editing.automation.id)}
           onClose={() => setEditing(null)}
           onChanged={onChanged}
           onCreated={onAutomationCreated}
@@ -845,14 +846,17 @@ function cronPreview(expr: string): string {
 function AutomationFormModal({
   editing,
   projects,
+  running = false,
   onClose,
   onChanged,
   onCreated,
   onDone,
 }: {
   editing: Editing;
-  /** issue #2：创建表单的项目下拉数据源（默认「不绑定」）。 */
+  /** 归属项目下拉的数据源（创建时默认自动建同名项目，编辑时可改绑）。 */
   projects: ProjectInfo[];
+  /** 编辑对象的任务正在运行：归属项目下拉锁住（改绑要在不跑的时候做）。 */
+  running?: boolean;
   onClose: () => void;
   onChanged: () => void;
   /** review finding 5：仅在 create 分支真正创建成功后调用一次，通知 App 侧清空对应的 composer 草稿。 */
@@ -864,7 +868,7 @@ function AutomationFormModal({
   const prefillSchedule = editing.mode === "create" ? editing.schedule : undefined;
   const prefillPrompt = editing.mode === "create" ? editing.prompt : undefined;
   const [name, setName] = useState(source?.name ?? "");
-  // issue #2：项目归属显式选择,默认「不绑定」(null);仅创建模式可选,编辑不可改(sidecar update 白名单不含 projectId)。
+  // 归属项目显式选择：创建态默认 null（宿主自动建同名项目），编辑态以当前归属为初值并在保存时改绑。
   const [bindProjectId, setBindProjectId] = useState<string | null>(
     editing.mode === "create" ? editing.projectId : (source?.projectId ?? null),
   );
@@ -1069,6 +1073,10 @@ function AutomationFormModal({
           missedPolicy,
           taskShape,
           unattended: unattendedEnabled ? { enabled: true, allow: buildUnattendedAllow() } : "",
+          // 设计 §3.3.3：只有真的改绑才把 projectId 放进补丁（null 不可回写，见 AutomationPatch）。
+          ...(bindProjectId !== null && bindProjectId !== editing.automation.projectId
+            ? { projectId: bindProjectId }
+            : {}),
         });
         setSavedNextRun(automation.nextRunAt ?? null);
       }
@@ -1109,27 +1117,40 @@ function AutomationFormModal({
           <input className="modal-input" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder="如：每日早报" />
         </label>
 
-        {editing.mode === "create" ? (
-          <label className="modal-field">
-            归属项目（可选）
-            <select
-              className="modal-input"
-              value={bindProjectId ?? ""}
-              aria-label="归属项目"
-              onChange={(event) => setBindProjectId(event.target.value || null)}
-            >
-              <option value="">不绑定（中立任务）</option>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-            <span className="muted" style={{ fontSize: 12 }}>
-              创建后不可更改；不绑定的任务与任何项目目录无关
-            </span>
-          </label>
-        ) : null}
+        <label className="modal-field">
+          {editing.mode === "create" ? "归属项目（可选）" : "归属项目"}
+          <select
+            className="modal-input"
+            value={bindProjectId ?? ""}
+            aria-label="归属项目"
+            disabled={editing.mode === "edit" && Boolean(running)}
+            onChange={(event) => setBindProjectId(event.target.value || null)}
+          >
+            {editing.mode === "create" ? (
+              <option value="">自动创建同名项目（推荐）</option>
+            ) : source?.projectId === null ? (
+              <option value="" disabled>
+                未绑定项目（历史任务，可选择项目绑定）
+              </option>
+            ) : !projects.some((project) => project.id === source?.projectId) ? (
+              <option value={source?.projectId ?? ""} disabled>
+                原归属项目已删除（请选择新项目）
+              </option>
+            ) : null}
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {editing.mode === "create"
+              ? "未选择已有项目时，将自动为您创建同名项目并绑定；也可选择已有项目"
+              : running
+                ? "任务正在运行，请等待运行结束或停止后再修改归属项目"
+                : "修改归属项目后，下一轮运行将在新项目目录中执行（原项目文件不会迁移）"}
+          </span>
+        </label>
 
         {editing.mode === "create" && availableTemplates.length > 0 ? (
           <label className="modal-field">

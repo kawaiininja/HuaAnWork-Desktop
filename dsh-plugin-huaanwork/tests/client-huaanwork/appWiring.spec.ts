@@ -341,6 +341,20 @@ test("the task-row stop goes through the reconciling stop path and refreshes aft
   assert.ok(refreshAt > callAt, "the task row refreshes from the host after the await on the stop call");
 });
 
+test("the automations view refreshes the project list alongside the tasks", () => {
+  // 设计 §3.3.3：automation.create 会自动建项目。只刷任务列表时，新项目在侧栏
+  // 要等下一次刷新（重启/开项目）才出现，用户会以为没建成。
+  const at = APP_SOURCE.indexOf("<AutomationsView");
+  const end = APP_SOURCE.indexOf("/>", at);
+  assert.ok(at >= 0 && end > at, "the AutomationsView call site is still present");
+  const site = APP_SOURCE.slice(at, end);
+  assert.match(
+    site,
+    /onChanged=\{\(\) => \{\s*void refreshAutomations\(\);\s*void refreshProjects\(\);\s*\}\}/,
+    "onChanged refreshes tasks and projects: a project auto-created by automation.create is otherwise invisible",
+  );
+});
+
 test("running-run state converges on refresh, host exit and stopped:false", () => {
   const refreshAt = APP_SOURCE.indexOf("async function refreshAutomations()");
   const refreshEnd = APP_SOURCE.indexOf("function handleRunDeleted", refreshAt);
@@ -700,6 +714,31 @@ test("send carries the tab id and selected model and mints under the tab's own r
   assert.match(body, /\.\.\.\(modelId \? \{ modelId \} : \{\}\),/);
   assert.match(body, /\{ at: \{ name: invokedAt\.name, clientMessageId: String\(userMsg\.id\) \} \}/);
   assert.match(body, /\{ skill: invokedSkill\.name \}/);
+});
+
+test("a neutral tab does not send when session.new fails", () => {
+  const body = functionBody("async function send()", "async function stopTurn(");
+  const mintAt = body.indexOf('"session.new"');
+  const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
+  assert.ok(mintAt >= 0 && sendAt > mintAt);
+  const between = body.slice(mintAt, sendAt);
+  // 接线钉：catch 调用抽出的判定函数，随后 return。catch 内不再有分支。
+  assert.match(
+    between,
+    /catch \(error\) \{\s*noteActive\(sessionMintFailureNote\(\{ error, tabProjectId: sendingTab\?\.projectId \}\)\);\s*return;\s*\}/,
+  );
+  // 不得退回改造前的空 catch。
+  assert.doesNotMatch(between, /catch \{\s*sessionId = undefined;\s*\}/);
+  // 草稿清空必须在这个 return 之后：否则「失败时草稿留存」不成立。
+  assert.ok(
+    between.indexOf("setDraft(") > between.indexOf("sessionMintFailureNote"),
+    "setDraft must come after the mint-failure return",
+  );
+  // 调用点留着而导入被删时，这条先变红（源码层面兜住）。
+  assert.match(
+    APP_SOURCE,
+    /import \{[^}]*sessionMintFailureNote[^}]*\} from "\.\/logic\/concurrentTurn\.ts";/,
+  );
 });
 
 test("send records the id it actually sends before the RPC so the next send keeps it", () => {

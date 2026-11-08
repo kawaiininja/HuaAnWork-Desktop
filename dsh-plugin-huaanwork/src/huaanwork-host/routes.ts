@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { mkdir, readdir, rmdir } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -7,6 +8,7 @@ import { compareAgentPackageVersions } from '@huaanwork/agent-package-format/man
 import type {
   AgentPackageSignatureInfo,
   AgentSource,
+  ProjectInfo,
   RpcEvent,
   RunSummary,
 } from '../client-huaanwork/rpc-types.ts'
@@ -49,6 +51,7 @@ import { INTERNAL_BUNDLED_SKILLS, listBundledSkills, readSkillToggles, SYSTEM_SK
 import {
   RUNS_LIMIT,
   RUN_STATUSES,
+  autoProjectRollbackAction,
   findAutomation,
   listAutomations,
   listProjects,
@@ -100,6 +103,7 @@ import { SubagentRunNotFoundError, type SubagentRunRegistry } from './subagent-r
 import {
   createAutomation,
   deleteAutomationRun,
+  MAX_AUTOMATIONS,
   normalizeAutomationInput,
   pruneAutomationSessions,
   removeAutomation,
@@ -110,9 +114,11 @@ import {
   automationAdmissionRoot,
   automationCollector,
   enqueueAutomation,
+  hasInFlightAutomationRun,
   stopAutomation,
 } from './automations-host.ts'
 import type { TurnScheduler } from './turn-scheduler.ts'
+import { autoProjectRootPath } from './workspace-state.ts'
 
 export interface RouteRequest {
   params: Record<string, string>
@@ -499,6 +505,58 @@ export interface NativeRouteEntry {
   handler: RouteHandler
 }
 
+/**
+ * 自动建项目的尽最大努力回滚(B3)。判定抽成 stores.ts 的纯函数,
+ * autoProjectRollbackAction,这里只做副作用。
+ *
+ * 先非递归 rmdir 空目录再摘登记:迟到文件会让 rmdir(ENOTEMPTY)失败,
+ * 登记尚未改变,不会被 recursive rm 抢走。摘登记失败则恢复刚删的空根。
+ * 所有保留/补偿失败都写日志;调用方重新抛出原始创建错误。
+ *
+ * 跨文件不是事务:进程在两步之间退出仍可能留下空项目(设计 §3.3.2 已如实写明,
+ * 用户可按常规项目删除或复用)。
+ */
+async function rollbackAutoProject(
+  ctx: { profileDir: string; logger: (message: string) => void },
+  projectId: string,
+  projectRoot: string,
+  registered: ProjectInfo | undefined,
+): Promise<void> {
+  const dirEntries = await readdir(projectRoot).catch(() => undefined)
+  // mkdir 本身就失败了:既没登记也没目录,无现场可留,也不必写误导性日志。
+  if (registered === undefined && dirEntries === undefined) return
+  const automations = await listAutomations(ctx.profileDir).catch(() => undefined)
+  if (dirEntries === undefined || automations === undefined) {
+    ctx.logger(`automation.create: 回滚保留现场 ${projectRoot}（目录或自动化引用不可读）`)
+    return
+  }
+  const referencedByAutomations = automations.some((item) => item.projectId === projectId)
+  if (autoProjectRollbackAction({ dirEntries, referencedByAutomations }) === 'keep') {
+    ctx.logger(`automation.create: 回滚保留现场 ${projectRoot}（目录非空或已被其他自动化引用）`)
+    return
+  }
+
+  try {
+    // 只删空目录;若检查后又有文件到达,ENOTEMPTY 且登记仍保留。
+    await rmdir(projectRoot)
+  } catch (error) {
+    ctx.logger(`automation.create: 回滚保留项目 ${projectId}，空目录删除失败 ${projectRoot}: ${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+  if (registered === undefined) return
+  try {
+    await removeProject(ctx.profileDir, registered.id)
+  } catch (error) {
+    // 并发删除已摘登记:空根也已删除,无需补偿或记录“保留项目”。
+    if (error instanceof Error && error.message === `project ${registered.id} was not found`) return
+    // 目录已删而登记没删掉:恢复空根,避免侧栏项目指向不存在的目录。
+    await mkdir(projectRoot, { recursive: true }).catch((recoveryError: unknown) => {
+      ctx.logger(`automation.create: 恢复自动项目空目录失败 ${projectRoot}: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`)
+    })
+    ctx.logger(`automation.create: 项目登记删除失败，保留项目 ${registered.id}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   // workspace:进程内热切换 holder,应答 { workspaceRoot },不重启。
   // 已在目标根短路返回当前根。
@@ -523,8 +581,9 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { method: 'session.list', http: 'GET', path: '/huaanwork/session/list', handler: sessionRoute(async (req, ctx) => sessionList(ctx, req.query.get('root') ?? undefined)) }, // Task 7 (文件 I/O 读会话列表)
   { method: 'session.open', http: 'POST', path: '/huaanwork/session/open', handler: sessionRoute(async (req, ctx) => sessionOpen(ctx, req.body)) }, // Task 7
   { method: 'session.remove', http: 'POST', path: '/huaanwork/session/remove', handler: sessionRoute(async (req, ctx) => sessionRemove(ctx.runtimeCtx, ctx, req.body)) }, // Task 7
-  // 纯内存 handler: 仅根据 workspaceRoot 字符串生成或复用 session ID, 无 I/O
-  { method: 'session.new', http: 'POST', path: '/huaanwork/session/new', handler: async (req, ctx) => sessionNew(ctx, req.body) }, // Task 7
+  // fresh 会话会为本次分配铸造 <profileDir>/workspace-sessions/<sessionId>(sessionNew 内 mkdir),
+  // 目录创建失败必须原样到达客户端:sessionRoute 把非 RouteError 映射为 400 `session-error` + 原文。
+  { method: 'session.new', http: 'POST', path: '/huaanwork/session/new', handler: sessionRoute(async (req, ctx) => sessionNew(ctx, req.body)) }, // Task 7
   { method: 'session.resume', http: 'POST', path: '/huaanwork/session/resume', handler: sessionRoute(async (req, ctx) => sessionResume(requireRuntime(ctx), ctx, req.body)) }, // Task 7
 
   // subagent:只读对账快照与定向取消。cancel 只认 parentSessionId + runId 精确匹配,
@@ -1132,7 +1191,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     method: 'automation.create',
     http: 'POST',
     path: '/huaanwork/automation/create',
-    // 旧 host.ts:1078-1087:规范化入参;仅显式绑定时校验项目存在,null(中立)直接放行。
+    // 旧 host.ts:1078-1087:规范化入参;显式绑定校验项目存在;未指定项目则自动建同名项目。
     handler: storeRoute(async (req, ctx) => {
       if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
         throw new Error('automation.create requires an object params')
@@ -1143,8 +1202,29 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         if (!projects.some((project) => project.id === input.projectId)) {
           throw new Error(`project ${input.projectId} was not found`)
         }
+        return { automation: await createAutomation(ctx.profileDir, input) }
       }
-      return { automation: await createAutomation(ctx.profileDir, input) }
+      // 预检放在建目录之前:并发跨过预检的情况由 createAutomation 的锁内复检
+      // (automations-store.ts:289-290)兜住,那条路径正好走下面的回滚。
+      if ((await listAutomations(ctx.profileDir)).length >= MAX_AUTOMATIONS) {
+        throw new Error(`任务数量已达上限（${MAX_AUTOMATIONS} 个），请先删除不再需要的任务`)
+      }
+      const projectId = randomUUID()
+      const projectRoot = autoProjectRootPath(ctx.profileDir, projectId)
+      let registered: ProjectInfo | undefined
+      try {
+        await mkdir(projectRoot, { recursive: true })
+        registered = await createProject(ctx.profileDir, {
+          id: projectId,
+          name: input.name,
+          root: projectRoot,
+        })
+        const automation = await createAutomation(ctx.profileDir, { ...input, projectId })
+        return { automation }
+      } catch (error) {
+        await rollbackAutoProject(ctx, projectId, projectRoot, registered)
+        throw error
+      }
     }),
   }, // Task 3 (M4)
   {
@@ -1157,10 +1237,29 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       }
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.update requires params.id')
-      const updated = await updateAutomation(ctx.profileDir, id, req.body as Record<string, unknown>)
-      // 停用或改期后不再沿用上一次准入留下的跳过标记(否则会在新时点被提前重试)。
       const patch = req.body as Record<string, unknown>
-      if (patch.enabled !== undefined || patch.schedule !== undefined) {
+      if (patch.projectId !== undefined) {
+        const targetProjectId = typeof patch.projectId === 'string' ? patch.projectId.trim() : ''
+        if (!targetProjectId) {
+          // 不允许通过 automation.update 把 projectId 改回 null(设计 §3.3.3 第 1 点)。
+          throw new Error('automation.update requires a non-empty projectId')
+        }
+        const existing = await findAutomation(ctx.profileDir, id)
+        if (existing.projectId !== targetProjectId) {
+          // check-then-act:守卫与随后的写入之间存在窗口。窗口内已准入的轮次不受影响
+          // (root 在 admitAutomation 时按值冻结),下一轮起才用新根。不承诺消除该窗口。
+          if (hasInFlightAutomationRun(id)) {
+            throw new Error('该自动化任务正在运行，请等待运行结束或停止后再修改归属项目')
+          }
+          const projects = await listProjects(ctx.profileDir)
+          if (!projects.some((project) => project.id === targetProjectId)) {
+            throw new Error(`project ${targetProjectId} was not found`)
+          }
+        }
+      }
+      const updated = await updateAutomation(ctx.profileDir, id, patch)
+      // 停用/改期/改绑后不再沿用上一次准入留下的跳过标记(否则会在旧归属或新时点被提前重试)。
+      if (patch.enabled !== undefined || patch.schedule !== undefined || patch.projectId !== undefined) {
         ctx.runtimeCtx?.huaanworkTurnScheduler?.clearAdmissionSkip(id)
       }
       return { automation: updated }
@@ -1213,7 +1312,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     method: 'automation.run',
     http: 'POST',
     path: '/huaanwork/automation/run',
-    // 手动运行的唯一准入点:目标根是任务所属项目(无项目用中立根),不改前台根。
+    // 手动运行的唯一准入点:目标根是任务所属项目(无项目用该任务自己的
+    // <profileDir>/workspace-automations/<automationId>),不改前台根。
     // skip 返回 waiting;成功则把已经占坑的 root/runId 交给执行体,fire-and-forget。
     // 手动跳过不登记 admissionSkips:那只服务定时调度的 missed 豁免,手动运行没有重评估队列。
     handler: workspaceRoute(async (req, ctx) => {

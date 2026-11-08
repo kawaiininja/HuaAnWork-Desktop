@@ -18,7 +18,7 @@ export type AutomationSchedule =
 
 export type AutomationInfo = {
   id: string;
-  projectId: string | null;                      // null = 中立归属(issue #2),创建后不可改
+  projectId: string | null;                      // null = 历史存量中立归属；新建任务由 automation.create 自动建项目并绑定，改绑见 AutomationPatch.projectId
   name: string;
   kind: "agent" | "script";
   schedule: AutomationSchedule;
@@ -94,6 +94,8 @@ export type AutomationPatch = {
   missedPolicy?: "skip" | "run-once" | "";
   taskShape?: "independent" | "merged" | "";
   unattended?: { enabled: boolean; allow: string[] } | "";
+  /** 改绑归属项目（设计 §3.3.3）：只接受非空且真实存在的项目 id，不能改回 null。 */
+  projectId?: string;
 };
 
 /** 项目根目录的名字（侧栏副行 / chip 用）。 */

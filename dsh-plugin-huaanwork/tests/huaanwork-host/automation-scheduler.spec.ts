@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 
 import type { AutomationInfo, RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
@@ -16,6 +16,7 @@ import { automationRunSessionId } from '../../src/huaanwork-host/automation-sess
 import { evaluateDueAutomations, startAutomationScheduler } from '../../src/huaanwork-host/automation-scheduler.ts'
 import {
   MISSING_PROJECT_OUTPUT,
+  automationAdmissionRoot,
   bindAutomationRuntime,
   enqueueAutomation,
   type AutomationRuntime,
@@ -39,7 +40,6 @@ import {
   createProject,
   findAutomation,
   listAutomations,
-  listProjects,
   recentRuns,
 } from '../../src/huaanwork-host/stores.ts'
 import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
@@ -238,17 +238,17 @@ async function arm(profileDir: string, id: string, nextRunAt: number): Promise<v
   await advanceNextRunAt(profileDir, id, nextRunAt)
 }
 
-/** 自管准入的执行:直接入队前先占坑(调度 tick 与 automation.run 之外的唯一测试路径)。 */
+/**
+ * 自管准入的执行:直接入队前先占坑(调度 tick 与 automation.run 之外的唯一测试路径)。
+ * 根与生产同源:项目根,或该任务自己的 workspace-automations 根(纯路径,不建目录)。
+ */
 async function admitAndEnqueue(
   h: Harness,
   automation: AutomationInfo,
   opts: { trigger: AutomationTrigger; runId?: string; coalescedCount?: number },
 ): Promise<{ runId: string; root: string; done: Promise<void> }> {
   const runId = opts.runId ?? randomUUID()
-  const project = automation.projectId
-    ? (await listProjects(h.profileDir)).find((item) => item.id === automation.projectId)
-    : undefined
-  const root = resolve(project?.root ?? h.neutral)
+  const root = await automationAdmissionRoot(h.routeCtx, automation)
   const sessionId =
     automation.kind === 'agent' ? automationRunSessionId(automation.id, runId) : `script:${runId}`
   const admitted = h.scheduler.admitAutomation({
@@ -498,7 +498,7 @@ test('a busy foreground channel agent does not keep another project root due', a
   expect(runEvents(h.events, 'automation/run-start', neutralTask.id)).toHaveLength(1)
 })
 
-test('neutral tasks run when the current root is the neutral root', async () => {
+test('unbound tasks run in their own workspace-automations root, not the neutral root', async () => {
   useTick(20)
   const h = makeHarness()
   mkdirSync(h.neutral, { recursive: true })

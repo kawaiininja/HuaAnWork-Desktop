@@ -170,6 +170,7 @@ import {
   noteWaitingStarted,
   releaseWaitingItem,
   sendOpensTurn,
+  sessionMintFailureNote,
   type TabRunState,
 } from "./logic/concurrentTurn.ts";
 import {
@@ -656,7 +657,7 @@ export default function App() {
   /** 由侧栏触发的自动化页一次性入口意图：focus=选中项目并停在「任务」tab。 */
   const [automationEnter, setAutomationEnter] = useState<{
     mode: "create" | "focus";
-    /** issue #2：可空——create 入口一律传 null(表单内项目下拉默认「不绑定」);focus 允许无归属任务。 */
+    /** create 入口一律传 null（表单默认自动建同名项目）；focus 允许无归属任务。 */
     projectId: string | null;
     /** Task 13：composer 命中自然语言调度短语时的预填（一次性赋值，人工在表单里确认）。 */
     schedule?: AutomationSchedule;
@@ -2569,7 +2570,8 @@ export default function App() {
   function tryOpenAutomationFromDraft(text: string): boolean {
     const parsed = parseSchedulePhrase(text);
     if (!parsed) return false;
-    // issue #2：不再隐式绑定活跃项目或 projects[0]——以 null 进表单,归属由用户在下拉里显式选择。
+    // issue #2：不再隐式绑定活跃项目或 projects[0]——以 null 进表单；表单默认会自动创建
+    // 同名项目并绑定，只有用户显式选择已有项目时才跳过自动创建。
     setAutomationEnter({
       mode: "create",
       projectId: null,
@@ -2686,8 +2688,9 @@ export default function App() {
             sessionId = minted.sessionId;
             setChatTabs((prev) => prev.map((tab) => (tab.id === chatId && !tab.sessionId ? { ...tab, sessionId } : tab)));
           }
-        } catch {
-          sessionId = undefined;
+        } catch (error) {
+          noteActive(sessionMintFailureNote({ error, tabProjectId: sendingTab?.projectId }));
+          return;
         }
       }
       // 项目上下文不允许无 sessionId 回退（规格 §1.5）：静默回退会把消息写进项目根稳定会话，
@@ -3554,7 +3557,10 @@ export default function App() {
               onStopAutomation={stopAutomationWithReconcile}
               enterIntent={automationEnter}
               onEnterIntentConsumed={() => setAutomationEnter(null)}
-              onChanged={() => void refreshAutomations()}
+              onChanged={() => {
+                void refreshAutomations();
+                void refreshProjects();
+              }}
               onRunDeleted={handleRunDeleted}
               onAutomationCreated={() => setDraft("")}
               onWorkspaceAligned={(root) => {

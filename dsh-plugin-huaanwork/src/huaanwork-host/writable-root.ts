@@ -1,24 +1,31 @@
-import { isAbsolute, relative, resolve } from 'node:path'
+import { existsSync, statSync } from 'node:fs'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 import { sessionIdFor } from './session-id.ts'
-import { neutralWorkspaceRoot, neutralWorkspaceRootPath } from './workspace-state.ts'
+import {
+  neutralAutomationRootPath,
+  neutralAutomationsBaseDir,
+  neutralSessionRootPath,
+  neutralWorkspaceRoot,
+  neutralWorkspaceRootPath,
+} from './workspace-state.ts'
 
 /**
- * 会话可写根推导(规格 §5.1.1)。同步推导:projects / tasks / headerCwd 都由
- * 调用方先异步载入再传入,这里不读盘、不调 listProjects / listTasks /
- * findSessionHeader,也不检查根目录是否存在(不存在的根由会话发送路径拒绝启动)。
- * 推导唯一的副作用在结果上:只有中立根作为结果返回时创建 `<profile>/workspace`。
+ * 会话可写根推导(规格 §3.2.3)。projects / tasks / headerCwd 由调用方先载入再传入。
+ * 这里不调 listProjects / listTasks / findSessionHeader，也不创建 workspace-sessions。
+ * 中立前缀的已铸造会话至多做两次 existsSync + statSync 检查，用来确认目录已由 session.new 建好。
+ * 删掉这次读取后，刚铸造、尚未写 header 的会话会掉回共享 workspace。
  *
- * 推导顺序(逐级回落,前一级命中即返回):
- * 1. 任务绑定:某任务 `sessionId` 正是本会话 ⇒ 用该任务 `projectId` 在 `projects`
- *    里同 id 项的 root。项目已从注册表消失时不做猜测,继续往下推导。
- * 2. 稳定会话 id:等于某项目根的 `sessionIdFor(root)` 或中立根的 `sessionIdFor(neutralRoot)`,
- *    或以对应稳定 id + '-' 开头。必须整段匹配稳定 id,不得用更短的哈希片段,也不能接受无
- *    `-` 的直接拼接。项目根与中立根同属这一步:同一 id 只可能等于其中一个根的稳定 id,
- *    两者检查的先后不影响结果;命中即返回,不再看 cwd。
- * 3. `header.cwd` 位于且仅位于一个项目根内(含等于根)。落在两个项目根内(如嵌套
- *    项目)属歧义,不猜,直接落到中立根。
- * 4. 中立根 `neutralWorkspaceRoot(profileDir)`。
+ * 推导顺序(前一级命中即返回):
+ * 1. 任务绑定。
+ * 2. 项目稳定 id。例外:项目根解析后等于中立 workspace，且会话 id 以中立稳定 id 加 `-`
+ *    开头，并且 workspace-sessions/<sessionId> 已存在或 headerCwd 在该目录内时，
+ *    不返回这个项目。恰好等于 work-1 稳定 id 的会话仍返回 workspace。
+ * 3. 中立稳定 id 与中立前缀。前缀会话只认 workspace 内的存量 cwd、已铸造的会话目录，
+ *    以及「目录已存在且还没有 header」。其余情况返回 workspace，不再按 cwd 改判到其他项目。
+ * 4. 非中立前缀时，header.cwd 位于且仅位于一个项目根内。
+ * 5. 非中立前缀时，header.cwd 位于 workspace-automations/<automationId>。
+ * 6. 中立根。只有中立根作为结果返回时才创建 <profile>/workspace。
  */
 export function writableRootForSession(input: {
   profileDir: string
@@ -35,23 +42,63 @@ export function writableRootForSession(input: {
     if (project) return resolve(project.root)
   }
 
-  for (const project of projects) {
-    const stable = sessionIdFor(project.root)
-    if (sessionId === stable || sessionId.startsWith(`${stable}-`)) return resolve(project.root)
-  }
-
-  // 中立根也承载通道默认会话的稳定 id(规格 §5.1.1 第 2 步)。比较只用纯路径:
-  // 中立目录只在它以结果身份被返回时创建,项目根推导不再顺带 mkdir。
   const neutralRoot = resolve(neutralWorkspaceRootPath(profileDir))
   const neutralStable = sessionIdFor(neutralRoot)
-  if (sessionId === neutralStable || sessionId.startsWith(`${neutralStable}-`)) {
+  const neutralPrefixed = sessionId.startsWith(`${neutralStable}-`)
+  // 非法分量在这里抛错，不回落到共享 workspace。合法 id 只是拼出路径，不建目录。
+  const mintedRoot = neutralPrefixed
+    ? resolve(neutralSessionRootPath(profileDir, sessionId))
+    : undefined
+  const mintedDirectoryReady = mintedRoot !== undefined
+    && (
+      (typeof headerCwd === 'string' && headerCwd.length > 0 && isInside(mintedRoot, headerCwd))
+      || (existsSync(mintedRoot) && statSync(mintedRoot).isDirectory())
+    )
+
+  for (const project of projects) {
+    const projectRoot = resolve(project.root)
+    const stable = sessionIdFor(project.root)
+    if (sessionId !== stable && !sessionId.startsWith(`${stable}-`)) continue
+    // D3: workspace 被登记成项目时，已铸造的会话目录优先。work-1 的精确稳定 id 不带 `-` 后缀，不会进这个分支。
+    if (projectRoot === neutralRoot && mintedDirectoryReady) continue
+    return projectRoot
+  }
+
+  if (sessionId === neutralStable) {
+    return resolve(neutralWorkspaceRoot(profileDir))
+  }
+  if (neutralPrefixed && mintedRoot !== undefined) {
+    if (typeof headerCwd === 'string' && headerCwd.length > 0) {
+      if (isInside(neutralRoot, headerCwd)) {
+        return resolve(neutralWorkspaceRoot(profileDir))
+      }
+      if (isInside(mintedRoot, headerCwd)) {
+        return mintedRoot
+      }
+    } else if (existsSync(mintedRoot) && statSync(mintedRoot).isDirectory()) {
+      return mintedRoot
+    }
+    // D4: 中立前缀的其余情况留在 workspace，不落到下面的项目 cwd / 自动化目录识别。
     return resolve(neutralWorkspaceRoot(profileDir))
   }
 
   const cwdRoot = soleContainingProjectRoot(projects, headerCwd)
   if (cwdRoot !== undefined) return cwdRoot
 
+  const autoRoot = containingAutomationRoot(profileDir, headerCwd)
+  if (autoRoot !== undefined) return autoRoot
+
   return resolve(neutralWorkspaceRoot(profileDir))
+}
+
+function containingAutomationRoot(profileDir: string, headerCwd: string | undefined): string | undefined {
+  if (typeof headerCwd !== 'string' || headerCwd.length === 0) return undefined
+  const base = resolve(neutralAutomationsBaseDir(profileDir))
+  const rel = relative(base, resolve(headerCwd))
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return undefined
+  const firstSegment = rel.split(sep)[0]
+  if (!firstSegment) return undefined
+  return resolve(neutralAutomationRootPath(profileDir, firstSegment))
 }
 
 /**

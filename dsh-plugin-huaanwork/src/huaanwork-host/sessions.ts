@@ -1,5 +1,5 @@
 import { existsSync, statSync } from 'node:fs'
-import { readdir, unlink } from 'node:fs/promises'
+import { readdir, rm, unlink } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import type { AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
@@ -32,6 +32,12 @@ import { resolveSessionModel } from './session-models.ts'
 import { listProjects, listTasks, setTaskModel } from './stores.ts'
 import type { QueueItem, TurnScheduler } from './turn-scheduler.ts'
 import { writableRootForSession } from './writable-root.ts'
+import {
+  assertSafePathSegment,
+  neutralSessionRoot,
+  neutralSessionRootPath,
+  neutralWorkspaceRootPath,
+} from './workspace-state.ts'
 import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog } from './session-view.ts'
 import type { RouteContext } from './routes.ts'
 import type { SubagentsService } from './subagents-service.ts'
@@ -595,18 +601,54 @@ export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, se
   }
 }
 
+/**
+ * 删除会话日志(并在必要时删除它的独立中立兄弟根)。
+ *
+ * D5 = E 的诚实口径:删除一个仍有在途回合的独立会话时,物理目录在写者仍活跃时被删掉,
+ * 该轮剩余的工具写可能因 ENOENT 失败;子代理收尾期间可能重建部分目录。启动清扫**不会**
+ * 回收这类残留(清扫只遍历已登记项目根,且 `workspace-sessions` 被列进 `protectedRoots`)。
+ * 爆炸半径限于该会话**自己**仍在途的那一轮,但**不承诺**该轮剩余写的落点:删除时
+ * `releaseSessionRuntime` 会从 `huaanworkSessionRoots` 摘掉该会话,此后 `pinnedCwd` /
+ * `sessionWorkspaceRoot` 回落前台根(`huaanworkWorkspaceRoot.current`),剩余工具写可能
+ * 落进共享 `workspace` 或当前项目根,直到回合结束。因此该窗口内没有写位置保证,不得
+ * 据此声称「只影响被删会话自己的兄弟根」。
+ * 不得声称「删除会等收尾完成」,也不得声称「不会留下任何残留」。
+ */
 async function removeSession(
   ctx: SessionRuntimeContext | undefined,
   sessionsRoot: string,
   params: unknown,
+  opts: { profileDir?: string; logger?: (message: string) => void } = {},
 ): Promise<{ removed: true }> {
-  const sessionId = objectString(params, 'sessionId')
-  if (!sessionId) throw new Error('session.remove requires params.sessionId')
+  const rawSessionId = objectString(params, 'sessionId')
+  if (!rawSessionId) throw new Error('session.remove requires params.sessionId')
+  const sessionId = assertSafePathSegment(rawSessionId, 'sessionId')
   const located = await locateSessionFile(sessionsRoot, sessionId)
+  // 没有日志就没有 `session.remove` 入口:`session.new` 铸出的兄弟根若从未写入会话日志,
+  // 这里在清理之前就抛 not-found,目录删不掉;启动清扫又把 `workspace-sessions` 列为
+  // protectedRoots(见上方 D5 注释),所以那个空目录不可回收。删除条件不因此放宽。
   if (!located) throw new Error(`session ${sessionId} was not found`)
   // 删日志之前先把会话从运行态里摘出来（见 releaseSessionRuntime 的注释）。
   releaseSessionRuntime(ctx, sessionId)
   await unlink(located.file)
+  // D5 = E 不变量:只有「通过 assertSafePathSegment **且** 带中立稳定前缀」的会话
+  // 才有专属兄弟根可删。放宽其中任何一个条件,都会把共享 workspace 或某个项目根
+  // 变成递归删除的目标(负例见 sessions.spec.ts 的
+  // `sessionRemove only ever touches the minted sibling root …`)。
+  const { profileDir, logger } = opts
+  if (profileDir) {
+    const neutralStable = sessionIdFor(resolve(neutralWorkspaceRootPath(profileDir)))
+    if (sessionId.startsWith(`${neutralStable}-`)) {
+      const siblingRoot = neutralSessionRootPath(profileDir, sessionId)
+      // 立即删,不等回合/子代理收尾(D5 = E)。失败只记日志不抛出:会话日志已经删掉,
+      // 把删除报告成失败会让界面停在一个已经不存在的会话上。
+      await rm(siblingRoot, { recursive: true, force: true }).catch((error: unknown) => {
+        logger?.(
+          `session.remove: 未能删除独立会话根 ${siblingRoot}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
+    }
+  }
   return { removed: true }
 }
 
@@ -1026,7 +1068,10 @@ export async function sessionRemove(
   routeCtx: RouteContext,
   params: unknown,
 ): Promise<{ removed: true }> {
-  return removeSession(ctx, join(routeCtx.dshHome, 'sessions'), params)
+  return removeSession(ctx, join(routeCtx.dshHome, 'sessions'), params, {
+    profileDir: routeCtx.profileDir,
+    logger: routeCtx.logger,
+  })
 }
 
 export function sessionNew(routeCtx: RouteContext, params: unknown): { sessionId: string; cwd: string } {
@@ -1034,10 +1079,16 @@ export function sessionNew(routeCtx: RouteContext, params: unknown): { sessionId
   const requested = objectString(params, 'cwd')
   const cwd = requested !== undefined && isAbsolute(requested) && existsSync(requested) && statSync(requested).isDirectory()
     ? resolve(requested)
-    : routeCtx.workspaceRoot.current
-  const sessionId = objectBool(params, 'fresh')
-    ? freshSessionIdFor(cwd)
-    : sessionIdFor(cwd)
+    : resolve(routeCtx.workspaceRoot.current)
+  const fresh = objectBool(params, 'fresh')
+  const sessionId = fresh ? freshSessionIdFor(cwd) : sessionIdFor(cwd)
+  // 独立中立会话拿自己的兄弟根(spec §3.1):共享 workspace 仍归稳定会话;
+  // 前缀仍由共享中立根派生,所以 refresh/writable-root 的既有推导不必改口径。
+  const neutralRoot = resolve(neutralWorkspaceRootPath(routeCtx.profileDir))
+  if (fresh && cwd === neutralRoot) {
+    const sessionCwd = resolve(neutralSessionRoot(routeCtx.profileDir, sessionId))
+    return { sessionId, cwd: sessionCwd }
+  }
   return { sessionId, cwd }
 }
 
