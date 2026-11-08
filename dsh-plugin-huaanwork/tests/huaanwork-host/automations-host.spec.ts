@@ -825,7 +825,7 @@ test('timeout is status timeout for a hung agent, a hung script, and a plain err
   const timed = (await recentRuns(h.profileDir, hung.id))[0] as RunSummary
   expect(timed.status).toBe('timeout')
   expect(timed.ok).toBe(false)
-  expect(timed.output).toContain('自动化任务执行超时')
+  expect(timed.output).toContain('自动化任务连续 200 毫秒无活动')
 
   const slow = await scriptTask(h.profileDir, nodeEval('setTimeout(() => {}, 30000)'), {
     projectId: project.id,
@@ -835,7 +835,7 @@ test('timeout is status timeout for a hung agent, a hung script, and a plain err
   await waitRunEnd(h.events, slow.id)
   const scriptRun = (await recentRuns(h.profileDir, slow.id))[0] as RunSummary
   expect(scriptRun.status).toBe('timeout')
-  expect(scriptRun.output).toMatch(/任务超时/)
+  expect(scriptRun.output).toContain('任务连续 200 毫秒无输出，已终止')
 
   h.state.mode = 'throw'
   const broken = await agentTask(h.profileDir, { projectId: project.id, name: '失败任务' })
@@ -1129,6 +1129,191 @@ test('a rejected running marker releases the root before any handoff', { timeout
   ).resolves.toMatchObject({ started: true })
 })
 
+test('an agent run keeps going past the configured window while attributed output keeps arriving', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ automation_timeout_ms: 180 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '持续活动' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '持续活动' })
+
+  const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'activity-1' })
+  const startedAt = Date.now()
+  await poll(() => h.followups.length === 1)
+  const sessionId = h.followups[0]!.sessionId
+  for (let index = 0; index < 6; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    h.routeCtx.emit({ event: 'token', text: `part-${index}`, sessionId })
+  }
+  expect(Date.now() - startedAt).toBeGreaterThan(180)
+  h.release(sessionId)
+  await run.done
+
+  expect(await recentRuns(h.profileDir, automation.id)).toMatchObject([
+    { status: 'ok', output: 'part-0part-1part-2part-3part-4part-5' },
+  ])
+})
+
+test('reasoning and tool lifecycle events keep an agent run alive', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ automation_timeout_ms: 180 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '阶段活动' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '阶段活动' })
+
+  const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'activity-events' })
+  await poll(() => h.followups.length === 1)
+  const sessionId = h.followups[0]!.sessionId
+  const events: RpcEvent[] = [
+    { event: 'reasoning', text: 'plan', sessionId },
+    { event: 'tool/start', name: 'read', callId: 'call-1', sessionId },
+    { event: 'tool/end', name: 'read', callId: 'call-1', sessionId },
+    { event: 'diff', text: 'changed', sessionId },
+  ]
+  for (let round = 0; round < 2; round += 1) {
+    for (const event of events) {
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      h.routeCtx.emit(event)
+    }
+  }
+  h.release(sessionId)
+  await run.done
+
+  expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({ status: 'ok' })
+})
+
+test('subagent progress from the same parent session keeps an agent run alive', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ automation_timeout_ms: 180 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '子代理活动' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '子代理活动' })
+
+  const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'activity-subagent' })
+  await poll(() => h.followups.length === 1)
+  const sessionId = h.followups[0]!.sessionId
+  for (let index = 0; index < 6; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    h.routeCtx.emit({
+      event: 'subagent/run',
+      run: {
+        runId: 'child-1',
+        parentSessionId: sessionId,
+        kind: 'legacy',
+        label: '调研子任务',
+        phase: 'generating',
+        activeTools: [],
+        startedAt: Date.now(),
+        lastActivity: Date.now() + index,
+        cleanupWarnings: [],
+        generation: 'generation-1',
+        revision: index + 1,
+      },
+    })
+  }
+  h.release(sessionId)
+  await run.done
+
+  expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({ status: 'ok' })
+})
+
+test('approval prompts do not count as agent activity', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ automation_timeout_ms: 180 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '审批等待' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '审批等待' })
+
+  const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'approval-idle' })
+  await poll(() => h.followups.length === 1)
+  const sessionId = h.followups[0]!.sessionId
+  for (let index = 0; index < 6; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    h.routeCtx.emit({
+      event: 'approval/asked',
+      approvalRequestId: `approval-${index}`,
+      toolName: 'bash',
+      sessionId,
+    })
+  }
+  await run.done
+
+  expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({
+    status: 'timeout',
+    output: expect.stringContaining('自动化任务连续 180 毫秒无活动'),
+  })
+})
+
+test('activity from another session does not keep an agent run alive', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ automation_timeout_ms: 180 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '无关会话' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '无关会话' })
+
+  const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'unrelated-activity' })
+  await poll(() => h.followups.length === 1)
+  for (let index = 0; index < 6; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    h.routeCtx.emit({ event: 'token', text: `other-${index}`, sessionId: 'another-session' })
+  }
+  await run.done
+
+  expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({ status: 'timeout' })
+})
+
+test('repeated subagent snapshots without new activity do not keep an agent run alive', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.mode = 'hang'
+  writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ automation_timeout_ms: 180 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '重复快照' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '重复快照' })
+
+  const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'duplicate-subagent' })
+  await poll(() => h.followups.length === 1)
+  const sessionId = h.followups[0]!.sessionId
+  const lastActivity = Date.now()
+  for (let index = 0; index < 6; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    h.routeCtx.emit({
+      event: 'subagent/run',
+      run: {
+        runId: 'child-1',
+        parentSessionId: sessionId,
+        kind: 'legacy',
+        label: '调研子任务',
+        phase: 'generating',
+        activeTools: [],
+        startedAt: lastActivity,
+        lastActivity,
+        cleanupWarnings: [],
+        generation: 'generation-1',
+        revision: index + 1,
+      },
+    })
+  }
+  await run.done
+
+  expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({ status: 'timeout' })
+})
+
+test('a script run keeps going past the configured window while it keeps writing output', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  writeFileSync(join(h.profileDir, 'huaanwork-settings.json'), JSON.stringify({ automation_timeout_ms: 3_000 }))
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '脚本活动' })
+  const command = nodeEval(
+    '(async()=>{for(let i=0;i<10;i+=1){console.log(`line-${i}`);await new Promise((resolve)=>setTimeout(resolve,400))}})()',
+  )
+  const automation = await scriptTask(h.profileDir, command, { projectId: project.id, name: '持续输出' })
+
+  const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'script-activity' })
+  await run.done
+
+  const recorded = (await recentRuns(h.profileDir, automation.id)).at(-1) as RunSummary
+  expect(recorded).toMatchObject({ status: 'ok', ok: true })
+  expect(recorded.durationMs).toBeGreaterThan(3_000)
+  for (let index = 0; index < 10; index += 1) expect(recorded.output).toContain(`line-${index}`)
+})
+
 test('agent run reads the collector only after the agent goes idle, and the timeout covers that wait', { timeout: 15_000 }, async () => {
   const h = makeHarness()
   h.state.mode = 'hang'
@@ -1153,7 +1338,7 @@ test('agent run reads the collector only after the agent goes idle, and the time
   await second.done
   expect((await recentRuns(h.profileDir, automation.id)).at(-1)).toMatchObject({
     status: 'timeout',
-    output: expect.stringContaining('自动化任务执行超时'),
+    output: expect.stringContaining('自动化任务连续 150 毫秒无活动'),
   })
 
   h.state.mode = 'immediate'

@@ -28,7 +28,7 @@ export type AppSettings = {
   allow_network: boolean
   /** 护栏策略档位：ask 修改前询问（缺省）/ smart 高危才询问 / full 完全访问；非法值回落 ask。 */
   guard_mode: GuardMode
-  /** 单次自动化任务的执行超时（毫秒）；缺省 10 分钟。 */
+  /** 单次自动化任务允许的连续无活动时长（毫秒）；有活动会重新起算，缺省 10 分钟。 */
   automation_timeout_ms: number
   /** 存在启用中的非手动任务时阻止系统睡眠：缺省 true（功能默认开，用户可关）。 */
   keep_awake: boolean

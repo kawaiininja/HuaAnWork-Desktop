@@ -267,9 +267,8 @@ test("stream treats garbage model text as the final assistant reply", async () =
   }
 });
 
-test("POST chat/completions is streamed with 120s timeout and empty api_key is valid", async () => {
+test("POST chat/completions is streamed and empty api_key is valid", async () => {
   const originalFetch = globalThis.fetch;
-  const originalTimeout = AbortSignal.timeout;
   const originalProfileDir = process.env.HUAANWORK_PROFILE_DIR;
   const root = mkdtempSync(join(tmpdir(), "huaanwork-llm-"));
   const profileDir = join(root, "profile");
@@ -277,13 +276,8 @@ test("POST chat/completions is streamed with 120s timeout and empty api_key is v
   writeFileSync(join(profileDir, "huaanwork-settings.json"), JSON.stringify({ api_key: "", model: "qwen" }));
   process.env.HUAANWORK_PROFILE_DIR = profileDir;
 
-  let timeoutMs: number | undefined;
   let init: RequestInit | undefined;
   let url: string | undefined;
-  AbortSignal.timeout = ((ms: number) => {
-    timeoutMs = ms;
-    return originalTimeout(ms);
-  }) as typeof AbortSignal.timeout;
   globalThis.fetch = async (input, requestInit) => {
     url = String(input);
     init = requestInit;
@@ -293,7 +287,6 @@ test("POST chat/completions is streamed with 120s timeout and empty api_key is v
   try {
     await collect(new HuaAnWorkAdapter().stream(userOptions({ signal: new AbortController().signal })));
     assert.equal(url, "http://127.0.0.1:11434/v1/chat/completions");
-    assert.equal(timeoutMs, 600_000);
     const headers = new Headers(init?.headers);
     assert.equal(headers.get("authorization"), null);
     assert.ok(headers.get("user-agent"));
@@ -303,10 +296,87 @@ test("POST chat/completions is streamed with 120s timeout and empty api_key is v
     assert.equal(init?.signal?.aborted, false);
   } finally {
     globalThis.fetch = originalFetch;
-    AbortSignal.timeout = originalTimeout;
     if (originalProfileDir === undefined) delete process.env.HUAANWORK_PROFILE_DIR;
     else process.env.HUAANWORK_PROFILE_DIR = originalProfileDir;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stream aborts a response body that goes silent beyond the configured idle timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  const encoder = new TextEncoder();
+  globalThis.fetch = async (_input, init) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`),
+        );
+        init?.signal?.addEventListener(
+          "abort",
+          () => controller.error(new DOMException("aborted", "AbortError")),
+          { once: true },
+        );
+        setTimeout(() => {
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        }, 1_000);
+      },
+    });
+    return new Response(body, { headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const adapter = new HuaAnWorkAdapter(undefined, undefined, 150);
+    const startedAt = Date.now();
+    await expect(collect(adapter.stream(userOptions()))).rejects.toThrow(/idle/i);
+    expect(Date.now() - startedAt).toBeLessThan(800);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("stream keeps reading past the idle window while new bytes keep arriving", async () => {
+  const originalFetch = globalThis.fetch;
+  const encoder = new TextEncoder();
+  globalThis.fetch = async (_input, init) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        let index = 0;
+        const timer = setInterval(() => {
+          if (index === 6) {
+            clearInterval(timer);
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+            return;
+          }
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: { content: `chunk-${index}` } }] })}\n\n`,
+            ),
+          );
+          index += 1;
+        }, 60);
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            clearInterval(timer);
+            controller.error(new DOMException("aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      },
+    });
+    return new Response(body, { headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const adapter = new HuaAnWorkAdapter(undefined, undefined, 150);
+    const startedAt = Date.now();
+    const chunks = await collect(adapter.stream(userOptions()));
+    expect(Date.now() - startedAt).toBeGreaterThan(150);
+    expect(
+      chunks.flatMap((chunk) => (chunk.type === "text-delta" ? [chunk.text] : [])).join(""),
+    ).toBe("chunk-0chunk-1chunk-2chunk-3chunk-4chunk-5");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

@@ -92,8 +92,13 @@ type BoundRuntime = {
   routeCtx: RouteContext
 }
 
-/** 后台 agent 任务运行期间按 sessionId 归集 token 流。Task 5/6 也读这张表。 */
-export const automationCollector = new Map<string, { runId: string; text: string }>()
+/** 后台 agent 任务运行期间按 sessionId 归集 token 流并刷新活动计时。Task 5/6 也读这张表。 */
+export const automationCollector = new Map<string, {
+  runId: string
+  text: string
+  touch: () => void
+  subagentActivity: Map<string, number>
+}>()
 
 /** 审批按 runId 归集:运行结束只拒绝本运行遗留的审批。 */
 const runPendingApprovals = new Map<string, Set<string>>()
@@ -130,6 +135,15 @@ function sanitizeUnattendedAllow(list: readonly string[]): string[] {
  * approval/asked 带 sessionId 时记入该运行的 runId;运行结束只拒绝这一组。
  */
 function ingestAutomationEvent(event: RpcEvent): void {
+  if (event.event === 'subagent/run') {
+    const run = event.run
+    const attributed = automationCollector.get(run.parentSessionId)
+    if (!attributed || run.lastActivity === undefined) return
+    const previous = attributed.subagentActivity.get(run.runId)
+    attributed.subagentActivity.set(run.runId, run.lastActivity)
+    if (previous !== undefined && run.lastActivity > previous) attributed.touch()
+    return
+  }
   if (event.event === 'approval/asked' && event.sessionId) {
     const attributed = automationCollector.get(event.sessionId)
     if (!attributed) return
@@ -141,13 +155,25 @@ function ingestAutomationEvent(event: RpcEvent): void {
     bucket.add(event.approvalRequestId)
     return
   }
-  if (event.event !== 'token') return
-  if (event.sessionId !== undefined) {
-    const attributed = automationCollector.get(event.sessionId)
-    if (attributed) attributed.text += event.text
+  const sessionId = 'sessionId' in event ? event.sessionId : undefined
+  if (sessionId !== undefined) {
+    const attributed = automationCollector.get(sessionId)
+    if (!attributed) return
+    if (event.event === 'token') {
+      attributed.text += event.text
+    } else if (
+      event.event !== 'reasoning'
+      && event.event !== 'tool/start'
+      && event.event !== 'tool/end'
+      && event.event !== 'diff'
+      && event.event !== 'compaction/done'
+    ) {
+      return
+    }
+    attributed.touch()
     return
   }
-  if (automationCollector.size === 1) {
+  if (event.event === 'token' && automationCollector.size === 1) {
     for (const bucket of automationCollector.values()) bucket.text += event.text
   }
 }
@@ -211,7 +237,7 @@ export function hasInFlightAutomationRun(automationId: string): boolean {
   return inFlightRunsOf(automationId).length > 0
 }
 
-const automationTimeout = (routeCtx: RouteContext): number =>
+const automationIdleTimeout = (routeCtx: RouteContext): number =>
   readHuaanworkSettingsSync(routeCtx.profileDir).automation_timeout_ms
 
 /**
@@ -221,6 +247,41 @@ const automationTimeout = (routeCtx: RouteContext): number =>
  */
 function timedOutTurnDrainMs(): number {
   return Number(process.env.HUAANWORK_TIMED_OUT_TURN_DRAIN_MS ?? 120_000)
+}
+
+/** 只在配置窗口内没有任何活动时拒绝的计时器;touch() 重新起算。 */
+function activityDeadline(timeoutMs: number): {
+  promise: Promise<never>
+  touch: () => void
+  dispose: () => void
+} {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let expired = false
+  let disposed = false
+  let reject!: (error: Error) => void
+  const promise = new Promise<never>((_, rejectPromise) => {
+    reject = rejectPromise
+  })
+  const arm = (): void => {
+    if (expired || disposed) return
+    if (timer !== undefined) clearTimeout(timer)
+    timer = setTimeout(() => {
+      expired = true
+      reject(new Error(`自动化任务连续 ${timeoutMs} 毫秒无活动`))
+    }, timeoutMs)
+    timer.unref?.()
+  }
+  arm()
+  return {
+    promise,
+    touch: arm,
+    dispose() {
+      if (disposed) return
+      disposed = true
+      if (timer !== undefined) clearTimeout(timer)
+      timer = undefined
+    },
+  }
 }
 
 function escapeXmlAttr(value: string): string {
@@ -286,9 +347,14 @@ async function runAgentTurn(
   // 受理后保持(未启动则还原)。自动化宿主自己不预写模型表。
   const root = pathResolve(admission.root)
   ctx.huaanworkSessionRoots?.set(sessionId, root)
-  automationCollector.set(sessionId, { runId, text: '' })
   let timedOut = false
-  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = activityDeadline(automationIdleTimeout(routeCtx))
+  automationCollector.set(sessionId, {
+    runId,
+    text: '',
+    touch: deadline.touch,
+    subagentActivity: new Map(),
+  })
   // 无人值守范围只写本次运行的会话键;并发运行的其它会话各查各的键。
   const unattended = ctx.huaanworkUnattended
   const allow = automation.unattended?.enabled ? sanitizeUnattendedAllow(automation.unattended.allow) : undefined
@@ -319,12 +385,9 @@ async function runAgentTurn(
   try {
     await Promise.race([
       turn,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          timedOut = true
-          reject(new Error('自动化任务执行超时'))
-        }, automationTimeout(routeCtx))
-        timer.unref?.()
+      deadline.promise.catch((error: unknown) => {
+        timedOut = true
+        throw error
       }),
     ])
     return stripModelThinking(automationCollector.get(sessionId)?.text ?? '').trim()
@@ -349,7 +412,7 @@ async function runAgentTurn(
     }
     throw error
   } finally {
-    if (timer) clearTimeout(timer)
+    deadline.dispose()
     automationCollector.delete(sessionId)
     unattended?.delete(sessionId)
     // 写者释放由 sendToAgent 的准入释放器负责;根/模型绑定随 turn settle 解除(见上)。
@@ -459,16 +522,23 @@ export function runScript(
       // 否则进程会跑完整个脚本/超时窗口（规格 §8「脚本结束对应子进程」）。
       if (inFlightRuns.get(runId)?.cancelRequested === true) killProcessTree(child)
     }
-    const timer = setTimeout(() => {
-      timedOut = true
-      killProcessTree(child)
-    }, timeoutMs)
-    timer.unref?.()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const armIdleTimer = (): void => {
+      if (timer !== undefined) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timedOut = true
+        killProcessTree(child)
+      }, timeoutMs)
+      timer.unref?.()
+    }
+    armIdleTimer()
     child.stdout?.on('data', (chunk: Buffer | string) => {
       if (stdout.length < OUTPUT_MAX_CHARS * 2) stdout += chunk.toString()
+      armIdleTimer()
     })
     child.stderr?.on('data', (chunk: Buffer | string) => {
       if (stderr.length < OUTPUT_MAX_CHARS * 2) stderr += chunk.toString()
+      armIdleTimer()
     })
     // spawn 失败时 Node 不给 `pid`:没有可等的进程,立即结算。spawn 成功之后的
     // error(如 kill 失败)进程可能仍在写,先存下错误、等 close 再结算。
@@ -477,7 +547,7 @@ export function runScript(
       else spawnError ??= error
     })
     child.on('close', (code) => {
-      if (timedOut) finish(false, `${stdout}${stderr}\n（任务超时，已终止）`)
+      if (timedOut) finish(false, `${stdout}${stderr}\n（任务连续 ${timeoutMs} 毫秒无输出，已终止）`)
       else if (spawnError !== undefined) finish(false, `${stdout}${stderr}\n${spawnError.message}\n（退出码 ${code ?? 'unknown'}）`)
       else if (code === 0) finish(true, stdout)
       else finish(false, `${stdout}${stderr ? `\n${stderr}` : ''}\n（退出码 ${code ?? 'unknown'}）`)
@@ -637,7 +707,7 @@ export async function executeRun(
         const result = await runScript(
           automation.command ?? '',
           admission.root,
-          automationTimeout(routeCtx),
+          automationIdleTimeout(routeCtx),
           runId,
         )
         ok = result.ok

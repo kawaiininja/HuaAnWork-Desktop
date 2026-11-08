@@ -32,7 +32,7 @@ import { resolveSessionModel, type SessionModelTable } from "../huaanwork-host/s
 
 const PROVIDER = "deepseek-official";
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
-/** 思考模型单次流式生成经常超过 2 分钟，120 秒会把正常回合掐成超时。 */
+/** 模型流连续无新字节的缺省超时；持续有数据可超过该时长。 */
 const REQUEST_TIMEOUT_MS = 600_000;
 /** 与官方 @deepseek-ai/dsh-llm-deepseek 的 DEFAULT_CONTEXT_WINDOW 同值;本文件不依赖该包,故按值声明。 */
 const DEFAULT_CONTEXT_WINDOW = 1_000_000;
@@ -164,7 +164,11 @@ function* finishModelStream(read: ModelStreamRead): Generator<StreamChunk> {
 }
 
 async function* readModelStream(
-  opened: { body: ReadableStream<Uint8Array>; signal: AbortSignal; timeout: AbortSignal },
+  opened: {
+    body: ReadableStream<Uint8Array>
+    signal: AbortSignal
+    idle: ModelIdleWatchdog
+  },
   callerSignal: AbortSignal | undefined,
   startIndex = 0,
 ): AsyncGenerator<StreamChunk, ModelStreamRead> {
@@ -180,7 +184,7 @@ async function* readModelStream(
   let textIndex = 0;
 
   try {
-    for await (const line of readSseLines(opened.body, opened.signal)) {
+    for await (const line of readSseLines(opened.body, opened.signal, opened.idle.touch)) {
       const [payload] = ssePayloads([line]);
       if (payload === undefined) continue;
       payloads.push(payload);
@@ -212,10 +216,12 @@ async function* readModelStream(
     }
   } catch (error) {
     if (callerSignal?.aborted) throw new LlmError("HuaAnWork model request aborted by caller", "ABORTED", { cause: error });
-    if (opened.timeout.aborted) {
-      throw new LlmError(`HuaAnWork model request timed out after ${REQUEST_TIMEOUT_MS}ms`, "TIMEOUT", { cause: error });
+    if (opened.idle.expired) {
+      throw new LlmError(`HuaAnWork model stream idle for ${opened.idle.timeoutMs}ms`, "TIMEOUT", { cause: error });
     }
     throw error;
+  } finally {
+    opened.idle.dispose();
   }
 
   if (reasoningStarted) {
@@ -230,6 +236,7 @@ export class HuaAnWorkAdapter extends LlmAdapter {
     // Loader 并发创建组条目:模型插件的 `apply` 可能早于宿主创建 Map,所以这里接受
     // getter,由 `stream` 每次读取当前表,而不是在 `apply` 时固化一个可能为空的引用。
     private readonly sessionModels?: SessionModelTable | (() => SessionModelTable | undefined),
+    private readonly requestIdleTimeoutMs: number = REQUEST_TIMEOUT_MS,
   ) {
     super();
   }
@@ -296,7 +303,7 @@ export class HuaAnWorkAdapter extends LlmAdapter {
     let startIndex = 0;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const read = yield* readModelStream(
-        await openCompletions(request, settings),
+        await openCompletions(request, settings, this.requestIdleTimeoutMs),
         options.signal,
         startIndex,
       );
@@ -396,12 +403,57 @@ export function loadSettings(profileDir = process.env.HUAANWORK_PROFILE_DIR ?? "
   }
 }
 
+type ModelIdleWatchdog = {
+  signal: AbortSignal;
+  readonly timeoutMs: number;
+  readonly expired: boolean;
+  touch: () => void;
+  dispose: () => void;
+};
+
+/** 只有连续 timeoutMs 没有新字节才中止;调用方取消优先级最高。 */
+function createModelIdleWatchdog(upstream: AbortSignal | undefined, timeoutMs: number): ModelIdleWatchdog {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let expired = false;
+  let disposed = false;
+  const abortFromUpstream = (): void => controller.abort(upstream?.reason);
+  if (upstream?.aborted) abortFromUpstream();
+  else upstream?.addEventListener("abort", abortFromUpstream, { once: true });
+  const touch = (): void => {
+    if (expired || disposed || controller.signal.aborted) return;
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(() => {
+      expired = true;
+      controller.abort(new DOMException("model stream idle", "TimeoutError"));
+    }, timeoutMs);
+    timer.unref?.();
+  };
+  touch();
+  return {
+    signal: controller.signal,
+    timeoutMs,
+    get expired() {
+      return expired;
+    },
+    touch,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+      upstream?.removeEventListener("abort", abortFromUpstream);
+    },
+  };
+}
+
 async function openCompletions(
   options: GenerateOptions,
   settings: ModelSettings,
-): Promise<{ body: ReadableStream<Uint8Array>; signal: AbortSignal; timeout: AbortSignal }> {
-  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  idleTimeoutMs: number,
+): Promise<{ body: ReadableStream<Uint8Array>; signal: AbortSignal; idle: ModelIdleWatchdog }> {
+  const idle = createModelIdleWatchdog(options.signal, idleTimeoutMs);
+  const { signal } = idle;
   const baseUrl = settings.base_url.replace(/\/+$/, "");
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -419,14 +471,17 @@ async function openCompletions(
       signal,
     });
   } catch (error) {
+    idle.dispose();
     if (options.signal?.aborted) throw new LlmError("HuaAnWork model request aborted by caller", "ABORTED", { cause: error });
-    if (timeout.aborted) {
-      throw new LlmError(`HuaAnWork model request timed out after ${REQUEST_TIMEOUT_MS}ms`, "TIMEOUT", { cause: error });
+    if (idle.expired) {
+      throw new LlmError(`HuaAnWork model stream idle for ${idleTimeoutMs}ms`, "TIMEOUT", { cause: error });
     }
     throw new LlmError(`HuaAnWork model request to ${baseUrl} failed`, "TRANSPORT", { cause: error });
   }
 
+  idle.touch();
   if (!response.ok) {
+    idle.dispose();
     const detail = (await response.text()).trim().slice(0, 500);
     throw new LlmError(
       `HuaAnWork model error (HTTP ${response.status})${detail ? `: ${detail}` : ""}`,
@@ -434,11 +489,18 @@ async function openCompletions(
       { status: response.status },
     );
   }
-  if (!response.body) throw new LlmError("HuaAnWork model returned no response body", "EMPTY_RESPONSE");
-  return { body: response.body, signal, timeout };
+  if (!response.body) {
+    idle.dispose();
+    throw new LlmError("HuaAnWork model returned no response body", "EMPTY_RESPONSE");
+  }
+  return { body: response.body, signal, idle };
 }
 
-async function* readSseLines(body: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncGenerator<string> {
+async function* readSseLines(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+  touch: () => void,
+): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -447,6 +509,7 @@ async function* readSseLines(body: ReadableStream<Uint8Array>, signal: AbortSign
       if (signal.aborted) throw new LlmError("HuaAnWork model request aborted by caller", "ABORTED");
       const { done, value } = await reader.read();
       if (done) break;
+      touch();
       buffer += decoder.decode(value, { stream: true });
       while (true) {
         const nl = buffer.search(/\r?\n/);
