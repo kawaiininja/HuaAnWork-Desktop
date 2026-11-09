@@ -40,10 +40,35 @@ function sendExpression(text) {
 // 项目行 title 以路径结尾、自动化运行标签行无 id 后缀，都不会误命中；也不依赖可能重名的显示标题。
 function openHistoryExpression(sessionId) {
   return `(() => {
-    const row = [...document.querySelectorAll('.recent-item')].find((item) => (item.getAttribute('title') ?? '').endsWith('\\n' + ${JSON.stringify(sessionId)}))
-    if (!row) return false
+    const sessionId = ${JSON.stringify(sessionId)}
+    const row = [...document.querySelectorAll('.recent-item')].find((item) => (item.getAttribute('title') ?? '').endsWith('\\n' + sessionId))
+    if (!row) return null
+    const attribute = row.getAttribute('title') ?? ''
+    const title = attribute.slice(0, attribute.length - sessionId.length - 1).replace(/\\s+/g, ' ').trim()
+    const log = document.querySelector('.chat-log')
+    // 点击前的页面状态：a7-1 曾因只看 .tool-panel/.thinking-panel 非空而被上一次会话的既有内容满足，
+    // 静默截到旧会话；记录旧日志元素与「旧日志已显示本会话」判定，供就绪等待区分重挂载与原地停留。
+    window.__acceptOldLog = log
+    window.__acceptOldLogMatched = log !== null
+      && ((log.querySelector('.bubble.user')?.textContent ?? '').replace(/\\s+/g, ' ').trim().includes(title))
     row.click()
-    return true
+    return title
+  })()`
+}
+
+// 就绪判据必须绑定被点的那一行（会话 id / 期望标题），不能是任意非空看板：
+// - 只读回退：`.session-detail-title` 的 title 恰为本会话 id；
+// - 可聊视图：首条用户消息（与宿主 summarizeSession 同为空白折叠 + trim）包含期望标题，
+//   且要么 `.chat-log` 已重挂载，要么点击前显示的本来就是本会话（同标签重复点击不重挂载）。
+function historyReadyExpression(sessionId, title) {
+  return `(() => {
+    if (document.querySelector('.session-detail-title')?.getAttribute('title') === ${JSON.stringify(sessionId)}) return true
+    const log = document.querySelector('.chat-log')
+    if (!log) return false
+    if (log === window.__acceptOldLog && window.__acceptOldLogMatched !== true) return false
+    const first = log.querySelector('.bubble.user')
+    if (!first) return false
+    return (first.textContent ?? '').replace(/\\s+/g, ' ').trim().includes(${JSON.stringify(title)})
   })()`
 }
 
@@ -189,8 +214,9 @@ async function run(options) {
       if (!(await evaluate(toggleExpression(options.index)))) throw new Error('panel index not found')
     } else if (options.action === 'open-history') {
       await waitFor(evaluate, `[...document.querySelectorAll('.recent-item')].some((item) => (item.getAttribute('title') ?? '').endsWith('\\n' + ${JSON.stringify(options.sessionId)}))`, options.timeout)
-      if (!(await evaluate(openHistoryExpression(options.sessionId)))) throw new Error('history row not found')
-      await waitFor(evaluate, `document.querySelectorAll('.tool-panel, .thinking-panel').length > 0`, options.timeout)
+      const expectedTitle = await evaluate(openHistoryExpression(options.sessionId))
+      if (typeof expectedTitle !== 'string' || expectedTitle.length === 0) throw new Error('history row not found')
+      await waitFor(evaluate, historyReadyExpression(options.sessionId, expectedTitle), options.timeout)
     }
     const facts = await evaluate(FACTS)
     const shot = await call('Page.captureScreenshot', { format: 'png' })

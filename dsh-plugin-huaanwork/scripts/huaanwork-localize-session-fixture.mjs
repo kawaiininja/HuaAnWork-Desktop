@@ -21,6 +21,11 @@ function parseArgs(argv) {
   for (const key of ['home', 'state', 'src', 'suffix']) {
     if (typeof options[key] !== 'string' || options[key].length === 0) throw new Error(`--${key} required`)
   }
+  // --suffix 直接拼进 sessionId 与铸造根目录名：路径分隔符或 `..` 会让 mintedRoot 逃出临时 profile
+  // （原守卫只拒绝精确的真实 home 路径，挡不住 `../..` 这类后缀穿越），因此只接受保守字符集。
+  if (!/^[A-Za-z0-9._-]+$/.test(options.suffix) || options.suffix === '.' || options.suffix === '..') {
+    throw new Error('--suffix must match ^[A-Za-z0-9._-]+$ and must not be "." or ".."')
+  }
   return options
 }
 

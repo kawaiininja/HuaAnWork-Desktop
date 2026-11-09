@@ -45,13 +45,13 @@ session "huaanwork-0e842e87a074fae2-b6617067": stored log is corrupt: Error: cor
 
 界面随之停在 `detail-meta` 只读错误视图（`.tool-panel`/`.thinking-panel` 均 0），与计划 A3 注记的「只读错误视图」现象同形但**根因不是 cwd 守卫**（`fixture.json` 的 `sessionId`/`storagePath` 与最近列表条目一致）。
 
-修法：脚本改为按帧写入——第 1 帧只含 header 行（含行尾换行），第 2 帧含其余全部事件行（以行边界结束），两帧拼接后原子 rename 到 `storagePath`；回读自校验（行数、header 改写、逐行逐字比对）原样保留。修后 `zstd --list` 报 `Frames = 2`，会话正常打开。此偏差只改物理编码方式，**事件行内容与 A3 判据数字不受影响**。脚本仍在写入前拒绝 `--home` 指向真实 `~/.huaanwork`（实测 `exit=1`，报错 `refusing to write into the production home`）。
+修法：脚本改为按帧写入——第 1 帧只含 header 行（含行尾换行），第 2 帧含其余全部事件行（以行边界结束），两帧拼接后原子 rename 到 `storagePath`；回读自校验（行数、header 改写、逐行逐字比对）原样保留。修后 `zstd --list` 报 `Frames = 2`，会话正常打开。此偏差只改物理编码方式，**事件行内容与 A3 判据数字不受影响**。脚本仍在写入前拒绝 `--home` 指向真实 `~/.huaanwork`（实测 `exit=1`，报错 `refusing to write into the production home`）；另对 `--suffix` 增加保守字符集校验（`^[A-Za-z0-9._-]+$`，拒绝 `.`/`..`），避免路径分隔符让铸造根逃出临时 profile —— 原守卫只拒绝精确的真实 home 路径，挡不住 `../..` 形态。
 
 ## 3. A1–A10 判定总表
 
 | 编号 | 判据（设计 §10） | 方式 | 结果 | 证据指针 |
 | --- | --- | --- | --- | --- |
-| A1 | 看板数 = 产生普通 `tool` 条目的 step 数，位置随会话流推进；有效 `todo_write` 不计入 | 真机 CDP + 磁盘日志对账 | **PASS**（干净一次运行；另一次运行遇到护栏拦截调用的既有可见性差异，见 §4.1） | `a1b.json`（3 看板 / 1 思考）、`a1b.png`、日志派生 4 step / 3 有调用 / 1 有 reasoning |
+| A1 | 看板数 = 产生普通 `tool` 条目的 step 数，位置随会话流推进；有效 `todo_write` 不计入 | 真机 CDP + 磁盘日志对账 | **PASS**（干净一次运行；另一次运行遇到护栏拦截调用的既有可见性差异，见 §4.1；本次运行未产生 `todo_write`，见 §5） | `a1b.json`（3 看板 / 1 思考）、`a1b.png`、日志派生 4 step / 3 有调用 / 1 有 reasoning |
 | A2 | 无普通工具的 step 不产出看板，前后看板不合并 | 真机 CDP + 单测 | **BLOCKED**（夹层形态三次尝试未出现；「无工具 step 不产出看板」一档已实测） | `a2.json`（11 step / 5 看板）、`a2b.json`（3 step / 2 看板）、`a2c.json`（两轮 2 看板）；单测 `toolPanel.spec.ts:507` |
 | A3 | 重开 `b6617067`：20 看板（step 1–20 有工具、step 21 无工具）+ 20 思考面板，无顶部聚合，`todo_write` 入板 | 真机 CDP | **PASS** | `a3.json`、`a3.png` |
 | A4 | 两条消息各自有工具 → 看板按消息归属，互不混用 | 真机 + 单测 | **PASS**（归属）；差量见 §4.1 | `a4-msg1.json`、`a4.json`、`a4.png` |
@@ -60,7 +60,7 @@ session "huaanwork-0e842e87a074fae2-b6617067": stored log is corrupt: Error: cor
 | A7 | 展开第 3 轮看板后切标签再回来仍展开，其余轮次不受影响 | 真机 CDP | **PASS** | `a7-2-toggle.json`（`expanded[2]="true"`）→ `a7-3-newtask.json` → `a7-4-reopen.json`（`expanded[2]` 仍 `"true"`，其余 19 项仍 `"false"`） |
 | A8 | 取消 / 失败 / 正常结束后无手动覆盖的看板默认收起；状态按真实终态，仅未结算调用允许「已中断」 | 真机 CDP | **PASS** | `a8b.json`（1 看板，`expanded="false"`，`工具 · 含失败调用 · 1 项调用`）、`a8b.png` |
 | A9 | `sidecarDead` 时在途工具显示「状态未确认」，不计入运行中 | 单测（既有覆盖不回归） | **UNIT-ONLY** | `toolPanel.spec.ts:108`「connection loss demotes only unresolved running tools without rewriting facts」 |
-| A10 | `corepack yarn check` exit 0 | 命令 | **PASS**（引用 Task 8 结果，未重跑） | Task 8：`exit=0`，日志 `/tmp/per-step-tool-board-check.log`（2407 行 / 160 576 B）；`git diff fd710a8865..HEAD` 仅 1 个文档文件 |
+| A10 | `corepack yarn check` exit 0 | 命令 | **PASS**（引用 Task 8 结果，未重跑） | Task 8：`exit=0`，日志 `/tmp/per-step-tool-board-check.log`（2405 行 / 160 576 B）；`git diff fd710a8865..HEAD` 仅 1 个文档文件 |
 
 ## 4. 逐项证据
 
@@ -154,6 +154,14 @@ node … --action=open-history --session-id="$FIXTURE_ID" --out=…/a7-4-reopen.
 
 `a7-4-reopen.json`：`expanded[2]` 仍为 `"true"`，其余 19 项仍 `"false"`，`counts`、`panelRowIndexes` 与切换前逐项相同 ⇒ 手动展开归属在第 3 个面板（step 3，5 项调用）上，标签切换 + 幂等 resume 后未被重建、也没有扩散到其他轮次。A7 **PASS**。
 
+#### 4.5.1 a7-1 旧会话误截与驱动就绪修复
+
+首次 A7 的 `a7-1-open.json` 是**静默截错**：facts 与当时已打开的 A4 会话一致，不是夹具。驱动当时只等 `.tool-panel`/`.thinking-panel` 非空，上一次会话的既有内容即可满足；点击后 `session.open`/`session.resume` 尚未完成时旧 DOM 仍在，快照就被采信。
+
+修法（`dsh-plugin-huaanwork/scripts/huaanwork-accept-per-step-board.mjs`）：`--action=open-history` 的就绪判据改为**会话特定**——点击前从被点行 `title`（`${title}\n${sessionId}`）取出期望标题并记录点击前的 `.chat-log` 元素；点击后只在以下任一成立时采信：① 只读回退 `.session-detail-title` 的 `title` 恰为 `sessionId`；② `.chat-log` 已重挂载（或点击前显示的本就是本会话，同标签重复点击不重挂载），且首条用户消息按宿主同款空白折叠 + trim 后包含期望标题。不再以「任意看板非空」作为就绪。
+
+复验（按 §1 重建隔离实例、本地化同一夹具，`--action=open-history` 连续两跑）：两跑均 `panelCount=20`、`thinkingCount=20`、`counts` 合计 **66**、`panelRowIndexes` 严格递增、`expanded` 20×false，且两跑 facts 逐项相同；第二跑正是从「夹具标签已打开」的状态起步。facts 备份：`/Users/amonmiao/huaanwork-per-step-tool-board-accept-evidence-2026-11-09-readiness/`（`open-history-run-1.json` / `open-history-run-2.json`，不进提交）。A7 判定不受影响：`a7-2-toggle`/`a7-4-reopen` 的 `expanded[2]` 与 `counts`/`panelRowIndexes` 已与 A3 夹具一致，说明后续步骤确实作用在夹具上；只有 `a7-1-open` 这一张快照是旧会话。
+
 ### 4.6 A8 取消后的收起与状态（PASS）
 
 计划命令 `--action=stop --prompt='请使用 bash 连续执行 sleep 30 与 uname -a。'` 的首发会在 stop 按钮出现的那一拍停止，实测停在工具启动之前：`panelCount=0`、`thinkingCount=0`，界面只有 `bubble.user` 与 `note 已停止`，无可观察看板。
@@ -181,15 +189,17 @@ A8 **PASS**。
 
 ### 4.8 A10 全量门禁（引用，不重跑）
 
-Task 8 命令原文 `corepack yarn check > /tmp/per-step-tool-board-check.log 2>&1; echo "exit=$?"` → **`exit=0`**，日志 `2407` 行 / `160 576` B（16:53–16:56 CST，单次运行通过）。Task 8 之后只有 `fd710a8865`、`7001f3a8a3` 两个文档提交（`git diff --stat fd710a8865..HEAD` 仅 `docs/evidence/2026-11-09-per-step-tool-board-gates.md` 5 增 1 改），源码未变，故引用有效，本次未重跑全量门禁。
+Task 8 命令原文 `corepack yarn check > /tmp/per-step-tool-board-check.log 2>&1; echo "exit=$?"` → **`exit=0`**，日志 `2405` 行 / `160 576` B（`wc -l` 实测；16:53–16:56 CST，单次运行通过）。Task 8 之后只有 `fd710a8865`、`7001f3a8a3` 两个文档提交（`git diff --stat fd710a8865..HEAD` 仅 `docs/evidence/2026-11-09-per-step-tool-board-gates.md` 5 增 1 改），源码未变，故引用有效，本次未重跑全量门禁。
 
 ## 5. 未跑项与限制
 
 | 项 | 状态 | 原因 |
 | --- | --- | --- |
 | A2 夹层形态（工具 → 无工具 → 工具） | BLOCKED | 三次尝试（原提示 / 换措辞 / 补前置条件）模型都把「只回答收到」放到回合末尾；判据未改写 |
+| A1 的「有效 `todo_write` 不计入」 | 未在本机行使 | A1 的提示与模型运行没有产生 `todo_write`，该档未在真机上触发。A3 覆盖历史侧 `todo_write` 入板（step 1/20 各 1 项），实时侧 `todo_write` 走待办卡、不产出工具看板是既有行为（非本里程碑改动）；不据此改写 A1 判定 |
 | A6 / A9 | UNIT-ONLY | 需构造无 `step/start` 的 fixture 与 `sidecarDead` 注入，真机不可达；引用单测且本次重跑通过 |
 | A10 | 引用 Task 8 | 此后无源码改动；不重复 3 分钟门禁 |
+| A8 第二发的停止方式 | 非提交脚本可复现 | 第二发是在运行中用临时 CDP 点击 `.send.stop` 停止的，不是 `--action=stop`；该发不能从驱动复现，但 facts 与磁盘日志仍支持 A8 判定（停后看板收起、状态取自真实终态）。首发 `--action=stop` 的停点（停在工具之前）已记录 |
 | Windows 侧真机 | 未跑 | 本次验收在 macOS 单机完成，与 Windows 打包/制品校验无关，未声称跨平台结论 |
 | 护栏拦截调用的实时可见性 | 观察项（非本轮缺陷） | `ctx.tools.guard` / `tools/pre-execute` 拒绝的调用不会进入 `tools/execute`，客户端因此没有 `tool/start`，实时无看板；历史侧按日志仍会渲染成「含失败调用」面板。里程碑前既有行为，本次只记录其对「按磁盘 `tool/call` 对账」的影响 |
 | `思考 · 进行中` 标签 | 观察项（非本轮缺陷） | 无同轮正文的思考面板在回合结束后仍显示「进行中」后缀（`ThinkingPanel.tsx:34` 的展开态后缀），A5 要求的「不误标已生成」正是该结果；未改文案 |
@@ -199,5 +209,6 @@ Task 8 命令原文 `corepack yarn check > /tmp/per-step-tool-board-check.log 2>
 - 本地备份（截图与 facts JSON，**不进提交**）：`/Users/amonmiao/huaanwork-per-step-accept-evidence-2026-11-09/`
   - `evidence/`：`a1`/`a1b`/`a2`/`a2b`/`a2c`/`a3`/`a4`/`a4-msg1`/`a7-1-open`/`a7-2-toggle`/`a7-3-newtask`/`a7-4-reopen`/`a8`/`a8b` 各 `.json` 与对应 `.png`（`.err` 均为空），另有 `a2-warmup.json`、`a2-newtask.json`
   - `fixture.json`：本地化脚本输出（`sessionId` / `storagePath` / `mintedRoot` / `eventLines` 212；其中路径指向已删除的临时根，保留为溯源记录）
-- 清理：basename 守卫（`huaanwork-per-step-accept.?*`）通过后执行 `cp -R` 归档 → `kill $(cat electron.pid)` → `rm -rf "$TMP_ROOT" /tmp/huaanwork-per-step-accept-root`。实测：临时根与指针文件均已删除，`pgrep -f huaanwork-per-step-accept` 无命中，`lsof -iTCP:9333` 无监听；`rm -rf` 未作用于任何 mktemp 根之外的路径。
+- 就绪修复复验备份（同样**不进提交**）：`/Users/amonmiao/huaanwork-per-step-tool-board-accept-evidence-2026-11-09-readiness/`（`open-history-run-1.json` / `open-history-run-2.json` 及其截图、`fixture.json`；两跑 facts 逐项相同）
+- 清理：basename 守卫（`huaanwork-per-step-accept.?*`）通过后执行 `cp -R` 归档 → `kill $(cat electron.pid)` → `rm -rf "$TMP_ROOT" /tmp/huaanwork-per-step-accept-root`。实测：临时根与指针文件均已删除，`pgrep -f huaanwork-per-step-accept` 无命中，`lsof -iTCP:9333` 无监听；`rm -rf` 未作用于任何 mktemp 根之外的路径。就绪修复复验按同一流程重建与清理，清理后同样复查：无实例进程、临时根与指针文件已删除、9333 无监听。
 - 本文件与两个脚本是唯一提交内容；截图、`fixture.json` 与任何临时根副本都不 `git add`（`origin` 为公开仓库）。
