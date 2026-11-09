@@ -6,10 +6,12 @@ import {
   historicalTurnFinalByUserId,
   projectToolPanels,
   reduceTurnFinal,
+  roundKeyOf,
   toolDescription,
   toolEntryStatus,
   withToolPanelToggle,
   type ToolPanelCard,
+  type ToolPanelContentItem,
   type ToolPanelItem,
   type ToolPanelRow,
   type ToolPanelView,
@@ -469,4 +471,183 @@ test("turn final settles the active user message", () => {
   // 不传活动 id 时也不能把等待项或本次已抛错的消息当成最新用户回合。
   const fallback = applyTurnFinalToTabs(tabs, "a", { kind: "session-end", ok: true, cancelled: false }, undefined);
   assert.deepEqual(fallback[0]?.turnFinalByUserId, { 1: true });
+});
+
+function keyedTool(id: number, name: string, roundKey: number): ToolPanelItem {
+  return { id, kind: "tool", card: { key: `key-${id}`, name, status: "start", roundKey } };
+}
+
+test("roundKeyOf reads the card on tool items and the item elsewhere", () => {
+  assert.equal(roundKeyOf(keyedTool(1, "read", 6)), 6);
+  assert.equal(roundKeyOf({ id: 2, kind: "thinking", roundKey: 9 }), 9);
+  assert.equal(roundKeyOf({ id: 3, kind: "tool", card: { key: "k", name: "read", status: "start" } }), undefined);
+  assert.equal(roundKeyOf({ id: 4, kind: "user" }), undefined);
+});
+
+test("projection creates one panel per step inside a single user turn", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    { id: 2, kind: "thinking", roundKey: 10 },
+    keyedTool(3, "grep", 10),
+    { id: 4, kind: "thinking", roundKey: 20 },
+    keyedTool(5, "bash", 20),
+    keyedTool(6, "web_fetch", 20),
+    { id: 7, kind: "thinking", roundKey: 30 },
+    keyedTool(8, "read", 30),
+  ];
+  const rows = projectToolPanels(items, { contentItems: content(items), connectionLost: false });
+  assert.deepEqual(rows.map((row) => row.kind === "panel" ? `panel:${row.id}` : `${row.item.kind}:${row.item.id}`), [
+    "user:1", "thinking:2", "panel:3", "thinking:4", "panel:5", "thinking:7", "panel:8",
+  ]);
+  assert.equal(panelAt(rows, 2).tools.length, 1);
+  assert.equal(panelAt(rows, 4).tools.length, 2);
+  assert.equal(panelAt(rows, 6).tools.length, 1);
+});
+
+test("a step without tools produces no panel and does not merge its neighbours", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    keyedTool(2, "read", 10),
+    { id: 3, kind: "thinking", roundKey: 20 },
+    { id: 4, kind: "assistant", text: "只有正文", roundKey: 20 },
+    keyedTool(5, "bash", 30),
+  ];
+  const rows = projectToolPanels(items, { contentItems: content(items), connectionLost: false });
+  assert.deepEqual(rows.map((row) => row.kind === "panel" ? `panel:${row.id}` : `${row.item.kind}:${row.item.id}`), [
+    "user:1", "panel:2", "thinking:3", "assistant:4", "panel:5",
+  ]);
+});
+
+test("roundKey never crosses a user turn boundary", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "A" },
+    keyedTool(2, "read", 10),
+    { id: 3, kind: "user", text: "B" },
+    keyedTool(4, "read", 10),
+  ];
+  const rows = projectToolPanels(items, { contentItems: content(items), connectionLost: false });
+  assert.deepEqual(rows.filter((row) => row.kind === "panel").map((row) => row.id), [2, 4]);
+});
+
+test("only the last round of an active turn defaults expanded", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    keyedTool(2, "read", 10),
+    keyedTool(3, "bash", 20),
+  ];
+  const rows = projectToolPanels(items, { contentItems: content(items), connectionLost: false });
+  assert.equal(panelAt(rows, 1).expanded, false, "the superseded round collapses");
+  assert.equal(panelAt(rows, 2).expanded, true, "the running round stays open");
+  const final = projectToolPanels(items, {
+    contentItems: content(items), connectionLost: false, turnFinalByUserId: { 1: true },
+  });
+  assert.equal(panelAt(final, 1).expanded, false);
+  assert.equal(panelAt(final, 2).expanded, false);
+});
+
+test("visible body collapses only its own round", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    keyedTool(2, "read", 10),
+    { id: 3, kind: "assistant", text: "第一轮正文", roundKey: 10 },
+    keyedTool(4, "bash", 20),
+  ];
+  const rows = projectToolPanels(items, { contentItems: content(items), connectionLost: false });
+  assert.equal(panelAt(rows, 1).expanded, false);
+  assert.equal(panelAt(rows, 3).expanded, true);
+});
+
+test("manual toggle stays on its own round anchor", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    keyedTool(2, "read", 10),
+    keyedTool(3, "bash", 20),
+  ];
+  const toggled = withToolPanelToggle(items, 2, "expand");
+  const rows = projectToolPanels(toggled, {
+    contentItems: content(toggled), connectionLost: false, turnFinalByUserId: { 1: true },
+  });
+  assert.equal(panelAt(rows, 1).expanded, true, "manual expand beats the final collapse");
+  assert.equal(panelAt(rows, 2).expanded, false);
+});
+
+test("missing roundKey falls back to thinking and visible body boundaries", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    { id: 2, kind: "thinking" },
+    tool(3, "read"),
+    tool(4, "bash"),
+    { id: 5, kind: "thinking" },
+    tool(6, "web_fetch"),
+    { id: 7, kind: "assistant", text: "正文" },
+    tool(8, "read"),
+  ];
+  const rows = projectToolPanels(items, { contentItems: content(items), connectionLost: false });
+  assert.deepEqual(rows.filter((row) => row.kind === "panel").map((row) => row.id), [3, 6, 8]);
+  assert.equal(panelAt(rows, 2).tools.length, 2, "tools before any boundary stay in one board");
+});
+
+test("a round with neither thinking nor visible body merges into the previous one under fallback", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    { id: 2, kind: "thinking" },
+    tool(3, "grep"),
+    tool(4, "bash"),
+    tool(5, "web_fetch"),
+  ];
+  const rows = projectToolPanels(items, { contentItems: content(items), connectionLost: false });
+  assert.deepEqual(rows.filter((row) => row.kind === "panel").map((row) => row.id), [3]);
+  assert.equal(panelAt(rows, 2).tools.length, 3);
+});
+
+test("final turns still split rounds by visible body when no roundKey exists", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    tool(2, "read"),
+    { id: 3, kind: "assistant", text: "第一轮正文" },
+    tool(4, "bash"),
+  ];
+  const rows = projectToolPanels(items, {
+    contentItems: content(items), connectionLost: false, turnFinalByUserId: { 1: true },
+  });
+  assert.deepEqual(rows.filter((row) => row.kind === "panel").map((row) => row.id), [2, 4]);
+  assert.equal(panelAt(rows, 1).expanded, false);
+  assert.equal(panelAt(rows, 3).expanded, false);
+});
+
+test("mixed keys infer the unkeyed prefix and keep explicit keyed rounds exact", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    { id: 2, kind: "thinking" },
+    tool(3, "read"),
+    { id: 4, kind: "assistant", text: "旧轮正文" },
+    tool(5, "bash"),
+    { id: 6, kind: "thinking", roundKey: 30 },
+    keyedTool(7, "web_fetch", 30),
+    tool(10, "grep"),
+    { id: 8, kind: "thinking", roundKey: 40 },
+    keyedTool(9, "read", 40),
+  ];
+  const rows = projectToolPanels(items, { contentItems: content(items), connectionLost: false });
+  assert.deepEqual(rows.filter((row) => row.kind === "panel").map((row) => row.id), [3, 5, 7, 9]);
+  assert.equal(panelAt(rows, 6).tools.length, 2, "an unkeyed gap after a keyed item stays in that round");
+});
+
+test("attachment is visible body but never starts a fallback round", () => {
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "问题" },
+    tool(2, "read"),
+    { id: 3, kind: "attachment", sourceText: "结果附件" },
+    tool(4, "bash"),
+  ];
+  const contentItems: ToolPanelContentItem[] = [
+    { id: 1, kind: "user" },
+    { id: 2, kind: "tool" },
+    { id: 3, kind: "assistant", text: "结果附件" },
+    { id: 4, kind: "tool" },
+  ];
+  const rows = projectToolPanels(items, { contentItems, connectionLost: false });
+  assert.deepEqual(rows.filter((row) => row.kind === "panel").map((row) => row.id), [2], "attachment does not split the round");
+  assert.equal(panelAt(rows, 1).tools.length, 2);
+  assert.equal(panelAt(rows, 1).expanded, false, "attachment still counts as visible body");
 });
