@@ -82,7 +82,7 @@ function toggleExpression(index) {
 }
 
 function parseArgs(argv) {
-  const options = { cdp: '9333', origin: undefined, timeout: 300_000, action: 'facts', out: undefined, prompt: undefined, sessionId: undefined, index: 0, newTask: true }
+  const options = { cdp: '9333', origin: undefined, timeout: 300_000, action: 'facts', out: undefined, prompt: undefined, sessionId: undefined, index: 0, newTask: true, stopAfter: 0 }
   for (const arg of argv) {
     if (arg.startsWith('--cdp=')) options.cdp = arg.slice(6)
     else if (arg.startsWith('--origin=')) options.origin = arg.slice(9)
@@ -93,6 +93,7 @@ function parseArgs(argv) {
     else if (arg.startsWith('--session-id=')) options.sessionId = arg.slice(13)
     else if (arg.startsWith('--index=')) options.index = Number(arg.slice(8))
     else if (arg.startsWith('--new=')) options.newTask = arg.slice(6) !== '0'
+    else if (arg.startsWith('--stop-after=')) options.stopAfter = Number(arg.slice(13))
     else throw new Error(`unknown argument: ${arg}`)
   }
   if (!['facts', 'new-task', 'send', 'stop', 'toggle', 'open-history'].includes(options.action)) throw new Error('bad --action')
@@ -101,6 +102,7 @@ function parseArgs(argv) {
   }
   if (options.action === 'open-history' && typeof options.sessionId !== 'string') throw new Error('--session-id required')
   if (!Number.isSafeInteger(options.timeout) || options.timeout < 1) throw new Error('bad --timeout')
+  if (!Number.isSafeInteger(options.stopAfter) || options.stopAfter < 0) throw new Error('bad --stop-after')
   return options
 }
 
@@ -165,6 +167,22 @@ async function waitFor(evaluate, expression, timeout) {
   throw new Error(`timed out waiting for ${expression}`)
 }
 
+const STOP_SETTLE_CAP = 15_000
+
+// --stop-after：A8 要点「工具已在跑」时停止。只等固定毫秒会在工具启动前就点（首发的两次实测都停在 panelCount=0），
+// 只等面板出现又会立刻停；故要求「已过 --stop-after 且至少 1 个 .tool-panel」同时成立，二者取 max，总上限 15 s。
+// 到上限仍无面板时不拦停，只在 stderr 告警后照常点停止——facts 的 panelCount=0 即「未及工具」的判据。
+async function settleBeforeStop(evaluate, wait, timeout) {
+  const started = Date.now()
+  const deadline = started + Math.min(STOP_SETTLE_CAP, timeout)
+  while (Date.now() < deadline) {
+    const waited = Date.now() - started >= wait
+    if (waited && (await evaluate(`document.querySelectorAll('.tool-panel').length > 0`))) return
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  console.error(JSON.stringify({ warning: `no .tool-panel within ${Math.min(STOP_SETTLE_CAP, timeout)}ms of the user bubble; stopping anyway` }))
+}
+
 const SEND_READY_TIMEOUT = 30_000
 
 async function submitPrompt(evaluate, text, timeout) {
@@ -201,6 +219,7 @@ async function run(options) {
       await waitFor(evaluate, `document.querySelectorAll('.bubble.user').length > ${baseline.users}`, options.timeout)
       if (options.action === 'stop') {
         await waitFor(evaluate, `document.querySelector('.send.stop') !== null`, options.timeout)
+        if (options.stopAfter > 0) await settleBeforeStop(evaluate, options.stopAfter, options.timeout)
         await evaluate(`document.querySelector('.send.stop').click()`)
       } else {
         await waitFor(evaluate, `document.querySelector('.send.stop') !== null

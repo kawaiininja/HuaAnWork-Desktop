@@ -20,6 +20,8 @@
 | 客户端 origin | `http://127.0.0.1:43120/?dsh-desktop-mode=advanced&…`（默认口 43120，未占用顺延；驱动按调试端口的 `127.0.0.1` 页面自动发现，未传 `--origin`） |
 | 驱动 | `dsh-plugin-huaanwork/scripts/huaanwork-accept-per-step-board.mjs`（CDP：`Runtime.evaluate` + `Page.captureScreenshot`，通用退避等待） |
 
+驱动方法补充：`--action=stop` 支持 `--stop-after=<ms>`（默认 `0`，只对 stop 生效）。提交提示、用户气泡出现后，驱动等待「已过 `--stop-after` **且**至少出现 1 个 `.tool-panel`」两者同时成立（取 max），总等待上限 15 s，然后点击 `.send.stop`；到上限仍无面板时只在 stderr 告警并照常停止，`facts.panelCount=0` 即「未及工具」的判据。只等固定毫秒会停在工具启动之前（原计划提示的两次实测都是这样），只等面板出现又会立刻停，故取两者较晚者。A8 复跑命令见 §4.6。
+
 ## 2. 夹具来源与本地化
 
 源会话：`huaanwork-21ea5abce4b51784-b6617067`，物理路径 `~/.huaanwork/sessions/--Users-amonmiao-.huaanwork-profiles-desktop-workspace-sessions-huaanwork-21ea5abce4b51784-b6617067--/huaanwork-21ea5abce4b51784-b6617067/session.v4.jsonl.zstd`（89 个 zstd 帧，237 201 B），header `cwd = /Users/amonmiao/.huaanwork/profiles/desktop/workspace-sessions/huaanwork-21ea5abce4b51784-b6617067`。Step 1 时刻重算源日志：**21 step / 66 `tool/call` / 20 step 有调用 / 20 step 有 reasoning**，step 21 无工具，与设计 §1 取证一致（源会话此后未被续写）。
@@ -58,7 +60,7 @@ session "huaanwork-0e842e87a074fae2-b6617067": stored log is corrupt: Error: cor
 | A5 | 思考面板数 = 有 reasoning 的 step 数；下一轮无 reasoning 有正文时，上一轮思考不误标「已生成」 | 真机 CDP + 单测 | **PASS** | `a1b.json`（1 = 1）、思考标题实测 `思考 · 进行中`（非「已生成」） |
 | A6 | 降级推断：`final=true` 仍按正文切轮；混合键旧前缀推断、新 key 精确 | 单测 | **UNIT-ONLY** | `toolPanel.spec.ts:603`「final turns still split rounds by visible body when no roundKey exists」、`:618`「mixed keys infer the unkeyed prefix and keep explicit keyed rounds exact」 |
 | A7 | 展开第 3 轮看板后切标签再回来仍展开，其余轮次不受影响 | 真机 CDP | **PASS** | `a7-2-toggle.json`（`expanded[2]="true"`）→ `a7-3-newtask.json` → `a7-4-reopen.json`（`expanded[2]` 仍 `"true"`，其余 19 项仍 `"false"`） |
-| A8 | 取消 / 失败 / 正常结束后无手动覆盖的看板默认收起；状态按真实终态，仅未结算调用允许「已中断」 | 真机 CDP | **PASS** | `a8b.json`（1 看板，`expanded="false"`，`工具 · 含失败调用 · 1 项调用`）、`a8b.png` |
+| A8 | 取消 / 失败 / 正常结束后无手动覆盖的看板默认收起；状态按真实终态，仅未结算调用允许「已中断」 | 真机 CDP（提交脚本 `--action=stop --stop-after=4000`） | **PASS**（一次命中：看板在飞时停止；`expanded="false"`，`工具 · 含失败调用 · 1 项调用`） | `a8-repro.json`、`a8-repro.png`（§4.6；早前临时 CDP 点击的 `a8b.json`/`a8b.png` 被取代、保留为历史） |
 | A9 | `sidecarDead` 时在途工具显示「状态未确认」，不计入运行中 | 单测（既有覆盖不回归） | **UNIT-ONLY** | `toolPanel.spec.ts:108`「connection loss demotes only unresolved running tools without rewriting facts」 |
 | A10 | `corepack yarn check` exit 0 | 命令 | **PASS**（引用 Task 8 结果，未重跑） | Task 8：`exit=0`，日志 `/tmp/per-step-tool-board-check.log`（2405 行 / 160 576 B）；门禁后提交只触碰 `dsh-plugin-huaanwork/scripts/` 与 `docs/`：`git diff fd710a8865..HEAD -- dsh-plugin-huaanwork/src` 无输出、exit 0（见 §4.8） |
 
@@ -164,21 +166,24 @@ node … --action=open-history --session-id="$FIXTURE_ID" --out=…/a7-4-reopen.
 
 ### 4.6 A8 取消后的收起与状态（PASS）
 
-计划命令 `--action=stop --prompt='请使用 bash 连续执行 sleep 30 与 uname -a。'` 的首发会在 stop 按钮出现的那一拍停止，实测停在工具启动之前：`panelCount=0`、`thinkingCount=0`，界面只有 `bubble.user` 与 `note 已停止`，无可观察看板。
+**提交脚本可复现的运行（2026-11-09，终审修复后复跑；HEAD `137788098f` + 随本修复落库的脚本）**：按 §1 新建隔离实例（新 mktemp 根、`chmod 700`、整树复制 `~/.huaanwork` 与 `profile-selection/state.json`；`lib/main.js` 比最新 `src/` 文件新，未重跑 build），Electron 起在 9333，用提交脚本原文执行：
 
-第二次尝试用同一提示词发送，运行中（面板已出现 `工具 · 执行中 · 1 项调用`）由 CDP 点击 `.send.stop`，随后取 facts：
+```bash
+node dsh-plugin-huaanwork/scripts/huaanwork-accept-per-step-board.mjs --action=stop --stop-after=4000 \
+  --prompt='请使用 bash 连续执行 sleep 30 与 uname -a。' \
+  --out="$TMP_ROOT/evidence/a8-repro.png" > "$TMP_ROOT/evidence/a8-repro.json"
+```
+
+exit 0，facts：
 
 ```json
 {"panelCount":1,"thinkingCount":2,"counts":[1],"panelRowIndexes":[4],
  "titles":["工具 · 含失败调用 · 1 项调用"],"expanded":["false"]}
 ```
 
-- 看板类名 `tool-panel tool-panel-failed`、标题 `工具 · 含失败调用 · 1 项调用`、`aria-expanded="false"`：该面板没有手动覆盖，取消后保持收起。
-- 状态取自真实终态：日志 step 2 的 `tool/result` 为 `isError=true`、`Error: tool call aborted`（调用已结算为失败），故显示「含失败调用」而非「已中断」；设计只允许**未结算**调用显示「已中断」。
-- 两个思考面板标题均为 `思考 · 已中断`，与取消语义一致。
-- 该 turn 的 step 1 同样是护栏拦截（`sleep 30 && uname -a`），按 §4.1 不产生看板。
+磁盘会话日志（该实例新任务会话）对账：step 1 的 `sleep 30; uname -a` 被护栏拒绝（`huaanwork-policy`，按 §4.1 不产生看板）；step 2 的 `bash` 调用 `sleep 30` 在用户消息后 +2.91 s 发出，+4.25 s 收到 `isError=true`、`Error: tool call aborted`，turn 以 `aborted(user)` 结束 ⇒ 停止发生在工具**执行中**，不是工具之前。看板标题呈失败态红色、`aria-expanded="false"`（截图 `a8-repro.png` 可见），无手动覆盖仍保持收起；状态取真实终态「含失败调用」而非「已中断」（调用已结算为失败，设计只允许未结算调用显示「已中断」）；两个思考面板标题为 `思考 · 已中断`。A8 **PASS**，且这次是提交脚本一次命中。
 
-A8 **PASS**。
+历史记录（被上述运行取代，保留备查）：计划原命令的首发在 stop 按钮出现的那一拍停止，实测停在工具启动之前（`panelCount=0`、`thinkingCount=0`，界面只有 `bubble.user` 与 `note 已停止`）；第二次尝试改用临时 CDP 点击 `.send.stop`（不是提交脚本能力），在面板 `工具 · 执行中 · 1 项调用` 时停止，facts 与本段新记录逐项相同（`a8b.json`/`a8b.png`）。两次历史尝试的事实与结论不受影响，但「可复现的停止方式」以本段的 `--stop-after` 命令为准。
 
 ### 4.7 A6 / A9（UNIT-ONLY）
 
@@ -205,7 +210,7 @@ git diff fd710a8865..HEAD -- dsh-plugin-huaanwork/src; echo "exit=$?"
 | A1 的「有效 `todo_write` 不计入」 | 未在本机行使 | A1 的提示与模型运行没有产生 `todo_write`，该档未在真机上触发。A3 覆盖历史侧 `todo_write` 入板（step 1/20 各 1 项），实时侧 `todo_write` 走待办卡、不产出工具看板是既有行为（非本里程碑改动）；不据此改写 A1 判定 |
 | A6 / A9 | UNIT-ONLY | 需构造无 `step/start` 的 fixture 与 `sidecarDead` 注入，真机不可达；引用单测且本次重跑通过 |
 | A10 | 引用 Task 8 | 此后无源码改动；不重复 3 分钟门禁 |
-| A8 第二发的停止方式 | 非提交脚本可复现 | 第二发是在运行中用临时 CDP 点击 `.send.stop` 停止的，不是 `--action=stop`；该发不能从驱动复现，但 facts 与磁盘日志仍支持 A8 判定（停后看板收起、状态取自真实终态）。首发 `--action=stop` 的停点（停在工具之前）已记录 |
+| A8 的停止方式 | 已可复现 | 提交脚本 `--action=stop --stop-after=4000` 一次命中工具执行中（§4.6）；早前的「停在工具之前」首发与临时 CDP 点击只作历史。`--stop-after` 的总等待上限为 15 s，到上限仍无面板时驱动只告警、照常停止，`panelCount=0` 即未及工具 |
 | Windows 侧真机 | 未跑 | 本次验收在 macOS 单机完成，与 Windows 打包/制品校验无关，未声称跨平台结论 |
 | 护栏拦截调用的实时可见性 | 观察项（非本轮缺陷） | `ctx.tools.guard` / `tools/pre-execute` 拒绝的调用不会进入 `tools/execute`，客户端因此没有 `tool/start`，实时无看板；历史侧按日志仍会渲染成「含失败调用」面板。里程碑前既有行为，本次只记录其对「按磁盘 `tool/call` 对账」的影响 |
 | `思考 · 进行中` 标签 | 观察项（非本轮缺陷） | 无同轮正文的思考面板在回合结束后仍显示「进行中」后缀（`ThinkingPanel.tsx:34` 的展开态后缀），A5 要求的「不误标已生成」正是该结果；未改文案 |
@@ -216,5 +221,6 @@ git diff fd710a8865..HEAD -- dsh-plugin-huaanwork/src; echo "exit=$?"
   - `evidence/`：`a1`/`a1b`/`a2`/`a2b`/`a2c`/`a3`/`a4`/`a4-msg1`/`a7-1-open`/`a7-2-toggle`/`a7-3-newtask`/`a7-4-reopen`/`a8`/`a8b` 各 `.json` 与对应 `.png`（`.err` 均为空），另有 `a2-warmup.json`、`a2-newtask.json`
   - `fixture.json`：本地化脚本输出（`sessionId` / `storagePath` / `mintedRoot` / `eventLines` 212；其中路径指向已删除的临时根，保留为溯源记录）
 - 就绪修复复验备份（同样**不进提交**）：`/Users/amonmiao/huaanwork-per-step-tool-board-accept-evidence-2026-11-09-readiness/`（`open-history-run-1.json` / `open-history-run-2.json` 及其截图、`fixture.json`；两跑 facts 逐项相同）
+- A8 可复现复跑备份（**不进提交**）：`/Users/amonmiao/huaanwork-per-step-tool-board-accept-evidence-2026-11-09-final-fix/`（`a8-repro.json`、`a8-repro.png`、空 `a8-repro.err`）
 - 清理：basename 守卫（`huaanwork-per-step-accept.?*`）通过后执行 `cp -R` 归档 → `kill $(cat electron.pid)` → `rm -rf "$TMP_ROOT" /tmp/huaanwork-per-step-accept-root`。实测：临时根与指针文件均已删除，`pgrep -f huaanwork-per-step-accept` 无命中，`lsof -iTCP:9333` 无监听；`rm -rf` 未作用于任何 mktemp 根之外的路径。就绪修复复验按同一流程重建与清理，清理后同样复查：无实例进程、临时根与指针文件已删除、9333 无监听。
 - 本文件与两个脚本是唯一提交内容；截图、`fixture.json` 与任何临时根副本都不 `git add`（`origin` 为公开仓库）。

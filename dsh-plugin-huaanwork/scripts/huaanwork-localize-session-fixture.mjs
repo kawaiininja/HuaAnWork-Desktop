@@ -5,7 +5,7 @@
 // 其 assertStoredIdentity 强制两者一致）。事件行逐字保留。
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 function parseArgs(argv) {
@@ -65,13 +65,27 @@ function encodeSegment(raw) {
   return out
 }
 
+/** realpath 解析失败（路径不存在或悬空链接）时回落 resolve；守卫比较两端同用本函数，误判方向只会更严。 */
+function canonical(path) {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolve(path)
+  }
+}
+
 const options = parseArgs(process.argv.slice(2))
-const realHome = process.env.HOME === undefined ? undefined : resolve(join(process.env.HOME, '.huaanwork'))
-if (realHome !== undefined && resolve(options.home) === realHome) {
+// 字符串比较挡不住软链或不同拼法的同一真实 home（如 /var → /private/var）；两端都先 realpath。
+const realHome = process.env.HOME === undefined ? undefined : canonical(join(process.env.HOME, '.huaanwork'))
+if (realHome !== undefined && canonical(options.home) === realHome) {
   throw new Error('--home points at the real ~/.huaanwork; refusing to write into the production home')
 }
 const state = JSON.parse(readFileSync(options.state, 'utf8'))
 if (typeof state.active !== 'string' || state.active.length === 0) throw new Error('state.json has no active profile')
+// active 直接作为 profiles/ 下的路径段拼进 profileDir：与 --suffix 同一保守字符集，拒绝 `.`/`..` 与分隔符。
+if (!/^[A-Za-z0-9._-]+$/.test(state.active) || state.active === '.' || state.active === '..') {
+  throw new Error('state.json active profile must match ^[A-Za-z0-9._-]+$ and must not be "." or ".."')
+}
 const profileDir = resolve(join(options.home, 'profiles', state.active))
 const workspaceRoot = resolve(join(profileDir, 'workspace'))
 const stable = `huaanwork-${createHash('sha256').update(workspaceRoot).digest('hex').slice(0, 16)}`

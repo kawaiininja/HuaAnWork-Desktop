@@ -37,7 +37,7 @@
 corepack yarn check > /tmp/per-step-tool-board-check.log 2>&1; echo "exit=$?"
 ```
 
-输出：`exit=0`。日志：`/tmp/per-step-tool-board-check.log`（2407 行，160 576 B），运行约 2026-11-09 16:53–16:56 CST（约 3 分钟）。
+输出：`exit=0`。日志：`/tmp/per-step-tool-board-check.log`（2405 行，160 576 B），运行约 2026-11-09 16:53–16:56 CST（约 3 分钟）。
 
 **单次运行即通过，没有重跑，也没有任何子命令红过。** 根 `check` 是 12 条子命令的串行 `&&` 链，命令名与证据如下（`Test Files` / `Tests` 行逐字取自日志）。
 
