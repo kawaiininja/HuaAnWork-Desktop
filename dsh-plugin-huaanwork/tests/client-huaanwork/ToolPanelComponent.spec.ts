@@ -179,6 +179,30 @@ it("keeps one status region and announces only title transitions", async () => {
   expect(region.textContent, "a count-only change is not a new status announcement").toBe("工具 · 已完成 · 1 项调用");
 });
 
+function ruleBlock(css: string, selector: string): string {
+  const start = css.indexOf(`${selector} {`);
+  if (start < 0) throw new Error(`missing rule ${selector}`);
+  const open = css.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < css.length; i++) {
+    if (css[i] === "{") depth++;
+    else if (css[i] === "}") {
+      depth--;
+      if (depth === 0) return css.slice(open + 1, i);
+    }
+  }
+  throw new Error(`unbalanced rule ${selector}`);
+}
+
+it("keeps the absolute status region inside the transcript scroll container", () => {
+  const css = readFileSync(resolve(import.meta.dirname, "../../src/client-huaanwork/styles.css"), "utf8");
+  const chatLog = ruleBlock(css, ".chat-log");
+  expect(chatLog).toContain("overflow: auto");
+  // .sr-only is position:absolute; without a positioned ancestor its containing
+  // block is the document, so a tall transcript grows a page-level scrollbar.
+  expect(chatLog).toMatch(/position:\s*relative/);
+});
+
 it("caps long content inside a scrollable tokenized panel body", () => {
   const css = readFileSync(resolve(import.meta.dirname, "../../src/client-huaanwork/styles.css"), "utf8");
   const section = css.split("/* ---- 工具面板 ---- */")[1]?.split("/* ----")[0] ?? "";

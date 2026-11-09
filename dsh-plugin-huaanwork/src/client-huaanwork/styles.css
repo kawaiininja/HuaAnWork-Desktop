@@ -822,6 +822,8 @@ button {
 }
 
 .chat-log {
+  /* 绝对定位读屏节点的 containing block;缺它时节点落到文档坐标,长会话会撑出整页滚动条 */
+  position: relative;
   flex: 1;
   overflow: auto;
   padding: 16px 20px;
