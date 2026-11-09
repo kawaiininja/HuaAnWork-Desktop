@@ -4183,7 +4183,7 @@ function sessionMetaOf(session: SessionRow): string {
 
 const COMPACTION_NOTE = "更早的工具输出已被压缩";
 
-function handleEvent(
+export function handleEvent(
   event: RpcEvent,
   allocId: () => number,
   setReady: (ready: boolean) => void,
@@ -4205,10 +4205,10 @@ function handleEvent(
       }
       break;
     case "token":
-      setItems((prev) => appendToken(prev, event.text, allocId), event.sessionId);
+      setItems((prev) => appendToken(prev, event.text, allocId, event.roundKey), event.sessionId);
       break;
     case "reasoning":
-      setItems((prev) => applyReasoning(prev, event.text, event.final === true, allocId), event.sessionId);
+      setItems((prev) => applyReasoning(prev, event.text, event.final === true, allocId, event.roundKey), event.sessionId);
       break;
     case "tool/start":
       if (event.name === "todo_write" && event.todos) {
@@ -4225,6 +4225,7 @@ function handleEvent(
             name: event.name,
             callId: event.callId,
             status: "start",
+            ...(event.roundKey === undefined ? {} : { roundKey: event.roundKey }),
             ...(event.args === undefined ? {} : { args: event.args }),
             ...(event.command === undefined ? {} : { command: event.command }),
           },
@@ -4461,13 +4462,13 @@ export function insertBeforeToolRow(items: ChatItem[], card: ChatItem, callId: s
 }
 
 /** 流式正文接在活动回合末尾；排队消息把末尾顶开时仍写回它自己那个回合。 */
-export function appendToken(items: ChatItem[], text: string, allocId: () => number): ChatItem[] {
+export function appendToken(items: ChatItem[], text: string, allocId: () => number, roundKey?: number): ChatItem[] {
   const insertAt = turnAppendIndex(items);
   const last = insertAt > 0 ? items[insertAt - 1] : undefined;
-  if (last?.kind === "assistant") {
+  if (last?.kind === "assistant" && last.roundKey === roundKey) {
     return [...items.slice(0, insertAt - 1), { ...last, text: last.text + text }, ...items.slice(insertAt)];
   }
-  return [...items.slice(0, insertAt), { id: allocId(), kind: "assistant", text }, ...items.slice(insertAt)];
+  return [...items.slice(0, insertAt), { id: allocId(), kind: "assistant", text, ...(roundKey === undefined ? {} : { roundKey }) }, ...items.slice(insertAt)];
 }
 
 type ContentChatItem = Exclude<
@@ -4509,10 +4510,12 @@ function contentItem(item: Exclude<ChatItem, { kind: "subagent-run" }>): Content
   return item.kind === "attachment" ? attachmentAsAssistant(item) : item;
 }
 
-/** 同一回合只保留一块思考：非 final 追加当前步骤，final 只替换当前步骤，工具调用前已定稿的步骤保留。 */
-export function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number): ChatItem[] {
+/** 同一轮次只保留一块思考：非 final 追加当前步骤，final 只替换当前步骤；换轮次新建一块并插到同轮正文前。 */
+export function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number, roundKey?: number): ChatItem[] {
   const turnStart = currentTurnStart(items);
-  const existing = items.findIndex((item, index) => index >= turnStart && item.kind === "thinking");
+  const existing = items.findIndex((item, index) =>
+    index >= turnStart && item.kind === "thinking" && item.roundKey === roundKey,
+  );
   if (existing >= 0) {
     const current = items[existing];
     if (current?.kind !== "thinking") return items;
@@ -4522,10 +4525,16 @@ export function applyReasoning(items: ChatItem[], text: string, final: boolean, 
     return next;
   }
   const steps = nextThinkingSteps({ settled: "", draft: "" }, text, final);
-  const created: ChatItem = { id: allocId(), kind: "thinking", thought: thinkingStepsText(steps), interrupted: false, steps };
-  const assistantAt = items.findIndex((item, index) => index >= turnStart && item.kind === "assistant");
-  if (assistantAt >= 0) return [...items.slice(0, assistantAt), created, ...items.slice(assistantAt)];
-  const insertAt = turnAppendIndex(items);
+  const created: ChatItem = {
+    id: allocId(), kind: "thinking", thought: thinkingStepsText(steps), interrupted: false, steps,
+    ...(roundKey === undefined ? {} : { roundKey }),
+  };
+  const assistantAt = items.findIndex((item, index) =>
+    index >= turnStart
+    && item.kind === "assistant"
+    && (roundKey === undefined || item.roundKey === roundKey),
+  );
+  const insertAt = assistantAt >= 0 ? assistantAt : turnAppendIndex(items);
   return [...items.slice(0, insertAt), created, ...items.slice(insertAt)];
 }
 
