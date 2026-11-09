@@ -581,3 +581,35 @@ describe('session.list fixture directory (旧 session-view.test.ts 存储段)', 
     expect(filtered.map((s) => s.id)).toEqual(['huaanwork-old'])
   })
 })
+
+test('detailRecords stamps roundKey from the governing step/start seq', () => {
+  const log = sessionLog([
+    HEADER,
+    { type: 'turn/start', seq: 1, time: T0 + 1, data: { turn: 1 } },
+    { type: 'step/start', seq: 2, time: T0 + 2, data: { turn: 1, step: 1 } },
+    { type: 'user/message', seq: 3, time: T0 + 3, data: { content: [{ type: 'text', text: '问题' }] } },
+    {
+      type: 'assistant/message', seq: 4, time: T0 + 4,
+      data: { message: { content: [{ type: 'reasoning', text: '想' }, { type: 'text', text: '答' }] }, stream: [] },
+    },
+    { type: 'tool/call', seq: 5, time: T0 + 5, data: { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: '{}' } },
+    { type: 'step/start', seq: 6, time: T0 + 6, data: { turn: 1, step: 2 } },
+    { type: 'tool/call', seq: 7, time: T0 + 7, data: { turn: 1, step: 2, callId: 'c2', name: 'bash', arguments: '{}' } },
+  ])
+  const records = detailRecords(log)
+  expect(records.find((r) => r.kind === 'thinking')).toMatchObject({ kind: 'thinking', roundKey: 2 })
+  expect(records.find((r) => r.kind === 'assistant')).toMatchObject({ kind: 'assistant', roundKey: 2 })
+  const calls = records.filter((r) => r.kind === 'tool-call')
+  expect(calls[0]).toMatchObject({ kind: 'tool-call', roundKey: 2 })
+  expect(calls[1]).toMatchObject({ kind: 'tool-call', roundKey: 6 })
+})
+
+test('detailRecords omits roundKey when the log has no step/start', () => {
+  const log = sessionLog([
+    HEADER,
+    { type: 'tool/call', seq: 1, time: T0 + 1, data: { callId: 'c1', name: 'read', arguments: '{}' } },
+  ])
+  const call = detailRecords(log).find((r) => r.kind === 'tool-call')
+  expect(call).toBeDefined()
+  expect(Object.hasOwn(call as object, 'roundKey')).toBe(false)
+})
