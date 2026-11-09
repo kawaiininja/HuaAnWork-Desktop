@@ -4775,11 +4775,15 @@ export function InputCardView({
   );
 }
 
-function thinkingBefore(items: readonly ChatItem[], index: number): Extract<ChatItem, { kind: "thinking" }> | undefined {
+export function thinkingBefore(items: readonly ChatItem[], index: number): Extract<ChatItem, { kind: "thinking" }> | undefined {
+  const target = items[index];
+  const roundKey = target?.kind === "assistant" ? target.roundKey : undefined;
   for (let i = index - 1; i >= 0; i -= 1) {
     const item = items[i];
     if (item.kind === "user") return undefined;
-    if (item.kind === "thinking") return item;
+    if (item.kind !== "thinking") continue;
+    if (roundKey === undefined || item.roundKey === undefined || item.roundKey === roundKey) return item;
+    return undefined;
   }
   return undefined;
 }

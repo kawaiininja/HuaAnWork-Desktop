@@ -1952,3 +1952,14 @@ test("tool/start roundKey lands on the card", () => {
   });
   assert.equal(next[1]?.kind === "tool" ? next[1].card.roundKey : undefined, 42);
 });
+
+test("thinkingBefore never borrows another round's reasoning", () => {
+  const items = [
+    { id: 1, kind: "user" as const, text: "问题" },
+    { id: 2, kind: "thinking" as const, thought: "第一轮想", interrupted: false, roundKey: 10 },
+    { id: 3, kind: "assistant" as const, text: "第二轮正文", roundKey: 20 },
+  ];
+  assert.equal(AppModule.thinkingBefore(items, 2), undefined);
+  const sameRound = [...items.slice(0, 2), { id: 4, kind: "assistant" as const, text: "第一轮正文", roundKey: 10 }];
+  assert.equal(AppModule.thinkingBefore(sameRound, 2)?.id, 2);
+});
