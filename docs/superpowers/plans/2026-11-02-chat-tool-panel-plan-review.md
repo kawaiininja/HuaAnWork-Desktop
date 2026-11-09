@@ -99,6 +99,8 @@ assert.deepEqual(emitted, [
 **m-4｜目标续轮会话的历史恢复面板碎裂（复核新增，规格与计划均未处理）。**
 证据链：goal 驱动的 `user/message`（`source.kind=goal`，round>0，即 `goal/round` 的日志来源，bridge.ts:161-166）不被 session-view.ts:188-192 的 plugin/tool 过滤 → 落为 `kind:'user'` 记录 → `historyItemsFromRecords` 产 user 条目 → 计划投影按 user 分段：**每个 goal round 一个面板**，且 `historicalTurnFinalByUserId` 把每轮都标 final。live 路径则相反：`goal/round` 只加 note（App.tsx:3571-3575），同一用户回合单面板。同一会话 live 1 面板 vs 恢复 N 面板，与规格 §5.1「后续 `goal/round` 仍属于同一个用户回合和同一个工具面板」在恢复视图的成立性、以及 §1「实时事件与历史恢复使用一致的状态语义」存在张力。需要裁定：在历史配对/投影层合并 goal 源 user 记录，或显式接受差异并登记为已知行为（注意：goal 驱动消息在今天的历史恢复里本就显示为 user 气泡，属既有形态，本项只登记其新引入的面板碎裂后果）。
 
+**处置（2026-11-09）**：`2026-11-09-per-step-tool-board-design.md` R-1 / R-7 关闭 goal 续轮导致的历史面板碎裂。工具看板在普通工具范围内两侧逐轮；有效 `todo_write` 实时转待办卡、历史仍入工具卡，两侧数量可能不同，已登记为残余债，不能写成「完全一致」。
+
 ### 处置建议
 
 1. M-1、M-2 为低成本文档修复（订正一处期望值、补一个 `});`），修完即消除阻塞。
