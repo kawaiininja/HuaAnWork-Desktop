@@ -60,7 +60,7 @@ session "huaanwork-0e842e87a074fae2-b6617067": stored log is corrupt: Error: cor
 | A7 | 展开第 3 轮看板后切标签再回来仍展开，其余轮次不受影响 | 真机 CDP | **PASS** | `a7-2-toggle.json`（`expanded[2]="true"`）→ `a7-3-newtask.json` → `a7-4-reopen.json`（`expanded[2]` 仍 `"true"`，其余 19 项仍 `"false"`） |
 | A8 | 取消 / 失败 / 正常结束后无手动覆盖的看板默认收起；状态按真实终态，仅未结算调用允许「已中断」 | 真机 CDP | **PASS** | `a8b.json`（1 看板，`expanded="false"`，`工具 · 含失败调用 · 1 项调用`）、`a8b.png` |
 | A9 | `sidecarDead` 时在途工具显示「状态未确认」，不计入运行中 | 单测（既有覆盖不回归） | **UNIT-ONLY** | `toolPanel.spec.ts:108`「connection loss demotes only unresolved running tools without rewriting facts」 |
-| A10 | `corepack yarn check` exit 0 | 命令 | **PASS**（引用 Task 8 结果，未重跑） | Task 8：`exit=0`，日志 `/tmp/per-step-tool-board-check.log`（2405 行 / 160 576 B）；`git diff fd710a8865..HEAD` 仅 1 个文档文件 |
+| A10 | `corepack yarn check` exit 0 | 命令 | **PASS**（引用 Task 8 结果，未重跑） | Task 8：`exit=0`，日志 `/tmp/per-step-tool-board-check.log`（2405 行 / 160 576 B）；门禁后提交只触碰 `dsh-plugin-huaanwork/scripts/` 与 `docs/`：`git diff fd710a8865..HEAD -- dsh-plugin-huaanwork/src` 无输出、exit 0（见 §4.8） |
 
 ## 4. 逐项证据
 
@@ -189,7 +189,13 @@ A8 **PASS**。
 
 ### 4.8 A10 全量门禁（引用，不重跑）
 
-Task 8 命令原文 `corepack yarn check > /tmp/per-step-tool-board-check.log 2>&1; echo "exit=$?"` → **`exit=0`**，日志 `2405` 行 / `160 576` B（`wc -l` 实测；16:53–16:56 CST，单次运行通过）。Task 8 之后只有 `fd710a8865`、`7001f3a8a3` 两个文档提交（`git diff --stat fd710a8865..HEAD` 仅 `docs/evidence/2026-11-09-per-step-tool-board-gates.md` 5 增 1 改），源码未变，故引用有效，本次未重跑全量门禁。
+Task 8 命令原文 `corepack yarn check > /tmp/per-step-tool-board-check.log 2>&1; echo "exit=$?"` → **`exit=0`**，日志 `2405` 行 / `160 576` B（`wc -l` 实测；16:53–16:56 CST，单次运行通过）。门禁之后的新提交只触碰 `dsh-plugin-huaanwork/scripts/` 与 `docs/`（两个验收脚本与两份证据文档），产品源码未变，验证命令：
+
+```bash
+git diff fd710a8865..HEAD -- dsh-plugin-huaanwork/src; echo "exit=$?"
+```
+
+输出为空（无差异行），`exit=0`。故引用 Task 8 的 `exit=0` 对 HEAD 有效，本次未重跑全量门禁。
 
 ## 5. 未跑项与限制
 

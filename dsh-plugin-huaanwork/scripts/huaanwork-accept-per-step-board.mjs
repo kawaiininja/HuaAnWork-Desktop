@@ -219,6 +219,9 @@ async function run(options) {
       await waitFor(evaluate, historyReadyExpression(options.sessionId, expectedTitle), options.timeout)
     }
     const facts = await evaluate(FACTS)
+    // FACTS 以 `.chat-log` 为根：开历史失败、界面停在只读回退（`.session-detail-title`）时，
+    // 就绪判据可满足而这里返回 null；若不拦截，命令会以 facts:null 静默 exit 0。
+    if (facts === null) throw new Error('capture failed: no .chat-log (read-only fallback?)')
     const shot = await call('Page.captureScreenshot', { format: 'png' })
     if (options.out !== undefined) {
       await mkdir(dirname(resolve(options.out)), { recursive: true })
