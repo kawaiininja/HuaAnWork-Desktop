@@ -260,6 +260,7 @@ type ToolCard = {
   unconfirmed?: boolean;
   /** 历史恢复时只有调用记录、没有可配对结果记录。 */
   resultMissing?: boolean;
+  roundKey?: number;
 };
 
 /** 审批卡 = 逻辑层展示形状（answered/autoContinue/actionable）+ App 侧的原因、摘要与调用标识。 */
@@ -283,8 +284,8 @@ type ChatItem =
       /** 宿主应答 `started: false`，或排队项出队失败/被取消：这条消息没有开启回合。 */
       notStarted?: boolean;
     }
-  | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse" }
-  | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse" }
+  | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse"; roundKey?: number }
+  | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse"; roundKey?: number }
   | { id: number; kind: "tool"; card: ToolCard; panelToggled?: "expand" | "collapse" }
   | { id: number; kind: "todo"; todos: TodoEntry[] }
   | { id: number; kind: "ask"; card: AskCard }

@@ -124,8 +124,8 @@ export function thinkingStepsText(steps: ThinkingSteps): string {
 }
 
 type TurnItem =
-  | { kind: "thinking"; thought: string }
-  | { kind: "assistant"; text: string }
+  | { kind: "thinking"; thought: string; roundKey?: number }
+  | { kind: "assistant"; text: string; roundKey?: number }
   | { kind: "user"; queueItemId?: string; sendRejected?: boolean; notStarted?: boolean }
   | { kind: "tool" }
   | { kind: "ask" }

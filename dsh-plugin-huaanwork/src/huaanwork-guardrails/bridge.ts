@@ -21,13 +21,14 @@ import {
 import { sessionWorkspaceRoot } from "./sandbox-cwd.ts";
 
 type RpcEvent =
-  | { event: "token"; text: string; sessionId?: string }
-  | { event: "reasoning"; text: string; sessionId?: string; final?: true }
+  | { event: "token"; text: string; sessionId?: string; roundKey?: number }
+  | { event: "reasoning"; text: string; sessionId?: string; final?: true; roundKey?: number }
   | {
       event: "tool/start";
       name: string;
       callId?: string;
       sessionId?: string;
+      roundKey?: number;
       /** 参数摘要（单行、限长），供会话内工具卡展示。 */
       args?: string;
       command?: string;

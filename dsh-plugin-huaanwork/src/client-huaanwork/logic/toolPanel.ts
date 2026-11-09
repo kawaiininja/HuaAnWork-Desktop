@@ -18,6 +18,7 @@ export type ToolPanelCard = {
   interrupted?: boolean;
   unconfirmed?: boolean;
   resultMissing?: boolean;
+  roundKey?: number;
 };
 
 export type ToolPanelItem =
@@ -29,6 +30,7 @@ export type ToolPanelItem =
       panelToggled?: PanelToggle;
       text?: string;
       sourceText?: string;
+      roundKey?: number;
       /** 排队中、尚未开始执行的用户消息；由 `session.send` 的应答写回。 */
       queueItemId?: string;
       /** 本次 `session.send` 已抛错且未启动的用户消息；只在本标签内标记。 */

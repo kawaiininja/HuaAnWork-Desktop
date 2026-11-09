@@ -90,8 +90,8 @@ export type HistoryRecord = SessionDetailRecord;
 /** 历史记录映射后的对话流条目（App 侧再包一层 id 成为 ChatItem）。 */
 export type HistoryChatItem =
   | { kind: "user"; text: string }
-  | { kind: "thinking"; text: string }
-  | { kind: "assistant"; text: string }
+  | { kind: "thinking"; text: string; roundKey?: number }
+  | { kind: "assistant"; text: string; roundKey?: number }
   | {
       kind: "tool";
       name: string;
@@ -104,6 +104,7 @@ export type HistoryChatItem =
       interrupted?: boolean;
       truncated?: boolean;
       isError?: boolean;
+      roundKey?: number;
     }
   | { kind: "note"; text: string };
 
