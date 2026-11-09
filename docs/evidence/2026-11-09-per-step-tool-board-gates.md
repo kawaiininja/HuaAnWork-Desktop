@@ -7,7 +7,7 @@
 - 范围：Task 8 只改文档与债务表，**不改源码、不改测试**；因此本次门禁与提交前同一份代码状态，等价于同时覆盖 Task 1–7 的实现
 - 未启动图形应用；未打包；未触碰 `deepseek-harness/`
 
-## 1. 文档改动（四类）
+## 1. 文档改动（五项）
 
 | # | 文件 | 改动 | 性质 |
 | --- | --- | --- | --- |
@@ -73,6 +73,10 @@ corepack yarn check > /tmp/per-step-tool-board-check.log 2>&1; echo "exit=$?"
 ### 2.2 逐段子命令原文（除根 `check` 外，未单独重跑任何步骤）
 
 根 `check` 一条命令覆盖上表全部 12 步，没有把任何步骤摘出来单跑。命令原文即 2 节的单行。
+
+### 2.3 `check:whitespace` 的覆盖范围与提交后补跑
+
+`check:whitespace` 跑的是 `git diff --check <merge-base>..HEAD`，只覆盖**已提交**的改动；门禁时 Task 8 的全部 5 个文件（§1 表中的 4 个文件，加上本证据文档自身）都还在工作树（未提交 / untracked），故该步骤**对这 5 个文件零覆盖**——上文「没有重跑」只描述门禁当时的全量运行，并非指这些文件已受检。提交后在 HEAD `fd710a8865` 上单独补跑 `corepack yarn check:whitespace`：退出码 `0`，TAP `1..7`、`# pass 7`、`# fail 0`，日志 `/tmp/per-step-tool-board-whitespace-postcommit.log`。这是提交后对该步骤的补充覆盖，不改变 2 节记录的 `exit=0` 与第 2.1 节的测试总数。
 
 ## 3. 新增测试
 
