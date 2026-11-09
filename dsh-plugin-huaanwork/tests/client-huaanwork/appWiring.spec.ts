@@ -1876,3 +1876,90 @@ test("a queued message does not change the running turn outcome checks", () => {
   // App 的结算把活动消息 id 交给核对，而不是只传内容视图。
   assert.match(APP_SOURCE, /turnChecks\(contentItems\(items\), turnUserId\)/);
 });
+
+test("reasoning events of different steps create separate thinking blocks in order", () => {
+  const items = [{ id: 1, kind: "user" as const, text: "问题" }];
+  const first = AppModule.applyReasoning(items, "第一轮想", false, () => 2, 10);
+  const streamed = AppModule.appendToken(first, "第一轮正文", () => 3, 10);
+  const tooled = AppModule.insertTurnItem(streamed, {
+    id: 4, kind: "tool", card: { key: "k4", name: "read", status: "start", roundKey: 10 },
+  });
+  const second = AppModule.applyReasoning(tooled, "第二轮想", false, () => 5, 20);
+  assert.equal(second.filter((item) => item.kind === "thinking").length, 2);
+  assert.deepEqual(second.map((item) => item.kind), ["user", "thinking", "assistant", "tool", "thinking"]);
+  assert.equal(second[1]?.kind === "thinking" ? second[1].roundKey : undefined, 10);
+  assert.equal(second[4]?.kind === "thinking" ? second[4].roundKey : undefined, 20);
+  const more = AppModule.applyReasoning(second, "第二轮续", false, () => 6, 20);
+  assert.equal(more.filter((item) => item.kind === "thinking").length, 2, "same step keeps extending its own block");
+  assert.equal(more[4]?.kind === "thinking" ? more[4].thought : "", "第二轮想第二轮续");
+});
+
+test("assistant text does not merge across steps", () => {
+  const items = [{ id: 1, kind: "user" as const, text: "问题" }];
+  const first = AppModule.appendToken(items, "A", () => 2, 10);
+  const second = AppModule.appendToken(first, "B", () => 3, 20);
+  assert.deepEqual(second.map((item) => item.kind), ["user", "assistant", "assistant"]);
+  assert.equal(second[1]?.kind === "assistant" ? second[1].roundKey : undefined, 10);
+  assert.equal(second[2]?.kind === "assistant" ? second[2].roundKey : undefined, 20);
+  const more = AppModule.appendToken(second, "B2", () => 4, 20);
+  assert.equal(more.length, 3, "the same step keeps extending its own assistant item");
+  assert.equal(more[2]?.kind === "assistant" ? more[2].text : "", "BB2");
+});
+
+test("reasoning arriving after its own round's body still inserts before that body", () => {
+  const items = [
+    { id: 1, kind: "user" as const, text: "问题" },
+    { id: 2, kind: "assistant" as const, text: "第一轮正文", roundKey: 10 },
+  ];
+  const next = AppModule.applyReasoning(items, "想", false, () => 3, 10);
+  assert.deepEqual(next.map((item) => item.kind), ["user", "thinking", "assistant"]);
+  assert.equal(next[1]?.kind === "thinking" ? next[1].roundKey : undefined, 10);
+});
+
+test("handleEvent passes roundKey from tool/start into the card", () => {
+  const updates: ReturnType<typeof AppModule.insertTurnItem>[] = [];
+  const setItems = (updater: (prev: Parameters<typeof AppModule.insertTurnItem>[0]) => Parameters<typeof AppModule.insertTurnItem>[0]) => {
+    updates.push(updater([]));
+  };
+  AppModule.handleEvent(
+    { event: "tool/start", name: "read", callId: "c1", roundKey: 42 } as never,
+    () => 2,
+    () => undefined,
+    setItems,
+    () => undefined,
+    () => undefined,
+    async () => undefined,
+    { current: false },
+    false,
+    false,
+    false,
+  );
+  const card = updates[0]?.[0]?.kind === "tool" ? updates[0][0].card : undefined;
+  assert.equal(card?.roundKey, 42);
+});
+
+test("reasoning without roundKey keeps the single block behaviour", () => {
+  const items = [{ id: 1, kind: "user" as const, text: "问题" }];
+  const first = AppModule.applyReasoning(items, "想", false, () => 2);
+  const second = AppModule.applyReasoning(first, "再想", false, () => 3);
+  assert.equal(second.filter((item) => item.kind === "thinking").length, 1);
+});
+
+test("tool/start roundKey lands on the card", () => {
+  const items = [{ id: 1, kind: "user" as const, text: "问题" }];
+  const next = AppModule.insertTurnItem(items, {
+    id: 2, kind: "tool", card: { key: "k2", name: "bash", status: "start", roundKey: 42 },
+  });
+  assert.equal(next[1]?.kind === "tool" ? next[1].card.roundKey : undefined, 42);
+});
+
+test("thinkingBefore never borrows another round's reasoning", () => {
+  const items = [
+    { id: 1, kind: "user" as const, text: "问题" },
+    { id: 2, kind: "thinking" as const, thought: "第一轮想", interrupted: false, roundKey: 10 },
+    { id: 3, kind: "assistant" as const, text: "第二轮正文", roundKey: 20 },
+  ];
+  assert.equal(AppModule.thinkingBefore(items, 2), undefined);
+  const sameRound = [...items.slice(0, 2), { id: 4, kind: "assistant" as const, text: "第一轮正文", roundKey: 10 }];
+  assert.equal(AppModule.thinkingBefore(sameRound, 2)?.id, 2);
+});

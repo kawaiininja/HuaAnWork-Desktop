@@ -18,6 +18,7 @@ export type ToolPanelCard = {
   interrupted?: boolean;
   unconfirmed?: boolean;
   resultMissing?: boolean;
+  roundKey?: number;
 };
 
 export type ToolPanelItem =
@@ -29,6 +30,7 @@ export type ToolPanelItem =
       panelToggled?: PanelToggle;
       text?: string;
       sourceText?: string;
+      roundKey?: number;
       /** 排队中、尚未开始执行的用户消息；由 `session.send` 的应答写回。 */
       queueItemId?: string;
       /** 本次 `session.send` 已抛错且未启动的用户消息；只在本标签内标记。 */
@@ -42,6 +44,55 @@ export type ToolEntryStatus = "running" | "done" | "failed" | "interrupted" | "u
 export function toolPanelCard(item: ToolPanelItem): ToolPanelCard | undefined {
   if (item.kind !== "tool" || item.card === null || typeof item.card !== "object") return undefined;
   return item.card as ToolPanelCard;
+}
+
+/** 轮次身份 = governing step/start 的日志 seq；tool 条目记在卡上，其余记在条目上。 */
+export function roundKeyOf(item: ToolPanelItem): number | undefined {
+  if (item.kind === "tool") return toolPanelCard(item)?.roundKey;
+  return item.roundKey;
+}
+
+type RoundSpan = { start: number; end: number };
+
+/**
+ * 用户回合内再按模型轮次切子段。显式 key 是权威边界；已有 key 后的无 key 条目
+ * 跟随当前轮；首个显式 key 之前的无 key 前缀按思考 / 可见正文位置推断。
+ */
+function splitRounds<T extends ToolPanelItem>(
+  items: readonly T[],
+  start: number,
+  end: number,
+  visibleAssistantIds: ReadonlySet<number>,
+): RoundSpan[] {
+  const spans: RoundSpan[] = [];
+  let spanStart = start;
+  let currentKey: number | undefined;
+  let seenTool = false;
+  const closeBefore = (index: number): void => {
+    if (index > spanStart) {
+      spans.push({ start: spanStart, end: index });
+      spanStart = index;
+    }
+  };
+  for (let index = start; index < end; index += 1) {
+    const item = items[index];
+    if (!item) continue;
+    const key = roundKeyOf(item);
+    if (key !== undefined) {
+      if (key !== currentKey) closeBefore(index);
+      currentKey = key;
+      seenTool = false;
+      continue;
+    }
+    if (currentKey !== undefined) continue;
+    if (item.kind === "tool") { seenTool = true; continue; }
+    if (seenTool && (item.kind === "thinking" || (item.kind === "assistant" && visibleAssistantIds.has(item.id)))) {
+      closeBefore(index);
+      seenTool = false;
+    }
+  }
+  spans.push({ start: spanStart, end });
+  return spans;
 }
 
 export function toolEntryStatus(card: ToolPanelCard, connectionLost: boolean): ToolEntryStatus {
@@ -389,54 +440,66 @@ export function projectToolPanels<T extends ToolPanelItem>(
   const rows: ToolPanelRow<T>[] = [];
   for (const segment of segments) {
     const ids = new Set<number>();
-    const toolIndexes: number[] = [];
     for (let index = segment.start; index < segment.end; index += 1) {
       const item = items[index];
-      if (!item) continue;
-      ids.add(item.id);
-      if (item.kind === "tool") toolIndexes.push(index);
+      if (item) ids.add(item.id);
     }
-    // 终态回合的默认展开已由 `final` 决定，正文探测只在非终态分支被消费。
-    const hasVisibleAssistant = segment.final ? false : options.contentItems.some((item) =>
+    const visibleAssistantIds = new Set<number>(options.contentItems.flatMap((item) =>
       ids.has(item.id)
       && item.kind === "assistant"
       && resolveThinking({ reasoning: "", assistantText: item.text ?? "" }).visible.trim().length > 0
-    );
-    const anchorIndex = toolIndexes[0];
-    for (let index = segment.start; index < segment.end; index += 1) {
-      const item = items[index];
-      if (!item) continue;
-      if (index === anchorIndex) {
-        const anchor = item;
-        const tools = toolIndexes.flatMap((toolIndex) => {
-          const source = items[toolIndex];
-          const card = source ? toolPanelCard(source) : undefined;
-          return source && card ? [toolEntryView(source.id, card, options.connectionLost)] : [];
-        });
-        const statuses = tools.map((tool) => tool.status);
-        const status = STATUS_PRIORITY.find((candidate) => statuses.includes(candidate)) ?? "done";
-        const panelToggled = anchor.panelToggled ?? null;
-        rows.push({
-          kind: "panel",
-          id: anchor.id,
-          panel: {
-            anchorId: anchor.id,
-            count: tools.length,
-            status,
-            title: `工具 · ${PANEL_TEXT[status]} · ${tools.length} 项调用`,
-            expanded: panelToggled === "expand"
-              ? true
-              : panelToggled === "collapse"
-                ? false
-                : !segment.final && !hasVisibleAssistant,
-            panelToggled,
-            tools,
-          },
-        });
-        continue;
+        ? [item.id]
+        : [],
+    ));
+    const rounds = splitRounds(items, segment.start, segment.end, visibleAssistantIds);
+    for (let roundIndex = 0; roundIndex < rounds.length; roundIndex += 1) {
+      const round = rounds[roundIndex];
+      if (!round) continue;
+      const toolIndexes: number[] = [];
+      let roundHasVisibleAssistant = false;
+      for (let index = round.start; index < round.end; index += 1) {
+        const item = items[index];
+        if (!item) continue;
+        if (item.kind === "tool") toolIndexes.push(index);
+        if (visibleAssistantIds.has(item.id)) roundHasVisibleAssistant = true;
       }
-      if (item.kind === "tool") continue;
-      rows.push({ kind: "item", index, item: item as Exclude<T, { kind: "tool" }> });
+      const anchorIndex = toolIndexes[0];
+      const isLastRound = roundIndex === rounds.length - 1;
+      for (let index = round.start; index < round.end; index += 1) {
+        const item = items[index];
+        if (!item) continue;
+        if (index === anchorIndex) {
+          const anchor = item;
+          const tools = toolIndexes.flatMap((toolIndex) => {
+            const source = items[toolIndex];
+            const card = source ? toolPanelCard(source) : undefined;
+            return source && card ? [toolEntryView(source.id, card, options.connectionLost)] : [];
+          });
+          const statuses = tools.map((tool) => tool.status);
+          const status = STATUS_PRIORITY.find((candidate) => statuses.includes(candidate)) ?? "done";
+          const panelToggled = anchor.panelToggled ?? null;
+          rows.push({
+            kind: "panel",
+            id: anchor.id,
+            panel: {
+              anchorId: anchor.id,
+              count: tools.length,
+              status,
+              title: `工具 · ${PANEL_TEXT[status]} · ${tools.length} 项调用`,
+              expanded: panelToggled === "expand"
+                ? true
+                : panelToggled === "collapse"
+                  ? false
+                  : !segment.final && isLastRound && !roundHasVisibleAssistant,
+              panelToggled,
+              tools,
+            },
+          });
+          continue;
+        }
+        if (item.kind === "tool") continue;
+        rows.push({ kind: "item", index, item: item as Exclude<T, { kind: "tool" }> });
+      }
     }
   }
   return rows;

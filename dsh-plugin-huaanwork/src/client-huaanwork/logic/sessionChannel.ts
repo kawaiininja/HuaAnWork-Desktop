@@ -90,8 +90,8 @@ export type HistoryRecord = SessionDetailRecord;
 /** 历史记录映射后的对话流条目（App 侧再包一层 id 成为 ChatItem）。 */
 export type HistoryChatItem =
   | { kind: "user"; text: string }
-  | { kind: "thinking"; text: string }
-  | { kind: "assistant"; text: string }
+  | { kind: "thinking"; text: string; roundKey?: number }
+  | { kind: "assistant"; text: string; roundKey?: number }
   | {
       kind: "tool";
       name: string;
@@ -104,6 +104,7 @@ export type HistoryChatItem =
       interrupted?: boolean;
       truncated?: boolean;
       isError?: boolean;
+      roundKey?: number;
     }
   | { kind: "note"; text: string };
 
@@ -125,17 +126,18 @@ export function historyItemsFromRecords(records: readonly HistoryRecord[]): Hist
       continue;
     }
     if (record.kind === "thinking") {
-      items.push({ kind: "thinking", text: record.text });
+      items.push({ kind: "thinking", text: record.text, ...(record.roundKey === undefined ? {} : { roundKey: record.roundKey }) });
       continue;
     }
     if (record.kind === "assistant") {
-      items.push({ kind: "assistant", text: record.text });
+      items.push({ kind: "assistant", text: record.text, ...(record.roundKey === undefined ? {} : { roundKey: record.roundKey }) });
       continue;
     }
     if (record.kind === "tool-call") {
       items.push({
         kind: "tool",
         name: record.name || "tool",
+        ...(record.roundKey === undefined ? {} : { roundKey: record.roundKey }),
         ...(record.callId ? { callId: record.callId } : {}),
         ...(record.args === undefined ? {} : { args: record.args }),
         ...(record.command === undefined ? {} : { command: record.command }),

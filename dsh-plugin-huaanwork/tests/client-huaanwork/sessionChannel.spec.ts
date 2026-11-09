@@ -208,3 +208,22 @@ test("unscopedSessions treats legacy huaanwork-chat-* ids as normal sessions", (
     ["huaanwork-chat-0123456789abcdef-abcd1234"],
   );
 });
+
+test("historyItemsFromRecords passes roundKey through thinking, assistant and tool items", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "问题" },
+    { kind: "thinking", time: 2, text: "想", roundKey: 6 },
+    { kind: "assistant", time: 3, text: "答", roundKey: 6 },
+    { kind: "tool-call", time: 4, name: "read", callId: "c1", roundKey: 6 },
+    { kind: "tool-result", time: 5, callId: "c1", isError: false, text: "ok" },
+    { kind: "tool-call", time: 6, name: "bash", callId: "c2", roundKey: 9 },
+    { kind: "tool-result", time: 7, callId: "c2", isError: false, text: "ok" },
+  ]);
+  const thinking = items.find((i) => i.kind === "thinking");
+  const assistant = items.find((i) => i.kind === "assistant");
+  const tools = items.filter((i) => i.kind === "tool");
+  assert.equal(thinking?.kind === "thinking" ? thinking.roundKey : undefined, 6);
+  assert.equal(assistant?.kind === "assistant" ? assistant.roundKey : undefined, 6);
+  assert.equal(tools[0]?.kind === "tool" ? tools[0].roundKey : undefined, 6);
+  assert.equal(tools[1]?.kind === "tool" ? tools[1].roundKey : undefined, 9);
+});

@@ -260,6 +260,7 @@ type ToolCard = {
   unconfirmed?: boolean;
   /** 历史恢复时只有调用记录、没有可配对结果记录。 */
   resultMissing?: boolean;
+  roundKey?: number;
 };
 
 /** 审批卡 = 逻辑层展示形状（answered/autoContinue/actionable）+ App 侧的原因、摘要与调用标识。 */
@@ -283,8 +284,8 @@ type ChatItem =
       /** 宿主应答 `started: false`，或排队项出队失败/被取消：这条消息没有开启回合。 */
       notStarted?: boolean;
     }
-  | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse" }
-  | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse" }
+  | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse"; roundKey?: number }
+  | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse"; roundKey?: number }
   | { id: number; kind: "tool"; card: ToolCard; panelToggled?: "expand" | "collapse" }
   | { id: number; kind: "todo"; todos: TodoEntry[] }
   | { id: number; kind: "ask"; card: AskCard }
@@ -3140,6 +3141,7 @@ export default function App() {
           card: {
             key: callId ?? `tool-${allocId()}`,
             name: item.name,
+            ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }),
             ...(callId ? { callId } : {}),
             status: "end",
             ...(item.args === undefined ? {} : { args: item.args }),
@@ -3155,9 +3157,9 @@ export default function App() {
       }
       if (item.kind === "user") return { id: allocId(), kind: "user", text: item.text };
       if (item.kind === "thinking") {
-        return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false, historical: true };
+        return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false, historical: true, ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }) };
       }
-      if (item.kind === "assistant") return { id: allocId(), kind: "assistant", text: item.text };
+      if (item.kind === "assistant") return { id: allocId(), kind: "assistant", text: item.text, ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }) };
       return { id: allocId(), kind: "note", text: item.text };
     });
   }
@@ -4181,7 +4183,7 @@ function sessionMetaOf(session: SessionRow): string {
 
 const COMPACTION_NOTE = "更早的工具输出已被压缩";
 
-function handleEvent(
+export function handleEvent(
   event: RpcEvent,
   allocId: () => number,
   setReady: (ready: boolean) => void,
@@ -4203,10 +4205,10 @@ function handleEvent(
       }
       break;
     case "token":
-      setItems((prev) => appendToken(prev, event.text, allocId), event.sessionId);
+      setItems((prev) => appendToken(prev, event.text, allocId, event.roundKey), event.sessionId);
       break;
     case "reasoning":
-      setItems((prev) => applyReasoning(prev, event.text, event.final === true, allocId), event.sessionId);
+      setItems((prev) => applyReasoning(prev, event.text, event.final === true, allocId, event.roundKey), event.sessionId);
       break;
     case "tool/start":
       if (event.name === "todo_write" && event.todos) {
@@ -4223,6 +4225,7 @@ function handleEvent(
             name: event.name,
             callId: event.callId,
             status: "start",
+            ...(event.roundKey === undefined ? {} : { roundKey: event.roundKey }),
             ...(event.args === undefined ? {} : { args: event.args }),
             ...(event.command === undefined ? {} : { command: event.command }),
           },
@@ -4459,13 +4462,13 @@ export function insertBeforeToolRow(items: ChatItem[], card: ChatItem, callId: s
 }
 
 /** 流式正文接在活动回合末尾；排队消息把末尾顶开时仍写回它自己那个回合。 */
-export function appendToken(items: ChatItem[], text: string, allocId: () => number): ChatItem[] {
+export function appendToken(items: ChatItem[], text: string, allocId: () => number, roundKey?: number): ChatItem[] {
   const insertAt = turnAppendIndex(items);
   const last = insertAt > 0 ? items[insertAt - 1] : undefined;
-  if (last?.kind === "assistant") {
+  if (last?.kind === "assistant" && last.roundKey === roundKey) {
     return [...items.slice(0, insertAt - 1), { ...last, text: last.text + text }, ...items.slice(insertAt)];
   }
-  return [...items.slice(0, insertAt), { id: allocId(), kind: "assistant", text }, ...items.slice(insertAt)];
+  return [...items.slice(0, insertAt), { id: allocId(), kind: "assistant", text, ...(roundKey === undefined ? {} : { roundKey }) }, ...items.slice(insertAt)];
 }
 
 type ContentChatItem = Exclude<
@@ -4507,10 +4510,12 @@ function contentItem(item: Exclude<ChatItem, { kind: "subagent-run" }>): Content
   return item.kind === "attachment" ? attachmentAsAssistant(item) : item;
 }
 
-/** 同一回合只保留一块思考：非 final 追加当前步骤，final 只替换当前步骤，工具调用前已定稿的步骤保留。 */
-export function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number): ChatItem[] {
+/** 同一轮次只保留一块思考：非 final 追加当前步骤，final 只替换当前步骤；换轮次新建一块并插到同轮正文前。 */
+export function applyReasoning(items: ChatItem[], text: string, final: boolean, allocId: () => number, roundKey?: number): ChatItem[] {
   const turnStart = currentTurnStart(items);
-  const existing = items.findIndex((item, index) => index >= turnStart && item.kind === "thinking");
+  const existing = items.findIndex((item, index) =>
+    index >= turnStart && item.kind === "thinking" && item.roundKey === roundKey,
+  );
   if (existing >= 0) {
     const current = items[existing];
     if (current?.kind !== "thinking") return items;
@@ -4520,10 +4525,16 @@ export function applyReasoning(items: ChatItem[], text: string, final: boolean, 
     return next;
   }
   const steps = nextThinkingSteps({ settled: "", draft: "" }, text, final);
-  const created: ChatItem = { id: allocId(), kind: "thinking", thought: thinkingStepsText(steps), interrupted: false, steps };
-  const assistantAt = items.findIndex((item, index) => index >= turnStart && item.kind === "assistant");
-  if (assistantAt >= 0) return [...items.slice(0, assistantAt), created, ...items.slice(assistantAt)];
-  const insertAt = turnAppendIndex(items);
+  const created: ChatItem = {
+    id: allocId(), kind: "thinking", thought: thinkingStepsText(steps), interrupted: false, steps,
+    ...(roundKey === undefined ? {} : { roundKey }),
+  };
+  const assistantAt = items.findIndex((item, index) =>
+    index >= turnStart
+    && item.kind === "assistant"
+    && (roundKey === undefined || item.roundKey === roundKey),
+  );
+  const insertAt = assistantAt >= 0 ? assistantAt : turnAppendIndex(items);
   return [...items.slice(0, insertAt), created, ...items.slice(insertAt)];
 }
 
@@ -4764,11 +4775,15 @@ export function InputCardView({
   );
 }
 
-function thinkingBefore(items: readonly ChatItem[], index: number): Extract<ChatItem, { kind: "thinking" }> | undefined {
+export function thinkingBefore(items: readonly ChatItem[], index: number): Extract<ChatItem, { kind: "thinking" }> | undefined {
+  const target = items[index];
+  const roundKey = target?.kind === "assistant" ? target.roundKey : undefined;
   for (let i = index - 1; i >= 0; i -= 1) {
     const item = items[i];
     if (item.kind === "user") return undefined;
-    if (item.kind === "thinking") return item;
+    if (item.kind !== "thinking") continue;
+    if (roundKey === undefined || item.roundKey === undefined || item.roundKey === roundKey) return item;
+    return undefined;
   }
   return undefined;
 }

@@ -191,3 +191,51 @@ test("a final reasoning event replaces only the current step, earlier steps stay
   // 与重开历史一致：每条消息一块思考，按顺序拼起来就是同一段文字
   assert.equal(thinkingStepsText(steps), ["先读文件。", "再写报告。"].join("\n\n"));
 });
+
+test("hasAssistantTextAfter stops at the next round's thinking block", () => {
+  const items = [
+    { kind: "thinking" as const, thought: "第一轮想", roundKey: 10 },
+    { kind: "tool" as const },
+    { kind: "thinking" as const, thought: "第二轮想", roundKey: 20 },
+    { kind: "assistant" as const, text: "第二轮正文", roundKey: 20 },
+  ];
+  assert.equal(hasAssistantTextAfter(items, 0), false, "round 1 produced no visible body of its own");
+  assert.equal(hasAssistantTextAfter(items, 2), true);
+});
+
+test("hasAssistantTextAfter does not adopt a next-round body without its own thinking", () => {
+  const items = [
+    { kind: "thinking" as const, thought: "第一轮想", roundKey: 10 },
+    { kind: "tool" as const },
+    { kind: "assistant" as const, text: "第二轮正文", roundKey: 20 },
+  ];
+  assert.equal(hasAssistantTextAfter(items, 0), false);
+});
+
+test("hasAssistantTextAfter keeps scanning past an unkeyed thinking item", () => {
+  const items = [
+    { kind: "thinking" as const, thought: "第一轮想", roundKey: 10 },
+    { kind: "tool" as const },
+    { kind: "thinking" as const, thought: "无 key 续想" },
+    { kind: "assistant" as const, text: "正文" },
+  ];
+  assert.equal(hasAssistantTextAfter(items, 0), true);
+});
+
+test("hasAssistantTextAfter still sees its own round's body", () => {
+  const items = [
+    { kind: "thinking" as const, thought: "想", roundKey: 10 },
+    { kind: "assistant" as const, text: "正文" },
+    { kind: "thinking" as const, thought: "下一轮", roundKey: 20 },
+  ];
+  assert.equal(hasAssistantTextAfter(items, 0), true);
+});
+
+test("hasAssistantTextAfter without roundKeys keeps scanning to the next user", () => {
+  const items = [
+    { kind: "thinking" as const, thought: "想" },
+    { kind: "tool" as const },
+    { kind: "assistant" as const, text: "正文" },
+  ];
+  assert.equal(hasAssistantTextAfter(items, 0), true);
+});

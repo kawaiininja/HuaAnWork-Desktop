@@ -339,9 +339,9 @@ export type SessionSummary = {
 /** `session.open` 返回的可读会话记录，按日志顺序排列。 */
 export type SessionDetailRecord =
   | { kind: "user"; time: number; text: string; goalRound?: number }
-  | { kind: "thinking"; time: number; text: string }
-  | { kind: "assistant"; time: number; text: string }
-  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string }
+  | { kind: "thinking"; time: number; text: string; roundKey?: number }
+  | { kind: "assistant"; time: number; text: string; roundKey?: number }
+  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string; roundKey?: number }
   | {
       kind: "tool-result";
       time: number;
@@ -427,13 +427,14 @@ export type SubagentCancelResult = { status: 'accepted' | 'already-terminal'; ru
 
 /** 事件归属会话：token/tool/diff/session 事件携带发起回合的会话 id，前端与收集器据此归因。 */
 export type RpcEvent =
-  | { event: "token"; text: string; sessionId?: string }
-  | { event: "reasoning"; text: string; sessionId?: string; final?: true }
+  | { event: "token"; text: string; sessionId?: string; roundKey?: number }
+  | { event: "reasoning"; text: string; sessionId?: string; final?: true; roundKey?: number }
   | {
       event: "tool/start";
       name: string;
       callId?: string;
       sessionId?: string;
+      roundKey?: number;
       /** 参数摘要（单行、限长），供会话内工具卡展示。 */
       args?: string;
       /** bash / pwsh 调用的 command 参数,供回合结束核对「要求的命令」。 */

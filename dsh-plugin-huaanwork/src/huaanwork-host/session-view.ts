@@ -187,6 +187,7 @@ export function detailRecords(text: string): SessionDetailRecord[] {
   const lines = text.split('\n')
   const events = lines.slice(1).map(parseJsonLine).filter((event): event is Json => event !== undefined)
   const turnEndReasons = new Map<number, string>()
+  let roundKey: number | undefined
   for (const event of events) {
     if (event.type !== 'turn/end') continue
     const data = asObject(event.data)
@@ -217,6 +218,10 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         }
         break
       }
+      case 'step/start': {
+        roundKey = typeof event.seq === 'number' ? event.seq : undefined
+        break
+      }
       case 'assistant/message': {
         const message = asObject(data.message)
         const blocks = Array.isArray(message.content) ? message.content : []
@@ -228,8 +233,8 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         }
         const thought = reasoningParts.map((part) => part.trim()).filter((part) => part.length > 0).join('\n\n')
         const messageText = textParts.join('\n\n').trim()
-        if (thought) records.push({ kind: 'thinking', time, text: thought })
-        if (messageText) records.push({ kind: 'assistant', time, text: messageText })
+        if (thought) records.push({ kind: 'thinking', time, text: thought, ...(roundKey === undefined ? {} : { roundKey }) })
+        if (messageText) records.push({ kind: 'assistant', time, text: messageText, ...(roundKey === undefined ? {} : { roundKey }) })
         break
       }
       case 'tool/call': {
@@ -240,6 +245,7 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         records.push({
           kind: 'tool-call',
           time,
+          ...(roundKey === undefined ? {} : { roundKey }),
           name,
           ...(typeof data.callId === 'string' ? { callId: data.callId } : {}),
           ...(args !== undefined ? { args } : {}),

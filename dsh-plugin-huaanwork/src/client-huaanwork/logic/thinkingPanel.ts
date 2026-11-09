@@ -124,8 +124,8 @@ export function thinkingStepsText(steps: ThinkingSteps): string {
 }
 
 type TurnItem =
-  | { kind: "thinking"; thought: string }
-  | { kind: "assistant"; text: string }
+  | { kind: "thinking"; thought: string; roundKey?: number }
+  | { kind: "assistant"; text: string; roundKey?: number }
   | { kind: "user"; queueItemId?: string; sendRejected?: boolean; notStarted?: boolean }
   | { kind: "tool" }
   | { kind: "ask" }
@@ -140,6 +140,8 @@ export function hasAssistantTextAfter(items: readonly TurnItem[], index: number)
     const item = items[i];
     // 排队中、刚插入（应答未回）或已抛错的用户消息没有开启下一回合，不结束这里的扫描。
     if (item.kind === "user" && !isUnstartedUserItem(item)) return false;
+    if (item.kind === "thinking" && item.roundKey !== undefined && item.roundKey !== current.roundKey) return false;
+    if (item.kind === "assistant" && item.roundKey !== undefined && item.roundKey !== current.roundKey) return false;
     if (item.kind === "assistant") {
       const visible = resolveThinking({ reasoning: current.thought, assistantText: item.text }).visible.trim();
       if (visible.length > 0) return true;

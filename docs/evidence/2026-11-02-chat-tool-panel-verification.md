@@ -267,6 +267,8 @@ git diff --check
 | Step 6.3 `hostPhase=suspect/stoppable` 且套接字未断：只显示探活横幅 | 未执行 | 无强制 `hostPhase` 的界面/CDP 入口，未尝试 |
 | Step 6.4/6.5 目标 `active` 中间 `session/end` 与 `endFirst` 顺序 | 未执行（11B 最终） | 按 11A/11B 拆分留给 11B。**【11B 收口】** 真实 UI 无创建目标的入口（目标由模型工具 `create_goal` 产生，本环境无可复用的进行中目标会话），无法低成本到达「`goal/state active` 中间 `session/end`」与 `endFirst` 场景 ⇒ 维持**未执行，不视为通过**；自动化覆盖见 `tests/client-huaanwork/toolPanel.spec.ts:273`（"real goal actions settle completeFirst and endFirst without requiring a second session end"，两种顺序 + 重复 complete）与 `tests/client-huaanwork/appWiring.spec.ts:528`（"only the real complete outcome settles endFirst"） |
 
+> 历史标记（2026-11-09，Step 2.1）：本步骤验证的是「每用户回合一个面板」旧裁定，已被 R-1 取代；原始结果保留不改。标记置于本表之后而非行间：块引用插入 GFM 表格会终止表格、使后续行退化为纯文本，等于改写原始记录。
+
 ### 2. 关键观察细节
 
 **历史恢复的入口形态（真实 UI）**：从侧边栏子任务进入时没有「继续此会话」按钮——`selectSubtask` 直接 `session.resume`（`App.tsx:809`）+ `session.open`（`App.tsx:810`）后恢复为可聊标签（`App.tsx:806` 的注释「有会话：resume 恢复完整上下文 + 载入历史，直接可聊。」亦如此写；`selectSubtask` 函数体起于 `App.tsx:760`）。只读 `HistoryDetailPane` 只出现在 `openFreeSession` 失败或自动化运行记录详情；本环境唯一可达的运行记录详情所引用的会话日志不在临时 DSH_HOME 中。
