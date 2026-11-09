@@ -3141,6 +3141,7 @@ export default function App() {
           card: {
             key: callId ?? `tool-${allocId()}`,
             name: item.name,
+            ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }),
             ...(callId ? { callId } : {}),
             status: "end",
             ...(item.args === undefined ? {} : { args: item.args }),
@@ -3156,9 +3157,9 @@ export default function App() {
       }
       if (item.kind === "user") return { id: allocId(), kind: "user", text: item.text };
       if (item.kind === "thinking") {
-        return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false, historical: true };
+        return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false, historical: true, ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }) };
       }
-      if (item.kind === "assistant") return { id: allocId(), kind: "assistant", text: item.text };
+      if (item.kind === "assistant") return { id: allocId(), kind: "assistant", text: item.text, ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }) };
       return { id: allocId(), kind: "note", text: item.text };
     });
   }

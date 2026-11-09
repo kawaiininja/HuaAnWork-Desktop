@@ -126,17 +126,18 @@ export function historyItemsFromRecords(records: readonly HistoryRecord[]): Hist
       continue;
     }
     if (record.kind === "thinking") {
-      items.push({ kind: "thinking", text: record.text });
+      items.push({ kind: "thinking", text: record.text, ...(record.roundKey === undefined ? {} : { roundKey: record.roundKey }) });
       continue;
     }
     if (record.kind === "assistant") {
-      items.push({ kind: "assistant", text: record.text });
+      items.push({ kind: "assistant", text: record.text, ...(record.roundKey === undefined ? {} : { roundKey: record.roundKey }) });
       continue;
     }
     if (record.kind === "tool-call") {
       items.push({
         kind: "tool",
         name: record.name || "tool",
+        ...(record.roundKey === undefined ? {} : { roundKey: record.roundKey }),
         ...(record.callId ? { callId: record.callId } : {}),
         ...(record.args === undefined ? {} : { args: record.args }),
         ...(record.command === undefined ? {} : { command: record.command }),
