@@ -67,6 +67,9 @@ type ToolResult = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/
   meta?: { truncated?: boolean };
 };
 
+/** 插件实例拥有的轮次表：sessionId → 最近一条 step/start 的日志 seq。 */
+type RoundKeys = Map<string, number>;
+
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
   huaanworkSessionRoots?: Map<string, string>;
@@ -103,10 +106,16 @@ export const name = "huaanwork-bridge";
 export const inject = ["tools"];
 
 export function apply(ctx: Context): void {
+  const roundKeys: RoundKeys = new Map();
+  ctx.on("session/disposed", ((session: { id?: string }) => {
+    const id = session?.id;
+    if (typeof id === "string" && id) roundKeys.delete(id);
+  }) as never, { global: true });
+
   // Agent turns dispatch llm/stream, tools/execute, and agent/status on the
   // agent scope. An unscoped listener does not see those events.
   ctx.on("llm/stream", ((options: unknown, next: () => AsyncIterable<StreamChunk>) =>
-    mapTokens(ctx, sessionIdOfOptions(options), purposeOfOptions(options), next())) as never, { global: true });
+    mapTokens(ctx, sessionIdOfOptions(options), purposeOfOptions(options), next(), roundKeys)) as never, { global: true });
 
   ctx.on(
     "tools/execute",
@@ -115,11 +124,13 @@ export function apply(ctx: Context): void {
       const child = childActivityOf(ctx, sessionId);
       const tool = { name: execution.name, ...(execution.callId === undefined ? {} : { callId: execution.callId }) };
       if (child === undefined) {
+        const roundKey = roundKeyFor(roundKeys, sessionId);
         emit(ctx, {
           event: "tool/start",
           name: execution.name,
           ...(execution.callId === undefined ? {} : { callId: execution.callId }),
           ...(sessionId === undefined ? {} : { sessionId }),
+          ...(roundKey === undefined ? {} : { roundKey }),
           ...startDetail(execution),
         });
       } else {
@@ -166,6 +177,11 @@ export function apply(ctx: Context): void {
     // 已知 child 的目标/压缩事件不进父消息流:run 投影不消费它们,父会话也不该被改写。
     if (childActivityOf(ctx, sessionId) !== undefined) return;
     const scope = sessionId === undefined ? {} : { sessionId };
+    if (event?.type === "step/start") {
+      const seq = (event as { seq?: number } | undefined)?.seq;
+      if (sessionId !== undefined && typeof seq === "number") roundKeys.set(sessionId, seq);
+      return;
+    }
     if (event?.type === "compaction/end") {
       if (objectValue(event.data).error !== undefined) return;
       emit(ctx, { event: "compaction/done", ...scope });
@@ -240,19 +256,22 @@ async function* mapTokens(
   sessionId: string | undefined,
   purpose: string | undefined,
   stream: AsyncIterable<StreamChunk>,
+  roundKeys: RoundKeys,
 ): AsyncIterable<StreamChunk> {
   // 非回合流（compaction / session-title 等辅助模型调用）的 text-delta / reasoning 不是回合产出：
   // 照常透传 chunks，但不发 token 或 reasoning 事件——否则会被运行收集器按 sessionId 误归集为该次任务的产出。
   // 已知 child 的回合流同理只驱动 run 投影:正文与思考正文都不进入父消息流。
+  const roundKey = roundKeyFor(roundKeys, sessionId);
+  const roundField = roundKey === undefined ? {} : { roundKey };
   const child = purpose === undefined ? childActivityOf(ctx, sessionId) : undefined;
   for await (const chunk of stream) {
     if (purpose === undefined) {
       if (child === undefined) {
         if (chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
-          emit(ctx, { event: "token", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
+          emit(ctx, { event: "token", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }), ...roundField });
         }
         if (chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
-          emit(ctx, { event: "reasoning", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }) });
+          emit(ctx, { event: "reasoning", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }), ...roundField });
         }
         if (
           chunk?.type === "block-end"
@@ -264,6 +283,7 @@ async function* mapTokens(
             text: chunk.block.text,
             final: true,
             ...(sessionId === undefined ? {} : { sessionId }),
+            ...roundField,
           });
         }
       } else if (chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
@@ -410,6 +430,11 @@ function emit(ctx: Context, event: RpcEvent): void {
 function sessionIdOfOptions(options: unknown): string | undefined {
   const sessionId = (options as { sessionId?: unknown } | undefined)?.sessionId;
   return typeof sessionId === "string" && sessionId ? sessionId : undefined;
+}
+
+/** 当前轮次身份；会话尚未进入 step 或监听不可达时不盖键，客户端走推断降级。 */
+function roundKeyFor(roundKeys: RoundKeys, sessionId: string | undefined): number | undefined {
+  return sessionId === undefined ? undefined : roundKeys.get(sessionId);
 }
 
 /**

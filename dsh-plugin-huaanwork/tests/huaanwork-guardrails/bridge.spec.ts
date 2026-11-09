@@ -847,3 +847,98 @@ test("bridge keeps an unregistered session unchanged while a registry is present
   assert.deepEqual(emitted, [{ event: "session/end", ok: true, sessionId: PARENT_SESSION }]);
   assert.equal(runs.get(runId)?.phase, "starting", "parent activity must not touch the child run");
 });
+
+test("bridge stamps roundKey from observed step/start onto parent session events", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+
+  const sessionEvent = listeners["session/event"]?.[0] as unknown as (
+    session: { id: string },
+    event: { type: string; seq: number },
+  ) => void;
+  assert.ok(sessionEvent, "the bridge observes session/event");
+  sessionEvent({ id: PARENT_SESSION }, { type: "step/start", seq: 42 });
+
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+  await execute(
+    { name: "read", callId: "c1", arguments: {}, agent: parentAgent },
+    async () => ({ isError: false, content: [{ type: "text", text: "ok" }] }),
+  );
+  const start = emitted.find((e) => (e as { event?: string }).event === "tool/start") as { roundKey?: number };
+  assert.equal(start?.roundKey, 42);
+
+  const wrap = listeners["llm/stream"]?.[0] as (
+    options: unknown,
+    next: () => AsyncIterable<StreamChunk>,
+  ) => AsyncIterable<StreamChunk>;
+  async function* next() {
+    yield { type: "reasoning-delta" as const, index: 0, text: "想" };
+    yield { type: "text-delta" as const, index: 0, text: "答" };
+    yield { type: "finish" as const, reason: { kind: "stop" } };
+  }
+  const chunks: StreamChunk[] = [];
+  for await (const chunk of wrap({ sessionId: PARENT_SESSION }, next)) chunks.push(chunk);
+  const reasoning = emitted.find((e) => (e as { event?: string }).event === "reasoning") as { roundKey?: number };
+  const token = emitted.find((e) => (e as { event?: string }).event === "token") as { roundKey?: number };
+  assert.equal(reasoning?.roundKey, 42);
+  assert.equal(token?.roundKey, 42);
+  assert.equal(chunks.length, 3, "stamping must not consume or alter chunks");
+});
+
+test("bridge updates roundKey per step, isolates sessions, and drops it on dispose", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const sessionEvent = listeners["session/event"]?.[0] as unknown as (
+    session: { id: string },
+    event: { type: string; seq: number },
+  ) => void;
+  const disposed = listeners["session/disposed"]?.[0] as unknown as (session: { id: string }) => void;
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+  const stamp = async (callId: string, sessionId = PARENT_SESSION): Promise<number | undefined> => {
+    await execute(
+      { name: "read", callId, arguments: {}, agent: sessionId === PARENT_SESSION ? parentAgent : { session: { id: sessionId } } },
+      async () => ({ isError: false, content: [{ type: "text", text: "ok" }] }),
+    );
+    const event = emitted.findLast((e) => (e as { event?: string }).event === "tool/start") as { roundKey?: number };
+    return event.roundKey;
+  };
+
+  sessionEvent({ id: PARENT_SESSION }, { type: "step/start", seq: 42 });
+  assert.equal(await stamp("c1"), 42);
+  sessionEvent({ id: PARENT_SESSION }, { type: "step/start", seq: 43 });
+  assert.equal(await stamp("c2"), 43);
+
+  sessionEvent({ id: CHILD_SESSION }, { type: "step/start", seq: 99 });
+  assert.equal(await stamp("c3", CHILD_SESSION), 99, "a second session keeps its own key");
+  assert.equal(await stamp("c4"), 43, "the first session is unaffected");
+
+  disposed({ id: PARENT_SESSION });
+  assert.equal(await stamp("c5"), undefined, "dispose drops the session key");
+});
+
+test("bridge leaves roundKey absent before any step/start and on non-turn streams", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted } = createCtx();
+  apply(ctx as never);
+  const execute = listeners["tools/execute"]?.[0] as Execute;
+  await execute(
+    { name: "read", callId: "c1", arguments: {}, agent: parentAgent },
+    async () => ({ isError: false, content: [{ type: "text", text: "ok" }] }),
+  );
+  const start = emitted.find((e) => (e as { event?: string }).event === "tool/start") as { roundKey?: number };
+  assert.equal(start?.roundKey, undefined);
+  assert.equal(Object.hasOwn(start as object, "roundKey"), false);
+
+  const wrap = listeners["llm/stream"]?.[0] as (
+    options: unknown,
+    next: () => AsyncIterable<StreamChunk>,
+  ) => AsyncIterable<StreamChunk>;
+  async function* next() {
+    yield { type: "text-delta" as const, index: 0, text: "标题" };
+    yield { type: "finish" as const, reason: { kind: "stop" } };
+  }
+  for await (const chunk of wrap({ sessionId: PARENT_SESSION, purpose: "session-title" }, next)) void chunk;
+  assert.equal(emitted.filter((e) => (e as { event?: string }).event === "token").length, 0);
+});
