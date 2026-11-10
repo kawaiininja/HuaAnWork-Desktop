@@ -3,7 +3,7 @@
  * 广场签名包与智能体页外壳的 M2 spec（Task 12）：
  * - 广场签名卡（名称/简介/版本/大小/下载、迁移去重）与下载动作；
  * - 下载失败的规格中文（撤销 / 验签 / 网络）；
- * - 发布口令输入与 settings.set 一起保存；
+ * - 公用机配置已迁入设置「质检」页，本页不再展示任何配置相关信息；
  * - 进入页面与手动刷新的顺序、60 秒撤销轮询、不重叠、卸载清理、失败保留本地卡。
  */
 import { act, createElement } from "react";
@@ -378,8 +378,8 @@ describe("AgentsPlazaPanel（广场签名包）", () => {
   });
 });
 
-describe("AgentsView 发布口令与刷新周期", () => {
-  it("settings.get 回填发布口令；保存时与 host/port/读口令一起 settings.set", async () => {
+describe("AgentsView 刷新周期与配置移除", () => {
+  it("智能体页不再展示公用机配置(已迁入设置「质检」页)", async () => {
     handlers["settings.get"] = () => ({
       agents_host: "10.0.0.5",
       agents_port: 18080,
@@ -389,24 +389,12 @@ describe("AgentsView 发布口令与刷新周期", () => {
     const view = await mount(createElement(AgentsView, {}));
     await flush();
 
-    const publishInput = view.querySelector<HTMLInputElement>('input[aria-label="发布口令"]');
-    expect(publishInput).not.toBeNull();
-    expect(publishInput!.type).toBe("password");
-    expect(publishInput!.placeholder).toBe("发布口令（创建者）");
-    expect(publishInput!.value).toBe("publish-token");
-    expect(view.querySelector<HTMLInputElement>('input[aria-label="访问口令"]')!.value).toBe("read-token");
-
-    await typeInto(publishInput!, "new-publish-token");
-    await click(buttonByText(view, "保存配置")!);
-    await flush();
-
-    expect(rpcMock).toHaveBeenCalledWith("settings.set", {
-      agents_host: "10.0.0.5",
-      agents_port: 18080,
-      agents_catalog_token: "read-token",
-      agents_catalog_publish_token: "new-publish-token",
-    });
-
+    expect(view.querySelector('input[aria-label="公用机地址"]')).toBeNull();
+    expect(view.querySelector('input[aria-label="端口"]')).toBeNull();
+    expect(view.querySelector('input[aria-label="访问口令"]')).toBeNull();
+    expect(view.querySelector('input[aria-label="发布口令"]')).toBeNull();
+    expect(buttonByText(view, "保存配置")).toBeUndefined();
+    expect(view.textContent).not.toContain("在公用机完成质检后");
     // 本页没有 keyring / 私钥 / admin token / 撤销控件。
     expect(view.querySelector('[aria-label*="keyring" i]')).toBeNull();
     expect(view.textContent).not.toContain("私钥");

@@ -194,19 +194,20 @@ button {
 }
 
 .shell {
+  position: relative;
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 360px;
+  grid-template-columns: var(--left-w, 240px) minmax(0, 1fr) var(--right-w, 360px);
   flex: 1;
   min-height: 0;
   transition: grid-template-columns 300ms ease-out;
 }
 
 .shell.no-right {
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: var(--left-w, 240px) minmax(0, 1fr);
 }
 
 .shell.collapsed {
-  grid-template-columns: 52px minmax(0, 1fr) 360px;
+  grid-template-columns: 52px minmax(0, 1fr) var(--right-w, 360px);
 }
 
 .shell.collapsed.no-right {
@@ -216,11 +217,41 @@ button {
 /* 右侧面板收起：保持三列轨道，第三列 360px → 0 才能平滑过渡 */
 
 .shell.right-collapsed {
-  grid-template-columns: 240px minmax(0, 1fr) 0px;
+  grid-template-columns: var(--left-w, 240px) minmax(0, 1fr) 0px;
 }
 
 .shell.collapsed.right-collapsed {
   grid-template-columns: 52px minmax(0, 1fr) 0px;
+}
+
+/* 拖拽中：关掉列宽过渡让分隔条跟手，并禁止文本选择 */
+.shell.dragging {
+  transition: none;
+  user-select: none;
+}
+
+/* 三栏分隔条：绝对定位跨在列边界上，不参与 grid 轨道 */
+.col-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 20;
+}
+
+.col-divider-left {
+  transform: translateX(-50%);
+}
+
+.col-divider-right {
+  transform: translateX(50%);
+}
+
+.col-divider:hover,
+.col-divider.on {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 /* ---- 左侧导航 ---- */
@@ -334,14 +365,16 @@ button {
   gap: 4px;
 }
 
+/* 任务/项目两区固定各占剩余区域一半:边界不随任务增删移动,内部列表各自滚动 */
 .workspace-section {
-  flex: 1 1 auto;
+  flex: 1 1 0;
+  min-height: 0;
   overflow: hidden;
 }
 
 .recent-section {
-  flex: 0 1 auto;
-  max-height: 34%;
+  flex: 1 1 0;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -506,6 +539,7 @@ button {
   padding: 0 2px;
   overflow: auto;
   min-height: 0;
+  flex: 1 1 0;
 }
 
 .recent-item {
@@ -1526,51 +1560,7 @@ button {
   cursor: pointer;
 }
 
-/* ---- 智能体页公用机配置条 ---- */
-
-.agents-config-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 12px 0 16px;
-}
-
-.agents-config-bar .filter-tab {
-  height: 28px;
-  padding: 0 12px;
-  display: inline-flex;
-  align-items: center;
-}
-
-.agents-config-bar .filter-tab:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.agents-config-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.agents-config-input {
-  appearance: none;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  border-radius: var(--radius-sm);
-  padding: 5px 10px;
-  font-size: 12.5px;
-  color: var(--text);
-  outline: none;
-  box-sizing: border-box;
-  height: 28px;
-}
-
-.agents-config-input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
+/* 质检页(原智能体页配置栏)的逐字段错误文案 */
 
 .agents-field-error {
   font-size: 11px;
@@ -2387,8 +2377,7 @@ button {
   padding: 0 2px;
   overflow: auto;
   min-height: 0;
-  max-height: 148px;
-  flex: 0 0 auto;
+  flex: 1 1 0;
 }
 
 .project-item.active .recent-title {

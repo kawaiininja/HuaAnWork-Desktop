@@ -1,13 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { ThemePref } from "./logic/accountStatus.ts";
 import { rpcCall } from "./api.ts";
+import QualitySection from "./QualitySection.tsx";
 
 export const PLUGIN_CONFIRM =
   "该包将在 sidecar 内执行 apply(ctx)，权限与本机用户相同；护栏只约束模型工具调用，不沙箱化插件代码。\n\napply(ctx) runs as the user, not sandboxed.";
 
 export const PLUGIN_APPLY_FAIL = "禁用后装插件并重启";
 
-export type SettingsSection = "model" | "appearance" | "account" | "permissions";
+export type SettingsSection = "model" | "appearance" | "account" | "permissions" | "quality";
 
 export type ModelEntry = {
   id: string;
@@ -108,6 +109,8 @@ type Props = {
   /** Task 10：上一次持有系统防睡眠断言的尝试是否失败（或该 OS 不支持）；App 侧根据
    * automation.list 刷新后的判定结果调用 Rust command 后回填，此处只读展示静态提示。 */
   keepAwakeUnavailable: boolean;
+  /** 质检页保存公用机配置成功后通知 App(自增 agentChangeSignal,智能体页据此重拉)。 */
+  onAgentsConfigSaved?: () => void;
 };
 
 export function ModelChip({
@@ -291,10 +294,22 @@ function IconShield() {
   );
 }
 
+function IconQuality() {
+  return (
+    <svg {...ICON_PROPS}>
+      <title>质检</title>
+      <rect x="3.5" y="3" width="9" height="11" rx="1.5" />
+      <path d="M6 3V1.8h4V3" />
+      <path d="M5.8 8.8l1.5 1.5 2.9-2.9" />
+    </svg>
+  );
+}
+
 const NAV: { id: SettingsSection; label: string; icon: ReactNode }[] = [
   { id: "account", label: "账户", icon: <IconAccount /> },
   { id: "appearance", label: "外观", icon: <IconAppearance /> },
   { id: "model", label: "模型", icon: <IconModel /> },
+  { id: "quality", label: "质检", icon: <IconQuality /> },
   { id: "permissions", label: "权限", icon: <IconShield /> },
 ];
 
@@ -325,6 +340,7 @@ export default function Settings({
   onChangePassword,
   onModelsChange,
   keepAwakeUnavailable,
+  onAgentsConfigSaved,
 }: Props) {
   const [models, setModels] = useState<ModelEntry[]>([]);
   const [activeId, setActiveId] = useState("");
@@ -643,6 +659,7 @@ export default function Settings({
                 ))}
               </div>
             ) : null}
+            {section === "quality" ? <QualitySection onSaved={onAgentsConfigSaved} /> : null}
             {section === "permissions" ? (
               <div className="perm-pane">
                 <h3>网络权限</h3>
