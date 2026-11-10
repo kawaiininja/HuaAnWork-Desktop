@@ -20,6 +20,8 @@
 
 ## 2. 已确认裁定
 
+确认来源：项目归属与运行子任务范围两项经用户问答明确确认（2026-11-09）；其余各项随聊天中呈现的完整设计与五项推荐规则获用户整体批准（「复核预期，落成设计文档并撰写实施计划」）。批准链与评审校准详见 [`2026-11-09-automation-project-linkage-design-review.md`](./2026-11-09-automation-project-linkage-design-review.md) §1。
+
 | 决策点 | 规则 |
 | --- | --- |
 | 项目归属 | 默认新建同名项目；允许用户显式选择已有项目与后续改绑 |
@@ -142,7 +144,7 @@ script 仍使用 `script:<runId>` 写者键，不创建 Task，也没有 session
 2. 若原 Run 已存在：不追加 cancelled；按该 Run 的 `endedAt/ok/status` 对账 lastRunAt/lastStatus，清除 activeRunId，并完成 once 自动化的既有禁用收尾。
 3. 若原 Run 不存在：以原 runId 补 cancelled；按 `(automationId,activeRunId)` 查 Task，带上可用 taskId/sessionId。没有 Task 的 agent 仍由 activeRunId 推导 sessionId；script 无 sessionId。
 4. 旧 running 记录没有 activeRunId 时保留现有随机 runId 的兼容补记，不伪造 Task 关联。
-5. 补记或对账失败写日志并保留 running/activeRunId，使后续启动仍可重试；不得把真实已成功落盘的 Run 改报为失败。
+5. 补记或对账按自动化逐条隔离失败：单条失败写日志并保留 running/activeRunId，不中断同批其余项，使后续启动仍可重试；不得把真实已成功落盘的 Run 改报为失败。
 
 ## 7. 自动化页与运行标签
 
@@ -169,7 +171,7 @@ script 仍使用 `script:<runId>` 写者键，不创建 Task，也没有 session
 
 RunsPanel 接收最新 tasks 和 `onOpenRunTask`：
 
-1. run.taskId 存在时，先按 taskId 查现存 Task；必要时刷新一次 tasks。
+1. run.taskId 存在时，按 taskId 查客户端常驻 tasks 快照中的现存 Task；快照由 run-task/删除/prune 后的 onChanged 统一刷新（带请求序号，过期应答丢弃），点击时不单独按需刷新。
 2. 只有 Task 存在、来源字段与 Run 匹配且有 sessionId 才可跳转。
 3. App 复用子任务选择流程：切主视图、按 Task.projectId 对齐项目、设置 selectedTaskId、复用已有标签或 open+resume。
 4. Task 不存在或关联不匹配时不可点，显示“对应子任务或会话已删除/清理”；不得改用自动化当前 projectId 猜测。
@@ -186,7 +188,8 @@ RunsPanel 接收最新 tasks 和 `onOpenRunTask`：
 - 手动和调度准入在同步调用 scheduler.admitAutomation 前检查 deleting guard；guard 与 admit 之间不得有 await。admit 后到 enqueue 前的窗口由 rootWriter 中持久于内存的 automationId 覆盖。
 - 项目删除先进入进程内 `deletingProjectIds` guard，再对其当前绑定的全部 doomed Automations 进入 automation guard 并完成全量在途/活跃预检，然后才逐项删除；任一预检失败时项目注册项保留且不开始级联。已经开始后的子步骤失败不回滚已完成项，保留项目锚点供重试。guard 在 finally 释放。
 - 项目 guard 存续期间，`automation.create` 的显式绑定、`automation.update` 的改绑目标校验、`task.create` 必须在同步段 assert 项目不在删除中，否则拒绝——覆盖「级联期间项目仍在 projects.json、存在性检查可通过」的绑定窗口（锚点最后删引入的新窗口，非既有问题）。
-- 删除运行、删除自动化生成的 Task、删除自动化时，若目标 sessionId 在权威 activeSessionIds 中，拒绝删除。**该活跃拒绝只覆盖自动化来源对象**；普通 task/project 级联保持既有 release-then-delete 语义（先释放运行态再删日志），不得因普通任务正在对话而拒绝删除项目。
+- 删除运行、删除自动化生成的 Task、删除自动化时，若目标 sessionId 在权威 activeSessionIds **快照**中，拒绝删除。**该活跃拒绝只覆盖自动化来源对象**；普通 task/project 级联保持既有 release-then-delete 语义（先释放运行态再删日志），不得因普通任务正在对话而拒绝删除项目。
+- 残余窗口登记（与 routes.ts 改绑守卫的 check-then-act 先例同形）：activeSessionIds 是调用时快照，`sessionSend` 准入不查删除守卫；快照之后、删目录之前准入的续聊仍会被 release-then-delete。本设计承诺「快照时刻活跃者跳过」，不承诺消除该窗口；同类窗口在既有 deleteAutomationRun/session.remove 已存在。
 - activeSessionIds 由 TurnScheduler 的 rootWriters、starting、queue 与 automationCollector 求并集，覆盖自动化结束后的用户续聊；activeAutomationIds 从自动化 rootWriter 的 automationId 读取，覆盖 admit→enqueue 窗口。
 
 ### 9.2 删除单条 Run
@@ -225,6 +228,8 @@ prune 的候选是新自动 Task 与旧 auto-prefix 会话目录的并集：
 5. Run 保留；其 taskId 成为不可跳转历史引用。应答含 `removed/tasksRemoved/failed`，前端明确报告部分失败并可重试。
 6. runs.jsonl 超过 50 条的自动淘汰仍只删旧 Run，不级联 Task/Session。
 
+边界登记（N2）：keep 集来自最近 20 条 Run 与活跃快照；「Task 已建但 appendRun 失败、Run 未落盘」的会话不在 keep，prune 会清掉该次工作的唯一载体。该窗口随 M2（finishAutomation 失败路径摘 inFlight 条目）修复后触发概率极低，本设计登记接受，不新增保护机制。
+
 ## 10. 关键边界汇总
 
 | 场景 | 结果 |
@@ -238,7 +243,7 @@ prune 的候选是新自动 Task 与旧 auto-prefix 会话目录的并集：
 | agent 执行失败/取消/超时 | Task/Session 保留，Run 带终态 |
 | 用户删除运行 Task | Run 保留但不可跳转；活跃时拒绝删除 |
 | 删除 Automation | 清跨项目自动 Task，保留项目 |
-| prune 活跃续聊 | 跳过，不删除 |
+| prune 活跃续聊 | 快照时刻活跃者跳过；快照后准入的残余窗口见 §9.1 登记 |
 | 会话恢复失败 | 显示错误/重试，不创建替代 Task/Session |
 
 ## 11. 改动文件范围
@@ -253,6 +258,7 @@ prune 的候选是新自动 Task 与旧 auto-prefix 会话目录的并集：
 - `src/huaanwork-host/routes.ts`：级联接线、项目/自动化删除守卫和刷新应答。
 - `src/huaanwork-host/acceptance-hooks.ts`：验收专用的运行崩溃点注入（主开关 gating，生产默认惰性），供真机恢复验收。
 - `src/client-huaanwork/App.tsx`、`logic/runTabsLogic.ts`、`logic/chatTabs.ts`：标签单一路径、恢复、导航和关闭。
+- `src/client-huaanwork/logic/automationRunLink.ts`：新建；运行记录跳转目标判定与 stale 标签对账纯函数。
 - `src/client-huaanwork/AutomationsView.tsx`：看板/output 移除与运行跳转。
 - `src/client-huaanwork/BoardView.tsx`：删除。
 - `src/client-huaanwork/styles.css` 及生成产物：清理失效样式。
@@ -268,6 +274,6 @@ prune 的候选是新自动 Task 与旧 auto-prefix 会话目录的并集：
 6. 改绑后旧 Run 打开旧项目 Task；新 Run 使用新项目。
 7. 运行标签无双开；重启只重建仍有效的新版关联；恢复失败不能写入旧会话或创建替代任务。
 8. 自动化页无看板、widget 和 output 展示；新版 Run 正确跳子任务，旧 Run 只读，无会话记录不可点。
-9. 删除 Run/Automation/Project、Task 和 prune 的每个失败点均可重试，无失去锚点的半删除；活跃续聊不被清理；项目删除期间新建/改绑/建子任务被拒绝，普通任务级联语义不变。
+9. 删除 Run/Automation/Project、Task 和 prune 的每个失败点均可重试，无失去锚点的半删除；快照时刻活跃的续聊不被清理（残余窗口已登记）；项目删除期间新建/改绑/建子任务被拒绝，普通任务级联语义不变。
 10. `corepack yarn test`、`corepack yarn typecheck`、`corepack yarn check` 全部通过。
 11. 真机隔离实例逐项验证创建、手动/定时/补跑、跨项目跳转、续聊、删除、prune、Host 重启；未实际执行的项目标 BLOCKED，不以单测代替。

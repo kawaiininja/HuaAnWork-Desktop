@@ -181,6 +181,7 @@ Expected: PASS。仅在用户明确授权后提交本任务文件。
 **Files:**
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-host/automations-store.ts:436-459`
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-host/automations-host.ts:558-740`
+- Modify: `dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts:480-489`（run-end 变体补 `taskId?: string`，M3 归属）
 - Test: `dsh-plugin-huaanwork/tests/huaanwork-host/automations-host.spec.ts`
 - Test: `dsh-plugin-huaanwork/tests/huaanwork-host/automations-store.spec.ts`
 
@@ -230,6 +231,22 @@ test("task registry failure prevents model execution and leaves an unlinked erro
 
 另在 store 测试中断言 running 必须带 activeRunId，ok/error 收尾后字段消失。
 
+M2 回归钉（agent 软失败路径，script 有 finally 兜底不适用）：
+
+```ts
+test("appendRun failure still removes the handed-off in-flight entry", async () => {
+  const h = makeHarness();
+  const automation = await agentTask(h.profileDir);
+  // runs.jsonl 占位成目录 → appendRun 的 writeFile 抛 EISDIR，进程不退出。
+  mkdirSync(join(h.profileDir, "automations", `${automation.id}.runs.jsonl`), { recursive: true });
+  const started = await startAutomation(h, automation, { runId: "soft-fail-1" });
+  await expect(started.done).rejects.toThrow();
+  expect(inFlightRuns.has("soft-fail-1")).toBe(false);
+});
+```
+
+`inFlightRuns` 从 `automation-inflight.ts` 导入。该钉针对「appendRun 抛出但进程继续运行」：泄漏条目会让改绑/删自动化/删项目预检一直拒绝到 Host 重启（删除面阻塞系本计划新守卫引入）。
+
 - [ ] **Step 2: 运行并确认失败**
 
 Run: `corepack yarn workspace dsh-plugin-huaanwork test tests/huaanwork-host/automations-host.spec.ts tests/huaanwork-host/automations-store.spec.ts`
@@ -278,7 +295,17 @@ if (automation.kind === 'agent' && project) {
 }
 ```
 
-`finishAutomation` 的 run 参数和 RunSummary 条件展开 `taskId`；run-end 同步带 taskId。绑定项目缺失和 Task 创建失败路径不写 sessionId；存量 projectId:null 的 agent 仍执行但不建 Task，保留旧 sessionId 供只读历史降级。
+`finishAutomation` 的 run 参数和 RunSummary 条件展开 `taskId`；run-end 同步带 taskId（RpcEvent 变体改动归本 Task Files）。绑定项目缺失和 Task 创建失败路径不写 sessionId；存量 projectId:null 的 agent 仍执行但不建 Task，保留旧 sessionId 供只读历史降级。
+
+M2 修复：`finishAutomation` 的摘条目移入 finally，appendRun 软失败不再泄漏 inFlight（成功路径次序不变）：
+
+```ts
+try {
+  await appendRun(routeCtx.profileDir, automation.id, summary)
+} finally {
+  inFlightRuns.delete(run.runId)
+}
+```
 
 - [ ] **Step 5: 验证并提交边界**
 
@@ -405,7 +432,18 @@ export async function recoverInterruptedAutomation(
 }
 ```
 
-首个 tick 循环调用该函数；失败保留 running/activeRunId 并记录日志。
+首个 tick 循环**逐自动化 try/catch** 调用该函数（M4：一条失败不得中断同批其余项；失败项保留 running/activeRunId，下次启动重试）：
+
+```ts
+for (const automation of list) {
+  if (automation.lastStatus !== 'running' || (automation.lastRunAt ?? 0) >= hostStartedAt) continue
+  try {
+    await recoverInterruptedAutomation(routeCtx, automation, now)
+  } catch (error) {
+    console.error(`automation recovery failed for ${automation.id}:`, error)
+  }
+}
+```
 
 - [ ] **Step 4: 验证并提交边界**
 
@@ -1081,7 +1119,7 @@ Expected: PASS。仅在用户明确授权后提交。
 **Files:**
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-host/acceptance-hooks.ts`（T4 崩溃点判定，纯函数）
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-host/automations-host.ts`（三个崩溃点调用，主开关惰性）
-- Test: `dsh-plugin-huaanwork/tests/huaanwork-host/acceptance-hooks.spec.ts`（不存在则创建）
+- Test: `dsh-plugin-huaanwork/tests/huaanwork-host/acceptance-hooks.spec.ts`（已存在，追加用例）
 - Create after execution: `docs/evidence/2026-11-09-automation-project-linkage.md`
 - Modify if acceptance exposes a defect: only files owned by Tasks 1-8
 
@@ -1196,4 +1234,5 @@ kill "$(cat "$TMP_ROOT/electron.pid")" 2>/dev/null || true
 - 锚点顺序一致：单 Run 最后删 Run；Automation/Project 最后删注册项；prune 由 Task 注册表保证失败重试。
 - 客户端对账一致：Task 5 先提供 tasksLoaded、请求序号与 staleAutomationRunTabs，Task 6/7/8 的删除和清理均复用，不遗留失效自动化标签。
 - Review §6 必修点已落：T1 项目 guard（Task 7，含 task.create）；T3 过期应答丢弃（Task 5 Step 5）；T4 真机命令与崩溃注入（Task 9 Step 2-4）；N1 活跃拒绝只覆盖自动化来源（Task 7 Step 5）。
+- GLM §8.6 六项收尾已落：spec §2 批准链来源、§9.1/§10/§12 T2 快照语义与残余窗口、§9.4 N2 边界；计划 Task 2 M2 摘条目 + agent 软失败回归钉、Task 3 逐条 catch、M3 三处同步（spec §11 补 automationRunLink.ts、run-end taskId 归 Task 2 Files、spec §8.1 统一为常驻快照口径）。
 - 无占位符：所有实施步骤均给出目标文件、接口和验证命令；测试 helper 只允许复用现有 fixture，不允许留下待补逻辑。
