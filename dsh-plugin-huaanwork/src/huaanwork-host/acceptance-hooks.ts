@@ -47,6 +47,29 @@ export const HUAANWORK_ACCEPTANCE_TOOL_FAILURE_ENV = 'HUAANWORK_ACCEPTANCE_TOOL_
 /** Appends extra cleanup warnings when a result is settled. */
 export const HUAANWORK_ACCEPTANCE_EXTRA_WARNINGS_ENV = 'HUAANWORK_ACCEPTANCE_EXTRA_WARNINGS'
 
+/** Selects an automation run crash point while hooks are enabled. */
+export const HUAANWORK_ACCEPTANCE_CRASH_POINT_ENV = 'HUAANWORK_ACCEPTANCE_CRASH_POINT'
+
+/** Automation run crash windows exercised by the restart-recovery acceptance. */
+export type AcceptanceCrashPoint = 'after-running-mark' | 'after-run-task' | 'after-run-append'
+
+/**
+ * Whether the Host should crash at the given automation run window.
+ *
+ * The predicate itself never exits: the caller performs `process.exit(1)` so the
+ * simulation stays testable and the crash points remain visible at their sites.
+ *
+ * @param point crash window to match
+ * @param env environment to read instead of `process.env`
+ * @returns `true` only while the master switch is on and the env value equals `point` exactly
+ */
+export function acceptanceCrashPointMatches(
+  point: AcceptanceCrashPoint,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return acceptanceHooksEnabled(env) && env[HUAANWORK_ACCEPTANCE_CRASH_POINT_ENV] === point
+}
+
 /**
  * Whether the acceptance master switch is on.
  *

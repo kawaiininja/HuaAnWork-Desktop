@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import {
   HUAANWORK_ACCEPTANCE_CLEANUP_TIMEOUT_ENV,
+  HUAANWORK_ACCEPTANCE_CRASH_POINT_ENV,
   HUAANWORK_ACCEPTANCE_DISPOSE_FAILURE_ENV,
   HUAANWORK_ACCEPTANCE_EXTRA_WARNINGS_ENV,
   HUAANWORK_ACCEPTANCE_HOLD_END_ENV,
@@ -13,6 +14,7 @@ import {
   HUAANWORK_ACCEPTANCE_TERMINAL_REASON_ENV,
   HUAANWORK_ACCEPTANCE_TOOL_FAILURE_ENV,
   acceptanceCleanupTimeoutMs,
+  acceptanceCrashPointMatches,
   acceptanceDisposeFailure,
   acceptanceExtraWarnings,
   acceptanceHoldEndMs,
@@ -23,6 +25,7 @@ import {
   acceptancePackageDelayPoint,
   acceptanceTerminalReason,
   acceptanceToolFailure,
+  type AcceptanceCrashPoint,
 } from '../../src/huaanwork-host/acceptance-hooks.ts'
 
 /**
@@ -137,5 +140,44 @@ describe('acceptance hooks', () => {
       { code: 'acceptance-warning-error', severity: 'error' },
     ])
     expect(acceptanceExtraWarnings({ ...base, [HUAANWORK_ACCEPTANCE_EXTRA_WARNINGS_ENV]: 'true' })).toEqual([])
+  })
+
+  test('crash-point matches nothing while the master switch is off', () => {
+    const points: AcceptanceCrashPoint[] = ['after-running-mark', 'after-run-task', 'after-run-append']
+    for (const point of points) {
+      expect(
+        acceptanceCrashPointMatches(point, { [HUAANWORK_ACCEPTANCE_CRASH_POINT_ENV]: point }),
+      ).toBe(false)
+      expect(
+        acceptanceCrashPointMatches(point, {
+          [HUAANWORK_ACCEPTANCE_HOOKS_ENV]: '0',
+          [HUAANWORK_ACCEPTANCE_CRASH_POINT_ENV]: point,
+        }),
+      ).toBe(false)
+    }
+  })
+
+  test('crash-point matches only the exact value while the master switch is on', () => {
+    const base = { [HUAANWORK_ACCEPTANCE_HOOKS_ENV]: '1' }
+    const points: AcceptanceCrashPoint[] = ['after-running-mark', 'after-run-task', 'after-run-append']
+    for (const point of points) {
+      expect(
+        acceptanceCrashPointMatches(point, { ...base, [HUAANWORK_ACCEPTANCE_CRASH_POINT_ENV]: point }),
+      ).toBe(true)
+      for (const other of points) {
+        if (other === point) continue
+        expect(
+          acceptanceCrashPointMatches(point, { ...base, [HUAANWORK_ACCEPTANCE_CRASH_POINT_ENV]: other }),
+        ).toBe(false)
+      }
+    }
+  })
+
+  test('crash-point ignores unknown, empty, and missing values', () => {
+    const base = { [HUAANWORK_ACCEPTANCE_HOOKS_ENV]: '1' }
+    for (const raw of [undefined, '', 'after-run-end', 'AFTER-RUN-TASK', ' after-run-task ']) {
+      const env = raw === undefined ? base : { ...base, [HUAANWORK_ACCEPTANCE_CRASH_POINT_ENV]: raw }
+      expect(acceptanceCrashPointMatches('after-run-task', env)).toBe(false)
+    }
   })
 })

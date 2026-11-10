@@ -4,6 +4,7 @@ import { resolve as pathResolve } from 'node:path'
 
 import type { AutomationInfo, RpcEvent, RunSummary, TaskInfo } from '../client-huaanwork/rpc-types.ts'
 import { releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
+import { acceptanceCrashPointMatches } from './acceptance-hooks.ts'
 import { inFlightRuns, inFlightRunsOf, startInFlightRun, type InFlightRun } from './automation-inflight.ts'
 import { resolveApproval } from './approvals.ts'
 import { automationRunSessionId } from './automation-session-ids.ts'
@@ -620,6 +621,9 @@ async function finishAutomation(
   if (run.taskId !== undefined) summary.taskId = run.taskId
   try {
     await appendRun(routeCtx.profileDir, automation.id, summary)
+    // §5.1 崩溃窗口:Run 已落盘、终态注册表仍为 running。验收注入,生产惰性。
+    // 位于 finally 之前:注入实现进程退出,按设计跳过 inFlight 清理。
+    if (acceptanceCrashPointMatches('after-run-append')) process.exit(1)
   } finally {
     // 记录落盘即摘条目(成功路径次序不变);appendRun 软失败也必须摘:
     // 泄漏条目会让改绑/删自动化/删项目预检一直拒绝到 Host 重启(M2 回归钉)。
@@ -696,6 +700,8 @@ export async function executeRun(
       // running 与 activeRunId 同一次写盘:重启后按原 runId 对账(设计 §5.1/§6)。
       activeRunId: runId,
     })
+    // §5.1 崩溃窗口:running + activeRunId 已落盘、Task 尚未创建。验收注入,生产惰性。
+    if (acceptanceCrashPointMatches('after-running-mark')) process.exit(1)
 
     const project = automation.projectId
       ? (await listProjects(routeCtx.profileDir)).find((item) => item.id === automation.projectId)
@@ -759,6 +765,8 @@ export async function executeRun(
         trigger,
         task: runTask,
       })
+      // §5.1 崩溃窗口:Task 已建并发射关联、模型回合尚未开始。验收注入,生产惰性。
+      if (acceptanceCrashPointMatches('after-run-task')) process.exit(1)
     }
 
     let ok = true
