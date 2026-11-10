@@ -13,6 +13,7 @@ import {
   updateAutomation,
 } from './automations-store.ts'
 import {
+  assertAutomationNotDeleting,
   automationAdmissionRoot,
   boundAutomationRuntime,
   bindAutomationRuntime,
@@ -20,7 +21,7 @@ import {
   type AutomationRuntime,
 } from './automations-host.ts'
 import type { RouteContext } from './routes.ts'
-import { listAutomations } from './stores.ts'
+import { listAutomations, listTasks, recentRuns } from './stores.ts'
 import type { TurnScheduler } from './turn-scheduler.ts'
 
 /**
@@ -182,6 +183,13 @@ async function admitCandidate(
   const root = await automationAdmissionRoot(routeCtx, automation)
   const sessionId =
     automation.kind === 'agent' ? automationRunSessionId(automation.id, runId) : `script:${runId}`
+  // 删除守卫与准入必须是同一同步段:中间不得有 await(规格 §9.1)。
+  // 正在删除的候选直接作废——注册项还在表里只是删除级联尚未走到最后一步。
+  try {
+    assertAutomationNotDeleting(automation.id)
+  } catch {
+    return
+  }
   const admitted = scheduler.admitAutomation({
     automationId: automation.id,
     sessionId,
@@ -214,6 +222,59 @@ async function admitCandidate(
 }
 
 /**
+ * 重启后按原运行身份对账(设计 §6 / §5.1)。
+ *
+ * `activeRunId` 是上次进入 running 时与 lastStatus 同一次落盘的身份:
+ * - 没有它(旧产物或脚本早退):沿用旧行为补一条随机 runId 的 cancelled 记录。
+ * - 有它且运行记录已落盘:上次已经跑完(崩溃发生在终态写盘与注册表清理之间),
+ *   只把 lastRunAt/lastStatus 对齐到那条记录,不追加、不改 taskId(设计 §5.1)。
+ * - 有它但记录缺失:用原 runId 补一条 cancelled,并认回该运行已创建的运行子任务
+ *   (taskId/sessionId 来自任务本身,不按时间戳猜)。
+ */
+export async function recoverInterruptedAutomation(
+  routeCtx: RouteContext,
+  automation: AutomationInfo,
+  now: number,
+): Promise<void> {
+  const startedAt = automation.lastRunAt ?? now
+  const runId = automation.activeRunId
+  if (!runId) {
+    await appendRun(routeCtx.profileDir, automation.id, {
+      runId: randomUUID(), startedAt, endedAt: now, ok: false,
+      output: 'sidecar 重启，上次运行被中断', status: 'cancelled',
+      trigger: 'schedule', durationMs: Math.max(0, now - startedAt),
+    })
+    await markAutomation(routeCtx.profileDir, automation.id, { lastRunAt: now, lastStatus: 'error' })
+    return
+  }
+  const existing = (await recentRuns(routeCtx.profileDir, automation.id)).find((run) => run.runId === runId)
+  if (existing) {
+    await markAutomation(routeCtx.profileDir, automation.id, {
+      lastRunAt: existing.endedAt, lastStatus: existing.ok ? 'ok' : 'error',
+    })
+    if (automation.schedule.kind === 'once') {
+      await updateAutomation(routeCtx.profileDir, automation.id, { enabled: false })
+    }
+    return
+  }
+  const task = (await listTasks(routeCtx.profileDir)).find((item) =>
+    item.automationId === automation.id && item.runId === runId)
+  const sessionId = task?.sessionId
+    ?? (automation.kind === 'agent' ? automationRunSessionId(automation.id, runId) : undefined)
+  await appendRun(routeCtx.profileDir, automation.id, {
+    runId, startedAt, endedAt: now, ok: false,
+    output: 'sidecar 重启，上次运行被中断', status: 'cancelled', trigger: 'schedule',
+    durationMs: Math.max(0, now - startedAt),
+    ...(task ? { taskId: task.id } : {}),
+    ...(sessionId ? { sessionId } : {}),
+  })
+  await markAutomation(routeCtx.profileDir, automation.id, { lastRunAt: now, lastStatus: 'error' })
+  if (automation.schedule.kind === 'once') {
+    await updateAutomation(routeCtx.profileDir, automation.id, { enabled: false })
+  }
+}
+
+/**
  * 启动 unref ticker。返回停止函数,给 apply effect 的 dispose。
  * `opts.disabled`(config `automationScheduler.disabled`)或间隔 ≤ 0 时不启动。
  */
@@ -238,18 +299,12 @@ export function startAutomationScheduler(
     for (const automation of list) {
       // lastRunAt 不早于启动时刻 = 本次 generation 发起的在途运行,不是上次的残留。
       if (automation.lastStatus !== 'running' || (automation.lastRunAt ?? 0) >= hostStartedAt) continue
-      const startedAt = automation.lastRunAt ?? now
-      await appendRun(routeCtx.profileDir, automation.id, {
-        runId: randomUUID(),
-        startedAt,
-        endedAt: now,
-        ok: false,
-        output: 'sidecar 重启，上次运行被中断',
-        status: 'cancelled',
-        trigger: 'schedule',
-        durationMs: Math.max(0, now - startedAt),
-      })
-      await markAutomation(routeCtx.profileDir, automation.id, { lastRunAt: now, lastStatus: 'error' })
+      // 逐条隔离:一条失败不得中断同批其余项;失败项保留 running/activeRunId,下次启动重试。
+      try {
+        await recoverInterruptedAutomation(routeCtx, automation, now)
+      } catch (error: unknown) {
+        console.error(`automation recovery failed for ${automation.id}:`, error)
+      }
     }
   }
 

@@ -30,6 +30,8 @@ type RootWriter = {
   kind: 'user' | 'agent-automation' | 'script-automation'
   sessionId: string
   runId?: string
+  /** 自动化写者的来源任务 id;用户写者没有。供删除前的活跃快照覆盖 admit→enqueue 窗口。 */
+  automationId?: string
 }
 
 export type TurnScheduler = {
@@ -67,6 +69,10 @@ export type TurnScheduler = {
   isAdmissionSkipped(automationId: string): boolean
   activeTurnCount(): number
   soleCapWriterSessionId(): string | undefined
+  /** 只读活跃快照:写者、已出队启动中、等待队列里的全部 sessionId(规格 §9.1)。 */
+  activeSessionIds(): ReadonlySet<string>
+  /** 只读活跃快照:自动化写者登记的 automationId,覆盖 admit→enqueue 尚未入 inFlight 的窗口。 */
+  activeAutomationIds(): ReadonlySet<string>
 }
 
 const countsTowardCap = (kind: RootWriter['kind']): boolean => kind !== 'script-automation'
@@ -131,6 +137,7 @@ export function createTurnScheduler(options: {
         kind: input.countsTowardCap ? 'agent-automation' : 'script-automation',
         sessionId: input.sessionId,
         ...(input.runId === undefined ? {} : { runId: input.runId }),
+        ...(input.automationId === undefined ? {} : { automationId: input.automationId }),
       })
       if (input.countsTowardCap) activeTurns += 1
       admissionSkips.delete(input.automationId)
@@ -212,6 +219,22 @@ export function createTurnScheduler(options: {
         .filter((writer) => countsTowardCap(writer.kind))
         .map((writer) => writer.sessionId)
       return sessionIds.length === 1 ? sessionIds[0] : undefined
+    },
+
+    activeSessionIds() {
+      return new Set([
+        ...[...rootWriters.values()].map((writer) => writer.sessionId),
+        ...[...starting.values()].map((item) => item.sessionId),
+        ...queue.map((item) => item.sessionId),
+      ])
+    },
+
+    activeAutomationIds() {
+      return new Set(
+        [...rootWriters.values()]
+          .filter((writer) => writer.kind !== 'user' && writer.automationId !== undefined)
+          .map((writer) => writer.automationId!),
+      )
     },
   }
 }

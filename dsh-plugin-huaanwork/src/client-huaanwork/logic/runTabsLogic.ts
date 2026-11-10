@@ -1,35 +1,49 @@
-import type { RunSummary } from "./projects.ts";
+import type { RunSummary, TaskInfo } from "./projects.ts";
 
 /**
  * 重启后运行对话标签（run tab）的重建判定（纯函数，便于单测）。
  *
- * 背景：run tab 只由实时 automation/run-start 事件创建进内存 chatTabs，重启即消失；
- * 但运行历史（automations/<id>.runs.jsonl）与运行会话日志都在磁盘上。这里从
- * automation.list 返回的 runs（每任务最近 5 条）挑出需要重建骨架标签的描述符，
+ * 背景：run tab 只由实时 automation/run-task 事件创建进内存 chatTabs，重启即消失；
+ * 但运行历史（automations/<id>.runs.jsonl）、运行子任务与运行会话日志都在磁盘上。
+ * 这里从 automation.list 返回的 runs（每任务最近 5 条）挑出需要重建骨架标签的描述符，
  * 内容在用户首次打开标签时懒加载（session.open + historyToChatItems）。
  */
 
 export type RunTabDescriptor = {
-  /** 与实时 run-start 创建的标签同一去重键：`run-<runId>`。 */
+  /** 与实时 run-task 创建的标签同一去重键：`run-<runId>`。 */
   tabId: string;
   automationId: string;
   runId: string;
+  /** 该运行创建的运行子任务 id（重建的唯一依据，规格 §7.2）。 */
+  taskId: string;
   sessionId: string;
-  /** 任务名（RunSummary 无 name 字段，只能取 automation 的）。 */
+  /** 任务名取 Task.name（运行当时的日期任务名，不是自动化当前名称）。 */
   label: string;
+  /** 归属项目取 Task.projectId（自动化改绑后旧运行仍回旧项目）。 */
   projectId: string | null;
   status?: RunSummary["status"];
   ok: boolean;
 };
 
-type AutomationLike = { id: string; name: string; projectId?: string | null };
+type AutomationLike = { id: string };
+
+/** Run 的关联字段三件套与 Task 一致：该 Task 才能证明这条运行的历史归属。 */
+function taskOfRun(run: RunSummary, automationId: string, tasks: readonly TaskInfo[]): TaskInfo | undefined {
+  if (!run.taskId) return undefined;
+  const task = tasks.find((item) => item.id === run.taskId);
+  if (!task || !task.sessionId) return undefined;
+  if (task.automationId !== automationId || task.runId !== run.runId) return undefined;
+  if (task.sessionId !== run.sessionId) return undefined;
+  return task;
+}
 
 /**
- * 每个任务取 startedAt 最新的、带 sessionId 的运行各重建一个骨架（只取最近一个，
- * 避免侧栏被历史运行刷屏；更早的运行仍走任务中心「运行记录」下钻）。
- * 跳过：已存在的标签（实时 run-start 或已重建骨架，同 id 键去重）、
- * automationRuns 里残留但已从注册表删除的任务（拿不到 label）、以及
- * `suppressedSessionIds` 命中的运行。
+ * 每个任务取 startedAt 最新的、taskId 能解析到现存 Task 的运行各重建一个骨架（只取
+ * 最近一个，避免侧栏被历史运行刷屏；更早的运行仍走任务中心「运行记录」下钻）。
+ * 只接受「Run.taskId 能解析且 automation/run/session 一致」的运行：旧无 taskId、
+ * 已删 Task、已 prune Task 都不重建（规格 §7.2）。
+ * 跳过：已存在的标签（实时 run-task 标签或已重建骨架，同 id 键去重）、
+ * automationRuns 里残留但已从注册表删除的任务，以及 `suppressedSessionIds` 命中的运行。
  *
  * 抑制集合是 session 内存（重启即清空）：删掉一条运行记录后，它的会话不该被
  * 重建回骨架标签。命中最新一条时必须整任务跳过，不能回退到更早的运行——那会
@@ -38,6 +52,7 @@ type AutomationLike = { id: string; name: string; projectId?: string | null };
 export function runTabsToRebuild(
   automations: readonly AutomationLike[],
   automationRuns: Record<string, RunSummary[]>,
+  tasks: readonly TaskInfo[],
   existingTabIds: ReadonlySet<string>,
   suppressedSessionIds: ReadonlySet<string> = new Set(),
 ): RunTabDescriptor[] {
@@ -45,23 +60,28 @@ export function runTabsToRebuild(
   for (const automation of automations) {
     const runs = automationRuns[automation.id];
     if (!Array.isArray(runs) || runs.length === 0) continue;
-    const withSession = runs
+    const candidates = runs
       .filter((run) => typeof run.sessionId === "string" && run.sessionId !== "")
-      .sort((a, b) => b.startedAt - a.startedAt);
-    const latest = withSession[0];
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .flatMap((run) => {
+        const task = taskOfRun(run, automation.id, tasks);
+        return task ? [{ run, task }] : [];
+      });
+    const latest = candidates[0];
     if (!latest) continue;
-    if (suppressedSessionIds.has(latest.sessionId as string)) continue;
-    const tabId = `run-${latest.runId}`;
+    if (suppressedSessionIds.has(latest.run.sessionId as string)) continue;
+    const tabId = `run-${latest.run.runId}`;
     if (existingTabIds.has(tabId)) continue;
     descriptors.push({
       tabId,
       automationId: automation.id,
-      runId: latest.runId,
-      sessionId: latest.sessionId as string,
-      label: automation.name,
-      projectId: automation.projectId ?? null,
-      ...(latest.status === undefined ? {} : { status: latest.status }),
-      ok: latest.ok,
+      runId: latest.run.runId,
+      taskId: latest.task.id,
+      sessionId: latest.run.sessionId as string,
+      label: latest.task.name,
+      projectId: latest.task.projectId,
+      ...(latest.run.status === undefined ? {} : { status: latest.run.status }),
+      ok: latest.run.ok,
     });
   }
   return descriptors;
@@ -92,7 +112,7 @@ export function runIdOfTab(tabId: string): string | undefined {
  * 运行对话标签是否仍在跑（纯函数）。
  *
  * 在途状态按 runId 记账：同一任务的 run N 进行中时，run N-1 的标签不再算 live，
- * 否则旧标签会显示「停止」并把最新一轮停掉。标签 id 与 run-start 的去重键一致，
+ * 否则旧标签会显示「停止」并把最新一轮停掉。标签 id 与 run-task 的去重键一致，
  * 都是 `run-<runId>`；非运行标签（默认对话 / Work 会话）恒为 false。
  */
 export function isRunTabLive(tabId: string, runningRunIds: ReadonlySet<string>): boolean {

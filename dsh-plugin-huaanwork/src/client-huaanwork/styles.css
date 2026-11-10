@@ -546,21 +546,6 @@ button {
   white-space: nowrap;
 }
 
-.recent-item.live-dot .recent-title,
-.recent-item.live-dot .recent-meta {
-  padding-right: 14px;
-}
-
-.recent-item.live-dot::after {
-  content: "●";
-  color: var(--approval);
-  font-size: 8px;
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-}
-
 .side-footer {
   margin-top: auto;
   border-top: 1px solid var(--border);
@@ -2703,18 +2688,6 @@ button {
   min-width: 0;
 }
 
-.automation-expand {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 4px 2px;
-  flex-shrink: 0;
-  width: 16px;
-}
-
 .automation-info {
   flex: 1;
   min-width: 0;
@@ -2746,12 +2719,6 @@ button {
   font-size: 10.5px;
   padding: 1px 6px;
   line-height: 1.5;
-}
-
-.automation-chip.widget {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
-  background: var(--accent-soft);
 }
 
 .automation-chip.off {
@@ -2832,7 +2799,7 @@ button {
   gap: 8px;
 }
 
-/* 运行历史 */
+/* 运行记录列表（任务行不再有展开历史，规格 §7.1） */
 
 .automation-runs {
   list-style: none;
@@ -2872,23 +2839,6 @@ button {
   color: var(--error);
 }
 
-.automation-runs .run-output {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--text-muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 96px;
-  overflow: auto;
-  background: var(--sidebar-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 6px 8px;
-}
-
 .automation-runs-empty {
   margin: 8px 0 0 22px;
   padding: 8px 0 0;
@@ -2897,7 +2847,7 @@ button {
   font-size: 12px;
 }
 
-/* 运行记录 tab：按日分组标题与会话 drill-down 按钮（行头），行内展开历史（任务行）不受其影响 */
+/* 运行记录 tab：按日分组标题与会话 drill-down 按钮（行头） */
 .automation-runs .run-day {
   display: block;
   font-size: 12px;
@@ -2928,10 +2878,26 @@ button {
   color: var(--text);
 }
 
-/* 运行记录「删除」：行内不参与换行，垂直居中于输出框 */
+/* 不可跳转的运行记录（Task 已删 / 无会话）：与行头同布局，附带原因，不伪装成按钮 */
+.automation-runs .run-row-static {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.automation-runs .run-unavailable {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* 运行记录「删除」：行内不参与换行，全程贴右并垂直居中（无会话行没有 run-row-btn 撑开，需自己贴右） */
 .automation-runs .run-delete {
   flex-shrink: 0;
   align-self: center;
+  margin-left: auto;
 }
 
 /* 任务表单模态（复用 settings-overlay + confirm-modal 容器） */
@@ -3017,111 +2983,6 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-/* ---- 项目看板 ---- */
-
-.board-sub {
-  margin: 0 0 14px;
-  font-size: 12.5px;
-}
-
-.board-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 12px;
-}
-
-.board-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-}
-
-.board-card-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.board-card-name {
-  font-weight: 700;
-  font-size: 13.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.board-card-time {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-}
-
-.board-card-empty {
-  font-size: 12.5px;
-}
-
-.board-text {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--text-muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 220px;
-  overflow: auto;
-  background: var(--sidebar-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-}
-
-.board-table-wrap {
-  overflow: auto;
-  max-height: 240px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-
-.board-table {
-  border-collapse: collapse;
-  width: 100%;
-  font-size: 12px;
-}
-
-.board-table th,
-.board-table td {
-  text-align: left;
-  padding: 5px 10px;
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.board-table th {
-  position: sticky;
-  top: 0;
-  background: var(--sidebar-bg);
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-.board-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-
-.board-table-more {
-  margin: 6px 0 0;
-  font-size: 11px;
 }
 
 /* 历史会话详情（主区域内嵌，替代原弹窗） */

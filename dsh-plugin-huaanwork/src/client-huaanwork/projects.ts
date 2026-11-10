@@ -69,11 +69,14 @@ export function stopAutomation(id: string): Promise<{ stopped: boolean }> {
   return rpcCall("automation.stop", { id });
 }
 
-/** 删除单条运行记录：先释放会话运行态再删目录；sessionDirRemoved 报告目录是否删掉。 */
+/**
+ * 删除单条运行记录：宿主以 Run 为锚点，会话 → 运行子任务 → Run 行的顺序清理；
+ * 目录/任务删除失败时 Run 保留可供重试。`taskId` 是本次顺带删掉的运行子任务。
+ */
 export function deleteAutomationRun(
   automationId: string,
   runId: string,
-): Promise<{ removed: boolean; sessionDirRemoved: boolean }> {
+): Promise<{ removed: boolean; sessionDirRemoved: boolean; taskId?: string }> {
   return rpcCall("automation.deleteRun", { id: automationId, runId });
 }
 
@@ -96,8 +99,15 @@ export function automationRuns(
   return rpcCall("automation.runs", { id, ...opts });
 }
 
-/** 清理历史运行会话目录：保留每任务最近 20 条运行对应的会话（及正在运行的），返回删除目录数。 */
-export function pruneAutomationSessions(): Promise<{ removed: number }> {
+/**
+ * 清理历史运行会话目录及其自动化来源子任务：保留每任务最近 20 条运行对应的会话（及正在运行的）。
+ * `failed` 非空表示部分失败（Task 记 taskId，旧会话记 sessionId），可重试。
+ */
+export function pruneAutomationSessions(): Promise<{
+  removed: number;
+  tasksRemoved: number;
+  failed: string[];
+}> {
   return rpcCall("automation.pruneSessions");
 }
 

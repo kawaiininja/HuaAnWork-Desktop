@@ -235,7 +235,7 @@ export type AgentFieldError = { field: string; message: string };
 export type AgentWriteResult = { ok: true } | { ok: false; fieldErrors: AgentFieldError[] };
 export type SettingsFieldError = { field: string; message: string };
 
-/** 项目：隔离的工作空间（文件目录 + 对话历史 + 自动化配置 + Widget 看板）。 */
+/** 项目：隔离的工作空间（文件目录 + 对话历史 + 自动化配置）。 */
 export type ProjectInfo = {
   id: string;
   name: string;
@@ -259,7 +259,6 @@ export type AutomationSchedule =
  * 任务：挂在项目下的自动化工作流。
  * - `agent`：本地模型会话（agent local_conversation），产出为最后回复；
  * - `script`：在项目目录执行命令，产出为 stdout。
- * `widget` 为 true 时产出推送到项目看板。
  *
  * Phase 1 追加字段全部可选，旧记录读出来即默认值（missedPolicy 默认 "skip"、
  * taskShape 默认 "independent"），不需要迁移脚本；
@@ -276,7 +275,6 @@ export type AutomationInfo = {
   schedule: AutomationSchedule;
   prompt?: string;
   command?: string;
-  widget: boolean;
   enabled: boolean;
   createdAt: number;
   lastRunAt?: number;
@@ -286,6 +284,8 @@ export type AutomationInfo = {
   missedPolicy?: "skip" | "run-once";              // 默认 "skip"
   taskShape?: "independent" | "merged";            // 默认 "independent"
   unattended?: { enabled: boolean; allow: string[] };  // Phase 2
+  /** 注册表为 running 时记录的运行 id（恢复对账用）；任何终态对账都必须清除。 */
+  activeRunId?: string;
 };
 
 /** 内置任务模板（Task 12）：sidecar 从 `templates/automations.json` 读取，`automation.templates` RPC 返回；创建表单用它预填字段，选中不直接创建。 */
@@ -309,6 +309,8 @@ export type RunSummary = {
   coalescedCount?: number;
   sessionId?: string;
   durationMs?: number;
+  /** 该运行创建的运行子任务 id；旧记录与 script/未建子任务的运行没有此字段。 */
+  taskId?: string;
 };
 
 /** 子任务：挂在项目下的普通任务（区别于自动化任务，无调度与运行历史）。 */
@@ -321,6 +323,12 @@ export type TaskInfo = {
   sessionId?: string;
   /** 首次真正开始执行时用的模型条目 id；排队期间不写，旧 tasks.json 无此字段。 */
   modelId?: string;
+  /**
+   * 自动化来源（运行子任务）：只能在 `automationId`/`runId` 成对且非空时出现，
+   * 普通任务与旧 tasks.json 都不带这两个字段。
+   */
+  automationId?: string;
+  runId?: string;
 };
 
 /** `session.list` 行：会话日志的摘要投影（标题、时间、统计）。 */
@@ -477,6 +485,16 @@ export type RpcEvent =
   | { event: "agent/changed"; slug?: string }
   | { event: "sidecar/status"; ready: boolean }
   | { event: "automation/run-start"; automationId: string; runId: string; projectId: string | null; sessionId?: string; trigger?: "manual" | "schedule" | "catchup" }
+  /** 该次运行在本轮项目下创建了运行子任务（名称/项目取运行当时快照）；`task` 是完整登记项。 */
+  | {
+      event: "automation/run-task";
+      automationId: string;
+      projectId: string;
+      runId: string;
+      sessionId: string;
+      trigger?: "manual" | "schedule" | "catchup";
+      task: TaskInfo;
+    }
   | {
       event: "automation/run-end";
       automationId: string;
@@ -486,9 +504,10 @@ export type RpcEvent =
       status?: "ok" | "error" | "missed" | "timeout" | "cancelled";
       sessionId?: string;
       durationMs?: number;
+      /** 该运行创建的运行子任务 id；script/未建子任务/旧记录路径不带。 */
+      taskId?: string;
     }
   | { event: "automation/missed"; automationId: string; projectId: string | null; coalescedCount: number; missedAt: number }
-  | { event: "automation/widget"; automationId: string; projectId: string | null; time: number }
   /** 子代理 run 的权威投影；`activityFlushMs > 0` 时高频 token/reasoning 合并发布。 */
   | { event: "subagent/run"; run: SubagentRunProjection }
   /** 终态历史被淘汰；客户端只在 generation/revision 匹配时删除该 run。 */

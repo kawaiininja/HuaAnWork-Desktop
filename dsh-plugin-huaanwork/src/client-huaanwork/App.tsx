@@ -214,6 +214,7 @@ import {
   sessionsToSuppressAfterDelete,
   settleRunningRuns,
 } from "./logic/runTabsLogic.ts";
+import { reconcileStaleAutomationTabs } from "./logic/automationRunLink.ts";
 import {
   RESULT_ATTACHMENT_FILES,
   attachmentAsAssistant,
@@ -321,9 +322,10 @@ type ChatTab = {
   sessionId?: string;
   /** 绑定的子任务 id（Work 模式下侧边栏选中驱动）。 */
   taskId?: string;
-  /** 自动化运行对话：由 automation/run-start 创建，渲染在对应通道分区（不进最近对话）。 */
+  /** 自动化运行对话：由 automation/run-task 创建（单一路径），不进侧栏「任务」区（2026-11-10 owner 裁定：
+   * 实时进度看自动化页、历史在运行记录里点开）；仍承载实时观察、续聊与失效对账。 */
   automationId?: string;
-  /** 重启后重建的运行对话骨架：首启懒加载运行日志前为 true，加载（或失败降级）后清除。 */
+  /** 重启后重建的运行对话骨架：首启懒加载运行日志前为 true；加载成功后清除，加载失败则关闭该标签。 */
   runPlaceholder?: boolean;
   /** 右侧「预览」打开的结果附件（规格 §5）：选择记在标签上，换标签再回来沿用该标签上次的选择。 */
   previewFile?: ResultAttachmentFile;
@@ -639,6 +641,13 @@ export default function App() {
   /** 全部项目下的子任务快照（侧栏任务区与选中项目卡片共用）。 */
   const [projectTasks, setProjectTasks] = useState<TaskInfo[]>([]);
   /**
+   * 首次 `task.list` 成功后才为 true（规格 §7.2）：运行标签重建与失效对账都以
+   * 这份权威快照为前提，启动并发时的空列表不是「全部已删」的证据。
+   */
+  const [tasksLoaded, setTasksLoaded] = useState(false);
+  /** 任务请求单调序号（规格 §9.1 T3）：只提交最新一次应答，过期应答直接丢弃。 */
+  const taskRequestSeq = useRef(0);
+  /**
    * 在途运行按 runId 记账（run-start 加入 / run-end 只删自己的 runId）。
    * 任务级「运行中」集合由它派生：同一任务的两条并发脚本运行，任意一条结束
    * 都不会提前摘掉任务行的「停止」。
@@ -646,7 +655,7 @@ export default function App() {
   const [runningRuns, setRunningRuns] = useState<ReadonlyMap<string, { automationId: string }>>(new Map());
   /**
    * 删过运行记录后要抑制重建的会话 id（规格 §6；只在本次会话有效，重启清空）。
-   * 刷新任务列表时传给 runTabsToRebuild，避免刚删掉的运行又以骨架标签回来。
+   * 运行标签重建 effect 把它传给 runTabsToRebuild，避免刚删掉的运行又以骨架标签回来。
    */
   const suppressedRunSessionIdsRef = useRef<Set<string>>(new Set());
   /** Task 11：运行对话停止请求在飞——state 管按钮禁用，ref 挡同一批事件里的第二次点击。 */
@@ -1125,13 +1134,20 @@ export default function App() {
     noteTab(activeTab, text);
   }
 
-  /** 子任务列表：拉取全部项目下的普通任务（非自动化），供侧栏任务区与选中项目卡片共用。 */
+  /**
+   * 子任务列表：拉取全部项目下的普通任务（非自动化），供侧栏任务区与选中项目卡片共用。
+   * 单调序号丢弃过期应答（规格 §9.1 T3）：早于 Task 落盘发出、晚于 run-task 返回的旧
+   * 应答会把刚建的运行标签误判为失效并关闭，而 run-end 不刷新 tasks，误关后不能自愈。
+   */
   async function refreshTasks() {
+    const seq = ++taskRequestSeq.current;
     try {
       const listed = await listTasks();
+      if (seq !== taskRequestSeq.current) return;
       setProjectTasks(Array.isArray(listed.tasks) ? listed.tasks : []);
+      setTasksLoaded(true);
     } catch {
-      // 任务数据不可得时保留旧数据
+      // 任务数据不可得时保留旧数据（也不置 tasksLoaded：没有权威快照就不重建/不对账）
     }
   }
 
@@ -1156,7 +1172,11 @@ export default function App() {
       if (task.projectId && task.projectId !== activeProjectIdRef.current) {
         await alignWorkspaceOnly(task.projectId);
       }
-      const existing = chatTabs.find((tab) => tab.taskId === task.id);
+      // 自动化 Task 与它的运行标签共用同一会话：taskId 或 sessionId 命中都算已打开，
+      // 不能再建第二个标签（规格 §7.2 单一路径）。
+      const existing = chatTabs.find((tab) =>
+        tab.taskId === task.id ||
+        (task.sessionId !== undefined && tab.sessionId === task.sessionId));
       if (existing) {
         setActiveTab(existing.id);
         return;
@@ -1216,6 +1236,9 @@ export default function App() {
             projectId: task.projectId,
             pendingPick: false,
             taskId: task.id,
+            // 自动化来源的标签必须带 automationId 才参与失效对账（规格 §8 第 8 条：
+            // 删除自动化/prune 后关闭所有受影响标签，不只 run-<runId> 标签）。
+            ...(task.automationId ? { automationId: task.automationId } : {}),
             sessionId,
             turnFinalByUserId: historicalTurnFinalByUserId(items),
             turnFinalWithoutUser: true,
@@ -1224,6 +1247,12 @@ export default function App() {
         // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理运行卡补回来。
         void reconcileSubagentRuns(id, sessionId);
       } catch (error) {
+        // 自动化来源的 Task（运行子任务）：恢复失败只报错，不建普通降级标签、也不预铸会话
+        // （规格 §7.2 / §8.5：不得创建替代 Task/Session，也不允许向损坏会话写消息）。
+        if (task.automationId) {
+          noteActive(`历史会话恢复失败（${error instanceof Error ? error.message : String(error)}），未创建替代任务`);
+          return;
+        }
         // resume/open 失败：退化为项目上下文空标签 + 错误提示。
         // 不绑旧 sessionId（避免向损坏会话写消息），也不写 taskId（计划评审 P2-2）：
         // 若写 taskId，任务的持久 sessionId 仍在，后续发送两子态守卫都不命中，
@@ -1402,43 +1431,16 @@ export default function App() {
       // 运行记录出现即表示该轮已落盘：丢失 run-end 或 stop 返回 stopped:false 时，
       // 任务行/运行对话的在途状态不能永远停在「停止」。
       setRunningRuns((prev) => settleRunningRuns(prev, listed.runs ?? {}));
-      // 重启重建（规格 L544 修订）：run tab 只由实时 run-start 事件创建进内存，重启即消失；
-      // 这里按「每任务最近一次带会话的运行」补出骨架标签，内容首开时懒加载（见 runBackfill effect）。
-      // 去重键 run-<runId> 与实时创建相同，幂等；只 append 不重置，chatTabs 恒非空不变量不破。
-      // 删除过运行记录的会话进抑制集：最新一条被抑制时整个任务跳过，不退回更早的运行。
-      const rebuild = runTabsToRebuild(
-        nextAutomations,
-        listed.runs ?? {},
-        new Set(chatTabsRef.current.map((tab) => tab.id)),
-        suppressedRunSessionIdsRef.current,
-      );
-      if (rebuild.length > 0) {
-        setChatTabs((prev) => {
-          const have = new Set(prev.map((tab) => tab.id));
-          const additions = rebuild
-            .filter((descriptor) => !have.has(descriptor.tabId))
-            .map((descriptor): ChatTab => ({
-              id: descriptor.tabId,
-              label: descriptor.label,
-              items: [{ id: allocId(), kind: "note" as const, text: "自动化运行记录（打开时加载）" }],
-              sessionFailed: false,
-              projectId: descriptor.projectId,
-              pendingPick: false,
-              sessionId: descriptor.sessionId,
-              automationId: descriptor.automationId,
-              runPlaceholder: true,
-            }));
-          return additions.length > 0 ? [...prev, ...additions] : prev;
-        });
-      }
+      // 运行标签的重建与失效对账不在刷新过程中做：它们必须等首次 tasks 快照成功加载，
+      // 且以 projectTasks/tasksLoaded 为依赖（见下方 rebuild effect，规格 §7.2）。
     } catch {
       // 任务数据不可得时保留旧数据
     }
   }
 
   /**
-   * 运行记录删除成功后关掉它绑定的运行对话标签（规格 §6）。
-   * 只关自动化运行标签：默认对话标签即使 sessionId 相同也保留。
+   * 运行记录删除成功后关掉它绑定的对话标签（规格 §8.8）。
+   * 按 sessionId 关闭所有绑着该会话的标签（运行日志已删，标签不能再打开，不只自动化标签）；
    * 被关的是当前标签时改选最近的存活标签，选择交给 closeRunTabsForSession 决定。
    *
    * 抑制被删会话及其更早的运行：删掉的最新一条不能在下一次 automation.list 刷新时
@@ -1695,41 +1697,51 @@ export default function App() {
         staleIdleRef.current = consumed.stale;
         if (consumed.drop) return;
       }
-      // 后台任务事件：更新任务运行角标并刷新数据；agent 运行另建运行对话标签承载过程与结果。
+      // 后台任务事件：更新任务运行角标并刷新数据。运行对话标签只由 run-task 创建。
           if (event.event === "automation/run-start") {
             automationActiveRef.current = true;
+            // 只记账在途运行：标签创建统一走 run-task（规格 §7.2 单一路径）。
             setRunningRuns((prev) => {
               const next = new Map(prev);
               next.set(event.runId, { automationId: event.automationId });
               return next;
             });
-            if (event.sessionId) {
-              const automation = automationsRef.current.find((item) => item.id === event.automationId);
-              const tabId = `run-${event.runId}`;
-              setChatTabs((prev) =>
-                prev.some((tab) => tab.id === tabId)
-                  ? prev
-                  : [
-                      ...prev,
-                      {
-                        id: tabId,
-                        label: automation?.name ?? "自动化运行",
-                        items: [{ id: allocId(), kind: "note" as const, text: "自动化运行中…" }],
-                        sessionFailed: false,
-                        projectId: automation?.projectId ?? null,
-                        pendingPick: false,
-                        sessionId: event.sessionId,
-                        automationId: event.automationId,
-                      },
-                    ],
-              );
-              // 仅手动触发时聚焦；调度运行只在分区出现，不抢上下文。
-              if (event.trigger === "manual") setActiveTab(tabId);
-            }
             return;
           }
-          if (event.event === "automation/widget") {
-            void refreshAutomations();
+          if (event.event === "automation/run-task") {
+            // 本次运行创建的运行子任务：创建或补齐唯一的 `run-<runId>` 标签。
+            // 查找键依次为 tabId、taskId、sessionId（同一会话只允许一个标签）。
+            const task = event.task;
+            const tabId = `run-${event.runId}`;
+            const existing = chatTabsRef.current.find((tab) => tab.id === tabId)
+              ?? chatTabsRef.current.find((tab) => tab.taskId === task.id)
+              ?? chatTabsRef.current.find((tab) => tab.sessionId === event.sessionId);
+            const targetId = existing?.id ?? tabId;
+            const link = {
+              label: task.name,
+              projectId: task.projectId,
+              sessionId: event.sessionId,
+              automationId: event.automationId,
+              taskId: task.id,
+            };
+            setChatTabs((prev) => {
+              const found = prev.find((tab) => tab.id === targetId);
+              if (found) return prev.map((tab) => (tab.id === targetId ? { ...tab, ...link } : tab));
+              return [
+                ...prev,
+                {
+                  id: targetId,
+                  ...link,
+                  items: [{ id: allocId(), kind: "note" as const, text: "自动化运行中…" }],
+                  sessionFailed: false,
+                  pendingPick: false,
+                },
+              ];
+            });
+            // 仅手动触发时聚焦；调度运行只在分区出现，不抢上下文。
+            if (event.trigger === "manual") setActiveTab(targetId);
+            // 新 Task 已落盘：刷新权威快照，供侧栏、运行记录跳转与失效对账使用。
+            void refreshTasks();
             return;
           }
           if (event.event === "automation/missed") {
@@ -2122,6 +2134,62 @@ export default function App() {
     chatTabsRef.current = chatTabs;
   }, [chatTabs]);
 
+  /**
+   * 运行标签失效对账（规格 §7.2 ①）：关闭 taskId 已不在权威快照里的自动化运行标签
+   * （删除运行/自动化/prune 之后）。
+   * 只在 tasks 快照自身更新后执行，不能跟运行数据一起重跑：run-task 先建标签再 refreshTasks，
+   * 快照回来之前任何一次刷新（另一条运行的 run-end、stop、missed、开项目或切到自动化视图）
+   * 都会拿运行前的旧快照把刚建的标签误关成骨架；refreshTasks 的单调序号已保证晚写的快照必含新 Task。
+   * 首次 task.list 成功（tasksLoaded）之前不做：启动并发时的空列表不是删除证据。
+   */
+  useEffect(() => {
+    if (!tasksLoaded) return;
+    // 整段合成（多张失效标签逐张关闭 + active 选择）在 automationRunLink 里，有独立单测；
+    // 复用 closeRunTabsForSession 的关闭范围与 active 选择规则（不另写关闭路径）。
+    const result = reconcileStaleAutomationTabs(chatTabsRef.current, projectTasks, activeTabRef.current);
+    // 没有标签被关时结果与输入引用相等：不产生多余的状态更新。
+    if (result.tabs === chatTabsRef.current) return;
+    setChatTabs(result.tabs);
+    setActiveTab(result.nextActiveId);
+  }, [projectTasks, tasksLoaded]);
+
+  /**
+   * 为「Run.taskId 能解析到现存 Task」的运行重建骨架标签（规格 §7.2 ②），内容首开时懒加载
+   * （见 runBackfill effect），去重键 run-<runId> 与实时创建相同，幂等。
+   * 首次 task.list 成功（tasksLoaded）之前不重建：启动并发时的空列表不是权威快照。
+   * 删除过运行记录的会话进抑制集：最新一条被抑制时整个任务跳过，不退回更早的运行。
+   */
+  useEffect(() => {
+    if (!tasksLoaded) return;
+    // 只 append 不重置，chatTabs 恒非空不变量不破。
+    const rebuild = runTabsToRebuild(
+      automations,
+      automationRuns,
+      projectTasks,
+      new Set(chatTabsRef.current.map((tab) => tab.id)),
+      suppressedRunSessionIdsRef.current,
+    );
+    if (rebuild.length === 0) return;
+    setChatTabs((prev) => {
+      const have = new Set(prev.map((tab) => tab.id));
+      const additions = rebuild
+        .filter((descriptor) => !have.has(descriptor.tabId))
+        .map((descriptor): ChatTab => ({
+          id: descriptor.tabId,
+          label: descriptor.label,
+          items: [{ id: allocId(), kind: "note" as const, text: "自动化运行记录（打开时加载）" }],
+          sessionFailed: false,
+          projectId: descriptor.projectId,
+          pendingPick: false,
+          sessionId: descriptor.sessionId,
+          automationId: descriptor.automationId,
+          taskId: descriptor.taskId,
+          runPlaceholder: true,
+        }));
+      return additions.length > 0 ? [...prev, ...additions] : prev;
+    });
+  }, [automations, automationRuns, projectTasks, tasksLoaded]);
+
   useEffect(() => {
     subagentRunsRef.current = subagentRuns;
   }, [subagentRuns]);
@@ -2170,7 +2238,7 @@ export default function App() {
    * 重启重建的运行对话骨架：首次打开时懒加载运行日志回填内容（不调 session.resume、
    * 不切工作区——激活不抢上下文，工作区对齐推迟到发送时由 send() 做）。
    * busy ref 防 RPC 在飞期间（chatTabs 还是旧快照）重复触发与 StrictMode 双调；
-   * 失败降级为错误脚注，骨架与 sessionId 保留（续聊仍可用，发送路径自行对齐/报错）。
+   * 回填失败关闭骨架并提示（规格 §7.2）：不留可输入却打不开会话的标签。
    */
   const runBackfillBusyRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -2209,21 +2277,15 @@ export default function App() {
         // 历史回放只有消息条目:补拉宿主快照,把重启前的子代理运行卡补回来。
         void reconcileSubagentRuns(tabId, sessionId);
       } catch (error) {
+        // 回填失败：关闭该骨架标签，并把错误落到接手当前视图的标签上（规格 §7.2）。
+        // 不保留绑着打不开会话的可输入标签，也不在旧会话上继续写消息。
         const message = error instanceof Error ? error.message : String(error);
-        setChatTabs((prev) =>
-          prev.map((item) =>
-            item.id === tabId
-              ? {
-                  ...item,
-                  runPlaceholder: false,
-                  items: [
-                    ...item.items,
-                    { id: allocId(), kind: "note" as const, text: `运行记录加载失败（${message}）` },
-                  ],
-                }
-              : item,
-          ),
-        );
+        const result = closeRunTabsForSession(chatTabsRef.current, sessionId, activeTabRef.current);
+        // 标签已关：清掉在飞标记，重建出同 id 骨架时允许再试一次回填。
+        runBackfillBusyRef.current.delete(tabId);
+        setChatTabs(result.tabs);
+        setActiveTab(result.nextActiveId);
+        noteTab(result.nextActiveId, `运行记录加载失败（${message}），已关闭该运行标签`);
       }
     })();
   }, [activeTab, chatTabs, automationRuns]);
@@ -3291,8 +3353,6 @@ export default function App() {
    */
   const runTabLive = isRunTabLive(activeChat.id, runningRunIds);
   const chatEmpty = items.length === 0;
-  /** 自动化运行对话（live tab）：不进最近对话/历史列表。 */
-  const runTabs = chatTabs.filter((tab) => tab.automationId);
   /** 「任务」区的游离会话：中立工作区对话（项目分组已退役，项目会话收编进子任务）。 */
   const unscopedWorkSessions = unscopedSessions(sessions, projects);
   const showRightPane = view === "main";
@@ -3431,30 +3491,10 @@ export default function App() {
               <span>任务</span>
             </header>
             {hostNotice.kind === "unresponsive" ? <p className="side-muted">{HOST_UNRESPONSIVE_TEXT}</p> : null}
-            {unscopedWorkSessions.length === 0 && runTabs.length === 0 ? (
+            {unscopedWorkSessions.length === 0 ? (
               <p className="side-muted">暂无任务</p>
             ) : (
               <ul className="recent-list">
-                {/* 进行中的自动化运行对话：每次运行在「任务」区新建一个对话。 */}
-                {runTabs.map((tab) => {
-                  const running = isRunTabLive(tab.id, runningRunIds);
-                  return (
-                    <li key={tab.id}>
-                      <button
-                        type="button"
-                        className={running ? "recent-item live-dot" : "recent-item"}
-                        title={tab.label}
-                        onClick={() => {
-                          setView("main");
-                          setActiveTab(tab.id);
-                        }}
-                      >
-                        <span className="recent-title">{tab.label}</span>
-                        <span className="recent-meta">自动化运行{running ? " · 运行中" : ""}{hostNotice.kind === "unresponsive" ? ` · ${HOST_UNRESPONSIVE_TEXT}` : ""}</span>
-                      </button>
-                    </li>
-                  );
-                })}
                 {/* 未归属任何项目的 Work 会话（中立工作区里的任务对话），点击即恢复为可聊标签。 */}
                 {unscopedWorkSessions.map((session, index) => {
                   const id = String(session.id ?? `work-session-${index}`);
@@ -3555,6 +3595,7 @@ export default function App() {
               activeProjectId={activeProjectId}
               automations={automations}
               runs={automationRuns}
+              tasks={projectTasks}
               runningIds={runningAutomationIds}
               onStopAutomation={stopAutomationWithReconcile}
               enterIntent={automationEnter}
@@ -3562,7 +3603,10 @@ export default function App() {
               onChanged={() => {
                 void refreshAutomations();
                 void refreshProjects();
+                void refreshTasks();
+                void refreshSessions();
               }}
+              onOpenRunTask={(task) => void selectSubtask(task)}
               onRunDeleted={handleRunDeleted}
               onAutomationCreated={() => setDraft("")}
               onWorkspaceAligned={(root) => {

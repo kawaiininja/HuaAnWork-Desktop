@@ -1,6 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
-import BoardView from "./BoardView.tsx";
 import HistoryDetailPane, { type SessionDetailRecord, type SessionLogView } from "./HistoryDetailPane.tsx";
 import { rpcCall } from "./api.ts";
 import {
@@ -19,15 +18,21 @@ import {
   type AutomationTemplate,
   type ProjectInfo,
   type RunSummary,
+  type TaskInfo,
 } from "./projects.ts";
 import { humanizeCronText } from "./logic/scheduleText.ts";
 import { buildUnattendedAllow as computeUnattendedAllow } from "./logic/unattendedAllow.ts";
+import { resolveAutomationRunNavigation } from "./logic/automationRunLink.ts";
 
 type Props = {
   projects: ProjectInfo[];
   activeProjectId: string | null;
   automations: AutomationInfo[];
   runs: Record<string, RunSummary[]>;
+  /** 权威子任务快照（规格 §8）：运行记录按 taskId 查现存 Task 决定能否跳到历史项目。 */
+  tasks: TaskInfo[];
+  /** 运行记录跳转：taskId 分支交给 App 复用子任务选择流程（规格 §8.3）。 */
+  onOpenRunTask: (task: TaskInfo) => void;
   /** 正在后台执行的任务 id 集合（run-start 加入 / run-end 移除）。 */
   runningIds: ReadonlySet<string>;
   /** App 的停止入口：宿主回 stopped:false 时由 App 清掉调用前的在途快照。 */
@@ -67,7 +72,7 @@ type Props = {
   onDismissMissedBanner: () => void;
 };
 
-type Tab = "tasks" | "runs" | "board";
+type Tab = "tasks" | "runs";
 type Editing =
   | {
       mode: "create";
@@ -107,11 +112,13 @@ const SCHEDULE_KIND_OPTIONS: { value: AutomationSchedule["kind"]; label: string 
   { value: "cron", label: "自定义（cron）" },
 ];
 
-/** 自动化页：顶部「任务 / 运行记录 / 看板」三 tab，跨项目全局视图（无项目选择器）；仅展示自动化任务，子任务仍在项目卡片内。 */
+/** 自动化页：顶部「任务 / 运行记录」两 tab，跨项目全局视图（无项目选择器）；仅展示自动化任务，子任务仍在项目卡片内。 */
 export default function AutomationsView({
   projects,
   automations,
   runs,
+  tasks,
+  onOpenRunTask,
   runningIds,
   onStopAutomation,
   enterIntent,
@@ -147,7 +154,7 @@ export default function AutomationsView({
     onEnterIntentConsumed?.();
   }, [enterIntent, onEnterIntentConsumed]);
 
-  // 项目选择器已移除（2026-09-10）：任务 / 运行记录 / 看板均为跨项目全局视图。
+  // 项目选择器已移除（2026-09-10）：任务 / 运行记录均为跨项目全局视图。
   // 设计 §3.3.3：新建任务一律以 null 进表单，由表单默认「自动创建同名项目」，也可改选已有项目。
   const projectNameOf = useMemo(() => {
     const names = new Map(projects.map((project) => [project.id, project.name]));
@@ -233,7 +240,7 @@ export default function AutomationsView({
       ) : null}
       <div className="page-head">
         <h1>自动化</h1>
-        <span className="hint-text">定时或手动驱动的自动化任务，产出可推送到项目看板</span>
+        <span className="hint-text">定时或手动驱动的自动化任务</span>
         <span className="composer-spacer" />
         <span className="keep-awake-toggle" title="存在启用中的定时任务时阻止系统睡眠">
           <span className="hint-text">保持系统唤醒</span>
@@ -257,9 +264,6 @@ export default function AutomationsView({
           </button>
           <button type="button" role="tab" aria-selected={tab === "runs"} className={tab === "runs" ? "on" : ""} onClick={() => setTab("runs")}>
             运行记录
-          </button>
-          <button type="button" role="tab" aria-selected={tab === "board"} className={tab === "board" ? "on" : ""} onClick={() => setTab("board")}>
-            看板
           </button>
         </div>
         <span className="composer-spacer" />
@@ -311,10 +315,14 @@ export default function AutomationsView({
             ))}
           </div>
         )
-      ) : tab === "runs" ? (
-        <RunsPanel automations={automations} onChanged={onChanged} onRunDeleted={onRunDeleted} />
       ) : (
-        <BoardView automations={automations} runs={runs} projectId={null} projects={projects} />
+        <RunsPanel
+          automations={automations}
+          tasks={tasks}
+          onOpenRunTask={onOpenRunTask}
+          onChanged={onChanged}
+          onRunDeleted={onRunDeleted}
+        />
       )}
 
       {editing ? (
@@ -381,7 +389,6 @@ function AutomationRow({
   onEdit: () => void;
   onRemove: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   /** 停止请求在飞：state 管按钮禁用与文案，ref 管同一批事件里的第二次点击（同 M26 P2-3）。 */
   const [stopping, setStopping] = useState(false);
   /** 停止已被宿主接受：在 run-end 清掉 running 之前保持禁用，避免二次停止。 */
@@ -410,17 +417,13 @@ function AutomationRow({
   const stopPending = stopping || (stopRequested && running);
 
   return (
-    <div className={open ? "automation-row open" : "automation-row"}>
+    <div className="automation-row">
       <div className="automation-main">
-        <button type="button" className="automation-expand" aria-label={open ? "收起运行历史" : "展开运行历史"} aria-expanded={open} onClick={() => setOpen((prev) => !prev)}>
-          {open ? "▾" : "▸"}
-        </button>
         <div className="automation-info">
           <div className="automation-title">
             <span className="automation-name">{automation.name}</span>
             {projectName ? <span className="automation-chip">{projectName}</span> : null}
             <span className="automation-chip">{automation.kind === "agent" ? "定时对话" : "脚本"}</span>
-            {automation.widget ? <span className="automation-chip widget">看板</span> : null}
             {!automation.enabled ? <span className="automation-chip off">已停用</span> : null}
           </div>
           <span className="automation-meta">
@@ -458,26 +461,6 @@ function AutomationRow({
           </button>
         </div>
       </div>
-      {open ? (
-        runs.length === 0 ? (
-          <p className="automation-runs-empty">还没有运行记录</p>
-        ) : (
-          <ul className="automation-runs">
-            {[...runs].reverse().map((run) => {
-              const meta = RUN_STATUS_META[runStatusOf(run)];
-              return (
-                <li key={run.runId} className={meta.className ?? ""}>
-                  <span className="run-time">{formatRunTime(run.endedAt)}</span>
-                  <span className="run-status" style={meta.color ? { color: meta.color } : undefined}>
-                    {meta.label}
-                  </span>
-                  <pre className="run-output">{run.output || "（无输出）"}</pre>
-                </li>
-              );
-            })}
-          </ul>
-        )
-      ) : null}
     </div>
   );
 }
@@ -504,13 +487,17 @@ function latestRun(runs: RunSummary[]): RunSummary | undefined {
   return latest;
 }
 
-/** 「运行记录」tab：吃 automation.runs 全量运行，支持状态筛选、按日分组与点开会话详情（行内展开历史保留在任务行）。 */
+/** 「运行记录」tab：吃 automation.runs 全量运行，支持状态筛选与按日分组；taskId 能解析到现存 Task 的行跳到该历史任务，旧记录仍只读点开会话详情（任务行不再展开历史，规格 §7.1）。 */
 function RunsPanel({
   automations,
+  tasks,
+  onOpenRunTask,
   onChanged,
   onRunDeleted,
 }: {
   automations: AutomationInfo[];
+  tasks: TaskInfo[];
+  onOpenRunTask: (task: TaskInfo) => void;
   onChanged: () => void;
   onRunDeleted?: (sessionId: string, automationId: string, startedAt: number) => void;
 }) {
@@ -634,14 +621,15 @@ function RunsPanel({
     setDeleteError("");
     setNotice("");
     try {
-      const { sessionDirRemoved } = await deleteAutomationRun(automation.id, run.runId);
+      // sessionDirRemoved 恒为 true：宿主目录删除失败会抛错走 catch（Run 保留可重试），
+      // 不会以 false 成功返回。字段仍留在删除响应类型里（brief 钉住的契约），界面不再分支。
+      await deleteAutomationRun(automation.id, run.runId);
       setPendingDelete(null);
       // 先乐观移除：宿主列表回来之前这一行就已消失；随后用宿主读数覆盖。
       setFullRuns((prev) => ({
         ...prev,
         [automation.id]: (prev[automation.id] ?? []).filter((item) => item.runId !== run.runId),
       }));
-      if (sessionDirRemoved === false) setNotice("记录已删除，但会话目录未能删除");
       if (run.sessionId && detail?.sessionId === run.sessionId) setDetail(null);
       if (run.sessionId) onRunDeleted?.(run.sessionId, automation.id, run.startedAt);
       void reloadRuns(automation.id);
@@ -660,9 +648,15 @@ function RunsPanel({
     setPruning(true);
     setNotice("");
     try {
-      const { removed } = await pruneAutomationSessions();
-      setNotice(`已清理 ${removed} 个历史运行会话`);
+      const { removed, tasksRemoved, failed } = await pruneAutomationSessions();
+      const done = `已清理 ${removed} 个历史运行会话${tasksRemoved > 0 ? `、${tasksRemoved} 个运行子任务` : ""}`;
+      setNotice(
+        failed.length === 0
+          ? done
+          : `${done}；${failed.length} 项未能清理（${failed.join("、")}），可再次清理重试`,
+      );
       setPruneConfirm(false);
+      // 部分成功也要刷新：已删的会话/子任务必须从标签和任务区消失，失败项仍可重试。
       onChanged();
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
@@ -696,7 +690,7 @@ function RunsPanel({
         {pruneConfirm ? (
           <>
             <span className="muted" style={{ fontSize: 12 }}>
-              将删除每个任务最近 20 条运行之外的会话目录，确定？
+              将删除每个任务最近 20 条运行之外的会话目录及其运行子任务，确定？
             </span>
             <button type="button" className="btn danger" disabled={pruning} onClick={() => void prune()}>
               {pruning ? "清理中…" : "确认清理"}
@@ -730,6 +724,8 @@ function RunsPanel({
                 const meta = RUN_STATUS_META[runStatusOf(run)];
                 const seconds = typeof run.durationMs === "number" ? ` · ${Math.round(run.durationMs / 1000)}s` : "";
                 const catchup = run.trigger === "catchup" && run.coalescedCount ? ` · 补跑×${run.coalescedCount}` : "";
+                // 跳转目标由 Run 与 Task 的历史关联决定（规格 §8），不按自动化当前项目猜。
+                const navigation = resolveAutomationRunNavigation(automation, run, tasks);
                 const head = (
                   <>
                     <span className="run-time">{formatRunTime(run.startedAt)}</span>
@@ -744,8 +740,17 @@ function RunsPanel({
                   </>
                 );
                 return (
-                  <li key={run.runId} className={meta.className ?? ""}>
-                    {run.sessionId ? (
+                  <li key={run.runId} className={meta.className ?? ""} data-run-id={run.runId}>
+                    {navigation.kind === "task" ? (
+                      <button
+                        type="button"
+                        className="run-row-btn"
+                        title={`打开子任务：${navigation.task.name}`}
+                        onClick={() => onOpenRunTask(navigation.task)}
+                      >
+                        {head}
+                      </button>
+                    ) : navigation.kind === "legacy" ? (
                       <button
                         type="button"
                         className="run-row-btn"
@@ -755,9 +760,11 @@ function RunsPanel({
                         {head}
                       </button>
                     ) : (
-                      head
+                      <span className="run-row-static" title={navigation.reason}>
+                        {head}
+                        <span className="run-unavailable">{navigation.reason}</span>
+                      </span>
                     )}
-                    <pre className="run-output">{run.output || "（无输出）"}</pre>
                     <button
                       type="button"
                       className="side-action danger run-delete"
@@ -950,7 +957,6 @@ function AutomationFormModal({
   );
   const [prompt, setPrompt] = useState(source?.prompt ?? prefillPrompt ?? "");
   const [command, setCommand] = useState(source?.command ?? "");
-  const [widget, setWidget] = useState(source?.widget ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   /** undefined=尚未提交；number|null=已提交，值为后端算好的 nextRunAt（null=无后续触发）。 */
@@ -1050,7 +1056,6 @@ function AutomationFormModal({
           // create 用 undefined 表示不设置（与 sidecar 白名单配对）。
           prompt: kind === "agent" ? prompt.trim() : undefined,
           command: kind === "script" ? command.trim() : undefined,
-          widget,
           expiresAt: expiresAt ? new Date(expiresAt).getTime() : undefined,
           missedPolicy,
           taskShape,
@@ -1068,7 +1073,6 @@ function AutomationFormModal({
           // update 用 "" 清空可空字段（与 sidecar 白名单 patch 配对）。
           prompt: kind === "agent" ? prompt.trim() : "",
           command: kind === "script" ? command.trim() : "",
-          widget,
           expiresAt: expiresAt ? new Date(expiresAt).getTime() : "",
           missedPolicy,
           taskShape,
@@ -1287,7 +1291,7 @@ function AutomationFormModal({
 
         {kind === "agent" ? (
           <label className="modal-field">
-            提示词（发给本地模型，产出进入运行历史与看板）
+            提示词（发给本地模型，产出进入运行历史）
             <textarea
               className="modal-textarea"
               value={prompt}
@@ -1307,11 +1311,6 @@ function AutomationFormModal({
             />
           </label>
         )}
-
-        <label className="modal-check">
-          <input type="checkbox" checked={widget} onChange={(event) => setWidget(event.target.checked)} />
-          推送到项目看板
-        </label>
 
         <label className="modal-field">
           生效截止（可选）
@@ -1384,8 +1383,8 @@ function AutomationFormModal({
   );
 }
 
-/** 运行时间格式化（任务行与看板共用）。 */
-export function formatRunTime(ts: number): string {
+/** 运行时间格式化（任务行与运行记录共用）。 */
+function formatRunTime(ts: number): string {
   const date = new Date(ts);
   const hm = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   const now = new Date();

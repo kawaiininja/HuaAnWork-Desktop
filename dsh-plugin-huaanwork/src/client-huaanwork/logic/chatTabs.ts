@@ -7,19 +7,20 @@ export function resolveActiveTab(activeId: string, tabs: readonly { id: string }
 }
 
 /**
- * 删除一条运行记录后关掉它对应的运行对话标签（规格 §6）。
+ * 删除一条运行记录后关掉它对应的对话标签（规格 §8.8）。
  *
- * 只关「带 automationId 且 sessionId 命中」的标签：默认对话标签即使绑着同一个会话
- * 也不动。关掉的是当前标签时，按原列表顺序先向右再向左取最近一个存活标签；
+ * 关闭判据只看 sessionId：运行记录删除后该会话已从磁盘删掉，任何绑着它的标签都必须关闭，
+ * 不再只关带 automationId 的运行标签。普通对话标签不会被绑定到自动运行会话（一对一约束），
+ * 因此不会误伤其他 Task。关掉的是当前标签时，按原列表顺序先向右再向左取最近一个存活标签；
  * 全都关光时保留 activeId（交给 resolveActiveTab 兜底）。没有命中就原样返回——
  * 调用方 setState 不会产生多余更新。
  */
-export function closeRunTabsForSession<T extends { id: string; sessionId?: string; automationId?: string }>(
+export function closeRunTabsForSession<T extends { id: string; sessionId?: string }>(
   tabs: readonly T[],
   sessionId: string,
   activeId: string,
 ): { tabs: T[]; nextActiveId: string } {
-  const closes = (tab: T) => tab.automationId !== undefined && tab.sessionId === sessionId;
+  const closes = (tab: T) => tab.sessionId === sessionId;
   const kept = tabs.filter((tab) => !closes(tab));
   if (kept.length === tabs.length) return { tabs: tabs as T[], nextActiveId: activeId };
 

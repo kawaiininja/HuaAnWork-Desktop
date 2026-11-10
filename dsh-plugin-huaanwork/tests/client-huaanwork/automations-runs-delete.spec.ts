@@ -15,9 +15,9 @@ vi.mock("../../src/client-huaanwork/api.ts", () => ({ rpcCall: vi.fn() }));
 
 import { rpcCall } from "../../src/client-huaanwork/api.ts";
 import AutomationsView, { lastRunLabel } from "../../src/client-huaanwork/AutomationsView.tsx";
-import type { AutomationInfo, ProjectInfo, RunSummary } from "../../src/client-huaanwork/logic/projects.ts";
+import type { AutomationInfo, ProjectInfo, RunSummary, TaskInfo } from "../../src/client-huaanwork/logic/projects.ts";
 
-type DeleteResult = { removed: boolean; sessionDirRemoved: boolean };
+type DeleteResult = { removed: boolean; sessionDirRemoved: boolean; taskId?: string };
 
 const rpc = rpcCall as unknown as {
   mockImplementation: (
@@ -33,7 +33,6 @@ const AUTOMATION: AutomationInfo = {
   kind: "agent",
   schedule: { kind: "manual" },
   prompt: "整理今天的纪要",
-  widget: false,
   enabled: true,
   createdAt: 1,
 };
@@ -85,13 +84,13 @@ function dialogConfirm(view: HTMLElement): HTMLButtonElement {
   return buttonByText(dialog as HTMLElement, "删除");
 }
 
-/** 行按 startedAt 倒序，按输出文本定位目标行，避免测试依赖排序细节。 */
-function deleteButtonFor(view: HTMLElement, output: string): HTMLButtonElement {
-  const row = [...view.querySelectorAll(".automation-runs li")].find((item) =>
-    item.textContent?.includes(output),
-  );
-  const button = row?.querySelector(".run-delete");
-  if (!(button instanceof HTMLButtonElement)) throw new Error(`delete button not found for: ${output}`);
+/**
+ * 运行产出已不在页面上展示（规格 §7.1），行按 startedAt 倒序（组内同序），
+ * 按序号取删除按钮。
+ */
+function deleteButtonAt(view: HTMLElement, index: number): HTMLButtonElement {
+  const button = view.querySelectorAll(".run-delete")[index];
+  if (!(button instanceof HTMLButtonElement)) throw new Error(`delete button not found at index ${index}`);
   return button;
 }
 
@@ -129,6 +128,9 @@ async function mount(options: {
   onWorkspaceAligned?: (workspaceRoot: string) => void;
   runningIds?: ReadonlySet<string>;
   runs?: Record<string, RunSummary[]>;
+  /** 运行记录跳转的权威子任务快照（默认空：旧记录只能只读打开）。 */
+  tasks?: TaskInfo[];
+  onOpenRunTask?: (task: TaskInfo) => void;
   /** 默认进「运行记录」tab；任务行用例留在「任务」tab。 */
   openRuns?: boolean;
   /** 归属项目下拉的数据源（默认空列表：零项目也照常展示表单）。 */
@@ -148,6 +150,9 @@ async function mount(options: {
         automations: options.automations ?? [AUTOMATION],
         runs: options.runs ?? {},
         runningIds: options.runningIds ?? new Set<string>(),
+        tasks: options.tasks ?? [],
+        // 组件契约里 onOpenRunTask 是必填（App 是唯一消费方）；不关心跳转的用例给空桩。
+        onOpenRunTask: options.onOpenRunTask ?? (() => undefined),
         onChanged: options.onChanged,
         onWorkspaceAligned: options.onWorkspaceAligned,
         onRunDeleted: options.onRunDeleted,
@@ -180,7 +185,7 @@ afterEach(async () => {
 });
 
 describe("运行记录删除（spec §6）", () => {
-  it("deletes the confirmed row, reports the kept session dir and closes the run tab", async () => {
+  it("deletes the confirmed row and closes the run tab", async () => {
     let runs = [run("r1", "s-1", 1000, "第一条输出"), run("r2", "s-2", 2000, "第二条输出")];
     const onChanged = vi.fn();
     const onRunDeleted = vi.fn();
@@ -188,8 +193,9 @@ describe("运行记录删除（spec §6）", () => {
       runs: () => runs,
       deleteRun: async () => {
         // 宿主已经删行；第二次 automation.runs 只回剩下的那条。
+        // sessionDirRemoved 只可能是 true：目录删除失败时宿主抛错、保留 Run（走下面的 catch 用例）。
         runs = runs.filter((item) => item.runId !== "r1");
-        return { removed: true, sessionDirRemoved: false };
+        return { removed: true, sessionDirRemoved: true };
       },
     });
 
@@ -197,7 +203,8 @@ describe("运行记录删除（spec §6）", () => {
     expect(view.querySelectorAll(".run-delete")).toHaveLength(2);
 
     await act(async () => {
-      deleteButtonFor(view, "第一条输出").click();
+      // startedAt 倒序：r2（2000）在前，r1（1000）是第二行。
+      deleteButtonAt(view, 1).click();
     });
     expect(view.querySelector('[role="dialog"]')).not.toBeNull();
     expect(view.querySelector('[role="dialog"]')!.textContent).toContain("会话目录将被一并删除");
@@ -210,11 +217,8 @@ describe("运行记录删除（spec §6）", () => {
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0]![1]).toEqual({ id: "a1", runId: "r1" });
     expect(view.querySelector('[role="dialog"]')).toBeNull();
-    // 被删的那行消失，另一行还在。
-    expect(view.textContent).not.toContain("第一条输出");
-    expect(view.textContent).toContain("第二条输出");
-    // 目录没删掉要诚实说出来（记录本身已删，列表不再出现）。
-    expect(view.textContent).toContain("记录已删除，但会话目录未能删除");
+    // 被删的那行消失，另一行还在（输出不再展示，按行数断言）。
+    expect(view.querySelectorAll(".run-delete")).toHaveLength(1);
     expect(onRunDeleted).toHaveBeenCalledWith("s-1", "a1", 1000);
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
@@ -242,8 +246,8 @@ describe("运行记录删除（spec §6）", () => {
     const banner = view.querySelector(".banner.error");
     expect(banner).not.toBeNull();
     expect(banner!.textContent).toContain("运行中的记录不能删除");
-    // 列表保持原样：行还在，没有乐观删除。
-    expect(view.textContent).toContain("第一条输出");
+    // 列表保持原样：行还在，没有乐观删除（输出不再展示，按行数断言）。
+    expect(view.querySelectorAll(".run-delete")).toHaveLength(1);
     expect(onRunDeleted).not.toHaveBeenCalled();
     expect(onChanged).not.toHaveBeenCalled();
   });
@@ -256,7 +260,7 @@ describe("运行记录删除（spec §6）", () => {
     });
     const view = await mount({ onRunDeleted: vi.fn(), onChanged: vi.fn(), runs: { a1: runs } });
     await act(async () => {
-      deleteButtonFor(view, "脚本输出").click();
+      deleteButtonAt(view, 0).click();
     });
     const dialog = view.querySelector('[role="dialog"]');
     expect(dialog).not.toBeNull();
@@ -294,7 +298,149 @@ describe("运行记录删除（spec §6）", () => {
       settle?.({ removed: true, sessionDirRemoved: true });
     });
     expect(view.querySelector('[role="dialog"]')).toBeNull();
-    expect(view.textContent).not.toContain("第一条输出");
+    expect(view.querySelectorAll(".run-delete")).toHaveLength(0);
+  });
+});
+
+describe("运行记录跳转（规格 §8）", () => {
+  const TASK: TaskInfo = {
+    id: "task-1",
+    projectId: "p-old",
+    name: "每日简报 · 2026-11-09 10:00:00",
+    createdAt: 1_000,
+    automationId: "a1",
+    runId: "r1",
+    sessionId: "s-1",
+  };
+
+  /** 行按 runId 定位（规格 §8：不再依赖运行产出文本）。 */
+  function rowByRunId(view: HTMLElement, runId: string): HTMLElement {
+    const row = view.querySelector(`[data-run-id="${runId}"]`);
+    if (!(row instanceof HTMLElement)) throw new Error(`run row not found: ${runId}`);
+    return row;
+  }
+
+  it("opens the historical task through the task branch instead of the read-only session", async () => {
+    const runs = [{ ...run("r1", "s-1", 1000, "输出"), taskId: "task-1" }];
+    stubRpc({ runs: () => runs, deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const onOpenRunTask = vi.fn();
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      runs: { a1: runs },
+      tasks: [TASK],
+      onOpenRunTask,
+    });
+
+    const button = rowByRunId(view, "r1").querySelector(".run-row-btn");
+    expect(button).not.toBeNull();
+    await act(async () => {
+      (button as HTMLButtonElement).click();
+    });
+
+    expect(onOpenRunTask).toHaveBeenCalledWith(TASK);
+    // 跳转走子任务流程；不再在同一页开只读会话详情。
+    expect(rpc.mock.calls.some((call) => call[0] === "session.open")).toBe(false);
+  });
+
+  it("a run whose task is gone is not clickable and says the task or session is gone", async () => {
+    const runs = [{ ...run("r1", "s-1", 1000, "输出"), taskId: "task-gone" }];
+    stubRpc({ runs: () => runs, deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const onOpenRunTask = vi.fn();
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      runs: { a1: runs },
+      tasks: [],
+      onOpenRunTask,
+    });
+
+    const row = rowByRunId(view, "r1");
+    expect(row.querySelector(".run-row-btn")).toBeNull();
+    expect(row.textContent).toContain("对应子任务或会话已删除/清理");
+    expect(onOpenRunTask).not.toHaveBeenCalled();
+  });
+
+  it("a legacy record without taskId still opens the read-only session", async () => {
+    const runs = [run("r1", "s-1", 1000, "输出")];
+    stubRpc({ runs: () => runs, deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const onOpenRunTask = vi.fn();
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      runs: { a1: runs },
+      tasks: [],
+      onOpenRunTask,
+    });
+
+    const button = rowByRunId(view, "r1").querySelector(".run-row-btn");
+    expect(button).not.toBeNull();
+    await act(async () => {
+      (button as HTMLButtonElement).click();
+    });
+
+    const opened = rpc.mock.calls.filter((call) => call[0] === "session.open");
+    expect(opened).toHaveLength(1);
+    expect(opened[0]![1]).toEqual({ sessionId: "s-1" });
+    expect(onOpenRunTask).not.toHaveBeenCalled();
+  });
+
+  it("a script run without a session is not clickable and explains why", async () => {
+    const runs = [runWithoutSession("r1", 1000, "脚本输出")];
+    stubRpc({ runs: () => runs, deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      runs: { a1: runs },
+      automations: [{ ...AUTOMATION, kind: "script", command: "echo hi" }],
+    });
+
+    const row = rowByRunId(view, "r1");
+    expect(row.querySelector(".run-row-btn")).toBeNull();
+    expect(row.textContent).toContain("脚本运行无会话");
+  });
+});
+
+describe("看板与产出展示退役（规格 §7.1）", () => {
+  it("automation page has no board tab, widget control, or collected output", async () => {
+    const collected = run("r1", "s1", 1000, "SECRET-COLLECTED-OUTPUT");
+    stubRpc({
+      runs: () => [collected],
+      deleteRun: async () => ({ removed: true, sessionDirRemoved: true }),
+    });
+    const view = await mount({
+      onChanged: () => undefined,
+      onRunDeleted: () => undefined,
+      runs: { [AUTOMATION.id]: [collected] },
+    });
+    // mount 默认落在「运行记录」tab：看板 tab 与运行产出都不得出现在页面上。
+    expect(view.textContent).not.toContain("看板");
+    expect(view.textContent).not.toContain("SECRET-COLLECTED-OUTPUT");
+    expect(view.querySelector(".run-output")).toBeNull();
+    // 回到「任务」tab：任务行不再有展开历史的入口与内联产出块（规格 §7.1 删除任务行展开历史）。
+    await act(async () => {
+      buttonByText(view, "任务").click();
+    });
+    expect(view.querySelector(".automation-expand")).toBeNull();
+    expect(view.querySelector(".run-output")).toBeNull();
+    expect(view.textContent).not.toContain("SECRET-COLLECTED-OUTPUT");
+    // 创建表单：widget 勾选与看板文案也不得存在。
+    await act(async () => {
+      buttonByText(view, "＋ 新建任务").click();
+    });
+    expect(view.textContent).not.toContain("推送到项目看板");
+    expect(view.textContent).not.toContain("看板");
+    const createDialog = view.querySelector('[role="dialog"]') as HTMLElement;
+    await act(async () => {
+      buttonByText(createDialog, "取消").click();
+    });
+    // 编辑表单同样没有该控件（原 widget 勾选在两态共用）。
+    await act(async () => {
+      buttonByText(view, "编辑").click();
+    });
+    const editDialog = view.querySelector('[role="dialog"]') as HTMLElement;
+    expect(editDialog.textContent).not.toContain("推送到项目看板");
+    expect(editDialog.textContent).not.toContain("看板");
   });
 });
 

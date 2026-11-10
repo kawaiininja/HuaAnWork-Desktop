@@ -6,6 +6,7 @@ import {
   RUNS_LIMIT,
   autoProjectRollbackAction,
   bindTaskSession,
+  createAutomationRunTask,
   createProject,
   createTask,
   findAutomation,
@@ -14,15 +15,16 @@ import {
   listTasks,
   readAutomationTemplates,
   recentRuns,
-  removeAutomationsOfProject,
   removeProject,
   removeTask,
+  removeTasksOfAutomation,
   removeTasksOfProject,
   renameProject,
   renameTask,
   setTaskModel,
   touchProject,
 } from '../../src/huaanwork-host/stores.ts'
+import { removeAutomationsOfProject } from '../../src/huaanwork-host/automations-store.ts'
 import type { AutomationInfo } from '../../src/client-huaanwork/rpc-types.ts'
 
 // 读路径用例移植自旧 sidecar projects.test.ts / tasks.test.ts / automations.test.ts:
@@ -53,7 +55,6 @@ function makeAutomation(id: string, projectId: string | null, createdAt: number)
     name: `任务-${id}`,
     kind: 'agent',
     schedule: { kind: 'manual' },
-    widget: false,
     enabled: true,
     createdAt,
   }
@@ -320,6 +321,67 @@ describe('setTaskModel(Task 9:子任务记住模型)', () => {
     await Promise.all(tasks.map((task) => setTaskModel(home, { taskId: task.id, modelId: `m-${task.id}` })))
     const listed = await listTasks(home)
     expect(listed.map((task) => task.modelId)).toEqual(tasks.map((task) => `m-${task.id}`))
+  })
+})
+
+describe('createAutomationRunTask(运行子任务原子创建)', () => {
+  test('createAutomationRunTask binds once and is idempotent by automation/run', async () => {
+    const home = makeHome()
+    const input = {
+      projectId: 'p1', name: '任务 · 2026-11-09 10:00:00', createdAt: 1000,
+      automationId: 'auto-1', runId: 'run-1', sessionId: 'sess-1',
+    }
+    const first = await createAutomationRunTask(home, input)
+    expect(await createAutomationRunTask(home, { ...input, name: '用户已改名' })).toEqual(first)
+    await expect(createAutomationRunTask(home, { ...input, sessionId: 'other' }))
+      .rejects.toThrow(/does not match/)
+    await expect(createAutomationRunTask(home, { ...input, runId: 'run-2' }))
+      .rejects.toThrow(/already bound/)
+    expect(await listTasks(home, 'p1')).toEqual([first])
+  })
+
+  test('legacy tasks without automation origin stay readable', async () => {
+    const home = makeHome()
+    writeFileSync(join(home, 'tasks.json'), JSON.stringify({ tasks: [{
+      id: 'old', projectId: 'p1', name: '旧任务', createdAt: 1, sessionId: 'old-session',
+    }] }))
+    expect(await listTasks(home, 'p1')).toHaveLength(1)
+  })
+
+  test('half-pair automation origin is dropped instead of leaking into ordinary tasks', async () => {
+    const home = makeHome()
+    writeJson(home, 'tasks.json', {
+      tasks: [
+        { id: 'only-auto', projectId: 'p1', name: '只有自动化', createdAt: 1, automationId: 'auto-1' },
+        { id: 'blank-run', projectId: 'p1', name: '空白运行', createdAt: 2, automationId: 'auto-1', runId: '  ' },
+        { id: 'paired', projectId: 'p1', name: '成对', createdAt: 3, automationId: 'auto-1', runId: 'run-1' },
+      ],
+    })
+
+    const listed = await listTasks(home)
+    expect(listed.map((task) => task.id)).toEqual(['only-auto', 'blank-run', 'paired'])
+    expect(listed[0]!.automationId).toBeUndefined()
+    expect(listed[0]!.runId).toBeUndefined()
+    expect(listed[1]!.automationId).toBeUndefined()
+    expect(listed[1]!.runId).toBeUndefined()
+    expect(listed[2]!.automationId).toBe('auto-1')
+    expect(listed[2]!.runId).toBe('run-1')
+  })
+
+  test('whitespace-padded origin is normalized to the validated trim value so cascade matches', async () => {
+    // 外部手写/损坏的 tasks.json 可能带空白来源字段:校验用 trim 值,保留也必须归一,
+    // 否则 removeTasksOfAutomation/幂等查找的精确匹配漏掉它(评审 #4)。
+    const home = makeHome()
+    writeJson(home, 'tasks.json', {
+      tasks: [
+        { id: 'padded', projectId: 'p1', name: '空白来源', createdAt: 1, sessionId: 'sess-padded', automationId: ' auto-1 ', runId: ' run-1 ' },
+      ],
+    })
+    const listed = await listTasks(home)
+    expect(listed[0]!.automationId).toBe('auto-1')
+    expect(listed[0]!.runId).toBe('run-1')
+    expect(await removeTasksOfAutomation(home, 'auto-1')).toHaveLength(1)
+    expect(await listTasks(home)).toEqual([])
   })
 })
 

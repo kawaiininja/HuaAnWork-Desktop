@@ -105,8 +105,9 @@ export const testPortMapping: TestPortRow[] = [
   {
     file: 'automations-host.test.ts',
     title: 'automation.run executes a script task and emits widget and run events',
-    label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:278',
+    label: '裁定不移植',
+    evidence:
+      'widget 事件随 Task 4 退役（规格 §7.1）：新记录不再写 widget、宿主不再发射 automation/widget，故「运行脚本产出 widget 事件」不再成立。替代:script task 只发运行事件且 stdout 仍落 Run.output，tests/huaanwork-host/automations-host.spec.ts:352',
   },
   {
     file: 'automations-host.test.ts',
@@ -340,7 +341,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'issue #2: automation bound to a vanished project still fails with the missing-project message',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:662',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:870',
   },
   {
     file: 'unified-channel.test.ts',

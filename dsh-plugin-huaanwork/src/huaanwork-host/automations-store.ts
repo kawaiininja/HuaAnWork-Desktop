@@ -10,9 +10,13 @@ import { nextFireAfter, parseCron, periodOf } from './schedule.ts'
 import {
   RUNS_LIMIT,
   auditPath,
+  findSessionDirs,
+  listAutomationSessionDirs,
+  listTasks,
   readAutomationRegistry,
   recentRuns,
-  removeAutomationSessions,
+  removeTask,
+  removeTasksOfAutomation,
   runsPath,
   withAutomationRegistryLock,
   writeAutomationRegistry,
@@ -22,8 +26,8 @@ import {
  * 任务注册表写路径与调度纯函数(旧 automations.ts 的 create/update/remove、
  * normalize、missed/due/expired、prune、advanceNextRunAt)。
  *
- * 注册表锁只有 stores.ts 里那一把:本文件的写周期全部走
- * {@link withAutomationRegistryLock},与 removeAutomationsOfProject 串行。
+ * 注册表锁只有 stores.ts 里那一把:本文件的写周期(含删除/项目级联)全部走
+ * {@link withAutomationRegistryLock},彼此串行。
  * parseCron / nextFireAfter / periodOf 从 ./schedule.ts 再导出;humanizeCron
  * 留在 schedule.ts,只给迁移测试用,不接任何展示路径。
  */
@@ -81,7 +85,6 @@ export type AutomationInput = {
   schedule: AutomationSchedule
   prompt?: string
   command?: string
-  widget: boolean
   enabled: boolean
   expiresAt?: number
   missedPolicy?: 'skip' | 'run-once'
@@ -115,7 +118,6 @@ export function normalizeAutomationInput(params: Record<string, unknown>, now = 
     schedule,
     ...(prompt ? { prompt } : {}),
     ...(command ? { command } : {}),
-    widget: params.widget === true,
     enabled: params.enabled !== false,
     ...(typeof params.expiresAt === 'number' ? { expiresAt: params.expiresAt } : {}),
     ...(params.missedPolicy === 'skip' || params.missedPolicy === 'run-once' ? { missedPolicy: params.missedPolicy } : {}),
@@ -327,7 +329,6 @@ export async function updateAutomation(
     const command = optionalString(patch.command)
     if (command !== undefined) next.command = command
     if (patch.command === '') delete next.command
-    if (typeof patch.widget === 'boolean') next.widget = patch.widget
     if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled
     if (typeof patch.expiresAt === 'number') next.expiresAt = patch.expiresAt
     if (patch.expiresAt === '') delete next.expiresAt
@@ -355,6 +356,44 @@ export async function updateAutomation(
   })
 }
 
+/**
+ * 自动化删除的目标会话集(规格 §9.3 第 2 步):级联将要删掉的会话目录。
+ *
+ * = 跨项目自动 Task 的 sessionId ∪ 该自动化最近运行记录的 sessionId ∪ 磁盘上仍存在的
+ * `huaanwork-auto-<automationId>-*` 目录。路由的活跃预检与存储层的实际删除必须读同一份
+ * 定义,否则两侧会各自漂移(过拒/漏拒都只在这条边上有后果)。
+ * 只读快照:调用方拿到它之后准入的续聊仍可能被 release-then-delete(残余窗口,T2 已登记)。
+ */
+export async function automationCascadeSessionIds(
+  storageRoot: string,
+  automationId: string,
+  sessionsRoot: string = join(storageRoot, 'sessions'),
+): Promise<Set<string>> {
+  const sessionIds = new Set<string>()
+  for (const task of await listTasks(storageRoot)) {
+    if (task.automationId === automationId && task.sessionId) sessionIds.add(task.sessionId)
+  }
+  for (const run of await recentRuns(storageRoot, automationId)) {
+    if (run.sessionId) sessionIds.add(run.sessionId)
+  }
+  for (const dir of await listAutomationSessionDirs(sessionsRoot, automationId)) {
+    sessionIds.add(dir.sessionId)
+  }
+  return sessionIds
+}
+
+/**
+ * 删除自动化(规格 §9.3):以自动化注册项为持久锚点,最后才删注册项。
+ *
+ * 顺序:会话目录 → 全部自动 Task(跨项目)→ runs/audit → 注册项。
+ * 任一步非 ENOENT 失败都直接抛出,注册项保留,重试能从同一锚点继续;
+ * 会话目录与 runs/audit 的失败在本路径**不吞**(ENOENT 仍视为已删)。
+ * `releaseSession` 在删每个会话目录之前回调(宿主用它摘掉运行态,与 session.remove 同口径)。
+ *
+ * 锁序:整个级联持注册表锁,内部只取 task 锁(合法方向:task 锁嵌在 automation 锁内),
+ * 不反向调用任何先取 task/运行记录锁的写路径。
+ * 活跃/在途拒绝不在这里:那是路由的预检(进程内 guard 只在路由层存在)。
+ */
 export async function removeAutomation(
   storageRoot: string,
   automationId: string,
@@ -365,12 +404,46 @@ export async function removeAutomation(
     const registry = await readAutomationRegistry(storageRoot)
     const index = registry.automations.findIndex((item) => item.id === automationId)
     if (index < 0) throw new Error(`automation ${automationId} was not found`)
+    // 1. 会话目录:目标集(跨项目自动 Task ∪ 运行记录 ∪ auto-prefix 目录)里真实存在
+    //    的那些,逐个释放运行态后再删;非 ENOENT 失败中止(注册项仍在)。
+    const targets = await automationCascadeSessionIds(storageRoot, automationId, sessionsRoot)
+    for (const dir of await findSessionDirs(sessionsRoot, targets)) {
+      releaseSession?.(dir.sessionId)
+      await rm(join(dir.cwdDir, dir.sessionId), { recursive: true, force: true })
+    }
+    // 2. 跨项目自动 Task:改绑前的旧项目 Task 也随来源清理。
+    await removeTasksOfAutomation(storageRoot, automationId)
+    // 3. runs/audit:force 只吞 ENOENT,其他错误中止并保留注册项。
+    await rm(runsPath(storageRoot, automationId), { force: true })
+    await rm(auditPath(storageRoot, automationId), { force: true })
+    // 4. 注册项最后删:任何崩溃点都能用仍在的注册项重试。
     registry.automations.splice(index, 1)
     await writeAutomationRegistry(storageRoot, registry)
-    await rm(runsPath(storageRoot, automationId), { force: true }).catch(() => undefined)
-    await rm(auditPath(storageRoot, automationId), { force: true }).catch(() => undefined)
-    await removeAutomationSessions(sessionsRoot, automationId, releaseSession)
   })
+}
+
+/**
+ * 项目删除时级联清理该项目全部自动化:逐项复用 {@link removeAutomation} 的锚点顺序。
+ *
+ * 不整批持锁:每次删除自己取锁,长级联期间其他自动化的写周期仍可穿插。
+ * 已被并发删掉的项跳过(幂等重试口径),其他失败照常抛出并保留项目锚点。
+ * 活跃/在途预检由路由在调用前完成(进程内 guard 只在 routes.ts)。
+ */
+export async function removeAutomationsOfProject(
+  storageRoot: string,
+  projectId: string,
+  sessionsRoot: string = join(storageRoot, 'sessions'),
+  releaseSession?: (sessionId: string) => void,
+): Promise<void> {
+  const doomed = (await readAutomationRegistry(storageRoot)).automations.filter((item) => item.projectId === projectId)
+  for (const automation of doomed) {
+    try {
+      await removeAutomation(storageRoot, automation.id, sessionsRoot, releaseSession)
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes('was not found')) continue
+      throw error
+    }
+  }
 }
 
 /**
@@ -432,6 +505,10 @@ export function clipOutput(output: string): string {
  * 回写 lastRunAt / lastStatus。nextRunAt 只在进入 running 时按 lastRunAt 推进一次。
  * 完成时再按 endedAt 算会跨过运行期间的下一次触发,把那一档跳掉。
  * 调用方显式传入 nextRunAt 时仍按该值写入。任务不存在时静默返回。
+ *
+ * `activeRunId` 与 running 同生共死(设计 §5.1):进入 running 时与 lastStatus 同一次
+ * 写入记录本次运行 id;任何终态(ok/error)删除它。显式给空串是调用方 bug,直接拒绝
+ * (在取锁之前,不留下半写状态);不传时按旧调用方语义放行,但同样不得留下陈旧字段。
  */
 export async function markAutomation(
   storageRoot: string,
@@ -440,14 +517,24 @@ export async function markAutomation(
     lastRunAt: number
     lastStatus: 'ok' | 'error' | 'running'
     nextRunAt?: number
+    activeRunId?: string
   },
 ): Promise<void> {
+  if (status.activeRunId !== undefined && !status.activeRunId.trim()) {
+    throw new Error('markAutomation requires a non-empty activeRunId')
+  }
   return withAutomationRegistryLock(async () => {
     const registry = await readAutomationRegistry(storageRoot)
     const automation = registry.automations.find((item) => item.id === automationId)
     if (!automation) return
     automation.lastRunAt = status.lastRunAt
     automation.lastStatus = status.lastStatus
+    if (status.lastStatus === 'running' && status.activeRunId !== undefined) {
+      automation.activeRunId = status.activeRunId
+    } else {
+      // 终态一律清理;running 但没带身份的旧调用方也不得沿用上一轮的陈旧 id。
+      delete automation.activeRunId
+    }
     if (status.nextRunAt !== undefined) {
       automation.nextRunAt = status.nextRunAt
     } else if (automation.schedule.kind !== 'manual' && status.lastStatus === 'running') {
@@ -484,16 +571,34 @@ export async function appendRun(storageRoot: string, automationId: string, run: 
   })
 }
 
+export type PruneAutomationSessionsResult = {
+  /** 成功走完会话目录删除步骤的候选数(目录已不存在同视为成功)。 */
+  removed: number
+  /** 随会话一起删掉的自动化来源 Task 数。 */
+  tasksRemoved: number
+  /** 失败标识:有 Task 的候选记 taskId,无 Task 的旧会话记 sessionId。 */
+  failed: string[]
+}
+
 /**
- * 清理历史运行会话目录:每个任务只保留运行文件里最近
- * {@link AUTOMATION_SESSION_RETAIN_LIMIT} 条对应的会话,以及调用方声明的活跃会话。
- * 只删会话目录,不改 runs/audit 文件(运行记录仍按 {@link RUNS_LIMIT} 保留)。不加注册表锁。
+ * 清理历史运行会话目录与对应的自动化来源 Task(规格 §9.4)。
+ *
+ * keep = 调用方活跃快照 ∪ 每个任务最近 {@link AUTOMATION_SESSION_RETAIN_LIMIT} 条 Run 的
+ * sessionId(N2:最近一次 Run 未落盘时其会话不在 keep,已登记接受)。
+ * 候选 = 全部自动化来源 Task 的 sessionId ∪ 扫描到的旧 auto-prefix 会话目录。
+ * 对每个非 keep 候选:先释放运行态,再删会话目录;目录失败(非 ENOENT/ENOTDIR)记 failed
+ * 且保留 Task,不增加 removed。目录成功后删除 sessionId 匹配的自动化 Task;Task 删除失败
+ * 同样记 failed,下一轮仍由 Task 注册表生成候选重试。普通 Task 永不删除。
+ *
+ * 不删 Run(runs.jsonl 的 50 条淘汰不级联 Task/Session);不加注册表锁。单项失败不中止
+ * 整轮清理,由返回值报告部分失败。
  */
 export async function pruneAutomationSessions(
   storageRoot: string,
   activeSessionIds: ReadonlySet<string> = new Set(),
   sessionsRoot: string = join(storageRoot, 'sessions'),
-): Promise<number> {
+  opts: { releaseSession?: (sessionId: string) => void } = {},
+): Promise<PruneAutomationSessionsResult> {
   const keep = new Set(activeSessionIds)
   const registry = await readAutomationRegistry(storageRoot)
   await Promise.all(
@@ -505,70 +610,117 @@ export async function pruneAutomationSessions(
     }),
   )
 
-  let cwds: string[]
-  try {
-    cwds = await readdir(sessionsRoot)
-  } catch {
-    return 0
+  const automationTasks = (await listTasks(storageRoot)).filter(
+    (task) => task.automationId !== undefined && task.sessionId !== undefined,
+  )
+  const candidates = new Set<string>()
+  for (const task of automationTasks) {
+    if (task.sessionId) candidates.add(task.sessionId)
   }
-  let removed = 0
-  await Promise.all(
-    cwds.map(async (cwd) => {
-      const cwdDir = join(sessionsRoot, cwd)
+  try {
+    for (const cwd of await readdir(sessionsRoot)) {
       let entries: string[]
       try {
-        entries = await readdir(cwdDir)
+        entries = await readdir(join(sessionsRoot, cwd))
       } catch {
-        return
+        continue
       }
-      await Promise.all(
-        entries
-          .filter((entry) => isAutomationSessionEntry(entry) && !keep.has(entry))
-          .map(async (entry) => {
-            await rm(join(cwdDir, entry), { recursive: true, force: true }).catch(() => undefined)
-            removed += 1
-          }),
-      )
-    }),
-  )
-  return removed
+      for (const entry of entries) {
+        if (isAutomationSessionEntry(entry)) candidates.add(entry)
+      }
+    }
+  } catch {
+    // 会话根不可读:扫描面为空;Task 候选仍会走 removeSessionDir 的失败协议。
+  }
+
+  const failed: string[] = []
+  let removed = 0
+  let tasksRemoved = 0
+  for (const sessionId of candidates) {
+    if (keep.has(sessionId)) continue
+    const task = automationTasks.find((item) => item.sessionId === sessionId)
+    try {
+      // 先释放运行态,再删目录(session.remove / automation.remove 同序)。
+      opts.releaseSession?.(sessionId)
+    } catch {
+      failed.push(task?.id ?? sessionId)
+      continue
+    }
+    if (!await removeSessionDir(sessionsRoot, sessionId)) {
+      failed.push(task?.id ?? sessionId)
+      continue
+    }
+    removed += 1
+    for (const doomed of automationTasks.filter((item) => item.sessionId === sessionId)) {
+      try {
+        await removeTask(storageRoot, doomed.id)
+        tasksRemoved += 1
+      } catch {
+        // Task 写盘失败:会话已删,Task 留在注册表,下一轮 prune 重试。
+        failed.push(doomed.id)
+      }
+    }
+  }
+  return { removed, tasksRemoved, failed }
 }
 
 /**
- * 删除单条运行记录(规格 §6):删行 → 释放运行态 → 删对应会话目录 → 注册表锁内回写上次运行。
+ * 删除单条运行记录(规格 §9.2):以 Run 为持久锚点,最后才删运行行。
  *
- * 锁序:先在运行记录锁内删行并返回被删记录,锁释放后才进注册表锁回写。
- * 不得反过来嵌套——`finishAutomation` 先拿运行记录锁、再等注册表锁,反向嵌套会死锁。
+ * 顺序:拒绝在途/活跃 → 找匹配 Task → 释放运行态并删会话目录 → 删 Task → 删 Run 行
+ * → 注册表锁内回写上次运行。任何一步失败都保留 Run,重试仍能找回 Task 和会话状态;
+ * 不再出现「Run 先删、后续失败就永久丢失清理锚点」。
  *
- * 在途表中的 runId 拒绝删除:执行中的轮次要到结束才落盘,界面正常删不到它;
+ * 锁序:先做无锁的读与会话/Task 清理,最后才在运行记录锁内删行,锁释放后才进注册表锁
+ * 回写。不得反向嵌套——`finishAutomation` 先拿运行记录锁、再等注册表锁,反向嵌套会死锁;
+ * 也不得在 task 锁内调用运行记录或注册表的写路径。
+ *
+ * 在途表中的 runId 与活跃会话快照都拒绝删除:执行中的轮次要到结束才落盘,界面正常删不到它;
+ * 活跃拒绝只覆盖运行记录删除,普通 task/project 级联保持既有 release-then-delete 语义。
  * 拒绝文案是界面直接展示给用户的那一句。
  *
- * 行不存在时幂等返回(不改注册表);目录不存在视为已删;删行成功后即使
- * 目录删除失败也不回滚(列表不再出现这一条,由返回值报告目录未删)。
+ * 行不存在时幂等返回(不改注册表);目录不存在(ENOENT/ENOTDIR)视为已删;
+ * 非 ENOENT 的目录删除失败中止且 Run 保留,让用户能重试。
  */
 export async function deleteAutomationRun(
   storageRoot: string,
   automationId: string,
   runId: string,
-  opts: { sessionsRoot: string; releaseSession?: (sessionId: string) => void },
-): Promise<{ removed: boolean; sessionDirRemoved: boolean }> {
+  opts: {
+    sessionsRoot: string
+    activeSessionIds?: ReadonlySet<string>
+    releaseSession?: (sessionId: string) => void
+  },
+): Promise<{ removed: boolean; sessionDirRemoved: boolean; taskId?: string }> {
   if (inFlightRuns.has(runId)) throw new Error('运行中的记录不能删除')
+  const target = (await recentRuns(storageRoot, automationId)).find((run) => run.runId === runId)
+  if (!target) return { removed: false, sessionDirRemoved: true }
+  if (target.sessionId && opts.activeSessionIds?.has(target.sessionId)) {
+    throw new Error('会话正在使用，暂不能删除')
+  }
+  // Run.taskId 与 (automationId,runId) 都可定位自动 Task;两者指向同一条时才允许删除。
+  const task = (await listTasks(storageRoot)).find((item) =>
+    item.id === target.taskId || (item.automationId === automationId && item.runId === runId))
+  if (task && (task.automationId !== automationId || task.runId !== runId)) {
+    throw new Error('运行与子任务关联不一致')
+  }
+  if (target.sessionId) {
+    // 先释放运行态,再删目录(session.remove / automation.remove 同序)。
+    opts.releaseSession?.(target.sessionId)
+    if (!await removeSessionDir(opts.sessionsRoot, target.sessionId)) {
+      throw new Error('会话目录未能删除，运行记录已保留以便重试')
+    }
+  }
+  // Task 写盘失败会抛在这里:Run 与已缺失的会话仍是可重试状态(Task 留在注册表里)。
+  if (task) await removeTask(storageRoot, task.id)
+
   const removed = await withAppendRunLock(storageRoot, automationId, async () => {
     const existing = await recentRuns(storageRoot, automationId)
-    const target = existing.find((run) => run.runId === runId)
-    if (!target) return undefined
+    if (!existing.some((run) => run.runId === runId)) return false
     const lines = existing.filter((run) => run.runId !== runId).map((entry) => JSON.stringify(entry))
-    await mkdir(dirname(runsPath(storageRoot, automationId)), { recursive: true })
     await writeFile(runsPath(storageRoot, automationId), lines.length ? `${lines.join('\n')}\n` : '', 'utf8')
-    return target
+    return true
   })
-  if (removed === undefined) return { removed: false, sessionDirRemoved: true }
-  let sessionDirRemoved = true
-  if (removed.sessionId) {
-    // 先释放运行态,再删目录(session.remove / automation.remove 同序)。
-    opts.releaseSession?.(removed.sessionId)
-    sessionDirRemoved = await removeSessionDir(opts.sessionsRoot, removed.sessionId)
-  }
   await rewriteLastRunFromRuns(storageRoot, automationId).catch((error: unknown) => {
     // 运行记录与目录已经删掉；注册表回写失败不能让客户端以为删除失败。
     // 下次运行结束或再次删除会以锁内重读的权威数据修正上次运行文案。
@@ -576,7 +728,7 @@ export async function deleteAutomationRun(
       `[automations] failed to rewrite last-run fields after deleting ${automationId}/${runId}: ${error instanceof Error ? error.message : String(error)}`,
     )
   })
-  return { removed: true, sessionDirRemoved }
+  return { removed, sessionDirRemoved: true, ...(task ? { taskId: task.id } : {}) }
 }
 
 /**

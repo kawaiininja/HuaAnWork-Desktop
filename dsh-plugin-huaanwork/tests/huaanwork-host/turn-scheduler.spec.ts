@@ -296,3 +296,24 @@ test('cancelQueuedItemsForSession does not release an active writer of that sess
   expect(turns.soleCapWriterSessionId()).toBe('s')
   expect(turns.drainQueue()).toEqual([])
 })
+
+test('activeSessionIds covers writers, queued sessions, and starting sessions', () => {
+  const turns = createTurnScheduler({ maxConcurrentTurns: () => 1, modelExists: () => true })
+  turns.admitUserTurn({ sessionId: 's1', tabId: 't1', text: '一', modelId: 'm', root: '/a' })
+  const queued = turns.admitUserTurn({ sessionId: 's2', tabId: 't2', text: '二', modelId: 'm', root: '/b' })
+  if (queued.kind !== 'queued') throw new Error('expected queued admission')
+  expect(turns.activeSessionIds()).toEqual(new Set(['s1', 's2']))
+  turns.release('s1')
+  turns.drainQueue()
+  expect(turns.activeSessionIds()).toEqual(new Set(['s2']))
+  turns.finishStart(queued.queueItemId)
+})
+
+test('activeAutomationIds covers admit-to-enqueue before an in-flight entry exists', () => {
+  const turns = createTurnScheduler({ maxConcurrentTurns: () => 3, modelExists: () => true })
+  turns.admitAutomation({
+    automationId: 'auto-catchup', sessionId: 'huaanwork-auto-auto-catchup-r1',
+    root: '/project', runId: 'r1', countsTowardCap: true,
+  })
+  expect(turns.activeAutomationIds()).toEqual(new Set(['auto-catchup']))
+})

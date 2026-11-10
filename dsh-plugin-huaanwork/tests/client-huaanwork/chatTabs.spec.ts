@@ -114,9 +114,14 @@ test("no match is a no-op keeping the active id", () => {
   assert.equal(result.tabs, tabs);
 });
 
-test("a non-run tab with the same sessionId is never closed", () => {
-  const tabs = [{ id: "user", sessionId: "s-1" }]; // 无 automationId：默认对话标签
-  assert.equal(closeRunTabsForSession(tabs, "s-1", "user").tabs.length, 1);
+test("any tab bound to the deleted session is closed, not only automation run tabs", () => {
+  // 规格 §8.8:删除运行后按 sessionId 关闭所有受影响标签。
+  // 一对一约束保证默认对话标签不会绑到自动运行会话上,因此不必再看 automationId。
+  const tabs = [{ id: "user", sessionId: "s-1" }];
+  const result = closeRunTabsForSession(tabs, "s-1", "user");
+  assert.deepEqual(result.tabs, []);
+  // 全关光时保留 activeId,交给 resolveActiveTab 兜底。
+  assert.equal(result.nextActiveId, "user");
 });
 
 test("a closed immediate right neighbour is skipped for the next surviving tab", () => {

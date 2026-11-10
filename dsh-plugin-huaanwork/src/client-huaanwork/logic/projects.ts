@@ -24,7 +24,6 @@ export type AutomationInfo = {
   schedule: AutomationSchedule;
   prompt?: string;
   command?: string;
-  widget: boolean;
   enabled: boolean;
   createdAt: number;
   lastRunAt?: number;
@@ -34,6 +33,8 @@ export type AutomationInfo = {
   missedPolicy?: "skip" | "run-once";              // 默认 "skip"
   taskShape?: "independent" | "merged";            // 默认 "independent"
   unattended?: { enabled: boolean; allow: string[] };  // Phase 2
+  /** 注册表为 running 时的运行 id（恢复对账用）；终态对账必须清除。 */
+  activeRunId?: string;
 };
 
 export type RunSummary = {
@@ -47,6 +48,8 @@ export type RunSummary = {
   coalescedCount?: number;
   sessionId?: string;
   durationMs?: number;
+  /** 该运行创建的运行子任务 id；旧记录与未建子任务的运行没有此字段。 */
+  taskId?: string;
 };
 
 export type AutomationTemplate = {
@@ -65,6 +68,9 @@ export type TaskInfo = {
   sessionId?: string;
   /** 该子任务首次真正开始执行时用的模型条目 id；还没跑过就不存在（旧 tasks.json 无此字段）。 */
   modelId?: string;
+  /** 自动化来源（运行子任务）：只能成对出现，普通任务与旧 tasks.json 都没有。 */
+  automationId?: string;
+  runId?: string;
 };
 
 export type AutomationDraft = {
@@ -74,7 +80,6 @@ export type AutomationDraft = {
   schedule: AutomationSchedule;
   prompt?: string;
   command?: string;
-  widget?: boolean;
   enabled?: boolean;
   expiresAt?: number;
   missedPolicy?: "skip" | "run-once";
@@ -88,7 +93,6 @@ export type AutomationPatch = {
   schedule?: AutomationSchedule;
   prompt?: string;
   command?: string;
-  widget?: boolean;
   enabled?: boolean;
   expiresAt?: number | "";
   missedPolicy?: "skip" | "run-once" | "";
