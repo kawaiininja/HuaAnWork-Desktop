@@ -32,7 +32,7 @@ import { createAutomation, normalizeAutomationInput, updateAutomation } from '..
 import { ROUTE_TABLE, type RouteContext, type RouteHandler, type RouteRequest } from '../../src/huaanwork-host/routes.ts'
 import { sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import { AGENT_ID, sessionSend, type ListedAgent } from '../../src/huaanwork-host/sessions.ts'
-import { createProject, listAutomations, recentRuns } from '../../src/huaanwork-host/stores.ts'
+import { createProject, findAutomation, listAutomations, listTasks, recentRuns } from '../../src/huaanwork-host/stores.ts'
 import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import { neutralAutomationRootPath, neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 
@@ -2173,4 +2173,94 @@ test('rebinding keeps the admitted run on the old root and moves the next run to
   expect((await recentRuns(h.profileDir, task.id))[1]?.output).toBe(await realpath(p2.root))
   // 旧项目目录与其中的产物不搬家、不删除。
   expect(existsSync(p1.root)).toBe(true)
+})
+
+test('bound agent run creates one dated task and carries taskId through completion', async () => {
+  const h = makeHarness()
+  const projectRoot = mkdtempSync(join(tmpdir(), 'hw-run-task-project-'))
+  dirs.push(projectRoot)
+  const project = await createProject(h.profileDir, { root: projectRoot, name: '每日十万个为什么' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '每日十万个为什么' })
+  const started = await startAutomation(h, automation, { trigger: 'manual', runId: 'run-task-1' })
+  await started.done
+  const ended = await waitRunEnd(h.events, automation.id)
+  const run = (await recentRuns(h.profileDir, automation.id))[0]!
+  const task = (await listTasks(h.profileDir, project.id))[0]!
+  expect(task.runId).toBe('run-task-1')
+  expect(task.automationId).toBe(automation.id)
+  expect(task.sessionId).toBe(automationRunSessionId(automation.id, 'run-task-1'))
+  expect(task.createdAt).toBe(run.startedAt)
+  expect(task.name).toMatch(/^每日十万个为什么 · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
+  expect(run.taskId).toBe(task.id)
+  expect(ended).toMatchObject({ taskId: task.id })
+  // 一轮只建一个子任务。
+  expect(await listTasks(h.profileDir, project.id)).toHaveLength(1)
+  // 关联事件带完整 task、runId/sessionId 与触发源,且先于模型回合发出。
+  const runTaskIndex = h.events.findIndex((event) => event.event === 'automation/run-task')
+  expect(runTaskIndex).toBeGreaterThanOrEqual(0)
+  expect(h.events[runTaskIndex]).toMatchObject({
+    event: 'automation/run-task',
+    automationId: automation.id,
+    projectId: project.id,
+    runId: 'run-task-1',
+    sessionId: task.sessionId,
+    trigger: 'manual',
+    task,
+  })
+  expect(h.events.findIndex((event) => event.event === 'token')).toBeGreaterThan(runTaskIndex)
+  // 终态之后注册表不再挂着 running 身份。
+  expect((await findAutomation(h.profileDir, automation.id)).activeRunId).toBeUndefined()
+})
+
+test('task registry failure prevents model execution and leaves an unlinked error run', async () => {
+  const h = makeHarness()
+  const projectRoot = mkdtempSync(join(tmpdir(), 'hw-run-task-fail-'))
+  dirs.push(projectRoot)
+  const project = await createProject(h.profileDir, { root: projectRoot })
+  const automation = await agentTask(h.profileDir, { projectId: project.id })
+  // tasks.json 占位成目录 → createAutomationRunTask 的读取抛 EISDIR,不会静默建 Task。
+  mkdirSync(join(h.profileDir, 'tasks.json'))
+  const started = await startAutomation(h, automation, { runId: 'task-fail-1' })
+  await started.done
+  const ended = await waitRunEnd(h.events, automation.id)
+  const run = (await recentRuns(h.profileDir, automation.id))[0]!
+  expect(run.status).toBe('error')
+  expect(run.taskId).toBeUndefined()
+  expect(run.sessionId).toBeUndefined()
+  expect(ended).not.toHaveProperty('taskId')
+  // 不调用模型、不发关联事件,注册表也不留 running 身份。
+  expect(h.followups).toHaveLength(0)
+  expect(h.events.map((event) => event.event)).not.toContain('automation/run-task')
+  expect((await findAutomation(h.profileDir, automation.id)).activeRunId).toBeUndefined()
+})
+
+test('an agent run whose project vanished writes a failed run without a session or task', async () => {
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '消失的项目' })
+  const automation = await agentTask(h.profileDir, { projectId: project.id, name: '绑定智能体' })
+  writeFileSync(join(h.profileDir, 'projects.json'), `${JSON.stringify({ projects: [] })}\n`)
+  const started = await startAutomation(h, automation, { runId: 'missing-project-agent' })
+  await started.done
+  const ended = await waitRunEnd(h.events, automation.id)
+  expect(ended).toMatchObject({ ok: false })
+  const run = (await recentRuns(h.profileDir, automation.id))[0]!
+  expect(run.output).toBe(MISSING_PROJECT_OUTPUT)
+  // 已删项目的 agent 轮不写不存在的 sessionId,也不建运行子任务(spec §5.2 第 3 条)。
+  expect(run.sessionId).toBeUndefined()
+  expect(run.taskId).toBeUndefined()
+  expect(h.events.map((event) => event.event)).not.toContain('automation/run-task')
+  expect(h.followups).toHaveLength(0)
+})
+
+test('appendRun failure still removes the handed-off in-flight entry', async () => {
+  const h = makeHarness()
+  const automation = await agentTask(h.profileDir)
+  // runs.jsonl 占位成目录 → appendRun 的 writeFile 抛 EISDIR,进程不退出。
+  mkdirSync(join(h.profileDir, 'automations', `${automation.id}.runs.jsonl`), { recursive: true })
+  const started = await startAutomation(h, automation, { runId: 'soft-fail-1' })
+  // 交接后的软失败只记日志(enqueue 侧 catch),不做拒绝传播;断言的是表格状态。
+  await expect(started.done).resolves.toBeUndefined()
+  expect(inFlightRuns.has('soft-fail-1')).toBe(false)
+  // 泄漏条目会让改绑/删自动化/删项目预检一直拒绝到 Host 重启。
+  expect(hasInFlightAutomationRun(automation.id)).toBe(false)
 })

@@ -432,6 +432,10 @@ export function clipOutput(output: string): string {
  * 回写 lastRunAt / lastStatus。nextRunAt 只在进入 running 时按 lastRunAt 推进一次。
  * 完成时再按 endedAt 算会跨过运行期间的下一次触发,把那一档跳掉。
  * 调用方显式传入 nextRunAt 时仍按该值写入。任务不存在时静默返回。
+ *
+ * `activeRunId` 与 running 同生共死(设计 §5.1):进入 running 时与 lastStatus 同一次
+ * 写入记录本次运行 id;任何终态(ok/error)删除它。显式给空串是调用方 bug,直接拒绝
+ * (在取锁之前,不留下半写状态);不传时按旧调用方语义放行,但同样不得留下陈旧字段。
  */
 export async function markAutomation(
   storageRoot: string,
@@ -440,14 +444,24 @@ export async function markAutomation(
     lastRunAt: number
     lastStatus: 'ok' | 'error' | 'running'
     nextRunAt?: number
+    activeRunId?: string
   },
 ): Promise<void> {
+  if (status.activeRunId !== undefined && !status.activeRunId.trim()) {
+    throw new Error('markAutomation requires a non-empty activeRunId')
+  }
   return withAutomationRegistryLock(async () => {
     const registry = await readAutomationRegistry(storageRoot)
     const automation = registry.automations.find((item) => item.id === automationId)
     if (!automation) return
     automation.lastRunAt = status.lastRunAt
     automation.lastStatus = status.lastStatus
+    if (status.lastStatus === 'running' && status.activeRunId !== undefined) {
+      automation.activeRunId = status.activeRunId
+    } else {
+      // 终态一律清理;running 但没带身份的旧调用方也不得沿用上一轮的陈旧 id。
+      delete automation.activeRunId
+    }
     if (status.nextRunAt !== undefined) {
       automation.nextRunAt = status.nextRunAt
     } else if (automation.schedule.kind !== 'manual' && status.lastStatus === 'running') {

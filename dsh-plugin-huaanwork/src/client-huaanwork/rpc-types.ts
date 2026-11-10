@@ -506,6 +506,8 @@ export type RpcEvent =
       status?: "ok" | "error" | "missed" | "timeout" | "cancelled";
       sessionId?: string;
       durationMs?: number;
+      /** 该运行创建的运行子任务 id；script/未建子任务/旧记录路径不带。 */
+      taskId?: string;
     }
   | { event: "automation/missed"; automationId: string; projectId: string | null; coalescedCount: number; missedAt: number }
   | { event: "automation/widget"; automationId: string; projectId: string | null; time: number }

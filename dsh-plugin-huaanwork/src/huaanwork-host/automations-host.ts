@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { resolve as pathResolve } from 'node:path'
 
-import type { AutomationInfo, RpcEvent, RunSummary } from '../client-huaanwork/rpc-types.ts'
+import type { AutomationInfo, RpcEvent, RunSummary, TaskInfo } from '../client-huaanwork/rpc-types.ts'
 import { releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import { inFlightRuns, inFlightRunsOf, startInFlightRun, type InFlightRun } from './automation-inflight.ts'
 import { resolveApproval } from './approvals.ts'
@@ -25,7 +25,7 @@ import {
   type SessionRuntimeContext,
 } from './sessions.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
-import { listProjects, recentRuns } from './stores.ts'
+import { createAutomationRunTask, listProjects, recentRuns } from './stores.ts'
 import { neutralAutomationRoot, neutralAutomationRootPath } from './workspace-state.ts'
 
 /**
@@ -555,6 +555,16 @@ export function runScript(
   })
 }
 
+/**
+ * 运行子任务名称(设计 §5.2 第 4 条):`<任务名> · YYYY-MM-DD HH:mm:ss`,时间取宿主本地时区。
+ * 只由宿主铸造一次落盘;用户之后改名不回写,名称也不再参与任何匹配(关联靠 automationId/runId)。
+ */
+export function automationRunTaskName(name: string, startedAt: number): string {
+  const d = new Date(startedAt)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${name} · ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
 async function finishAutomation(
   routeCtx: RouteContext,
   automation: AutomationInfo,
@@ -565,6 +575,7 @@ async function finishAutomation(
     output: string
     status?: 'ok' | 'error' | 'timeout' | 'cancelled'
     sessionId?: string
+    taskId?: string
   },
   trigger: AutomationTrigger,
   coalescedCount: number | undefined,
@@ -584,9 +595,14 @@ async function finishAutomation(
   }
   if (coalescedCount !== undefined) summary.coalescedCount = coalescedCount
   if (run.sessionId !== undefined) summary.sessionId = run.sessionId
-  await appendRun(routeCtx.profileDir, automation.id, summary)
-  // 记录落盘即摘条目:之后到达的 stop 看到「无条目」,自然归于「记录已落盘 ⇒ 未停止」。
-  inFlightRuns.delete(run.runId)
+  if (run.taskId !== undefined) summary.taskId = run.taskId
+  try {
+    await appendRun(routeCtx.profileDir, automation.id, summary)
+  } finally {
+    // 记录落盘即摘条目(成功路径次序不变);appendRun 软失败也必须摘:
+    // 泄漏条目会让改绑/删自动化/删项目预检一直拒绝到 Host 重启(M2 回归钉)。
+    inFlightRuns.delete(run.runId)
+  }
   // 完成时不再推进 nextRunAt:进入 running 时已经按 startedAt 算过一次。
   await markAutomation(routeCtx.profileDir, automation.id, {
     lastRunAt: endedAt,
@@ -607,6 +623,7 @@ async function finishAutomation(
     status,
     durationMs,
     ...(run.sessionId === undefined ? {} : { sessionId: run.sessionId }),
+    ...(run.taskId === undefined ? {} : { taskId: run.taskId }),
   })
 }
 
@@ -654,7 +671,12 @@ export async function executeRun(
       ...(sessionId === undefined ? {} : { sessionId }),
     })
     // ── 同步段结束（以上不得有 await）────────────────────────────────
-    await markAutomation(routeCtx.profileDir, automation.id, { lastRunAt: startedAt, lastStatus: 'running' })
+    await markAutomation(routeCtx.profileDir, automation.id, {
+      lastRunAt: startedAt,
+      lastStatus: 'running',
+      // running 与 activeRunId 同一次写盘:重启后按原 runId 对账(设计 §5.1/§6)。
+      activeRunId: runId,
+    })
 
     const project = automation.projectId
       ? (await listProjects(routeCtx.profileDir)).find((item) => item.id === automation.projectId)
@@ -671,12 +693,53 @@ export async function executeRun(
           ok: false,
           output: cancelled ? '已停止' : MISSING_PROJECT_OUTPUT,
           ...(cancelled ? { status: 'cancelled' as const } : {}),
-          ...(sessionId === undefined ? {} : { sessionId }),
+          // 绑定项目已删除:不写一条指向不存在的项目/会话的关联(设计 §5.2 第 3 条),
+          // 也不创建运行子任务。
         },
         trigger,
         coalescedCount,
       )
       return
+    }
+
+    // 运行子任务:在模型回合之前创建一次并发射关联事件(设计 §5.2 第 4/5 条)。
+    // 创建失败不调用模型、不发 run-task、Run 不带 taskId/sessionId,只留一条错误记录。
+    let runTask: TaskInfo | undefined
+    if (automation.kind === 'agent' && project) {
+      try {
+        runTask = await createAutomationRunTask(routeCtx.profileDir, {
+          projectId: project.id,
+          name: automationRunTaskName(automation.name, startedAt),
+          createdAt: startedAt,
+          automationId: automation.id,
+          runId,
+          sessionId: sessionId!,
+        })
+      } catch (error: unknown) {
+        await finishAutomation(
+          routeCtx,
+          automation,
+          {
+            runId,
+            startedAt,
+            ok: false,
+            status: 'error',
+            output: error instanceof Error ? error.message : String(error),
+          },
+          trigger,
+          coalescedCount,
+        )
+        return
+      }
+      routeCtx.emit({
+        event: 'automation/run-task',
+        automationId: automation.id,
+        projectId: project.id,
+        runId,
+        sessionId: sessionId!,
+        trigger,
+        task: runTask,
+      })
     }
 
     let ok = true
@@ -734,7 +797,15 @@ export async function executeRun(
     await finishAutomation(
       routeCtx,
       automation,
-      { runId, startedAt, ok, output, status, ...(sessionId === undefined ? {} : { sessionId }) },
+      {
+        runId,
+        startedAt,
+        ok,
+        output,
+        status,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(runTask === undefined ? {} : { taskId: runTask.id }),
+      },
       trigger,
       coalescedCount,
     )

@@ -441,6 +441,17 @@ function isAutomationInfo(value: unknown): value is AutomationInfo {
   )
 }
 
+/**
+ * 恢复对账用的运行身份(`activeRunId`)只在非空字符串时保留;空串/非字符串(含旧
+ * automations.json 完全没有该字段)一律收敛成「无字段」,与 `withValidTaskOrigin`
+ * 同一宽容读法——读不炸、旧 JSON 照常可读。
+ */
+function withValidActiveRunId(automation: AutomationInfo): AutomationInfo {
+  if (typeof automation.activeRunId === 'string' && automation.activeRunId.trim()) return automation
+  delete automation.activeRunId
+  return automation
+}
+
 export async function readAutomationRegistry(storageRoot: string): Promise<AutomationRegistry> {
   const path = automationRegistryPath(storageRoot)
   let text: string
@@ -452,7 +463,11 @@ export async function readAutomationRegistry(storageRoot: string): Promise<Autom
   }
   try {
     const parsed = JSON.parse(text) as Partial<AutomationRegistry>
-    return { automations: Array.isArray(parsed.automations) ? parsed.automations.filter(isAutomationInfo) : [] }
+    return {
+      automations: Array.isArray(parsed.automations)
+        ? parsed.automations.filter(isAutomationInfo).map(withValidActiveRunId)
+        : [],
+    }
   } catch {
     // 注册表损坏:改名留证后返回空表,绝不让 automation.list 持续失败。
     const backup = `${path}.corrupt-${Date.now()}`

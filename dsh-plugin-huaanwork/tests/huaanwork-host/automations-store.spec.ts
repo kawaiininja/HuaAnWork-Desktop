@@ -1018,6 +1018,65 @@ describe('automations-store 写路径与纯函数', () => {
     expect(afterEnd?.nextRunAt).toBe(startedAt + 60_000)
   })
 
+  test('markAutomation persists activeRunId while running and clears it on every terminal status', async () => {
+    const home = makeHome()
+    const created = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    await markAutomation(home, created.id, {
+      lastRunAt: T0 + 10,
+      lastStatus: 'running',
+      activeRunId: 'run-1',
+    })
+    // lastStatus 与 activeRunId 必须落在同一个 automations.json 写入里。
+    expect(JSON.parse(readFileSync(join(home, 'automations.json'), 'utf8')).automations[0]).toMatchObject({
+      lastStatus: 'running',
+      activeRunId: 'run-1',
+    })
+    expect((await listAutomations(home)).find((item) => item.id === created.id)?.activeRunId).toBe('run-1')
+
+    await markAutomation(home, created.id, { lastRunAt: T0 + 20, lastStatus: 'ok' })
+    expect((await listAutomations(home)).find((item) => item.id === created.id)?.activeRunId).toBeUndefined()
+
+    await markAutomation(home, created.id, {
+      lastRunAt: T0 + 30,
+      lastStatus: 'running',
+      activeRunId: 'run-2',
+    })
+    expect((await listAutomations(home)).find((item) => item.id === created.id)?.activeRunId).toBe('run-2')
+    await markAutomation(home, created.id, { lastRunAt: T0 + 40, lastStatus: 'error' })
+    expect((await listAutomations(home)).find((item) => item.id === created.id)?.activeRunId).toBeUndefined()
+  })
+
+  test('markAutomation rejects a blank activeRunId but still accepts a legacy running mark', async () => {
+    const home = makeHome()
+    const created = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    await expect(
+      markAutomation(home, created.id, { lastRunAt: T0 + 10, lastStatus: 'running', activeRunId: '  ' }),
+    ).rejects.toThrow()
+    // 注册项未被改动:拒绝发生在写盘之前。
+    expect((await listAutomations(home)).find((item) => item.id === created.id)?.lastStatus).toBeUndefined()
+    // 旧调用方(无 activeRunId 的 running,如历史残留夹具)不得被拒。
+    await markAutomation(home, created.id, { lastRunAt: T0 + 10, lastStatus: 'running' })
+    const running = (await listAutomations(home)).find((item) => item.id === created.id)
+    expect(running?.lastStatus).toBe('running')
+    expect(running?.activeRunId).toBeUndefined()
+  })
+
+  test('registry reads drop blank or non-string activeRunId and keep old JSON readable', async () => {
+    const home = makeHome()
+    const created = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    const path = join(home, 'automations.json')
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    parsed.automations[0].activeRunId = '   '
+    writeFileSync(path, JSON.stringify(parsed))
+    expect((await listAutomations(home)).find((item) => item.id === created.id)?.activeRunId).toBeUndefined()
+    parsed.automations[0].activeRunId = 42
+    writeFileSync(path, JSON.stringify(parsed))
+    expect((await listAutomations(home)).find((item) => item.id === created.id)?.activeRunId).toBeUndefined()
+    parsed.automations[0].activeRunId = 'legacy-run'
+    writeFileSync(path, JSON.stringify(parsed))
+    expect((await listAutomations(home)).find((item) => item.id === created.id)?.activeRunId).toBe('legacy-run')
+  })
+
   test('concurrent appendRun calls keep every record for one automation', async () => {
     const home = makeHome()
     const created = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
