@@ -202,11 +202,26 @@ function withValidTaskModel(task: TaskInfo): TaskInfo {
   return task
 }
 
+/**
+ * 自动化来源(`automationId`/`runId`)必须成对且为非空字符串才是合法关联;
+ * 任一缺失或非法就把两个字段一起摘掉——普通任务与旧 tasks.json 永不获得半对字段。
+ */
+function withValidTaskOrigin(task: TaskInfo): TaskInfo {
+  const automationId = typeof task.automationId === 'string' && task.automationId.trim()
+  const runId = typeof task.runId === 'string' && task.runId.trim()
+  if (automationId && runId) return task
+  delete task.automationId
+  delete task.runId
+  return task
+}
+
 async function readTaskRegistry(storageRoot: string): Promise<TaskRegistry> {
   try {
     const parsed = JSON.parse(await readFile(taskRegistryPath(storageRoot), 'utf8')) as Partial<TaskRegistry>
     return {
-      tasks: Array.isArray(parsed.tasks) ? parsed.tasks.filter(isTaskInfo).map(withValidTaskModel) : [],
+      tasks: Array.isArray(parsed.tasks)
+        ? parsed.tasks.filter(isTaskInfo).map(withValidTaskModel).map(withValidTaskOrigin)
+        : [],
     }
   } catch (error: unknown) {
     if ((error as { code?: string }).code === 'ENOENT') return { tasks: [] }
@@ -261,6 +276,57 @@ export async function bindTaskSession(
     const conflict = registry.tasks.find((item) => item.id !== taskId && item.sessionId === sessionId)
     if (conflict) throw new Error(`session ${sessionId} is already bound to task ${conflict.id}`)
     task.sessionId = sessionId
+    await writeTaskRegistry(storageRoot, registry)
+    return task
+  })
+}
+
+export type AutomationRunTaskInput = {
+  projectId: string
+  name: string
+  createdAt: number
+  automationId: string
+  runId: string
+  sessionId: string
+}
+
+/**
+ * 运行子任务原子创建(设计 §5.2 第 4 条):在同一次 task 锁内完成
+ * 「按 (automationId,runId) 幂等查找 → 校验 projectId/sessionId → 会话占用检查 → 写入」。
+ *
+ * 已存在时校验项目与会话绑定但**放行改名**(名称允许被用户改过);
+ * 半对来源字段不可能出现在注册表里(`withValidTaskOrigin` 已收敛),因此这里只比对成对键。
+ * 锁内只读写 tasks.json,调用方不得在此回调里再碰 automations/runs(设计 §3.2 第 6 条)。
+ */
+export async function createAutomationRunTask(
+  storageRoot: string,
+  input: AutomationRunTaskInput,
+): Promise<TaskInfo> {
+  const projectId = input.projectId.trim()
+  const name = input.name.trim()
+  const automationId = input.automationId.trim()
+  const runId = input.runId.trim()
+  const sessionId = input.sessionId.trim()
+  if (!projectId || !name || !automationId || !runId || !sessionId) {
+    throw new Error('automation run task requires project, name, automation, run and session')
+  }
+  return withTaskRegistryLock(async () => {
+    const registry = await readTaskRegistry(storageRoot)
+    const existing = registry.tasks.find((task) =>
+      task.automationId === automationId && task.runId === runId)
+    if (existing) {
+      if (existing.projectId !== projectId || existing.sessionId !== sessionId) {
+        throw new Error(`automation run task ${automationId}/${runId} does not match existing binding`)
+      }
+      return existing
+    }
+    const conflict = registry.tasks.find((task) => task.sessionId === sessionId)
+    if (conflict) throw new Error(`session ${sessionId} is already bound to task ${conflict.id}`)
+    const task: TaskInfo = {
+      id: randomUUID(), projectId, name, createdAt: input.createdAt,
+      sessionId, automationId, runId,
+    }
+    registry.tasks.push(task)
     await writeTaskRegistry(storageRoot, registry)
     return task
   })

@@ -286,6 +286,8 @@ export type AutomationInfo = {
   missedPolicy?: "skip" | "run-once";              // 默认 "skip"
   taskShape?: "independent" | "merged";            // 默认 "independent"
   unattended?: { enabled: boolean; allow: string[] };  // Phase 2
+  /** 注册表为 running 时记录的运行 id（恢复对账用）；任何终态对账都必须清除。 */
+  activeRunId?: string;
 };
 
 /** 内置任务模板（Task 12）：sidecar 从 `templates/automations.json` 读取，`automation.templates` RPC 返回；创建表单用它预填字段，选中不直接创建。 */
@@ -309,6 +311,8 @@ export type RunSummary = {
   coalescedCount?: number;
   sessionId?: string;
   durationMs?: number;
+  /** 该运行创建的运行子任务 id；旧记录与 script/未建子任务的运行没有此字段。 */
+  taskId?: string;
 };
 
 /** 子任务：挂在项目下的普通任务（区别于自动化任务，无调度与运行历史）。 */
@@ -321,6 +325,12 @@ export type TaskInfo = {
   sessionId?: string;
   /** 首次真正开始执行时用的模型条目 id；排队期间不写，旧 tasks.json 无此字段。 */
   modelId?: string;
+  /**
+   * 自动化来源（运行子任务）：只能在 `automationId`/`runId` 成对且非空时出现，
+   * 普通任务与旧 tasks.json 都不带这两个字段。
+   */
+  automationId?: string;
+  runId?: string;
 };
 
 /** `session.list` 行：会话日志的摘要投影（标题、时间、统计）。 */
@@ -477,6 +487,16 @@ export type RpcEvent =
   | { event: "agent/changed"; slug?: string }
   | { event: "sidecar/status"; ready: boolean }
   | { event: "automation/run-start"; automationId: string; runId: string; projectId: string | null; sessionId?: string; trigger?: "manual" | "schedule" | "catchup" }
+  /** 该次运行在本轮项目下创建了运行子任务（名称/项目取运行当时快照）；`task` 是完整登记项。 */
+  | {
+      event: "automation/run-task";
+      automationId: string;
+      projectId: string;
+      runId: string;
+      sessionId: string;
+      trigger?: "manual" | "schedule" | "catchup";
+      task: TaskInfo;
+    }
   | {
       event: "automation/run-end";
       automationId: string;
