@@ -324,7 +324,7 @@ type ChatTab = {
   taskId?: string;
   /** 自动化运行对话：由 automation/run-task 创建（单一路径），渲染在对应通道分区（不进最近对话）。 */
   automationId?: string;
-  /** 重启后重建的运行对话骨架：首启懒加载运行日志前为 true，加载（或失败降级）后清除。 */
+  /** 重启后重建的运行对话骨架：首启懒加载运行日志前为 true；加载成功后清除，加载失败则关闭该标签。 */
   runPlaceholder?: boolean;
   /** 右侧「预览」打开的结果附件（规格 §5）：选择记在标签上，换标签再回来沿用该标签上次的选择。 */
   previewFile?: ResultAttachmentFile;
@@ -2131,16 +2131,16 @@ export default function App() {
   }, [chatTabs]);
 
   /**
-   * 运行标签与权威 tasks 快照对账（规格 §7.2）：
-   * ① 关闭 taskId 已不在快照里的自动化运行标签（删除运行/自动化/prune 之后）；
-   * ② 为「Run.taskId 能解析到现存 Task」的运行重建骨架标签，内容首开时懒加载
-   *    （见 runBackfill effect），去重键 run-<runId> 与实时创建相同，幂等。
-   * 首次 task.list 成功（tasksLoaded）之前两步都不做：启动并发时的空列表不是删除证据。
-   * 删除过运行记录的会话进抑制集：最新一条被抑制时整个任务跳过，不退回更早的运行。
+   * 运行标签失效对账（规格 §7.2 ①）：关闭 taskId 已不在权威快照里的自动化运行标签
+   * （删除运行/自动化/prune 之后）。
+   * 只在 tasks 快照自身更新后执行，不能跟运行数据一起重跑：run-task 先建标签再 refreshTasks，
+   * 快照回来之前任何一次刷新（另一条运行的 run-end、stop、missed、开项目或切到自动化视图）
+   * 都会拿运行前的旧快照把刚建的标签误关成骨架；refreshTasks 的单调序号已保证晚写的快照必含新 Task。
+   * 首次 task.list 成功（tasksLoaded）之前不做：启动并发时的空列表不是删除证据。
    */
   useEffect(() => {
     if (!tasksLoaded) return;
-    // ① 失效对账复用 closeRunTabsForSession 的关闭范围与 active 选择规则（不另写关闭路径）。
+    // 复用 closeRunTabsForSession 的关闭范围与 active 选择规则（不另写关闭路径）。
     // 运行标签恒带 sessionId（run-task / 重建都要求会话），没有会话的骨架不在此列。
     let tabs: ChatTab[] = chatTabsRef.current;
     let nextActive = activeTabRef.current;
@@ -2154,7 +2154,17 @@ export default function App() {
       setChatTabs(tabs);
       setActiveTab(nextActive);
     }
-    // ② 重建骨架：只 append 不重置，chatTabs 恒非空不变量不破。
+  }, [projectTasks, tasksLoaded]);
+
+  /**
+   * 为「Run.taskId 能解析到现存 Task」的运行重建骨架标签（规格 §7.2 ②），内容首开时懒加载
+   * （见 runBackfill effect），去重键 run-<runId> 与实时创建相同，幂等。
+   * 首次 task.list 成功（tasksLoaded）之前不重建：启动并发时的空列表不是权威快照。
+   * 删除过运行记录的会话进抑制集：最新一条被抑制时整个任务跳过，不退回更早的运行。
+   */
+  useEffect(() => {
+    if (!tasksLoaded) return;
+    // 只 append 不重置，chatTabs 恒非空不变量不破。
     const rebuild = runTabsToRebuild(
       automations,
       automationRuns,

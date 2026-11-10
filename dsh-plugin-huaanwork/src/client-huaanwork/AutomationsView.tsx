@@ -32,7 +32,7 @@ type Props = {
   /** 权威子任务快照（规格 §8）：运行记录按 taskId 查现存 Task 决定能否跳到历史项目。 */
   tasks: TaskInfo[];
   /** 运行记录跳转：taskId 分支交给 App 复用子任务选择流程（规格 §8.3）。 */
-  onOpenRunTask?: (task: TaskInfo) => void;
+  onOpenRunTask: (task: TaskInfo) => void;
   /** 正在后台执行的任务 id 集合（run-start 加入 / run-end 移除）。 */
   runningIds: ReadonlySet<string>;
   /** App 的停止入口：宿主回 stopped:false 时由 App 清掉调用前的在途快照。 */
@@ -487,7 +487,7 @@ function latestRun(runs: RunSummary[]): RunSummary | undefined {
   return latest;
 }
 
-/** 「运行记录」tab：吃 automation.runs 全量运行，支持状态筛选、按日分组与点开会话详情（任务行不再展开历史，规格 §7.1）。 */
+/** 「运行记录」tab：吃 automation.runs 全量运行，支持状态筛选与按日分组；taskId 能解析到现存 Task 的行跳到该历史任务，旧记录仍只读点开会话详情（任务行不再展开历史，规格 §7.1）。 */
 function RunsPanel({
   automations,
   tasks,
@@ -497,7 +497,7 @@ function RunsPanel({
 }: {
   automations: AutomationInfo[];
   tasks: TaskInfo[];
-  onOpenRunTask?: (task: TaskInfo) => void;
+  onOpenRunTask: (task: TaskInfo) => void;
   onChanged: () => void;
   onRunDeleted?: (sessionId: string, automationId: string, startedAt: number) => void;
 }) {
@@ -739,7 +739,7 @@ function RunsPanel({
                         type="button"
                         className="run-row-btn"
                         title={`打开子任务：${navigation.task.name}`}
-                        onClick={() => onOpenRunTask?.(navigation.task)}
+                        onClick={() => onOpenRunTask(navigation.task)}
                       >
                         {head}
                       </button>

@@ -389,17 +389,30 @@ test("run tabs are created only by automation/run-task", () => {
   assert.match(runTask, /void refreshTasks\(\)/);
 });
 
-test("the run-tab rebuild waits for the first tasks snapshot and closes stale task tabs", () => {
-  // 规格 §7.2：首次 task.list 成功前不重建、不对账（空快照不是删除证据）。
-  assert.match(APP_SOURCE, /if \(!tasksLoaded\) return;/);
-  const effectAt = APP_SOURCE.indexOf("staleAutomationRunTabs(chatTabsRef.current, projectTasks)");
-  assert.ok(effectAt >= 0, "the rebuild effect reconciles stale automation tabs");
-  const depsAt = APP_SOURCE.indexOf("}, [automations, automationRuns, projectTasks, tasksLoaded]);", effectAt);
-  assert.ok(depsAt > effectAt, "the rebuild effect is keyed by automations/runs/tasks/tasksLoaded");
-  const body = APP_SOURCE.slice(effectAt, depsAt);
-  assert.match(body, /runTabsToRebuild\(\s*automations,\s*automationRuns,\s*projectTasks,/, "rebuild consumes the tasks snapshot");
+test("stale run-tab reconciliation is keyed by the tasks snapshot while the rebuild keeps automations/runs", () => {
+  // 规格 §7.2 + 评审 R5-1：run-task 先建标签再 refreshTasks。失效对账若跟 automations/runs 一起
+  // 重跑，期间任何一次 refreshAutomations（另一条运行的 run-end、stop、missed、开项目、切到
+  // 自动化视图）都会拿运行前的旧快照把刚建的运行标签误关成骨架。对账必须只以 tasks 快照为依赖。
+  const staleAt = APP_SOURCE.indexOf("staleAutomationRunTabs(chatTabsRef.current, projectTasks)");
+  assert.ok(staleAt >= 0, "stale reconciliation is still wired");
+  const effectStart = APP_SOURCE.lastIndexOf("useEffect(() => {", staleAt);
+  assert.ok(effectStart >= 0, "reconciliation lives in an effect");
+  const reconcileDepsAt = APP_SOURCE.indexOf("}, [projectTasks, tasksLoaded]);", staleAt);
+  assert.ok(reconcileDepsAt > staleAt, "reconciliation is keyed only by the tasks snapshot and its loaded flag");
+  const reconcile = APP_SOURCE.slice(effectStart, reconcileDepsAt);
+  assert.match(reconcile, /if \(!tasksLoaded\) return;/, "no reconciliation before the first authoritative snapshot");
+  assert.doesNotMatch(reconcile, /runTabsToRebuild\(/, "the rebuild does not share the reconciliation effect");
   // 关闭复用现有 closeRunTabsForSession（active 选择规则不另写一份）。
-  assert.match(body, /closeRunTabsForSession\(/);
+  assert.match(reconcile, /closeRunTabsForSession\(/);
+
+  const rebuildAt = APP_SOURCE.indexOf("runTabsToRebuild(", reconcileDepsAt);
+  assert.ok(rebuildAt > reconcileDepsAt, "the rebuild effect is separate from the reconciliation effect");
+  const rebuildEffectStart = APP_SOURCE.lastIndexOf("useEffect(() => {", rebuildAt);
+  const rebuildDepsAt = APP_SOURCE.indexOf("}, [automations, automationRuns, projectTasks, tasksLoaded]);", rebuildAt);
+  assert.ok(rebuildEffectStart > reconcileDepsAt && rebuildDepsAt > rebuildAt, "the rebuild is keyed by automations/runs/tasks/tasksLoaded");
+  const rebuild = APP_SOURCE.slice(rebuildEffectStart, rebuildDepsAt);
+  assert.match(rebuild, /if \(!tasksLoaded\) return;/, "no rebuild before the first authoritative snapshot");
+  assert.match(rebuild, /runTabsToRebuild\(\s*automations,\s*automationRuns,\s*projectTasks,/, "rebuild consumes the tasks snapshot");
 });
 
 test("a failed run-tab backfill closes the skeleton instead of keeping an input-capable tab", () => {

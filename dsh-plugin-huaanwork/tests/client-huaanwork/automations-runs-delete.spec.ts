@@ -151,7 +151,8 @@ async function mount(options: {
         runs: options.runs ?? {},
         runningIds: options.runningIds ?? new Set<string>(),
         tasks: options.tasks ?? [],
-        onOpenRunTask: options.onOpenRunTask,
+        // 组件契约里 onOpenRunTask 是必填（App 是唯一消费方）；不关心跳转的用例给空桩。
+        onOpenRunTask: options.onOpenRunTask ?? (() => undefined),
         onChanged: options.onChanged,
         onWorkspaceAligned: options.onWorkspaceAligned,
         onRunDeleted: options.onRunDeleted,
