@@ -358,6 +358,8 @@ test('script task ignores a legacy widget flag: only run events and stdout kept 
     name: '抓取行情',
     widget: true,
   })
+  // 规格 §7.1:新记录不再写 widget;补丁里保留 widget:true 只为证明它被忽略。
+  expect(await findAutomation(h.profileDir, automation.id)).not.toHaveProperty('widget')
   const accepted = await handler('automation.run')(body({ id: automation.id }), h.routeCtx)
   expect(accepted).toMatchObject({ queued: true, workspaceRoot: h.neutral })
   const ended = await waitRunEnd(h.events, automation.id)

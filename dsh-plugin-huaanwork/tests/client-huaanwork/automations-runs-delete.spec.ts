@@ -212,7 +212,6 @@ describe("运行记录删除（spec §6）", () => {
     expect(view.querySelector('[role="dialog"]')).toBeNull();
     // 被删的那行消失，另一行还在（输出不再展示，按行数断言）。
     expect(view.querySelectorAll(".run-delete")).toHaveLength(1);
-    expect(() => deleteButtonAt(view, 0)).not.toThrow();
     // 目录没删掉要诚实说出来（记录本身已删，列表不再出现）。
     expect(view.textContent).toContain("记录已删除，但会话目录未能删除");
     expect(onRunDeleted).toHaveBeenCalledWith("s-1", "a1", 1000);
@@ -314,15 +313,30 @@ describe("看板与产出展示退役（规格 §7.1）", () => {
     expect(view.textContent).not.toContain("看板");
     expect(view.textContent).not.toContain("SECRET-COLLECTED-OUTPUT");
     expect(view.querySelector(".run-output")).toBeNull();
-    // 回到「任务」tab 打开创建表单：widget 勾选与看板文案也不得存在。
+    // 回到「任务」tab：任务行不再有展开历史的入口与内联产出块（规格 §7.1 删除任务行展开历史）。
     await act(async () => {
       buttonByText(view, "任务").click();
     });
+    expect(view.querySelector(".automation-expand")).toBeNull();
+    expect(view.querySelector(".run-output")).toBeNull();
+    expect(view.textContent).not.toContain("SECRET-COLLECTED-OUTPUT");
+    // 创建表单：widget 勾选与看板文案也不得存在。
     await act(async () => {
       buttonByText(view, "＋ 新建任务").click();
     });
     expect(view.textContent).not.toContain("推送到项目看板");
     expect(view.textContent).not.toContain("看板");
+    const createDialog = view.querySelector('[role="dialog"]') as HTMLElement;
+    await act(async () => {
+      buttonByText(createDialog, "取消").click();
+    });
+    // 编辑表单同样没有该控件（原 widget 勾选在两态共用）。
+    await act(async () => {
+      buttonByText(view, "编辑").click();
+    });
+    const editDialog = view.querySelector('[role="dialog"]') as HTMLElement;
+    expect(editDialog.textContent).not.toContain("推送到项目看板");
+    expect(editDialog.textContent).not.toContain("看板");
   });
 });
 

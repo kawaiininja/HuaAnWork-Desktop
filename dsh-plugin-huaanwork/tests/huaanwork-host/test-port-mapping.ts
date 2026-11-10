@@ -104,9 +104,10 @@ export const testPortMapping: TestPortRow[] = [
   },
   {
     file: 'automations-host.test.ts',
-    title: 'script task ignores a legacy widget flag: only run events and stdout kept in Run.output',
-    label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:352',
+    title: 'automation.run executes a script task and emits widget and run events',
+    label: '裁定不移植',
+    evidence:
+      'widget 事件随 Task 4 退役（规格 §7.1）：新记录不再写 widget、宿主不再发射 automation/widget，故「运行脚本产出 widget 事件」不再成立。替代:script task 只发运行事件且 stdout 仍落 Run.output，tests/huaanwork-host/automations-host.spec.ts:352',
   },
   {
     file: 'automations-host.test.ts',

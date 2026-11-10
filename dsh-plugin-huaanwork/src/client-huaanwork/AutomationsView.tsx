@@ -375,7 +375,6 @@ function AutomationRow({
   onEdit: () => void;
   onRemove: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   /** 停止请求在飞：state 管按钮禁用与文案，ref 管同一批事件里的第二次点击（同 M26 P2-3）。 */
   const [stopping, setStopping] = useState(false);
   /** 停止已被宿主接受：在 run-end 清掉 running 之前保持禁用，避免二次停止。 */
@@ -404,11 +403,8 @@ function AutomationRow({
   const stopPending = stopping || (stopRequested && running);
 
   return (
-    <div className={open ? "automation-row open" : "automation-row"}>
+    <div className="automation-row">
       <div className="automation-main">
-        <button type="button" className="automation-expand" aria-label={open ? "收起运行历史" : "展开运行历史"} aria-expanded={open} onClick={() => setOpen((prev) => !prev)}>
-          {open ? "▾" : "▸"}
-        </button>
         <div className="automation-info">
           <div className="automation-title">
             <span className="automation-name">{automation.name}</span>
@@ -451,25 +447,6 @@ function AutomationRow({
           </button>
         </div>
       </div>
-      {open ? (
-        runs.length === 0 ? (
-          <p className="automation-runs-empty">还没有运行记录</p>
-        ) : (
-          <ul className="automation-runs">
-            {[...runs].reverse().map((run) => {
-              const meta = RUN_STATUS_META[runStatusOf(run)];
-              return (
-                <li key={run.runId} className={meta.className ?? ""}>
-                  <span className="run-time">{formatRunTime(run.endedAt)}</span>
-                  <span className="run-status" style={meta.color ? { color: meta.color } : undefined}>
-                    {meta.label}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        )
-      ) : null}
     </div>
   );
 }
@@ -496,7 +473,7 @@ function latestRun(runs: RunSummary[]): RunSummary | undefined {
   return latest;
 }
 
-/** 「运行记录」tab：吃 automation.runs 全量运行，支持状态筛选、按日分组与点开会话详情（行内展开历史保留在任务行）。 */
+/** 「运行记录」tab：吃 automation.runs 全量运行，支持状态筛选、按日分组与点开会话详情（任务行不再展开历史，规格 §7.1）。 */
 function RunsPanel({
   automations,
   onChanged,

@@ -2703,18 +2703,6 @@ button {
   min-width: 0;
 }
 
-.automation-expand {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 4px 2px;
-  flex-shrink: 0;
-  width: 16px;
-}
-
 .automation-info {
   flex: 1;
   min-width: 0;
@@ -2826,7 +2814,7 @@ button {
   gap: 8px;
 }
 
-/* 运行历史 */
+/* 运行记录列表（任务行不再有展开历史，规格 §7.1） */
 
 .automation-runs {
   list-style: none;
@@ -2874,7 +2862,7 @@ button {
   font-size: 12px;
 }
 
-/* 运行记录 tab：按日分组标题与会话 drill-down 按钮（行头），行内展开历史（任务行）不受其影响 */
+/* 运行记录 tab：按日分组标题与会话 drill-down 按钮（行头） */
 .automation-runs .run-day {
   display: block;
   font-size: 12px;
@@ -2905,10 +2893,11 @@ button {
   color: var(--text);
 }
 
-/* 运行记录「删除」：行内不参与换行，垂直居中于输出框 */
+/* 运行记录「删除」：行内不参与换行，全程贴右并垂直居中（无会话行没有 run-row-btn 撑开，需自己贴右） */
 .automation-runs .run-delete {
   flex-shrink: 0;
   align-self: center;
+  margin-left: auto;
 }
 
 /* 任务表单模态（复用 settings-overlay + confirm-modal 容器） */
