@@ -18,15 +18,21 @@ import {
   type AutomationTemplate,
   type ProjectInfo,
   type RunSummary,
+  type TaskInfo,
 } from "./projects.ts";
 import { humanizeCronText } from "./logic/scheduleText.ts";
 import { buildUnattendedAllow as computeUnattendedAllow } from "./logic/unattendedAllow.ts";
+import { resolveAutomationRunNavigation } from "./logic/automationRunLink.ts";
 
 type Props = {
   projects: ProjectInfo[];
   activeProjectId: string | null;
   automations: AutomationInfo[];
   runs: Record<string, RunSummary[]>;
+  /** 权威子任务快照（规格 §8）：运行记录按 taskId 查现存 Task 决定能否跳到历史项目。 */
+  tasks: TaskInfo[];
+  /** 运行记录跳转：taskId 分支交给 App 复用子任务选择流程（规格 §8.3）。 */
+  onOpenRunTask?: (task: TaskInfo) => void;
   /** 正在后台执行的任务 id 集合（run-start 加入 / run-end 移除）。 */
   runningIds: ReadonlySet<string>;
   /** App 的停止入口：宿主回 stopped:false 时由 App 清掉调用前的在途快照。 */
@@ -111,6 +117,8 @@ export default function AutomationsView({
   projects,
   automations,
   runs,
+  tasks,
+  onOpenRunTask,
   runningIds,
   onStopAutomation,
   enterIntent,
@@ -308,7 +316,13 @@ export default function AutomationsView({
           </div>
         )
       ) : (
-        <RunsPanel automations={automations} onChanged={onChanged} onRunDeleted={onRunDeleted} />
+        <RunsPanel
+          automations={automations}
+          tasks={tasks}
+          onOpenRunTask={onOpenRunTask}
+          onChanged={onChanged}
+          onRunDeleted={onRunDeleted}
+        />
       )}
 
       {editing ? (
@@ -476,10 +490,14 @@ function latestRun(runs: RunSummary[]): RunSummary | undefined {
 /** 「运行记录」tab：吃 automation.runs 全量运行，支持状态筛选、按日分组与点开会话详情（任务行不再展开历史，规格 §7.1）。 */
 function RunsPanel({
   automations,
+  tasks,
+  onOpenRunTask,
   onChanged,
   onRunDeleted,
 }: {
   automations: AutomationInfo[];
+  tasks: TaskInfo[];
+  onOpenRunTask?: (task: TaskInfo) => void;
   onChanged: () => void;
   onRunDeleted?: (sessionId: string, automationId: string, startedAt: number) => void;
 }) {
@@ -699,6 +717,8 @@ function RunsPanel({
                 const meta = RUN_STATUS_META[runStatusOf(run)];
                 const seconds = typeof run.durationMs === "number" ? ` · ${Math.round(run.durationMs / 1000)}s` : "";
                 const catchup = run.trigger === "catchup" && run.coalescedCount ? ` · 补跑×${run.coalescedCount}` : "";
+                // 跳转目标由 Run 与 Task 的历史关联决定（规格 §8），不按自动化当前项目猜。
+                const navigation = resolveAutomationRunNavigation(automation, run, tasks);
                 const head = (
                   <>
                     <span className="run-time">{formatRunTime(run.startedAt)}</span>
@@ -713,8 +733,17 @@ function RunsPanel({
                   </>
                 );
                 return (
-                  <li key={run.runId} className={meta.className ?? ""}>
-                    {run.sessionId ? (
+                  <li key={run.runId} className={meta.className ?? ""} data-run-id={run.runId}>
+                    {navigation.kind === "task" ? (
+                      <button
+                        type="button"
+                        className="run-row-btn"
+                        title={`打开子任务：${navigation.task.name}`}
+                        onClick={() => onOpenRunTask?.(navigation.task)}
+                      >
+                        {head}
+                      </button>
+                    ) : navigation.kind === "legacy" ? (
                       <button
                         type="button"
                         className="run-row-btn"
@@ -724,7 +753,10 @@ function RunsPanel({
                         {head}
                       </button>
                     ) : (
-                      head
+                      <span className="run-row-static" title={navigation.reason}>
+                        {head}
+                        <span className="run-unavailable">{navigation.reason}</span>
+                      </span>
                     )}
                     <button
                       type="button"

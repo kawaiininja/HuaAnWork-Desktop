@@ -15,7 +15,7 @@ vi.mock("../../src/client-huaanwork/api.ts", () => ({ rpcCall: vi.fn() }));
 
 import { rpcCall } from "../../src/client-huaanwork/api.ts";
 import AutomationsView, { lastRunLabel } from "../../src/client-huaanwork/AutomationsView.tsx";
-import type { AutomationInfo, ProjectInfo, RunSummary } from "../../src/client-huaanwork/logic/projects.ts";
+import type { AutomationInfo, ProjectInfo, RunSummary, TaskInfo } from "../../src/client-huaanwork/logic/projects.ts";
 
 type DeleteResult = { removed: boolean; sessionDirRemoved: boolean };
 
@@ -128,6 +128,9 @@ async function mount(options: {
   onWorkspaceAligned?: (workspaceRoot: string) => void;
   runningIds?: ReadonlySet<string>;
   runs?: Record<string, RunSummary[]>;
+  /** 运行记录跳转的权威子任务快照（默认空：旧记录只能只读打开）。 */
+  tasks?: TaskInfo[];
+  onOpenRunTask?: (task: TaskInfo) => void;
   /** 默认进「运行记录」tab；任务行用例留在「任务」tab。 */
   openRuns?: boolean;
   /** 归属项目下拉的数据源（默认空列表：零项目也照常展示表单）。 */
@@ -147,6 +150,8 @@ async function mount(options: {
         automations: options.automations ?? [AUTOMATION],
         runs: options.runs ?? {},
         runningIds: options.runningIds ?? new Set<string>(),
+        tasks: options.tasks ?? [],
+        onOpenRunTask: options.onOpenRunTask,
         onChanged: options.onChanged,
         onWorkspaceAligned: options.onWorkspaceAligned,
         onRunDeleted: options.onRunDeleted,
@@ -294,6 +299,105 @@ describe("运行记录删除（spec §6）", () => {
     });
     expect(view.querySelector('[role="dialog"]')).toBeNull();
     expect(view.querySelectorAll(".run-delete")).toHaveLength(0);
+  });
+});
+
+describe("运行记录跳转（规格 §8）", () => {
+  const TASK: TaskInfo = {
+    id: "task-1",
+    projectId: "p-old",
+    name: "每日简报 · 2026-11-09 10:00:00",
+    createdAt: 1_000,
+    automationId: "a1",
+    runId: "r1",
+    sessionId: "s-1",
+  };
+
+  /** 行按 runId 定位（规格 §8：不再依赖运行产出文本）。 */
+  function rowByRunId(view: HTMLElement, runId: string): HTMLElement {
+    const row = view.querySelector(`[data-run-id="${runId}"]`);
+    if (!(row instanceof HTMLElement)) throw new Error(`run row not found: ${runId}`);
+    return row;
+  }
+
+  it("opens the historical task through the task branch instead of the read-only session", async () => {
+    const runs = [{ ...run("r1", "s-1", 1000, "输出"), taskId: "task-1" }];
+    stubRpc({ runs: () => runs, deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const onOpenRunTask = vi.fn();
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      runs: { a1: runs },
+      tasks: [TASK],
+      onOpenRunTask,
+    });
+
+    const button = rowByRunId(view, "r1").querySelector(".run-row-btn");
+    expect(button).not.toBeNull();
+    await act(async () => {
+      (button as HTMLButtonElement).click();
+    });
+
+    expect(onOpenRunTask).toHaveBeenCalledWith(TASK);
+    // 跳转走子任务流程；不再在同一页开只读会话详情。
+    expect(rpc.mock.calls.some((call) => call[0] === "session.open")).toBe(false);
+  });
+
+  it("a run whose task is gone is not clickable and says the task or session is gone", async () => {
+    const runs = [{ ...run("r1", "s-1", 1000, "输出"), taskId: "task-gone" }];
+    stubRpc({ runs: () => runs, deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const onOpenRunTask = vi.fn();
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      runs: { a1: runs },
+      tasks: [],
+      onOpenRunTask,
+    });
+
+    const row = rowByRunId(view, "r1");
+    expect(row.querySelector(".run-row-btn")).toBeNull();
+    expect(row.textContent).toContain("对应子任务或会话已删除/清理");
+    expect(onOpenRunTask).not.toHaveBeenCalled();
+  });
+
+  it("a legacy record without taskId still opens the read-only session", async () => {
+    const runs = [run("r1", "s-1", 1000, "输出")];
+    stubRpc({ runs: () => runs, deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const onOpenRunTask = vi.fn();
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      runs: { a1: runs },
+      tasks: [],
+      onOpenRunTask,
+    });
+
+    const button = rowByRunId(view, "r1").querySelector(".run-row-btn");
+    expect(button).not.toBeNull();
+    await act(async () => {
+      (button as HTMLButtonElement).click();
+    });
+
+    const opened = rpc.mock.calls.filter((call) => call[0] === "session.open");
+    expect(opened).toHaveLength(1);
+    expect(opened[0]![1]).toEqual({ sessionId: "s-1" });
+    expect(onOpenRunTask).not.toHaveBeenCalled();
+  });
+
+  it("a script run without a session is not clickable and explains why", async () => {
+    const runs = [runWithoutSession("r1", 1000, "脚本输出")];
+    stubRpc({ runs: () => runs, deleteRun: async () => ({ removed: true, sessionDirRemoved: true }) });
+    const view = await mount({
+      onRunDeleted: vi.fn(),
+      onChanged: vi.fn(),
+      runs: { a1: runs },
+      automations: [{ ...AUTOMATION, kind: "script", command: "echo hi" }],
+    });
+
+    const row = rowByRunId(view, "r1");
+    expect(row.querySelector(".run-row-btn")).toBeNull();
+    expect(row.textContent).toContain("脚本运行无会话");
   });
 });
 

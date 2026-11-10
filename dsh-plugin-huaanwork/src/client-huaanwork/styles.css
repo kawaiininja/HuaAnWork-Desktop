@@ -2893,6 +2893,21 @@ button {
   color: var(--text);
 }
 
+/* 不可跳转的运行记录（Task 已删 / 无会话）：与行头同布局，附带原因，不伪装成按钮 */
+.automation-runs .run-row-static {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.automation-runs .run-unavailable {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 /* 运行记录「删除」：行内不参与换行，全程贴右并垂直居中（无会话行没有 run-row-btn 撑开，需自己贴右） */
 .automation-runs .run-delete {
   flex-shrink: 0;

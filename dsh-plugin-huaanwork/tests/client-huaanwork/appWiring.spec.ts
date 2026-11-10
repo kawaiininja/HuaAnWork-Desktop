@@ -341,17 +341,97 @@ test("the task-row stop goes through the reconciling stop path and refreshes aft
   assert.ok(refreshAt > callAt, "the task row refreshes from the host after the await on the stop call");
 });
 
-test("the automations view refreshes the project list alongside the tasks", () => {
+test("the automations view refreshes projects, tasks and sessions alongside the tasks", () => {
   // 设计 §3.3.3：automation.create 会自动建项目。只刷任务列表时，新项目在侧栏
   // 要等下一次刷新（重启/开项目）才出现，用户会以为没建成。
+  // 规格 §8：运行记录跳转吃 tasks 快照，删除运行/自动化/prune 后必须一起刷新。
   const at = APP_SOURCE.indexOf("<AutomationsView");
   const end = APP_SOURCE.indexOf("/>", at);
   assert.ok(at >= 0 && end > at, "the AutomationsView call site is still present");
   const site = APP_SOURCE.slice(at, end);
   assert.match(
     site,
-    /onChanged=\{\(\) => \{\s*void refreshAutomations\(\);\s*void refreshProjects\(\);\s*\}\}/,
-    "onChanged refreshes tasks and projects: a project auto-created by automation.create is otherwise invisible",
+    /onChanged=\{\(\) => \{\s*void refreshAutomations\(\);\s*void refreshProjects\(\);\s*void refreshTasks\(\);\s*void refreshSessions\(\);\s*\}\}/,
+    "onChanged refreshes automations, projects, tasks and sessions",
+  );
+  // 运行记录跳转复用子任务选择流程（规格 §8.3），且吃 App 的常驻 tasks 快照。
+  assert.match(site, /tasks=\{projectTasks\}/);
+  assert.match(site, /onOpenRunTask=\{\(task\) => void selectSubtask\(task\)\}/);
+});
+
+test("refreshTasks discards stale responses before writing projectTasks", () => {
+  // 规格 §9.1（T3）：早于 Task 落盘发出、晚于 run-task 返回的旧 task.list 会把刚建的
+  // 运行标签当成失效并关掉；run-end 不刷新 tasks，误关后不能自愈。
+  const fn = functionBody("async function refreshTasks", "async function createSubtask");
+  assert.ok(fn.indexOf("taskRequestSeq") >= 0, "refreshTasks owns a monotonic request sequence");
+  const guardAt = fn.indexOf("seq !== taskRequestSeq.current");
+  const writeAt = fn.indexOf("setProjectTasks");
+  assert.ok(guardAt >= 0, "the stale-response guard is present");
+  assert.ok(writeAt > guardAt, "the guard runs before projectTasks is written");
+});
+
+test("run tabs are created only by automation/run-task", () => {
+  // 规格 §7.2：run-start 只更新在途表，不再建标签。
+  const runStart = functionBody('if (event.event === "automation/run-start")', 'if (event.event === "automation/run-task")');
+  assert.match(runStart, /setRunningRuns/);
+  assert.doesNotMatch(runStart, /setChatTabs/);
+
+  const runTask = functionBody('if (event.event === "automation/run-task")', 'if (event.event === "automation/missed")');
+  // 查找键依次为 tabId、taskId、sessionId；标签名取 Task.name；只有 manual 聚焦。
+  assert.match(runTask, /`run-\$\{event\.runId\}`/);
+  assert.match(runTask, /tab\.id === tabId/);
+  assert.match(runTask, /tab\.taskId === task\.id/);
+  assert.match(runTask, /tab\.sessionId === event\.sessionId/);
+  assert.match(runTask, /label: task\.name/);
+  assert.match(runTask, /taskId: task\.id/);
+  assert.match(runTask, /automationId: event\.automationId/);
+  assert.match(runTask, /if \(event\.trigger === "manual"\) setActiveTab\(targetId\)/);
+  assert.match(runTask, /void refreshTasks\(\)/);
+});
+
+test("the run-tab rebuild waits for the first tasks snapshot and closes stale task tabs", () => {
+  // 规格 §7.2：首次 task.list 成功前不重建、不对账（空快照不是删除证据）。
+  assert.match(APP_SOURCE, /if \(!tasksLoaded\) return;/);
+  const effectAt = APP_SOURCE.indexOf("staleAutomationRunTabs(chatTabsRef.current, projectTasks)");
+  assert.ok(effectAt >= 0, "the rebuild effect reconciles stale automation tabs");
+  const depsAt = APP_SOURCE.indexOf("}, [automations, automationRuns, projectTasks, tasksLoaded]);", effectAt);
+  assert.ok(depsAt > effectAt, "the rebuild effect is keyed by automations/runs/tasks/tasksLoaded");
+  const body = APP_SOURCE.slice(effectAt, depsAt);
+  assert.match(body, /runTabsToRebuild\(\s*automations,\s*automationRuns,\s*projectTasks,/, "rebuild consumes the tasks snapshot");
+  // 关闭复用现有 closeRunTabsForSession（active 选择规则不另写一份）。
+  assert.match(body, /closeRunTabsForSession\(/);
+});
+
+test("a failed run-tab backfill closes the skeleton instead of keeping an input-capable tab", () => {
+  // 规格 §7.2：回填失败关闭骨架并提示，不保留可输入的旧会话标签。
+  const backfill = functionBody("const runBackfillBusyRef", "}, [activeTab, chatTabs, automationRuns]);");
+  const catchAt = backfill.indexOf("} catch (error) {");
+  assert.ok(catchAt >= 0, "the backfill still has a failure branch");
+  const failure = backfill.slice(catchAt);
+  assert.match(failure, /closeRunTabsForSession\(chatTabsRef\.current, sessionId, activeTabRef\.current\)/);
+  assert.match(failure, /setActiveTab\(result\.nextActiveId\)/);
+  assert.match(failure, /noteTab\(result\.nextActiveId,/, "the error is surfaced on the surviving tab");
+  assert.doesNotMatch(failure, /runPlaceholder: false/);
+});
+
+test("an automation task's failed restore never falls back to a fresh chat tab", () => {
+  // 规格 §7.2 末条：恢复失败只报错，不走普通任务「发送后新建子任务」的降级。
+  const body = functionBody("async function selectSubtask(", "async function renameSubtask(");
+  const catchAt = body.indexOf("} catch (error) {");
+  assert.ok(catchAt >= 0, "selectSubtask still handles open/resume failures");
+  const failure = body.slice(catchAt);
+  const guardAt = failure.indexOf("if (task.automationId)");
+  const fallbackAt = failure.indexOf("failedSubtaskTabs.current.set");
+  assert.ok(guardAt >= 0, "the automation guard comes first");
+  assert.ok(fallbackAt > guardAt, "the ordinary fallback stays after the automation guard");
+  const automationBranch = failure.slice(guardAt, fallbackAt);
+  assert.match(automationBranch, /noteActive\(/);
+  assert.match(automationBranch, /return;/, "the automation branch returns before any fallback tab");
+  assert.doesNotMatch(automationBranch, /setChatTabs|session\.new/);
+  // 去重按 taskId 或 sessionId（自动化 Task 与运行标签共用同一会话）。
+  assert.match(
+    functionBody("async function selectSubtask(", "async function renameSubtask("),
+    /tab\.taskId === task\.id \|\|\s*\(task\.sessionId !== undefined && tab\.sessionId === task\.sessionId\)/,
   );
 });
 
