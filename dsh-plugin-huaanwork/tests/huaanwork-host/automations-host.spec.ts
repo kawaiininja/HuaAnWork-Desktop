@@ -349,7 +349,7 @@ afterEach(async () => {
   else process.env.HUAANWORK_TIMED_OUT_TURN_DRAIN_MS = previousDrain
 }, 15_000)
 
-test('script task emits widget between run-start and run-end', async () => {
+test('script task ignores a legacy widget flag: only run events and stdout kept in Run.output', async () => {
   const h = makeHarness()
   writeFileSync(join(h.neutral, 'task.mjs'), 'process.stdout.write("widget-data-123");\n')
   const project = await createProject(h.profileDir, { root: h.neutral, name: '行情' })
@@ -367,7 +367,6 @@ test('script task emits widget between run-start and run-end', async () => {
   expect(runs[0]?.ok).toBe(true)
   expect(h.events.filter((event) => event.event.startsWith('automation/')).map((event) => event.event)).toEqual([
     'automation/run-start',
-    'automation/widget',
     'automation/run-end',
   ])
 })
@@ -756,7 +755,6 @@ test('legacy channel:chat record can enable unattended and mint a huaanwork-auto
           schedule: { kind: 'manual' },
           prompt: '生成早报',
           command: 'echo hi',
-          widget: false,
           enabled: true,
           createdAt: Date.now(),
           channel: 'chat',

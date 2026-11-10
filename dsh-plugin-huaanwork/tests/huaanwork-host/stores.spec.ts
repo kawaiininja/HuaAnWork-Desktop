@@ -54,7 +54,6 @@ function makeAutomation(id: string, projectId: string | null, createdAt: number)
     name: `任务-${id}`,
     kind: 'agent',
     schedule: { kind: 'manual' },
-    widget: false,
     enabled: true,
     createdAt,
   }

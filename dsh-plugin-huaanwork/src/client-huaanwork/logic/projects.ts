@@ -24,7 +24,6 @@ export type AutomationInfo = {
   schedule: AutomationSchedule;
   prompt?: string;
   command?: string;
-  widget: boolean;
   enabled: boolean;
   createdAt: number;
   lastRunAt?: number;
@@ -81,7 +80,6 @@ export type AutomationDraft = {
   schedule: AutomationSchedule;
   prompt?: string;
   command?: string;
-  widget?: boolean;
   enabled?: boolean;
   expiresAt?: number;
   missedPolicy?: "skip" | "run-once";
@@ -95,7 +93,6 @@ export type AutomationPatch = {
   schedule?: AutomationSchedule;
   prompt?: string;
   command?: string;
-  widget?: boolean;
   enabled?: boolean;
   expiresAt?: number | "";
   missedPolicy?: "skip" | "run-once" | "";

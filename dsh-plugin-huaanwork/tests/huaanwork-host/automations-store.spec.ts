@@ -62,7 +62,6 @@ function agentInput(overrides: Record<string, unknown> = {}): Record<string, unk
     kind: 'agent',
     schedule: { kind: 'daily', time: '09:30' },
     prompt: '生成今日早报',
-    widget: true,
     enabled: true,
     ...overrides,
   }
@@ -90,7 +89,6 @@ describe('automations-store 写路径与纯函数', () => {
   test('normalizeAutomationInput validates required fields and schedule shapes', () => {
     const input = normalizeAutomationInput(agentInput(), T0)
     expect(input.kind).toBe('agent')
-    expect(input.widget).toBe(true)
     expect(input.schedule).toEqual({ kind: 'daily', time: '09:30' })
 
     expect(normalizeAutomationInput(agentInput({ projectId: '' })).projectId).toBe(null)
@@ -106,8 +104,7 @@ describe('automations-store 写路径与纯函数', () => {
     expect(() => normalizeAutomationInput(agentInput({ schedule: { kind: 'wat' } }))).toThrow(
       /manual.*once.*interval.*hourly.*daily.*weekly.*monthly.*cron/,
     )
-    expect(normalizeAutomationInput(agentInput({ enabled: undefined, widget: undefined })).enabled).toBe(true)
-    expect(normalizeAutomationInput(agentInput({ enabled: undefined, widget: undefined })).widget).toBe(false)
+    expect(normalizeAutomationInput(agentInput({ enabled: undefined })).enabled).toBe(true)
   })
 
   test('dueAutomations matches items within grace; stale ones land in missedAutomations', () => {
@@ -117,7 +114,6 @@ describe('automations-store 写路径与纯函数', () => {
       name: 'task',
       kind: 'agent',
       schedule: { kind: 'interval', minutes: 10 },
-      widget: false,
       enabled: true,
       createdAt: T0,
       ...overrides,
@@ -427,7 +423,6 @@ describe('automations-store 写路径与纯函数', () => {
       name: '一次性任务',
       kind: 'agent',
       schedule: { kind: 'once', at: T0 },
-      widget: false,
       enabled: true,
       createdAt: T0,
       nextRunAt: T0,
@@ -449,7 +444,6 @@ describe('automations-store 写路径与纯函数', () => {
       name: 'task',
       kind: 'agent',
       schedule: { kind: 'interval', minutes: 10 },
-      widget: false,
       enabled: true,
       createdAt: T0,
       nextRunAt: T0,
@@ -478,7 +472,6 @@ describe('automations-store 写路径与纯函数', () => {
       name: 'task',
       kind: 'agent',
       schedule: { kind: 'interval', minutes: 10 },
-      widget: false,
       enabled: true,
       createdAt: T0,
       ...overrides,
@@ -562,13 +555,12 @@ describe('automations-store 写路径与纯函数', () => {
       T0,
     )
     await Promise.all([
-      updateAutomation(home, created.id, { name: '改名了', widget: false }, T0),
+      updateAutomation(home, created.id, { name: '改名了' }, T0),
       removeAutomationsOfProject(home, 'p2'),
     ])
     const left = await listAutomations(home)
     expect(left.map((item) => item.id)).toEqual([created.id])
     expect(left[0]?.name).toBe('改名了')
-    expect(left[0]?.widget).toBe(false)
     expect(left.some((item) => item.id === other.id)).toBe(false)
   })
 

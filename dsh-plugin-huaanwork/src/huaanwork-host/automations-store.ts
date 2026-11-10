@@ -81,7 +81,6 @@ export type AutomationInput = {
   schedule: AutomationSchedule
   prompt?: string
   command?: string
-  widget: boolean
   enabled: boolean
   expiresAt?: number
   missedPolicy?: 'skip' | 'run-once'
@@ -115,7 +114,6 @@ export function normalizeAutomationInput(params: Record<string, unknown>, now = 
     schedule,
     ...(prompt ? { prompt } : {}),
     ...(command ? { command } : {}),
-    widget: params.widget === true,
     enabled: params.enabled !== false,
     ...(typeof params.expiresAt === 'number' ? { expiresAt: params.expiresAt } : {}),
     ...(params.missedPolicy === 'skip' || params.missedPolicy === 'run-once' ? { missedPolicy: params.missedPolicy } : {}),
@@ -327,7 +325,6 @@ export async function updateAutomation(
     const command = optionalString(patch.command)
     if (command !== undefined) next.command = command
     if (patch.command === '') delete next.command
-    if (typeof patch.widget === 'boolean') next.widget = patch.widget
     if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled
     if (typeof patch.expiresAt === 'number') next.expiresAt = patch.expiresAt
     if (patch.expiresAt === '') delete next.expiresAt

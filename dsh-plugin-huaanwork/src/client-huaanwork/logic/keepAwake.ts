@@ -26,7 +26,7 @@ export type SetKeepAwakeInvoke = (hold: boolean) => Promise<boolean>;
  * 开关切换等）都会调 refresh(desired)；驱动负责把 desired 变成对 host 的断言：
  *
  * - **confirmed 只在 invoke 成功且期望未变时提交**——失败不提交，下次 refresh（下一
- *   个 automation/widget、run-end 等事件刷新）自然重试，不再因 ref 先提交而楔死。
+ *   个 run-end 等事件刷新）自然重试，不再因 ref 先提交而楔死。
  * - **期望比较替代 cancelled 标志**——resolve 时若 desired 已被更新的期望取代，结果
  *   一律丢弃（不发状态、不提交），避免 deps 换引用（每次刷新都是新 automations 数组）
  *   触发的 cleanup 丢弃成功回调、留下过期的「不可用」提示。

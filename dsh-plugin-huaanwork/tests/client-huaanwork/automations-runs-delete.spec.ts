@@ -33,7 +33,6 @@ const AUTOMATION: AutomationInfo = {
   kind: "agent",
   schedule: { kind: "manual" },
   prompt: "整理今天的纪要",
-  widget: false,
   enabled: true,
   createdAt: 1,
 };
@@ -85,13 +84,13 @@ function dialogConfirm(view: HTMLElement): HTMLButtonElement {
   return buttonByText(dialog as HTMLElement, "删除");
 }
 
-/** 行按 startedAt 倒序，按输出文本定位目标行，避免测试依赖排序细节。 */
-function deleteButtonFor(view: HTMLElement, output: string): HTMLButtonElement {
-  const row = [...view.querySelectorAll(".automation-runs li")].find((item) =>
-    item.textContent?.includes(output),
-  );
-  const button = row?.querySelector(".run-delete");
-  if (!(button instanceof HTMLButtonElement)) throw new Error(`delete button not found for: ${output}`);
+/**
+ * 运行产出已不在页面上展示（规格 §7.1），行按 startedAt 倒序（组内同序），
+ * 按序号取删除按钮。
+ */
+function deleteButtonAt(view: HTMLElement, index: number): HTMLButtonElement {
+  const button = view.querySelectorAll(".run-delete")[index];
+  if (!(button instanceof HTMLButtonElement)) throw new Error(`delete button not found at index ${index}`);
   return button;
 }
 
@@ -197,7 +196,8 @@ describe("运行记录删除（spec §6）", () => {
     expect(view.querySelectorAll(".run-delete")).toHaveLength(2);
 
     await act(async () => {
-      deleteButtonFor(view, "第一条输出").click();
+      // startedAt 倒序：r2（2000）在前，r1（1000）是第二行。
+      deleteButtonAt(view, 1).click();
     });
     expect(view.querySelector('[role="dialog"]')).not.toBeNull();
     expect(view.querySelector('[role="dialog"]')!.textContent).toContain("会话目录将被一并删除");
@@ -210,9 +210,9 @@ describe("运行记录删除（spec §6）", () => {
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0]![1]).toEqual({ id: "a1", runId: "r1" });
     expect(view.querySelector('[role="dialog"]')).toBeNull();
-    // 被删的那行消失，另一行还在。
-    expect(view.textContent).not.toContain("第一条输出");
-    expect(view.textContent).toContain("第二条输出");
+    // 被删的那行消失，另一行还在（输出不再展示，按行数断言）。
+    expect(view.querySelectorAll(".run-delete")).toHaveLength(1);
+    expect(() => deleteButtonAt(view, 0)).not.toThrow();
     // 目录没删掉要诚实说出来（记录本身已删，列表不再出现）。
     expect(view.textContent).toContain("记录已删除，但会话目录未能删除");
     expect(onRunDeleted).toHaveBeenCalledWith("s-1", "a1", 1000);
@@ -242,8 +242,8 @@ describe("运行记录删除（spec §6）", () => {
     const banner = view.querySelector(".banner.error");
     expect(banner).not.toBeNull();
     expect(banner!.textContent).toContain("运行中的记录不能删除");
-    // 列表保持原样：行还在，没有乐观删除。
-    expect(view.textContent).toContain("第一条输出");
+    // 列表保持原样：行还在，没有乐观删除（输出不再展示，按行数断言）。
+    expect(view.querySelectorAll(".run-delete")).toHaveLength(1);
     expect(onRunDeleted).not.toHaveBeenCalled();
     expect(onChanged).not.toHaveBeenCalled();
   });
@@ -256,7 +256,7 @@ describe("运行记录删除（spec §6）", () => {
     });
     const view = await mount({ onRunDeleted: vi.fn(), onChanged: vi.fn(), runs: { a1: runs } });
     await act(async () => {
-      deleteButtonFor(view, "脚本输出").click();
+      deleteButtonAt(view, 0).click();
     });
     const dialog = view.querySelector('[role="dialog"]');
     expect(dialog).not.toBeNull();
@@ -294,7 +294,35 @@ describe("运行记录删除（spec §6）", () => {
       settle?.({ removed: true, sessionDirRemoved: true });
     });
     expect(view.querySelector('[role="dialog"]')).toBeNull();
-    expect(view.textContent).not.toContain("第一条输出");
+    expect(view.querySelectorAll(".run-delete")).toHaveLength(0);
+  });
+});
+
+describe("看板与产出展示退役（规格 §7.1）", () => {
+  it("automation page has no board tab, widget control, or collected output", async () => {
+    const collected = run("r1", "s1", 1000, "SECRET-COLLECTED-OUTPUT");
+    stubRpc({
+      runs: () => [collected],
+      deleteRun: async () => ({ removed: true, sessionDirRemoved: true }),
+    });
+    const view = await mount({
+      onChanged: () => undefined,
+      onRunDeleted: () => undefined,
+      runs: { [AUTOMATION.id]: [collected] },
+    });
+    // mount 默认落在「运行记录」tab：看板 tab 与运行产出都不得出现在页面上。
+    expect(view.textContent).not.toContain("看板");
+    expect(view.textContent).not.toContain("SECRET-COLLECTED-OUTPUT");
+    expect(view.querySelector(".run-output")).toBeNull();
+    // 回到「任务」tab 打开创建表单：widget 勾选与看板文案也不得存在。
+    await act(async () => {
+      buttonByText(view, "任务").click();
+    });
+    await act(async () => {
+      buttonByText(view, "＋ 新建任务").click();
+    });
+    expect(view.textContent).not.toContain("推送到项目看板");
+    expect(view.textContent).not.toContain("看板");
   });
 });
 

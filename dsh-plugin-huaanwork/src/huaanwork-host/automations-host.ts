@@ -611,9 +611,6 @@ async function finishAutomation(
   if (automation.schedule.kind === 'once') {
     await updateAutomation(routeCtx.profileDir, automation.id, { enabled: false })
   }
-  if (automation.widget) {
-    routeCtx.emit({ event: 'automation/widget', automationId: automation.id, projectId: automation.projectId, time: endedAt })
-  }
   routeCtx.emit({
     event: 'automation/run-end',
     automationId: automation.id,

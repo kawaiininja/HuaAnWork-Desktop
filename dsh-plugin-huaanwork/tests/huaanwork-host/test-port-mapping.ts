@@ -104,9 +104,9 @@ export const testPortMapping: TestPortRow[] = [
   },
   {
     file: 'automations-host.test.ts',
-    title: 'automation.run executes a script task and emits widget and run events',
+    title: 'script task ignores a legacy widget flag: only run events and stdout kept in Run.output',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:278',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:352',
   },
   {
     file: 'automations-host.test.ts',
@@ -340,7 +340,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'issue #2: automation bound to a vanished project still fails with the missing-project message',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:662',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:870',
   },
   {
     file: 'unified-channel.test.ts',

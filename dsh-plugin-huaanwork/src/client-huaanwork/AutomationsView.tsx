@@ -1,6 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
-import BoardView from "./BoardView.tsx";
 import HistoryDetailPane, { type SessionDetailRecord, type SessionLogView } from "./HistoryDetailPane.tsx";
 import { rpcCall } from "./api.ts";
 import {
@@ -67,7 +66,7 @@ type Props = {
   onDismissMissedBanner: () => void;
 };
 
-type Tab = "tasks" | "runs" | "board";
+type Tab = "tasks" | "runs";
 type Editing =
   | {
       mode: "create";
@@ -107,7 +106,7 @@ const SCHEDULE_KIND_OPTIONS: { value: AutomationSchedule["kind"]; label: string 
   { value: "cron", label: "自定义（cron）" },
 ];
 
-/** 自动化页：顶部「任务 / 运行记录 / 看板」三 tab，跨项目全局视图（无项目选择器）；仅展示自动化任务，子任务仍在项目卡片内。 */
+/** 自动化页：顶部「任务 / 运行记录」两 tab，跨项目全局视图（无项目选择器）；仅展示自动化任务，子任务仍在项目卡片内。 */
 export default function AutomationsView({
   projects,
   automations,
@@ -147,7 +146,7 @@ export default function AutomationsView({
     onEnterIntentConsumed?.();
   }, [enterIntent, onEnterIntentConsumed]);
 
-  // 项目选择器已移除（2026-09-10）：任务 / 运行记录 / 看板均为跨项目全局视图。
+  // 项目选择器已移除（2026-09-10）：任务 / 运行记录均为跨项目全局视图。
   // 设计 §3.3.3：新建任务一律以 null 进表单，由表单默认「自动创建同名项目」，也可改选已有项目。
   const projectNameOf = useMemo(() => {
     const names = new Map(projects.map((project) => [project.id, project.name]));
@@ -233,7 +232,7 @@ export default function AutomationsView({
       ) : null}
       <div className="page-head">
         <h1>自动化</h1>
-        <span className="hint-text">定时或手动驱动的自动化任务，产出可推送到项目看板</span>
+        <span className="hint-text">定时或手动驱动的自动化任务</span>
         <span className="composer-spacer" />
         <span className="keep-awake-toggle" title="存在启用中的定时任务时阻止系统睡眠">
           <span className="hint-text">保持系统唤醒</span>
@@ -257,9 +256,6 @@ export default function AutomationsView({
           </button>
           <button type="button" role="tab" aria-selected={tab === "runs"} className={tab === "runs" ? "on" : ""} onClick={() => setTab("runs")}>
             运行记录
-          </button>
-          <button type="button" role="tab" aria-selected={tab === "board"} className={tab === "board" ? "on" : ""} onClick={() => setTab("board")}>
-            看板
           </button>
         </div>
         <span className="composer-spacer" />
@@ -311,10 +307,8 @@ export default function AutomationsView({
             ))}
           </div>
         )
-      ) : tab === "runs" ? (
-        <RunsPanel automations={automations} onChanged={onChanged} onRunDeleted={onRunDeleted} />
       ) : (
-        <BoardView automations={automations} runs={runs} projectId={null} projects={projects} />
+        <RunsPanel automations={automations} onChanged={onChanged} onRunDeleted={onRunDeleted} />
       )}
 
       {editing ? (
@@ -420,7 +414,6 @@ function AutomationRow({
             <span className="automation-name">{automation.name}</span>
             {projectName ? <span className="automation-chip">{projectName}</span> : null}
             <span className="automation-chip">{automation.kind === "agent" ? "定时对话" : "脚本"}</span>
-            {automation.widget ? <span className="automation-chip widget">看板</span> : null}
             {!automation.enabled ? <span className="automation-chip off">已停用</span> : null}
           </div>
           <span className="automation-meta">
@@ -471,7 +464,6 @@ function AutomationRow({
                   <span className="run-status" style={meta.color ? { color: meta.color } : undefined}>
                     {meta.label}
                   </span>
-                  <pre className="run-output">{run.output || "（无输出）"}</pre>
                 </li>
               );
             })}
@@ -757,7 +749,6 @@ function RunsPanel({
                     ) : (
                       head
                     )}
-                    <pre className="run-output">{run.output || "（无输出）"}</pre>
                     <button
                       type="button"
                       className="side-action danger run-delete"
@@ -950,7 +941,6 @@ function AutomationFormModal({
   );
   const [prompt, setPrompt] = useState(source?.prompt ?? prefillPrompt ?? "");
   const [command, setCommand] = useState(source?.command ?? "");
-  const [widget, setWidget] = useState(source?.widget ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   /** undefined=尚未提交；number|null=已提交，值为后端算好的 nextRunAt（null=无后续触发）。 */
@@ -1050,7 +1040,6 @@ function AutomationFormModal({
           // create 用 undefined 表示不设置（与 sidecar 白名单配对）。
           prompt: kind === "agent" ? prompt.trim() : undefined,
           command: kind === "script" ? command.trim() : undefined,
-          widget,
           expiresAt: expiresAt ? new Date(expiresAt).getTime() : undefined,
           missedPolicy,
           taskShape,
@@ -1068,7 +1057,6 @@ function AutomationFormModal({
           // update 用 "" 清空可空字段（与 sidecar 白名单 patch 配对）。
           prompt: kind === "agent" ? prompt.trim() : "",
           command: kind === "script" ? command.trim() : "",
-          widget,
           expiresAt: expiresAt ? new Date(expiresAt).getTime() : "",
           missedPolicy,
           taskShape,
@@ -1287,7 +1275,7 @@ function AutomationFormModal({
 
         {kind === "agent" ? (
           <label className="modal-field">
-            提示词（发给本地模型，产出进入运行历史与看板）
+            提示词（发给本地模型，产出进入运行历史）
             <textarea
               className="modal-textarea"
               value={prompt}
@@ -1307,11 +1295,6 @@ function AutomationFormModal({
             />
           </label>
         )}
-
-        <label className="modal-check">
-          <input type="checkbox" checked={widget} onChange={(event) => setWidget(event.target.checked)} />
-          推送到项目看板
-        </label>
 
         <label className="modal-field">
           生效截止（可选）
@@ -1384,8 +1367,8 @@ function AutomationFormModal({
   );
 }
 
-/** 运行时间格式化（任务行与看板共用）。 */
-export function formatRunTime(ts: number): string {
+/** 运行时间格式化（任务行与运行记录共用）。 */
+function formatRunTime(ts: number): string {
   const date = new Date(ts);
   const hm = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   const now = new Date();

@@ -1728,10 +1728,6 @@ export default function App() {
             }
             return;
           }
-          if (event.event === "automation/widget") {
-            void refreshAutomations();
-            return;
-          }
           if (event.event === "automation/missed") {
             // 错过补跑被跳过：刷新任务列表 + 累积本次会话的 missed 横幅计数（Task 11，dismiss 后不再累积）。
             void refreshAutomations();

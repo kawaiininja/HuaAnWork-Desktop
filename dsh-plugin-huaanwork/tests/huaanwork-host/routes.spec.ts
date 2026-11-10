@@ -868,7 +868,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     writeFileSync(join(profileTempDir, 'automations.json'), JSON.stringify({
       automations: [{
         id: 'a1', projectId: project.id, name: '自动化', kind: 'agent',
-        schedule: { kind: 'manual' }, widget: false, enabled: true, createdAt: 1,
+        schedule: { kind: 'manual' }, enabled: true, createdAt: 1,
       }],
     }))
     mkdirSync(join(profileTempDir, 'automations'), { recursive: true })
@@ -985,7 +985,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     writeFileSync(join(profileTempDir, 'automations.json'), JSON.stringify({
       automations: [{
         id: 'a1', projectId: null, name: '巡检', kind: 'agent',
-        schedule: { kind: 'hourly', minute: 0 }, widget: false, enabled: true, createdAt: 1,
+        schedule: { kind: 'hourly', minute: 0 }, enabled: true, createdAt: 1,
       }],
     }))
     mkdirSync(join(profileTempDir, 'automations'), { recursive: true })

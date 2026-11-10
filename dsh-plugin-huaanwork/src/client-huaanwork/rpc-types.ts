@@ -235,7 +235,7 @@ export type AgentFieldError = { field: string; message: string };
 export type AgentWriteResult = { ok: true } | { ok: false; fieldErrors: AgentFieldError[] };
 export type SettingsFieldError = { field: string; message: string };
 
-/** 项目：隔离的工作空间（文件目录 + 对话历史 + 自动化配置 + Widget 看板）。 */
+/** 项目：隔离的工作空间（文件目录 + 对话历史 + 自动化配置）。 */
 export type ProjectInfo = {
   id: string;
   name: string;
@@ -259,7 +259,6 @@ export type AutomationSchedule =
  * 任务：挂在项目下的自动化工作流。
  * - `agent`：本地模型会话（agent local_conversation），产出为最后回复；
  * - `script`：在项目目录执行命令，产出为 stdout。
- * `widget` 为 true 时产出推送到项目看板。
  *
  * Phase 1 追加字段全部可选，旧记录读出来即默认值（missedPolicy 默认 "skip"、
  * taskShape 默认 "independent"），不需要迁移脚本；
@@ -276,7 +275,6 @@ export type AutomationInfo = {
   schedule: AutomationSchedule;
   prompt?: string;
   command?: string;
-  widget: boolean;
   enabled: boolean;
   createdAt: number;
   lastRunAt?: number;
@@ -510,7 +508,6 @@ export type RpcEvent =
       taskId?: string;
     }
   | { event: "automation/missed"; automationId: string; projectId: string | null; coalescedCount: number; missedAt: number }
-  | { event: "automation/widget"; automationId: string; projectId: string | null; time: number }
   /** 子代理 run 的权威投影；`activityFlushMs > 0` 时高频 token/reasoning 合并发布。 */
   | { event: "subagent/run"; run: SubagentRunProjection }
   /** 终态历史被淘汰；客户端只在 generation/revision 匹配时删除该 run。 */
