@@ -546,21 +546,6 @@ button {
   white-space: nowrap;
 }
 
-.recent-item.live-dot .recent-title,
-.recent-item.live-dot .recent-meta {
-  padding-right: 14px;
-}
-
-.recent-item.live-dot::after {
-  content: "●";
-  color: var(--approval);
-  font-size: 8px;
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-}
-
 .side-footer {
   margin-top: auto;
   border-top: 1px solid var(--border);

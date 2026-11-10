@@ -483,6 +483,36 @@ test("an automation task's failed restore never falls back to a fresh chat tab",
   );
 });
 
+test("selectSubtask stamps automation origin on tabs opened from run records", () => {
+  // 规格 §8 第 8 条：删除自动化/prune 后关闭所有受影响标签。从运行记录打开的 work 标签
+  // 必须带 automationId 才参与失效对账，否则残留指向已删会话的幽灵标签（评审 #1）。
+  const body = functionBody("async function selectSubtask(", "async function renameSubtask(");
+  const historyAt = body.indexOf("historyToChatItems(view)");
+  assert.ok(historyAt >= 0, "selectSubtask still replays history for tasks with a session");
+  const createAt = body.indexOf("setChatTabs((prev) => [", historyAt);
+  const createEnd = body.indexOf("void reconcileSubagentRuns(id, sessionId)", createAt);
+  assert.ok(createAt > historyAt && createEnd > createAt, "the history branch still creates the tab before reconciling");
+  const newTab = body.slice(createAt, createEnd);
+  assert.match(
+    newTab,
+    /\.\.\.\(task\.automationId \? \{ automationId: task\.automationId \} : \{\}\)/,
+    "the opened tab must conditionally carry task.automationId: stale reconciliation only closes tabs with automationId + taskId",
+  );
+});
+
+test("automation run tabs never enter the sidebar task list", () => {
+  // 2026-11-10 owner 裁定：运行对话不再在侧栏「任务」区渲染——实时进度与历史以自动化页为准
+  // （任务行有停止按钮、运行记录可点开）。侧栏任务区只列游离 Work 会话。
+  const at = APP_SOURCE.indexOf("<span>任务</span>");
+  assert.ok(at >= 0, "the sidebar still has the task section header");
+  const end = APP_SOURCE.indexOf('className="side-section workspace-section"', at);
+  assert.ok(end > at, "the task section is still followed by the workspace section");
+  const section = APP_SOURCE.slice(at, end);
+  assert.doesNotMatch(section, /runTabs/, "automation run tabs must not be rendered in the sidebar task list");
+  assert.doesNotMatch(section, /automationId/, "no automation-origin entries in the sidebar task list");
+  assert.match(section, /unscopedWorkSessions\.length === 0 \?/, "the empty state keys off free work sessions only");
+});
+
 test("running-run state converges on refresh, host exit and stopped:false", () => {
   const refreshAt = APP_SOURCE.indexOf("async function refreshAutomations()");
   const refreshEnd = APP_SOURCE.indexOf("function handleRunDeleted", refreshAt);
@@ -542,9 +572,8 @@ test("live-run state is run-scoped: run-end deletes only its own runId and turns
     /const runningTurnCount = useMemo\(\s*\(\) => Object\.values\(tabRuns\)\.filter\(\(state\) => state\.running\)\.length,/,
     "the turn count is derived from per-tab running state, not a process-wide boolean",
   );
-  // 运行标签 live 判据按 runId;任务行仍用派生的任务 id 集合。
+  // 运行标签 live 判据按 runId(2026-11-10 起侧栏不再渲染运行条目,只剩激活标签的停止按钮)。
   assert.match(APP_SOURCE, /isRunTabLive\(activeChat\.id, runningRunIds\)/);
-  assert.match(APP_SOURCE, /isRunTabLive\(tab\.id, runningRunIds\)/);
   assert.match(APP_SOURCE, /useMemo\(\s*\(\) => new Set\(\[\.\.\.runningRuns\.values\(\)\]\.map\(\(entry\) => entry\.automationId\)\)/);
 });
 

@@ -210,7 +210,12 @@ function withValidTaskModel(task: TaskInfo): TaskInfo {
 function withValidTaskOrigin(task: TaskInfo): TaskInfo {
   const automationId = typeof task.automationId === 'string' && task.automationId.trim()
   const runId = typeof task.runId === 'string' && task.runId.trim()
-  if (automationId && runId) return task
+  if (automationId && runId) {
+    // 保留校验用的 trim 值:外部手写的空白来源否则逃过级联删除/幂等查找的精确匹配。
+    task.automationId = automationId
+    task.runId = runId
+    return task
+  }
   delete task.automationId
   delete task.runId
   return task

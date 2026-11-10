@@ -322,7 +322,8 @@ type ChatTab = {
   sessionId?: string;
   /** 绑定的子任务 id（Work 模式下侧边栏选中驱动）。 */
   taskId?: string;
-  /** 自动化运行对话：由 automation/run-task 创建（单一路径），渲染在对应通道分区（不进最近对话）。 */
+  /** 自动化运行对话：由 automation/run-task 创建（单一路径），不进侧栏「任务」区（2026-11-10 owner 裁定：
+   * 实时进度看自动化页、历史在运行记录里点开）；仍承载实时观察、续聊与失效对账。 */
   automationId?: string;
   /** 重启后重建的运行对话骨架：首启懒加载运行日志前为 true；加载成功后清除，加载失败则关闭该标签。 */
   runPlaceholder?: boolean;
@@ -1235,6 +1236,9 @@ export default function App() {
             projectId: task.projectId,
             pendingPick: false,
             taskId: task.id,
+            // 自动化来源的标签必须带 automationId 才参与失效对账（规格 §8 第 8 条：
+            // 删除自动化/prune 后关闭所有受影响标签，不只 run-<runId> 标签）。
+            ...(task.automationId ? { automationId: task.automationId } : {}),
             sessionId,
             turnFinalByUserId: historicalTurnFinalByUserId(items),
             turnFinalWithoutUser: true,
@@ -3349,8 +3353,6 @@ export default function App() {
    */
   const runTabLive = isRunTabLive(activeChat.id, runningRunIds);
   const chatEmpty = items.length === 0;
-  /** 自动化运行对话（live tab）：不进最近对话/历史列表。 */
-  const runTabs = chatTabs.filter((tab) => tab.automationId);
   /** 「任务」区的游离会话：中立工作区对话（项目分组已退役，项目会话收编进子任务）。 */
   const unscopedWorkSessions = unscopedSessions(sessions, projects);
   const showRightPane = view === "main";
@@ -3489,30 +3491,10 @@ export default function App() {
               <span>任务</span>
             </header>
             {hostNotice.kind === "unresponsive" ? <p className="side-muted">{HOST_UNRESPONSIVE_TEXT}</p> : null}
-            {unscopedWorkSessions.length === 0 && runTabs.length === 0 ? (
+            {unscopedWorkSessions.length === 0 ? (
               <p className="side-muted">暂无任务</p>
             ) : (
               <ul className="recent-list">
-                {/* 进行中的自动化运行对话：每次运行在「任务」区新建一个对话。 */}
-                {runTabs.map((tab) => {
-                  const running = isRunTabLive(tab.id, runningRunIds);
-                  return (
-                    <li key={tab.id}>
-                      <button
-                        type="button"
-                        className={running ? "recent-item live-dot" : "recent-item"}
-                        title={tab.label}
-                        onClick={() => {
-                          setView("main");
-                          setActiveTab(tab.id);
-                        }}
-                      >
-                        <span className="recent-title">{tab.label}</span>
-                        <span className="recent-meta">自动化运行{running ? " · 运行中" : ""}{hostNotice.kind === "unresponsive" ? ` · ${HOST_UNRESPONSIVE_TEXT}` : ""}</span>
-                      </button>
-                    </li>
-                  );
-                })}
                 {/* 未归属任何项目的 Work 会话（中立工作区里的任务对话），点击即恢复为可聊标签。 */}
                 {unscopedWorkSessions.map((session, index) => {
                   const id = String(session.id ?? `work-session-${index}`);

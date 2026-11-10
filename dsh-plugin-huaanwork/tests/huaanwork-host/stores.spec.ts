@@ -17,6 +17,7 @@ import {
   recentRuns,
   removeProject,
   removeTask,
+  removeTasksOfAutomation,
   removeTasksOfProject,
   renameProject,
   renameTask,
@@ -365,6 +366,22 @@ describe('createAutomationRunTask(运行子任务原子创建)', () => {
     expect(listed[1]!.runId).toBeUndefined()
     expect(listed[2]!.automationId).toBe('auto-1')
     expect(listed[2]!.runId).toBe('run-1')
+  })
+
+  test('whitespace-padded origin is normalized to the validated trim value so cascade matches', async () => {
+    // 外部手写/损坏的 tasks.json 可能带空白来源字段:校验用 trim 值,保留也必须归一,
+    // 否则 removeTasksOfAutomation/幂等查找的精确匹配漏掉它(评审 #4)。
+    const home = makeHome()
+    writeJson(home, 'tasks.json', {
+      tasks: [
+        { id: 'padded', projectId: 'p1', name: '空白来源', createdAt: 1, sessionId: 'sess-padded', automationId: ' auto-1 ', runId: ' run-1 ' },
+      ],
+    })
+    const listed = await listTasks(home)
+    expect(listed[0]!.automationId).toBe('auto-1')
+    expect(listed[0]!.runId).toBe('run-1')
+    expect(await removeTasksOfAutomation(home, 'auto-1')).toHaveLength(1)
+    expect(await listTasks(home)).toEqual([])
   })
 })
 

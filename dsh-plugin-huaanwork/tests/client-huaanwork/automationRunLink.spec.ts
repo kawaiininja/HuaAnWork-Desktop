@@ -106,6 +106,16 @@ test("stale reconciliation ignores tabs that are not automation task tabs", () =
   expect(staleAutomationRunTabs([], [])).toEqual([]);
 });
 
+test("a work-style tab stamped with automation origin joins stale reconciliation", () => {
+  // selectSubtask 从运行记录打开的标签 id 是 work-*，但带 automationId + taskId 后
+  // 必须与 run-<runId> 标签一样在 Task 消失后被关闭（规格 §8 第 8 条，评审 #1）。
+  const tabs = [
+    { id: "work-7", automationId: "auto-1", taskId: "task-gone", sessionId: "s1" },
+    { id: "work-1", taskId: "task-1", sessionId: "s2" },
+  ];
+  expect(staleAutomationRunTabs(tabs, [])).toEqual([tabs[0]]);
+});
+
 test("reconciliation leaves the tab list and selection untouched when nothing is stale", () => {
   const tabs = [
     { id: "run-r1", automationId: "auto-1", taskId: "task-1", sessionId: "s1" },
