@@ -996,8 +996,8 @@ test('pruneSessions keeps collector and recorded sessions', { timeout: 15_000 },
       sessionId: recorded,
     })}\n`,
   )
-  const removed = await handler('automation.pruneSessions')(body({}), h.routeCtx)
-  expect(removed).toEqual({ removed: 1 })
+  const result = await handler('automation.pruneSessions')(body({}), h.routeCtx)
+  expect(result).toEqual({ removed: 1, tasksRemoved: 0, failed: [] })
   expect(readdirSync(cwd).sort()).toEqual([live!, recorded, 'huaanwork-user'].sort())
   h.release()
   await waitRunEnd(h.events, automation.id)

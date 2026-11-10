@@ -571,16 +571,34 @@ export async function appendRun(storageRoot: string, automationId: string, run: 
   })
 }
 
+export type PruneAutomationSessionsResult = {
+  /** 成功走完会话目录删除步骤的候选数(目录已不存在同视为成功)。 */
+  removed: number
+  /** 随会话一起删掉的自动化来源 Task 数。 */
+  tasksRemoved: number
+  /** 失败标识:有 Task 的候选记 taskId,无 Task 的旧会话记 sessionId。 */
+  failed: string[]
+}
+
 /**
- * 清理历史运行会话目录:每个任务只保留运行文件里最近
- * {@link AUTOMATION_SESSION_RETAIN_LIMIT} 条对应的会话,以及调用方声明的活跃会话。
- * 只删会话目录,不改 runs/audit 文件(运行记录仍按 {@link RUNS_LIMIT} 保留)。不加注册表锁。
+ * 清理历史运行会话目录与对应的自动化来源 Task(规格 §9.4)。
+ *
+ * keep = 调用方活跃快照 ∪ 每个任务最近 {@link AUTOMATION_SESSION_RETAIN_LIMIT} 条 Run 的
+ * sessionId(N2:最近一次 Run 未落盘时其会话不在 keep,已登记接受)。
+ * 候选 = 全部自动化来源 Task 的 sessionId ∪ 扫描到的旧 auto-prefix 会话目录。
+ * 对每个非 keep 候选:先释放运行态,再删会话目录;目录失败(非 ENOENT/ENOTDIR)记 failed
+ * 且保留 Task,不增加 removed。目录成功后删除 sessionId 匹配的自动化 Task;Task 删除失败
+ * 同样记 failed,下一轮仍由 Task 注册表生成候选重试。普通 Task 永不删除。
+ *
+ * 不删 Run(runs.jsonl 的 50 条淘汰不级联 Task/Session);不加注册表锁。单项失败不中止
+ * 整轮清理,由返回值报告部分失败。
  */
 export async function pruneAutomationSessions(
   storageRoot: string,
   activeSessionIds: ReadonlySet<string> = new Set(),
   sessionsRoot: string = join(storageRoot, 'sessions'),
-): Promise<number> {
+  opts: { releaseSession?: (sessionId: string) => void } = {},
+): Promise<PruneAutomationSessionsResult> {
   const keep = new Set(activeSessionIds)
   const registry = await readAutomationRegistry(storageRoot)
   await Promise.all(
@@ -592,33 +610,58 @@ export async function pruneAutomationSessions(
     }),
   )
 
-  let cwds: string[]
-  try {
-    cwds = await readdir(sessionsRoot)
-  } catch {
-    return 0
+  const automationTasks = (await listTasks(storageRoot)).filter(
+    (task) => task.automationId !== undefined && task.sessionId !== undefined,
+  )
+  const candidates = new Set<string>()
+  for (const task of automationTasks) {
+    if (task.sessionId) candidates.add(task.sessionId)
   }
-  let removed = 0
-  await Promise.all(
-    cwds.map(async (cwd) => {
-      const cwdDir = join(sessionsRoot, cwd)
+  try {
+    for (const cwd of await readdir(sessionsRoot)) {
       let entries: string[]
       try {
-        entries = await readdir(cwdDir)
+        entries = await readdir(join(sessionsRoot, cwd))
       } catch {
-        return
+        continue
       }
-      await Promise.all(
-        entries
-          .filter((entry) => isAutomationSessionEntry(entry) && !keep.has(entry))
-          .map(async (entry) => {
-            await rm(join(cwdDir, entry), { recursive: true, force: true }).catch(() => undefined)
-            removed += 1
-          }),
-      )
-    }),
-  )
-  return removed
+      for (const entry of entries) {
+        if (isAutomationSessionEntry(entry)) candidates.add(entry)
+      }
+    }
+  } catch {
+    // 会话根不可读:扫描面为空;Task 候选仍会走 removeSessionDir 的失败协议。
+  }
+
+  const failed: string[] = []
+  let removed = 0
+  let tasksRemoved = 0
+  for (const sessionId of candidates) {
+    if (keep.has(sessionId)) continue
+    const task = automationTasks.find((item) => item.sessionId === sessionId)
+    try {
+      // 先释放运行态,再删目录(session.remove / automation.remove 同序)。
+      opts.releaseSession?.(sessionId)
+    } catch {
+      failed.push(task?.id ?? sessionId)
+      continue
+    }
+    if (!await removeSessionDir(sessionsRoot, sessionId)) {
+      failed.push(task?.id ?? sessionId)
+      continue
+    }
+    removed += 1
+    for (const doomed of automationTasks.filter((item) => item.sessionId === sessionId)) {
+      try {
+        await removeTask(storageRoot, doomed.id)
+        tasksRemoved += 1
+      } catch {
+        // Task 写盘失败:会话已删,Task 留在注册表,下一轮 prune 重试。
+        failed.push(doomed.id)
+      }
+    }
+  }
+  return { removed, tasksRemoved, failed }
 }
 
 /**

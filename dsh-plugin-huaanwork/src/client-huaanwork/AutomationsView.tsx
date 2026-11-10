@@ -647,9 +647,15 @@ function RunsPanel({
     setPruning(true);
     setNotice("");
     try {
-      const { removed } = await pruneAutomationSessions();
-      setNotice(`已清理 ${removed} 个历史运行会话`);
+      const { removed, tasksRemoved, failed } = await pruneAutomationSessions();
+      const done = `已清理 ${removed} 个历史运行会话${tasksRemoved > 0 ? `、${tasksRemoved} 个运行子任务` : ""}`;
+      setNotice(
+        failed.length === 0
+          ? done
+          : `${done}；${failed.length} 项未能清理（${failed.join("、")}），可再次清理重试`,
+      );
       setPruneConfirm(false);
+      // 部分成功也要刷新：已删的会话/子任务必须从标签和任务区消失，失败项仍可重试。
       onChanged();
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
@@ -683,7 +689,7 @@ function RunsPanel({
         {pruneConfirm ? (
           <>
             <span className="muted" style={{ fontSize: 12 }}>
-              将删除每个任务最近 20 条运行之外的会话目录，确定？
+              将删除每个任务最近 20 条运行之外的会话目录及其运行子任务，确定？
             </span>
             <button type="button" className="btn danger" disabled={pruning} onClick={() => void prune()}>
               {pruning ? "清理中…" : "确认清理"}

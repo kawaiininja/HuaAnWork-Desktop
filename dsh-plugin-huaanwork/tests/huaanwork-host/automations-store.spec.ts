@@ -2,7 +2,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import type { AutomationInfo, AutomationSchedule, ProjectInfo, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
+import type { AutomationInfo, AutomationSchedule, ProjectInfo, RunSummary, TaskInfo } from '../../src/client-huaanwork/rpc-types.ts'
 import { inFlightRuns, startInFlightRun } from '../../src/huaanwork-host/automation-inflight.ts'
 import {
   assertAutomationNotDeleting,
@@ -40,6 +40,7 @@ import {
   listAutomations,
   listProjects,
   listTasks,
+
   recentRuns,
   removeProject,
   runsPath,
@@ -346,15 +347,15 @@ describe('automations-store 写路径与纯函数', () => {
     mkdirSync(join(sessionsCwd, `huaanwork-auto-${id}-live`), { recursive: true })
     mkdirSync(join(sessionsCwd, 'huaanwork-user'), { recursive: true })
 
-    const removed = await pruneAutomationSessions(home, new Set([`huaanwork-auto-${id}-live`]))
-    expect(removed).toBe(1)
+    const pruned = await pruneAutomationSessions(home, new Set([`huaanwork-auto-${id}-live`]))
+    expect(pruned.removed).toBe(1)
     expect(readdirSync(sessionsCwd).sort()).toEqual(
       [`huaanwork-auto-${id}-live`, `huaanwork-auto-${id}-r51`, 'huaanwork-user'].sort(),
     )
     expect(readFileSync(runsPath, 'utf8')).toBe(runsBody)
 
-    const removedAll = await pruneAutomationSessions(home)
-    expect(removedAll).toBe(1)
+    const prunedAll = await pruneAutomationSessions(home)
+    expect(prunedAll.removed).toBe(1)
     expect(readdirSync(sessionsCwd).sort()).toEqual([`huaanwork-auto-${id}-r51`, 'huaanwork-user'].sort())
     expect(readFileSync(runsPath, 'utf8')).toBe(runsBody)
     expect(existsSync(runsPath)).toBe(true)
@@ -393,8 +394,8 @@ describe('automations-store 写路径与纯函数', () => {
     expect(AUTOMATION_SESSION_RETAIN_LIMIT).toBe(20)
     expect(AUTOMATION_SESSION_RETAIN_LIMIT).not.toBe(RUNS_LIMIT)
 
-    const removed = await pruneAutomationSessions(home, new Set([activeSessionId]))
-    expect(removed).toBe(1)
+    const pruned = await pruneAutomationSessions(home, new Set([activeSessionId]))
+    expect(pruned.removed).toBe(1)
     expect(existsSync(join(sessionsCwd, sessionIds[0]!))).toBe(false)
     expect(readdirSync(sessionsCwd).sort()).toEqual(
       [...sessionIds.slice(1), activeSessionId, 'huaanwork-user'].sort(),
@@ -402,6 +403,62 @@ describe('automations-store 写路径与纯函数', () => {
     const afterPrune = readFileSync(runsPath, 'utf8')
     expect(afterPrune).toBe(`${runsBody}\n`)
     expect(afterPrune.trimEnd().split('\n')).toHaveLength(21)
+  })
+
+  async function pruneFixture(home: string): Promise<{ automation: AutomationInfo; task: TaskInfo }> {
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput({
+      projectId: 'p1', schedule: { kind: 'manual' },
+    })))
+    const task = await createAutomationRunTask(home, {
+      projectId: 'p1', name: '待清理运行', createdAt: 1,
+      automationId: automation.id, runId: 'r0', sessionId: 's0',
+    })
+    for (let i = 0; i < 21; i += 1) {
+      await appendRun(home, automation.id, {
+        runId: `r${i}`, startedAt: i + 1, endedAt: i + 2, ok: true,
+        output: 'done', status: 'ok', sessionId: `s${i}`,
+        ...(i === 0 ? { taskId: task.id } : {}),
+      })
+    }
+    return { automation, task }
+  }
+
+  test('prune skips a resumed automation session owned by a live user writer', async () => {
+    const home = makeHome()
+    const { task } = await pruneFixture(home)
+    const sessionsRoot = join(home, 'sessions')
+    mkdirSync(join(sessionsRoot, 'project', task.sessionId!), { recursive: true })
+    const scheduler = createTurnScheduler({ maxConcurrentTurns: () => 3, modelExists: () => true })
+    scheduler.admitUserTurn({
+      sessionId: task.sessionId!, tabId: 'tab-1', text: '继续',
+      modelId: 'model-1', root: join(home, 'project'),
+    })
+    expect(scheduler.activeSessionIds().has(task.sessionId!)).toBe(true)
+    const result = await pruneAutomationSessions(home, scheduler.activeSessionIds(), sessionsRoot)
+    expect(result.removed).toBe(0)
+    expect((await listTasks(home)).map((item) => item.id)).toContain(task.id)
+  })
+
+  test('prune keeps task candidate when task deletion fails and retries it', async () => {
+    const home = makeHome()
+    const { automation, task } = await pruneFixture(home)
+    const sessionsRoot = join(home, 'sessions')
+    mkdirSync(join(sessionsRoot, 'project', task.sessionId!), { recursive: true })
+    let first = true
+    const result = await pruneAutomationSessions(home, new Set(), sessionsRoot, {
+      releaseSession: () => {
+        if (!first) return
+        first = false
+        renameSync(join(home, 'tasks.json'), join(home, 'tasks.saved'))
+        mkdirSync(join(home, 'tasks.json'))
+      },
+    })
+    expect(result.failed).toContain(task.id)
+    expect(await recentRuns(home, automation.id)).toHaveLength(21)
+    rmSync(join(home, 'tasks.json'), { recursive: true })
+    renameSync(join(home, 'tasks.saved'), join(home, 'tasks.json'))
+    const retry = await pruneAutomationSessions(home, new Set(), sessionsRoot)
+    expect(retry.tasksRemoved).toBe(1)
   })
 
   test('normalizeAutomationInput creates a script automation', async () => {

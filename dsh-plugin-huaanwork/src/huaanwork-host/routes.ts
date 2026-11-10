@@ -1449,15 +1449,17 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     method: 'automation.pruneSessions',
     http: 'POST',
     path: '/huaanwork/automation/pruneSessions',
-    // keep = collector 中的在途会话 ∪ 每任务最近 20 条 runs 的 sessionId
-    // (runs 侧由 pruneAutomationSessions 并入)。会话目录在 dshHome/sessions。
+    // keep = collector 中的在途会话 ∪ TurnScheduler 活跃快照 ∪ 每任务最近 20 条 runs
+    // 的 sessionId(runs 侧由 pruneAutomationSessions 并入)。会话目录在 dshHome/sessions。
+    // 删除前先经 runtimeCtx 释放运行态;部分失败由应答的 failed 报告,前端可重试。
     handler: storeRoute(async (_req, ctx) => {
-      const removed = await pruneAutomationSessions(
+      const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
+      return pruneAutomationSessions(
         ctx.profileDir,
-        new Set(automationCollector.keys()),
+        new Set([...automationCollector.keys(), ...(scheduler?.activeSessionIds() ?? [])]),
         join(ctx.dshHome, 'sessions'),
+        { releaseSession: (sessionId) => releaseSessionRuntime(ctx.runtimeCtx, sessionId) },
       )
-      return { removed }
     }),
   }, // Task 4 (M4)
   { method: 'automation.templates', http: 'GET', path: '/huaanwork/automation/templates', handler: storeRoute(async () => ({ templates: await readAutomationTemplates() })) }, // Task 10 (文件 I/O 读模板文件)
