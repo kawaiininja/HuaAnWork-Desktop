@@ -22,6 +22,8 @@ export const OPTIONAL_KEYS_WHITELIST: Record<string, string[]> = {
   // 手动触发被准入跳过时只多这两个键(queued:false + waiting:true + reason);
   // 成功启动不含 waiting 与 reason。
   'automation.run': ['waiting', 'reason'],
+  // 只有同时删掉了运行子任务的分支才带 taskId;旧会话记录与幂等分支没有这个键。
+  'automation.deleteRun': ['taskId'],
   'auth.status': ['username'],
   'auth.register': ['username'],
   'auth.login': ['username'],
@@ -41,7 +43,8 @@ export const OPTIONAL_KEYS_WHITELIST: Record<string, string[]> = {
  * 按 Task 0 Step 1 与评审 P3-4、旧 host.ts/skills-host.ts 应答行钉死:
  * - plugin.add/remove: ['bundles'] (restarting 列入可选键白名单, bundles 为必含键)
  * - automation.run: ['queued', 'runId', 'workspaceRoot']
- * - automation.pruneSessions: ['removed'] (旧 host.ts:1131)
+ * - automation.pruneSessions: ['removed', 'tasksRemoved', 'failed'] (宿主 prune 真实返回:
+ *   会话目录数 / 一并清理的运行子任务数 / 失败标识列表)
  * - skill.importPreview: ['targetName', 'nameMismatch', 'kind'] (旧 skills-host.ts:279)
  * - skill.create/update/import: ['skill'] (SkillWriteResult)
  * - agent.addEndpoint: ['agent'] (AgentWriteResult)
@@ -67,7 +70,7 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.update': ['automation'],
   'automation.remove': ['removed'],
   'automation.run': ['queued', 'runId', 'workspaceRoot'],
-  'automation.pruneSessions': ['removed'],
+  'automation.pruneSessions': ['removed', 'tasksRemoved', 'failed'],
 }
 
 /** 72 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
@@ -189,7 +192,7 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.deleteRun': ['removed', 'sessionDirRemoved'],
   'automation.run': ['queued', 'runId', 'workspaceRoot'],
   'automation.runs': ['runs'],
-  'automation.pruneSessions': ['removed'],
+  'automation.pruneSessions': ['removed', 'tasksRemoved', 'failed'],
   'automation.templates': ['templates'],
 
   // task
@@ -329,7 +332,7 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'automation.deleteRun': ['removed', 'sessionDirRemoved'],
   'automation.run': ['queued', 'runId', 'workspaceRoot'],
   'automation.runs': ['runs'],
-  'automation.pruneSessions': ['removed'],
+  'automation.pruneSessions': ['removed', 'tasksRemoved', 'failed'],
   'automation.templates': ['templates'],
 
   // task
@@ -514,7 +517,7 @@ describe('Route Contract Cross-Test (D6)', () => {
     expect(TARGET_BUSINESS_REQUIRED_KEYS['plugin.add']).toEqual(['bundles'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['plugin.remove']).toEqual(['bundles'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['automation.run']).toEqual(['queued', 'runId', 'workspaceRoot'])
-    expect(TARGET_BUSINESS_REQUIRED_KEYS['automation.pruneSessions']).toEqual(['removed'])
+    expect(TARGET_BUSINESS_REQUIRED_KEYS['automation.pruneSessions']).toEqual(['removed', 'tasksRemoved', 'failed'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['skill.importPreview']).toEqual(['targetName', 'nameMismatch', 'kind'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['skill.create']).toEqual(['skill'])
     expect(TARGET_BUSINESS_REQUIRED_KEYS['skill.update']).toEqual(['skill'])

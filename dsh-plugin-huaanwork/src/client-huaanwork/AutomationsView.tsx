@@ -621,14 +621,15 @@ function RunsPanel({
     setDeleteError("");
     setNotice("");
     try {
-      const { sessionDirRemoved } = await deleteAutomationRun(automation.id, run.runId);
+      // sessionDirRemoved 恒为 true：宿主目录删除失败会抛错走 catch（Run 保留可重试），
+      // 不会以 false 成功返回。字段仍留在删除响应类型里（brief 钉住的契约），界面不再分支。
+      await deleteAutomationRun(automation.id, run.runId);
       setPendingDelete(null);
       // 先乐观移除：宿主列表回来之前这一行就已消失；随后用宿主读数覆盖。
       setFullRuns((prev) => ({
         ...prev,
         [automation.id]: (prev[automation.id] ?? []).filter((item) => item.runId !== run.runId),
       }));
-      if (sessionDirRemoved === false) setNotice("记录已删除，但会话目录未能删除");
       if (run.sessionId && detail?.sessionId === run.sessionId) setDetail(null);
       if (run.sessionId) onRunDeleted?.(run.sessionId, automation.id, run.startedAt);
       void reloadRuns(automation.id);

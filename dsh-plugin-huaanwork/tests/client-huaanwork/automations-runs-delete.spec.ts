@@ -17,7 +17,7 @@ import { rpcCall } from "../../src/client-huaanwork/api.ts";
 import AutomationsView, { lastRunLabel } from "../../src/client-huaanwork/AutomationsView.tsx";
 import type { AutomationInfo, ProjectInfo, RunSummary, TaskInfo } from "../../src/client-huaanwork/logic/projects.ts";
 
-type DeleteResult = { removed: boolean; sessionDirRemoved: boolean };
+type DeleteResult = { removed: boolean; sessionDirRemoved: boolean; taskId?: string };
 
 const rpc = rpcCall as unknown as {
   mockImplementation: (
@@ -185,7 +185,7 @@ afterEach(async () => {
 });
 
 describe("运行记录删除（spec §6）", () => {
-  it("deletes the confirmed row, reports the kept session dir and closes the run tab", async () => {
+  it("deletes the confirmed row and closes the run tab", async () => {
     let runs = [run("r1", "s-1", 1000, "第一条输出"), run("r2", "s-2", 2000, "第二条输出")];
     const onChanged = vi.fn();
     const onRunDeleted = vi.fn();
@@ -193,8 +193,9 @@ describe("运行记录删除（spec §6）", () => {
       runs: () => runs,
       deleteRun: async () => {
         // 宿主已经删行；第二次 automation.runs 只回剩下的那条。
+        // sessionDirRemoved 只可能是 true：目录删除失败时宿主抛错、保留 Run（走下面的 catch 用例）。
         runs = runs.filter((item) => item.runId !== "r1");
-        return { removed: true, sessionDirRemoved: false };
+        return { removed: true, sessionDirRemoved: true };
       },
     });
 
@@ -218,8 +219,6 @@ describe("运行记录删除（spec §6）", () => {
     expect(view.querySelector('[role="dialog"]')).toBeNull();
     // 被删的那行消失，另一行还在（输出不再展示，按行数断言）。
     expect(view.querySelectorAll(".run-delete")).toHaveLength(1);
-    // 目录没删掉要诚实说出来（记录本身已删，列表不再出现）。
-    expect(view.textContent).toContain("记录已删除，但会话目录未能删除");
     expect(onRunDeleted).toHaveBeenCalledWith("s-1", "a1", 1000);
     expect(onChanged).toHaveBeenCalledTimes(1);
   });

@@ -113,6 +113,10 @@ test("answering writes the card into the tab that holds it, not the live tab", (
 });
 
 const APP_SOURCE = readFileSync(new URL("../../src/client-huaanwork/App.tsx", import.meta.url), "utf8");
+const AUTOMATION_RUN_LINK_SOURCE = readFileSync(
+  new URL("../../src/client-huaanwork/logic/automationRunLink.ts", import.meta.url),
+  "utf8",
+);
 
 test("App consumes the two production helpers at their only call sites", () => {
   // 契约钉:删掉 App 里的调用(或把循环写回组件)即失败。
@@ -380,7 +384,10 @@ test("automation deletion refreshes tasks and sessions so stale run tabs get rec
   assert.match(site, /void refreshSessions\(\);/, "deletion refreshes sessions alongside tasks");
 
   // 刷新必须真的落到失效标签对账:对账的依赖是 tasks 快照本身。
-  assert.match(APP_SOURCE, /staleAutomationRunTabs\(chatTabsRef\.current, projectTasks\)/);
+  assert.match(
+    APP_SOURCE,
+    /reconcileStaleAutomationTabs\(chatTabsRef\.current, projectTasks, activeTabRef\.current\)/,
+  );
   assert.match(APP_SOURCE, /\}, \[projectTasks, tasksLoaded\]\);/);
 });
 
@@ -418,7 +425,9 @@ test("stale run-tab reconciliation is keyed by the tasks snapshot while the rebu
   // 规格 §7.2 + 评审 R5-1：run-task 先建标签再 refreshTasks。失效对账若跟 automations/runs 一起
   // 重跑，期间任何一次 refreshAutomations（另一条运行的 run-end、stop、missed、开项目、切到
   // 自动化视图）都会拿运行前的旧快照把刚建的运行标签误关成骨架。对账必须只以 tasks 快照为依赖。
-  const staleAt = APP_SOURCE.indexOf("staleAutomationRunTabs(chatTabsRef.current, projectTasks)");
+  const staleAt = APP_SOURCE.indexOf(
+    "reconcileStaleAutomationTabs(chatTabsRef.current, projectTasks, activeTabRef.current)",
+  );
   assert.ok(staleAt >= 0, "stale reconciliation is still wired");
   const effectStart = APP_SOURCE.lastIndexOf("useEffect(() => {", staleAt);
   assert.ok(effectStart >= 0, "reconciliation lives in an effect");
@@ -427,8 +436,9 @@ test("stale run-tab reconciliation is keyed by the tasks snapshot while the rebu
   const reconcile = APP_SOURCE.slice(effectStart, reconcileDepsAt);
   assert.match(reconcile, /if \(!tasksLoaded\) return;/, "no reconciliation before the first authoritative snapshot");
   assert.doesNotMatch(reconcile, /runTabsToRebuild\(/, "the rebuild does not share the reconciliation effect");
-  // 关闭复用现有 closeRunTabsForSession（active 选择规则不另写一份）。
-  assert.match(reconcile, /closeRunTabsForSession\(/);
+  // 关闭复用现有 closeRunTabsForSession（active 选择规则不另写一份）：合成在 logic 模块单测覆盖。
+  assert.match(AUTOMATION_RUN_LINK_SOURCE, /from "\.\/chatTabs\.ts"/, "the composition lives next to the tab helpers");
+  assert.match(AUTOMATION_RUN_LINK_SOURCE, /closeRunTabsForSession\(/, "closing still goes through closeRunTabsForSession");
 
   const rebuildAt = APP_SOURCE.indexOf("runTabsToRebuild(", reconcileDepsAt);
   assert.ok(rebuildAt > reconcileDepsAt, "the rebuild effect is separate from the reconciliation effect");

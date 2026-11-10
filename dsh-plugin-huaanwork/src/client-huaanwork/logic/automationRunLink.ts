@@ -1,4 +1,5 @@
 import type { AutomationInfo, RunSummary, TaskInfo } from "./projects.ts";
+import { closeRunTabsForSession } from "./chatTabs.ts";
 
 /**
  * 运行记录跳转与失效运行标签对账（纯函数，便于单测）。
@@ -49,4 +50,33 @@ export function staleAutomationRunTabs<T extends { automationId?: string; taskId
 ): T[] {
   const alive = new Set(tasks.map((task) => task.id));
   return tabs.filter((tab) => tab.automationId && tab.taskId && !alive.has(tab.taskId));
+}
+
+/**
+ * App 失效运行标签对账的整段合成：多张失效标签逐张走 {@link closeRunTabsForSession}。
+ *
+ * 关闭范围与 active 选择规则完全复用 `closeRunTabsForSession`（不另写一份）：每关一张
+ * 都可能改选 active，所以必须把上一次的结果喂给下一次，而不是对原始列表重复计算。
+ * 没有失效标签（或失效标签都没有 sessionId）时原样返回输入数组与 activeId —— 引用相等，
+ * 调用方据此跳过 setState。缺 sessionId 的骨架不在此列：运行标签恒带 sessionId
+ * （run-task / 重建都要求会话），没有会话的骨架无从对账。
+ */
+export function reconcileStaleAutomationTabs<
+  T extends { id: string; automationId?: string; taskId?: string; sessionId?: string },
+>(
+  tabs: readonly T[],
+  tasks: readonly TaskInfo[],
+  activeId: string,
+): { tabs: T[]; nextActiveId: string } {
+  let current = tabs as T[];
+  let nextActiveId = activeId;
+  for (const stale of staleAutomationRunTabs(tabs, tasks)) {
+    if (!stale.sessionId) continue;
+    const result = closeRunTabsForSession(current, stale.sessionId, nextActiveId);
+    current = result.tabs;
+    nextActiveId = result.nextActiveId;
+  }
+  // closeRunTabsForSession 未命中时原引用返回，故引用相等即「没有任何标签被关」。
+  if (current === tabs) return { tabs: current, nextActiveId: activeId };
+  return { tabs: current, nextActiveId };
 }

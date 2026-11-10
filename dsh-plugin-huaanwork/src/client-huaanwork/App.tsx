@@ -214,7 +214,7 @@ import {
   sessionsToSuppressAfterDelete,
   settleRunningRuns,
 } from "./logic/runTabsLogic.ts";
-import { staleAutomationRunTabs } from "./logic/automationRunLink.ts";
+import { reconcileStaleAutomationTabs } from "./logic/automationRunLink.ts";
 import {
   RESULT_ATTACHMENT_FILES,
   attachmentAsAssistant,
@@ -2140,20 +2140,13 @@ export default function App() {
    */
   useEffect(() => {
     if (!tasksLoaded) return;
+    // 整段合成（多张失效标签逐张关闭 + active 选择）在 automationRunLink 里，有独立单测；
     // 复用 closeRunTabsForSession 的关闭范围与 active 选择规则（不另写关闭路径）。
-    // 运行标签恒带 sessionId（run-task / 重建都要求会话），没有会话的骨架不在此列。
-    let tabs: ChatTab[] = chatTabsRef.current;
-    let nextActive = activeTabRef.current;
-    for (const stale of staleAutomationRunTabs(chatTabsRef.current, projectTasks)) {
-      if (!stale.sessionId) continue;
-      const result = closeRunTabsForSession(tabs, stale.sessionId, nextActive);
-      tabs = result.tabs;
-      nextActive = result.nextActiveId;
-    }
-    if (tabs !== chatTabsRef.current) {
-      setChatTabs(tabs);
-      setActiveTab(nextActive);
-    }
+    const result = reconcileStaleAutomationTabs(chatTabsRef.current, projectTasks, activeTabRef.current);
+    // 没有标签被关时结果与输入引用相等：不产生多余的状态更新。
+    if (result.tabs === chatTabsRef.current) return;
+    setChatTabs(result.tabs);
+    setActiveTab(result.nextActiveId);
   }, [projectTasks, tasksLoaded]);
 
   /**

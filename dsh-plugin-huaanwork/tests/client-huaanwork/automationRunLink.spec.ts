@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 
 import {
+  reconcileStaleAutomationTabs,
   resolveAutomationRunNavigation,
   staleAutomationRunTabs,
 } from "../../src/client-huaanwork/logic/automationRunLink.ts";
@@ -103,4 +104,61 @@ test("stale reconciliation ignores tabs that are not automation task tabs", () =
   expect(staleAutomationRunTabs(tabs, [])).toEqual([tabs[2]]);
   // 空快照与「任务都还在」是两种输入：前者说明快照还没加载，调用方必须自己门控。
   expect(staleAutomationRunTabs([], [])).toEqual([]);
+});
+
+test("reconciliation leaves the tab list and selection untouched when nothing is stale", () => {
+  const tabs = [
+    { id: "run-r1", automationId: "auto-1", taskId: "task-1", sessionId: "s1" },
+    { id: "work-1", sessionId: "s2" },
+  ];
+  const result = reconcileStaleAutomationTabs(tabs, [task({ id: "task-1" })], "work-1");
+  // 引用相等：调用方据此跳过 setChatTabs（App effect 用 result.tabs === 输入 判空）。
+  expect(result.tabs).toBe(tabs);
+  expect(result.nextActiveId).toBe("work-1");
+});
+
+test("a single stale non-active tab closes without moving the selection", () => {
+  const tabs = [
+    { id: "run-r1", automationId: "auto-1", taskId: "task-gone", sessionId: "s1" },
+    { id: "work-1", sessionId: "s2" },
+  ];
+  const result = reconcileStaleAutomationTabs(tabs, [], "work-1");
+  expect(result.tabs).toEqual([tabs[1]]);
+  expect(result.tabs).not.toBe(tabs);
+  expect(result.nextActiveId).toBe("work-1");
+});
+
+test("multiple stale tabs all close and the survivor is chosen right-then-left", () => {
+  const tabs = [
+    { id: "run-r1", automationId: "auto-1", taskId: "gone-1", sessionId: "s1" },
+    { id: "work-1", sessionId: "s2" },
+    { id: "run-r2", automationId: "auto-1", taskId: "gone-2", sessionId: "s3" },
+    { id: "work-2", sessionId: "s4" },
+  ];
+  // 当前标签是第二张失效标签：先向右取 work-2。
+  const right = reconcileStaleAutomationTabs(tabs, [], "run-r2");
+  expect(right.tabs.map((tab) => tab.id)).toEqual(["work-1", "work-2"]);
+  expect(right.nextActiveId).toBe("work-2");
+
+  // 当前标签在列表末尾：右边没有存活标签，退回左边最近的 work-1。
+  const tailActive = [
+    { id: "run-r1", automationId: "auto-1", taskId: "gone-1", sessionId: "s1" },
+    { id: "work-1", sessionId: "s2" },
+    { id: "run-r2", automationId: "auto-1", taskId: "gone-2", sessionId: "s3" },
+  ];
+  const left = reconcileStaleAutomationTabs(tailActive, [], "run-r2");
+  expect(left.tabs.map((tab) => tab.id)).toEqual(["work-1"]);
+  expect(left.nextActiveId).toBe("work-1");
+});
+
+test("a stale tab without a session id stays and never crashes the sweep", () => {
+  const tabs = [
+    { id: "run-skeleton", automationId: "auto-1", taskId: "gone-1" },
+    { id: "run-r2", automationId: "auto-1", taskId: "gone-2", sessionId: "s3" },
+    { id: "work-1", sessionId: "s4" },
+  ];
+  const result = reconcileStaleAutomationTabs(tabs, [], "work-1");
+  // 没有 sessionId 的骨架不在关闭范围（与 closeRunTabsForSession 的判据一致），其余照常关闭。
+  expect(result.tabs.map((tab) => tab.id)).toEqual(["run-skeleton", "work-1"]);
+  expect(result.nextActiveId).toBe("work-1");
 });
