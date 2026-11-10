@@ -8,12 +8,16 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 
 import type { AutomationInfo, RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 import { inFlightRuns } from '../../src/huaanwork-host/automation-inflight.ts'
 import { automationRunSessionId } from '../../src/huaanwork-host/automation-session-ids.ts'
-import { evaluateDueAutomations, startAutomationScheduler } from '../../src/huaanwork-host/automation-scheduler.ts'
+import {
+  evaluateDueAutomations,
+  recoverInterruptedAutomation,
+  startAutomationScheduler,
+} from '../../src/huaanwork-host/automation-scheduler.ts'
 import {
   MISSING_PROJECT_OUTPUT,
   automationAdmissionRoot,
@@ -25,6 +29,7 @@ import {
 import {
   MISSED_GRACE_MS,
   advanceNextRunAt,
+  appendRun,
   createAutomation,
   markAutomation,
   normalizeAutomationInput,
@@ -37,10 +42,12 @@ import {
   type ListedAgent,
 } from '../../src/huaanwork-host/sessions.ts'
 import {
+  createAutomationRunTask,
   createProject,
   findAutomation,
   listAutomations,
   recentRuns,
+  runsPath,
 } from '../../src/huaanwork-host/stores.ts'
 import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
@@ -592,6 +599,82 @@ test('a new scheduler cancels residual running rows and leaves this generation a
   expect((await findAutomation(h.profileDir, residual.id)).lastStatus).toBe('error')
   expect(await recentRuns(h.profileDir, current.id)).toEqual([])
   expect((await findAutomation(h.profileDir, current.id)).lastStatus).toBe('running')
+})
+
+async function boundAgentForRecovery(h: Harness): Promise<AutomationInfo> {
+  const root = mkdtempSync(join(tmpdir(), 'hw-recovery-project-'))
+  dirs.push(root)
+  const project = await createProject(h.profileDir, { root, name: '恢复项目' })
+  return createAutomation(h.profileDir, normalizeAutomationInput({
+    projectId: project.id, name: '恢复任务', kind: 'agent',
+    schedule: { kind: 'manual' }, prompt: '恢复测试',
+  }))
+}
+
+test('recovery reconciles an already persisted successful run without duplicating it', async () => {
+  const h = makeHarness()
+  const created = await boundAgentForRecovery(h)
+  await markAutomation(h.profileDir, created.id, {
+    lastRunAt: 1000, lastStatus: 'running', activeRunId: 'original-1',
+  })
+  await appendRun(h.profileDir, created.id, {
+    runId: 'original-1', startedAt: 1000, endedAt: 1200, ok: true,
+    output: 'done', status: 'ok', durationMs: 200,
+  })
+  const running = await findAutomation(h.profileDir, created.id)
+  await recoverInterruptedAutomation(h.routeCtx, running, 2000)
+  const runs = await recentRuns(h.profileDir, created.id)
+  expect(runs).toHaveLength(1)
+  expect(runs[0]?.runId).toBe('original-1')
+  expect((await findAutomation(h.profileDir, created.id)).lastStatus).toBe('ok')
+})
+
+test('recovery reuses the persisted run task instead of matching timestamps', async () => {
+  const h = makeHarness()
+  const created = await boundAgentForRecovery(h)
+  const sessionId = automationRunSessionId(created.id, 'original-2')
+  const task = await createAutomationRunTask(h.profileDir, {
+    projectId: created.projectId!, name: '原运行', createdAt: 1000,
+    automationId: created.id, runId: 'original-2', sessionId,
+  })
+  await markAutomation(h.profileDir, created.id, {
+    lastRunAt: 1000, lastStatus: 'running', activeRunId: 'original-2',
+  })
+  const running = await findAutomation(h.profileDir, created.id)
+  await recoverInterruptedAutomation(h.routeCtx, running, 2000)
+  const run = (await recentRuns(h.profileDir, created.id))[0]!
+  expect(run.runId).toBe('original-2')
+  expect(run.taskId).toBe(task.id)
+  expect(run.sessionId).toBe(sessionId)
+  expect(run.status).toBe('cancelled')
+})
+
+test('one failing recovery leaves its row running and does not block the rest', async () => {
+  useTick(20)
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '隔离' })
+  const broken = await makeTask(h.profileDir, { projectId: project.id, name: '损坏', schedule: { kind: 'manual' } })
+  const healthy = await makeTask(h.profileDir, { projectId: project.id, name: '正常', schedule: { kind: 'manual' } })
+  await markAutomation(h.profileDir, broken.id, {
+    lastRunAt: Date.now() - 10_000, lastStatus: 'running', activeRunId: 'broken-1',
+  })
+  await markAutomation(h.profileDir, healthy.id, {
+    lastRunAt: Date.now() - 10_000, lastStatus: 'running', activeRunId: 'healthy-1',
+  })
+  // runs 文件位置被目录占住:该条恢复在 appendRun 前读取就抛错(EISDIR)。
+  mkdirSync(runsPath(h.profileDir, broken.id), { recursive: true })
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    start(h)
+    await poll(async () => (await recentRuns(h.profileDir, healthy.id)).some((run) => run.runId === 'healthy-1'))
+  } finally {
+    logged.mockRestore()
+  }
+  const recovered = (await recentRuns(h.profileDir, healthy.id))[0]!
+  expect(recovered).toMatchObject({ status: 'cancelled', ok: false })
+  const stuck = await findAutomation(h.profileDir, broken.id)
+  expect(stuck.lastStatus).toBe('running')
+  expect(stuck.activeRunId).toBe('broken-1')
 })
 
 test('a due once task disables itself after firing and does not record missed', async () => {
