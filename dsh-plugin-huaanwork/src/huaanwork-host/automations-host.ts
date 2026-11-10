@@ -237,6 +237,28 @@ export function hasInFlightAutomationRun(automationId: string): boolean {
   return inFlightRunsOf(automationId).length > 0
 }
 
+/**
+ * 进程内「正在删除」集合(规格 §9.1)。
+ *
+ * 删除级联存在多个 await,而准入的同步段要在 `admitAutomation` 之前就拒绝:只靠
+ * inFlight 表挡不住「已准入、尚未 enqueue」的窗口(那段由 rootWriter 的 automationId
+ * 覆盖),也挡不住 guard 与 admit 之间被插入的调度 tick。已删除的注册项在下一次读表
+ * 之前仍可被调度器看到,所以这层进程内互斥是必要的。
+ */
+const deletingAutomationIds = new Set<string>()
+
+/** 进入删除守卫;已在删除中直接拒绝(同一任务不允许并发两条删除级联)。 */
+export function beginAutomationDeletion(id: string): () => void {
+  if (deletingAutomationIds.has(id)) throw new Error('该自动化正在删除')
+  deletingAutomationIds.add(id)
+  return () => deletingAutomationIds.delete(id)
+}
+
+/** 准入前的同步断言:与 `scheduler.admitAutomation` 之间不得有 await。 */
+export function assertAutomationNotDeleting(id: string): void {
+  if (deletingAutomationIds.has(id)) throw new Error('该自动化正在删除')
+}
+
 const automationIdleTimeout = (routeCtx: RouteContext): number =>
   readHuaanworkSettingsSync(routeCtx.profileDir).automation_timeout_ms
 

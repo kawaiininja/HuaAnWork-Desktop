@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
+import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 
 import type {
@@ -398,6 +399,22 @@ export async function removeTasksOfProject(storageRoot: string, projectId: strin
   })
 }
 
+/**
+ * 自动化删除时按来源清理它生成的**全部**子任务(跨项目:改绑前的旧项目 Task 也在内),
+ * 返回被删 Task。规格 §9.3 第 4 步;写盘失败直接抛出,让自动化注册项保留供重试。
+ */
+export async function removeTasksOfAutomation(storageRoot: string, automationId: string): Promise<TaskInfo[]> {
+  if (!automationId.trim()) throw new Error('removeTasksOfAutomation requires an automationId')
+  return withTaskRegistryLock(async () => {
+    const registry = await readTaskRegistry(storageRoot)
+    const doomed = registry.tasks.filter((task) => task.automationId === automationId)
+    if (doomed.length === 0) return []
+    registry.tasks = registry.tasks.filter((task) => task.automationId !== automationId)
+    await writeTaskRegistry(storageRoot, registry)
+    return doomed
+  })
+}
+
 // —— automations 读路径(旧 automations.ts:376-387,713-754 逐字)。
 // 写路径在 automations-store.ts,必须复用下面这把锁,禁止再造第二把。——
 
@@ -409,9 +426,8 @@ export { AUTO_SESSION_PREFIX }
 type AutomationRegistry = { automations: AutomationInfo[] }
 
 /**
- * 注册表读改写周期的互斥链:级联删除(removeAutomationsOfProject)与 M4 写周期
- * 串行执行,避免并发周期互相覆盖丢更新。读函数不加锁——原子 rename 保证读者
- * 看到的是完整旧态或完整新态。
+ * 注册表读改写周期的互斥链:自动化删除/项目级联与 M4 写周期串行执行,避免并发周期
+ * 互相覆盖丢更新。读函数不加锁——原子 rename 保证读者看到的是完整旧态或完整新态。
  */
 let automationRegistryLock: Promise<unknown> = Promise.resolve()
 
@@ -518,75 +534,71 @@ export function auditPath(storageRoot: string, automationId: string): string {
   return join(runsDir(storageRoot), `${automationId}.audit.jsonl`)
 }
 
+/** 一处会话目录:`<cwdDir>/<sessionId>`。 */
+export type AutomationSessionDir = { cwdDir: string; sessionId: string }
+
 /**
- * 级联删除运行会话目录:`<sessionsRoot>/<escaped-cwd>/huaanwork-auto-<automationId>-*`。
- * 会话 id 由运行侧铸造(前缀 + automationId + "-" + 后缀),按前缀匹配即可;目录不存在或个别 cwd
- * 读取失败都不炸(删除路径的容错优先于清理彻底)。
- * 注意:Desktop 组合下会话日志在 dshHome/sessions(不在 profileDir 下),调用方显式传根。
- * `releaseSession` 在删每个会话目录之前回调(宿主用它摘掉运行态,与 session.remove 同口径);
- * 不传则保持旧的纯删文件行为,存储层单元测试无需构造运行态。
+ * 扫描会话根并按谓词匹配目录名。会话根缺失(ENOENT/ENOTDIR)视为没有会话,
+ * 其他读取失败直接抛出——删除路径必须能区分「没有」与「读不到」,后者要中止并保留锚点。
+ * 会话根里的普通文件(如 macOS 的 `.DS_Store`)不是 cwd,直接跳过。
  */
-export async function removeAutomationSessions(
+async function scanSessionDirs(
+  sessionsRoot: string,
+  matches: (sessionId: string) => boolean,
+): Promise<AutomationSessionDir[]> {
+  const missing = (error: unknown): boolean => {
+    const code = (error as { code?: string }).code
+    return code === 'ENOENT' || code === 'ENOTDIR'
+  }
+  let roots: Dirent[]
+  try {
+    roots = await readdir(sessionsRoot, { withFileTypes: true })
+  } catch (error) {
+    if (missing(error)) return []
+    throw error
+  }
+  const found: AutomationSessionDir[] = []
+  for (const entry of roots) {
+    if (!entry.isDirectory()) continue
+    const cwdDir = join(sessionsRoot, entry.name)
+    let entries: string[]
+    try {
+      entries = await readdir(cwdDir)
+    } catch (error) {
+      // ENOTDIR/ENOENT:扫描后条目被换成非目录或已消失,它不是会话 cwd。
+      if (missing(error)) continue
+      throw error
+    }
+    for (const sessionId of entries) {
+      if (matches(sessionId)) found.push({ cwdDir, sessionId })
+    }
+  }
+  return found
+}
+
+/** 该自动化的全部运行会话目录(前缀口径:`huaanwork-auto-<automationId>-*`)。 */
+export async function listAutomationSessionDirs(
   sessionsRoot: string,
   automationId: string,
-  releaseSession?: (sessionId: string) => void,
-): Promise<void> {
-  const wantedPrefixes = [`${AUTO_SESSION_PREFIX}${automationId}-`]
-  let cwds: string[]
-  try {
-    cwds = await readdir(sessionsRoot)
-  } catch {
-    return
-  }
-  await Promise.all(
-    cwds.map(async (cwd) => {
-      const cwdDir = join(sessionsRoot, cwd)
-      let entries: string[]
-      try {
-        entries = await readdir(cwdDir)
-      } catch {
-        return
-      }
-      await Promise.all(
-        entries
-          .filter((entry) => wantedPrefixes.some((prefix) => entry.startsWith(prefix)))
-          .map((entry) => {
-            releaseSession?.(entry)
-            return rm(join(cwdDir, entry), { recursive: true, force: true }).catch(() => undefined)
-          }),
-      )
-    }),
-  )
+): Promise<AutomationSessionDir[]> {
+  const wantedPrefix = `${AUTO_SESSION_PREFIX}${automationId}-`
+  return scanSessionDirs(sessionsRoot, (sessionId) => sessionId.startsWith(wantedPrefix))
+}
+
+/** 给定 sessionId 集合在磁盘上的会话目录(删除级联的目标定位;不存在的不返回)。 */
+export async function findSessionDirs(
+  sessionsRoot: string,
+  sessionIds: ReadonlySet<string>,
+): Promise<AutomationSessionDir[]> {
+  if (sessionIds.size === 0) return []
+  return scanSessionDirs(sessionsRoot, (sessionId) => sessionIds.has(sessionId))
 }
 
 /**
- * 项目删除时级联清理该项目全部任务及其运行历史。
- * `releaseSession` 原样传给 `removeAutomationSessions`(见其注释)。
+ * 项目删除时级联清理该项目全部自动化:逐项复用自动化自己的删除锚点顺序(规格 §9.3),
+ * 实现见 automations-store.ts 的 `removeAutomationsOfProject`(写路径不在本文件,
+ * 以免 stores ↔ automations-store 双向依赖)。
  */
-export async function removeAutomationsOfProject(
-  storageRoot: string,
-  projectId: string,
-  sessionsRoot: string = join(storageRoot, 'sessions'),
-  releaseSession?: (sessionId: string) => void,
-): Promise<void> {
-  return withAutomationRegistryLock(async () => {
-    const registry = await readAutomationRegistry(storageRoot)
-    const doomed = registry.automations.filter((item) => item.projectId === projectId)
-    if (doomed.length === 0) return
-    registry.automations = registry.automations.filter((item) => item.projectId !== projectId)
-    await writeAutomationRegistry(storageRoot, registry)
-    await Promise.all(
-      doomed.map((automation) => rm(runsPath(storageRoot, automation.id), { force: true }).catch(() => undefined)),
-    )
-    // Phase 2:无人值守降级审计行随项目级联一并清理(与 removeAutomation 同口径)。
-    await Promise.all(
-      doomed.map((automation) =>
-        rm(auditPath(storageRoot, automation.id), { force: true }).catch(() => undefined),
-      ),
-    )
-    await Promise.all(doomed.map((automation) => removeAutomationSessions(sessionsRoot, automation.id, releaseSession)))
-  })
-}
 
 /** 最近的运行记录(新的在后);文件缺失或损坏时返回空数组。 */
 export async function recentRuns(storageRoot: string, automationId: string, limit = RUNS_LIMIT): Promise<RunSummary[]> {

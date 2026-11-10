@@ -1,6 +1,6 @@
 import { createServer, request as httpRequest, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
@@ -10,6 +10,7 @@ import {
   routeKey,
   handleHuaanworkRequest,
   errorRoute,
+  beginProjectDeletion,
   RouteError,
   type RouteContext,
 } from '../../src/huaanwork-host/routes.ts'
@@ -19,6 +20,7 @@ import { createAgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 import { readPendingWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
 import { WORKSPACE_SCAN_DEPTH } from '../../src/client-huaanwork/logic/outcomeCheck.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
+import { createTurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 
 const ALL_METHODS = [
   'workspace.open', 'workspace.close',
@@ -1598,6 +1600,199 @@ describe('automation.stop 成功路径(Task 8)', () => {
     } finally {
       inFlightRuns.clear()
       rmSync(profileDir, { recursive: true, force: true })
+    }
+  })
+})
+
+/**
+ * Task 7:删除 guard 与跨项目级联(规格 §9.1/§9.3)。
+ *
+ * 自动化注册项/项目注册项是持久锚点:级联期间它们仍在注册表里,所以真正挡住
+ * 「删除中又被绑定」的是进程内 guard,而不是存在性检查。这里直接驱动 ROUTE_TABLE
+ * 的 handler,因为 guard 的存续期必须跨多次 await(HTTP 面无法在中间插桩)。
+ */
+describe('删除 guard 与跨项目级联 (Task 7)', () => {
+  type Invoke = (method: string, body: unknown) => Promise<unknown>
+
+  function makeCtx(home: string, runtimeCtx?: RouteContext['runtimeCtx']): RouteContext {
+    return {
+      dshHome: join(home, 'dsh'),
+      profileDir: home,
+      workspaceRoot: { current: join(home, 'workspace') },
+      emit: () => {},
+      logger: () => {},
+      requestRestart: async () => false,
+      ...(runtimeCtx === undefined ? {} : { runtimeCtx }),
+    }
+  }
+
+  const invokeWith = (ctx: RouteContext): Invoke => {
+    return async (method, body) => {
+      const route = ROUTE_TABLE.find((entry) => entry.method === method)
+      if (!route) throw new Error(`missing route ${method}`)
+      return route.handler({ params: {}, body, query: new URLSearchParams() }, ctx)
+    }
+  }
+
+  test('automation.remove rejects an admitted run that has not reached the in-flight table', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'hw-task7-remove-'))
+    const scheduler = createTurnScheduler({ maxConcurrentTurns: () => 4, modelExists: () => true })
+    const sessionId = 'huaanwork-auto-a2-r1'
+    try {
+      writeFileSync(join(home, 'automations.json'), JSON.stringify({
+        automations: [{
+          id: 'a2', projectId: null, name: '巡检', kind: 'agent',
+          schedule: { kind: 'manual' }, enabled: true, createdAt: 1,
+        }],
+      }))
+      // 只准入、不入队:inFlight 表还是空的,只有 scheduler.activeAutomationIds 覆盖这个窗口。
+      expect(scheduler.admitAutomation({
+        automationId: 'a2',
+        sessionId,
+        root: join(home, 'root'),
+        runId: 'r1',
+        countsTowardCap: true,
+      }).kind).toBe('start')
+
+      const invoke = invokeWith(makeCtx(home, { huaanworkTurnScheduler: scheduler }))
+      await expect(invoke('automation.remove', { id: 'a2' })).rejects.toThrow(/正在运行/)
+      expect((JSON.parse(readFileSync(join(home, 'automations.json'), 'utf8')) as { automations: unknown[] }).automations)
+        .toHaveLength(1)
+
+      scheduler.release(sessionId)
+      await expect(invoke('automation.remove', { id: 'a2' })).resolves.toEqual({ removed: true })
+      expect((JSON.parse(readFileSync(join(home, 'automations.json'), 'utf8')) as { automations: unknown[] }).automations)
+        .toEqual([])
+    } finally {
+      scheduler.release(sessionId)
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(process.platform === 'win32')(
+    'a task-write failure during the cascade keeps the automation registry and the retry succeeds',
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'hw-task7-retry-'))
+      const sessionId = 's-auto'
+      const sessionDir = join(home, 'dsh', 'sessions', 'cwd-x', sessionId)
+      try {
+        writeFileSync(join(home, 'automations.json'), JSON.stringify({
+          automations: [{
+            id: 'a3', projectId: 'p1', name: '日报', kind: 'agent',
+            schedule: { kind: 'manual' }, enabled: true, createdAt: 1,
+          }],
+        }))
+        writeFileSync(join(home, 'tasks.json'), JSON.stringify({
+          tasks: [{
+            id: 't-auto', projectId: 'p1', name: '运行子任务', createdAt: 1000,
+            sessionId, automationId: 'a3', runId: 'r1',
+          }],
+        }))
+        mkdirSync(sessionDir, { recursive: true })
+        mkdirSync(join(home, 'automations'), { recursive: true })
+        writeFileSync(join(home, 'automations', 'a3.runs.jsonl'), `${JSON.stringify({
+          runId: 'r1', startedAt: 1, endedAt: 2, ok: true, output: 'ok', sessionId,
+        })}\n`)
+
+        // 只读 tasks.json:会话已清、Task 写回失败、注册项保留供重试。
+        const tasksPath = join(home, 'tasks.json')
+        chmodSync(tasksPath, 0o444)
+        const invoke = invokeWith(makeCtx(home))
+        try {
+          await expect(invoke('automation.remove', { id: 'a3' })).rejects.toThrow()
+        } finally {
+          chmodSync(tasksPath, 0o644)
+        }
+        expect(existsSync(sessionDir)).toBe(false)
+        expect((JSON.parse(readFileSync(join(home, 'automations.json'), 'utf8')) as { automations: unknown[] }).automations)
+          .toHaveLength(1)
+        expect((JSON.parse(readFileSync(tasksPath, 'utf8')) as { tasks: { id: string }[] }).tasks.map((task) => task.id))
+          .toEqual(['t-auto'])
+
+        await expect(invoke('automation.remove', { id: 'a3' })).resolves.toEqual({ removed: true })
+        expect((JSON.parse(readFileSync(join(home, 'automations.json'), 'utf8')) as { automations: unknown[] }).automations)
+          .toEqual([])
+        expect((JSON.parse(readFileSync(tasksPath, 'utf8')) as { tasks: unknown[] }).tasks).toEqual([])
+        expect(existsSync(join(home, 'automations', 'a3.runs.jsonl'))).toBe(false)
+      } finally {
+        rmSync(home, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('the project deletion guard rejects binding, rebinding and subtask creation until it is released', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'hw-task7-project-guard-'))
+    try {
+      writeFileSync(join(home, 'projects.json'), JSON.stringify({
+        projects: [{ id: 'p1', name: 'P1', root: join(home, 'p1'), createdAt: 1 }],
+      }))
+      // a1 属于 p2,下面要改绑到正在删除的 p1。
+      writeFileSync(join(home, 'automations.json'), JSON.stringify({
+        automations: [{
+          id: 'a1', projectId: 'p2', name: '巡检', kind: 'agent',
+          schedule: { kind: 'manual' }, prompt: '巡检一次', enabled: true, createdAt: 1,
+        }],
+      }))
+      const invoke = invokeWith(makeCtx(home))
+      const bindBody = { name: '新脚本', kind: 'script', command: 'echo hi', schedule: { kind: 'manual' }, projectId: 'p1' }
+
+      const release = beginProjectDeletion('p1')
+      try {
+        // 项目注册项仍在 projects.json:存在性检查放行,必须由 guard 拒绝。
+        await expect(invoke('automation.create', bindBody)).rejects.toThrow('该项目正在删除，暂不能绑定')
+        await expect(invoke('automation.update', { id: 'a1', projectId: 'p1' }))
+          .rejects.toThrow('该项目正在删除，暂不能绑定')
+        await expect(invoke('task.create', { projectId: 'p1', name: '子任务' }))
+          .rejects.toThrow('该项目正在删除，暂不能绑定')
+      } finally {
+        release()
+      }
+
+      // 释放后三条路径恢复。
+      const created = await invoke('automation.create', bindBody) as { automation: { projectId: string } }
+      expect(created.automation.projectId).toBe('p1')
+      const rebound = await invoke('automation.update', { id: 'a1', projectId: 'p1' }) as { automation: { projectId: string } }
+      expect(rebound.automation.projectId).toBe('p1')
+      const task = await invoke('task.create', { projectId: 'p1', name: '子任务' }) as { task: { projectId: string } }
+      expect(task.task.projectId).toBe('p1')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('an active plain task session does not reject project removal', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'hw-task7-plain-'))
+    const sessionId = 'huaanwork-8888888888888888'
+    const sessionDir = join(home, 'dsh', 'sessions', 'repo', sessionId)
+    const scheduler = createTurnScheduler({ maxConcurrentTurns: () => 2, modelExists: () => true })
+    try {
+      writeFileSync(join(home, 'projects.json'), JSON.stringify({
+        projects: [{ id: 'p1', name: 'P1', root: join(home, 'p1'), createdAt: 1 }],
+      }))
+      writeFileSync(join(home, 'tasks.json'), JSON.stringify({
+        tasks: [{ id: 't-plain', projectId: 'p1', name: '普通子任务', createdAt: 1, sessionId }],
+      }))
+      mkdirSync(sessionDir, { recursive: true })
+      writeFileSync(join(sessionDir, 'session.jsonl'), `${JSON.stringify({
+        type: 'session', version: 0, id: sessionId, createdAt: 1_000, delegationDepth: 0,
+      })}\n`)
+
+      // 普通任务正在对话:既有 release-then-delete 语义,不得因活跃拒绝(N1)。
+      expect(scheduler.admitUserTurn({
+        sessionId, tabId: 'tab', text: '继续', modelId: 'm', root: join(home, 'root'),
+      }).kind).toBe('start')
+
+      const invoke = invokeWith(makeCtx(home, {
+        huaanworkTurnScheduler: scheduler,
+        agents: { get: () => undefined },
+      }))
+      await expect(invoke('project.remove', { projectId: 'p1' })).resolves.toMatchObject({ removed: true })
+      expect((JSON.parse(readFileSync(join(home, 'projects.json'), 'utf8')) as { projects: unknown[] }).projects).toEqual([])
+      expect((JSON.parse(readFileSync(join(home, 'tasks.json'), 'utf8')) as { tasks: unknown[] }).tasks).toEqual([])
+      expect(existsSync(sessionDir)).toBe(false)
+    } finally {
+      scheduler.release(sessionId)
+      rmSync(home, { recursive: true, force: true })
     }
   })
 })

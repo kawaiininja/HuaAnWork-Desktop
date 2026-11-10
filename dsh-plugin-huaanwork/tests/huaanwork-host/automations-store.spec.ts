@@ -4,7 +4,11 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { AutomationInfo, AutomationSchedule, ProjectInfo, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
 import { inFlightRuns, startInFlightRun } from '../../src/huaanwork-host/automation-inflight.ts'
-import { automationCollector } from '../../src/huaanwork-host/automations-host.ts'
+import {
+  assertAutomationNotDeleting,
+  automationCollector,
+  beginAutomationDeletion,
+} from '../../src/huaanwork-host/automations-host.ts'
 import { createTurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import {
   AUTOMATION_SESSION_RETAIN_LIMIT,
@@ -21,6 +25,7 @@ import {
   normalizeAutomationInput,
   pruneAutomationSessions,
   removeAutomation,
+  removeAutomationsOfProject,
   rewriteLastRunFromRuns,
   updateAutomation,
 } from '../../src/huaanwork-host/automations-store.ts'
@@ -36,7 +41,6 @@ import {
   listProjects,
   listTasks,
   recentRuns,
-  removeAutomationsOfProject,
   removeProject,
   runsPath,
   withAutomationRegistryLock,
@@ -1781,4 +1785,86 @@ describe('automation.deleteRun (Task 9)', () => {
     }
     expect(await listTasks(profileDir)).toEqual([])
   })
+})
+
+/**
+ * Task 7 删除锚点与 guard(规格 §9.1/§9.3)。
+ * 自动化注册项是持久锚点:会话 → 跨项目自动 Task → runs/audit → 注册项最后删,
+ * 任何一步非 ENOENT 失败都保留注册项供重试。
+ */
+describe('automation deletion anchor and guard (Task 7)', () => {
+  test('automation deletion removes generated tasks from old and current projects', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput({
+      projectId: 'p1', schedule: { kind: 'manual' },
+    })))
+    const oldTask = await createAutomationRunTask(home, {
+      projectId: 'p1', name: '旧项目运行', createdAt: 1000,
+      automationId: automation.id, runId: 'r1', sessionId: 's1',
+    })
+    await updateAutomation(home, automation.id, { projectId: 'p2' })
+    const newTask = await createAutomationRunTask(home, {
+      projectId: 'p2', name: '新项目运行', createdAt: 2000,
+      automationId: automation.id, runId: 'r2', sessionId: 's2',
+    })
+    await removeAutomation(home, automation.id, join(home, 'sessions'))
+    expect((await listTasks(home)).map((task) => task.id)).not.toContain(oldTask.id)
+    expect((await listTasks(home)).map((task) => task.id)).not.toContain(newTask.id)
+    expect(await listAutomations(home)).toEqual([])
+  })
+
+  test('deletion guard blocks admission synchronously', () => {
+    const release = beginAutomationDeletion('auto-delete')
+    try {
+      expect(() => assertAutomationNotDeleting('auto-delete')).toThrow(/正在删除/)
+    } finally {
+      release()
+    }
+  })
+
+  test.skipIf(process.platform === 'win32')(
+    'a cascade task-write failure keeps the automation registry and a retry completes',
+    async () => {
+      const dshHome = makeHome()
+      const profileDir = join(dshHome, 'profiles', 'huaanwork')
+      mkdirSync(profileDir, { recursive: true })
+      const automation = await createAutomation(
+        profileDir,
+        normalizeAutomationInput(agentInput({ schedule: { kind: 'manual' } })),
+        T0,
+      )
+      const task = await createAutomationRunTask(profileDir, {
+        projectId: 'p1', name: '运行子任务', createdAt: 1000,
+        automationId: automation.id, runId: 'r1', sessionId: 's1',
+      })
+      const sessionDir = join(dshHome, 'sessions', 'cwd-x', 's1')
+      mkdirSync(sessionDir, { recursive: true })
+      await appendRun(profileDir, automation.id, {
+        runId: 'r1',
+        startedAt: T0,
+        endedAt: T0 + 1,
+        ok: true,
+        output: 'ok',
+        sessionId: 's1',
+      })
+
+      // 只读 tasks.json:读得到、写回失败 ⇒ 会话已清、Task 写盘抛错、注册项仍在。
+      const tasksPath = join(profileDir, 'tasks.json')
+      chmodSync(tasksPath, 0o444)
+      try {
+        await expect(removeAutomation(profileDir, automation.id, join(dshHome, 'sessions'))).rejects.toThrow()
+      } finally {
+        chmodSync(tasksPath, 0o644)
+      }
+
+      expect(existsSync(sessionDir)).toBe(false)
+      expect((await listTasks(profileDir)).map((item) => item.id)).toEqual([task.id])
+      expect((await listAutomations(profileDir)).map((item) => item.id)).toEqual([automation.id])
+
+      await removeAutomation(profileDir, automation.id, join(dshHome, 'sessions'))
+      expect(await listAutomations(profileDir)).toEqual([])
+      expect(await listTasks(profileDir)).toEqual([])
+      expect(await recentRuns(profileDir, automation.id)).toEqual([])
+    },
+  )
 })

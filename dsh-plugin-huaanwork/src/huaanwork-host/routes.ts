@@ -60,7 +60,6 @@ import {
   createTask,
   bindTaskSession,
   recentRuns,
-  removeAutomationsOfProject,
   removeProject,
   removeTask,
   removeTasksOfProject,
@@ -101,19 +100,23 @@ import {
 import { closeWorkspace, openWorkspace } from './workspace.ts'
 import { SubagentRunNotFoundError, type SubagentRunRegistry } from './subagent-runs.ts'
 import {
+  automationCascadeSessionIds,
   createAutomation,
   deleteAutomationRun,
   MAX_AUTOMATIONS,
   normalizeAutomationInput,
   pruneAutomationSessions,
+  removeAutomationsOfProject,
   removeAutomation,
   updateAutomation,
 } from './automations-store.ts'
 import { automationRunSessionId } from './automation-session-ids.ts'
 import { inFlightRuns } from './automation-inflight.ts'
 import {
+  assertAutomationNotDeleting,
   automationAdmissionRoot,
   automationCollector,
+  beginAutomationDeletion,
   enqueueAutomation,
   hasInFlightAutomationRun,
   stopAutomation,
@@ -194,6 +197,54 @@ const requireTurnScheduler = (ctx: RouteContext): TurnScheduler => {
   const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
   if (!scheduler) throw new RouteError(503, 'runtime-unavailable', '回合调度器未初始化')
   return scheduler
+}
+
+/**
+ * 进程内「项目正在删除」集合(规格 §9.1)。
+ *
+ * 放在 routes.ts 模块 scope:只有 `project.remove` 一个生产消费者,放进 automations-host
+ * 会名不副实。锚点最后删使级联期间项目仍在 projects.json,存在性检查挡不住绑定 ⇒
+ * `automation.create` 的显式绑定、`automation.update` 的改绑与 `task.create` 必须在
+ * 同步段 assert。导出给路由级测试用(唯一生产消费者仍是本文件)。
+ */
+const deletingProjectIds = new Set<string>()
+
+export function beginProjectDeletion(id: string): () => void {
+  if (deletingProjectIds.has(id)) throw new Error('该项目正在删除')
+  deletingProjectIds.add(id)
+  return () => deletingProjectIds.delete(id)
+}
+
+export function assertProjectNotDeleting(id: string): void {
+  if (deletingProjectIds.has(id)) throw new Error('该项目正在删除，暂不能绑定')
+}
+
+/** 自动化在途/活跃快照:`automationCollector ∪ TurnScheduler`(只读,用于删除预检)。 */
+function activeAutomationSessionIds(scheduler: TurnScheduler | undefined): Set<string> {
+  return new Set([...automationCollector.keys(), ...(scheduler?.activeSessionIds() ?? [])])
+}
+
+/** 删除自动化前的全量预检:在途轮、已准入未入队、目标会话的活跃快照(规格 §9.1)。 */
+async function assertAutomationRemovable(
+  ctx: RouteContext,
+  automationId: string,
+  scheduler: TurnScheduler | undefined,
+): Promise<void> {
+  if (hasInFlightAutomationRun(automationId)) {
+    throw new Error('该自动化任务正在运行，请等待运行结束或停止后再删除')
+  }
+  if (scheduler?.activeAutomationIds().has(automationId)) {
+    // admit→enqueue 的窗口:inFlight 表还没有条目,只有 rootWriter 带着 automationId。
+    throw new Error('该自动化任务正在运行，请等待运行结束或停止后再删除')
+  }
+  const activeSessionIds = activeAutomationSessionIds(scheduler)
+  for (const sessionId of await automationCascadeSessionIds(
+    ctx.profileDir,
+    automationId,
+    join(ctx.dshHome, 'sessions'),
+  )) {
+    if (activeSessionIds.has(sessionId)) throw new Error('会话正在使用，暂不能删除')
+  }
 }
 
 /** 子代理 run registry 由 index.ts 在 holders 安装后注入;缺席是装配错误,按 503 报告。 */
@@ -1131,26 +1182,41 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     path: '/huaanwork/project/remove',
     // 旧 host.ts:1050-1059 语义:级联清理该项目下全部自动化任务(含运行历史)与
     // 子任务(不触碰项目目录与普通会话日志);子任务绑定会话日志经 removeSessionFilesById 级联删。
+    //
+    // 规格 §9.3:项目注册项是最后才删的锚点。级联期间项目仍在 projects.json,所以
+    // 「删除中又被绑定」由 `deletingProjectIds` 挡住,而不是存在性检查(T1)。
+    // doomed 自动化全部预检(在途/已准入/自动化来源活跃会话)通过后才开始删除;
+    // 预检失败时项目注册项保留、不开始任何级联。中途失败不回滚已完成的子级联,
+    // 项目锚点仍在,重试即幂等续做。剩余普通 Task 保持既有 release-then-delete(N1)。
     handler: storeRoute(async (req, ctx) => {
       const projectId = bodyParam(req.body, 'projectId')
       if (!projectId) throw new Error('project.remove requires params.projectId')
       const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
-      if (scheduler) {
-        for (const automation of await listAutomations(ctx.profileDir)) {
-          if (automation.projectId === projectId) scheduler.clearAdmissionSkip(automation.id)
-        }
+      // 先拿项目守卫再读 doomed:反序会给「列表之后、守卫之前」留一个绑定窗口(T1)。
+      const releaseProject = beginProjectDeletion(projectId)
+      const releaseAutomations: Array<() => void> = []
+      try {
+        const doomed = await listAutomations(ctx.profileDir, projectId)
+        // 每个 doomed 自动化先进自己的删除守卫,再做全量预检;任一失败整批不开始。
+        for (const automation of doomed) releaseAutomations.push(beginAutomationDeletion(automation.id))
+        for (const automation of doomed) await assertAutomationRemovable(ctx, automation.id, scheduler)
+
+        for (const automation of doomed) scheduler?.clearAdmissionSkip(automation.id)
+        // 逐项复用自动化自己的可重试锚点顺序(会话 → 跨项目自动 Task → runs/audit → 注册项)。
+        await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'), (sessionId) =>
+          releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+        )
+        const cascadedSessionIds = await removeTasksOfProject(ctx.profileDir, projectId)
+        // 与 session.remove 同一运行态释放:删文件前先摘掉卡片、live agent、子会话与计划目标。
+        for (const sessionId of cascadedSessionIds) releaseSessionRuntime(ctx.runtimeCtx, sessionId)
+        await removeSessionFilesById(join(ctx.dshHome, 'sessions'), cascadedSessionIds)
+        // 项目锚点最后删:上面的子级联都可重试,重试时项目仍在。
+        const removed = await removeProject(ctx.profileDir, projectId)
+        return { removed: true, project: removed }
+      } finally {
+        for (const release of releaseAutomations.reverse()) release()
+        releaseProject()
       }
-      const removed = await removeProject(ctx.profileDir, projectId)
-      // 自动化运行会话也是会话日志:删目录前同样释放运行态(等待中的输入、live agent、
-      // 子会话登记、坏参数计数与已确认计划目标),与 session.remove / 任务级联同口径。
-      await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'), (sessionId) =>
-        releaseSessionRuntime(ctx.runtimeCtx, sessionId),
-      )
-      const cascadedSessionIds = await removeTasksOfProject(ctx.profileDir, projectId)
-      // 与 session.remove 同一运行态释放:删文件前先摘掉卡片、live agent、子会话与计划目标。
-      for (const sessionId of cascadedSessionIds) releaseSessionRuntime(ctx.runtimeCtx, sessionId)
-      await removeSessionFilesById(join(ctx.dshHome, 'sessions'), cascadedSessionIds)
-      return { removed: true, project: removed }
     }),
   }, // Task 10
   {
@@ -1203,6 +1269,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         if (!projects.some((project) => project.id === input.projectId)) {
           throw new Error(`project ${input.projectId} was not found`)
         }
+        // 删除中的项目仍在 projects.json:同步段 assert 挡在 createAutomation 之前(T1)。
+        assertProjectNotDeleting(input.projectId)
         return { automation: await createAutomation(ctx.profileDir, input) }
       }
       // 预检放在建目录之前:并发跨过预检的情况由 createAutomation 的锁内复检
@@ -1256,6 +1324,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
           if (!projects.some((project) => project.id === targetProjectId)) {
             throw new Error(`project ${targetProjectId} was not found`)
           }
+          // 目标项目正在删除:同步段拒绝,避免级联结束后留下悬空归属(T1)。
+          assertProjectNotDeleting(targetProjectId)
         }
       }
       const updated = await updateAutomation(ctx.profileDir, id, patch)
@@ -1270,14 +1340,24 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     method: 'automation.remove',
     http: 'POST',
     path: '/huaanwork/automation/remove',
+    // 规格 §9.3:注册项是最后删的持久锚点。先进程内 guard,再拒在途/已准入/活跃续聊,
+    // 然后按「会话 → 跨项目自动 Task → runs/audit → 注册项」级联;任何失败都保留注册项,
+    // guard 在 finally 释放,只有成功才清调度跳过标记。
     handler: storeRoute(async (req, ctx) => {
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.remove requires params.id')
-      // 运行会话随任务一并删除:删日志前先释放它的运行态(与 project.remove 同一接线段)。
-      await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
-        releaseSessionRuntime(ctx.runtimeCtx, sessionId),
-      )
-      ctx.runtimeCtx?.huaanworkTurnScheduler?.clearAdmissionSkip(id)
+      const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
+      const release = beginAutomationDeletion(id)
+      try {
+        await assertAutomationRemovable(ctx, id, scheduler)
+        // 运行会话随任务一并删除:删日志前先释放它的运行态(与 project.remove 同一接线段)。
+        await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
+          releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+        )
+      } finally {
+        release()
+      }
+      scheduler?.clearAdmissionSkip(id)
       return { removed: true }
     }),
   }, // Task 3 (M4)
@@ -1328,6 +1408,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const root = await automationAdmissionRoot(ctx, automation)
       const sessionId =
         automation.kind === 'agent' ? automationRunSessionId(automation.id, runId) : `script:${runId}`
+      // 删除守卫与准入必须是同一同步段:中间不得有 await(规格 §9.1)。
+      assertAutomationNotDeleting(automation.id)
       const admitted = scheduler.admitAutomation({
         automationId: automation.id,
         sessionId,
@@ -1395,6 +1477,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       if (!projects.some((project) => project.id === projectId)) {
         throw new Error(`project ${projectId} was not found`)
       }
+      // 删除中的项目仍在 projects.json:普通子任务也不得建进将删项目(T1)。
+      assertProjectNotDeleting(projectId)
       return { task: await createTask(ctx.profileDir, { projectId, name }) }
     }),
   }, // Task 10

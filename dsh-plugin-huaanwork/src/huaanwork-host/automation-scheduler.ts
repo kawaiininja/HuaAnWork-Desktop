@@ -13,6 +13,7 @@ import {
   updateAutomation,
 } from './automations-store.ts'
 import {
+  assertAutomationNotDeleting,
   automationAdmissionRoot,
   boundAutomationRuntime,
   bindAutomationRuntime,
@@ -182,6 +183,13 @@ async function admitCandidate(
   const root = await automationAdmissionRoot(routeCtx, automation)
   const sessionId =
     automation.kind === 'agent' ? automationRunSessionId(automation.id, runId) : `script:${runId}`
+  // 删除守卫与准入必须是同一同步段:中间不得有 await(规格 §9.1)。
+  // 正在删除的候选直接作废——注册项还在表里只是删除级联尚未走到最后一步。
+  try {
+    assertAutomationNotDeleting(automation.id)
+  } catch {
+    return
+  }
   const admitted = scheduler.admitAutomation({
     automationId: automation.id,
     sessionId,

@@ -359,6 +359,31 @@ test("the automations view refreshes projects, tasks and sessions alongside the 
   assert.match(site, /onOpenRunTask=\{\(task\) => void selectSubtask\(task\)\}/);
 });
 
+test("automation deletion refreshes tasks and sessions so stale run tabs get reconciled", () => {
+  // 规格 §9.3:删除自动化会级联清掉跨项目的运行子任务与会话日志。只刷新自动化列表时,
+  // 运行标签与「任务」区会留着已失 Task 的条目(标签对账吃的是 tasks 快照,不吃 runs)。
+  // 三段接线缺一即失效:删除成功 → onChanged → tasks/sessions 刷新 → 失效对账。
+  const removeAt = AUTOMATIONS_VIEW_SOURCE.indexOf("async function submitRemove()");
+  const removeEnd = AUTOMATIONS_VIEW_SOURCE.indexOf("return (", removeAt);
+  assert.ok(removeAt >= 0 && removeEnd > removeAt, "AutomationsView still owns submitRemove");
+  const removeBody = AUTOMATIONS_VIEW_SOURCE.slice(removeAt, removeEnd);
+  const callAt = removeBody.indexOf("await removeAutomation(confirming.id)");
+  const changedAt = removeBody.indexOf("onChanged()");
+  assert.ok(callAt >= 0, "the confirm dialog still calls automation.remove");
+  assert.ok(changedAt > callAt, "the view refreshes from the host only after a successful removal");
+
+  const at = APP_SOURCE.indexOf("<AutomationsView");
+  const end = APP_SOURCE.indexOf("/>", at);
+  assert.ok(at >= 0 && end > at, "the AutomationsView call site is still present");
+  const site = APP_SOURCE.slice(at, end);
+  assert.match(site, /void refreshTasks\(\);/, "deletion refreshes the tasks snapshot, not only the automation list");
+  assert.match(site, /void refreshSessions\(\);/, "deletion refreshes sessions alongside tasks");
+
+  // 刷新必须真的落到失效标签对账:对账的依赖是 tasks 快照本身。
+  assert.match(APP_SOURCE, /staleAutomationRunTabs\(chatTabsRef\.current, projectTasks\)/);
+  assert.match(APP_SOURCE, /\}, \[projectTasks, tasksLoaded\]\);/);
+});
+
 test("refreshTasks discards stale responses before writing projectTasks", () => {
   // 规格 §9.1（T3）：早于 Task 落盘发出、晚于 run-task 返回的旧 task.list 会把刚建的
   // 运行标签当成失效并关掉；run-end 不刷新 tasks，误关后不能自愈。

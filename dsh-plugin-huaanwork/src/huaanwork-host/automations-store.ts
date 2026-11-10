@@ -10,11 +10,13 @@ import { nextFireAfter, parseCron, periodOf } from './schedule.ts'
 import {
   RUNS_LIMIT,
   auditPath,
+  findSessionDirs,
+  listAutomationSessionDirs,
   listTasks,
   readAutomationRegistry,
   recentRuns,
-  removeAutomationSessions,
   removeTask,
+  removeTasksOfAutomation,
   runsPath,
   withAutomationRegistryLock,
   writeAutomationRegistry,
@@ -24,8 +26,8 @@ import {
  * 任务注册表写路径与调度纯函数(旧 automations.ts 的 create/update/remove、
  * normalize、missed/due/expired、prune、advanceNextRunAt)。
  *
- * 注册表锁只有 stores.ts 里那一把:本文件的写周期全部走
- * {@link withAutomationRegistryLock},与 removeAutomationsOfProject 串行。
+ * 注册表锁只有 stores.ts 里那一把:本文件的写周期(含删除/项目级联)全部走
+ * {@link withAutomationRegistryLock},彼此串行。
  * parseCron / nextFireAfter / periodOf 从 ./schedule.ts 再导出;humanizeCron
  * 留在 schedule.ts,只给迁移测试用,不接任何展示路径。
  */
@@ -354,6 +356,44 @@ export async function updateAutomation(
   })
 }
 
+/**
+ * 自动化删除的目标会话集(规格 §9.3 第 2 步):级联将要删掉的会话目录。
+ *
+ * = 跨项目自动 Task 的 sessionId ∪ 该自动化最近运行记录的 sessionId ∪ 磁盘上仍存在的
+ * `huaanwork-auto-<automationId>-*` 目录。路由的活跃预检与存储层的实际删除必须读同一份
+ * 定义,否则两侧会各自漂移(过拒/漏拒都只在这条边上有后果)。
+ * 只读快照:调用方拿到它之后准入的续聊仍可能被 release-then-delete(残余窗口,T2 已登记)。
+ */
+export async function automationCascadeSessionIds(
+  storageRoot: string,
+  automationId: string,
+  sessionsRoot: string = join(storageRoot, 'sessions'),
+): Promise<Set<string>> {
+  const sessionIds = new Set<string>()
+  for (const task of await listTasks(storageRoot)) {
+    if (task.automationId === automationId && task.sessionId) sessionIds.add(task.sessionId)
+  }
+  for (const run of await recentRuns(storageRoot, automationId)) {
+    if (run.sessionId) sessionIds.add(run.sessionId)
+  }
+  for (const dir of await listAutomationSessionDirs(sessionsRoot, automationId)) {
+    sessionIds.add(dir.sessionId)
+  }
+  return sessionIds
+}
+
+/**
+ * 删除自动化(规格 §9.3):以自动化注册项为持久锚点,最后才删注册项。
+ *
+ * 顺序:会话目录 → 全部自动 Task(跨项目)→ runs/audit → 注册项。
+ * 任一步非 ENOENT 失败都直接抛出,注册项保留,重试能从同一锚点继续;
+ * 会话目录与 runs/audit 的失败在本路径**不吞**(ENOENT 仍视为已删)。
+ * `releaseSession` 在删每个会话目录之前回调(宿主用它摘掉运行态,与 session.remove 同口径)。
+ *
+ * 锁序:整个级联持注册表锁,内部只取 task 锁(合法方向:task 锁嵌在 automation 锁内),
+ * 不反向调用任何先取 task/运行记录锁的写路径。
+ * 活跃/在途拒绝不在这里:那是路由的预检(进程内 guard 只在路由层存在)。
+ */
 export async function removeAutomation(
   storageRoot: string,
   automationId: string,
@@ -364,12 +404,46 @@ export async function removeAutomation(
     const registry = await readAutomationRegistry(storageRoot)
     const index = registry.automations.findIndex((item) => item.id === automationId)
     if (index < 0) throw new Error(`automation ${automationId} was not found`)
+    // 1. 会话目录:目标集(跨项目自动 Task ∪ 运行记录 ∪ auto-prefix 目录)里真实存在
+    //    的那些,逐个释放运行态后再删;非 ENOENT 失败中止(注册项仍在)。
+    const targets = await automationCascadeSessionIds(storageRoot, automationId, sessionsRoot)
+    for (const dir of await findSessionDirs(sessionsRoot, targets)) {
+      releaseSession?.(dir.sessionId)
+      await rm(join(dir.cwdDir, dir.sessionId), { recursive: true, force: true })
+    }
+    // 2. 跨项目自动 Task:改绑前的旧项目 Task 也随来源清理。
+    await removeTasksOfAutomation(storageRoot, automationId)
+    // 3. runs/audit:force 只吞 ENOENT,其他错误中止并保留注册项。
+    await rm(runsPath(storageRoot, automationId), { force: true })
+    await rm(auditPath(storageRoot, automationId), { force: true })
+    // 4. 注册项最后删:任何崩溃点都能用仍在的注册项重试。
     registry.automations.splice(index, 1)
     await writeAutomationRegistry(storageRoot, registry)
-    await rm(runsPath(storageRoot, automationId), { force: true }).catch(() => undefined)
-    await rm(auditPath(storageRoot, automationId), { force: true }).catch(() => undefined)
-    await removeAutomationSessions(sessionsRoot, automationId, releaseSession)
   })
+}
+
+/**
+ * 项目删除时级联清理该项目全部自动化:逐项复用 {@link removeAutomation} 的锚点顺序。
+ *
+ * 不整批持锁:每次删除自己取锁,长级联期间其他自动化的写周期仍可穿插。
+ * 已被并发删掉的项跳过(幂等重试口径),其他失败照常抛出并保留项目锚点。
+ * 活跃/在途预检由路由在调用前完成(进程内 guard 只在 routes.ts)。
+ */
+export async function removeAutomationsOfProject(
+  storageRoot: string,
+  projectId: string,
+  sessionsRoot: string = join(storageRoot, 'sessions'),
+  releaseSession?: (sessionId: string) => void,
+): Promise<void> {
+  const doomed = (await readAutomationRegistry(storageRoot)).automations.filter((item) => item.projectId === projectId)
+  for (const automation of doomed) {
+    try {
+      await removeAutomation(storageRoot, automation.id, sessionsRoot, releaseSession)
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes('was not found')) continue
+      throw error
+    }
+  }
 }
 
 /**

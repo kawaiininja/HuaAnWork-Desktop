@@ -15,7 +15,6 @@ import {
   listTasks,
   readAutomationTemplates,
   recentRuns,
-  removeAutomationsOfProject,
   removeProject,
   removeTask,
   removeTasksOfProject,
@@ -24,6 +23,7 @@ import {
   setTaskModel,
   touchProject,
 } from '../../src/huaanwork-host/stores.ts'
+import { removeAutomationsOfProject } from '../../src/huaanwork-host/automations-store.ts'
 import type { AutomationInfo } from '../../src/client-huaanwork/rpc-types.ts'
 
 // 读路径用例移植自旧 sidecar projects.test.ts / tasks.test.ts / automations.test.ts:
