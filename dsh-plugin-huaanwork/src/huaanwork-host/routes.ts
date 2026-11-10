@@ -110,6 +110,7 @@ import {
   updateAutomation,
 } from './automations-store.ts'
 import { automationRunSessionId } from './automation-session-ids.ts'
+import { inFlightRuns } from './automation-inflight.ts'
 import {
   automationAdmissionRoot,
   automationCollector,
@@ -1295,16 +1296,18 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     method: 'automation.deleteRun',
     http: 'POST',
     path: '/huaanwork/automation/deleteRun',
-    // 删一条已结束的运行记录:删行 → 释放会话运行态 → 删对应会话目录(规格 §6)。
-    // 会话目录在 dshHome/sessions,与 automation.remove 同一接线。
+    // 删一条已结束的运行记录:以 Run 为锚点,会话 → Task → Run 行最后删(规格 §9.2)。
+    // 活跃会话快照 = 自动化收集器 ∪ 调度器写者/出队/队列,命中即拒绝(只读快照)。
     handler: storeRoute(async (req, ctx) => {
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.deleteRun requires params.id')
       const runId = bodyParam(req.body, 'runId')
       if (!runId) throw new Error('automation.deleteRun requires params.runId')
+      const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
       return await deleteAutomationRun(ctx.profileDir, id, runId, {
         sessionsRoot: join(ctx.dshHome, 'sessions'),
         releaseSession: (sessionId) => releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+        activeSessionIds: new Set([...automationCollector.keys(), ...(scheduler?.activeSessionIds() ?? [])]),
       })
     }),
   }, // Task 9
@@ -1400,9 +1403,24 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     http: 'POST',
     path: '/huaanwork/task/remove',
     // 旧 host.ts:1148-1155 语义:级联——删子任务即删其对话历史(规格 §1.4)。
+    // 自动化来源的 Task 是运行的可跳转锚点:在途/活跃时拒绝;普通 Task 保持既有级联语义(N1)。
     handler: storeRoute(async (req, ctx) => {
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('task.remove requires params.id')
+      const task = (await listTasks(ctx.profileDir)).find((item) => item.id === id)
+      if (task?.automationId !== undefined) {
+        if (task.runId !== undefined && inFlightRuns.has(task.runId)) {
+          throw new Error('运行中的记录不能删除')
+        }
+        if (task.sessionId !== undefined) {
+          const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
+          const activeSessionIds = new Set([
+            ...automationCollector.keys(),
+            ...(scheduler?.activeSessionIds() ?? []),
+          ])
+          if (activeSessionIds.has(task.sessionId)) throw new Error('会话正在使用，暂不能删除')
+        }
+      }
       const removedTask = await removeTask(ctx.profileDir, id)
       if (removedTask.sessionId) {
         releaseSessionRuntime(ctx.runtimeCtx, removedTask.sessionId)

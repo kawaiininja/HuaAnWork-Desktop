@@ -10,9 +10,11 @@ import { nextFireAfter, parseCron, periodOf } from './schedule.ts'
 import {
   RUNS_LIMIT,
   auditPath,
+  listTasks,
   readAutomationRegistry,
   recentRuns,
   removeAutomationSessions,
+  removeTask,
   runsPath,
   withAutomationRegistryLock,
   writeAutomationRegistry,
@@ -546,40 +548,62 @@ export async function pruneAutomationSessions(
 }
 
 /**
- * 删除单条运行记录(规格 §6):删行 → 释放运行态 → 删对应会话目录 → 注册表锁内回写上次运行。
+ * 删除单条运行记录(规格 §9.2):以 Run 为持久锚点,最后才删运行行。
  *
- * 锁序:先在运行记录锁内删行并返回被删记录,锁释放后才进注册表锁回写。
- * 不得反过来嵌套——`finishAutomation` 先拿运行记录锁、再等注册表锁,反向嵌套会死锁。
+ * 顺序:拒绝在途/活跃 → 找匹配 Task → 释放运行态并删会话目录 → 删 Task → 删 Run 行
+ * → 注册表锁内回写上次运行。任何一步失败都保留 Run,重试仍能找回 Task 和会话状态;
+ * 不再出现「Run 先删、后续失败就永久丢失清理锚点」。
  *
- * 在途表中的 runId 拒绝删除:执行中的轮次要到结束才落盘,界面正常删不到它;
+ * 锁序:先做无锁的读与会话/Task 清理,最后才在运行记录锁内删行,锁释放后才进注册表锁
+ * 回写。不得反向嵌套——`finishAutomation` 先拿运行记录锁、再等注册表锁,反向嵌套会死锁;
+ * 也不得在 task 锁内调用运行记录或注册表的写路径。
+ *
+ * 在途表中的 runId 与活跃会话快照都拒绝删除:执行中的轮次要到结束才落盘,界面正常删不到它;
+ * 活跃拒绝只覆盖运行记录删除,普通 task/project 级联保持既有 release-then-delete 语义。
  * 拒绝文案是界面直接展示给用户的那一句。
  *
- * 行不存在时幂等返回(不改注册表);目录不存在视为已删;删行成功后即使
- * 目录删除失败也不回滚(列表不再出现这一条,由返回值报告目录未删)。
+ * 行不存在时幂等返回(不改注册表);目录不存在(ENOENT/ENOTDIR)视为已删;
+ * 非 ENOENT 的目录删除失败中止且 Run 保留,让用户能重试。
  */
 export async function deleteAutomationRun(
   storageRoot: string,
   automationId: string,
   runId: string,
-  opts: { sessionsRoot: string; releaseSession?: (sessionId: string) => void },
-): Promise<{ removed: boolean; sessionDirRemoved: boolean }> {
+  opts: {
+    sessionsRoot: string
+    activeSessionIds?: ReadonlySet<string>
+    releaseSession?: (sessionId: string) => void
+  },
+): Promise<{ removed: boolean; sessionDirRemoved: boolean; taskId?: string }> {
   if (inFlightRuns.has(runId)) throw new Error('运行中的记录不能删除')
+  const target = (await recentRuns(storageRoot, automationId)).find((run) => run.runId === runId)
+  if (!target) return { removed: false, sessionDirRemoved: true }
+  if (target.sessionId && opts.activeSessionIds?.has(target.sessionId)) {
+    throw new Error('会话正在使用，暂不能删除')
+  }
+  // Run.taskId 与 (automationId,runId) 都可定位自动 Task;两者指向同一条时才允许删除。
+  const task = (await listTasks(storageRoot)).find((item) =>
+    item.id === target.taskId || (item.automationId === automationId && item.runId === runId))
+  if (task && (task.automationId !== automationId || task.runId !== runId)) {
+    throw new Error('运行与子任务关联不一致')
+  }
+  if (target.sessionId) {
+    // 先释放运行态,再删目录(session.remove / automation.remove 同序)。
+    opts.releaseSession?.(target.sessionId)
+    if (!await removeSessionDir(opts.sessionsRoot, target.sessionId)) {
+      throw new Error('会话目录未能删除，运行记录已保留以便重试')
+    }
+  }
+  // Task 写盘失败会抛在这里:Run 与已缺失的会话仍是可重试状态(Task 留在注册表里)。
+  if (task) await removeTask(storageRoot, task.id)
+
   const removed = await withAppendRunLock(storageRoot, automationId, async () => {
     const existing = await recentRuns(storageRoot, automationId)
-    const target = existing.find((run) => run.runId === runId)
-    if (!target) return undefined
+    if (!existing.some((run) => run.runId === runId)) return false
     const lines = existing.filter((run) => run.runId !== runId).map((entry) => JSON.stringify(entry))
-    await mkdir(dirname(runsPath(storageRoot, automationId)), { recursive: true })
     await writeFile(runsPath(storageRoot, automationId), lines.length ? `${lines.join('\n')}\n` : '', 'utf8')
-    return target
+    return true
   })
-  if (removed === undefined) return { removed: false, sessionDirRemoved: true }
-  let sessionDirRemoved = true
-  if (removed.sessionId) {
-    // 先释放运行态,再删目录(session.remove / automation.remove 同序)。
-    opts.releaseSession?.(removed.sessionId)
-    sessionDirRemoved = await removeSessionDir(opts.sessionsRoot, removed.sessionId)
-  }
   await rewriteLastRunFromRuns(storageRoot, automationId).catch((error: unknown) => {
     // 运行记录与目录已经删掉；注册表回写失败不能让客户端以为删除失败。
     // 下次运行结束或再次删除会以锁内重读的权威数据修正上次运行文案。
@@ -587,7 +611,7 @@ export async function deleteAutomationRun(
       `[automations] failed to rewrite last-run fields after deleting ${automationId}/${runId}: ${error instanceof Error ? error.message : String(error)}`,
     )
   })
-  return { removed: true, sessionDirRemoved }
+  return { removed, sessionDirRemoved: true, ...(task ? { taskId: task.id } : {}) }
 }
 
 /**

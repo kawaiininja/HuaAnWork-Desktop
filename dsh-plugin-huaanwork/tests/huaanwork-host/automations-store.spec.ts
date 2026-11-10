@@ -1,9 +1,11 @@
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { AutomationInfo, AutomationSchedule, ProjectInfo, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
 import { inFlightRuns, startInFlightRun } from '../../src/huaanwork-host/automation-inflight.ts'
+import { automationCollector } from '../../src/huaanwork-host/automations-host.ts'
+import { createTurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import {
   AUTOMATION_SESSION_RETAIN_LIMIT,
   MAX_AUTOMATIONS,
@@ -26,9 +28,13 @@ import { humanizeCron, nextFireAfter, parseCron, periodOf } from '../../src/huaa
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
 import {
   RUNS_LIMIT,
+  bindTaskSession,
+  createAutomationRunTask,
   createProject,
+  createTask,
   listAutomations,
   listProjects,
+  listTasks,
   recentRuns,
   removeAutomationsOfProject,
   removeProject,
@@ -1310,6 +1316,89 @@ describe('automation.deleteRun (Task 9)', () => {
     expect((await recentRuns(home, id)).map((run) => run.runId)).toEqual(['r1'])
   })
 
+  test('rejects a run whose session is still active and keeps the anchor', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
+    await appendRun(home, automation.id, runSummary('r1', { sessionId: 'live-session' }))
+
+    await expect(
+      deleteAutomationRun(home, automation.id, 'r1', {
+        sessionsRoot: join(home, 'sessions'),
+        activeSessionIds: new Set(['live-session']),
+      }),
+    ).rejects.toThrow('会话正在使用，暂不能删除')
+
+    expect((await recentRuns(home, automation.id)).map((run) => run.runId)).toEqual(['r1'])
+  })
+
+  test('rejects a run whose linked task points at another run', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput({ projectId: 'p1' })), T0)
+    const task = await createAutomationRunTask(home, {
+      projectId: 'p1', name: '运行子任务', createdAt: 1000,
+      automationId: automation.id, runId: 'r1', sessionId: 's1',
+    })
+    // Run r2 通过 taskId 指向绑定 r1 的 Task:关联不一致,删除必须在动任何东西前中止。
+    await appendRun(home, automation.id, runSummary('r2', { sessionId: 's1', taskId: task.id }))
+
+    await expect(
+      deleteAutomationRun(home, automation.id, 'r2', { sessionsRoot: join(home, 'sessions') }),
+    ).rejects.toThrow('运行与子任务关联不一致')
+
+    expect((await recentRuns(home, automation.id)).map((run) => run.runId)).toEqual(['r2'])
+    expect((await listTasks(home)).map((item) => item.id)).toEqual([task.id])
+  })
+
+  test('failed task cleanup keeps the run anchor and a retry finishes deletion', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput({
+      projectId: 'p1', schedule: { kind: 'manual' },
+    })))
+    const task = await createAutomationRunTask(home, {
+      projectId: 'p1', name: '运行子任务', createdAt: 1000,
+      automationId: automation.id, runId: 'r1', sessionId: 's1',
+    })
+    await appendRun(home, automation.id, {
+      runId: 'r1', startedAt: 1000, endedAt: 1100, ok: true,
+      output: 'done', status: 'ok', sessionId: 's1', taskId: task.id,
+    })
+    let failTaskWrite = true
+    const opts = {
+      sessionsRoot: join(home, 'sessions'),
+      releaseSession: () => {
+        if (!failTaskWrite) return
+        failTaskWrite = false
+        // 把 tasks.json 换成目录:removeTask 的读改写必然失败,而会话已在前面删掉。
+        renameSync(join(home, 'tasks.json'), join(home, 'tasks.saved'))
+        mkdirSync(join(home, 'tasks.json'))
+      },
+    }
+    await expect(deleteAutomationRun(home, automation.id, 'r1', opts)).rejects.toThrow()
+    expect((await recentRuns(home, automation.id))[0]?.runId).toBe('r1')
+    rmSync(join(home, 'tasks.json'), { recursive: true })
+    renameSync(join(home, 'tasks.saved'), join(home, 'tasks.json'))
+    const result = await deleteAutomationRun(home, automation.id, 'r1', { sessionsRoot: opts.sessionsRoot })
+    expect(result).toEqual({ removed: true, sessionDirRemoved: true, taskId: task.id })
+    expect(await recentRuns(home, automation.id)).toEqual([])
+    expect(await listTasks(home)).toEqual([])
+  })
+
+  test('deletes the linked task before the run row and reports its id', async () => {
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput({ projectId: 'p1' })), T0)
+    const task = await createAutomationRunTask(home, {
+      projectId: 'p1', name: '运行子任务', createdAt: 1000,
+      automationId: automation.id, runId: 'r1', sessionId: 's1',
+    })
+    await appendRun(home, automation.id, runSummary('r1', { sessionId: 's1', taskId: task.id }))
+
+    const result = await deleteAutomationRun(home, automation.id, 'r1', { sessionsRoot: join(home, 'sessions') })
+
+    expect(result).toEqual({ removed: true, sessionDirRemoved: true, taskId: task.id })
+    expect(await listTasks(home)).toEqual([])
+    expect(await recentRuns(home, automation.id)).toEqual([])
+  })
+
   test('rolls lastRunAt/lastStatus back to the latest remaining real run and skips missed', async () => {
     const home = makeHome()
     const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
@@ -1415,7 +1504,7 @@ describe('automation.deleteRun (Task 9)', () => {
     expect(await recentRuns(home, id)).toEqual([])
   })
 
-  test.skipIf(process.platform === 'win32')('keeps the row deleted when removing the session directory fails', async () => {
+  test.skipIf(process.platform === 'win32')('keeps the run and the session when removing the session directory fails', async () => {
     const home = makeHome()
     const automation = await createAutomation(home, normalizeAutomationInput(agentInput(), T0), T0)
     const id = automation.id
@@ -1426,17 +1515,17 @@ describe('automation.deleteRun (Task 9)', () => {
     await appendRun(home, id, runSummary('r1', { endedAt: T0 + 10, sessionId }))
 
     chmodSync(cwdDir, 0o555)
-    let result: Awaited<ReturnType<typeof deleteAutomationRun>>
     try {
-      result = await deleteAutomationRun(home, id, 'r1', { sessionsRoot: join(home, 'sessions') })
+      // 目录删不掉时以 Run 为锚点中止:运行记录仍在,可重试。
+      await expect(deleteAutomationRun(home, id, 'r1', { sessionsRoot: join(home, 'sessions') })).rejects.toThrow(
+        '会话目录未能删除，运行记录已保留以便重试',
+      )
     } finally {
       chmodSync(cwdDir, 0o755)
     }
 
-    expect(result).toEqual({ removed: true, sessionDirRemoved: false })
-    // 删行成功优先:目录还在,列表里已没有这一条。
     expect(existsSync(sessionDir)).toBe(true)
-    expect(await recentRuns(home, id)).toEqual([])
+    expect((await recentRuns(home, id)).map((run) => run.runId)).toEqual(['r1'])
   })
 
   test.skipIf(process.platform === 'win32')('reports a deletion failure when the sessions root is unreadable', async () => {
@@ -1448,15 +1537,15 @@ describe('automation.deleteRun (Task 9)', () => {
     await appendRun(home, id, runSummary('r1', { endedAt: T0 + 10, sessionId: `huaanwork-auto-${id}-r1` }))
 
     chmodSync(sessionsRoot, 0o000)
-    let result: Awaited<ReturnType<typeof deleteAutomationRun>>
     try {
-      result = await deleteAutomationRun(home, id, 'r1', { sessionsRoot })
+      await expect(deleteAutomationRun(home, id, 'r1', { sessionsRoot })).rejects.toThrow(
+        '会话目录未能删除，运行记录已保留以便重试',
+      )
     } finally {
       chmodSync(sessionsRoot, 0o755)
     }
 
-    expect(result).toEqual({ removed: true, sessionDirRemoved: false })
-    expect(await recentRuns(home, id)).toEqual([])
+    expect((await recentRuns(home, id)).map((run) => run.runId)).toEqual(['r1'])
   })
 
   test('returns success when the registry rewrite fails after the run row is deleted, and self-heals later', async () => {
@@ -1573,5 +1662,123 @@ describe('automation.deleteRun (Task 9)', () => {
     const row = (await listAutomations(profileDir)).find((item) => item.id === automation.id)
     expect(row?.lastRunAt).toBeUndefined()
     expect(row?.lastStatus).toBeUndefined()
+  })
+
+  test('automation.deleteRun route rejects a run whose session is in the active snapshot', async () => {
+    const dshHome = makeHome()
+    const profileDir = join(dshHome, 'profiles', 'huaanwork')
+    mkdirSync(profileDir, { recursive: true })
+    const automation = await createAutomation(profileDir, normalizeAutomationInput(agentInput(), T0), T0)
+    const sessionId = `huaanwork-auto-${automation.id}-r1`
+    const sessionDir = join(dshHome, 'sessions', 'cwd-x', sessionId)
+    mkdirSync(sessionDir, { recursive: true })
+    await appendRun(profileDir, automation.id, runSummary('r1', { sessionId }))
+
+    // 会话在 TurnScheduler 中占着写者:路由必须把它并入 activeSessionIds。
+    const scheduler = createTurnScheduler({ maxConcurrentTurns: () => 2, modelExists: () => true })
+    scheduler.admitUserTurn({ sessionId, tabId: 'tab', text: '续聊', modelId: 'm', root: '/tmp/project' })
+    const ctx = {
+      dshHome,
+      profileDir,
+      workspaceRoot: { current: dshHome },
+      emit: () => {},
+      logger: () => {},
+      requestRestart: async () => false,
+      runtimeCtx: { huaanworkTurnScheduler: scheduler },
+    }
+    const route = ROUTE_TABLE.find((entry) => entry.method === 'automation.deleteRun')
+    expect(route).toBeDefined()
+    const request = { params: {}, body: { id: automation.id, runId: 'r1' }, query: new URLSearchParams() }
+
+    try {
+      await expect(route!.handler(request, ctx)).rejects.toThrow('会话正在使用，暂不能删除')
+      expect(existsSync(sessionDir)).toBe(true)
+      expect((await recentRuns(profileDir, automation.id)).map((run) => run.runId)).toEqual(['r1'])
+    } finally {
+      scheduler.release(sessionId)
+    }
+
+    await expect(route!.handler(request, ctx)).resolves.toEqual({ removed: true, sessionDirRemoved: true })
+    expect(existsSync(sessionDir)).toBe(false)
+  })
+
+  test('task.remove rejects an automation task whose run is in flight', async () => {
+    const dshHome = makeHome()
+    const profileDir = join(dshHome, 'profiles', 'huaanwork')
+    mkdirSync(profileDir, { recursive: true })
+    const automation = await createAutomation(profileDir, normalizeAutomationInput(agentInput({ projectId: 'p1' })), T0)
+    const task = await createAutomationRunTask(profileDir, {
+      projectId: 'p1', name: '运行子任务', createdAt: 1000,
+      automationId: automation.id, runId: 'r1', sessionId: 's1',
+    })
+    const route = ROUTE_TABLE.find((entry) => entry.method === 'task.remove')
+    expect(route).toBeDefined()
+    const request = { params: {}, body: { id: task.id }, query: new URLSearchParams() }
+    const ctx = {
+      dshHome,
+      profileDir,
+      workspaceRoot: { current: dshHome },
+      emit: () => {},
+      logger: () => {},
+      requestRestart: async () => false,
+      runtimeCtx: { agents: { get: () => undefined } },
+    }
+
+    startInFlightRun({
+      automationId: automation.id,
+      runId: 'r1',
+      trigger: 'manual',
+      kind: 'agent',
+      phase: 'queued',
+      cancelRequested: false,
+      slotConsumed: false,
+    })
+    try {
+      await expect(route!.handler(request, ctx)).rejects.toThrow('运行中的记录不能删除')
+    } finally {
+      inFlightRuns.delete('r1')
+    }
+
+    automationCollector.set('s1', { runId: 'r1', text: '', touch: () => {}, subagentActivity: new Map() })
+    try {
+      await expect(route!.handler(request, ctx)).rejects.toThrow('会话正在使用，暂不能删除')
+    } finally {
+      automationCollector.delete('s1')
+    }
+
+    // 锚点仍在:两次拒绝都没有删掉 Task。
+    expect((await listTasks(profileDir)).map((item) => item.id)).toEqual([task.id])
+    await expect(route!.handler(request, ctx)).resolves.toEqual({ removed: true })
+    expect(await listTasks(profileDir)).toEqual([])
+  })
+
+  test('task.remove still cascades a plain task whose session is active', async () => {
+    const dshHome = makeHome()
+    const profileDir = join(dshHome, 'profiles', 'huaanwork')
+    mkdirSync(profileDir, { recursive: true })
+    const plain = await createTask(profileDir, { projectId: 'p1', name: '普通子任务' })
+    await bindTaskSession(profileDir, { taskId: plain.id, sessionId: 's-plain' })
+    const route = ROUTE_TABLE.find((entry) => entry.method === 'task.remove')
+    expect(route).toBeDefined()
+
+    // 普通 Task 不适用自动化来源的活跃拒绝:既有 release-then-delete 语义保持(N1)。
+    automationCollector.set('s-plain', { runId: 'plain', text: '', touch: () => {}, subagentActivity: new Map() })
+    try {
+      await expect(route!.handler(
+        { params: {}, body: { id: plain.id }, query: new URLSearchParams() },
+        {
+          dshHome,
+          profileDir,
+          workspaceRoot: { current: dshHome },
+          emit: () => {},
+          logger: () => {},
+          requestRestart: async () => false,
+          runtimeCtx: { agents: { get: () => undefined } },
+        },
+      )).resolves.toEqual({ removed: true })
+    } finally {
+      automationCollector.delete('s-plain')
+    }
+    expect(await listTasks(profileDir)).toEqual([])
   })
 })
