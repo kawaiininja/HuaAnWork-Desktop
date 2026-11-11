@@ -145,14 +145,6 @@ async function click(el: HTMLElement): Promise<void> {
   });
 }
 
-async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-  await act(async () => {
-    setter?.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-}
-
 async function advance(ms: number): Promise<void> {
   await act(async () => {
     vi.advanceTimersByTime(ms);
