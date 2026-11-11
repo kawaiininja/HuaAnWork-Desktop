@@ -4,7 +4,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import AccountFooter from "./AccountFooter.tsx";
 import AgentConfirmCard from "./AgentConfirmCard.tsx";
@@ -37,6 +39,7 @@ import {
   shouldConfirmFull,
   type GuardMode,
 } from "./logic/guardMode.ts";
+import { clampLeftWidth, clampRightWidth, resolveColumnWidths } from "./logic/columnResize.ts";
 import AtAgentMenu from "./AtAgentMenu.tsx";
 import SlashSkillMenu from "./SlashSkillMenu.tsx";
 import SkillsView from "./SkillsView.tsx";
@@ -513,6 +516,16 @@ export default function App() {
   const [view, setView] = useState<View>("main");
   const [collapsed, setCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  /** 三栏拖拽宽度仅本次会话有效(用户裁定 2026-11-10):不写 localStorage,重启回 240/360。 */
+  const [leftWidth, setLeftWidth] = useState(240);
+  const [rightWidth, setRightWidth] = useState(360);
+  const [columnDragging, setColumnDragging] = useState<"left" | "right" | null>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const dragSideRef = useRef<"left" | "right" | null>(null);
+  const columnWidthsRef = useRef({ left: 240, right: 360 });
+  useEffect(() => {
+    columnWidthsRef.current = { left: leftWidth, right: rightWidth };
+  }, [leftWidth, rightWidth]);
   const [rightTab, setRightTab] = useState<RightTab>("preview");
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [gitWarning, setGitWarning] = useState("");
@@ -3356,9 +3369,65 @@ export default function App() {
   /** 「任务」区的游离会话：中立工作区对话（项目分组已退役，项目会话收编进子任务）。 */
   const unscopedWorkSessions = unscopedSessions(sessions, projects);
   const showRightPane = view === "main";
+  const rightActive = showRightPane && !rightCollapsed;
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const pendingAsk = hasPendingAsk(chatTabs);
   const logoutDisabled = anyTabRunning || pendingAsk;
+
+  // 右栏收起/无右栏时保留右栏宽度记忆;窗口缩放与右栏恢复时按当前容器宽重钳制。
+  // 依赖 authPhase:登录前 App 提前返回 AuthGate、shell 未挂载,登录后须重跑以注册监听。
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    const reclamp = () => {
+      const total = shell.getBoundingClientRect().width;
+      const resolved = resolveColumnWidths({
+        left: columnWidthsRef.current.left,
+        right: columnWidthsRef.current.right,
+        total,
+        hasRight: rightActive,
+      });
+      setLeftWidth(resolved.left);
+      if (rightActive) setRightWidth(resolved.right);
+    };
+    reclamp();
+    window.addEventListener("resize", reclamp);
+    return () => window.removeEventListener("resize", reclamp);
+  }, [rightActive, authPhase]);
+
+  // 拖拽中若经快捷键收起左栏/右栏,分隔条随之卸载,这里同步结束拖拽态。
+  useEffect(() => {
+    dragSideRef.current = null;
+    setColumnDragging(null);
+  }, [collapsed, rightActive]);
+
+  function startColumnDrag(event: ReactPointerEvent<HTMLDivElement>, side: "left" | "right") {
+    event.preventDefault();
+    dragSideRef.current = side;
+    setColumnDragging(side);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveColumnDrag(event: ReactPointerEvent<HTMLDivElement>, side: "left" | "right") {
+    if (dragSideRef.current !== side) return;
+    const shell = shellRef.current;
+    if (!shell) return;
+    const rect = shell.getBoundingClientRect();
+    if (side === "left") {
+      setLeftWidth(clampLeftWidth(event.clientX - rect.left, rect.width, rightWidth, rightActive));
+    } else {
+      setRightWidth(clampRightWidth(rect.right - event.clientX, rect.width, leftWidth));
+    }
+  }
+
+  function endColumnDrag(event: ReactPointerEvent<HTMLDivElement>, side: "left" | "right") {
+    if (dragSideRef.current !== side) return;
+    dragSideRef.current = null;
+    setColumnDragging(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
 
   function openSettings(section?: SettingsSection) {
     if (section) setSettingsSection(section);
@@ -3428,7 +3497,9 @@ export default function App() {
       </header>
 
       <div
-        className={`shell${collapsed ? " collapsed" : ""}${showRightPane ? "" : " no-right"}${rightCollapsed ? " right-collapsed" : ""}`}
+        ref={shellRef}
+        className={`shell${collapsed ? " collapsed" : ""}${showRightPane ? "" : " no-right"}${rightCollapsed ? " right-collapsed" : ""}${columnDragging ? " dragging" : ""}`}
+        style={{ "--left-w": `${leftWidth}px`, "--right-w": `${rightWidth}px` } as CSSProperties}
       >
         <aside className="sidebar" aria-label="导航">
           <div className="brand">
@@ -3982,6 +4053,33 @@ export default function App() {
             </div>
           </aside>
         ) : null}
+
+        {!collapsed ? (
+          <div
+            className={`col-divider col-divider-left${columnDragging === "left" ? " on" : ""}`}
+            style={{ left: leftWidth }}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整左栏宽度"
+            onPointerDown={(event) => startColumnDrag(event, "left")}
+            onPointerMove={(event) => moveColumnDrag(event, "left")}
+            onPointerUp={(event) => endColumnDrag(event, "left")}
+            onPointerCancel={(event) => endColumnDrag(event, "left")}
+          />
+        ) : null}
+        {rightActive ? (
+          <div
+            className={`col-divider col-divider-right${columnDragging === "right" ? " on" : ""}`}
+            style={{ right: rightWidth }}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整右栏宽度"
+            onPointerDown={(event) => startColumnDrag(event, "right")}
+            onPointerMove={(event) => moveColumnDrag(event, "right")}
+            onPointerUp={(event) => endColumnDrag(event, "right")}
+            onPointerCancel={(event) => endColumnDrag(event, "right")}
+          />
+        ) : null}
       </div>
 
       {sessionMenu ? (
@@ -4158,6 +4256,7 @@ export default function App() {
             await rpcCall("auth.changePassword", { current, next });
           }}
           keepAwakeUnavailable={keepAwakeUnavailable}
+          onAgentsConfigSaved={() => setAgentChangeSignal((prev) => prev + 1)}
         />
       ) : null}
     </div>
