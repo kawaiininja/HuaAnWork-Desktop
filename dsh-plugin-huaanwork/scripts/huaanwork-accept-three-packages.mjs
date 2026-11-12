@@ -20,24 +20,37 @@
  *
  * Model credentials are read from the production `huaanwork-settings.json` and
  * copied into the isolated profile; they are never printed. `guard_mode` is
- * always written as `smart` here (R9), never copied from production.
+ * always written as `smart` here (R9), never copied from production. The model
+ * name defaults to the production active entry and can be overridden with
+ * `--model <name>` (the plan pins the walkthrough to `deepseek-chat`; the
+ * production settings may only carry another model name on the same provider).
+ *
+ * The Electron-ABI fs-ext binding must already exist (`prepare:electron-native`);
+ * the script refuses to launch without it. App stdout/stderr are redacted before
+ * they reach `app-stdout.log` or the console.
+ *
+ * The catalog connection comes from a Task 9 `--keep-catalog` run. Task 9
+ * intentionally leaves that root on SIGTERM, so this script stops the catalog
+ * pid it was given and deletes the root afterwards when the path is provably a
+ * Task 9 temp root; otherwise it records a manual-delete instruction.
  *
  * Usage:
  *   node scripts/huaanwork-accept-three-packages.mjs \
- *     --connection <catalog-connection.json> --out <dir> [--timeout <ms>] [--keep-root]
+ *     --connection <catalog-connection.json> --out <dir> [--timeout <ms>] [--model <name>] \
+ *     [--keep-root] [--keep-catalog-root]
  *
  * `--keep-root` skips the final isolated-root removal and records its path in
  * `facts.isolatedRoot`; the root keeps the isolated profile copy of the model
  * credential and the per-run catalog token, so only use it for diagnosis and
- * delete it afterwards.
+ * delete it afterwards. `--keep-catalog-root` does the same for the Task 9
+ * catalog root (diagnosis only; it holds the dev private key).
  *
  * Exit: 0 PASS / 1 FAIL / 2 usage / 3 BLOCKED (missing precondition).
  */
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { createHash, randomBytes, randomUUID, scrypt } from 'node:crypto'
+import { createHash, randomBytes, scrypt } from 'node:crypto'
 import {
   chmodSync,
-  cpSync,
   createWriteStream,
   existsSync,
   mkdirSync,
@@ -74,7 +87,8 @@ const DEFAULT_TIMEOUT_MS = 180_000
 const COMPOSER_IDLE_TIMEOUT_MS = 60_000
 const PARENT_REPLY_TIMEOUT_MS = 240_000
 const HOST_CLEANUP_BUDGET_MS = 600_000
-const TERMINAL_PHASES = new Set(['completed', 'failed', 'stopped'])
+/** Step 6 human review needs the whole plan/report, not a 2 KB teaser. */
+const MODEL_OUTPUT_EXCERPT_CHARS = 16_384
 const SECRETS = []
 
 /** Precondition the walkthrough cannot work around; reported as BLOCKED (exit 3). */
@@ -90,28 +104,34 @@ const options = parseArgs(process.argv.slice(2))
 const screenshots = []
 const driverLog = []
 let appLogFile
+let appStreamSinks = []
 let appProcess
 let appCdp
 let tempRoot
 let userDataDir
 let isolated
 let catalogPid
+let catalogUsed = false
+let catalogCleanup
 let facts
 let shutdownDone = false
 /** Partial drive results, kept even when a later step throws. */
 const progress = { plaza: [], installs: [], enables: [], details: [], runs: [] }
 
 function parseArgs(argv) {
-  const out = { connection: null, outDir: null, timeout: DEFAULT_TIMEOUT_MS, keepRoot: false }
+  const out = { connection: null, outDir: null, timeout: DEFAULT_TIMEOUT_MS, model: null, keepRoot: false, keepCatalogRoot: false }
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--connection') { out.connection = argv[i + 1]; i += 1 }
     else if (argv[i] === '--out') { out.outDir = argv[i + 1]; i += 1 }
     else if (argv[i] === '--timeout') { out.timeout = Number(argv[i + 1]); i += 1 }
+    else if (argv[i] === '--model') { out.model = argv[i + 1]; i += 1 }
     else if (argv[i] === '--keep-root') { out.keepRoot = true }
+    else if (argv[i] === '--keep-catalog-root') { out.keepCatalogRoot = true }
     else { console.error(`unknown argument: ${argv[i]}`); process.exit(2) }
   }
-  if (!out.connection || !out.outDir) { console.error('usage: --connection <json> --out <dir> [--timeout <ms>] [--keep-root]'); process.exit(2) }
+  if (!out.connection || !out.outDir) { console.error('usage: --connection <json> --out <dir> [--timeout <ms>] [--model <name>] [--keep-root] [--keep-catalog-root]'); process.exit(2) }
   if (!Number.isSafeInteger(out.timeout) || out.timeout < 30_000) { console.error('--timeout must be at least 30000ms'); process.exit(2) }
+  if (out.model !== null && (typeof out.model !== 'string' || out.model.trim() === '')) { console.error('--model needs a non-empty model name'); process.exit(2) }
   return out
 }
 
@@ -235,8 +255,44 @@ function requireFreshBuild() {
   return { libMainMtime: new Date(libMtime).toISOString(), newestSourceMtime: new Date(sourceMtime).toISOString() }
 }
 
+/**
+ * The launcher loads the Electron-ABI fs-ext binding produced by
+ * `prepare:electron-native` (the same step `dev`/`package:dir` run). A stale or
+ * missing binding fails deep inside the session backend, so refuse up front
+ * with the exact command instead of launching a half-working app.
+ */
+function requireElectronNative() {
+  const require = createRequire(import.meta.url)
+  let fsExtRoot
+  try {
+    fsExtRoot = dirname(require.resolve('fs-ext/package.json'))
+  } catch (cause) {
+    throw new BlockedError(`fs-ext is not installed for the desktop package: ${cause instanceof Error ? cause.message : String(cause)}`, {
+      remediation: 'corepack yarn install --immutable',
+    })
+  }
+  const dir = join(fsExtRoot, 'prebuilds', `${osPlatform()}-${osArch()}`)
+  const files = existsSync(dir)
+    ? readdirSync(dir).filter((name) => /^electron\.abi\d+\.node$/u.test(name)).sort()
+    : []
+  if (files.length === 0) {
+    throw new BlockedError(
+      `Electron-ABI fs-ext binding is missing under ${dir}; the app cannot lock sessions under Electron`,
+      {
+        remediation: 'corepack yarn workspace dsh-plugin-huaanwork prepare:electron-native',
+        directory: dir,
+      },
+    )
+  }
+  return {
+    path: join(dir, files[0]),
+    files,
+    preparedBy: 'corepack yarn workspace dsh-plugin-huaanwork prepare:electron-native (also run by dev/package:dir)',
+  }
+}
+
 /** 只读复制生产模型设置；只取六个字段，api_key 永不打印。 */
-function readProductionModelSettings() {
+function readProductionModelSettings(modelOverride) {
   if (!existsSync(PRODUCTION_SETTINGS_PATH)) {
     throw new BlockedError(`production model settings are missing: ${PRODUCTION_SETTINGS_PATH}`)
   }
@@ -273,6 +329,25 @@ function readProductionModelSettings() {
   if (typeof credential !== 'string' || credential.length === 0) {
     throw new BlockedError('production model settings carry no api_key for the active model')
   }
+  const productionModel = active?.model ?? picked.model
+  const override = typeof modelOverride === 'string' && modelOverride !== '' ? modelOverride.trim() : null
+  if (override !== null && override !== productionModel) {
+    // The plan pins the walkthrough to `deepseek-chat`, which the production
+    // settings may not list by id. Only the model *name* of the active entry is
+    // changed; base_url and api_key stay untouched and are never printed.
+    const baseUrl = active?.base_url || picked.base_url
+    if (!baseUrl.startsWith('https://')) {
+      throw new BlockedError(`--model ${override} needs an https provider base_url on the active entry`, { baseUrl })
+    }
+    if (models.length === 0) {
+      throw new BlockedError(`--model ${override} needs a models[] entry to carry the override`)
+    }
+    const targetId = active?.id ?? picked.active_model_id
+    for (const entry of models) {
+      if (entry.id === targetId) entry.model = override
+    }
+    picked.model = override
+  }
   registerSecrets([picked.api_key, ...models.map((entry) => entry.api_key)])
   return {
     settings: picked,
@@ -280,6 +355,11 @@ function readProductionModelSettings() {
       activeModelId: active?.id ?? picked.active_model_id,
       providerName: active?.name ?? '',
       model: active?.model ?? picked.model,
+      productionModel,
+      modelOverride: override,
+      modelSource: override === null
+        ? 'copied from the production active entry'
+        : `--model ${override} applied to the production active entry (base_url/api_key unchanged)`,
       baseUrl: active?.base_url ?? picked.base_url,
       apiKeyPresent: true,
       allowNetwork: picked.allow_network,
@@ -444,6 +524,34 @@ function freePort() {
   })
 }
 
+/**
+ * Line-buffered redaction in front of `app-stdout.log` and the console: a secret
+ * can straddle two chunks, so complete lines are redacted before they leave the
+ * process (the brief's no-secret rule covers app logs too).
+ */
+function createRedactingSink(file, target) {
+  let buffer = ''
+  const emit = (text) => {
+    const redacted = redactSecrets(text, SECRETS)
+    file.write(redacted)
+    target.write(redacted)
+  }
+  return {
+    push(chunk) {
+      buffer += chunk.toString('utf8')
+      let index = buffer.indexOf('\n')
+      while (index >= 0) {
+        emit(buffer.slice(0, index + 1))
+        buffer = buffer.slice(index + 1)
+        index = buffer.indexOf('\n')
+      }
+    },
+    end() {
+      if (buffer !== '') { emit(buffer); buffer = '' }
+    },
+  }
+}
+
 async function launchApp({ homeDir, userDataDir, cdpPort, outDir }) {
   const require = createRequire(import.meta.url)
   const electronPath = require('electron')
@@ -470,14 +578,11 @@ async function launchApp({ homeDir, userDataDir, cdpPort, outDir }) {
     windowsHide: true,
   })
   appLogFile = createWriteStream(join(outDir, 'app-stdout.log'), { flags: 'a' })
-  child.stdout?.on('data', (chunk) => {
-    appLogFile.write(chunk)
-    process.stdout.write(chunk)
-  })
-  child.stderr?.on('data', (chunk) => {
-    appLogFile.write(chunk)
-    process.stderr.write(chunk)
-  })
+  const stdoutSink = createRedactingSink(appLogFile, process.stdout)
+  const stderrSink = createRedactingSink(appLogFile, process.stderr)
+  appStreamSinks = [stdoutSink, stderrSink]
+  child.stdout?.on('data', (chunk) => stdoutSink.push(chunk))
+  child.stderr?.on('data', (chunk) => stderrSink.push(chunk))
   child.once('exit', (code, signal) => {
     log(`electron exited code=${String(code)} signal=${String(signal)}`)
   })
@@ -987,6 +1092,21 @@ function lastAssistantText(events) {
   return undefined
 }
 
+/** The provider/model the app actually requested, from the session's first header. */
+function requestHeaderConfig(session) {
+  for (const event of session.events) {
+    if (event?.type !== 'request/header') continue
+    const config = event.data?.header?.config
+    if (config === null || typeof config !== 'object') continue
+    return {
+      provider: typeof config.provider === 'string' ? config.provider : null,
+      model: typeof config.model === 'string' ? config.model : null,
+      reasoningEffort: typeof config.reasoningEffort === 'string' ? config.reasoningEffort : null,
+    }
+  }
+  return null
+}
+
 /**
  * The parent session's user message is the remainder plus the host instruction
  * (the launcher strips the `@slug` prefix before appending, verified against a
@@ -1048,8 +1168,13 @@ function subagentCallFacts(session) {
   return calls
 }
 
+/**
+ * Cleanup-budget evidence is only valid when the host actually wrote logs. An
+ * empty `userDataDir/logs` yields `cleanupBudgetScan: 'no-log-files'` and the run
+ * fails on it instead of reporting a silent zero.
+ */
 function scanAppLogs(root) {
-  const result = { files: 0, cleanupBudgetTrips: 0, cleanupBudgetLines: [], packageErrors: 0, catalogErrors: 0 }
+  const result = { root, files: 0, cleanupBudgetScan: 'no-log-files', cleanupBudgetTrips: 0, cleanupBudgetLines: [], packageErrors: 0, catalogErrors: 0 }
   const visit = (dir) => {
     let entries
     try {
@@ -1084,20 +1209,24 @@ function scanAppLogs(root) {
     }
   }
   visit(root)
+  result.cleanupBudgetScan = result.files > 0 ? 'scanned' : 'no-log-files'
   return result
 }
 
 /**
  * Affirmative depth-degradation claims only. A model that reports "未降级为单会话
- * 自审" / "未出现递归深度不足" is describing the healthy path; matching the bare
- * verb there would turn a passing run into a false failure. Negated mentions are
- * removed before the affirmative patterns run.
+ * 多轮自审" / "未触发深度降级" is describing the healthy path, and the typo-check
+ * package always discloses the R1 same-model cross-validation downgrade
+ * ("交叉验证已降级") — neither is a depth degradation. The affirmative set
+ * therefore requires an explicit depth/lane phrase, not a bare `降级` or a bare
+ * `maxDepth` mention.
  */
 function reportsDepthDegradation(text) {
   const stripped = text
-    .replace(/(?:未|并未|没有|不会|不能|无|不)(?:发生|出现|进行|被)?\s*[*_]{0,4}降级/gu, '')
+    .replace(/(?:未|并未|没有|不会|不能|无|不)(?:发生|出现|进行|被|触发|涉及|采用)?\s*[*_]{0,4}(?:递归)?(?:深度)?降级/gu, '')
     .replace(/(?:未|并未|没有|不会|不能|无|不)[^。；\n]{0,10}深度不足/gu, '')
-  return /递归深度不足|单会话多轮自审|maxDepth|SubagentDepthError|已降级|降级为/iu.test(stripped)
+    .replace(/(?:并非|不是|非)\s*[*_]{0,4}单会话多轮自审/gu, '')
+  return /(?:递归)?深度不足|单会话多轮自审|非双盲|SubagentDepthError|降级为单会话|已降级为单会话|深度降级/u.test(stripped)
 }
 
 function observeLanes({ homeDir, remainder, slug, runCardCompletedAt, appLogs }) {
@@ -1193,7 +1322,9 @@ function observeLanes({ homeDir, remainder, slug, runCardCompletedAt, appLogs })
     childId,
     childCreatedAt: child.header.createdAt,
     childLastEventAt,
-    childFinalTextExcerpt: clip(childFinal?.text ?? '', 2000),
+    parentRequestHeader: requestHeaderConfig(parent),
+    childRequestHeader: requestHeaderConfig(child),
+    childFinalTextExcerpt: clip(childFinal?.text ?? '', 4096),
     calls,
     distinctCallIdCount: distinctCallIds.size,
     goodCallCount: goodCalls.length,
@@ -1206,6 +1337,8 @@ function observeLanes({ homeDir, remainder, slug, runCardCompletedAt, appLogs })
     runCardCompletedAtWallMs: runCardCompletedAt,
     childAliveMsAtCardCompletion: runCardCompletedAt - (child.header.createdAt ?? runCardCompletedAt),
     cleanupBudgetMs: HOST_CLEANUP_BUDGET_MS,
+    cleanupBudgetScan: appLogs?.cleanupBudgetScan ?? 'no-log-files',
+    cleanupBudgetFiles: appLogs?.files ?? 0,
     cleanupBudgetTrippedInAppLogs: (appLogs?.cleanupBudgetTrips ?? 0) > 0,
     cleanupBudgetLines: appLogs?.cleanupBudgetLines ?? [],
     honestDegradation,
@@ -1223,10 +1356,11 @@ async function run() {
   const startedAt = new Date().toISOString()
   const versions = appVersions()
   const build = requireFreshBuild()
+  const nativeBinding = requireElectronNative()
   requireZstd()
   const connection = readConnection(resolve(options.connection))
   catalogPid = connection.pid
-  const models = readProductionModelSettings()
+  const models = readProductionModelSettings(options.model)
   if (process.platform !== 'darwin') {
     throw new BlockedError('the docx sample and this walkthrough are macOS-only (textutil)', { platform: process.platform })
   }
@@ -1241,9 +1375,10 @@ async function run() {
   log(`isolated root ${tempRoot}`)
 
   const prepared = prepareProfile({ homeDir, userDataDir, workspaceDir, sampleDir, models: models.settings, connection })
+  catalogUsed = true
   await writeAuthState(prepared.profileDir)
   const precheck = await requireMaxDepth(prepared.profileDir)
-  log(`precheck: subagent.maxDepth=${String(precheck.maxDepth)} guard_mode=smart`)
+  log(`precheck: subagent.maxDepth=${String(precheck.maxDepth)} guard_mode=smart model=${models.summary.model}`)
 
   const sampleDocx = makeSampleDocx(sampleDir)
   const sampleCode = makeSampleCode(sampleDir)
@@ -1284,6 +1419,7 @@ async function run() {
       launched: 'electron lib/main.js (the same entry bin.js spawns) with CDP flags; bin.js forwards no extra flags',
       mainPath: MAIN_PATH,
       build,
+      nativeBinding,
     },
     connection: {
       path: resolve(options.connection),
@@ -1303,6 +1439,7 @@ async function run() {
     isolated,
     isolatedRoot: tempRoot,
     keepRoot: options.keepRoot,
+    keepCatalogRoot: options.keepCatalogRoot,
     plaza: progress.plaza,
     installs: progress.installs,
     enables: progress.enables,
@@ -1342,19 +1479,34 @@ async function run() {
   })
   log(`lane chain: child=${lane.childId} lanes=${lane.laneSessions.map((item) => item.id).join(',')} dualBlindOk=${String(lane.dualBlindOk)}`)
 
-  // Model-output facts for the other two packages, located by their own remainder.
+  // Final model text per package, captured from the session logs for the Step 6
+  // human review. `finalTextExcerpt` prefers the package child (depth 1) because
+  // the parent may answer "waiting for the child" before the child settles.
   const sessions = loadSessions(homeDir)
   const modelOutputs = {}
   for (const slug of SLUGS) {
     const remainder = prompts[slug].replace(new RegExp(`^@${slug}\\s+`, 'u'), '')
     const parents = findParentSessions(sessions, remainder)
     const parent = parents.length === 1 ? parents[0] : undefined
-    const final = parent === undefined ? undefined : lastAssistantText(parent.events)
+    const child = parent === undefined
+      ? undefined
+      : sessions.find((session) => session.header.parentSession === parent.header.id
+        && session.header.origin === 'subagent'
+        && session.header.delegationDepth === 1)
+    const parentFinal = parent === undefined ? undefined : lastAssistantText(parent.events)
+    const childFinal = child === undefined ? undefined : lastAssistantText(child.events)
+    const final = childFinal ?? parentFinal
     modelOutputs[slug] = {
       parentSessionId: parent?.header.id ?? null,
       parentCandidates: parents.length,
-      finalTextExcerpt: clip(final?.text ?? '', 2000),
+      packageChildId: child?.header.id ?? null,
+      parentRequestHeader: parent === undefined ? null : requestHeaderConfig(parent),
+      packageChildRequestHeader: child === undefined ? null : requestHeaderConfig(child),
+      finalTextSource: childFinal === undefined ? (parentFinal === undefined ? 'none' : 'parent-final') : 'package-child-final',
       finalTextLength: final?.text.length ?? 0,
+      finalTextExcerpt: clip(final?.text ?? '', MODEL_OUTPUT_EXCERPT_CHARS),
+      parentFinalTextLength: parentFinal?.text.length ?? 0,
+      parentFinalTextExcerpt: clip(parentFinal?.text ?? '', MODEL_OUTPUT_EXCERPT_CHARS),
     }
   }
 
@@ -1363,6 +1515,9 @@ async function run() {
     if (run.terminalPhase !== 'completed') failures.push(`run ${run.slug} ended ${run.terminalPhase}`)
   }
   if (!lane.dualBlindOk) failures.push(`dual-blind lane criteria not met: ${lane.dualBlindReasons.join('; ')}`)
+  if (appLogs.files === 0) {
+    failures.push(`app log scan is invalid: no log files under ${join(userDataDir, 'logs')}; the cleanup-budget evidence needs a real scan`)
+  }
 
   facts.outcome = failures.length === 0 ? 'PASS' : 'FAIL'
   facts.finishedAt = new Date().toISOString()
@@ -1377,6 +1532,7 @@ async function run() {
 function persistFacts() {
   if (facts === undefined) return
   facts.screenshots = screenshots
+  if (catalogCleanup !== undefined) facts.catalogRootCleanup = catalogCleanup
   mkdirSync(dirname(join(options.outDir, 'facts.json')), { recursive: true })
   writeFileSync(join(options.outDir, 'facts.json'), `${JSON.stringify(redactReport(facts, SECRETS), null, 2)}\n`)
 }
@@ -1401,7 +1557,101 @@ function blockedFacts(error) {
     },
     errors: [error.message],
     screenshots,
+    catalogRootCleanup: catalogCleanup ?? null,
   }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+/**
+ * Task 9 intentionally leaves the `--keep-catalog` root on SIGTERM (the
+ * connection file is its hand-off), so removing this run's root is the
+ * acceptance script's job. Deletion requires all of: the connection was used to
+ * configure the app, SIGTERM reached its pid and the process exited, the root
+ * lives directly under the OS temp dir, and its name carries the Task 9 prefix.
+ * Anything else becomes an explicit manual-delete instruction in facts.
+ */
+async function stopAndCleanCatalog(connection) {
+  const fact = {
+    root: connection?.path === undefined ? null : dirname(resolve(connection.path)),
+    pid: connection?.pid ?? null,
+    usedByThisRun: catalogUsed,
+    signalled: false,
+    exited: false,
+    deleted: false,
+    status: 'pending',
+  }
+  if (connection?.path === undefined) {
+    fact.status = 'manual-delete-required'
+    fact.reason = 'no catalog connection was read (the catalog root is unknown)'
+    return fact
+  }
+  if (!Number.isSafeInteger(connection.pid) || connection.pid <= 0) {
+    fact.status = 'manual-delete-required'
+    fact.reason = 'connection pid is invalid'
+    fact.command = `rm -rf '${fact.root}'`
+    return fact
+  }
+  if (!catalogUsed && !options.keepCatalogRoot) {
+    fact.status = 'manual-delete-required'
+    fact.reason = 'the catalog was not used by this run; refusing to delete a root it did not use'
+    fact.command = `rm -rf '${fact.root}'`
+    return fact
+  }
+  try {
+    process.kill(connection.pid, 'SIGTERM')
+    fact.signalled = true
+  } catch (error) {
+    fact.signalError = error?.code ?? String(error)
+  }
+  if (fact.signalled) {
+    const deadline = Date.now() + 15_000
+    while (isProcessAlive(connection.pid) && Date.now() < deadline) await delay(200)
+    fact.exited = !isProcessAlive(connection.pid)
+  }
+  if (options.keepCatalogRoot) {
+    fact.status = 'kept (--keep-catalog-root)'
+    fact.command = `rm -rf '${fact.root}'`
+    return fact
+  }
+  const root = resolve(fact.root)
+  const tempDir = resolve(tmpdir())
+  const underTemp = root.startsWith(`${tempDir}${sep}`)
+  const taskNineName = /^huaanwork-plaza-verify-/u.test(basename(root))
+  if (!fact.signalled || !fact.exited) {
+    fact.status = 'manual-delete-required'
+    fact.reason = fact.signalled ? 'the catalog pid did not exit within 15s' : `SIGTERM failed (${fact.signalError ?? 'unknown'})`
+    fact.command = `rm -rf '${root}'`
+    return fact
+  }
+  if (!underTemp || !taskNineName) {
+    fact.status = 'manual-delete-required'
+    fact.reason = 'the root is not a Task 9 temp root (OS temp dir + huaanwork-plaza-verify- prefix)'
+    fact.command = `rm -rf '${root}'`
+    return fact
+  }
+  if (!existsSync(root)) {
+    fact.status = 'already-absent'
+    return fact
+  }
+  try {
+    rmSync(root, { recursive: true, force: true })
+    fact.deleted = true
+    fact.status = existsSync(root) ? 'delete-failed' : 'deleted'
+    if (fact.status === 'delete-failed') fact.command = `rm -rf '${root}'`
+  } catch (error) {
+    fact.status = 'delete-failed'
+    fact.reason = error instanceof Error ? error.message : String(error)
+    fact.command = `rm -rf '${root}'`
+  }
+  return fact
 }
 
 async function shutdown() {
@@ -1424,10 +1674,15 @@ async function shutdown() {
   }
   // Only the catalog process this walkthrough was pointed at (started by the
   // caller for this task); never an unrelated process.
-  const connectionPid = catalogPid ?? facts?.connection?.pid ?? undefined
-  if (Number.isSafeInteger(connectionPid) && connectionPid > 0) {
-    try { process.kill(connectionPid, 'SIGTERM') } catch { /* already gone */ }
+  const connection = catalogPid === undefined
+    ? undefined
+    : { pid: catalogPid, path: facts?.connection?.path ?? resolve(options.connection) }
+  if (connection !== undefined) {
+    catalogCleanup = await stopAndCleanCatalog(connection)
+    log(`catalog cleanup: ${catalogCleanup.status} root=${String(catalogCleanup.root)}`)
   }
+  for (const sink of appStreamSinks) sink.end()
+  appStreamSinks = []
   if (appLogFile !== undefined) {
     await new Promise((resolveEnd) => { appLogFile.end(resolveEnd) })
   }
