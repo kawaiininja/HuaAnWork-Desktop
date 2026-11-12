@@ -233,3 +233,101 @@ if (!(maxDepth >= 2)) process.exit(3)                        // BLOCKED
 | `docs/evidence/2026-11-11-three-agent-packages.md` | 本文件（Task 0 节） |
 
 scratch（未提交）：`/tmp/typo-plaza-spike/{depth-probe.mjs,ask-tier-probe.mjs,injection-probe.mjs,injection-probe-2.mjs}`。
+
+---
+
+## Task 10 中间门禁与证据汇总（2026-11-12/13 本地跨午夜实测）
+
+> **本节是中间门禁，不是最终门禁。** 实测树为 `736ede7742`（Task 9 之后、Task 11/12 之前）。其后 Task 11 可能按独立评审修安全代码、Task 12 新增 CDP 真机脚本，最终代码树的 `typecheck`/`test`/`check` 在 Task 12 Step 5 重跑，**最终证据以那一次为准**；本节不得被引用为最终门禁结论。
+
+### 10.1 运行时扩展 C1–C5：commit / 测试 / 退出码
+
+| 能力 | commit | 生产文件 | 覆盖测试 | 任务报告记录的聚焦绿跑（exit 0） | 本节全量门禁实测 |
+| --- | --- | --- | --- | --- | --- |
+| R8 产品默认 `maxDepth: 2`（Task 0） | `2f2ae65c0f` + fix `67fc1a88c2` | `src/profile.ts`（`DESKTOP_SUBAGENT_MAX_DEPTH`，`prepareDesktopProfile` 产品默认层） | `tests/profile.spec.ts`（4 条回归钉 + 2 helper） | `63 passed (63)` | `tests/profile.spec.ts (63 tests)` 绿 |
+| C1 allow list 加 `subagent` | `d5e3a2d8e4` | `src/huaanwork-host/agent-package/runtime.ts` | `tests/huaanwork-host/agent-package-runtime.spec.ts`（`follows the declared modes and never exposes host tools`、`includes subagent for both platform shells`） | 全文件 `55 passed` | 全文件本轮 `57 tests` 绿 |
+| C2 血缘 holder | `a6b3ba0310` | `src/huaanwork-host/holders.ts` | 同上 + `tests/huaanwork-guardrails/agent-package-tools.spec.ts`（幂等清理场景加 map 断言） | runtime spec `56 passed` | `agent-package-tools.spec.ts (63 tests)` 绿 |
+| C3 bind / 按引用释放 | `a6b3ba0310` | `src/huaanwork-host/agent-package/host.ts` | `agent-package-runtime.spec.ts`（`binds the turn allow reference for children and clears by reference on cleanup` + 取消/会话 id 复用场景扩展） | runtime spec `56 passed` | runtime spec `57 tests` 绿 |
+| C4 孙代收窄（传递绑定） | `e804df9cde` | `src/huaanwork-guardrails/skills.ts` | `tests/huaanwork-guardrails/package-subagent-lineage.spec.ts`（9 条矩阵：收窄、首步工具表、曾孙传递、无血缘不触发、legacy 优先、包请求优先、legacy wrapper、`tools/change` 保持、双包隔离） | 本 spec `9 passed` + `skills.spec.ts` 39 = `48 passed` | 本 spec `9 tests` 绿 |
+| C5 执行期拒绝 | `52ed4c5901` | `src/huaanwork-guardrails/policy.ts` | `tests/huaanwork-guardrails/policy.cordis.spec.ts`（`lineage sessions are denied out-of-allow tools at execute time even before schema narrowing`） | 全文件 `34 passed` | 全文件 `34 tests` 绿 |
+
+聚焦绿跑的退出码来自各任务报告（`.superpowers/sdd/2026-11-11-three-agent-packages-plaza/task-{0,1,2,3,4}-report.md`）；「本节全量门禁实测」来自下节 `corepack yarn test` 的同一份日志（`/tmp/task10-test.log`）。对 spec §4.4 的映射：C1 = 第 1 项；C4 的 9 条 = 第 2、3 项与跨包隔离/legacy/主会话/`tools/change` 不回归（第 5、7、8 项）；C5 = 第 4 项；第 6 项清理（回合结束/取消后 map 无残留、id 复用不继承）由 C2/C3 在 `agent-package-runtime.spec.ts` 与 `agent-package-tools.spec.ts` 的场景覆盖。
+
+### 10.2 三包源文件：manifest 字段与预算实测
+
+三包共同字段（`parseAgentPackageManifest` 全部通过；`tests/huaanwork-host/agent-package-sources.spec.ts` 9 tests 逐字段精确断言，全量门禁绿）：`schemaVersion: 1`、`version: "1.0.0"`、`persona: "persona.md"`、`skill.entry: "skill/SKILL.md"`、`tools: { mode: "none" }`、`allowSkills: []`。`draftId`/`createdAt`/`updatedAt` 为固定占位，播种脚本（Task 8）写入前重新生成。
+
+| slug | displayName | description（字符/UTF-8 字节） | manifest 规范化 JSON B | persona B | SKILL.md B | `agentPackageBytes` 整包 B | 上限 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `typo-check` | 错别字检测 | 83 / 211 | 677（源文件 `agent.json` 661 B） | 536 | 8433 | 9646 | persona/SKILL 各 32768；整包 5242880 |
+| `code-review` | 代码审查 | 76 / 200 | 674（源文件 658 B） | 432 | 2771 | 3877 | 同上 |
+| `task-orch` | 任务编排 | 95 / 231 | 694（源文件 678 B） | 477 | 4156 | 5327 | 同上 |
+
+测量方法（本节实测，exit 0）：`agent-package-sources.spec.ts` 的 `stays within store budgets` 只断言 ≤ 上限、不打印数值；本表字节用 `src/huaanwork-host/agent-package/store.ts` 的 `agentPackageBytes()`（`JSON.stringify(manifest, null, 2) + "\n"` + persona + skill）与 `parseAgentPackageManifest()` 对 `dsh-plugin-huaanwork/agent-packages/{slug}/` 逐包实测。上表 manifest 列即该函数使用的规范化字节数（源文件 B 数另列，二者差在 JSON 重排与尾换行）。上限常量：`MAX_PERSONA_BYTES = MAX_SKILL_BYTES = 32768`、`MAX_PACKAGE_BYTES = 5242880`（`store.ts:37-43`）。三包整包分别占上限 0.18% / 0.07% / 0.10%，persona 与 SKILL.md 均在各自 32 KiB 内（SKILL.md 最紧的是 typo-check，25.7%）。与 Task 8 报告记录的 9646 / 3877 / 5327 一致。
+
+### 10.3 播种与广场发布验证
+
+**播种（Task 8）**：`tests/huaanwork-host/seed-agent-packages.spec.ts` 在 `corepack yarn test` 中 `2 tests` 绿（`/tmp/task10-test.log`；Task 8 报告的聚焦复跑同为 2/2、exit 0）。两条覆盖：① happy path（三包写入隔离 profile、stdout `{seeded,details}` 字节数与 §10.2 一致、`agents-state.json` 精确四字段）；② `rejects an oversized third source before writing any package`（预检覆盖写时校验，第三包 persona 超限 ⇒ 非零退出且 profile 目录为空，无部分写入；Task 8 修复报告记录了 mutation 证据）。本任务未单独手跑播种 CLI，测试内部真实 spawn 该脚本。
+
+**广场发布验证（Task 9）**：本任务在中间树上重跑（2026-11-13 00:03 本地，`--out` 落到 `/tmp/plaza-verify-report-task10.json`）：
+
+```bash
+cd dsh-plugin-huaanwork
+corepack yarn exec node --experimental-transform-types scripts/verify-agent-packages-plaza.mjs \
+  --out /tmp/plaza-verify-report-task10.json
+# EXIT=0；stdout 报告 outcome=PASS
+```
+
+脱敏摘要（报告文件已按 Task 9 的 redaction 深度脱敏；复核 `plaza-probe-read-/publish-/admin-` 与 `PRIVATE KEY`/`BEGIN` 命中均为 0）：
+
+- `legacyConflict`: `PASS (409 for all three slugs)` —— typo-check / code-review / task-orch 三条同名 kind:"tool" fixture 均返回 HTTP 409，且未记录假 pending。
+- 三个提交 id：`ea25305b…` / `f0ec8f8d…` / `baad5b64…`（每运行现场生成）；`reviewedAndSigned.keyId` = `80f7c5cf…57842`（每运行一次性开发密钥，非生产）。
+- `plazaBeforeInstall`: 3 张卡 `installed:false`，displayName = 代码审查 / 任务编排 / 错别字检测。
+- `installedAndVerified`: 三包安装并独立复验 keyId + digest 通过；`plazaAfterInstall`: `installed slugs excluded`；`enabled`: 三包 `enabled:true`。
+- 本次非 `--keep-catalog` 运行未留临时根（Task 9 的 `--keep-catalog` 记录根 `/var/folders/…/huaanwork-plaza-verify-9XaJJq` 仍在，含一次性私钥、权限 0600，留给 Task 12 使用/清理）。
+- Task 9 的原始 PASS 报告 `/tmp/plaza-verify-report.json` 仍在（2026-11-12 23:45，outcome PASS，结论一致）。
+
+### 10.4 门禁：三条命令与退出码
+
+| # | 命令 | exit | 说明 |
+| --- | --- | --- | --- |
+| 前置 | `corepack yarn build` | **1** | 仅作测试前置尝试：`market:prepare` 在 `dshmarket` 桌面补丁上失败（npm latest 已到 `1.73.19`，仓库 pin `1.73.7` 与 `.yarn/patches/dshmarket-desktop.patch` 不匹配，`Cannot apply hunk #2`），按设计 fail-closed。该 pin 与 patch 在本分支零改动（`git diff master -- dsh-plugin-huaanwork/package.json yarn.lock .yarn/patches/` 为空），属外部漂移而非本分支引入；失败后脚本自行恢复 manifests/lockfile，`git status` 干净。 |
+| 前置 | `corepack yarn workspace dsh-plugin-huaanwork build` | **0** | 初始树缺 `dsh-plugin-huaanwork/lib/`（测试的既有构建产物前置；Task 0 节已记录缺 lib 会让 `package.spec`/`verify-packaged-runtime`/`recovery-plugin-uninstall` 误红）。该包 build 不经过 `market:prepare`，补齐后测试可跑。`market-server`/`update-server`/`agent-catalog-server`/`agent-catalog-admin` 的 build 为 no-op（源码直跑），无需产物。 |
+| 1 | `corepack yarn typecheck` | **0** | 八个 workspace 的 typecheck 全部通过；日志 `/tmp/task10-typecheck.log`（末行 `EXIT=0`）。 |
+| 2 | `corepack yarn test` | **0** | 日志 `/tmp/task10-test.log`。分 workspace：dsh-plugin-huaanwork `284 passed / 4 skipped`（288 文件；3971 passed / 15 skipped / 3986 tests）、dsh-community-market 13 文件 303 tests、@huaanwork/policy 64（62 过 2 跳过）、model 10、git-tools 8、web-tools 19、market-server 14 文件 244 tests、update-server 5 文件 88 tests、catalog-signing 13、agent-package-format 35、agent-catalog-server 5 文件 80 tests、agent-catalog-admin 15；0 失败。本节相关 spec 全绿：`agent-package-runtime` 57、`agent-package-tools` 63、`package-subagent-lineage` 9、`policy.cordis` 34、`profile` 63、`agent-package-sources` 9、`seed-agent-packages` 2、`typo-check-pwsh-extract` 2（1 跳过，见 §10.6）。 |
+| 3 | `corepack yarn check` | **0** | 日志 `/tmp/task10-check-3.log`（末行 `EXIT=0`）；完整链含 `check:whitespace`、`check:layout`、`test:aa-connector`、各 workspace check（community-market build+test、huaanwork build+typecheck+test+verify:closure/bundled/cli/loader/profile/host/**aa**/licenses/operations 等）。`verify:aa` 在本轮 **in-check 直接通过，未出现并发竞态**（日志两次 `verify-profile-boot: minimal preset, plugin manager, and disabled hmr lock passed`，分别为 verify:profile 与 verify:aa；无 AA Host services conflict），因此本任务没有隔离重跑。 |
+
+`check` 从红到绿的两次环境/分支修正（如实登记，均不改变产品行为）：
+
+1. **分支引入的尾随空格**：`check` 首跑在 `test:whitespace` 失败（7 条中 2 条红），`git diff --check` 指向 `docs/superpowers/plans/2026-11-11-three-agent-packages-plaza-plan-review.md:42,62` 的两个两空格空行（该文件由本分支 docs 提交引入）。最小修复为删除两处尾随空格，**单独提交 `736ede7742`**（只改该文档），随后 `node scripts/check-whitespace.mjs` exit 0、其单测 7/7 通过。
+2. **worktree 子模组 origin 形态**：第二跑在 `verify-layout` 失败：`deepseek-harness origin differs from upstream.json`。原因是本 worktree 的子模组按 Task 0 记录从本地共享库检出，`origin` 指向父 checkout 的本地路径，而 `upstream.json` 要求 `https://github.com/deepseek-ai/deepseek-harness.git`。修复为 `git -C deepseek-harness remote set-url origin https://github.com/deepseek-ai/deepseek-harness.git`（仅本地 git config；子模组 pin `1600d8a1e1` 与工作树内容零改动，`git status --porcelain` 仍空）。修复后 `node scripts/verify-layout.mjs` exit 0，第三跑全绿。
+
+外部漂移的边界（不属本分支、未被绕过）：`corepack yarn build`/`dev`/`dist:*` 的 `market:prepare` 在当前 npm latest（`1.73.19`）下仍 fail-closed；根 `check` 不调用 `market:prepare`，故不影响本门禁。Task 12 若通过根 `dev` 或 `open-latest-huaanwork` 的 market 刷新路径构建，会先撞同一外部漂移；可改用包内 `build` + `prepare:electron-native` + `node lib/bin.js`（不经 market:prepare）。此项登记为 Task 12 的前置风险，不得在 Task 12 里静默跳过或改写 patch 了事。
+
+### 10.5 能力披露口径订正（spec §5.0/§7.3）
+
+签名广场包**没有安装/启用确认对话框**：安装 = 广场卡直接「下载」按钮，启用 = 「我的智能体」页直接「启用」开关。披露面是**详情对话框**（`dsh-plugin-huaanwork/src/client-huaanwork/AgentPackagesPanel.tsx`）：
+
+- **未安装**（`summaryDetail` 分支）：包信息（版本 / @slug / 描述 / 包大小 / 更新时间 / 迁移来源）+ 签名节只显示 `INSTALL_DETAIL_NOTICE`（`logic/agentPackagesLogic.ts:51`，文案「安装后可查看签名与文件清单」）；不伪造签名或文件清单。
+- **已安装**（`packageDetail` 分支）：发布状态 + 签名（keyId / 签名时间 / 槽位 / **验签结果：通过**，或「未通过 + 原因」）+ 人设 + 技能 + 工具 + 文件 digest 清单；`tools.mode:"none"` 经 `packageToolsLabel()` 显示为 **「无」**（`agentPackagesLogic.ts:446-449`）。对话框底部固定显示 `PACKAGE_SANDBOX_WARNING`（`agentPackagesLogic.ts:24`，文案「脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。」）。
+- 广场卡（`catalogPackageCard`）只显示 displayName/description/version/size，**没有 capabilities 字段**；允许名单（read/read_file/glob/grep/bash（win32 为 pwsh）/subagent）不在 UI 逐项展示，能力边界如实写在 description 与 SKILL.md，由 C4/C5 在运行时收窄与拒绝。
+
+spec §5.0/§7.3 已于 2026-11-12 同步订正；本里程碑**不伪造对话框测试**，真实 DOM 断言归 Task 12。上表 10.3 的脚本断言的是同一套 logic（`plazaCards`/`packageActionLabel`），不含 DOM。
+
+### 10.6 Windows：单元覆盖与 BLOCKED 项
+
+- **win32 allow 形态（已覆盖）**：`tests/huaanwork-host/agent-package-runtime.spec.ts` 的 `includes subagent for both platform shells` 强制 `process.platform` 为 `darwin` 与 `win32`，断言两种 allow 数组分别以 `bash`/`pwsh` 后接 `subagent`；全量门禁绿。
+- **pwsh 提取行为（本机 BLOCKED）**：`tests/huaanwork-host/typo-check-pwsh-extract.spec.ts` 共 2 条；本机 `2 tests | 1 skipped` —— 提取行为用例因 `spawnSync('pwsh', ['-Version'])` 返回 `ENOENT`（`powershell` 亦不存在）如实跳过并打印原因；另一条 fixture 完整性用例在两平台实际执行并通过。即：`System.IO.Compression` + `HtmlDecode` + UTF-8 无 BOM 的提取处方**在本机从未被执行**，不得声称已验证。
+- **真机项 BLOCKED（R-ACCEPT-1 豁免先例）**：无第二台 Windows 机器，不声称跨机器/跨 OS 通过。Windows CI 的 `check:win-package:platform` 测试清单（`dsh-plugin-huaanwork/package.json`）不含上述 pwsh 提取 spec，故该行为目前**没有任何 Windows 执行证据**。触发条件：有 pwsh 的主机显式运行该 spec；获得第二台 Windows 机器时按 R-ACCEPT-1 证据 §4 四步补跑。
+
+### 10.7 待补（后续任务完成后回填）
+
+- **Task 11（独立评审）**：runtime/holders/host/skills/policy + Task 0 maxDepth 注入 diff 与回归钉的评审结论（经反证校准、严重度）、P0/P1 修复 commit 与重跑退出码、N-3 探针（lane 存活期 vs 10 分钟清理预算）结论。
+- **Task 12（CDP 真机走查 + 最终门禁）**：`huaanwork-accept-three-packages.mjs` 脚本与执行事实（maxDepth ≥ 2 预检、guard_mode=smart、三张中文卡、详情对话框真实 DOM 披露断言、双盲身份链判据、N-3 实测、截图指针）；**最终代码树的 `typecheck`/`test`/`check` 在 Step 5 重跑，最终证据以那次为准**。
+- **Task 13（备份 + 延后删除登记）**：`~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz` 的防覆盖门、`tar -tzf` 完整校验、sha256、删除范围与触发条件（本里程碑不删除）。
+- **Task 14（生产上架 runbook 指引）**：`docs/huaanwork-three-agent-packages-release.md` 与证据指针；生产签名/上架仍为 owner 运维动作。
+
+### 10.8 工作树状态与 scratch
+
+- 门禁实测 HEAD：`736ede7742`（本提交之前）；本节以独立 commit 追加。`deepseek-harness` pin `1600d8a1e140dcde43a1a0941940a0480712c011` 未变；除本文件与空白修复提交外工作树干净。
+- scratch（未提交）：`/tmp/task10-typecheck.log`、`/tmp/task10-build.log`、`/tmp/task10-hw-build.log`、`/tmp/task10-test.log`、`/tmp/task10-check{,-2,-3}.log`、`/tmp/plaza-verify-report-task10.json`、`/tmp/task10-plaza-{stdout.json,stderr.log}`。
