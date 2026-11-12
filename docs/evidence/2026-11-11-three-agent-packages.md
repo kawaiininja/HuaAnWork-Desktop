@@ -429,7 +429,7 @@ spec §5.0/§7.3 已于 2026-11-12 同步订正；本里程碑**不伪造对话�
 | `corepack yarn workspace dsh-plugin-huaanwork exec node --experimental-transform-types scripts/verify-agent-packages-plaza.mjs --keep-catalog` | **0** | Task 9 脚本；三次运行各起一次，连接文件分别在 `…/huaanwork-plaza-verify-{2rTxxP,fLwKEr,g2ahfr}/catalog-connection.json` |
 | 走查 run 1：`corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-three-packages.mjs --connection <2rTxxP> --out /tmp/three-packages-accept-2` | **0 PASS** | 构建点 `edc932f1fe`（profile 修复后、锁行同步前）；产物 `/tmp/three-packages-accept-2-run1` |
 | 走查 run 2（最终树重跑） | **1 FAIL** | 机制全通过，仅文本断言假阳性；产物 `/tmp/three-packages-accept-2-run2`，见 12.7 |
-| 断言修正后走查 run 3（最终树） | **0 PASS** | 产物 `/tmp/three-packages-accept-2`；二进制构建于最终 `HEAD`（`a48e71a47c` 的源码树，仅本证据文档未纳入构建） |
+| 断言修正后走查 run 3（最终树） | **0 PASS** | 产物 `/tmp/three-packages-accept-2`；`facts.environment.headSha = 4fbd73d1a2`，`lib` 新于全部 `src`（`libMainMtime 21:52:31Z > newestSourceMtime 21:52:06Z`）；其后只有脚本断言提交 `a48e71a47c`（`.mjs`，不参与构建）与本证据文档 |
 
 所有 `--keep-catalog` 临时根（含私钥 / catalog token）与本轮走查的临时根（含生产模型凭据副本，`isolatedCleanup: "removed"`）均已删除；诊断期保留的 `/var/folders/.../huaanwork-three-packages-Ag1QX2` 也已删除。
 
