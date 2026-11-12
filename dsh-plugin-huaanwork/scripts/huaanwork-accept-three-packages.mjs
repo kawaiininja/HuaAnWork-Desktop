@@ -1087,6 +1087,19 @@ function scanAppLogs(root) {
   return result
 }
 
+/**
+ * Affirmative depth-degradation claims only. A model that reports "未降级为单会话
+ * 自审" / "未出现递归深度不足" is describing the healthy path; matching the bare
+ * verb there would turn a passing run into a false failure. Negated mentions are
+ * removed before the affirmative patterns run.
+ */
+function reportsDepthDegradation(text) {
+  const stripped = text
+    .replace(/(?:未|并未|没有|不会|不能|无|不)(?:发生|出现|进行|被)?\s*[*_]{0,4}降级/gu, '')
+    .replace(/(?:未|并未|没有|不会|不能|无|不)[^。；\n]{0,10}深度不足/gu, '')
+  return /递归深度不足|单会话多轮自审|maxDepth|SubagentDepthError|已降级|降级为/iu.test(stripped)
+}
+
 function observeLanes({ homeDir, remainder, slug, runCardCompletedAt, appLogs }) {
   const sessions = loadSessions(homeDir)
   const parents = findParentSessions(sessions, remainder)
@@ -1153,7 +1166,7 @@ function observeLanes({ homeDir, remainder, slug, runCardCompletedAt, appLogs })
   const deliveryTimes = laneDeliveries.map((delivery) => delivery.at ?? 0)
   const lastDeliveryAt = deliveryTimes.length > 0 ? Math.max(...deliveryTimes) : undefined
   const arbitrationText = [childFinal?.text ?? '', lastAssistantText(parent.events)?.text ?? ''].join('\n')
-  const honestDegradation = /递归深度不足|单会话多轮自审|maxDepth|SubagentDepthError|已降级|降级为/iu.test(arbitrationText)
+  const honestDegradation = reportsDepthDegradation(arbitrationText)
 
   const lanesDelivered = laneFacts.length === 2
     && deliveredLaneIds.size === 2
