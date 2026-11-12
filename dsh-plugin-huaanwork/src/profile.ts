@@ -1593,6 +1593,11 @@ export function prepareDesktopProfile(
     // jobs/tool-jobs 硬锁定下该参数可见必败（收口裁定，spike §4.6）。
     { id: 'tool-fs', disabled: false },
     { id: 'tool-fs-search', disabled: false },
+    // 委派工具:web-app overlay 关闭宿主平面的 tool-subagent 行,而桌面会话从不挂载
+    // standard preset(委派组随 preset 提供)⇒ 若不复挂,父会话与包子会话都没有
+    // `subagent` 工具,包 lane 派发不可达(2026-11-13 owner 裁定)。仅翻回 `subagent`;
+    // fork/control/list-agents 保持关闭。
+    { id: 'tool-subagent', disabled: false },
     process.platform === 'win32'
       ? { id: 'tool-pwsh', disabled: false, config: { enableRunInBackground: false } }
       : { id: 'tool-bash', disabled: false, config: { enableRunInBackground: false } },

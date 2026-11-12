@@ -162,6 +162,25 @@ describe('desktop profile composition', {
     expect(effectiveSubagentMaxDepth(prepared)).toBe(2)
   })
 
+  it('re-enables the model-facing subagent tool the Web overlay disables', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const rows = composeEntries([prepared.patches])
+    const tool = rows.find(row => row.id === 'tool-subagent')
+
+    // The Web overlay disables the host-plane tool row, and desktop sessions never
+    // mount a preset (the standard preset owns the delegation group). Without this
+    // re-enable no agent — parent or package child — has the `subagent` tool, so
+    // package lane dispatch is unreachable. Owner ruling 2026-11-13 supersedes
+    // spec §4.3's "main-session subagent behavior unchanged" invariant.
+    expect(tool).toEqual(expect.objectContaining({ name: '@deepseek-ai/dsh-tool-subagent' }))
+    expect(tool?.disabled).not.toBe(true)
+    expect(rows.find(row => row.id === 'subagent')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-subagent',
+      config: { maxDepth: 2 },
+    }))
+  })
+
   it('pins the depth arithmetic the shipped packages rely on', () => {
     const home = temporaryHome()
     const cap = effectiveSubagentMaxDepth(prepareDesktopProfile(undefined, home, 'darwin'))
