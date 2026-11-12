@@ -98,3 +98,33 @@ describe('code-review package source', () => {
     expect(skill).toContain('文件:行号')
   })
 })
+
+describe('task-orch package source', () => {
+  test('manifest matches the approved spec fields', () => {
+    const manifest = loadSourceManifest('task-orch')
+    expect(manifest.slug).toBe('task-orch')
+    expect(manifest.displayName).toBe('任务编排')
+    expect(manifest.description).toBe(
+      '把复杂任务拆解为可实施的执行计划：子任务依赖分析、每步输入产出与验收标准、顺序与并行建议、周期任务的 cron/interval 调度建议。只出计划，不执行。用 @task-orch 调用。',
+    )
+    expect(manifest.version).toBe('1.0.0')
+    expect(manifest.tools).toEqual({ mode: 'none' })
+    expect(manifest.allowSkills).toEqual([])
+  })
+
+  test('stays within store budgets', () => {
+    const files = fileSet('task-orch')
+    expect(Buffer.byteLength(files.persona, 'utf8')).toBeLessThanOrEqual(MAX_PERSONA_BYTES)
+    expect(Buffer.byteLength(files.skill.markdown, 'utf8')).toBeLessThanOrEqual(MAX_SKILL_BYTES)
+    expect(agentPackageBytes(files)).toBeLessThanOrEqual(MAX_PACKAGE_BYTES)
+  })
+
+  test('SKILL.md pins the plan-only boundary and scheduling forms', () => {
+    const skill = readSource('task-orch', 'skill/SKILL.md')
+    for (const pin of ['只出计划', '验收标准', 'cron', 'interval', '依赖', '可并行', '拓扑', '@task-orch']) {
+      expect(skill).toContain(pin)
+    }
+    expect(skill).toContain('30s')
+    expect(skill).toContain('执行者')
+  })
+})
