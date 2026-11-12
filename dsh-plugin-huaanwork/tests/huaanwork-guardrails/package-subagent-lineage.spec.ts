@@ -157,11 +157,12 @@ test("grandchild schemas narrow to inherited allow intersected with its tool tab
   assert.equal(h.childAllow.get(h.grandchildId), h.allow);
 });
 
-// 矩阵 2b（终审 P1）：首步模型可见工具表。
+// 矩阵 2b（终审 P1）：激活后的工具表。
 // 本 harness 不启动真实 provider。driveFirstChildStep 是命名过的那一次 schemas() 读取；
 // 测试只断言它记下的名字。矩阵 2 仍直接断言注册表视图，两者不要混用。
-// 执行期拒绝见 Task 4，本测试不重复。
-test("grandchild first model request carries only the inherited allow", async () => {
+// 真实子会话的首条模型请求可能在该 activation 包装运行之前就已组装；那个窗口不是由
+// schema 层封住的，而是由 C5 执行期拒绝封住（见 policy.ts）。执行期拒绝见 Task 4，本测试不重复。
+test("a grandchild's tool table after activation carries only the inherited allow", async () => {
   const h = lineageHarness();
   await activateOf(h.ctx)(activationSpec(h.grandchildId, h.parentSessionId));
   h.driveFirstChildStep();
@@ -235,6 +236,22 @@ test("the legacy start wrapper narrows grandchildren identically", async () => {
   const start = (h.ctx.subagents as { start: (...args: never[]) => Promise<unknown> }).start;
   await start("lane" as never, { parent: liveParent(h.parentSessionId), prompt: [] } as never);
   const names = h.grandchildTools.schemas().map((schema) => schema.name);
+  assert.deepEqual(names, ["read", "read_file", "glob", "grep", "bash", "subagent"]);
+  assert.equal(h.childAllow.get(h.grandchildId), h.allow);
+});
+
+// I2（Task 11 评审）：`current` 是进程级 legacy marker，可能属于另一会话的在途 `@agent`
+// 回合。本次派发的父会话有血缘条目时，血缘条目权威 —— 不与那个回合的 allow 求交，
+// 也不因此跳过收窄与条目写入（C4 与 activation 路径同形）。
+test("the start wrapper honors a lineage entry over a concurrent legacy turn", async () => {
+  const h = lineageHarness();
+  (h.ctx as Record<string, unknown>).huaanworkAgentRequest = {
+    current: { allow: ["read"], persona: "另一会话的在途 legacy 回合" },
+  };
+  const start = (h.ctx.subagents as { start: (...args: never[]) => Promise<unknown> }).start;
+  await start("lane" as never, { parent: liveParent(h.parentSessionId), prompt: [] } as never);
+  const names = h.grandchildTools.schemas().map((schema) => schema.name);
+  // 不是 legacy 的 ['read']：来源是继承 allow，不是进程级 marker。
   assert.deepEqual(names, ["read", "read_file", "glob", "grep", "bash", "subagent"]);
   assert.equal(h.childAllow.get(h.grandchildId), h.allow);
 });

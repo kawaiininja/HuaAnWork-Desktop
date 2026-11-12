@@ -294,18 +294,24 @@ export function apply(ctx: Context): void {
       // 在 await 之前取快照:dispatch 的 finally 会在 run 结束后清空容器。
       const pkg = ctx.huaanworkAgentPackageRequest?.current;
       const current = ctx.huaanworkAgentRequest?.current;
+      // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写。
+      // 事件载荷没有 parent；父会话只取这次 start 的 parent，缺省即无父会话。
+      const parentFromCall = sessionIdOf(parentFromStartArgs(args));
+      // 血缘条目与父会话同在 await 之前取快照。`current` 是进程级 legacy marker，可能属于
+      // 另一会话的在途 `@agent` 回合；本次派发的父会话已有血缘条目时，血缘条目是权威的
+      // (C4 与 activation 路径同形)，不能被那个回合的 allow 求交、也不得因此跳过收窄。
+      const inherited =
+        parentFromCall === undefined ? undefined : ctx.huaanworkPackageChildAllow?.get(parentFromCall);
+      const legacyApplies = current !== undefined && inherited === undefined;
       try {
-        if (current) {
+        if (legacyApplies && current) {
           if (!current.persona || current.persona.trim() === "") {
             throw new Error("智能体人设为空");
           }
         }
-        // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写。
-        // 事件载荷没有 parent；父会话只取这次 start 的 parent，缺省即无父会话。
-        const parentFromCall = sessionIdOf(parentFromStartArgs(args));
         const run: any = await startParent.run(parentFromCall, () => original(...args));
         let packageApplied = false;
-        if (current && run?.localAgent) {
+        if (legacyApplies && current && run?.localAgent) {
           const tools = run.localAgent.ctx?.get?.("tools");
           const schemas = tools?.schemas?.() ?? [];
           const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
@@ -342,19 +348,16 @@ export function apply(ctx: Context): void {
           tools?.restrict?.({ allow });
         }
         // 血缘分支(C4,start 旧签名回落):与 activation 路径同形。
-        if (!current && !packageApplied && run?.localAgent && parentFromCall !== undefined) {
-          const inherited = ctx.huaanworkPackageChildAllow?.get(parentFromCall);
-          if (inherited !== undefined) {
-            const childSessionId =
-              sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
-            if (childSessionId !== undefined) {
-              const tools = run.localAgent.ctx?.get?.("tools");
-              const schemas = tools?.schemas?.() ?? [];
-              const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
-              const allow = inherited.filter((name) => existing.includes(name));
-              tools?.restrict?.({ allow });
-              ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
-            }
+        if (!packageApplied && run?.localAgent && parentFromCall !== undefined && inherited !== undefined) {
+          const childSessionId =
+            sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
+          if (childSessionId !== undefined) {
+            const tools = run.localAgent.ctx?.get?.("tools");
+            const schemas = tools?.schemas?.() ?? [];
+            const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
+            const allow = inherited.filter((name) => existing.includes(name));
+            tools?.restrict?.({ allow });
+            ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
           }
         }
         if (run?.localAgent) {

@@ -103,6 +103,8 @@ export function readGuardMode(profileDir: string | undefined): GuardMode {
 
 export function apply(ctx: Context): void {
   ctx.on("tools/pre-execute", async (execution, next) => {
+    // 名字集合判定:上游 schema 层会豁免 scope 自己注册的本地工具(如 structured_output),
+    // 本检查不豁免 —— 血缘会话若真的请求 scope 本地工具,这里必须重新审查。
     const lineageAllow = ctx.huaanworkPackageChildAllow?.get(sessionIdOfAgentRef(execution.agent) ?? "");
     if (lineageAllow !== undefined && !lineageAllow.includes(execution.name)) {
       return { kind: "deny", reason: `huaanwork-policy: 智能体包链路会话不允许使用工具 ${execution.name}` };
@@ -122,6 +124,8 @@ export function apply(ctx: Context): void {
   });
 
   ctx.tools.guard((execution) => {
+    // 名字集合判定(与 pre-execute 同一语义):上游 schema 层豁免 scope 自己注册的本地工具,
+    // 本检查不豁免 —— 血缘会话若真的请求 scope 本地工具,这里必须重新审查。
     const lineageAllow = ctx.huaanworkPackageChildAllow?.get(sessionIdOfAgentRef(execution.agent) ?? "");
     if (lineageAllow !== undefined && !lineageAllow.includes(execution.name)) {
       return `huaanwork-guard: 智能体包链路会话不允许使用工具 ${execution.name}`;

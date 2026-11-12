@@ -732,7 +732,10 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           // added, and a later turn reusing the id must not inherit the package flag.
           ctx.huaanworkPackageChildSessions?.add(childSessionId)
           packageChildSessions.add(childSessionId)
-          if (turnAllow !== undefined) ctx.huaanworkPackageChildAllow?.set(childSessionId, turnAllow)
+          // `turnAllow` 在两次 `bindChild` 之前赋值;缺它就是调用顺序回归,不能静默跳过
+          // 写入 —— 否则血缘表与 C5 执行期拒绝会一起缺席。
+          if (turnAllow === undefined) throw new Error('智能体包回合 allow 未就绪即绑定子会话')
+          ctx.huaanworkPackageChildAllow?.set(childSessionId, turnAllow)
           if (runtime === undefined) return
           // `skills.ts` attaches the runtime tools and MCP names before calling this;
           // cleanup detaches them again from every bound child.
