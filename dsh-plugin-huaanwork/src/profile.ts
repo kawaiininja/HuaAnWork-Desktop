@@ -115,8 +115,8 @@ export const UPSTREAM_PRODUCT_ANALYTICS_ROW_IDS = ['desktop-product-telemetry', 
  * A shipped agent package runs as a child agent at depth 1 and dispatches its
  * lane subagents at depth 2; upstream's default of 1 rejects that dispatch with
  * `SubagentDepthError`. The row composes after the bundle layers and ahead of
- * the profile and machine-wide layers, so a value saved in Desktop settings
- * replaces it rather than being shadowed by the launcher.
+ * the profile and machine-wide layers, so a saved Desktop value replaces it
+ * rather than being shadowed; bundle-level `subagent` config is replaced, never merged.
  */
 const DESKTOP_SUBAGENT_MAX_DEPTH = 2
 const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'

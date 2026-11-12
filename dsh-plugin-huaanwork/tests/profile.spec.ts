@@ -189,6 +189,19 @@ describe('desktop profile composition', {
     expect(effectiveSubagentMaxDepth(pendingWrite)).toBe(3)
   })
 
+  it('drops the product default when a user row carries only a sibling field', () => {
+    const home = temporaryHome()
+    // Known edge (evidence §0.3 C): a patch row replaces the whole `config`, so a
+    // user row without `maxDepth` leaves the schema default of 1 instead of the
+    // shipped 2. The settings card's clear/reset control plans an `unset`, which
+    // persists exactly such a row once a sibling field is stored.
+    const siblingOnly = prepareDesktopProfile(undefined, home, 'darwin', 'desktop', undefined, undefined, {
+      profilePatches: [{ id: 'subagent', config: { maxActiveSubagents: 4 } }],
+    })
+
+    expect(effectiveSubagentMaxDepth(siblingOnly)).toBe(1)
+  })
+
   it('reads packaged Cordis skills from the logical ASAR preset root', () => {
     const home = temporaryHome()
     const resources = join(home, 'resources')

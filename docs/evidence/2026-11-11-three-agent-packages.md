@@ -98,7 +98,11 @@ E machine-wide=4 -> {"config":{"maxDepth":4},"get":4}
 - B：用户值 3 ⇒ 保留 **3**（P2 保留门成立）。
 - D：设置面写入 maxDepth=3 的校验组合 = 3 ⇒ 写入不会被判「被覆盖」。
 - E：machine-wide `cordis.patch.yml` 的值同样优先于产品默认（管理员层不被遮蔽）。
-- C：**已知边界（如实登记）**：若用户行只写同族字段（如仅 `maxActiveSubagents: 4`），整条 config 被替换 ⇒ `maxDepth` 回落到 schema 默认 1，而不是产品默认 2。Desktop 设置卡片按整条 config 写入（`SettingsForms.mutate` 从当前有效值出发，`maxDepth` 与 `maxActiveSubagents` 一并落盘），故 UI 来源的配置不触发该边界；只有手写只含单字段的用户 patch 会。该形态是 patch 语义（`config` 整体替换）的固有结果，不在本任务扩大处理范围（改动它需引入字段级合并，属另一个产品决定）。
+- C：**已知边界（如实登记；产品 UI 可触达）**：patch 行对 `config` 是**整条替换**而不是逐字段合并，所以用户行一旦不含 `maxDepth`，有效值回落到 schema 默认 1 而不是产品默认 2。触发面按写操作分成两类：
+  - **`set` 类不触发**：`SettingsFormModel.plan()`（`dsh-client-ui-primitives/lib/index.js:7448`）为普通编辑发 `{op:'set', path:[field], value}`（`:7481-7487`）；`dsh-settings` 的 `mutate()`（`dsh-settings/lib/index.js:488-500`）把它应用到「当前**有效** config 的投影」（`entry.options.config`）上，故 `maxDepth` 与同族字段一并落盘。
+  - **`unset`/清空类触发**：卡片的 `resetField`（`dsh-client-ui-primitives/lib/index.js:7384-7389`，plan 在 `:7462-7468`，仅当该字段在用户层存在时）与「把输入框清空再保存」（`:7474-7480`；`spec.parse` 对空串返回 `{kind:'clear'}`，`:7261`/`:7282`）都发 `{op:'unset', path:[field]}`。`mutate()` 的 `unset` 分支（`dsh-settings/lib/index.js:488-500`）先到 config editor 给的 `inherited` 层找可回落的继承值；该层由 `inherited()`（`dsh-config-editor/lib/index.js:54-63`）只重组合磁盘层（bundle + home），**不含 launcher 内存里的产品默认行**，而本仓 bundle 的 `subagent` 行无 config ⇒ inherited = `{}` ⇒ 找不到继承值，`applyPathOp` 的非数组分支执行**删键**（`dsh-settings/lib/index.js:189-214`，删除在 `:204`）。随后 `write()` 落盘 `mergeLayers(strip(raw, form), next)`（`:501-536`，`strip` 在 `:524-533`、`mergeLayers` 在 `:534`）；`subagent` 两个字段都是 volatile（`deepseek-harness/packages/subagent/subagent/src/index.ts:196-197`），`strip(raw, form)` = `{}`，所以落盘行恰好等于 `next`。
+  - **具体后果**：用户先存过同族字段（如 `maxActiveSubagents: 4`），再点 `maxDepth` 的清除/重置（或清空后保存）⇒ 落盘行 = `{maxActiveSubagents: 4}` ⇒ 下次组合整条替换 ⇒ 开箱默认 2 静默变回 1，R8 要防的包子会话派 lane 失败复现。反过来，`set` 路径落盘行会带上生效的 `maxDepth`，故普通编辑不受影响。
+  - **处理与裁定**：本任务不引入字段级合并（那是 patch 语义/产品决定，改动面超出 R8 注入），边界按「登记 + 钉住」交付：回归钉 `drops the product default when a user row carries only a sibling field`（`tests/profile.spec.ts`，经 `profilePatches` 组合 `{ id: 'subagent', config: { maxActiveSubagents: 4 } }` ⇒ 有效 `maxDepth` = 1）。是否做字段级合并、或在设置卡片层规避清空路径，作为显式产品决定留给后续任务（与 Task 11/12 的实测一并复核），不属本任务静默扩大的范围。
 
 ### 0.4 N-2 ask 档 bash 判定实测（真实 `@huaanwork/policy`）
 
@@ -127,13 +131,14 @@ EXIT=0
 
 ### 0.5 回归钉（先红后绿）
 
-测试落在既有 `dsh-plugin-huaanwork/tests/profile.spec.ts`（追加 3 个 `it`，复用该 spec 的临时 home 与真实 `prepareDesktopProfile`）：
+测试落在既有 `dsh-plugin-huaanwork/tests/profile.spec.ts`（追加 4 个 `it`：实现轮 3 条 + 修复轮 1 条；复用该 spec 的临时 home 与真实 `prepareDesktopProfile`）：
 
 1. `ships a two-level delegation cap so a package child can dispatch its lane subagents` —— 组合行的 `subagent.config` = `{ maxDepth: 2 }`，且经 **运行时同一读取路径** `SubagentRuntime.Config(行 config).maxDepth.get()` = 2。
 2. `pins the depth arithmetic the shipped packages rely on` —— 用真实 `resolveChildDepth`/`SubagentDepthError`：cap=1 时 parent 深度 1 派 lane 抛错（N-1）；从组合产物读出的 cap 放行 child 深度 2；parent 深度 2 再派抛错（深度 3 > cap）。
 3. `preserves a saved maxDepth instead of shadowing it with the product default` —— 缺席 ⇒ 2；profile patch 写 3 ⇒ 3；config editor 的 pending 写入组合 ⇒ 3。
+4. `drops the product default when a user row carries only a sibling field`（修复轮）—— 组合 `{ id: 'subagent', config: { maxActiveSubagents: 4 } }` ⇒ 有效 `maxDepth` = 1，钉住 §0.3 C 的整条替换边界。
 
-RED（实现先 `git stash` 掉 `src/profile.ts`）：
+RED（实现先 `git stash` 掉 `src/profile.ts`；实现轮 3 条钉）：
 
 ```bash
 corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/profile.spec.ts -t "delegation cap|depth arithmetic|saved maxDepth"
@@ -145,13 +150,22 @@ corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/profile.spec.
 #   3) expected 1 to be 2
 ```
 
-GREEN（恢复实现）：
+GREEN（恢复实现；实现轮 3 条钉）：
 
 ```bash
 corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/profile.spec.ts -t "delegation cap|depth arithmetic|saved maxDepth"
 # EXIT=0 ; Tests  3 passed | 59 skipped (62)
 corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/profile.spec.ts
 # EXIT=0 ; Tests  62 passed (62)
+```
+
+修复轮（新增第 4 条钉后的复跑；两个命令均 EXIT=0）：
+
+```bash
+corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/profile.spec.ts -t "delegation cap|depth arithmetic|saved maxDepth|sibling"
+# Tests  4 passed | 59 skipped (63)
+corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/profile.spec.ts
+# Tests  63 passed (63)
 ```
 
 类型检查（改动文件所属工程）：
@@ -163,7 +177,7 @@ corepack yarn exec tsc --noEmit -p tsconfig.tests.json   # EXIT=0（含 tests/pr
 
 注：首次跑 `tsconfig.json` 时 `Cannot find module 'dsh-community-market/contracts'`（2 条，与本改动无关）——该包 `lib/` 未构建。按仓库既有前置（`check:mac-package:platform` 同样先 `yarn workspace dsh-community-market build`）构建后两条错误消失，上面记录的是构建后的结果；构建产物为 git-ignored，不在提交内。
 
-附：本工作树未构建 `dsh-plugin-huaanwork/lib`、未安装 Electron 二进制，包内全量 `vitest run` 为 3852 passed / 5 failed（6 个文件），5 条失败全部来自这两项环境前置：`huaanwork-market-provider`（Electron failed to install）、`host-process`（下载 Electron 超时）、`host-process-integration` ×2 与 `recovery-plugin-uninstall`（缺 `lib/desktop-cli.js`）、`verify-packaged-runtime` 与 `package.spec`（缺 `lib/`）。与本改动无关；Task 10/12 的完整门禁会先 `build`，届时以那次的退出码为准。
+附：环境前置对包内测试的影响（**计数面必须先分清**：vitest 的 `Test Files … failed` 与 `Tests … failed` 不是同一个数——收集期失败的 spec 计 1 个失败文件、0 条失败测试，`verify-packaged-runtime` 即 `Tests no tests` 的形态）。实现轮的记录形如 `3852 passed / 5 failed（6 文件）`，但当时列出的 6 个文件名无法与「5 条失败测试」对齐（文件数与测试数混写，故不可核对）。**修复轮复核（2026-11-11）**：Electron 二进制此刻已就位，单跑这 6 个文件 ⇒ `Test Files 4 failed | 2 passed (6)`、`Tests 4 failed | 105 passed | 1 skipped (110)`；`huaanwork-market-provider` 与 `host-process` 通过；余下失败 = 缺 `lib/` 的三项（`verify-packaged-runtime` 收集期 `ENOENT: … scandir …/lib`、`package.spec` 缺 `lib/client.js`、`recovery-plugin-uninstall` 缺 `lib/desktop-cli.js`）与 `host-process-integration` ×2（隔离 host 启动 60s 超时）。与本改动无关；Task 10/12 的完整门禁会先 `build`，届时以那次的退出码为准。
 
 ### 0.6 真机抽查：BLOCKED（按任务书口径转交 Task 12）
 
@@ -176,8 +190,8 @@ corepack yarn exec tsc --noEmit -p tsconfig.tests.json   # EXIT=0（含 tests/pr
 
 ### 0.7 N-3 探针的源码层面证据（留 Task 11/12 实测）
 
-- **正常时序**：上游 `deepseek-harness/packages/subagent/subagent/src/manager.ts:1081-1091` 的 `settlementState()` 在 `activation.ownedChildren.size > 0` 时返回 `'wait'`；`watchLocalSettlement()`（`:1023-1055`）收到 `'wait'` 后 `await idleObservation.promise` 再继续。`ownedChildren` 的删除在 `:668`（releaser 内 `delete` 后 `wake(parentActivation)`）。⇒ 有存活 owned child 的父 activation **不会结算关闭**，血缘条目在 lane 回传结果与仲裁期间保持存活。
-- **残余边缘**：`dsh-plugin-huaanwork/src/huaanwork-host/agent-package/host.ts:309` 的 `ACTIVATION_CLEANUP_TIMEOUT_MS = 600_000`（10 分钟清理预算）。超时路径会记一条清理失败并强制释放 activation（`:664-673` 的 `cleanupTimeoutMs` 竞速）⇒ 若 lane 在该预算内未结束，血缘条目可能在仲裁仍待结果时被清理。该边缘的真实时序留 Task 11/12 实测，不在本任务下结论。
+- **正常时序**：上游 `deepseek-harness/packages/subagent/subagent/src/manager.ts:1081-1091` 的 `settlementState()` 在 `activation.ownedChildren.size > 0` 时返回 `'wait'`；`watchLocalSettlement()`（函数体 `:1024-1073`，前一行 `:1023` 是它的 JSDoc）收到 `'wait'` 后 `await idleObservation.promise` 再继续。`ownedChildren` 的删除有两个点，按 pin `1600d8a1e1` 实测：正常路径是 `releaseOwnership()`（`:1010-1014`，`delete` 在 `:1012`），失败路径是 `holdOwnership()` 的 releaser（`:661-668`，`delete` 在 `:668`，`:669` 是该闭包的收尾大括号）。⇒ 有存活 owned child 的父 activation **不会结算关闭**，血缘条目在 lane 回传结果与仲裁期间保持存活。
+- **残余边缘**：`dsh-plugin-huaanwork/src/huaanwork-host/agent-package/host.ts:309` 的 `ACTIVATION_CLEANUP_TIMEOUT_MS = 600_000`（10 分钟清理预算）。真实路径在 `:804-817`：`settleWithin(currentActivation.result, cleanupTimeoutMs)` 竞速取消门，超时后只记清理预算（`subagentRuns.noteCleanupBudget`）并打一条 `console.error`，随后 `disposeActivation` 释放 activation——该分支**不**写 `cleanupFailures`（`:809-812` 注释明说 result 晚结算不是清理失败；`cleanupFailures` 由 `disposeActivation`/`stopTurnRuntime` 的失败与超时写）。`:664-673` 是验收注入缝（`acceptanceDisposeFailure() === 'hang'` 时的 `cleanupTimeoutMs` 等待），不是真实超时路径。⇒ 若 lane 在该预算内未结束，血缘条目可能在仲裁仍待结果时被清理。该边缘的真实时序留 Task 11/12 实测，不在本任务下结论。
 
 ### 0.8 有效 maxDepth 读取路径（Task 12 `requireMaxDepth()` 按此实现）
 
@@ -214,8 +228,8 @@ if (!(maxDepth >= 2)) process.exit(3)                        // BLOCKED
 
 | 文件 | 变更 |
 | --- | --- |
-| `dsh-plugin-huaanwork/src/profile.ts` | +`DESKTOP_SUBAGENT_MAX_DEPTH`（`:121`）；`prepareDesktopProfile` 的 `ordinary` 组合插入产品默认行（`:1540`） |
-| `dsh-plugin-huaanwork/tests/profile.spec.ts` | 新增 3 条回归钉 + 2 个 helper（`effectiveSubagentMaxDepth`、`agentAtDepth`） |
+| `dsh-plugin-huaanwork/src/profile.ts` | +`DESKTOP_SUBAGENT_MAX_DEPTH`（`:121`，JSDoc 注明该行整条替换 bundle 级 `subagent` config）；`prepareDesktopProfile` 的 `ordinary` 组合插入产品默认行（`:1540`） |
+| `dsh-plugin-huaanwork/tests/profile.spec.ts` | 新增 4 条回归钉 + 2 个 helper（`effectiveSubagentMaxDepth`、`agentAtDepth`） |
 | `docs/evidence/2026-11-11-three-agent-packages.md` | 本文件（Task 0 节） |
 
 scratch（未提交）：`/tmp/typo-plaza-spike/{depth-probe.mjs,ask-tier-probe.mjs,injection-probe.mjs,injection-probe-2.mjs}`。
