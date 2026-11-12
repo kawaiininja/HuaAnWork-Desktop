@@ -427,15 +427,22 @@ spec §5.0/§7.3 已于 2026-11-12 同步订正；本里程碑**不伪造对话�
 | --- | --- | --- |
 | `corepack yarn workspace dsh-plugin-huaanwork build` | **0** | 两次（走查前与最终树各一次），日志 `/tmp/task12-build-final.log`。**未跑 root build**：本次源码改动全部在 `dsh-plugin-huaanwork` 内，root build 会触发 `market:prepare` 的外部依赖刷新（已知 dshmarket 漂移面），与走查无关 |
 | `corepack yarn workspace dsh-plugin-huaanwork exec node --experimental-transform-types scripts/verify-agent-packages-plaza.mjs --keep-catalog` | **0** | Task 9 脚本；三次运行各起一次，连接文件分别在 `…/huaanwork-plaza-verify-{2rTxxP,fLwKEr,g2ahfr}/catalog-connection.json` |
-| 走查 run 1：`corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-three-packages.mjs --connection <2rTxxP> --out /tmp/three-packages-accept-2` | **0 PASS** | 构建点 `edc932f1fe`（profile 修复后、锁行同步前）；产物 `/tmp/three-packages-accept-2-run1` |
+| 走查 run 1：`corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-three-packages.mjs --connection <2rTxxP> --out /tmp/three-packages-accept-2` | **0 PASS** | run 1 使用的是**未提交的 profile 修复内容**（该内容随后成为 `edc932f1fe`）；`facts.environment.headSha = 3a2c507aad`（当时 profile 修复尚未提交）。产物 `/tmp/three-packages-accept-2-run1` |
 | 走查 run 2（最终树重跑） | **1 FAIL** | 机制全通过，仅文本断言假阳性；产物 `/tmp/three-packages-accept-2-run2`，见 12.7 |
 | 断言修正后走查 run 3（最终树） | **0 PASS** | 产物 `/tmp/three-packages-accept-2`；`facts.environment.headSha = 4fbd73d1a2`，`lib` 新于全部 `src`（`libMainMtime 21:52:31Z > newestSourceMtime 21:52:06Z`）；其后只有脚本断言提交 `a48e71a47c`（`.mjs`，不参与构建）与本证据文档 |
 
-所有 `--keep-catalog` 临时根（含私钥 / catalog token）与本轮走查的临时根（含生产模型凭据副本，`isolatedCleanup: "removed"`）均已删除；诊断期保留的 `/var/folders/.../huaanwork-three-packages-Ag1QX2` 也已删除。
+**cleanup 契约（2026-11-13 评审订正，取代原「临时根均已删除」的表述）**：
+
+- (a) 走查脚本现在**自己删除它用过的 `--keep-catalog` 根**：`shutdown()` 先向连接文件给定的 catalog pid 发 SIGTERM、等待进程退出，再在「根位于 OS 临时目录下**且**目录名匹配 `huaanwork-plaza-verify-`」时 `rmSync(dirname(connection.path), { recursive: true, force: true })`；结果写入 `facts.catalogRootCleanup`（`signalled`/`exited`/`deleted`/`status`）。
+- (b) 上述删除**无法执行时**（SIGTERM 失败、15 秒内未退出、路径不在临时目录或前缀不符），脚本只记录 `status: "manual-delete-required"` 与 `command: "rm -rf '<root>'"`，由操作者手工删除；脚本**不删除没有被本次运行使用的根**（`usedByThisRun: false` ⇒ 只记手工删除指令）。
+- (c) **为什么必须由脚本删**：Task 9 的 `--keep-catalog` 在写出连接文件后收到 SIGTERM 时会**有意保留**临时根（连接文件是交接物），这是 Task 9 的设计行为，不是泄漏缺陷；因此删除责任落在走查脚本/操作者。
+- **历史事实订正**：原文「所有 `--keep-catalog` 临时根……均已删除」**不实** —— 本节三轮的 `…-2rTxxP`、`…-fLwKEr`、`…-g2ahfr` 当时仍在（含 dev 私钥与 per-run catalog token），已于 2026-11-13 由 controller 手工删除。修复轮（§12.11）的 catalog 根由脚本自身删除，并在 facts 与文件系统中双重验证。
+
+诊断期保留的 `/var/folders/.../huaanwork-three-packages-Ag1QX2` 已删除；走查的隔离临时根由脚本删除（`isolatedCleanup: "removed"`）。
 
 ### 12.4 走查 facts 摘要（run 3，`/tmp/three-packages-accept-2/facts.json`）
 
-- **前置检查**：`subagent.maxDepth = 2`，`guard_mode = smart`（脚本显式写入，非生产值），active model id `default`，`allowNetwork = true`。
+- **前置检查**：`subagent.maxDepth = 2`，`guard_mode = smart`（脚本显式写入，非生产值），`allowNetwork = true`；模型来自生产 active 条目（id `default`，provider `deepseek`），解析后的模型串为 **`deepseek-flash`**（`facts.precheck.model.model`；本节 run 3 未加 `--model` 覆盖，修复轮已改用 `deepseek-chat`，见 §12.11）。
 - **广场卡（安装前）**：`code-review / 代码审查`、`task-orch / 任务编排`、`typo-check / 错别字检测`——首次运行的 `facts.plaza: []` 是脚本先 `facts.plaza = progress.plaza`（引用快照）后在 `drive` 里**整体替换** `progress.plaza` 造成的；现改为原地 `splice`，并把选择器收紧到 `.agent-plaza-panel .skill-card[data-slug]`，缺卡 / 重名 / 名称不符即 FAIL。
 - **安装 / 启用 / 已装详情**：三包各一次下载、一次启用；已装详情 `验签结果：通过`、工具「无」、文件清单 3 条、标题 `智能体详情：{错别字检测,代码审查,任务编排}`。
 - **运行卡**：三包均 `terminalPhase = completed`、状态「已完成」，父会话回复均被观测到。
@@ -471,7 +478,9 @@ run 2 在同一最终树上把**全部机制判据**跑通（两条 depth 2 lane
 - **自动 PASS 只证明机制**（卡片、签名、安装、启用、委派、lane、投递、仲裁时序）；模型输出质量（检出是否准确、报告是否可用）**需人工复核**，本节不作质量结论。
 - **Windows：BLOCKED**。走查依赖 `textutil` 与 macOS 上的 Electron CDP，本机为 darwin；无 Windows 真机产物与走查证据，未做任何 Windows 声明。
 
-### 12.9 最终门禁（最终树，`a48e71a47c` + 本证据文档未提交）
+### 12.9 最终门禁（原始轮：代码树 `a48e71a47c` + 本证据文档未提交）
+
+> 这是**评审修复轮之前**的门禁记录，保留为历史。修复轮（脚本 + 本证据文档）在最终树上重跑的门禁见 §12.11.6。
 
 | 命令 | 退出码 | 摘要 |
 | --- | --- | --- |
@@ -489,3 +498,103 @@ run 2 在同一最终树上把**全部机制判据**跑通（两条 depth 2 lane
 - `4fbd73d1a2 style(tests): restore one lock id per line in the enumeration`
 - `a48e71a47c fix(scripts): ignore negated depth-degradation claims in the lane assertion`
 - 本证据文档独立提交。
+
+---
+
+## 12.11 Task 12 评审修复轮（2026-11-13）
+
+本节只修 Task 12 评审发现与 controller 要求，**不改产品行为**；脚本仍是同一个文件，最终证据以本轮复跑（§12.11.3 run C）与本轮门禁（§12.11.7）为准。
+
+### 12.11.1 修复清单（逐条对应评审发现）
+
+| # | 发现 | 处置 |
+| --- | --- | --- |
+| I1 | 「`--keep-catalog` 临时根已全部删除」不实 | 见 §12.3 的 cleanup 契约：脚本现在停止它被给定的 catalog pid 并删除该根，结果写入 `facts.catalogRootCleanup`；条件不满足只记 `manual-delete-required` + 手工命令。历史空白由 controller 手工删除，已如实订正 |
+| C2/C6 | 走查须用 `deepseek-chat`；facts 记解析后的模型串 | 新增 `--model <name>`：只改生产 active 条目的模型名，`base_url`/`api_key` 原样保留；facts 记 `precheck.model.{model,productionModel,modelOverride,modelSource}`。本轮 `model = deepseek-chat`（§12.11.4–12.11.5） |
+| C3 | Step 6 人工核对结论 | `facts.modelOutputs` 现为**包子会话终态文本**（深度 1，最多 16 KB）+ 父会话终态文本；结论见 §12.11.6（标注「实施者人工核对（owner 可复核）」） |
+| M4 | run 1 的构建点 provenance | §12.3 订正为「run 1 使用未提交的 profile 修复内容（随后成为 `edc932f1fe`），`facts.headSha = 3a2c507aad`」 |
+| M5 | 报告称 run 1 `facts.plaza: []` | 报告订正：空 pláza 是更早的**诊断期** `/tmp/three-packages-accept` 运行，不是 `-run1`（后者 plaza 三卡齐全） |
+| M6 | 证据只写「active model id default」 | §12.4 与 §12.11.4 记解析后的模型串 |
+| M7 | 脚本未使用标识符 | 删除 `randomUUID`、`cpSync`、`basename`/`sep`（改为 cleanup 需要时才使用）、`TERMINAL_PHASES` |
+| M8 | app 输出可能带密钥 | `app-stdout.log` 与 console 都经**按行缓冲**的 `redactSecrets`（跨 chunk 的密钥不会漏出） |
+| M9 | 日志缺失时静默报 0 | `scanAppLogs` 记 `cleanupBudgetScan: "scanned"` 或 `"no-log-files"`；files = 0 时直接 FAIL（`app log scan is invalid`） |
+| M10 | `reportsDepthDegradation` 过宽 | 保留否定式剥离，肯定式集合收紧为**深度/双盲短语**（`深度不足`/`单会话多轮自审`/`非双盲`/`SubagentDepthError`/`降级为单会话`/`深度降级`），裸 `maxDepth` 与跨厂商「交叉验证已降级」（R1 披露）不再算降级 |
+| M11 | `prepare:electron-native` 前置 | 启动前检查 `node_modules/fs-ext/prebuilds/<platform>-<arch>/electron.abi*.node`；缺失即 BLOCKED 并给出 `corepack yarn workspace dsh-plugin-huaanwork prepare:electron-native`；facts 记 `appEntry.nativeBinding` |
+| M12 | 报告 header HEAD sha | 报告 header 改为本轮最终提交 |
+
+另外记录：`request/header` 的 `model` 是 **`local`**、provider 为 `deepseek-official`（`src/profile.ts:1588` 的 agent-loop 哨兵值），不是实际模型串；实际串只由 `precheck.model` 与端点探针证明（§12.11.5）。
+
+### 12.11.2 catalog 根清理（脚本行为）
+
+- `stopAndCleanCatalog()`：先 SIGTERM `connection.pid` → 最多等 15 秒退出 → 校验「根位于 `os.tmpdir()` 下」且「目录名匹配 `huaanwork-plaza-verify-`」→ `rmSync(root, { recursive: true, force: true })`。
+- 失败/不满足条件/本次运行未使用该连接 ⇒ `status: "manual-delete-required"`、`reason`、`command: "rm -rf '<root>'"`，**不删除**。
+- `--keep-catalog-root` 保留根（诊断用，根内有 dev 私钥）。
+- 本轮三次运行的 facts 中 `catalogRootCleanup.status` 均为 `"deleted"`，事后 `ls` 三个根都不存在（§12.11.8）。
+
+### 12.11.3 `deepseek-chat` 复跑（三次，含一次诚实 FAIL）
+
+| 运行 | 产物 | 退出码 / 结果 | 说明 |
+| --- | --- | --- | --- |
+| A | `/tmp/three-packages-accept-3-run1` | **0 PASS** | 首次加 `--model deepseek-chat`；机制与人工核对素材完整，但 `modelOutputs` 只有 4 KB 摘录 |
+| B | `/tmp/three-packages-accept-3-run2` | **1 FAIL** | 摘录上限提到 16 KB 后复跑；**机制全绿**（2 个不同 callId、2 条 depth 2 lane、4 条 delivery、仲裁在 delivery 之后），失败原因是文本断言把 R1 的「交叉验证已降级」当成深度降级（见下） |
+| C | `/tmp/three-packages-accept-3` | **0 PASS** | 收紧降级短语集合后的最终运行；`facts.environment.headSha = e62a30866a` |
+
+run B 的失败是**断言精度缺陷**，不是产品/机制失败，也不是把 FAIL 洗成 PASS：
+
+- 包子会话报告写「原 DeepSeek+Kimi 交叉验证已降级，同一模型同源盲区仍存在」——这是 R1 裁定的**跨厂商**降级披露，包本身每次都会写。
+- 同段还写「本次双盲派发成功，未触发深度降级」——否定式。
+- 旧集合里的裸 `已降级` 命中了前者。修法：肯定式集合只保留深度/双盲短语，并对 `未触发…降级` 增加否定剥离；`SubagentDepthError`、`递归深度不足`、`单会话多轮自审`、`非双盲`、`降级为单会话` 仍判 FAIL。
+- 12 条样例（含 run B 的真实文本、R1 披露、否定式、4 条肯定式）全部判对；脚本 `node --check` 通过。
+
+### 12.11.4 最终 facts 摘要（run C，`/tmp/three-packages-accept-3/facts.json`）
+
+- `outcome = PASS`，`errors: []`，`startedAt 22:29:33Z` / `finishedAt 22:31:41Z`；`headSha = e62a30866afcbb93b24509c2bb9a673aff745491`（`feat/three-agent-packages-plaza`）。
+- **模型**：`precheck.model.model = deepseek-chat`，`productionModel = deepseek-flash`，`modelOverride = deepseek-chat`，`modelSource = "--model deepseek-chat applied to the production active entry (base_url/api_key unchanged)"`，provider `deepseek`，`baseUrl https://api.deepseek.com`，`apiKeyPresent = true`（从不打印）。
+- `subagent.maxDepth = 2`；`guard_mode = smart`（脚本显式写入）。
+- `appEntry.nativeBinding`：`node_modules/fs-ext/prebuilds/darwin-arm64/electron.abi149.node`（存在，`prepare:electron-native` 产物）。
+- 广场三卡、安装/启用各三次、已装详情三份均 `验签结果：通过` / 工具「无」/ 文件清单 3 条 / 标题正确；三包运行卡 `completed`。
+- `appLogs`：3 个文件，`cleanupBudgetScan = "scanned"`，`cleanupBudgetTrips = 0`，`packageErrors = 0`，`catalogErrors = 0`。
+- `catalogRootCleanup.status = "deleted"`（root `…/huaanwork-plaza-verify-rWgmmB`，pid 47152，`signalled/exited/deleted = true`）；`isolatedCleanup = "removed"`。
+- 双盲身份链：父 `huaanwork-5be541f32f339457-21998d24` → 包子会话 `e4483c52-64c0-445e-b065-40474b84d30f`（depth 1）。
+  - 两个不同 callId、结果非错误：`17dcb09e-54cf-4e10-9c22-6946a46c7087` → lane `ad9307a1-bd84-4f3c-abb5-76be70856b69`；`5a1cda14-4cc8-46b5-9f3a-18c712a7a777` → lane `2a3063a0-5eac-4d99-b07c-b58dab99d682`。
+  - 两条 depth 2 lane 均收到 settlement 投递（`finalTextLength` 1209 / 1192，无 “left no closing message”）；`distinctCallIdCount = 2`、`goodCallCount = 2`、`errorCallCount = 0`、`missingCallCount = 0`；`arbitrationAfterLastDelivery = true`；`honestDegradation = false`；`dualBlindOk = true`。
+  - N-3：运行卡完成时包子会话存活 69,236 ms，清理预算 600,000 ms；`cleanupBudgetTrips = 0`。20 分钟双预算分支仍未观测（登记债）。
+- 截图 13 张（同前命名），关键图：`01-plaza.png`（180,660 B / `e33df7c11b9784fb`）、`06-run-task-orch.png`（252,729 B / `88cad1fa34149a37`）。
+
+### 12.11.5 模型串与端点行为（诚实记录）
+
+- 生产 `huaanwork-settings.json` 只有两条 `models` 条目：`default`（deepseek，`deepseek-flash`）与 `kimi`（`k3.1-pro`）；**没有 `deepseek-chat` 条目**。
+- 因此本轮按 controller 允许的第 2 条路线处理：在**同一 provider 条目**上把模型名设为 `deepseek-chat`，保留 `base_url`/`api_key`；这记为显式 `--model` 覆盖，不是「生产里存在 deepseek-chat」。
+- 端点探针（2026-11-13，未打印凭据）：`GET /models` 返回 `deepseek-flash`、`deepseek-v4-pro`；`POST /chat/completions` 传 `model: deepseek-chat` 返回 **200，响应体 `model` 字段为 `deepseek-flash`** —— 该端点把 `deepseek-chat` 别名到 `deepseek-flash`。走查的模型串事实以 `precheck.model.model = deepseek-chat`（请求名）为准；服务端实际回报的模型名是 `deepseek-flash`，两者都如实记录。
+- 计划约束「全链路用 deepseek-chat」在请求侧已满足；**该端点的别名行为不属本任务可控范围**，也不把它写成「跑在另一个模型上」。
+
+### 12.11.6 人工核对结论（**实施者人工核对（owner 可复核）**）
+
+依据：`facts.modelOutputs` 的包子会话终态文本（typo-check 1,986 字、code-review 3,333 字、task-orch 7,581 字；每条另存父会话终态文本），以及 §12.11.4 的截图。**不声称自动化的内容质量证明**。
+
+- **typo-check**：7 处植入错误**全部命中**（按装→安装、帐户→账户、市市场→市场、我们将我们→我们将、Managment→Management、２０２５→2025、在次→再次），每条带「双路一致」置信度标签；仲裁记录指出 L4 两路边界差异并按原文回读裁定；报告主动披露「两条 lane 同一宿主模型，不等同于跨厂商交叉验证（R1 降级）」。引用：`facts.modelOutputs['typo-check'].finalTextExcerpt`、`06-run-typo-check.png`。
+- **code-review**：命中**硬编码密钥**（`sample-review.js:1`，指出还经 `module.exports` 导出、建议轮换与 env 注入）与 **`eval`**（`:3`，判 RCE/CWE-95，给出移除与受限解析替代），并按严重度分级。引用：`facts.modelOutputs['code-review'].finalTextExcerpt`、`06-run-code-review.png`。
+- **task-orch**：计划**包含依赖与验收标准**——子任务 DAG 逐条 `dependsOn`（T0→T1→{T2,T3}→T4→{T6,T8}→T7→T9），每步给出输入/产出/可判定验收/超时/重试/幂等，并给并行与调度建议。**限制**：本次包子会话声明无法读取仓库（工作区策略拒绝 glob/bash，计划中的代码事实均标【待核实】并明确「没有编造项目事实」）；因此本轮只能核对「计划结构是否包含依赖与验收标准」，不能核对计划是否贴合真实代码。引用：`facts.modelOutputs['task-orch'].finalTextExcerpt`、`06-run-task-orch.png`。
+
+### 12.11.7 最终门禁（最终树，本轮脚本 + 本证据文档）
+
+| 命令 | 退出码 | 摘要 |
+| --- | --- | --- |
+| `corepack yarn typecheck` | **0** | 日志 `/tmp/task12fix-final-typecheck.log` |
+| `corepack yarn test` | **0** | 根 workspace `3973 passed \| 15 skipped (3988)`，`284 passed \| 4 skipped (288)` 文件；其余 4 个 workspace `303 / 244 / 88 / 80 passed`；日志 `/tmp/task12fix-final-test.log` |
+| `corepack yarn check` | **0** | 含 `build`、`verify:*` 与 `verify:aa`，计数同上；日志 `/tmp/task12fix-final-check.log` |
+
+门禁在**随后提交的同一工作树**上运行：提交前后无文件改动（`git status --porcelain` 空），因此本表描述的就是最终提交内容。
+
+### 12.11.8 清理验证
+
+- 本轮 catalog 根 `…/huaanwork-plaza-verify-{qTuVPf,Wiz3Qh,rWgmmB}` 均由脚本删除（三份 facts 的 `catalogRootCleanup.status = "deleted"`）；运行后 `ls -d …/huaanwork-plaza-verify-*` 无匹配。
+- 三次运行的隔离临时根均为 `isolatedCleanup = "removed"`；无残留 Electron / catalog / 走查进程（`pgrep` 无命中）。
+- 原三轮遗留根（`2rTxxP`/`fLwKEr`/`g2ahfr`）由 controller 于 2026-11-13 手工删除；本节的 cleanup 契约保证此后不再依赖人工收尾。
+
+### 12.11.9 残余与边界
+
+- **task-orch 读取权限差异**：run C 的包子会话读不到仓库（上一轮 run 1 的包子会话能读到真实代码）。这是模型/工作区策略层面的运行差异，Task 12 的机制判据（卡片、安装、委派、lane、投递、仲裁）不受影响；计划内容质量只按 §12.11.6 的边界记录，不宣称「计划已对照真实代码验证」。
+- **`deepseek-chat` 别名**：端点把它解析为 `deepseek-flash`（§12.11.5），本任务不做模型能力结论。
+- **Windows：BLOCKED**（同 §12.8），本轮未改变。
+- **自动 PASS 的边界**：只证明机制；内容质量结论仅来自 §12.11.6 的人工核对。
