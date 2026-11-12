@@ -384,3 +384,108 @@ spec §5.0/§7.3 已于 2026-11-12 同步订正；本里程碑**不伪造对话�
 - 零改动且绿的既有面：`tests/huaanwork-guardrails/skills.spec.ts`（39）、`policy.cordis.spec.ts`（34）、`agent-package-tools.spec.ts`（63）、`tests/huaanwork-host/agent-package-runtime.spec.ts`（57）、`tests/profile.spec.ts`（63）。
 - **本节不声称最终门禁**：最终 `typecheck`/`test`/`check` 由 Task 12 Step 5 在最终代码树上重跑，以那次为准。
 - 改动文件（仅此六个，另有 Task 11 报告文件）：`dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts`、`dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts`、`dsh-plugin-huaanwork/src/huaanwork-host/agent-package/host.ts`、`dsh-plugin-huaanwork/tests/huaanwork-guardrails/package-subagent-lineage.spec.ts`、`agents.md`、本文件。
+
+---
+
+## Task 12 真机走查、根因裁定与最终门禁（2026-11-13）
+
+### 12.1 根因与 owner 裁定
+
+首次真机走查（诊断件 `.superpowers/sdd/2026-11-11-three-agent-packages-plaza/task-12-diagnosis.md`）把失败根因定在**组合层**而不是 allow 层：
+
+- web-app overlay 关闭宿主平面的委派行（`deepseek-harness/packages/bundle/web-app/cordis.patch.yml:552-561` 的 `tool-subagent-control` / `tool-subagent-list-agents` / `tool-subagent` / `tool-subagent-fork`）。
+- HuaAnWork profile 的 L1/L2 复挂块只翻回 `tool-fs`、`tool-bash`、`plan-mode`、`tool-todo`、`tool-goal`、`tool-result-pruner`、`compaction-basic`，**没有** `tool-subagent`。
+- 委派组只随 standard preset 提供，而桌面会话创建 agent 时不挂 preset（`dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts:432`，父会话与包子会话的 session header 都没有 `agentPreset`）。
+
+结果是 `subagent` 这个名字在父会话与包子会话的 `request/header` 工具表里都不存在（诊断实测：父子均为 22 个宿主平面工具），`pkg.allow ∩ tools.schemas()` 自然把它丢掉；包子会话「工具集仅 bash / glob / grep / read」与 lane 缺失都是这一层的下游表现，不是 `maxDepth`、策略拒绝或 prompt 抑制。
+
+**Owner 裁定**：在桌面 profile 复挂该行。改动 `dsh-plugin-huaanwork/src/profile.ts:1596-1600`：
+
+```ts
+{ id: 'tool-subagent', disabled: false },
+```
+
+只翻回 `subagent`，**不**翻回 `tool-subagent-fork` / `tool-subagent-control` / `tool-subagent-list-agents`。同批把该行登记进运行时的锁行断言表（`src/huaanwork-host/row-assertions.ts`，`HUAANWORK_ROW_ASSERTIONS` 增 `{ id: 'tool-subagent', intent: 'override' }`）与组合顺序守卫的锁行枚举（`tests/market-composition-order.spec.ts` 的 `GUARDRAIL_LOCK_IDS`，锁层保持连续）。
+
+**后果（显式）**：主会话也获得 `subagent` 委派能力。它被产品默认 `maxDepth: 2`（Task 0/R8）约束在同一深度上限，工具面其余部分（approval `ask`、native 模式、血缘收窄）不变。spec §4.3 的不变量「主会话模型自主 subagent 行为零变化（无血缘条目 ⇒ 基线）」**由本 owner 裁定取代**，不再是本里程碑的有效不变量；无血缘条目时主会话仍走基线策略，只是工具目录里多了 `subagent` 一行。
+
+### 12.2 回归钉（先红后绿）
+
+`dsh-plugin-huaanwork/tests/profile.spec.ts`（新用例「re-enables the model-facing subagent tool the Web overlay disables」）：
+
+| 命令 | 结果 |
+| --- | --- |
+| 改动前 `vitest run tests/profile.spec.ts` | **红**：`1 failed \| 63 passed (64)`，`expected true not to be true`（`tool-subagent` 组合行 `disabled: true`） |
+| 改动后同一命令 | **绿**：`64 passed (64)` |
+| 锁行同步后 `vitest run tests/market-composition-order.spec.ts tests/profile.spec.ts tests/huaanwork-rowids.spec.ts` | `3 passed (3)`；`83 passed (83)` |
+
+用例同时钉住 `subagent` 服务行仍为 `config: { maxDepth: 2 }`。
+
+### 12.3 走查命令与退出码
+
+| 命令 | 退出码 | 备注 |
+| --- | --- | --- |
+| `corepack yarn workspace dsh-plugin-huaanwork build` | **0** | 两次（走查前与最终树各一次），日志 `/tmp/task12-build-final.log`。**未跑 root build**：本次源码改动全部在 `dsh-plugin-huaanwork` 内，root build 会触发 `market:prepare` 的外部依赖刷新（已知 dshmarket 漂移面），与走查无关 |
+| `corepack yarn workspace dsh-plugin-huaanwork exec node --experimental-transform-types scripts/verify-agent-packages-plaza.mjs --keep-catalog` | **0** | Task 9 脚本；三次运行各起一次，连接文件分别在 `…/huaanwork-plaza-verify-{2rTxxP,fLwKEr,g2ahfr}/catalog-connection.json` |
+| 走查 run 1：`corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-three-packages.mjs --connection <2rTxxP> --out /tmp/three-packages-accept-2` | **0 PASS** | 构建点 `edc932f1fe`（profile 修复后、锁行同步前）；产物 `/tmp/three-packages-accept-2-run1` |
+| 走查 run 2（最终树重跑） | **1 FAIL** | 机制全通过，仅文本断言假阳性；产物 `/tmp/three-packages-accept-2-run2`，见 12.7 |
+| 断言修正后走查 run 3（最终树） | **0 PASS** | 产物 `/tmp/three-packages-accept-2`；二进制构建于最终 `HEAD`（`a48e71a47c` 的源码树，仅本证据文档未纳入构建） |
+
+所有 `--keep-catalog` 临时根（含私钥 / catalog token）与本轮走查的临时根（含生产模型凭据副本，`isolatedCleanup: "removed"`）均已删除；诊断期保留的 `/var/folders/.../huaanwork-three-packages-Ag1QX2` 也已删除。
+
+### 12.4 走查 facts 摘要（run 3，`/tmp/three-packages-accept-2/facts.json`）
+
+- **前置检查**：`subagent.maxDepth = 2`，`guard_mode = smart`（脚本显式写入，非生产值），active model id `default`，`allowNetwork = true`。
+- **广场卡（安装前）**：`code-review / 代码审查`、`task-orch / 任务编排`、`typo-check / 错别字检测`——首次运行的 `facts.plaza: []` 是脚本先 `facts.plaza = progress.plaza`（引用快照）后在 `drive` 里**整体替换** `progress.plaza` 造成的；现改为原地 `splice`，并把选择器收紧到 `.agent-plaza-panel .skill-card[data-slug]`，缺卡 / 重名 / 名称不符即 FAIL。
+- **安装 / 启用 / 已装详情**：三包各一次下载、一次启用；已装详情 `验签结果：通过`、工具「无」、文件清单 3 条、标题 `智能体详情：{错别字检测,代码审查,任务编排}`。
+- **运行卡**：三包均 `terminalPhase = completed`、状态「已完成」，父会话回复均被观测到。
+- **应用日志**：3 个日志文件，`cleanupBudgetTrips = 0`，`packageErrors = 0`，`catalogErrors = 0`。
+
+### 12.5 双盲身份链（typo-check）
+
+- 父会话 `huaanwork-889b6d510b401bfd-744ddc3a` → 包子会话 `6f9c392e-12ba-4c6d-b865-a5e9846726bf`（`origin: "subagent"`，`delegationDepth = 1`）。
+- 包子会话内两条 `subagent` 派发，callId 不同且结果非错误：
+  - `40106a00-f081-4913-889e-d24cb4b1966b` → `started subagent 220c73a0-6346-4b73-ae72-528e11d39f3c`；
+  - `92f845ca-7597-4522-8e9d-51fd157f4f47` → `started subagent 3c4c94a7-b9bc-4ac2-8e5a-eb707d9620ca`。
+- lane 会话两条，均 `delegationDepth = 2`：`220c73a0…`（4383 ms，收尾 1172 字）与 `3c4c94a7…`（10470 ms，收尾 1193 字）；两条都收到 `subagent-settled` 投递（`agent/inbox/spliced` + `user/message` 各一条，共 4 条 delivery），均无 “left no closing message”。
+- 计数：`distinctCallIdCount = 2`、`goodCallCount = 2`、`errorCallCount = 0`、`missingCallCount = 0`；`arbitrationAfterLastDelivery = true`；`honestDegradation = false`；`dualBlindOk = true`。
+- 包子会话仲裁文本为逐条回读原文的 A/B 对照报告（7 条发现，双路一致），不是深度降级叙述。
+
+### 12.6 N-3 时序结论（可观测部分）
+
+- 运行卡完成时包子会话已存活 `76,251 ms`；清理预算常量 `600,000 ms`（10 分钟）。应用日志里 `cleanupBudgetTrips = 0`，无「分钟内未结束」行，因此本轮**未触发**任何清理预算超时。
+- 仲裁发生在两条 lane 的 delivery 之后（`arbitrationAfterLastDelivery = true`），与 §11.3 的源码级结论一致：lanes 存活期间血缘条目不会被清理。
+- 20 分钟双预算耗尽后的残余分支（`agents.md` N-3 行）本轮不可观测，仍按登记保留。
+
+### 12.7 走查暴露并修复的断言缺陷（run 2 → run 3）
+
+run 2 在同一最终树上把**全部机制判据**跑通（两条 depth 2 lane、两个不同 callId 且非错误、两条 delivery），却因 `honestDegradation` 文本正则命中包子会话健康路径报告里的「**未**降级为单会话自审」而 FAIL——正则只认动词、不认否定。这不是产品缺陷，是走查断言的精度缺陷：
+
+- 修法：`scripts/huaanwork-accept-three-packages.mjs` 新增 `reportsDepthDegradation()`，先剥离「未 / 并未 / 没有 / 不会 / 不能 / 无 / 不（发生|出现|进行|被）…降级」与「…深度不足」的否定式提及，再匹配肯定式短语（`递归深度不足`、`单会话多轮自审`、`maxDepth`、`SubagentDepthError`、`已降级`、`降级为`）。
+- 验证：6 条样例（4 条否定 / 健康 + 2 条肯定，含 `SubagentDepthError` 原文）全部判对；run 3 通过。**肯定式的深度降级仍然判 FAIL**，断言没有放宽。
+
+### 12.8 截图、人工复核边界与 Windows
+
+- 截图 13 张（`/tmp/three-packages-accept-2`，`facts.json` 记 bytes + sha256 前 16 位）：`00-app-ready`、`01-plaza`、`02-detail-pre-{typo-check,code-review,task-orch}`、`03-after-install`、`04-enabled`、`05-detail-post-{…}`、`06-run-{…}`；`01-plaza.png` 为 `180641 B / 1d77faead76006b8`，与首次运行同图（广场卡稳定）。
+- 模型输出长度（run 3）：typo-check 1092 字、code-review 1796 字、task-orch 291 字；摘录见 `facts.modelOutputs`。
+- **自动 PASS 只证明机制**（卡片、签名、安装、启用、委派、lane、投递、仲裁时序）；模型输出质量（检出是否准确、报告是否可用）**需人工复核**，本节不作质量结论。
+- **Windows：BLOCKED**。走查依赖 `textutil` 与 macOS 上的 Electron CDP，本机为 darwin；无 Windows 真机产物与走查证据，未做任何 Windows 声明。
+
+### 12.9 最终门禁（最终树，`a48e71a47c` + 本证据文档未提交）
+
+| 命令 | 退出码 | 摘要 |
+| --- | --- | --- |
+| `corepack yarn typecheck` | **0** | 日志 `/tmp/task12-final-typecheck.log` |
+| `corepack yarn test` | **0** | 根 workspace `3973 passed \| 15 skipped (3988)`，`284 passed \| 4 skipped (288)` 文件；其余 4 个 workspace `303 / 244 / 88 / 80 passed`；日志 `/tmp/task12-final-test.log` |
+| `corepack yarn check` | **0** | 首次运行即绿（含 `verify:aa`），无需隔离重跑；日志 `/tmp/task12-final-check.log` |
+
+首次 `yarn test`（锁行同步前）红在 `tests/market-composition-order.spec.ts` 三例：新增锁行插进了 `GUARDRAIL_LOCK_IDS` 的连续锁层，守卫按设计报「interleaved or truncated」。处置 = 同步锁行枚举 + 运行时断言表（提交 `43dac0d0c6`，格式订正 `4fbd73d1a2`），不是放宽守卫。
+
+### 12.10 本轮提交
+
+- `6b8e28839b feat(scripts): CDP acceptance walkthrough for three plaza agent packages`
+- `edc932f1fe fix(profile): re-enable the model-facing subagent tool for package lane dispatch`
+- `43dac0d0c6 fix(huaanwork-host): assert the re-enabled subagent tool row at boot`
+- `4fbd73d1a2 style(tests): restore one lock id per line in the enumeration`
+- `a48e71a47c fix(scripts): ignore negated depth-degradation claims in the lane assertion`
+- 本证据文档独立提交。
