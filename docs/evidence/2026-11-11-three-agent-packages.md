@@ -322,7 +322,7 @@ spec §5.0/§7.3 已于 2026-11-12 同步订正；本里程碑**不伪造对话�
 
 ### 10.7 待补（后续任务完成后回填）
 
-- **Task 11（独立评审）**：runtime/holders/host/skills/policy + Task 0 maxDepth 注入 diff 与回归钉的评审结论（经反证校准、严重度）、P0/P1 修复 commit 与重跑退出码、N-3 探针（lane 存活期 vs 10 分钟清理预算）结论。
+- **Task 11（独立评审）**：runtime/holders/host/skills/policy + Task 0 maxDepth 注入 diff 与回归钉的评审结论（经反证校准、严重度）、P0/P1 修复 commit 与重跑退出码、N-3 探针（lane 存活期 vs 10 分钟清理预算）结论 ⇒ 见文末〈Task 11 独立评审〉。
 - **Task 12（CDP 真机走查 + 最终门禁）**：`huaanwork-accept-three-packages.mjs` 脚本与执行事实（maxDepth ≥ 2 预检、guard_mode=smart、三张中文卡、详情对话框真实 DOM 披露断言、双盲身份链判据、N-3 实测、截图指针）；**最终代码树的 `typecheck`/`test`/`check` 在 Step 5 重跑，最终证据以那次为准**。
 - **Task 13（备份 + 延后删除登记）**：`~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz` 的防覆盖门、`tar -tzf` 完整校验、sha256、删除范围与触发条件（本里程碑不删除）。
 - **Task 14（生产上架 runbook 指引）**：`docs/huaanwork-three-agent-packages-release.md` 与证据指针；生产签名/上架仍为 owner 运维动作。
@@ -331,3 +331,56 @@ spec §5.0/§7.3 已于 2026-11-12 同步订正；本里程碑**不伪造对话�
 
 - 门禁实测 HEAD：`736ede7742`（本提交之前）；本节以独立 commit 追加。`deepseek-harness` pin `1600d8a1e140dcde43a1a0941940a0480712c011` 未变；除本文件与空白修复提交外工作树干净。
 - scratch（未提交）：`/tmp/task10-typecheck.log`、`/tmp/task10-build.log`、`/tmp/task10-hw-build.log`、`/tmp/task10-test.log`、`/tmp/task10-check{,-2,-3}.log`、`/tmp/plaza-verify-report-task10.json`、`/tmp/task10-plaza-{stdout.json,stderr.log}`。
+
+---
+
+## Task 11 独立评审（2026-11-13，修复落地记录）
+
+本节记录**评审结论**与**修复落地**；评审与修复为两个角色，本节作者只做修复。
+
+### 11.1 评审范围与基线
+
+- 被评审代码：Task 0 的产品默认 `maxDepth` 注入（`2f2ae65c0f`，含订正 `67fc1a88c2`）与运行时扩展 C1–C5（`d5e3a2d8e4`→`52ed4c5901`），基线 HEAD `bb40e30724`。
+- 评审面：`src/huaanwork-guardrails/{skills,policy}.ts`、`src/huaanwork-host/agent-package/host.ts`、holders 装配、`src/profile.ts` 注入点，及其回归钉。
+- 校准：下列严重度与「不算缺陷」的反证来自 Task 11 评审结论（controller 校准），修复侧逐条照办，未扩大范围。
+
+### 11.2 发现清单与处置
+
+| ID | 严重度 | 内容 | 校准 / 处置 |
+| --- | --- | --- | --- |
+| I1 | Important | 产品默认 `maxDepth: 2` 是**全局**放宽（所有会话可到深度 2，不只包子会话） | **反证不成立缺陷**：spec §4.6 已披露该全局放宽。作为已披露的产品决定保留，不改 |
+| I2 | Important（真实但休眠） | `start` 旧签名包装的血缘分支挂在 `!current` 上，而 `current` 是**进程级** legacy marker：另一会话有在途 `@agent` 回合时，血缘派发会被那个回合的 `allow` 收窄、且不写血缘条目 ⇒ C5 不覆盖 | **已修**：`parentFromCall`/`inherited` 提前到 `await` 之前取快照；血缘条目对本次派发权威，legacy 人设校验与 `current.allow ∩ schemas` 只在 `current` 在场**且**无血缘条目时生效；血缘分支弃掉 `!current` 条件（与 activation 路径同形）。新增回归钉见 11.5 |
+| I3 | Important（登记） | 产品默认 `maxDepth` 与设置面清除/重置的兄弟字段边界（§0.3 C 实证：落盘行只剩 `maxActiveSubagents` ⇒ 有效值回落 schema 默认 1 ⇒ 派 lane 失败且无产品信号） | **登记为债**（`agents.md` 新增行），不实现字段级合并；延后决定：字段级合并 vs. 规避清空路径 |
+| M1 | Minor | 用例标题「grandchild first model request…」言过其实：真实首条模型请求可能在 activation 包装之前组装 | **已修**：改名为「a grandchild's tool table after activation…」，并注明该窗口由 **C5 执行期拒绝**封住、不是 schema 层 |
+| M2 | Minor | C5 是名字集合判定；上游 schema 层会豁免 scope 自己注册的本地工具（如 `structured_output`） | **已加注释**（`policy.ts` 两处 lineage 检查各一行），行为不变 |
+| M3 | Minor | `bindChild` 在 `turnAllow` 未就绪时静默跳过写入 ⇒ 血缘表与 C5 一起缺席 | **已修**：改为内部 `Error('智能体包回合 allow 未就绪即绑定子会话')`，顺序回归立刻失败。现值 `turnAllow` 在两次 `bindChild` 之前赋值，全部既有用例绿 |
+| M4 | Minor | 证据文档缺评审结论 | 本节 |
+| M6 | Minor（观察） | writer/reader 会话 id 推导不对称 | 记录，不修（见 11.4） |
+| M7 | Minor（观察） | provider 忽略预留 childId 的包 fallback 继承既有 M1 残余 | 记录，不修（见 11.4） |
+
+### 11.3 N-3 探针结论（lane 存活期 vs 10 分钟清理预算）
+
+- **正常路径：血缘条目存活。** 上游 `subagent/manager` 的 `settlementState()` 在 `activation.ownedChildren.size > 0` 时返回 `'wait'`，`watchLocalSettlement()` 继续等待；`ownedChildren` 只在 `releaseOwnership()`（正常路径）与 `holdOwnership()` 的 releaser（失败路径）里删除。因此有存活 owned child 的父 activation **不会结算关闭**，而 host 清理里 `Promise.race([settleWithin(activation.result, 10 min), cancelGate])` 在 lane 正常回传结果时不会超时 —— 血缘条目在 lane 回传结果与仲裁期间保持存活。
+- **残余：只有两个预算都耗尽才发生。** 清理先等 result 至多 10 分钟（`ACTIVATION_CLEANUP_TIMEOUT_MS = 600_000`，超时只 `noteCleanupBudget` + 一行 `console.error`，不入 `cleanupFailures`），随后 `disposeActivation` 再等至多 10 分钟。两段都超时（合计 20 分钟以上、子会话既不算完也拒绝释放）时，清理按引用删掉血缘条目并释放 activation，而子会话仍在运行。
+- **降级形状（如实登记）**：20 分钟后 **C5 执行期拒绝对该子会话缺席**，而 restrict 层不撤销 ⇒ **schema 收窄仍在**；它此后派生的孙代也不再继承血缘收窄。已登记为债（`agents.md` N-3 行），非阻断。
+- 边界：本节为源码级结论（上游 manager 与 host 清理的读码 + 既有用例），**不声称真机时序验证**；Task 12 走查可实测。
+
+### 11.4 未修的观察项
+
+- **M6（writer/reader 会话 id 推导不对称）**：写入侧 `skills.ts` 用 `sessionIdOf(agent.session?.header ?? agent) ?? sessionIdOf(agent)`（可读到 `header.id`，且跳过字面量 `huaanwork`），读取侧 `policy.ts` 的 `sessionIdOfAgentRef` 只读 `session?.id ?? id`。两侧通常一致；若某 provider 只填 `header.id` 而 agent 上没有 `session.id`，写入命中而 C5 读取不命中 ⇒ C5 对该会话静默缺席（schema 收窄仍在）。这是观察项，未修。
+- **M7（provider 忽略预留 childId）**：`host.ts` 在 activation 返回后对实际 id 补挂附件并 `bindChild`，但 `skills.ts` 的包 lane `restrict`/`refreshAgentRestrict` 只在 `pkg.childId === childSessionId` 时接线 ⇒ 实际子会话跳过包 restrict/refresh。该缺口继承既有 M1 残余（`agents.md`「智能体包 M1 残余小项」行），本任务不重复登记。
+- **I3** 的产品决定（字段级合并 vs. 规避清空路径）与 **N-3** 修复都留待后续，本轮只登记。
+
+### 11.5 修复的测试命令与退出码（本修复自测，非最终门禁）
+
+| 命令 | 退出码 / 计数 |
+| --- | --- |
+| `corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-guardrails tests/huaanwork-host/agent-package-runtime.spec.ts tests/profile.spec.ts` | `EXIT=0`；`Test Files 22 passed (22)`；`Tests 438 passed (438)` |
+| `corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-guardrails/package-subagent-lineage.spec.ts` | `EXIT=0`；`Tests 10 passed (10)`（新增 I2 用例后由 9 → 10） |
+| mutation 反向验证（临时把 `legacyApplies` 退回 `current !== undefined`） | 同一文件 `1 failed \| 9 passed` ⇒ 新用例确实钉住 I2；还原后 `10 passed (10)` |
+| `corepack yarn workspace dsh-plugin-huaanwork exec tsc -p tsconfig.json --noEmit` | `EXIT=0` |
+| `corepack yarn workspace dsh-plugin-huaanwork exec tsc -p tsconfig.tests.json --noEmit` | `EXIT=0` |
+
+- 零改动且绿的既有面：`tests/huaanwork-guardrails/skills.spec.ts`（39）、`policy.cordis.spec.ts`（34）、`agent-package-tools.spec.ts`（63）、`tests/huaanwork-host/agent-package-runtime.spec.ts`（57）、`tests/profile.spec.ts`（63）。
+- **本节不声称最终门禁**：最终 `typecheck`/`test`/`check` 由 Task 12 Step 5 在最终代码树上重跑，以那次为准。
+- 改动文件（仅此六个，另有 Task 11 报告文件）：`dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts`、`dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts`、`dsh-plugin-huaanwork/src/huaanwork-host/agent-package/host.ts`、`dsh-plugin-huaanwork/tests/huaanwork-guardrails/package-subagent-lineage.spec.ts`、`agents.md`、本文件。
