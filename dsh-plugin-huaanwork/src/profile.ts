@@ -109,6 +109,16 @@ const DESKTOP_WINDOWS_PWSH_SANDBOX_ROW_ID = 'desktop-windows-pwsh-sandbox'
 const DESKTOP_WINDOWS_PWSH_SANDBOX_PACKAGE = `${DESKTOP_PACKAGE_NAME}/windows-pwsh-sandbox`
 /** Upstream Web rows that exist only to send Desktop product analytics to DeepSeek. */
 export const UPSTREAM_PRODUCT_ANALYTICS_ROW_IDS = ['desktop-product-telemetry', 'product-analytics'] as const
+/**
+ * Product default for the delegation-depth cap (`subagent.maxDepth`).
+ *
+ * A shipped agent package runs as a child agent at depth 1 and dispatches its
+ * lane subagents at depth 2; upstream's default of 1 rejects that dispatch with
+ * `SubagentDepthError`. The row composes after the bundle layers and ahead of
+ * the profile and machine-wide layers, so a value saved in Desktop settings
+ * replaces it rather than being shadowed by the launcher.
+ */
+const DESKTOP_SUBAGENT_MAX_DEPTH = 2
 const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'
 const DEFAULT_DESKTOP_PORT = DESKTOP_DEFAULT_WEB_PORT
 const DESKTOP_WEB_SERVER_ROW_ID = 'desktop-webserver'
@@ -1524,6 +1534,10 @@ export function prepareDesktopProfile(
   }
   const ordinary = filterMarketProviderPatches([
     ...filteredBundles.patches,
+    // Product default delegation depth (see DESKTOP_SUBAGENT_MAX_DEPTH). Ahead of
+    // the profile and home layers on purpose: a patch row replaces the whole
+    // config, so a later default would shadow every value the user saved.
+    { id: 'subagent', config: { maxDepth: DESKTOP_SUBAGENT_MAX_DEPTH } },
     ...providerPatches,
     ...filteredProfile.patches,
     ...filteredHome.patches,

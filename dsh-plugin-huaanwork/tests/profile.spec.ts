@@ -17,6 +17,7 @@ import {
   initProfile,
   PROFILE_TEMPLATES,
 } from '@deepseek-ai/dsh-app-boot'
+import { resolveChildDepth, SubagentDepthError, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import {
   DESKTOP_PACKAGE_NAME,
   desktopShellModeFromSettings,
@@ -86,6 +87,23 @@ function writeDesktopShellPreferences(home: string, preferences: readonly string
   ].join('\n'))
 }
 
+/**
+ * Effective delegation cap of one prepared profile, read the way the Host reads it:
+ * the composed `subagent` row is what the Loader parses through
+ * `SubagentRuntime.Config`, whose volatile cell `resolveMaxDepth` calls `get()` on.
+ */
+function effectiveSubagentMaxDepth(prepared: ReturnType<typeof prepareDesktopProfile>): number {
+  const row = composeEntries([prepared.patches]).find(entry => entry.id === 'subagent')
+  if (row === undefined) throw new Error('desktop profile has no subagent row')
+  const config = row.config !== null && typeof row.config === 'object' ? row.config : {}
+  return SubagentRuntime.Config(config).maxDepth.get()
+}
+
+/** Minimal parent the upstream depth functions read; the runtime passes real Agents. */
+function agentAtDepth(subagentDepth: number): Parameters<typeof resolveChildDepth>[0] {
+  return { options: { subagentDepth }, session: { header: {} } } as unknown as Parameters<typeof resolveChildDepth>[0]
+}
+
 afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
@@ -130,6 +148,45 @@ describe('desktop profile composition', {
       name: '@deepseek-ai/dsh-agent-tool-presentation',
       disabled: true,
     }))
+  })
+
+  it('ships a two-level delegation cap so a package child can dispatch its lane subagents', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const row = composeEntries([prepared.patches]).find(entry => entry.id === 'subagent')
+
+    expect(row).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-subagent',
+      config: { maxDepth: 2 },
+    }))
+    expect(effectiveSubagentMaxDepth(prepared)).toBe(2)
+  })
+
+  it('pins the depth arithmetic the shipped packages rely on', () => {
+    const home = temporaryHome()
+    const cap = effectiveSubagentMaxDepth(prepareDesktopProfile(undefined, home, 'darwin'))
+
+    // Upstream's default cap of 1 rejects the package child's lane dispatch.
+    expect(() => resolveChildDepth(agentAtDepth(1), 1)).toThrow(SubagentDepthError)
+    // The shipped cap admits the lane at depth 2 and stops any further nesting.
+    expect(resolveChildDepth(agentAtDepth(1), cap)).toBe(2)
+    expect(() => resolveChildDepth(agentAtDepth(2), cap)).toThrow(SubagentDepthError)
+  })
+
+  it('preserves a saved maxDepth instead of shadowing it with the product default', () => {
+    const home = temporaryHome()
+    const dir = ensureDesktopProfile(home)
+
+    expect(effectiveSubagentMaxDepth(prepareDesktopProfile(undefined, home, 'darwin'))).toBe(2)
+    // Desktop settings write into the profile patch layer. A launcher default
+    // composed after that layer would both shadow this value and make the
+    // config editor reject the write as "overridden by a home patch".
+    writeFileSync(join(dir, 'cordis.patch.yml'), '- id: subagent\n  config:\n    maxDepth: 3\n')
+    expect(effectiveSubagentMaxDepth(prepareDesktopProfile(undefined, home, 'darwin'))).toBe(3)
+    const pendingWrite = prepareDesktopProfile(undefined, home, 'darwin', 'desktop', undefined, undefined, {
+      profilePatches: [{ id: 'subagent', config: { maxDepth: 3 } }],
+    })
+    expect(effectiveSubagentMaxDepth(pendingWrite)).toBe(3)
   })
 
   it('reads packaged Cordis skills from the logical ASAR preset root', () => {
