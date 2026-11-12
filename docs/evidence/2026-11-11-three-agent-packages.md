@@ -548,7 +548,7 @@ run B 的失败是**断言精度缺陷**，不是产品/机制失败，也不是
 
 ### 12.11.4 最终 facts 摘要（run C，`/tmp/three-packages-accept-3/facts.json`）
 
-- `outcome = PASS`，`errors: []`，`startedAt 22:29:33Z` / `finishedAt 22:31:41Z`；`headSha = e62a30866afcbb93b24509c2bb9a673aff745491`（`feat/three-agent-packages-plaza`）。
+- `outcome = PASS`，`errors: []`，`startedAt 22:29:33Z` / `finishedAt 22:31:41Z`；`headSha = e62a30866afcbb93b24509c2bb9a673aff745491`（`feat/three-agent-packages-plaza`）。run C 运行时脚本修复**尚未提交**，`facts.headSha` 因此是上一个提交点（`e62a30866a`）；run C 实际使用的脚本内容随后成为 `4ac5eccbab`（`.mjs`，不参与构建，`lib` 不变）。
 - **模型**：`precheck.model.model = deepseek-chat`，`productionModel = deepseek-flash`，`modelOverride = deepseek-chat`，`modelSource = "--model deepseek-chat applied to the production active entry (base_url/api_key unchanged)"`，provider `deepseek`，`baseUrl https://api.deepseek.com`，`apiKeyPresent = true`（从不打印）。
 - `subagent.maxDepth = 2`；`guard_mode = smart`（脚本显式写入）。
 - `appEntry.nativeBinding`：`node_modules/fs-ext/prebuilds/darwin-arm64/electron.abi149.node`（存在，`prepare:electron-native` 产物）。
@@ -584,7 +584,7 @@ run B 的失败是**断言精度缺陷**，不是产品/机制失败，也不是
 | `corepack yarn test` | **0** | 根 workspace `3973 passed \| 15 skipped (3988)`，`284 passed \| 4 skipped (288)` 文件；其余 4 个 workspace `303 / 244 / 88 / 80 passed`；日志 `/tmp/task12fix-final-test.log` |
 | `corepack yarn check` | **0** | 含 `build`、`verify:*` 与 `verify:aa`，计数同上；日志 `/tmp/task12fix-final-check.log` |
 
-门禁在**随后提交的同一工作树**上运行：提交前后无文件改动（`git status --porcelain` 空），因此本表描述的就是最终提交内容。
+门禁在**脚本提交 `4ac5eccbab` 之后的同一代码树**上运行（当时本证据文档已写完、未提交，`git status` 只有该文档）。此后只有本证据文档的文字补充（含本条 provenance 说明），代码树与门禁时逐字节一致；`.mjs` 未参与构建，`lib/` 不变。
 
 ### 12.11.8 清理验证
 
