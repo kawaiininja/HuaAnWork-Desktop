@@ -66,6 +66,12 @@ type Context = {
   huaanworkAttachments?: AttachmentMaps;
   /** 智能体包回合绑定的子会话 id;policy 据此放行包自己挂载的 `mcp__*`。 */
   huaanworkPackageChildSessions?: Set<string>;
+  /**
+   * 按会话保存的链路工具白名单（Task 2 的 `ctx.huaanworkPackageChildAllow`）。
+   * 有条目即限制集：条目外的工具在执行期直接拒绝，不受 schemas 收窄时序影响。
+   * 只读限制集，不是存活性信号——条目缺席即无限制，现有判定不变。
+   */
+  huaanworkPackageChildAllow?: Map<string, readonly string[]>;
   on(
     event: "tools/pre-execute",
     listener: (
@@ -97,6 +103,10 @@ export function readGuardMode(profileDir: string | undefined): GuardMode {
 
 export function apply(ctx: Context): void {
   ctx.on("tools/pre-execute", async (execution, next) => {
+    const lineageAllow = ctx.huaanworkPackageChildAllow?.get(sessionIdOfAgentRef(execution.agent) ?? "");
+    if (lineageAllow !== undefined && !lineageAllow.includes(execution.name)) {
+      return { kind: "deny", reason: `huaanwork-policy: 智能体包链路会话不允许使用工具 ${execution.name}` };
+    }
     const mode = readGuardMode(ctx.huaanworkProfileDir);
     const { decision, reason } = preExecuteExplained(toToolCall(execution, ctx), mode);
     // reason 面向模型：说明拒绝原因与可行替代（如「去掉管道拆成单条命令」），让模型能自我纠正，
@@ -112,6 +122,10 @@ export function apply(ctx: Context): void {
   });
 
   ctx.tools.guard((execution) => {
+    const lineageAllow = ctx.huaanworkPackageChildAllow?.get(sessionIdOfAgentRef(execution.agent) ?? "");
+    if (lineageAllow !== undefined && !lineageAllow.includes(execution.name)) {
+      return `huaanwork-guard: 智能体包链路会话不允许使用工具 ${execution.name}`;
+    }
     const mode = readGuardMode(ctx.huaanworkProfileDir);
     const call = toToolCall(execution, ctx);
     // guard 的 deny 集合 == pre-execute 的 deny ∪ would-be-ask（guard 不能表达 ask），
