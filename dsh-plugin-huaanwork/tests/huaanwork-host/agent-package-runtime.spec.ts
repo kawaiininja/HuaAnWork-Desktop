@@ -292,6 +292,7 @@ describe('agent package tool allow list', () => {
       'glob',
       'grep',
       SHELL,
+      'subagent',
     ])
     expect(composeAgentPackageToolAllowList(manifestWithMode('http'), [], [])).not.toContain('agent_skill_run')
     expect(composeAgentPackageToolAllowList(manifestWithMode('http'), [], ['skill/scripts/echo.mjs'])).toContain('agent_skill_run')
@@ -304,6 +305,22 @@ describe('agent package tool allow list', () => {
     expect(
       composeAgentPackageToolAllowList(manifestWithMode('both'), ['mcp__demo__echo'], ['skill/scripts/echo.mjs']),
     ).not.toContain('call_host_tool')
+  })
+
+  test('includes subagent for both platform shells', () => {
+    const original = process.platform
+    try {
+      Object.defineProperty(process, 'platform', { value: 'darwin' })
+      expect(composeAgentPackageToolAllowList(manifestWithMode('none'), [], [])).toEqual([
+        'read', 'read_file', 'glob', 'grep', 'bash', 'subagent',
+      ])
+      Object.defineProperty(process, 'platform', { value: 'win32' })
+      expect(composeAgentPackageToolAllowList(manifestWithMode('none'), [], [])).toEqual([
+        'read', 'read_file', 'glob', 'grep', 'pwsh', 'subagent',
+      ])
+    } finally {
+      Object.defineProperty(process, 'platform', { value: original })
+    }
   })
 })
 
