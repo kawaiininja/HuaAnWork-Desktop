@@ -69,3 +69,32 @@ describe('typo-check package source', () => {
     expect(skill).toContain('帐')
   })
 })
+
+describe('code-review package source', () => {
+  test('manifest matches the approved spec fields', () => {
+    const manifest = loadSourceManifest('code-review')
+    expect(manifest.slug).toBe('code-review')
+    expect(manifest.displayName).toBe('代码审查')
+    expect(manifest.description).toBe(
+      '对指定代码文件或目录做结构化审查：按审查规格逐项检查正确性、安全、性能与可维护性，输出按严重度分级的发现与修复建议。用 @code-review 调用。',
+    )
+    expect(manifest.version).toBe('1.0.0')
+    expect(manifest.tools).toEqual({ mode: 'none' })
+    expect(manifest.allowSkills).toEqual([])
+  })
+
+  test('stays within store budgets', () => {
+    const files = fileSet('code-review')
+    expect(Buffer.byteLength(files.persona, 'utf8')).toBeLessThanOrEqual(MAX_PERSONA_BYTES)
+    expect(Buffer.byteLength(files.skill.markdown, 'utf8')).toBeLessThanOrEqual(MAX_SKILL_BYTES)
+    expect(agentPackageBytes(files)).toBeLessThanOrEqual(MAX_PACKAGE_BYTES)
+  })
+
+  test('SKILL.md pins the review spec structure and severity discipline', () => {
+    const skill = readSource('code-review', 'skill/SKILL.md')
+    for (const pin of ['严重度统计', '问题清单', 'critical', 'high', 'medium', 'low', 'info', '先反证', '安全漏洞', '@code-review']) {
+      expect(skill).toContain(pin)
+    }
+    expect(skill).toContain('文件:行号')
+  })
+})
