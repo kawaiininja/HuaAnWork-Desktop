@@ -513,7 +513,7 @@ run 2 在同一最终树上把**全部机制判据**跑通（两条 depth 2 lane
 | C2/C6 | 走查须用 `deepseek-chat`；facts 记解析后的模型串 | 新增 `--model <name>`：只改生产 active 条目的模型名，`base_url`/`api_key` 原样保留；facts 记 `precheck.model.{model,productionModel,modelOverride,modelSource}`。本轮 `model = deepseek-chat`（§12.11.4–12.11.5） |
 | C3 | Step 6 人工核对结论 | `facts.modelOutputs` 现为**包子会话终态文本**（深度 1，最多 16 KB）+ 父会话终态文本；结论见 §12.11.6（标注「实施者人工核对（owner 可复核）」） |
 | M4 | run 1 的构建点 provenance | §12.3 订正为「run 1 使用未提交的 profile 修复内容（随后成为 `edc932f1fe`），`facts.headSha = 3a2c507aad`」 |
-| M5 | 报告称 run 1 `facts.plaza: []` | 报告订正：空 pláza 是更早的**诊断期** `/tmp/three-packages-accept` 运行，不是 `-run1`（后者 plaza 三卡齐全） |
+| M5 | 报告称 run 1 `facts.plaza: []` | 报告订正：空 plaza 是更早的**诊断期** `/tmp/three-packages-accept` 运行，不是 `-run1`（后者 plaza 三卡齐全） |
 | M6 | 证据只写「active model id default」 | §12.4 与 §12.11.4 记解析后的模型串 |
 | M7 | 脚本未使用标识符 | 删除 `randomUUID`、`cpSync`、`basename`/`sep`（改为 cleanup 需要时才使用）、`TERMINAL_PHASES` |
 | M8 | app 输出可能带密钥 | `app-stdout.log` 与 console 都经**按行缓冲**的 `redactSecrets`（跨 chunk 的密钥不会漏出） |
