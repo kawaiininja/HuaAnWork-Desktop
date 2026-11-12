@@ -46,6 +46,8 @@ declare module '@deepseek-ai/cordis' {
      * 子会话没有审批界面,自己挂载的 MCP 工具不能被 ask 自动拒绝。
      */
     huaanworkPackageChildSessions: Set<string>
+    /** 包回合血缘允许表：会话 id → 本回合 allow 数组引用（孙代收窄继承用，C2）。 */
+    huaanworkPackageChildAllow: Map<string, readonly string[]>
     huaanworkCheckpointUserDataDir: string
     /** 签名广场 HTTP 客户端(发布/安装共用同一绑定);index 启动时注入。 */
     huaanworkAgentCatalogClient: AgentCatalogClient
@@ -80,6 +82,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkAgentPackageHost',
   'huaanworkAgentPackageRequest',
   'huaanworkPackageChildSessions',
+  'huaanworkPackageChildAllow',
   'huaanworkCheckpointUserDataDir',
   'huaanworkAgentCatalogClient',
   'huaanworkAgentCatalogSecurity',
@@ -166,6 +169,7 @@ export function installHuaanworkHolders(
   ctx.huaanworkAgentRequest = { current: null }
   ctx.huaanworkAgentPackageRequest = { current: null }
   ctx.huaanworkPackageChildSessions = new Set<string>()
+  ctx.huaanworkPackageChildAllow = new Map<string, readonly string[]>()
   ctx.huaanworkAgentCatalog = { current: { items: [] } }
   ctx.huaanworkEmit = emit
 

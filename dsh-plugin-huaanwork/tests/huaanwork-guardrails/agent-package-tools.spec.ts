@@ -1353,6 +1353,11 @@ describe('@slug package dispatch', () => {
 
   test('composes persona/allow, binds the parent, and afterIdle stops every resource', async () => {
     const h = dispatchHarness()
+    const childAllow = new Map<string, readonly string[]>()
+    // 另一回合的条目:不同数组引用,清理绝不能误删。
+    const otherTurnAllow: readonly string[] = ['read']
+    childAllow.set('other-turn-child', otherTurnAllow)
+    h.ctx.huaanworkPackageChildAllow = childAllow
     const pkg = await h.host.findInvocable('weekly-report')
     expect(pkg).toBeDefined()
     expect(pkg?.enabled).toBe(true)
@@ -1409,6 +1414,8 @@ describe('@slug package dispatch', () => {
     attachAgentTools(h.maps, childId!, [AGENT_HTTP_TOOL, 'mcp__weekly-report__echo'])
     holder.current?.bindChild(childId!)
     expect(h.maps.sessionAgentTools.get(childId!)?.size).toBe(3)
+    // 血缘表与 request.allow 是同一引用。
+    expect(childAllow.get(childId!)).toBe(holder.current?.allow)
 
     const idle = dispatched.afterIdle()
     await new Promise((resolve) => setImmediate(resolve))
@@ -1425,12 +1432,19 @@ describe('@slug package dispatch', () => {
     expect(h.registry.get(childId!)).toBeUndefined()
     expect(holder.current).toBeNull()
     expect(h.mcpDisposes).toEqual([1])
+    // 血缘表按引用清理:本回合条目已清,其他回合的条目原样保留。
+    expect(childAllow.has(childId!)).toBe(false)
+    expect(childAllow.get('other-turn-child')).toBe(otherTurnAllow)
 
     // cleanup 是幂等的:重复 afterIdle 不再停进程、不再释放 activation。
     await dispatched.afterIdle()
     expect(h.stopped).toEqual([h.runtime])
     expect(h.activationDisposals).toEqual([1])
     expect(h.mcpDisposes).toEqual([1])
+    // 重复清理既不复活本回合条目,也不误清其他回合的条目。
+    expect(childAllow.has(childId!)).toBe(false)
+    expect(childAllow.get('other-turn-child')).toBe(otherTurnAllow)
+    expect(childAllow.size).toBe(1)
     // 子会话的运行时工具与 MCP 名也随回合卸载,并重算 present-as。
     expect(h.maps.sessionAgentTools.size).toBe(0)
     expect(h.restrictSessions).toContain(childId!)

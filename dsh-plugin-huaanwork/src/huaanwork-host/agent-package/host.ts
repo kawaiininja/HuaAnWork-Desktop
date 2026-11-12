@@ -75,6 +75,7 @@ export type AgentPackageDispatchContext = {
   huaanworkAgentPackageRequest?: { current: AgentPackageSubagentRequest | null }
   /** 包回合绑定的子会话 id;清理时逐一移除,供 policy 标记 `mcp__*` 的运行链路。 */
   huaanworkPackageChildSessions?: Set<string>
+  huaanworkPackageChildAllow?: Map<string, readonly string[]>
   subagents?: SubagentsService
   /**
    * 统一子代理 run 登记表(Task 5)。`index.ts` 注入与 routes/legacy `@agent`
@@ -615,6 +616,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         const boundChildren = new Set<string>()
         /** 本回合登记进 `huaanworkPackageChildSessions` 的 id;清理时逐一移除。 */
         const packageChildSessions = new Set<string>()
+        /** 本回合 allow 数组的引用;血缘表按引用同一性清理,不误删并发回合。 */
+        let turnAllow: readonly string[] | undefined
 
         /**
          * 取消/失败的统一错误。
@@ -729,6 +732,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           // added, and a later turn reusing the id must not inherit the package flag.
           ctx.huaanworkPackageChildSessions?.add(childSessionId)
           packageChildSessions.add(childSessionId)
+          if (turnAllow !== undefined) ctx.huaanworkPackageChildAllow?.set(childSessionId, turnAllow)
           if (runtime === undefined) return
           // `skills.ts` attaches the runtime tools and MCP names before calling this;
           // cleanup detaches them again from every bound child.
@@ -767,6 +771,14 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
             ctx.huaanworkPackageChildSessions?.delete(childSessionId)
           }
           packageChildSessions.clear()
+          // Clear only entries this turn wrote: the value is this turn's allow array
+          // reference, so a concurrent turn's entries are never removed.
+          const allowTable = ctx.huaanworkPackageChildAllow
+          if (allowTable !== undefined && turnAllow !== undefined) {
+            for (const [childSessionId, bound] of allowTable) {
+              if (bound === turnAllow) allowTable.delete(childSessionId)
+            }
+          }
         }
 
         /**
@@ -990,6 +1002,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           }
 
           const allow = composeAgentPackageToolAllowList(manifest, mcpNames, runtime.skillScripts)
+          // Before either `bindChild` call below: lineage entries carry this reference.
+          turnAllow = allow
           const prompt = input.remainder.trim() || pkg.description || '开始协助工作。'
           const parent = input.resolveParent === undefined ? undefined : await input.resolveParent()
           assertLive()
