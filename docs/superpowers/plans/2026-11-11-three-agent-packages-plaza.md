@@ -4,7 +4,7 @@
 
 **Goal:** 把 typo-check / code-review / task-orch 三个完全 LLM 化的智能体包经 M2 签名链路接入智能体广场，并为此完成「包允许 subagent 派发 + 孙代工具收窄继承」运行时扩展。
 
-**Architecture:** 运行时扩展只改 huaanwork 自有五个文件（C1 允许名单、C2 血缘 holder、C3 绑定/清理、C4 孙代收窄、C5 执行期强制），不改上游子模块与 manifest schema。三个包源文件落 `dsh-plugin-huaanwork/agent-packages/{slug}/`，规则全部内联 SKILL.md；播种脚本写入隔离 profile，验证脚本走「隔离 catalog + 一次性开发密钥 + admin CLI 签名 + 广场卡断言 + 安装验签」，真机走查用 CDP 驱动最新构建。原目录备份并经 owner 再次确认后删除。
+**Architecture:** 运行时扩展只改 huaanwork 自有五个文件（C1 允许名单、C2 血缘 holder、C3 绑定/清理、C4 孙代收窄、C5 执行期强制），不改上游子模块与 manifest schema。三个包源文件落 `dsh-plugin-huaanwork/agent-packages/{slug}/`，规则全部内联 SKILL.md；播种脚本写入隔离 profile，验证脚本走「隔离 catalog + 一次性开发密钥 + admin CLI 签名 + 广场卡断言 + 安装验签」，真机走查用 CDP 驱动最新构建。原目录本里程碑只备份并登记延后删除项（R7：删除等生产上架稳定后）；生产上架只产出 runbook 指引（R6），动作本身是 owner 运维。
 
 **Tech Stack:** TypeScript（Cordis host/client）、vitest、Node `--experimental-transform-types` 脚本（M2 验收先例）、Ed25519 签名（`@huaanwork/catalog-signing`）、Electron + CDP 真机走查。
 
@@ -18,11 +18,12 @@
 - 任何输出（日志/报告/截图）不得打印 token、api_key、私钥；脚本一律经 `scripts/huaanwork-acceptance-redaction.mjs` 脱敏。
 - 验收只用隔离临时 profile，**绝不触碰生产 profile**；生产模型设置只读复制（`~/.huaanwork/profiles/desktop/huaanwork-settings.json`），绝不打印 api_key。
 - 绝不自动 kill 正在运行的应用实例；真机脚本只清理自己启动的进程。
-- 中文 displayName/description 逐字取自 spec §5.1–5.3；@ 派发只用 slug（`@typo-check`/`@code-review`/`@task-orch`），dispatch 正则不认中文。
+- 中文 displayName/description 逐字取自 spec §5.1–5.3（description 末尾含「用 @slug 调用。」提示，SKILL.md 开头含调用行——2026-11-12 评审 P2-1 处置）；@ 派发只用 slug（`@typo-check`/`@code-review`/`@task-orch`），dispatch 正则不认中文。
+- **生产上架与删除时序（owner 裁定 R6/R7，2026-11-12）**：生产上架不纳入本里程碑代码范围，Task 14 只产出 runbook 指引（指向 `docs/huaanwork-agent-packages-m2.md`）；原目录删除延后到生产上架完成并稳定运行后，本里程碑 Task 13 只备份 + 登记延后触发项，不执行任何 rm。
 - 只提交本任务文件；工作树存在无关改动（README、package.json、update-server fixture 等），一律不碰。git 命令一律在仓库根执行。
 - Windows 无第二台真机 ⇒ 真机项记 BLOCKED（R-ACCEPT-1 豁免先例），不声称跨机器通过；pwsh 提取与 win32 allow 形态做单元测试。
 - 诚实记录：CI 绿 ≠ 真机；BLOCKED 项如实登记；`verify:aa` 并发竞态为已登记既有 flaky，失败时隔离重跑并记录。
-- **能力披露口径订正（spec §5.0/§7.3 措辞与 UI 现实的差异，实施按本条执行）**：签名广场包**没有**安装/启用确认对话框——安装 = 广场卡直接「下载」按钮，启用 = 我的智能体页直接「启用」开关。实际披露面是**详情对话框**：未安装卡只显示包信息 + `INSTALL_DETAIL_NOTICE`（"安装后可查看签名与文件清单"）；已安装卡显示发布状态/签名（keyId/签名时间/槽位/验签结果：通过）/人设/技能/工具（`tools.mode:"none"` ⇒ "无"）/文件 digest 清单 + `PACKAGE_SANDBOX_WARNING`（"脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。"）。验证断言按此真实形态写，**不伪造对话框测试**；此订正记入证据文档。
+- **能力披露口径订正（spec §5.0/§7.3 已于 2026-11-12 同步订正，实施按本条执行）**：签名广场包**没有**安装/启用确认对话框——安装 = 广场卡直接「下载」按钮，启用 = 我的智能体页直接「启用」开关。实际披露面是**详情对话框**：未安装卡只显示包信息 + `INSTALL_DETAIL_NOTICE`（"安装后可查看签名与文件清单"）；已安装卡显示发布状态/签名（keyId/签名时间/槽位/验签结果：通过）/人设/技能/工具（`tools.mode:"none"` ⇒ "无"）/文件 digest 清单 + `PACKAGE_SANDBOX_WARNING`（"脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。"）。验证断言按此真实形态写，**不伪造对话框测试**；此订正记入证据文档。
 - **嵌套 lane 无运行卡**：孙代 subagent 没有 Host runId，不产生 `.subagent-run-card`；真机走查观测 lane 数量经 zstd 会话日志的 subagent tool/call 计数，不靠运行卡。
 
 ## File Structure
@@ -44,6 +45,7 @@
 | `dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-sources.spec.ts` | 三包 manifest/预算/内容钉（新文件） |
 | `dsh-plugin-huaanwork/tests/huaanwork-host/seed-agent-packages.spec.ts` | 播种脚本自测（新文件） |
 | `docs/evidence/2026-11-11-three-agent-packages.md` | 逐项命令/退出码/截图指针 |
+| `docs/huaanwork-three-agent-packages-release.md` | 生产上架 runbook 指引（R6，Task 14；只指向 M2 runbook，不执行生产动作） |
 
 ---
 
@@ -865,7 +867,7 @@ describe('typo-check package source', () => {
     expect(manifest.slug).toBe('typo-check')
     expect(manifest.displayName).toBe('错别字检测')
     expect(manifest.description).toBe(
-      '对指定文件夹中的 Word 文档做错别字与用语规范检测：两个独立子代理背靠背双盲检测，主代理仲裁分歧，输出带行号定位与置信度的报告。',
+      '对指定文件夹中的 Word 文档做错别字与用语规范检测：两个独立子代理背靠背双盲检测，主代理仲裁分歧，输出带行号定位与置信度的报告。用 @typo-check 调用。',
     )
     expect(manifest.version).toBe('1.0.0')
     expect(manifest.persona).toBe('persona.md')
@@ -883,7 +885,7 @@ describe('typo-check package source', () => {
 
   test('SKILL.md pins the dual-blind workflow and honest degradation', () => {
     const skill = readSource('typo-check', 'skill/SKILL.md')
-    for (const pin of ['subagent', '双盲', '仲裁', '同一宿主模型', 'textutil', 'System.IO.Compression', '30000', '500']) {
+    for (const pin of ['subagent', '双盲', '仲裁', '同一宿主模型', 'textutil', 'System.IO.Compression', '30000', '500', '@typo-check']) {
       expect(skill).toContain(pin)
     }
     // 7 类 canonical 标签齐全
@@ -912,7 +914,7 @@ Expected: FAIL — 源文件不存在（ENOENT）。
   "schemaVersion": 1,
   "slug": "typo-check",
   "displayName": "错别字检测",
-  "description": "对指定文件夹中的 Word 文档做错别字与用语规范检测：两个独立子代理背靠背双盲检测，主代理仲裁分歧，输出带行号定位与置信度的报告。",
+  "description": "对指定文件夹中的 Word 文档做错别字与用语规范检测：两个独立子代理背靠背双盲检测，主代理仲裁分歧，输出带行号定位与置信度的报告。用 @typo-check 调用。",
   "version": "1.0.0",
   "draftId": "00000000-0000-4000-8000-000000000101",
   "createdAt": "2026-11-11T00:00:00.000Z",
@@ -944,6 +946,8 @@ description: Word 文档错别字与用语规范双盲检测
 ---
 
 # 错别字检测工作流
+
+调用：`@typo-check <文件夹路径或单个 docx 路径>`。中文名「错别字检测」仅展示，不能作唤醒词。
 
 ## 边界与降级声明（如实告知用户）
 
@@ -1069,7 +1073,7 @@ describe('code-review package source', () => {
     expect(manifest.slug).toBe('code-review')
     expect(manifest.displayName).toBe('代码审查')
     expect(manifest.description).toBe(
-      '对指定代码文件或目录做结构化审查：按审查规格逐项检查正确性、安全、性能与可维护性，输出按严重度分级的发现与修复建议。',
+      '对指定代码文件或目录做结构化审查：按审查规格逐项检查正确性、安全、性能与可维护性，输出按严重度分级的发现与修复建议。用 @code-review 调用。',
     )
     expect(manifest.version).toBe('1.0.0')
     expect(manifest.tools).toEqual({ mode: 'none' })
@@ -1085,7 +1089,7 @@ describe('code-review package source', () => {
 
   test('SKILL.md pins the review spec structure and severity discipline', () => {
     const skill = readSource('code-review', 'skill/SKILL.md')
-    for (const pin of ['严重度统计', '问题清单', 'critical', 'high', 'medium', 'low', 'info', '先反证', '安全漏洞']) {
+    for (const pin of ['严重度统计', '问题清单', 'critical', 'high', 'medium', 'low', 'info', '先反证', '安全漏洞', '@code-review']) {
       expect(skill).toContain(pin)
     }
     expect(skill).toContain('文件:行号')
@@ -1107,7 +1111,7 @@ Expected: FAIL — 源文件不存在。
   "schemaVersion": 1,
   "slug": "code-review",
   "displayName": "代码审查",
-  "description": "对指定代码文件或目录做结构化审查：按审查规格逐项检查正确性、安全、性能与可维护性，输出按严重度分级的发现与修复建议。",
+  "description": "对指定代码文件或目录做结构化审查：按审查规格逐项检查正确性、安全、性能与可维护性，输出按严重度分级的发现与修复建议。用 @code-review 调用。",
   "version": "1.0.0",
   "draftId": "00000000-0000-4000-8000-000000000102",
   "createdAt": "2026-11-11T00:00:00.000Z",
@@ -1139,6 +1143,8 @@ description: 按规格审查代码安全与质量，输出分级发现
 ---
 
 # 代码审查工作流
+
+调用：`@code-review <代码文件或目录路径>`。中文名「代码审查」仅展示，不能作唤醒词。
 
 ## 工作流
 
@@ -1225,7 +1231,7 @@ describe('task-orch package source', () => {
     expect(manifest.slug).toBe('task-orch')
     expect(manifest.displayName).toBe('任务编排')
     expect(manifest.description).toBe(
-      '把复杂任务拆解为可实施的执行计划：子任务依赖分析、每步输入产出与验收标准、顺序与并行建议、周期任务的 cron/interval 调度建议。只出计划，不执行。',
+      '把复杂任务拆解为可实施的执行计划：子任务依赖分析、每步输入产出与验收标准、顺序与并行建议、周期任务的 cron/interval 调度建议。只出计划，不执行。用 @task-orch 调用。',
     )
     expect(manifest.version).toBe('1.0.0')
     expect(manifest.tools).toEqual({ mode: 'none' })
@@ -1241,7 +1247,7 @@ describe('task-orch package source', () => {
 
   test('SKILL.md pins the plan-only boundary and scheduling forms', () => {
     const skill = readSource('task-orch', 'skill/SKILL.md')
-    for (const pin of ['只出计划', '验收标准', 'cron', 'interval', '依赖', '可并行', '拓扑']) {
+    for (const pin of ['只出计划', '验收标准', 'cron', 'interval', '依赖', '可并行', '拓扑', '@task-orch']) {
       expect(skill).toContain(pin)
     }
     expect(skill).toContain('30s')
@@ -1264,7 +1270,7 @@ Expected: FAIL — 源文件不存在。
   "schemaVersion": 1,
   "slug": "task-orch",
   "displayName": "任务编排",
-  "description": "把复杂任务拆解为可实施的执行计划：子任务依赖分析、每步输入产出与验收标准、顺序与并行建议、周期任务的 cron/interval 调度建议。只出计划，不执行。",
+  "description": "把复杂任务拆解为可实施的执行计划：子任务依赖分析、每步输入产出与验收标准、顺序与并行建议、周期任务的 cron/interval 调度建议。只出计划，不执行。用 @task-orch 调用。",
   "version": "1.0.0",
   "draftId": "00000000-0000-4000-8000-000000000103",
   "createdAt": "2026-11-11T00:00:00.000Z",
@@ -1296,6 +1302,8 @@ description: 复杂任务拆解与可实施执行计划顾问
 ---
 
 # 任务编排顾问工作流
+
+调用：`@task-orch <复杂任务描述>`。中文名「任务编排」仅展示，不能作唤醒词。
 
 ## 边界（务必遵守）
 
@@ -1707,11 +1715,25 @@ async function bootCatalog(entriesDir, dirs, tokens) {
     AGENT_CATALOG_ADMIN_TOKEN: tokens.admin,
     AGENT_CATALOG_KEYRING_PATH: join(dirs.root, 'keyring.json'),
   })
-  const runtime = createAgentCatalogRuntime(config)
-  const server = createAgentCatalogServer(runtime, config)
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  // 与 M2 先例 bootCatalog 逐字同形：runtime 是 async 必须 await；
+  // createAgentCatalogServer 签名是 (config, runtime?)，顺序不可颠倒。
+  const runtime = await createAgentCatalogRuntime(config)
+  const server = createAgentCatalogServer(config, runtime)
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject)
+      resolve()
+    })
+  })
   const port = server.address().port
-  return { server, runtime, config, port, baseUrl: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(r)) }
+  return {
+    server, runtime, config, port, baseUrl: `http://127.0.0.1:${port}`,
+    close: async () => {
+      server.closeAllConnections()
+      await new Promise((r) => server.close(r))
+    },
+  }
 }
 
 function configureCreator(profileDir, port, tokens) {
@@ -1975,9 +1997,9 @@ Expected: exit 0。若 `verify:aa` 因已登记并发竞态失败（AGENTS.md �
 - 三包源文件：manifest 字段、预算实测字节数（从 sources 测试输出取）。
 - 播种/发布验证：Task 8 测试退出码、Task 9 脚本报告指针（/tmp/plaza-verify-report.json 内容摘要，脱敏）。
 - 门禁：typecheck/test/check 三条命令与退出码；verify:aa 处置（如有）。
-- **能力披露口径订正**：spec §5.0/§7.3「安装/启用对话框披露」与 UI 现实的差异（签名包无安装/启用对话框；披露面为详情对话框；未安装=包信息+INSTALL_DETAIL_NOTICE，已安装=工具"无"+PACKAGE_SANDBOX_WARNING+验签结果），按 Global Constraints 订正条执行。
+- **能力披露口径订正**：spec §5.0/§7.3 原「安装/启用对话框披露」措辞与 UI 现实的差异（签名包无安装/启用对话框；披露面为详情对话框；未安装=包信息+INSTALL_DETAIL_NOTICE，已安装=工具"无"+PACKAGE_SANDBOX_WARNING+验签结果），按 Global Constraints 订正条执行；spec 对应措辞已于 2026-11-12 同步订正。
 - Windows：pwsh 提取与 win32 allow 形态单元测试覆盖；真机项 BLOCKED（R-ACCEPT-1 豁免先例，无第二台 Windows 机器）。
-- 待补：Task 11 评审结论、Task 12 真机走查、Task 13 备份删除（后续任务完成后回填）。
+- 待补：Task 11 评审结论、Task 12 真机走查、Task 13 备份与延后删除登记、Task 14 runbook 指引（后续任务完成后回填）。
 
 - [ ] **Step 5: Commit**
 
@@ -2038,7 +2060,7 @@ git commit -m "docs(evidence): record independent security review of runtime ext
 **关键事实（务必遵守）：**
 - @ 派发只用 slug：`@typo-check`/`@code-review`/`@task-orch`（dispatch 正则 `AT_INVOKE_RE` 不认中文 displayName）。
 - 回到聊天输入框：点 `button[title="新建任务"]`（App.tsx:3509，newTask 设 view "main"）。
-- 广场卡 DOM：`.agent-plaza-panel .skill-card[data-slug]`，`.nm` = displayName；动作按钮 `.agent-package-actions button.filter-tab`（查看详情/下载）。
+- 广场卡 DOM：`.agent-plaza-panel .skill-card[data-slug]`，`.nm` = displayName；动作按钮 `.agent-package-actions button.filter-tab`，DOM 顺序为 [查看详情, span.composer-spacer, 下载]——**一律按文案匹配按钮，禁用 `:last-child` 等位置选择器**（会命中下载）。
 - 我的智能体页：`.agent-packages-panel`，启用按钮文案「启用」。
 - 详情对话框：`.settings-overlay[role="dialog"][aria-label="智能体详情：<displayName>"]`，关闭按钮文案「关闭」。
 - 运行卡：`.subagent-run-card[data-phase]`；**lane 无运行卡**，lane 计数经 zstd 会话日志 subagent tool/call。
@@ -2098,6 +2120,15 @@ function makeSampleCode(workDir) {
   ].join('\n'), 'utf8')
   return file
 }
+
+/** lane 观测依赖 zstd CLI（多帧解压）；缺失 ⇒ BLOCKED exit 3，不静默降级。 */
+function requireZstd() {
+  const probe = spawnSync('zstd', ['--version'], { encoding: 'utf8' })
+  if (probe.status !== 0) {
+    console.error('zstd CLI not found on PATH; session logs are multi-frame zstd and Node zlib only decodes the first frame')
+    process.exit(3)
+  }
+}
 ```
 
 隔离 profile 准备：`initProfile(profileDir, ['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app'])`（从 `@deepseek-ai/dsh-app-boot`）；profileDir = homeDir/profiles/desktop；settings.json 落 dirname(homeDir)；scrypt 认证（writeAuthState）；wizard skip state（setupWizardStatePath）；keyring 从 connection.keyring 写入 `agent-catalog-keyring.json`；agents_host/agents_port/agents_catalog_token 从 connection 写入 huaanwork-settings.json；agents-state.json 初始为空 `{}`（让广场卡走「未安装→下载」真实路径）。
@@ -2124,8 +2155,9 @@ async function drive(client, ctx) {
   await shot('01-plaza')
 
   // 2. 未安装详情：只有包信息 + INSTALL_DETAIL_NOTICE（无签名/文件清单）。
+  // 按钮按文案匹配：DOM 顺序是 [查看详情, spacer, 下载]，位置选择器（:last-child 等）会点错。
   for (const slug of SLUGS) {
-    await client.evaluate(`document.querySelector('.agent-plaza-panel .skill-card[data-slug="${slug}"] .agent-package-actions button.filter-tab:last-child').click()`)
+    await client.evaluate(`[...document.querySelectorAll('.agent-plaza-panel .skill-card[data-slug="${slug}"] .agent-package-actions button')].find((b) => b.textContent.trim() === '查看详情')?.click()`)
     await waitFor(`detail ${slug}`, async () => {
       const text = await client.evaluate(`document.querySelector('.settings-overlay[role="dialog"]')?.textContent ?? ''`)
       return { ok: text.includes(INSTALL_DETAIL_NOTICE), value: text }
@@ -2201,9 +2233,9 @@ async function drive(client, ctx) {
 
 - [ ] **Step 3: 写 lane 观测 + 主入口 + 清理**
 
-lane 观测（typo-check 运行后）：定位隔离 profile 的会话日志（`{homeDir}/profiles/desktop/.../sessions/` 下最新会话），用 **zstd CLI 多帧解压**（`zstd -d -c <file>`，Node zlib 只解首帧不可用）读日志，统计 `subagent` 工具的 tool/call 次数 ⇒ 期望 ≥2（两个 lane）。把计数记入 facts（模型输出质量记为事实，不做硬断言；lane 计数 <2 记 FAIL）。
+lane 观测（typo-check 运行后）：会话日志在 **`{homeDir}/sessions/`** 下（homeDir 即隔离 DSH_HOME，launchApp 设 `env.DSH_HOME = homeDir`；**不在** profiles/desktop 下），布局 `{sessionsRoot}/{projectKey}/{编码会话id}/session.v4.jsonl.zstd`。递归枚举 `*.jsonl.zstd`，逐个用 **zstd CLI 多帧解压**（`zstd -dc <file>`，Node zlib 只解首帧不可用）；drive 依次跑三包，「最新会话」不一定是 typo-check——**按日志内容含 `@typo-check` 派发文本定位目标会话**，统计 `kind === 'tool-call' && name === 'subagent'` 的记录数 ⇒ 期望 ≥2（两个 lane）。把计数记入 facts（模型输出质量记为事实，不做硬断言；lane 计数 <2 记 FAIL）。
 
-主入口：读 connection → 准备隔离 profile（模型设置缺失 ⇒ BLOCKED exit 3）→ 生成样例 → build workspace + prepare:electron-native（若 lib/ 已存在可跳过 build，但须记录）→ launchApp（清 ELECTRON_RUN_AS_NODE/NODE_OPTIONS，DSH_TELEMETRY_DISABLED=1，--remote-debugging-port，--disable-gpu --no-first-run --disable-background-timer-throttling --disable-renderer-backgrounding）→ connectAppPage → ensureLoggedIn → drive → 写 facts 报告（脱敏）→ finally 只 kill 自己启动的 app 进程 + 向 connection.pid 发 SIGTERM。exit 0/1/3。
+主入口：读 connection → requireZstd()（缺失 ⇒ BLOCKED exit 3）→ 准备隔离 profile（模型设置缺失 ⇒ BLOCKED exit 3）→ 生成样例 → build workspace + prepare:electron-native（若 lib/ 已存在可跳过 build，但须记录）→ launchApp（清 ELECTRON_RUN_AS_NODE/NODE_OPTIONS，DSH_TELEMETRY_DISABLED=1，--remote-debugging-port，--disable-gpu --no-first-run --disable-background-timer-throttling --disable-renderer-backgrounding）→ connectAppPage → ensureLoggedIn → drive → 写 facts 报告（脱敏）→ finally 只 kill 自己启动的 app 进程 + 向 connection.pid 发 SIGTERM。exit 0/1/3。
 
 - [ ] **Step 4: 启动 keep-catalog 并跑真机走查**
 
@@ -2222,50 +2254,76 @@ git commit -m "feat(scripts): CDP acceptance walkthrough for three plaza agent p
 
 ---
 
-### Task 13: 原目录备份 + owner 再次确认 + 删除
+### Task 13: 原目录备份 + 延后删除登记（R7：删除等生产稳定后）
 
 **Files:**
 - 仓库外: `~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz`
-- Modify: `docs/evidence/2026-11-11-three-agent-packages.md`（清理节）
+- Modify: `docs/evidence/2026-11-11-three-agent-packages.md`（备份与延后删除节）
 
 **Interfaces:**
 - Consumes: Task 10–12 验证全部通过（或 BLOCKED 项经 owner 接受）。
-- Produces: 备份 tar + sha256 + owner 明确同意记录 + 三目录删除。
+- Produces: 备份 tar + sha256 + 延后删除触发项登记。**本里程碑不执行删除**（owner 裁定 R7，2026-11-12）。
 
-**安全约束（绝不违反）：** 三个目录均无 git remote，备份是唯一安全网；**未经 owner 再次明确确认绝不删除**；含 typo `data/` 真实基金报告与 orch.db 248MB 历史。
+**安全约束（绝不违反）：** 三个目录均无 git remote，备份是唯一安全网；**未经 owner 再次明确确认绝不删除**；含 typo `data/` 真实基金报告与 orch.db 248MB 历史。三个目录实际位于 `~/Downloads/cursor/智能办公平台/` 下（2026-11-12 评审订正：原稿路径漏了「智能办公平台」层，tar 会失败、`rm -rf` 指向不存在路径会静默退出 0 造成空转假象）。
 
 - [ ] **Step 1: 备份**
 
 Run:
 ```bash
-tar -czf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz -C ~/Downloads/cursor 错别字检测智能体 代码审查智能体 任务编排智能体
+tar -czf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz -C ~/Downloads/cursor/智能办公平台 错别字检测智能体 代码审查智能体 任务编排智能体
 ```
-Expected: exit 0，备份落仓库外。
+Expected: exit 0，备份落仓库外。失败则停止，不得进入后续步骤。
 
 - [ ] **Step 2: 校验备份完整性**
 
 Run: `tar -tzf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz | head -50`（确认三目录条目齐全）+ `shasum -a 256 ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz`（记录哈希）。
 Expected: 列表含三目录；哈希记入证据。
 
-- [ ] **Step 3: owner 再次确认（硬门禁）**
+- [ ] **Step 3: 登记延后删除触发项（不删除）**
 
-用 AskUserQuestion 向 owner 明示：备份位置与 sha256、删除范围（三个目录绝对路径）、三目录无 git remote（备份是唯一安全网）、验证结论（含 BLOCKED 项）。**只有 owner 明确同意才进入 Step 4**；不同意则保留目录、记录裁定。
+证据文档写明：备份位置与 sha256、删除范围（`~/Downloads/cursor/智能办公平台/错别字检测智能体`、`~/Downloads/cursor/智能办公平台/代码审查智能体`、`~/Downloads/cursor/智能办公平台/任务编排智能体` 三个绝对路径）、三目录无 git remote（备份是唯一安全网）、验证结论（含 BLOCKED 项）。**触发条件**：生产上架完成（按 Task 14 的 runbook 指引）并稳定运行后，向 owner 明示上述范围并获**再次明确确认**，才可另行执行删除；本里程碑到此为止，不运行任何 rm。
 
-- [ ] **Step 4: 删除（仅在 owner 明确同意后）**
+- [ ] **Step 4: 回填证据 + Commit**
 
-Run:
-```bash
-rm -rf ~/Downloads/cursor/错别字检测智能体 ~/Downloads/cursor/代码审查智能体 ~/Downloads/cursor/任务编排智能体
-```
-Expected: 三目录删除；备份仍在。
-
-- [ ] **Step 5: 回填证据 + Commit**
-
-证据文档补「原目录清理」节：备份路径、sha256、tar 校验结果、owner 确认记录（日期+裁定）、删除执行结果。
+证据文档补「原目录备份与延后删除」节：备份路径、sha256、tar 校验结果、延后删除触发条件（R7）。
 
 ```bash
 git add docs/evidence/2026-11-11-three-agent-packages.md
-git commit -m "docs(evidence): record backup, owner confirmation and original directory cleanup"
+git commit -m "docs(evidence): record original directory backup and deferred deletion trigger"
+```
+
+---
+
+### Task 14: 生产上架 runbook 指引（R6：只指引，不执行生产动作）
+
+**Files:**
+- Create: `docs/huaanwork-three-agent-packages-release.md`
+- Modify: `docs/evidence/2026-11-11-three-agent-packages.md`（指引指针）
+
+**Interfaces:**
+- Consumes: Task 9 已验证的签名链路（开发密钥形态）+ `docs/huaanwork-agent-packages-m2.md`（M2 部署与离线签名 runbook）。
+- Produces: 生产上架指引文档。生产上架动作本身仍是 owner 运维（R2/R6）；本任务不触碰生产 catalog、不生成/不持有/不提交任何生产私钥。
+
+- [ ] **Step 1: 写指引文档**
+
+新建 `docs/huaanwork-three-agent-packages-release.md`，逐条覆盖（步骤全部指向 M2 runbook 对应章节，不另造命令）：
+
+1. **前置退役**：生产 catalog entriesDir 的三条同名 kind:"tool" 条目（typo-check/code-review/task-orch）必须先退役——同名 legacy 条目一律 409 `legacy-conflict`（`agent-catalog-server/src/submissions.ts:428-446`），迁移例外仅限 kind:"agent"，tool 条目无迁移路径。下架/撤销语义见 M2 runbook §8（下架不是安全处置）与 §13（legacy 迁移仍需审查）。
+2. **签名纪律**：生产签名只用 owner 真实密钥；keyring、私钥与轮换纪律见 M2 runbook §4。仓库与任何脚本输出不生成、不持有、不提交生产私钥。
+3. **上架步骤**：
+   - 播种：把 Task 5–7 交付的 `agent-packages/` 三包写入生产 creator profile——`node --experimental-transform-types scripts/seed-agent-packages.mjs --profile <生产 creator profileDir>`（Task 8 脚本，profileDir 由 owner 指定）。此步是 owner 运维动作；「验收绝不触碰生产 profile」的约束只约束验收运行，不约束本指引。
+   - 发布 → 离线审查 → 签名：`agent.packagePublish` 提交 → admin CLI `review` 独立复算 digest 写审查回执 → 明确同意后 `approve --slot 1`，见 M2 runbook §6。
+   - 广场签名卡出现后安装/更新/启用，见 M2 runbook §7。
+4. **与原目录删除的联动（R7）**：生产上架完成并稳定运行后，owner 再次明确确认删除范围，才可删除三个原目录；备份位置与 sha256 见证据文档「原目录备份与延后删除」节（Task 13）。未经再次确认绝不删除。
+5. **验证边界**：本里程碑的开发密钥验证（Task 9）不等于生产上架验收；生产上架后按 M2 runbook §14 双 Profile 验收探针复核。
+
+- [ ] **Step 2: 核对指针 + 回填证据 + Commit**
+
+逐条核对指引引用的 M2 runbook 章节号真实存在（§4/§6/§7/§8/§13/§14）；证据文档补指引文档指针。
+
+```bash
+git add docs/huaanwork-three-agent-packages-release.md docs/evidence/2026-11-11-three-agent-packages.md
+git commit -m "docs: add production release runbook pointer for three agent packages"
 ```
 
 ---
@@ -2277,11 +2335,11 @@ git commit -m "docs(evidence): record backup, owner confirmation and original di
 - §4.4 测试矩阵 8 项：1→Task 1 平台测试；2/3/5/6/8→Task 3 八测试；4→Task 4；7→Task 3 基线/legacy 测试 + 既有钉子零改动。✓（矩阵 6「清理/id 复用」由 Task 2 引用清理测试 + Task 4 map.delete 后回 ask 覆盖。）
 - §5.0 共同形态→Task 5–7 manifest/预算/内联；§5.1→Task 5；§5.2→Task 6；§5.3→Task 7。✓
 - §6.1 播种→Task 8；发布验证→Task 9；旧条目 fixture 保留→Task 9 Phase A 拷贝不改仓库。✓
-- §6.2 正式上架 owner 运维→Global Constraints（不生成生产私钥）+ Task 9 409 负例证明退役必要性。✓
+- §6.2 正式上架 owner 运维→Global Constraints（不生成生产私钥）+ Task 9 409 负例证明退役必要性 + Task 14 runbook 指引（R6）。✓
 - §7.1 单元→Task 1–9；§7.2 门禁→Task 10；§7.3 真机→Task 12；§7.4 独立评审→Task 11；§7.5 Windows→Task 1 平台测试 + Task 10/12 BLOCKED；§7.6 证据→Task 10。✓
-- §8 备份删除→Task 13。✓
+- §8 备份与延后删除→Task 13（R7：本里程碑只备份 + 登记触发项，不删除）。✓
 - §9 边界→Global Constraints + 各包 SKILL.md 边界节。✓
-- **口径订正**：§5.0/§7.3「安装/启用对话框披露」与 UI 现实差异已在 Global Constraints 订正条 + Task 12 真实 DOM 断言中诚实处理。✓
+- **口径订正**：§5.0/§7.3「安装/启用对话框披露」与 UI 现实差异已在 Global Constraints 订正条 + Task 12 真实 DOM 断言中诚实处理；spec 对应措辞已于 2026-11-12 同步订正。✓
 
 **2. Placeholder scan：** 无 TBD/TODO；所有代码步骤含完整代码；Task 12 helper 复制给出精确源文件+行号范围（可验证引用，非未定义符号）；驱动序列/样例/主入口逻辑完整。✓
 
@@ -2292,3 +2350,12 @@ git commit -m "docs(evidence): record backup, owner confirmation and original di
 - Task 4 ask 基线 `write`→`git_push`（普通会话与清理后两处）：`write` 空参同样路径越界 deny，无法体现 smart 档 ask；`git_push` 不检查参数、smart 档恒 ask，且不在继承 allow 内，清理前会被血缘 deny、清理后回 ask，正确证明「标志非永久」。
 - Task 3 包优先测试：pkg 分支命中时 C4 跳过、fake bindChild 只记录调用 ⇒ 血缘 map 无孙代条目，断言改为 `has(grandchildId)===false` + `get(parentSessionId)===allow` + `size===1`。
 - Task 3 跨包隔离测试：删除「替换 startActivation 后重新 applySkills」（会叠加事件监听器造成双重收窄），改为 harness 暴露 `agentsById`、登记 `grandchild-b` 后直接两次 activateOf（既有 fake 按 agentsById 解析 localAgent）。✓
+
+**5. 评审后订正（2026-11-12，Gemini 计划评审反证核实 + owner 裁定 R6/R7）：**
+
+评审原文 `docs/superpowers/plans/2026-11-11-three-agent-packages-plaza-plan-review.md`；逐条判决见该文档「处置」节。本计划据此订正：
+
+- **阻断修复（4 处）**：① Task 13 tar/-C 与删除范围路径补「智能办公平台」层（原路径 tar 必失败、rm 指向不存在路径静默退出 0）；② Task 12 Step 2 未安装详情按钮改按文案匹配「查看详情」（原 `button.filter-tab:last-child` 命中 DOM 末位的「下载」，会提前安装并超时）；③ Task 12 lane 观测会话日志路径改 `{homeDir}/sessions/`（DSH_HOME 根，原 `profiles/desktop/.../sessions/` 不存在），并按 `@typo-check` 文本定位目标会话（drive 依次跑三包，最新会话不一定是 typo-check）；④ Task 9 bootCatalog 补 `await createAgentCatalogRuntime(config)`、参数顺序改 `createAgentCatalogServer(config, runtime)`（与 M2 先例 :608-635 同形），listen 补 error reject、close 补 closeAllConnections。
+- **owner 裁定落地**：R6 → 新增 Task 14 runbook 指引（生产上架不入代码范围）；R7 → Task 13 删除延后到生产上架稳定后，本里程碑只备份 + 登记触发项。
+- **低成本改进**：Task 12 增 `requireZstd()` 预检（缺失 ⇒ BLOCKED exit 3）；三包 description 末尾加「用 @slug 调用。」、SKILL.md 开头加调用行并各补一条回归钉（评审 P2-1）；spec §1 位置/§3 中文 @ 图示/§5.0/§7.3 披露口径同步订正。
+- **探针项（不定性为 bug）**：孙代迟到 activation 的清理竞态留给 Task 11 独立评审核查（可达性取决于上游取消语义）。

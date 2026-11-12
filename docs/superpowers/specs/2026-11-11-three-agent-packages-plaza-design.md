@@ -1,20 +1,20 @@
 # 三个智能体包与广场接入设计（typo-check / code-review / task-orch）
 
-- 日期：2026-11-11
-- 状态：设计已获 owner 批准（2026-11-11），待 spec 审阅后进入实施计划
+- 日期：2026-11-11（2026-11-12 按计划评审订正：目录位置、@ 唤醒图示、披露口径、删除时序；登记 R6/R7）
+- 状态：设计已获 owner 批准（2026-11-11）；实施计划已产出并经评审订正
 - 范围：`dsh-plugin-huaanwork` 运行时扩展 + 三个智能体包定义 + 签名广场接入 + 原目录清理
 - 上游约束：`deepseek-harness/` 子模块零修改；manifest schema、admin CLI、catalog server 代码、广场卡 schema 均不改
 
 ## 1. 背景与目标
 
-`/Users/amonmiao/Downloads/cursor/` 下三个独立项目（错别字检测智能体 TypoGuard、代码审查智能体 code-review-cli、任务编排智能体 orch）均为常驻 HTTP 服务形态，与 HuaAnWork 智能体包的回合制运行时不兼容。owner 裁定将其**完全 LLM 化**为三个自包含智能体包，经 **M2 签名发布流程**进入智能体广场；原服务退役，原目录在备份与再次确认后可删除。
+`/Users/amonmiao/Downloads/cursor/智能办公平台/` 下三个独立项目（错别字检测智能体 TypoGuard、代码审查智能体 code-review-cli、任务编排智能体 orch）均为常驻 HTTP 服务形态，与 HuaAnWork 智能体包的回合制运行时不兼容。owner 裁定将其**完全 LLM 化**为三个自包含智能体包，经 **M2 签名发布流程**进入智能体广场；原服务退役，原目录本里程碑只备份，删除延后到生产上架稳定后（R7）。
 
 目标：
 
 1. 三个包以中文 displayName 出现在广场，名称/描述/能力披露与页面展示一致。
 2. 错别字检测实现「两个子代理背靠背双盲检测 + 主代理仲裁」——需要一次运行时扩展（包允许 subagent 派发 + 孙代工具收窄继承）。
 3. 任务编排为「复杂任务拆解 + 可实施执行计划」顾问，只出计划不执行。
-4. 全程验证留证据；原目录删除前备份并经 owner 再次确认。
+4. 全程验证留证据；原目录本里程碑备份并登记延后删除项，删除须待生产稳定且 owner 再次确认（R7）。
 
 ## 2. 裁定记录
 
@@ -25,11 +25,14 @@
 | R3 | 双盲检测本里程碑做运行时扩展：包允许名单加 `subagent` + 孙代收窄继承 + 回归钉（约 2–3 人日，安全敏感文件须独立评审） | 2026-11-11 |
 | R4 | task-orch 升级为「任务拆解与执行计划顾问」：输入复杂任务，输出依赖拆解 + 步骤计划 + 验收标准 + 调度建议 | 2026-11-11 |
 | R5 | 完整设计批准，写 spec | 2026-11-11 |
+| R6 | 生产上架不纳入本里程碑代码范围（维持 R2/§6.2 边界）；补一个 runbook 指引任务，指向 M2 部署与离线签名 runbook 的生产上架步骤 | 2026-11-12 |
+| R7 | 原目录删除延后到生产上架完成并稳定运行后；本里程碑只做备份 + 延后项登记，删除仍须 owner 再次明确确认 | 2026-11-12 |
 
 ## 3. 总体架构
 
 ```
-用户 @错别字检测 / @代码审查 / @任务编排
+用户 @typo-check / @code-review / @task-orch
+（唤醒词 = slug；中文 displayName 仅展示，dispatch 正则不认中文）
         │  agent-invoke.ts（包优先分发，现状不改）
         ▼
 包直接子会话（allow = read/read_file/glob/grep/bash|pwsh/subagent [+运行时工具]）
@@ -110,13 +113,14 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 - 源文件落点：`dsh-plugin-huaanwork/agent-packages/{slug}/`（布局门禁不限制该树内部子目录，已核 `scripts/verify-layout.mjs`），每包 `agent.json` + `persona.md` + `skill/SKILL.md`。
 - manifest：schemaVersion 1；version `1.0.0`；persona `"persona.md"`；skill `{ entry: "skill/SKILL.md", summary: ≤200字 }`；`tools: { mode: "none" }`；`allowSkills: []`。draftId/createdAt/updatedAt 由播种脚本生成。
 - 预算：persona/SKILL.md 各 ≤32KiB，整包 ≤5MiB（store 既有上限）；检测规则/审查规格/方法论全部内联进 SKILL.md，**不放额外引用文件**（store 写入 API 的文件集不含任意 references）。
-- 能力披露：包实际允许名单 = read/read_file/glob/grep/bash（win32 为 pwsh）/subagent；广场签名卡展示 displayName/description/version/size（`catalogPackageCard` 无 capabilities 字段，已核实），能力项在安装/启用对话框按允许名单披露。
+- 能力披露：包实际允许名单 = read/read_file/glob/grep/bash（win32 为 pwsh）/subagent；广场签名卡展示 displayName/description/version/size（`catalogPackageCard` 无 capabilities 字段，已核实）。**披露面是详情对话框，不是安装/启用对话框**（2026-11-12 订正：签名包没有安装/启用确认对话框——安装=直接「下载」按钮，启用=直接开关）：未安装详情显示包信息 + 「安装后可查看签名与文件清单」；已安装详情显示验签结果、工具模式（`tools.mode:"none"` ⇒ 「无」）与沙箱警告。允许名单本身不在 UI 逐项展示，能力边界如实写进 description 与 SKILL.md。
 - Qoder 侧 `superpowers:dispatching-parallel-agents` 属另一套技能体系，包无法引用；双盲派发模式写进 SKILL.md 文本。
+- 调用提示（2026-11-12 评审 P2-1 处置）：@ 派发只认 slug，中文 displayName 不能作唤醒词；每包 description 末尾带「用 @slug 调用。」，SKILL.md 开头带调用行（`@slug <参数形态>`），让用户在广场卡与详情里都能看到真实调用词。
 
 ### 5.1 错别字检测（slug: `typo-check`）
 
 - displayName：`错别字检测`
-- description：`对指定文件夹中的 Word 文档做错别字与用语规范检测：两个独立子代理背靠背双盲检测，主代理仲裁分歧，输出带行号定位与置信度的报告。`
+- description：`对指定文件夹中的 Word 文档做错别字与用语规范检测：两个独立子代理背靠背双盲检测，主代理仲裁分歧，输出带行号定位与置信度的报告。用 @typo-check 调用。`
 - persona 要点：中文公文/金融文档校对专家；严谨、只报有据之错；不改动原文。
 - SKILL.md 工作流：
   1. **枚举**：按用户给定路径 `glob` 匹配 `*.docx`（单文件亦支持）；逐个处理。
@@ -131,7 +135,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 ### 5.2 代码审查（slug: `code-review`）
 
 - displayName：`代码审查`
-- description：`对指定代码文件或目录做结构化审查：按审查规格逐项检查正确性、安全、性能与可维护性，输出按严重度分级的发现与修复建议。`
+- description：`对指定代码文件或目录做结构化审查：按审查规格逐项检查正确性、安全、性能与可维护性，输出按严重度分级的发现与修复建议。用 @code-review 调用。`
 - persona 要点：资深代码评审者；先反证再定严重度；只报有证据的问题。
 - SKILL.md 工作流：read/glob/grep 读目标代码 → 按 REVIEW_SPEC 逐项审查 → 大文件条件分块（同 5.1 阈值策略）→ 输出按严重度（阻断/重要/建议）分级的发现：位置、问题、证据、修复建议。
 - 规格来源：原项目 `代码审查智能体/src/spec.ts` 的 REVIEW_SPEC 逐节移植（保留审查维度/严重度定义/输出格式，剔除服务与 HTTP 相关内容）。
@@ -140,7 +144,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 ### 5.3 任务编排（slug: `task-orch`）
 
 - displayName：`任务编排`
-- description：`把复杂任务拆解为可实施的执行计划：子任务依赖分析、每步输入产出与验收标准、顺序与并行建议、周期任务的 cron/interval 调度建议。只出计划，不执行。`
+- description：`把复杂任务拆解为可实施的执行计划：子任务依赖分析、每步输入产出与验收标准、顺序与并行建议、周期任务的 cron/interval 调度建议。只出计划，不执行。用 @task-orch 调用。`
 - persona 要点：任务编排顾问；拆解落在真实工程上；计划可执行、可验收；不承诺自动执行。
 - SKILL.md 工作流：
   1. 理解复杂任务；若附项目路径，用 read/glob/grep 读实际代码/文档再拆解。
@@ -162,21 +166,22 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 
 - 生产 catalog 的 entriesDir 中三条同名 kind:"tool" 条目必须先退役：同名 legacy 条目一律 409 `legacy-conflict`（`agent-catalog-server/src/submissions.ts:428-446`），迁移例外仅限 kind:"agent"，tool 条目无迁移路径。
 - 签名用 owner 真实密钥；本设计不生成、不持有、不提交任何生产私钥。
+- 按 R6（2026-11-12），本里程碑补一个 **runbook 指引任务**（实施计划 Task 14）：产出 `docs/huaanwork-three-agent-packages-release.md`，把上述生产上架步骤逐条指向 `docs/huaanwork-agent-packages-m2.md` §6（发布→离线审查→签名）、§7（安装/更新/启用）、§13（legacy 迁移仍需审查）；生产上架动作本身仍由 owner 执行。
 
 ## 7. 验证计划
 
 1. **单元测试**：§4.4 全矩阵 + 三包 manifest 校验/预算断言 + 播种/发布脚本自测。
 2. **门禁**：`corepack yarn typecheck`、`corepack yarn test`、`corepack yarn check` 全量；`verify:aa` 并发竞态为已登记既有 flaky，失败时隔离重跑并如实记录。
-3. **真机走查（CDP）**：用 open-latest-huaanwork 最新构建——广场出现三张中文名卡；安装/启用对话框能力披露正确；用**验收专用样例 docx**（脚本生成，含已知错别字；不用真实基金报告）跑通 typo-check，观测两个 lane 子代理与仲裁结果；code-review 审一段样例代码；task-orch 拆解一个样例复杂任务（如「为市场模块增加离线缓存」）并产出含依赖与验收标准的计划。
+3. **真机走查（CDP）**：用 open-latest-huaanwork 最新构建——广场出现三张中文名卡；详情对话框披露正确（未安装=包信息+「安装后可查看签名与文件清单」；已安装=验签结果：通过+工具「无」+沙箱警告；签名包无安装/启用确认对话框，2026-11-12 订正）；用**验收专用样例 docx**（脚本生成，含已知错别字；不用真实基金报告）跑通 typo-check，观测两个 lane 子代理与仲裁结果；code-review 审一段样例代码；task-orch 拆解一个样例复杂任务（如「为市场模块增加离线缓存」）并产出含依赖与验收标准的计划。
 4. **独立评审**：运行时扩展（skills/policy/host/runtime/holders）走 requesting-code-review，结论经反证与严重度校准。
 5. **Windows**：pwsh 提取与 win32 allow 形态做单元测试；无第二台 Windows 真机 ⇒ 真机项记 BLOCKED（R-ACCEPT-1 豁免先例），不声称跨机器通过。
 6. 证据落 `docs/evidence/2026-11-11-three-agent-packages.md`（逐项命令/退出码/截图指针；CI 绿 ≠ 真机，区分 PR CI 与 master run）。
 
-## 8. 原目录清理
+## 8. 原目录备份与延后删除（R7，2026-11-12）
 
-1. **备份**：`tar -czf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz` 打包三个原目录（含 typo `data/` 真实基金报告与 orch.db 248MB 历史），备份落仓库外；`tar -tzf` 校验完整性。
+1. **备份（本里程碑执行）**：`tar -czf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz -C ~/Downloads/cursor/智能办公平台 错别字检测智能体 代码审查智能体 任务编排智能体` 打包三个原目录（含 typo `data/` 真实基金报告与 orch.db 248MB 历史），备份落仓库外；`tar -tzf` 校验完整性并记录 sha256。三个目录实际位于 `~/Downloads/cursor/智能办公平台/` 下（2026-11-12 订正：原稿漏了「智能办公平台」这一层，会导致 tar 失败、删除空转）。
 2. **前置**：§7 验证全部通过（或如实记录 BLOCKED 项并经 owner 接受）。
-3. **再次确认**：向 owner 明示备份位置与删除范围，获明确同意后才执行删除。三个目录均无 git remote，备份是唯一安全网；未经再次确认绝不删除。
+3. **删除延后（本里程碑不执行）**：触发条件 = 生产上架完成（按 Task 14 runbook 指引）并稳定运行，且 owner 再次明确确认删除范围。三个目录均无 git remote，备份是唯一安全网；未经再次确认绝不删除。本里程碑只在证据文档登记备份位置/sha256/删除范围/触发条件，作为后续触发项。
 
 ## 9. 边界与非目标
 
@@ -195,5 +200,5 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 | 包源文件 | 新增 `dsh-plugin-huaanwork/agent-packages/{typo-check,code-review,task-orch}/{agent.json,persona.md,skill/SKILL.md}` |
 | 脚本 | 新增 `dsh-plugin-huaanwork/scripts/seed-agent-packages.mjs`、`scripts/verify-agent-packages-plaza.mjs` |
 | 测试 | 新增 `tests/huaanwork-guardrails/package-subagent-lineage.spec.ts` 等；runtime allow 既有单测扩展 |
-| 文档 | 本 spec；实施证据 `docs/evidence/2026-11-11-three-agent-packages.md` |
+| 文档 | 本 spec；实施证据 `docs/evidence/2026-11-11-three-agent-packages.md`；生产上架 runbook 指引 `docs/huaanwork-three-agent-packages-release.md`（R6，Task 14） |
 | 不改 | `deepseek-harness/`、manifest schema、admin CLI、catalog server、广场卡 schema、测试 fixtures |
