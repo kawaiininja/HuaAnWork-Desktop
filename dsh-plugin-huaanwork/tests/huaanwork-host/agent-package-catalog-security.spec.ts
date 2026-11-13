@@ -419,6 +419,7 @@ function makeTurnHarness(options: TurnHarnessOptions = {}): TurnHarness {
     huaanworkAttachments: emptyAttachments(),
     huaanworkAgentPackageRequest: { current: null },
     huaanworkPackageChildSessions: new Set<string>(),
+    huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
     huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
     subagents: {
       startActivation: async (spec: { childId?: string } = {}) => {

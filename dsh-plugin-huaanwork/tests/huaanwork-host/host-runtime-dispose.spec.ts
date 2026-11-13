@@ -107,6 +107,7 @@ describe('host runtime disposal', () => {
     const dispatched = await host.dispatch({
       ctx: {
         huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
         huaanworkSubagentRuns: newRunRegistry(),
         subagents: {
           startActivation: async () => ({
@@ -202,6 +203,7 @@ describe('host runtime disposal', () => {
     const dispatched = await host.dispatch({
       ctx: {
         huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
         huaanworkSubagentRuns: newRunRegistry(),
         subagents: {
           startActivation: async () => ({
@@ -309,6 +311,7 @@ describe('cleanup failure propagation', () => {
     await host.dispatch({
       ctx: {
         huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
         huaanworkSubagentRuns: newRunRegistry(),
         subagents: { startActivation: async () => neverDisposingActivation() },
       } as never,
@@ -359,6 +362,7 @@ describe('cleanup failure propagation', () => {
       const dispatched = await host.dispatch({
         ctx: {
           huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+          huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
           huaanworkSubagentRuns: newRunRegistry(),
           subagents: {
             startActivation: async () => ({
@@ -404,6 +408,7 @@ describe('cleanup failure propagation', () => {
     const dispatched = await host.dispatch({
       ctx: {
         huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
+        huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
         huaanworkSubagentRuns: newRunRegistry(),
         subagents: { startActivation: async () => neverDisposingActivation() },
       } as never,

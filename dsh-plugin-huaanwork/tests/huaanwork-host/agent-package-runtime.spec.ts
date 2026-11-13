@@ -742,6 +742,7 @@ describe('agent package turn cleanup', () => {
       ctx: {
         get: (name: string) => (name === 'sandbox' ? passthroughSandbox : undefined),
         huaanworkWorkspaceRoot: { current: workspaceRoot },
+        huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
         huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
         subagents: {
           startActivation: async () => ({
@@ -798,6 +799,7 @@ describe('agent package turn cleanup', () => {
       huaanworkAttachments: attachments,
       huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
       huaanworkAgentPackageRequest: { current: null },
+      huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
       huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async () => ({
@@ -880,6 +882,7 @@ describe('agent package turn cleanup', () => {
       huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
       huaanworkAgentPackageRequest: { current: null },
       huaanworkPackageChildSessions: childSessions,
+      huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
       huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async () => ({
@@ -1027,6 +1030,7 @@ describe('agent package turn cleanup', () => {
     await expect(
       host.dispatch({
         ctx: {
+          huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
           huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
         } as never,
         sessionId: 'parent-session',
@@ -1230,6 +1234,7 @@ describe('agent package catalog damage', () => {
       host.dispatch({
         ctx: {
           huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
+          huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
           huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
           subagents: {
             startActivation: async () => ({
@@ -1339,6 +1344,7 @@ describe('agent package subagent run projection', () => {
       get: () => undefined,
       huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
       huaanworkAgentPackageRequest: { current: null },
+      huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
       huaanworkSubagentRuns: runs,
       subagents: {
         startActivation:
@@ -1447,6 +1453,13 @@ describe('agent package subagent run projection', () => {
         resolveParent: async () => ({ id: 'parent-agent' }),
       }),
     ).rejects.toThrow(/subagent run registry is not initialized/)
+  })
+
+  test('dispatch refuses when the lineage allow holder is absent', async () => {
+    const harness = runHarness()
+    // 抹掉 holder（模拟未来重构漏装），其余就绪。
+    delete harness.ctx.huaanworkPackageChildAllow
+    await expect(harness.dispatch('parent-session')).rejects.toThrow(/huaanworkPackageChildAllow/)
   })
 
   test('cancelling during createRuntime stops the selected late runtime only', async () => {

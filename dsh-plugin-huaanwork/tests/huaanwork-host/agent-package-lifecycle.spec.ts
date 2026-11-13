@@ -280,6 +280,7 @@ function dispatchInput(): {
   return {
     ctx: {
       huaanworkWorkspaceRoot: { current: join(root, 'workspace') },
+      huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
       huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async () => {

@@ -75,7 +75,8 @@ export type AgentPackageDispatchContext = {
   huaanworkAgentPackageRequest?: { current: AgentPackageSubagentRequest | null }
   /** 包回合绑定的子会话 id;清理时逐一移除,供 policy 标记 `mcp__*` 的运行链路。 */
   huaanworkPackageChildSessions?: Set<string>
-  huaanworkPackageChildAllow?: Map<string, readonly string[]>
+  /** 包回合血缘允许表(C2);恒由 installHuaanworkHolders 初始化,缺席即调用方装配回归。 */
+  huaanworkPackageChildAllow: Map<string, readonly string[]>
   subagents?: SubagentsService
   /**
    * 统一子代理 run 登记表(Task 5)。`index.ts` 注入与 routes/legacy `@agent`
@@ -520,6 +521,11 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       // 失败或未启用的回合也要留下终结事实,而不是一张永远 starting 的卡。
       const subagentRuns = ctx.huaanworkSubagentRuns
       if (subagentRuns === undefined) throw new Error('subagent run registry is not initialized')
+      // 血缘允许表缺席即装配回归:静默跳过会让 C1 允许 subagent 而 C4/C5 不生效,
+      // 必须在建 run 之前响亮拒绝,与 run 登记表缺席拒绝同形。
+      if (ctx.huaanworkPackageChildAllow === undefined) {
+        throw new Error('智能体包 dispatch 缺少 huaanworkPackageChildAllow holder（装配回归）')
+      }
       const runId = subagentRuns.begin({
         parentSessionId: sessionId,
         kind: 'package',

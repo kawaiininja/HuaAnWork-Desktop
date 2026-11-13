@@ -1217,6 +1217,7 @@ function dispatchHarness(options: {
     huaanworkWorkspaceRoot: { current: '/tmp/workspace' },
     huaanworkAttachments: maps,
     huaanworkAgentPackageRequest: { current: null },
+    huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
     huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
     subagents: {
       startActivation: async (spec: ActivationSpec) => {
