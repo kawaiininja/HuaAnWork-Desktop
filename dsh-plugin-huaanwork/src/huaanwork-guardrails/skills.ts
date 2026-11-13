@@ -348,17 +348,19 @@ export function apply(ctx: Context): void {
           tools?.restrict?.({ allow });
         }
         // 血缘分支(C4,start 旧签名回落):与 activation 路径同形。
+        // C4 加固:无可解析 childId 即抛(start 路径无 activation.dispose,由调用方错误路径收尾)。
         if (!packageApplied && run?.localAgent && parentFromCall !== undefined && inherited !== undefined) {
           const childSessionId =
             sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
-          if (childSessionId !== undefined) {
-            const tools = run.localAgent.ctx?.get?.("tools");
-            const schemas = tools?.schemas?.() ?? [];
-            const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
-            const allow = inherited.filter((name) => existing.includes(name));
-            tools?.restrict?.({ allow });
-            ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
+          if (childSessionId === undefined) {
+            throw new Error("subagent lineage child id missing");
           }
+          const tools = run.localAgent.ctx?.get?.("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
+          const allow = inherited.filter((name) => existing.includes(name));
+          tools?.restrict?.({ allow });
+          ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
         }
         if (run?.localAgent) {
           consumePendingSpawn(run.localAgent);
@@ -485,11 +487,20 @@ export function apply(ctx: Context): void {
           !packageApplied &&
           legacy === undefined &&
           run !== undefined &&
-          childSessionId !== undefined &&
           parentFromCall !== undefined
         ) {
           const inherited = ctx.huaanworkPackageChildAllow?.get(parentFromCall);
           if (inherited !== undefined) {
+            // C4 加固:血缘子会话无可解析 id 必须 fail-closed,不能静默保留基线工具
+            // (mainstream 不可达:上游契约保证 childId)。与 parent-mismatch 同形。
+            if (childSessionId === undefined) {
+              try {
+                await run?.dispose?.();
+              } catch {
+                // 释放失败不能顶替不一致错误,也不能留下未处理 rejection。
+              }
+              throw new Error("subagent lineage child id missing");
+            }
             const childAgent = ctx.agents?.get?.(childSessionId) ?? run.localAgent;
             const tools = childAgent?.ctx?.get?.("tools");
             const schemas = tools?.schemas?.() ?? [];

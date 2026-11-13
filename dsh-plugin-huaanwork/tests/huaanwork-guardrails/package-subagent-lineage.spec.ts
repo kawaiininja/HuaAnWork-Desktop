@@ -276,6 +276,43 @@ test("baseline re-restrict on tools/change preserves the lineage layer", async (
   );
 });
 
+// C4 加固（加固波次 Task 1）：父在血缘表里，但本次 activation 的 run 不暴露任何可解析
+// childId ⇒ 必须 dispose + 拒绝，不得静默跳过收窄让孙代持基线工具。mainstream 不可达
+// （上游契约保证 childId），这是纵深防御；与 parent-mismatch fail-closed 同形。
+test("C4 hardening: a lineage activation with no resolvable child id fails closed", async () => {
+  const h = lineageHarness();
+  // fake startActivation 按 spec.childId 原样回填 run.childId：空串经 sessionIdOf 不可解析，
+  // 等价于 run 不暴露 childId；把孙代登记到空键下，让 run 仍带持有基线工具的 localAgent
+  // （静默放行就会让它带着完整工具表继续跑）。
+  h.agentsById.set("", h.grandchild);
+  await assert.rejects(
+    activateOf(h.ctx)(activationSpec("", h.parentSessionId)),
+    { message: "subagent lineage child id missing" },
+  );
+  // 父条目不被误清，也不得写入任何孙代条目。
+  assert.equal(h.childAllow.get(h.parentSessionId), h.allow);
+  assert.equal(h.childAllow.size, 1);
+  // 收窄从未发生：孙代工具表仍是基线（拒绝已挡住这次 run）。
+  assert.deepEqual(h.grandchildTools.schemas().map((schema) => schema.name), [...BASE_NAMES]);
+});
+
+// C4 加固（加固波次 Task 1）：start 旧签名回落同形 —— 无可解析 childId 即抛
+// （start 路径无 activation.dispose，由调用方错误路径收尾）。
+test("C4 hardening: a lineage start with no resolvable child id fails closed", async () => {
+  const h = lineageHarness();
+  // fake start 按 agentsById 解析 localAgent：把孙代替换为无 id 的 agent ⇒
+  // header 与 agent 自身都不暴露可解析 id。
+  h.agentsById.set(h.grandchildId, agentOf("", h.grandchildTools));
+  const start = (h.ctx.subagents as { start: (...args: never[]) => Promise<unknown> }).start;
+  await assert.rejects(
+    start("lane" as never, { parent: liveParent(h.parentSessionId), prompt: [] } as never),
+    { message: "subagent lineage child id missing" },
+  );
+  assert.equal(h.childAllow.get(h.parentSessionId), h.allow);
+  assert.equal(h.childAllow.size, 1);
+  assert.deepEqual(h.grandchildTools.schemas().map((schema) => schema.name), [...BASE_NAMES]);
+});
+
 // 矩阵 5（跨包隔离）：A 包血缘不拿 B 包 allow；两引用互不串。
 test("two package lineages stay isolated by reference", async () => {
   const h = lineageHarness();
