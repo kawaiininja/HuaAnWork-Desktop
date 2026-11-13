@@ -124,7 +124,7 @@ function splitWorkflowJobs(workflow: string): Record<string, string> {
 describe('published package surface', () => {
   it('keeps the private workspace version-neutral and versions the HuaAnWork package', () => {
     expect(workspaceManifest.version).toBeUndefined()
-    expect(manifest.version).toBe('0.1.0')
+    expect(manifest.version).toBe('0.1.8')
   })
 
   it('runs desktop and community market typechecks from the root command', () => {
@@ -888,7 +888,7 @@ describe('published package surface', () => {
 
   it('fixes the installed application identity', () => {
     expect(workspaceManifest.version).toBeUndefined()
-    expect(manifest.version).toBe('0.1.0')
+    expect(manifest.version).toBe('0.1.8')
     expect(manifest.name).toBe('dsh-plugin-huaanwork')
     expect(manifest.bin).toEqual({
       'huaanwork': 'lib/bin.js',
