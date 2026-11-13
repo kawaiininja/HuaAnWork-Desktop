@@ -284,7 +284,7 @@ corepack yarn exec node --experimental-transform-types scripts/verify-agent-pack
 - 三个提交 id：`ea25305b…` / `f0ec8f8d…` / `baad5b64…`（每运行现场生成）；`reviewedAndSigned.keyId` = `80f7c5cf…57842`（每运行一次性开发密钥，非生产）。
 - `plazaBeforeInstall`: 3 张卡 `installed:false`，displayName = 代码审查 / 任务编排 / 错别字检测。
 - `installedAndVerified`: 三包安装并独立复验 keyId + digest 通过；`plazaAfterInstall`: `installed slugs excluded`；`enabled`: 三包 `enabled:true`。
-- 本次非 `--keep-catalog` 运行未留临时根（Task 9 的 `--keep-catalog` 记录根 `/var/folders/…/huaanwork-plaza-verify-9XaJJq` 仍在，含一次性私钥、权限 0600，留给 Task 12 使用/清理）。
+- 本次非 `--keep-catalog` 运行未留临时根（Task 9 的 `--keep-catalog` 记录根 `/var/folders/…/huaanwork-plaza-verify-9XaJJq` 仍在，含一次性私钥、权限 0600，留给 Task 12 使用/清理）。**后续状态见 §12.3**：该根已于 2026-11-13 由 controller 手工删除；「仍在」只是本节登记时点的状态，读者勿在此停步。
 - Task 9 的原始 PASS 报告 `/tmp/plaza-verify-report.json` 仍在（2026-11-12 23:45，outcome PASS，结论一致）。
 
 ### 10.4 门禁：三条命令与退出码
@@ -460,7 +460,7 @@ spec §5.0/§7.3 已于 2026-11-12 同步订正；本里程碑**不伪造对话�
 
 ### 12.6 N-3 时序结论（可观测部分）
 
-- 运行卡完成时包子会话已存活 `76,251 ms`；清理预算常量 `600,000 ms`（10 分钟）。应用日志里 `cleanupBudgetTrips = 0`，无「分钟内未结束」行，因此本轮**未触发**任何清理预算超时。
+- 运行卡完成时包子会话已存活 `76,251 ms`；清理预算常量 `600,000 ms`（10 分钟）。应用日志里 `cleanupBudgetTrips = 0`，无「分钟内未结束」行，因此本轮**未触发**任何清理预算超时。**（口径订正，见 §12.12：「分钟内未结束」行是 `host.ts` 的 `console.error`，经 Electron stderr 落 `<out>/app-stdout.log`，不在 `<userData>/logs`；本轮只扫了后者，`cleanupBudgetTrips = 0` 是空通道读数，不能作为「未触发」的证据。修复轮已双通道扫描并按文件记命中数。）**
 - 仲裁发生在两条 lane 的 delivery 之后（`arbitrationAfterLastDelivery = true`），与 §11.3 的源码级结论一致：lanes 存活期间血缘条目不会被清理。
 - 20 分钟双预算耗尽后的残余分支（`agents.md` N-3 行）本轮不可观测，仍按登记保留。
 
@@ -553,12 +553,12 @@ run B 的失败是**断言精度缺陷**，不是产品/机制失败，也不是
 - `subagent.maxDepth = 2`；`guard_mode = smart`（脚本显式写入）。
 - `appEntry.nativeBinding`：`node_modules/fs-ext/prebuilds/darwin-arm64/electron.abi149.node`（存在，`prepare:electron-native` 产物）。
 - 广场三卡、安装/启用各三次、已装详情三份均 `验签结果：通过` / 工具「无」/ 文件清单 3 条 / 标题正确；三包运行卡 `completed`。
-- `appLogs`：3 个文件，`cleanupBudgetScan = "scanned"`，`cleanupBudgetTrips = 0`，`packageErrors = 0`，`catalogErrors = 0`。
+- `appLogs`：3 个文件，`cleanupBudgetScan = "scanned"`，`cleanupBudgetTrips = 0`，`packageErrors = 0`，`catalogErrors = 0`。**（口径订正，见 §12.12：本轮只扫 `<userData>/logs`；trip 行实际经 Electron stderr 落 `<out>/app-stdout.log`，该通道未扫，故 `cleanupBudgetTrips = 0` 为空通道读数。修复轮双通道扫描。）**
 - `catalogRootCleanup.status = "deleted"`（root `…/huaanwork-plaza-verify-rWgmmB`，pid 47152，`signalled/exited/deleted = true`）；`isolatedCleanup = "removed"`。
 - 双盲身份链：父 `huaanwork-5be541f32f339457-21998d24` → 包子会话 `e4483c52-64c0-445e-b065-40474b84d30f`（depth 1）。
   - 两个不同 callId、结果非错误：`17dcb09e-54cf-4e10-9c22-6946a46c7087` → lane `ad9307a1-bd84-4f3c-abb5-76be70856b69`；`5a1cda14-4cc8-46b5-9f3a-18c712a7a777` → lane `2a3063a0-5eac-4d99-b07c-b58dab99d682`。
   - 两条 depth 2 lane 均收到 settlement 投递（`finalTextLength` 1209 / 1192，无 “left no closing message”）；`distinctCallIdCount = 2`、`goodCallCount = 2`、`errorCallCount = 0`、`missingCallCount = 0`；`arbitrationAfterLastDelivery = true`；`honestDegradation = false`；`dualBlindOk = true`。
-  - N-3：运行卡完成时包子会话存活 69,236 ms，清理预算 600,000 ms；`cleanupBudgetTrips = 0`。20 分钟双预算分支仍未观测（登记债）。
+  - N-3：运行卡完成时包子会话存活 69,236 ms，清理预算 600,000 ms；`cleanupBudgetTrips = 0`（**当时只扫 `<userData>/logs`，属空通道读数；trip 行落 `app-stdout.log`，双通道扫描见 §12.12**）。20 分钟双预算分支仍未观测（登记债）。
 - 截图 13 张（同前命名），关键图：`01-plaza.png`（180,660 B / `e33df7c11b9784fb`）、`06-run-task-orch.png`（252,729 B / `88cad1fa34149a37`）。
 
 ### 12.11.5 模型串与端点行为（诚实记录）
@@ -574,7 +574,7 @@ run B 的失败是**断言精度缺陷**，不是产品/机制失败，也不是
 
 - **typo-check**：7 处植入错误**全部命中**（按装→安装、帐户→账户、市市场→市场、我们将我们→我们将、Managment→Management、２０２５→2025、在次→再次），每条带「双路一致」置信度标签；仲裁记录指出 L4 两路边界差异并按原文回读裁定；报告主动披露「两条 lane 同一宿主模型，不等同于跨厂商交叉验证（R1 降级）」。引用：`facts.modelOutputs['typo-check'].finalTextExcerpt`、`06-run-typo-check.png`。
 - **code-review**：命中**硬编码密钥**（`sample-review.js:1`，指出还经 `module.exports` 导出、建议轮换与 env 注入）与 **`eval`**（`:3`，判 RCE/CWE-95，给出移除与受限解析替代），并按严重度分级。引用：`facts.modelOutputs['code-review'].finalTextExcerpt`、`06-run-code-review.png`。
-- **task-orch**：计划**包含依赖与验收标准**——子任务 DAG 逐条 `dependsOn`（T0→T1→{T2,T3}→T4→{T6,T8}→T7→T9），每步给出输入/产出/可判定验收/超时/重试/幂等，并给并行与调度建议。**限制**：本次包子会话声明无法读取仓库（工作区策略拒绝 glob/bash，计划中的代码事实均标【待核实】并明确「没有编造项目事实」）；因此本轮只能核对「计划结构是否包含依赖与验收标准」，不能核对计划是否贴合真实代码。引用：`facts.modelOutputs['task-orch'].finalTextExcerpt`、`06-run-task-orch.png`。
+- **task-orch**：计划**包含依赖与验收标准**——子任务 DAG 逐条 `dependsOn`（T0→T1→{T2,T3}→T4→{T6,T8}→T7→T9），每步给出输入/产出/可判定验收/超时/重试/幂等，并给并行与调度建议。**限制**：本次包子会话声明无法读取仓库（工作区策略拒绝 glob/bash；真实根因见 §12.11.9 订正——样例落在派发会话工作区之外，不是模型/策略差异）。计划含环境相关命令，**仅少数**代码事实标【待核实】并明确「没有编造项目事实」（原「均标【待核实】」为过度表述，本轮订正）；owner 生产使用前须自行复核计划与真实代码的贴合度。本轮只能核对「计划结构是否包含依赖与验收标准」，不能核对计划是否贴合真实代码。引用：`facts.modelOutputs['task-orch'].finalTextExcerpt`、`06-run-task-orch.png`。
 
 ### 12.11.7 最终门禁（最终树，本轮脚本 + 本证据文档）
 
@@ -594,10 +594,111 @@ run B 的失败是**断言精度缺陷**，不是产品/机制失败，也不是
 
 ### 12.11.9 残余与边界
 
-- **task-orch 读取权限差异**：run C 的包子会话读不到仓库（上一轮 run 1 的包子会话能读到真实代码）。这是模型/工作区策略层面的运行差异，Task 12 的机制判据（卡片、安装、委派、lane、投递、仲裁）不受影响；计划内容质量只按 §12.11.6 的边界记录，不宣称「计划已对照真实代码验证」。
+- **task-orch/code-review 读取失败的真实根因（终审订正，取代原「模型/工作区策略差异」归因）**：run C 的包子会话读不到样例，**不是**模型/工作区策略层面的运行差异。真实根因：走查脚本把样例放在 `<tempRoot>/workspace/samples` 并把 `pendingRoot` 设为该 workspace，却对每个包点击「新建任务」——新任务会话铸造自己的根 `<profile>/workspace-sessions/<sessionId>`（`sessions.ts` `sessionNew`），样例落在该根之外；`read`/`glob`/`grep` 受工作区绑定（`packages/huaanwork-policy/src/decide.ts` 的 `pathsAreInside`），故 code-review 的 `read` 报「路径越出当前工作区」并回落 bash cat，task-orch 声明工作区为空。原归因**不实**，本轮订正。修复：走查保留「新建任务」导航（UI 没有纯返回主视图的入口，`unscopedSessions` 只列有内容的会话，空 work-1 不可点回），三包共用一个新建任务会话；样例先暂存于隔离 workspace，首次发送后脚本发现该会话铸造的新根 `<profile>/workspace-sessions/<sessionId>` 并把样例拷入 `<新根>/samples`，prompt 以相对路径 `samples/...` 引用，使样例落在派发会话工作区内；新增每包 read/glob 成功事实断言（`facts.modelOutputs[slug].sampleAccess`）与派发根核对（`facts.dispatchRootChecks`，父会话头 cwd 与发现根做 realpath 比对）。复跑与事实见 §12.12。Task 12 的机制判据（卡片、安装、委派、lane、投递、仲裁）不受影响；计划内容质量只按 §12.11.6 的边界记录，不宣称「计划已对照真实代码验证」。
 - **`deepseek-chat` 别名**：端点把它解析为 `deepseek-flash`（§12.11.5），本任务不做模型能力结论。
 - **Windows：BLOCKED**（同 §12.8），本轮未改变。
 - **自动 PASS 的边界**：只证明机制；内容质量结论仅来自 §12.11.6 的人工核对。
+
+---
+
+## 12.12 终审修复波次（2026-11-13，最终走查复跑 + 最终门禁）
+
+本节落地整支终审的 10 条发现（5 Important + 5 Minor），并在最终代码树上复跑走查与三门禁。**最终走查证据以本节 run E（§12.12.3）为准**；脚本仍是同一个 `huaanwork-accept-three-packages.mjs`。
+
+### 12.12.1 发现处置清单
+
+| # | 发现 | 处置 |
+| --- | --- | --- |
+| 1 | 样例落在派发会话工作区之外，read/glob 被拒、回落 bash | 走查保留「新建任务」导航，三包共用一个新建任务会话；样例暂存后于首次发送拷入该会话铸造根 `<profile>/workspace-sessions/<sessionId>/samples`，prompt 用相对路径 `samples/...`；新增 `sampleAccess`（每包 read/glob 成功事实）与 `dispatchRootChecks`（父会话头 cwd vs 发现根 realpath）。code-review/task-orch SKILL 增「工作区边界」节。§12.11.9 归因订正。复跑事实见 §12.12.4 |
+| 2 | Windows pwsh 处方含 `$`/`;`，在 SKILL 指定的 smart 档被 classifyShell deny | typo-check SKILL Windows 处方改为单条简单命令 `pwsh -EncodedCommand <base64>`（base64 编码 UTF-16LE 脚本，元字符自由）；spec 改为从 SKILL.md 取处方原文、代入路径、编码后执行该命令本身，并新增 classifyShell 非 deny 钉 + 内联对照钉；spec 列入 `check:win-package:platform`。本机无 pwsh，行为用例如实跳过（CI-owned） |
+| 3 | spec/plan 仍断言被取代的「主会话模型自主 subagent 行为零变化」 | spec §2 增 R10（2026-11-13 owner）；§4.3 不变量订正为「主会话 subagent 的*工具收窄*行为零变化；工具可见性与委派能力按 R10 放开」；§4.6/§7 同步；plan 矩阵 7 两处加历史批注（不静默改写） |
+| 4 | 清理预算证据只扫 `<userData>/logs`，trip 行实际落 `app-stdout.log`，读数为空 | `scanAppLogs` 改双通道（`<userData>/logs` + `<out>/app-stdout.log`），按文件记命中数（`scannedFiles`）；§12.6/§12.11.4 旧读数标注为空通道。复跑事实见 §12.12.6 |
+| 5 | runbook 与 seed 脚本头部矛盾；缺发布后重跑警告与运行时前提 | seed 头部订正（隔离规则只约束验收运行；生产 creator 播种是 owner 动作）+ replace:true 重置警告；runbook §3.1 增「发布后不要再重跑 seed」警告 + 新增 §0.1 运行时前提（maxDepth 2 产品默认 / typo-check 需 smart/full / Windows 提取 CI-owned 未真机验证 / 工作区边界） |
+| 6 | runtime.ts 注释引 §4.2 C1 且称 guaranteed | 改为 C4 引用 + 「enforced by the C4 lineage branch」 |
+| 7 | verify-agent-packages-plaza.mjs 未用 readFileSync import | 删除 |
+| 8 | 证据 :577「代码事实均标【待核实】」过度表述 | 订正为「含环境相关命令，仅少数标【待核实】，owner 生产前须复核」（§12.11.6） |
+| 9 | 证据 :639 locale 补救措辞 | 订正为「须先在 LC_ALL=en_US.UTF-8 下重新生成清单再计数；只对旧 C locale 清单 re-grep 仍 0/0/0」（§13.2） |
+| 10 | 证据 :284「仍在」缺后续指针 | 增前向指针 §12.3（该根已由 controller 手工删除）（§10.3） |
+
+### 12.12.2 走查复跑运行史（含诚实 FAIL/BLOCKED，不洗成 PASS）
+
+| 运行 | 产物 | 结果 | 原因 |
+| --- | --- | --- | --- |
+| run A | `/tmp/three-packages-accept-4`（首次） | **1 FAIL** | 移除「新建任务」点击后丢失其导航副作用：步骤 5 后停在智能体面板，composer 不在场（`hasComposer:false`），`waitForComposerIdle` 超时。脚本缺陷，非产品缺陷 |
+| run B | 同上（第二次） | **3 BLOCKED** | 改回「新建任务」+ 相对路径 + 拷样例后，子会话归因只查**首条** user/message，而首条是系统「working directory changed」通知，派发 prompt 在后续 user/message ⇒ 匹配 0。用 `--keep-root` 保留隔离根实证后改为查**所有** user/message |
+| run C | 同上（第三次） | **1 FAIL** | 机制全绿（sampleAccess 全 ok、dualBlindOk=true），仅 `dispatchRootChecks.expectedRoot=null`：`drive` 返回 progress 而非 ctx，`driven.sessionRoot` 取不到。改为命名 `driveCtx` 后读取 |
+| run E | `/tmp/three-packages-accept-4`（最终） | **0 PASS** | 最终树复跑，全部判据通过；`facts.environment.headSha = afc80e444e`（脚本修复为未提交 `.mjs`，不参与构建，`lib` 不变） |
+
+run B 的诊断保留根（含生产凭据副本）已于诊断后手工删除；run E 的隔离根由脚本删除（`isolatedCleanup: "removed"`）。
+
+### 12.12.3 最终 facts 摘要（run E，`/tmp/three-packages-accept-4/facts.json`）
+
+- `outcome = PASS`，`errors: []`；`startedAt 01:33:47Z` / `finishedAt 01:35:31Z`；`headSha = afc80e444e3602f2fab54f021f1a6c00f07936f1`。
+- **模型**：`precheck.model.model = deepseek-chat`，`baseUrl = https://api.deepseek.com`（生产 active 条目只读复制，`--model deepseek-chat` 仅改模型名，base_url/api_key 不变、从不打印），`maxDepth = 2`，`guard_mode = smart`（脚本显式写入）。
+- 广场三卡、安装/启用各三次、已装详情三份均 `验签结果：通过` / 工具「无」/ 文件清单 3 条 / 标题正确；三包运行卡 `completed`。
+- `dispatchRootChecks`：typo-check / code-review / task-orch 均 `ok:true`（父会话头 cwd 与发现根 realpath 一致）。
+- `catalogRootCleanup.status = "deleted"`（root `…/huaanwork-plaza-verify-gbJQuO`，`signalled/exited/deleted = true`）；`isolatedCleanup = "removed"`。
+- 截图 13 张；关键图：`01-plaza.png`（180,224 B / `9a23b30040cd1ff1`）、`06-run-typo-check.png`（238,149 B / `332cea662a1e6161`）、`06-run-code-review.png`（339,763 B / `1a499e0af8df9acc`）、`06-run-task-orch.png`（386,562 B / `3e71d50dd9ca92fb`）。
+
+### 12.12.4 read/glob 样例访问事实（发现 1 的核心判据）
+
+每包 child 的 `sampleAccess.ok = true`（至少一次非错误 read/glob 命中样例路径，bash-only 不计）：
+
+| slug | child | 成功的 read/glob 调用 | 终态文本长度 |
+| --- | --- | --- | --- |
+| typo-check | `40bab39d-5328-4fa8-8412-edf588984974` | `glob(ok)` | 3100 |
+| code-review | `23779098-60fa-4952-be7f-fd662b558eb9` | `read(ok)` | 2059 |
+| task-orch | `6a82f868-be35-49f8-9d0d-49733026f5e2` | `read(ok), read(ok), read(err)` | 6077 |
+
+task-orch 的 `read(err)` 是对二进制 `sample.docx` 的 read（read 工具读不了二进制，模型如实记录「read 读不了」），另两次 read 成功；`ok` 判据为成功数 > 0，满足。样例确在派发会话工作区内（`dispatchRootChecks` 全 true），不再是 run C 的「工作区为空」。
+
+### 12.12.5 双盲身份链（typo-check）
+
+- 父会话 `huaanwork-05385871e89209e8-b76b851f` → 包子会话 `40bab39d-5328-4fa8-8412-edf588984974`（`origin: "subagent"`，depth 1）。
+- 两条 `subagent` 派发，callId 不同且结果非错误：`1a38c906-549c-4f40-ac2e-ea1081193e35` → lane `218d8207-ef54-4731-b9e7-45b45400532b`；`49604b1b-4aae-46c7-8d27-5a0107b0b92f` → lane `e3344b42-17c2-439f-b17d-3fc0f38744d3`。
+- 两条 depth 2 lane：`218d8207…`（4902 ms，收尾 1206 字）与 `e3344b42…`（4323 ms，收尾 1206 字）；均收到 `subagent-settled` 投递（`agent/inbox/spliced`），无 "left no closing message"。
+- 计数：`distinctCallIdCount = 2`、`goodCallCount = 2`、`errorCallCount = 0`、`missingCallCount = 0`；`arbitrationAfterLastDelivery = true`；`honestDegradation = false`；`dualBlindOk = true`。
+
+### 12.12.6 清理预算双通道扫描（发现 4）
+
+`appLogs.roots` = `[<userData>/logs, <out>/app-stdout.log]`；`scannedFiles` 逐文件命中数：
+
+| 文件 | cleanupBudgetTrips | packageErrors | catalogErrors |
+| --- | --- | --- | --- |
+| `<userData>/logs/dsh-2026-11-13.log` | 0 | 0 | 0 |
+| `<userData>/logs/host/dsh-2026-11-13.error.log` | 0 | 0 | 0 |
+| `<userData>/logs/host/dsh-2026-11-13.log` | 0 | 0 | 0 |
+| `<out>/app-stdout.log` | 0 | 0 | 0 |
+
+合计 `cleanupBudgetTrips = 0`、`packageErrors = 0`、`catalogErrors = 0`。**这次是真实双通道读数**：trip 行（`host.ts` console.error「分钟内未结束」）所在的 `app-stdout.log` 已被扫描，0 命中可信。N-3：运行卡完成时包子会话存活 49,209 ms，清理预算 600,000 ms，未触发；20 分钟双预算分支仍未观测（登记债）。
+
+### 12.12.7 人工核对结论（**实施者人工核对（owner 可复核）**）
+
+依据 `facts.modelOutputs` 包子会话终态文本与 §12.12.3 截图。**不声称自动化的内容质量证明**。
+
+- **typo-check**：7 处植入错误**全部命中**（按装→安装、帐户→账户、市市场→市场、我们将我们→我们将、Managment→Management、２０２５→2025、在次→再次），双路一致；仲裁逐条回读原文并纠正 A/B 两路的行号/字符偏移基准差异。引用 `facts.modelOutputs['typo-check'].finalTextExcerpt`、`06-run-typo-check.png`。
+- **code-review**：命中 `eval` 代码注入（`samples/sample-review.js:3`，critical/RCE）与硬编码密钥（`:1`，critical，指出经 `module.exports` 导出），严重度统计 critical 2 / medium 1 / low 1 / info 1。引用 `facts.modelOutputs['code-review'].finalTextExcerpt`、`06-run-code-review.png`。
+- **task-orch**：这次**真实 read/glob 了工作区**并诚实判定「samples 目录里没有任何市场模块代码」，逐文件列出实际内容；计划把「发现与确认」作为 T1 显式前置，含依赖 DAG、每步可判定验收门（G1…）、并行与调度建议；未编造项目事实。引用 `facts.modelOutputs['task-orch'].finalTextExcerpt`、`06-run-task-orch.png`。边界：计划是否贴合真实市场模块代码仍须 owner 生产前复核（样例非市场代码）。
+
+### 12.12.8 最终门禁（最终树）
+
+| 命令 | 退出码 | 摘要 |
+| --- | --- | --- |
+| `corepack yarn typecheck` | **0** | 日志 `/tmp/fixwave-final-typecheck.log` |
+| `corepack yarn test` | **0** | 根 workspace `3974 passed \| 15 skipped (3989)`、`284 passed \| 4 skipped (288)` 文件（较 §12.11.7 +1 = 新增 SKILL 元字符自由钉）；其余 4 workspace `303 / 244 / 88 / 80 passed`；日志 `/tmp/fixwave-final-test.log` |
+| `corepack yarn check` | **0** | 含 build/verify:* 与 verify:aa；日志 `/tmp/fixwave-final-check.log` |
+
+### 12.12.9 清理验证
+
+- run E 的 catalog 根 `…/huaanwork-plaza-verify-gbJQuO` 由脚本删除（`catalogRootCleanup.status = "deleted"`）；运行后 `ls -d …/huaanwork-plaza-verify-* …/huaanwork-three-packages-*` 无匹配，`pgrep` 无残留走查/catalog 进程。
+- run E 隔离根 `isolatedCleanup = "removed"`；run B 诊断保留根已手工删除。
+
+### 12.12.10 残余与边界
+
+- **Windows：CI-owned / BLOCKED**。pwsh 提取行为用例本机无 pwsh 如实跳过；spec 已列入 `check:win-package:platform`，由 Windows CI 执行；无第二台 Windows 真机，不声称跨机器/真机通过（R-ACCEPT-1）。
+- **`deepseek-chat` 别名**：端点解析为 `deepseek-flash`（§12.11.5），不做模型能力结论。
+- **自动 PASS 的边界**：只证明机制；内容质量结论仅来自 §12.12.7 的人工核对。
+- **走查脚本运行史**：run A/B/C 的 FAIL/BLOCKED 均为脚本缺陷（导航副作用、子会话归因首条消息、ctx 引用），已修复并如实记录于 §12.12.2，未洗成 PASS。
 
 ---
 
@@ -636,7 +737,7 @@ run B 的失败是**断言精度缺陷**，不是产品/机制失败，也不是
 | 任务编排智能体 | **704** |
 | 合计 | 11,311（与 `wc -l` 相等；顶层前缀去重后只有这三个目录） |
 
-**校验命令的口径坑（如实记录）**：本机 shell 的 `LC_ALL` 为空 ⇒ `LC_CTYPE=C`，`bsdtar 3.5.3` 在 C locale 下把非 ASCII 名字打印成八进制转义（`\351\224\231…`），因此 brief 里原样的 `grep -c "^$d/"` 在默认环境得到 **0 / 0 / 0**。这是**显示层转义**，不是归档缺目录：在 `LC_ALL=en_US.UTF-8` 下重跑同一循环即得上表数值，且归档内存储的是原始 UTF-8 字节（`tar -xOzf` 按中文名可取到内容，见下）。
+**校验命令的口径坑（如实记录）**：本机 shell 的 `LC_ALL` 为空 ⇒ `LC_CTYPE=C`，`bsdtar 3.5.3` 在 C locale 下把非 ASCII 名字打印成八进制转义（`\351\224\231…`），因此 brief 里原样的 `grep -c "^$d/"` 在默认环境得到 **0 / 0 / 0**。这是**显示层转义**，不是归档缺目录：**必须先在 `LC_ALL=en_US.UTF-8` 下重新生成清单**（`LC_ALL=en_US.UTF-8 tar -tzf <archive> > listing`）**再计数**，才得上表数值；只对旧的 C locale 清单重新 grep 仍返回 0/0/0。归档内存储的是原始 UTF-8 字节（`tar -xOzf` 按中文名可取到内容，见下）。
 
 端到端内容比对（不只看清单）：
 
