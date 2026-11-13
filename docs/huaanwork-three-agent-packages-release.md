@@ -11,6 +11,13 @@
 
 本里程碑的验证（Task 9 的隔离签名链路、Task 12 的 macOS 真机走查）只证明机制，不等于生产上架验收（见 §5）。
 
+## 0.1 运行时前提（产品默认与档位）
+
+- **递归深度**：产品默认 `subagent.maxDepth = 2`（R8，profile 组合层注入，开箱即用，不依赖用户手工设置）。typo-check 的双盲派发要求有效 maxDepth ≥ 2；深度不足或派发失败时 SKILL 如实降级为单会话多轮自审，严禁伪造双盲。已知边界：用户先存过同族字段（如 `maxActiveSubagents`）再清除/重置 `maxDepth`，落盘行整条替换 ⇒ 有效值回落 schema 默认 1（证据文档 §0.3 C 登记债，产品侧无提示）。
+- **Guard 档位**：typo-check 的提取步骤需要 **smart 或 full** 档（R9）。ask 档（产品默认）下包子会话没有审批界面，bash/pwsh 必然被拒；SKILL 被拒时如实告知用户切档，不伪造提取结果。验收隔离 profile 显式写 `guard_mode: "smart"`，不复制生产值。
+- **Windows 提取**：处方为单条简单命令 `pwsh -EncodedCommand <base64>`（base64 编码 UTF-16LE 脚本，元字符自由，smart 档可放行）。行为覆盖在 `tests/huaanwork-host/typo-check-pwsh-extract.spec.ts`，已列入 `check:win-package:platform`（Windows CI 执行）；本机 macOS 无 pwsh，行为用例如实跳过，**Windows 真机项 BLOCKED**（R-ACCEPT-1 豁免先例），不得声称已验证。
+- **工作区边界**：三包 SKILL 均声明 `read`/`glob`/`grep` 只允许当前会话工作区内路径；工作区外目标请用户把该文件夹作为工作区打开，或改用 bash/pwsh（smart/full）。
+
 ## 1. 前置退役：三条同名 kind:"tool" 条目必须先退役
 
 生产 catalog 的 entriesDir 中，`typo-check` / `code-review` / `task-orch` 三条同名 legacy 条目（`kind:"tool"`）必须先退役，再发布同名智能体包。
@@ -41,7 +48,8 @@ node --experimental-transform-types dsh-plugin-huaanwork/scripts/seed-agent-pack
 
 - Task 8 脚本 `dsh-plugin-huaanwork/scripts/seed-agent-packages.mjs`（usage 行写作 `scripts/seed-agent-packages.mjs`，在 `dsh-plugin-huaanwork/` 目录下执行即同一命令）；`profileDir` 由 owner 指定。
 - 脚本把 `dsh-plugin-huaanwork/agent-packages/` 三包写入 `{profileDir}/agents/{slug}` 与 `{profileDir}/agents-state.json`；写入前对三包全量预检（manifest + 字节预算），任一包不合格即不写任何包。
-- 此步是 owner 运维动作；「验收绝不触碰生产 profile」的约束只约束验收运行，不约束本指引。
+- 此步是 owner 运维动作；「验收绝不触碰生产 profile」的约束只约束验收运行，不约束本指引（脚本头部同口径）。
+- **发布后不要再重跑 seed**：脚本以 `replace: true` 写入并把本地状态重置为 `{enabled:true, publishStatus:'none'}`——重跑会替换源并重置本地发布状态，已发布包的本地发布记录丢失，须重新走发布/签名流程。仅在首次播种或确需重置时执行。
 
 ### 3.2 发布 → 离线审查 → 签名（M2 runbook §6）
 

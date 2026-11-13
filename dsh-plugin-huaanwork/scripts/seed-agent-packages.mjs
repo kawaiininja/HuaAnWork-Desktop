@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 /**
- * 把 agent-packages/ 三个源包播种到指定隔离 profile。
+ * 把 agent-packages/ 三个源包播种到指定 profile。
  * 用法: node --experimental-transform-types scripts/seed-agent-packages.mjs \
  *         --profile <profileDir> [--sources <dir>]
- * 绝不触碰生产 profile；draftId/createdAt/updatedAt 每次重新生成。
+ * 隔离规则只约束验收运行：验收/CI 一律指向隔离 profile，绝不触碰生产 profile。
+ * 生产 creator profile 的播种是 owner 运维动作（见 docs/huaanwork-three-agent-packages-release.md §3.1）。
+ * 警告：写入用 replace:true 并把本地状态重置为 {enabled:true, publishStatus:'none'}——
+ * 发布后不要再重跑本脚本，否则会替换源并重置本地发布状态。
+ * draftId/createdAt/updatedAt 每次重新生成。
  */
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
