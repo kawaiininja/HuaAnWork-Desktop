@@ -259,11 +259,11 @@ scratch（未提交）：`/tmp/typo-plaza-spike/{depth-probe.mjs,ask-tier-probe.
 
 | slug | displayName | description（字符/UTF-8 字节） | manifest 规范化 JSON B | persona B | SKILL.md B | `agentPackageBytes` 整包 B | 上限 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `typo-check` | 错别字检测 | 83 / 211 | 677（源文件 `agent.json` 661 B） | 536 | 9904 | 11117 | persona/SKILL 各 32768；整包 5242880 |
+| `typo-check` | 错别字检测 | 83 / 211 | 677（源文件 `agent.json` 661 B） | 536 | 10526 | 11739 | persona/SKILL 各 32768；整包 5242880 |
 | `code-review` | 代码审查 | 76 / 200 | 674（源文件 658 B） | 432 | 3159 | 4265 | 同上 |
 | `task-orch` | 任务编排 | 95 / 231 | 694（源文件 678 B） | 477 | 4607 | 5778 | 同上 |
 
-测量方法（本节实测，exit 0）：`agent-package-sources.spec.ts` 的 `stays within store budgets` 只断言 ≤ 上限、不打印数值；本表字节用 `src/huaanwork-host/agent-package/store.ts` 的 `agentPackageBytes()`（`JSON.stringify(manifest, null, 2) + "\n"` + persona + skill）与 `parseAgentPackageManifest()` 对 `dsh-plugin-huaanwork/agent-packages/{slug}/` 逐包实测。上表 manifest 列即该函数使用的规范化字节数（源文件 B 数另列，二者差在 JSON 重排与尾换行）。上限常量：`MAX_PERSONA_BYTES = MAX_SKILL_BYTES = 32768`、`MAX_PACKAGE_BYTES = 5242880`（`store.ts:37-43`）。三包整包分别占上限 0.21% / 0.08% / 0.11%，persona 与 SKILL.md 均在各自 32 KiB 内（SKILL.md 最紧的是 typo-check，30.2%）。**字节订正（评审 Minor，2026-11-13）**：SKILL.md 在修复波次（`2cf3dafcd5`，工作区边界节 + pwsh 处方硬化）增大，本表已按最终树用 `agentPackageBytes()` 重测（SKILL 9904/3159/4607、整包 11117/4265/5778）；Task 8 报告原记 9646/3877/5327 是修复前值，manifest 与 persona 字节不变。
+测量方法（本节实测，exit 0）：`agent-package-sources.spec.ts` 的 `stays within store budgets` 只断言 ≤ 上限、不打印数值；本表字节用 `src/huaanwork-host/agent-package/store.ts` 的 `agentPackageBytes()`（`JSON.stringify(manifest, null, 2) + "\n"` + persona + skill）与 `parseAgentPackageManifest()` 对 `dsh-plugin-huaanwork/agent-packages/{slug}/` 逐包实测。上表 manifest 列即该函数使用的规范化字节数（源文件 B 数另列，二者差在 JSON 重排与尾换行）。上限常量：`MAX_PERSONA_BYTES = MAX_SKILL_BYTES = 32768`、`MAX_PACKAGE_BYTES = 5242880`（`store.ts:37-43`）。三包整包分别占上限 0.22% / 0.08% / 0.11%，persona 与 SKILL.md 均在各自 32 KiB 内（SKILL.md 最紧的是 typo-check，32.1%）。**字节订正（2026-11-13 修复波次 & 2026-11-14 qwen4 复审 Minor #2 修复）**：SKILL.md 先后在修复波次（`2cf3dafcd5`，工作区边界节 + pwsh 处方硬化，SKILL 9904/3159/4607 B、整包 11117/4265/5778 B）及 2026-11-14 qwen4 复审 Minor #2 修复（`typo-check` 步 6 跨平台写报告规则与降级回退，使 `typo-check` SKILL 增至 10526 B、整包增至 11739 B）调整；本表已按最终树用 `agentPackageBytes()` 重测（SKILL 10526/3159/4607 B、整包 11739/4265/5778 B）；Task 8 报告原记 9646/3877/5327 是首次修复前值，manifest 与 persona 字节不变。
 
 ### 10.3 播种与广场发布验证
 
@@ -883,3 +883,21 @@ Task 6 Step 3 要求真实走 ConfigEditor.edit 清除 maxDepth（同族字段�
 - 实现 6 提交（`73a8e99955` / `6c0be22e7d` / `650094f794` / `3add2b95ab` / `6599d03a1a` / `01a402cbbd`）+ M-1 注释修复（`c9f5fd28ee`）+ 本证据/债表闭环提交。
 - src 改动面：`skills.ts`（C4 两入口 fail-closed + start dispose）、`host.ts`（holder required + N-3 延迟清）、`profile.ts`（I3 字段级默认）；其余皆 tests/docs。上游子模组、三包 SKILL 源文件、manifest 零改动。
 - 本波次已提交、未推送；生产上架/Windows CI run/原目录删除仍守 R6/R7/R-ACCEPT-1 边界。
+
+---
+
+## qwen4 复审修正（2026-11-14，对应评审文档 §6）
+
+按 `docs/superpowers/plans/2026-11-13-three-agent-packages-plaza-code-review.md` §6.7 owner 拍板执行：
+
+1. **Important #1（§6.1，采纳降级）**：维持 `AGENTS.md:93/:95` 已登记延后债轨道；未改动 `agent-invoke.ts`、`sessions.ts`、`holders.ts`、`huaanwork-agent-package-m2-acceptance.mjs` 与 `huaanwork-agent-package-windows-acceptance.mjs`（最小 `tsc` 探针已复现原建议 1+2 组合在 `strict` + `exactOptionalPropertyTypes` 下报 `TS2322` 的内部矛盾）。
+2. **Minor #1（§6.2，已修）**：`docs/huaanwork-three-agent-packages-release.md:16` 过时 I3 债务表述已更新为字段级注入 + 清除后瞬态内存窗口（仅在下次磁盘重组前暂时为 `1`、fail-closed），与 `profile.ts:1666-1672` 和 `AGENTS.md:91` 对齐。
+3. **Minor #2（§6.3，owner 批准方案 A，已修并同步 spec/plan/§10.2）**：
+   - `dsh-plugin-huaanwork/agent-packages/typo-check/skill/SKILL.md`：提取与清理仍禁止 `&&`、管道与重定向；第 6 步明确仅当用户要求落盘报告文件时允许按系统使用单条简单命令写入工作区内路径（macOS/Linux `bash` 单次 `>` 重定向；Windows `pwsh`，可复用 `pwsh -EncodedCommand`；不引入 python 等外部依赖），若在 `ask` 档被拒或因报告正文含 `|`、`&`、`;`、`` ` ``、`$`（`classifyShell` 元字符拒集）在 `smart` 档被拦截，均回退对话输出并如实告知，不绕过或伪造。
+   - 同步更新 `docs/superpowers/specs/2026-11-11-three-agent-packages-plaza-design.md`（R9 与 §5.1 第 2/6 步）与 `docs/superpowers/plans/2026-11-11-three-agent-packages-plaza.md`（R9、`Task 5` 第 6 步说明及复审修订条）。
+   - §10.2 重测 `typo-check`：`SKILL.md = 10526 B`，`agentPackageBytes() = 11739 B`（`code-review` / `task-orch` 未改动）。
+4. **Minor #3（§6.4，已修）**：`dsh-plugin-huaanwork/src/huaanwork-host/agent-package/host.ts` 中 `bindChild` 将 `if (turnAllow === undefined) throw ...` 守卫上移至 `ctx.huaanworkPackageChildSessions?.add` 与 `packageChildSessions.add` 之前，确保异常时无部分写入。
+5. **Minor #4（§6.5，已修）**：`dsh-plugin-huaanwork/src/profile.ts` 的 `I3` 字段级补丁同步调用 `rows.set('subagent', { ...subagentRow, config })` 使局部 `rows` 与 `patches` 保持一致；注释行号锚点 `(dsh-config-editor:122)` 改为符号语义引用（`@deepseek-ai/dsh-config-editor` 的 `ConfigEditor.edit` pending-write 校验）。
+6. **§6.6 链接瑕疵（已修）**：`docs/superpowers/plans/2026-11-13-three-agent-packages-plaza-code-review.md:29` 的 `row-assertions.ts` 路径修正为 `../../../dsh-plugin-huaanwork/src/huaanwork-host/row-assertions.ts#L29`。
+
+聚焦验证与全量最终门禁在以上修改落盘后的工作区树上执行，结论见本次会话最终交付报告。

@@ -749,13 +749,13 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         }
 
         const bindChild = (childSessionId: string): void => {
+          // `turnAllow` 在两次 `bindChild` 之前赋值;缺它就是调用顺序回归,必须先校验再
+          // 写入任何血缘/权限集合 —— 避免抛错后在集合留下半写入记录。
+          if (turnAllow === undefined) throw new Error('智能体包回合 allow 未就绪即绑定子会话')
           // Record even before the runtime exists: cleanup must clear every id this turn
           // added, and a later turn reusing the id must not inherit the package flag.
           ctx.huaanworkPackageChildSessions?.add(childSessionId)
           packageChildSessions.add(childSessionId)
-          // `turnAllow` 在两次 `bindChild` 之前赋值;缺它就是调用顺序回归,不能静默跳过
-          // 写入 —— 否则血缘表与 C5 执行期拒绝会一起缺席。
-          if (turnAllow === undefined) throw new Error('智能体包回合 allow 未就绪即绑定子会话')
           ctx.huaanworkPackageChildAllow?.set(childSessionId, turnAllow)
           if (runtime === undefined) return
           // `skills.ts` attaches the runtime tools and MCP names before calling this;
