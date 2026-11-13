@@ -87,6 +87,7 @@ import { promisify } from 'node:util'
 import { initProfile } from '@deepseek-ai/dsh-app-boot'
 
 import { redactReport, redactSecrets } from './huaanwork-acceptance-redaction.mjs'
+import { reportsDepthDegradation } from './huaanwork-acceptance-degradation.mjs'
 
 const scryptAsync = promisify(scrypt)
 const PACKAGE_ROOT = fileURLToPath(new URL('../', import.meta.url))
@@ -1364,22 +1365,6 @@ function scanAppLogs(roots) {
   }
   result.cleanupBudgetScan = result.files > 0 ? 'scanned' : 'no-log-files'
   return result
-}
-
-/**
- * Affirmative depth-degradation claims only. A model that reports "未降级为单会话
- * 多轮自审" / "未触发深度降级" is describing the healthy path, and the typo-check
- * package always discloses the R1 same-model cross-validation downgrade
- * ("交叉验证已降级") — neither is a depth degradation. The affirmative set
- * therefore requires an explicit depth/lane phrase, not a bare `降级` or a bare
- * `maxDepth` mention.
- */
-function reportsDepthDegradation(text) {
-  const stripped = text
-    .replace(/(?:未|并未|没有|不会|不能|无|不)(?:发生|出现|进行|被|触发|涉及|采用)?\s*[*_]{0,4}(?:递归)?(?:深度)?降级/gu, '')
-    .replace(/(?:未|并未|没有|不会|不能|无|不)[^。；\n]{0,10}深度不足/gu, '')
-    .replace(/(?:并非|不是|非)\s*[*_]{0,4}单会话多轮自审/gu, '')
-  return /(?:递归)?深度不足|单会话多轮自审|非双盲|SubagentDepthError|降级为单会话|已降级为单会话|深度降级/u.test(stripped)
 }
 
 function observeLanes({ homeDir, remainder, slug, runCardCompletedAt, appLogs }) {
