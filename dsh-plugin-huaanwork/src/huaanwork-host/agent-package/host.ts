@@ -624,6 +624,21 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         const packageChildSessions = new Set<string>()
         /** 本回合 allow 数组的引用;血缘表按引用同一性清理,不误删并发回合。 */
         let turnAllow: readonly string[] | undefined
+        /**
+         * 权威 `activation.result` 是否已结算(子会话真正终结)。
+         *
+         * 未结算前,预算耗尽的清理不得清血缘条目:仍在运行的子会话会失去 C5
+         * 执行期拒绝,其孙代也不再继承血缘收窄。
+         */
+        let activationResultSettled = false
+        /**
+         * 清理已把血缘清除延迟给 result 观察者(N-3)。
+         *
+         * 只有延迟真的发生过,观察者才补清:常规时序(result 先于清理结算)下血缘
+         * 仍由 `releaseChildBindings` 在清理时清,观察者的提前清除会与包装在
+         * activation 之后的 `bindChild` 抢跑。
+         */
+        let lineageClearDeferred = false
 
         /**
          * 取消/失败的统一错误。
@@ -750,6 +765,22 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         }
 
         /**
+         * Clear only the lineage entries this turn wrote: the value is this turn's
+         * allow array reference, so a concurrent turn's entries are never removed.
+         *
+         * `Map.delete` is idempotent, so the cleanup pass and the result observer
+         * converge regardless of which one runs first.
+         */
+        const clearTurnLineage = (): void => {
+          const allowTable = ctx.huaanworkPackageChildAllow
+          if (allowTable !== undefined && turnAllow !== undefined) {
+            for (const [childSessionId, bound] of allowTable) {
+              if (bound === turnAllow) allowTable.delete(childSessionId)
+            }
+          }
+        }
+
+        /**
          * Undo everything this turn attached to a child session: the registry binding,
          * the tool attachments, `present-as`'s restrict and the policy's package-runtime
          * marker.
@@ -780,13 +811,15 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
             ctx.huaanworkPackageChildSessions?.delete(childSessionId)
           }
           packageChildSessions.clear()
-          // Clear only entries this turn wrote: the value is this turn's allow array
-          // reference, so a concurrent turn's entries are never removed.
-          const allowTable = ctx.huaanworkPackageChildAllow
-          if (allowTable !== undefined && turnAllow !== undefined) {
-            for (const [childSessionId, bound] of allowTable) {
-              if (bound === turnAllow) allowTable.delete(childSessionId)
-            }
+          // N-3: 子会话已终结(或从未启动)才现在清血缘;熬过预算仍在跑的子会话保留
+          // C5 条目,由 `activation.result` 观察者在真正终结时清。引用同一性保跨回合隔离。
+          //
+          // 取消是例外:它立即 dispose 并让本回合以明确失败结束,契约是「取消回合
+          // 重新绑定的东西一律清干净」,不给一个已被判定死亡的 id 留血缘条目。
+          if (activation === undefined || activationResultSettled || cancelRequested) {
+            clearTurnLineage()
+          } else {
+            lineageClearDeferred = true
           }
         }
 
@@ -1081,12 +1114,17 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           // failRun。观察器兼做 unhandled rejection 的兜底。
           void activation.result.then(
             (result) => {
+              // 权威终结到达:补上预算耗尽时被延迟的血缘清理(N-3)。
+              activationResultSettled = true
+              if (lineageClearDeferred) clearTurnLineage()
               subagentRuns.settleResult(runId, { stopReason: stopReasonOfResult(result) })
               // 清理先于 result 确认时,补一次幂等确认;stopped 仍要求 executionEnded,
               // 且清理必须真的成功(见 `confirmObservedCleanup`)。
               confirmObservedCleanup()
             },
             (error) => {
+              activationResultSettled = true
+              if (lineageClearDeferred) clearTurnLineage()
               subagentRuns.rejectResult(runId, error instanceof Error ? error.message : String(error))
               confirmObservedCleanup()
             },

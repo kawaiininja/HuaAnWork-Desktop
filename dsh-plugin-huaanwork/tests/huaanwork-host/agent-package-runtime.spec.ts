@@ -1660,6 +1660,104 @@ describe('agent package subagent run projection', () => {
     expect(childAllow.size).toBe(0)
   })
 
+  test('N-3: a child outliving the cleanup budget keeps its C5 lineage entry until it terminates', async () => {
+    const result = deferred<unknown>()
+    const childAllow = new Map<string, readonly string[]>()
+    const harness = runHarness({
+      cleanupTimeoutMs: 20,
+      startActivation: async (spec) => ({
+        childId: spec.childId ?? 'child',
+        // 清理期间永不结算:两个预算都耗尽后子会话仍在运行。
+        result: result.promise,
+        dispose: async () => {
+          await delay(60)
+        },
+      }),
+    })
+    harness.ctx.huaanworkPackageChildAllow = childAllow
+    const dispatched = await harness.dispatch('parent-session')
+    const request = (harness.ctx.huaanworkAgentPackageRequest as {
+      current: { childId: string; allow: readonly string[] } | null
+    }).current
+    expect(request).not.toBeNull()
+    const childId = request!.childId
+    const allow = request!.allow
+    expect(childAllow.get(childId)).toBe(allow)
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await dispatched.afterIdle()
+    } finally {
+      errorSpy.mockRestore()
+    }
+
+    // 预算耗尽只释放资源:仍在运行的子会话保留执行期拒绝(C5)。
+    expect(childAllow.get(childId)).toBe(allow)
+
+    result.resolve({ stopReason: 'completed' })
+    await flushMicrotasks(() => !childAllow.has(childId))
+    expect(childAllow.has(childId)).toBe(false)
+  })
+
+  test('N-3: a budget-surviving child that settles late clears only its own lineage reference', async () => {
+    const firstResult = deferred<unknown>()
+    const secondResult = deferred<unknown>()
+    let activationCalls = 0
+    const harness = runHarness({
+      cleanupTimeoutMs: 20,
+      startActivation: async (spec) => {
+        activationCalls += 1
+        const isFirstTurn = activationCalls === 1
+        return {
+          childId: spec.childId ?? 'child',
+          result: isFirstTurn ? firstResult.promise : secondResult.promise,
+          // 首回合 dispose 熬过预算 ⇒ 清理结束时它的子会话仍在运行。
+          dispose: async () => {
+            if (isFirstTurn) await delay(60)
+          },
+        }
+      },
+    })
+    const childAllow = new Map<string, readonly string[]>()
+    harness.ctx.huaanworkPackageChildAllow = childAllow
+
+    const firstDispatch = await harness.dispatch('parent-session')
+    const firstRequest = (harness.ctx.huaanworkAgentPackageRequest as {
+      current: { childId: string; allow: readonly string[] } | null
+    }).current
+    expect(firstRequest).not.toBeNull()
+    expect(childAllow.get(firstRequest!.childId)).toBe(firstRequest!.allow)
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const firstIdle = firstDispatch.afterIdle()
+      // 同 sessionId 的新回合在首回合清理落定之前就已运行,并写入新的 allow 引用。
+      const secondDispatch = await harness.dispatch('parent-session')
+      const secondRequest = (harness.ctx.huaanworkAgentPackageRequest as {
+        current: { childId: string; allow: readonly string[] } | null
+      }).current
+      expect(secondRequest).not.toBeNull()
+      expect(secondRequest!.allow).not.toBe(firstRequest!.allow)
+      expect(childAllow.get(secondRequest!.childId)).toBe(secondRequest!.allow)
+
+      await firstIdle
+      // 首回合预算耗尽:自己的条目延迟保留,新回合的条目不受影响。
+      expect(childAllow.get(firstRequest!.childId)).toBe(firstRequest!.allow)
+      expect(childAllow.get(secondRequest!.childId)).toBe(secondRequest!.allow)
+
+      firstResult.resolve({ stopReason: 'completed' })
+      await flushMicrotasks(() => !childAllow.has(firstRequest!.childId))
+      expect(childAllow.has(firstRequest!.childId)).toBe(false)
+      expect(childAllow.get(secondRequest!.childId)).toBe(secondRequest!.allow)
+
+      secondResult.resolve({ stopReason: 'completed' })
+      await secondDispatch.afterIdle()
+      expect(childAllow.size).toBe(0)
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
   test('a deferred runtime stop keeps the selected run stopping until cleanup is confirmed', async () => {
     const stopGate = deferred<void>()
     const stoppedA: string[] = []
