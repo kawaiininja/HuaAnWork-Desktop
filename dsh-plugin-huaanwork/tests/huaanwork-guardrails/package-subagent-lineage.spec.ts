@@ -299,7 +299,7 @@ test("C4 hardening: a lineage activation with no resolvable child id fails close
 });
 
 // C4 加固（加固波次 Task 1）：start 旧签名回落同形 —— 无可解析 childId 即抛
-// （start 路径无 activation.dispose，由调用方错误路径收尾）。
+// （start 路径与 activation 分支同形：先 dispose 已启动的子 run，再 fail-closed 抛出）。
 test("C4 hardening: a lineage start with no resolvable child id fails closed", async () => {
   const h = lineageHarness();
   // fake start 按 agentsById 解析 localAgent：把孙代替换为无 id 的 agent ⇒
