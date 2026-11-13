@@ -348,11 +348,16 @@ export function apply(ctx: Context): void {
           tools?.restrict?.({ allow });
         }
         // 血缘分支(C4,start 旧签名回落):与 activation 路径同形。
-        // C4 加固:无可解析 childId 即抛(start 路径无 activation.dispose,由调用方错误路径收尾)。
+        // C4 加固:无可解析 childId 先 dispose 再抛,与 activation 路径同形。
         if (!packageApplied && run?.localAgent && parentFromCall !== undefined && inherited !== undefined) {
           const childSessionId =
             sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
           if (childSessionId === undefined) {
+            try {
+              await run?.dispose?.();
+            } catch {
+              // 释放失败不能顶替不一致错误,也不能留下未处理的 rejection。
+            }
             throw new Error("subagent lineage child id missing");
           }
           const tools = run.localAgent.ctx?.get?.("tools");
