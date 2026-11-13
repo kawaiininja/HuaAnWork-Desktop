@@ -9,14 +9,28 @@
  * installed detail verifies the signature and shows `tools.mode = none`, and
  * each `@slug` round completes with a run card.
  *
+ * All three dispatches share one fresh 新建任务 session (the only reliable nav
+ * back to the chat view from the plaza panel). That session's workspace root is
+ * minted on first send (`<profile>/workspace-sessions/<sessionId>`), so the
+ * samples are staged before launch and copied INTO that root right after the
+ * first send (placeSamplesInDispatchRoot); the prompts address them relatively
+ * (`samples/...`). This keeps the samples inside the dispatch session's root so
+ * the workspace-bound read/glob/grep policy admits them — the final-review
+ * finding was that samples left in the pendingRoot workspace fell outside the
+ * fresh task root and reads were denied. Each package child must show a
+ * successful `read`/`glob` call on the sample paths
+ * (facts.modelOutputs[slug].sampleAccess); bash-only access fails. The dispatch
+ * root is verified post-hoc against the parent session header cwd
+ * (facts.dispatchRootChecks).
+ *
  * Lane observation for `@typo-check` reads the durable session logs under
  * `$DSH_HOME/sessions` with the zstd CLI (multi-frame container) and pins the
  * delegation identity from session headers: parent dispatch text -> package
- * child (`parentSession`, `origin: "subagent"`, depth 1) -> two lane sessions
- * (depth 2). A dual-blind PASS needs two distinct non-error `subagent` tool
- * dispatches plus one `subagent-settled` delivery per lane. Call counts alone
- * never pass; a dispatch error or an honest depth degradation fails the
- * assertion.
+ * child (`parentSession`, `origin: "subagent"`, depth 1, first user message
+ * carries the dispatch remainder) -> two lane sessions (depth 2). A dual-blind
+ * PASS needs two distinct non-error `subagent` tool dispatches plus one
+ * `subagent-settled` delivery per lane. Call counts alone never pass; a dispatch
+ * error or an honest depth degradation fails the assertion.
  *
  * Model credentials are read from the production `huaanwork-settings.json` and
  * copied into the isolated profile; they are never printed. `guard_mode` is
@@ -51,12 +65,14 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomBytes, scrypt } from 'node:crypto'
 import {
   chmodSync,
+  cpSync,
   createWriteStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -167,6 +183,15 @@ function readJson(path) {
     return JSON.parse(readFileSync(path, 'utf8'))
   } catch {
     return undefined
+  }
+}
+
+/** macOS tmpdir is a symlink (/var → /private/var); compare roots canonically. */
+function canonicalPath(path) {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolve(path)
   }
 }
 
@@ -860,12 +885,50 @@ async function parentReplyAfter(client, text, timeoutMs = PARENT_REPLY_TIMEOUT_M
   return { observed: false, text: null }
 }
 
+/**
+ * The dispatch session is a fresh 新建任务 tab whose workspace root is minted on
+ * first send (`<profile>/workspace-sessions/<sessionId>`). The samples must live
+ * INSIDE that root for the workspace-bound read/glob/grep policy to admit them.
+ * The root id is only known after the first send, so the prompts reference the
+ * samples by the relative folder `samples`; right after the first send we discover
+ * the minted root and copy the staged samples into `<root>/samples`. The host mints
+ * the directory in session.new before it processes the message, and the model's
+ * first tool call comes a full LLM round-trip later, so the copy lands well before
+ * any read/glob. `ctx.sessionRoot` records the discovered root for the post-hoc
+ * header-cwd check; a lost race would surface as a denied read and FAIL honestly.
+ */
+async function placeSamplesInDispatchRoot(ctx) {
+  const before = new Set(ctx.sessionDirsBefore)
+  const deadline = Date.now() + 15_000
+  let root
+  while (Date.now() < deadline) {
+    let entries = []
+    try {
+      entries = readdirSync(ctx.sessionsBaseDir, { withFileTypes: true })
+    } catch {
+      entries = []
+    }
+    const fresh = entries.filter((entry) => entry.isDirectory() && !before.has(entry.name))
+    if (fresh.length === 1) {
+      root = join(ctx.sessionsBaseDir, fresh[0].name)
+      break
+    }
+    if (fresh.length > 1) throw new Error(`expected one new dispatch session root, found ${String(fresh.length)}`)
+    await delay(50)
+  }
+  if (root === undefined) throw new Error(`no new dispatch session root appeared under ${ctx.sessionsBaseDir} within 15s`)
+  ctx.sessionRoot = root
+  ctx.sessionSampleDir = join(root, 'samples')
+  cpSync(ctx.stagingSampleDir, ctx.sessionSampleDir, { recursive: true })
+  log(`samples placed in dispatch session root ${root}`)
+}
+
 async function runPackage(client, ctx, slug) {
   const prompt = ctx.prompts[slug]
-  await client.evaluate(`document.querySelector('button[title="新建任务"]').click()`)
   await waitForComposerIdle(client)
   log(`dispatch ${slug}: ${clip(prompt, 200)}`)
   await sendText(client, prompt)
+  if (ctx.sessionRoot === undefined) await placeSamplesInDispatchRoot(ctx)
   const completedAt = await waitFor(`run card ${slug}`, async () => {
     const cards = await client.evaluate(CARDS_EXPRESSION)
     const match = cards.filter((card) => card.label.includes(`@${slug}`))
@@ -1005,7 +1068,18 @@ async function drive(client, ctx) {
     await closeDetailDialog(client)
   }
 
-  // 6. 回到聊天，逐包派发（slug-only @）。
+  // 6. 回到聊天：新建任务一次（导航回主视图并铸造派发会话），三包共用该会话。
+  //    样例在该会话首次发送后放入其新根（见 placeSamplesInDispatchRoot）。
+  let sessionDirsBefore = []
+  try {
+    sessionDirsBefore = readdirSync(ctx.sessionsBaseDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+  } catch {
+    sessionDirsBefore = []
+  }
+  ctx.sessionDirsBefore = sessionDirsBefore
+  await client.evaluate(`document.querySelector('button[title="新建任务"]').click()`)
+  await waitForComposerIdle(client)
   for (const slug of SLUGS) {
     facts.runs.push(await runPackage(client, ctx, slug))
   }
@@ -1120,6 +1194,61 @@ function findParentSessions(sessions, remainder) {
     && session.events.some((event) => event?.type === 'user/message' && messageText(event.data).startsWith(needle)))
 }
 
+/**
+ * All three packages dispatch in the SAME session, so the depth-1 children
+ * under one parent must be attributed by dispatch content: the package child
+ * carries `persona + 用户请求：\n + remainder` (host.ts dispatch) in one of its
+ * user messages. The FIRST user message is a synthetic cwd-change notice, so the
+ * match scans ALL user messages, not just the first. The remainder carries the
+ * unique sample path / planning text per slug.
+ */
+function packageChildSessions(sessions, parentId, remainder) {
+  const needle = remainder.trim()
+  return sessions.filter((session) => {
+    if (session.header.parentSession !== parentId || session.header.origin !== 'subagent' || session.header.delegationDepth !== 1) return false
+    return session.events.some((event) => {
+      if (event?.type !== 'user/message') return false
+      const text = messageText(event.data)
+      return text.includes('用户请求：') && text.includes(needle)
+    })
+  })
+}
+
+const SAMPLE_ACCESS_TOOLS = new Set(['read', 'read_file', 'glob', 'grep'])
+
+/**
+ * Workspace-bound sample access: the child must reach the samples through
+ * read/glob/grep (non-error result), not only through bash. A bash-only child
+ * means the samples were outside the session workspace (the final-review
+ * finding) or the model ignored the SKILL enumeration step.
+ */
+function sampleAccessFacts(child, samplePaths) {
+  const results = new Map()
+  for (const event of child.events) {
+    if (event?.type !== 'tool/result') continue
+    const callId = event.data?.message?.toolCallId
+    if (typeof callId === 'string') results.set(callId, event)
+  }
+  const calls = []
+  for (const event of child.events) {
+    if (event?.type !== 'tool/call' || !SAMPLE_ACCESS_TOOLS.has(event.data?.name)) continue
+    const args = typeof event.data?.arguments === 'string' ? event.data.arguments : ''
+    if (!samplePaths.some((path) => args.includes(path))) continue
+    const callId = event.data?.callId
+    const result = typeof callId === 'string' ? results.get(callId) : undefined
+    calls.push({
+      name: event.data.name,
+      callId: typeof callId === 'string' ? callId : null,
+      argumentsExcerpt: clip(args, 400),
+      resultFound: result !== undefined,
+      isError: result === undefined ? null : result.data?.message?.isError === true,
+      resultExcerpt: clip(messageText(result?.data?.message), 300),
+    })
+  }
+  const successful = calls.filter((call) => call.resultFound === true && call.isError === false)
+  return { calls, successfulCount: successful.length, ok: successful.length > 0 }
+}
+
 function settlementDeliveries(session) {
   const deliveries = []
   for (const event of session.events) {
@@ -1169,12 +1298,43 @@ function subagentCallFacts(session) {
 }
 
 /**
- * Cleanup-budget evidence is only valid when the host actually wrote logs. An
- * empty `userDataDir/logs` yields `cleanupBudgetScan: 'no-log-files'` and the run
- * fails on it instead of reporting a silent zero.
+ * Cleanup-budget evidence is only valid when the host actually wrote logs. The
+ * trip line (`host.ts` console.error 「分钟内未结束」) travels over Electron
+ * stderr into `<out>/app-stdout.log`, NOT into `<userData>/logs`; scanning only
+ * the latter is vacuous (final-review finding). Both channels are scanned and
+ * per-file match counts are recorded. Zero scanned files fails the run instead
+ * of reporting a silent zero.
  */
-function scanAppLogs(root) {
-  const result = { root, files: 0, cleanupBudgetScan: 'no-log-files', cleanupBudgetTrips: 0, cleanupBudgetLines: [], packageErrors: 0, catalogErrors: 0 }
+function scanAppLogs(roots) {
+  const result = { roots, files: 0, scannedFiles: [], cleanupBudgetScan: 'no-log-files', cleanupBudgetTrips: 0, cleanupBudgetLines: [], packageErrors: 0, catalogErrors: 0 }
+  const scanFile = (path) => {
+    let text = ''
+    try {
+      const stat = statSync(path)
+      if (stat.size > 40 * 1024 * 1024) return
+      text = readFileSync(path, 'utf8')
+    } catch {
+      return
+    }
+    const counts = { path, cleanupBudgetTrips: 0, packageErrors: 0, catalogErrors: 0 }
+    result.files += 1
+    for (const line of text.split('\n')) {
+      if (line.includes('分钟内未结束')) {
+        counts.cleanupBudgetTrips += 1
+        result.cleanupBudgetTrips += 1
+        if (result.cleanupBudgetLines.length < 5) result.cleanupBudgetLines.push(clip(redactSecrets(line, SECRETS), 500))
+      }
+      if (line.includes('智能体「') && line.includes('失败')) {
+        counts.packageErrors += 1
+        result.packageErrors += 1
+      }
+      if (line.includes('[agent-catalog]') && line.includes('失败')) {
+        counts.catalogErrors += 1
+        result.catalogErrors += 1
+      }
+    }
+    result.scannedFiles.push(counts)
+  }
   const visit = (dir) => {
     let entries
     try {
@@ -1189,26 +1349,19 @@ function scanAppLogs(root) {
         continue
       }
       if (!/\.(log|jsonl|txt)$/u.test(entry.name)) continue
-      let text = ''
-      try {
-        const stat = statSync(path)
-        if (stat.size > 40 * 1024 * 1024) continue
-        text = readFileSync(path, 'utf8')
-      } catch {
-        continue
-      }
-      result.files += 1
-      for (const line of text.split('\n')) {
-        if (line.includes('分钟内未结束')) {
-          result.cleanupBudgetTrips += 1
-          if (result.cleanupBudgetLines.length < 5) result.cleanupBudgetLines.push(clip(redactSecrets(line, SECRETS), 500))
-        }
-        if (line.includes('智能体「') && line.includes('失败')) result.packageErrors += 1
-        if (line.includes('[agent-catalog]') && line.includes('失败')) result.catalogErrors += 1
-      }
+      scanFile(path)
     }
   }
-  visit(root)
+  for (const root of roots) {
+    let stat
+    try {
+      stat = statSync(root)
+    } catch {
+      continue
+    }
+    if (stat.isDirectory()) visit(root)
+    else scanFile(root)
+  }
   result.cleanupBudgetScan = result.files > 0 ? 'scanned' : 'no-log-files'
   return result
 }
@@ -1240,13 +1393,21 @@ function observeLanes({ homeDir, remainder, slug, runCardCompletedAt, appLogs })
   }
   const parent = parents[0]
   const parentId = parent.header.id
-  const children = sessions.filter((session) => session.header.parentSession === parentId
-    && session.header.origin === 'subagent'
-    && session.header.delegationDepth === 1)
+  const children = packageChildSessions(sessions, parentId, remainder)
   if (children.length !== 1) {
+    const allDepth1 = sessions.filter((session) => session.header.parentSession === parentId
+      && session.header.origin === 'subagent' && session.header.delegationDepth === 1)
     throw new BlockedError(
-      `identity chain: expected exactly one package child (depth 1) under ${String(parentId)}, found ${String(children.length)}`,
-      { children: children.map((session) => session.header.id) },
+      `identity chain: expected exactly one package child (depth 1) carrying the ${slug} dispatch remainder under ${String(parentId)}, found ${String(children.length)}`,
+      {
+        children: children.map((session) => session.header.id),
+        needle: remainder.trim(),
+        depth1Candidates: allDepth1.map((session) => {
+          const userTexts = session.events.filter((event) => event?.type === 'user/message').map((event) => messageText(event.data))
+          const dispatch = userTexts.find((text) => text.includes('用户请求：')) ?? ''
+          return { id: session.header.id, origin: session.header.origin, depth: session.header.delegationDepth, dispatchExcerpt: clip(dispatch, 300), hasMarker: dispatch.includes('用户请求：'), hasNeedle: userTexts.some((text) => text.includes(remainder.trim())) }
+        }),
+      },
     )
   }
   const child = children[0]
@@ -1339,6 +1500,8 @@ function observeLanes({ homeDir, remainder, slug, runCardCompletedAt, appLogs })
     cleanupBudgetMs: HOST_CLEANUP_BUDGET_MS,
     cleanupBudgetScan: appLogs?.cleanupBudgetScan ?? 'no-log-files',
     cleanupBudgetFiles: appLogs?.files ?? 0,
+    cleanupBudgetRoots: appLogs?.roots ?? [],
+    cleanupBudgetScannedFiles: appLogs?.scannedFiles ?? [],
     cleanupBudgetTrippedInAppLogs: (appLogs?.cleanupBudgetTrips ?? 0) > 0,
     cleanupBudgetLines: appLogs?.cleanupBudgetLines ?? [],
     honestDegradation,
@@ -1392,10 +1555,13 @@ async function run() {
     userDataDir,
   }
 
+  // Relative sample references: the dispatch session root is minted on first
+  // send, so the samples are addressed relative to that root (`samples/...`)
+  // and copied into it right after the first send (placeSamplesInDispatchRoot).
   const prompts = {
-    'typo-check': `@typo-check 检测这个文件夹里的 Word 文档：${sampleDir}`,
-    'code-review': `@code-review 审查这个文件：${sampleCode}`,
-    'task-orch': '@task-orch 把「为市场模块增加离线缓存」拆解为可实施的执行计划，给出依赖、每步验收标准与调度建议。',
+    'typo-check': '@typo-check 检测这个文件夹里的 Word 文档：samples',
+    'code-review': '@code-review 审查这个文件：samples/sample-review.js',
+    'task-orch': '@task-orch 把「为市场模块增加离线缓存」拆解为可实施的执行计划，给出依赖、每步验收标准与调度建议。工作区样例目录：samples（先用 glob/read 查看工作区内容；样例文件不是市场模块代码，计划中的代码事实仍须标注待核实，不得编造项目事实）。',
   }
 
   // Published before launch so a later failure still leaves a usable report.
@@ -1447,6 +1613,7 @@ async function run() {
     runs: progress.runs,
     lane: null,
     modelOutputs: null,
+    dispatchRootChecks: null,
     appLogs: null,
     screenshotDir: options.outDir,
     screenshots,
@@ -1462,14 +1629,22 @@ async function run() {
   await screenshot(appCdp, '00-app-ready.png')
   log(`app ready after ${String(Date.now() - appStartedAt)}ms (cdp ${String(cdpPort)})`)
 
-  const driven = await drive(appCdp, {
+  const driveCtx = {
     timeout: options.timeout,
     replyTimeout: Math.min(PARENT_REPLY_TIMEOUT_MS, options.timeout),
     prompts,
-  })
+    sessionsBaseDir: join(prepared.profileDir, 'workspace-sessions'),
+    stagingSampleDir: sampleDir,
+    sessionRoot: undefined,
+    sessionSampleDir: undefined,
+    sessionDirsBefore: [],
+  }
+  const driven = await drive(appCdp, driveCtx)
 
   const typoRun = driven.runs.find((item) => item.slug === 'typo-check')
-  const appLogs = scanAppLogs(join(userDataDir, 'logs'))
+  // Two channels: the host file logs AND the Electron stdout/stderr capture
+  // (the cleanup-budget trip line is a console.error → app-stdout.log).
+  const appLogs = scanAppLogs([join(userDataDir, 'logs'), join(options.outDir, 'app-stdout.log')])
   const lane = observeLanes({
     homeDir,
     remainder: prompts['typo-check'].replace(/^@typo-check\s+/u, ''),
@@ -1482,24 +1657,37 @@ async function run() {
   // Final model text per package, captured from the session logs for the Step 6
   // human review. `finalTextExcerpt` prefers the package child (depth 1) because
   // the parent may answer "waiting for the child" before the child settles.
+  // All three packages share the dispatch session, so children are attributed by
+  // dispatch remainder (packageChildSessions), and each child must show a
+  // successful workspace-bound read/glob on the sample paths.
   const sessions = loadSessions(homeDir)
+  // The prompts reference the samples relatively (`samples/...`); match that
+  // marker plus the absolute discovered path so either form counts.
+  const samplePaths = ['samples', driveCtx.sessionSampleDir].filter((path) => typeof path === 'string')
+  const dispatchRoot = driveCtx.sessionRoot
   const modelOutputs = {}
+  const dispatchRootChecks = []
+  const sampleAccessFailures = []
   for (const slug of SLUGS) {
     const remainder = prompts[slug].replace(new RegExp(`^@${slug}\\s+`, 'u'), '')
     const parents = findParentSessions(sessions, remainder)
     const parent = parents.length === 1 ? parents[0] : undefined
-    const child = parent === undefined
-      ? undefined
-      : sessions.find((session) => session.header.parentSession === parent.header.id
-        && session.header.origin === 'subagent'
-        && session.header.delegationDepth === 1)
+    const childCandidates = parent === undefined ? [] : packageChildSessions(sessions, parent.header.id, remainder)
+    const child = childCandidates.length === 1 ? childCandidates[0] : undefined
     const parentFinal = parent === undefined ? undefined : lastAssistantText(parent.events)
     const childFinal = child === undefined ? undefined : lastAssistantText(child.events)
     const final = childFinal ?? parentFinal
+    const sampleAccess = child === undefined
+      ? { calls: [], successfulCount: 0, ok: false }
+      : sampleAccessFacts(child, samplePaths)
+    if (!sampleAccess.ok) sampleAccessFailures.push(slug)
+    const headerCwd = typeof parent?.header?.cwd === 'string' ? parent.header.cwd : null
+    dispatchRootChecks.push({ slug, parentSessionId: parent?.header.id ?? null, headerCwd, expectedRoot: dispatchRoot ?? null, ok: headerCwd !== null && dispatchRoot !== undefined && canonicalPath(headerCwd) === canonicalPath(dispatchRoot) })
     modelOutputs[slug] = {
       parentSessionId: parent?.header.id ?? null,
       parentCandidates: parents.length,
       packageChildId: child?.header.id ?? null,
+      packageChildCandidates: childCandidates.length,
       parentRequestHeader: parent === undefined ? null : requestHeaderConfig(parent),
       packageChildRequestHeader: child === undefined ? null : requestHeaderConfig(child),
       finalTextSource: childFinal === undefined ? (parentFinal === undefined ? 'none' : 'parent-final') : 'package-child-final',
@@ -1507,6 +1695,7 @@ async function run() {
       finalTextExcerpt: clip(final?.text ?? '', MODEL_OUTPUT_EXCERPT_CHARS),
       parentFinalTextLength: parentFinal?.text.length ?? 0,
       parentFinalTextExcerpt: clip(parentFinal?.text ?? '', MODEL_OUTPUT_EXCERPT_CHARS),
+      sampleAccess,
     }
   }
 
@@ -1515,14 +1704,21 @@ async function run() {
     if (run.terminalPhase !== 'completed') failures.push(`run ${run.slug} ended ${run.terminalPhase}`)
   }
   if (!lane.dualBlindOk) failures.push(`dual-blind lane criteria not met: ${lane.dualBlindReasons.join('; ')}`)
+  for (const check of dispatchRootChecks) {
+    if (!check.ok) failures.push(`dispatch root ${check.slug}: parent header cwd ${String(check.headerCwd)} is not the sample workspace ${check.expectedRoot}`)
+  }
+  if (sampleAccessFailures.length > 0) {
+    failures.push(`no successful workspace-bound read/glob on the sample paths for: ${sampleAccessFailures.join(', ')} (bash-only access does not count)`)
+  }
   if (appLogs.files === 0) {
-    failures.push(`app log scan is invalid: no log files under ${join(userDataDir, 'logs')}; the cleanup-budget evidence needs a real scan`)
+    failures.push(`app log scan is invalid: no log files under ${appLogs.roots.join(' | ')}; the cleanup-budget evidence needs a real scan`)
   }
 
   facts.outcome = failures.length === 0 ? 'PASS' : 'FAIL'
   facts.finishedAt = new Date().toISOString()
   facts.lane = lane
   facts.modelOutputs = modelOutputs
+  facts.dispatchRootChecks = dispatchRootChecks
   facts.appLogs = appLogs
   facts.errors = failures
   if (failures.length === 0) log('verdict PASS')

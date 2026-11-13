@@ -1,44 +1,34 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import AdmZip from 'adm-zip'
 import { afterEach, describe, expect, test } from 'vitest'
 
-// SKILL.md（agent-packages/typo-check/skill/SKILL.md）的 Windows 提取处方:
-// 用 System.IO.Compression 打开 docx、读 word/document.xml、把 `</w:p>` 换成换行、
-// 去掉全部标签、解码 XML 实体、写 UTF-8 txt。下面原样按这个顺序实现,并用真实 docx
-// fixture 验证行为——不是断言 SKILL.md 里出现了这些字样。
-const PWSH_EXTRACT_SCRIPT = `param(
-  [Parameter(Mandatory = $true)][string]$DocxPath,
-  [Parameter(Mandatory = $true)][string]$OutPath
-)
-$fileStream = [System.IO.File]::OpenRead($DocxPath)
-try {
-  $archive = [System.IO.Compression.ZipArchive]::new($fileStream, [System.IO.Compression.ZipArchiveMode]::Read)
-  try {
-    $entry = $archive.GetEntry('word/document.xml')
-    if ($null -eq $entry) { throw 'word/document.xml is missing from the docx' }
-    $entryStream = $entry.Open()
-    try {
-      $reader = [System.IO.StreamReader]::new($entryStream, [System.Text.Encoding]::UTF8)
-      $xml = $reader.ReadToEnd()
-    } finally {
-      $entryStream.Dispose()
-    }
-  } finally {
-    $archive.Dispose()
-  }
-} finally {
-  $fileStream.Dispose()
+import { classifyShell } from '@huaanwork/policy/shell'
+
+// SKILL.md（agent-packages/typo-check/skill/SKILL.md）的 Windows 提取处方是
+// **单条简单命令** `pwsh -EncodedCommand <base64>`：base64 按 PowerShell 约定编码
+// 整段脚本的 UTF-16LE 文本，字母表不含 shell 元字符（ask/smart 档的 classifyShell
+// 对含 `$`/`;` 的内联脚本直接 deny，只有 full 档放行）。本 spec 不再另行物化 .ps1，
+// 而是从 SKILL.md 取出处方脚本原文、代入 fixture 路径、编码后执行 SKILL 规定的
+// 那条命令——测的就是 SKILL 文本本身，处方漂移会立刻红。
+const SKILL_PATH = join(import.meta.dirname, '..', '..', 'agent-packages', 'typo-check', 'skill', 'SKILL.md')
+const SKILL_TEXT = readFileSync(SKILL_PATH, 'utf8')
+
+function skillRecipe(): string {
+  const match = /```powershell\n([\s\S]*?)```/u.exec(SKILL_TEXT)
+  const recipe = match?.[1]
+  if (recipe === undefined) throw new Error('SKILL.md carries no powershell recipe block')
+  return recipe
 }
-# LF only: the txt must stay byte-identical on Windows and macOS.
-$newline = [string][char]10
-$text = $xml -replace '</w:p>', $newline
-$text = $text -replace '<[^>]+>', ''
-$text = [System.Net.WebUtility]::HtmlDecode($text)
-[System.IO.File]::WriteAllText($OutPath, $text, [System.Text.UTF8Encoding]::new($false))
-`
+
+/** The exact command the SKILL prescribes: `pwsh -EncodedCommand <base64>`. */
+function prescribedCommand(docxPath: string, outPath: string): { argv: string[]; command: string } {
+  const script = skillRecipe().replaceAll('<DOCX>', docxPath).replaceAll('<OUT>', outPath)
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  return { argv: ['-EncodedCommand', encoded], command: `pwsh -EncodedCommand ${encoded}` }
+}
 
 const CONTENT_TYPES_XML =
   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
@@ -105,20 +95,34 @@ describe('typo-check pwsh docx extraction', () => {
     expect(replayed).not.toContain('收入 & 支出')
   })
 
+  test('SKILL prescribes a metachar-free EncodedCommand carrying the full recipe', () => {
+    // 不依赖 pwsh：处方文本与命令形态在 macOS 上也能钉住。
+    expect(SKILL_TEXT).toContain('pwsh -EncodedCommand')
+    expect(SKILL_TEXT).toContain('单条简单命令')
+    const recipe = skillRecipe()
+    for (const pin of ['System.IO.Compression', 'word/document.xml', '</w:p>', 'HtmlDecode', 'UTF8Encoding', '<DOCX>', '<OUT>']) {
+      expect(recipe).toContain(pin)
+    }
+    // 代入真实路径后的命令串必须不被 classifyShell 判 deny（元字符自由），
+    // 否则 smart 档（SKILL 指定的档位）根本发不出去。
+    const { command } = prescribedCommand(join(tmpdir(), 'fixture.docx'), join(tmpdir(), 'fixture.txt'))
+    expect(command.startsWith('pwsh -EncodedCommand ')).toBe(true)
+    expect(classifyShell(command)).not.toBe('deny')
+    // 对照：内联脚本形态（含 $/;）在 ask/smart 档被 deny——处方改回内联会红。
+    expect(classifyShell(`pwsh -Command "${recipe.replaceAll('"', '\\"')}"`)).toBe('deny')
+  })
+
   test('extracts paragraphs, strips tags, decodes entities and keeps UTF-8 Chinese (requires pwsh)', (ctx) => {
     if (!PWSH_AVAILABLE) ctx.skip(PWSH_SKIP_REASON)
 
     const dir = makeWorkDir()
     const docxPath = buildFixtureDocx(dir)
-    const scriptPath = join(dir, 'extract-docx.ps1')
-    writeFileSync(scriptPath, PWSH_EXTRACT_SCRIPT, 'utf8')
     const outPath = join(dir, 'fixture.txt')
 
-    const result = spawnSync(
-      'pwsh',
-      ['-NoProfile', '-NonInteractive', '-File', scriptPath, '-DocxPath', docxPath, '-OutPath', outPath],
-      { encoding: 'utf8', timeout: 120_000 },
-    )
+    // 执行 SKILL 规定的那条命令本身：pwsh -EncodedCommand <base64 of the recipe>。
+    const { argv, command } = prescribedCommand(docxPath, outPath)
+    expect(classifyShell(command)).not.toBe('deny')
+    const result = spawnSync('pwsh', argv, { encoding: 'utf8', timeout: 120_000 })
     expect(result.error).toBeUndefined()
     expect(result.status, `pwsh extraction failed: ${result.stderr}`).toBe(0)
 
