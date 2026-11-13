@@ -292,6 +292,7 @@ describe('agent package tool allow list', () => {
       'glob',
       'grep',
       SHELL,
+      'subagent',
     ])
     expect(composeAgentPackageToolAllowList(manifestWithMode('http'), [], [])).not.toContain('agent_skill_run')
     expect(composeAgentPackageToolAllowList(manifestWithMode('http'), [], ['skill/scripts/echo.mjs'])).toContain('agent_skill_run')
@@ -304,6 +305,22 @@ describe('agent package tool allow list', () => {
     expect(
       composeAgentPackageToolAllowList(manifestWithMode('both'), ['mcp__demo__echo'], ['skill/scripts/echo.mjs']),
     ).not.toContain('call_host_tool')
+  })
+
+  test('includes subagent for both platform shells', () => {
+    const original = process.platform
+    try {
+      Object.defineProperty(process, 'platform', { value: 'darwin' })
+      expect(composeAgentPackageToolAllowList(manifestWithMode('none'), [], [])).toEqual([
+        'read', 'read_file', 'glob', 'grep', 'bash', 'subagent',
+      ])
+      Object.defineProperty(process, 'platform', { value: 'win32' })
+      expect(composeAgentPackageToolAllowList(manifestWithMode('none'), [], [])).toEqual([
+        'read', 'read_file', 'glob', 'grep', 'pwsh', 'subagent',
+      ])
+    } finally {
+      Object.defineProperty(process, 'platform', { value: original })
+    }
   })
 })
 
@@ -725,6 +742,7 @@ describe('agent package turn cleanup', () => {
       ctx: {
         get: (name: string) => (name === 'sandbox' ? passthroughSandbox : undefined),
         huaanworkWorkspaceRoot: { current: workspaceRoot },
+        huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
         huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
         subagents: {
           startActivation: async () => ({
@@ -781,6 +799,7 @@ describe('agent package turn cleanup', () => {
       huaanworkAttachments: attachments,
       huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
       huaanworkAgentPackageRequest: { current: null },
+      huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
       huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async () => ({
@@ -863,6 +882,7 @@ describe('agent package turn cleanup', () => {
       huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
       huaanworkAgentPackageRequest: { current: null },
       huaanworkPackageChildSessions: childSessions,
+      huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
       huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
       subagents: {
         startActivation: async () => ({
@@ -909,6 +929,97 @@ describe('agent package turn cleanup', () => {
     expect(childSessions.size).toBe(0)
   })
 
+  test('binds the turn allow reference for children and clears by reference on cleanup', async () => {
+    const profileDir = makeRoot('agent-package-profile-')
+    const packageDir = join(profileDir, 'agents', 'weekly-report')
+    mkdirSync(packageDir, { recursive: true })
+    writeFileSync(
+      join(packageDir, 'agent.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        slug: 'weekly-report',
+        displayName: '周报助手',
+        description: '把一周工作整理成周报',
+        version: '1.0.0',
+        draftId: 'draft-minimal',
+        createdAt: '2026-10-23T00:00:00.000Z',
+        updatedAt: '2026-10-23T00:00:00.000Z',
+        persona: 'persona.md',
+        skill: null,
+        tools: { mode: 'none' },
+        allowSkills: [],
+      }),
+      'utf8',
+    )
+    writeFileSync(join(packageDir, 'persona.md'), '你是周报助手。', 'utf8')
+    writeFileSync(
+      join(profileDir, 'agents-state.json'),
+      JSON.stringify({ 'local:weekly-report': { source: 'local', enabled: true, installedVersion: '1.0.0' } }),
+      'utf8',
+    )
+
+    const childSessions = new Set<string>()
+    const childAllow = new Map<string, readonly string[]>()
+    // 另一并发回合的条目：不同数组引用，清理绝不能误删。
+    const otherTurnAllow: readonly string[] = ['read']
+    childAllow.set('other-turn-child', otherTurnAllow)
+    const ctx = {
+      huaanworkAttachments: emptyAttachments(),
+      huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
+      huaanworkAgentPackageRequest: { current: null },
+      huaanworkPackageChildSessions: childSessions,
+      huaanworkPackageChildAllow: childAllow,
+      huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
+      subagents: {
+        startActivation: async () => ({
+          childId: 'child',
+          result: Promise.resolve({}),
+          dispose: async () => undefined,
+        }),
+      },
+    }
+    const host = createAgentPackageHost({
+      profileDir,
+      takenSlugs: () => [],
+      createRuntime: async (options) => ({
+        slug: options.manifest.slug,
+        packageDir: options.packageDir,
+        workspaceRoot: options.workspaceRoot,
+        skillScripts: [],
+        runSkillScript: async () => ({ text: '' }),
+      }),
+    })
+    const pkg = await host.findInvocable('weekly-report')
+    const dispatched = await host.dispatch({
+      ctx: ctx as never,
+      sessionId: 'parent-session',
+      pkg: pkg!,
+      remainder: '写周报',
+      resolveParent: async () => ({ id: 'parent-agent' }),
+    })
+
+    const request = ctx.huaanworkAgentPackageRequest.current as {
+      childId: string
+      allow: readonly string[]
+      bindChild(sessionId: string): void
+    } | null
+    expect(request).not.toBeNull()
+    expect(request!.allow).toContain('subagent')
+    // 预留 id、activation 返回 id、late-bind id 都写同一引用。
+    expect(childAllow.get(request!.childId)).toBe(request!.allow)
+    expect(childAllow.get('child')).toBe(request!.allow)
+    request!.bindChild('late-child')
+    expect(childAllow.get('late-child')).toBe(request!.allow)
+
+    await dispatched.afterIdle()
+    expect(childSessions.size).toBe(0)
+    expect(childAllow.has(request!.childId)).toBe(false)
+    expect(childAllow.has('child')).toBe(false)
+    expect(childAllow.has('late-child')).toBe(false)
+    // 跨回合隔离：其他回合的条目原样保留。
+    expect(childAllow.get('other-turn-child')).toBe(otherTurnAllow)
+  })
+
   test('refuses a package whose declared HTTP entry is missing', async () => {
     const profileDir = installHttpPackage()
     rmSync(join(profileDir, 'agents', 'weekly-report', 'tools', 'http', 'server.mjs'))
@@ -919,6 +1030,7 @@ describe('agent package turn cleanup', () => {
     await expect(
       host.dispatch({
         ctx: {
+          huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
           huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
         } as never,
         sessionId: 'parent-session',
@@ -1122,6 +1234,7 @@ describe('agent package catalog damage', () => {
       host.dispatch({
         ctx: {
           huaanworkWorkspaceRoot: { current: makeRoot('agent-package-ws-') },
+          huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
           huaanworkSubagentRuns: createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined }),
           subagents: {
             startActivation: async () => ({
@@ -1231,6 +1344,7 @@ describe('agent package subagent run projection', () => {
       get: () => undefined,
       huaanworkWorkspaceRoot: { current: join(profileDir, 'workspace') },
       huaanworkAgentPackageRequest: { current: null },
+      huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
       huaanworkSubagentRuns: runs,
       subagents: {
         startActivation:
@@ -1341,6 +1455,13 @@ describe('agent package subagent run projection', () => {
     ).rejects.toThrow(/subagent run registry is not initialized/)
   })
 
+  test('dispatch refuses when the lineage allow holder is absent', async () => {
+    const harness = runHarness()
+    // 抹掉 holder（模拟未来重构漏装），其余就绪。
+    delete harness.ctx.huaanworkPackageChildAllow
+    await expect(harness.dispatch('parent-session')).rejects.toThrow(/huaanworkPackageChildAllow/)
+  })
+
   test('cancelling during createRuntime stops the selected late runtime only', async () => {
     const gateA = deferred<AgentPackageTurnRuntime>()
     const gateB = deferred<AgentPackageTurnRuntime>()
@@ -1403,12 +1524,16 @@ describe('agent package subagent run projection', () => {
     const disposalsB: string[] = []
     const stopsA: string[] = []
     const stopsB: string[] = []
+    // 两个 harness 共用一个血缘表:同一进程里的并发回合读写同一 holder。
+    const childAllow = new Map<string, readonly string[]>()
+    const reserved: { a: string | undefined; b: string | undefined } = { a: undefined, b: undefined }
     const first = runHarness({
       createRuntime: async (start) => runtimeFor(start, 'runtime-a'),
       stopRuntime: async (runtime) => {
         stopsA.push(runtime.workspaceRoot)
       },
-      startActivation: () => {
+      startActivation: (spec) => {
+        reserved.a = spec.childId
         activationStartedA.resolve()
         return activationA.promise
       },
@@ -1418,19 +1543,32 @@ describe('agent package subagent run projection', () => {
       stopRuntime: async (runtime) => {
         stopsB.push(runtime.workspaceRoot)
       },
-      startActivation: () => {
+      startActivation: (spec) => {
+        reserved.b = spec.childId
         activationStartedB.resolve()
         return activationB.promise
       },
     })
+    first.ctx.huaanworkPackageChildAllow = childAllow
+    second.ctx.huaanworkPackageChildAllow = childAllow
 
     const dispatchA = first.dispatch('session-a')
     void dispatchA.catch(() => undefined)
     const runA = await firstRunId(first.runs, 'session-a')
     await activationStartedA.promise
+    const requestA = (first.ctx.huaanworkAgentPackageRequest as {
+      current: { childId: string; allow: readonly string[]; bindChild(sessionId: string): void } | null
+    }).current
+    expect(requestA).not.toBeNull()
+    expect(childAllow.get(requestA!.childId)).toBe(requestA!.allow)
     const dispatchB = second.dispatch('session-b')
     const runB = await firstRunId(second.runs, 'session-b')
     await activationStartedB.promise
+    const requestB = (second.ctx.huaanworkAgentPackageRequest as {
+      current: { childId: string; allow: readonly string[] } | null
+    }).current
+    expect(requestB).not.toBeNull()
+    expect(childAllow.get(requestB!.childId)).toBe(requestB!.allow)
 
     // startActivation 仍在途时取消:晚到的 activation 必须 dispose,不得继续运行。
     expect((await first.runs.requestCancel('session-a', runA)).status).toBe('accepted')
@@ -1442,10 +1580,18 @@ describe('agent package subagent run projection', () => {
         disposalsA.push('child-a')
       },
     })
+    // 包装在取消后恢复运行时会补绑实际 id;血缘表必须记同一引用。
+    requestA!.bindChild('child-a')
+    expect(childAllow.get('child-a')).toBe(requestA!.allow)
     await expect(dispatchA).rejects.toThrow(/回合已取消/)
     expect(disposalsA).toEqual(['child-a'])
     expect(stopsA).toHaveLength(1)
     expect(first.runs.get(runA)?.phase).toBe('stopped')
+    // 取消回合的预留 id 与迟到 id 都已清理,并发第二回合的条目原样保留。
+    expect(reserved.a).toBe(requestA!.childId)
+    expect(childAllow.has(requestA!.childId)).toBe(false)
+    expect(childAllow.has('child-a')).toBe(false)
+    expect(childAllow.get(requestB!.childId)).toBe(requestB!.allow)
 
     expect(second.runs.get(runB)?.phase).toBe('starting')
     expect(disposalsB).toHaveLength(0)
@@ -1462,6 +1608,154 @@ describe('agent package subagent run projection', () => {
     await dispatchedB.afterIdle()
     expect(disposalsB).toEqual(['child-b'])
     expect(second.runs.get(runB)?.phase).toBe('completed')
+    // 第二回合自己的清理按引用移除它写过的条目;取消回合早已清空。
+    expect(childAllow.has(requestB!.childId)).toBe(false)
+    expect(childAllow.has('child-b')).toBe(false)
+    expect(childAllow.size).toBe(0)
+  })
+
+  test('a late cleanup from the previous turn never strips the lineage of a turn that reused the session id', async () => {
+    const firstResult = deferred<unknown>()
+    let activationCalls = 0
+    const harness = runHarness({
+      startActivation: async (spec: SubagentActivationSpec) => {
+        activationCalls += 1
+        return {
+          childId: spec.childId ?? 'child',
+          // 首回合的子代理结果由测试控制,第二回合在首回合清理落定之前就已运行。
+          result: activationCalls === 1 ? firstResult.promise : Promise.resolve({ stopReason: 'completed' }),
+          dispose: async () => undefined,
+        }
+      },
+    })
+    const childAllow = new Map<string, readonly string[]>()
+    harness.ctx.huaanworkPackageChildAllow = childAllow
+
+    const firstDispatch = await harness.dispatch('parent-session')
+    const firstRequest = (harness.ctx.huaanworkAgentPackageRequest as {
+      current: { childId: string; allow: readonly string[] } | null
+    }).current
+    expect(firstRequest).not.toBeNull()
+    expect(childAllow.get(firstRequest!.childId)).toBe(firstRequest!.allow)
+
+    // 首回合进入清理:会话预留随即释放,清理等子代理结果落定。
+    const firstIdle = firstDispatch.afterIdle()
+    const secondDispatch = await harness.dispatch('parent-session')
+    const secondRequest = (harness.ctx.huaanworkAgentPackageRequest as {
+      current: { childId: string; allow: readonly string[] } | null
+    }).current
+    expect(secondRequest).not.toBeNull()
+    // 同 sessionId 的新回合拿到新的 allow 数组引用。
+    expect(secondRequest!.allow).not.toBe(firstRequest!.allow)
+    expect(childAllow.get(secondRequest!.childId)).toBe(secondRequest!.allow)
+
+    // 首回合清理落定:只按引用删自己写过的条目,新回合的条目原样保留。
+    firstResult.resolve({ stopReason: 'completed' })
+    await firstIdle
+    expect(childAllow.has(firstRequest!.childId)).toBe(false)
+    expect(childAllow.get(secondRequest!.childId)).toBe(secondRequest!.allow)
+
+    await secondDispatch.afterIdle()
+    expect(childAllow.has(secondRequest!.childId)).toBe(false)
+    expect(childAllow.size).toBe(0)
+  })
+
+  test('N-3: a child outliving the cleanup budget keeps its C5 lineage entry until it terminates', async () => {
+    const result = deferred<unknown>()
+    const childAllow = new Map<string, readonly string[]>()
+    const harness = runHarness({
+      cleanupTimeoutMs: 20,
+      startActivation: async (spec) => ({
+        childId: spec.childId ?? 'child',
+        // 清理期间永不结算:两个预算都耗尽后子会话仍在运行。
+        result: result.promise,
+        dispose: async () => {
+          await delay(60)
+        },
+      }),
+    })
+    harness.ctx.huaanworkPackageChildAllow = childAllow
+    const dispatched = await harness.dispatch('parent-session')
+    const request = (harness.ctx.huaanworkAgentPackageRequest as {
+      current: { childId: string; allow: readonly string[] } | null
+    }).current
+    expect(request).not.toBeNull()
+    const childId = request!.childId
+    const allow = request!.allow
+    expect(childAllow.get(childId)).toBe(allow)
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await dispatched.afterIdle()
+    } finally {
+      errorSpy.mockRestore()
+    }
+
+    // 预算耗尽只释放资源:仍在运行的子会话保留执行期拒绝(C5)。
+    expect(childAllow.get(childId)).toBe(allow)
+
+    result.resolve({ stopReason: 'completed' })
+    await flushMicrotasks(() => !childAllow.has(childId))
+    expect(childAllow.has(childId)).toBe(false)
+  })
+
+  test('N-3: a budget-surviving child that settles late clears only its own lineage reference', async () => {
+    const firstResult = deferred<unknown>()
+    const secondResult = deferred<unknown>()
+    let activationCalls = 0
+    const harness = runHarness({
+      cleanupTimeoutMs: 20,
+      startActivation: async (spec) => {
+        activationCalls += 1
+        const isFirstTurn = activationCalls === 1
+        return {
+          childId: spec.childId ?? 'child',
+          result: isFirstTurn ? firstResult.promise : secondResult.promise,
+          // 首回合 dispose 熬过预算 ⇒ 清理结束时它的子会话仍在运行。
+          dispose: async () => {
+            if (isFirstTurn) await delay(60)
+          },
+        }
+      },
+    })
+    const childAllow = new Map<string, readonly string[]>()
+    harness.ctx.huaanworkPackageChildAllow = childAllow
+
+    const firstDispatch = await harness.dispatch('parent-session')
+    const firstRequest = (harness.ctx.huaanworkAgentPackageRequest as {
+      current: { childId: string; allow: readonly string[] } | null
+    }).current
+    expect(firstRequest).not.toBeNull()
+    expect(childAllow.get(firstRequest!.childId)).toBe(firstRequest!.allow)
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const firstIdle = firstDispatch.afterIdle()
+      // 同 sessionId 的新回合在首回合清理落定之前就已运行,并写入新的 allow 引用。
+      const secondDispatch = await harness.dispatch('parent-session')
+      const secondRequest = (harness.ctx.huaanworkAgentPackageRequest as {
+        current: { childId: string; allow: readonly string[] } | null
+      }).current
+      expect(secondRequest).not.toBeNull()
+      expect(secondRequest!.allow).not.toBe(firstRequest!.allow)
+      expect(childAllow.get(secondRequest!.childId)).toBe(secondRequest!.allow)
+
+      await firstIdle
+      // 首回合预算耗尽:自己的条目延迟保留,新回合的条目不受影响。
+      expect(childAllow.get(firstRequest!.childId)).toBe(firstRequest!.allow)
+      expect(childAllow.get(secondRequest!.childId)).toBe(secondRequest!.allow)
+
+      firstResult.resolve({ stopReason: 'completed' })
+      await flushMicrotasks(() => !childAllow.has(firstRequest!.childId))
+      expect(childAllow.has(firstRequest!.childId)).toBe(false)
+      expect(childAllow.get(secondRequest!.childId)).toBe(secondRequest!.allow)
+
+      secondResult.resolve({ stopReason: 'completed' })
+      await secondDispatch.afterIdle()
+      expect(childAllow.size).toBe(0)
+    } finally {
+      errorSpy.mockRestore()
+    }
   })
 
   test('a deferred runtime stop keeps the selected run stopping until cleanup is confirmed', async () => {

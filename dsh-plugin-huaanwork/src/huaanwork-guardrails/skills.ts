@@ -92,6 +92,8 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   >;
   /** 会话工具附件表;包运行时工具与 MCP 名字按子会话挂载。 */
   huaanworkAttachments?: AttachmentMaps;
+  /** 包回合血缘允许表(C2):孙代收窄继承读父条目、写同引用条目(C4)。 */
+  huaanworkPackageChildAllow?: Map<string, readonly string[]>;
   /** 宿主创建的会话模型绑定表(Task 6 登记);这里只在子会话开始/结束时复制与删除。 */
   huaanworkSessionModels?: Map<string, string>;
   /** 宿主创建的会话可写根表(Task 6 登记);子会话开始/结束时同样复制与删除。 */
@@ -292,17 +294,24 @@ export function apply(ctx: Context): void {
       // 在 await 之前取快照:dispatch 的 finally 会在 run 结束后清空容器。
       const pkg = ctx.huaanworkAgentPackageRequest?.current;
       const current = ctx.huaanworkAgentRequest?.current;
+      // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写。
+      // 事件载荷没有 parent；父会话只取这次 start 的 parent，缺省即无父会话。
+      const parentFromCall = sessionIdOf(parentFromStartArgs(args));
+      // 血缘条目与父会话同在 await 之前取快照。`current` 是进程级 legacy marker，可能属于
+      // 另一会话的在途 `@agent` 回合；本次派发的父会话已有血缘条目时，血缘条目是权威的
+      // (C4 与 activation 路径同形)，不能被那个回合的 allow 求交、也不得因此跳过收窄。
+      const inherited =
+        parentFromCall === undefined ? undefined : ctx.huaanworkPackageChildAllow?.get(parentFromCall);
+      const legacyApplies = current !== undefined && inherited === undefined;
       try {
-        if (current) {
+        if (legacyApplies && current) {
           if (!current.persona || current.persona.trim() === "") {
             throw new Error("智能体人设为空");
           }
         }
-        // 调用形态以探针 3 核实的 (name, request) 签名为准（dispatchAt 显式传 parent/signal），直通不改写。
-        // 事件载荷没有 parent；父会话只取这次 start 的 parent，缺省即无父会话。
-        const parentFromCall = sessionIdOf(parentFromStartArgs(args));
         const run: any = await startParent.run(parentFromCall, () => original(...args));
-        if (current && run?.localAgent) {
+        let packageApplied = false;
+        if (legacyApplies && current && run?.localAgent) {
           const tools = run.localAgent.ctx?.get?.("tools");
           const schemas = tools?.schemas?.() ?? [];
           const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
@@ -313,6 +322,7 @@ export function apply(ctx: Context): void {
         // started by any other session while this turn is in flight keeps its own tools
         // and attachments instead of inheriting this package's runtime.
         if (pkg && run?.localAgent && parentFromCall !== undefined && pkg.parentSessionId === parentFromCall) {
+          packageApplied = true;
           // header.id 是真实子会话 id;某些 provider 只填 agent/session id,故再回落一次。
           const childSessionId =
             sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
@@ -336,6 +346,26 @@ export function apply(ctx: Context): void {
           const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
           const allow = pkg.allow.filter((name) => existing.includes(name));
           tools?.restrict?.({ allow });
+        }
+        // 血缘分支(C4,start 旧签名回落):与 activation 路径同形。
+        // C4 加固:无可解析 childId 先 dispose 再抛,与 activation 路径同形。
+        if (!packageApplied && run?.localAgent && parentFromCall !== undefined && inherited !== undefined) {
+          const childSessionId =
+            sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
+          if (childSessionId === undefined) {
+            try {
+              await run?.dispose?.();
+            } catch {
+              // 释放失败不能顶替不一致错误,也不能留下未处理的 rejection。
+            }
+            throw new Error("subagent lineage child id missing");
+          }
+          const tools = run.localAgent.ctx?.get?.("tools");
+          const schemas = tools?.schemas?.() ?? [];
+          const existing = schemas.flatMap((s: { name?: string }) => (s.name ? [s.name] : []));
+          const allow = inherited.filter((name) => existing.includes(name));
+          tools?.restrict?.({ allow });
+          ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
         }
         if (run?.localAgent) {
           consumePendingSpawn(run.localAgent);
@@ -454,6 +484,36 @@ export function apply(ctx: Context): void {
           const existing = schemas.flatMap((schema) => (schema.name ? [schema.name] : []));
           const allow = legacy.allow.filter((name) => existing.includes(name));
           tools?.restrict?.({ allow });
+        }
+        // 血缘分支(C4):本次 activation 未命中包请求与 legacy,且父会话在血缘表中
+        // ⇒ 孙代按 继承allow ∩ schemas 收窄,并写同引用条目供曾孙代继续继承。
+        // 不挂包运行时附件(v1);allow ∩ schemas 自然滤掉未挂载的运行时工具名。
+        if (
+          !packageApplied &&
+          legacy === undefined &&
+          run !== undefined &&
+          parentFromCall !== undefined
+        ) {
+          const inherited = ctx.huaanworkPackageChildAllow?.get(parentFromCall);
+          if (inherited !== undefined) {
+            // C4 加固:血缘子会话无可解析 id 必须 fail-closed,不能静默保留基线工具
+            // (mainstream 不可达:上游契约保证 childId)。与 parent-mismatch 同形。
+            if (childSessionId === undefined) {
+              try {
+                await run?.dispose?.();
+              } catch {
+                // 释放失败不能顶替不一致错误,也不能留下未处理 rejection。
+              }
+              throw new Error("subagent lineage child id missing");
+            }
+            const childAgent = ctx.agents?.get?.(childSessionId) ?? run.localAgent;
+            const tools = childAgent?.ctx?.get?.("tools");
+            const schemas = tools?.schemas?.() ?? [];
+            const existing = schemas.flatMap((schema) => (schema.name ? [schema.name] : []));
+            const allow = inherited.filter((name) => existing.includes(name));
+            tools?.restrict?.({ allow });
+            ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
+          }
         }
         if (run?.localAgent) {
           consumePendingSpawn(run.localAgent);

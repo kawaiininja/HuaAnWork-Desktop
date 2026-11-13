@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "slug": "task-orch",
+  "displayName": "任务编排",
+  "description": "把复杂任务拆解为可实施的执行计划：子任务依赖分析、每步输入产出与验收标准、顺序与并行建议、周期任务的 cron/interval 调度建议。只出计划，不执行。用 @task-orch 调用。",
+  "version": "1.0.0",
+  "draftId": "00000000-0000-4000-8000-000000000103",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "updatedAt": "2026-11-11T00:00:00.000Z",
+  "persona": "persona.md",
+  "skill": { "entry": "skill/SKILL.md", "summary": "复杂任务拆解与可实施执行计划顾问" },
+  "tools": { "mode": "none" },
+  "allowSkills": []
+}

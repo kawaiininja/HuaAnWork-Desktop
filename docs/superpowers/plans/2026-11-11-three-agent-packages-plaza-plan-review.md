@@ -39,7 +39,7 @@
   - `/Users/amonmiao/Downloads/cursor/智能办公平台/错别字检测智能体`
   - `/Users/amonmiao/Downloads/cursor/智能办公平台/代码审查智能体`
   - `/Users/amonmiao/Downloads/cursor/智能办公平台/任务编排智能体`
-  
+
   若直接在 `~/Downloads/cursor` 下执行 `tar -C`，系统会因找不到目标目录而抛出 `Cannot stat: No such file or directory` 并退出（Exit Code 1），导致整个自动化流程中断；同时 Step 4 删除命令作用于空路径，原目录无法被正常清理。
 - **修复要求**：
   将设计规格 §8.1 与实施计划 Task 13 中的路径统一修正为真实相对路径或绝对路径：
@@ -59,7 +59,7 @@
   - `typo-check.json`
   - `code-review.json`
   - `task-orch.json`
-  
+
   根据 `agent-catalog-server` 的校验规则，任何同名旧 tool 条目在重新提交包时会强行抛出 HTTP 409 `legacy-conflict` 错误拒绝发布。计划将正式上架完全排除在实施范围之外（作为 owner 运维动作），导致**自动化实施完毕、原文件夹删除后，用户在正式使用的 HuaAnWork 智能体广场中根本看不到这 3 个智能体**，业务功能发生断档。
 - **修复要求**：
   计划中必须追加 **Task 14（生产上架与正式发布闭环）** 或在 Task 9/13 之间增加正式生产发布流程指引：

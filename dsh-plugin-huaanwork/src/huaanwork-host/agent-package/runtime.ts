@@ -153,7 +153,9 @@ export async function composeAgentPackagePersona(
 /**
  * Build the tool names the package subagent may use.
  *
- * Base tools are `read`/`read_file`/`glob`/`grep` plus the platform shell.
+ * Base tools are `read`/`read_file`/`glob`/`grep` plus the platform shell and
+ * `subagent` (a harness-native tool; grandchild narrowing is enforced by the C4
+ * lineage branch in `skills.ts`, see spec §4.2 C4).
  * `agent_skill_run` appears only when the package declares skill scripts,
  * `agent_http` only for HTTP packages, and MCP tool names only for MCP packages.
  * `call_host_tool` is never included.
@@ -174,6 +176,7 @@ export function composeAgentPackageToolAllowList(
     'glob',
     'grep',
     process.platform === 'win32' ? 'pwsh' : 'bash',
+    'subagent',
   ])
   if (skillScripts.length > 0) allow.add('agent_skill_run')
   const mode = manifest.tools.mode

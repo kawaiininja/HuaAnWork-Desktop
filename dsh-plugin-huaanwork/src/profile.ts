@@ -109,6 +109,16 @@ const DESKTOP_WINDOWS_PWSH_SANDBOX_ROW_ID = 'desktop-windows-pwsh-sandbox'
 const DESKTOP_WINDOWS_PWSH_SANDBOX_PACKAGE = `${DESKTOP_PACKAGE_NAME}/windows-pwsh-sandbox`
 /** Upstream Web rows that exist only to send Desktop product analytics to DeepSeek. */
 export const UPSTREAM_PRODUCT_ANALYTICS_ROW_IDS = ['desktop-product-telemetry', 'product-analytics'] as const
+/**
+ * Product default for the delegation-depth cap (`subagent.maxDepth`).
+ *
+ * A shipped agent package runs as a child agent at depth 1 and dispatches its
+ * lane subagents at depth 2; upstream's default of 1 rejects that dispatch with
+ * `SubagentDepthError`. The row composes after the bundle layers and ahead of
+ * the profile and machine-wide layers, so a saved Desktop value replaces it
+ * rather than being shadowed; bundle-level `subagent` config is replaced, never merged.
+ */
+const DESKTOP_SUBAGENT_MAX_DEPTH = 2
 const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'
 const DEFAULT_DESKTOP_PORT = DESKTOP_DEFAULT_WEB_PORT
 const DESKTOP_WEB_SERVER_ROW_ID = 'desktop-webserver'
@@ -1524,6 +1534,10 @@ export function prepareDesktopProfile(
   }
   const ordinary = filterMarketProviderPatches([
     ...filteredBundles.patches,
+    // Product default delegation depth (see DESKTOP_SUBAGENT_MAX_DEPTH). Ahead of
+    // the profile and home layers on purpose: a patch row replaces the whole
+    // config, so a later default would shadow every value the user saved.
+    { id: 'subagent', config: { maxDepth: DESKTOP_SUBAGENT_MAX_DEPTH } },
     ...providerPatches,
     ...filteredProfile.patches,
     ...filteredHome.patches,
@@ -1579,6 +1593,11 @@ export function prepareDesktopProfile(
     // jobs/tool-jobs 硬锁定下该参数可见必败（收口裁定，spike §4.6）。
     { id: 'tool-fs', disabled: false },
     { id: 'tool-fs-search', disabled: false },
+    // 委派工具:web-app overlay 关闭宿主平面的 tool-subagent 行,而桌面会话从不挂载
+    // standard preset(委派组随 preset 提供)⇒ 若不复挂,父会话与包子会话都没有
+    // `subagent` 工具,包 lane 派发不可达(2026-11-13 owner 裁定)。仅翻回 `subagent`;
+    // fork/control/list-agents 保持关闭。
+    { id: 'tool-subagent', disabled: false },
     process.platform === 'win32'
       ? { id: 'tool-pwsh', disabled: false, config: { enableRunInBackground: false } }
       : { id: 'tool-bash', disabled: false, config: { enableRunInBackground: false } },
@@ -1639,6 +1658,22 @@ export function prepareDesktopProfile(
   }
   assertHuaanworkRowIdsHit(rows)
   assertPtcPresetPresentation(rows)
+  // I3: subagent.maxDepth 字段级产品默认。上游 applyEntryPatches 对 config 整条替换,
+  // 用户只存同族字段时会丢弱默认行、回落 schema 默认 1。仅在 maxDepth 缺席时补 2,
+  // 保留用户已写的每个字段。门控:config editor 的 pending-write 校验(hooks.profilePatches)
+  // 必须跳过——其 fail-closed 判据(@deepseek-ai/dsh-config-editor 的 ConfigEditor.edit
+  // pending-write 校验)要求组合 config 逐字等于待写 raw config,补默认会让清除写入被判
+  // "overridden by a home patch"。真实 boot/HMR/包操作才应用。
+  if (hooks.profilePatches === undefined) {
+    const subagentRow = rows.get('subagent')
+    const subagentConfig = rowConfig(subagentRow)
+    if (subagentRow !== undefined && subagentConfig.maxDepth === undefined) {
+      const config = { ...subagentConfig, maxDepth: DESKTOP_SUBAGENT_MAX_DEPTH }
+      patches.push({ id: 'subagent', config })
+      // Keep the lookup map aligned with `patches` so later consumers of `rows` see the injected default.
+      rows.set('subagent', { ...subagentRow, config })
+    }
+  }
   const settings = rows.get('settings')
   if (settings?.name !== SETTINGS_PACKAGE) {
     throw new Error(`${BIN_NAME}: desktop profile must use ${SETTINGS_PACKAGE} in the settings row`)

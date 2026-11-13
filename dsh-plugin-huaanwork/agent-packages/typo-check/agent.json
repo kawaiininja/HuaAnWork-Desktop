@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "slug": "typo-check",
+  "displayName": "错别字检测",
+  "description": "对指定文件夹中的 Word 文档做错别字与用语规范检测：两个独立子代理背靠背双盲检测，主代理仲裁分歧，输出带行号定位与置信度的报告。用 @typo-check 调用。",
+  "version": "1.0.0",
+  "draftId": "00000000-0000-4000-8000-000000000101",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "updatedAt": "2026-11-11T00:00:00.000Z",
+  "persona": "persona.md",
+  "skill": { "entry": "skill/SKILL.md", "summary": "Word 文档错别字双盲检测与仲裁报告" },
+  "tools": { "mode": "none" },
+  "allowSkills": []
+}

@@ -929,6 +929,88 @@ test("attached mcp tools allow for a package runtime child and still ask for a n
   }
 });
 
+test("lineage sessions are denied out-of-allow tools at execute time even before schema narrowing", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
+  const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-policy-lineage-"));
+  try {
+    writeFileSync(join(profileDir, "huaanwork-settings.json"), JSON.stringify({ guard_mode: "smart" }), "utf8");
+    const childAllow = new Map<string, readonly string[]>([
+      ["grandchild", ["read", "read_file", "glob", "grep", "bash", "subagent"]],
+      ["pkg-child", ["read", "read_file", "glob", "grep", "bash", "subagent"]],
+    ]);
+
+    let preExecute: PreExecute | undefined;
+    let guard:
+      | ((execution: {
+          name: string;
+          arguments: Record<string, unknown>;
+          agent?: { id?: string; session?: { id?: string } };
+          callId?: string;
+        }) => string | undefined)
+      | undefined;
+
+    apply({
+      huaanworkWorkspaceRoot: { current: process.cwd() },
+      huaanworkProfileDir: profileDir,
+      huaanworkAttachments: emptyAttachments(),
+      huaanworkPackageChildSessions: new Set(["pkg-child"]),
+      huaanworkPackageChildAllow: childAllow,
+      on(event: string, listener: PreExecute) {
+        if (event === "tools/pre-execute") preExecute = listener;
+      },
+      tools: {
+        guard(listener: typeof guard) {
+          guard = listener;
+          return () => undefined;
+        },
+      },
+    });
+
+    const call = (sessionId: string, name: string, callId: string) => ({
+      name,
+      arguments: {},
+      agent: { session: { id: sessionId } },
+      callId,
+    });
+
+    // 血缘会话 allow 内工具：血缘层不拦，落到常规策略判定（glob 无路径参数在 smart 档
+    // 本就 allow；read 需工作区内真实路径，空参会被路径越界拒绝，故不用 read 做放行样例）。
+    assert.deepEqual(
+      await preExecute?.(call("grandchild", "glob", "g-1"), async () => ({ kind: "allow" })),
+      { kind: "allow" },
+    );
+    // 血缘会话 allow 外工具：即使 schemas 尚未收窄，执行期也拒绝（首步时序窗封死）。
+    const writeCall = call("grandchild", "write", "g-2");
+    assert.deepEqual(await preExecute?.(writeCall, async () => ({ kind: "allow" })), {
+      kind: "deny",
+      reason: POLICY("智能体包链路会话不允许使用工具 write"),
+    });
+    assert.equal(guard?.(writeCall), GUARD("智能体包链路会话不允许使用工具 write"));
+    // 直接包子会话同样受强制（有意的安全收紧，spec §4.3）。
+    const hostCall = call("pkg-child", "call_host_tool", "p-1");
+    assert.deepEqual(await preExecute?.(hostCall, async () => ({ kind: "allow" })), {
+      kind: "deny",
+      reason: POLICY("智能体包链路会话不允许使用工具 call_host_tool"),
+    });
+    // 普通会话不在血缘表：git_push 保持 smart 档原有 ask（git_push 不检查参数，空参即
+    // ask；write 空参会被路径越界拒绝，无法体现 ask 基线，故用 git_push）。
+    assert.deepEqual(
+      await preExecute?.(call("normal-session", "git_push", "n-1"), async () => ({ kind: "allow" })),
+      { kind: "ask" },
+    );
+    // 清理后同一会话回到普通询问：标志不是永久的。
+    // 注意：此处手工 delete 只验证 policy 读侧语义（条目缺席 ⇒ 回落基线）；
+    // 生命周期驱动的真实清理证据在 Task 2 Step 6（取消/迟到/幂等/id 复用场景），不以此冒充。
+    childAllow.delete("grandchild");
+    assert.deepEqual(
+      await preExecute?.(call("grandchild", "git_push", "g-3"), async () => ({ kind: "allow" })),
+      { kind: "ask" },
+    );
+  } finally {
+    rmSync(profileDir, { recursive: true, force: true });
+  }
+});
+
 test("re-created attachments maps are empty (reboot contract)", () => {
   const maps = emptyAttachments();
   attachHostTool(maps, "s", "pdf-extract");

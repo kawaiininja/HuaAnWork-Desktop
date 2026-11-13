@@ -4,7 +4,7 @@
 
 **Goal:** 把 typo-check / code-review / task-orch 三个完全 LLM 化的智能体包经 M2 签名链路接入智能体广场，并为此完成「包允许 subagent 派发 + 孙代工具收窄继承」运行时扩展。
 
-**Architecture:** 运行时扩展只改 huaanwork 自有五个文件（C1 允许名单、C2 血缘 holder、C3 绑定/清理、C4 孙代收窄、C5 执行期强制），不改上游子模块与 manifest schema。三个包源文件落 `dsh-plugin-huaanwork/agent-packages/{slug}/`，规则全部内联 SKILL.md；播种脚本写入隔离 profile，验证脚本走「隔离 catalog + 一次性开发密钥 + admin CLI 签名 + 广场卡断言 + 安装验签」，真机走查用 CDP 驱动最新构建。原目录本里程碑只备份并登记延后删除项（R7：删除等生产上架稳定后）；生产上架只产出 runbook 指引（R6），动作本身是 owner 运维。
+**Architecture:** 运行时扩展只改 huaanwork 自有五个文件（C1 允许名单、C2 血缘 holder、C3 绑定/清理、C4 孙代收窄、C5 执行期强制），不改上游子模块与 manifest schema；另按 R8 在 huaanwork 自有配置/profile 面注入产品默认 `maxDepth: 2`（Task 0 spike 确认接入点，上游默认 1 会挡住 lane 派发）。三个包源文件落 `dsh-plugin-huaanwork/agent-packages/{slug}/`，规则全部内联 SKILL.md；播种脚本写入隔离 profile，验证脚本走「隔离 catalog + 一次性开发密钥 + admin CLI 签名 + 广场卡断言 + 安装验签」，真机走查用 CDP 驱动最新构建（前置：有效 maxDepth ≥ 2、隔离 profile 显式 smart 档）。原目录本里程碑只备份并登记延后删除项（R7：删除等生产上架稳定后）；生产上架只产出 runbook 指引（R6），动作本身是 owner 运维。
 
 **Tech Stack:** TypeScript（Cordis host/client）、vitest、Node `--experimental-transform-types` 脚本（M2 验收先例）、Ed25519 签名（`@huaanwork/catalog-signing`）、Electron + CDP 真机走查。
 
@@ -24,7 +24,9 @@
 - Windows 无第二台真机 ⇒ 真机项记 BLOCKED（R-ACCEPT-1 豁免先例），不声称跨机器通过；pwsh 提取与 win32 allow 形态做单元测试。
 - 诚实记录：CI 绿 ≠ 真机；BLOCKED 项如实登记；`verify:aa` 并发竞态为已登记既有 flaky，失败时隔离重跑并记录。
 - **能力披露口径订正（spec §5.0/§7.3 已于 2026-11-12 同步订正，实施按本条执行）**：签名广场包**没有**安装/启用确认对话框——安装 = 广场卡直接「下载」按钮，启用 = 我的智能体页直接「启用」开关。实际披露面是**详情对话框**：未安装卡只显示包信息 + `INSTALL_DETAIL_NOTICE`（"安装后可查看签名与文件清单"）；已安装卡显示发布状态/签名（keyId/签名时间/槽位/验签结果：通过）/人设/技能/工具（`tools.mode:"none"` ⇒ "无"）/文件 digest 清单 + `PACKAGE_SANDBOX_WARNING`（"脚本在本机沙箱中运行；沙箱只限制写，读取文件和网络不受限制。"）。验证断言按此真实形态写，**不伪造对话框测试**；此订正记入证据文档。
-- **嵌套 lane 无运行卡**：孙代 subagent 没有 Host runId，不产生 `.subagent-run-card`；真机走查观测 lane 数量经 zstd 会话日志的 subagent tool/call 计数，不靠运行卡。
+- **嵌套 lane 无运行卡**：孙代 subagent 没有 Host runId，不产生 `.subagent-run-card`；真机走查验收 lane 经 zstd 会话日志的**确定性身份链（会话头 parentSession/origin/delegationDepth）+ 不同 callId 的非错误结果**，不靠运行卡、不靠文本搜索、不靠调用计数（终审 N-4）。
+- **递归深度产品默认（owner 裁定 R8，2026-11-12 复审 N-1）**：上游 maxDepth 默认 `1` 会挡住包子会话（深度 1）派发 lane（深度 2）——`SubagentDepthError` + 系统提示抑制，fake 单测发现不了。**Task 0 spike 先行**（实测深度错误 + 确认无侵入注入点 + ask 档 bash 判定，结论落证据文档），随后注入产品默认 `maxDepth: 2`（huaanwork 自有配置/profile 面，上游零修改，开箱即用）并补回归钉；Task 12 前置断言有效 maxDepth ≥ 2（不满足 ⇒ BLOCKED exit 3）。SKILL.md 深度不足/派发失败必须如实披露「已降级为单会话多轮自审」，严禁伪造双盲。
+- **typo-check 档位依赖（owner 裁定 R9，2026-11-12 复审 N-2 补强口径；2026-11-14 qwen4 复审 Minor #2 订正）**：ask 档（产品默认）下包子会话 bash/pwsh **必然被拒**（guard 缝 deny，无审批界面）——单条简单命令约束只在 smart 档有意义，不能解决 ask 档拦截。Task 12 隔离 profile 显式写 `guard_mode: "smart"` 并记入 facts；typo-check SKILL.md 约束单条简单命令（无 `&&`/管道，提取与清理不用重定向；仅第 6 步用户明确要求落盘报告时允许 macOS/Linux `bash` 单次 `>` 重定向或 Windows `pwsh` 单条简单命令写工作区内路径，被 ask 档或 smart 档元字符拦截回退对话并如实告知）、清理用单文件删除或不清理并说明临时目录位置、提取被拒时如实告知用户切 smart 档，不伪造提取结果。code-review/task-orch 不用 bash，不受影响。
 
 ## File Structure
 
@@ -35,17 +37,135 @@
 | `dsh-plugin-huaanwork/src/huaanwork-host/agent-package/host.ts` | C3：bindChild 写血缘表、releaseChildBindings 按引用清理 |
 | `dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts` | C4：start/startActivation 孙代收窄+传递绑定 |
 | `dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts` | C5：pre-execute/guard 血缘越权拒绝 |
+| 产品默认深度注入点（Task 0 spike 确认，R8） | huaanwork 自有 profile/配置面注入 `maxDepth: 2` + 开箱有效值回归钉（上游零修改） |
 | `dsh-plugin-huaanwork/agent-packages/{typo-check,code-review,task-orch}/{agent.json,persona.md,skill/SKILL.md}` | 三包源文件（规则内联） |
 | `dsh-plugin-huaanwork/scripts/seed-agent-packages.mjs` | 播种：源文件 → 隔离 profile（store API） |
 | `dsh-plugin-huaanwork/scripts/verify-agent-packages-plaza.mjs` | 发布验证：409 负例 + 签名链路 + 广场断言 + 安装验签 |
 | `dsh-plugin-huaanwork/scripts/huaanwork-accept-three-packages.mjs` | 真机走查：CDP 驱动广场/安装/启用/三包对话 |
 | `dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-runtime.spec.ts` | C1 既有测试扩展 + C3 派发血缘测试 |
-| `dsh-plugin-huaanwork/tests/huaanwork-guardrails/package-subagent-lineage.spec.ts` | C4 八项矩阵（新文件） |
+| `dsh-plugin-huaanwork/tests/huaanwork-guardrails/package-subagent-lineage.spec.ts` | C4 八项矩阵 + 首步捕获 2b（新文件） |
 | `dsh-plugin-huaanwork/tests/huaanwork-guardrails/policy.cordis.spec.ts` | C5 执行期强制测试 |
 | `dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-sources.spec.ts` | 三包 manifest/预算/内容钉（新文件） |
 | `dsh-plugin-huaanwork/tests/huaanwork-host/seed-agent-packages.spec.ts` | 播种脚本自测（新文件） |
 | `docs/evidence/2026-11-11-three-agent-packages.md` | 逐项命令/退出码/截图指针 |
 | `docs/huaanwork-three-agent-packages-release.md` | 生产上架 runbook 指引（R6，Task 14；只指向 M2 runbook，不执行生产动作） |
+
+---
+
+### Task 0: Spike + 产品默认递归深度注入（R8；复审进入条件，先于 Task 1–14）
+
+**Files:**
+- Scratch（不提交）: `/tmp/typo-plaza-spike/` 下的一次性测量脚本
+- Modify: spike 确认的注入点（huaanwork 自有 profile/配置面，**上游零修改**）
+- Test: 注入点对应的既有 spec（开箱有效 maxDepth = 2 回归钉）
+- Create: `docs/evidence/2026-11-11-three-agent-packages.md`（Task 0 节；Task 10 起追加后续节）
+
+**Interfaces:**
+- Consumes: 上游**真实**函数 `resolveChildDepth`/`delegationDepthOf`/`SubagentDepthError`——**经 workspace 安装的运行时包 `@deepseek-ai/dsh-subagent` 导入**（包入口重导出这三个符号；源码锚点 `deepseek-harness/packages/subagent/subagent/src/child-agent.ts:32-58`、`depth.ts:28-36`、`index.ts:113,121-122`）。**不得直接 import 子模块 TS 源码**：`error.ts` 带运行时依赖 `@deepseek-ai/dsh-llm`，子模块外裸 Node 解析必失败（终审 P0-1，已实测复现 ERR_MODULE_NOT_FOUND）。`SubagentRuntime.Config.maxDepth` 默认值（`subagent/src/index.ts:196`）、`resolveMaxDepth`（:242-248）；huaanwork-policy 真实 `decide`/guard 判定（`packages/huaanwork-policy/src/decide.ts:195-235`）。
+- Produces: ① N-1/N-2 实测结论（证据文档，复审进入条件 1）；② 产品默认 `maxDepth: 2` 注入 + 回归钉（R8）；③ **确认的注入点与有效值读取路径**——Task 12 `requireMaxDepth()` 预检按此读取。
+
+**决策门**：若不存在 huaanwork 自有的无侵入接入点 ⇒ BLOCKED 报 owner 裁定，绝不改上游子模块，不继续 Task 1–14。**用户设置保留条件门（终审 P2 条件项）**：R8 是「产品默认」——若选 profile/Host 默认值路线，必须实测并钉住「用户设置缺席 → 2、已有用户值 → 保留用户值」；若只能选工具级固定覆盖（候选 3，绕过 Host 设置、用户无法改），**不得静默当作普通默认值**，须把覆盖语义与全局影响报 owner 单独裁定后再继续。
+
+- [ ] **Step 1: N-1 机制实测（真实上游函数，非 fake 逻辑，无需模型）**
+
+经 workspace 包导入（终审 P0-1 修正接线；此形态已实测 PASS）。Run: `corepack yarn workspace dsh-plugin-huaanwork exec node --input-type=module -e "<下列脚本>"`，用最小 parent 形态（`{ options: { subagentDepth: 1 }, session: { header: {} } }`）断言：
+
+```js
+import { resolveChildDepth, SubagentDepthError, delegationDepthOf } from '@deepseek-ai/dsh-subagent'
+import assert from 'node:assert'
+
+const pkgChild = { options: { subagentDepth: 1 }, session: { header: {} } }  // 包子会话深度 1
+const lane = { options: { subagentDepth: 2 }, session: { header: {} } }      // lane 深度 2
+
+assert.equal(delegationDepthOf(pkgChild), 1)
+// 默认 cap=1：包子会话派 lane ⇒ 深度 2 > 1，抛 SubagentDepthError（N-1 机制）
+assert.throws(() => resolveChildDepth(pkgChild, 1), (e) => e instanceof SubagentDepthError && e.attemptedDepth === 2 && e.maxDepth === 1)
+// R8 cap=2：包子会话派 lane 放行；lane 再派曾孙 ⇒ 深度 3 > 2 拒绝（天然封死嵌套）
+assert.equal(resolveChildDepth(pkgChild, 2), 2)
+assert.throws(() => resolveChildDepth(lane, 2), (e) => e instanceof SubagentDepthError && e.attemptedDepth === 3)
+console.log('depth mechanism verified')
+```
+
+同时记录三条 grep 证据（命令 + 命中数）：① bundle 的 tool-subagent 挂载配置不含 maxDepth（`dsh-plugin-huaanwork/node_modules/@deepseek-ai/dsh-base/cordis.patch.yml` 的 tool-subagent 段）；② `dsh-plugin-huaanwork/src` 内 maxDepth 覆盖 = 0；③ 上游 Config 默认值行（`subagent/src/index.ts:196` `.default(1)`）。
+
+- [ ] **Step 2: 确认 maxDepth: 2 的无侵入注入点（spike 核心）**
+
+候选（按优先级核查，记录每项的生效机制与侵入性）：
+1. **在 `dsh-plugin-huaanwork/src/profile.ts` 的 `patches` 数组新增一行**（不是改已有行：该文件目前没有 subagent 条目。插件 id 是 `subagent`，不是 `subagents`；本体在 `node_modules/@deepseek-ai/dsh-base/cordis.patch.yml` 的 `id: subagent`，且没有 `maxDepth`）。写法与同数组里的 `goal`、`tool-bash` 相同：
+
+```ts
+{ id: 'subagent', config: { maxDepth: 2 } },
+```
+
+`maxDepth` 是 volatile，schema 默认 `1`（`subagent/src/index.ts:196`）。须实测：用户设置缺席时 `this.config.maxDepth.get()` 为 `2`；已有用户值时保留用户值。用户覆盖在 profile 配置层，不在 `huaanwork-settings.json`，也不在 `dirname(homeDir)/settings.json`（那是模型地址与密钥）。
+2. **Host 设置存储默认值**：profile 初始化时写 `subagent.maxDepth: 2`（设置 UI 的 Host `subagent` 设置段，`ui-settings-subagent/src/client/subagent-limits-card-controller.ts:46-48`）。仅当候选 1 的 volatile 实测不成立时评估。
+3. **tool-subagent 工具级 maxDepth**（显式工具限制，`resolveMaxDepth` 直接返回，绕过 Host 设置）：仅当 1/2 不可行时评估，注意其挂载面是否 huaanwork 自有。不得静默当作普通默认值。
+
+约束：注入点必须是 huaanwork 自有面；若只能改 vendored 资产（`node_modules/@deepseek-ai/dsh-base/cordis.patch.yml`），须走 `patches/` 机制并显式记录成本，不得静默改 node_modules；绝不改 `deepseek-harness/`。记录选定接入点、理由、以及**与运行时 `get()` 同一条的有效值读取路径**（供 Task 12 预检）。Task 12 的 `requireMaxDepth` 在该路径写入证据之前保持占位，禁止读 `settings.json`。
+
+- [ ] **Step 3: N-2 ask 档 bash 判定实测（真实 policy 代码）**
+
+Run: `corepack yarn workspace dsh-plugin-huaanwork exec node --input-type=module -e "<下列脚本>"`。本脚本按 macOS（工具名 `bash`、参数 `command`）；Windows 上把工具名改为 `pwsh`。重定向 `>` 不在元字符集（`| & ; $` 与反引号）里，复合命令样例用 `&&`。
+
+```js
+import assert from 'node:assert'
+import {
+  preExecuteExplained,
+  guardExplained,
+  REASON_NEEDS_APPROVAL,
+  REASON_SHELL_METACHAR,
+} from '@huaanwork/policy'
+
+const textutil = {
+  name: 'bash',
+  args: { command: 'textutil -convert txt -output /tmp/x.txt /tmp/x.docx' },
+  workspaceRoot: '/tmp',
+}
+const compound = {
+  name: 'bash',
+  args: { command: 'textutil -convert txt -output /tmp/x.txt /tmp/x.docx && rm /tmp/x.txt' },
+  workspaceRoot: '/tmp',
+}
+
+const askPre = preExecuteExplained(textutil, 'ask')
+const askGuard = guardExplained(textutil, 'ask')
+assert.equal(askPre.decision, 'ask')
+assert.equal(askGuard.decision, 'deny')
+assert.equal(askGuard.reason, REASON_NEEDS_APPROVAL)
+
+const meta = guardExplained(compound, 'ask')
+assert.equal(meta.decision, 'deny')
+assert.equal(meta.reason, REASON_SHELL_METACHAR)
+
+assert.equal(preExecuteExplained(textutil, 'smart').decision, 'allow')
+assert.equal(guardExplained(textutil, 'smart').decision, 'allow')
+console.log('ask-tier bash policy verified')
+```
+
+Expected: 打印 `ask-tier bash policy verified` 后退出 0。ask 档单命令 preExecute 为 `ask`、guard 为 `deny`（`REASON_NEEDS_APPROVAL`）——包子会话无审批界面、交互运行无无人值守白名单，故必然被拒；`&&` 在 ask 档 guard 为 `deny`（`REASON_SHELL_METACHAR`）；smart 档同一条 `textutil` 的 preExecute 与 guard 都是 `allow`。
+
+记录：「包子会话没有审批界面」为仓库既有事实（`policy.ts:234`、`holders.ts:46` 注释；packageRuntime 豁免只覆盖 mcp__*）。无应用实跑确认的部分如实标注「判定层实测；真机确认留 Task 12」。
+
+- [ ] **Step 4: 注入产品默认 maxDepth: 2（按 Step 2 确认点，最小改动）**
+
+在确认的接入点写入默认 `maxDepth: 2`，开箱即用（不依赖用户手工设置）。改动只落 huaanwork 自有文件。
+
+- [ ] **Step 5: 回归钉（先红后绿）**
+
+在注入点对应的既有 spec 追加回归钉（形态按确认点调整）：① 开箱有效 maxDepth = 2（经运行时同一读取路径，如 profile 组合产物或设置默认值）；② 深度算术钉：parent 深度 1 + cap 2 ⇒ child 深度 2 放行，parent 深度 2 + cap 2 ⇒ 抛 `SubagentDepthError`（防未来默认值回退）；③ **用户设置保留钉（profile/Host 默认值路线必钉）**：设置缺席 ⇒ 有效值 2；已有用户值（如 1 或 3）⇒ 保留用户值，产品默认不覆盖。跑对应测试确认绿。
+
+- [ ] **Step 6: 真实例抽查（条件允许时）**
+
+用 open-latest-huaanwork 最新构建 + 隔离 profile 启动，经 Step 2 确认的读取路径核实真实例有效 maxDepth = 2（设置面或配置读取）。无法启动 ⇒ 如实记 BLOCKED，该确认由 Task 12 前置断言承接（maxDepth < 2 ⇒ BLOCKED exit 3，不会静默放行）。
+
+- [ ] **Step 7: 实测结论落证据文档 + Commit**
+
+新建 `docs/evidence/2026-11-11-three-agent-packages.md`，写「Task 0 spike」节：N-1 机制实测输出、grep 证据、选定注入点与理由、volatile 语义实测、N-2 判定实测输出、回归钉与测试退出码、真实例抽查结论（或 BLOCKED）；并登记 N-3 探针的源码层面证据（上游 `manager.ts:1081-1091` ownedChildren 非空 ⇒ 结算 wait，正常时序血缘条目存活；残余边缘 = `host.ts:309` 10 分钟清理预算，留 Task 11/12 实测）。scratch 脚本不提交。
+
+```bash
+git add <注入点文件> <回归钉测试文件> docs/evidence/2026-11-11-three-agent-packages.md
+git commit -m "feat(config): ship product default subagent maxDepth 2 for package lane dispatch (R8)"
+```
 
 ---
 
@@ -301,10 +421,23 @@ declare module Context 内，紧跟 `huaanworkPackageChildSessions: Set<string>`
 Run: `corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-host/agent-package-runtime.spec.ts`
 Expected: PASS（新测试 + 既有 `tracks bound child sessions` 零改动全绿）。
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: 扩展既有生命周期场景接入血缘 Map（终审 P1；不另造骨架）**
+
+仓库已有取消/迟到 activation/幂等清理场景，但都未接新 Map——**就地扩展**，在真实生命周期事件后断言 `huaanworkPackageChildAllow` 无 stale 条目、不误清新回合：
+
+1. `agent-package-runtime.spec.ts` 的 `cancelling during startActivation disposes the selected late activation only`（:1397-1465）：两个 harness 的 ctx 补 `huaanworkPackageChildAllow`；取消 + 迟到 activation dispose 后断言本回合预留 id/迟到 id 的 Map 条目已清，并发第二回合的条目原样保留。
+2. `tests/huaanwork-guardrails/agent-package-tools.spec.ts` 的幂等清理场景（:1429-1436，重复 afterIdle）：同样接 Map，断言首次 afterIdle 后条目清空、重复 afterIdle 不复活也不误清其他回合条目。
+3. **会话 id 复用**：回合结束后以同一 sessionId 派发新回合（新 allow 数组引用），断言旧回合清理不影响新回合条目（引用同一性语义由 Step 1 测试覆盖，此处用真实生命周期驱动复验）。
+
+只追加 Map 断言，不改这些场景的既有断言；**不得用手工 `map.delete` 模拟清理**充当生命周期证据。
+
+Run: `corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-host/agent-package-runtime.spec.ts tests/huaanwork-guardrails/agent-package-tools.spec.ts`
+Expected: PASS（既有断言零改动 + 新 Map 断言全绿）。
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add dsh-plugin-huaanwork/src/huaanwork-host/holders.ts dsh-plugin-huaanwork/src/huaanwork-host/agent-package/host.ts dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-runtime.spec.ts
+git add dsh-plugin-huaanwork/src/huaanwork-host/holders.ts dsh-plugin-huaanwork/src/huaanwork-host/agent-package/host.ts dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-runtime.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/agent-package-tools.spec.ts
 git commit -m "feat(agent-package): track per-turn allow lineage and clear by reference (C2+C3)"
 ```
 
@@ -314,7 +447,7 @@ git commit -m "feat(agent-package): track per-turn allow lineage and clear by re
 
 **Files:**
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts`（Context ~:68-104、start 包装 ~:288-362、startActivation 包装 ~:364-477）
-- Test: `dsh-plugin-huaanwork/tests/huaanwork-guardrails/package-subagent-lineage.spec.ts`（新文件，八项矩阵）
+- Test: `dsh-plugin-huaanwork/tests/huaanwork-guardrails/package-subagent-lineage.spec.ts`（新文件，八项矩阵 + 首步捕获 2b）
 
 **Interfaces:**
 - Consumes: Task 2 的 `ctx.huaanworkPackageChildAllow`（读父会话条目、写孙代同引用条目）。
@@ -452,6 +585,11 @@ function lineageHarness(options?: {
     ctx, emit, childAllow, attachments, allow, agentsById,
     parentSessionId, grandchildId, greatGrandchildId,
     grandchildTools, greatGrandchildTools, grandchild, greatGrandchild,
+    capturedFirstRequestToolNames: undefined as string[] | undefined,
+    /** 本 harness 的首步组装：只读一次孙代 schemas()。收窄发生在 startActivation 的 restrict，模型请求读的是同一份表。 */
+    driveFirstChildStep(this: { capturedFirstRequestToolNames?: string[] }) {
+      this.capturedFirstRequestToolNames = grandchildTools.schemas().map((schema) => schema.name);
+    },
   };
 }
 
@@ -479,6 +617,20 @@ test("grandchild schemas narrow to inherited allow intersected with its tool tab
   assert.equal(h.childAllow.get(h.grandchildId), h.allow);
 });
 
+// 矩阵 2b（终审 P1）：首步模型可见工具表。
+// 本 harness 不启动真实 provider。driveFirstChildStep 是命名过的那一次 schemas() 读取；
+// 测试只断言它记下的名字。矩阵 2 仍直接断言注册表视图，两者不要混用。
+// 执行期拒绝见 Task 4，本测试不重复。
+test("grandchild first model request carries only the inherited allow", async () => {
+  const h = lineageHarness();
+  await activateOf(h.ctx)(activationSpec(h.grandchildId, h.parentSessionId));
+  h.driveFirstChildStep();
+  assert.deepEqual(
+    h.capturedFirstRequestToolNames,
+    ["read", "read_file", "glob", "grep", "bash", "subagent"],
+  );
+});
+
 // 矩阵 3：传递性——曾孙代同样收窄。
 test("great-grandchild inherits the same narrowing transitively", async () => {
   const h = lineageHarness();
@@ -490,6 +642,8 @@ test("great-grandchild inherits the same narrowing transitively", async () => {
 });
 
 // 矩阵 7（基线）：无血缘条目的主会话 subagent 行为零变化。
+// （历史口径，2026-11-13 owner 裁定 R10 订正：零变化的是*工具收窄*行为；
+//   工具可见性与委派能力按 R10 放开，见 spec §2 R10 与 §4.3 订正。本钉本身不变。）
 test("a session without a lineage entry keeps its baseline tools", async () => {
   const h = lineageHarness();
   h.childAllow.clear();
@@ -656,7 +810,7 @@ Expected: FAIL — 孙代 schemas 仍为基线全量（血缘分支未实现）�
 - [ ] **Step 4: 跑新测试 + 既有 skills 钉子确认绿**
 
 Run: `corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-guardrails/package-subagent-lineage.spec.ts tests/huaanwork-guardrails/skills.spec.ts`
-Expected: PASS — 八项矩阵全绿；既有 skills.spec.ts **零改动**全绿（矩阵 7：legacy 与主会话行为不变）。
+Expected: PASS — 八项矩阵全绿；既有 skills.spec.ts **零改动**全绿（矩阵 7：legacy 与主会话行为不变）。（历史口径：矩阵 7 的「主会话行为不变」指*工具收窄*行为；工具可见性与委派能力按 2026-11-13 owner 裁定 R10 放开，见 spec §2 R10 与 §4.3 订正，不静默改写本行历史。）
 
 - [ ] **Step 5: Commit**
 
@@ -752,6 +906,8 @@ test("lineage sessions are denied out-of-allow tools at execute time even before
       { kind: "ask" },
     );
     // 清理后同一会话回到普通询问：标志不是永久的。
+    // 注意：此处手工 delete 只验证 policy 读侧语义（条目缺席 ⇒ 回落基线）；
+    // 生命周期驱动的真实清理证据在 Task 2 Step 6（取消/迟到/幂等/id 复用场景），不以此冒充。
     childAllow.delete("grandchild");
     assert.deepEqual(
       await preExecute?.(call("grandchild", "git_push", "g-3"), async () => ({ kind: "allow" })),
@@ -885,7 +1041,7 @@ describe('typo-check package source', () => {
 
   test('SKILL.md pins the dual-blind workflow and honest degradation', () => {
     const skill = readSource('typo-check', 'skill/SKILL.md')
-    for (const pin of ['subagent', '双盲', '仲裁', '同一宿主模型', 'textutil', 'System.IO.Compression', '30000', '500', '@typo-check']) {
+    for (const pin of ['subagent', '双盲', '仲裁', '同一宿主模型', 'textutil', 'System.IO.Compression', '30000', '500', '@typo-check', '递归深度不足', '单会话多轮自审', '单条简单命令', 'smart']) {
       expect(skill).toContain(pin)
     }
     // 7 类 canonical 标签齐全
@@ -954,6 +1110,8 @@ description: Word 文档错别字与用语规范双盲检测
 - 只出报告，绝不修改原文档。
 - 两个 lane 使用**同一宿主模型**，不等于原跨厂商（DeepSeek+Kimi）交叉验证；同模型相关盲区不可消除（owner 裁定 R1 的降级）。
 - 定位锚点为提取后 txt 的行号（无 python-docx 结构化锚定）；无断点续跑。
+- **深度降级（R8）**：双盲派发要求环境有效递归深度 maxDepth ≥ 2（产品默认已注入）。若深度不足或 subagent 派发失败，必须向用户如实披露「当前环境递归深度不足，已降级为单会话多轮自审」，然后以单会话多轮自审完成检测；**严禁伪造「双盲」结果**，报告中置信度不得标「双路一致」。
+- **档位降级（R9）**：提取用的 bash/pwsh 在 ask 档（产品默认）下会被安全策略拦截（包子会话没有审批界面）。被拒时如实告知用户「提取被安全档位拦截，请在设置切换 smart 档后重试」，不伪造提取结果、不尝试绕过。
 
 ## 工作流（六步）
 
@@ -961,16 +1119,17 @@ description: Word 文档错别字与用语规范双盲检测
 2. **提取**：
    - macOS：`bash` 执行 `textutil -convert txt -output <工作区临时目录>/<名>.txt <docx>`（系统自带，零依赖）。
    - Windows：`pwsh` 用 `System.IO.Compression` 打开 docx，读 `word/document.xml`，把 `</w:p>` 替换为换行、去除全部标签、解码 XML 实体，写 UTF-8 txt。
-   - 临时文件落工作区临时目录；报告完成后清理。txt 行号即定位锚点。
+   - **命令约束（R9）**：每次只发**单条简单命令**——不用 `&&`、管道；提取与清理也不得使用重定向（仅第 6 步用户明确要求落盘报告文件时允许按步 6 规定使用单次 `>` 重定向写入工作区内目标路径；Windows 的 `pwsh -EncodedCommand <base64>` 形态本身不含元字符）。ask 档下包子会话的 bash/pwsh 没有审批界面、必然被拒：提取被拒时按「档位降级」如实告知用户切 smart 档，不伪造提取结果、不尝试绕过。
+   - 临时文件落工作区临时目录；清理用**单文件删除**（`rm <文件>`，不用递归删除），或不清理并告知用户临时目录位置。txt 行号即定位锚点。
 3. **条件分块**：提取文本 ≤30000 字整篇检测；超过则按 ≤30000 字/块、相邻块重叠 500 字切块，逐块检测后按（行号,原文）合并去重。
-4. **双盲派发**：用 `subagent` 工具派两个独立 lane（A/B）。每个 lane 的 prompt 只含：本文件「检测规则」「明确不报」「两可词」「输出格式」节全文 + 目标 txt 路径 + 各自角色指令；**不含另一 lane 的任何信息**、不含主流程的中间判断。两 lane 独立会话即双盲（运行时串行或并行调度不影响独立性）。
+4. **双盲派发**：用 `subagent` 工具派两个独立 lane（A/B）。每个 lane 的 prompt 只含：本文件「检测规则」「明确不报」「两可词」「输出格式」节全文 + 目标 txt 路径 + 各自角色指令；**不含另一 lane 的任何信息**、不含主流程的中间判断。两 lane 独立会话即双盲（运行时串行或并行调度不影响独立性）。**深度依赖（R8）**：派发要求有效 maxDepth ≥ 2；深度不足或派发失败 ⇒ 按「深度降级」如实披露并转单会话多轮自审，严禁伪造双盲。
    - lane A 角色：「你是基金定期报告错别字审查员（A 路）。逐行审读给定文本，找出确定的错别字。」
    - lane B 角色：「你是金融披露文档校对专家（B 路），以怀疑但克制的态度复核文本。允许零发现：没有把握时不要强行报告，宁缺毋滥；但每条发现必须给出 evidence（行原文中的确切子串），无法给出证据的条目视为无效。」
 5. **仲裁**：两路返回后按（行号+原文）对齐逐条比对——
    - 双路一致 ⇒ 高置信收录（置信度=双路一致）。
    - 单路报告 ⇒ 回读原文上下文裁决：成立则收录并标「仲裁」；不成立则丢弃。
    - 两路冲突（同位置不同建议）⇒ 回读原文给出裁定。
-6. **报告**：按文件输出发现列表：行号/段落、原文、建议、类别（canonical 中文标签）、置信度（双路一致/仲裁）、依据。对话输出为主；用户要求时用 bash 写报告文件。零发现时如实输出「未发现确定错误」。
+6. **报告**：按文件输出发现列表：行号/段落、原文、建议、类别（canonical 中文标签）、置信度（双路一致/仲裁）、依据。对话输出为主；仅当用户明确要求落盘报告文件时，按系统使用**单条简单命令**（不用 `&&`、管道）写入工作区内目标路径——macOS/Linux 用 `bash` 单次 `>` 重定向，Windows 用 `pwsh`（可复用 `pwsh -EncodedCommand` 显式写文件）；不引入 python 等外部依赖。若在 ask 档被拒，或报告正文含策略拒绝的元字符（如 Markdown 表格中的 `|` 及 `&`、`;`、`` ` ``、`$`）导致 smart 档拦截，均回退为对话输出并如实告知用户原因，不绕过安全策略、不伪造落盘成功。零发现时如实输出「未发现确定错误」。
 
 ## 检测规则（仅报以下 7 类；lane prompt 内联复制本节）
 
@@ -1041,10 +1200,17 @@ description: Word 文档错别字与用语规范双盲检测
 Run: `corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-host/agent-package-sources.spec.ts`
 Expected: PASS（typo-check 三测试）。
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: pwsh 提取行为测试（终审 P1；规格 §7.5 要求，子串钉不得冒充）**
+
+新建 `tests/huaanwork-host/typo-check-pwsh-extract.spec.ts`：用固定 fixture docx（含多段落、XML 实体如 `&amp;`/`&lt;`、中文 UTF-8 文本）验证 SKILL.md 所述 pwsh 提取参考实现的**行为**——段落换行（`</w:p>` → 换行）、标签全部移除、XML 实体解码、UTF-8 输出。测试以 `pwsh` 可用性门控（`spawnSync('pwsh', ['-Version'])` 探测，不可用 ⇒ `test.skip` 并在证据记「未覆盖/BLOCKED」）；Windows CI 或有 pwsh 的环境必须实跑。**没有执行环境时如实记未覆盖或 BLOCKED，不得用 `System.IO.Compression` 提示词子串钉冒充提取通过**（本机当前无 pwsh，已核实）。
+
+Run: `corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-host/typo-check-pwsh-extract.spec.ts`
+Expected: 有 pwsh ⇒ PASS；无 pwsh ⇒ skipped（证据如实登记，Windows 真机项按 R-ACCEPT-1 记 BLOCKED）。
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add dsh-plugin-huaanwork/agent-packages/typo-check dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-sources.spec.ts
+git add dsh-plugin-huaanwork/agent-packages/typo-check dsh-plugin-huaanwork/tests/huaanwork-host/agent-package-sources.spec.ts dsh-plugin-huaanwork/tests/huaanwork-host/typo-check-pwsh-extract.spec.ts
 git commit -m "feat(agent-packages): add typo-check package source with inline dual-blind rules"
 ```
 
@@ -1145,6 +1311,10 @@ description: 按规格审查代码安全与质量，输出分级发现
 # 代码审查工作流
 
 调用：`@code-review <代码文件或目录路径>`。中文名「代码审查」仅展示，不能作唤醒词。
+
+## 工作区边界（R11，修复波次收编）
+
+`read`/`glob`/`grep` 只允许当前会话工作区内的路径；用户给出的工作区外路径会被安全策略拒绝（「路径越出当前工作区」）。遇到工作区外目标：请用户把该文件夹作为工作区打开后再审查，或改用 bash/pwsh 读取（需 smart/full 档；ask 档无审批界面必然被拒）。不伪造读取结果。
 
 ## 工作流
 
@@ -1309,6 +1479,8 @@ description: 复杂任务拆解与可实施执行计划顾问
 
 **只出计划，不执行。** 无定时触发、无运行监控、不自动派发其他智能体。
 执行由用户或主会话驱动；你不承诺自动执行，也不调用 subagent 去跑计划。
+
+**工作区边界（R11，修复波次收编）**：`read`/`glob`/`grep` 只允许当前会话工作区内的路径；用户给出的工作区外路径会被安全策略拒绝（「路径越出当前工作区」）。遇到工作区外项目：请用户把该文件夹作为工作区打开后再拆解，或改用 bash/pwsh 读取（需 smart/full 档；ask 档无审批界面必然被拒）。读不到的代码/文档不假设其存在，计划中相应事实标注待核实。
 
 ## 工作流
 
@@ -1512,7 +1684,7 @@ function parseArgs(argv) {
   return { profileDir: argv[index + 1] }
 }
 
-function seedOne(profileDir, slug) {
+function readAndValidate(slug) {
   const dir = join(SOURCES_ROOT, slug)
   const rawManifest = JSON.parse(readFileSync(join(dir, 'agent.json'), 'utf8'))
   const now = new Date().toISOString()
@@ -1528,23 +1700,31 @@ function seedOne(profileDir, slug) {
   if (bytes > MAX_PACKAGE_BYTES) {
     throw new Error(`${slug} 超过整包预算: ${bytes} > ${MAX_PACKAGE_BYTES}`)
   }
+  return { files, bytes }
+}
+
+function seedOne(profileDir, slug, prefetched) {
+  const { files, bytes } = prefetched
   writeAgentPackageAtomically({ profileDir, ...files, replace: true })
   const state = readAgentPackageState(profileDir)
   state[`local:${slug}`] = {
     source: 'local',
     enabled: true,
-    installedVersion: parsed.manifest.version,
+    installedVersion: files.manifest.version,
     publishStatus: 'none',
   }
   writeAgentPackageState(profileDir, state)
-  return { slug, version: parsed.manifest.version, bytes }
+  return { slug, version: files.manifest.version, bytes }
 }
 
 const { profileDir } = parseArgs(process.argv.slice(2))
+// 终审 P2：先完成三包 manifest/预算/文件集全量预检，再开始任何写入——
+// 避免第三包失败时前两包已写盘（Task 14 会指引生产 creator 使用本脚本）。
+const prefetched = new Map(SLUGS.map((slug) => [slug, readAndValidate(slug)]))
 const seeded = []
 const details = []
 for (const slug of SLUGS) {
-  details.push(seedOne(profileDir, slug))
+  details.push(seedOne(profileDir, slug, prefetched.get(slug)))
   seeded.push(slug)
 }
 console.log(JSON.stringify({ seeded, details }, null, 2))
@@ -1571,7 +1751,7 @@ git commit -m "feat(scripts): seed three agent packages into an isolated profile
 
 **Interfaces:**
 - Consumes: Task 8 播种脚本；M2 验收先例 `scripts/huaanwork-agent-package-m2-acceptance.mjs` 的全部机制（makeTokens/installKeyring/runCli/requireCliOk/makeDirs/bootCatalog/configureCreator/configureConsumerProfile/adminEnv，逐字复用其形态）；`publishLocalAgentPackage(slug)`、`refreshLocalAgentPackagePublishStatus(slug)`、`installCatalogAgentPackage(slug, version)`、`configureAgentCatalog`、`createAgentCatalogSecurity`、`createAgentPackageActiveTurnRegistry`、`createAgentPackageHost`、`verifyAgentPackageDirectory`、`generateKeyPair`/`fingerprintPublicKeyHex`、`plazaCards`/`packageActions`/`packageActionLabel`（client logic）。
-- Produces: CLI `node --experimental-transform-types scripts/verify-agent-packages-plaza.mjs [--keep-catalog] [--out <report.json>]`；exit 0 PASS / 1 FAIL / 3 BLOCKED / 2 usage。`--keep-catalog` 时写 `{outDir}/catalog-connection.json`（baseUrl/port/readToken/keyring/pid）并等待 SIGINT/SIGTERM，供 Task 12 真机走查复用同一 catalog。
+- Produces: CLI `node --experimental-transform-types scripts/verify-agent-packages-plaza.mjs [--keep-catalog] [--out <report.json>]`；exit 0 PASS / 1 FAIL / 2 usage（终审 P2 订正：原「3 BLOCKED」无对应分支，删除不可达口径；本脚本失败一律 FAIL）。`--keep-catalog` 时写 `{outDir}/catalog-connection.json`（baseUrl/port/readToken/keyring/pid）并等待 SIGINT/SIGTERM，供 Task 12 真机走查复用同一 catalog。
 
 **关键事实（已核实，写断言时务必遵守）：**
 - catalog 客户端**不回显服务端错误正文**（catalog-client.ts:183-185）：409 legacy-conflict 抛 `AgentCatalogClientError('目录请求失败（HTTP 409）', 'http', 409)`；`publishLocalAgentPackage` 原样重抛（catalog-publish.ts:419-425）。**负例断言 `error.status === 409 && error.code === 'http'`，不断言消息含「标识与目录条目冲突」**（该文案只在服务端，客户端不可见）。
@@ -1590,7 +1770,7 @@ git commit -m "feat(scripts): seed three agent packages into an isolated profile
  * Phase A: 同名 kind:"tool" legacy 条目 ⇒ publish 必须 409。
  * Phase B: 空 entries ⇒ 播种→发布→CLI 签名批准→广场卡断言（先于安装）→安装→验签→启用。
  * 用法: node --experimental-transform-types scripts/verify-agent-packages-plaza.mjs [--keep-catalog] [--out <report.json>]
- * exit: 0 PASS / 1 FAIL / 3 BLOCKED / 2 usage
+ * exit: 0 PASS / 1 FAIL / 2 usage（无 BLOCKED 分支，失败一律 FAIL）
  */
 import { randomUUID } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
@@ -1903,6 +2083,14 @@ async function main() {
   const keyId = fingerprintPublicKeyHex(keyPair.publicKeyHex)
   const keyring = { keyId, publicKeyHex: keyPair.publicKeyHex, slot: 1 }
   writeFileSync(dirs.privateKey, keyPair.privateKeyPem, { encoding: 'utf8', mode: 0o600 })
+  // server keyring（终审 P0-3）：bootCatalog 的 AGENT_CATALOG_KEYRING_PATH 指向 dirs.root/keyring.json，
+  // config.ts parseKeyring 要求文件可读——首次 bootCatalog 前必须写盘（M2 先例 :1343-1347 同形）。
+  // consumer profile 的 agent-catalog-keyring.json 是另一份文件，不能替代 server 这份。
+  writeFileSync(
+    join(dirs.root, 'keyring.json'),
+    `${JSON.stringify({ schemaVersion: 1, keys: [keyring] }, null, 2)}\n`,
+    { encoding: 'utf8', mode: 0o600 },
+  )
   registerSecrets([tokens.read, tokens.publish, tokens.admin, keyPair.privateKeyPem])
 
   const report = { outcome: 'PASS', phases: {}, startedAt: new Date().toISOString() }
@@ -1966,14 +2154,14 @@ git commit -m "feat(scripts): verify three-package plaza publish chain with dev 
 
 ---
 
-### Task 10: 全量门禁 + 证据文档
+### Task 10: 中间门禁 + 证据文档（终审 P1：最终门禁在 Task 12 Step 5，对应最终代码树）
 
 **Files:**
-- Create: `docs/evidence/2026-11-11-three-agent-packages.md`
+- Modify: `docs/evidence/2026-11-11-three-agent-packages.md`（Task 0 已创建并写 spike 节，本任务追加门禁节）
 
 **Interfaces:**
 - Consumes: Task 1–9 全部代码与脚本。
-- Produces: 门禁退出码记录 + 证据文档（逐项命令/退出码/产物指针；能力披露口径订正、Windows BLOCKED、verify:aa flaky 处置如实登记）。
+- Produces: 门禁退出码记录 + 证据文档（逐项命令/退出码/产物指针；能力披露口径订正、Windows BLOCKED、verify:aa flaky 处置如实登记）。**本任务是中间门禁**：其后 Task 11 可能修安全代码、Task 12 新增脚本，最终代码树的 typecheck/test/check 在 Task 12 Step 5 重跑，证据以最终那次为准。
 
 - [ ] **Step 1: 跑 typecheck**
 
@@ -1992,7 +2180,7 @@ Expected: exit 0。若 `verify:aa` 因已登记并发竞态失败（AGENTS.md �
 
 - [ ] **Step 4: 写证据文档**
 
-新建 `docs/evidence/2026-11-11-three-agent-packages.md`，逐节记录：
+在 `docs/evidence/2026-11-11-three-agent-packages.md`（Task 0 已创建）追加门禁节，逐节记录：
 - 运行时扩展 C1–C5：每项对应 commit、测试文件、退出码。
 - 三包源文件：manifest 字段、预算实测字节数（从 sources 测试输出取）。
 - 播种/发布验证：Task 8 测试退出码、Task 9 脚本报告指针（/tmp/plaza-verify-report.json 内容摘要，脱敏）。
@@ -2013,7 +2201,7 @@ git commit -m "docs(evidence): record gates and verification for three agent pac
 ### Task 11: 独立代码评审（安全敏感文件）
 
 **Files:**
-- 评审对象: `runtime.ts`/`holders.ts`/`host.ts`/`skills.ts`/`policy.ts` + 对应测试（Task 1–4 改动）
+- 评审对象: `runtime.ts`/`holders.ts`/`host.ts`/`skills.ts`/`policy.ts` + 对应测试（Task 1–4 改动）+ **Task 0 的 maxDepth 注入 diff 与回归钉（终审 P2：R8 有全局嵌套副作用，安全评审须覆盖）**
 - 可能修改: 上述文件（按评审 P0/P1 发现修复）
 
 **Interfaces:**
@@ -2022,10 +2210,11 @@ git commit -m "docs(evidence): record gates and verification for three agent pac
 
 - [ ] **Step 1: 发起独立评审**
 
-REQUIRED SUB-SKILL: `superpowers:requesting-code-review`。评审范围 = Task 1–4 的五个运行时文件与测试。评审提示须包含：
+REQUIRED SUB-SKILL: `superpowers:requesting-code-review`。评审范围 = Task 1–4 的五个运行时文件与测试 + Task 0 的 maxDepth 注入 diff 与回归钉。评审提示须包含：
 - spec §4.2 C1–C5 与 §4.3 不变量全文；
 - 上游 restrict 组合语义锚点（`deepseek-harness/packages/core/tools/src/index.ts:1105`「Restrictions intersect」，disposer 只解除本层）；
 - 重点核查：引用同一性清理是否误清并发回合；血缘分支是否漏掉 legacy/pkg 优先；C5 是否对直接子会话有意收紧且不改已收窄行为；孙代是否可能拿到 call_host_tool/未挂载运行时工具；tools/change 后收窄是否保持。
+- **N-3 探针（复审 P2，2026-11-12）**：lane 存活期与回合清理时序——源码层面已核实上游结算判定在 ownedChildren 非空时 wait（`deepseek-harness/packages/subagent/subagent/src/manager.ts:1081-1091`），正常时序血缘条目活得到仲裁；评审核查残余边缘：`host.ts:309` 的 10 分钟清理预算超时路径（lane+仲裁超预算 ⇒ 绑定提前释放，C5 执行期强制中途失效）与 delivery/cleanup 时序竞态，结论记入证据（Task 12 真机一并实测）。
 
 - [ ] **Step 2: 反证校准评审结论**
 
@@ -2063,9 +2252,11 @@ git commit -m "docs(evidence): record independent security review of runtime ext
 - 广场卡 DOM：`.agent-plaza-panel .skill-card[data-slug]`，`.nm` = displayName；动作按钮 `.agent-package-actions button.filter-tab`，DOM 顺序为 [查看详情, span.composer-spacer, 下载]——**一律按文案匹配按钮，禁用 `:last-child` 等位置选择器**（会命中下载）。
 - 我的智能体页：`.agent-packages-panel`，启用按钮文案「启用」。
 - 详情对话框：`.settings-overlay[role="dialog"][aria-label="智能体详情：<displayName>"]`，关闭按钮文案「关闭」。
-- 运行卡：`.subagent-run-card[data-phase]`；**lane 无运行卡**，lane 计数经 zstd 会话日志 subagent tool/call。
-- 模型设置只读复制 `~/.huaanwork/profiles/desktop/huaanwork-settings.json`（绝不打印 api_key；缺失 ⇒ BLOCKED exit 3）；全链路用 deepseek-chat。
+- 运行卡：`.subagent-run-card[data-phase]`，真实终态只有 completed/failed/stopped（`logic/subagentRuns.ts:41-45`，**无 `done`**）；**lane 无运行卡**，lane 验收经 zstd 会话日志的**身份链 + 非错误结果**（Step 3），不靠运行卡、不靠调用计数。
+- 模型设置只读复制 `~/.huaanwork/profiles/desktop/huaanwork-settings.json`（绝不打印 api_key；缺失 ⇒ BLOCKED exit 3）；全链路用 deepseek-chat。**guard_mode 不从生产复制**（生产可能是 ask 档）：隔离 profile 显式写 `guard_mode: "smart"`（R9）并记入 facts——ask 档下包子会话 bash 必然被拒，typo-check 提取走不通。
+- **深度预检（R8）**：有效 maxDepth ≥ 2 才允许走查（否则双盲派发结构性不可达，lane 计数必 0）。读取路径等于 Task 0 证据记下的那条，读不到或 < 2 ⇒ BLOCKED exit 3。**禁止读 `profileDir/settings.json` 或 `dirname(homeDir)/settings.json`**：前者不是深度配置，后者是模型地址与密钥。
 - 样例 docx 用 `textutil -convert docx` 从含已知错别字的 txt 生成（按装/银行帐户/市市场/我们将我们/Managment/２０２５/在次），**不用真实基金报告**。
+- **样例位置（终审 P2）**：`ctx.sampleDir` 与 `ctx.sampleCode` 必须落在本次隔离 **workspaceRoot 内**（如 `{workspaceRoot}/samples/`）——`packages/huaanwork-policy/src/decide.ts:93-98` 拒绝工作区外 read/glob（REASON_PATH_ESCAPE），样例落在外部临时目录会导致包读不到。`makeSampleDocx/makeSampleCode` 的 workDir 用 workspaceRoot 子目录，**不用 out 目录**。
 
 - [ ] **Step 1: 写脚本骨架（helper 复制 + 隔离 profile + 样例生成）**
 
@@ -2129,9 +2320,19 @@ function requireZstd() {
     process.exit(3)
   }
 }
+
+/** R8 深度预检。读取路径必须等于 Task 0 证据记下的那条；证据未写明之前保持本占位。
+ * 禁止读 profileDir/settings.json 或 dirname(homeDir)/settings.json。
+ * 有效值若只存在于进程内 config.maxDepth.get()，则检查组合产物里的 subagent.config.maxDepth，
+ * 或等宿主起来后再读。读不到或 < 2 ⇒ BLOCKED exit 3。
+ * 写 Task 12 时用证据中的路径替换本函数体；下面的退出是未定稿守卫，不是示例读法。 */
+function requireMaxDepth(_profileDir) {
+  console.error('requireMaxDepth read path is unset; fill it from the Task 0 evidence before this walkthrough')
+  process.exit(3)
+}
 ```
 
-隔离 profile 准备：`initProfile(profileDir, ['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app'])`（从 `@deepseek-ai/dsh-app-boot`）；profileDir = homeDir/profiles/desktop；settings.json 落 dirname(homeDir)；scrypt 认证（writeAuthState）；wizard skip state（setupWizardStatePath）；keyring 从 connection.keyring 写入 `agent-catalog-keyring.json`；agents_host/agents_port/agents_catalog_token 从 connection 写入 huaanwork-settings.json；agents-state.json 初始为空 `{}`（让广场卡走「未安装→下载」真实路径）。
+隔离 profile 准备：`initProfile(profileDir, ['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app'])`（从 `@deepseek-ai/dsh-app-boot`）；profileDir = homeDir/profiles/desktop；模型 `settings.json` 落 dirname(homeDir)（只放模型地址与密钥，不是 maxDepth 预检的读取处）；scrypt 认证（writeAuthState）；wizard skip state（setupWizardStatePath）；keyring 从 connection.keyring 写入 `agent-catalog-keyring.json`；agents_host/agents_port/agents_catalog_token 从 connection 写入 huaanwork-settings.json，**同批显式写 `guard_mode: "smart"`（R9：不从生产复制，ask 档包子会话 bash 必然被拒）**；agents-state.json 初始为空 `{}`（让广场卡走「未安装→下载」真实路径）。
 
 - [ ] **Step 2: 写驱动序列（广场→详情→下载→启用→详情→三包对话）**
 
@@ -2217,11 +2418,14 @@ async function drive(client, ctx) {
     await client.evaluate(`document.querySelector('button[title="新建任务"]').click()`)
     await waitForComposerIdle(client)
     await sendText(client, prompts[slug])
-    // 运行卡完成（硬断言）；lane 无运行卡，计数经会话日志（Step 3）。
+    // 运行卡完成（硬断言）；真实终态只有 completed/failed/stopped（无 done）。
+    // lane 无运行卡，双盲验收经会话日志身份链 + 非错误结果（Step 3）。
     await waitFor(`run card ${slug}`, async () => {
       const cards = await client.evaluate(`[...document.querySelectorAll('.subagent-run-card')].map((el) => ({ label: el.textContent, phase: el.dataset.phase }))`)
       const match = cards.filter((c) => c.label.includes(`@${slug}`))
-      const done = match.find((c) => c.phase === 'completed' || c.phase === 'done')
+      const dead = match.find((c) => c.phase === 'failed' || c.phase === 'stopped')
+      if (dead) throw new Error(`run card ${slug} 进入终态 ${dead.phase}`)
+      const done = match.find((c) => c.phase === 'completed')
       return { ok: !!done, value: cards }
     }, ctx.timeout, 1000)
     facts.runs.push({ slug, completed: true })
@@ -2233,19 +2437,31 @@ async function drive(client, ctx) {
 
 - [ ] **Step 3: 写 lane 观测 + 主入口 + 清理**
 
-lane 观测（typo-check 运行后）：会话日志在 **`{homeDir}/sessions/`** 下（homeDir 即隔离 DSH_HOME，launchApp 设 `env.DSH_HOME = homeDir`；**不在** profiles/desktop 下），布局 `{sessionsRoot}/{projectKey}/{编码会话id}/session.v4.jsonl.zstd`。递归枚举 `*.jsonl.zstd`，逐个用 **zstd CLI 多帧解压**（`zstd -dc <file>`，Node zlib 只解首帧不可用）；drive 依次跑三包，「最新会话」不一定是 typo-check——**按日志内容含 `@typo-check` 派发文本定位目标会话**，统计 `kind === 'tool-call' && name === 'subagent'` 的记录数 ⇒ 期望 ≥2（两个 lane）。把计数记入 facts（模型输出质量记为事实，不做硬断言；lane 计数 <2 记 FAIL）。
+lane 观测（typo-check 运行后；终审 P0-4 + N-4 重写）：会话日志在 **`{homeDir}/sessions/`** 下（homeDir 即隔离 DSH_HOME，launchApp 设 `env.DSH_HOME = homeDir`；**不在** profiles/desktop 下），布局 `{sessionsRoot}/{projectKey}/{编码会话id}/session.v4.jsonl.zstd`。递归枚举 `*.jsonl.zstd`，逐个用 **zstd CLI 多帧解压**（`zstd -dc <file>`，Node zlib 只解首帧不可用）。
 
-主入口：读 connection → requireZstd()（缺失 ⇒ BLOCKED exit 3）→ 准备隔离 profile（模型设置缺失 ⇒ BLOCKED exit 3）→ 生成样例 → build workspace + prepare:electron-native（若 lib/ 已存在可跳过 build，但须记录）→ launchApp（清 ELECTRON_RUN_AS_NODE/NODE_OPTIONS，DSH_TELEMETRY_DISABLED=1，--remote-debugging-port，--disable-gpu --no-first-run --disable-background-timer-throttling --disable-renderer-backgrounding）→ connectAppPage → ensureLoggedIn → drive → 写 facts 报告（脱敏）→ finally 只 kill 自己启动的 app 进程 + 向 connection.pid 发 SIGTERM。exit 0/1/3。
+**原始 v4 字段（P0-4）**：原始记录是 `{"type":"tool/call","seq","time","data":{"callId","name","arguments",...}}` 与 `{"type":"tool/result","data":{"message":{"toolCallId","isError","content",...}}}`（真实日志已核实）。`kind:'tool-call'` + 顶层 `name` 是 `session-view.ts:240-252` 的**派生视图**，直接扫原始日志用该谓词命中数恒 0——**禁用**。
+
+**确定性身份链（N-4，禁文本搜索）**：会话头（首行 `type:'session'`）含 `id/parentSession/origin/delegationDepth`（真实日志已核实）。① 按用户**完整派发文本**（`@typo-check 检测这个文件夹里的 Word 文档：<sampleDir>`）定位**父会话**——该文本只在父会话用户消息中；包子会话收到的是 persona + `用户请求：<remainder>`（无 @ 前缀），取父会话 header.id。② 包 child = header 满足 `parentSession === parentId && origin === 'subagent' && delegationDepth === 1` 的会话。③ 两个 lane = `parentSession === childId && delegationDepth === 2` 的会话。**不得按 `@typo-check` 子串搜索**：parentText 含 @slug（agent-invoke.ts:97-107 送回父会话）、persona 内联 SKILL 调用行（runtime.ts:120-125），父子日志都命中，无确定性。
+
+**成功判据（调用次数 ≠ 成功 lane）**：包 child 日志中 `type === 'tool/call' && data.name === 'subagent'` 的记录须有 **≥2 个不同 callId**，且每个 callId 关联到 `type === 'tool/result'`、`data.message.toolCallId` 匹配、`data.message.isError !== true`（派发被接受，非深度/策略拒绝）；再核实两个 lane 各自交付了结果（child 日志中的 lane 结果投递记录，或两个 lane 会话的终态输出——实施时从真实日志钉住确切记录形态并写入证据）。**任何派发失败、错误结果或诚实降级都不得计入双盲 PASS**（降级事实如实记录，双盲断言记 FAIL 或降级标记）。保留两个 lane 的实际输出与主流程仲裁文本作为人工核对事实（脱敏）。若身份链或结果事实无法从现有日志可靠恢复 ⇒ 记 BLOCKED 并补观测缝，**不得降低为调用计数**。facts 记录：childId、两个 callId、各 result 的 isError 状态、lane 输出摘录。
+
+主入口：读 connection → requireZstd()（缺失 ⇒ BLOCKED exit 3）→ 准备隔离 profile（模型设置缺失 ⇒ BLOCKED exit 3；显式写 guard_mode: "smart"）→ **requireMaxDepth(profileDir)**（写脚本时用 Task 0 证据中的读取路径替换占位函数体；读不到或 < 2 ⇒ BLOCKED exit 3。禁止读 `settings.json`）→ 生成样例（落隔离 workspaceRoot 内，见关键事实）→ build workspace + prepare:electron-native（若 lib/ 已存在可跳过 build，但须记录）→ launchApp（清 ELECTRON_RUN_AS_NODE/NODE_OPTIONS，DSH_TELEMETRY_DISABLED=1，--remote-debugging-port，--disable-gpu --no-first-run --disable-background-timer-throttling --disable-renderer-backgrounding）→ connectAppPage → ensureLoggedIn → drive → 写 facts 报告（脱敏，**含 guard_mode 与 maxDepth 预检值**）→ finally 只 kill 自己启动的 app 进程 + 向 connection.pid 发 SIGTERM。exit 0/1/3。
 
 - [ ] **Step 4: 启动 keep-catalog 并跑真机走查**
 
 先后台启动 Task 9 的 `--keep-catalog`（记录 connectionPath），再：
 Run: `corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-three-packages.mjs --connection <connectionPath> --out /tmp/three-packages-accept`
-Expected: exit 0；facts 含三张中文广场卡、三次下载/启用、详情验签通过+工具无+沙箱警告、三包运行卡 completed、typo-check lane 计数 ≥2。截图落 out 目录。
+Expected: exit 0；facts 含 **maxDepth 预检值 ≥2、guard_mode=smart**、三张中文广场卡、三次下载/启用、详情验签通过+工具无+沙箱警告、三包运行卡 completed、**typo-check 双盲成功判据满足（身份链定位包 child + 2 个不同 callId + 非错误结果 + 两 lane 交付，Step 3）**。截图落 out 目录。若深度预检通过但双盲判据不满足：如实记 FAIL 并摘录会话日志中的派发/拒绝/错误结果记录（区分深度错误、策略拒绝、提示抑制与模型行为），不静默归因；诚实降级不得计为双盲 PASS。
 
-- [ ] **Step 5: 回填证据 + Commit**
+- [ ] **Step 5: 最终门禁（终审 P1：必须在最终代码树上执行）**
 
-证据文档补「真机走查」节：命令、退出码、facts 摘要、截图指针、lane 计数、模型输出事实摘录（脱敏）、能力披露真实形态确认。Windows 真机项记 BLOCKED。
+Task 11 评审修复与 Task 12 脚本都已落盘，此时代码树才是最终形态。重跑三条全量门禁：
+Run: `corepack yarn typecheck`、`corepack yarn test`、`corepack yarn check`
+Expected: 三条均 exit 0；退出码与证据对应**最后一次代码变更**（Task 10 的中间门禁结果不能替代）。verify:aa 并发竞态处置同 Task 10 口径。失败必须修复后重跑，不得以中间门禁绿冒充最终绿。
+
+- [ ] **Step 6: 回填证据 + Commit**
+
+证据文档补「真机走查」节：命令、退出码、facts 摘要（含 maxDepth 预检值与 guard_mode）、截图指针、**双盲成功判据事实（childId/两个 callId/非错误结果/lane 输出摘录）**、模型输出事实摘录（脱敏）、能力披露真实形态确认、**N-3 探针实测结论（lane 结果回传与仲裁期间血缘条目是否存活、清理时序；对照 10 分钟清理预算边缘）**；补「最终门禁」节：三条命令退出码（最终代码树）。**人工核对口径（终审 P2）**：自动 PASS 只代表流程与机制通过，不宣称内容质量经过自动证明——typo-check 的仲裁结论、code-review 对植入缺陷（硬编码密钥/eval）的命中、task-orch 计划的依赖与验收标准，须人工核对并在证据中记录核对结论。Windows 真机项记 BLOCKED。
 
 ```bash
 git add dsh-plugin-huaanwork/scripts/huaanwork-accept-three-packages.mjs docs/evidence/2026-11-11-three-agent-packages.md
@@ -2266,18 +2482,28 @@ git commit -m "feat(scripts): CDP acceptance walkthrough for three plaza agent p
 
 **安全约束（绝不违反）：** 三个目录均无 git remote，备份是唯一安全网；**未经 owner 再次明确确认绝不删除**；含 typo `data/` 真实基金报告与 orch.db 248MB 历史。三个目录实际位于 `~/Downloads/cursor/智能办公平台/` 下（2026-11-12 评审订正：原稿路径漏了「智能办公平台」层，tar 会失败、`rm -rf` 指向不存在路径会静默退出 0 造成空转假象）。
 
-- [ ] **Step 1: 备份**
+- [ ] **Step 1: 防覆盖门 + 备份（终审 N-5）**
 
-Run:
+**先检查目标不存在**（固定文件名重复执行会静默覆盖旧备份，而旧备份可能是唯一安全网）：
+```bash
+test ! -e ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz || { echo "备份已存在，停止——由 owner 决定沿用或另选带时间戳的新文件名"; exit 1; }
+```
+存在即停止并报告 owner，**不得未经确认覆盖旧归档**；owner 选择新文件名时同步更新本任务与证据中的路径。确认不存在后：
 ```bash
 tar -czf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz -C ~/Downloads/cursor/智能办公平台 错别字检测智能体 代码审查智能体 任务编排智能体
 ```
 Expected: exit 0，备份落仓库外。失败则停止，不得进入后续步骤。
 
-- [ ] **Step 2: 校验备份完整性**
+- [ ] **Step 2: 完整校验备份（终审 P1：不得截断读取）**
 
-Run: `tar -tzf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz | head -50`（确认三目录条目齐全）+ `shasum -a 256 ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz`（记录哈希）。
-Expected: 列表含三目录；哈希记入证据。
+Run:
+```bash
+# LC_ALL=en_US.UTF-8：C locale 下 bsdtar 把非 ASCII 文件名八进制转义，grep "^$d/" 会得 0/0/0（证据 §13.2 实测坑）
+LC_ALL=en_US.UTF-8 tar -tzf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz > /tmp/agent-backup-listing.txt
+for d in 错别字检测智能体 代码审查智能体 任务编排智能体; do grep -c "^$d/" /tmp/agent-backup-listing.txt; done
+shasum -a 256 ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz
+```
+Expected: `tar -tzf` **完整读取归档**退出 0（不用 `| head` 截断——截断既不能发现归档后段损坏，也不保证列全三目录）；三个目录各自的成员计数均 > 0（逐目录核对，不是只看前 50 行）；哈希记入证据。负例口径：损坏归档应使 `tar -tzf` 非零退出，与正常归档可区分（校验命令本身的退出码就是判据）。
 
 - [ ] **Step 3: 登记延后删除触发项（不删除）**
 
@@ -2332,7 +2558,8 @@ git commit -m "docs: add production release runbook pointer for three agent pack
 
 **1. Spec coverage：**
 - §4.2 C1→Task 1；C2+C3→Task 2；C4→Task 3；C5→Task 4。✓
-- §4.4 测试矩阵 8 项：1→Task 1 平台测试；2/3/5/6/8→Task 3 八测试；4→Task 4；7→Task 3 基线/legacy 测试 + 既有钉子零改动。✓（矩阵 6「清理/id 复用」由 Task 2 引用清理测试 + Task 4 map.delete 后回 ask 覆盖。）
+- §4.6 产品默认递归深度（R8）→Task 0（spike + 注入 + 回归钉）；§7.0 spike 先行→Task 0；§5.1 档位依赖（R9）→Task 5 SKILL.md + Task 12 guard_mode。✓
+- §4.4 测试矩阵 8 项：1→Task 1 平台测试；2/3/5/6/8→Task 3 八测试 + 2b 首步捕获（终审 P1）；4→Task 4；7→Task 3 基线/legacy 测试 + 既有钉子零改动。✓（矩阵 6「清理/id 复用」由 Task 2 引用清理测试 + Task 2 Step 6 生命周期场景扩展 + Task 4 读侧语义覆盖。）
 - §5.0 共同形态→Task 5–7 manifest/预算/内联；§5.1→Task 5；§5.2→Task 6；§5.3→Task 7。✓
 - §6.1 播种→Task 8；发布验证→Task 9；旧条目 fixture 保留→Task 9 Phase A 拷贝不改仓库。✓
 - §6.2 正式上架 owner 运维→Global Constraints（不生成生产私钥）+ Task 9 409 负例证明退役必要性 + Task 14 runbook 指引（R6）。✓
@@ -2341,7 +2568,7 @@ git commit -m "docs: add production release runbook pointer for three agent pack
 - §9 边界→Global Constraints + 各包 SKILL.md 边界节。✓
 - **口径订正**：§5.0/§7.3「安装/启用对话框披露」与 UI 现实差异已在 Global Constraints 订正条 + Task 12 真实 DOM 断言中诚实处理；spec 对应措辞已于 2026-11-12 同步订正。✓
 
-**2. Placeholder scan：** 无 TBD/TODO；所有代码步骤含完整代码；Task 12 helper 复制给出精确源文件+行号范围（可验证引用，非未定义符号）；驱动序列/样例/主入口逻辑完整。✓
+**2. Placeholder scan：** 无 TBD/TODO；代码步骤为**关键代码 + 明确实现步骤**（终审 P2 订正：Task 12 的 shot() 等含 prose 实现步骤，不声称「全部完整代码」）；Task 12 helper 复制给出精确源文件+行号范围（可验证引用，非未定义符号）；驱动序列/样例/主入口逻辑完整。Task 0 Step 1/3 测量脚本完整。Step 2 候选 1 是在 `profile.ts` 的 `patches` 新增 `{ id: 'subagent', config: { maxDepth: 2 } }`；Step 4/5 的最终形态仍按实测确认。`requireMaxDepth` 在 Task 0 把读取路径写入证据之前是失败即停的占位，禁止读 `settings.json`。Task 3 矩阵 2b 的 `driveFirstChildStep` 已在 `lineageHarness` 返回值里，测试只断言它记下的名字。✓
 
 **3. Type consistency：** `huaanworkPackageChildAllow: Map<string, readonly string[]>` 在 C2/C3/C4/C5 四处同名同型；`composeAgentPackageToolAllowList` 返回顺序 Task 1 定义、Task 2/3 断言一致；`packageActionLabel(action, card)` 两参；`plazaCards({packages,catalogAgents,catalogPackages})` 三字段；`publishLocalAgentPackage(slug)`/`installCatalogAgentPackage(slug,version)`/`refreshLocalAgentPackagePublishStatus(slug)` 签名与源码一致；`AgentPackageDetail` 无 manifest 字段 ⇒ seed 测试经 readAgentPackageFile 读 agent.json。✓
 
@@ -2359,3 +2586,24 @@ git commit -m "docs: add production release runbook pointer for three agent pack
 - **owner 裁定落地**：R6 → 新增 Task 14 runbook 指引（生产上架不入代码范围）；R7 → Task 13 删除延后到生产上架稳定后，本里程碑只备份 + 登记触发项。
 - **低成本改进**：Task 12 增 `requireZstd()` 预检（缺失 ⇒ BLOCKED exit 3）；三包 description 末尾加「用 @slug 调用。」、SKILL.md 开头加调用行并各补一条回归钉（评审 P2-1）；spec §1 位置/§3 中文 @ 图示/§5.0/§7.3 披露口径同步订正。
 - **探针项（不定性为 bug）**：孙代迟到 activation 的清理竞态留给 Task 11 独立评审核查（可达性取决于上游取消语义）。
+
+**6. 复审后订正（2026-11-12，Claude 复审反证核实 + owner 确认 R8/R9）：**
+
+复审原文 `docs/superpowers/plans/2026-11-11-three-agent-packages-plaza-plan-rereview.md`；逐条判决与处置见该文档「处置」节。本计划据此订正：
+
+- **N-1（P0，属实，首轮评审与反证均漏）**：上游 maxDepth 默认 1 ⇒ 包子会话（深度 1）派 lane（深度 2）抛 `SubagentDepthError` + 系统提示抑制，fake 单测全绿但真机 lane 计数必 0。处置：新增 **Task 0（spike + 产品默认深度注入）**——真实上游函数实测深度机制、确认无侵入注入点、注入 `maxDepth: 2`（R8）+ 开箱回归钉；Task 12 增 `requireMaxDepth()` 预检（< 2 或读不到 ⇒ BLOCKED exit 3）；typo-check SKILL.md 增深度降级条款（单会话多轮自审，严禁伪造双盲）。spec 登记 R8、新增 §4.6、订正 §4.2 C4 深度表述。
+- **N-2（P1，属实且比复审更确定——ask 档 guard 缝必然 deny，非「很可能」）**：处置补强（owner 确认口径，R9）——复审的「单条简单命令」约束**不能解决 ask 档拦截**（ask 档单命令照样被拒），只在 smart 档有意义；故 Task 12 隔离 profile **显式写 guard_mode: "smart"**（不从生产复制）并记入 facts，SKILL.md 增档位降级条款（被拒如实告知切档，不伪造提取结果）+ 命令约束（无 &&/管道/重定向）+ 清理约束（单文件删除或不清理并说明位置）。Task 0 spike 含 ask 档判定实测。spec 登记 R9、§5.1 写明档位依赖。
+- **N-3（P2 探针，描述准确）**：源码层面已部分回答——上游 `manager.ts:1081-1091` ownedChildren 非空 ⇒ 结算 wait，正常时序血缘条目活得到仲裁；残余边缘 = `host.ts:309` 10 分钟清理预算超时路径。Task 11 评审范围 + Task 12 证据节均登记该探针，实测结论落证据。
+- **§3 已核实声明抽查**：description 200 字上限（drafts.ts:54）与 83/76/95 长度重算一致；host.ts:1028 锚点正确；bootCatalog 修正已于上一轮对 M2 先例核实（复审自认未核项，无缺口）。
+
+**7. 终审后订正（2026-11-12，Claude 第三轮终审反证核实；逐条判决见终审文档 §7 与处置节）：**
+
+- **P0-1（属实，已实测复现）**：Task 0 探针改经 workspace 包 `@deepseek-ai/dsh-subagent` 导入（直接 import 子模块 TS 源码因 error.ts 的 `@deepseek-ai/dsh-llm` 运行时依赖必失败，ERR_MODULE_NOT_FOUND 已复现；修正形态已实测 PASS）；profile 组合文件路径订正为 `src/profile.ts`。
+- **P0-2（误报，不改）**：`seeded.push(slug)` 在当前计划文本中位于 `for...of` 循环内；文件 SHA-256 与终审审计基线 `3b4e618e8c40` 一致，终审的最小复现系其自身转录错误。
+- **P0-3（属实）**：Task 9 main() 在首次 bootCatalog 前写 server keyring `dirs.root/keyring.json`（`{schemaVersion:1, keys:[keyring]}`，0600，M2 先例 :1343-1347 同形）；consumer profile 的 keyring 不能替代。
+- **P0-4（属实，上一轮反证自身错误）**：Task 12 lane 观测改原始 v4 字段 `type:'tool/call'` + `data.name`（`kind:'tool-call'` 是 session-view.ts:240-252 派生视图，真实日志已核实 kind 命中恒 0）。
+- **N-4（属实）**：lane 验收改确定性身份链（会话头 parentSession/origin/delegationDepth，真实日志已核实）+ 2 个不同 callId 关联非错误 tool/result + 两 lane 交付证据；禁文本搜索（父子日志都含 @slug）、禁调用计数；降级不 PASS；不可恢复 ⇒ BLOCKED 补观测缝。
+- **N-5（属实）**：Task 13 防覆盖门（目标存在即停止报 owner）+ 完整归档校验（tar -tzf 不截断、逐目录核对成员、损坏归档负例可区分）。
+- **P1 其余**：Task 2 Step 6 扩展既有取消/迟到/幂等/id 复用场景接新 Map（不另造骨架、不手工 delete 冒充生命周期）；Task 3 矩阵 2b 首步模型可见工具表捕获；Task 5 Step 5 pwsh 提取行为测试（pwsh 门控，无环境记 BLOCKED，子串钉不冒充）；Task 10 标中间门禁 + Task 12 Step 5 最终代码树门禁。
+- **P2**：Task 9 exit 3 不可达口径删除；Task 12 `done` 伪终态删除（真实终态 completed/failed/stopped）+ failed/stopped 立即 FAIL；样例落隔离 workspaceRoot 内；Task 8 先全量预检后写盘；Task 0 用户设置保留条件门（工具级覆盖须 owner 单独裁定）；Task 11 评审范围纳 Task 0 diff；Self-Review「完整代码」口径订正；人工输出核对口径（自动 PASS ≠ 内容质量证明）。
+- **2026-11-14 代码复审（qwen4 复审 Minor #2 订正）**：上述 N-2 口径保留为历史记录，R9 与 Task 5 Step 6（`:29`/`:1122`/`:1132`）已按 owner 批准方案 A 订正——提取与清理仍禁 `&&`/管道/重定向，仅步 6 用户明确要求落盘报告文件时允许跨平台单条简单命令写入工作区内路径（macOS/Linux `bash` 单次 `>` 重定向，Windows `pwsh`，禁 `&&`/管道及外部依赖；ask 档或 smart 档 `/[|&;`$]/` 拦截时回退对话输出并如实告知）。
