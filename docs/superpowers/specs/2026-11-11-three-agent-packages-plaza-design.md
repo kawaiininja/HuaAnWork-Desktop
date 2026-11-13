@@ -29,6 +29,7 @@
 | R7 | 原目录删除延后到生产上架完成并稳定运行后；本里程碑只做备份 + 延后项登记，删除仍须 owner 再次明确确认 | 2026-11-12 |
 | R8 | 递归深度方案 B（复审 N-1）：有效递归深度设为恰好 `2`，作为 HuaAnWork **产品默认配置**在 profile 初始化或配置层注入（开箱即用，不依赖用户手工设置；上游零修改）。深度 2 是包子会话（深度 1）派发 lane（深度 2）的最小必要值，lane 再派发深度 3 > 2 被拒，天然封死无限嵌套。SKILL.md 诚实降级：深度不足或派发失败必须如实披露「已降级为单会话多轮自审」，严禁伪造双盲结果 | 2026-11-12 |
 | R9 | typo-check 档位依赖与诚实降级（复审 N-2，owner 确认补强口径）：提取步骤依赖 guard 档位 smart/full——ask 档（产品默认）下包子会话 bash **必然被拒**（guard 缝 deny，无审批界面、交互运行无无人值守白名单）；验收隔离 profile 显式设 smart 档并记录；SKILL.md 命令约束为单条简单命令（无 `&&`/管道/重定向），被拒时如实告知用户切档，不伪造提取结果；清理用单文件删除或不清理并说明临时目录位置 | 2026-11-12 |
+| R10 | 桌面 profile 复挂模型可见的 `tool-subagent` 行（`{ id: 'tool-subagent', disabled: false }`，只翻回该行，不翻回 fork/control/list-agents）：web-app overlay 关闭了宿主平面委派工具，主会话与包子会话的工具表都没有 `subagent`，双盲派发结构性不可达（Task 12 诊断实测）。**后果（显式）**：主会话也获得委派能力，受产品默认 maxDepth 2（R8）约束在同一深度上限；无血缘条目时主会话仍走基线策略，只是工具目录多一行。§4.3 不变量订正为「主会话 subagent 的*工具收窄*行为零变化；工具可见性与委派能力按 R10 放开」；回归钉 `tests/profile.spec.ts`「re-enables the model-facing subagent tool the Web overlay disables」+ 锁行断言（row-assertions / market-composition-order） | 2026-11-13（owner） |
 
 ## 3. 总体架构
 
@@ -85,7 +86,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 ### 4.3 不变量（回归钉必须全部守住）
 
 - 直接包 child 路径正常时序行为零变化（既有 skills/host/present-as 钉子全绿）；C5 对直接子会话同样生效，属有意的安全收紧——首步时序窗内的越权调用从「可能执行」变为「拒绝」，不改已收窄状态下的任何行为。
-- legacy `@agent` 路径零变化；主会话模型自主 subagent 行为零变化（无血缘条目 ⇒ 基线）。
+- legacy `@agent` 路径零变化；主会话 subagent 的*工具收窄*行为零变化（无血缘条目 ⇒ 基线策略）；工具可见性与委派能力按 R10 放开（主会话也获得 `subagent`，受产品默认 maxDepth 2 约束）。原表述「主会话模型自主 subagent 行为零变化」由 R10（2026-11-13，owner）取代，不再是有效不变量。
 - activation parent-mismatch fail-closed 保留。
 - 跨回合隔离：并发回合互不清理对方条目；回合结束后条目清空，复用的会话 id 不继承旧包标志。
 - 孙代永远拿不到 call_host_tool/run_code（基线本就排除）；拿不到未挂载的包运行时工具。
@@ -114,7 +115,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 
 **要求**：有效递归深度恰好 `2`，作为产品默认在 profile 初始化或配置层注入，开箱即用，不依赖用户手工设置；上游子模块零修改。注入点由实施计划 **Task 0 spike** 实测确认（候选：profile 组合中 subagents 插件条目 config、tool-subagent 工具级 maxDepth、Host 设置存储 `subagent.maxDepth` 默认值），必须是 huaanwork 自有面；无论选哪个点，补回归钉断开箱有效值 = 2。若不存在无侵入接入点 ⇒ BLOCKED 报 owner，绝不改上游。**用户设置保留语义（2026-11-12 终审条件项）**：R8 是「产品默认」——profile/Host 默认值路线必须保留已有用户值（缺席 → 2、已有用户值 → 保留）；工具级固定覆盖会绕过 Host 设置（用户无法改），不得静默当作普通默认值，须把覆盖语义与全局影响报 owner 单独裁定。
 
-**全局副作用（如实披露）**：放宽是全局的——主会话自主派发的子代理也可多嵌一层（无血缘会话保持全局基线工具，安全边界不变）。深度 2 下 lane（深度 2）再派发被拒，C4 曾孙代路径攻击面收敛至最小。
+**全局副作用（如实披露）**：放宽是全局的——主会话自主派发的子代理也可多嵌一层（无血缘会话保持全局基线工具，安全边界不变）。深度 2 下 lane（深度 2）再派发被拒，C4 曾孙代路径攻击面收敛至最小。工具可见性后果按 R10（§2）登记：主会话工具目录也复挂 `subagent` 一行。
 
 **诚实降级（写进 SKILL.md）**：环境深度不足或 subagent 派发失败时，智能体必须向用户如实披露「当前环境递归深度不足，已降级为单会话多轮自审」，严禁伪造「双盲」结果。
 
@@ -186,7 +187,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 ## 7. 验证计划
 
 0. **Spike 先行（Task 0，复审进入条件）**：实测验证 N-1（默认 depth=1 抛 `SubagentDepthError` + 产品默认 `maxDepth: 2` 的无侵入接入点与生效状态）与 N-2（ask 档包子会话 `textutil` 的实际判定），结论写入证据文档后才进入 Task 1–14。
-1. **单元测试**：§4.4 全矩阵 + 三包 manifest 校验/预算断言 + 播种/发布脚本自测 + **产品默认深度回归钉（开箱有效 maxDepth = 2，R8）**。
+1. **单元测试**：§4.4 全矩阵 + 三包 manifest 校验/预算断言 + 播种/发布脚本自测 + **产品默认深度回归钉（开箱有效 maxDepth = 2，R8）** + **R10 复挂钉（`tool-subagent` 组合行 `disabled: false`，主会话获得委派、maxDepth 2 约束；锁行断言同步）**。§4.4 第 7 项「主会话 subagent」钉的是*工具收窄*行为（无血缘条目 ⇒ 基线），工具可见性按 R10 放开，两者不矛盾。
 2. **门禁**：`corepack yarn typecheck`、`corepack yarn test`、`corepack yarn check` 全量；**最终门禁必须在最终代码树上执行**（独立评审修复与真机脚本落盘后重跑，中间门禁不能替代；2026-11-12 终审订正）；`verify:aa` 并发竞态为已登记既有 flaky，失败时隔离重跑并如实记录。
 3. **真机走查（CDP）**：用 open-latest-huaanwork 最新构建——**前置检查：有效 maxDepth ≥ 2（不满足 ⇒ BLOCKED exit 3）；隔离 profile 显式设定 guard_mode = smart 并记录（R9）；验收样例落隔离 workspaceRoot 内（工作区外 read/glob 被策略拒绝）**；广场出现三张中文名卡；详情对话框披露正确（未安装=包信息+「安装后可查看签名与文件清单」；已安装=验签结果：通过+工具「无」+沙箱警告；签名包无安装/启用确认对话框，2026-11-12 订正）；用**验收专用样例 docx**（脚本生成，含已知错别字；不用真实基金报告）跑通 typo-check，**双盲验收判据（2026-11-12 终审 N-4）：经会话头身份链（parentSession/origin/delegationDepth）定位包 child 与两个 lane，2 个不同 callId 关联非错误结果 + 两 lane 交付证据；禁文本搜索与调用计数，任何派发失败或诚实降级不得计为双盲 PASS，不可恢复 ⇒ BLOCKED 补观测缝**；顺带实测 N-3 探针（lane 存活期与清理时序）；code-review 审一段样例代码；task-orch 拆解一个样例复杂任务（如「为市场模块增加离线缓存」）并产出含依赖与验收标准的计划。**模型输出为人工核对事实（自动 PASS 只代表流程与机制通过，不宣称内容质量经过自动证明）**。
 4. **独立评审**：运行时扩展（skills/policy/host/runtime/holders）走 requesting-code-review，结论经反证与严重度校准。

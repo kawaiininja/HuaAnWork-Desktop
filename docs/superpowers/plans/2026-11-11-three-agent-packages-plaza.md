@@ -642,6 +642,8 @@ test("great-grandchild inherits the same narrowing transitively", async () => {
 });
 
 // 矩阵 7（基线）：无血缘条目的主会话 subagent 行为零变化。
+// （历史口径，2026-11-13 owner 裁定 R10 订正：零变化的是*工具收窄*行为；
+//   工具可见性与委派能力按 R10 放开，见 spec §2 R10 与 §4.3 订正。本钉本身不变。）
 test("a session without a lineage entry keeps its baseline tools", async () => {
   const h = lineageHarness();
   h.childAllow.clear();
@@ -808,7 +810,7 @@ Expected: FAIL — 孙代 schemas 仍为基线全量（血缘分支未实现）�
 - [ ] **Step 4: 跑新测试 + 既有 skills 钉子确认绿**
 
 Run: `corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-guardrails/package-subagent-lineage.spec.ts tests/huaanwork-guardrails/skills.spec.ts`
-Expected: PASS — 八项矩阵全绿；既有 skills.spec.ts **零改动**全绿（矩阵 7：legacy 与主会话行为不变）。
+Expected: PASS — 八项矩阵全绿；既有 skills.spec.ts **零改动**全绿（矩阵 7：legacy 与主会话行为不变）。（历史口径：矩阵 7 的「主会话行为不变」指*工具收窄*行为；工具可见性与委派能力按 2026-11-13 owner 裁定 R10 放开，见 spec §2 R10 与 §4.3 订正，不静默改写本行历史。）
 
 - [ ] **Step 5: Commit**
 
