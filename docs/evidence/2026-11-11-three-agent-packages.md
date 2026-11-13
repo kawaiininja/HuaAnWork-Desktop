@@ -813,3 +813,73 @@ task-orch 的 `read(err)` 是对二进制 `sample.docx` 的 read（read 工具�
 | `corepack yarn check` | **0** | 含 build/verify:* 与 verify:aa（in-check 直接通过，无并发竞态）；日志 `/tmp/reviewfix-check.log` |
 
 改动面：4 文档（spec/plan/runbook/evidence）+ 走查脚本 import + 2 新文件（降级模块 + 回归钉）；**src/ 与三包 SKILL 源文件零改动**。本波次未提交、未推送；生产上架/Windows CI run/原目录删除仍守 R6/R7/R-ACCEPT-1 边界。
+
+---
+
+## 安全加固波次（2026-11-13，五项加固 + 独立评审 + 最终门禁 + 债表闭环）
+
+计划 `docs/superpowers/plans/2026-11-13-agent-package-hardening.md`；基线 `fe20dbfd47`（波次排期提交），最终代码树 `01a402cbbd`。五项全部落 huaanwork 自有面（`dsh-plugin-huaanwork/src/**` 与 `tests/**`）；上游 `deepseek-harness/` 子模组 pin `1600d8a1e14`（rc.1）**零修改**；三包 SKILL 源文件、manifest schema、生产 profile/密钥/原目录均未动（R6/R7/R-ACCEPT-1 边界不变）。
+
+### 裁定与校准（owner 2026-11-13）
+
+- **I3 = 字段级合并**：组合后 subagent config 缺 `maxDepth` 时补产品默认 2，用户已写值保留；**必须门控 `hooks.profilePatches === undefined`**——否则破 config-editor 的 fail-closed 写入校验（`dsh-config-editor`:122 要求组合 config 逐字等于待写 raw config）。
+- **N-3 = C5 条目延后到子会话终止**：资源清理仍按预算释放；血缘/C5 条目不在预算耗尽时清，改绑 `activation.result` 权威结算。
+- **M6 = characterization-only（dormant）**：原评审列为「id 对齐」，经反证为 dormant/不可达（见下节）；落 characterization 钉、不改读侧；防御性对齐列为可选延后项（需 owner 另裁边界）。
+- **范围 = 全 5 项一波**，按依赖/风险排序：C4 → holder → M6 → N-3 → I3 → 评审/门禁/登记。
+
+### 五项：commit 与机制
+
+| 项 | commit | 机制 |
+| --- | --- | --- |
+| C4 childId fail-closed（Task 1） | `73a8e99955` + `6c0be22e7d` | activation/start 两血缘入口在 childId 不可解析时抛 `subagent lineage child id missing`；activation 先 dispose 再抛；start 路径经评审裁定补 `await run?.dispose?.()` 后抛（与 activation 同形，不留持基线工具的孤儿子 run）。mainstream 不可达（上游契约保证 childId），属纵深防御，与 parent-mismatch fail-closed 同形。 |
+| dispatch holder required（Task 2） | `650094f794` | `AgentPackageDispatchContext.huaanworkPackageChildAllow` 改 required；dispatch 入口在建 run 之前对缺席 holder 响亮拒绝（`host.ts:526-528`，与 run 登记表缺席拒绝同形）。14 处测试 harness 注入 holder。 |
+| M6 id 不对称 characterization（Task 3） | `3add2b95ab` | 两枚 characterization 钉描述当前行为（按计划应直接绿，非红绿特性）；读侧 `sessionIdOfAgentRef` 零改动；第二钉是延后防御性对齐的触发探针。 |
+| N-3 血缘清理延迟到终止（Task 4） | `6599d03a1a` | `clearTurnLineage`（按本回合 allow 引用同一性清，跨回合隔离）+ `activationResultSettled`（权威结算标志）+ `lineageClearDeferred`（仅延迟真发生时观察者才补清）；预算耗尽的清理不再清未结算子会话的条目，`activation.result` 观察者在真正终结时补清；取消分支仍立即清（既有取消契约）。 |
+| I3 maxDepth 字段级产品默认（Task 5） | `01a402cbbd` | 组合后仅在 `maxDepth` 缺席时按字段补 `DESKTOP_SUBAGENT_MAX_DEPTH`（2），spread 保留用户字段；门控 `hooks.profilePatches === undefined`（editor pending-write 校验路径不补默认）；真实 boot/HMR/包操作才应用。 |
+
+### TDD 纪律（逐项先红后绿 + mutation 校验）
+
+- Task 1：RED→GREEN（required 51/51 + sweep 154/154，typecheck 0）；评审 Important #1（start throw 孤儿化已启动子 run）由 `6c0be22e7d` 修复。
+- Task 2：RED→GREEN（runtime 58/58 + ripple 98/98 + sweep 1404 passed/3 skipped，typecheck 0）；holder-absent 钉以 cast 删除 holder 构造。
+- Task 3：characterization 按计划 mandate 直接绿；评审者独立逐行核实写侧调用点（`skills.ts:328/:354`）与上游不变量；钉 2 可判别读侧改动。
+- Task 4：RED→GREEN（runtime 60/60 + 4 specs 75/75，typecheck 0）；mutation 证明观察者半边 load-bearing；两处对 brief 字面条件的必要偏离（`lineageClearDeferred` 标志、`|| cancelRequested`）经裁定接受——否则破 3 枚既有钉。
+- Task 5：RED→GREEN（profile 65/65 + adjacent 65/65，typecheck 0）；双钉均 mutation-proven；editor 门控在 `dsh-config-editor:122` 核实；旧弱默认边界钉改写为 sibling-only→2（净 +8 tests = 9 新增 − 1 改写）。
+
+### M6 dormant 校准（反证，读侧不改）
+
+两条上游不变量封死写读恒等：① `Session.id` 是 `header.id` 的 getter（`dsh-session`，`deepseek-harness/packages/core/session/src/index.ts` `get id()` :546-548）；② `Agents.enter` 在 `agent.id !== agent.session.id` 时直接抛，注册即强制相等（`dsh-agent`，`deepseek-harness/packages/core/agent/src/index.ts` `enter()` :461-465）。⇒ 任何真实注册 Agent 上，写侧 `sessionIdOf`（`skills.ts:567-574`，调用点 :328/:354 先取 `run.localAgent.session?.header`）与读侧 `sessionIdOfAgentRef`（`packages/huaanwork-policy/src/channels.ts:2-7`，C5 消费点 `policy.ts:108/:129`）解析出同一个 id，血缘 lookup 不会因 id 形状 miss。不对称只在合成 ref（session 无 id、agent.id 另有其值）上显形，该形状没有任何注册 Agent 能取到。两钉以 fixture 建模上游 getter、不 import 真实 Session/Agent ⇒ 上游若放宽 ①/② 不会自动变红，那一侧只能靠上游同步评审发现。**延后项（owner 裁定）**：防御性读侧对齐（让 `sessionIdOfAgentRef` 也回落 header.id）不做——dormant + blast radius 9+ 消费模块，且该函数住在 `packages/huaanwork-policy/`（本包 src 之外）；导出写侧 `sessionIdOf` 做全执行钉同样需 owner 另裁（characterization-only 裁定禁止生产导出）。
+
+### 最终门禁（最终树 `01a402cbbd`，controller 实跑）
+
+| 命令 | 退出码 | 摘要 |
+| --- | --- | --- |
+| `corepack yarn typecheck` | **0** | 日志 `/tmp/hardening-typecheck.log` |
+| `corepack yarn test` | **0** | dsh-plugin-huaanwork `3985 passed \| 15 skipped (4000)`、`285 passed \| 4 skipped (289)` 文件（较评审修复波次 +8 tests、文件数不变）；其余 4 workspace `303 / 244 / 88 / 80 passed`（community-market / market-server / update-server / agent-catalog-server）；日志 `/tmp/hardening-test.log` |
+| `corepack yarn check` | **0** | 含 build/verify:* 与 verify:aa（in-check 直接通过，无并发竞态）；日志 `/tmp/hardening-check.log` |
+
+门禁树 = `01a402cbbd`；其后 `c9f5fd28ee`（测试注释）与本证据/债表提交均非构建面改动，不参与门禁。
+
+### I3 瞬态集成核实：BLOCKED
+
+Task 6 Step 3 要求真实走 ConfigEditor.edit 清除 maxDepth（同族字段在场），断言不抛 "overridden by a home patch"，并核实「清除后立即派 lane」是否撞瞬态 maxDepth=1（editor 写后到下次磁盘重组的窗口）。本会话无真机/集成环境 ⇒ **BLOCKED，不声称已验证**。单元层钉（boot sibling-only→2 + editor 门控不补默认）绿；瞬态窗口登记为残余（见下与 AGENTS.md I3 行）。
+
+### 最终整支评审与 M-1 处置
+
+- 评审范围 `fe20dbfd47..01a402cbbd`：**0 Critical、0 代码级 Important**；五项实现独立核实（N-3 状态机在所有时序下收敛、绝不早于旧行为清；I3 门控精确且 memory-only；C4 mainstream 不可达确认；M6 dormant 锚点在钉住的 rc.1 上逐行核实；上游零修改）。
+- I-1（Important，plan-alignment）：Task 6 闭环（门禁 + 证据 + 债表 + 残余登记）= 合并前置；门禁部分由 controller 实跑满足，其余由本节与 AGENTS.md 闭环。
+- M-1（Minor，已修）：`package-subagent-lineage.spec.ts:301-302` 陈旧注释「start 路径无 activation.dispose，由调用方错误路径收尾」与 `6c0be22e7d` 已实施行为矛盾 ⇒ 订正为「start 路径与 activation 分支同形：先 dispose 已启动的子 run，再 fail-closed 抛出」（commit `c9f5fd28ee`，comment-only、断言零改动）。聚焦复跑 `corepack yarn workspace dsh-plugin-huaanwork exec vitest run tests/huaanwork-guardrails/package-subagent-lineage.spec.ts`：**14 passed (14)，EXIT=0**。
+
+### 残余与边界（如实登记，非阻断）
+
+1. **N-3 永久卡死子会话**：result 永不结算 ⇒ 血缘条目常驻至 Host teardown。安全正确取舍——条目数受真实存活子会话数上界约束，优于在子会话仍运行时失去 C5。触发条件：result 永不结算。
+2. **N-3 cancel + dispose-timeout 角（pre-existing）**：取消 + dispose 超时（子会话可能仍存活）仍按既有取消契约立即清 C5——既有取消钉（`agent-package-runtime.spec.ts` "cancelling during startActivation disposes the selected late activation only"，:1592 断言取消回合条目必须已清）强制立即清；改它 = 改取消契约，需 owner 另裁。本波次已收紧其余路径，仅「cancel AND dispose-timeout AND child alive」这一角 fail-open。
+3. **I3 瞬态窗口**：editor 清除/unset 且同族字段在场后，有效 maxDepth=1 直到下次磁盘重组（HMR/boot/包操作）。fail-closed 方向（1 比 2 严；最坏 `SubagentDepthError`，非沙箱绕过）。真机行为 **BLOCKED/未验证**；触发条件：真机/集成环境可用时按 Task 6 Step 3 核实。
+4. **M6 防御性读侧对齐延后**：dormant；导出写侧 `sessionIdOf` 做全执行钉需 owner 裁定（见上节）。
+5. **M2/Windows 验收脚本缺 holder（pre-existing）**：`huaanwork-agent-package-m2-acceptance.mjs`（`dispatchHttpTurn` ctx）与 `huaanwork-agent-package-windows-acceptance.mjs`（dispatch ctx）都缺 `huaanworkSubagentRuns` 与 `huaanworkPackageChildAllow`——基线在 registry 门即红（`host.ts:523` "subagent run registry is not initialized"，波次基线 `fe20dbfd47` 已存在的断言，非本波次引入）；holder required 化后缺 holder 另会在 `host.ts:526-528` 被拒。**重跑这两个验收脚本前必须先注入两个 holder**。
+6. **下一波候选：Face 接缝类型**：AgentInvokeContext/Face 接缝未携带 required holder 类型——编译期强制只覆盖直接消费方（`AgentPackageDispatchContext`），运行时入口断言是兜底。
+
+### 改动面与提交
+
+- 实现 6 提交（`73a8e99955` / `6c0be22e7d` / `650094f794` / `3add2b95ab` / `6599d03a1a` / `01a402cbbd`）+ M-1 注释修复（`c9f5fd28ee`）+ 本证据/债表闭环提交。
+- src 改动面：`skills.ts`（C4 两入口 fail-closed + start dispose）、`host.ts`（holder required + N-3 延迟清）、`profile.ts`（I3 字段级默认）；其余皆 tests/docs。上游子模组、三包 SKILL 源文件、manifest 零改动。
+- 本波次已提交、未推送；生产上架/Windows CI run/原目录删除仍守 R6/R7/R-ACCEPT-1 边界。
