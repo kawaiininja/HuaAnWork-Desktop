@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "vitest";
+import { afterEach, expect, test } from "vitest";
+
+import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 
 import { resetChildSessionRegistry } from "../../src/huaanwork-host/child-sessions.ts";
 import { HUAANWORK_LEGACY_AGENT_REQUEST } from "../../src/huaanwork-host/subagents-service.ts";
@@ -332,4 +334,36 @@ test("two package lineages stay isolated by reference", async () => {
   assert.deepEqual(toolsB.schemas().map((schema) => schema.name), ["read", "grep"]);
   assert.equal(h.childAllow.get(h.grandchildId), h.allow);
   assert.equal(h.childAllow.get("grandchild-b"), allowB);
+});
+
+// M6（加固波次 Task 3）：id 不对称经反证为 **dormant / 真实不可达**，本段只落 characterization 钉，
+// 不改读侧。曾被记为「C4 写侧按 session.header.id 建血缘键、C5 读侧按 session?.id ?? id 取键」的
+// 不对称，被两条上游不变量封成写读恒等：
+//   ① `Session.id` 就是 `header.id` 的 getter（@deepseek-ai/dsh-session，
+//      deepseek-harness/packages/core/session/src/index.ts `get id()` :546-548）；
+//   ② `Agents.enter` 在 `agent.id !== agent.session.id` 时直接抛，注册即强制两者相等
+//      （@deepseek-ai/dsh-agent，deepseek-harness/packages/core/agent/src/index.ts `enter()` :461-465）。
+// ⇒ 任何真实注册 Agent 上，写侧 `sessionIdOf`（skills.ts `sessionIdOf` :567-574，调用点 :328/:354
+//   先取 `run.localAgent.session?.header`）与读侧 `sessionIdOfAgentRef`
+//   （packages/huaanwork-policy/src/channels.ts `sessionIdOfAgentRef` :2-7，C5 消费点 policy.ts :108/:129）
+//   解析出同一个 id，血缘 lookup 不会因 id 形状 miss。不对称只在合成 ref 上显形，
+//   而那种形状（session 无 id、agent.id 另有其值）没有任何注册 Agent 能取到。
+// 下面两钉描述**当前行为**，按计划应直接绿；不是待修缺陷的红灯，也不得为凑绿而改读侧。
+// 两钉以 fixture 建模上游 getter，不 import 真实 Session/Agent ⇒ 上游若放宽 ①/② 不会自动变红，
+// 那一侧只能靠上游同步评审发现。
+// 延后项（owner 裁定）：防御性读侧对齐（让 `sessionIdOfAgentRef` 也回落 header.id）**不做** ——
+// dormant + blast radius 9+ 消费模块，且该函数住在 packages/huaanwork-policy/（本包 src 之外），
+// 要动须另裁边界。第二钉即该延后项的触发探针：读侧一旦改成优先 header.id 它就红（返回 real-child），
+// 那是行为变更信号，须重开裁定而非静默改钉。
+test("M6 characterization: writer header.id and reader session.id converge for a real Agent", () => {
+  const header = { id: "child-uuid" };
+  const session = { header, get id() { return this.header.id; } };
+  const agent = { id: "child-uuid", session };
+  expect(sessionIdOfAgentRef(agent as never)).toBe("child-uuid");
+  expect(header.id).toBe(session.id); // 上游不变量 ⇒ 无 miss
+});
+
+test("M6 latent asymmetry only manifests for a synthetic ref no registered Agent can take", () => {
+  const synthetic = { id: "other", session: { header: { id: "real-child" } } };
+  expect(sessionIdOfAgentRef(synthetic as never)).toBe("other"); // 读侧 miss real-child（真实不可达）
 });
