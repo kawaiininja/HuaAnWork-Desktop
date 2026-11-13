@@ -30,6 +30,7 @@
 | R8 | 递归深度方案 B（复审 N-1）：有效递归深度设为恰好 `2`，作为 HuaAnWork **产品默认配置**在 profile 初始化或配置层注入（开箱即用，不依赖用户手工设置；上游零修改）。深度 2 是包子会话（深度 1）派发 lane（深度 2）的最小必要值，lane 再派发深度 3 > 2 被拒，天然封死无限嵌套。SKILL.md 诚实降级：深度不足或派发失败必须如实披露「已降级为单会话多轮自审」，严禁伪造双盲结果 | 2026-11-12 |
 | R9 | typo-check 档位依赖与诚实降级（复审 N-2，owner 确认补强口径）：提取步骤依赖 guard 档位 smart/full——ask 档（产品默认）下包子会话 bash **必然被拒**（guard 缝 deny，无审批界面、交互运行无无人值守白名单）；验收隔离 profile 显式设 smart 档并记录；SKILL.md 命令约束为单条简单命令（无 `&&`/管道/重定向），被拒时如实告知用户切档，不伪造提取结果；清理用单文件删除或不清理并说明临时目录位置 | 2026-11-12 |
 | R10 | 桌面 profile 复挂模型可见的 `tool-subagent` 行（`{ id: 'tool-subagent', disabled: false }`，只翻回该行，不翻回 fork/control/list-agents）：web-app overlay 关闭了宿主平面委派工具，主会话与包子会话的工具表都没有 `subagent`，双盲派发结构性不可达（Task 12 诊断实测）。**后果（显式）**：主会话也获得委派能力，受产品默认 maxDepth 2（R8）约束在同一深度上限；无血缘条目时主会话仍走基线策略，只是工具目录多一行。§4.3 不变量订正为「主会话 subagent 的*工具收窄*行为零变化；工具可见性与委派能力按 R10 放开」；回归钉 `tests/profile.spec.ts`「re-enables the model-facing subagent tool the Web overlay disables」+ 锁行断言（row-assertions / market-composition-order） | 2026-11-13（owner） |
+| R11 | 工作区边界语义与 shell 兜底合法化（评审 #2，owner 选 B）：`read/read_file/glob/grep/edit/write` 受会话工作区包含约束（`pathsAreInside`）；`bash/pwsh` 走 `decideShell`，受 guard 档位（smart/full）与元字符/高危/灾难命令门控，但**不受工作区包含约束**。code-review/task-orch 主工作流用 read/glob/grep（不依赖 maxDepth/guard）；工作区外目标允许 smart/full 档经 bash/pwsh 读取，ask 档诚实降级（请用户重开工作区或切档），不伪造读取结果。SKILL「工作区边界」节如实披露此语义（§5.2/§5.3）；typo-check 用 bash/pwsh 做提取（§5.1），不含该兜底节。 | 2026-11-13（owner） |
 
 ## 3. 总体架构
 
@@ -95,7 +96,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 ### 4.4 测试矩阵（新增 `tests/huaanwork-guardrails/package-subagent-lineage.spec.ts` 等）
 
 1. allow 名单含 subagent（darwin 与 win32 两种平台形态）。
-2. 孙代 schemas 收窄为 pkg.allow ∩ schemas；首步有效工具表断言（fake provider 捕获）。
+2. 孙代 schemas 收窄为 pkg.allow ∩ schemas（activation 后 `schemas()` 断言）；首步时序窗由 C5 执行期拒绝封死（第 4 项）。原「fake provider 首步捕获」口径经 M1 裁定订正：真实首条模型请求可能在包装之前组装，该窗口由 C5 覆盖，不以事后 schemas 冒充首步证据。
 3. 传递性：曾孙代同样收窄。
 4. 执行期强制：血缘会话调用 allow 外工具被 policy 拒绝（即使 schemas 尚未收窄）。
 5. 跨包隔离：A 包血缘不拿 B 包 allow；并发回合引用清理互不影响。
@@ -131,7 +132,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 - 能力披露：包实际允许名单 = read/read_file/glob/grep/bash（win32 为 pwsh）/subagent；广场签名卡展示 displayName/description/version/size（`catalogPackageCard` 无 capabilities 字段，已核实）。**披露面是详情对话框，不是安装/启用对话框**（2026-11-12 订正：签名包没有安装/启用确认对话框——安装=直接「下载」按钮，启用=直接开关）：未安装详情显示包信息 + 「安装后可查看签名与文件清单」；已安装详情显示验签结果、工具模式（`tools.mode:"none"` ⇒ 「无」）与沙箱警告。允许名单本身不在 UI 逐项展示，能力边界如实写进 description 与 SKILL.md。
 - Qoder 侧 `superpowers:dispatching-parallel-agents` 属另一套技能体系，包无法引用；双盲派发模式写进 SKILL.md 文本。
 - 调用提示（2026-11-12 评审 P2-1 处置）：@ 派发只认 slug，中文 displayName 不能作唤醒词；每包 description 末尾带「用 @slug 调用。」，SKILL.md 开头带调用行（`@slug <参数形态>`），让用户在广场卡与详情里都能看到真实调用词。
-- 运行环境依赖（2026-11-12 复审处置，R8/R9）：typo-check 的双盲派发依赖有效 `maxDepth ≥ 2`（产品默认注入，§4.6），提取步骤依赖 guard 档位 smart/full（ask 档诚实降级，§5.1）；code-review 与 task-orch 只用 read/glob/grep，不依赖这两项。环境不满足时 SKILL.md 必须如实披露降级，严禁伪造双盲或提取结果。
+- 运行环境依赖（2026-11-12 复审处置，R8/R9）：typo-check 的双盲派发依赖有效 `maxDepth ≥ 2`（产品默认注入，§4.6），提取步骤依赖 guard 档位 smart/full（ask 档诚实降级，§5.1）；code-review 与 task-orch 主工作流只用 read/glob/grep（不依赖 maxDepth/guard）；工作区外目标允许 smart/full 档经 bash/pwsh 兜底读取（R11，§5.2/§5.3），ask 档诚实降级。环境不满足时 SKILL.md 必须如实披露降级，严禁伪造双盲或提取结果。
 
 ### 5.1 错别字检测（slug: `typo-check`）
 
@@ -156,6 +157,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 - SKILL.md 工作流：read/glob/grep 读目标代码 → 按 REVIEW_SPEC 逐项审查 → 大文件条件分块（同 5.1 阈值策略）→ 输出按严重度（阻断/重要/建议）分级的发现：位置、问题、证据、修复建议。
 - 规格来源：原项目 `代码审查智能体/src/spec.ts` 的 REVIEW_SPEC 逐节移植（保留审查维度/严重度定义/输出格式，剔除服务与 HTTP 相关内容）。
 - 无运行时依赖，不需要 subagent（单会话审查；双盲不引入，YAGNI）。
+- 工作区边界（R11，写进 SKILL.md）：read/glob/grep 只允许会话工作区内路径；工作区外目标请用户把该文件夹作为工作区打开，或 smart/full 档经 bash/pwsh 读取（ask 档无审批界面必然被拒，诚实降级）；不伪造读取结果。
 
 ### 5.3 任务编排（slug: `task-orch`）
 
@@ -169,6 +171,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
   4. 按用户反馈迭代修订。
 - 方法论来源：原项目 `docs/任务编排智能体-系统化说明书.md`、`docs/任务编排智能体-工程实践指南.md` 与 types.ts 调度/重试/监控模型蒸馏。
 - 边界（写进 SKILL.md）：只出计划不执行——无定时触发、无运行监控、不自动派发其他智能体；执行由用户或主会话驱动。
+- 工作区边界（R11，写进 SKILL.md）：read/glob/grep 只允许会话工作区内路径；工作区外项目请用户把该文件夹作为工作区打开，或 smart/full 档经 bash/pwsh 读取（ask 档诚实降级）；读不到的代码/文档不假设其存在，计划中相应事实标注待核实。
 
 ## 6. 广场接入
 
@@ -208,6 +211,7 @@ startActivation 包装在既有 pkg/legacy 分支之外新增血缘分支：本�
 - 孙代不挂包运行时（agent_http/agent_skill_run/MCP）；后续如需另立裁定。
 - 生产签名与生产目录退役为 owner 运维动作。
 - 原三个项目的代码不移植（仅蒸馏提示词/规格/方法论）；服务依赖（Python/node:sqlite 等）全部不引入。
+- 工作区边界对文件工具（read/read_file/glob/grep/edit/write）是硬约束，对 bash/pwsh 非硬约束（shell 受档位门控、不受工作区包含约束，R11）；code-review/task-orch 的工作区外 shell 兜底据此合法化，不视为沙箱绕过缺陷。
 
 ## 10. 文件改动清单（预估）
 

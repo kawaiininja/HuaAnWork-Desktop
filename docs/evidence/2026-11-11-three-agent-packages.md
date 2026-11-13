@@ -259,11 +259,11 @@ scratch（未提交）：`/tmp/typo-plaza-spike/{depth-probe.mjs,ask-tier-probe.
 
 | slug | displayName | description（字符/UTF-8 字节） | manifest 规范化 JSON B | persona B | SKILL.md B | `agentPackageBytes` 整包 B | 上限 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `typo-check` | 错别字检测 | 83 / 211 | 677（源文件 `agent.json` 661 B） | 536 | 8433 | 9646 | persona/SKILL 各 32768；整包 5242880 |
-| `code-review` | 代码审查 | 76 / 200 | 674（源文件 658 B） | 432 | 2771 | 3877 | 同上 |
-| `task-orch` | 任务编排 | 95 / 231 | 694（源文件 678 B） | 477 | 4156 | 5327 | 同上 |
+| `typo-check` | 错别字检测 | 83 / 211 | 677（源文件 `agent.json` 661 B） | 536 | 9904 | 11117 | persona/SKILL 各 32768；整包 5242880 |
+| `code-review` | 代码审查 | 76 / 200 | 674（源文件 658 B） | 432 | 3159 | 4265 | 同上 |
+| `task-orch` | 任务编排 | 95 / 231 | 694（源文件 678 B） | 477 | 4607 | 5778 | 同上 |
 
-测量方法（本节实测，exit 0）：`agent-package-sources.spec.ts` 的 `stays within store budgets` 只断言 ≤ 上限、不打印数值；本表字节用 `src/huaanwork-host/agent-package/store.ts` 的 `agentPackageBytes()`（`JSON.stringify(manifest, null, 2) + "\n"` + persona + skill）与 `parseAgentPackageManifest()` 对 `dsh-plugin-huaanwork/agent-packages/{slug}/` 逐包实测。上表 manifest 列即该函数使用的规范化字节数（源文件 B 数另列，二者差在 JSON 重排与尾换行）。上限常量：`MAX_PERSONA_BYTES = MAX_SKILL_BYTES = 32768`、`MAX_PACKAGE_BYTES = 5242880`（`store.ts:37-43`）。三包整包分别占上限 0.18% / 0.07% / 0.10%，persona 与 SKILL.md 均在各自 32 KiB 内（SKILL.md 最紧的是 typo-check，25.7%）。与 Task 8 报告记录的 9646 / 3877 / 5327 一致。
+测量方法（本节实测，exit 0）：`agent-package-sources.spec.ts` 的 `stays within store budgets` 只断言 ≤ 上限、不打印数值；本表字节用 `src/huaanwork-host/agent-package/store.ts` 的 `agentPackageBytes()`（`JSON.stringify(manifest, null, 2) + "\n"` + persona + skill）与 `parseAgentPackageManifest()` 对 `dsh-plugin-huaanwork/agent-packages/{slug}/` 逐包实测。上表 manifest 列即该函数使用的规范化字节数（源文件 B 数另列，二者差在 JSON 重排与尾换行）。上限常量：`MAX_PERSONA_BYTES = MAX_SKILL_BYTES = 32768`、`MAX_PACKAGE_BYTES = 5242880`（`store.ts:37-43`）。三包整包分别占上限 0.21% / 0.08% / 0.11%，persona 与 SKILL.md 均在各自 32 KiB 内（SKILL.md 最紧的是 typo-check，30.2%）。**字节订正（评审 Minor，2026-11-13）**：SKILL.md 在修复波次（`2cf3dafcd5`，工作区边界节 + pwsh 处方硬化）增大，本表已按最终树用 `agentPackageBytes()` 重测（SKILL 9904/3159/4607、整包 11117/4265/5778）；Task 8 报告原记 9646/3877/5327 是修复前值，manifest 与 persona 字节不变。
 
 ### 10.3 播种与广场发布验证
 
@@ -318,7 +318,7 @@ spec §5.0/§7.3 已于 2026-11-12 同步订正；本里程碑**不伪造对话�
 
 - **win32 allow 形态（已覆盖）**：`tests/huaanwork-host/agent-package-runtime.spec.ts` 的 `includes subagent for both platform shells` 强制 `process.platform` 为 `darwin` 与 `win32`，断言两种 allow 数组分别以 `bash`/`pwsh` 后接 `subagent`；全量门禁绿。
 - **pwsh 提取行为（本机 BLOCKED）**：`tests/huaanwork-host/typo-check-pwsh-extract.spec.ts` 共 2 条；本机 `2 tests | 1 skipped` —— 提取行为用例因 `spawnSync('pwsh', ['-Version'])` 返回 `ENOENT`（`powershell` 亦不存在）如实跳过并打印原因；另一条 fixture 完整性用例在两平台实际执行并通过。即：`System.IO.Compression` + `HtmlDecode` + UTF-8 无 BOM 的提取处方**在本机从未被执行**，不得声称已验证。
-- **真机项 BLOCKED（R-ACCEPT-1 豁免先例）**：无第二台 Windows 机器，不声称跨机器/跨 OS 通过。Windows CI 的 `check:win-package:platform` 测试清单（`dsh-plugin-huaanwork/package.json`）不含上述 pwsh 提取 spec，故该行为目前**没有任何 Windows 执行证据**。触发条件：有 pwsh 的主机显式运行该 spec；获得第二台 Windows 机器时按 R-ACCEPT-1 证据 §4 四步补跑。
+- **真机项 BLOCKED（R-ACCEPT-1 豁免先例）**：无第二台 Windows 机器，不声称跨机器/跨 OS 通过。Windows CI 的 `check:win-package:platform` 测试清单（`dsh-plugin-huaanwork/package.json`）不含上述 pwsh 提取 spec，故该行为目前**没有任何 Windows 执行证据**。触发条件：有 pwsh 的主机显式运行该 spec；获得第二台 Windows 机器时按 R-ACCEPT-1 证据 §4 四步补跑。**后续状态见 §12.12.10**：该 spec 已于修复波次（`2cf3dafcd5`）列入 `check:win-package:platform`，并新增 classifyShell 元字符自由钉（共 3 条；上条「共 2 条」是 Task 10 树时点状态）。「不含」只是本节登记时点的状态；列入≠已执行——本分支未推送，暂无 Windows CI run。
 
 ### 10.7 待补（后续任务完成后回填）
 
@@ -480,7 +480,7 @@ run 2 在同一最终树上把**全部机制判据**跑通（两条 depth 2 lane
 
 ### 12.9 最终门禁（原始轮：代码树 `a48e71a47c` + 本证据文档未提交）
 
-> 这是**评审修复轮之前**的门禁记录，保留为历史。修复轮（脚本 + 本证据文档）在最终树上重跑的门禁见 §12.11.6。
+> 这是**评审修复轮之前**的门禁记录，保留为历史。修复轮（脚本 + 本证据文档）在最终树上重跑的门禁见 §12.11.7（§12.11.6 是人工核对结论，非门禁）；该轮门禁又被 §12.12.8 取代。
 
 | 命令 | 退出码 | 摘要 |
 | --- | --- | --- |
@@ -578,6 +578,8 @@ run B 的失败是**断言精度缺陷**，不是产品/机制失败，也不是
 
 ### 12.11.7 最终门禁（最终树，本轮脚本 + 本证据文档）
 
+> 历史标记（评审 Minor 订正）：本节门禁已被 §12.12.8（修复波次最终树）取代，保留为历史。
+
 | 命令 | 退出码 | 摘要 |
 | --- | --- | --- |
 | `corepack yarn typecheck` | **0** | 日志 `/tmp/task12fix-final-typecheck.log` |
@@ -627,7 +629,7 @@ run B 的失败是**断言精度缺陷**，不是产品/机制失败，也不是
 | run A | `/tmp/three-packages-accept-4`（首次） | **1 FAIL** | 移除「新建任务」点击后丢失其导航副作用：步骤 5 后停在智能体面板，composer 不在场（`hasComposer:false`），`waitForComposerIdle` 超时。脚本缺陷，非产品缺陷 |
 | run B | 同上（第二次） | **3 BLOCKED** | 改回「新建任务」+ 相对路径 + 拷样例后，子会话归因只查**首条** user/message，而首条是系统「working directory changed」通知，派发 prompt 在后续 user/message ⇒ 匹配 0。用 `--keep-root` 保留隔离根实证后改为查**所有** user/message |
 | run C | 同上（第三次） | **1 FAIL** | 机制全绿（sampleAccess 全 ok、dualBlindOk=true），仅 `dispatchRootChecks.expectedRoot=null`：`drive` 返回 progress 而非 ctx，`driven.sessionRoot` 取不到。改为命名 `driveCtx` 后读取 |
-| run E | `/tmp/three-packages-accept-4`（最终） | **0 PASS** | 最终树复跑，全部判据通过；`facts.environment.headSha = afc80e444e`（脚本修复为未提交 `.mjs`，不参与构建，`lib` 不变） |
+| run E | `/tmp/three-packages-accept-4`（最终） | **0 PASS** | 最终树复跑，全部判据通过；`facts.environment.headSha = afc80e444e`（未提交 delta 含脚本 `.mjs` 与三包 `SKILL.md` 包源——随后 `2cf3dafcd5`；`.mjs` 不参与构建、SKILL 是模型消费源，`lib` 行为不变） |
 
 run B 的诊断保留根（含生产凭据副本）已于诊断后手工删除；run E 的隔离根由脚本删除（`isolatedCleanup: "removed"`）。
 
@@ -682,6 +684,8 @@ task-orch 的 `read(err)` 是对二进制 `sample.docx` 的 read（read 工具�
 
 ### 12.12.8 最终门禁（最终树）
 
+门禁树 = `2cf3dafcd5`（其后 `7b68f46ff3`/`5dad9dd3b2`/`fc45f748cb` 均 docs-only，不参与构建）；运行时 `git status` 仅本证据文档未提交。
+
 | 命令 | 退出码 | 摘要 |
 | --- | --- | --- |
 | `corepack yarn typecheck` | **0** | 日志 `/tmp/fixwave-final-typecheck.log` |
@@ -695,7 +699,7 @@ task-orch 的 `read(err)` 是对二进制 `sample.docx` 的 read（read 工具�
 
 ### 12.12.10 残余与边界
 
-- **Windows：CI-owned / BLOCKED**。pwsh 提取行为用例本机无 pwsh 如实跳过；spec 已列入 `check:win-package:platform`，由 Windows CI 执行；无第二台 Windows 真机，不声称跨机器/真机通过（R-ACCEPT-1）。
+- **Windows：CI-owned / BLOCKED**。pwsh 提取行为用例本机无 pwsh 如实跳过；spec 已列入 `check:win-package:platform`（**将由** Windows CI 执行；本分支未推送，暂无 CI run，列入≠已有执行证据）；无第二台 Windows 真机，不声称跨机器/真机通过（R-ACCEPT-1）。
 - **`deepseek-chat` 别名**：端点解析为 `deepseek-flash`（§12.11.5），不做模型能力结论。
 - **自动 PASS 的边界**：只证明机制；内容质量结论仅来自 §12.12.7 的人工核对。
 - **走查脚本运行史**：run A/B/C 的 FAIL/BLOCKED 均为脚本缺陷（导航副作用、子会话归因首条消息、ctx 引用），已修复并如实记录于 §12.12.2，未洗成 PASS。
@@ -763,6 +767,7 @@ task-orch 的 `read(err)` 是对二进制 `sample.docx` 的 read（read 工具�
 - 内容抽样与最大文件（`orch.db` 248.8 MB）逐字节一致（sha256 相同）。
 - 归档 sha256 两次一致：`b8fabb6b410be765e7c23df27a0941351ab0d46f9e2883d3746d2517fd3772d6`。
 - **BLOCKED 项：无**（本节范围内）。Windows 相关 BLOCKED 是 Task 10/12 的既有结论（§12.8/§12.11.9），与本备份无关。
+- **损坏归档负例未实跑（评审 Minor 订正）**：「损坏归档 ⇒ `tar -tzf` 非零退出」是 tar 行为假设；本里程碑只用正常归档做正向校验，未用真实损坏归档演示负例，判据依赖 tar 退出码语义、未独立验证。
 
 ### 13.5 延后删除触发条件（owner 裁定 R7，2026-11-12）
 
@@ -778,3 +783,33 @@ task-orch 的 `read(err)` 是对二进制 `sample.docx` 的 read（read 工具�
 - 产物：`docs/huaanwork-three-agent-packages-release.md`（2026-11-13）。逐条覆盖前置退役（生产 entriesDir 三条同名 kind:"tool" 条目 409 `legacy-conflict`，tool 无迁移路径）、签名纪律（生产密钥只由 owner 持有）、上架步骤（播种 → 发布/离线审查/签名 → 安装/更新/启用）、R7 删除联动与验证边界。
 - 指针核对：文档引用的 M2 runbook 章节 **§4 / §6 / §7 / §8 / §13 / §14** 已逐条 grep 标题核实存在（`keyring、私钥与轮换纪律` / `发布 → 离线审查 → 签名` / `安装、更新、启用` / `下架不是安全处置；撤销与离线风险` / `legacy 迁移仍需审查` / `双 Profile 验收探针`），另引用 §2（entriesDir 边界）、§11（撤销离线语义）、§15（验收记录）三处亦已核实；无章节改号。
 - 本任务未执行任何生产命令、未生成/持有/提交任何生产私钥；§13.5 的延后删除触发条件与本任务结论一致，不变。
+
+---
+
+## 评审修复波次（2026-11-13，requesting-code-review 处置：R11 + #3/#4 + Minor）
+
+独立评审（三路只读评审 + coordinator 反证校准）后，owner 裁定与修复落地。本节登记改动与最终门禁；**不改 C1–C5 运行时代码、不改三包 SKILL 源文件**。
+
+### 裁定与处置
+
+- **R10（owner 确认）**：profile 复挂 `tool-subagent` 经 owner 批准（分支基线有效）。master 工作树未提交的 spec/plan 删除 R10 属陈旧草稿，与裁定矛盾，合并以分支为准；该草稿不在本波次处理。
+- **R11（owner 选 B，#2）**：工作区边界语义合法化 shell 兜底——文件工具受工作区硬约束，bash/pwsh 受档位门控但不受工作区包含约束；code-review/task-orch 工作区外目标允许 smart/full 档 bash/pwsh 读取。spec §2/§5.0/§5.2/§5.3/§9、plan Task 6/7、runbook §0.1 已对齐；SKILL 源文件不变（兜底文本已在）。runbook「三包 SKILL 均声明」订正为两包。
+- **#3（降级正则假 FAIL）**：`reportsDepthDegradation` 抽出为纯模块 `scripts/huaanwork-acceptance-degradation.mjs`（同 redaction 模块形态），走查脚本改为 import。TDD：新增 `tests/huaanwork-host/agent-package-accept-degradation.spec.ts` 先红（复合否定「未降级为单会话多轮自审」「不存在深度降级」「双路一致，未降级为单会话多轮自审」误判 true）后绿；修法 = 否定剥离消费整条否定子句（动词表加「存在」、尾部加「为单会话(多轮自审)?」）。肯定式降级判据未放宽（真降级仍判 true）。
+- **#4（pwsh 证据矛盾）**：§10.6 补前向指针（spec 已于 `2cf3dafcd5` 列入 `check:win-package:platform`、共 3 条）；§12.12.10 与 runbook §0.1「Windows CI 执行」降级为前瞻措辞（本分支未推送，暂无 CI run，列入≠已执行）。
+- **Doc Minor**：spec §4.4 第 2 项文本订正（activation 后 schemas + C5 覆盖首步窗，M1 裁定）；§10.2 字节按最终树重测（SKILL 9904/3159/4607、整包 11117/4265/5778）；§12.9 指针改 §12.11.7、§12.11.7 补历史标记；§12.12.8 钉门禁树 SHA；run E provenance 补 SKILL.md 包源；§13.4 登记损坏归档负例未实跑；plan Task 13 Step 2 命令补 `LC_ALL=en_US.UTF-8`。
+
+### 延后 / 不改（如实登记）
+
+- **代码加固 Minor 延后**：C4 childId 缺席 fail-closed、holder required 化——安全敏感文件、mainstream 不可达的理论边缘，按评审建议留待专门加固波次（与 M6/N-3/I3 债同排），本波次不动 skills.ts/host.ts。
+- **按设计不改**：seed 无生产 profile 守卫（生产播种是 owner 动作，spec §6.2）；调用行非字面首行（宽义满足）；样例放置竞态（丢失会诚实 FAIL，可接受）。
+
+### 最终门禁（本波次树 = `fc45f748cb` + 上述未提交 delta）
+
+| 命令 | 退出码 | 摘要 |
+| --- | --- | --- |
+| `corepack yarn typecheck` | **0** | 八 workspace 全过；日志 `/tmp/reviewfix-typecheck.log` |
+| `node scripts/check-whitespace.mjs` | **0** | 日志 `/tmp/reviewfix-whitespace.log` |
+| `corepack yarn test` | **0** | dsh-plugin-huaanwork `3977 passed \| 15 skipped (3992)`、`285 passed \| 4 skipped (289)` 文件（较 §12.12.8 +3 tests/+1 文件 = 新增降级回归钉）；其余 workspace `303 / 244 / 88 / 80 passed`；日志 `/tmp/reviewfix-test.log` |
+| `corepack yarn check` | **0** | 含 build/verify:* 与 verify:aa（in-check 直接通过，无并发竞态）；日志 `/tmp/reviewfix-check.log` |
+
+改动面：4 文档（spec/plan/runbook/evidence）+ 走查脚本 import + 2 新文件（降级模块 + 回归钉）；**src/ 与三包 SKILL 源文件零改动**。本波次未提交、未推送；生产上架/Windows CI run/原目录删除仍守 R6/R7/R-ACCEPT-1 边界。

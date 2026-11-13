@@ -1312,6 +1312,10 @@ description: 按规格审查代码安全与质量，输出分级发现
 
 调用：`@code-review <代码文件或目录路径>`。中文名「代码审查」仅展示，不能作唤醒词。
 
+## 工作区边界（R11，修复波次收编）
+
+`read`/`glob`/`grep` 只允许当前会话工作区内的路径；用户给出的工作区外路径会被安全策略拒绝（「路径越出当前工作区」）。遇到工作区外目标：请用户把该文件夹作为工作区打开后再审查，或改用 bash/pwsh 读取（需 smart/full 档；ask 档无审批界面必然被拒）。不伪造读取结果。
+
 ## 工作流
 
 1. 用 `glob`/`grep` 定位用户指定的代码文件或目录；用 `read` 读目标代码。
@@ -1475,6 +1479,8 @@ description: 复杂任务拆解与可实施执行计划顾问
 
 **只出计划，不执行。** 无定时触发、无运行监控、不自动派发其他智能体。
 执行由用户或主会话驱动；你不承诺自动执行，也不调用 subagent 去跑计划。
+
+**工作区边界（R11，修复波次收编）**：`read`/`glob`/`grep` 只允许当前会话工作区内的路径；用户给出的工作区外路径会被安全策略拒绝（「路径越出当前工作区」）。遇到工作区外项目：请用户把该文件夹作为工作区打开后再拆解，或改用 bash/pwsh 读取（需 smart/full 档；ask 档无审批界面必然被拒）。读不到的代码/文档不假设其存在，计划中相应事实标注待核实。
 
 ## 工作流
 
@@ -2492,7 +2498,8 @@ Expected: exit 0，备份落仓库外。失败则停止，不得进入后续步�
 
 Run:
 ```bash
-tar -tzf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz > /tmp/agent-backup-listing.txt
+# LC_ALL=en_US.UTF-8：C locale 下 bsdtar 把非 ASCII 文件名八进制转义，grep "^$d/" 会得 0/0/0（证据 §13.2 实测坑）
+LC_ALL=en_US.UTF-8 tar -tzf ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz > /tmp/agent-backup-listing.txt
 for d in 错别字检测智能体 代码审查智能体 任务编排智能体; do grep -c "^$d/" /tmp/agent-backup-listing.txt; done
 shasum -a 256 ~/Downloads/cursor/agent-dirs-backup-2026-11-11.tar.gz
 ```
