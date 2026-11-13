@@ -1658,6 +1658,18 @@ export function prepareDesktopProfile(
   }
   assertHuaanworkRowIdsHit(rows)
   assertPtcPresetPresentation(rows)
+  // I3: subagent.maxDepth 字段级产品默认。上游 applyEntryPatches 对 config 整条替换,
+  // 用户只存同族字段时会丢弱默认行、回落 schema 默认 1。仅在 maxDepth 缺席时补 2,
+  // 保留用户已写的每个字段。门控:config editor 的 pending-write 校验(hooks.profilePatches)
+  // 必须跳过——其 fail-closed 判据(dsh-config-editor:122)要求组合 config 逐字等于待写 raw
+  // config,补默认会让清除写入被判 "overridden by a home patch"。真实 boot/HMR/包操作才应用。
+  if (hooks.profilePatches === undefined) {
+    const subagentRow = rows.get('subagent')
+    const subagentConfig = rowConfig(subagentRow)
+    if (subagentRow !== undefined && subagentConfig.maxDepth === undefined) {
+      patches.push({ id: 'subagent', config: { ...subagentConfig, maxDepth: DESKTOP_SUBAGENT_MAX_DEPTH } })
+    }
+  }
   const settings = rows.get('settings')
   if (settings?.name !== SETTINGS_PACKAGE) {
     throw new Error(`${BIN_NAME}: desktop profile must use ${SETTINGS_PACKAGE} in the settings row`)

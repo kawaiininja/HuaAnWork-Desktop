@@ -208,17 +208,31 @@ describe('desktop profile composition', {
     expect(effectiveSubagentMaxDepth(pendingWrite)).toBe(3)
   })
 
-  it('drops the product default when a user row carries only a sibling field', () => {
+  it('fills the product default maxDepth when a persisted user row carries only a sibling field', () => {
     const home = temporaryHome()
-    // Known edge (evidence §0.3 C): a patch row replaces the whole `config`, so a
-    // user row without `maxDepth` leaves the schema default of 1 instead of the
-    // shipped 2. The settings card's clear/reset control plans an `unset`, which
-    // persists exactly such a row once a sibling field is stored.
-    const siblingOnly = prepareDesktopProfile(undefined, home, 'darwin', 'desktop', undefined, undefined, {
+    const dir = ensureDesktopProfile(home)
+    // A patch row replaces the whole `config`, so a persisted row without
+    // `maxDepth` drops the launcher's weak default row. The settings card's
+    // clear/reset control plans an `unset`, which leaves exactly such a row once
+    // a sibling field is stored (evidence §0.3 C).
+    writeFileSync(join(dir, 'cordis.patch.yml'), '- id: subagent\n  config:\n    maxActiveSubagents: 4\n')
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+
+    expect(effectiveSubagentMaxDepth(prepared)).toBe(2)
+    const row = composeEntries([prepared.patches]).find(entry => entry.id === 'subagent')
+    expect((row?.config as Record<string, unknown>).maxActiveSubagents).toBe(4)
+  })
+
+  it('skips the maxDepth fixup on the config-editor pending-write composition', () => {
+    const home = temporaryHome()
+    // The editor's fail-closed check compares the composed config with the raw
+    // pending config byte-for-byte, so filling a default here would reject a
+    // clear-maxDepth write as "overridden by a home patch".
+    const pending = prepareDesktopProfile(undefined, home, 'darwin', 'desktop', undefined, undefined, {
       profilePatches: [{ id: 'subagent', config: { maxActiveSubagents: 4 } }],
     })
 
-    expect(effectiveSubagentMaxDepth(siblingOnly)).toBe(1)
+    expect(effectiveSubagentMaxDepth(pending)).toBe(1)
   })
 
   it('reads packaged Cordis skills from the logical ASAR preset root', () => {
