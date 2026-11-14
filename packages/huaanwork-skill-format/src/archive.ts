@@ -54,12 +54,15 @@ const MAX_SKILL_DESCRIPTION_CHARS = 1024
 const MAX_SKILL_NAME_CHARS = 64
 
 /**
- * Gunzip output cap: the content budget plus per-entry header/padding slack and
- * the two EOF blocks. Directory headers (whose declared body node-tar drops)
- * and in-budget PAX headers are counted here, so the sum can never exceed the
- * documented content budget without being detected.
+ * Gunzip output cap: the content budget plus worst-case per-entry framing and
+ * the two EOF blocks. One tar entry can cost a 512-byte header, up to 511 bytes
+ * of body padding, and a PAX header plus body (path records up to the 512-byte
+ * path budget). 4096 bytes per entry covers that framing with room to spare;
+ * the old fixed 1024-byte slack was smaller than legal archives produced by
+ * `buildSkillArchive`, so inspection rejected its own output.
  */
-const MAX_UNPACKED_BYTES = MAX_SKILL_ARCHIVE_CONTENT_BYTES + MAX_SKILL_ENTRIES * 1024 + 1024
+const MAX_UNPACKED_BYTES =
+  MAX_SKILL_ARCHIVE_CONTENT_BYTES + MAX_SKILL_ENTRIES * 4096 + 1024
 
 /** A single PAX/global extension header body cap; skill paths are far smaller. */
 const MAX_META_BYTES = 64 * 1024
@@ -107,10 +110,14 @@ type UnpackedArchive = {
 /**
  * Canonical SHA-256 over `{ schemaVersion: 1, files: [{ path, size, sha256 }] }`
  * with rows sorted by path. Returned as `sha256:<64 hex>`.
+ *
+ * Ordering is UTF-16 code-unit based (the same `byPath` comparator the readers
+ * use), never `localeCompare`: the digest is a cross-host contract and must not
+ * change with the process locale or ICU collation.
  */
 export function createSkillDigest(files: readonly SkillArchiveFile[]): string {
   const rows = [...files]
-    .sort((a, b) => a.path.localeCompare(b.path))
+    .sort(byPath)
     .map((file) => ({
       path: file.path,
       size: file.data.byteLength,
@@ -126,15 +133,18 @@ export function createSkillDigest(files: readonly SkillArchiveFile[]): string {
  * Read a skill directory into archive files, sorted by path.
  *
  * Links are rejected rather than followed, so reading cannot pull files from
- * outside the skill root. Hidden files are ordinary resources; the caller's
- * budgets reject anything oversized.
+ * outside the skill root. Hidden files are ordinary resources. File sizes are
+ * accumulated from `lstat` before bodies are read, so an over-budget tree is
+ * rejected without loading its contents into memory.
  */
 export function readSkillDirectory(root: string): SkillArchiveFile[] {
   const rootPath = resolve(root)
+  assertDirectoryRoot(rootPath)
   const files: SkillArchiveFile[] = []
   let entries = 0
+  let totalBytes = 0
   const walk = (directory: string): void => {
-    for (const name of readdirSync(directory).sort((a, b) => a.localeCompare(b))) {
+    for (const name of readdirSync(directory).sort(byCodeUnit)) {
       const full = join(directory, name)
       const stat = lstatSync(full)
       if (stat.isSymbolicLink()) throw archiveError(`不允许符号链接：${name}`)
@@ -147,6 +157,8 @@ export function readSkillDirectory(root: string): SkillArchiveFile[] {
       if (!stat.isFile()) throw archiveError('只允许普通文件与目录')
       if (stat.nlink > 1) throw archiveError(`不允许硬链接：${name}`)
       const path = normalizeEntryPath(relative(rootPath, full).split(sep).join('/'), 'file')
+      totalBytes += stat.size
+      if (totalBytes > MAX_SKILL_ARCHIVE_CONTENT_BYTES) throw contentTooLargeError()
       files.push({ path, data: readFileSync(full) })
     }
   }
@@ -157,12 +169,15 @@ export function readSkillDirectory(root: string): SkillArchiveFile[] {
 /**
  * Write a validated file set under `root`, creating parent directories.
  *
- * Existing symlinks (on the target or any parent) and hard-linked targets are
+ * A symlinked or non-directory root is rejected before anything is created, so
+ * a `skill -> outside` link can never redirect the write. Existing symlinks (on
+ * the target or any parent inside the root) and hard-linked targets are
  * rejected so a write can never escape the root or mutate a second path.
  */
 export async function writeSkillDirectory(root: string, files: readonly SkillArchiveFile[]): Promise<void> {
   const validated = validateSkillFiles(files)
   const rootPath = resolve(root)
+  assertDirectoryRoot(rootPath)
   mkdirSync(rootPath, { recursive: true })
   for (const file of validated) {
     assertContainedPath(rootPath, file.path)
@@ -231,6 +246,11 @@ export async function inspectSkillArchive(
 
 function byPath(a: SkillArchiveFile, b: SkillArchiveFile): number {
   return a.path < b.path ? -1 : a.path > b.path ? 1 : 0
+}
+
+/** Locale-independent name order for directory enumeration. */
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
 }
 
 /**
@@ -347,6 +367,25 @@ function assertContainedPath(rootPath: string, path: string): void {
   }
 }
 
+/**
+ * Refuse a skill root that exists but is a symlink or a non-directory.
+ *
+ * Only the final root component is checked: ancestors the helper does not
+ * create (macOS `/tmp` -> `/private/tmp`, `/var` -> `/private/var`) stay
+ * allowed. A root that does not exist yet is created normally by the caller.
+ */
+function assertDirectoryRoot(rootPath: string): void {
+  let stat
+  try {
+    stat = lstatSync(rootPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  if (stat.isSymbolicLink()) throw archiveError('技能目录不得是符号链接')
+  if (!stat.isDirectory()) throw archiveError('技能目录必须是目录')
+}
+
 /** Refuse to write through an existing symlink or non-directory parent. */
 function assertNoSymlinkedParents(rootPath: string, path: string): void {
   const segments = path.split('/')
@@ -421,7 +460,7 @@ function unpackCapped(bundle: Buffer): Promise<UnpackedArchive> {
       transform(chunk: Buffer, _encoding, callback) {
         unpackedBytes += chunk.byteLength
         if (unpackedBytes > MAX_UNPACKED_BYTES) {
-          callback(archiveTooLargeError())
+          callback(unpackedTooLargeError())
           return
         }
         if (prefixChecked) {
@@ -617,9 +656,20 @@ function archiveError(message: string): Error {
   return new Error(`技能归档非法：${message}`)
 }
 
-/** Shared by the compressed cap, the unpacked meter, and the content budget. */
+/** Shared by the compressed cap and the build output cap. */
 function archiveTooLargeError(): Error {
   return archiveError(`技能归档超过${MAX_SKILL_ARCHIVE_BYTES}字节上限`)
+}
+
+/**
+ * Unpacked-stream overflow: the tar framing pushed the stream past the content
+ * budget plus per-entry overhead. This is not the compressed cap; naming the
+ * unpacked budget keeps the diagnosis accurate.
+ */
+function unpackedTooLargeError(): Error {
+  return archiveError(
+    `解包后超过${MAX_UNPACKED_BYTES}字节上限（文件内容预算${MAX_SKILL_ARCHIVE_CONTENT_BYTES}字节 + 条目框架开销）`,
+  )
 }
 
 function contentTooLargeError(): Error {

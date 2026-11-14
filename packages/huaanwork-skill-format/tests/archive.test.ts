@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict'
-import { gzipSync } from 'node:zlib'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import {
+  chmodSync,
+  closeSync,
   existsSync,
+  ftruncateSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -216,17 +221,68 @@ test('createSkillDigest is canonical, path-sorted, and prefixed with sha256:', (
   assert.match(digest, /^sha256:[0-9a-f]{64}$/u)
   // Pinned canonical document: the digest is a cross-process contract, not an
   // implementation detail. Changing key order or row ordering must fail here.
-  assert.equal(digest, 'sha256:cae3bcf4346d27f5b16db8f7692decef4443b4013df2a7bcc3328f8741dfbc38')
+  assert.equal(digest, 'sha256:7b0ab44a84f0a184dafea1f6fbee5c58d5e974ec79e1c3de3c17a83ffafa06ad')
   assert.notEqual(
     digest,
     createSkillDigest([validFiles[0]!, { path: 'scripts/run.mjs', data: Buffer.from('changed\n') }]),
   )
 })
 
+test('createSkillDigest orders rows by UTF-16 code unit, not locale collation', () => {
+  const goldenFiles: SkillArchiveFile[] = [
+    validFiles[0]!,
+    { path: '参考资料.md', data: Buffer.from('# 参考资料\n', 'utf8') },
+    { path: 'ä.md', data: Buffer.from('a-umlaut\n', 'utf8') },
+    { path: 'z.md', data: Buffer.from('zed\n', 'utf8') },
+    { path: 'I.md', data: Buffer.from('upper\n', 'utf8') },
+    { path: 'i.md', data: Buffer.from('lower\n', 'utf8') },
+  ]
+  // Code-unit order puts all ASCII before `ä` (U+00E4) and CJK (U+53C2), and
+  // `I` before `i`; `localeCompare` would interleave these differently per host.
+  assert.deepEqual(
+    [...goldenFiles].sort(byPath).map((file) => file.path),
+    ['I.md', 'SKILL.md', 'i.md', 'z.md', 'ä.md', '参考资料.md'],
+  )
+  // Pinned exact digest: stable across locales, ICU versions, and hosts.
+  assert.equal(
+    createSkillDigest(goldenFiles),
+    'sha256:0fb508099d9efefeb60fd76c12cdc4426649ff3e6c5f378d2a790910d9c0ee12',
+  )
+  assert.equal(createSkillDigest([...goldenFiles].reverse()), createSkillDigest(goldenFiles))
+})
+
 test('buildSkillArchive normalizes input order', async () => {
   const forward = await buildSkillArchive(validFiles)
   const reversed = await buildSkillArchive([...validFiles].reverse())
   assert.deepEqual(reversed, forward)
+})
+
+test('round-trips an archive whose tar framing exceeds the old fixed slack', async () => {
+  const resourceCount = 199
+  let perFile = Math.floor(
+    (MAX_SKILL_ARCHIVE_CONTENT_BYTES - Buffer.byteLength(SKILL_MD) - 4096) / resourceCount,
+  )
+  // Every file body is 1 mod 512, so each entry carries ~511 bytes of padding
+  // on top of its header and PAX path record.
+  perFile -= (perFile - 1) % 512
+  const longFiles: SkillArchiveFile[] = [
+    validFiles[0]!,
+    ...Array.from({ length: resourceCount }, (_, index) => ({
+      path: `r${String(index).padStart(3, '0')}-${'a'.repeat(116)}.md`,
+      data: Buffer.alloc(perFile, 0x78),
+    })),
+  ]
+  const archive = await buildSkillArchive(longFiles)
+  const unpackedBytes = gunzipSync(archive).byteLength
+  // Regression pin: the old 1024-byte-per-entry slack was too small for a
+  // legal archive, so inspection rejected its own build output.
+  assert.ok(
+    unpackedBytes > MAX_SKILL_ARCHIVE_CONTENT_BYTES + MAX_SKILL_ENTRIES * 1024 + 1024,
+    `fixture must exceed the old slack (unpacked ${unpackedBytes})`,
+  )
+  const inspected = await inspectSkillArchive(archive)
+  assert.equal(inspected.files.length, longFiles.length)
+  assert.equal(inspected.digest, createSkillDigest(longFiles))
 })
 
 test('inspectSkillArchive rejects an expected name that does not match SKILL.md', async () => {
@@ -259,6 +315,64 @@ test('writeSkillDirectory refuses to follow a symlinked parent out of the root',
       /技能归档非法/u,
     )
     assert.equal(existsSync(join(outside, 'run.mjs')), false)
+  })
+})
+
+test('writeSkillDirectory refuses a symlinked skill root without writing outside', async () => {
+  await withTempDir(async (root) => {
+    const outside = join(root, 'outside')
+    mkdirSync(outside)
+    const target = join(root, 'skill')
+    symlinkSync(outside, target, 'dir')
+    await assert.rejects(
+      writeSkillDirectory(target, validFiles),
+      /技能归档非法：技能目录不得是符号链接/u,
+    )
+    assert.deepEqual(readdirSync(outside), [])
+  })
+})
+
+test('readSkillDirectory rejects a symlinked skill root', async () => {
+  await withTempDir(async (root) => {
+    const outside = join(root, 'outside')
+    writeTree(outside, validFiles)
+    const target = join(root, 'skill')
+    symlinkSync(outside, target, 'dir')
+    assert.throws(
+      () => readSkillDirectory(target),
+      /技能归档非法：技能目录不得是符号链接/u,
+    )
+  })
+})
+
+test('readSkillDirectory and writeSkillDirectory reject a non-directory root', async () => {
+  await withTempDir(async (root) => {
+    const target = join(root, 'skill')
+    writeFileSync(target, 'not a directory')
+    assert.throws(() => readSkillDirectory(target), /技能归档非法：技能目录必须是目录/u)
+    await assert.rejects(
+      writeSkillDirectory(target, validFiles),
+      /技能归档非法：技能目录必须是目录/u,
+    )
+    assert.equal(readFileSync(target, 'utf8'), 'not a directory')
+  })
+})
+
+test('readSkillDirectory rejects an over-budget tree from lstat sizes without reading bodies', async () => {
+  await withTempDir(async (root) => {
+    writeTree(root, validFiles)
+    const blob = join(root, 'resources', 'blob.bin')
+    mkdirSync(dirname(blob), { recursive: true })
+    const fd = openSync(blob, 'w')
+    ftruncateSync(fd, MAX_SKILL_ARCHIVE_CONTENT_BYTES + 1)
+    closeSync(fd)
+    // The body is unreadable, so a reader that loads it before checking the
+    // budget fails with EACCES instead of the named budget error.
+    chmodSync(blob, 0o000)
+    assert.throws(
+      () => readSkillDirectory(root),
+      /技能归档非法：文件内容超过5242880字节上限/u,
+    )
   })
 })
 
