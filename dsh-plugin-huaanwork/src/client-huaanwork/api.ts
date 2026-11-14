@@ -84,6 +84,7 @@ export const ROUTES: Record<string, RouteDef> = {
   'skill.centerList': get('/huaanwork/skill/center/list'),
   'skill.mineList': get('/huaanwork/skill/mine/list'),
   'skill.invocableList': get('/huaanwork/skill/invocable/list'),
+  'skill.download': post('/huaanwork/skill/download'),
   'skill.get': get('/huaanwork/skill/get', objectQuery),
   'skill.create': post('/huaanwork/skill/create'),
   'skill.update': post('/huaanwork/skill/update'),

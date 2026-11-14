@@ -53,6 +53,11 @@ import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
 import { listInvocableSkills, listSkillCenter } from './skill-center.ts'
 import { getSkillCatalogClient } from './skill-catalog-client.ts'
 import {
+  SkillDownloadError,
+  downloadSkillToMine,
+  type DownloadSkillRequest,
+} from './skill-catalog-download.ts'
+import {
   RUNS_LIMIT,
   RUN_STATUSES,
   autoProjectRollbackAction,
@@ -879,6 +884,46 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     http: 'GET',
     path: '/huaanwork/skill/invocable/list',
     handler: storeRoute(async (_req, ctx) => ({ skills: await listInvocableSkills(ctx.profileDir) })),
+  },
+  {
+    method: 'skill.download',
+    http: 'POST',
+    path: '/huaanwork/skill/download',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      for (const forbidden of ['path', 'url']) {
+        if (forbidden in body) {
+          throw new RouteError(400, 'bad-request', `skill.download does not accept ${forbidden}`)
+        }
+      }
+      const source = body.source
+      if (source !== 'bundled' && source !== 'catalog') {
+        throw new RouteError(400, 'bad-request', 'skill.download source must be bundled | catalog')
+      }
+      const name = typeof body.name === 'string' ? body.name : ''
+      if (!name) throw new RouteError(400, 'bad-request', 'skill.download requires params.name')
+      let request: DownloadSkillRequest
+      if (source === 'bundled') {
+        request = { source: 'bundled', name }
+      } else {
+        const revision = typeof body.revision === 'number' && Number.isInteger(body.revision) && body.revision > 0
+          ? body.revision
+          : undefined
+        if (revision === undefined) {
+          throw new RouteError(400, 'bad-request', 'skill.download source=catalog requires a positive integer revision')
+        }
+        request = { source: 'catalog', name, revision }
+      }
+      try {
+        return await downloadSkillToMine(ctx.profileDir, request)
+      } catch (error) {
+        if (error instanceof SkillDownloadError) {
+          const status = error.code === 'local-skill-conflict' ? 409 : 400
+          throw new RouteError(status, error.code, error.message)
+        }
+        throw error
+      }
+    }),
   },
   {
     method: 'skill.create',

@@ -36,7 +36,7 @@ const ALL_METHODS = [
   'settings.get', 'settings.set',
   'auth.status', 'auth.register', 'auth.login', 'auth.logout', 'auth.changePassword',
   'plugin.add', 'plugin.remove', 'plugin.list',
-  'skill.list', 'skill.centerList', 'skill.mineList', 'skill.invocableList', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
+  'skill.list', 'skill.centerList', 'skill.mineList', 'skill.invocableList', 'skill.download', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
   'agent.list', 'agent.get', 'agent.refresh', 'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
   'agent.packageList', 'agent.packageDetail', 'agent.packageSetEnabled', 'agent.invocableList',
   'agent.packagePublish', 'agent.packagePublishStatus', 'agent.packageRequestDelist', 'agent.packageInstall', 'agent.packageUpdate', 'agent.packageRemove', 'agent.packageRefresh',
@@ -47,10 +47,10 @@ const ALL_METHODS = [
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('75 个方法全部登记,无遗漏无重复', () => {
+  test('76 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(75)
+    expect(ROUTE_TABLE).toHaveLength(76)
   })
 
   test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
@@ -121,7 +121,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 75 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 76 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -150,6 +150,7 @@ describe('ROUTE_TABLE registry', () => {
       'skill.centerList',
       'skill.mineList',
       'skill.invocableList',
+      'skill.download',
       'skill.get',
       'agent.list',
       'agent.get',
@@ -206,7 +207,7 @@ describe('ROUTE_TABLE registry', () => {
       'subagent.list',
       'subagent.cancel',
     ])
-    expect(implemented).toHaveLength(75)
+    expect(implemented).toHaveLength(76)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
