@@ -47,6 +47,7 @@ export default function SkillsView({
   const [centerSearch, setCenterSearch] = useState("");
   const [localSearch, setLocalSearch] = useState("");
   const [catalogError, setCatalogError] = useState("");
+  const [migrationWarnings, setMigrationWarnings] = useState<string[]>([]);
   const [centerError, setCenterError] = useState("");
   const [mineError, setMineError] = useState("");
   const [note, setNote] = useState("");
@@ -72,9 +73,10 @@ export default function SkillsView({
 
   const refreshCenter = useCallback(async () => {
     try {
-      const listed = await rpcCall<{ skills: CenterSkillInfo[]; catalogError?: string }>("skill.centerList");
+      const listed = await rpcCall<{ skills: CenterSkillInfo[]; catalogError?: string; migrationWarnings?: string[] }>("skill.centerList");
       setCenterSkills(Array.isArray(listed.skills) ? listed.skills : []);
       setCatalogError(listed.catalogError ?? "");
+      setMigrationWarnings(Array.isArray(listed.migrationWarnings) ? listed.migrationWarnings : []);
       setCenterError("");
     } catch (cause) {
       reportError(cause, "center");
@@ -286,6 +288,9 @@ export default function SkillsView({
         )}
       </div>
       {tab === "center" && catalogError ? <p className="banner">{catalogError}</p> : null}
+      {tab === "center" && migrationWarnings.length > 0 ? (
+        <p className="hint">{migrationWarnings.join("；")}</p>
+      ) : null}
       {tab === "center" && centerError ? <p className="banner error">{centerError}</p> : null}
       {tab === "mine" && mineError ? <p className="banner error">{mineError}</p> : null}
       {note ? (

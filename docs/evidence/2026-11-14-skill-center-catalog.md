@@ -30,7 +30,7 @@
 
 | 规格 §14.1 条目 | 覆盖位置 |
 | --- | --- |
-| 两标签、默认页、页内搜索、按钮/徽标/空态 | `tests/client-huaanwork/skillsLogic.spec.ts`（标签/按钮/徽标/搜索）、`SkillsView.tsx` + `appWiring.spec.ts` 源码契约钉 |
+| 两标签、默认页、页内搜索、按钮/徽标/空态 | `tests/client-huaanwork/skillsLogic.spec.ts`（标签/按钮/徽标/搜索）+ `tests/client-huaanwork/skillsView.spec.ts`（jsdom：默认页、系统技能无下载、下载/已下载按钮态、共享卡发布者/revision、迁移警告、我的技能徽标/启停/上传入口、空态指路） |
 | 启停、删除清理、重启恢复、未启用 `/` 拒绝 | `skills-host.spec.ts`、`skill-local-state.spec.ts`、`routes.spec.ts`、`sessions.spec.ts` |
 | `user-invocable:false` 不阻止已启用本地技能；表单无该选项；编辑保留行 | `skills-host.spec.ts` 解析器用例、`skillsLogic.spec.ts` |
 | 内置同名副本拒绝首次上传；另存为新技能 | `skill-catalog-upload.spec.ts`、`skill-duplicate.spec.ts`、`routes.spec.ts` |
@@ -61,3 +61,20 @@
 - 活跃源码无 `all`/`external` 技能标签（grep 0 命中）；`skill.list` 无消费者；无外部 resolver 回退；无普通 bundled 启停恢复。
 - 文档不把摘要写成签名（`docs/skill-center*.md` 明示“没有签名/keyring 校验”），不把 CI 写成 Windows 真机通过。
 - 本文件第 3 节如实登记 BLOCKED。
+
+
+## 5. 最终整支评审修复波次（2026-11-15）
+
+整支评审（merge gate）提出 3 项 Important，已在本波次闭环：
+
+1. `THIRD_PARTY_NOTICES.md` 缺少新内置包：运行 `corepack yarn workspace dsh-plugin-huaanwork verify:notices` 重新生成，新增 `| @huaanwork/skill-format | 0.1.0 | MIT | bundled |` 一行（exit 0）。
+2. 迁移警告未在界面展示（规格 §11.1.4/§11.1.6）：`SkillsView` 的 `refreshCenter` 读取 `migrationWarnings` 并在技能中心渲染；jsdom 用例断言警告可见。
+3. 两标签页缺少可执行 UI 覆盖：新增 `tests/client-huaanwork/skillsView.spec.ts`（3 个 jsdom 用例），补齐 §14.1 的默认页/按钮可见性/系统技能/空态断言；上文 §14.1 映射已更新。
+
+修复波次后的最终门禁（第三条表，均在修复后的最终树执行）：
+
+| 命令 | 退出码 | 关键计数 |
+| --- | --- | --- |
+| `corepack yarn typecheck` | （见提交说明） | — |
+| `corepack yarn test` | （见提交说明） | — |
+| `corepack yarn check` | （见提交说明） | — |
