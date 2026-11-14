@@ -9,7 +9,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdir, rename, rm } from 'node:fs/promises'
+import { lstat, mkdir, rename, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import {
@@ -173,11 +173,18 @@ async function recoverInterruptedReplace(profileDir: string, name: string): Prom
   const backup = join(profileDir, `.skill-backup-${name}`)
   await rm(staging, { recursive: true, force: true }).catch(() => undefined)
   if (!existsSync(backup)) return
-  if (existsSync(join(root, name)) || existsSync(join(root, `${name}.md`))) {
+  // A live skill (frontmatter identity, the same test listUserSkills uses)
+  // supersedes the backup; a non-skill leftover at the path does not.
+  if ((await findEntry(root, name)) !== undefined) {
     await rm(backup, { recursive: true, force: true }).catch(() => undefined)
     return
   }
-  await rename(backup, join(root, name))
+  // Restore the ORIGINAL shape: a moved flat `.md` must not become a
+  // directory without extension (invisible to scanRoot and unremovable).
+  const restoredPath = (await lstat(backup)).isDirectory()
+    ? join(root, name)
+    : join(root, `${name}.md`)
+  await rename(backup, restoredPath)
 }
 
 /**

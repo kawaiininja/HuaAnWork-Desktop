@@ -241,6 +241,24 @@ test('restores an interrupted replace instead of deleting the only copy', async 
   assert.equal(existsSync(backup), false)
 })
 
+test('restores a flat backup to its .md shape', async () => {
+  const profile = makeHome()
+  mkdirSync(join(profile, 'skills'), { recursive: true })
+  writeFileSync(
+    join(profile, '.skill-backup-demo'),
+    '---\nname: demo\ndescription: 手改\n---\n\n扁平手改正文\n',
+    'utf8',
+  )
+  await bindCatalog('demo', 1, '正文')
+  await assert.rejects(
+    downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 1 }),
+    (cause: unknown) => cause instanceof SkillDownloadError && cause.code === 'local-skill-conflict',
+  )
+  // The recovered flat file is a real local skill again.
+  assert.match(readFileSync(join(profile, 'skills', 'demo.md'), 'utf8'), /扁平手改正文/)
+  assert.equal(existsSync(join(profile, 'skills', 'demo')), false)
+})
+
 test('sweeps its staging sibling when the final rename fails', async () => {
   const profile = makeHome()
   await bindCatalog('demo', 1, '正文')
