@@ -15,6 +15,7 @@ import { test, vi } from 'vitest'
 
 import { generateKeyPair } from '@huaanwork/catalog-signing'
 import { redactSecrets } from '../src/audit.ts'
+import { authenticateSkillPublisher } from '../src/auth.ts'
 import {
   AgentCatalogConfigError,
   loadAgentCatalogConfig,
@@ -557,7 +558,9 @@ test('loads a valid configuration, with documented defaults for host and port', 
       'port',
       'publishToken',
       'readToken',
+      'skillUploaders',
     ])
+    assert.deepEqual(config.skillUploaders, {})
 
     const overridden = loadAgentCatalogConfig({
       ...environment.env,
@@ -633,6 +636,63 @@ test('requires three distinct tokens of at least 32 characters', async () => {
       () => loadAgentCatalogConfig({ ...base, AGENT_CATALOG_ADMIN_TOKEN: READ_TOKEN }),
       (cause: unknown) => cause instanceof AgentCatalogConfigError && /distinct/u.test(cause.message),
     )
+  } finally {
+    await environment.cleanup()
+  }
+})
+
+test('parses optional skill uploader tokens with fail-closed validation', async () => {
+  const environment = await createConfigEnvironment()
+  try {
+    const base = environment.env
+    const alice = 'skill-token-alice-0123456789012345678901'
+    const bob = 'skill-token-bob-012345678901234567890123'
+    const uploaders = { alice, bob }
+
+    assert.deepEqual(
+      loadAgentCatalogConfig({ ...base, AGENT_CATALOG_SKILL_UPLOADERS: JSON.stringify(uploaders) }).skillUploaders,
+      uploaders,
+    )
+    assert.deepEqual(loadAgentCatalogConfig(base).skillUploaders, {})
+
+    for (const [raw, reason] of [
+      ['{ not json', /not valid JSON/u],
+      ['[]', /JSON object/u],
+      [JSON.stringify({ ALICE: alice }), /publisher id/u],
+      [JSON.stringify({ alice: 'short' }), /at least 32/u],
+      [JSON.stringify({ alice, bob: alice }), /distinct/u],
+      [JSON.stringify({ alice: READ_TOKEN }), /distinct/u],
+    ] as const) {
+      assert.throws(
+        () => loadAgentCatalogConfig({ ...base, AGENT_CATALOG_SKILL_UPLOADERS: raw }),
+        (cause: unknown) =>
+          cause instanceof AgentCatalogConfigError
+          && reason.test(cause.message)
+          && !cause.message.includes(alice)
+          && !cause.message.includes(READ_TOKEN),
+        `${raw} must be refused without echoing a token`,
+      )
+    }
+  } finally {
+    await environment.cleanup()
+  }
+})
+
+test('authenticates skill publishers only through their own token table', async () => {
+  const environment = await createConfigEnvironment()
+  try {
+    const alice = 'skill-token-alice-0123456789012345678901'
+    const bob = 'skill-token-bob-012345678901234567890123'
+    const config = loadAgentCatalogConfig({
+      ...environment.env,
+      AGENT_CATALOG_SKILL_UPLOADERS: JSON.stringify({ alice, bob }),
+    })
+    assert.equal(authenticateSkillPublisher(config, alice), 'alice')
+    assert.equal(authenticateSkillPublisher(config, bob), 'bob')
+    assert.equal(authenticateSkillPublisher(config, READ_TOKEN), undefined)
+    assert.equal(authenticateSkillPublisher(config, PUBLISH_TOKEN), undefined)
+    assert.equal(authenticateSkillPublisher(config, 'wrong'), undefined)
+    assert.equal(authenticateSkillPublisher(config, `${alice}x`), undefined)
   } finally {
     await environment.cleanup()
   }

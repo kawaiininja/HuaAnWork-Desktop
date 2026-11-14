@@ -67,3 +67,21 @@ export function authenticateToken(
   if (isRead) return 'read'
   return null
 }
+
+/**
+ * Resolve the skill publisher id for a presented upload token. The whole
+ * uploader table is always compared before the verdict so response time does
+ * not reveal which table entry matched. Config guarantees the tokens are
+ * distinct, so at most one id can match.
+ */
+export function authenticateSkillPublisher(
+  config: AgentCatalogConfig,
+  presented: string,
+): string | undefined {
+  let publisher: string | undefined
+  for (const [id, token] of Object.entries(config.skillUploaders)) {
+    const matches = tokenMatches(presented, token)
+    if (matches && publisher === undefined) publisher = id
+  }
+  return publisher
+}
