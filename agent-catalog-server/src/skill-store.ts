@@ -38,6 +38,7 @@ const SKILLS_DIRECTORY = 'skills'
 const ARCHIVES_DIRECTORY = 'archives'
 const SKILL_STATE_FILE = 'state.json'
 const SKILL_STATE_TEMP_PATTERN = /^state\.json\.tmp-\d+-[0-9a-f]+$/u
+const ARCHIVE_TEMP_PATTERN = /\.tar\.gz\.tmp-\d+-[0-9a-f]+$/u
 
 export type SkillStoreErrorCode =
   | 'invalid-skill'
@@ -223,6 +224,16 @@ export class SkillStore {
         await unlink(join(skillsDir, file)).catch(() => undefined)
       }
     }
+    // Crash leftovers of an interrupted archive rename live one level down.
+    const archivesRoot = join(skillsDir, ARCHIVES_DIRECTORY)
+    for (const name of await readdir(archivesRoot).catch(() => [] as string[])) {
+      const archiveDir = join(archivesRoot, name)
+      for (const file of await readdir(archiveDir).catch(() => [] as string[])) {
+        if (ARCHIVE_TEMP_PATTERN.test(file)) {
+          await unlink(join(archiveDir, file)).catch(() => undefined)
+        }
+      }
+    }
 
     const statePath = join(skillsDir, SKILL_STATE_FILE)
     let contents: string
@@ -271,6 +282,19 @@ export class SkillStore {
   async publish(input: SkillPublishInput): Promise<{ skill: SkillRevisionSummary; created: boolean }> {
     if (!SKILL_NAME_RE.test(input.name)) {
       throw new SkillStoreError('invalid-skill', `skill name ${JSON.stringify(input.name)} is not kebab-case`)
+    }
+    // The loader rejects empty persisted strings; refuse them here so a legal
+    // call can never write a state document its own `open` would refuse.
+    if (
+      input.description.trim() === ''
+      || input.publisher.trim() === ''
+      || input.digest.trim() === ''
+      || input.createdAt.trim() === ''
+    ) {
+      throw new SkillStoreError(
+        'invalid-skill',
+        `skill ${input.name} requires a non-empty description, publisher, digest and createdAt`,
+      )
     }
     return this.withNameLock(input.name, async () => {
       const series = this.state.skills[input.name]
@@ -377,7 +401,24 @@ export class SkillStore {
       throw cause
     }
     await handle.close()
-    await rename(tempPath, archivePath)
+    try {
+      await rename(tempPath, archivePath)
+    } catch (cause) {
+      await unlink(tempPath).catch(() => undefined)
+      throw cause
+    }
+    // Make the archive dirent durable before the state commit references it.
+    // Directory fsync is unsupported on some platforms; best effort.
+    const directory = await openFile(dirname(archivePath), 'r').catch(() => null)
+    if (directory !== null) {
+      try {
+        await directory.sync()
+      } catch {
+        // Ignore: the file itself is already fsynced and renamed.
+      } finally {
+        await directory.close()
+      }
+    }
   }
 
   private async writeState(state: SkillState): Promise<void> {

@@ -232,6 +232,28 @@ test('rejects non-kebab names before deriving any path', async () => {
   }
 })
 
+test('rejects an empty description instead of writing an unloadable state', async () => {
+  const dataDir = await makeHome()
+  const store = await SkillStore.open(dataDir)
+  await assert.rejects(
+    store.publish(publishInput({ description: '' })),
+    (cause: unknown) => cause instanceof SkillStoreError && cause.code === 'invalid-skill',
+  )
+  assert.equal(store.get('demo', 1), undefined)
+  // The same document must stay loadable: no archive, no revision.
+  assert.deepEqual((await SkillStore.open(dataDir)).read().skills, {})
+})
+
+test('sweeps interrupted archive temp files on open', async () => {
+  const dataDir = await makeHome()
+  const archiveDir = join(dataDir, 'skills', 'archives', 'demo')
+  await mkdir(archiveDir, { recursive: true })
+  const leftover = join(archiveDir, '1.tar.gz.tmp-123-abcd')
+  await writeFile(leftover, 'partial', 'utf8')
+  await SkillStore.open(dataDir)
+  await assert.rejects(readFile(leftover))
+})
+
 test('refuses to open a corrupt state document', async () => {
   const dataDir = await makeHome()
   await mkdir(join(dataDir, 'skills'), { recursive: true })

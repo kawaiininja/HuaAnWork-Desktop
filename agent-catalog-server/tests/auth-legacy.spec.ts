@@ -655,8 +655,10 @@ test('parses optional skill uploader tokens with fail-closed validation', async 
     )
     assert.deepEqual(loadAgentCatalogConfig(base).skillUploaders, {})
 
+    const leakFragment = 'skill-leak-token-012345678901234567890123'
     for (const [raw, reason] of [
       ['{ not json', /not valid JSON/u],
+      [`{"alice":${leakFragment}}`, /not valid JSON/u],
       ['[]', /JSON object/u],
       [JSON.stringify({ ALICE: alice }), /publisher id/u],
       [JSON.stringify({ alice: 'short' }), /at least 32/u],
@@ -669,7 +671,8 @@ test('parses optional skill uploader tokens with fail-closed validation', async 
           cause instanceof AgentCatalogConfigError
           && reason.test(cause.message)
           && !cause.message.includes(alice)
-          && !cause.message.includes(READ_TOKEN),
+          && !cause.message.includes(READ_TOKEN)
+          && !cause.message.includes(leakFragment.slice(0, 10)),
         `${raw} must be refused without echoing a token`,
       )
     }

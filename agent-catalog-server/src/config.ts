@@ -170,8 +170,10 @@ function parseSkillUploaders(
   let document: unknown
   try {
     document = JSON.parse(raw)
-  } catch (cause) {
-    fail(`${AGENT_CATALOG_ENV.skillUploaders} is not valid JSON: ${(cause as Error).message}`)
+  } catch {
+    // V8's SyntaxError embeds a snippet of the input, which here can be a
+    // token; the message deliberately names the variable only.
+    fail(`${AGENT_CATALOG_ENV.skillUploaders} is not valid JSON.`)
   }
   if (document === null || typeof document !== 'object' || Array.isArray(document)) {
     fail(`${AGENT_CATALOG_ENV.skillUploaders} must be a JSON object mapping publisher ids to tokens.`)
