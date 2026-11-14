@@ -5,20 +5,15 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import {
   createSkill,
   getSkill,
-  getSkillHandlesForTest,
   importSkill,
   listExternalSkills,
   listUserSkills,
   previewSkillImport,
   removeSkill,
-  restoreEnabledBundledSkills,
   setSkillEnabled,
   updateSkill,
 } from '../../src/huaanwork-host/skills-host.ts'
-import {
-  readSkillToggles,
-  setBundledSkillRegistrar,
-} from '../../src/huaanwork-guardrails/skills.ts'
+import { readUserSkillToggles } from '../../src/huaanwork-host/skill-local-state.ts'
 import { promises as fsp } from 'node:fs'
 
 // 用例移植自旧 sidecar skills-host.test.ts 的 list/get 段(skills-host.test.ts:29-110):
@@ -43,8 +38,6 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  setBundledSkillRegistrar(null)
-  getSkillHandlesForTest().clear()
   if (prevAgentsHome === undefined) delete process.env.DSH_AGENTS_HOME
   else process.env.DSH_AGENTS_HOME = prevAgentsHome
   while (homes.length > 0) rmSync(homes.pop()!, { recursive: true, force: true })
@@ -173,6 +166,10 @@ describe('skills-host 写路径 (Task 1)', () => {
       expect(created.skill.name).toBe('my-skill')
       expect(created.skill.source).toBe('user')
       expect(created.skill.whenToUse).toBe('处理特定任务时')
+      expect(created.skill.enabled).toBe(false)
+      expect(created.skill.origin).toEqual({ kind: 'created' })
+      expect(created.skill.publishState).toBe('not-published')
+      expect(created.skill.contentDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
     }
 
     const fileContent = await fsp.readFile(join(home, 'skills', 'my-skill', 'SKILL.md'), 'utf8')
@@ -180,7 +177,8 @@ describe('skills-host 写路径 (Task 1)', () => {
     expect(fileContent).toContain('description: 我的技能')
     expect(fileContent).toContain('whenToUse: 处理特定任务时')
     expect(fileContent).toContain('disable-model-invocation: true')
-    expect(fileContent).toContain('user-invocable: false')
+    // R7:创建不再写 user-invocable;手动调用由本地启用开关决定。
+    expect(fileContent).not.toContain('user-invocable')
     expect(fileContent).toContain('# 步骤\n1. 执行')
 
     // 7. 用户同名重复创建拒绝
@@ -394,187 +392,42 @@ describe('skills-host 写路径 (Task 1)', () => {
     expect(savedAux).toBe('{"key":"value"}')
   })
 
-  test('setSkillEnabled 校验、落盘与即时生效机制', async () => {
+  test('setSkillEnabled 只切换已存在的本地用户技能', async () => {
     const home = makeHome()
 
-    // 1. 参数校验:空名称
+    // 1. 参数与目标校验:空名称、不存在的本地技能、系统技能、内部技能。
     await expect(setSkillEnabled(home, '', true)).rejects.toThrow(/params\.name/)
-
-    // 2. 拒绝系统技能 (SYSTEM_SKILLS: explore, test-fix)
+    await expect(setSkillEnabled(home, 'missing', true)).rejects.toThrow(/不是本地用户技能/)
     await expect(setSkillEnabled(home, 'explore', false)).rejects.toThrow(/系统技能，始终启用/)
     await expect(setSkillEnabled(home, 'test-fix', false)).rejects.toThrow(/系统技能，始终启用/)
+    await expect(setSkillEnabled(home, 'create-agent', true)).rejects.toThrow(/内部技能，不能启停/)
 
-    // 3. 拒绝非内置技能
-    await expect(setSkillEnabled(home, 'not-a-bundled-skill', true)).rejects.toThrow(/not a bundled skill/)
+    // 2. 普通内置同名不再是“内置启停”:先落成本地副本再切换。
+    const created = await createSkill(home, { name: 'pdf', description: '本地 PDF', content: '本地正文' })
+    expect(created.ok).toBe(true)
+    await expect(setSkillEnabled(home, 'pdf', true)).resolves.toEqual({ ok: true })
+    expect(readUserSkillToggles(home)['pdf']).toBe(true)
 
-    // 4. 落盘校验与即时生效 (带 mock registrar)
-    let registeredSkillName: string | undefined
-    let disposed = false
-    const mockDispose = () => {
-      disposed = true
-    }
-    const mockRegistrar = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registeredSkillName = skill.name
-          return mockDispose
-        },
-      },
-    }
-
-    setBundledSkillRegistrar(mockRegistrar as any)
-    try {
-      // 启用 pdf
-      const enableRes = await setSkillEnabled(home, 'pdf', true)
-      expect(enableRes).toEqual({ ok: true })
-      expect(registeredSkillName).toBe('pdf')
-
-      // 落盘验证
-      const togglesOn = readSkillToggles(home)
-      expect(togglesOn['pdf']).toBe(true)
-
-      // 禁用 pdf -> 触发 dispose
-      const disableRes = await setSkillEnabled(home, 'pdf', false)
-      expect(disableRes).toEqual({ ok: true })
-      expect(disposed).toBe(true)
-
-      // 落盘验证 (禁用后 key 被 delete)
-      const togglesOff = readSkillToggles(home)
-      expect(togglesOff['pdf']).toBeUndefined()
-
-      // registrar 为 null 时安全跳过重注不抛错
-      setBundledSkillRegistrar(null)
-      await expect(setSkillEnabled(home, 'pdf', true)).resolves.toEqual({ ok: true })
-      expect(readSkillToggles(home)['pdf']).toBe(true)
-    } finally {
-      setBundledSkillRegistrar(null)
-    }
-  })
-})
-
-describe('restoreEnabledBundledSkills boot 恢复(M4 评审 D2)', () => {
-  test('按 toggles 恢复已启用技能:跳过系统技能、未知名容错、handles 记账', () => {
-    const home = makeHome()
-    // pdf 真实存在于 bundled 目录;explore 是系统技能(由 guardrails 注册,恢复须跳过);
-    // not-a-bundled-skill 不存在——registerBundledSkill 返回 undefined,静默跳过不抛。
-    writeFileSync(
-      join(home, 'skill-toggles.json'),
-      JSON.stringify({ pdf: true, explore: true, 'not-a-bundled-skill': true }),
-    )
-    const registered: string[] = []
-    const mockRegistrar = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registered.push(skill.name)
-          return () => {}
-        },
-      },
-    }
-
-    restoreEnabledBundledSkills(home, mockRegistrar)
-
-    expect(registered).toEqual(['pdf'])
-    expect(getSkillHandlesForTest().has('pdf')).toBe(true)
-  })
-
-  test('启用 → 重启(新 registrar)→ 仍注册,且之后 disable 仍生效', async () => {
-    const home = makeHome()
-    const registeredA: string[] = []
-    const registrarA = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registeredA.push(skill.name)
-          return () => {}
-        },
-      },
-    }
-
-    // 第一代:用户启用 pdf(即时注册 + 落盘)。
-    setBundledSkillRegistrar(registrarA as any)
-    try {
-      await setSkillEnabled(home, 'pdf', true)
-      expect(registeredA).toEqual(['pdf'])
-    } finally {
-      setBundledSkillRegistrar(null)
-    }
-
-    // 模拟 generation 重启:模块态(handles)随新进程归零,boot 恢复用新 registrar 重放
-    // (等价 index.ts 内联 skills 插件在 skills 服务就绪后执行的行为)。
-    getSkillHandlesForTest().clear()
-    const registeredB: string[] = []
-    let disposedB = false
-    const registrarB = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registeredB.push(skill.name)
-          return () => {
-            disposedB = true
-          }
-        },
-      },
-    }
-
-    restoreEnabledBundledSkills(home, registrarB)
-
-    // D2 修复目标:重启后模型目录里仍能发现该技能(收到注册)。
-    expect(registeredB).toEqual(['pdf'])
-    expect(getSkillHandlesForTest().has('pdf')).toBe(true)
-
-    // 回归断言:恢复进了 skillHandles 记账,后续 disable 才能真正 dispose——
-    // harness register 同层 first-wins,不记账则 disable 半残。
-    await setSkillEnabled(home, 'pdf', false)
-    expect(disposedB).toBe(true)
-    expect(readSkillToggles(home)['pdf']).toBeUndefined()
-  })
-
-  test('同进程重复 restore 幂等:dispose-then-register,handles 不膨胀', () => {
-    const home = makeHome()
-    writeFileSync(join(home, 'skill-toggles.json'), JSON.stringify({ pdf: true }))
-    const registered: string[] = []
-    const disposed: string[] = []
-    const mockRegistrar = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registered.push(skill.name)
-          return () => disposed.push(skill.name)
-        },
-      },
-    }
-
-    restoreEnabledBundledSkills(home, mockRegistrar)
-    restoreEnabledBundledSkills(home, mockRegistrar)
-
-    expect(registered).toEqual(['pdf', 'pdf'])
-    expect(disposed).toEqual(['pdf'])
-    expect(getSkillHandlesForTest().size).toBe(1)
+    // 3. 禁用后键被删除(缺省 = 禁用);旧 skill-toggles.json 不再承载新状态。
+    await expect(setSkillEnabled(home, 'pdf', false)).resolves.toEqual({ ok: true })
+    expect(readUserSkillToggles(home)['pdf']).toBeUndefined()
+    expect(await fsp.readFile(join(home, 'skill-toggles.json'), 'utf8').catch(() => null)).toBeNull()
   })
 })
 
 describe('内部技能不可全局启用(设计 §6.1)', () => {
-  test('create-agent 被 setSkillEnabled 与 boot 恢复同时跳过', async () => {
+  test('create-agent 被 setSkillEnabled 拒绝且不写用户启用键', async () => {
     const home = makeHome()
 
     await expect(setSkillEnabled(home, 'create-agent', true)).rejects.toThrow(/内部技能，不能启停/)
-    expect(readSkillToggles(home)['create-agent']).toBeUndefined()
+    expect(readUserSkillToggles(home)['create-agent']).toBeUndefined()
 
-    // 旧开关表里即使残留 create-agent,重启也不得注册进全局技能目录。
+    // 旧开关表里的 create-agent 只属于迁移输入;不进入用户启用文档。
     writeFileSync(
       join(home, 'skill-toggles.json'),
       JSON.stringify({ 'create-agent': true, pdf: true }),
     )
-    const registered: string[] = []
-    const mockRegistrar = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registered.push(skill.name)
-          return () => {}
-        },
-      },
-    }
-    restoreEnabledBundledSkills(home, mockRegistrar)
-
-    expect(registered).toEqual(['pdf'])
-    expect(getSkillHandlesForTest().has('create-agent')).toBe(false)
+    expect(readUserSkillToggles(home)['create-agent']).toBeUndefined()
   })
 })
 

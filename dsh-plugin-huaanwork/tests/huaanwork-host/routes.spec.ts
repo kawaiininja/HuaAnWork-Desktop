@@ -21,6 +21,7 @@ import { readPendingWorkspaceRoot } from '../../src/huaanwork-host/workspace-sta
 import { WORKSPACE_SCAN_DEPTH } from '../../src/client-huaanwork/logic/outcomeCheck.ts'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 import { createTurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
+import { readUserSkillToggles } from '../../src/huaanwork-host/skill-local-state.ts'
 
 const ALL_METHODS = [
   'workspace.open', 'workspace.close',
@@ -1049,7 +1050,14 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     // bundled 系统技能始终启用;用户技能入列;全局按名排序。
     expect(byName('explore').source).toBe('bundled')
     expect(byName('explore').enabled).toBe(true)
-    expect(byName('demo')).toMatchObject({ source: 'user', description: '演示' })
+    expect(byName('demo')).toMatchObject({
+      source: 'user',
+      description: '演示',
+      enabled: false,
+      origin: { kind: 'created' },
+      publishState: 'not-published',
+    })
+    expect(byName('demo').contentDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
     const names = skills.map((s: { name: string }) => s.name)
     expect([...names].sort((a: string, b: string) => a.localeCompare(b))).toEqual(names)
 
@@ -1099,15 +1107,19 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     }))
     expect(createRes.status).toBe(200)
     const createJson = await createRes.json()
-    expect(createJson).toEqual({
+    expect(createJson).toMatchObject({
       ok: true,
       skill: {
         name: 'route-created-skill',
         description: '路由创建技能',
         source: 'user',
         whenToUse: '测试路由时',
+        enabled: false,
+        origin: { kind: 'created' },
+        publishState: 'not-published',
       },
     })
+    expect(createJson.skill.contentDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
 
     // 3. skill.update 缺少 name 返回 400
     const updateNoName = await fetch(`${baseUrl}/huaanwork/skill/update`, authed({
@@ -1132,14 +1144,18 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     }))
     expect(updateRes.status).toBe(200)
     const updateJson = await updateRes.json()
-    expect(updateJson).toEqual({
+    expect(updateJson).toMatchObject({
       ok: true,
       skill: {
         name: 'route-created-skill',
         description: '已更新技能描述',
         source: 'user',
+        enabled: false,
+        origin: { kind: 'created' },
+        publishState: 'not-published',
       },
     })
+    expect(updateJson.skill.contentDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
 
     // 5. skill.importPreview 缺少 path 返回 400
     const previewNoPath = await fetch(`${baseUrl}/huaanwork/skill/importPreview`, authed({
@@ -1218,14 +1234,28 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
       error: { code: 'store-error', message: 'skill explore 为系统技能，始终启用' },
     })
 
-    // 11. skill.setEnabled 正常内置技能 (pdf) 开关
+    // 11. skill.setEnabled 只切换已存在的本地用户技能
     const setEnabledRes = await fetch(`${baseUrl}/huaanwork/skill/setEnabled`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'route-created-skill', enabled: true }),
+    }))
+    expect(setEnabledRes.status).toBe(200)
+    expect(await setEnabledRes.json()).toEqual({ ok: true })
+    const toggledList = await fetch(`${baseUrl}/huaanwork/skill/list`, authed())
+    const toggledSkills = (await toggledList.json()).skills as Array<{ name: string; source: string; enabled?: boolean }>
+    expect(toggledSkills.find((s) => s.name === 'route-created-skill' && s.source === 'user')?.enabled).toBe(true)
+
+    // 未下载/未导入的同名普通内置技能不因“内置名”而被切换。
+    const setEnabledBundled = await fetch(`${baseUrl}/huaanwork/skill/setEnabled`, authed({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: 'pdf', enabled: true }),
     }))
-    expect(setEnabledRes.status).toBe(200)
-    expect(await setEnabledRes.json()).toEqual({ ok: true })
+    expect(setEnabledBundled.status).toBe(400)
+    const bundledError = await setEnabledBundled.json()
+    expect(bundledError.error.code).toBe('store-error')
+    expect(bundledError.error.message).toContain('不是本地用户技能')
 
     // 12. skill.remove 缺少 name 返回 400
     const removeNoName = await fetch(`${baseUrl}/huaanwork/skill/remove`, authed({
@@ -1265,6 +1295,9 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     }))
     expect(removeImportedRes.status).toBe(200)
     expect(await removeImportedRes.json()).toEqual({ removed: true })
+
+    // 删除同时清理用户启用键。
+    expect(readUserSkillToggles(profileTempDir)['route-created-skill']).toBeUndefined()
   })
 
   test('agent 域:未配置 agents_host 时 list/get 均为空(占位目录语义)', async () => {

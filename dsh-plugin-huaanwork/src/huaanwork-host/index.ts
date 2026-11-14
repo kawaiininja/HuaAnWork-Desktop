@@ -14,7 +14,7 @@ import { bindAutomationRuntime, type AutomationRuntime } from './automations-hos
 import { registerKeepAwakeRoute } from './keep-awake-route.ts'
 import { registerHuaanworkRoutes } from './routes.ts'
 import { sweepProjectLegacySessionsOncePerProcess } from './session-sweep.ts'
-import { restoreEnabledBundledSkills } from './skills-host.ts'
+import { ensureSkillCenterMigration } from './skill-center-migration.ts'
 import { createAgentsHost } from './agents-host.ts'
 import {
   setAgentPackageActiveTurns,
@@ -149,6 +149,18 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     }
     return runtime.requestConfirmedRestart()
   })
+  // 技能中心一次性迁移必须在技能路由可用前完成:旧用户技能与旧启用的普通内置
+  // 技能都要先变成“本地副本 + user-skill-toggles.json”。失败不写完成标记,
+  // 下次启动重入;错误只记录,不阻塞桌面其余部分。
+  try {
+    for (const warning of await ensureSkillCenterMigration(config.profileDir)) {
+      routeCtx.logger(`[skills] ${warning}`)
+    }
+  } catch (cause) {
+    routeCtx.logger(
+      `[skills] 本地技能状态迁移失败，将在下次启动重试:${cause instanceof Error ? cause.message : String(cause)}`,
+    )
+  }
   // 子代理 run 权威状态机(设计 §5.2):holders 安装后创建一次,经 ctx 注入;
   // 事件与路由共用同一个 hub.broadcast(routeCtx.emit)。
   const subagentRuns = createSubagentRunRegistry({ emit: routeCtx.emit })
@@ -380,13 +392,4 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
       hub.dispose()
     }
   }, 'huaanwork: routes and events')
-  // D2 修复:boot/generation 重启后按 skill-toggles.json 恢复已启用 bundled skills
-  // 的运行时注册(legacy host.ts:411-421 同构)。内联插件等 skills 服务就绪后激活,
-  // 不把 'skills' 加进本插件 inject——避免隔离挂载 huaanwork-host 的环境被依赖楔死。
-  ctx.plugin({
-    inject: ['skills'],
-    apply: (pc: Context) => {
-      restoreEnabledBundledSkills(config.profileDir, pc)
-    },
-  })
 }

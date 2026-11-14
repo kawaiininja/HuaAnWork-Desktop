@@ -1,8 +1,9 @@
 import type { Dirent } from 'node:fs'
-import { promises as fs } from 'node:fs'
+import { readFileSync, promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
+import { createSkillDigest, readSkillDirectory } from '@huaanwork/skill-format'
 import {
   SKILL_NAME_RE,
   parseSkillMarkdown,
@@ -12,19 +13,23 @@ import {
   INTERNAL_BUNDLED_SKILLS,
   SYSTEM_SKILLS,
   getBundledSkill,
-  getBundledSkillRegistrar,
-  listBundledSkills,
-  readSkillToggles,
-  registerBundledSkill,
-  setSkillToggle,
 } from '../huaanwork-guardrails/skills.ts'
 import type {
+  LocalSkillInfo,
   SkillDetail,
   SkillFieldError,
   SkillImportPreview,
   SkillInfo,
+  SkillLocalEntry,
   SkillWriteResult,
 } from '../client-huaanwork/rpc-types.ts'
+import {
+  readSkillLocalState,
+  readUserSkillToggles,
+  removeSkillLocalEntry,
+  setUserSkillToggle,
+  writeSkillLocalEntry,
+} from './skill-local-state.ts'
 
 /**
  * 技能宿主读路径(Task 7 子集):skill-invoke 的 @skill 分发只依赖
@@ -92,8 +97,59 @@ async function listRoot(root: string, source: 'user' | 'external'): Promise<Skil
   return skills.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-export function listUserSkills(storageRoot: string): Promise<SkillInfo[]> {
-  return listRoot(userSkillsRoot(storageRoot), 'user')
+export function listUserSkills(storageRoot: string): Promise<LocalSkillInfo[]> {
+  return listLocalRoot(storageRoot)
+}
+
+/**
+ * 目录包按整棵技能目录取摘要;扁平 `.md` 只按规范化的 `SKILL.md` 取摘要
+ * (上传/下载会在 Task 7/8 统一成 `<name>/SKILL.md`)。读取目录失败(例如手工
+ * 放入的符号链接)时回落到 SKILL.md,保证列表仍可读、不把整个技能中心拖垮。
+ */
+export function skillEntryDigest(entry: DiskEntry): string {
+  if (entry.kind === 'flat') {
+    return createSkillDigest([{ path: 'SKILL.md', data: readFileSync(entry.path) }])
+  }
+  try {
+    return createSkillDigest(readSkillDirectory(dirname(entry.path)))
+  } catch {
+    return createSkillDigest([{ path: 'SKILL.md', data: readFileSync(entry.path) }])
+  }
+}
+
+function publishStateOf(entry: Pick<SkillLocalEntry, 'contentDigest' | 'publishedRevision' | 'publishedDigest'>): LocalSkillInfo['publishState'] {
+  if (entry.publishedRevision === undefined) return 'not-published'
+  return entry.contentDigest === entry.publishedDigest ? 'published' : 'modified'
+}
+
+async function listLocalRoot(root: string): Promise<LocalSkillInfo[]> {
+  const toggles = readUserSkillToggles(root)
+  const state = readSkillLocalState(root)
+  const skills: LocalSkillInfo[] = []
+  for (const entry of await scanRoot(userSkillsRoot(root))) {
+    try {
+      const parsed = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
+      if (!parsed.name || !parsed.description) continue
+      const local = state.skills[parsed.name]
+      const contentDigest = local?.contentDigest ?? skillEntryDigest(entry)
+      const origin = local?.origin ?? { kind: 'created' as const }
+      skills.push({
+        name: parsed.name,
+        description: parsed.description,
+        source: 'user',
+        ...(parsed.whenToUse ? { whenToUse: parsed.whenToUse } : {}),
+        enabled: toggles[parsed.name] === true,
+        origin,
+        contentDigest,
+        ...(local?.publishedRevision !== undefined ? { publishedRevision: local.publishedRevision } : {}),
+        ...(local?.publishedDigest !== undefined ? { publishedDigest: local.publishedDigest } : {}),
+        publishState: publishStateOf({ contentDigest, ...local }),
+      })
+    } catch {
+      // 不可读条目跳过(与 provider 的 warn+skip 语义对齐)
+    }
+  }
+  return skills.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export function listExternalSkills(env: NodeJS.ProcessEnv = process.env): Promise<SkillInfo[]> {
@@ -166,11 +222,16 @@ export type SkillInput = {
   userInvocable?: boolean
   content: string
 }
-export type SkillUpdateInput = Omit<SkillInput, 'name'>
+export type SkillUpdateInput = Omit<SkillInput, 'name' | 'userInvocable'>
 
-/** 已占用名:内置 + 用户技能(外部技能允许被用户同名遮蔽——这是 dsh rank 的设计行为)。 */
+/**
+ * 已占用名:系统技能 + 内部技能 + 既有用户技能。普通内置名不再阻止本地创建/
+ * 导入(它们可以下载/复制为本地副本);首次上传的内置同名检查在 Task 8。
+ * 外部技能允许被用户同名遮蔽——这是 dsh rank 的设计行为。
+ */
 export async function takenNames(storageRoot: string): Promise<Set<string>> {
-  const names = new Set(listBundledSkills().map((skill) => skill.name))
+  const names = new Set<string>(SYSTEM_SKILLS)
+  for (const name of INTERNAL_BUNDLED_SKILLS) names.add(name)
   for (const skill of await listUserSkills(storageRoot)) names.add(skill.name)
   return names
 }
@@ -182,7 +243,7 @@ function validateSkillFields(input: SkillInput, taken: ReadonlySet<string>): Ski
   } else if (input.name.length > MAX_SKILL_NAME_LENGTH) {
     errors.push({ field: 'name', message: `名称不超过 ${MAX_SKILL_NAME_LENGTH} 字符` })
   } else if (taken.has(input.name)) {
-    errors.push({ field: 'name', message: '已存在同名技能（含内置技能）' })
+    errors.push({ field: 'name', message: '已存在同名技能' })
   }
   if (!input.description?.trim()) {
     errors.push({ field: 'description', message: '描述必填' })
@@ -208,26 +269,33 @@ async function atomicWrite(targetPath: string, content: string): Promise<void> {
 export async function createSkill(storageRoot: string, input: SkillInput): Promise<SkillWriteResult> {
   const errors = validateSkillFields(input, await takenNames(storageRoot))
   if (errors.length > 0) return { ok: false, fieldErrors: errors }
-  // 与 update 对称:invocation 布尔只在非默认值时落键,不给每个新技能写默认键
-  await atomicWrite(
-    join(userSkillsRoot(storageRoot), input.name, 'SKILL.md'),
-    serializeSkillMarkdown({
-      name: input.name,
-      description: input.description,
-      ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
-      ...(input.disableModelInvocation ? { disableModelInvocation: true } : {}),
-      ...(input.userInvocable === false ? { userInvocable: false } : {}),
-      content: input.content,
-      extraLines: [],
-    }),
-  )
+  // 先读状态:损坏文档必须在落盘前失败,不留下没有来源记录的用户技能。
+  readSkillLocalState(storageRoot)
+  const serialized = serializeSkillMarkdown({
+    name: input.name,
+    description: input.description,
+    ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
+    ...(input.disableModelInvocation ? { disableModelInvocation: true } : {}),
+    // R7:创建不写 user-invocable;启用开关是 HuaAnWork 手动调用的唯一产品门。
+    content: input.content,
+    extraLines: [],
+  })
+  const skillPath = join(userSkillsRoot(storageRoot), input.name, 'SKILL.md')
+  await atomicWrite(skillPath, serialized)
+  const contentDigest = createSkillDigest([{ path: 'SKILL.md', data: Buffer.from(serialized, 'utf8') }])
+  const localEntry: SkillLocalEntry = { origin: { kind: 'created' }, contentDigest }
+  writeSkillLocalEntry(storageRoot, input.name, localEntry)
   return {
     ok: true,
     skill: {
       name: input.name,
       description: input.description,
       source: 'user',
-      ...(input.whenToUse ? { whenToUse: input.whenToUse } : {}),
+      ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
+      enabled: readUserSkillToggles(storageRoot)[input.name] === true,
+      origin: localEntry.origin,
+      contentDigest,
+      publishState: publishStateOf(localEntry),
     },
   }
 }
@@ -238,6 +306,7 @@ export async function updateSkill(
   name: string,
   input: SkillUpdateInput,
 ): Promise<SkillWriteResult> {
+  const state = readSkillLocalState(storageRoot)
   const entry = await findEntry(userSkillsRoot(storageRoot), name)
   if (!entry) {
     return { ok: false, fieldErrors: [{ field: 'name', message: `用户技能 ${name} 不存在（内置与外部技能不可编辑）` }] }
@@ -253,11 +322,21 @@ export async function updateSkill(
       // 缺省即默认(模型可调用/用户可调用),只在非默认值时落键
       ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
       ...(input.disableModelInvocation ? { disableModelInvocation: true } : {}),
-      ...(input.userInvocable === false ? { userInvocable: false } : {}),
+      // R7:表单不再接收 userInvocable,但原文件既有行必须保留。
+      ...(original.userInvocable !== undefined ? { userInvocable: original.userInvocable } : {}),
       content: input.content,
       extraLines: original.extraLines,
     }),
   )
+  const contentDigest = skillEntryDigest(entry)
+  const previous = state.skills[name]
+  const localEntry: SkillLocalEntry = {
+    origin: previous?.origin ?? { kind: 'created' },
+    contentDigest,
+    ...(previous?.publishedRevision !== undefined ? { publishedRevision: previous.publishedRevision } : {}),
+    ...(previous?.publishedDigest !== undefined ? { publishedDigest: previous.publishedDigest } : {}),
+  }
+  writeSkillLocalEntry(storageRoot, name, localEntry)
   return {
     ok: true,
     skill: {
@@ -265,6 +344,12 @@ export async function updateSkill(
       description: input.description,
       source: 'user',
       ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
+      enabled: readUserSkillToggles(storageRoot)[name] === true,
+      origin: localEntry.origin,
+      contentDigest,
+      ...(localEntry.publishedRevision !== undefined ? { publishedRevision: localEntry.publishedRevision } : {}),
+      ...(localEntry.publishedDigest !== undefined ? { publishedDigest: localEntry.publishedDigest } : {}),
+      publishState: publishStateOf(localEntry),
     },
   }
 }
@@ -273,8 +358,13 @@ export async function removeSkill(storageRoot: string, name: string): Promise<vo
   if (!SKILL_NAME_RE.test(name)) throw new Error(`invalid skill name: ${name}`)
   const entry = await findEntry(userSkillsRoot(storageRoot), name)
   if (!entry) throw new Error(`用户技能 ${name} 不存在（内置与外部技能不可删除）`)
+  // 损坏状态在删除文件前暴露,避免留下无法清理的来源记录。
+  readSkillLocalState(storageRoot)
+  readUserSkillToggles(storageRoot)
   if (entry.kind === 'bundle') await fs.rm(dirname(entry.path), { recursive: true })
   else await fs.unlink(entry.path)
+  removeSkillLocalEntry(storageRoot, name)
+  setUserSkillToggle(storageRoot, name, false)
 }
 
 const remoteSource = /github:|git\+|https?:\/\//i
@@ -357,11 +447,13 @@ export async function importSkill(
   }
   const preview = await previewSkillImport(storageRoot, sourcePath)
   if (!preview.ok) return preview
+  // 与 create 对称:损坏状态必须在复制前失败,不留下没有来源记录的副本。
+  readSkillLocalState(storageRoot)
   const { targetName, kind } = preview.preview
   const root = userSkillsRoot(storageRoot)
   await fs.mkdir(root, { recursive: true })
   if (kind === 'file') {
-    // 原始文件原样落盘(保留未知 frontmatter 键),目录名以 frontmatter name 为准
+    // 原始文件原样落盘(保留未知 frontmatter 键与 user-invocable 行),目录名以 frontmatter name 为准
     await atomicWrite(join(root, targetName, 'SKILL.md'), await fs.readFile(sourcePath, 'utf8'))
   } else {
     const tmp = join(storageRoot, `.skill-import-${targetName}`)
@@ -374,6 +466,10 @@ export async function importSkill(
       throw err
     }
   }
+  const targetEntry: DiskEntry = { path: join(root, targetName, 'SKILL.md'), kind: 'bundle' }
+  const contentDigest = skillEntryDigest(targetEntry)
+  const localEntry: SkillLocalEntry = { origin: { kind: 'imported' }, contentDigest }
+  writeSkillLocalEntry(storageRoot, targetName, localEntry)
   return {
     ok: true,
     skill: {
@@ -381,16 +477,19 @@ export async function importSkill(
       description: preview.preview.description,
       source: 'user',
       ...(preview.preview.whenToUse ? { whenToUse: preview.preview.whenToUse } : {}),
+      enabled: readUserSkillToggles(storageRoot)[targetName] === true,
+      origin: localEntry.origin,
+      contentDigest,
+      publishState: publishStateOf(localEntry),
     },
   }
 }
 
-const skillHandles = new Map<string, () => void>()
-
-export function getSkillHandlesForTest(): Map<string, () => void> {
-  return skillHandles
-}
-
+/**
+ * 启用/禁用本地用户技能:只接受 `<profileDir>/skills` 中按 frontmatter name
+ * 真实存在的技能,写 `user-skill-toggles.json`。普通 bundled 与外部技能没有
+ * 启用键——它们必须先创建/导入/下载成本地副本。
+ */
 export async function setSkillEnabled(
   storageRoot: string,
   name: string,
@@ -400,52 +499,9 @@ export async function setSkillEnabled(
   if (SYSTEM_SKILLS.has(name)) throw new Error(`skill ${name} 为系统技能，始终启用`)
   // 内部技能由创建入口直接注入正文,不接受开关,也不注册进全局技能目录。
   if (INTERNAL_BUNDLED_SKILLS.has(name)) throw new Error(`skill ${name} 为内部技能，不能启停`)
-  if (!listBundledSkills().some((skill) => skill.name === name)) {
-    throw new Error(`skill ${name} is not a bundled skill`)
-  }
-  setSkillToggle(storageRoot, name, enabled)
-
-  // 运行时即时生效:dispose-then-register 保证幂等
-  const disposeOld = skillHandles.get(name)
-  if (disposeOld) {
-    disposeOld()
-    skillHandles.delete(name)
-  }
-  if (enabled) {
-    const registrar = getBundledSkillRegistrar()
-    if (registrar?.skills) {
-      const dispose = registerBundledSkill(registrar, name)
-      if (!dispose) throw new Error(`skill ${name} failed to register`)
-      skillHandles.set(name, dispose)
-    }
-  }
+  const entry = await findEntry(userSkillsRoot(storageRoot), name)
+  if (!entry) throw new Error(`skill ${name} 不是本地用户技能（请先在“我的技能”中创建、导入或下载）`)
+  setUserSkillToggle(storageRoot, name, enabled)
   return { ok: true }
-}
-
-/** registerBundledSkill 的 registrar 参数形状(结构性类型,避免再引 SkillRegistration)。 */
-export type BundledSkillRegistrar = Parameters<typeof registerBundledSkill>[0]
-
-/**
- * boot/generation 重启后按 skill-toggles.json 恢复已启用 bundled skills 的运行时注册
- * (M4 评审 D2;legacy host.ts:411-421 同构)。guardrails apply 只注册 explore/test-fix
- * 两个系统技能,用户启用的技能若不在 boot 期重注册,重启后 skill.list 仍显示
- * enabled:true 但模型目录(ctx.skills)取不到。dispose-then-register 与 setSkillEnabled
- * 共用 skillHandles 记账:harness register 同层 first-wins,重复注册拿 no-op
- * disposer——boot 注册不进本表,后续 setEnabled(false) 将无法 dispose、禁用半残。
- * 注册失败(dispose 为 undefined)静默跳过,不让技能恢复拖垮 boot(legacy 容错语义)。
- * 内部技能(`INTERNAL_BUNDLED_SKILLS`)即使出现在旧开关表里也不恢复注册。
- */
-export function restoreEnabledBundledSkills(storageRoot: string, registrar: BundledSkillRegistrar): void {
-  for (const name of Object.keys(readSkillToggles(storageRoot))) {
-    if (SYSTEM_SKILLS.has(name) || INTERNAL_BUNDLED_SKILLS.has(name)) continue
-    const disposeOld = skillHandles.get(name)
-    if (disposeOld) {
-      disposeOld()
-      skillHandles.delete(name)
-    }
-    const dispose = registerBundledSkill(registrar, name)
-    if (!dispose) continue
-    skillHandles.set(name, dispose)
-  }
 }
 
