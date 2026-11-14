@@ -6,7 +6,6 @@ import {
   createSkill,
   getSkill,
   importSkill,
-  listExternalSkills,
   listUserSkills,
   previewSkillImport,
   removeSkill,
@@ -64,14 +63,6 @@ describe('skills-host 读路径(旧 skills-host.test.ts 用例)', () => {
     mkdirSync(join(home, 'skills'), { recursive: true })
     writeFileSync(join(home, 'skills', 'broken.md'), '没有 frontmatter')
     expect(await listUserSkills(home)).toEqual([])
-  })
-
-  test('listExternalSkills reads the agents-home skills root read-only', async () => {
-    const agents = process.env.DSH_AGENTS_HOME!
-    mkdirSync(join(agents, 'skills'), { recursive: true })
-    writeFileSync(join(agents, 'skills', 'ext.md'), '---\nname: ext\ndescription: 外部技能\n---\n\nx\n')
-    const skills = await listExternalSkills()
-    expect(skills.map((s) => [s.name, s.source])).toEqual([['ext', 'external']])
   })
 
   test('getSkill searches user then external then bundled', async () => {

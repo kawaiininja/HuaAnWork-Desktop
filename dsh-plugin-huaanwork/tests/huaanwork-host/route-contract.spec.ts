@@ -148,12 +148,12 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'plugin.list': ['plugins'],
 
   // skill
-  'skill.list': ['skills'],
   'skill.centerList': ['skills'],
   'skill.mineList': ['skills'],
   'skill.invocableList': ['skills'],
   'skill.download': ['skill', 'created', 'updated'],
   'skill.upload': ['skill', 'created'],
+  'skill.duplicate': ['skill'],
   'skill.get': ['skill'],
   'skill.create': ['skill'], // 501
   'skill.update': ['skill'], // 501
@@ -288,12 +288,12 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'plugin.list': ['plugins'],
 
   // skill
-  'skill.list': ['skills'],
   'skill.centerList': ['skills'],
   'skill.mineList': ['skills'],
   'skill.invocableList': ['skills'],
   'skill.download': ['skill', 'created', 'updated'],
   'skill.upload': ['skill', 'created'],
+  'skill.duplicate': ['skill'],
   'skill.get': ['skill'],
   'skill.create': ['skill'],
   'skill.update': ['skill'],

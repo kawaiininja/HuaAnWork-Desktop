@@ -37,7 +37,7 @@ const ALL_METHODS = [
   'settings.get', 'settings.set',
   'auth.status', 'auth.register', 'auth.login', 'auth.logout', 'auth.changePassword',
   'plugin.add', 'plugin.remove', 'plugin.list',
-  'skill.list', 'skill.centerList', 'skill.mineList', 'skill.invocableList', 'skill.download', 'skill.upload', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
+  'skill.centerList', 'skill.mineList', 'skill.invocableList', 'skill.download', 'skill.upload', 'skill.duplicate', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
   'agent.list', 'agent.get', 'agent.refresh', 'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
   'agent.packageList', 'agent.packageDetail', 'agent.packageSetEnabled', 'agent.invocableList',
   'agent.packagePublish', 'agent.packagePublishStatus', 'agent.packageRequestDelist', 'agent.packageInstall', 'agent.packageUpdate', 'agent.packageRemove', 'agent.packageRefresh',
@@ -147,12 +147,12 @@ describe('ROUTE_TABLE registry', () => {
       'workspace.close',
       // Task 10:M4 域读路径 + projects/tasks 低复杂度写
       'plugin.list',
-      'skill.list',
       'skill.centerList',
       'skill.mineList',
       'skill.invocableList',
       'skill.download',
       'skill.upload',
+      'skill.duplicate',
       'skill.get',
       'agent.list',
       'agent.get',
@@ -1051,17 +1051,22 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     expect(templateJson.templates.length).toBeGreaterThan(0)
   })
 
-  test('skill 域:list 三源合并(bundled 带 enabled)→ get 按 name/source query', async () => {
+  test('skill 域:centerList 合并内置+缓存,mineList 只含本地 → get 按 name/source query', async () => {
     // 用户技能直接落盘(写路径 M4,这里只准备读 fixture)。
     mkdirSync(join(profileTempDir, 'skills', 'demo'), { recursive: true })
     writeFileSync(join(profileTempDir, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: 演示\n---\n\n正文\n')
 
-    const listed = await fetch(`${baseUrl}/huaanwork/skill/list`, authed())
-    const { skills } = await listed.json()
-    const byName = (name: string) => skills.find((s: { name: string }) => s.name === name)
-    // bundled 系统技能始终启用;用户技能入列;全局按名排序。
-    expect(byName('explore').source).toBe('bundled')
-    expect(byName('explore').enabled).toBe(true)
+    const centerListed = await fetch(`${baseUrl}/huaanwork/skill/center/list`, authed())
+    const center = await centerListed.json()
+    const centerByName = (name: string) => center.skills.find((s: { name: string }) => s.name === name)
+    // 未配置远端:内置仍在,并给出规格 §5.4 原文的离线提示。
+    expect(center.catalogError).toBe('共享技能库不可用，当前显示内置技能与已缓存内容')
+    expect(centerByName('explore')).toMatchObject({ source: 'bundled', downloadState: 'not-applicable' })
+    expect(centerByName('demo')).toBeUndefined()
+
+    const mineListed = await fetch(`${baseUrl}/huaanwork/skill/mine/list`, authed())
+    const mine = await mineListed.json()
+    const byName = (name: string) => mine.skills.find((s: { name: string }) => s.name === name)
     expect(byName('demo')).toMatchObject({
       source: 'user',
       description: '演示',
@@ -1070,7 +1075,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
       publishState: 'not-published',
     })
     expect(byName('demo').contentDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
-    const names = skills.map((s: { name: string }) => s.name)
+    const names = mine.skills.map((s: { name: string }) => s.name)
     expect([...names].sort((a: string, b: string) => a.localeCompare(b))).toEqual(names)
 
     // get:source 定向 + 未找到 400 原文。
@@ -1493,7 +1498,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     }))
     expect(setEnabledRes.status).toBe(200)
     expect(await setEnabledRes.json()).toEqual({ ok: true })
-    const toggledList = await fetch(`${baseUrl}/huaanwork/skill/list`, authed())
+    const toggledList = await fetch(`${baseUrl}/huaanwork/skill/mine/list`, authed())
     const toggledSkills = (await toggledList.json()).skills as Array<{ name: string; source: string; enabled?: boolean }>
     expect(toggledSkills.find((s) => s.name === 'route-created-skill' && s.source === 'user')?.enabled).toBe(true)
 
@@ -1767,9 +1772,9 @@ describe('errorRoute wrapper factory & handler error injection (N1)', () => {
       await expect(pluginListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
         .rejects.toMatchObject({ status: 400, code: 'store-error' })
 
-      // 3. skill.list (store-error) - skills 为普通文件导致 readdir 报 ENOTDIR
+      // 3. skill.mineList (store-error) - skills 为普通文件导致 readdir 报 ENOTDIR
       writeFileSync(join(tempDir, 'skills'), 'file-not-dir')
-      const skillListRoute = ROUTE_TABLE.find((r) => r.method === 'skill.list')!
+      const skillListRoute = ROUTE_TABLE.find((r) => r.method === 'skill.mineList')!
       await expect(skillListRoute.handler({ params: {}, body: undefined, query: new URLSearchParams() }, failCtx))
         .rejects.toMatchObject({ status: 400, code: 'store-error' })
 

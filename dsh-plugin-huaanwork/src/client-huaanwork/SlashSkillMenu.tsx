@@ -1,4 +1,4 @@
-import { sourceLabel, type SkillInfo } from "./logic/skillsLogic.ts";
+import { sourceLabel, type InvocableSkillInfo } from "./logic/skillsLogic.ts";
 import ComposerMentionMenu from "./ComposerMentionMenu.tsx";
 
 export default function SlashSkillMenu({
@@ -7,15 +7,15 @@ export default function SlashSkillMenu({
   onHover,
   onPick,
 }: {
-  skills: SkillInfo[];
+  skills: InvocableSkillInfo[];
   activeIndex: number;
   onHover: (index: number) => void;
-  onPick: (skill: SkillInfo) => void;
+  onPick: (skill: InvocableSkillInfo) => void;
 }) {
   return (
     <ComposerMentionMenu
       label="已启用的技能"
-      empty="没有已启用的技能。到技能中心打开开关。"
+      empty="没有已启用的技能。到“我的技能”打开开关。"
       items={skills.map((skill) => ({
         key: `${skill.source}:${skill.name}`,
         name: skill.name,

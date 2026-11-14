@@ -676,7 +676,7 @@ describe('internal skill hiding', () => {
 
     const root = makeRoot()
     mkdirSync(join(root, 'skills'), { recursive: true })
-    const entry = ROUTE_TABLE.find((route) => route.method === 'skill.list')
+    const entry = ROUTE_TABLE.find((route) => route.method === 'skill.centerList')
     expect(entry).toBeDefined()
     const result = (await entry?.handler(
       { method: 'GET', query: new URLSearchParams(), body: undefined } as never,

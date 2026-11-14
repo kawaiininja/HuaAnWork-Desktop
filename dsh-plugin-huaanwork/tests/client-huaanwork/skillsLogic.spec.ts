@@ -1,84 +1,92 @@
-import assert from "node:assert/strict";
-import { test } from "vitest";
+import assert from 'node:assert/strict'
+import { test } from 'vitest'
 
 import {
-  SYSTEM_SKILLS,
-  canToggleSkill,
-  filterSkills,
-  isReservedSlash,
-  isSkillInvocable,
-  parseSlashInvoke,
+  SKILL_TABS,
+  centerActionLabel,
+  filterCenterSkills,
+  filterLocalSkills,
+  originLabel,
   slashSkills,
-  slashTokenAt,
   sourceLabel,
   tabLabel,
-  validateSkillForm,
-  type SkillInfo,
-} from "../../src/client-huaanwork/logic/skillsLogic.ts";
+  uploadActionLabel,
+  validateDuplicateName,
+  type CenterSkillInfo,
+  type InvocableSkillInfo,
+  type LocalSkillInfo,
+} from '../../src/client-huaanwork/logic/skillsLogic.ts'
 
-const SKILLS: SkillInfo[] = [
-  { name: "explore", description: "只读探索", source: "bundled" },
-  { name: "demo", description: "我的演示", source: "user" },
-  { name: "ext", description: "外部演示", source: "external" },
-];
+test('only the center and mine tabs remain', () => {
+  assert.deepEqual([...SKILL_TABS], ['center', 'mine'])
+  assert.equal(tabLabel('center'), '技能中心')
+  assert.equal(tabLabel('mine'), '我的技能')
+})
 
-test("sourceLabel and tabLabel map sources to Chinese labels", () => {
-  assert.equal(sourceLabel("bundled"), "内置");
-  assert.equal(sourceLabel("user"), "我创建的");
-  assert.equal(sourceLabel("external"), "外部");
-  assert.equal(tabLabel("all"), "全部");
-  assert.equal(tabLabel("user"), "我创建的");
-});
+test('download and upload labels are independent from enablement', () => {
+  assert.equal(centerActionLabel('available'), '下载')
+  assert.equal(centerActionLabel('downloaded'), '已下载')
+  assert.equal(centerActionLabel('update-available'), '更新')
+  assert.equal(centerActionLabel('local-conflict'), '本地有修改')
+  assert.equal(centerActionLabel('not-applicable'), '系统技能·始终启用')
+  assert.equal(uploadActionLabel('not-published'), '上传')
+  assert.equal(uploadActionLabel('published'), '已上传')
+  assert.equal(uploadActionLabel('modified'), '更新上传')
+})
 
-test("filterSkills scopes by tab then by query", () => {
-  assert.deepEqual(filterSkills(SKILLS, "all", "").map((s) => s.name), ["explore", "demo", "ext"]);
-  assert.deepEqual(filterSkills(SKILLS, "user", "").map((s) => s.name), ["demo"]);
-  assert.deepEqual(filterSkills(SKILLS, "all", "演示").map((s) => s.name), ["demo", "ext"]);
-  assert.deepEqual(filterSkills(SKILLS, "external", "演示").map((s) => s.name), ["ext"]);
-  assert.deepEqual(filterSkills(SKILLS, "bundled", "不存在"), []);
-});
+test('source and origin badges follow the spec vocabulary', () => {
+  assert.equal(sourceLabel('bundled'), '内置')
+  assert.equal(sourceLabel('catalog'), '共享')
+  assert.equal(sourceLabel('user'), '我的技能')
+  assert.equal(originLabel({ kind: 'created' }), '创建')
+  assert.equal(originLabel({ kind: 'imported' }), '导入')
+  assert.equal(originLabel({ kind: 'bundled' }), '内置副本')
+  assert.equal(
+    originLabel({ kind: 'catalog', name: 'x', revision: 1, publisher: 'alice', digest: 'sha256:' + 'a'.repeat(64) }),
+    '共享副本',
+  )
+})
 
-test("validateSkillForm enforces name grammar, duplicates, and required fields", () => {
-  const base = { name: "demo", description: "d", whenToUse: "", content: "c", disableModelInvocation: false, userInvocable: true };
-  assert.deepEqual(validateSkillForm(base, { editing: false, takenNames: [] }), {});
-  assert.ok(validateSkillForm({ ...base, name: "Bad_Name" }, { editing: false, takenNames: [] }).name);
-  assert.ok(validateSkillForm(base, { editing: false, takenNames: ["demo"] }).name);
-  assert.ok(validateSkillForm({ ...base, description: " " }, { editing: false, takenNames: [] }).description);
-  assert.ok(validateSkillForm({ ...base, content: "" }, { editing: false, takenNames: [] }).content);
-  // 编辑模式不校验名称（名称锁定）
-  assert.deepEqual(validateSkillForm({ ...base, name: "" }, { editing: true, takenNames: [] }), {});
-});
+const centerSkills: CenterSkillInfo[] = [
+  { name: 'pdf', description: '处理 PDF', source: 'bundled', downloadState: 'available' },
+  { name: 'shared-helper', description: '共享技能', source: 'catalog', revision: 1, publisher: 'alice', downloadState: 'downloaded' },
+]
+const localSkills: LocalSkillInfo[] = [
+  {
+    name: 'weekly-report',
+    description: '周报',
+    source: 'user',
+    enabled: true,
+    origin: { kind: 'created' },
+    contentDigest: 'sha256:' + 'a'.repeat(64),
+    publishState: 'not-published',
+  },
+]
 
-test("canToggleSkill: only bundled non-system skills", () => {
-  assert.equal(canToggleSkill({ source: "bundled", name: "pdf" }), true);
-  assert.equal(canToggleSkill({ source: "bundled", name: "explore" }), false);
-  assert.equal(canToggleSkill({ source: "bundled", name: "test-fix" }), false);
-  assert.equal(canToggleSkill({ source: "user", name: "pdf" }), false);
-  assert.equal(canToggleSkill({ source: "external", name: "pdf" }), false);
-  assert.ok(SYSTEM_SKILLS.has("explore") && SYSTEM_SKILLS.has("test-fix"));
-});
+test('page searches are scoped to their own tab', () => {
+  assert.deepEqual(filterCenterSkills(centerSkills, 'pdf').map(skill => skill.name), ['pdf'])
+  assert.deepEqual(filterCenterSkills(centerSkills, '周报'), [])
+  assert.deepEqual(filterLocalSkills(localSkills, '周报').map(skill => skill.name), ['weekly-report'])
+  assert.deepEqual(filterLocalSkills(localSkills, 'pdf'), [])
+  // 中心列表不含本地 user 技能,本地列表不含中心条目。
+  assert.equal(centerSkills.some(skill => skill.name === 'weekly-report'), false)
+  assert.equal(localSkills.some(skill => skill.name === 'shared-helper'), false)
+})
 
-test("slash helpers only list enabled skills and parse leading /name", () => {
-  const catalog: SkillInfo[] = [
-    { name: "explore", description: "只读探索", source: "bundled", enabled: true },
-    { name: "pdf", description: "处理 PDF", source: "bundled", enabled: false },
-    { name: "investigate", description: "根因分析", source: "bundled", enabled: true },
-    { name: "my-note", description: "用户笔记", source: "user" },
-  ];
-  assert.equal(isSkillInvocable(catalog[1]!), false);
-  assert.deepEqual(
-    slashSkills(catalog, "inv").map((skill) => skill.name),
-    ["investigate"],
-  );
-  assert.deepEqual(
-    slashSkills(catalog, "").map((skill) => skill.name),
-    ["explore", "investigate", "my-note"],
-  );
-  assert.equal(slashTokenAt("请看 /inv", 6)?.query, "inv");
-  assert.equal(slashTokenAt("https://x.com", 4), undefined);
-  assert.equal(slashTokenAt("foo/bar", 4), undefined);
-  assert.equal(isReservedSlash("schedule"), true);
-  assert.deepEqual(parseSlashInvoke("/investigate 登录 500"), { name: "investigate", remainder: "登录 500" });
-  assert.equal(parseSlashInvoke("/schedule 每天 8 点"), undefined);
-  assert.equal(parseSlashInvoke("先看看 /investigate"), undefined);
-});
+test('slash catalog filters and prefix-orders invocable skills only', () => {
+  const skills: InvocableSkillInfo[] = [
+    { name: 'explore', description: '探索', source: 'bundled', enabled: true },
+    { name: 'demo', description: '演示', source: 'user', enabled: true },
+    { name: 'demo-extra', description: '演示二', source: 'user', enabled: true },
+  ]
+  assert.deepEqual(slashSkills(skills, 'dem').map(skill => skill.name), ['demo', 'demo-extra'])
+  assert.deepEqual(slashSkills(skills, '').map(skill => skill.name), ['demo', 'demo-extra', 'explore'])
+  assert.deepEqual(slashSkills(skills, '探索').map(skill => skill.name), ['explore'])
+})
+
+test('duplicate target validation refuses taken, invalid and unchanged names', () => {
+  assert.equal(validateDuplicateName('new-name', { sourceName: 'pdf', takenNames: ['pdf'] }), undefined)
+  assert.match(validateDuplicateName('pdf', { sourceName: 'pdf', takenNames: ['pdf'] }) ?? '', /新的技能名称/)
+  assert.match(validateDuplicateName('Bad Name', { sourceName: 'pdf', takenNames: ['pdf'] }) ?? '', /kebab-case/)
+  assert.match(validateDuplicateName('taken', { sourceName: 'pdf', takenNames: ['taken'] }) ?? '', /已存在同名技能/)
+})

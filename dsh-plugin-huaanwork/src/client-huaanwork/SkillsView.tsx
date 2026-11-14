@@ -2,76 +2,172 @@ import { useCallback, useEffect, useState } from "react";
 
 import { pickDirectory, rpcCall } from "./api.ts";
 import {
-  canToggleSkill,
-  filterSkills,
+  SKILL_TABS,
+  centerActionLabel,
+  filterCenterSkills,
+  filterLocalSkills,
+  originLabel,
   sourceLabel,
   tabLabel,
+  uploadActionLabel,
+  validateDuplicateName,
   validateSkillForm,
+  type CenterSkillInfo,
+  type LocalSkillInfo,
   type SkillDetail,
   type SkillFormValues,
   type SkillImportPreview,
-  type SkillInfo,
   type SkillTab,
   type SkillWriteResult,
 } from "./logic/skillsLogic.ts";
-
-const TABS: SkillTab[] = ["all", "bundled", "user", "external"];
 
 type Modal =
   | { kind: "view"; skill: SkillDetail }
   | { kind: "create" }
   | { kind: "edit"; skill: SkillDetail }
-  | { kind: "delete"; skill: SkillInfo }
+  | { kind: "delete"; skill: LocalSkillInfo }
   | { kind: "import-pick" }
-  | { kind: "import-confirm"; path: string; preview: Extract<SkillImportPreview, { ok: true }>["preview"] };
+  | { kind: "import-confirm"; path: string; preview: Extract<SkillImportPreview, { ok: true }>["preview"] }
+  | { kind: "duplicate"; skill: LocalSkillInfo };
 
-export default function SkillsView() {
-  const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [search, setSearch] = useState("");
-  const [tab, setTab] = useState<SkillTab>("all");
+export default function SkillsView({
+  refreshSignal = 0,
+  onInvocableChanged,
+}: {
+  refreshSignal?: number;
+  onInvocableChanged?: () => void;
+}) {
+  const [tab, setTab] = useState<SkillTab>("center");
+  const [centerSkills, setCenterSkills] = useState<CenterSkillInfo[]>([]);
+  const [localSkills, setLocalSkills] = useState<LocalSkillInfo[]>([]);
+  const [centerSearch, setCenterSearch] = useState("");
+  const [localSearch, setLocalSearch] = useState("");
+  const [catalogError, setCatalogError] = useState("");
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
-  const [busySkill, setBusySkill] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [modal, setModal] = useState<Modal | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refreshMine = useCallback(async () => {
     try {
-      const listed = await rpcCall<{ skills: SkillInfo[] }>("skill.list");
-      setSkills(Array.isArray(listed.skills) ? listed.skills : []);
-      setError("");
+      const listed = await rpcCall<{ skills: LocalSkillInfo[] }>("skill.mineList");
+      setLocalSkills(Array.isArray(listed.skills) ? listed.skills : []);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+
+  const refreshCenter = useCallback(async () => {
+    try {
+      const listed = await rpcCall<{ skills: CenterSkillInfo[]; catalogError?: string }>("skill.centerList");
+      setCenterSkills(Array.isArray(listed.skills) ? listed.skills : []);
+      setCatalogError(listed.catalogError ?? "");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, []);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (tab === "center") void refreshCenter();
+    else void refreshMine();
+  }, [tab, refreshSignal, refreshCenter, refreshMine]);
 
-  const openView = async (skill: SkillInfo) => {
+  const openView = async (name: string, source: "bundled" | "catalog" | "user", revision?: number) => {
     try {
-      const detail = await rpcCall<{ skill: SkillDetail }>("skill.get", { name: skill.name, source: skill.source });
+      const params = source === "catalog" ? { name, source, revision } : { name, source };
+      const detail = await rpcCall<{ skill: SkillDetail }>("skill.get", params);
       setModal({ kind: "view", skill: detail.skill });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
-  const openEdit = async (skill: SkillInfo) => {
+  const openEdit = async (skill: LocalSkillInfo) => {
     try {
-      const detail = await rpcCall<{ skill: SkillDetail }>("skill.get", { name: skill.name, source: skill.source });
+      const detail = await rpcCall<{ skill: SkillDetail }>("skill.get", { name: skill.name, source: "user" });
       setModal({ kind: "edit", skill: detail.skill });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
-  const removeSkill = async (skill: SkillInfo) => {
+  const downloadSkill = async (skill: CenterSkillInfo) => {
+    if (busy) return;
+    setBusy(`${skill.source}:${skill.name}`);
+    setError("");
+    try {
+      await rpcCall("skill.download", {
+        source: skill.source,
+        name: skill.name,
+        ...(skill.revision !== undefined ? { revision: skill.revision } : {}),
+      });
+      setNote(`已下载技能 ${skill.name}，请在“我的技能”中启用`);
+      await Promise.all([refreshCenter(), refreshMine()]);
+    } catch (cause) {
+      setNote("");
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const uploadSkill = async (skill: LocalSkillInfo) => {
+    if (busy) return;
+    setBusy(`user:${skill.name}`);
+    setError("");
+    try {
+      const result = await rpcCall<{ skill: LocalSkillInfo; created: boolean }>("skill.upload", { name: skill.name });
+      const revision = result.skill.publishedRevision ?? 1;
+      setNote(`已发布技能 ${skill.name}（revision ${revision}）`);
+      await Promise.all([refreshMine(), refreshCenter()]);
+    } catch (cause) {
+      setNote("");
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleSkill = async (skill: LocalSkillInfo) => {
+    if (busy) return;
+    const enabling = !skill.enabled;
+    setBusy(`user:${skill.name}`);
+    setError("");
+    try {
+      await rpcCall("skill.setEnabled", { name: skill.name, enabled: enabling });
+      setNote(
+        enabling
+          ? `已启用技能 ${skill.name}，可在对话框输入 / 调用`
+          : `已禁用技能 ${skill.name}`,
+      );
+      await refreshMine();
+      onInvocableChanged?.();
+    } catch (cause) {
+      setNote("");
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeSkill = async (skill: LocalSkillInfo) => {
     try {
       await rpcCall("skill.remove", { name: skill.name });
       setModal(null);
       setNote(`已删除技能 ${skill.name}`);
-      await refresh();
+      await Promise.all([refreshMine(), refreshCenter()]);
+      onInvocableChanged?.();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const duplicateSkill = async (skill: LocalSkillInfo, target: string) => {
+    try {
+      await rpcCall("skill.duplicate", { source: skill.name, name: target });
+      setModal(null);
+      setNote(`已另存为技能 ${target}，请在“我的技能”中启用`);
+      await refreshMine();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -103,48 +199,37 @@ export default function SkillsView() {
         return;
       }
       setModal(null);
-      setNote(`已导入技能 ${name}，新会话即可使用`);
-      await refresh();
+      setNote(`已导入技能 ${name}，请在“我的技能”中启用`);
+      await refreshMine();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       setModal(null);
     }
   };
 
-  const toggleSkill = async (skill: SkillInfo) => {
-    if (busySkill) return;
-    const enabling = skill.enabled !== true;
-    setBusySkill(skill.name);
-    setError("");
-    try {
-      await rpcCall("skill.setEnabled", { name: skill.name, enabled: enabling });
-      setNote(enabling ? `已启用技能 ${skill.name}，新会话生效` : `已禁用技能 ${skill.name}，新会话生效`);
-      await refresh();
-    } catch (cause) {
-      setNote("");
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusySkill(null);
-    }
-  };
-
-  const visible = filterSkills(skills, tab, search);
+  const centerVisible = filterCenterSkills(centerSkills, centerSearch);
+  const localVisible = filterLocalSkills(localSkills, localSearch);
+  const bundledNames = new Set(centerSkills.filter((skill) => skill.source === "bundled").map((skill) => skill.name));
+  const takenLocalNames = localSkills.map((skill) => skill.name);
 
   return (
     <div className="page-view">
       <div className="page-head">
-        <h1>技能中心</h1>
+        <h1>{tabLabel(tab)}</h1>
         <span className="hint-text">把经验、方法和工具封装成技能，相似任务轻松复用</span>
       </div>
       <div className="page-tools">
         <input
           className="search-input"
-          value={search}
-          placeholder="🔍 搜索技能"
-          aria-label="搜索技能"
-          onChange={(event) => setSearch(event.target.value)}
+          value={tab === "center" ? centerSearch : localSearch}
+          placeholder={tab === "center" ? "🔍 搜索技能中心" : "🔍 搜索我的技能"}
+          aria-label={tab === "center" ? "搜索技能中心" : "搜索我的技能"}
+          onChange={(event) => {
+            if (tab === "center") setCenterSearch(event.target.value);
+            else setLocalSearch(event.target.value);
+          }}
         />
-        {TABS.map((item) => (
+        {SKILL_TABS.map((item) => (
           <button
             key={item}
             type="button"
@@ -155,89 +240,173 @@ export default function SkillsView() {
           </button>
         ))}
         <span className="composer-spacer" />
-        <button type="button" className="filter-tab" onClick={() => setModal({ kind: "import-pick" })}>
-          ↑ 上传技能
-        </button>
-        <button type="button" className="btn-dark" onClick={() => setModal({ kind: "create" })}>
-          ＋ 创建技能
-        </button>
+        {tab === "center" ? (
+          <button type="button" className="filter-tab" onClick={() => void refreshCenter()}>
+            刷新
+          </button>
+        ) : (
+          <>
+            <button type="button" className="filter-tab" onClick={() => setModal({ kind: "import-pick" })}>
+              导入技能
+            </button>
+            <button type="button" className="btn-dark" onClick={() => setModal({ kind: "create" })}>
+              ＋ 创建技能
+            </button>
+          </>
+        )}
       </div>
+      {tab === "center" && catalogError ? <p className="banner">{catalogError}</p> : null}
       {note ? (
         <p className="hint" style={{ marginBottom: 12 }}>
           {note}
         </p>
       ) : null}
       {error ? <p className="banner error">{error}</p> : null}
-      {!error && visible.length === 0 ? (
-        tab === "user" && !search.trim() ? (
+
+      {tab === "center" ? (
+        centerVisible.length === 0 ? (
+          <p className="panel-empty">{centerSearch.trim() ? "没有匹配的技能" : "暂无技能"}</p>
+        ) : (
+          <div className="skill-grid">
+            {centerVisible.map((skill) => {
+              const key = `${skill.source}:${skill.name}`;
+              const actionable = skill.downloadState === "available" || skill.downloadState === "update-available";
+              return (
+                <div key={key} className="skill-card">
+                  <div className="top">
+                    <span className="av">{skill.name.slice(0, 1).toUpperCase()}</span>
+                    <div>
+                      <div className="nm">{skill.name}</div>
+                      <div className="src">{sourceLabel(skill.source)}</div>
+                    </div>
+                  </div>
+                  <p>{skill.description}</p>
+                  {skill.source === "catalog" ? (
+                    <p className="hint">
+                      发布者 {skill.publisher ?? "未知"} · revision {skill.revision ?? "?"} · {skill.updatedAt ?? ""}
+                    </p>
+                  ) : null}
+                  <div className="page-tools" style={{ marginTop: 8 }}>
+                    <button
+                      type="button"
+                      className="filter-tab"
+                      onClick={() =>
+                        void openView(
+                          skill.name,
+                          skill.source,
+                          skill.source === "catalog" ? skill.revision : undefined,
+                        )
+                      }
+                    >
+                      查看
+                    </button>
+                    {skill.downloadState === "not-applicable" ? (
+                      <span className="src" style={{ padding: "4px 0" }}>
+                        {centerActionLabel(skill.downloadState)}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="filter-tab"
+                        disabled={!actionable || busy === key}
+                        aria-label={`${centerActionLabel(skill.downloadState)}技能 ${skill.name}`}
+                        onClick={() => void downloadSkill(skill)}
+                      >
+                        {centerActionLabel(skill.downloadState)}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )
+      ) : localVisible.length === 0 ? (
+        localSearch.trim() ? (
+          <p className="panel-empty">没有匹配的技能</p>
+        ) : (
           <p className="panel-empty">
             还没有创建过技能。{" "}
             <button type="button" className="filter-tab" onClick={() => setModal({ kind: "create" })}>
               创建第一个技能
-            </button>
+            </button>{" "}
+            或点“导入技能”从文件导入。
           </p>
-        ) : (
-          <p className="panel-empty">{search.trim() || tab !== "all" ? "没有匹配的技能" : "暂无技能"}</p>
         )
       ) : (
         <div className="skill-grid">
-          {visible.map((skill) => (
-            <div key={`${skill.source}:${skill.name}`} className="skill-card">
-              <div className="top">
-                <span className="av">{skill.name.slice(0, 1).toUpperCase()}</span>
-                <div>
-                  <div className="nm">{skill.name}</div>
-                  <div className="src">{sourceLabel(skill.source)}</div>
+          {localVisible.map((skill) => {
+            const key = `user:${skill.name}`;
+            const builtinSameName = skill.origin.kind === "bundled" || bundledNames.has(skill.name);
+            const uploadDisabled = busy === key || skill.publishState === "published" || builtinSameName;
+            return (
+              <div key={key} className="skill-card">
+                <div className="top">
+                  <span className="av">{skill.name.slice(0, 1).toUpperCase()}</span>
+                  <div>
+                    <div className="nm">{skill.name}</div>
+                    <div className="src">{originLabel(skill.origin)}</div>
+                  </div>
                 </div>
-              </div>
-              <p>{skill.description}</p>
-              <div className="page-tools" style={{ marginTop: 8 }}>
-                <button type="button" className="filter-tab" onClick={() => void openView(skill)}>
-                  查看
-                </button>
-                {skill.source === "bundled" ? (
-                  canToggleSkill(skill) ? (
+                <p>{skill.description}</p>
+                <div className="page-tools" style={{ marginTop: 8 }}>
+                  <button type="button" className="filter-tab" onClick={() => void openView(skill.name, "user")}>
+                    查看
+                  </button>
+                  <button type="button" className="filter-tab" onClick={() => void openEdit(skill)}>
+                    编辑
+                  </button>
+                  <button type="button" className="filter-tab" onClick={() => setModal({ kind: "delete", skill })}>
+                    删除
+                  </button>
+                  <button
+                    type="button"
+                    className={skill.enabled ? "filter-tab on" : "filter-tab"}
+                    aria-pressed={skill.enabled}
+                    aria-label={`${skill.enabled ? "禁用" : "启用"}技能 ${skill.name}`}
+                    disabled={busy === key}
+                    onClick={() => void toggleSkill(skill)}
+                  >
+                    {skill.enabled ? "已启用" : "启用"}
+                  </button>
+                  <button
+                    type="button"
+                    className="filter-tab"
+                    disabled={uploadDisabled}
+                    aria-label={`上传技能 ${skill.name}`}
+                    onClick={() => void uploadSkill(skill)}
+                  >
+                    {uploadActionLabel(skill.publishState)}
+                  </button>
+                  {builtinSameName ? (
                     <button
                       type="button"
-                      className={skill.enabled === true ? "filter-tab on" : "filter-tab"}
-                      aria-pressed={skill.enabled === true}
-                      aria-label={`${skill.enabled === true ? "禁用" : "启用"}技能 ${skill.name}`}
-                      disabled={busySkill === skill.name}
-                      onClick={() => void toggleSkill(skill)}
+                      className="filter-tab"
+                      onClick={() => setModal({ kind: "duplicate", skill })}
                     >
-                      {skill.enabled === true ? "已启用" : "启用"}
+                      另存为新技能
                     </button>
-                  ) : (
-                    <span className="src" style={{ padding: "4px 0" }}>
-                      始终启用
-                    </span>
-                  )
-                ) : null}
-                {skill.source === "user" ? (
-                  <>
-                    <button type="button" className="filter-tab" onClick={() => void openEdit(skill)}>
-                      编辑
-                    </button>
-                    <button type="button" className="filter-tab" onClick={() => setModal({ kind: "delete", skill })}>
-                      删除
-                    </button>
-                  </>
+                  ) : null}
+                </div>
+                {builtinSameName ? (
+                  <p className="hint">与内置技能同名，请另存为新技能后上传</p>
                 ) : null}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
+
       {modal?.kind === "view" ? <SkillViewModal skill={modal.skill} onClose={() => setModal(null)} /> : null}
       {modal?.kind === "create" || modal?.kind === "edit" ? (
         <SkillFormModal
           source={modal.kind === "edit" ? modal.skill : null}
-          takenNames={skills.filter((skill) => skill.source !== "external").map((skill) => skill.name)}
+          takenNames={takenLocalNames}
           onClose={() => setModal(null)}
           onSaved={async (name) => {
             setModal(null);
-            setNote(`已保存技能 ${name}，新会话即可使用`);
-            await refresh();
+            setNote(`已保存技能 ${name}，请在“我的技能”中启用`);
+            await refreshMine();
           }}
         />
       ) : null}
@@ -252,6 +421,14 @@ export default function SkillsView() {
           preview={modal.preview}
           onCancel={() => setModal(null)}
           onConfirm={() => void confirmImport(modal.path, modal.preview.targetName)}
+        />
+      ) : null}
+      {modal?.kind === "duplicate" ? (
+        <SkillDuplicateModal
+          skill={modal.skill}
+          takenNames={[...takenLocalNames, "explore", "test-fix", "create-agent", ...bundledNames]}
+          onCancel={() => setModal(null)}
+          onConfirm={(target) => void duplicateSkill(modal.skill, target)}
         />
       ) : null}
     </div>
@@ -294,12 +471,10 @@ function SkillFormModal({
     description: source?.description ?? "",
     whenToUse: source?.whenToUse ?? "",
     content: source?.content ?? "",
-    // 从 skill.get 回填（评审 P1 修复点）：不得硬编码默认值，否则编辑会静默删掉已落盘的 invocation 键
     disableModelInvocation: source?.disableModelInvocation ?? false,
-    userInvocable: source?.userInvocable ?? true,
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
+  const [busyState, setBusyState] = useState(false);
 
   const patch = (part: Partial<SkillFormValues>) => setValues((prev) => ({ ...prev, ...part }));
 
@@ -309,14 +484,13 @@ function SkillFormModal({
       setErrors(local);
       return;
     }
-    setBusy(true);
+    setBusyState(true);
     try {
       const params = {
         description: values.description.trim(),
         whenToUse: values.whenToUse.trim() || undefined,
         content: values.content,
         disableModelInvocation: values.disableModelInvocation,
-        userInvocable: values.userInvocable,
       };
       const result = await rpcCall<SkillWriteResult>(
         editing ? "skill.update" : "skill.create",
@@ -330,7 +504,7 @@ function SkillFormModal({
     } catch (cause) {
       setErrors({ form: cause instanceof Error ? cause.message : String(cause) });
     } finally {
-      setBusy(false);
+      setBusyState(false);
     }
   };
 
@@ -338,7 +512,7 @@ function SkillFormModal({
     <div className="settings-overlay" role="dialog" aria-label={editing ? "编辑技能" : "创建技能"}>
       <div className="confirm-modal automation-form">
         <h3>{editing ? "编辑技能" : "创建技能"}</h3>
-        <p className="sub">技能 = 一段写给模型的方法说明（Markdown），保存后新会话即可使用</p>
+        <p className="sub">技能 = 一段写给模型的方法说明（Markdown），保存后在“我的技能”中启用即可使用</p>
         {errors.form ? <p className="banner error">{errors.form}</p> : null}
         <div className="automation-form-body">
         <label className="modal-field">
@@ -393,22 +567,14 @@ function SkillFormModal({
             />{" "}
             禁止模型自动调用（仅手动）
           </label>
-          <label className="modal-field">
-            <input
-              type="checkbox"
-              checked={!values.userInvocable}
-              onChange={(event) => patch({ userInvocable: !event.target.checked })}
-            />{" "}
-            禁止用户手动调用
-          </label>
         </details>
         </div>
         <div className="page-tools">
           <span className="composer-spacer" />
-          <button type="button" className="filter-tab" onClick={onClose} disabled={busy}>
+          <button type="button" className="filter-tab" onClick={onClose} disabled={busyState}>
             取消
           </button>
-          <button type="button" className="btn-dark" onClick={() => void submit()} disabled={busy}>
+          <button type="button" className="btn-dark" onClick={() => void submit()} disabled={busyState}>
             {editing ? "保存" : "创建"}
           </button>
         </div>
@@ -419,10 +585,10 @@ function SkillFormModal({
 
 function ImportPickModal({ onPick, onClose }: { onPick: (directory: boolean) => void; onClose: () => void }) {
   return (
-    <div className="settings-overlay" role="dialog" aria-label="上传技能">
+    <div className="settings-overlay" role="dialog" aria-label="导入技能">
       <div className="confirm-modal">
-        <h3>上传技能</h3>
-        <p className="sub">技能文件（.md）或含 SKILL.md 的技能目录。导入即信任其内容。</p>
+        <h3>导入技能</h3>
+        <p className="sub">技能文件（.md）或含 SKILL.md 的技能目录。导入即信任其内容；导入后默认未启用。</p>
         <div className="page-tools">
           <button type="button" className="filter-tab" onClick={() => onPick(false)}>
             选择 .md 文件
@@ -472,12 +638,12 @@ function ImportConfirmModal({
   );
 }
 
-function SkillDeleteModal({ skill, onCancel, onConfirm }: { skill: SkillInfo; onCancel: () => void; onConfirm: () => void }) {
+function SkillDeleteModal({ skill, onCancel, onConfirm }: { skill: LocalSkillInfo; onCancel: () => void; onConfirm: () => void }) {
   return (
     <div className="settings-overlay" role="dialog" aria-label="删除技能确认">
       <div className="confirm-modal">
         <h3>删除技能 {skill.name}？</h3>
-        <p className="sub">仅删除技能文件，不影响历史会话。</p>
+        <p className="sub">仅删除本机技能文件，不影响已发布到技能中心的内容与历史会话。</p>
         <div className="page-tools">
           <span className="composer-spacer" />
           <button type="button" className="filter-tab" onClick={onCancel}>
@@ -485,6 +651,60 @@ function SkillDeleteModal({ skill, onCancel, onConfirm }: { skill: SkillInfo; on
           </button>
           <button type="button" className="btn-dark" onClick={onConfirm}>
             删除
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SkillDuplicateModal({
+  skill,
+  takenNames,
+  onCancel,
+  onConfirm,
+}: {
+  skill: LocalSkillInfo;
+  takenNames: readonly string[];
+  onCancel: () => void;
+  onConfirm: (target: string) => void;
+}) {
+  const [target, setTarget] = useState("");
+  const [error, setError] = useState("");
+  const submit = () => {
+    const problem = validateDuplicateName(target, { sourceName: skill.name, takenNames });
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    onConfirm(target);
+  };
+  return (
+    <div className="settings-overlay" role="dialog" aria-label="另存为新技能">
+      <div className="confirm-modal automation-form">
+        <h3>另存为新技能</h3>
+        <p className="sub">复制 {skill.name} 的正文与资源为新名称；新副本默认未启用。</p>
+        <label className="modal-field">
+          新名称（kebab-case）
+          <input
+            className="modal-input"
+            value={target}
+            autoFocus
+            placeholder="如：my-daily-report"
+            onChange={(event) => {
+              setTarget(event.target.value);
+              setError("");
+            }}
+          />
+          {error ? <span className="hint">{error}</span> : null}
+        </label>
+        <div className="page-tools">
+          <span className="composer-spacer" />
+          <button type="button" className="filter-tab" onClick={onCancel}>
+            取消
+          </button>
+          <button type="button" className="btn-dark" onClick={submit}>
+            复制
           </button>
         </div>
       </div>

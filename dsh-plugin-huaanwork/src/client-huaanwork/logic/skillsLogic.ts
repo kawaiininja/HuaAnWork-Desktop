@@ -1,63 +1,103 @@
-export type SkillSource = "bundled" | "user" | "external";
+/**
+ * Skill page pure logic (Task 9).
+ *
+ * Types are the RPC projections from `rpc-types.ts` (one source of truth);
+ * this module owns only tab/search/button/label decisions so they can be
+ * tested without React. The page has exactly two tabs; the center is the
+ * bundled+shared catalog, "我的技能" is the profile's local copies.
+ */
 
-export type SkillInfo = {
-  name: string;
-  description: string;
-  source: SkillSource;
-  whenToUse?: string;
-  enabled?: boolean;
+import type {
+  CenterSkillInfo,
+  InvocableSkillInfo,
+  LocalSkillInfo,
+  SkillDetail,
+  SkillDownloadState,
+  SkillFieldError,
+  SkillImportPreview,
+  SkillOrigin,
+  SkillSource,
+  SkillWriteResult,
+} from "../rpc-types.ts";
+
+export type {
+  CenterSkillInfo,
+  InvocableSkillInfo,
+  LocalSkillInfo,
+  SkillDetail,
+  SkillDownloadState,
+  SkillFieldError,
+  SkillImportPreview,
+  SkillOrigin,
+  SkillSource,
+  SkillWriteResult,
 };
 
-export type SkillDetail = SkillInfo & {
-  content: string;
-  /** invocation 策略（供查看/编辑回填；缺省 = dsh 默认：模型可调用、用户可调用）。 */
-  disableModelInvocation?: boolean;
-  userInvocable?: boolean;
-};
-
-export type SkillTab = "all" | SkillSource;
-
-export type SkillFieldError = { field: string; message: string };
-
-export type SkillWriteResult = { ok: true; skill: SkillInfo } | { ok: false; fieldErrors: SkillFieldError[] };
-
-export type SkillImportPreview =
-  | {
-      ok: true;
-      preview: SkillDetail & { targetName: string; sourceName: string; nameMismatch: boolean; kind: "file" | "directory" };
-    }
-  | { ok: false; fieldErrors: SkillFieldError[] };
-
-/** 与 dsh SKILL_NAME 及 sidecar 校验保持一致。 */
-export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
-export function sourceLabel(source: SkillSource): string {
-  return source === "bundled" ? "内置" : source === "user" ? "我创建的" : "外部";
-}
+export const SKILL_TABS = ["center", "mine"] as const;
+export type SkillTab = (typeof SKILL_TABS)[number];
 
 export function tabLabel(tab: SkillTab): string {
-  return tab === "all" ? "全部" : sourceLabel(tab);
+  return tab === "center" ? "技能中心" : "我的技能";
 }
 
-export function filterSkills(skills: SkillInfo[], tab: SkillTab, query: string): SkillInfo[] {
-  const scoped = tab === "all" ? skills : skills.filter((skill) => skill.source === tab);
+/** Source badge for CENTER cards only; local cards use {@link originLabel}. */
+export function sourceLabel(source: SkillSource): string {
+  switch (source) {
+    case "bundled": return "内置";
+    case "catalog": return "共享";
+    case "user": return "我的技能";
+    case "external": return "外部";
+  }
+}
+
+/** Local-card origin badge (spec §5.3). */
+export function originLabel(origin: SkillOrigin): string {
+  switch (origin.kind) {
+    case "created": return "创建";
+    case "imported": return "导入";
+    case "bundled": return "内置副本";
+    case "catalog": return "共享副本";
+  }
+}
+
+function matches(name: string, description: string, query: string): boolean {
   const normalized = query.trim().toLowerCase();
-  if (!normalized) return scoped;
-  return scoped.filter((skill) => `${skill.name} ${skill.description}`.toLowerCase().includes(normalized));
+  if (!normalized) return true;
+  return `${name} ${description}`.toLowerCase().includes(normalized);
 }
 
-/** 系统技能：始终启用，技能中心不渲染开关（与 sidecar/bundle 的 SYSTEM_SKILLS 保持一致）。 */
+export function filterCenterSkills(skills: readonly CenterSkillInfo[], query: string): CenterSkillInfo[] {
+  return skills.filter(skill => matches(skill.name, skill.description, query));
+}
+
+export function filterLocalSkills(skills: readonly LocalSkillInfo[], query: string): LocalSkillInfo[] {
+  return skills.filter(skill => matches(skill.name, skill.description, query));
+}
+
+/** Center action button label; independent from any enable state. */
+export function centerActionLabel(state: SkillDownloadState): string {
+  switch (state) {
+    case "available": return "下载";
+    case "downloaded": return "已下载";
+    case "update-available": return "更新";
+    case "local-conflict": return "本地有修改";
+    case "not-applicable": return "系统技能·始终启用";
+  }
+}
+
+/** My-skills upload button label. */
+export function uploadActionLabel(state: LocalSkillInfo["publishState"]): string {
+  switch (state) {
+    case "not-published": return "上传";
+    case "published": return "已上传";
+    case "modified": return "更新上传";
+  }
+}
+
+/** System skills: always enabled, no toggle, no download. */
 export const SYSTEM_SKILLS: ReadonlySet<string> = new Set(["explore", "test-fix"]);
 
-/** 内置技能是否渲染启用开关：仅 bundled 且非系统技能。 */
-export function canToggleSkill(skill: Pick<SkillInfo, "source" | "name">): boolean {
-  return skill.source === "bundled" && !SYSTEM_SKILLS.has(skill.name);
-}
-
-/** 可被 `/` 点名：内置必须 enabled；用户/外部无开关，视为已启用。 */
-export function isSkillInvocable(skill: SkillInfo): boolean {
-  return skill.source === "bundled" ? skill.enabled === true : true;
-}
+export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export type SlashToken = { start: number; end: number; query: string };
 
@@ -81,10 +121,10 @@ export function isReservedSlash(query: string): boolean {
   return query === RESERVED_SLASH || query.startsWith(`${RESERVED_SLASH}-`);
 }
 
-export function slashSkills(skills: readonly SkillInfo[], query: string): SkillInfo[] {
+/** `/` catalog query + ordering. Every entry is invocable by construction. */
+export function slashSkills(skills: readonly InvocableSkillInfo[], query: string): InvocableSkillInfo[] {
   const needle = query.trim().toLowerCase();
   const matched = skills.filter((skill) => {
-    if (!isSkillInvocable(skill)) return false;
     if (!needle) return true;
     return skill.name.includes(needle) || skill.description.toLowerCase().includes(needle);
   });
@@ -111,7 +151,6 @@ export type SkillFormValues = {
   whenToUse: string;
   content: string;
   disableModelInvocation: boolean;
-  userInvocable: boolean;
 };
 
 /** 客户端预校验（服务端仍会复检并返回 fieldErrors）。编辑模式名称锁定、不校验。 */
@@ -123,10 +162,22 @@ export function validateSkillForm(
   if (!opts.editing) {
     if (!SKILL_NAME_RE.test(values.name)) errors.name = "名称需为小写字母/数字/连字符（kebab-case）";
     else if (values.name.length > 64) errors.name = "名称不超过 64 字符";
-    else if (opts.takenNames.includes(values.name)) errors.name = "已存在同名技能（含内置技能）";
+    else if (opts.takenNames.includes(values.name)) errors.name = "已存在同名技能";
   }
   if (!values.description.trim()) errors.description = "描述必填";
   else if (values.description.length > 1024) errors.description = "描述不超过 1024 字符";
   if (!values.content.trim()) errors.content = "正文必填";
   return errors;
+}
+
+/** Target-name validation for “另存为新技能”. */
+export function validateDuplicateName(
+  target: string,
+  opts: { sourceName: string; takenNames: readonly string[] },
+): string | undefined {
+  if (target === opts.sourceName) return "请输入一个新的技能名称";
+  if (!SKILL_NAME_RE.test(target)) return "名称需为小写字母/数字/连字符（kebab-case）";
+  if (target.length > 64) return "名称不超过 64 字符";
+  if (opts.takenNames.includes(target)) return "已存在同名技能";
+  return undefined;
 }

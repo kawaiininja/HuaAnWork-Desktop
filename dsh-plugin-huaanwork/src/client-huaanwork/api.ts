@@ -80,12 +80,12 @@ export const ROUTES: Record<string, RouteDef> = {
   'plugin.list': get('/huaanwork/plugin/list'),
 
   // skill
-  'skill.list': get('/huaanwork/skill/list'),
   'skill.centerList': get('/huaanwork/skill/center/list'),
   'skill.mineList': get('/huaanwork/skill/mine/list'),
   'skill.invocableList': get('/huaanwork/skill/invocable/list'),
   'skill.download': post('/huaanwork/skill/download'),
   'skill.upload': post('/huaanwork/skill/upload'),
+  'skill.duplicate': post('/huaanwork/skill/duplicate'),
   'skill.get': get('/huaanwork/skill/get', objectQuery),
   'skill.create': post('/huaanwork/skill/create'),
   'skill.update': post('/huaanwork/skill/update'),

@@ -1,6 +1,5 @@
 import type { Dirent } from 'node:fs'
 import { readFileSync, promises as fs } from 'node:fs'
-import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 
 import {
@@ -26,7 +25,6 @@ import type {
   SkillDetail,
   SkillFieldError,
   SkillImportPreview,
-  SkillInfo,
   SkillLocalEntry,
   SkillWriteResult,
 } from '../client-huaanwork/rpc-types.ts'
@@ -50,10 +48,6 @@ import {
 
 export function userSkillsRoot(storageRoot: string): string {
   return join(storageRoot, 'skills')
-}
-
-export function externalSkillsRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return join(env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'), 'skills')
 }
 
 export type DiskEntry = { path: string; kind: 'bundle' | 'flat' }
@@ -83,25 +77,6 @@ export async function scanRoot(root: string): Promise<DiskEntry[]> {
     }
   }
   return found
-}
-
-async function listRoot(root: string, source: 'user' | 'external'): Promise<SkillInfo[]> {
-  const skills: SkillInfo[] = []
-  for (const entry of await scanRoot(root)) {
-    try {
-      const parsed = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
-      if (!parsed.name || !parsed.description) continue
-      skills.push({
-        name: parsed.name,
-        description: parsed.description,
-        source,
-        ...(parsed.whenToUse ? { whenToUse: parsed.whenToUse } : {}),
-      })
-    } catch {
-      // 不可读条目跳过(与 provider 的 warn+skip 语义对齐)
-    }
-  }
-  return skills.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export function listUserSkills(storageRoot: string): Promise<LocalSkillInfo[]> {
@@ -168,10 +143,6 @@ async function listLocalRoot(root: string): Promise<LocalSkillInfo[]> {
     }
   }
   return skills.sort((a, b) => a.name.localeCompare(b.name))
-}
-
-export function listExternalSkills(env: NodeJS.ProcessEnv = process.env): Promise<SkillInfo[]> {
-  return listRoot(externalSkillsRoot(env), 'external')
 }
 
 /** 按 frontmatter name 在指定 root 找条目(name 是运行时唯一事实来源,与文件/目录名无关)。 */

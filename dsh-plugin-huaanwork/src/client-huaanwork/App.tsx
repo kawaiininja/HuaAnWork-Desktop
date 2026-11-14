@@ -49,7 +49,7 @@ import {
   parseSlashInvoke,
   slashSkills,
   slashTokenAt,
-  type SkillInfo,
+  type InvocableSkillInfo,
 } from "./logic/skillsLogic.ts";
 import type {
   AgentPackageConfirmCard,
@@ -533,7 +533,7 @@ export default function App() {
     { id: "work-1", label: "对话", items: [], sessionFailed: false, projectId: null, pendingPick: false },
   ]);
   const [draft, setDraft] = useState("");
-  const [slashCatalog, setSlashCatalog] = useState<SkillInfo[]>([]);
+  const [slashCatalog, setSlashCatalog] = useState<InvocableSkillInfo[]>([]);
   const [slashCursor, setSlashCursor] = useState(0);
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashClosed, setSlashClosed] = useState(false);
@@ -1114,16 +1114,17 @@ export default function App() {
     }
   }, [atMatches.length, atIndex]);
 
+  const refreshSlashCatalog = useCallback(() => {
+    if (view !== "main" || sidecarDead || !ready) return;
+    void rpcCall<{ skills: InvocableSkillInfo[] }>("skill.invocableList")
+      .then((listed) => setSlashCatalog(Array.isArray(listed.skills) ? listed.skills : []))
+      .catch(() => setSlashCatalog([]));
+  }, [view, ready, sidecarDead]);
+
   useEffect(() => {
     if (view !== "main" || sidecarDead || !ready) return;
     let cancelled = false;
-    void rpcCall<{ skills: SkillInfo[] }>("skill.list")
-      .then((listed) => {
-        if (!cancelled) setSlashCatalog(Array.isArray(listed.skills) ? listed.skills : []);
-      })
-      .catch(() => {
-        if (!cancelled) setSlashCatalog([]);
-      });
+    refreshSlashCatalog();
     void rpcCall<{ items: AgentListItem[] }>("agent.invocableList")
       .then((res) => {
         if (!cancelled) setAtCatalog(Array.isArray(res.items) ? res.items : []);
@@ -1134,7 +1135,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [view, ready, sidecarDead]);
+  }, [view, ready, sidecarDead, refreshSlashCatalog]);
 
   /** 向指定标签追加一条提示；标签已关闭时自然丢弃。 */
   function noteTab(tabId: string, text: string) {
@@ -2609,7 +2610,7 @@ export default function App() {
     liveChatRef.current = id;
   }
 
-  function pickSlashSkill(skill: SkillInfo) {
+  function pickSlashSkill(skill: InvocableSkillInfo) {
     const token = slashTokenAt(draft, slashCursor);
     const next = token
       ? `${draft.slice(0, token.start)}/${skill.name} ${draft.slice(token.end)}`
@@ -3659,7 +3660,7 @@ export default function App() {
           ) : null}
 
           {view === "skills" ? (
-            <SkillsView />
+            <SkillsView refreshSignal={agentChangeSignal} onInvocableChanged={refreshSlashCatalog} />
           ) : view === "automations" ? (
             <AutomationsView
               projects={projects}

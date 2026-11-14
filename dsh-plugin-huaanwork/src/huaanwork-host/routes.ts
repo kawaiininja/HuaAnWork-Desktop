@@ -37,7 +37,6 @@ import {
   createSkill,
   getSkill,
   importSkill,
-  listExternalSkills,
   listUserSkills,
   previewSkillImport,
   removeSkill,
@@ -47,7 +46,6 @@ import {
   type SkillSourceFilter,
   type SkillUpdateInput,
 } from './skills-host.ts'
-import { INTERNAL_BUNDLED_SKILLS, listBundledSkills, readSkillToggles, SYSTEM_SKILLS } from '../huaanwork-guardrails/skills.ts'
 import { inspectSkillArchive } from '@huaanwork/skill-format'
 import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
 import { listInvocableSkills, listSkillCenter } from './skill-center.ts'
@@ -58,6 +56,7 @@ import {
   type DownloadSkillRequest,
 } from './skill-catalog-download.ts'
 import { SkillUploadError, uploadLocalSkill } from './skill-catalog-upload.ts'
+import { SkillDuplicateError, duplicateLocalSkill } from './skill-duplicate.ts'
 import {
   RUNS_LIMIT,
   RUN_STATUSES,
@@ -800,29 +799,6 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
 
   // skill
   {
-    method: 'skill.list',
-    http: 'GET',
-    path: '/huaanwork/skill/list',
-    handler: storeRoute(async (_req, ctx) => {
-      // 旧 host.ts:1182-1195 语义:toggles 只作用于内置技能,三源合并全局按名排序、同名不去重。
-      const toggles = readSkillToggles(ctx.profileDir)
-      // 内部技能(create-agent)由创建入口注入,不进技能中心;仍留 listBundledSkills 供重名检查。
-      const bundled = listBundledSkills()
-        .filter((skill) => !INTERNAL_BUNDLED_SKILLS.has(skill.name))
-        .map((skill) => ({
-          ...skill,
-          source: 'bundled' as const,
-          enabled: SYSTEM_SKILLS.has(skill.name) || toggles[skill.name] === true,
-        }))
-      const user = await listUserSkills(ctx.profileDir)
-      const external = await listExternalSkills()
-      // 全局按名称排序;跨来源同名不去重(前端以 source:name 为 key 双卡展示,所见即运行时遮蔽关系)
-      const skills = [...bundled, ...user, ...external]
-      skills.sort((a, b) => a.name.localeCompare(b.name))
-      return { skills }
-    }),
-  }, // Task 10 (文件 I/O 读技能目录与配置)
-  {
     method: 'skill.get',
     http: 'GET',
     path: '/huaanwork/skill/get',
@@ -947,6 +923,26 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
             || error.code === 'skill-name-conflict'
             || error.code === 'skill-revision-conflict'
           throw new RouteError(conflict ? 409 : 400, error.code, error.message)
+        }
+        throw error
+      }
+    }),
+  },
+  {
+    method: 'skill.duplicate',
+    http: 'POST',
+    path: '/huaanwork/skill/duplicate',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const source = typeof body.source === 'string' ? body.source : ''
+      const name = typeof body.name === 'string' ? body.name : ''
+      if (!source || !name) throw new RouteError(400, 'bad-request', 'skill.duplicate requires params.source and params.name')
+      try {
+        return { skill: await duplicateLocalSkill(ctx.profileDir, source, name) }
+      } catch (error) {
+        if (error instanceof SkillDuplicateError) {
+          const status = error.code === 'skill-name-taken' ? 409 : 400
+          throw new RouteError(status, error.code, error.message)
         }
         throw error
       }
