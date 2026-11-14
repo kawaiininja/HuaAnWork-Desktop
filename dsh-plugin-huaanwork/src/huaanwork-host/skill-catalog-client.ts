@@ -225,23 +225,26 @@ export function createSkillCatalogClient(options: CreateSkillCatalogClientOption
       if (status === 401 || status === 403) {
         throw new SkillCatalogClientError('技能上传口令错误或权限不足', 'auth', status)
       }
+      // Only the machine-readable code crosses the boundary: the server body is
+      // never echoed (it is untrusted text and may carry a token fragment).
       if (status === 409) {
         const code = isRecord(body) && typeof body.code === 'string' ? body.code : undefined
-        const known = code === 'skill-already-exists'
-          || code === 'skill-name-conflict'
-          || code === 'skill-revision-conflict'
+        const messages: Record<string, string> = {
+          'skill-already-exists': '同名技能已存在，首次上传不能覆盖',
+          'skill-name-conflict': '该技能由其他发布者所有',
+          'skill-revision-conflict': '本地记录的发布版本已落后，请重新发布',
+        }
+        const known = code !== undefined && Object.hasOwn(messages, code)
         throw new SkillCatalogClientError(
-          isRecord(body) && typeof body.error === 'string' ? body.error : '技能发布冲突',
-          known ? code : 'http',
+          (known ? messages[code] : undefined) ?? '技能发布冲突',
+          known ? code as SkillCatalogErrorCode : 'http',
           status,
         )
       }
       if (status === 400) {
-        const code = isRecord(body) && (body.code === 'invalid-skill' || body.code === 'skill-too-large')
-          ? body.code
-          : 'invalid-skill'
+        const code = isRecord(body) && body.code === 'skill-too-large' ? 'skill-too-large' : 'invalid-skill'
         throw new SkillCatalogClientError(
-          isRecord(body) && typeof body.error === 'string' ? body.error : '技能归档无效',
+          code === 'skill-too-large' ? '技能归档超过 5 MiB 上限' : '技能归档无效',
           code,
           status,
         )

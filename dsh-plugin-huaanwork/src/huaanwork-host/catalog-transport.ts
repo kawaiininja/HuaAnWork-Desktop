@@ -189,6 +189,11 @@ export function createCatalogTransport(options: CatalogTransportOptions = {}): C
 
     async requestJsonResult(url, token, init) {
       const response = await fetchAnyResponse(url, token, init)
+      // Classify auth BEFORE reading: an oversized auth-error page must not be
+      // reported as "response too large".
+      if (response.status === 401 || response.status === 403) {
+        throw makeError(CATALOG_AUTH_ERROR, 'auth', response.status)
+      }
       const body = await readCappedCatalogBuffer(response, MAX_CATALOG_JSON_BYTES, '目录响应超过 1 MiB 上限', makeError)
       let parsed: unknown
       try {

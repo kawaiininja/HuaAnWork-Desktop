@@ -234,6 +234,55 @@ test('caps a downloaded archive at 5 MiB', async () => {
   )
 })
 
+test('maps publish responses without echoing the server body', async () => {
+  let behavior: { status: number; body: string; contentType?: string } = {
+    status: 401,
+    body: '{"error":"口令错误"}',
+  }
+  const server = await bootServer((_request, response) => {
+    response.writeHead(behavior.status, { 'content-type': behavior.contentType ?? 'application/json' })
+    response.end(behavior.body)
+  })
+  const client = createSkillCatalogClient({
+    readSettings: () => settingsFor(server.host, server.port),
+  })
+  const archive = Buffer.from('not-a-real-archive')
+
+  await assert.rejects(
+    client.publishSkill('demo', archive, undefined),
+    (cause: unknown) => cause instanceof SkillCatalogClientError && cause.code === 'auth',
+  )
+
+  behavior = { status: 400, body: '{"error":"SERVER-TEXT","code":"skill-too-large"}' }
+  await assert.rejects(
+    client.publishSkill('demo', archive, undefined),
+    (cause: unknown) => cause instanceof SkillCatalogClientError
+      && cause.code === 'skill-too-large'
+      && !cause.message.includes('SERVER-TEXT'),
+  )
+
+  behavior = { status: 409, body: '{"error":"SERVER-TEXT","code":"skill-name-conflict"}' }
+  await assert.rejects(
+    client.publishSkill('demo', archive, 1),
+    (cause: unknown) => cause instanceof SkillCatalogClientError
+      && cause.code === 'skill-name-conflict'
+      && cause.message.includes('其他发布者')
+      && !cause.message.includes('SERVER-TEXT'),
+  )
+
+  // An unknown 409 code and a non-JSON error body both surface as generic HTTP.
+  behavior = { status: 409, body: '{"error":"SERVER-TEXT","code":"mystery"}' }
+  await assert.rejects(
+    client.publishSkill('demo', archive, 1),
+    (cause: unknown) => cause instanceof SkillCatalogClientError && cause.code === 'http',
+  )
+  behavior = { status: 409, body: 'not json' }
+  await assert.rejects(
+    client.publishSkill('demo', archive, 1),
+    (cause: unknown) => cause instanceof SkillCatalogClientError && cause.code === 'http',
+  )
+})
+
 test('reports the unavailable sentence when the host is not configured', async () => {
   const client = createSkillCatalogClient({
     readSettings: () => settingsFor('', ''),

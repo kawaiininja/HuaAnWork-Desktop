@@ -187,6 +187,12 @@ test('same-digest retry is idempotent', async () => {
 test('maps server conflicts without touching the local publish state', async () => {
   const profile = makeHome()
   writeLocalSkill(profile, 'demo')
+  const first = await bootCatalogServer()
+  bindClient(first.port)
+  await uploadLocalSkill(profile, 'demo')
+  const before = readSkillLocalState(profile).skills.demo
+  assert.equal(before?.publishedRevision, 1)
+
   for (const [code, status] of [['skill-name-conflict', 409], ['skill-revision-conflict', 409]] as const) {
     const server = await bootCatalogServer({ status, body: { error: '冲突', code } })
     bindClient(server.port)
@@ -194,23 +200,46 @@ test('maps server conflicts without touching the local publish state', async () 
       uploadLocalSkill(profile, 'demo'),
       (cause: unknown) => cause instanceof SkillUploadError && cause.code === code,
     )
-    assert.equal(readSkillLocalState(profile).skills.demo?.publishedRevision, undefined)
+    const after = readSkillLocalState(profile).skills.demo
+    assert.equal(after?.publishedRevision, before?.publishedRevision)
+    assert.equal(after?.publishedDigest, before?.publishedDigest)
   }
+})
+
+test('never echoes the server error text into the surfaced message', async () => {
+  const profile = makeHome()
+  writeLocalSkill(profile, 'demo')
+  const server = await bootCatalogServer({
+    status: 409,
+    body: { error: 'SECRET-SERVER-TEXT', code: 'skill-name-conflict' },
+  })
+  bindClient(server.port)
+  await assert.rejects(
+    uploadLocalSkill(profile, 'demo'),
+    (cause: unknown) => cause instanceof SkillUploadError
+      && cause.code === 'skill-name-conflict'
+      && cause.message.includes('其他发布者')
+      && !cause.message.includes('SECRET-SERVER-TEXT'),
+  )
 })
 
 test('rebuilds the snapshot from disk and reports an edit made during upload as modified', async () => {
   const profile = makeHome()
   writeLocalSkill(profile, 'demo', '第一版')
-  const server = await bootCatalogServer({
+  const first = await bootCatalogServer()
+  bindClient(first.port)
+  await uploadLocalSkill(profile, 'demo')
+  // A realistic update round trip (revision 2) where the file changes mid-flight.
+  const second = await bootCatalogServer({
     revision: 2,
     duringRequest: () => {
-      // Edit lands while the POST is in flight.
       writeFileSync(join(profile, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: demo\n---\n\n改过\n', 'utf8')
     },
   })
   setUserSkillToggle(profile, 'demo', true)
-  bindClient(server.port)
+  bindClient(second.port)
   const result = await uploadLocalSkill(profile, 'demo')
+  assert.equal(result.skill.publishedRevision, 2)
   assert.equal(result.skill.publishState, 'modified')
   assert.notEqual(result.skill.publishedDigest, result.skill.contentDigest)
   assert.match(readFileSync(join(profile, 'skills', 'demo', 'SKILL.md'), 'utf8'), /改过/)
@@ -242,6 +271,23 @@ test('an empty upload token disables upload without any request', async () => {
     (cause: unknown) => cause instanceof SkillUploadError && cause.code === 'upload-token-missing',
   )
   assert.equal(server.requests.length, 0)
+})
+
+test('normalizes a flat markdown skill to one SKILL.md entry', async () => {
+  const profile = makeHome()
+  mkdirSync(join(profile, 'skills'), { recursive: true })
+  writeFileSync(
+    join(profile, 'skills', 'flat-one.md'),
+    '---\nname: flat-one\ndescription: flat\n---\n\n扁平正文\n',
+    'utf8',
+  )
+  const server = await bootCatalogServer()
+  bindClient(server.port)
+  const result = await uploadLocalSkill(profile, 'flat-one')
+  assert.equal(result.created, true)
+  const inspected = await inspectSkillArchive(server.requests[0]!.archive)
+  assert.deepEqual(inspected.files.map(file => file.path), ['SKILL.md'])
+  assert.match(inspected.skillMarkdown, /扁平正文/)
 })
 
 test('refuses a first publish that reuses a bundled skill name', async () => {
