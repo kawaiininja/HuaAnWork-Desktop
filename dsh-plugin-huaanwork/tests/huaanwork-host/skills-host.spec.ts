@@ -312,6 +312,19 @@ describe('skills-host 写路径 (Task 1)', () => {
       if (!symResult.ok) expect(symResult.fieldErrors[0]?.message).toContain('符号链接')
     }
 
+    // 6. 顶层目录本身是符号链接 -> 拒绝
+    const realSkillDir = join(home, 'real-skill-dir')
+    mkdirSync(realSkillDir, { recursive: true })
+    writeFileSync(join(realSkillDir, 'SKILL.md'), '---\nname: real-sym-target\ndescription: sym\n---\n\nx\n')
+    const topSymlinkDir = join(home, 'top-symlink-dir')
+    await fsp.symlink(realSkillDir, topSymlinkDir).catch(() => null)
+    const isTopSym = await fsp.lstat(topSymlinkDir).then((s) => s.isSymbolicLink()).catch(() => false)
+    if (isTopSym) {
+      const topSymResult = await previewSkillImport(home, topSymlinkDir)
+      expect(topSymResult.ok).toBe(false)
+      if (!topSymResult.ok) expect(topSymResult.fieldErrors[0]?.message).toContain('目录包含符号链接，已拒绝导入')
+    }
+
     // 6. 正常 file 预览 (校验 targetName, sourceName, nameMismatch, kind)
     const fileSource = join(home, 'original-filename.md')
     writeFileSync(

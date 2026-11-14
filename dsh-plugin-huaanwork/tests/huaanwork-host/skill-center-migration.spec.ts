@@ -327,5 +327,67 @@ describe('ensureSkillCenterMigration', () => {
     const stateAfterCopy = readSkillLocalState(crashAfterCopy)
     assert.equal(stateAfterCopy.skills.pdf?.origin.kind, 'bundled')
     assert.equal(stateAfterCopy.migration?.version, 1)
+
+    // 情况 3: 写入 origin='bundled' 时携带过期 contentDigest 后、复制目录前崩溃，重入应刷新为当前内置摘要
+    const crashStaleDigest = makeProfile()
+    writeFileSync(join(crashStaleDigest, 'skill-toggles.json'), JSON.stringify({ pdf: true }), 'utf8')
+    writeFileSync(
+      skillLocalStatePath(crashStaleDigest),
+      JSON.stringify({
+        schemaVersion: 1,
+        skills: {
+          pdf: { origin: { kind: 'bundled' }, contentDigest: 'sha256:stale-old-digest' },
+        },
+      }),
+      'utf8',
+    )
+
+    const warningsStaleDigest = await ensureSkillCenterMigration(crashStaleDigest)
+    assert.deepEqual(warningsStaleDigest, [])
+    assert.equal(existsSync(join(crashStaleDigest, 'skills', 'pdf', 'SKILL.md')), true)
+    assert.equal(readUserSkillToggles(crashStaleDigest).pdf, true)
+    const stateStaleDigest = readSkillLocalState(crashStaleDigest)
+    assert.equal(stateStaleDigest.skills.pdf?.origin.kind, 'bundled')
+    assert.equal(stateStaleDigest.skills.pdf?.contentDigest, bundledDigest)
+    assert.equal(stateStaleDigest.migration?.version, 1)
+  })
+
+  test('skips local skill with empty description even when matched in legacy skill-toggles.json', async () => {
+    const profile = makeProfile()
+    const skillDir = join(profile, 'skills', 'pdf')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '---\nname: pdf\ndescription:   \n---\n\n正文\n',
+      'utf8',
+    )
+    writeFileSync(join(profile, 'skill-toggles.json'), JSON.stringify({ pdf: true }), 'utf8')
+
+    const warnings = await ensureSkillCenterMigration(profile)
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0]!, /跳过缺少描述的本地技能 pdf/)
+
+    const state = readSkillLocalState(profile)
+    assert.equal(state.migration?.version, 1)
+    assert.equal(state.skills.pdf, undefined)
+    assert.equal(readUserSkillToggles(profile).pdf, undefined)
+  })
+
+  test('warns and continues when non-skill path occupies bundled target location', async () => {
+    const profile = makeProfile()
+    mkdirSync(join(profile, 'skills'), { recursive: true })
+    const occupied = join(profile, 'skills', 'pdf')
+    writeFileSync(occupied, 'occupied-regular-file', 'utf8')
+    writeFileSync(join(profile, 'skill-toggles.json'), JSON.stringify({ pdf: true }), 'utf8')
+
+    const warnings = await ensureSkillCenterMigration(profile)
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0]!, /内置技能 pdf 未复制：目标路径已存在/)
+    assert.equal(readFileSync(occupied, 'utf8'), 'occupied-regular-file')
+
+    const state = readSkillLocalState(profile)
+    assert.equal(state.migration?.version, 1)
+    assert.equal(state.skills.pdf, undefined)
+    assert.equal(readUserSkillToggles(profile).pdf, undefined)
   })
 })

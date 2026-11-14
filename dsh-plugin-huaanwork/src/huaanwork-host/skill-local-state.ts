@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import { SKILL_NAME_RE } from '@huaanwork/skill-format/markdown'
@@ -67,8 +67,17 @@ function readJsonDocument(path: string, label: string, ErrorType: new (message: 
 function writeJsonAtomic(path: string, value: unknown): void {
   const tmp = `${path}.tmp`
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-  renameSync(tmp, path)
+  try {
+    writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    renameSync(tmp, path)
+  } catch (error) {
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      // 清理临时文件失败不得遮蔽原始写入错误
+    }
+    throw error
+  }
 }
 
 export function readUserSkillToggles(profileDir: string): Record<string, true> {
@@ -97,7 +106,7 @@ export function setUserSkillToggle(profileDir: string, name: string, enabled: bo
   if (!SKILL_NAME_RE.test(name)) throw new Error(`invalid skill name: ${name}`)
   const toggles = readUserSkillToggles(profileDir)
   if (enabled) toggles[name] = true
-  else delete toggles[name]
+  else if (Object.hasOwn(toggles, name)) delete toggles[name]
   writeJsonAtomic(userSkillTogglesPath(profileDir), toggles)
 }
 
@@ -208,7 +217,7 @@ export function writeSkillLocalEntry(profileDir: string, name: string, entry: Sk
 
 export function removeSkillLocalEntry(profileDir: string, name: string): void {
   const state = readSkillLocalState(profileDir)
-  if (state.skills[name] === undefined) return
+  if (!Object.hasOwn(state.skills, name)) return
   delete state.skills[name]
   writeJsonAtomic(skillLocalStatePath(profileDir), state)
 }

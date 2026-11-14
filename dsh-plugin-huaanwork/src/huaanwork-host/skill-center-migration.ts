@@ -1,9 +1,10 @@
 import { readFileSync, promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { createSkillDigest, readSkillDirectory, writeSkillDirectory } from '@huaanwork/skill-format'
+import { createSkillDigest, readSkillDirectory } from '@huaanwork/skill-format'
 import type { SkillArchiveFile } from '@huaanwork/skill-format'
 import { SKILL_NAME_RE, parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
+import type { SkillOrigin } from '../client-huaanwork/rpc-types.ts'
 import {
   INTERNAL_BUNDLED_SKILLS,
   SYSTEM_SKILLS,
@@ -14,7 +15,9 @@ import {
   findEntry,
   scanRoot,
   skillEntryDigestStrict,
+  stageSkillDirectory,
   userSkillsRoot,
+  withSkillStorageLock,
 } from './skills-host.ts'
 import {
   markSkillCenterMigrationComplete,
@@ -58,121 +61,109 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function copyBundledSkill(
-  profileDir: string,
-  name: string,
-  files: readonly SkillArchiveFile[],
-): Promise<void> {
-  const root = userSkillsRoot(profileDir)
-  await fs.mkdir(root, { recursive: true })
-  // staging 放在 skills 根之外:扫描器永远不会把一个未完成的副本当成技能。
-  const tmp = join(profileDir, `.skill-migration-${name}`)
-  await fs.rm(tmp, { recursive: true, force: true })
-  try {
-    await writeSkillDirectory(tmp, files)
-    await fs.rename(tmp, join(root, name))
-  } catch (error) {
-    await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined)
-    throw error
-  }
-}
-
 export async function ensureSkillCenterMigration(profileDir: string): Promise<string[]> {
-  const state = readSkillLocalState(profileDir)
-  if (state.migration?.version === 1) return []
-  // 损坏的启用状态文档必须在任何写盘/复制前暴露，避免迁移只写一半。
-  readUserSkillToggles(profileDir)
+  return withSkillStorageLock(profileDir, async () => {
+    const state = readSkillLocalState(profileDir)
+    if (state.migration?.version === 1) return []
+    // 损坏的启用状态文档必须在任何写盘/复制前暴露，避免迁移只写一半。
+    readUserSkillToggles(profileDir)
 
-  const warnings: string[] = []
-  const labeled = new Set(Object.keys(state.skills))
-  const skippedInvalidLocalNames = new Set<string>()
-  const userRoot = userSkillsRoot(profileDir)
+    const warnings: string[] = []
+    const labeled = new Map<string, SkillOrigin>(
+      Object.entries(state.skills).map(([name, entry]) => [name, entry.origin]),
+    )
+    const skippedInvalidLocalNames = new Set<string>()
+    const userRoot = userSkillsRoot(profileDir)
 
-  // 先读取旧用户目录与旧开关表，再开始任何复制/写入。
-  // 直接扫描 userRoot（保留根目录级 ENOTDIR 抛错），不经过 listUserSkills 的宽松摘要回落。
-  const userEntries = await scanRoot(userRoot)
-  const legacyToggles = readSkillToggles(profileDir)
+    // 先读取旧用户目录与旧开关表，再开始任何复制/写入。
+    // 直接扫描 userRoot（保留根目录级 ENOTDIR 抛错），不经过 listUserSkills 的宽松摘要回落。
+    const userEntries = await scanRoot(userRoot)
+    const legacyToggles = readSkillToggles(profileDir)
 
-  for (const entry of userEntries) {
-    let parsed
-    try {
-      parsed = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
-    } catch {
-      continue
-    }
-    if (!parsed.name || !parsed.description) continue
-    if (!SKILL_NAME_RE.test(parsed.name)) {
-      warnings.push(`跳过非法名称的本地技能 ${parsed.name}`)
-      continue
-    }
-    if (!labeled.has(parsed.name)) {
-      let contentDigest: string
+    for (const entry of userEntries) {
+      let parsed
       try {
-        contentDigest = skillEntryDigestStrict(entry)
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        warnings.push(`跳过不安全的本地技能 ${parsed.name}：${reason}`)
+        parsed = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
+      } catch {
+        continue
+      }
+      if (!parsed.name) continue
+      if (!SKILL_NAME_RE.test(parsed.name)) {
+        warnings.push(`跳过非法名称的本地技能 ${parsed.name}`)
+        continue
+      }
+      if (!parsed.description) {
+        warnings.push(`跳过缺少描述的本地技能 ${parsed.name}`)
         skippedInvalidLocalNames.add(parsed.name)
         continue
       }
-      writeSkillLocalEntry(profileDir, parsed.name, {
-        origin: { kind: 'created' },
-        contentDigest,
-      })
-      labeled.add(parsed.name)
-    }
-    // 旧版没有用户技能启用门:存量用户技能全部保留可调用。
-    setUserSkillToggle(profileDir, parsed.name, true)
-  }
-
-  for (const name of Object.keys(legacyToggles)) {
-    if (SYSTEM_SKILLS.has(name) || INTERNAL_BUNDLED_SKILLS.has(name)) continue
-    // 只有当前仍存在、且不是系统/内部技能的普通内置条目参与复制。
-    if (!findBundledEntry(name)) continue
-
-    const existing = await findEntry(userRoot, name)
-    if (existing) {
-      if (skippedInvalidLocalNames.has(name)) continue
-      if (!labeled.has(name)) {
+      if (!labeled.has(parsed.name)) {
         let contentDigest: string
         try {
-          contentDigest = skillEntryDigestStrict(existing)
+          contentDigest = skillEntryDigestStrict(entry)
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error)
-          warnings.push(`跳过不安全的本地技能 ${name}：${reason}`)
+          warnings.push(`跳过不安全的本地技能 ${parsed.name}：${reason}`)
+          skippedInvalidLocalNames.add(parsed.name)
           continue
         }
-        writeSkillLocalEntry(profileDir, name, {
+        writeSkillLocalEntry(profileDir, parsed.name, {
           origin: { kind: 'created' },
           contentDigest,
         })
-        labeled.add(name)
+        labeled.set(parsed.name, { kind: 'created' })
       }
-      setUserSkillToggle(profileDir, name, true)
-      // 已由本迁移复制出的副本(重入路径)不是同名冲突,不再追加警告。
-      if (readSkillLocalState(profileDir).skills[name]?.origin.kind !== 'bundled') {
-        warnings.push(`内置技能 ${name} 未复制：已存在同名本地技能`)
-      }
-      continue
+      // 旧版没有用户技能启用门:存量用户技能全部保留可调用。
+      setUserSkillToggle(profileDir, parsed.name, true)
     }
 
-    const target = join(userRoot, name)
-    if (await pathExists(target)) {
-      warnings.push(`内置技能 ${name} 未复制：目标路径已存在`)
-      continue
-    }
+    for (const name of Object.keys(legacyToggles)) {
+      if (SYSTEM_SKILLS.has(name) || INTERNAL_BUNDLED_SKILLS.has(name)) continue
+      // 只有当前仍存在、且不是系统/内部技能的普通内置条目参与复制。
+      if (!findBundledEntry(name)) continue
 
-    const files = bundledSkillFiles(name)
-    const contentDigest = createSkillDigest(files)
-    if (!labeled.has(name)) {
-      // 先写来源再复制:副本成功而开关未写时崩溃,重入仍保住 bundled 来源。
+      const existing = await findEntry(userRoot, name)
+      if (existing) {
+        if (skippedInvalidLocalNames.has(name)) continue
+        if (!labeled.has(name)) {
+          let contentDigest: string
+          try {
+            contentDigest = skillEntryDigestStrict(existing)
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            warnings.push(`跳过不安全的本地技能 ${name}：${reason}`)
+            continue
+          }
+          writeSkillLocalEntry(profileDir, name, {
+            origin: { kind: 'created' },
+            contentDigest,
+          })
+          labeled.set(name, { kind: 'created' })
+        }
+        setUserSkillToggle(profileDir, name, true)
+        // 已由本迁移复制出的副本(重入路径)不是同名冲突,不再追加警告。
+        if (labeled.get(name)?.kind !== 'bundled') {
+          warnings.push(`内置技能 ${name} 未复制：已存在同名本地技能`)
+        }
+        continue
+      }
+
+      const target = join(userRoot, name)
+      if (await pathExists(target)) {
+        warnings.push(`内置技能 ${name} 未复制：目标路径已存在`)
+        continue
+      }
+
+      const files = bundledSkillFiles(name)
+      const contentDigest = createSkillDigest(files)
+      // 先写来源再复制:副本成功而开关未写时崩溃,重入仍保住 bundled 来源，并刷新可能过期的 digest。
       writeSkillLocalEntry(profileDir, name, { origin: { kind: 'bundled' }, contentDigest })
-      labeled.add(name)
+      labeled.set(name, { kind: 'bundled' })
+      await stageSkillDirectory(profileDir, name, files, '.skill-migration-')
+      setUserSkillToggle(profileDir, name, true)
     }
-    await copyBundledSkill(profileDir, name, files)
-    setUserSkillToggle(profileDir, name, true)
-  }
 
-  markSkillCenterMigrationComplete(profileDir, warnings)
-  return warnings
+    markSkillCenterMigrationComplete(profileDir, warnings)
+    return warnings
+  })
 }

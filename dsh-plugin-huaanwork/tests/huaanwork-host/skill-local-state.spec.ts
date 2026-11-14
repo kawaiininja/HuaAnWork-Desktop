@@ -24,6 +24,7 @@ import {
   previewSkillImport,
   removeSkill,
   setSkillEnabled,
+  type SkillUpdateInput,
   updateSkill,
 } from '../../src/huaanwork-host/skills-host.ts'
 import {
@@ -223,6 +224,93 @@ describe('skill-local-state.json', () => {
       () => readSkillLocalState(profile),
       (error: unknown) =>
         error instanceof CorruptSkillLocalStateError && /publishedRevision/.test(error.message),
+    )
+
+    writeFileSync(
+      skillLocalStatePath(profile),
+      '{"schemaVersion":1,"skills":{"demo":{"origin":{"kind":"catalog","name":"BadName","revision":1,"publisher":"pub","digest":"sha256:x"},"contentDigest":"sha256:x"}}}',
+      'utf8',
+    )
+    assert.throws(
+      () => readSkillLocalState(profile),
+      (error: unknown) =>
+        error instanceof CorruptSkillLocalStateError && /origin\.name 不是合法技能名/.test(error.message),
+    )
+
+    for (const badRev of [0, 1.5]) {
+      writeFileSync(
+        skillLocalStatePath(profile),
+        JSON.stringify({
+          schemaVersion: 1,
+          skills: {
+            demo: {
+              origin: { kind: 'catalog', name: 'valid-name', revision: badRev, publisher: 'pub', digest: 'sha256:x' },
+              contentDigest: 'sha256:x',
+            },
+          },
+        }),
+        'utf8',
+      )
+      assert.throws(
+        () => readSkillLocalState(profile),
+        (error: unknown) =>
+          error instanceof CorruptSkillLocalStateError && /origin\.revision 必须是正整数/.test(error.message),
+      )
+    }
+
+    writeFileSync(
+      skillLocalStatePath(profile),
+      '{"schemaVersion":1,"skills":{"demo":{"origin":{"kind":"catalog","name":"valid-name","revision":1,"publisher":"","digest":"sha256:x"},"contentDigest":"sha256:x"}}}',
+      'utf8',
+    )
+    assert.throws(
+      () => readSkillLocalState(profile),
+      (error: unknown) =>
+        error instanceof CorruptSkillLocalStateError && /origin\.publisher/.test(error.message),
+    )
+
+    writeFileSync(
+      skillLocalStatePath(profile),
+      '{"schemaVersion":1,"skills":{"demo":{"origin":{"kind":"catalog","name":"valid-name","revision":1,"publisher":"pub","digest":""},"contentDigest":"sha256:x"}}}',
+      'utf8',
+    )
+    assert.throws(
+      () => readSkillLocalState(profile),
+      (error: unknown) =>
+        error instanceof CorruptSkillLocalStateError && /origin\.digest/.test(error.message),
+    )
+
+    writeFileSync(
+      skillLocalStatePath(profile),
+      '{"schemaVersion":1,"skills":{},"migration":{"version":2,"completedAt":"2026-11-14T00:00:00.000Z"}}',
+      'utf8',
+    )
+    assert.throws(
+      () => readSkillLocalState(profile),
+      (error: unknown) =>
+        error instanceof CorruptSkillLocalStateError && /migration 必须是/.test(error.message),
+    )
+
+    writeFileSync(
+      skillLocalStatePath(profile),
+      '{"schemaVersion":1,"skills":{},"migration":{"version":1,"completedAt":""}}',
+      'utf8',
+    )
+    assert.throws(
+      () => readSkillLocalState(profile),
+      (error: unknown) =>
+        error instanceof CorruptSkillLocalStateError && /migration\.completedAt/.test(error.message),
+    )
+
+    writeFileSync(
+      skillLocalStatePath(profile),
+      '{"schemaVersion":1,"skills":{},"migration":{"version":1,"completedAt":"2026-11-14T00:00:00.000Z"},"migrationWarnings":[123]}',
+      'utf8',
+    )
+    assert.throws(
+      () => readSkillLocalState(profile),
+      (error: unknown) =>
+        error instanceof CorruptSkillLocalStateError && /migrationWarnings 必须是字符串数组/.test(error.message),
     )
   })
 })
@@ -538,5 +626,169 @@ describe('write-path fail-fast and strict tree checks', () => {
     )
     assert.equal(readFileSync(skillMd, 'utf8'), originalRaw)
     assert.deepEqual(readSkillLocalState(updateProfile).skills['sym-edit'], originalState)
+  })
+
+  test('importSkill (file) rejects >5 MiB frontmatter before creating target directory or writing state', async () => {
+    const profile = makeHome()
+    const oversizedSource = join(profile, 'oversized.md')
+    const pad = 'a'.repeat(MAX_SKILL_ARCHIVE_CONTENT_BYTES)
+    writeFileSync(
+      oversizedSource,
+      `---\nname: oversized-frontmatter\ndescription: 合法描述\nx-pad: ${pad}\n---\n\n正文\n`,
+      'utf8',
+    )
+
+    await assert.rejects(
+      () => importSkill(profile, { path: oversizedSource }),
+      /字节上限/,
+    )
+    assert.equal(existsSync(join(profile, 'skills', 'oversized-frontmatter')), false)
+    assert.equal(readSkillLocalState(profile).skills['oversized-frontmatter'], undefined)
+  })
+
+  test('updateSkill rejects bundle growth exceeding 5 MiB before overwriting SKILL.md', async () => {
+    const profile = makeHome()
+    const created = await createSkill(profile, {
+      name: 'budget-edit',
+      description: '初始描述',
+      content: '短正文',
+    })
+    assert.equal(created.ok, true)
+    if (!created.ok) return
+
+    const skillDir = join(profile, 'skills', 'budget-edit')
+    const skillMd = join(skillDir, 'SKILL.md')
+    const auxPath = join(skillDir, 'aux.bin')
+    const fd = openSync(auxPath, 'w')
+    try {
+      ftruncateSync(fd, MAX_SKILL_ARCHIVE_CONTENT_BYTES - 120)
+    } finally {
+      closeSync(fd)
+    }
+    const beforeRaw = readFileSync(skillMd, 'utf8')
+    const beforeState = readSkillLocalState(profile).skills['budget-edit']
+
+    await assert.rejects(
+      () =>
+        updateSkill(profile, 'budget-edit', {
+          description: '超限描述',
+          content: 'b'.repeat(200),
+        }),
+      /字节上限/,
+    )
+    assert.equal(readFileSync(skillMd, 'utf8'), beforeRaw)
+    assert.deepEqual(readSkillLocalState(profile).skills['budget-edit'], beforeState)
+  })
+
+  test('updateSkill ignores runtime userInvocable field and preserves user-invocable: false on disk', async () => {
+    const profile = makeHome()
+    const skillDir = join(profile, 'skills', 'keep-non-invocable')
+    mkdirSync(skillDir, { recursive: true })
+    const skillMd = join(skillDir, 'SKILL.md')
+    writeFileSync(
+      skillMd,
+      '---\nname: keep-non-invocable\ndescription: 初始\nuser-invocable: false\n---\n\n旧正文\n',
+      'utf8',
+    )
+
+    const result = await updateSkill(profile, 'keep-non-invocable', {
+      description: '更新描述',
+      content: '新正文',
+      userInvocable: true,
+    } as unknown as SkillUpdateInput)
+    assert.equal(result.ok, true)
+    const updatedRaw = readFileSync(skillMd, 'utf8')
+    assert.match(updatedRaw, /^user-invocable:\s*false$/m)
+    assert.match(updatedRaw, /^description:\s*更新描述$/m)
+    assert.match(updatedRaw, /新正文/)
+  })
+
+  test('createSkill and importSkill refuse to clobber existing mismatched-dirname SKILL.md', async () => {
+    const profile = makeHome()
+    const dir = join(profile, 'skills', 'foo')
+    mkdirSync(dir, { recursive: true })
+    const existingSkillMd = join(dir, 'SKILL.md')
+    const originalRaw = '---\nname: bar\ndescription: 已存在别名技能\n---\n\n原始内容\n'
+    writeFileSync(existingSkillMd, originalRaw, 'utf8')
+
+    await assert.rejects(
+      () =>
+        createSkill(profile, {
+          name: 'foo',
+          description: '试图覆盖',
+          content: '新内容',
+        }),
+      /目标技能目录已存在 SKILL\.md/,
+    )
+    assert.equal(readFileSync(existingSkillMd, 'utf8'), originalRaw)
+    assert.equal(readSkillLocalState(profile).skills.foo, undefined)
+
+    const mdImportSource = join(profile, 'foo.md')
+    writeFileSync(mdImportSource, '---\nname: foo\ndescription: 导入覆盖\n---\n\n导入内容\n', 'utf8')
+    await assert.rejects(
+      () => importSkill(profile, { path: mdImportSource }),
+      /目标技能目录已存在 SKILL\.md/,
+    )
+    assert.equal(readFileSync(existingSkillMd, 'utf8'), originalRaw)
+    assert.equal(readSkillLocalState(profile).skills.foo, undefined)
+
+    const dirImportSource = join(profile, 'import-dir-foo')
+    mkdirSync(dirImportSource, { recursive: true })
+    writeFileSync(
+      join(dirImportSource, 'SKILL.md'),
+      '---\nname: foo\ndescription: 目录导入覆盖\n---\n\n目录内容\n',
+      'utf8',
+    )
+    await assert.rejects(
+      () => importSkill(profile, { path: dirImportSource }),
+      /目标技能目录已存在/,
+    )
+    assert.equal(readFileSync(existingSkillMd, 'utf8'), originalRaw)
+    assert.equal(readSkillLocalState(profile).skills.foo, undefined)
+  })
+
+  test('concurrent create, import, update, and toggle writes on same storageRoot serialize without lost state', async () => {
+    const profile = makeHome()
+    const importSrcA = writeExternalSkill('imp-a', 'A 正文')
+    const importSrcB = join(profile, 'imp-b-dir')
+    mkdirSync(importSrcB, { recursive: true })
+    writeFileSync(join(importSrcB, 'SKILL.md'), '---\nname: imp-b\ndescription: B 描述\n---\n\nB 正文\n', 'utf8')
+    writeFileSync(join(importSrcB, 'note.txt'), 'extra', 'utf8')
+
+    const createdAndImported = await Promise.all([
+      createSkill(profile, { name: 'conc-one', description: 'one', content: 'body one' }),
+      createSkill(profile, { name: 'conc-two', description: 'two', content: 'body two' }),
+      importSkill(profile, { path: importSrcA }),
+      importSkill(profile, { path: importSrcB }),
+    ])
+    for (const res of createdAndImported) {
+      assert.equal(res.ok, true)
+    }
+
+    const [updateRes] = await Promise.all([
+      updateSkill(profile, 'conc-one', { description: 'one-v2', content: 'body one v2' }),
+      setSkillEnabled(profile, 'conc-one', true),
+      setSkillEnabled(profile, 'imp-a', true),
+      setSkillEnabled(profile, 'imp-b', true),
+    ])
+    assert.equal(updateRes.ok, true)
+
+    const state = readSkillLocalState(profile)
+    assert.equal(state.skills['conc-one']?.origin.kind, 'created')
+    assert.equal(state.skills['conc-two']?.origin.kind, 'created')
+    assert.equal(state.skills['imp-a']?.origin.kind, 'imported')
+    assert.equal(state.skills['imp-b']?.origin.kind, 'imported')
+
+    const expectedOneDigest = createSkillDigest([
+      { path: 'SKILL.md', data: readFileSync(join(profile, 'skills', 'conc-one', 'SKILL.md')) },
+    ])
+    assert.equal(state.skills['conc-one']?.contentDigest, expectedOneDigest)
+
+    const toggles = readUserSkillToggles(profile)
+    assert.deepEqual(toggles, {
+      'conc-one': true,
+      'imp-a': true,
+      'imp-b': true,
+    })
   })
 })
