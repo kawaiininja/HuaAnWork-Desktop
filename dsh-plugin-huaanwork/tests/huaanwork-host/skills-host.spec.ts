@@ -13,7 +13,8 @@ import {
   setSkillEnabled,
   updateSkill,
 } from '../../src/huaanwork-host/skills-host.ts'
-import { readUserSkillToggles } from '../../src/huaanwork-host/skill-local-state.ts'
+import { readUserSkillToggles, setUserSkillToggle } from '../../src/huaanwork-host/skill-local-state.ts'
+import { resolveInvocableSkill } from '../../src/huaanwork-host/skill-invoke.ts'
 import { promises as fsp } from 'node:fs'
 
 // 用例移植自旧 sidecar skills-host.test.ts 的 list/get 段(skills-host.test.ts:29-110):
@@ -93,25 +94,51 @@ describe('skills-host 读路径(旧 skills-host.test.ts 用例)', () => {
     // 手写用户技能,与内置 explore 同名(createSkill 拒绝内置同名,故直接落盘绕过)
     mkdirSync(join(home, 'skills', 'explore'), { recursive: true })
     writeFileSync(join(home, 'skills', 'explore', 'SKILL.md'), '---\nname: explore\ndescription: 用户同名\n---\n\n用户正文\n')
-    const agents = process.env.DSH_AGENTS_HOME!
-    mkdirSync(join(agents, 'skills'), { recursive: true })
-    writeFileSync(join(agents, 'skills', 'explore.md'), '---\nname: explore\ndescription: 外部同名\n---\n\n外部正文\n')
-    // 无 source:保持 用户 → 外部 → 内置 的 rank order
+    // 无 source:保持 用户 → 内置 的 rank order(外部根不再参与回退)
     const unscoped = await getSkill(home, 'explore')
     expect(unscoped?.source).toBe('user')
     expect(unscoped?.content).toBe('用户正文')
     // 定向 source:只在该来源的根里找
     expect((await getSkill(home, 'explore', 'user'))?.content).toBe('用户正文')
-    expect((await getSkill(home, 'explore', 'external'))?.content).toBe('外部正文')
     const bundledScoped = await getSkill(home, 'explore', 'bundled')
     expect(bundledScoped?.source).toBe('bundled')
     expect(bundledScoped?.content ?? '').toMatch(/subagent/)
-    // 该来源下不存在 → undefined(外部/用户 root 没有内置独占名;bundled 没有用户/外部名)
-    expect(await getSkill(home, 'test-fix', 'external')).toBeUndefined()
+    // 该来源下不存在 → undefined(用户 root 没有内置独占名;bundled 没有用户名)
     expect(await getSkill(home, 'test-fix', 'user')).toBeUndefined()
     expect(await getSkill(home, 'missing', 'bundled')).toBeUndefined()
     // SKILL_NAME_RE 守卫对带 source 的查询同样生效
     expect(await getSkill(home, '../etc', 'user')).toBeUndefined()
+  })
+})
+
+describe('skills-host resolver 启用门与外部退出 (Task 3)', () => {
+  function writeLocalSkillFile(profile: string, name: string, extraFrontmatter = ''): void {
+    const dir = join(profile, 'skills', name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${name}\n${extraFrontmatter}---\n\n正文\n`, 'utf8')
+  }
+
+  test('disabled local skill is rejected by the Host resolver', async () => {
+    const profile = makeHome()
+    writeLocalSkillFile(profile, 'demo')
+    setUserSkillToggle(profile, 'demo', false)
+    await expect(resolveInvocableSkill(profile, 'demo')).rejects.toThrow('skill demo is disabled')
+  })
+
+  test('external skills are not an implicit fallback', async () => {
+    const profile = makeHome()
+    const agents = process.env.DSH_AGENTS_HOME!
+    mkdirSync(join(agents, 'skills'), { recursive: true })
+    writeFileSync(join(agents, 'skills', 'external-only.md'), '---\nname: external-only\ndescription: 外部技能\n---\n\n正文\n', 'utf8')
+    expect(await getSkill(profile, 'external-only')).toBeUndefined()
+    await expect(resolveInvocableSkill(profile, 'external-only')).rejects.toThrow('skill external-only was not found')
+  })
+
+  test('user-invocable false does not block an enabled local skill', async () => {
+    const profile = makeHome()
+    writeLocalSkillFile(profile, 'demo', 'user-invocable: false\n')
+    setUserSkillToggle(profile, 'demo', true)
+    await expect(resolveInvocableSkill(profile, 'demo')).resolves.toMatchObject({ skill: { name: 'demo' } })
   })
 })
 

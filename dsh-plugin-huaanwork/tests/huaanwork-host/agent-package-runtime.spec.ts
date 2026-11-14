@@ -20,6 +20,7 @@ import {
   type AgentPackageHost,
 } from '../../src/huaanwork-host/agent-package/host.ts'
 import { readAgentPackageState } from '../../src/huaanwork-host/agent-package/store.ts'
+import { setUserSkillToggle } from '../../src/huaanwork-host/skill-local-state.ts'
 import {
   AGENT_PACKAGE_CHILD_TOOLS,
   attachAgentTools,
@@ -106,6 +107,7 @@ function makeProfileWithSkill(name: string): string {
     join(root, 'skills', name, 'SKILL.md'),
     `---\nname: ${name}\ndescription: 周报风格\n---\n\n内置技能正文:使用条目式。\n`,
   )
+  setUserSkillToggle(root, name, true)
   return root
 }
 

@@ -150,6 +150,30 @@ describe('desktop profile composition', {
     }))
   })
 
+  it('points every preset skill-filesystem row at the empty agents home', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const rows = composeEntries([prepared.patches])
+    const emptyAgentsHome = join(prepared.profile.dir, 'skill-provider-empty-agents-home')
+    expect(existsSync(emptyAgentsHome)).toBe(true)
+
+    for (const presetId of ['preset-standard', 'preset-ptc', 'preset-cordis']) {
+      const preset = rows.find(row => row.id === presetId)
+      expect(preset).toEqual(expect.objectContaining({ name: '@deepseek-ai/dsh-agent-preset' }))
+      const plugins = (preset?.config as { plugins?: Array<Record<string, unknown>> }).plugins
+      const skillFilesystem = plugins?.find(plugin => plugin.id === 'skill-filesystem')
+      expect(skillFilesystem).toEqual(expect.objectContaining({
+        name: '@deepseek-ai/dsh-skill-filesystem',
+        config: expect.objectContaining({ agentsHome: emptyAgentsHome }),
+      }))
+    }
+    // cordis 的 customSkillDirs 必须随 agentsHome 一起保留
+    const cordis = rows.find(row => row.id === 'preset-cordis')
+    const cordisPlugins = (cordis?.config as { plugins?: Array<Record<string, unknown>> }).plugins
+    const cordisSkills = cordisPlugins?.find(plugin => plugin.id === 'skill-filesystem')
+    expect((cordisSkills?.config as { customSkillDirs?: unknown }).customSkillDirs).toBeDefined()
+  })
+
   it('ships a two-level delegation cap so a package child can dispatch its lane subagents', () => {
     const home = temporaryHome()
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')

@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
-import { listBundledSkills, setSkillToggle } from '../../src/huaanwork-guardrails/skills.ts'
+import { listBundledSkills } from '../../src/huaanwork-guardrails/skills.ts'
+import { setUserSkillToggle } from '../../src/huaanwork-host/skill-local-state.ts'
 import {
   beginAgentPackageUpdate,
   cancelAgentPackage,
@@ -455,9 +456,10 @@ describe('propose validation', () => {
     if (!existingDir.ok) expect(existingDir.fieldErrors.map((error) => error.field)).toContain('slug')
   })
 
-  test('resolves allowSkills and rejects missing, bundled-disabled, and create-agent entries', async () => {
+  test('resolves allowSkills and rejects missing, bundled-only, and create-agent entries', async () => {
     const root = makeRoot()
     writeUserSkill(root, 'weekly-helper')
+    setUserSkillToggle(root, 'weekly-helper', true)
 
     const ok = await proposeAgentPackage(
       root,
@@ -492,29 +494,23 @@ describe('propose validation', () => {
     expect(bundled).toBeDefined()
     if (bundled === undefined) return
 
-    // 内置技能缺省关闭:未启用时必须拒绝,启用后才通过。
-    const disabled = await proposeAgentPackage(
+    // 普通内置技能不再有启用路径:必须先下载为本地副本才可被包引用。
+    const bundledOnly = await proposeAgentPackage(
       root,
       'session-allow-4',
       createProposal({ allowSkills: [bundled.name] }),
       [],
     )
-    expect(disabled.ok).toBe(false)
-    if (!disabled.ok) expect(JSON.stringify(disabled.fieldErrors)).toContain('disabled')
-
-    setSkillToggle(root, bundled.name, true)
-    const enabled = await proposeAgentPackage(
-      root,
-      'session-allow-5',
-      createProposal({ allowSkills: [bundled.name] }),
-      [],
-    )
-    expect(enabled.ok).toBe(true)
+    expect(bundledOnly.ok).toBe(false)
+    if (!bundledOnly.ok) {
+      expect(JSON.stringify(bundledOnly.fieldErrors)).toContain('requires a downloaded local copy')
+    }
   })
 
   test('rejects a payload whose persona and skill bodies exceed the 64 KiB combined cap', async () => {
     const root = makeRoot()
     writeUserSkill(root, 'big-helper', 'c'.repeat(2048))
+    setUserSkillToggle(root, 'big-helper', true)
 
     const front = '---\nname: weekly-report\ndescription: 大\n---\n'
     const markdown = `${front}${'b'.repeat(32 * 1024 - Buffer.byteLength(front, 'utf8'))}`
@@ -545,6 +541,7 @@ describe('propose validation', () => {
   test('counts the whole SKILL.md markdown toward the 64 KiB combined cap', async () => {
     const root = makeRoot()
     writeUserSkill(root, 'tiny-helper', 'c'.repeat(32))
+    setUserSkillToggle(root, 'tiny-helper', true)
 
     const front = '---\nname: weekly-report\ndescription: 大\n---\n'
     const markdown = `${front}${'b'.repeat(32 * 1024 - Buffer.byteLength(front, 'utf8'))}`

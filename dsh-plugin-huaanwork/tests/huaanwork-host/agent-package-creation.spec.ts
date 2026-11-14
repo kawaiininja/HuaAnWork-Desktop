@@ -29,6 +29,7 @@ import {
   injectCreateAgentSkill,
 } from '../../src/huaanwork-host/agent-package/creation.ts'
 import { INTERNAL_BUNDLED_SKILLS, listBundledSkills } from '../../src/huaanwork-guardrails/skills.ts'
+import { setUserSkillToggle } from '../../src/huaanwork-host/skill-local-state.ts'
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
 import {
   sendToAgent,
@@ -475,6 +476,7 @@ describe('sendToAgent creation gate', () => {
       '---\nname: weekly-helper\ndescription: 整理周报素材\n---\n\n整理吧。\n',
       'utf8',
     )
+    setUserSkillToggle(root, 'weekly-helper', true)
 
     const proposed = await host.propose(sessionId, draftProposal)
     expect(proposed.ok).toBe(true)
@@ -510,6 +512,7 @@ describe('sendToAgent creation gate', () => {
       '---\nname: weekly-helper\ndescription: 整理周报素材\n---\n\n整理吧。\n',
       'utf8',
     )
+    setUserSkillToggle(root, 'weekly-helper', true)
 
     const proposed = await host.propose(sessionId, draftProposal)
     expect(proposed.ok).toBe(true)

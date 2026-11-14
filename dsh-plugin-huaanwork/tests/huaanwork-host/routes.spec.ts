@@ -1069,6 +1069,13 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     const bundledGot = await fetch(`${baseUrl}/huaanwork/skill/get?name=explore&source=bundled`, authed())
     expect((await bundledGot.json()).skill.source).toBe('bundled')
 
+    // source 白名单已收窄:external 不再是合法定向来源。
+    const externalSource = await fetch(`${baseUrl}/huaanwork/skill/get?name=demo&source=external`, authed())
+    expect(externalSource.status).toBe(400)
+    expect(await externalSource.json()).toEqual({
+      error: { code: 'store-error', message: 'skill.get source must be one of bundled | user, got external' },
+    })
+
     const missing = await fetch(`${baseUrl}/huaanwork/skill/get?name=missing`, authed())
     expect(missing.status).toBe(400)
     expect(await missing.json()).toEqual({

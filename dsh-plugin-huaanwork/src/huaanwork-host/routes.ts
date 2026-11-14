@@ -822,8 +822,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const sourceParam = queryParam(req, 'source')
       let source: SkillSourceFilter | undefined
       if (sourceParam !== undefined) {
-        if (sourceParam !== 'bundled' && sourceParam !== 'user' && sourceParam !== 'external') {
-          throw new Error(`skill.get source must be one of bundled | user | external, got ${sourceParam}`)
+        if (sourceParam !== 'bundled' && sourceParam !== 'user') {
+          throw new Error(`skill.get source must be one of bundled | user, got ${sourceParam}`)
         }
         source = sourceParam
       }

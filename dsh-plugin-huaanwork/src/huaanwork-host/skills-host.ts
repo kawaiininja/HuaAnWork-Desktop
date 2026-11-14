@@ -188,16 +188,16 @@ export async function findEntry(root: string, name: string): Promise<DiskEntry |
   return undefined
 }
 
-export type SkillSourceFilter = 'bundled' | 'user' | 'external'
+export type SkillSourceFilter = 'bundled' | 'user'
 
-/** 按来源读取技能完整内容。未指定 source 时按 用户 → 外部 → 内置 的 rank order;指定时只在该来源的根里找。 */
+/** 按来源读取技能完整内容。未指定 source 时按 用户 → 内置 的 rank order;外部根不再是回退来源。 */
 export async function getSkill(
   storageRoot: string,
   name: string,
   source?: SkillSourceFilter,
 ): Promise<SkillDetail | undefined> {
   if (!SKILL_NAME_RE.test(name)) return undefined
-  const readEntry = async (root: string, source: 'user' | 'external'): Promise<SkillDetail | undefined> => {
+  const readEntry = async (root: string, source: 'user'): Promise<SkillDetail | undefined> => {
     const entry = await findEntry(root, name)
     if (!entry) return undefined
     const parsed = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
@@ -216,14 +216,8 @@ export async function getSkill(
     return bundled ? { ...bundled, source: 'bundled' as const } : undefined
   }
   if (source === 'user') return readEntry(userSkillsRoot(storageRoot), 'user')
-  if (source === 'external') return readEntry(externalSkillsRoot(), 'external')
-  for (const [root, ranked] of [
-    [userSkillsRoot(storageRoot), 'user'],
-    [externalSkillsRoot(), 'external'],
-  ] as const) {
-    const detail = await readEntry(root, ranked)
-    if (detail) return detail
-  }
+  const detail = await readEntry(userSkillsRoot(storageRoot), 'user')
+  if (detail) return detail
   const bundled = getBundledSkill(name)
   return bundled ? { ...bundled, source: 'bundled' as const } : undefined
 }
