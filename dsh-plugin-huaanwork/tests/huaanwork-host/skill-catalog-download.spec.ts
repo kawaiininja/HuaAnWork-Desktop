@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, test } from 'vitest'
@@ -182,6 +182,60 @@ test('refuses to overwrite a downloaded copy that has local edits', async () => 
     downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 2 }),
     (cause: unknown) => cause instanceof SkillDownloadError && cause.code === 'local-skill-conflict',
   )
+})
+
+test('refuses to overwrite an out-of-band edit of a downloaded copy', async () => {
+  const profile = makeHome()
+  await bindCatalog('demo', 1, '第一版')
+  await downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 1 })
+  // Direct file edit outside the app: stored state still claims the old digest.
+  writeFileSync(
+    join(profile, 'skills', 'demo', 'SKILL.md'),
+    '---\nname: demo\ndescription: 手改\n---\n\n手改正文\n',
+    'utf8',
+  )
+  await bindCatalog('demo', 2, '第二版')
+  await assert.rejects(
+    downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 2 }),
+    (cause: unknown) => cause instanceof SkillDownloadError && cause.code === 'local-skill-conflict',
+  )
+})
+
+test('refuses to overwrite a modified bundled copy', async () => {
+  const profile = makeHome()
+  const bundled = listBundledSkills().find(skill => !SYSTEM_SKILLS.has(skill.name) && skill.name !== 'create-agent')
+  assert.ok(bundled)
+  await downloadSkillToMine(profile, { source: 'bundled', name: bundled.name })
+  const updated = await updateSkill(profile, bundled.name, { description: '改过', content: '本地改过' })
+  assert.equal(updated.ok, true)
+  await assert.rejects(
+    downloadSkillToMine(profile, { source: 'bundled', name: bundled.name }),
+    (cause: unknown) => cause instanceof SkillDownloadError && cause.code === 'local-skill-conflict',
+  )
+})
+
+test('refuses a catalog entry that uses a reserved name', async () => {
+  const profile = makeHome()
+  await bindCatalog('explore', 1, '正文')
+  await assert.rejects(
+    downloadSkillToMine(profile, { source: 'catalog', name: 'explore', revision: 1 }),
+    (cause: unknown) => cause instanceof SkillDownloadError && cause.code === 'skill-is-system',
+  )
+})
+
+test('sweeps its staging sibling when the final rename fails', async () => {
+  const profile = makeHome()
+  await bindCatalog('demo', 1, '正文')
+  const skillsRoot = join(profile, 'skills')
+  mkdirSync(skillsRoot, { recursive: true })
+  chmodSync(skillsRoot, 0o500)
+  try {
+    await assert.rejects(downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 1 }))
+  } finally {
+    chmodSync(skillsRoot, 0o700)
+  }
+  assert.deepEqual(stagingLeftovers(profile), [])
+  assert.throws(() => readdirSync(join(skillsRoot, 'demo')))
 })
 
 test('rejects a digest mismatch without touching the local tree', async () => {

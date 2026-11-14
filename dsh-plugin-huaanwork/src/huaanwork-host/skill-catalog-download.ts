@@ -8,10 +8,9 @@
  * renamed into place. Same-name rules live here, never in the UI.
  */
 
-import { randomBytes } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { mkdir, rename, rm } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import {
   createSkillDigest,
@@ -24,8 +23,14 @@ import { SKILL_NAME_RE } from '@huaanwork/skill-format/markdown'
 
 import { INTERNAL_BUNDLED_SKILLS, SYSTEM_SKILLS, findBundledEntry } from '../huaanwork-guardrails/skills.ts'
 import { getSkillCatalogClient } from './skill-catalog-client.ts'
-import { writeSkillLocalEntry } from './skill-local-state.ts'
-import { findEntry, listUserSkills, userSkillsRoot, withSkillStorageLock } from './skills-host.ts'
+import { readSkillLocalState, writeSkillLocalEntry } from './skill-local-state.ts'
+import {
+  findEntry,
+  listUserSkills,
+  skillEntryDigestStrict,
+  userSkillsRoot,
+  withSkillStorageLock,
+} from './skills-host.ts'
 import type { LocalSkillInfo } from '../client-huaanwork/rpc-types.ts'
 
 export type DownloadSkillRequest =
@@ -77,15 +82,22 @@ type PreparedDownload = {
   publisher?: string
 }
 
-async function prepareBundled(name: string): Promise<PreparedDownload> {
+function assertDownloadableName(name: string): void {
+  // Reserved names (system + internal) have no toggle path: a local copy would
+  // be dead, so no source may produce one.
   if (SYSTEM_SKILLS.has(name) || INTERNAL_BUNDLED_SKILLS.has(name)) {
     throw new SkillDownloadError('skill-is-system', `技能 ${name} 是系统技能，不能下载副本`)
   }
+}
+
+async function prepareBundled(name: string): Promise<PreparedDownload> {
+  assertDownloadableName(name)
   const files = bundledSkillFiles(name)
   return { files, digest: createSkillDigest(files) }
 }
 
 async function prepareCatalog(name: string, revision: number): Promise<PreparedDownload> {
+  assertDownloadableName(name)
   const client = getSkillCatalogClient()
   const summary = await client.getSkillRevision(name, revision)
   const archive = await client.downloadSkillArchive(name, revision)
@@ -115,19 +127,22 @@ async function replaceLocalSkill(profileDir: string, name: string, files: SkillA
   const root = userSkillsRoot(profileDir)
   await mkdir(root, { recursive: true })
   const target = join(root, name)
-  const staging = join(profileDir, `.skill-staging-${String(process.pid)}-${randomBytes(8).toString('hex')}`)
-  const backup = join(profileDir, `.skill-backup-${String(process.pid)}-${randomBytes(8).toString('hex')}`)
-  await writeSkillDirectory(staging, files)
+  // Deterministic per-name scratch paths: a crash leftover is swept by the
+  // next operation for the same skill instead of accumulating forever.
+  const staging = join(profileDir, `.skill-staging-${name}`)
+  const backup = join(profileDir, `.skill-backup-${name}`)
+  await rm(staging, { recursive: true, force: true }).catch(() => undefined)
+  await rm(backup, { recursive: true, force: true }).catch(() => undefined)
 
   const existing = await findEntry(root, name)
-  const flatPath = join(root, `${name}.md`)
-  // Move the ARTIFACT aside: the whole directory for a bundle, the single
-  // file for a flat skill. Renaming only SKILL.md would leave the directory.
+  // Move the ARTIFACT aside: the whole directory for a bundle, the single file
+  // for a flat skill. Renaming only SKILL.md would leave the directory.
   const existingPath = existing === undefined
-    ? (existsSync(flatPath) ? flatPath : undefined)
+    ? undefined
     : existing.kind === 'bundle' ? dirname(existing.path) : existing.path
   let movedAside = false
   try {
+    await writeSkillDirectory(staging, files)
     if (existingPath !== undefined) {
       await rename(existingPath, backup)
       movedAside = true
@@ -136,15 +151,37 @@ async function replaceLocalSkill(profileDir: string, name: string, files: SkillA
   } catch (cause) {
     if (movedAside) await rename(backup, existingPath!).catch(() => undefined)
     await rm(staging, { recursive: true, force: true }).catch(() => undefined)
+    const code = (cause as NodeJS.ErrnoException).code
+    if (code === 'ENOTEMPTY' || code === 'EEXIST') {
+      throw new SkillDownloadError('local-skill-conflict', `本地同名路径 ${name} 不是可替换的技能目录`)
+    }
     throw cause
   }
   if (movedAside) await rm(backup, { recursive: true, force: true }).catch(() => undefined)
 }
 
+/**
+ * The stored content digest can be stale when the user edits files outside the
+ * app; an explicit update must not silently discard those bytes. Returns the
+ * conflict verdict for an unreadable/edited tree.
+ */
+async function onDiskDigestMismatch(profileDir: string, local: LocalSkillInfo): Promise<boolean> {
+  const entry = await findEntry(userSkillsRoot(profileDir), local.name)
+  if (entry === undefined) return true
+  try {
+    return skillEntryDigestStrict(entry) !== local.contentDigest
+  } catch {
+    return true
+  }
+}
+
 function sameSource(local: LocalSkillInfo, request: DownloadSkillRequest, digest: string): 'same' | 'update' | 'conflict' {
   if (request.source === 'bundled') {
     if (local.origin.kind !== 'bundled') return 'conflict'
-    return local.contentDigest === digest ? 'same' : 'update'
+    // A bundled copy carries no baseline digest: any drift could be a user
+    // edit, so it is never overwritten automatically (matches the projection's
+    // local-conflict verdict).
+    return local.contentDigest === digest ? 'same' : 'conflict'
   }
   if (local.origin.kind !== 'catalog' || local.origin.name !== request.name) return 'conflict'
   if (local.contentDigest === digest) return 'same'
@@ -164,7 +201,7 @@ export async function downloadSkillToMine(
   if (!SKILL_NAME_RE.test(request.name)) {
     throw new SkillDownloadError('skill-not-found', `技能名 ${JSON.stringify(request.name)} 不合法`)
   }
-  const key = `${request.source}:${request.name}`
+  const key = `${resolve(profileDir)}:${request.source}:${request.name}`
   return withDownloadLock(key, async () => {
     const prepared = request.source === 'bundled'
       ? await prepareBundled(request.name)
@@ -173,6 +210,12 @@ export async function downloadSkillToMine(
     return withSkillStorageLock(profileDir, async () => {
       const local = (await listUserSkills(profileDir)).find((skill) => skill.name === request.name)
       if (local !== undefined) {
+        if (await onDiskDigestMismatch(profileDir, local)) {
+          throw new SkillDownloadError(
+            'local-skill-conflict',
+            `本地技能 ${request.name} 的磁盘内容与已记录摘要不一致，拒绝自动覆盖`,
+          )
+        }
         const verdict = sameSource(local, request, prepared.digest)
         if (verdict === 'same') return { skill: local, created: false, updated: false }
         if (verdict === 'conflict') {
@@ -193,7 +236,14 @@ export async function downloadSkillToMine(
             publisher: prepared.publisher ?? '',
             digest: prepared.digest,
           }
-      writeSkillLocalEntry(profileDir, request.name, { origin, contentDigest: prepared.digest })
+      // Preserve the publish snapshot on update; a download is not an upload.
+      const prior = readSkillLocalState(profileDir).skills[request.name]
+      writeSkillLocalEntry(profileDir, request.name, {
+        origin,
+        contentDigest: prepared.digest,
+        ...(prior?.publishedRevision !== undefined ? { publishedRevision: prior.publishedRevision } : {}),
+        ...(prior?.publishedDigest !== undefined ? { publishedDigest: prior.publishedDigest } : {}),
+      })
 
       const written = (await listUserSkills(profileDir)).find((skill) => skill.name === request.name)
       if (written === undefined) {

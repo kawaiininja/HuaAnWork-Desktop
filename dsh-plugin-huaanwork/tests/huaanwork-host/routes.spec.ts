@@ -1190,6 +1190,68 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     }
   })
 
+  test('skill 域:download 只接受 source/name/revision,冲突映射 409', async () => {
+    const files = [
+      { path: 'SKILL.md', data: Buffer.from('---\nname: pdf\ndescription: 共享 pdf\n---\n\n共享正文\n', 'utf8') },
+    ]
+    const archive = await buildSkillArchive(files)
+    const inspected = await inspectSkillArchive(archive)
+    configureSkillCatalog({
+      readSettings: () => ({
+        agents_host: '127.0.0.1',
+        agents_port: 18080,
+        agents_catalog_token: '',
+        agents_skill_upload_token: '',
+      }),
+      client: {
+        listSharedSkills: async () => [],
+        getSkillRevision: async (name, revision) => ({
+          name,
+          revision,
+          description: '共享 pdf',
+          publisher: 'alice',
+          digest: inspected.digest,
+          size: archive.byteLength,
+          updatedAt: '2026-11-14T00:00:00.000Z',
+        }),
+        downloadSkillArchive: async () => archive,
+      },
+    })
+    try {
+      const post = (body: unknown) => fetch(`${baseUrl}/huaanwork/skill/download`, authed({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }))
+
+      // path/url 永不接受。
+      expect((await post({ source: 'catalog', name: 'pdf', revision: 1, path: '/etc/passwd' })).status).toBe(400)
+      expect((await post({ source: 'catalog', name: 'pdf', revision: 1, url: 'http://x' })).status).toBe(400)
+      // catalog 缺 revision 或非法 revision → 400。
+      expect((await post({ source: 'catalog', name: 'pdf' })).status).toBe(400)
+      expect((await post({ source: 'catalog', name: 'pdf', revision: 0 })).status).toBe(400)
+      // 非法 source → 400。
+      expect((await post({ source: 'external', name: 'pdf' })).status).toBe(400)
+
+      const downloaded = await post({ source: 'catalog', name: 'pdf', revision: 1 })
+      expect(downloaded.status).toBe(200)
+      const body = await downloaded.json()
+      expect(body).toMatchObject({ created: true, updated: false })
+      expect(body.skill).toMatchObject({ name: 'pdf', source: 'user', enabled: false })
+      expect(body.skill.origin).toMatchObject({ kind: 'catalog', name: 'pdf', revision: 1 })
+
+      // 同名但来源不同(本地已是 catalog 副本,再请求 bundled)→ 409。
+      const conflict = await post({ source: 'bundled', name: 'pdf' })
+      expect(conflict.status).toBe(409)
+      expect((await conflict.json()).error.code).toBe('local-skill-conflict')
+    } finally {
+      // The shared profile must not keep this download: later cases assert that
+      // the bundled pdf has no local copy.
+      rmSync(join(profileTempDir, 'skills', 'pdf'), { recursive: true, force: true })
+      resetSkillCatalogForTests()
+    }
+  })
+
   test('skill 写域 (Task 1): create -> update -> importPreview -> import -> setEnabled -> remove 闭环与 400 校验', async () => {
     // 1. skill.create 缺少 name 返回 400
     const createNoName = await fetch(`${baseUrl}/huaanwork/skill/create`, authed({
