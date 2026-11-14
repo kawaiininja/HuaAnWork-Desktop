@@ -15,14 +15,14 @@
 import { readFileSync } from 'node:fs'
 import { rename, unlink, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { createSkillDigest, readSkillDirectory } from '@huaanwork/skill-format'
 
 import {
   INTERNAL_BUNDLED_SKILLS,
   SYSTEM_SKILLS,
-  bundledSkillDir,
+  findBundledEntry,
   listBundledSkills,
 } from '../huaanwork-guardrails/skills.ts'
 import { readSkillLocalState } from './skill-local-state.ts'
@@ -121,10 +121,13 @@ async function writeCache(profileDir: string, items: SkillRevisionSummary[]): Pr
 
 /** Digest of one bundled skill directory; undefined when the tree is unreadable. */
 function bundledDigest(name: string): string | undefined {
-  const dir = bundledSkillDir(name)
-  if (dir === undefined) return undefined
+  const entry = findBundledEntry(name)
+  if (entry === undefined) return undefined
   try {
-    return createSkillDigest(readSkillDirectory(dir))
+    // Flat skills digest their single file, not the whole bundled root.
+    return entry.kind === 'flat'
+      ? createSkillDigest([{ path: 'SKILL.md', data: readFileSync(entry.path) }])
+      : createSkillDigest(readSkillDirectory(dirname(entry.path)))
   } catch {
     return undefined
   }
@@ -171,16 +174,25 @@ export async function listSkillCenter(
   profileDir: string,
   options: ListSkillCenterOptions = {},
 ): Promise<SkillCenterListResult> {
-  const client = options.client ?? getSkillCatalogClient()
   let remoteItems: SkillRevisionSummary[] | undefined
   let catalogError: string | undefined
   try {
+    // Resolve the client inside the fallback: an unbound client must degrade to
+    // the documented bundled+cache view, never fail the local lists.
+    const client = options.client ?? getSkillCatalogClient()
     remoteItems = await client.listSharedSkills()
-    // Only a complete listing is allowed to refresh the cache.
-    await writeCache(profileDir, remoteItems)
   } catch {
     remoteItems = readCache(profileDir)
     catalogError = SKILL_CATALOG_UNAVAILABLE
+  }
+  if (catalogError === undefined && remoteItems !== undefined) {
+    try {
+      // Only a complete listing refreshes the cache; a cache WRITE failure must
+      // not discard the live listing that was fetched successfully.
+      await writeCache(profileDir, remoteItems)
+    } catch {
+      // Keep the live listing; the next successful run retries the cache.
+    }
   }
 
   const localSkills = await listUserSkills(profileDir)

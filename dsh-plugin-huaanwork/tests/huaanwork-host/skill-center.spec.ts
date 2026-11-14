@@ -176,6 +176,33 @@ test('computes all five download states against the local state', async () => {
   }
 })
 
+test('pins the exact catalog-unavailable sentence from spec §5.4', () => {
+  assert.equal(SKILL_CATALOG_UNAVAILABLE, '共享技能库不可用，当前显示内置技能与已缓存内容')
+})
+
+test('keeps the live listing when the cache write fails', async () => {
+  const profile = makeHome()
+  // A directory at the cache path makes the atomic rename fail.
+  mkdirSync(skillCatalogCachePath(profile), { recursive: true })
+  const result = await listSkillCenter(profile, {
+    client: fakeClient([catalogItem('shared', 1, digestA)]),
+  })
+  assert.equal(result.catalogError, undefined)
+  assert.ok(result.skills.some(skill => skill.source === 'catalog' && skill.name === 'shared'))
+})
+
+test('leaves the previous cache untouched when a refresh fails', async () => {
+  const profile = makeHome()
+  await listSkillCenter(profile, { client: fakeClient([catalogItem('shared', 1, digestA)]) })
+  const before = readFileSync(skillCatalogCachePath(profile), 'utf8')
+  const failing = fakeClient(async () => {
+    throw new Error('offline')
+  })
+  const result = await listSkillCenter(profile, { client: failing })
+  assert.equal(result.catalogError, SKILL_CATALOG_UNAVAILABLE)
+  assert.equal(readFileSync(skillCatalogCachePath(profile), 'utf8'), before)
+})
+
 test('falls back to the complete cache with the exact error sentence', async () => {
   const profile = makeHome()
   const items = [catalogItem('shared', 1, digestA)]

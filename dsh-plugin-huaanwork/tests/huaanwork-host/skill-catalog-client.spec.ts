@@ -57,12 +57,15 @@ async function bootServer(handler: Handler): Promise<{ host: string; port: numbe
   return { host: '127.0.0.1', port: address.port, requests, auth }
 }
 
+const UPLOAD_TOKEN = 'skill-upload-token-012345678901234567890123456789'
+
 function settingsFor(host: string, port: number | ''): SkillCatalogSettings {
   return {
     agents_host: host,
     agents_port: port,
     agents_catalog_token: READ_TOKEN,
-    agents_skill_upload_token: '',
+    // Distinct non-empty upload token: reads must still use the READ token.
+    agents_skill_upload_token: UPLOAD_TOKEN,
   }
 }
 

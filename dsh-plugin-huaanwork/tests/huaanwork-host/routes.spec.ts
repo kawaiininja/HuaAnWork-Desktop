@@ -22,6 +22,12 @@ import { WORKSPACE_SCAN_DEPTH } from '../../src/client-huaanwork/logic/outcomeCh
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 import { createTurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import { readUserSkillToggles } from '../../src/huaanwork-host/skill-local-state.ts'
+import { buildSkillArchive, inspectSkillArchive } from '@huaanwork/skill-format'
+import {
+  configureSkillCatalog,
+  resetSkillCatalogForTests,
+  type SkillCatalogClient,
+} from '../../src/huaanwork-host/skill-catalog-client.ts'
 
 const ALL_METHODS = [
   'workspace.open', 'workspace.close',
@@ -1090,6 +1096,97 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     expect(await noName.json()).toEqual({
       error: { code: 'store-error', message: 'skill.get requires params.name' },
     })
+  })
+
+  test('skill 域:catalog 精确 revision 只读预览且不写本地', async () => {
+    const files = [
+      { path: 'SKILL.md', data: Buffer.from('---\nname: demo\ndescription: 共享演示\n---\n\n共享正文\n', 'utf8') },
+    ]
+    const archive = await buildSkillArchive(files)
+    const inspected = await inspectSkillArchive(archive)
+    const summary = {
+      name: 'demo',
+      revision: 1,
+      description: '共享演示',
+      publisher: 'alice',
+      digest: inspected.digest,
+      size: archive.byteLength,
+      updatedAt: '2026-11-14T00:00:00.000Z',
+    }
+    const makeClient = (overrides: Partial<{ digest: string; archive: Buffer }> = {}): SkillCatalogClient => ({
+      listSharedSkills: async () => [],
+      getSkillRevision: async (name, revision) => ({
+        ...summary,
+        name,
+        revision,
+        ...(overrides.digest === undefined ? {} : { digest: overrides.digest }),
+      }),
+      downloadSkillArchive: async () => overrides.archive ?? archive,
+    })
+    configureSkillCatalog({
+      readSettings: () => ({
+        agents_host: '127.0.0.1',
+        agents_port: 18080,
+        agents_catalog_token: '',
+        agents_skill_upload_token: '',
+      }),
+      client: makeClient(),
+    })
+    try {
+      const localFile = join(profileTempDir, 'skills', 'demo', 'SKILL.md')
+      const localBefore = existsSync(localFile) ? readFileSync(localFile, 'utf8') : undefined
+      const ok = await fetch(`${baseUrl}/huaanwork/skill/get?name=demo&source=catalog&revision=1`, authed())
+      expect(ok.status).toBe(200)
+      expect(await ok.json()).toMatchObject({
+        skill: { name: 'demo', source: 'catalog', description: '共享演示', content: '共享正文' },
+      })
+      // 只读预览:本地既有副本不发生变化(更不会被创建/覆盖)。
+      expect(existsSync(localFile) ? readFileSync(localFile, 'utf8') : undefined).toBe(localBefore)
+
+      const missingRevision = await fetch(`${baseUrl}/huaanwork/skill/get?name=demo&source=catalog`, authed())
+      expect(missingRevision.status).toBe(400)
+      const zeroRevision = await fetch(`${baseUrl}/huaanwork/skill/get?name=demo&source=catalog&revision=0`, authed())
+      expect(zeroRevision.status).toBe(400)
+
+      // 名称与存档不一致:拒绝。
+      const otherFiles = [
+        { path: 'SKILL.md', data: Buffer.from('---\nname: other\ndescription: 别的技能\n---\n\n其它\n', 'utf8') },
+      ]
+      const otherArchive = await buildSkillArchive(otherFiles)
+      const otherInspected = await inspectSkillArchive(otherArchive)
+      configureSkillCatalog({
+        readSettings: () => ({
+          agents_host: '127.0.0.1',
+          agents_port: 18080,
+          agents_catalog_token: '',
+          agents_skill_upload_token: '',
+        }),
+        client: {
+          listSharedSkills: async () => [],
+          getSkillRevision: async () => ({ ...summary, digest: otherInspected.digest }),
+          downloadSkillArchive: async () => otherArchive,
+        },
+      })
+      const mismatchedName = await fetch(`${baseUrl}/huaanwork/skill/get?name=demo&source=catalog&revision=1`, authed())
+      expect(mismatchedName.status).toBe(400)
+      expect(JSON.stringify(await mismatchedName.json())).toContain('does not match')
+
+      // 摘要与目录记录不一致:拒绝。
+      configureSkillCatalog({
+        readSettings: () => ({
+          agents_host: '127.0.0.1',
+          agents_port: 18080,
+          agents_catalog_token: '',
+          agents_skill_upload_token: '',
+        }),
+        client: makeClient({ digest: `sha256:${'f'.repeat(64)}` }),
+      })
+      const mismatchedDigest = await fetch(`${baseUrl}/huaanwork/skill/get?name=demo&source=catalog&revision=1`, authed())
+      expect(mismatchedDigest.status).toBe(400)
+      expect(JSON.stringify(await mismatchedDigest.json())).toContain('digest')
+    } finally {
+      resetSkillCatalogForTests()
+    }
   })
 
   test('skill 写域 (Task 1): create -> update -> importPreview -> import -> setEnabled -> remove 闭环与 400 校验', async () => {
