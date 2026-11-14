@@ -63,12 +63,13 @@
 | 设置保存后技能中心刷新 | **PASS** | 首次保存“公用机配置”后离线提示消失、中心即时可用（无需重启 Host） |
 | `user-invocable: false` 的已启用本地技能仍可 `/` 调用（R7） | **PASS** | B 的 demo SKILL.md 改为 `user-invocable: false` 后，`/demo` 仍成功注入 `# 已启用技能：demo` |
 | 三种 preset 不再扫描真实 `~/.agents/skills` | **PASS（隔离）** | 以 `DSH_AGENTS_HOME` 指向含 `ext-visible.md` 的临时外部根重启后，中心/我的/`/` 菜单均无该外部技能；原文件保留 |
-| 智能体包 `allowSkills` 不能调用未启用本地技能 | **未在真机重复** | 自动化用例已覆盖（agent-package drafts/runtime）；真机需创建智能体包并派发真实回合，本轮未执行 |
-| 升级 fixture（旧用户技能/旧启用内置/同名冲突/外部文件） | **部分（非受控）** | 首启（未清空 profile 的第一次尝试）真实触发了迁移：旧的启用内置被复制为“内置副本”并在界面可见；该证据为真实但非受控 fixture。受控旧数据目录用例未单独执行 |
+| 智能体包 `allowSkills` 不能调用未启用本地技能 | **PASS（2026-11-15 补充）** | 播种本地包 `@weekly-report`（`allowSkills:["demo"]`，tools=none）并启用；demo 禁用时真实派发 `@weekly-report`，界面报“智能体 @weekly-report 引用的技能 demo 不可用：skill demo is disabled”；启用 demo 后同一派发完成真实模型回合，父会话收到“周报助手 @weekly-report 已回复：它的技能是先收集本周工作，再生成周报” |
+| 升级 fixture（旧用户技能/旧启用内置/同名冲突/外部文件） | **PASS（2026-11-15 受控 fixture）** | 受控旧目录：`skills/legacy-user` + `skill-toggles.json {pdf:true,xlsx:true}` + 同名本地 `skills/pdf`（内容标记）+ 外部 `ext-only.md`。首启后：legacy-user 来源 created 且启用；pdf 文件未被覆盖（标记仍在）、启用、警告 `内置技能 pdf 未复制：已存在同名本地技能`；xlsx 复制为 bundled 并启用；外部技能未导入且原文件保留；`migration.version=1`。随后在 UI 禁用 xlsx 并重启：`skill-local-state.json` 字节不变（哈希相同）、toggles 只剩 legacy-user/pdf、UI 中 xlsx 仍为“启用”（未被迁移重新启用） |
 | Windows 真机矩阵 | **BLOCKED** | 无 Windows 主机 |
 
 说明：
 
+- 2026-11-15 补充两项：受控迁移 fixture 与真机 `allowSkills` 回合均已执行（见上表）。为跑真实模型回合，临时 profile 需把 `huaanwork-settings.json` 的 `models`/`base_url`/`api_key` 置为生产 DeepSeek 配置并把活动模型改为 `deepseek-chat`，同时在临时 profile 的 设置→权限 打开“允许接入公网”（默认仅局域网会拦截 `api.deepseek.com`）；实测回复“模型可用”，包回合完成。
 - 两个客户端为顺序切换的两个 Profile（单实例），不是两台机器同时在线；服务端记录的两个 publisher（alice/bob）分别来自两个 Profile 的独立上传口令，身份隔离仍被真实验证。
 - 真实模型回合在本地未配置可用端点（应用活动模型指向 `http://127.0.0.1:11434/v1`），回合以模型连接失败结束；技能链路的判据取自 Host 注入的 `# 已启用技能` 与 `技能目录`（服务端/本地文件证据），不把模型失败当作技能失败，也不据此声称模型对话通过。
 - 证据原始目录：`/tmp/hw-skill-accept-20261115/`（应用日志、服务端日志、`catalog-data/`、两个 profile 与截图 `accept-slash-menu.png`）；该目录为临时目录，不入库。
