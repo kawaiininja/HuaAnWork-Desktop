@@ -129,14 +129,19 @@ export async function uploadLocalSkill(
       // Keep the uploaded digest; a vanished skill is reported by its absence.
     }
     const origin = readSkillLocalState(profileDir).skills[name]?.origin ?? local?.origin ?? { kind: 'created' as const }
-    writeSkillLocalEntry(profileDir, name, {
-      origin,
-      contentDigest,
-      publishedRevision: published.skill.revision,
-      publishedDigest: uploadDigest,
-    })
-
-    const written = (await listUserSkills(profileDir)).find(skill => skill.name === name)
+    let written: LocalSkillInfo | undefined
+    try {
+      writeSkillLocalEntry(profileDir, name, {
+        origin,
+        contentDigest,
+        publishedRevision: published.skill.revision,
+        publishedDigest: uploadDigest,
+      })
+      written = (await listUserSkills(profileDir)).find(skill => skill.name === name)
+    } catch {
+      // The publish already succeeded; a local bookkeeping failure (corrupt
+      // toggles, vanished row) must not be reported as an upload failure.
+    }
     if (written !== undefined) return { skill: written, created: published.created }
     // The publish succeeded; a concurrent delete must not be reported as an
     // upload failure (there is no local row to return).
