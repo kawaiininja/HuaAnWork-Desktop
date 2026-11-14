@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, test } from 'vitest'
@@ -221,6 +221,24 @@ test('refuses a catalog entry that uses a reserved name', async () => {
     downloadSkillToMine(profile, { source: 'catalog', name: 'explore', revision: 1 }),
     (cause: unknown) => cause instanceof SkillDownloadError && cause.code === 'skill-is-system',
   )
+})
+
+test('restores an interrupted replace instead of deleting the only copy', async () => {
+  const profile = makeHome()
+  // Simulate a crash between "artifact moved aside" and "staging renamed in":
+  // only the backup exists, and it carries user edits.
+  const backup = join(profile, '.skill-backup-demo')
+  mkdirSync(backup, { recursive: true })
+  writeFileSync(join(backup, 'SKILL.md'), '---\nname: demo\ndescription: 手改\n---\n\n手改正文\n', 'utf8')
+  await bindCatalog('demo', 1, '正文')
+  // The restored copy is a same-name local skill → the download must conflict,
+  // not delete the recovered bytes.
+  await assert.rejects(
+    downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 1 }),
+    (cause: unknown) => cause instanceof SkillDownloadError && cause.code === 'local-skill-conflict',
+  )
+  assert.match(readFileSync(join(profile, 'skills', 'demo', 'SKILL.md'), 'utf8'), /手改正文/)
+  assert.equal(existsSync(backup), false)
 })
 
 test('sweeps its staging sibling when the final rename fails', async () => {

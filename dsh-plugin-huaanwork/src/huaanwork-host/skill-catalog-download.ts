@@ -8,7 +8,7 @@
  * renamed into place. Same-name rules live here, never in the UI.
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, rename, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
@@ -152,12 +152,32 @@ async function replaceLocalSkill(profileDir: string, name: string, files: SkillA
     if (movedAside) await rename(backup, existingPath!).catch(() => undefined)
     await rm(staging, { recursive: true, force: true }).catch(() => undefined)
     const code = (cause as NodeJS.ErrnoException).code
-    if (code === 'ENOTEMPTY' || code === 'EEXIST') {
+    if (code === 'ENOTEMPTY' || code === 'EEXIST' || code === 'ENOTDIR') {
       throw new SkillDownloadError('local-skill-conflict', `本地同名路径 ${name} 不是可替换的技能目录`)
     }
     throw cause
   }
   if (movedAside) await rm(backup, { recursive: true, force: true }).catch(() => undefined)
+}
+
+/**
+ * Recover a replace interrupted between "old artifact moved aside" and "new
+ * artifact renamed in". The backup may hold the ONLY surviving copy of a
+ * user-edited skill, so it is restored when the target is missing and removed
+ * only when a live target exists. Incomplete staging content is always swept.
+ */
+async function recoverInterruptedReplace(profileDir: string, name: string): Promise<void> {
+  const root = userSkillsRoot(profileDir)
+  await mkdir(root, { recursive: true })
+  const staging = join(profileDir, `.skill-staging-${name}`)
+  const backup = join(profileDir, `.skill-backup-${name}`)
+  await rm(staging, { recursive: true, force: true }).catch(() => undefined)
+  if (!existsSync(backup)) return
+  if (existsSync(join(root, name)) || existsSync(join(root, `${name}.md`))) {
+    await rm(backup, { recursive: true, force: true }).catch(() => undefined)
+    return
+  }
+  await rename(backup, join(root, name))
 }
 
 /**
@@ -208,6 +228,10 @@ export async function downloadSkillToMine(
       : await prepareCatalog(request.name, request.revision)
 
     return withSkillStorageLock(profileDir, async () => {
+      // A crashed previous replace must be repaired BEFORE the conflict checks:
+      // the backup may be the only copy of the skill and the next download must
+      // not silently discard it.
+      await recoverInterruptedReplace(profileDir, request.name)
       const local = (await listUserSkills(profileDir)).find((skill) => skill.name === request.name)
       if (local !== undefined) {
         if (await onDiskDigestMismatch(profileDir, local)) {
