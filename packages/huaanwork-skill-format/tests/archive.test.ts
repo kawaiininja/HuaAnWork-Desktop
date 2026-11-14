@@ -138,6 +138,78 @@ test('round-trips a skill bundle with resources and stable digest', async () => 
   })
 })
 
+test('round-trips unicode resource paths with a stable digest', async () => {
+  const unicodeFiles: SkillArchiveFile[] = [
+    validFiles[0]!,
+    { path: '参考资料.md', data: Buffer.from('# 参考资料\n', 'utf8') },
+    { path: '资料/说明.md', data: Buffer.from('说明正文\n', 'utf8') },
+  ]
+  await withTempDir(async (root) => {
+    writeTree(root, unicodeFiles)
+    const files = readSkillDirectory(root)
+    assert.deepEqual(files.map((file) => file.path), ['SKILL.md', '参考资料.md', '资料/说明.md'])
+    const archive = await buildSkillArchive(files)
+    const inspected = await inspectSkillArchive(archive)
+    assert.deepEqual(inspected.files.map((file) => file.path), ['SKILL.md', '参考资料.md', '资料/说明.md'])
+    assert.equal(inspected.digest, createSkillDigest(files))
+    const target = join(root, 'restored')
+    await writeSkillDirectory(target, inspected.files)
+    const restored = readSkillDirectory(target)
+    assert.deepEqual(restored, files)
+    assert.equal(createSkillDigest(restored), inspected.digest)
+    assert.equal(readFileSync(join(target, '参考资料.md'), 'utf8'), '# 参考资料\n')
+    assert.equal(readFileSync(join(target, '资料', '说明.md'), 'utf8'), '说明正文\n')
+  })
+})
+
+test('buildSkillArchive and inspectSkillArchive reject ASCII control characters in paths', async () => {
+  const controlFiles: SkillArchiveFile[] = [
+    validFiles[0]!,
+    { path: 'bad\u0001.md', data: Buffer.from('x') },
+  ]
+  await assert.rejects(buildSkillArchive(controlFiles), /技能归档非法：路径包含控制字符/u)
+  await assert.rejects(
+    inspectSkillArchive(await packViaTar(controlFiles)),
+    /技能归档非法：路径包含控制字符/u,
+  )
+  await assert.rejects(
+    buildSkillArchive([validFiles[0]!, { path: 'bad\u007f.md', data: Buffer.from('x') }]),
+    /技能归档非法：路径包含控制字符/u,
+  )
+})
+
+test('accepts a path of exactly MAX_SKILL_PATH_BYTES and rejects one byte over', async () => {
+  // Split across three segments so every filesystem name stays under 255 bytes.
+  const atLimit = `${'资'.repeat(60)}/${'料'.repeat(60)}/${'参'.repeat(49)}abc`
+  const overLimit = `${'资'.repeat(60)}/${'料'.repeat(60)}/${'参'.repeat(49)}abcd`
+  assert.equal(Buffer.byteLength(atLimit, 'utf8'), 512)
+  assert.equal(Buffer.byteLength(overLimit, 'utf8'), 513)
+
+  const archive = await buildSkillArchive([validFiles[0]!, { path: atLimit, data: Buffer.from('x') }])
+  const inspected = await inspectSkillArchive(archive)
+  assert.deepEqual(inspected.files.map((file) => file.path), ['SKILL.md', atLimit])
+
+  await assert.rejects(
+    buildSkillArchive([validFiles[0]!, { path: overLimit, data: Buffer.from('x') }]),
+    /技能归档非法：路径超过512字节/u,
+  )
+  await assert.rejects(
+    inspectSkillArchive(await packViaTar([validFiles[0]!, { path: overLimit, data: Buffer.from('x') }])),
+    /技能归档非法：路径超过512字节/u,
+  )
+})
+
+test('rejects an unpaired surrogate that has no stable UTF-8 encoding', async () => {
+  const files: SkillArchiveFile[] = [validFiles[0]!, { path: 'bad\uD800.md', data: Buffer.from('x') }]
+  await assert.rejects(buildSkillArchive(files), /技能归档非法：路径不是合法的 Unicode 文本/u)
+  await withTempDir(async (root) => {
+    await assert.rejects(
+      writeSkillDirectory(join(root, 'skill'), files),
+      /技能归档非法：路径不是合法的 Unicode 文本/u,
+    )
+  })
+})
+
 test('createSkillDigest is canonical, path-sorted, and prefixed with sha256:', () => {
   const digest = createSkillDigest(validFiles)
   assert.equal(digest, createSkillDigest([...validFiles].reverse()))

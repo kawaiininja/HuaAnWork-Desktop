@@ -12,7 +12,9 @@
  * - only regular files and directories; symlinks, hard links, devices, FIFOs
  *   and unknown tar typeflags are rejected;
  * - relative POSIX paths only: no absolute paths, `..`, backslashes, drive
- *   prefixes, duplicates, or file/directory conflicts;
+ *   prefixes, NUL or ASCII control characters, duplicates, or file/directory
+ *   conflicts. Paths are bounded by UTF-8 bytes, not by alphabet, so any other
+ *   Unicode text (CJK resource names included) is a valid segment;
  * - the gzip output is metered before tar parses it, and nested
  *   gzip/zstd payloads are rejected before node-tar can decompress them
  *   outside that meter;
@@ -64,8 +66,13 @@ const MAX_META_BYTES = 64 * 1024
 
 const SKILL_MARKDOWN_PATH = 'SKILL.md'
 
-/** Safe portable path alphabet; anything else is rejected on every platform. */
-const PATH_RE = /^[A-Za-z0-9._/-]+$/u
+/**
+ * Paths are bounded by UTF-8 bytes, not by alphabet: CJK resource names such as
+ * `参考资料.md` are legitimate. Only ASCII control characters are forbidden;
+ * the structural rules (absolute paths, `..`, backslashes, drive prefixes,
+ * duplicates, conflicts, links) are enforced separately.
+ */
+const ASCII_CONTROL_RE = /[\u0000-\u001f\u007f]/u
 const DRIVE_PREFIX_RE = /^[A-Za-z]:/u
 const RESERVED_SEGMENT_PREFIXES = ['.tmp-', '.old-', '.install-'] as const
 
@@ -312,7 +319,13 @@ function normalizeEntryPath(rawPath: string, kind: 'file' | 'directory'): string
   if (DRIVE_PREFIX_RE.test(path)) throw archiveError('路径不得包含盘符')
   if (path.includes('\\')) throw archiveError('路径不得包含反斜杠')
   if (path.includes('\0')) throw archiveError('路径不得包含 NUL')
-  if (!PATH_RE.test(path)) throw archiveError('路径包含不允许的字符')
+  if (ASCII_CONTROL_RE.test(path)) throw archiveError('路径包含控制字符')
+  // An unpaired surrogate has no UTF-8 encoding: it would be replaced with
+  // U+FFFD on disk and in tar headers, silently changing the name (and with it
+  // the digest) between build and inspect.
+  if (Buffer.from(path, 'utf8').toString('utf8') !== path) {
+    throw archiveError('路径不是合法的 Unicode 文本')
+  }
 
   const segments = path.split('/')
   if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
