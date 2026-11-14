@@ -47,19 +47,26 @@ export default function SkillsView({
   const [centerSearch, setCenterSearch] = useState("");
   const [localSearch, setLocalSearch] = useState("");
   const [catalogError, setCatalogError] = useState("");
-  const [error, setError] = useState("");
+  const [centerError, setCenterError] = useState("");
+  const [mineError, setMineError] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [modalBusy, setModalBusy] = useState(false);
   const [modal, setModal] = useState<Modal | null>(null);
 
+  const reportError = (cause: unknown, where: "center" | "mine") => {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    if (where === "center") setCenterError(message);
+    else setMineError(message);
+  };
+
   const refreshMine = useCallback(async () => {
     try {
       const listed = await rpcCall<{ skills: LocalSkillInfo[] }>("skill.mineList");
       setLocalSkills(Array.isArray(listed.skills) ? listed.skills : []);
-      setError("");
+      setMineError("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "mine");
     }
   }, []);
 
@@ -68,9 +75,9 @@ export default function SkillsView({
       const listed = await rpcCall<{ skills: CenterSkillInfo[]; catalogError?: string }>("skill.centerList");
       setCenterSkills(Array.isArray(listed.skills) ? listed.skills : []);
       setCatalogError(listed.catalogError ?? "");
-      setError("");
+      setCenterError("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "center");
     }
   }, []);
 
@@ -87,7 +94,7 @@ export default function SkillsView({
       const detail = await rpcCall<{ skill: SkillDetail }>("skill.get", params);
       setModal({ kind: "view", skill: detail.skill });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, source === "user" ? "mine" : "center");
     }
   };
 
@@ -96,14 +103,14 @@ export default function SkillsView({
       const detail = await rpcCall<{ skill: SkillDetail }>("skill.get", { name: skill.name, source: "user" });
       setModal({ kind: "edit", skill: detail.skill });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "mine");
     }
   };
 
   const downloadSkill = async (skill: CenterSkillInfo) => {
     if (busy) return;
     setBusy(busyKeyFor(skill.source, skill.name));
-    setError("");
+    setCenterError("");
     try {
       await rpcCall("skill.download", {
         source: skill.source,
@@ -115,7 +122,7 @@ export default function SkillsView({
       onInvocableChanged?.();
     } catch (cause) {
       setNote("");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "center");
     } finally {
       setBusy(null);
     }
@@ -124,7 +131,7 @@ export default function SkillsView({
   const uploadSkill = async (skill: LocalSkillInfo) => {
     if (busy) return;
     setBusy(busyKeyFor("user", skill.name));
-    setError("");
+    setMineError("");
     try {
       const result = await rpcCall<{ skill: LocalSkillInfo; created: boolean }>("skill.upload", { name: skill.name });
       const revision = result.skill.publishedRevision;
@@ -136,7 +143,7 @@ export default function SkillsView({
       await Promise.all([refreshMine(), refreshCenter()]);
     } catch (cause) {
       setNote("");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "mine");
     } finally {
       setBusy(null);
     }
@@ -146,7 +153,7 @@ export default function SkillsView({
     if (busy) return;
     const enabling = !skill.enabled;
     setBusy(busyKeyFor("user", skill.name));
-    setError("");
+    setMineError("");
     try {
       await rpcCall("skill.setEnabled", { name: skill.name, enabled: enabling });
       setNote(
@@ -158,7 +165,7 @@ export default function SkillsView({
       onInvocableChanged?.();
     } catch (cause) {
       setNote("");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "mine");
     } finally {
       setBusy(null);
     }
@@ -166,7 +173,7 @@ export default function SkillsView({
 
   const removeSkill = async (skill: LocalSkillInfo) => {
     setModalBusy(true);
-    setError("");
+    setMineError("");
     try {
       await rpcCall("skill.remove", { name: skill.name });
       setModal(null);
@@ -174,7 +181,7 @@ export default function SkillsView({
       await Promise.all([refreshMine(), refreshCenter()]);
       onInvocableChanged?.();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "mine");
     } finally {
       setModalBusy(false);
     }
@@ -182,7 +189,7 @@ export default function SkillsView({
 
   const duplicateSkill = async (skill: LocalSkillInfo, target: string) => {
     setModalBusy(true);
-    setError("");
+    setMineError("");
     try {
       await rpcCall("skill.duplicate", { source: skill.name, name: target });
       setModal(null);
@@ -190,7 +197,7 @@ export default function SkillsView({
       await refreshMine();
       onInvocableChanged?.();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "mine");
     } finally {
       setModalBusy(false);
     }
@@ -202,13 +209,13 @@ export default function SkillsView({
     try {
       const preview = await rpcCall<SkillImportPreview>("skill.importPreview", { path: selected });
       if (!preview.ok) {
-        setError(preview.fieldErrors.map((error) => error.message).join("；"));
+        setMineError(preview.fieldErrors.map((error) => error.message).join("；"));
         setModal(null);
         return;
       }
       setModal({ kind: "import-confirm", path: selected, preview: preview.preview });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "mine");
       setModal(null);
     }
   };
@@ -217,7 +224,7 @@ export default function SkillsView({
     try {
       const result = await rpcCall<SkillWriteResult>("skill.import", { path });
       if (!result.ok) {
-        setError(result.fieldErrors.map((error) => error.message).join("；"));
+        setMineError(result.fieldErrors.map((error) => error.message).join("；"));
         setModal(null);
         return;
       }
@@ -225,7 +232,7 @@ export default function SkillsView({
       setNote(`已导入技能 ${name}，请在“我的技能”中启用`);
       await refreshMine();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      reportError(cause, "mine");
       setModal(null);
     }
   };
@@ -279,13 +286,13 @@ export default function SkillsView({
         )}
       </div>
       {tab === "center" && catalogError ? <p className="banner">{catalogError}</p> : null}
+      {tab === "center" && centerError ? <p className="banner error">{centerError}</p> : null}
+      {tab === "mine" && mineError ? <p className="banner error">{mineError}</p> : null}
       {note ? (
         <p className="hint" style={{ marginBottom: 12 }}>
           {note}
         </p>
       ) : null}
-      {error ? <p className="banner error">{error}</p> : null}
-
       {tab === "center" ? (
         centerVisible.length === 0 ? (
           <p className="panel-empty">{centerSearch.trim() ? "没有匹配的技能" : "暂无技能"}</p>
