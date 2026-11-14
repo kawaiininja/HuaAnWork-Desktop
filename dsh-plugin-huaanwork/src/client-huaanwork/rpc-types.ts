@@ -83,9 +83,20 @@ export type RpcRequest = {
   params?: unknown;
 };
 
-export type SkillSource = "bundled" | "catalog" | "user" | "external";
+export type SkillSource = "bundled" | "catalog" | "user";
 
-export type SkillInfo = { name: string; description: string; source: SkillSource; whenToUse?: string; enabled?: boolean };
+/** `skill.get` 的只读详情模型;列表 UI 状态不进入详情。 */
+export type SkillDetail = {
+  name: string;
+  description: string;
+  source: SkillSource;
+  whenToUse?: string;
+  content: string;
+  disableModelInvocation?: boolean;
+  userInvocable?: boolean;
+  origin?: SkillOrigin;
+  enabled?: boolean;
+};
 
 /** 技能中心条目的下载状态投影（spec §5.2）。 */
 export type SkillDownloadState =
@@ -123,12 +134,7 @@ export type SkillCenterListResult = {
   migrationWarnings?: string[];
 };
 
-export type SkillDetail = SkillInfo & {
-  content: string;
-  /** invocation 策略（供查看/编辑回填；缺省 = dsh 默认：模型可调用、用户可调用）。 */
-  disableModelInvocation?: boolean;
-  userInvocable?: boolean;
-};
+
 
 /** 本地技能来源：创建、导入、内置副本或中心共享副本（含发布身份快照）。 */
 export type SkillOrigin =

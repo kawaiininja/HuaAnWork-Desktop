@@ -1338,6 +1338,37 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     }
   })
 
+  test('skill 域:duplicate 复制为 created/未启用并校验目标名', async () => {
+    mkdirSync(join(profileTempDir, 'skills', 'dup-source'), { recursive: true })
+    writeFileSync(
+      join(profileTempDir, 'skills', 'dup-source', 'SKILL.md'),
+      '---\nname: dup-source\ndescription: dup-source\n---\n\n正文\n',
+      'utf8',
+    )
+    writeFileSync(join(profileTempDir, 'skills', 'dup-source', 'helper.mjs'), 'console.log(1)\n', 'utf8')
+    const post = (body: unknown) => fetch(`${baseUrl}/huaanwork/skill/duplicate`, authed({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }))
+    try {
+      expect((await post({ source: 'dup-source' })).status).toBe(400)
+      expect((await post({ source: 'dup-source', name: 'Bad Name' })).status).toBe(400)
+      const ok = await post({ source: 'dup-source', name: 'dup-copy' })
+      expect(ok.status).toBe(200)
+      expect(await ok.json()).toMatchObject({
+        skill: { name: 'dup-copy', enabled: false, origin: { kind: 'created' } },
+      })
+      expect(existsSync(join(profileTempDir, 'skills', 'dup-copy', 'helper.mjs'))).toBe(true)
+      const conflict = await post({ source: 'dup-source', name: 'dup-copy' })
+      expect(conflict.status).toBe(409)
+      expect((await conflict.json()).error.code).toBe('skill-name-taken')
+    } finally {
+      rmSync(join(profileTempDir, 'skills', 'dup-source'), { recursive: true, force: true })
+      rmSync(join(profileTempDir, 'skills', 'dup-copy'), { recursive: true, force: true })
+    }
+  })
+
   test('skill 写域 (Task 1): create -> update -> importPreview -> import -> setEnabled -> remove 闭环与 400 校验', async () => {
     // 1. skill.create 缺少 name 返回 400
     const createNoName = await fetch(`${baseUrl}/huaanwork/skill/create`, authed({

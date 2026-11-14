@@ -2,10 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 
 import { pickDirectory, rpcCall } from "./api.ts";
 import {
+  RESERVED_SKILL_NAMES,
   SKILL_TABS,
+  busyKeyFor,
   centerActionLabel,
   filterCenterSkills,
   filterLocalSkills,
+  isBuiltinNameConflict,
+  isUploadDisabled,
   originLabel,
   sourceLabel,
   tabLabel,
@@ -46,12 +50,14 @@ export default function SkillsView({
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [modalBusy, setModalBusy] = useState(false);
   const [modal, setModal] = useState<Modal | null>(null);
 
   const refreshMine = useCallback(async () => {
     try {
       const listed = await rpcCall<{ skills: LocalSkillInfo[] }>("skill.mineList");
       setLocalSkills(Array.isArray(listed.skills) ? listed.skills : []);
+      setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -62,14 +68,17 @@ export default function SkillsView({
       const listed = await rpcCall<{ skills: CenterSkillInfo[]; catalogError?: string }>("skill.centerList");
       setCenterSkills(Array.isArray(listed.skills) ? listed.skills : []);
       setCatalogError(listed.catalogError ?? "");
+      setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, []);
 
   useEffect(() => {
-    if (tab === "center") void refreshCenter();
-    else void refreshMine();
+    // The center list also supplies the bundled-name set for my-skills cards,
+    // so load it on mount even while 我的技能 is active.
+    void refreshCenter();
+    if (tab === "mine") void refreshMine();
   }, [tab, refreshSignal, refreshCenter, refreshMine]);
 
   const openView = async (name: string, source: "bundled" | "catalog" | "user", revision?: number) => {
@@ -93,7 +102,7 @@ export default function SkillsView({
 
   const downloadSkill = async (skill: CenterSkillInfo) => {
     if (busy) return;
-    setBusy(`${skill.source}:${skill.name}`);
+    setBusy(busyKeyFor(skill.source, skill.name));
     setError("");
     try {
       await rpcCall("skill.download", {
@@ -103,6 +112,7 @@ export default function SkillsView({
       });
       setNote(`已下载技能 ${skill.name}，请在“我的技能”中启用`);
       await Promise.all([refreshCenter(), refreshMine()]);
+      onInvocableChanged?.();
     } catch (cause) {
       setNote("");
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -113,12 +123,16 @@ export default function SkillsView({
 
   const uploadSkill = async (skill: LocalSkillInfo) => {
     if (busy) return;
-    setBusy(`user:${skill.name}`);
+    setBusy(busyKeyFor("user", skill.name));
     setError("");
     try {
       const result = await rpcCall<{ skill: LocalSkillInfo; created: boolean }>("skill.upload", { name: skill.name });
-      const revision = result.skill.publishedRevision ?? 1;
-      setNote(`已发布技能 ${skill.name}（revision ${revision}）`);
+      const revision = result.skill.publishedRevision;
+      setNote(
+        revision === undefined
+          ? `已发布技能 ${skill.name}`
+          : `已发布技能 ${skill.name}（revision ${revision}）`,
+      );
       await Promise.all([refreshMine(), refreshCenter()]);
     } catch (cause) {
       setNote("");
@@ -131,7 +145,7 @@ export default function SkillsView({
   const toggleSkill = async (skill: LocalSkillInfo) => {
     if (busy) return;
     const enabling = !skill.enabled;
-    setBusy(`user:${skill.name}`);
+    setBusy(busyKeyFor("user", skill.name));
     setError("");
     try {
       await rpcCall("skill.setEnabled", { name: skill.name, enabled: enabling });
@@ -151,6 +165,8 @@ export default function SkillsView({
   };
 
   const removeSkill = async (skill: LocalSkillInfo) => {
+    setModalBusy(true);
+    setError("");
     try {
       await rpcCall("skill.remove", { name: skill.name });
       setModal(null);
@@ -159,17 +175,24 @@ export default function SkillsView({
       onInvocableChanged?.();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setModalBusy(false);
     }
   };
 
   const duplicateSkill = async (skill: LocalSkillInfo, target: string) => {
+    setModalBusy(true);
+    setError("");
     try {
       await rpcCall("skill.duplicate", { source: skill.name, name: target });
       setModal(null);
       setNote(`已另存为技能 ${target}，请在“我的技能”中启用`);
       await refreshMine();
+      onInvocableChanged?.();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setModalBusy(false);
     }
   };
 
@@ -269,7 +292,7 @@ export default function SkillsView({
         ) : (
           <div className="skill-grid">
             {centerVisible.map((skill) => {
-              const key = `${skill.source}:${skill.name}`;
+              const key = busyKeyFor(skill.source, skill.name);
               const actionable = skill.downloadState === "available" || skill.downloadState === "update-available";
               return (
                 <div key={key} className="skill-card">
@@ -336,9 +359,9 @@ export default function SkillsView({
       ) : (
         <div className="skill-grid">
           {localVisible.map((skill) => {
-            const key = `user:${skill.name}`;
-            const builtinSameName = skill.origin.kind === "bundled" || bundledNames.has(skill.name);
-            const uploadDisabled = busy === key || skill.publishState === "published" || builtinSameName;
+            const key = busyKeyFor("user", skill.name);
+            const builtinSameName = isBuiltinNameConflict(skill, bundledNames);
+            const uploadDisabled = busy === key || isUploadDisabled(skill, bundledNames);
             return (
               <div key={key} className="skill-card">
                 <div className="top">
@@ -401,7 +424,7 @@ export default function SkillsView({
       {modal?.kind === "create" || modal?.kind === "edit" ? (
         <SkillFormModal
           source={modal.kind === "edit" ? modal.skill : null}
-          takenNames={takenLocalNames}
+          takenNames={[...takenLocalNames, ...RESERVED_SKILL_NAMES]}
           onClose={() => setModal(null)}
           onSaved={async (name) => {
             setModal(null);
@@ -411,7 +434,7 @@ export default function SkillsView({
         />
       ) : null}
       {modal?.kind === "delete" ? (
-        <SkillDeleteModal skill={modal.skill} onCancel={() => setModal(null)} onConfirm={() => void removeSkill(modal.skill)} />
+        <SkillDeleteModal skill={modal.skill} busy={modalBusy} onCancel={() => setModal(null)} onConfirm={() => void removeSkill(modal.skill)} />
       ) : null}
       {modal?.kind === "import-pick" ? (
         <ImportPickModal onPick={(directory) => void pickImport(directory)} onClose={() => setModal(null)} />
@@ -426,7 +449,8 @@ export default function SkillsView({
       {modal?.kind === "duplicate" ? (
         <SkillDuplicateModal
           skill={modal.skill}
-          takenNames={[...takenLocalNames, "explore", "test-fix", "create-agent", ...bundledNames]}
+          busy={modalBusy}
+          takenNames={[...takenLocalNames, ...RESERVED_SKILL_NAMES, ...bundledNames]}
           onCancel={() => setModal(null)}
           onConfirm={(target) => void duplicateSkill(modal.skill, target)}
         />
@@ -638,7 +662,17 @@ function ImportConfirmModal({
   );
 }
 
-function SkillDeleteModal({ skill, onCancel, onConfirm }: { skill: LocalSkillInfo; onCancel: () => void; onConfirm: () => void }) {
+function SkillDeleteModal({
+  skill,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  skill: LocalSkillInfo;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
   return (
     <div className="settings-overlay" role="dialog" aria-label="删除技能确认">
       <div className="confirm-modal">
@@ -646,10 +680,10 @@ function SkillDeleteModal({ skill, onCancel, onConfirm }: { skill: LocalSkillInf
         <p className="sub">仅删除本机技能文件，不影响已发布到技能中心的内容与历史会话。</p>
         <div className="page-tools">
           <span className="composer-spacer" />
-          <button type="button" className="filter-tab" onClick={onCancel}>
+          <button type="button" className="filter-tab" onClick={onCancel} disabled={busy}>
             取消
           </button>
-          <button type="button" className="btn-dark" onClick={onConfirm}>
+          <button type="button" className="btn-dark" onClick={onConfirm} disabled={busy}>
             删除
           </button>
         </div>
@@ -660,11 +694,13 @@ function SkillDeleteModal({ skill, onCancel, onConfirm }: { skill: LocalSkillInf
 
 function SkillDuplicateModal({
   skill,
+  busy,
   takenNames,
   onCancel,
   onConfirm,
 }: {
   skill: LocalSkillInfo;
+  busy: boolean;
   takenNames: readonly string[];
   onCancel: () => void;
   onConfirm: (target: string) => void;
@@ -700,10 +736,10 @@ function SkillDuplicateModal({
         </label>
         <div className="page-tools">
           <span className="composer-spacer" />
-          <button type="button" className="filter-tab" onClick={onCancel}>
+          <button type="button" className="filter-tab" onClick={onCancel} disabled={busy}>
             取消
           </button>
-          <button type="button" className="btn-dark" onClick={submit}>
+          <button type="button" className="btn-dark" onClick={submit} disabled={busy}>
             复制
           </button>
         </div>

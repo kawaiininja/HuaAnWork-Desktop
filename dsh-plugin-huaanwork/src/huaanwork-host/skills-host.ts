@@ -38,7 +38,7 @@ import {
 
 /**
  * 技能宿主读路径(Task 7 子集):skill-invoke 的 @skill 分发只依赖
- * userSkillsRoot / externalSkillsRoot / findEntry / getSkill。
+ * userSkillsRoot / findEntry / getSkill。
  * Task 10 在此基础上补齐 list/get 路由与写路径(create/update/remove/import),
  * 本文件的读函数签名与旧 sidecar skills-host.ts 逐字一致。
  *

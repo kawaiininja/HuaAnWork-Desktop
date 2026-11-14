@@ -17,7 +17,7 @@ import { resolveInvocableSkill } from '../../src/huaanwork-host/skill-invoke.ts'
 import { promises as fsp } from 'node:fs'
 
 // 用例移植自旧 sidecar skills-host.test.ts 的 list/get 段(skills-host.test.ts:29-110):
-// 三源合并、遮蔽序 user → external → bundled、bundled 根为包内 skills/(Task 2)。
+// 遮蔽序 user → bundled、bundled 根为包内 skills/(Task 2/3;外部根已退出)。
 
 const DEMO = '---\nname: demo\ndescription: 演示技能\n---\n\n正文\n'
 
@@ -65,7 +65,7 @@ describe('skills-host 读路径(旧 skills-host.test.ts 用例)', () => {
     expect(await listUserSkills(home)).toEqual([])
   })
 
-  test('getSkill searches user then external then bundled', async () => {
+  test('getSkill searches user then bundled', async () => {
     const home = makeHome()
     mkdirSync(join(home, 'skills', 'demo'), { recursive: true })
     writeFileSync(join(home, 'skills', 'demo', 'SKILL.md'), DEMO)

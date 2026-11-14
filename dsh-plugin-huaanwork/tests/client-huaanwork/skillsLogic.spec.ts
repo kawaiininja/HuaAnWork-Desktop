@@ -2,16 +2,24 @@ import assert from 'node:assert/strict'
 import { test } from 'vitest'
 
 import {
+  RESERVED_SKILL_NAMES,
   SKILL_TABS,
+  busyKeyFor,
   centerActionLabel,
   filterCenterSkills,
   filterLocalSkills,
+  isBuiltinNameConflict,
+  isReservedSlash,
+  isUploadDisabled,
   originLabel,
+  parseSlashInvoke,
   slashSkills,
+  slashTokenAt,
   sourceLabel,
   tabLabel,
   uploadActionLabel,
   validateDuplicateName,
+  validateSkillForm,
   type CenterSkillInfo,
   type InvocableSkillInfo,
   type LocalSkillInfo,
@@ -89,4 +97,54 @@ test('duplicate target validation refuses taken, invalid and unchanged names', (
   assert.match(validateDuplicateName('pdf', { sourceName: 'pdf', takenNames: ['pdf'] }) ?? '', /新的技能名称/)
   assert.match(validateDuplicateName('Bad Name', { sourceName: 'pdf', takenNames: ['pdf'] }) ?? '', /kebab-case/)
   assert.match(validateDuplicateName('taken', { sourceName: 'pdf', takenNames: ['taken'] }) ?? '', /已存在同名技能/)
+})
+
+
+test('slash token parsing keeps URL/path-like input out of the menu', () => {
+  assert.deepEqual(slashTokenAt('请看 /demo 技能', 6), { start: 3, end: 8, query: 'demo' })
+  assert.equal(slashTokenAt('http://example.com/x', 10), undefined)
+  assert.equal(slashTokenAt('a //demo', 8), undefined)
+  assert.deepEqual(slashTokenAt('/', 1), { start: 0, end: 1, query: '' })
+  assert.equal(slashTokenAt('/dem o', 4)?.query, 'dem')
+  assert.equal(slashTokenAt('/Dem', 4), undefined)
+})
+
+test('schedule stays reserved for automation', () => {
+  assert.equal(isReservedSlash('schedule'), true)
+  assert.equal(isReservedSlash('schedule-daily'), true)
+  assert.equal(isReservedSlash('demo'), false)
+  assert.equal(parseSlashInvoke('/schedule 每小时'), undefined)
+  assert.deepEqual(parseSlashInvoke('/demo 跑一下'), { name: 'demo', remainder: '跑一下' })
+})
+
+test('form validation checks kebab names, taken names and content', () => {
+  const base = { name: 'demo', description: '演示', whenToUse: '', content: '正文', disableModelInvocation: false }
+  assert.deepEqual(validateSkillForm(base, { editing: false, takenNames: [] }), {})
+  assert.equal(validateSkillForm({ ...base, name: 'Bad Name' }, { editing: false, takenNames: [] }).name !== undefined, true)
+  assert.equal(validateSkillForm({ ...base, name: 'taken' }, { editing: false, takenNames: ['taken'] }).name !== undefined, true)
+  assert.equal(validateSkillForm({ ...base, description: ' ' }, { editing: false, takenNames: [] }).description !== undefined, true)
+  assert.equal(validateSkillForm({ ...base, content: ' ' }, { editing: false, takenNames: [] }).content !== undefined, true)
+  // Editing keeps the name locked → no name error even when "taken".
+  assert.equal(validateSkillForm({ ...base, name: 'taken' }, { editing: true, takenNames: ['taken'] }).name, undefined)
+})
+
+test('builtin-name conflicts and upload disabling match the host rules', () => {
+  const base: LocalSkillInfo = {
+    name: 'pdf',
+    description: 'x',
+    source: 'user',
+    enabled: false,
+    origin: { kind: 'created' },
+    contentDigest: 'sha256:' + 'a'.repeat(64),
+    publishState: 'not-published',
+  }
+  assert.equal(busyKeyFor('catalog', 'pdf'), 'catalog:pdf')
+  assert.equal(busyKeyFor('user', 'pdf'), 'user:pdf')
+  assert.equal(isBuiltinNameConflict(base, new Set(['pdf'])), true)
+  assert.equal(isBuiltinNameConflict({ ...base, origin: { kind: 'bundled' } }, new Set()), true)
+  assert.equal(isBuiltinNameConflict({ ...base, name: 'other' }, new Set(['pdf'])), false)
+  assert.equal(isUploadDisabled(base, new Set(['pdf'])), true)
+  assert.equal(isUploadDisabled({ ...base, name: 'other', publishState: 'published' }, new Set(['pdf'])), true)
+  assert.equal(isUploadDisabled({ ...base, name: 'other' }, new Set(['pdf'])), false)
+  assert.ok(RESERVED_SKILL_NAMES.includes('create-agent'))
 })

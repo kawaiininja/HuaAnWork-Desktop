@@ -1115,7 +1115,8 @@ export default function App() {
   }, [atMatches.length, atIndex]);
 
   const refreshSlashCatalog = useCallback(() => {
-    if (view !== "main" || sidecarDead || !ready) return;
+    // Callable from the skills page too; only readiness gates the request.
+    if (sidecarDead || !ready) return;
     void rpcCall<{ skills: InvocableSkillInfo[] }>("skill.invocableList")
       .then((listed) => setSlashCatalog(Array.isArray(listed.skills) ? listed.skills : []))
       .catch(() => setSlashCatalog([]));

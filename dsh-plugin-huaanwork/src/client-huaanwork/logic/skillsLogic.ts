@@ -46,7 +46,6 @@ export function sourceLabel(source: SkillSource): string {
     case "bundled": return "内置";
     case "catalog": return "共享";
     case "user": return "我的技能";
-    case "external": return "外部";
   }
 }
 
@@ -94,8 +93,29 @@ export function uploadActionLabel(state: LocalSkillInfo["publishState"]): string
   }
 }
 
-/** System skills: always enabled, no toggle, no download. */
-export const SYSTEM_SKILLS: ReadonlySet<string> = new Set(["explore", "test-fix"]);
+/** Reserved names a local skill must not take (system + internal). */
+export const RESERVED_SKILL_NAMES: readonly string[] = ["explore", "test-fix", "create-agent"];
+
+/** Busy key shared by every action on one card. */
+export function busyKeyFor(source: "bundled" | "catalog" | "user", name: string): string {
+  return `${source}:${name}`;
+}
+
+/** A local skill that reuses a bundled (or downloaded-bundled) name cannot be
+ * uploaded as a FIRST publish; it must be duplicated under a new name. */
+export function isBuiltinNameConflict(
+  skill: Pick<LocalSkillInfo, "name" | "origin">,
+  bundledNames: ReadonlySet<string>,
+): boolean {
+  return skill.origin.kind === "bundled" || bundledNames.has(skill.name);
+}
+
+export function isUploadDisabled(
+  skill: LocalSkillInfo,
+  bundledNames: ReadonlySet<string>,
+): boolean {
+  return skill.publishState === "published" || isBuiltinNameConflict(skill, bundledNames);
+}
 
 export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
