@@ -45,16 +45,33 @@
 | 内网不可用时本地独立与完整缓存 | `skill-center.spec.ts`、`skill-catalog-client.spec.ts` |
 | 迁移保留存量与同名本地 | `skill-center-migration.spec.ts` |
 
-## 3. 真机端到端矩阵（规格 §14.2）— BLOCKED
+## 3. 真机端到端矩阵（规格 §14.2，2026-11-15 执行）
 
-| 项 | 状态 | 原因 |
+环境：macOS 本机；隔离 `DSH_HOME=/tmp/hw-skill-accept-20261115/.huaanwork` + 独立 `--user-data-dir` + CDP 9333 + `HUAANWORK_ACCEPTANCE_HOOKS=1`（固定 Web 43120）；本地目录服务 `agent-catalog-server` 监听 `127.0.0.1:19090`（临时 keyring；read/publish/admin 与 alice/bob 两个技能上传口令全部随机生成、互不相同）。两个客户端 = 同一隔离 Home 下的两个 Profile，通过 profile-selection 顺序切换：A=`desktop`（alice 上传口令），B=`accept-b`（bob 上传口令），共享同一 read token。
+
+| 规格 §14.2 项 | 结果 | 证据 |
 | --- | --- | --- |
-| 双客户端（A/B 两个 Profile + 两个上传者 token）上传/下载/启停/冲突 | **BLOCKED** | 本会话未启动隔离内网目录服务与两个真实桌面客户端；仅有 loopback HTTP 与真实 Profile 的自动化覆盖 |
-| macOS 真实 UI、目录选择、资源下载、重启恢复、迁移 | **BLOCKED** | 未进行真实 GUI 走查 |
+| A 创建含脚本资源的技能并上传 revision 1 | **PASS** | UI 创建 demo 后写入 `scripts/hello.txt`；点击“上传”提示 `已发布技能 demo（revision 1）`；服务端 `GET /v1/skills` 记录 publisher=alice |
+| A/B 中心看到共享条目及 revision 1 | **PASS** | A 中心卡：`共享 · 发布者 alice · revision 1`；B 中心卡同（`下载` 可用） |
+| B 下载后“我的技能”未启用，`/` 不展示且手工调用被 Host 拒绝 | **PASS** | 下载提示 `已下载技能 demo，请在“我的技能”中启用`；卡片来源“共享副本”、按钮“启用”；资源 `skills/demo/scripts/hello.txt` 完整；新会话手工发送 `/demo …` 得到 `skill demo is disabled` |
+| B 启用后 `/` 可调用且资源目录正确；禁用后两条路径再次关闭 | **PASS** | 启用提示 `已启用技能 demo，可在对话框输入 / 调用`；`/` 菜单出现 `/demo`；会话日志含 `# 已启用技能：demo` 与 `技能目录：<profile>/skills/demo`；禁用后 `/` 菜单移除 demo，手工调用再次 `skill demo is disabled` |
+| A 更新为 revision 2；B 看到更新但不自动替换本地副本 | **PASS** | A 编辑后“更新上传”→ `已发布技能 demo（revision 2）`；B 中心卡变 `更新`，而本地 SKILL.md 仍为 v1（未自动覆盖）；点击“更新”后才变 v2（`已下载技能 demo…`） |
+| B 用不同上传者身份更新 A 的名称 → `skill-name-conflict`，中心不变 | **PASS** | B 点击上传提示 `该技能由其他发布者所有`；服务端 demo 仍为 alice revision 2 |
+| 内置同名副本：上传禁用提示，“另存为新技能”后可上传 | **PASS** | B 下载内置 pdf → 卡片“内置副本”，上传按钮禁用并提示 `与内置技能同名，请另存为新技能后上传`；另存为 pdf-copy（提示 `已另存为技能 pdf-copy，请在“我的技能”中启用`）后上传成功 `revision 1`（publisher=bob） |
+| 外部技能导入、原文件保留、启用后才可调用 | **PASS** | 原生选择器导入 `ext-visible`（预览正文正确）→ `已导入技能 ext-visible，请在“我的技能”中启用`；源文件仍存在；启用后 `/` 菜单出现 `/ext-visible` |
+| 断网后本地技能、启停和已启用 `/` 调用仍工作；中心展示缓存与警告 | **PASS** | 停掉目录服务并刷新：中心显示 `共享技能库不可用，当前显示内置技能与已缓存内容`，缓存中的 demo/pdf-copy 仍在；`/demo` 离线调用仍产出 `# 已启用技能：demo` + 技能目录 |
+| 设置保存后技能中心刷新 | **PASS** | 首次保存“公用机配置”后离线提示消失、中心即时可用（无需重启 Host） |
+| `user-invocable: false` 的已启用本地技能仍可 `/` 调用（R7） | **PASS** | B 的 demo SKILL.md 改为 `user-invocable: false` 后，`/demo` 仍成功注入 `# 已启用技能：demo` |
+| 三种 preset 不再扫描真实 `~/.agents/skills` | **PASS（隔离）** | 以 `DSH_AGENTS_HOME` 指向含 `ext-visible.md` 的临时外部根重启后，中心/我的/`/` 菜单均无该外部技能；原文件保留 |
+| 智能体包 `allowSkills` 不能调用未启用本地技能 | **未在真机重复** | 自动化用例已覆盖（agent-package drafts/runtime）；真机需创建智能体包并派发真实回合，本轮未执行 |
+| 升级 fixture（旧用户技能/旧启用内置/同名冲突/外部文件） | **部分（非受控）** | 首启（未清空 profile 的第一次尝试）真实触发了迁移：旧的启用内置被复制为“内置副本”并在界面可见；该证据为真实但非受控 fixture。受控旧数据目录用例未单独执行 |
 | Windows 真机矩阵 | **BLOCKED** | 无 Windows 主机 |
-| 升级 fixture（旧用户技能/旧启用内置/同名冲突/外部文件保留） | **BLOCKED（真机）** | 自动化迁移用例已覆盖逻辑；真实旧数据目录 fixture 未执行 |
 
-按计划与仓库规则：不得以 CI 或单元测试代替真机结论；因此规格状态**保持“待实施”**，不写成“已实施”。获得真机环境后按规格 §14.2 逐项补跑。
+说明：
+
+- 两个客户端为顺序切换的两个 Profile（单实例），不是两台机器同时在线；服务端记录的两个 publisher（alice/bob）分别来自两个 Profile 的独立上传口令，身份隔离仍被真实验证。
+- 真实模型回合在本地未配置可用端点（应用活动模型指向 `http://127.0.0.1:11434/v1`），回合以模型连接失败结束；技能链路的判据取自 Host 注入的 `# 已启用技能` 与 `技能目录`（服务端/本地文件证据），不把模型失败当作技能失败，也不据此声称模型对话通过。
+- 证据原始目录：`/tmp/hw-skill-accept-20261115/`（应用日志、服务端日志、`catalog-data/`、两个 profile 与截图 `accept-slash-menu.png`）；该目录为临时目录，不入库。
 
 ## 4. 自审（Task 11 Step 5）
 
