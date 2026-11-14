@@ -44,7 +44,14 @@
 import { randomBytes } from 'node:crypto'
 import { mkdir, open as openFile, readFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { CatalogState } from './types.ts'
+/**
+ * The only thing reconciliation reads from a state document. Both the agent
+ * catalog state and the skill state satisfy it structurally, so the two audit
+ * journals reconcile against their own store without sharing a state type.
+ */
+export interface StructuralMutationState {
+  readonly lastMutation?: { readonly requestId: string; readonly action: string; readonly at: string }
+}
 
 export const AUDIT_FILE_NAME = 'audit.jsonl'
 export const AUDIT_INTENTS_FILE_NAME = 'audit-intents.jsonl'
@@ -222,7 +229,7 @@ export class AuditLog {
    * halfway, the next startup skips the intents whose result lines were already
    * written and clears the rest.
    */
-  async reconcile(state: CatalogState): Promise<void> {
+  async reconcile(state: StructuralMutationState): Promise<void> {
     const readLines = async (path: string): Promise<string[]> => {
       try {
         return (await readFile(path, 'utf8')).split('\n').filter(Boolean)

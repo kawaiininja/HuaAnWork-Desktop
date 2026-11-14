@@ -19,6 +19,7 @@ import {
   createAgentCatalogServer,
   type AgentCatalogRuntime,
 } from './server.ts'
+import { SkillStoreCorruptError } from './skill-store.ts'
 import { StoreCorruptError } from './store.ts'
 
 async function main(): Promise<void> {
@@ -37,7 +38,9 @@ async function main(): Promise<void> {
   try {
     runtime = await createAgentCatalogRuntime(config)
   } catch (cause) {
-    if (cause instanceof StoreCorruptError) {
+    // A corrupt agent OR skill state document is an operator error: refuse to
+    // start (exit 1) rather than serve a partly-blind catalog (spec §11.2).
+    if (cause instanceof StoreCorruptError || cause instanceof SkillStoreCorruptError) {
       console.error(cause.message)
       process.exit(1)
     }
