@@ -64,6 +64,20 @@ export const MIN_TOKEN_LENGTH = 32
 /** Skill publisher id rule (spec §7.3). */
 export const SKILL_PUBLISHER_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u
 
+/**
+ * Every configured secret, including skill upload tokens (spec §7.4). Both
+ * audit journals, HTTP error redaction and the legacy-entry redactor must use
+ * this ONE list so a new token kind cannot miss a surface.
+ */
+export function catalogSecrets(config: AgentCatalogConfig): readonly string[] {
+  return [
+    config.readToken,
+    config.publishToken,
+    config.adminToken,
+    ...Object.values(config.skillUploaders),
+  ]
+}
+
 export interface AgentCatalogConfig {
   readonly host: string
   readonly port: number

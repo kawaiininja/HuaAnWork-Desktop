@@ -70,7 +70,7 @@ import {
 
 import { redactSecrets } from './audit.ts'
 import type { AgentCatalogRole } from './auth.ts'
-import type { AgentCatalogConfig } from './config.ts'
+import { catalogSecrets, type AgentCatalogConfig } from './config.ts'
 import {
   BodyTooLargeError,
   declaredContentLength,
@@ -319,8 +319,7 @@ function hasExactSignatureShape(value: unknown): boolean {
  * through the same redaction the audit log uses.
  */
 function legacyRedactorFor(config: AgentCatalogConfig): LegacyRedactor {
-  const secrets = [config.readToken, config.publishToken, config.adminToken]
-  return text => redactSecrets(text, secrets)
+  return text => redactSecrets(text, catalogSecrets(config))
 }
 
 /**

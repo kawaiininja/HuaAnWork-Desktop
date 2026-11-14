@@ -63,7 +63,7 @@ import {
   tokenActor,
   type AgentCatalogRole,
 } from './auth.ts'
-import type { AgentCatalogConfig } from './config.ts'
+import { catalogSecrets, type AgentCatalogConfig } from './config.ts'
 import {
   approveDelistRequest,
   createDelistRequest,
@@ -108,14 +108,7 @@ export interface AgentCatalogRuntime {
 }
 
 /** Every configured secret, including skill upload tokens (spec §7.4). */
-function secretList(config: AgentCatalogConfig): readonly string[] {
-  return [
-    config.readToken,
-    config.publishToken,
-    config.adminToken,
-    ...Object.values(config.skillUploaders),
-  ]
-}
+const secretList = catalogSecrets
 
 /**
  * Open the runtime (state stores first: a corrupt state file must refuse

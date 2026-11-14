@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'vitest'
 
@@ -291,6 +291,90 @@ test('routes pre-dispatch denials and method errors to the skill journal', async
     const agentAudit = await catalog.readAudit()
     assert.equal(agentAudit.some(record => record.action === 'skills.publish'), false)
     assert.equal(agentAudit.some(record => record.action === 'route.method-not-allowed'), false)
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('records 401 denials on the matched skill journal and unknown routes on the agent journal', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    // Missing token and an unknown token on a MATCHED skill route: 401 on the
+    // skill journal.
+    assert.equal((await catalog.request('/v1/skills/demo', {
+      method: 'POST', raw: validArchive, headers: { 'content-type': 'application/gzip' },
+    })).status, 401)
+    assert.equal((await publish(catalog, 'demo', { token: 'wrong-token' })).status, 401)
+    const skillAudit = await catalog.readSkillAudit()
+    assert.equal(skillAudit.filter(record => record.action === 'auth.denied').length, 2)
+
+    // An unknown route (even one carrying an upload token in the path) stays on
+    // the agent journal, and the token is redacted there.
+    const unknown = await catalog.request(`/v1/nope/${ALICE_SKILL_TOKEN}`, { token: READ_TOKEN })
+    assert.equal(unknown.status, 404)
+    const agentRaw = await catalog.readAuditRaw()
+    assert.ok(agentRaw.includes('route.unknown'))
+    assert.equal(agentRaw.includes(ALICE_SKILL_TOKEN), false)
+    assert.ok(agentRaw.includes('[REDACTED]'))
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('writes the publish intent to the skill journal only', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    assert.equal((await publish(catalog, 'demo')).status, 201)
+    const intents = (await readFile(join(catalog.dataDir, 'skills', 'audit-intents.jsonl'), 'utf8'))
+      .split('\n').filter(Boolean).map(line => JSON.parse(line) as { action: string; slug?: string })
+    const intent = intents.find(record => record.action === 'skills.publish')
+    assert.ok(intent)
+    assert.equal(intent.slug, 'demo')
+    // The agent intent journal was never touched.
+    await assert.rejects(readFile(join(catalog.dataDir, 'audit-intents.jsonl'), 'utf8'))
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('refuses a skill publish while the skill audit is unavailable', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    // A directory at the intents path makes every intent append fail.
+    await mkdir(join(catalog.dataDir, 'skills', 'audit-intents.jsonl'), { recursive: true })
+    const response = await publish(catalog, 'demo')
+    assert.equal(response.status, 500)
+    assert.equal(response.body.code, 'audit-write-failed')
+    assert.deepEqual(catalog.runtime.skillStore.read().skills, {})
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('routes handler failures to the skill journal', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    assert.equal((await publish(catalog, 'demo')).status, 201)
+    await rm(join(catalog.dataDir, 'skills', 'archives', 'demo', '1.tar.gz'))
+    assert.equal((await catalog.request('/v1/skills/demo/1/archive', { token: READ_TOKEN })).status, 500)
+    const skillAudit = await catalog.readSkillAudit()
+    assert.ok(skillAudit.some(record => record.action === 'skills.archive' && record.status === 500))
+  } finally {
+    await catalog.close()
+  }
+})
+
+test('accepts exactly the archive cap and rejects one byte over', async () => {
+  const catalog = await bootTestAgentCatalog()
+  try {
+    // Exactly 5 MiB is buffered and reaches inspection (which rejects the
+    // garbage bytes as an invalid archive, not as too large).
+    const atCap = await publish(catalog, 'demo', { archive: Buffer.alloc(MAX_SKILL_ARCHIVE_BYTES, 1) })
+    assert.equal(atCap.status, 400)
+    assert.equal(atCap.body.code, 'invalid-skill')
+    const overCap = await publish(catalog, 'demo', { archive: Buffer.alloc(MAX_SKILL_ARCHIVE_BYTES + 1, 1) })
+    assert.equal(overCap.status, 400)
+    assert.equal(overCap.body.code, 'skill-too-large')
   } finally {
     await catalog.close()
   }

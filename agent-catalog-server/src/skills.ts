@@ -229,7 +229,9 @@ export async function publishSkill(ctx: SkillHandlerContext, name: string): Prom
       code: cause.code,
     }, {
       action: 'skills.publish',
-      outcome: 'denied',
+      // A 409 is a state conflict, not a credential denial: `denied` stays the
+      // 401/403 vocabulary across both journals.
+      outcome: 'error',
       reason: cause.message,
       slug: name,
     })
