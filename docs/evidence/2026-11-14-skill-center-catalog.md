@@ -76,5 +76,5 @@
 | 命令 | 退出码 | 关键计数 |
 | --- | --- | --- |
 | `corepack yarn typecheck` | **0** | 25s |
-| `corepack yarn test` | **0** | 103s；全仓 4099 tests（4083 passed / 15 skipped），本次运行无失败 |
-| `corepack yarn check` | **0** | 182s；含 `dsh-plugin-huaanwork` 292/292 passed、双语门禁 51 records / 102 documents |
+| `corepack yarn test` | **0** | 103s；全仓 4102 tests（4087 passed / 15 skipped），本次运行无失败 |
+| `corepack yarn check` | **0** | 182s；含 `dsh-plugin-huaanwork` 293 files passed / 4 skipped（共 4102 tests：4087 passed / 15 skipped）、双语门禁 51 records / 102 documents |
