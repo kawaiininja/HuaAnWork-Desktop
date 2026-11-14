@@ -1120,7 +1120,7 @@ export default function App() {
     void rpcCall<{ skills: InvocableSkillInfo[] }>("skill.invocableList")
       .then((listed) => setSlashCatalog(Array.isArray(listed.skills) ? listed.skills : []))
       .catch(() => setSlashCatalog([]));
-  }, [view, ready, sidecarDead]);
+  }, [ready, sidecarDead]);
 
   useEffect(() => {
     if (view !== "main" || sidecarDead || !ready) return;

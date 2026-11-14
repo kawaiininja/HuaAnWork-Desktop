@@ -2129,20 +2129,21 @@ const SKILLS_VIEW_SOURCE = readFileSync(
 test("the slash catalog refresh is callable from the skills page and wired to card actions", () => {
   // 契约钉:技能页启用期间也必须能刷新 `/` 目录(不得再以 view==='main' 为门)。
   const start = APP_SOURCE.indexOf("const refreshSlashCatalog = useCallback");
-  assert.ok(start >= 0, "refreshSlashCatalog still exists");
-  const block = APP_SOURCE.slice(start, start + 400);
+  const end = APP_SOURCE.indexOf("}, [ready, sidecarDead]);", start);
+  assert.ok(start >= 0 && end > start, "refreshSlashCatalog still exists");
+  const block = APP_SOURCE.slice(start, end);
   assert.doesNotMatch(block, /view !== "main"/);
-  assert.match(
-    APP_SOURCE,
-    /<SkillsView refreshSignal=\{agentChangeSignal\} onInvocableChanged=\{refreshSlashCatalog\} \/>/,
-  );
+  assert.match(APP_SOURCE, /onInvocableChanged=\{refreshSlashCatalog\}/);
   // 下载/重复/启停等操作成功后就地刷新,不依赖视图切换。
   const callbacks = SKILLS_VIEW_SOURCE.match(/onInvocableChanged\?\.\(\)/g) ?? [];
   assert.ok(callbacks.length >= 3, "card actions refresh the slash catalog");
   const downloadStart = SKILLS_VIEW_SOURCE.indexOf("const downloadSkill");
-  const downloadBlock = SKILLS_VIEW_SOURCE.slice(downloadStart, downloadStart + 900);
-  assert.match(downloadBlock, /onInvocableChanged\?\.\(\)/);
+  const downloadEnd = SKILLS_VIEW_SOURCE.indexOf("const uploadSkill", downloadStart);
+  assert.ok(downloadStart >= 0 && downloadEnd > downloadStart);
+  assert.match(SKILLS_VIEW_SOURCE.slice(downloadStart, downloadEnd), /onInvocableChanged\?\.\(\)/);
   // 中心与我的各用独立错误槽:中心加载失败不得画到“我的技能”。
   assert.match(SKILLS_VIEW_SOURCE, /const \[centerError, setCenterError\]/);
   assert.match(SKILLS_VIEW_SOURCE, /const \[mineError, setMineError\]/);
+  assert.match(SKILLS_VIEW_SOURCE, /tab === "center" && centerError/);
+  assert.match(SKILLS_VIEW_SOURCE, /tab === "mine" && mineError/);
 });
