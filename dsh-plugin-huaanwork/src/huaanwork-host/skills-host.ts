@@ -3,7 +3,7 @@ import { readFileSync, promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
-import { createSkillDigest, readSkillDirectory } from '@huaanwork/skill-format'
+import { createSkillDigest, readSkillDirectory, writeSkillDirectory } from '@huaanwork/skill-format'
 import {
   SKILL_NAME_RE,
   parseSkillMarkdown,
@@ -52,7 +52,7 @@ export function externalSkillsRoot(env: NodeJS.ProcessEnv = process.env): string
 export type DiskEntry = { path: string; kind: 'bundle' | 'flat' }
 
 /** 扫描一个技能根:目录包(<name>/SKILL.md)与扁平 <name>.md 双形态;跳过 .system。 */
-async function scanRoot(root: string): Promise<DiskEntry[]> {
+export async function scanRoot(root: string): Promise<DiskEntry[]> {
   let entries: Dirent[]
   try {
     entries = await fs.readdir(root, { withFileTypes: true })
@@ -102,16 +102,27 @@ export function listUserSkills(storageRoot: string): Promise<LocalSkillInfo[]> {
 }
 
 /**
- * 目录包按整棵技能目录取摘要;扁平 `.md` 只按规范化的 `SKILL.md` 取摘要
- * (上传/下载会在 Task 7/8 统一成 `<name>/SKILL.md`)。读取目录失败(例如手工
- * 放入的符号链接)时回落到 SKILL.md,保证列表仍可读、不把整个技能中心拖垮。
+ * 严格摘要:目录包按整棵技能目录取摘要(扁平 `.md` 按规范化的 `SKILL.md`),
+ * 违反目录安全规则(符号链接、硬链接、条目/字节预算)时抛错。
+ *
+ * 所有会把摘要写进 `skill-local-state.json` 的路径(create/update/import/迁移)
+ * 都必须用它:部分摘要会让 `publishState` 把未上传的资源当成已发布内容。
  */
-export function skillEntryDigest(entry: DiskEntry): string {
+export function skillEntryDigestStrict(entry: DiskEntry): string {
   if (entry.kind === 'flat') {
     return createSkillDigest([{ path: 'SKILL.md', data: readFileSync(entry.path) }])
   }
+  return createSkillDigest(readSkillDirectory(dirname(entry.path)))
+}
+
+/**
+ * 列表展示专用的宽松摘要:目录不可读(例如手工放入的符号链接)时回落到
+ * SKILL.md,保证列表仍可读、不把整个技能中心拖垮。只用于 `listUserSkills`
+ * 投影,绝不能把结果持久化。
+ */
+function skillEntryDigestLenient(entry: DiskEntry): string {
   try {
-    return createSkillDigest(readSkillDirectory(dirname(entry.path)))
+    return skillEntryDigestStrict(entry)
   } catch {
     return createSkillDigest([{ path: 'SKILL.md', data: readFileSync(entry.path) }])
   }
@@ -131,7 +142,7 @@ async function listLocalRoot(root: string): Promise<LocalSkillInfo[]> {
       const parsed = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
       if (!parsed.name || !parsed.description) continue
       const local = state.skills[parsed.name]
-      const contentDigest = local?.contentDigest ?? skillEntryDigest(entry)
+      const contentDigest = local?.contentDigest ?? skillEntryDigestLenient(entry)
       const origin = local?.origin ?? { kind: 'created' as const }
       skills.push({
         name: parsed.name,
@@ -266,11 +277,31 @@ async function atomicWrite(targetPath: string, content: string): Promise<void> {
   await fs.rename(tmp, targetPath)
 }
 
+/**
+ * 写路径的目标目录预检:目标已存在时必须是真实目录,且整棵树通过严格读取
+ * (符号链接、硬链接、条目/字节预算)。让 create/import 在落任何文件前拒绝
+ * 不安全的既有目录,而不是先写入再在摘要阶段失败。
+ */
+async function assertSafeExistingSkillDir(dir: string): Promise<void> {
+  const stat = await fs.lstat(dir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return undefined
+    throw error
+  })
+  if (stat === undefined) return
+  if (stat.isSymbolicLink()) throw new Error(`技能目录不得是符号链接：${dir}`)
+  if (!stat.isDirectory()) throw new Error(`技能路径必须是目录：${dir}`)
+  readSkillDirectory(dir)
+}
+
 export async function createSkill(storageRoot: string, input: SkillInput): Promise<SkillWriteResult> {
   const errors = validateSkillFields(input, await takenNames(storageRoot))
   if (errors.length > 0) return { ok: false, fieldErrors: errors }
-  // 先读状态:损坏文档必须在落盘前失败,不留下没有来源记录的用户技能。
+  // 先读两份状态文档并在落盘前预检目标目录:损坏文档与不安全的既有目录
+  // 都必须在落盘前失败,不留下没有来源记录的用户技能。
   readSkillLocalState(storageRoot)
+  const toggles = readUserSkillToggles(storageRoot)
+  const skillDir = join(userSkillsRoot(storageRoot), input.name)
+  await assertSafeExistingSkillDir(skillDir)
   const serialized = serializeSkillMarkdown({
     name: input.name,
     description: input.description,
@@ -280,9 +311,9 @@ export async function createSkill(storageRoot: string, input: SkillInput): Promi
     content: input.content,
     extraLines: [],
   })
-  const skillPath = join(userSkillsRoot(storageRoot), input.name, 'SKILL.md')
-  await atomicWrite(skillPath, serialized)
-  const contentDigest = createSkillDigest([{ path: 'SKILL.md', data: Buffer.from(serialized, 'utf8') }])
+  await atomicWrite(join(skillDir, 'SKILL.md'), serialized)
+  // 严格目录摘要:目标目录里既有的资源也计入,不能只记 SKILL.md。
+  const contentDigest = createSkillDigest(readSkillDirectory(skillDir))
   const localEntry: SkillLocalEntry = { origin: { kind: 'created' }, contentDigest }
   writeSkillLocalEntry(storageRoot, input.name, localEntry)
   return {
@@ -292,7 +323,7 @@ export async function createSkill(storageRoot: string, input: SkillInput): Promi
       description: input.description,
       source: 'user',
       ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
-      enabled: readUserSkillToggles(storageRoot)[input.name] === true,
+      enabled: toggles[input.name] === true,
       origin: localEntry.origin,
       contentDigest,
       publishState: publishStateOf(localEntry),
@@ -306,7 +337,9 @@ export async function updateSkill(
   name: string,
   input: SkillUpdateInput,
 ): Promise<SkillWriteResult> {
+  // 先读两份状态文档:损坏文档必须在落盘前失败。
   const state = readSkillLocalState(storageRoot)
+  const toggles = readUserSkillToggles(storageRoot)
   const entry = await findEntry(userSkillsRoot(storageRoot), name)
   if (!entry) {
     return { ok: false, fieldErrors: [{ field: 'name', message: `用户技能 ${name} 不存在（内置与外部技能不可编辑）` }] }
@@ -314,21 +347,31 @@ export async function updateSkill(
   const errors = validateSkillFields({ ...input, name }, new Set())
   if (errors.length > 0) return { ok: false, fieldErrors: errors }
   const original = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
-  await atomicWrite(
-    entry.path,
-    serializeSkillMarkdown({
-      name: original.name,
-      description: input.description,
-      // 缺省即默认(模型可调用/用户可调用),只在非默认值时落键
-      ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
-      ...(input.disableModelInvocation ? { disableModelInvocation: true } : {}),
-      // R7:表单不再接收 userInvocable,但原文件既有行必须保留。
-      ...(original.userInvocable !== undefined ? { userInvocable: original.userInvocable } : {}),
-      content: input.content,
-      extraLines: original.extraLines,
-    }),
-  )
-  const contentDigest = skillEntryDigest(entry)
+  const serialized = serializeSkillMarkdown({
+    name: original.name,
+    description: input.description,
+    // 缺省即默认(模型可调用/用户可调用),只在非默认值时落键
+    ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
+    ...(input.disableModelInvocation ? { disableModelInvocation: true } : {}),
+    // R7:表单不再接收 userInvocable,但原文件既有行必须保留。
+    ...(original.userInvocable !== undefined ? { userInvocable: original.userInvocable } : {}),
+    content: input.content,
+    extraLines: original.extraLines,
+  })
+  let contentDigest: string
+  if (entry.kind === 'flat') {
+    await atomicWrite(entry.path, serialized)
+    contentDigest = createSkillDigest([{ path: 'SKILL.md', data: Buffer.from(serialized, 'utf8') }])
+  } else {
+    // 先严格读取整棵目录:符号链接/硬链接/超预算在落盘前失败。摘要基于同一
+    // 文件集(替换 SKILL.md),不会把只含 SKILL.md 的部分摘要写进状态。
+    const siblings = readSkillDirectory(dirname(entry.path))
+    await atomicWrite(entry.path, serialized)
+    contentDigest = createSkillDigest([
+      ...siblings.filter((file) => file.path !== 'SKILL.md'),
+      { path: 'SKILL.md', data: Buffer.from(serialized, 'utf8') },
+    ])
+  }
   const previous = state.skills[name]
   const localEntry: SkillLocalEntry = {
     origin: previous?.origin ?? { kind: 'created' },
@@ -344,7 +387,7 @@ export async function updateSkill(
       description: input.description,
       source: 'user',
       ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
-      enabled: readUserSkillToggles(storageRoot)[name] === true,
+      enabled: toggles[name] === true,
       origin: localEntry.origin,
       contentDigest,
       ...(localEntry.publishedRevision !== undefined ? { publishedRevision: localEntry.publishedRevision } : {}),
@@ -375,17 +418,6 @@ async function containsSymlink(dir: string): Promise<boolean> {
     if (entry.isDirectory() && (await containsSymlink(join(dir, entry.name)))) return true
   }
   return false
-}
-
-async function copyDir(source: string, target: string): Promise<void> {
-  await fs.mkdir(target, { recursive: true })
-  for (const entry of await fs.readdir(source, { withFileTypes: true })) {
-    const from = join(source, entry.name)
-    const to = join(target, entry.name)
-    if (entry.isDirectory()) await copyDir(from, to)
-    else if (entry.isFile()) await fs.copyFile(from, to)
-    // symlink 已在 preview 拒绝;此处防御性跳过
-  }
 }
 
 export async function previewSkillImport(
@@ -447,27 +479,36 @@ export async function importSkill(
   }
   const preview = await previewSkillImport(storageRoot, sourcePath)
   if (!preview.ok) return preview
-  // 与 create 对称:损坏状态必须在复制前失败,不留下没有来源记录的副本。
+  // 与 create 对称:先读两份状态文档并预检目标目录,损坏状态或不安全目录
+  // 必须在落盘前失败,不留下没有来源记录的副本。
   readSkillLocalState(storageRoot)
+  const toggles = readUserSkillToggles(storageRoot)
   const { targetName, kind } = preview.preview
   const root = userSkillsRoot(storageRoot)
-  await fs.mkdir(root, { recursive: true })
+  const targetDir = join(root, targetName)
+  await assertSafeExistingSkillDir(targetDir)
+  let contentDigest: string
   if (kind === 'file') {
     // 原始文件原样落盘(保留未知 frontmatter 键与 user-invocable 行),目录名以 frontmatter name 为准
-    await atomicWrite(join(root, targetName, 'SKILL.md'), await fs.readFile(sourcePath, 'utf8'))
+    const raw = await fs.readFile(sourcePath, 'utf8')
+    await atomicWrite(join(targetDir, 'SKILL.md'), raw)
+    contentDigest = skillEntryDigestStrict({ path: join(targetDir, 'SKILL.md'), kind: 'bundle' })
   } else {
+    // 源目录必须先通过严格安全与预算检查(符号链接/硬链接/非普通文件/预算),
+    // 失败时不创建目标目录,也不写入任何状态。
+    const files = readSkillDirectory(sourcePath)
     const tmp = join(storageRoot, `.skill-import-${targetName}`)
     await fs.rm(tmp, { recursive: true, force: true })
     try {
-      await copyDir(sourcePath, tmp)
-      await fs.rename(tmp, join(root, targetName))
+      await writeSkillDirectory(tmp, files)
+      await fs.mkdir(root, { recursive: true })
+      await fs.rename(tmp, targetDir)
     } catch (err) {
       await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined)
       throw err
     }
+    contentDigest = createSkillDigest(files)
   }
-  const targetEntry: DiskEntry = { path: join(root, targetName, 'SKILL.md'), kind: 'bundle' }
-  const contentDigest = skillEntryDigest(targetEntry)
   const localEntry: SkillLocalEntry = { origin: { kind: 'imported' }, contentDigest }
   writeSkillLocalEntry(storageRoot, targetName, localEntry)
   return {
@@ -477,7 +518,7 @@ export async function importSkill(
       description: preview.preview.description,
       source: 'user',
       ...(preview.preview.whenToUse ? { whenToUse: preview.preview.whenToUse } : {}),
-      enabled: readUserSkillToggles(storageRoot)[targetName] === true,
+      enabled: toggles[targetName] === true,
       origin: localEntry.origin,
       contentDigest,
       publishState: publishStateOf(localEntry),

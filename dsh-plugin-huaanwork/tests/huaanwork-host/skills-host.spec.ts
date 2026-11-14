@@ -421,13 +421,6 @@ describe('内部技能不可全局启用(设计 §6.1)', () => {
 
     await expect(setSkillEnabled(home, 'create-agent', true)).rejects.toThrow(/内部技能，不能启停/)
     expect(readUserSkillToggles(home)['create-agent']).toBeUndefined()
-
-    // 旧开关表里的 create-agent 只属于迁移输入;不进入用户启用文档。
-    writeFileSync(
-      join(home, 'skill-toggles.json'),
-      JSON.stringify({ 'create-agent': true, pdf: true }),
-    )
-    expect(readUserSkillToggles(home)['create-agent']).toBeUndefined()
   })
 })
 

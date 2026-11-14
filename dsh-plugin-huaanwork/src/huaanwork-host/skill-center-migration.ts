@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 
 import { createSkillDigest, readSkillDirectory, writeSkillDirectory } from '@huaanwork/skill-format'
 import type { SkillArchiveFile } from '@huaanwork/skill-format'
+import { SKILL_NAME_RE, parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
 import {
   INTERNAL_BUNDLED_SKILLS,
   SYSTEM_SKILLS,
@@ -11,13 +12,14 @@ import {
 } from '../huaanwork-guardrails/skills.ts'
 import {
   findEntry,
-  listUserSkills,
-  skillEntryDigest,
+  scanRoot,
+  skillEntryDigestStrict,
   userSkillsRoot,
 } from './skills-host.ts'
 import {
   markSkillCenterMigrationComplete,
   readSkillLocalState,
+  readUserSkillToggles,
   setUserSkillToggle,
   writeSkillLocalEntry,
 } from './skill-local-state.ts'
@@ -78,27 +80,51 @@ async function copyBundledSkill(
 export async function ensureSkillCenterMigration(profileDir: string): Promise<string[]> {
   const state = readSkillLocalState(profileDir)
   if (state.migration?.version === 1) return []
+  // 损坏的启用状态文档必须在任何写盘/复制前暴露，避免迁移只写一半。
+  readUserSkillToggles(profileDir)
 
   const warnings: string[] = []
   const labeled = new Set(Object.keys(state.skills))
+  const skippedInvalidLocalNames = new Set<string>()
+  const userRoot = userSkillsRoot(profileDir)
 
   // 先读取旧用户目录与旧开关表，再开始任何复制/写入。
-  const userSkills = await listUserSkills(profileDir)
+  // 直接扫描 userRoot（保留根目录级 ENOTDIR 抛错），不经过 listUserSkills 的宽松摘要回落。
+  const userEntries = await scanRoot(userRoot)
   const legacyToggles = readSkillToggles(profileDir)
 
-  for (const skill of userSkills) {
-    if (!labeled.has(skill.name)) {
-      writeSkillLocalEntry(profileDir, skill.name, {
+  for (const entry of userEntries) {
+    let parsed
+    try {
+      parsed = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
+    } catch {
+      continue
+    }
+    if (!parsed.name || !parsed.description) continue
+    if (!SKILL_NAME_RE.test(parsed.name)) {
+      warnings.push(`跳过非法名称的本地技能 ${parsed.name}`)
+      continue
+    }
+    if (!labeled.has(parsed.name)) {
+      let contentDigest: string
+      try {
+        contentDigest = skillEntryDigestStrict(entry)
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        warnings.push(`跳过不安全的本地技能 ${parsed.name}：${reason}`)
+        skippedInvalidLocalNames.add(parsed.name)
+        continue
+      }
+      writeSkillLocalEntry(profileDir, parsed.name, {
         origin: { kind: 'created' },
-        contentDigest: skill.contentDigest,
+        contentDigest,
       })
-      labeled.add(skill.name)
+      labeled.add(parsed.name)
     }
     // 旧版没有用户技能启用门:存量用户技能全部保留可调用。
-    setUserSkillToggle(profileDir, skill.name, true)
+    setUserSkillToggle(profileDir, parsed.name, true)
   }
 
-  const userRoot = userSkillsRoot(profileDir)
   for (const name of Object.keys(legacyToggles)) {
     if (SYSTEM_SKILLS.has(name) || INTERNAL_BUNDLED_SKILLS.has(name)) continue
     // 只有当前仍存在、且不是系统/内部技能的普通内置条目参与复制。
@@ -106,10 +132,19 @@ export async function ensureSkillCenterMigration(profileDir: string): Promise<st
 
     const existing = await findEntry(userRoot, name)
     if (existing) {
+      if (skippedInvalidLocalNames.has(name)) continue
       if (!labeled.has(name)) {
+        let contentDigest: string
+        try {
+          contentDigest = skillEntryDigestStrict(existing)
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          warnings.push(`跳过不安全的本地技能 ${name}：${reason}`)
+          continue
+        }
         writeSkillLocalEntry(profileDir, name, {
           origin: { kind: 'created' },
-          contentDigest: skillEntryDigest(existing),
+          contentDigest,
         })
         labeled.add(name)
       }

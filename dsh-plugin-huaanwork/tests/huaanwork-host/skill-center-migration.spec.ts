@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, test } from 'vitest'
-import { createSkillDigest, readSkillDirectory } from '@huaanwork/skill-format'
+import { createSkillDigest, readSkillDirectory, writeSkillDirectory } from '@huaanwork/skill-format'
 import { findBundledEntry } from '../../src/huaanwork-guardrails/skills.ts'
 import { ensureSkillCenterMigration } from '../../src/huaanwork-host/skill-center-migration.ts'
 import {
@@ -204,5 +204,128 @@ describe('ensureSkillCenterMigration', () => {
       origin: { kind: 'created' },
       contentDigest: createSkillDigest([{ path: 'SKILL.md', data: readFileSync(flatPath) }]),
     })
+  })
+
+  test('skips non-kebab frontmatter names with a warning without aborting migration', async () => {
+    const profile = makeProfile()
+    writeLocalSkill(profile, 'legacy', '旧本地技能')
+    const badDir = join(profile, 'skills', 'bad-dir')
+    mkdirSync(badDir, { recursive: true })
+    writeFileSync(
+      join(badDir, 'SKILL.md'),
+      '---\nname: Bad_Name\ndescription: 非法命名本地技能\n---\n\n内容\n',
+      'utf8',
+    )
+
+    const warnings = await ensureSkillCenterMigration(profile)
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0]!, /Bad_Name/)
+    assert.equal(readUserSkillToggles(profile).legacy, true)
+    assert.equal(readUserSkillToggles(profile).Bad_Name, undefined)
+    const state = readSkillLocalState(profile)
+    assert.equal(state.migration?.version, 1)
+    assert.equal(state.skills.legacy?.origin.kind, 'created')
+    assert.equal(state.skills.Bad_Name, undefined)
+    assert.deepEqual(state.migrationWarnings, warnings)
+  })
+
+  test('skips user skill directories with unsafe trees (symlinks) and never persists a partial SKILL.md digest', async () => {
+    const profile = makeProfile()
+    writeLocalSkill(profile, 'legacy', '旧本地技能')
+    writeLocalSkill(profile, 'bad-sym', '带符号链接的本地技能')
+    writeLocalSkill(profile, 'pptx', '同名且含符号链接的本地技能')
+    const target = join(profile, 'outside.txt')
+    writeFileSync(target, 'outside', 'utf8')
+    symlinkSync(target, join(profile, 'skills', 'bad-sym', 'link.txt'))
+    symlinkSync(target, join(profile, 'skills', 'pptx', 'link.txt'))
+    writeFileSync(join(profile, 'skill-toggles.json'), JSON.stringify({ pptx: true }), 'utf8')
+
+    const warnings = await ensureSkillCenterMigration(profile)
+    assert.equal(warnings.length, 2)
+    assert.ok(warnings.some((w) => w.includes('bad-sym')))
+    assert.ok(warnings.some((w) => w.includes('pptx')))
+
+    const state = readSkillLocalState(profile)
+    assert.equal(state.migration?.version, 1)
+    assert.equal(state.skills.legacy?.origin.kind, 'created')
+    assert.equal(state.skills['bad-sym'], undefined)
+    assert.equal(state.skills.pptx, undefined)
+    assert.equal(readUserSkillToggles(profile).legacy, true)
+    assert.equal(readUserSkillToggles(profile)['bad-sym'], undefined)
+    assert.equal(readUserSkillToggles(profile).pptx, undefined)
+  })
+
+  test('does not copy or enable explicit false in legacy skill-toggles.json and keeps post-migration disables across restarts', async () => {
+    const profile = makeProfile()
+    writeFileSync(join(profile, 'skill-toggles.json'), JSON.stringify({ pdf: false, pptx: true }), 'utf8')
+
+    const firstWarnings = await ensureSkillCenterMigration(profile)
+    assert.deepEqual(firstWarnings, [])
+    assert.equal(existsSync(join(profile, 'skills', 'pdf')), false)
+    assert.equal(readUserSkillToggles(profile).pdf, undefined)
+    assert.equal(readSkillLocalState(profile).skills.pdf, undefined)
+    assert.equal(readUserSkillToggles(profile).pptx, true)
+    assert.equal(readSkillLocalState(profile).skills.pptx?.origin.kind, 'bundled')
+
+    setUserSkillToggle(profile, 'pptx', false)
+    const completedAt = readSkillLocalState(profile).migration?.completedAt
+
+    const rebootWarnings = await ensureSkillCenterMigration(profile)
+    assert.deepEqual(rebootWarnings, [])
+    assert.equal(readUserSkillToggles(profile).pptx, undefined)
+    assert.equal(readUserSkillToggles(profile).pdf, undefined)
+    assert.equal(existsSync(join(profile, 'skills', 'pdf')), false)
+    assert.equal(readSkillLocalState(profile).migration?.completedAt, completedAt)
+  })
+
+  test('re-entrant bundled copy recovery completes cleanly without false same-name conflict warnings', async () => {
+    const bundled = findBundledEntry('pdf')
+    assert.ok(bundled)
+    const bundledFiles = readSkillDirectory(dirname(bundled.path))
+    const bundledDigest = createSkillDigest(bundledFiles)
+
+    // 情况 1: 写入 origin='bundled' 后、复制目录前崩溃（无完成标记、无 user-skill-toggles.json）
+    const crashBeforeCopy = makeProfile()
+    writeFileSync(join(crashBeforeCopy, 'skill-toggles.json'), JSON.stringify({ pdf: true }), 'utf8')
+    writeFileSync(
+      skillLocalStatePath(crashBeforeCopy),
+      JSON.stringify({
+        schemaVersion: 1,
+        skills: {
+          pdf: { origin: { kind: 'bundled' }, contentDigest: bundledDigest },
+        },
+      }),
+      'utf8',
+    )
+
+    const warningsBeforeCopy = await ensureSkillCenterMigration(crashBeforeCopy)
+    assert.deepEqual(warningsBeforeCopy, [])
+    assert.equal(existsSync(join(crashBeforeCopy, 'skills', 'pdf', 'SKILL.md')), true)
+    assert.equal(readUserSkillToggles(crashBeforeCopy).pdf, true)
+    const stateBeforeCopy = readSkillLocalState(crashBeforeCopy)
+    assert.equal(stateBeforeCopy.skills.pdf?.origin.kind, 'bundled')
+    assert.equal(stateBeforeCopy.migration?.version, 1)
+
+    // 情况 2: origin='bundled' 与目录均已落盘，但未写 user-skill-toggles.json 与完成标记前崩溃
+    const crashAfterCopy = makeProfile()
+    writeFileSync(join(crashAfterCopy, 'skill-toggles.json'), JSON.stringify({ pdf: true }), 'utf8')
+    await writeSkillDirectory(join(crashAfterCopy, 'skills', 'pdf'), bundledFiles)
+    writeFileSync(
+      skillLocalStatePath(crashAfterCopy),
+      JSON.stringify({
+        schemaVersion: 1,
+        skills: {
+          pdf: { origin: { kind: 'bundled' }, contentDigest: bundledDigest },
+        },
+      }),
+      'utf8',
+    )
+
+    const warningsAfterCopy = await ensureSkillCenterMigration(crashAfterCopy)
+    assert.deepEqual(warningsAfterCopy, [])
+    assert.equal(readUserSkillToggles(crashAfterCopy).pdf, true)
+    const stateAfterCopy = readSkillLocalState(crashAfterCopy)
+    assert.equal(stateAfterCopy.skills.pdf?.origin.kind, 'bundled')
+    assert.equal(stateAfterCopy.migration?.version, 1)
   })
 })
