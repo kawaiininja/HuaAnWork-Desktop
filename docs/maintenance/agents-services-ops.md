@@ -1,3 +1,15 @@
+> **已退役（2026-11-14）——本文件仅作历史档案，所有路径与命令均不可再执行。**
+> 本文描述的「四服务局域网常驻」部署形态已退役：typo-check / code-review / task-orch 三个智能体服务由本地智能体包
+> （`dsh-plugin-huaanwork/agent-packages/{typo-check,code-review,task-orch}/`）取代，目录服务由仓内 TypeScript 版
+> `agent-catalog-server/`（智能体包广场，M1/M2）取代。文中引用的源目录均已物理删除：三个智能体目录
+> （备份与延后删除裁定过程见 `docs/evidence/2026-11-11-three-agent-packages.md` Task 13）与独立目录服务目录
+> `agent-catalog-server`（2026-11-14 删除；三条生产条目在 `agent-catalog-server/tests/fixtures/entries/` 有逐字节一致副本）；
+> `cn.huaanwork.*` LaunchAgents 已不存在。桌面端旧指向已于 2026-11-14 清空（`agents_host`/`agents_port` 置空、
+> `catalog:*` 启用键移除；清理时的回滚备份 `huaanwork-settings.json.bak-20261114-cleanup` 与
+> `agents-enabled.json.bak-20261114-cleanup` 已于同日按 owner 决定删除）。下文的端口分配、unit 模板、口令纪律与运维命令仅作历史记录，
+> **不要照此执行**；现行目录服务部署与上架以 `docs/huaanwork-agent-packages-m2.md` 与
+> `docs/huaanwork-three-agent-packages-release.md` 为准。
+
 # 智能体服务运维手册(launchd 常驻)
 
 > 适用范围:本机(192.168.3.109)同时作为「公用机」运行四个智能体服务,
