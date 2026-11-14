@@ -31,7 +31,7 @@ function makeHome(): string {
 }
 
 beforeEach(() => {
-  // 隔离外部技能根:未设置时 externalSkillsRoot 回落 ~/.agents/skills(机器相关)。
+  // 隔离外部技能根:证明未启用/外部条目不参与解析(不再有扫描回退)。
   prevAgentsHome = process.env.DSH_AGENTS_HOME
   process.env.DSH_AGENTS_HOME = mkdtempSync(join(tmpdir(), 'hw-fake-agents-'))
   homes.push(process.env.DSH_AGENTS_HOME)
