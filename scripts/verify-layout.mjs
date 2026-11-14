@@ -38,10 +38,11 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'update-server',
   'packages/catalog-signing',
   'packages/agent-package-format',
+  'packages/huaanwork-skill-format',
   'agent-catalog-server',
   'agent-catalog-admin',
 ])) {
-  fail('the root Yarn workspace must contain only the HuaAnWork desktop, community-fabric, community-market, market-server, update-server, catalog-signing, agent-package-format, agent-catalog-server, and agent-catalog-admin packages')
+  fail('the root Yarn workspace must contain only the HuaAnWork desktop, community-fabric, community-market, market-server, update-server, catalog-signing, agent-package-format, skill-format, agent-catalog-server, and agent-catalog-admin packages')
 }
 for (const [name, manifest] of [
   ['dsh-plugin-huaanwork', huaanworkPlugin],

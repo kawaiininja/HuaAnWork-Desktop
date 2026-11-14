@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "vitest";
 
+import { parseSkillMarkdown, serializeSkillMarkdown } from "@huaanwork/skill-format/markdown";
+
 import type { AgentPackageSubagentRequest } from "../../src/huaanwork-host/agent-package/types.ts";
 import * as childSessions from "../../src/huaanwork-host/child-sessions.ts";
 import {
@@ -22,7 +24,7 @@ import {
 import { apply as applyLimits } from "../../src/huaanwork-guardrails/limits.ts";
 import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
-import { SYSTEM_SKILLS, apply as applySkills, bundledSkillDir, exploreAllowList, getBundledSkill, listBundledSkills, parentVisibleExploreTranscript, parseSkillMarkdown, readSkillToggles, registerBundledSkill, scanBundledSkillEntries, serializeSkillMarkdown, setBundledSkillRegistrar, setSkillToggle, shellToolName, testFixAllowList } from "../../src/huaanwork-guardrails/skills.ts";
+import { SYSTEM_SKILLS, apply as applySkills, bundledSkillDir, exploreAllowList, getBundledSkill, listBundledSkills, parentVisibleExploreTranscript, readSkillToggles, registerBundledSkill, scanBundledSkillEntries, setBundledSkillRegistrar, setSkillToggle, shellToolName, testFixAllowList } from "../../src/huaanwork-guardrails/skills.ts";
 
 // 这些插件把 registrar / 子会话登记放在模块级或进程级全局:用例之间要复位,
 // 免得多份 harness 的 ctx 互相串(今天靠唯一 id 侥幸,不该依赖)。

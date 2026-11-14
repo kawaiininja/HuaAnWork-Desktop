@@ -4,7 +4,7 @@ import { connect, createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
-import { parseSkillMarkdown } from '../../huaanwork-guardrails/skills.ts'
+import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
 import { resolveInvocableSkill } from '../skill-invoke.ts'
 
 import type { AgentPackageManifest, AgentPackageTurnRuntime } from './types.ts'

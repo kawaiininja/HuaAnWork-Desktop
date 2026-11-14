@@ -1,6 +1,8 @@
 import { dirname } from "node:path";
 
-import { SYSTEM_SKILLS, SKILL_NAME_RE, bundledSkillDir, readSkillToggles } from "../huaanwork-guardrails/skills.ts";
+import { SKILL_NAME_RE } from "@huaanwork/skill-format/markdown";
+
+import { SYSTEM_SKILLS, bundledSkillDir, readSkillToggles } from "../huaanwork-guardrails/skills.ts";
 import type { SkillDetail } from "../client-huaanwork/rpc-types.ts";
 
 import { externalSkillsRoot, findEntry, getSkill, userSkillsRoot } from "./skills-host.ts";

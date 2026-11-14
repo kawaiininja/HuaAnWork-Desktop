@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
+import { SKILL_NAME_RE, parseSkillMarkdown } from "@huaanwork/skill-format/markdown";
+import type { ParsedSkillMarkdown } from "@huaanwork/skill-format/markdown";
 import { forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
 import {
   AGENT_PACKAGE_CHILD_TOOLS,
@@ -614,71 +616,6 @@ function stringArg(value: unknown, key: string): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
   const candidate = (value as Record<string, unknown>)[key];
   return typeof candidate === "string" ? candidate : "";
-}
-
-/** dsh 的技能名语法（与 @deepseek-ai/dsh-skill 的 SKILL_NAME 一致）。 */
-export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
-const MANAGED_KEYS = new Set(["name", "description", "whenToUse", "disable-model-invocation", "user-invocable"]);
-
-export type ParsedSkillMarkdown = {
-  name: string;
-  description: string;
-  whenToUse?: string;
-  disableModelInvocation?: boolean;
-  userInvocable?: boolean;
-  content: string;
-  /** 非管理字段的 frontmatter 原始行（含 metadata 等多行块），按原顺序保留，编辑时不得丢弃。 */
-  extraLines: string[];
-};
-
-function parseFrontmatterBool(value: string): boolean | undefined {
-  switch (value.trim().toLowerCase()) {
-    case "true": case "1": case "yes": case "on": return true;
-    case "false": case "0": case "no": case "off": return false;
-    default: return undefined;
-  }
-}
-
-export function parseSkillMarkdown(raw: string): ParsedSkillMarkdown {
-  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
-  const body = (match?.[2] ?? raw).trim();
-  const known = new Map<string, string>();
-  const extraLines: string[] = [];
-  for (const line of (match?.[1] ?? "").split("\n")) {
-    // 缩进行是多行值（如 metadata 块）的延续，原样保留
-    if (/^[ \t]/.test(line)) { extraLines.push(line); continue; }
-    const index = line.indexOf(":");
-    if (index === -1) { if (line.trim()) extraLines.push(line); continue; }
-    const key = line.slice(0, index).trim();
-    const value = line.slice(index + 1).trim();
-    if (MANAGED_KEYS.has(key)) known.set(key, value);
-    else extraLines.push(line);
-  }
-  const disableModelInvocation = known.has("disable-model-invocation")
-    ? parseFrontmatterBool(known.get("disable-model-invocation")!)
-    : undefined;
-  const userInvocable = known.has("user-invocable")
-    ? parseFrontmatterBool(known.get("user-invocable")!)
-    : undefined;
-  return {
-    name: known.get("name") ?? "",
-    description: known.get("description") ?? "",
-    ...(known.get("whenToUse") ? { whenToUse: known.get("whenToUse")! } : {}),
-    ...(disableModelInvocation !== undefined ? { disableModelInvocation } : {}),
-    ...(userInvocable !== undefined ? { userInvocable } : {}),
-    content: body,
-    extraLines,
-  };
-}
-
-export function serializeSkillMarkdown(skill: ParsedSkillMarkdown): string {
-  const lines = [`name: ${skill.name}`, `description: ${skill.description}`];
-  if (skill.whenToUse) lines.push(`whenToUse: ${skill.whenToUse}`);
-  if (skill.disableModelInvocation !== undefined) lines.push(`disable-model-invocation: ${String(skill.disableModelInvocation)}`);
-  if (skill.userInvocable !== undefined) lines.push(`user-invocable: ${String(skill.userInvocable)}`);
-  lines.push(...skill.extraLines);
-  return `---\n${lines.join("\n")}\n---\n\n${skill.content.trim()}\n`;
 }
 
 function resolveBundledSkillsRoot(): string {

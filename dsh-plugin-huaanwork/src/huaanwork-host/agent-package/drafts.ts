@@ -4,7 +4,8 @@ import { basename, join } from 'node:path'
 
 import { AGENT_NAME_RE } from '@huaanwork/policy/agent-catalog'
 
-import { parseSkillMarkdown } from '../../huaanwork-guardrails/skills.ts'
+import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
+
 import { resolveInvocableSkill } from '../skill-invoke.ts'
 import { parseAgentPackageManifest } from './manifest.ts'
 import { resetLocalAgentPackagePublication } from './catalog-publish.ts'

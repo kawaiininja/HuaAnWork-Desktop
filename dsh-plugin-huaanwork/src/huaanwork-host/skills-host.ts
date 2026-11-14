@@ -4,16 +4,18 @@ import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
 import {
-  INTERNAL_BUNDLED_SKILLS,
   SKILL_NAME_RE,
+  parseSkillMarkdown,
+  serializeSkillMarkdown,
+} from '@huaanwork/skill-format/markdown'
+import {
+  INTERNAL_BUNDLED_SKILLS,
   SYSTEM_SKILLS,
   getBundledSkill,
   getBundledSkillRegistrar,
   listBundledSkills,
-  parseSkillMarkdown,
   readSkillToggles,
   registerBundledSkill,
-  serializeSkillMarkdown,
   setSkillToggle,
 } from '../huaanwork-guardrails/skills.ts'
 import type {

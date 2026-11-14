@@ -18,7 +18,8 @@
   },
   "dependencies": {
     "@huaanwork/agent-package-format": "workspace:*",
-    "@huaanwork/catalog-signing": "workspace:*"
+    "@huaanwork/catalog-signing": "workspace:*",
+    "@huaanwork/skill-format": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",

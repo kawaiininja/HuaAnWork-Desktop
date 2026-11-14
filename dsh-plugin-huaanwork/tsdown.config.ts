@@ -71,6 +71,7 @@ export default defineConfig([
         '@huaanwork/agent-package-format',
         '@huaanwork/catalog-signing',
         '@huaanwork/policy',
+        '@huaanwork/skill-format',
       ],
     },
   },
