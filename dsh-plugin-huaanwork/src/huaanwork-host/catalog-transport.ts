@@ -121,6 +121,12 @@ export interface CatalogTransportOptions {
 
 export interface CatalogTransport {
   requestJson(url: string, token: string | undefined, init: RequestInit): Promise<CatalogJsonResponse>
+  /**
+   * Like `requestJson`, but hands back the parsed body for EVERY non-redirect
+   * response (including 4xx). Upload callers need the server's structured
+   * conflict code; redirects and transport failures still throw.
+   */
+  requestJsonResult(url: string, token: string | undefined, init: RequestInit): Promise<CatalogJsonResponse>
   requestBuffer(
     url: string,
     token: string | undefined,
@@ -157,6 +163,19 @@ export function createCatalogTransport(options: CatalogTransportOptions = {}): C
     return response
   }
 
+  async function fetchAnyResponse(url: string, token: string | undefined, init: RequestInit): Promise<Response> {
+    let response: Response
+    try {
+      response = await fetchFn(url, buildCatalogInit(init, token, timeoutMs))
+    } catch {
+      throw makeError(CATALOG_UNREACHABLE_ERROR, 'unreachable')
+    }
+    if (isRedirectStatus(response.status)) {
+      throw makeError('目录请求被重定向，已拒绝', 'redirect', response.status)
+    }
+    return response
+  }
+
   return {
     async requestJson(url, token, init) {
       const response = await fetchResponse(url, token, init)
@@ -166,6 +185,20 @@ export function createCatalogTransport(options: CatalogTransportOptions = {}): C
       } catch {
         throw makeError('目录响应不是合法 JSON', 'invalid-response', response.status)
       }
+    },
+
+    async requestJsonResult(url, token, init) {
+      const response = await fetchAnyResponse(url, token, init)
+      const body = await readCappedCatalogBuffer(response, MAX_CATALOG_JSON_BYTES, '目录响应超过 1 MiB 上限', makeError)
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(body.toString('utf8'))
+      } catch {
+        if (response.ok) throw makeError('目录响应不是合法 JSON', 'invalid-response', response.status)
+        // An error body that is not JSON still carries the status.
+        parsed = undefined
+      }
+      return { status: response.status, body: parsed }
     },
 
     async requestBuffer(url, token, init, cap, tooLargeMessage) {

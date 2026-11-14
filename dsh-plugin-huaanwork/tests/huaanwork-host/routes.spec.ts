@@ -26,6 +26,7 @@ import { buildSkillArchive, inspectSkillArchive } from '@huaanwork/skill-format'
 import {
   configureSkillCatalog,
   resetSkillCatalogForTests,
+  SkillCatalogClientError,
   type SkillCatalogClient,
 } from '../../src/huaanwork-host/skill-catalog-client.ts'
 
@@ -36,7 +37,7 @@ const ALL_METHODS = [
   'settings.get', 'settings.set',
   'auth.status', 'auth.register', 'auth.login', 'auth.logout', 'auth.changePassword',
   'plugin.add', 'plugin.remove', 'plugin.list',
-  'skill.list', 'skill.centerList', 'skill.mineList', 'skill.invocableList', 'skill.download', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
+  'skill.list', 'skill.centerList', 'skill.mineList', 'skill.invocableList', 'skill.download', 'skill.upload', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
   'agent.list', 'agent.get', 'agent.refresh', 'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
   'agent.packageList', 'agent.packageDetail', 'agent.packageSetEnabled', 'agent.invocableList',
   'agent.packagePublish', 'agent.packagePublishStatus', 'agent.packageRequestDelist', 'agent.packageInstall', 'agent.packageUpdate', 'agent.packageRemove', 'agent.packageRefresh',
@@ -47,10 +48,10 @@ const ALL_METHODS = [
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('76 个方法全部登记,无遗漏无重复', () => {
+  test('77 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(76)
+    expect(ROUTE_TABLE).toHaveLength(77)
   })
 
   test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
@@ -121,7 +122,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 76 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 77 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -151,6 +152,7 @@ describe('ROUTE_TABLE registry', () => {
       'skill.mineList',
       'skill.invocableList',
       'skill.download',
+      'skill.upload',
       'skill.get',
       'agent.list',
       'agent.get',
@@ -207,7 +209,7 @@ describe('ROUTE_TABLE registry', () => {
       'subagent.list',
       'subagent.cancel',
     ])
-    expect(implemented).toHaveLength(76)
+    expect(implemented).toHaveLength(77)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -1123,6 +1125,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
         ...(overrides.digest === undefined ? {} : { digest: overrides.digest }),
       }),
       downloadSkillArchive: async () => overrides.archive ?? archive,
+      publishSkill: async () => { throw new Error('publishSkill is not used in this test') },
     })
     configureSkillCatalog({
       readSettings: () => ({
@@ -1166,6 +1169,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
           listSharedSkills: async () => [],
           getSkillRevision: async () => ({ ...summary, digest: otherInspected.digest }),
           downloadSkillArchive: async () => otherArchive,
+          publishSkill: async () => { throw new Error('publishSkill is not used in this test') },
         },
       })
       const mismatchedName = await fetch(`${baseUrl}/huaanwork/skill/get?name=demo&source=catalog&revision=1`, authed())
@@ -1215,6 +1219,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
           updatedAt: '2026-11-14T00:00:00.000Z',
         }),
         downloadSkillArchive: async () => archive,
+        publishSkill: async () => { throw new Error('publishSkill is not used in this test') },
       },
     })
     try {
@@ -1248,6 +1253,82 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
       // The shared profile must not keep this download: later cases assert that
       // the bundled pdf has no local copy.
       rmSync(join(profileTempDir, 'skills', 'pdf'), { recursive: true, force: true })
+      resetSkillCatalogForTests()
+    }
+  })
+
+  test('skill 域:upload 只接受 name,冲突映射 409', async () => {
+    const makeClient = (fail?: 'skill-name-conflict') => ({
+      listSharedSkills: async () => [],
+      getSkillRevision: async () => { throw new Error('unused') },
+      downloadSkillArchive: async () => Buffer.alloc(0),
+      publishSkill: async (name: string, archive: Buffer) => {
+        if (fail !== undefined) throw new SkillCatalogClientError('冲突', fail, 409)
+        return {
+          skill: {
+            name,
+            revision: 1,
+            description: 'demo',
+            publisher: 'alice',
+            digest: `sha256:${'a'.repeat(64)}`,
+            size: archive.byteLength,
+            updatedAt: '2026-11-14T00:00:00.000Z',
+          },
+          created: true,
+        }
+      },
+    })
+    configureSkillCatalog({
+      readSettings: () => ({
+        agents_host: '127.0.0.1',
+        agents_port: 18080,
+        agents_catalog_token: '',
+        agents_skill_upload_token: 'upload-token',
+      }),
+      client: makeClient(),
+    })
+    try {
+      mkdirSync(join(profileTempDir, 'skills', 'up-load'), { recursive: true })
+      writeFileSync(
+        join(profileTempDir, 'skills', 'up-load', 'SKILL.md'),
+        '---\nname: up-load\ndescription: up-load\n---\n\n正文\n',
+        'utf8',
+      )
+      const post = (body: unknown) => fetch(`${baseUrl}/huaanwork/skill/upload`, authed({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }))
+      expect((await post({ name: 'up-load', path: '/etc/passwd' })).status).toBe(400)
+      expect((await post({ name: 'up-load', url: 'http://x' })).status).toBe(400)
+      expect((await post({})).status).toBe(400)
+
+      const ok = await post({ name: 'up-load' })
+      expect(ok.status).toBe(200)
+      expect(await ok.json()).toMatchObject({ created: true, skill: { name: 'up-load', publishedRevision: 1 } })
+
+      configureSkillCatalog({
+        readSettings: () => ({
+          agents_host: '127.0.0.1',
+          agents_port: 18080,
+          agents_catalog_token: '',
+          agents_skill_upload_token: 'upload-token',
+        }),
+        client: makeClient('skill-name-conflict'),
+      })
+      // A second local skill that has never been published.
+      mkdirSync(join(profileTempDir, 'skills', 'up-conflict'), { recursive: true })
+      writeFileSync(
+        join(profileTempDir, 'skills', 'up-conflict', 'SKILL.md'),
+        '---\nname: up-conflict\ndescription: up-conflict\n---\n\n正文\n',
+        'utf8',
+      )
+      const conflict = await post({ name: 'up-conflict' })
+      expect(conflict.status).toBe(409)
+      expect((await conflict.json()).error.code).toBe('skill-name-conflict')
+    } finally {
+      rmSync(join(profileTempDir, 'skills', 'up-load'), { recursive: true, force: true })
+      rmSync(join(profileTempDir, 'skills', 'up-conflict'), { recursive: true, force: true })
       resetSkillCatalogForTests()
     }
   })

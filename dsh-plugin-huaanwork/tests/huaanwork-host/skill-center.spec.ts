@@ -72,6 +72,7 @@ function fakeClient(items: SkillRevisionSummary[] | (() => Promise<SkillRevision
     listSharedSkills: typeof items === 'function' ? items : async () => items,
     getSkillRevision: async (name, revision) => catalogItem(name, revision, digestA),
     downloadSkillArchive: async () => Buffer.alloc(0),
+    publishSkill: async () => { throw new Error('publishSkill is not used in this test') },
   }
 }
 

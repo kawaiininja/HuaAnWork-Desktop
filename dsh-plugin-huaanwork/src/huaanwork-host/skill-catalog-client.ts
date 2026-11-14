@@ -35,7 +35,15 @@ export type SkillCatalogSettings = Pick<
   'agents_host' | 'agents_port' | 'agents_catalog_token' | 'agents_skill_upload_token'
 >
 
-export type SkillCatalogErrorCode = CatalogTransportErrorCode | 'not-found' | 'page-limit'
+export type SkillCatalogErrorCode =
+  | CatalogTransportErrorCode
+  | 'not-found'
+  | 'page-limit'
+  | 'skill-already-exists'
+  | 'skill-name-conflict'
+  | 'skill-revision-conflict'
+  | 'invalid-skill'
+  | 'skill-too-large'
 
 export class SkillCatalogClientError extends Error {
   readonly code: SkillCatalogErrorCode
@@ -53,6 +61,11 @@ export interface SkillCatalogClient {
   listSharedSkills(): Promise<SkillRevisionSummary[]>
   getSkillRevision(name: string, revision: number): Promise<SkillRevisionSummary>
   downloadSkillArchive(name: string, revision: number): Promise<Buffer>
+  publishSkill(
+    name: string,
+    archive: Buffer,
+    expectedRevision: number | undefined,
+  ): Promise<{ skill: SkillRevisionSummary; created: boolean }>
 }
 
 export type CreateSkillCatalogClientOptions = {
@@ -191,6 +204,54 @@ export function createSkillCatalogClient(options: CreateSkillCatalogClientOption
         }
         throw cause
       }
+    },
+
+    async publishSkill(name, archive, expectedRevision) {
+      const { rootUrl } = catalogRoot()
+      const settings = options.readSettings()
+      const uploadToken = optionalCatalogToken(settings.agents_skill_upload_token)
+      if (uploadToken === undefined) {
+        throw new SkillCatalogClientError('技能上传口令未配置，无法上传', 'auth')
+      }
+      const headers: Record<string, string> = { 'content-type': 'application/gzip' }
+      if (expectedRevision !== undefined) {
+        headers['x-skill-expected-revision'] = String(expectedRevision)
+      }
+      const { status, body } = await transport.requestJsonResult(
+        `${rootUrl}/v1/skills/${encodeURIComponent(name)}`,
+        uploadToken,
+        { method: 'POST', headers, body: new Uint8Array(archive) },
+      )
+      if (status === 401 || status === 403) {
+        throw new SkillCatalogClientError('技能上传口令错误或权限不足', 'auth', status)
+      }
+      if (status === 409) {
+        const code = isRecord(body) && typeof body.code === 'string' ? body.code : undefined
+        const known = code === 'skill-already-exists'
+          || code === 'skill-name-conflict'
+          || code === 'skill-revision-conflict'
+        throw new SkillCatalogClientError(
+          isRecord(body) && typeof body.error === 'string' ? body.error : '技能发布冲突',
+          known ? code : 'http',
+          status,
+        )
+      }
+      if (status === 400) {
+        const code = isRecord(body) && (body.code === 'invalid-skill' || body.code === 'skill-too-large')
+          ? body.code
+          : 'invalid-skill'
+        throw new SkillCatalogClientError(
+          isRecord(body) && typeof body.error === 'string' ? body.error : '技能归档无效',
+          code,
+          status,
+        )
+      }
+      if (status !== 200 && status !== 201) {
+        throw new SkillCatalogClientError(`目录请求失败（HTTP ${status}）`, 'http', status)
+      }
+      const skillRaw = isRecord(body) ? body.skill : undefined
+      const created = isRecord(body) && body.created === true
+      return { skill: normalizeSummary(skillRaw), created }
     },
   }
 }

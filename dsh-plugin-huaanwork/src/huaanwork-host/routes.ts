@@ -57,6 +57,7 @@ import {
   downloadSkillToMine,
   type DownloadSkillRequest,
 } from './skill-catalog-download.ts'
+import { SkillUploadError, uploadLocalSkill } from './skill-catalog-upload.ts'
 import {
   RUNS_LIMIT,
   RUN_STATUSES,
@@ -920,6 +921,32 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         if (error instanceof SkillDownloadError) {
           const status = error.code === 'local-skill-conflict' ? 409 : 400
           throw new RouteError(status, error.code, error.message)
+        }
+        throw error
+      }
+    }),
+  },
+  {
+    method: 'skill.upload',
+    http: 'POST',
+    path: '/huaanwork/skill/upload',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      for (const forbidden of ['path', 'url']) {
+        if (forbidden in body) {
+          throw new RouteError(400, 'bad-request', `skill.upload does not accept ${forbidden}`)
+        }
+      }
+      const name = typeof body.name === 'string' ? body.name : ''
+      if (!name) throw new RouteError(400, 'bad-request', 'skill.upload requires params.name')
+      try {
+        return await uploadLocalSkill(ctx.profileDir, name)
+      } catch (error) {
+        if (error instanceof SkillUploadError) {
+          const conflict = error.code === 'skill-already-exists'
+            || error.code === 'skill-name-conflict'
+            || error.code === 'skill-revision-conflict'
+          throw new RouteError(conflict ? 409 : 400, error.code, error.message)
         }
         throw error
       }

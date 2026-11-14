@@ -65,6 +65,7 @@ function bindFakeClient(options: {
       updatedAt: '2026-11-14T00:00:00.000Z',
     }),
     downloadSkillArchive: async () => options.archive,
+    publishSkill: async () => { throw new Error('publishSkill is not used in this test') },
   }
   configureSkillCatalog({
     readSettings: () => ({
@@ -301,6 +302,9 @@ test('leaves no staging artifacts behind when the transfer fails', async () => {
     }),
     downloadSkillArchive: async () => {
       throw new Error('network down')
+    },
+    publishSkill: async () => {
+      throw new Error('publishSkill is not used in this test')
     },
   }
   configureSkillCatalog({
