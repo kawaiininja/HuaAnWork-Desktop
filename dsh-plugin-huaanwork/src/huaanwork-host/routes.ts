@@ -48,6 +48,10 @@ import {
   type SkillUpdateInput,
 } from './skills-host.ts'
 import { INTERNAL_BUNDLED_SKILLS, listBundledSkills, readSkillToggles, SYSTEM_SKILLS } from '../huaanwork-guardrails/skills.ts'
+import { inspectSkillArchive } from '@huaanwork/skill-format'
+import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
+import { listInvocableSkills, listSkillCenter } from './skill-center.ts'
+import { getSkillCatalogClient } from './skill-catalog-client.ts'
 import {
   RUNS_LIMIT,
   RUN_STATUSES,
@@ -820,10 +824,36 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const name = queryParam(req, 'name')
       if (!name) throw new Error('skill.get requires params.name')
       const sourceParam = queryParam(req, 'source')
+      // 中心共享条目的只读预览:按精确 revision 下载归档并校验,不写本地目录。
+      if (sourceParam === 'catalog') {
+        const revisionRaw = queryParam(req, 'revision')
+        const revision = revisionRaw !== undefined && /^[1-9]\d*$/u.test(revisionRaw) ? Number(revisionRaw) : undefined
+        if (revision === undefined) {
+          throw new RouteError(400, 'bad-request', 'skill.get source=catalog requires a positive integer revision')
+        }
+        const client = getSkillCatalogClient()
+        const summary = await client.getSkillRevision(name, revision)
+        const archive = await client.downloadSkillArchive(name, revision)
+        const inspected = await inspectSkillArchive(archive)
+        if (inspected.name !== name) throw new Error(`skill ${name} archive does not match its name`)
+        if (inspected.digest !== summary.digest) throw new Error(`skill ${name} archive digest does not match the catalog`)
+        const parsed = parseSkillMarkdown(inspected.skillMarkdown)
+        return {
+          skill: {
+            name: parsed.name,
+            description: parsed.description,
+            source: 'catalog' as const,
+            ...(parsed.whenToUse ? { whenToUse: parsed.whenToUse } : {}),
+            ...(parsed.disableModelInvocation !== undefined ? { disableModelInvocation: parsed.disableModelInvocation } : {}),
+            ...(parsed.userInvocable !== undefined ? { userInvocable: parsed.userInvocable } : {}),
+            content: parsed.content,
+          },
+        }
+      }
       let source: SkillSourceFilter | undefined
       if (sourceParam !== undefined) {
         if (sourceParam !== 'bundled' && sourceParam !== 'user') {
-          throw new Error(`skill.get source must be one of bundled | user, got ${sourceParam}`)
+          throw new Error(`skill.get source must be one of bundled | user | catalog, got ${sourceParam}`)
         }
         source = sourceParam
       }
@@ -832,6 +862,24 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { skill }
     }),
   }, // Task 10
+  {
+    method: 'skill.centerList',
+    http: 'GET',
+    path: '/huaanwork/skill/center/list',
+    handler: storeRoute(async (_req, ctx) => listSkillCenter(ctx.profileDir)),
+  },
+  {
+    method: 'skill.mineList',
+    http: 'GET',
+    path: '/huaanwork/skill/mine/list',
+    handler: storeRoute(async (_req, ctx) => ({ skills: await listUserSkills(ctx.profileDir) })),
+  },
+  {
+    method: 'skill.invocableList',
+    http: 'GET',
+    path: '/huaanwork/skill/invocable/list',
+    handler: storeRoute(async (_req, ctx) => ({ skills: await listInvocableSkills(ctx.profileDir) })),
+  },
   {
     method: 'skill.create',
     http: 'POST',

@@ -30,7 +30,7 @@ const ALL_METHODS = [
   'settings.get', 'settings.set',
   'auth.status', 'auth.register', 'auth.login', 'auth.logout', 'auth.changePassword',
   'plugin.add', 'plugin.remove', 'plugin.list',
-  'skill.list', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
+  'skill.list', 'skill.centerList', 'skill.mineList', 'skill.invocableList', 'skill.get', 'skill.create', 'skill.update', 'skill.remove', 'skill.importPreview', 'skill.import', 'skill.setEnabled',
   'agent.list', 'agent.get', 'agent.refresh', 'agent.setEnabled', 'agent.addEndpoint', 'agent.removeEndpoint',
   'agent.packageList', 'agent.packageDetail', 'agent.packageSetEnabled', 'agent.invocableList',
   'agent.packagePublish', 'agent.packagePublishStatus', 'agent.packageRequestDelist', 'agent.packageInstall', 'agent.packageUpdate', 'agent.packageRemove', 'agent.packageRefresh',
@@ -41,10 +41,10 @@ const ALL_METHODS = [
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('72 个方法全部登记,无遗漏无重复', () => {
+  test('75 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(72)
+    expect(ROUTE_TABLE).toHaveLength(75)
   })
 
   test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
@@ -115,7 +115,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 72 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 75 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -141,6 +141,9 @@ describe('ROUTE_TABLE registry', () => {
       // Task 10:M4 域读路径 + projects/tasks 低复杂度写
       'plugin.list',
       'skill.list',
+      'skill.centerList',
+      'skill.mineList',
+      'skill.invocableList',
       'skill.get',
       'agent.list',
       'agent.get',
@@ -197,7 +200,7 @@ describe('ROUTE_TABLE registry', () => {
       'subagent.list',
       'subagent.cancel',
     ])
-    expect(implemented).toHaveLength(72)
+    expect(implemented).toHaveLength(75)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue
@@ -1073,7 +1076,7 @@ describe('M4 域读路径路由(Task 10 真实化)', () => {
     const externalSource = await fetch(`${baseUrl}/huaanwork/skill/get?name=demo&source=external`, authed())
     expect(externalSource.status).toBe(400)
     expect(await externalSource.json()).toEqual({
-      error: { code: 'store-error', message: 'skill.get source must be one of bundled | user, got external' },
+      error: { code: 'store-error', message: 'skill.get source must be one of bundled | user | catalog, got external' },
     })
 
     const missing = await fetch(`${baseUrl}/huaanwork/skill/get?name=missing`, authed())

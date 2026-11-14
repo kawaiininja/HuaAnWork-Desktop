@@ -37,6 +37,7 @@ import {
 } from './agent-package/catalog-client.ts'
 import { createAgentPackageRuntimeRegistry, stopAllAgentPackageProcesses } from './agent-package/runtime.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
+import { configureSkillCatalog } from './skill-catalog-client.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
 import { clearPendingWorkspaceRoot, neutralAutomationsBaseDir, neutralSessionsBaseDir, neutralWorkspaceRoot } from './workspace-state.ts'
 import { registerCallHostTool } from '../huaanwork-guardrails/agent-tool.ts'
@@ -255,6 +256,8 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     },
   })
   ctx.huaanworkAgentCatalogClient = catalogClient
+  // 技能目录客户端:每次请求重新读取 settings,保存后无需重启 Host。
+  configureSkillCatalog({ readSettings: () => readHuaanworkSettingsSync(config.profileDir) })
   // 运行前安全面:keyring 缺失/非法只让 catalog 包 fail closed;缓存的撤销在构造
   // 后立刻应用(启动时还没有在途回合),随后异步刷新一次并保留失败告警。
   const agentCatalogSecurity = createAgentCatalogSecurity({

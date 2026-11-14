@@ -12,6 +12,7 @@ export default function QualitySection({ onSaved }: { onSaved?: () => void }) {
   const [port, setPort] = useState("");
   const [token, setToken] = useState("");
   const [publishToken, setPublishToken] = useState("");
+  const [skillUploadToken, setSkillUploadToken] = useState("");
   const [hostFieldErrors, setHostFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState("");
@@ -35,12 +36,14 @@ export default function QualitySection({ onSaved }: { onSaved?: () => void }) {
           agents_port?: number | "";
           agents_catalog_token?: string;
           agents_catalog_publish_token?: string;
+          agents_skill_upload_token?: string;
         }>("settings.get");
         if (active && s) {
           setHost(s.agents_host ?? "");
           setPort(s.agents_port ? String(s.agents_port) : "");
           setToken(s.agents_catalog_token ?? "");
           setPublishToken(s.agents_catalog_publish_token ?? "");
+          setSkillUploadToken(s.agents_skill_upload_token ?? "");
         }
       } catch (cause) {
         if (active) setError(cause instanceof Error ? cause.message : String(cause));
@@ -65,6 +68,7 @@ export default function QualitySection({ onSaved }: { onSaved?: () => void }) {
         agents_port: port.trim() ? Number(port.trim()) : "",
         agents_catalog_token: token.trim(),
         agents_catalog_publish_token: publishToken.trim(),
+        agents_skill_upload_token: skillUploadToken.trim(),
       });
       if (res && typeof res === "object" && "ok" in res && (res as { ok: boolean }).ok === false) {
         const fieldErrors: Record<string, string> = {};
@@ -151,6 +155,16 @@ export default function QualitySection({ onSaved }: { onSaved?: () => void }) {
           placeholder="发布口令（创建者）"
           aria-label="发布口令"
           onChange={(event) => setPublishToken(event.target.value)}
+        />
+      </label>
+      <label>
+        技能上传口令
+        <input
+          type="password"
+          value={skillUploadToken}
+          placeholder="技能上传口令（可选，用于共享技能）"
+          aria-label="技能上传口令"
+          onChange={(event) => setSkillUploadToken(event.target.value)}
         />
       </label>
       <div className="row">

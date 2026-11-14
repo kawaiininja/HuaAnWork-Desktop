@@ -78,9 +78,45 @@ export type RpcRequest = {
   params?: unknown;
 };
 
-export type SkillSource = "bundled" | "user" | "external";
+export type SkillSource = "bundled" | "catalog" | "user" | "external";
 
 export type SkillInfo = { name: string; description: string; source: SkillSource; whenToUse?: string; enabled?: boolean };
+
+/** 技能中心条目的下载状态投影（spec §5.2）。 */
+export type SkillDownloadState =
+  | 'available'
+  | 'downloaded'
+  | 'update-available'
+  | 'local-conflict'
+  | 'not-applicable';
+
+/** 技能中心卡片（内置 + 共享目录条目）。 */
+export type CenterSkillInfo = {
+  name: string;
+  description: string;
+  source: 'bundled' | 'catalog';
+  whenToUse?: string;
+  revision?: number;
+  publisher?: string;
+  digest?: string;
+  updatedAt?: string;
+  downloadState: SkillDownloadState;
+};
+
+/** `/` 菜单可调用条目：系统技能 + 已启用本地技能。 */
+export type InvocableSkillInfo = {
+  name: string;
+  description: string;
+  source: 'bundled' | 'user';
+  enabled: true;
+  originKind?: SkillOrigin['kind'];
+};
+
+export type SkillCenterListResult = {
+  skills: CenterSkillInfo[];
+  catalogError?: string;
+  migrationWarnings?: string[];
+};
 
 export type SkillDetail = SkillInfo & {
   content: string;

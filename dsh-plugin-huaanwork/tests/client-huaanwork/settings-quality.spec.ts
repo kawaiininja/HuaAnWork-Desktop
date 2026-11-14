@@ -24,6 +24,7 @@ const QUALITY_SETTINGS = {
   agents_port: 18080,
   agents_catalog_token: "read-token",
   agents_catalog_publish_token: "publish-token",
+  agents_skill_upload_token: "skill-upload-token",
 };
 
 let root: Root | undefined;
@@ -139,9 +140,12 @@ describe("设置「质检」页公用机配置", () => {
     expect(publishToken.type).toBe("password");
     expect(publishToken.placeholder).toBe("发布口令（创建者）");
     expect(publishToken.value).toBe("publish-token");
+    const uploadToken = inputByLabel(view, "技能上传口令");
+    expect(uploadToken.type).toBe("password");
+    expect(uploadToken.value).toBe("skill-upload-token");
   });
 
-  it("保存时四字段一起 settings.set,给出反馈并通知 App 刷新智能体页", async () => {
+  it("保存时五字段一起 settings.set,给出反馈并通知 App 刷新智能体页", async () => {
     const onSaved = vi.fn();
     const view = await mountSettings("quality", onSaved);
     await flush();
@@ -155,6 +159,7 @@ describe("设置「质检」页公用机配置", () => {
       agents_port: 18080,
       agents_catalog_token: "read-token",
       agents_catalog_publish_token: "new-publish-token",
+      agents_skill_upload_token: "skill-upload-token",
     });
     expect(view.textContent).toContain("已保存公用机配置");
     expect(onSaved).toHaveBeenCalledTimes(1);

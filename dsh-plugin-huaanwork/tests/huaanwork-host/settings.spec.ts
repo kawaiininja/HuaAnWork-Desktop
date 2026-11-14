@@ -211,6 +211,23 @@ describe('settings logic ported from sidecar', () => {
     expect(parseSettings({ agents_catalog_publish_token: 42 }).agents_catalog_publish_token).toBe('')
   })
 
+  test('parseSettings defaults the skill upload token to empty and trims a configured one', () => {
+    expect(parseSettings({}).agents_skill_upload_token).toBe('')
+    expect(parseSettings({ agents_skill_upload_token: '  skill-secret  ' }).agents_skill_upload_token).toBe('skill-secret')
+    expect(parseSettings({ agents_skill_upload_token: 42 }).agents_skill_upload_token).toBe('')
+  })
+
+  test('mergeSettings saves and clears the skill upload token without touching the read token', () => {
+    const current = mergeSettings(parseSettings({}), {
+      agents_catalog_token: 'read-secret',
+      agents_skill_upload_token: '  skill-secret  ',
+    })
+    expect(current.agents_catalog_token).toBe('read-secret')
+    expect(current.agents_skill_upload_token).toBe('skill-secret')
+    expect(mergeSettings(current, { theme: 'dark' }).agents_skill_upload_token).toBe('skill-secret')
+    expect(mergeSettings(current, { agents_skill_upload_token: '   ' }).agents_skill_upload_token).toBe('')
+  })
+
   test('mergeSettings saves and clears the publish token without touching the read token', () => {
     const current = mergeSettings(parseSettings({}), {
       agents_catalog_token: 'read-secret',

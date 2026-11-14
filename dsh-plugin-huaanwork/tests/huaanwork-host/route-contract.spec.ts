@@ -5,7 +5,7 @@ import { ROUTE_TABLE, type RouteTableEntry } from '../../src/huaanwork-host/rout
 /**
  * 路由契约跨端交叉测试 (M3 评审 D6):
  * 验证客户端 ROUTES (src/client-huaanwork/api.ts) 与
- * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 72 个方法在
+ * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 75 个方法在
  * HTTP Method、Path 与返回载荷键集上的严格双向一致性。
  */
 
@@ -14,6 +14,8 @@ import { ROUTE_TABLE, type RouteTableEntry } from '../../src/huaanwork-host/rout
  * 这些字段在某些分支场景下返回 (如重启中携带 restarting, 认证携带 username, 目录拉取失败携带 catalogError)。
  */
 export const OPTIONAL_KEYS_WHITELIST: Record<string, string[]> = {
+  // 中心列表的可选投影:远端失败只多 catalogError;有迁移告警才多 migrationWarnings。
+  'skill.centerList': ['catalogError', 'migrationWarnings'],
   'workspace.open': ['restarting'],
   'workspace.close': ['restarting'],
   'project.open': ['restarting'],
@@ -73,10 +75,10 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.pruneSessions': ['removed', 'tasksRemoved', 'failed'],
 }
 
-/** 72 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
+/** 75 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
 export const METHODS_501 = new Set<string>([])
 
-/** 客户端 72 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
+/** 客户端 75 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
 export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   // workspace
   'workspace.open': ['workspaceRoot'],
@@ -110,6 +112,7 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
     'agents_host',
     'agents_port',
     'agents_catalog_token',
+    'agents_skill_upload_token',
     'base_url',
     'model',
     'api_key',
@@ -125,6 +128,7 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
     'agents_host',
     'agents_port',
     'agents_catalog_token',
+    'agents_skill_upload_token',
     'base_url',
     'model',
     'api_key',
@@ -145,6 +149,9 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
 
   // skill
   'skill.list': ['skills'],
+  'skill.centerList': ['skills'],
+  'skill.mineList': ['skills'],
+  'skill.invocableList': ['skills'],
   'skill.get': ['skill'],
   'skill.create': ['skill'], // 501
   'skill.update': ['skill'], // 501
@@ -243,6 +250,7 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
     'agents_host',
     'agents_port',
     'agents_catalog_token',
+    'agents_skill_upload_token',
     'base_url',
     'model',
     'api_key',
@@ -258,6 +266,7 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
     'agents_host',
     'agents_port',
     'agents_catalog_token',
+    'agents_skill_upload_token',
     'base_url',
     'model',
     'api_key',
@@ -278,6 +287,9 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
 
   // skill
   'skill.list': ['skills'],
+  'skill.centerList': ['skills'],
+  'skill.mineList': ['skills'],
+  'skill.invocableList': ['skills'],
   'skill.get': ['skill'],
   'skill.create': ['skill'],
   'skill.update': ['skill'],
@@ -383,16 +395,16 @@ export function verifyMethodContract(
 }
 
 describe('Route Contract Cross-Test (D6)', () => {
-  test('双端方法总数恰好 72 且集合完全一致', () => {
+  test('双端方法总数恰好 75 且集合完全一致', () => {
     const clientMethods = Object.keys(ROUTES).sort()
     const serverMethods = ROUTE_TABLE.map((r) => r.method).sort()
 
-    expect(clientMethods.length).toBe(72)
-    expect(serverMethods.length).toBe(72)
+    expect(clientMethods.length).toBe(75)
+    expect(serverMethods.length).toBe(75)
     expect(clientMethods).toEqual(serverMethods)
   })
 
-  test('72 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
+  test('75 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const [method, clientRoute] of Object.entries(ROUTES)) {
