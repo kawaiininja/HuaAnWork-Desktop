@@ -119,7 +119,7 @@ test('new names must not carry an expectation; updates must', async () => {
     (cause: unknown) => cause instanceof SkillStoreError && cause.code === 'skill-revision-conflict',
   )
   await store.publish(publishInput())
-  // 同名更新不带 expectedRevision:不能静默覆盖,按乐观并发冲突处理。
+  // 同名但无 expectedRevision:客户端以为在新建,名称已被占用。
   await assert.rejects(
     store.publish(publishInput({
       digest: digestB,
@@ -127,7 +127,7 @@ test('new names must not carry an expectation; updates must', async () => {
       requestId: 'r2',
       createdAt: '2026-11-14T00:01:00.000Z',
     })),
-    (cause: unknown) => cause instanceof SkillStoreError && cause.code === 'skill-revision-conflict',
+    (cause: unknown) => cause instanceof SkillStoreError && cause.code === 'skill-already-exists',
   )
 })
 
@@ -147,7 +147,7 @@ test('concurrent publishes of one name serialize on the name queue', async () =>
   assert.equal(fulfilled.length, 1)
   assert.equal(rejected.length, 1)
   assert.equal(fulfilled[0]?.value.skill.revision, 1)
-  assert.equal((rejected[0]?.reason as SkillStoreError).code, 'skill-revision-conflict')
+  assert.equal((rejected[0]?.reason as SkillStoreError).code, 'skill-already-exists')
 })
 
 test('writes the archive before the state that references it', async () => {

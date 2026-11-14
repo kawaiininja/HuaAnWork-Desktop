@@ -309,6 +309,14 @@ export class SkillStore {
             `skill ${input.name} is owned by another publisher`,
           )
         }
+        // No expectation means the client believes it is creating a new name;
+        // the name exists, so it is the documented already-exists conflict.
+        if (input.expectedRevision === undefined) {
+          throw new SkillStoreError(
+            'skill-already-exists',
+            `skill ${input.name} already exists; updates must carry an expected revision`,
+          )
+        }
         if (input.expectedRevision !== latest.revision) {
           throw new SkillStoreError(
             'skill-revision-conflict',
