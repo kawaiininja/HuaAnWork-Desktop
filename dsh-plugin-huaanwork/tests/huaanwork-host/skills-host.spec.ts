@@ -12,7 +12,7 @@ import {
   setSkillEnabled,
   updateSkill,
 } from '../../src/huaanwork-host/skills-host.ts'
-import { readUserSkillToggles, setUserSkillToggle } from '../../src/huaanwork-host/skill-local-state.ts'
+import { readSkillLocalState, readUserSkillToggles, setUserSkillToggle, writeSkillLocalEntry } from '../../src/huaanwork-host/skill-local-state.ts'
 import { resolveInvocableSkill } from '../../src/huaanwork-host/skill-invoke.ts'
 import { promises as fsp } from 'node:fs'
 
@@ -452,6 +452,49 @@ describe('内部技能不可全局启用(设计 §6.1)', () => {
 
     await expect(setSkillEnabled(home, 'create-agent', true)).rejects.toThrow(/内部技能，不能启停/)
     expect(readUserSkillToggles(home)['create-agent']).toBeUndefined()
+  })
+})
+
+describe('带外磁盘编辑的列表投影(评审 Important 1)', () => {
+  test('已发布技能被外部修改 SKILL.md 后投影为 modified 且摘要反映磁盘', async () => {
+    const home = makeHome()
+    const created = await createSkill(home, { name: 'demo', description: '演示技能', content: '第一版' })
+    expect(created.ok).toBe(true)
+    const recorded = readSkillLocalState(home).skills.demo!
+    writeSkillLocalEntry(home, 'demo', { ...recorded, publishedRevision: 1, publishedDigest: recorded.contentDigest })
+    expect((await listUserSkills(home))[0]!.publishState).toBe('published')
+
+    writeFileSync(join(home, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: 演示技能\n---\n\n外部改过\n')
+    const [skill] = await listUserSkills(home)
+    expect(skill!.publishState).toBe('modified')
+    expect(skill!.contentDigest).not.toBe(recorded.contentDigest)
+  })
+
+  test('已发布技能被外部修改附带资源文件后投影为 modified', async () => {
+    const home = makeHome()
+    const created = await createSkill(home, { name: 'demo', description: '演示技能', content: '第一版' })
+    expect(created.ok).toBe(true)
+    writeFileSync(join(home, 'skills', 'demo', 'run.mjs'), 'console.log("v1")\n')
+    const updated = await updateSkill(home, 'demo', { description: '演示技能', content: '第一版' })
+    expect(updated.ok).toBe(true)
+    const recorded = readSkillLocalState(home).skills.demo!
+    writeSkillLocalEntry(home, 'demo', { ...recorded, publishedRevision: 1, publishedDigest: recorded.contentDigest })
+    expect((await listUserSkills(home))[0]!.publishState).toBe('published')
+
+    writeFileSync(join(home, 'skills', 'demo', 'run.mjs'), 'console.log("v2")\n')
+    const [skill] = await listUserSkills(home)
+    expect(skill!.publishState).toBe('modified')
+    expect(skill!.contentDigest).not.toBe(recorded.contentDigest)
+  })
+
+  test('同名扁平 .md 与目录包只投影一条(评审 Minor 5)', async () => {
+    const home = makeHome()
+    const root = join(home, 'skills')
+    mkdirSync(join(root, 'demo'), { recursive: true })
+    writeFileSync(join(root, 'demo', 'SKILL.md'), DEMO)
+    writeFileSync(join(root, 'demo.md'), DEMO)
+    const skills = await listUserSkills(home)
+    expect(skills.map((s) => s.name)).toEqual(['demo'])
   })
 })
 

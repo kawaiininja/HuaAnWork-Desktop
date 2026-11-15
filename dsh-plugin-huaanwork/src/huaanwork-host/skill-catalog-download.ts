@@ -195,8 +195,12 @@ async function recoverInterruptedReplace(profileDir: string, name: string): Prom
 async function onDiskDigestMismatch(profileDir: string, local: LocalSkillInfo): Promise<boolean> {
   const entry = await findEntry(userSkillsRoot(profileDir), local.name)
   if (entry === undefined) return true
+  // local.contentDigest 是磁盘现算值;这里必须对照持久化记录,否则退化为
+  // 磁盘与自身比对,带外编辑(即使改回与远端一致)会被漏判。
+  const recorded = readSkillLocalState(profileDir).skills[local.name]?.contentDigest
+  if (recorded === undefined) return true
   try {
-    return skillEntryDigestStrict(entry) !== local.contentDigest
+    return skillEntryDigestStrict(entry) !== recorded
   } catch {
     return true
   }

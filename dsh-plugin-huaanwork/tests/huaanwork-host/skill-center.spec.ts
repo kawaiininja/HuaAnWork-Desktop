@@ -181,6 +181,22 @@ test('pins the exact catalog-unavailable sentence from spec §5.4', () => {
   assert.equal(SKILL_CATALOG_UNAVAILABLE, '共享技能库不可用，当前显示内置技能与已缓存内容')
 })
 
+test('projects an out-of-band edited catalog copy as local-conflict (评审 Important 1)', async () => {
+  const profile = makeHome()
+  const file = writeLocalSkill(profile, 'shared', '', '第一版')
+  const digest = skillDigest(file)
+  writeSkillLocalEntry(profile, 'shared', {
+    origin: { kind: 'catalog', name: 'shared', revision: 1, publisher: 'alice', digest },
+    contentDigest: digest,
+  })
+  // 远端仍是同一 digest/revision;磁盘被应用外修改,记录摘要过期。
+  writeFileSync(file, '---\nname: shared\ndescription: shared\n---\n\n外部改过\n', 'utf8')
+  assert.equal(
+    await stateOf(profile, fakeClient([catalogItem('shared', 1, digest)]), 'shared'),
+    'local-conflict',
+  )
+})
+
 test('keeps the live listing when the cache write fails', async () => {
   const profile = makeHome()
   // A directory at the cache path makes the atomic rename fail.

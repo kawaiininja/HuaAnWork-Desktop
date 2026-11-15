@@ -202,6 +202,24 @@ test('refuses to overwrite an out-of-band edit of a downloaded copy', async () =
   )
 })
 
+test('refuses an out-of-band edit even when disk bytes match the latest catalog digest (评审 Important 1 联动钉)', async () => {
+  const profile = makeHome()
+  await bindCatalog('demo', 1, '第一版')
+  await downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 1 })
+  // 应用外把磁盘改成恰好等于远端 revision 2 的内容:记录摘要仍是 rev1,
+  // 冲突判定必须比对「磁盘 vs 记录」,不能退化为「磁盘 vs 磁盘」而误判 same。
+  await bindCatalog('demo', 2, '第二版')
+  writeFileSync(
+    join(profile, 'skills', 'demo', 'SKILL.md'),
+    '---\nname: demo\ndescription: demo 演示\n---\n\n第二版\n',
+    'utf8',
+  )
+  await assert.rejects(
+    downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 2 }),
+    (cause: unknown) => cause instanceof SkillDownloadError && cause.code === 'local-skill-conflict',
+  )
+})
+
 test('refuses to overwrite a modified bundled copy', async () => {
   const profile = makeHome()
   const bundled = listBundledSkills().find(skill => !SYSTEM_SKILLS.has(skill.name) && skill.name !== 'create-agent')

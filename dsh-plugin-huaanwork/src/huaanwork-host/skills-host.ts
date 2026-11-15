@@ -119,12 +119,17 @@ async function listLocalRoot(root: string): Promise<LocalSkillInfo[]> {
   const toggles = readUserSkillToggles(root)
   const state = readSkillLocalState(root)
   const skills: LocalSkillInfo[] = []
+  const seen = new Set<string>()
   for (const entry of await scanRoot(userSkillsRoot(root))) {
     try {
       const parsed = parseSkillMarkdown(await fs.readFile(entry.path, 'utf8'))
       if (!parsed.name || !parsed.description) continue
+      // 与 findEntry 同序取扫描序第一条:同名扁平 .md 与目录包不重复投影。
+      if (seen.has(parsed.name)) continue
+      seen.add(parsed.name)
       const local = Object.hasOwn(state.skills, parsed.name) ? state.skills[parsed.name] : undefined
-      const contentDigest = local?.contentDigest ?? skillEntryDigestLenient(entry)
+      // 投影摘要永远现算磁盘,带外编辑才可见;记录摘要只用于发布快照比较。
+      const contentDigest = skillEntryDigestLenient(entry)
       const origin = local?.origin ?? { kind: 'created' as const }
       skills.push({
         name: parsed.name,
@@ -136,7 +141,7 @@ async function listLocalRoot(root: string): Promise<LocalSkillInfo[]> {
         contentDigest,
         ...(local?.publishedRevision !== undefined ? { publishedRevision: local.publishedRevision } : {}),
         ...(local?.publishedDigest !== undefined ? { publishedDigest: local.publishedDigest } : {}),
-        publishState: publishStateOf({ contentDigest, ...local }),
+        publishState: publishStateOf({ ...local, contentDigest }),
       })
     } catch {
       // 不可读条目跳过(与 provider 的 warn+skip 语义对齐)
