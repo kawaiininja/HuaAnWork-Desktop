@@ -74,3 +74,29 @@ test('SKILL_NAME_RE is the dsh kebab-case grammar', () => {
     assert.equal(SKILL_NAME_RE.test(name), false, name)
   }
 })
+
+test('a closing --- at EOF without a trailing newline still parses frontmatter (评审 Minor 2)', () => {
+  const parsed = parseSkillMarkdown('---\nname: demo\ndescription: 演示\n---')
+  assert.equal(parsed.name, 'demo')
+  assert.equal(parsed.description, '演示')
+  assert.equal(parsed.content, '')
+})
+
+test('an empty frontmatter block parses as empty, not as body (评审 Minor 2)', () => {
+  const parsed = parseSkillMarkdown('---\n---\n')
+  assert.equal(parsed.name, '')
+  assert.equal(parsed.description, '')
+  assert.equal(parsed.content, '')
+  assert.deepEqual(parsed.extraLines, [])
+})
+
+test('CRLF frontmatter normalizes extraLines to LF without mixing endings (评审 Minor 2)', () => {
+  const raw = '---\r\nname: demo\r\ndescription: 演示\r\nmetadata:\r\n  author: someone\r\nx-custom: keep-me\r\n---\r\n\r\n正文\r\n'
+  const parsed = parseSkillMarkdown(raw)
+  assert.equal(parsed.name, 'demo')
+  assert.equal(parsed.content, '正文')
+  assert.deepEqual(parsed.extraLines, ['metadata:', '  author: someone', 'x-custom: keep-me'])
+  const out = serializeSkillMarkdown(parsed)
+  assert.equal(out.includes('\r'), false)
+  assert.deepEqual(parseSkillMarkdown(out), parsed)
+})
