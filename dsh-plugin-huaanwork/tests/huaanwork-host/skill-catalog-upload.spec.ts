@@ -12,11 +12,12 @@ import type { AddressInfo } from 'node:net'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, test } from 'vitest'
+import { afterEach, test, vi } from 'vitest'
 
 import { inspectSkillArchive } from '@huaanwork/skill-format'
 
-import { setUserSkillToggle, readSkillLocalState } from '../../src/huaanwork-host/skill-local-state.ts'
+import { setUserSkillToggle, readSkillLocalState, writeSkillLocalEntry } from '../../src/huaanwork-host/skill-local-state.ts'
+import * as skillLocalState from '../../src/huaanwork-host/skill-local-state.ts'
 import {
   SkillUploadError,
   uploadLocalSkill,
@@ -300,4 +301,32 @@ test('refuses a first publish that reuses a bundled skill name', async () => {
     (cause: unknown) => cause instanceof SkillUploadError && cause.code === 'skill-already-exists',
   )
   assert.equal(server.requests.length, 0)
+})
+
+test('the pre-publish merge re-reads the latest entry inside the lock (评审 Minor 3)', async () => {
+  const profile = makeHome()
+  writeLocalSkill(profile, 'demo', '第一版')
+  const first = await bootCatalogServer()
+  bindClient(first.port)
+  await uploadLocalSkill(profile, 'demo')
+  // 带外编辑使记录摘要过期,触发发布前合并;并发写者把 publishedRevision 推进到 2。
+  writeFileSync(join(profile, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: demo\n---\n\n第二版\n', 'utf8')
+  const recorded = readSkillLocalState(profile).skills.demo!
+  writeSkillLocalEntry(profile, 'demo', { ...recorded, publishedRevision: 2 })
+  // 锁外快照读到推进前的旧值 1;锁内重读必须看到磁盘上的 2。发布失败时合并结果留存。
+  const real = skillLocalState.readSkillLocalState
+  let snapshotTaken = false
+  const spy = vi.spyOn(skillLocalState, 'readSkillLocalState').mockImplementation((dir: string) => {
+    const doc = real(dir)
+    if (!snapshotTaken) {
+      snapshotTaken = true
+      return { ...doc, skills: { ...doc.skills, demo: { ...doc.skills.demo!, publishedRevision: 1 } } }
+    }
+    return doc
+  })
+  const failing = await bootCatalogServer({ status: 500 })
+  bindClient(failing.port)
+  await assert.rejects(uploadLocalSkill(profile, 'demo'), SkillUploadError)
+  spy.mockRestore()
+  assert.equal(readSkillLocalState(profile).skills.demo!.publishedRevision, 2)
 })

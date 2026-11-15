@@ -84,11 +84,13 @@ export async function uploadLocalSkill(
   // digest must reflect the bytes the user sees even if the publish fails.
   if (local !== undefined && local.contentDigest !== uploadDigest) {
     await withSkillStorageLock(profileDir, async () => {
+      // 锁内重读最新条目再合并:锁外快照可能已被并发写者推进。
+      const fresh = readSkillLocalState(profileDir).skills[name] ?? local
       writeSkillLocalEntry(profileDir, name, {
-        origin: local.origin,
+        origin: fresh.origin,
         contentDigest: uploadDigest,
-        ...(local.publishedRevision !== undefined ? { publishedRevision: local.publishedRevision } : {}),
-        ...(local.publishedDigest !== undefined ? { publishedDigest: local.publishedDigest } : {}),
+        ...(fresh.publishedRevision !== undefined ? { publishedRevision: fresh.publishedRevision } : {}),
+        ...(fresh.publishedDigest !== undefined ? { publishedDigest: fresh.publishedDigest } : {}),
       })
     })
   }
