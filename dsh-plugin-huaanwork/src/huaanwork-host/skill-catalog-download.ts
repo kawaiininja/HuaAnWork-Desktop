@@ -215,9 +215,10 @@ function sameSource(local: LocalSkillInfo, request: DownloadSkillRequest, digest
     return local.contentDigest === digest ? 'same' : 'conflict'
   }
   if (local.origin.kind !== 'catalog' || local.origin.name !== request.name) return 'conflict'
-  if (local.contentDigest === digest) return 'same'
-  // Unmodified download copy, newer revision → explicit update.
+  // Unmodified download copy, newer revision → explicit update, even when the
+  // digest matches: a rollback revision must still sync origin.revision.
   if (local.contentDigest === local.origin.digest && request.revision > local.origin.revision) return 'update'
+  if (local.contentDigest === digest) return 'same'
   return 'conflict'
 }
 

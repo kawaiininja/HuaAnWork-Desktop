@@ -150,7 +150,7 @@ function downloadStateOf(
   // catalog
   if (local.origin.kind !== 'catalog' || local.origin.name !== item.name) return 'local-conflict'
   const unmodified = local.contentDigest === local.origin.digest
-  if (item.digest !== undefined && item.digest === local.contentDigest) return 'downloaded'
+  // 更高 revision 优先于摘要相等:回滚到旧内容的 revision 也要能同步修订号。
   if (
     unmodified
     && item.revision !== undefined
@@ -158,6 +158,7 @@ function downloadStateOf(
   ) {
     return 'update-available'
   }
+  if (item.digest !== undefined && item.digest === local.contentDigest) return 'downloaded'
   return 'local-conflict'
 }
 

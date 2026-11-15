@@ -145,6 +145,19 @@ test('same digest is idempotent', async () => {
   assert.equal(replay.updated, false)
 })
 
+test('a same-digest higher revision updates the origin revision (评审 Important 2)', async () => {
+  const profile = makeHome()
+  await bindCatalog('demo', 1, '正文')
+  await downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 1 })
+  // 回滚 revision:内容与 rev1 完全相同,但 revision 更高。
+  await bindCatalog('demo', 3, '正文')
+  const updated = await downloadSkillToMine(profile, { source: 'catalog', name: 'demo', revision: 3 })
+  assert.equal(updated.created, false)
+  assert.equal(updated.updated, true)
+  assert.equal(updated.skill.origin.kind, 'catalog')
+  if (updated.skill.origin.kind === 'catalog') assert.equal(updated.skill.origin.revision, 3)
+})
+
 test('an explicit update keeps the enable toggle and advances the origin revision', async () => {
   const profile = makeHome()
   await bindCatalog('demo', 1, '第一版')

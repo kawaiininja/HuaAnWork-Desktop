@@ -197,6 +197,21 @@ test('projects an out-of-band edited catalog copy as local-conflict (评审 Impo
   )
 })
 
+test('same digest at a higher revision still surfaces update-available (评审 Important 2)', async () => {
+  const profile = makeHome()
+  const file = writeLocalSkill(profile, 'shared', '', '正文')
+  const digest = skillDigest(file)
+  writeSkillLocalEntry(profile, 'shared', {
+    origin: { kind: 'catalog', name: 'shared', revision: 1, publisher: 'alice', digest },
+    contentDigest: digest,
+  })
+  // 发布者回滚到旧内容:摘要相同但 revision 更高,仍应提示更新以同步修订号。
+  assert.equal(
+    await stateOf(profile, fakeClient([catalogItem('shared', 3, digest)]), 'shared'),
+    'update-available',
+  )
+})
+
 test('keeps the live listing when the cache write fails', async () => {
   const profile = makeHome()
   // A directory at the cache path makes the atomic rename fail.
