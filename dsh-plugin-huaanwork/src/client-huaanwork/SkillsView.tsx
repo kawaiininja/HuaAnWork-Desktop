@@ -53,13 +53,21 @@ export default function SkillsView({
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [modalBusy, setModalBusy] = useState(false);
+  const [modalError, setModalError] = useState("");
   const [modal, setModal] = useState<Modal | null>(null);
+
+  const closeModal = () => {
+    setModalError("");
+    setModal(null);
+  };
 
   const reportError = (cause: unknown, where: "center" | "mine") => {
     const message = cause instanceof Error ? cause.message : String(cause);
     if (where === "center") setCenterError(message);
     else setMineError(message);
   };
+
+  const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
   const refreshMine = useCallback(async () => {
     try {
@@ -175,6 +183,7 @@ export default function SkillsView({
 
   const removeSkill = async (skill: LocalSkillInfo) => {
     setModalBusy(true);
+    setModalError("");
     setMineError("");
     try {
       await rpcCall("skill.remove", { name: skill.name });
@@ -183,7 +192,7 @@ export default function SkillsView({
       await Promise.all([refreshMine(), refreshCenter()]);
       onInvocableChanged?.();
     } catch (cause) {
-      reportError(cause, "mine");
+      setModalError(errorMessage(cause));
     } finally {
       setModalBusy(false);
     }
@@ -191,6 +200,7 @@ export default function SkillsView({
 
   const duplicateSkill = async (skill: LocalSkillInfo, target: string) => {
     setModalBusy(true);
+    setModalError("");
     setMineError("");
     try {
       await rpcCall("skill.duplicate", { source: skill.name, name: target });
@@ -199,7 +209,7 @@ export default function SkillsView({
       await refreshMine();
       onInvocableChanged?.();
     } catch (cause) {
-      reportError(cause, "mine");
+      setModalError(errorMessage(cause));
     } finally {
       setModalBusy(false);
     }
@@ -223,19 +233,21 @@ export default function SkillsView({
   };
 
   const confirmImport = async (path: string, name: string) => {
+    setModalBusy(true);
+    setModalError("");
     try {
       const result = await rpcCall<SkillWriteResult>("skill.import", { path });
       if (!result.ok) {
-        setMineError(result.fieldErrors.map((error) => error.message).join("；"));
-        setModal(null);
+        setModalError(result.fieldErrors.map((error) => error.message).join("；"));
         return;
       }
       setModal(null);
       setNote(`已导入技能 ${name}，请在“我的技能”中启用`);
       await refreshMine();
     } catch (cause) {
-      reportError(cause, "mine");
-      setModal(null);
+      setModalError(errorMessage(cause));
+    } finally {
+      setModalBusy(false);
     }
   };
 
@@ -438,15 +450,16 @@ export default function SkillsView({
           source={modal.kind === "edit" ? modal.skill : null}
           takenNames={[...takenLocalNames, ...RESERVED_SKILL_NAMES]}
           onClose={() => setModal(null)}
-          onSaved={async (name) => {
+          onSaved={async (name, editing) => {
             setModal(null);
-            setNote(`已保存技能 ${name}，请在“我的技能”中启用`);
+            setNote(editing ? `已保存技能 ${name}` : `已保存技能 ${name}，请在“我的技能”中启用`);
             await refreshMine();
+            onInvocableChanged?.();
           }}
         />
       ) : null}
       {modal?.kind === "delete" ? (
-        <SkillDeleteModal skill={modal.skill} busy={modalBusy} onCancel={() => setModal(null)} onConfirm={() => void removeSkill(modal.skill)} />
+        <SkillDeleteModal skill={modal.skill} busy={modalBusy} error={modalError} onCancel={closeModal} onConfirm={() => void removeSkill(modal.skill)} />
       ) : null}
       {modal?.kind === "import-pick" ? (
         <ImportPickModal onPick={(directory) => void pickImport(directory)} onClose={() => setModal(null)} />
@@ -454,7 +467,9 @@ export default function SkillsView({
       {modal?.kind === "import-confirm" ? (
         <ImportConfirmModal
           preview={modal.preview}
-          onCancel={() => setModal(null)}
+          busy={modalBusy}
+          error={modalError}
+          onCancel={closeModal}
           onConfirm={() => void confirmImport(modal.path, modal.preview.targetName)}
         />
       ) : null}
@@ -462,8 +477,9 @@ export default function SkillsView({
         <SkillDuplicateModal
           skill={modal.skill}
           busy={modalBusy}
+          error={modalError}
           takenNames={[...takenLocalNames, ...RESERVED_SKILL_NAMES, ...bundledNames]}
-          onCancel={() => setModal(null)}
+          onCancel={closeModal}
           onConfirm={(target) => void duplicateSkill(modal.skill, target)}
         />
       ) : null}
@@ -499,7 +515,7 @@ function SkillFormModal({
   source: SkillDetail | null;
   takenNames: readonly string[];
   onClose: () => void;
-  onSaved: (name: string) => Promise<void>;
+  onSaved: (name: string, editing: boolean) => Promise<void>;
 }) {
   const editing = source !== null;
   const [values, setValues] = useState<SkillFormValues>({
@@ -536,7 +552,7 @@ function SkillFormModal({
         setErrors(Object.fromEntries(result.fieldErrors.map((error) => [error.field, error.message])));
         return;
       }
-      await onSaved(editing ? source.name : values.name);
+      await onSaved(editing ? source.name : values.name, editing);
     } catch (cause) {
       setErrors({ form: cause instanceof Error ? cause.message : String(cause) });
     } finally {
@@ -644,10 +660,14 @@ function ImportPickModal({ onPick, onClose }: { onPick: (directory: boolean) => 
 
 function ImportConfirmModal({
   preview,
+  busy,
+  error,
   onCancel,
   onConfirm,
 }: {
   preview: Extract<SkillImportPreview, { ok: true }>["preview"];
+  busy: boolean;
+  error: string;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -656,16 +676,17 @@ function ImportConfirmModal({
       <div className="confirm-modal automation-form">
         <h3>导入技能 {preview.targetName}？</h3>
         <p className="sub">{preview.description}</p>
+        {error ? <p className="banner error">{error}</p> : null}
         {preview.nameMismatch ? (
           <p className="hint">源名称「{preview.sourceName}」与 frontmatter 名称不一致，将以「{preview.targetName}」为名落盘。</p>
         ) : null}
         <pre className="diff" style={{ maxHeight: 280, overflow: "auto" }}>{preview.content}</pre>
         <div className="page-tools">
           <span className="composer-spacer" />
-          <button type="button" className="filter-tab" onClick={onCancel}>
+          <button type="button" className="filter-tab" onClick={onCancel} disabled={busy}>
             取消
           </button>
-          <button type="button" className="btn-dark" onClick={onConfirm}>
+          <button type="button" className="btn-dark" onClick={onConfirm} disabled={busy}>
             确认导入
           </button>
         </div>
@@ -677,11 +698,13 @@ function ImportConfirmModal({
 function SkillDeleteModal({
   skill,
   busy,
+  error,
   onCancel,
   onConfirm,
 }: {
   skill: LocalSkillInfo;
   busy: boolean;
+  error: string;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -690,6 +713,7 @@ function SkillDeleteModal({
       <div className="confirm-modal">
         <h3>删除技能 {skill.name}？</h3>
         <p className="sub">仅删除本机技能文件，不影响已发布到技能中心的内容与历史会话。</p>
+        {error ? <p className="banner error">{error}</p> : null}
         <div className="page-tools">
           <span className="composer-spacer" />
           <button type="button" className="filter-tab" onClick={onCancel} disabled={busy}>
@@ -707,22 +731,24 @@ function SkillDeleteModal({
 function SkillDuplicateModal({
   skill,
   busy,
+  error,
   takenNames,
   onCancel,
   onConfirm,
 }: {
   skill: LocalSkillInfo;
   busy: boolean;
+  error: string;
   takenNames: readonly string[];
   onCancel: () => void;
   onConfirm: (target: string) => void;
 }) {
   const [target, setTarget] = useState("");
-  const [error, setError] = useState("");
+  const [nameError, setNameError] = useState("");
   const submit = () => {
     const problem = validateDuplicateName(target, { sourceName: skill.name, takenNames });
     if (problem) {
-      setError(problem);
+      setNameError(problem);
       return;
     }
     onConfirm(target);
@@ -732,6 +758,7 @@ function SkillDuplicateModal({
       <div className="confirm-modal automation-form">
         <h3>另存为新技能</h3>
         <p className="sub">复制 {skill.name} 的正文与资源为新名称；新副本默认未启用。</p>
+        {error ? <p className="banner error">{error}</p> : null}
         <label className="modal-field">
           新名称（kebab-case）
           <input
@@ -741,10 +768,10 @@ function SkillDuplicateModal({
             placeholder="如：my-daily-report"
             onChange={(event) => {
               setTarget(event.target.value);
-              setError("");
+              setNameError("");
             }}
           />
-          {error ? <span className="hint">{error}</span> : null}
+          {nameError ? <span className="hint">{nameError}</span> : null}
         </label>
         <div className="page-tools">
           <span className="composer-spacer" />

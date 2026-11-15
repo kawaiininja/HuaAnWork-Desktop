@@ -13,11 +13,12 @@ vi.mock("../../src/client-huaanwork/api.ts", () => ({
   pickDirectory: vi.fn(),
 }));
 
-import { rpcCall } from "../../src/client-huaanwork/api.ts";
+import { rpcCall, pickDirectory } from "../../src/client-huaanwork/api.ts";
 import SkillsView from "../../src/client-huaanwork/SkillsView.tsx";
 import type { CenterSkillInfo, LocalSkillInfo } from "../../src/client-huaanwork/rpc-types.ts";
 
 const rpc = vi.mocked(rpcCall);
+const pick = vi.mocked(pickDirectory);
 
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
@@ -141,5 +142,125 @@ describe("SkillsView", () => {
     await flush();
     expect(view.textContent).toContain("还没有创建过技能");
     expect(view.textContent).toContain("导入技能");
+  });
+});
+
+function dialogOf(view: HTMLElement): HTMLElement {
+  return view.querySelector<HTMLElement>('[role="dialog"]')!;
+}
+
+async function clickText(scope: HTMLElement, text: string): Promise<void> {
+  await act(async () => {
+    buttonByText(scope, text)?.click();
+  });
+  await flush();
+}
+
+async function fillInput(input: HTMLInputElement, value: string): Promise<void> {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  await act(async () => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await flush();
+}
+
+async function openMine(view: HTMLElement): Promise<void> {
+  await clickText(view, "我的技能");
+}
+
+describe("SkillsView 弹窗错误透传与防重入(评审 Important 3 / Minor 4)", () => {
+  it("删除失败时错误显示在弹窗内且弹窗不关闭", async () => {
+    const view = await mount();
+    await openMine(view);
+    await clickText(view, "删除");
+    expect(dialogOf(view)).toBeTruthy();
+    rpc.mockImplementation((async (method: string) => {
+      if (method === "skill.remove") throw new Error("删除失败：磁盘只读");
+      throw new Error(`unexpected rpc ${method}`);
+    }) as never);
+    await clickText(dialogOf(view), "删除");
+    expect(view.querySelector('[role="dialog"]')).toBeTruthy();
+    expect(dialogOf(view).textContent).toContain("删除失败：磁盘只读");
+  });
+
+  it("另存为失败时错误显示在弹窗内且弹窗不关闭", async () => {
+    const view = await mount({ mine: [{ ...LOCAL, name: "pdf" }] });
+    await openMine(view);
+    await clickText(view, "另存为新技能");
+    const dialog = dialogOf(view);
+    await fillInput(dialog.querySelector<HTMLInputElement>("input")!, "pdf-copy");
+    rpc.mockImplementation((async (method: string) => {
+      if (method === "skill.duplicate") throw new Error("另存为失败：名称冲突");
+      throw new Error(`unexpected rpc ${method}`);
+    }) as never);
+    await clickText(dialog, "复制");
+    expect(view.querySelector('[role="dialog"]')).toBeTruthy();
+    expect(dialogOf(view).textContent).toContain("另存为失败：名称冲突");
+  });
+
+  it("确认导入失败时错误显示在弹窗内且弹窗不关闭", async () => {
+    pick.mockResolvedValue("/tmp/imp-dir" as never);
+    const view = await mount();
+    await openMine(view);
+    rpc.mockImplementation((async (method: string) => {
+      if (method === "skill.importPreview") {
+        return {
+          ok: true,
+          preview: {
+            name: "imp", description: "导入技能", source: "user", content: "正文",
+            targetName: "imp", sourceName: "imp-dir", nameMismatch: false, kind: "directory",
+          },
+        };
+      }
+      if (method === "skill.import") throw new Error("导入失败：目录含硬链接");
+      throw new Error(`unexpected rpc ${method}`);
+    }) as never);
+    await clickText(view, "导入技能");
+    await clickText(dialogOf(view), "选择目录");
+    expect(dialogOf(view).getAttribute("aria-label")).toBe("确认导入技能");
+    await clickText(dialogOf(view), "确认导入");
+    expect(view.querySelector('[role="dialog"]')).toBeTruthy();
+    expect(dialogOf(view).textContent).toContain("导入失败：目录含硬链接");
+  });
+
+  it("确认导入在途时确认按钮禁用防重入", async () => {
+    pick.mockResolvedValue("/tmp/imp-dir" as never);
+    const view = await mount();
+    await openMine(view);
+    rpc.mockImplementation((async (method: string) => {
+      if (method === "skill.importPreview") {
+        return {
+          ok: true,
+          preview: {
+            name: "imp", description: "导入技能", source: "user", content: "正文",
+            targetName: "imp", sourceName: "imp-dir", nameMismatch: false, kind: "directory",
+          },
+        };
+      }
+      if (method === "skill.import") return new Promise(() => {});
+      throw new Error(`unexpected rpc ${method}`);
+    }) as never);
+    await clickText(view, "导入技能");
+    await clickText(dialogOf(view), "选择目录");
+    await clickText(dialogOf(view), "确认导入");
+    expect(buttonByText(dialogOf(view), "确认导入")?.disabled).toBe(true);
+  });
+
+  it("编辑已启用技能保存后提示不再要求启用(评审 Minor 4)", async () => {
+    const view = await mount({ mine: [{ ...LOCAL, enabled: true }] });
+    await openMine(view);
+    rpc.mockImplementation((async (method: string) => {
+      if (method === "skill.get") {
+        return { skill: { name: "demo", description: "本地演示", source: "user", content: "正文" } };
+      }
+      if (method === "skill.update") return { ok: true, skill: { ...LOCAL, enabled: true } };
+      if (method === "skill.mineList") return { skills: [{ ...LOCAL, enabled: true }] };
+      throw new Error(`unexpected rpc ${method}`);
+    }) as never);
+    await clickText(view, "编辑");
+    await clickText(dialogOf(view), "保存");
+    expect(view.textContent).toContain("已保存技能 demo");
+    expect(view.textContent).not.toContain("请在“我的技能”中启用");
   });
 });
