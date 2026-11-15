@@ -35,9 +35,14 @@ export const READ_TOKEN = 'test-read-token-012345678901234567890123456789'
 export const PUBLISH_TOKEN = 'test-publish-token-012345678901234567890123456789'
 export const ADMIN_TOKEN = 'test-admin-token-012345678901234567890123456789'
 
-/** Skill upload tokens: distinct from every role token (config refuses overlap). */
-export const ALICE_SKILL_TOKEN = 'test-skill-alice-0123456789012345678901234567'
-export const BOB_SKILL_TOKEN = 'test-skill-bob-012345678901234567890123456789'
+/**
+ * Skill upload tokens: distinct from every role token (config refuses overlap).
+ * The repeated-letter tails are deliberate: they keep Shannon entropy below
+ * gitleaks' generic-api-key threshold so the fixtures do not trip the secret
+ * scan. Do not regenerate them as random/high-entropy strings.
+ */
+export const ALICE_SKILL_TOKEN = 'test-skill-alice-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+export const BOB_SKILL_TOKEN = 'test-skill-bob-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 
 const FIXTURE_ENTRIES_DIR = join(import.meta.dirname, 'fixtures', 'entries')
 const FIXTURE_ENTRY_FILES = ['code-review.json', 'task-orch.json', 'typo-check.json'] as const
