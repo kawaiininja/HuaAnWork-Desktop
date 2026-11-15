@@ -1,9 +1,14 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { HUAANWORK_EVENTS_PATH } from '../../src/huaanwork-host/events.ts'
 import { resetProjectLegacySweepLatch } from '../../src/huaanwork-host/session-sweep.ts'
+import {
+  readSkillLocalState,
+  readUserSkillToggles,
+  skillLocalStatePath,
+} from '../../src/huaanwork-host/skill-local-state.ts'
 import { HUAANWORK_MIGRATION_STEPS, runHuaanworkLegacyMigration } from '../../src/huaanwork-migration/index.ts'
 import { bootHuaanworkHost, hostConfig, writeJsonFile, writeSessionLog } from './startup-sweep-fixture.ts'
 
@@ -157,5 +162,77 @@ describe('sweepProjectLegacySessions has a production call site', () => {
     expect(existsSync(mintedBetween)).toBe(true)
     // chat-auto 清扫不走门闩,仍在每次 generation 执行(R-6.12-1 第 1 条)。
     expect(existsSync(chatAuto)).toBe(false)
+  })
+})
+
+describe('ensureSkillCenterMigration boot integration', () => {
+  test('runs skill center migration before registering routes and logs warnings on boot', async () => {
+    const source = readFileSync(new URL('../../src/huaanwork-host/index.ts', import.meta.url), 'utf8')
+    const migrateCallIndex = source.indexOf('await ensureSkillCenterMigration(config.profileDir)')
+    const routesCallIndex = source.indexOf('registerHuaanworkRoutes(ctx, routeCtx)')
+    expect(migrateCallIndex).toBeGreaterThan(-1)
+    expect(routesCallIndex).toBeGreaterThan(migrateCallIndex)
+
+    const root = freshRoot()
+    const config = hostConfig(root)
+    mkdirSync(join(config.profileDir, 'skills', 'boot-skill'), { recursive: true })
+    writeJsonFile(join(config.profileDir, 'skill-toggles.json'), { pdf: true })
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(
+      join(config.profileDir, 'skills', 'boot-skill', 'SKILL.md'),
+      '---\nname: boot-skill\ndescription: 启动迁移技能\n---\n\n正文\n',
+      'utf8',
+    )
+    mkdirSync(join(config.profileDir, 'skills', 'bad-dir'), { recursive: true })
+    writeFileSync(
+      join(config.profileDir, 'skills', 'bad-dir', 'SKILL.md'),
+      '---\nname: Bad_Name\ndescription: 非法命名\n---\n\n正文\n',
+      'utf8',
+    )
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    let booted: Awaited<ReturnType<typeof bootHuaanworkHost>> | undefined
+    try {
+      booted = await bootHuaanworkHost(config)
+      expect(booted.registeredPaths).toContain('/huaanwork')
+      expect(booted.upgradePaths).toContain(HUAANWORK_EVENTS_PATH)
+
+      const state = readSkillLocalState(config.profileDir)
+      expect(state.migration?.version).toBe(1)
+      expect(state.skills['boot-skill']?.origin.kind).toBe('created')
+      expect(state.skills.pdf?.origin.kind).toBe('bundled')
+      expect(readUserSkillToggles(config.profileDir)['boot-skill']).toBe(true)
+      expect(readUserSkillToggles(config.profileDir).pdf).toBe(true)
+      expect(
+        logSpy.mock.calls.some(([msg]) => typeof msg === 'string' && msg.includes('[skills]') && msg.includes('Bad_Name')),
+      ).toBe(true)
+    } finally {
+      logSpy.mockRestore()
+      await booted?.ctx.fiber.dispose()
+    }
+  })
+
+  test('catches corrupt skill-local-state.json migration error, logs it, and still finishes host boot', async () => {
+    const root = freshRoot()
+    const config = hostConfig(root)
+    mkdirSync(config.profileDir, { recursive: true })
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(skillLocalStatePath(config.profileDir), '{not json', 'utf8')
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    let booted: Awaited<ReturnType<typeof bootHuaanworkHost>> | undefined
+    try {
+      booted = await bootHuaanworkHost(config)
+      expect(booted.registeredPaths).toContain('/huaanwork')
+      expect(booted.upgradePaths).toContain(HUAANWORK_EVENTS_PATH)
+      expect(
+        logSpy.mock.calls.some(
+          ([msg]) => typeof msg === 'string' && msg.includes('[skills] 本地技能状态迁移失败，将在下次启动重试'),
+        ),
+      ).toBe(true)
+    } finally {
+      logSpy.mockRestore()
+      await booted?.ctx.fiber.dispose()
+    }
   })
 })

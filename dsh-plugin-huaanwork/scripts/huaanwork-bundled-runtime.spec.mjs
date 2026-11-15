@@ -18,6 +18,7 @@ const markerSources = {
   '@huaanwork/agent-package-format': 'const MAX_AGENT_PACKAGE_BUNDLE_BYTES = 5 * 1024 * 1024;',
   '@huaanwork/catalog-signing': 'function parseCatalogKeyring() {}',
   '@huaanwork/policy': 'function workNetworkGateError() {}',
+  '@huaanwork/skill-format': 'const MAX_SKILL_ARCHIVE_BYTES = 5 * 1024 * 1024;',
   tar: 'const code = "TAR_BAD_ARCHIVE";',
 }
 

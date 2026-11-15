@@ -6,6 +6,15 @@ import { MAX_AGENT_PACKAGE_BUNDLE_BYTES } from '@huaanwork/agent-package-format/
 import { catalogRootUrl } from '@huaanwork/policy/agent-catalog'
 import { isLanEndpoint } from '@huaanwork/policy/network'
 
+import {
+  DEFAULT_CATALOG_REQUEST_TIMEOUT_MS,
+  MAX_CATALOG_JSON_BYTES,
+  buildCatalogInit,
+  createCatalogTransport,
+  isRedirectStatus,
+  optionalCatalogToken,
+  type CatalogErrorFactory,
+} from '../catalog-transport.ts'
 import type { AppSettings } from '../settings.ts'
 import { createAgentPackageLifecycleLock, type AgentPackageLifecycleLock } from './lifecycle.ts'
 import type { AgentPackageRevocation } from './types.ts'
@@ -28,8 +37,8 @@ import type { AgentPackageRevocation } from './types.ts'
 export const AGENT_CATALOG_AUTH_ERROR = '目录口令错误或权限不足'
 export const AGENT_CATALOG_UNREACHABLE_ERROR = '目录不可达，请稍后重试；本地智能体不受影响'
 
-export const DEFAULT_CATALOG_REQUEST_TIMEOUT_MS = 5_000
-export const MAX_CATALOG_JSON_BYTES = 1024 * 1024
+// Re-exported for existing consumers; the transport owns the values.
+export { DEFAULT_CATALOG_REQUEST_TIMEOUT_MS, MAX_CATALOG_JSON_BYTES }
 
 /**
  * 撤销列表分页(I-6)。单页 200 条与服务端上限一致;500 页(x 200)足以覆盖
@@ -151,6 +160,15 @@ export type CreateAgentCatalogClientOptions = {
 export function createAgentCatalogClient(options: CreateAgentCatalogClientOptions): AgentCatalogClient {
   const fetchFn = options.fetchImpl ?? fetch
   const timeoutMs = options.timeoutMs ?? DEFAULT_CATALOG_REQUEST_TIMEOUT_MS
+  const makeError: CatalogErrorFactory = (message, code, status) =>
+    new AgentCatalogClientError(message, code as AgentCatalogErrorCode, status)
+  // Same-origin/timeout/redirect/capped-read mechanics come from the shared
+  // transport; signing and installation logic stays in this client.
+  const transport = createCatalogTransport({
+    fetchImpl: fetchFn,
+    timeoutMs,
+    makeError,
+  })
 
   async function catalogRoot(): Promise<{ rootUrl: string; settings: AgentCatalogSettings }> {
     const settings = options.readSettings()
@@ -166,36 +184,7 @@ export function createAgentCatalogClient(options: CreateAgentCatalogClientOption
     token: string | undefined,
     init: RequestInit,
   ): Promise<{ status: number; body: unknown }> {
-    let response: Response
-    try {
-      response = await fetchFn(url, buildInit(init, token, timeoutMs))
-    } catch {
-      throw new AgentCatalogClientError(AGENT_CATALOG_UNREACHABLE_ERROR, 'unreachable')
-    }
-    if (isRedirect(response.status)) {
-      throw new AgentCatalogClientError('目录请求被重定向，已拒绝', 'redirect', response.status)
-    }
-    // 先按状态码分类再读正文:错误响应(401/403/其它非 2xx)的正文永远不参与
-    // 大小判定,否则一个超大错误页会把「口令错误」误报成「响应超过 1 MiB」。
-    if (response.status === 401 || response.status === 403) {
-      throw new AgentCatalogClientError(AGENT_CATALOG_AUTH_ERROR, 'auth', response.status)
-    }
-    if (!response.ok) {
-      // 不回显服务端错误正文:它可能包含服务端视角的 token 片段。
-      throw new AgentCatalogClientError(`目录请求失败（HTTP ${response.status}）`, 'http', response.status)
-    }
-    let body: Buffer
-    try {
-      body = await readCappedBuffer(response, MAX_CATALOG_JSON_BYTES, '目录响应超过 1 MiB 上限', 'response-too-large')
-    } catch (error) {
-      if (error instanceof AgentCatalogClientError) throw error
-      throw new AgentCatalogClientError(AGENT_CATALOG_UNREACHABLE_ERROR, 'unreachable')
-    }
-    try {
-      return { status: response.status, body: JSON.parse(body.toString('utf8')) as unknown }
-    } catch {
-      throw new AgentCatalogClientError('目录响应不是合法 JSON', 'invalid-response', response.status)
-    }
+    return transport.requestJson(url, token, init)
   }
 
   async function getPackageMetadata(slug: string, version: string): Promise<AgentPackageMetadata> {
@@ -504,59 +493,15 @@ function catalogRootUrlOrUndefined(settings: AgentCatalogSettings): string | und
 }
 
 function buildInit(init: RequestInit, token: string | undefined, timeoutMs: number): RequestInit {
-  const headers: Record<string, string> = {
-    accept: 'application/json',
-    ...(init.headers as Record<string, string> | undefined),
-  }
-  if (token !== undefined) headers.authorization = `Bearer ${token}`
-  return {
-    ...init,
-    headers,
-    redirect: 'manual',
-    signal: AbortSignal.timeout(timeoutMs),
-  }
+  return buildCatalogInit(init, token, timeoutMs)
 }
 
 function optionalToken(value: string): string | undefined {
-  const trimmed = value.trim()
-  return trimmed.length > 0 ? trimmed : undefined
+  return optionalCatalogToken(value)
 }
 
 function isRedirect(status: number): boolean {
-  return status >= 300 && status < 400
-}
-
-async function readCappedBuffer(
-  response: Response,
-  cap: number,
-  tooLargeMessage: string,
-  tooLargeCode: AgentCatalogErrorCode,
-): Promise<Buffer> {
-  const body = response.body
-  if (body === null) return Buffer.alloc(0)
-  const reader = body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (value === undefined) continue
-      total += value.byteLength
-      if (total > cap) {
-        await reader.cancel().catch(() => undefined)
-        throw new AgentCatalogClientError(tooLargeMessage, tooLargeCode)
-      }
-      chunks.push(value)
-    }
-  } catch (error) {
-    if (error instanceof AgentCatalogClientError) throw error
-    throw new AgentCatalogClientError(AGENT_CATALOG_UNREACHABLE_ERROR, 'unreachable')
-  }
-  return Buffer.concat(
-    chunks.map((chunk) => Buffer.from(chunk)),
-    total,
-  )
+  return isRedirectStatus(status)
 }
 
 async function writeCappedFile(response: Response, destination: string): Promise<void> {

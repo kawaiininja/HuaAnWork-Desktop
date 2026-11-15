@@ -40,6 +40,8 @@ export type AppSettings = {
   agents_catalog_token: string
   /** 智能体目录发布 token（提交审查、查询自己的提交、申请下架）：缺省 ""。 */
   agents_catalog_publish_token: string
+  /** 技能中心上传口令（发布共享技能）：缺省 ""；空值只禁用上传。 */
+  agents_skill_upload_token: string
   /** 同时运行的自动化轮次上限：缺省 3，范围 1–8。 */
   max_concurrent_turns: number
 }
@@ -71,6 +73,7 @@ export const defaultSettings: AppSettings = {
   agents_port: '',
   agents_catalog_token: '',
   agents_catalog_publish_token: '',
+  agents_skill_upload_token: '',
   max_concurrent_turns: DEFAULT_MAX_CONCURRENT_TURNS,
 }
 
@@ -200,6 +203,8 @@ export function parseSettings(raw: unknown): AppSettings {
     agents_catalog_token: typeof rec.agents_catalog_token === 'string' ? rec.agents_catalog_token.trim() : '',
     agents_catalog_publish_token:
       typeof rec.agents_catalog_publish_token === 'string' ? rec.agents_catalog_publish_token.trim() : '',
+    agents_skill_upload_token:
+      typeof rec.agents_skill_upload_token === 'string' ? rec.agents_skill_upload_token.trim() : '',
     max_concurrent_turns: parseConcurrentTurns(rec.max_concurrent_turns),
     ...mirrorActive(models, asString(rec.active_model_id)),
   }
@@ -232,6 +237,10 @@ export function mergeSettings(current: AppSettings, params: unknown): AppSetting
     typeof rec.agents_catalog_publish_token === 'string'
       ? rec.agents_catalog_publish_token.trim()
       : current.agents_catalog_publish_token
+  const agentsSkillUploadToken =
+    typeof rec.agents_skill_upload_token === 'string'
+      ? rec.agents_skill_upload_token.trim()
+      : current.agents_skill_upload_token
   const maxConcurrentTurns =
     rec.max_concurrent_turns !== undefined
       ? parseConcurrentTurns(rec.max_concurrent_turns)
@@ -288,6 +297,7 @@ export function mergeSettings(current: AppSettings, params: unknown): AppSetting
     agents_port: agentsPort,
     agents_catalog_token: agentsCatalogToken,
     agents_catalog_publish_token: agentsCatalogPublishToken,
+    agents_skill_upload_token: agentsSkillUploadToken,
     max_concurrent_turns: maxConcurrentTurns,
     ...mirrorActive(models, activeId),
   }

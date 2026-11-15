@@ -96,3 +96,17 @@ HuaAnWork confirmations, warnings, and operation results open as separate deskto
 - **No update notification appeared**: background failures are silent; use the manual tray check to see the result.
 
 The lower-level lifecycle, packaging, and platform limits belong to the developer documentation; see the [documentation index](README.md).
+
+## Skill Center and My Skills
+
+The skills page has exactly two tabs: **Skill Center** (application bundles plus intranet shared skills) and **My Skills** (skills created, imported, or downloaded on this machine). The Skill Center opens by default.
+
+- **Download and enable**: in the Skill Center, click **Download** to create a local copy. Created, imported, and downloaded copies all start **disabled**. Open the toggle in **My Skills** before the skill appears for `/` invocation in the composer. System skills (for example explore and test-fix) are always enabled and need no download.
+- **Import is not upload**: **Import skill** in My Skills copies a local file into your skills; the card's **Upload** action publishes the snapshot to the intranet skill center. Upload publishes immediately, with no review and no signature; conflicts across users surface as "owned by another publisher" or a revision conflict.
+- **Credentials**: browsing and downloading use the shared-machine access token; uploading uses a separate "skill upload token", and leaving it empty disables upload only. Configure both in **Settings → Quality → Shared machine configuration**; changes apply without a restart.
+- **Offline**: an unavailable skill center affects shared entries only. Bundled skills, My Skills, enablement, and enabled `/` invocation keep working. The center shows the last fully successful cache and never presents an incomplete page sequence as the full catalog.
+- **Name collisions with bundled skills**: a local copy that reuses a bundled skill's name cannot be uploaded directly; use **Save as new skill** on the card to duplicate it under a new name first. External skills no longer appear automatically; import them before enabling.
+- **Shared entry details**: shared cards show the publisher, revision, and update time; viewing previews the exact revision read-only and never writes to My Skills.
+- **Backup**: the skill center's server-side data (state, archives, audit) lives under `<dataDir>/skills/`; see [Intranet Skill Center deployment and operations](skill-center.en.md) for backup and rotation.
+
+Note: the Chinese and English user guides are maintained with equal facts but were historically outside the `*.i18n.yaml` bilingual gate; the skill center deployment document is inside that gate.

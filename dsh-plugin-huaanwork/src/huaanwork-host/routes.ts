@@ -37,7 +37,6 @@ import {
   createSkill,
   getSkill,
   importSkill,
-  listExternalSkills,
   listUserSkills,
   previewSkillImport,
   removeSkill,
@@ -47,7 +46,17 @@ import {
   type SkillSourceFilter,
   type SkillUpdateInput,
 } from './skills-host.ts'
-import { INTERNAL_BUNDLED_SKILLS, listBundledSkills, readSkillToggles, SYSTEM_SKILLS } from '../huaanwork-guardrails/skills.ts'
+import { inspectSkillArchive } from '@huaanwork/skill-format'
+import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
+import { listInvocableSkills, listSkillCenter } from './skill-center.ts'
+import { getSkillCatalogClient } from './skill-catalog-client.ts'
+import {
+  SkillDownloadError,
+  downloadSkillToMine,
+  type DownloadSkillRequest,
+} from './skill-catalog-download.ts'
+import { SkillUploadError, uploadLocalSkill } from './skill-catalog-upload.ts'
+import { SkillDuplicateError, duplicateLocalSkill } from './skill-duplicate.ts'
 import {
   RUNS_LIMIT,
   RUN_STATUSES,
@@ -790,29 +799,6 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
 
   // skill
   {
-    method: 'skill.list',
-    http: 'GET',
-    path: '/huaanwork/skill/list',
-    handler: storeRoute(async (_req, ctx) => {
-      // 旧 host.ts:1182-1195 语义:toggles 只作用于内置技能,三源合并全局按名排序、同名不去重。
-      const toggles = readSkillToggles(ctx.profileDir)
-      // 内部技能(create-agent)由创建入口注入,不进技能中心;仍留 listBundledSkills 供重名检查。
-      const bundled = listBundledSkills()
-        .filter((skill) => !INTERNAL_BUNDLED_SKILLS.has(skill.name))
-        .map((skill) => ({
-          ...skill,
-          source: 'bundled' as const,
-          enabled: SYSTEM_SKILLS.has(skill.name) || toggles[skill.name] === true,
-        }))
-      const user = await listUserSkills(ctx.profileDir)
-      const external = await listExternalSkills()
-      // 全局按名称排序;跨来源同名不去重(前端以 source:name 为 key 双卡展示,所见即运行时遮蔽关系)
-      const skills = [...bundled, ...user, ...external]
-      skills.sort((a, b) => a.name.localeCompare(b.name))
-      return { skills }
-    }),
-  }, // Task 10 (文件 I/O 读技能目录与配置)
-  {
     method: 'skill.get',
     http: 'GET',
     path: '/huaanwork/skill/get',
@@ -820,10 +806,36 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const name = queryParam(req, 'name')
       if (!name) throw new Error('skill.get requires params.name')
       const sourceParam = queryParam(req, 'source')
+      // 中心共享条目的只读预览:按精确 revision 下载归档并校验,不写本地目录。
+      if (sourceParam === 'catalog') {
+        const revisionRaw = queryParam(req, 'revision')
+        const revision = revisionRaw !== undefined && /^[1-9]\d*$/u.test(revisionRaw) ? Number(revisionRaw) : undefined
+        if (revision === undefined) {
+          throw new RouteError(400, 'bad-request', 'skill.get source=catalog requires a positive integer revision')
+        }
+        const client = getSkillCatalogClient()
+        const summary = await client.getSkillRevision(name, revision)
+        const archive = await client.downloadSkillArchive(name, revision)
+        const inspected = await inspectSkillArchive(archive)
+        if (inspected.name !== name) throw new Error(`skill ${name} archive does not match its name`)
+        if (inspected.digest !== summary.digest) throw new Error(`skill ${name} archive digest does not match the catalog`)
+        const parsed = parseSkillMarkdown(inspected.skillMarkdown)
+        return {
+          skill: {
+            name: parsed.name,
+            description: parsed.description,
+            source: 'catalog' as const,
+            ...(parsed.whenToUse ? { whenToUse: parsed.whenToUse } : {}),
+            ...(parsed.disableModelInvocation !== undefined ? { disableModelInvocation: parsed.disableModelInvocation } : {}),
+            ...(parsed.userInvocable !== undefined ? { userInvocable: parsed.userInvocable } : {}),
+            content: parsed.content,
+          },
+        }
+      }
       let source: SkillSourceFilter | undefined
       if (sourceParam !== undefined) {
-        if (sourceParam !== 'bundled' && sourceParam !== 'user' && sourceParam !== 'external') {
-          throw new Error(`skill.get source must be one of bundled | user | external, got ${sourceParam}`)
+        if (sourceParam !== 'bundled' && sourceParam !== 'user') {
+          throw new Error(`skill.get source must be one of bundled | user | catalog, got ${sourceParam}`)
         }
         source = sourceParam
       }
@@ -832,6 +844,110 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { skill }
     }),
   }, // Task 10
+  {
+    method: 'skill.centerList',
+    http: 'GET',
+    path: '/huaanwork/skill/center/list',
+    handler: storeRoute(async (_req, ctx) => listSkillCenter(ctx.profileDir)),
+  },
+  {
+    method: 'skill.mineList',
+    http: 'GET',
+    path: '/huaanwork/skill/mine/list',
+    handler: storeRoute(async (_req, ctx) => ({ skills: await listUserSkills(ctx.profileDir) })),
+  },
+  {
+    method: 'skill.invocableList',
+    http: 'GET',
+    path: '/huaanwork/skill/invocable/list',
+    handler: storeRoute(async (_req, ctx) => ({ skills: await listInvocableSkills(ctx.profileDir) })),
+  },
+  {
+    method: 'skill.download',
+    http: 'POST',
+    path: '/huaanwork/skill/download',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      for (const forbidden of ['path', 'url']) {
+        if (forbidden in body) {
+          throw new RouteError(400, 'bad-request', `skill.download does not accept ${forbidden}`)
+        }
+      }
+      const source = body.source
+      if (source !== 'bundled' && source !== 'catalog') {
+        throw new RouteError(400, 'bad-request', 'skill.download source must be bundled | catalog')
+      }
+      const name = typeof body.name === 'string' ? body.name : ''
+      if (!name) throw new RouteError(400, 'bad-request', 'skill.download requires params.name')
+      let request: DownloadSkillRequest
+      if (source === 'bundled') {
+        request = { source: 'bundled', name }
+      } else {
+        const revision = typeof body.revision === 'number' && Number.isInteger(body.revision) && body.revision > 0
+          ? body.revision
+          : undefined
+        if (revision === undefined) {
+          throw new RouteError(400, 'bad-request', 'skill.download source=catalog requires a positive integer revision')
+        }
+        request = { source: 'catalog', name, revision }
+      }
+      try {
+        return await downloadSkillToMine(ctx.profileDir, request)
+      } catch (error) {
+        if (error instanceof SkillDownloadError) {
+          const status = error.code === 'local-skill-conflict' ? 409 : 400
+          throw new RouteError(status, error.code, error.message)
+        }
+        throw error
+      }
+    }),
+  },
+  {
+    method: 'skill.upload',
+    http: 'POST',
+    path: '/huaanwork/skill/upload',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      for (const forbidden of ['path', 'url']) {
+        if (forbidden in body) {
+          throw new RouteError(400, 'bad-request', `skill.upload does not accept ${forbidden}`)
+        }
+      }
+      const name = typeof body.name === 'string' ? body.name : ''
+      if (!name) throw new RouteError(400, 'bad-request', 'skill.upload requires params.name')
+      try {
+        return await uploadLocalSkill(ctx.profileDir, name)
+      } catch (error) {
+        if (error instanceof SkillUploadError) {
+          const conflict = error.code === 'skill-already-exists'
+            || error.code === 'skill-name-conflict'
+            || error.code === 'skill-revision-conflict'
+          throw new RouteError(conflict ? 409 : 400, error.code, error.message)
+        }
+        throw error
+      }
+    }),
+  },
+  {
+    method: 'skill.duplicate',
+    http: 'POST',
+    path: '/huaanwork/skill/duplicate',
+    handler: storeRoute(async (req, ctx) => {
+      const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as Record<string, unknown>
+      const source = typeof body.source === 'string' ? body.source : ''
+      const name = typeof body.name === 'string' ? body.name : ''
+      if (!source || !name) throw new RouteError(400, 'bad-request', 'skill.duplicate requires params.source and params.name')
+      try {
+        return { skill: await duplicateLocalSkill(ctx.profileDir, source, name) }
+      } catch (error) {
+        if (error instanceof SkillDuplicateError) {
+          const status = error.code === 'skill-name-taken' ? 409 : 400
+          throw new RouteError(status, error.code, error.message)
+        }
+        throw error
+      }
+    }),
+  },
   {
     method: 'skill.create',
     http: 'POST',

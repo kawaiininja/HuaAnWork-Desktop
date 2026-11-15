@@ -11,11 +11,15 @@ const SETTINGS_FILENAME = 'huaanwork-settings.json'
 const FILE_MODE = 0o600
 const DIRECTORY_MODE = 0o700
 
-/** The thirteen keys the legacy AppSettings document defined (sidecar settings.ts:7-38). */
+/**
+ * The thirteen keys the legacy AppSettings document defined (sidecar
+ * settings.ts:7-38), plus the skill upload token added by the skill center.
+ * A legacy document simply does not carry the new key.
+ */
 const CARRIED_KEYS = [
   'base_url', 'model', 'api_key', 'theme', 'models', 'active_model_id', 'allow_network',
   'guard_mode', 'automation_timeout_ms', 'keep_awake', 'agents_host', 'agents_port',
-  'agents_catalog_token',
+  'agents_catalog_token', 'agents_skill_upload_token',
 ] as const
 
 /**

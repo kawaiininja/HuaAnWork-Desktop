@@ -93,6 +93,7 @@ const EXPECTED_WORKSPACES = [
   'update-server',
   'packages/catalog-signing',
   'packages/agent-package-format',
+  'packages/huaanwork-skill-format',
   'agent-catalog-server',
   'agent-catalog-admin',
 ]

@@ -421,6 +421,7 @@
     "@huaanwork/git-tools": "*",
     "@huaanwork/model": "*",
     "@huaanwork/policy": "*",
+    "@huaanwork/skill-format": "*",
     "@huaanwork/web-tools": "*",
     "@tailwindcss/vite": "^4",
     "@types/js-yaml": "^4.0.9",

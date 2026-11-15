@@ -73,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(72 项)——
+// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(77 项)——
 const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'workspace.open': { http: 'POST', path: '/huaanwork/workspace/open' },
   'workspace.close': { http: 'POST', path: '/huaanwork/workspace/close' },
@@ -100,7 +100,12 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'plugin.add': { http: 'POST', path: '/huaanwork/plugin/add' },
   'plugin.remove': { http: 'POST', path: '/huaanwork/plugin/remove' },
   'plugin.list': { http: 'GET', path: '/huaanwork/plugin/list' },
-  'skill.list': { http: 'GET', path: '/huaanwork/skill/list' },
+  'skill.centerList': { http: 'GET', path: '/huaanwork/skill/center/list' },
+  'skill.mineList': { http: 'GET', path: '/huaanwork/skill/mine/list' },
+  'skill.invocableList': { http: 'GET', path: '/huaanwork/skill/invocable/list' },
+  'skill.download': { http: 'POST', path: '/huaanwork/skill/download' },
+  'skill.upload': { http: 'POST', path: '/huaanwork/skill/upload' },
+  'skill.duplicate': { http: 'POST', path: '/huaanwork/skill/duplicate' },
   'skill.get': { http: 'GET', path: '/huaanwork/skill/get' },
   'skill.create': { http: 'POST', path: '/huaanwork/skill/create' },
   'skill.update': { http: 'POST', path: '/huaanwork/skill/update' },
@@ -150,8 +155,8 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
 }
 
 describe('rpcCall 路由映射', () => {
-  test('全表 72 项与 ROUTE_TABLE 一一对应', () => {
-    expect(Object.keys(ROUTES)).toHaveLength(72)
+  test('全表 77 项与 ROUTE_TABLE 一一对应', () => {
+    expect(Object.keys(ROUTES)).toHaveLength(77)
     const actual = Object.fromEntries(
       Object.entries(ROUTES).map(([method, route]) => [method, { http: route.http, path: route.path }]),
     )
@@ -325,7 +330,7 @@ describe('rpcCall 错误处理', () => {
 
   test('非 2xx 无 envelope → reject 含 HTTP status', async () => {
     fetchMock.mockResolvedValue(new Response('', { status: 405 }))
-    await expect(rpcCall('skill.list')).rejects.toThrow('HTTP 405')
+    await expect(rpcCall('skill.mineList')).rejects.toThrow('HTTP 405')
   })
 
   test('fetch 收到 180s AbortSignal', async () => {

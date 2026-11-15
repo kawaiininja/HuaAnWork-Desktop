@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -1086,35 +1087,64 @@ function rowConfig(row: EntryOptions | undefined): Record<string, unknown> {
     : {}
 }
 
+/** Empty `agentsHome` that cuts the provider's global `~/.agents/skills` root. */
+const EMPTY_AGENTS_HOME_DIR = 'skill-provider-empty-agents-home'
+const HUAANWORK_PRESET_IDS = ['preset-standard', 'preset-ptc', 'preset-cordis'] as const
+
 /**
- * `preset-ptc` carries a `tool-presentation` row inside its own `config.plugins`.
- * The include patch layer recurses only group entries, so a normal top-level
- * patch cannot reach it. Native is the global tools-row default, not a scoped
- * preset declaration: an enabled native row calls `presentAs('native')` without
- * an agent scope and fails upstream. Disable the nested row and let the global
- * `tools.mode: native` apply; the runtime `presentAs` guard stays as defense.
+ * Preset overrides that a top-level patch cannot express, because the target
+ * rows live inside each preset's own `config.plugins` and the include patch
+ * layer recurses only group entries.
+ *
+ * - `preset-ptc` carries a `tool-presentation` row. Native is the global
+ *   tools-row default, not a scoped preset declaration: an enabled native row
+ *   calls `presentAs('native')` without an agent scope and fails upstream.
+ *   Disable the nested row and let the global `tools.mode: native` apply; the
+ *   runtime `presentAs` guard stays as defense.
+ * - All three presets declare `skill-filesystem`. Their `agentsHome` is
+ *   redirected to an empty profile directory so the provider stops scanning the
+ *   global `$DSH_AGENTS_HOME/skills` root. Project roots, `$DSH_HOME/skills`
+ *   and bundled skills stay untouched (spec §10.4).
  */
-function ptcPresentationOverride(patches: readonly PatchOptions[]): PatchOptions {
+function huaanworkPresetOverrides(patches: readonly PatchOptions[], profileDir: string): PatchOptions[] {
   const rows = composeEntries([[...patches]])
-  const preset = rows.find(row => row.id === 'preset-ptc' && row.name === '@deepseek-ai/dsh-agent-preset')
-  if (preset === undefined) {
-    throw new Error(`${BIN_NAME}: ptc preset entry is missing from the composed profile`)
-  }
-  const config = structuredClone(rowConfig(preset))
-  const plugins = config.plugins
-  if (!Array.isArray(plugins)) {
-    throw new Error(`${BIN_NAME}: ptc preset config.plugins is not an array`)
-  }
-  const presentation = plugins.find(
-    plugin => plugin !== null && typeof plugin === 'object' && !Array.isArray(plugin)
-      && plugin.id === 'tool-presentation'
-      && plugin.name === '@deepseek-ai/dsh-agent-tool-presentation',
-  ) as Record<string, unknown> | undefined
-  if (presentation === undefined) {
-    throw new Error(`${BIN_NAME}: ptc preset is missing its tool-presentation row`)
-  }
-  presentation.disabled = true
-  return { id: 'preset-ptc', name: '@deepseek-ai/dsh-agent-preset', config }
+  const emptyAgentsHome = join(profileDir, EMPTY_AGENTS_HOME_DIR)
+  return HUAANWORK_PRESET_IDS.map((presetId) => {
+    const preset = rows.find(row => row.id === presetId && row.name === '@deepseek-ai/dsh-agent-preset')
+    if (preset === undefined) {
+      throw new Error(`${BIN_NAME}: ${presetId} entry is missing from the composed profile`)
+    }
+    const config = structuredClone(rowConfig(preset))
+    const plugins = config.plugins
+    if (!Array.isArray(plugins)) {
+      throw new Error(`${BIN_NAME}: ${presetId} config.plugins is not an array`)
+    }
+    if (presetId === 'preset-ptc') {
+      const presentation = plugins.find(
+        plugin => plugin !== null && typeof plugin === 'object' && !Array.isArray(plugin)
+          && plugin.id === 'tool-presentation'
+          && plugin.name === '@deepseek-ai/dsh-agent-tool-presentation',
+      ) as Record<string, unknown> | undefined
+      if (presentation === undefined) {
+        throw new Error(`${BIN_NAME}: ptc preset is missing its tool-presentation row`)
+      }
+      presentation.disabled = true
+    }
+    const skillFilesystem = plugins.find(
+      plugin => plugin !== null && typeof plugin === 'object' && !Array.isArray(plugin)
+        && plugin.id === 'skill-filesystem'
+        && plugin.name === '@deepseek-ai/dsh-skill-filesystem',
+    ) as Record<string, unknown> | undefined
+    if (skillFilesystem === undefined) {
+      throw new Error(`${BIN_NAME}: ${presetId} is missing its skill-filesystem row`)
+    }
+    const currentConfig = skillFilesystem.config
+    const skillConfig = currentConfig !== null && typeof currentConfig === 'object' && !Array.isArray(currentConfig)
+      ? currentConfig as Record<string, unknown>
+      : {}
+    skillFilesystem.config = { ...skillConfig, agentsHome: emptyAgentsHome }
+    return { id: presetId, name: '@deepseek-ai/dsh-agent-preset', config }
+  })
 }
 
 /** Snapshot, validate, and deduplicate the LAN allowlist supplied by the launcher. */
@@ -1417,6 +1447,7 @@ export function prepareDesktopProfile(
   const profileDir = profileName === DESKTOP_PROFILE_NAME
     ? ensureDesktopProfile(home)
     : resolveProfileDir(profileName, home)
+  mkdirSync(join(profileDir, EMPTY_AGENTS_HOME_DIR), { recursive: true })
   const workspaceChanged = reconcileProfilePnpmWorkspace(profileDir)
   const requiresDependencyMigration = profileDependencyMigrationRequired(profileDir, workspaceChanged, platform)
   // `plugin-management` remains the community market's user-facing scope.
@@ -1566,10 +1597,10 @@ export function prepareDesktopProfile(
     }
   }
   const patches: PatchOptions[] = [...ordinary.patches, ...aaPatches]
-  // Compose the ordinary layers before the guardrail rows: the ptc preset is
-  // inserted by the Web bundle, and its nested presentation row needs the
-  // full-config override appended after the locks.
-  const ptcPresetOverride = ptcPresentationOverride(patches)
+  // Compose the ordinary layers before the guardrail rows: the presets are
+  // inserted by the Web bundle, and their nested rows need full-config
+  // overrides appended after the locks.
+  const presetOverrides = huaanworkPresetOverrides(patches, profile.dir)
   // HuaAnWork guardrail 锁层(M3):disable/config 行与 insert 行全部走内存组合,
   // 与 ui-layout 禁用同层——应用锁在所有用户 bundle 之后生效(spec §6 第 2 条)。
   // spec §14 第 23 条残余(Task 6.9):超期 pendingRoot(写入时刻距今 > 10 分钟——
@@ -1648,7 +1679,7 @@ export function prepareDesktopProfile(
       ],
     },
   )
-  patches.push(ptcPresetOverride)
+  patches.push(...presetOverrides)
   const composedRows = composeEntries([patches])
   assertUniqueEntryIds(composedRows)
   assertEffectiveMarketRows(composedRows, effectiveMarket)

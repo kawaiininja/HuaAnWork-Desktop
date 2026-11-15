@@ -26,7 +26,12 @@ export type RpcRequest = {
     | "plugin.add"
     | "plugin.remove"
     | "plugin.list"
-    | "skill.list"
+    | "skill.centerList"
+    | "skill.mineList"
+    | "skill.invocableList"
+    | "skill.download"
+    | "skill.upload"
+    | "skill.duplicate"
     | "skill.get"
     | "skill.create"
     | "skill.update"
@@ -78,21 +83,100 @@ export type RpcRequest = {
   params?: unknown;
 };
 
-export type SkillSource = "bundled" | "user" | "external";
+export type SkillSource = "bundled" | "catalog" | "user";
 
-export type SkillInfo = { name: string; description: string; source: SkillSource; whenToUse?: string; enabled?: boolean };
-
-export type SkillDetail = SkillInfo & {
+/** `skill.get` 的只读详情模型;列表 UI 状态不进入详情。 */
+export type SkillDetail = {
+  name: string;
+  description: string;
+  source: SkillSource;
+  whenToUse?: string;
   content: string;
-  /** invocation 策略（供查看/编辑回填；缺省 = dsh 默认：模型可调用、用户可调用）。 */
   disableModelInvocation?: boolean;
   userInvocable?: boolean;
+  origin?: SkillOrigin;
+  enabled?: boolean;
+};
+
+/** 技能中心条目的下载状态投影（spec §5.2）。 */
+export type SkillDownloadState =
+  | 'available'
+  | 'downloaded'
+  | 'update-available'
+  | 'local-conflict'
+  | 'not-applicable';
+
+/** 技能中心卡片（内置 + 共享目录条目）。 */
+export type CenterSkillInfo = {
+  name: string;
+  description: string;
+  source: 'bundled' | 'catalog';
+  whenToUse?: string;
+  revision?: number;
+  publisher?: string;
+  digest?: string;
+  updatedAt?: string;
+  downloadState: SkillDownloadState;
+};
+
+/** `/` 菜单可调用条目：系统技能 + 已启用本地技能。 */
+export type InvocableSkillInfo = {
+  name: string;
+  description: string;
+  source: 'bundled' | 'user';
+  enabled: true;
+  originKind?: SkillOrigin['kind'];
+};
+
+export type SkillCenterListResult = {
+  skills: CenterSkillInfo[];
+  catalogError?: string;
+  migrationWarnings?: string[];
+};
+
+
+
+/** 本地技能来源：创建、导入、内置副本或中心共享副本（含发布身份快照）。 */
+export type SkillOrigin =
+  | { kind: 'created' }
+  | { kind: 'imported' }
+  | { kind: 'bundled' }
+  | { kind: 'catalog'; name: string; revision: number; publisher: string; digest: string };
+
+/** `skill-local-state.json` 中一条本地技能的来源、当前摘要与发布快照。 */
+export type SkillLocalEntry = {
+  origin: SkillOrigin;
+  contentDigest: string;
+  publishedRevision?: number;
+  publishedDigest?: string;
+};
+
+/** 我的技能列表/写操作返回的完整本地投影（启用状态来自 `user-skill-toggles.json`）。 */
+export type LocalSkillInfo = {
+  name: string;
+  description: string;
+  source: 'user';
+  whenToUse?: string;
+  enabled: boolean;
+  origin: SkillOrigin;
+  contentDigest: string;
+  publishedRevision?: number;
+  publishedDigest?: string;
+  publishState: 'not-published' | 'published' | 'modified';
+};
+
+/** `skill-local-state.json` 的文档形状；`migration.version === 1` 是唯一完成标记。 */
+export type SkillLocalStateDocument = {
+  schemaVersion: 1;
+  migration?: { version: 1; completedAt: string };
+  skills: Record<string, SkillLocalEntry>;
+  migrationWarnings?: string[];
 };
 
 export type SkillFieldError = { field: string; message: string };
 
 /** 技能写操作结果：校验失败走 result payload（非 RPC error），前端据 field 做模态内回显。 */
-export type SkillWriteResult = { ok: true; skill: SkillInfo } | { ok: false; fieldErrors: SkillFieldError[] };
+export type SkillWriteResult = { ok: true; skill: LocalSkillInfo } | { ok: false; fieldErrors: SkillFieldError[] };
 
 export type SkillImportPreview =
   | { ok: true; preview: SkillDetail & { targetName: string; sourceName: string; nameMismatch: boolean; kind: "file" | "directory" } }

@@ -6677,6 +6677,16 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@huaanwork/skill-format@npm:*, @huaanwork/skill-format@workspace:*, @huaanwork/skill-format@workspace:packages/huaanwork-skill-format":
+  version: 0.0.0-use.local
+  resolution: "@huaanwork/skill-format@workspace:packages/huaanwork-skill-format"
+  dependencies:
+    "@types/node": "npm:^22.20.0"
+    tar: "npm:7.5.22"
+    typescript: "npm:6.0.3"
+  languageName: unknown
+  linkType: soft
+
 "@huaanwork/web-tools@npm:*, @huaanwork/web-tools@workspace:packages/huaanwork-web-tools":
   version: 0.0.0-use.local
   resolution: "@huaanwork/web-tools@workspace:packages/huaanwork-web-tools"
@@ -8910,6 +8920,7 @@ __metadata:
   dependencies:
     "@huaanwork/agent-package-format": "workspace:*"
     "@huaanwork/catalog-signing": "workspace:*"
+    "@huaanwork/skill-format": "workspace:*"
     "@types/node": "npm:^22.20.0"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
@@ -10605,6 +10616,7 @@ __metadata:
     "@huaanwork/git-tools": "npm:*"
     "@huaanwork/model": "npm:*"
     "@huaanwork/policy": "npm:*"
+    "@huaanwork/skill-format": "npm:*"
     "@huaanwork/web-tools": "npm:*"
     "@tailwindcss/vite": "npm:^4"
     "@types/js-yaml": "npm:^4.0.9"

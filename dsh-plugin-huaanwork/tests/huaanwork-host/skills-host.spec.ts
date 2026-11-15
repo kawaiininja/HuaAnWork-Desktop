@@ -5,24 +5,19 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import {
   createSkill,
   getSkill,
-  getSkillHandlesForTest,
   importSkill,
-  listExternalSkills,
   listUserSkills,
   previewSkillImport,
   removeSkill,
-  restoreEnabledBundledSkills,
   setSkillEnabled,
   updateSkill,
 } from '../../src/huaanwork-host/skills-host.ts'
-import {
-  readSkillToggles,
-  setBundledSkillRegistrar,
-} from '../../src/huaanwork-guardrails/skills.ts'
+import { readSkillLocalState, readUserSkillToggles, setUserSkillToggle, writeSkillLocalEntry } from '../../src/huaanwork-host/skill-local-state.ts'
+import { resolveInvocableSkill } from '../../src/huaanwork-host/skill-invoke.ts'
 import { promises as fsp } from 'node:fs'
 
 // 用例移植自旧 sidecar skills-host.test.ts 的 list/get 段(skills-host.test.ts:29-110):
-// 三源合并、遮蔽序 user → external → bundled、bundled 根为包内 skills/(Task 2)。
+// 遮蔽序 user → bundled、bundled 根为包内 skills/(Task 2/3;外部根已退出)。
 
 const DEMO = '---\nname: demo\ndescription: 演示技能\n---\n\n正文\n'
 
@@ -36,15 +31,13 @@ function makeHome(): string {
 }
 
 beforeEach(() => {
-  // 隔离外部技能根:未设置时 externalSkillsRoot 回落 ~/.agents/skills(机器相关)。
+  // 隔离外部技能根:证明未启用/外部条目不参与解析(不再有扫描回退)。
   prevAgentsHome = process.env.DSH_AGENTS_HOME
   process.env.DSH_AGENTS_HOME = mkdtempSync(join(tmpdir(), 'hw-fake-agents-'))
   homes.push(process.env.DSH_AGENTS_HOME)
 })
 
 afterEach(() => {
-  setBundledSkillRegistrar(null)
-  getSkillHandlesForTest().clear()
   if (prevAgentsHome === undefined) delete process.env.DSH_AGENTS_HOME
   else process.env.DSH_AGENTS_HOME = prevAgentsHome
   while (homes.length > 0) rmSync(homes.pop()!, { recursive: true, force: true })
@@ -72,15 +65,7 @@ describe('skills-host 读路径(旧 skills-host.test.ts 用例)', () => {
     expect(await listUserSkills(home)).toEqual([])
   })
 
-  test('listExternalSkills reads the agents-home skills root read-only', async () => {
-    const agents = process.env.DSH_AGENTS_HOME!
-    mkdirSync(join(agents, 'skills'), { recursive: true })
-    writeFileSync(join(agents, 'skills', 'ext.md'), '---\nname: ext\ndescription: 外部技能\n---\n\nx\n')
-    const skills = await listExternalSkills()
-    expect(skills.map((s) => [s.name, s.source])).toEqual([['ext', 'external']])
-  })
-
-  test('getSkill searches user then external then bundled', async () => {
+  test('getSkill searches user then bundled', async () => {
     const home = makeHome()
     mkdirSync(join(home, 'skills', 'demo'), { recursive: true })
     writeFileSync(join(home, 'skills', 'demo', 'SKILL.md'), DEMO)
@@ -100,25 +85,51 @@ describe('skills-host 读路径(旧 skills-host.test.ts 用例)', () => {
     // 手写用户技能,与内置 explore 同名(createSkill 拒绝内置同名,故直接落盘绕过)
     mkdirSync(join(home, 'skills', 'explore'), { recursive: true })
     writeFileSync(join(home, 'skills', 'explore', 'SKILL.md'), '---\nname: explore\ndescription: 用户同名\n---\n\n用户正文\n')
-    const agents = process.env.DSH_AGENTS_HOME!
-    mkdirSync(join(agents, 'skills'), { recursive: true })
-    writeFileSync(join(agents, 'skills', 'explore.md'), '---\nname: explore\ndescription: 外部同名\n---\n\n外部正文\n')
-    // 无 source:保持 用户 → 外部 → 内置 的 rank order
+    // 无 source:保持 用户 → 内置 的 rank order(外部根不再参与回退)
     const unscoped = await getSkill(home, 'explore')
     expect(unscoped?.source).toBe('user')
     expect(unscoped?.content).toBe('用户正文')
     // 定向 source:只在该来源的根里找
     expect((await getSkill(home, 'explore', 'user'))?.content).toBe('用户正文')
-    expect((await getSkill(home, 'explore', 'external'))?.content).toBe('外部正文')
     const bundledScoped = await getSkill(home, 'explore', 'bundled')
     expect(bundledScoped?.source).toBe('bundled')
     expect(bundledScoped?.content ?? '').toMatch(/subagent/)
-    // 该来源下不存在 → undefined(外部/用户 root 没有内置独占名;bundled 没有用户/外部名)
-    expect(await getSkill(home, 'test-fix', 'external')).toBeUndefined()
+    // 该来源下不存在 → undefined(用户 root 没有内置独占名;bundled 没有用户名)
     expect(await getSkill(home, 'test-fix', 'user')).toBeUndefined()
     expect(await getSkill(home, 'missing', 'bundled')).toBeUndefined()
     // SKILL_NAME_RE 守卫对带 source 的查询同样生效
     expect(await getSkill(home, '../etc', 'user')).toBeUndefined()
+  })
+})
+
+describe('skills-host resolver 启用门与外部退出 (Task 3)', () => {
+  function writeLocalSkillFile(profile: string, name: string, extraFrontmatter = ''): void {
+    const dir = join(profile, 'skills', name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${name}\n${extraFrontmatter}---\n\n正文\n`, 'utf8')
+  }
+
+  test('disabled local skill is rejected by the Host resolver', async () => {
+    const profile = makeHome()
+    writeLocalSkillFile(profile, 'demo')
+    setUserSkillToggle(profile, 'demo', false)
+    await expect(resolveInvocableSkill(profile, 'demo')).rejects.toThrow('skill demo is disabled')
+  })
+
+  test('external skills are not an implicit fallback', async () => {
+    const profile = makeHome()
+    const agents = process.env.DSH_AGENTS_HOME!
+    mkdirSync(join(agents, 'skills'), { recursive: true })
+    writeFileSync(join(agents, 'skills', 'external-only.md'), '---\nname: external-only\ndescription: 外部技能\n---\n\n正文\n', 'utf8')
+    expect(await getSkill(profile, 'external-only')).toBeUndefined()
+    await expect(resolveInvocableSkill(profile, 'external-only')).rejects.toThrow('skill external-only was not found')
+  })
+
+  test('user-invocable false does not block an enabled local skill', async () => {
+    const profile = makeHome()
+    writeLocalSkillFile(profile, 'demo', 'user-invocable: false\n')
+    setUserSkillToggle(profile, 'demo', true)
+    await expect(resolveInvocableSkill(profile, 'demo')).resolves.toMatchObject({ skill: { name: 'demo' } })
   })
 })
 
@@ -173,6 +184,10 @@ describe('skills-host 写路径 (Task 1)', () => {
       expect(created.skill.name).toBe('my-skill')
       expect(created.skill.source).toBe('user')
       expect(created.skill.whenToUse).toBe('处理特定任务时')
+      expect(created.skill.enabled).toBe(false)
+      expect(created.skill.origin).toEqual({ kind: 'created' })
+      expect(created.skill.publishState).toBe('not-published')
+      expect(created.skill.contentDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
     }
 
     const fileContent = await fsp.readFile(join(home, 'skills', 'my-skill', 'SKILL.md'), 'utf8')
@@ -180,7 +195,8 @@ describe('skills-host 写路径 (Task 1)', () => {
     expect(fileContent).toContain('description: 我的技能')
     expect(fileContent).toContain('whenToUse: 处理特定任务时')
     expect(fileContent).toContain('disable-model-invocation: true')
-    expect(fileContent).toContain('user-invocable: false')
+    // R7:创建不再写 user-invocable;手动调用由本地启用开关决定。
+    expect(fileContent).not.toContain('user-invocable')
     expect(fileContent).toContain('# 步骤\n1. 执行')
 
     // 7. 用户同名重复创建拒绝
@@ -314,6 +330,19 @@ describe('skills-host 写路径 (Task 1)', () => {
       if (!symResult.ok) expect(symResult.fieldErrors[0]?.message).toContain('符号链接')
     }
 
+    // 6. 顶层目录本身是符号链接 -> 拒绝
+    const realSkillDir = join(home, 'real-skill-dir')
+    mkdirSync(realSkillDir, { recursive: true })
+    writeFileSync(join(realSkillDir, 'SKILL.md'), '---\nname: real-sym-target\ndescription: sym\n---\n\nx\n')
+    const topSymlinkDir = join(home, 'top-symlink-dir')
+    await fsp.symlink(realSkillDir, topSymlinkDir).catch(() => null)
+    const isTopSym = await fsp.lstat(topSymlinkDir).then((s) => s.isSymbolicLink()).catch(() => false)
+    if (isTopSym) {
+      const topSymResult = await previewSkillImport(home, topSymlinkDir)
+      expect(topSymResult.ok).toBe(false)
+      if (!topSymResult.ok) expect(topSymResult.fieldErrors[0]?.message).toContain('目录包含符号链接，已拒绝导入')
+    }
+
     // 6. 正常 file 预览 (校验 targetName, sourceName, nameMismatch, kind)
     const fileSource = join(home, 'original-filename.md')
     writeFileSync(
@@ -394,187 +423,156 @@ describe('skills-host 写路径 (Task 1)', () => {
     expect(savedAux).toBe('{"key":"value"}')
   })
 
-  test('setSkillEnabled 校验、落盘与即时生效机制', async () => {
+  test('setSkillEnabled 只切换已存在的本地用户技能', async () => {
     const home = makeHome()
 
-    // 1. 参数校验:空名称
+    // 1. 参数与目标校验:空名称、不存在的本地技能、系统技能、内部技能。
     await expect(setSkillEnabled(home, '', true)).rejects.toThrow(/params\.name/)
-
-    // 2. 拒绝系统技能 (SYSTEM_SKILLS: explore, test-fix)
+    await expect(setSkillEnabled(home, 'missing', true)).rejects.toThrow(/不是本地用户技能/)
     await expect(setSkillEnabled(home, 'explore', false)).rejects.toThrow(/系统技能，始终启用/)
     await expect(setSkillEnabled(home, 'test-fix', false)).rejects.toThrow(/系统技能，始终启用/)
+    await expect(setSkillEnabled(home, 'create-agent', true)).rejects.toThrow(/内部技能，不能启停/)
 
-    // 3. 拒绝非内置技能
-    await expect(setSkillEnabled(home, 'not-a-bundled-skill', true)).rejects.toThrow(/not a bundled skill/)
+    // 2. 普通内置同名不再是“内置启停”:先落成本地副本再切换。
+    const created = await createSkill(home, { name: 'pdf', description: '本地 PDF', content: '本地正文' })
+    expect(created.ok).toBe(true)
+    await expect(setSkillEnabled(home, 'pdf', true)).resolves.toEqual({ ok: true })
+    expect(readUserSkillToggles(home)['pdf']).toBe(true)
 
-    // 4. 落盘校验与即时生效 (带 mock registrar)
-    let registeredSkillName: string | undefined
-    let disposed = false
-    const mockDispose = () => {
-      disposed = true
-    }
-    const mockRegistrar = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registeredSkillName = skill.name
-          return mockDispose
-        },
-      },
-    }
-
-    setBundledSkillRegistrar(mockRegistrar as any)
-    try {
-      // 启用 pdf
-      const enableRes = await setSkillEnabled(home, 'pdf', true)
-      expect(enableRes).toEqual({ ok: true })
-      expect(registeredSkillName).toBe('pdf')
-
-      // 落盘验证
-      const togglesOn = readSkillToggles(home)
-      expect(togglesOn['pdf']).toBe(true)
-
-      // 禁用 pdf -> 触发 dispose
-      const disableRes = await setSkillEnabled(home, 'pdf', false)
-      expect(disableRes).toEqual({ ok: true })
-      expect(disposed).toBe(true)
-
-      // 落盘验证 (禁用后 key 被 delete)
-      const togglesOff = readSkillToggles(home)
-      expect(togglesOff['pdf']).toBeUndefined()
-
-      // registrar 为 null 时安全跳过重注不抛错
-      setBundledSkillRegistrar(null)
-      await expect(setSkillEnabled(home, 'pdf', true)).resolves.toEqual({ ok: true })
-      expect(readSkillToggles(home)['pdf']).toBe(true)
-    } finally {
-      setBundledSkillRegistrar(null)
-    }
-  })
-})
-
-describe('restoreEnabledBundledSkills boot 恢复(M4 评审 D2)', () => {
-  test('按 toggles 恢复已启用技能:跳过系统技能、未知名容错、handles 记账', () => {
-    const home = makeHome()
-    // pdf 真实存在于 bundled 目录;explore 是系统技能(由 guardrails 注册,恢复须跳过);
-    // not-a-bundled-skill 不存在——registerBundledSkill 返回 undefined,静默跳过不抛。
-    writeFileSync(
-      join(home, 'skill-toggles.json'),
-      JSON.stringify({ pdf: true, explore: true, 'not-a-bundled-skill': true }),
-    )
-    const registered: string[] = []
-    const mockRegistrar = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registered.push(skill.name)
-          return () => {}
-        },
-      },
-    }
-
-    restoreEnabledBundledSkills(home, mockRegistrar)
-
-    expect(registered).toEqual(['pdf'])
-    expect(getSkillHandlesForTest().has('pdf')).toBe(true)
-  })
-
-  test('启用 → 重启(新 registrar)→ 仍注册,且之后 disable 仍生效', async () => {
-    const home = makeHome()
-    const registeredA: string[] = []
-    const registrarA = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registeredA.push(skill.name)
-          return () => {}
-        },
-      },
-    }
-
-    // 第一代:用户启用 pdf(即时注册 + 落盘)。
-    setBundledSkillRegistrar(registrarA as any)
-    try {
-      await setSkillEnabled(home, 'pdf', true)
-      expect(registeredA).toEqual(['pdf'])
-    } finally {
-      setBundledSkillRegistrar(null)
-    }
-
-    // 模拟 generation 重启:模块态(handles)随新进程归零,boot 恢复用新 registrar 重放
-    // (等价 index.ts 内联 skills 插件在 skills 服务就绪后执行的行为)。
-    getSkillHandlesForTest().clear()
-    const registeredB: string[] = []
-    let disposedB = false
-    const registrarB = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registeredB.push(skill.name)
-          return () => {
-            disposedB = true
-          }
-        },
-      },
-    }
-
-    restoreEnabledBundledSkills(home, registrarB)
-
-    // D2 修复目标:重启后模型目录里仍能发现该技能(收到注册)。
-    expect(registeredB).toEqual(['pdf'])
-    expect(getSkillHandlesForTest().has('pdf')).toBe(true)
-
-    // 回归断言:恢复进了 skillHandles 记账,后续 disable 才能真正 dispose——
-    // harness register 同层 first-wins,不记账则 disable 半残。
-    await setSkillEnabled(home, 'pdf', false)
-    expect(disposedB).toBe(true)
-    expect(readSkillToggles(home)['pdf']).toBeUndefined()
-  })
-
-  test('同进程重复 restore 幂等:dispose-then-register,handles 不膨胀', () => {
-    const home = makeHome()
-    writeFileSync(join(home, 'skill-toggles.json'), JSON.stringify({ pdf: true }))
-    const registered: string[] = []
-    const disposed: string[] = []
-    const mockRegistrar = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registered.push(skill.name)
-          return () => disposed.push(skill.name)
-        },
-      },
-    }
-
-    restoreEnabledBundledSkills(home, mockRegistrar)
-    restoreEnabledBundledSkills(home, mockRegistrar)
-
-    expect(registered).toEqual(['pdf', 'pdf'])
-    expect(disposed).toEqual(['pdf'])
-    expect(getSkillHandlesForTest().size).toBe(1)
+    // 3. 禁用后键被删除(缺省 = 禁用);旧 skill-toggles.json 不再承载新状态。
+    await expect(setSkillEnabled(home, 'pdf', false)).resolves.toEqual({ ok: true })
+    expect(readUserSkillToggles(home)['pdf']).toBeUndefined()
+    expect(await fsp.readFile(join(home, 'skill-toggles.json'), 'utf8').catch(() => null)).toBeNull()
   })
 })
 
 describe('内部技能不可全局启用(设计 §6.1)', () => {
-  test('create-agent 被 setSkillEnabled 与 boot 恢复同时跳过', async () => {
+  test('create-agent 被 setSkillEnabled 拒绝且不写用户启用键', async () => {
     const home = makeHome()
 
     await expect(setSkillEnabled(home, 'create-agent', true)).rejects.toThrow(/内部技能，不能启停/)
-    expect(readSkillToggles(home)['create-agent']).toBeUndefined()
+    expect(readUserSkillToggles(home)['create-agent']).toBeUndefined()
+  })
+})
 
-    // 旧开关表里即使残留 create-agent,重启也不得注册进全局技能目录。
-    writeFileSync(
-      join(home, 'skill-toggles.json'),
-      JSON.stringify({ 'create-agent': true, pdf: true }),
-    )
-    const registered: string[] = []
-    const mockRegistrar = {
-      skills: {
-        register: (skill: { name: string }) => {
-          registered.push(skill.name)
-          return () => {}
-        },
-      },
-    }
-    restoreEnabledBundledSkills(home, mockRegistrar)
+describe('导入预览与确认的校验边界一致(评审 Important 4)', () => {
+  const skillMd = (name: string) => `---\nname: ${name}\ndescription: ${name}\n---\n\n正文\n`
 
-    expect(registered).toEqual(['pdf'])
-    expect(getSkillHandlesForTest().has('create-agent')).toBe(false)
+  test('预览阶段即拒绝硬链接并返回 fieldErrors', async () => {
+    const home = makeHome()
+    const dir = join(home, 'hardlink-skill')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('hardlink-skill'))
+    const target = join(home, 'outside.txt')
+    writeFileSync(target, 'outside')
+    const linkPath = join(dir, 'hard.txt')
+    await fsp.link(target, linkPath).catch(() => null)
+    const linked = await fsp.lstat(linkPath).then((s) => s.nlink > 1).catch(() => false)
+    if (!linked) return
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.message).toContain('硬链接')
+  })
+
+  test('预览阶段即拒绝保留前缀段', async () => {
+    const home = makeHome()
+    const dir = join(home, 'reserved-skill')
+    mkdirSync(join(dir, '.tmp-cache'), { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('reserved-skill'))
+    writeFileSync(join(dir, '.tmp-cache', 'x.txt'), 'x')
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.field).toBe('path')
+  })
+
+  test('预览阶段即拒绝超过 256 条目', async () => {
+    const home = makeHome()
+    const dir = join(home, 'many-skill')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('many-skill'))
+    for (let index = 0; index < 256; index += 1) writeFileSync(join(dir, `f${index}.txt`), 'x')
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.message).toContain('256')
+  })
+
+  test('预览阶段即拒绝超过 5 MiB 内容总量', async () => {
+    const home = makeHome()
+    const dir = join(home, 'big-skill')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('big-skill'))
+    writeFileSync(join(dir, 'big.bin'), Buffer.alloc(6 * 1024 * 1024))
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.field).toBe('path')
+  })
+
+  test('预览阶段即拒绝超过 512 字节的路径', async () => {
+    const home = makeHome()
+    const dir = join(home, 'deep-skill')
+    const segment = 'a'.repeat(200)
+    const deep = join(dir, segment, segment, segment)
+    mkdirSync(deep, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('deep-skill'))
+    writeFileSync(join(deep, 'x.txt'), 'x')
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.message).toContain('512')
+  })
+
+  test('含资源文件的合法目录仍正常预览并可确认导入', async () => {
+    const home = makeHome()
+    const dir = join(home, 'resource-skill')
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('resource-skill'))
+    writeFileSync(join(dir, 'scripts', 'run.mjs'), 'console.log("ok")\n')
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(true)
+    const imported = await importSkill(home, dir)
+    expect(imported.ok).toBe(true)
+  })
+})
+
+describe('带外磁盘编辑的列表投影(评审 Important 1)', () => {
+  test('已发布技能被外部修改 SKILL.md 后投影为 modified 且摘要反映磁盘', async () => {
+    const home = makeHome()
+    const created = await createSkill(home, { name: 'demo', description: '演示技能', content: '第一版' })
+    expect(created.ok).toBe(true)
+    const recorded = readSkillLocalState(home).skills.demo!
+    writeSkillLocalEntry(home, 'demo', { ...recorded, publishedRevision: 1, publishedDigest: recorded.contentDigest })
+    expect((await listUserSkills(home))[0]!.publishState).toBe('published')
+
+    writeFileSync(join(home, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: 演示技能\n---\n\n外部改过\n')
+    const [skill] = await listUserSkills(home)
+    expect(skill!.publishState).toBe('modified')
+    expect(skill!.contentDigest).not.toBe(recorded.contentDigest)
+  })
+
+  test('已发布技能被外部修改附带资源文件后投影为 modified', async () => {
+    const home = makeHome()
+    const created = await createSkill(home, { name: 'demo', description: '演示技能', content: '第一版' })
+    expect(created.ok).toBe(true)
+    writeFileSync(join(home, 'skills', 'demo', 'run.mjs'), 'console.log("v1")\n')
+    const updated = await updateSkill(home, 'demo', { description: '演示技能', content: '第一版' })
+    expect(updated.ok).toBe(true)
+    const recorded = readSkillLocalState(home).skills.demo!
+    writeSkillLocalEntry(home, 'demo', { ...recorded, publishedRevision: 1, publishedDigest: recorded.contentDigest })
+    expect((await listUserSkills(home))[0]!.publishState).toBe('published')
+
+    writeFileSync(join(home, 'skills', 'demo', 'run.mjs'), 'console.log("v2")\n')
+    const [skill] = await listUserSkills(home)
+    expect(skill!.publishState).toBe('modified')
+    expect(skill!.contentDigest).not.toBe(recorded.contentDigest)
+  })
+
+  test('同名扁平 .md 与目录包只投影一条(评审 Minor 5)', async () => {
+    const home = makeHome()
+    const root = join(home, 'skills')
+    mkdirSync(join(root, 'demo'), { recursive: true })
+    writeFileSync(join(root, 'demo', 'SKILL.md'), DEMO)
+    writeFileSync(join(root, 'demo.md'), DEMO)
+    const skills = await listUserSkills(home)
+    expect(skills.map((s) => s.name)).toEqual(['demo'])
   })
 })
 

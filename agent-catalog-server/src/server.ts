@@ -54,9 +54,16 @@
 
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { join } from 'node:path'
 import { AuditLog, redactSecrets, type AuditEvent } from './audit.ts'
-import { authenticateToken, bearerToken, tokenActor, type AgentCatalogRole } from './auth.ts'
-import type { AgentCatalogConfig } from './config.ts'
+import {
+  authenticateSkillPublisher,
+  authenticateToken,
+  bearerToken,
+  tokenActor,
+  type AgentCatalogRole,
+} from './auth.ts'
+import { catalogSecrets, type AgentCatalogConfig } from './config.ts'
 import {
   approveDelistRequest,
   createDelistRequest,
@@ -67,6 +74,8 @@ import {
   type GovernanceHandlerContext,
 } from './governance.ts'
 import { findEntry, loadEntries } from './legacy.ts'
+import { SkillStore } from './skill-store.ts'
+import { downloadSkillArchive, getSkillRevision, listSkills, publishSkill } from './skills.ts'
 import { CatalogStore } from './store.ts'
 import {
   approveSubmission,
@@ -94,33 +103,48 @@ export interface AgentCatalogRuntime {
   readonly config: AgentCatalogConfig
   readonly store: CatalogStore
   readonly audit: AuditLog
+  readonly skillStore: SkillStore
+  readonly skillAudit: AuditLog
 }
 
+/** Every configured secret, including skill upload tokens (spec §7.4). */
+const secretList = catalogSecrets
+
 /**
- * Open the runtime (state store first: a corrupt state file must refuse
- * startup before any request can be served or audited). After both files are
- * open, unclosed write intents are reconciled (Task 4): a crash between the
- * state commit and its audit result line must not leave an unaudited
- * successful change.
+ * Open the runtime (state stores first: a corrupt state file must refuse
+ * startup before any request can be served or audited). After the stores and
+ * their audit logs are open, unclosed write intents are reconciled (Task 4):
+ * a crash between a state commit and its audit result line must not leave an
+ * unaudited successful change. Skill state and the agent state keep separate
+ * audit logs, so each reconciliation only sees its own journal.
  */
 export async function createAgentCatalogRuntime(config: AgentCatalogConfig): Promise<AgentCatalogRuntime> {
+  const secrets = secretList(config)
   const store = await CatalogStore.open(config.dataDir)
-  const audit = await AuditLog.open(config.dataDir, [config.readToken, config.publishToken, config.adminToken])
+  const skillStore = await SkillStore.open(config.dataDir)
+  const audit = await AuditLog.open(config.dataDir, secrets)
+  const skillAudit = await AuditLog.open(join(config.dataDir, 'skills'), secrets)
   await audit.reconcile(store.read())
-  return { config, store, audit }
+  await skillAudit.reconcile(skillStore.read())
+  return { config, store, audit, skillStore, skillAudit }
 }
 
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
 
-type PatternSegment = string | ':slug' | ':version' | ':id' | ':requestId'
+type PatternSegment = string | ':slug' | ':version' | ':id' | ':requestId' | ':skillName' | ':revision'
+
+/** Role of a request: one of the agent roles, or a skill uploader. */
+export type CatalogPrincipal = AgentCatalogRole | 'skill-publish'
 
 interface RouteDefinition {
   readonly id: string
   readonly path: readonly PatternSegment[]
   readonly method: string
-  readonly roles: readonly AgentCatalogRole[]
+  readonly roles: readonly CatalogPrincipal[]
+  /** Which audit journal the route writes to (spec §7.4). */
+  readonly audit: 'agent' | 'skill'
 }
 
 /**
@@ -130,27 +154,39 @@ interface RouteDefinition {
  * `/{slug}/{version}` (and keeps the two capture kinds apart in the audit).
  */
 const AGENT_PACKAGE_ROUTES: readonly RouteDefinition[] = [
-  { id: 'agentPackages.list', path: [], method: 'GET', roles: ['read'] },
-  { id: 'agentPackages.submissions.create', path: ['submissions'], method: 'POST', roles: ['publish'] },
-  { id: 'agentPackages.submissions.pending', path: ['submissions'], method: 'GET', roles: ['admin'] },
-  { id: 'agentPackages.submissions.get', path: ['submissions', ':id'], method: 'GET', roles: ['publish', 'admin'] },
-  { id: 'agentPackages.submissions.bundle', path: ['submissions', ':id', 'bundle'], method: 'GET', roles: ['admin'] },
-  { id: 'agentPackages.submissions.approve', path: ['submissions', ':id', 'approve'], method: 'POST', roles: ['admin'] },
-  { id: 'agentPackages.submissions.reject', path: ['submissions', ':id', 'reject'], method: 'POST', roles: ['admin'] },
-  { id: 'agentPackages.delistRequests.pending', path: ['delist-requests'], method: 'GET', roles: ['admin'] },
-  { id: 'agentPackages.delistRequests.approve', path: ['delist-requests', ':requestId', 'approve'], method: 'POST', roles: ['admin'] },
-  { id: 'agentPackages.delistRequests.reject', path: ['delist-requests', ':requestId', 'reject'], method: 'POST', roles: ['admin'] },
-  { id: 'agentPackages.revocations.list', path: ['revocations'], method: 'GET', roles: ['read'] },
-  { id: 'agentPackages.get', path: [':slug', ':version'], method: 'GET', roles: ['read'] },
-  { id: 'agentPackages.bundle', path: [':slug', ':version', 'bundle'], method: 'GET', roles: ['read'] },
-  { id: 'agentPackages.delistRequests.create', path: [':slug', ':version', 'delist-requests'], method: 'POST', roles: ['publish'] },
-  { id: 'agentPackages.revoke', path: [':slug', ':version', 'revoke'], method: 'POST', roles: ['admin'] },
+  { id: 'agentPackages.list', path: [], method: 'GET', roles: ['read'], audit: 'agent' },
+  { id: 'agentPackages.submissions.create', path: ['submissions'], method: 'POST', roles: ['publish'], audit: 'agent' },
+  { id: 'agentPackages.submissions.pending', path: ['submissions'], method: 'GET', roles: ['admin'], audit: 'agent' },
+  { id: 'agentPackages.submissions.get', path: ['submissions', ':id'], method: 'GET', roles: ['publish', 'admin'], audit: 'agent' },
+  { id: 'agentPackages.submissions.bundle', path: ['submissions', ':id', 'bundle'], method: 'GET', roles: ['admin'], audit: 'agent' },
+  { id: 'agentPackages.submissions.approve', path: ['submissions', ':id', 'approve'], method: 'POST', roles: ['admin'], audit: 'agent' },
+  { id: 'agentPackages.submissions.reject', path: ['submissions', ':id', 'reject'], method: 'POST', roles: ['admin'], audit: 'agent' },
+  { id: 'agentPackages.delistRequests.pending', path: ['delist-requests'], method: 'GET', roles: ['admin'], audit: 'agent' },
+  { id: 'agentPackages.delistRequests.approve', path: ['delist-requests', ':requestId', 'approve'], method: 'POST', roles: ['admin'], audit: 'agent' },
+  { id: 'agentPackages.delistRequests.reject', path: ['delist-requests', ':requestId', 'reject'], method: 'POST', roles: ['admin'], audit: 'agent' },
+  { id: 'agentPackages.revocations.list', path: ['revocations'], method: 'GET', roles: ['read'], audit: 'agent' },
+  { id: 'agentPackages.get', path: [':slug', ':version'], method: 'GET', roles: ['read'], audit: 'agent' },
+  { id: 'agentPackages.bundle', path: [':slug', ':version', 'bundle'], method: 'GET', roles: ['read'], audit: 'agent' },
+  { id: 'agentPackages.delistRequests.create', path: [':slug', ':version', 'delist-requests'], method: 'POST', roles: ['publish'], audit: 'agent' },
+  { id: 'agentPackages.revoke', path: [':slug', ':version', 'revoke'], method: 'POST', roles: ['admin'], audit: 'agent' },
+]
+
+/**
+ * Skill surface (spec §7.1). Static segment `archive` is matched after the
+ * two-segment metadata pattern by length, never shadowed by `:skillName`.
+ */
+const SKILL_ROUTES: readonly RouteDefinition[] = [
+  { id: 'skills.list', path: [], method: 'GET', roles: ['read'], audit: 'skill' },
+  { id: 'skills.get', path: [':skillName', ':revision'], method: 'GET', roles: ['read'], audit: 'skill' },
+  { id: 'skills.archive', path: [':skillName', ':revision', 'archive'], method: 'GET', roles: ['read'], audit: 'skill' },
+  { id: 'skills.publish', path: [':skillName'], method: 'POST', roles: ['skill-publish'], audit: 'skill' },
 ]
 
 interface ResolvedRoute {
   /** Stable action id used both for dispatch and for the audit action. */
   readonly id: string
-  readonly roles: readonly AgentCatalogRole[]
+  readonly roles: readonly CatalogPrincipal[]
+  readonly audit: 'agent' | 'skill'
   readonly methodMatched: boolean
   readonly legacy: boolean
   readonly entryNameRaw?: string
@@ -162,6 +198,7 @@ interface ResolvedRoute {
 }
 
 const AGENT_PACKAGE_PREFIX = '/v1/agent-packages'
+const SKILLS_PREFIX = '/v1/skills'
 const LEGACY_PREFIX = '/v1/catalog'
 
 function splitAgentPackagePath(pathname: string): string[] | null {
@@ -208,7 +245,8 @@ function withCaptures(
 ): ResolvedRoute {
   const route: {
     id: string
-    roles: readonly AgentCatalogRole[]
+    roles: readonly CatalogPrincipal[]
+    audit: 'agent' | 'skill'
     methodMatched: boolean
     legacy: boolean
     slug?: string
@@ -218,47 +256,49 @@ function withCaptures(
   } = {
     id: definition.id,
     roles: definition.roles,
+    audit: definition.audit,
     methodMatched,
     legacy: false,
   }
-  if (captures.slug !== undefined) route.slug = captures.slug
-  if (captures.version !== undefined) route.version = captures.version
+  // Skill routes reuse the agent audit coordinates: name -> slug,
+  // revision -> version (spec §7.4), so routeAuditContext stays one shape.
+  const slug = captures.skillName ?? captures.slug
+  const version = captures.revision ?? captures.version
+  if (slug !== undefined) route.slug = slug
+  if (version !== undefined) route.version = version
   if (captures.id !== undefined) route.submissionId = captures.id
   if (captures.requestId !== undefined) route.delistRequestId = captures.requestId
   return route
 }
 
-function resolveRoute(method: string, pathname: string): ResolvedRoute | null {
-  // Legacy M-A0 surface. Shape preserved exactly: `/v1/catalog` (list) and
-  // `/v1/catalog/<name>` (single entry); everything else is unknown.
-  if (pathname === LEGACY_PREFIX) {
-    return { id: 'catalog.list', roles: ['read'], methodMatched: method === 'GET', legacy: true }
-  }
-  if (pathname.startsWith(`${LEGACY_PREFIX}/`)) {
-    return {
-      id: 'catalog.get',
-      roles: ['read'],
-      methodMatched: method === 'GET',
-      legacy: true,
-      entryNameRaw: pathname.slice(LEGACY_PREFIX.length + 1),
-    }
-  }
+function splitSkillPath(pathname: string): string[] | null {
+  if (pathname === SKILLS_PREFIX) return []
+  if (!pathname.startsWith(`${SKILLS_PREFIX}/`)) return null
+  const rest = pathname.slice(SKILLS_PREFIX.length + 1)
+  return rest === '' ? [] : rest.split('/')
+}
 
-  const segments = splitAgentPackagePath(pathname)
-  if (segments === null) return null
-
-  for (const definition of AGENT_PACKAGE_ROUTES) {
+/**
+ * Match one surface's table. A known path with a wrong method answers 405
+ * with the union of every method's roles, so authorization still runs before
+ * the method verdict (a publish token cannot probe an admin-only path). The
+ * method-not-allowed route keeps the surface's audit journal.
+ */
+function resolveSurface(
+  method: string,
+  segments: readonly string[],
+  definitions: readonly RouteDefinition[],
+  audit: 'agent' | 'skill',
+): ResolvedRoute | null {
+  for (const definition of definitions) {
     if (definition.method !== method) continue
     const captures = matchPattern(definition.path, segments)
     if (captures !== null) return withCaptures(definition, captures, true)
   }
 
-  // Known path, wrong method: 405. The role set is the union of every method
-  // defined for this path, so authorization still runs before the method
-  // verdict (a publish token cannot probe an admin-only path).
-  const roles = new Set<AgentCatalogRole>()
+  const roles = new Set<CatalogPrincipal>()
   let matchedPath = false
-  for (const definition of AGENT_PACKAGE_ROUTES) {
+  for (const definition of definitions) {
     const captures = matchPattern(definition.path, segments)
     if (captures === null) continue
     matchedPath = true
@@ -268,9 +308,35 @@ function resolveRoute(method: string, pathname: string): ResolvedRoute | null {
   return {
     id: 'route.method-not-allowed',
     roles: [...roles],
+    audit,
     methodMatched: false,
     legacy: false,
   }
+}
+
+function resolveRoute(method: string, pathname: string): ResolvedRoute | null {
+  // Legacy M-A0 surface. Shape preserved exactly: `/v1/catalog` (list) and
+  // `/v1/catalog/<name>` (single entry); everything else is unknown.
+  if (pathname === LEGACY_PREFIX) {
+    return { id: 'catalog.list', roles: ['read'], audit: 'agent', methodMatched: method === 'GET', legacy: true }
+  }
+  if (pathname.startsWith(`${LEGACY_PREFIX}/`)) {
+    return {
+      id: 'catalog.get',
+      roles: ['read'],
+      audit: 'agent',
+      methodMatched: method === 'GET',
+      legacy: true,
+      entryNameRaw: pathname.slice(LEGACY_PREFIX.length + 1),
+    }
+  }
+
+  const skillSegments = splitSkillPath(pathname)
+  if (skillSegments !== null) return resolveSurface(method, skillSegments, SKILL_ROUTES, 'skill')
+
+  const segments = splitAgentPackagePath(pathname)
+  if (segments === null) return null
+  return resolveSurface(method, segments, AGENT_PACKAGE_ROUTES, 'agent')
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +393,7 @@ function errorBody(error: string, code?: string): AgentCatalogErrorBody {
  */
 async function finish(
   response: ServerResponse,
-  runtime: AgentCatalogRuntime,
+  audit: AuditLog,
   result: HandlerResult,
   actor: string,
   config: AgentCatalogConfig,
@@ -352,7 +418,7 @@ async function finish(
     requestId,
   }
   try {
-    await runtime.audit.writeAudit(event)
+    await audit.writeAudit(event)
   } catch (cause) {
     const message = redactSecrets(String((cause as Error).message), secretList(config))
     console.error(`agent-catalog-server: audit write failed: ${message}`)
@@ -365,10 +431,6 @@ async function finish(
     return
   }
   sendJson(response, effective.status, effective.body ?? null, effective.headers)
-}
-
-function secretList(config: AgentCatalogConfig): readonly string[] {
-  return [config.readToken, config.publishToken, config.adminToken]
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +483,7 @@ async function handleRequest(
   } catch {
     await finish(
       response,
-      runtime,
+      runtime.audit,
       jsonResult(400, errorBody('请求无效', 'bad-request'), {
         action: 'request.invalid',
         outcome: 'error',
@@ -434,13 +496,19 @@ async function handleRequest(
     return
   }
 
+  // BOTH authenticators always run: a role match must never skip the skill
+  // uploader comparison (spec §7.4). The principal is the role when one
+  // matched, otherwise the skill publisher id when an upload token matched.
   const identity = presented === undefined ? null : authenticateToken(config, presented)
+  const publisher = presented === undefined ? undefined : authenticateSkillPublisher(config, presented)
   const route = resolveRoute(method, pathname)
+  const targetAudit = route?.audit === 'skill' ? runtime.skillAudit : runtime.audit
+  const principal: CatalogPrincipal | null = identity ?? (publisher === undefined ? null : 'skill-publish')
 
-  if (identity === null) {
+  if (principal === null) {
     await finish(
       response,
-      runtime,
+      targetAudit,
       jsonResult(401, errorBody('口令错误'), {
         action: 'auth.denied',
         outcome: 'denied',
@@ -454,9 +522,10 @@ async function handleRequest(
   }
 
   if (route === null) {
+    // Unmatched routes never belong to the skill surface: agent audit.
     await finish(
       response,
-      runtime,
+      runtime.audit,
       jsonResult(404, errorBody('Not Found'), {
         action: 'route.unknown',
         outcome: 'error',
@@ -469,14 +538,14 @@ async function handleRequest(
     return
   }
 
-  if (!route.roles.includes(identity)) {
+  if (!route.roles.includes(principal)) {
     await finish(
       response,
-      runtime,
+      targetAudit,
       jsonResult(403, errorBody('权限不足', 'forbidden'), {
         action: route.id,
         outcome: 'denied',
-        reason: `role ${identity} is not allowed on this route`,
+        reason: `role ${principal} is not allowed on this route`,
         ...routeAuditContext(route),
       }),
       actor,
@@ -489,7 +558,7 @@ async function handleRequest(
   if (!route.methodMatched) {
     await finish(
       response,
-      runtime,
+      targetAudit,
       jsonResult(
         405,
         // M-A0 answered `{"error":"只支持 GET"}` for the legacy surface; keep
@@ -511,7 +580,7 @@ async function handleRequest(
   // Fail-closed on a broken audit log: a mutating request must not reach its
   // handler if its audit line could not be written anyway. GETs may still
   // fail later in finish(); this gate is specifically about WRITES.
-  if (method !== 'GET' && method !== 'HEAD' && runtime.audit.unavailable) {
+  if (method !== 'GET' && method !== 'HEAD' && targetAudit.unavailable) {
     console.error('agent-catalog-server: refusing a write while the audit log is unavailable')
     sendJson(response, 500, errorBody('审计写入失败', 'audit-write-failed'))
     return
@@ -522,7 +591,7 @@ async function handleRequest(
   // so there is no state change and nothing for reconciliation to guess about.
   if (method !== 'GET' && method !== 'HEAD') {
     try {
-      await runtime.audit.writeIntent({
+      await targetAudit.writeIntent({
         action: route.id,
         actor,
         requestId,
@@ -544,7 +613,15 @@ async function handleRequest(
   // the server-level guard (which is left for `finish` itself).
   let result: HandlerResult
   try {
-    result = await dispatch(route, { request, runtime, config, role: identity, actor, requestId })
+    result = await dispatch(route, {
+      request,
+      runtime,
+      config,
+      role: principal,
+      ...(publisher === undefined ? {} : { publisher }),
+      actor,
+      requestId,
+    })
   } catch (cause) {
     const message = redactSecrets(String((cause as Error)?.message ?? cause), secretList(config))
     console.error(`agent-catalog-server: request handler failed: ${message}`)
@@ -555,17 +632,23 @@ async function handleRequest(
       ...routeAuditContext(route),
     })
   }
-  await finish(response, runtime, result, actor, config, requestId)
+  await finish(response, targetAudit, result, actor, config, requestId)
 }
 
 interface DispatchContext {
   readonly request: IncomingMessage
   readonly runtime: AgentCatalogRuntime
   readonly config: AgentCatalogConfig
-  readonly role: AgentCatalogRole
+  readonly role: CatalogPrincipal
+  /** Present whenever the presented token belongs to a skill uploader. */
+  readonly publisher?: string
   readonly actor: string
   /** The id of this request; mutations stamp it into `state.lastMutation`. */
   readonly requestId: string
+}
+
+function requestUrl(request: IncomingMessage): URL {
+  return new URL(request.url ?? '/', 'http://localhost')
 }
 
 async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise<HandlerResult> {
@@ -603,39 +686,59 @@ async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise
     return jsonResult(200, entry, { action: 'catalog.get', outcome: 'ok' })
   }
 
-  const handlers = submissionContext(context)
-  const governance = governanceContext(context)
+  // Constructed lazily: skill routes must never build an agent handler context,
+  // whose role invariant excludes the skill-publish principal.
+  const handlers = (): SubmissionHandlerContext => submissionContext(context)
+  const governance = (): GovernanceHandlerContext => governanceContext(context)
   switch (route.id) {
     case 'agentPackages.list':
-      return listPublishedPackages(handlers)
+      return listPublishedPackages(handlers())
     case 'agentPackages.get':
-      return getPackageMetadata(handlers, route.slug ?? '', route.version ?? '')
+      return getPackageMetadata(handlers(), route.slug ?? '', route.version ?? '')
     case 'agentPackages.bundle':
-      return downloadPackageBundle(handlers, route.slug ?? '', route.version ?? '')
+      return downloadPackageBundle(handlers(), route.slug ?? '', route.version ?? '')
     case 'agentPackages.submissions.create':
-      return createSubmission(handlers)
+      return createSubmission(handlers())
     case 'agentPackages.submissions.pending':
-      return listPendingSubmissions(handlers)
+      return listPendingSubmissions(handlers())
     case 'agentPackages.submissions.get':
-      return getSubmission(handlers, route.submissionId ?? '')
+      return getSubmission(handlers(), route.submissionId ?? '')
     case 'agentPackages.submissions.bundle':
-      return downloadSubmissionBundle(handlers, route.submissionId ?? '')
+      return downloadSubmissionBundle(handlers(), route.submissionId ?? '')
     case 'agentPackages.submissions.approve':
-      return approveSubmission(handlers, route.submissionId ?? '')
+      return approveSubmission(handlers(), route.submissionId ?? '')
     case 'agentPackages.submissions.reject':
-      return rejectSubmission(handlers, route.submissionId ?? '')
+      return rejectSubmission(handlers(), route.submissionId ?? '')
     case 'agentPackages.delistRequests.create':
-      return createDelistRequest(governance, route.slug ?? '', route.version ?? '')
+      return createDelistRequest(governance(), route.slug ?? '', route.version ?? '')
     case 'agentPackages.delistRequests.pending':
-      return listDelistRequests(governance)
+      return listDelistRequests(governance())
     case 'agentPackages.delistRequests.approve':
-      return approveDelistRequest(governance, route.delistRequestId ?? '')
+      return approveDelistRequest(governance(), route.delistRequestId ?? '')
     case 'agentPackages.delistRequests.reject':
-      return rejectDelistRequest(governance, route.delistRequestId ?? '')
+      return rejectDelistRequest(governance(), route.delistRequestId ?? '')
     case 'agentPackages.revoke':
-      return revokePackage(governance, route.slug ?? '', route.version ?? '')
+      return revokePackage(governance(), route.slug ?? '', route.version ?? '')
     case 'agentPackages.revocations.list':
-      return listRevocations(governance)
+      return listRevocations(governance())
+    case 'skills.list':
+      return listSkills(context.runtime.skillStore, requestUrl(context.request))
+    case 'skills.get':
+      return getSkillRevision(context.runtime.skillStore, route.slug ?? '', route.version ?? '')
+    case 'skills.archive':
+      return downloadSkillArchive(context.runtime.skillStore, route.slug ?? '', route.version ?? '')
+    case 'skills.publish': {
+      const publisher = context.publisher
+      if (publisher === undefined) {
+        throw new Error('a skill-publish principal must carry a publisher id')
+      }
+      return publishSkill({
+        request: context.request,
+        store: context.runtime.skillStore,
+        publisher,
+        requestId: context.requestId,
+      }, route.slug ?? '')
+    }
     default:
       // Unreachable while AGENT_PACKAGE_ROUTES and this switch agree. It must
       // still answer with the unified body: adding a route id without a handler
@@ -649,12 +752,24 @@ async function dispatch(route: ResolvedRoute, context: DispatchContext): Promise
   }
 }
 
+/**
+ * The agent handlers were written against the three agent roles. A
+ * `skill-publish` principal can only reach skill routes (the role sets never
+ * overlap), so this narrowing is an invariant assertion, not a mapping.
+ */
+function agentRole(context: DispatchContext): AgentCatalogRole {
+  if (context.role === 'skill-publish') {
+    throw new Error('skill-publish principal dispatched an agent route')
+  }
+  return context.role
+}
+
 function submissionContext(context: DispatchContext): SubmissionHandlerContext {
   return {
     request: context.request,
     config: context.config,
     store: context.runtime.store,
-    role: context.role,
+    role: agentRole(context),
     actor: context.actor,
     requestId: context.requestId,
   }
@@ -665,7 +780,7 @@ function governanceContext(context: DispatchContext): GovernanceHandlerContext {
   return {
     request: context.request,
     store: context.runtime.store,
-    role: context.role,
+    role: agentRole(context),
     actor: context.actor,
     requestId: context.requestId,
   }

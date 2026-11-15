@@ -34,6 +34,7 @@ import {
   type ListedAgent,
   type SessionRuntimeContext,
 } from '../../src/huaanwork-host/sessions.ts'
+import { setUserSkillToggle } from '../../src/huaanwork-host/skill-local-state.ts'
 import { openWorkspace } from '../../src/huaanwork-host/workspace.ts'
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
@@ -532,6 +533,7 @@ describe('session.send 网络门禁 (旧 session-history.test.ts:L115-153)', () 
       ['---', 'name: demo', 'description: 演示技能', '---', '', '按演示技能说明执行。'].join('\n'),
       'utf8',
     )
+    setUserSkillToggle(routeCtx.profileDir, 'demo', true)
     const received: unknown[] = []
     const channelAgent: ListedAgent = {
       id: 'huaanwork',
@@ -2560,6 +2562,7 @@ describe('session.send 调度器接线', () => {
       ['---', 'name: demo', 'description: 演示技能', '---', '', '按演示技能说明执行。'].join('\n'),
       'utf8',
     )
+    setUserSkillToggle(root, 'demo', true)
     const idleA = makeDeferred()
     const idleSkill = makeDeferred()
     h.addAgent('a1', () => idleA.promise)

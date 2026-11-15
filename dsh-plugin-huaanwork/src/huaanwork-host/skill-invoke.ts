@@ -1,9 +1,12 @@
 import { dirname } from "node:path";
 
-import { SYSTEM_SKILLS, SKILL_NAME_RE, bundledSkillDir, readSkillToggles } from "../huaanwork-guardrails/skills.ts";
+import { SKILL_NAME_RE } from "@huaanwork/skill-format/markdown";
+
+import { SYSTEM_SKILLS, bundledSkillDir } from "../huaanwork-guardrails/skills.ts";
 import type { SkillDetail } from "../client-huaanwork/rpc-types.ts";
 
-import { externalSkillsRoot, findEntry, getSkill, userSkillsRoot } from "./skills-host.ts";
+import { readUserSkillToggles } from "./skill-local-state.ts";
+import { findEntry, getSkill, userSkillsRoot } from "./skills-host.ts";
 
 /**
  * @skill 分发(旧 sidecar skill-invoke.ts 逐字移植)。
@@ -17,13 +20,15 @@ import { externalSkillsRoot, findEntry, getSkill, userSkillsRoot } from "./skill
 
 export type InvocableSkill = { skill: SkillDetail; resourceDir?: string };
 
-/** 用户显式点名时：内置必须已启用；用户/外部技能始终可调用。 */
+/** 用户显式点名时：系统技能始终可调用；本地技能必须已启用；普通内置须先下载为本地副本。 */
 export async function resolveInvocableSkill(storageRoot: string, name: string): Promise<InvocableSkill> {
   if (!SKILL_NAME_RE.test(name)) throw new Error(`skill ${name} is not invocable`);
   const skill = await getSkill(storageRoot, name);
   if (!skill) throw new Error(`skill ${name} was not found`);
-  if (skill.source === "bundled" && !SYSTEM_SKILLS.has(skill.name)) {
-    if (readSkillToggles(storageRoot)[skill.name] !== true) throw new Error(`skill ${skill.name} is disabled`);
+  if (skill.source === "user") {
+    if (readUserSkillToggles(storageRoot)[name] !== true) throw new Error(`skill ${name} is disabled`);
+  } else if (!SYSTEM_SKILLS.has(skill.name)) {
+    throw new Error(`skill ${skill.name} requires a downloaded local copy`);
   }
   const resourceDir = await resourceDirFor(storageRoot, skill);
   return { skill, ...(resourceDir !== undefined ? { resourceDir } : {}) };
@@ -31,7 +36,8 @@ export async function resolveInvocableSkill(storageRoot: string, name: string): 
 
 async function resourceDirFor(storageRoot: string, skill: SkillDetail): Promise<string | undefined> {
   if (skill.source === "bundled") return bundledSkillDir(skill.name);
-  const root = skill.source === "user" ? userSkillsRoot(storageRoot) : externalSkillsRoot();
+  if (skill.source !== "user") return undefined;
+  const root = userSkillsRoot(storageRoot);
   const entry = await findEntry(root, skill.name);
   if (!entry) return undefined;
   return entry.kind === "bundle" ? dirname(entry.path) : root;

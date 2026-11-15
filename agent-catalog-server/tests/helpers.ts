@@ -35,6 +35,15 @@ export const READ_TOKEN = 'test-read-token-012345678901234567890123456789'
 export const PUBLISH_TOKEN = 'test-publish-token-012345678901234567890123456789'
 export const ADMIN_TOKEN = 'test-admin-token-012345678901234567890123456789'
 
+/**
+ * Skill upload tokens: distinct from every role token (config refuses overlap).
+ * The repeated-letter tails are deliberate: they keep Shannon entropy below
+ * gitleaks' generic-api-key threshold so the fixtures do not trip the secret
+ * scan. Do not regenerate them as random/high-entropy strings.
+ */
+export const ALICE_SKILL_TOKEN = 'test-skill-alice-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+export const BOB_SKILL_TOKEN = 'test-skill-bob-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
 const FIXTURE_ENTRIES_DIR = join(import.meta.dirname, 'fixtures', 'entries')
 const FIXTURE_ENTRY_FILES = ['code-review.json', 'task-orch.json', 'typo-check.json'] as const
 
@@ -141,6 +150,8 @@ export interface TestRequestOptions {
   readonly token?: string
   readonly method?: string
   readonly body?: TestBody
+  /** Raw bytes sent verbatim (takes precedence over `body`; no content-type is implied). */
+  readonly raw?: Buffer
   readonly headers?: Record<string, string>
 }
 
@@ -179,9 +190,12 @@ export interface TestAgentCatalog {
   /** Present only when `retiredKeyAt` was configured. */
   readonly retiredKey?: TestKeyring
   readonly auditPath: string
+  /** Skill audit journal (`<dataDir>/skills/audit.jsonl`). */
+  readonly skillAuditPath: string
   request: <T = any>(path: string, options?: TestRequestOptions) => Promise<TestResponse<T>>
   readAudit: () => Promise<AuditRecord[]>
   readAuditRaw: () => Promise<string>
+  readSkillAudit: () => Promise<AuditRecord[]>
   close: () => Promise<void>
 }
 
@@ -225,6 +239,7 @@ export async function bootTestAgentCatalog(
       AGENT_CATALOG_PUBLISH_TOKEN: PUBLISH_TOKEN,
       AGENT_CATALOG_ADMIN_TOKEN: ADMIN_TOKEN,
       AGENT_CATALOG_KEYRING_PATH: keyring.path,
+      AGENT_CATALOG_SKILL_UPLOADERS: JSON.stringify({ alice: ALICE_SKILL_TOKEN, bob: BOB_SKILL_TOKEN }),
     }),
     port: 0,
   }
@@ -234,6 +249,7 @@ export async function bootTestAgentCatalog(
   const address = server.address() as AddressInfo
   const baseUrl = `http://127.0.0.1:${String(address.port)}`
   const auditPath = join(dataDir, 'audit.jsonl')
+  const skillAuditPath = join(dataDir, 'skills', 'audit.jsonl')
 
   const request = <T = any>(path: string, requestOptions: TestRequestOptions = {}): Promise<TestResponse<T>> =>
     new Promise((resolve, reject) => {
@@ -242,7 +258,9 @@ export async function bootTestAgentCatalog(
         headers.authorization = `Bearer ${requestOptions.token}`
       }
       let payload: Buffer | undefined
-      if (requestOptions.body !== undefined) {
+      if (requestOptions.raw !== undefined) {
+        payload = requestOptions.raw
+      } else if (requestOptions.body !== undefined) {
         if (Buffer.isBuffer(requestOptions.body)) {
           payload = requestOptions.body
         } else if (typeof requestOptions.body === 'string') {
@@ -304,6 +322,7 @@ export async function bootTestAgentCatalog(
     activeKey: keyring,
     ...(retiredKey === undefined ? {} : { retiredKey }),
     auditPath,
+    skillAuditPath,
     request,
     readAudit: async () => {
       const raw = await readAuditRaw()
@@ -313,6 +332,19 @@ export async function bootTestAgentCatalog(
         .map(line => JSON.parse(line) as AuditRecord)
     },
     readAuditRaw,
+    readSkillAudit: async () => {
+      let raw: string
+      try {
+        raw = await readFile(skillAuditPath, 'utf8')
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return []
+        throw cause
+      }
+      return raw
+        .split('\n')
+        .filter(line => line.trim() !== '')
+        .map(line => JSON.parse(line) as AuditRecord)
+    },
     close: async () => {
       server.closeAllConnections()
       await new Promise<void>(resolve => server.close(() => resolve()))

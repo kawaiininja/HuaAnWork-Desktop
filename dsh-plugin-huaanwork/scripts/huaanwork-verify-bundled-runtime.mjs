@@ -2,7 +2,7 @@
  * Verify that the agent-package runtime is compiled into `lib/` instead of
  * being resolved at runtime.
  *
- * The three `@huaanwork/*` modules export raw TypeScript, so they can never be
+ * The `@huaanwork/*` modules export raw TypeScript, so they can never be
  * runtime externals of the published JavaScript: every emitted file must carry
  * their code inline. `tar` is allowed to ship either way, but never both and
  * never neither:
@@ -24,6 +24,7 @@ export const AGENT_PACKAGE_RUNTIME_PACKAGES = Object.freeze([
   '@huaanwork/agent-package-format',
   '@huaanwork/catalog-signing',
   '@huaanwork/policy',
+  '@huaanwork/skill-format',
 ])
 
 /**
@@ -35,6 +36,7 @@ export const BUNDLED_MARKERS = Object.freeze({
   '@huaanwork/agent-package-format': 'MAX_AGENT_PACKAGE_BUNDLE_BYTES',
   '@huaanwork/catalog-signing': 'parseCatalogKeyring',
   '@huaanwork/policy': 'workNetworkGateError',
+  '@huaanwork/skill-format': 'MAX_SKILL_ARCHIVE_BYTES',
   tar: 'TAR_BAD_ARCHIVE',
 })
 
@@ -132,8 +134,8 @@ function realManifestPath(path) {
 }
 
 /**
- * Collect every package whose code is compiled into `lib/`: the three
- * first-party runtime modules, `tar`, and the production dependency closure of
+ * Collect every package whose code is compiled into `lib/`: the first-party
+ * runtime modules, `tar`, and the production dependency closure of
  * `tar` (all of it is inlined by the bundler).
  * @param {string} packageRoot - absolute package root.
  * @returns {{ names: string[], failures: string[] }} bundled package names.

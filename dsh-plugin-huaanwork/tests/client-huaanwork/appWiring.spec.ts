@@ -2120,3 +2120,30 @@ test("thinkingBefore never borrows another round's reasoning", () => {
   const sameRound = [...items.slice(0, 2), { id: 4, kind: "assistant" as const, text: "第一轮正文", roundKey: 10 }];
   assert.equal(AppModule.thinkingBefore(sameRound, 2)?.id, 2);
 });
+
+const SKILLS_VIEW_SOURCE = readFileSync(
+  new URL("../../src/client-huaanwork/SkillsView.tsx", import.meta.url),
+  "utf8",
+);
+
+test("the slash catalog refresh is callable from the skills page and wired to card actions", () => {
+  // 契约钉:技能页启用期间也必须能刷新 `/` 目录(不得再以 view==='main' 为门)。
+  const start = APP_SOURCE.indexOf("const refreshSlashCatalog = useCallback");
+  const end = APP_SOURCE.indexOf("}, [ready, sidecarDead]);", start);
+  assert.ok(start >= 0 && end > start, "refreshSlashCatalog still exists");
+  const block = APP_SOURCE.slice(start, end);
+  assert.doesNotMatch(block, /view !== "main"/);
+  assert.match(APP_SOURCE, /onInvocableChanged=\{refreshSlashCatalog\}/);
+  // 下载/重复/启停等操作成功后就地刷新,不依赖视图切换。
+  const callbacks = SKILLS_VIEW_SOURCE.match(/onInvocableChanged\?\.\(\)/g) ?? [];
+  assert.ok(callbacks.length >= 3, "card actions refresh the slash catalog");
+  const downloadStart = SKILLS_VIEW_SOURCE.indexOf("const downloadSkill");
+  const downloadEnd = SKILLS_VIEW_SOURCE.indexOf("const uploadSkill", downloadStart);
+  assert.ok(downloadStart >= 0 && downloadEnd > downloadStart);
+  assert.match(SKILLS_VIEW_SOURCE.slice(downloadStart, downloadEnd), /onInvocableChanged\?\.\(\)/);
+  // 中心与我的各用独立错误槽:中心加载失败不得画到“我的技能”。
+  assert.match(SKILLS_VIEW_SOURCE, /const \[centerError, setCenterError\]/);
+  assert.match(SKILLS_VIEW_SOURCE, /const \[mineError, setMineError\]/);
+  assert.match(SKILLS_VIEW_SOURCE, /tab === "center" && centerError/);
+  assert.match(SKILLS_VIEW_SOURCE, /tab === "mine" && mineError/);
+});

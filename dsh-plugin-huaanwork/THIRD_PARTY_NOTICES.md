@@ -353,6 +353,7 @@ This list records package names, versions, licenses, and how each package ships.
 | @huaanwork/agent-package-format | 0.1.0 | MIT | bundled |
 | @huaanwork/catalog-signing | 0.1.0 | MIT | bundled |
 | @huaanwork/policy | 0.1.0 | MIT | bundled |
+| @huaanwork/skill-format | 0.1.0 | MIT | bundled |
 | @img/colour | 1.1.0 | MIT | installed |
 | @img/sharp-darwin-arm64 | 0.35.5 | Apache-2.0 | installed |
 | @img/sharp-darwin-x64 | 0.35.5 | Apache-2.0 | installed |

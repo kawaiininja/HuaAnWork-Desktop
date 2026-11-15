@@ -63,6 +63,7 @@ const BUNDLED_FIRST_PARTY_PACKAGES = [
   '@huaanwork/agent-package-format',
   '@huaanwork/catalog-signing',
   '@huaanwork/policy',
+  '@huaanwork/skill-format',
 ]
 
 /**
