@@ -24,6 +24,7 @@ import {
   skillCatalogCachePath,
 } from '../../src/huaanwork-host/skill-center.ts'
 import type { SkillCatalogClient, SkillRevisionSummary } from '../../src/huaanwork-host/skill-catalog-client.ts'
+import { SkillCatalogClientError } from '../../src/huaanwork-host/skill-catalog-client.ts'
 import type { SkillDownloadState } from '../../src/client-huaanwork/rpc-types.ts'
 
 const digestA = `sha256:${'a'.repeat(64)}`
@@ -271,6 +272,25 @@ test('treats a corrupt cache as a miss', async () => {
   const result = await listSkillCenter(profile, { client: failing })
   assert.equal(result.catalogError, SKILL_CATALOG_UNAVAILABLE)
   assert.equal(result.skills.some(skill => skill.source === 'catalog'), false)
+})
+
+test('surfaces a distinct message for auth failures (评审 Minor 1)', async () => {
+  const profile = makeHome()
+  const failing = fakeClient(async () => {
+    throw new SkillCatalogClientError('技能上传口令错误或权限不足', 'auth', 401)
+  })
+  const result = await listSkillCenter(profile, { client: failing })
+  assert.equal(result.catalogError, '技能上传口令错误或权限不足')
+  assert.ok(result.skills.some(skill => skill.source === 'bundled'))
+})
+
+test('surfaces a distinct message for page-limit failures (评审 Minor 1)', async () => {
+  const profile = makeHome()
+  const failing = fakeClient(async () => {
+    throw new SkillCatalogClientError('技能目录分页超过 1000 页上限', 'page-limit')
+  })
+  const result = await listSkillCenter(profile, { client: failing })
+  assert.equal(result.catalogError, '技能目录分页超过 1000 页上限')
 })
 
 test('projects the slash menu to system plus enabled local skills without remote calls', async () => {

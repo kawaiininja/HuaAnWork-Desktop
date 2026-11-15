@@ -28,6 +28,7 @@ import {
 import { readSkillLocalState } from './skill-local-state.ts'
 import { listUserSkills } from './skills-host.ts'
 import {
+  SkillCatalogClientError,
   getSkillCatalogClient,
   type SkillCatalogClient,
   type SkillRevisionSummary,
@@ -42,6 +43,17 @@ import type {
 export const SKILL_CATALOG_UNAVAILABLE = '共享技能库不可用，当前显示内置技能与已缓存内容'
 export const SKILL_CATALOG_CACHE_FILENAME = 'skill-catalog-cache.json'
 const CACHE_MODE = 0o600
+
+/**
+ * §5.4 的不可用文案覆盖不可达与未知失败;鉴权与页数上限是可运维诊断的信号,
+ * 沿用客户端的非密钥错误文案单独呈现,其余仍降级为不可用文案。
+ */
+function catalogFailureMessage(cause: unknown): string {
+  if (cause instanceof SkillCatalogClientError && (cause.code === 'auth' || cause.code === 'page-limit')) {
+    return cause.message
+  }
+  return SKILL_CATALOG_UNAVAILABLE
+}
 
 type SkillCatalogCacheDocument = {
   schemaVersion: 1
@@ -182,9 +194,9 @@ export async function listSkillCenter(
     // the documented bundled+cache view, never fail the local lists.
     const client = options.client ?? getSkillCatalogClient()
     remoteItems = await client.listSharedSkills()
-  } catch {
+  } catch (cause) {
     remoteItems = readCache(profileDir)
-    catalogError = SKILL_CATALOG_UNAVAILABLE
+    catalogError = catalogFailureMessage(cause)
   }
   if (catalogError === undefined && remoteItems !== undefined) {
     try {
