@@ -1,7 +1,7 @@
 # 技能中心双标签与内网共享流转设计规格
 
 - 日期：2026-11-14
-- 状态：已确认产品方向，待实施
+- 状态：已实施（2026-11-15）。Windows 真机矩阵按 R-ACCEPT-1 方式记 **waiver**（无 Windows 主机，未验证真实 Windows 边界，不得写成通过）；补跑触发与残余风险见 `docs/evidence/2026-11-14-skill-center-catalog.md` §6
 - 基线：外层仓库 `9d5a7a0f75e195e41179e4c7ad94003659038567`；`deepseek-harness` pin `1600d8a1e140dcde43a1a0941940a0480712c011`（`0.2.1-rc.1`）
 - 范围：HuaAnWork 技能中心、我的技能、显式 `/` 调用、内网共享技能目录、相关持久化与迁移
 - 约束：不修改 `deepseek-harness/`；所有桌面行为改动落在 HuaAnWork 自有代码与 Profile 组合层

@@ -1202,17 +1202,17 @@ corepack yarn check
 
 每条命令单独记录开始时间、结束时间、退出码和关键计数；不得用较早任务的通过结果替代最终树结果。若 `verify:aa` 触发已知并发竞争，先停止并行门禁，再单独重跑该步骤并记录原因，不跳过检查。
 
-- [ ] **Step 2: 启动隔离的内网目录服务与两个桌面 Profile**
+- [x] **Step 2: 启动隔离的内网目录服务与两个桌面 Profile**
 
 使用测试数据目录和两个不同上传者 token，不连接生产 profile，不替换 `/Applications`。服务端配置 `alice`、`bob` 两个技能上传者；客户端 A 使用 alice token，客户端 B 使用 bob token，read token 相同。记录服务地址、Profile 路径和构建提交。
 
-- [ ] **Step 3: 执行双向流转与防绕过验收**
+- [x] **Step 3: 执行双向流转与防绕过验收**
 
 按规格 §14.2 逐项执行并保存证据：A 上传 revision 1；A/B 中心可见；B 下载后默认禁用；手工 `/demo` 被 Host 拒绝；B 启用后 `/` 可见且资源目录正确；禁用后再次拒绝；A 更新 revision 2；B 不自动更新；B 更新 A 的名称得到冲突；内置同名副本经“另存为新技能”后可上传；外部导入后启用才可用；断网后本地调用仍可用；设置保存后技能中心刷新，启停后 `/` 目录即时刷新。
 
 同时验证三种 preset 不再扫描真实 `~/.agents/skills`，智能体包 `allowSkills` 不能调用未启用本地技能。
 
-- [ ] **Step 4: 执行平台与升级验收**
+- [x] **Step 4: 执行平台与升级验收**
 
 macOS 验证真实 UI、目录选择、下载资源、启停、重启恢复和迁移。Windows 有主机时重复同一矩阵；没有主机时在证据中标记 `BLOCKED: no Windows host`，不得写成通过。用隔离 fixture 验证旧用户技能、旧启用内置、同名冲突和外部文件保留。
 
@@ -1220,7 +1220,7 @@ macOS 验证真实 UI、目录选择、下载资源、启停、重启恢复和�
 
 逐项把规格 R1–R6、§5–§14 映射到实现任务和证据；检查活跃源码无 `all/external` 技能标签、无旧 `skill.list` 消费、无外部 resolver 回退、无普通 bundled 启停恢复。检查文档没有把摘要写成签名、没有把 CI 写成 Windows 真机通过。
 
-- [ ] **Step 6: 更新状态并提交证据**
+- [x] **Step 6: 更新状态并提交证据**
 
 只有所有必需验收完成或明确记录经 owner 接受的 waiver 后，才把规格状态改为“已实施”。证据文件记录每项 PASS/BLOCKED/waiver、命令退出码和产物位置。
 
@@ -1240,5 +1240,5 @@ git commit -m "docs(skills): record skill center implementation acceptance"
 ## Execution Status (2026-11-14)
 
 - Task 1–10 implemented and reviewed (per-task review artifacts under `.superpowers/sdd/2026-11-14-skill-center-catalog/`); final tree gates recorded in `docs/evidence/2026-11-14-skill-center-catalog.md`.
-- Task 11 Steps 1 and 5 completed; Step 1 recorded a single pre-existing timing flake in `agent-package-runtime.spec.ts` (isolated rerun green, same suite green inside `yarn check`) with both exit codes retained.
-- Task 11 Steps 2–4 (macOS) executed on 2026-11-15 against an isolated catalog server and two sequential profiles (alice/bob identities); the matrix results live in the evidence file §3. Windows remains **BLOCKED** (no host). A controlled legacy-migration fixture and a real-machine `allowSkills` round were added on 2026-11-15 and passed (evidence §3). Step 6 therefore keeps the spec status at “待实施”, not “已实施”, until Windows is verified or the owner accepts a waiver.
+- Task 11 Steps 1–6 completed; Step 1 recorded a single pre-existing timing flake in `agent-package-runtime.spec.ts` (isolated rerun green, same suite green inside `yarn check`) with both exit codes retained.
+- Task 11 Steps 2–4 (macOS) executed on 2026-11-15 against an isolated catalog server and two sequential profiles (alice/bob identities); the matrix results live in the evidence file §3. A controlled legacy-migration fixture and a real-machine `allowSkills` round were added on 2026-11-15 and passed (evidence §3). Windows has no host; per owner ruling on 2026-11-15 it is recorded **WAIVED in the R-ACCEPT-1 style** (never as a Windows pass; substitute = the repo's `desktop-windows` CI chain once the branch is pushed; residual risks and re-run trigger documented in evidence §6). The spec status is therefore set to “已实施” with that waiver, not “待实施”.

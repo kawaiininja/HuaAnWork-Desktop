@@ -65,7 +65,7 @@
 | 三种 preset 不再扫描真实 `~/.agents/skills` | **PASS（隔离）** | 以 `DSH_AGENTS_HOME` 指向含 `ext-visible.md` 的临时外部根重启后，中心/我的/`/` 菜单均无该外部技能；原文件保留 |
 | 智能体包 `allowSkills` 不能调用未启用本地技能 | **PASS（2026-11-15 补充）** | 播种本地包 `@weekly-report`（`allowSkills:["demo"]`，tools=none）并启用；demo 禁用时真实派发 `@weekly-report`，界面报“智能体 @weekly-report 引用的技能 demo 不可用：skill demo is disabled”；启用 demo 后同一派发完成真实模型回合，父会话收到“周报助手 @weekly-report 已回复：它的技能是先收集本周工作，再生成周报” |
 | 升级 fixture（旧用户技能/旧启用内置/同名冲突/外部文件） | **PASS（2026-11-15 受控 fixture）** | 受控旧目录：`skills/legacy-user` + `skill-toggles.json {pdf:true,xlsx:true}` + 同名本地 `skills/pdf`（内容标记）+ 外部 `ext-only.md`。首启后：legacy-user 来源 created 且启用；pdf 文件未被覆盖（标记仍在）、启用、警告 `内置技能 pdf 未复制：已存在同名本地技能`；xlsx 复制为 bundled 并启用；外部技能未导入且原文件保留；`migration.version=1`。随后在 UI 禁用 xlsx 并重启：`skill-local-state.json` 字节不变（哈希相同）、toggles 只剩 legacy-user/pdf、UI 中 xlsx 仍为“启用”（未被迁移重新启用） |
-| Windows 真机矩阵 | **BLOCKED** | 无 Windows 主机 |
+| Windows 真机矩阵 | **WAIVED（R-ACCEPT-1 式，owner 2026-11-15 裁定）** | 无 Windows 主机；**不得写成 Windows 矩阵通过**。替代证据：分支推送后由 CI `desktop-windows` job 构建安装器并在链内运行 `verify-win-installer`（CI 定义既有；本分支尚未跑 CI）。残余风险：真实 macOS→Windows 机器/OS 边界、Windows UI 矩阵、原生目录选择与对话框均未在真机验证。触发条件：获得 Windows 主机时按本节矩阵补跑并更新证据 |
 
 说明：
 
@@ -96,3 +96,11 @@
 | `corepack yarn typecheck` | **0** | 25s |
 | `corepack yarn test` | **0** | 103s；全仓 4102 tests（4087 passed / 15 skipped），本次运行无失败 |
 | `corepack yarn check` | **0** | 182s；含 `dsh-plugin-huaanwork` 293 files passed / 4 skipped（共 4102 tests：4087 passed / 15 skipped）、双语门禁 51 records / 102 documents |
+
+
+## 6. Windows waiver（owner 裁定 2026-11-15，R-ACCEPT-1 式）
+
+- **裁定**：按 `R-ACCEPT-1` 先例，Windows 真机矩阵记为 **complete with waiver**，不得表述为“Windows 矩阵通过”或“跨机器验收实际通过”。
+- **替代证据**：本仓库既有 Windows CI 链（`.github/workflows/ci.yml` 的 `desktop-windows` job：`check:win-package:platform` → `Build Windows installer`（`dist:win`，内部执行 `verify-win-installer.ts`）→ portable）。该链需要分支推送后才会针对本分支运行；截至本文件更新时间，本分支**未推送、未跑 CI**，因此替代证据是“已定义且待运行”，不是已获得的运行结果。
+- **残余风险**：① 真实 macOS→Windows 机器/OS 边界未验证；② Windows 上的技能中心 UI、下载/上传、`/` 调用、启用门与迁移未在真机执行；③ 原生目录选择器/对话框的 Windows 行为未验证。
+- **补跑触发**：获得 Windows 主机后，按本文件 §3 同一矩阵（两 Profile/alice-bob、下载→启用→`/`、更新与冲突、内置同名另存为、外部导入、离线、迁移 fixture）在 Windows 上重跑，并把结果写回 §3，届时移除 waiver 标注。
