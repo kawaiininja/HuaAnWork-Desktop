@@ -51,7 +51,7 @@ export default function SkillsView({
   const [centerError, setCenterError] = useState("");
   const [mineError, setMineError] = useState("");
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [modalBusy, setModalBusy] = useState(false);
   const [modalError, setModalError] = useState("");
   const [modal, setModal] = useState<Modal | null>(null);
@@ -118,8 +118,9 @@ export default function SkillsView({
   };
 
   const downloadSkill = async (skill: CenterSkillInfo) => {
-    if (busy) return;
-    setBusy(busyKeyFor(skill.source, skill.name));
+    const key = busyKeyFor(skill.source, skill.name);
+    if (busy.has(key)) return;
+    setBusy((prev) => new Set(prev).add(key));
     setCenterError("");
     try {
       await rpcCall("skill.download", {
@@ -134,13 +135,18 @@ export default function SkillsView({
       setNote("");
       reportError(cause, "center");
     } finally {
-      setBusy(null);
+      setBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
     }
   };
 
   const uploadSkill = async (skill: LocalSkillInfo) => {
-    if (busy) return;
-    setBusy(busyKeyFor("user", skill.name));
+    const key = busyKeyFor("user", skill.name);
+    if (busy.has(key)) return;
+    setBusy((prev) => new Set(prev).add(key));
     setMineError("");
     try {
       const result = await rpcCall<{ skill: LocalSkillInfo; created: boolean }>("skill.upload", { name: skill.name });
@@ -155,14 +161,19 @@ export default function SkillsView({
       setNote("");
       reportError(cause, "mine");
     } finally {
-      setBusy(null);
+      setBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
     }
   };
 
   const toggleSkill = async (skill: LocalSkillInfo) => {
-    if (busy) return;
+    const key = busyKeyFor("user", skill.name);
+    if (busy.has(key)) return;
     const enabling = !skill.enabled;
-    setBusy(busyKeyFor("user", skill.name));
+    setBusy((prev) => new Set(prev).add(key));
     setMineError("");
     try {
       await rpcCall("skill.setEnabled", { name: skill.name, enabled: enabling });
@@ -177,7 +188,11 @@ export default function SkillsView({
       setNote("");
       reportError(cause, "mine");
     } finally {
-      setBusy(null);
+      setBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
     }
   };
 
@@ -355,7 +370,7 @@ export default function SkillsView({
                       <button
                         type="button"
                         className="filter-tab"
-                        disabled={!actionable || busy === key}
+                        disabled={!actionable || busy.has(key)}
                         aria-label={`${centerActionLabel(skill.downloadState)}技能 ${skill.name}`}
                         onClick={() => void downloadSkill(skill)}
                       >
@@ -385,7 +400,7 @@ export default function SkillsView({
           {localVisible.map((skill) => {
             const key = busyKeyFor("user", skill.name);
             const builtinSameName = isBuiltinNameConflict(skill, bundledNames);
-            const uploadDisabled = busy === key || isUploadDisabled(skill, bundledNames);
+            const uploadDisabled = busy.has(key) || isUploadDisabled(skill, bundledNames);
             return (
               <div key={key} className="skill-card">
                 <div className="top">
@@ -411,7 +426,7 @@ export default function SkillsView({
                     className={skill.enabled ? "filter-tab on" : "filter-tab"}
                     aria-pressed={skill.enabled}
                     aria-label={`${skill.enabled ? "禁用" : "启用"}技能 ${skill.name}`}
-                    disabled={busy === key}
+                    disabled={busy.has(key)}
                     onClick={() => void toggleSkill(skill)}
                   >
                     {skill.enabled ? "已启用" : "启用"}

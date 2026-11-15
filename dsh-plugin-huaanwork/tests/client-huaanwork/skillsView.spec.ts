@@ -264,3 +264,45 @@ describe("SkillsView 弹窗错误透传与防重入(评审 Important 3 / Minor 4
     expect(view.textContent).not.toContain("请在“我的技能”中启用");
   });
 });
+
+describe("SkillsView busy 按 key 隔离(评审 Residual 2 / 规格 §12)", () => {
+  it("一个技能请求在途时不阻塞无关技能的启停", async () => {
+    const second: LocalSkillInfo = { ...LOCAL, name: "demo2" };
+    const view = await mount({ mine: [LOCAL, second] });
+    await openMine(view);
+    const toggled: string[] = [];
+    rpc.mockImplementation((async (method: string, params: { name?: string }) => {
+      if (method === "skill.setEnabled") {
+        toggled.push(params.name!);
+        if (params.name === "demo") return new Promise(() => {});
+        return { ok: true };
+      }
+      if (method === "skill.mineList") return { skills: [LOCAL, second] };
+      throw new Error(`unexpected rpc ${method}`);
+    }) as never);
+    await act(async () => {
+      buttonByLabel(view, "启用技能 demo")?.click();
+    });
+    await flush();
+    await act(async () => {
+      buttonByLabel(view, "启用技能 demo2")?.click();
+    });
+    await flush();
+    expect(toggled).toContain("demo2");
+  });
+
+  it("同一技能在途时其按钮禁用防重入", async () => {
+    const view = await mount({ mine: [LOCAL] });
+    await openMine(view);
+    rpc.mockImplementation((async (method: string) => {
+      if (method === "skill.setEnabled") return new Promise(() => {});
+      if (method === "skill.mineList") return { skills: [LOCAL] };
+      throw new Error(`unexpected rpc ${method}`);
+    }) as never);
+    await act(async () => {
+      buttonByLabel(view, "启用技能 demo")?.click();
+    });
+    await flush();
+    expect(buttonByLabel(view, "启用技能 demo")?.disabled).toBe(true);
+  });
+});
