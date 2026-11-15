@@ -65,7 +65,7 @@
 | 三种 preset 不再扫描真实 `~/.agents/skills` | **PASS（隔离）** | 以 `DSH_AGENTS_HOME` 指向含 `ext-visible.md` 的临时外部根重启后，中心/我的/`/` 菜单均无该外部技能；原文件保留 |
 | 智能体包 `allowSkills` 不能调用未启用本地技能 | **PASS（2026-11-15 补充）** | 播种本地包 `@weekly-report`（`allowSkills:["demo"]`，tools=none）并启用；demo 禁用时真实派发 `@weekly-report`，界面报“智能体 @weekly-report 引用的技能 demo 不可用：skill demo is disabled”；启用 demo 后同一派发完成真实模型回合，父会话收到“周报助手 @weekly-report 已回复：它的技能是先收集本周工作，再生成周报” |
 | 升级 fixture（旧用户技能/旧启用内置/同名冲突/外部文件） | **PASS（2026-11-15 受控 fixture）** | 受控旧目录：`skills/legacy-user` + `skill-toggles.json {pdf:true,xlsx:true}` + 同名本地 `skills/pdf`（内容标记）+ 外部 `ext-only.md`。首启后：legacy-user 来源 created 且启用；pdf 文件未被覆盖（标记仍在）、启用、警告 `内置技能 pdf 未复制：已存在同名本地技能`；xlsx 复制为 bundled 并启用；外部技能未导入且原文件保留；`migration.version=1`。随后在 UI 禁用 xlsx 并重启：`skill-local-state.json` 字节不变（哈希相同）、toggles 只剩 legacy-user/pdf、UI 中 xlsx 仍为“启用”（未被迁移重新启用） |
-| Windows 真机矩阵 | **WAIVED（R-ACCEPT-1 式，owner 2026-11-15 裁定）** | 无 Windows 主机；**不得写成 Windows 矩阵通过**。替代证据：分支推送后由 CI `desktop-windows` job 构建安装器并在链内运行 `verify-win-installer`（CI 定义既有；本分支尚未跑 CI）。残余风险：真实 macOS→Windows 机器/OS 边界、Windows UI 矩阵、原生目录选择与对话框均未在真机验证。触发条件：获得 Windows 主机时按本节矩阵补跑并更新证据 |
+| Windows 真机矩阵 | **WAIVED（R-ACCEPT-1 式，owner 2026-11-15 裁定）** | 无 Windows 主机；**不得写成 Windows 矩阵通过**。替代证据：分支推送后由 CI `desktop-windows` job 构建安装器并在链内运行 `verify-win-installer`（**已取得**：PR #28 run `43677194426` 通过，详见 §6）。残余风险：真实 macOS→Windows 机器/OS 边界、Windows UI 矩阵、原生目录选择与对话框均未在真机验证。触发条件：获得 Windows 主机时按本节矩阵补跑并更新证据 |
 
 说明：
 
@@ -108,12 +108,12 @@
 | `corepack yarn test` | **0** | huaanwork 293 files \| 4 skipped、4110 passed \| 15 skipped（4125）；skill-format 50；agent-catalog-server 112；market-server 244；update-server 88；dsh-community-market 303；其余 workspace 全绿，0 fail |
 | `corepack yarn check` | **0** | 含 build / verify:bundled（134 files、10 bundled inlined）/ verify:aa / verify:licenses（637 packages、2 notice-required）/ verify:operations（7 operations、18 fault contracts）/ 双语 51 records、102 documents 完整闭环 |
 
-相对初审波次净增 23 条桌面测试（4087→4110）与 3 条格式包测试（47→50）。Windows 真机矩阵仍按 §6 `R-ACCEPT-1` waiver；本分支未推送、未跑 CI。
+相对初审波次净增 23 条桌面测试（4087→4110）与 3 条格式包测试（47→50）。Windows 真机矩阵仍按 §6 `R-ACCEPT-1` waiver；分支已推送（PR #28），PR CI 6/6 全绿（run `43677194426`，commit `06de4cc839`），Windows CI 替代证据已取得（见 §6）。
 
 
 ## 6. Windows waiver（owner 裁定 2026-11-15，R-ACCEPT-1 式）
 
 - **裁定**：按 `R-ACCEPT-1` 先例，Windows 真机矩阵记为 **complete with waiver**，不得表述为“Windows 矩阵通过”或“跨机器验收实际通过”。
-- **替代证据**：本仓库既有 Windows CI 链（`.github/workflows/ci.yml` 的 `desktop-windows` job：`check:win-package:platform` → `Build Windows installer`（`dist:win`，内部执行 `verify-win-installer.ts`）→ portable）。该链需要分支推送后才会针对本分支运行；截至本文件更新时间，本分支**未推送、未跑 CI**，因此替代证据是“已定义且待运行”，不是已获得的运行结果。
+- **替代证据（已取得，2026-11-15）**：本仓库既有 Windows CI 链（`.github/workflows/ci.yml` 的 `desktop-windows` job：`check:win-package:platform` → `Build Windows installer`（`dist:win`，内部执行 `verify-win-installer.ts`）→ portable）。分支已推送（PR #28），该 job 在 run `43677194426`（commit `06de4cc839`，2026-11-15）**通过**（4m56s）：`Build Windows installer` 步骤输出 `Windows installer verification passed: …\dist\HuaAnWork-0.1.8-x64-Setup.exe`，`Build Windows portable archive` 与 `Real Host liveness on Windows`（`host-liveness-win.spec.ts` 在 Windows 实跑）均通过；同 run PR CI 6/6 全绿（含 gitleaks）。**边界**：这是 CI 上的安装器构建 + 校验与 Host liveness，**不是** §3 的完整真机交互矩阵，不得据此表述为“Windows 矩阵通过”；waiver 与下述真机残余风险保留。
 - **残余风险**：① 真实 macOS→Windows 机器/OS 边界未验证；② Windows 上的技能中心 UI、下载/上传、`/` 调用、启用门与迁移未在真机执行；③ 原生目录选择器/对话框的 Windows 行为未验证。
 - **补跑触发**：获得 Windows 主机后，按本文件 §3 同一矩阵（两 Profile/alice-bob、下载→启用→`/`、更新与冲突、内置同名另存为、外部导入、离线、迁移 fixture）在 Windows 上重跑，并把结果写回 §3，届时移除 waiver 标注。
