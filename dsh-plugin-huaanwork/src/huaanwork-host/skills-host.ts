@@ -509,7 +509,16 @@ export async function previewSkillImport(
     kind = 'directory'
     sourceName = basename(sourcePath)
     if (await containsSymlink(sourcePath)) return fail('目录包含符号链接，已拒绝导入')
-    raw = await fs.readFile(join(sourcePath, 'SKILL.md'), 'utf8').catch(() => '')
+    // 与确认导入同边界:硬链接/非普通文件/保留段/路径字节/条目与体积预算
+    // 都在预览阶段以 fieldErrors 拒绝,不把用户引到确认弹窗才报错关窗。
+    let files: SkillArchiveFile[]
+    try {
+      files = readSkillDirectory(sourcePath)
+    } catch (cause) {
+      return fail(cause instanceof Error ? cause.message : String(cause))
+    }
+    const skillFile = files.find((file) => file.path === 'SKILL.md')
+    raw = skillFile ? skillFile.data.toString('utf8') : ''
     if (!raw) return fail('目录中未找到 SKILL.md')
   } else if (stat.isFile()) {
     kind = 'file'

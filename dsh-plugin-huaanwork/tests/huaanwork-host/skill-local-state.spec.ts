@@ -515,7 +515,7 @@ describe('write-path fail-fast and strict tree checks', () => {
     await assert.rejects(() => importSkill(corruptTogglesProfile, dirSrc), CorruptUserSkillTogglesError)
     assert.equal(existsSync(join(corruptTogglesProfile, 'skills', 'dir-toggle-fail')), false)
 
-    // 3. 源目录含硬链接：严格 readSkillDirectory 在创建目标目录前失败，不留状态条目
+    // 3. 源目录含硬链接：预览阶段即以 fieldErrors 拒绝（评审 Important 4），不留目标与状态
     const hardlinkProfile = makeHome()
     const hardlinkSrc = join(hardlinkProfile, 'hardlink-src')
     mkdirSync(hardlinkSrc, { recursive: true })
@@ -525,11 +525,13 @@ describe('write-path fail-fast and strict tree checks', () => {
       'utf8',
     )
     linkSync(join(hardlinkSrc, 'SKILL.md'), join(hardlinkSrc, 'hard.md'))
-    await assert.rejects(() => importSkill(hardlinkProfile, hardlinkSrc), /硬链接/)
+    const hardlinkResult = await importSkill(hardlinkProfile, hardlinkSrc)
+    assert.equal(hardlinkResult.ok, false)
+    if (!hardlinkResult.ok) assert.match(hardlinkResult.fieldErrors[0]!.message, /硬链接/)
     assert.equal(existsSync(join(hardlinkProfile, 'skills', 'hardlink-skill')), false)
     assert.equal(readSkillLocalState(hardlinkProfile).skills['hardlink-skill'], undefined)
 
-    // 4. 源目录超字节预算：严格 readSkillDirectory 在创建目标目录前失败，不留状态条目
+    // 4. 源目录超字节预算：预览阶段即以 fieldErrors 拒绝（评审 Important 4），不留目标与状态
     const overBudgetProfile = makeHome()
     const overBudgetSrc = join(overBudgetProfile, 'over-budget-src')
     mkdirSync(overBudgetSrc, { recursive: true })
@@ -542,7 +544,9 @@ describe('write-path fail-fast and strict tree checks', () => {
     const fd = openSync(blobPath, 'w')
     ftruncateSync(fd, MAX_SKILL_ARCHIVE_CONTENT_BYTES + 1)
     closeSync(fd)
-    await assert.rejects(() => importSkill(overBudgetProfile, overBudgetSrc), /上限/)
+    const overBudgetResult = await importSkill(overBudgetProfile, overBudgetSrc)
+    assert.equal(overBudgetResult.ok, false)
+    if (!overBudgetResult.ok) assert.match(overBudgetResult.fieldErrors[0]!.message, /上限/)
     assert.equal(existsSync(join(overBudgetProfile, 'skills', 'over-budget-skill')), false)
     assert.equal(readSkillLocalState(overBudgetProfile).skills['over-budget-skill'], undefined)
 

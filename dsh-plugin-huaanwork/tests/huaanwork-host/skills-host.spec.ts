@@ -455,6 +455,84 @@ describe('内部技能不可全局启用(设计 §6.1)', () => {
   })
 })
 
+describe('导入预览与确认的校验边界一致(评审 Important 4)', () => {
+  const skillMd = (name: string) => `---\nname: ${name}\ndescription: ${name}\n---\n\n正文\n`
+
+  test('预览阶段即拒绝硬链接并返回 fieldErrors', async () => {
+    const home = makeHome()
+    const dir = join(home, 'hardlink-skill')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('hardlink-skill'))
+    const target = join(home, 'outside.txt')
+    writeFileSync(target, 'outside')
+    const linkPath = join(dir, 'hard.txt')
+    await fsp.link(target, linkPath).catch(() => null)
+    const linked = await fsp.lstat(linkPath).then((s) => s.nlink > 1).catch(() => false)
+    if (!linked) return
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.message).toContain('硬链接')
+  })
+
+  test('预览阶段即拒绝保留前缀段', async () => {
+    const home = makeHome()
+    const dir = join(home, 'reserved-skill')
+    mkdirSync(join(dir, '.tmp-cache'), { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('reserved-skill'))
+    writeFileSync(join(dir, '.tmp-cache', 'x.txt'), 'x')
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.field).toBe('path')
+  })
+
+  test('预览阶段即拒绝超过 256 条目', async () => {
+    const home = makeHome()
+    const dir = join(home, 'many-skill')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('many-skill'))
+    for (let index = 0; index < 256; index += 1) writeFileSync(join(dir, `f${index}.txt`), 'x')
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.message).toContain('256')
+  })
+
+  test('预览阶段即拒绝超过 5 MiB 内容总量', async () => {
+    const home = makeHome()
+    const dir = join(home, 'big-skill')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('big-skill'))
+    writeFileSync(join(dir, 'big.bin'), Buffer.alloc(6 * 1024 * 1024))
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.field).toBe('path')
+  })
+
+  test('预览阶段即拒绝超过 512 字节的路径', async () => {
+    const home = makeHome()
+    const dir = join(home, 'deep-skill')
+    const segment = 'a'.repeat(200)
+    const deep = join(dir, segment, segment, segment)
+    mkdirSync(deep, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('deep-skill'))
+    writeFileSync(join(deep, 'x.txt'), 'x')
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(false)
+    if (!preview.ok) expect(preview.fieldErrors[0]?.message).toContain('512')
+  })
+
+  test('含资源文件的合法目录仍正常预览并可确认导入', async () => {
+    const home = makeHome()
+    const dir = join(home, 'resource-skill')
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skillMd('resource-skill'))
+    writeFileSync(join(dir, 'scripts', 'run.mjs'), 'console.log("ok")\n')
+    const preview = await previewSkillImport(home, dir)
+    expect(preview.ok).toBe(true)
+    const imported = await importSkill(home, dir)
+    expect(imported.ok).toBe(true)
+  })
+})
+
 describe('带外磁盘编辑的列表投影(评审 Important 1)', () => {
   test('已发布技能被外部修改 SKILL.md 后投影为 modified 且摘要反映磁盘', async () => {
     const home = makeHome()
