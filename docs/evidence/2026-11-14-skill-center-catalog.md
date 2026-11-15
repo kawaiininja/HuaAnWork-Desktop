@@ -98,6 +98,19 @@
 | `corepack yarn check` | **0** | 182s；含 `dsh-plugin-huaanwork` 293 files passed / 4 skipped（共 4102 tests：4087 passed / 15 skipped）、双语门禁 51 records / 102 documents |
 
 
+### 5.1 评审处置与残余波次终态（2026-11-15，HEAD `5a77d0e5f2`）
+
+上表第三条为初审修复波次（`e95980f517`）计数。其后按整支评审校准清单处置 8 提交（`5856463048`..`93351296d3`），再按 owner 裁定处置终检残余：Residual 2（busy 按 key 隔离，`5a77d0e5f2`）、Residual 3（即本小节计数同步）；Residual 1（正则贪婪）经节点实测仅影响非法空 frontmatter 文档、合法技能不受影响，无真实场景，裁定不修（YAGNI）。终态门禁在 `5a77d0e5f2` 顺序实跑：
+
+| 命令 | 退出码 | 关键计数 |
+| --- | --- | --- |
+| `corepack yarn typecheck` | **0** | 9 个 TS 项目全过；contract-types 4 文件 current |
+| `corepack yarn test` | **0** | huaanwork 293 files \| 4 skipped、4110 passed \| 15 skipped（4125）；skill-format 50；agent-catalog-server 112；market-server 244；update-server 88；dsh-community-market 303；其余 workspace 全绿，0 fail |
+| `corepack yarn check` | **0** | 含 build / verify:bundled（134 files、10 bundled inlined）/ verify:aa / verify:licenses（637 packages、2 notice-required）/ verify:operations（7 operations、18 fault contracts）/ 双语 51 records、102 documents 完整闭环 |
+
+相对初审波次净增 23 条桌面测试（4087→4110）与 3 条格式包测试（47→50）。Windows 真机矩阵仍按 §6 `R-ACCEPT-1` waiver；本分支未推送、未跑 CI。
+
+
 ## 6. Windows waiver（owner 裁定 2026-11-15，R-ACCEPT-1 式）
 
 - **裁定**：按 `R-ACCEPT-1` 先例，Windows 真机矩阵记为 **complete with waiver**，不得表述为“Windows 矩阵通过”或“跨机器验收实际通过”。
