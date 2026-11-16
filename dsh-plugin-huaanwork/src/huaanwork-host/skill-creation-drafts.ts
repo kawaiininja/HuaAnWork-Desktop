@@ -368,3 +368,9 @@ export async function cancelSkillCreation(
     return false
   }
 }
+
+/** 删除会话时无条件清理技能草稿:不带互斥守卫,失败由调用方记日志。 */
+export function discardSkillCreationDraft(profileDir: string, sessionId: string): void {
+  if (!isValidSessionId(sessionId)) return
+  rmSync(draftPath(profileDir, sessionId), { force: true })
+}

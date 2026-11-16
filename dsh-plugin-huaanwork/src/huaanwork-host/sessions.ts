@@ -15,7 +15,7 @@ import {
   injectCreateAgentSkill,
   noteCreationTurn,
 } from './agent-package/creation.ts'
-import { CorruptAgentPackageDraftError, isAgentCancelText } from './agent-package/drafts.ts'
+import { CorruptAgentPackageDraftError, discardAgentPackageDraft, isAgentCancelText } from './agent-package/drafts.ts'
 import type { AgentPackageActiveTurnRegistry } from './agent-package/host.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { isCreationCancelText } from './creation-utterances.ts'
@@ -27,7 +27,7 @@ import {
   getSkillCreationHost,
   injectCreateSkill,
 } from './skill-creation.ts'
-import { CorruptSkillCreationDraftError, hasAgentCreationDraftOnDisk } from './skill-creation-drafts.ts'
+import { CorruptSkillCreationDraftError, discardSkillCreationDraft, hasAgentCreationDraftOnDisk } from './skill-creation-drafts.ts'
 import { invokeSkillText } from './skill-invoke.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
 import type { AgentsHost } from './agents-host.ts'
@@ -795,6 +795,19 @@ async function removeSession(
   // `sessionRemove only ever touches the minted sibling root …`)。
   const { profileDir, logger } = opts
   if (profileDir) {
+    // 删除会话=放弃未完成草稿(owner 2026-11-16 裁定):两类创建草稿随会话一并清理,
+    // 否则稳定通道会话重建同 sessionId 时旧草稿复活并继续注入创建流程。
+    // 清理失败只记日志不抛出:会话日志已删,不得谎报失败让界面停在已不存在的会话上。
+    try {
+      discardSkillCreationDraft(profileDir, sessionId)
+    } catch (error) {
+      logger?.(`session.remove: 技能草稿清理失败 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    try {
+      discardAgentPackageDraft(profileDir, sessionId)
+    } catch (error) {
+      logger?.(`session.remove: 智能体草稿清理失败 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
     const neutralStable = sessionIdFor(resolve(neutralWorkspaceRootPath(profileDir)))
     if (sessionId.startsWith(`${neutralStable}-`)) {
       const siblingRoot = neutralSessionRootPath(profileDir, sessionId)

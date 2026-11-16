@@ -399,6 +399,12 @@ export async function cancelAgentPackage(
   }
 }
 
+/** 删除会话时无条件清理智能体草稿:不带互斥守卫,失败由调用方记日志。 */
+export function discardAgentPackageDraft(profileDir: string, sessionId: string): void {
+  if (!isValidSessionId(sessionId)) return
+  rmSync(draftPath(profileDir, sessionId), { force: true })
+}
+
 /**
  * 读取这一会话的草稿;文件缺失、损坏或 `sessionId` 非法时返回 undefined。
  *

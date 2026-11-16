@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   childrenOf,
@@ -65,6 +65,10 @@ import {
   createSubagentRunRegistry,
   type SubagentRunRegistry,
 } from '../../src/huaanwork-host/subagent-runs.ts'
+import {
+  hasAgentCreationDraftOnDisk,
+  hasSkillCreationDraftOnDisk,
+} from '../../src/huaanwork-host/skill-creation-drafts.ts'
 
 // —— 用例移植自旧 sidecar session-history.test.ts(L61-69 / L115-153 / L220-241)
 // 与 host.ts 会话 case 语义;存储 fixture 钉死读路径 <dshHome>/sessions ——
@@ -1638,6 +1642,46 @@ describe('session.remove lifecycle', () => {
     expect(existsSync(join(projectRoot, 'keep.txt'))).toBe(true)
     // 连兄弟根的父容器都不该被创建出来。
     expect(existsSync(neutralSessionsBaseDir(routeCtx.profileDir))).toBe(false)
+  })
+
+  test('sessionRemove discards both creation drafts with the session', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const fresh = sessionNew(routeCtx, { fresh: true })
+    writePersistedSession(routeCtx.dshHome, fresh.sessionId, fresh.cwd)
+    // 删除会话=放弃未完成草稿(owner 2026-11-16 裁定):两类草稿随会话一并清理,
+    // 否则稳定通道会话重建同 sessionId 时旧草稿复活并继续注入创建流程。
+    const skillDraft = join(routeCtx.profileDir, 'skill-creation-drafts', `${fresh.sessionId}.json`)
+    const agentDraft = join(routeCtx.profileDir, 'agents', '.drafts', `${fresh.sessionId}.json`)
+    mkdirSync(dirname(skillDraft), { recursive: true })
+    writeFileSync(skillDraft, '{"schemaVersion":1}\n', 'utf8')
+    mkdirSync(dirname(agentDraft), { recursive: true })
+    writeFileSync(agentDraft, '{"schemaVersion":1}\n', 'utf8')
+
+    await expect(sessionRemove(undefined, routeCtx, { sessionId: fresh.sessionId })).resolves.toEqual({ removed: true })
+
+    expect(existsSync(skillDraft)).toBe(false)
+    expect(existsSync(agentDraft)).toBe(false)
+    // 同 sessionId 重建不再有草稿,不重新激活创建流程。
+    expect(hasSkillCreationDraftOnDisk(routeCtx.profileDir, fresh.sessionId)).toBe(false)
+    expect(hasAgentCreationDraftOnDisk(routeCtx.profileDir, fresh.sessionId)).toBe(false)
+  })
+
+  test('sessionRemove logs and still reports removed when draft cleanup fails', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const fresh = sessionNew(routeCtx, { fresh: true })
+    writePersistedSession(routeCtx.dshHome, fresh.sessionId, fresh.cwd)
+    // 草稿路径被目录占位 ⇒ rmSync(force) 抛 EISDIR;清理失败只记日志不抛出,
+    // 会话日志已删,不得谎报失败让界面停在已不存在的会话上。
+    const skillDraft = join(routeCtx.profileDir, 'skill-creation-drafts', `${fresh.sessionId}.json`)
+    mkdirSync(skillDraft, { recursive: true })
+    const logs: string[] = []
+    const loggingCtx: RouteContext = { ...routeCtx, logger: (message: string) => { logs.push(message) } }
+
+    await expect(sessionRemove(undefined, loggingCtx, { sessionId: fresh.sessionId })).resolves.toEqual({ removed: true })
+
+    expect(logs.some((line) => line.includes(fresh.sessionId) && line.includes('草稿'))).toBe(true)
   })
 
   test.skipIf(process.platform === 'win32')('sessionRemove logs and still reports removed when the sibling root cannot be deleted', async () => {
