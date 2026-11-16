@@ -365,15 +365,17 @@ export async function stageSkillDirectory(
   }
 }
 
+/** 对话创建幂等身份:两键必须成对写入,读者把单键状态判为损坏。 */
+type SkillCreationIdentity = { draftId: string; sessionId: string }
+
 /**
  * 创建主体:调用方必须已持有 `withSkillStorageLock`。锁非重入,这里绝不能再取锁。
- * 表单入口不传创建身份;对话草稿入口把幂等键随首条状态一并落盘。
+ * 表单入口不传创建身份;对话草稿入口把两个幂等键作为一个整体随首条状态一并落盘。
  */
 async function createSkillLocked(
   storageRoot: string,
   input: SkillInput,
-  creationDraftId?: string,
-  creationSessionId?: string,
+  identity?: SkillCreationIdentity,
 ): Promise<SkillWriteResult> {
   const errors = validateSkillFields(input, await takenNames(storageRoot))
   if (errors.length > 0) return { ok: false, fieldErrors: errors }
@@ -398,8 +400,9 @@ async function createSkillLocked(
   const localEntry: SkillLocalEntry = {
     origin: { kind: 'created' },
     contentDigest,
-    ...(creationDraftId !== undefined ? { creationDraftId } : {}),
-    ...(creationSessionId !== undefined ? { creationSessionId } : {}),
+    ...(identity !== undefined
+      ? { creationDraftId: identity.draftId, creationSessionId: identity.sessionId }
+      : {}),
   }
   writeSkillLocalEntry(storageRoot, input.name, localEntry)
   return {
@@ -429,6 +432,10 @@ export type SkillCreateFromDraftResult =
  * 对话创建的正式入口:同一 `(creationDraftId, creationSessionId)` 只落盘一次。
  * 幂等命中要求状态条目与本地技能目录同时存在;目录被带外删除时返回字段错误,
  * 不得报告 phantom 成功(否则用户会在列表里看到不存在的已创建结果)。
+ *
+ * 两个身份键在读写状态之前就校验:读者把空串判为损坏、把单键判为成对约束破坏,
+ * 若把这类值写进去会让整个技能中心对当前 profile 永久抛错,因此写入边界必须
+ * fail closed。校验失败不获取锁、不读状态、不落盘。
  */
 export async function createSkillFromDraft(
   storageRoot: string,
@@ -436,6 +443,16 @@ export async function createSkillFromDraft(
   creationDraftId: string,
   creationSessionId: string,
 ): Promise<SkillCreateFromDraftResult> {
+  const identityErrors: SkillFieldError[] = []
+  for (const [field, value] of [
+    ['creationDraftId', creationDraftId],
+    ['creationSessionId', creationSessionId],
+  ] as const) {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      identityErrors.push({ field, message: `${field} 必须是非空字符串` })
+    }
+  }
+  if (identityErrors.length > 0) return { ok: false, fieldErrors: identityErrors }
   return withSkillStorageLock(storageRoot, async () => {
     const state = readSkillLocalState(storageRoot)
     const liveNames = new Set((await listUserSkills(storageRoot)).map((skill) => skill.name))
@@ -450,7 +467,10 @@ export async function createSkillFromDraft(
         return { ok: true, name, alreadyCommitted: true }
       }
     }
-    const result = await createSkillLocked(storageRoot, input, creationDraftId, creationSessionId)
+    const result = await createSkillLocked(storageRoot, input, {
+      draftId: creationDraftId,
+      sessionId: creationSessionId,
+    })
     if (!result.ok) return result
     return { ok: true, name: input.name, alreadyCommitted: false }
   })

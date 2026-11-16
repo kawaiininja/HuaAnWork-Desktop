@@ -493,6 +493,27 @@ describe('对话创建草稿的幂等入口 (Task 2)', () => {
     expect(result.ok).toBe(false)
   })
 
+  test('rejects empty or whitespace creation ids without writing state or directory', async () => {
+    const root = makeHome()
+    const input = { name: 'weekly-report', description: '生成周报', content: '按步骤生成周报' }
+
+    const emptyDraft = await createSkillFromDraft(root, input, '', 'session-1')
+    expect(emptyDraft).toMatchObject({ ok: false })
+    if (!emptyDraft.ok) expect(emptyDraft.fieldErrors.map((error) => error.field)).toContain('creationDraftId')
+
+    const emptySession = await createSkillFromDraft(root, input, 'draft-1', '')
+    expect(emptySession).toMatchObject({ ok: false })
+    if (!emptySession.ok) expect(emptySession.fieldErrors.map((error) => error.field)).toContain('creationSessionId')
+
+    const whitespaceDraft = await createSkillFromDraft(root, input, '   ', 'session-1')
+    expect(whitespaceDraft.ok).toBe(false)
+
+    // 拒绝必须发生在任何落盘之前:没有技能目录,状态文档仍可读且为空。
+    expect(await fsp.stat(join(root, 'skills', 'weekly-report')).catch(() => null)).toBeNull()
+    expect(readSkillLocalState(root)).toEqual({ schemaVersion: 1, skills: {} })
+    expect((await listUserSkills(root)).map((skill) => skill.name)).toEqual([])
+  })
+
   test('rejects idempotent replay as a field error when the state key remains but the directory is gone', async () => {
     const root = makeHome()
     const input = { name: 'weekly-report', description: '生成周报', content: '按步骤生成周报' }
