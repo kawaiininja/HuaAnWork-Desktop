@@ -853,7 +853,7 @@ test("background automations no longer lock project navigation", () => {
 });
 
 test("send carries the tab id and selected model and mints under the tab's own root", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   // 后台任务不再挡住发送；发送前的整段工作区对齐只为铸造会话，已由 session.new 的 cwd 取代。
   assert.doesNotMatch(body, /automationActiveRef/);
   assert.doesNotMatch(body, /ensureNeutralWorkspace\(\)/);
@@ -874,7 +874,7 @@ test("send carries the tab id and selected model and mints under the tab's own r
 });
 
 test("a neutral tab does not send when session.new fails", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const mintAt = body.indexOf('"session.new"');
   const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
   assert.ok(mintAt >= 0 && sendAt > mintAt);
@@ -901,7 +901,7 @@ test("a neutral tab does not send when session.new fails", () => {
 test("send records the id it actually sends before the RPC so the next send keeps it", () => {
   // P-1：宿主在 followup 之后才把 modelId 写回任务，刷新前改全局模型会把新 id 写进会话绑定。
   // 发送前把实际送出的 id 记进本标签的选择，下一次发送就按这个 id 走。
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const resolveAt = body.indexOf("const modelId = resolveSendModelId(");
   const recordAt = body.indexOf(
     "setModelPickByTab((prev) => (prev[chatId] === modelId ? prev : { ...prev, [chatId]: modelId }))",
@@ -965,7 +965,7 @@ test("an unsent turn's pick is restored to the pre-send value, unless the user a
 });
 
 test("the send rejection path rolls the recorded pick back through the helper", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
   assert.ok(sendAt >= 0, "send still awaits the session.send response");
   const catchAt = body.indexOf("} catch (error) {", sendAt);
@@ -981,7 +981,7 @@ test("the send rejection path rolls the recorded pick back through the helper", 
 });
 
 test("every non-starting send path rolls the implicit pick back, a started one keeps it", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
   assert.ok(sendAt >= 0, "send still awaits the session.send response");
   // 发送前的选择要在写入本次选择之前记下：回滚只能还原到那个值。
@@ -1126,7 +1126,7 @@ test("rolling back an earlier queued send keeps a later queued send's pick and h
 });
 
 test("a started or queued send refreshes tasks so the host's task-model write-back lands", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
   assert.ok(sendAt >= 0, "send still awaits the session.send response");
   const catchAt = body.indexOf("} catch (error) {", sendAt);
@@ -1209,7 +1209,7 @@ function blockAfter(source: string, startNeedle: string): { start: number; body:
 }
 
 test("a queued send preserves the running turn stop latch", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   // 进程级单槽早退已删除：发送不再被另一个标签的回合挡住，也不在应答前自称执行中。
   assert.doesNotMatch(body, /turnActive/);
   const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
@@ -1332,7 +1332,7 @@ test("stale idle uses the event tab epoch", () => {
 });
 
 test("a rejected send leaves the running turn stop latch", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   // 只取 session.send 的那个 catch：前面铸造子任务会话的 catch 不在这里。
   const sendAt = body.indexOf("const sent = await rpcCall<SessionSendResult>");
   assert.ok(sendAt >= 0, "send still awaits the session.send response");
@@ -1384,7 +1384,7 @@ function earlyEventGate(): string {
 }
 
 test("queued send opens the goal window only when the turn starts", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
   const gateAt = body.indexOf("if (sendOpensTurn(sent)) {");
   assert.ok(sendAt >= 0, "send still awaits the session.send response");
@@ -1421,7 +1421,7 @@ test("queued send opens the goal window only when the turn starts", () => {
 });
 
 test("a queued response backfills the inserted user message", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
   const pendingAt = body.indexOf("pendingSendsRef.current.set(chatId, pending)");
   assert.ok(pendingAt >= 0 && pendingAt < sendAt, "the pending identity exists before the send leaves the client");
@@ -1593,7 +1593,7 @@ test("early session end is buffered until the started response", () => {
   assert.ok(heldAt > gateAt, "the early end never reaches the held-end queue while its send is pending");
 
   // 身份写回 → 初始化回合 → 重放；started:false 只丢本次缓冲。
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const openAt = body.indexOf("openTurnForTab(");
   const replayAt = body.indexOf("for (const buffered of takePendingBuffer(pending, sent)) applySidecarEventRef.current(buffered);");
   assert.ok(openAt >= 0, "send opens the turn through the shared init point");
@@ -1639,7 +1639,7 @@ test("pending send does not buffer the previous turn events", () => {
   assert.ok(lastPushAt > runningGuardAt, "the running-turn guard runs before the goal events are buffered");
 
   // B 的 waiting 应答不撤销 A 的停止闩锁或终态。
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const waitingBranch = blockAfter(body, "if (sent.waiting && sent.queueItemId !== undefined) {").body;
   for (const needle of ["patchTabTurn(", "stopSessionId", "latchOwner", "stopping", "writeTabRun("]) {
     assert.ok(!waitingBranch.includes(needle), `the waiting branch must not touch ${needle}`);
@@ -1687,7 +1687,7 @@ test("a cross-tab running turn's session end is never buffered into another tab'
   const ticket = { id: 3, sessionId: "s-shared", epoch: 1 };
   const armed = finishStop({ ticket, pending: ticket, currentEpoch: 1, ok: true, latchOwner: null });
   assert.equal(armed.arm, true, "B's queued send on the shared session leaves A's stop ticket armed");
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   const waitingBranch = blockAfter(body, "if (sent.waiting && sent.queueItemId !== undefined) {").body;
   for (const needle of ["openTurnForTab(", "patchTabTurn(", "writeTabRun("]) {
     assert.ok(!waitingBranch.includes(needle), `the waiting branch must not touch ${needle}`);
@@ -1866,7 +1866,7 @@ test("a just-inserted user message stays inside the running turn's append window
 });
 
 test("the sent message is unstarted until the started response clears it", () => {
-  const body = functionBody("async function send()", "async function stopTurn(");
+  const body = functionBody("async function send(", "async function stopTurn(");
   assert.match(
     body,
     /const userMsg: ChatItem = \{ id: allocId\(\), kind: "user", text, notStarted: true \};/,
@@ -2146,4 +2146,95 @@ test("the slash catalog refresh is callable from the skills page and wired to ca
   assert.match(SKILLS_VIEW_SOURCE, /const \[mineError, setMineError\]/);
   assert.match(SKILLS_VIEW_SOURCE, /tab === "center" && centerError/);
   assert.match(SKILLS_VIEW_SOURCE, /tab === "mine" && mineError/);
+});
+
+test("dedupes skill success cards by draftId and keeps the same array on replay", () => {
+  const event = {
+    draftId: "draft-1",
+    name: "daily-summary",
+    text: "已保存技能 daily-summary，请在“我的技能”中启用",
+  };
+  const first = AppModule.upsertSkillSuccess([], event, () => 10);
+  assert.equal(first.length, 1);
+  assert.deepEqual(first[0], { id: 10, kind: "skill-success", ...event });
+
+  const replay = AppModule.upsertSkillSuccess(first, event, () => 11);
+  assert.equal(replay, first);
+  assert.equal(replay.length, 1);
+
+  const other = AppModule.upsertSkillSuccess(replay, { ...event, draftId: "draft-2" }, () => 12);
+  assert.deepEqual(other.map((item) => item.kind), ["skill-success", "skill-success"]);
+  assert.deepEqual(other.map((item) => item.id), [10, 12]);
+});
+
+test("ChatItem carries the skill confirm card and the deduplicated success card", () => {
+  assert.match(APP_SOURCE, /\| \{ id: number; kind: "skill-confirm"; card: SkillConfirmCard \}/);
+  assert.match(APP_SOURCE, /\| \{ id: number; kind: "skill-success"; draftId: string; name: string; text: string \}/);
+  // 两张卡都是独立的对话条目，渲染分支只在 ChatRow 本体里。
+  const chatRow = functionBody("function ChatRow(", "\nfunction PlanCard(");
+  assert.match(chatRow, /item\.kind === "skill-confirm"/);
+  assert.match(chatRow, /item\.kind === "skill-success"/);
+  assert.match(chatRow, /<SkillConfirmCardView/);
+  assert.match(chatRow, /<SkillSuccessCard/);
+});
+
+test("skill events follow their session and keep success, notice and change routes separate", () => {
+  const start = APP_SOURCE.indexOf('if (event.event === "skill/confirm")');
+  const end = APP_SOURCE.indexOf('if (event.event === "session/queue-start")', start);
+  assert.ok(start >= 0 && end > start, "the four skill event branches sit before queue-start");
+  const block = APP_SOURCE.slice(start, end);
+  assert.match(block, /targetTabFor\(eventSessionId\)/);
+  assert.doesNotMatch(block, /liveChatRef\.current/);
+  assert.match(block, /setChannelItems\(\(items\) => upsertSkillSuccess\(items, event, allocId\), event\.sessionId\)/);
+  assert.match(block, /setSkillChangeSignal\(\(prev\) => prev \+ 1\)/);
+  assert.match(block, /"skill\.invocableList"/);
+
+  const noticeAt = block.indexOf('if (event.event === "skill/notice")');
+  const changedAt = block.indexOf('if (event.event === "skill/changed")');
+  assert.ok(noticeAt >= 0 && changedAt > noticeAt, "notice and changed branches keep their order");
+  const notice = block.slice(noticeAt, changedAt);
+  assert.match(notice, /noteTab\(target, event\.text\)/);
+  assert.doesNotMatch(notice, /skill-success|upsertSkillSuccess|setView\(/);
+});
+
+test("SkillsView refreshes on the skill signal, never on agent changes", () => {
+  assert.match(APP_SOURCE, /const \[skillChangeSignal, setSkillChangeSignal\] = useState\(0\);/);
+  assert.match(APP_SOURCE, /<SkillsView\s+refreshSignal=\{skillChangeSignal\}/);
+  assert.match(APP_SOURCE, /initialTab=\{skillsInitialTab\}/);
+  assert.match(APP_SOURCE, /onStartConversationCreate=\{startSkillCreationConversation\}/);
+  assert.doesNotMatch(APP_SOURCE, /<SkillsView refreshSignal=\{agentChangeSignal\}/);
+});
+
+test("the Mine conversation entry sends /create-skill from a normal tab and never consents", () => {
+  assert.match(APP_SOURCE, /const SKILL_CREATION_COMMAND = "\/create-skill";/);
+  const body = functionBody("function startSkillCreationConversation(", "function openMySkills(");
+  assert.match(body, /setView\("main"\)/);
+  assert.match(body, /isPlainConversationTab/);
+  assert.match(body, /void send\(SKILL_CREATION_COMMAND, (?:reuse\.id|id)\)/);
+  // 启动只开普通会话并发送预置命令：不自动启用、上传或跳过确认写盘。
+  assert.doesNotMatch(body, /skill\.(upload|setEnabled|create)/);
+  assert.doesNotMatch(body, /"确认"/);
+});
+
+test("the confirm card's actions stay on the ordinary conversation path", () => {
+  assert.match(APP_SOURCE, /onSkillConsent=\{\(\) => void send\("确认"\)\}/);
+  assert.match(APP_SOURCE, /onSkillCancel=\{\(\) => void send\("取消"\)\}/);
+  assert.match(APP_SOURCE, /onSkillRevise=\{focusComposer\}/);
+  assert.match(APP_SOURCE, /onSkillGoToMine=\{openMySkills\}/);
+  // 同意回调与“对话创建技能”的启动回调不得互相串用。
+  assert.doesNotMatch(APP_SOURCE, /onSkillConsent=\{startSkillCreationConversation\}/);
+  assert.doesNotMatch(APP_SOURCE, /onStartConversationCreate=\{\(\) => void send\("确认"\)\}/);
+
+  const sendBody = functionBody("async function send(", "async function cancelWaiting(");
+  assert.match(sendBody, /const text = \(textOverride \?\? draft\)\.trim\(\);/);
+  assert.match(sendBody, /const chatId = targetTabId \?\? activeTab;/);
+  assert.match(sendBody, /if \(textOverride === undefined\) setDraft\(""\);/);
+});
+
+test("the success card's go-to-mine action selects the Mine tab without stopping the turn", () => {
+  const body = functionBody("function openMySkills(", "function focusComposer(");
+  assert.match(body, /setSkillsInitialTab\("mine"\)/);
+  assert.match(body, /setView\("skills"\)/);
+  assert.doesNotMatch(body, /session\.cancel|stopTurn|setChatTabs/);
+  assert.match(APP_SOURCE, /initialTab=\{skillsInitialTab\}/);
 });

@@ -25,7 +25,19 @@ export type ToolPanelItem =
   | { id: number; kind: "tool"; card: ToolPanelCard; panelToggled?: PanelToggle; text?: string }
   | {
       id: number;
-      kind: "user" | "assistant" | "thinking" | "todo" | "ask" | "input" | "attachment" | "agent-confirm" | "subagent-run" | "note";
+      kind:
+        | "user"
+        | "assistant"
+        | "thinking"
+        | "todo"
+        | "ask"
+        | "input"
+        | "attachment"
+        | "agent-confirm"
+        | "skill-confirm"
+        | "skill-success"
+        | "subagent-run"
+        | "note";
       card?: unknown;
       panelToggled?: PanelToggle;
       text?: string;

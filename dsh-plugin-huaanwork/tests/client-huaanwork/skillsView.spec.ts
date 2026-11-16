@@ -60,7 +60,11 @@ function flush(turns = 6): Promise<void> {
   })();
 }
 
-async function mount(options: { mine: LocalSkillInfo[]; warning?: string } = { mine: [LOCAL] }): Promise<HTMLDivElement> {
+async function mount(options: {
+  mine: LocalSkillInfo[]
+  warning?: string
+  onStartConversationCreate?: () => void
+} = { mine: [LOCAL] }): Promise<HTMLDivElement> {
   rpc.mockImplementation((async (method: string) => {
     if (method === "skill.centerList") {
       return {
@@ -75,10 +79,14 @@ async function mount(options: { mine: LocalSkillInfo[]; warning?: string } = { m
   document.body.append(container);
   root = createRoot(container);
   await act(async () => {
-    root!.render(createElement(SkillsView));
+    root!.render(createElement(SkillsView, {
+      ...(options.onStartConversationCreate !== undefined
+        ? { onStartConversationCreate: options.onStartConversationCreate }
+        : {}),
+    }));
   });
   await flush();
-  return container;
+  return container!;
 }
 
 function buttonByText(view: HTMLElement, text: string): HTMLButtonElement | undefined {
@@ -142,6 +150,31 @@ describe("SkillsView", () => {
     await flush();
     expect(view.textContent).toContain("还没有创建过技能");
     expect(view.textContent).toContain("导入技能");
+  });
+
+  it("opens conversational creation from Mine", async () => {
+    const onStartConversationCreate = vi.fn();
+    const view = await mount({ mine: [], onStartConversationCreate });
+    await act(async () => {
+      buttonByText(view, "我的技能")?.click();
+    });
+    await flush();
+    await act(async () => {
+      buttonByText(view, "对话创建技能")?.click();
+    });
+    expect(onStartConversationCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the conversational create entry on the Mine tab only", async () => {
+    const view = await mount({ mine: [LOCAL], onStartConversationCreate: vi.fn() });
+    // 技能中心没有“对话创建技能”，也不应凭空创建会话。
+    expect(buttonByText(view, "对话创建技能")).toBeUndefined();
+    await act(async () => {
+      buttonByText(view, "我的技能")?.click();
+    });
+    await flush();
+    expect(buttonByText(view, "对话创建技能")).toBeDefined();
+    expect(buttonByText(view, "导入技能")).toBeDefined();
   });
 });
 

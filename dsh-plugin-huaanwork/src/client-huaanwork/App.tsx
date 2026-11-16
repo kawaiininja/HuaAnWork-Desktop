@@ -41,6 +41,8 @@ import {
 } from "./logic/guardMode.ts";
 import { clampLeftWidth, clampRightWidth, resolveColumnWidths } from "./logic/columnResize.ts";
 import AtAgentMenu from "./AtAgentMenu.tsx";
+import SkillConfirmCardView from "./SkillConfirmCard.tsx";
+import SkillSuccessCard from "./SkillSuccessCard.tsx";
 import SlashSkillMenu from "./SlashSkillMenu.tsx";
 import SkillsView from "./SkillsView.tsx";
 import SubagentRunCard from "./SubagentRunCard.tsx";
@@ -50,9 +52,11 @@ import {
   slashSkills,
   slashTokenAt,
   type InvocableSkillInfo,
+  type SkillTab,
 } from "./logic/skillsLogic.ts";
 import type {
   AgentPackageConfirmCard,
+  SkillConfirmCard,
   SubagentCancelResult,
   SubagentRunProjection,
   SubagentRunSnapshot,
@@ -296,6 +300,8 @@ type ChatItem =
   | { id: number; kind: "input"; card: InputCard }
   | { id: number; kind: "attachment"; sourceText: string }
   | { id: number; kind: "agent-confirm"; card: AgentPackageConfirmCard }
+  | { id: number; kind: "skill-confirm"; card: SkillConfirmCard }
+  | { id: number; kind: "skill-success"; draftId: string; name: string; text: string }
   | { id: number; kind: "subagent-run"; runId: string }
   | { id: number; kind: "note"; text: string };
 
@@ -342,6 +348,14 @@ type SessionMenu = { sessionId: string; x: number; y: number };
 
 /** 回合进度的最近一次活动种类：思考、正文、工具结果或静默。 */
 type PulseKind = "reasoning" | "text" | "tool" | "quiet";
+
+/**
+ * 普通会话标签：不是自动化运行、不是重启后的运行骨架、也不是项目子任务。
+ * “对话创建技能”只在这类标签里发预置命令，避免把创建流程塞进运行/子任务上下文。
+ */
+function isPlainConversationTab(tab: ChatTab): boolean {
+  return tab.automationId === undefined && tab.runPlaceholder !== true && tab.taskId === undefined;
+}
 
 /**
  * 一条标签自己的回合身份与停止票据。另一个标签开始回合不会改动这份记录，
@@ -403,6 +417,9 @@ export type RightTab = "preview" | "progress" | "files" | "diff";
 type AuthPhase = "unknown" | "needs-register" | "logged-out" | "logged-in";
 
 const SUGGESTIONS = ["修掉这个仓库里失败的测试", "解释这个仓库的整体结构", "把最近的改动整理成一次 commit"];
+
+/** “我的技能”页“对话创建技能”的预置命令；宿主内部访谈技能名。 */
+const SKILL_CREATION_COMMAND = "/create-skill";
 
 /** 子代理 run 的初始客户端状态;reducer 只读入参,可安全共享。 */
 const INITIAL_SUBAGENT_RUNS: SubagentRunsState = { revision: 0, runs: new Map(), connection: "live" };
@@ -540,6 +557,10 @@ export default function App() {
   const [atCatalog, setAtCatalog] = useState<AgentListItem[]>([]);
   /** 智能体包/目录写入事件计数：智能体页据此重拉各面板数据。 */
   const [agentChangeSignal, setAgentChangeSignal] = useState(0);
+  /** 技能创建/变更事件计数：技能页与 `/` 补全用它刷新，不再借用智能体信号。 */
+  const [skillChangeSignal, setSkillChangeSignal] = useState(0);
+  /** 技能页挂载时打开的标签：“前往我的技能”置 mine，普通导航留在技能中心。 */
+  const [skillsInitialTab, setSkillsInitialTab] = useState<SkillTab>("center");
   const [atCursor, setAtCursor] = useState(0);
   const [atIndex, setAtIndex] = useState(0);
   const [atClosed, setAtClosed] = useState(false);
@@ -1861,6 +1882,44 @@ export default function App() {
           });
         return;
       }
+      // 技能创建事件：确认卡/成功卡按会话归属路由，提示只写脚注，变更只刷新技能侧。
+      // 与智能体事件同处自动化泄漏门之后，自动化会话的技能事件不会写进可见对话标签。
+      if (event.event === "skill/confirm") {
+        const target = targetTabFor(eventSessionId);
+        if (target) {
+          setChatTabs((prev) =>
+            prev.map((tab) =>
+              tab.id === target
+                ? { ...tab, items: [...tab.items, { id: allocId(), kind: "skill-confirm" as const, card: event.card }] }
+                : tab,
+            ),
+          );
+        }
+        return;
+      }
+      if (event.event === "skill/success") {
+        // 同一 draftId 的重放返回原数组：补偿事件不产生第二张成功卡。
+        setChannelItems((items) => upsertSkillSuccess(items, event, allocId), event.sessionId);
+        return;
+      }
+      if (event.event === "skill/notice") {
+        // 成功文案只走 skill/success；这里只留错误与一般提示的脚注。
+        const target = targetTabFor(eventSessionId);
+        if (target) noteTab(target, event.text);
+        return;
+      }
+      if (event.event === "skill/changed") {
+        // 技能变化只驱动技能页与 `/` 补全，不再让智能体信号冒充技能变更。
+        setSkillChangeSignal((prev) => prev + 1);
+        void rpcCall<{ skills: InvocableSkillInfo[] }>("skill.invocableList")
+          .then((listed) => {
+            if (!cancelled) setSlashCatalog(Array.isArray(listed.skills) ? listed.skills : []);
+          })
+          .catch(() => {
+            // 目录暂不可读时保留旧补全数据
+          });
+        return;
+      }
       // 排队项出队/复检失败：早到的那条已在上方按 pending 暂存，这里只处理能归属的。
       if (event.event === "session/queue-start") {
         beginQueuedTurn(queueItemTab(event.queueItemId) ?? event.tabId, event.sessionId, event.queueItemId);
@@ -2596,6 +2655,44 @@ export default function App() {
     // 不再 rebindTabSession：项目根稳定会话退役（规格 §1.5），项目内首条消息走懒创建建子任务。
   }
 
+  /**
+   * “我的技能”页的“对话创建技能”启动回调：打开或复用普通会话标签并发送预置命令。
+   * 只做会话入口——不自动启用、不上传、也不替用户发送同意句。
+   */
+  function startSkillCreationConversation() {
+    setView("main");
+    const reuse =
+      chatTabs.find((tab) => tab.id === activeTab && isPlainConversationTab(tab)) ??
+      chatTabs.find(isPlainConversationTab);
+    if (reuse) {
+      setActiveTab(reuse.id);
+      liveChatRef.current = reuse.id;
+      void send(SKILL_CREATION_COMMAND, reuse.id);
+      return;
+    }
+    const id = `work-${nextChatSeq.current}`;
+    nextChatSeq.current += 1;
+    const label = `任务 ${chatTabs.length + 1}`;
+    setChatTabs((prev) => [
+      ...prev,
+      { id, label, items: [], sessionFailed: false, projectId: null, pendingPick: false },
+    ]);
+    setActiveTab(id);
+    liveChatRef.current = id;
+    void send(SKILL_CREATION_COMMAND, id);
+  }
+
+  /** 成功卡“前往我的技能”：只切视图并让技能页挂载在“我的技能”，不停止当前回合。 */
+  function openMySkills() {
+    setSkillsInitialTab("mine");
+    setView("skills");
+  }
+
+  /** 确认卡“继续修改”：草稿留在宿主侧，只把焦点放回输入框。 */
+  function focusComposer() {
+    composerRef.current?.focus();
+  }
+
   function newTask() {
     setDraft("");
     setSelectedTaskId(null);
@@ -2715,15 +2812,20 @@ export default function App() {
     return sessionId;
   }
 
-  async function send() {
-    const text = draft.trim();
+  /**
+   * 普通会话发送。`textOverride` 用于卡片/入口的固定话术（确认、取消、预置命令）：
+   * 它们走同一条 send/session.send 路径，但不读取也不清空输入框里未提交的草稿。
+   * `targetTabId` 让入口在新建/复用标签的同一拍内发出，不依赖 activeTab 的异步提交。
+   */
+  async function send(textOverride?: string, targetTabId?: string) {
+    const text = (textOverride ?? draft).trim();
     const invokedSkill = parseSlashInvoke(text);
     const invokedAt = parseAtInvoke(text);
     if ((!text && !invokedAt) || sidecarDead || hostPhase !== "ok") return;
     if (tryOpenAutomationFromDraft(text)) return;
     // 同步重入护栏（R3-1）：按标签记录，覆盖到回合真正开始之前的整段异步前奏。
     // 它只挡同一标签的重入，不挡另一个标签。
-    const chatId = activeTab;
+    const chatId = targetTabId ?? activeTab;
     if (sendingRef.current.has(chatId)) return;
     sendingRef.current.add(chatId);
     try {
@@ -2796,7 +2898,8 @@ export default function App() {
       // 停在它后面。只有 started 应答（或排队项真正出队）才清掉这个标记。
       const userMsg: ChatItem = { id: allocId(), kind: "user", text, notStarted: true };
       setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, items: [...tab.items, userMsg] } : tab)));
-      setDraft("");
+      // 固定话术不是输入框草稿：发完不撤用户正在写的内容。
+      if (textOverride === undefined) setDraft("");
       // 应答与 WebSocket 事件不保证先后：发送前先记下本次发送的身份（标签 + 本地消息 id），
       // 应答回来之前到达的事件按到达顺序暂存。pending 本身不开目标窗、不增加 epoch。
       const pending: PendingSend = {
@@ -3516,7 +3619,11 @@ export default function App() {
           <button
             type="button"
             className={view === "skills" ? "nav-it on" : "nav-it"}
-            onClick={() => setView("skills")}
+            onClick={() => {
+              // 普通导航回到技能中心；成功卡的“前往我的技能”单独置 mine。
+              setSkillsInitialTab("center");
+              setView("skills");
+            }}
             title="技能中心"
           >
             <IconSkills />
@@ -3661,7 +3768,12 @@ export default function App() {
           ) : null}
 
           {view === "skills" ? (
-            <SkillsView refreshSignal={agentChangeSignal} onInvocableChanged={refreshSlashCatalog} />
+            <SkillsView
+              refreshSignal={skillChangeSignal}
+              initialTab={skillsInitialTab}
+              onInvocableChanged={refreshSlashCatalog}
+              onStartConversationCreate={startSkillCreationConversation}
+            />
           ) : view === "automations" ? (
             <AutomationsView
               projects={projects}
@@ -3749,6 +3861,10 @@ export default function App() {
                     onThinkingToggle={toggleThinking}
                     onOpenAttachment={handleOpenAttachment}
                     onCancelWaiting={(queueItemId) => void cancelWaiting(queueItemId)}
+                    onSkillConsent={() => void send("确认")}
+                    onSkillRevise={focusComposer}
+                    onSkillCancel={() => void send("取消")}
+                    onSkillGoToMine={openMySkills}
                     reasoning={row.item.kind === "assistant" ? (thinkingBefore(items, row.index)?.thought ?? "") : ""}
                     hasAssistantText={
                       row.item.kind === "thinking"
@@ -4545,6 +4661,19 @@ export function insertTurnItem(items: ChatItem[], item: ChatItem): ChatItem[] {
 }
 
 /**
+ * 技能成功卡按 `draftId` 去重：commit 重放可重发 `skill/success` 补偿丢失事件，
+ * 同一 draftId 再到达时返回原数组（同一引用，React 可跳过更新），绝不插第二张卡。
+ */
+export function upsertSkillSuccess(
+  items: ChatItem[],
+  event: { draftId: string; name: string; text: string },
+  allocId: () => number,
+): ChatItem[] {
+  if (items.some((item) => item.kind === "skill-success" && item.draftId === event.draftId)) return items;
+  return [...items, { id: allocId(), kind: "skill-success", ...event }];
+}
+
+/**
  * `request_input` 的卡片：先关掉没人回答的旧卡，再放进本回合的写入位置。
  * `appendOpenInput` 只会追加到末尾，这里把新卡挪回活动回合内，排队消息之后不再落卡片。
  */
@@ -4618,7 +4747,7 @@ export function appendToken(items: ChatItem[], text: string, allocId: () => numb
 
 type ContentChatItem = Exclude<
   ChatItem,
-  { kind: "attachment" } | { kind: "agent-confirm" } | { kind: "subagent-run" }
+  { kind: "attachment" } | { kind: "agent-confirm" } | { kind: "skill-confirm" } | { kind: "skill-success" } | { kind: "subagent-run" }
 >;
 
 /** 删除记录里的一个键;原本不存在时返回入参,React 状态可跳过更新。 */
@@ -4632,8 +4761,8 @@ function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T
 /**
  * 回合核对与思考折叠用的对话内容视图：结果附件是折叠后的 JSON 渲染项，
  * 在内容视图里等价于一整段助手正文（同 id、同位置，正文取 sourceText）。
- * 创建确认卡映射成空 note——它不参与文件/命令核对，也不结束思考；用占位而不是
- * 删除，是为了让其余条目的相对顺序与 `thinkingBefore` 的 items 下标保持稳定。
+ * 创建确认卡与技能确认/成功卡映射成空 note——它们不参与文件/命令核对，也不结束思考；
+ * 用占位而不是删除，是为了让其余条目的相对顺序与 `thinkingBefore` 的 items 下标保持稳定。
  * 子代理运行卡没有内容和回合语义，直接从内容视图里剔除；`hasAssistantTextAfter`
  * 因此改用 id 映射后的内容视图下标（见调用方），不能再直接用 `items` 下标。
  *
@@ -4651,7 +4780,9 @@ function contentItems(items: readonly ChatItem[]): ContentChatItem[] {
 }
 
 function contentItem(item: Exclude<ChatItem, { kind: "subagent-run" }>): ContentChatItem {
-  if (item.kind === "agent-confirm") return { id: item.id, kind: "note", text: "" };
+  if (item.kind === "agent-confirm" || item.kind === "skill-confirm" || item.kind === "skill-success") {
+    return { id: item.id, kind: "note", text: "" };
+  }
   return item.kind === "attachment" ? attachmentAsAssistant(item) : item;
 }
 
@@ -4707,6 +4838,10 @@ function ChatRow({
   onThinkingToggle,
   onOpenAttachment,
   onCancelWaiting,
+  onSkillConsent,
+  onSkillRevise,
+  onSkillCancel,
+  onSkillGoToMine,
   reasoning = "",
   hasAssistantText = false,
 }: {
@@ -4719,6 +4854,12 @@ function ChatRow({
   onOpenAttachment?: (file: ResultAttachmentFile) => void;
   /** 等待中的用户消息：取消这一条排队项。 */
   onCancelWaiting?: (queueItemId: string) => void;
+  /** 技能确认卡：同意句、继续修改（聚焦输入框）与取消。 */
+  onSkillConsent?: () => void;
+  onSkillRevise?: () => void;
+  onSkillCancel?: () => void;
+  /** 技能成功卡：只有点击才切到“我的技能”。 */
+  onSkillGoToMine?: () => void;
   reasoning?: string;
   hasAssistantText?: boolean;
 }) {
@@ -4799,6 +4940,19 @@ function ChatRow({
   }
   if (item.kind === "note") return <div className="note">{item.text}</div>;
   if (item.kind === "agent-confirm") return <AgentConfirmCard card={item.card} />;
+  if (item.kind === "skill-confirm") {
+    return (
+      <SkillConfirmCardView
+        card={item.card}
+        onConsent={() => onSkillConsent?.()}
+        onRevise={() => onSkillRevise?.()}
+        onCancel={() => onSkillCancel?.()}
+      />
+    );
+  }
+  if (item.kind === "skill-success") {
+    return <SkillSuccessCard name={item.name} draftId={item.draftId} onGoToMine={() => onSkillGoToMine?.()} />;
+  }
   if (item.kind === "todo") {
     return (
       <div className="card todo-card">

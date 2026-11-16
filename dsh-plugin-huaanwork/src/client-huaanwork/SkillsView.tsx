@@ -36,12 +36,17 @@ type Modal =
 
 export default function SkillsView({
   refreshSignal = 0,
+  initialTab = "center",
   onInvocableChanged,
+  onStartConversationCreate,
 }: {
   refreshSignal?: number;
+  /** 挂载时打开的标签；“前往我的技能”用它直达“我的技能”而不是技能中心。 */
+  initialTab?: SkillTab;
   onInvocableChanged?: () => void;
+  onStartConversationCreate?: () => void;
 }) {
-  const [tab, setTab] = useState<SkillTab>("center");
+  const [tab, setTab] = useState<SkillTab>(initialTab);
   const [centerSkills, setCenterSkills] = useState<CenterSkillInfo[]>([]);
   const [localSkills, setLocalSkills] = useState<LocalSkillInfo[]>([]);
   const [centerSearch, setCenterSearch] = useState("");
@@ -305,6 +310,9 @@ export default function SkillsView({
           </button>
         ) : (
           <>
+            <button type="button" className="filter-tab" onClick={() => onStartConversationCreate?.()}>
+              对话创建技能
+            </button>
             <button type="button" className="filter-tab" onClick={() => setModal({ kind: "import-pick" })}>
               导入技能
             </button>
