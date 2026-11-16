@@ -914,9 +914,10 @@ test("a neutral tab does not send when session.new fails", () => {
   assert.ok(mintAt >= 0 && sendAt > mintAt);
   const between = body.slice(mintAt, sendAt);
   // 接线钉：catch 调用抽出的判定函数，随后 return。catch 内不再有分支。
+  // 脚注落发送目标标签 chatId（入口与 setActiveTab 同拍发送时 activeTab 仍是旧闭包）。
   assert.match(
     between,
-    /catch \(error\) \{\s*noteActive\(sessionMintFailureNote\(\{ error, tabProjectId: sendingTab\?\.projectId \}\)\);\s*return;\s*\}/,
+    /catch \(error\) \{\s*noteTab\(chatId, sessionMintFailureNote\(\{ error, tabProjectId: sendingTab\?\.projectId \}\)\);\s*return;\s*\}/,
   );
   // 不得退回改造前的空 catch。
   assert.doesNotMatch(between, /catch \{\s*sessionId = undefined;\s*\}/);
@@ -2201,6 +2202,31 @@ test("dedupes skill success cards by draftId and keeps the same array on replay"
   assert.deepEqual(other.map((item) => item.id), [10, 12]);
 });
 
+test("the success card item carries only its declared fields", () => {
+  // 运行期到达的是完整事件对象(带 event/sessionId);展开入参会把多余属性写进
+  // ChatItem。成功卡条目只应携带声明过的五个字段。
+  const fullEvent = {
+    event: "skill/success",
+    text: "已保存技能 daily-summary，请在“我的技能”中启用",
+    draftId: "draft-1",
+    name: "daily-summary",
+    sessionId: "huaanwork-chat-1",
+  };
+  const items = AppModule.upsertSkillSuccess([], fullEvent, () => 7);
+  assert.deepEqual(Object.keys(items[0]!).sort(), ["draftId", "id", "kind", "name", "text"]);
+});
+
+test("send failure footnotes target the sending tab, not the stale active tab", () => {
+  // startSkillCreationConversation 在 setActiveTab 的同一拍调 send(text, id);send 内
+  // activeTab 仍是上一帧闭包。失败脚注走 noteActive 会落到切换前的旧标签,目标标签
+  // 看起来「什么都没发生」。三条失败路径都必须 noteTab(chatId)。
+  const body = functionBody("async function send(", "async function cancelWaiting(");
+  assert.doesNotMatch(body, /noteActive\(/);
+  assert.match(body, /noteTab\(chatId, error instanceof Error \? error\.message : String\(error\)\)/);
+  assert.match(body, /noteTab\(chatId, sessionMintFailureNote\(/);
+  assert.match(body, /noteTab\(chatId, "子任务会话尚未就绪，消息未发送。请重试。"\)/);
+});
+
 test("ChatItem carries the skill confirm card and the deduplicated success card", () => {
   assert.match(APP_SOURCE, /\| \{ id: number; kind: "skill-confirm"; card: SkillConfirmCard \}/);
   assert.match(APP_SOURCE, /\| \{ id: number; kind: "skill-success"; draftId: string; name: string; text: string \}/);
@@ -2236,6 +2262,8 @@ test("SkillsView refreshes on the skill signal, never on agent changes", () => {
   assert.match(APP_SOURCE, /<SkillsView\s+refreshSignal=\{skillChangeSignal\}/);
   assert.match(APP_SOURCE, /initialTab=\{skillsInitialTab\}/);
   assert.match(APP_SOURCE, /onStartConversationCreate=\{startSkillCreationConversation\}/);
+  // 宿主不可发送时入口禁用,与 send 的早退守卫同口径,不新开空白标签。
+  assert.match(APP_SOURCE, /conversationCreateDisabled=\{sidecarDead \|\| hostPhase !== "ok"\}/);
   assert.doesNotMatch(APP_SOURCE, /<SkillsView refreshSignal=\{agentChangeSignal\}/);
 });
 

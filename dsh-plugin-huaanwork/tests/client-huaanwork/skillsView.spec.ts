@@ -64,6 +64,7 @@ async function mount(options: {
   mine: LocalSkillInfo[]
   warning?: string
   onStartConversationCreate?: () => void
+  conversationCreateDisabled?: boolean
 } = { mine: [LOCAL] }): Promise<HTMLDivElement> {
   rpc.mockImplementation((async (method: string) => {
     if (method === "skill.centerList") {
@@ -82,6 +83,9 @@ async function mount(options: {
     root!.render(createElement(SkillsView, {
       ...(options.onStartConversationCreate !== undefined
         ? { onStartConversationCreate: options.onStartConversationCreate }
+        : {}),
+      ...(options.conversationCreateDisabled !== undefined
+        ? { conversationCreateDisabled: options.conversationCreateDisabled }
         : {}),
     }));
   });
@@ -163,6 +167,21 @@ describe("SkillsView", () => {
       buttonByText(view, "对话创建技能")?.click();
     });
     expect(onStartConversationCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables conversational creation while the host cannot send", async () => {
+    const onStartConversationCreate = vi.fn();
+    const view = await mount({ mine: [], onStartConversationCreate, conversationCreateDisabled: true });
+    await act(async () => {
+      buttonByText(view, "我的技能")?.click();
+    });
+    await flush();
+    const button = buttonByText(view, "对话创建技能");
+    expect(button?.disabled).toBe(true);
+    await act(async () => {
+      button?.click();
+    });
+    expect(onStartConversationCreate).not.toHaveBeenCalled();
   });
 
   it("keeps the conversational create entry on the Mine tab only", async () => {

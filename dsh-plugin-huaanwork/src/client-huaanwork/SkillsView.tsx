@@ -39,12 +39,15 @@ export default function SkillsView({
   initialTab = "center",
   onInvocableChanged,
   onStartConversationCreate,
+  conversationCreateDisabled = false,
 }: {
   refreshSignal?: number;
   /** 挂载时打开的标签；“前往我的技能”用它直达“我的技能”而不是技能中心。 */
   initialTab?: SkillTab;
   onInvocableChanged?: () => void;
   onStartConversationCreate?: () => void;
+  /** 宿主不可发送时禁用入口，避免切到空白标签后 send 静默早退。 */
+  conversationCreateDisabled?: boolean;
 }) {
   const [tab, setTab] = useState<SkillTab>(initialTab);
   const [centerSkills, setCenterSkills] = useState<CenterSkillInfo[]>([]);
@@ -310,7 +313,12 @@ export default function SkillsView({
           </button>
         ) : (
           <>
-            <button type="button" className="filter-tab" onClick={() => onStartConversationCreate?.()}>
+            <button
+              type="button"
+              className="filter-tab"
+              disabled={conversationCreateDisabled}
+              onClick={() => onStartConversationCreate?.()}
+            >
               对话创建技能
             </button>
             <button type="button" className="filter-tab" onClick={() => setModal({ kind: "import-pick" })}>

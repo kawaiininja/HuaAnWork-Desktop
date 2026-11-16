@@ -2846,7 +2846,7 @@ export default function App() {
         try {
           sessionId = await ensureSubtaskSession(sendingTab, text);
         } catch (error) {
-          noteActive(error instanceof Error ? error.message : String(error));
+          noteTab(chatId, error instanceof Error ? error.message : String(error));
           return; // 不发送：draft 未清空，用户可重试
         }
       }
@@ -2867,14 +2867,14 @@ export default function App() {
             setChatTabs((prev) => prev.map((tab) => (tab.id === chatId && !tab.sessionId ? { ...tab, sessionId } : tab)));
           }
         } catch (error) {
-          noteActive(sessionMintFailureNote({ error, tabProjectId: sendingTab?.projectId }));
+          noteTab(chatId, sessionMintFailureNote({ error, tabProjectId: sendingTab?.projectId }));
           return;
         }
       }
       // 项目上下文不允许无 sessionId 回退（规格 §1.5）：静默回退会把消息写进项目根稳定会话，
       // 下次启动被清扫删除——宁可不发送。
       if (sendingTab && sendingTab.projectId != null && !sessionId) {
-        noteActive("子任务会话尚未就绪，消息未发送。请重试。");
+        noteTab(chatId, "子任务会话尚未就绪，消息未发送。请重试。");
         return;
       }
       // 本次发送的模型：本标签选择 > 子任务记住的模型 > 全局当前模型。
@@ -3771,6 +3771,7 @@ export default function App() {
               initialTab={skillsInitialTab}
               onInvocableChanged={refreshSlashCatalog}
               onStartConversationCreate={startSkillCreationConversation}
+              conversationCreateDisabled={sidecarDead || hostPhase !== "ok"}
             />
           ) : view === "automations" ? (
             <AutomationsView
@@ -4668,7 +4669,8 @@ export function upsertSkillSuccess(
   allocId: () => number,
 ): ChatItem[] {
   if (items.some((item) => item.kind === "skill-success" && item.draftId === event.draftId)) return items;
-  return [...items, { id: allocId(), kind: "skill-success", ...event }];
+  // 运行期入参是完整事件对象;只取声明过的字段,不把 event/sessionId 写进 ChatItem。
+  return [...items, { id: allocId(), kind: "skill-success", draftId: event.draftId, name: event.name, text: event.text }];
 }
 
 /**
