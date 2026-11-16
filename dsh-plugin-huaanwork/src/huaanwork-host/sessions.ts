@@ -278,11 +278,12 @@ export async function sendToAgent(
     }
 
     // ③ 流程类型识别:自然语言入口只在无显式 /name、无 @agent 时计入;显式命令不受此限。
-    // 技能 NL 分支还要让出显式智能体入口(客户端拆包 `{skill:'create-agent'}` 或直接
-    // `/create-agent ...`),否则入口正文里的「创建一个技能…」会被技能 NL 检测器抢走,
-    // 智能体分支被 `!requestedSkill` 挡下,两个流程都不启动。
+    // 两侧 NL 都要让出对方的显式入口(客户端拆包 `{skill:'create-agent'}`/`{skill:'create-skill'}`
+    // 或直接斜杠命令),否则入口正文里的对方创建说法会被本侧 NL 检测器抢走,造成双向误触:
+    // `/create-agent 创建一个技能…` 被技能 NL 劫持,`/create-skill 创建一个智能体…` 误触互斥。
     const nlAllowed = !atName && !skillName
-    const detectedAgentIntent = nlAllowed ? detectAgentCreationIntent(text) : undefined
+    const agentNlAllowed = nlAllowed && !createSkillEntry && skillSlash === null
+    const detectedAgentIntent = agentNlAllowed ? detectAgentCreationIntent(text) : undefined
     const agentIntent = createAgentEntry ? detectCreateAgentCommand(text) : detectedAgentIntent
     const requestedAgent = createAgentEntry || agentSlash !== null || detectedAgentIntent !== undefined
     const skillNlAllowed = nlAllowed && !createAgentEntry && agentSlash === null
@@ -303,9 +304,10 @@ export async function sendToAgent(
 
     // ⑤ 对方草稿损坏检测(I-2):智能体侧 hasDraft 是宽松读取(损坏吞成 undefined),磁盘
     // 文件在场却读不出即损坏,fail-closed 终止;不得让技能流程绕过损坏的智能体草稿。
-    // 补救路径由放宽后的 agentCancel 守卫保证(NI-1)。条件与 R8 一致:技能草稿在场时普通
-    // 消息即「继续创建」,损坏文件也算「在场」;无技能草稿时普通聊天不触发。
-    if ((requestedSkill || skillDraft) && hasAgentCreationDraftOnDisk(routeCtx.profileDir, sessionId) && !agentDraft) {
+    // 补救路径由放宽后的 agentCancel 守卫保证(NI-1)。技能草稿在场时普通消息即「继续创建」
+    // (与 step 8 同口径),损坏文件也算「在场」;显式 /name 与 @agent 是非创建轮,按规格 §7
+    // 第 5 步豁免,不被本守卫误拒;无技能草稿时普通聊天不触发。
+    if ((requestedSkill || (nlAllowed && skillDraft)) && hasAgentCreationDraftOnDisk(routeCtx.profileDir, sessionId) && !agentDraft) {
       const notice = '检测到损坏的智能体创建草稿，已终止本次创建路由。请用 /create-agent cancel 显式清理后重试。'
       routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
       return { queued: true, sessionId, started: false, reason: notice }
@@ -322,7 +324,8 @@ export async function sendToAgent(
         summary = requestedAgent ? skillHost?.describeDraft(sessionId) : packageHost?.describeDraft(sessionId)
       } catch (error) {
         if (error instanceof CorruptSkillCreationDraftError || error instanceof CorruptAgentPackageDraftError) {
-          const notice = '检测到损坏的创建草稿，已终止本次创建路由。请用对应流程的 cancel 入口显式取消后重试。'
+          const cancelCommand = error instanceof CorruptSkillCreationDraftError ? '/create-skill cancel' : '/create-agent cancel'
+          const notice = `检测到损坏的创建草稿，已终止本次创建路由。请用 ${cancelCommand} 显式取消后重试。`
           routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
           return { queued: true, sessionId, started: false, reason: notice }
         }
@@ -352,7 +355,9 @@ export async function sendToAgent(
     // 双草稿普通聊天不得注入任一方。
     if (skillHost && nlAllowed && !agentDraft && (requestedSkill || skillDraft)) {
       skillHost.noteCreationTurn(sessionId, text)
-      text = injectCreateSkill(text, skillDraft && !requestedSkill ? 'continue' : 'create')
+      // 原始斜杠命令的正文剥离 `/create-skill` 前缀后再注入;客户端拆包形态 text 已是正文。
+      const skillEntryText = skillSlash !== null ? (skillSlash[1] ?? '').trim() : text
+      text = injectCreateSkill(skillEntryText, skillDraft && !requestedSkill ? 'continue' : 'create')
       attachSkillCreationTools(ctx, sessionId)
     }
 
