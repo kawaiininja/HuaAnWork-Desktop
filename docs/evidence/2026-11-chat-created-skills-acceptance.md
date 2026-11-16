@@ -1,7 +1,7 @@
 # 对话创建技能 — 实施证据（2026-11-16）
 
 - 分支：`feat/chat-created-skills`（基线 `ff29debd37d72a92f10d446eafa07867d17befd8`）
-- 最终代码提交：`90d4c73284`（评审修复波 + 停放项修复 + 文档提交，见 §7；本文件落盘提交在其之后）
+- 最终代码提交：`84c80e145c`（评审修复波 + 停放项修复；文档提交在其之后，见 §2 提交链）
 - 规格：`docs/superpowers/specs/2026-11-15-chat-created-skills-design.md`
 - 计划：`docs/superpowers/plans/2026-11-15-chat-created-skills.md`
 - 评审：`docs/superpowers/plans/2026-11-15-implementation-plans-review.md`
