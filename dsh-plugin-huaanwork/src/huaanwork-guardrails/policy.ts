@@ -11,16 +11,19 @@ import { sessionWorkspaceRoot } from "./sandbox-cwd.ts";
 import { parentSessionOf } from "../huaanwork-host/child-sessions.ts";
 
 /**
- * 本地智能体包工具:创建流程挂 agent_propose/agent_commit,`@slug` 运行链路挂
- * agent_skill_run/agent_http。四个名字都要在这里补 `attached`——创建链路两个在
- * decide() 的 default 分支按档位 ask,运行链路两个在显式分支附加即 allow;
- * 未挂载一律 deny,与 call_host_tool 同一纵深。
+ * 按会话挂载的创建/运行工具:智能体创建挂 agent_propose/agent_commit,`@slug` 运行
+ * 链路挂 agent_skill_run/agent_http,对话创建技能挂 skill_propose/skill_commit。
+ * 六个名字都要在这里补 `attached`:两个创建链路与技能创建在 decide() 的 default
+ * 分支按档位 ask,智能体运行链路两个在显式分支附加即 allow;未挂载一律 deny,
+ * 与 call_host_tool 同一纵深。
  */
-const AGENT_PACKAGE_TOOLS: ReadonlySet<string> = new Set([
+const SESSION_ATTACHED_TOOLS: ReadonlySet<string> = new Set([
   "agent_propose",
   "agent_commit",
   "agent_skill_run",
   "agent_http",
+  "skill_propose",
+  "skill_commit",
 ]);
 
 type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:376
@@ -251,7 +254,7 @@ function toToolCall(execution: ToolExecution, ctx: Context): ToolCall {
     attached = isMcpAttached(ctx.huaanworkAttachments, sessionId, execution.name);
     // 包运行子会话没有审批界面:标记出来让 decide() 放行它自己挂载的 MCP 工具。
     packageRuntime = sessionId !== undefined && ctx.huaanworkPackageChildSessions?.has(sessionId) === true;
-  } else if (AGENT_PACKAGE_TOOLS.has(execution.name)) {
+  } else if (SESSION_ATTACHED_TOOLS.has(execution.name)) {
     const sessionId = sessionIdOfAgentRef(execution.agent);
     attached = isAgentToolAttached(ctx.huaanworkAttachments, sessionId, execution.name);
   }
