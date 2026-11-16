@@ -1,7 +1,7 @@
 # 对话创建技能 — 实施证据（2026-11-16）
 
 - 分支：`feat/chat-created-skills`（基线 `ff29debd37d72a92f10d446eafa07867d17befd8`）
-- 最终代码提交：`1d99d015b8`（本文件落盘提交在其之后）
+- 最终代码提交：`3b41400ba4`（评审修复波，见 §7；本文件落盘提交在其之后）
 - 规格：`docs/superpowers/specs/2026-11-15-chat-created-skills-design.md`
 - 计划：`docs/superpowers/plans/2026-11-15-chat-created-skills.md`
 - 评审：`docs/superpowers/plans/2026-11-15-implementation-plans-review.md`
@@ -13,6 +13,7 @@
 - 规格 §12.2 的五项**人类验收（§4）尚未执行**，需 owner 真人完成并回填证据。
 - 2026-11-16 先后做了两轮 **agent 辅助真机走查（§4.1）**。首轮因模型长上下文走神、创建工具批准未授予而未能出确认卡，曾误判为“上游丢弃工具调用”（§4.2 旧结论，已纠正）。第二轮在短上下文 + 显式批准下，**五项全部走通**：确认卡、继续修改/取消、成功卡+默认未启用、启停调用、仅 SKILL.md 无脚本/端点/自动上传。
 - 这不是人类验收，不能替代 §4；§4 仍待 owner 真人回填。
+- 2026-11-16 晚完成 Gemini code review 的独立复核与修复波（§7）：Critical 白名单修复入库、路由对称性、事件闸门顺序、字段归一化与 §12.1 缺口补齐；修复后根门禁见 §1。
 
 ## 1. 自动化门禁（实际执行，原始退出码）
 
@@ -23,10 +24,11 @@
 | 最终修复波聚焦套件（6 spec） | `1d99d015b8` | 终波修复实现者 | 0 | 263 passed |
 | `corepack yarn check` | `987b014774` | 控制器 | 0 | 全链通过（最后一个 workspace agent-catalog-admin 15/15）；该次运行早于终波修复提交 |
 | `corepack yarn check` | `1d99d015b8` | 控制器 | 0 | 终树复跑全链通过（最后一个 workspace agent-catalog-admin 15/15） |
+| `corepack yarn check` | `3b41400ba4` | 控制器（评审修复波） | 0 | 全链通过；桌面包 `4231 passed / 15 skipped (4246)`、`verify:host` 35/0、closure 316 节点、bundled 134 文件/10 内联、licenses 637 包、operations 7/18；最后一个 workspace agent-catalog-admin 15/15。完整日志 `/tmp/hw-root-check-20261116-r2.log` |
 
-说明：计划允许 `verify:aa` 并发竞争时串行重跑并如实记录；本次两轮根门禁均未出现该竞争，无重跑。
+说明：计划允许 `verify:aa` 并发竞争时串行重跑并如实记录；本次两轮根门禁均未出现该竞争，无重跑。评审修复波首轮根门禁退出码 **2**：typecheck 捕获归一化写法的 `exactOptionalPropertyTypes` 违规（vitest 不做类型检查），修正提交 `3b41400ba4` 后复跑退出码 0；首轮日志 `/tmp/hw-root-check-20261116.log`。
 
-## 2. 提交链（ff29debd37..1d99d015b8）
+## 2. 提交链（ff29debd37..3b41400ba4）
 
 | 提交 | 内容 |
 | --- | --- |
@@ -41,6 +43,13 @@
 | `5427147e28` | 客户端确认卡/成功卡、事件接线与“我的技能”入口 |
 | `987b014774` | 启动对话创建时清除历史面板，真正露出会话标签 |
 | `1d99d015b8` | 终审修复波：客户端形态显式取消、项目标签排除、门面重建、显式智能体入口不被技能 NL 劫持、重放清理草稿 |
+| `9545c218cd` | 评审 Critical：适配器白名单放行 skill_propose/skill_commit + 回归钉 |
+| `cc0afed6c8` | 评审 Important #1/#2 + Minor #4/#7d：agentNlAllowed 对称守卫、Step ⑤ 非创建轮豁免、损坏提示点名 cancel、斜杠前缀剥离 |
+| `3733a2168d` | 评审 Important #3（复核降 Minor）：skill/changed 与 agent/changed 移出自动化闸门 + 顺序契约钉 |
+| `10b1304ff3` | 评审 Minor #1/#2/#3/#5：字段归一化、随机 tmp 后缀、contentPreviewOf 去重与 commit 卡移除、beginUpdate 低层互斥 |
+| `0654f565dc` | 评审 Minor #6/#7a/#7b：noteTab(chatId) 脚注、成功卡字段投影、入口禁用 |
+| `90dfe0a944` | 评审 Important #4：§12.1 缺口补齐（保留名/预算/换行/卡↔frontmatter/损坏 catch/另存不继承） |
+| `3b41400ba4` | 归一化写法满足 exactOptionalPropertyTypes（根门禁 typecheck 捕获后修正） |
 
 ## 3. 规格 §12.1 自动化覆盖映射（摘要）
 
@@ -103,15 +112,18 @@
 
 **结论**：agent 辅助第二轮五项全部 PASS；§12.2 人类验收仍待 owner 真人回填。此前“上游硬阻塞、不能验收”的结论已纠正（见 §4.2）。
 
-## 4.2 根因排查记录与纠正（2026-11-16，systematic-debugging，未改动产品代码）
+## 4.2 根因排查记录与纠正（2026-11-16，systematic-debugging）
 
-曾用本地转发代理抓上游请求/响应、并在 policy/present-as/execute/attach 加临时日志（后全部还原），一度判定“上游 LLM→tool-call 归一化层丢弃创建工具调用”。**该判定已被第二轮真机走查推翻**：同一构建下 `skill_propose`/`skill_commit` 正常执行并产生受控状态，故不存在确定性的上游丢弃。
+曾用本地转发代理抓上游请求/响应、并在 policy/present-as/execute/attach 加临时日志（后全部还原），一度判定“上游 LLM→tool-call 归一化层丢弃创建工具调用”。上游确实正常返回了 `skill_propose`/`cs_propose` 原生调用；**丢弃发生在桌面适配器的静态白名单**：提交树（`1d99d015b8` 及之前）的 `isRegisteredToolName` 未放行 `skill_propose`/`skill_commit`，SSE 与文本协议两条解析路径都会过滤掉它们——无正文回合退化为 `EMPTY_RESPONSE`，带思考回合触发重试后可能 `NO_ACTION`，混排正文则静默丢失调用。
 
-复盘首轮“工具调用消失/EMPTY_RESPONSE”的真实诱因：
+第二轮真机走查（§4.1）之所以五项走通，是因为其工作区构建包含了 17:02 写入、当时**尚未提交**的白名单修复（`model.ts`/`model.spec.ts`，修复波已入库为 `9545c218cd`）。本节旧版“同一构建下正常执行，故不存在确定性的上游丢弃”与“产品代码与分支提交一致”的表述不准确：走查构建 ≠ 提交树；提交树在修复入库前，对话创建主链路确定性不可用。该基线错位由 2026-11-16 code review（Critical #1）指出，并经独立复核确认（时间戳：model.ts 17:02:34 / 走查记录提交 734e124022 17:20:55）。
+
+复盘首轮“工具调用消失/EMPTY_RESPONSE”的真实诱因（多因叠加）：
+- 白名单丢弃（确定性，已修复入库）；
 - 创建工具被策略 ask 挂起等待“批准”，未批准时回合不产生确认卡，表象似“调用被丢”；
-- 长上下文下模型合规性下降，改走 read/skill-creator/子代理带外写盘，或返回空内容（DeepSeek thinking 模式偶发），与工具链路无关。
+- 长上下文下模型合规性下降，改走 read/skill-creator/子代理带外写盘，或返回空内容（DeepSeek thinking 模式偶发）。
 
-因此**不需要上游修复**即可真机走通；保留的改进项为观察 1/2（批准交互明示、创建回合模型合规加固），均属 owner 裁定范围。排查期间临时改名/日志已 `git restore` 还原，产品代码与分支提交一致。
+因此**不需要上游修复**；需要且已完成的修复是桌面适配器白名单。保留的改进项为观察 1/2（批准交互明示、创建回合模型合规加固），均属 owner 裁定范围。排查期间临时改名/日志已 `git restore` 还原。
 
 ## 5. 残余与裁定（移交 owner）
 
@@ -120,8 +132,19 @@
 - **停放（Low）**：损坏草稿 + 凭证重放窗口下草稿仍保留（与首提交清理同一限制；显式取消现可从客户端触达）。
 - **停放（Low）**：`selectSubtask` 与本次修复对称的历史面板问题属应用级导航，超出本计划范围。
 - 其余 deferred minors 见 `.superpowers/sdd/2026-11-15-chat-created-skills/progress.md`（SDD 工作区，git-ignored，合入前会随工作区清理；要点已在本节汇总）。
+- **停放（Low，评审 Minor #7c）**：确认卡按钮无锁存/禁用态，回看历史卡片再点「确认创建」会把「确认」当普通消息发给模型；与智能体确认卡既有行为一致，卡片生命周期统一裁定属 owner。
+- **停放（Low，评审 Minor #7e）**：`session.remove` 不清理创建草稿文件，与智能体 `.drafts` 既有行为一致；稳定通道会话删除后重建同 `sessionId` 时遗留草稿会重新激活。统一清理策略属 owner。
+- **停放（Low，评审 Minor #7f）**：`.skill-confirm-card`/`.skill-success-card` 与 `.agent-confirm-card` 样式规则重复，可合并共用类；涉及 `styles.generated.ts` 再生成与视觉核对，留待 UI 加固波。
 
 ## 6. 仓库状态备注
 
 - `docs/superpowers/plans/*`、`docs/superpowers/specs/*`（本计划/规格/评审/另两份计划）为**未跟踪新文件**，本分支的 11 个提交均未包含它们；合入前是否提交由 owner 决定。
 - 工作区 `AGENTS.md` 的修改为既有未提交改动，本分支未触碰、未提交。
+
+## 7. 2026-11-16 code review 独立复核与修复波
+
+- 评审文档：`docs/superpowers/plans/2026-11-16-chat-created-skills-code-review.md`（Gemini，Double-Check 校准版；独立复核结论以标注段落追加在该文档末尾）。
+- 复核判决：1 Critical + 4 Important + 7 Minor 的代码事实**全部属实**，无实质误报、无实质漏报（独立扫描全量 41 文件 diff）；两处措辞不精确（Important #4「全仓唯一调用 duplicateLocalSkill」——routes.spec.ts 亦经 HTTP 路由 exercising 同一函数；Important #3 影响段漏写缓解因素）。Important #3 严重度校准为 Minor：新技能默认禁用本就不进 invocableList，启用/禁用经 SkillsView `onInvocableChanged` 独立刷新，真实影响仅「commit 时已挂载的 SkillsView 错过一次自动刷新」；仍按建议照修。
+- 修复提交见 §2 提交链 `9545c218cd`..`3b41400ba4`（7 个提交，TDD：每项先红后绿）。
+- 修复后仓库根 `corepack yarn check` 退出码 **0**（§1 末行：桌面 4231 passed / 15 skipped，全链通过；完整日志 `/tmp/hw-root-check-20261116-r2.log`）。首轮根门禁曾在 typecheck 捕获归一化写法的 `exactOptionalPropertyTypes` 违规（vitest 不做类型检查），修正后复跑。
+- §12.2 五项真人验收**仍待 owner**，本波未替代；§4.1 的 agent 辅助走查结论不变，但其构建含未提交修复的基线错位已在 §4.2 更正。
