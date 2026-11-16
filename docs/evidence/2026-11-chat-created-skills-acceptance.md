@@ -24,10 +24,11 @@
 | `corepack yarn check` | `987b014774` | 控制器 | 0 | 全链通过（最后一个 workspace agent-catalog-admin 15/15）；该次运行早于终波修复提交 |
 | `corepack yarn check` | `1d99d015b8` | 控制器 | 0 | 终树复跑全链通过（最后一个 workspace agent-catalog-admin 15/15） |
 | `corepack yarn check` | `3b41400ba4` | 控制器（评审修复波） | 0 | 全链通过；桌面包 `4231 passed / 15 skipped (4246)`、`verify:host` 35/0、closure 316 节点、bundled 134 文件/10 内联、licenses 637 包、operations 7/18；最后一个 workspace agent-catalog-admin 15/15。完整日志 `/tmp/hw-root-check-20261116-r2.log` |
+| `corepack yarn check` | `c8e044c356` | 控制器（最终干净树） | 0 | 全链通过；桌面包 `4236 passed / 15 skipped (4251)`（+5：#7c/#7e 新钉）、closure 316 节点、operations 7/18；最后一个 workspace agent-catalog-admin 15/15。完整日志 `/tmp/hw-root-check-final-r2.log` |
 
-说明：计划允许 `verify:aa` 并发竞争时串行重跑并如实记录；本次两轮根门禁均未出现该竞争，无重跑。评审修复波首轮根门禁退出码 **2**：typecheck 捕获归一化写法的 `exactOptionalPropertyTypes` 违规（vitest 不做类型检查），修正提交 `3b41400ba4` 后复跑退出码 0；首轮日志 `/tmp/hw-root-check-20261116.log`。
+说明：计划允许 `verify:aa` 并发竞争时串行重跑并如实记录；本次两轮根门禁均未出现该竞争，无重跑。评审修复波首轮根门禁退出码 **2**：typecheck 捕获归一化写法的 `exactOptionalPropertyTypes` 违规（vitest 不做类型检查），修正提交 `3b41400ba4` 后复跑退出码 0；首轮日志 `/tmp/hw-root-check-20261116.log`。最终干净树首轮退出码 **1**：check-whitespace 捕获 archive 文件末尾空行，修复提交 `c8e044c356` 后复跑退出码 0；首轮日志 `/tmp/hw-root-check-final.log`。
 
-## 2. 提交链（ff29debd37..c8e044c356）
+## 2. 提交链（ff29debd37..f26ccefe69）
 
 | 提交 | 内容 |
 | --- | --- |
