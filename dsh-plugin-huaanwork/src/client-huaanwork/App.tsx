@@ -2660,6 +2660,10 @@ export default function App() {
    * 只做会话入口——不自动启用、不上传、也不替用户发送同意句。
    */
   function startSkillCreationConversation() {
+    // 与 newTask 一致地重置主视图导航：historyView 优先级高于对话区，
+    // 不清则发送的 /create-skill 落在用户看不见的历史详情页后面。
+    setSelectedTaskId(null);
+    setHistoryView(null);
     setView("main");
     const reuse =
       chatTabs.find((tab) => tab.id === activeTab && isPlainConversationTab(tab)) ??

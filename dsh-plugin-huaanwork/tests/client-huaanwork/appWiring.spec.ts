@@ -2208,6 +2208,10 @@ test("SkillsView refreshes on the skill signal, never on agent changes", () => {
 test("the Mine conversation entry sends /create-skill from a normal tab and never consents", () => {
   assert.match(APP_SOURCE, /const SKILL_CREATION_COMMAND = "\/create-skill";/);
   const body = functionBody("function startSkillCreationConversation(", "function openMySkills(");
+  // 与 newTask 相同的导航重置：historyView 优先级高于对话区且不随视图切换失效，
+  // 不清则 /create-skill 进入用户看不到的标签页，输入框也被历史详情页挡掉。
+  assert.match(body, /setHistoryView\(null\)/);
+  assert.match(body, /setSelectedTaskId\(null\)/);
   assert.match(body, /setView\("main"\)/);
   assert.match(body, /isPlainConversationTab/);
   assert.match(body, /void send\(SKILL_CREATION_COMMAND, (?:reuse\.id|id)\)/);
