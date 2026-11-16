@@ -269,6 +269,32 @@ describe('skill creation drafts', () => {
     expect(hasSkillCreationDraftOnDisk(root, 'session-1')).toBe(false)
   })
 
+  it('rejects internal and bundled reserved names at propose', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'skill-draft-reserved-'))
+    for (const name of ['create-skill', 'create-agent', 'explore']) {
+      const proposed = await proposeSkillCreation(root, 'session-1', {
+        name, description: '描述', body: '正文',
+      })
+      expect(proposed.ok).toBe(false)
+      if (proposed.ok) continue
+      expect(proposed.fieldErrors.map((error) => error.field)).toContain('name')
+    }
+    expect(hasSkillCreationDraftOnDisk(root, 'session-1')).toBe(false)
+  })
+
+  it('rejects over-budget description and body at propose', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'skill-draft-budget-'))
+    const longDescription = await proposeSkillCreation(root, 'session-1', {
+      name: 'long-desc', description: '字'.repeat(1025), body: '正文',
+    })
+    expect(longDescription.ok).toBe(false)
+    const longBody = await proposeSkillCreation(root, 'session-1', {
+      name: 'long-body', description: '描述', body: 'a'.repeat(64 * 1024 + 1),
+    })
+    expect(longBody.ok).toBe(false)
+    expect(hasSkillCreationDraftOnDisk(root, 'session-1')).toBe(false)
+  })
+
   it('the committed SKILL.md frontmatter matches the confirmed proposal', async () => {
     const root = mkdtempSync(join(tmpdir(), 'skill-draft-frontmatter-'))
     const proposed = await proposeSkillCreation(root, 'session-1', {
