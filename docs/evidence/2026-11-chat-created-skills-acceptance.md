@@ -1,7 +1,7 @@
 # 对话创建技能 — 实施证据（2026-11-16）
 
 - 分支：`feat/chat-created-skills`（基线 `ff29debd37d72a92f10d446eafa07867d17befd8`）
-- 最终代码提交：`84c80e145c`（评审修复波 + 停放项修复，见 §7；本文件落盘提交在其之后）
+- 最终代码提交：`c8e044c356`（评审修复波 + 停放项修复 + 文档提交，见 §7；本文件落盘提交在其之后）
 - 规格：`docs/superpowers/specs/2026-11-15-chat-created-skills-design.md`
 - 计划：`docs/superpowers/plans/2026-11-15-chat-created-skills.md`
 - 评审：`docs/superpowers/plans/2026-11-15-implementation-plans-review.md`
@@ -27,7 +27,7 @@
 
 说明：计划允许 `verify:aa` 并发竞争时串行重跑并如实记录；本次两轮根门禁均未出现该竞争，无重跑。评审修复波首轮根门禁退出码 **2**：typecheck 捕获归一化写法的 `exactOptionalPropertyTypes` 违规（vitest 不做类型检查），修正提交 `3b41400ba4` 后复跑退出码 0；首轮日志 `/tmp/hw-root-check-20261116.log`。
 
-## 2. 提交链（ff29debd37..84c80e145c）
+## 2. 提交链（ff29debd37..c8e044c356）
 
 | 提交 | 内容 |
 | --- | --- |
@@ -51,6 +51,8 @@
 | `3b41400ba4` | 归一化写法满足 exactOptionalPropertyTypes（根门禁 typecheck 捕获后修正） |
 | `cdc7dcda8f` | 评审 Minor #7c（owner 裁定修复）：新确认卡/成功卡消费旧卡，历史按钮禁用 |
 | `84c80e145c` | 评审 Minor #7e（owner 裁定修复）：session.remove 统一清理两类创建草稿 |
+| `5b6f54fce3` | owner 裁定：未跟踪规格/计划/评审文档随分支提交；AGENTS.md 历史记录压缩为活跃债务表 + 完整版移入 archive |
+| `c8e044c356` | check-whitespace 门禁捕获：删除 archive 文件末尾空行 |
 
 ## 3. 规格 §12.1 自动化覆盖映射（摘要）
 
