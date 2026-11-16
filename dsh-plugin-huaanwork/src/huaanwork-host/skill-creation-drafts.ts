@@ -233,6 +233,9 @@ export async function proposeSkillCreation(
   if (hasAgentCreationDraftOnDisk(profileDir, sessionId)) {
     return fieldError('session', '当前会话存在智能体创建草稿，请先完成或取消智能体创建')
   }
+  // 旧草稿只用于 fail-closed 探测:损坏必须抛 CorruptSkillCreationDraftError,不得被
+  // 新 propose 静默覆盖(设计 §11);合法旧草稿仍照常被新 draftId 覆盖。
+  loadSkillCreationDraft(profileDir, sessionId)
   const parsed = parseProposal(input)
   if (!parsed.ok) return parsed
   const errors = validateSkillFields(toSkillInput(parsed.proposal), await takenNames(profileDir))

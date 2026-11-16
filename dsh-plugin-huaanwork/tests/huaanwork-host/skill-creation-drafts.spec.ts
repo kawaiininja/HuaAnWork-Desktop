@@ -1,5 +1,5 @@
 import { mkdtempSync } from 'node:fs'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -153,6 +153,22 @@ describe('skill creation drafts', () => {
       proposedThisTurn: false, creationTurn: true,
     })).rejects.toThrow(CorruptSkillCreationDraftError)
     expect(await listUserSkills(root)).toHaveLength(0)
+  })
+
+  it('fails closed when proposing over a corrupt draft without overwriting it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'skill-draft-propose-corrupt-'))
+    try {
+      const path = join(root, 'skill-creation-drafts', 'session-1.json')
+      await mkdir(join(root, 'skill-creation-drafts'), { recursive: true })
+      await writeFile(path, '{corrupt')
+      await expect(proposeSkillCreation(root, 'session-1', {
+        name: 'daily-summary', description: '生成日报', body: '整理输入并生成日报',
+      })).rejects.toThrow(CorruptSkillCreationDraftError)
+      expect(await readFile(path, 'utf8')).toBe('{corrupt')
+      expect(await listUserSkills(root)).toHaveLength(0)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('keeps the draft and the existing skill when the name is taken before commit', async () => {
