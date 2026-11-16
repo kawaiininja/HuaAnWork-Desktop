@@ -11,8 +11,8 @@
 
 - 自动化门禁（§1）均**实际执行**并记录真实结果。
 - 规格 §12.2 的五项**人类验收（§4）尚未执行**，需 owner 真人完成并回填证据。
-- 2026-11-16 已做一次 **agent 辅助真机走查（§4.1）**：第 4 项 PASS；第 1–3 项 FAIL/BLOCKED（模型未调用 `skill_propose`，上游在该步恒空响应）；第 5 项对正式流程未验证。这不是人类验收，不能替代 §4。
-- 本文档**不构成**验收通过声明；在 §4 回填与 §4.1 观察 2 解决之前，不满足计划的 Completion Criteria。
+- 2026-11-16 先后做了两轮 **agent 辅助真机走查（§4.1）**。首轮因模型长上下文走神、创建工具批准未授予而未能出确认卡，曾误判为“上游丢弃工具调用”（§4.2 旧结论，已纠正）。第二轮在短上下文 + 显式批准下，**五项全部走通**：确认卡、继续修改/取消、成功卡+默认未启用、启停调用、仅 SKILL.md 无脚本/端点/自动上传。
+- 这不是人类验收，不能替代 §4；§4 仍待 owner 真人回填。
 
 ## 1. 自动化门禁（实际执行，原始退出码）
 
@@ -65,11 +65,11 @@
 
 | 项 | 内容 | 状态 |
 | --- | --- | --- |
-| 1 | 从“我的技能”点击“对话创建技能”，完成访谈并看到确认卡 | 待执行（agent 辅助走查失败，见 §4.1） |
-| 2 | 选择继续修改时草稿更新；选择取消时没有新技能 | 待执行（依赖第 1 项，未到达） |
-| 3 | 确认后成功卡出现；“我的技能”立即可见且默认未启用；同一 draftId 重放不新增第二张成功卡 | 待执行（依赖第 1 项，未到达） |
-| 4 | 手动启用后可通过 `/name` 调用；禁用后不可调用 | 待执行（agent 辅助走查 PASS，见 §4.1） |
-| 5 | 全程无脚本、端点或外部接口配置；无自动上传或发布 | 待执行（正式流程未走到 commit，无法判定） |
+| 1 | 从“我的技能”点击“对话创建技能”，完成访谈并看到确认卡 | 待真人回填（agent 辅助第二轮 PASS，见 §4.1） |
+| 2 | 选择继续修改时草稿更新；选择取消时没有新技能 | 待真人回填（agent 辅助第二轮 PASS） |
+| 3 | 确认后成功卡出现；“我的技能”立即可见且默认未启用；同一 draftId 重放不新增第二张成功卡 | 待真人回填（agent 辅助第二轮 PASS；去重另有自动化钉） |
+| 4 | 手动启用后可通过 `/name` 调用；禁用后不可调用 | 待真人回填（agent 辅助两轮均 PASS） |
+| 5 | 全程无脚本、端点或外部接口配置；无自动上传或发布 | 待真人回填（agent 辅助第二轮 PASS） |
 
 建议的真机验收补充观察点（来自评审残余）：
 
@@ -80,42 +80,38 @@
 
 ## 4.1 2026-11-16 agent 辅助真机走查（CDP，非真人验收，不能替代 §4）
 
-环境：隔离临时 `DSH_HOME` + `--user-data-dir`（复制生产 `desktop` profile，模型 `deepseek-chat`，未打印密钥）；工作区 Electron `lib/main.js`（`1d99d015b8` 构建）；CDP 9333 + `HUAANWORK_ACCEPTANCE_HOOKS=1`。走查后已关闭实例并删除含密钥的临时 profile。证据目录（未入库）：`/tmp/hw-skill-accept-evidence-20261116/`（截图 + summary + 启动日志）。
+环境：隔离临时 `DSH_HOME` + `--user-data-dir`（复制生产 `desktop` profile，模型 `deepseek-chat`，未打印密钥）；工作区 Electron `lib/main.js`（分支 `feat/chat-created-skills` 构建）；CDP 9333 + `HUAANWORK_ACCEPTANCE_HOOKS=1`。共两轮；第二轮五项全部走通。走查后关闭实例并删除含密钥临时 profile。证据目录（未入库）：`/tmp/hw-skill-walk3/evidence/`。
+
+**第二轮（短上下文 + 显式批准）结果：**
 
 | 项 | 结果 | 证据要点 |
 | --- | --- | --- |
-| 1 | **FAIL** | 确认卡从未渲染；全部会话中 `skill_propose` 实际调用数为 **0**（日志里出现的 2 处只是工具定义）。首轮访谈正常，模型先 `bash`/`read` 读技能文件，随后口头声称“已提交”但未调用工具；两次显式纠正（点名 `skill_propose` + 四个字段）均得到 `EMPTY_RESPONSE`（上游 5 次重试全空）。截图 `item1-no-confirm-card.png`。 |
-| 2 | **BLOCKED** | 依赖确认卡，未到达；继续修改/取消入口未在真机触发。 |
-| 3 | **BLOCKED** | 依赖确认卡，未到达；成功卡/默认未启用/同 draftId 去重均未在真机验证。 |
-| 4 | **PASS（借助带外技能）** | 使用模型经子代理写入的 `weekly-report-writer`（见下）：禁用时 `/weekly-report-writer …` → `skill weekly-report-writer is disabled`；在“我的技能”启用后同一调用 → 模型按技能正文生成四节周报（会话日志出现 `# 已启用技能：weekly-report-writer` 包装提示）；再禁用 → 再次拒绝。截图 `item4-enabled-invoke-then-disabled.png`。 |
-| 5 | **无法判定（正式流程未 commit）** | 唯一新增技能目录只含 `SKILL.md`（2260 B，无 scripts/资源）；`agents-endpoints.json` 未被修改；无发布/上传状态。但该目录是子代理用 `bash`/`write` 直接写入 `<profile>/skills/` 的带外产物，本地状态中**无**对应条目，不是对话流程的正式 commit。 |
+| 1 | **PASS** | `/create-skill` → 访谈 → 模型调用 `skill_propose`（需点击“批准”，策略 ask）→ 渲染确认卡（名称/描述/触发场景/正文摘要 + 确认创建/继续修改/取消）。截图 `item1-confirm-card.png`。 |
+| 2 | **PASS** | 点“继续修改”→ 发送修订 → 重新 `skill_propose`（批准）→ 新确认卡含“修订版”（草稿更新）；点“取消”→ `已取消创建技能，没有写入技能。`，`meeting-notes` 目录与本地状态条目均不存在。截图 `item2-before-revise.png`/`item2-cancelled.png`。 |
+| 3 | **PASS** | 回复“确认”→ `skill_commit`（批准）→ 成功卡“已保存技能 weekly-report-writer，请在‘我的技能’中启用”+“前往我的技能”；“我的技能”立即列出该技能、来源“创建”、默认未启用（启用按钮）。本地状态含 `creationDraftId`+`creationSessionId`（受控幂等）。截图 `item3-success-card.png`。同 draftId 去重另有自动化钉（appWiring）。 |
+| 4 | **PASS** | 禁用时 `/weekly-report-writer …` → `skill weekly-report-writer is disabled`；启用后同一调用 → 模型按技能正文输出四节周报；再禁用 → 再次拒绝。截图 `item4-enabled-invoke.png`。 |
+| 5 | **PASS** | 技能目录仅 `SKILL.md`（无 scripts/资源）；`origin={kind:"created"}`、无 `publishedRevision/Digest`（未上传/发布）；`agents-endpoints.json` 未被修改；无自动启用。 |
 
-### 关键观察（需 owner 与后续排查）
+**首轮（失败）与纠正**：首轮在长/多轮上下文下模型走神（读 `skill-creator`、派生子代理带外写盘、口头声称提交），且 `skill_propose`/`skill_commit` 的“批准”请求未获授予，导致确认卡不出现，曾据此误判为“上游丢弃工具调用”。第二轮证明：**创建工具本身可正常执行**（propose/commit 均有 `tool/call` 与受控状态写入），首轮失败主因是模型合规性（长上下文）与批准未授予，而非确定性的上游产品 bug。
 
-1. **模型绕过对话流程**：访谈轮中模型读取了用户已启用的 `skill-creator`，随后派生子代理用脚本/`write` 直接把 `weekly-report-writer/SKILL.md` 写进 profile 的 skills 目录（子会话工具集无 `skill_propose`，模型据此声称“工具没有附加”）。注入的 create-skill 指令（“只能调用 skill_propose、不得生成脚本”）没有被遵守；这是产品层健壮性风险（是否在创建回合限制工具集/收紧提示词，需要裁定）。
-2. **`skill_propose` 步恒空响应**：A/B 对照——同一构建、同一模型、同一会话环境，`/create-agent` 立即正常调用 `agent_propose`（弹出批准请求）；而所有技能创建尝试在应调用 `skill_propose` 时上游返回空内容（共记录 54 条 `EMPTY_RESPONSE` 重试/错误）。直接用同一 `api_key` 对 `https://api.deepseek.com` 发同 schema 工具请求，非流式与流式都返回合法 `skill_propose` 工具调用（`finish_reason=tool_calls`）⇒ 上游模型/接口本身可用，问题落在应用侧 provider 适配/工具调用处理路径，需 Host/上游侧排查（超出本计划范围，但它是本功能在当前构建可用的硬阻塞）。
-3. **带外技能可见性**：无本地状态条目的 `weekly-report-writer` 仍出现在“我的技能”（来源显示“创建”），可启停——属既有列表行为，但说明“目录即技能”的入口存在。
-4. **密钥泄漏提示（事故记录）**：走查期间一条错误写的脱敏命令把临时 copy 里的两个 `api_key` 原样打印到了会话输出（仅本机 Qoder 会话记录，未写入仓库）；建议轮换这两个 key。临时 profile 已删除。
+### 仍需 owner 关注的观察
 
-**结论**：第 4 项通过；第 1–3 项在当前构建失败/阻塞；第 5 项对正式流程未验证。§12.2 人类验收仍未完成，且在观察 2 解决并用真人流程复走之前，不应把本功能标记为验收通过或合入发布。
+1. **创建工具需显式批准**：`skill_propose`/`skill_commit` 走策略 ask，真机需用户点“批准”。这是安全设计，但意味着“确认卡→确认→commit”之外还有一次批准交互；验收与文档应明示。
+2. **模型长上下文合规性**：多轮后模型可能弃用 create-skill 改走 skill-creator 带外写盘（首轮出现）。属模型行为风险，可考虑创建回合收紧工具集/提示词（owner 裁定，未实施）。
+3. **带外技能可见性**：无本地状态条目的目录技能仍会出现在“我的技能”（既有列表行为）。
+4. **密钥泄漏提示（事故记录）**：排查期间一条误写的脱敏命令把临时 copy 的两个 `api_key` 打印到会话输出（仅本机记录，未入库）；建议轮换。临时 profile 已删除。
 
-## 4.2 空响应根因排查（2026-11-16，systematic-debugging，未改动产品代码）
+**结论**：agent 辅助第二轮五项全部 PASS；§12.2 人类验收仍待 owner 真人回填。此前“上游硬阻塞、不能验收”的结论已纠正（见 §4.2）。
 
-用本地转发代理抓取应用真实上游请求/响应，并在 policy / present-as / 工具 execute / attach 四个边界加临时日志（排查后已全部还原），复现并逐层定位：
+## 4.2 根因排查记录与纠正（2026-11-16，systematic-debugging，未改动产品代码）
 
-1. **上游正常**：DeepSeek（OpenAI `/chat/completions` 与 Anthropic `/v1/messages` 两种协议）对同一工具 schema 均返回合法 `skill_propose` 工具调用（`finish_reason=tool_calls`，参数完整）。直连探针与代理抓包一致。
-2. **注册与可见性正常**：`tools.schemas()` 含创建工具（`schemasHasCs=true`）；attach 后会话附件白名单含创建工具（`extraHasCs=true`），present-as restrict 的 `allowed` 随之包含它。即工具“已注册、已对模型可见、在执行白名单内”。
-3. **丢弃发生在 LLM→agent-loop 转换层**：会话日志中创建工具**没有任何 `tool/call`**，policy `toToolCall` 与工具 `execute` 均未被触发；上游返回的 tool-call 块在进入 agent-loop 前被丢弃。content=0 时表现为 `EMPTY_RESPONSE`，有文本时表现为“只有文本、工具调用消失”。
-4. **对照**：同一构建/同一模型下 `agent_propose`、`bash`、`read`、`request_input` 均正常执行；把工具改名为 `cs_propose`/`cs_commit`（排除 `skill_` 前缀冲突）**仍被丢弃**。
+曾用本地转发代理抓上游请求/响应、并在 policy/present-as/execute/attach 加临时日志（后全部还原），一度判定“上游 LLM→tool-call 归一化层丢弃创建工具调用”。**该判定已被第二轮真机走查推翻**：同一构建下 `skill_propose`/`skill_commit` 正常执行并产生受控状态，故不存在确定性的上游丢弃。
 
-**根因判定**：丢弃位于上游 harness 的 LLM 流→工具调用归一化层（`@deepseek-ai/dsh-llm` / `@earendil-works/pi-ai`，处于 `node_modules`/`deepseek-harness` 子模组），对“会话附件挂载的创建类工具调用”选择性丢弃。该层不在 `dsh-plugin-huaanwork/` 可编辑面内（AGENTS.md 禁止改子模组），**无法在本分支内修复**。
+复盘首轮“工具调用消失/EMPTY_RESPONSE”的真实诱因：
+- 创建工具被策略 ask 挂起等待“批准”，未批准时回合不产生确认卡，表象似“调用被丢”；
+- 长上下文下模型合规性下降，改走 read/skill-creator/子代理带外写盘，或返回空内容（DeepSeek thinking 模式偶发），与工具链路无关。
 
-**可达成的路径（需 owner 裁定）**：
-- (a) 立一个独立的上游同步/补丁任务，修复或升级 pinned `deepseek-harness` 的工具调用归一化（按 AGENTS.md 选择性评审流程），再复走真机；
-- (b) 若上游有兼容补丁缝（类似 market 的 compatibility patch），经 owner 批准后以补丁方式修正该层；
-- (c) 在上游修复前，本功能真机第 1–3 项保持 BLOCKED，不宣称验收通过。
-
-排查期间的临时改名与日志已全部 `git restore` 还原，工作区产品代码与 `d881bde5de` 一致；含密钥的临时 profile 与代理脚本已删除。
+因此**不需要上游修复**即可真机走通；保留的改进项为观察 1/2（批准交互明示、创建回合模型合规加固），均属 owner 裁定范围。排查期间临时改名/日志已 `git restore` 还原，产品代码与分支提交一致。
 
 ## 5. 残余与裁定（移交 owner）
 
