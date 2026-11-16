@@ -301,7 +301,7 @@ type ChatItem =
   | { id: number; kind: "input"; card: InputCard }
   | { id: number; kind: "attachment"; sourceText: string }
   | { id: number; kind: "agent-confirm"; card: AgentPackageConfirmCard }
-  | { id: number; kind: "skill-confirm"; card: SkillConfirmCard }
+  | { id: number; kind: "skill-confirm"; card: SkillConfirmCard; consumed?: boolean }
   | { id: number; kind: "skill-success"; draftId: string; name: string; text: string }
   | { id: number; kind: "subagent-run"; runId: string }
   | { id: number; kind: "note"; text: string };
@@ -1898,7 +1898,7 @@ export default function App() {
           setChatTabs((prev) =>
             prev.map((tab) =>
               tab.id === target
-                ? { ...tab, items: [...tab.items, { id: allocId(), kind: "skill-confirm" as const, card: event.card }] }
+                ? { ...tab, items: [...consumeSkillConfirmCards(tab.items), { id: allocId(), kind: "skill-confirm" as const, card: event.card }] }
                 : tab,
             ),
           );
@@ -1907,7 +1907,7 @@ export default function App() {
       }
       if (event.event === "skill/success") {
         // 同一 draftId 的重放返回原数组：补偿事件不产生第二张成功卡。
-        setChannelItems((items) => upsertSkillSuccess(items, event, allocId), event.sessionId);
+        setChannelItems((items) => upsertSkillSuccess(consumeSkillConfirmCards(items), event, allocId), event.sessionId);
         return;
       }
       if (event.event === "skill/notice") {
@@ -4674,6 +4674,17 @@ export function upsertSkillSuccess(
 }
 
 /**
+ * 新确认卡或成功卡到达即消费同标签的旧确认卡:历史旧卡再点「确认创建」会发
+ * stray 同意句,且在已有更新草稿时实际确认的是最新活动草稿。无可标记时返回原数组。
+ */
+export function consumeSkillConfirmCards<T extends { kind: string; consumed?: boolean }>(items: T[]): T[] {
+  if (!items.some((item) => item.kind === "skill-confirm" && item.consumed !== true)) return items;
+  return items.map((item) =>
+    item.kind === "skill-confirm" && item.consumed !== true ? { ...item, consumed: true } : item,
+  );
+}
+
+/**
  * `request_input` 的卡片：先关掉没人回答的旧卡，再放进本回合的写入位置。
  * `appendOpenInput` 只会追加到末尾，这里把新卡挪回活动回合内，排队消息之后不再落卡片。
  */
@@ -4944,6 +4955,7 @@ function ChatRow({
     return (
       <SkillConfirmCardView
         card={item.card}
+        disabled={item.consumed === true}
         onConsent={() => onSkillConsent?.()}
         onRevise={() => onSkillRevise?.()}
         onCancel={() => onSkillCancel?.()}

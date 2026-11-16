@@ -2216,6 +2216,44 @@ test("the success card item carries only its declared fields", () => {
   assert.deepEqual(Object.keys(items[0]!).sort(), ["draftId", "id", "kind", "name", "text"]);
 });
 
+test("a new confirm or success card consumes older confirm cards in the same tab", () => {
+  // 旧确认卡不禁用时,回看历史点「确认创建」会发 stray 同意句;已有更新草稿时
+  // 点旧卡实际确认的是最新活动草稿。新卡/成功卡到达即把旧卡标记 consumed。
+  const items = [
+    { id: 1, kind: "user", text: "创建技能" },
+    { id: 2, kind: "skill-confirm", card: { name: "old" } },
+    { id: 3, kind: "skill-confirm", card: { name: "newer" }, consumed: true },
+    { id: 4, kind: "skill-success", draftId: "d", name: "n", text: "t" },
+  ];
+  const consumed = AppModule.consumeSkillConfirmCards(items);
+  assert.deepEqual(consumed.map((item) => item.consumed), [undefined, true, true, undefined]);
+  assert.equal(consumed[0], items[0]);
+  assert.equal(consumed[3], items[3]);
+  // 无可标记时返回原数组,React 可跳过更新。
+  assert.equal(AppModule.consumeSkillConfirmCards(consumed), consumed);
+  const empty: Array<{ kind: string }> = [];
+  assert.equal(AppModule.consumeSkillConfirmCards(empty), empty);
+});
+
+test("confirm and success handlers consume older cards and ChatRow disables them", () => {
+  const confirmBlock = (() => {
+    const start = APP_SOURCE.indexOf('if (event.event === "skill/confirm")');
+    const end = APP_SOURCE.indexOf('if (event.event === "skill/success")', start);
+    assert.ok(start >= 0 && end > start);
+    return APP_SOURCE.slice(start, end);
+  })();
+  assert.match(confirmBlock, /consumeSkillConfirmCards\(tab\.items\)/);
+  const successBlock = (() => {
+    const start = APP_SOURCE.indexOf('if (event.event === "skill/success")');
+    const end = APP_SOURCE.indexOf('if (event.event === "skill/notice")', start);
+    assert.ok(start >= 0 && end > start);
+    return APP_SOURCE.slice(start, end);
+  })();
+  assert.match(successBlock, /upsertSkillSuccess\(consumeSkillConfirmCards\(items\), event, allocId\)/);
+  const chatRow = functionBody("function ChatRow(", "\nfunction PlanCard(");
+  assert.match(chatRow, /disabled=\{item\.consumed === true\}/);
+});
+
 test("send failure footnotes target the sending tab, not the stale active tab", () => {
   // startSkillCreationConversation 在 setActiveTab 的同一拍调 send(text, id);send 内
   // activeTab 仍是上一帧闭包。失败脚注走 noteActive 会落到切换前的旧标签,目标标签
@@ -2228,7 +2266,7 @@ test("send failure footnotes target the sending tab, not the stale active tab", 
 });
 
 test("ChatItem carries the skill confirm card and the deduplicated success card", () => {
-  assert.match(APP_SOURCE, /\| \{ id: number; kind: "skill-confirm"; card: SkillConfirmCard \}/);
+  assert.match(APP_SOURCE, /\| \{ id: number; kind: "skill-confirm"; card: SkillConfirmCard; consumed\?: boolean \}/);
   assert.match(APP_SOURCE, /\| \{ id: number; kind: "skill-success"; draftId: string; name: string; text: string \}/);
   // 两张卡都是独立的对话条目，渲染分支只在 ChatRow 本体里。
   const chatRow = functionBody("function ChatRow(", "\nfunction PlanCard(");
@@ -2245,7 +2283,7 @@ test("skill events follow their session and keep success and notice routes separ
   const block = APP_SOURCE.slice(start, end);
   assert.match(block, /targetTabFor\(eventSessionId\)/);
   assert.doesNotMatch(block, /liveChatRef\.current/);
-  assert.match(block, /setChannelItems\(\(items\) => upsertSkillSuccess\(items, event, allocId\), event\.sessionId\)/);
+  assert.match(block, /setChannelItems\(\(items\) => upsertSkillSuccess\(consumeSkillConfirmCards\(items\), event, allocId\), event\.sessionId\)/);
   // skill/changed 无会话归属,必须在自动化闸门之前全局刷新(见顺序契约钉),
   // 不得混回这段会话归属分支。
   assert.doesNotMatch(block, /skill\/changed/);

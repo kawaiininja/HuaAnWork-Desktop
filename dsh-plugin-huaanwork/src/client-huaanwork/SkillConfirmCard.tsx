@@ -6,12 +6,14 @@ import type { SkillConfirmCard as SkillConfirmCardData } from "./rpc-types.ts";
  */
 export type SkillConfirmCardProps = {
   card: SkillConfirmCardData;
+  /** 同标签已有更新的确认卡或成功卡时置真:历史旧卡不再可操作。 */
+  disabled?: boolean;
   onConsent: () => void;
   onRevise: () => void;
   onCancel: () => void;
 };
 
-export default function SkillConfirmCard({ card, onConsent, onRevise, onCancel }: SkillConfirmCardProps) {
+export default function SkillConfirmCard({ card, disabled = false, onConsent, onRevise, onCancel }: SkillConfirmCardProps) {
   const rows: Array<{ label: string; value: string }> = [
     { label: "名称", value: card.name },
     { label: "描述", value: card.description },
@@ -30,16 +32,18 @@ export default function SkillConfirmCard({ card, onConsent, onRevise, onCancel }
           </div>
         ))}
       </dl>
-      <p className="hint">点“确认创建”会通过当前会话发送「确认」，由宿主在下一轮写入技能。</p>
+      <p className="hint">
+        {disabled ? "这张确认卡已处理。" : "点“确认创建”会通过当前会话发送「确认」，由宿主在下一轮写入技能。"}
+      </p>
       <div className="skill-card-actions">
-        <button type="button" className="filter-tab" onClick={onRevise}>
+        <button type="button" className="filter-tab" disabled={disabled} onClick={onRevise}>
           继续修改
         </button>
-        <button type="button" className="filter-tab" onClick={onCancel}>
+        <button type="button" className="filter-tab" disabled={disabled} onClick={onCancel}>
           取消
         </button>
         <span className="composer-spacer" />
-        <button type="button" className="btn-dark" onClick={onConsent}>
+        <button type="button" className="btn-dark" disabled={disabled} onClick={onConsent}>
           确认创建
         </button>
       </div>

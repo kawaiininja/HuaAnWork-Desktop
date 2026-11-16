@@ -20,13 +20,13 @@ const CARD: SkillConfirmCardData = {
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
-async function mount(card: SkillConfirmCardData = CARD) {
+async function mount(card: SkillConfirmCardData = CARD, disabled = false) {
   const handlers = { onConsent: vi.fn(), onRevise: vi.fn(), onCancel: vi.fn() };
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
   await act(async () => {
-    root!.render(createElement(SkillConfirmCard, { card, ...handlers }));
+    root!.render(createElement(SkillConfirmCard, { card, disabled, ...handlers }));
   });
   return { view: container, ...handlers };
 }
@@ -94,5 +94,21 @@ describe("SkillConfirmCard", () => {
 
     expect(view.textContent).toContain("daily-summary");
     expect(view.textContent).not.toContain("触发场景");
+  });
+
+  it("disables every action once the card is consumed", async () => {
+    const { view, onConsent, onRevise, onCancel } = await mount(CARD, true);
+
+    for (const label of ["确认创建", "继续修改", "取消"]) {
+      const button = buttonByText(view, label);
+      expect(button?.disabled).toBe(true);
+      await act(async () => {
+        button?.click();
+      });
+    }
+    expect(onConsent).not.toHaveBeenCalled();
+    expect(onRevise).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(view.textContent).toContain("已处理");
   });
 });
