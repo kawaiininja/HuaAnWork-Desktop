@@ -1830,6 +1830,32 @@ export default function App() {
             }
             return;
           }
+      // 全局目录变更事件没有会话归属:必须在下方自动化泄漏门之前刷新,否则后台运行
+      // 期间创建技能/智能体的变更信号被吞(与 sidecar/status 同款顺序契约)。只驱动
+      // 列表与补全刷新,不写对话条目,自动化会话触发的变更同样安全。
+      if (event.event === "agent/changed") {
+        setAgentChangeSignal((prev) => prev + 1);
+        void rpcCall<{ items: AgentListItem[] }>("agent.invocableList")
+          .then((res) => {
+            if (!cancelled) setAtCatalog(Array.isArray(res.items) ? res.items : []);
+          })
+          .catch(() => {
+            // 目录暂不可读时保留旧补全数据
+          });
+        return;
+      }
+      if (event.event === "skill/changed") {
+        // 技能变化只驱动技能页与 `/` 补全，不再让智能体信号冒充技能变更。
+        setSkillChangeSignal((prev) => prev + 1);
+        void rpcCall<{ skills: InvocableSkillInfo[] }>("skill.invocableList")
+          .then((listed) => {
+            if (!cancelled) setSlashCatalog(Array.isArray(listed.skills) ? listed.skills : []);
+          })
+          .catch(() => {
+            // 目录暂不可读时保留旧补全数据
+          });
+        return;
+      }
           // 事件路由（review A4）：自动化运行会话（huaanwork-auto- / huaanwork-chat-auto- 前缀）
           // 自身的 token/tool/approval/diff/session-end 只在绑定了运行对话标签时渲染（路由进该标签），
           // 否则永不写入用户对话流——即便并发多运行、run-end 角标时序滞后也不泄漏
@@ -1841,8 +1867,8 @@ export default function App() {
           // 用户自身会话（huaanwork-chat- / huaanwork-<digest>）与绑定运行标签的事件照常渲染，
           // 并发 Chat 回合不再被全局布尔误伤（「运行中看直播」的路由前提）。
           if (automationActiveRef.current && !isUserSessionId(eventSessionId) && !boundTab) return;
-      // 智能体包事件：会话内提示、结构化创建确认卡，以及列表刷新信号（面板与 @ 补全共用）。
-      // 放在自动化会话泄漏门之后，自动化会话的 agent 事件不会写进可见对话标签。
+      // 智能体包事件：会话内提示与结构化创建确认卡。列表刷新信号（agent/changed）
+      // 无会话归属,已在自动化泄漏门之前处理。放在门后的事件不会写进可见对话标签。
       if (event.event === "agent/notice") {
         const target = targetTabFor(eventSessionId);
         if (target) {
@@ -1864,19 +1890,8 @@ export default function App() {
         }
         return;
       }
-      if (event.event === "agent/changed") {
-        setAgentChangeSignal((prev) => prev + 1);
-        void rpcCall<{ items: AgentListItem[] }>("agent.invocableList")
-          .then((res) => {
-            if (!cancelled) setAtCatalog(Array.isArray(res.items) ? res.items : []);
-          })
-          .catch(() => {
-            // 目录暂不可读时保留旧补全数据
-          });
-        return;
-      }
-      // 技能创建事件：确认卡/成功卡按会话归属路由，提示只写脚注，变更只刷新技能侧。
-      // 与智能体事件同处自动化泄漏门之后，自动化会话的技能事件不会写进可见对话标签。
+      // 技能创建事件：确认卡/成功卡按会话归属路由，提示只写脚注。变更信号
+      // （skill/changed）无会话归属,已在自动化泄漏门之前处理。
       if (event.event === "skill/confirm") {
         const target = targetTabFor(eventSessionId);
         if (target) {
@@ -1899,18 +1914,6 @@ export default function App() {
         // 成功文案只走 skill/success；这里只留错误与一般提示的脚注。
         const target = targetTabFor(eventSessionId);
         if (target) noteTab(target, event.text);
-        return;
-      }
-      if (event.event === "skill/changed") {
-        // 技能变化只驱动技能页与 `/` 补全，不再让智能体信号冒充技能变更。
-        setSkillChangeSignal((prev) => prev + 1);
-        void rpcCall<{ skills: InvocableSkillInfo[] }>("skill.invocableList")
-          .then((listed) => {
-            if (!cancelled) setSlashCatalog(Array.isArray(listed.skills) ? listed.skills : []);
-          })
-          .catch(() => {
-            // 目录暂不可读时保留旧补全数据
-          });
         return;
       }
       // 排队项出队/复检失败：早到的那条已在上方按 pending 暂存，这里只处理能归属的。

@@ -129,8 +129,9 @@ test("App consumes the two production helpers at their only call sites", () => {
 test("agent notices and confirm cards follow their session instead of the live tab", () => {
   // 回合中新建任务会把 liveChatRef 移到新标签;agent 事件自带 sessionId,
   // 必须走 targetTabFor,否则旧会话的卡片/提示会落到新标签。
+  // agent/changed 无会话归属,已移到自动化闸门之前,不再作为本块的结束标记。
   const start = APP_SOURCE.indexOf('if (event.event === "agent/notice")');
-  const end = APP_SOURCE.indexOf('if (event.event === "agent/changed")', start);
+  const end = APP_SOURCE.indexOf('if (event.event === "skill/confirm")', start);
   assert.ok(start >= 0 && end > start, "agent notice/confirm branches are still present");
   const block = APP_SOURCE.slice(start, end);
   assert.match(block, /targetTabFor\(eventSessionId\)/);
@@ -617,6 +618,39 @@ test("the ready reconcile runs before the sidecar event gates so every reconnect
       + "unreachable — cards keep 连接中断，状态可能滞后, timers stay frozen and 终止 stays disabled "
       + "until the next reconnect (a manual send cannot clear it either)",
   );
+});
+
+test("global catalog refreshes run before the automation gate so background runs cannot swallow them", () => {
+  // 契约钉:skill/changed 与 agent/changed 不携带 sessionId,自动化闸门对 undefined
+  // 判定为非用户会话并早退。若目录刷新留在闸门之后,后台自动化运行期间创建技能/智能体
+  // 的全局变更信号被吞:挂载中的技能页收不到 refreshSignal,/ 与 @ 补全目录滞后。
+  // 与 sidecar/status 同款顺序契约;会话归属的卡片/提示分支仍须留在闸门之后。
+  const handlerAt = APP_SOURCE.indexOf("const applyEvent = (event: RpcEvent) => {");
+  const handlerEnd = APP_SOURCE.indexOf("applySidecarEventRef.current = applyEvent;", handlerAt);
+  assert.ok(handlerAt >= 0 && handlerEnd > handlerAt, "the sidecar event handler is still a named applyEvent closure");
+  const handler = APP_SOURCE.slice(handlerAt, handlerEnd);
+
+  const gateAt = handler.indexOf(
+    "if (automationActiveRef.current && !isUserSessionId(eventSessionId) && !boundTab) return;",
+  );
+  assert.ok(gateAt >= 0, "the automation route gate is still present");
+  const skillChangedAt = handler.indexOf('if (event.event === "skill/changed")');
+  const agentChangedAt = handler.indexOf('if (event.event === "agent/changed")');
+  assert.ok(skillChangedAt >= 0 && agentChangedAt >= 0, "both catalog refresh branches are still present");
+  assert.ok(
+    skillChangedAt < gateAt,
+    "skill/changed must refresh before the automation gate: it has no sessionId, so the gate "
+      + "returns early while a background automation runs and a mounted SkillsView never sees "
+      + "the new skill until remount",
+  );
+  assert.ok(
+    agentChangedAt < gateAt,
+    "agent/changed must refresh before the automation gate for the same no-sessionId reason",
+  );
+  const skillConfirmAt = handler.indexOf('if (event.event === "skill/confirm")');
+  const agentNoticeAt = handler.indexOf('if (event.event === "agent/notice")');
+  assert.ok(skillConfirmAt > gateAt, "session-routed skill cards stay behind the automation gate");
+  assert.ok(agentNoticeAt > gateAt, "session-routed agent notices stay behind the automation gate");
 });
 
 test("the sidecar/status ready branch clears the dead latch a disconnect set", () => {
@@ -2178,21 +2212,21 @@ test("ChatItem carries the skill confirm card and the deduplicated success card"
   assert.match(chatRow, /<SkillSuccessCard/);
 });
 
-test("skill events follow their session and keep success, notice and change routes separate", () => {
+test("skill events follow their session and keep success and notice routes separate", () => {
   const start = APP_SOURCE.indexOf('if (event.event === "skill/confirm")');
   const end = APP_SOURCE.indexOf('if (event.event === "session/queue-start")', start);
-  assert.ok(start >= 0 && end > start, "the four skill event branches sit before queue-start");
+  assert.ok(start >= 0 && end > start, "the session-routed skill event branches sit before queue-start");
   const block = APP_SOURCE.slice(start, end);
   assert.match(block, /targetTabFor\(eventSessionId\)/);
   assert.doesNotMatch(block, /liveChatRef\.current/);
   assert.match(block, /setChannelItems\(\(items\) => upsertSkillSuccess\(items, event, allocId\), event\.sessionId\)/);
-  assert.match(block, /setSkillChangeSignal\(\(prev\) => prev \+ 1\)/);
-  assert.match(block, /"skill\.invocableList"/);
+  // skill/changed 无会话归属,必须在自动化闸门之前全局刷新(见顺序契约钉),
+  // 不得混回这段会话归属分支。
+  assert.doesNotMatch(block, /skill\/changed/);
 
   const noticeAt = block.indexOf('if (event.event === "skill/notice")');
-  const changedAt = block.indexOf('if (event.event === "skill/changed")');
-  assert.ok(noticeAt >= 0 && changedAt > noticeAt, "notice and changed branches keep their order");
-  const notice = block.slice(noticeAt, changedAt);
+  assert.ok(noticeAt >= 0, "the notice branch is still present");
+  const notice = block.slice(noticeAt);
   assert.match(notice, /noteTab\(target, event\.text\)/);
   assert.doesNotMatch(notice, /skill-success|upsertSkillSuccess|setView\(/);
 });
