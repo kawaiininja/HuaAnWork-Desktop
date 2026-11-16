@@ -29,7 +29,9 @@ import {
   cancelAgentPackage,
   commitAgentPackage,
   loadAgentPackageDraft,
+  loadAgentPackageDraftStrict,
   proposeAgentPackage,
+  type AgentPackageCancelOptions,
   type CommitResult,
   type ProposeResult,
 } from './drafts.ts'
@@ -234,8 +236,13 @@ export type AgentPackageHost = {
     rawUserText: string,
     opts?: { proposedThisTurn?: boolean },
   ): Promise<CommitResult>
-  cancel(sessionId: string): Promise<boolean>
+  cancel(sessionId: string, options?: AgentPackageCancelOptions): Promise<boolean>
   hasDraft(sessionId: string): boolean
+  /**
+   * 互斥提示用的草稿摘要:@标识优先、显示名回落。缺失返回 `undefined`;
+   * 损坏草稿抛 `CorruptAgentPackageDraftError`(路由据此 fail-closed 终止创建)。
+   */
+  describeDraft(sessionId: string): string | undefined
   beginUpdate(sessionId: string, slug: string): Promise<void>
   lastUserText(sessionId: string): string | undefined
   /** 每轮用户发送都调用:记录原句并清除上一轮的创建流程标记。 */
@@ -411,16 +418,23 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       return result
     },
 
-    async cancel(sessionId) {
+    async cancel(sessionId, cancelOptions) {
       recoverCatalogPackageInstalls(profileDir)
       proposedThisTurn.delete(sessionId)
-      return cancelAgentPackage(profileDir, sessionId)
+      return cancelAgentPackage(profileDir, sessionId, cancelOptions)
     },
 
     hasDraft(sessionId) {
       // 每轮消息都会走这里;广场安装的崩溃恢复同样必须先于 store 的通用清理。
       recoverCatalogPackageInstalls(profileDir)
       return loadAgentPackageDraft(profileDir, sessionId) !== undefined
+    },
+
+    describeDraft(sessionId) {
+      // 严格读取:损坏必须抛具名错误,不能与「没有草稿」混为一谈。
+      const draft = loadAgentPackageDraftStrict(profileDir, sessionId)
+      if (draft === undefined) return undefined
+      return draft.slug.length > 0 ? draft.slug : draft.displayName
     },
 
     async beginUpdate(sessionId, slug) {

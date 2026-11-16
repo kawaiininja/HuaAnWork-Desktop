@@ -28,6 +28,36 @@ export const SKILL_PROPOSE_TOOL = 'skill_propose'
 export const SKILL_COMMIT_TOOL = 'skill_commit'
 export const SKILL_CREATION_TOOLS = [SKILL_PROPOSE_TOOL, SKILL_COMMIT_TOOL] as const
 
+/**
+ * 技能创建入口(设计 §7):
+ * - `CREATE_SKILL_RE` 只认「(帮我)新建/创建/建 (一个)技能」开头,近似说法留给用户改写;
+ * - `CREATE_SKILL_COMMAND` 只认整段 `/create-skill [...]`,其后的 `cancel` 是显式取消。
+ * 两个正则都不得为单条用例放宽;自然语言 fixture 必须能真的命中它们。
+ */
+const CREATE_SKILL_RE = /^(?:帮我)?(?:新建|创建|建)(?:一个|个)?(?:技能)/
+export const CREATE_SKILL_COMMAND = /^\/create-skill(?:\s+([\s\S]*))?$/
+
+/** 说法之后紧跟的标点不属于用户信息。 */
+const LEADING_SEPARATORS = /^[\s，,。.：:；;、!！?？]+/
+
+export type SkillCreationIntent = { kind: 'create'; initialText: string }
+
+/**
+ * 识别技能创建入口:整段 `/create-skill [...]`,或开头命中保守正则的规范说法。
+ *
+ * @param text 用户原句
+ * @returns 创建意图与已提供的信息;不匹配时 undefined
+ */
+export function detectSkillCreationIntent(text: string): SkillCreationIntent | undefined {
+  const trimmed = text.trim()
+  const slash = CREATE_SKILL_COMMAND.exec(trimmed)
+  if (slash) return { kind: 'create', initialText: (slash[1] ?? '').trim() }
+
+  const match = CREATE_SKILL_RE.exec(trimmed)
+  if (!match) return undefined
+  return { kind: 'create', initialText: trimmed.slice(match[0].length).replace(LEADING_SEPARATORS, '') }
+}
+
 /** 每会话原句与回合标记只保留最近一批;上限防止长驻宿主按会话无限增长。 */
 const MAX_TRACKED_SESSIONS = 256
 

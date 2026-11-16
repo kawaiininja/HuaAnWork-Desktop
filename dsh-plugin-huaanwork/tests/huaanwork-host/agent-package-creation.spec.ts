@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -28,6 +28,14 @@ import {
   detachCreationTools,
   injectCreateAgentSkill,
 } from '../../src/huaanwork-host/agent-package/creation.ts'
+import { dispatchAt } from '../../src/huaanwork-host/agent-invoke.ts'
+import {
+  attachSkillCreationTools,
+  createSkillCreationHost,
+  injectCreateSkill,
+  setSkillCreationHost,
+} from '../../src/huaanwork-host/skill-creation.ts'
+import { commitSkillCreation, proposeSkillCreation } from '../../src/huaanwork-host/skill-creation-drafts.ts'
 import { INTERNAL_BUNDLED_SKILLS, listBundledSkills } from '../../src/huaanwork-guardrails/skills.ts'
 import { setUserSkillToggle } from '../../src/huaanwork-host/skill-local-state.ts'
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
@@ -41,6 +49,43 @@ import {
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
 import { resetChildSessionRegistry } from '../../src/huaanwork-host/child-sessions.ts'
 import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
+
+// 路由级互斥用例要钉住「是否注入 / 是否挂载 / 是否 @ 分发」,而这些是模块级函数,
+// 只能经模块 mock 记录调用;包装函数一律回调真实实现,行为断言仍走真实路径。
+vi.mock('../../src/huaanwork-host/agent-package/creation.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/huaanwork-host/agent-package/creation.ts')>()
+  return {
+    ...actual,
+    injectCreateAgentSkill: vi.fn((text: string, mode?: Parameters<typeof actual.injectCreateAgentSkill>[1], slug?: string) =>
+      actual.injectCreateAgentSkill(text, mode, slug),
+    ),
+    attachCreationTools: vi.fn((ctx: Parameters<typeof actual.attachCreationTools>[0], sessionId: string) =>
+      actual.attachCreationTools(ctx, sessionId),
+    ),
+  }
+})
+
+vi.mock('../../src/huaanwork-host/skill-creation.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/huaanwork-host/skill-creation.ts')>()
+  return {
+    ...actual,
+    injectCreateSkill: vi.fn((text: string, mode?: Parameters<typeof actual.injectCreateSkill>[1]) =>
+      actual.injectCreateSkill(text, mode),
+    ),
+    attachSkillCreationTools: vi.fn((ctx: Parameters<typeof actual.attachSkillCreationTools>[0], sessionId: string) =>
+      actual.attachSkillCreationTools(ctx, sessionId),
+    ),
+  }
+})
+
+// `@agent` 只用于证明显式 @ 分流不被创建互斥拦下;分发本身由 sessions.spec.ts 覆盖。
+vi.mock('../../src/huaanwork-host/agent-invoke.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/huaanwork-host/agent-invoke.ts')>()
+  return {
+    ...actual,
+    dispatchAt: vi.fn(async () => ({ text: 'at-dispatched', afterIdle: async () => undefined })),
+  }
+})
 
 const PRESENT_AS_STATE = Symbol.for('huaanwork.presentAs.restrictState')
 
@@ -71,6 +116,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setAgentPackageHost(undefined)
+  setSkillCreationHost(undefined)
   resetChildSessionRegistry()
   vi.restoreAllMocks()
   delete process.env.DSH_AGENTS_HOME
@@ -143,6 +189,7 @@ function fakeHost(overrides: Partial<AgentPackageHost> = {}): AgentPackageHost {
     commit: async () => ({ ok: false, error: 'not implemented' }),
     cancel: async () => false,
     hasDraft: () => false,
+    describeDraft: () => undefined,
     beginUpdate: async () => undefined,
     lastUserText: () => undefined,
     noteUserText: () => undefined,
@@ -684,5 +731,361 @@ describe('internal skill hiding', () => {
     )) as { skills: Array<{ name: string }> }
     expect(result.skills.some((skill) => skill.name === 'create-agent')).toBe(false)
     expect(result.skills.some((skill) => skill.name === 'explore')).toBe(true)
+  })
+})
+
+// —— 会话路由与智能体/技能双向互斥(设计 §7) ——
+
+const ROUTING_SESSION_ID = 'session-1'
+
+function agentDraftJson(overrides: Record<string, unknown> = {}): string {
+  return `${JSON.stringify(
+    {
+      schemaVersion: 1,
+      draftId: 'agent-draft-1',
+      mode: 'create',
+      slug: 'weekly-report',
+      displayName: '周报小助手',
+      description: '把一周工作整理成周报',
+      persona: '你是周报助手。',
+      personaSummary: '写周报',
+      skillSummary: '无专属技能包',
+      skill: null,
+      allowSkills: [],
+      tools: 'none',
+      ...overrides,
+    },
+    null,
+    2,
+  )}\n`
+}
+
+function skillDraftJson(sessionId: string): string {
+  return `${JSON.stringify(
+    {
+      schemaVersion: 1,
+      draftId: 'draft-1',
+      sessionId,
+      proposal: { name: 'daily-summary', description: '生成日报', body: '整理输入并生成日报' },
+      createdAt: '2026-11-15T00:00:00.000Z',
+      updatedAt: '2026-11-15T00:00:00.000Z',
+    },
+    null,
+    2,
+  )}\n`
+}
+
+function lastEventText(events: RpcEvent[]): string {
+  const last = events.at(-1)
+  return last !== undefined && 'text' in last && typeof last.text === 'string' ? last.text : ''
+}
+
+function enableUserSkill(root: string, name: string): void {
+  mkdirSync(join(root, 'skills', name), { recursive: true })
+  writeFileSync(
+    join(root, 'skills', name, 'SKILL.md'),
+    `---\nname: ${name}\ndescription: 演示技能\n---\n按演示技能说明执行。\n`,
+    'utf8',
+  )
+  setUserSkillToggle(root, name, true)
+}
+
+function routingHarness(options: { agentDraft?: boolean; skillDraft?: boolean } = {}) {
+  const root = makeRoot()
+  const events: RpcEvent[] = []
+  const received: unknown[] = []
+  const maps = emptyAttachments()
+  const agent = makeAgent(ROUTING_SESSION_ID, received)
+  const ctx = makeSessionCtx(agent, ROUTING_SESSION_ID, maps)
+  const packageHost: AgentPackageHost = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+  const skillHost = createSkillCreationHost({ profileDir: root })
+  setAgentPackageHost(packageHost)
+  setSkillCreationHost(skillHost)
+
+  const agentDraftPath = join(root, 'agents', '.drafts', `${ROUTING_SESSION_ID}.json`)
+  const skillDraftPath = join(root, 'skill-creation-drafts', `${ROUTING_SESSION_ID}.json`)
+
+  const harness = {
+    root,
+    events,
+    received,
+    maps,
+    ctx,
+    packageHost,
+    skillHost,
+    agentDraftPath,
+    skillDraftPath,
+    originalAgentDraft: '',
+    originalSkillDraft: '',
+    proposeAgentPackage: vi.spyOn(packageHost, 'propose'),
+    commitAgentPackage: vi.spyOn(packageHost, 'commit'),
+    cancelAgent: vi.spyOn(packageHost, 'cancel'),
+    cancelSkill: vi.spyOn(skillHost, 'cancel'),
+    seedAgentDraft() {
+      mkdirSync(join(root, 'agents', '.drafts'), { recursive: true })
+      writeFileSync(agentDraftPath, agentDraftJson(), 'utf8')
+      harness.originalAgentDraft = readFileSync(agentDraftPath, 'utf8')
+    },
+    seedSkillDraft() {
+      mkdirSync(join(root, 'skill-creation-drafts'), { recursive: true })
+      writeFileSync(skillDraftPath, skillDraftJson(ROUTING_SESSION_ID), 'utf8')
+      harness.originalSkillDraft = readFileSync(skillDraftPath, 'utf8')
+    },
+    seedBothDrafts() {
+      harness.seedAgentDraft()
+      harness.seedSkillDraft()
+    },
+    send(params: Record<string, unknown>) {
+      return sendToAgent(ctx, makeRouteCtx(root, events), { sessionId: ROUTING_SESSION_ID, ...params })
+    },
+  }
+  if (options.agentDraft === true) harness.seedAgentDraft()
+  if (options.skillDraft === true) harness.seedSkillDraft()
+  return harness
+}
+
+describe('agent and skill creation routing', () => {
+  // 文件级 afterEach 的 restoreAllMocks 恢复实现但不清调用记录;模块 mock 的回调计数必须逐例清零。
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const matrix = [
+    { existing: 'agent', incoming: '/create-skill', rejected: true },
+    { existing: 'agent', incoming: '帮我创建一个技能', rejected: true },
+    { existing: 'skill', incoming: '/create-agent', rejected: true },
+    { existing: 'skill', incoming: '/create-agent update weekly-report', rejected: true },
+    { existing: 'skill', incoming: '新建一个智能体', rejected: true },
+    { existing: 'agent', incoming: '/create-agent', rejected: false },
+    { existing: 'skill', incoming: '/create-skill', rejected: false },
+    { existing: 'none', incoming: '修改技能 weekly-report', rejected: false },
+  ] as const
+
+  for (const testCase of matrix) {
+    test(`${String(testCase.existing)} draft + ${testCase.incoming} => rejected: ${String(testCase.rejected)}`, async () => {
+      const harness = routingHarness({
+        agentDraft: testCase.existing === 'agent',
+        skillDraft: testCase.existing === 'skill',
+      })
+
+      const result = await harness.send({ text: testCase.incoming })
+
+      if (testCase.rejected) {
+        expect(result.started).toBe(false)
+        expect(injectCreateSkill).not.toHaveBeenCalled()
+        expect(injectCreateAgentSkill).not.toHaveBeenCalled()
+        expect(attachSkillCreationTools).not.toHaveBeenCalled()
+        expect(attachCreationTools).not.toHaveBeenCalled()
+        if (testCase.existing === 'agent') {
+          expect(readFileSync(harness.agentDraftPath, 'utf8')).toBe(harness.originalAgentDraft)
+          expect(existsSync(harness.skillDraftPath)).toBe(false)
+          expect(lastEventText(harness.events)).toContain('weekly-report')
+        } else {
+          expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
+          expect(existsSync(harness.agentDraftPath)).toBe(false)
+          expect(lastEventText(harness.events)).toContain('daily-summary')
+        }
+        return
+      }
+
+      expect(result.started).toBe(true)
+      if (testCase.incoming === '/create-agent') {
+        expect(injectCreateAgentSkill).toHaveBeenCalledTimes(1)
+        expect(attachCreationTools).toHaveBeenCalledTimes(1)
+        expect(injectCreateSkill).not.toHaveBeenCalled()
+        expect(attachSkillCreationTools).not.toHaveBeenCalled()
+      } else if (testCase.incoming === '/create-skill') {
+        expect(injectCreateSkill).toHaveBeenCalledTimes(1)
+        expect(attachSkillCreationTools).toHaveBeenCalledTimes(1)
+        expect(injectCreateAgentSkill).not.toHaveBeenCalled()
+        expect(attachCreationTools).not.toHaveBeenCalled()
+      } else {
+        // 负例:修改技能不是新建入口,不进入任何创建流程。
+        expect(injectCreateSkill).not.toHaveBeenCalled()
+        expect(injectCreateAgentSkill).not.toHaveBeenCalled()
+        expect(attachSkillCreationTools).not.toHaveBeenCalled()
+        expect(attachCreationTools).not.toHaveBeenCalled()
+      }
+    })
+  }
+
+  test('does not let an agent draft hijack /create-skill into agent continue and commit', async () => {
+    const harness = routingHarness({ agentDraft: true })
+
+    const result = await harness.send({ text: '/create-skill' })
+
+    expect(result.started).toBe(false)
+    expect(harness.events.filter((event) => event.event === 'agent/confirm')).toHaveLength(0)
+    expect(harness.proposeAgentPackage).not.toHaveBeenCalled()
+    expect(harness.commitAgentPackage).not.toHaveBeenCalled()
+    expect(readFileSync(harness.agentDraftPath, 'utf8')).toBe(harness.originalAgentDraft)
+  })
+
+  test('terminates the creation routing with a notice when the agent draft is corrupt', async () => {
+    const harness = routingHarness()
+    mkdirSync(join(harness.root, 'agents', '.drafts'), { recursive: true })
+    writeFileSync(harness.agentDraftPath, '{corrupt', 'utf8')
+
+    const result = await harness.send({ text: '/create-skill' })
+
+    expect(result.started).toBe(false)
+    expect(lastEventText(harness.events)).toContain('损坏')
+    expect(injectCreateSkill).not.toHaveBeenCalled()
+    expect(attachSkillCreationTools).not.toHaveBeenCalled()
+    expect(readFileSync(harness.agentDraftPath, 'utf8')).toBe('{corrupt')
+  })
+
+  test('lets /create-agent cancel clean a corrupt agent draft (NI-1 recovery path)', async () => {
+    const harness = routingHarness()
+    mkdirSync(join(harness.root, 'agents', '.drafts'), { recursive: true })
+    writeFileSync(harness.agentDraftPath, '{corrupt', 'utf8')
+
+    const result = await harness.send({ text: '/create-agent cancel' })
+
+    expect(result.started).toBe(false)
+    expect(lastEventText(harness.events)).toContain('已取消创建智能体')
+    expect(harness.cancelAgent).toHaveBeenCalledWith(ROUTING_SESSION_ID, { explicit: true })
+    expect(existsSync(harness.agentDraftPath)).toBe(false)
+  })
+
+  test('cleans a corrupt agent draft alongside a valid skill draft without touching the skill draft', async () => {
+    const harness = routingHarness()
+    harness.seedBothDrafts()
+    writeFileSync(harness.agentDraftPath, '{corrupt', 'utf8')
+
+    const result = await harness.send({ text: '/create-agent cancel' })
+
+    expect(result.started).toBe(false)
+    expect(existsSync(harness.agentDraftPath)).toBe(false)
+    expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
+  })
+
+  test('does not reject a normal skill turn with creation-like body while an agent draft exists', async () => {
+    const harness = routingHarness({ agentDraft: true })
+    enableUserSkill(harness.root, 'weekly-report')
+
+    const result = await harness.send({
+      skill: 'weekly-report',
+      text: '创建技能正文，但仍是一次普通技能调用',
+    })
+
+    expect(result).toMatchObject({ started: true })
+    expect(
+      harness.events.filter((event) => event.event === 'skill/notice' && event.text.includes('请先完成')),
+    ).toHaveLength(0)
+    expect(injectCreateSkill).not.toHaveBeenCalled()
+    expect(readFileSync(harness.agentDraftPath, 'utf8')).toBe(harness.originalAgentDraft)
+  })
+
+  test('does not reject an @agent turn with creation-like body while a skill draft exists', async () => {
+    const harness = routingHarness({ skillDraft: true })
+
+    const result = await harness.send({
+      at: { name: 'legacy-agent' },
+      text: '创建技能正文，但仍是一次显式 @ 调用',
+    })
+
+    expect(result).toMatchObject({ started: true })
+    expect(dispatchAt).toHaveBeenCalledTimes(1)
+    expect(
+      harness.events.filter((event) => event.event === 'skill/notice' && event.text.includes('请先完成')),
+    ).toHaveLength(0)
+    expect(injectCreateSkill).not.toHaveBeenCalled()
+  })
+
+  test('rejects bare cancel, propose and commit while both drafts exist', async () => {
+    const harness = routingHarness()
+    harness.seedBothDrafts()
+
+    const result = await harness.send({ text: '取消' })
+
+    expect(result.started).toBe(false)
+    expect(lastEventText(harness.events)).toContain('/create-skill cancel')
+    expect(readFileSync(harness.agentDraftPath, 'utf8')).toBe(harness.originalAgentDraft)
+    expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
+    expect(harness.packageHost.cancel).not.toHaveBeenCalled()
+    expect(harness.skillHost.cancel).not.toHaveBeenCalled()
+    expect(harness.proposeAgentPackage).not.toHaveBeenCalled()
+    expect(harness.commitAgentPackage).not.toHaveBeenCalled()
+    expect(
+      await proposeSkillCreation(harness.root, ROUTING_SESSION_ID, {
+        name: 'daily-summary',
+        description: '生成日报',
+        body: '整理输入并生成日报',
+      }),
+    ).toMatchObject({ ok: false })
+    expect(
+      await commitSkillCreation(harness.root, ROUTING_SESSION_ID, 'draft-1', '确认', {
+        proposedThisTurn: false,
+        creationTurn: true,
+      }),
+    ).toMatchObject({ ok: false })
+  })
+
+  test('keeps ordinary chat out of both creation flows while both drafts exist', async () => {
+    const harness = routingHarness()
+    harness.seedBothDrafts()
+
+    const result = await harness.send({ text: '普通聊天，不继续任何创建流程' })
+
+    expect(result.started).toBe(true)
+    expect(injectCreateSkill).not.toHaveBeenCalled()
+    expect(injectCreateAgentSkill).not.toHaveBeenCalled()
+    expect(attachSkillCreationTools).not.toHaveBeenCalled()
+    expect(attachCreationTools).not.toHaveBeenCalled()
+    expect(readFileSync(harness.agentDraftPath, 'utf8')).toBe(harness.originalAgentDraft)
+    expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
+  })
+
+  test.each(['/create-skill', '/create-agent'])(
+    'rejects explicit creation entry %s while both drafts exist',
+    async (entry) => {
+      const harness = routingHarness()
+      harness.seedBothDrafts()
+
+      const result = await harness.send({ text: entry })
+
+      expect(result.started).toBe(false)
+      expect(lastEventText(harness.events)).toContain('检测到并存')
+      expect(injectCreateSkill).not.toHaveBeenCalled()
+      expect(injectCreateAgentSkill).not.toHaveBeenCalled()
+      expect(attachSkillCreationTools).not.toHaveBeenCalled()
+      expect(attachCreationTools).not.toHaveBeenCalled()
+      expect(readFileSync(harness.agentDraftPath, 'utf8')).toBe(harness.originalAgentDraft)
+      expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
+    },
+  )
+
+  test('cancels only the named flow via explicit cancel entries and recovers the other', async () => {
+    const harness = routingHarness()
+    harness.seedBothDrafts()
+
+    const skillCancel = await harness.send({ text: '/create-skill cancel' })
+    expect(skillCancel.started).toBe(false)
+    expect(existsSync(harness.skillDraftPath)).toBe(false)
+    expect(readFileSync(harness.agentDraftPath, 'utf8')).toBe(harness.originalAgentDraft)
+    expect(lastEventText(harness.events)).toContain('已取消创建技能')
+
+    harness.seedBothDrafts()
+    const agentCancel = await harness.send({ text: '/create-agent cancel' })
+    expect(agentCancel.started).toBe(false)
+    expect(existsSync(harness.agentDraftPath)).toBe(false)
+    expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
+    expect(lastEventText(harness.events)).toContain('已取消创建智能体')
+
+    const continued = await harness.send({ text: '继续修改技能' })
+    expect(continued.started).toBe(true)
+    expect(injectCreateSkill).toHaveBeenCalledWith('继续修改技能', 'continue')
+  })
+
+  test('routes single-draft bare cancel to the skill flow and names it', async () => {
+    const harness = routingHarness({ skillDraft: true })
+
+    const result = await harness.send({ text: '取消' })
+
+    expect(result.started).toBe(false)
+    expect(existsSync(harness.skillDraftPath)).toBe(false)
+    expect(lastEventText(harness.events)).toContain('已取消创建技能')
+    expect(harness.packageHost.cancel).not.toHaveBeenCalled()
   })
 })

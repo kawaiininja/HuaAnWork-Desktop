@@ -7,6 +7,7 @@ import { AGENT_NAME_RE } from '@huaanwork/policy/agent-catalog'
 import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
 
 import { isCreationCancelText, isCreationConsentText } from '../creation-utterances.ts'
+import { hasSkillCreationDraftOnDisk } from '../skill-creation-drafts.ts'
 import { resolveInvocableSkill } from '../skill-invoke.ts'
 import { parseAgentPackageManifest } from './manifest.ts'
 import { resetLocalAgentPackagePublication } from './catalog-publish.ts'
@@ -78,6 +79,20 @@ const CONSENT_HINT_UPDATE = '回复「可以」更新（启用状态保持不变
 const NO_SKILL_SUMMARY = '无专属技能包'
 
 export type AgentPackageFieldError = { field: string; message: string }
+
+/**
+ * 智能体创建草稿的严格读取错误。宽松读取(`loadAgentPackageDraft`)仍把损坏吞成
+ * `undefined`——`hasDraft` 依赖该语义;严格读取只服务于互斥提示与损坏检测。
+ */
+export class CorruptAgentPackageDraftError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CorruptAgentPackageDraftError'
+  }
+}
+
+/** 取消入口的显式选择语义:对方草稿在场时,只有路由的显式 cancel 能删除本方草稿。 */
+export type AgentPackageCancelOptions = { explicit?: boolean }
 
 export type AgentPackageDraftSkill = {
   summary: string
@@ -165,6 +180,11 @@ export async function proposeAgentPackage(
   if (input.mode !== 'create' && input.mode !== 'update') {
     return { ok: false, fieldErrors: [{ field: 'mode', message: 'mode 必须是 create 或 update' }] }
   }
+  // 双向互斥的低层防护:路由守卫之外,存在技能创建草稿时不得覆盖任何智能体草稿。
+  // 只读存在性检查;技能草稿模块不反向导入本模块,不会形成循环依赖。
+  if (hasSkillCreationDraftOnDisk(profileDir, sessionId)) {
+    return { ok: false, fieldErrors: [{ field: 'session', message: '当前会话存在技能创建草稿，请先完成或取消技能创建' }] }
+  }
 
   const previous = loadAgentPackageDraft(profileDir, sessionId)
   const baseRead = resolveUpdateBase(profileDir, input, previous)
@@ -230,6 +250,8 @@ export async function commitAgentPackage(
   if (typeof draftId !== 'string' || !draftId.trim() || draftId.length > MAX_DRAFT_ID_LENGTH) {
     return refused('draftId 无效')
   }
+  // 双向互斥的低层防护:技能创建草稿在场时拒绝提交,且先于锁与任何写入。
+  if (hasSkillCreationDraftOnDisk(profileDir, sessionId)) return refused('当前会话存在技能创建草稿')
 
   // 同 slug 的 publish 与 commit 共用一把锁:写包 + 复位发布状态期间,上传不能
   // 交错。slug 在草稿或已落盘包上才知道,锁内重新读草稿并校验 draftId。
@@ -349,12 +371,22 @@ async function commitAgentPackageLocked(
 /**
  * 丢弃这一会话的草稿。
  *
+ * 对方技能创建草稿在场且未显式 `{explicit:true}` 时返回 `false` 且不触碰任何文件;
+ * 显式入口只删除本智能体草稿,绝不级联清理对方。损坏草稿仍按 `existsSync` + `rmSync`
+ * 清理(NI-1:损坏草稿的补救入口不能被自己的守卫挡死)。
+ *
  * @param profileDir profile 数据目录
  * @param sessionId 当前会话 id
- * @returns 之前是否存在草稿
+ * @param options `explicit` 只由路由的 `/create-agent cancel` 传入
+ * @returns 之前是否存在并删除了草稿
  */
-export async function cancelAgentPackage(profileDir: string, sessionId: string): Promise<boolean> {
+export async function cancelAgentPackage(
+  profileDir: string,
+  sessionId: string,
+  options?: AgentPackageCancelOptions,
+): Promise<boolean> {
   if (!isValidSessionId(sessionId)) return false
+  if (hasSkillCreationDraftOnDisk(profileDir, sessionId) && options?.explicit !== true) return false
   const target = draftPath(profileDir, sessionId)
   if (!existsSync(target)) return false
   try {
@@ -389,6 +421,39 @@ export function loadAgentPackageDraft(profileDir: string, sessionId: string): Ag
     return undefined
   }
   return parseDraft(raw)
+}
+
+/**
+ * 严格读取这一会话的草稿(设计 §7 I-2)。
+ *
+ * 与 `loadAgentPackageDraft` 的宽松语义相反:只有文件缺失(ENOENT)返回 `undefined`,
+ * 读取失败、JSON 解析失败或 `parseDraft` 任一字段非法都抛 `CorruptAgentPackageDraftError`。
+ * 宽松读取的「损坏吞成 absent」是 `hasDraft` 的既有契约,不得改动。
+ */
+export function loadAgentPackageDraftStrict(
+  profileDir: string,
+  sessionId: string,
+): AgentPackageDraft | undefined {
+  if (!isValidSessionId(sessionId)) return undefined
+  const path = draftPath(profileDir, sessionId)
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw new CorruptAgentPackageDraftError(
+      `智能体创建草稿无法读取(${path}):${errorMessage(error)}`,
+    )
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    throw new CorruptAgentPackageDraftError(`智能体创建草稿不是合法 JSON:${path}`)
+  }
+  const parsed = parseDraft(raw)
+  if (parsed === undefined) throw new CorruptAgentPackageDraftError(`智能体创建草稿字段非法:${path}`)
+  return parsed
 }
 
 /**

@@ -1,14 +1,20 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { cancelAgentPackage } from '../../src/huaanwork-host/agent-package/drafts.ts'
 import {
+  cancelSkillCreation,
   CorruptSkillCreationDraftError,
   hasSkillCreationDraftOnDisk,
   proposeSkillCreation,
 } from '../../src/huaanwork-host/skill-creation-drafts.ts'
-import { createSkillCreationHost, injectCreateSkill } from '../../src/huaanwork-host/skill-creation.ts'
+import {
+  createSkillCreationHost,
+  detectSkillCreationIntent,
+  injectCreateSkill,
+} from '../../src/huaanwork-host/skill-creation.ts'
 
 const roots: string[] = []
 
@@ -186,5 +192,94 @@ describe('injectCreateSkill', () => {
     const continued = injectCreateSkill('可以', 'continue')
     expect(continued).toContain('skill_commit')
     expect(continued).toContain('沿用已有草稿')
+  })
+})
+
+describe('detectSkillCreationIntent', () => {
+  it('detects the slash command and the conservative natural-language entry', () => {
+    expect(detectSkillCreationIntent('/create-skill')).toEqual({ kind: 'create', initialText: '' })
+    expect(detectSkillCreationIntent('/create-skill 做个日报技能')).toEqual({
+      kind: 'create',
+      initialText: '做个日报技能',
+    })
+    expect(detectSkillCreationIntent('帮我创建一个技能')).toEqual({ kind: 'create', initialText: '' })
+    expect(detectSkillCreationIntent('帮我建一个技能，用来写日报')?.initialText).toBe('用来写日报')
+    expect(detectSkillCreationIntent('  新建技能  ')).toEqual({ kind: 'create', initialText: '' })
+  })
+
+  it('does not treat editing or unrelated sentences as a new creation entry', () => {
+    expect(detectSkillCreationIntent('修改技能 weekly-report')).toBeUndefined()
+    expect(detectSkillCreationIntent('继续修改技能')).toBeUndefined()
+    expect(detectSkillCreationIntent('帮我做一个技能')).toBeUndefined()
+    expect(detectSkillCreationIntent('/create-skills')).toBeUndefined()
+  })
+})
+
+/**
+ * 双草稿低层取消:路由守卫之外,两个草稿入口自身也必须拒绝隐式取消。
+ * 无 `explicit` 时双方都返回 `false` 且一个字节都不动;显式取消只清理本方。
+ */
+describe('cross-flow cancel symmetry', () => {
+  const agentDraftDocument = {
+    schemaVersion: 1,
+    draftId: 'agent-draft-1',
+    mode: 'create',
+    slug: 'weekly-report',
+    displayName: '周报小助手',
+    description: '把一周工作整理成周报',
+    persona: '你是周报助手。',
+    personaSummary: '写周报',
+    skillSummary: '无专属技能包',
+    skill: null,
+    allowSkills: [],
+    tools: 'none',
+  }
+  const skillDraftDocument = {
+    schemaVersion: 1,
+    draftId: 'draft-1',
+    sessionId: 'session-1',
+    proposal: { name: 'daily-summary', description: '生成日报', body: '整理输入并生成日报' },
+    createdAt: '2026-11-15T00:00:00.000Z',
+    updatedAt: '2026-11-15T00:00:00.000Z',
+  }
+
+  function seedBothDrafts(root: string): { agentDraft: string; skillDraft: string } {
+    const agentDraft = join(root, 'agents', '.drafts', 'session-1.json')
+    const skillDraft = join(root, 'skill-creation-drafts', 'session-1.json')
+    mkdirSync(join(root, 'agents', '.drafts'), { recursive: true })
+    mkdirSync(join(root, 'skill-creation-drafts'), { recursive: true })
+    writeFileSync(agentDraft, `${JSON.stringify(agentDraftDocument, null, 2)}\n`, 'utf8')
+    writeFileSync(skillDraft, `${JSON.stringify(skillDraftDocument, null, 2)}\n`, 'utf8')
+    return { agentDraft, skillDraft }
+  }
+
+  it('refuses the implicit skill cancel while an agent draft exists', async () => {
+    const root = makeRoot()
+    const { agentDraft, skillDraft } = seedBothDrafts(root)
+    const agentBytes = readFileSync(agentDraft, 'utf8')
+    const skillBytes = readFileSync(skillDraft, 'utf8')
+
+    expect(await cancelSkillCreation(root, 'session-1')).toBe(false)
+    expect(readFileSync(agentDraft, 'utf8')).toBe(agentBytes)
+    expect(readFileSync(skillDraft, 'utf8')).toBe(skillBytes)
+
+    expect(await cancelSkillCreation(root, 'session-1', { explicit: true })).toBe(true)
+    expect(existsSync(skillDraft)).toBe(false)
+    expect(readFileSync(agentDraft, 'utf8')).toBe(agentBytes)
+  })
+
+  it('refuses the implicit agent cancel while a skill draft exists', async () => {
+    const root = makeRoot()
+    const { agentDraft, skillDraft } = seedBothDrafts(root)
+    const agentBytes = readFileSync(agentDraft, 'utf8')
+    const skillBytes = readFileSync(skillDraft, 'utf8')
+
+    expect(await cancelAgentPackage(root, 'session-1')).toBe(false)
+    expect(readFileSync(agentDraft, 'utf8')).toBe(agentBytes)
+    expect(readFileSync(skillDraft, 'utf8')).toBe(skillBytes)
+
+    expect(await cancelAgentPackage(root, 'session-1', { explicit: true })).toBe(true)
+    expect(existsSync(agentDraft)).toBe(false)
+    expect(readFileSync(skillDraft, 'utf8')).toBe(skillBytes)
   })
 })
