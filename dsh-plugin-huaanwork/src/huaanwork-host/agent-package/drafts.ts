@@ -6,6 +6,7 @@ import { AGENT_NAME_RE } from '@huaanwork/policy/agent-catalog'
 
 import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
 
+import { isCreationCancelText, isCreationConsentText } from '../creation-utterances.ts'
 import { resolveInvocableSkill } from '../skill-invoke.ts'
 import { parseAgentPackageManifest } from './manifest.ts'
 import { resetLocalAgentPackagePublication } from './catalog-publish.ts'
@@ -62,9 +63,6 @@ const INITIAL_VERSION = '1.0.0'
 const VALIDATION_TIMESTAMP = '1970-01-01T00:00:00.000Z'
 
 const FORBIDDEN_ALLOW_SKILL = 'create-agent'
-const CONSENT_PHRASES: ReadonlySet<string> = new Set(['可以', '确认', '同意', '就这样', '按这个建'])
-const CANCEL_PHRASES: ReadonlySet<string> = new Set(['取消', '先不要'])
-const TRAILING_PUNCTUATION: ReadonlySet<string> = new Set(['。', '！', '!', '？', '?'])
 
 const TOOL_MODES: readonly AgentPackageToolsMode[] = ['none', 'http', 'mcp', 'both']
 const TOOL_LABELS: Record<AgentPackageToolsMode, string> = {
@@ -135,12 +133,12 @@ export type CommitResult =
 
 /** 同意说法:去首尾空白、去掉结尾一个 `。！!？?` 之后整句等于五种说法之一。 */
 export function isAgentConsentText(text: string): boolean {
-  return CONSENT_PHRASES.has(normalizeUtterance(text))
+  return isCreationConsentText(text)
 }
 
 /** 取消说法:与同意同一套规范化,整句等于 `取消` 或 `先不要`。 */
 export function isAgentCancelText(text: string): boolean {
-  return CANCEL_PHRASES.has(normalizeUtterance(text))
+  return isCreationCancelText(text)
 }
 
 /**
@@ -969,13 +967,6 @@ function normalizeSlug(value: string | undefined): string | undefined {
   if (value === undefined) return undefined
   const trimmed = value.trim()
   return trimmed ? trimmed : undefined
-}
-
-function normalizeUtterance(text: string): string {
-  const trimmed = text.trim()
-  const last = trimmed.at(-1)
-  if (last === undefined || !TRAILING_PUNCTUATION.has(last)) return trimmed
-  return trimmed.slice(0, -1)
 }
 
 function deriveSummary(text: string): string {

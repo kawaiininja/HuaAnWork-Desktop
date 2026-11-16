@@ -94,7 +94,7 @@ export function uploadActionLabel(state: LocalSkillInfo["publishState"]): string
 }
 
 /** Reserved names a local skill must not take (system + internal). */
-export const RESERVED_SKILL_NAMES: readonly string[] = ["explore", "test-fix", "create-agent"];
+export const RESERVED_SKILL_NAMES: readonly string[] = ["explore", "test-fix", "create-agent", "create-skill"];
 
 /** Busy key shared by every action on one card. */
 export function busyKeyFor(source: "bundled" | "catalog" | "user", name: string): string {

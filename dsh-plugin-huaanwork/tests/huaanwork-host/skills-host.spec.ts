@@ -455,6 +455,15 @@ describe('内部技能不可全局启用(设计 §6.1)', () => {
   })
 })
 
+describe('对话创建技能的保留名', () => {
+  test('rejects user skills named create-skill on the host side', async () => {
+    const root = makeHome()
+    const result = await createSkill(root, { name: 'create-skill', description: '占用内部名', content: '正文' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.fieldErrors.map((error) => error.field)).toContain('name')
+  })
+})
+
 describe('导入预览与确认的校验边界一致(评审 Important 4)', () => {
   const skillMd = (name: string) => `---\nname: ${name}\ndescription: ${name}\n---\n\n正文\n`
 
