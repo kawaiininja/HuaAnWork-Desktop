@@ -1,9 +1,11 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import {
   createSkill,
+  createSkillFromDraft,
   getSkill,
   importSkill,
   listUserSkills,
@@ -461,6 +463,49 @@ describe('对话创建技能的保留名', () => {
     const result = await createSkill(root, { name: 'create-skill', description: '占用内部名', content: '正文' })
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.fieldErrors.map((error) => error.field)).toContain('name')
+  })
+})
+
+describe('对话创建草稿的幂等入口 (Task 2)', () => {
+  test('creates from a draft once and preserves identity after editing', async () => {
+    const root = makeHome()
+    const input = { name: 'weekly-report', description: '生成周报', content: '按步骤生成周报' }
+    const first = await createSkillFromDraft(root, input, 'draft-1', 'session-1')
+    expect(first).toMatchObject({ ok: true, alreadyCommitted: false, name: 'weekly-report' })
+    await expect(resolveInvocableSkill(root, 'weekly-report')).rejects.toThrow('weekly-report is disabled')
+    setUserSkillToggle(root, 'weekly-report', true)
+    await expect(resolveInvocableSkill(root, 'weekly-report')).resolves.toMatchObject({ skill: { name: 'weekly-report' } })
+
+    const edited = await updateSkill(root, 'weekly-report', { ...input, content: '更新后的正文' })
+    expect(edited.ok).toBe(true)
+
+    const replay = await createSkillFromDraft(root, input, 'draft-1', 'session-1')
+    expect(replay).toMatchObject({ ok: true, alreadyCommitted: true, name: 'weekly-report' })
+    expect(readSkillLocalState(root).skills['weekly-report']!.creationDraftId).toBe('draft-1')
+    expect(readSkillLocalState(root).skills['weekly-report']!.creationSessionId).toBe('session-1')
+  })
+
+  test('rejects multiline frontmatter fields', async () => {
+    const root = makeHome()
+    const result = await createSkill(root, {
+      name: 'multiline-test', description: '第一行\n第二行', content: '正文',
+    })
+    expect(result.ok).toBe(false)
+  })
+
+  test('rejects idempotent replay as a field error when the state key remains but the directory is gone', async () => {
+    const root = makeHome()
+    const input = { name: 'weekly-report', description: '生成周报', content: '按步骤生成周报' }
+    const first = await createSkillFromDraft(root, input, 'draft-1', 'session-1')
+    expect(first.ok).toBe(true)
+
+    await rm(join(root, 'skills', 'weekly-report'), { recursive: true, force: true })
+
+    const replay = await createSkillFromDraft(root, input, 'draft-1', 'session-1')
+    expect(replay.ok).toBe(false)
+    if (!replay.ok) expect(replay.fieldErrors.map((error) => error.field)).toContain('name')
+    expect(readSkillLocalState(root).skills['weekly-report']!.creationDraftId).toBe('draft-1')
+    expect(readSkillLocalState(root).skills['weekly-report']!.creationSessionId).toBe('session-1')
   })
 })
 

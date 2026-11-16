@@ -147,6 +147,8 @@ export type SkillOrigin =
 export type SkillLocalEntry = {
   origin: SkillOrigin;
   contentDigest: string;
+  creationDraftId?: string;
+  creationSessionId?: string;
   publishedRevision?: number;
   publishedDigest?: string;
 };

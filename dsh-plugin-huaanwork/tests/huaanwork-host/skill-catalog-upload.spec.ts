@@ -163,12 +163,21 @@ test('sends the local publishedRevision as the expectation on updates', async ()
   const server = await bootCatalogServer()
   bindClient(server.port)
   await uploadLocalSkill(profile, 'demo')
+  // 发布回写:条目携带草稿幂等键,第二次发布的快照写回不得丢掉它们。
+  const recorded = readSkillLocalState(profile).skills.demo!
+  writeSkillLocalEntry(profile, 'demo', {
+    ...recorded,
+    creationDraftId: 'draft-1',
+    creationSessionId: 'session-1',
+  })
   const second = await bootCatalogServer({ created: true, revision: 2 })
   bindClient(second.port)
   const updated = await uploadLocalSkill(profile, 'demo')
   assert.equal(updated.created, true)
   assert.equal(second.requests[0]?.expectedRevision, '1')
   assert.equal(updated.skill.publishedRevision, 2)
+  assert.equal(readSkillLocalState(profile).skills.demo!.creationDraftId, 'draft-1')
+  assert.equal(readSkillLocalState(profile).skills.demo!.creationSessionId, 'session-1')
 })
 
 test('same-digest retry is idempotent', async () => {
@@ -252,6 +261,13 @@ test('refreshes a stale stored digest from the disk before publishing', async ()
   const first = await bootCatalogServer()
   bindClient(first.port)
   await uploadLocalSkill(profile, 'demo')
+  // 预置带外编辑采纳:记录摘要停留在第一版(与磁盘不一致),条目携带草稿幂等键。
+  const recorded = readSkillLocalState(profile).skills.demo!
+  writeSkillLocalEntry(profile, 'demo', {
+    ...recorded,
+    creationDraftId: 'draft-1',
+    creationSessionId: 'session-1',
+  })
   // Out-of-band edit after the recorded digest.
   writeFileSync(join(profile, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: demo\n---\n\n外部改过\n', 'utf8')
   const second = await bootCatalogServer({ revision: 2 })
@@ -260,6 +276,8 @@ test('refreshes a stale stored digest from the disk before publishing', async ()
   const inspected = await inspectSkillArchive(second.requests[0]!.archive)
   assert.match(inspected.skillMarkdown, /外部改过/)
   assert.equal(result.skill.publishState, 'published')
+  assert.equal(readSkillLocalState(profile).skills.demo!.creationDraftId, 'draft-1')
+  assert.equal(readSkillLocalState(profile).skills.demo!.creationSessionId, 'session-1')
 })
 
 test('an empty upload token disables upload without any request', async () => {

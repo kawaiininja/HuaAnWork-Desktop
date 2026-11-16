@@ -170,6 +170,47 @@ describe('skill-local-state.json', () => {
     assert.deepEqual(readSkillLocalState(profile).skills.imported, state.skills.imported)
   })
 
+  test('conversational creation identity round-trips only as a complete pair', () => {
+    const profile = makeHome()
+    writeSkillLocalEntry(profile, 'draft-created', {
+      origin: { kind: 'created' },
+      contentDigest: 'sha256:draft',
+      creationDraftId: 'draft-1',
+      creationSessionId: 'session-1',
+    })
+    assert.deepEqual(readSkillLocalState(profile).skills['draft-created'], {
+      origin: { kind: 'created' },
+      contentDigest: 'sha256:draft',
+      creationDraftId: 'draft-1',
+      creationSessionId: 'session-1',
+    })
+    const document = JSON.parse(readFileSync(skillLocalStatePath(profile), 'utf8'))
+    assert.equal(document.skills['draft-created'].creationDraftId, 'draft-1')
+    assert.equal(document.skills['draft-created'].creationSessionId, 'session-1')
+
+    // 只存在其中一个键即损坏:幂等命中必须同时校验草稿与会话归属。
+    for (const [label, extra] of [
+      ['creationDraftId', { creationDraftId: 'draft-1' }],
+      ['creationSessionId', { creationSessionId: 'session-1' }],
+    ] as const) {
+      writeFileSync(
+        skillLocalStatePath(profile),
+        JSON.stringify({
+          schemaVersion: 1,
+          skills: { demo: { origin: { kind: 'created' }, contentDigest: 'sha256:x', ...extra } },
+        }),
+        'utf8',
+      )
+      assert.throws(
+        () => readSkillLocalState(profile),
+        (error: unknown) =>
+          error instanceof CorruptSkillLocalStateError
+          && /creationDraftId 与 creationSessionId 必须同时存在/.test(error.message),
+        `${label} alone must be corrupt`,
+      )
+    }
+  })
+
   test('the migration marker and warnings survive later entry writes', () => {
     const profile = makeHome()
     markSkillCenterMigrationComplete(profile, ['内置技能 pdf 未复制'])
