@@ -1090,6 +1090,55 @@ describe('agent and skill creation routing', () => {
     expect(injectCreateSkill).toHaveBeenCalledWith('继续修改技能', 'continue')
   })
 
+  // 客户端把斜杠命令拆成 { skill, text }:显式取消必须按入口标志识别,
+  // 否则 "cancel" 会被当成新一轮创建正文重新进入访谈。
+  test('client-shaped skill cancel discards the draft without re-entering creation', async () => {
+    const harness = routingHarness({ skillDraft: true })
+
+    const result = await harness.send({ skill: 'create-skill', text: 'cancel' })
+
+    expect(result.started).toBe(false)
+    expect(result.reason).toContain('已取消创建技能')
+    expect(harness.cancelSkill).toHaveBeenCalledWith(ROUTING_SESSION_ID, { explicit: true })
+    expect(existsSync(harness.skillDraftPath)).toBe(false)
+    expect(lastEventText(harness.events)).toContain('已取消创建技能')
+    expect(injectCreateSkill).not.toHaveBeenCalled()
+    expect(attachSkillCreationTools).not.toHaveBeenCalled()
+    expect(injectCreateAgentSkill).not.toHaveBeenCalled()
+    expect(attachCreationTools).not.toHaveBeenCalled()
+  })
+
+  test('client-shaped agent cancel discards the draft without starting a turn', async () => {
+    const harness = routingHarness({ agentDraft: true })
+
+    const result = await harness.send({ skill: 'create-agent', text: 'cancel' })
+
+    expect(result.started).toBe(false)
+    expect(result.reason).toContain('已取消创建智能体')
+    expect(harness.cancelAgent).toHaveBeenCalledWith(ROUTING_SESSION_ID, { explicit: true })
+    expect(existsSync(harness.agentDraftPath)).toBe(false)
+    expect(lastEventText(harness.events)).toContain('已取消创建智能体')
+    expect(injectCreateAgentSkill).not.toHaveBeenCalled()
+    expect(attachCreationTools).not.toHaveBeenCalled()
+    expect(injectCreateSkill).not.toHaveBeenCalled()
+    expect(attachSkillCreationTools).not.toHaveBeenCalled()
+  })
+
+  // 客户端拆包的 `/create-agent 创建一个技能规划师`:正文命中技能自然语言入口时,
+  // 不得把整轮从智能体创建流程抢走,否则两条入口都不启动。
+  test('an explicit create-agent body that reads like skill creation stays in the agent flow', async () => {
+    const harness = routingHarness()
+
+    const result = await harness.send({ skill: 'create-agent', text: '创建一个技能规划师' })
+
+    expect(result.started).toBe(true)
+    expect(injectCreateAgentSkill).toHaveBeenCalledTimes(1)
+    expect(injectCreateAgentSkill).toHaveBeenCalledWith('创建一个技能规划师', 'create', undefined)
+    expect(attachCreationTools).toHaveBeenCalledTimes(1)
+    expect(injectCreateSkill).not.toHaveBeenCalled()
+    expect(attachSkillCreationTools).not.toHaveBeenCalled()
+  })
+
   test('routes single-draft bare cancel to the skill flow and names it', async () => {
     const harness = routingHarness({ skillDraft: true })
 

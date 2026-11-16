@@ -224,8 +224,14 @@ export async function sendToAgent(
 
     const agentSlash = /^\/create-agent(?:\s+([\s\S]*))?$/.exec(text.trim())
     const skillSlash = CREATE_SKILL_COMMAND.exec(text.trim())
-    const agentCancel = agentSlash !== null && /^\s*cancel\s*$/.test(agentSlash[1] ?? '')
-    const skillCancel = skillSlash !== null && /^\s*cancel\s*$/.test(skillSlash[1] ?? '')
+    // 客户端把 `/create-skill cancel` 拆成 `{ skill: 'create-skill', text: 'cancel' }`:
+    // 入口标志在场且正文是裸 `cancel` 时与显式斜杠命令同权,否则取消文本会被当成
+    // 新一轮创建正文重新进入访谈,损坏/双草稿提示给出的补救入口会原地打转。
+    const entryCancel = /^\s*cancel\s*$/.test(text.trim())
+    const agentCancel =
+      (agentSlash !== null && /^\s*cancel\s*$/.test(agentSlash[1] ?? '')) || (createAgentEntry && entryCancel)
+    const skillCancel =
+      (skillSlash !== null && /^\s*cancel\s*$/.test(skillSlash[1] ?? '')) || (createSkillEntry && entryCancel)
 
     // ② 显式取消是终止操作,不得再被当成 create 意图;目标缺席也不能触碰另一流程。
     if (skillCancel) {
@@ -272,12 +278,16 @@ export async function sendToAgent(
     }
 
     // ③ 流程类型识别:自然语言入口只在无显式 /name、无 @agent 时计入;显式命令不受此限。
+    // 技能 NL 分支还要让出显式智能体入口(客户端拆包 `{skill:'create-agent'}` 或直接
+    // `/create-agent ...`),否则入口正文里的「创建一个技能…」会被技能 NL 检测器抢走,
+    // 智能体分支被 `!requestedSkill` 挡下,两个流程都不启动。
     const nlAllowed = !atName && !skillName
     const detectedAgentIntent = nlAllowed ? detectAgentCreationIntent(text) : undefined
     const agentIntent = createAgentEntry ? detectCreateAgentCommand(text) : detectedAgentIntent
     const requestedAgent = createAgentEntry || agentSlash !== null || detectedAgentIntent !== undefined
+    const skillNlAllowed = nlAllowed && !createAgentEntry && agentSlash === null
     const requestedSkill =
-      createSkillEntry || skillSlash !== null || (nlAllowed && detectSkillCreationIntent(text) !== undefined)
+      createSkillEntry || skillSlash !== null || (skillNlAllowed && detectSkillCreationIntent(text) !== undefined)
 
     const agentDraft = packageHost?.hasDraft(sessionId) === true
     const skillDraft = skillHost?.hasDraft(sessionId) === true

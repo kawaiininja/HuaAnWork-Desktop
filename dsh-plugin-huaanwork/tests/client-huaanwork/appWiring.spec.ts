@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
-import { answerApprovalInTabs } from "../../src/client-huaanwork/logic/chatTabs.ts";
+import { answerApprovalInTabs, isPlainConversationTab, pickPlainConversationTab } from "../../src/client-huaanwork/logic/chatTabs.ts";
 import {
   isUnstartedUserItem,
   noteSendResult,
@@ -2213,11 +2213,28 @@ test("the Mine conversation entry sends /create-skill from a normal tab and neve
   assert.match(body, /setHistoryView\(null\)/);
   assert.match(body, /setSelectedTaskId\(null\)/);
   assert.match(body, /setView\("main"\)/);
-  assert.match(body, /isPlainConversationTab/);
+  assert.match(body, /pickPlainConversationTab/);
+  assert.match(body, /const reuse = pickPlainConversationTab\(chatTabs, activeTab\);/);
   assert.match(body, /void send\(SKILL_CREATION_COMMAND, (?:reuse\.id|id)\)/);
   // 启动只开普通会话并发送预置命令：不自动启用、上传或跳过确认写盘。
   assert.doesNotMatch(body, /skill\.(upload|setEnabled|create)/);
   assert.doesNotMatch(body, /"确认"/);
+});
+
+test("the Mine conversation entry never hijacks a project-bound or pending-pick tab", () => {
+  const project = { id: "project-tab", projectId: "p1", pendingPick: false };
+  const pending = { id: "pending-tab", projectId: null, pendingPick: true };
+  const plain = { id: "plain-tab", projectId: null, pendingPick: false };
+
+  // 项目绑定标签发送时会懒创建项目子任务;待选项目标签还在等 chip 选择:
+  // 两者都不是普通会话,“对话创建技能”不得把 /create-skill 塞进去。
+  assert.equal(isPlainConversationTab(project), false);
+  assert.equal(isPlainConversationTab(pending), false);
+  assert.equal(isPlainConversationTab(plain), true);
+
+  assert.equal(pickPlainConversationTab([project, pending, plain], project.id)?.id, "plain-tab");
+  assert.equal(pickPlainConversationTab([project, plain], plain.id)?.id, "plain-tab");
+  assert.equal(pickPlainConversationTab([project, pending], project.id), undefined);
 });
 
 test("the confirm card's actions stay on the ordinary conversation path", () => {

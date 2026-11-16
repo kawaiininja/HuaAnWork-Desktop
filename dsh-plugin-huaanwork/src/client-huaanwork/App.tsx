@@ -163,6 +163,7 @@ import {
   askCardWaitsForClick,
   closeRunTabsForSession,
   hasPendingAsk,
+  pickPlainConversationTab,
   resolveActiveTab,
   type ApprovalCardView,
 } from "./logic/chatTabs.ts";
@@ -348,14 +349,6 @@ type SessionMenu = { sessionId: string; x: number; y: number };
 
 /** 回合进度的最近一次活动种类：思考、正文、工具结果或静默。 */
 type PulseKind = "reasoning" | "text" | "tool" | "quiet";
-
-/**
- * 普通会话标签：不是自动化运行、不是重启后的运行骨架、也不是项目子任务。
- * “对话创建技能”只在这类标签里发预置命令，避免把创建流程塞进运行/子任务上下文。
- */
-function isPlainConversationTab(tab: ChatTab): boolean {
-  return tab.automationId === undefined && tab.runPlaceholder !== true && tab.taskId === undefined;
-}
 
 /**
  * 一条标签自己的回合身份与停止票据。另一个标签开始回合不会改动这份记录，
@@ -2665,9 +2658,7 @@ export default function App() {
     setSelectedTaskId(null);
     setHistoryView(null);
     setView("main");
-    const reuse =
-      chatTabs.find((tab) => tab.id === activeTab && isPlainConversationTab(tab)) ??
-      chatTabs.find(isPlainConversationTab);
+    const reuse = pickPlainConversationTab(chatTabs, activeTab);
     if (reuse) {
       setActiveTab(reuse.id);
       liveChatRef.current = reuse.id;

@@ -348,6 +348,9 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     inject: ['tools'],
     apply: (pc: Context) => {
       pc.effect(() => {
+        // 门面在父作用域创建;tools 服务重提供会让本 effect 重跑,而旧 disposer 已把它
+        // 清空。每次注册前重新注入,保证工具重新挂载期间 getSkillCreationHost() 仍可用。
+        setSkillCreationHost(skillCreationHost)
         const toolCtx = {
           tools: (pc as unknown as { tools?: unknown }).tools,
           huaanworkAgentCatalog: ctx.huaanworkAgentCatalog,

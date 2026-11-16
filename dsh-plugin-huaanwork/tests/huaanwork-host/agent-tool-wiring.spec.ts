@@ -5,6 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, test } from 'vitest'
 import { apply, type HuaanworkHostConfig } from '../../src/huaanwork-host/index.ts'
 import { getAgentsDirectory } from '../../src/huaanwork-host/sessions.ts'
+import { getSkillCreationHost } from '../../src/huaanwork-host/skill-creation.ts'
 import { hostConfig } from './startup-sweep-fixture.ts'
 
 /**
@@ -33,6 +34,7 @@ afterEach(() => {
 async function bootWithTools(config: HuaanworkHostConfig): Promise<{
   ctx: Context
   registered: RegisteredTool[]
+  disposeTools: () => void
 }> {
   mkdirSync(config.profileDir, { recursive: true })
   mkdirSync(config.dshHome, { recursive: true })
@@ -44,7 +46,7 @@ async function bootWithTools(config: HuaanworkHostConfig): Promise<{
     registerUpgrade: () => () => {},
   } as never)
   ctx.provide('desktopRuntime', { requestConfirmedRestart: async () => true } as never)
-  ctx.provide('tools', {
+  const disposeTools = ctx.provide('tools', {
     register(def: RegisteredTool) {
       registered.push(def)
       return () => {
@@ -55,11 +57,16 @@ async function bootWithTools(config: HuaanworkHostConfig): Promise<{
   } as never)
   await apply(ctx, config)
   // 子插件在 fiber 中激活:有界等待注册落地(正常 <50ms,给足 CI 余量)。
+  await waitForTool(registered, 'call_host_tool')
+  return { ctx, registered, disposeTools }
+}
+
+/** 有界等待某个工具行出现或消失,避免用固定 sleep 猜 fiber 调度。 */
+async function waitForTool(registered: RegisteredTool[], name: string, present = true): Promise<void> {
   const deadline = Date.now() + 2_000
-  while (Date.now() < deadline && !registered.some((t) => t.name === 'call_host_tool')) {
+  while (Date.now() < deadline && registered.some((tool) => tool.name === name) !== present) {
     await new Promise((done) => setTimeout(done, 10))
   }
-  return { ctx, registered }
 }
 
 /** 在 profile 的本地端点表追加一条 http 小工具端点(落盘形状 { entries: [...] },与 writeEndpoints 同构)。 */
@@ -132,5 +139,34 @@ describe('call_host_tool registration wiring (P1)', () => {
 
     await booted.ctx.fiber.dispose()
     expect(booted.registered.some((t) => t.name === 'call_host_tool')).toBe(false)
+  })
+
+  test('re-providing tools restores the skill creation facade for the new registration', async () => {
+    const config = hostConfig(freshRoot())
+    const booted = await bootWithTools(config)
+    expect(getSkillCreationHost()).toBeDefined()
+
+    // 旧 tools 注销时 effect disposer 清空门面;重新提供 tools 后子插件重跑并重新注册。
+    await booted.disposeTools()
+    await waitForTool(booted.registered, 'call_host_tool', false)
+    expect(getSkillCreationHost()).toBeUndefined()
+
+    const disposeTools = booted.ctx.provide('tools', {
+      register(def: RegisteredTool) {
+        booted.registered.push(def)
+        return () => {
+          const idx = booted.registered.indexOf(def)
+          if (idx >= 0) booted.registered.splice(idx, 1)
+        }
+      },
+    } as never)
+    await waitForTool(booted.registered, 'skill_propose', true)
+
+    // 修复点:tools effect 每次注册前重新注入父作用域门面,重提供后仍可用。
+    expect(getSkillCreationHost()).toBeDefined()
+    expect(booted.registered.some((tool) => tool.name === 'skill_commit')).toBe(true)
+
+    await disposeTools()
+    await booted.ctx.fiber.dispose()
   })
 })

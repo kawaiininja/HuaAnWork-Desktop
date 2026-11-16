@@ -266,6 +266,19 @@ function contentPreviewOf(body: string): string {
 }
 
 /**
+ * 清理仍在场的同 ID 草稿。提交凭证已经落盘,读取/删除失败不得反向报告失败,
+ * 留给下一次重放或显式取消处理;新 propose 已替换的草稿绝不误删。
+ */
+function removeCommittedDraftIfCurrent(profileDir: string, sessionId: string, draftId: string): void {
+  try {
+    const remaining = loadSkillCreationDraft(profileDir, sessionId)
+    if (remaining?.draftId === draftId) rmSync(draftPath(profileDir, sessionId), { force: true })
+  } catch {
+    // 落盘已经成功;草稿读取/清理失败留给下一次重放或显式取消处理,不能反向报告失败。
+  }
+}
+
+/**
  * 提交草稿。门禁顺序本身就是授权约束:
  * 会话 → 创建/继续创建轮次且无对方智能体草稿 → 本轮未重新 propose →
  * 最近用户原句是完整同意句 → draftId 合法性 → 先查已提交凭证(支持草稿已删的
@@ -301,6 +314,9 @@ export async function commitSkillCreation(
   // 查询同时按 creationSessionId 限定,其他会话凭同一 draftId 无法重放。
   const credential = await findSkillByCreationDraftId(profileDir, draftId, sessionId)
   if (credential) {
+    // 崩溃窗口补救:状态已写入、草稿尚未删除时重放命中凭证。这里补一次同 ID 清理,
+    // 否则会话会继续带着草稿重新注入访谈,即使成功已展示给用户。
+    removeCommittedDraftIfCurrent(profileDir, sessionId, draftId)
     return { ok: true, draftId, name: credential.name, alreadyCommitted: true }
   }
 
@@ -323,12 +339,7 @@ export async function commitSkillCreation(
   if (!created.ok) return created
 
   // 成功后清理仍在场的同 ID 草稿;新 propose 已替换的草稿不得误删。
-  try {
-    const remaining = loadSkillCreationDraft(profileDir, sessionId)
-    if (remaining?.draftId === draftId) rmSync(draftPath(profileDir, sessionId), { force: true })
-  } catch {
-    // 落盘已经成功;草稿读取/清理失败留给下一次重放或显式取消处理,不能反向报告失败。
-  }
+  removeCommittedDraftIfCurrent(profileDir, sessionId, draftId)
 
   if (created.alreadyCommitted) {
     return { ok: true, draftId, name: created.name, alreadyCommitted: true }

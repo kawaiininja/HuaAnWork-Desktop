@@ -7,6 +7,7 @@ import {
   CorruptSkillCreationDraftError,
   commitSkillCreation,
   hasSkillCreationDraftOnDisk,
+  loadSkillCreationDraft,
   proposeSkillCreation,
 } from '../../src/huaanwork-host/skill-creation-drafts.ts'
 import { createSkill, createSkillFromDraft, listUserSkills } from '../../src/huaanwork-host/skills-host.ts'
@@ -72,6 +73,53 @@ describe('skill creation drafts', () => {
     expect(replay.ok).toBe(false)
     expect(replay).not.toMatchObject({ alreadyCommitted: true })
     expect((await listUserSkills(root)).filter((skill) => skill.name === 'daily-summary')).toHaveLength(1)
+  })
+
+  it('deletes a same-id draft left behind when a committed credential is replayed', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'skill-draft-credential-cleanup-'))
+    const proposal = { name: 'daily-summary', description: '生成日报', body: '整理输入并生成日报' }
+    const proposed = await proposeSkillCreation(root, 'session-1', proposal)
+    if (!proposed.ok) throw new Error('propose failed')
+
+    // 模拟崩溃窗口:状态写入成功、草稿尚未删除;重放命中凭证时必须补上这次清理,
+    // 否则会话会带着草稿继续注入访谈,即使成功早已展示。
+    const created = await createSkillFromDraft(root, {
+      name: proposal.name, description: proposal.description, content: proposal.body,
+    }, proposed.draftId, 'session-1')
+    expect(created).toEqual({ ok: true, name: 'daily-summary', alreadyCommitted: false })
+    expect(hasSkillCreationDraftOnDisk(root, 'session-1')).toBe(true)
+
+    const replay = await commitSkillCreation(root, 'session-1', proposed.draftId, '确认', {
+      proposedThisTurn: false, creationTurn: true,
+    })
+    expect(replay).toMatchObject({ ok: true, alreadyCommitted: true, name: 'daily-summary' })
+    expect(hasSkillCreationDraftOnDisk(root, 'session-1')).toBe(false)
+  })
+
+  it('never deletes a replaced draft when a committed credential is replayed', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'skill-draft-credential-mismatch-'))
+    const first = await proposeSkillCreation(root, 'session-1', {
+      name: 'daily-summary', description: '生成日报', body: '整理输入并生成日报',
+    })
+    if (!first.ok) throw new Error('first propose failed')
+    const created = await createSkillFromDraft(root, {
+      name: 'daily-summary', description: '生成日报', content: '整理输入并生成日报',
+    }, first.draftId, 'session-1')
+    expect(created.ok).toBe(true)
+
+    // 新 propose 用不同 draftId 替换了草稿;重放旧凭证不得误删新草稿。
+    const second = await proposeSkillCreation(root, 'session-1', {
+      name: 'weekly-report', description: '生成周报', body: '整理周报素材',
+    })
+    if (!second.ok) throw new Error('second propose failed')
+    expect(second.draftId).not.toBe(first.draftId)
+
+    const replay = await commitSkillCreation(root, 'session-1', first.draftId, '确认', {
+      proposedThisTurn: false, creationTurn: true,
+    })
+    expect(replay).toMatchObject({ ok: true, alreadyCommitted: true, name: 'daily-summary' })
+    expect(loadSkillCreationDraft(root, 'session-1')?.draftId).toBe(second.draftId)
+    expect(hasSkillCreationDraftOnDisk(root, 'session-1')).toBe(true)
   })
 
   it('refuses replay without phantom success when the directory vanishes behind a state key', async () => {
