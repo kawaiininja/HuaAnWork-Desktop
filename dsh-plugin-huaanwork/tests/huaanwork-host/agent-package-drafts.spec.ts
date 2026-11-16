@@ -799,6 +799,27 @@ describe('update mode', () => {
     writeFileSync(join(agentPackagesRoot(root), 'broken-agent', 'agent.json'), '{not json', 'utf8')
     await expect(host.beginUpdate('session-broken', 'broken-agent')).rejects.toThrow(/损坏/)
   })
+
+  test('beginUpdate refuses while a skill creation draft exists', async () => {
+    const root = makeRoot()
+    const created = await proposeAgentPackage(root, 'session-guard-create', createProposal(), [])
+    if (!created.ok) throw new Error('propose failed')
+    const committed = await commitAgentPackage(root, 'session-guard-create', created.draftId, '可以', [])
+    expect(committed.ok).toBe(true)
+    mkdirSync(join(root, 'skill-creation-drafts'), { recursive: true })
+    writeFileSync(join(root, 'skill-creation-drafts', 'session-guard.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      draftId: 'skill-draft-1',
+      sessionId: 'session-guard',
+      proposal: { name: 'daily-summary', description: '生成日报', body: '正文' },
+      createdAt: '2026-11-16T00:00:00.000Z',
+      updatedAt: '2026-11-16T00:00:00.000Z',
+    })}\n`, 'utf8')
+
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    await expect(host.beginUpdate('session-guard', 'weekly-report')).rejects.toThrow(/技能创建草稿/)
+    expect(existsSync(join(root, 'agents', '.drafts', 'session-guard.json'))).toBe(false)
+  })
 })
 
 describe('host facade', () => {

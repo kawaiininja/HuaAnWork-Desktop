@@ -170,6 +170,29 @@ describe('skill_propose', () => {
     expect(h.registered.size).toBe(0)
   })
 
+  test('the confirm card truncates the body preview to 500 characters', async () => {
+    const host = fakeHost({
+      propose: async () => ({ ok: true, draftId: 'draft-1', proposal: { ...PROPOSAL, body: '字'.repeat(600) } }),
+    })
+    const h = harness()
+    const dispose = registerSkillCreationTools(h.ctx, host)
+    const tool = h.registered.get(SKILL_PROPOSE_TOOL)
+
+    await tool?.execute(PROPOSAL, execFor('session-a'))
+
+    expect(h.events).toContainEqual({
+      event: 'skill/confirm',
+      card: {
+        name: PROPOSAL.name,
+        description: PROPOSAL.description,
+        whenToUse: PROPOSAL.whenToUse,
+        contentPreview: '字'.repeat(500),
+      },
+      sessionId: 'session-a',
+    })
+    dispose()
+  })
+
   test('returns field errors as an error result and a notice without a confirm card', async () => {
     const host = fakeHost({
       propose: async () => ({ ok: false, fieldErrors: [{ field: 'name', message: '已存在同名技能' }] }),

@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -491,6 +491,28 @@ describe('对话创建草稿的幂等入口 (Task 2)', () => {
       name: 'multiline-test', description: '第一行\n第二行', content: '正文',
     })
     expect(result.ok).toBe(false)
+  })
+
+  test('rejects a multiline whenToUse', async () => {
+    const root = makeHome()
+    const result = await createSkill(root, {
+      name: 'multiline-when', description: '描述', whenToUse: '第一行\n第二行', content: '正文',
+    })
+    expect(result.ok).toBe(false)
+  })
+
+  test('createSkill trims description and drops whitespace-only whenToUse', async () => {
+    const root = makeHome()
+    const result = await createSkill(root, {
+      name: 'trim-test', description: '  描述  ', whenToUse: '   ', content: '正文',
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.skill.description).toBe('描述')
+    expect(result.skill.whenToUse).toBeUndefined()
+    const raw = readFileSync(join(root, 'skills', 'trim-test', 'SKILL.md'), 'utf8')
+    expect(raw).toContain('description: 描述')
+    expect(raw).not.toContain('whenToUse')
   })
 
   test('rejects empty or whitespace creation ids without writing state or directory', async () => {

@@ -472,6 +472,10 @@ export async function beginAgentPackageUpdate(
 ): Promise<void> {
   if (!isValidSessionId(sessionId)) throw new Error('会话 id 必须是单个路径段')
   if (!isValidSlug(slug)) throw new Error(`智能体 @标识「${slug}」无效`)
+  // 与 propose/commit 同口径的低层互斥:路由守卫之外,技能草稿在场不得开启更新草稿。
+  if (hasSkillCreationDraftOnDisk(profileDir, sessionId)) {
+    throw new Error('当前会话存在技能创建草稿，请先完成或取消技能创建')
+  }
   const base = readUpdateBase(profileDir, slug)
   const draft: AgentPackageDraft = {
     schemaVersion: AGENT_PACKAGE_SCHEMA_VERSION,

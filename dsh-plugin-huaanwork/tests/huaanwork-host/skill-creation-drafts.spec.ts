@@ -1,8 +1,9 @@
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, promises as fs, readFileSync, readdirSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
 import {
   CorruptSkillCreationDraftError,
   commitSkillCreation,
@@ -239,23 +240,66 @@ describe('skill creation drafts', () => {
     expect(skills[0]!.description).toBe('既有技能')
   })
 
-  it('returns a success card whose fields match the proposal', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'skill-draft-card-'))
-    const body = '字'.repeat(600)
+  it('normalizes whitespace in proposal fields so the card and disk agree', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'skill-draft-trim-'))
     const proposed = await proposeSkillCreation(root, 'session-1', {
-      name: 'daily-summary', description: '生成日报', whenToUse: '需要日报时', body,
+      name: 'daily-summary', description: '  生成日报  ', whenToUse: '   ', body: '整理输入并生成日报',
     })
-    if (!proposed.ok) throw new Error('propose failed')
+    expect(proposed.ok).toBe(true)
+    if (!proposed.ok) return
+    expect(proposed.proposal.description).toBe('生成日报')
+    expect(proposed.proposal.whenToUse).toBeUndefined()
+    const committed = await commitSkillCreation(root, 'session-1', proposed.draftId, '确认', {
+      proposedThisTurn: false, creationTurn: true,
+    })
+    expect(committed.ok).toBe(true)
+    const raw = readFileSync(join(root, 'skills', 'daily-summary', 'SKILL.md'), 'utf8')
+    expect(raw).toContain('description: 生成日报')
+    expect(raw).not.toContain('whenToUse')
+  })
+
+  it('rejects a multiline whenToUse without writing a draft', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'skill-draft-when-'))
+    const proposed = await proposeSkillCreation(root, 'session-1', {
+      name: 'daily-summary', description: '生成日报', whenToUse: '第一行\r\n第二行', body: '整理输入并生成日报',
+    })
+    expect(proposed.ok).toBe(false)
+    if (proposed.ok) return
+    expect(proposed.fieldErrors.map((error) => error.field)).toContain('whenToUse')
+    expect(hasSkillCreationDraftOnDisk(root, 'session-1')).toBe(false)
+  })
+
+  it('the committed SKILL.md frontmatter matches the confirmed proposal', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'skill-draft-frontmatter-'))
+    const proposed = await proposeSkillCreation(root, 'session-1', {
+      name: 'daily-summary', description: '生成日报', whenToUse: '需要日报时', body: '整理输入并生成日报',
+    })
+    expect(proposed.ok).toBe(true)
+    if (!proposed.ok) return
     const committed = await commitSkillCreation(root, 'session-1', proposed.draftId, '确认', {
       proposedThisTurn: false, creationTurn: true,
     })
     expect(committed).toMatchObject({ ok: true, alreadyCommitted: false })
-    if (!committed.ok) throw new Error('unreachable')
-    expect(committed.card).toEqual({
-      name: 'daily-summary',
-      description: '生成日报',
-      whenToUse: '需要日报时',
-      contentPreview: Array.from(body).slice(0, 500).join(''),
-    })
+    const parsed = parseSkillMarkdown(readFileSync(join(root, 'skills', 'daily-summary', 'SKILL.md'), 'utf8'))
+    expect(parsed.name).toBe('daily-summary')
+    expect(parsed.description).toBe('生成日报')
+    expect(parsed.whenToUse).toBe('需要日报时')
+  })
+
+  it('concurrent draft writes use distinct temp files and leave a valid draft', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'skill-draft-race-'))
+    const rename = vi.spyOn(fs, 'rename')
+    const results = await Promise.all([1, 2, 3].map((n) =>
+      proposeSkillCreation(root, 'session-1', {
+        name: `daily-summary-${n}`, description: '生成日报', body: '整理输入并生成日报',
+      })))
+    const tmpPaths = rename.mock.calls.map((call) => String(call[0]))
+    rename.mockRestore()
+    for (const result of results) expect(result.ok).toBe(true)
+    expect(tmpPaths.length).toBe(3)
+    expect(new Set(tmpPaths).size).toBe(tmpPaths.length)
+    const draft = loadSkillCreationDraft(root, 'session-1')
+    expect(draft?.sessionId).toBe('session-1')
+    expect(readdirSync(join(root, 'skill-creation-drafts')).filter((name) => name.includes('.tmp'))).toEqual([])
   })
 })

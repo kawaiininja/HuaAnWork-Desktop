@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
@@ -62,7 +62,6 @@ export type SkillCommitResult =
       draftId: string
       name: string
       alreadyCommitted: boolean
-      card?: { name: string; description: string; whenToUse?: string; contentPreview: string }
     }
   | { ok: false; fieldErrors: SkillFieldError[] }
 
@@ -141,10 +140,13 @@ function parseProposal(raw: unknown): { ok: true; proposal: SkillProposalInput }
     errors.push({ field: 'whenToUse', message: 'whenToUse 必须是字符串' })
   }
   if (errors.length > 0) return { ok: false, fieldErrors: errors }
+  // 规格 §6.2:单行文本去除首尾空白;纯空白 whenToUse 归一为缺席,确认卡与落盘一致。
+  const description = (raw.description as string).trim()
+  const whenToUse = raw.whenToUse !== undefined ? (raw.whenToUse as string).trim() : undefined
   const proposal: SkillProposalInput = {
     name: raw.name as string,
-    description: raw.description as string,
-    ...(raw.whenToUse !== undefined ? { whenToUse: raw.whenToUse as string } : {}),
+    description,
+    ...(whenToUse ? { whenToUse } : {}),
     body: raw.body as string,
   }
   return { ok: true, proposal }
@@ -206,10 +208,10 @@ export function loadSkillCreationDraft(profileDir: string, sessionId: string): S
   return validateDraftDocument(parsed, sessionId, path)
 }
 
-/** 同目录 `.tmp` + rename:草稿替换对读者不可见。 */
+/** 同目录随机后缀 `.tmp` + rename:草稿替换对读者不可见,并发写互不覆盖。 */
 async function writeSkillCreationDraft(profileDir: string, draft: SkillCreationDraft): Promise<void> {
   const target = draftPath(profileDir, draft.sessionId)
-  const tmp = `${target}.tmp`
+  const tmp = `${target}.tmp-${String(process.pid)}-${randomBytes(8).toString('hex')}`
   await fs.mkdir(dirname(target), { recursive: true })
   try {
     await fs.writeFile(tmp, `${JSON.stringify(draft, null, 2)}\n`, 'utf8')
@@ -261,7 +263,7 @@ export async function proposeSkillCreation(
   return { ok: true, draftId: draft.draftId, proposal: draft.proposal }
 }
 
-function contentPreviewOf(body: string): string {
+export function contentPreviewOf(body: string): string {
   return Array.from(body).slice(0, 500).join('')
 }
 
@@ -344,18 +346,7 @@ export async function commitSkillCreation(
   if (created.alreadyCommitted) {
     return { ok: true, draftId, name: created.name, alreadyCommitted: true }
   }
-  return {
-    ok: true,
-    draftId,
-    name: created.name,
-    alreadyCommitted: false,
-    card: {
-      name: current.proposal.name,
-      description: current.proposal.description,
-      ...(current.proposal.whenToUse !== undefined ? { whenToUse: current.proposal.whenToUse } : {}),
-      contentPreview: contentPreviewOf(current.proposal.body),
-    },
-  }
+  return { ok: true, draftId, name: created.name, alreadyCommitted: false }
 }
 
 /**

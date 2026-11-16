@@ -5,6 +5,7 @@ import type { RpcEvent, SkillConfirmCard } from '../client-huaanwork/rpc-types.t
 import type { AttachmentMaps } from './agent-attachments.ts'
 import {
   CorruptSkillCreationDraftError,
+  contentPreviewOf,
   type SkillCommitResult,
   type SkillProposalInput,
   type SkillProposeResult,
@@ -80,10 +81,6 @@ function sessionIdOf(exec: ToolExec | undefined): string {
 
 function emit(ctx: ToolContext, event: RpcEvent): void {
   ctx.huaanworkEmit?.(event)
-}
-
-function contentPreviewOf(body: string): string {
-  return Array.from(body).slice(0, 500).join('')
 }
 
 /** 工具参数 → 宿主入参:只投影声明过的字段,可选字段缺席时保持缺席。 */

@@ -377,6 +377,9 @@ async function createSkillLocked(
   input: SkillInput,
   identity?: SkillCreationIdentity,
 ): Promise<SkillWriteResult> {
+  // 规格 §6.2:单行字段去除首尾空白,纯空白 whenToUse 归一为缺席;与对话草稿的
+  // parseProposal 同口径,表单与对话两条入口落盘一致。
+  input = { ...input, description: input.description.trim(), whenToUse: input.whenToUse?.trim() || undefined }
   const errors = validateSkillFields(input, await takenNames(storageRoot))
   if (errors.length > 0) return { ok: false, fieldErrors: errors }
   // 先读两份状态文档并在落盘前预检目标目录与预算:损坏文档、不安全既有目录
