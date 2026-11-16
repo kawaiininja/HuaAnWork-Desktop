@@ -234,7 +234,14 @@ export async function sendToAgent(
         routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
         return { queued: true, sessionId, started: false, reason: notice }
       }
-      await skillHost.cancel(sessionId, { explicit: true })
+      // 取消是删除磁盘草稿的真操作:低层吞掉 rmSync 失败返回 false。失败时草稿仍在,
+      // 不得报「已取消」也不得卸下工具,否则损坏草稿的补救入口会骗用户重试循环。
+      const cancelled = await skillHost.cancel(sessionId, { explicit: true })
+      if (!cancelled) {
+        const notice = '已取消创建技能失败，草稿仍保留，请重试。'
+        routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+        return { queued: true, sessionId, started: false, reason: notice }
+      }
       detachSkillCreationTools(ctx, sessionId)
       const notice = '已取消创建技能，没有写入技能。'
       routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
@@ -250,7 +257,14 @@ export async function sendToAgent(
         return { queued: true, sessionId, started: false, reason: notice }
       }
       // 目标缺席时 packageHost 可能是 undefined:显式取消仍以低层清理为准(幂等、只删本方)。
-      await packageHost?.cancel(sessionId, { explicit: true })
+      // 假值(删除失败或宿主缺席)时草稿仍在,不得报「已取消」:只要 hasDraft/磁盘守卫
+      // 已放行,这条路就是损坏草稿的唯一逃生口,虚报会让互斥守卫继续挡住每一轮。
+      const cancelled = await packageHost?.cancel(sessionId, { explicit: true })
+      if (cancelled !== true) {
+        const notice = '已取消创建智能体失败，草稿仍保留，请重试。'
+        routeCtx.emit({ event: 'agent/notice', text: notice, sessionId })
+        return { queued: true, sessionId, started: false, reason: notice }
+      }
       detachCreationTools(ctx, sessionId)
       const notice = '已取消创建智能体，没有写入智能体。'
       routeCtx.emit({ event: 'agent/notice', text: notice, sessionId })
@@ -310,8 +324,14 @@ export async function sendToAgent(
     }
 
     // ⑦ 单技能草稿的裸取消只清技能流程;双草稿已在④拒绝,智能体单草稿仍走既有取消分支。
+    // 与显式取消同口径:低层返回 false 即草稿未删,如实报失败并保留工具。
     if (!agentDraft && skillDraft && bareCreationCancel) {
-      await skillHost!.cancel(sessionId)
+      const cancelled = await skillHost!.cancel(sessionId)
+      if (!cancelled) {
+        const notice = '已取消创建技能失败，草稿仍保留，请重试。'
+        routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+        return { queued: true, sessionId, started: false, reason: notice }
+      }
       detachSkillCreationTools(ctx, sessionId)
       const notice = '已取消创建技能，没有写入技能。'
       routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })

@@ -32,6 +32,7 @@ import { dispatchAt } from '../../src/huaanwork-host/agent-invoke.ts'
 import {
   attachSkillCreationTools,
   createSkillCreationHost,
+  detachSkillCreationTools,
   injectCreateSkill,
   setSkillCreationHost,
 } from '../../src/huaanwork-host/skill-creation.ts'
@@ -62,6 +63,10 @@ vi.mock('../../src/huaanwork-host/agent-package/creation.ts', async (importOrigi
     attachCreationTools: vi.fn((ctx: Parameters<typeof actual.attachCreationTools>[0], sessionId: string) =>
       actual.attachCreationTools(ctx, sessionId),
     ),
+    // 取消失败必须保留工具:卸载函数同样要能被计数,否则只能间接推断。
+    detachCreationTools: vi.fn((ctx: Parameters<typeof actual.detachCreationTools>[0], sessionId: string) =>
+      actual.detachCreationTools(ctx, sessionId),
+    ),
   }
 })
 
@@ -74,6 +79,9 @@ vi.mock('../../src/huaanwork-host/skill-creation.ts', async (importOriginal) => 
     ),
     attachSkillCreationTools: vi.fn((ctx: Parameters<typeof actual.attachSkillCreationTools>[0], sessionId: string) =>
       actual.attachSkillCreationTools(ctx, sessionId),
+    ),
+    detachSkillCreationTools: vi.fn((ctx: Parameters<typeof actual.detachSkillCreationTools>[0], sessionId: string) =>
+      actual.detachSkillCreationTools(ctx, sessionId),
     ),
   }
 })
@@ -780,6 +788,10 @@ function lastEventText(events: RpcEvent[]): string {
   return last !== undefined && 'text' in last && typeof last.text === 'string' ? last.text : ''
 }
 
+function eventTexts(events: RpcEvent[]): string[] {
+  return events.flatMap((event) => ('text' in event && typeof event.text === 'string' ? [event.text] : []))
+}
+
 function enableUserSkill(root: string, name: string): void {
   mkdirSync(join(root, 'skills', name), { recursive: true })
   writeFileSync(
@@ -1087,5 +1099,83 @@ describe('agent and skill creation routing', () => {
     expect(existsSync(harness.skillDraftPath)).toBe(false)
     expect(lastEventText(harness.events)).toContain('已取消创建技能')
     expect(harness.packageHost.cancel).not.toHaveBeenCalled()
+  })
+
+  // 取消是删除磁盘草稿的真操作,低层把 rmSync 失败吞成 false。假值必须如实报失败:
+  // 不报「已取消」、不卸工具、草稿仍在——否则损坏草稿的唯一逃生口会报「已取消」却
+  // 让互斥守卫继续挡住每一轮,用户陷入重试循环。
+  const failedSkillCancel = '已取消创建技能失败，草稿仍保留，请重试。'
+  const failedAgentCancel = '已取消创建智能体失败，草稿仍保留，请重试。'
+
+  test('reports a failed explicit skill cancel without claiming the draft is gone', async () => {
+    const harness = routingHarness({ skillDraft: true })
+    const cancel = vi.fn(async () => false)
+    harness.skillHost.cancel = cancel
+
+    const result = await harness.send({ text: '/create-skill cancel' })
+
+    expect(result).toEqual({
+      queued: true,
+      sessionId: ROUTING_SESSION_ID,
+      started: false,
+      reason: failedSkillCancel,
+    })
+    expect(cancel).toHaveBeenCalledWith(ROUTING_SESSION_ID, { explicit: true })
+    expect(harness.events).toContainEqual({
+      event: 'skill/notice',
+      text: failedSkillCancel,
+      sessionId: ROUTING_SESSION_ID,
+    })
+    expect(eventTexts(harness.events).some((text) => text.includes('没有写入技能'))).toBe(false)
+    expect(detachSkillCreationTools).not.toHaveBeenCalled()
+    expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
+  })
+
+  test('reports a failed explicit agent cancel without claiming the draft is gone', async () => {
+    const harness = routingHarness({ agentDraft: true })
+    const cancel = vi.fn(async () => false)
+    harness.packageHost.cancel = cancel
+
+    const result = await harness.send({ text: '/create-agent cancel' })
+
+    expect(result).toEqual({
+      queued: true,
+      sessionId: ROUTING_SESSION_ID,
+      started: false,
+      reason: failedAgentCancel,
+    })
+    expect(cancel).toHaveBeenCalledWith(ROUTING_SESSION_ID, { explicit: true })
+    expect(harness.events).toContainEqual({
+      event: 'agent/notice',
+      text: failedAgentCancel,
+      sessionId: ROUTING_SESSION_ID,
+    })
+    expect(eventTexts(harness.events).some((text) => text.includes('没有写入智能体'))).toBe(false)
+    expect(detachCreationTools).not.toHaveBeenCalled()
+    expect(readFileSync(harness.agentDraftPath, 'utf8')).toBe(harness.originalAgentDraft)
+  })
+
+  test('reports a failed bare skill cancel without claiming the draft is gone', async () => {
+    const harness = routingHarness({ skillDraft: true })
+    const cancel = vi.fn(async () => false)
+    harness.skillHost.cancel = cancel
+
+    const result = await harness.send({ text: '取消' })
+
+    expect(result).toEqual({
+      queued: true,
+      sessionId: ROUTING_SESSION_ID,
+      started: false,
+      reason: failedSkillCancel,
+    })
+    expect(cancel).toHaveBeenCalledWith(ROUTING_SESSION_ID)
+    expect(harness.events).toContainEqual({
+      event: 'skill/notice',
+      text: failedSkillCancel,
+      sessionId: ROUTING_SESSION_ID,
+    })
+    expect(eventTexts(harness.events).some((text) => text.includes('没有写入技能'))).toBe(false)
+    expect(detachSkillCreationTools).not.toHaveBeenCalled()
+    expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
   })
 })
