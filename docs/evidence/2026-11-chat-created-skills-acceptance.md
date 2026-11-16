@@ -99,6 +99,24 @@
 
 **结论**：第 4 项通过；第 1–3 项在当前构建失败/阻塞；第 5 项对正式流程未验证。§12.2 人类验收仍未完成，且在观察 2 解决并用真人流程复走之前，不应把本功能标记为验收通过或合入发布。
 
+## 4.2 空响应根因排查（2026-11-16，systematic-debugging，未改动产品代码）
+
+用本地转发代理抓取应用真实上游请求/响应，并在 policy / present-as / 工具 execute / attach 四个边界加临时日志（排查后已全部还原），复现并逐层定位：
+
+1. **上游正常**：DeepSeek（OpenAI `/chat/completions` 与 Anthropic `/v1/messages` 两种协议）对同一工具 schema 均返回合法 `skill_propose` 工具调用（`finish_reason=tool_calls`，参数完整）。直连探针与代理抓包一致。
+2. **注册与可见性正常**：`tools.schemas()` 含创建工具（`schemasHasCs=true`）；attach 后会话附件白名单含创建工具（`extraHasCs=true`），present-as restrict 的 `allowed` 随之包含它。即工具“已注册、已对模型可见、在执行白名单内”。
+3. **丢弃发生在 LLM→agent-loop 转换层**：会话日志中创建工具**没有任何 `tool/call`**，policy `toToolCall` 与工具 `execute` 均未被触发；上游返回的 tool-call 块在进入 agent-loop 前被丢弃。content=0 时表现为 `EMPTY_RESPONSE`，有文本时表现为“只有文本、工具调用消失”。
+4. **对照**：同一构建/同一模型下 `agent_propose`、`bash`、`read`、`request_input` 均正常执行；把工具改名为 `cs_propose`/`cs_commit`（排除 `skill_` 前缀冲突）**仍被丢弃**。
+
+**根因判定**：丢弃位于上游 harness 的 LLM 流→工具调用归一化层（`@deepseek-ai/dsh-llm` / `@earendil-works/pi-ai`，处于 `node_modules`/`deepseek-harness` 子模组），对“会话附件挂载的创建类工具调用”选择性丢弃。该层不在 `dsh-plugin-huaanwork/` 可编辑面内（AGENTS.md 禁止改子模组），**无法在本分支内修复**。
+
+**可达成的路径（需 owner 裁定）**：
+- (a) 立一个独立的上游同步/补丁任务，修复或升级 pinned `deepseek-harness` 的工具调用归一化（按 AGENTS.md 选择性评审流程），再复走真机；
+- (b) 若上游有兼容补丁缝（类似 market 的 compatibility patch），经 owner 批准后以补丁方式修正该层；
+- (c) 在上游修复前，本功能真机第 1–3 项保持 BLOCKED，不宣称验收通过。
+
+排查期间的临时改名与日志已全部 `git restore` 还原，工作区产品代码与 `d881bde5de` 一致；含密钥的临时 profile 与代理脚本已删除。
+
 ## 5. 残余与裁定（移交 owner）
 
 - **F5 停放**：先前已存在的同名用户技能 `create-skill` 会被内部入口遮蔽且无法启停（与 `create-agent` 先例一致）。任何迁移/重命名裁定属于 owner，本分支未处理。
