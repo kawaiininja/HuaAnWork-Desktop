@@ -865,6 +865,20 @@ test("agent package tools survive the static tool filter", () => {
   assert.equal(isRegisteredToolName("agent_unknown"), false);
 });
 
+test("skill creation tools survive the static tool filter", () => {
+  for (const name of ["skill_propose", "skill_commit"]) {
+    assert.equal(isRegisteredToolName(name), true, name);
+  }
+  // 上游已返回原生工具调用时,不得因适配器白名单遗漏而退化成 EMPTY_RESPONSE。
+  const payloads = [
+    JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "s1", function: { name: "skill_propose", arguments: "{\"name\":\"daily-summary\"}" } }] } }],
+    }),
+  ];
+  assert.equal(parseSseToolCalls(payloads, isRegisteredToolName).length, 1);
+  assert.equal(isRegisteredToolName("skill_unknown"), false);
+});
+
 describe("session-bound model selection", () => {
   function profileWithSettings(settings: Record<string, unknown>): string {
     const root = mkdtempSync(join(tmpdir(), "huaanwork-session-model-"));
