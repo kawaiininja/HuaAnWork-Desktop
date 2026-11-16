@@ -884,6 +884,10 @@ function removeDraft(profileDir: string, sessionId: string): void {
   }
 }
 
+/**
+ * 与 `skill-creation-drafts.ts` 的 `hasAgentCreationDraftOnDisk` 同路径
+ * (`{profileDir}/agents/.drafts/{sessionId}.json`);任一处变更必须同步另一处。
+ */
 function draftPath(profileDir: string, sessionId: string): string {
   return join(agentPackagesRoot(profileDir), DRAFTS_DIR, `${sessionId}.json`)
 }
