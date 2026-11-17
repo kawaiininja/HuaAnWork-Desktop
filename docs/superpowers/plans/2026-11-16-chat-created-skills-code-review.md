@@ -285,3 +285,31 @@ Kimi-M-1 可随修复波一并处理或由 owner 明确停放；停放不改变�
 2. 反证同进程乱序结果仍由首次成功 callId 驱动解绑，而新进程首个重放具有自己的结果后解绑；检查删除/重建同 sessionId 不继承任一技能或智能体创建附件。
 3. 确认只有取消成功的结构化终态消费卡片，失败/一般 notice 不误消费；consumed 卡片三个按钮均不可再触发发送。
 4. 核对最终提交包含实现、测试、计划口径及历史证据映射，并复跑干净终树根门禁。以上事项完成后，由复审方独立给出合并结论。
+
+---
+
+## 九、独立复审结论与 Minor 停放（2026-11-17）
+
+> 复审方为独立只读评审代理，未参与 §7 审核或 §8 修复；除本节落档外未修改仓库文件。复审范围为 `e4f6c0b123b067f9c4cb0aa0f76e934683374306..33f7823f6fef7684510bb162d314a4389080e4b6`。
+
+### 9.1 复审结论
+
+**Approve：0 Critical / 0 Important / 1 Minor。**
+
+- §7 三项问题均经源码语义反证与行为级测试双重确认闭环：Kimi-I-1 的首次创建清除与重放保留语义、Kimi-I-2 的新进程重放解绑与删除会话附件清理、Kimi-M-1 的结构化取消终态与卡片消费。
+- 评审方实际运行 7 个聚焦 spec：`skills-host` 31/31、`skill-creation-tools` 15/15、`sessions` 98/98、`agent-package-creation` 58/58、`appWiring` 92/92、`skill-confirm-card` 5/5、`test-port-mapping` 1/1，合计 **300/300 通过**。
+- 评审方核验提交后干净终树根门禁日志 `/tmp/hw-chat-created-skills-rereview-20261117.log`：桌面包 **299 files passed / 4 skipped，4238 tests passed / 15 skipped**，其余根门禁通过。
+- `deepseek-harness` 对该范围零差异；复审时工作区干净。
+
+### 9.2 停放项（Review-M-1，非阻断）
+
+- **位置：** `dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts:591`、`dsh-plugin-huaanwork/src/client-huaanwork/App.tsx:1915`。
+- **问题：** `skill/notice` 的 `terminal:"cancelled"` 与 `sessionId` 在类型上相互独立。若未来新增的 terminal 通知忘带 `sessionId`，客户端会经当前活跃标签回落并可能消费错误标签的活动确认卡。
+- **当前不可触发的理由：** 全仓当前只有 `sessions.ts` 的两条取消成功路径携带 `terminal:"cancelled"`，且均显式携带 `sessionId`。
+- **裁定：** owner 2026-11-17 决定按非阻断项停放，不在本分支修复。后续处理建议是收紧联合类型（携带 `terminal` 的分支要求 `sessionId: string`），或在客户端接线处忽略缺 `sessionId` 的 terminal 通知。
+- **停放范围：** 不改变 §9.1 的 Approve 结论，不构成合并阻断。
+
+### 9.3 当前状态
+
+- 修复提交：`33f7823f6fef7684510bb162d314a4389080e4b6`。
+- 本节及后续文档提交不改变产品代码；分支仍未推送。
