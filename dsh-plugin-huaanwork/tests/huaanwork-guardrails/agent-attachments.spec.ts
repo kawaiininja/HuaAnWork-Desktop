@@ -10,6 +10,9 @@ import {
   emptyAttachments,
   isHostAttached,
   isMcpAttached,
+  registerAttachmentCleanup,
+  releaseAttachmentPending,
+  trackSessionPendingDetach,
 } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 
 test("emptyAttachments creates fresh independent maps", () => {
@@ -89,4 +92,28 @@ test("agentPackageChildAttachmentNames keeps only enabled package tools plus MCP
     "agent_skill_run",
   ]);
   assert.deepEqual(agentPackageChildAttachmentNames(["read"]), []);
+});
+
+test("trackSessionPendingDetach clears only the released session and unsubscribes on dispose", () => {
+  const maps = emptyAttachments();
+  const pending = new Map<string, string>([
+    ["call-a1", "session-a"],
+    ["call-a2", "session-a"],
+    ["call-b1", "session-b"],
+  ]);
+  const stop = trackSessionPendingDetach(maps, pending);
+  const customCalls: string[] = [];
+  const stopCustom = registerAttachmentCleanup(maps, (sessionId) => customCalls.push(sessionId));
+
+  releaseAttachmentPending(maps, "session-a");
+  assert.deepEqual([...pending.entries()], [["call-b1", "session-b"]]);
+  assert.deepEqual(customCalls, ["session-a"]);
+
+  stop();
+  stopCustom();
+  releaseAttachmentPending(maps, "session-b");
+  assert.deepEqual([...pending.entries()], [["call-b1", "session-b"]]);
+  assert.deepEqual(customCalls, ["session-a"]);
+
+  assert.doesNotThrow(() => releaseAttachmentPending(undefined, "session-a"));
 });

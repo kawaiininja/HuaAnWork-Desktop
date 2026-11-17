@@ -2,7 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { sessionIdOfAgentRef } from '@huaanwork/policy/channels'
 
 import type { RpcEvent, SkillConfirmCard } from '../client-huaanwork/rpc-types.ts'
-import type { AttachmentMaps } from './agent-attachments.ts'
+import { trackSessionPendingDetach, type AttachmentMaps } from './agent-attachments.ts'
 import {
   CorruptSkillCreationDraftError,
   contentPreviewOf,
@@ -213,6 +213,7 @@ export function registerSkillCreationTools(ctx: unknown, host: SkillCreationHost
   const c = ctx as ToolContext
   if (!c.tools?.register) return () => undefined
   const pendingDetach = new Map<string, string>()
+  const stopCleanup = trackSessionPendingDetach(c.huaanworkAttachments, pendingDetach)
   const stopToolResults = c.huaanworkOnToolResult?.((exec) => {
     const sessionId = exec.callId === undefined ? undefined : pendingDetach.get(exec.callId)
     if (sessionId === undefined || exec.callId === undefined) return
@@ -225,6 +226,7 @@ export function registerSkillCreationTools(ctx: unknown, host: SkillCreationHost
   ]
   return () => {
     stopToolResults?.()
+    stopCleanup()
     for (const dispose of disposers.reverse()) dispose()
   }
 }

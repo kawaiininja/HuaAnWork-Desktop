@@ -92,6 +92,7 @@ import {
   authStatus,
 } from './auth.ts'
 import {
+  discardSessionCreationDrafts,
   sessionAnswerApproval,
   sessionAnswerInput,
   sessionCancel,
@@ -231,6 +232,12 @@ export function assertProjectNotDeleting(id: string): void {
 /** 自动化在途/活跃快照:`automationCollector ∪ TurnScheduler`(只读,用于删除预检)。 */
 function activeAutomationSessionIds(scheduler: TurnScheduler | undefined): Set<string> {
   return new Set([...automationCollector.keys(), ...(scheduler?.activeSessionIds() ?? [])])
+}
+
+/** 级联删除会话目录前先释放运行态并移除同 sessionId 的两类创建草稿。 */
+function releaseAndDiscardSession(ctx: RouteContext, sessionId: string, caller: string): void {
+  releaseSessionRuntime(ctx.runtimeCtx, sessionId)
+  discardSessionCreationDrafts(ctx.profileDir, sessionId, ctx.logger, caller)
 }
 
 /** 删除自动化前的全量预检:在途轮、已准入未入队、目标会话的活跃快照(规格 §9.1)。 */
@@ -1320,11 +1327,11 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         for (const automation of doomed) scheduler?.clearAdmissionSkip(automation.id)
         // 逐项复用自动化自己的可重试锚点顺序(会话 → 跨项目自动 Task → runs/audit → 注册项)。
         await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'), (sessionId) =>
-          releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+          releaseAndDiscardSession(ctx, sessionId, 'project.remove'),
         )
         const cascadedSessionIds = await removeTasksOfProject(ctx.profileDir, projectId)
-        // 与 session.remove 同一运行态释放:删文件前先摘掉卡片、live agent、子会话与计划目标。
-        for (const sessionId of cascadedSessionIds) releaseSessionRuntime(ctx.runtimeCtx, sessionId)
+        // 与 session.remove 同一运行态与草稿释放:删文件前先摘掉卡片、live agent、子会话、计划目标与创建草稿。
+        for (const sessionId of cascadedSessionIds) releaseAndDiscardSession(ctx, sessionId, 'project.remove')
         await removeSessionFilesById(join(ctx.dshHome, 'sessions'), cascadedSessionIds)
         // 项目锚点最后删:上面的子级联都可重试,重试时项目仍在。
         const removed = await removeProject(ctx.profileDir, projectId)
@@ -1466,9 +1473,9 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const release = beginAutomationDeletion(id)
       try {
         await assertAutomationRemovable(ctx, id, scheduler)
-        // 运行会话随任务一并删除:删日志前先释放它的运行态(与 project.remove 同一接线段)。
+        // 运行会话随任务一并删除:删日志前先释放它的运行态与创建草稿(与 session.remove 同口径)。
         await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
-          releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+          releaseAndDiscardSession(ctx, sessionId, 'automation.remove'),
         )
       } finally {
         release()
@@ -1502,7 +1509,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
       return await deleteAutomationRun(ctx.profileDir, id, runId, {
         sessionsRoot: join(ctx.dshHome, 'sessions'),
-        releaseSession: (sessionId) => releaseSessionRuntime(ctx.runtimeCtx, sessionId),
+        releaseSession: (sessionId) => releaseAndDiscardSession(ctx, sessionId, 'automation.deleteRun'),
         activeSessionIds: new Set([...automationCollector.keys(), ...(scheduler?.activeSessionIds() ?? [])]),
       })
     }),
@@ -1574,7 +1581,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         ctx.profileDir,
         new Set([...automationCollector.keys(), ...(scheduler?.activeSessionIds() ?? [])]),
         join(ctx.dshHome, 'sessions'),
-        { releaseSession: (sessionId) => releaseSessionRuntime(ctx.runtimeCtx, sessionId) },
+        { releaseSession: (sessionId) => releaseAndDiscardSession(ctx, sessionId, 'automation.pruneSessions') },
       )
     }),
   }, // Task 4 (M4)
@@ -1625,7 +1632,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       }
       const removedTask = await removeTask(ctx.profileDir, id)
       if (removedTask.sessionId) {
-        releaseSessionRuntime(ctx.runtimeCtx, removedTask.sessionId)
+        releaseAndDiscardSession(ctx, removedTask.sessionId, 'task.remove')
         await removeSessionFilesById(join(ctx.dshHome, 'sessions'), [removedTask.sessionId])
       }
       return { removed: true }

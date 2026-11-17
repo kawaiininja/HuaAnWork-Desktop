@@ -20,15 +20,15 @@ const CARD: SkillConfirmCardData = {
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
-async function mount(card: SkillConfirmCardData = CARD, disabled = false) {
+async function mount(card: SkillConfirmCardData = CARD, disabled = false, unavailable = false) {
   const handlers = { onConsent: vi.fn(), onRevise: vi.fn(), onCancel: vi.fn() };
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
   await act(async () => {
-    root!.render(createElement(SkillConfirmCard, { card, disabled, ...handlers }));
+    root!.render(createElement(SkillConfirmCard, { card, disabled, unavailable, ...handlers }));
   });
-  return { view: container, ...handlers };
+  return { view: container, root, ...handlers };
 }
 
 function buttonByText(view: HTMLElement, text: string): HTMLButtonElement | undefined {
@@ -110,5 +110,42 @@ describe("SkillConfirmCard", () => {
     expect(onRevise).not.toHaveBeenCalled();
     expect(onCancel).not.toHaveBeenCalled();
     expect(view.textContent).toContain("已处理");
+  });
+
+  it("disables actions without claiming consumed while the host is unavailable, then recovers", async () => {
+    const mounted = await mount(CARD, false, true);
+
+    for (const label of ["确认创建", "继续修改", "取消"]) {
+      const button = buttonByText(mounted.view, label);
+      expect(button?.disabled).toBe(true);
+      await act(async () => {
+        button?.click();
+      });
+    }
+    expect(mounted.onConsent).not.toHaveBeenCalled();
+    expect(mounted.onRevise).not.toHaveBeenCalled();
+    expect(mounted.onCancel).not.toHaveBeenCalled();
+    expect(mounted.view.textContent).not.toContain("已处理");
+    expect(mounted.view.textContent).toContain("不可用");
+
+    await act(async () => {
+      mounted.root.render(
+        createElement(SkillConfirmCard, {
+          card: CARD,
+          disabled: false,
+          unavailable: false,
+          onConsent: mounted.onConsent,
+          onRevise: mounted.onRevise,
+          onCancel: mounted.onCancel,
+        }),
+      );
+    });
+    for (const label of ["确认创建", "继续修改", "取消"]) {
+      expect(buttonByText(mounted.view, label)?.disabled).toBe(false);
+    }
+    await act(async () => {
+      buttonByText(mounted.view, "确认创建")?.click();
+    });
+    expect(mounted.onConsent).toHaveBeenCalledTimes(1);
   });
 });

@@ -3724,4 +3724,50 @@ describe('session.send 调度器接线', () => {
     expect(h.scheduler.activeTurnCount()).toBe(0)
     expect(h.releaseCalls).toEqual(['s1'])
   })
+
+  test('task.remove and project.remove discard both creation drafts without touching unrelated sessions', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const taskSession = 'huaanwork-task-draft-del'
+    const projectSession = 'huaanwork-project-draft-del'
+    const keepSession = 'huaanwork-keep-draft'
+    for (const sessionId of [taskSession, projectSession]) {
+      writePersistedSession(routeCtx.dshHome, sessionId, routeCtx.workspaceRoot.current)
+    }
+    writeFileSync(join(root, 'tasks.json'), JSON.stringify({
+      tasks: [
+        { id: 't1', projectId: 'p1', name: 'T1', createdAt: 1, sessionId: taskSession },
+        { id: 't2', projectId: 'p2', name: 'T2', createdAt: 2, sessionId: projectSession },
+      ],
+    }))
+    writeFileSync(join(root, 'projects.json'), JSON.stringify({
+      projects: [{ id: 'p2', name: 'P2', root: join(root, 'p2'), createdAt: 1 }],
+    }))
+    mkdirSync(join(root, 'skill-creation-drafts'), { recursive: true })
+    mkdirSync(join(root, 'agents', '.drafts'), { recursive: true })
+    const skillDraftFile = (sessionId: string) => join(root, 'skill-creation-drafts', `${sessionId}.json`)
+    const agentDraftFile = (sessionId: string) => join(root, 'agents', '.drafts', `${sessionId}.json`)
+    for (const sessionId of [taskSession, projectSession, keepSession]) {
+      writeFileSync(skillDraftFile(sessionId), '{}', 'utf8')
+      writeFileSync(agentDraftFile(sessionId), '{}', 'utf8')
+    }
+
+    const invoke = async (method: string, body: unknown) => {
+      const route = ROUTE_TABLE.find((entry) => entry.method === method)
+      if (!route) throw new Error(`missing route ${method}`)
+      return route.handler({ params: {}, body, query: new URLSearchParams() }, routeCtx)
+    }
+
+    await invoke('task.remove', { id: 't1' })
+    expect(existsSync(skillDraftFile(taskSession))).toBe(false)
+    expect(existsSync(agentDraftFile(taskSession))).toBe(false)
+    expect(existsSync(skillDraftFile(keepSession))).toBe(true)
+    expect(existsSync(agentDraftFile(keepSession))).toBe(true)
+
+    await invoke('project.remove', { projectId: 'p2' })
+    expect(existsSync(skillDraftFile(projectSession))).toBe(false)
+    expect(existsSync(agentDraftFile(projectSession))).toBe(false)
+    expect(existsSync(skillDraftFile(keepSession))).toBe(true)
+    expect(existsSync(agentDraftFile(keepSession))).toBe(true)
+  })
 })

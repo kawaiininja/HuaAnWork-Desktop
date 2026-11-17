@@ -1924,4 +1924,60 @@ describe('automation deletion anchor and guard (Task 7)', () => {
       expect(await recentRuns(profileDir, automation.id)).toEqual([])
     },
   )
+
+  test('automation removal routes discard skill and agent creation drafts for deleted sessions', async () => {
+    const dshHome = makeHome()
+    const profileDir = join(dshHome, 'profiles', 'huaanwork')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(join(profileDir, 'skill-creation-drafts'), { recursive: true })
+    mkdirSync(join(profileDir, 'agents', '.drafts'), { recursive: true })
+
+    const a1 = await createAutomation(profileDir, normalizeAutomationInput(agentInput(), T0), T0)
+    const a2 = await createAutomation(profileDir, normalizeAutomationInput(agentInput(), T0), T0)
+    const sDeleteRun = `huaanwork-auto-${a1.id}-r1`
+    const sRemoveAuto = `huaanwork-auto-${a2.id}-r2`
+    const sPrune = `huaanwork-auto-${a1.id}-stale`
+    const sKeep = 'unrelated-session'
+    for (const sid of [sDeleteRun, sRemoveAuto, sPrune]) {
+      mkdirSync(join(dshHome, 'sessions', 'cwd-x', sid), { recursive: true })
+    }
+    await appendRun(profileDir, a1.id, runSummary('r1', { endedAt: T0 + 10, sessionId: sDeleteRun }))
+    await appendRun(profileDir, a2.id, runSummary('r2', { endedAt: T0 + 11, sessionId: sRemoveAuto }))
+
+    const skillDraft = (sid: string) => join(profileDir, 'skill-creation-drafts', `${sid}.json`)
+    const agentDraft = (sid: string) => join(profileDir, 'agents', '.drafts', `${sid}.json`)
+    for (const sid of [sDeleteRun, sRemoveAuto, sPrune, sKeep]) {
+      writeFileSync(skillDraft(sid), '{}', 'utf8')
+      writeFileSync(agentDraft(sid), '{}', 'utf8')
+    }
+
+    const ctx = {
+      dshHome,
+      profileDir,
+      workspaceRoot: { current: dshHome },
+      emit: () => {},
+      logger: () => {},
+      requestRestart: async () => false,
+    }
+    const callRoute = async (method: string, body: Record<string, unknown>) => {
+      const route = ROUTE_TABLE.find((entry) => entry.method === method)
+      if (!route) throw new Error(`missing route ${method}`)
+      return route.handler({ params: {}, body, query: new URLSearchParams() }, ctx)
+    }
+
+    await callRoute('automation.deleteRun', { id: a1.id, runId: 'r1' })
+    expect(existsSync(skillDraft(sDeleteRun))).toBe(false)
+    expect(existsSync(agentDraft(sDeleteRun))).toBe(false)
+
+    await callRoute('automation.remove', { id: a2.id })
+    expect(existsSync(skillDraft(sRemoveAuto))).toBe(false)
+    expect(existsSync(agentDraft(sRemoveAuto))).toBe(false)
+
+    await callRoute('automation.pruneSessions', {})
+    expect(existsSync(skillDraft(sPrune))).toBe(false)
+    expect(existsSync(agentDraft(sPrune))).toBe(false)
+
+    expect(existsSync(skillDraft(sKeep))).toBe(true)
+    expect(existsSync(agentDraft(sKeep))).toBe(true)
+  })
 })

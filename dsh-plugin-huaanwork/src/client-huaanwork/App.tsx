@@ -3463,6 +3463,7 @@ export default function App() {
   }
 
   const blocked = sidecarDead;
+  const hostUnavailable = blocked || hostPhase !== "ok";
   /**
    * 运行对话标签仅在「这一轮自动化运行进行中」锁输入；运行结束后可继续对话（规格 L544 修订，
    * 发送路径会自动对齐工作区到运行会话目录）。判据按 runId：同一任务的新一轮开跑后，
@@ -3855,6 +3856,7 @@ export default function App() {
                     key={row.item.id}
                     item={row.item}
                     blocked={blocked}
+                    hostUnavailable={hostUnavailable}
                     subagent={subagentChat}
                     onAnswer={answer}
                     onInput={answerInput}
@@ -4844,6 +4846,7 @@ type SubagentChatView = {
 function ChatRow({
   item,
   blocked,
+  hostUnavailable,
   subagent,
   onAnswer,
   onInput,
@@ -4859,6 +4862,7 @@ function ChatRow({
 }: {
   item: Exclude<ChatItem, { kind: "tool" }>;
   blocked: boolean;
+  hostUnavailable: boolean;
   subagent: SubagentChatView;
   onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
   onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
@@ -4957,6 +4961,7 @@ function ChatRow({
       <SkillConfirmCardView
         card={item.card}
         disabled={item.consumed === true}
+        unavailable={hostUnavailable}
         onConsent={() => onSkillConsent?.()}
         onRevise={() => onSkillRevise?.()}
         onCancel={() => onSkillCancel?.()}

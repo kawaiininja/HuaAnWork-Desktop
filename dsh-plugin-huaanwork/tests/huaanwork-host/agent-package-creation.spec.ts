@@ -15,6 +15,10 @@ import {
   registerAgentPackageCreationTools,
 } from '../../src/huaanwork-guardrails/agent-package-tools.ts'
 import {
+  SKILL_COMMIT_TOOL,
+  registerSkillCreationTools,
+} from '../../src/huaanwork-guardrails/skill-creation-tools.ts'
+import {
   createAgentPackageHost,
   type AgentPackageHost,
 } from '../../src/huaanwork-host/agent-package/host.ts'
@@ -42,6 +46,7 @@ import { INTERNAL_BUNDLED_SKILLS, listBundledSkills } from '../../src/huaanwork-
 import { setUserSkillToggle } from '../../src/huaanwork-host/skill-local-state.ts'
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
 import {
+  releaseSessionRuntime,
   sendToAgent,
   sessionSend,
   setAgentPackageHost,
@@ -1004,6 +1009,8 @@ describe('agent and skill creation routing', () => {
       harness.events.filter((event) => event.event === 'skill/notice' && event.text.includes('请先完成')),
     ).toHaveLength(0)
     expect(injectCreateSkill).not.toHaveBeenCalled()
+    expect(attachSkillCreationTools).not.toHaveBeenCalled()
+    expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
   })
 
   test('rejects bare cancel, propose and commit while both drafts exist', async () => {
@@ -1339,5 +1346,129 @@ describe('agent and skill creation routing', () => {
     expect(eventTexts(harness.events).some((text) => text.includes('没有写入技能'))).toBe(false)
     expect(detachSkillCreationTools).not.toHaveBeenCalled()
     expect(readFileSync(harness.skillDraftPath, 'utf8')).toBe(harness.originalSkillDraft)
+  })
+
+  test('detaches opposite creation tools when switching creation type before any draft is written', async () => {
+    const first = routingHarness()
+    await first.send({ text: '/create-agent' })
+    expect(isAgentToolAttached(first.maps, ROUTING_SESSION_ID, AGENT_PROPOSE_TOOL)).toBe(true)
+    expect(isAgentToolAttached(first.maps, ROUTING_SESSION_ID, AGENT_COMMIT_TOOL)).toBe(true)
+
+    const switchedToSkill = await first.send({ text: '/create-skill 帮我总结日报' })
+    expect(switchedToSkill.started).toBe(true)
+    expect(isAgentToolAttached(first.maps, ROUTING_SESSION_ID, AGENT_PROPOSE_TOOL)).toBe(false)
+    expect(isAgentToolAttached(first.maps, ROUTING_SESSION_ID, AGENT_COMMIT_TOOL)).toBe(false)
+    expect(isAgentToolAttached(first.maps, ROUTING_SESSION_ID, 'skill_propose')).toBe(true)
+    expect(isAgentToolAttached(first.maps, ROUTING_SESSION_ID, 'skill_commit')).toBe(true)
+
+    const second = routingHarness()
+    await second.send({ text: '/create-skill' })
+    expect(isAgentToolAttached(second.maps, ROUTING_SESSION_ID, 'skill_propose')).toBe(true)
+    expect(isAgentToolAttached(second.maps, ROUTING_SESSION_ID, 'skill_commit')).toBe(true)
+
+    // 失败的 update 入口未进入智能体创建、也未同时挂载两套工具;切入有效的 /create-agent 后再卸除技能工具。
+    const missingUpdate = await second.send({ text: '/create-agent update missing-agent' })
+    expect(missingUpdate.started).toBe(false)
+    expect(isAgentToolAttached(second.maps, ROUTING_SESSION_ID, AGENT_PROPOSE_TOOL)).toBe(false)
+    expect(isAgentToolAttached(second.maps, ROUTING_SESSION_ID, 'skill_propose')).toBe(true)
+
+    const switchedToAgent = await second.send({ text: '/create-agent 帮我做周报助手' })
+    expect(switchedToAgent.started).toBe(true)
+    expect(isAgentToolAttached(second.maps, ROUTING_SESSION_ID, 'skill_propose')).toBe(false)
+    expect(isAgentToolAttached(second.maps, ROUTING_SESSION_ID, 'skill_commit')).toBe(false)
+    expect(isAgentToolAttached(second.maps, ROUTING_SESSION_ID, AGENT_PROPOSE_TOOL)).toBe(true)
+    expect(isAgentToolAttached(second.maps, ROUTING_SESSION_ID, AGENT_COMMIT_TOOL)).toBe(true)
+  })
+
+  test('releaseSessionRuntime drops pendingDetach entries so reused sessionIds ignore late results and keep fresh replays', async () => {
+    const maps = emptyAttachments()
+    const toolResultListeners = new Set<(exec: { callId?: string }) => void>()
+    const registered = new Map<string, { execute(args: unknown, exec: unknown): Promise<{ text: string }> }>()
+    const ctx = {
+      huaanworkAttachments: maps,
+      huaanworkEmit: () => undefined,
+      huaanworkOnToolResult: (listener: (exec: { callId?: string }) => void) => {
+        toolResultListeners.add(listener)
+        return () => toolResultListeners.delete(listener)
+      },
+      tools: {
+        register(definition: unknown) {
+          const tool = definition as { name: string; execute(args: unknown, exec: unknown): Promise<{ text: string }> }
+          registered.set(tool.name, tool)
+          return () => {
+            registered.delete(tool.name)
+          }
+        },
+      },
+    }
+    const emitToolResult = (callId: string) => {
+      for (const listener of [...toolResultListeners]) listener({ callId })
+    }
+
+    let skillCommits = 0
+    const skillHost = {
+      propose: async () => ({ ok: false as const, fieldErrors: [] }),
+      commit: async (_sessionId: string, draftId: string) => {
+        skillCommits += 1
+        return { ok: true as const, draftId, name: 'daily-summary', alreadyCommitted: skillCommits > 1 }
+      },
+      cancel: async () => true,
+      hasDraft: () => false,
+      lastUserText: () => '确认',
+      noteUserText: () => undefined,
+      noteCreationTurn: () => undefined,
+      describeDraft: () => undefined,
+    }
+    const disposeSkill = registerSkillCreationTools(ctx, skillHost)
+    const disposeAgent = registerAgentPackageCreationTools(
+      ctx,
+      fakeHost({
+        commit: async (_sessionId, draftId) => ({
+          ok: true,
+          draftId,
+          slug: 'weekly-report',
+          packagePath: '/tmp/agents/weekly-report',
+          card: {
+            mode: 'create',
+            displayName: '周报小助手',
+            slug: 'weekly-report',
+            description: '把一周工作整理成周报',
+            personaSummary: '写周报',
+            skillSummary: '无专属技能包',
+            tools: 'none',
+            toolLabel: '不要',
+            warning: '脚本将在本机沙箱中运行',
+            consentHint: '回复「可以」创建（默认关闭）；回复「取消」放弃。',
+          },
+          cardText: 'CARD TEXT',
+          alreadyCommitted: false,
+          mode: 'create',
+        }),
+      }),
+    )
+    try {
+      const exec = (callId: string) => ({ agent: { session: { id: 'work-1' } }, callId })
+      await registered.get(SKILL_COMMIT_TOOL)?.execute({ draftId: 'draft-skill-1' }, exec('old-skill-call'))
+      await registered.get(AGENT_COMMIT_TOOL)?.execute({ draftId: 'draft-agent-1' }, exec('old-agent-call'))
+
+      releaseSessionRuntime(ctx as unknown as SessionRuntimeContext, 'work-1')
+
+      attachSkillCreationTools(ctx, 'work-1')
+      emitToolResult('old-skill-call')
+      expect(isAgentToolAttached(maps, 'work-1', SKILL_COMMIT_TOOL)).toBe(true)
+
+      // 重建后若命中 alreadyCommitted 重放，不得被已释放会话的僵尸 pendingDetach 误判为「已有在途首次提交」。
+      await registered.get(SKILL_COMMIT_TOOL)?.execute({ draftId: 'draft-skill-1' }, exec('new-replay-call'))
+      expect(isAgentToolAttached(maps, 'work-1', SKILL_COMMIT_TOOL)).toBe(true)
+      emitToolResult('new-replay-call')
+      expect(isAgentToolAttached(maps, 'work-1', SKILL_COMMIT_TOOL)).toBe(false)
+
+      attachCreationTools(ctx, 'work-1')
+      emitToolResult('old-agent-call')
+      expect(isAgentToolAttached(maps, 'work-1', AGENT_COMMIT_TOOL)).toBe(true)
+    } finally {
+      disposeSkill()
+      disposeAgent()
+    }
   })
 })

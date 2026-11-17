@@ -8,12 +8,27 @@ export type SkillConfirmCardProps = {
   card: SkillConfirmCardData;
   /** 同标签已有更新的确认卡或成功卡时置真:历史旧卡不再可操作。 */
   disabled?: boolean;
+  /** sidecar 断连或宿主未就绪时临时禁用按钮，不把未处理的卡片标成「已处理」。 */
+  unavailable?: boolean;
   onConsent: () => void;
   onRevise: () => void;
   onCancel: () => void;
 };
 
-export default function SkillConfirmCard({ card, disabled = false, onConsent, onRevise, onCancel }: SkillConfirmCardProps) {
+export default function SkillConfirmCard({
+  card,
+  disabled = false,
+  unavailable = false,
+  onConsent,
+  onRevise,
+  onCancel,
+}: SkillConfirmCardProps) {
+  const buttonsDisabled = disabled || unavailable;
+  const hint = disabled
+    ? "这张确认卡已处理。"
+    : unavailable
+      ? "当前执行进程不可用，请等待恢复后再操作。"
+      : "点“确认创建”会通过当前会话发送「确认」，由宿主在下一轮写入技能。";
   const rows: Array<{ label: string; value: string }> = [
     { label: "名称", value: card.name },
     { label: "描述", value: card.description },
@@ -32,18 +47,16 @@ export default function SkillConfirmCard({ card, disabled = false, onConsent, on
           </div>
         ))}
       </dl>
-      <p className="hint">
-        {disabled ? "这张确认卡已处理。" : "点“确认创建”会通过当前会话发送「确认」，由宿主在下一轮写入技能。"}
-      </p>
+      <p className="hint">{hint}</p>
       <div className="skill-card-actions">
-        <button type="button" className="filter-tab" disabled={disabled} onClick={onRevise}>
+        <button type="button" className="filter-tab" disabled={buttonsDisabled} onClick={onRevise}>
           继续修改
         </button>
-        <button type="button" className="filter-tab" disabled={disabled} onClick={onCancel}>
+        <button type="button" className="filter-tab" disabled={buttonsDisabled} onClick={onCancel}>
           取消
         </button>
         <span className="composer-spacer" />
-        <button type="button" className="btn-dark" disabled={disabled} onClick={onConsent}>
+        <button type="button" className="btn-dark" disabled={buttonsDisabled} onClick={onConsent}>
           确认创建
         </button>
       </div>

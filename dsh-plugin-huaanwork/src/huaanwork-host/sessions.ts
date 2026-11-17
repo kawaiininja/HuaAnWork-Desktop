@@ -2,12 +2,17 @@ import { existsSync, statSync } from 'node:fs'
 import { readdir, rm, unlink } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-import type { AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
+import {
+  isAgentToolAttached,
+  releaseAttachmentPending,
+  type AttachmentMaps,
+} from '../huaanwork-guardrails/agent-attachments.ts'
 import { forgetConfirmedTarget, settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
 import { answerRouteInput, cancelRouteInput, clearInvalidRoute, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
 import {
   attachCreationTools,
+  CREATION_TOOLS,
   detectAgentCreationIntent,
   detectCreateAgentCommand,
   detachCreationTools,
@@ -26,6 +31,7 @@ import {
   detachSkillCreationTools,
   getSkillCreationHost,
   injectCreateSkill,
+  SKILL_CREATION_TOOLS,
 } from './skill-creation.ts'
 import { CorruptSkillCreationDraftError, discardSkillCreationDraft, hasAgentCreationDraftOnDisk } from './skill-creation-drafts.ts'
 import { invokeSkillText } from './skill-invoke.ts'
@@ -352,12 +358,14 @@ export async function sendToAgent(
     }
 
     // ⑧ 同类创建/继续创建才注入技能并挂工具;技能中心入口按 create,已有草稿按 continue。
-    // 双草稿普通聊天不得注入任一方。
+    // 双草稿普通聊天不得注入任一方。切换创建流程时即便对方还没写下草稿,也先卸除
+    // 其创建工具,确保智能体与技能创建工具不同时挂载(规格 §7 第 7 步)。
     if (skillHost && nlAllowed && !agentDraft && (requestedSkill || skillDraft)) {
       skillHost.noteCreationTurn(sessionId, text)
       // 原始斜杠命令的正文剥离 `/create-skill` 前缀后再注入;客户端拆包形态 text 已是正文。
       const skillEntryText = skillSlash !== null ? (skillSlash[1] ?? '').trim() : text
       text = injectCreateSkill(skillEntryText, skillDraft && !requestedSkill ? 'continue' : 'create')
+      detachOtherCreationTools(ctx, sessionId, CREATION_TOOLS, detachCreationTools)
       attachSkillCreationTools(ctx, sessionId)
     }
 
@@ -392,8 +400,9 @@ export async function sendToAgent(
         mode,
         agentIntent?.kind === 'update' ? agentIntent.slug : undefined,
       )
-      // 工具跨轮保持挂载,只在 commit 成功或取消时卸下(设计 §6.2):
+      // 工具跨轮保持挂载,只在 commit 成功、取消或改口进入另一类创建流程时卸下(设计 §6.2、§7):
       // 访谈首轮提出草稿前没有草稿,不能按「回合结束是否有草稿」判断。
+      detachOtherCreationTools(ctx, sessionId, SKILL_CREATION_TOOLS, detachSkillCreationTools)
       attachCreationTools(ctx, sessionId)
     }
 
@@ -732,6 +741,39 @@ function descendantSessionIds(sessionId: string): string[] {
   return collected
 }
 
+/** 若对侧创建工具仍挂在本会话上（未落盘草稿时改口切换），先卸除再挂本侧工具。 */
+function detachOtherCreationTools(
+  ctx: SessionRuntimeContext,
+  sessionId: string,
+  otherTools: readonly string[],
+  detach: (ctx: SessionRuntimeContext, sessionId: string) => void,
+): void {
+  if (!otherTools.some((name) => isAgentToolAttached(ctx.huaanworkAttachments, sessionId, name))) return
+  detach(ctx, sessionId)
+}
+
+/**
+ * 删除或级联清理会话时统一移除两类创建草稿；清理失败只记日志，
+ * 不让外层删除（会话/任务/项目/自动化）在日志已删后谎报失败。
+ */
+export function discardSessionCreationDrafts(
+  profileDir: string,
+  sessionId: string,
+  logger?: (message: string) => void,
+  caller = 'session.remove',
+): void {
+  try {
+    discardSkillCreationDraft(profileDir, sessionId)
+  } catch (error) {
+    logger?.(`${caller}: 技能草稿清理失败 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    discardAgentPackageDraft(profileDir, sessionId)
+  } catch (error) {
+    logger?.(`${caller}: 智能体草稿清理失败 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 /**
  * 删除会话前必须先释放的运行态：等待中的卡片、绑定的 live agent、子会话登记、
  * 坏参数计数与上一份已确认的计划目标。`session.remove` 与 task/project 级联删除
@@ -753,8 +795,9 @@ export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, se
   forgetConfirmedTarget(sessionId)
   if (ctx) {
     for (const id of [sessionId, ...descendants]) {
-      // 删除是创建流程的终止路径:草稿由 removeSession 清理,运行态附件在这里卸除,
-      // 防止同 sessionId 重建后继承。正常 commit 仍在各自 tools/result 后解绑。
+      // 删除是创建流程的终止路径:草稿由 removeSession 清理,运行态附件与挂起解绑项
+      // 在这里卸除,防止同 sessionId 重建后继承或被晚到的旧 tools/result 误卸。
+      releaseAttachmentPending(ctx.huaanworkAttachments, id)
       detachSkillCreationTools(ctx, id)
       detachCreationTools(ctx, id)
       ctx.huaanworkSessionModels?.delete(id)
@@ -801,17 +844,7 @@ async function removeSession(
   if (profileDir) {
     // 删除会话=放弃未完成草稿(owner 2026-11-16 裁定):两类创建草稿随会话一并清理,
     // 否则稳定通道会话重建同 sessionId 时旧草稿复活并继续注入创建流程。
-    // 清理失败只记日志不抛出:会话日志已删,不得谎报失败让界面停在已不存在的会话上。
-    try {
-      discardSkillCreationDraft(profileDir, sessionId)
-    } catch (error) {
-      logger?.(`session.remove: 技能草稿清理失败 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
-    }
-    try {
-      discardAgentPackageDraft(profileDir, sessionId)
-    } catch (error) {
-      logger?.(`session.remove: 智能体草稿清理失败 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
-    }
+    discardSessionCreationDrafts(profileDir, sessionId, logger, 'session.remove')
     const neutralStable = sessionIdFor(resolve(neutralWorkspaceRootPath(profileDir)))
     if (sessionId.startsWith(`${neutralStable}-`)) {
       const siblingRoot = neutralSessionRootPath(profileDir, sessionId)

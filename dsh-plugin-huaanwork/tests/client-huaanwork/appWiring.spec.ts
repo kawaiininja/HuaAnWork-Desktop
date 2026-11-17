@@ -2252,6 +2252,9 @@ test("confirm and success handlers consume older cards and ChatRow disables them
   assert.match(successBlock, /upsertSkillSuccess\(consumeSkillConfirmCards\(items\), event, allocId\)/);
   const chatRow = functionBody("function ChatRow(", "\nfunction PlanCard(");
   assert.match(chatRow, /disabled=\{item\.consumed === true\}/);
+  assert.match(chatRow, /unavailable=\{hostUnavailable\}/);
+  assert.match(APP_SOURCE, /const hostUnavailable = blocked \|\| hostPhase !== "ok";/);
+  assert.match(APP_SOURCE, /<ChatRow[\s\S]*?hostUnavailable=\{hostUnavailable\}/);
 });
 
 test("send failure footnotes target the sending tab, not the stale active tab", () => {
