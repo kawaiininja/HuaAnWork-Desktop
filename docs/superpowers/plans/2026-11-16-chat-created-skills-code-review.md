@@ -9,7 +9,8 @@
   - 规格文档：[2026-11-15-chat-created-skills-design.md](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/docs/superpowers/specs/2026-11-15-chat-created-skills-design.md)
   - 实施计划：[2026-11-15-chat-created-skills.md](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/docs/superpowers/plans/2026-11-15-chat-created-skills.md)
   - 验收证据：[2026-11-chat-created-skills-acceptance.md](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/docs/evidence/2026-11-chat-created-skills-acceptance.md)
-- **评审结论：** **No（需先修复后再合入 / With fixes）**
+- **评审结论：** **No（需先修复后再合入 / With fixes）**（本节是 2026-11-16 初审，已被后续各节覆盖）
+- **当前结论：** **Grok 审核（2026-11-17，第十节）：可合入。** 0 Critical，无阻断性 Important。本次审核初稿中的 1 条 Important 经源码反证拆开：同时挂载降为不阻断的规格偏离，`/name` 改写再确认的半句撤回。
 
 > [!WARNING]
 > **工作区状态声明**：当前工作区存在未提交改动——[model.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-guardrails/model.ts)（修改时间 `2026-11-16 17:02:34`）与 [model.spec.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-guardrails/model.spec.ts)（修改时间 `2026-11-16 17:02:04`）未纳入任何分支提交（早于最近一次文档提交 `734e124022` `17:20:55`），另有未提交的 [AGENTS.md](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/AGENTS.md) 及未跟踪的 `docs/project-memory-archive.md`、`docs/superpowers/*`。本文第四节的测试与门禁结果均是在**包含工作区未提交 `model.ts` / `model.spec.ts` 修复**的状态下实测所得；`feat/chat-created-skills` 当前 `HEAD` 本身不含该修复。
@@ -313,3 +314,61 @@ Kimi-M-1 可随修复波一并处理或由 owner 明确停放；停放不改变�
 
 - 修复提交：`33f7823f6fef7684510bb162d314a4389080e4b6`。
 - 本节及后续文档提交不改变产品代码；分支仍未推送。
+
+---
+
+## 十、Grok 审核（2026-11-17，反证校准版）
+
+> **审核人：Grok。** 本节是对当前终树的独立审核，以及对该审核所提 1 条 Important、5 条 Minor 的源码反证。第十节覆盖本节之前的当前合并判断；第一至九节保留为历史评审与修复上下文。除本节落档外，不修改实现、测试、计划或验收证据。
+
+### 10.1 评审对象、依据与方法
+
+- **分支 / 基线 / HEAD：** `feat/chat-created-skills`；共同基线与当前 `master` 均为 `ff29debd37d72a92f10d446eafa07867d17befd8`；审核 HEAD 为 `fa22902cfb0993386ded7085a6bb35254d5e2c24`。产品代码停在 `33f7823f6fef7684510bb162d314a4389080e4b6`，其后只有文档。审核时工作区干净。`deepseek-harness` 无内容差异，pin 仍为 `1600d8a1e140dcde43a1a0941940a0480712c011`。
+- **权威依据：** `docs/superpowers/specs/2026-11-15-chat-created-skills-design.md` 与 `docs/superpowers/plans/2026-11-15-chat-created-skills.md`。验收证据只作待核材料。
+- **方法：** 对照规格 §6–§9、§11、§12 与计划全局约束，分授权落盘、客户端、测试验收三条阅读当前源码。随后只对审核当时列出的 1 条 Important 和 5 条 Minor 做反证：核对路由条件、附件 `Set`、护栏默认档、确认卡消费和删除路径，不把初稿表述当成结论。本轮没有重跑 `corepack yarn check`，也没有重跑 CDP。§9 记录的根门禁日志对应的仍是当前产品树。
+- **Grok 审核结论：** **可合入（Yes）。0 Critical / 0 阻断性 Important。** 正式写盘的同意、幂等、默认禁用，以及客户端确认卡、成功卡和 `skill/changed`，本次反证没有推翻。计划 Task 1–7 的代码和测试都在；计划正文的复选框未勾，只是文档漂移。
+
+### 10.2 反证校准表
+
+| 初稿 | 反证事实 | 校准 |
+| --- | --- | --- |
+| Important：改口时两套创建工具同时挂着，模型写出对方草稿后把用户流程挡在互斥门外；`/name` 或 `@agent` 上 `skill_propose` 改写草稿，下一句「确认」提交新草稿 | 同时挂载属实，且只发生在两侧都还没有草稿时。`sessions.ts:356-362` 只 `attachSkillCreationTools`，`sessions.ts:367-397` 只 `attachCreationTools`；`attachAgentTools` 往同一个 `Set` 追加。已有草稿时步骤 ⑥ 先拒绝返回，不会挂上另一侧。默认 `guard_mode` 缺省为 `ask`（`policy.ts:97-101`），已挂载的创建工具走 `decide.ts` default 分支返回 `ASK`。不批准就不会写草稿。`/name` 与 `@agent` 这一轮的 `skill_commit` 因 `creationTurn !== true` 被拒绝（`skill-creation-drafts.ts:301-303`）。工具跨轮保持挂载是既有设计：`agent-package/creation.ts:106` 写明访谈中途不卸，`agent_propose` 同样不看创建轮。新确认卡到达时会消费旧卡 | **同时挂载属实，后果夸大，降为不阻断的规格偏离。** `/name` 改写再确认的半句撤回：规格要挡住的是借旧草稿提交，提交已经被挡住 |
+| Minor：sidecar 未就绪时确认卡仍可点，点击没有脚注 | `App.tsx:4959` 只在 `consumed` 时禁用按钮。`App.tsx:2823` 对 `sidecarDead` 或 `hostPhase !== "ok"` 直接返回，发生在写入脚注之前。入口按钮 `App.tsx:3775` 已按这两个条件禁用 | **属实，严重度恰当** |
+| Minor：`pendingDetach` 比会话活得久，晚到结果会卸掉新会话工具 | 表只在 `tools/result` 里删除（`skill-creation-tools.ts:215-220`）。`releaseSessionRuntime`（`sessions.ts:754-759`）会解绑，但不清这张表。只有 `work-1` 复用稳定 `sessionId`（`App.tsx:2861` 的 `fresh: chatId !== "work-1"`）。新标签带随机后缀，不会撞上。取消后同一个 `callId` 的 `tools/result` 是否仍投递，没有证据 | **机制属实，后果说满了。** 保留为未证实的窄竞态 |
+| Minor：`task.remove` 不删两类草稿 | `routes.ts:1626-1629` 只 `releaseSessionRuntime` 并删会话日志，不调用 `discardSkillCreationDraft`。`project.remove` 是同一条路。创建按钮只进入普通会话；子任务里要手打 `/create-skill` 才会留下草稿。子任务 `sessionId` 不复用 | **属实，但不会复活创建流程。** 只是孤儿草稿文件 |
+| Minor：`terminal` 与 `sessionId` 类型独立 | `rpc-types.ts:591` 两个字段都可选。全仓只有 `sessions.ts:253` 与 `sessions.ts:350` 发出 `terminal:"cancelled"`，都带了 `sessionId`。缺 `sessionId` 时 `eventTargetTab`（`outcomeCheck.ts:331-344`）落到当前标签 | **类型缝属实，当前不可触发。** 继续按 §9.2 停放，不算开放缺陷 |
+| Minor：计划复选框未勾；`@agent` 未断言对方草稿；真机第 5 项没有目录清单 | 计划中没有 `- [x]`。`agent-package-creation.spec.ts:993-1007` 只断言不拒绝、不注入；相邻的 `/weekly-report` 用例 `976-990` 才比对了对方草稿字节。验收文档第 5 项写了「目录仅 `SKILL.md`」，入库材料没有目录清单，截图在本机 `/tmp` | **三件都属实，都不是产品缺陷** |
+
+### 10.3 校准后的意见
+
+#### 不阻断的规格偏离（Grok-S-1）
+
+- **位置：** `dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts:356-362`、`sessions.ts:367-397`。
+- **事实：** 草稿还没落盘时，从 `/create-agent` 改口到 `/create-skill`，或反过来，两套创建工具会同时留在会话上。这与规格 §7 第 7 步「不得同时挂载智能体与技能创建工具」不一致。
+- **达不到的程度：** 不静默写出对方草稿，也不让下一句「确认」绕过同意。残留工具要被模型调用；默认 ask 档还要用户批准。批准之后，互斥才会挡住原来的流程。
+- **不纳入本条：** 显式 `/name` 与 `@agent` 期间 `skill_propose` 仍可调用。该轮 `skill_commit` 已被拒绝。跨轮不卸工具与智能体创建一致，不单列为技能创建缺陷。
+- **若后续要收口：** 进入一侧创建时卸掉另一侧的创建工具。不要给 `propose` 单独加 `creationTurn` 检查，否则草稿出现前的普通回答无法提出第一份草稿。
+
+#### Minor（不阻断）
+
+1. **sidecar 或宿主未就绪时，已经出现的确认卡仍可点击，而且没有反馈。** `App.tsx:4959`、`App.tsx:2823`、`App.tsx:3775`。修复可以是把 `sidecarDead || hostPhase !== "ok"` 并进确认卡的 `disabled`；若点击仍进入 `send`，给目标标签补一条脚注。
+2. **`pendingDetach` 不随会话释放清除。** 只有稳定会话 `work-1` 会复用 `sessionId`。晚到的 `tools/result` 会不会在重新挂载之后卸掉新工具，本轮没有证实。释放会话时丢掉该会话的 pending，可让更晚的结果变成空操作。
+3. **`task.remove` 与 `project.remove` 不删除两类创建草稿。** 设计入口不会把创建放进子任务。手打命令留下的是孤儿文件，新任务不会继承。`session.remove` 已经清理草稿。
+
+#### 继续停放（Review-M-1）
+
+`skill/notice` 的 `terminal` 与 `sessionId` 仍然互相独立。当前发送点都带了 `sessionId`。维持 §9.2 的 owner 裁定，不在本分支修复。
+
+#### 文档与证据说明（不是产品缺陷）
+
+- 计划步骤的复选框全部未勾。代码和测试已经对应 Task 1–7。
+- `@agent` 普通轮没有断言技能草稿字节和创建附件保持不变。同文件的显式 `/name` 用例已经比对了智能体草稿字节。
+- 规格 §12.2 第 5 项在验收文档中记为通过，观察是「技能目录仅 `SKILL.md`」且 `agents-endpoints.json` 未被修改。入库文本没有目录清单，截图留在本机 `/tmp`。这只说明长期审计材料不完整，不推翻该次走查记录。
+
+### 10.4 合并结论
+
+**Grok 审核结论：当前分支达到合入 `master` 的标准（Yes）。**
+
+依据是：0 Critical；初稿里唯一的 Important 经反证后不再是授权洞。同时挂载是默认 ask 档下的条件性规格偏离，显式 `/name` 上改写草稿再由下一句「确认」提交的说法撤回。五条 Minor 里，确认卡静默点击、`pendingDetach` 的未证实竞态、子任务删除留下的孤儿草稿，都不改变正式写入的同意门禁和默认禁用。`terminal` 类型缝维持停放。计划复选框、`@agent` 断言缺口和真机第 5 项的目录清单是文档与证据说明。
+
+Grok-S-1 可以在合入后收口，不作为本次合入条件。
