@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   childrenOf,
@@ -8,7 +8,11 @@ import {
   resetChildSessionRegistry,
 } from '../../src/huaanwork-host/child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
-import { emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
+import {
+  attachAgentTools,
+  emptyAttachments,
+  isAgentToolAttached,
+} from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import { apply as applySkills, setBundledSkillRegistrar } from '../../src/huaanwork-guardrails/skills.ts'
 import {
   answerRouteInput,
@@ -55,6 +59,8 @@ import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-hos
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 import { sweepProjectLegacySessions } from '../../src/huaanwork-host/session-sweep.ts'
 import { ACTIVATION_CLEANUP_TIMEOUT_MS } from '../../src/huaanwork-host/agent-package/host.ts'
+import { CREATION_TOOLS } from '../../src/huaanwork-host/agent-package/creation.ts'
+import { SKILL_CREATION_TOOLS } from '../../src/huaanwork-host/skill-creation.ts'
 import { dispatchAt } from '../../src/huaanwork-host/agent-invoke.ts'
 import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 import {
@@ -65,6 +71,10 @@ import {
   createSubagentRunRegistry,
   type SubagentRunRegistry,
 } from '../../src/huaanwork-host/subagent-runs.ts'
+import {
+  hasAgentCreationDraftOnDisk,
+  hasSkillCreationDraftOnDisk,
+} from '../../src/huaanwork-host/skill-creation-drafts.ts'
 
 // —— 用例移植自旧 sidecar session-history.test.ts(L61-69 / L115-153 / L220-241)
 // 与 host.ts 会话 case 语义;存储 fixture 钉死读路径 <dshHome>/sessions ——
@@ -1638,6 +1648,62 @@ describe('session.remove lifecycle', () => {
     expect(existsSync(join(projectRoot, 'keep.txt'))).toBe(true)
     // 连兄弟根的父容器都不该被创建出来。
     expect(existsSync(neutralSessionsBaseDir(routeCtx.profileDir))).toBe(false)
+  })
+
+  test('sessionRemove discards both creation drafts and detaches both creation tool pairs', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const fresh = sessionNew(routeCtx, { fresh: true })
+    writePersistedSession(routeCtx.dshHome, fresh.sessionId, fresh.cwd)
+    // 删除会话=放弃未完成草稿(owner 2026-11-16 裁定):两类草稿与工具附件随会话一并清理,
+    // 否则稳定通道会话重建同 sessionId 时旧草稿复活并继续注入创建流程或继承工具。
+    const skillDraft = join(routeCtx.profileDir, 'skill-creation-drafts', `${fresh.sessionId}.json`)
+    const agentDraft = join(routeCtx.profileDir, 'agents', '.drafts', `${fresh.sessionId}.json`)
+    mkdirSync(dirname(skillDraft), { recursive: true })
+    writeFileSync(skillDraft, '{"schemaVersion":1}\n', 'utf8')
+    mkdirSync(dirname(agentDraft), { recursive: true })
+    writeFileSync(agentDraft, '{"schemaVersion":1}\n', 'utf8')
+    const maps = emptyAttachments()
+    attachAgentTools(maps, fresh.sessionId, [...SKILL_CREATION_TOOLS, ...CREATION_TOOLS])
+    attachAgentTools(maps, fresh.sessionId, ['mcp__demo__echo'])
+    const restrictCalls: string[] = []
+    const ctx: SessionRuntimeContext = { huaanworkAttachments: maps }
+    const runtimeWithRestrict = ctx as unknown as Record<symbol, unknown>
+    runtimeWithRestrict[Symbol.for('huaanwork.presentAs.restrictState')] = {
+      restrict: () => undefined,
+      restrictAll: () => undefined,
+      restrictSession: (sessionId: string) => restrictCalls.push(sessionId),
+    }
+
+    await expect(sessionRemove(ctx, routeCtx, { sessionId: fresh.sessionId })).resolves.toEqual({ removed: true })
+
+    expect(existsSync(skillDraft)).toBe(false)
+    expect(existsSync(agentDraft)).toBe(false)
+    // 同 sessionId 重建不再有草稿或创建附件,不重新激活创建流程。
+    expect(hasSkillCreationDraftOnDisk(routeCtx.profileDir, fresh.sessionId)).toBe(false)
+    expect(hasAgentCreationDraftOnDisk(routeCtx.profileDir, fresh.sessionId)).toBe(false)
+    for (const toolName of [...SKILL_CREATION_TOOLS, ...CREATION_TOOLS]) {
+      expect(isAgentToolAttached(maps, fresh.sessionId, toolName)).toBe(false)
+    }
+    expect(isAgentToolAttached(maps, fresh.sessionId, 'mcp__demo__echo')).toBe(true)
+    expect(restrictCalls).toEqual([fresh.sessionId, fresh.sessionId])
+  })
+
+  test('sessionRemove logs and still reports removed when draft cleanup fails', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const fresh = sessionNew(routeCtx, { fresh: true })
+    writePersistedSession(routeCtx.dshHome, fresh.sessionId, fresh.cwd)
+    // 草稿路径被目录占位 ⇒ rmSync(force) 抛 EISDIR;清理失败只记日志不抛出,
+    // 会话日志已删,不得谎报失败让界面停在已不存在的会话上。
+    const skillDraft = join(routeCtx.profileDir, 'skill-creation-drafts', `${fresh.sessionId}.json`)
+    mkdirSync(skillDraft, { recursive: true })
+    const logs: string[] = []
+    const loggingCtx: RouteContext = { ...routeCtx, logger: (message: string) => { logs.push(message) } }
+
+    await expect(sessionRemove(undefined, loggingCtx, { sessionId: fresh.sessionId })).resolves.toEqual({ removed: true })
+
+    expect(logs.some((line) => line.includes(fresh.sessionId) && line.includes('草稿'))).toBe(true)
   })
 
   test.skipIf(process.platform === 'win32')('sessionRemove logs and still reports removed when the sibling root cannot be deleted', async () => {
@@ -3657,5 +3723,51 @@ describe('session.send 调度器接线', () => {
     expect(h.models.has('s1')).toBe(false)
     expect(h.scheduler.activeTurnCount()).toBe(0)
     expect(h.releaseCalls).toEqual(['s1'])
+  })
+
+  test('task.remove and project.remove discard both creation drafts without touching unrelated sessions', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const taskSession = 'huaanwork-task-draft-del'
+    const projectSession = 'huaanwork-project-draft-del'
+    const keepSession = 'huaanwork-keep-draft'
+    for (const sessionId of [taskSession, projectSession]) {
+      writePersistedSession(routeCtx.dshHome, sessionId, routeCtx.workspaceRoot.current)
+    }
+    writeFileSync(join(root, 'tasks.json'), JSON.stringify({
+      tasks: [
+        { id: 't1', projectId: 'p1', name: 'T1', createdAt: 1, sessionId: taskSession },
+        { id: 't2', projectId: 'p2', name: 'T2', createdAt: 2, sessionId: projectSession },
+      ],
+    }))
+    writeFileSync(join(root, 'projects.json'), JSON.stringify({
+      projects: [{ id: 'p2', name: 'P2', root: join(root, 'p2'), createdAt: 1 }],
+    }))
+    mkdirSync(join(root, 'skill-creation-drafts'), { recursive: true })
+    mkdirSync(join(root, 'agents', '.drafts'), { recursive: true })
+    const skillDraftFile = (sessionId: string) => join(root, 'skill-creation-drafts', `${sessionId}.json`)
+    const agentDraftFile = (sessionId: string) => join(root, 'agents', '.drafts', `${sessionId}.json`)
+    for (const sessionId of [taskSession, projectSession, keepSession]) {
+      writeFileSync(skillDraftFile(sessionId), '{}', 'utf8')
+      writeFileSync(agentDraftFile(sessionId), '{}', 'utf8')
+    }
+
+    const invoke = async (method: string, body: unknown) => {
+      const route = ROUTE_TABLE.find((entry) => entry.method === method)
+      if (!route) throw new Error(`missing route ${method}`)
+      return route.handler({ params: {}, body, query: new URLSearchParams() }, routeCtx)
+    }
+
+    await invoke('task.remove', { id: 't1' })
+    expect(existsSync(skillDraftFile(taskSession))).toBe(false)
+    expect(existsSync(agentDraftFile(taskSession))).toBe(false)
+    expect(existsSync(skillDraftFile(keepSession))).toBe(true)
+    expect(existsSync(agentDraftFile(keepSession))).toBe(true)
+
+    await invoke('project.remove', { projectId: 'p2' })
+    expect(existsSync(skillDraftFile(projectSession))).toBe(false)
+    expect(existsSync(agentDraftFile(projectSession))).toBe(false)
+    expect(existsSync(skillDraftFile(keepSession))).toBe(true)
+    expect(existsSync(agentDraftFile(keepSession))).toBe(true)
   })
 })

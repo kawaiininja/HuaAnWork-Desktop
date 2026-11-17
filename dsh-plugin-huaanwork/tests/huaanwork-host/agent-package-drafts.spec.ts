@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { listBundledSkills } from '../../src/huaanwork-guardrails/skills.ts'
@@ -9,9 +9,11 @@ import {
   beginAgentPackageUpdate,
   cancelAgentPackage,
   commitAgentPackage,
+  CorruptAgentPackageDraftError,
   isAgentCancelText,
   isAgentConsentText,
   loadAgentPackageDraft,
+  loadAgentPackageDraftStrict,
   proposeAgentPackage,
 } from '../../src/huaanwork-host/agent-package/drafts.ts'
 import { createAgentPackageHost } from '../../src/huaanwork-host/agent-package/host.ts'
@@ -797,6 +799,27 @@ describe('update mode', () => {
     writeFileSync(join(agentPackagesRoot(root), 'broken-agent', 'agent.json'), '{not json', 'utf8')
     await expect(host.beginUpdate('session-broken', 'broken-agent')).rejects.toThrow(/损坏/)
   })
+
+  test('beginUpdate refuses while a skill creation draft exists', async () => {
+    const root = makeRoot()
+    const created = await proposeAgentPackage(root, 'session-guard-create', createProposal(), [])
+    if (!created.ok) throw new Error('propose failed')
+    const committed = await commitAgentPackage(root, 'session-guard-create', created.draftId, '可以', [])
+    expect(committed.ok).toBe(true)
+    mkdirSync(join(root, 'skill-creation-drafts'), { recursive: true })
+    writeFileSync(join(root, 'skill-creation-drafts', 'session-guard.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      draftId: 'skill-draft-1',
+      sessionId: 'session-guard',
+      proposal: { name: 'daily-summary', description: '生成日报', body: '正文' },
+      createdAt: '2026-11-16T00:00:00.000Z',
+      updatedAt: '2026-11-16T00:00:00.000Z',
+    })}\n`, 'utf8')
+
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    await expect(host.beginUpdate('session-guard', 'weekly-report')).rejects.toThrow(/技能创建草稿/)
+    expect(existsSync(join(root, 'agents', '.drafts', 'session-guard.json'))).toBe(false)
+  })
 })
 
 describe('host facade', () => {
@@ -890,5 +913,161 @@ describe('host facade', () => {
     expect(host.lastUserText('session-bound-43')).toBeUndefined()
     expect(host.lastUserText('session-bound-44')).toBe('text-44')
     expect(host.lastUserText('session-bound-299')).toBe('text-299')
+  })
+})
+
+/** 合法技能草稿夹具:与 `skill-creation-drafts.ts` 的文档 schema 一致。 */
+function skillDraftDocument(sessionId: string) {
+  return {
+    schemaVersion: 1,
+    draftId: 'draft-1',
+    sessionId,
+    proposal: { name: 'daily-summary', description: '生成日报', body: '整理输入并生成日报' },
+    createdAt: '2026-11-15T00:00:00.000Z',
+    updatedAt: '2026-11-15T00:00:00.000Z',
+  }
+}
+
+function writeSkillDraft(root: string, sessionId: string): string {
+  const path = join(root, 'skill-creation-drafts', `${sessionId}.json`)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(skillDraftDocument(sessionId), null, 2)}\n`, 'utf8')
+  return path
+}
+
+describe('strict draft reading', () => {
+  test('returns undefined only when the draft file is missing', () => {
+    const root = makeRoot()
+    expect(loadAgentPackageDraftStrict(root, 'session-missing')).toBeUndefined()
+  })
+
+  test('returns the parsed draft for a valid file', async () => {
+    const root = makeRoot()
+    const proposed = await proposeAgentPackage(root, 'session-strict', createProposal(), [])
+    if (!proposed.ok) throw new Error('propose failed')
+    expect(loadAgentPackageDraftStrict(root, 'session-strict')?.draftId).toBe(proposed.draftId)
+  })
+
+  test('throws a named error for unreadable, non-JSON and field-invalid drafts', async () => {
+    const root = makeRoot()
+    mkdirSync(draftPath(root, 'session-unreadable'), { recursive: true })
+    expect(() => loadAgentPackageDraftStrict(root, 'session-unreadable')).toThrow(
+      CorruptAgentPackageDraftError,
+    )
+
+    writeFileSync(draftPath(root, 'session-bad-json'), '{corrupt', 'utf8')
+    expect(() => loadAgentPackageDraftStrict(root, 'session-bad-json')).toThrow(
+      CorruptAgentPackageDraftError,
+    )
+    // 宽松读取的既有语义不变:损坏仍然吞成 undefined（hasDraft 依赖它）。
+    expect(loadAgentPackageDraft(root, 'session-bad-json')).toBeUndefined()
+
+    writeFileSync(draftPath(root, 'session-bad-fields'), JSON.stringify({ schemaVersion: 1, draftId: 'x' }), 'utf8')
+    const error = (() => {
+      try {
+        loadAgentPackageDraftStrict(root, 'session-bad-fields')
+        return undefined
+      } catch (caught) {
+        return caught
+      }
+    })()
+    expect(error).toBeInstanceOf(CorruptAgentPackageDraftError)
+    expect((error as Error).name).toBe('CorruptAgentPackageDraftError')
+  })
+})
+
+describe('skill draft cross-flow guard', () => {
+  test('refuses to propose over a session that owns a skill draft', async () => {
+    const root = makeRoot()
+    writeSkillDraft(root, 'session-cross')
+
+    const proposed = await proposeAgentPackage(root, 'session-cross', createProposal(), [])
+    expect(proposed.ok).toBe(false)
+    if (proposed.ok) return
+    expect(proposed.fieldErrors).toHaveLength(1)
+    expect(proposed.fieldErrors[0]?.field).toBe('session')
+    expect(proposed.fieldErrors[0]?.message).toContain('技能创建草稿')
+    expect(existsSync(draftPath(root, 'session-cross'))).toBe(false)
+  })
+
+  test('refuses to commit while a skill draft exists and keeps the agent draft', async () => {
+    const root = makeRoot()
+    const proposed = await proposeAgentPackage(root, 'session-cross-commit', createProposal(), [])
+    if (!proposed.ok) throw new Error('propose failed')
+    const skillPath = writeSkillDraft(root, 'session-cross-commit')
+
+    const committed = await commitAgentPackage(root, 'session-cross-commit', proposed.draftId, '可以', [])
+    expect(committed.ok).toBe(false)
+    expect(committed.ok ? '' : committed.error).toContain('当前会话存在技能创建草稿')
+    expect(existsSync(draftPath(root, 'session-cross-commit'))).toBe(true)
+    expect(existsSync(skillPath)).toBe(true)
+    expect(listLocalAgentPackages(root)).toEqual([])
+  })
+})
+
+describe('cancel mutual exclusion', () => {
+  test('refuses the implicit agent cancel while a skill draft exists', async () => {
+    const root = makeRoot()
+    const proposed = await proposeAgentPackage(root, 'session-both', createProposal(), [])
+    if (!proposed.ok) throw new Error('propose failed')
+    const skillPath = writeSkillDraft(root, 'session-both')
+    const agentBytes = readFileSync(draftPath(root, 'session-both'), 'utf8')
+    const skillBytes = readFileSync(skillPath, 'utf8')
+
+    expect(await cancelAgentPackage(root, 'session-both')).toBe(false)
+    expect(readFileSync(draftPath(root, 'session-both'), 'utf8')).toBe(agentBytes)
+    expect(readFileSync(skillPath, 'utf8')).toBe(skillBytes)
+
+    expect(await cancelAgentPackage(root, 'session-both', { explicit: true })).toBe(true)
+    expect(existsSync(draftPath(root, 'session-both'))).toBe(false)
+    expect(readFileSync(skillPath, 'utf8')).toBe(skillBytes)
+  })
+
+  test('explicit cancel still deletes a corrupt agent draft', async () => {
+    const root = makeRoot()
+    mkdirSync(dirname(draftPath(root, 'session-corrupt')), { recursive: true })
+    writeFileSync(draftPath(root, 'session-corrupt'), '{corrupt', 'utf8')
+    expect(await cancelAgentPackage(root, 'session-corrupt')).toBe(true)
+    expect(existsSync(draftPath(root, 'session-corrupt'))).toBe(false)
+  })
+})
+
+describe('host describeDraft', () => {
+  test('names the draft by slug and falls back to the displayName', async () => {
+    const root = makeRoot()
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    expect(host.describeDraft('session-describe')).toBeUndefined()
+
+    const proposed = await proposeAgentPackage(root, 'session-describe', createProposal(), [])
+    if (!proposed.ok) throw new Error('propose failed')
+    expect(host.describeDraft('session-describe')).toBe('weekly-report')
+
+    const base = loadAgentPackageDraft(root, 'session-describe')
+    if (base === undefined) throw new Error('draft missing')
+    writeFileSync(
+      draftPath(root, 'session-describe'),
+      `${JSON.stringify({ ...base, slug: '', displayName: '周报小助手' })}\n`,
+      'utf8',
+    )
+    expect(host.describeDraft('session-describe')).toBe('周报小助手')
+
+    writeFileSync(draftPath(root, 'session-describe'), '{corrupt', 'utf8')
+    expect(() => host.describeDraft('session-describe')).toThrow(CorruptAgentPackageDraftError)
+  })
+
+  test('passes cancel options through to the low-level entry', async () => {
+    const root = makeRoot()
+    const host = createAgentPackageHost({ profileDir: root, takenSlugs: () => [] })
+    const proposed = await host.propose('session-host-cancel', createProposal())
+    if (!proposed.ok) throw new Error('propose failed')
+    const skillPath = writeSkillDraft(root, 'session-host-cancel')
+
+    expect(await host.cancel('session-host-cancel')).toBe(false)
+    expect(host.hasDraft('session-host-cancel')).toBe(true)
+    expect(existsSync(skillPath)).toBe(true)
+
+    expect(await host.cancel('session-host-cancel', { explicit: true })).toBe(true)
+    expect(host.hasDraft('session-host-cancel')).toBe(false)
+    expect(existsSync(skillPath)).toBe(true)
   })
 })

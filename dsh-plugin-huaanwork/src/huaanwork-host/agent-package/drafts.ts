@@ -6,6 +6,8 @@ import { AGENT_NAME_RE } from '@huaanwork/policy/agent-catalog'
 
 import { parseSkillMarkdown } from '@huaanwork/skill-format/markdown'
 
+import { isCreationCancelText, isCreationConsentText } from '../creation-utterances.ts'
+import { hasSkillCreationDraftOnDisk } from '../skill-creation-drafts.ts'
 import { resolveInvocableSkill } from '../skill-invoke.ts'
 import { parseAgentPackageManifest } from './manifest.ts'
 import { resetLocalAgentPackagePublication } from './catalog-publish.ts'
@@ -62,9 +64,6 @@ const INITIAL_VERSION = '1.0.0'
 const VALIDATION_TIMESTAMP = '1970-01-01T00:00:00.000Z'
 
 const FORBIDDEN_ALLOW_SKILL = 'create-agent'
-const CONSENT_PHRASES: ReadonlySet<string> = new Set(['可以', '确认', '同意', '就这样', '按这个建'])
-const CANCEL_PHRASES: ReadonlySet<string> = new Set(['取消', '先不要'])
-const TRAILING_PUNCTUATION: ReadonlySet<string> = new Set(['。', '！', '!', '？', '?'])
 
 const TOOL_MODES: readonly AgentPackageToolsMode[] = ['none', 'http', 'mcp', 'both']
 const TOOL_LABELS: Record<AgentPackageToolsMode, string> = {
@@ -80,6 +79,20 @@ const CONSENT_HINT_UPDATE = '回复「可以」更新（启用状态保持不变
 const NO_SKILL_SUMMARY = '无专属技能包'
 
 export type AgentPackageFieldError = { field: string; message: string }
+
+/**
+ * 智能体创建草稿的严格读取错误。宽松读取(`loadAgentPackageDraft`)仍把损坏吞成
+ * `undefined`——`hasDraft` 依赖该语义;严格读取只服务于互斥提示与损坏检测。
+ */
+export class CorruptAgentPackageDraftError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CorruptAgentPackageDraftError'
+  }
+}
+
+/** 取消入口的显式选择语义:对方草稿在场时,只有路由的显式 cancel 能删除本方草稿。 */
+export type AgentPackageCancelOptions = { explicit?: boolean }
 
 export type AgentPackageDraftSkill = {
   summary: string
@@ -135,12 +148,12 @@ export type CommitResult =
 
 /** 同意说法:去首尾空白、去掉结尾一个 `。！!？?` 之后整句等于五种说法之一。 */
 export function isAgentConsentText(text: string): boolean {
-  return CONSENT_PHRASES.has(normalizeUtterance(text))
+  return isCreationConsentText(text)
 }
 
 /** 取消说法:与同意同一套规范化,整句等于 `取消` 或 `先不要`。 */
 export function isAgentCancelText(text: string): boolean {
-  return CANCEL_PHRASES.has(normalizeUtterance(text))
+  return isCreationCancelText(text)
 }
 
 /**
@@ -166,6 +179,11 @@ export async function proposeAgentPackage(
   }
   if (input.mode !== 'create' && input.mode !== 'update') {
     return { ok: false, fieldErrors: [{ field: 'mode', message: 'mode 必须是 create 或 update' }] }
+  }
+  // 双向互斥的低层防护:路由守卫之外,存在技能创建草稿时不得覆盖任何智能体草稿。
+  // 只读存在性检查;技能草稿模块不反向导入本模块,不会形成循环依赖。
+  if (hasSkillCreationDraftOnDisk(profileDir, sessionId)) {
+    return { ok: false, fieldErrors: [{ field: 'session', message: '当前会话存在技能创建草稿，请先完成或取消技能创建' }] }
   }
 
   const previous = loadAgentPackageDraft(profileDir, sessionId)
@@ -232,6 +250,8 @@ export async function commitAgentPackage(
   if (typeof draftId !== 'string' || !draftId.trim() || draftId.length > MAX_DRAFT_ID_LENGTH) {
     return refused('draftId 无效')
   }
+  // 双向互斥的低层防护:技能创建草稿在场时拒绝提交,且先于锁与任何写入。
+  if (hasSkillCreationDraftOnDisk(profileDir, sessionId)) return refused('当前会话存在技能创建草稿')
 
   // 同 slug 的 publish 与 commit 共用一把锁:写包 + 复位发布状态期间,上传不能
   // 交错。slug 在草稿或已落盘包上才知道,锁内重新读草稿并校验 draftId。
@@ -351,12 +371,22 @@ async function commitAgentPackageLocked(
 /**
  * 丢弃这一会话的草稿。
  *
+ * 对方技能创建草稿在场且未显式 `{explicit:true}` 时返回 `false` 且不触碰任何文件;
+ * 显式入口只删除本智能体草稿,绝不级联清理对方。损坏草稿仍按 `existsSync` + `rmSync`
+ * 清理(NI-1:损坏草稿的补救入口不能被自己的守卫挡死)。
+ *
  * @param profileDir profile 数据目录
  * @param sessionId 当前会话 id
- * @returns 之前是否存在草稿
+ * @param options `explicit` 只由路由的 `/create-agent cancel` 传入
+ * @returns 之前是否存在并删除了草稿
  */
-export async function cancelAgentPackage(profileDir: string, sessionId: string): Promise<boolean> {
+export async function cancelAgentPackage(
+  profileDir: string,
+  sessionId: string,
+  options?: AgentPackageCancelOptions,
+): Promise<boolean> {
   if (!isValidSessionId(sessionId)) return false
+  if (hasSkillCreationDraftOnDisk(profileDir, sessionId) && options?.explicit !== true) return false
   const target = draftPath(profileDir, sessionId)
   if (!existsSync(target)) return false
   try {
@@ -367,6 +397,12 @@ export async function cancelAgentPackage(profileDir: string, sessionId: string):
     // commit 仍会用自己的 draftId 校验兜底。
     return false
   }
+}
+
+/** 删除会话时无条件清理智能体草稿:不带互斥守卫,失败由调用方记日志。 */
+export function discardAgentPackageDraft(profileDir: string, sessionId: string): void {
+  if (!isValidSessionId(sessionId)) return
+  rmSync(draftPath(profileDir, sessionId), { force: true })
 }
 
 /**
@@ -394,6 +430,39 @@ export function loadAgentPackageDraft(profileDir: string, sessionId: string): Ag
 }
 
 /**
+ * 严格读取这一会话的草稿(设计 §7 I-2)。
+ *
+ * 与 `loadAgentPackageDraft` 的宽松语义相反:只有文件缺失(ENOENT)返回 `undefined`,
+ * 读取失败、JSON 解析失败或 `parseDraft` 任一字段非法都抛 `CorruptAgentPackageDraftError`。
+ * 宽松读取的「损坏吞成 absent」是 `hasDraft` 的既有契约,不得改动。
+ */
+export function loadAgentPackageDraftStrict(
+  profileDir: string,
+  sessionId: string,
+): AgentPackageDraft | undefined {
+  if (!isValidSessionId(sessionId)) return undefined
+  const path = draftPath(profileDir, sessionId)
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw new CorruptAgentPackageDraftError(
+      `智能体创建草稿无法读取(${path}):${errorMessage(error)}`,
+    )
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    throw new CorruptAgentPackageDraftError(`智能体创建草稿不是合法 JSON:${path}`)
+  }
+  const parsed = parseDraft(raw)
+  if (parsed === undefined) throw new CorruptAgentPackageDraftError(`智能体创建草稿字段非法:${path}`)
+  return parsed
+}
+
+/**
  * 以现有本地包为基底写一份 `mode:'update'` 草稿,供后续只提交变化字段。
  *
  * @param profileDir profile 数据目录
@@ -409,6 +478,10 @@ export async function beginAgentPackageUpdate(
 ): Promise<void> {
   if (!isValidSessionId(sessionId)) throw new Error('会话 id 必须是单个路径段')
   if (!isValidSlug(slug)) throw new Error(`智能体 @标识「${slug}」无效`)
+  // 与 propose/commit 同口径的低层互斥:路由守卫之外,技能草稿在场不得开启更新草稿。
+  if (hasSkillCreationDraftOnDisk(profileDir, sessionId)) {
+    throw new Error('当前会话存在技能创建草稿，请先完成或取消技能创建')
+  }
   const base = readUpdateBase(profileDir, slug)
   const draft: AgentPackageDraft = {
     schemaVersion: AGENT_PACKAGE_SCHEMA_VERSION,
@@ -886,6 +959,10 @@ function removeDraft(profileDir: string, sessionId: string): void {
   }
 }
 
+/**
+ * 与 `skill-creation-drafts.ts` 的 `hasAgentCreationDraftOnDisk` 同路径
+ * (`{profileDir}/agents/.drafts/{sessionId}.json`);任一处变更必须同步另一处。
+ */
 function draftPath(profileDir: string, sessionId: string): string {
   return join(agentPackagesRoot(profileDir), DRAFTS_DIR, `${sessionId}.json`)
 }
@@ -969,13 +1046,6 @@ function normalizeSlug(value: string | undefined): string | undefined {
   if (value === undefined) return undefined
   const trimmed = value.trim()
   return trimmed ? trimmed : undefined
-}
-
-function normalizeUtterance(text: string): string {
-  const trimmed = text.trim()
-  const last = trimmed.at(-1)
-  if (last === undefined || !TRAILING_PUNCTUATION.has(last)) return trimmed
-  return trimmed.slice(0, -1)
 }
 
 function deriveSummary(text: string): string {

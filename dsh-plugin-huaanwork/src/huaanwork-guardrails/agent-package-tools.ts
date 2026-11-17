@@ -5,7 +5,7 @@ import { capToolOutput } from '@huaanwork/policy/truncate'
 import { sessionIdOfAgentRef } from '@huaanwork/policy/channels'
 
 import type { RpcEvent } from '../client-huaanwork/rpc-types.ts'
-import type { AttachmentMaps } from './agent-attachments.ts'
+import { trackSessionPendingDetach, type AttachmentMaps } from './agent-attachments.ts'
 import { detachCreationTools } from '../huaanwork-host/agent-package/creation.ts'
 import type { AgentPackageHost } from '../huaanwork-host/agent-package/host.ts'
 import type { AgentPackageRuntimeRegistry } from '../huaanwork-host/agent-package/runtime.ts'
@@ -226,6 +226,7 @@ export function registerAgentPackageCreationTools(ctx: unknown, host: AgentPacka
   const c = ctx as ToolContext
   if (!c.tools?.register) return () => undefined
   const pendingDetach = new Map<string, string>()
+  const stopCleanup = trackSessionPendingDetach(c.huaanworkAttachments, pendingDetach)
   const stopToolResults = c.huaanworkOnToolResult?.((exec) => {
     const sessionId = exec.callId === undefined ? undefined : pendingDetach.get(exec.callId)
     if (sessionId === undefined || exec.callId === undefined) return
@@ -238,6 +239,7 @@ export function registerAgentPackageCreationTools(ctx: unknown, host: AgentPacka
   ]
   return () => {
     stopToolResults?.()
+    stopCleanup()
     for (const dispose of disposers.reverse()) dispose()
   }
 }

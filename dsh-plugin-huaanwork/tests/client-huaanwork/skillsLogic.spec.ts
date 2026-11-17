@@ -148,3 +148,7 @@ test('builtin-name conflicts and upload disabling match the host rules', () => {
   assert.equal(isUploadDisabled({ ...base, name: 'other' }, new Set(['pdf'])), false)
   assert.ok(RESERVED_SKILL_NAMES.includes('create-agent'))
 })
+
+test('reserves create-skill for the internal creation flow', () => {
+  assert.ok(RESERVED_SKILL_NAMES.includes('create-skill'))
+})

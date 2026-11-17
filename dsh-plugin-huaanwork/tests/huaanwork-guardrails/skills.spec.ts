@@ -457,7 +457,7 @@ test("getBundledSkill reads bundled content and rejects bad names", () => {
   assert.match(explore?.content ?? "", /subagent/);
 });
 
-test("scanBundledSkillEntries covers flat and directory forms, exactly 25 names", () => {
+test("scanBundledSkillEntries covers flat and directory forms, exactly 26 names", () => {
   const entries = scanBundledSkillEntries();
   const byName = new Map(
     entries.map((entry) => [parseSkillMarkdown(readFileSync(entry.path, "utf8")).name, entry.kind]),
@@ -465,9 +465,9 @@ test("scanBundledSkillEntries covers flat and directory forms, exactly 25 names"
   assert.deepEqual(
     [...byName.keys()].sort(),
     [
-      "brainstorming", "code-review", "create-agent", "darwin-skill", "deep-research",
-      "dispatching-parallel-agents", "explore", "find-skills", "frontend-design",
-      "frontend-dev", "graph", "grill-me", "humanizer", "investigate",
+      "brainstorming", "code-review", "create-agent", "create-skill", "darwin-skill",
+      "deep-research", "dispatching-parallel-agents", "explore", "find-skills",
+      "frontend-design", "frontend-dev", "graph", "grill-me", "humanizer", "investigate",
       "markitdown-skill", "nuwa-skill", "pdf", "pptx", "skill-creator",
       "skill-vetter", "subagent-driven-development", "systematic-debugging",
       "test-fix", "using-superpowers", "xlsx",
@@ -478,13 +478,15 @@ test("scanBundledSkillEntries covers flat and directory forms, exactly 25 names"
   assert.equal(byName.get("investigate"), "bundle");
   assert.equal(byName.get("code-review"), "bundle");
   assert.equal(byName.get("create-agent"), "bundle");
+  assert.equal(byName.get("create-skill"), "bundle");
 });
 
 test("listBundledSkills covers directory-form skills", () => {
   const names = listBundledSkills().map((skill) => skill.name);
-  assert.equal(names.length, 25);
+  assert.equal(names.length, 26);
   assert.ok(names.includes("pdf") && names.includes("graph"));
   assert.ok(names.includes("create-agent"));
+  assert.ok(names.includes("create-skill"));
   // 每个条目都有非空 description
   for (const skill of listBundledSkills()) assert.ok(skill.description.length > 0, skill.name);
 });

@@ -1727,6 +1727,65 @@ button {
   word-break: break-word;
 }
 
+/* 对话创建技能：确认卡与成功卡 */
+.skill-confirm-card,
+.skill-success-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-self: stretch;
+  border-color: var(--approval-border);
+  background: var(--approval-bg);
+}
+
+.skill-confirm-card .ttl,
+.skill-success-card .ttl {
+  font-weight: 700;
+  color: var(--approval);
+  font-size: 12.5px;
+}
+
+.skill-confirm-rows {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.skill-confirm-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.skill-confirm-row dt {
+  color: var(--text-muted);
+}
+
+.skill-confirm-row dd {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.skill-success-text {
+  margin: 0;
+  font-size: 13px;
+}
+
+.skill-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 已消费的确认卡:历史旧卡按钮置灰禁用,不再触发 stray 同意句。 */
+.skill-card-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* 空状态页（定时任务） */
 
 .empty-state {

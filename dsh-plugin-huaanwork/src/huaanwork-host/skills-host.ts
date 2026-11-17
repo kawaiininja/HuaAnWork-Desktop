@@ -224,7 +224,7 @@ export async function takenNames(storageRoot: string): Promise<Set<string>> {
   return names
 }
 
-function validateSkillFields(input: SkillInput, taken: ReadonlySet<string>): SkillFieldError[] {
+export function validateSkillFields(input: SkillInput, taken: ReadonlySet<string>): SkillFieldError[] {
   const errors: SkillFieldError[] = []
   if (!SKILL_NAME_RE.test(input.name)) {
     errors.push({ field: 'name', message: '名称需为小写字母/数字/连字符（kebab-case）' })
@@ -242,6 +242,14 @@ function validateSkillFields(input: SkillInput, taken: ReadonlySet<string>): Ski
     errors.push({ field: 'content', message: '正文必填' })
   } else if (Buffer.byteLength(input.content, 'utf8') > MAX_SKILL_CONTENT_BYTES) {
     errors.push({ field: 'content', message: '正文不超过 64 KiB' })
+  }
+  for (const [field, value] of [
+    ['description', input.description],
+    ['whenToUse', input.whenToUse],
+  ] as const) {
+    if (value !== undefined && /[\r\n]/.test(value)) {
+      errors.push({ field, message: `${field} 必须是单行文本` })
+    }
   }
   return errors
 }
@@ -357,44 +365,151 @@ export async function stageSkillDirectory(
   }
 }
 
-export async function createSkill(storageRoot: string, input: SkillInput): Promise<SkillWriteResult> {
-  return withSkillStorageLock(storageRoot, async () => {
-    const errors = validateSkillFields(input, await takenNames(storageRoot))
-    if (errors.length > 0) return { ok: false, fieldErrors: errors }
-    // 先读两份状态文档并在落盘前预检目标目录与预算:损坏文档、不安全既有目录
-    // 与超预算文件集都必须在落盘前失败,不留下没有来源记录或超上限的技能。
-    readSkillLocalState(storageRoot)
-    const toggles = readUserSkillToggles(storageRoot)
-    const skillDir = join(userSkillsRoot(storageRoot), input.name)
-    const existing = await readSafeExistingSkillDir(skillDir)
-    const serialized = serializeSkillMarkdown({
+/** 对话创建幂等身份:两键必须成对写入,读者把单键状态判为损坏。 */
+type SkillCreationIdentity = { draftId: string; sessionId: string }
+
+/**
+ * 创建主体:调用方必须已持有 `withSkillStorageLock`。锁非重入,这里绝不能再取锁。
+ * 表单入口不传创建身份;对话草稿入口把两个幂等键作为一个整体随首条状态一并落盘。
+ */
+async function createSkillLocked(
+  storageRoot: string,
+  input: SkillInput,
+  identity?: SkillCreationIdentity,
+): Promise<SkillWriteResult> {
+  // 规格 §6.2:单行字段去除首尾空白,纯空白 whenToUse 归一为缺席;与对话草稿的
+  // parseProposal 同口径,表单与对话两条入口落盘一致。
+  const { whenToUse, ...rest } = input
+  input = {
+    ...rest,
+    description: input.description.trim(),
+    ...(whenToUse?.trim() ? { whenToUse: whenToUse.trim() } : {}),
+  }
+  const errors = validateSkillFields(input, await takenNames(storageRoot))
+  if (errors.length > 0) return { ok: false, fieldErrors: errors }
+  // 先读两份状态文档并在落盘前预检目标目录与预算:损坏文档、不安全既有目录
+  // 与超预算文件集都必须在落盘前失败,不留下没有来源记录或超上限的技能。
+  readSkillLocalState(storageRoot)
+  const toggles = readUserSkillToggles(storageRoot)
+  const skillDir = join(userSkillsRoot(storageRoot), input.name)
+  const existing = await readSafeExistingSkillDir(skillDir)
+  const serialized = serializeSkillMarkdown({
+    name: input.name,
+    description: input.description,
+    ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
+    ...(input.disableModelInvocation ? { disableModelInvocation: true } : {}),
+    // R7:创建不写 user-invocable;启用开关是 HuaAnWork 手动调用的唯一产品门。
+    content: input.content,
+    extraLines: [],
+  })
+  const skillData = Buffer.from(serialized, 'utf8')
+  const contentDigest = validatedSkillDigest([...existing.files, { path: 'SKILL.md', data: skillData }])
+  // 对话首次创建必须默认禁用:带外删除可能留下同名 enabled=true 键。
+  // 只在当前存储锁内、技能文件可见前清残留;凭证重放在进入本函数前已返回,
+  // 因而不会撤销用户创建后的手动启用。本函数不得再次获取非重入存储锁。
+  if (identity !== undefined && Object.hasOwn(toggles, input.name)) {
+    setUserSkillToggle(storageRoot, input.name, false)
+    delete toggles[input.name]
+  }
+  await atomicWrite(join(skillDir, 'SKILL.md'), skillData)
+  const localEntry: SkillLocalEntry = {
+    origin: { kind: 'created' },
+    contentDigest,
+    ...(identity !== undefined
+      ? { creationDraftId: identity.draftId, creationSessionId: identity.sessionId }
+      : {}),
+  }
+  writeSkillLocalEntry(storageRoot, input.name, localEntry)
+  return {
+    ok: true,
+    skill: {
       name: input.name,
       description: input.description,
+      source: 'user',
       ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
-      ...(input.disableModelInvocation ? { disableModelInvocation: true } : {}),
-      // R7:创建不写 user-invocable;启用开关是 HuaAnWork 手动调用的唯一产品门。
-      content: input.content,
-      extraLines: [],
-    })
-    const skillData = Buffer.from(serialized, 'utf8')
-    const contentDigest = validatedSkillDigest([...existing.files, { path: 'SKILL.md', data: skillData }])
-    await atomicWrite(join(skillDir, 'SKILL.md'), skillData)
-    const localEntry: SkillLocalEntry = { origin: { kind: 'created' }, contentDigest }
-    writeSkillLocalEntry(storageRoot, input.name, localEntry)
-    return {
-      ok: true,
-      skill: {
-        name: input.name,
-        description: input.description,
-        source: 'user',
-        ...(input.whenToUse?.trim() ? { whenToUse: input.whenToUse.trim() } : {}),
-        enabled: Object.hasOwn(toggles, input.name) && toggles[input.name] === true,
-        origin: localEntry.origin,
-        contentDigest,
-        publishState: publishStateOf(localEntry),
-      },
+      enabled: Object.hasOwn(toggles, input.name) && toggles[input.name] === true,
+      origin: localEntry.origin,
+      contentDigest,
+      publishState: publishStateOf(localEntry),
+    },
+  }
+}
+
+export async function createSkill(storageRoot: string, input: SkillInput): Promise<SkillWriteResult> {
+  return withSkillStorageLock(storageRoot, () => createSkillLocked(storageRoot, input))
+}
+
+export type SkillCreateFromDraftResult =
+  | { ok: true; name: string; alreadyCommitted: boolean }
+  | { ok: false; fieldErrors: SkillFieldError[] }
+
+/**
+ * 对话创建的正式入口:同一 `(creationDraftId, creationSessionId)` 只落盘一次。
+ * 幂等命中要求状态条目与本地技能目录同时存在;目录被带外删除时返回字段错误,
+ * 不得报告 phantom 成功(否则用户会在列表里看到不存在的已创建结果)。
+ *
+ * 两个身份键在读写状态之前就校验:读者把空串判为损坏、把单键判为成对约束破坏,
+ * 若把这类值写进去会让整个技能中心对当前 profile 永久抛错,因此写入边界必须
+ * fail closed。校验失败不获取锁、不读状态、不落盘。
+ */
+export async function createSkillFromDraft(
+  storageRoot: string,
+  input: SkillInput,
+  creationDraftId: string,
+  creationSessionId: string,
+): Promise<SkillCreateFromDraftResult> {
+  const identityErrors: SkillFieldError[] = []
+  for (const [field, value] of [
+    ['creationDraftId', creationDraftId],
+    ['creationSessionId', creationSessionId],
+  ] as const) {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      identityErrors.push({ field, message: `${field} 必须是非空字符串` })
     }
+  }
+  if (identityErrors.length > 0) return { ok: false, fieldErrors: identityErrors }
+  return withSkillStorageLock(storageRoot, async () => {
+    const state = readSkillLocalState(storageRoot)
+    const liveNames = new Set((await listUserSkills(storageRoot)).map((skill) => skill.name))
+    for (const [name, entry] of Object.entries(state.skills)) {
+      if (entry.creationDraftId === creationDraftId && entry.creationSessionId === creationSessionId) {
+        if (!liveNames.has(name)) {
+          return {
+            ok: false,
+            fieldErrors: [{ field: 'name', message: `技能 ${name} 的目录已不存在，幂等凭证失效` }],
+          }
+        }
+        return { ok: true, name, alreadyCommitted: true }
+      }
+    }
+    const result = await createSkillLocked(storageRoot, input, {
+      draftId: creationDraftId,
+      sessionId: creationSessionId,
+    })
+    if (!result.ok) return result
+    return { ok: true, name: input.name, alreadyCommitted: false }
   })
+}
+
+/**
+ * 已提交凭证查询:供草稿已被删除后的 commit 重放使用。只认同时匹配草稿 ID
+ * 与会话归属、且本地目录仍存在的条目。
+ */
+export async function findSkillByCreationDraftId(
+  storageRoot: string,
+  creationDraftId: string,
+  creationSessionId: string,
+): Promise<{ name: string } | undefined> {
+  const state = readSkillLocalState(storageRoot)
+  const names = new Set((await listUserSkills(storageRoot)).map((skill) => skill.name))
+  for (const [name, entry] of Object.entries(state.skills)) {
+    if (
+      entry.creationDraftId === creationDraftId
+      && entry.creationSessionId === creationSessionId
+      && names.has(name)
+    ) return { name }
+  }
+  return undefined
 }
 
 /** 合并式更新:读原文件,只覆盖表单管理字段,metadata 等未知键经 extraLines 原样保留。 */
@@ -444,6 +559,8 @@ export async function updateSkill(
     const localEntry: SkillLocalEntry = {
       origin: previous?.origin ?? { kind: 'created' },
       contentDigest,
+      ...(previous?.creationDraftId !== undefined ? { creationDraftId: previous.creationDraftId } : {}),
+      ...(previous?.creationSessionId !== undefined ? { creationSessionId: previous.creationSessionId } : {}),
       ...(previous?.publishedRevision !== undefined ? { publishedRevision: previous.publishedRevision } : {}),
       ...(previous?.publishedDigest !== undefined ? { publishedDigest: previous.publishedDigest } : {}),
     }

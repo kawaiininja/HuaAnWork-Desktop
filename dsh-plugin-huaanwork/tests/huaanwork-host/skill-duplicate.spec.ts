@@ -8,6 +8,7 @@ import {
   SkillDuplicateError,
   duplicateLocalSkill,
 } from '../../src/huaanwork-host/skill-duplicate.ts'
+import { createSkillFromDraft } from '../../src/huaanwork-host/skills-host.ts'
 import { readSkillLocalState, readUserSkillToggles } from '../../src/huaanwork-host/skill-local-state.ts'
 
 const homes: string[] = []
@@ -68,4 +69,24 @@ test('refuses a missing source skill', async () => {
     duplicateLocalSkill(profile, 'missing', 'copy-skill'),
     (cause: unknown) => cause instanceof SkillDuplicateError && cause.code === 'skill-not-found',
   )
+})
+
+test('a duplicate does not inherit the creation idempotency keys', async () => {
+  const profile = makeHome()
+  const created = await createSkillFromDraft(
+    profile,
+    { name: 'source-skill', description: '源技能', content: '正文' },
+    'draft-src',
+    'session-src',
+  )
+  assert.equal(created.ok, true)
+
+  const copy = await duplicateLocalSkill(profile, 'source-skill', 'copy-skill')
+
+  assert.equal(copy.name, 'copy-skill')
+  const state = readSkillLocalState(profile)
+  assert.equal(state.skills['source-skill']?.creationDraftId, 'draft-src')
+  assert.equal(state.skills['source-skill']?.creationSessionId, 'session-src')
+  assert.equal(state.skills['copy-skill']?.creationDraftId, undefined)
+  assert.equal(state.skills['copy-skill']?.creationSessionId, undefined)
 })

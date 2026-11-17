@@ -6,6 +6,45 @@ export function resolveActiveTab(activeId: string, tabs: readonly { id: string }
   return tabs[0]?.id ?? activeId;
 }
 
+/** 普通会话标签的判定子集：“对话创建技能”只在这类标签里发预置命令。 */
+export type PlainConversationProbe = {
+  projectId: string | null;
+  pendingPick: boolean;
+  automationId?: string;
+  runPlaceholder?: boolean;
+  taskId?: string;
+};
+
+/**
+ * 普通会话标签：不绑定项目、不在待选项目态、不是自动化运行、不是重启后的运行骨架、
+ * 也不是项目子任务。“对话创建技能”只在这类标签里发预置命令，避免把创建流程塞进
+ * 运行/子任务上下文；项目绑定标签发送时会走子任务懒创建，会把它变成 `/create-skill`
+ * 子任务。
+ */
+export function isPlainConversationTab(tab: PlainConversationProbe): boolean {
+  return (
+    tab.automationId === undefined &&
+    tab.runPlaceholder !== true &&
+    tab.taskId === undefined &&
+    tab.projectId === null &&
+    !tab.pendingPick
+  );
+}
+
+/**
+ * “对话创建技能”的目标标签：优先当前标签（若仍是普通会话），否则按列表顺序取第一个
+ * 普通会话；都不满足时返回 undefined，由调用方新建中立标签。
+ */
+export function pickPlainConversationTab<T extends PlainConversationProbe & { id: string }>(
+  tabs: readonly T[],
+  activeId: string,
+): T | undefined {
+  return (
+    tabs.find((tab) => tab.id === activeId && isPlainConversationTab(tab)) ??
+    tabs.find(isPlainConversationTab)
+  );
+}
+
 /**
  * 删除一条运行记录后关掉它对应的对话标签（规格 §8.8）。
  *

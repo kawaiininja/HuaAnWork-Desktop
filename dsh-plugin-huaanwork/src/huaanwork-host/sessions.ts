@@ -2,12 +2,17 @@ import { existsSync, statSync } from 'node:fs'
 import { readdir, rm, unlink } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-import type { AttachmentMaps } from '../huaanwork-guardrails/agent-attachments.ts'
+import {
+  isAgentToolAttached,
+  releaseAttachmentPending,
+  type AttachmentMaps,
+} from '../huaanwork-guardrails/agent-attachments.ts'
 import { forgetConfirmedTarget, settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
 import { answerRouteInput, cancelRouteInput, clearInvalidRoute, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
 import {
   attachCreationTools,
+  CREATION_TOOLS,
   detectAgentCreationIntent,
   detectCreateAgentCommand,
   detachCreationTools,
@@ -15,9 +20,20 @@ import {
   injectCreateAgentSkill,
   noteCreationTurn,
 } from './agent-package/creation.ts'
-import { isAgentCancelText } from './agent-package/drafts.ts'
+import { CorruptAgentPackageDraftError, discardAgentPackageDraft, isAgentCancelText } from './agent-package/drafts.ts'
 import type { AgentPackageActiveTurnRegistry } from './agent-package/host.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
+import { isCreationCancelText } from './creation-utterances.ts'
+import {
+  attachSkillCreationTools,
+  CREATE_SKILL_COMMAND,
+  detectSkillCreationIntent,
+  detachSkillCreationTools,
+  getSkillCreationHost,
+  injectCreateSkill,
+  SKILL_CREATION_TOOLS,
+} from './skill-creation.ts'
+import { CorruptSkillCreationDraftError, discardSkillCreationDraft, hasAgentCreationDraftOnDisk } from './skill-creation-drafts.ts'
 import { invokeSkillText } from './skill-invoke.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
 import type { AgentsHost } from './agents-host.ts'
@@ -140,8 +156,10 @@ export async function sendToAgent(
   }
 
   // 每一轮用户原句都记进宿主:同意门禁只认最近一轮,技能/@ 轮若旁路不记,
-  // agent_commit 会读到更早那轮的「可以」(设计 §5)。创建门禁内的记录是同一句,
-  // 重复写入无副作用。
+  // agent_commit / skill_commit 会读到更早那轮的「可以」(设计 §5)。创建门禁内的
+  // 记录是同一句,重复写入无副作用。
+  const skillHost = getSkillCreationHost()
+  skillHost?.noteUserText(sessionId, text)
   getAgentPackageHost()?.noteUserText(sessionId, text)
 
   let afterIdle: (() => Promise<void>) | undefined
@@ -194,19 +212,167 @@ export async function sendToAgent(
         return resolved
       })())
 
-    // 创建入口(设计 §6.1):规范说法、`/create-agent`(文本或 skill 参数)或已有草稿时,
-    // 在技能/@ 分发与 agent 解析之前接管本轮。未注入宿主门面时整段旁路。
+    // 创建入口(设计 §7):智能体与技能两条对话创建流程在本层双向互斥。
+    // 顺序即授权契约:① 规范化内部入口 → ② 显式取消(终止操作) → ③ 流程类型识别 →
+    // ④ 双草稿异常态 → ⑤ 对方草稿损坏 fail-closed → ⑥ 双向互斥提示 →
+    // ⑦ 单技能草稿裸取消 → ⑧ 同类创建/续建才注入技能并挂工具。
     const packageHost = getAgentPackageHost()
-    const createSkillEntry = packageHost !== undefined && skillName === 'create-agent'
+
+    // ① 规范化内部创建入口(含显式取消),清出普通 skill 分流;显式取消在互斥检查之前解析。
+    // 边缘行为变化(M-3):旧路由的这一步带 `packageHost !== undefined` 守卫,此处无条件
+    // 规范化。宿主门面未注入的纯测试组合下,`/create-agent` 从「普通技能解析报错」变为
+    // 「普通聊天文本」;index.ts 恒注入 host,生产无用户可见影响。同名用户技能
+    // `create-skill` 也因此让位给内部流程。
+    const createAgentEntry = skillName === 'create-agent'
+    if (createAgentEntry) skillName = undefined
+    const createSkillEntry = skillName === 'create-skill'
     if (createSkillEntry) skillName = undefined
-    const creationIntent =
-      !atName && !skillName
-        ? createSkillEntry
-          ? detectCreateAgentCommand(text)
-          : detectAgentCreationIntent(text)
-        : undefined
-    const activeDraft = !atName && !skillName && packageHost?.hasDraft(sessionId) === true
-    if (packageHost && (creationIntent !== undefined || activeDraft)) {
+
+    const agentSlash = /^\/create-agent(?:\s+([\s\S]*))?$/.exec(text.trim())
+    const skillSlash = CREATE_SKILL_COMMAND.exec(text.trim())
+    // 客户端把 `/create-skill cancel` 拆成 `{ skill: 'create-skill', text: 'cancel' }`:
+    // 入口标志在场且正文是裸 `cancel` 时与显式斜杠命令同权,否则取消文本会被当成
+    // 新一轮创建正文重新进入访谈,损坏/双草稿提示给出的补救入口会原地打转。
+    const entryCancel = /^\s*cancel\s*$/.test(text.trim())
+    const agentCancel =
+      (agentSlash !== null && /^\s*cancel\s*$/.test(agentSlash[1] ?? '')) || (createAgentEntry && entryCancel)
+    const skillCancel =
+      (skillSlash !== null && /^\s*cancel\s*$/.test(skillSlash[1] ?? '')) || (createSkillEntry && entryCancel)
+
+    // ② 显式取消是终止操作,不得再被当成 create 意图;目标缺席也不能触碰另一流程。
+    if (skillCancel) {
+      if (skillHost?.hasDraft(sessionId) !== true) {
+        const notice = '当前没有可取消的技能创建。'
+        routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+        return { queued: true, sessionId, started: false, reason: notice }
+      }
+      // 取消是删除磁盘草稿的真操作:低层吞掉 rmSync 失败返回 false。失败时草稿仍在,
+      // 不得报「已取消」也不得卸下工具,否则损坏草稿的补救入口会骗用户重试循环。
+      const cancelled = await skillHost.cancel(sessionId, { explicit: true })
+      if (!cancelled) {
+        const notice = '已取消创建技能失败，草稿仍保留，请重试。'
+        routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+        return { queued: true, sessionId, started: false, reason: notice }
+      }
+      detachSkillCreationTools(ctx, sessionId)
+      const notice = '已取消创建技能，没有写入技能。'
+      routeCtx.emit({ event: 'skill/notice', text: notice, sessionId, terminal: 'cancelled' })
+      return { queued: true, sessionId, started: false, reason: notice }
+    }
+    if (agentCancel) {
+      // NI-1:守卫放宽——宽松 hasDraft 为假且磁盘文件也不在场才报「没有可取消」;损坏草稿
+      // (磁盘在场、宽松读不出)必须放行到 cancelAgentPackage(existsSync + rmSync 可清理),
+      // 否则损坏提示给出的 `/create-agent cancel` 补救入口会被本守卫挡死。
+      if (packageHost?.hasDraft(sessionId) !== true && !hasAgentCreationDraftOnDisk(routeCtx.profileDir, sessionId)) {
+        const notice = '当前没有可取消的智能体创建。'
+        routeCtx.emit({ event: 'agent/notice', text: notice, sessionId })
+        return { queued: true, sessionId, started: false, reason: notice }
+      }
+      // 目标缺席时 packageHost 可能是 undefined:显式取消仍以低层清理为准(幂等、只删本方)。
+      // 假值(删除失败或宿主缺席)时草稿仍在,不得报「已取消」:只要 hasDraft/磁盘守卫
+      // 已放行,这条路就是损坏草稿的唯一逃生口,虚报会让互斥守卫继续挡住每一轮。
+      const cancelled = await packageHost?.cancel(sessionId, { explicit: true })
+      if (cancelled !== true) {
+        const notice = '已取消创建智能体失败，草稿仍保留，请重试。'
+        routeCtx.emit({ event: 'agent/notice', text: notice, sessionId })
+        return { queued: true, sessionId, started: false, reason: notice }
+      }
+      detachCreationTools(ctx, sessionId)
+      const notice = '已取消创建智能体，没有写入智能体。'
+      routeCtx.emit({ event: 'agent/notice', text: notice, sessionId })
+      return { queued: true, sessionId, started: false, reason: notice }
+    }
+
+    // ③ 流程类型识别:自然语言入口只在无显式 /name、无 @agent 时计入;显式命令不受此限。
+    // 两侧 NL 都要让出对方的显式入口(客户端拆包 `{skill:'create-agent'}`/`{skill:'create-skill'}`
+    // 或直接斜杠命令),否则入口正文里的对方创建说法会被本侧 NL 检测器抢走,造成双向误触:
+    // `/create-agent 创建一个技能…` 被技能 NL 劫持,`/create-skill 创建一个智能体…` 误触互斥。
+    const nlAllowed = !atName && !skillName
+    const agentNlAllowed = nlAllowed && !createSkillEntry && skillSlash === null
+    const detectedAgentIntent = agentNlAllowed ? detectAgentCreationIntent(text) : undefined
+    const agentIntent = createAgentEntry ? detectCreateAgentCommand(text) : detectedAgentIntent
+    const requestedAgent = createAgentEntry || agentSlash !== null || detectedAgentIntent !== undefined
+    const skillNlAllowed = nlAllowed && !createAgentEntry && agentSlash === null
+    const requestedSkill =
+      createSkillEntry || skillSlash !== null || (skillNlAllowed && detectSkillCreationIntent(text) !== undefined)
+
+    const agentDraft = packageHost?.hasDraft(sessionId) === true
+    const skillDraft = skillHost?.hasDraft(sessionId) === true
+
+    // ④ 双草稿异常态:显式取消已在上方处理;只拦截创建/续建入口与裸取消,普通聊天、
+    // 普通 /name 和 @agent 不被全量拒绝。
+    const bareCreationCancel = nlAllowed && isCreationCancelText(text)
+    if (agentDraft && skillDraft && (requestedAgent || requestedSkill || bareCreationCancel)) {
+      const notice = '检测到并存的智能体与技能创建草稿，请先分别用 /create-skill cancel 或 /create-agent cancel 取消其中一个。'
+      routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+      return { queued: true, sessionId, started: false, reason: notice }
+    }
+
+    // ⑤ 对方草稿损坏检测(I-2):智能体侧 hasDraft 是宽松读取(损坏吞成 undefined),磁盘
+    // 文件在场却读不出即损坏,fail-closed 终止;不得让技能流程绕过损坏的智能体草稿。
+    // 补救路径由放宽后的 agentCancel 守卫保证(NI-1)。技能草稿在场时普通消息即「继续创建」
+    // (与 step 8 同口径),损坏文件也算「在场」;显式 /name 与 @agent 是非创建轮,按规格 §7
+    // 第 5 步豁免,不被本守卫误拒;无技能草稿时普通聊天不触发。
+    if ((requestedSkill || (nlAllowed && skillDraft)) && hasAgentCreationDraftOnDisk(routeCtx.profileDir, sessionId) && !agentDraft) {
+      const notice = '检测到损坏的智能体创建草稿，已终止本次创建路由。请用 /create-agent cancel 显式清理后重试。'
+      routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+      return { queued: true, sessionId, started: false, reason: notice }
+    }
+
+    // ⑥ 双向互斥:提示带对方草稿的名称或摘要(describeDraft 由各 Host 提供)。
+    if ((requestedAgent && skillDraft) || (requestedSkill && agentDraft)) {
+      const currentKind = requestedAgent ? '技能' : '智能体'
+      // describeDraft 对损坏草稿抛具名错误(技能侧 CorruptSkillCreationDraftError、智能体侧
+      // CorruptAgentPackageDraftError);捕获并终止,不得让异常穿透 sendToAgent,覆盖
+      // hasDraft 与 describeDraft 两次读取之间草稿被损坏的竞态窗口。
+      let summary: string | undefined
+      try {
+        summary = requestedAgent ? skillHost?.describeDraft(sessionId) : packageHost?.describeDraft(sessionId)
+      } catch (error) {
+        if (error instanceof CorruptSkillCreationDraftError || error instanceof CorruptAgentPackageDraftError) {
+          const cancelCommand = error instanceof CorruptSkillCreationDraftError ? '/create-skill cancel' : '/create-agent cancel'
+          const notice = `检测到损坏的创建草稿，已终止本次创建路由。请用 ${cancelCommand} 显式取消后重试。`
+          routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+          return { queued: true, sessionId, started: false, reason: notice }
+        }
+        throw error
+      }
+      const notice = `请先完成或取消当前的${currentKind}创建：${summary ?? (requestedAgent ? '技能草稿' : '智能体草稿')}`
+      routeCtx.emit({ event: requestedAgent ? 'agent/notice' : 'skill/notice', text: notice, sessionId })
+      return { queued: true, sessionId, started: false, reason: notice }
+    }
+
+    // ⑦ 单技能草稿的裸取消只清技能流程;双草稿已在④拒绝,智能体单草稿仍走既有取消分支。
+    // 与显式取消同口径:低层返回 false 即草稿未删,如实报失败并保留工具。
+    if (!agentDraft && skillDraft && bareCreationCancel) {
+      const cancelled = await skillHost!.cancel(sessionId)
+      if (!cancelled) {
+        const notice = '已取消创建技能失败，草稿仍保留，请重试。'
+        routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+        return { queued: true, sessionId, started: false, reason: notice }
+      }
+      detachSkillCreationTools(ctx, sessionId)
+      const notice = '已取消创建技能，没有写入技能。'
+      routeCtx.emit({ event: 'skill/notice', text: notice, sessionId, terminal: 'cancelled' })
+      return { queued: true, sessionId, started: false, reason: notice }
+    }
+
+    // ⑧ 同类创建/继续创建才注入技能并挂工具;技能中心入口按 create,已有草稿按 continue。
+    // 双草稿普通聊天不得注入任一方。切换创建流程时即便对方还没写下草稿,也先卸除
+    // 其创建工具,确保智能体与技能创建工具不同时挂载(规格 §7 第 7 步)。
+    if (skillHost && nlAllowed && !agentDraft && (requestedSkill || skillDraft)) {
+      skillHost.noteCreationTurn(sessionId, text)
+      // 原始斜杠命令的正文剥离 `/create-skill` 前缀后再注入;客户端拆包形态 text 已是正文。
+      const skillEntryText = skillSlash !== null ? (skillSlash[1] ?? '').trim() : text
+      text = injectCreateSkill(skillEntryText, skillDraft && !requestedSkill ? 'continue' : 'create')
+      detachOtherCreationTools(ctx, sessionId, CREATION_TOOLS, detachCreationTools)
+      attachSkillCreationTools(ctx, sessionId)
+    }
+
+    // 智能体同类创建/继续创建沿用既有分支,但必须位于上述互斥检查之后;技能草稿在场时
+    // 不注入、不挂载,也不接续智能体草稿。`!requestedSkill` 保证同一轮不会既按技能入口
+    // 又按智能体入口双重注入(两条入口同时命中时由先解析的技能入口胜出)。
+    if (packageHost && !skillDraft && !requestedSkill && (agentIntent !== undefined || (nlAllowed && agentDraft))) {
       noteCreationTurn(sessionId, text)
       if (isAgentCancelText(text) && (await packageHost.cancel(sessionId))) {
         detachCreationTools(ctx, sessionId)
@@ -214,9 +380,9 @@ export async function sendToAgent(
         routeCtx.emit({ event: 'agent/notice', text: notice, sessionId })
         return { queued: true, sessionId, started: false, reason: notice }
       }
-      if (creationIntent?.kind === 'update') {
+      if (agentIntent?.kind === 'update') {
         try {
-          await packageHost.beginUpdate(sessionId, creationIntent.slug)
+          await packageHost.beginUpdate(sessionId, agentIntent.slug)
         } catch (error) {
           // 坏的 update 目标(不存在/已损坏)回一条会话提示,不把整次发送变成路由错误。
           const notice = `无法进入更新模式：${error instanceof Error ? error.message : String(error)}`
@@ -228,14 +394,15 @@ export async function sendToAgent(
           return { queued: true, sessionId, started: false, reason: notice }
         }
       }
-      const mode = creationIntent?.kind ?? 'continue'
+      const mode = agentIntent?.kind ?? 'continue'
       text = injectCreateAgentSkill(
-        creationIntent ? creationIntent.initialText || text : text,
+        agentIntent ? agentIntent.initialText || text : text,
         mode,
-        creationIntent?.kind === 'update' ? creationIntent.slug : undefined,
+        agentIntent?.kind === 'update' ? agentIntent.slug : undefined,
       )
-      // 工具跨轮保持挂载,只在 commit 成功或取消时卸下(设计 §6.2):
+      // 工具跨轮保持挂载,只在 commit 成功、取消或改口进入另一类创建流程时卸下(设计 §6.2、§7):
       // 访谈首轮提出草稿前没有草稿,不能按「回合结束是否有草稿」判断。
+      detachOtherCreationTools(ctx, sessionId, SKILL_CREATION_TOOLS, detachSkillCreationTools)
       attachCreationTools(ctx, sessionId)
     }
 
@@ -574,6 +741,39 @@ function descendantSessionIds(sessionId: string): string[] {
   return collected
 }
 
+/** 若对侧创建工具仍挂在本会话上（未落盘草稿时改口切换），先卸除再挂本侧工具。 */
+function detachOtherCreationTools(
+  ctx: SessionRuntimeContext,
+  sessionId: string,
+  otherTools: readonly string[],
+  detach: (ctx: SessionRuntimeContext, sessionId: string) => void,
+): void {
+  if (!otherTools.some((name) => isAgentToolAttached(ctx.huaanworkAttachments, sessionId, name))) return
+  detach(ctx, sessionId)
+}
+
+/**
+ * 删除或级联清理会话时统一移除两类创建草稿；清理失败只记日志，
+ * 不让外层删除（会话/任务/项目/自动化）在日志已删后谎报失败。
+ */
+export function discardSessionCreationDrafts(
+  profileDir: string,
+  sessionId: string,
+  logger?: (message: string) => void,
+  caller = 'session.remove',
+): void {
+  try {
+    discardSkillCreationDraft(profileDir, sessionId)
+  } catch (error) {
+    logger?.(`${caller}: 技能草稿清理失败 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    discardAgentPackageDraft(profileDir, sessionId)
+  } catch (error) {
+    logger?.(`${caller}: 智能体草稿清理失败 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 /**
  * 删除会话前必须先释放的运行态：等待中的卡片、绑定的 live agent、子会话登记、
  * 坏参数计数与上一份已确认的计划目标。`session.remove` 与 task/project 级联删除
@@ -595,6 +795,11 @@ export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, se
   forgetConfirmedTarget(sessionId)
   if (ctx) {
     for (const id of [sessionId, ...descendants]) {
+      // 删除是创建流程的终止路径:草稿由 removeSession 清理,运行态附件与挂起解绑项
+      // 在这里卸除,防止同 sessionId 重建后继承或被晚到的旧 tools/result 误卸。
+      releaseAttachmentPending(ctx.huaanworkAttachments, id)
+      detachSkillCreationTools(ctx, id)
+      detachCreationTools(ctx, id)
       ctx.huaanworkSessionModels?.delete(id)
       ctx.huaanworkSessionRoots?.delete(id)
     }
@@ -637,6 +842,9 @@ async function removeSession(
   // `sessionRemove only ever touches the minted sibling root …`)。
   const { profileDir, logger } = opts
   if (profileDir) {
+    // 删除会话=放弃未完成草稿(owner 2026-11-16 裁定):两类创建草稿随会话一并清理,
+    // 否则稳定通道会话重建同 sessionId 时旧草稿复活并继续注入创建流程。
+    discardSessionCreationDrafts(profileDir, sessionId, logger, 'session.remove')
     const neutralStable = sessionIdFor(resolve(neutralWorkspaceRootPath(profileDir)))
     if (sessionId.startsWith(`${neutralStable}-`)) {
       const siblingRoot = neutralSessionRootPath(profileDir, sessionId)

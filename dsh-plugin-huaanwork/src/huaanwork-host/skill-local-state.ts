@@ -164,6 +164,15 @@ function validateEntry(name: string, value: unknown, path: string): SkillLocalEn
   if (value.publishedDigest !== undefined) {
     entry.publishedDigest = requireString(value.publishedDigest, `${name}.publishedDigest`, path)
   }
+  if (value.creationDraftId !== undefined) {
+    entry.creationDraftId = requireString(value.creationDraftId, `${name}.creationDraftId`, path)
+  }
+  if (value.creationSessionId !== undefined) {
+    entry.creationSessionId = requireString(value.creationSessionId, `${name}.creationSessionId`, path)
+  }
+  if ((value.creationDraftId === undefined) !== (value.creationSessionId === undefined)) {
+    throw new CorruptSkillLocalStateError(`本地技能状态 creationDraftId 与 creationSessionId 必须同时存在:${path}`)
+  }
   return entry
 }
 

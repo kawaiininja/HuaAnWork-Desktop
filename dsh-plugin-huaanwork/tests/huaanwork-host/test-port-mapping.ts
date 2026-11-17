@@ -143,7 +143,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'session.list filters sessions by project root',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-host/sessions.spec.ts:1728',
+    evidence: 'tests/huaanwork-host/sessions.spec.ts:1882',
   },
   {
     file: 'automations-host.test.ts',

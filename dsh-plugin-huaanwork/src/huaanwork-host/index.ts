@@ -36,6 +36,7 @@ import {
   refreshCatalogPackageCache,
 } from './agent-package/catalog-client.ts'
 import { createAgentPackageRuntimeRegistry, stopAllAgentPackageProcesses } from './agent-package/runtime.ts'
+import { createSkillCreationHost, setSkillCreationHost } from './skill-creation.ts'
 import { readHuaanworkSettingsSync } from './settings.ts'
 import { configureSkillCatalog } from './skill-catalog-client.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
@@ -45,6 +46,7 @@ import {
   registerAgentPackageCreationTools,
   registerAgentPackageRuntimeTools,
 } from '../huaanwork-guardrails/agent-package-tools.ts'
+import { registerSkillCreationTools } from '../huaanwork-guardrails/skill-creation-tools.ts'
 
 export const name = 'huaanwork-host'
 export const inject = ['webServer', 'agents', 'subagents', 'desktopRuntime']
@@ -331,6 +333,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   setAgentPackageHost(agentPackageHost)
   setAgentPackageActiveTurns(agentPackageTurns)
   ctx.huaanworkAgentPackageHost = agentPackageHost
+  // 对话创建技能宿主:发送入口(sessions.ts)、skill_propose/skill_commit 与“我的技能”
+  // 刷新共用同一实例;宿主自己持有 per-session 原句与回合标记,`hasDraft` 读磁盘草稿。
+  const skillCreationHost = createSkillCreationHost({ profileDir: config.profileDir })
+  setSkillCreationHost(skillCreationHost)
   // call_host_tool 注册接线(P1 修复):旧 sidecar 的生产调用在桌面移植时遗失,
   // @点名 HTTP 小工具链路因此断裂。工具全局注册单实例,执行边界在 policy 的会话
   // 附件门禁(decide.ts:111-112:unattached → deny),可见性由 present-as 的
@@ -342,6 +348,9 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     inject: ['tools'],
     apply: (pc: Context) => {
       pc.effect(() => {
+        // 门面在父作用域创建;tools 服务重提供会让本 effect 重跑,而旧 disposer 已把它
+        // 清空。每次注册前重新注入,保证工具重新挂载期间 getSkillCreationHost() 仍可用。
+        setSkillCreationHost(skillCreationHost)
         const toolCtx = {
           tools: (pc as unknown as { tools?: unknown }).tools,
           huaanworkAgentCatalog: ctx.huaanworkAgentCatalog,
@@ -360,12 +369,17 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
         const unregisterPackageTools = registerAgentPackageCreationTools(toolCtx, agentPackageHost)
         // 运行链路工具全局注册;可见性/执行权由子会话的 sessionAgentTools 附件控制。
         const unregisterRuntimeTools = registerAgentPackageRuntimeTools(toolCtx, agentPackageRegistry)
+        // 对话创建技能:两个工具全局注册,可见性/执行权同样由会话附件与 policy 门禁控制。
+        const unregisterSkillTools = registerSkillCreationTools(toolCtx, skillCreationHost)
         syncHostToolDescription = () => {
           unregister?.()
           unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
         }
         return () => {
           syncHostToolDescription = undefined
+          // 先注销创建工具再清空门面:卸载后不能再有持有门面的工具在途。
+          unregisterSkillTools()
+          setSkillCreationHost(undefined)
           unregisterRuntimeTools()
           unregisterPackageTools()
           unregister?.()

@@ -94,3 +94,50 @@ export function isMcpAttached(maps: AttachmentMaps | undefined, sessionId: strin
 export function isAgentToolAttached(maps: AttachmentMaps | undefined, sessionId: string | undefined, toolName: string): boolean {
   return isMcpAttached(maps, sessionId, toolName);
 }
+
+const attachmentCleanups = new WeakMap<AttachmentMaps, Set<(sessionId: string) => void>>();
+
+/**
+ * 登记随会话释放触发的清理回调（挂在同一 AttachmentMaps 弱键上，不改其公开字段）。
+ */
+export function registerAttachmentCleanup(
+  maps: AttachmentMaps | undefined,
+  cleanup: (sessionId: string) => void,
+): () => void {
+  if (!maps) return () => undefined;
+  let listeners = attachmentCleanups.get(maps);
+  if (!listeners) {
+    listeners = new Set();
+    attachmentCleanups.set(maps, listeners);
+  }
+  listeners.add(cleanup);
+  return () => {
+    const current = attachmentCleanups.get(maps);
+    if (!current) return;
+    current.delete(cleanup);
+    if (current.size === 0) attachmentCleanups.delete(maps);
+  };
+}
+
+/**
+ * 绑定「commit 后的待解绑 callId 表」与会话释放事件：删除或重置同一 sessionId
+ * （如稳定通道 `work-1`）时丢弃该会话尚未到达 `tools/result` 的挂起项。
+ */
+export function trackSessionPendingDetach(
+  maps: AttachmentMaps | undefined,
+  pendingDetach: Map<string, string>,
+): () => void {
+  return registerAttachmentCleanup(maps, (sessionId) => {
+    for (const [callId, ownerSessionId] of pendingDetach) {
+      if (ownerSessionId === sessionId) pendingDetach.delete(callId);
+    }
+  });
+}
+
+/** 会话运行态释放时调用，清理随附件表登记的在途 pending 状态。 */
+export function releaseAttachmentPending(maps: AttachmentMaps | undefined, sessionId: string): void {
+  if (!maps || !sessionId) return;
+  const listeners = attachmentCleanups.get(maps);
+  if (!listeners) return;
+  for (const cleanup of [...listeners]) cleanup(sessionId);
+}

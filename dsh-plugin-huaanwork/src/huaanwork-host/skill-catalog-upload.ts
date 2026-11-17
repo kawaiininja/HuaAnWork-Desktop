@@ -89,6 +89,8 @@ export async function uploadLocalSkill(
       writeSkillLocalEntry(profileDir, name, {
         origin: fresh.origin,
         contentDigest: uploadDigest,
+        ...(fresh.creationDraftId !== undefined ? { creationDraftId: fresh.creationDraftId } : {}),
+        ...(fresh.creationSessionId !== undefined ? { creationSessionId: fresh.creationSessionId } : {}),
         ...(fresh.publishedRevision !== undefined ? { publishedRevision: fresh.publishedRevision } : {}),
         ...(fresh.publishedDigest !== undefined ? { publishedDigest: fresh.publishedDigest } : {}),
       })
@@ -130,12 +132,16 @@ export async function uploadLocalSkill(
     } catch {
       // Keep the uploaded digest; a vanished skill is reported by its absence.
     }
-    const origin = readSkillLocalState(profileDir).skills[name]?.origin ?? local?.origin ?? { kind: 'created' as const }
+    // 发布回写同样只重读既有条目,创建身份永不上传、也不从上传参数读取。
+    const previous = readSkillLocalState(profileDir).skills[name] ?? local
+    const origin = previous?.origin ?? { kind: 'created' as const }
     let written: LocalSkillInfo | undefined
     try {
       writeSkillLocalEntry(profileDir, name, {
         origin,
         contentDigest,
+        ...(previous?.creationDraftId !== undefined ? { creationDraftId: previous.creationDraftId } : {}),
+        ...(previous?.creationSessionId !== undefined ? { creationSessionId: previous.creationSessionId } : {}),
         publishedRevision: published.skill.revision,
         publishedDigest: uploadDigest,
       })

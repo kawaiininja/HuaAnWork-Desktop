@@ -1,9 +1,11 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import {
   createSkill,
+  createSkillFromDraft,
   getSkill,
   importSkill,
   listUserSkills,
@@ -452,6 +454,129 @@ describe('内部技能不可全局启用(设计 §6.1)', () => {
 
     await expect(setSkillEnabled(home, 'create-agent', true)).rejects.toThrow(/内部技能，不能启停/)
     expect(readUserSkillToggles(home)['create-agent']).toBeUndefined()
+  })
+})
+
+describe('对话创建技能的保留名', () => {
+  test('rejects user skills named create-skill on the host side', async () => {
+    const root = makeHome()
+    const result = await createSkill(root, { name: 'create-skill', description: '占用内部名', content: '正文' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.fieldErrors.map((error) => error.field)).toContain('name')
+  })
+})
+
+describe('对话创建草稿的幂等入口 (Task 2)', () => {
+  test('creates from a draft once and preserves identity after editing', async () => {
+    const root = makeHome()
+    const input = { name: 'weekly-report', description: '生成周报', content: '按步骤生成周报' }
+    const first = await createSkillFromDraft(root, input, 'draft-1', 'session-1')
+    expect(first).toMatchObject({ ok: true, alreadyCommitted: false, name: 'weekly-report' })
+    await expect(resolveInvocableSkill(root, 'weekly-report')).rejects.toThrow('weekly-report is disabled')
+    setUserSkillToggle(root, 'weekly-report', true)
+    await expect(resolveInvocableSkill(root, 'weekly-report')).resolves.toMatchObject({ skill: { name: 'weekly-report' } })
+
+    const edited = await updateSkill(root, 'weekly-report', { ...input, content: '更新后的正文' })
+    expect(edited.ok).toBe(true)
+
+    const replay = await createSkillFromDraft(root, input, 'draft-1', 'session-1')
+    expect(replay).toMatchObject({ ok: true, alreadyCommitted: true, name: 'weekly-report' })
+    expect(readSkillLocalState(root).skills['weekly-report']!.creationDraftId).toBe('draft-1')
+    expect(readSkillLocalState(root).skills['weekly-report']!.creationSessionId).toBe('session-1')
+  })
+
+  test('a first draft create clears a stale same-name enable toggle, but replay preserves later manual enablement', async () => {
+    const root = makeHome()
+    const input = { name: 'daily-summary', description: '生成日报', content: '对话创建的正文' }
+    const legacy = await createSkill(root, { ...input, content: '旧技能正文' })
+    expect(legacy.ok).toBe(true)
+    await setSkillEnabled(root, input.name, true)
+    // 模拟带外删除:正常 removeSkill 会清 toggle,这里只删目录以留下历史启用键。
+    await rm(join(root, 'skills', input.name), { recursive: true, force: true })
+
+    const created = await createSkillFromDraft(root, input, 'draft-stale-toggle', 'session-1')
+    expect(created).toEqual({ ok: true, name: input.name, alreadyCommitted: false })
+    expect(readUserSkillToggles(root)[input.name]).toBeUndefined()
+    expect((await listUserSkills(root)).find((skill) => skill.name === input.name)?.enabled).toBe(false)
+    await expect(resolveInvocableSkill(root, input.name)).rejects.toThrow(`${input.name} is disabled`)
+
+    await setSkillEnabled(root, input.name, true)
+    const committedBody = readFileSync(join(root, 'skills', input.name, 'SKILL.md'), 'utf8')
+    const replay = await createSkillFromDraft(
+      root,
+      { ...input, content: '重放不得覆盖正文' },
+      'draft-stale-toggle',
+      'session-1',
+    )
+    expect(replay).toEqual({ ok: true, name: input.name, alreadyCommitted: true })
+    expect(readUserSkillToggles(root)[input.name]).toBe(true)
+    expect(readFileSync(join(root, 'skills', input.name, 'SKILL.md'), 'utf8')).toBe(committedBody)
+  })
+
+  test('rejects multiline frontmatter fields', async () => {
+    const root = makeHome()
+    const result = await createSkill(root, {
+      name: 'multiline-test', description: '第一行\n第二行', content: '正文',
+    })
+    expect(result.ok).toBe(false)
+  })
+
+  test('rejects a multiline whenToUse', async () => {
+    const root = makeHome()
+    const result = await createSkill(root, {
+      name: 'multiline-when', description: '描述', whenToUse: '第一行\n第二行', content: '正文',
+    })
+    expect(result.ok).toBe(false)
+  })
+
+  test('createSkill trims description and drops whitespace-only whenToUse', async () => {
+    const root = makeHome()
+    const result = await createSkill(root, {
+      name: 'trim-test', description: '  描述  ', whenToUse: '   ', content: '正文',
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.skill.description).toBe('描述')
+    expect(result.skill.whenToUse).toBeUndefined()
+    const raw = readFileSync(join(root, 'skills', 'trim-test', 'SKILL.md'), 'utf8')
+    expect(raw).toContain('description: 描述')
+    expect(raw).not.toContain('whenToUse')
+  })
+
+  test('rejects empty or whitespace creation ids without writing state or directory', async () => {
+    const root = makeHome()
+    const input = { name: 'weekly-report', description: '生成周报', content: '按步骤生成周报' }
+
+    const emptyDraft = await createSkillFromDraft(root, input, '', 'session-1')
+    expect(emptyDraft).toMatchObject({ ok: false })
+    if (!emptyDraft.ok) expect(emptyDraft.fieldErrors.map((error) => error.field)).toContain('creationDraftId')
+
+    const emptySession = await createSkillFromDraft(root, input, 'draft-1', '')
+    expect(emptySession).toMatchObject({ ok: false })
+    if (!emptySession.ok) expect(emptySession.fieldErrors.map((error) => error.field)).toContain('creationSessionId')
+
+    const whitespaceDraft = await createSkillFromDraft(root, input, '   ', 'session-1')
+    expect(whitespaceDraft.ok).toBe(false)
+
+    // 拒绝必须发生在任何落盘之前:没有技能目录,状态文档仍可读且为空。
+    expect(await fsp.stat(join(root, 'skills', 'weekly-report')).catch(() => null)).toBeNull()
+    expect(readSkillLocalState(root)).toEqual({ schemaVersion: 1, skills: {} })
+    expect((await listUserSkills(root)).map((skill) => skill.name)).toEqual([])
+  })
+
+  test('rejects idempotent replay as a field error when the state key remains but the directory is gone', async () => {
+    const root = makeHome()
+    const input = { name: 'weekly-report', description: '生成周报', content: '按步骤生成周报' }
+    const first = await createSkillFromDraft(root, input, 'draft-1', 'session-1')
+    expect(first.ok).toBe(true)
+
+    await rm(join(root, 'skills', 'weekly-report'), { recursive: true, force: true })
+
+    const replay = await createSkillFromDraft(root, input, 'draft-1', 'session-1')
+    expect(replay.ok).toBe(false)
+    if (!replay.ok) expect(replay.fieldErrors.map((error) => error.field)).toContain('name')
+    expect(readSkillLocalState(root).skills['weekly-report']!.creationDraftId).toBe('draft-1')
+    expect(readSkillLocalState(root).skills['weekly-report']!.creationSessionId).toBe('session-1')
   })
 })
 

@@ -147,6 +147,8 @@ export type SkillOrigin =
 export type SkillLocalEntry = {
   origin: SkillOrigin;
   contentDigest: string;
+  creationDraftId?: string;
+  creationSessionId?: string;
   publishedRevision?: number;
   publishedDigest?: string;
 };
@@ -463,6 +465,17 @@ export type AgentPackageConfirmCard = {
 };
 
 /**
+ * 对话创建技能的确认卡。字段与 host `skill-creation-drafts.ts` 的提案投影一致;
+ * 客户端不从 host 导入。
+ */
+export type SkillConfirmCard = {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  contentPreview: string;
+};
+
+/**
  * 一次显式 @ 调用的展示相位。`stopping` 表示停止/强制释放已开始但尚未确认完成；
  * `stopped` 只在执行终结与所需清理都确认后出现（见设计 §5.2）。
  */
@@ -567,6 +580,17 @@ export type RpcEvent =
   | { event: "agent/confirm"; card: AgentPackageConfirmCard; sessionId?: string }
   /** 本地智能体包新增/更新/启停后触发,客户端据此刷新列表。 */
   | { event: "agent/changed"; slug?: string }
+  /** 结构化技能创建确认卡;客户端优先渲染它,模型贴回的纯文本是后备。 */
+  | { event: "skill/confirm"; card: SkillConfirmCard; sessionId?: string }
+  /**
+   * 技能创建成功卡。载荷含成功文案、`draftId` 与 `name`;客户端按 `draftId`
+   * 去重,重放只补偿丢失事件,不产生第二张成功卡。
+   */
+  | { event: "skill/success"; text: string; draftId: string; name: string; sessionId: string }
+  /** 技能创建的错误与一般提示;仅取消成功携带 terminal,供客户端消费活动确认卡。 */
+  | { event: "skill/notice"; text: string; sessionId?: string; terminal?: "cancelled" }
+  /** 本地技能新增/变化后触发,客户端据此刷新“我的技能”与补全数据。 */
+  | { event: "skill/changed"; name: string; origin: { kind: "created" } }
   | { event: "sidecar/status"; ready: boolean }
   | { event: "automation/run-start"; automationId: string; runId: string; projectId: string | null; sessionId?: string; trigger?: "manual" | "schedule" | "catchup" }
   /** 该次运行在本轮项目下创建了运行子任务（名称/项目取运行当时快照）；`task` 是完整登记项。 */
