@@ -70,6 +70,8 @@ function validFacts() {
         countFormatAlwaysXY: true,
         activityToolNames: ['bash', 'read'],
         sessionToolNames: ['read', 'bash'],
+        latestRoundToolNames: ['bash'],
+        latestRoundCovered: true,
         activityMatchesSession: true,
         reasons: [],
       },
@@ -118,6 +120,8 @@ function validFacts() {
         freshTabTaskCount: 0,
         historyReloadTaskCount: 4,
         historyTodoCardCount: 1,
+        postHistoryTurnTaskCount: 0,
+        previousTurnTodoNotCarried: true,
         previousTodoNotInFreshTab: true,
         connectionSamples: [{ connection: 'live', banner: null }, { connection: 'reconnecting', banner: '正在重新连接，状态可能不是最新' }],
         reconnectBannerSeen: true,
@@ -138,6 +142,8 @@ function validFacts() {
         siblingCompleted: true,
         siblingSettlementSeen: true,
         mainCardCounts: { target: 1, sibling: 1 },
+        mainToolPanelCount: 2,
+        mainToolPanelsUnique: true,
         todoCardCount: 1,
         duplicateFree: true,
         reasons: [],
@@ -198,6 +204,12 @@ test('compareHeaderToolPhases rejects leaks before, absence during, and no recla
   const retained = compareHeaderToolPhases({ before: [], during: ['subagent'], after: ['subagent'] })
   assert.equal(retained.ok, false)
   assert.match(retained.reasons.join(' '), /after/)
+})
+
+test('compareHeaderToolPhases rejects a missing ordinary pre-execution header', () => {
+  const comparison = compareHeaderToolPhases({ before: [], during: ['subagent'], after: ['bash'] })
+  assert.equal(comparison.ok, false)
+  assert.match(comparison.reasons.join(' '), /no ordinary pre-execution header snapshot/)
 })
 
 const SESSION_HEADERS = [
@@ -286,6 +298,12 @@ test('rejects activity that does not match the current turn session log', () => 
   assert.throws(() => assertProgressSidebarAcceptanceFacts(facts), /activity does not match/)
 })
 
+test('rejects an activity panel that misses the latest model round', () => {
+  const facts = validFacts()
+  facts.checks['no-fabricated-percentage'].latestRoundCovered = false
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(facts), /latest model round/)
+})
+
 test('rejects an ordinary turn that exposed subagent or an unconverged explicit @ cancel', () => {
   const exposed = validFacts()
   exposed.checks['parent-no-self-spawn'].ordinaryTurnsWithoutSubagent = false
@@ -332,6 +350,10 @@ test('relays the Host restart evidence and requires the reconnect banner', () =>
   leakedTodo.checks['switch-history-restart'].previousTodoNotInFreshTab = false
   assert.throws(() => assertProgressSidebarAcceptanceFacts(leakedTodo), /switch-history-restart/)
 
+  const carriedTodo = validFacts()
+  carriedTodo.checks['switch-history-restart'].previousTurnTodoNotCarried = false
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(carriedTodo), /previous turn todo/)
+
   const samePid = validFacts()
   samePid.checks['switch-history-restart'].restart.evidence.restart.newPid = 501
   assert.throws(() => assertProgressSidebarAcceptanceFacts(samePid), /Host pid did not change/)
@@ -357,4 +379,8 @@ test('rejects duplicated cancel RPCs, sibling interference, and duplicated cards
   const duplicate = validFacts()
   duplicate.checks['single-cancel-isolation'].duplicateFree = false
   assert.throws(() => assertProgressSidebarAcceptanceFacts(duplicate), /single-cancel-isolation/)
+
+  const duplicatedToolPanels = validFacts()
+  duplicatedToolPanels.checks['single-cancel-isolation'].mainToolPanelsUnique = false
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(duplicatedToolPanels), /duplicate tool panels/)
 })

@@ -154,6 +154,7 @@ export function compareHeaderToolPhases(phases) {
   const duringHasSubagent = during.includes('subagent')
   const afterHasSubagent = after.includes('subagent')
   const reasons = []
+  if (before.length === 0) reasons.push('no ordinary pre-execution header snapshot')
   if (beforeHasSubagent) reasons.push('subagent is already present in the ordinary turn before the execution window')
   if (!duringHasSubagent) reasons.push('subagent is absent during the system-skill execution window')
   if (afterHasSubagent) reasons.push('subagent was not reclaimed after the execution window')
@@ -297,6 +298,7 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   requireFacts(percent.progressBarCount === 0, `no-fabricated-percentage: ${String(percent.progressBarCount)} progress bars were rendered`)
   requireFacts(percent.countFormatAlwaysXY === true, 'no-fabricated-percentage: the header count left the X/Y format during execution')
   requireFacts(percent.activityMatchesSession === true, 'no-fabricated-percentage: the current-turn activity does not match the session log')
+  requireFacts(percent.latestRoundCovered === true, 'no-fabricated-percentage: the latest model round is missing from the activity panel')
   if (Array.isArray(percent.foreignActivityNames)) {
     requireFacts(percent.foreignActivityNames.length === 0, `no-fabricated-percentage: ${String(percent.foreignActivityNames.length)} activity tool names are absent from the current turn (${percent.foreignActivityNames.join(', ')})`)
   }
@@ -329,6 +331,7 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   const switched = checks['switch-history-restart']
   requireFacts(switched.freshTabTaskCount === 0, 'switch-history-restart: the previous session todo leaked into the fresh tab')
   requireFacts(switched.previousTodoNotInFreshTab === true, 'switch-history-restart: the previous session todo was not isolated from the fresh tab')
+  requireFacts(switched.previousTurnTodoNotCarried === true, 'switch-history-restart: a new turn in the same session still showed the previous turn todo')
   requireFacts(switched.historyTodoCardCount >= 1, 'switch-history-restart: history reload rendered no todo cards')
   requireFacts(Number.isInteger(switched.historyReloadTaskCount) && switched.historyReloadTaskCount >= 3, 'switch-history-restart: the reloaded progress panel lost the task list')
   requireFacts(switched.reconnectBannerSeen === true, 'switch-history-restart: no disconnect/reconnect banner was observed during the Host restart')
@@ -347,6 +350,7 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   requireFacts(cancel.siblingCompleted === true, 'single-cancel-isolation: the concurrent sibling run did not complete')
   requireFacts(cancel.siblingSettlementSeen === true, 'single-cancel-isolation: the sibling run was never delivered back to the parent')
   requireFacts(cancel.mainCardCounts?.target === 1 && cancel.mainCardCounts?.sibling === 1, 'single-cancel-isolation: a duplicated or missing main-flow run card was observed')
+  requireFacts(cancel.mainToolPanelsUnique === true, 'single-cancel-isolation: the main flow rendered duplicate tool panels')
   requireFacts(cancel.duplicateFree === true, `single-cancel-isolation: duplicated cards were observed (todo cards ${String(cancel.todoCardCount)})`)
   return true
 }
@@ -958,6 +962,7 @@ const CARDS_STATE = `(() => {
     main: [...document.querySelectorAll('.chat-log .subagent-run-card')].map(read),
     rail: [...document.querySelectorAll('.right-pane .subagent-run-card')].map(read),
     todoCards: document.querySelectorAll('.chat-log .todo-card').length,
+    toolPanelBodies: [...document.querySelectorAll('.chat-log [id^="tool-panel-body-"]')].map((node) => node.id),
   }
 })()`
 
@@ -1566,9 +1571,26 @@ function turnFacts(session, marker) {
   const turnEvents = session.events.slice(startIndex, end)
   const toolCalls = turnEvents.flatMap((event) => (
     event?.type === 'tool/call' && typeof event.data?.name === 'string'
-      ? [{ name: event.data.name, seq: typeof event.seq === 'number' ? event.seq : null }]
+      ? [{
+          name: event.data.name,
+          seq: typeof event.seq === 'number' ? event.seq : null,
+          turn: typeof event.data.turn === 'number' ? event.data.turn : null,
+          step: typeof event.data.step === 'number' ? event.data.step : null,
+        }]
       : []
   ))
+  const substantiveCalls = toolCalls.filter((call) => call.name !== 'todo_write')
+  const latest = substantiveCalls.reduce((best, call) => {
+    if (best === undefined) return call
+    if (call.turn === null || call.step === null) return best
+    if (best.turn === null || best.step === null) return call
+    return call.turn > best.turn || (call.turn === best.turn && call.step > best.step) ? call : best
+  }, undefined)
+  const latestRoundToolNames = latest === undefined
+    ? []
+    : [...new Set(substantiveCalls
+        .filter((call) => call.turn === latest.turn && call.step === latest.step)
+        .map((call) => call.name))]
   const userMessage = session.events[startIndex]
   return {
     marker,
@@ -1577,6 +1599,7 @@ function turnFacts(session, marker) {
     endSeq: end >= session.events.length ? null : (typeof session.events[end].seq === 'number' ? session.events[end].seq : end),
     header: inspectSessionHeaderTools(session.events),
     toolNames: toolCalls.map((call) => call.name),
+    latestRoundToolNames,
     todoWriteCount: toolCalls.filter((call) => call.name === 'todo_write').length,
   }
 }
@@ -1769,16 +1792,24 @@ async function driveNoFabricatedPercentage(client) {
   // rail) is the real violation.
   const sessionToolNames = [...new Set((turn?.toolNames ?? []).filter((name) => name !== 'todo_write'))].sort()
   const activityToolNames = [...new Set(names)].sort()
+  const latestRoundToolNames = [...new Set((turn?.latestRoundToolNames ?? []).filter((name) => name !== 'todo_write'))].sort()
   const foreignActivityNames = activityToolNames.filter((name) => !sessionToolNames.includes(name))
   const activityMatchesSession = sessionToolNames.length > 0
     && activityToolNames.length > 0
     && foreignActivityNames.length === 0
+  // §8.2 keeps the rail to the latest/in-progress round, so the rail need not
+  // repeat every earlier-round tool; the latest round itself must be represented.
+  const latestRoundCovered = latestRoundToolNames.length === 0
+    || latestRoundToolNames.every((name) => activityToolNames.includes(name))
   const reasons = []
   if (percentTexts.length > 0) reasons.push(`percentage labels rendered: ${percentTexts.slice(0, 3).join(', ')}`)
   if (progressBarCount > 0) reasons.push(`${String(progressBarCount)} progress bars rendered`)
   if (!countFormatAlwaysXY) reasons.push('the header count left the X/Y format')
   if (!activityMatchesSession) {
     reasons.push(`activity ${JSON.stringify(activityToolNames)} does not match the current-turn session log ${JSON.stringify(sessionToolNames)}`)
+  }
+  if (!latestRoundCovered) {
+    reasons.push(`the latest round tools ${JSON.stringify(latestRoundToolNames)} are missing from the activity panel ${JSON.stringify(activityToolNames)}`)
   }
   if (final?.tasks.some((task) => /\\d+\\s*%/u.test(task.content)) === true) {
     // Task content may legitimately carry a percentage; only status/count labels count as fabricated progress.
@@ -1792,6 +1823,8 @@ async function driveNoFabricatedPercentage(client) {
     countFormatAlwaysXY,
     activityToolNames,
     sessionToolNames,
+    latestRoundToolNames,
+    latestRoundCovered,
     foreignActivityNames,
     activityMatchesSession,
     samples: samples.length,
@@ -2383,6 +2416,14 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
       reasons.push(`the rail terminate control could not be clicked: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
   }
+  // The network request is captured after the click; wait for it before counting.
+  try {
+    await waitFor('cancel rpc captured', async () => {
+      const capturedRequests = await resolveRpcPostData(client).catch(() => rpcRequests)
+      const hit = countSubagentCancelRequests(capturedRequests.slice(cancelStartIndex), '')
+      return { ok: hit.cancelRequestCount >= 1, value: hit.cancelRequestCount }
+    }, 20_000, 250)
+  } catch { /* recorded below */ }
   const requests = await resolveRpcPostData(client)
   // Only requests captured from the confirm click onward belong to this cancel.
   const cancelWindow = requests.slice(cancelStartIndex)
@@ -2479,6 +2520,9 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
   } catch { /* recorded below */ }
   const afterSnapshot = await subagentRunsOf(client, stableSessionId)
   const after = await cardsState(client)
+  const toolPanelBodies = Array.isArray(after.toolPanelBodies) ? after.toolPanelBodies : []
+  const mainToolPanelsUnique = new Set(toolPanelBodies).size === toolPanelBodies.length
+  if (!mainToolPanelsUnique) reasons.push('the main flow rendered duplicate tool panels for the same anchor')
   const renderedCards = after.main.filter((card) => card.label === SIBLING_RUN_LABEL)
   const newRuns = (afterSnapshot.runs ?? []).filter((run) => run.label === SIBLING_RUN_LABEL && !knownBefore.has(run.runId))
   const renderedDelta = renderedCards.length - siblingCardsBefore
@@ -2531,6 +2575,8 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
     mainCardCounts: { target: pairRenderedOnce ? 1 : 0, sibling: pairRenderedOnce ? 1 : 0 },
     absoluteMainCardCounts: { sibling: renderedCards.length, siblingBefore: siblingCardsBefore },
     runLedgerCounts: { sibling: newRuns.length },
+    mainToolPanelCount: toolPanelBodies.length,
+    mainToolPanelsUnique,
     todoCardCount: after.todoCards,
     todoWritingTurns: expectedTodoCards ?? null,
     duplicateFree,
@@ -2649,15 +2695,32 @@ async function driveSwitchHistoryRestart(client) {
   if (historyReloadTaskCount < 3) reasons.push(`the reloaded progress panel showed ${String(historyReloadTaskCount)} tasks`)
   if (historyTodoCardCount < 1) reasons.push('history reload rendered no todo cards')
 
-  // Active run for the Host restart: the restart must invalidate it in place.
-  const restartPrompt = `@code-review ${MARKER}-RESTART 逐行审查 samples/sample-review.js 与 samples 目录下的全部文件，输出不少于 1200 字的分级评审报告：每个问题给出文件、行号、风险等级与修复建议，最后给出发布阻断结论。`
+  // The previous turn's todo must not masquerade as the next turn's list in the
+  // same session: a tool-free ordinary turn starts with no tasks in the rail.
+  try {
+    await sendAndSettle(client, `${MARKER}-HIST-AFTER 只回复「好的」两个字，不要调用任何工具。`, { label: 'history follow-up' })
+  } catch (cause) {
+    reasons.push(`the same-session follow-up turn failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
+  await ensureProgressTab(client)
+  const postHistory = await progressState(client)
+  const postHistoryTurnTaskCount = postHistory?.tasks.length ?? -1
+  const previousTurnTodoNotCarried = postHistoryTurnTaskCount === 0
+  if (!previousTurnTodoNotCarried) {
+    reasons.push(`a new ordinary turn in the same session still showed ${String(postHistoryTurnTaskCount)} tasks from the previous turn`)
+  }
+
+  // The restart needs a run that is still active when the Host is replaced: the
+  // task-orch package's two-lane flow stays running long enough to be invalidated.
+  const restartPrompt = `@task-orch ${MARKER}-RESTART 请按双盲流程派发两个独立子代理（A/B），分别审查 samples 目录下的全部文件并给出分级评审报告，最后汇总交集与分歧。`
   let restartRunId
+  const restartRunLabel = '@task-orch'
   for (let attempt = 1; attempt <= 2 && restartRunId === undefined; attempt += 1) {
     const restartBeforeLedger = await subagentRunsOf(client, historySessionId)
     const known = new Set((restartBeforeLedger.runs ?? []).map((run) => run.runId))
     await sendText(client, restartPrompt)
     try {
-      const created = await waitForNewRun(client, historySessionId, '@code-review', known, Math.min(options.timeout, 90_000))
+      const created = await waitForNewRun(client, historySessionId, restartRunLabel, known, Math.min(options.timeout, 90_000))
       const candidateId = created.runs[0].runId
       const active = await waitFor('restart run stays active', async () => {
         const snapshot = await subagentRunsOf(client, historySessionId)
@@ -2748,6 +2811,8 @@ async function driveSwitchHistoryRestart(client) {
     previousTodoNotInFreshTab,
     historyReloadTaskCount,
     historyTodoCardCount,
+    postHistoryTurnTaskCount,
+    previousTurnTodoNotCarried,
     connectionSamples,
     reconnectBannerSeen,
     restart: {
