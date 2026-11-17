@@ -89,7 +89,12 @@ export type HistoryRecord = SessionDetailRecord;
 
 /** 历史记录映射后的对话流条目（App 侧再包一层 id 成为 ChatItem）。 */
 export type HistoryChatItem =
-  | { kind: "user"; text: string }
+  | {
+      kind: "user";
+      text: string;
+      /** Host 持久化的用户消息 id（`session-view` 从 `user/message` 的 `data.id` 透传）。 */
+      clientMessageId?: string;
+    }
   | { kind: "thinking"; text: string; roundKey?: number }
   | { kind: "assistant"; text: string; roundKey?: number }
   | {
@@ -109,6 +114,54 @@ export type HistoryChatItem =
   | { kind: "note"; text: string };
 
 /**
+ * `session.send` 的请求参数。顶层 `clientMessageId` 是本次发送的持久回合锚；
+ * `at.clientMessageId` 仅为旧 @ 运行卡的本地展示兼容保留。
+ */
+export type SessionSendParams = {
+  text: string;
+  tabId: string;
+  clientMessageId: string;
+  sessionId?: string;
+  modelId?: string;
+  skill?: string;
+  at?: { name: string; clientMessageId: string };
+};
+
+/**
+ * 构造一次用户发送的 RPC 参数（`session.send`）。
+ *
+ * - 顶层 `clientMessageId` 恒为调用方生成的 UUID（`crypto.randomUUID()`）：它是 Host 与
+ *   进度面板的持久回合锚，**禁止**用 `String(userMsg.id)`（`allocId()` 刷新后可重复）；
+ * - `@` 发送仍带 `at.clientMessageId = String(userItemId)`（仅旧 @ 卡展示兼容），且保持
+ *   旧口径优先于 skill；skill / 普通发送不带 `at`。
+ */
+export function buildSessionSendParams(input: {
+  text: string;
+  tabId: string;
+  clientMessageId: string;
+  /** 本条本地 user 条目的数值 id（仅作为 `@` 兼容值）。 */
+  userItemId: number;
+  sessionId?: string;
+  modelId?: string;
+  invokedAt?: { name: string; remainder: string };
+  invokedSkill?: { name: string; remainder: string };
+}): SessionSendParams {
+  const text = input.invokedAt ? input.invokedAt.remainder : input.invokedSkill ? input.invokedSkill.remainder : input.text;
+  return {
+    text,
+    tabId: input.tabId,
+    clientMessageId: input.clientMessageId,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(input.modelId ? { modelId: input.modelId } : {}),
+    ...(input.invokedAt
+      ? { at: { name: input.invokedAt.name, clientMessageId: String(input.userItemId) } }
+      : input.invokedSkill
+        ? { skill: input.invokedSkill.name }
+        : {}),
+  };
+}
+
+/**
  * 历史会话记录 → 对话流条目：user/assistant 按原文还原，tool-call 成工具卡，
  * tool-result 按 callId 配对回调用（缺 callId 时只在当前用户回合内按顺序配对）；
  * 配不上的失败结果折叠为一条提示，配不上的成功结果不产出条目。
@@ -121,7 +174,11 @@ export function historyItemsFromRecords(records: readonly HistoryRecord[]): Hist
       if (record.goalRound !== undefined) {
         items.push({ kind: "note", text: goalRoundLabel(record.goalRound) });
       } else {
-        items.push({ kind: "user", text: record.text });
+        items.push({
+          kind: "user",
+          text: record.text,
+          ...(record.clientMessageId === undefined ? {} : { clientMessageId: record.clientMessageId }),
+        });
       }
       continue;
     }

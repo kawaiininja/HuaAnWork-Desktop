@@ -284,7 +284,8 @@ export type SubagentRunCardItem = { id: number; kind: "subagent-run"; runId: str
 /**
  * 在父会话的用户消息之后插入运行卡(设计 D8 / §6)。
  *
- * - 精确锚点:实时事件只在 `clientMessageId` 等于本 tab 里某条 `user` 条目的 `id` 时插入;
+ * - 精确锚点:`clientMessageId` 优先与条目的持久锚(`user.clientMessageId`)比较,
+ *   旧条目没有持久锚时退回 `String(item.id)` 兼容历史卡;
  * - 快照回退:只有 `allowSnapshotFallback === true`(仅 snapshot 对账)才回退到本 tab
  *   最后一条 `user`。实时事件不得猜测归属,两条路径都不得跨 tab 查找;
  * - 同 `runId` 的卡已存在或本 tab 没有可用锚点时返回入参 `items`,React 可跳过重渲染。
@@ -293,7 +294,7 @@ export type SubagentRunCardItem = { id: number; kind: "subagent-run"; runId: str
  * @param input 运行 id、消息锚点、是否允许快照回退与 id 分配器
  * @returns 含新卡的数组;无需插入时返回入参 `items`
  */
-export function insertSubagentRunCard<T extends { id: number; kind: string }>(
+export function insertSubagentRunCard<T extends { id: number; kind: string; clientMessageId?: string }>(
   items: T[],
   input: { runId: string; clientMessageId?: string; allowSnapshotFallback?: boolean; allocateId(): number },
 ): Array<T | SubagentRunCardItem> {
@@ -302,7 +303,10 @@ export function insertSubagentRunCard<T extends { id: number; kind: string }>(
   }
   const exactIndex = input.clientMessageId === undefined
     ? -1
-    : items.findIndex((item) => item.kind === "user" && item.id === Number(input.clientMessageId));
+    : items.findIndex(
+        (item) =>
+          item.kind === "user" && (item.clientMessageId ?? String(item.id)) === input.clientMessageId,
+      );
   const fallbackIndex = input.allowSnapshotFallback === true
     ? items.findLastIndex((item) => item.kind === "user")
     : -1;

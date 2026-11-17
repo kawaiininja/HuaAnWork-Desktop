@@ -279,9 +279,47 @@ describe('detailRecords', () => {
       userMessage('官方续轮提示', 2, T0 + 4, { kind: 'goal', goalId: 'g', round: 2 }),
     ]))
     expect(records).toEqual([
-      { kind: 'user', time: T0 + 3, text: '原始目标' },
+      { kind: 'user', time: T0 + 3, text: '原始目标', clientMessageId: 'm1' },
+      // goal 续轮不是新的用户回合:不带 clientMessageId。
       { kind: 'user', time: T0 + 4, text: '官方续轮提示', goalRound: 2 },
     ])
+  })
+
+  test('passes the persisted message id through and drops non-human user messages', () => {
+    const log = sessionLog([
+      HEADER,
+      userMessage('真实任务', 1, T0 + 3),
+      userMessage('子代理完成', 2, T0 + 4, { kind: 'subagent-settled' }),
+      userMessage('运行时上下文', 3, T0 + 5, { kind: 'runtime-context' }),
+      userMessage('指令注入', 4, T0 + 6, { kind: 'agent-instructions' }),
+      userMessage('技能目录', 5, T0 + 7, { kind: 'skill-catalog' }),
+      userMessage('技能调用', 6, T0 + 8, { kind: 'skill-invocation' }),
+      userMessage('问题回复', 7, T0 + 9, { kind: 'user-question-reply' }),
+      userMessage('审批回执', 8, T0 + 10, { kind: 'user-approval' }),
+      userMessage('工作目录', 9, T0 + 11, { kind: 'working-directory' }),
+      userMessage('压缩检查点', 10, T0 + 12, { kind: 'compact-checkpoint' }),
+      userMessage('插件注入', 11, T0 + 13, { kind: 'plugin', plugin: 'fixture' }),
+      userMessage('工具消息', 12, T0 + 14, { kind: 'tool' }),
+      // 旧日志:没有 source.kind 的真实用户消息仍按普通用户放行(没有可透传的 data.id)。
+      { type: 'user/message', seq: 13, time: T0 + 15, data: { role: 'user', content: [{ type: 'text', text: '旧夹具无 source' }] } },
+    ])
+    expect(detailRecords(log)).toEqual([
+      { kind: 'user', time: T0 + 3, text: '真实任务', clientMessageId: 'm1' },
+      { kind: 'user', time: T0 + 15, text: '旧夹具无 source' },
+    ])
+    const summary = summarizeSessionLog(log)
+    expect(summary).toBeDefined()
+    expect(summary!.title).toBe('真实任务')
+    expect(summary!.messageCount).toBe(2)
+  })
+
+  test('drops goal continuations without a positive round', () => {
+    const log = sessionLog([
+      HEADER,
+      userMessage('缺少轮次', 1, T0 + 3, { kind: 'goal' }),
+      userMessage('零轮次', 2, T0 + 4, { kind: 'goal', round: 0 }),
+    ])
+    expect(detailRecords(log)).toEqual([])
   })
 
   test('keeps the shell command on tool-call records and never invents an exit code', () => {

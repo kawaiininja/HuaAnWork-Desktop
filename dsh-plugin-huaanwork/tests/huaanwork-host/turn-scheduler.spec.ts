@@ -317,3 +317,29 @@ test('activeAutomationIds covers admit-to-enqueue before an in-flight entry exis
   })
   expect(turns.activeAutomationIds()).toEqual(new Set(['auto-catchup']))
 })
+
+test('a queued item keeps the top-level clientMessageId through drainQueue', () => {
+  const turns = scheduler(1)
+  expect(turns.admitUserTurn({ sessionId: 'a', tabId: 'ta', text: 'run', modelId: 'm1', root: '/proj-a' }).kind).toBe('start')
+  expect(turns.admitUserTurn({
+    sessionId: 'b',
+    tabId: 'tb',
+    text: 'wait',
+    modelId: 'm1',
+    root: '/proj-b',
+    clientMessageId: 'uuid-1',
+  })).toMatchObject({ kind: 'queued', queueItemId: 'q1' })
+  const withoutAnchor = turns.admitUserTurn({ sessionId: 'c', tabId: 'tc', text: 'plain', modelId: 'm1', root: '/proj-c' })
+  expect(withoutAnchor.kind).toBe('queued')
+
+  turns.release('a')
+  const [drained] = turns.drainQueue()
+  expect(drained).toMatchObject({ sessionId: 'b', clientMessageId: 'uuid-1' })
+  // 未提供锚点的等待项不凭空生成 clientMessageId。
+  const plain = turns.drainQueue()
+  expect(plain).toEqual([])
+  turns.release('b')
+  const [second] = turns.drainQueue()
+  expect(second).toMatchObject({ sessionId: 'c' })
+  expect(second).not.toHaveProperty('clientMessageId')
+})

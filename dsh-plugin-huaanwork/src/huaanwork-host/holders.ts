@@ -11,6 +11,7 @@ import type { HuaanworkEventHub } from './events.ts'
 import type { RouteContext } from './routes.ts'
 import type { SessionRuntimeContext } from './sessions.ts'
 import type { SubagentRunRegistry } from './subagent-runs.ts'
+import { createTurnAnchorStore, type TurnAnchorStore } from './turn-anchors.ts'
 import type { TurnScheduler } from './turn-scheduler.ts'
 
 export interface HuaanworkHostConfig {
@@ -64,6 +65,8 @@ declare module '@deepseek-ai/cordis' {
     huaanworkSessionRoots: Map<string, string>
     /** 唯一回合调度器(Task 6);用户发送与自动化准入共用。 */
     huaanworkTurnScheduler: TurnScheduler
+    /** 会话 → 当前回合锚点(设计「回合归属」);pre-step 钩子与后续进度投影共读同一实例。 */
+    huaanworkTurnAnchors: TurnAnchorStore
   }
 }
 
@@ -90,6 +93,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkSessionModels',
   'huaanworkSessionRoots',
   'huaanworkTurnScheduler',
+  'huaanworkTurnAnchors',
 ] as const
 
 let installed = false
@@ -172,6 +176,7 @@ export function installHuaanworkHolders(
   ctx.huaanworkPackageChildAllow = new Map<string, readonly string[]>()
   ctx.huaanworkAgentCatalog = { current: { items: [] } }
   ctx.huaanworkEmit = emit
+  ctx.huaanworkTurnAnchors = createTurnAnchorStore()
 
   if (ctx.huaanworkEmit !== emit) {
     throw new Error(

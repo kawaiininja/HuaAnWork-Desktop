@@ -120,6 +120,7 @@ import { createKeepAwakeDriver, shouldHoldKeepAwake } from "./logic/keepAwake.ts
 import { missedBannerView, nextMissedCount } from "./logic/missedBanner.ts";
 import { parseSchedulePhrase } from "./logic/schedulePhrase.ts";
 import {
+  buildSessionSendParams,
   chatTabHasConversation,
   cwdWithinRoot,
   historyItemsFromRecords,
@@ -286,6 +287,8 @@ type ChatItem =
       id: number;
       kind: "user";
       text: string;
+      /** 本次发送的持久回合锚（Host UUID / 自动化 runId）；历史回放时来自 `data.id`。 */
+      clientMessageId?: string;
       /** 排队中、尚未开始执行的本次发送；由 `session.send` 的应答写回。 */
       queueItemId?: string;
       /** 本次 `session.send` 已抛错且未启动；只在本标签内标记。 */
@@ -1755,13 +1758,23 @@ export default function App() {
             };
             setChatTabs((prev) => {
               const found = prev.find((tab) => tab.id === targetId);
-              if (found) return prev.map((tab) => (tab.id === targetId ? { ...tab, ...link } : tab));
+              if (found) {
+                // 复用标签:同一 run 的重复 run-task/回放不追加第二条 user 条目。
+                const runUser = automationRunUserItem(event.runId, task.name, found.items);
+                const items = runUser === undefined
+                  ? found.items
+                  : [...found.items, { id: allocId(), ...runUser }];
+                return prev.map((tab) => (tab.id === targetId ? { ...tab, ...link, items } : tab));
+              }
+              // 新建标签:锚定的 user 条目放在既有「自动化运行中…」note 之前,与历史回放的首条用户消息同形。
+              const initialItems: ChatItem[] = [{ id: allocId(), kind: "note" as const, text: "自动化运行中…" }];
+              const runUser = automationRunUserItem(event.runId, task.name, initialItems);
               return [
                 ...prev,
                 {
                   id: targetId,
                   ...link,
-                  items: [{ id: allocId(), kind: "note" as const, text: "自动化运行中…" }],
+                  items: runUser === undefined ? initialItems : [{ id: allocId(), ...runUser }, ...initialItems],
                   sessionFailed: false,
                   pendingPick: false,
                 },
@@ -2895,7 +2908,10 @@ export default function App() {
       // （applyOpenedProject），未选择的会话留在中立根，按 cwd 分组落入侧栏「任务」区。
       // 插入即标未启动：应答回来之前这条消息还没有开启回合，流式条目与终态选择都不能
       // 停在它后面。只有 started 应答（或排队项真正出队）才清掉这个标记。
-      const userMsg: ChatItem = { id: allocId(), kind: "user", text, notStarted: true };
+      // 持久回合锚由本端生成 UUID：allocId 刷新后会重复，不能当持久锚；也不使用客户端
+      // 时钟冒充 Host 的 TurnAnchor.startedAt。
+      const clientMessageId = crypto.randomUUID();
+      const userMsg: ChatItem = { id: allocId(), kind: "user", text, clientMessageId, notStarted: true };
       setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, items: [...tab.items, userMsg] } : tab)));
       // 固定话术不是输入框草稿：发完不撤用户正在写的内容。
       if (textOverride === undefined) setDraft("");
@@ -2909,17 +2925,16 @@ export default function App() {
       };
       pendingSendsRef.current.set(chatId, pending);
       try {
-        const sent = await rpcCall<SessionSendResult>("session.send", {
-          text: invokedAt ? invokedAt.remainder : invokedSkill ? invokedSkill.remainder : text,
+        const sent = await rpcCall<SessionSendResult>("session.send", buildSessionSendParams({
+          text,
           tabId: chatId,
+          clientMessageId,
+          userItemId: userMsg.id,
           ...(sessionId ? { sessionId } : {}),
           ...(modelId ? { modelId } : {}),
-          ...(invokedAt
-            ? { at: { name: invokedAt.name, clientMessageId: String(userMsg.id) } }
-            : invokedSkill
-              ? { skill: invokedSkill.name }
-              : {}),
-        });
+          ...(invokedAt ? { invokedAt } : {}),
+          ...(invokedSkill ? { invokedSkill } : {}),
+        }));
         // 先写回身份：排队只追加等待项，started:true 才真正开始执行。
         writeTabRun(chatId, (state) => noteSendResult(state, sent));
         // 宿主在 started 应答前（followup 之后）或 queue-start 之后才写回本次模型；刷新任务列表，
@@ -3334,7 +3349,14 @@ export default function App() {
           },
         };
       }
-      if (item.kind === "user") return { id: allocId(), kind: "user", text: item.text };
+      if (item.kind === "user") {
+        return {
+          id: allocId(),
+          kind: "user",
+          text: item.text,
+          ...(item.clientMessageId === undefined ? {} : { clientMessageId: item.clientMessageId }),
+        };
+      }
       if (item.kind === "thinking") {
         return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false, historical: true, ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }) };
       }
@@ -4733,6 +4755,25 @@ export function upsertTodoItem(items: ChatItem[], todos: TodoEntry[], allocId: (
   if (at >= 0) return items.map((item, index) => (index === at ? { ...item, todos } : item));
   const insertAt = turnAppendIndex(items);
   return [...items.slice(0, insertAt), { id: allocId(), kind: "todo", todos }, ...items.slice(insertAt)];
+}
+
+/** 自动化运行标签首条用户条目的模板:数值 `id` 由调用方 `allocId()` 补齐(与历史回放同口径)。 */
+export type AutomationRunUserEntry = { kind: "user"; text: string; clientMessageId: string };
+
+/**
+ * 自动化运行标签的锚定用户条目(纯 helper,先例 `upsertTodoItem`)。
+ *
+ * `automation/run-task` 建立的运行标签必须有一条 `clientMessageId === runId` 的用户条目:
+ * 它同时是子代理运行卡与进度面板的精确锚点,历史回放从会话日志透传的也是同一个 runId。
+ * 该 run 的条目已存在时返回 `undefined`,调用方不得追加第二条。
+ */
+export function automationRunUserItem(
+  runId: string,
+  taskName: string,
+  items: readonly { kind: string; clientMessageId?: string }[],
+): AutomationRunUserEntry | undefined {
+  if (items.some((item) => item.kind === "user" && item.clientMessageId === runId)) return undefined;
+  return { kind: "user", text: `自动化任务「${taskName}」开始运行`, clientMessageId: runId };
 }
 
 /** 计划卡画在本回合 `exit_plan_mode` 那一行工具之前；找不到那一行就落在排队消息之前。 */

@@ -151,7 +151,10 @@ export function summarizeSessionLog(text: string): SessionSummary | undefined {
         turnCount += 1
         break
       case 'user/message': {
-        if (sourceKind(data) === 'plugin' || sourceKind(data) === 'tool') break
+        // 与 turn-anchors 同一「真实用户回合」判定:只有 `user` / 缺 kind(旧日志)算人类消息;
+        // 完成通知、运行时上下文、指令注入、技能目录等系统消息不进标题、不计数。
+        const kind = sourceKind(data)
+        if (kind !== '' && kind !== 'user') break
         messageCount += 1
         if (!firstUserText) firstUserText = firstTextOfMessage(data)
         break
@@ -203,17 +206,26 @@ export function detailRecords(text: string): SessionDetailRecord[] {
       case 'user/message': {
         const source = asObject(data.source)
         const kind = sourceKind(data)
-        if (kind === 'plugin' || kind === 'tool') break
-        const messageText = firstTextOfMessage(data)
+        // 与 turn-anchors 同一「真实用户回合」判定:只有普通用户(或旧日志缺 source)与
+        // 有效 goal 续轮(round > 0)产出 user 记录;其余系统/注入消息一律过滤。
+        if (kind !== '' && kind !== 'user' && kind !== 'goal') break
         const goalRound = kind === 'goal' && typeof source.round === 'number' && source.round > 0
           ? source.round
           : undefined
+        if (kind === 'goal' && goalRound === undefined) break
+        const messageText = firstTextOfMessage(data)
         if (messageText) {
+          // 普通用户记录带上 Host 生成的持久消息 id;goal 续轮不写(它不是新的用户回合)。
+          // 渲染用的数值 id 由客户端 allocId() 重新分配,不复用这个历史 id。
+          const persistedId = goalRound === undefined && typeof data.id === 'string' && data.id.length > 0
+            ? data.id
+            : undefined
           records.push({
             kind: 'user',
             time,
             text: messageText,
             ...(goalRound === undefined ? {} : { goalRound }),
+            ...(persistedId === undefined ? {} : { clientMessageId: persistedId }),
           })
         }
         break

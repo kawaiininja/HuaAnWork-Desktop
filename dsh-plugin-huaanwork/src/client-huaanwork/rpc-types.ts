@@ -432,7 +432,15 @@ export type SessionSummary = {
 
 /** `session.open` 返回的可读会话记录，按日志顺序排列。 */
 export type SessionDetailRecord =
-  | { kind: "user"; time: number; text: string; goalRound?: number }
+  | {
+      kind: "user";
+      time: number;
+      text: string;
+      /** goal 续轮序号；普通用户记录没有该字段。 */
+      goalRound?: number;
+      /** Host 持久化的用户消息 id（`data.id`）；仅普通用户记录透传，供运行卡/进度精确锚定。 */
+      clientMessageId?: string;
+    }
   | { kind: "thinking"; time: number; text: string; roundKey?: number }
   | { kind: "assistant"; time: number; text: string; roundKey?: number }
   | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string; roundKey?: number }

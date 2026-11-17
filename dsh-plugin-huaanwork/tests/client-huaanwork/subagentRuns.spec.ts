@@ -1086,6 +1086,41 @@ test("a matched anchor inserts directly after that message and keeps later items
   assert.deepEqual(anchored.map((item) => item.kind), ["user", "subagent-run", "assistant", "user", "assistant"]);
 });
 
+test("a run card prefers the persisted clientMessageId over the numeric React id", () => {
+  const tab = [
+    { id: 7, kind: "user", clientMessageId: "uuid-x" },
+    { id: 8, kind: "user" },
+  ];
+  // 精确命中持久锚:插在该用户消息之后,而不是 id 数值撞上的另一条。
+  assert.deepEqual(
+    insertSubagentRunCard(tab, { runId: "run-1", clientMessageId: "uuid-x", allocateId: () => 9 }).map((item) => item.id),
+    [7, 9, 8],
+  );
+  // 旧条目没有持久锚时退回 String(item.id) 兼容历史卡。
+  assert.deepEqual(
+    insertSubagentRunCard([{ id: 8, kind: "user" }], { runId: "run-1", clientMessageId: "8", allocateId: () => 9 }).map(
+      (item) => item.id,
+    ),
+    [8, 9],
+  );
+  // 已有持久锚的条目不再用数值 id 兜底:同名数值不等于锚。
+  assert.deepEqual(
+    insertSubagentRunCard(tab, { runId: "run-1", clientMessageId: "7", allocateId: () => 9 }).map((item) => item.id),
+    [7, 8],
+  );
+});
+
+test("a live run event without an exact anchor never falls back to the last user message", () => {
+  const tab = [
+    { id: 1, kind: "user" },
+    { id: 2, kind: "assistant" },
+    { id: 3, kind: "user" },
+  ];
+  // 实时路径(无 allowSnapshotFallback)禁止 last-user 回退,缺精确锚点的 run 不插卡。
+  assert.equal(insertSubagentRunCard(tab, { runId: "run-1", clientMessageId: "missing", allocateId: () => 4 }), tab);
+  assert.equal(insertSubagentRunCard(tab, { runId: "run-1", allocateId: () => 4 }), tab);
+});
+
 test("the parent line summarizes an active child run and otherwise keeps the turn status", () => {
   assert.deepEqual(
     parentTurnLine({ hasActiveChild: true, current: { text: "已 12 秒没有新结果", alert: true } }),

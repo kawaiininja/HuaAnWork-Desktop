@@ -40,6 +40,24 @@ test("history maps goal continuation records to notes without splitting the user
   assert.equal(items.filter((item) => item.kind === "user").length, 1);
 });
 
+test("history user items keep the host clientMessageId while goal rounds stay notes", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "开始", clientMessageId: "m1" },
+    { kind: "assistant", time: 2, text: "好的" },
+    { kind: "user", time: 3, text: "官方续轮提示", goalRound: 2, clientMessageId: "m2" },
+  ]);
+  assert.deepEqual(items, [
+    { kind: "user", text: "开始", clientMessageId: "m1" },
+    { kind: "assistant", text: "好的" },
+    // 完成/续轮通知不得切出第二条用户回合:goal 续轮只成为 note。
+    { kind: "note", text: "正在按目标继续，第 2/4 轮，这还不是验收结果" },
+  ]);
+  // 没有历史 id 的旧记录保持无字段,不凭空生成锚点。
+  assert.deepEqual(historyItemsFromRecords([{ kind: "user", time: 1, text: "旧记录" }]), [
+    { kind: "user", text: "旧记录" },
+  ]);
+});
+
 test("history pairs success, failure, empty and truncated results into their tool cards", () => {
   const items = historyItemsFromRecords([
     { kind: "user", time: 1, text: "读取并运行" },

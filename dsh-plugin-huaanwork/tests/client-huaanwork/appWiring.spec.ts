@@ -25,6 +25,7 @@ import { appendOutcomeNotes, latestUserItemId, turnChecks } from "../../src/clie
 import { interruptTurnItems } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 import { clearFailuresInTabs } from "../../src/client-huaanwork/logic/hostStop.ts";
 import { foldRunAssistantItems } from "../../src/client-huaanwork/logic/runResultAttachments.ts";
+import { buildSessionSendParams } from "../../src/client-huaanwork/logic/sessionChannel.ts";
 import * as AppModule from "../../src/client-huaanwork/App.tsx";
 
 /**
@@ -899,12 +900,100 @@ test("send carries the tab id and selected model and mints under the tab's own r
   // cwd 只属于这条新会话：标签已有项目用项目根，未绑定用中立根。
   assert.match(body, /const cwd = await sessionCwdForTab\(sendingTab\);/);
   assert.match(body, /"session\.new", \{\s*fresh: chatId !== "work-1",\s*\.\.\.\(cwd \? \{ cwd \} : \{\}\),/);
-  // 发送参数带当前标签 id、所选 modelId，以及本次 skill 或 at。
+  // 发送参数经 buildSessionSendParams 构造：带当前标签 id、所选 modelId、本次 UUID
+  // 回合锚，以及本次 skill 或 at（@ 的 at.clientMessageId 兼容值由 builder 生成）。
   assert.match(body, /tabId: chatId,/);
   assert.match(body, /const modelId = resolveSendModelId\(modelPickByTab, chatId, sendingTask\?\.modelId, activeModelId\);/);
   assert.match(body, /\.\.\.\(modelId \? \{ modelId \} : \{\}\),/);
-  assert.match(body, /\{ at: \{ name: invokedAt\.name, clientMessageId: String\(userMsg\.id\) \} \}/);
-  assert.match(body, /\{ skill: invokedSkill\.name \}/);
+  assert.match(body, /const clientMessageId = crypto\.randomUUID\(\);/);
+  assert.match(body, /await rpcCall<SessionSendResult>\("session\.send", buildSessionSendParams\(\{/);
+  assert.match(body, /clientMessageId,/);
+  assert.match(body, /userItemId: userMsg\.id,/);
+  assert.match(body, /\.\.\.\(invokedAt \? \{ invokedAt \} : \{\}\),/);
+  assert.match(body, /\.\.\.\(invokedSkill \? \{ invokedSkill \} : \{\}\),/);
+});
+
+test("session.send always carries a top-level clientMessageId and keeps the @ compat anchor", () => {
+  const plain = buildSessionSendParams({ text: "你好", tabId: "t1", clientMessageId: "uuid-1", userItemId: 7 });
+  assert.deepEqual(plain, { text: "你好", tabId: "t1", clientMessageId: "uuid-1" });
+  assert.equal("at" in plain, false);
+  assert.equal("skill" in plain, false);
+
+  const skill = buildSessionSendParams({
+    text: "看下",
+    tabId: "t1",
+    clientMessageId: "uuid-2",
+    userItemId: 7,
+    invokedSkill: { name: "review", remainder: "看下" },
+  });
+  assert.deepEqual(skill, { text: "看下", tabId: "t1", clientMessageId: "uuid-2", skill: "review" });
+  assert.equal("at" in skill, false);
+
+  const at = buildSessionSendParams({
+    text: "@helper 帮我看",
+    tabId: "t1",
+    clientMessageId: "uuid-3",
+    userItemId: 7,
+    invokedAt: { name: "helper", remainder: "帮我看" },
+  });
+  assert.deepEqual(at, {
+    text: "帮我看",
+    tabId: "t1",
+    clientMessageId: "uuid-3",
+    at: { name: "helper", clientMessageId: "7" },
+  });
+
+  // 旧口径:@ 优先于 skill,且 at.clientMessageId 仍取本地条目 id(兼容旧 @ 卡)。
+  const both = buildSessionSendParams({
+    text: "x",
+    tabId: "t1",
+    clientMessageId: "uuid-4",
+    userItemId: 9,
+    invokedAt: { name: "helper", remainder: "r" },
+    invokedSkill: { name: "review", remainder: "r2" },
+  });
+  assert.deepEqual(both.at, { name: "helper", clientMessageId: "9" });
+  assert.equal("skill" in both, false);
+
+  // 会话与模型只在有值时出现。
+  const bound = buildSessionSendParams({
+    text: "hi",
+    tabId: "t1",
+    clientMessageId: "uuid-5",
+    userItemId: 1,
+    sessionId: "s1",
+    modelId: "m1",
+  });
+  assert.deepEqual(bound, { text: "hi", tabId: "t1", clientMessageId: "uuid-5", sessionId: "s1", modelId: "m1" });
+});
+
+test("automation run tabs get a single user entry anchored to the run id", () => {
+  const item = AppModule.automationRunUserItem("run-1", "每日报告", []);
+  assert.ok(item);
+  assert.equal(item.kind, "user");
+  assert.equal(item.clientMessageId, "run-1");
+  assert.match(item.text, /每日报告/);
+  // 同一 run 的重复 run-task(或回放)不再追加第二条。
+  assert.equal(
+    AppModule.automationRunUserItem("run-1", "每日报告", [{ kind: "user", clientMessageId: "run-1" }]),
+    undefined,
+  );
+  assert.equal(
+    AppModule.automationRunUserItem("run-2", "每日报告", [{ kind: "user", clientMessageId: "run-1" }])?.clientMessageId,
+    "run-2",
+  );
+});
+
+test("the live run-task handler appends the anchored user entry in both tab branches", () => {
+  // 复用分支与新建分支都必须补同一条 user 条目(新建分支在「自动化运行中…」note 之前)。
+  assert.equal((APP_SOURCE.match(/automationRunUserItem\(event\.runId, task\.name, /g) ?? []).length, 2);
+});
+
+test("history user rows keep the persisted anchor but allocate a fresh React id", () => {
+  assert.match(
+    APP_SOURCE,
+    /if \(item\.kind === "user"\) \{\s*return \{\s*id: allocId\(\),\s*kind: "user",\s*text: item\.text,\s*\.\.\.\(item\.clientMessageId === undefined \? \{\} : \{ clientMessageId: item\.clientMessageId \}\),\s*\};\s*\}/,
+  );
 });
 
 test("a neutral tab does not send when session.new fails", () => {
@@ -1904,8 +1993,8 @@ test("the sent message is unstarted until the started response clears it", () =>
   const body = functionBody("async function send(", "async function stopTurn(");
   assert.match(
     body,
-    /const userMsg: ChatItem = \{ id: allocId\(\), kind: "user", text, notStarted: true \};/,
-    "the just-inserted message carries the unstarted marker before the response",
+    /const userMsg: ChatItem = \{ id: allocId\(\), kind: "user", text, clientMessageId, notStarted: true \};/,
+    "the just-inserted message carries the unstarted marker and the generated turn anchor before the response",
   );
   const gate = blockAfter(body, "if (sendOpensTurn(sent)) {").body;
   assert.match(gate, /startUserItem\(item\)/, "only the started response clears the marker");
