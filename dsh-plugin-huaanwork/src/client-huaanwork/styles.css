@@ -3482,8 +3482,8 @@ button {
   min-width: 0;
 }
 
-/* 窄栏里的运行摘要收紧内边距；确认/焦点行为仍由共享摘要组件负责。 */
-.progress-subagent-card {
+/* 窄栏里的运行摘要收紧内边距；.subagent-run-card 声明在后且权重相同，故加面板前缀让本覆盖真正生效。确认/焦点行为仍由共享摘要组件负责。 */
+.progress-panel .progress-subagent-card {
   min-width: 0;
   padding: 8px 10px;
   gap: 4px;
