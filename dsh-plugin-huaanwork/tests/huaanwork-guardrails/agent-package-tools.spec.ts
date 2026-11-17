@@ -1414,7 +1414,9 @@ describe('@slug package dispatch', () => {
     // skills.ts 的安全网再挂一次不产生重复:附件按名字存进 Set。
     attachAgentTools(h.maps, childId!, [AGENT_HTTP_TOOL, 'mcp__weekly-report__echo'])
     holder.current?.bindChild(childId!)
-    expect(h.maps.sessionAgentTools.get(childId!)?.size).toBe(3)
+    // Task 2:包 allow 含 subagent(composeAgentPackageToolAllowList 的基础项),
+    // 故附件集为 agent_http/agent_skill_run/subagent/MCP 名四项。
+    expect(h.maps.sessionAgentTools.get(childId!)?.size).toBe(4)
     // 血缘表与 request.allow 是同一引用。
     expect(childAllow.get(childId!)).toBe(holder.current?.allow)
 

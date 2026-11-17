@@ -23,7 +23,6 @@ const ALLOWED_TOOLS = new Set([
   "bash",
   "pwsh",
   "skill",
-  "subagent",
   "todo_write",
   "get_goal",
   "create_goal",

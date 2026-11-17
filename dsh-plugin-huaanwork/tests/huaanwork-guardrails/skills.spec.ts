@@ -12,10 +12,13 @@ import {
   childrenOf,
   forgetChildSession,
   parentSessionOf,
+  registerChildSession,
   resetChildSessionRegistry,
 } from "../../src/huaanwork-host/child-sessions.ts";
 import { sendToAgent } from "../../src/huaanwork-host/sessions.ts";
 import { createSubagentRunRegistry } from "../../src/huaanwork-host/subagent-runs.ts";
+import { createSystemSkillLeaseStore, systemSkillLeaseKindOf } from "../../src/huaanwork-host/system-skill-leases.ts";
+import { createTurnAnchorStore } from "../../src/huaanwork-host/turn-anchors.ts";
 import { createTurnScheduler } from "../../src/huaanwork-host/turn-scheduler.ts";
 import {
   HUAANWORK_LEGACY_AGENT_REQUEST,
@@ -24,7 +27,7 @@ import {
 import { apply as applyLimits } from "../../src/huaanwork-guardrails/limits.ts";
 import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
-import { SYSTEM_SKILLS, apply as applySkills, bundledSkillDir, exploreAllowList, getBundledSkill, listBundledSkills, parentVisibleExploreTranscript, readSkillToggles, registerBundledSkill, scanBundledSkillEntries, setBundledSkillRegistrar, setSkillToggle, shellToolName, testFixAllowList } from "../../src/huaanwork-guardrails/skills.ts";
+import { SYSTEM_SKILLS, apply as applySkills, bundledSkillDir, currentDispatchSkillKind, exploreAllowList, getBundledSkill, listBundledSkills, parentVisibleExploreTranscript, readSkillToggles, registerBundledSkill, scanBundledSkillEntries, setBundledSkillRegistrar, setSkillToggle, shellToolName, testFixAllowList } from "../../src/huaanwork-guardrails/skills.ts";
 
 // 这些插件把 registrar / 子会话登记放在模块级或进程级全局:用例之间要复位,
 // 免得多份 harness 的 ctx 互相串(今天靠唯一 id 侥幸,不该依赖)。
@@ -59,15 +62,24 @@ type Decision = { kind: string; reason?: string };
 
 function createTools(names: readonly string[]): ToolsService & { visible: Schema[]; guards: Array<(execution: { name: string; arguments: unknown }) => string | undefined> } {
   const all = names.map((name) => ({ name }));
+  // 相交层模型:schemas = 全部活跃层的交集;disposer 只移除本层。present-as 的
+  // refresh 会先 lift 自己的旧层再按当前 schemas 重算,单层覆盖式 mock 无法把
+  // 租约挂回来的 `subagent` 重新暴露。
+  const layers: Array<readonly string[]> = [];
   const tools = {
-    visible: [...all],
     guards: [] as Array<(execution: { name: string; arguments: unknown }) => string | undefined>,
+    get visible(): Schema[] {
+      return all.filter((schema) => layers.every((allow) => allow.includes(schema.name)));
+    },
     schemas() {
       return tools.visible;
     },
     restrict({ allow }: { allow: readonly string[] }) {
-      tools.visible = all.filter((schema) => allow.includes(schema.name));
-      return () => undefined;
+      layers.push(allow);
+      return () => {
+        const index = layers.indexOf(allow);
+        if (index >= 0) layers.splice(index, 1);
+      };
     },
     guard(listener: (execution: { name: string; arguments: unknown }) => string | undefined) {
       tools.guards.push(listener);
@@ -77,43 +89,31 @@ function createTools(names: readonly string[]): ToolsService & { visible: Schema
   return tools;
 }
 
-function createHarness(options?: { childNames?: readonly string[]; parentNames?: readonly string[] }) {
+const DEFAULT_TOOL_NAMES = [
+  "read",
+  "read_file",
+  "glob",
+  "grep",
+  "edit",
+  "write",
+  "str_replace_editor",
+  "bash",
+  "pwsh",
+  "skill",
+  "subagent",
+  "git_push",
+  "web_search",
+] as const;
+
+function createHarness(options?: {
+  childNames?: readonly string[];
+  parentNames?: readonly string[];
+  withActivation?: boolean;
+}) {
   const skills: SkillRegistration[] = [];
   const events: Record<string, ((payload: never, next?: () => Promise<unknown>, extra?: unknown) => unknown)[]> = {};
-  const parentTools = createTools(
-    options?.parentNames ?? [
-      "read",
-      "read_file",
-      "glob",
-      "grep",
-      "edit",
-      "write",
-      "str_replace_editor",
-      "bash",
-      "pwsh",
-      "skill",
-      "subagent",
-      "git_push",
-      "web_search",
-    ],
-  );
-  const childTools = createTools(
-    options?.childNames ?? [
-      "read",
-      "read_file",
-      "glob",
-      "grep",
-      "edit",
-      "write",
-      "str_replace_editor",
-      "bash",
-      "pwsh",
-      "skill",
-      "subagent",
-      "git_push",
-      "web_search",
-    ],
-  );
+  const parentTools = createTools(options?.parentNames ?? DEFAULT_TOOL_NAMES);
+  const childTools = createTools(options?.childNames ?? DEFAULT_TOOL_NAMES);
   const cancelled: string[] = [];
   const parent: Agent = {
     id: "main",
@@ -126,10 +126,23 @@ function createHarness(options?: { childNames?: readonly string[]; parentNames?:
     cancel: () => cancelled.push("child"),
   };
   const emitted: unknown[] = [];
-  const ctx = {
+  const attachments = emptyAttachments();
+  const anchors = createTurnAnchorStore();
+  anchors.register({ sessionId: "main", clientMessageId: "user-1", origin: "advanced" });
+  anchors.notePreStep(
+    "main",
+    [{ role: "user", id: "user-1", source: { kind: "user" } }],
+    new Date().toISOString(),
+  );
+  const extraAgents = new Map<string, Agent>();
+  const ctx: Record<string, unknown> = {
     huaanworkEmit(event: unknown) {
       emitted.push(event);
     },
+    huaanworkAttachments: attachments,
+    huaanworkUnattended: new Map(),
+    huaanworkPackageChildAllow: new Map(),
+    huaanworkTurnAnchors: anchors,
     skills: {
       register(skill: SkillRegistration) {
         skills.push(skill);
@@ -137,10 +150,12 @@ function createHarness(options?: { childNames?: readonly string[]; parentNames?:
       },
     },
     agents: {
-      list: () => [parent],
-      get: (id: string) => (id === child.id ? child : parent),
+      list: () => [parent, child, ...extraAgents.values()],
+      get: (id: string) => extraAgents.get(id) ?? (id === child.id ? child : parent),
     },
     tools: {
+      presentAs: () => () => undefined,
+      schemas: () => [],
       guard() {
         return () => undefined;
       },
@@ -157,6 +172,30 @@ function createHarness(options?: { childNames?: readonly string[]; parentNames?:
     },
   };
 
+  const emit = (event: string, payload: unknown, extra?: unknown) => {
+    for (const listener of events[event] ?? []) listener(payload as never, undefined, extra as never);
+  };
+
+  if (options?.withActivation === true) {
+    ctx.subagents = {
+      startActivation: async (spec: { childId?: string; localAgent?: Agent }) => {
+        const target = (spec.childId === undefined ? undefined : (ctx.agents as { get(id: string): Agent }).get(spec.childId)) ?? spec.localAgent;
+        if (target === undefined) throw new Error("activation target missing");
+        // 上游两阶段派发:startActivation 在同一个异步链里同步派发 created/start。
+        emit("agent/created", { agent: target });
+        emit("subagent/start", { id: target.id, local: true });
+        return {
+          childId: target.id,
+          localAgent: target,
+          result: Promise.resolve({}),
+          dispose: async () => undefined,
+        };
+      },
+    };
+  }
+
+  ctx.huaanworkSystemSkillLeases = createSystemSkillLeaseStore(ctx as never);
+  applyPresentAs(ctx as never);
   applySkills(ctx as never);
   applyLimits(ctx as never);
 
@@ -176,8 +215,42 @@ function createHarness(options?: { childNames?: readonly string[]; parentNames?:
     return next();
   }
 
-  function emit(event: string, payload: unknown, extra?: unknown) {
-    for (const listener of events[event] ?? []) listener(payload as never, undefined, extra as never);
+  /**
+   * 上游两阶段派发的忠实模拟:先 `tools/pre-execute` waterfall(终止回调只返回
+   * `{kind:'allow'}`,不包 body),解析完后再 `tools/execute` waterfall,body 为终止回调。
+   * `spawnKind` ALS 的覆盖必须在 body 阶段可见(PC-1)。
+   */
+  async function preExecute(agent: Agent, name: string, args: Record<string, unknown>) {
+    const execution = { name, arguments: args, agent };
+    const decision = await emitWaterfall("tools/pre-execute", execution);
+    return { decision, execution };
+  }
+
+  async function runExecute(
+    execution: { name: string; arguments: unknown; agent?: Agent },
+    body: () => Promise<unknown> = async () => ({}),
+  ): Promise<unknown> {
+    const listeners = events["tools/execute"] ?? [];
+    let index = 0;
+    const next = async (): Promise<unknown> => {
+      const listener = listeners[index];
+      index += 1;
+      if (!listener) return body();
+      return await listener(execution as never, next);
+    };
+    return next();
+  }
+
+  async function dispatchTool(
+    agent: Agent,
+    name: string,
+    args: Record<string, unknown>,
+    body: () => Promise<unknown> = async () => ({}),
+  ): Promise<Decision> {
+    const { decision, execution } = await preExecute(agent, name, args);
+    if (decision.kind !== "allow") return decision;
+    await runExecute(execution, body);
+    return decision;
   }
 
   return {
@@ -188,19 +261,42 @@ function createHarness(options?: { childNames?: readonly string[]; parentNames?:
     childTools,
     cancelled,
     emitted,
+    ctx,
+    events,
+    attachments,
+    anchors,
     emit,
+    addAgent(agent: Agent) {
+      extraAgents.set(agent.id, agent);
+      return agent;
+    },
+    preExecute,
+    runExecute,
+    dispatchTool,
+    /** 下游 async hook(模拟 workspace-changes 等待后返回 allow / deny / 抛错)。 */
+    onPreExecute(listener: (execution: { name: string; arguments: unknown; agent?: Agent }, next?: () => Promise<Decision>) => unknown) {
+      (events["tools/pre-execute"] ??= []).push(listener as never);
+    },
     async invokeSkill(agent: Agent, name: string) {
       return emitWaterfall("tools/pre-execute", { name: "skill", arguments: { name }, agent });
     },
-    async invokeSubagent(agent: Agent) {
-      const decision = await emitWaterfall("tools/pre-execute", {
-        name: "subagent",
-        arguments: { prompt: "look around" },
-        agent,
+    async invokeSubagent(agent: Agent, target: Agent = child) {
+      return dispatchTool(agent, "subagent", { prompt: "look around" }, async () => {
+        emit("agent/created", { agent: target });
+        emit("subagent/start", { id: target.id, local: true });
+        return { ok: true };
       });
-      emit("agent/created", { agent: child });
-      emit("subagent/start", { id: child.id, local: true });
-      return decision;
+    },
+    /** 显式 `@` 路径:宿主直接调 startActivation,不经过模型工具(无 ALS)。 */
+    async activate(agent: Agent, parentSessionId = "main") {
+      const subagents = ctx.subagents as { startActivation(spec: unknown): Promise<unknown> };
+      return subagents.startActivation({
+        provider: "spawn",
+        label: "@explicit",
+        childId: agent.id,
+        request: { prompt: [], parent: { session: { id: parentSessionId } } },
+        delivery: "parent",
+      });
     },
     async callTool(agent: Agent, name: string, args: Record<string, unknown> = {}) {
       return emitWaterfall("tools/pre-execute", { name, arguments: args, agent });
@@ -1374,4 +1470,246 @@ test("a dispose failure never replaces the parent mismatch error", async () => {
     { message: "subagent activation parent mismatch" },
   );
   assert.equal(disposeCalls, 1);
+});
+
+// ── Task 2: 系统技能租约可见性 + spawnKind ALS(token 精确消费) ────────────────
+
+function agentWithTools(id: string, tools: ReturnType<typeof createTools>, sessionId?: string): Agent {
+  return {
+    id,
+    ...(sessionId === undefined ? {} : { session: { id: sessionId } }),
+    ctx: { get: (name) => (name === "tools" ? tools : undefined) },
+  };
+}
+
+test("a system-skill turn acquires the lease, makes subagent visible, and is idempotent", async () => {
+  const harness = createHarness();
+  // present-as 基线不再放行 subagent；租约把附件挂回来后模型才看得到。
+  assert.equal(harness.parentTools.visible.some((schema) => schema.name === "subagent"), false);
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  assert.equal(harness.parentTools.visible.some((schema) => schema.name === "subagent"), true);
+  assert.equal(harness.attachments.sessionAgentTools.get("main")?.has("subagent"), true);
+  assert.equal(systemSkillLeaseKindOf(harness.ctx as never, "main"), "explore");
+
+  // 重复 acquire 幂等：附件集合不膨胀，租约类型保持。
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  assert.equal(harness.attachments.sessionAgentTools.get("main")?.size, 1);
+  assert.equal(systemSkillLeaseKindOf(harness.ctx as never, "main"), "explore");
+});
+
+test("an unattended automation turn never acquires the lease or caches a skill kind", async () => {
+  const harness = createHarness();
+  (harness.ctx.huaanworkUnattended as Map<string, unknown>).set("main", {
+    runId: "r",
+    automationId: "a",
+    allow: new Set(),
+  });
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  assert.equal(harness.attachments.sessionAgentTools.has("main"), false);
+  assert.equal(systemSkillLeaseKindOf(harness.ctx as never, "main"), undefined);
+
+  // acquire 返回 false 时不得写入 pendingByAgent：派生的子代理保持基线（可写），
+  // 不是 explore 的只读工具表。
+  await harness.invokeSubagent(harness.parent);
+  assert.ok(harness.childTools.visible.some((schema) => schema.name === "edit"));
+  assert.equal(harness.guardReason(harness.childTools, "edit"), undefined);
+});
+
+test("a legacy child is denied before any cache write; a managed package child can acquire", async () => {
+  const harness = createHarness({ withActivation: true });
+  registerChildSession("legacy-parent", "child");
+  const denied = (await harness.invokeSkill(harness.child, "explore")) as Decision;
+  assert.equal(denied.kind, "deny");
+  assert.equal(denied.reason, "unmanaged-child-system-skill");
+  assert.equal(harness.attachments.sessionAgentTools.has("child"), false);
+
+  // 包儿童：血缘 allow 表有条目 ⇒ 受管，可以获取租约（锚点在场）。
+  const pkgTools = createTools(DEFAULT_TOOL_NAMES);
+  const pkgChild = agentWithTools("pkg-child", pkgTools);
+  harness.addAgent(pkgChild);
+  registerChildSession("pkg-parent", "pkg-child");
+  (harness.ctx.huaanworkPackageChildAllow as Map<string, readonly string[]>).set("pkg-child", ["read", "subagent"]);
+  harness.anchors.register({ sessionId: "pkg-child", clientMessageId: "pkg-user", origin: "advanced" });
+  harness.anchors.notePreStep(
+    "pkg-child",
+    [{ role: "user", id: "pkg-user", source: { kind: "user" } }],
+    new Date().toISOString(),
+  );
+  assert.equal((await harness.invokeSkill(pkgChild, "explore")).kind, "allow");
+  assert.equal(harness.attachments.sessionAgentTools.get("pkg-child")?.has("subagent"), true);
+  assert.equal(systemSkillLeaseKindOf(harness.ctx as never, "pkg-child"), "explore");
+});
+
+test("PC-1: the dispatch kind rides tools/execute into the body and never leaks into a later explicit @", async () => {
+  const harness = createHarness({ withActivation: true });
+  const atTools = createTools(DEFAULT_TOOL_NAMES);
+  const atChild = agentWithTools("at-child", atTools);
+  harness.addAgent(atChild);
+
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  assert.equal(harness.parentTools.visible.some((schema) => schema.name === "subagent"), true);
+  let kindInBody: string | undefined;
+  const decision = await harness.dispatchTool(harness.parent, "subagent", { prompt: "look" }, async () => {
+    kindInBody = currentDispatchSkillKind();
+    harness.emit("agent/created", { agent: harness.child });
+    harness.emit("subagent/start", { id: harness.child.id, local: true });
+    return { ok: true };
+  });
+  assert.equal(decision.kind, "allow");
+  // PC-1 防假绿：kind 必须在 body 阶段可见；错挂到 pre-execute 时这里是 undefined。
+  assert.equal(kindInBody, "explore");
+  assert.deepEqual(
+    harness.childTools.visible.map((schema) => schema.name),
+    ["read", "read_file", "glob", "grep"],
+  );
+
+  // 派发结束（takeSlotForExecute 已精确释放本次兼容槽）：显式 @ 走 startActivation，
+  // 无 ALS、无残留槽，不得被继承成 explore 只读子代理。
+  await harness.activate(atChild);
+  assert.ok(atTools.visible.some((schema) => schema.name === "write"));
+  assert.equal(harness.guardReason(atTools, "write"), undefined);
+});
+
+test("QP-I1: a deny or throw after pre-execute never pollutes a later explicit @", async () => {
+  for (const mode of ["deny", "throw"] as const) {
+    resetChildSessionRegistry();
+    const harness = createHarness({ withActivation: true });
+    const atTools = createTools(DEFAULT_TOOL_NAMES);
+    const atChild = agentWithTools(`at-child-${mode}`, atTools);
+    harness.addAgent(atChild);
+    assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+
+    let armed = true;
+    harness.onPreExecute((_execution, next) => {
+      if (!armed) return next?.();
+      armed = false;
+      if (mode === "deny") return { kind: "deny", reason: "downstream-deny" };
+      throw new Error("downstream boom");
+    });
+
+    if (mode === "deny") {
+      assert.deepEqual(await harness.invokeSubagent(harness.parent), { kind: "deny", reason: "downstream-deny" });
+    } else {
+      await assert.rejects(() => harness.invokeSubagent(harness.parent), /downstream boom/);
+    }
+
+    await harness.activate(atChild);
+    assert.ok(atTools.visible.some((schema) => schema.name === "write"), `${mode}: explicit @ stays baseline`);
+    assert.equal(harness.guardReason(atTools, "write"), undefined, `${mode}: no explore guard leaks`);
+  }
+});
+
+test("QR-I1: an allow that later settles through tools/result cleans the pending slot idempotently", async () => {
+  const harness = createHarness({ withActivation: true });
+  const atTools = createTools(DEFAULT_TOOL_NAMES);
+  const atChild = agentWithTools("at-child-result", atTools);
+  harness.addAgent(atChild);
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+
+  const { decision, execution } = await harness.preExecute(harness.parent, "subagent", { prompt: "cancelled" });
+  assert.equal(decision.kind, "allow");
+  // 等待期取消：上游 prepareExecution 直接返回 post-result，跳过 tools/execute。
+  harness.emit("tools/result", execution);
+  harness.emit("tools/result", execution); // 幂等
+
+  await harness.activate(atChild);
+  assert.ok(atTools.visible.some((schema) => schema.name === "write"));
+  assert.equal(harness.guardReason(atTools, "write"), undefined);
+});
+
+test("QR-I1: a downstream guard rejection after allow also leaves no slot behind", async () => {
+  const harness = createHarness({ withActivation: true });
+  const atTools = createTools(DEFAULT_TOOL_NAMES);
+  const atChild = agentWithTools("at-child-guard", atTools);
+  harness.addAgent(atChild);
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+
+  let guardArmed = true;
+  harness.parentTools.guard(() => {
+    if (!guardArmed) return undefined;
+    guardArmed = false;
+    return "policy-guard";
+  });
+  const { decision, execution } = await harness.preExecute(harness.parent, "subagent", { prompt: "guarded" });
+  assert.equal(decision.kind, "allow");
+  assert.equal(harness.guardReason(harness.parentTools, "subagent"), "policy-guard");
+  harness.emit("tools/result", execution);
+
+  await harness.activate(atChild);
+  assert.ok(atTools.visible.some((schema) => schema.name === "write"));
+  assert.equal(harness.guardReason(atTools, "write"), undefined);
+});
+
+test("QP-I1: an overlapping compatible dispatch never clears another call's pending slot", async () => {
+  for (const finish of ["execute", "result"] as const) {
+    resetChildSessionRegistry();
+    const harness = createHarness({ withActivation: true });
+    const otherTools = createTools(DEFAULT_TOOL_NAMES);
+    const other = agentWithTools("other", otherTools, "other-session");
+    harness.addAgent(other);
+    const store = harness.ctx.huaanworkSystemSkillLeases as ReturnType<typeof createSystemSkillLeaseStore>;
+    assert.equal(store.acquireExplicit("other-session", "explore"), true);
+    assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+
+    // A 完成 pre-execute；B（兼容路径、无 ALS）随后写入自己的 pendingSpawn。
+    const a = await harness.preExecute(harness.parent, "subagent", { prompt: "a" });
+    const b = await harness.preExecute(other, "subagent", { prompt: "b" });
+    assert.equal(a.decision.kind, "allow");
+    assert.equal(b.decision.kind, "allow");
+
+    if (finish === "execute") {
+      let kindA: string | undefined;
+      await harness.runExecute(a.execution, async () => {
+        kindA = currentDispatchSkillKind();
+        return {};
+      });
+      assert.equal(kindA, "explore");
+    } else {
+      harness.emit("tools/result", a.execution);
+    }
+
+    // B 的兼容槽仍有效：显式 @（无 ALS）消费到 explore 收窄。
+    const otherChildTools = createTools(DEFAULT_TOOL_NAMES);
+    const otherChild = agentWithTools(`other-child-${finish}`, otherChildTools);
+    harness.addAgent(otherChild);
+    await harness.activate(otherChild, "other-session");
+    assert.deepEqual(
+      otherChildTools.visible.map((schema) => schema.name).sort(),
+      ["glob", "grep", "read", "read_file"].sort(),
+      `${finish}: B's compatibility slot survives A's cleanup`,
+    );
+  }
+});
+
+test("QR-I2: an explicit system skill switch invalidates the stale skill cache and the lease kind wins", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "test-fix")).kind, "allow");
+
+  const fixChildTools = createTools(DEFAULT_TOOL_NAMES);
+  const fixChild = agentWithTools("fix-child", fixChildTools);
+  harness.addAgent(fixChild);
+  await harness.invokeSubagent(harness.parent, fixChild);
+  assert.ok(fixChildTools.visible.some((schema) => schema.name === "write"));
+
+  // 显式 /explore 重挂租约：同一父 agent 的旧 test-fix 缓存被同步失效。
+  const store = harness.ctx.huaanworkSystemSkillLeases as ReturnType<typeof createSystemSkillLeaseStore>;
+  assert.equal(store.acquireExplicit("main", "explore"), true);
+  assert.equal(systemSkillLeaseKindOf(harness.ctx as never, "main"), "explore");
+  const exploreChildTools = createTools(DEFAULT_TOOL_NAMES);
+  const exploreChild = agentWithTools("explore-child", exploreChildTools);
+  harness.addAgent(exploreChild);
+  await harness.invokeSubagent(harness.parent, exploreChild);
+  assert.deepEqual(
+    exploreChildTools.visible.map((schema) => schema.name),
+    ["read", "read_file", "glob", "grep"],
+  );
+
+  // 反向 /test-fix：允许写工具。
+  assert.equal(store.acquireExplicit("main", "test-fix"), true);
+  const fixAgainTools = createTools(DEFAULT_TOOL_NAMES);
+  const fixAgain = agentWithTools("fix-again", fixAgainTools);
+  harness.addAgent(fixAgain);
+  await harness.invokeSubagent(harness.parent, fixAgain);
+  assert.ok(fixAgainTools.visible.some((schema) => schema.name === "write"));
+  assert.equal(harness.guardReason(fixAgainTools, "write"), undefined);
 });

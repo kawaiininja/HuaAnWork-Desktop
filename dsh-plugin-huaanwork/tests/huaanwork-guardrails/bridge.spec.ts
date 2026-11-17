@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { test, vi } from "vitest";
 
 import { createSubagentRunRegistry } from "../../src/huaanwork-host/subagent-runs.ts";
+import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
+import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
+import { createSystemSkillLeaseStore, type SystemSkillLeaseStore } from "../../src/huaanwork-host/system-skill-leases.ts";
 
 // Transparent spawnSync wrapper: the snapshot tests below assert the blocking
 // budget on the real calls; every other test still executes the real binary.
@@ -941,4 +944,129 @@ test("bridge leaves roundKey absent before any step/start and on non-turn stream
   }
   for await (const chunk of wrap({ sessionId: PARENT_SESSION, purpose: "session-title" }, next)) void chunk;
   assert.equal(emitted.filter((e) => (e as { event?: string }).event === "token").length, 0);
+});
+
+// ── Task 2: 系统技能租约的权威解挂(goal/error/turn-end/disposed/idle) ────────
+
+const LEASE_SESSION = "huaanwork-lease-session";
+
+function createLeaseCtx() {
+  const attachments = emptyAttachments();
+  const listeners: Record<string, ((...args: never[]) => unknown)[]> = {};
+  const emitted: unknown[] = [];
+  const ctx: Record<string, unknown> = {
+    huaanworkAttachments: attachments,
+    huaanworkUnattended: new Map(),
+    huaanworkPackageChildAllow: new Map(),
+    huaanworkTurnAnchors: {
+      current: () => ({ clientMessageId: "u1", startedAt: new Date().toISOString(), origin: "advanced" }),
+    },
+    huaanworkEmit(event: unknown) {
+      emitted.push(event);
+    },
+    agents: { list: () => [] },
+    tools: { presentAs: () => () => undefined, schemas: () => [] },
+    on(event: string, listener: (...args: never[]) => unknown) {
+      (listeners[event] ??= []).push(listener);
+    },
+  };
+  applyPresentAs(ctx as never);
+  const store: SystemSkillLeaseStore = createSystemSkillLeaseStore(ctx as never);
+  ctx.huaanworkSystemSkillLeases = store;
+  return { ctx, store, attachments, listeners, emitted };
+}
+
+function seedLease(store: SystemSkillLeaseStore, attachments: ReturnType<typeof emptyAttachments>, sessionId = LEASE_SESSION) {
+  assert.equal(store.acquireExplicit(sessionId, "explore"), true);
+  assert.equal(attachments.sessionAgentTools.get(sessionId)?.has("subagent"), true);
+}
+
+function assertReleased(
+  store: SystemSkillLeaseStore,
+  attachments: ReturnType<typeof emptyAttachments>,
+  sessionId = LEASE_SESSION,
+) {
+  assert.equal(store.kindOf(sessionId), undefined);
+  assert.equal(attachments.sessionAgentTools.has(sessionId), false);
+}
+
+test("an active goal does not keep the lease across agent/error, while normal idle does", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, store, attachments, listeners, emitted } = createLeaseCtx();
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as (session: { id: string }, event: { type: string; data?: unknown }) => void;
+  const status = listeners["agent/status"]?.[0] as (payload: { status: string; agent?: { session?: { id?: string } } }) => void;
+  const error = listeners["agent/error"]?.[0] as (payload: { error: unknown; agent?: { session?: { id?: string } } }) => void;
+
+  onSessionEvent({ id: LEASE_SESSION }, { type: "goal/change", data: { goal: { phase: "active" }, roundsStarted: 1 } });
+  seedLease(store, attachments);
+  // 正常完成轮次:active goal 的轮间 idle 不得提前解挂。
+  status({ status: "idle", agent: { session: { id: LEASE_SESSION } } });
+  assert.equal(store.kindOf(LEASE_SESSION), "explore");
+  assert.deepEqual(emitted.filter((event) => (event as { event?: string }).event === "session/end"), [
+    { event: "session/end", ok: true, sessionId: LEASE_SESSION },
+  ]);
+
+  // agent/error 无条件释放(含 abort),abort 仍按 cancelled 广播。
+  error({ error: new Error("boom"), agent: { session: { id: LEASE_SESSION } } });
+  assertReleased(store, attachments);
+  seedLease(store, attachments);
+  error({
+    error: Object.assign(new Error("HuaAnWork model request aborted by caller"), { code: "ABORTED" }),
+    agent: { session: { id: LEASE_SESSION } },
+  });
+  assertReleased(store, attachments);
+  assert.ok(emitted.some((event) => (event as { cancelled?: boolean }).cancelled === true));
+});
+
+test("a terminal goal phase releases the lease and its active-goal marker", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, store, attachments, listeners } = createLeaseCtx();
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as (session: { id: string }, event: { type: string; data?: unknown }) => void;
+
+  onSessionEvent({ id: LEASE_SESSION }, { type: "goal/change", data: { goal: { phase: "active" }, roundsStarted: 1 } });
+  seedLease(store, attachments);
+  onSessionEvent({ id: LEASE_SESSION }, { type: "goal/change", data: { goal: { phase: "complete" }, roundsStarted: 2 } });
+  assertReleased(store, attachments);
+
+  // 墓碑 clear 同样释放。
+  onSessionEvent({ id: LEASE_SESSION }, { type: "goal/change", data: { goal: { phase: "active" }, roundsStarted: 3 } });
+  seedLease(store, attachments);
+  onSessionEvent({ id: LEASE_SESSION }, { type: "goal/change", data: { operation: "clear" } });
+  assertReleased(store, attachments);
+});
+
+test("aborted or errored turn/end releases the lease; a completed turn keeps it", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, store, attachments, listeners } = createLeaseCtx();
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as (session: { id: string }, event: { type: string; data?: unknown }) => void;
+
+  seedLease(store, attachments);
+  onSessionEvent({ id: LEASE_SESSION }, { type: "turn/end", data: { reason: { kind: "completed" } } });
+  assert.equal(store.kindOf(LEASE_SESSION), "explore");
+
+  onSessionEvent({ id: LEASE_SESSION }, { type: "turn/end", data: { reason: { kind: "aborted" } } });
+  assertReleased(store, attachments);
+
+  seedLease(store, attachments);
+  onSessionEvent({ id: LEASE_SESSION }, { type: "turn/end", data: { reason: { kind: "error" } } });
+  assertReleased(store, attachments);
+});
+
+test("session/disposed releases the lease, and a parent idle without an active goal also does", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, store, attachments, listeners } = createLeaseCtx();
+  apply(ctx as never);
+  const disposed = listeners["session/disposed"]?.[0] as (session: { id: string }) => void;
+  const status = listeners["agent/status"]?.[0] as (payload: { status: string; agent?: { session?: { id?: string } } }) => void;
+
+  seedLease(store, attachments);
+  disposed({ id: LEASE_SESSION });
+  assertReleased(store, attachments);
+
+  seedLease(store, attachments);
+  status({ status: "idle", agent: { session: { id: LEASE_SESSION } } });
+  assertReleased(store, attachments);
 });

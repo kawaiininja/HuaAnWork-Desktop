@@ -60,6 +60,12 @@ import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog 
 import type { RouteContext } from './routes.ts'
 import type { SubagentsService } from './subagents-service.ts'
 import type { SubagentRunRegistry } from './subagent-runs.ts'
+import {
+  acquireExplicitSystemSkillLease,
+  isUnmanagedChildSession,
+  releaseSystemSkillLease,
+  type SystemSkillLeaseStore,
+} from './system-skill-leases.ts'
 import type { TurnAnchorStore } from './turn-anchors.ts'
 
 /**
@@ -119,6 +125,13 @@ export type SessionRuntimeContext = {
    * 登记本次发送的 pending,pre-step 钩子在真实用户消息出现时写 anchor。
    */
   huaanworkTurnAnchors?: TurnAnchorStore
+  /**
+   * 系统技能回合租约(holders.ts 注入)。显式 `/explore`、`/test-fix` 在 followup 之前
+   * 挂载 `subagent` 附件与租约;受管儿童在登记锚点之前拒发。
+   */
+  huaanworkSystemSkillLeases?: SystemSkillLeaseStore
+  /** 包回合血缘允许表:受管儿童判别(`isUnmanagedChildSession`)读它。 */
+  huaanworkPackageChildAllow?: Map<string, readonly string[]>
 }
 
 /** 一次已准入的用户回合:根与模型由 `sessionSend`/出队复检算好。 */
@@ -492,6 +505,13 @@ export async function sendToAgent(
       return { queued: true, sessionId, started: false, reason: '已取消' }
     }
     clearInvalidRoute(sessionId)
+    // 系统技能回合租约(显式 /explore、/test-fix):受管儿童(无包血缘条目)不得经显式
+    // 入口获得模型面 `subagent`;拒发必须在 turnAnchors.register 之前,不留下未消费 anchor。
+    const systemSkillKind =
+      skillName === 'explore' || skillName === 'test-fix' ? skillName : undefined
+    if (systemSkillKind !== undefined && isUnmanagedChildSession(ctx, sessionId)) {
+      throw new Error('unmanaged-child-system-skill')
+    }
     // 回合锚点:followup 受理前登记本次发送的 pending(pre-step 出现真实用户消息时生效)。
     // 拒发 / followup 抛错时只回滚本次登记,不触碰上一回合已生效的 anchor。
     const followupId = resolveFollowupClientMessageId(params)
@@ -501,6 +521,12 @@ export async function sendToAgent(
       origin: turnOriginForSession(sessionId),
     })
     try {
+      // 显式系统技能回合:上游 systemPrompt.assemble() 在 agent/pre-step 建立锚点前即
+      // 采集 Step 1 工具列表,租约与附件必须在 followup 之前挂好;acquireExplicit 会先
+      // 同步失效同一父 agent 的旧 pendingByAgent 缓存(QR-I2)。
+      if (systemSkillKind !== undefined) {
+        acquireExplicitSystemSkillLease(ctx, sessionId, systemSkillKind)
+      }
       agent.followup({
         id: followupId,
         role: 'user',
@@ -509,6 +535,8 @@ export async function sendToAgent(
       })
     } catch (error) {
       rollbackAnchor?.()
+      // followup 抛错立即精确回滚本次显式租约与附件(不传 clearGoal,保留既有 active goal 语义)。
+      if (systemSkillKind !== undefined) releaseSystemSkillLease(ctx, sessionId)
       throw error
     }
     followupAccepted = true
@@ -829,6 +857,9 @@ export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, se
       // 未激活或稳定通道会话删除后可能以同 id 重建:清掉锚点与未消费的 pending,
       // 否则新会话的第一轮会继承已删会话的回合归属。
       ctx.huaanworkTurnAnchors?.clearSession(id)
+      // 系统技能租约随会话销毁无条件释放并清 active goal 标记(与 bridge 的
+      // session/disposed 同一契约;两处都幂等)。
+      releaseSystemSkillLease(ctx, id, { clearGoal: true })
     }
   }
 }

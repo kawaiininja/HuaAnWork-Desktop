@@ -11,6 +11,7 @@ import type { HuaanworkEventHub } from './events.ts'
 import type { RouteContext } from './routes.ts'
 import type { SessionRuntimeContext } from './sessions.ts'
 import type { SubagentRunRegistry } from './subagent-runs.ts'
+import { createSystemSkillLeaseStore, type SystemSkillLeaseStore } from './system-skill-leases.ts'
 import { createTurnAnchorStore, type TurnAnchorStore } from './turn-anchors.ts'
 import type { TurnScheduler } from './turn-scheduler.ts'
 
@@ -67,6 +68,11 @@ declare module '@deepseek-ai/cordis' {
     huaanworkTurnScheduler: TurnScheduler
     /** 会话 → 当前回合锚点(设计「回合归属」);pre-step 钩子与后续进度投影共读同一实例。 */
     huaanworkTurnAnchors: TurnAnchorStore
+    /**
+     * 系统技能回合租约(`explore` / `test-fix` 在回合内把 `subagent` 挂进会话附件)。
+     * 实例随宿主生命周期;guardrails 侧与 sessions/bridge 读同一引用。
+     */
+    huaanworkSystemSkillLeases: SystemSkillLeaseStore
   }
 }
 
@@ -94,6 +100,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkSessionRoots',
   'huaanworkTurnScheduler',
   'huaanworkTurnAnchors',
+  'huaanworkSystemSkillLeases',
 ] as const
 
 let installed = false
@@ -177,6 +184,8 @@ export function installHuaanworkHolders(
   ctx.huaanworkAgentCatalog = { current: { items: [] } }
   ctx.huaanworkEmit = emit
   ctx.huaanworkTurnAnchors = createTurnAnchorStore()
+  // 系统技能租约在其余 holder 之后创建:store 捕获同一批容器(无人值守/附件/血缘/锚点)。
+  ctx.huaanworkSystemSkillLeases = createSystemSkillLeaseStore(ctx)
 
   if (ctx.huaanworkEmit !== emit) {
     throw new Error(

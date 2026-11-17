@@ -118,6 +118,11 @@ export const UPSTREAM_PRODUCT_ANALYTICS_ROW_IDS = ['desktop-product-telemetry', 
  * `SubagentDepthError`. The row composes after the bundle layers and ahead of
  * the profile and machine-wide layers, so a saved Desktop value replaces it
  * rather than being shadowed; bundle-level `subagent` config is replaced, never merged.
+ *
+ * R1/R2 decision (2026-11-15): this depth reason is unchanged — a package child
+ * keeps `subagent` through its lineage attachment, so depth-2 lane dispatch stays
+ * reachable. Visibility is controlled per session by present-as / system-skill
+ * leases and is unrelated to this depth default; the constant is not modified.
  */
 const DESKTOP_SUBAGENT_MAX_DEPTH = 2
 const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'
@@ -1625,9 +1630,12 @@ export function prepareDesktopProfile(
     { id: 'tool-fs', disabled: false },
     { id: 'tool-fs-search', disabled: false },
     // 委派工具:web-app overlay 关闭宿主平面的 tool-subagent 行,而桌面会话从不挂载
-    // standard preset(委派组随 preset 提供)⇒ 若不复挂,父会话与包子会话都没有
-    // `subagent` 工具,包 lane 派发不可达(2026-11-13 owner 裁定)。仅翻回 `subagent`;
-    // fork/control/list-agents 保持关闭。
+    // standard preset(委派组随 preset 提供)⇒ 若不复挂,包 lane 派发不可达
+    // (2026-11-13 owner 裁定)。仅翻回 `subagent`;fork/control/list-agents 保持关闭。
+    // R1/R2(2026-11-15):本行保持启用不是模型面放行——普通父会话默认无 `subagent`
+    // (present-as 已把它移出全局 ALLOWED_TOOLS);系统技能回合经租约附件、包儿童经
+    // 血缘附件获得;宿主 `ctx.subagents` 服务始终保留。保持 enabled 是为包 lane 深度 2
+    // 与条件可见(bundle 行整体禁用会连宿主服务一起移除)。
     { id: 'tool-subagent', disabled: false },
     process.platform === 'win32'
       ? { id: 'tool-pwsh', disabled: false, config: { enableRunInBackground: false } }
