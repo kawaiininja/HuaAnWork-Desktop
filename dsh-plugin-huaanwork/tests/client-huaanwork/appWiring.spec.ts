@@ -1820,6 +1820,42 @@ test("an early todo_write for the pending send is buffered and replayed after it
   assert.match(historyBody, /kind: "todo"/);
 });
 
+test("a fresh tab's first early todo_write is matched by its anchor alone", () => {
+  const holdSource = earlyEventGate();
+  const todoBranch = blockAfter(
+    holdSource,
+    'incoming.event === "tool/start" && incoming.name === "todo_write"',
+  ).body;
+  // 全新标签首发时 pending 还没有 sessionId：待办分支必须按锚查找，且锚本身仍参与守卫。
+  assert.match(
+    todoBranch,
+    /findPendingSendByClientMessageId\(pendingSendsRef\.current\.values\(\), incoming\.clientMessageId\)/,
+    "the early todo branch looks the pending send up by its turn anchor",
+  );
+  assert.doesNotMatch(todoBranch, /pendingSendOfSession\(/, "a session id cannot identify a fresh tab's first send");
+  assert.match(todoBranch, /incoming\.clientMessageId === pending\.clientMessageId/);
+
+  // 行为：sessionId 缺失的在途发送仍按锚命中并缓冲；锚不一致或无锚一律不命中。
+  const fresh = { tabId: "fresh", clientMessageId: "uuid-fresh", buffered: [] as RpcEvent[] };
+  const bound = { tabId: "bound", clientMessageId: "uuid-bound", sessionId: "s1", buffered: [] as RpcEvent[] };
+  const pendings = [fresh, bound];
+  const todoEvent: RpcEvent = {
+    event: "tool/start",
+    name: "todo_write",
+    clientMessageId: "uuid-fresh",
+    roundKey: 3,
+    todos: [{ content: "一", status: "pending" }],
+  };
+  assert.equal(AppModule.findPendingSendByClientMessageId(pendings, todoEvent.clientMessageId), fresh);
+  const matched = AppModule.findPendingSendByClientMessageId(pendings, todoEvent.clientMessageId);
+  if (matched !== undefined && todoEvent.clientMessageId === matched.clientMessageId) matched.buffered.push(todoEvent);
+  assert.deepEqual(fresh.buffered, [todoEvent], "the anchored todo is buffered before the send response");
+  assert.deepEqual(bound.buffered, []);
+  assert.equal(AppModule.findPendingSendByClientMessageId(pendings, "uuid-other"), undefined);
+  assert.equal(AppModule.findPendingSendByClientMessageId(pendings, undefined), undefined);
+  assert.equal(AppModule.findPendingSendByClientMessageId([], "uuid-fresh"), undefined);
+});
+
 test("pending send does not buffer the previous turn events", () => {
   const holdSource = earlyEventGate();
   const runningGuardAt = holdSource.indexOf(

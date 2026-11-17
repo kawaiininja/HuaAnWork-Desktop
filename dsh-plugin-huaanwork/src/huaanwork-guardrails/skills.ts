@@ -807,10 +807,12 @@ export function apply(ctx: Context): void {
           // `result` 必填:无需可选跳过,它同时提供 executionEnded。
           observeResult(run);
           // 正常完成(未取消)后按同一收尾预算释放 activation;取消路径由 cancel 闭包
-          // 或下面的晚到取消分支负责。
+          // 或下面的晚到取消分支负责。清理 promise 必须回链到这里:游离的 cleanup
+          // 若 reject 会成为未处理的拒绝。
           void resultObserved
             ?.then(() => {
-              if (!cancelRequested) void cleanup("idle");
+              if (cancelRequested) return undefined;
+              return cleanup("idle");
             })
             .catch(() => undefined);
           if (cancelRequested) {

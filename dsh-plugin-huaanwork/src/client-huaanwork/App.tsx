@@ -1739,8 +1739,9 @@ export default function App() {
         // 该分支必须先于 running-turn 守卫：goalIntermediate 保留前端 running 期间，
         // 本次排队回合的 todo_write 也不能被守卫当成上一回合的事件丢掉；
         // 上一回合或他项的事件 clientMessageId 不匹配，天然不进这里的缓冲。
+        // 全新标签的首发还没有 sessionId，所以按锚而不是按会话查找在途发送。
         if (incoming.event === "tool/start" && incoming.name === "todo_write") {
-          const pending = pendingSendOfSession(sessionIdOfEvent(incoming));
+          const pending = findPendingSendByClientMessageId(pendingSendsRef.current.values(), incoming.clientMessageId);
           if (pending !== undefined && incoming.clientMessageId === pending.clientMessageId) {
             pending.buffered.push(incoming);
             return true;
@@ -4821,6 +4822,27 @@ export function queuedTurnRunState(state: TabRunState, queueItemId: string, hasO
   return hasOwner
     ? noteWaitingStarted(state, queueItemId)
     : noteWaitingCancelled(state, queueItemId);
+}
+
+/**
+ * 按本次发送的持久回合锚在在途发送中查找。
+ *
+ * 全新标签的首发在应答回来前还没有 `sessionId`, 早到的 `todo_write` 只能靠
+ * 发送方生成的 UUID 锚归属; 锚由 `crypto.randomUUID()` 生成, 不会重复。
+ *
+ * @param pending 在途发送集合 (`pendingSendsRef.current.values()`)
+ * @param clientMessageId 早到事件携带的回合锚; 缺失或没有匹配时返回 undefined
+ * @returns 锚一致的发送记录
+ */
+export function findPendingSendByClientMessageId<P extends { clientMessageId: string }>(
+  pending: Iterable<P>,
+  clientMessageId: string | undefined,
+): P | undefined {
+  if (typeof clientMessageId !== "string" || clientMessageId.length === 0) return undefined;
+  for (const candidate of pending) {
+    if (candidate.clientMessageId === clientMessageId) return candidate;
+  }
+  return undefined;
 }
 
 /** 本回合只保留最新一份待办列表（todo_write 每次发送完整替换列表），并带上它的回合归属。 */

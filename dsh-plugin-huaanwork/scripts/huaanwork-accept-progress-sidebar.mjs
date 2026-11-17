@@ -1894,6 +1894,13 @@ const DUAL_ENTRIES = [
 ]
 const AFTER_PROMPT = `${MARKER}-AFTER 回复「完成」两个字即可。`
 
+/**
+ * The sole check reason the model-skill entry produces when the shipped profile
+ * never declares the `skill` tool (F1). A BLOCKED verdict is only allowed when
+ * this is the only recorded failure; any other reason is a real FAIL.
+ */
+const MODEL_SKILL_BLOCKED_REASON = 'model-skill explore was not constructible: the parent request/header tool schema never declares the skill tool'
+
 /** The session-failure banner and the host error note the client renders after `sessionFailed`. */
 const SESSION_FAILURE_STATE = `(() => {
   const banner = [...document.querySelectorAll('.banner.error')]
@@ -1948,7 +1955,7 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
       runSeenInRail: false,
       cancelled: false,
     })
-    reasons.push('model-skill explore was not constructible: the parent request/header tool schema never declares the skill tool')
+    reasons.push(MODEL_SKILL_BLOCKED_REASON)
   }
   for (const definition of DUAL_ENTRIES) {
     if (definition.modelSkill) {
@@ -2961,20 +2968,30 @@ async function run() {
     cancelRequests: countSubagentCancelRequests(requests, ''),
     channel: 'CDP Network.requestWillBeSent (/huaanwork/*)',
   }
-  // A scene the shipped product cannot construct is a blocking product finding,
-  // not a pass: the check already carries its own reason, and the run exits 3.
+  // A BLOCKED verdict is reserved for the model-skill entry being unreachable
+  // (F1) as the only failure. Any other failing check is a real product FAIL and
+  // must exit 1, so BLOCKED never masks a FAIL. The blocked detail is recorded in
+  // facts either way; the failing-check assertion decides the verdict.
   const dualCheck = progress.checks['dual-entry-system-skills']
   if (dualCheck?.modelSkillBlocked !== null && dualCheck?.modelSkillBlocked !== undefined) {
-    throw new BlockedError(
-      `the model-triggered system-skill entry is unreachable: ${dualCheck.modelSkillBlocked.cause}`,
-      {
+    const blocked = {
+      cause: `the model-triggered system-skill entry is unreachable: ${dualCheck.modelSkillBlocked.cause}`,
+      detail: {
         check: 'dual-entry-system-skills',
         entry: dualCheck.modelSkillBlocked.entry,
         skill: dualCheck.modelSkillBlocked.skill,
         sessionId: dualCheck.modelSkillBlocked.sessionId,
         toolNames: dualCheck.modelSkillBlocked.toolNames,
       },
-    )
+    }
+    const failingIds = PROGRESS_ACCEPT_CHECK_IDS.filter((id) => progress.checks[id]?.ok !== true)
+    const dualReasons = Array.isArray(dualCheck.reasons) ? dualCheck.reasons : []
+    const onlyModelSkillBlocked = failingIds.length === 1
+      && failingIds[0] === 'dual-entry-system-skills'
+      && dualReasons.length > 0
+      && dualReasons.every((reason) => reason === MODEL_SKILL_BLOCKED_REASON)
+    if (onlyModelSkillBlocked) throw new BlockedError(blocked.cause, blocked.detail)
+    facts.blocked = blocked
   }
   assertProgressSidebarAcceptanceFacts(facts)
   facts.outcome = 'PASS'
