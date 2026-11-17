@@ -1103,6 +1103,7 @@ describe('agent and skill creation routing', () => {
     expect(harness.cancelSkill).toHaveBeenCalledWith(ROUTING_SESSION_ID, { explicit: true })
     expect(existsSync(harness.skillDraftPath)).toBe(false)
     expect(lastEventText(harness.events)).toContain('已取消创建技能')
+    expect(harness.events.at(-1)).toMatchObject({ event: 'skill/notice', terminal: 'cancelled' })
     expect(injectCreateSkill).not.toHaveBeenCalled()
     expect(attachSkillCreationTools).not.toHaveBeenCalled()
     expect(injectCreateAgentSkill).not.toHaveBeenCalled()
@@ -1258,6 +1259,7 @@ describe('agent and skill creation routing', () => {
     expect(result.started).toBe(false)
     expect(existsSync(harness.skillDraftPath)).toBe(false)
     expect(lastEventText(harness.events)).toContain('已取消创建技能')
+    expect(harness.events.at(-1)).toMatchObject({ event: 'skill/notice', terminal: 'cancelled' })
     expect(harness.packageHost.cancel).not.toHaveBeenCalled()
   })
 

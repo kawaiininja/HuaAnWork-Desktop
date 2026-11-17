@@ -2292,7 +2292,12 @@ test("skill events follow their session and keep success and notice routes separ
   assert.ok(noticeAt >= 0, "the notice branch is still present");
   const notice = block.slice(noticeAt);
   assert.match(notice, /noteTab\(target, event\.text\)/);
-  assert.doesNotMatch(notice, /skill-success|upsertSkillSuccess|setView\(/);
+  // 只有宿主确认取消成功的结构化终态才消费卡片;一般提示与失败 notice 不得误消费。
+  assert.match(
+    notice,
+    /if \(event\.terminal === "cancelled"\) setChannelItems\(\(items\) => consumeSkillConfirmCards\(items\), event\.sessionId\);/,
+  );
+  assert.doesNotMatch(notice, /skill-success|upsertSkillSuccess|setView\(|event\.text\.includes/);
 });
 
 test("SkillsView refreshes on the skill signal, never on agent changes", () => {

@@ -26,7 +26,7 @@
 - 工具结果定稿前不得解绑当前工具；成功提交后使用 `huaanworkOnToolResult` 解绑。
 - 修改 `styles.css` 后必须运行 `corepack yarn workspace dsh-plugin-huaanwork gen:styles`。
 - 所有命令均在仓库根执行；提交只包含当前任务列出的文件。
-- 包级 `typecheck`/`check` 之外，收尾必须按仓库根约定执行 `corepack yarn check`；自动化门禁不替代 §12.2 的人类验收。
+- 包级 `typecheck`/`check` 之外，收尾必须按仓库根约定执行 `corepack yarn check`；自动化门禁不替代 §12.2 的真机走查与证据。
 
 ---
 
@@ -1300,17 +1300,17 @@ git commit -m "feat(skills): complete conversational creation flow"
 
 ---
 
-### Task 7: 人类验收（规格 §12.2）与证据落盘
+### Task 7: 真机验收（规格 §12.2）与证据落盘
 
 **Files:**
 - Create: `docs/evidence/2026-11-chat-created-skills-acceptance.md`（记录验收结果与证据）
 
 **Interfaces:**
-- Consumes: Task 1–6 全部已合入的构建产物；本任务只执行规格 §12.2 的五项人类验收并落盘证据，不改产品代码。
+- Consumes: Task 1–6 全部已合入的构建产物；本任务只执行规格 §12.2 的五项真机验收并落盘证据，不改产品代码。
 
 - [ ] **Step 1: 按规格 §12.2 逐项执行并记录**
 
-以下五项必须真人执行，不得用自动化测试替代；每项记录环境（OS/构建号）、操作步骤、观察结果与截图/日志证据路径：
+按 owner 2026-11-16 裁定，以下五项可由 agent 以规格 §12.2 定义的真机走查方式执行，也可由真人执行；不得以自动化测试或 CI 通过替代。每项记录执行方、环境（OS/构建号）、操作步骤、观察结果与截图/日志证据路径：
 
 1. 从“我的技能”点击“对话创建技能”，完成访谈并看到确认卡。
 2. 选择继续修改时草稿更新；选择取消时没有新技能。
@@ -1330,7 +1330,7 @@ Expected: PASS（若 `verify:aa` 并发竞争失败，串行重跑并如实记�
 
 ```bash
 git add docs/evidence/2026-11-chat-created-skills-acceptance.md
-git commit -m "docs(skills): record conversational creation human acceptance"
+git commit -m "docs(skills): record conversational creation acceptance"
 ```
 
 ## Completion Criteria
@@ -1341,4 +1341,4 @@ git commit -m "docs(skills): record conversational creation human acceptance"
 - 异常双草稿态 propose/commit/裸取消均被拒绝，`/create-skill cancel` 与 `/create-agent cancel` 只清指定流程并恢复剩余流程。
 - 没有脚本、HTTP/MCP、自动启用、自动上传或第二套正式写盘路径。
 - 包级 `typecheck` 与 `check` 已实际执行并记录真实结果；仓库根 `corepack yarn check` 已实际执行并记录真实结果。
-- 规格 §12.2 五项人类验收已真人执行，证据落盘 `docs/evidence/2026-11-chat-created-skills-acceptance.md`；自动化门禁不替代人类验收。
+- 规格 §12.2 五项真机验收已由 agent 或真人按 owner 2026-11-16 裁定执行，证据落盘 `docs/evidence/2026-11-chat-created-skills-acceptance.md`；自动化门禁不替代真机走查。

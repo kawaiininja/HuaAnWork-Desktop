@@ -404,6 +404,13 @@ async function createSkillLocked(
   })
   const skillData = Buffer.from(serialized, 'utf8')
   const contentDigest = validatedSkillDigest([...existing.files, { path: 'SKILL.md', data: skillData }])
+  // 对话首次创建必须默认禁用:带外删除可能留下同名 enabled=true 键。
+  // 只在当前存储锁内、技能文件可见前清残留;凭证重放在进入本函数前已返回,
+  // 因而不会撤销用户创建后的手动启用。本函数不得再次获取非重入存储锁。
+  if (identity !== undefined && Object.hasOwn(toggles, input.name)) {
+    setUserSkillToggle(storageRoot, input.name, false)
+    delete toggles[input.name]
+  }
   await atomicWrite(join(skillDir, 'SKILL.md'), skillData)
   const localEntry: SkillLocalEntry = {
     origin: { kind: 'created' },

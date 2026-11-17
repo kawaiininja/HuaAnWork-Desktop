@@ -293,6 +293,33 @@ describe('skill_commit', () => {
     expect(h.restrictCalls).toEqual(['session-a'])
   })
 
+  test('detaches after the first alreadyCommitted replay when a restarted process has no pending result', async () => {
+    const host = fakeHost({
+      commit: async (_sessionId, draftId) => ({
+        ok: true,
+        draftId,
+        name: 'daily-summary',
+        alreadyCommitted: true,
+      }),
+    })
+    const h = harness()
+    attachAgentTools(h.maps, 'session-a', SKILL_CREATION_TOOLS)
+    registerSkillCreationTools(h.ctx, host)
+
+    await h.registered.get(SKILL_COMMIT_TOOL)?.execute(
+      { draftId: 'draft-1' },
+      execFor('session-a', { callId: 'call-after-restart' }),
+    )
+
+    // 工具结果尚未定稿时仍须保留附件,供上游按工具名归一化成功结果。
+    expect(isAgentToolAttached(h.maps, 'session-a', SKILL_COMMIT_TOOL)).toBe(true)
+    h.emitToolResult('call-other')
+    expect(isAgentToolAttached(h.maps, 'session-a', SKILL_COMMIT_TOOL)).toBe(true)
+    h.emitToolResult('call-after-restart')
+    expect(isAgentToolAttached(h.maps, 'session-a', SKILL_PROPOSE_TOOL)).toBe(false)
+    expect(isAgentToolAttached(h.maps, 'session-a', SKILL_COMMIT_TOOL)).toBe(false)
+  })
+
   test('replays the same success and changed events without a second pending detach', async () => {
     let commits = 0
     const host = fakeHost({

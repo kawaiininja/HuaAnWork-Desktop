@@ -1911,7 +1911,8 @@ export default function App() {
         return;
       }
       if (event.event === "skill/notice") {
-        // 成功文案只走 skill/success；这里只留错误与一般提示的脚注。
+        // 仅取消成功的结构化终态消费活动确认卡；错误和一般 notice 不改变卡片状态。
+        if (event.terminal === "cancelled") setChannelItems((items) => consumeSkillConfirmCards(items), event.sessionId);
         const target = targetTabFor(eventSessionId);
         if (target) noteTab(target, event.text);
         return;

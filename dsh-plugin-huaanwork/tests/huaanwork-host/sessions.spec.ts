@@ -8,7 +8,11 @@ import {
   resetChildSessionRegistry,
 } from '../../src/huaanwork-host/child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
-import { emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
+import {
+  attachAgentTools,
+  emptyAttachments,
+  isAgentToolAttached,
+} from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import { apply as applySkills, setBundledSkillRegistrar } from '../../src/huaanwork-guardrails/skills.ts'
 import {
   answerRouteInput,
@@ -55,6 +59,8 @@ import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-hos
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
 import { sweepProjectLegacySessions } from '../../src/huaanwork-host/session-sweep.ts'
 import { ACTIVATION_CLEANUP_TIMEOUT_MS } from '../../src/huaanwork-host/agent-package/host.ts'
+import { CREATION_TOOLS } from '../../src/huaanwork-host/agent-package/creation.ts'
+import { SKILL_CREATION_TOOLS } from '../../src/huaanwork-host/skill-creation.ts'
 import { dispatchAt } from '../../src/huaanwork-host/agent-invoke.ts'
 import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 import {
@@ -1644,27 +1650,43 @@ describe('session.remove lifecycle', () => {
     expect(existsSync(neutralSessionsBaseDir(routeCtx.profileDir))).toBe(false)
   })
 
-  test('sessionRemove discards both creation drafts with the session', async () => {
+  test('sessionRemove discards both creation drafts and detaches both creation tool pairs', async () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)
     const fresh = sessionNew(routeCtx, { fresh: true })
     writePersistedSession(routeCtx.dshHome, fresh.sessionId, fresh.cwd)
-    // 删除会话=放弃未完成草稿(owner 2026-11-16 裁定):两类草稿随会话一并清理,
-    // 否则稳定通道会话重建同 sessionId 时旧草稿复活并继续注入创建流程。
+    // 删除会话=放弃未完成草稿(owner 2026-11-16 裁定):两类草稿与工具附件随会话一并清理,
+    // 否则稳定通道会话重建同 sessionId 时旧草稿复活并继续注入创建流程或继承工具。
     const skillDraft = join(routeCtx.profileDir, 'skill-creation-drafts', `${fresh.sessionId}.json`)
     const agentDraft = join(routeCtx.profileDir, 'agents', '.drafts', `${fresh.sessionId}.json`)
     mkdirSync(dirname(skillDraft), { recursive: true })
     writeFileSync(skillDraft, '{"schemaVersion":1}\n', 'utf8')
     mkdirSync(dirname(agentDraft), { recursive: true })
     writeFileSync(agentDraft, '{"schemaVersion":1}\n', 'utf8')
+    const maps = emptyAttachments()
+    attachAgentTools(maps, fresh.sessionId, [...SKILL_CREATION_TOOLS, ...CREATION_TOOLS])
+    attachAgentTools(maps, fresh.sessionId, ['mcp__demo__echo'])
+    const restrictCalls: string[] = []
+    const ctx: SessionRuntimeContext = { huaanworkAttachments: maps }
+    const runtimeWithRestrict = ctx as unknown as Record<symbol, unknown>
+    runtimeWithRestrict[Symbol.for('huaanwork.presentAs.restrictState')] = {
+      restrict: () => undefined,
+      restrictAll: () => undefined,
+      restrictSession: (sessionId: string) => restrictCalls.push(sessionId),
+    }
 
-    await expect(sessionRemove(undefined, routeCtx, { sessionId: fresh.sessionId })).resolves.toEqual({ removed: true })
+    await expect(sessionRemove(ctx, routeCtx, { sessionId: fresh.sessionId })).resolves.toEqual({ removed: true })
 
     expect(existsSync(skillDraft)).toBe(false)
     expect(existsSync(agentDraft)).toBe(false)
-    // 同 sessionId 重建不再有草稿,不重新激活创建流程。
+    // 同 sessionId 重建不再有草稿或创建附件,不重新激活创建流程。
     expect(hasSkillCreationDraftOnDisk(routeCtx.profileDir, fresh.sessionId)).toBe(false)
     expect(hasAgentCreationDraftOnDisk(routeCtx.profileDir, fresh.sessionId)).toBe(false)
+    for (const toolName of [...SKILL_CREATION_TOOLS, ...CREATION_TOOLS]) {
+      expect(isAgentToolAttached(maps, fresh.sessionId, toolName)).toBe(false)
+    }
+    expect(isAgentToolAttached(maps, fresh.sessionId, 'mcp__demo__echo')).toBe(true)
+    expect(restrictCalls).toEqual([fresh.sessionId, fresh.sessionId])
   })
 
   test('sessionRemove logs and still reports removed when draft cleanup fails', async () => {

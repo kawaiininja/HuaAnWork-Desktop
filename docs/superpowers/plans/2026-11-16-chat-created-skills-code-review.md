@@ -247,3 +247,41 @@
 3. 同步计划与规格的验收口径；以 owner 2026-11-16 裁定为准时，不再把“真人未验收”列为额外阻断。
 
 Kimi-M-1 可随修复波一并处理或由 owner 明确停放；停放不改变上述两项 Important 必须闭环的准入条件。
+
+---
+
+## 八、§7 修复与复审移交（2026-11-17）
+
+> 本节是修复方移交材料，不等同于独立复审结论。复审仍应读取最终提交、执行针对性回归并核对干净终树门禁，不因本节自述直接改判 Approve。
+
+### 8.1 修复范围
+
+1. **Kimi-I-1——同名残留启用态：**
+   - `skills-host.ts` 的 `createSkillLocked` 仅在携带对话创建身份的首次非凭证命中路径中，于既有存储锁内、`SKILL.md` 可见前删除同名残留 toggle；不嵌套获取非重入锁。
+   - 凭证命中仍在进入 `createSkillLocked` 前返回，因此重放不会清除用户创建后的手动启用，也不会重写技能内容。
+   - 回归覆盖“表单创建并启用 → 带外删目录 → 对话同名新建”后的 `mineList.enabled=false`、toggle 缺席与 `/name` 拒绝，以及手动启用后的原 draftId 重放保持启用和内容不变。
+2. **Kimi-I-2——创建工具附件终止生命周期：**
+   - `skill-creation-tools.ts` 仅在**同会话已有在途首次成功 detach**时跳过重放的第二个登记；新进程空 pending 的首个 `alreadyCommitted` 重放登记自己的 callId，并在对应 `tools/result` 后卸除两个技能创建工具。
+   - `sessions.ts` 的 `releaseSessionRuntime` 在会话及已登记后代的运行态释放中卸除技能与智能体创建工具；`session.remove` 继续清理两类草稿，同 sessionId 重建不再继承附件。
+   - 回归分别覆盖新进程首个重放、同进程首次成功与重放结果乱序、真实 `session.remove` 删除路径；无关 MCP 附件保持不动，正常在途结果不会被提前解绑。
+3. **Kimi-M-1——取消后确认卡消费：**
+   - 两条技能取消成功路径的 `skill/notice` 携带 `terminal:"cancelled"`；客户端只凭该结构化终态消费同标签活动确认卡，不按文案匹配，也不消费一般提示或失败 notice。
+   - `SkillConfirmCard` 既有 consumed 渲染将三个按钮全部禁用；接线契约与按钮点击测试共同覆盖取消后不再发送 stray 文本。
+4. **验收口径：** `2026-11-15-chat-created-skills.md` 的 Global Constraints、Task 7 与 Completion Criteria 已同步规格 §12.2 的 owner 2026-11-16 裁定：五项真机走查可由 agent 或真人执行，自动化门禁不替代走查证据。本轮未重新执行真实模型走查。
+
+### 8.2 验证记录
+
+- 上述新增/加强回归均先对未修实现观察到预期失败，再在修复后通过。
+- 聚焦套件实跑：`skills-host.spec.ts` 31/31、`skill-creation-tools.spec.ts` 15/15、`sessions.spec.ts` 98/98、`agent-package-creation.spec.ts` 58/58、`appWiring.spec.ts + skill-confirm-card.spec.ts` 97/97。
+- `corepack yarn workspace dsh-plugin-huaanwork typecheck`：退出码 **0**。
+- 修复工作树首轮根 `corepack yarn check` 的构建、类型检查及全部 4238 个产品测试通过，但历史证据映射 `test-port-mapping.spec.ts` 因 `sessions.spec.ts` 行号位移失败；已将对应 evidence 校正到实际用例，映射聚焦测试 1/1 通过。
+- 映射修正后的完整根门禁：退出码 **0**；桌面包 **299 files passed / 4 skipped，4238 tests passed / 15 skipped**；`verify:host` **35/0**，closure **316** 节点，bundled / cli / loader / profile / aa / licenses / operations 均通过。
+- 提交后干净终树复跑日志：`/tmp/hw-chat-created-skills-rereview-20261117.log`。
+- `deepseek-harness` 始终保持 pin `1600d8a1e140dcde43a1a0941940a0480712c011`，无内容差异。
+
+### 8.3 复审重点
+
+1. 反证 toggle 清除是否严格限于首次对话创建，且任何凭证重放均不撤销后续手动启用。
+2. 反证同进程乱序结果仍由首次成功 callId 驱动解绑，而新进程首个重放具有自己的结果后解绑；检查删除/重建同 sessionId 不继承任一技能或智能体创建附件。
+3. 确认只有取消成功的结构化终态消费卡片，失败/一般 notice 不误消费；consumed 卡片三个按钮均不可再触发发送。
+4. 核对最终提交包含实现、测试、计划口径及历史证据映射，并复跑干净终树根门禁。以上事项完成后，由复审方独立给出合并结论。

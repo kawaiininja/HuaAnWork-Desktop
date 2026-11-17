@@ -183,8 +183,10 @@ function commitTool(ctx: ToolContext, host: SkillCreationHost, pendingDetach: Ma
       // 成功卡只走 skill/success(客户端按 draftId 去重);notice 不再承载成功文案。
       emit(ctx, { event: 'skill/success', text, draftId: result.draftId, name: result.name, sessionId })
       emit(ctx, { event: 'skill/changed', name: result.name, origin: { kind: 'created' } })
-      // 重放只补偿丢失事件:不重复写盘,也不设置第二个 pendingDetach。
-      if (!result.alreadyCommitted) {
+      // 同进程已有首次成功的在途结果时,重放不设置第二个 pendingDetach;但重启后
+      // pending map 为空,首个 alreadyCommitted 重放必须登记自己的结果后解绑。
+      const hasPendingForSession = [...pendingDetach.values()].includes(sessionId)
+      if (!result.alreadyCommitted || !hasPendingForSession) {
         if (ctx.huaanworkOnToolResult !== undefined && exec.callId !== undefined) {
           pendingDetach.set(exec.callId, sessionId)
         } else {

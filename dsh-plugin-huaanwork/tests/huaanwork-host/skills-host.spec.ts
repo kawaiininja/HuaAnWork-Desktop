@@ -485,6 +485,34 @@ describe('对话创建草稿的幂等入口 (Task 2)', () => {
     expect(readSkillLocalState(root).skills['weekly-report']!.creationSessionId).toBe('session-1')
   })
 
+  test('a first draft create clears a stale same-name enable toggle, but replay preserves later manual enablement', async () => {
+    const root = makeHome()
+    const input = { name: 'daily-summary', description: '生成日报', content: '对话创建的正文' }
+    const legacy = await createSkill(root, { ...input, content: '旧技能正文' })
+    expect(legacy.ok).toBe(true)
+    await setSkillEnabled(root, input.name, true)
+    // 模拟带外删除:正常 removeSkill 会清 toggle,这里只删目录以留下历史启用键。
+    await rm(join(root, 'skills', input.name), { recursive: true, force: true })
+
+    const created = await createSkillFromDraft(root, input, 'draft-stale-toggle', 'session-1')
+    expect(created).toEqual({ ok: true, name: input.name, alreadyCommitted: false })
+    expect(readUserSkillToggles(root)[input.name]).toBeUndefined()
+    expect((await listUserSkills(root)).find((skill) => skill.name === input.name)?.enabled).toBe(false)
+    await expect(resolveInvocableSkill(root, input.name)).rejects.toThrow(`${input.name} is disabled`)
+
+    await setSkillEnabled(root, input.name, true)
+    const committedBody = readFileSync(join(root, 'skills', input.name, 'SKILL.md'), 'utf8')
+    const replay = await createSkillFromDraft(
+      root,
+      { ...input, content: '重放不得覆盖正文' },
+      'draft-stale-toggle',
+      'session-1',
+    )
+    expect(replay).toEqual({ ok: true, name: input.name, alreadyCommitted: true })
+    expect(readUserSkillToggles(root)[input.name]).toBe(true)
+    expect(readFileSync(join(root, 'skills', input.name, 'SKILL.md'), 'utf8')).toBe(committedBody)
+  })
+
   test('rejects multiline frontmatter fields', async () => {
     const root = makeHome()
     const result = await createSkill(root, {

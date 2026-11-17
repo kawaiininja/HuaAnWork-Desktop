@@ -587,8 +587,8 @@ export type RpcEvent =
    * 去重,重放只补偿丢失事件,不产生第二张成功卡。
    */
   | { event: "skill/success"; text: string; draftId: string; name: string; sessionId: string }
-  /** 技能创建的错误与一般提示;成功文案只走 `skill/success`。 */
-  | { event: "skill/notice"; text: string; sessionId?: string }
+  /** 技能创建的错误与一般提示;仅取消成功携带 terminal,供客户端消费活动确认卡。 */
+  | { event: "skill/notice"; text: string; sessionId?: string; terminal?: "cancelled" }
   /** 本地技能新增/变化后触发,客户端据此刷新“我的技能”与补全数据。 */
   | { event: "skill/changed"; name: string; origin: { kind: "created" } }
   | { event: "sidecar/status"; ready: boolean }

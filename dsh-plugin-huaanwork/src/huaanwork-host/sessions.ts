@@ -250,7 +250,7 @@ export async function sendToAgent(
       }
       detachSkillCreationTools(ctx, sessionId)
       const notice = '已取消创建技能，没有写入技能。'
-      routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+      routeCtx.emit({ event: 'skill/notice', text: notice, sessionId, terminal: 'cancelled' })
       return { queued: true, sessionId, started: false, reason: notice }
     }
     if (agentCancel) {
@@ -347,7 +347,7 @@ export async function sendToAgent(
       }
       detachSkillCreationTools(ctx, sessionId)
       const notice = '已取消创建技能，没有写入技能。'
-      routeCtx.emit({ event: 'skill/notice', text: notice, sessionId })
+      routeCtx.emit({ event: 'skill/notice', text: notice, sessionId, terminal: 'cancelled' })
       return { queued: true, sessionId, started: false, reason: notice }
     }
 
@@ -753,6 +753,10 @@ export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, se
   forgetConfirmedTarget(sessionId)
   if (ctx) {
     for (const id of [sessionId, ...descendants]) {
+      // 删除是创建流程的终止路径:草稿由 removeSession 清理,运行态附件在这里卸除,
+      // 防止同 sessionId 重建后继承。正常 commit 仍在各自 tools/result 后解绑。
+      detachSkillCreationTools(ctx, id)
+      detachCreationTools(ctx, id)
       ctx.huaanworkSessionModels?.delete(id)
       ctx.huaanworkSessionRoots?.delete(id)
     }
