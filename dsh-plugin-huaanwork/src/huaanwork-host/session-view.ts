@@ -2,10 +2,12 @@ import { readFile } from 'node:fs/promises'
 import { zstdDecompressSync } from 'node:zlib'
 
 import { capToolOutput } from '@huaanwork/policy/truncate'
+import { normalizeTodoEntries } from '@huaanwork/policy/todo'
 import {
   failureMarkers,
   formatToolArguments,
   isShellTool,
+  parseToolArguments,
   shellCommandOf,
 } from '../client-huaanwork/logic/commandOutcome.ts'
 import type { SessionDetailRecord, SessionSummary } from '../client-huaanwork/rpc-types.ts'
@@ -191,6 +193,8 @@ export function detailRecords(text: string): SessionDetailRecord[] {
   const events = lines.slice(1).map(parseJsonLine).filter((event): event is Json => event !== undefined)
   const turnEndReasons = new Map<number, string>()
   let roundKey: number | undefined
+  /** 最近一条普通人类用户回合的持久锚点:goal 续轮与系统通知不清空也不篡改它。 */
+  let currentOrdinaryUserClientId: string | undefined
   for (const event of events) {
     if (event.type !== 'turn/end') continue
     const data = asObject(event.data)
@@ -220,6 +224,8 @@ export function detailRecords(text: string): SessionDetailRecord[] {
           const persistedId = goalRound === undefined && typeof data.id === 'string' && data.id.length > 0
             ? data.id
             : undefined
+          // 只有真实普通用户记录换锚:goal 续轮与已过滤的系统/插件消息不参与。
+          if (persistedId !== undefined) currentOrdinaryUserClientId = persistedId
           records.push({
             kind: 'user',
             time,
@@ -254,6 +260,10 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         const args = formatToolArguments(data.arguments)
         const command = shellCommandOf(name, data.arguments)
         if (typeof data.callId === 'string') toolNames.set(data.callId, name)
+        // 真实 JSONL 日志把 arguments 序列化成 JSON 字符串:结构化 todos 必须从原始参数
+        // 解码(展示用 args 已截断且不可还原),坏条目逐条过滤;其他工具不解析。
+        const parsedArgs: Json = name === 'todo_write' ? asObject(parseToolArguments(data.arguments)) : {}
+        const todos = name === 'todo_write' ? normalizeTodoEntries(parsedArgs.todos) : undefined
         records.push({
           kind: 'tool-call',
           time,
@@ -262,6 +272,10 @@ export function detailRecords(text: string): SessionDetailRecord[] {
           ...(typeof data.callId === 'string' ? { callId: data.callId } : {}),
           ...(args !== undefined ? { args } : {}),
           ...(command !== undefined ? { command } : {}),
+          ...(todos !== undefined ? { todos } : {}),
+          ...(name === 'todo_write' && currentOrdinaryUserClientId !== undefined
+            ? { clientMessageId: currentOrdinaryUserClientId }
+            : {}),
         })
         break
       }

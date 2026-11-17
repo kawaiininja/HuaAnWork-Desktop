@@ -371,6 +371,106 @@ describe('detailRecords', () => {
     expect(record).toMatchObject({ kind: 'tool-call', command: 'pnpm test', args: '{"command":"pnpm test"}' })
   })
 
+  test('keeps structured todos from object-shaped todo_write arguments with the ordinary user anchor', () => {
+    const log = sessionLog([
+      HEADER,
+      userMessage('规划实施', 1, T0 + 3),
+      {
+        type: 'tool/call',
+        seq: 2,
+        time: T0 + 4,
+        data: {
+          turn: 0,
+          step: 0,
+          callId: 't1',
+          name: 'todo_write',
+          arguments: { todos: [
+            { content: '分析', status: 'completed' },
+            { content: '实施', status: 'in_progress' },
+            { content: '验证', status: 'pending' },
+          ] },
+        },
+      },
+    ])
+    const records = detailRecords(log)
+    expect(records[0]).toEqual({ kind: 'user', time: T0 + 3, text: '规划实施', clientMessageId: 'm1' })
+    const call = records[1]
+    if (call?.kind !== 'tool-call') throw new Error('expected tool-call record')
+    expect(call).toMatchObject({ name: 'todo_write', callId: 't1', clientMessageId: 'm1' })
+    expect(call.todos).toEqual([
+      { content: '分析', status: 'completed' },
+      { content: '实施', status: 'in_progress' },
+      { content: '验证', status: 'pending' },
+    ])
+  })
+
+  test('decodes long JSON-string todo_write arguments instead of the truncated display args', () => {
+    // 真实 JSONL 日志把 arguments 存成 JSON 字符串;展示用 args 在 200 字符处截断,
+    // 结构化的 todos 必须从原始字符串解码,不能从截断 args 恢复。
+    const todos = [
+      { content: '分析第一阶段的目标与边界', status: 'completed' },
+      { content: '分析第一阶段的验收条件', status: 'completed' },
+      { content: '实施第一阶段的改造与回归验证', status: 'in_progress' },
+      { content: '验证第一阶段的真实日志、回放与证据', status: 'pending' },
+    ]
+    const log = sessionLog([
+      HEADER,
+      userMessage('规划实施', 1, T0 + 3),
+      toolCall('t1', 'todo_write', { todos }, 2, T0 + 4),
+    ])
+    const records = detailRecords(log)
+    const call = records[1]
+    if (call?.kind !== 'tool-call') throw new Error('expected tool-call record')
+    expect(JSON.stringify({ todos }).length).toBeGreaterThan(200)
+    expect(call.args?.endsWith('…')).toBe(true)
+    expect(call.todos).toEqual(todos)
+    expect(call.clientMessageId).toBe('m1')
+  })
+
+  test('anchors continued todo_write to the original ordinary user across completion notices', () => {
+    const log = sessionLog([
+      HEADER,
+      userMessage('修好构建', 1, T0 + 3),
+      userMessage('子代理完成', 2, T0 + 4, { kind: 'subagent-settled' }),
+      userMessage('运行时上下文', 3, T0 + 5, { kind: 'runtime-context' }),
+      userMessage('指令注入', 4, T0 + 6, { kind: 'agent-instructions' }),
+      userMessage('技能目录', 5, T0 + 7, { kind: 'skill-catalog' }),
+      { type: 'step/start', seq: 6, time: T0 + 8, data: { turn: 0, step: 0 } },
+      toolCall('t1', 'todo_write', { todos: [{ content: '复现', status: 'completed' }] }, 7, T0 + 9),
+      toolResult('t1', 'updated', 8, T0 + 10),
+      {
+        type: 'user/message',
+        seq: 9,
+        time: T0 + 11,
+        surfaceOp: 'append',
+        data: {
+          id: 'mg',
+          role: 'user',
+          content: [{ type: 'text', text: '官方续轮提示' }],
+          source: { kind: 'goal', goalId: 'g', round: 1 },
+        },
+      },
+      { type: 'step/start', seq: 10, time: T0 + 12, data: { turn: 1, step: 0 } },
+      toolCall('t2', 'todo_write', { todos: [{ content: '复现', status: 'completed' }, { content: '修复', status: 'in_progress' }] }, 11, T0 + 13),
+    ])
+    const records = detailRecords(log)
+    // 完成通知落盘后仍只有 1 条普通用户回合;goal 续轮记录保持 goalRound,不是新用户。
+    expect(records.filter((record) => record.kind === 'user' && record.goalRound === undefined)).toEqual([
+      { kind: 'user', time: T0 + 3, text: '修好构建', clientMessageId: 'm1' },
+    ])
+    expect(records.filter((record) => record.kind === 'user').map((record) => (
+      record.kind === 'user' ? [record.text, record.goalRound, record.clientMessageId] : []
+    ))).toEqual([
+      ['修好构建', undefined, 'm1'],
+      ['官方续轮提示', 1, undefined],
+    ])
+    const todoCalls = records.filter((record) => record.kind === 'tool-call' && record.name === 'todo_write')
+    expect(todoCalls.map((record) => (record.kind === 'tool-call' ? [record.clientMessageId, record.roundKey] : []))).toEqual([
+      ['m1', 6],
+      ['m1', 10],
+    ])
+  })
+
   test('reads failure markers from the uncapped result so a clipped head cannot hide them', () => {
     const tail = `${'x'.repeat(40_000)}\n[exit code: 1]`
     const log = sessionLog([

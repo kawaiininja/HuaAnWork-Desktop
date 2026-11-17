@@ -10,6 +10,7 @@
     "./network": "./src/network.ts",
     "./paths": "./src/paths.ts",
     "./shell": "./src/shell.ts",
+    "./todo": "./src/todo.ts",
     "./truncate": "./src/truncate.ts"
   },
   "scripts": {

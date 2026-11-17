@@ -227,6 +227,68 @@ test("unscopedSessions treats legacy huaanwork-chat-* ids as normal sessions", (
   );
 });
 
+test("history maps todo_write calls to a todo card and skips the paired result", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "规划实施", clientMessageId: "m1" },
+    { kind: "tool-call", time: 2, name: "todo_write", callId: "t1", roundKey: 6, clientMessageId: "m1", todos: [
+      { content: "分析", status: "completed" },
+      { content: "实施", status: "in_progress" },
+    ] },
+    { kind: "tool-result", time: 3, callId: "t1", isError: false, text: "updated" },
+    { kind: "assistant", time: 4, text: "继续", roundKey: 6 },
+  ]);
+  assert.deepEqual(items, [
+    { kind: "user", text: "规划实施", clientMessageId: "m1" },
+    { kind: "todo", todos: [
+      { content: "分析", status: "completed" },
+      { content: "实施", status: "in_progress" },
+    ], roundKey: 6, clientMessageId: "m1" },
+    { kind: "assistant", text: "继续", roundKey: 6 },
+  ]);
+});
+
+test("history keeps the empty todo snapshot legal and never expands a failed todo result", () => {
+  const items = historyItemsFromRecords([
+    { kind: "tool-call", time: 1, name: "todo_write", callId: "t1", todos: [] },
+    { kind: "tool-result", time: 2, callId: "t1", isError: true, text: "boom" },
+  ]);
+  assert.deepEqual(items, [{ kind: "todo", todos: [] }]);
+});
+
+test("history replaces an unparseable todo_write with a safe note instead of the raw arguments", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "规划", clientMessageId: "m1" },
+    { kind: "tool-call", time: 2, name: "todo_write", callId: "t1", args: '{"todos":"坏参数"}' },
+    { kind: "tool-result", time: 3, callId: "t1", isError: true, text: "invalid arguments" },
+  ]);
+  assert.deepEqual(items, [
+    { kind: "user", text: "规划", clientMessageId: "m1" },
+    { kind: "note", text: "历史待办无法解析" },
+  ]);
+});
+
+test("history todo cards stay anchored across goal continuation notices", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "修好构建", clientMessageId: "m1" },
+    { kind: "tool-call", time: 2, name: "todo_write", callId: "t1", roundKey: 6, clientMessageId: "m1", todos: [
+      { content: "复现", status: "completed" },
+    ] },
+    { kind: "tool-result", time: 3, callId: "t1", isError: false, text: "updated" },
+    { kind: "user", time: 4, text: "官方续轮提示", goalRound: 1 },
+    { kind: "tool-call", time: 5, name: "todo_write", callId: "t2", roundKey: 10, clientMessageId: "m1", todos: [
+      { content: "复现", status: "completed" },
+      { content: "修复", status: "in_progress" },
+    ] },
+    { kind: "tool-result", time: 6, callId: "t2", isError: false, text: "updated" },
+  ]);
+  assert.equal(items.filter((item) => item.kind === "user").length, 1);
+  const todos = items.filter((item) => item.kind === "todo");
+  assert.deepEqual(todos.map((item) => (item.kind === "todo" ? [item.clientMessageId, item.roundKey] : [])), [
+    ["m1", 6],
+    ["m1", 10],
+  ]);
+});
+
 test("historyItemsFromRecords passes roundKey through thinking, assistant and tool items", () => {
   const items = historyItemsFromRecords([
     { kind: "user", time: 1, text: "问题" },

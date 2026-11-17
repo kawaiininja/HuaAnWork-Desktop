@@ -443,7 +443,12 @@ export type SessionDetailRecord =
     }
   | { kind: "thinking"; time: number; text: string; roundKey?: number }
   | { kind: "assistant"; time: number; text: string; roundKey?: number }
-  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string; roundKey?: number }
+  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string; roundKey?: number;
+      /** `todo_write` 的结构化快照;宿主从原始 JSON 参数解码,坏条目已逐条过滤。 */
+      todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+      /** 快照所属真实用户回合的持久锚点(`user/message.data.id`);旧记录没有。 */
+      clientMessageId?: string;
+    }
   | {
       kind: "tool-result";
       time: number;
@@ -565,6 +570,8 @@ export type RpcEvent =
       command?: string;
       /** todo_write 的完整替换列表。 */
       todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+      /** 本次工具调用所属真实用户回合的持久锚点;非回合事件没有。 */
+      clientMessageId?: string;
     }
   | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; text?: string; sessionId?: string; isError?: true }
   | {

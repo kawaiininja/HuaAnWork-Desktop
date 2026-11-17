@@ -125,8 +125,10 @@ import {
   cwdWithinRoot,
   historyItemsFromRecords,
   isAutomationSessionId,
+  takeEarlyPendingEvents,
   unscopedSessions,
 } from "./logic/sessionChannel.ts";
+import { currentSnapshotRoundKey, shouldApplyTodoEvent } from "./logic/todoProjection.ts";
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
 import {
   hasAssistantTextAfter,
@@ -299,7 +301,7 @@ type ChatItem =
   | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse"; roundKey?: number }
   | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse"; roundKey?: number }
   | { id: number; kind: "tool"; card: ToolCard; panelToggled?: "expand" | "collapse" }
-  | { id: number; kind: "todo"; todos: TodoEntry[] }
+  | { id: number; kind: "todo"; todos: TodoEntry[]; roundKey?: number; clientMessageId?: string }
   | { id: number; kind: "ask"; card: AskCard }
   | { id: number; kind: "input"; card: InputCard }
   | { id: number; kind: "attachment"; sourceText: string }
@@ -402,6 +404,8 @@ type PendingSend = {
   tabId: string;
   /** 本次插入的用户消息 id；等待项与回合身份都按它回写。 */
   userId: number;
+  /** 本次发送的持久回合锚；早到的 `todo_write` 只按它进入本次缓冲。 */
+  clientMessageId: string;
   /** 发送前已知道的会话 id；没有它的发送无法匹配早到事件。 */
   sessionId?: string;
   /** 应答回来之前到达、尚不能结算的事件，按到达顺序。 */
@@ -935,8 +939,9 @@ export default function App() {
 
   /**
    * 取出本次发送暂存的早到事件并清掉它的 pending：直接开始的回合按原顺序全部重放；
-   * 排队应答只重放 `queueItemId` 与它一致的那几条；没启动的应答只丢弃本次缓冲。
-   * 清理只针对本次记录，别的发送的 pending 不受影响。
+   * 排队应答只重放 `queueItemId` 与它一致的那几条（本次排队项真的开始执行时，
+   * 连带重放携带本次锚点的早到 `todo_write`，队列开始先于待办）；
+   * 没启动的应答只丢弃本次缓冲。清理只针对本次记录，别的发送的 pending 不受影响。
    */
   function takePendingBuffer(pending: PendingSend, sent: SessionSendResult): RpcEvent[] {
     const buffered = pending.buffered;
@@ -947,7 +952,7 @@ export default function App() {
     discardBufferedStopEnds(buffered);
     if (sent.waiting && sent.queueItemId !== undefined) {
       const queueItemId = sent.queueItemId;
-      return buffered.filter((event) => (
+      return takeEarlyPendingEvents(sent, buffered, pending.clientMessageId, (event) => (
         (event.event === "session/queue-start" || event.event === "session/queue-fail")
         && event.queueItemId === queueItemId
       ));
@@ -1695,6 +1700,18 @@ export default function App() {
           if (pending === undefined) return false;
           pending.buffered.push(incoming);
           return true;
+        }
+        // 同会话新排队回合在 waiting 应答前早到的待办：只按本次发送的锚点进入本次缓冲。
+        // 该分支必须先于 running-turn 守卫：goalIntermediate 保留前端 running 期间，
+        // 本次排队回合的 todo_write 也不能被守卫当成上一回合的事件丢掉；
+        // 上一回合或他项的事件 clientMessageId 不匹配，天然不进这里的缓冲。
+        if (incoming.event === "tool/start" && incoming.name === "todo_write") {
+          const pending = pendingSendOfSession(sessionIdOfEvent(incoming));
+          if (pending !== undefined && incoming.clientMessageId === pending.clientMessageId) {
+            pending.buffered.push(incoming);
+            return true;
+          }
+          return false;
         }
         const isGoalEvent = incoming.event === "session/end" || incoming.event === "goal/state"
           || incoming.event === "goal/round" || incoming.event === "goal/round-limit";
@@ -2920,6 +2937,7 @@ export default function App() {
       const pending: PendingSend = {
         tabId: chatId,
         userId: userMsg.id,
+        clientMessageId,
         ...(sessionId ? { sessionId } : {}),
         buffered: [],
       };
@@ -3354,6 +3372,16 @@ export default function App() {
           id: allocId(),
           kind: "user",
           text: item.text,
+          ...(item.clientMessageId === undefined ? {} : { clientMessageId: item.clientMessageId }),
+        };
+      }
+      // 历史待办与实时投影同一形状：显式分支，不落入 note 兜底。
+      if (item.kind === "todo") {
+        return {
+          id: allocId(),
+          kind: "todo",
+          todos: item.todos,
+          ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }),
           ...(item.clientMessageId === undefined ? {} : { clientMessageId: item.clientMessageId }),
         };
       }
@@ -4498,7 +4526,12 @@ export function handleEvent(
     case "tool/start":
       if (event.name === "todo_write" && event.todos) {
         const todos = event.todos;
-        setItems((prev) => upsertTodoItem(prev, todos, allocId), event.sessionId);
+        // 待办只属于当前回合的真实用户开启者：锚点不精确或轮次回退一律不写（面板与主流都不更新）。
+        setItems((prev) => {
+          const turnStart = currentTurnStart(prev);
+          if (!shouldApplyTodoEvent(prev, turnStart, event, currentSnapshotRoundKey(prev, turnStart))) return prev;
+          return upsertTodoItem(prev, todos, allocId, event.roundKey, event.clientMessageId);
+        }, event.sessionId);
         break;
       }
       setItems(
@@ -4748,13 +4781,23 @@ export function queuedTurnRunState(state: TabRunState, queueItemId: string, hasO
     : noteWaitingCancelled(state, queueItemId);
 }
 
-/** 本回合只保留最新一份待办列表（todo_write 每次发送完整替换列表）。 */
-export function upsertTodoItem(items: ChatItem[], todos: TodoEntry[], allocId: () => number): ChatItem[] {
+/** 本回合只保留最新一份待办列表（todo_write 每次发送完整替换列表），并带上它的回合归属。 */
+export function upsertTodoItem(
+  items: ChatItem[],
+  todos: TodoEntry[],
+  allocId: () => number,
+  roundKey?: number,
+  clientMessageId?: string,
+): ChatItem[] {
   const turnStart = currentTurnStart(items);
+  const attribution = {
+    ...(roundKey === undefined ? {} : { roundKey }),
+    ...(clientMessageId === undefined ? {} : { clientMessageId }),
+  };
   const at = items.findIndex((item, index) => index >= turnStart && item.kind === "todo");
-  if (at >= 0) return items.map((item, index) => (index === at ? { ...item, todos } : item));
+  if (at >= 0) return items.map((item, index) => (index === at ? { ...item, todos, ...attribution } : item));
   const insertAt = turnAppendIndex(items);
-  return [...items.slice(0, insertAt), { id: allocId(), kind: "todo", todos }, ...items.slice(insertAt)];
+  return [...items.slice(0, insertAt), { id: allocId(), kind: "todo", todos, ...attribution }, ...items.slice(insertAt)];
 }
 
 /** 自动化运行标签首条用户条目的模板:数值 `id` 由调用方 `allocId()` 补齐(与历史回放同口径)。 */

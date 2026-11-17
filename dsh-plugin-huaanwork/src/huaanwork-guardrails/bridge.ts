@@ -9,6 +9,7 @@ import {
   resultTextFailed,
   shellCommandOf,
 } from "../client-huaanwork/logic/commandOutcome.ts";
+import { normalizeTodoEntries } from "../client-huaanwork/logic/todoProjection.ts";
 import { acceptanceInjectToolName, acceptanceToolFailure } from "../huaanwork-host/acceptance-hooks.ts";
 import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
 import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
@@ -39,6 +40,8 @@ type RpcEvent =
       args?: string;
       command?: string;
       todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+      /** 本次工具调用所属真实用户回合的持久锚点;无锚事件不带该字段。 */
+      clientMessageId?: string;
     }
   | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; text?: string; sessionId?: string; isError?: true }
   | { event: "diff"; text: string; sessionId?: string }
@@ -83,6 +86,8 @@ type Context = SystemSkillLeaseHost & {
   huaanworkTurnScheduler?: { soleCapWriterSessionId(): string | undefined };
   /** Cordis logger;缺席时 console 兜底由调用点决定。 */
   logger?: { info?(message: string): void };
+  /** 共享回合锚点(设计「回合归属」):`tool/start` 从这里取本次调用的真实用户锚点。 */
+  huaanworkTurnAnchors?: { current(sessionId: string): { clientMessageId: string } | undefined };
   huaanworkEmit?: (event: RpcEvent) => void;
   /** 子代理 run 权威状态机;fixture 与旧运行时可以缺席,缺席时所有事件照旧广播。 */
   huaanworkSubagentRuns?: ChildRunActivity;
@@ -135,12 +140,14 @@ export function apply(ctx: Context): void {
       const tool = { name: execution.name, ...(execution.callId === undefined ? {} : { callId: execution.callId }) };
       if (child === undefined) {
         const roundKey = roundKeyFor(roundKeys, sessionId);
+        const anchor = sessionId === undefined ? undefined : ctx.huaanworkTurnAnchors?.current(sessionId);
         emit(ctx, {
           event: "tool/start",
           name: execution.name,
           ...(execution.callId === undefined ? {} : { callId: execution.callId }),
           ...(sessionId === undefined ? {} : { sessionId }),
           ...(roundKey === undefined ? {} : { roundKey }),
+          ...(anchor?.clientMessageId === undefined ? {} : { clientMessageId: anchor.clientMessageId }),
           ...startDetail(execution),
         });
       } else {
@@ -423,21 +430,14 @@ function porcelainUntrackedPath(line: string): string | undefined {
   return path;
 }
 
-const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
-
 /** tool/start 的附加信息:参数摘要、todo_write 的待办列表、bash / pwsh 的 command 参数。 */
 function startDetail(execution: ToolExecution): Partial<Extract<RpcEvent, { event: "tool/start" }>> {
   const formattedArgs = formatToolArguments(execution.arguments);
   const args = formattedArgs === undefined ? {} : { args: formattedArgs };
   const objectArgs = objectValue(execution.arguments);
-  if (execution.name === "todo_write" && Array.isArray(objectArgs.todos)) {
-    const todos = objectArgs.todos.flatMap((entry) => {
-      const todo = objectValue(entry);
-      return typeof todo.content === "string" && typeof todo.status === "string" && TODO_STATUSES.has(todo.status)
-        ? [{ content: todo.content, status: todo.status as "pending" | "in_progress" | "completed" }]
-        : [];
-    });
-    return { ...args, todos };
+  if (execution.name === "todo_write") {
+    const todos = normalizeTodoEntries(objectArgs.todos);
+    if (todos !== undefined) return { ...args, todos };
   }
   const command = shellCommandOf(execution.name, execution.arguments);
   return { ...args, ...(command === undefined ? {} : { command }) };

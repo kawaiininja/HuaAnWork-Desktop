@@ -25,7 +25,8 @@ import { appendOutcomeNotes, latestUserItemId, turnChecks } from "../../src/clie
 import { interruptTurnItems } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 import { clearFailuresInTabs } from "../../src/client-huaanwork/logic/hostStop.ts";
 import { foldRunAssistantItems } from "../../src/client-huaanwork/logic/runResultAttachments.ts";
-import { buildSessionSendParams } from "../../src/client-huaanwork/logic/sessionChannel.ts";
+import { buildSessionSendParams, takeEarlyPendingEvents } from "../../src/client-huaanwork/logic/sessionChannel.ts";
+import type { RpcEvent } from "../../src/client-huaanwork/rpc-types.ts";
 import * as AppModule from "../../src/client-huaanwork/App.tsx";
 
 /**
@@ -1751,6 +1752,72 @@ test("early queue start is buffered until the queued response", () => {
   assert.deepEqual(waiting, { running: true, waitingIds: ["q1"] });
   const started = noteWaitingStarted(waiting, "q1");
   assert.deepEqual(started, { running: true, waitingIds: [] });
+});
+
+test("an early todo_write for the pending send is buffered and replayed after its queue start", () => {
+  const holdSource = earlyEventGate();
+  const todoBranchAt = holdSource.indexOf('incoming.event === "tool/start" && incoming.name === "todo_write"');
+  const goalCheckAt = holdSource.indexOf("if (!isGoalEvent) return false;");
+  const runningGuardAt = holdSource.indexOf(
+    "if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;",
+  );
+  assert.ok(todoBranchAt >= 0, "early todo_write events take the buffering path");
+  assert.ok(todoBranchAt < goalCheckAt, "todo_write is buffered before the goal-only early return");
+  // QP-I6:goalIntermediate 保留前端 running 期间,同会话新排队回合早到的待办不能被 running 守卫丢掉。
+  assert.ok(todoBranchAt < runningGuardAt, "an early todo for the new turn is considered before the running-turn guard");
+  assert.match(holdSource, /incoming\.clientMessageId === pending\.clientMessageId/);
+  // goal 事件的缓冲仍留在 crossTabGuard 之后(既有源码钉)。
+  const lastPushAt = holdSource.lastIndexOf("pending.buffered.push(incoming);");
+  assert.ok(lastPushAt > runningGuardAt, "goal events are still buffered after the running-turn guard");
+
+  // 行为:started 应答重放全量;waiting 应答只在本次 queue-start 已到时保留本锚待办,
+  // 且 queue-start 先于 todo_write 重放;未启动/queue-fail/他项/无锚一律丢弃。
+  const todoEvent: RpcEvent = {
+    event: "tool/start",
+    name: "todo_write",
+    clientMessageId: "mb",
+    roundKey: 5,
+    todos: [{ content: "一", status: "pending" }],
+  };
+  const queueStart: RpcEvent = { event: "session/queue-start", sessionId: "s", tabId: "t", queueItemId: "qb" };
+  const queueFail: RpcEvent = { event: "session/queue-fail", sessionId: "s", tabId: "t", queueItemId: "qb", reason: "busy" };
+  const otherTodo: RpcEvent = { ...todoEvent, clientMessageId: "other" };
+  const unanchoredTodo: RpcEvent = { event: "tool/start", name: "todo_write", roundKey: 5, todos: todoEvent.todos };
+  const controlOf = (event: RpcEvent) => (
+    (event.event === "session/queue-start" || event.event === "session/queue-fail") && event.queueItemId === "qb"
+  );
+
+  assert.deepEqual(
+    takeEarlyPendingEvents({ waiting: false, started: true }, [queueStart, todoEvent], "mb", controlOf),
+    [queueStart, todoEvent],
+    "a started response replays this send's whole buffer",
+  );
+  const replayed = takeEarlyPendingEvents(
+    { waiting: true, started: false, queueItemId: "qb" },
+    [todoEvent, queueStart],
+    "mb",
+    controlOf,
+  );
+  assert.deepEqual(replayed, [queueStart, todoEvent], "the queue start is replayed before the todo of the same turn");
+  assert.deepEqual(
+    takeEarlyPendingEvents({ waiting: true, started: false, queueItemId: "qb" }, [queueStart, otherTodo, unanchoredTodo], "mb", controlOf),
+    [queueStart],
+    "todos carrying another turn or no anchor are still dropped",
+  );
+  assert.deepEqual(
+    takeEarlyPendingEvents({ waiting: true, started: false, queueItemId: "qb" }, [queueFail, todoEvent], "mb", controlOf),
+    [queueFail],
+    "a failed queue item never replays a todo that has no turn",
+  );
+  assert.deepEqual(takeEarlyPendingEvents({ waiting: false, started: false }, [todoEvent], "mb", controlOf), []);
+  assert.deepEqual(takeEarlyPendingEvents({ waiting: true, started: false }, [todoEvent], "mb", controlOf), []);
+
+  // 接线:App 的 todo 分支先过回合归属守卫再写入待办卡;历史回放有显式 todo 分支。
+  assert.match(APP_SOURCE, /shouldApplyTodoEvent\(prev, turnStart, event, currentSnapshotRoundKey\(prev, turnStart\)\)/);
+  assert.match(APP_SOURCE, /upsertTodoItem\(prev, todos, allocId, event\.roundKey, event\.clientMessageId\)/);
+  const historyBody = functionBody("function historyToChatItems(", "async function resumeFromView(");
+  assert.match(historyBody, /if \(item\.kind === "todo"\) \{/);
+  assert.match(historyBody, /kind: "todo"/);
 });
 
 test("pending send does not buffer the previous turn events", () => {

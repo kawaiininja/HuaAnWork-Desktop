@@ -1,4 +1,7 @@
-import type { SessionDetailRecord } from "../rpc-types.ts";
+import type { TodoEntry } from "@huaanwork/policy/todo";
+
+import type { RpcEvent, SessionDetailRecord } from "../rpc-types.ts";
+import { sendOpensTurn } from "./concurrentTurn.ts";
 import { goalRoundLabel } from "./goalRound.ts";
 
 /**
@@ -98,6 +101,14 @@ export type HistoryChatItem =
   | { kind: "thinking"; text: string; roundKey?: number }
   | { kind: "assistant"; text: string; roundKey?: number }
   | {
+      kind: "todo";
+      /** 结构化待办快照；空数组是合法的空快照。 */
+      todos: TodoEntry[];
+      roundKey?: number;
+      /** 快照所属真实用户回合的持久锚点；旧记录没有时 fail closed。 */
+      clientMessageId?: string;
+    }
+  | {
       kind: "tool";
       name: string;
       callId?: string;
@@ -162,13 +173,48 @@ export function buildSessionSendParams(input: {
 }
 
 /**
+ * 一次 `session.send` 应答后应重放的早到事件。
+ *
+ * - 真正开始执行的应答重放整份缓冲(顺序不变)；
+ * - 排队应答只重放本次 `queueItemId` 的队列事件；仅当本次排队项的
+ *   `session/queue-start` 已在缓冲里(它真的开始执行)时，才保留携带本次
+ *   `clientMessageId` 的早到 `todo_write`，并让队列开始先于待办重放——
+ *   `beginQueuedTurn` 先开回合清 `notStarted`，待办才落得到这一回合；
+ * - 未启动(含 `queue-fail`)的应答丢弃本次缓冲。
+ *
+ * @param sent `session.send` 应答(排队/启动/`queueItemId`)
+ * @param buffered 本次发送应答回来之前暂存的事件(按到达顺序)
+ * @param pendingClientMessageId 本次发送的持久回合锚
+ * @param isQueueControl 只匹配本次排队项的队列事件(start/fail)，由调用点按 `queueItemId` 闭包
+ * @returns 重放顺序的事件列表；不重放任何事件时为空数组
+ */
+export function takeEarlyPendingEvents(
+  sent: { waiting: boolean; started: boolean; queueItemId?: string },
+  buffered: readonly RpcEvent[],
+  pendingClientMessageId: string,
+  isQueueControl: (event: RpcEvent) => boolean,
+): RpcEvent[] {
+  if (sendOpensTurn(sent)) return [...buffered];
+  if (!(sent.waiting && sent.queueItemId !== undefined)) return [];
+  const queueEvents = buffered.filter(isQueueControl);
+  // 本次排队项没有真正开始(只有 queue-fail 或什么都没到)：没有回合可以挂待办。
+  if (!queueEvents.some((event) => event.event === "session/queue-start")) return queueEvents;
+  const todos = buffered.filter((event) => (
+    event.event === "tool/start" && event.name === "todo_write" && event.clientMessageId === pendingClientMessageId
+  ));
+  return [...queueEvents, ...todos];
+}
+
+/**
  * 历史会话记录 → 对话流条目：user/assistant 按原文还原，tool-call 成工具卡，
  * tool-result 按 callId 配对回调用（缺 callId 时只在当前用户回合内按顺序配对）；
  * 配不上的失败结果折叠为一条提示，配不上的成功结果不产出条目。
  * 官方 goal 续轮记录只恢复为与实时 goal/round 同文案的 note，不切分用户回合。
+ * `todo_write` 与实时投影一致地恢复为待办卡，并吞掉它自己的工具结果。
  */
 export function historyItemsFromRecords(records: readonly HistoryRecord[]): HistoryChatItem[] {
   const items: HistoryChatItem[] = [];
+  const todoCallIds = new Set<string>();
   for (const record of records) {
     if (record.kind === "user") {
       if (record.goalRound !== undefined) {
@@ -191,6 +237,21 @@ export function historyItemsFromRecords(records: readonly HistoryRecord[]): Hist
       continue;
     }
     if (record.kind === "tool-call") {
+      if (record.name === "todo_write") {
+        // 坏参数只留安全提示，不展开原始参数；坏条目已由宿主逐条过滤过。
+        if (!Array.isArray(record.todos)) {
+          items.push({ kind: "note", text: "历史待办无法解析" });
+        } else {
+          items.push({
+            kind: "todo",
+            todos: record.todos,
+            ...(record.roundKey === undefined ? {} : { roundKey: record.roundKey }),
+            ...(record.clientMessageId === undefined ? {} : { clientMessageId: record.clientMessageId }),
+          });
+        }
+        if (record.callId !== undefined) todoCallIds.add(record.callId);
+        continue;
+      }
       items.push({
         kind: "tool",
         name: record.name || "tool",
@@ -204,6 +265,8 @@ export function historyItemsFromRecords(records: readonly HistoryRecord[]): Hist
       continue;
     }
 
+    // 待办卡已吸收本次调用的结果：不再生成第二条待办，也不留孤儿工具失败提示。
+    if (record.callId !== undefined && todoCallIds.has(record.callId)) continue;
     let turnStart = 0;
     for (let index = items.length - 1; index >= 0; index -= 1) {
       if (items[index]?.kind === "user") {
