@@ -1,18 +1,19 @@
-# 对话创建技能 — 实施证据（2026-11-16）
+# 对话创建技能 — 实施证据（2026-11-16 ~ 2026-11-17）
 
 - 分支：`feat/chat-created-skills`（基线 `ff29debd37d72a92f10d446eafa07867d17befd8`）
-- 最终代码提交：`84c80e145c`（评审修复波 + 停放项修复；文档提交在其之后，见 §2 提交链）
+- 最终代码提交：`33f7823f6f`（Kimi 评审 §7 闭环波：生命周期/残留启用态/取消消费修复 + 回归与计划 §12.2 口径同步；后续仅文档提交，不改产品代码，见 §2 提交链）
 - 规格：`docs/superpowers/specs/2026-11-15-chat-created-skills-design.md`
 - 计划：`docs/superpowers/plans/2026-11-15-chat-created-skills.md`
-- 评审：`docs/superpowers/plans/2026-11-15-implementation-plans-review.md`
+- 评审：`docs/superpowers/plans/2026-11-15-implementation-plans-review.md`（计划评审）；`docs/superpowers/plans/2026-11-16-chat-created-skills-code-review.md`（Gemini 复核、Kimi 终审与独立复审 Approve）
 - 环境：macOS（darwin 27.0.0 / arm64）；Node v24.22.1；根 Yarn 4.18.0（Corepack）
 
 ## 0. 状态声明
 
 - 自动化门禁（§1）均**实际执行**并记录真实结果。
-- 规格 §12.2 验收方式经 **owner 2026-11-16 裁定**：agent 真机走查（CDP + 真实构建 + 真实模型 + 隔离 profile）替代真人验收，规格 §12.2 文本已同步更新。五项验收项不变，执行方与证据如实标注（§4）。
+- 规格 §12.2 验收方式经 **owner 2026-11-16 裁定**：agent 真机走查（CDP + 真实构建 + 真实模型 + 隔离 profile）替代真人验收，规格 §12.2 与计划（`33f7823f6f` 同步 Task 7 / Completion Criteria）文本已保持一致。五项验收项不变，执行方与证据如实标注（§4）。
 - 2026-11-16 先后做了两轮 **agent 辅助真机走查（§4.1）**。首轮因模型长上下文走神、创建工具批准未授予而未能出确认卡，曾误判为“上游丢弃工具调用”（§4.2 旧结论，已纠正）。第二轮在短上下文 + 显式批准下，**五项全部走通**：确认卡、继续修改/取消、成功卡+默认未启用、启停调用、仅 SKILL.md 无脚本/端点/自动上传。
-- 2026-11-16 晚完成 Gemini code review 的独立复核与修复波（§7）：Critical 白名单修复入库、路由对称性、事件闸门顺序、字段归一化与 §12.1 缺口补齐；修复后根门禁见 §1。评审停放项 #7c（确认卡锁存）与 #7e（session.remove 清草稿）同波修复入库；#7f（样式合并）维持停放。
+- 2026-11-16 晚完成 Gemini code review 的独立复核与修复波（§7）：Critical 白名单修复入库、路由对称性、事件闸门顺序、字段归一化与 §12.1 缺口补齐；评审停放项 #7c（确认卡锁存）与 #7e（session.remove 清草稿）同波修复入库（`84c80e145c`），并完成全修复构建复走（§4.1.1）；#7f（样式合并）维持停放。
+- 2026-11-17 完成 Kimi double-check 评审与最终修复闭环（§7）：Kimi 评审（`e4f6c0b123`）检出 0 Critical / 2 Important / 1 Minor；最终代码提交 `33f7823f6f` 闭环 **Kimi-I-1**（仅首次创建清同名残留启用态，重放保留后续手动启用）、**Kimi-I-2**（崩溃后新进程首个重放 `tools/result` 后解绑 + `releaseSessionRuntime`/`session.remove` 清理两类创建附件）与 **Kimi-M-1**（取消成功发送 `terminal:"cancelled"` 消费同标签确认卡），并同步计划 §12.2 口径与证据映射。独立只读复审（`ec7ad6fc8d`）给出 **Approve（0 Critical / 0 Important / 1 Minor：`Review-M-1` 经 owner 2026-11-17 裁定停放，见 §5）**。`33f7823f6f` 之后未重跑真实模型 CDP 走查，改由新增行为回归、聚焦回归套件与干净树 `corepack yarn check`（`4238 passed / 15 skipped`）验证闭环（见 §1、§4.1.1、§7）。
 
 ## 1. 自动化门禁（实际执行，原始退出码）
 
@@ -24,11 +25,14 @@
 | `corepack yarn check` | `987b014774` | 控制器 | 0 | 全链通过（最后一个 workspace agent-catalog-admin 15/15）；该次运行早于终波修复提交 |
 | `corepack yarn check` | `1d99d015b8` | 控制器 | 0 | 终树复跑全链通过（最后一个 workspace agent-catalog-admin 15/15） |
 | `corepack yarn check` | `3b41400ba4` | 控制器（评审修复波） | 0 | 全链通过；桌面包 `4231 passed / 15 skipped (4246)`、`verify:host` 35/0、closure 316 节点、bundled 134 文件/10 内联、licenses 637 包、operations 7/18；最后一个 workspace agent-catalog-admin 15/15。完整日志 `/tmp/hw-root-check-20261116-r2.log` |
-| `corepack yarn check` | `c8e044c356` | 控制器（最终干净树） | 0 | 全链通过；桌面包 `4236 passed / 15 skipped (4251)`（+5：#7c/#7e 新钉）、closure 316 节点、operations 7/18；最后一个 workspace agent-catalog-admin 15/15。完整日志 `/tmp/hw-root-check-final-r2.log` |
+| `corepack yarn check` | `c8e044c356` | 控制器（2026-11-16 干净树） | 0 | 全链通过；桌面包 `4236 passed / 15 skipped (4251)`（+5：#7c/#7e 新钉）、closure 316 节点、operations 7/18；最后一个 workspace agent-catalog-admin 15/15。完整日志 `/tmp/hw-root-check-final-r2.log` |
+| 最终修复波聚焦套件（7 spec） | `33f7823f6f` | 独立复审方 | 0 | `skills-host` 31/31、`skill-creation-tools` 15/15、`sessions` 98/98、`agent-package-creation` 58/58、`appWiring` 92/92、`skill-confirm-card` 5/5、`test-port-mapping` 1/1，合计 **300/300** 通过 |
+| 桌面包聚焦套件（22 spec） | `ec7ad6fc8d` | 合并评审复核 | 0 | `Test Files 22 passed (22)`，`Tests 565 passed (565)`（vitest 实跑） |
+| `corepack yarn check` | `ec7ad6fc8d`（代码 `33f7823f6f` 干净终树） | 修复验证 & 合并评审复核 | 0 | 全链通过；桌面包 `299 passed \| 4 skipped (303)` 文件、`4238 passed / 15 skipped (4253)`（较 `c8e044c356` 4236 → 4238 passed）、`verify:host` 35/35、closure 316 节点、bundled 134 文件/10 内联/11/11、licenses 637 包、operations 7/18；`dsh-community-market` 13/303、`market-server` 14/244、`update-server` 5/88、`agent-catalog-server` 7/112、`agent-catalog-admin` 15/15。参考日志 `/tmp/hw-chat-created-skills-rereview-20261117.log` |
 
-说明：计划允许 `verify:aa` 并发竞争时串行重跑并如实记录；本次两轮根门禁均未出现该竞争，无重跑。评审修复波首轮根门禁退出码 **2**：typecheck 捕获归一化写法的 `exactOptionalPropertyTypes` 违规（vitest 不做类型检查），修正提交 `3b41400ba4` 后复跑退出码 0；首轮日志 `/tmp/hw-root-check-20261116.log`。最终干净树首轮退出码 **1**：check-whitespace 捕获 archive 文件末尾空行，修复提交 `c8e044c356` 后复跑退出码 0；首轮日志 `/tmp/hw-root-check-final.log`。
+说明：计划允许 `verify:aa` 并发竞争时串行重跑并如实记录；上述各轮根门禁均未出现并发竞争。评审修复波首轮根门禁退出码 **2**：typecheck 捕获归一化写法的 `exactOptionalPropertyTypes` 违规（vitest 不做类型检查），修正提交 `3b41400ba4` 后复跑退出码 0（首轮日志 `/tmp/hw-root-check-20261116.log`）。2026-11-16 干净树首轮退出码 **1**：`check-whitespace` 捕获 archive 文件末尾空行，修复提交 `c8e044c356` 后复跑退出码 0（首轮日志 `/tmp/hw-root-check-final.log`）。`33f7823f6f` 修复工作树首轮根门禁曾因 `sessions.spec.ts` 行号位移导致历史证据映射 `test-port-mapping.spec.ts` 失败，已于 `33f7823f6f` 同步校正并复跑退出码 0。后续本文件的归档口径对齐提交仅修订文档文本，不改动产品源码或测试。
 
-## 2. 提交链（ff29debd37..f26ccefe69）
+## 2. 提交链（ff29debd37..ec7ad6fc8d，另含归档对齐文档提交）
 
 | 提交 | 内容 |
 | --- | --- |
@@ -54,6 +58,14 @@
 | `84c80e145c` | 评审 Minor #7e（owner 裁定修复）：session.remove 统一清理两类创建草稿 |
 | `5b6f54fce3` | owner 裁定：未跟踪规格/计划/评审文档随分支提交；AGENTS.md 历史记录压缩为活跃债务表 + 完整版移入 archive |
 | `c8e044c356` | check-whitespace 门禁捕获：删除 archive 文件末尾空行 |
+| `90d4c73284` | 文档更新：追加 5b6f54fce3 与 c8e044c356 到提交链与门禁状态 |
+| `5b2ad7ba7b` | 文档引用收口：证据文档更新当时提交链至 90d4c73284 |
+| `f26ccefe69` | 文档基线收口：证据文档固定当时代码提交 84c80e145c |
+| `dab30cd667` | 文档记录：补录 c8e044c356 干净树根门禁结果（4236 passed，exit 0） |
+| `e4f6c0b123` | Kimi double-check 代码评审落档（`dab30cd667` 树：0 Critical / 2 Important / 1 Minor） |
+| `33f7823f6f` | **最终代码提交**：闭环 Kimi-I-1 / Kimi-I-2 / Kimi-M-1（生命周期/残留启用态/取消消费），同步计划 §12.2 口径与证据映射 |
+| `ec7ad6fc8d` | 独立只读复审落档：**Approve**（0 Critical / 0 Important / 1 Minor：`Review-M-1` 经 owner 2026-11-17 裁定停放） |
+| （归档口径对齐提交） | 仅更新本验收证据文件至最终代码提交 `33f7823f6f`、Kimi 评审/独立复审结论与最新门禁状态，不改动产品源码或测试 |
 
 ## 3. 规格 §12.1 自动化覆盖映射（摘要）
 
@@ -74,17 +86,17 @@
 
 ## 4. 规格 §12.2 验收（agent 真机走查，owner 2026-11-16 裁定替代真人验收）
 
-执行方式：agent 以 CDP 驱动真实应用构建（工作区 Electron `lib/main.js`，分支 `feat/chat-created-skills`），隔离 `DSH_HOME` + `--user-data-dir`，真实模型端点（`deepseek-chat`），逐步操作并截图/日志留证。执行方与证据路径逐项标注。共两轮走查（§4.1），第二轮在短上下文 + 显式批准下五项全部走通；最终修复后在含全部修复的构建上复走一轮（§4.2）。
+执行方式：agent 以 CDP 驱动真实应用构建（工作区 Electron `lib/main.js`，分支 `feat/chat-created-skills`），隔离 `DSH_HOME` + `--user-data-dir`，真实模型端点（`deepseek-chat`），逐步操作并截图/日志留证。执行方与证据路径逐项标注。2026-11-16 共两轮走查（§4.1），第二轮在短上下文 + 显式批准下五项全部走通；`84c80e145c` 构建复走一轮（§4.1.1）。后续 `33f7823f6f` 修复波未重跑真实模型走查（见 §4.1.1 说明）。
 
 | 项 | 内容 | 执行方 | 结果 | 证据要点 |
 | --- | --- | --- | --- | --- |
-| 1 | 从“我的技能”点击“对话创建技能”，完成访谈并看到确认卡 | agent（CDP，第二轮+复走） | **PASS** | `/create-skill` → 访谈 → 模型调用 `skill_propose`（批准）→ 确认卡渲染（名称/描述/触发场景/正文摘要 + 三按钮）。截图 `item1-confirm-card.png` |
-| 2 | 选择继续修改时草稿更新；选择取消时没有新技能 | agent（CDP，第二轮+复走） | **PASS** | 「继续修改」→ 修订 → 重新 propose → 新确认卡；「取消」→ `已取消创建技能，没有写入技能。`，目录与本地状态条目均不存在。截图 `item2-before-revise.png`/`item2-cancelled.png` |
-| 3 | 确认后成功卡出现；“我的技能”立即可见且默认未启用；同一 draftId 重放不新增第二张成功卡 | agent（CDP，第二轮+复走） | **PASS** | 「确认」→ `skill_commit`（批准）→ 成功卡 +「前往我的技能」；列表立即可见、默认未启用。去重另有自动化钉（appWiring）。截图 `item3-success-card.png` |
-| 4 | 手动启用后可通过 `/name` 调用；禁用后不可调用 | agent（CDP，两轮均+复走） | **PASS** | 禁用时 `/daily-summary …` → `skill daily-summary is disabled`；启用后按技能正文输出；再禁用再次拒绝。截图 `item4-disabled-invoke.png` |
-| 5 | 全程无脚本、端点或外部接口配置；无自动上传或发布 | agent（CDP，第二轮+复走） | **PASS** | 技能目录仅 `SKILL.md`；`origin={kind:"created"}`、无 `publishedRevision/Digest`；`agents-endpoints.json` 未被修改；无自动启用 |
+| 1 | 从“我的技能”点击“对话创建技能”，完成访谈并看到确认卡 | agent（CDP，第二轮 + `84c80e145c` 复走） | **PASS** | `/create-skill` → 访谈 → 模型调用 `skill_propose`（批准）→ 确认卡渲染（名称/描述/触发场景/正文摘要 + 三按钮）。截图 `item1-confirm-card.png` |
+| 2 | 选择继续修改时草稿更新；选择取消时没有新技能 | agent（CDP，第二轮 + `84c80e145c` 复走） | **PASS** | 「继续修改」→ 修订 → 重新 propose → 新确认卡；「取消」→ `已取消创建技能，没有写入技能。`，目录与本地状态条目均不存在。截图 `item2-before-revise.png`/`item2-cancelled.png` |
+| 3 | 确认后成功卡出现；“我的技能”立即可见且默认未启用；同一 draftId 重放不新增第二张成功卡 | agent（CDP，第二轮 + `84c80e145c` 复走） | **PASS** | 「确认」→ `skill_commit`（批准）→ 成功卡 +「前往我的技能」；列表立即可见、默认未启用。去重另有自动化钉（appWiring）。截图 `item3-success-card.png` |
+| 4 | 手动启用后可通过 `/name` 调用；禁用后不可调用 | agent（CDP，两轮均 + `84c80e145c` 复走） | **PASS** | 禁用时 `/daily-summary …` → `skill daily-summary is disabled`；启用后按技能正文输出；再禁用再次拒绝。截图 `item4-disabled-invoke.png` |
+| 5 | 全程无脚本、端点或外部接口配置；无自动上传或发布 | agent（CDP，第二轮 + `84c80e145c` 复走） | **PASS** | 技能目录仅 `SKILL.md`；`origin={kind:"created"}`、无 `publishedRevision/Digest`；`agents-endpoints.json` 未被修改；无自动启用 |
 
-证据目录（未入库）：`/tmp/hw-skill-walk3/evidence/`（第二轮）、`/tmp/hw-skill-walk-final/evidence/`（复走）。走查后关闭实例并删除含密钥临时 profile。
+证据目录（本机 `/tmp` 临时目录，未入库）：`/tmp/hw-skill-walk3/evidence/`（第二轮历史引用，实机路径为 `/tmp/hw-skill-walk3-evidence`）、`/tmp/hw-skill-walk-final/evidence/`（`84c80e145c` 复走）。走查后关闭实例并删除含密钥临时 profile。
 
 建议的真机验收补充观察点（来自评审残余）：
 
@@ -95,7 +107,7 @@
 
 ## 4.1 2026-11-16 agent 真机走查记录（CDP，owner 2026-11-16 裁定替代真人验收）
 
-环境：隔离临时 `DSH_HOME` + `--user-data-dir`（复制生产 `desktop` profile，模型 `deepseek-chat`，未打印密钥）；工作区 Electron `lib/main.js`（分支 `feat/chat-created-skills` 构建）；CDP 9333 + `HUAANWORK_ACCEPTANCE_HOOKS=1`。共两轮；第二轮五项全部走通。走查后关闭实例并删除含密钥临时 profile。证据目录（未入库）：`/tmp/hw-skill-walk3/evidence/`。
+环境：隔离临时 `DSH_HOME` + `--user-data-dir`（复制生产 `desktop` profile，模型 `deepseek-chat`，未打印密钥）；工作区 Electron `lib/main.js`（分支 `feat/chat-created-skills` 构建）；CDP 9333 + `HUAANWORK_ACCEPTANCE_HOOKS=1`。共两轮；第二轮五项全部走通。走查后关闭实例并删除含密钥临时 profile。证据目录（本机临时目录，未入库）：原记录作 `/tmp/hw-skill-walk3/evidence/`，实机目录为 `/tmp/hw-skill-walk3-evidence`。
 
 **构建基线说明**：第二轮走查的工作区构建包含了当时尚未提交的白名单修复（`model.ts`/`model.spec.ts`，后入库为 `9545c218cd`）。该修复是走通的前提——干净提交树在修复入库前主链路确定性不可用（§4.2 已更正）。本波修复已全部入库，规格 §12.2 验收以此走查记录为准。
 
@@ -120,9 +132,9 @@
 
 **结论**：agent 辅助第二轮五项全部 PASS；§12.2 验收方式经 owner 2026-11-16 裁定改为 agent 真机走查。此前“上游硬阻塞、不能验收”的结论已纠正（见 §4.2 根因排查）。
 
-## 4.2 复走记录（含全部修复的构建，2026-11-16 晚）
+### 4.1.1 复走记录（`84c80e145c` 构建，2026-11-16 晚）
 
-环境：隔离临时 `DSH_HOME` + `--user-data-dir`（复制生产 `desktop` profile，模型 `deepseek-chat`，未打印密钥）；工作区 Electron `lib/main.js`（分支 `feat/chat-created-skills` 构建，含全部评审修复与 #7c/#7e 停放项修复）；CDP 9333 + `HUAANWORK_ACCEPTANCE_HOOKS=1`。走查后关闭实例并删除含密钥临时 profile。证据目录（未入库）：`/tmp/hw-skill-walk-final/evidence/`。
+环境：隔离临时 `DSH_HOME` + `--user-data-dir`（复制生产 `desktop` profile，模型 `deepseek-chat`，未打印密钥）；工作区 Electron `lib/main.js`（分支 `feat/chat-created-skills` 提交 `84c80e145c` 构建，含 Gemini 评审修复波与 `#7c`/`#7e` 停放项修复）；CDP 9333 + `HUAANWORK_ACCEPTANCE_HOOKS=1`。走查后关闭实例并删除含密钥临时 profile。证据目录（本机临时目录，未入库）：`/tmp/hw-skill-walk-final/evidence/`。
 
 | 项 | 结果 | 证据要点 |
 | --- | --- | --- |
@@ -132,7 +144,7 @@
 | 4 | **PASS** | 禁用时 `/daily-summary …` → `skill daily-summary is disabled`；启用后按技能正文输出日报；再禁用再次拒绝。截图 `item4-disabled-invoke.png` |
 | 5 | **PASS** | 技能目录仅 `SKILL.md`；`origin={kind:"created"}`、无 `publishedRevision/Digest`；`agents-endpoints.json` 未被修改；本地状态含 `creationDraftId`+`creationSessionId`（受控幂等）；无自动启用 |
 
-**构建基线**：本次复走构建包含全部评审修复（白名单、路由对称性、事件闸门、字段归一化等）与 #7c/#7e 停放项修复，确认修复不引入回归。
+**构建基线与范围说明**：本次复走构建对应提交 `84c80e145c`，包含 2026-11-16 晚全部评审修复（白名单、路由对称性、事件闸门、字段归一化等）与 `#7c`/`#7e` 停放项修复。其后 2026-11-17 的最终代码提交 `33f7823f6f` 聚焦 **Kimi-I-1 / Kimi-I-2 / Kimi-M-1**（同名残留启用态清除、重放/删会话工具附件清理、取消消费确认卡），**未重新执行真实模型 CDP 走查**，由新增行为回归、聚焦 22-spec / 7-spec 套件与干净树 `corepack yarn check`（§1、§7）验证闭环。
 
 ## 4.2 根因排查记录与纠正（2026-11-16，systematic-debugging）
 
@@ -157,16 +169,19 @@
 - ~~**停放（Low，评审 Minor #7c）**~~ **已修**（owner 2026-11-16 裁定修复）：同标签出现新确认卡或成功卡时旧卡标记 consumed、按钮禁用，见提交 `cdc7dcda8f`。
 - ~~**停放（Low，评审 Minor #7e）**~~ **已修**（owner 2026-11-16 裁定修复，认可「删除会话=放弃未完成草稿」语义）：`session.remove` 统一清理两类草稿文件，见提交 `84c80e145c`。
 - **停放（Low，评审 Minor #7f）**：`.skill-confirm-card`/`.skill-success-card` 与 `.agent-confirm-card` 样式规则重复，可合并共用类；涉及 `styles.generated.ts` 再生成与视觉核对，留待 UI 加固波。
+- **停放（Low，复审 Minor #Review-M-1，2026-11-17）**：`client-huaanwork/rpc-types.ts:591` 与 `App.tsx:1915` 的 `skill/notice` 中 `terminal:"cancelled"` 与 `sessionId` 在类型上相互独立，缺 `sessionId` 时会回落当前活跃标签；当前全仓仅 `sessions.ts` 两条取消成功路径发射且均显式携带 `sessionId`。经 **owner 2026-11-17 裁定按非阻断项停放**（见 `2026-11-16-chat-created-skills-code-review.md` §9.2），后续可收紧判别联合类型。
 
 ## 6. 仓库状态备注
 
 - `docs/superpowers/plans/*`、`docs/superpowers/specs/*`（本计划/规格/评审/另两份计划）为未跟踪新文件；owner 2026-11-16 裁定随分支提交，与本文件同批落库。
 - 工作区 `AGENTS.md` 的修改为既有未提交改动；owner 2026-11-16 裁定「如果可行也一并提交」，经内容审查后与本批文档同库。
 
-## 7. 2026-11-16 code review 独立复核与修复波
+## 7. 2026-11-16 ~ 2026-11-17 code review 复核、Kimi 终审与独立复审闭环
 
-- 评审文档：`docs/superpowers/plans/2026-11-16-chat-created-skills-code-review.md`（Gemini，Double-Check 校准版；独立复核结论以标注段落追加在该文档末尾）。
-- 复核判决：1 Critical + 4 Important + 7 Minor 的代码事实**全部属实**，无实质误报、无实质漏报（独立扫描全量 41 文件 diff）；两处措辞不精确（Important #4「全仓唯一调用 duplicateLocalSkill」——routes.spec.ts 亦经 HTTP 路由 exercising 同一函数；Important #3 影响段漏写缓解因素）。Important #3 严重度校准为 Minor：新技能默认禁用本就不进 invocableList，启用/禁用经 SkillsView `onInvocableChanged` 独立刷新，真实影响仅「commit 时已挂载的 SkillsView 错过一次自动刷新」；仍按建议照修。
-- 修复提交见 §2 提交链 `9545c218cd`..`3b41400ba4`（7 个提交，TDD：每项先红后绿）。
-- 修复后仓库根 `corepack yarn check` 退出码 **0**（§1 末行：桌面 4231 passed / 15 skipped，全链通过；完整日志 `/tmp/hw-root-check-20261116-r2.log`）。首轮根门禁曾在 typecheck 捕获归一化写法的 `exactOptionalPropertyTypes` 违规（vitest 不做类型检查），修正后复跑。
-- §12.2 验收方式经 **owner 2026-11-16 裁定**：agent 真机走查替代真人验收，规格 §12.2 文本已同步更新；五项验收结果见 §4（第二轮全 PASS），走查构建含未提交修复的基线错位已在 §4.2 更正。评审停放项 #7c/#7e 同波修复入库（`cdc7dcda8f`/`84c80e145c`），#7f 维持停放。
+- 评审文档：`docs/superpowers/plans/2026-11-16-chat-created-skills-code-review.md`（Gemini Double-Check 校准版 §§1–5、Qoder 复核修复 §6、Kimi 复审 §7、修复移交 §8、独立只读复审 Approve §9）。
+- **2026-11-16 Gemini 评审复核与修复波（`9545c218cd`..`3b41400ba4`）**：1 Critical + 4 Important + 7 Minor 的代码事实全部属实（Important #3 校准为 Minor，按建议照修）；7 个 TDD 修复提交后根 `corepack yarn check` 于 `3b41400ba4` 通过（§1 `3b41400ba4` 行：`4231 passed / 15 skipped`；完整日志 `/tmp/hw-root-check-20261116-r2.log`；首轮 typecheck 捕获 `exactOptionalPropertyTypes` 违规并在 `3b41400ba4` 修复）。评审停放项 `#7c`/`#7e` 随后经 owner 裁定同批修复入库（`cdc7dcda8f`/`84c80e145c`），`84c80e145c` 干净树复走与 `c8e044c356` 根门禁（`4236 passed / 15 skipped`）均通过；`#7f` 维持停放。
+- **2026-11-17 Kimi 终审与闭环波（`e4f6c0b123` → `33f7823f6f` → `ec7ad6fc8d`）**：
+  - Kimi 评审（`e4f6c0b123`，`dab30cd667` 树）检出 **0 Critical / 2 Important（Kimi-I-1、Kimi-I-2）/ 1 Minor（Kimi-M-1）**。
+  - 最终代码提交 `33f7823f6f` 闭环全部三项，并同步 `2026-11-15-chat-created-skills.md` 的 §12.2 验收口径与 `test-port-mapping.ts` 行号映射（未重跑真实模型走查）。
+  - 独立只读复审（`ec7ad6fc8d`，覆盖 `e4f6c0b123..33f7823f6f`）实跑 7 个聚焦 spec（**300/300 通过**）并核验干净终树 `corepack yarn check`（**299 files passed / 4 skipped，4238 passed / 15 skipped**），给出 **Approve（0 Critical / 0 Important / 1 Minor：`Review-M-1` 经 owner 2026-11-17 裁定停放，见 §5）**。
+- §12.2 验收方式经 **owner 2026-11-16 裁定**：agent 真机走查替代真人验收，规格与计划文本已同步；五项验收结果见 §4（第二轮 + `84c80e145c` 复走全 PASS），走查构建基线已在 §4.1.1 / §4.2 如实标注。
