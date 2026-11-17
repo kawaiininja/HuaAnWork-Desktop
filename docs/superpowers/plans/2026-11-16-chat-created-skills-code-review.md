@@ -180,3 +180,70 @@
 - 修复后仓库根 `corepack yarn check` 退出码 **0**：桌面包 `4231 passed / 15 skipped (4246)`（较评审时 +22 新钉），`verify:host` 35/0，closure/bundled/licenses/operations 全过，最后一个 workspace agent-catalog-admin 15/15。首轮退出码 2（typecheck 捕获 `exactOptionalPropertyTypes` 违规），修正提交 `3b41400ba4` 后复跑通过。完整日志 `/tmp/hw-root-check-20261116-r2.log`，证据文档 §1 已回填。
 - 证据文档基线与根因已更正（§4.2：白名单缺失确为确定性丢弃路径，走查构建含未提交修复）。
 - **§12.2 五项真人验收仍待 owner**；本波不替代。合入前还需 owner 裁定未跟踪规格/计划/评审文档是否随分支提交。
+
+---
+
+## 七、Kimi 审核（2026-11-16，终树 Double-Check）
+
+> **审核人：Kimi。** 本节是对当前终树的独立审查与二次反证记录，覆盖前文的当前合并判断；前六节保留为历史评审及修复上下文。复核遵循「查漏报、去误报、消夸大、校行号」，并另由只读 subagent 对下列两项 Important、一项 Minor 和验收口径逐项反证，结论一致。
+
+### 7.1 评审对象、依据与方法
+
+- **分支 / 基线 / HEAD：** `feat/chat-created-skills`；共同基线与当前 `master` 均为 `ff29debd37d72a92f10d446eafa07867d17befd8`；评审 HEAD 为 `dab30cd66722eef21c665c5e9cad99475f35b418`。
+- **权威依据：** `docs/superpowers/specs/2026-11-15-chat-created-skills-design.md` 与 `docs/superpowers/plans/2026-11-15-chat-created-skills.md`；验收证据仅作待核验材料，不以自述替代源码和实测。
+- **方法：** 当前源码逐路径反证、临时 profile / 内存附件最小复现、当前 HEAD 根门禁复跑、真机证据抽查、独立只读反证。除本节落档外，不修改实现、测试、计划或验收证据。
+- **终树结论：** **0 Critical / 2 Important / 1 Minor，No（With fixes）**。两项 Important 均为真实规格违背，但均有明确触发条件；不得扩大成“所有创建都会自动启用”或“可直接绕过同意门禁正式写盘”。
+
+### 7.2 Double-Check 校准表
+
+| 结论 | 复核事实与缓解条件 | 校准判决 |
+| --- | --- | --- |
+| 残留同名启用键使对话新建技能自动启用 | 源码与两条实测路径均成立；正常 `removeSkill` 会清键，触发条件是正常的带外删除或异常残留，而非每次新建。`alreadyCommitted` 重放不改变内容/状态的既定语义不是反证 | **属实，Important 合理**；首次创建直接获得可调用能力，违反 R4、§8.1 与 §12.1#7；非 Critical |
+| 崩溃后的首个 `alreadyCommitted` 重放不解绑 | 重启产生新的空 `pendingDetach`；磁盘草稿驱动重新 attach，而 `!result.alreadyCommitted` 守卫排除重放解绑。计划的“不设置第二个 pendingDetach”及现有测试只覆盖同进程已有首次 pending 的情形，不覆盖新进程首个重放 | **属实，Important**；是终止生命周期缺口，不是首次主链路不可用 |
+| `session.remove` 后创建附件残留 | `releaseSessionRuntime` 无 detach，`removeSession` 只清草稿；`src` 中未见其他 `sessionAgentTools` 会话清理路径。直接调用释放函数后两个技能工具仍 attached，同 ID 重建可继承 | **属实，与上项合记一个 Important**；但 commit 仍有 consent / creationTurn / draft / credential 门禁，不能夸大为“可无条件正式创建” |
+| 取消后旧确认卡仍可点击 | `consumeSkillConfirmCards` 仅由新 confirm / success 调用，取消 notice 只写脚注；未见其他消费路径 | **属实，Minor**；后果是 stray 普通消息和误导性 UI，不会仅凭旧卡直接写盘 |
+| 计划“真人验收”与规格 agent 走查裁定冲突 | 规格 §12.2:259 已记录 owner 2026-11-16 允许 agent 真机走查；计划 :29、:1313、:1344 仍是旧“人类/真人”口径 | **属实，非代码阻断**；以更新后的 owner 裁定为准时不应再声称“缺真人验收所以必须 No”，但计划应同步 |
+
+### 7.3 当前问题与修改建议
+
+#### Kimi-I-1（Important）：首次对话创建必须清除同名残留启用态，重放不得撤销后续手动启用
+
+- **位置：** `dsh-plugin-huaanwork/src/huaanwork-host/skills-host.ts:375-429`、`:448-485`；实际调用闸门为 `skill-invoke.ts` 的 `resolveInvocableSkill`。
+- **根因：** `createSkillLocked` 在 :393 读取既有 toggles，并在 :423 直接以同名键计算新技能的 `enabled`；对话首次创建没有消除“目录已不存在但启用键仍在”的历史状态。
+- **已复现：** ① 表单创建并启用 `daily-summary`；② 带外删除其目录；③ 正常对话 propose + 后续确认 commit 同名技能。结果为 `enabledAfterConversationCreate=true`；另一条最小复现同时确认 `resolveInvocableSkill` 立即成功。
+- **修改建议：** 只在**首次非凭证命中创建**的存储锁临界区内，于正式技能文件可见之前清除同名残留启用键，保证崩溃窗口也 fail-closed；凭证命中 / `alreadyCommitted` 重放不得重写 toggles，以免撤销用户创建后的手动启用。不要为修此问题嵌套获取非重入 `withSkillStorageLock`。
+- **回归测试：** 覆盖“旧技能启用 → 带外删目录 → 对话同名新建”，断言 `mineList.enabled=false`、toggle 键不存在、`/name` 拒绝；再手动启用并重放原 draftId，断言仍启用、内容不被重写且返回 `alreadyCommitted`。
+
+#### Kimi-I-2（Important）：创建工具附件在崩溃重放与删除会话两条终止路径未完整释放
+
+- **位置：** `huaanwork-guardrails/skill-creation-tools.ts:186-219`、`huaanwork-host/skill-creation-drafts.ts:293-350`、`huaanwork-host/skill-creation.ts:175-179`、`huaanwork-host/sessions.ts:354-362`、`:740-760`、`:790-810`。
+- **路径 A——崩溃后重放：** 正式技能和幂等状态已写入但草稿未删时进程退出；重启后 pending map 为空，磁盘草稿使路由重新 attach，凭证命中返回 `alreadyCommitted=true`，而 :187 跳过本次解绑。空 pending 注册实例的实测结果为 `proposeStillAttached=true`、`commitStillAttached=true`，即使对应 tools/result 已到达。
+- **路径 B——删除会话：** `session.remove` 已清两类草稿，但运行态释放只清模型/根等状态，未卸创建附件。直接实测释放后两个技能工具仍 attached；同 `sessionId` 重建可继承。
+- **影响边界：** 残留工具会继续暴露，`skill_propose` 低层又没有 `creationTurn` 检查，普通轮可因此写新草稿；但正式 commit 仍有完整授权门禁，因此本项不定 Critical，也不声称可无条件正式落盘。
+- **修改建议：** 重放时只在同会话已有在途首次成功 detach 的情况下跳过“第二个”登记；若没有，则当前重放必须拥有自己的结果后解绑。会话删除路径同时清理技能与智能体创建附件，保持与草稿终止语义一致，并避免在工具结果定稿前破坏仍在归一化的调用。
+- **回归测试：** 分别模拟新进程空 pending 的首个重放、同进程首次成功与重放结果乱序、删除/重建同 sessionId；断言终态无技能/智能体创建附件，且正常在途结果不会被提前改写成 `UNKNOWN_TOOL`。
+
+#### Kimi-M-1（Minor）：取消成功未消费活动确认卡
+
+- **位置：** `client-huaanwork/App.tsx:1895-1917`；卡片禁用渲染位于 `SkillConfirmCard.tsx:35-48`。
+- **问题：** 新确认卡和成功卡会消费旧卡，取消成功 notice 不会。草稿已经删除后，旧卡三个按钮仍可点击并发送普通“确认/取消”等文本。
+- **修改建议：** 让取消成功携带明确的结构化终态信号，并在同标签消费活动确认卡；不要把所有错误/一般 notice 都当成已处理，也不建议依赖易漂移的文案模糊匹配。补“取消后按钮禁用、点击不再发送”的回归。
+
+### 7.4 实测与证据边界
+
+1. **当前 HEAD 根门禁实测：** `corepack yarn check` 退出码 **0**；桌面包 `299 passed | 4 skipped (303)`，`4236 passed / 15 skipped (4251)`；`verify:host` 35/0，closure 316 节点，bundled / cli / loader / profile / aa / licenses / operations 均通过。门禁绿不能覆盖上述未测状态与生命周期边界。
+2. **最小复现：** 两项 Important 及删除附件残留均用临时目录或内存对象实际执行并观察输出；未在仓库新增复现脚本，未改产品代码。
+3. **真机证据：** `/tmp/hw-skill-walk-final/evidence/` 当前存在，抽查确认卡、成功卡、“我的技能”和禁用调用截图与记录相符；本次未重新运行真实模型走查。历史 `/tmp/hw-skill-walk3/evidence/` 当前已不存在，且证据均为本机 `/tmp` 引用，长期审计建议持久归档关键截图/日志。此项不改变代码缺陷分级。
+4. **范围与清洁度：** `deepseek-harness` 无差异；落档前工作区干净。本节由 owner 明确要求追加，不代表已执行任何修复或 git 提交。
+
+### 7.5 合并结论与收口条件
+
+**Kimi 审核结论：当前仍不达合并 `master` 标准（No / With fixes），但不是测试失败或主流程普遍不可用，而是两个有边界的授权/生命周期缺口尚未闭环。**
+
+合入前必须：
+
+1. 修复 Kimi-I-1 与 Kimi-I-2，并落入 §7.3 所列回归；保留现有正常重放、用户后续手动启用和工具结果定稿语义。
+2. 在包含修复的干净终树复跑 `corepack yarn check`，保持退出码 0。
+3. 同步计划与规格的验收口径；以 owner 2026-11-16 裁定为准时，不再把“真人未验收”列为额外阻断。
+
+Kimi-M-1 可随修复波一并处理或由 owner 明确停放；停放不改变上述两项 Important 必须闭环的准入条件。
