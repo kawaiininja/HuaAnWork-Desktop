@@ -11,6 +11,7 @@ import type {
   RpcEvent,
   SubagentCancelResult,
   SubagentCleanupWarning,
+  SubagentRunKind,
   SubagentRunProjection,
   SubagentRunSnapshot,
   SubagentStopReason,
@@ -65,7 +66,7 @@ export class SubagentRunNotFoundError extends Error {
 export interface SubagentRunRegistry {
   begin(input: {
     parentSessionId: string
-    kind: 'legacy' | 'package'
+    kind: SubagentRunKind
     label: string
     packageVersion?: string
     clientMessageId?: string

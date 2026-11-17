@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, test } from "vitest";
+import { afterEach, test, vi } from "vitest";
 
 import { parseSkillMarkdown, serializeSkillMarkdown } from "@huaanwork/skill-format/markdown";
 
@@ -15,6 +15,7 @@ import {
   registerChildSession,
   resetChildSessionRegistry,
 } from "../../src/huaanwork-host/child-sessions.ts";
+import { ACTIVATION_CLEANUP_TIMEOUT_MS } from "../../src/huaanwork-host/agent-package/host.ts";
 import { sendToAgent } from "../../src/huaanwork-host/sessions.ts";
 import { createSubagentRunRegistry } from "../../src/huaanwork-host/subagent-runs.ts";
 import { createSystemSkillLeaseStore, systemSkillLeaseKindOf } from "../../src/huaanwork-host/system-skill-leases.ts";
@@ -105,10 +106,50 @@ const DEFAULT_TOOL_NAMES = [
   "web_search",
 ] as const;
 
+/** Task 1 已注册的 UUID 回合锚:system-skill run 的 clientMessageId 只来自它。 */
+const TURN_MESSAGE_ID = "6f1c2b9e-3a7d-4f0e-9b8c-1d2e3f4a5b6c";
+
+type ActivationSpec = {
+  provider?: string;
+  label?: string;
+  childId?: string;
+  request?: { prompt?: unknown[]; parent?: unknown };
+  delivery?: string;
+};
+
+/** 释放 pending activation 时提供的上游句柄成员;缺省即正常 completed/dispose。 */
+type ActivationRelease = {
+  childId?: unknown;
+  localAgent?: Agent;
+  result?: Promise<unknown>;
+  dispose?: () => Promise<void>;
+  emitEvents?: boolean;
+  upstreamRunId?: string;
+};
+
+type ActivationGate = {
+  spec: ActivationSpec;
+  gate: {
+    promise: Promise<ActivationRelease | undefined>;
+    resolve(release: ActivationRelease | undefined): void;
+    reject(error: unknown): void;
+  };
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function createHarness(options?: {
   childNames?: readonly string[];
   parentNames?: readonly string[];
-  withActivation?: boolean;
+  anchor?: { sessionId: string; clientMessageId: string; origin: "advanced" | "automation" | "unknown" };
 }) {
   const skills: SkillRegistration[] = [];
   const events: Record<string, ((payload: never, next?: () => Promise<unknown>, extra?: unknown) => unknown)[]> = {};
@@ -126,12 +167,16 @@ function createHarness(options?: {
     cancel: () => cancelled.push("child"),
   };
   const emitted: unknown[] = [];
+  const activationGates: ActivationGate[] = [];
+  const runs = createSubagentRunRegistry({ activityFlushMs: 0, emit: () => undefined });
   const attachments = emptyAttachments();
   const anchors = createTurnAnchorStore();
-  anchors.register({ sessionId: "main", clientMessageId: "user-1", origin: "advanced" });
+  const anchor =
+    options?.anchor ?? { sessionId: "main", clientMessageId: TURN_MESSAGE_ID, origin: "advanced" as const };
+  anchors.register(anchor);
   anchors.notePreStep(
-    "main",
-    [{ role: "user", id: "user-1", source: { kind: "user" } }],
+    anchor.sessionId,
+    [{ role: "user", id: anchor.clientMessageId, source: { kind: "user" } }],
     new Date().toISOString(),
   );
   const extraAgents = new Map<string, Agent>();
@@ -143,6 +188,7 @@ function createHarness(options?: {
     huaanworkUnattended: new Map(),
     huaanworkPackageChildAllow: new Map(),
     huaanworkTurnAnchors: anchors,
+    huaanworkSubagentRuns: runs,
     skills: {
       register(skill: SkillRegistration) {
         skills.push(skill);
@@ -176,23 +222,43 @@ function createHarness(options?: {
     for (const listener of events[event] ?? []) listener(payload as never, undefined, extra as never);
   };
 
-  if (options?.withActivation === true) {
-    ctx.subagents = {
-      startActivation: async (spec: { childId?: string; localAgent?: Agent }) => {
-        const target = (spec.childId === undefined ? undefined : (ctx.agents as { get(id: string): Agent }).get(spec.childId)) ?? spec.localAgent;
-        if (target === undefined) throw new Error("activation target missing");
-        // 上游两阶段派发:startActivation 在同一个异步链里同步派发 created/start。
-        emit("agent/created", { agent: target });
-        emit("subagent/start", { id: target.id, local: true });
-        return {
-          childId: target.id,
-          localAgent: target,
-          result: Promise.resolve({}),
-          dispose: async () => undefined,
-        };
-      },
-    };
-  }
+  // 上游两阶段派发的忠实 fake:调用发生在 tools/execute 的终止回调(body)内;
+  // agent/created 与 subagent/start 在 fake 自己的异步续体内派发,startRun/spawnKind
+  // 的 ALS 作用域因此仍然有效。gate 让用例在 activation 释放前观察 registry。
+  ctx.subagents = {
+    startActivation: async (...args: never[]) => {
+      const gate = deferred<ActivationRelease | undefined>();
+      activationGates.push({ spec: args[0] as ActivationSpec, gate });
+      const release = await gate.promise;
+      if (release === undefined) return undefined;
+      const childId = release.childId;
+      if (release.emitEvents !== false && childId !== undefined) {
+        const known =
+          typeof childId === "string"
+            ? (extraAgents.get(childId) ?? (childId === child.id ? child : undefined))
+            : undefined;
+        const eventAgent =
+          release.localAgent ??
+          known ?? {
+            id: String(childId),
+            session: { header: {} },
+            ctx: { get: () => undefined },
+          };
+        emit("agent/created", { agent: eventAgent });
+        emit("subagent/start", {
+          runId: release.upstreamRunId ?? `upstream-${String(childId)}`,
+          id: String(childId),
+          local: true,
+        });
+      }
+      return {
+        ...(childId === undefined ? {} : { childId }),
+        ...(release.localAgent === undefined ? {} : { localAgent: release.localAgent }),
+        result: release.result ?? Promise.resolve({ stopReason: "completed" }),
+        dispose: release.dispose ?? (async () => undefined),
+      };
+    },
+  };
 
   ctx.huaanworkSystemSkillLeases = createSystemSkillLeaseStore(ctx as never);
   applyPresentAs(ctx as never);
@@ -253,6 +319,76 @@ function createHarness(options?: {
     return decision;
   }
 
+  function buildActivationSpec(parentSessionId: string, childId?: string): ActivationSpec {
+    return {
+      provider: "spawn",
+      label: "system-skill",
+      ...(childId === undefined ? {} : { childId }),
+      request: { prompt: [{ type: "text", text: "look around" }], parent: { session: { id: parentSessionId } } },
+      delivery: "parent",
+    };
+  }
+
+  function callActivation(spec: ActivationSpec): Promise<unknown> {
+    const subagents = ctx.subagents as { startActivation(spec: ActivationSpec): Promise<unknown> };
+    return subagents.startActivation(spec);
+  }
+
+  function releaseActivation(release: ActivationRelease = {}, index = -1): void {
+    const entry = activationGates.at(index);
+    if (entry === undefined) throw new Error("no pending activation");
+    entry.gate.resolve(release);
+  }
+
+  function failActivation(error: Error, index = -1): void {
+    const entry = activationGates.at(index);
+    if (entry === undefined) throw new Error("no pending activation");
+    entry.gate.reject(error);
+  }
+
+  /**
+   * 忠实两阶段派发里的 `subagent` body:startActivation 只在 `tools/execute` 的
+   * 终止回调(body)内调用,不在任何 pre-execute `next()` 内触发。
+   */
+  async function startSubagentSpawn(agent: Agent, spec: ActivationSpec) {
+    const { decision, execution } = await preExecute(agent, "subagent", { prompt: "look around" });
+    if (decision.kind !== "allow") {
+      return { decision, execution, executionDone: Promise.resolve(undefined), entry: undefined, call: undefined };
+    }
+    const started = deferred<void>();
+    let call: Promise<unknown> | undefined;
+    const executionDone = runExecute(execution, async () => {
+      call = callActivation(spec);
+      started.resolve();
+      return call;
+    });
+    await started.promise;
+    const entry = activationGates.at(-1);
+    return { decision, execution, executionDone, entry, call: call as Promise<unknown> };
+  }
+
+  /** 建立 pending activation 并把释放时机交给用例。 */
+  async function beginSubagentSpawn(
+    agent: Agent,
+    options?: {
+      target?: Agent;
+      /** `omit` 模拟上游 `tool-subagent` 不传 childId。 */
+      specChildId?: string | "omit";
+      parentSessionId?: string;
+    },
+  ) {
+    const specChildId =
+      options?.specChildId === "omit" ? undefined : (options?.specChildId ?? options?.target?.id);
+    const started = await startSubagentSpawn(
+      agent,
+      buildActivationSpec(options?.parentSessionId ?? "main", specChildId),
+    );
+    if (started.decision.kind !== "allow" || started.entry === undefined) {
+      throw new Error(`subagent dispatch ended with ${started.decision.kind}`);
+    }
+    return { ...started, entry: started.entry, call: started.call as Promise<unknown> };
+  }
+
   return {
     skills,
     parent,
@@ -261,6 +397,8 @@ function createHarness(options?: {
     childTools,
     cancelled,
     emitted,
+    activationGates,
+    runs,
     ctx,
     events,
     attachments,
@@ -273,6 +411,10 @@ function createHarness(options?: {
     preExecute,
     runExecute,
     dispatchTool,
+    beginSubagentSpawn,
+    startSubagentSpawn,
+    releaseActivation,
+    failActivation,
     /** 下游 async hook(模拟 workspace-changes 等待后返回 allow / deny / 抛错)。 */
     onPreExecute(listener: (execution: { name: string; arguments: unknown; agent?: Agent }, next?: () => Promise<Decision>) => unknown) {
       (events["tools/pre-execute"] ??= []).push(listener as never);
@@ -280,23 +422,24 @@ function createHarness(options?: {
     async invokeSkill(agent: Agent, name: string) {
       return emitWaterfall("tools/pre-execute", { name: "skill", arguments: { name }, agent });
     },
-    async invokeSubagent(agent: Agent, target: Agent = child) {
-      return dispatchTool(agent, "subagent", { prompt: "look around" }, async () => {
-        emit("agent/created", { agent: target });
-        emit("subagent/start", { id: target.id, local: true });
-        return { ok: true };
-      });
+    async invokeSubagent(agent: Agent, target: Agent = child, parentSessionId = "main") {
+      const started = await startSubagentSpawn(agent, buildActivationSpec(parentSessionId, target.id));
+      if (started.decision.kind !== "allow" || started.entry === undefined) return started.decision;
+      releaseActivation({ childId: target.id, localAgent: target });
+      await started.executionDone;
+      return started.decision;
     },
     /** 显式 `@` 路径:宿主直接调 startActivation,不经过模型工具(无 ALS)。 */
     async activate(agent: Agent, parentSessionId = "main") {
-      const subagents = ctx.subagents as { startActivation(spec: unknown): Promise<unknown> };
-      return subagents.startActivation({
+      const call = callActivation({
         provider: "spawn",
         label: "@explicit",
         childId: agent.id,
         request: { prompt: [], parent: { session: { id: parentSessionId } } },
         delivery: "parent",
       });
+      releaseActivation({ childId: agent.id, localAgent: agent });
+      return call;
     },
     async callTool(agent: Agent, name: string, args: Record<string, unknown> = {}) {
       return emitWaterfall("tools/pre-execute", { name, arguments: args, agent });
@@ -1516,7 +1659,7 @@ test("an unattended automation turn never acquires the lease or caches a skill k
 });
 
 test("a legacy child is denied before any cache write; a managed package child can acquire", async () => {
-  const harness = createHarness({ withActivation: true });
+  const harness = createHarness();
   registerChildSession("legacy-parent", "child");
   const denied = (await harness.invokeSkill(harness.child, "explore")) as Decision;
   assert.equal(denied.kind, "deny");
@@ -1541,7 +1684,7 @@ test("a legacy child is denied before any cache write; a managed package child c
 });
 
 test("PC-1: the dispatch kind rides tools/execute into the body and never leaks into a later explicit @", async () => {
-  const harness = createHarness({ withActivation: true });
+  const harness = createHarness();
   const atTools = createTools(DEFAULT_TOOL_NAMES);
   const atChild = agentWithTools("at-child", atTools);
   harness.addAgent(atChild);
@@ -1573,7 +1716,7 @@ test("PC-1: the dispatch kind rides tools/execute into the body and never leaks 
 test("QP-I1: a deny or throw after pre-execute never pollutes a later explicit @", async () => {
   for (const mode of ["deny", "throw"] as const) {
     resetChildSessionRegistry();
-    const harness = createHarness({ withActivation: true });
+    const harness = createHarness();
     const atTools = createTools(DEFAULT_TOOL_NAMES);
     const atChild = agentWithTools(`at-child-${mode}`, atTools);
     harness.addAgent(atChild);
@@ -1600,7 +1743,7 @@ test("QP-I1: a deny or throw after pre-execute never pollutes a later explicit @
 });
 
 test("QR-I1: an allow that later settles through tools/result cleans the pending slot idempotently", async () => {
-  const harness = createHarness({ withActivation: true });
+  const harness = createHarness();
   const atTools = createTools(DEFAULT_TOOL_NAMES);
   const atChild = agentWithTools("at-child-result", atTools);
   harness.addAgent(atChild);
@@ -1618,7 +1761,7 @@ test("QR-I1: an allow that later settles through tools/result cleans the pending
 });
 
 test("QR-I1: a downstream guard rejection after allow also leaves no slot behind", async () => {
-  const harness = createHarness({ withActivation: true });
+  const harness = createHarness();
   const atTools = createTools(DEFAULT_TOOL_NAMES);
   const atChild = agentWithTools("at-child-guard", atTools);
   harness.addAgent(atChild);
@@ -1643,7 +1786,7 @@ test("QR-I1: a downstream guard rejection after allow also leaves no slot behind
 test("QP-I1: an overlapping compatible dispatch never clears another call's pending slot", async () => {
   for (const finish of ["execute", "result"] as const) {
     resetChildSessionRegistry();
-    const harness = createHarness({ withActivation: true });
+    const harness = createHarness();
     const otherTools = createTools(DEFAULT_TOOL_NAMES);
     const other = agentWithTools("other", otherTools, "other-session");
     harness.addAgent(other);
@@ -1712,4 +1855,439 @@ test("QR-I2: an explicit system skill switch invalidates the stale skill cache a
   await harness.invokeSubagent(harness.parent, fixAgain);
   assert.ok(fixAgainTools.visible.some((schema) => schema.name === "write"));
   assert.equal(harness.guardReason(fixAgainTools, "write"), undefined);
+});
+
+// ── Task 3: system-skill 运行进入 registry 并支持定向取消 ─────────────────────
+
+function otherParentAgent(harness: ReturnType<typeof createHarness>, id: string, sessionId: string): Agent {
+  const agent = agentWithTools(id, createTools(DEFAULT_TOOL_NAMES), sessionId);
+  harness.addAgent(agent);
+  const store = harness.ctx.huaanworkSystemSkillLeases as ReturnType<typeof createSystemSkillLeaseStore>;
+  assert.equal(store.acquireExplicit(sessionId, "explore"), true);
+  return agent;
+}
+
+test("a system-skill spawn is visible in the registry before the activation releases", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  const disposed: string[] = [];
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+
+  const runs = harness.runs.snapshot("main").runs;
+  assert.equal(runs.length, 1);
+  const run = runs[0]!;
+  assert.ok(run.runId.length > 0);
+  assert.deepEqual(
+    {
+      kind: run.kind,
+      phase: run.phase,
+      label: run.label,
+      parentSessionId: run.parentSessionId,
+      clientMessageId: run.clientMessageId,
+    },
+    {
+      kind: "system-skill",
+      phase: "starting",
+      label: "explore",
+      parentSessionId: "main",
+      clientMessageId: TURN_MESSAGE_ID,
+    },
+  );
+
+  harness.releaseActivation({
+    childId: "child",
+    localAgent: harness.child,
+    dispose: async () => {
+      disposed.push("child");
+    },
+  });
+  await executionDone;
+  await vi.waitFor(() => {
+    assert.equal(harness.runs.get(run.runId)?.phase, "completed");
+    assert.deepEqual(disposed, ["child"]);
+  });
+  const settled = harness.runs.get(run.runId)!;
+  assert.equal(settled.childId, "child");
+  assert.equal(settled.upstreamRunId, "upstream-child");
+  assert.deepEqual(settled.cleanupWarnings, []);
+});
+
+test("an automation turn anchors its system-skill run to the automation run id", async () => {
+  const harness = createHarness({
+    anchor: { sessionId: "main", clientMessageId: "automation-run-7", origin: "automation" },
+  });
+  assert.equal((await harness.invokeSkill(harness.parent, "test-fix")).kind, "allow");
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+  const run = harness.runs.snapshot("main").runs[0]!;
+  assert.equal(run.kind, "system-skill");
+  assert.equal(run.label, "test-fix");
+  assert.equal(run.clientMessageId, "automation-run-7");
+  harness.releaseActivation({ childId: "child", localAgent: harness.child });
+  await executionDone;
+});
+
+test("a missing run registry fails the system-skill spawn loudly before any activation", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  harness.ctx.huaanworkSubagentRuns = undefined;
+  const started = await harness.startSubagentSpawn(harness.parent, {
+    provider: "spawn",
+    label: "system-skill",
+    childId: "child",
+    request: { prompt: [], parent: { session: { id: "main" } } },
+    delivery: "parent",
+  });
+  assert.equal(started.entry, undefined);
+  await assert.rejects(started.executionDone, { message: "subagent run registry is not initialized" });
+  assert.equal(harness.activationGates.length, 0);
+});
+
+test("an unresolvable activation child id disposes, fails, confirms cleanup, and throws", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  const disposed: string[] = [];
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent);
+  const runId = harness.runs.snapshot("main").runs[0]!.runId;
+  harness.releaseActivation({
+    childId: "",
+    emitEvents: false,
+    dispose: async () => {
+      disposed.push("empty-child");
+    },
+  });
+  await assert.rejects(executionDone, /subagent activation child id missing/);
+  assert.deepEqual(disposed, ["empty-child"]);
+  const run = harness.runs.get(runId)!;
+  assert.equal(run.phase, "failed");
+  assert.match(run.failure ?? "", /child id missing/);
+  assert.deepEqual(run.cleanupWarnings, []);
+});
+
+test("a reserved spec child id the activation does not reuse fails closed without binding", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  const disposed: string[] = [];
+  const bound: string[] = [];
+  const bindActivation = harness.runs.bindActivation.bind(harness.runs);
+  harness.runs.bindActivation = (runId, input) => {
+    bound.push(input.childId);
+    bindActivation(runId, input);
+  };
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent, {
+    specChildId: "reserved-1",
+    target: harness.child,
+  });
+  const runId = harness.runs.snapshot("main").runs[0]!.runId;
+  assert.equal(harness.runs.get(runId)?.childId, "reserved-1");
+  harness.releaseActivation({
+    childId: "child",
+    localAgent: harness.child,
+    dispose: async () => {
+      disposed.push("mismatch");
+    },
+  });
+  await assert.rejects(executionDone, /subagent activation child mismatch/);
+  assert.deepEqual(disposed, ["mismatch"]);
+  assert.deepEqual(bound, []);
+  const run = harness.runs.get(runId)!;
+  assert.equal(run.phase, "failed");
+  assert.match(run.failure ?? "", /child mismatch/);
+});
+
+test("an activation without a reserved child id binds the provider-assigned child id", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent, { specChildId: "omit" });
+  const runId = harness.runs.snapshot("main").runs[0]!.runId;
+  harness.releaseActivation({ childId: "provider-child", localAgent: harness.child });
+  await executionDone;
+  await vi.waitFor(() => assert.equal(harness.runs.get(runId)?.phase, "completed"));
+  assert.equal(harness.runs.get(runId)?.childId, "provider-child");
+});
+
+test("an activation rejection fails the system-skill run and confirms cleanup", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+  const runId = harness.runs.snapshot("main").runs[0]!.runId;
+  harness.failActivation(new Error("activation refused"));
+  await assert.rejects(executionDone, /activation refused/);
+  const run = harness.runs.get(runId)!;
+  assert.equal(run.phase, "failed");
+  assert.equal(run.failure, "activation refused");
+  assert.deepEqual(run.cleanupWarnings, []);
+});
+
+test("a targeted cancel stops only the selected system-skill run", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  const disposed: string[] = [];
+
+  let resolveRunA!: (value: { stopReason: string }) => void;
+  const resultA = new Promise<{ stopReason: string }>((resolve) => {
+    resolveRunA = resolve;
+  });
+  const runASpawn = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+  harness.releaseActivation({
+    childId: "child",
+    localAgent: harness.child,
+    result: resultA,
+    dispose: async () => {
+      disposed.push("a");
+    },
+  });
+  await runASpawn.executionDone;
+  const runA = harness.runs.snapshot("main").runs[0]!.runId;
+
+  const sibling = agentWithTools("sibling-child", createTools(DEFAULT_TOOL_NAMES));
+  harness.addAgent(sibling);
+  const runBSpawn = await harness.beginSubagentSpawn(harness.parent, { target: sibling });
+  harness.releaseActivation({
+    childId: "sibling-child",
+    localAgent: sibling,
+    upstreamRunId: "upstream-sibling",
+    result: new Promise(() => undefined),
+    dispose: async () => {
+      disposed.push("b");
+    },
+  });
+  await runBSpawn.executionDone;
+  const runB = harness.runs.snapshot("main").runs.find((run) => run.runId !== runA)!.runId;
+
+  const other = otherParentAgent(harness, "other-parent-child", "other-session");
+  const runCSpawn = await harness.beginSubagentSpawn(other, { parentSessionId: "other-session" });
+  harness.releaseActivation({
+    childId: "other-parent-child",
+    localAgent: other,
+    upstreamRunId: "upstream-other",
+    result: new Promise(() => undefined),
+    dispose: async () => {
+      disposed.push("c");
+    },
+  });
+  await runCSpawn.executionDone;
+  const runC = harness.runs.snapshot("other-session").runs[0]!.runId;
+
+  assert.deepEqual(await harness.runs.requestCancel("main", runA), { status: "accepted", runId: runA });
+  resolveRunA({ stopReason: "aborted" });
+  await vi.waitFor(() => assert.equal(harness.runs.get(runA)?.phase, "stopped"));
+  assert.deepEqual(disposed, ["a"]);
+  assert.equal(harness.runs.get(runA)?.stopReason, "aborted");
+  assert.equal(harness.runs.get(runB)?.phase, "starting");
+  assert.equal(harness.runs.get(runC)?.phase, "starting");
+  assert.equal(harness.runs.get(runC)?.stopRequestedAt, undefined);
+  await assert.rejects(harness.runs.requestCancel("main", runC), /subagent run not found/);
+  await assert.rejects(harness.runs.requestCancel("other-session", runA), /subagent run not found/);
+});
+
+test("a cancel accepted while the activation is pending converges to stopped after the late dispose", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  const disposed: string[] = [];
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+  const runId = harness.runs.snapshot("main").runs[0]!.runId;
+
+  assert.deepEqual(await harness.runs.requestCancel("main", runId), { status: "accepted", runId });
+  assert.equal(harness.runs.get(runId)?.phase, "stopping");
+
+  harness.releaseActivation({
+    childId: "child",
+    localAgent: harness.child,
+    result: Promise.resolve({ stopReason: "aborted" }),
+    dispose: async () => {
+      disposed.push("late");
+    },
+  });
+  await assert.rejects(executionDone, /已取消/);
+  await vi.waitFor(() => assert.equal(harness.runs.get(runId)?.phase, "stopped"));
+  assert.deepEqual(disposed, ["late"]);
+  assert.equal(harness.runs.get(runId)?.stopReason, "aborted");
+});
+
+test("a cancel accepted while pending still converges when the activation rejects", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+  const runId = harness.runs.snapshot("main").runs[0]!.runId;
+
+  assert.deepEqual(await harness.runs.requestCancel("main", runId), { status: "accepted", runId });
+  harness.failActivation(new Error("启动被取消"));
+  await assert.rejects(executionDone, /启动被取消/);
+  const run = harness.runs.get(runId)!;
+  assert.equal(run.phase, "stopped");
+  assert.equal(run.failure, "启动被取消");
+  assert.deepEqual(run.cleanupWarnings, []);
+});
+
+test("a cancel accepted while pending still converges when the activation returns an empty child id", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  const disposed: string[] = [];
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent);
+  const runId = harness.runs.snapshot("main").runs[0]!.runId;
+
+  assert.deepEqual(await harness.runs.requestCancel("main", runId), { status: "accepted", runId });
+  harness.releaseActivation({
+    childId: "",
+    emitEvents: false,
+    dispose: async () => {
+      disposed.push("empty");
+    },
+  });
+  await assert.rejects(executionDone, /subagent activation child id missing/);
+  assert.deepEqual(disposed, ["empty"]);
+  const run = harness.runs.get(runId)!;
+  assert.equal(run.phase, "stopped");
+  assert.match(run.failure ?? "", /child id missing/);
+});
+
+test("the post-dispose result window uses an independent budget instead of the aborted signal", async () => {
+  vi.useFakeTimers();
+  try {
+    const harness = createHarness();
+    assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+    const disposed: string[] = [];
+
+    const runA = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+    harness.releaseActivation({
+      childId: "child",
+      localAgent: harness.child,
+      result: new Promise(() => undefined),
+      dispose: async () => {
+        disposed.push("a");
+      },
+    });
+    await runA.executionDone;
+    const runAId = harness.runs.snapshot("main").runs[0]!.runId;
+
+    const sibling = agentWithTools("sibling-window", createTools(DEFAULT_TOOL_NAMES));
+    harness.addAgent(sibling);
+    const runB = await harness.beginSubagentSpawn(harness.parent, { target: sibling });
+    harness.releaseActivation({
+      childId: "sibling-window",
+      localAgent: sibling,
+      result: new Promise(() => undefined),
+    });
+    await runB.executionDone;
+    const runBId = harness.runs.snapshot("main").runs.find((run) => run.runId !== runAId)!.runId;
+
+    const other = otherParentAgent(harness, "other-window", "other-session");
+    const runC = await harness.beginSubagentSpawn(other, { parentSessionId: "other-session" });
+    harness.releaseActivation({
+      childId: "other-window",
+      localAgent: other,
+      result: new Promise(() => undefined),
+    });
+    await runC.executionDone;
+    const runCId = harness.runs.snapshot("other-session").runs[0]!.runId;
+
+    assert.deepEqual(await harness.runs.requestCancel("main", runAId), { status: "accepted", runId: runAId });
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(harness.runs.get(runAId)?.phase, "stopping");
+    assert.equal(
+      harness.runs.get(runAId)?.failure,
+      undefined,
+      "the aborted controller signal must not short-circuit the window",
+    );
+    await vi.advanceTimersByTimeAsync(ACTIVATION_CLEANUP_TIMEOUT_MS - 1);
+    assert.equal(harness.runs.get(runAId)?.phase, "stopping");
+    assert.equal(harness.runs.get(runAId)?.failure, undefined);
+    await vi.advanceTimersByTimeAsync(1);
+    assert.equal(harness.runs.get(runAId)?.failure, "execution result missing after dispose");
+    assert.equal(harness.runs.get(runAId)?.phase, "stopped");
+    assert.deepEqual(disposed, ["a"]);
+    assert.equal(harness.runs.get(runBId)?.phase, "starting");
+    assert.equal(harness.runs.get(runCId)?.phase, "starting");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a dispose rejection keeps the cancelled run stopping with an activation-dispose-failed warning", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  let resolveResult!: (value: { stopReason: string }) => void;
+  const result = new Promise<{ stopReason: string }>((resolve) => {
+    resolveResult = resolve;
+  });
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+  harness.releaseActivation({
+    childId: "child",
+    localAgent: harness.child,
+    result,
+    dispose: async () => {
+      throw new Error("释放失败");
+    },
+  });
+  await executionDone;
+  const runId = harness.runs.snapshot("main").runs[0]!.runId;
+
+  assert.deepEqual(await harness.runs.requestCancel("main", runId), { status: "accepted", runId });
+  resolveResult({ stopReason: "error" });
+  await vi.waitFor(() => {
+    assert.deepEqual(harness.runs.get(runId)?.cleanupWarnings, [
+      { code: "activation-dispose-failed", severity: "error" },
+    ]);
+  });
+  const run = harness.runs.get(runId)!;
+  assert.equal(run.phase, "stopping");
+  assert.equal(run.stopReason, "error");
+  assert.equal(run.failure, undefined);
+  assert.equal(run.endedAt, undefined);
+});
+
+test("a dispose timeout keeps the cancelled run stopping with an activation-dispose-timeout warning", async () => {
+  vi.useFakeTimers();
+  try {
+    const harness = createHarness();
+    assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+    const { executionDone } = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+    harness.releaseActivation({
+      childId: "child",
+      localAgent: harness.child,
+      result: new Promise(() => undefined),
+      dispose: () => new Promise<void>(() => undefined),
+    });
+    await executionDone;
+    const runId = harness.runs.snapshot("main").runs[0]!.runId;
+
+    assert.deepEqual(await harness.runs.requestCancel("main", runId), { status: "accepted", runId });
+    await vi.advanceTimersByTimeAsync(ACTIVATION_CLEANUP_TIMEOUT_MS);
+    assert.equal(harness.runs.get(runId)?.phase, "stopping");
+    assert.deepEqual(harness.runs.get(runId)?.cleanupWarnings, []);
+    await vi.advanceTimersByTimeAsync(ACTIVATION_CLEANUP_TIMEOUT_MS);
+    const run = harness.runs.get(runId)!;
+    assert.equal(run.phase, "stopping");
+    assert.deepEqual(run.cleanupWarnings, [{ code: "activation-dispose-timeout", severity: "error" }]);
+    assert.equal(run.failure, "execution result missing after dispose");
+    assert.equal(run.endedAt, undefined);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a cancelled run whose execution ended and dispose succeeded converges to stopped", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+  let resolveResult!: (value: { stopReason: string }) => void;
+  const result = new Promise<{ stopReason: string }>((resolve) => {
+    resolveResult = resolve;
+  });
+  const { executionDone } = await harness.beginSubagentSpawn(harness.parent, { target: harness.child });
+  harness.releaseActivation({
+    childId: "child",
+    localAgent: harness.child,
+    result,
+  });
+  await executionDone;
+  const runId = harness.runs.snapshot("main").runs[0]!.runId;
+
+  assert.deepEqual(await harness.runs.requestCancel("main", runId), { status: "accepted", runId });
+  resolveResult({ stopReason: "error" });
+  await vi.waitFor(() => assert.equal(harness.runs.get(runId)?.phase, "stopped"));
+  const run = harness.runs.get(runId)!;
+  assert.equal(run.phase, "stopped");
+  assert.equal(run.stopReason, "error");
+  assert.deepEqual(run.cleanupWarnings, []);
+  assert.notEqual(run.endedAt, undefined);
 });

@@ -507,16 +507,27 @@ export type SubagentCleanupWarning = { code: string; severity: 'info' | 'error' 
 /** 一个仍在运行的子代理工具活动；`id` 是 registry 内部标识，`callId` 来自上游事件。 */
 export type SubagentToolActivity = { id: string; callId?: string; name: string; startedAt: number }
 
-/** 单次子代理 run 的权威展示投影（WS 与 snapshot 共用同一形状）。 */
+/** 子代理 run 的来源:显式 `@agent`、智能体包 `@slug`、系统技能回合派生。 */
+export type SubagentRunKind = 'legacy' | 'package' | 'system-skill'
+
+/**
+ * 单次子代理 run 的权威展示投影（WS 与 snapshot 共用同一形状）。
+ *
+ * `system-skill` 运行复用同一 projector：phase/alerts/revision/stale 不按 kind 分支。
+ * `taskId`/`parentRunId`/`depth` 是规格预留的运行树字段，一期不填充。
+ */
 export type SubagentRunProjection = {
   runId: string
   parentSessionId: string
   clientMessageId?: string
   childId?: string
   upstreamRunId?: string
-  kind: 'legacy' | 'package'
+  kind: SubagentRunKind
   label: string
   packageVersion?: string
+  taskId?: string
+  parentRunId?: string
+  depth?: number
   phase: SubagentRunPhase
   activeTools: SubagentToolActivity[]
   startedAt: number

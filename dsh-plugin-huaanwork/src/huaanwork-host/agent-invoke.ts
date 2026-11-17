@@ -4,13 +4,10 @@ import { attachHostTool, detachHostTool, type AttachmentMaps } from "../huaanwor
 import { mountSessionMcp } from "../huaanwork-guardrails/agent-mcp.ts";
 import { filterAgentAllow } from "@huaanwork/policy/agent-catalog";
 import type { SubagentCleanupWarning } from "../client-huaanwork/rpc-types.ts";
-import { acceptanceCleanupTimeoutMs, acceptanceDisposeFailure } from "./acceptance-hooks.ts";
+import { acceptanceCleanupTimeoutMs } from "./acceptance-hooks.ts";
 import type { AgentPackageDetail, AgentPackageSubagentRequest } from "./agent-package/types.ts";
-import {
-  ACTIVATION_CLEANUP_TIMEOUT_MS,
-  settleWithin,
-  type AgentPackageDispatchResult,
-} from "./agent-package/host.ts";
+import { ACTIVATION_CLEANUP_TIMEOUT_MS, type AgentPackageDispatchResult } from "./agent-package/host.ts";
+import { disposeActivationWithTimeout, waitResultWithBudget } from "./subagent-cleanup.ts";
 import type { AgentsHost } from "./agents-host.ts";
 import {
   HUAANWORK_LEGACY_AGENT_REQUEST,
@@ -284,7 +281,7 @@ export async function dispatchAt(opts: {
             return;
           }
           if (mode === "idle" && !cancelRequested) {
-            const waited = await waitForLegacyResult(observeResult(activation), controller.signal, cleanupTimeoutMs);
+            const waited = await waitResultWithBudget(observeResult(activation), controller.signal, cleanupTimeoutMs);
             if (waited === "timeout") {
               // 与包路径同一上限与文案:超时只记录事实,取消归随后的 dispose()。
               subagentRuns.noteCleanupBudget(runId, cleanupTimeoutMs);
@@ -293,7 +290,7 @@ export async function dispatchAt(opts: {
               );
             }
           }
-          const disposal = await disposeLegacyActivation(activation, cleanupTimeoutMs);
+          const disposal = await disposeActivationWithTimeout(activation, cleanupTimeoutMs);
           if (disposal === "fulfilled") {
             ok = true;
           } else if (disposal === "rejected") {
@@ -427,85 +424,14 @@ function clearLegacyRequest(ctx: AgentInvokeContext, request: LegacyAgentRequest
   }
 }
 
-/**
- * 有界 dispose,并区分三种结局:只有 fulfilled 才算清理确认。同步抛错与 rejection
- * 同归 `rejected`;超时不当成功,也不把失败抛给调用方。
- *
- * 验收注入缝(A-08/B-05):`acceptanceDisposeFailure()` 非 `none` 时直接返回对应
- * 结局,不触碰真实 activation;主开关关闭时该函数恒为 `none`。
- *
- * @param timeoutMs dispose 等待上限(默认生产常量)
- */
-async function disposeLegacyActivation(
-  activation: SubagentActivationHandle,
-  timeoutMs = ACTIVATION_CLEANUP_TIMEOUT_MS,
-): Promise<"fulfilled" | "rejected" | "timeout"> {
-  const failure = acceptanceDisposeFailure();
-  if (failure === "reject") return "rejected";
-  if (failure === "hang") {
-    await new Promise<void>((resolve) => setTimeout(resolve, timeoutMs));
-    return "timeout";
-  }
-  let rejected = false;
-  let disposal: Promise<void>;
-  try {
-    disposal = Promise.resolve(activation.dispose());
-  } catch {
-    return "rejected";
-  }
-  const observed = disposal.catch(() => {
-    rejected = true;
-  });
-  const settled = await settleWithin(observed, timeoutMs);
-  if (!settled) return "timeout";
-  return rejected ? "rejected" : "fulfilled";
-}
-
-/**
- * 等权威 result 结算。定向取消先到返回 `cancelled`(已开始的 graceful 等待必须能被
- * 唤醒),收尾预算到期返回 `timeout`。
- *
- * @param observed — 已挂上 settleResult/rejectResult 的观察 promise
- * @param signal — 本次调用保存的 controller signal
- * @param timeoutMs — 收尾预算(默认生产常量)
- */
-function waitForLegacyResult(
-  observed: Promise<void>,
-  signal: AbortSignal,
-  timeoutMs = ACTIVATION_CLEANUP_TIMEOUT_MS,
-): Promise<"settled" | "timeout" | "cancelled"> {
-  return new Promise((resolve) => {
-    let done = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (outcome: "settled" | "timeout" | "cancelled"): void => {
-      if (done) return;
-      done = true;
-      if (timer !== undefined) clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
-      resolve(outcome);
-    };
-    const onAbort = (): void => finish("cancelled");
-    if (signal.aborted) {
-      finish("cancelled");
-      return;
-    }
-    timer = setTimeout(() => finish("timeout"), timeoutMs);
-    signal.addEventListener("abort", onAbort, { once: true });
-    void observed.then(
-      () => finish("settled"),
-      () => finish("settled"),
-    );
-  });
-}
-
 /** activation.result 的 stopReason;provider 没给字符串时交给 registry 归为 `unknown`。 */
-function stopReasonOf(result: unknown): string {
+export function stopReasonOf(result: unknown): string {
   if (typeof result !== "object" || result === null) return "";
   const reason = (result as { stopReason?: unknown }).stopReason;
   return typeof reason === "string" ? reason : "";
 }
 
 /** 启动/外层失败与 result rejection 的 failure 文案:只留消息,不留堆栈。 */
-function errorText(error: unknown): string {
+export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
