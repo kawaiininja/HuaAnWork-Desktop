@@ -129,6 +129,7 @@ import {
   unscopedSessions,
 } from "./logic/sessionChannel.ts";
 import { currentSnapshotRoundKey, shouldApplyTodoEvent } from "./logic/todoProjection.ts";
+import { selectProgressPanelModel } from "./logic/progressPanel.ts";
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
 import {
   hasAssistantTextAfter,
@@ -235,6 +236,7 @@ import {
 import { renderResultHtml, renderResultMarkdown } from "./logic/runResultRender.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 import ToolPanel from "./ToolPanel.tsx";
+import ProgressPanel from "./ProgressPanel.tsx";
 
 /**
  * 用户对话会话 id（事件路由用）：huaanwork-chat- 旧会话与 huaanwork-<16hex digest> 新会话。
@@ -1054,6 +1056,38 @@ export default function App() {
     turnFinalWithoutUser: activeChat.turnFinalWithoutUser,
     connectionLost: sidecarDead,
   }), [items, contentView, activeChat.turnFinalByUserId, activeChat.turnFinalWithoutUser, sidecarDead]);
+  /**
+   * 右栏进度只读当前回合：最后一条已启动用户条目的 `clientMessageId` 是唯一权威锚点，
+   * 终态沿用标签自己的 `turnFinalByUserId` / `turnFinalWithoutUser` 结算。
+   */
+  const progressTurnStart = currentTurnStart(items);
+  const progressTurnOpener = progressTurnStart > 0 ? items[progressTurnStart - 1] : undefined;
+  const progressCurrentClientMessageId =
+    progressTurnOpener?.kind === "user" ? progressTurnOpener.clientMessageId : undefined;
+  const progressTurnFinal = progressTurnOpener === undefined
+    ? activeChat.turnFinalWithoutUser === true
+    : activeChat.turnFinalByUserId?.[progressTurnOpener.id] === true;
+  const progressModel = useMemo(() => selectProgressPanelModel({
+    sessionId: activeChat.sessionId ?? "",
+    items,
+    toolRows,
+    currentTurnClientMessageId: progressCurrentClientMessageId,
+    turnFinal: progressTurnFinal,
+    subagents: [...subagentRuns.runs.values()],
+    sidecarDead,
+    ready,
+    sawReady: sawReady.current,
+    subagentConnection: subagentRuns.connection,
+  }), [
+    activeChat.sessionId,
+    items,
+    toolRows,
+    progressCurrentClientMessageId,
+    progressTurnFinal,
+    subagentRuns,
+    sidecarDead,
+    ready,
+  ]);
   /** 运行卡不进入内容视图,下标会与 `items` 错位;思考收尾判断按 id 取内容视图下标。 */
   const contentIndexById = useMemo(
     () => new Map(contentView.map((entry, index) => [entry.id, index] as const)),
@@ -4184,10 +4218,18 @@ export default function App() {
                 )
               ) : null}
               {rightTab === "progress" ? (
-                <div className="panel-card">
-                  <p className="h">任务进度</p>
-                  <p className="panel-empty">任务进度将显示在这里</p>
-                </div>
+                <ProgressPanel
+                  model={progressModel}
+                  now={now}
+                  frozenAt={subagentRuns.frozenAt}
+                  confirmingRunId={confirmingRunId}
+                  cancelBusyByRunId={cancelBusyByRunId}
+                  cancelErrorByRunId={cancelErrorByRunId}
+                  onToggleActivity={toggleToolPanel}
+                  onRequestCancel={requestCancelSubagent}
+                  onConfirmCancel={(runId) => void confirmCancelSubagent(runId)}
+                  onDismissCancel={dismissCancelSubagent}
+                />
               ) : null}
               {rightTab === "files" ? (
                 <div className="panel-card project-tree-card">
