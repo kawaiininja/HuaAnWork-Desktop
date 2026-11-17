@@ -10,7 +10,7 @@
   - 实施计划：[2026-11-15-chat-created-skills.md](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/docs/superpowers/plans/2026-11-15-chat-created-skills.md)
   - 验收证据：[2026-11-chat-created-skills-acceptance.md](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/docs/evidence/2026-11-chat-created-skills-acceptance.md)
 - **评审结论：** **No（需先修复后再合入 / With fixes）**（本节是 2026-11-16 初审，已被后续各节覆盖）
-- **当前结论：** **Grok 审核（2026-11-17，第十节）：可合入。** 0 Critical，无阻断性 Important。本次审核初稿中的 1 条 Important 经源码反证拆开：同时挂载降为不阻断的规格偏离，`/name` 改写再确认的半句撤回。
+- **当前结论：** **Grok 审核（2026-11-17，第十节 `0189080386`）：可合入（Yes）。** 0 Critical，无阻断性 Important；第十一节已将 Grok-S-1、Minor 1–3 与 `@agent` 对称断言一并闭环至代码提交 `0eb33b5ca9`，干净树根门禁 `corepack yarn check` 通过（`4244 passed | 15 skipped`）；`Review-M-1` 维持停放。
 
 > [!WARNING]
 > **工作区状态声明**：当前工作区存在未提交改动——[model.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-guardrails/model.ts)（修改时间 `2026-11-16 17:02:34`）与 [model.spec.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-guardrails/model.spec.ts)（修改时间 `2026-11-16 17:02:04`）未纳入任何分支提交（早于最近一次文档提交 `734e124022` `17:20:55`），另有未提交的 [AGENTS.md](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/AGENTS.md) 及未跟踪的 `docs/project-memory-archive.md`、`docs/superpowers/*`。本文第四节的测试与门禁结果均是在**包含工作区未提交 `model.ts` / `model.spec.ts` 修复**的状态下实测所得；`feat/chat-created-skills` 当前 `HEAD` 本身不含该修复。
@@ -372,3 +372,39 @@ Kimi-M-1 可随修复波一并处理或由 owner 明确停放；停放不改变�
 依据是：0 Critical；初稿里唯一的 Important 经反证后不再是授权洞。同时挂载是默认 ask 档下的条件性规格偏离，显式 `/name` 上改写草稿再由下一句「确认」提交的说法撤回。五条 Minor 里，确认卡静默点击、`pendingDetach` 的未证实竞态、子任务删除留下的孤儿草稿，都不改变正式写入的同意门禁和默认禁用。`terminal` 类型缝维持停放。计划复选框、`@agent` 断言缺口和真机第 5 项的目录清单是文档与证据说明。
 
 Grok-S-1 可以在合入后收口，不作为本次合入条件。
+
+---
+
+## 十一、Grok §10 复审意见评估与闭环（2026-11-17）
+
+> 本节记录按 `/receiving-code-review` 对 §10（`0189080386`）全部核实项的源码评估、修复提交与门禁复跑结果；§10 原文保留不改。
+
+### 11.1 逐项核实与处置
+
+1. **Grok-S-1（非阻断规格偏离——未落盘草稿改口切流程时两套创建工具同时挂载）：核实属实，已修复。**
+   - 在 `dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts` 提取 `detachOtherCreationTools`，进入技能创建（已通过 Step ⑤/⑥、确保无有效或损坏智能体草稿）前若检测到 `CREATION_TOOLS` 在场则先 `detachCreationTools`；进入智能体创建（在 `isAgentCancelText` 与 `beginUpdate` 早退之后、实际 `attachCreationTools` 之前，且 `!skillDraft` 已由 `hasSkillCreationDraftOnDisk` 保证无有效或损坏技能草稿）前若检测到 `SKILL_CREATION_TOOLS` 在场则先 `detachSkillCreationTools`。
+   - 不对 `propose` 单独加 `creationTurn` 检查，不破坏首轮提问后的提案，也不让失败的 `/create-agent update <missing>` 提前卸掉技能工具。
+2. **Grok Minor 1（`sidecarDead || hostPhase !== "ok"` 时已渲染确认卡仍可点且静默无脚注）：核实属实，已按语义隔离修复。**
+   - 核对源码发现不能直接把 `sidecarDead || hostPhase !== "ok"` 并入 `SkillConfirmCard` 的 `disabled`，否则 `SkillConfirmCard.tsx` 会对未处理的卡误渲染「这张确认卡已处理。」，且会违背 `appWiring.spec.ts` 对 `disabled={item.consumed === true}` 的契约断言。
+   - 因此保留 `disabled={item.consumed === true}` 专指已消费卡片，在 `SkillConfirmCard.tsx` 新增 `unavailable?: boolean`，由 `App.tsx` 传入 `hostUnavailable={blocked || hostPhase !== "ok"}`：当 `unavailable && !disabled` 时统一禁用三个动作按钮并提示「当前执行进程不可用，请等待恢复后再操作。」，宿主恢复后自动解除禁用且不误标为已消费。
+3. **Grok Minor 2（`pendingDetach` 不随会话释放清除）：核实属实，且确认除晚到 `tools/result` 误卸新工具外，僵尸条目还会欺骗 `skill-creation-tools.ts` 的 `hasPendingForSession`，导致同 `sessionId` 重建后的首个 `alreadyCommitted` 重放跳过登记解绑。已修复。**
+   - 在 `dsh-plugin-huaanwork/src/huaanwork-guardrails/agent-attachments.ts` 新增基于 `WeakMap<AttachmentMaps, Set<(sessionId: string) => void>>` 的 `registerAttachmentCleanup`、`trackSessionPendingDetach` 与 `releaseAttachmentPending`（保持 `emptyAttachments()` 公开结构不变）。
+   - `registerSkillCreationTools` 与 `registerAgentPackageCreationTools` 共用 `trackSessionPendingDetach` 注册清理并在各自 disposer 中退订；`sessions.ts` 的 `releaseSessionRuntime` 在释放 `[sessionId, ...descendants]` 时同步调用 `releaseAttachmentPending(ctx.huaanworkAttachments, id)`。
+4. **Grok Minor 3（`task.remove` / `project.remove` / 自动化删除路径不清理两类创建草稿）：核实属实，已统一补齐。**
+   - 从 `sessions.ts` 的 `removeSession` 抽取共享 helper `discardSessionCreationDrafts`（异常只记日志不中断删库），并在 `routes.ts` 抽取 `releaseAndDiscardSession`，统一接入 `project.remove`（级联自动化与普通子任务）、`automation.remove`、`automation.deleteRun`、`automation.pruneSessions` 与 `task.remove`。
+5. **继续停放与文档/断言说明：**
+   - **Review-M-1**（`rpc-types.ts:591` / `App.tsx:1915` 的 `terminal` 与 `sessionId` 类型独立）：遵照 §9.2 owner 裁定与 §10.3 意见继续停放。
+   - **测试断言补齐**：在 `agent-package-creation.spec.ts` 的 `@agent` 普通轮用例补全 `skillDraftPath` 字节未变与 `attachSkillCreationTools` 未调用断言。
+   - **计划复选框与 `/tmp` 说明**：`docs/superpowers/plans/2026-11-15-chat-created-skills.md` 沿用本仓 11 月系列计划文件保留 `- [ ]` 步骤框的既有体例（§10.3 已明确非产品缺陷）；§12.2 第 5 项临时证据路径口径已在 `docs/evidence/2026-11-chat-created-skills-acceptance.md` 保持一致。
+
+### 11.2 修复提交与实测结果
+
+- **代码修复提交：** `0eb33b5ca9`（紧接 Grok 审核提交 `0189080386` 之后；13 个源码/测试文件变更）。
+- **聚焦验证（TDD 先红后绿）：**
+  - `corepack yarn workspace dsh-plugin-huaanwork typecheck`：退出码 **0**。
+  - 13 项聚焦回归套件（`agent-attachments` 7/7、`skill-creation-tools` 15/15、`agent-package-tools` 63/63、`skill-creation` 12/12、`skill-creation-drafts` 18/18、`skills-host` 31/31、`agent-package-creation` 60/60、`sessions` 99/99、`routes` 50/50、`automations-store` 81/81、`test-port-mapping` 1/1、`skill-confirm-card` 6/6、`appWiring` 92/92）：**13/13 文件、535/535 用例通过**。
+- **干净代码树全仓根门禁（`corepack yarn check` @ `0eb33b5ca9`）：** 退出码 **0**。
+  - `dsh-plugin-huaanwork`：**299 files passed | 4 skipped (303)，4244 passed | 15 skipped (4259)**（较 `ec7ad6fc8d` 净增 6 条新增行为回归）；
+  - `verify:host` 35/35、`verify:closure` 316 节点（4/4）、`verify:bundled` 134 文件 / 10 内置（11/11）、`verify:profile` 与 `verify:aa` 均通过、`verify:licenses` 637 包、`verify:operations` 7/18；
+  - 其余 workspace：`dsh-community-market` 13/303、`market-server` 14/244、`update-server` 5/88、`agent-catalog-server` 7/112、`agent-catalog-admin` 15/15。
+- **状态声明：** `deepseek-harness/` 保持 pin `1600d8a1e140dcde43a1a0941940a0480712c011` 无差异；本波聚焦路由/生命周期/UI 状态防误触，未重跑真实模型 CDP 走查；后续归档提交仅改文档不改产品源码与测试。
