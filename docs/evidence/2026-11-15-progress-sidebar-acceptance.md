@@ -24,6 +24,8 @@
 | `corepack yarn workspace dsh-plugin-huaanwork run verify:host` | 控制器 | 0 | 53/53 pass |
 | `corepack yarn check` | 控制器 | 0 | 桌面包全量通过；`verify:profile-boot` 通过；其余 workspace 全通过 |
 
+> 上表为 F1/F2 修复轮记录；2026-11-18 代码评审修复后的门禁复跑结果见 §2.5（policy 65/0、typecheck 0 错、`corepack yarn check` GATE_EXIT=0、判据单测 18/18）。
+
 ## 2. 本次修复（对应 F1/F2）
 
 1. **F1（模型入口）**：`profile.ts` 为不走 preset 的桌面父会话显式启用宿主平面 `skill-filesystem` / `tool-skill`，`agentsHome` 仍指向空目录；`present-as.ts` 仅对无人值守自动化与 legacy/system-skill 儿童隐藏 `skill`，普通父会话可用。
@@ -39,11 +41,15 @@
 
 ## 3. 走查命令与退出码
 
+最终权威运行（2026-11-18 评审修复轮，构建含 `2cfe785f3a`+`dd6e837e60`）：
+
 ```bash
 corepack yarn workspace dsh-plugin-huaanwork build
-corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-progress-sidebar.mjs --out /tmp/progress-sidebar-accept-final
-# exit 0 (PASS)
+corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-progress-sidebar.mjs --out /tmp/progress-sidebar-accept-rerun2
+# exit 0 (PASS), 7/7
 ```
+
+此前记录：F1/F2 修复轮（11-17 ~ 11-18 午前）`--out /tmp/progress-sidebar-accept-final` exit 0（PASS）；评审修复首轮 `--out /tmp/progress-sidebar-accept-rerun` exit 1，唯一失败为脚本侧总进度条选择器 bug（§2.5），非产品缺陷。
 
 脚本返回码约定：`0` PASS / `1` FAIL / `3` BLOCKED。截图、DOM 快照与事实 JSON 备份在仓库外（§6），仓库仅提交脚本、判据单测与本脱敏文档。
 
