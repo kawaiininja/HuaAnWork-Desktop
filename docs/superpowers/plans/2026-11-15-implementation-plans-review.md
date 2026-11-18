@@ -8,7 +8,7 @@
   - `docs/superpowers/plans/2026-11-15-task-result-artifacts.md`（931 行，Task 1–8；下称「Artifact 计划」）
 - 需求权威：对应三份规格（`specs/2026-11-15-*-design.md`）与 `specs/2026-11-15-three-feature-designs-review.md`（裁定 R1/R2/R8 及 §4.2 落地约束、§7.3 两条必补项）
 - 基线：master `ff29debd37`；子模组 pin `1600d8a1e14`（0.2.1-rc.1）；计划/规格均为未跟踪新文件
-- 状态：**评审全流程闭环（首轮 §1–7 → 复审 §8 → 修订方处置 §9 → 主 agent 最终确认 §10 → GLM 独立复审 §11 → 审计 §12 → 九项处置 §13 → NI-1 处置 §14 → GLM 修复确认 §15）；三份计划达到实施标准，开工门槛解除（技能计划 Task 1 待 owner 人工确认）**；XM-A4 维持 owner 裁定（2026-11-16）。这只代表计划开工门槛解除，不代表功能已实现或测试/真机验收已通过
+- 当前状态（2026-11-17 §18 复核与 P/S 修订闭环）：**经独立复核 §17「qwen4复审结论」无误报、无夸大，确认 `QR-I1`、`QR-I2`、`QR-M1`、`QR-M2` 成立并同步补齐 6 项运行时/测试接线漏报后，相关修订已全部写入设计规格（S）与实施计划（P）；当前计划层面剩余 Open 阻断为 0 Critical / 0 Important / 0 Minor，可进入 Task 1–5 实施。** 2026-11-17 另按 owner 要求将进度计划（`§14.2` / `Task 5`）与 Artifact 计划（`§12.2` / `Task 9`）的真人/人工验收统一升级为 agent 真机走查自动化测试（CDP + `verify:host` 判据单测）；`§1–17` 完整保留历史评审与复审原文（`#29` 对话创建技能已合入并由 `2026-11-chat-created-skills-acceptance.md` 闭环，本轮未改），XM-A4 维持 owner 裁定（2026-11-16）。计划层面修订闭环不代表功能已实现，亦不替代后续源码实现、`corepack yarn check`、包级类型检查与真实 Electron CDP 走查自动化测试。
 
 ## 1. 总体判决
 
@@ -405,6 +405,8 @@
 
 ### 10.2 最终判决
 
+> 2026-11-17 适用范围更新：以下为当时修订稿的历史判决；进度计划的当前开工判决已由 §16 更新为 With fixes。其余两份计划本轮未重审。
+
 **三份计划达到实施标准，开工门槛解除。**
 
 - 技能计划：可开工（XM-S1…S4 全部落地）。
@@ -574,3 +576,232 @@ I-2 落地时发现 GLM 修法与 §12 核验均未覆盖的可达性问题：�
 ### 15.3 判决
 
 **NI-1 闭环。** §11 的 3 Important + 6 Minor（含 §12.4 提级同批的 M-5）、§13 九项处置、§14 NI-1 处置全部落地并经 GLM 两轮定向复核确认；本轮未发现新引入问题。**技能计划达到可开工标准；Task 1 开工待 owner 人工确认**（维持 §13.2/§14 状态约定）。GLM 评审轨至此完整闭环：发现（§11）→ 审计（§12）→ 处置（§13）→ 新发现 NI-1 → 处置（§14）→ 修复确认（本节）。
+
+## 16. qwen4评审结论（2026-11-17，进度计划双向复核）
+
+> 本节保留 Gemini 修订前稿件的历史意见；修订后的处置核验、剩余项与严重度校准见 §17，不再把本节的 6 Important / 4 Minor 视作当前待办数。
+
+### 16.1 对象、方法与判决
+
+- 依据：owner 要求对本会话上一轮评审 double check 误报、漏报与夸大，再将校准结论落入本文；本轮不实施功能、不修订需求稿。
+- 对象：当前工作区的 [进度计划](2026-11-15-progress-sidebar.md)（下称 P）与 [设计规格](../specs/2026-11-15-task-progress-sidebar-design.md)（下称 S）。两份均含 owner 已有的未提交修订，不使用 §10 的旧行号或旧 PASS 代替重新核查。
+- 源码基线：`3dd3b182bc8c28671d5f712a7ae2da23dab463bd`；上游 pin `1600d8a1e140dcde43a1a0941940a0480712c011`。运行时消息来源另外核对桌面工作区实际安装的 `@deepseek-ai/dsh-subagent@0.2.1-rc.1`，不把子模组源码版本等同于安装产物版本。
+- 稿件指纹（`git hash-object`）：P=`4749d7b059037aacc49ca7c157dc1be95cde3047`，S=`646149d75ec05f3907fb4b61e961a43ab545b08a`。以下 P/S 行号均指这两份稿件。
+- 方法：两路独立只读审计分别反证既有意见与寻找漏项；主 agent 对新增 Important 逐条读源码、核对实际运行时产物，并运行计划片段、真实 registry、历史映射、缓冲过滤和 TypeScript 内存探针。未采信「全部成立」式汇总结论。
+
+**判决：With fixes，0 Critical / 6 Important / 4 Minor。现稿尚不能直接实施，但无需推倒重写。** UUID/runId 发送、around-dispatch ALS 挂点、registry 复用、历史结构化 todos、当前回合活动裁剪和二次确认的总体方向成立；阻塞集中在来源分类、遗漏入口、事件重放与生命周期承诺。以下条目均是待修订意见，不是已经完成的修复。
+
+### 16.2 对上一轮结论的校准
+
+| 上一轮意见 | double check 后 | 校准说明 |
+| --- | --- | --- |
+| ALS 兼容槽污染后续显式 @，Important | 保留，QP-I1 | 顺序执行即可触发，不依赖并发；此前 XM-P6 只避免误清另一调用，未避免本次值残留。 |
+| 取消失败收敛与既有 registry 不符，Important | 保留，QP-I2 | 是计划承诺与既有严格停止语义冲突，不是新发现的 registry 生产缺陷；若保留既有语义，先订正承诺，不必强行增加终态。 |
+| 客户端时间代替权威锚点时间，Important | **降为 Minor，QP-M1** | 差异成立，但只影响无锚终态的降级筛选；常规 UUID 精确命中与活跃项不依赖此比较。没有真实应用常规错挂证据，上一轮定级偏高。 |
+| 工具隐藏与回收的真人验收证据不足，Important | 保留，QP-I3 | 模型自述不是 schema 证据；不是指控计划已经伪造验收，P:711 明确尚未执行。 |
+| todo 数值 ID 回退，Minor | 保留，QP-M2 | 违反无锚拒绝契约，但不能把正常 UUID/runId 路径说成已证实错挂。 |
+| 包 lane 聚合粒度待明确 | 归入非阻断澄清，QP-M3 | 外层派发摘要确实存在；旧规格评审已把 lane 无独立 registry 卡登记为非阻断。不能据此直接要求新增内部工具聚合。 |
+
+**漏报补充：QP-I4、QP-I5、QP-I6 三项 Important，以及 QP-M4 一项 Minor。** 既有意见没有整项事实撤回，但有一项严重度下调、边界收窄和三项核心链路漏报；不能保留「无漏报、无夸大」的元结论。
+
+### 16.3 Important（6 项）
+
+#### QP-I1：ALS 路径留下陈旧 pendingSpawn，后续显式 @ 被错误收窄
+
+- 位置：P:291–301；`dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts:166–205,224–258,520–523`。
+- 路径：系统技能 pre-execute 写 `pendingSpawn` → around-dispatch ALS 消费技能类型但不清槽 → 另一已存在父会话显式 @ 创建新 child → 无 ALS 的消费点读到旧技能类型。`applyKind` 不只是写标签，还安装工具 restrict 与持续 guard；例如合法的写工具会被误按 explore 只读策略拒绝。
+- 验证：从当前 P 直接提取 `consumePendingSpawn` 片段执行，系统技能 child 与之后的显式 @ child 均得到 `explore`。这是计划片段探针，不是尚未实现功能的真机复现；调用链由当前源码独立核实。
+- 修订要求：保留规格要求的兼容桥接，但增加调用归属并精确消费/释放本次拥有的槽；不能只比较技能名，也不能恢复并发下的无条件清槽。补成功、失败清理后跨会话 @ 不串用，以及重叠派发不误清的测试。
+- 历史订正：§9 的 XM-P6 处置与 §10.1 的确认，只证明「不清另一在途值」，不证明完整槽生命周期正确；其开工支持结论在此收窄。
+
+#### QP-I2：清理失败时的终态承诺与既有严格停止仲裁矛盾
+
+- 位置：P:468–476,735；S:174,352；`dsh-plugin-huaanwork/src/huaanwork-host/subagent-runs.ts:349–353,588–606,639–690`。
+- 已核实行为：定向取消后，执行 error/aborted/rejection 与成功清理可以收敛 `stopped`；`cleanupOk=false` 时仍保持 `stopping`。P:476 的「stopReason 为 error/aborted 或清理失败按既有仲裁归 failed」不成立；P:471 又明确 dispose reject/timeout 必须报 `ok:false`，因此不能同时无条件承诺不永停。
+- 边界：P:410–413 已覆盖晚到 activation、启动失败清理确认及不吃 abort 信号的结果观察窗，这些不是本轮新缺口。现有 registry 的固定语义与回归测试也不是应当被本任务顺手推翻的缺陷。
+- 修订要求：优先保留严格 stopped，把有界收敛承诺限定到清理已获确认的路径；失败/超时保留真实告警，不伪装已停，并同步订正 S/P。若 owner 仍要求清理失败也必须终态化，则先裁定失败/未知状态与资源责任，再定义实现，不能直接在包装层手动置终态。补真实 registry 的 dispose reject/timeout 组合测试，而非只测成功清理。
+
+#### QP-I3：工具隐藏、租约回收与失效状态的验收判据不足
+
+- 位置：P:711–723,741；S:139–163,389–397。
+- 模型回答“没有 subagent”或日志中未发生调用，都不能证明模型请求未包含该工具；P:718 的执行步骤只要求 explore，不能覆盖 test-fix。P:720 的失效截图“如可构造”也不能成为七项全部完成的隐式豁免。
+- 修订要求：分别记录普通回合、explore/test-fix 执行期、下一普通回合的实际模型请求工具 schema（如 request/header 中的有效工具），模型回答仅作辅助；给出可重复的 Host 重启失效步骤，无法执行就记未完成/BLOCKED，只有明确 owner waiver 才能记替代验收。
+- 不扩张严重度：P:673 已安排二次确认组件测试。补一次点击对应的取消 RPC 数量及兄弟运行不受影响的记录有价值，但“截图不能证明无双重更新”不再拆成另一个 Important，也不声称当前验收已经造假。
+
+#### QP-I4（新增漏报）：subagent-settled 通知被当成新用户消息，打断共享锚点
+
+- 位置：P:158,582,684；S:126,132–135。实际载荷证据在 `dsh-plugin-huaanwork/node_modules/@deepseek-ai/dsh-subagent/lib/index.js:508–539,2048–2058`：完成通知由 `createUserMessage` 创建，`source.kind='subagent-settled'`，向父 agent queue/steer。
+- 路径：真实用户产生 todo → 子代理完成并通知父会话 → 父会话下一 step 继续执行。P:158 只特判 goal，其余最近 `role='user'` 均换锚，故锚点被改成通知消息 ID。实时客户端没有追加相同 ID 的用户条目（`huaanwork-guardrails/bridge.ts:192–197` 只转述 goal 用户消息），后续 todo 会被精确 ID 守卫拒绝，新运行卡也失去原用户落点。
+- 历史侧同样存在接缝：`huaanwork-host/session-view.ts:203–217` 只排除 plugin/tool，完成通知仍被映射成 user；P:582 又仅用 goalRound 排除续轮，因此会更新 ordinary-user ID 并使当前回合边界错误前移。真实 `detailRecords → historyItemsFromRecords` 内存夹具确认：一条真实用户消息加一条完成通知得到两条 user。
+- 修订要求：在共享锚点与历史映射中统一“真实用户开启回合”和“系统通知继续原上下文”的判定，至少明确 subagent-settled 不换锚、不切成新的用户回合，并保留旧普通用户消息的 unknown 降级。同步细化 S §6 的来源语义，补完成通知后再次 todo、继续派生、历史回放与回合终态的联动用例；不能只在右栏选择器里绕过精确匹配。
+
+#### QP-I5（新增漏报）：显式 /explore、/test-fix 入口没有租约与派生类型接线
+
+- 位置：P:269,335；S:157。`client-huaanwork/App.tsx:2912–2921` 将显式技能作为 `session.send.skill` 发送；`huaanwork-host/sessions.ts:471–489` 经 `invokeSkillText` 把正文编进用户消息后直接 followup；`huaanwork-host/skill-invoke.ts:69–77` 是文本封装，不执行 skill 工具。
+- 路径：新会话显式 `/explore` 或 `/test-fix` → 按 P 默认隐藏 subagent → 没有 `tools/pre-execute(name='skill')`，故 P:335 的 acquire 从未发生，`pendingByAgent` 也没有本次技能类型。依赖模型再调用一次 skill 不是确定的产品接线；只补附件又会漏掉 system-skill registry 分类。
+- 修订要求：复用已有的 skill 发送/排队字段，把受理的系统技能身份与本次 UUID 绑定，在真实 pre-step 锚点建立后取得租约，并接通 around-dispatch 使用的技能类型来源。`turn-scheduler.ts:114` 与 `sessions.ts:1116` 已透传 skill，不应误报为缺少这个既有字段。补显式直发、排队出队、模型调用 skill 三入口的同一矩阵，并继续守住无人值守和子会话限制。
+- 测试边界：`tests/huaanwork-guardrails/skills.spec.ts:192–194` 的 invokeSkill 直接模拟 pre-execute，不能证明上述显式入口可用。
+
+#### QP-I6（新增漏报）：waiting 应答分支仍会丢弃已缓冲的首条 todo
+
+- 位置：P:575–576；`client-huaanwork/App.tsx:938–951,2929–2988`。
+- 路径：A 占用并发名额，B 发送后排队；B 的 waiting 应答尚未被客户端处理时，A 结束，B 的 queue-start 与首条 todo 已先经 WS 到达。P 新增的 holdEarlyEvent 会缓冲 todo，但 `takePendingBuffer` 在 waiting 分支只保留匹配 queueItemId 的 queue-start/queue-fail；重放开启回合时 todo 已被丢弃。
+- 验证：提取当前 `takePendingBuffer` 实际函数体，以 `[queue-start(q-b), tool/start(todo_write, message-b)]` 为缓冲、waiting(q-b) 为应答执行，重放结果只有 queue-start。直接 `started:true` 分支全量重放并不能反证此路径。
+- 修订要求：等待应答对账确认本次排队项已启动后，按本次 clientMessageId 保留对应 todo，并保证回合初始化后再应用；继续拒绝旧回合与其他队列项事件。补完整交错顺序、未启动/失败项丢弃、旧回合不被新发送吞掉的行为测试。
+- 既有钉校准：`tests/client-huaanwork/appWiring.spec.ts:1646–1658` 只钉 queueItemId 过滤结构，不证明新 todo 会保留；不能靠源码正则存在就判该新场景通过，也不应为此删除旧隔离钉。
+
+### 16.4 Minor（4 项）
+
+#### QP-M1：无锚终态的时间回退来源不一致（由 Important 降级）
+
+P:195,686 的 user.sentAt 是客户端发送、出队通知处理或自动化标签建立时刻，S:126,249–253 指定的则是 Host pre-step 起点。统一 epoch-ms 只解决单位，不解决来源；此处不是撤回 §9/§10 的单位修订。无锚路径也不必然不可达：租约取得后 anchor 可被 LRU 淘汰，goal 续轮无锚时不补造，而 P:445–450 允许无锚 system-skill run。客户端通知晚处理可能影响这类终态的时间筛选。
+
+但精确 UUID 命中的终态与全部活跃 run 不受该比较影响，尚无常规真机误挂证据，故降为 Minor。修订应补权威起点的消费接线；若选择缺权威时间就不回退，应同步修改规格的降级承诺，而非把客户端时间冒充同一锚点。测试限定在无锚、淘汰及延迟通知组合，不泛化到所有发送。
+
+#### QP-M2：todo 错用了仅授予旧运行卡的数值 ID 回退
+
+P:520,569 的 `(clientMessageId ?? String(id))` 与 S:132,361 的无锚拒绝不符；S:134 的兼容特许针对运行卡。删除 todo 的数值回退，补“用户条目无锚、事件 ID 恰好等于 String(id) 仍拒绝”钉。正常新版本 UUID/runId 不碰数值 ID，因此本项是契约偏差，不作已证实生产错挂表述。
+
+#### QP-M3：包 lane 聚合粒度需澄清，但不新增阻塞或独立运行树
+
+`huaanwork-guardrails/bridge.ts:305–312` 与 `huaanwork-host/subagent-runs.ts:310–329,495–496` 只归因直接 child；lane 内部工具没有祖先映射，但父包自己调用 subagent 的外层活动会进入其摘要。“父包卡完全不更新”不成立，不能据此推断正文泄漏。
+
+[原规格评审 §4.2 第 7 条](../specs/2026-11-15-three-feature-designs-review.md#42-可行性核实r1r2-落地约束均已对代码验证)（该文:129）已把 lane 不进 registry 登记为非阻断，并建议一期保留父包摘要。它不是明确的“内部工具必须聚合”裁定。建议 S:185,222,378 与 P:719 明说一期摘要粒度并加钉；沿用外层派发摘要时无需新产品裁定，只有 owner 要求内部工具聚合才追加归因范围。不得把既有非阻断项无声升级，亦不得增加独立 lane 卡。
+
+#### QP-M4（新增漏报）：原样抽取清理 helper 与可选 ActivationRun 类型不相容
+
+P:425 要求原样搬出 dispose helper，P:432 却仍把 result 定为可选。当前 `skills.ts:63–68` 的 childId 是 unknown、dispose 可选；`agent-invoke.ts:439–452` 的 helper 参数是完整 `SubagentActivationHandle`，该类型在 `subagents-service.ts:50–54` 要求 childId/result/dispose。仅解析出字符串 childSessionId，并不能把原 run 窄化为整个必填 handle。
+
+在内存 TypeScript 探针中按上述类型直连，得到 TS2345（unknown childId）与 TS18048（result 可能 undefined）。最小处方也已编译验证：保留 childId 的边界解析，把运行时恒有的 result/dispose 声明为必填，清理 helper 入参收窄到实际消费的 `Pick<SubagentActivationHandle, 'dispose'>`。这是 Task 3 的类型接缝订正，不是已发生的运行崩溃；需要同批调整相关 fixture，不应靠非空断言或可选链静默跳过结果观察。
+
+### 16.5 实际执行的验证与证据边界
+
+| 验证 | 结果 | 能证明 / 不能证明 |
+| --- | --- | --- |
+| HEAD / submodule / 工作树核对 | 源码基线与上列一致；原有两份需求稿未被本轮修改 | 本轮仅编辑本文，不代表未提交需求稿已进入 HEAD。 |
+| 当前 P 的 consumePendingSpawn 片段探针 | 系统技能 child=`explore`；随后无 ALS 的显式 @ child 也=`explore` | 证明槽生命周期问题；不是完整应用验收。 |
+| 真实 registry 取消组合探针 | error+清理失败、completed+清理超时均为 stopping；error/aborted/缺结果+清理成功均为 stopped | 证明 P 对既有仲裁的描述错误，不代表需要修改既有仲裁。 |
+| `corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/subagent-runs.spec.ts` | exit 0；1 个文件、20 条测试通过 | 当前 registry 回归基线通过，不代表计划的新 system-skill 生命周期已实现。 |
+| 真实 detailRecords → historyItemsFromRecords 合成消息夹具 | 一条真实用户消息加一条 subagent-settled 通知被还原成两条 user | 证明历史来源分类接缝；运行时通知结构另由已安装 rc.1 产物核对。 |
+| 当前 takePendingBuffer 源码提取探针 | waiting 应答只重放 queue-start，todoPreserved=false | 证明新缓冲入口必须配套重放出口；事件交错为受控夹具。 |
+| TypeScript 内存探针（工作区编译器） | 原直连接口报 TS2345/TS18048；最小窄接口方案 0 diagnostics | 未创建源码文件；不是全工程 typecheck。 |
+
+本轮没有运行完整 check/build/typecheck、真实模型调用、Electron 或七项真人验收；没有修改产品实现、规格或实施计划，也没有提交。显式技能入口遗漏经当前 App → sessions → skill-invoke 源码核实，未冒称已做真实模型复现。
+
+### 16.6 后续处置与历史结论适用范围
+
+1. 开工前修订 QP-I1…QP-I6，特别是通用锚点的系统通知分类、显式技能入口和 waiting 重放；QP-M1…QP-M4 随对应任务文本一并订正。修订必须落实到文件清单、接口、测试场景与验收步骤，不能只在 Completion Criteria 补一句承诺。
+2. QP-I2 优先遵守现有严格 stopped；只有要求清理失败也终态化时才需要新的 owner 裁定。QP-M3 沿用一期父包外层摘要时只需澄清，不再默认要求 owner 扩大聚合范围。
+3. QP-I4 细化共享锚点来源规则、QP-I2/QP-M1 修改承诺时须同步对齐设计规格；Artifact 消费同一通用锚点，修订共享契约后应核对其消费假设，但本轮没有重审整个 Artifact 计划。
+4. §10 的 around-dispatch ALS 挂点、结构化 todos 以及其余已核实处置不被整体推翻；被更新的是进度计划的完整实施就绪判决，尤其 XM-P6 的生命周期完整性和本轮新增漏项。历史 PASS 保留为审计记录，不再作为现稿可直接开工的依据。
+5. 修订完成后定向复核本节条目及其联动，仍需按计划实际运行门禁与真人验收；本文档落盘只完成评审归档，不意味着上述问题已修复。
+
+## 17. qwen4复审结论（2026-11-17，Gemini 修订稿及剩余意见校准）
+
+### 17.1 范围与最终判决
+
+- 对象：Gemini 按 §16 修订后的 [进度计划](2026-11-15-progress-sidebar.md)（P，826 行）与 [设计规格](../specs/2026-11-15-task-progress-sidebar-design.md)（S，408 行）。稿件指纹：P=`e69d6ada2f05b3dbf869e69d240a1abc94a9dd0e`，S=`663df9075acecef78d69ec3a2aadc37d58a88153`；以下 P/S 行号均指这两份稿件。
+- 源码基线仍为 `3dd3b182bc8c28671d5f712a7ae2da23dab463bd`，上游 pin 未变。除源码外，核查了桌面工作区安装的 rc.1 运行时产物及实际 bundle 配置。
+- 过程：先对 Gemini 修订做定向复审，得到会话中的「3 Important / 1 Minor」初判；owner 随后要求逐条反证准确性。本节保存反证后的结论，替代该初判，不把事实推导与产品裁定混为一谈。
+
+**最终判决：With fixes，0 Critical / 2 Important / 2 Minor，其中一项 Minor 仅为非阻断语义澄清。开工前必修只保留 QR-I1、QR-I2。** Gemini 的主要整改方向成立；本轮没有要求重写整份计划，也不要求为了被撤回的阻断意见新增功能。
+
+### 17.2 §16 原意见的处置核验
+
+| 原项 | 当前修订稿证据 | 处置结论（仅计划层面） |
+| --- | --- | --- |
+| QP-I1 单槽残留 | P:296–358 增加调用 token、两张归属表及精确释放 | 正常 dispatch、pre-execute 直接非 allow/抛错已覆盖；allow 后不派发的出口仍缺，收敛为 QR-I1。 |
+| QP-I2 严格停止仲裁 | P:478–482,545–553；S:179,357 | 已对齐既有仲裁：清理成功且执行结束才 stopped，失败/超时保持告警与 stopping；不再要求擅改 registry。 |
+| QP-I3 验收判据 | P:802–806 | 已改为实际 request/header 工具 schema、双技能/双入口、Host 重启失效及单次取消隔离；无法执行记 BLOCKED，不再依赖模型自述。 |
+| QP-I4 系统通知换锚 | P:174,193,201,636,666–668；S:126–136 | 真实用户白名单与历史归属已补齐。通知是否重开已终结的逻辑回合是另一个未裁定问题，不能据此继续认定本项未修，见 QR-M1。 |
+| QP-I5 显式技能入口 | P:378–403,411 | 显式直发/出队已接入 followup 前预挂载与失败回滚，核心入口缺失已修；与旧 pendingByAgent 的身份同步仍缺，见 QR-I2。 |
+| QP-I6 waiting 丢 todo | P:638,655–661 | 已同时安排缓冲入口、waiting 重放出口、queue-start 优先及错锚/失败隔离的行为测试。 |
+| QP-M1 客户端时钟回退 | P:754,771；S:258,367 | 已删除时间回退，缺锚终态 fail-closed，规格同步。 |
+| QP-M2 todo 数字 ID 回退 | P:631–632,650 | 已删除并增加数字碰撞仍拒绝的测试。 |
+| QP-M3 lane 粒度 | P:24,804；S:190,227 | 已明确仅外层包儿童自身摘要，不新增 lane 内部聚合或独立卡。 |
+| QP-M4 清理类型接缝 | P:450,494,501–504 | 已改必填 result/dispose 与窄化 helper 入参；内存 TypeScript 探针通过。 |
+
+对 §16 QP-I5 修法的补充订正：该节曾建议在 pre-step 锚点建立后取得显式租约，但安装版 `dsh-agent-loop/lib/index.js:902–919` 显示 systemPrompt.assemble 先于 agent/pre-step。Gemini 改为先 register pending、followup 前挂载，并在 followup 抛错时回滚，有真实次序依据；不能要求退回原建议或重新加入 current 锚点硬门。
+
+### 17.3 Important（2 项，保留但限定影响范围）
+
+#### QR-I1：预检 allow 后取消、未实际派发，兼容槽仍未清理
+
+- 位置：P:328–358,407。计划在 pre-execute 非 allow/抛错及进入 tools/execute 时清理，但没有覆盖预检允许后由运行时直接转入最终结果的出口；释放租约时只提清 pendingByAgent，不会同时清掉 pendingSpawn 与归属队列。
+- 可达性：产品 web-app bundle 的 `cordis.patch.yml:357–358` 启用 workspace-changes；安装版 `@deepseek-ai/dsh-workspace-changes/lib/index.js:1086–1093` 会在 tools/pre-execute 等待 recorder.settled，基线快照包含异步 Git/文件操作（:631–652）。用户取消可发生在等待期间；recorder 的 chain 使用自身 lifetime 并收容操作异常（:764–774），其 hook 随后仍可返回 allow。安装版 `@deepseek-ai/dsh-tools/lib/index.js:3354–3358` 检测原 signal 已取消后直接返回 post-result，不进入 tools/execute。
+- 结果：本次槽仍在，后来无 ALS 的显式 @ 新 child 可消费旧 explore 类型并被错误收窄。当前计划片段与真实 prepareExecution 控制流的内存探针已复现；普通 dispatch 与直接 deny 是干净对照。
+- 严重度边界：保留 Important。不是“所有 token 清理都无效”；正常派发及直接拒绝/抛错已修好。allow 后 guard 拒绝也是应覆盖的运行时出口，但普通父默认策略允许 subagent，注入 guard 的探针不算默认生产场景实机复现。
+- 修订要求：为不派发的最终结果路径增加按稳定调用身份的精确、幂等清理（例如同步 tools/result 监听），同步清理两张归属表与仍属于该调用的兼容槽；不能用 FIFO 取走其他调用的槽。补等待中取消后返回 allow、allow 后 guard 拒绝、同/异父后续 @ 不受污染，以及 A 收尾不清 B 的测试。
+
+#### QR-I2：active goal 保留的旧技能缓存优先于显式新租约
+
+- 位置：P:334–337,342,384–410。rememberSubagentSpawn 与 execute 两处均优先 pendingByAgent；显式入口只更新 lease，active goal 正常轮间 idle 则保留旧缓存。
+- 可达性：`client-huaanwork/App.tsx:3925–3997` 的普通交互输入框不会仅因该标签正在执行就禁用，仍能按 Enter 提交；scheduler 按写根/并发名额决定直发或排队，不按 goal active 拒绝，出队复用现有 live Agent。安装版 goal-round-driver 的 :108–134 会等待子运行，:249–255 的人类竞争输入只登记竞争状态或使预约失效，不保证先 pause/清缓存。上游 `goal-round-driver.spec.ts:969–983` 亦有等待子运行时优先执行人类输入的测试，本轮只核对该测试源码，未执行它。
+- 精确触发条件：先前模型调用 test-fix 已留下缓存，active goal 保留它；用户显式 /explore 被同一父 agent 受理，新 lease 是 explore，而旧缓存尚未清理；模型随后直接派发、未再次调用新 skill 覆盖缓存。按计划取值仍为 test-fix，子代允许列表可错误保留写工具；反方向则误禁写。双向取值探针已确认。
+- 严重度边界：保留 Important，但不是每次切换必错，也没有证据称已经写入文件或绕过通用审批/沙箱。不能把允许列表错用扩大成不受约束的系统级权限提升。
+- 修订要求：显式入口同步或失效旧父缓存，统一两入口的有效技能身份；同时覆盖 pre-execute slot 和 execute 取值，不能只改一个 fallback。补 active goal 条件下两种方向、直发/排队入口的 ALS 类型、运行标签与子代工具允许列表一致性测试。
+
+### 17.4 Minor（2 项；第一项为非阻断语义澄清）
+
+#### QR-M1：完成通知是否重开逻辑用户回合——撤回原 Important 与强制修法
+
+- 事实部分成立：无 active goal 的父会话先 idle、随后被 parent-delivery 的 subagent-settled 通知唤醒时，安装版 subagent 的 :2048–2058 支持 queue/steer；bridge 不转发通用 turn/start/running，App :1998–2006 已结算原用户终态，`logic/toolPanel.ts:197–207` 保持 final 单调。因此若后续 todo 继续归原 user，P:769 可将其 in_progress 叠加为 interrupted。active goal 正常中间 idle 不属于这一情景。
+- 原判决过强：S:256 明确要求回合正常/历史结束后仍未完成的项显示 interrupted；规格要求保留通知归属、继续显示活跃子运行，却没有规定通知必须重开已终结的逻辑用户回合。保留 clientMessageId 与重新打开逻辑回合不是同一要求。现有 `toolPanel.spec.ts:286–294,332–333` 也钉住终态单调，没有 settlement 重开例外。
+- **撤回“此处必然违反规格”的 Important 判断，并撤回“必须新增权威续执行信号”的强制处方。** 保留显示现象与语义澄清记录，不作为开工阻断；只有 owner 明确选择通知续作重开逻辑回合后，才定义相应开始/结束信号和测试。未裁定前不扩大实现范围，更不能用任意迟到 token 复活终态。
+
+#### QR-M2：显式入口凭 pending 预挂载的守卫例外欠一句说明
+
+S:168 仍笼统写“缺当前回合锚点即拒绝”，与同节 S:162 及 P:378–403 的显式入口预挂载次序不一致。补明：current 锚点要求适用于模型 skill 入口；显式入口须已为本次发送 register pending，在 followup 前预挂载，followup 抛错回滚。维持 Minor；不是显式入口核心接线缺失，也不应为了消除文字矛盾重新加 current 硬门。
+
+### 17.5 验证记录、局限与当前处置边界
+
+- Gemini 稿定向复审阶段实际运行了现有 toolPanel 33 条，以及 subagent-runs 20 条、session-view 29 条回归，共 82 条通过；它们验证基线与既有规则，不证明尚未实现的计划功能完成。随后四项反证阶段未重跑这些套件。
+- 控制流探针提取了当前计划 token/消费片段与安装版 tools.prepareExecution 方法体，验证 allow 后取消、正常 dispatch 与直接 deny。最终有效对照结果依次为：`post-result / 不派发 / 后续 @ 得 explore`、`dispatch / 派发 / 无污染`、`post-result / 不派发 / 无污染`。探针初版 deny 桩遗漏必填 reason，已修为完整 deny 载荷并重跑；初版的 dispatch 输出不作为拒绝路径证据。
+- 旧技能缓存/新显式 lease 的双向取值、父 idle 后通知续作的状态叠加，以及修订后的清理 helper 类型接缝均有内存探针；真实可达性另外核对 UI 准入、调度器、goal-driver、workspace-changes 与运行时终结路径，不把孤立变量赋值当作整条产品链路的证明。
+- 没有运行真实模型、Electron/GUI、完整 check/build/typecheck，也没有修改产品实现、设计规格或实施计划。本次写入仅归档复审与校准，不意味着剩余意见已经修复。
+- **当前开工前必修仅 QR-I1、QR-I2；QR-M1/QR-M2 不升级为阻断。** 修订后定向复核两项生命周期/身份接线及其测试即可；此前会话的「3 Important / 1 Minor」汇总结论由本节的「2 Important / 2 Minor」替代，不能继续要求按已撤回的第三项 Important 扩面实施。
+
+---
+
+## 18. 复核校准与修订闭环（2026-11-17，对 §17 核验与 P/S 闭环修订）
+
+> 说明：本节记录独立复核 `§17「qwen4复审结论」` 的核验结果，以及依据复核结论对设计规格（S）与实施计划（P）完成的修订闭环。`§17` 原文完整保留作为历史复审记录；除 S、P 与本评审文档外，本轮未修改任何产品源码、测试代码或 `deepseek-harness` 子模块。
+
+### 18.1 复核基线与专项核验
+
+- 复核仓基线：`HEAD` = `3dd3b182bc8c28671d5f712a7ae2da23dab463bd`，`deepseek-harness` 子模块 = `1600d8a1e140dcde43a1a0941940a0480712c011`。
+- 既有相关基线单测复跑：`corepack yarn workspace dsh-plugin-huaanwork vitest run tests/client-huaanwork/toolPanel.spec.ts tests/huaanwork-host/subagent-runs.spec.ts tests/huaanwork-host/session-view.spec.ts` → **82/82 通过**（`33 + 20 + 29`）。
+- 对 §17 的独立判定：**0 误报、0 夸大**。`QR-I1`、`QR-I2`、`QR-M1`、`QR-M2` 均经宿主/客户端真实接线核验成立；同时在实施计划与既有源码约束之间识别出 6 项需同步补齐的运行时边界与测试约束漏报。
+
+### 18.2 §17 条目核验与 P/S 修订闭环
+
+| 编号 | 核验判定 | 修订内容与落点 |
+| --- | --- | --- |
+| `QR-I1` | 成立（无误报/无夸大） | **S §7.2、§7.3 #8、§14.1；P 全局约束、Task 2（接口与 Step 4）、Completion Criteria**：`PendingSpawnSlot` 绑定执行槽 `agent` 归属与调用 token，新增 `clearExecutionSlot`；在 `skills.ts` `Context.on` 补入 `'tools/result'`，并于 `tools/result` 同步路径按执行槽/token 精确清零，同时以租约释放 `onInvalidate` 兜底（覆盖 `allow` → `post-result`/`final-result`、连续多轮 `skill → ordinary → skill` 及并行 `runGroup` 抛错），不污染顺序 `@` 或误清并发在途槽。 |
+| `QR-I2` | 成立（无误报/无夸大） | **S §7.2、§14.1；P 全局约束、Task 2（Step 5）、Completion Criteria**：明确双入口路径在 `turn-anchors` 与 `system-skill-leases` 上的职责边界——显式 `/explore`、`/test-fix` 在 `followup` 前先调用 `acquireExplicit`（触发旧 `pendingByAgent` 失效清理，并注册/绑定显式租约），`followup` 抛错时精确释放本轮租约；`acquireSystemSkillLease` 仅在返回真值后才写 `pendingByAgent`。 |
+| `QR-M1` | 成立（Minor 语义澄清） | **S §9；P Completion Criteria**：明确 `subagent-settled` 等非人类来源通知必须保持 `turnFinal` 单调，不重开已结案回合。 |
+| `QR-M2` | 成立（Minor 规则澄清） | **S §7.2；P Completion Criteria**：显式拆分守卫语义——模型 `skill` 工具路径受 `turnAnchors.current` 约束，显式 `/explore`、`/test-fix` 路径则在 `followup` 前完成 `turnAnchors.register` 与 `acquireExplicit`，避免将显式入口的前置建锚误判为缺失守卫。 |
+
+### 18.3 复核补充的 6 项漏报与同步修订
+
+1. **先于租约激活的 `goal/change('active')` 与错误回滚隔离**：若 `goalPhase: 'active'` 仅存于 `leases` 内部，当 `goal/change('active')` 先于 `acquire`/`acquireExplicit` 到达（如连续跨轮）或 `followup` 抛错触发 `release` 时会丢失或误清活跃目标状态。已在 **S §7.2、§14.1** 与 **P 全局约束、Task 2 Step 5、Completion Criteria** 修订为在 `system-skill-leases.ts` 维护独立 `activeGoalSessions` 集合；`release(ctx, sessionId, { clearGoal?: boolean })` 默认不清除既有 `activeGoalSessions`，仅 `agent/error`、中止/异常 `turn/end`、`goal/change` 非活跃/`clear`、`session/disposed` 与 `releaseSessionRuntime` 传入 `{ clearGoal: true }`。
+2. **`acquireSystemSkillLease` 返回 `false` 时防止遗留脏 `pendingByAgent`**：已在 **S §7.2、§14.1** 与 **P Task 2 Step 4/5、Completion Criteria** 修订为先通过 `acquireSystemSkillLease` 真值门控再写入 `pendingByAgent`，同时 `release` 在无活跃租约时仍触发 `onInvalidate` 通知以防残留。
+3. **`skills.ts` `'tools/result'` 订阅与并行失败兜底**：为确保 `QR-I1` `tools/result` 清理可达且不漏并行 `runGroup` 的 `throwSchedulerFailure`，已在 **P Task 2 Step 4** 明确将 `'tools/result'` 加入 `skills.ts` `Context.on`，并配 `onInvalidate` 释放兜底与对应 6 项单测场景。
+4. **Task 4 `holdEarlyEvent` 与 `appWiring.spec.ts` 源码正则钉兼容**：原计划若把 `tool/start(todo_write)` 放在 `running-turn` 守卫之后，会在 `goalIntermediate === true` 保持前端 `running === true` 期间误丢新排队回合早到的 `todo_write`；且抽取 `takeEarlyPendingEvents` 若将 `sent.waiting && sent.queueItemId !== undefined` 与 `(event.event === "session/queue-start" || event.event === "session/queue-fail") && event.queueItemId === queueItemId` 字面量移出 `takePendingBuffer`，将破坏 `tests/client-huaanwork/appWiring.spec.ts:1646-1658` 的正则断言（以及 `:1710-1711` 的 `lastPushAt > crossTabGuardAt`）。已在 **P Task 4 Step 1/3、Completion Criteria** 修正为：在 `running-turn` 守卫之前按 `incoming.clientMessageId === pending.clientMessageId` 缓冲早到 `todo_write`，保留尾部 `isGoalEvent` `pending.buffered.push(incoming)` 在 `crossTabGuard` 之后，并在 `takePendingBuffer` 中保留字面量 `sent.waiting && sent.queueItemId !== undefined` 与 `isQueueControl` 谓词传入 `takeEarlyPendingEvents`。
+5. **非白名单显式 `sendToAgent` 的注册顺序防泄漏**：若 `isUnmanagedChildSession` 校验在 `turnAnchors.register` 之后执行并抛错，会在 `turnAnchors` 遗留未清理条目。已在 **P Task 1、Completion Criteria** 修正为先校验 `isUnmanagedChildSession` 再执行 `turnAnchors.register`（或 `try/catch` 回滚）。
+6. **`session-view.spec.ts` 普通 `user` 记录 `.toEqual` 契约同步**：普通 `user`（`goalRound === undefined`）历史记录补带 `clientMessageId` 后，需同步更新 `tests/huaanwork-host/session-view.spec.ts:275-285` 的严格相等断言。已在 **P Task 1、Completion Criteria** 显式列出该测试更新项。
+
+### 18.4 修订后目标文档状态（已写入磁盘）
+
+- `docs/superpowers/specs/2026-11-15-task-progress-sidebar-design.md`：410 行，`git hash-object` = `0c3a793abb67b8812b5c9546b35d723b95589337`
+- `docs/superpowers/plans/2026-11-15-progress-sidebar.md`：890 行，`git hash-object` = `90f401e29e5b39bbce3f4c3063ebcb0ad19a5e60`
+- `docs/superpowers/specs/2026-11-15-task-result-artifacts-design.md`：396 行，`git hash-object` = `c292fddc486c68168292868531a868dd06874fcf`
+- `docs/superpowers/plans/2026-11-15-task-result-artifacts.md`：1637 行，`git hash-object` = `bdb108f43252de1684365676215df6d22df1b815`
+- 计划层面遗留状态：**0 Critical / 0 Important / 0 Minor**，可进入实施阶段。
+- 验证边界声明：本轮仅完成评审复核与规格/计划/评审文档闭环修订；源码与新增单测尚未实施，`corepack yarn check`、包级 `typecheck`、`dsh-plugin-huaanwork` 构建及进度 `§14.2` / Artifact `§12.2` agent 真机走查自动化测试均未执行，待代码实施阶段逐项落地验证。
+
+### 18.5 验收方式更新（2026-11-17：真人/人工验收 → agent 真机走查自动化测试）
+
+- 依据用户指令，对尚未实施的两组 `2026-11-15` 规格与计划完成验收口径统一升级（`#29` 对话创建技能已合入 `master` 并由 `docs/evidence/2026-11-chat-created-skills-acceptance.md` 完成真机走查闭环，本轮保持不动；`§1–§17` 历史评审原文亦保持不动）：
+  - **进度面板（`2026-11-15-task-progress-sidebar-design.md` `§14.2` / `2026-11-15-progress-sidebar.md` `Task 5`）**：取消人工真人验收，改为新增可执行脚本 `dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs`（exit `0`/`1`/`3`）及其 `verify:host` 判据单测 `dsh-plugin-huaanwork/scripts/huaanwork-host-progress-sidebar-acceptance.spec.mjs`，在隔离 `DSH_HOME` + `--user-data-dir` + `--remote-debugging-port` + `HUAANWORK_ACCEPTANCE_HOOKS=1` 的工作区构建 Electron 上自动覆盖七项走查断言（含 `session.v4.jsonl.zstd` 内 `request/header.tools` schema 提取、双技能双入口、包 lane 深度 2 身份链、`window.huaanworkAcceptance.restartHost()` 接力校验与单次 `subagent.cancel` RPC 隔离），截图与含密钥临时目录退避至仓库外本地备份后清理，仅提交脚本、单测与脱敏文本证据。
+  - **任务结果 Artifact（`2026-11-15-task-result-artifacts-design.md` `§8.2` & `§12.2` / `2026-11-15-task-result-artifacts.md` `Task 7` & `Task 9`）**：取消人工用户验收，改为新增 `dsh-plugin-huaanwork/scripts/huaanwork-accept-task-artifacts.mjs` 及 `verify:host` 判据单测 `dsh-plugin-huaanwork/scripts/huaanwork-host-artifacts-acceptance.spec.mjs`，覆盖全屏 `/json/list` 第二 page target 检验、preview/fullscreen `iframe` 实时交互与沙箱隔离、重载/重启历史定位及三类自动化并存；同时在 `Task 7` 增设仅受 `HUAANWORK_ACCEPTANCE_HOOKS=1` 门控的 `HUAANWORK_ACCEPTANCE_SAVE_DIALOG_QUEUE_FILE` 队列接缝（生产默认完全惰性），确保保存与取消另存为在校验 `ownerSurface`/`defaultPath` 后走完真实原子写盘/取消零写入闭环而不阻塞于系统模态框。
