@@ -28,7 +28,7 @@
 1. **F1（模型入口）**：`profile.ts` 为不走 preset 的桌面父会话显式启用宿主平面 `skill-filesystem` / `tool-skill`，`agentsHome` 仍指向空目录；`present-as.ts` 仅对无人值守自动化与 legacy/system-skill 儿童隐藏 `skill`，普通父会话可用。
 2. **F2（顺序派发失败）**：`skills.ts` 在 `agent/disposed` 时从 `tracked`/`kinds`/`lifted` 移除已释放子代理，并对 `cannot create effect on inactive context` 竞态兜底；`holders.ts` 在创建 `huaanworkSystemSkillLeases` 后调用 `huaanworkRegisterSystemSkillLeaseInvalidation`，修复「租约 store 晚于 skills apply 创建时 `onInvalidate` 未注册」导致的旧技能类型残留。
 3. **走查可靠性**：双入口场景使用第一个系统技能回合作为执行窗口起点（避免把上一系统技能回合误当普通回合），并增加一次显式 `subagent` 重试；隔离 profile 的活跃模型固定为 `deepseek-chat`（`deepseek-flash` 会自述没有 `subagent`，实测不可靠）。
-4. **组合顺序与 smoke 兼容**：`skill-filesystem`/`tool-skill` 放在 `llm-deepseek` 锁层锚点之前，保持 guardrail 锁层连续；`test-port-mapping.ts` 的证据行号同步到新增测试后的真实行号；`huaanwork-stub-llm.mjs` 的 `/ls/` 匹配收紧为 `/\bls\b/`，避免把 `skills`/`tools` 误判为 `ls` 命令。
+4. **组合顺序与 smoke 兼容**：`skill-filesystem`/`tool-skill` 放在 `llm-deepseek` 锁层锚点之前，保持 guardrail 锁层连续；`test-port-mapping.ts` 的证据行号同步到新增测试后的真实行号；`huaanwork-host-loop.spec.mjs` 的 `/ls/` 匹配收紧为 `/\bls\b/`，避免把 `skills`/`tools` 误判为 `ls` 命令。
 
 ## 3. 走查命令与退出码
 

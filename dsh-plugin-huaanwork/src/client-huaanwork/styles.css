@@ -3420,6 +3420,34 @@ button {
   font-size: 11px;
 }
 
+/* 规格 §8.1 总进度条:Y > 0 时显示,取值 X/Y;单步列表内不渲染任何进度条。 */
+.progress-total-bar {
+  display: block;
+  width: 100%;
+  height: 6px;
+  margin: 4px 0 8px;
+  border: none;
+  appearance: none;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-total-bar::-webkit-progress-bar {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.progress-total-bar::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.progress-total-bar::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 3px;
+}
+
 .progress-panel .panel-empty {
   padding: 12px 8px;
 }

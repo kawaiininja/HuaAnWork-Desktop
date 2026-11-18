@@ -312,6 +312,13 @@ export function apply(ctx: Context): void {
       const queue = slotsByParent.get(execution.agent);
       if (queue === undefined) slotsByParent.set(execution.agent, [slot]);
       else queue.push(slot);
+      // 显式 /explore、/test-fix 入口同样按会话登记:租约失效兜底(QR-I2)不因
+      // pendingByAgent 缺席而跳过该会话的 slotsByParent 清理。
+      if (sessionId !== undefined) {
+        const agents = pendingAgentsBySession.get(sessionId) ?? new Set<Agent>();
+        agents.add(execution.agent as Agent);
+        pendingAgentsBySession.set(sessionId, agents);
+      }
     }
     // 模块内兼容槽:无 ALS 的消费点(startActivation 包装)仍按最近一次派发回落。
     pendingSpawn = slot;
@@ -505,6 +512,9 @@ export function apply(ctx: Context): void {
       registerChildSession(parentId, info.id);
       inheritSessionModel(ctx.huaanworkSessionModels, parentId, info.id);
       inheritSessionRoot(ctx.huaanworkSessionRoots, parentId, info.id);
+      // 登记表补齐后立即收窄本儿童:agent/created 时 header 缺父会话的儿童此前未被
+      // present-as 识别,靠这里(及后续 tools/change)关闭创建期的 `skill` 泄漏窗口。
+      refreshAgentRestrict(ctx as never, info.id);
     }
     if (child) consumePendingSpawn(child);
   }) as never);

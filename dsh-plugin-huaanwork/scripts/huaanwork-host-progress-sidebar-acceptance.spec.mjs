@@ -66,7 +66,9 @@ function validFacts() {
         ok: true,
         taskPercentTexts: 0,
         countPercentTexts: 0,
-        progressBarCount: 0,
+        taskProgressBarCount: 0,
+        totalProgressBarCount: 1,
+        totalBarMatchesCount: true,
         countFormatAlwaysXY: true,
         activityToolNames: ['bash', 'read'],
         sessionToolNames: ['read', 'bash'],
@@ -282,6 +284,14 @@ test('rejects a fabricated percentage or an inconsistent task count', () => {
   const percent = validFacts()
   percent.checks['no-fabricated-percentage'].taskPercentTexts = 1
   assert.throws(() => assertProgressSidebarAcceptanceFacts(percent), /no-fabricated-percentage/)
+
+  const perStepBar = validFacts()
+  perStepBar.checks['no-fabricated-percentage'].taskProgressBarCount = 1
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(perStepBar), /per-step progress bars/)
+
+  const totalBar = validFacts()
+  totalBar.checks['no-fabricated-percentage'].totalBarMatchesCount = false
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(totalBar), /total progress bar/)
 
   const count = validFacts()
   count.checks['progress-tasks'].countMatched = false

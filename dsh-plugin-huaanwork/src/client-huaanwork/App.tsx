@@ -46,6 +46,7 @@ import SkillSuccessCard from "./SkillSuccessCard.tsx";
 import SlashSkillMenu from "./SlashSkillMenu.tsx";
 import SkillsView from "./SkillsView.tsx";
 import SubagentRunCard from "./SubagentRunCard.tsx";
+import type { SubagentConfirmSurface, SubagentConfirmTarget } from "./SubagentRunCard.tsx";
 import {
   isReservedSlash,
   parseSlashInvoke,
@@ -615,7 +616,7 @@ export default function App() {
   /** 对账代际:断连与 ready 都推进它,迟到的 snapshot 应答据此丢弃(设计 D6)。 */
   const reconcileEpochRef = useRef(0);
   const [expandedByRunId, setExpandedByRunId] = useState<Record<string, boolean>>({});
-  const [confirmingRunId, setConfirmingRunId] = useState<string | null>(null);
+  const [confirmingTarget, setConfirmingTarget] = useState<SubagentConfirmTarget | null>(null);
   const [cancelBusyByRunId, setCancelBusyByRunId] = useState<Record<string, boolean>>({});
   const [cancelErrorByRunId, setCancelErrorByRunId] = useState<Record<string, string>>({});
   /**
@@ -1099,11 +1100,11 @@ export default function App() {
     now,
     frozenAt: subagentRuns.frozenAt,
     expandedByRunId,
-    confirmingRunId,
+    confirmingTarget,
     cancelBusyByRunId,
     cancelErrorByRunId,
     onToggleExpanded: toggleSubagentExpanded,
-    onRequestCancel: requestCancelSubagent,
+    onRequestCancel: (runId) => requestCancelSubagent(runId, "main"),
     onConfirmCancel: (runId) => void confirmCancelSubagent(runId),
     onDismissCancel: dismissCancelSubagent,
   };
@@ -1701,7 +1702,7 @@ export default function App() {
       setExpandedByRunId((prev) => withoutKey(prev, runId));
       setCancelBusyByRunId((prev) => withoutKey(prev, runId));
       setCancelErrorByRunId((prev) => withoutKey(prev, runId));
-      setConfirmingRunId((prev) => (prev === runId ? null : prev));
+      setConfirmingTarget((prev) => (prev?.runId === runId ? null : prev));
     };
     const applyEvent = (event: RpcEvent) => {
       if (cancelled) return;
@@ -2332,7 +2333,7 @@ export default function App() {
 
   /** 切 tab 取消确认态:确认对象可能已不在当前标签里(设计 D17 的 UI 边界)。 */
   useEffect(() => {
-    setConfirmingRunId((prev) => (prev === null ? prev : null));
+    setConfirmingTarget((prev) => (prev === null ? prev : null));
   }, [activeTab]);
 
   useEffect(() => {
@@ -2572,14 +2573,14 @@ export default function App() {
     setExpandedByRunId((prev) => ({ ...prev, [runId]: prev[runId] !== true }));
   }
 
-  /** 点「终止」只打开卡内二次确认,不发送任何 RPC。 */
-  function requestCancelSubagent(runId: string): void {
-    setConfirmingRunId(runId);
+  /** 点「终止」只打开触发侧卡内的行内二次确认,不发送任何 RPC;主流与右栏共用唯一状态。 */
+  function requestCancelSubagent(runId: string, surface: SubagentConfirmSurface): void {
+    setConfirmingTarget({ runId, surface });
     setCancelErrorByRunId((prev) => withoutKey(prev, runId));
   }
 
   function dismissCancelSubagent(runId: string): void {
-    setConfirmingRunId((prev) => (prev === runId ? null : prev));
+    setConfirmingTarget((prev) => (prev?.runId === runId ? null : prev));
   }
 
   /**
@@ -2588,7 +2589,7 @@ export default function App() {
    * 确认期间 run 已终态或失效时关闭确认且零 RPC。
    */
   async function confirmCancelSubagent(runId: string): Promise<void> {
-    setConfirmingRunId((prev) => (prev === runId ? null : prev));
+    setConfirmingTarget((prev) => (prev?.runId === runId ? null : prev));
     const run = subagentRunsRef.current.runs.get(runId);
     if (!run || !isSubagentRunActive(run)) {
       setCancelErrorByRunId((prev) => withoutKey(prev, runId));
@@ -4223,11 +4224,11 @@ export default function App() {
                   model={progressModel}
                   now={now}
                   frozenAt={subagentRuns.frozenAt}
-                  confirmingRunId={confirmingRunId}
+                  confirmingTarget={confirmingTarget}
                   cancelBusyByRunId={cancelBusyByRunId}
                   cancelErrorByRunId={cancelErrorByRunId}
                   onToggleActivity={toggleToolPanel}
-                  onRequestCancel={requestCancelSubagent}
+                  onRequestCancel={(runId) => requestCancelSubagent(runId, "progress")}
                   onConfirmCancel={(runId) => void confirmCancelSubagent(runId)}
                   onDismissCancel={dismissCancelSubagent}
                 />
@@ -4982,7 +4983,7 @@ type SubagentChatView = {
   now: number;
   frozenAt?: number;
   expandedByRunId: Readonly<Record<string, boolean>>;
-  confirmingRunId: string | null;
+  confirmingTarget: SubagentConfirmTarget | null;
   cancelBusyByRunId: Readonly<Record<string, boolean>>;
   cancelErrorByRunId: Readonly<Record<string, string>>;
   onToggleExpanded(runId: string): void;
@@ -5041,7 +5042,7 @@ function ChatRow({
         frozenAt={subagent.frozenAt}
         duplicateLabel={subagentNeedsStartTime(run, sameParentRuns)}
         expanded={subagent.expandedByRunId[run.runId] === true}
-        confirming={subagent.confirmingRunId === run.runId}
+        confirming={subagent.confirmingTarget?.runId === run.runId && subagent.confirmingTarget.surface === "main"}
         cancelBusy={subagent.cancelBusyByRunId[run.runId] === true || run.phase === "stopping"}
         cancelError={subagent.cancelErrorByRunId[run.runId]}
         onToggleExpanded={subagent.onToggleExpanded}

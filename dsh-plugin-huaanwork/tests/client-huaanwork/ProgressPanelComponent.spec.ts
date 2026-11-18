@@ -2,8 +2,8 @@
 /**
  * 右栏进度面板：三区展示、当前回合活动复用 ToolPanel、子代理摘要复用运行卡二次确认。
  *
- * `confirmingRunId`、忙态与错误都由调用方（App）持有；本组测试用受控 props 钉住
- * 「点终止只请求确认、绝不直接发取消」与「确认区只属于被确认的 run」。
+ * `confirmingTarget`、忙态与错误都由调用方（App）持有；本组测试用受控 props 钉住
+ * 「点终止只请求确认、绝不直接发取消」与「确认区只属于被确认的 run 且只在右栏发起时出现」。
  */
 import { act, createElement } from "react";
 import type { ReactElement } from "react";
@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import ProgressPanel from "../../src/client-huaanwork/ProgressPanel.tsx";
 import type { ProgressPanelModel } from "../../src/client-huaanwork/logic/progressPanel.ts";
+import type { SubagentConfirmTarget } from "../../src/client-huaanwork/SubagentRunCard.tsx";
 import type { SubagentRunView } from "../../src/client-huaanwork/logic/subagentRuns.ts";
 import type { PanelToggle, ToolPanelView } from "../../src/client-huaanwork/logic/toolPanel.ts";
 
@@ -93,7 +94,7 @@ function panelElement(
   overrides: {
     now?: number;
     frozenAt?: number;
-    confirmingRunId?: string | null;
+    confirmingTarget?: SubagentConfirmTarget | null;
     cancelBusyByRunId?: Readonly<Record<string, boolean>>;
     cancelErrorByRunId?: Readonly<Record<string, string>>;
   } = {},
@@ -102,7 +103,7 @@ function panelElement(
     model: progress,
     now: overrides.now ?? 13_000,
     frozenAt: overrides.frozenAt,
-    confirmingRunId: overrides.confirmingRunId ?? null,
+    confirmingTarget: overrides.confirmingTarget ?? null,
     cancelBusyByRunId: overrides.cancelBusyByRunId ?? {},
     cancelErrorByRunId: overrides.cancelErrorByRunId ?? {},
     onToggleActivity: spies.onToggleActivity,
@@ -157,7 +158,7 @@ afterEach(async () => {
 });
 
 describe("ProgressPanel tasks", () => {
-  it("renders the task list with a completed/total count and no percentages", async () => {
+  it("renders the task list with a completed/total count and a total progress bar", async () => {
     const view = await mount(panelElement(model(), createSpies()));
 
     expect(view.textContent).toContain("已完成 1/3");
@@ -169,6 +170,16 @@ describe("ProgressPanel tasks", () => {
     expect(view.querySelector('.progress-task[data-status="in_progress"]')?.textContent).toContain(
       "实现面板",
     );
+    const totalBar = view.querySelector("progress.progress-total-bar");
+    expect(totalBar?.getAttribute("value")).toBe("1");
+    expect(totalBar?.getAttribute("max")).toBe("3");
+  });
+
+  it("keeps the total progress bar out of every single task row", async () => {
+    const view = await mount(panelElement(model(), createSpies()));
+
+    expect(view.querySelectorAll(".progress-task-list progress").length).toBe(0);
+    expect(view.querySelectorAll(".progress-task progress").length).toBe(0);
   });
 
   it("shows an interrupted overlay label without touching the count", async () => {
@@ -190,18 +201,20 @@ describe("ProgressPanel tasks", () => {
     expect(view.textContent).not.toMatch(/\d+%/);
   });
 
-  it("renders waiting and empty phases without a fabricated count", async () => {
+  it("renders waiting and empty phases without a fabricated count or progress bar", async () => {
     const waiting = await mount(
       panelElement(model({ taskPhase: "waiting", tasks: [], completedCount: 0, totalCount: 0 }), createSpies()),
     );
-    expect(waiting.textContent).toContain("等待任务步骤");
+    expect(waiting.textContent).toContain("正在等待任务拆解");
     expect(waiting.textContent).not.toContain("已完成 0/0");
+    expect(waiting.querySelector("progress")).toBeNull();
 
     await rerender(
       panelElement(model({ taskPhase: "empty", tasks: [], completedCount: 0, totalCount: 0 }), createSpies()),
     );
-    expect(waiting.textContent).toContain("当前回合还没有任务步骤");
-    expect(waiting.textContent).not.toContain("等待任务步骤");
+    expect(waiting.textContent).toContain("暂无任务拆解");
+    expect(waiting.textContent).not.toContain("正在等待任务拆解");
+    expect(waiting.querySelector("progress")).toBeNull();
   });
 });
 
@@ -264,7 +277,9 @@ describe("ProgressPanel subagents", () => {
     const spies = createSpies();
     const runs = [run({ runId: "run-1" }), run({ runId: "run-2", label: "@测试" })];
     const view = await mount(
-      panelElement(model({ subagents: runs }), spies, { confirmingRunId: "run-1" }),
+      panelElement(model({ subagents: runs }), spies, {
+        confirmingTarget: { runId: "run-1", surface: "progress" },
+      }),
     );
 
     expect(view.textContent).toContain("确认终止 @审阅");
@@ -276,6 +291,20 @@ describe("ProgressPanel subagents", () => {
     await click(buttonByText(view, "取消"));
     expect(spies.onDismissCancel).toHaveBeenCalledWith("run-1");
     expect(spies.onConfirmCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the rail confirmation closed when the main flow triggered it", async () => {
+    const spies = createSpies();
+    const view = await mount(
+      panelElement(model({ subagents: [run({ runId: "run-1" })] }), spies, {
+        confirmingTarget: { runId: "run-1", surface: "main" },
+      }),
+    );
+
+    expect(view.textContent).not.toContain("确认终止 @审阅");
+    expect(view.textContent).toContain("终止");
+    await click(buttonByText(view, "终止"));
+    expect(spies.onRequestCancel).toHaveBeenCalledWith("run-1");
   });
 
   it("shows stale runs with the fixed unrecoverable text and disables termination", async () => {

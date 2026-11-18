@@ -49,7 +49,7 @@ type ToolsService = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tool
 
 type Agent = {
   id?: string;
-  session?: { id?: string };
+  session?: { id?: string; header?: { parentSession?: unknown } };
   ctx?: {
     get?(name: string): ToolsService | undefined;
   };
@@ -131,11 +131,20 @@ export function apply(ctx: Context): void {
     lifted.delete(agent);
     const sessionId = sessionIdOfAgentRef(agent);
     const extra = sessionId ? ctx.huaanworkAttachments?.sessionAgentTools.get(sessionId) : undefined;
+    // 上游在子会话 header 记录 `parentSession`(父会话 id),早于 subagent/start 的
+    // 登记表:创建期(agents.create 已发生、registerChildSession 尚未)也能判别儿童。
+    const headerParent = agent.session?.header?.parentSession;
+    const headerParentId =
+      typeof headerParent === "string"
+        ? headerParent.length > 0
+          ? headerParent
+          : undefined
+        : sessionIdOfAgentRef(headerParent as { id?: string; session?: { id?: string } } | undefined);
     // R2:父会话可调用 `skill` 加载系统技能;无人值守自动化与 legacy/system-skill 儿童
     // 维持不可见(他们的派发只能走显式 @ / 包血缘 / 系统技能租约)。
     const hideSkill = sessionId !== undefined && (
       ctx.huaanworkUnattended?.has(sessionId) === true
-      || (parentSessionOf(sessionId) !== undefined && ctx.huaanworkPackageChildAllow?.has(sessionId) !== true)
+      || ((parentSessionOf(sessionId) !== undefined || headerParentId !== undefined) && ctx.huaanworkPackageChildAllow?.has(sessionId) !== true)
     );
     const allowed = tools.schemas().flatMap((schema) => {
       const name = schema.name;

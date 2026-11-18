@@ -21,6 +21,19 @@ const FROZEN_TEXT = "连接中断，状态可能滞后";
 const INACTIVITY_ALERT_CODE = "inactive";
 
 /**
+ * 触发行内二次确认的表面：主流运行卡或右栏进度面板。
+ *
+ * 确认状态仍由 App 唯一持有（不建第二套状态机），但同一 run 的卡片可能同时挂载在
+ * 主流与右栏；记录触发表面后，确认区、焦点与 Esc 监听只属于发起侧。
+ */
+export type SubagentConfirmSurface = "main" | "progress";
+
+export type SubagentConfirmTarget = {
+  runId: string;
+  surface: SubagentConfirmSurface;
+};
+
+/**
  * 运行摘要的输入：卡片与右栏共用同一份展示与确认逻辑。
  *
  * `confirming`、`cancelBusy`、`cancelError` 都由调用方按 runId 持有；摘要自身不缓存

@@ -3,7 +3,7 @@ import type { ReactElement } from "react";
 import type { ProgressPanelModel, ProgressTaskView } from "./logic/progressPanel.ts";
 import { isSubagentRunActive, subagentNeedsStartTime } from "./logic/subagentRuns.ts";
 import type { PanelToggle } from "./logic/toolPanel.ts";
-import { SubagentRunSummary } from "./SubagentRunCard.tsx";
+import { SubagentRunSummary, type SubagentConfirmTarget } from "./SubagentRunCard.tsx";
 import ToolPanel from "./ToolPanel.tsx";
 
 /** 分步任务的展示状态文案；没有单步百分比。 */
@@ -18,7 +18,8 @@ export type ProgressPanelProps = {
   model: ProgressPanelModel;
   now: number;
   frozenAt?: number;
-  confirmingRunId: string | null;
+  /** App 持有的唯一确认目标；右栏只在确认由右栏发起时展示确认区。 */
+  confirmingTarget: SubagentConfirmTarget | null;
   cancelBusyByRunId: Readonly<Record<string, boolean>>;
   cancelErrorByRunId: Readonly<Record<string, string>>;
   onToggleActivity(anchorId: number, next: PanelToggle): void;
@@ -30,16 +31,16 @@ export type ProgressPanelProps = {
 /**
  * 右栏「进度」窄栏：连接状态、分步任务、当前回合工具活动与受管子代理运行。
  *
- * 任务只显示 `completed/total` 计数与展示状态，不构造单步百分比；活动直接复用
- * `ToolPanel` 的面板/切换回调；子代理复用 `SubagentRunSummary` 与 App 持有的
- * `confirmingRunId`/忙态/错误，不另建取消 reducer 或确认状态。
+ * 任务只显示 `completed/total` 计数与展示状态，不构造单步百分比；`Y > 0` 时顶部
+ * 显示总进度条（规格 §8.1）。活动直接复用 `ToolPanel` 的面板/切换回调；子代理复用
+ * `SubagentRunSummary` 与 App 持有的确认目标/忙态/错误，确认区只在右栏发起时出现。
  */
 export default function ProgressPanel(props: ProgressPanelProps): ReactElement {
   const {
     model,
     now,
     frozenAt,
-    confirmingRunId,
+    confirmingTarget,
     cancelBusyByRunId,
     cancelErrorByRunId,
     onToggleActivity,
@@ -71,10 +72,18 @@ export default function ProgressPanel(props: ProgressPanelProps): ReactElement {
             </span>
           ) : null}
         </div>
+        {model.taskPhase === "ready" && model.totalCount > 0 ? (
+          <progress
+            className="progress-total-bar"
+            value={model.completedCount}
+            max={model.totalCount}
+            aria-label={`总进度 ${model.completedCount}/${model.totalCount}`}
+          />
+        ) : null}
         {model.taskPhase === "waiting" ? (
-          <p className="panel-empty">等待任务步骤…</p>
+          <p className="panel-empty">正在等待任务拆解</p>
         ) : model.taskPhase === "empty" ? (
-          <p className="panel-empty">当前回合还没有任务步骤</p>
+          <p className="panel-empty">暂无任务拆解</p>
         ) : model.tasks.length === 0 ? (
           <p className="panel-empty">本轮任务列表为空</p>
         ) : (
@@ -102,7 +111,12 @@ export default function ProgressPanel(props: ProgressPanelProps): ReactElement {
         ) : (
           <div className="progress-activity-list">
             {model.activity.map((panel) => (
-              <ToolPanel key={panel.anchorId} panel={panel} onToggle={onToggleActivity} />
+              <ToolPanel
+                key={panel.anchorId}
+                panel={panel}
+                onToggle={onToggleActivity}
+                idPrefix="progress"
+              />
             ))}
           </div>
         )}
@@ -129,7 +143,7 @@ export default function ProgressPanel(props: ProgressPanelProps): ReactElement {
                     now={now}
                     frozenAt={frozenAt}
                     duplicateLabel={subagentNeedsStartTime(run, model.subagents)}
-                    confirming={confirmingRunId === run.runId}
+                    confirming={confirmingTarget?.runId === run.runId && confirmingTarget.surface === "progress"}
                     cancelBusy={cancelBusyByRunId[run.runId] === true || run.phase === "stopping"}
                     cancelError={cancelErrorByRunId[run.runId]}
                     onRequestCancel={onRequestCancel}

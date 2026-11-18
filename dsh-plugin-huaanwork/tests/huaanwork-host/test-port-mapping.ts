@@ -64,7 +64,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'loop.test.ts',
     title: '@http catalog path: call_host_tool attached, cross-tab denied, and disable immediate',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-guardrails/present-as.cordis.spec.ts:134',
+    evidence: 'tests/huaanwork-guardrails/present-as.cordis.spec.ts:145',
   },
   {
     file: 'loop.test.ts',
@@ -88,7 +88,7 @@ export const testPortMapping: TestPortRow[] = [
     file: 'loop.test.ts',
     title: 'dynamic work session has same restrict allowlist as default huaanwork',
     label: '已覆盖',
-    evidence: 'tests/huaanwork-guardrails/present-as.cordis.spec.ts:92',
+    evidence: 'tests/huaanwork-guardrails/present-as.cordis.spec.ts:103',
   },
   {
     file: 'loop.test.ts',

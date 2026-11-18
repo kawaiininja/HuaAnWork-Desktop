@@ -1861,6 +1861,28 @@ test("QR-I2: an explicit system skill switch invalidates the stale skill cache a
   assert.equal(harness.guardReason(fixAgainTools, "write"), undefined);
 });
 
+test("QR-I2: an explicit-entry session's spawn slots are cleared on lease invalidation too", async () => {
+  const harness = createHarness();
+  const store = harness.ctx.huaanworkSystemSkillLeases as ReturnType<typeof createSystemSkillLeaseStore>;
+  // 显式 /explore 入口:不经模型 skill,rememberSubagentSpawn 是该会话唯一的登记来源。
+  assert.equal(store.acquireExplicit("main", "explore"), true);
+  const { decision } = await harness.preExecute(harness.parent, "subagent", { prompt: "queued" });
+  assert.equal(decision.kind, "allow");
+
+  // 显式 /test-fix 重挂:租约失效兜底必须清掉上面留下的兼容槽,不留给后续显式 @。
+  assert.equal(store.acquireExplicit("main", "test-fix"), true);
+
+  const atTools = createTools(DEFAULT_TOOL_NAMES);
+  const atChild = agentWithTools("explicit-entry-child", atTools);
+  harness.addAgent(atChild);
+  await harness.activate(atChild);
+  assert.ok(
+    atTools.visible.some((schema) => schema.name === "write"),
+    "the stale explore compat slot must not restrict a later explicit @ child",
+  );
+  assert.equal(harness.guardReason(atTools, "write"), undefined);
+});
+
 // ── Task 3: system-skill 运行进入 registry 并支持定向取消 ─────────────────────
 
 function otherParentAgent(harness: ReturnType<typeof createHarness>, id: string, sessionId: string): Agent {

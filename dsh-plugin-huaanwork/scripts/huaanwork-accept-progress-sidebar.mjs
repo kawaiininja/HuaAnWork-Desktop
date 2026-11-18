@@ -295,7 +295,8 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   const percent = checks['no-fabricated-percentage']
   requireFacts(percent.taskPercentTexts === 0, `no-fabricated-percentage: ${String(percent.taskPercentTexts)} per-step percentage labels were rendered`)
   requireFacts(percent.countPercentTexts === 0, `no-fabricated-percentage: the header count rendered a percentage`)
-  requireFacts(percent.progressBarCount === 0, `no-fabricated-percentage: ${String(percent.progressBarCount)} progress bars were rendered`)
+  requireFacts(percent.taskProgressBarCount === 0, `no-fabricated-percentage: ${String(percent.taskProgressBarCount)} per-step progress bars were rendered`)
+  requireFacts(percent.totalBarMatchesCount === true, `no-fabricated-percentage: the §8.1 total progress bar does not track the X/Y count (${percent.totalBarReason ?? 'no reason'})`)
   requireFacts(percent.countFormatAlwaysXY === true, 'no-fabricated-percentage: the header count left the X/Y format during execution')
   requireFacts(percent.activityMatchesSession === true, 'no-fabricated-percentage: the current-turn activity does not match the session log')
   requireFacts(percent.latestRoundCovered === true, 'no-fabricated-percentage: the latest model round is missing from the activity panel')
@@ -937,6 +938,7 @@ const PROGRESS_STATE = `(() => {
   const percentTexts = [...panel.querySelectorAll('.progress-task-status, .progress-count')]
     .map((node) => (node.textContent ?? '').trim())
     .filter((text) => /\\d+\\s*%/u.test(text))
+  const PROGRESS_BAR_SELECTOR = 'progress, meter, [role="progressbar"], .progress-bar'
   return {
     mounted: true,
     connection: panel.getAttribute('data-connection'),
@@ -947,7 +949,9 @@ const PROGRESS_STATE = `(() => {
     subagents,
     countText,
     percentTexts,
-    progressBarCount: panel.querySelectorAll('progress, meter, [role="progressbar"], .progress-bar').length,
+    // 规格 §8.1:单步不渲染进度条;总进度条只出现在分步任务区头部(Y > 0)。
+    taskProgressBarCount: panel.querySelectorAll('.progress-task-list ' + PROGRESS_BAR_SELECTOR).length,
+    totalProgressBarCount: panel.querySelectorAll('.progress-section-head ' + PROGRESS_BAR_SELECTOR).length,
     panelText: (panel.textContent ?? '').replace(/\\s+/g, ' ').trim(),
   }
 })()`
@@ -1782,8 +1786,20 @@ async function driveNoFabricatedPercentage(client) {
   const samples = complexSamples
   const final = samples[samples.length - 1]
   const percentTexts = samples.flatMap((state) => state.percentTexts ?? [])
-  const progressBarCount = Math.max(0, ...samples.map((state) => state.progressBarCount ?? 0))
+  const taskProgressBarCount = Math.max(0, ...samples.map((state) => state.taskProgressBarCount ?? 0))
   const countFormatAlwaysXY = samples.every((state) => state.countText === '' || parseCount(state.countText) !== undefined)
+  // 规格 §8.1:有 X/Y 计数且 Y > 0 的样本必须恰好渲染一个总进度条;无计数(等待/空)
+  // 或 Y === 0 的样本不得渲染任何进度条。
+  const totalBarMismatch = samples.filter((state) => {
+    const count = state.countText === '' ? undefined : parseCount(state.countText)
+    const total = state.totalProgressBarCount ?? 0
+    if (count === undefined) return total !== 0
+    return count.total > 0 ? total !== 1 : total !== 0
+  })
+  const totalBarMatchesCount = totalBarMismatch.length === 0
+  const totalBarReason = totalBarMatchesCount
+    ? null
+    : `${String(totalBarMismatch.length)} samples carried a total progress bar that disagrees with the header count`
 
   const sessions = loadSessions(isolated.homeDir)
   const parent = findParentSession(sessions, `${MARKER}-TODO`)
@@ -1807,7 +1823,8 @@ async function driveNoFabricatedPercentage(client) {
     || latestRoundToolNames.every((name) => activityToolNames.includes(name))
   const reasons = []
   if (percentTexts.length > 0) reasons.push(`percentage labels rendered: ${percentTexts.slice(0, 3).join(', ')}`)
-  if (progressBarCount > 0) reasons.push(`${String(progressBarCount)} progress bars rendered`)
+  if (taskProgressBarCount > 0) reasons.push(`${String(taskProgressBarCount)} per-step progress bars rendered`)
+  if (!totalBarMatchesCount) reasons.push(String(totalBarReason))
   if (!countFormatAlwaysXY) reasons.push('the header count left the X/Y format')
   if (!activityMatchesSession) {
     reasons.push(`activity ${JSON.stringify(activityToolNames)} does not match the current-turn session log ${JSON.stringify(sessionToolNames)}`)
@@ -1823,7 +1840,10 @@ async function driveNoFabricatedPercentage(client) {
     ok: reasons.length === 0,
     taskPercentTexts: percentTexts.length,
     countPercentTexts: percentTexts.length,
-    progressBarCount,
+    taskProgressBarCount,
+    totalProgressBarCount: Math.max(0, ...samples.map((state) => state.totalProgressBarCount ?? 0)),
+    totalBarMatchesCount,
+    totalBarReason,
     countFormatAlwaysXY,
     activityToolNames,
     sessionToolNames,
@@ -2094,13 +2114,18 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
       // previous system-skill turn.
       const executionTurn = turnFacts(parent, `${MARKER}-SKILL`) ?? turn
       const executionStartSeq = executionTurn?.startSeq ?? turn.startSeq
+      // The window must cover the trailing /test-fix turn as well: `subagent` stays
+      // visible for the whole system-skill execution, not just the /explore leg.
+      // Falls back to the /explore end when the /test-fix turn never settled.
+      const testFixTurn = turnFacts(parent, `${MARKER}-TESTFIX`)
+      const duringEndSeq = testFixTurn?.endSeq ?? turn.endSeq
       // `after` is the header in force from the next ordinary turn onward: a
       // reclaim that never logged a request would keep `subagent` visible, so an
       // empty window fails instead of passing trivially.
       const afterStart = followUp?.startSeq ?? (turn.endSeq ?? 0)
       phases = {
         before: headerNamesBefore(header, executionStartSeq),
-        during: headerNamesBetween(header, executionStartSeq, turn.endSeq),
+        during: headerNamesBetween(header, executionStartSeq, duringEndSeq),
         after: headerNamesBetween(header, afterStart, null),
       }
       if (followUp === undefined) {

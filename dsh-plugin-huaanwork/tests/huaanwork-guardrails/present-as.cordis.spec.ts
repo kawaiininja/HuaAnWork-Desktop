@@ -12,7 +12,7 @@ afterEach(() => {
 
 type MockAgent = {
   id?: string;
-  session?: { id?: string };
+  session?: { id?: string; header?: { parentSession?: unknown } };
   ctx: {
     get(name: string): MockToolsService | undefined;
   };
@@ -29,6 +29,7 @@ type MockToolsService = {
 function createMockAgent(options: {
   id?: string;
   sessionId?: string;
+  headerParentSession?: string;
   initialToolNames: string[];
 }): MockAgent {
   const restrictions: Array<{ allow: readonly string[] }> = [];
@@ -57,7 +58,16 @@ function createMockAgent(options: {
 
   const agent: MockAgent = {
     ...(options.id !== undefined ? { id: options.id } : {}),
-    ...(options.sessionId !== undefined ? { session: { id: options.sessionId } } : {}),
+    ...(options.sessionId !== undefined
+      ? {
+          session: {
+            id: options.sessionId,
+            ...(options.headerParentSession !== undefined
+              ? { header: { parentSession: options.headerParentSession } }
+              : {}),
+          },
+        }
+      : {}),
     ctx: {
       get: (name: string) => (name === "tools" ? tools : undefined),
     },
@@ -482,6 +492,40 @@ test("skill is visible to attended parents but hidden from unattended automation
   assert.ok(parent.restrictCalls.at(-1)!.allow.includes("skill"), "an attended parent may load skills");
   assert.ok(!unattended.restrictCalls.at(-1)!.allow.includes("skill"), "unattended automation does not get skill");
   assert.ok(!child.restrictCalls.at(-1)!.allow.includes("skill"), "an unmanaged child does not get skill");
+});
+
+test("creation-window child hides skill via the session header before subagent/start registration", () => {
+  // 真实运行时顺序:agents.create(触发 agent/created)先于 observer.start(触发
+  // subagent/start 的 registerChildSession)。先 apply 再 emit agent/created,保持
+  // 登记表为空,验证 header 判别不依赖登记表补齐。
+  const parent = createMockAgent({ sessionId: "window-parent", initialToolNames: ["read", "skill"] });
+  const child = createMockAgent({
+    sessionId: "window-child",
+    headerParentSession: "window-parent",
+    initialToolNames: ["read", "skill"],
+  });
+  const ctx = createMockContext({
+    agents: [parent],
+    attachments: emptyAttachments(),
+  }) as ReturnType<typeof createMockContext> & Record<string, unknown>;
+  ctx.huaanworkPackageChildAllow = new Map();
+
+  apply(ctx as never);
+  ctx.emit("agent/created", { agent: child });
+
+  assert.ok(parent.restrictCalls.at(-1)!.allow.includes("skill"), "the attended parent keeps skill");
+  assert.ok(
+    !child.restrictCalls.at(-1)!.allow.includes("skill"),
+    "the creation-window child hides skill before the registry knows it",
+  );
+
+  // 登记表随后补齐(subagent/start):tools/change 重放后两个判别口径保持一致。
+  registerChildSession("window-parent", "window-child");
+  ctx.emit("tools/change");
+  assert.ok(
+    !child.restrictCalls.at(-1)!.allow.includes("skill"),
+    "the registered child still hides skill",
+  );
 });
 
 test("PM-1: package allow ∩ present-as intersection keeps subagent only when the package allow declares it", () => {
