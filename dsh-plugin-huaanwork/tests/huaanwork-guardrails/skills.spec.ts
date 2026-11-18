@@ -151,6 +151,7 @@ function createHarness(options?: {
   parentNames?: readonly string[];
   anchor?: { sessionId: string; clientMessageId: string; origin: "advanced" | "automation" | "unknown" };
   deferLeaseStore?: boolean;
+  skipPresentAs?: boolean;
 }) {
   const skills: SkillRegistration[] = [];
   const events: Record<string, ((payload: never, next?: () => Promise<unknown>, extra?: unknown) => unknown)[]> = {};
@@ -264,7 +265,7 @@ function createHarness(options?: {
   if (!options?.deferLeaseStore) {
     ctx.huaanworkSystemSkillLeases = createSystemSkillLeaseStore(ctx as never);
   }
-  applyPresentAs(ctx as never);
+  if (!options?.skipPresentAs) applyPresentAs(ctx as never);
   applySkills(ctx as never);
   applyLimits(ctx as never);
 
@@ -2296,16 +2297,31 @@ test("a cancelled run whose execution ended and dispose succeeded converges to s
 });
 
 test("disposed system-skill children are not re-restricted on later tools/change", async () => {
-  const harness = createHarness();
+  const harness = createHarness({ skipPresentAs: true });
   await harness.invokeSkill(harness.parent, "explore");
   const firstTools = createTools(DEFAULT_TOOL_NAMES);
+  const restrict = firstTools.restrict;
+  let disposed = false;
+  let exploreRestrictCalls = 0;
+  firstTools.restrict = (filter) => {
+    if (filter.allow.join(",") === "read,read_file,glob,grep") {
+      exploreRestrictCalls += 1;
+      if (disposed) throw new Error("cannot create effect on inactive context");
+    }
+    return restrict(filter);
+  };
   const first = harness.addAgent({
     id: "child-dispose",
     ctx: { get: (name) => (name === "tools" ? firstTools : undefined) },
   });
 
   await harness.invokeSubagent(harness.parent, first);
+  assert.equal(exploreRestrictCalls, 1);
+
+  disposed = true;
   harness.emit("agent/disposed", { agent: first });
+  harness.emit("tools/change", {});
+  assert.equal(exploreRestrictCalls, 1);
 
   const second = harness.addAgent({
     id: "child-after-dispose",
