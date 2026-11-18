@@ -73,6 +73,8 @@ declare module '@deepseek-ai/cordis' {
      * 实例随宿主生命周期;guardrails 侧与 sessions/bridge 读同一引用。
      */
     huaanworkSystemSkillLeases: SystemSkillLeaseStore
+    /** 租约失效清理的延迟注册入口;guardrails 注入,holders 创建 store 后调用。 */
+    huaanworkRegisterSystemSkillLeaseInvalidation?: () => void
   }
 }
 
@@ -101,6 +103,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkTurnScheduler',
   'huaanworkTurnAnchors',
   'huaanworkSystemSkillLeases',
+  'huaanworkRegisterSystemSkillLeaseInvalidation',
 ] as const
 
 let installed = false
@@ -186,6 +189,8 @@ export function installHuaanworkHolders(
   ctx.huaanworkTurnAnchors = createTurnAnchorStore()
   // 系统技能租约在其余 holder 之后创建:store 捕获同一批容器(无人值守/附件/血缘/锚点)。
   ctx.huaanworkSystemSkillLeases = createSystemSkillLeaseStore(ctx)
+  // guardrails 的失效清理在此刻注册,避免 skills apply 先于 store 创建时漏挂 onInvalidate。
+  ctx.huaanworkRegisterSystemSkillLeaseInvalidation?.()
 
   if (ctx.huaanworkEmit !== emit) {
     throw new Error(

@@ -462,6 +462,28 @@ test("subagent visibility matrix: ordinary parents, unattended turns and legacy 
   });
 });
 
+test("skill is visible to attended parents but hidden from unattended automation and unmanaged children", () => {
+  const parent = createMockAgent({ sessionId: "skill-parent", initialToolNames: ["read", "skill", "subagent"] });
+  const unattended = createMockAgent({ sessionId: "skill-auto", initialToolNames: ["read", "skill"] });
+  const child = createMockAgent({ sessionId: "skill-child", initialToolNames: ["read", "skill"] });
+  registerChildSession("skill-parent", "skill-child");
+
+  const ctx = createMockContext({
+    agents: [parent, unattended, child],
+    attachments: emptyAttachments(),
+  }) as ReturnType<typeof createMockContext> & Record<string, unknown>;
+  ctx.huaanworkUnattended = new Map([
+    ["skill-auto", { runId: "r", automationId: "a", allow: new Set() }],
+  ]);
+  ctx.huaanworkPackageChildAllow = new Map();
+
+  apply(ctx as never);
+
+  assert.ok(parent.restrictCalls.at(-1)!.allow.includes("skill"), "an attended parent may load skills");
+  assert.ok(!unattended.restrictCalls.at(-1)!.allow.includes("skill"), "unattended automation does not get skill");
+  assert.ok(!child.restrictCalls.at(-1)!.allow.includes("skill"), "an unmanaged child does not get skill");
+});
+
 test("PM-1: package allow ∩ present-as intersection keeps subagent only when the package allow declares it", () => {
   const initialToolNames = ["read", "read_file", "glob", "grep", "bash", "subagent", "git_push"];
 

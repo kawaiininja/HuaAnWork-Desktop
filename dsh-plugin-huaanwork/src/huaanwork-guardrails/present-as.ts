@@ -1,5 +1,6 @@
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import type { ToolPresentationMode } from "@deepseek-ai/dsh-tools";
+import { parentSessionOf } from "../huaanwork-host/child-sessions.ts";
 
 import type { AttachmentMaps } from "./agent-attachments.ts";
 
@@ -8,7 +9,7 @@ function isDisabledPresentationMode(mode: unknown): mode is "ptc" | "both" {
 }
 
 /** Agent disposal can race a scheduled tools/change; Cordis reports it as an inactive scope. */
-function isInactiveContextError(error: unknown): boolean {
+export function isInactiveContextError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("inactive context");
 }
 
@@ -57,6 +58,8 @@ type Agent = {
 
 export type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts(Cordis ctx 无单独类型导出)
   huaanworkAttachments?: AttachmentMaps;
+  huaanworkUnattended?: { has(sessionId: string): boolean };
+  huaanworkPackageChildAllow?: Map<string, readonly string[]>;
   huaanworkEmit?: (event: { event: "session/end"; ok: false; error: string; sessionId?: string }) => void;
   tools: {
     presentAs(mode: ToolPresentationMode): () => void;
@@ -128,9 +131,16 @@ export function apply(ctx: Context): void {
     lifted.delete(agent);
     const sessionId = sessionIdOfAgentRef(agent);
     const extra = sessionId ? ctx.huaanworkAttachments?.sessionAgentTools.get(sessionId) : undefined;
+    // R2:父会话可调用 `skill` 加载系统技能;无人值守自动化与 legacy/system-skill 儿童
+    // 维持不可见(他们的派发只能走显式 @ / 包血缘 / 系统技能租约)。
+    const hideSkill = sessionId !== undefined && (
+      ctx.huaanworkUnattended?.has(sessionId) === true
+      || (parentSessionOf(sessionId) !== undefined && ctx.huaanworkPackageChildAllow?.has(sessionId) !== true)
+    );
     const allowed = tools.schemas().flatMap((schema) => {
       const name = schema.name;
       if (!name) return [];
+      if (name === "skill" && hideSkill) return [];
       if (ALLOWED_TOOLS.has(name) || extra?.has(name)) return [name];
       return [];
     });

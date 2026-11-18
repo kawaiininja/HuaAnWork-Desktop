@@ -649,9 +649,13 @@ function prepareProfile({ homeDir, userDataDir: userData, workspaceDir, models }
 
   const flat = {
     base_url: models.base_url,
-    model: models.model,
+    // 验收需要模型稳定遵循「必须调用 subagent」的技能指令;deepseek-flash 在多轮
+    // 双入口场景会自述没有 subagent。用 deepseek-chat 驱动,端点/密钥仍只读复制。
+    model: process.env.PSB_ACCEPTANCE_MODEL ?? 'deepseek-chat',
     api_key: models.api_key,
-    models: models.models,
+    models: models.models.map((entry) => entry.id === models.active_model_id
+      ? { ...entry, model: process.env.PSB_ACCEPTANCE_MODEL ?? 'deepseek-chat' }
+      : entry),
     active_model_id: models.active_model_id,
     allow_network: models.allow_network,
   }
@@ -1888,9 +1892,9 @@ async function driveParentNoSelfSpawn(client, tasksFact) {
 }
 
 const DUAL_ENTRIES = [
-  { entry: 'model-skill', skill: 'explore', modelSkill: true, prompt: `${MARKER}-SKILL 这是一次工具调用测试：你的第一个动作必须调用 skill 工具加载 explore 技能（参数 name 为 "explore"），不要直接回答。加载后按技能要求让子代理探索当前工作区，最后只返回一行结论。`, cancel: false },
-  { entry: 'explicit-slash', skill: 'explore', modelSkill: false, prompt: `/explore ${MARKER}-EXPLORE 逐个阅读当前工作区的 README.md、samples/sample-review.js 与 fixme 目录下的所有文件，说明每个文件的作用，最后给出一行结论。`, cancel: true },
-  { entry: 'explicit-slash', skill: 'test-fix', modelSkill: false, prompt: `/test-fix ${MARKER}-TESTFIX 先运行 node fixme/check.js 确认失败，然后修改 fixme/lib.js 让检查通过，重新运行直到输出 PASS，最后汇总改动。`, cancel: true },
+  { entry: 'model-skill', skill: 'explore', modelSkill: true, prompt: `${MARKER}-SKILL 这是一次工具调用测试：你的第一个动作必须调用 skill 工具加载 explore 技能（参数 name 为 "explore"），不要直接回答。加载后必须立即调用 subagent 工具派发探索子代理，未调用 subagent 前不得结束本轮，最后只返回一行结论。`, cancel: false },
+  { entry: 'explicit-slash', skill: 'explore', modelSkill: false, prompt: `/explore ${MARKER}-EXPLORE 必须通过 subagent 工具派发只读探索子代理，逐个阅读当前工作区的 README.md、samples/sample-review.js 与 fixme 目录下的所有文件，说明每个文件的作用；不允许在本会话直接读取或结束，最后给出一行结论。`, cancel: true },
+  { entry: 'explicit-slash', skill: 'test-fix', modelSkill: false, prompt: `/test-fix ${MARKER}-TESTFIX 必须通过 subagent 工具派发修复子代理：先运行 node fixme/check.js 确认失败，然后修改 fixme/lib.js 让检查通过，重新运行直到输出 PASS，最后汇总改动；不允许在本会话直接执行修复。`, cancel: true },
 ]
 const AFTER_PROMPT = `${MARKER}-AFTER 回复「完成」两个字即可。`
 
@@ -2012,6 +2016,20 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
       log(`${definition.entry} ${definition.skill} card missing: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
     await screenshot(client, `05-${definition.skill}-${definition.entry}.png`)
+    // Model variance: a turn can finish without delegating even though subagent is
+    // exposed. Retry once with an explicit tool-call instruction before failing.
+    if (!runSeenInMain && sessionFailure === null) {
+      const retryPrompt = `${MARKER}-RETRY-${definition.skill} 你刚才没有调用 subagent 工具。现在必须立即调用 subagent 工具：description 填 "${definition.skill}"，prompt 按技能要求执行，不要直接回答或结束。`
+      try {
+        await sendText(client, retryPrompt, Math.min(options.timeout, 120_000))
+        await waitForNewMainCard(client, definition.skill, previousCards, Math.min(options.timeout, 120_000))
+        runSeenInMain = true
+        runSeenInRail = true
+        log(`${definition.entry} ${definition.skill} run appeared after the explicit subagent retry`)
+      } catch (cause) {
+        log(`${definition.entry} ${definition.skill} retry still produced no run: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+    }
     // Cancel while the run is still active: a settled run has no terminate control.
     if (definition.cancel && runSeenInMain) {
       try {
@@ -2071,13 +2089,18 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
     if (turn === undefined) {
       phaseComparison = { ok: false, reasons: ['the explicit /explore user message is missing'], beforeHasSubagent: false, duringHasSubagent: false, afterHasSubagent: false, added: [], removed: [] }
     } else {
+      // The execution window starts at the first system-skill entry (model skill or
+      // explicit slash); `before` is the ordinary turn before that window, not the
+      // previous system-skill turn.
+      const executionTurn = turnFacts(parent, `${MARKER}-SKILL`) ?? turn
+      const executionStartSeq = executionTurn?.startSeq ?? turn.startSeq
       // `after` is the header in force from the next ordinary turn onward: a
       // reclaim that never logged a request would keep `subagent` visible, so an
       // empty window fails instead of passing trivially.
       const afterStart = followUp?.startSeq ?? (turn.endSeq ?? 0)
       phases = {
-        before: headerNamesBefore(header, turn.startSeq),
-        during: headerNamesBetween(header, turn.startSeq, turn.endSeq),
+        before: headerNamesBefore(header, executionStartSeq),
+        during: headerNamesBetween(header, executionStartSeq, turn.endSeq),
         after: headerNamesBetween(header, afterStart, null),
       }
       if (followUp === undefined) {

@@ -150,6 +150,7 @@ function createHarness(options?: {
   childNames?: readonly string[];
   parentNames?: readonly string[];
   anchor?: { sessionId: string; clientMessageId: string; origin: "advanced" | "automation" | "unknown" };
+  deferLeaseStore?: boolean;
 }) {
   const skills: SkillRegistration[] = [];
   const events: Record<string, ((payload: never, next?: () => Promise<unknown>, extra?: unknown) => unknown)[]> = {};
@@ -260,7 +261,9 @@ function createHarness(options?: {
     },
   };
 
-  ctx.huaanworkSystemSkillLeases = createSystemSkillLeaseStore(ctx as never);
+  if (!options?.deferLeaseStore) {
+    ctx.huaanworkSystemSkillLeases = createSystemSkillLeaseStore(ctx as never);
+  }
   applyPresentAs(ctx as never);
   applySkills(ctx as never);
   applyLimits(ctx as never);
@@ -2290,4 +2293,58 @@ test("a cancelled run whose execution ended and dispose succeeded converges to s
   assert.equal(run.stopReason, "error");
   assert.deepEqual(run.cleanupWarnings, []);
   assert.notEqual(run.endedAt, undefined);
+});
+
+test("disposed system-skill children are not re-restricted on later tools/change", async () => {
+  const harness = createHarness();
+  await harness.invokeSkill(harness.parent, "explore");
+  const firstTools = createTools(DEFAULT_TOOL_NAMES);
+  const first = harness.addAgent({
+    id: "child-dispose",
+    ctx: { get: (name) => (name === "tools" ? firstTools : undefined) },
+  });
+
+  await harness.invokeSubagent(harness.parent, first);
+  harness.emit("agent/disposed", { agent: first });
+
+  const second = harness.addAgent({
+    id: "child-after-dispose",
+    ctx: { get: (name) => (name === "tools" ? createTools(DEFAULT_TOOL_NAMES) : undefined) },
+  });
+  const decision = await harness.invokeSubagent(harness.parent, second);
+  assert.equal(decision.kind, "allow");
+});
+
+test("a lease store injected after apply still invalidates stale skill kinds on explicit re-acquire", async () => {
+  const harness = createHarness({ deferLeaseStore: true });
+  harness.ctx.huaanworkSystemSkillLeases = createSystemSkillLeaseStore(harness.ctx as never);
+  await harness.invokeSkill(harness.parent, "explore");
+  await harness.invokeSubagent(harness.parent, harness.child);
+
+  (harness.ctx as { huaanworkRegisterSystemSkillLeaseInvalidation?: () => void })
+    .huaanworkRegisterSystemSkillLeaseInvalidation?.();
+  harness.ctx.huaanworkSystemSkillLeases.acquireExplicit("main", "test-fix");
+
+  await harness.invokeSubagent(harness.parent, harness.child);
+  const run = harness.runs.snapshot("main").runs.at(-1)!;
+  assert.equal(run.label, "test-fix");
+});
+
+test("restricting a child that is already unloading does not poison the next activation", async () => {
+  const harness = createHarness();
+  await harness.invokeSkill(harness.parent, "explore");
+  const childTools = createTools(DEFAULT_TOOL_NAMES);
+  childTools.restrict = (filter) => {
+    if (filter.allow.join(",") === "read,read_file,glob,grep") {
+      throw new Error("cannot create effect on inactive context");
+    }
+    return createTools(DEFAULT_TOOL_NAMES).restrict(filter);
+  };
+  const child = harness.addAgent({
+    id: "child-inactive",
+    ctx: { get: (name) => (name === "tools" ? childTools : undefined) },
+  });
+
+  await harness.invokeSubagent(harness.parent, child);
+  harness.emit("tools/change", {});
 });

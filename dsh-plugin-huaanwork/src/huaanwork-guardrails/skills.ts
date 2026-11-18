@@ -24,7 +24,7 @@ import {
   attachAgentTools,
   type AttachmentMaps,
 } from "./agent-attachments.ts";
-import { refreshAgentRestrict } from "./present-as.ts";
+import { isInactiveContextError, refreshAgentRestrict } from "./present-as.ts";
 import type { AgentPackageSubagentRequest } from "../huaanwork-host/agent-package/types.ts";
 import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
 import type { TurnAnchorStore } from "../huaanwork-host/turn-anchors.ts";
@@ -136,12 +136,15 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   huaanworkSessionRoots?: Map<string, string>;
   /** 系统技能回合租约(holders 注入);模型 `skill` 入口取租约,显式入口由 sessions 接线。 */
   huaanworkSystemSkillLeases?: SystemSkillLeaseStore;
+  /** 租约注入可能晚于本插件 apply;holders 创建 store 后调用以注册失效清理。 */
+  huaanworkRegisterSystemSkillLeaseInvalidation?: () => void;
   on(
     event:
       | "tools/pre-execute"
       | "tools/execute"
       | "tools/result"
       | "agent/created"
+      | "agent/disposed"
       | "subagent/start"
       | "subagent/end"
       | "tools/change",
@@ -209,6 +212,12 @@ export function apply(ctx: Context): void {
   const tracked = new Set<Agent>();
   const lifted = new WeakMap<Agent, () => void>();
   let restricting = false;
+
+  const forget = (agent: Agent) => {
+    tracked.delete(agent);
+    kinds.delete(agent);
+    lifted.delete(agent);
+  };
 
   // spawnKind:技能类型跨越 `tools/pre-execute` → `tools/execute` → body 的唯一载体。
   //
@@ -315,17 +324,34 @@ export function apply(ctx: Context): void {
     const existing = (tools.schemas?.() ?? []).flatMap((schema) => (schema.name ? [schema.name] : []));
     const allow = kind === "explore" ? exploreAllowList(existing) : testFixAllowList(existing);
     if (allow.length === 0) return;
-    lifted.set(agent, tools.restrict?.({ allow }) ?? (() => undefined));
+    try {
+      lifted.set(agent, tools.restrict?.({ allow }) ?? (() => undefined));
+    } catch (error) {
+      // A disposed child must not poison the activation that triggered tools/change.
+      if (isInactiveContextError(error)) {
+        forget(agent);
+        return;
+      }
+      throw error;
+    }
   };
 
   const applyKind = (agent: Agent, kind: SkillKind) => {
     if (kinds.has(agent)) return;
     kinds.set(agent, kind);
     tracked.add(agent);
-    restrictKind(agent, kind);
-    const tools = agent.ctx?.get?.("tools");
-    const allowed = new Set(wantedTools(kind));
-    tools?.guard?.((execution) => (allowed.has(execution.name) ? undefined : `huaanwork-${kind}`));
+    try {
+      restrictKind(agent, kind);
+      const tools = agent.ctx?.get?.("tools");
+      const allowed = new Set(wantedTools(kind));
+      tools?.guard?.((execution) => (allowed.has(execution.name) ? undefined : `huaanwork-${kind}`));
+    } catch (error) {
+      if (isInactiveContextError(error)) {
+        forget(agent);
+        return;
+      }
+      throw error;
+    }
   };
 
   const consumePendingSpawn = (agent: Agent) => {
@@ -353,7 +379,15 @@ export function apply(ctx: Context): void {
       slotsByParent.delete(agent);
     }
   };
-  ctx.huaanworkSystemSkillLeases?.onInvalidate(invalidateSessionSpawnState);
+  const invalidationStores = new WeakSet<object>();
+  const registerLeaseInvalidation = () => {
+    const store = ctx.huaanworkSystemSkillLeases;
+    if (store === undefined || invalidationStores.has(store)) return;
+    invalidationStores.add(store);
+    store.onInvalidate(invalidateSessionSpawnState);
+  };
+  ctx.huaanworkRegisterSystemSkillLeaseInvalidation = registerLeaseInvalidation;
+  registerLeaseInvalidation();
 
   ctx.on(
     "tools/pre-execute",
@@ -435,6 +469,10 @@ export function apply(ctx: Context): void {
 
   ctx.on("agent/created", (({ agent }: { agent: Agent }) => {
     consumePendingSpawn(agent);
+  }) as never);
+
+  ctx.on("agent/disposed", (({ agent }: { agent: Agent }) => {
+    forget(agent);
   }) as never);
 
   ctx.on("subagent/start", ((info: { id?: string; runId?: string }) => {

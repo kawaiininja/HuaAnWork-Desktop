@@ -1618,6 +1618,10 @@ export function prepareDesktopProfile(
   })
   const workspaceRoot = pendingRoot ?? neutralWorkspaceRoot(profile.dir)
   patches.push(
+    // R2 模型入口:桌面父会话不走 preset,宿主平面的 skill-filesystem/tool-skill 需显式复挂;
+    // agentsHome 继续指向空目录,避免扫描全局 ~/.agents/skills。放在 llm-deepseek 锁层锚点之前。
+    { id: 'skill-filesystem', disabled: false, config: { agentsHome: join(profile.dir, EMPTY_AGENTS_HOME_DIR) } },
+    { id: 'tool-skill', disabled: false },
     { id: 'llm-deepseek', disabled: true },
     { id: 'approval', config: { policy: 'ask' } },
     { id: 'tools', config: { mode: 'native' } },

@@ -114,7 +114,7 @@ async function bootSharedHost() {
     { match: /hang/, reply: { hang: true } },
     { match: /自我介绍/, reply: { content: 'stub:我是 HuaAnWork 本地智能助手。' } },
     {
-      match: /ls/,
+      match: /\bls\b/,
       reply: { toolCalls: [{ name: 'bash', arguments: { command: 'ls' } }] },
     },
   ])

@@ -174,6 +174,26 @@ describe('desktop profile composition', {
     expect((cordisSkills?.config as { customSkillDirs?: unknown }).customSkillDirs).toBeDefined()
   })
 
+  it('enables the host-plane skill catalog and loader for desktop parent agents', () => {
+    const home = temporaryHome()
+    const prepared = prepareDesktopProfile(undefined, home, 'darwin')
+    const rows = composeEntries([prepared.patches])
+    const emptyAgentsHome = join(prepared.profile.dir, 'skill-provider-empty-agents-home')
+
+    const skillFilesystem = rows.find(row => row.id === 'skill-filesystem')
+    expect(skillFilesystem).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-skill-filesystem',
+      disabled: false,
+      config: expect.objectContaining({ agentsHome: emptyAgentsHome }),
+    }))
+
+    const toolSkill = rows.find(row => row.id === 'tool-skill')
+    expect(toolSkill).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-tool-skill',
+      disabled: false,
+    }))
+  })
+
   it('ships a two-level delegation cap so a package child can dispatch its lane subagents', () => {
     const home = temporaryHome()
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')
