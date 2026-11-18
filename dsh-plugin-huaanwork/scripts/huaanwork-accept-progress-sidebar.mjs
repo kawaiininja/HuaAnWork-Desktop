@@ -951,7 +951,7 @@ const PROGRESS_STATE = `(() => {
     percentTexts,
     // 规格 §8.1:单步不渲染进度条;总进度条只出现在分步任务区头部(Y > 0)。
     taskProgressBarCount: panel.querySelectorAll('.progress-task-list ' + PROGRESS_BAR_SELECTOR).length,
-    totalProgressBarCount: panel.querySelectorAll('.progress-section-head ' + PROGRESS_BAR_SELECTOR).length,
+    totalProgressBarCount: panel.querySelectorAll('.progress-total-bar').length,
     panelText: (panel.textContent ?? '').replace(/\\s+/g, ' ').trim(),
   }
 })()`

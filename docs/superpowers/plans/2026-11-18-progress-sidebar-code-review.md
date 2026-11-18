@@ -166,5 +166,5 @@
 
 ### 6.3 验证与遗留
 
-- `@huaanwork/policy check`：65 pass / 0 fail / 2 skipped（Windows 路径在 macOS 跳过）；`typecheck` 0 错误；受影响聚焦套件（`test-port-mapping`、`present-as.cordis`、`skills`、`client-huaanwork/*`）904/904 通过；`corepack yarn check` 全量门禁见本次提交信息。
-- **遗留人工步骤**：Important #1 修复后需在具备真实模型凭证的真机 Electron 上复跑 `huaanwork-accept-progress-sidebar.mjs` 全部 7 项走查并更新 `2026-11-15-progress-sidebar-acceptance.md`（走查第 2 项现按新判据覆盖 §8.1 总进度条）；该脚本依赖外部凭证，本环境按 `BLOCKED` 处理未复跑。
+- `@huaanwork/policy check`：65 pass / 0 fail / 2 skipped（Windows 路径在 macOS 跳过）；`typecheck` 0 错误；受影响聚焦套件（`test-port-mapping`、`present-as.cordis`、`skills`、`client-huaanwork/*`）904/904 通过；`corepack yarn check` 全量门禁 GATE_EXIT=0（vitest 304 文件/4367 通过、verify:host 53）。
+- **真机复跑（2026-11-18 晚，已完成）**：重建含修复产物后在真机 Electron 复跑 `huaanwork-accept-progress-sidebar.mjs` 全量 7 项——首轮 6/7，唯一失败经查为**脚本侧判据选择器 bug**（总进度条按 `.progress-section-head` 后代查询而组件渲染为兄弟节点，修正为直接查询 `.progress-total-bar`）；修正后完整复跑 **exit 0（PASS）7/7**，`no-fabricated-percentage` 新判据实测 39 采样单步进度条 0、总进度条与 X/Y 计数互锁成立，且 `dual-entry`（延长后 during 窗）与 `single-cancel-isolation`（新确认表面作用域）真机通过。证据更新见 [2026-11-15-progress-sidebar-acceptance.md §2.5](../../evidence/2026-11-15-progress-sidebar-acceptance.md)；分支达合入 `master` 标准。
