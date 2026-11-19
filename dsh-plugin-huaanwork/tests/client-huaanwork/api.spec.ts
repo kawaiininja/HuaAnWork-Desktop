@@ -73,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(77 项)——
+// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(80 项)——
 const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'workspace.open': { http: 'POST', path: '/huaanwork/workspace/open' },
   'workspace.close': { http: 'POST', path: '/huaanwork/workspace/close' },
@@ -152,11 +152,14 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'task.bindSession': { http: 'POST', path: '/huaanwork/task/bindSession' },
   'task.rename': { http: 'POST', path: '/huaanwork/task/rename' },
   'task.setModel': { http: 'POST', path: '/huaanwork/task/setModel' },
+  'artifact.get': { http: 'GET', path: '/huaanwork/artifact/get' },
+  'artifact.content': { http: 'GET', path: '/huaanwork/artifact/content' },
+  'artifact.list': { http: 'GET', path: '/huaanwork/artifact/list' },
 }
 
 describe('rpcCall 路由映射', () => {
-  test('全表 77 项与 ROUTE_TABLE 一一对应', () => {
-    expect(Object.keys(ROUTES)).toHaveLength(77)
+  test('全表 80 项与 ROUTE_TABLE 一一对应', () => {
+    expect(Object.keys(ROUTES)).toHaveLength(80)
     const actual = Object.fromEntries(
       Object.entries(ROUTES).map(([method, route]) => [method, { http: route.http, path: route.path }]),
     )
@@ -308,6 +311,22 @@ describe('rpcCall 路由映射', () => {
     expect(lastFetchCall().url).toBe('/huaanwork/automation/list')
     await rpcCall('skill.get')
     expect(lastFetchCall().url).toBe('/huaanwork/skill/get')
+  })
+
+  test('artifact 域:三条 GET 走 query,list 只传 sessionId', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}))
+    await rpcCall('artifact.get', { sessionId: 's1', artifactId: 'a1' })
+    expect(lastFetchCall().url).toBe('/huaanwork/artifact/get?sessionId=s1&artifactId=a1')
+    expect(lastFetchCall().init.method).toBe('GET')
+    expect(lastFetchCall().init.body).toBeUndefined()
+
+    await rpcCall('artifact.content', { sessionId: 's1', artifactId: 'a1' })
+    expect(lastFetchCall().url).toBe('/huaanwork/artifact/content?sessionId=s1&artifactId=a1')
+    expect(lastFetchCall().init.body).toBeUndefined()
+
+    await rpcCall('artifact.list', { sessionId: 's1' })
+    expect(lastFetchCall().url).toBe('/huaanwork/artifact/list?sessionId=s1')
+    expect(lastFetchCall().init.body).toBeUndefined()
   })
 
   test('2xx 返回 JSON payload', async () => {

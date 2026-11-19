@@ -13,6 +13,7 @@ import type {
   RunSummary,
 } from '../client-huaanwork/rpc-types.ts'
 import { readCachedCatalogPackages, refreshCatalogPackageCache, type AgentPackageSummary } from './agent-package/catalog-client.ts'
+import { getArtifact, listArtifacts, readArtifactContent } from './artifacts-host.ts'
 import {
   AGENT_PACKAGE_VERIFY_FAILURE,
   installCatalogAgentPackage,
@@ -303,6 +304,20 @@ function bodyParam(body: unknown, key: string): string | undefined {
   return body && typeof body === 'object' && typeof (body as Record<string, unknown>)[key] === 'string'
     ? (body as Record<string, string>)[key]
     : undefined
+}
+
+/** artifact 读路径的 query 契约:sessionId 恒必填,artifactId 仅单条读取必填。 */
+function artifactSessionId(req: RouteRequest, method: string): string {
+  const sessionId = queryParam(req, 'sessionId')
+  if (!sessionId) throw new RouteError(400, 'bad-request', `${method} requires params.sessionId`)
+  return sessionId
+}
+
+function artifactRef(req: RouteRequest, method: string): { sessionId: string; artifactId: string } {
+  const sessionId = artifactSessionId(req, method)
+  const artifactId = queryParam(req, 'artifactId')
+  if (!artifactId) throw new RouteError(400, 'bad-request', `${method} requires params.artifactId`)
+  return { sessionId, artifactId }
 }
 
 // ---------------------------------------------------------------------------
@@ -1674,6 +1689,39 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { task: await setTaskModel(ctx.profileDir, { taskId, modelId }) }
     }),
   }, // Task 9(子任务记住模型)
+
+  // artifact(Task 4):只读查询。存储根恒取 routeCtx.profileDir,调用方不提供路径;
+  // get/list 只回摘要,仅 content 读正文并转 UTF-8 字符串。归属不符统一报 artifact-not-found。
+  {
+    method: 'artifact.get',
+    http: 'GET',
+    path: '/huaanwork/artifact/get',
+    handler: storeRoute(async (req, ctx) => {
+      const { sessionId, artifactId } = artifactRef(req, 'artifact.get')
+      return { artifact: await getArtifact(ctx.profileDir, sessionId, artifactId) }
+    }),
+  },
+  {
+    method: 'artifact.content',
+    http: 'GET',
+    path: '/huaanwork/artifact/content',
+    handler: storeRoute(async (req, ctx) => {
+      const { sessionId, artifactId } = artifactRef(req, 'artifact.content')
+      const artifact = await getArtifact(ctx.profileDir, sessionId, artifactId)
+      const content = await readArtifactContent(ctx.profileDir, sessionId, artifactId)
+      return { artifact, content: content.toString('utf8') }
+    }),
+  },
+  {
+    method: 'artifact.list',
+    http: 'GET',
+    path: '/huaanwork/artifact/list',
+    handler: storeRoute(async (req, ctx) => {
+      const sessionId = artifactSessionId(req, 'artifact.list')
+      // 排序由 artifacts-host 的 listArtifacts 负责,路由不再重排。
+      return { artifacts: await listArtifacts(ctx.profileDir, sessionId) }
+    }),
+  },
 ]
 
 export const NATIVE_ROUTES: readonly NativeRouteEntry[] = [

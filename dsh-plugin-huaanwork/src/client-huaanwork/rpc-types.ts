@@ -78,6 +78,9 @@ export type RpcRequest = {
     | "task.bindSession"
     | "task.rename"
     | "task.setModel"
+    | "artifact.get"
+    | "artifact.content"
+    | "artifact.list"
     | "subagent.list"
     | "subagent.cancel";
   params?: unknown;
