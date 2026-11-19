@@ -342,4 +342,19 @@ git diff --check master...HEAD
 - **经二次核实撤回/保留原契约**：
   - 撤回将 `App.tsx:964`（`discardBufferedStopEnds`）后移的建议（经查 `openTurnForTab` 会递增 `epoch`，`appWiring.spec.ts` 显式钉住该顺序，不存在破坏排队回合 `session/end` 的回归）；
   - 保留 `skills.ts:794–797` 在 `dispose` 失败/超时后仍等待 `settleWithin` 的两段超时契约（已由计划 Task 3 Step 4 与 `skills.spec.ts:2281–2288` 钉住）。
-- **验证边界声明**：本节收口修复以无头自动化全量门禁（`@huaanwork/policy check`、`typecheck`、验收判据单测 22/22、`corepack yarn check`）在提交后的干净工作区上完成验证；真实 Electron CDP 7/7 走查以 2026-11-19 `qwen4` 权威运行（§8 与实施证据 §2.6/§4）为准，本节窄边界修复未重跑真实模型 CDP。
+- **验证边界声明**：本节收口修复最初以无头自动化全量门禁验证；随后的 §10 复核修复与最终提交已补跑完整真实 Electron CDP 7/7 走查并全量通过（见 §10 与实施证据 §2.7/§4）。
+
+---
+
+## 十、Grok 复核修复与最终提交真机 CDP 7/7 闭环（2026-11-19）
+
+针对 §9 提交后的 Grok 复核意见（1 Important + 2 Minor）逐项核实源码与上游 `agent-loop` 同步执行顺序后全部闭环：
+
+1. **Important（`sessions.ts:523–545` `followup` 抛错未恢复既有 active goal 系统技能租约 — 属实并修复于 `4f1052cebc`）**：
+   - 因上游 `agent.followup()` 同步进入 `wakeDriver() → kick() → turn() → preStep() → systemPrompt.assemble()` 采集 Step 1 工具列表，普通回合仍必须在 `agent.followup()` **之前**释放旧租约；
+   - 在 `try` 前快照 `previousLeaseKind = systemSkillLeaseKindOf(ctx, sessionId)`，若 `agent.followup()` 抛错则在 `catch` 中按 `previousLeaseKind` 调用 `acquireExplicitSystemSkillLease` 精确挂回原租约与 `subagent` 附件（否则仅释放本次新建的显式租约），同时覆盖普通回合与显式技能切换两种抛错回滚，并在 [sessions.spec.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-host/sessions.spec.ts) 补齐两条回归用例。
+2. **Minor #1（`session-view.ts:228` 带 `data.id` 的空文本普通用户消息未清锚 — 属实并修复于 `4f1052cebc`）**：
+   - 改为 `if (goalRound === undefined) currentOrdinaryUserClientId = messageText ? persistedId : undefined`，消除无对应 `user` 记录的孤儿 `clientMessageId`，并在 [session-view.spec.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-host/session-view.spec.ts) 为空文本用例补上 `id: 'm-empty'`。
+3. **Minor #2（证据文档基线 commit 说明 + 最终提交补跑真机 CDP — 闭环于 `a3a125a893` + `a02bad496e`）**：
+   - 补跑真机 CDP 期间同步定位并修复 3 处走查脚本侧判据缺陷（非产品缺陷），均已补判据单测（`24/24 pass`）：`turnFacts` 继承 `user/message` 前紧邻的 `step/start` `roundKey`（`a3a125a893`）；`todoCardTurns` 按真实用户回合计数避免把 `subagent-settled` 内部唤醒算作额外待办卡；`driveDualEntrySystemSkills` 重试保留入口前缀与唯一 marker（`a02bad496e`）。
+   - 在干净提交 `a02bad496edf7b74e53fd510cd83332c28167d8f`（产品源码 `4f1052cebc`）上重建 `dsh-plugin-huaanwork` 并完整实跑真实 Electron CDP 走查：**exit `0`（`verdict PASS`，7/7 全通过，`errors: []`，`isolatedCleanup: "removed"`）**，外置备份于 `~/huaanwork-progress-sidebar-accept-evidence-2026-11-19-premerge/`，证据文档 §2.6/§2.7/§4/§4.1/§6 已同步更新。
