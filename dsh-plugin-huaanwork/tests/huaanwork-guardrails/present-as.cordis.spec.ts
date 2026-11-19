@@ -3,8 +3,13 @@ import { afterEach, test } from "vitest";
 
 import { DEFAULT_AGENT_ALLOW } from "@huaanwork/policy/agent-catalog";
 import { registerChildSession, resetChildSessionRegistry } from "../../src/huaanwork-host/child-sessions.ts";
+import { createTurnAnchorStore, installTurnAnchorHooks } from "../../src/huaanwork-host/turn-anchors.ts";
 import { attachAgentTools, detachAgentTools, emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply, refreshAgentRestrict } from "../../src/huaanwork-guardrails/present-as.ts";
+import {
+  RESULT_PRESENT_TOOL,
+  makeResultPresentClaimed,
+} from "../../src/huaanwork-guardrails/result-artifact-tools.ts";
 
 afterEach(() => {
   resetChildSessionRegistry();
@@ -552,4 +557,97 @@ test("PM-1: package allow ∩ present-as intersection keeps subagent only when t
 
   const withoutSubagent = runWithPackageAllow(["read", "read_file", "glob", "grep", "bash"], "pkg-child-b");
   assert.ok(!withoutSubagent.includes("subagent"), "a package allow without subagent never gains it");
+});
+
+// —— Task 2: result_present 的 claimed 附件同步 ——
+// 真实 anchor store 驱动同一 claimed 处理器;bridge 的 pre-step 入口与 claim 两种顺序
+// 都只允许改变状态一次,重复消息与 goal 续轮不重复 refresh。
+
+test("result_present attachment sync refreshes restrict exactly once per attachment change", () => {
+  const attachments = emptyAttachments();
+  const agent = createMockAgent({ sessionId: "work-rp", initialToolNames: ["read", RESULT_PRESENT_TOOL] });
+  const ctx = createMockContext({ agents: [agent], attachments }) as ReturnType<typeof createMockContext> & Record<string, unknown>;
+  apply(ctx as never);
+  const initial = agent.restrictCalls.length;
+
+  const anchors = createTurnAnchorStore();
+  ctx.huaanworkTurnAnchors = anchors;
+  const claimed = makeResultPresentClaimed(ctx as never);
+  const message = (id: string, kind = "user") => ({ role: "user", id, source: { kind } }) as never;
+
+  // 顺序 A(pre-step 先):bridge 的 notePreStep 归约出 advanced,claim 再同步附件。
+  const first = message("rp-msg-a");
+  anchors.register({ sessionId: "work-rp", clientMessageId: "rp-msg-a", origin: "advanced" });
+  anchors.notePreStep("work-rp", [first], "2026-11-15T10:00:00.000Z");
+  claimed({ agent, message: first });
+  assert.equal(agent.restrictCalls.length, initial + 1);
+  assert.ok(agent.restrictCalls.at(-1)!.allow.includes(RESULT_PRESENT_TOOL));
+
+  // 同一处理器重复调用、重复 pre-step:状态未变就不 refresh。
+  claimed({ agent, message: first });
+  anchors.notePreStep("work-rp", [first], "2026-11-15T10:00:05.000Z");
+  claimed({ agent, message: first });
+  assert.equal(agent.restrictCalls.length, initial + 1);
+
+  // 顺序 B(claim 先):pre-step 随后走 bridge 入口;未知来源摘除附件只 +1。
+  const second = message("rp-msg-b");
+  anchors.register({ sessionId: "work-rp", clientMessageId: "rp-msg-b", origin: "unknown" });
+  claimed({ agent, message: second });
+  assert.equal(agent.restrictCalls.length, initial + 2);
+  anchors.notePreStep("work-rp", [second], "2026-11-15T10:00:10.000Z");
+  claimed({ agent, message: second });
+  assert.equal(agent.restrictCalls.length, initial + 2);
+  assert.ok(!agent.restrictCalls.at(-1)!.allow.includes(RESULT_PRESENT_TOOL));
+
+  // advanced 再次 claim 先于 pre-step:重新挂载仍只 +1。
+  const third = message("rp-msg-c");
+  anchors.register({ sessionId: "work-rp", clientMessageId: "rp-msg-c", origin: "advanced" });
+  claimed({ agent, message: third });
+  assert.equal(agent.restrictCalls.length, initial + 3);
+  anchors.notePreStep("work-rp", [third], "2026-11-15T10:00:15.000Z");
+  claimed({ agent, message: third });
+  assert.equal(agent.restrictCalls.length, initial + 3);
+  assert.ok(agent.restrictCalls.at(-1)!.allow.includes(RESULT_PRESENT_TOOL));
+
+  // goal 续轮没有新用户继承:锚点与附件原样保留,不 refresh。
+  const goal = message("rp-goal-1", "goal");
+  claimed({ agent, message: goal });
+  anchors.notePreStep("work-rp", [goal], "2026-11-15T10:00:20.000Z");
+  claimed({ agent, message: goal });
+  assert.equal(agent.restrictCalls.length, initial + 3);
+  assert.equal(anchors.current("work-rp")?.clientMessageId, "rp-msg-c");
+
+  // 缺 sessionId 直接 return:不触碰 anchor,也不 refresh。
+  claimed({ agent: {} as never, message: goal });
+  // 有 sessionId 但没有对应活动 agent:锚点归约为 unknown 后与未挂载一致,直接 return。
+  const orphan = message("rp-orphan-1");
+  claimed({ agent: { session: { id: "work-no-agent" } } as never, message: orphan });
+  assert.equal(agent.restrictCalls.length, initial + 3);
+  assert.equal(anchors.current("work-no-agent")?.origin, "unknown");
+});
+
+test("installTurnAnchorHooks pre-step delegates to next on every step and records shared anchors", () => {
+  const agent = createMockAgent({ sessionId: "work-hooks", initialToolNames: ["read"] });
+  const ctx = createMockContext({ agents: [agent], attachments: emptyAttachments() }) as ReturnType<typeof createMockContext> & Record<string, unknown>;
+  const anchors = createTurnAnchorStore();
+  ctx.huaanworkTurnAnchors = anchors;
+  installTurnAnchorHooks(ctx as never);
+
+  let nextCalls = 0;
+  const next = () => {
+    nextCalls += 1;
+  };
+  const user = { role: "user", id: "hooks-msg-1", source: { kind: "user" } };
+  ctx.emit("agent/pre-step", { agent, messages: [user] }, next);
+  assert.equal(nextCalls, 1, "the real pre-step listener must delegate on every step");
+  assert.equal(anchors.current("work-hooks")?.clientMessageId, "hooks-msg-1");
+  assert.equal(anchors.current("work-hooks")?.origin, "unknown");
+
+  const goal = { role: "user", id: "hooks-goal-1", source: { kind: "goal" } };
+  ctx.emit("agent/pre-step", { agent, messages: [goal] }, next);
+  assert.equal(nextCalls, 2);
+  assert.equal(anchors.current("work-hooks")?.clientMessageId, "hooks-msg-1", "goal rounds inherit the open anchor");
+
+  ctx.emit("session/disposed", { id: "work-hooks" });
+  assert.equal(anchors.current("work-hooks"), undefined);
 });

@@ -137,6 +137,10 @@ function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
     case "agent_http":
     case "agent_skill_run":
       return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
+    // 普通父会话的结果页工具：附件只在高级(界面发送且已 claim)回合挂载，用户在场即
+    // 授权，不逐次 ask；未挂载(自动化/包儿童/兼容回合)在任何档位都拒绝。
+    case "result_present":
+      return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
     default:
       return input.attached ? (mode === "full" ? ALLOW : askOrDeny(seam)) : deny(reasonToolUnattached(input.name));
   }
