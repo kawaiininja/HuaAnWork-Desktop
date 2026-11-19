@@ -260,6 +260,7 @@ import { ThinkingPanel } from "./ThinkingPanel.tsx";
 import ToolPanel from "./ToolPanel.tsx";
 import ProgressPanel from "./ProgressPanel.tsx";
 import ResultArtifactCard from "./ResultArtifactCard.tsx";
+import ArtifactPreview from "./ArtifactPreview.tsx";
 
 /**
  * 用户对话会话 id（事件路由用）：huaanwork-chat- 旧会话与 huaanwork-<16hex digest> 新会话。
@@ -1176,9 +1177,6 @@ export default function App() {
   const previewAttachment = activeChat.previewFile ? items.find((item) => item.kind === "attachment") : undefined;
   const previewFile = previewAttachment ? activeChat.previewFile : undefined;
   const previewArtifactId = activeChat.previewArtifactId;
-  const previewArtifactItem = previewArtifactId
-    ? items.find((item): item is ArtifactResultCardItem => item.kind === "artifact" && item.artifactId === previewArtifactId)
-    : undefined;
   const previewArtifactLoaded = previewArtifactId && artifactPreview?.artifactId === previewArtifactId
     ? artifactPreview
     : undefined;
@@ -4466,19 +4464,14 @@ export default function App() {
               {rightTab === "preview" ? (
                 previewArtifactId ? (
                   <div className="panel-card preview-card">
-                    <p className="h preview-head">
-                      <span>{previewArtifactLoaded?.artifact.title ?? previewArtifactItem?.artifact.title ?? "结果页"}</span>
-                    </p>
                     {artifactPreviewBusy ? (
                       <p className="panel-empty">正在读取结果…</p>
-                    ) : previewArtifactFailure ? (
-                      <p className="panel-empty">{previewArtifactFailure.message}</p>
-                    ) : previewArtifactLoaded?.artifact.format === "markdown" ? (
-                      <pre className="preview-md">{previewArtifactLoaded.content}</pre>
-                    ) : previewArtifactLoaded ? (
-                      <p className="panel-empty">HTML 结果将在安全沙箱预览中展示</p>
                     ) : (
-                      <p className="panel-empty">结果尚未读取</p>
+                      <ArtifactPreview
+                        artifact={previewArtifactLoaded}
+                        error={previewArtifactFailure?.message}
+                        onRetry={() => void handleOpenArtifact(previewArtifactId)}
+                      />
                     )}
                   </div>
                 ) : previewFile && previewAttachment ? (
