@@ -3,12 +3,25 @@
  *
  * 每条用例都用真实存储原语建 Artifact 与运行/会话记录，再调用对应的公开删除原语，
  * 以实际磁盘目录与读取结果作证据；兄弟 Artifact 必须保留。删除与两阶段写入的竞态
- * 用 `node:fs/promises` 的 rm 部分 mock 定点挂起，不靠定时器猜时序。
+ * 用 `node:fs/promises` 的 rm 部分 mock 定点挂起，不靠定时器猜时序；同一 mock 记录
+ * 每次 readdir，用文件系统枚举而不是模块导出来证明删除不扫描全 profile。
+ * 符号链接逃逸用例使用真实临时目录与 `symlinkSync`，由 afterEach 连根删除。
  */
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import type { ArtifactWriteScope } from '../../src/huaanwork-host/artifacts-host.ts'
@@ -38,16 +51,21 @@ import { ROUTE_TABLE, type RouteContext, type RouteHandler } from '../../src/hua
 import { sessionRemove } from '../../src/huaanwork-host/sessions.ts'
 import { createProject, recentRuns } from '../../src/huaanwork-host/stores.ts'
 
-/** 删除 I/O 屏障:只拦 `deletionIo.path` 的那一次 rm。 */
+/** 删除 I/O 屏障与文件系统枚举观测:拦 `deletionIo.path` 的那一次 rm,并记录每次 readdir。 */
 const deletionIo = vi.hoisted(() => ({
   path: undefined as string | undefined,
   wait: undefined as undefined | (() => Promise<void>),
   failure: undefined as undefined | Error,
+  readdirs: [] as string[],
 }))
 vi.mock('node:fs/promises', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...real,
+    readdir: async (path: string, options?: { withFileTypes: true; recursive?: boolean }) => {
+      deletionIo.readdirs.push(path)
+      return options === undefined ? real.readdir(path) : real.readdir(path, options)
+    },
     rm: async (...args: Parameters<typeof real.rm>) => {
       if (args[0] === deletionIo.path) {
         await deletionIo.wait?.()
@@ -84,6 +102,7 @@ afterEach(() => {
   deletionIo.path = undefined
   deletionIo.wait = undefined
   deletionIo.failure = undefined
+  deletionIo.readdirs.length = 0
   while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true })
 })
 
@@ -265,13 +284,23 @@ it('reports incomplete cleanup instead of silently succeeding', async () => {
 
 it('locates a run artifact directly via RunSummary.sessionId without scanning', async () => {
   const seeded = await seedRunArtifact()
+  const sibling = await seedRunArtifact({ profileDir: seeded.profileDir, runId: 'no-scan-sibling' })
+  const artifactRoot = join(seeded.profileDir, 'artifacts')
   const scan = vi.spyOn(artifactStore, 'scanArtifactManifests')
+  deletionIo.readdirs.length = 0
   try {
     const report = await deleteAutomationRun(seeded.profileDir, seeded.automationId, seeded.runId, {
       sessionsRoot: join(seeded.profileDir, 'sessions'),
     })
+    // 文件系统证据(名称空间 spy 看不到模块内部调用):删除期间只枚举本会话目录,
+    // 不列 artifacts 根,也不列任何兄弟会话目录。
+    const artifactEnumerations = deletionIo.readdirs.filter(
+      (path) => path === artifactRoot || path.startsWith(`${artifactRoot}${sep}`),
+    )
     expect(report).toMatchObject({ removed: true })
+    expect(artifactEnumerations).toEqual([join(artifactRoot, seeded.sessionId)])
     expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([])
+    expect(await artifactIds(seeded.profileDir, sibling.sessionId)).toEqual([sibling.artifactId])
     expect(scan).not.toHaveBeenCalled()
   } finally {
     scan.mockRestore()
@@ -379,4 +408,63 @@ it('invalidates the run lease without guessing a directory when sessionId is unk
   await discardPreparedArtifact(write)
   // 窄化输入不猜目录:已有结果文件保持原样,由调用方报告清理不完整。
   expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([seeded.artifactId])
+})
+
+it('rejects session removal when the session directory is a symlink out of the profile', async () => {
+  const profileDir = makeRoot('artifact-escape-')
+  const outside = makeRoot('artifact-outside-')
+  writeFileSync(join(outside, 'keep.md'), '# 外部数据', 'utf8')
+  mkdirSync(join(profileDir, 'artifacts'), { recursive: true })
+  symlinkSync(outside, join(profileDir, 'artifacts', 'linked-session'), 'dir')
+
+  await expect(removeArtifactsOfSession(profileDir, 'linked-session')).rejects.toThrow('artifact-path-escape')
+  expect(readFileSync(join(outside, 'keep.md'), 'utf8')).toBe('# 外部数据')
+  expect(lstatSync(join(profileDir, 'artifacts', 'linked-session')).isSymbolicLink()).toBe(true)
+})
+
+it('rejects a run removal whose target escapes through the session link', async () => {
+  const seeded = await seedRunArtifact()
+  const outside = makeRoot('artifact-outside-')
+  const movedSession = join(outside, 'session')
+  const sessionDir = join(seeded.profileDir, 'artifacts', seeded.sessionId)
+  renameSync(sessionDir, movedSession)
+  symlinkSync(movedSession, sessionDir, 'dir')
+
+  // manifest 仍可经链接读到,但解析后的目标在 profile 之外,必须在任何 rm 之前拒绝。
+  await expect(removeArtifactOfRun(seeded.profileDir, seeded.sessionId, seeded.automationId, seeded.runId))
+    .rejects.toThrow('artifact-path-escape')
+  // 自动化级扫描不把符号链接目录当作会话目录,因此同样不进入外链。
+  await expect(removeArtifactsOfAutomation(seeded.profileDir, seeded.automationId)).resolves.toBeUndefined()
+  expect(readFileSync(join(movedSession, seeded.artifactId, 'content.md'), 'utf8')).toBe('# 结果')
+})
+
+it('unlinks a symlinked artifact directory instead of following it outside the profile', async () => {
+  const seeded = await seedRunArtifact()
+  const outside = makeRoot('artifact-outside-')
+  writeFileSync(join(outside, 'keep.md'), '# 外部正文', 'utf8')
+  const artifactDir = join(seeded.profileDir, 'artifacts', seeded.sessionId, seeded.artifactId)
+  rmSync(artifactDir, { recursive: true, force: true })
+  symlinkSync(outside, artifactDir, 'dir')
+
+  await expect(removeArtifactsOfSession(seeded.profileDir, seeded.sessionId)).resolves.toBeUndefined()
+  expect(existsSync(join(seeded.profileDir, 'artifacts', seeded.sessionId))).toBe(false)
+  expect(readdirSync(outside)).toEqual(['keep.md'])
+  expect(readFileSync(join(outside, 'keep.md'), 'utf8')).toBe('# 外部正文')
+})
+
+it('treats dangling links and a missing profile root as no-op removals', async () => {
+  const profileDir = makeRoot('artifact-dangling-')
+  mkdirSync(join(profileDir, 'artifacts', 'linked-session'), { recursive: true })
+  symlinkSync(join(profileDir, 'missing-artifact'), join(profileDir, 'artifacts', 'linked-session', 'dangling-artifact'), 'dir')
+  await expect(removeArtifactsOfSession(profileDir, 'linked-session')).resolves.toBeUndefined()
+  expect(() => lstatSync(join(profileDir, 'artifacts', 'linked-session'))).toThrow()
+
+  symlinkSync(join(profileDir, 'missing-session'), join(profileDir, 'artifacts', 'dangling-session'), 'dir')
+  await expect(removeArtifactsOfSession(profileDir, 'dangling-session')).resolves.toBeUndefined()
+  expect(() => lstatSync(join(profileDir, 'artifacts', 'dangling-session'))).toThrow()
+
+  const missingProfile = join(profileDir, 'no-such-profile')
+  await expect(removeArtifactsOfSession(missingProfile, 'session-1')).resolves.toBeUndefined()
+  await expect(removeArtifactOfRun(missingProfile, 'session-1', 'automation-1', 'run-1')).resolves.toBeUndefined()
+  await expect(removeArtifactsOfAutomation(missingProfile, 'automation-1')).resolves.toBeUndefined()
 })
