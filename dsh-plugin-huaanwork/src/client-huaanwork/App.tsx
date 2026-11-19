@@ -237,6 +237,7 @@ import {
 } from "./logic/runTabsLogic.ts";
 import { reconcileStaleAutomationTabs } from "./logic/automationRunLink.ts";
 import {
+  applyRunEndProjection,
   insertArtifactIntoHistory,
   insertBeforeArtifactGroup,
   openArtifactPreview,
@@ -642,6 +643,8 @@ export default function App() {
   const subagentRunsRef = useRef<SubagentRunsState>(INITIAL_SUBAGENT_RUNS);
   /** 对账代际:断连与 ready 都推进它,迟到的 snapshot 应答据此丢弃(设计 D6)。 */
   const reconcileEpochRef = useRef(0);
+  /** Artifact 请求代际：选中会话切换时推进，迟到的摘要/正文应答据此丢弃（不牵连子代理对账）。 */
+  const artifactEpochRef = useRef(0);
   /** Artifact 摘要缓存：artifact/created 与 artifact.get/list 共用，run-end 投影按 id 取。 */
   const artifactSummariesRef = useRef<Map<string, TaskArtifactSummary>>(new Map());
   /** 右栏预览已读取的摘要与正文；渲染由 Task 6 的预览组件接管。 */
@@ -1068,15 +1071,16 @@ export default function App() {
 
   const activeChat = chatTabs.find((tab) => tab.id === activeTab) ?? chatTabs[0];
   /**
-   * 选中会话切换时推进既有对账代际：迟到的 Artifact 摘要/正文应答不能覆盖当前预览。
-   * 旧会话或旧代际的响应由 `shouldApplyArtifactResponse` 直接丢弃。
+   * 选中会话切换时推进专用 Artifact 代际：迟到的 Artifact 摘要/正文应答不能覆盖
+   * 当前预览。旧会话或旧代际的响应由 `shouldApplyArtifactResponse` 直接丢弃；
+   * 共享对账代际（子代理 snapshot）不受影响。
    */
   const previewEpochSessionRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const sessionId = activeChat.sessionId;
     if (previewEpochSessionRef.current === sessionId) return;
     previewEpochSessionRef.current = sessionId;
-    reconcileEpochRef.current += 1;
+    artifactEpochRef.current += 1;
   }, [activeChat.sessionId]);
   /** 当前标签发送时使用的模型：本标签选择 > 子任务记住的模型 > 全局当前模型。 */
   const activeTabTask = activeChat.taskId
@@ -1684,6 +1688,14 @@ export default function App() {
       if (!target) return;
       setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: updater(tab.items) } : tab)));
     };
+    /** 读取该标签此刻的条目；函数式更新按队列顺序执行，prev 已含同一批事件。 */
+    const readTabItems = (tabId: string): Promise<ChatItem[]> =>
+      new Promise((resolve) => {
+        setChatTabs((prev) => {
+          resolve(prev.find((tab) => tab.id === tabId)?.items ?? []);
+          return prev;
+        });
+      });
     /** 读取本回合的标签与条目；只读状态，不列工作区树。子代理会话不属于任何标签时返回 undefined。 */
     const readTurnItems = async (sessionId?: string) => {
       const tabId = outcomeTargetTab(sessionId, chatTabsRef.current, liveChatRef.current);
@@ -2002,7 +2014,12 @@ export default function App() {
                 const resultLabel = runResultNoteText(event.status);
                 // 实时路径：run 直接由当前 run-end 事件构造，不额外拉运行列表或猜事件顺序。
                 const run = automationResultRunFromEvent(event);
+                // 运行封套边界：run-end 时刻已存在的条目才参与投影。函数式读取按队列
+                // 顺序执行，prev 已含同一批事件；读取摘要期间用户续聊的回复不在边界内，
+                // 投影后原样保留（不被当成封套删除）。
+                const envelopeItems = readTabItems(target);
                 void (async () => {
+                  const boundaryIds = new Set((await envelopeItems).map((item) => item.id));
                   // created 事件丢失时用 RunSummary.artifactId + artifact.get/list 补齐；
                   // 摘要暂不可读时投影成可重试占位，不把 created 改成 failed。
                   const artifact = run.artifactOutcome === "created" && run.artifactId
@@ -2013,14 +2030,19 @@ export default function App() {
                       // 等待摘要期间标签可能被关闭或改绑：迟到的应答只写仍属于该会话的标签。
                       if (tab.id !== target || tab.sessionId !== sessionId) return tab;
                       // 新协议只展示唯一结果卡/失败卡；无 artifactOutcome 的旧运行仍走旧折叠。
-                      const projected = projectAutomationResult(tab.items, run, artifact, (sourceText) => ({
-                        id: allocId(),
-                        kind: "attachment" as const,
-                        sourceText,
-                      }));
+                      // 投影只替换边界内的条目，边界后追加的续聊条目原样接回。
                       return {
                         ...tab,
-                        items: insertBeforeArtifactGroup(projected, { id: allocId(), kind: "note" as const, text: resultLabel }),
+                        items: applyRunEndProjection(
+                          tab.items,
+                          boundaryIds,
+                          (prefix) => projectAutomationResult(prefix, run, artifact, (sourceText) => ({
+                            id: allocId(),
+                            kind: "attachment" as const,
+                            sourceText,
+                          })),
+                          { id: allocId(), kind: "note" as const, text: resultLabel },
+                        ),
                       };
                     }),
                   );
@@ -3439,7 +3461,7 @@ export default function App() {
     const tab = chatTabsRef.current.find((item) => item.id === tabId);
     const sessionId = tab?.sessionId;
     if (!sessionId) return;
-    const request = { sessionId, epoch: reconcileEpochRef.current };
+    const request = { sessionId, epoch: artifactEpochRef.current };
     setRightTab("preview");
     setRightCollapsed(false);
     setChatTabs((prev) =>
@@ -3463,7 +3485,7 @@ export default function App() {
     );
     setArtifactPreviewBusy(false);
     const currentTab = chatTabsRef.current.find((item) => item.id === tabId);
-    const current = { sessionId: currentTab?.sessionId ?? "", epoch: reconcileEpochRef.current };
+    const current = { sessionId: currentTab?.sessionId ?? "", epoch: artifactEpochRef.current };
     if (!shouldApplyArtifactResponse(current, request) || currentTab?.previewArtifactId !== artifactId) return;
     if (next.previewError) {
       setArtifactPreviewError({ artifactId, message: next.previewError });

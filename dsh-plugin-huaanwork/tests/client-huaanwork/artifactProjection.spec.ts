@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatItem } from "../../src/client-huaanwork/App.tsx";
 import {
   ARTIFACT_READ_FAILED,
+  applyRunEndProjection,
   insertArtifactIntoHistory,
   insertBeforeArtifactGroup,
   openArtifactPreview,
@@ -249,5 +250,23 @@ describe("artifact preview selection", () => {
       { sessionId: "session-1", epoch: 4 },
       { sessionId: "session-1", epoch: 4 },
     )).toBe(true);
+  });
+
+  it("projects only the run-end boundary and keeps later items before a trailing group", () => {
+    const tabItems: ProjectionItem[] = [
+      { id: 1, kind: "assistant", text: '{"title":"报告","content":"完整结果正文"}' },
+      { id: 2, kind: "artifact-group", text: "未定位的历史结果" },
+      { id: 4, kind: "user", text: "再补一版" }, // 读取摘要期间到达的续聊
+    ];
+    const boundaryIds = new Set([1, 2]);
+    const projected = applyRunEndProjection(
+      tabItems,
+      boundaryIds,
+      (prefix) => projectAutomationResult(prefix, createdRun, artifact),
+      { id: 5, kind: "note", text: "运行已结束" },
+    );
+    expect(projected.map((item) => item.kind)).toEqual(["artifact", "note", "user", "artifact-group"]);
+    expect(JSON.stringify(projected)).not.toContain("完整结果正文");
+    expect(JSON.stringify(projected)).toContain("再补一版");
   });
 });

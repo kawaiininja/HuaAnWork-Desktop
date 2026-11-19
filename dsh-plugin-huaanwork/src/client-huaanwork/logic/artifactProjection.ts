@@ -290,6 +290,35 @@ export function insertArtifactIntoHistory<T extends HistoryItem>(
   ];
 }
 
+/**
+ * run-end 的异步投影只替换边界内的条目。
+ *
+ * `boundaryIds` 是 run-end 时刻该标签已有的条目 id。读取摘要期间用户续聊产生的
+ * 条目不在边界内，投影后原样接回（仍先于尾部未定位分组），因此不会被替换规则
+ * 当成运行封套删除。`footnote` 是本次运行的结果脚注，跟在投影结果之后。
+ *
+ * @param items 投影时该标签的当前条目（可能已含边界后的续聊内容）
+ * @param boundaryIds run-end 时刻已存在的条目 id
+ * @param project 只作用于边界内条目的投影（通常是 `projectAutomationResult`）
+ * @param footnote 结果脚注
+ * @returns 投影结果 + 未被替换的边界后条目
+ */
+export function applyRunEndProjection<T extends ProjectionItem>(
+  items: readonly T[],
+  boundaryIds: ReadonlySet<number>,
+  project: (prefix: readonly T[]) => (T | ArtifactProjectionCard)[],
+  footnote: T,
+): (T | ArtifactProjectionCard)[] {
+  const prefix: T[] = [];
+  const suffix: T[] = [];
+  for (const item of items) (boundaryIds.has(item.id) ? prefix : suffix).push(item);
+  const projected = insertBeforeArtifactGroup(project(prefix), footnote);
+  if (suffix.length === 0) return projected;
+  const groupStart = projected.findIndex((item) => item.kind === "artifact-group");
+  if (groupStart < 0) return [...projected, ...suffix];
+  return [...projected.slice(0, groupStart), ...suffix, ...projected.slice(groupStart)];
+}
+
 /** 新普通条目落在尾部未定位分组之前；没有分组时仍是追加。 */
 export function insertBeforeArtifactGroup<T extends { kind: string }>(items: readonly T[], item: T): T[] {
   const groupStart = items.findIndex((entry) => entry.kind === "artifact-group");

@@ -25,12 +25,14 @@ import { appendOutcomeNotes, latestUserItemId, turnChecks } from "../../src/clie
 import { interruptTurnItems } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 import { clearFailuresInTabs } from "../../src/client-huaanwork/logic/hostStop.ts";
 import {
+  applyRunEndProjection,
   insertArtifactIntoHistory,
   insertBeforeArtifactGroup,
   projectAutomationResult,
+  shouldApplyArtifactResponse,
   sortArtifactsForBackfill,
 } from "../../src/client-huaanwork/logic/artifactProjection.ts";
-import { automationResultRunFromEvent } from "../../src/client-huaanwork/logic/runTabsLogic.ts";
+import { automationResultRunFromEvent, runResultNoteText } from "../../src/client-huaanwork/logic/runTabsLogic.ts";
 import { foldRunAssistantItems } from "../../src/client-huaanwork/logic/runResultAttachments.ts";
 import type { TaskArtifactSummary } from "../../src/client-huaanwork/rpc-types.ts";
 import {
@@ -249,7 +251,10 @@ test("App projects automation results at both call sites and keeps the legacy at
   assert.ok(runEndEnd > runEndAt, "run-end branch still ends before the global event handlers");
   const runEndBody = APP_SOURCE.slice(runEndAt, runEndEnd);
   assert.match(runEndBody, /automationResultRunFromEvent\(event\)/);
-  assert.match(runEndBody, /projectAutomationResult\(tab\.items, run, artifact/);
+  // run-end 先取运行封套边界，声明摘要读取只投影边界内的条目。
+  assert.match(runEndBody, /const envelopeItems = readTabItems\(target\);/);
+  assert.match(runEndBody, /const boundaryIds = new Set\(\(await envelopeItems\)\.map\(\(item\) => item\.id\)\);/);
+  assert.match(runEndBody, /applyRunEndProjection\(\s*tab\.items,\s*boundaryIds,\s*\(prefix\) => projectAutomationResult\(prefix, run, artifact/);
   assert.doesNotMatch(runEndBody, /foldRunAssistantItems\(/);
   assert.match(runEndBody, /kind: "attachment" as const/, "legacy runs still receive one attachment");
   const runEndNoteAt = runEndBody.indexOf("text: resultLabel");
@@ -356,17 +361,108 @@ test("new live turns stay before a trailing unlocated result group and list repl
   assert.deepEqual(replay.map((item) => item.kind), kinds);
 });
 
-test("artifact preview replies are dropped unless the session and epoch still match", () => {
+test("artifact preview replies are dropped unless the session and artifact epoch still match", () => {
   const body = functionBody("async function handleOpenArtifact(", "async function retryArtifact(");
-  // 请求发起时捕获会话与代际；返回后只有当前选择仍匹配才写入预览。
-  assert.match(body, /const request = \{ sessionId, epoch: reconcileEpochRef\.current \};/);
+  // 请求发起时捕获会话与专用 Artifact 代际；返回后只有当前选择仍匹配才写入预览。
+  assert.match(body, /const request = \{ sessionId, epoch: artifactEpochRef\.current \};/);
+  assert.match(body, /const current = \{ sessionId: currentTab\?\.sessionId \?\? "", epoch: artifactEpochRef\.current \};/);
   assert.match(body, /shouldApplyArtifactResponse\(current, request\)/);
   assert.match(body, /currentTab\?\.previewArtifactId !== artifactId/);
-  // 选中会话切换推进既有对账代际，旧会话/旧代际的响应自然失配。
-  assert.match(
-    APP_SOURCE,
-    /previewEpochSessionRef\.current === sessionId\) return;[\s\S]*?reconcileEpochRef\.current \+= 1;/,
+});
+
+test("session switching advances only the dedicated artifact epoch", () => {
+  // 选中会话切换推进专用 Artifact 代际；共享对账代际（子代理 snapshot）不动。
+  const switchBody = functionBody(
+    "const previewEpochSessionRef = useRef<string | undefined>(undefined);",
+    "/** 当前标签发送时使用的模型",
   );
+  assert.match(switchBody, /previewEpochSessionRef\.current === sessionId\) return;/);
+  assert.match(switchBody, /artifactEpochRef\.current \+= 1;/);
+  assert.doesNotMatch(switchBody, /reconcileEpochRef/);
+
+  // (a) 旧专用代际的 Artifact 应答被丢弃；子代理对账仍只按共享对账代际判定。
+  const artifactEpoch = 2;
+  assert.equal(
+    shouldApplyArtifactResponse(
+      { sessionId: "session-a", epoch: artifactEpoch + 1 },
+      { sessionId: "session-a", epoch: artifactEpoch },
+    ),
+    false,
+  );
+  const reconcileBody = functionBody("async function reconcileSubagentRuns(", "function anchorSnapshotSubagentCards(");
+  assert.match(reconcileBody, /const epoch = reconcileEpochRef\.current;/);
+  assert.match(reconcileBody, /epoch !== reconcileEpochRef\.current/);
+  assert.doesNotMatch(reconcileBody, /artifactEpochRef/);
+
+  // (b) 切换会话后，旧会话的迟到 Artifact 应答仍被丢弃。
+  assert.equal(
+    shouldApplyArtifactResponse(
+      { sessionId: "session-b", epoch: artifactEpoch + 1 },
+      { sessionId: "session-a", epoch: artifactEpoch },
+    ),
+    false,
+  );
+});
+
+test("a follow-up appended while the run-end artifact read is pending survives the projection", async () => {
+  // 可控 deferred：模拟 artifact.get 的真实往返，不用 sleep。
+  let resolveSummary!: (value: TaskArtifactSummary) => void;
+  const summaryRead = new Promise<TaskArtifactSummary>((resolve) => {
+    resolveSummary = resolve;
+  });
+  const summary: TaskArtifactSummary = {
+    artifactId: "artifact-1",
+    sessionId: "sess-1",
+    title: "报告",
+    format: "markdown",
+    downloadName: "报告.md",
+    sizeBytes: 4,
+    sha256: "sha256:test",
+    createdAt: "2026-11-15T10:00:00.000Z",
+    anchor: { kind: "automation-run", automationId: "auto-a", runId: "r1" },
+  };
+  const run = automationResultRunFromEvent({
+    event: "automation/run-end",
+    automationId: "auto-a",
+    runId: "r1",
+    projectId: null,
+    ok: true,
+    status: "ok",
+    sessionId: "sess-1",
+    artifactOutcome: "created",
+    artifactId: "artifact-1",
+  });
+  const envelope = '{"title":"报告","content":"完整结果正文"}';
+  let items: AppModule.ChatItem[] = [
+    { id: 1, kind: "note", text: "自动化运行中…" },
+    { id: 2, kind: "assistant", text: envelope },
+  ];
+  const projection = (async () => {
+    // App 在 run-end 时读边界，读取摘要期间标签照常接收续聊。
+    const boundaryIds = new Set(items.map((item) => item.id));
+    const artifact = await summaryRead;
+    return applyRunEndProjection(
+      items,
+      boundaryIds,
+      (prefix) => projectAutomationResult(prefix, run, artifact),
+      { id: 8, kind: "note" as const, text: runResultNoteText("ok") },
+    );
+  })();
+  items = [
+    ...items,
+    { id: 3, kind: "user", text: "再补一版", clientMessageId: "m2" },
+    { id: 4, kind: "assistant", text: "补充回复正文" },
+  ];
+  resolveSummary(summary);
+  const projected = await projection;
+
+  assert.deepEqual(projected.map((item) => item.kind), ["note", "artifact", "note", "user", "assistant"]);
+  assert.match(JSON.stringify(projected), /再补一版/);
+  assert.match(JSON.stringify(projected), /补充回复正文/);
+  assert.doesNotMatch(JSON.stringify(projected), /完整结果正文/);
+  // 同一标签不带边界投影会删掉读取期间到达的续聊回复（本次修复的缺陷）。
+  const unbounded = projectAutomationResult(items, run, summary);
+  assert.doesNotMatch(JSON.stringify(unbounded), /补充回复正文/);
 });
 
 test("ChatRow offers exactly the shared result attachment files through the optional handler", () => {
