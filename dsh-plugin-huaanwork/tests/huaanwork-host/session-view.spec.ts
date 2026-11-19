@@ -332,8 +332,8 @@ describe('detailRecords', () => {
       { type: 'user/message', seq: 3, time: T0 + 5, data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '回合二无id' }] } },
       toolCall('c2', 'todo_write', todoArgs, 4, T0 + 6),
       userMessage('回合三', 5, T0 + 7),
-      // 普通用户消息缺文本:同样开启新回合且清空旧锚点。
-      { type: 'user/message', seq: 6, time: T0 + 8, data: { role: 'user', source: { kind: 'user' }, content: [] } },
+      // 普通用户消息缺文本(即使带有 data.id):不产出 user 记录且必须清空旧锚点,避免孤儿锚点。
+      { type: 'user/message', seq: 6, time: T0 + 8, data: { id: 'm-empty', role: 'user', source: { kind: 'user' }, content: [] } },
       toolCall('c3', 'todo_write', todoArgs, 7, T0 + 9),
     ])
     const todos = detailRecords(log).filter(

@@ -3972,6 +3972,46 @@ describe('系统技能回合租约(显式 /explore、/test-fix)', () => {
     ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'complete')
   })
 
+  test('a failing ordinary followup restores a retained active-goal system skill lease and subagent attachment', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'ordinary-followup-throw-session'
+    const { ctx, attachments, observed } = makeSkillLeaseCtx(sessionId, { throwOnFollowup: true })
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'active')
+    expect(ctx.huaanworkSystemSkillLeases.acquireExplicit(sessionId, 'explore')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    expect(attachments.sessionAgentTools.get(sessionId)?.has('subagent')).toBe(true)
+
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '普通插话', sessionId }),
+    ).rejects.toThrow('followup boom')
+    // followup 调用当下已先摘除(确保正常启动时 Step 1 看不到 subagent),抛错后精确挂回原 explore 租约与附件。
+    expect(observed).toEqual({ kind: undefined, attached: false })
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    expect(attachments.sessionAgentTools.get(sessionId)?.has('subagent')).toBe(true)
+    // 原 active goal 语义仍在:轮间 idle 继续保留恢复后的租约。
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'complete')
+  })
+
+  test('a failing explicit system skill followup restores a previously retained active-goal lease', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'switch-skill-followup-throw-session'
+    const { ctx, attachments, observed } = makeSkillLeaseCtx(sessionId, { throwOnFollowup: true })
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'active')
+    expect(ctx.huaanworkSystemSkillLeases.acquireExplicit(sessionId, 'explore')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '修测试', skill: 'test-fix', sessionId }),
+    ).rejects.toThrow('followup boom')
+    expect(observed).toEqual({ kind: 'test-fix', attached: true })
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    expect(attachments.sessionAgentTools.get(sessionId)?.has('subagent')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'complete')
+  })
+
   test('an unmanaged child is rejected before any anchor registration or attachment', async () => {
     const routeCtx = makeRouteCtx(freshTmp())
     const sessionId = 'legacy-child-session'

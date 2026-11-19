@@ -225,7 +225,7 @@ export function detailRecords(text: string): SessionDetailRecord[] {
           : undefined
         // 只有真实普通用户消息换锚:goal 续轮与已过滤的系统/插件消息不参与;
         // 缺 id 或无文本的普通用户消息同样清掉旧锚(与 turn-anchors 的 fail closed 一致)。
-        if (goalRound === undefined) currentOrdinaryUserClientId = persistedId
+        if (goalRound === undefined) currentOrdinaryUserClientId = messageText ? persistedId : undefined
         if (messageText) {
           records.push({
             kind: 'user',

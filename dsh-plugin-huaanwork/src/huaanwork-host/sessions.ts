@@ -64,6 +64,7 @@ import {
   acquireExplicitSystemSkillLease,
   isUnmanagedChildSession,
   releaseSystemSkillLease,
+  systemSkillLeaseKindOf,
   type SystemSkillLeaseStore,
 } from './system-skill-leases.ts'
 import type { TurnAnchorStore } from './turn-anchors.ts'
@@ -520,12 +521,14 @@ export async function sendToAgent(
       clientMessageId: followupId,
       origin: turnOriginForSession(sessionId),
     })
+    const previousLeaseKind = systemSkillLeaseKindOf(ctx, sessionId)
     try {
       // 显式系统技能回合:上游 systemPrompt.assemble() 在 agent/pre-step 建立锚点前即
       // 采集 Step 1 工具列表,租约与附件必须在 followup 之前挂好;acquireExplicit 会先
       // 同步失效同一父 agent 的旧 pendingByAgent 缓存(QR-I2)。
-      // 普通用户回合则主动释放上一回合因 active goal 在 idle 时保留的租约与 `subagent` 附件
-      // (不传 clearGoal,保留 activeGoalSessions 本身,避免普通回合继承旧租约)。
+      // 普通用户回合同样必须在 followup 之前释放上一回合因 active goal 在 idle 时保留的
+      // 租约与 `subagent` 附件(followup 会同步进入 kick/preStep/assemble 采集 Step 1 工具),
+      // 不传 clearGoal,保留 activeGoalSessions 本身;若 followup 抛错再于 catch 按原 kind 还原。
       if (systemSkillKind !== undefined) {
         acquireExplicitSystemSkillLease(ctx, sessionId, systemSkillKind)
       } else {
@@ -539,8 +542,13 @@ export async function sendToAgent(
       })
     } catch (error) {
       rollbackAnchor?.()
-      // followup 抛错立即精确回滚本次显式租约与附件(不传 clearGoal,保留既有 active goal 语义)。
-      if (systemSkillKind !== undefined) releaseSystemSkillLease(ctx, sessionId)
+      // followup 抛错精确还原本次发送前的租约与附件(不传 clearGoal,保留既有 active goal 语义):
+      // 先前因 active goal 留有租约则按原 kind 挂回,否则仅释放本次新建的显式租约。
+      if (previousLeaseKind !== undefined) {
+        acquireExplicitSystemSkillLease(ctx, sessionId, previousLeaseKind)
+      } else if (systemSkillKind !== undefined) {
+        releaseSystemSkillLease(ctx, sessionId)
+      }
       throw error
     }
     followupAccepted = true
