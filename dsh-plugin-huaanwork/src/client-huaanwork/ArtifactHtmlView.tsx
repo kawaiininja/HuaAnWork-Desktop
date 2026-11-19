@@ -59,16 +59,21 @@ export default function ArtifactHtmlView({ content, title, prepareFrame }: Artif
       setFailure({ frameName, message: "安全预览未就绪：原生 frame 防护回调缺失" });
       return;
     }
-    prepareFrame(frameName).then(
-      () => {
-        if (currentFrameName.current === frameName) setPreparedName(frameName);
-      },
-      (reason: unknown) => {
-        if (currentFrameName.current !== frameName) return;
-        const message = reason instanceof Error ? reason.message : String(reason);
-        setFailure({ frameName, message: `安全预览准备失败：${message}` });
-      },
-    );
+    const fail = (reason: unknown): void => {
+      if (currentFrameName.current !== frameName) return;
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setFailure({ frameName, message: `安全预览准备失败：${message}` });
+    };
+    let pending: Promise<void>;
+    try {
+      pending = prepareFrame(frameName);
+    } catch (reason) {
+      fail(reason);
+      return;
+    }
+    pending.then(() => {
+      if (currentFrameName.current === frameName) setPreparedName(frameName);
+    }, fail);
   };
 
   const retry = (): void => setAttempt((value) => value + 1);
