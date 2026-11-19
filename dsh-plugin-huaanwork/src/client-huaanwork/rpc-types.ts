@@ -383,6 +383,33 @@ export type AutomationTemplate = {
   command?: string;
 };
 
+/** Artifact 正文格式白名单；第三种值由宿主在运行时拒绝。 */
+export type ArtifactFormat = "markdown" | "html";
+
+/** Artifact 的归属双 ID；所有入口都必须同时校验 Profile、会话与 Artifact 归属。 */
+export type ArtifactRef = { sessionId: string; artifactId: string };
+
+/** Artifact 的回合锚点：普通交互回合用 clientMessageId，自动化用 automationId + runId。 */
+export type ArtifactAnchor =
+  | { kind: "turn"; clientMessageId?: string }
+  | { kind: "automation-run"; automationId: string; runId: string };
+
+/** 一次运行的结果页持久化结局；取消/跳过不写任何 artifact 可选键。 */
+export type ArtifactOutcome = "created" | "failed";
+
+/** Artifact 的线上摘要；正文不出现在事件与列表里，只能按需读取。 */
+export type TaskArtifactSummary = {
+  artifactId: string;
+  sessionId: string;
+  title: string;
+  format: ArtifactFormat;
+  downloadName: string;
+  sizeBytes: number;
+  sha256: string;
+  createdAt: string;
+  anchor: ArtifactAnchor;
+};
+
 /** 一次任务运行的记录（产出截断后存储）。 */
 export type RunSummary = {
   runId: string;
@@ -397,6 +424,13 @@ export type RunSummary = {
   durationMs?: number;
   /** 该运行创建的运行子任务 id；旧记录与 script/未建子任务的运行没有此字段。 */
   taskId?: string;
+  /** 结果页持久化结局；旧记录、取消与 skipped 没有这些可选键。 */
+  artifactOutcome?: ArtifactOutcome;
+  artifactId?: string;
+  artifactError?: string;
+  /** 仅在封套/兼容 JSON 已通过校验、只是持久化失败时记录；坏标记封套不可确认 title/format。 */
+  artifactTitle?: string;
+  artifactFormat?: ArtifactFormat;
 };
 
 /** 子任务：挂在项目下的普通任务（区别于自动化任务，无调度与运行历史）。 */
@@ -640,7 +674,15 @@ export type RpcEvent =
       durationMs?: number;
       /** 该运行创建的运行子任务 id；script/未建子任务/旧记录路径不带。 */
       taskId?: string;
+      /** 与同一 RunSummary 的 artifactFields 逐项同值；未创建/跳过时不出现。 */
+      artifactOutcome?: ArtifactOutcome;
+      artifactId?: string;
+      artifactError?: string;
+      artifactTitle?: string;
+      artifactFormat?: ArtifactFormat;
     }
+  /** 结果页提交成功；只在 commit 返回 created:true 时发一次，正文不在事件里。 */
+  | { event: "artifact/created"; artifact: TaskArtifactSummary; sessionId: string }
   | { event: "automation/missed"; automationId: string; projectId: string | null; coalescedCount: number; missedAt: number }
   /** 子代理 run 的权威投影；`activityFlushMs > 0` 时高频 token/reasoning 合并发布。 */
   | { event: "subagent/run"; run: SubagentRunProjection }
