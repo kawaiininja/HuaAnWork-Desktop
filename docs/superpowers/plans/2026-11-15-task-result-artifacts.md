@@ -300,10 +300,11 @@ git commit -m "feat(artifacts): add bounded persistent result storage"
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts`
 - Modify: `packages/huaanwork-policy/src/decide.ts`
 - Modify: `dsh-plugin-huaanwork/src/huaanwork-host/index.ts`
-- Modify: `dsh-plugin-huaanwork/src/huaanwork-guardrails/bridge.ts:120-172`
+- Modify: `dsh-plugin-huaanwork/src/huaanwork-guardrails/bridge.ts:120-172,433-444`
 - Test: `dsh-plugin-huaanwork/tests/huaanwork-guardrails/result-artifact-tools.spec.ts`
 - Test: `dsh-plugin-huaanwork/tests/huaanwork-guardrails/present-as.cordis.spec.ts`
 - Test: `dsh-plugin-huaanwork/tests/huaanwork-guardrails/policy.cordis.spec.ts`
+- Test: `dsh-plugin-huaanwork/tests/huaanwork-guardrails/bridge.spec.ts`
 
 **Interfaces:**
 - Consumes: Task 1 的 `beginArtifactWrite/prepareArtifact/commitPreparedArtifact/discardPreparedArtifact`；以及已合并的 `dsh-plugin-huaanwork/src/huaanwork-host/turn-anchors.ts` 的 `TurnAnchorStore` / `TurnAnchor`（经 `holders.ts` 注入 `ctx.huaanworkTurnAnchors`）。本 Task 只 import 消费，不修改该模块、不依赖 ProgressPanel。只有 `sendToAgent` 的 `register()` 登记且消息已被 claim 才能获得高级/自动化来源；未登记包儿童经 `notePreStep` 得 `unknown`，登记但尚未 claim 的排队消息不改变当前附件。
@@ -398,7 +399,7 @@ import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepse
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { createTurnAnchorStore, installTurnAnchorHooks } from '../../src/huaanwork-host/turn-anchors.ts'
 import { apply as applyPresentAs } from '../../src/huaanwork-guardrails/present-as.ts'
 
@@ -431,12 +432,34 @@ async function makeClaimHarness(profileDir: string) {
   Object.assign(ctx, { huaanworkTurnAnchors: anchors, huaanworkAttachments: emptyAttachments() })
   const adapter = new RequestAdapter()
   ctx.llm.registerAdapter(['artifact-test'], adapter)
+  // 注册一个已在 ALLOWED_TOOLS 内的基准工具，避免 present-as.ts 的 restrictInternal 在未挂载
+  // result_present 时因 allowed.length === 0 提前返回而跳过 tools.restrict()。
+  const unregisterBaseline = ctx.tools.register(defineTool({
+    name: 'read',
+    description: 'baseline allowed tool for restrict testing',
+    parameters: {},
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.text }],
+    },
+    execute: async () => ({ text: 'ok' }),
+  }))
   const unregister = registerResultArtifactTools(ctx as never, profileDir)
   applyPresentAs(ctx as never)
   installTurnAnchorHooks(ctx as never) // 保留真实 pre-step 的 next 链
   ctx.on('agent/inbox/claimed', makeResultPresentClaimed(ctx as never), { global: true })
   const agent = await ctx.agentLoop.create(SessionId('huaanwork-claim-test'), { provider: 'artifact-test', model: 'test' })
-  return { ctx, agent, anchors, adapter, async dispose() { unregister(); await ctx.fiber.dispose() } }
+  return {
+    ctx,
+    agent,
+    anchors,
+    adapter,
+    async dispose() {
+      unregister()
+      unregisterBaseline()
+      await ctx.fiber.dispose()
+    },
+  }
 }
 
 it('includes result_present on the first advanced request and removes it on the first compat request', async () => {
@@ -448,8 +471,9 @@ it('includes result_present on the first advanced request and removes it on the 
       h.anchors.register({ sessionId: h.agent.session.id, clientMessageId: message.id, origin })
       h.agent.followup(message)
       await h.agent.whenIdle()
-      expect(h.adapter.requests.at(-1)!.tools?.some((tool) => tool.name === RESULT_PRESENT_TOOL))
-        .toBe(origin === 'advanced')
+      const names = h.adapter.requests.at(-1)!.tools?.map((tool) => tool.name) ?? []
+      expect(names).toContain('read')
+      expect(names.includes(RESULT_PRESENT_TOOL)).toBe(origin === 'advanced')
     }
     expect(h.adapter.requests).toHaveLength(2)
   } finally {
@@ -460,17 +484,90 @@ it('includes result_present on the first advanced request and removes it on the 
 ```
 
 同一真实 harness 还必须覆盖（每个测试自己创建 profile/context 并 finally 释放）：
-- 自动化 register(origin=automation) 首 request 和包儿童未 register 的首 request 均不含工具；普通直接执行但未 attached 必须拒绝。
+- 自动化 register(origin=automation) 首 request 和包儿童未 register 的首 request 均含 `read` 且不含 `result_present`；普通直接执行但未 attached 必须拒绝。
 - advanced 首轮后发送 `source.kind='goal'` 的消息，原 anchor/附件保留，续轮 request 仍含工具。
 - `beforeFinish` 使用测试内 `Promise.withResolvers<void>()` 的 entered/release 两个屏障暂停首轮；第二条消息只 register 并排队、尚未 claim 时断言当前附件与 anchor 不变，再 release 并核对下一次 request（不靠 sleep）。
 - 对真实 anchor store 的 `notePreStep` 或 restrict 刷新注入同步抛错，spy `agent.cancel`，断言收到 `{kind:'hook',reason:'result-present-attachment-sync-failed'}`，`await agent.whenIdle()` 后 adapter.requests 为零；不能只 expect throw，真实通知会吞监听器异常。
 - 在现有 `present-as.cordis.spec.ts` 的 `createMockAgent/createMockContext` 上加入真实 anchor store，直接调用同一 claimed 处理器两次、以两种顺序调用 bridge 采用的 `notePreStep(sessionId,[message],now)`，比较 `restrictCalls.length` 相对初值仅加一；不再使用未声明的 `makeStep/countRestrictRefreshes/runBridgeSync`。另驱动 `installTurnAnchorHooks` 注册的真实 pre-step listener，并用本地计数 next 函数断言每次都委托。`TurnAnchorStore` 内部不修改，goal 无新用户继承、未知 sessionId 直接 return 都有钉。
 
+在现有 `policy.cordis.spec.ts` 中沿用 `applyPolicyWithUnattended`、`POLICY`、`GUARD` 与 `reasonToolUnattached` 增加策略门禁失败测试（覆盖 `tools/pre-execute` 与 `tools.guard`）：
+
+```ts
+test('result_present is allowed without approval when attached and denied when unattached', async () => {
+  const { apply } = await import('../../src/huaanwork-guardrails/policy.ts')
+  const attachments = emptyAttachments()
+  const sessionId = 'session-result-present'
+  const call = {
+    name: 'result_present',
+    arguments: { title: '日报', format: 'markdown', content: '# 正文' },
+    agent: { session: { id: sessionId } },
+    callId: 'call-rp-1',
+  }
+
+  // 默认 ask 档：未挂载一律 deny；挂载后直接 allow（不弹 ask 审批）
+  const askHarness = applyPolicyWithUnattended({ huaanworkAttachments: attachments })
+  apply(askHarness.ctx as never)
+  assert.deepEqual(await askHarness.preExecute(call), {
+    kind: 'deny',
+    reason: POLICY(reasonToolUnattached('result_present')),
+  })
+  assert.equal(askHarness.guard(call), GUARD(reasonToolUnattached('result_present')))
+
+  attachAgentTools(attachments, sessionId, ['result_present'])
+  assert.deepEqual(await askHarness.preExecute(call), { kind: 'allow' })
+  assert.equal(askHarness.guard(call), undefined)
+
+  // full 档下未挂载同样 deny
+  const fullProfile = mkdtempSync(join(tmpdir(), 'huaanwork-policy-rp-full-'))
+  try {
+    writeFileSync(join(fullProfile, 'huaanwork-settings.json'), JSON.stringify({ guard_mode: 'full' }))
+    const fullHarness = applyPolicyWithUnattended({
+      huaanworkProfileDir: fullProfile,
+      huaanworkAttachments: emptyAttachments(),
+    })
+    apply(fullHarness.ctx as never)
+    assert.deepEqual(await fullHarness.preExecute(call), {
+      kind: 'deny',
+      reason: POLICY(reasonToolUnattached('result_present')),
+    })
+    assert.equal(fullHarness.guard(call), GUARD(reasonToolUnattached('result_present')))
+  } finally {
+    rmSync(fullProfile, { recursive: true, force: true })
+  }
+})
+```
+
+在现有 `bridge.spec.ts` 中沿用 `createCtx` 增加实时 `tool/start` 参数抑制失败测试：
+
+```ts
+test('result_present omits args from live tool/start events', async () => {
+  const { apply } = await import('../../src/huaanwork-guardrails/bridge.ts')
+  const { ctx, listeners, emitted } = createCtx()
+  apply(ctx as never)
+  const execute = listeners['tools/execute']?.[0] as Execute
+  await execute(
+    {
+      name: 'result_present',
+      callId: 'rp-live-1',
+      arguments: { title: '分析报告', format: 'markdown', content: '# 敏感完整正文' },
+      agent: parentAgent,
+    },
+    async () => ({ isError: false, content: [{ type: 'text', text: '已生成结果页“分析报告”。artifactId: a-1' }] }),
+  )
+  const start = emitted.find((event) => (event as { event?: string }).event === 'tool/start') as Record<string, unknown>
+  assert.equal(start.name, 'result_present')
+  assert.equal(start.callId, 'rp-live-1')
+  assert.equal(start.sessionId, PARENT_SESSION)
+  assert.equal('args' in start, false)
+  assert.equal(JSON.stringify(start).includes('敏感完整正文'), false)
+})
+```
+
 - [ ] **Step 2: 确认工具注册和可见性测试失败**
 
 Run:
 ```bash
-corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-guardrails/result-artifact-tools.spec.ts tests/huaanwork-guardrails/present-as.cordis.spec.ts tests/huaanwork-guardrails/policy.cordis.spec.ts
+corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-guardrails/result-artifact-tools.spec.ts tests/huaanwork-guardrails/present-as.cordis.spec.ts tests/huaanwork-guardrails/policy.cordis.spec.ts tests/huaanwork-guardrails/bridge.spec.ts
 ```
 Expected: FAIL，工具未注册。
 
@@ -555,15 +652,28 @@ ctx.on('agent/inbox/claimed', makeResultPresentClaimed(ctx), { global: true })
 
 上述窄 context 只列 helper 消费的 holder；实际传入完整 Host ctx，`refreshAgentRestrict(ctx as never, sessionId)` 继续使用既有 agents/restrict 服务，不用上述窄类型伪造运行时 ctx。`AgentCancelCause` 的真实 hook 形状在 `core/session/src/types.ts:190-194`；cancel 使 driver 的 signal 中止，assembly 后检查会阻止 llm 请求。缺 sessionId 直接 return。
 
-唯一 origin 门是 advanced：automation/unknown（含兼容新回合和未登记包儿童）摘除旧附件，状态改变才 refresh；goal 没有新用户消息时共享 store 返回原 anchor，附件保留。register 只登记 pending，不触碰当前附件；真正 claimed 后才切换。与 bridge 的同一 `notePreStep` 入口幂等，重复消息及后续 pre-step 不重复 refresh。工具执行体仍检查 attached；不改 `turn-anchors.ts`、普通全局 allow、包儿童血缘或无人值守白名单。policy 对 `result_present` 只允许 `attached=true`。
+生产接线位置（`dsh-plugin-huaanwork/src/huaanwork-host/index.ts`）：
+- 在顶层 `installTurnAnchorHooks(ctx)` 紧邻处注册 `ctx.on('agent/inbox/claimed', makeResultPresentClaimed(ctx), { global: true })`（`huaanwork-host` 顶层 `inject` 不含 `'tools'`，不得在顶层直接调用 `ctx.tools`）。
+- 在既有 `ctx.plugin({ inject: ['tools'], apply: (pc) => ... })` 的 `pc.effect` 中，给 `toolCtx` 补传 `huaanworkTurnAnchors: ctx.huaanworkTurnAnchors`，调用 `const unregisterResultArtifactTools = registerResultArtifactTools(toolCtx, config.profileDir)`，并在该 `effect` 的 disposer 中调用 `unregisterResultArtifactTools()`。
+
+唯一 origin 门是 advanced：automation/unknown（含兼容新回合和未登记包儿童）摘除旧附件，状态改变才 refresh；goal 没有新用户消息时共享 store 返回原 anchor，附件保留。register 只登记 pending，不触碰当前附件；真正 claimed 后才切换。与 bridge 的同一 `notePreStep` 入口幂等，重复消息及后续 pre-step 不重复 refresh。工具执行体仍检查 attached；不改 `turn-anchors.ts`、普通全局 allow、包儿童血缘或无人值守白名单。
+
+策略层两处精确修改（已挂载直接放行、不弹 `ask` 审批，未挂载在所有档位一律拒绝）：
+- `dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts`：在 `SESSION_ATTACHED_TOOLS` 中加入 `"result_present"`，使 `toToolCall` 填充 `attached = isAgentToolAttached(ctx.huaanworkAttachments, sessionId, "result_present")`。
+- `packages/huaanwork-policy/src/decide.ts`：在 `switch (input.name)` 中新增与 `agent_http`/`agent_skill_run` 同形的显式分支：
+
+```ts
+case "result_present":
+  return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
+```
 
 - [ ] **Step 5: 在桥接层抑制参数正文**
 
-`tool/start` 的 `result_present` 不构造通用 args 详情；只保留 name/callId/sessionId/roundKey，供客户端识别该工具。历史侧在 Task 5 做同形处理。
+在 `dsh-plugin-huaanwork/src/huaanwork-guardrails/bridge.ts` 的 `startDetail(execution)` 开头，对 `execution.name === RESULT_PRESENT_TOOL` 直接返回 `{}`（跳过 `formatToolArguments`）；使 `tool/start` 只保留 `name/callId/sessionId/roundKey/clientMessageId`，不携带 `args` 正文。历史侧在 Task 5 做同形处理。
 
 Run:
 ```bash
-corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-guardrails/result-artifact-tools.spec.ts tests/huaanwork-guardrails/present-as.cordis.spec.ts tests/huaanwork-guardrails/policy.cordis.spec.ts tests/huaanwork-guardrails/agent-attachments.spec.ts
+corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-guardrails/result-artifact-tools.spec.ts tests/huaanwork-guardrails/present-as.cordis.spec.ts tests/huaanwork-guardrails/policy.cordis.spec.ts tests/huaanwork-guardrails/bridge.spec.ts tests/huaanwork-guardrails/agent-attachments.spec.ts
 corepack yarn workspace @huaanwork/policy check
 ```
 Expected: PASS。
@@ -571,7 +681,7 @@ Expected: PASS。
 - [ ] **Step 6: Commit**
 
 ```bash
-git add dsh-plugin-huaanwork/src/huaanwork-guardrails/result-artifact-tools.ts dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts packages/huaanwork-policy/src/decide.ts dsh-plugin-huaanwork/src/huaanwork-host/index.ts dsh-plugin-huaanwork/src/huaanwork-guardrails/bridge.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/result-artifact-tools.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/present-as.cordis.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/policy.cordis.spec.ts
+git add dsh-plugin-huaanwork/src/huaanwork-guardrails/result-artifact-tools.ts dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts packages/huaanwork-policy/src/decide.ts dsh-plugin-huaanwork/src/huaanwork-host/index.ts dsh-plugin-huaanwork/src/huaanwork-guardrails/bridge.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/result-artifact-tools.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/present-as.cordis.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/policy.cordis.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/bridge.spec.ts
 git commit -m "feat(artifacts): add parent-only result presentation tool"
 ```
 
@@ -606,8 +716,8 @@ it.each([
   const project = await createProject(h.profileDir, { root: h.neutral, name: '封套提示' })
   const automation = await agentTask(h.profileDir, {
     projectId: project.id,
-    name: '生成报告',
-    prompt: '生成报告',
+    name: '季度任务',
+    prompt: '请输出本季度经营分析',
     ...(unattended !== undefined ? { unattended } : {}),
   })
   const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'prompt-contract-1' })
@@ -615,7 +725,9 @@ it.each([
   const prompt = h.followups[0]!.text
   expect(prompt).toContain('<task-result-contract>')
   expect(prompt).toContain('最终可见输出必须且只能是一个 JSON 对象')
-  expect(prompt.indexOf('生成报告')).toBeLessThan(prompt.indexOf('<task-result-contract>'))
+  expect(prompt.indexOf('请输出本季度经营分析')).toBeGreaterThan(-1)
+  expect(prompt.indexOf('请输出本季度经营分析')).toBeLessThan(prompt.indexOf('<task-result-contract>'))
+  expect(prompt.indexOf('</task-result-contract>')).toBeLessThan(prompt.indexOf('</automation-fire>'))
   expect(prompt).toContain('<automation-fire')
   h.release(h.followups[0]!.sessionId)
   await run.done
@@ -695,7 +807,9 @@ it('cancels while preparation is pending without publishing any artifact fields'
     const summary = await storedRun(h.profileDir, automation.id, run.runId)
     expect(summary).toMatchObject({ ok: false, status: 'cancelled' })
     expect(artifactFieldsOf(summary)).toEqual({})
+    expect(await findAutomation(h.profileDir, automation.id)).toMatchObject({ lastStatus: 'error' })
     const end = h.events.find((event) => event.event === 'automation/run-end' && event.runId === run.runId)!
+    expect(end).toMatchObject({ ok: false, status: 'cancelled' })
     expect(artifactFieldsOf(end)).toEqual({})
     expect(await listArtifacts(h.profileDir, sessionId)).toEqual([])
     expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
@@ -2234,3 +2348,11 @@ git commit -m "fix(artifacts): clean result files with owning records"
 | M3 基线与范围 | Minor，成立 | 基线更新为 a423eef9fc；明确 CI/lock/证据例外，前置模块直接消费 |
 
 依据包括当前 pin 的 `agent-loop/src/inbox.ts` 与 `agent.ts`、`huaanwork-host/turn-anchors.ts`、自动化取消/prune 原语、Electron 访问头实现与公开 frame 类型、Markdown 渲染器的 definition 解析；原有晚停止裁定见 `../specs/2026-10-21-automation-result-preview-design.md`，N2 边界见 `../specs/2026-11-09-automation-project-linkage-design.md`。真实模型请求、Electron 探针和七项用户验收仍需实施后执行；本轮文档修订不能勾选这些验收。
+
+### 2026-11-19 实施前审阅修订
+
+- **Task 2 `makeClaimHarness` 基准允许工具（原阻断 1）**：在 `applyPresentAs` 之前注册 `ALLOWED_TOOLS` 内的基准工具 `read`（并随 `dispose()` 注销），避免 `present-as.ts` 的 `restrictInternal` 在未挂载 `result_present` 时因 `allowed.length === 0` 早退跳过 `tools.restrict()` 导致未挂载断言恒红。
+- **Task 2 策略门禁实现与测试**：明确 `policy.ts` 的 `SESSION_ATTACHED_TOOLS` 与 `packages/huaanwork-policy/src/decide.ts` 的 `case "result_present"` 显式分支（挂载即放行、未挂载在 `ask`/`full` 档均拒绝），并在 `policy.cordis.spec.ts` 增加 `tools/pre-execute` 与 `tools.guard` 失败测试。
+- **Task 2 生产接线点**：明确 `huaanwork-host/index.ts` 在顶层 `installTurnAnchorHooks(ctx)` 旁注册 `agent/inbox/claimed`，在 `ctx.plugin({ inject: ['tools'] })` 的 `pc.effect` 中给 `toolCtx` 补传 `huaanworkTurnAnchors: ctx.huaanworkTurnAnchors` 并注册/注销 `registerResultArtifactTools`。
+- **Task 2 实时 `tool/start` 抑制**：明确在 `bridge.ts` 的 `startDetail(execution)` 中对 `result_present` 返回 `{}`，并在 `bridge.spec.ts` 补失败测试、同步 Files、vitest 命令与提交清单。
+- **Task 3 提示顺序与取消断言**：将测试任务名与 `prompt` 正文区分并校验正文在 `<task-result-contract>` 之前、契约在 `</automation-fire>` 之前；在 prepare 期间取消用例补齐 `findAutomation().lastStatus === 'error'` 与 `run-end` 的 `{ ok: false, status: 'cancelled' }` 断言。
