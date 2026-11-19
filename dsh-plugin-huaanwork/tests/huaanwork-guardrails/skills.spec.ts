@@ -114,7 +114,9 @@ type ActivationSpec = {
   label?: string;
   childId?: string;
   request?: { prompt?: unknown[]; parent?: unknown };
+  signal?: AbortSignal;
   delivery?: string;
+  [key: symbol]: unknown;
 };
 
 /** 释放 pending activation 时提供的上游句柄成员;缺省即正常 completed/dispose。 */
@@ -2456,4 +2458,118 @@ test("Q4-I2: an awaiting explore pre-execute slot in session A never narrows a c
     ["glob", "grep", "read", "read_file"].sort(),
   );
   assert.equal(harness.guardReason(aChildTools, "write"), "huaanwork-explore");
+});
+
+test("Q4-R2-01: system-skill merges targeted cancel and caller signals into startActivation while preserving symbols, sibling isolation, and legacy specs", async () => {
+  const harness = createHarness();
+  assert.equal((await harness.invokeSkill(harness.parent, "explore")).kind, "allow");
+
+  // 1) 同父会话两个并发 pending system-skill 共用同一 callerSignal：定向取消 runA 只中止 runA 的启动信号，
+  //    不影响 callerSignal 与兄弟 runB，且保留 spec 上的自定义符号字段。
+  const sharedCaller = new AbortController();
+  const customTag = Symbol("custom-spec-tag");
+  const specA: ActivationSpec = {
+    provider: "spawn",
+    label: "explore-a",
+    childId: "child-a",
+    request: { prompt: [{ type: "text", text: "a" }], parent: { session: { id: "main" } } },
+    signal: sharedCaller.signal,
+    delivery: "parent",
+    [customTag]: "preserved-tag",
+  };
+  const specB: ActivationSpec = {
+    provider: "spawn",
+    label: "explore-b",
+    childId: "child-b",
+    request: { prompt: [{ type: "text", text: "b" }], parent: { session: { id: "main" } } },
+    signal: sharedCaller.signal,
+    delivery: "parent",
+  };
+  const runA = await harness.startSubagentSpawn(harness.parent, specA);
+  const runB = await harness.startSubagentSpawn(harness.parent, specB);
+  const runs = harness.runs.snapshot("main").runs;
+  const runAId = runs.find((run) => run.childId === "child-a")!.runId;
+  const runBId = runs.find((run) => run.childId === "child-b")!.runId;
+  const receivedA = runA.entry!.spec;
+  const receivedB = runB.entry!.spec;
+  assert.equal(receivedA[customTag], "preserved-tag", "custom symbol properties survive signal wrapping");
+  assert.ok(receivedA.signal instanceof AbortSignal);
+  assert.ok(receivedB.signal instanceof AbortSignal);
+  assert.equal(receivedA.signal.aborted, false);
+  assert.equal(receivedB.signal.aborted, false);
+
+  let aAbortEvents = 0;
+  let bAbortEvents = 0;
+  receivedA.signal.addEventListener("abort", () => {
+    aAbortEvents += 1;
+    // 模拟真实上游 startLocal 收到 abort 后立即拒绝启动。
+    runA.entry!.gate.reject(new Error("aborted during start"));
+  });
+  receivedB.signal.addEventListener("abort", () => {
+    bAbortEvents += 1;
+  });
+
+  assert.deepEqual(await harness.runs.requestCancel("main", runAId), { status: "accepted", runId: runAId });
+  assert.equal(receivedA.signal.aborted, true, "targeted cancel propagates abort into system-skill startActivation");
+  assert.equal(aAbortEvents, 1);
+  assert.equal(sharedCaller.signal.aborted, false, "targeted cancel must not abort caller signal");
+  assert.equal(receivedB.signal.aborted, false, "sibling run signal stays untouched");
+  assert.equal(bAbortEvents, 0);
+  await assert.rejects(runA.executionDone, /aborted during start/);
+  assert.equal(harness.runs.get(runAId)?.phase, "stopped");
+  assert.equal(harness.runs.get(runBId)?.phase, "starting");
+
+  // 2) 中止 callerSignal（父回合取消）仍传播到兄弟 runB 的启动信号。
+  sharedCaller.abort(new Error("parent cancelled"));
+  assert.equal(receivedB.signal.aborted, true, "caller signal abort propagates into startActivation");
+  assert.equal(bAbortEvents, 1);
+  runB.entry!.gate.reject(new Error("parent cancelled"));
+  await assert.rejects(runB.executionDone, /parent cancelled/);
+  assert.equal(harness.runs.get(runBId)?.phase, "failed");
+
+  // 3) 若底层启动方忽略已中止信号仍晚到返回句柄，仍按晚到取消分支 dispose 并收敛 stopped。
+  const lateCaller = new AbortController();
+  const lateDisposed: string[] = [];
+  const lateRun = await harness.startSubagentSpawn(harness.parent, {
+    provider: "spawn",
+    label: "explore-late",
+    childId: "child-late",
+    request: { prompt: [{ type: "text", text: "late" }], parent: { session: { id: "main" } } },
+    signal: lateCaller.signal,
+    delivery: "parent",
+  });
+  const lateRunId = harness.runs.snapshot("main").runs.find((run) => run.childId === "child-late")!.runId;
+  assert.deepEqual(await harness.runs.requestCancel("main", lateRunId), { status: "accepted", runId: lateRunId });
+  assert.equal(lateRun.entry!.spec.signal?.aborted, true);
+  lateRun.entry!.gate.resolve({
+    childId: "child-late",
+    localAgent: harness.child,
+    result: Promise.resolve({ stopReason: "aborted" }),
+    dispose: async () => {
+      lateDisposed.push("child-late");
+    },
+  });
+  await assert.rejects(lateRun.executionDone, /已取消/);
+  assert.deepEqual(lateDisposed, ["child-late"]);
+  assert.equal(harness.runs.get(lateRunId)?.phase, "stopped");
+
+  // 4) legacy 派发不经过 system-skill 信号改写：spec 与 signal 原样透传。
+  const legacyCaller = new AbortController();
+  const legacyRunId = harness.runs.begin({ parentSessionId: "main", kind: "legacy", label: "@reader" });
+  const legacySpec: ActivationSpec = {
+    provider: "spawn",
+    label: "@reader",
+    childId: "child-legacy",
+    request: { prompt: [{ type: "text", text: "read" }], parent: harness.parent },
+    signal: legacyCaller.signal,
+    delivery: "parent",
+    [HUAANWORK_LEGACY_AGENT_REQUEST]: { name: "reader", allow: ["read"], persona: "reader" },
+    [HUAANWORK_SUBAGENT_RUN_ID]: legacyRunId,
+  };
+  const legacyCall = (harness.ctx.subagents!.startActivation as (spec: unknown) => Promise<unknown>)(legacySpec);
+  const receivedLegacy = harness.activationGates.at(-1)!.spec;
+  assert.equal(receivedLegacy, legacySpec, "legacy activation spec is passed through untouched");
+  assert.equal(receivedLegacy.signal, legacyCaller.signal);
+  harness.releaseActivation({ childId: "child-legacy", localAgent: harness.child });
+  await legacyCall;
 });

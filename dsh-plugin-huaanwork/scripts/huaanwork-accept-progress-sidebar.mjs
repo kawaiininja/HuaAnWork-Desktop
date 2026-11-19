@@ -172,6 +172,165 @@ export function compareHeaderToolPhases(phases) {
   }
 }
 
+/**
+ * Resolve the effective `request/header` tool surface in force for one turn.
+ *
+ * DSH appends `request/header` only when the schema changes, so an ordinary turn
+ * that inherits the previous header logs no new snapshot inside `[startSeq, endSeq)`.
+ * Returning the inherited prior header ensures a leaked `subagent` tool in an
+ * intermediate ordinary turn (`MID1` / `MID2`) cannot hide behind an unchanged header.
+ */
+export function inspectEffectiveTurnHeaderTools(header, turn) {
+  const requests = Array.isArray(header?.requests) ? header.requests : []
+  const startSeq = typeof turn?.startSeq === 'number' ? turn.startSeq : null
+  const endSeq = typeof turn?.endSeq === 'number' ? turn.endSeq : null
+  if (startSeq === null) {
+    return { inherited: false, snapshotCount: 0, effectiveToolNames: [], hasSubagent: false }
+  }
+  const inTurn = requests.filter((request) => (
+    request?.seq !== null
+    && typeof request?.seq === 'number'
+    && request.seq >= startSeq
+    && (endSeq === null || request.seq < endSeq)
+  ))
+  if (inTurn.length > 0) {
+    const effectiveToolNames = [...new Set(inTurn.flatMap((request) => namesOfPhase(request.toolNames)))].sort()
+    return {
+      inherited: false,
+      snapshotCount: inTurn.length,
+      effectiveToolNames,
+      hasSubagent: inTurn.some((request) => request.hasSubagent === true || namesOfPhase(request.toolNames).includes('subagent')),
+    }
+  }
+  let prior
+  for (const request of requests) {
+    if (request?.seq !== null && typeof request?.seq === 'number' && request.seq < startSeq) prior = request
+  }
+  const effectiveToolNames = prior === undefined ? [] : [...new Set(namesOfPhase(prior.toolNames))].sort()
+  return {
+    inherited: prior !== undefined,
+    snapshotCount: 0,
+    effectiveToolNames,
+    hasSubagent: prior !== undefined && (prior.hasSubagent === true || effectiveToolNames.includes('subagent')),
+  }
+}
+
+const NON_COMPLETED_SETTLEMENT_PATTERN = /\b(was stopped before it finished|failed before it finished|declined the task|ran out of room before it finished|ended abnormally)\b/iu
+
+/**
+ * Classify one depth-2 package lane's terminal outcome from its own persisted
+ * session events and the settlement notice delivered to the depth-1 package child.
+ *
+ * Normal lane acceptance (spec §14.2 #5) requires an authoritative `turn/end`
+ * with `reason.kind === 'completed'` (no `aborted`, `interrupted`, `error`,
+ * `blocked`, `max-tokens`, missing, or unknown reason), non-empty closing text,
+ * and a non-abnormal delivered settlement.
+ */
+export function classifyLaneOutcome(laneId, laneSession, delivery) {
+  const events = Array.isArray(laneSession?.events) ? laneSession.events : []
+  const turnEndKinds = events
+    .filter((event) => event?.type === 'turn/end')
+    .map((event) => {
+      const kind = event?.data?.reason?.kind
+      return typeof kind === 'string' && kind !== '' ? kind : 'unknown'
+    })
+  const turnEndKind = turnEndKinds.length > 0 ? turnEndKinds[turnEndKinds.length - 1] : null
+  const allTurnsCompleted = turnEndKinds.length > 0 && turnEndKinds.every((kind) => kind === 'completed')
+  const final = laneSession === undefined ? undefined : lastAssistantText(events)
+  const finalTextLength = final?.text.length ?? 0
+  const deliveryText = typeof delivery?.text === 'string' ? delivery.text : ''
+  const settlementDelivered = delivery !== undefined && !/left no closing message/iu.test(deliveryText)
+  const settlementAbnormal = delivery !== undefined && NON_COMPLETED_SETTLEMENT_PATTERN.test(deliveryText)
+  const isError = !allTurnsCompleted
+    || settlementAbnormal
+    || final === undefined
+    || final.text.trim() === ''
+  return {
+    id: laneId,
+    turnEndKind,
+    turnEndKinds,
+    finalTextLength,
+    settlementDelivered,
+    settlementAbnormal,
+    isError,
+  }
+}
+
+/** Return sorted duplicate non-empty `callId` values found in an entry list. */
+export function findDuplicateCallIds(entries) {
+  const counts = new Map()
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const callId = typeof entry?.callId === 'string' && entry.callId !== '' ? entry.callId : null
+    if (callId === null) continue
+    counts.set(callId, (counts.get(callId) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([callId]) => callId)
+    .sort()
+}
+
+/**
+ * Audit uniqueness across *all* rendered main-flow tool panels (collapsed and
+ * expanded) as well as every rendered tool call entry inside them.
+ */
+export function inspectMainToolUniqueness(panels, expectedCalls = []) {
+  const list = Array.isArray(panels) ? panels : []
+  const anchorCounts = new Map()
+  const bodyCounts = new Map()
+  const callCounts = new Map()
+  let missingAnchorCount = 0
+  let unexpandedPanelCount = 0
+  let mountedBodyCount = 0
+  let totalCallEntries = 0
+  for (const panel of list) {
+    const anchorId = typeof panel?.anchorId === 'string' && panel.anchorId !== '' ? panel.anchorId : null
+    if (anchorId === null) missingAnchorCount += 1
+    else anchorCounts.set(anchorId, (anchorCounts.get(anchorId) ?? 0) + 1)
+    if (panel?.expanded !== true) unexpandedPanelCount += 1
+    const bodyId = typeof panel?.bodyId === 'string' && panel.bodyId !== '' ? panel.bodyId : null
+    if (bodyId !== null) {
+      mountedBodyCount += 1
+      bodyCounts.set(bodyId, (bodyCounts.get(bodyId) ?? 0) + 1)
+    }
+    for (const entry of Array.isArray(panel?.entries) ? panel.entries : []) {
+      totalCallEntries += 1
+      const callId = typeof entry?.callId === 'string' && entry.callId !== '' ? entry.callId : null
+      if (callId !== null) callCounts.set(callId, (callCounts.get(callId) ?? 0) + 1)
+    }
+  }
+  const duplicateAnchorIds = [...anchorCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id).sort()
+  const duplicateBodyIds = [...bodyCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id).sort()
+  const duplicateCallIds = [...callCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id).sort()
+  const expectedIds = [...new Set(
+    (Array.isArray(expectedCalls) ? expectedCalls : [])
+      .map((call) => (typeof call?.callId === 'string' && call.callId !== '' ? call.callId : null))
+      .filter((id) => id !== null),
+  )]
+  const missingExpectedCallIds = expectedIds.filter((id) => (callCounts.get(id) ?? 0) === 0).sort()
+  const duplicatedExpectedCallIds = expectedIds.filter((id) => (callCounts.get(id) ?? 0) > 1).sort()
+  const panelsUnique = missingAnchorCount === 0 && duplicateAnchorIds.length === 0 && duplicateBodyIds.length === 0
+  const callsUnique = unexpandedPanelCount === 0
+    && duplicateCallIds.length === 0
+    && missingExpectedCallIds.length === 0
+    && duplicatedExpectedCallIds.length === 0
+  return {
+    panelCount: list.length,
+    mountedBodyCount,
+    unexpandedPanelCount,
+    missingAnchorCount,
+    duplicateAnchorIds,
+    duplicateBodyIds,
+    totalCallEntries,
+    uniqueCallIdCount: callCounts.size,
+    duplicateCallIds,
+    missingExpectedCallIds,
+    duplicatedExpectedCallIds,
+    panelsUnique,
+    callsUnique,
+  }
+}
+
 function sessionHeaderFacts(session) {
   const header = session?.header ?? {}
   return {
@@ -303,6 +462,10 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   requireFacts(percent.latestRoundCovered === true, 'no-fabricated-percentage: the latest model round is missing from the activity panel')
   requireFacts(percent.activityAnchorMatched === true, 'no-fabricated-percentage: the progress panel turn anchor does not match the complex turn clientMessageId')
   requireFacts(percent.activityCallsMatched === true, 'no-fabricated-percentage: the activity entries do not match the session tool callId/roundKey records')
+  requireFacts(percent.activityCallsUnique === true, 'no-fabricated-percentage: duplicated tool callId entries appeared in the activity panel')
+  if (Array.isArray(percent.duplicateActivityCallIds)) {
+    requireFacts(percent.duplicateActivityCallIds.length === 0, `no-fabricated-percentage: duplicated activity callIds (${percent.duplicateActivityCallIds.join(', ')})`)
+  }
   if (Array.isArray(percent.foreignActivityNames)) {
     requireFacts(percent.foreignActivityNames.length === 0, `no-fabricated-percentage: ${String(percent.foreignActivityNames.length)} activity tool names are absent from the current turn (${percent.foreignActivityNames.join(', ')})`)
   }
@@ -330,6 +493,15 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   requireFacts(Number.isInteger(dual.cancelledCount) && dual.cancelledCount >= 1, 'dual-entry-system-skills: no system-skill run was stopped through the targeted cancel control')
   const phaseReasons = Array.isArray(dual.phaseComparison?.reasons) ? dual.phaseComparison.reasons.join('; ') : 'phase comparison missing'
   requireFacts(dual.phaseComparison?.ok === true, `dual-entry-system-skills: request/header tool phases failed: ${phaseReasons}`)
+  const expectedMidCount = Math.max(0, dual.entries.length - 1)
+  requireFacts(
+    Array.isArray(dual.intermediateOrdinaryTurns) && dual.intermediateOrdinaryTurns.length >= expectedMidCount,
+    `dual-entry-system-skills: expected at least ${String(expectedMidCount)} intermediate ordinary turn reclaim checks`,
+  )
+  requireFacts(
+    dual.intermediateOrdinaryTurns.every((turn) => Array.isArray(turn?.effectiveToolNames) && turn.effectiveToolNames.length > 0 && turn.hasSubagent === false),
+    'dual-entry-system-skills: an intermediate ordinary turn lacked an effective header schema or still exposed subagent',
+  )
 
   const lane = checks['package-lane-depth-two']
   requireFacts(lane.outerCardSeenInRail === true && lane.outerCardSeenInMain === true, 'package-lane-depth-two: the outer package run card is missing from the rail or the main flow')
@@ -340,6 +512,18 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   requireFacts(Array.isArray(lane.chain?.laneIds) && lane.chain.laneIds.length === 2, `package-lane-depth-two: found ${String(lane.chain?.laneIds?.length)} depth-2 lanes (expected exactly 2)`)
   requireFacts(Array.isArray(lane.chain?.laneDepths) && lane.chain.laneDepths.every((depth) => depth === 2), 'package-lane-depth-two: a lane session is not at delegation depth 2')
   requireFacts(Array.isArray(lane.laneResults) && lane.laneResults.length === 2, 'package-lane-depth-two: lane result facts are missing')
+  requireFacts(
+    lane.laneResults.every((result) => result.turnEndKind === 'completed'),
+    `package-lane-depth-two: a lane did not end with authoritative turn/end reason.kind=completed (${lane.laneResults.map((result) => String(result?.turnEndKind ?? 'missing')).join(', ')})`,
+  )
+  requireFacts(
+    lane.laneResults.every((result) => Array.isArray(result.turnEndKinds) && result.turnEndKinds.length > 0 && result.turnEndKinds.every((kind) => kind === 'completed')),
+    'package-lane-depth-two: a lane recorded a non-completed turn/end reason in its session log',
+  )
+  requireFacts(
+    lane.laneResults.every((result) => result.settlementAbnormal !== true),
+    'package-lane-depth-two: a lane settlement notice reported an abnormal stop',
+  )
   requireFacts(lane.laneResults.every((result) => result.isError === false), 'package-lane-depth-two: a lane ended with an error result')
   requireFacts(lane.laneResults.every((result) => Number.isInteger(result.finalTextLength) && result.finalTextLength > 0), 'package-lane-depth-two: a lane produced no closing text')
   requireFacts(lane.laneResults.every((result) => result.settlementDelivered === true), 'package-lane-depth-two: a lane result was never delivered to the package child')
@@ -369,6 +553,14 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   requireFacts(cancel.railCardCounts?.target === 1 && cancel.railCardCounts?.sibling === 1, 'single-cancel-isolation: a duplicated or missing rail run card was observed')
   requireFacts(cancel.perRunCardUnique === true, 'single-cancel-isolation: per-runId card uniqueness failed')
   requireFacts(cancel.mainToolPanelsUnique === true, 'single-cancel-isolation: the main flow rendered duplicate tool panels')
+  requireFacts(cancel.mainToolCallsUnique === true, 'single-cancel-isolation: the main flow rendered duplicate or missing tool calls')
+  requireFacts(cancel.unexpandedMainToolPanelCount === 0, `single-cancel-isolation: ${String(cancel.unexpandedMainToolPanelCount)} main-flow tool panels remained collapsed during the uniqueness audit`)
+  if (Array.isArray(cancel.duplicateMainAnchorIds)) {
+    requireFacts(cancel.duplicateMainAnchorIds.length === 0, `single-cancel-isolation: duplicate main tool panel anchorIds (${cancel.duplicateMainAnchorIds.join(', ')})`)
+  }
+  if (Array.isArray(cancel.duplicateMainCallIds)) {
+    requireFacts(cancel.duplicateMainCallIds.length === 0, `single-cancel-isolation: duplicate main tool callIds (${cancel.duplicateMainCallIds.join(', ')})`)
+  }
   requireFacts(cancel.duplicateFree === true, `single-cancel-isolation: duplicated cards were observed (todo cards ${String(cancel.todoCardCount)})`)
   requireFacts(
     !(typeof facts.isolatedCleanup === 'string' && facts.isolatedCleanup.startsWith('failed:')),
@@ -1155,12 +1347,36 @@ const CARDS_STATE = `(() => {
     terminateDisabled: card.querySelector('.subagent-run-terminate')?.disabled ?? null,
     elapsed: card.querySelector('.subagent-run-status .subagent-run-meta')?.textContent ?? null,
   })
+  const readToolPanel = (section) => ({
+    anchorId: section.getAttribute('data-anchor-id') ?? null,
+    expanded: section.querySelector('.tool-panel-title')?.getAttribute('aria-expanded') === 'true',
+    bodyId: section.querySelector('.tool-panel-body')?.id ?? null,
+    entries: [...section.querySelectorAll('.tool-panel-entry')].map((entry) => {
+      const name = (entry.querySelector('.tool-panel-entry-title code')?.textContent ?? '').trim()
+      const callId = entry.getAttribute('data-call-id') ?? null
+      const rawRound = entry.getAttribute('data-round-key')
+      const roundKey = rawRound !== null && rawRound !== '' && Number.isFinite(Number(rawRound)) ? Number(rawRound) : null
+      return { name, callId, roundKey }
+    }),
+  })
   return {
     main: [...document.querySelectorAll('.chat-log .subagent-run-card')].map(read),
     rail: [...document.querySelectorAll('.right-pane .subagent-run-card')].map(read),
     todoCards: document.querySelectorAll('.chat-log .todo-card').length,
     toolPanelBodies: [...document.querySelectorAll('.chat-log [id^="tool-panel-body-"]')].map((node) => node.id),
+    mainToolPanels: [...document.querySelectorAll('.chat-log .tool-panel')].map(readToolPanel),
   }
+})()`
+
+const EXPAND_MAIN_TOOL_PANELS = `(() => {
+  const buttons = [...document.querySelectorAll('.chat-log .tool-panel .tool-panel-title')]
+  let clicked = 0
+  for (const button of buttons) {
+    if (button.getAttribute('aria-expanded') === 'true') continue
+    button.click()
+    clicked += 1
+  }
+  return { panels: buttons.length, clicked }
 })()`
 
 const EXPAND_ACTIVITY = `(() => {
@@ -2072,6 +2288,8 @@ async function driveNoFabricatedPercentage(client) {
     && call.roundKey === entry.roundKey
   )
   const foreignActivityCalls = activityEntries.filter((entry) => !substantiveCalls.some((call) => matchCall(call, entry)))
+  const duplicateActivityCallIds = findDuplicateCallIds(activityEntries)
+  const activityCallsUnique = duplicateActivityCallIds.length === 0
   const latestRoundCalls = turn?.latestRoundCalls ?? []
   const latestRoundCallsCovered = latestRoundCalls.length === 0
     || latestRoundCalls.every((call) => activityEntries.some((entry) => matchCall(call, entry)))
@@ -2079,6 +2297,7 @@ async function driveNoFabricatedPercentage(client) {
     && activityEntries.length > 0
     && foreignActivityCalls.length === 0
     && latestRoundCallsCovered
+    && activityCallsUnique
   const reasons = []
   if (percentTexts.length > 0) reasons.push(`percentage labels rendered: ${percentTexts.slice(0, 3).join(', ')}`)
   if (taskProgressBarCount > 0) reasons.push(`${String(taskProgressBarCount)} per-step progress bars rendered`)
@@ -2092,6 +2311,9 @@ async function driveNoFabricatedPercentage(client) {
   }
   if (!activityAnchorMatched) {
     reasons.push(`progress panel turn anchor ${JSON.stringify(final?.turnAnchor ?? null)} does not match turn clientMessageId ${JSON.stringify(turn?.clientMessageId ?? null)}`)
+  }
+  if (!activityCallsUnique) {
+    reasons.push(`duplicated tool callIds rendered in the activity panel: ${duplicateActivityCallIds.join(', ')}`)
   }
   if (!activityCallsMatched) {
     reasons.push(`activity callId/roundKey records failed to match turn log (foreign=${JSON.stringify(foreignActivityCalls)}, latestCovered=${String(latestRoundCallsCovered)})`)
@@ -2114,6 +2336,8 @@ async function driveNoFabricatedPercentage(client) {
     activityAnchorMatched,
     activityEntries,
     foreignActivityCalls,
+    duplicateActivityCallIds,
+    activityCallsUnique,
     latestRoundCallsCovered,
     activityCallsMatched,
     activityToolNames,
@@ -2335,6 +2559,7 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
   const drivenIndices = DUAL_ENTRIES
     .map((definition, index) => ({ definition, index }))
     .filter(({ definition }) => !definition.modelSkill || exposure.exposed)
+  const intermediateMarkers = []
   for (let step = 0; step < drivenIndices.length; step += 1) {
     const { definition } = drivenIndices[step]
     const baseMarker = entryMarkerFor(definition)
@@ -2520,6 +2745,7 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
     // logs its own fresh open/reclaim request/header transition in session.v4.jsonl.zstd.
     if (step < drivenIndices.length - 1 && sessionFailure === null) {
       const midMarker = `${MARKER}-MID${String(step + 1)}`
+      intermediateMarkers.push(midMarker)
       try {
         await sendAndSettle(client, `${midMarker} 只回复「好」两个字，不要调用任何工具。`, { label: `ordinary mid-${String(step + 1)}` })
       } catch (cause) {
@@ -2567,8 +2793,42 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
     ?? findParentSession(sessions, `${MARKER}-EXPLORE`)
   let phaseComparison = { ok: false, reasons: ['the explicit /explore turn is missing from the session logs'], beforeHasSubagent: false, duringHasSubagent: false, afterHasSubagent: false, added: [], removed: [] }
   let phases = { before: [], during: [], after: [] }
+  const intermediateOrdinaryTurns = []
   if (parent !== undefined) {
     const header = inspectSessionHeaderTools(parent.events)
+    for (const midMarker of intermediateMarkers) {
+      const midTurn = turnFacts(parent, midMarker)
+      if (midTurn === undefined) {
+        intermediateOrdinaryTurns.push({
+          marker: midMarker,
+          startSeq: null,
+          endSeq: null,
+          replied: false,
+          inherited: false,
+          snapshotCount: 0,
+          effectiveToolNames: [],
+          hasSubagent: false,
+        })
+        reasons.push(`intermediate ordinary turn ${midMarker} is missing from the session log`)
+        continue
+      }
+      const effective = inspectEffectiveTurnHeaderTools(header, midTurn)
+      const replied = hasAssistantAfter(parent.events, midTurn.startSeq)
+      intermediateOrdinaryTurns.push({
+        marker: midMarker,
+        startSeq: midTurn.startSeq,
+        endSeq: midTurn.endSeq,
+        replied,
+        ...effective,
+      })
+      if (!replied) reasons.push(`intermediate ordinary turn ${midMarker} produced no assistant reply`)
+      if (effective.effectiveToolNames.length === 0) {
+        reasons.push(`intermediate ordinary turn ${midMarker} had no effective request/header tool schema`)
+      }
+      if (effective.hasSubagent) {
+        reasons.push(`intermediate ordinary turn ${midMarker} still exposed subagent (inherited=${String(effective.inherited)})`)
+      }
+    }
     for (const item of entries) {
       if (!item.constructible) continue
       const entryTurn = turnFacts(parent, item.marker)
@@ -2656,6 +2916,7 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
     modelSkillBlocked,
     sessionFailure,
     entries,
+    intermediateOrdinaryTurns,
     cancelledCount,
     phases,
     phaseComparison,
@@ -2832,20 +3093,19 @@ async function drivePackageLaneDepthTwo(client, stableSessionId) {
           laneToolNameSet.add(event.data.name)
         }
       }
-      const final = lane === undefined ? undefined : lastAssistantText(lane.events)
       const delivery = deliveries.find((item) => item.laneId === laneId)
-      const errorTurn = lane === undefined ? false : lane.events.some((event) => event?.type === 'turn/end' && event.data?.reason?.kind === 'error')
-      laneResults.push({
-        id: laneId,
-        finalTextLength: final?.text.length ?? 0,
-        settlementDelivered: delivery !== undefined && !/left no closing message/iu.test(delivery.text ?? ''),
-        isError: errorTurn || final === undefined || final.text.trim() === '',
-      })
+      laneResults.push(classifyLaneOutcome(laneId, lane, delivery))
     }
     laneOnlyToolNames = [...laneToolNameSet].filter((name) => !outerChildToolNames.includes(name))
     if (!chain.identityOk) reasons.push('the parent -> package child -> lane identity chain did not resolve from the session headers')
     if (chain.laneIds.length !== 2) reasons.push(`found ${String(chain.laneIds.length)} depth-2 lanes (expected exactly 2)`)
     if (chain.laneDepths.some((depth) => depth !== 2)) reasons.push('a lane session is not at delegation depth 2')
+    if (laneResults.some((result) => result.turnEndKind !== 'completed')) {
+      reasons.push(`a lane did not end with authoritative turn/end reason.kind=completed (${laneResults.map((result) => `${result.id}:${String(result.turnEndKind ?? 'missing')}`).join(', ')})`)
+    }
+    if (laneResults.some((result) => result.settlementAbnormal === true)) {
+      reasons.push('a lane settlement notice reported an abnormal stop')
+    }
     if (laneResults.some((result) => result.isError)) reasons.push('a lane ended with an error result')
     if (laneResults.some((result) => result.finalTextLength === 0)) reasons.push('a lane produced no closing text')
     if (laneResults.some((result) => result.settlementDelivered !== true)) reasons.push('a lane result was never delivered to the package child')
@@ -3009,11 +3269,13 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
   //    another run (the root writer), and the skill lease must not be released by an
   //    idle event from the previous turn, so wait for a quiet session first.
   let pair = []
+  let usedSiblingMarker = `${MARKER}-SIBLING`
   for (let attempt = 1; attempt <= 2 && pair.length < 2; attempt += 1) {
     try {
       await waitForNoActiveRuns(client, stableSessionId)
       await waitForComposerIdle(client, Math.min(options.timeout, 120_000))
       await delay(1_500)
+      usedSiblingMarker = attempt === 1 ? `${MARKER}-SIBLING` : `${MARKER}-SIBLING3`
       await sendText(client, attempt === 1 ? SIBLING_RUN_PROMPT : SIBLING_RUN_RETRY_PROMPT)
       const created = await waitForFreshRuns(
         client, stableSessionId, SIBLING_RUN_LABEL, known, 2, Math.min(options.timeout, 90_000),
@@ -3180,10 +3442,28 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
     }, 20_000, 500)
   } catch { /* recorded below */ }
   const afterSnapshot = await subagentRunsOf(client, stableSessionId)
+  // Expand every collapsed main-flow tool panel (including this scene's own settled
+  // turn panels) so uniqueness audits cover all panels and every rendered tool callId.
+  await client.evaluate(EXPAND_MAIN_TOOL_PANELS).catch(() => undefined)
+  await waitFor('main tool panels expanded', async () => {
+    const state = await cardsState(client)
+    const panels = Array.isArray(state.mainToolPanels) ? state.mainToolPanels : []
+    return { ok: panels.every((panel) => panel.expanded === true), value: panels.length }
+  }, 10_000, 150).catch(() => undefined)
   const after = await cardsState(client)
-  const toolPanelBodies = Array.isArray(after.toolPanelBodies) ? after.toolPanelBodies : []
-  const mainToolPanelsUnique = new Set(toolPanelBodies).size === toolPanelBodies.length
-  if (!mainToolPanelsUnique) reasons.push('the main flow rendered duplicate tool panels for the same anchor')
+  const siblingSessions = loadSessions(isolated.homeDir)
+  const siblingParent = findParentSession(siblingSessions, usedSiblingMarker)
+  const siblingTurn = siblingParent === undefined ? undefined : turnFacts(siblingParent, usedSiblingMarker)
+  const expectedSiblingToolCalls = (siblingTurn?.substantiveCalls ?? []).filter((call) => call.name === 'subagent')
+  const mainToolAudit = inspectMainToolUniqueness(after.mainToolPanels, expectedSiblingToolCalls)
+  const mainToolPanelsUnique = mainToolAudit.panelsUnique
+  const mainToolCallsUnique = mainToolAudit.callsUnique
+  if (!mainToolPanelsUnique) {
+    reasons.push(`the main flow rendered duplicate or unanchored tool panels (missing=${String(mainToolAudit.missingAnchorCount)}, duplicateAnchors=${JSON.stringify(mainToolAudit.duplicateAnchorIds)}, duplicateBodies=${JSON.stringify(mainToolAudit.duplicateBodyIds)})`)
+  }
+  if (!mainToolCallsUnique) {
+    reasons.push(`main-flow tool call uniqueness failed (unexpanded=${String(mainToolAudit.unexpandedPanelCount)}, duplicateCalls=${JSON.stringify(mainToolAudit.duplicateCallIds)}, missingExpected=${JSON.stringify(mainToolAudit.missingExpectedCallIds)}, duplicatedExpected=${JSON.stringify(mainToolAudit.duplicatedExpectedCallIds)})`)
+  }
   const renderedCards = after.main.filter((card) => card.label === SIBLING_RUN_LABEL)
   const newRuns = (afterSnapshot.runs ?? []).filter((run) => run.label === SIBLING_RUN_LABEL && !knownBefore.has(run.runId))
   const renderedDelta = renderedCards.length - siblingCardsBefore
@@ -3256,8 +3536,15 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
     perRunCardUnique,
     absoluteMainCardCounts: { sibling: renderedCards.length, siblingBefore: siblingCardsBefore },
     runLedgerCounts: { sibling: newRuns.length },
-    mainToolPanelCount: toolPanelBodies.length,
+    mainToolPanelCount: mainToolAudit.panelCount,
+    mountedMainToolBodyCount: mainToolAudit.mountedBodyCount,
+    unexpandedMainToolPanelCount: mainToolAudit.unexpandedPanelCount,
+    mainToolCallEntryCount: mainToolAudit.totalCallEntries,
+    duplicateMainAnchorIds: mainToolAudit.duplicateAnchorIds,
+    duplicateMainCallIds: mainToolAudit.duplicateCallIds,
+    missingSiblingToolCallIds: mainToolAudit.missingExpectedCallIds,
     mainToolPanelsUnique,
+    mainToolCallsUnique,
     todoCardCount: after.todoCards,
     todoWritingTurns: expectedTodoCards ?? null,
     duplicateFree,

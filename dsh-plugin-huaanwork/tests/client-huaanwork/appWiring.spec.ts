@@ -19,7 +19,7 @@ import {
   type GoalTurnEvent,
   type GoalTurnState,
 } from "../../src/client-huaanwork/logic/goalRound.ts";
-import { applyTurnFinalToTabs, currentTurnStart, historicalTurnFinalByUserId, projectToolPanels, reduceTurnFinal, type TurnFinalEvent } from "../../src/client-huaanwork/logic/toolPanel.ts";
+import { applyTurnFinalToTabs, currentTurnStart, historicalTurnFinalByUserId, projectToolPanels, reduceTurnFinal, withToolPanelToggle, type TurnFinalEvent } from "../../src/client-huaanwork/logic/toolPanel.ts";
 import { consumeBufferedStaleEnds, consumeStaleIdle, finishStop } from "../../src/client-huaanwork/logic/stopGate.ts";
 import { appendOutcomeNotes, latestUserItemId, turnChecks } from "../../src/client-huaanwork/logic/outcomeCheck.ts";
 import { interruptTurnItems } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
@@ -2813,4 +2813,114 @@ test("buffers goal/state and session/end for a queued turn started while goalInt
     controlOf,
   );
   assert.deepEqual(replayed, [queueStart, todoEvent, goalComplete, turnEnd]);
+});
+
+test("Q4-R2-02: upsertTodoItem cross-step update preserves same-round tool panel grouping, toggle, and stale-event rejection", () => {
+  // 实时路径:单 step 顺序 A(10) → todo(10) → B(10),随后 step 2 发合法 todo(20)。
+  let seq = 1;
+  const alloc = () => seq++;
+  let items: Parameters<typeof AppModule.upsertTodoItem>[0] = [
+    { id: alloc(), kind: "user", text: "分步执行", clientMessageId: "uuid-1" },
+    { id: alloc(), kind: "tool", card: { key: "c1", name: "read", callId: "c1", status: "end", roundKey: 10 } },
+    { id: alloc(), kind: "todo", todos: [{ content: "步骤一", status: "in_progress" }], roundKey: 10, clientMessageId: "uuid-1" },
+    { id: alloc(), kind: "tool", card: { key: "c2", name: "grep", callId: "c2", status: "end", roundKey: 10 } },
+  ];
+  items = withToolPanelToggle(items, 2, "expand").slice();
+  const project = (list: typeof items, final: boolean) => {
+    const toolRows = projectToolPanels(list, {
+      contentItems: list,
+      turnFinalByUserId: final ? { 1: true } : undefined,
+      connectionLost: false,
+    });
+    const model = selectProgressPanelModel({
+      sessionId: "s1",
+      items: list,
+      toolRows,
+      currentTurnClientMessageId: "uuid-1",
+      turnFinal: final,
+      subagents: [],
+      sidecarDead: false,
+      ready: true,
+      sawReady: true,
+      subagentConnection: "live",
+    });
+    return {
+      mainPanels: toolRows.filter((row) => row.kind === "panel").map((row) => row.panel),
+      railPanels: model.activity,
+      model,
+    };
+  };
+
+  const before = project(items, true);
+  assert.equal(before.mainPanels.length, 1);
+  assert.equal(before.mainPanels[0]?.anchorId, 2);
+  assert.equal(before.mainPanels[0]?.count, 2);
+  assert.equal(before.mainPanels[0]?.expanded, true);
+
+  const turnStart = currentTurnStart(items);
+  const update = { clientMessageId: "uuid-1", roundKey: 20, todos: [{ content: "步骤一", status: "completed" as const }] };
+  assert.equal(shouldApplyTodoEvent(items, turnStart, update, currentSnapshotRoundKey(items, turnStart)), true);
+  items = AppModule.upsertTodoItem(items, update.todos, alloc, update.roundKey, update.clientMessageId);
+
+  const after = project(items, true);
+  assert.equal(after.mainPanels.length, 1, "cross-step todo update must not split the step-1 tool panel");
+  assert.equal(after.mainPanels[0]?.anchorId, 2);
+  assert.equal(after.mainPanels[0]?.count, 2);
+  assert.equal(after.mainPanels[0]?.expanded, true, "manual expand toggle on anchor 2 is preserved");
+  assert.deepEqual(after.mainPanels[0]?.tools.map((entry) => entry.name), ["read", "grep"]);
+  assert.equal(after.railPanels.length, 1);
+  assert.equal(after.railPanels[0]?.anchorId, 2);
+  assert.equal(after.model.completedCount, 1);
+  assert.equal(currentSnapshotRoundKey(items, turnStart), 20);
+  assert.equal(
+    shouldApplyTodoEvent(items, turnStart, { clientMessageId: "uuid-1", roundKey: 15 }, currentSnapshotRoundKey(items, turnStart)),
+    false,
+    "older todo events remain rejected after updating the snapshot roundKey",
+  );
+
+  // 历史恢复后续写路径:历史包含 [tool A(10), todo(10), tool B(10)],恢复后收到实时 todo(20)。
+  const history = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "历史续写", clientMessageId: "uuid-h" },
+    { kind: "tool-call", time: 2, name: "read", callId: "h1", roundKey: 10 },
+    { kind: "tool-result", time: 3, callId: "h1", isError: false, text: "ok" },
+    { kind: "tool-call", time: 4, name: "todo_write", callId: "ht1", roundKey: 10, clientMessageId: "uuid-h", todos: [{ content: "历史步", status: "in_progress" }] },
+    { kind: "tool-result", time: 5, callId: "ht1", isError: false, text: "updated" },
+    { kind: "tool-call", time: 6, name: "grep", callId: "h2", roundKey: 10 },
+    { kind: "tool-result", time: 7, callId: "h2", isError: false, text: "ok" },
+  ]);
+  let hSeq = 1;
+  const hAlloc = () => hSeq++;
+  let hItems: Parameters<typeof AppModule.upsertTodoItem>[0] = history.map((entry) => {
+    if (entry.kind === "user") return { id: hAlloc(), kind: "user", text: entry.text, clientMessageId: entry.clientMessageId };
+    if (entry.kind === "todo") return { id: hAlloc(), kind: "todo", todos: entry.todos, roundKey: entry.roundKey, clientMessageId: entry.clientMessageId };
+    if (entry.kind === "tool") {
+      const id = hAlloc();
+      return {
+        id,
+        kind: "tool",
+        card: {
+          key: entry.callId ?? `${entry.name}-${id}`,
+          name: entry.name,
+          ...(entry.callId === undefined ? {} : { callId: entry.callId }),
+          status: "end",
+          ...(entry.roundKey === undefined ? {} : { roundKey: entry.roundKey }),
+        },
+      };
+    }
+    return { id: hAlloc(), kind: "note", text: entry.kind };
+  });
+  const hTurnStart = currentTurnStart(hItems);
+  hItems = AppModule.upsertTodoItem(hItems, [{ content: "历史步", status: "completed" }], hAlloc, 20, "uuid-h");
+  const hPanels = projectToolPanels(hItems, {
+    contentItems: hItems,
+    turnFinalByUserId: historicalTurnFinalByUserId(hItems),
+    connectionLost: false,
+  }).filter((row) => row.kind === "panel");
+  assert.equal(hPanels.length, 1, "live todo update after history restore keeps historical step-10 tools in one panel");
+  assert.deepEqual(hPanels[0]?.panel.tools.map((entry) => entry.name), ["read", "grep"]);
+  assert.equal(currentSnapshotRoundKey(hItems, hTurnStart), 20);
+  assert.equal(
+    shouldApplyTodoEvent(hItems, hTurnStart, { clientMessageId: "uuid-h", roundKey: 15 }, currentSnapshotRoundKey(hItems, hTurnStart)),
+    false,
+  );
 });

@@ -4,11 +4,15 @@ import assert from 'node:assert/strict'
 import {
   PROGRESS_ACCEPT_CHECK_IDS,
   assertProgressSidebarAcceptanceFacts,
+  classifyLaneOutcome,
   cleanupIsolatedRoot,
   compareHeaderToolPhases,
   countSubagentCancelRequests,
+  findDuplicateCallIds,
   hasRecordedCheckFailure,
   inspectDelegationChain,
+  inspectEffectiveTurnHeaderTools,
+  inspectMainToolUniqueness,
   inspectSessionHeaderTools,
   recordPartialCheckFailureBeforeBlocked,
   resolveBlockedOrFailedOutcome,
@@ -80,6 +84,8 @@ function validFacts() {
         countFormatAlwaysXY: true,
         activityAnchorMatched: true,
         activityCallsMatched: true,
+        activityCallsUnique: true,
+        duplicateActivityCallIds: [],
         foreignActivityCalls: [],
         activityToolNames: ['bash', 'read'],
         sessionToolNames: ['read', 'bash'],
@@ -140,6 +146,28 @@ function validFacts() {
           },
         ],
         cancelledCount: 2,
+        intermediateOrdinaryTurns: [
+          {
+            marker: 'PSB-MID1',
+            startSeq: 47,
+            endSeq: 57,
+            replied: true,
+            inherited: false,
+            snapshotCount: 1,
+            effectiveToolNames: ['bash', 'read', 'todo_write'],
+            hasSubagent: false,
+          },
+          {
+            marker: 'PSB-MID2',
+            startSeq: 87,
+            endSeq: 109,
+            replied: true,
+            inherited: true,
+            snapshotCount: 0,
+            effectiveToolNames: ['bash', 'read', 'todo_write'],
+            hasSubagent: false,
+          },
+        ],
         phases: { before: ['bash', 'read', 'todo_write'], during: ['bash', 'read', 'todo_write', 'subagent'], after: ['bash', 'read', 'todo_write'] },
         phaseComparison: compareHeaderToolPhases({
           before: ['bash', 'read', 'todo_write'],
@@ -158,8 +186,8 @@ function validFacts() {
         outerSummaryFromOuterChildOnly: true,
         chain: { rootId: 'root', childId: 'child', childCount: 1, childDepth: 1, laneIds: ['lane-a', 'lane-b'], laneDepths: [2, 2], identityOk: true },
         laneResults: [
-          { id: 'lane-a', finalTextLength: 120, settlementDelivered: true, isError: false },
-          { id: 'lane-b', finalTextLength: 132, settlementDelivered: true, isError: false },
+          { id: 'lane-a', turnEndKind: 'completed', turnEndKinds: ['completed'], finalTextLength: 120, settlementDelivered: true, settlementAbnormal: false, isError: false },
+          { id: 'lane-b', turnEndKind: 'completed', turnEndKinds: ['completed'], finalTextLength: 132, settlementDelivered: true, settlementAbnormal: false, isError: false },
         ],
         reasons: [],
       },
@@ -193,7 +221,11 @@ function validFacts() {
         railCardCounts: { target: 1, sibling: 1 },
         perRunCardUnique: true,
         mainToolPanelCount: 2,
+        unexpandedMainToolPanelCount: 0,
+        duplicateMainAnchorIds: [],
+        duplicateMainCallIds: [],
         mainToolPanelsUnique: true,
+        mainToolCallsUnique: true,
         todoCardCount: 1,
         duplicateFree: true,
         reasons: [],
@@ -623,4 +655,176 @@ test('todoCardTurns counts distinct real user turns rather than subagent-settled
     ],
   }
   assert.equal(todoCardTurns(session), 2)
+})
+
+test('Q4-R2-03: lane outcome classification requires authoritative turn/end completed and rejects aborted, blocked, or missing reasons', () => {
+  const closingAssistant = {
+    type: 'assistant/message',
+    seq: 10,
+    time: 100,
+    data: { message: { content: [{ type: 'text', text: 'Partial check summary before stop.' }] } },
+  }
+  const okLane = {
+    header: { id: 'lane-ok' },
+    events: [closingAssistant, { type: 'turn/end', seq: 11, data: { turn: 1, reason: { kind: 'completed' } } }],
+  }
+  const okResult = classifyLaneOutcome('lane-ok', okLane, {
+    laneId: 'lane-ok',
+    text: 'Background subagent lane-ok finished and will do no further work unless you send it more.\nIts closing message:\nPartial check summary before stop.',
+  })
+  assert.equal(okResult.turnEndKind, 'completed')
+  assert.deepEqual(okResult.turnEndKinds, ['completed'])
+  assert.equal(okResult.settlementDelivered, true)
+  assert.equal(okResult.settlementAbnormal, false)
+  assert.equal(okResult.isError, false)
+
+  // 可达反例:有正文 + turn/end aborted + 已投递 settlement + 外层 completed 必须判失败。
+  const abortedLane = {
+    header: { id: 'lane-aborted' },
+    events: [closingAssistant, { type: 'turn/end', seq: 11, data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'parent' } } } }],
+  }
+  const abortedResult = classifyLaneOutcome('lane-aborted', abortedLane, {
+    laneId: 'lane-aborted',
+    text: 'Background subagent lane-aborted was stopped before it finished.\nIts closing message:\nPartial check summary before stop.',
+  })
+  assert.equal(abortedResult.turnEndKind, 'aborted')
+  assert.equal(abortedResult.settlementDelivered, true)
+  assert.equal(abortedResult.settlementAbnormal, true)
+  assert.equal(abortedResult.isError, true)
+  const abortedFacts = validFacts()
+  abortedFacts.checks['package-lane-depth-two'].laneResults = [okResult, abortedResult]
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(abortedFacts), /turn\/end reason\.kind=completed/)
+
+  // 合成负例:blocked 与缺失/未知终因同样必须失败。
+  const blockedLane = {
+    header: { id: 'lane-blocked' },
+    events: [closingAssistant, { type: 'turn/end', seq: 11, data: { turn: 1, reason: { kind: 'blocked' } } }],
+  }
+  const blockedResult = classifyLaneOutcome('lane-blocked', blockedLane, {
+    laneId: 'lane-blocked',
+    text: 'Background subagent lane-blocked declined the task.\nIts closing message:\nPartial check summary before stop.',
+  })
+  assert.equal(blockedResult.turnEndKind, 'blocked')
+  assert.equal(blockedResult.isError, true)
+
+  const missingTurnEnd = classifyLaneOutcome('lane-missing', { header: { id: 'lane-missing' }, events: [closingAssistant] }, {
+    laneId: 'lane-missing',
+    text: 'Background subagent lane-missing finished.\nIts closing message:\nPartial check summary before stop.',
+  })
+  assert.equal(missingTurnEnd.turnEndKind, null)
+  assert.equal(missingTurnEnd.isError, true)
+
+  // 即使 facts 人为把 isError 标为 false,缺 turnEndKind 或非 completed 也必须被总判据拒绝。
+  const forged = validFacts()
+  forged.checks['package-lane-depth-two'].laneResults[0].turnEndKind = 'aborted'
+  forged.checks['package-lane-depth-two'].laneResults[0].turnEndKinds = ['aborted']
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(forged), /turn\/end reason\.kind=completed/)
+})
+
+test('Q4-R2-04: intermediate ordinary turns MID1 and MID2 are verified individually including inherited headers', () => {
+  const header = inspectSessionHeaderTools([
+    { ...headerEvent(['bash', 'read']), seq: 5 },
+    { ...headerEvent(['bash', 'read', 'subagent']), seq: 25 },
+    // MID1 (seq 45..60) 无新 header,继承 seq 25 泄漏的 subagent。
+    // EXPLORE (seq 60..85) 仍含 subagent。
+    { ...headerEvent(['bash', 'read']), seq: 90 },
+    // MID2 (seq 85..105) 显式记录收回后的 header。
+    { ...headerEvent(['bash', 'read', 'subagent']), seq: 110 },
+    { ...headerEvent(['bash', 'read']), seq: 140 },
+  ])
+  const mid1 = inspectEffectiveTurnHeaderTools(header, { startSeq: 45, endSeq: 60 })
+  assert.equal(mid1.inherited, true)
+  assert.equal(mid1.hasSubagent, true, 'inherited leak in MID1 is detected')
+  const mid2 = inspectEffectiveTurnHeaderTools(header, { startSeq: 85, endSeq: 105 })
+  assert.equal(mid2.inherited, false)
+  assert.equal(mid2.hasSubagent, false)
+
+  // 仅 MID1 泄漏而最终 AFTER 已收回时,总判据必须拒绝。
+  const mid1Leak = validFacts()
+  mid1Leak.checks['dual-entry-system-skills'].intermediateOrdinaryTurns[0] = {
+    marker: 'PSB-MID1',
+    startSeq: 45,
+    endSeq: 60,
+    replied: true,
+    ...mid1,
+  }
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(mid1Leak), /intermediate ordinary turn/)
+
+  // 仅 MID2 泄漏而 MID1 与 AFTER 正常时,总判据同样必须拒绝。
+  const mid2Leak = validFacts()
+  mid2Leak.checks['dual-entry-system-skills'].intermediateOrdinaryTurns[1] = {
+    marker: 'PSB-MID2',
+    startSeq: 85,
+    endSeq: 105,
+    replied: true,
+    inherited: false,
+    snapshotCount: 1,
+    effectiveToolNames: ['bash', 'read', 'subagent'],
+    hasSubagent: true,
+  }
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(mid2Leak), /intermediate ordinary turn/)
+})
+
+test('Q4-R2-05: main-flow and activity tool uniqueness catches collapsed duplicate panels and duplicate callIds', () => {
+  // 1) 两个折叠的重复面板(bodyId 均为 null,但 data-anchor-id 重复)必须失败。
+  const collapsedDup = inspectMainToolUniqueness([
+    { anchorId: '2', expanded: false, bodyId: null, entries: [] },
+    { anchorId: '2', expanded: false, bodyId: null, entries: [] },
+  ])
+  assert.equal(collapsedDup.panelCount, 2)
+  assert.equal(collapsedDup.mountedBodyCount, 0)
+  assert.equal(collapsedDup.panelsUnique, false)
+  assert.deepEqual(collapsedDup.duplicateAnchorIds, ['2'])
+  assert.equal(collapsedDup.callsUnique, false)
+  assert.equal(collapsedDup.unexpandedPanelCount, 2)
+
+  // 2) 单个已展开面板内包含重复 callId(bodyId 唯一但调用重复)必须失败。
+  const dupCallInOnePanel = inspectMainToolUniqueness([
+    {
+      anchorId: '2',
+      expanded: true,
+      bodyId: 'tool-panel-body-2',
+      entries: [
+        { name: 'read', callId: 'same-call', roundKey: 10 },
+        { name: 'read', callId: 'same-call', roundKey: 10 },
+      ],
+    },
+  ])
+  assert.equal(dupCallInOnePanel.panelsUnique, true)
+  assert.equal(dupCallInOnePanel.callsUnique, false)
+  assert.deepEqual(dupCallInOnePanel.duplicateCallIds, ['same-call'])
+
+  // 3) 兄弟场景预期调用未出现在已展开主流面板中必须失败。
+  const missingExpected = inspectMainToolUniqueness(
+    [
+      {
+        anchorId: '2',
+        expanded: true,
+        bodyId: 'tool-panel-body-2',
+        entries: [{ name: 'bash', callId: 'c-old', roundKey: 6 }],
+      },
+    ],
+    [{ name: 'subagent', callId: 'c-sibling-1', roundKey: 90 }],
+  )
+  assert.equal(missingExpected.callsUnique, false)
+  assert.deepEqual(missingExpected.missingExpectedCallIds, ['c-sibling-1'])
+
+  // 4) 右栏活动重复 callId 必须被 findDuplicateCallIds 与总判据捕获。
+  assert.deepEqual(
+    findDuplicateCallIds([
+      { name: 'bash', callId: 'c1', roundKey: 10 },
+      { name: 'bash', callId: 'c1', roundKey: 10 },
+      { name: 'read', callId: 'c2', roundKey: 10 },
+    ]),
+    ['c1'],
+  )
+  const dupActivity = validFacts()
+  dupActivity.checks['no-fabricated-percentage'].activityCallsUnique = false
+  dupActivity.checks['no-fabricated-percentage'].duplicateActivityCallIds = ['c1']
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(dupActivity), /duplicated tool callId/)
+
+  const dupMainCall = validFacts()
+  dupMainCall.checks['single-cancel-isolation'].mainToolCallsUnique = false
+  dupMainCall.checks['single-cancel-isolation'].duplicateMainCallIds = ['same-call']
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(dupMainCall), /duplicate or missing tool calls/)
 })

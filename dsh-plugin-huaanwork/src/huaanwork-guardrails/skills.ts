@@ -818,9 +818,12 @@ export function apply(ctx: Context): void {
 
       try {
         const hostManaged = hostRunId !== undefined || legacy !== undefined;
+        const activationArgs = (
+          system === undefined ? args : withSystemSkillAbortSignal(args, controller.signal)
+        ) as never[];
         const run = await startHostManaged.run(hostManaged, () =>
           startRun.run(effectiveRunId, () =>
-            startParent.run(parentFromCall, () => originalActivation(...args)),
+            startParent.run(parentFromCall, () => originalActivation(...activationArgs)),
           ),
         );
         // fail closed:激活的父会话与登记表里的 run parent 必须是同一个。三方 parent
@@ -1213,5 +1216,27 @@ export function getBundledSkill(
     ...(parsed.disableModelInvocation !== undefined ? { disableModelInvocation: parsed.disableModelInvocation } : {}),
     ...(parsed.userInvocable !== undefined ? { userInvocable: parsed.userInvocable } : {}),
   };
+}
+
+/**
+ * 仅用于 `system-skill` 的 `startActivation`：把本次运行的定向取消信号与调用方原 `spec.signal` 合并，
+ * 保留 `spec` 原型与全部自有属性（含符号字段），且不改写调用方原对象、不触碰 legacy/package 派发。
+ */
+function withSystemSkillAbortSignal(args: readonly unknown[], cancelSignal: AbortSignal): unknown[] {
+  if (args.length === 0) return [];
+  const spec = args[0];
+  if (typeof spec !== "object" || spec === null) return [...args];
+  const callerSignal = (spec as { signal?: unknown }).signal;
+  const combinedSignal =
+    callerSignal instanceof AbortSignal ? AbortSignal.any([callerSignal, cancelSignal]) : cancelSignal;
+  const descriptors = Object.getOwnPropertyDescriptors(spec);
+  descriptors.signal = {
+    value: combinedSignal,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  };
+  const cloned = Object.defineProperties(Object.create(Object.getPrototypeOf(spec)), descriptors);
+  return [cloned, ...args.slice(1)];
 }
 

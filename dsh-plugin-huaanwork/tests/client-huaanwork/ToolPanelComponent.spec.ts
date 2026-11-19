@@ -161,6 +161,8 @@ it("scopes DOM ids with idPrefix so the same anchor can mount twice", async () =
   );
   const bodies = [...view.querySelectorAll("[id^='tool-panel-body-']")].map((node) => node.id);
   expect(bodies).toEqual(["tool-panel-body-2", "tool-panel-body-progress-2"]);
+  const anchors = [...view.querySelectorAll(".tool-panel")].map((node) => node.getAttribute("data-anchor-id"));
+  expect(anchors).toEqual(["2", "2"]);
   const railTitle = Array.from(view.querySelectorAll<HTMLButtonElement>(".tool-panel-title"))[1]!;
   expect(railTitle.getAttribute("aria-controls")).toBe("tool-panel-body-progress-2");
   const railEntry = view.querySelectorAll<HTMLButtonElement>(".tool-panel-entry-title")[1]!;

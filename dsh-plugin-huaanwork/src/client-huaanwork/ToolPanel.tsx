@@ -36,7 +36,11 @@ export default function ToolPanel({
   const bodyId = `tool-panel-body${idScope}-${panel.anchorId}`;
 
   return (
-    <section className={`tool-panel tool-panel-${panel.status}`}>
+    <section
+      className={`tool-panel tool-panel-${panel.status}`}
+      data-anchor-id={panel.anchorId}
+      data-tool-count={panel.count}
+    >
       <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</span>
       <button
         type="button"
