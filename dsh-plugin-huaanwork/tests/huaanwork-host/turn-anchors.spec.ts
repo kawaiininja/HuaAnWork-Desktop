@@ -82,6 +82,17 @@ describe('turn anchor store', () => {
     expect(store.current('s2')).toBeUndefined()
   })
 
+  it('clears the previous anchor and pending registration when a new human user message has no id', () => {
+    const store = createTurnAnchorStore()
+    store.register({ sessionId: 's1', clientMessageId: 'm1', origin: 'advanced' })
+    expect(store.notePreStep('s1', [message('m1')], 't1')?.clientMessageId).toBe('m1')
+    store.register({ sessionId: 's1', clientMessageId: 'm2', origin: 'advanced' })
+    // 真实人类用户消息缺字符串 id:不能沿用 m1,同时清掉未消费的 pending(fail closed)。
+    expect(store.notePreStep('s1', [{ role: 'user', source: { kind: 'user' } }], 't2')).toBeUndefined()
+    expect(store.current('s1')).toBeUndefined()
+    expect(store.notePreStep('s1', [message('m2')], 't3')?.origin).toBe('unknown')
+  })
+
   it('rolls back only the current pending registration when followup fails', () => {
     const store = createTurnAnchorStore()
     store.notePreStep('s1', [message('old')], 't1')

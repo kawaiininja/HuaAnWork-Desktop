@@ -4,10 +4,15 @@ import assert from 'node:assert/strict'
 import {
   PROGRESS_ACCEPT_CHECK_IDS,
   assertProgressSidebarAcceptanceFacts,
+  cleanupIsolatedRoot,
   compareHeaderToolPhases,
   countSubagentCancelRequests,
+  hasRecordedCheckFailure,
   inspectDelegationChain,
   inspectSessionHeaderTools,
+  recordPartialCheckFailureBeforeBlocked,
+  resolveBlockedOrFailedOutcome,
+  resolveFinalExitCode,
 } from './huaanwork-accept-progress-sidebar.mjs'
 
 const TOOLS = ['bash', 'read', 'todo_write']
@@ -50,6 +55,7 @@ function validFacts() {
   return {
     schemaVersion: 1,
     outcome: 'PASS',
+    isolatedCleanup: 'removed',
     checks: {
       'progress-tasks': {
         ok: true,
@@ -70,6 +76,9 @@ function validFacts() {
         totalProgressBarCount: 1,
         totalBarMatchesCount: true,
         countFormatAlwaysXY: true,
+        activityAnchorMatched: true,
+        activityCallsMatched: true,
+        foreignActivityCalls: [],
         activityToolNames: ['bash', 'read'],
         sessionToolNames: ['read', 'bash'],
         latestRoundToolNames: ['bash'],
@@ -82,6 +91,10 @@ function validFacts() {
         ordinaryTurnCount: 2,
         ordinaryTurnsWithoutSubagent: true,
         ordinaryHeaderSnapshots: [{ snapshot: 0, hasSubagent: false }, { snapshot: 1, hasSubagent: false }],
+        legacyAtLabel: '@legacy-reviewer',
+        legacyAtCardSeen: true,
+        legacyAtKind: 'legacy',
+        legacyTargetedCancelConverged: true,
         explicitAtLabel: '@typo-check',
         explicitCardSeen: true,
         targetedCancelConverged: true,
@@ -90,9 +103,39 @@ function validFacts() {
       'dual-entry-system-skills': {
         ok: true,
         entries: [
-          { entry: 'model-skill', skill: 'explore', runSeenInRail: true, runSeenInMain: true, cancelled: false },
-          { entry: 'explicit-slash', skill: 'explore', runSeenInRail: true, runSeenInMain: true, cancelled: true },
-          { entry: 'explicit-slash', skill: 'test-fix', runSeenInRail: true, runSeenInMain: true, cancelled: true },
+          {
+            entry: 'model-skill',
+            skill: 'explore',
+            runSeenInRail: true,
+            runSeenInMain: true,
+            runKind: 'system-skill',
+            anchorMatched: true,
+            headerHasSubagent: true,
+            skillToolCalled: true,
+            cancelled: false,
+          },
+          {
+            entry: 'explicit-slash',
+            skill: 'explore',
+            runSeenInRail: true,
+            runSeenInMain: true,
+            runKind: 'system-skill',
+            anchorMatched: true,
+            headerHasSubagent: true,
+            skillToolCalled: false,
+            cancelled: true,
+          },
+          {
+            entry: 'explicit-slash',
+            skill: 'test-fix',
+            runSeenInRail: true,
+            runSeenInMain: true,
+            runKind: 'system-skill',
+            anchorMatched: true,
+            headerHasSubagent: true,
+            skillToolCalled: false,
+            cancelled: true,
+          },
         ],
         cancelledCount: 2,
         phases: { before: ['bash', 'read', 'todo_write'], during: ['bash', 'read', 'todo_write', 'subagent'], after: ['bash', 'read', 'todo_write'] },
@@ -110,6 +153,7 @@ function validFacts() {
         outerCardSeenInMain: true,
         railLaneRowCount: 0,
         aggregatedToolSummary: '正在执行 1 个工具',
+        outerSummaryFromOuterChildOnly: true,
         chain: { rootId: 'root', childId: 'child', childCount: 1, childDepth: 1, laneIds: ['lane-a', 'lane-b'], laneDepths: [2, 2], identityOk: true },
         laneResults: [
           { id: 'lane-a', finalTextLength: 120, settlementDelivered: true, isError: false },
@@ -144,6 +188,8 @@ function validFacts() {
         siblingCompleted: true,
         siblingSettlementSeen: true,
         mainCardCounts: { target: 1, sibling: 1 },
+        railCardCounts: { target: 1, sibling: 1 },
+        perRunCardUnique: true,
         mainToolPanelCount: 2,
         mainToolPanelsUnique: true,
         todoCardCount: 1,
@@ -393,4 +439,145 @@ test('rejects duplicated cancel RPCs, sibling interference, and duplicated cards
   const duplicatedToolPanels = validFacts()
   duplicatedToolPanels.checks['single-cancel-isolation'].mainToolPanelsUnique = false
   assert.throws(() => assertProgressSidebarAcceptanceFacts(duplicatedToolPanels), /duplicate tool panels/)
+})
+
+test('Q4-M1: enforces anchor, callId/roundKey, legacy @agent, per-entry skill, outer-only summary, and per-runId card uniqueness', () => {
+  const wrongAnchor = validFacts()
+  wrongAnchor.checks['no-fabricated-percentage'].activityAnchorMatched = false
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(wrongAnchor), /turn anchor/)
+
+  const wrongCalls = validFacts()
+  wrongCalls.checks['no-fabricated-percentage'].activityCallsMatched = false
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(wrongCalls), /callId\/roundKey/)
+
+  const foreignCall = validFacts()
+  foreignCall.checks['no-fabricated-percentage'].foreignActivityCalls = [{ name: 'bash', callId: 'c-foreign', roundKey: 99 }]
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(foreignCall), /lack a matching current-turn callId\/roundKey/)
+
+  const wrongLegacyKind = validFacts()
+  wrongLegacyKind.checks['parent-no-self-spawn'].legacyAtKind = 'package'
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(wrongLegacyKind), /expected legacy run kind/)
+
+  const missingDualKind = validFacts()
+  missingDualKind.checks['dual-entry-system-skills'].entries[1].runKind = 'legacy'
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(missingDualKind), /kind=system-skill/)
+
+  const missingSkillCall = validFacts()
+  missingSkillCall.checks['dual-entry-system-skills'].entries[0].skillToolCalled = false
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(missingSkillCall), /did not invoke the skill tool/)
+
+  const leakedLaneTool = validFacts()
+  leakedLaneTool.checks['package-lane-depth-two'].outerSummaryFromOuterChildOnly = false
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(leakedLaneTool), /leaked a tool/)
+
+  const missingRailCount = validFacts()
+  missingRailCount.checks['single-cancel-isolation'].railCardCounts = { target: 2, sibling: 1 }
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(missingRailCount), /rail run card/)
+
+  const nonUniqueRun = validFacts()
+  nonUniqueRun.checks['single-cancel-isolation'].perRunCardUnique = false
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(nonUniqueRun), /per-runId card uniqueness/)
+})
+
+test('Q4-I5: BlockedError after an earlier check failure resolves to FAIL (exit 1) rather than BLOCKED (exit 3)', () => {
+  const blockedErr = Object.assign(new Error('late environment prerequisite blocked'), {
+    name: 'BlockedError',
+    detail: { step: 'switch-history-restart' },
+  })
+  const failingChecks = {
+    'progress-tasks': { ok: true },
+    'parent-no-self-spawn': { ok: false, reasons: ['explicit cancel failed'] },
+  }
+  assert.equal(hasRecordedCheckFailure(failingChecks), true)
+  const failVerdict = resolveBlockedOrFailedOutcome(validFacts(), failingChecks, blockedErr)
+  assert.equal(failVerdict.exitCode, 1)
+  assert.equal(failVerdict.facts.outcome, 'FAIL')
+  assert.equal(failVerdict.facts.blocked.cause, 'late environment prerequisite blocked')
+
+  const cleanChecks = { 'progress-tasks': { ok: true } }
+  assert.equal(hasRecordedCheckFailure(cleanChecks), false)
+  const blockedVerdict = resolveBlockedOrFailedOutcome({ schemaVersion: 1, outcome: 'PENDING', errors: [] }, cleanChecks, blockedErr)
+  assert.equal(blockedVerdict.exitCode, 3)
+  assert.equal(blockedVerdict.facts.outcome, 'BLOCKED')
+
+  const f1OnlyErr = Object.assign(new Error('model-skill blocked'), {
+    name: 'BlockedError',
+    detail: { onlyBlockedCheckId: 'dual-entry-system-skills' },
+  })
+  const f1Clean = { 'progress-tasks': { ok: true }, 'dual-entry-system-skills': { ok: false } }
+  assert.equal(resolveBlockedOrFailedOutcome({ schemaVersion: 1, outcome: 'PENDING', errors: [] }, f1Clean, f1OnlyErr).exitCode, 3)
+  const f1WithPriorFail = { 'progress-tasks': { ok: false }, 'dual-entry-system-skills': { ok: false } }
+  assert.equal(resolveBlockedOrFailedOutcome({ schemaVersion: 1, outcome: 'PENDING', errors: [] }, f1WithPriorFail, f1OnlyErr).exitCode, 1)
+})
+
+test('Q4-I6: failed tempRoot cleanup downgrades PASS to FAIL, records path, and forces non-zero exit', () => {
+  const factsDoc = validFacts()
+  const failedCleanup = cleanupIsolatedRoot('/tmp/huaanwork-progress-sidebar-perm-test', factsDoc, {
+    keepTemp: false,
+    removeDir: () => {
+      throw new Error('EACCES: permission denied')
+    },
+  })
+  assert.equal(failedCleanup.ok, false)
+  assert.equal(factsDoc.outcome, 'FAIL')
+  assert.match(factsDoc.isolatedCleanup, /^failed: EACCES/)
+  assert.ok(factsDoc.errors.some((entry) => entry.includes('/tmp/huaanwork-progress-sidebar-perm-test')))
+  assert.equal(resolveFinalExitCode(factsDoc, failedCleanup), 1)
+  assert.throws(() => assertProgressSidebarAcceptanceFacts(factsDoc), /isolated credential cleanup failed/)
+
+  const okFacts = validFacts()
+  const okCleanup = cleanupIsolatedRoot('/tmp/huaanwork-progress-sidebar-ok-test', okFacts, {
+    keepTemp: false,
+    removeDir: () => undefined,
+  })
+  assert.equal(okCleanup.ok, true)
+  assert.equal(okFacts.isolatedCleanup, 'removed')
+  assert.equal(resolveFinalExitCode(okFacts, okCleanup), 0)
+
+  const blockedFacts = { schemaVersion: 1, outcome: 'BLOCKED', errors: [] }
+  const blockedFailedCleanup = cleanupIsolatedRoot('/tmp/huaanwork-progress-sidebar-blocked-perm', blockedFacts, {
+    keepTemp: false,
+    removeDir: () => {
+      throw new Error('EPERM: busy')
+    },
+  })
+  assert.equal(blockedFailedCleanup.ok, false)
+  assert.equal(blockedFacts.outcome, 'FAIL')
+  assert.equal(resolveFinalExitCode(blockedFacts, blockedFailedCleanup), 1)
+})
+
+test('in-scene switch-history failures flushed before BlockedError resolve to FAIL (exit 1) rather than BLOCKED (exit 3)', () => {
+  const checks = { 'progress-tasks': { ok: true, reasons: [] } }
+  const record = (id, fact) => {
+    checks[id] = fact
+  }
+  const blockedErr = Object.assign(new Error('no active run could be constructed for the Host restart'), {
+    name: 'BlockedError',
+    detail: { attempts: 2 },
+  })
+
+  // 没有累计场景内失败时不写入假失败,真正的阻塞仍退出 3。
+  assert.equal(
+    recordPartialCheckFailureBeforeBlocked('switch-history-restart', [], { restart: { attempted: false, asserted: false } }, record),
+    false,
+  )
+  assert.equal(checks['switch-history-restart'], undefined)
+  const cleanBlocked = resolveBlockedOrFailedOutcome({ schemaVersion: 1, outcome: 'PENDING', errors: [] }, checks, blockedErr)
+  assert.equal(cleanBlocked.exitCode, 3)
+  assert.equal(cleanBlocked.facts.outcome, 'BLOCKED')
+
+  // 场景内已出现切换/历史失败时先落盘为 ok:false,随后的 BlockedError 必须裁定 FAIL (exit 1) 且保留失败原因。
+  const flushed = recordPartialCheckFailureBeforeBlocked(
+    'switch-history-restart',
+    ['the fresh tab showed 4 tasks'],
+    { freshTabTaskCount: 4, restart: { attempted: false, asserted: false } },
+    record,
+  )
+  assert.equal(flushed, true)
+  assert.equal(checks['switch-history-restart'].ok, false)
+  assert.deepEqual(checks['switch-history-restart'].reasons, ['the fresh tab showed 4 tasks'])
+  const failedOutcome = resolveBlockedOrFailedOutcome({ schemaVersion: 1, outcome: 'PENDING', errors: [] }, checks, blockedErr)
+  assert.equal(failedOutcome.exitCode, 1)
+  assert.equal(failedOutcome.facts.outcome, 'FAIL')
+  assert.equal(failedOutcome.facts.blocked.cause, 'no active run could be constructed for the Host restart')
 })

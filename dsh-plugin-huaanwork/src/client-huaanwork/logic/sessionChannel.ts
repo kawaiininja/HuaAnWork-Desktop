@@ -172,14 +172,86 @@ export function buildSessionSendParams(input: {
   };
 }
 
+type BufferedStartEntry = { name: string; callId?: string; sessionId?: string };
+
+/** 跟踪缓冲内尚未配对结束的 `tool/start`，供 `holdEarlyEvent` 与 `takeEarlyPendingEvents` 复用。 */
+function createBufferedToolTracker() {
+  const openStarts: BufferedStartEntry[] = [];
+  return {
+    recordStart(event: Extract<RpcEvent, { event: "tool/start" }>): void {
+      openStarts.push({
+        name: event.name,
+        ...(event.callId === undefined ? {} : { callId: event.callId }),
+        ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
+      });
+    },
+    consumeEnd(event: Extract<RpcEvent, { event: "tool/end" }>, fallbackSessionId?: string): boolean {
+      const hasCallId = typeof event.callId === "string" && event.callId.length > 0;
+      const index = openStarts.findIndex((entry) => {
+        if (entry.sessionId !== undefined && event.sessionId !== undefined && entry.sessionId !== event.sessionId) {
+          return false;
+        }
+        if (fallbackSessionId !== undefined && event.sessionId !== undefined && fallbackSessionId !== event.sessionId) {
+          return false;
+        }
+        return hasCallId ? entry.callId === event.callId : entry.name === event.name;
+      });
+      if (index < 0) return false;
+      openStarts.splice(index, 1);
+      return true;
+    },
+  };
+}
+
+/**
+ * 为早到的 `tool/end` 查找已暂存其配对 `tool/start` 的在途发送记录。
+ * 属于上一回合的工具早已写入主列表、缓冲里没有未闭合的同 `callId`/同名开始事件，因此不会被误截流。
+ */
+export function findPendingForToolEnd<P extends { sessionId?: string; buffered: readonly RpcEvent[] }>(
+  pending: Iterable<P>,
+  incoming: Extract<RpcEvent, { event: "tool/end" }>,
+): P | undefined {
+  for (const candidate of pending) {
+    if (
+      candidate.sessionId !== undefined
+      && incoming.sessionId !== undefined
+      && candidate.sessionId !== incoming.sessionId
+    ) {
+      continue;
+    }
+    const tracker = createBufferedToolTracker();
+    for (const event of candidate.buffered) {
+      if (event.event === "tool/start") tracker.recordStart(event);
+      else if (event.event === "tool/end") tracker.consumeEnd(event, candidate.sessionId);
+    }
+    if (tracker.consumeEnd(incoming, candidate.sessionId)) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * 本次在途发送的缓冲里是否已经收到该会话尚未被认领的 `session/queue-start`。
+ * 一旦排队项已在宿主进入执行窗（即使 `goalIntermediate` 让前端仍保持 `running === true`），
+ * 紧随其后的同会话 `goal/*` 与 `session/end` 属于本次排队回合，必须留在缓冲里随 `waiting`
+ * 应答按序重放，不能被 running-turn 守卫放走去结算上一回合。
+ */
+export function hasBufferedQueueStartForSession(
+  buffered: readonly RpcEvent[],
+  sessionId: string | undefined,
+): boolean {
+  if (typeof sessionId !== "string" || sessionId.length === 0) return false;
+  return buffered.some((event) => event.event === "session/queue-start" && event.sessionId === sessionId);
+}
+
 /**
  * 一次 `session.send` 应答后应重放的早到事件。
  *
  * - 真正开始执行的应答重放整份缓冲(顺序不变)；
  * - 排队应答只重放本次 `queueItemId` 的队列事件；仅当本次排队项的
  *   `session/queue-start` 已在缓冲里(它真的开始执行)时，才保留携带本次
- *   `clientMessageId` 的早到 `todo_write`，并让队列开始先于待办重放——
- *   `beginQueuedTurn` 先开回合清 `notStarted`，待办才落得到这一回合；
+ *   `clientMessageId` 的早到工具（含 `todo_write` 与普通工具及其配对结束），
+ *   并保留本次 `queue-start` 之后同会话的终态/goal 事件，按原执行顺序重放
+ *   （`queue-start` 先于工具与终态，启动前的旧回合事件仍排除）；
  * - 未启动(含 `queue-fail`)的应答丢弃本次缓冲。
  *
  * @param sent `session.send` 应答(排队/启动/`queueItemId`)
@@ -197,12 +269,54 @@ export function takeEarlyPendingEvents(
   if (sendOpensTurn(sent)) return [...buffered];
   if (!(sent.waiting && sent.queueItemId !== undefined)) return [];
   const queueEvents = buffered.filter(isQueueControl);
-  // 本次排队项没有真正开始(只有 queue-fail 或什么都没到)：没有回合可以挂待办。
-  if (!queueEvents.some((event) => event.event === "session/queue-start")) return queueEvents;
-  const todos = buffered.filter((event) => (
-    event.event === "tool/start" && event.name === "todo_write" && event.clientMessageId === pendingClientMessageId
-  ));
-  return [...queueEvents, ...todos];
+  const startIndex = buffered.findIndex((event) => isQueueControl(event) && event.event === "session/queue-start");
+  // 本次排队项没有真正开始(只有 queue-fail 或什么都没到)：没有回合可以挂待办、工具或终态。
+  if (startIndex < 0) return queueEvents;
+
+  const started = buffered[startIndex];
+  const startedSessionId =
+    started && "sessionId" in started && typeof started.sessionId === "string" ? started.sessionId : undefined;
+  const tracker = createBufferedToolTracker();
+  const preQueueControls: RpcEvent[] = [];
+  const preStartTools: RpcEvent[] = [];
+  const postStartEvents: RpcEvent[] = [];
+  let windowClosed = false;
+
+  for (let index = 0; index < buffered.length; index += 1) {
+    const event = buffered[index];
+    if (!event || index === startIndex) continue;
+    if (isQueueControl(event)) {
+      if (index < startIndex) preQueueControls.push(event);
+      else postStartEvents.push(event);
+      continue;
+    }
+    if (event.event === "tool/start" && event.clientMessageId === pendingClientMessageId) {
+      tracker.recordStart(event);
+      (index < startIndex ? preStartTools : postStartEvents).push(event);
+      continue;
+    }
+    if (event.event === "tool/end") {
+      if (tracker.consumeEnd(event, startedSessionId)) {
+        (index < startIndex ? preStartTools : postStartEvents).push(event);
+      }
+      continue;
+    }
+    if (index <= startIndex || windowClosed) continue;
+    if (event.event === "session/queue-start" && "sessionId" in event && event.sessionId === startedSessionId) {
+      windowClosed = true;
+      continue;
+    }
+    const isTerminalOrGoal =
+      event.event === "session/end"
+      || event.event === "goal/state"
+      || event.event === "goal/round"
+      || event.event === "goal/round-limit";
+    if (isTerminalOrGoal && startedSessionId !== undefined && "sessionId" in event && event.sessionId === startedSessionId) {
+      postStartEvents.push(event);
+    }
+  }
+
+  return [...preQueueControls, ...(started ? [started] : []), ...preStartTools, ...postStartEvents];
 }
 
 /**

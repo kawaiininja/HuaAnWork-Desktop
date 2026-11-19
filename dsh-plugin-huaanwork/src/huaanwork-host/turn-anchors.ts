@@ -86,8 +86,15 @@ export function createTurnAnchorStore(options: { limit?: number } = {}): TurnAnc
 
     notePreStep(sessionId, messages, startedAt) {
       const observed = scanTurnBoundary(messages)
-      // 没有回合边界 / goal 续轮 / 人类消息缺 id:锚点保持原样(fail closed,不写 unknown)。
-      if (observed === undefined || observed.kind !== 'user') return current(sessionId)
+      // 没有回合边界 / goal 续轮:锚点保持原样(fail closed,不写 unknown)。
+      if (observed === undefined || observed.kind === 'goal') return current(sessionId)
+      // 真实人类消息缺字符串 id:清除上一回合旧锚与未消费 pending,避免新回合工具/待办误归旧回合。
+      if (observed.kind === 'invalid') {
+        anchors.delete(sessionId)
+        pending.delete(sessionId)
+        order.delete(sessionId)
+        return undefined
+      }
       const existing = anchors.get(sessionId)
       if (existing !== undefined && existing.clientMessageId === observed.id) {
         // 同一消息的重复 pre-step(或多次 listener 调用)不得刷新 startedAt。
@@ -127,7 +134,7 @@ export function createTurnAnchorStore(options: { limit?: number } = {}): TurnAnc
  * - `subagent-settled`、`agent-instructions`、`runtime-context`、技能目录/调用、
  *   `user-question-reply`、`user-approval`、`working-directory`、`compact-checkpoint`、
  *   `plugin`、`tool` 等一切非人类/系统通知直接跳过;
- * - 真实用户消息缺字符串 id 时返回 `invalid`:不能换锚,也不继续向前猜旧消息。
+ * - 真实用户消息缺字符串 id 时返回 `invalid`:清掉旧锚与未消费 pending 并 fail closed,不沿用旧锚也不继续向前猜旧消息。
  */
 function scanTurnBoundary(messages: readonly unknown[]): TurnBoundary | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {

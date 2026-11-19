@@ -124,6 +124,8 @@ import {
   buildSessionSendParams,
   chatTabHasConversation,
   cwdWithinRoot,
+  findPendingForToolEnd,
+  hasBufferedQueueStartForSession,
   historyItemsFromRecords,
   isAutomationSessionId,
   takeEarlyPendingEvents,
@@ -815,6 +817,14 @@ export default function App() {
     if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
     for (const pending of pendingSendsRef.current.values()) {
       if (pending.sessionId === sessionId) return pending;
+    }
+    for (const pending of pendingSendsRef.current.values()) {
+      if (
+        pending.sessionId === undefined
+        && pending.buffered.some((ev) => ev.event === "session/queue-start" && ev.sessionId === sessionId)
+      ) {
+        return pending;
+      }
     }
     return undefined;
   }
@@ -1749,6 +1759,24 @@ export default function App() {
           }
           return false;
         }
+        // Q4-I3: 本次发送的普通工具早到（含与它配对的结束事件）同样按锚点暂存，
+        // 避免在应答回来清掉 `notStarted` 前落入上一回合、导致当前右栏漏活动。
+        if (incoming.event === "tool/start") {
+          const pending = findPendingSendByClientMessageId(pendingSendsRef.current.values(), incoming.clientMessageId);
+          if (pending !== undefined && incoming.clientMessageId === pending.clientMessageId) {
+            pending.buffered.push(incoming);
+            return true;
+          }
+          return false;
+        }
+        if (incoming.event === "tool/end") {
+          const pending = findPendingForToolEnd(pendingSendsRef.current.values(), incoming);
+          if (pending !== undefined) {
+            pending.buffered.push(incoming);
+            return true;
+          }
+          return false;
+        }
         const isGoalEvent = incoming.event === "session/end" || incoming.event === "goal/state"
           || incoming.event === "goal/round" || incoming.event === "goal/round-limit";
         if (!isGoalEvent) return false;
@@ -1759,12 +1787,17 @@ export default function App() {
         if (stopRequestedForSession(sessionId) || staleIdleRef.current.some((item) => item.sessionId === sessionId)) return false;
         const pending = pendingSendOfSession(sessionId);
         if (pending === undefined) return false;
-        if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;
-        // 跨标签同会话:任一标签正把这个会话作为执行中的回合跟踪时,这条事件属于
-        // 那个回合,必须照常即时结算——进本发送的 pending 缓冲会被 waiting 应答的
-        // 按 queueItemId 过滤丢弃,那个标签将永久 running(最终评审 Important 1)。
-        const turnTab = turnTabForSession(sessionId);
-        if (turnTab !== undefined && tabRunOf(turnTab).running && tabTurnOf(turnTab).sessionId === sessionId) return false;
+        // 本次在途发送已收到同会话未认领的 queue-start 时，后续 goal/* 与 session/end 属于
+        // 该排队回合（即便 goalIntermediate 让前端仍维持 running === true），必须继续留在缓冲中。
+        const pendingQueuedStarted = hasBufferedQueueStartForSession(pending.buffered, sessionId);
+        if (!pendingQueuedStarted) {
+          if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;
+          // 跨标签同会话:任一标签正把这个会话作为执行中的回合跟踪时,这条事件属于
+          // 那个回合,必须照常即时结算——进本发送的 pending 缓冲会被 waiting 应答的
+          // 按 queueItemId 过滤丢弃,那个标签将永久 running(最终评审 Important 1)。
+          const turnTab = turnTabForSession(sessionId);
+          if (turnTab !== undefined && tabRunOf(turnTab).running && tabTurnOf(turnTab).sessionId === sessionId) return false;
+        }
         pending.buffered.push(incoming);
         return true;
       };
@@ -2331,10 +2364,16 @@ export default function App() {
     subagentRunsRef.current = subagentRuns;
   }, [subagentRuns]);
 
-  /** 切 tab 取消确认态:确认对象可能已不在当前标签里(设计 D17 的 UI 边界)。 */
+  /** 切 tab 或离开主视图取消确认态:确认对象可能已不在当前视图里(设计 D17 的 UI 边界)。 */
   useEffect(() => {
     setConfirmingTarget((prev) => (prev === null ? prev : null));
-  }, [activeTab]);
+  }, [activeTab, view]);
+
+  /** 右栏切离进度页或收起时只清右栏发起的确认态,不影响主流卡上的行内确认。 */
+  useEffect(() => {
+    if (rightTab === "progress" && !rightCollapsed) return;
+    setConfirmingTarget((prev) => (prev?.surface === "progress" ? null : prev));
+  }, [rightTab, rightCollapsed]);
 
   useEffect(() => {
     // 分享同一秒表:任一标签的回合或任一子代理 run 活跃时都走;每张运行卡不得自建 interval。
@@ -4859,7 +4898,13 @@ export function upsertTodoItem(
     ...(roundKey === undefined ? {} : { roundKey }),
     ...(clientMessageId === undefined ? {} : { clientMessageId }),
   };
-  const at = items.findIndex((item, index) => index >= turnStart && item.kind === "todo");
+  let at = -1;
+  for (let index = items.length - 1; index >= turnStart; index -= 1) {
+    if (items[index]?.kind === "todo") {
+      at = index;
+      break;
+    }
+  }
   if (at >= 0) return items.map((item, index) => (index === at ? { ...item, todos, ...attribution } : item));
   const insertAt = turnAppendIndex(items);
   return [...items.slice(0, insertAt), { id: allocId(), kind: "todo", todos, ...attribution }, ...items.slice(insertAt)];
@@ -5124,8 +5169,8 @@ function ChatRow({
     return (
       <div className="card todo-card">
         <span className="ttl">待办</span>
-        {item.todos.map((todo) => (
-          <div key={todo.content} className={todo.status === "completed" ? "muted" : undefined}>
+        {item.todos.map((todo, index) => (
+          <div key={`${index}-${todo.content}`} className={todo.status === "completed" ? "muted" : undefined}>
             <span className="badge">{todoLabel(todo.status)}</span> {todo.content}
           </div>
         ))}

@@ -341,6 +341,7 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
   return (
     <div
       className="subagent-run-card"
+      data-run-id={run.runId}
       data-phase={run.phase}
       data-stale={!terminal && run.stale === true ? "true" : undefined}
       data-frozen={!terminal && frozenAt !== undefined ? "true" : undefined}

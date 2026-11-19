@@ -39,6 +39,7 @@ export type ProgressTaskView = {
 export type ProgressPanelModel = {
   sessionId: string;
   connection: ProgressConnection;
+  currentTurnClientMessageId?: string;
   taskPhase: ProgressTaskPhase;
   tasks: ProgressTaskView[];
   completedCount: number;
@@ -110,6 +111,9 @@ export function selectProgressPanelModel<T extends ProgressPanelItem>(
   return {
     sessionId: input.sessionId,
     connection: resolveConnection(input),
+    ...(input.currentTurnClientMessageId === undefined
+      ? {}
+      : { currentTurnClientMessageId: input.currentTurnClientMessageId }),
     taskPhase,
     tasks,
     completedCount,

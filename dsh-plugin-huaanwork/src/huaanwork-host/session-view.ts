@@ -218,14 +218,15 @@ export function detailRecords(text: string): SessionDetailRecord[] {
           : undefined
         if (kind === 'goal' && goalRound === undefined) break
         const messageText = firstTextOfMessage(data)
+        // 普通用户记录带上 Host 生成的持久消息 id;goal 续轮不写(它不是新的用户回合)。
+        // 渲染用的数值 id 由客户端 allocId() 重新分配,不复用这个历史 id。
+        const persistedId = goalRound === undefined && typeof data.id === 'string' && data.id.length > 0
+          ? data.id
+          : undefined
+        // 只有真实普通用户消息换锚:goal 续轮与已过滤的系统/插件消息不参与;
+        // 缺 id 或无文本的普通用户消息同样清掉旧锚(与 turn-anchors 的 fail closed 一致)。
+        if (goalRound === undefined) currentOrdinaryUserClientId = persistedId
         if (messageText) {
-          // 普通用户记录带上 Host 生成的持久消息 id;goal 续轮不写(它不是新的用户回合)。
-          // 渲染用的数值 id 由客户端 allocId() 重新分配,不复用这个历史 id。
-          const persistedId = goalRound === undefined && typeof data.id === 'string' && data.id.length > 0
-            ? data.id
-            : undefined
-          // 只有真实普通用户记录换锚:goal 续轮与已过滤的系统/插件消息不参与。
-          if (persistedId !== undefined) currentOrdinaryUserClientId = persistedId
           records.push({
             kind: 'user',
             time,

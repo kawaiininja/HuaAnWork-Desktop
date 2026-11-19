@@ -50,6 +50,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
+import { createServer as createHttpServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { arch as osArch, homedir, platform as osPlatform, release as osRelease, tmpdir } from 'node:os'
@@ -300,19 +301,32 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   requireFacts(percent.countFormatAlwaysXY === true, 'no-fabricated-percentage: the header count left the X/Y format during execution')
   requireFacts(percent.activityMatchesSession === true, 'no-fabricated-percentage: the current-turn activity does not match the session log')
   requireFacts(percent.latestRoundCovered === true, 'no-fabricated-percentage: the latest model round is missing from the activity panel')
+  requireFacts(percent.activityAnchorMatched === true, 'no-fabricated-percentage: the progress panel turn anchor does not match the complex turn clientMessageId')
+  requireFacts(percent.activityCallsMatched === true, 'no-fabricated-percentage: the activity entries do not match the session tool callId/roundKey records')
   if (Array.isArray(percent.foreignActivityNames)) {
     requireFacts(percent.foreignActivityNames.length === 0, `no-fabricated-percentage: ${String(percent.foreignActivityNames.length)} activity tool names are absent from the current turn (${percent.foreignActivityNames.join(', ')})`)
+  }
+  if (Array.isArray(percent.foreignActivityCalls)) {
+    requireFacts(percent.foreignActivityCalls.length === 0, `no-fabricated-percentage: ${String(percent.foreignActivityCalls.length)} activity entries lack a matching current-turn callId/roundKey`)
   }
 
   const spawn = checks['parent-no-self-spawn']
   requireFacts(Number.isInteger(spawn.ordinaryTurnCount) && spawn.ordinaryTurnCount >= 1, 'parent-no-self-spawn: no ordinary turn was inspected')
   requireFacts(spawn.ordinaryTurnsWithoutSubagent === true, 'parent-no-self-spawn: an ordinary turn request header exposed the subagent tool')
+  requireFacts(spawn.legacyAtCardSeen === true, `parent-no-self-spawn: the explicit legacy ${String(spawn.legacyAtLabel)} dispatch produced no run card`)
+  requireFacts(spawn.legacyAtKind === 'legacy', `parent-no-self-spawn: expected legacy run kind, got ${String(spawn.legacyAtKind)}`)
+  requireFacts(spawn.legacyTargetedCancelConverged === true, `parent-no-self-spawn: the targeted cancel of the legacy ${String(spawn.legacyAtLabel)} run did not converge`)
   requireFacts(spawn.explicitCardSeen === true, `parent-no-self-spawn: the explicit ${String(spawn.explicitAtLabel)} dispatch produced no run card`)
   requireFacts(spawn.targetedCancelConverged === true, 'parent-no-self-spawn: the targeted cancel of the explicit @ run did not converge')
 
   const dual = checks['dual-entry-system-skills']
   requireFacts(Array.isArray(dual.entries) && dual.entries.length >= 3, 'dual-entry-system-skills: fewer than three entry/skill combinations were driven')
   requireFacts(dual.entries.every((entry) => entry.runSeenInRail === true && entry.runSeenInMain === true), 'dual-entry-system-skills: a system-skill run card was not visible in both the rail and the main flow')
+  requireFacts(dual.entries.every((entry) => entry.runKind === 'system-skill'), 'dual-entry-system-skills: an entry run did not record kind=system-skill')
+  requireFacts(dual.entries.every((entry) => entry.anchorMatched === true), 'dual-entry-system-skills: an entry run clientMessageId did not match its parent turn anchor')
+  requireFacts(dual.entries.every((entry) => entry.headerHasSubagent === true), 'dual-entry-system-skills: an entry lacked subagent in its own turn request/header snapshots')
+  const modelEntries = dual.entries.filter((entry) => entry.entry === 'model-skill')
+  requireFacts(modelEntries.length >= 1 && modelEntries.every((entry) => entry.skillToolCalled === true), 'dual-entry-system-skills: the model-skill entry did not invoke the skill tool in the session log')
   requireFacts(Number.isInteger(dual.cancelledCount) && dual.cancelledCount >= 1, 'dual-entry-system-skills: no system-skill run was stopped through the targeted cancel control')
   const phaseReasons = Array.isArray(dual.phaseComparison?.reasons) ? dual.phaseComparison.reasons.join('; ') : 'phase comparison missing'
   requireFacts(dual.phaseComparison?.ok === true, `dual-entry-system-skills: request/header tool phases failed: ${phaseReasons}`)
@@ -321,6 +335,7 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   requireFacts(lane.outerCardSeenInRail === true && lane.outerCardSeenInMain === true, 'package-lane-depth-two: the outer package run card is missing from the rail or the main flow')
   requireFacts(lane.railLaneRowCount === 0, `package-lane-depth-two: ${String(lane.railLaneRowCount)} independent lane rows appeared in the rail`)
   requireFacts(typeof lane.aggregatedToolSummary === 'string' && lane.aggregatedToolSummary !== '', 'package-lane-depth-two: the rail never showed an aggregated tool summary')
+  requireFacts(lane.outerSummaryFromOuterChildOnly === true, 'package-lane-depth-two: the outer package summary leaked a tool not called by the depth-1 package child')
   requireFacts(lane.chain?.identityOk === true, 'package-lane-depth-two: the parent -> package child -> lane identity chain did not resolve')
   requireFacts(Array.isArray(lane.chain?.laneIds) && lane.chain.laneIds.length === 2, `package-lane-depth-two: found ${String(lane.chain?.laneIds?.length)} depth-2 lanes (expected exactly 2)`)
   requireFacts(Array.isArray(lane.chain?.laneDepths) && lane.chain.laneDepths.every((depth) => depth === 2), 'package-lane-depth-two: a lane session is not at delegation depth 2')
@@ -351,9 +366,118 @@ export function assertProgressSidebarAcceptanceFacts(facts) {
   requireFacts(cancel.siblingCompleted === true, 'single-cancel-isolation: the concurrent sibling run did not complete')
   requireFacts(cancel.siblingSettlementSeen === true, 'single-cancel-isolation: the sibling run was never delivered back to the parent')
   requireFacts(cancel.mainCardCounts?.target === 1 && cancel.mainCardCounts?.sibling === 1, 'single-cancel-isolation: a duplicated or missing main-flow run card was observed')
+  requireFacts(cancel.railCardCounts?.target === 1 && cancel.railCardCounts?.sibling === 1, 'single-cancel-isolation: a duplicated or missing rail run card was observed')
+  requireFacts(cancel.perRunCardUnique === true, 'single-cancel-isolation: per-runId card uniqueness failed')
   requireFacts(cancel.mainToolPanelsUnique === true, 'single-cancel-isolation: the main flow rendered duplicate tool panels')
   requireFacts(cancel.duplicateFree === true, `single-cancel-isolation: duplicated cards were observed (todo cards ${String(cancel.todoCardCount)})`)
+  requireFacts(
+    !(typeof facts.isolatedCleanup === 'string' && facts.isolatedCleanup.startsWith('failed:')),
+    `isolated credential cleanup failed: ${String(facts.isolatedCleanup)}`,
+  )
   return true
+}
+
+/** Whether any already-executed check has recorded an explicit product failure (`ok !== true`). */
+export function hasRecordedCheckFailure(checks) {
+  if (checks === null || typeof checks !== 'object') return false
+  return Object.values(checks).some((check) => check !== null && typeof check === 'object' && check.ok !== true)
+}
+
+/**
+ * Resolve an exception thrown by `run()` into final outcome and exit code.
+ * A `BlockedError` can only classify the run as `BLOCKED` (exit 3) when no
+ * earlier scene already recorded a real check failure; otherwise `FAIL` (1) wins.
+ */
+export function resolveBlockedOrFailedOutcome(factsDoc, checks, error, redact = (value) => value) {
+  const target = factsDoc ?? {
+    schemaVersion: 1,
+    outcome: 'FAIL',
+    startedAt: new Date().toISOString(),
+    errors: [],
+    screenshots: [],
+  }
+  const now = new Date().toISOString()
+  target.finishedAt = now
+  if (error?.name === 'BlockedError' || error instanceof BlockedError) {
+    const allowedCheckId = typeof error?.detail?.onlyBlockedCheckId === 'string'
+      ? error.detail.onlyBlockedCheckId
+      : undefined
+    const remainingChecks = allowedCheckId === undefined || checks === null || typeof checks !== 'object'
+      ? checks
+      : Object.fromEntries(Object.entries(checks).filter(([id]) => id !== allowedCheckId))
+    target.blocked = { cause: error.message, detail: error.detail ?? {} }
+    target.errors = [...(target.errors ?? []), error.message]
+    if (hasRecordedCheckFailure(remainingChecks)) {
+      target.outcome = 'FAIL'
+      return { facts: target, exitCode: 1 }
+    }
+    target.outcome = 'BLOCKED'
+    return { facts: target, exitCode: 3 }
+  }
+  target.outcome = 'FAIL'
+  target.errors = [...(target.errors ?? []), redact(String(error?.stack ?? error))]
+  return { facts: target, exitCode: 1 }
+}
+
+/**
+ * Persist in-scene product failures right before throwing a late `BlockedError`
+ * inside a multi-phase scene, so `resolveBlockedOrFailedOutcome` records `FAIL` (1)
+ * with the accumulated reasons instead of downgrading to `BLOCKED` (3).
+ */
+export function recordPartialCheckFailureBeforeBlocked(checkId, reasons, partialFact, record = checkFact) {
+  const nonEmpty = Array.isArray(reasons) ? reasons.filter((reason) => typeof reason === 'string' && reason !== '') : []
+  if (nonEmpty.length === 0) return false
+  record(checkId, {
+    ...partialFact,
+    ok: false,
+    reasons: nonEmpty,
+  })
+  return true
+}
+
+/**
+ * Remove the isolated credential/profile root and enforce fail-closed exit semantics:
+ * if deletion fails, `facts.outcome` cannot stay `PASS`/`BLOCKED` and the leftover path is surfaced.
+ */
+export function cleanupIsolatedRoot(
+  rootDir,
+  factsDoc,
+  {
+    keepTemp = process.env.PSB_DEBUG_KEEP_TEMP === '1',
+    removeDir = (dir) => rmSync(dir, { recursive: true, force: true }),
+  } = {},
+) {
+  if (rootDir === undefined) return { ok: true, kept: false }
+  if (keepTemp) {
+    if (factsDoc !== undefined) factsDoc.isolatedCleanup = 'kept for debugging (PSB_DEBUG_KEEP_TEMP=1)'
+    return { ok: true, kept: true, rootDir }
+  }
+  try {
+    removeDir(rootDir)
+    if (factsDoc !== undefined) factsDoc.isolatedCleanup = 'removed'
+    return { ok: true, kept: false, rootDir }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    if (factsDoc !== undefined) {
+      factsDoc.isolatedCleanup = `failed: ${detail}`
+      factsDoc.errors = [
+        ...(factsDoc.errors ?? []),
+        `isolated credential root ${rootDir} could not be removed (${detail}); remove it manually`,
+      ]
+      if (factsDoc.outcome === 'PASS' || factsDoc.outcome === 'PENDING' || factsDoc.outcome === 'BLOCKED') {
+        factsDoc.outcome = 'FAIL'
+      }
+    }
+    return { ok: false, kept: false, rootDir, detail }
+  }
+}
+
+/** Compute final process exit code AFTER shutdown/cleanup has completed. */
+export function resolveFinalExitCode(factsDoc, cleanupResult) {
+  if (cleanupResult?.ok === false) return 1
+  if (factsDoc?.outcome === 'PASS') return 0
+  if (factsDoc?.outcome === 'BLOCKED') return 3
+  return 1
 }
 
 /* ------------------------------------------------------------------------- *
@@ -380,12 +504,14 @@ const driverLog = []
 let appLogFile
 let appProcess
 let appCdp
+let legacyCatalogServer
 let tempRoot
 let userDataDir
 let isolated
 let mainLogPath
 let facts
 let shutdownDone = false
+let lastCleanupResult = { ok: true, kept: false }
 let rpcRequests = []
 const progress = { checks: {} }
 
@@ -638,7 +764,60 @@ function makeSampleCode(workDir) {
   return file
 }
 
-function prepareProfile({ homeDir, userDataDir: userData, workspaceDir, models }) {
+const LEGACY_AGENT_NAME = 'legacy-reviewer'
+
+const LEGACY_TEST_AGENT = {
+  name: LEGACY_AGENT_NAME,
+  version: '1.0.0',
+  kind: 'agent',
+  description: '只读代码审阅代理，用于验证 legacy @agent 路径',
+  permissions: ['read', 'glob'],
+  allow: ['read', 'glob'],
+  persona: [
+    '你是只读代码审阅子代理。收到请求后，必须按顺序分多步调用工具仔细核对目标文件：',
+    '1) 用 glob 列出工作区全部文件；',
+    '2) 逐个用 read 读取 README.md、samples/sample-review.js 与 samples/sample.txt；',
+    '3) 对每个文件逐行分析结构、依赖与潜在问题后再输出详细报告。',
+  ].join('\n'),
+}
+
+function startLegacyCatalogServer() {
+  return new Promise((resolveServer, rejectServer) => {
+    const server = createHttpServer((request, response) => {
+      const path = (request.url ?? '').split('?')[0]
+      if (path === '/v1/catalog') {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ items: [LEGACY_TEST_AGENT] }))
+        return
+      }
+      if (path === `/v1/catalog/${encodeURIComponent(LEGACY_AGENT_NAME)}`) {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify(LEGACY_TEST_AGENT))
+        return
+      }
+      response.writeHead(404, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ error: 'not found' }))
+    })
+    server.once('error', rejectServer)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      if (address === null || typeof address === 'string') {
+        server.close()
+        rejectServer(new Error('legacy catalog server did not bind a TCP port'))
+        return
+      }
+      resolveServer({
+        server,
+        port: address.port,
+        close: () => new Promise((resolveClose) => {
+          server.close(() => resolveClose())
+        }),
+      })
+    })
+  })
+}
+
+function prepareProfile({ homeDir, userDataDir: userData, workspaceDir, models, legacyCatalogPort }) {
   const versions = appVersions()
   const profileDir = join(homeDir, 'profiles', 'desktop')
   const parentDir = dirname(homeDir)
@@ -669,7 +848,13 @@ function prepareProfile({ homeDir, userDataDir: userData, workspaceDir, models }
     guard_mode: 'smart',
     automation_timeout_ms: 600_000,
     keep_awake: false,
+    ...(legacyCatalogPort === undefined ? {} : { agents_host: '127.0.0.1', agents_port: legacyCatalogPort }),
   }, null, 2)}\n`)
+  if (legacyCatalogPort !== undefined) {
+    writeFileSync(join(profileDir, 'agents-enabled.json'), `${JSON.stringify({
+      [`catalog:${LEGACY_AGENT_NAME}`]: true,
+    }, null, 2)}\n`)
+  }
   writeFileSync(join(profileDir, 'huaanwork-workspace.json'), `${JSON.stringify({
     pendingRoot: workspaceDir,
     writtenAt: new Date().toISOString(),
@@ -929,9 +1114,11 @@ const PROGRESS_STATE = `(() => {
     entryCount: element.querySelectorAll('.tool-panel-entry').length,
   }))
   const subagents = [...panel.querySelectorAll('.progress-subagent-card')].map((card) => ({
+    runId: card.getAttribute('data-run-id') ?? null,
     label: (card.querySelector('.subagent-run-label')?.textContent ?? '').trim(),
     phase: card.getAttribute('data-phase'),
     stale: card.getAttribute('data-stale') === 'true',
+    statusText: (card.querySelector('.subagent-run-status-text')?.textContent ?? '').trim(),
     text: (card.textContent ?? '').replace(/\\s+/g, ' ').trim(),
   }))
   const countText = (panel.querySelector('.progress-count')?.textContent ?? '').trim()
@@ -942,6 +1129,7 @@ const PROGRESS_STATE = `(() => {
   return {
     mounted: true,
     connection: panel.getAttribute('data-connection'),
+    turnAnchor: panel.getAttribute('data-turn-anchor') ?? null,
     banner: (panel.querySelector('.progress-connection')?.textContent ?? '').trim() || null,
     emptyText: (panel.querySelector('.progress-section .panel-empty')?.textContent ?? '').trim() || null,
     tasks,
@@ -958,6 +1146,7 @@ const PROGRESS_STATE = `(() => {
 
 const CARDS_STATE = `(() => {
   const read = (card) => ({
+    runId: card.getAttribute('data-run-id') ?? null,
     label: (card.querySelector('.subagent-run-label')?.textContent ?? '').trim(),
     phase: card.getAttribute('data-phase'),
     stale: card.getAttribute('data-stale') === 'true',
@@ -988,6 +1177,14 @@ const EXPAND_ACTIVITY = `(() => {
 const ACTIVITY_ENTRIES = `(() => [...document.querySelectorAll('.right-pane .progress-activity-list .tool-panel-entry-title code')]
   .map((node) => (node.textContent ?? '').trim())
   .filter((name) => name !== ''))()`
+
+const ACTIVITY_ENTRY_DETAILS = `(() => [...document.querySelectorAll('.right-pane .progress-activity-list .tool-panel-entry')].map((entry) => {
+  const name = (entry.querySelector('.tool-panel-entry-title code')?.textContent ?? '').trim()
+  const callId = entry.getAttribute('data-call-id') ?? null
+  const rawRound = entry.getAttribute('data-round-key')
+  const roundKey = rawRound !== null && rawRound !== '' && Number.isFinite(Number(rawRound)) ? Number(rawRound) : null
+  return { name, callId, roundKey }
+}).filter((item) => item.name !== ''))()`
 
 async function waitFor(label, probe, timeoutMs = 60_000, intervalMs = 250) {
   const deadline = Date.now() + timeoutMs
@@ -1267,6 +1464,7 @@ async function newTaskTab(client) {
 const RAIL_CARD_STATE = `(() => {
   const cards = [...document.querySelectorAll('.right-pane .progress-subagent-card')]
   return cards.map((card) => ({
+    runId: card.getAttribute('data-run-id') ?? null,
     label: (card.querySelector('.subagent-run-label')?.textContent ?? '').trim(),
     phase: card.getAttribute('data-phase'),
     stale: card.getAttribute('data-stale') === 'true',
@@ -1285,9 +1483,8 @@ async function railCardsFor(client, label) {
 
 /**
  * Click 「终止」 on the newest *active* rail card for `label`, then click
- * 「确认终止」. Polling for an active card (instead of assuming the first one is
- * running) is what makes a fast-finishing run fail honestly instead of hitting a
- * settled card's missing terminate control.
+ * 「确认终止」 on that exact `data-run-id` card. Returns `{ label, runId }`
+ * bound at click time (before any RPC inspection).
  */
 async function clickRailTerminate(client, label, activationTimeoutMs = 60_000) {
   const requested = await waitFor(`active rail card ${label}`, async () => {
@@ -1307,14 +1504,18 @@ async function clickRailTerminate(client, label, activationTimeoutMs = 60_000) {
       .find((candidate) => (candidate.textContent ?? '').trim() === '终止')
     if (!button) return { ok: false, reason: 'terminate button missing' }
     if (button.disabled) return { ok: false, reason: 'terminate disabled' }
+    const runId = card.getAttribute('data-run-id') ?? ''
     button.click()
-    return { ok: true, label: (card.querySelector('.subagent-run-label')?.textContent ?? '').trim() }
+    return { ok: true, label: (card.querySelector('.subagent-run-label')?.textContent ?? '').trim(), runId }
   })()`)
   if (clicked?.ok !== true) throw new Error(`could not request cancel for ${label}: ${JSON.stringify(clicked)}`)
+  const clickedRunId = typeof clicked.runId === 'string' ? clicked.runId : ''
   await waitFor(`confirm cancel ${label}`, async () => {
     const ready = await client.evaluate(`(() => {
       const cards = [...document.querySelectorAll('.right-pane .progress-subagent-card')]
-      const match = cards.filter((card) => (card.querySelector('.subagent-run-label')?.textContent ?? '').trim() === ${JSON.stringify(label)})
+      const match = ${JSON.stringify(clickedRunId)} !== ''
+        ? cards.filter((card) => card.getAttribute('data-run-id') === ${JSON.stringify(clickedRunId)})
+        : cards.filter((card) => (card.querySelector('.subagent-run-label')?.textContent ?? '').trim() === ${JSON.stringify(label)})
       return match.some((card) => [...card.querySelectorAll('.subagent-run-terminate')]
         .some((candidate) => (candidate.textContent ?? '').trim().startsWith('确认终止')))
     })()`)
@@ -1322,7 +1523,9 @@ async function clickRailTerminate(client, label, activationTimeoutMs = 60_000) {
   }, 10_000, 100)
   const confirmed = await client.evaluate(`(() => {
     const cards = [...document.querySelectorAll('.right-pane .progress-subagent-card')]
-    const match = cards.filter((card) => (card.querySelector('.subagent-run-label')?.textContent ?? '').trim() === ${JSON.stringify(label)})
+    const match = ${JSON.stringify(clickedRunId)} !== ''
+      ? cards.filter((card) => card.getAttribute('data-run-id') === ${JSON.stringify(clickedRunId)})
+      : cards.filter((card) => (card.querySelector('.subagent-run-label')?.textContent ?? '').trim() === ${JSON.stringify(label)})
     for (const card of match) {
       const button = [...card.querySelectorAll('.subagent-run-terminate')]
         .find((candidate) => (candidate.textContent ?? '').trim().startsWith('确认终止'))
@@ -1334,7 +1537,7 @@ async function clickRailTerminate(client, label, activationTimeoutMs = 60_000) {
     return { ok: false, reason: 'confirm button missing' }
   })()`)
   if (confirmed?.ok !== true) throw new Error(`could not confirm cancel for ${label}: ${JSON.stringify(confirmed)}`)
-  return clicked.label ?? label
+  return { label: clicked.label ?? label, runId: clickedRunId }
 }
 
 /** The Host run ledger for one parent session, read from the renderer's own RPC. */
@@ -1451,7 +1654,7 @@ async function expandActivity(client) {
   await ensureRailTab(client)
   await client.evaluate(EXPAND_ACTIVITY)
   await delay(250)
-  return client.evaluate(ACTIVITY_ENTRIES)
+  return client.evaluate(ACTIVITY_ENTRY_DETAILS)
 }
 
 /* ------------------------------------------------------------------------- *
@@ -1577,16 +1780,31 @@ function turnFacts(session, marker) {
   const nextIndex = session.events.findIndex((event, index) => index > startIndex && isRealUserMessage(event))
   const end = nextIndex < 0 ? session.events.length : nextIndex
   const turnEvents = session.events.slice(startIndex, end)
-  const toolCalls = turnEvents.flatMap((event) => (
-    event?.type === 'tool/call' && typeof event.data?.name === 'string'
-      ? [{
-          name: event.data.name,
-          seq: typeof event.seq === 'number' ? event.seq : null,
-          turn: typeof event.data.turn === 'number' ? event.data.turn : null,
-          step: typeof event.data.step === 'number' ? event.data.step : null,
-        }]
-      : []
-  ))
+  const toolCalls = []
+  let currentRoundKey = null
+  for (const event of turnEvents) {
+    if (event?.type === 'step/start' && typeof event.seq === 'number') {
+      currentRoundKey = event.seq
+      continue
+    }
+    if (event?.type === 'tool/call' && typeof event.data?.name === 'string') {
+      let argsObj = event.data.arguments
+      if (typeof argsObj === 'string') {
+        try { argsObj = JSON.parse(argsObj) } catch { argsObj = undefined }
+      }
+      toolCalls.push({
+        name: event.data.name,
+        callId: typeof event.data.callId === 'string' && event.data.callId !== '' ? event.data.callId : null,
+        roundKey: currentRoundKey,
+        seq: typeof event.seq === 'number' ? event.seq : null,
+        turn: typeof event.data.turn === 'number' ? event.data.turn : null,
+        step: typeof event.data.step === 'number' ? event.data.step : null,
+        skillName: event.data.name === 'skill' && argsObj !== null && typeof argsObj === 'object' && typeof argsObj.name === 'string'
+          ? argsObj.name
+          : null,
+      })
+    }
+  }
   const substantiveCalls = toolCalls.filter((call) => call.name !== 'todo_write')
   const latest = substantiveCalls.reduce((best, call) => {
     if (best === undefined) return call
@@ -1594,11 +1812,10 @@ function turnFacts(session, marker) {
     if (best.turn === null || best.step === null) return call
     return call.turn > best.turn || (call.turn === best.turn && call.step > best.step) ? call : best
   }, undefined)
-  const latestRoundToolNames = latest === undefined
+  const latestRoundCalls = latest === undefined
     ? []
-    : [...new Set(substantiveCalls
-        .filter((call) => call.turn === latest.turn && call.step === latest.step)
-        .map((call) => call.name))]
+    : substantiveCalls.filter((call) => call.turn === latest.turn && call.step === latest.step)
+  const latestRoundToolNames = [...new Set(latestRoundCalls.map((call) => call.name))]
   const userMessage = session.events[startIndex]
   return {
     marker,
@@ -1607,6 +1824,9 @@ function turnFacts(session, marker) {
     endSeq: end >= session.events.length ? null : (typeof session.events[end].seq === 'number' ? session.events[end].seq : end),
     header: inspectSessionHeaderTools(session.events),
     toolNames: toolCalls.map((call) => call.name),
+    skillCalls: toolCalls.filter((call) => call.name === 'skill').map((call) => call.skillName),
+    substantiveCalls,
+    latestRoundCalls,
     latestRoundToolNames,
     todoWriteCount: toolCalls.filter((call) => call.name === 'todo_write').length,
   }
@@ -1804,12 +2024,14 @@ async function driveNoFabricatedPercentage(client) {
   const sessions = loadSessions(isolated.homeDir)
   const parent = findParentSession(sessions, `${MARKER}-TODO`)
   const turn = parent === undefined ? undefined : turnFacts(parent, `${MARKER}-TODO`)
-  const names = await expandActivity(client)
+  const activityEntries = await expandActivity(client)
+  const names = activityEntries.map((entry) => entry.name)
   await screenshot(client, '02-activity-expanded.png')
   // Unique tool names, sorted: repeated calls of one tool are a panel aggregation
   // detail, and a call rejected before execution leaves no panel on either side.
   // A name the current turn never ran (a previous round's panel leaking into the
   // rail) is the real violation.
+  const substantiveCalls = turn?.substantiveCalls ?? []
   const sessionToolNames = [...new Set((turn?.toolNames ?? []).filter((name) => name !== 'todo_write'))].sort()
   const activityToolNames = [...new Set(names)].sort()
   const latestRoundToolNames = [...new Set((turn?.latestRoundToolNames ?? []).filter((name) => name !== 'todo_write'))].sort()
@@ -1821,6 +2043,25 @@ async function driveNoFabricatedPercentage(client) {
   // repeat every earlier-round tool; the latest round itself must be represented.
   const latestRoundCovered = latestRoundToolNames.length === 0
     || latestRoundToolNames.every((name) => activityToolNames.includes(name))
+  const activityAnchorMatched = typeof turn?.clientMessageId === 'string'
+    && turn.clientMessageId !== ''
+    && final?.turnAnchor === turn.clientMessageId
+  const matchCall = (call, entry) => (
+    call.name === entry.name
+    && typeof entry.callId === 'string'
+    && entry.callId !== ''
+    && call.callId === entry.callId
+    && typeof entry.roundKey === 'number'
+    && call.roundKey === entry.roundKey
+  )
+  const foreignActivityCalls = activityEntries.filter((entry) => !substantiveCalls.some((call) => matchCall(call, entry)))
+  const latestRoundCalls = turn?.latestRoundCalls ?? []
+  const latestRoundCallsCovered = latestRoundCalls.length === 0
+    || latestRoundCalls.every((call) => activityEntries.some((entry) => matchCall(call, entry)))
+  const activityCallsMatched = substantiveCalls.length > 0
+    && activityEntries.length > 0
+    && foreignActivityCalls.length === 0
+    && latestRoundCallsCovered
   const reasons = []
   if (percentTexts.length > 0) reasons.push(`percentage labels rendered: ${percentTexts.slice(0, 3).join(', ')}`)
   if (taskProgressBarCount > 0) reasons.push(`${String(taskProgressBarCount)} per-step progress bars rendered`)
@@ -1832,7 +2073,13 @@ async function driveNoFabricatedPercentage(client) {
   if (!latestRoundCovered) {
     reasons.push(`the latest round tools ${JSON.stringify(latestRoundToolNames)} are missing from the activity panel ${JSON.stringify(activityToolNames)}`)
   }
-  if (final?.tasks.some((task) => /\\d+\\s*%/u.test(task.content)) === true) {
+  if (!activityAnchorMatched) {
+    reasons.push(`progress panel turn anchor ${JSON.stringify(final?.turnAnchor ?? null)} does not match turn clientMessageId ${JSON.stringify(turn?.clientMessageId ?? null)}`)
+  }
+  if (!activityCallsMatched) {
+    reasons.push(`activity callId/roundKey records failed to match turn log (foreign=${JSON.stringify(foreignActivityCalls)}, latestCovered=${String(latestRoundCallsCovered)})`)
+  }
+  if (final?.tasks.some((task) => /\d+\s*%/u.test(task.content)) === true) {
     // Task content may legitimately carry a percentage; only status/count labels count as fabricated progress.
     log('note: a task content mentions a percentage (not treated as a fabricated progress label)')
   }
@@ -1845,6 +2092,13 @@ async function driveNoFabricatedPercentage(client) {
     totalBarMatchesCount,
     totalBarReason,
     countFormatAlwaysXY,
+    activityAnchor: final?.turnAnchor ?? null,
+    expectedTurnAnchor: turn?.clientMessageId ?? null,
+    activityAnchorMatched,
+    activityEntries,
+    foreignActivityCalls,
+    latestRoundCallsCovered,
+    activityCallsMatched,
     activityToolNames,
     sessionToolNames,
     latestRoundToolNames,
@@ -1856,6 +2110,8 @@ async function driveNoFabricatedPercentage(client) {
   })
 }
 
+const LEGACY_AT_LABEL = `@${LEGACY_AGENT_NAME}`
+const LEGACY_AT_PROMPT = `${LEGACY_AT_LABEL} ${MARKER}-LEGACY 请作为只读审阅子代理按步骤使用 glob 与 read 工具检查工作区中的 README.md、samples/sample-review.js 与 samples/sample.txt，逐文件给出详细审阅意见。`
 const EXPLICIT_AT_PROMPT = `@typo-check ${MARKER}-AT 检测这个文件夹里的 Word 文档：samples`
 
 async function driveParentNoSelfSpawn(client, tasksFact) {
@@ -1870,6 +2126,58 @@ async function driveParentNoSelfSpawn(client, tasksFact) {
   if (!ordinaryTurnsWithoutSubagent) reasons.push('an ordinary turn request header exposed subagent')
 
   await ensureProgressTab(client)
+
+  // Q4-M1: cover both the legacy catalog @agent path (kind === 'legacy') and
+  // the package @typo-check path sequentially under the same parent session.
+  const catalogRefresh = await client.evaluate(`fetch('/huaanwork/agent/refresh', { method: 'POST' })
+    .then((response) => (response.ok ? response.json() : { ok: false, status: response.status }))
+    .catch((error) => ({ ok: false, error: String(error) }))`)
+  const legacyCatalogLoaded = Array.isArray(catalogRefresh?.items)
+    && catalogRefresh.items.some((item) => item.name === LEGACY_AGENT_NAME && item.enabled === true && !item.broken)
+  if (!legacyCatalogLoaded) {
+    reasons.push(`legacy catalog agent ${LEGACY_AGENT_NAME} did not load before @ dispatch: ${clip(JSON.stringify(catalogRefresh), 300)}`)
+  }
+  const beforeLegacyRuns = await subagentRunsOf(client, parent.header.id)
+  const knownLegacyRunIds = new Set((beforeLegacyRuns.runs ?? []).map((run) => run.runId))
+  const previousLegacyCards = await mainCardCount(client, LEGACY_AT_LABEL)
+  let legacyAtCardSeen = false
+  let legacyAtRunId = null
+  let legacyAtKind = null
+  let legacyTargetedCancelConverged = false
+  if (legacyCatalogLoaded) {
+    await sendText(client, LEGACY_AT_PROMPT)
+    try {
+      await waitForNewMainCard(client, LEGACY_AT_LABEL, previousLegacyCards, Math.min(options.timeout, 90_000))
+      legacyAtCardSeen = true
+    } catch { /* recorded below */ }
+    try {
+      const created = await waitForNewRun(client, parent.header.id, LEGACY_AT_LABEL, knownLegacyRunIds, Math.min(options.timeout, 45_000))
+      const run = created.runs[created.runs.length - 1]
+      legacyAtRunId = run?.runId ?? null
+      legacyAtKind = run?.kind ?? null
+    } catch (cause) {
+      log(`legacy @ run lookup failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+    await screenshot(client, '03a-legacy-at-card.png')
+    if (legacyAtCardSeen) {
+      try {
+        await clickRailTerminate(client, LEGACY_AT_LABEL)
+        if (legacyAtRunId !== null) {
+          await waitForRunPhase(client, parent.header.id, legacyAtRunId, new Set(['stopped']), Math.min(options.timeout, 90_000))
+        }
+        await waitForMainCardPhase(client, LEGACY_AT_LABEL, new Set(['stopped']), Math.min(options.timeout, 90_000))
+        legacyTargetedCancelConverged = true
+      } catch (cause) {
+        log(`legacy @ cancel did not converge: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+    }
+    await waitForComposerIdle(client, Math.min(options.timeout, 120_000))
+    await screenshot(client, '03b-legacy-at-cancelled.png')
+  }
+  if (!legacyAtCardSeen) reasons.push(`the legacy ${LEGACY_AT_LABEL} dispatch produced no run card`)
+  if (legacyAtKind !== 'legacy') reasons.push(`expected legacy run kind 'legacy', got ${JSON.stringify(legacyAtKind)}`)
+  if (!legacyTargetedCancelConverged) reasons.push(`the targeted cancel of the legacy ${LEGACY_AT_LABEL} run did not converge to stopped`)
+
   const previousCards = await mainCardCount(client, '@typo-check')
   await sendText(client, EXPLICIT_AT_PROMPT)
   let explicitCardSeen = false
@@ -1903,6 +2211,13 @@ async function driveParentNoSelfSpawn(client, tasksFact) {
       toolCount: request.toolNames.length,
       hasSubagent: request.hasSubagent,
     })),
+    legacyAtLabel: LEGACY_AT_LABEL,
+    legacyAtPrompt: LEGACY_AT_PROMPT,
+    legacyCatalogLoaded,
+    legacyAtRunId,
+    legacyAtKind,
+    legacyAtCardSeen,
+    legacyTargetedCancelConverged,
     explicitAtLabel: '@typo-check',
     explicitAtPrompt: EXPLICIT_AT_PROMPT,
     explicitCardSeen,
@@ -1957,6 +2272,18 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
   const entries = []
   const reasons = []
   const exposure = skillToolExposed(loadSessions(isolated.homeDir))
+  const entryMarkerFor = (definition) => (
+    definition.modelSkill
+      ? `${MARKER}-SKILL`
+      : definition.skill === 'explore'
+        ? `${MARKER}-EXPLORE`
+        : `${MARKER}-TESTFIX`
+  )
+  let dualParentSessionId = await waitForParentSessionId(client, `${MARKER}-DUAL-WARM`, 20_000).catch(() => null)
+  const initialRuns = dualParentSessionId !== null
+    ? await subagentRunsOf(client, dualParentSessionId).catch(() => ({ runs: [] }))
+    : { runs: [] }
+  const knownDualRunIds = new Set((initialRuns.runs ?? []).map((run) => run.runId))
   let sessionFailure = null
   let modelSkillBlocked = null
   if (!exposure.exposed) {
@@ -1977,14 +2304,24 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
       reason: modelSkillBlocked.cause,
       runSeenInMain: false,
       runSeenInRail: false,
+      runId: null,
+      runKind: null,
+      clientMessageId: null,
+      anchorMatched: false,
+      headerHasSubagent: false,
+      skillToolCalled: false,
       cancelled: false,
+      marker: `${MARKER}-SKILL`,
     })
     reasons.push(MODEL_SKILL_BLOCKED_REASON)
   }
-  for (const definition of DUAL_ENTRIES) {
-    if (definition.modelSkill) {
-      if (!exposure.exposed) continue
-    }
+  const drivenIndices = DUAL_ENTRIES
+    .map((definition, index) => ({ definition, index }))
+    .filter(({ definition }) => !definition.modelSkill || exposure.exposed)
+  for (let step = 0; step < drivenIndices.length; step += 1) {
+    const { definition } = drivenIndices[step]
+    const baseMarker = entryMarkerFor(definition)
+    let usedMarker = baseMarker
     if (sessionFailure !== null) {
       entries.push({
         entry: definition.entry,
@@ -1993,7 +2330,14 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
         reason: `the session failed before this entry could be driven: ${sessionFailure}`,
         runSeenInMain: false,
         runSeenInRail: false,
+        runId: null,
+        runKind: null,
+        clientMessageId: null,
+        anchorMatched: false,
+        headerHasSubagent: false,
+        skillToolCalled: false,
         cancelled: false,
+        marker: usedMarker,
       })
       reasons.push(`${definition.entry} ${definition.skill} was not driven because the session had already failed`)
       continue
@@ -2010,6 +2354,7 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
     }
     await ensureProgressTab(client)
     const previousCards = await mainCardCount(client, definition.skill)
+    const previousRailCount = (await railCardsFor(client, definition.skill)).length
     try {
       // The parent turn can still be settling after a previous entry's cancel;
       // a slash send waits for the composer's send control to re-enable.
@@ -2017,17 +2362,35 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
     } catch (cause) {
       const reason = cause instanceof Error ? cause.message : String(cause)
       log(`${definition.entry} ${definition.skill} send failed: ${reason}`)
-      entries.push({ entry: definition.entry, skill: definition.skill, constructible: false, reason, runSeenInMain: false, runSeenInRail: false, cancelled: false })
+      entries.push({
+        entry: definition.entry,
+        skill: definition.skill,
+        constructible: false,
+        reason,
+        runSeenInMain: false,
+        runSeenInRail: false,
+        runId: null,
+        runKind: null,
+        clientMessageId: null,
+        anchorMatched: false,
+        headerHasSubagent: false,
+        skillToolCalled: false,
+        cancelled: false,
+        marker: usedMarker,
+      })
       reasons.push(`${definition.entry} ${definition.skill} could not be sent: ${reason}`)
       continue
+    }
+    if (dualParentSessionId === null) {
+      dualParentSessionId = await waitForParentSessionId(client, usedMarker, 20_000).catch(() => null)
     }
     let runSeenInMain = false
     let runSeenInRail = false
     let cancelled = false
+    let entryRun = null
     try {
       await waitForNewMainCard(client, definition.skill, previousCards, Math.min(options.timeout, 120_000))
       runSeenInMain = true
-      runSeenInRail = true
     } catch (cause) {
       const failure = await client.evaluate(SESSION_FAILURE_STATE).catch(() => null)
       if (failure?.banner !== null && failure?.banner !== undefined) {
@@ -2035,29 +2398,70 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
       }
       log(`${definition.entry} ${definition.skill} card missing: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
-    await screenshot(client, `05-${definition.skill}-${definition.entry}.png`)
     // Model variance: a turn can finish without delegating even though subagent is
     // exposed. Retry once with an explicit tool-call instruction before failing.
     if (!runSeenInMain && sessionFailure === null) {
-      const retryPrompt = `${MARKER}-RETRY-${definition.skill} 你刚才没有调用 subagent 工具。现在必须立即调用 subagent 工具：description 填 "${definition.skill}"，prompt 按技能要求执行，不要直接回答或结束。`
+      const retryMarker = `${MARKER}-RETRY-${definition.skill}`
+      const retryPrompt = `${retryMarker} 你刚才没有调用 subagent 工具。现在必须立即调用 subagent 工具：description 填 "${definition.skill}"，prompt 按技能要求执行，不要直接回答或结束。`
       try {
         await sendText(client, retryPrompt, Math.min(options.timeout, 120_000))
+        usedMarker = retryMarker
         await waitForNewMainCard(client, definition.skill, previousCards, Math.min(options.timeout, 120_000))
         runSeenInMain = true
-        runSeenInRail = true
         log(`${definition.entry} ${definition.skill} run appeared after the explicit subagent retry`)
       } catch (cause) {
         log(`${definition.entry} ${definition.skill} retry still produced no run: ${cause instanceof Error ? cause.message : String(cause)}`)
       }
     }
+    if (runSeenInMain) {
+      if (dualParentSessionId === null) {
+        dualParentSessionId = await waitForParentSessionId(client, usedMarker, 20_000).catch(() => null)
+      }
+      if (dualParentSessionId !== null) {
+        try {
+          const created = await waitForNewRun(client, dualParentSessionId, definition.skill, knownDualRunIds, 30_000)
+          entryRun = created.runs[created.runs.length - 1] ?? null
+          if (entryRun !== null) knownDualRunIds.add(entryRun.runId)
+        } catch (cause) {
+          log(`${definition.entry} ${definition.skill} Host run lookup failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+        }
+      }
+      try {
+        await waitFor(`rail card ${definition.skill}`, async () => {
+          const railCards = await railCardsFor(client, definition.skill)
+          const matched = entryRun !== null
+            ? railCards.some((card) => card.runId === entryRun.runId)
+            : railCards.length > previousRailCount
+          return { ok: matched, value: matched }
+        }, 15_000, 200)
+        runSeenInRail = true
+      } catch {
+        runSeenInRail = false
+      }
+    }
+    await screenshot(client, `05-${definition.skill}-${definition.entry}.png`)
     // Cancel while the run is still active: a settled run has no terminate control.
     if (definition.cancel && runSeenInMain) {
+      let cancelledChildId = entryRun?.childId ?? null
       try {
         await clickRailTerminate(client, definition.skill)
+        if (dualParentSessionId !== null && entryRun !== null) {
+          const stoppedRun = await waitForRunPhase(client, dualParentSessionId, entryRun.runId, new Set(['stopped']), Math.min(options.timeout, 90_000))
+          cancelledChildId = stoppedRun?.childId ?? cancelledChildId
+        }
         await waitForMainCardPhase(client, definition.skill, new Set(['stopped']), Math.min(options.timeout, 90_000))
         cancelled = true
       } catch (cause) {
         log(`system-skill cancel ${definition.skill} did not converge: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+      if (dualParentSessionId !== null && cancelled && typeof cancelledChildId === 'string' && cancelledChildId !== '') {
+        await waitFor(`settlement delivery after cancel ${definition.skill}`, async () => {
+          const currentSessions = loadSessions(isolated.homeDir)
+          const currentParent = currentSessions.find((session) => session.header.id === dualParentSessionId)
+          const delivered = currentParent !== undefined
+            && settlementDeliveries(currentParent).some((delivery) => delivery.laneId === cancelledChildId)
+          return { ok: delivered, value: delivered }
+        }, 20_000, 250).catch(() => undefined)
       }
       const failure = await client.evaluate(SESSION_FAILURE_STATE).catch(() => null)
       if (failure?.banner !== null && failure?.banner !== undefined && sessionFailure === null) {
@@ -2065,13 +2469,40 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
       }
     }
     try {
+      await delay(400)
       await waitForComposerIdle(client, Math.min(options.timeout, 120_000))
     } catch (cause) {
       log(`composer did not settle after ${definition.skill}: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
-    entries.push({ entry: definition.entry, skill: definition.skill, constructible: true, runSeenInMain, runSeenInRail, cancelled })
+    entries.push({
+      entry: definition.entry,
+      skill: definition.skill,
+      constructible: true,
+      runSeenInMain,
+      runSeenInRail,
+      runId: entryRun?.runId ?? null,
+      runKind: entryRun?.kind ?? null,
+      clientMessageId: entryRun?.clientMessageId ?? null,
+      anchorMatched: false,
+      headerHasSubagent: false,
+      skillToolCalled: false,
+      cancelled,
+      marker: usedMarker,
+      initialMarker: baseMarker,
+    })
     if (!runSeenInMain || !runSeenInRail) reasons.push(`${definition.entry} ${definition.skill} run card missing from the rail or main flow`)
     if (definition.cancel && !cancelled) reasons.push(`${definition.entry} ${definition.skill} targeted cancel did not converge`)
+
+    // Separate consecutive system-skill turns with an ordinary turn so each entry
+    // logs its own fresh open/reclaim request/header transition in session.v4.jsonl.zstd.
+    if (step < drivenIndices.length - 1 && sessionFailure === null) {
+      const midMarker = `${MARKER}-MID${String(step + 1)}`
+      try {
+        await sendAndSettle(client, `${midMarker} 只回复「好」两个字，不要调用任何工具。`, { label: `ordinary mid-${String(step + 1)}` })
+      } catch (cause) {
+        reasons.push(`the intermediate ordinary turn ${midMarker} failed: ${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+    }
   }
   if (sessionFailure !== null) reasons.push(`the Host raised an exception during the system-skill scene: ${sessionFailure}`)
   try {
@@ -2080,31 +2511,76 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
     reasons.push(`the ordinary follow-up turn failed: ${cause instanceof Error ? cause.message : String(cause)}`)
   }
 
-  // The follow-up request/header is persisted at turn start; poll briefly so the
-  // phase comparison reads a settled log instead of racing the write.
+  const hasAssistantAfter = (events, startSeq) => events.some((event) => (
+    event?.type === 'assistant/message'
+    && (startSeq === null || (typeof event.seq === 'number' && event.seq > startSeq))
+    && messageText(event.data?.message).trim() !== ''
+  ))
+
+  // The follow-up request/header is persisted at turn start (or inherited from
+  // a post-cancel settlement turn whose reclaimed schema matches); wait until
+  // either a new request/header or the follow-up's assistant reply + turn/end lands.
   const headerDeadline = Date.now() + 60_000
   while (Date.now() < headerDeadline) {
     const probeSessions = loadSessions(isolated.homeDir)
-    const probeParent = findParentSession(probeSessions, `${MARKER}-EXPLORE`)
+    const probeParent = findParentSession(probeSessions, `${MARKER}-DUAL-WARM`)
+      ?? findParentSession(probeSessions, `${MARKER}-EXPLORE`)
     if (probeParent !== undefined) {
       const probeTurn = turnFacts(probeParent, `${MARKER}-EXPLORE`)
       const probeFollow = turnFacts(probeParent, `${MARKER}-AFTER`)
       if (probeTurn !== undefined && probeFollow !== undefined) {
         const probeHeader = inspectSessionHeaderTools(probeParent.events)
         const probeStart = probeFollow.startSeq ?? (probeTurn.endSeq ?? 0)
-        if (headerNamesBetween(probeHeader, probeStart, null).length > 0) break
+        const settledAfter = hasAssistantAfter(probeParent.events, probeFollow.startSeq)
+          && probeParent.events.some((event) => event?.type === 'turn/end' && typeof event.seq === 'number' && event.seq > probeFollow.startSeq)
+        if (headerNamesBetween(probeHeader, probeStart, null).length > 0 || settledAfter) break
       }
     }
     await delay(500)
   }
 
   const sessions = loadSessions(isolated.homeDir)
-  const parent = findParentSession(sessions, `${MARKER}-EXPLORE`)
+  const parent = findParentSession(sessions, `${MARKER}-DUAL-WARM`)
+    ?? findParentSession(sessions, `${MARKER}-EXPLORE`)
   let phaseComparison = { ok: false, reasons: ['the explicit /explore turn is missing from the session logs'], beforeHasSubagent: false, duringHasSubagent: false, afterHasSubagent: false, added: [], removed: [] }
   let phases = { before: [], during: [], after: [] }
   if (parent !== undefined) {
-    const turn = turnFacts(parent, `${MARKER}-EXPLORE`)
     const header = inspectSessionHeaderTools(parent.events)
+    for (const item of entries) {
+      if (!item.constructible) continue
+      const entryTurn = turnFacts(parent, item.marker)
+      const initialTurn = item.initialMarker && item.initialMarker !== item.marker
+        ? turnFacts(parent, item.initialMarker)
+        : undefined
+      if (entryTurn !== undefined) {
+        item.startSeq = entryTurn.startSeq
+        item.endSeq = entryTurn.endSeq
+        item.turnClientMessageId = entryTurn.clientMessageId
+        item.anchorMatched = typeof item.clientMessageId === 'string'
+          && item.clientMessageId !== ''
+          && entryTurn.clientMessageId === item.clientMessageId
+        const between = headerNamesBetween(header, entryTurn.startSeq, entryTurn.endSeq)
+        item.headerTools = between
+        item.headerHasSubagent = between.includes('subagent')
+        const skillCalls = [...(entryTurn.skillCalls ?? []), ...(initialTurn?.skillCalls ?? [])]
+        item.skillCalls = skillCalls
+        item.skillToolCalled = skillCalls.includes(item.skill)
+      }
+      if (item.runKind !== 'system-skill') {
+        reasons.push(`${item.entry} ${item.skill} run recorded kind=${JSON.stringify(item.runKind)} instead of 'system-skill'`)
+      }
+      if (!item.anchorMatched) {
+        reasons.push(`${item.entry} ${item.skill} run clientMessageId ${JSON.stringify(item.clientMessageId)} did not match turn anchor`)
+      }
+      if (!item.headerHasSubagent) {
+        reasons.push(`${item.entry} ${item.skill} turn lacked subagent in its request/header snapshot`)
+      }
+      if (item.entry === 'model-skill' && !item.skillToolCalled) {
+        reasons.push(`${item.entry} ${item.skill} never called skill tool with name=${item.skill}`)
+      }
+    }
+
+    const turn = turnFacts(parent, `${MARKER}-EXPLORE`)
     const followUp = turnFacts(parent, `${MARKER}-AFTER`)
     if (turn === undefined) {
       phaseComparison = { ok: false, reasons: ['the explicit /explore user message is missing'], beforeHasSubagent: false, duringHasSubagent: false, afterHasSubagent: false, added: [], removed: [] }
@@ -2119,14 +2595,22 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
       // Falls back to the /explore end when the /test-fix turn never settled.
       const testFixTurn = turnFacts(parent, `${MARKER}-TESTFIX`)
       const duringEndSeq = testFixTurn?.endSeq ?? turn.endSeq
-      // `after` is the header in force from the next ordinary turn onward: a
-      // reclaim that never logged a request would keep `subagent` visible, so an
-      // empty window fails instead of passing trivially.
+      // `after` is the schema in force for the follow-up turn. If a preceding
+      // post-cancel settlement turn already logged the reclaimed schema, DSH
+      // omits a duplicate request/header on `followUp`; only fall back to the
+      // latest logged request header >= executionStartSeq when `followUp` itself
+      // produced a real LLM reply. If `subagent` leaked, that latest header still
+      // carries `subagent` and `compareHeaderToolPhases` fails cleanly.
       const afterStart = followUp?.startSeq ?? (turn.endSeq ?? 0)
+      const afterLogged = headerNamesBetween(header, afterStart, null)
+      const followUpReplied = followUp !== undefined && hasAssistantAfter(parent.events, followUp.startSeq)
+      const latestWindowHeader = header.requests
+        .filter((request) => request.seq !== null && request.seq >= executionStartSeq)
+        .pop()?.toolNames ?? []
       phases = {
         before: headerNamesBefore(header, executionStartSeq),
         during: headerNamesBetween(header, executionStartSeq, duringEndSeq),
-        after: headerNamesBetween(header, afterStart, null),
+        after: afterLogged.length > 0 ? afterLogged : (followUpReplied ? [...latestWindowHeader].sort() : []),
       }
       if (followUp === undefined) {
         phaseComparison = { ok: false, reasons: ['the ordinary follow-up turn after the execution window is missing from the session log'], beforeHasSubagent: false, duringHasSubagent: false, afterHasSubagent: false, added: [], removed: [] }
@@ -2167,6 +2651,34 @@ function listDirNames(dir) {
   }
 }
 
+const LANE_SUMMARY_OBSERVER = `(() => {
+  window.__laneSummaryAccept?.observer?.disconnect()
+  window.__laneSummaryAccept = { samples: [], observer: null }
+  const scan = () => {
+    const root = document.querySelector('.right-pane .progress-panel')
+    if (!root) return
+    const cards = [...root.querySelectorAll('.progress-subagent-card')]
+    for (const card of cards) {
+      const label = (card.querySelector('.subagent-run-label')?.textContent ?? '').trim()
+      if (label !== '@typo-check') continue
+      const runId = card.getAttribute('data-run-id') ?? null
+      const phase = card.getAttribute('data-phase')
+      const statusText = (card.querySelector('.subagent-run-status-text')?.textContent ?? '').trim()
+      const text = (card.textContent ?? '').replace(/\\s+/g, ' ').trim()
+      const samples = window.__laneSummaryAccept.samples
+      const last = samples[samples.length - 1]
+      if (!last || last.runId !== runId || last.phase !== phase || last.statusText !== statusText || last.text !== text) {
+        samples.push({ runId, phase, statusText, text, at: Date.now() })
+      }
+    }
+  }
+  scan()
+  const target = document.querySelector('.right-pane') ?? document.body
+  window.__laneSummaryAccept.observer = new MutationObserver(scan)
+  window.__laneSummaryAccept.observer.observe(target, { subtree: true, childList: true, characterData: true, attributes: true })
+  return true
+})()`
+
 /**
  * The lane scene runs in the stable session: its workspace already carries the
  * docx samples, and a brand-new task session cannot dispatch a package as its
@@ -2177,14 +2689,23 @@ async function drivePackageLaneDepthTwo(client, stableSessionId) {
   await ensureProgressTab(client)
   const before = await subagentRunsOf(client, stableSessionId)
   const known = new Set((before.runs ?? []).map((run) => run.runId))
+  await client.evaluate(LANE_SUMMARY_OBSERVER)
   await sendText(client, LANE_PROMPT)
-  await waitForTurnStart(client, await userBubbleCount(client), Math.min(options.timeout, 60_000)).catch(() => undefined)
 
   let railLaneRowCount = 0
   let aggregatedToolSummary = ''
   let outerCardSeenInRail = false
   let outerCardSeenInMain = false
   let outerRunId = null
+  const outerObservedTools = new Set()
+  const collectToolText = (statusText) => {
+    if (typeof statusText !== 'string' || !statusText.includes(' · ')) return
+    const tail = statusText.slice(statusText.lastIndexOf(' · ') + 3).replace(/\s+\+\d+$/u, '').trim()
+    for (const piece of tail.split('、')) {
+      const toolName = piece.trim()
+      if (toolName !== '') outerObservedTools.add(toolName)
+    }
+  }
   let terminal
   const deadline = Date.now() + Math.round(options.timeout * 1.5)
   while (Date.now() < deadline) {
@@ -2193,6 +2714,10 @@ async function drivePackageLaneDepthTwo(client, stableSessionId) {
     const outer = railCards.filter((card) => card.label === '@typo-check')
     if (outer.length > 0) outerCardSeenInRail = true
     railLaneRowCount = Math.max(railLaneRowCount, railCards.filter((card) => card.label !== '@typo-check').length)
+    for (const card of outer) {
+      if (TERMINAL_PHASES.has(card.phase)) continue
+      collectToolText(card.statusText ?? '')
+    }
     const summary = outer.find((card) => /正在执行|个工具/u.test(card.text))
     if (summary !== undefined) aggregatedToolSummary = clip(summary.text, 300)
     const cards = await cardsState(client)
@@ -2202,12 +2727,33 @@ async function drivePackageLaneDepthTwo(client, stableSessionId) {
     const run = runsForLabel(snapshot, '@typo-check').find((candidate) => !known.has(candidate.runId))
     if (run !== undefined) {
       outerRunId = run.runId
+      if (!TERMINAL_PHASES.has(run.phase)) {
+        for (const active of run.activeTools ?? []) {
+          if (typeof active?.name === 'string' && active.name !== '') outerObservedTools.add(active.name)
+        }
+      }
       if (TERMINAL_PHASES.has(run.phase)) {
         terminal = { phase: run.phase, status: run.failure ?? '', text: mainOuter[mainOuter.length - 1]?.text ?? '' }
         break
       }
     }
-    await delay(400)
+    await delay(100)
+  }
+  const domSamples = await client.evaluate(`(() => {
+    window.__laneSummaryAccept?.observer?.disconnect()
+    const samples = window.__laneSummaryAccept?.samples ?? []
+    delete window.__laneSummaryAccept
+    return samples
+  })()`).catch(() => [])
+  const scopedSamples = Array.isArray(domSamples)
+    ? domSamples.filter((sample) => (outerRunId === null || sample.runId === null || sample.runId === outerRunId))
+    : []
+  for (const sample of scopedSamples) {
+    if (TERMINAL_PHASES.has(sample.phase)) continue
+    collectToolText(sample.statusText ?? '')
+    if (aggregatedToolSummary === '' && /正在执行|个工具/u.test(sample.text ?? '')) {
+      aggregatedToolSummary = clip(sample.text, 300)
+    }
   }
   if (terminal === undefined) throw new Error(`the package lane run did not reach a terminal phase within ${Math.round(options.timeout * 1.5)}ms`)
   await screenshot(client, '06-package-lane-terminal.png')
@@ -2225,6 +2771,8 @@ async function drivePackageLaneDepthTwo(client, stableSessionId) {
     identityOk: false,
   }
   const laneResults = []
+  let outerChildToolNames = []
+  let laneOnlyToolNames = []
   if (parent === undefined) {
     reasons.push('the package lane parent session is missing from the session logs')
   } else {
@@ -2245,9 +2793,20 @@ async function drivePackageLaneDepthTwo(client, stableSessionId) {
         ]
     chain = inspectDelegationChain(scoped, parent.header.id)
     const childSession = child
+    outerChildToolNames = childSession === undefined
+      ? []
+      : [...new Set(childSession.events
+          .filter((event) => event?.type === 'tool/call' && typeof event.data?.name === 'string')
+          .map((event) => event.data.name))]
+    const laneToolNameSet = new Set()
     const deliveries = childSession === undefined ? [] : settlementDeliveries(childSession)
     for (const laneId of chain.laneIds) {
       const lane = sessions.find((session) => session.header.id === laneId)
+      for (const event of lane?.events ?? []) {
+        if (event?.type === 'tool/call' && typeof event.data?.name === 'string') {
+          laneToolNameSet.add(event.data.name)
+        }
+      }
       const final = lane === undefined ? undefined : lastAssistantText(lane.events)
       const delivery = deliveries.find((item) => item.laneId === laneId)
       const errorTurn = lane === undefined ? false : lane.events.some((event) => event?.type === 'turn/end' && event.data?.reason?.kind === 'error')
@@ -2258,6 +2817,7 @@ async function drivePackageLaneDepthTwo(client, stableSessionId) {
         isError: errorTurn || final === undefined || final.text.trim() === '',
       })
     }
+    laneOnlyToolNames = [...laneToolNameSet].filter((name) => !outerChildToolNames.includes(name))
     if (!chain.identityOk) reasons.push('the parent -> package child -> lane identity chain did not resolve from the session headers')
     if (chain.laneIds.length !== 2) reasons.push(`found ${String(chain.laneIds.length)} depth-2 lanes (expected exactly 2)`)
     if (chain.laneDepths.some((depth) => depth !== 2)) reasons.push('a lane session is not at delegation depth 2')
@@ -2265,9 +2825,19 @@ async function drivePackageLaneDepthTwo(client, stableSessionId) {
     if (laneResults.some((result) => result.finalTextLength === 0)) reasons.push('a lane produced no closing text')
     if (laneResults.some((result) => result.settlementDelivered !== true)) reasons.push('a lane result was never delivered to the package child')
   }
+  const outerObservedToolNames = [...outerObservedTools].sort()
+  const foreignOuterTools = outerObservedToolNames.filter((name) => !outerChildToolNames.includes(name))
+  const laneOnlyLeakedTools = outerObservedToolNames.filter((name) => laneOnlyToolNames.includes(name))
+  const outerSummaryFromOuterChildOnly = outerChildToolNames.length > 0
+    && outerObservedToolNames.length > 0
+    && foreignOuterTools.length === 0
+    && laneOnlyLeakedTools.length === 0
   if (!outerCardSeenInMain || !outerCardSeenInRail) reasons.push('the outer package run card is missing from the rail or the main flow')
   if (railLaneRowCount !== 0) reasons.push(`${String(railLaneRowCount)} independent lane rows appeared in the rail`)
   if (aggregatedToolSummary === '') reasons.push('the rail never showed an aggregated tool summary for the outer package run')
+  if (!outerSummaryFromOuterChildOnly) {
+    reasons.push(`outer package summary did not stay scoped to depth-1 child tools (observed=${JSON.stringify(outerObservedToolNames)}, outerChild=${JSON.stringify(outerChildToolNames)}, foreign=${JSON.stringify(foreignOuterTools)}, laneOnlyLeaked=${JSON.stringify(laneOnlyLeakedTools)})`)
+  }
   if (terminal.phase !== 'completed') reasons.push(`the outer package run ended ${String(terminal.phase)}`)
   if (terminal.status !== '') reasons.push(`the outer package run reported ${clip(terminal.status, 200)}`)
   await waitForComposerIdle(client, Math.min(options.timeout, 120_000)).catch(() => undefined)
@@ -2279,6 +2849,12 @@ async function drivePackageLaneDepthTwo(client, stableSessionId) {
     outerCardSeenInMain,
     railLaneRowCount,
     aggregatedToolSummary,
+    outerObservedToolNames,
+    outerChildToolNames: [...outerChildToolNames].sort(),
+    laneOnlyToolNames: [...laneOnlyToolNames].sort(),
+    foreignOuterTools,
+    laneOnlyLeakedTools,
+    outerSummaryFromOuterChildOnly,
     terminalPhase: terminal.phase,
     terminalStatus: terminal.status,
     terminalText: clip(terminal.text, 400),
@@ -2451,14 +3027,19 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
   if (railRowsAtWindow !== activeLabelRuns) {
     reasons.push(`the rail rendered ${String(railRowsAtWindow)} sibling rows for ${String(activeLabelRuns)} live runs`)
   }
+  const windowPairCardUnique = pairRunIds.length === 2 && pairRunIds.every((runId) => (
+    windowCards.main.filter((card) => card.runId === runId).length === 1
+    && windowCards.rail.filter((card) => card.runId === runId).length === 1
+  ))
   // Two runs, two cards: each run of the pair rendered exactly one main-flow card.
-  const pairRenderedOnce = windowRuns.length === 2 && cardsAtWindow === 2
+  const pairRenderedOnce = windowRuns.length === 2 && cardsAtWindow === 2 && windowPairCardUnique
   if (!pairRenderedOnce) {
-    reasons.push(`the concurrent window rendered ${String(cardsAtWindow)} main cards for ${String(windowRuns.length)} sibling runs`)
+    reasons.push(`the concurrent window rendered ${String(cardsAtWindow)} main cards for ${String(windowRuns.length)} sibling runs (unique=${String(windowPairCardUnique)})`)
   }
   await screenshot(client, '07-sibling-active.png')
 
-  // 3. One 「终止 → 确认终止」 pair must cancel exactly one of the two runs.
+  // 3. One 「终止 → 确认终止」 pair binds the clicked card's `data-run-id` at click
+  //    time and cancels that exact run alone.
   const cancelStartIndex = rpcRequests.length
   let cancelConverged = false
   let targetRunId = ''
@@ -2466,34 +3047,17 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
   let targetTerminal
   if (pairRunIds.length === 2 && activeAtWindow === 2) {
     try {
-      await clickRailTerminate(client, SIBLING_RUN_LABEL)
+      const clicked = await clickRailTerminate(client, SIBLING_RUN_LABEL)
+      targetRunId = clicked?.runId ?? ''
     } catch (cause) {
       reasons.push(`the rail terminate control could not be clicked: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
   }
-  // The network request is captured after the click; wait for it before counting.
-  try {
-    await waitFor('cancel rpc captured', async () => {
-      const capturedRequests = await resolveRpcPostData(client).catch(() => rpcRequests)
-      const hit = countSubagentCancelRequests(capturedRequests.slice(cancelStartIndex), '')
-      return { ok: hit.cancelRequestCount >= 1, value: hit.cancelRequestCount }
-    }, 20_000, 250)
-  } catch { /* recorded below */ }
-  const requests = await resolveRpcPostData(client)
-  // Only requests captured from the confirm click onward belong to this cancel.
-  const cancelWindow = requests.slice(cancelStartIndex)
-  const captured = countSubagentCancelRequests(cancelWindow, '')
-  // The click names its run in the request body; that run is the target.
-  targetRunId = captured.runIds.length === 1 ? captured.runIds[0] : ''
-  siblingRunId = pairRunIds.find((runId) => runId !== targetRunId) ?? ''
-  const cancelFacts = countSubagentCancelRequests(cancelWindow, targetRunId)
-  if (targetRunId === '') reasons.push('the two-step confirm carried no single target runId')
+  if (targetRunId === '') reasons.push('the two-step confirm clicked a card without a bound data-run-id')
   if (targetRunId !== '' && !pairRunIds.includes(targetRunId)) {
     reasons.push(`the cancel targeted ${targetRunId}, which this scene did not dispatch`)
   }
-  if (cancelFacts.cancelRequestCount !== 1) reasons.push(`the two-step confirm sent ${String(cancelFacts.cancelRequestCount)} subagent.cancel requests (expected exactly 1)`)
-  if (cancelFacts.targetRunIdCount !== 1) reasons.push(`the target run received ${String(cancelFacts.targetRunIdCount)} cancel requests (expected exactly 1)`)
-  if (cancelFacts.otherRunIdCount !== 0) reasons.push(`${String(cancelFacts.otherRunIdCount)} cancel requests escaped to another runId`)
+  siblingRunId = targetRunId !== '' ? (pairRunIds.find((runId) => runId !== targetRunId) ?? '') : ''
 
   if (targetRunId !== '') {
     try {
@@ -2554,6 +3118,23 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
     }
   }
 
+  // Only inspect the cancel RPC window *after* both target stopped and sibling
+  // completed+settled so any delayed or leaked cancel RPCs remain inside the window.
+  try {
+    await waitFor('cancel rpc captured', async () => {
+      const capturedRequests = await resolveRpcPostData(client).catch(() => rpcRequests)
+      const hit = countSubagentCancelRequests(capturedRequests.slice(cancelStartIndex), targetRunId)
+      return { ok: hit.cancelRequestCount >= 1, value: hit.cancelRequestCount }
+    }, 20_000, 250)
+  } catch { /* recorded below */ }
+  const requests = await resolveRpcPostData(client)
+  const cancelWindow = requests.slice(cancelStartIndex)
+  const cancelFacts = countSubagentCancelRequests(cancelWindow, targetRunId)
+  if (cancelFacts.cancelRequestCount !== 1) reasons.push(`the two-step confirm sent ${String(cancelFacts.cancelRequestCount)} subagent.cancel requests (expected exactly 1)`)
+  if (cancelFacts.targetRunIdCount !== 1) reasons.push(`the target run received ${String(cancelFacts.targetRunIdCount)} cancel requests (expected exactly 1)`)
+  if (cancelFacts.otherRunIdCount !== 0) reasons.push(`${String(cancelFacts.otherRunIdCount)} cancel requests escaped to another runId`)
+  if (cancelFacts.runIds[0] !== targetRunId) reasons.push(`cancel RPC runId ${JSON.stringify(cancelFacts.runIds[0] ?? null)} does not match clicked targetRunId ${JSON.stringify(targetRunId)}`)
+
   // 5. One rendered card per Host run: every run this scene created has exactly one
   //    main-flow card (a re-dispatch by the parent model is its own run and its own
   //    card, so the counts must still match one-to-one). The rail drops a settled run
@@ -2581,6 +3162,24 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
   const renderedCards = after.main.filter((card) => card.label === SIBLING_RUN_LABEL)
   const newRuns = (afterSnapshot.runs ?? []).filter((run) => run.label === SIBLING_RUN_LABEL && !knownBefore.has(run.runId))
   const renderedDelta = renderedCards.length - siblingCardsBefore
+  const railCardCounts = {
+    target: targetRunId === '' ? 0 : windowCards.rail.filter((card) => card.runId === targetRunId).length,
+    sibling: siblingRunId === '' ? 0 : windowCards.rail.filter((card) => card.runId === siblingRunId).length,
+  }
+  const mainCardCounts = {
+    target: targetRunId === '' ? 0 : after.main.filter((card) => card.runId === targetRunId).length,
+    sibling: siblingRunId === '' ? 0 : after.main.filter((card) => card.runId === siblingRunId).length,
+  }
+  const perRunCardUnique = targetRunId !== ''
+    && siblingRunId !== ''
+    && windowPairCardUnique
+    && railCardCounts.target === 1
+    && railCardCounts.sibling === 1
+    && mainCardCounts.target === 1
+    && mainCardCounts.sibling === 1
+  if (!perRunCardUnique) {
+    reasons.push(`per-runId card uniqueness failed (main=${JSON.stringify(mainCardCounts)}, rail=${JSON.stringify(railCardCounts)}, windowUnique=${String(windowPairCardUnique)})`)
+  }
   const oneCardPerRun = pairRenderedOnce && renderedDelta === newRuns.length
   if (!oneCardPerRun) {
     reasons.push(`rendered cards do not match the Host run ledger: ${String(renderedDelta)} cards for ${String(newRuns.length)} runs`)
@@ -2589,7 +3188,7 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
   if (!todoCardsOk) {
     reasons.push(`the main flow rendered ${String(after.todoCards)} todo cards for ${String(expectedTodoCards ?? 'unknown')} writing turns`)
   }
-  const duplicateFree = oneCardPerRun && railRowsAtWindow === activeLabelRuns && todoCardsOk
+  const duplicateFree = oneCardPerRun && perRunCardUnique && railRowsAtWindow === activeLabelRuns && todoCardsOk
   if (!duplicateFree) {
     reasons.push(`duplicated or missing cards: railRows=${String(railRowsAtWindow)} liveRuns=${String(activeLabelRuns)} todoCards=${String(after.todoCards)}`)
   }
@@ -2608,6 +3207,7 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
       railCancellableRows: railWindow.cancellableRows,
       mainCards: cardsAtWindow,
       ledgerRuns: windowRuns.length,
+      windowPairCardUnique,
       phases: liveRuns.map((run) => run?.phase ?? null),
     },
     targetTerminal: targetTerminal === undefined
@@ -2626,8 +3226,9 @@ async function driveSingleCancelIsolation(client, stableSessionId) {
       : { phase: siblingFinal.phase, stopCause: siblingStopCause === '' ? null : siblingStopCause, childId: siblingChildId ?? null },
     siblingSettlementSeen,
     dismissedPendingInput: dismissedInput,
-    // Each run of the pair rendered exactly one main-flow card (`pairRenderedOnce`).
-    mainCardCounts: { target: pairRenderedOnce ? 1 : 0, sibling: pairRenderedOnce ? 1 : 0 },
+    mainCardCounts,
+    railCardCounts,
+    perRunCardUnique,
     absoluteMainCardCounts: { sibling: renderedCards.length, siblingBefore: siblingCardsBefore },
     runLedgerCounts: { sibling: newRuns.length },
     mainToolPanelCount: toolPanelBodies.length,
@@ -2791,11 +3392,32 @@ async function driveSwitchHistoryRestart(client) {
       log(`restart run attempt ${attempt} did not appear: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
   }
+  const flushPreRestartFailures = () => recordPartialCheckFailureBeforeBlocked(
+    'switch-history-restart',
+    reasons,
+    {
+      historySessionId,
+      ownedTaskCount: ownedTasks,
+      freshTabTaskCount,
+      freshTodoCardCount: freshTodoCards,
+      switchTaskCount,
+      previousTodoNotInFreshTab,
+      historyReloadTaskCount,
+      historyTodoCardCount,
+      postHistoryTurnTaskCount,
+      previousTurnTodoNotCarried,
+      connectionSamples: [],
+      reconnectBannerSeen: false,
+      restart: { attempted: false, asserted: false },
+    },
+  )
   if (restartRunId === undefined) {
+    flushPreRestartFailures()
     throw new BlockedError('no active run could be constructed for the Host restart', { attempts: 2 })
   }
   const hook = await client.evaluate(`typeof window.huaanworkAcceptance?.restartHost === 'function'`)
   if (hook !== true) {
+    flushPreRestartFailures()
     throw new BlockedError('window.huaanworkAcceptance.restartHost is unavailable; HUAANWORK_ACCEPTANCE_HOOKS=1 did not reach the renderer')
   }
   await screenshot(client, '12-before-host-restart.png')
@@ -2916,7 +3538,14 @@ async function run() {
   mkdirSync(sampleDir, { recursive: true })
   log(`isolated root ${tempRoot}`)
 
-  const prepared = prepareProfile({ homeDir, userDataDir, workspaceDir, models: models.settings })
+  legacyCatalogServer = await startLegacyCatalogServer()
+  const prepared = prepareProfile({
+    homeDir,
+    userDataDir,
+    workspaceDir,
+    models: models.settings,
+    legacyCatalogPort: legacyCatalogServer.port,
+  })
   await writeAuthState(prepared.profileDir)
   const seeded = seedAgentPackages(prepared.profileDir)
   makeSampleDocx(sampleDir)
@@ -2950,6 +3579,7 @@ async function run() {
       model: models.summary,
       guardMode: 'smart (written by this script; the production value is not copied)',
       seeded: Array.isArray(seeded?.seeded) ? seeded.seeded : [],
+      legacyCatalogPort: legacyCatalogServer.port,
       zstdRequired: true,
     },
     isolated: { homeDir, userDataDir, workspaceDir, sampleDir },
@@ -3002,7 +3632,7 @@ async function run() {
     // the Host surface a real exception, and that must not poison the earlier scenes.
     await newTaskTab(appCdp)
     // Mint the tab's workspace-session root before seeding the samples/fixme fixture.
-    await sendAndSettle(appCdp, `${MARKER}-WARM 回复「好」两个字即可。`, { label: 'warm-up' }).catch((cause) => {
+    await sendAndSettle(appCdp, `${MARKER}-DUAL-WARM 回复「好」两个字即可。`, { label: 'dual warm-up' }).catch((cause) => {
       log(`dual warm-up did not settle: ${cause instanceof Error ? cause.message : String(cause)}`)
     })
     seedSceneFiles()
@@ -3038,7 +3668,9 @@ async function run() {
       && failingIds[0] === 'dual-entry-system-skills'
       && dualReasons.length > 0
       && dualReasons.every((reason) => reason === MODEL_SKILL_BLOCKED_REASON)
-    if (onlyModelSkillBlocked) throw new BlockedError(blocked.cause, blocked.detail)
+    if (onlyModelSkillBlocked) {
+      throw new BlockedError(blocked.cause, { ...blocked.detail, onlyBlockedCheckId: 'dual-entry-system-skills' })
+    }
     facts.blocked = blocked
   }
   assertProgressSidebarAcceptanceFacts(facts)
@@ -3080,6 +3712,10 @@ async function shutdown() {
   if (shutdownDone) return
   shutdownDone = true
   try { appCdp?.close() } catch { /* best effort */ }
+  if (legacyCatalogServer !== undefined) {
+    try { await legacyCatalogServer.close() } catch { /* best effort */ }
+    legacyCatalogServer = undefined
+  }
   if (appProcess !== undefined && appProcess.exitCode === null && appProcess.signalCode === null) {
     try {
       if (process.platform === 'win32') {
@@ -3100,57 +3736,32 @@ async function shutdown() {
     await new Promise((resolveEnd) => { appLogFile.end(resolveEnd) })
   }
   // The isolated root holds the copied model credential, the per-run session
-  // logs and screenshots-in-progress; it never survives the run.
-  if (tempRoot !== undefined) {
-    if (process.env.PSB_DEBUG_KEEP_TEMP === '1') {
-      if (facts !== undefined) facts.isolatedCleanup = 'kept for debugging (PSB_DEBUG_KEEP_TEMP=1)'
-      log(`kept isolated root ${tempRoot} for debugging; remove it manually`)
-    } else {
-      try {
-        rmSync(tempRoot, { recursive: true, force: true })
-        if (facts !== undefined) facts.isolatedCleanup = 'removed'
-      } catch (error) {
-        if (facts !== undefined) facts.isolatedCleanup = `failed: ${error instanceof Error ? error.message : String(error)}`
-      }
-    }
+  // logs and screenshots-in-progress; it never survives the run. Fail closed
+  // if cleanup itself throws (Q4-I6).
+  lastCleanupResult = cleanupIsolatedRoot(tempRoot, facts)
+  if (!lastCleanupResult.ok) {
+    log(`FAILED isolated credential cleanup for ${String(tempRoot)}: ${String(lastCleanupResult.detail ?? 'unknown error')}`)
+  } else if (lastCleanupResult.kept) {
+    log(`kept isolated root ${String(tempRoot)} for debugging; remove it manually`)
   }
-  writeFileSync(join(options.outDir, 'walkthrough.log'), `${redactSecrets(driverLog.join('\n'), SECRETS)}\n`)
   persistFacts()
   log(`facts written to ${join(options.outDir, 'facts.json')}`)
+  writeFileSync(join(options.outDir, 'walkthrough.log'), `${redactSecrets(driverLog.join('\n'), SECRETS)}\n`)
 }
 
 const invokedPath = process.argv[1] === undefined ? undefined : pathToFileURL(resolve(process.argv[1])).href
 if (invokedPath === import.meta.url) {
   options = parseArguments(process.argv.slice(2))
   run()
-    .then(() => { process.exitCode = facts?.outcome === 'PASS' ? 0 : 1 })
     .catch(async (error) => {
-      if (error instanceof BlockedError) {
-        if (facts === undefined) {
-          facts = blockedFacts(error)
-        } else {
-          facts.outcome = 'BLOCKED'
-          facts.finishedAt = new Date().toISOString()
-          facts.blocked = { cause: error.message, detail: error.detail ?? {} }
-          facts.errors = [...(facts.errors ?? []), error.message]
-        }
+      const seedFacts = facts === undefined && error instanceof BlockedError ? blockedFacts(error) : facts
+      const resolved = resolveBlockedOrFailedOutcome(seedFacts, progress.checks, error, (value) => redactSecrets(value, SECRETS))
+      facts = resolved.facts
+      if (resolved.exitCode === 3) {
         log(`BLOCKED: ${error.message}`)
         persistFacts()
-        process.exitCode = 3
         return
       }
-      if (facts === undefined) {
-        facts = {
-          schemaVersion: 1,
-          outcome: 'FAIL',
-          startedAt: new Date().toISOString(),
-          errors: [],
-          screenshots,
-        }
-      }
-      facts.outcome = 'FAIL'
-      facts.finishedAt = new Date().toISOString()
-      facts.errors = [...(facts.errors ?? []), redactSecrets(String(error?.stack ?? error), SECRETS)]
       if (appCdp !== undefined) {
         try {
           await screenshot(appCdp, '99-failure.png')
@@ -3160,7 +3771,9 @@ if (invokedPath === import.meta.url) {
       }
       persistFacts()
       log(`FAILED: ${error instanceof Error ? error.message : String(error)}`)
-      process.exitCode = 1
     })
-    .finally(async () => { await shutdown() })
+    .finally(async () => {
+      await shutdown()
+      process.exitCode = resolveFinalExitCode(facts, lastCleanupResult)
+    })
 }

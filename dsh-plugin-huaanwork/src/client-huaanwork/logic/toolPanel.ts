@@ -331,6 +331,8 @@ export type ToolEntryView = {
   id: number;
   key: string;
   name: string;
+  callId?: string;
+  roundKey?: number;
   description: string;
   status: ToolEntryStatus;
   statusText: string;
@@ -410,6 +412,8 @@ function toolEntryView(id: number, card: ToolPanelCard, connectionLost: boolean)
     id,
     key: card.key,
     name: card.name,
+    ...(card.callId === undefined ? {} : { callId: card.callId }),
+    ...(card.roundKey === undefined ? {} : { roundKey: card.roundKey }),
     description: toolDescription(card.name),
     status,
     statusText: STATUS_TEXT[status],

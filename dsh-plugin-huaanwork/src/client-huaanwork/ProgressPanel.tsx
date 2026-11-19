@@ -50,7 +50,11 @@ export default function ProgressPanel(props: ProgressPanelProps): ReactElement {
   } = props;
 
   return (
-    <div className="panel-card progress-panel" data-connection={model.connection}>
+    <div
+      className="panel-card progress-panel"
+      data-connection={model.connection}
+      data-turn-anchor={model.currentTurnClientMessageId}
+    >
       {model.connection === "live" ? null : (
         <p
           className={`progress-connection is-${model.connection}`}
@@ -134,6 +138,7 @@ export default function ProgressPanel(props: ProgressPanelProps): ReactElement {
                 <div
                   key={run.runId}
                   className="subagent-run-card progress-subagent-card"
+                  data-run-id={run.runId}
                   data-phase={run.phase}
                   data-stale={!terminal && run.stale === true ? "true" : undefined}
                   data-frozen={!terminal && frozenAt !== undefined ? "true" : undefined}

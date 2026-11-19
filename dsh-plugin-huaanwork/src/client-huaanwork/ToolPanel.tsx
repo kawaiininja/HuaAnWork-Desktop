@@ -53,7 +53,12 @@ export default function ToolPanel({
             const expanded = expandedTools.has(tool.id);
             const detailId = `tool-detail${idScope}-${panel.anchorId}-${tool.id}`;
             return (
-              <div className="tool-panel-entry" key={tool.id}>
+              <div
+                className="tool-panel-entry"
+                key={tool.id}
+                data-call-id={tool.callId}
+                data-round-key={tool.roundKey}
+              >
                 <button
                   type="button"
                   className="tool-panel-entry-title"

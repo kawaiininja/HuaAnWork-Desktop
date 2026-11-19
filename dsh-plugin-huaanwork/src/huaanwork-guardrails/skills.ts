@@ -228,7 +228,7 @@ export function apply(ctx: Context): void {
   // `tools/execute` waterfall 终止回调 `dispatchToolBody` 里执行(:1609-1616 →
   // :1572-1600 → `tool.execute` :1589)。**pre-execute 里建立的 ALS 作用域到 body
   // 阶段已出栈,读不到技能类型** —— 唯一修法是把 kind 挂到 tools/execute。
-  type PendingSpawnSlot = { kind: SkillKind; token: symbol; agent?: object };
+  type PendingSpawnSlot = { kind: SkillKind; token: symbol; agent?: object; parentSessionId?: string };
   const spawnKind = new AsyncLocalStorage<SkillKind | undefined>();
   currentSpawnKindProbe = () => spawnKind.getStore();
   let pendingSpawn: PendingSpawnSlot | undefined;
@@ -274,6 +274,8 @@ export function apply(ctx: Context): void {
   // R1/R5：普通父会话的模型面已不可达 `subagent`；仍走嵌套派发的只剩 system-skill
   // 运行(Task 3)与包 lane 血缘(一期不独立建卡)，没有 Host runId 时都不误绑外层 run。
   const startRun = new AsyncLocalStorage<string | undefined>();
+  // 显式 `@agent`/`@slug`（或带 legacy 请求）由宿主直接启动，绝不消费系统技能兼容槽 `pendingSpawn`。
+  const startHostManaged = new AsyncLocalStorage<boolean>();
 
   ctx.skills.register(loadSkill("explore.md"));
   ctx.skills.register(loadSkill("test-fix.md"));
@@ -306,6 +308,7 @@ export function apply(ctx: Context): void {
       kind,
       token: Symbol(),
       ...(execution.agent === undefined ? {} : { agent: execution.agent }),
+      ...(sessionId === undefined ? {} : { parentSessionId: sessionId }),
     };
     slotByExecution.set(execution, slot);
     if (execution.agent !== undefined) {
@@ -361,14 +364,24 @@ export function apply(ctx: Context): void {
     }
   };
 
-  const consumePendingSpawn = (agent: Agent) => {
+  const consumePendingSpawn = (agent: Agent, explicitParentId?: string) => {
     const fromAls = spawnKind.getStore();
-    const kind = fromAls ?? pendingSpawn?.kind;
+    let kind = fromAls;
+    let consumedFallback = false;
+    if (kind === undefined && pendingSpawn !== undefined && startHostManaged.getStore() !== true) {
+      const expectedParent = pendingSpawn.parentSessionId ?? sessionIdOf(pendingSpawn.agent);
+      const actualParent =
+        explicitParentId ?? sessionIdOf(agent.session?.header?.parentSession) ?? startParent.getStore();
+      // 兼容槽只属于写入它的父会话：他会话、显式宿主派发或无父会话新建不得偷吃或清槽。
+      if (expectedParent === undefined || actualParent !== expectedParent) return;
+      kind = pendingSpawn.kind;
+      consumedFallback = true;
+    }
     if (!kind) return;
     if (pendingByAgent.has(agent)) return;
     applyKind(agent, kind);
-    // 只有无 ALS 覆盖的回落路径消费完单槽时清零。
-    if (fromAls === undefined) pendingSpawn = undefined;
+    // 只有无 ALS 覆盖的回落路径真正消费完单槽时才清零。
+    if (consumedFallback) pendingSpawn = undefined;
   };
 
   /** 租约释放/显式重挂:清掉该会话父代理的 pendingByAgent 与残留派发槽。 */
@@ -516,7 +529,7 @@ export function apply(ctx: Context): void {
       // present-as 识别,靠这里(及后续 tools/change)关闭创建期的 `skill` 泄漏窗口。
       refreshAgentRestrict(ctx as never, info.id);
     }
-    if (child) consumePendingSpawn(child);
+    if (child) consumePendingSpawn(child, parentId);
   }) as never);
 
   // 与 subagent/start 成对的结束事件(载荷 id 即子会话 id):子会话结束后从登记表摘掉,
@@ -572,7 +585,12 @@ export function apply(ctx: Context): void {
             throw new Error("智能体人设为空");
           }
         }
-        const run: any = await startParent.run(parentFromCall, () => original(...args));
+        const packageApplies =
+          pkg !== undefined && pkg !== null && parentFromCall !== undefined && pkg.parentSessionId === parentFromCall;
+        const hostManaged = legacyApplies || packageApplies;
+        const run: any = await startHostManaged.run(hostManaged, () =>
+          startParent.run(parentFromCall, () => original(...args)),
+        );
         let packageApplied = false;
         if (legacyApplies && current && run?.localAgent) {
           const tools = run.localAgent.ctx?.get?.("tools");
@@ -584,7 +602,7 @@ export function apply(ctx: Context): void {
         // Package requests are keyed to the session that dispatched them: a subagent
         // started by any other session while this turn is in flight keeps its own tools
         // and attachments instead of inheriting this package's runtime.
-        if (pkg && run?.localAgent && parentFromCall !== undefined && pkg.parentSessionId === parentFromCall) {
+        if (packageApplies && pkg && run?.localAgent) {
           packageApplied = true;
           // header.id 是真实子会话 id;某些 provider 只填 agent/session id,故再回落一次。
           const childSessionId =
@@ -634,8 +652,8 @@ export function apply(ctx: Context): void {
           tools?.restrict?.({ allow });
           ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
         }
-        if (run?.localAgent) {
-          consumePendingSpawn(run.localAgent);
+        if (run?.localAgent && !hostManaged) {
+          consumePendingSpawn(run.localAgent, parentFromCall);
         }
         if (run && typeof run.result?.then === "function") {
           await run.result;
@@ -799,8 +817,11 @@ export function apply(ctx: Context): void {
       }
 
       try {
-        const run = await startRun.run(effectiveRunId, () =>
-          startParent.run(parentFromCall, () => originalActivation(...args)),
+        const hostManaged = hostRunId !== undefined || legacy !== undefined;
+        const run = await startHostManaged.run(hostManaged, () =>
+          startRun.run(effectiveRunId, () =>
+            startParent.run(parentFromCall, () => originalActivation(...args)),
+          ),
         );
         // fail closed:激活的父会话与登记表里的 run parent 必须是同一个。三方 parent
         // 不一致时先释放本次 activation,再拒绝启动;后续 restrict/refresh/bindChild
@@ -948,8 +969,8 @@ export function apply(ctx: Context): void {
             ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
           }
         }
-        if (run?.localAgent) {
-          consumePendingSpawn(run.localAgent);
+        if (run?.localAgent && !hostManaged) {
+          consumePendingSpawn(run.localAgent, parentFromCall);
         }
         return run;
       } catch (error) {

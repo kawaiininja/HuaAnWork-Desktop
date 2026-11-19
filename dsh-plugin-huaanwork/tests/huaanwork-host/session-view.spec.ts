@@ -322,6 +322,30 @@ describe('detailRecords', () => {
     expect(detailRecords(log)).toEqual([])
   })
 
+  test('clears the current turn anchor when a subsequent ordinary user message lacks an id or text', () => {
+    const todoArgs = { todos: [{ content: '步骤一', status: 'in_progress' }] }
+    const log = sessionLog([
+      HEADER,
+      userMessage('回合一', 1, T0 + 3),
+      toolCall('c1', 'todo_write', todoArgs, 2, T0 + 4),
+      // 普通用户消息缺 id:后续 todo_write 不得继承回合一的 m1 锚点。
+      { type: 'user/message', seq: 3, time: T0 + 5, data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '回合二无id' }] } },
+      toolCall('c2', 'todo_write', todoArgs, 4, T0 + 6),
+      userMessage('回合三', 5, T0 + 7),
+      // 普通用户消息缺文本:同样开启新回合且清空旧锚点。
+      { type: 'user/message', seq: 6, time: T0 + 8, data: { role: 'user', source: { kind: 'user' }, content: [] } },
+      toolCall('c3', 'todo_write', todoArgs, 7, T0 + 9),
+    ])
+    const todos = detailRecords(log).filter(
+      (record): record is Extract<typeof record, { kind: 'tool-call' }> =>
+        record.kind === 'tool-call' && record.name === 'todo_write',
+    )
+    expect(todos).toHaveLength(3)
+    expect(todos[0]?.clientMessageId).toBe('m1')
+    expect(todos[1]?.clientMessageId).toBeUndefined()
+    expect(todos[2]?.clientMessageId).toBeUndefined()
+  })
+
   test('keeps the shell command on tool-call records and never invents an exit code', () => {
     const log = sessionLog([
       HEADER,

@@ -524,8 +524,12 @@ export async function sendToAgent(
       // 显式系统技能回合:上游 systemPrompt.assemble() 在 agent/pre-step 建立锚点前即
       // 采集 Step 1 工具列表,租约与附件必须在 followup 之前挂好;acquireExplicit 会先
       // 同步失效同一父 agent 的旧 pendingByAgent 缓存(QR-I2)。
+      // 普通用户回合则主动释放上一回合因 active goal 在 idle 时保留的租约与 `subagent` 附件
+      // (不传 clearGoal,保留 activeGoalSessions 本身,避免普通回合继承旧租约)。
       if (systemSkillKind !== undefined) {
         acquireExplicitSystemSkillLease(ctx, sessionId, systemSkillKind)
+      } else {
+        releaseSystemSkillLease(ctx, sessionId)
       }
       agent.followup({
         id: followupId,

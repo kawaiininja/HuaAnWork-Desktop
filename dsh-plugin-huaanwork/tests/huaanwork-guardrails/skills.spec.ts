@@ -2386,3 +2386,74 @@ test("restricting a child that is already unloading does not poison the next act
   await harness.invokeSubagent(harness.parent, child);
   harness.emit("tools/change", {});
 });
+
+test("Q4-I2: an awaiting explore pre-execute slot in session A never narrows a concurrent explicit @agent in session B", async () => {
+  const harness = createHarness();
+  const store = harness.ctx.huaanworkSystemSkillLeases as ReturnType<typeof createSystemSkillLeaseStore>;
+  assert.equal(store.acquireExplicit("main", "explore"), true);
+
+  // A 已在 pre-execute 写入 pendingSpawn，但被下游（如 recorder.settled()）异步挂起，尚未进入 tools/execute。
+  const downstreamWait = deferred<{ kind: string }>();
+  let holdA = true;
+  harness.onPreExecute((_execution, next) => {
+    if (!holdA) return next?.();
+    holdA = false;
+    return downstreamWait.promise;
+  });
+  const aPreExecute = harness.preExecute(harness.parent, "subagent", { prompt: "explore A" });
+
+  // B 并发在另一会话派发允许写入的显式 legacy `@agent`（携带真实符号标记）。
+  const bParentTools = createTools(DEFAULT_TOOL_NAMES);
+  const bParent = agentWithTools("session-b", bParentTools);
+  harness.addAgent(bParent);
+  const bChildTools = createTools(DEFAULT_TOOL_NAMES);
+  const bChild = agentWithTools("child-b", bChildTools);
+  harness.addAgent(bChild);
+  const bRunId = harness.runs.begin({ parentSessionId: "session-b", kind: "legacy", label: "@writer" });
+  const bSpec = {
+    provider: "spawn",
+    label: "@writer",
+    childId: "child-b",
+    request: { prompt: [{ type: "text", text: "write B" }], parent: bParent },
+    delivery: "parent",
+    [HUAANWORK_LEGACY_AGENT_REQUEST]: { name: "writer", allow: ["read", "write"], persona: "writer" },
+    [HUAANWORK_SUBAGENT_RUN_ID]: bRunId,
+  };
+  const bActivation = (harness.ctx.subagents!.startActivation as (spec: unknown) => Promise<unknown>)(bSpec);
+  harness.releaseActivation({ childId: "child-b", localAgent: bChild });
+  await bActivation;
+
+  // B 不得被 A 的 explore 槽误收窄为只读或挂上 huaanwork-explore 守卫。
+  assert.deepEqual(bChildTools.visible.map((schema) => schema.name).sort(), ["read", "write"]);
+  assert.equal(harness.guardReason(bChildTools, "write"), undefined);
+
+  // 无父会话的新建 agent/created 同样不能偷吃或清掉 A 的兼容槽。
+  const topTools = createTools(DEFAULT_TOOL_NAMES);
+  const topAgent = agentWithTools("top-new", topTools);
+  harness.emit("agent/created", { agent: topAgent });
+  assert.ok(topTools.visible.some((schema) => schema.name === "write"));
+
+  // A 恢复并进入 tools/execute 后，仍能正常按 explore 收窄自己的子代理。
+  downstreamWait.resolve({ kind: "allow" });
+  const aPre = await aPreExecute;
+  assert.equal(aPre.decision.kind, "allow");
+  const aChildTools = createTools(DEFAULT_TOOL_NAMES);
+  const aChild = agentWithTools("child-a", aChildTools);
+  harness.addAgent(aChild);
+  await harness.runExecute(aPre.execution, async () => {
+    const call = (harness.ctx.subagents!.startActivation as (spec: unknown) => Promise<unknown>)({
+      provider: "spawn",
+      label: "explore",
+      childId: "child-a",
+      request: { prompt: [{ type: "text", text: "explore A" }], parent: harness.parent },
+      delivery: "parent",
+    });
+    harness.releaseActivation({ childId: "child-a", localAgent: aChild });
+    return call;
+  });
+  assert.deepEqual(
+    aChildTools.visible.map((schema) => schema.name).sort(),
+    ["glob", "grep", "read", "read_file"].sort(),
+  );
+  assert.equal(harness.guardReason(aChildTools, "write"), "huaanwork-explore");
+});

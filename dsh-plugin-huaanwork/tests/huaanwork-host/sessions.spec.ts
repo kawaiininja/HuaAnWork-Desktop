@@ -3943,6 +3943,35 @@ describe('系统技能回合租约(显式 /explore、/test-fix)', () => {
     ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'complete')
   })
 
+  test('an ordinary sendToAgent releases a retained active-goal system skill lease before followup', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'ordinary-after-goal-session'
+    const { ctx, attachments, observed } = makeSkillLeaseCtx(sessionId)
+    const invalidated: string[] = []
+    ctx.huaanworkSystemSkillLeases.onInvalidate((id) => invalidated.push(id))
+
+    // 上一回合处于 active goal + 显式 /explore,轮间 idle 按契约保留租约与 subagent 附件。
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'active')
+    await sendToAgent(ctx, routeCtx, { text: '先探索', skill: 'explore', sessionId })
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    expect(attachments.sessionAgentTools.get(sessionId)?.has('subagent')).toBe(true)
+    invalidated.length = 0
+
+    // 用户新发普通回合(无 systemSkillKind):必须在 followup 前释放旧租约、摘掉 subagent 并失效缓存。
+    await sendToAgent(ctx, routeCtx, { text: '直接回答就好', sessionId })
+    expect(observed).toEqual({ kind: undefined, attached: false })
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBeUndefined()
+    expect(attachments.sessionAgentTools.has(sessionId)).toBe(false)
+    expect(invalidated).toEqual([sessionId])
+
+    // activeGoalSessions 本身未被误清:若后续合法重取系统技能,轮间 idle 仍保持租约。
+    expect(ctx.huaanworkSystemSkillLeases.acquireExplicit(sessionId, 'explore')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'complete')
+  })
+
   test('an unmanaged child is rejected before any anchor registration or attachment', async () => {
     const routeCtx = makeRouteCtx(freshTmp())
     const sessionId = 'legacy-child-session'
@@ -3950,9 +3979,13 @@ describe('系统技能回合租约(显式 /explore、/test-fix)', () => {
     registerChildSession('legacy-parent', sessionId)
 
     await expect(
-      sendToAgent(ctx, routeCtx, { text: '看看', skill: 'explore', sessionId }),
+      sendToAgent(ctx, routeCtx, { text: '看看', skill: 'explore', sessionId, clientMessageId: 'unmanaged-1' }),
     ).rejects.toThrow('unmanaged-child-system-skill')
     expect(anchors.current(sessionId)).toBeUndefined()
+    // 不仅没有生效 anchor,连未消费 pending 也未登记(后续观察同 id 只能降级为 unknown)。
+    expect(
+      anchors.notePreStep(sessionId, [{ role: 'user', id: 'unmanaged-1', source: { kind: 'user' } }], 't1')?.origin,
+    ).toBe('unknown')
     expect(attachments.sessionAgentTools.has(sessionId)).toBe(false)
     expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBeUndefined()
   })
