@@ -35,7 +35,7 @@ Markdown 预览、Markdown 全屏复用、下载另存为与跨会话切换已�
 | 项目 | 命令 | 结果 |
 | --- | --- | --- |
 | 构建 | `corepack yarn workspace dsh-plugin-huaanwork build` | 成功，`lib/` 输出重建，含 D1 修复 |
-| 根门禁 | `corepack yarn check` | 本轮未运行（按任务约束由控制者重跑）；修复提交在上一轮 `EXIT=0` 之后新增代码与测试，本文件不声称修复提交已过门禁 |
+| 根门禁 | `corepack yarn check` | **EXIT=0**（D1 修复提交 `e5945270` 之后由控制者重跑，日志 `.superpowers/sdd/2026-11-15-task-result-artifacts/final-check-3.log`）；上一轮 `final-check-2.log` 也是 EXIT=0 |
 | Electron 探针 | `corepack yarn workspace dsh-plugin-huaanwork test:artifact-sandbox` | 本轮未重跑；历史两轮均 `Test timed out in 30000ms`，状态保持 **NOT PASSED** |
 
 ## 2. 实例与夹具（实际执行）
@@ -208,7 +208,7 @@ HTML 隔离观察。
 ## 7. 结论
 
 - 构建：`corepack yarn workspace dsh-plugin-huaanwork build` 成功。
-- 门禁：本轮未重跑，不声称修复提交已过门禁。
+- 门禁：D1 修复提交之后 `corepack yarn check` 实跑 **EXIT=0**（`final-check-3.log`）。
 - 探针：NOT PASSED（未重跑；历史超时仍在）。
 - §12.2：HTML 预览、全屏、刷新与交互在真实应用中复核通过；隔离只记录应用内可观测行为；
   工具生成仍 BLOCKED；第 7 步脚本运行真实通过、新旧协议展示为夹具通过。
