@@ -36,6 +36,49 @@ describe("ArtifactPreview", () => {
     expect(frame.getAttribute("src")).toBe("about:blank");
   });
 
+  it("arms the empty frame when its about:blank load never reaches the component", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const originalAdd = EventTarget.prototype.addEventListener;
+    // 与真实应用等价：about:blank 先装载完成，React 挂上的合成 load 监听再也收不到事件。
+    EventTarget.prototype.addEventListener = function (
+      this: EventTarget,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions,
+    ): void {
+      if (type === "load" && this instanceof HTMLIFrameElement) return;
+      originalAdd.call(this, type, listener, options);
+    } as typeof EventTarget.prototype.addEventListener;
+    const prepareFrame = vi.fn<(frameName: string) => Promise<void>>(() => Promise.resolve());
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          createElement(ArtifactHtmlView, {
+            content: "<p>自动武装</p>",
+            title: "结果",
+            prepareFrame,
+          }),
+        ),
+      );
+      const frame = container.querySelector("iframe")!;
+      // 不派发 load 事件：登记必须由 frame 就绪本身触发。
+      expect(prepareFrame).toHaveBeenCalledWith(frame.name);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(frame.getAttribute("src")).toBeNull();
+      expect(frame.getAttribute("srcdoc")).toContain("自动武装");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      EventTarget.prototype.addEventListener = originalAdd;
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("releases HTML only after the native frame guard acknowledges preparation", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");

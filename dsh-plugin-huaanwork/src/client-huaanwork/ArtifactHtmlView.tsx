@@ -3,9 +3,11 @@
  * 带 CSP 的 srcDoc 释放模型 HTML；准备失败只显示错误与重试，绝不提前插入正文。
  *
  * 每次内容替换或重试都重建 frame 名称；旧准备 Promise 归来不得武装新 frame，
- * srcDoc 自身的 load 也不得再次请求登记。沙箱只开 allow-scripts，不增加其他 token。
+ * srcDoc 自身的 load 也不得再次请求登记。登记不依赖空 frame 的 load 事件：该事件可能
+ * 在 React 挂上监听前就已触发，因此 frame 一就绪就主动请求，load 只作兜底。
+ * 沙箱只开 allow-scripts，不增加其他 token。
  */
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const ARTIFACT_CSP = [
   "default-src 'none'",
@@ -46,13 +48,14 @@ export default function ArtifactHtmlView({ content, title, prepareFrame }: Artif
   currentFrameName.current = frameName;
   const [preparedName, setPreparedName] = useState<string | null>(null);
   const [failure, setFailure] = useState<{ frameName: string; message: string } | null>(null);
-  /** 每个 frame 只在空文档 load 时请求一次登记；srcDoc 的 load 不再重复请求。 */
+  /** 每个 frame 只在空文档就绪时请求一次登记；srcDoc 的 load 不再重复请求。 */
   const requested = useRef<string | null>(null);
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
   const armed = preparedName === frameName;
   const error = failure?.frameName === frameName ? failure.message : null;
   const secured = useMemo(() => withArtifactContentSecurity(content), [content]);
 
-  const handleLoad = (): void => {
+  const requestPrepare = (): void => {
     if (requested.current === frameName) return;
     requested.current = frameName;
     if (!prepareFrame) {
@@ -76,6 +79,18 @@ export default function ArtifactHtmlView({ content, title, prepareFrame }: Artif
     }, fail);
   };
 
+  const handleLoad = (): void => requestPrepare();
+
+  useEffect(() => {
+    // about:blank 可能在 React 挂上合成 load 监听之前就已装载完成，load 不再重放。
+    // 只要子 frame 已在（contentWindow 存在；沙箱 frame 的 contentDocument 对父页面不可见），
+    // 就走与 onLoad 相同的登记路径；onLoad 只兜底更晚装载的 frame。
+    const frame = frameRef.current;
+    if (frame !== null && (frame.contentWindow !== null || frame.contentDocument !== null)) {
+      requestPrepare();
+    }
+  }, [frameName]);
+
   const retry = (): void => setAttempt((value) => value + 1);
 
   return (
@@ -90,6 +105,7 @@ export default function ArtifactHtmlView({ content, title, prepareFrame }: Artif
       ) : null}
       <iframe
         key={frameName}
+        ref={frameRef}
         name={frameName}
         title={title}
         className="artifact-frame"
