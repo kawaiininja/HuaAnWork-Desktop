@@ -81,6 +81,9 @@ export type RpcRequest = {
     | "artifact.get"
     | "artifact.content"
     | "artifact.list"
+    | "artifact.openFullscreen"
+    | "artifact.download"
+    | "artifact.prepareFrame"
     | "subagent.list"
     | "subagent.cancel";
   params?: unknown;

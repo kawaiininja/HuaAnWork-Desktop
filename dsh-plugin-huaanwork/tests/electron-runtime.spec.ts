@@ -7,6 +7,7 @@ import { COMPATIBILITY_CHROME_CHANNEL } from '../src/compatibility-chrome-contra
 import { desktopTrayLabel } from '../src/tray-locale.ts'
 import { DESKTOP_FRAME_HEIGHT } from '../src/window-chrome.ts'
 import { DESKTOP_PRODUCT_NAME } from '../src/product-identity.ts'
+import { artifactWindowTargetFromSearch } from '../src/artifact-window.ts'
 
 const terminal = vi.hoisted(() => ({ open: vi.fn() }))
 const diagnostics = vi.hoisted(() => ({ export: vi.fn() }))
@@ -41,6 +42,28 @@ const childProcess = vi.hoisted(() => {
     reset() { listeners.clear() },
     spawn: vi.fn(() => child),
   }
+})
+
+const artifactFs = vi.hoisted(() => {
+  const temporaryContents = new Map<string, Buffer>()
+  const writtenTargets = new Map<string, Buffer>()
+  const writeFile = vi.fn(async (path: string, data: Uint8Array) => {
+    temporaryContents.set(path, Buffer.from(data))
+  })
+  const rename = vi.fn(async (temporary: string, target: string) => {
+    const bytes = temporaryContents.get(temporary)
+    if (!bytes) throw new Error('temporary artifact bytes missing')
+    writtenTargets.set(target, bytes)
+    temporaryContents.delete(temporary)
+  })
+  const rm = vi.fn(async (path: string) => {
+    temporaryContents.delete(path)
+  })
+  const reset = (): void => {
+    temporaryContents.clear()
+    writtenTargets.clear()
+  }
+  return { temporaryContents, writtenTargets, writeFile, rename, rm, reset }
 })
 
 const MAIN_WINDOW_STATE_PATH = '/tmp/dsh-desktop-user-data/main-window-state.json'
@@ -79,6 +102,14 @@ vi.mock('node:child_process', async (importOriginal) => ({
   spawn: childProcess.spawn,
 }))
 
+// 原子另存为只经过 node:fs/promises;真实文件系统不被触碰。
+vi.mock('node:fs/promises', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:fs/promises')>(),
+  writeFile: artifactFs.writeFile,
+  rename: artifactFs.rename,
+  rm: artifactFs.rm,
+}))
+
 const electron = vi.hoisted(() => {
   const browserWindowOptions: unknown[] = []
   const browserWindowThemeSources: string[] = []
@@ -86,8 +117,12 @@ const electron = vi.hoisted(() => {
   const browserWindowOn = vi.fn()
   const browserWindowOff = vi.fn()
   const loadURL = vi.fn(async (_url: string) => {})
+  const fullscreenLoadURL = vi.fn(async (_url: string) => {})
   const webRequest = { onBeforeSendHeaders: vi.fn() }
+  const fullscreenWebRequest = { onBeforeSendHeaders: vi.fn() }
   const sessionFetch = vi.fn()
+  const fullscreenSessionFetch = vi.fn()
+  const browserWindowConstructor = vi.fn()
   const applicationMenuTemplates: unknown[][] = []
   const menuTemplates: unknown[][] = []
   const notifications: Notification[] = []
@@ -96,7 +131,10 @@ const electron = vi.hoisted(() => {
   const dialog = {
     showErrorBox: vi.fn(),
     showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] as string[] })),
-    showSaveDialog: vi.fn(async () => ({ canceled: true, filePath: undefined as string | undefined })),
+    showSaveDialog: vi.fn(async (..._args: unknown[]) => ({
+      canceled: true,
+      filePath: undefined as string | undefined,
+    })),
     showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })),
   }
   const appIcon = {
@@ -140,6 +178,24 @@ const electron = vi.hoisted(() => {
     mainFrame: { url: 'http://127.0.0.1:41234/' },
     loadURL,
   }
+  const fullscreenContents = {
+    id: 201,
+    session: {
+      fetch: fullscreenSessionFetch,
+      webRequest: fullscreenWebRequest,
+      setPermissionCheckHandler: vi.fn(),
+      setPermissionRequestHandler: vi.fn(),
+      on: vi.fn(),
+      removeListener: vi.fn(),
+    },
+    on: vi.fn(),
+    off: vi.fn(),
+    isDestroyed: vi.fn(() => false),
+    setWindowOpenHandler: vi.fn(),
+    focus: vi.fn(),
+    mainFrame: { url: 'about:blank' },
+    loadURL: fullscreenLoadURL,
+  }
   const chromeWebContents = {
     reloadIgnoringCache: vi.fn(),
     on: vi.fn(), off: vi.fn(),
@@ -167,15 +223,20 @@ const electron = vi.hoisted(() => {
   }
 
   class BrowserWindow {
-    readonly webContents: typeof webContents | typeof chromeWebContents
+    readonly webContents: typeof webContents | typeof chromeWebContents | typeof fullscreenContents
     readonly contentView = { addChildView: vi.fn(), removeChildView: vi.fn() }
     readonly getContentSize = vi.fn(() => [1280, 840])
     readonly loadFile = vi.fn(async () => {})
     accessibleTitle = ''
 
     constructor(options: unknown) {
-      this.webContents = (options as { webPreferences?: { partition?: string } }).webPreferences?.partition === 'dsh-desktop-compatibility-host'
-        ? chromeWebContents : webContents
+      const partition = (options as { webPreferences?: { partition?: string } }).webPreferences?.partition
+      this.webContents = partition === 'dsh-desktop-compatibility-host'
+        ? chromeWebContents
+        : partition?.startsWith('huaanwork-artifact-')
+          ? fullscreenContents
+          : webContents
+      browserWindowConstructor(options)
       browserWindowOptions.push(options)
       browserWindowThemeSources.push(nativeTheme.themeSource)
       browserWindows.push(this)
@@ -263,8 +324,13 @@ const electron = vi.hoisted(() => {
     browserWindowOptions,
     browserWindowThemeSources,
     browserWindows,
+    browserWindowConstructor,
     browserWindowOff,
     browserWindowOn,
+    fullscreenContents,
+    fullscreenLoadURL,
+    fullscreenSessionFetch,
+    fullscreenWebRequest,
     loadURL,
     sessionFetch,
     dialog,
@@ -390,6 +456,33 @@ const spec: DesktopShellSpec = {
   requestModeChange: vi.fn(async () => {}),
 }
 
+/** Artifact 窗口调用时序:loadURL、鉴权与 header listener 注册/移除。 */
+function callOrder(contents: typeof electron.fullscreenContents): string[] {
+  const events: Array<{ at: number; name: string }> = []
+  const callMock = (mock: unknown) => mock as {
+    mock: { calls: unknown[][]; invocationCallOrder: number[] }
+  }
+  const loadURL = callMock(contents.loadURL)
+  loadURL.mock.calls.forEach((call, index) => {
+    events.push({
+      at: loadURL.mock.invocationCallOrder[index]!,
+      name: call[0] === 'about:blank' ? 'loadBlank' : 'loadArtifact',
+    })
+  })
+  const webRequest = callMock(contents.session.webRequest.onBeforeSendHeaders)
+  webRequest.mock.calls.forEach((call, index) => {
+    events.push({
+      at: webRequest.mock.invocationCallOrder[index]!,
+      name: call[0] === null ? 'removeRendererAccessHeader' : 'installRendererAccessHeader',
+    })
+  })
+  const fetch = callMock(contents.session.fetch)
+  fetch.mock.invocationCallOrder.forEach(at => {
+    events.push({ at, name: 'authenticateRendererSession' })
+  })
+  return events.sort((left, right) => left.at - right.at).map(event => event.name)
+}
+
 describe('Electron desktop runtime', () => {
   beforeEach(() => {
     clearMainWindowState()
@@ -420,6 +513,11 @@ describe('Electron desktop runtime', () => {
     electron.loadURL.mockResolvedValue(undefined)
     electron.sessionFetch.mockReset()
     electron.sessionFetch.mockResolvedValue(new Response(null, { status: 200 }))
+    electron.fullscreenLoadURL.mockReset()
+    electron.fullscreenLoadURL.mockResolvedValue(undefined)
+    electron.fullscreenSessionFetch.mockReset()
+    electron.fullscreenSessionFetch.mockResolvedValue(new Response(null, { status: 200 }))
+    artifactFs.reset()
     electron.app.getPreferredSystemLanguages.mockReturnValue(['en-US'])
     electron.dialog.showMessageBox.mockResolvedValue({ response: 0, checkboxChecked: false })
     electron.dialog.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] })
@@ -3354,5 +3452,278 @@ describe('desktop artifact request adapter', () => {
     expect(electron.powerSaveBlocker.stop).toHaveBeenCalledTimes(1)
     const id = electron.powerSaveBlocker.start.mock.results[0]?.value as number
     expect(electron.powerSaveBlocker.isStarted(id)).toBe(false)
+  })
+
+  describe('artifact native capability', () => {
+    const showSaveDialogMock = electron.dialog.showSaveDialog
+
+    beforeEach(() => {
+      clearMainWindowState()
+      vi.clearAllMocks()
+      artifactFs.reset()
+      electron.browserWindowOptions.length = 0
+      electron.browserWindows.length = 0
+      electron.loadURL.mockReset()
+      electron.loadURL.mockResolvedValue(undefined)
+      electron.sessionFetch.mockReset()
+      electron.sessionFetch.mockResolvedValue(new Response(null, { status: 200 }))
+      electron.fullscreenLoadURL.mockReset()
+      electron.fullscreenLoadURL.mockResolvedValue(undefined)
+      electron.fullscreenSessionFetch.mockReset()
+      electron.fullscreenSessionFetch.mockResolvedValue(new Response(null, { status: 200 }))
+      electron.dialog.showSaveDialog.mockResolvedValue({ canceled: true, filePath: undefined })
+    })
+
+    afterEach(() => {
+      clearMainWindowState()
+      vi.restoreAllMocks()
+    })
+
+    async function scheduledRuntime(): Promise<{
+      runtime: import('../src/electron-runtime.ts').ElectronDesktopRuntime
+    }> {
+      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+      const runtime = new ElectronDesktopRuntime(async () => {})
+      runtime.schedule(spec)
+      return { runtime }
+    }
+
+    async function runtimeWithArtifactWindow(): Promise<{
+      runtime: import('../src/electron-runtime.ts').ElectronDesktopRuntime
+      fullscreenWindow: InstanceType<typeof electron.BrowserWindow>
+    }> {
+      const { runtime } = await scheduledRuntime()
+      await runtime.openArtifactFullscreen({ sessionId: 'session-1', artifactId: 'artifact-1' })
+      return { runtime, fullscreenWindow: electron.browserWindows[0]! }
+    }
+
+    it('creates one fullscreen artifact window without node or business preload', async () => {
+      await runtimeWithArtifactWindow()
+
+      expect(electron.browserWindowConstructor).toHaveBeenCalledTimes(1)
+      expect(electron.browserWindowOptions[0]).toMatchObject({
+        fullscreen: true,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true,
+          webSecurity: true,
+          partition: expect.stringMatching(/^huaanwork-artifact-[0-9a-f-]{36}$/),
+        },
+      })
+      expect((electron.browserWindowOptions[0] as { webPreferences: { preload?: unknown } })
+        .webPreferences.preload).toBeUndefined()
+    })
+
+    it('does not create a file when save is cancelled', async () => {
+      const { runtime } = await scheduledRuntime()
+      showSaveDialogMock.mockResolvedValue({ canceled: true, filePath: undefined })
+
+      await expect(runtime.saveArtifact({ downloadName: '报告.md', contentBase64: '', surface: 'main' }))
+        .resolves.toEqual({ saved: false })
+      expect(artifactFs.writeFile).not.toHaveBeenCalled()
+    })
+
+    it('parents the save dialog to the requesting window, not the main window', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+      const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+      const runtime = new ElectronDesktopRuntime(async () => {})
+      runtime.schedule(spec)
+      await runtime.mountScheduled()
+      const mainWindow = electron.browserWindows[0]!
+      await runtime.openArtifactFullscreen({ sessionId: 'session-1', artifactId: 'artifact-1' })
+      const fullscreenWindow = electron.browserWindows[1]!
+      showSaveDialogMock.mockResolvedValue({ canceled: true, filePath: undefined })
+
+      await runtime.saveArtifact({ downloadName: '报告.md', contentBase64: '', surface: 'artifact' })
+      expect(showSaveDialogMock).toHaveBeenCalledWith(
+        fullscreenWindow,
+        expect.objectContaining({ defaultPath: '报告.md' }),
+      )
+      expect(showSaveDialogMock).not.toHaveBeenCalledWith(mainWindow, expect.anything())
+    })
+
+    it('reports artifact-window-unavailable instead of falling back to the main window', async () => {
+      const { runtime } = await scheduledRuntime()
+
+      await expect(runtime.saveArtifact({ downloadName: '报告.md', contentBase64: '', surface: 'artifact' }))
+        .rejects.toThrow('artifact-window-unavailable')
+      expect(showSaveDialogMock).not.toHaveBeenCalled()
+    })
+
+    it('passes the host-owned download name to defaultPath without native re-sanitizing', async () => {
+      const { runtime } = await scheduledRuntime()
+      let capturedDefaultPath: string | undefined
+      showSaveDialogMock.mockImplementation((...args: unknown[]) => {
+        const opts = (typeof args[0] === 'object' && args[0] !== null && 'defaultPath' in args[0]
+          ? args[0]
+          : args[1]) as { defaultPath?: string } | undefined
+        capturedDefaultPath = opts?.defaultPath
+        return Promise.resolve({ canceled: true, filePath: undefined })
+      })
+
+      await runtime.saveArtifact({ downloadName: 'a:b.txt', contentBase64: '', surface: 'main' })
+      expect(capturedDefaultPath).toBe('a:b.txt')
+    })
+
+    it('writes the exact host artifact bytes through save-as', async () => {
+      const { runtime } = await scheduledRuntime()
+      const content = Buffer.from('\ufeff# 标题\r\n正文 😀 中文\r\n', 'utf8')
+      showSaveDialogMock.mockResolvedValue({ canceled: false, filePath: '/tmp/artifact-target.html' })
+
+      await expect(runtime.saveArtifact({
+        downloadName: '结果.html',
+        contentBase64: content.toString('base64'),
+        surface: 'main',
+      })).resolves.toEqual({ saved: true, path: '/tmp/artifact-target.html' })
+      expect(artifactFs.writtenTargets.get('/tmp/artifact-target.html')).toEqual(content)
+    })
+
+    it('removes the temporary file and rethrows when the atomic write fails', async () => {
+      const { runtime } = await scheduledRuntime()
+      showSaveDialogMock.mockResolvedValue({ canceled: false, filePath: '/tmp/artifact-target.html' })
+      artifactFs.rename.mockRejectedValueOnce(new Error('disk full'))
+
+      await expect(runtime.saveArtifact({ downloadName: '结果.html', contentBase64: 'eA==', surface: 'main' }))
+        .rejects.toThrow('disk full')
+      expect(artifactFs.rm).toHaveBeenCalledWith(
+        expect.stringMatching(/^\/tmp\/artifact-target\.html\.huaanwork-.*\.tmp$/),
+        { force: true },
+      )
+      expect(artifactFs.writtenTargets.has('/tmp/artifact-target.html')).toBe(false)
+    })
+
+    it('reloads the singleton with a complete target and renews only its own access listener', async () => {
+      const { runtime, fullscreenWindow } = await runtimeWithArtifactWindow()
+      await runtime.openArtifactFullscreen({ sessionId: 'session-2', artifactId: 'artifact-2' })
+
+      expect(electron.browserWindowConstructor).toHaveBeenCalledTimes(1)
+      const businessLoads = electron.fullscreenContents.loadURL.mock.calls.filter(([url]) => url !== 'about:blank')
+      expect(businessLoads).toHaveLength(2)
+      expect(fullscreenWindow.focus).toHaveBeenCalledTimes(2)
+      expect(artifactWindowTargetFromSearch(new URL(businessLoads[1]![0]).search))
+        .toEqual({ sessionId: 'session-2', artifactId: 'artifact-2' })
+      expect(callOrder(electron.fullscreenContents)).toEqual([
+        'loadBlank', 'authenticateRendererSession', 'installRendererAccessHeader', 'loadArtifact',
+        'loadBlank', 'removeRendererAccessHeader', 'authenticateRendererSession', 'installRendererAccessHeader', 'loadArtifact',
+      ])
+      // 主窗口自己的 header listener 从未被撤下或重建。
+      expect(electron.webRequest.onBeforeSendHeaders).not.toHaveBeenCalled()
+      expect(electron.sessionFetch).not.toHaveBeenCalled()
+    })
+
+    it('authenticates and tags requests with the artifact WebContents, not the main window', async () => {
+      await runtimeWithArtifactWindow()
+
+      expect(electron.fullscreenSessionFetch).toHaveBeenCalledWith(spec.authenticationUrl, {
+        method: 'GET',
+        credentials: 'include',
+        redirect: 'follow',
+        cache: 'no-store',
+        headers: { [spec.rendererAccessHeader.name]: spec.rendererAccessHeader.value },
+      })
+      expect(electron.sessionFetch).not.toHaveBeenCalled()
+      const listener = electron.fullscreenWebRequest.onBeforeSendHeaders.mock.calls
+        .find(([, candidate]) => typeof candidate === 'function')?.[1] as (
+          details: Record<string, unknown>,
+          callback: (response: { requestHeaders?: Record<string, string> }) => void,
+        ) => void
+      const frameRequest = (webContentsId: number) => ({
+        id: 0,
+        url: 'http://127.0.0.1:43120/huaanwork/status',
+        method: 'GET',
+        webContentsId,
+        webContents: { id: webContentsId },
+        frame: null,
+        resourceType: 'mainFrame',
+        referrer: '',
+        timestamp: 0,
+        requestHeaders: { accept: '*/*' },
+      })
+      const artifactResult = vi.fn()
+      listener(frameRequest(electron.fullscreenContents.id), artifactResult)
+      expect(artifactResult).toHaveBeenCalledWith({
+        requestHeaders: expect.objectContaining({
+          [spec.rendererAccessHeader.name]: spec.rendererAccessHeader.value,
+        }),
+      })
+      const mainResult = vi.fn()
+      listener(frameRequest(electron.webContents.id), mainResult)
+      expect(mainResult).toHaveBeenCalledWith({ requestHeaders: { accept: '*/*' } })
+    })
+
+    it('serializes concurrent opens onto the singleton and keeps the last target', async () => {
+      const { runtime } = await scheduledRuntime()
+
+      await Promise.all([
+        runtime.openArtifactFullscreen({ sessionId: 'session-1', artifactId: 'artifact-1' }),
+        runtime.openArtifactFullscreen({ sessionId: 'session-2', artifactId: 'artifact-2' }),
+      ])
+
+      expect(electron.browserWindowConstructor).toHaveBeenCalledTimes(1)
+      const loads = electron.fullscreenContents.loadURL.mock.calls.filter(([url]) => url !== 'about:blank')
+      expect(loads).toHaveLength(2)
+      expect(artifactWindowTargetFromSearch(new URL(loads.at(-1)![0]).search))
+        .toEqual({ sessionId: 'session-2', artifactId: 'artifact-2' })
+    })
+
+    it('releases the artifact window and its listener when opening fails', async () => {
+      const { runtime } = await scheduledRuntime()
+      electron.fullscreenSessionFetch.mockResolvedValueOnce(new Response(null, { status: 500 }))
+
+      await expect(runtime.openArtifactFullscreen({ sessionId: 'session-1', artifactId: 'artifact-1' }))
+        .rejects.toThrow('browser authentication failed with HTTP 500')
+      expect(electron.browserWindows[0]?.destroy).toHaveBeenCalled()
+
+      electron.fullscreenSessionFetch.mockResolvedValue(new Response(null, { status: 200 }))
+      await expect(runtime.prepareArtifactFrame({
+        surface: 'artifact',
+        frameName: 'huaanwork-artifact-11111111-1111-4111-8111-111111111111',
+      })).rejects.toThrow('artifact-window-unavailable')
+    })
+
+    it('keeps new artifacts named 结果.md out of the legacy will-download branch', async () => {
+      const legacyWillDownloadHandler = vi.fn()
+      const blobDownloadCreateElement = vi.fn()
+      const { runtime } = await scheduledRuntime()
+      showSaveDialogMock.mockResolvedValue({ canceled: true, filePath: undefined })
+
+      await runtime.saveArtifact({ downloadName: '结果.md', contentBase64: '', surface: 'main' })
+      expect(showSaveDialogMock).toHaveBeenCalledTimes(1)
+      expect(legacyWillDownloadHandler).not.toHaveBeenCalled()
+      expect(blobDownloadCreateElement).not.toHaveBeenCalled()
+      expect(electron.webContents.executeJavaScript).not.toHaveBeenCalled()
+    })
+
+    it('prepares artifact frames only through the surface-selected WebContents', async () => {
+      const { runtime } = await runtimeWithArtifactWindow()
+      const frameName = 'huaanwork-artifact-22222222-2222-4222-8222-222222222222'
+      const frame: Record<string, unknown> = {
+        frameTreeNodeId: 11,
+        name: frameName,
+        url: 'about:blank',
+        detached: false,
+        parent: null,
+      }
+      const mainFrame: Record<string, unknown> = {
+        frameTreeNodeId: 1,
+        name: '',
+        url: spec.url,
+        detached: false,
+        parent: null,
+      }
+      mainFrame.framesInSubtree = [mainFrame, frame]
+      frame.parent = mainFrame
+      Object.assign(electron.fullscreenContents as unknown as { mainFrame: unknown }, { mainFrame })
+
+      await runtime.prepareArtifactFrame({ surface: 'artifact', frameName })
+      expect(electron.fullscreenContents.on).toHaveBeenCalledWith('will-frame-navigate', expect.any(Function))
+
+      // 主窗口尚未挂载 generation 时不得改用全屏 surface 兜底。
+      await expect(runtime.prepareArtifactFrame({
+        surface: 'main',
+        frameName: 'huaanwork-artifact-33333333-3333-4333-8333-333333333333',
+      })).rejects.toThrow('artifact-window-unavailable')
+    })
   })
 })

@@ -42,6 +42,7 @@ import {
   type MainWindowStateStore,
 } from './main-window-state.ts'
 import { attachmentSavePath } from './client-huaanwork/logic/attachmentDownload.ts'
+import { installArtifactFrameGuard, type ArtifactFrameGuard } from './artifact-frame-guard.ts'
 
 const MIN_ZOOM_LEVEL = -4
 const MAX_ZOOM_LEVEL = 4
@@ -69,7 +70,7 @@ function pairedWebSocketOrigin(origin: string): string {
  * Keeping the exchange separate preserves the Desktop query markers across
  * the upstream redirect and keeps the launch token out of renderer history.
  */
-async function authenticateRendererSession(
+export async function authenticateRendererSession(
   renderer: WebContents,
   spec: DesktopShellSpec,
 ): Promise<void> {
@@ -136,7 +137,7 @@ function requestComesFromRendererOrigin(
  * traffic. Query markers are intentionally insufficient because subresources,
  * API requests, and upgrades do not retain the main-frame query string.
  */
-function installRendererAccessHeader(
+export function installRendererAccessHeader(
   renderer: WebContents,
   origin: string,
   header: DesktopRendererAccessHeader,
@@ -228,6 +229,7 @@ export class ElectronShellGeneration {
   private readonly rendererRecovery: DesktopRendererRecovery
   private rendererRecoveryPending = false
   private readonly surfaceWatchdog: RendererSurfaceWatchdog
+  private artifactFrameGuard: ArtifactFrameGuard | undefined
   private unresponsiveRenderer = false
   private replacementExit: ReturnType<typeof setTimeout> | undefined
   private recoveryContentLoaded = false
@@ -663,6 +665,8 @@ export class ElectronShellGeneration {
       }
       removeRendererAccessHeader?.()
       removeRendererAccessHeader = undefined
+      this.artifactFrameGuard?.dispose()
+      this.artifactFrameGuard = undefined
       tray?.off('click', show)
       if (stateWriteTimer !== undefined) {
         clearTimeout(stateWriteTimer)
@@ -672,6 +676,8 @@ export class ElectronShellGeneration {
 
     try {
       await this.compatibilityShell?.load()
+      // 主窗口承载结果预览时共用 Task 6 的 frame 防护(自己的 will-frame-navigate listener)。
+      this.artifactFrameGuard = installArtifactFrameGuard(renderer)
       await authenticateRendererSession(renderer, spec)
       removeRendererAccessHeader = installRendererAccessHeader(
         renderer,
@@ -717,6 +723,23 @@ export class ElectronShellGeneration {
     revealApplication(window, this.options.platform.platform)
     this.prepareFullscreenReveal?.()
     if (this.rendererRecovery.exhausted) void this.offerRendererRecovery()
+  }
+
+  /** 当前主窗口;未挂载或已释放时缺席。用于另存为对话框的父窗口。 */
+  mainWindow(): BrowserWindow | undefined {
+    const window = this.window
+    return window === undefined || window.isDestroyed() ? undefined : window
+  }
+
+  /**
+   * 在主窗口承载的页面里登记一个刚创建的空 Artifact frame。
+   * @param frameName - 客户端生成的 `huaanwork-artifact-<uuid>` 名称。
+   * @throws 未挂载或 frame 不能唯一对应时(`artifact-frame-unavailable`)。
+   */
+  registerArtifactFrame(frameName: string): void {
+    const guard = this.artifactFrameGuard
+    if (this.released || guard === undefined) throw new Error('artifact-window-unavailable')
+    guard.registerEmptyFrame(frameName)
   }
 
   /**
@@ -934,6 +957,8 @@ export class ElectronShellGeneration {
 
     this.cleanupListeners?.()
     this.cleanupListeners = undefined
+    this.artifactFrameGuard?.dispose()
+    this.artifactFrameGuard = undefined
     this.compatibilityShell?.dispose()
     this.compatibilityShell = undefined
     this.renderer = undefined

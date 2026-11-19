@@ -12,6 +12,8 @@ import type {
   RpcEvent,
   RunSummary,
 } from '../client-huaanwork/rpc-types.ts'
+import type { ArtifactNativeCapability } from '../runtime.ts'
+import { isArtifactFrameName } from '../artifact-window.ts'
 import { readCachedCatalogPackages, refreshCatalogPackageCache, type AgentPackageSummary } from './agent-package/catalog-client.ts'
 import { getArtifact, listArtifacts, readArtifactContent } from './artifacts-host.ts'
 import {
@@ -160,6 +162,11 @@ export interface RouteContext {
    * runtimeCtx 查一次,仍没有则 503。
    */
   desktopPnpm?: PluginPnpmCapability
+  /**
+   * 原生 Artifact 能力(全屏窗口/另存为/frame 准备)。index.ts 从
+   * ctx.desktopRuntime 窄化注入;缺席时相关路由报 artifact-native-unavailable。
+   */
+  artifactNative?: ArtifactNativeCapability
 }
 
 export type RouteHandler = (req: RouteRequest, ctx: RouteContext) => Promise<unknown>
@@ -318,6 +325,33 @@ function artifactRef(req: RouteRequest, method: string): { sessionId: string; ar
   const artifactId = queryParam(req, 'artifactId')
   if (!artifactId) throw new RouteError(400, 'bad-request', `${method} requires params.artifactId`)
   return { sessionId, artifactId }
+}
+
+/** POST body 版 ArtifactRef:路径与任意文件路径都不接受,只认双 ID。 */
+function artifactRefBody(req: RouteRequest, method: string): { sessionId: string; artifactId: string } {
+  const sessionId = bodyParam(req.body, 'sessionId')
+  if (!sessionId) throw new RouteError(400, 'bad-request', `${method} requires body.sessionId`)
+  const artifactId = bodyParam(req.body, 'artifactId')
+  if (!artifactId) throw new RouteError(400, 'bad-request', `${method} requires body.artifactId`)
+  return { sessionId, artifactId }
+}
+
+/** 原生 surface 只能由声明式调用方显式选择;不做回落猜测。 */
+function artifactSurfaceBody(req: RouteRequest, method: string): 'main' | 'artifact' {
+  const surface = bodyParam(req.body, 'surface')
+  if (surface !== 'main' && surface !== 'artifact') {
+    throw new RouteError(400, 'bad-request', `${method} requires body.surface 'main' or 'artifact'`)
+  }
+  return surface
+}
+
+/** 能力缺失是装配问题(非 Electron 装配):503,且不回落主窗口或 Blob 下载。 */
+function requireArtifactNative(ctx: RouteContext, method: string): ArtifactNativeCapability {
+  const capability = ctx.artifactNative
+  if (capability === undefined) {
+    throw new RouteError(503, 'artifact-native-unavailable', `${method} requires the native artifact capability`)
+  }
+  return capability
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,6 +1754,55 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const sessionId = artifactSessionId(req, 'artifact.list')
       // 排序由 artifacts-host 的 listArtifacts 负责,路由不再重排。
       return { artifacts: await listArtifacts(ctx.profileDir, sessionId) }
+    }),
+  },
+  // artifact(Task 7):声明式原生能力。三者都先按双 ID 校验当前 Profile 归属;
+  // 开窗传完整 ArtifactRef,下载只传宿主读出的原字节与 summary.downloadName,
+  // frame 准备只传 surface/frameName(绝不接受 renderer 自报的数字 frame ID)。
+  {
+    method: 'artifact.openFullscreen',
+    http: 'POST',
+    path: '/huaanwork/artifact/openFullscreen',
+    handler: storeRoute(async (req, ctx) => {
+      const target = artifactRefBody(req, 'artifact.openFullscreen')
+      const native = requireArtifactNative(ctx, 'artifact.openFullscreen')
+      await getArtifact(ctx.profileDir, target.sessionId, target.artifactId)
+      await native.openArtifactFullscreen(target)
+      return { opened: true }
+    }),
+  },
+  {
+    method: 'artifact.download',
+    http: 'POST',
+    path: '/huaanwork/artifact/download',
+    handler: storeRoute(async (req, ctx) => {
+      const target = artifactRefBody(req, 'artifact.download')
+      const surface = artifactSurfaceBody(req, 'artifact.download')
+      const native = requireArtifactNative(ctx, 'artifact.download')
+      const artifact = await getArtifact(ctx.profileDir, target.sessionId, target.artifactId)
+      const content = await readArtifactContent(ctx.profileDir, target.sessionId, target.artifactId)
+      return await native.saveArtifact({
+        downloadName: artifact.downloadName,
+        contentBase64: content.toString('base64'),
+        surface,
+      })
+    }),
+  },
+  {
+    method: 'artifact.prepareFrame',
+    http: 'POST',
+    path: '/huaanwork/artifact/prepareFrame',
+    handler: storeRoute(async (req, ctx) => {
+      const target = artifactRefBody(req, 'artifact.prepareFrame')
+      const surface = artifactSurfaceBody(req, 'artifact.prepareFrame')
+      const frameName = bodyParam(req.body, 'frameName')
+      if (!isArtifactFrameName(frameName)) {
+        throw new RouteError(400, 'bad-request', 'artifact.prepareFrame requires body.frameName')
+      }
+      const native = requireArtifactNative(ctx, 'artifact.prepareFrame')
+      await getArtifact(ctx.profileDir, target.sessionId, target.artifactId)
+      await native.prepareArtifactFrame({ surface, frameName })
+      return { prepared: true }
     }),
   },
 ]

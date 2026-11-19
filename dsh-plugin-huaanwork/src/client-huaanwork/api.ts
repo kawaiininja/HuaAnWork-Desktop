@@ -7,10 +7,12 @@ const REQUEST_TIMEOUT_MS = 180_000 // 平移旧 sidecar.rs:102 的 RPC 超时
 /** 这些调用要等模型回合结束，不能用 180 秒把还在生成的会话标成失败。 */
 const LONG_RUNNING_METHODS = new Set(['session.send', 'session.resume'])
 const LONG_REQUEST_TIMEOUT_MS = 30 * 60_000
+/** 等待用户在系统另存为对话框中决定;不能由 180 秒超时抢先判失败。 */
+const INTERACTIVE_METHODS = new Set(['artifact.download'])
 
 const DIRECTORY_PICKER_PATH = '/_dsh/desktop/pick-directory'
 
-// —— 80 方法 → route 映射(与 huaanwork-host/routes.ts 的 ROUTE_TABLE 互为唯一事实源)——
+// —— 83 方法 → route 映射(与 huaanwork-host/routes.ts 的 ROUTE_TABLE 互为唯一事实源)——
 // Task 4 的 GET route 均不取 query 参数,故 path 为常量;写类 route body 透传 params。
 // Task 10 起 GET 类 route 定义 query contract:params 对象的键值编码为 query string
 // (undefined 值跳过;空对象 → 无 query,path 不变)。服务端 routes.ts 同名参数直读。
@@ -148,6 +150,11 @@ export const ROUTES: Record<string, RouteDef> = {
   'artifact.get': get('/huaanwork/artifact/get', objectQuery),
   'artifact.content': get('/huaanwork/artifact/content', objectQuery),
   'artifact.list': get('/huaanwork/artifact/list', objectQuery),
+  // Task 7:声明式原生能力;body 分别透传 ArtifactRef、ArtifactRef+surface 与
+  // ArtifactRef+surface/frameName,不接受任意文件路径。
+  'artifact.openFullscreen': post('/huaanwork/artifact/openFullscreen'),
+  'artifact.download': post('/huaanwork/artifact/download'),
+  'artifact.prepareFrame': post('/huaanwork/artifact/prepareFrame'),
 }
 
 interface ErrorEnvelope { error?: { code?: string; message?: string } }
@@ -185,7 +192,7 @@ export async function rpcCall<T>(method: string, params?: unknown): Promise<T> {
     const queryString = route.query ? route.query(params) : ''
     const init: RequestInit = {
       method: route.http,
-      signal: AbortSignal.timeout(timeoutMs),
+      ...(INTERACTIVE_METHODS.has(method) ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
     }
     if (route.body) {
       init.headers = { 'content-type': 'application/json' }

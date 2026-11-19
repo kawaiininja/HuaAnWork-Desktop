@@ -263,13 +263,13 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'agent task runs in an independent session with an automation-fire envelope',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:535',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:883',
   },
   {
     file: 'automations-host.test.ts',
     title: 'merged taskShape injects the previous successful output truncated to 4 KB',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:535',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:883',
   },
   {
     file: 'automations-host.test.ts',

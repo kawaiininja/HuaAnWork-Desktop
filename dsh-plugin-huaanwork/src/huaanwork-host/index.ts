@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { ConfirmedRestartRuntime } from '../host-runtime-bridge.ts'
+import { narrowArtifactNativeCapability, type ConfirmedRestartRuntime } from '../host-runtime-bridge.ts'
 import { sweepLegacyChatAutoSessions } from './automation-sweep.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
@@ -157,6 +157,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     }
     return runtime.requestConfirmedRestart()
   })
+  // Artifact 原生能力同样是窄接口:三个方法齐备才注入;测试桩/第三方 Host 缺席时
+  // 路由明确报 artifact-native-unavailable,而不是在调用点抛裸 TypeError。
+  const artifactNative = narrowArtifactNativeCapability(ctx.desktopRuntime)
+  if (artifactNative !== undefined) routeCtx.artifactNative = artifactNative
   // 共享回合锚点:holders 注入实例,这里挂 pre-step 写锚点与 session/disposed 清理。
   installTurnAnchorHooks(ctx)
   // result_present 的会话附件切换:claim 早于 prompt assembly,通知处理器必须同步完成

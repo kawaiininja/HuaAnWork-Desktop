@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { DesktopRendererAccessHeader } from './desktop-browser-access.ts'
+import type { ArtifactRef } from './client-huaanwork/rpc-types.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
 import type { DesktopReleaseChannel, UpdateCheckResult, UpdateRequest } from './update-checker.ts'
 import type { DesktopInstallationId } from './desktop-installation-id.ts'
@@ -133,6 +134,25 @@ export interface DesktopUpdateAdapter {
   ): Promise<void>
   /** Present a native status notification without blocking the Host tree. */
   notify(notification: DesktopNotification): void
+}
+
+/**
+ * 任务结果 Artifact 的窄原生能力(Host 经 RPC 声明式调用)。
+ *
+ * 独立于 {@link DesktopRuntime}:既有测试桩无需实现,由 huaanwork-host 检查三个
+ * 方法后注入 RouteContext;生产 Electron 装配恒提供。
+ */
+export interface ArtifactNativeCapability {
+  /** 在无业务 preload 的全屏窗口打开当前目标的 Artifact 页面。 */
+  openArtifactFullscreen(target: ArtifactRef): Promise<void>
+  /** 把宿主读出的原字节交给系统另存为,返回用户取消或最终路径。 */
+  saveArtifact(input: {
+    downloadName: string
+    contentBase64: string
+    surface: 'main' | 'artifact'
+  }): Promise<{ saved: false } | { saved: true; path: string }>
+  /** 在 surface 对应的真实 WebContents 里登记刚创建的空 Artifact frame。 */
+  prepareArtifactFrame(input: { surface: 'main' | 'artifact'; frameName: string }): Promise<void>
 }
 
 /** Profile identity needed to open the packaged DSH command environment. */

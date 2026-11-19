@@ -2,6 +2,7 @@
 
 import {
   app,
+  BrowserWindow,
   dialog,
   nativeTheme,
   net,
@@ -9,7 +10,10 @@ import {
   powerSaveBlocker,
   shell,
 } from 'electron'
+import type { WebContents } from 'electron'
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { rename, rm, writeFile } from 'node:fs/promises'
 import { RemoteControlOffer, remoteControlOfferCopy } from './remote-control-offer.ts'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -18,12 +22,19 @@ import { fileURLToPath } from 'node:url'
 import { desktopTerminalStateDirectory, openDesktopTerminal } from './desktop-terminal.ts'
 import { showDesktopMessageBox } from './desktop-dialog-window.ts'
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
-import { ElectronShellGeneration } from './electron-shell-generation.ts'
+import {
+  authenticateRendererSession,
+  ElectronShellGeneration,
+  installRendererAccessHeader,
+} from './electron-shell-generation.ts'
+import { installArtifactFrameGuard, type ArtifactFrameGuard } from './artifact-frame-guard.ts'
+import { artifactWindowOptions } from './artifact-window.ts'
 import { isPlatformLoginDestination, type DesktopPlatformLoginRequest } from './platform-login.ts'
 import { PLATFORM_LOGIN_TITLE, platformLoginUrl } from './platform-login-window.ts'
 import type { DesktopOpenWorkspaceDelivery } from './launch-workspace-contract.ts'
 import { electronPlatformStrategy, type ElectronPlatformStrategy } from './electron-platform.ts'
 import type {
+  ArtifactNativeCapability,
   DesktopNotification,
   DesktopLocale,
   DesktopPlatform,
@@ -36,6 +47,7 @@ import type {
   DesktopTrayItemRegistration,
   DesktopUpdateAdapter,
 } from './runtime.ts'
+import type { ArtifactRef } from './client-huaanwork/rpc-types.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
 import {
   DesktopRendererHealthGate,
@@ -179,7 +191,7 @@ export function requestDesktopArtifact(url: string, init: RequestInit): Promise<
 }
 
 /** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
-export class ElectronDesktopRuntime implements DesktopRuntime {
+export class ElectronDesktopRuntime implements DesktopRuntime, ArtifactNativeCapability {
   setupOnboarding?: import('./setup-onboarding-bridge.ts').DesktopOnboardingBridge
   readonly platform: DesktopPlatform
   private readonly platformStrategy: ElectronPlatformStrategy
@@ -209,6 +221,12 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private keepAwakeBlockerId: number | undefined
   private hostStoppedRecovery: Promise<void> | undefined
   private remoteOffer: RemoteControlOffer | undefined
+  /** 单例全屏 Artifact 窗口;不存在时 Artifact surface 报 artifact-window-unavailable。 */
+  private artifactWindow: BrowserWindow | undefined
+  private artifactFrameGuard: ArtifactFrameGuard | undefined
+  private removeArtifactAccessHeader: (() => void) | undefined
+  /** 打开请求在实例内串行;不复用其他窗口的 listener 或模块级状态。 */
+  private artifactOpenTask: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly restart: (target?: 'recovery' | 'safe-mode') => Promise<void>,
@@ -333,6 +351,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     }
     this.scheduled = spec
     generation.adoptSpec(spec)
+    // Host handover 后旧的 Artifact 窗口属于上一代 Shell;按同一释放路径关闭。
+    this.releaseArtifactWindow()
     this.remoteOffer = this.createRemoteControlOffer(spec)
     if (this.platform !== 'linux') nativeTheme.themeSource = spec.readThemeSource()
     this.rebuildTrayMenu()
@@ -354,6 +374,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         try {
           this.profileCreateWindow?.close()
           this.profileCreateWindow = undefined
+          this.releaseArtifactWindow()
           await this.generation?.release()
         } finally {
           this.generation = undefined
@@ -792,8 +813,170 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** @inheritdoc */
+  async openArtifactFullscreen(target: ArtifactRef): Promise<void> {
+    // 同一实例内串行:失败不阻塞后续请求。
+    const task = this.artifactOpenTask.then(
+      () => this.openArtifactFullscreenNow(target),
+      () => this.openArtifactFullscreenNow(target),
+    )
+    this.artifactOpenTask = task.then(() => undefined, () => undefined)
+    await task
+  }
+
+  private async openArtifactFullscreenNow(target: ArtifactRef): Promise<void> {
+    const spec = this.scheduled
+    if (spec === undefined) throw new Error('artifact-window-unavailable')
+    const origin = new URL(spec.url).origin
+    const partition = `huaanwork-artifact-${randomUUID()}`
+    let window = this.artifactWindow
+    if (window === undefined || window.isDestroyed()) {
+      this.artifactWindow = undefined
+      window = new BrowserWindow(artifactWindowOptions(spec, target, partition))
+      this.artifactWindow = window
+      this.artifactFrameGuard = installArtifactFrameGuard(window.webContents)
+      this.configureArtifactWindow(window, origin)
+      window.on('closed', () => {
+        // 用户关闭也走同一幂等释放路径;主窗口 listener 不受影响。
+        this.releaseArtifactWindow()
+      })
+    }
+    const contents: WebContents = window.webContents
+    try {
+      // about:blank 不需要服务端鉴权:先撤下旧内容,再替换本窗口自己的 header listener。
+      await contents.loadURL('about:blank')
+      const removePrevious = this.removeArtifactAccessHeader
+      this.removeArtifactAccessHeader = undefined
+      removePrevious?.()
+      await authenticateRendererSession(contents, spec)
+      this.removeArtifactAccessHeader = installRendererAccessHeader(
+        contents,
+        origin,
+        spec.rendererAccessHeader,
+      )
+      await contents.loadURL(artifactWindowOptions(spec, target, partition).url)
+      window.focus()
+    } catch (error) {
+      this.releaseArtifactWindow()
+      throw error
+    }
+  }
+
+  /** 与主窗口相同的顶层同源导航约束与安全外链策略;不创建第二个应用窗口。 */
+  private configureArtifactWindow(window: BrowserWindow, origin: string): void {
+    const contents = window.webContents
+    const sameOrigin = (url: string): boolean => {
+      try {
+        return new URL(url).origin === origin
+      } catch {
+        return false
+      }
+    }
+    contents.on('will-navigate', (event: Electron.Event, url: string) => {
+      if (!sameOrigin(url)) event.preventDefault()
+    })
+    contents.on('will-redirect', (
+      event: Electron.Event,
+      url: string,
+      _isInPlace: boolean,
+      isMainFrame: boolean,
+    ) => {
+      if (isMainFrame && !sameOrigin(url)) event.preventDefault()
+    })
+    contents.setWindowOpenHandler(({ url }) => {
+      try {
+        const target = new URL(url)
+        if (target.protocol === 'https:' || target.protocol === 'http:' || target.protocol === 'mailto:') {
+          void shell.openExternal(target.href).catch((cause: unknown) => {
+            this.logError(`dsh-plugin-desktop: failed to open external link: ${cause instanceof Error ? cause.message : String(cause)}`)
+          })
+        }
+      } catch {
+        // A malformed target is denied by the same result.
+      }
+      return { action: 'deny' }
+    })
+  }
+
+  /**
+   * 关闭/移交/退出共用的幂等释放:撤下本窗口的 header listener、frame 防护与窗口。
+   * 只触碰 Artifact 窗口自身;主窗口的 listener 与 RPC 保持有效。
+   */
+  private releaseArtifactWindow(): void {
+    const window = this.artifactWindow
+    this.artifactWindow = undefined
+    const guard = this.artifactFrameGuard
+    this.artifactFrameGuard = undefined
+    const removeAccessHeader = this.removeArtifactAccessHeader
+    this.removeArtifactAccessHeader = undefined
+    // session 级 listener 需要显式撤下;frame 防护随销毁的 WebContents 一起消失。
+    removeAccessHeader?.()
+    if (window === undefined || window.isDestroyed()) return
+    guard?.dispose()
+    window.destroy()
+  }
+
+  /** @inheritdoc */
+  async prepareArtifactFrame(input: { surface: 'main' | 'artifact'; frameName: string }): Promise<void> {
+    if (input.surface === 'artifact') {
+      const window = this.artifactWindow
+      const guard = this.artifactFrameGuard
+      if (window === undefined || window.isDestroyed() || guard === undefined) {
+        throw new Error('artifact-window-unavailable')
+      }
+      guard.registerEmptyFrame(input.frameName)
+      return
+    }
+    const generation = this.generation
+    if (generation === undefined) throw new Error('artifact-window-unavailable')
+    generation.registerArtifactFrame(input.frameName)
+  }
+
+  /** @inheritdoc */
+  async saveArtifact(input: {
+    downloadName: string
+    contentBase64: string
+    surface: 'main' | 'artifact'
+  }): Promise<{ saved: false } | { saved: true; path: string }> {
+    const owner = input.surface === 'artifact' ? this.artifactWindow : this.mainArtifactOwner()
+    if (input.surface === 'artifact' && (owner === undefined || owner.isDestroyed())) {
+      throw new Error('artifact-window-unavailable')
+    }
+    const target = await this.showArtifactSaveDialog(
+      owner !== undefined && !owner.isDestroyed() ? owner : undefined,
+      { defaultPath: input.downloadName },
+    )
+    if (target.canceled || !target.filePath) return { saved: false }
+    const content = Buffer.from(input.contentBase64, 'base64')
+    const temporary = `${target.filePath}.huaanwork-${randomUUID()}.tmp`
+    try {
+      await writeFile(temporary, content, { flag: 'wx' })
+      await rename(temporary, target.filePath)
+      return { saved: true, path: target.filePath }
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined)
+      throw error
+    }
+  }
+
+  /** 主窗口 renderer 的保存对话框挂主窗口;未挂载时退回无 parent 的系统对话框。 */
+  private mainArtifactOwner(): BrowserWindow | undefined {
+    const window = this.generation?.mainWindow()
+    return window === undefined || window.isDestroyed() ? undefined : window
+  }
+
+  private async showArtifactSaveDialog(
+    owner: BrowserWindow | undefined,
+    options: Electron.SaveDialogOptions,
+  ): Promise<Electron.SaveDialogReturnValue> {
+    return owner === undefined
+      ? await dialog.showSaveDialog(options)
+      : await dialog.showSaveDialog(owner, options)
+  }
+
+  /** @inheritdoc */
   prepareToQuit(): void {
     this.quitting = true
+    this.releaseArtifactWindow()
     this.generation?.stopRendererRecovery()
     this.generation?.closePlatformLogin()
     this.stopRendererBootMonitoring()

@@ -1,5 +1,15 @@
 /** Native capability adapters; frontend HTTP and WebSocket connections are unchanged. */
-import type { DesktopLocale, DesktopRuntime, DesktopShellSpec, DesktopTrayItem, DesktopTrayItemRegistration, DesktopUpdateAdapter } from './runtime.ts'
+import type {
+  ArtifactNativeCapability,
+  DesktopLocale,
+  DesktopRuntime,
+  DesktopShellSpec,
+  DesktopTrayItem,
+  DesktopTrayItemRegistration,
+  DesktopUpdateAdapter,
+} from './runtime.ts'
+import type { ArtifactRef } from './client-huaanwork/rpc-types.ts'
+import { isArtifactFrameName } from './artifact-window.ts'
 import { HostRpc } from './host-rpc.ts'
 import { parseDesktopPlatformLoginRequest } from './platform-login.ts'
 
@@ -48,7 +58,10 @@ export function runtimeSnapshot(runtime: DesktopRuntime): RuntimeSnapshot {
 }
 
 /** Keep functions in their owning process and send snapshots plus opaque callback IDs. */
-export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): ConfirmedRestartRuntime & KeepAwakeRuntime {
+export function createHostRuntime(
+  rpc: HostRpc,
+  snapshot: RuntimeSnapshot,
+): ConfirmedRestartRuntime & KeepAwakeRuntime & ArtifactNativeCapability {
   let sequence = 0
   let locale = snapshot.locale
   const calls = new Set<Promise<unknown>>()
@@ -59,7 +72,8 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Conf
   const shellSpecs = new Map<string, DesktopShellSpec>()
   const send = <T = void>(method: string, args: unknown[] = [], signal?: AbortSignal): Promise<T> => {
     const interactive = ['update:confirmDownload', 'update:showManualCheckResult', 'update:downloadAndOpen',
-      'native:pickDirectory', 'native:exportDiagnostics', 'native:requestConfirmedRestart'].includes(method)
+      'native:pickDirectory', 'native:exportDiagnostics', 'native:requestConfirmedRestart',
+      'native:saveArtifact'].includes(method)
     const task = rpc.call<T>(method, args, signal, interactive ? 0 : undefined)
     calls.add(task)
     // Report fire-and-forget failures without creating an unhandled rejection.
@@ -80,9 +94,16 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Conf
     })
     return localeSync
   }
-  const runtime: ConfirmedRestartRuntime & KeepAwakeRuntime = {
+  // Artifact 原生能力:窄接口,生产装配恒提供;Host 侧缺能力时由路由报错。
+  const artifactNativeMethods: ArtifactNativeCapability = {
+    openArtifactFullscreen: input => send('native:openArtifactFullscreen', [input]),
+    saveArtifact: input => send('native:saveArtifact', [input]),
+    prepareArtifactFrame: input => send('native:prepareArtifactFrame', [input]),
+  }
+  const runtime: ConfirmedRestartRuntime & KeepAwakeRuntime & ArtifactNativeCapability = {
     platform: snapshot.platform,
     get locale() { return locale },
+    ...artifactNativeMethods,
     updates: {
       ...snapshot.updates,
       request: async (url, init) => {
@@ -170,6 +191,79 @@ export function createHostRuntime(rpc: HostRpc, snapshot: RuntimeSnapshot): Conf
   return runtime
 }
 
+const ARTIFACT_BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/u
+
+function isArtifactIdSegment(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) return false
+  if (value === '.' || value === '..') return false
+  return !/[/\\:*?"<>|\x00-\x1f]/.test(value) && !value.endsWith('.') && !value.endsWith(' ')
+}
+
+function parseArtifactTarget(method: string, value: unknown): ArtifactRef {
+  const input = (typeof value === 'object' && value !== null ? value : {}) as Partial<ArtifactRef>
+  if (!isArtifactIdSegment(input.sessionId) || !isArtifactIdSegment(input.artifactId)) {
+    throw new Error(`${method} requires valid sessionId and artifactId`)
+  }
+  return { sessionId: input.sessionId, artifactId: input.artifactId }
+}
+
+function parseArtifactSurface(method: string, value: unknown): 'main' | 'artifact' {
+  if (value !== 'main' && value !== 'artifact') {
+    throw new Error(`${method} requires surface 'main' or 'artifact'`)
+  }
+  return value
+}
+
+function parseArtifactSaveInput(method: string, value: unknown): {
+  downloadName: string
+  contentBase64: string
+  surface: 'main' | 'artifact'
+} {
+  const input = (typeof value === 'object' && value !== null ? value : {}) as {
+    downloadName?: unknown
+    contentBase64?: unknown
+    surface?: unknown
+  }
+  if (typeof input.downloadName !== 'string' || input.downloadName.length === 0) {
+    throw new Error(`${method} requires a downloadName`)
+  }
+  if (typeof input.contentBase64 !== 'string' || input.contentBase64.length % 4 !== 0
+    || !ARTIFACT_BASE64_PATTERN.test(input.contentBase64)) {
+    throw new Error(`${method} requires base64 content`)
+  }
+  return {
+    downloadName: input.downloadName,
+    contentBase64: input.contentBase64,
+    surface: parseArtifactSurface(method, input.surface),
+  }
+}
+
+function parseArtifactFrameInput(method: string, value: unknown): {
+  surface: 'main' | 'artifact'
+  frameName: string
+} {
+  const input = (typeof value === 'object' && value !== null ? value : {}) as {
+    surface?: unknown
+    frameName?: unknown
+  }
+  if (!isArtifactFrameName(input.frameName)) {
+    throw new Error(`${method} requires a huaanwork-artifact frame name`)
+  }
+  return { surface: parseArtifactSurface(method, input.surface), frameName: input.frameName }
+}
+
+/** 检查三个窄方法后返回原生 Artifact 能力;缺少任一方法即视为未装配。 */
+export function narrowArtifactNativeCapability(
+  runtime: DesktopRuntime,
+): ArtifactNativeCapability | undefined {
+  const candidate = runtime as Partial<ArtifactNativeCapability>
+  return typeof candidate.openArtifactFullscreen === 'function'
+    && typeof candidate.saveArtifact === 'function'
+    && typeof candidate.prepareArtifactFrame === 'function'
+    ? candidate as ArtifactNativeCapability
+    : undefined
+}
+
 export interface HostNativeRuntimeBinding {
   /** Keep the mounted shell when the old Host gracefully disposes its effects. */
   retainShell(): void
@@ -210,6 +304,18 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): HostNa
     if (typeof hold !== 'boolean') throw new Error('native:setKeepAwake requires a boolean hold')
     return callSetKeepAwake(runtime, hold)
   })
+  // Artifact 原生能力只在三个方法齐备时注册;测试桩不被迫实现。
+  const artifactCapability = (): ArtifactNativeCapability => {
+    const capability = narrowArtifactNativeCapability(runtime)
+    if (capability === undefined) throw new Error('artifact-native-unavailable')
+    return capability
+  }
+  handle('native:openArtifactFullscreen', ([input]) =>
+    artifactCapability().openArtifactFullscreen(parseArtifactTarget('native:openArtifactFullscreen', input)))
+  handle('native:saveArtifact', ([input]) =>
+    artifactCapability().saveArtifact(parseArtifactSaveInput('native:saveArtifact', input)))
+  handle('native:prepareArtifactFrame', ([input]) =>
+    artifactCapability().prepareArtifactFrame(parseArtifactFrameInput('native:prepareArtifactFrame', input)))
   handle('native:openProfileCreateWindow', ([id]) => runtime.openProfileCreateWindow({
     onSubmit: name => callback(`${id}:submit`, [name]), onCancel: () => report(callback(`${id}:cancel`)),
   }))
