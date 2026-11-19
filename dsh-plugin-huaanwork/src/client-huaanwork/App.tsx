@@ -57,6 +57,7 @@ import {
 } from "./logic/skillsLogic.ts";
 import type {
   AgentPackageConfirmCard,
+  ArtifactRef,
   SkillConfirmCard,
   SubagentCancelResult,
   SubagentRunProjection,
@@ -3450,6 +3451,51 @@ export default function App() {
     setRightCollapsed(false);
   }
 
+  /** 预览栏原生能力的目标：只取已读取 Artifact 的双 ID，不传路径、不做 Profile 反查。 */
+  function previewArtifactTarget(): ArtifactRef | undefined {
+    const loaded = previewArtifactLoaded;
+    return loaded ? { sessionId: loaded.sessionId, artifactId: loaded.artifactId } : undefined;
+  }
+
+  /** 打开独立全屏窗口；失败写入预览栏的可见错误。 */
+  async function openArtifactFullscreen(): Promise<void> {
+    const target = previewArtifactTarget();
+    if (!target) return;
+    try {
+      await rpcCall("artifact.openFullscreen", target);
+    } catch (error) {
+      setArtifactPreviewError({
+        artifactId: target.artifactId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** 系统另存为：字节由宿主读取，客户端只发双 ID 与 surface。 */
+  async function downloadArtifact(): Promise<void> {
+    const target = previewArtifactTarget();
+    if (!target) return;
+    try {
+      await rpcCall("artifact.download", { ...target, surface: "main" });
+    } catch (error) {
+      setArtifactPreviewError({
+        artifactId: target.artifactId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** HTML frame 原生防护登记：返回确认 Promise，失败由 ArtifactHtmlView 显示错误与重试。 */
+  function prepareArtifactHtmlFrame(frameName: string): Promise<void> {
+    const target = previewArtifactTarget();
+    if (!target) return Promise.reject(new Error("artifact-not-loaded"));
+    return rpcCall<{ prepared: true }>("artifact.prepareFrame", {
+      ...target,
+      surface: "main",
+      frameName,
+    }).then(() => undefined);
+  }
+
   /**
    * 点结果卡：留在当前对话，选中该 Artifact，右侧切到预览并展开（规格 §7.1）。
    * 请求发起时捕获会话与代际；返回后只有当前选择仍匹配才写入预览。
@@ -4470,6 +4516,9 @@ export default function App() {
                       <ArtifactPreview
                         artifact={previewArtifactLoaded}
                         error={previewArtifactFailure?.message}
+                        onFullscreen={previewArtifactLoaded ? () => void openArtifactFullscreen() : undefined}
+                        onDownload={previewArtifactLoaded ? () => void downloadArtifact() : undefined}
+                        prepareHtmlFrame={previewArtifactLoaded ? prepareArtifactHtmlFrame : undefined}
                         onRetry={() => void handleOpenArtifact(previewArtifactId)}
                       />
                     )}

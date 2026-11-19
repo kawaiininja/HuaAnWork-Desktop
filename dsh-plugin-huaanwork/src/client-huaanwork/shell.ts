@@ -8,6 +8,8 @@ import { DesktopLayoutState } from '../client/layout-state.ts'
 import { installDesktopLayout } from '../client/layout-service.ts'
 import { HuaanworkApp } from './frame.tsx'
 import App from './App.tsx'
+import ArtifactFullscreenPage from './ArtifactFullscreenPage.tsx'
+import { ARTIFACT_WINDOW_PARAM, artifactWindowTargetFromSearch } from '../artifact-window.ts'
 import { HUAANWORK_STYLES } from './styles.generated.ts'
 
 function installHuaanworkStyles(): void {
@@ -24,6 +26,21 @@ function installHuaanworkStyles(): void {
     link.href = 'https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..800;1,9..144,300..800&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&family=Noto+Sans+SC:wght@300..800&family=Noto+Serif+SC:wght@300..900&display=swap'
     document.head.appendChild(link)
   }
+}
+
+/**
+ * 根节点选择：带 `artifactWindow=1` 且双 ID 合法时挂载全屏 Artifact 页；同一标记但参数
+ * 无效只渲染错误提示，不挂载主 App；其他启动沿用主 App。
+ * @param search - 当前窗口的 `location.search`。
+ * @returns root slot 的 tree。
+ */
+export function huaanworkRootElement(search: string): React.ReactElement {
+  const target = artifactWindowTargetFromSearch(search)
+  if (target) return React.createElement(ArtifactFullscreenPage, { target })
+  if (new URLSearchParams(search).get(ARTIFACT_WINDOW_PARAM) === '1') {
+    return React.createElement('div', { role: 'alert' }, '结果窗口参数无效')
+  }
+  return React.createElement(App)
 }
 
 export function applyHuaanworkShell(ctx: ClientContext, environment: DesktopClientEnvironment): void {
@@ -49,7 +66,7 @@ export function applyHuaanworkShell(ctx: ClientContext, environment: DesktopClie
           inject: () => ({
             layout: desktopLayout,
             platform: environment.platform,
-            tree: React.createElement(App),
+            tree: huaanworkRootElement(window.location.search),
             dragRegion: ctx.desktopWindow?.dragRegion,
           }),
         },
