@@ -17,7 +17,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import type { Dirent } from 'node:fs'
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 
 import type { ArtifactAnchor, ArtifactFormat, TaskArtifactSummary } from '../client-huaanwork/rpc-types.ts'
@@ -40,6 +40,7 @@ const ERROR_CORRUPT = 'artifact-corrupt'
 const ERROR_TOO_LARGE = 'artifact-too-large'
 const ERROR_SESSION_FULL = 'artifact-session-full'
 const ERROR_INVALID_SCOPE = 'artifact-invalid-scope'
+const ERROR_PATH_ESCAPE = 'artifact-path-escape'
 
 export type ArtifactInput = {
   sessionId: string
@@ -608,4 +609,179 @@ export async function findArtifactByRun(
     }
   }
   return undefined
+}
+
+/** 记录删除之后结果文件未能全部清理时的用户可见说明；路由原样透传。 */
+export const ARTIFACT_CLEANUP_INCOMPLETE_MESSAGE = '记录已删除、结果文件未能完全清理'
+
+/** 删除原语的磁盘清理报告：记录删除已完成，`complete:false` 只描述结果文件残余。 */
+export type ArtifactCleanupReport = {
+  complete: boolean
+  message?: string
+}
+
+/** 结果文件清理不完整：权威记录已删除，调用方只报告、不回滚。 */
+export function incompleteArtifactCleanup(): ArtifactCleanupReport {
+  return { complete: false, message: ARTIFACT_CLEANUP_INCOMPLETE_MESSAGE }
+}
+
+/** 只读 manifest 扫描记录：不含正文、不含下载名之外的展示信息。 */
+export type ArtifactManifestRecord = {
+  sessionId: string
+  artifactId: string
+  anchor: ArtifactAnchor
+  idempotency: ArtifactIdempotency
+}
+
+/**
+ * 在锁内按 scope 失效匹配的活跃 lease。被失效的句柄仍由调用方 finally discard 释放；
+ * 映射条目只在最后一个 lease 释放时删除，不保留永久删除标记。
+ */
+function invalidateMatchingWrites(profileDir: string, match: (state: InternalWrite) => boolean): void {
+  for (const state of activeWrites.values()) {
+    if (state.released || state.invalid) continue
+    if (state.profileDir !== profileDir) continue
+    if (match(state)) state.invalid = true
+  }
+}
+
+/**
+ * 删除前的符号链接逃逸检查：以 profile 的真实路径为根，目标解析结果必须仍在根内。
+ * 目标不存在时放行(幂等删除会由 `rm(force)` 收尾)，链接指向根外一律拒绝。
+ */
+async function assertRemovalTargetInside(profileDir: string, target: string): Promise<void> {
+  let realRoot: string
+  try {
+    realRoot = await realpath(profileDir)
+  } catch (error) {
+    if (isMissingPathError(error)) return
+    throw error
+  }
+  let realTarget: string
+  try {
+    realTarget = await realpath(target)
+  } catch (error) {
+    if (isMissingPathError(error)) return
+    throw error
+  }
+  if (realTarget !== realRoot && !realTarget.startsWith(`${realRoot}${sep}`)) {
+    throw namedError(ERROR_PATH_ESCAPE)
+  }
+}
+
+/** 删除单个目录：逃逸检查后无条件 `rm(force)`，目标缺失也是成功。 */
+async function removeDirectoryInside(profileDir: string, target: string): Promise<void> {
+  await assertRemovalTargetInside(profileDir, target)
+  await rm(target, { recursive: true, force: true })
+}
+
+/**
+ * 只读扫描 profile 内全部 manifest，供自动化/项目级联删除与测试仪器化使用。
+ * 目录名必须仍是单路径段；损坏 manifest 与列表读取一样 fail closed。
+ */
+export async function scanArtifactManifests(profileDir: string): Promise<ArtifactManifestRecord[]> {
+  const key = profileKey(profileDir, ERROR_NOT_FOUND)
+  let entries: Dirent[]
+  try {
+    entries = await readdir(artifactsRoot(key), { withFileTypes: true })
+  } catch (error) {
+    if (isMissingPathError(error)) return []
+    throw error
+  }
+  const records: ArtifactManifestRecord[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    if (!isSinglePathSegment(entry.name)) throw namedError(ERROR_CORRUPT)
+    for (const manifest of await readSessionManifests(key, entry.name)) {
+      records.push({
+        sessionId: manifest.sessionId,
+        artifactId: manifest.artifactId,
+        anchor: manifest.anchor,
+        idempotency: manifest.idempotency,
+      })
+    }
+  }
+  return records
+}
+
+/**
+ * 删除整个会话的结果目录(Task 8)。进入锁后、删除 I/O 前同步失效该会话的全部活跃
+ * lease；锁内 finally 再失效一次，覆盖删除等待期间同步 begin 的新 lease。即使最终目录
+ * 不存在或 `rm` 失败，两次失效都会执行。调用方仍需在自己的 finally discard 句柄。
+ */
+export async function removeArtifactsOfSession(profileDir: string, sessionId: string): Promise<void> {
+  const key = profileKey(profileDir, ERROR_NOT_FOUND)
+  if (!isSinglePathSegment(sessionId)) throw namedError(ERROR_NOT_FOUND)
+  const invalidate = () => invalidateMatchingWrites(key, (state) => state.sessionId === sessionId)
+  return withProfileLock(key, async () => {
+    invalidate()
+    try {
+      await removeDirectoryInside(key, sessionDirPath(key, sessionId))
+    } finally {
+      invalidate()
+    }
+  })
+}
+
+/**
+ * 删除单次运行的结果文件(Task 8)。只检查 `sessionId` 对应会话的 manifest，不扫描全
+ * profile；`sessionId` 缺失时只按已知 automationId/runId 失效活跃 write，不猜目录。
+ * 与 commit 共用 profile 锁，失效配对与 {@link removeArtifactsOfSession} 相同。
+ */
+export async function removeArtifactOfRun(
+  profileDir: string,
+  sessionId: string | undefined,
+  automationId: string,
+  runId: string,
+): Promise<void> {
+  const key = profileKey(profileDir, ERROR_NOT_FOUND)
+  if (!isSinglePathSegment(automationId) || !isSinglePathSegment(runId)) throw namedError(ERROR_NOT_FOUND)
+  if (sessionId !== undefined && !isSinglePathSegment(sessionId)) throw namedError(ERROR_NOT_FOUND)
+  const matchesRun = (state: InternalWrite) =>
+    state.anchor.kind === 'automation-run' &&
+    state.anchor.automationId === automationId &&
+    state.anchor.runId === runId
+  const invalidate = () => invalidateMatchingWrites(key, matchesRun)
+  return withProfileLock(key, async () => {
+    invalidate()
+    try {
+      if (sessionId === undefined) return
+      for (const manifest of await readSessionManifests(key, sessionId)) {
+        if (manifest.anchor.kind !== 'automation-run' ||
+          manifest.anchor.automationId !== automationId ||
+          manifest.anchor.runId !== runId) continue
+        if (manifest.idempotency.kind !== 'automation-run' ||
+          manifest.idempotency.automationId !== automationId ||
+          manifest.idempotency.runId !== runId) continue
+        await removeDirectoryInside(key, artifactDirPath(key, sessionId, manifest.artifactId))
+      }
+    } finally {
+      invalidate()
+    }
+  })
+}
+
+/**
+ * 删除一个自动化的全部结果文件(Task 8)：允许扫描全部 manifest，但只按
+ * `automation-run` 锚点的 automationId 精确匹配，不按标题、下载名或目录名猜测。
+ * lease 失效同样发生在进入锁与锁内 finally 两个同步段。
+ */
+export async function removeArtifactsOfAutomation(profileDir: string, automationId: string): Promise<void> {
+  const key = profileKey(profileDir, ERROR_NOT_FOUND)
+  if (!isSinglePathSegment(automationId)) throw namedError(ERROR_NOT_FOUND)
+  const invalidate = () => invalidateMatchingWrites(
+    key,
+    (state) => state.anchor.kind === 'automation-run' && state.anchor.automationId === automationId,
+  )
+  return withProfileLock(key, async () => {
+    invalidate()
+    try {
+      for (const record of await scanArtifactManifests(key)) {
+        if (record.anchor.kind !== 'automation-run' || record.anchor.automationId !== automationId) continue
+        await removeDirectoryInside(key, artifactDirPath(key, record.sessionId, record.artifactId))
+      }
+    } finally {
+      invalidate()
+    }
+  })
 }

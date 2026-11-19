@@ -6,6 +6,13 @@ import { dirname, join } from 'node:path'
 import type { AutomationInfo, AutomationSchedule, RunSummary } from '../client-huaanwork/rpc-types.ts'
 import { inFlightRuns } from './automation-inflight.ts'
 import { isAutomationSessionEntry } from './automation-session-ids.ts'
+import {
+  incompleteArtifactCleanup,
+  removeArtifactOfRun,
+  removeArtifactsOfAutomation,
+  removeArtifactsOfSession,
+  type ArtifactCleanupReport,
+} from './artifacts-host.ts'
 import { nextFireAfter, parseCron, periodOf } from './schedule.ts'
 import {
   RUNS_LIMIT,
@@ -399,7 +406,7 @@ export async function removeAutomation(
   automationId: string,
   sessionsRoot: string = join(storageRoot, 'sessions'),
   releaseSession?: (sessionId: string) => void,
-): Promise<void> {
+): Promise<ArtifactCleanupReport> {
   return withAutomationRegistryLock(async () => {
     const registry = await readAutomationRegistry(storageRoot)
     const index = registry.automations.findIndex((item) => item.id === automationId)
@@ -411,6 +418,17 @@ export async function removeAutomation(
       releaseSession?.(dir.sessionId)
       await rm(join(dir.cwdDir, dir.sessionId), { recursive: true, force: true })
     }
+    // 1.5 结果文件:按自动化锚点精确清理。失败不让记录删除失败(否则无法重试),
+    //     由应答报告清理不完整。
+    let artifactCleanup: ArtifactCleanupReport = { complete: true }
+    try {
+      await removeArtifactsOfAutomation(storageRoot, automationId)
+    } catch (error: unknown) {
+      console.warn(
+        `[automations] failed to remove artifacts of ${automationId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      artifactCleanup = incompleteArtifactCleanup()
+    }
     // 2. 跨项目自动 Task:改绑前的旧项目 Task 也随来源清理。
     await removeTasksOfAutomation(storageRoot, automationId)
     // 3. runs/audit:force 只吞 ENOENT,其他错误中止并保留注册项。
@@ -419,6 +437,7 @@ export async function removeAutomation(
     // 4. 注册项最后删:任何崩溃点都能用仍在的注册项重试。
     registry.automations.splice(index, 1)
     await writeAutomationRegistry(storageRoot, registry)
+    return artifactCleanup
   })
 }
 
@@ -434,16 +453,19 @@ export async function removeAutomationsOfProject(
   projectId: string,
   sessionsRoot: string = join(storageRoot, 'sessions'),
   releaseSession?: (sessionId: string) => void,
-): Promise<void> {
+): Promise<ArtifactCleanupReport> {
   const doomed = (await readAutomationRegistry(storageRoot)).automations.filter((item) => item.projectId === projectId)
+  let cleanup: ArtifactCleanupReport = { complete: true }
   for (const automation of doomed) {
     try {
-      await removeAutomation(storageRoot, automation.id, sessionsRoot, releaseSession)
+      const result = await removeAutomation(storageRoot, automation.id, sessionsRoot, releaseSession)
+      if (!result.complete) cleanup = result
     } catch (error: unknown) {
       if (error instanceof Error && error.message.includes('was not found')) continue
       throw error
     }
   }
+  return cleanup
 }
 
 /**
@@ -578,6 +600,8 @@ export type PruneAutomationSessionsResult = {
   tasksRemoved: number
   /** 失败标识:有 Task 的候选记 taskId,无 Task 的旧会话记 sessionId。 */
   failed: string[]
+  /** 有会话已删除但结果文件未能全部清掉时存在;保留的会话不进入这一步。 */
+  artifactCleanup?: ArtifactCleanupReport
 }
 
 /**
@@ -636,6 +660,7 @@ export async function pruneAutomationSessions(
   const failed: string[] = []
   let removed = 0
   let tasksRemoved = 0
+  let artifactCleanup: ArtifactCleanupReport | undefined
   for (const sessionId of candidates) {
     if (keep.has(sessionId)) continue
     const task = automationTasks.find((item) => item.sessionId === sessionId)
@@ -651,6 +676,15 @@ export async function pruneAutomationSessions(
       continue
     }
     removed += 1
+    // 只清理实际被删会话的结果文件;失败不改变 deleted 语义,只报告不完整。
+    try {
+      await removeArtifactsOfSession(storageRoot, sessionId)
+    } catch (error: unknown) {
+      console.warn(
+        `[automations] failed to remove artifacts of ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      artifactCleanup = incompleteArtifactCleanup()
+    }
     for (const doomed of automationTasks.filter((item) => item.sessionId === sessionId)) {
       try {
         await removeTask(storageRoot, doomed.id)
@@ -661,7 +695,7 @@ export async function pruneAutomationSessions(
       }
     }
   }
-  return { removed, tasksRemoved, failed }
+  return { removed, tasksRemoved, failed, ...(artifactCleanup === undefined ? {} : { artifactCleanup }) }
 }
 
 /**
@@ -691,7 +725,12 @@ export async function deleteAutomationRun(
     activeSessionIds?: ReadonlySet<string>
     releaseSession?: (sessionId: string) => void
   },
-): Promise<{ removed: boolean; sessionDirRemoved: boolean; taskId?: string }> {
+): Promise<{
+  removed: boolean
+  sessionDirRemoved: boolean
+  taskId?: string
+  artifactCleanup?: ArtifactCleanupReport
+}> {
   if (inFlightRuns.has(runId)) throw new Error('运行中的记录不能删除')
   const target = (await recentRuns(storageRoot, automationId)).find((run) => run.runId === runId)
   if (!target) return { removed: false, sessionDirRemoved: true }
@@ -728,7 +767,24 @@ export async function deleteAutomationRun(
       `[automations] failed to rewrite last-run fields after deleting ${automationId}/${runId}: ${error instanceof Error ? error.message : String(error)}`,
     )
   })
-  return { removed, sessionDirRemoved: true, ...(task ? { taskId: task.id } : {}) }
+  // 结果文件随运行记录删除：只查该会话 manifest，不扫描全 profile。Run 缺 sessionId 时
+  // 仍按已知 automationId/runId 失效活跃 write，但不猜目录，并报告清理不完整。
+  let artifactCleanup: ArtifactCleanupReport | undefined
+  try {
+    await removeArtifactOfRun(storageRoot, target.sessionId, automationId, runId)
+    if (target.sessionId === undefined) artifactCleanup = incompleteArtifactCleanup()
+  } catch (error: unknown) {
+    console.warn(
+      `[automations] failed to remove artifact of ${automationId}/${runId}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    artifactCleanup = incompleteArtifactCleanup()
+  }
+  return {
+    removed,
+    sessionDirRemoved: true,
+    ...(task ? { taskId: task.id } : {}),
+    ...(artifactCleanup === undefined ? {} : { artifactCleanup }),
+  }
 }
 
 /**

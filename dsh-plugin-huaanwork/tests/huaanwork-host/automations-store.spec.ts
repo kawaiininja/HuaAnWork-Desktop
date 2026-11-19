@@ -1636,7 +1636,12 @@ describe('automation.deleteRun (Task 9)', () => {
       warn.mockRestore()
     }
 
-    expect(result).toEqual({ removed: true, sessionDirRemoved: true })
+    // 旧记录不带 sessionId:记录删除成功,结果文件无法定位,按 Task 8 报告清理不完整。
+    expect(result).toEqual({
+      removed: true,
+      sessionDirRemoved: true,
+      artifactCleanup: { complete: false, message: '记录已删除、结果文件未能完全清理' },
+    })
     expect((await recentRuns(home, id)).map((run) => run.runId)).toEqual(['r1'])
     // 回写失败已被警告记录，注册表暂时保留删行前的旧状态。
     expect(warnings.some((line) => line.includes('[automations]'))).toBe(true)
@@ -1979,5 +1984,95 @@ describe('automation deletion anchor and guard (Task 7)', () => {
 
     expect(existsSync(skillDraft(sKeep))).toBe(true)
     expect(existsSync(agentDraft(sKeep))).toBe(true)
+  })
+})
+
+describe('结果文件随权威记录清理 (Task 8)', () => {
+  const incomplete = { complete: false, message: '记录已删除、结果文件未能完全清理' }
+
+  async function runArtifact(
+    home: string,
+    automationId: string,
+    runId: string,
+    title = '结果',
+  ): Promise<{ sessionId: string; artifactId: string }> {
+    const { createArtifact } = await import('../../src/huaanwork-host/artifacts-host.ts')
+    const { automationRunSessionId } = await import('../../src/huaanwork-host/automation-session-ids.ts')
+    const sessionId = automationRunSessionId(automationId, runId)
+    const artifact = await createArtifact(home, {
+      sessionId,
+      anchor: { kind: 'automation-run', automationId, runId },
+      idempotency: { kind: 'automation-run', automationId, runId },
+      title,
+      format: 'markdown',
+      content: `# ${title}`,
+    })
+    return { sessionId, artifactId: artifact.artifactId }
+  }
+
+  test('deleteAutomationRun removes that run artifact and keeps a sibling run artifact', async () => {
+    const { listArtifacts } = await import('../../src/huaanwork-host/artifacts-host.ts')
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput({ schedule: { kind: 'manual' } })))
+    const doomed = await runArtifact(home, automation.id, 'r1')
+    const kept = await runArtifact(home, automation.id, 'r2')
+    await appendRun(home, automation.id, runSummary('r1', { sessionId: doomed.sessionId }))
+    await appendRun(home, automation.id, runSummary('r2', { sessionId: kept.sessionId }))
+
+    const result = await deleteAutomationRun(home, automation.id, 'r1', { sessionsRoot: join(home, 'sessions') })
+    expect(result).not.toHaveProperty('artifactCleanup')
+    expect(await listArtifacts(home, doomed.sessionId)).toEqual([])
+    expect((await listArtifacts(home, kept.sessionId)).map((item) => item.artifactId)).toEqual([kept.artifactId])
+  })
+
+  test('deleteAutomationRun reports incomplete cleanup for a RunSummary without sessionId', async () => {
+    const { listArtifacts } = await import('../../src/huaanwork-host/artifacts-host.ts')
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput({ schedule: { kind: 'manual' } })))
+    const seeded = await runArtifact(home, automation.id, 'r1')
+    await appendRun(home, automation.id, runSummary('r1'))
+
+    const result = await deleteAutomationRun(home, automation.id, 'r1', { sessionsRoot: join(home, 'sessions') })
+    expect(result).toMatchObject({ removed: true, artifactCleanup: incomplete })
+    expect((await listArtifacts(home, seeded.sessionId)).map((item) => item.artifactId)).toEqual([seeded.artifactId])
+  })
+
+  test('removeAutomation deletes its artifacts by exact anchor and keeps another automation', async () => {
+    const { listArtifacts, scanArtifactManifests } = await import('../../src/huaanwork-host/artifacts-host.ts')
+    const home = makeHome()
+    const doomed = await createAutomation(home, normalizeAutomationInput(agentInput({ schedule: { kind: 'manual' } })))
+    const kept = await createAutomation(home, normalizeAutomationInput(agentInput({ name: '同名任务', schedule: { kind: 'manual' } })))
+    const doomedArtifact = await runArtifact(home, doomed.id, 'r1', '同名结果')
+    const keptArtifact = await runArtifact(home, kept.id, 'r1', '同名结果')
+
+    const report = await removeAutomation(home, doomed.id)
+    expect(report).toEqual({ complete: true })
+    expect(await listArtifacts(home, doomedArtifact.sessionId)).toEqual([])
+    expect((await listArtifacts(home, keptArtifact.sessionId)).map((item) => item.artifactId))
+      .toEqual([keptArtifact.artifactId])
+    expect((await scanArtifactManifests(home)).map((record) => record.artifactId)).toEqual([keptArtifact.artifactId])
+  })
+
+  test('pruneAutomationSessions clears artifacts only for sessions actually removed', async () => {
+    const { listArtifacts } = await import('../../src/huaanwork-host/artifacts-host.ts')
+    const home = makeHome()
+    const automation = await createAutomation(home, normalizeAutomationInput(agentInput({ schedule: { kind: 'manual' } })))
+    for (let index = 1; index <= AUTOMATION_SESSION_RETAIN_LIMIT + 1; index += 1) {
+      const sessionId = `huaanwork-auto-${automation.id}-r${index}`
+      await appendRun(home, automation.id, runSummary(`r${index}`, { sessionId }))
+    }
+    const pruned = await runArtifact(home, automation.id, 'r1')
+    const retained = await runArtifact(home, automation.id, `r${AUTOMATION_SESSION_RETAIN_LIMIT + 1}`)
+    for (const sessionId of [pruned.sessionId, retained.sessionId]) {
+      mkdirSync(join(home, 'sessions', 'project', sessionId), { recursive: true })
+    }
+
+    const result = await pruneAutomationSessions(home)
+    expect(result.removed).toBe(1)
+    expect(result).not.toHaveProperty('artifactCleanup')
+    expect(await listArtifacts(home, pruned.sessionId)).toEqual([])
+    expect((await listArtifacts(home, retained.sessionId)).map((item) => item.artifactId))
+      .toEqual([retained.artifactId])
+    expect(existsSync(join(home, 'sessions', 'project', retained.sessionId))).toBe(true)
   })
 })

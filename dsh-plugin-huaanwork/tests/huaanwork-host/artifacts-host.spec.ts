@@ -22,7 +22,11 @@ import {
   listArtifacts,
   prepareArtifact,
   readArtifactContent,
+  removeArtifactOfRun,
+  removeArtifactsOfAutomation,
+  removeArtifactsOfSession,
   sanitizeArtifactDownloadName,
+  scanArtifactManifests,
 } from '../../src/huaanwork-host/artifacts-host.ts'
 
 const roots: string[] = []
@@ -312,4 +316,138 @@ it('releases every lease without a permanent owner tombstone', async () => {
   await discardPreparedArtifact(fresh) // commit 后 discard 不删除正文
   expect(await listArtifacts(root, 'session-1')).toHaveLength(1)
   await expect(commitPreparedArtifact(fresh)).rejects.toThrow('artifact-owner-deleted')
+})
+
+it('invalidates a prepared lease on session removal and leaves no permanent tombstone', async () => {
+  const root = makeRoot('artifact-remove-session-')
+  const scope: ArtifactWriteScope = {
+    sessionId: 'session-1',
+    anchor: { kind: 'turn' },
+    idempotency: { kind: 'tool', callId: 'remove-1' },
+  }
+  const write = beginArtifactWrite(root, scope)
+  await prepareArtifact(write, { title: '删除中', format: 'markdown', content: '# 迟到正文' })
+  const committed = await createArtifact(root, {
+    sessionId: 'session-1', title: '已有', format: 'markdown', content: '# 已有正文',
+    anchor: { kind: 'turn' }, idempotency: { kind: 'tool', callId: 'existing' },
+  })
+
+  await removeArtifactsOfSession(root, scope.sessionId)
+  await expect(commitPreparedArtifact(write)).rejects.toThrow('artifact-owner-deleted')
+  await discardPreparedArtifact(write)
+  expect(await listArtifacts(root, scope.sessionId)).toEqual([])
+  expect(existsSync(join(root, 'artifacts', scope.sessionId, committed.artifactId))).toBe(false)
+
+  // 删除完成后 begin 不受旧删除影响:不保留永久删除标记。
+  const fresh = beginArtifactWrite(root, {
+    sessionId: 'session-1',
+    anchor: { kind: 'turn' },
+    idempotency: { kind: 'tool', callId: 'fresh-after-remove' },
+  })
+  await prepareArtifact(fresh, { title: '恢复', format: 'markdown', content: '# 新正文' })
+  expect((await commitPreparedArtifact(fresh)).created).toBe(true)
+  await discardPreparedArtifact(fresh)
+  expect(await listArtifacts(root, 'session-1')).toHaveLength(1)
+})
+
+it('invalidates only the exact automation-run anchor for a run removal', async () => {
+  const root = makeRoot('artifact-remove-run-')
+  const runScope: ArtifactWriteScope = {
+    sessionId: 'auto-session-1',
+    anchor: { kind: 'automation-run', automationId: 'automation-1', runId: 'run-1' },
+    idempotency: { kind: 'automation-run', automationId: 'automation-1', runId: 'run-1' },
+  }
+  const siblingRun: ArtifactWriteScope = {
+    sessionId: 'auto-session-1',
+    anchor: { kind: 'automation-run', automationId: 'automation-1', runId: 'run-2' },
+    idempotency: { kind: 'automation-run', automationId: 'automation-1', runId: 'run-2' },
+  }
+  const otherAutomation: ArtifactWriteScope = {
+    sessionId: 'auto-session-2',
+    anchor: { kind: 'automation-run', automationId: 'automation-2', runId: 'run-1' },
+    idempotency: { kind: 'automation-run', automationId: 'automation-2', runId: 'run-1' },
+  }
+  const removed = beginArtifactWrite(root, runScope)
+  const sibling = beginArtifactWrite(root, siblingRun)
+  const other = beginArtifactWrite(root, otherAutomation)
+  await Promise.all([
+    prepareArtifact(removed, { title: '被删', format: 'markdown', content: '# 被删' }),
+    prepareArtifact(sibling, { title: '保留', format: 'markdown', content: '# 保留' }),
+    prepareArtifact(other, { title: '别家', format: 'markdown', content: '# 别家' }),
+  ])
+  const onDisk = await createArtifact(root, {
+    sessionId: runScope.sessionId, title: '旧记录', format: 'markdown', content: '# 旧正文',
+    anchor: runScope.anchor, idempotency: { kind: 'automation-run', automationId: 'automation-1', runId: 'run-1' },
+  })
+
+  await removeArtifactOfRun(root, runScope.sessionId, 'automation-1', 'run-1')
+  await expect(commitPreparedArtifact(removed)).rejects.toThrow('artifact-owner-deleted')
+  expect(await listArtifacts(root, runScope.sessionId)).toEqual([])
+  expect(existsSync(join(root, 'artifacts', runScope.sessionId, onDisk.artifactId))).toBe(false)
+
+  expect((await commitPreparedArtifact(sibling)).created).toBe(true)
+  expect((await commitPreparedArtifact(other)).created).toBe(true)
+  const kept = await listArtifacts(root, runScope.sessionId)
+  expect(kept.map((item) => item.anchor)).toEqual([siblingRun.anchor])
+  for (const write of [removed, sibling, other]) await discardPreparedArtifact(write)
+})
+
+it('invalidates all leases of one automation and deletes only its manifests', async () => {
+  const root = makeRoot('artifact-remove-automation-')
+  const removedScope: ArtifactWriteScope = {
+    sessionId: 'auto-session-1',
+    anchor: { kind: 'automation-run', automationId: 'automation-1', runId: 'run-late' },
+    idempotency: { kind: 'automation-run', automationId: 'automation-1', runId: 'run-late' },
+  }
+  const keptScope: ArtifactWriteScope = {
+    sessionId: 'auto-session-2',
+    anchor: { kind: 'automation-run', automationId: 'automation-2', runId: 'run-1' },
+    idempotency: { kind: 'automation-run', automationId: 'automation-2', runId: 'run-1' },
+  }
+  const removed = beginArtifactWrite(root, removedScope)
+  const kept = beginArtifactWrite(root, keptScope)
+  await Promise.all([
+    prepareArtifact(removed, { title: '被删', format: 'markdown', content: '# 被删' }),
+    prepareArtifact(kept, { title: '保留', format: 'markdown', content: '# 保留' }),
+  ])
+  await createArtifact(root, {
+    sessionId: removedScope.sessionId, title: '旧一', format: 'markdown', content: '# 旧一',
+    anchor: removedScope.anchor, idempotency: removedScope.idempotency,
+  })
+  const otherRun = await createArtifact(root, {
+    sessionId: 'auto-session-1', title: '同会话别家自动化', format: 'markdown', content: '# 别家',
+    anchor: { kind: 'automation-run', automationId: 'automation-2', runId: 'run-1' },
+    idempotency: { kind: 'automation-run', automationId: 'automation-2', runId: 'run-1' },
+  })
+
+  await removeArtifactsOfAutomation(root, 'automation-1')
+  await expect(commitPreparedArtifact(removed)).rejects.toThrow('artifact-owner-deleted')
+  expect((await commitPreparedArtifact(kept)).created).toBe(true)
+  const remaining = await listArtifacts(root, removedScope.sessionId)
+  expect(remaining.map((item) => item.artifactId)).toEqual([otherRun.artifactId])
+  const scan = await scanArtifactManifests(root)
+  expect(scan.every((record) => record.anchor.kind !== 'automation-run' || record.anchor.automationId !== 'automation-1')).toBe(true)
+  for (const write of [removed, kept]) await discardPreparedArtifact(write)
+})
+
+it('scans manifests read-only and returns nothing for an absent profile root', async () => {
+  const root = makeRoot('artifact-scan-')
+  expect(await scanArtifactManifests(root)).toEqual([])
+  const first = await createArtifact(root, {
+    sessionId: 'session-1', title: '扫描', format: 'markdown', content: '# 一',
+    anchor: { kind: 'turn' }, idempotency: { kind: 'tool', callId: 'scan-1' },
+  })
+  const second = await createArtifact(root, {
+    sessionId: 'session-2', title: '扫描', format: 'html', content: '<p>二</p>',
+    anchor: { kind: 'automation-run', automationId: 'automation-1', runId: 'run-9' },
+    idempotency: { kind: 'automation-run', automationId: 'automation-1', runId: 'run-9' },
+  })
+  const records = await scanArtifactManifests(root)
+  expect(records.map((record) => [record.sessionId, record.artifactId]).sort()).toEqual([
+    ['session-1', first.artifactId],
+    ['session-2', second.artifactId],
+  ].sort())
+  expect(records.find((record) => record.artifactId === second.artifactId)?.anchor).toEqual({
+    kind: 'automation-run', automationId: 'automation-1', runId: 'run-9',
+  })
 })

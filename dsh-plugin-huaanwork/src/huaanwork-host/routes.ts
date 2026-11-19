@@ -15,7 +15,14 @@ import type {
 import type { ArtifactNativeCapability } from '../runtime.ts'
 import { isArtifactFrameName } from '../artifact-window.ts'
 import { readCachedCatalogPackages, refreshCatalogPackageCache, type AgentPackageSummary } from './agent-package/catalog-client.ts'
-import { getArtifact, listArtifacts, readArtifactContent } from './artifacts-host.ts'
+import {
+  getArtifact,
+  incompleteArtifactCleanup,
+  listArtifacts,
+  readArtifactContent,
+  removeArtifactsOfSession,
+  type ArtifactCleanupReport,
+} from './artifacts-host.ts'
 import {
   AGENT_PACKAGE_VERIFY_FAILURE,
   installCatalogAgentPackage,
@@ -1367,6 +1374,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       // 先拿项目守卫再读 doomed:反序会给「列表之后、守卫之前」留一个绑定窗口(T1)。
       const releaseProject = beginProjectDeletion(projectId)
       const releaseAutomations: Array<() => void> = []
+      let artifactCleanup: ArtifactCleanupReport = { complete: true }
       try {
         const doomed = await listAutomations(ctx.profileDir, projectId)
         // 每个 doomed 自动化先进自己的删除守卫,再做全量预检;任一失败整批不开始。
@@ -1375,16 +1383,28 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
 
         for (const automation of doomed) scheduler?.clearAdmissionSkip(automation.id)
         // 逐项复用自动化自己的可重试锚点顺序(会话 → 跨项目自动 Task → runs/audit → 注册项)。
-        await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'), (sessionId) =>
+        const automationCleanup = await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'), (sessionId) =>
           releaseAndDiscardSession(ctx, sessionId, 'project.remove'),
         )
+        if (!automationCleanup.complete) artifactCleanup = automationCleanup
         const cascadedSessionIds = await removeTasksOfProject(ctx.profileDir, projectId)
         // 与 session.remove 同一运行态与草稿释放:删文件前先摘掉卡片、live agent、子会话、计划目标与创建草稿。
         for (const sessionId of cascadedSessionIds) releaseAndDiscardSession(ctx, sessionId, 'project.remove')
         await removeSessionFilesById(join(ctx.dshHome, 'sessions'), cascadedSessionIds)
+        // 普通子任务绑定的会话结果文件随会话删除;自动化会话已由上面的级联覆盖。
+        for (const sessionId of cascadedSessionIds) {
+          try {
+            await removeArtifactsOfSession(ctx.profileDir, sessionId)
+          } catch (error: unknown) {
+            ctx.logger(
+              `project.remove: 结果文件未能完全清理 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+            )
+            artifactCleanup = incompleteArtifactCleanup()
+          }
+        }
         // 项目锚点最后删:上面的子级联都可重试,重试时项目仍在。
         const removed = await removeProject(ctx.profileDir, projectId)
-        return { removed: true, project: removed }
+        return { removed: true, project: removed, ...(artifactCleanup.complete ? {} : { artifactCleanup }) }
       } finally {
         for (const release of releaseAutomations.reverse()) release()
         releaseProject()
@@ -1519,18 +1539,19 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.remove requires params.id')
       const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
+      let artifactCleanup: ArtifactCleanupReport = { complete: true }
       const release = beginAutomationDeletion(id)
       try {
         await assertAutomationRemovable(ctx, id, scheduler)
         // 运行会话随任务一并删除:删日志前先释放它的运行态与创建草稿(与 session.remove 同口径)。
-        await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
+        artifactCleanup = await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
           releaseAndDiscardSession(ctx, sessionId, 'automation.remove'),
         )
       } finally {
         release()
       }
       scheduler?.clearAdmissionSkip(id)
-      return { removed: true }
+      return { removed: true, ...(artifactCleanup.complete ? {} : { artifactCleanup }) }
     }),
   }, // Task 3 (M4)
   {

@@ -1,0 +1,382 @@
+/**
+ * 全生命周期清理(Task 8 / 设计 §5.3、§9)。
+ *
+ * 每条用例都用真实存储原语建 Artifact 与运行/会话记录，再调用对应的公开删除原语，
+ * 以实际磁盘目录与读取结果作证据；兄弟 Artifact 必须保留。删除与两阶段写入的竞态
+ * 用 `node:fs/promises` 的 rm 部分 mock 定点挂起，不靠定时器猜时序。
+ */
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, expect, it, vi } from 'vitest'
+
+import type { ArtifactWriteScope } from '../../src/huaanwork-host/artifacts-host.ts'
+import * as artifactStore from '../../src/huaanwork-host/artifacts-host.ts'
+import {
+  ARTIFACT_CLEANUP_INCOMPLETE_MESSAGE,
+  beginArtifactWrite,
+  commitPreparedArtifact,
+  createArtifact,
+  discardPreparedArtifact,
+  listArtifacts,
+  prepareArtifact,
+  removeArtifactOfRun,
+  removeArtifactsOfAutomation,
+  removeArtifactsOfSession,
+} from '../../src/huaanwork-host/artifacts-host.ts'
+import { automationRunSessionId } from '../../src/huaanwork-host/automation-session-ids.ts'
+import {
+  appendRun,
+  createAutomation,
+  deleteAutomationRun,
+  normalizeAutomationInput,
+  pruneAutomationSessions,
+  removeAutomation,
+} from '../../src/huaanwork-host/automations-store.ts'
+import { ROUTE_TABLE, type RouteContext, type RouteHandler } from '../../src/huaanwork-host/routes.ts'
+import { sessionRemove } from '../../src/huaanwork-host/sessions.ts'
+import { createProject, recentRuns } from '../../src/huaanwork-host/stores.ts'
+
+/** 删除 I/O 屏障:只拦 `deletionIo.path` 的那一次 rm。 */
+const deletionIo = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  wait: undefined as undefined | (() => Promise<void>),
+  failure: undefined as undefined | Error,
+}))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...real,
+    rm: async (...args: Parameters<typeof real.rm>) => {
+      if (args[0] === deletionIo.path) {
+        await deletionIo.wait?.()
+        const failure = deletionIo.failure
+        if (failure !== undefined) throw failure
+      }
+      return real.rm(args[0], args[1])
+    },
+  }
+})
+
+function deletionBarrier() {
+  const entered = Promise.withResolvers<void>()
+  const released = Promise.withResolvers<void>()
+  return {
+    entered: entered.promise,
+    release: () => released.resolve(),
+    wait: async () => {
+      entered.resolve()
+      await released.promise
+    },
+  }
+}
+
+const roots: string[] = []
+
+function makeRoot(prefix: string): string {
+  const root = mkdtempSync(join(tmpdir(), prefix))
+  roots.push(root)
+  return root
+}
+
+afterEach(() => {
+  deletionIo.path = undefined
+  deletionIo.wait = undefined
+  deletionIo.failure = undefined
+  while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true })
+})
+
+type SeedOptions = {
+  profileDir?: string
+  runId?: string
+  title?: string
+  includeSessionId?: boolean
+  persistRun?: boolean
+  projectId?: string
+}
+
+type SeededRun = {
+  profileDir: string
+  automationId: string
+  runId: string
+  sessionId: string
+  artifactId: string
+}
+
+/** 真实原语夹具:createAutomation + createArtifact + appendRun。 */
+async function seedRunArtifact(opts: SeedOptions = {}): Promise<SeededRun> {
+  const profileDir = opts.profileDir ?? makeRoot('artifact-life-')
+  const automation = await createAutomation(profileDir, normalizeAutomationInput({
+    name: '结果任务',
+    kind: 'agent',
+    schedule: { kind: 'manual' },
+    prompt: '生成结果',
+    ...(opts.projectId === undefined ? {} : { projectId: opts.projectId }),
+  }))
+  const runId = opts.runId ?? randomUUID()
+  const sessionId = automationRunSessionId(automation.id, runId)
+  const title = opts.title ?? '结果'
+  const artifact = await createArtifact(profileDir, {
+    sessionId,
+    anchor: { kind: 'automation-run', automationId: automation.id, runId },
+    idempotency: { kind: 'automation-run', automationId: automation.id, runId },
+    title,
+    format: 'markdown',
+    content: `# ${title}`,
+  })
+  if (opts.persistRun !== false) {
+    await appendRun(profileDir, automation.id, {
+      runId,
+      startedAt: 1,
+      endedAt: 2,
+      ok: true,
+      output: 'ok',
+      status: 'ok',
+      ...(opts.includeSessionId === false ? {} : { sessionId }),
+    })
+  }
+  return { profileDir, automationId: automation.id, runId, sessionId, artifactId: artifact.artifactId }
+}
+
+function routeCtx(profileDir: string, dshHome: string): RouteContext {
+  return {
+    dshHome,
+    profileDir,
+    workspaceRoot: { current: profileDir },
+    emit() {},
+    logger() {},
+    requestRestart: async () => false,
+  }
+}
+
+function handler(method: string): RouteHandler {
+  const found = ROUTE_TABLE.find((item) => item.method === method)
+  if (!found) throw new Error(`missing route ${method}`)
+  return found.handler
+}
+
+function makeSessionLog(dshHome: string, sessionId: string, cwd: string): string {
+  const dir = join(dshHome, 'sessions', 'some-cwd')
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, `${sessionId}.jsonl`)
+  writeFileSync(file, `${JSON.stringify({ type: 'session', id: sessionId, createdAt: 1, cwd })}\n`, 'utf8')
+  return file
+}
+
+async function artifactIds(profileDir: string, sessionId: string): Promise<string[]> {
+  return (await listArtifacts(profileDir, sessionId)).map((item) => item.artifactId)
+}
+
+it('session.remove deletes the session artifacts and keeps a sibling session', async () => {
+  const seeded = await seedRunArtifact()
+  const sibling = await seedRunArtifact({ profileDir: seeded.profileDir, runId: 'sibling-run' })
+  const dshHome = makeRoot('artifact-life-dsh-')
+  const log = makeSessionLog(dshHome, seeded.sessionId, join(dshHome, 'workspace'))
+
+  const report = await sessionRemove(undefined, routeCtx(seeded.profileDir, dshHome), {
+    sessionId: seeded.sessionId,
+  })
+  expect(report).toEqual({ removed: true })
+  expect(existsSync(log)).toBe(false)
+  expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([])
+  expect(existsSync(join(seeded.profileDir, 'artifacts', seeded.sessionId))).toBe(false)
+  expect(await artifactIds(seeded.profileDir, sibling.sessionId)).toEqual([sibling.artifactId])
+})
+
+it('automation.deleteRun deletes only that run artifact record row', async () => {
+  const seeded = await seedRunArtifact()
+  const sibling = await seedRunArtifact({ profileDir: seeded.profileDir, runId: 'keep-run' })
+
+  const report = await deleteAutomationRun(seeded.profileDir, seeded.automationId, seeded.runId, {
+    sessionsRoot: join(seeded.profileDir, 'sessions'),
+  })
+  expect(report).toMatchObject({ removed: true })
+  expect(await recentRuns(seeded.profileDir, seeded.automationId, 100))
+    .not.toContainEqual(expect.objectContaining({ runId: seeded.runId }))
+  expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([])
+  expect(existsSync(join(seeded.profileDir, 'artifacts', seeded.sessionId, seeded.artifactId))).toBe(false)
+  expect(await artifactIds(seeded.profileDir, sibling.sessionId)).toEqual([sibling.artifactId])
+})
+
+it('automation.remove cascades to all artifacts of that automation only', async () => {
+  const seeded = await seedRunArtifact()
+  const sibling = await seedRunArtifact({ profileDir: seeded.profileDir, runId: 'keep-run' })
+
+  await removeAutomation(seeded.profileDir, seeded.automationId)
+  expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([])
+  expect(existsSync(join(seeded.profileDir, 'artifacts', seeded.sessionId, seeded.artifactId))).toBe(false)
+  expect(await artifactIds(seeded.profileDir, sibling.sessionId)).toEqual([sibling.artifactId])
+})
+
+it('project.remove cascades to the artifacts of its automations only', async () => {
+  const profileDir = makeRoot('artifact-life-')
+  const dshHome = makeRoot('artifact-life-dsh-')
+  const project = await createProject(profileDir, { root: makeRoot('artifact-life-root-'), name: '季度' })
+  const seeded = await seedRunArtifact({ profileDir, projectId: project.id })
+  const other = await seedRunArtifact({ profileDir })
+
+  const report = await handler('project.remove')({ params: {}, body: { projectId: project.id }, query: new URLSearchParams() }, routeCtx(profileDir, dshHome))
+  expect(report).toMatchObject({ removed: true })
+  expect(await artifactIds(profileDir, seeded.sessionId)).toEqual([])
+  expect(await artifactIds(profileDir, other.sessionId)).toEqual([other.artifactId])
+})
+
+it('automation.pruneSessions deletes only the artifacts of sessions actually removed', async () => {
+  const seeded = await seedRunArtifact({ persistRun: false })
+  const kept = await seedRunArtifact({ profileDir: seeded.profileDir, runId: 'kept-run' })
+  const sessionsRoot = join(seeded.profileDir, 'sessions')
+  mkdirSync(join(sessionsRoot, 'project', seeded.sessionId), { recursive: true })
+  mkdirSync(join(sessionsRoot, 'project', kept.sessionId), { recursive: true })
+
+  const result = await pruneAutomationSessions(seeded.profileDir, new Set([kept.sessionId]), sessionsRoot)
+  expect(result.removed).toBe(1)
+  expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([])
+  expect(existsSync(join(sessionsRoot, 'project', seeded.sessionId))).toBe(false)
+  expect(await artifactIds(seeded.profileDir, kept.sessionId)).toEqual([kept.artifactId])
+  expect(existsSync(join(sessionsRoot, 'project', kept.sessionId))).toBe(true)
+})
+
+it('treats a missing artifact directory as an idempotent success', async () => {
+  const profileDir = makeRoot('artifact-life-')
+  await expect(removeArtifactsOfSession(profileDir, 'absent-session')).resolves.toBeUndefined()
+  await expect(removeArtifactsOfSession(profileDir, 'absent-session')).resolves.toBeUndefined()
+  await expect(removeArtifactOfRun(profileDir, 'absent-session', 'automation-1', 'run-1')).resolves.toBeUndefined()
+  await expect(removeArtifactsOfAutomation(profileDir, 'automation-1')).resolves.toBeUndefined()
+})
+
+it('reports incomplete cleanup instead of silently succeeding', async () => {
+  const seeded = await seedRunArtifact()
+  const dshHome = makeRoot('artifact-life-dsh-')
+  makeSessionLog(dshHome, seeded.sessionId, join(dshHome, 'workspace'))
+  deletionIo.path = join(seeded.profileDir, 'artifacts', seeded.sessionId)
+  deletionIo.failure = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+
+  const report = await sessionRemove(undefined, routeCtx(seeded.profileDir, dshHome), {
+    sessionId: seeded.sessionId,
+  })
+  expect(report).toEqual({
+    removed: true,
+    artifactCleanup: { complete: false, message: ARTIFACT_CLEANUP_INCOMPLETE_MESSAGE },
+  })
+  expect(JSON.stringify(report)).toContain('记录已删除、结果文件未能完全清理')
+  expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([seeded.artifactId])
+})
+
+it('locates a run artifact directly via RunSummary.sessionId without scanning', async () => {
+  const seeded = await seedRunArtifact()
+  const scan = vi.spyOn(artifactStore, 'scanArtifactManifests')
+  try {
+    const report = await deleteAutomationRun(seeded.profileDir, seeded.automationId, seeded.runId, {
+      sessionsRoot: join(seeded.profileDir, 'sessions'),
+    })
+    expect(report).toMatchObject({ removed: true })
+    expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([])
+    expect(scan).not.toHaveBeenCalled()
+  } finally {
+    scan.mockRestore()
+  }
+})
+
+it('scans manifests by exact automation anchor when sessions are gone', async () => {
+  const first = await seedRunArtifact({ runId: 'run-1', title: '同名结果' })
+  const other = await seedRunArtifact({
+    profileDir: first.profileDir,
+    runId: 'run-2',
+    title: '同名结果',
+  })
+  rmSync(join(first.profileDir, 'sessions', first.sessionId), { recursive: true, force: true })
+  await removeAutomation(first.profileDir, first.automationId)
+  expect(await artifactIds(first.profileDir, first.sessionId)).toEqual([])
+  expect(existsSync(join(first.profileDir, 'artifacts', first.sessionId, first.artifactId))).toBe(false)
+  expect(await artifactIds(other.profileDir, other.sessionId)).toEqual([other.artifactId])
+})
+
+it('reports incomplete cleanup when RunSummary lacks sessionId', async () => {
+  const seeded = await seedRunArtifact({ includeSessionId: false })
+  const report = await deleteAutomationRun(seeded.profileDir, seeded.automationId, seeded.runId, {
+    sessionsRoot: join(seeded.profileDir, 'sessions'),
+  })
+  expect(JSON.stringify(report)).toContain('记录已删除、结果文件未能完全清理')
+  expect((await recentRuns(seeded.profileDir, seeded.automationId, 100)).some((run) => run.runId === seeded.runId)).toBe(false)
+  expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([seeded.artifactId])
+})
+
+it('invalidates writes begun while deletion awaits I/O even when no final directory exists', async () => {
+  const root = makeRoot('artifact-delete-race-')
+  const scope: ArtifactWriteScope = {
+    sessionId: 'session-1', anchor: { kind: 'turn' }, idempotency: { kind: 'tool', callId: 'race' },
+  }
+  const before = beginArtifactWrite(root, scope)
+  const writes = [before]
+  const gate = deletionBarrier()
+  deletionIo.path = join(root, 'artifacts', scope.sessionId)
+  deletionIo.wait = gate.wait
+  const removing = removeArtifactsOfSession(root, scope.sessionId)
+  try {
+    await gate.entered
+    const during = beginArtifactWrite(root, scope)
+    writes.push(during)
+    await prepareArtifact(during, { title: '迟到', format: 'markdown', content: '# 不应复活' })
+    gate.release()
+    await removing
+    for (const write of writes) {
+      await expect(commitPreparedArtifact(write)).rejects.toThrow('artifact-owner-deleted')
+      await discardPreparedArtifact(write)
+    }
+    expect(await listArtifacts(root, scope.sessionId)).toEqual([])
+    expect(existsSync(join(root, 'artifacts', scope.sessionId))).toBe(false)
+  } finally {
+    gate.release()
+    await removing
+    deletionIo.path = undefined
+    deletionIo.wait = undefined
+    await Promise.all(writes.map((write) => discardPreparedArtifact(write)))
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+it('reports the artifact removal failure but still invalidates the lease in finally', async () => {
+  const root = makeRoot('artifact-delete-fail-')
+  const scope: ArtifactWriteScope = {
+    sessionId: 'session-1', anchor: { kind: 'turn' }, idempotency: { kind: 'tool', callId: 'fail' },
+  }
+  const write = beginArtifactWrite(root, scope)
+  await prepareArtifact(write, { title: '失败', format: 'markdown', content: '# 正文' })
+  const gate = deletionBarrier()
+  deletionIo.path = join(root, 'artifacts', scope.sessionId)
+  deletionIo.wait = gate.wait
+  deletionIo.failure = Object.assign(new Error('EIO: i/o error'), { code: 'EIO' })
+  const removing = removeArtifactsOfSession(root, scope.sessionId)
+  try {
+    await gate.entered
+    gate.release()
+    await expect(removing).rejects.toThrow('EIO')
+    await expect(commitPreparedArtifact(write)).rejects.toThrow('artifact-owner-deleted')
+  } finally {
+    gate.release()
+    await removing.catch(() => undefined)
+    deletionIo.path = undefined
+    deletionIo.wait = undefined
+    deletionIo.failure = undefined
+    await discardPreparedArtifact(write)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+it('invalidates the run lease without guessing a directory when sessionId is unknown', async () => {
+  const seeded = await seedRunArtifact()
+  const scope: ArtifactWriteScope = {
+    sessionId: seeded.sessionId,
+    anchor: { kind: 'automation-run', automationId: seeded.automationId, runId: seeded.runId },
+    idempotency: { kind: 'automation-run', automationId: seeded.automationId, runId: seeded.runId },
+  }
+  const write = beginArtifactWrite(seeded.profileDir, scope)
+  await prepareArtifact(write, { title: '迟到', format: 'markdown', content: '# 迟到正文' })
+
+  await removeArtifactOfRun(seeded.profileDir, undefined, seeded.automationId, seeded.runId)
+  await expect(commitPreparedArtifact(write)).rejects.toThrow('artifact-owner-deleted')
+  await discardPreparedArtifact(write)
+  // 窄化输入不猜目录:已有结果文件保持原样,由调用方报告清理不完整。
+  expect(await artifactIds(seeded.profileDir, seeded.sessionId)).toEqual([seeded.artifactId])
+})

@@ -2738,3 +2738,139 @@ test('logs a failing artifact discard without blocking the cancelled record', as
   expect(await listArtifacts(h.profileDir, automationRunSessionId(automation.id, run.runId))).toEqual([])
   expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
 })
+
+test('pruneSessions deletes a session whose artifact is still preparing and freezes the run as owner-deleted', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir, { name: '清理中' })
+  const gate = promiseBarrier()
+  artifactBarriers.afterPrepare = gate.wait
+  const run = await startAutomation(h, automation, { runId: 'prune-delete' })
+  const sessionId = automationRunSessionId(automation.id, run.runId)
+  mkdirSync(join(h.dshHome, 'sessions', 'project', sessionId), { recursive: true })
+  try {
+    await gate.entered
+    // 回合已结束:collector 摘除、写者名额已释放、运行记录尚未落盘。
+    expect(automationCollector.has(sessionId)).toBe(false)
+    await poll(() => !h.scheduler.activeSessionIds().has(sessionId))
+    expect((await recentRuns(h.profileDir, automation.id, 100)).some((record) => record.runId === run.runId)).toBe(false)
+
+    // 真实 prune 路由:用原 collector/调度器计算保留集,不手工添加 inFlight/write session。
+    const result = await handler('automation.pruneSessions')(body({}), h.routeCtx) as { removed: number }
+    expect(result.removed).toBe(1)
+    expect(existsSync(join(h.dshHome, 'sessions', 'project', sessionId))).toBe(false)
+
+    gate.release()
+    await run.done
+  } finally {
+    gate.release()
+    await run.done
+    artifactBarriers.afterPrepare = undefined
+  }
+
+  const summary = await storedRun(h.profileDir, automation.id, run.runId)
+  expect(summary).toMatchObject({ ok: true, status: 'ok' })
+  expect(artifactFieldsOf(summary)).toEqual({
+    artifactOutcome: 'failed',
+    artifactError: 'artifact-owner-deleted',
+    artifactTitle: '季度报告',
+    artifactFormat: 'html',
+  })
+  const end = h.events.find((event) => event.event === 'automation/run-end' && event.runId === run.runId)!
+  expect(end).toMatchObject({ ok: true, status: 'ok' })
+  expect(artifactFieldsOf(end)).toEqual(artifactFieldsOf(summary))
+  expect(await listArtifacts(h.profileDir, sessionId)).toEqual([])
+  expect(existsSync(join(h.profileDir, 'artifacts', sessionId))).toBe(false)
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
+  expect(stagingResidue(h.profileDir)).toEqual([])
+})
+
+test('removes a committed artifact when the automation is deleted afterwards', async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir, { name: '先提交后删除' })
+  const run = await startAutomation(h, automation, { runId: 'commit-then-delete' })
+  await run.done
+  const summary = await storedRun(h.profileDir, automation.id, run.runId)
+  expect(summary).toMatchObject({ artifactOutcome: 'created' })
+  const sessionId = summary.sessionId!
+  expect(await listArtifacts(h.profileDir, sessionId)).toHaveLength(1)
+
+  const removed = await handler('automation.remove')(body({ id: automation.id }), h.routeCtx)
+  expect(removed).toMatchObject({ removed: true })
+  expect(await listArtifacts(h.profileDir, sessionId)).toEqual([])
+  expect(existsSync(join(h.profileDir, 'artifacts', sessionId, summary.artifactId!))).toBe(false)
+  // 已发布的 created 事件不回滚;删除只清理磁盘记录。
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toHaveLength(1)
+})
+
+test('deleting one run leaves a preparing run of another automation untouched', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const kept = await agentTask(h.profileDir, { name: '保留' })
+  const doomed = await agentTask(h.profileDir, { name: '删除' })
+  const { appendRun } = await import('../../src/huaanwork-host/automations-store.ts')
+  await appendRun(h.profileDir, doomed.id, {
+    runId: 'doomed-run',
+    startedAt: 1,
+    endedAt: 2,
+    ok: true,
+    output: 'ok',
+    status: 'ok',
+    sessionId: automationRunSessionId(doomed.id, 'doomed-run'),
+  })
+  const gate = promiseBarrier()
+  artifactBarriers.afterPrepare = gate.wait
+  const run = await startAutomation(h, kept, { runId: 'sibling-run' })
+  try {
+    await gate.entered
+    const removed = await handler('automation.deleteRun')(body({ id: doomed.id, runId: 'doomed-run' }), h.routeCtx)
+    expect(removed).toMatchObject({ removed: true })
+    gate.release()
+    await run.done
+  } finally {
+    gate.release()
+    await run.done
+    artifactBarriers.afterPrepare = undefined
+  }
+
+  const summary = await storedRun(h.profileDir, kept.id, run.runId)
+  expect(summary).toMatchObject({ artifactOutcome: 'created' })
+  expect(await listArtifacts(h.profileDir, summary.sessionId!)).toHaveLength(1)
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toHaveLength(1)
+})
+
+test('repeat deletion after a cancelled discard stays idempotent and leaves no tombstone', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir, { name: '取消后删除' })
+  const gate = promiseBarrier()
+  artifactBarriers.afterPrepare = gate.wait
+  const run = await startAutomation(h, automation, { runId: 'cancel-repeat' })
+  try {
+    await gate.entered
+    expect(await stopAutomation(automation.id)).toEqual({ stopped: true })
+    gate.release()
+    await run.done
+  } finally {
+    gate.release()
+    await run.done
+    artifactBarriers.afterPrepare = undefined
+  }
+  const summary = await storedRun(h.profileDir, automation.id, run.runId)
+  expect(summary).toMatchObject({ ok: false, status: 'cancelled' })
+  expect(artifactFieldsOf(summary)).toEqual({})
+  expect(stagingResidue(h.profileDir)).toEqual([])
+
+  const first = await handler('automation.deleteRun')(body({ id: automation.id, runId: run.runId }), h.routeCtx)
+  expect(first).toMatchObject({ removed: true })
+  const second = await handler('automation.deleteRun')(body({ id: automation.id, runId: run.runId }), h.routeCtx)
+  expect(second).toMatchObject({ removed: false, sessionDirRemoved: true })
+
+  // 删除完成后同一 runId 的新运行仍能提交正文:没有永久删除标记挡住后来的写入。
+  const again = await startAutomation(h, automation, { runId: run.runId })
+  await again.done
+  const recreated = await storedRun(h.profileDir, automation.id, again.runId)
+  expect(recreated).toMatchObject({ artifactOutcome: 'created' })
+  expect(await listArtifacts(h.profileDir, recreated.sessionId!)).toHaveLength(1)
+})
