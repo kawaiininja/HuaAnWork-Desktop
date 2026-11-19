@@ -131,6 +131,10 @@ type TurnItem =
   | { kind: "ask" }
   | { kind: "input" }
   | { kind: "todo" }
+  | { kind: "artifact" }
+  | { kind: "artifact-error" }
+  | { kind: "artifact-loading" }
+  | { kind: "artifact-group" }
   | { kind: "note" };
 
 export function hasAssistantTextAfter(items: readonly TurnItem[], index: number): boolean {

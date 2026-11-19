@@ -28,7 +28,14 @@ export function isJsonResultText(text: string): boolean {
   return typeof parsed === "object" && parsed !== null;
 }
 
-/** 不可折叠时原引用返回；可折叠时删掉全部 assistant，在第一个被删位置插入附件项。 */
+/**
+ * 不可折叠时原引用返回；可折叠时删掉全部 assistant，在第一个被删位置插入附件项。
+ *
+ * 这是**旧运行**（`RunSummary.artifactOutcome === undefined`）的唯一折叠入口：
+ * `artifactProjection.projectAutomationResult` 只在无 outcome 分支调用它。每次运行
+ * 只插 1 个 attachment，对象与渲染 id 都由调用方注入的构造器生成（App 用显式
+ * `allocId()`），模块内不得自增计数器或缓存 id。
+ */
 export function foldRunAssistantItems<T extends { kind: string }>(
   items: readonly T[],
   createAttachment: (sourceText: string) => T,

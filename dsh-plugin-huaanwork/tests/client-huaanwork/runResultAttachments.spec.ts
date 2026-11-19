@@ -52,6 +52,22 @@ test("non-JSON bodies return the same array reference untouched", () => {
   assert.equal(foldRunAssistantItems(items, () => ({ id: 99, kind: "attachment", sourceText: "" })), items);
 });
 
+test("the legacy fold inserts exactly one attachment built by the injected factory", () => {
+  type Item = { id: number; kind: string; text?: string; sourceText?: string };
+  const items: Item[] = [
+    { id: 1, kind: "assistant", text: '{"a"' },
+    { id: 2, kind: "assistant", text: ":1}" },
+  ];
+  const sources: string[] = [];
+  const folded = foldRunAssistantItems(items, (sourceText) => {
+    sources.push(sourceText);
+    return { id: 99, kind: "attachment", sourceText };
+  });
+  // 每次运行只有一个附件；id 来自调用方的工厂，不是模块内自增计数器。
+  assert.deepEqual(sources, ['{"a":1}']);
+  assert.equal(folded.filter((item) => item.kind === "attachment").length, 1);
+});
+
 test("attachment file names are exactly the two fixed names", () => {
   assert.deepEqual([...RESULT_ATTACHMENT_FILES], ["结果.md", "结果.html"]);
 });

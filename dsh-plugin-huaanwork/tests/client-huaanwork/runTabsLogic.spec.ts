@@ -3,7 +3,10 @@ import { test } from "vitest";
 
 import type { RunSummary, TaskInfo } from "../../src/client-huaanwork/logic/projects.ts";
 import {
+  automationResultRunFromEvent,
+  automationResultRunFromSummary,
   dropRunningRunIds,
+  findRunForSession,
   isRunTabLive,
   runEndNeedsFailureNotice,
   runIdOfTab,
@@ -12,6 +15,7 @@ import {
   sessionsToSuppressAfterDelete,
   settleRunningRuns,
 } from "../../src/client-huaanwork/logic/runTabsLogic.ts";
+import type { RpcEvent } from "../../src/client-huaanwork/rpc-types.ts";
 
 function run(partial: Partial<RunSummary> & { runId: string; startedAt: number }): RunSummary {
   return { endedAt: partial.startedAt + 1000, ok: true, output: "", ...partial };
@@ -224,4 +228,92 @@ test("runResultNoteText: exact footer strings (single source for run-end handler
   assert.equal(runResultNoteText("missed"), "自动化运行失败");
   assert.equal(runResultNoteText("ok"), "自动化运行完成");
   assert.equal(runResultNoteText(undefined), "自动化运行完成");
+});
+
+test("automationResultRunFromSummary carries only the result fields a projection consumes", () => {
+  assert.deepEqual(
+    automationResultRunFromSummary(run({
+      runId: "r1",
+      startedAt: 1,
+      artifactOutcome: "created",
+      artifactId: "artifact-1",
+      artifactTitle: "季度报告",
+      artifactFormat: "html",
+    })),
+    {
+      artifactOutcome: "created",
+      artifactId: "artifact-1",
+      artifactTitle: "季度报告",
+      artifactFormat: "html",
+    },
+  );
+  assert.deepEqual(
+    automationResultRunFromSummary(run({ runId: "r2", startedAt: 2, artifactOutcome: "failed", artifactError: "artifact-write-failed" })),
+    { artifactOutcome: "failed", artifactError: "artifact-write-failed" },
+  );
+  // 旧运行没有 artifactOutcome：投影对象为空，调用方仍把附件构造器交给旧折叠。
+  assert.deepEqual(automationResultRunFromSummary(run({ runId: "r3", startedAt: 3 })), {});
+});
+
+test("automationResultRunFromEvent builds the same projection fields from the live run-end event", () => {
+  const created: Extract<RpcEvent, { event: "automation/run-end" }> = {
+    event: "automation/run-end",
+    automationId: "auto-a",
+    runId: "r1",
+    projectId: null,
+    ok: true,
+    status: "ok",
+    sessionId: "sess-1",
+    artifactOutcome: "created",
+    artifactId: "artifact-1",
+    artifactTitle: "季度报告",
+    artifactFormat: "html",
+  };
+  assert.deepEqual(automationResultRunFromEvent(created), {
+    artifactOutcome: "created",
+    artifactId: "artifact-1",
+    artifactTitle: "季度报告",
+    artifactFormat: "html",
+  });
+  const failed: Extract<RpcEvent, { event: "automation/run-end" }> = {
+    event: "automation/run-end",
+    automationId: "auto-a",
+    runId: "r2",
+    projectId: null,
+    ok: true,
+    status: "ok",
+    sessionId: "sess-2",
+    artifactOutcome: "failed",
+    artifactError: "artifact-write-failed",
+    artifactFormat: "markdown",
+  };
+  assert.deepEqual(automationResultRunFromEvent(failed), {
+    artifactOutcome: "failed",
+    artifactError: "artifact-write-failed",
+    artifactFormat: "markdown",
+  });
+  const legacy: Extract<RpcEvent, { event: "automation/run-end" }> = {
+    event: "automation/run-end",
+    automationId: "auto-a",
+    runId: "r3",
+    projectId: null,
+    ok: true,
+    status: "ok",
+  };
+  assert.deepEqual(automationResultRunFromEvent(legacy), {});
+});
+
+test("findRunForSession only returns the exact automation's run for that session", () => {
+  const runs = {
+    "auto-a": [
+      run({ runId: "r-old", startedAt: 100, sessionId: "sess-old", taskId: "task-old" }),
+      run({ runId: "r-new", startedAt: 200, sessionId: "sess-new", taskId: "task-new" }),
+    ],
+    "auto-b": [run({ runId: "r-b", startedAt: 300, sessionId: "sess-b" })],
+  };
+  assert.equal(findRunForSession(runs, "auto-a", "sess-new")?.runId, "r-new");
+  // 跨 automation 的同名会话不得命中。
+  assert.equal(findRunForSession(runs, "auto-b", "sess-new"), undefined);
+  assert.equal(findRunForSession(runs, "auto-a", undefined), undefined);
+  assert.equal(findRunForSession(runs, undefined, "sess-new"), undefined);
 });

@@ -61,6 +61,7 @@ import type {
   SubagentCancelResult,
   SubagentRunProjection,
   SubagentRunSnapshot,
+  TaskArtifactSummary,
 } from "./rpc-types.ts";
 import {
   insertSubagentRunCard,
@@ -128,6 +129,8 @@ import {
   hasBufferedQueueStartForSession,
   historyItemsFromRecords,
   isAutomationSessionId,
+  RESULT_PRESENT_FAILURE_NOTE,
+  RESULT_PRESENT_TOOL,
   takeEarlyPendingEvents,
   unscopedSessions,
 } from "./logic/sessionChannel.ts";
@@ -222,6 +225,9 @@ import {
 } from "./logic/goalRound.ts";
 import {
   dropRunningRunIds,
+  automationResultRunFromEvent,
+  automationResultRunFromSummary,
+  findRunForSession,
   isRunTabLive,
   runEndNeedsFailureNotice,
   runResultNoteText,
@@ -231,15 +237,28 @@ import {
 } from "./logic/runTabsLogic.ts";
 import { reconcileStaleAutomationTabs } from "./logic/automationRunLink.ts";
 import {
+  insertArtifactIntoHistory,
+  insertBeforeArtifactGroup,
+  openArtifactPreview,
+  projectAutomationResult,
+  settleArtifactLoading,
+  shouldApplyArtifactResponse,
+  sortArtifactsForBackfill,
+  type ArtifactErrorCardItem,
+  type ArtifactGroupCardItem,
+  type ArtifactLoadingCardItem,
+  type ArtifactResultCardItem,
+} from "./logic/artifactProjection.ts";
+import {
   RESULT_ATTACHMENT_FILES,
   attachmentAsAssistant,
-  foldRunAssistantItems,
   type ResultAttachmentFile,
 } from "./logic/runResultAttachments.ts";
 import { renderResultHtml, renderResultMarkdown } from "./logic/runResultRender.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 import ToolPanel from "./ToolPanel.tsx";
 import ProgressPanel from "./ProgressPanel.tsx";
+import ResultArtifactCard from "./ResultArtifactCard.tsx";
 
 /**
  * 用户对话会话 id（事件路由用）：huaanwork-chat- 旧会话与 huaanwork-<16hex digest> 新会话。
@@ -289,7 +308,7 @@ type AskCard = ApprovalCardView & {
   summary?: string;
 };
 
-type ChatItem =
+export type ChatItem =
   | {
       id: number;
       kind: "user";
@@ -310,6 +329,10 @@ type ChatItem =
   | { id: number; kind: "ask"; card: AskCard }
   | { id: number; kind: "input"; card: InputCard }
   | { id: number; kind: "attachment"; sourceText: string }
+  | ArtifactResultCardItem
+  | ArtifactErrorCardItem
+  | ArtifactLoadingCardItem
+  | ArtifactGroupCardItem
   | { id: number; kind: "agent-confirm"; card: AgentPackageConfirmCard }
   | { id: number; kind: "skill-confirm"; card: SkillConfirmCard; consumed?: boolean }
   | { id: number; kind: "skill-success"; draftId: string; name: string; text: string }
@@ -349,6 +372,8 @@ type ChatTab = {
   runPlaceholder?: boolean;
   /** 右侧「预览」打开的结果附件（规格 §5）：选择记在标签上，换标签再回来沿用该标签上次的选择。 */
   previewFile?: ResultAttachmentFile;
+  /** 右侧「预览」选中的 Artifact（Task 5）：按 id 读取，内容由预览面板渲染。 */
+  previewArtifactId?: string;
   /** 每个用户消息回合是否已终结（按用户消息条目 id 归因）；面板据此区分「进行中」与「中断」。 */
   turnFinalByUserId?: Readonly<Record<number, boolean>>;
   /** 没有用户消息条目的标签（自动化运行记录等）用同一个合成回合结算。 */
@@ -617,6 +642,17 @@ export default function App() {
   const subagentRunsRef = useRef<SubagentRunsState>(INITIAL_SUBAGENT_RUNS);
   /** 对账代际:断连与 ready 都推进它,迟到的 snapshot 应答据此丢弃(设计 D6)。 */
   const reconcileEpochRef = useRef(0);
+  /** Artifact 摘要缓存：artifact/created 与 artifact.get/list 共用，run-end 投影按 id 取。 */
+  const artifactSummariesRef = useRef<Map<string, TaskArtifactSummary>>(new Map());
+  /** 右栏预览已读取的摘要与正文；渲染由 Task 6 的预览组件接管。 */
+  const [artifactPreview, setArtifactPreview] = useState<{
+    artifactId: string;
+    sessionId: string;
+    artifact: TaskArtifactSummary;
+    content: string;
+  } | null>(null);
+  const [artifactPreviewError, setArtifactPreviewError] = useState<{ artifactId: string; message: string } | null>(null);
+  const [artifactPreviewBusy, setArtifactPreviewBusy] = useState(false);
   const [expandedByRunId, setExpandedByRunId] = useState<Record<string, boolean>>({});
   const [confirmingTarget, setConfirmingTarget] = useState<SubagentConfirmTarget | null>(null);
   const [cancelBusyByRunId, setCancelBusyByRunId] = useState<Record<string, boolean>>({});
@@ -1031,6 +1067,17 @@ export default function App() {
   }, [authPhase]);
 
   const activeChat = chatTabs.find((tab) => tab.id === activeTab) ?? chatTabs[0];
+  /**
+   * 选中会话切换时推进既有对账代际：迟到的 Artifact 摘要/正文应答不能覆盖当前预览。
+   * 旧会话或旧代际的响应由 `shouldApplyArtifactResponse` 直接丢弃。
+   */
+  const previewEpochSessionRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const sessionId = activeChat.sessionId;
+    if (previewEpochSessionRef.current === sessionId) return;
+    previewEpochSessionRef.current = sessionId;
+    reconcileEpochRef.current += 1;
+  }, [activeChat.sessionId]);
   /** 当前标签发送时使用的模型：本标签选择 > 子任务记住的模型 > 全局当前模型。 */
   const activeTabTask = activeChat.taskId
     ? projectTasks.find((task) => task.id === activeChat.taskId)
@@ -1124,6 +1171,16 @@ export default function App() {
    */
   const previewAttachment = activeChat.previewFile ? items.find((item) => item.kind === "attachment") : undefined;
   const previewFile = previewAttachment ? activeChat.previewFile : undefined;
+  const previewArtifactId = activeChat.previewArtifactId;
+  const previewArtifactItem = previewArtifactId
+    ? items.find((item): item is ArtifactResultCardItem => item.kind === "artifact" && item.artifactId === previewArtifactId)
+    : undefined;
+  const previewArtifactLoaded = previewArtifactId && artifactPreview?.artifactId === previewArtifactId
+    ? artifactPreview
+    : undefined;
+  const previewArtifactFailure = previewArtifactId && artifactPreviewError?.artifactId === previewArtifactId
+    ? artifactPreviewError
+    : undefined;
   const previewContent = useMemo(() => {
     // 预览页不可见时不解析/渲染：token 流会持续替换 items，不能每次刷新都重算。
     if (rightTab !== "preview" || !previewAttachment || !previewFile) return undefined;
@@ -1205,15 +1262,56 @@ export default function App() {
     };
   }, [view, ready, sidecarDead, refreshSlashCatalog]);
 
-  /** 向指定标签追加一条提示；标签已关闭时自然丢弃。 */
+  /** 向指定标签追加一条提示；标签已关闭时自然丢弃。新提示永远落在未定位结果分组之前。 */
   function noteTab(tabId: string, text: string) {
     const note: ChatItem = { id: allocId(), kind: "note", text };
-    setChatTabs((prev) => prev.map((tab) => (tab.id === tabId ? { ...tab, items: [...tab.items, note] } : tab)));
+    setChatTabs((prev) =>
+      prev.map((tab) => (tab.id === tabId ? { ...tab, items: insertBeforeArtifactGroup(tab.items, note) } : tab)),
+    );
   }
 
   /** 向最近激活的对话标签追加一条提示。 */
   function noteActive(text: string) {
     noteTab(activeTab, text);
+  }
+
+  /** 会话的 Artifact 摘要（按 createdAt/artifactId 排序）；读取失败不阻塞历史打开。 */
+  async function listSessionArtifacts(sessionId: string): Promise<TaskArtifactSummary[]> {
+    try {
+      const listed = await rpcCall<{ artifacts?: TaskArtifactSummary[] }>("artifact.list", { sessionId });
+      return sortArtifactsForBackfill(Array.isArray(listed.artifacts) ? listed.artifacts : []);
+    } catch {
+      return [];
+    }
+  }
+
+  /** 单个 Artifact 摘要：先查事件缓存，再 artifact.get；失败时退回列表快照。 */
+  async function fetchArtifactSummary(
+    sessionId: string,
+    artifactId: string,
+  ): Promise<TaskArtifactSummary | undefined> {
+    const cached = artifactSummariesRef.current.get(artifactId);
+    if (cached) return cached;
+    try {
+      const got = await rpcCall<{ artifact?: TaskArtifactSummary }>("artifact.get", { sessionId, artifactId });
+      if (got?.artifact) {
+        artifactSummariesRef.current.set(got.artifact.artifactId, got.artifact);
+        return got.artifact;
+      }
+    } catch {
+      // 摘要暂不可读：退回到列表快照补齐（created 事件丢失时的同一条补齐路径）。
+    }
+    const artifacts = await listSessionArtifacts(sessionId);
+    return artifacts.find((artifact) => artifact.artifactId === artifactId);
+  }
+
+  /** 普通会话历史回填：列表快照逐项按确定锚点插入（重复 id 不插第二张卡）。 */
+  async function historyItemsWithArtifacts(view: SessionLogView): Promise<ChatItem[]> {
+    let items: ChatItem[] = historyToChatItems(view);
+    for (const artifact of await listSessionArtifacts(view.sessionId)) {
+      items = [...insertArtifactIntoHistory(items, artifact, allocId)];
+    }
+    return items;
   }
 
   /**
@@ -1307,7 +1405,7 @@ export default function App() {
           records: Array.isArray(opened.records) ? opened.records : [],
         };
         await rpcCall("session.resume", { sessionId });
-        const items = historyToChatItems(view);
+        const items = await historyItemsWithArtifacts(view);
         setChatTabs((prev) => [
           ...prev,
           {
@@ -1639,11 +1737,19 @@ export default function App() {
       const notes = texts.map((text) => ({ id: allocId(), kind: "note" as const, text }));
       // 等待期间用户可能已发出新消息：在最新状态上判断，旧回合的结论不落到新消息之后。
       setChatTabs((prev) =>
-        prev.map((candidate) =>
-          candidate.id === turn.tabId
-            ? { ...candidate, items: appendOutcomeNotes(candidate.items, turn.turnUserId, notes) as ChatItem[] }
-            : candidate,
-        ),
+        prev.map((candidate) => {
+          if (candidate.id !== turn.tabId) return candidate;
+          const appended = appendOutcomeNotes(candidate.items, turn.turnUserId, notes) as ChatItem[];
+          if (appended === candidate.items) return candidate;
+          // 追加落点若越过尾部未定位结果分组，把本回合结论移回组标题之前。
+          if (!candidate.items.some((item) => item.kind === "artifact-group")) {
+            return { ...candidate, items: appended };
+          }
+          const added = new Set(notes.map((note) => note.id));
+          let items = appended.filter((item) => !added.has(item.id));
+          for (const note of notes) items = insertBeforeArtifactGroup(items, note);
+          return { ...candidate, items };
+        }),
       );
     };
     /** 回合正常结束：读侧核对用户写明的文件与命令，把结果写进对话；不重跑任何命令。 */
@@ -1887,30 +1993,38 @@ export default function App() {
               return next;
             });
             automationActiveRef.current = false;
-            // 运行对话标签追加结果脚注（过程 token 已由 sessionId 路由进同一标签）。
+            // 运行对话标签统一投影结果卡（过程 token 已由 sessionId 路由进同一标签）。
             if (event.sessionId) {
-              const target = boundTabFor(event.sessionId);
+              const sessionId = event.sessionId;
+              const target = boundTabFor(sessionId);
               if (target) {
                 // 文案单一来源在 runTabsLogic（重启重建的回填脚注复用同一映射）。
                 const resultLabel = runResultNoteText(event.status);
-                setChatTabs((prev) =>
-                  prev.map((tab) =>
-                    tab.id === target
-                      ? {
-                          ...tab,
-                          items: [
-                            // 整段 JSON 输出先收成附件项，结果脚注仍在末尾。
-                            ...foldRunAssistantItems(tab.items, (sourceText) => ({
-                              id: allocId(),
-                              kind: "attachment" as const,
-                              sourceText,
-                            })),
-                            { id: allocId(), kind: "note" as const, text: resultLabel },
-                          ],
-                        }
-                      : tab,
-                  ),
-                );
+                // 实时路径：run 直接由当前 run-end 事件构造，不额外拉运行列表或猜事件顺序。
+                const run = automationResultRunFromEvent(event);
+                void (async () => {
+                  // created 事件丢失时用 RunSummary.artifactId + artifact.get/list 补齐；
+                  // 摘要暂不可读时投影成可重试占位，不把 created 改成 failed。
+                  const artifact = run.artifactOutcome === "created" && run.artifactId
+                    ? await fetchArtifactSummary(sessionId, run.artifactId)
+                    : undefined;
+                  setChatTabs((prev) =>
+                    prev.map((tab) => {
+                      // 等待摘要期间标签可能被关闭或改绑：迟到的应答只写仍属于该会话的标签。
+                      if (tab.id !== target || tab.sessionId !== sessionId) return tab;
+                      // 新协议只展示唯一结果卡/失败卡；无 artifactOutcome 的旧运行仍走旧折叠。
+                      const projected = projectAutomationResult(tab.items, run, artifact, (sourceText) => ({
+                        id: allocId(),
+                        kind: "attachment" as const,
+                        sourceText,
+                      }));
+                      return {
+                        ...tab,
+                        items: insertBeforeArtifactGroup(projected, { id: allocId(), kind: "note" as const, text: resultLabel }),
+                      };
+                    }),
+                  );
+                })();
                 // 运行的权威结束事件；session/end 可能被 stale-idle 闸门丢弃。
                 applyFinalForTab(target, event.sessionId, {
                   kind: "run-end",
@@ -2014,6 +2128,24 @@ export default function App() {
         if (event.terminal === "cancelled") setChannelItems((items) => consumeSkillConfirmCards(items), event.sessionId);
         const target = targetTabFor(eventSessionId);
         if (target) noteTab(target, event.text);
+        return;
+      }
+      // 结果页提交成功：先暂存摘要（run-end 投影与预览共用）；普通会话立即插卡，
+      // 自动化运行标签等到 run-end 统一投影，同一 artifactId 只渲染一张卡。
+      if (event.event === "artifact/created") {
+        const artifact = event.artifact;
+        artifactSummariesRef.current.set(artifact.artifactId, artifact);
+        const target = boundTabFor(event.sessionId);
+        if (!target) return;
+        const tab = chatTabsRef.current.find((candidate) => candidate.id === target);
+        if (tab?.automationId) return;
+        setChatTabs((prev) =>
+          prev.map((candidate) =>
+            candidate.id === target
+              ? { ...candidate, items: insertArtifactIntoHistory(candidate.items, artifact, allocId) }
+              : candidate,
+          ),
+        );
         return;
       }
       // 排队项出队/复检失败：早到的那条已在上方按 pending 暂存，这里只处理能归属的。
@@ -2136,7 +2268,7 @@ export default function App() {
                 ? {
                     ...tab,
                     ...(exitNotice.sessionFailed ? { sessionFailed: true } : {}),
-                    items: [...tab.items, { id: allocId(), kind: "note" as const, text: exitNotice.text }],
+                    items: insertBeforeArtifactGroup(tab.items, { id: allocId(), kind: "note" as const, text: exitNotice.text }),
                   }
                 : tab,
             ),
@@ -2434,17 +2566,28 @@ export default function App() {
           log: "",
           records: Array.isArray(opened.records) ? opened.records : [],
         };
-        const items = [
-          // 回放历史里的整段 JSON 回复同样收成附件项；结果脚注仍在其后（末尾）。
-          ...foldRunAssistantItems(historyToChatItems(view), (sourceText) => ({
-            id: allocId(),
-            kind: "attachment" as const,
-            sourceText,
-          })),
+        // 历史回填使用持久化 RunSummary（实时路径用 run-end 事件，二者不混用）；
+        // created 主卡按 artifactId 从列表快照补齐，全部按确定锚点插入。
+        const run = findRunForSession(automationRuns, automationId, sessionId);
+        const artifacts = await listSessionArtifacts(sessionId);
+        const primary = run?.artifactId
+          ? artifacts.find((artifact) => artifact.artifactId === run.artifactId)
+          : undefined;
+        let items: ChatItem[] = [
+          ...projectAutomationResult(
+            historyToChatItems(view),
+            run ? automationResultRunFromSummary(run) : {},
+            primary,
+            (sourceText) => ({ id: allocId(), kind: "attachment" as const, sourceText }),
+          ),
         ];
         // 按 sessionId 匹配所属 run 取结果脚注：重建后同一任务又跑了新 run 也不会拿错。
-        const run = (automationRuns[automationId] ?? []).find((item) => item.sessionId === sessionId);
         if (run) items.push({ id: allocId(), kind: "note", text: runResultNoteText(run.status) });
+        for (const artifact of artifacts) {
+          items = [
+            ...insertArtifactIntoHistory(items, artifact, allocId, run ? { automationId, summary: run } : undefined),
+          ];
+        }
         setChatTabs((prev) =>
           prev.map((item) => (item.id === tabId
             ? { ...item, items, runPlaceholder: false, turnFinalByUserId: historicalTurnFinalByUserId(items), turnFinalWithoutUser: true }
@@ -2750,7 +2893,7 @@ export default function App() {
     setChatTabs((prev) =>
       prev.map((tab) =>
         tab.id === target
-          ? { ...tab, pendingPick: false, projectId: project.id, sessionId: undefined, items: [...tab.items, note] }
+          ? { ...tab, pendingPick: false, projectId: project.id, sessionId: undefined, items: insertBeforeArtifactGroup(tab.items, note) }
           : tab,
       ),
     );
@@ -3004,7 +3147,7 @@ export default function App() {
       // 时钟冒充 Host 的 TurnAnchor.startedAt。
       const clientMessageId = crypto.randomUUID();
       const userMsg: ChatItem = { id: allocId(), kind: "user", text, clientMessageId, notStarted: true };
-      setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, items: [...tab.items, userMsg] } : tab)));
+      setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, items: insertBeforeArtifactGroup(tab.items, userMsg) } : tab)));
       // 固定话术不是输入框草稿：发完不撤用户正在写的内容。
       if (textOverride === undefined) setDraft("");
       // 应答与 WebSocket 事件不保证先后：发送前先记下本次发送的身份（标签 + 本地消息 id），
@@ -3109,12 +3252,13 @@ export default function App() {
                   ...tab,
                   // 该标签仍有正在执行的回合时，这条发送失败不是会话失败。
                   ...(tabRunOf(chatId).running ? {} : { sessionFailed: true }),
-                  items: [
-                    ...tab.items.map((item) => (
+                  // 失败脚注仍是普通提示：落在尾部未定位结果分组之前。
+                  items: insertBeforeArtifactGroup(
+                    tab.items.map((item) => (
                       item.kind === "user" && item.id === userMsg.id ? { ...item, sendRejected: true } : item
                     )),
                     note,
-                  ],
+                  ),
                 }
               : tab,
           ),
@@ -3158,7 +3302,9 @@ export default function App() {
     patchTabTurn(tabId, { stopping: true, pending: ticket });
     const noteFor = (text: string) => {
       const note: ChatItem = { id: allocId(), kind: "note", text };
-      setChatTabs((prev) => prev.map((tab) => (tab.id === tabId ? { ...tab, items: [...tab.items, note] } : tab)));
+      setChatTabs((prev) =>
+        prev.map((tab) => (tab.id === tabId ? { ...tab, items: insertBeforeArtifactGroup(tab.items, note) } : tab)),
+      );
     };
     try {
       await rpcCall("session.cancel", { sessionId });
@@ -3167,7 +3313,14 @@ export default function App() {
         applyFinalForTab(tabId, ticket.sessionId, { kind: "session-end", ok: false, cancelled: true });
         setChatTabs((prev) => prev.map((tab) => (
           tab.id === tabId
-            ? { ...tab, items: [...interruptTurnItems(tab.items), { id: allocId(), kind: "note" as const, text: "已停止" }] }
+            ? {
+                ...tab,
+                items: insertBeforeArtifactGroup(interruptTurnItems(tab.items), {
+                  id: allocId(),
+                  kind: "note" as const,
+                  text: "已停止",
+                }),
+              }
             : tab
         )));
       }
@@ -3271,9 +3424,72 @@ export default function App() {
 
   /** 点附件：留在当前对话，右侧切到预览并展开（规格 §5）。 */
   function handleOpenAttachment(file: ResultAttachmentFile) {
-    setChatTabs((prev) => prev.map((tab) => (tab.id === activeTab ? { ...tab, previewFile: file } : tab)));
+    // 清掉上一次选中的 Artifact：预览栏以 Artifact 优先，残留会让附件打不开。
+    setChatTabs((prev) => prev.map((tab) => (tab.id === activeTab ? { ...tab, previewFile: file, previewArtifactId: undefined } : tab)));
     setRightTab("preview");
     setRightCollapsed(false);
+  }
+
+  /**
+   * 点结果卡：留在当前对话，选中该 Artifact，右侧切到预览并展开（规格 §7.1）。
+   * 请求发起时捕获会话与代际；返回后只有当前选择仍匹配才写入预览。
+   */
+  async function handleOpenArtifact(artifactId: string) {
+    const tabId = activeTabRef.current;
+    const tab = chatTabsRef.current.find((item) => item.id === tabId);
+    const sessionId = tab?.sessionId;
+    if (!sessionId) return;
+    const request = { sessionId, epoch: reconcileEpochRef.current };
+    setRightTab("preview");
+    setRightCollapsed(false);
+    setChatTabs((prev) =>
+      prev.map((item) => (item.id === tabId ? { ...item, previewArtifactId: artifactId } : item)),
+    );
+    setArtifactPreviewBusy(true);
+    setArtifactPreviewError(null);
+    const next = await openArtifactPreview(
+      { rightOpen: !rightCollapsed, rightTab, previewArtifactId: tab.previewArtifactId },
+      artifactId,
+      async (id) => {
+        const summary = await rpcCall<{ artifact?: TaskArtifactSummary }>("artifact.get", { sessionId, artifactId: id });
+        const body = await rpcCall<{ artifact?: TaskArtifactSummary; content: string }>("artifact.content", {
+          sessionId,
+          artifactId: id,
+        });
+        const artifact = body.artifact ?? summary.artifact;
+        if (!artifact) throw new Error("artifact-not-found");
+        return { artifact, content: body.content };
+      },
+    );
+    setArtifactPreviewBusy(false);
+    const currentTab = chatTabsRef.current.find((item) => item.id === tabId);
+    const current = { sessionId: currentTab?.sessionId ?? "", epoch: reconcileEpochRef.current };
+    if (!shouldApplyArtifactResponse(current, request) || currentTab?.previewArtifactId !== artifactId) return;
+    if (next.previewError) {
+      setArtifactPreviewError({ artifactId, message: next.previewError });
+      return;
+    }
+    if (next.preview) {
+      artifactSummariesRef.current.set(next.preview.artifact.artifactId, next.preview.artifact);
+      setArtifactPreview({ artifactId, sessionId, ...next.preview });
+    }
+  }
+
+  /** 占位卡重试：读到摘要换成结果卡；仍读不到由 settleArtifactLoading 收敛为错误终态。 */
+  async function retryArtifact(tabId: string, artifactId?: string) {
+    const tab = chatTabsRef.current.find((item) => item.id === tabId);
+    const sessionId = tab?.sessionId;
+    if (!sessionId) return;
+    const artifact = artifactId
+      ? await fetchArtifactSummary(sessionId, artifactId)
+      : (await listSessionArtifacts(sessionId))[0];
+    setChatTabs((prev) =>
+      prev.map((item) =>
+        item.id === tabId && item.sessionId === sessionId
+          ? { ...item, items: settleArtifactLoading(item.items, artifactId, artifact) }
+          : item,
+      ),
+    );
   }
 
   /**
@@ -3303,26 +3519,22 @@ export default function App() {
       const text = planExitNote(result);
       if (!text) {
         const note: ChatItem = { id: allocId(), kind: "note", text: "未能退出计划模式" };
-        setChatTabs((prev) => prev.map((tab) => (tab.id === target ? { ...tab, items: [...tab.items, note] } : tab)));
+        setChatTabs((prev) =>
+          prev.map((tab) => (tab.id === target ? { ...tab, items: insertBeforeArtifactGroup(tab.items, note) } : tab)),
+        );
         return;
       }
       const note: ChatItem = { id: allocId(), kind: "note", text };
       setChatTabs((prev) =>
-        prev.map((tab) =>
-          tab.id === target
-            ? {
-                ...tab,
-                items: [
-                  ...tab.items.map((item) =>
-                    item.kind === "ask" && item.card.toolName === "plan-review" && !item.card.answered && !item.card.autoContinue
-                      ? { ...item, card: { ...item.card, answered: "reject" as const } }
-                      : item,
-                  ),
-                  note,
-                ],
-              }
-            : tab,
-        ),
+        prev.map((tab) => {
+          if (tab.id !== target) return tab;
+          const settled = tab.items.map((item) =>
+            item.kind === "ask" && item.card.toolName === "plan-review" && !item.card.answered && !item.card.autoContinue
+              ? { ...item, card: { ...item.card, answered: "reject" as const } }
+              : item,
+          );
+          return { ...tab, items: insertBeforeArtifactGroup(settled, note) };
+        }),
       );
     } catch (error) {
       noteActive(error instanceof Error ? error.message : String(error));
@@ -3510,7 +3722,7 @@ export default function App() {
       const id = `work-${nextChatSeq.current}`;
       nextChatSeq.current += 1;
       const label = view.title && view.title !== sessionId ? view.title.slice(0, 24) : `任务 ${nextChatSeq.current - 1}`;
-      const items = historyToChatItems(view);
+      const items = await historyItemsWithArtifacts(view);
       // 防御：恢复的标签一律不绑项目（评审 P2-4），杜绝『有历史却命中懒创建』
       setChatTabs((prev) => [
         ...prev,
@@ -3987,6 +4199,8 @@ export default function App() {
                     onInput={answerInput}
                     onThinkingToggle={toggleThinking}
                     onOpenAttachment={handleOpenAttachment}
+                    onOpenArtifact={(artifactId) => void handleOpenArtifact(artifactId)}
+                    onRetryArtifact={(artifactId) => void retryArtifact(activeChat.id, artifactId)}
                     onCancelWaiting={(queueItemId) => void cancelWaiting(queueItemId)}
                     onSkillConsent={() => void send("确认")}
                     onSkillRevise={focusComposer}
@@ -4228,7 +4442,24 @@ export default function App() {
             </div>
             <div className="right-body">
               {rightTab === "preview" ? (
-                previewFile && previewAttachment ? (
+                previewArtifactId ? (
+                  <div className="panel-card preview-card">
+                    <p className="h preview-head">
+                      <span>{previewArtifactLoaded?.artifact.title ?? previewArtifactItem?.artifact.title ?? "结果页"}</span>
+                    </p>
+                    {artifactPreviewBusy ? (
+                      <p className="panel-empty">正在读取结果…</p>
+                    ) : previewArtifactFailure ? (
+                      <p className="panel-empty">{previewArtifactFailure.message}</p>
+                    ) : previewArtifactLoaded?.artifact.format === "markdown" ? (
+                      <pre className="preview-md">{previewArtifactLoaded.content}</pre>
+                    ) : previewArtifactLoaded ? (
+                      <p className="panel-empty">HTML 结果将在安全沙箱预览中展示</p>
+                    ) : (
+                      <p className="panel-empty">结果尚未读取</p>
+                    )}
+                  </div>
+                ) : previewFile && previewAttachment ? (
                   <div className="panel-card preview-card">
                     <p className="h preview-head">
                       <span>{previewFile}</span>
@@ -4607,6 +4838,8 @@ export function handleEvent(
       setItems((prev) => applyReasoning(prev, event.text, event.final === true, allocId, event.roundKey), event.sessionId);
       break;
     case "tool/start":
+      // 结果页工具的参数含完整正文：成功只由 Artifact 卡展示，不建普通工具卡。
+      if (event.name === RESULT_PRESENT_TOOL) break;
       if (event.name === "todo_write" && event.todos) {
         const todos = event.todos;
         // 待办只属于当前回合的真实用户开启者：锚点不精确或轮次回退一律不写（面板与主流都不更新）。
@@ -4635,6 +4868,16 @@ export function handleEvent(
       );
       break;
     case "tool/end":
+      // 结果页工具没有工具卡可配对：失败只留一条不含参数的紧凑提示，成功静默。
+      if (event.name === RESULT_PRESENT_TOOL) {
+        if (event.isError === true) {
+          setItems(
+            (prev) => insertTurnItem(prev, { id: allocId(), kind: "note", text: RESULT_PRESENT_FAILURE_NOTE }),
+            event.sessionId,
+          );
+        }
+        break;
+      }
       setItems((prev) => applyToolEnd(prev, event), event.sessionId);
       break;
     case "approval/asked": {
@@ -4694,15 +4937,18 @@ export function handleEvent(
  * 的消息虽然排在后面，但还没开启回合，流式条目必须落在它们前面。
  * 标签还没有任何已启动回合时（首条消息刚插入、应答未回），这条消息就是回合的开头，
  * 写入位置是末尾——不能把流式正文插到问题前面。
+ * 尾部的「未定位的历史结果」分组不算正常内容：新的回合条目始终写在组标题之前。
  */
 function turnAppendIndex(items: readonly ChatItem[]): number {
   const turnStart = currentTurnStart(items);
-  if (turnStart === 0) return items.length;
-  for (let index = turnStart; index < items.length; index += 1) {
+  const groupStart = items.findIndex((item) => item.kind === "artifact-group");
+  const normalEnd = groupStart < 0 ? items.length : groupStart;
+  if (turnStart === 0 || turnStart >= normalEnd) return normalEnd;
+  for (let index = turnStart; index < normalEnd; index += 1) {
     const item = items[index];
     if (item?.kind === "user" && isUnstartedUserItem(item)) return index;
   }
-  return items.length;
+  return normalEnd;
 }
 
 /**
@@ -5051,6 +5297,8 @@ function ChatRow({
   onSkillRevise,
   onSkillCancel,
   onSkillGoToMine,
+  onOpenArtifact,
+  onRetryArtifact,
   reasoning = "",
   hasAssistantText = false,
 }: {
@@ -5062,6 +5310,10 @@ function ChatRow({
   onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
   onThinkingToggle?: (itemId: number, userToggled: "expand" | "collapse") => void;
   onOpenAttachment?: (file: ResultAttachmentFile) => void;
+  /** 结果卡：打开右侧预览并读取该 Artifact。 */
+  onOpenArtifact?: (artifactId: string) => void;
+  /** 结果页占位卡：重试读取摘要；仍失败收敛为无正文错误卡。 */
+  onRetryArtifact?: (artifactId?: string) => void;
   /** 等待中的用户消息：取消这一条排队项。 */
   onCancelWaiting?: (queueItemId: string) => void;
   /** 技能确认卡：同意句、继续修改（聚焦输入框）与取消。 */
@@ -5188,6 +5440,10 @@ function ChatRow({
       </div>
     );
   }
+  if (item.kind === "artifact" || item.kind === "artifact-error" || item.kind === "artifact-loading") {
+    return <ResultArtifactCard item={item} onOpen={onOpenArtifact} onRetry={onRetryArtifact} />;
+  }
+  if (item.kind === "artifact-group") return <div className="note">{item.text}</div>;
   if (item.kind === "input") return <InputCardView itemId={item.id} card={item.card} blocked={blocked} onInput={onInput} />;
   if (item.card.toolName === "plan-review") return <PlanCard card={item.card} blocked={blocked} onAnswer={onAnswer} />;
   return (

@@ -90,6 +90,15 @@ export function chatTabHasConversation(tab: { items: readonly TitleItem[] }): bo
 /** 会话日志详情记录（与 sidecar session-view 的 detailRecords 对齐；唯一定义在 rpc-types）。 */
 export type HistoryRecord = SessionDetailRecord;
 
+/**
+ * 结果页工具名。参数含完整结果正文，实时与历史都不展示它的普通工具卡；
+ * 与 src/huaanwork-guardrails/result-artifact-tools.ts 的 `RESULT_PRESENT_TOOL` 同名。
+ */
+export const RESULT_PRESENT_TOOL = "result_present";
+
+/** `result_present` 失败的紧凑提示；不含参数正文，成功结果只由 Artifact 卡展示。 */
+export const RESULT_PRESENT_FAILURE_NOTE = "结果页提交失败";
+
 /** 历史记录映射后的对话流条目（App 侧再包一层 id 成为 ChatItem）。 */
 export type HistoryChatItem =
   | {
@@ -329,6 +338,10 @@ export function takeEarlyPendingEvents(
 export function historyItemsFromRecords(records: readonly HistoryRecord[]): HistoryChatItem[] {
   const items: HistoryChatItem[] = [];
   const todoCallIds = new Set<string>();
+  const resultPresentCallIds = new Set<string>();
+  // 无 callId 的 result_present 调用只记个数：后面的无 callId 结果按顺序归它，
+  // 不能被当成普通工具调用配对，也不能落到孤儿失败提示的通用分支。
+  let resultPresentWithoutCallId = 0;
   for (const record of records) {
     if (record.kind === "user") {
       if (record.goalRound !== undefined) {
@@ -351,6 +364,13 @@ export function historyItemsFromRecords(records: readonly HistoryRecord[]): Hist
       continue;
     }
     if (record.kind === "tool-call") {
+      if (record.name === RESULT_PRESENT_TOOL) {
+        // 结果页工具永远不是普通工具卡：成功只由 Artifact 卡展示，失败退化为紧凑提示。
+        // 参数正文从不进入对话流；历史日志字段也不作为展示兜底。
+        if (record.callId !== undefined) resultPresentCallIds.add(record.callId);
+        else resultPresentWithoutCallId += 1;
+        continue;
+      }
       if (record.name === "todo_write") {
         // 坏参数只留安全提示，不展开原始参数；坏条目已由宿主逐条过滤过。
         if (!Array.isArray(record.todos)) {
@@ -381,6 +401,17 @@ export function historyItemsFromRecords(records: readonly HistoryRecord[]): Hist
 
     // 待办卡已吸收本次调用的结果：不再生成第二条待办，也不留孤儿工具失败提示。
     if (record.callId !== undefined && todoCallIds.has(record.callId)) continue;
+    // 结果页工具的结果同样不再配对：成功静默；失败只追加不含参数的紧凑提示。
+    const resultPresent = record.callId !== undefined
+      ? resultPresentCallIds.has(record.callId)
+      : resultPresentWithoutCallId > 0;
+    if (resultPresent) {
+      if (record.callId === undefined) resultPresentWithoutCallId -= 1;
+      if (record.isError && record.synthetic === undefined) {
+        items.push({ kind: "note", text: RESULT_PRESENT_FAILURE_NOTE });
+      }
+      continue;
+    }
     let turnStart = 0;
     for (let index = items.length - 1; index >= 0; index -= 1) {
       if (items[index]?.kind === "user") {
