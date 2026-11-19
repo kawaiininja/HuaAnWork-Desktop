@@ -7,6 +7,7 @@
  * 共享定义、普通链接与围栏代码块保持原样。原始 HTML 与不安全协议仍由上游渲染器禁用。
  */
 import { type MarkdownLabels, MarkdownText } from "@deepseek-ai/dsh-client-ui-primitives";
+import { memo, useMemo } from "react";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { gfmFromMarkdown } from "mdast-util-gfm";
 import { mathFromMarkdown } from "mdast-util-math";
@@ -72,11 +73,19 @@ export function withoutRemoteMarkdownImages(content: string): string {
     );
 }
 
-/** 右侧预览的 Markdown 正文；禁用流式解析与文件提及/本地图片词汇。 */
-export default function ArtifactMarkdownView({ content }: { content: string }) {
+/**
+ * 右侧预览的 Markdown 正文；禁用流式解析与文件提及/本地图片词汇。
+ *
+ * 父页面每个流式 token 都会重渲染，因此过滤结果按 `content` 记忆化，并以 `memo`
+ * 跳过内容未变的整棵渲染：避免每帧重新解析整篇 Markdown（可达数 MiB）。
+ */
+function ArtifactMarkdownView({ content }: { content: string }) {
+  const filtered = useMemo(() => withoutRemoteMarkdownImages(content), [content]);
   return (
     <div className="artifact-markdown">
-      <MarkdownText text={withoutRemoteMarkdownImages(content)} streaming={false} labels={labels} />
+      <MarkdownText text={filtered} streaming={false} labels={labels} />
     </div>
   );
 }
+
+export default memo(ArtifactMarkdownView);
