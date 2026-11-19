@@ -1,104 +1,190 @@
 # 任务结果 Artifact 用户验收证据（规格 §12.2）
 
 - 分支：`feat/task-result-artifacts-impl`
-- 提交：`48c36b134ed7aaf9f9a237f641ffa90eed1aa33c`
+- 提交：`8950c258c5`（门禁 `EXIT=0` 的当前 HEAD）
 - 规格：`docs/superpowers/specs/2026-11-15-task-result-artifacts-design.md` §12.2
-- 环境：macOS 27.0.0 / arm64；Node v24.22.1；执行时间 2026-11-20 02:09–02:12 CST
+- 环境：macOS 27.0.0 / arm64；Node v24.22.1；执行时间 2026-11-20 02:19–02:31 CST
+- 实例：临时 `DSH_HOME=/tmp/art-accept/run/.huaanwork`（生产 `~/.huaanwork` 的副本），
+  `--user-data-dir=/tmp/art-accept/run/userData`，`--remote-debugging-port=9333`，
+  `HUAANWORK_ACCEPTANCE_HOOKS=1`（固定 Web `43120`）
 
 ## 0. 状态声明
 
-**本轮验收未执行：BLOCKED。** 验收前置条件“完整根门禁 `corepack yarn check` 通过”未满足（`EXIT=1`），
-按计划 Task 9 的硬性约束在门禁失败时停止验收。七项用户验收步骤全部为 **NOT RUN**；
-本文件不声称任何一步通过，也不包含任何 UI 截图或模型生成的 Artifact。
+本轮实际启动了桌面实例并逐步执行 §12.2，结论**部分通过、一项发现产品缺陷、一项未完成**：
 
-本轮未启动桌面应用、未创建临时 `DSH_HOME`、未写入任何真实会话或生产数据，也未修改源码或测试。
+- 已执行并通过（真实 UI + 真实存储）：第 3 步、第 5 步、第 6 步的刷新/重开部分、第 2 步的 Markdown 与跨会话切换部分。
+- 夹具辅助（`result_present` 工具生成未发生，Artifact 经受控脚本调用真实宿主存储
+  `createArtifact` 写入）：第 1 步的“结果卡唯一展示”、第 2 步的卡片/预览入口、第 6 步的未定位分组。
+- 未通过 / 阻塞：第 4 步（HTML 交互与隔离）——预览与全屏的 HTML frame 从未装填正文，
+  见 §5 缺陷 D1；第 1 步的工具生成（模型未调用 `result_present`）。
+- 未完成：第 7 步（自动化新旧协议并存）——未写入运行夹具，未核对自动化运行界面。
+- Electron 沙箱探针：一次重试后仍超时，记录为 NOT PASSED（已知非阻断遗留项）。
 
-## 1. 门禁结果（实际执行）
+任何一步都没有用单元测试、探针或夹具冒充真机结果；未观测到的行为一律记为未通过/未完成。
 
-| 命令 | 退出码 | 结果 |
+## 1. 门禁与探针（实际执行）
+
+| 项目 | 命令 | 结果 |
 | --- | --- | --- |
-| `corepack yarn check` | **1** | 318 个测试文件：313 通过 / 1 失败 / 4 跳过；4630 个用例：4614 通过 / 1 失败 / 15 跳过；其余 workspace 无失败记录 |
+| 根门禁 | `corepack yarn check` | `EXIT=0`（`.superpowers/sdd/2026-11-15-task-result-artifacts/final-check-2.log` 末行 `EXIT=0`；本轮未重跑） |
+| Electron 探针（唯一一次重试） | `corepack yarn workspace dsh-plugin-huaanwork test:artifact-sandbox` | `EXIT=1`；`Tests 1 failed (1)`，`Test timed out in 30000ms`，用时 30.35 s |
 
-日志：`.superpowers/sdd/2026-11-15-task-result-artifacts/final-check.log`（仓库外，末行 `EXIT=1`）。
+探针两次历史超时（本轮之前）加本轮一次重试，均在同一处挂起；本轮遗留探针 Electron
+（PID 91857）已按 PID 终止。探针状态：**NOT PASSED**，不能作为 §12.1 第 9 条或 §12.2 第 4 条
+的渲染器隔离证据。
 
-唯一失败用例：
+## 2. 实例与夹具（实际执行）
 
-```text
-FAIL  tests/huaanwork-host/test-port-mapping.spec.ts > legacy loop cases reconcile to 61 rows with a four-state label
-AssertionError: two parallel script tasks do not lock workspace.open
-  tests/huaanwork-host/automations-host.spec.ts:1271: expected '' not to be ''
-```
+启动（后台）后 `http://127.0.0.1:9333/json/list` 出现唯一 `43120` 页面目标，标题
+`DeepSeek Harness`，URL 含 `dsh-desktop-mode=advanced&...`。应用内完成：
 
-### 1.1 失败原因（已定位）
+1. 新建会话 A 并发送一条用户消息，模型真实回复“收到”（会话
+   `huaanwork-5a4497056ab88f0d-d573c1d2`，用户消息 id `32d00f46-c775-401b-8395-dfba1645165f`，
+   即该回合的 `clientMessageId`）。
+2. 新建会话 B 并发送一条用户消息，模型回复“好的”（会话
+   `huaanwork-5a4497056ab88f0d-49342e7e`，`clientMessageId=7d798e87-ac9c-4caf-9ec9-1cf11749cdb1`）。
+3. 用 Node 直接导入 `src/huaanwork-host/artifacts-host.ts` 的真实存储 API `createArtifact`
+   （同一 `profileDir`、同一两阶段写入与目录布局），写入四个 Artifact：
 
-- `tests/huaanwork-host/test-port-mapping.ts:274-279` 仍把该移植行的证据钉在
-  `tests/huaanwork-host/automations-host.spec.ts:1271`，且行标题仍是旧名
-  `two parallel script tasks do not lock workspace.open`（实际用例自 `10b1e35f01`
-  起名为 `two parallel script tasks on different roots do not lock workspace.open`，
-  现位于该文件第 1642 行）。
-- 钉行断言只检查该行非空。Task 8 门禁通过的提交 `861d4c2117` 上，第 1271 行是非空内容；
-  最终修复提交 `48c36b134e` 在文件前部新增 18 行（`@@ -54,6 +54,23 @@` 新增 17 行、
-  `@@ -424,6 +441,7 @@` 新增 1 行），使第 1271 行变为空行，钉行断言因此失败。
-- 该失败是**测试证据行号漂移**，不是产品行为回归；Task 8 的 `EXIT=0` 记录（同目录
-  `task-8-check.log:1263` 该 spec 通过、`:2983` `EXIT=0`）只对应提交 `861d4c21`，
-  对当前 HEAD 不再成立。
-- 本轮范围只允许验收证据，不允许修改源码或测试，因此未修复该钉行。
+| Artifact | 会话 | 锚点 | 标题/格式 | 大小 |
+| --- | --- | --- | --- | --- |
+| `50a1e395-…` | A | `clientMessageId=32d00f46-…` | 验收报告 / markdown | 431 B |
+| `f91d8aca-…` | A | `clientMessageId=775d7241-…`（第二回合） | 交互图表 / html | 3.1 KB |
+| `df7107dd-…` | A | `{kind:"turn"}`（无 `clientMessageId`） | 历史结果（无锚点）/ markdown | 107 B |
+| `9cdef403-…` | B | `clientMessageId=7d798e87-…` | 第二会话结果 / markdown | 94 B |
 
-### 1.2 对验收的影响
+落盘校验：`artifacts/<sessionId>/<artifactId>/{manifest.json,content.md|content.html}`，清单
+`sha256` 与正文一致。生产 `~/.huaanwork` 仅被读取复制，未被写入。
 
-计划 Task 9 明确规定：根门禁出现非零退出码时记录结果并停止验收，不得在红色基线上执行
-GUI 验收。因此 §12.2 的七项步骤未启动；任何“已走查/已截图”的表述都会失实。
+另在 `127.0.0.1:45999` 启动本地接收端并记录 `/tmp/art-accept/leak-requests.log`，用于
+HTML 隔离观察（见第 4 步）。
 
-## 2. Electron 沙箱探针（实际执行，未通过）
+## 3. 规格 §12.2 六项 UI 结论（逐条，含证据）
 
-Task 6 的探针此前为 NOT RUN；本轮在图形会话中实际执行两次：
+截图目录：`docs/evidence/assets/task-result-artifacts-2026-11-20/`。
 
-| 命令 | 时间 | 结果 |
-| --- | --- | --- |
-| `corepack yarn workspace dsh-plugin-huaanwork test:artifact-sandbox` | 02:11:21 | 1 个用例失败：`Test timed out in 30000ms`，耗时 30005 ms |
-| `corepack yarn workspace dsh-plugin-huaanwork vitest run --config vitest.artifact-sandbox.config.ts --testTimeout=120000` | 02:12:02 | 同样在 30000 ms 超时（显式覆盖未生效），耗时 30006 ms |
+### 第 1 步 Markdown 与 HTML 的唯一展示 — 生成 BLOCKED / 夹具部分执行
 
-两次运行都遗留了隐藏的探针 Electron 进程（PID 79553、79650，命令行均为
-`electron ... tests/electron/artifact-sandbox-main.mjs`）；已按 PID 单独终止，未触碰其他进程。
+- 真实模型尝试：在会话 A 第二回合要求“调用 result_present 提交 Markdown 结果页”。
+  该回合的 `request/header` 工具列表确实包含 `result_present`（同时含 `bash`、`write`、
+  `screenshot` 等，模型 `deepseek-official/local`），证明工具已挂载到模型面。
+- 结果：连续 5 次 `assistant/attempt` 只产出 reasoning，没有 `tool-call`；日志
+  `[dsh-agent-error] ... [NO_ACTION]: 模型只返回了思考，没有调用工具，也没有给出结果。`。
+  因此**没有**任何 Artifact 由工具生成；生成结论 **BLOCKED**（端点可用、工具可见、
+  模型未按指令调用）。
+- 夹具路径：上面四个 Artifact 经真实存储写入后，会话 A 历史中每个 Artifact 只出现一张卡
+  （`card artifact-card`：验收报告、交互图表、历史结果（无锚点）），卡上正文摘要
+  “431 B / 3.1 KB” 与存储一致；因不存在 `result_present` 工具调用，工具参数卡里没有重复
+  正文，旧附件预览也没有重复（无工具调用可折叠）。因此“唯一展示”只在夹具数据上成立，
+  不能替代真实生成路径。
 
-结论：探针 **NOT PASSED（启动挂起/超时）**，与 Task 6 记录的非阻断遗留项
-“probe launch hang leaves orphan Electron; add launch timeout”一致。该结果不能作为
-规格 §12.1 第 9 条或 §12.2 第 4 条的真实 renderer 隔离证据。
+### 第 2 步 卡片点击与右侧预览 — Markdown 通过 / HTML 未通过
 
-## 3. 规格 §12.2 七项步骤逐条记录
+- Markdown：点击“验收报告”卡后右栏展开、标题“验收报告”、`预览` 页签为选中态，
+  正文按 Markdown 渲染（标题、两项列表、两列表格、中文段落完整）。截图
+  `01-md-preview.png`。结论：**EXECUTED PASS**。
+- 跨会话一致性：切到会话 B 后右栏预览标题为“第二会话结果”，切回会话 A 后为“验收报告”，
+  无串页。结论：**EXECUTED PASS**。
+- HTML：点击“交互图表”卡后右栏标题正确，但 `<iframe class="artifact-frame"
+  sandbox="allow-scripts">` 始终没有 `srcdoc`、没有正文、也没有错误提示（截图
+  `02-html-preview-empty.png`）。结论：**NOT PASSED**，缺陷见 §5 D1。
 
-| # | 步骤 | 结论 | 说明 |
+### 第 3 步 独立全屏窗口 — 通过
+
+- 从 Markdown 预览点“全屏”后出现第二个 CDP 页面目标，URL 为
+  `.../artifactWindow=1&sessionId=huaanwork-5a4497056ab88f0d-d573c1d2&artifactId=50a1e395-6178-4714-90ac-2839d65337f4`，
+  窗口内正文完整渲染，按钮为“关闭”“下载”（截图 `03-fullscreen-md.png`）。
+- 复用：切到会话 B 打开其结果并点“全屏”，**同一页面目标 id**
+  `15BB7633FD535BAD1D0EFFD468BEB43B` 的 URL 变为 `sessionId=…-49342e7e&artifactId=9cdef403-…`，
+  正文变为“第二会话结果”。结论：同一 WebContents 两次读取正确双 ID。
+- 关闭：点“关闭”后该目标消失；再次打开后发送 `Escape` 键，目标同样消失，主窗口
+  (`574B343A…`) 不变。随之在主窗口调用 `artifact.list` 返回 HTTP 200（1 条），
+  主会话布局与消息未变。结论：**EXECUTED PASS**。
+  “独占 session 的鉴权/访问头记录”未直接读取窗口请求头，此处只验证了双 ID 与 RPC 归属校验。
+
+### 第 4 步 HTML 交互与隔离 — 未通过（被 D1 阻塞）
+
+- 两个真实入口（右栏预览、全屏窗口）都只显示标题/按钮，frame 正文为空，无法操作内联图表
+  交互（无按钮、无滑块），因此**没有交互成功截图**。
+- 因正文从未装填，本地接收端 `127.0.0.1:45999` 在整个过程记录到 **0** 条请求；这不能归因于
+  沙箱防护，因为模型 HTML 从未进入 frame。父应用/网络/弹窗/表单/顶层导航的不可达性
+  未能在应用内观测。结论：**NOT PASSED**（不引用 Task 6 探针结果替代）。
+- 可作参考的旁证（不属于本步骤的应用内证据）：以当前 frame 名手工调用
+  `POST /huaanwork/artifact/prepareFrame` 立即返回 `{"prepared":true}`（HTTP 200，2 ms），
+  说明原生防护登记本身可用，问题在客户端 `onLoad → prepareFrame` 的接线从未触发（D1）。
+
+### 第 5 步 下载另存为 — 通过
+
+- 在 Markdown 预览点“下载”，弹出系统保存面板，默认文件名“验收报告.md”（含中文，
+  截图已记录于 /tmp/art-accept/screen-dialog.png），用 System Events `Cmd+Shift+G`
+  输入目录后 `Return` 保存。
+- 保存文件 `downloads/验收报告.md`，431 字节，`sha256=9b6fa877…d9a4`，与
+  `artifacts/huaanwork-5a4497056ab88f0d-d573c1d2/50a1e395-…/content.md` 的 sha256 及
+  manifest 的 `sha256` 完全一致；正文含中文标题、中文表格单元格与 `2026-11-20 <>&`。
+- 再次点“下载”后在面板按 `Escape` 取消，目标目录仍只有这一个文件（无新文件）。
+  结论：**EXECUTED PASS**。
+
+### 第 6 步 刷新与历史重开 — 通过（渲染器刷新；未做整应用重启）
+
+- 在页面内执行 `location.reload()`（渲染器刷新）后重新打开会话 A：三张卡仍在，
+  未定位的“历史结果（无锚点）”位于尾部“未定位的历史结果”分组内。
+- 随后切到会话 B 再切回会话 A（重开历史会话）：卡片、右栏预览与“下载”入口均可用
+  （第 5 步的保存与取消都是在刷新之后完成）。结论：**EXECUTED PASS**。
+- 边界说明：本轮只做渲染器刷新，没有退出并重启整个应用（Host 未重建）；该更强条件
+  未验证。
+
+### 第 7 步 自动化新旧协议并存 — 未完成
+
+- 未写入 `automations/<autoId>.runs.jsonl` 的 RunSummary 夹具，也未在自动化页核对
+  “新运行一张卡 / 旧运行双附件 / 脚本 32 KiB 截断”。本轮预算用于前面步骤后剩余不足，
+  未执行，结论为 **NOT COMPLETED**（不是通过，也不是产品失败）。
+
+## 4. 汇总
+
+| # | 步骤 | 结论 | 类别 |
 | --- | --- | --- | --- |
-| 1 | Markdown 报告与 HTML 交互结果的唯一展示 | NOT RUN（BLOCKED） | 未启动应用；门禁 `EXIT=1`。 |
-| 2 | 卡片点击与右侧预览 | NOT RUN（BLOCKED） | 同上；未创建卡片或预览截图。 |
-| 3 | 独立全屏窗口 | NOT RUN（BLOCKED） | 同上；未创建全屏窗口，未采集双 ID/鉴权/access header 记录。 |
-| 4 | HTML 交互与隔离 | NOT RUN（BLOCKED） | 同上；§2 的独立探针也未通过，不能替代该步骤。 |
-| 5 | 下载另存为 | NOT RUN（BLOCKED） | 同上；未打开系统保存对话框。 |
-| 6 | 刷新与历史重开 | NOT RUN（BLOCKED） | 同上；未构造“未定位的历史结果”分组。 |
-| 7 | 自动化新旧协议并存 | NOT RUN（BLOCKED） | 同上；未运行自动化或写入 RunSummary 夹具。 |
+| 1 | Markdown/HTML 唯一展示 | 工具生成 BLOCKED；夹具下唯一展示成立 | BLOCKED + FIXTURE-FACILITATED |
+| 2 | 卡片点击与右侧预览 | Markdown 与跨会话通过；HTML 未通过（D1） | EXECUTED（部分） |
+| 3 | 独立全屏窗口 | 双 ID、同窗复用、按钮/Esc 关闭、主窗口 RPC 正常 | EXECUTED |
+| 4 | HTML 交互与隔离 | frame 未装填，交互与隔离均未观测 | NOT PASSED（D1 阻塞） |
+| 5 | 下载另存为 | 哈希/字节一致（含非 ASCII）；取消无新文件 | EXECUTED |
+| 6 | 刷新与历史重开 | 刷新后卡片/预览/下载可用；未定位分组正确 | EXECUTED（渲染器刷新） |
+| 7 | 自动化新旧协议并存 | 未执行夹具与界面核对 | NOT COMPLETED |
 
-每步的证据（执行环境、命令、输出/截图、结论）按要求记录：本轮只有执行环境与阻塞原因，
-没有可引用的操作输出或截图，因此按 NOT RUN 记录，不补造证据。
+统计：3 项执行通过（3、5、6），1 项部分执行（2），1 项夹具辅助（1 的 UI 部分），
+1 项未通过（4），1 项未完成（7）；探针 NOT PASSED。
 
-## 4. 未执行的操作
+## 5. 发现的产品缺陷（未修复）
 
-- 未启动工作区 Electron，也未复制 `~/.huaanwork` 到临时实例；生产数据未被触碰。
-- 未创建或种子化任何 Artifact、会话、自动化运行记录。
-- 未截取任何截图，未调用 `artifact.*` RPC。
-- 未修改产品源码、测试或共享夹具。
+**D1：HTML Artifact 在右栏预览与全屏窗口中都不会装填正文，且无错误提示。**
 
-## 5. 解除阻塞所需步骤（后续任务）
+- 现象：点击 HTML 结果卡后，右栏出现 `iframe.artifact-frame[name^="huaanwork-artifact-"]`，
+  `sandbox="allow-scripts"`，但始终没有 `srcdoc` 属性，正文与交互均不可见，也没有
+  `role="alert"` 错误或重试入口（截图 `02-html-preview-empty.png`、
+  `04-fullscreen-html-empty.png`）。全屏窗口同样只剩“关闭”“下载”。
+- 客户端行为：在页面内包装 `window.fetch` 后重复点击 HTML 卡（含一次冷启动后首次点击），
+  只看到 `artifact.get` 与 `artifact.content`，**从未** 出现 `artifact.prepareFrame`；
+  等待 30 s 以上也无错误提示（`ArtifactHtmlView` 的失败分支没有被触发）。
+- 原生侧对照：用该 frame 的完整名称手工 `POST /huaanwork/artifact/prepareFrame`
+  返回 HTTP 200 `{"prepared":true}`（2 ms），说明防护登记与路由可用。
+- 结论：`ArtifactHtmlView` 的空 frame `onLoad`（用于触发 `prepareFrame` 并武装正文）
+  在真实 Electron 中没有走到回调；在页面内用同样 `sandbox`/`about:blank` 的 iframe
+  先挂 `load` 监听再插入时 `load` 会触发，因此高度怀疑 React 插入 iframe 的时机与该
+  `about:blank` 同步 load 之间存在竞态。未修复，未改源码/测试。
 
-1. 修正 `tests/huaanwork-host/test-port-mapping.ts` 中该行的证据行号（并同步过时标题），
-   使钉行重新指向真实用例行。
-2. 在修复提交上重新运行 `corepack yarn check`，确认 `EXIT=0`。
-3. 再按计划 Task 9 的 CDP 临时实例配方执行 §12.2 七项走查并更新本文件；
-   在门禁恢复绿色之前，本文件的七项结论保持 NOT RUN。
+## 6. 未执行的操作与残留
 
-## 6. 结论
+- 未由 `result_present` 工具生成任何 Artifact；第 1 步的“唯一展示”只对应夹具。
+- 未做整应用退出/重启后的恢复验收；第 7 步没有运行夹具或查看自动化界面。
+- 未直接读取全屏窗口的请求头/access header，只验证双 ID 与 RPC 归属。
+- Electron 沙箱探针仍挂起并遗留孤儿进程（本轮已清理）；建议补启动超时，避免 CI/人工
+  验收被 30 s 超时和残留进程拖住。
+- 未修改产品源码、测试或共享夹具；临时实例与本机接收端已在结束时关闭。
 
-- 门禁：`corepack yarn check` `EXIT=1`（1 个测试证据钉行失败，已定位到 `48c36b134e`
-  的测试行插入与 `test-port-mapping.ts` 的过时行号）。
-- Electron 探针：启动超时，未通过；两枚遗留进程已清理。
-- 规格 §12.2：0 项通过、0 项夹具辅助、7 项未执行（BLOCKED）。
-- 未以单测、探针或门禁结果替代真机验收；本轮不宣称任何用户验收通过。
+## 7. 结论
+
+- 门禁：`EXIT=0`（`final-check-2.log`）。
+- 探针：NOT PASSED（超时，一次重试后仍挂起；孤儿已清理）。
+- §12.2：Markdown 展示、全屏窗口、下载另存为、刷新/重开与未定位分组在真实应用中得到验证；
+  HTML 预览/全屏被缺陷 D1 挡住（第 2、4 步未通过）；工具生成被模型行为挡住（第 1 步
+  BLOCKED）；第 7 步未完成。本文件不声称整体验收通过。
