@@ -251,12 +251,34 @@ describe("ArtifactFullscreenPage", () => {
     }
   });
 
+  it("keeps the close toolbar and the preview in the full-height page chain", async () => {
+    const summary = summaryFor("session-1", "artifact-1");
+    const { container, root } = await mountPage({ sessionId: "session-1", artifactId: "artifact-1" }, summary);
+    try {
+      const page = container.querySelector(".artifact-page");
+      expect(page).not.toBeNull();
+      const toolbar = page!.querySelector(".artifact-preview-actions");
+      const preview = page!.querySelector(".artifact-preview");
+      // 关闭工具栏是页面的直接子节点，落在 `.artifact-page` 的滚动裁剪区之外。
+      expect(toolbar?.parentElement).toBe(page);
+      expect(preview?.parentElement).toBe(page);
+      expect(preview!.querySelector(".artifact-markdown")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it("prepares the HTML frame with the artifact surface", async () => {
     const summary = summaryFor("session-2", "artifact-2", "html");
     const { container, root } = await mountPage({ sessionId: "session-2", artifactId: "artifact-2" }, summary);
     try {
       const frame = container.querySelector("iframe");
       expect(frame).not.toBeNull();
+      expect(frame!.classList.contains("artifact-frame")).toBe(true);
+      expect(frame!.parentElement?.className).toBe("artifact-html");
+      expect(frame!.parentElement?.parentElement?.className).toBe("artifact-preview");
+      expect(frame!.parentElement?.parentElement?.parentElement?.className).toBe("artifact-page");
       await act(async () => {
         frame!.dispatchEvent(new Event("load"));
         await new Promise((done) => setTimeout(done, 0));

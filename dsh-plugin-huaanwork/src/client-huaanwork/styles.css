@@ -1450,6 +1450,19 @@ button {
   background: var(--surface);
 }
 
+/* 独立全屏结果页（规格 §5）：窗口父级 `.huaan-shell-body` 高度确定且裁切溢出，
+   页面自建整高 flex 链，让 Markdown 在页内滚动、HTML iframe 取剩余高度而不是退到 min-height。 */
+
+.artifact-page {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px;
+}
+
 /* Artifact 结果预览（规格 §7.1）：Markdown 用上游安全渲染器，HTML 进只能跑脚本的不透明沙箱 */
 
 .artifact-preview {
