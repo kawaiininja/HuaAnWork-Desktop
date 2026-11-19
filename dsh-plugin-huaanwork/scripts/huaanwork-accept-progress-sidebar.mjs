@@ -1774,14 +1774,25 @@ function findParentSession(sessions, marker) {
 }
 
 /** The turn that a marker user message opened: its tool calls and header snapshots. */
-function turnFacts(session, marker) {
+export function turnFacts(session, marker) {
   const startIndex = session.events.findIndex((event) => isRealUserMessage(event) && messageText(event.data).includes(marker))
   if (startIndex < 0) return undefined
   const nextIndex = session.events.findIndex((event, index) => index > startIndex && isRealUserMessage(event))
   const end = nextIndex < 0 ? session.events.length : nextIndex
   const turnEvents = session.events.slice(startIndex, end)
   const toolCalls = []
+  // DSH 在回合 step 1 里会先写入 `step/start` 再写入 `user/message`；
+  // 向前回溯本回合紧邻的 `step/start`（遇到上一条真实用户消息即止），
+  // 否则首轮非 todo 工具在 turnFacts 里会得到 `roundKey: null` 而与真实产品 `roundKey` 错配。
   let currentRoundKey = null
+  for (let index = startIndex - 1; index >= 0; index -= 1) {
+    const prior = session.events[index]
+    if (prior?.type === 'step/start' && typeof prior.seq === 'number') {
+      currentRoundKey = prior.seq
+      break
+    }
+    if (isRealUserMessage(prior)) break
+  }
   for (const event of turnEvents) {
     if (event?.type === 'step/start' && typeof event.seq === 'number') {
       currentRoundKey = event.seq

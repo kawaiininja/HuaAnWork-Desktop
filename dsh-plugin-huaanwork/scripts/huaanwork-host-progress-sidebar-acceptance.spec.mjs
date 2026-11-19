@@ -13,6 +13,7 @@ import {
   recordPartialCheckFailureBeforeBlocked,
   resolveBlockedOrFailedOutcome,
   resolveFinalExitCode,
+  turnFacts,
 } from './huaanwork-accept-progress-sidebar.mjs'
 
 const TOOLS = ['bash', 'read', 'todo_write']
@@ -580,4 +581,27 @@ test('in-scene switch-history failures flushed before BlockedError resolve to FA
   assert.equal(failedOutcome.exitCode, 1)
   assert.equal(failedOutcome.facts.outcome, 'FAIL')
   assert.equal(failedOutcome.facts.blocked.cause, 'no active run could be constructed for the Host restart')
+})
+
+test('turnFacts inherits the governing step/start seq emitted immediately before user/message', () => {
+  const session = {
+    header: { id: 's-step1' },
+    events: [
+      { type: 'turn/start', seq: 1, data: { turn: 1 } },
+      { type: 'step/start', seq: 6, data: { turn: 1, step: 1 } },
+      { type: 'user/message', seq: 7, data: { id: 'm-1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'MARK-1 go' }] } },
+      { type: 'tool/call', seq: 12, data: { turn: 1, step: 1, callId: 'c-1', name: 'bash', arguments: '{}' } },
+      { type: 'step/start', seq: 20, data: { turn: 1, step: 2 } },
+      { type: 'tool/call', seq: 24, data: { turn: 1, step: 2, callId: 'c-2', name: 'read', arguments: '{}' } },
+    ],
+  }
+  const facts = turnFacts(session, 'MARK-1')
+  assert.equal(facts.clientMessageId, 'm-1')
+  assert.deepEqual(
+    facts.substantiveCalls.map(({ name, callId, roundKey }) => ({ name, callId, roundKey })),
+    [
+      { name: 'bash', callId: 'c-1', roundKey: 6 },
+      { name: 'read', callId: 'c-2', roundKey: 20 },
+    ],
+  )
 })
