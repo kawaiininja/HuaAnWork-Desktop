@@ -20,43 +20,68 @@ const STALE_TEXT = "状态不可恢复 · Host 已重启，结果未确认";
 const FROZEN_TEXT = "连接中断，状态可能滞后";
 const INACTIVITY_ALERT_CODE = "inactive";
 
-export type SubagentRunCardProps = {
+/**
+ * 触发行内二次确认的表面：主流运行卡或右栏进度面板。
+ *
+ * 确认状态仍由 App 唯一持有（不建第二套状态机），但同一 run 的卡片可能同时挂载在
+ * 主流与右栏；记录触发表面后，确认区、焦点与 Esc 监听只属于发起侧。
+ */
+export type SubagentConfirmSurface = "main" | "progress";
+
+export type SubagentConfirmTarget = {
+  runId: string;
+  surface: SubagentConfirmSurface;
+};
+
+/**
+ * 运行摘要的输入：卡片与右栏共用同一份展示与确认逻辑。
+ *
+ * `confirming`、`cancelBusy`、`cancelError` 都由调用方按 runId 持有；摘要自身不缓存
+ * 第二套确认状态。省略 `onToggleExpanded` 时只渲染窄栏摘要，不提供详情展开。
+ */
+export type SubagentRunSummaryProps = {
   run: SubagentRunView;
   now: number;
   frozenAt?: number;
   duplicateLabel: boolean;
-  expanded: boolean;
+  expanded?: boolean;
   confirming: boolean;
   cancelBusy: boolean;
   cancelError?: string;
-  onToggleExpanded(runId: string): void;
   onRequestCancel(runId: string): void;
   onConfirmCancel(runId: string): void;
   onDismissCancel(runId: string): void;
+  onToggleExpanded?(runId: string): void;
+};
+
+export type SubagentRunCardProps = Omit<
+  SubagentRunSummaryProps,
+  "expanded" | "onToggleExpanded"
+> & {
+  expanded: boolean;
+  onToggleExpanded(runId: string): void;
 };
 
 /**
- * 单次显式 `@` 调用的运行卡（Task 10）。
+ * 单次受管运行的摘要：身份、真实状态、工具摘要、惰性耗时、最近活动与行内二次确认。
  *
- * 活跃卡三行：身份 + 终止、真实状态 + 工具摘要 + 惰性耗时、最近活动 + 展开；
- * 终态收为单行，展开后显示失败、清理告警与结束时的在途工具。stale（Host 重启）
- * 与断连冻结都保留最后已知状态并禁用终止，不把未知结果画成成功或失败。
- * `expanded`、`confirming` 等 UI 状态由调用方按 runId 持有，本组件不缓存。
+ * 活跃与失效（Host 重启）卡保留最后已知状态并禁用终止；终态收为单行。断连冻结
+ * 沿用调用方的 `frozenAt`。卡片在摘要下方追加失败/告警/工具明细，右栏只显示摘要。
  */
-export default function SubagentRunCard(props: SubagentRunCardProps): ReactElement {
+export function SubagentRunSummary(props: SubagentRunSummaryProps): ReactElement {
   const {
     run,
     now,
     frozenAt,
     duplicateLabel,
-    expanded,
+    expanded = false,
     confirming,
     cancelBusy,
     cancelError,
-    onToggleExpanded,
     onRequestCancel,
     onConfirmCancel,
     onDismissCancel,
+    onToggleExpanded,
   } = props;
 
   const active = isSubagentRunActive(run);
@@ -122,10 +147,7 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
   const expandName = `${expanded ? "收起" : "展开"} ${run.label} 详情${duplicateSuffix}`;
   const confirmText = `确认终止 ${run.label}${duplicateSuffix}`;
 
-  const alerts = subagentAlerts(run, now).filter(
-    (alert) =>
-      !(stale || frozenAt !== undefined) || alert.code !== INACTIVITY_ALERT_CODE,
-  );
+  const alerts = cardAlerts(run, now, frozenAt);
   const visibleAlerts = terminal
     ? expanded
       ? alerts
@@ -137,7 +159,6 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
   // 取消 RPC 错误属于活跃操作；终态详情只保留执行失败与真实清理告警。
   const visibleCancelError = terminal ? undefined : cancelError;
   const alertElements = buildAlertElements(visibleCancelError, visibleAlerts);
-  const sortedTools = [...run.activeTools].sort(compareTools);
   const elapsed = formatElapsed(subagentElapsedMs(run, now, frozenAt));
   const statusDetail = subagentStatusDetail(run);
   const showStatusDetail = !stale && statusDetail !== undefined;
@@ -148,9 +169,10 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
   const hasTerminalDetails =
     (run.failure !== undefined && run.failure !== "") ||
     alerts.length > 0 ||
-    sortedTools.length > 0 ||
+    run.activeTools.length > 0 ||
     visibleCancelError !== undefined;
-  const showExpand = !terminal || hasTerminalDetails;
+  const showExpand =
+    onToggleExpanded !== undefined && (!terminal || hasTerminalDetails);
 
   const expandButton = (): ReactElement => (
     <button
@@ -158,18 +180,10 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
       className="subagent-run-expand"
       aria-expanded={expanded}
       aria-label={expandName}
-      onClick={() => onToggleExpanded(run.runId)}
+      onClick={() => onToggleExpanded?.(run.runId)}
     >
       {expanded ? "收起详情" : "展开详情"}
     </button>
-  );
-
-  const toolList = (): ReactElement => (
-    <ul className="subagent-run-tools">
-      {sortedTools.map((tool) => (
-        <li key={tool.id}>{tool.name}</li>
-      ))}
-    </ul>
   );
 
   // 常驻根节点的读屏状态区：活跃与终态共用同一个 DOM 节点，插入内容与区域同在时
@@ -187,10 +201,7 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
 
   if (terminal) {
     return (
-      <div
-        className="subagent-run-card"
-        data-phase={run.phase}
-      >
+      <>
         {liveRegion()}
         <div className="subagent-run-compact">
           <span className="subagent-run-dot" aria-hidden="true" />
@@ -207,26 +218,12 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
           <span className="subagent-run-meta">{elapsed}</span>
           {showExpand ? expandButton() : null}
         </div>
-        {expanded && hasTerminalDetails ? (
-          <div className="subagent-run-details">
-            {run.failure !== undefined && run.failure !== "" ? (
-              <p className="subagent-run-failure">{run.failure}</p>
-            ) : null}
-            {alertElements}
-            {sortedTools.length > 0 ? toolList() : null}
-          </div>
-        ) : null}
-      </div>
+      </>
     );
   }
 
   return (
-    <div
-      className="subagent-run-card"
-      data-phase={run.phase}
-      data-stale={stale ? "true" : undefined}
-      data-frozen={frozenAt === undefined ? undefined : "true"}
-    >
+    <>
       {liveRegion()}
       <div className="subagent-run-header">
         <span className="subagent-run-dot" aria-hidden="true" />
@@ -293,9 +290,98 @@ export default function SubagentRunCard(props: SubagentRunCardProps): ReactEleme
       {alertElements.length > 0 ? (
         <div className="subagent-run-details">{alertElements}</div>
       ) : null}
+    </>
+  );
+}
 
-      {expanded && sortedTools.length > 0 ? toolList() : null}
+/**
+ * 单次显式 `@` 调用的运行卡（Task 10）。
+ *
+ * 活跃卡三行：身份 + 终止、真实状态 + 工具摘要 + 惰性耗时、最近活动 + 展开；
+ * 终态收为单行，展开后显示失败、清理告警与结束时的在途工具。stale（Host 重启）
+ * 与断连冻结都保留最后已知状态并禁用终止，不把未知结果画成成功或失败。
+ * `expanded`、`confirming` 等 UI 状态由调用方按 runId 持有，本组件不缓存。
+ */
+export default function SubagentRunCard(props: SubagentRunCardProps): ReactElement {
+  const {
+    run,
+    now,
+    frozenAt,
+    duplicateLabel,
+    expanded,
+    confirming,
+    cancelBusy,
+    cancelError,
+    onRequestCancel,
+    onConfirmCancel,
+    onDismissCancel,
+    onToggleExpanded,
+  } = props;
+
+  const terminal = !isSubagentRunActive(run) && run.stale !== true;
+  const alerts = cardAlerts(run, now, frozenAt);
+  const visibleCancelError = terminal ? undefined : cancelError;
+  const sortedTools = [...run.activeTools].sort(compareTools);
+  const hasTerminalDetails =
+    (run.failure !== undefined && run.failure !== "") ||
+    alerts.length > 0 ||
+    sortedTools.length > 0 ||
+    visibleCancelError !== undefined;
+
+  const toolList = (): ReactElement => (
+    <ul className="subagent-run-tools">
+      {sortedTools.map((tool) => (
+        <li key={tool.id}>{tool.name}</li>
+      ))}
+    </ul>
+  );
+
+  const alertElements = buildAlertElements(visibleCancelError, alerts);
+
+  return (
+    <div
+      className="subagent-run-card"
+      data-run-id={run.runId}
+      data-phase={run.phase}
+      data-stale={!terminal && run.stale === true ? "true" : undefined}
+      data-frozen={!terminal && frozenAt !== undefined ? "true" : undefined}
+    >
+      <SubagentRunSummary
+        run={run}
+        now={now}
+        frozenAt={frozenAt}
+        duplicateLabel={duplicateLabel}
+        expanded={expanded}
+        confirming={confirming}
+        cancelBusy={cancelBusy}
+        cancelError={cancelError}
+        onRequestCancel={onRequestCancel}
+        onConfirmCancel={onConfirmCancel}
+        onDismissCancel={onDismissCancel}
+        onToggleExpanded={onToggleExpanded}
+      />
+      {terminal ? (
+        expanded && hasTerminalDetails ? (
+          <div className="subagent-run-details">
+            {run.failure !== undefined && run.failure !== "" ? (
+              <p className="subagent-run-failure">{run.failure}</p>
+            ) : null}
+            {alertElements}
+            {sortedTools.length > 0 ? toolList() : null}
+          </div>
+        ) : null
+      ) : expanded && sortedTools.length > 0 ? (
+        toolList()
+      ) : null}
     </div>
+  );
+}
+
+/** 摘要与卡片共用的告警口径：失效/断连时抑制「无新活动」提醒。 */
+function cardAlerts(run: SubagentRunView, now: number, frozenAt?: number): SubagentRunAlert[] {
+  return subagentAlerts(run, now).filter(
+    (alert) =>
+      !(run.stale === true || frozenAt !== undefined) || alert.code !== INACTIVITY_ALERT_CODE,
   );
 }
 

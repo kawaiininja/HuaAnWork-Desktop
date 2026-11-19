@@ -432,10 +432,23 @@ export type SessionSummary = {
 
 /** `session.open` 返回的可读会话记录，按日志顺序排列。 */
 export type SessionDetailRecord =
-  | { kind: "user"; time: number; text: string; goalRound?: number }
+  | {
+      kind: "user";
+      time: number;
+      text: string;
+      /** goal 续轮序号；普通用户记录没有该字段。 */
+      goalRound?: number;
+      /** Host 持久化的用户消息 id（`data.id`）；仅普通用户记录透传，供运行卡/进度精确锚定。 */
+      clientMessageId?: string;
+    }
   | { kind: "thinking"; time: number; text: string; roundKey?: number }
   | { kind: "assistant"; time: number; text: string; roundKey?: number }
-  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string; roundKey?: number }
+  | { kind: "tool-call"; time: number; name: string; callId?: string; args?: string; command?: string; roundKey?: number;
+      /** `todo_write` 的结构化快照;宿主从原始 JSON 参数解码,坏条目已逐条过滤。 */
+      todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+      /** 快照所属真实用户回合的持久锚点(`user/message.data.id`);旧记录没有。 */
+      clientMessageId?: string;
+    }
   | {
       kind: "tool-result";
       time: number;
@@ -499,16 +512,27 @@ export type SubagentCleanupWarning = { code: string; severity: 'info' | 'error' 
 /** 一个仍在运行的子代理工具活动；`id` 是 registry 内部标识，`callId` 来自上游事件。 */
 export type SubagentToolActivity = { id: string; callId?: string; name: string; startedAt: number }
 
-/** 单次子代理 run 的权威展示投影（WS 与 snapshot 共用同一形状）。 */
+/** 子代理 run 的来源:显式 `@agent`、智能体包 `@slug`、系统技能回合派生。 */
+export type SubagentRunKind = 'legacy' | 'package' | 'system-skill'
+
+/**
+ * 单次子代理 run 的权威展示投影（WS 与 snapshot 共用同一形状）。
+ *
+ * `system-skill` 运行复用同一 projector：phase/alerts/revision/stale 不按 kind 分支。
+ * `taskId`/`parentRunId`/`depth` 是规格预留的运行树字段，一期不填充。
+ */
 export type SubagentRunProjection = {
   runId: string
   parentSessionId: string
   clientMessageId?: string
   childId?: string
   upstreamRunId?: string
-  kind: 'legacy' | 'package'
+  kind: SubagentRunKind
   label: string
   packageVersion?: string
+  taskId?: string
+  parentRunId?: string
+  depth?: number
   phase: SubagentRunPhase
   activeTools: SubagentToolActivity[]
   startedAt: number
@@ -546,6 +570,8 @@ export type RpcEvent =
       command?: string;
       /** todo_write 的完整替换列表。 */
       todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+      /** 本次工具调用所属真实用户回合的持久锚点;非回合事件没有。 */
+      clientMessageId?: string;
     }
   | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; text?: string; sessionId?: string; isError?: true }
   | {

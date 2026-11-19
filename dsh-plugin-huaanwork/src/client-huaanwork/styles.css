@@ -3358,6 +3358,165 @@ button {
   font-size: 12.5px;
 }
 
+/* ---- 右栏进度面板（Task 5） ---- */
+
+.progress-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 连接提示只在断连/重连对账未收敛时出现；正常就绪态不占位。 */
+.progress-connection {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.progress-connection.is-disconnected {
+  border: 1px solid var(--error);
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.progress-connection.is-reconnecting {
+  border: 1px solid var(--approval-border);
+  background: var(--approval-bg);
+  color: var(--approval);
+}
+
+.progress-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.progress-section + .progress-section {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.progress-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.progress-section .h {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.progress-count {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+/* 规格 §8.1 总进度条:Y > 0 时显示,取值 X/Y;单步列表内不渲染任何进度条。 */
+.progress-total-bar {
+  display: block;
+  width: 100%;
+  height: 6px;
+  margin: 4px 0 8px;
+  border: none;
+  appearance: none;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-total-bar::-webkit-progress-bar {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.progress-total-bar::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.progress-total-bar::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.progress-panel .panel-empty {
+  padding: 12px 8px;
+}
+
+.progress-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.progress-task {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.progress-task[data-status="in_progress"] {
+  background: var(--accent-soft);
+}
+
+.progress-task-content {
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.progress-task-status {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.progress-task[data-status="completed"] .progress-task-status {
+  color: var(--success);
+}
+
+.progress-task[data-status="in_progress"] .progress-task-status,
+.progress-task[data-status="in_progress"] .progress-task-content {
+  color: var(--accent-ink);
+}
+
+.progress-task[data-status="interrupted"] .progress-task-status {
+  color: var(--error);
+}
+
+.progress-activity-list,
+.progress-subagent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 窄栏里的运行摘要收紧内边距；.subagent-run-card 声明在后且权重相同，故加面板前缀让本覆盖真正生效。确认/焦点行为仍由共享摘要组件负责。 */
+.progress-panel .progress-subagent-card {
+  min-width: 0;
+  padding: 8px 10px;
+  gap: 4px;
+}
+
 /* ---- 子代理运行卡（Task 10） ---- */
 
 .subagent-run-card {

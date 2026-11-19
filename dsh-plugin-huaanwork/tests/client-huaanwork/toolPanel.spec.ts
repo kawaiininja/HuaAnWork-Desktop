@@ -477,11 +477,12 @@ function keyedTool(id: number, name: string, roundKey: number): ToolPanelItem {
   return { id, kind: "tool", card: { key: `key-${id}`, name, status: "start", roundKey } };
 }
 
-test("roundKeyOf reads the card on tool items and the item elsewhere", () => {
+test("roundKeyOf reads the card on tool items and the item elsewhere, ignoring mutable todo snapshots", () => {
   assert.equal(roundKeyOf(keyedTool(1, "read", 6)), 6);
   assert.equal(roundKeyOf({ id: 2, kind: "thinking", roundKey: 9 }), 9);
   assert.equal(roundKeyOf({ id: 3, kind: "tool", card: { key: "k", name: "read", status: "start" } }), undefined);
   assert.equal(roundKeyOf({ id: 4, kind: "user" }), undefined);
+  assert.equal(roundKeyOf({ id: 5, kind: "todo", roundKey: 20 }), undefined);
 });
 
 test("projection creates one panel per step inside a single user turn", () => {
@@ -650,4 +651,62 @@ test("attachment is visible body but never starts a fallback round", () => {
   assert.deepEqual(rows.filter((row) => row.kind === "panel").map((row) => row.id), [2], "attachment does not split the round");
   assert.equal(panelAt(rows, 1).tools.length, 2);
   assert.equal(panelAt(rows, 1).expanded, false, "attachment still counts as visible body");
+});
+
+test("Q4-R2-02: a cross-step todo roundKey update never splits same-round tools or flips visibility", () => {
+  // 同 step 顺序 A(10) → todo(10) → B(10) 在下一 step 原地更新为 todo(20) 后仍须合并为一个面板，
+  // 且保留原锚点 id 与手动开合选择（终态与进行中双路径）。
+  const items: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "多步骤任务" },
+    { id: 2, kind: "tool", card: { key: "c1", name: "read", callId: "c1", status: "end", roundKey: 10 }, panelToggled: "expand" },
+    { id: 3, kind: "todo", roundKey: 20 },
+    { id: 4, kind: "tool", card: { key: "c2", name: "grep", callId: "c2", status: "end", roundKey: 10 } },
+  ];
+  const finalRows = projectToolPanels(items, {
+    contentItems: content(items),
+    connectionLost: false,
+    turnFinalByUserId: { 1: true },
+  });
+  const finalPanels = finalRows.filter((row) => row.kind === "panel");
+  assert.equal(finalPanels.length, 1);
+  assert.equal(finalPanels[0]?.panel.anchorId, 2);
+  assert.equal(finalPanels[0]?.panel.count, 2);
+  assert.equal(finalPanels[0]?.panel.expanded, true, "manual expand on anchor 2 survives todo roundKey update");
+  assert.deepEqual(finalPanels[0]?.panel.tools.map((entry) => entry.name), ["read", "grep"]);
+
+  const liveItems: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "多步骤任务" },
+    keyedTool(2, "read", 10),
+    { id: 3, kind: "todo", roundKey: 20 },
+    keyedTool(4, "grep", 10),
+  ];
+  const livePanels = projectToolPanels(liveItems, { contentItems: content(liveItems), connectionLost: false })
+    .filter((row) => row.kind === "panel");
+  assert.equal(livePanels.length, 1);
+  assert.equal(livePanels[0]?.panel.anchorId, 2);
+  assert.equal(livePanels[0]?.panel.expanded, true, "active round stays expanded as one panel");
+
+  // assistant(10) → todo(20) → tool(10) 仍属同一轮，不应把可见正文拆出导致工具意外展开。
+  const withAssistant: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "任务" },
+    { id: 2, kind: "assistant", text: "先检查文件", roundKey: 10 },
+    { id: 3, kind: "todo", roundKey: 20 },
+    keyedTool(4, "read", 10),
+  ];
+  const assistantPanels = projectToolPanels(withAssistant, { contentItems: content(withAssistant), connectionLost: false })
+    .filter((row) => row.kind === "panel");
+  assert.equal(assistantPanels.length, 1);
+  assert.equal(assistantPanels[0]?.panel.expanded, false, "visible body in round 10 still collapses its own round");
+
+  // 无 step/start 降级路径里，带有新 roundKey 的 todo 也不得把 currentKey 置位从而破坏可见正文切轮。
+  const unkeyedFallback: ToolPanelItem[] = [
+    { id: 1, kind: "user", text: "旧日志" },
+    tool(2, "read"),
+    { id: 3, kind: "todo", roundKey: 20 },
+    { id: 4, kind: "assistant", text: "第一轮正文" },
+    tool(5, "bash"),
+  ];
+  const fallbackPanels = projectToolPanels(unkeyedFallback, { contentItems: content(unkeyedFallback), connectionLost: false })
+    .filter((row) => row.kind === "panel");
+  assert.deepEqual(fallbackPanels.map((row) => row.panel.anchorId), [2, 5]);
 });

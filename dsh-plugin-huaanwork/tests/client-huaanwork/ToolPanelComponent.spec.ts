@@ -147,6 +147,30 @@ it("never points aria-controls at an element that is not rendered", async () => 
   expect(unresolvedControls(view)).toEqual([]);
 });
 
+it("scopes DOM ids with idPrefix so the same anchor can mount twice", async () => {
+  const view = await mount(
+    createElement("div", null, [
+      createElement(ToolPanel, { key: "main", panel: panelFor([START_READ]), onToggle: () => undefined }),
+      createElement(ToolPanel, {
+        key: "rail",
+        panel: panelFor([START_READ]),
+        onToggle: () => undefined,
+        idPrefix: "progress",
+      }),
+    ]),
+  );
+  const bodies = [...view.querySelectorAll("[id^='tool-panel-body-']")].map((node) => node.id);
+  expect(bodies).toEqual(["tool-panel-body-2", "tool-panel-body-progress-2"]);
+  const anchors = [...view.querySelectorAll(".tool-panel")].map((node) => node.getAttribute("data-anchor-id"));
+  expect(anchors).toEqual(["2", "2"]);
+  const railTitle = Array.from(view.querySelectorAll<HTMLButtonElement>(".tool-panel-title"))[1]!;
+  expect(railTitle.getAttribute("aria-controls")).toBe("tool-panel-body-progress-2");
+  const railEntry = view.querySelectorAll<HTMLButtonElement>(".tool-panel-entry-title")[1]!;
+  await click(railEntry);
+  expect(railEntry.getAttribute("aria-controls")).toBe("tool-detail-progress-2-2");
+  expect(new Set(bodies).size).toBe(bodies.length);
+});
+
 it("renders waiting, empty, missing, failed, truncated, interrupted and unconfirmed results as plain text", async () => {
   const view = await mount(createElement(StaticPanelHarness));
   for (const entry of view.querySelectorAll<HTMLButtonElement>(".tool-panel-entry-title")) await click(entry);

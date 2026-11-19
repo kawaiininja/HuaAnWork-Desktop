@@ -2,10 +2,12 @@ import { readFile } from 'node:fs/promises'
 import { zstdDecompressSync } from 'node:zlib'
 
 import { capToolOutput } from '@huaanwork/policy/truncate'
+import { normalizeTodoEntries } from '@huaanwork/policy/todo'
 import {
   failureMarkers,
   formatToolArguments,
   isShellTool,
+  parseToolArguments,
   shellCommandOf,
 } from '../client-huaanwork/logic/commandOutcome.ts'
 import type { SessionDetailRecord, SessionSummary } from '../client-huaanwork/rpc-types.ts'
@@ -151,7 +153,10 @@ export function summarizeSessionLog(text: string): SessionSummary | undefined {
         turnCount += 1
         break
       case 'user/message': {
-        if (sourceKind(data) === 'plugin' || sourceKind(data) === 'tool') break
+        // 与 turn-anchors 同一「真实用户回合」判定:只有 `user` / 缺 kind(旧日志)算人类消息;
+        // 完成通知、运行时上下文、指令注入、技能目录等系统消息不进标题、不计数。
+        const kind = sourceKind(data)
+        if (kind !== '' && kind !== 'user') break
         messageCount += 1
         if (!firstUserText) firstUserText = firstTextOfMessage(data)
         break
@@ -188,6 +193,8 @@ export function detailRecords(text: string): SessionDetailRecord[] {
   const events = lines.slice(1).map(parseJsonLine).filter((event): event is Json => event !== undefined)
   const turnEndReasons = new Map<number, string>()
   let roundKey: number | undefined
+  /** 最近一条普通人类用户回合的持久锚点:goal 续轮与系统通知不清空也不篡改它。 */
+  let currentOrdinaryUserClientId: string | undefined
   for (const event of events) {
     if (event.type !== 'turn/end') continue
     const data = asObject(event.data)
@@ -203,17 +210,29 @@ export function detailRecords(text: string): SessionDetailRecord[] {
       case 'user/message': {
         const source = asObject(data.source)
         const kind = sourceKind(data)
-        if (kind === 'plugin' || kind === 'tool') break
-        const messageText = firstTextOfMessage(data)
+        // 与 turn-anchors 同一「真实用户回合」判定:只有普通用户(或旧日志缺 source)与
+        // 有效 goal 续轮(round > 0)产出 user 记录;其余系统/注入消息一律过滤。
+        if (kind !== '' && kind !== 'user' && kind !== 'goal') break
         const goalRound = kind === 'goal' && typeof source.round === 'number' && source.round > 0
           ? source.round
           : undefined
+        if (kind === 'goal' && goalRound === undefined) break
+        const messageText = firstTextOfMessage(data)
+        // 普通用户记录带上 Host 生成的持久消息 id;goal 续轮不写(它不是新的用户回合)。
+        // 渲染用的数值 id 由客户端 allocId() 重新分配,不复用这个历史 id。
+        const persistedId = goalRound === undefined && typeof data.id === 'string' && data.id.length > 0
+          ? data.id
+          : undefined
+        // 只有真实普通用户消息换锚:goal 续轮与已过滤的系统/插件消息不参与;
+        // 缺 id 或无文本的普通用户消息同样清掉旧锚(与 turn-anchors 的 fail closed 一致)。
+        if (goalRound === undefined) currentOrdinaryUserClientId = messageText ? persistedId : undefined
         if (messageText) {
           records.push({
             kind: 'user',
             time,
             text: messageText,
             ...(goalRound === undefined ? {} : { goalRound }),
+            ...(persistedId === undefined ? {} : { clientMessageId: persistedId }),
           })
         }
         break
@@ -242,6 +261,10 @@ export function detailRecords(text: string): SessionDetailRecord[] {
         const args = formatToolArguments(data.arguments)
         const command = shellCommandOf(name, data.arguments)
         if (typeof data.callId === 'string') toolNames.set(data.callId, name)
+        // 真实 JSONL 日志把 arguments 序列化成 JSON 字符串:结构化 todos 必须从原始参数
+        // 解码(展示用 args 已截断且不可还原),坏条目逐条过滤;其他工具不解析。
+        const parsedArgs: Json = name === 'todo_write' ? asObject(parseToolArguments(data.arguments)) : {}
+        const todos = name === 'todo_write' ? normalizeTodoEntries(parsedArgs.todos) : undefined
         records.push({
           kind: 'tool-call',
           time,
@@ -250,6 +273,10 @@ export function detailRecords(text: string): SessionDetailRecord[] {
           ...(typeof data.callId === 'string' ? { callId: data.callId } : {}),
           ...(args !== undefined ? { args } : {}),
           ...(command !== undefined ? { command } : {}),
+          ...(todos !== undefined ? { todos } : {}),
+          ...(name === 'todo_write' && currentOrdinaryUserClientId !== undefined
+            ? { clientMessageId: currentOrdinaryUserClientId }
+            : {}),
         })
         break
       }

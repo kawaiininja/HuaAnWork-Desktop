@@ -8,6 +8,7 @@ import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
 import { createSubagentRunRegistry } from './subagent-runs.ts'
 import { createTurnScheduler } from './turn-scheduler.ts'
+import { installTurnAnchorHooks } from './turn-anchors.ts'
 import { installNetworkGate } from './net-gate.ts'
 import { startAutomationScheduler, evaluateDueAutomations } from './automation-scheduler.ts'
 import { bindAutomationRuntime, type AutomationRuntime } from './automations-host.ts'
@@ -152,6 +153,8 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     }
     return runtime.requestConfirmedRestart()
   })
+  // 共享回合锚点:holders 注入实例,这里挂 pre-step 写锚点与 session/disposed 清理。
+  installTurnAnchorHooks(ctx)
   // 技能中心一次性迁移必须在技能路由可用前完成:旧用户技能与旧启用的普通内置
   // 技能都要先变成“本地副本 + user-skill-toggles.json”。失败不写完成标记,
   // 下次启动重入;错误只记录,不阻塞桌面其余部分。

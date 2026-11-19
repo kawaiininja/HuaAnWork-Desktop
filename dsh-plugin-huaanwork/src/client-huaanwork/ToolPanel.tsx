@@ -4,9 +4,15 @@ import type { PanelToggle, ToolPanelView } from "./logic/toolPanel.ts";
 export default function ToolPanel({
   panel,
   onToggle,
+  idPrefix,
 }: {
   panel: ToolPanelView;
   onToggle: (anchorId: number, next: PanelToggle) => void;
+  /**
+   * 同一锚的面板可能同时挂载于主流与右栏；右栏传入前缀避免 DOM `id` 与
+   * `aria-controls` 重复。主流省略，保持既有 `tool-panel-body-${anchorId}` 形态。
+   */
+  idPrefix?: string;
 }) {
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<number>>(new Set());
   const [announcement, setAnnouncement] = useState("");
@@ -26,10 +32,15 @@ export default function ToolPanel({
     });
   };
 
-  const bodyId = `tool-panel-body-${panel.anchorId}`;
+  const idScope = idPrefix === undefined || idPrefix === "" ? "" : `-${idPrefix}`;
+  const bodyId = `tool-panel-body${idScope}-${panel.anchorId}`;
 
   return (
-    <section className={`tool-panel tool-panel-${panel.status}`}>
+    <section
+      className={`tool-panel tool-panel-${panel.status}`}
+      data-anchor-id={panel.anchorId}
+      data-tool-count={panel.count}
+    >
       <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</span>
       <button
         type="button"
@@ -44,9 +55,14 @@ export default function ToolPanel({
         <div className="tool-panel-body" id={bodyId}>
           {panel.tools.map((tool) => {
             const expanded = expandedTools.has(tool.id);
-            const detailId = `tool-detail-${panel.anchorId}-${tool.id}`;
+            const detailId = `tool-detail${idScope}-${panel.anchorId}-${tool.id}`;
             return (
-              <div className="tool-panel-entry" key={tool.id}>
+              <div
+                className="tool-panel-entry"
+                key={tool.id}
+                data-call-id={tool.callId}
+                data-round-key={tool.roundKey}
+              >
                 <button
                   type="button"
                   className="tool-panel-entry-title"

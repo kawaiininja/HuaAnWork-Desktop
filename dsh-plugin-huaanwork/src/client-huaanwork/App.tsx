@@ -46,6 +46,7 @@ import SkillSuccessCard from "./SkillSuccessCard.tsx";
 import SlashSkillMenu from "./SlashSkillMenu.tsx";
 import SkillsView from "./SkillsView.tsx";
 import SubagentRunCard from "./SubagentRunCard.tsx";
+import type { SubagentConfirmSurface, SubagentConfirmTarget } from "./SubagentRunCard.tsx";
 import {
   isReservedSlash,
   parseSlashInvoke,
@@ -120,12 +121,18 @@ import { createKeepAwakeDriver, shouldHoldKeepAwake } from "./logic/keepAwake.ts
 import { missedBannerView, nextMissedCount } from "./logic/missedBanner.ts";
 import { parseSchedulePhrase } from "./logic/schedulePhrase.ts";
 import {
+  buildSessionSendParams,
   chatTabHasConversation,
   cwdWithinRoot,
+  findPendingForToolEnd,
+  hasBufferedQueueStartForSession,
   historyItemsFromRecords,
   isAutomationSessionId,
+  takeEarlyPendingEvents,
   unscopedSessions,
 } from "./logic/sessionChannel.ts";
+import { currentSnapshotRoundKey, shouldApplyTodoEvent } from "./logic/todoProjection.ts";
+import { selectProgressPanelModel } from "./logic/progressPanel.ts";
 import { needsSubtaskOnSend, subtaskNameFromMessage, subtaskRenamesFromTitles } from "./logic/subtaskLogic.ts";
 import {
   hasAssistantTextAfter,
@@ -232,6 +239,7 @@ import {
 import { renderResultHtml, renderResultMarkdown } from "./logic/runResultRender.ts";
 import { ThinkingPanel } from "./ThinkingPanel.tsx";
 import ToolPanel from "./ToolPanel.tsx";
+import ProgressPanel from "./ProgressPanel.tsx";
 
 /**
  * 用户对话会话 id（事件路由用）：huaanwork-chat- 旧会话与 huaanwork-<16hex digest> 新会话。
@@ -286,6 +294,8 @@ type ChatItem =
       id: number;
       kind: "user";
       text: string;
+      /** 本次发送的持久回合锚（Host UUID / 自动化 runId）；历史回放时来自 `data.id`。 */
+      clientMessageId?: string;
       /** 排队中、尚未开始执行的本次发送；由 `session.send` 的应答写回。 */
       queueItemId?: string;
       /** 本次 `session.send` 已抛错且未启动；只在本标签内标记。 */
@@ -296,7 +306,7 @@ type ChatItem =
   | { id: number; kind: "assistant"; text: string; interrupted?: boolean; userToggled?: "expand" | "collapse"; roundKey?: number }
   | { id: number; kind: "thinking"; thought: string; interrupted: boolean; historical?: boolean; steps?: ThinkingSteps; userToggled?: "expand" | "collapse"; roundKey?: number }
   | { id: number; kind: "tool"; card: ToolCard; panelToggled?: "expand" | "collapse" }
-  | { id: number; kind: "todo"; todos: TodoEntry[] }
+  | { id: number; kind: "todo"; todos: TodoEntry[]; roundKey?: number; clientMessageId?: string }
   | { id: number; kind: "ask"; card: AskCard }
   | { id: number; kind: "input"; card: InputCard }
   | { id: number; kind: "attachment"; sourceText: string }
@@ -399,6 +409,8 @@ type PendingSend = {
   tabId: string;
   /** 本次插入的用户消息 id；等待项与回合身份都按它回写。 */
   userId: number;
+  /** 本次发送的持久回合锚；早到的 `todo_write` 只按它进入本次缓冲。 */
+  clientMessageId: string;
   /** 发送前已知道的会话 id；没有它的发送无法匹配早到事件。 */
   sessionId?: string;
   /** 应答回来之前到达、尚不能结算的事件，按到达顺序。 */
@@ -606,7 +618,7 @@ export default function App() {
   /** 对账代际:断连与 ready 都推进它,迟到的 snapshot 应答据此丢弃(设计 D6)。 */
   const reconcileEpochRef = useRef(0);
   const [expandedByRunId, setExpandedByRunId] = useState<Record<string, boolean>>({});
-  const [confirmingRunId, setConfirmingRunId] = useState<string | null>(null);
+  const [confirmingTarget, setConfirmingTarget] = useState<SubagentConfirmTarget | null>(null);
   const [cancelBusyByRunId, setCancelBusyByRunId] = useState<Record<string, boolean>>({});
   const [cancelErrorByRunId, setCancelErrorByRunId] = useState<Record<string, string>>({});
   /**
@@ -806,6 +818,14 @@ export default function App() {
     for (const pending of pendingSendsRef.current.values()) {
       if (pending.sessionId === sessionId) return pending;
     }
+    for (const pending of pendingSendsRef.current.values()) {
+      if (
+        pending.sessionId === undefined
+        && pending.buffered.some((ev) => ev.event === "session/queue-start" && ev.sessionId === sessionId)
+      ) {
+        return pending;
+      }
+    }
     return undefined;
   }
 
@@ -932,8 +952,9 @@ export default function App() {
 
   /**
    * 取出本次发送暂存的早到事件并清掉它的 pending：直接开始的回合按原顺序全部重放；
-   * 排队应答只重放 `queueItemId` 与它一致的那几条；没启动的应答只丢弃本次缓冲。
-   * 清理只针对本次记录，别的发送的 pending 不受影响。
+   * 排队应答只重放 `queueItemId` 与它一致的那几条（本次排队项真的开始执行时，
+   * 连带重放携带本次锚点的早到 `todo_write`，队列开始先于待办）；
+   * 没启动的应答只丢弃本次缓冲。清理只针对本次记录，别的发送的 pending 不受影响。
    */
   function takePendingBuffer(pending: PendingSend, sent: SessionSendResult): RpcEvent[] {
     const buffered = pending.buffered;
@@ -944,7 +965,7 @@ export default function App() {
     discardBufferedStopEnds(buffered);
     if (sent.waiting && sent.queueItemId !== undefined) {
       const queueItemId = sent.queueItemId;
-      return buffered.filter((event) => (
+      return takeEarlyPendingEvents(sent, buffered, pending.clientMessageId, (event) => (
         (event.event === "session/queue-start" || event.event === "session/queue-fail")
         && event.queueItemId === queueItemId
       ));
@@ -1046,6 +1067,38 @@ export default function App() {
     turnFinalWithoutUser: activeChat.turnFinalWithoutUser,
     connectionLost: sidecarDead,
   }), [items, contentView, activeChat.turnFinalByUserId, activeChat.turnFinalWithoutUser, sidecarDead]);
+  /**
+   * 右栏进度只读当前回合：最后一条已启动用户条目的 `clientMessageId` 是唯一权威锚点，
+   * 终态沿用标签自己的 `turnFinalByUserId` / `turnFinalWithoutUser` 结算。
+   */
+  const progressTurnStart = currentTurnStart(items);
+  const progressTurnOpener = progressTurnStart > 0 ? items[progressTurnStart - 1] : undefined;
+  const progressCurrentClientMessageId =
+    progressTurnOpener?.kind === "user" ? progressTurnOpener.clientMessageId : undefined;
+  const progressTurnFinal = progressTurnOpener === undefined
+    ? activeChat.turnFinalWithoutUser === true
+    : activeChat.turnFinalByUserId?.[progressTurnOpener.id] === true;
+  const progressModel = useMemo(() => selectProgressPanelModel({
+    sessionId: activeChat.sessionId ?? "",
+    items,
+    toolRows,
+    currentTurnClientMessageId: progressCurrentClientMessageId,
+    turnFinal: progressTurnFinal,
+    subagents: [...subagentRuns.runs.values()],
+    sidecarDead,
+    ready,
+    sawReady: sawReady.current,
+    subagentConnection: subagentRuns.connection,
+  }), [
+    activeChat.sessionId,
+    items,
+    toolRows,
+    progressCurrentClientMessageId,
+    progressTurnFinal,
+    subagentRuns,
+    sidecarDead,
+    ready,
+  ]);
   /** 运行卡不进入内容视图,下标会与 `items` 错位;思考收尾判断按 id 取内容视图下标。 */
   const contentIndexById = useMemo(
     () => new Map(contentView.map((entry, index) => [entry.id, index] as const)),
@@ -1057,11 +1110,11 @@ export default function App() {
     now,
     frozenAt: subagentRuns.frozenAt,
     expandedByRunId,
-    confirmingRunId,
+    confirmingTarget,
     cancelBusyByRunId,
     cancelErrorByRunId,
     onToggleExpanded: toggleSubagentExpanded,
-    onRequestCancel: requestCancelSubagent,
+    onRequestCancel: (runId) => requestCancelSubagent(runId, "main"),
     onConfirmCancel: (runId) => void confirmCancelSubagent(runId),
     onDismissCancel: dismissCancelSubagent,
   };
@@ -1659,7 +1712,7 @@ export default function App() {
       setExpandedByRunId((prev) => withoutKey(prev, runId));
       setCancelBusyByRunId((prev) => withoutKey(prev, runId));
       setCancelErrorByRunId((prev) => withoutKey(prev, runId));
-      setConfirmingRunId((prev) => (prev === runId ? null : prev));
+      setConfirmingTarget((prev) => (prev?.runId === runId ? null : prev));
     };
     const applyEvent = (event: RpcEvent) => {
       if (cancelled) return;
@@ -1693,6 +1746,37 @@ export default function App() {
           pending.buffered.push(incoming);
           return true;
         }
+        // 同会话新排队回合在 waiting 应答前早到的待办：只按本次发送的锚点进入本次缓冲。
+        // 该分支必须先于 running-turn 守卫：goalIntermediate 保留前端 running 期间，
+        // 本次排队回合的 todo_write 也不能被守卫当成上一回合的事件丢掉；
+        // 上一回合或他项的事件 clientMessageId 不匹配，天然不进这里的缓冲。
+        // 全新标签的首发还没有 sessionId，所以按锚而不是按会话查找在途发送。
+        if (incoming.event === "tool/start" && incoming.name === "todo_write") {
+          const pending = findPendingSendByClientMessageId(pendingSendsRef.current.values(), incoming.clientMessageId);
+          if (pending !== undefined && incoming.clientMessageId === pending.clientMessageId) {
+            pending.buffered.push(incoming);
+            return true;
+          }
+          return false;
+        }
+        // Q4-I3: 本次发送的普通工具早到（含与它配对的结束事件）同样按锚点暂存，
+        // 避免在应答回来清掉 `notStarted` 前落入上一回合、导致当前右栏漏活动。
+        if (incoming.event === "tool/start") {
+          const pending = findPendingSendByClientMessageId(pendingSendsRef.current.values(), incoming.clientMessageId);
+          if (pending !== undefined && incoming.clientMessageId === pending.clientMessageId) {
+            pending.buffered.push(incoming);
+            return true;
+          }
+          return false;
+        }
+        if (incoming.event === "tool/end") {
+          const pending = findPendingForToolEnd(pendingSendsRef.current.values(), incoming);
+          if (pending !== undefined) {
+            pending.buffered.push(incoming);
+            return true;
+          }
+          return false;
+        }
         const isGoalEvent = incoming.event === "session/end" || incoming.event === "goal/state"
           || incoming.event === "goal/round" || incoming.event === "goal/round-limit";
         if (!isGoalEvent) return false;
@@ -1703,12 +1787,17 @@ export default function App() {
         if (stopRequestedForSession(sessionId) || staleIdleRef.current.some((item) => item.sessionId === sessionId)) return false;
         const pending = pendingSendOfSession(sessionId);
         if (pending === undefined) return false;
-        if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;
-        // 跨标签同会话:任一标签正把这个会话作为执行中的回合跟踪时,这条事件属于
-        // 那个回合,必须照常即时结算——进本发送的 pending 缓冲会被 waiting 应答的
-        // 按 queueItemId 过滤丢弃,那个标签将永久 running(最终评审 Important 1)。
-        const turnTab = turnTabForSession(sessionId);
-        if (turnTab !== undefined && tabRunOf(turnTab).running && tabTurnOf(turnTab).sessionId === sessionId) return false;
+        // 本次在途发送已收到同会话未认领的 queue-start 时，后续 goal/* 与 session/end 属于
+        // 该排队回合（即便 goalIntermediate 让前端仍维持 running === true），必须继续留在缓冲中。
+        const pendingQueuedStarted = hasBufferedQueueStartForSession(pending.buffered, sessionId);
+        if (!pendingQueuedStarted) {
+          if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;
+          // 跨标签同会话:任一标签正把这个会话作为执行中的回合跟踪时,这条事件属于
+          // 那个回合,必须照常即时结算——进本发送的 pending 缓冲会被 waiting 应答的
+          // 按 queueItemId 过滤丢弃,那个标签将永久 running(最终评审 Important 1)。
+          const turnTab = turnTabForSession(sessionId);
+          if (turnTab !== undefined && tabRunOf(turnTab).running && tabTurnOf(turnTab).sessionId === sessionId) return false;
+        }
         pending.buffered.push(incoming);
         return true;
       };
@@ -1755,13 +1844,23 @@ export default function App() {
             };
             setChatTabs((prev) => {
               const found = prev.find((tab) => tab.id === targetId);
-              if (found) return prev.map((tab) => (tab.id === targetId ? { ...tab, ...link } : tab));
+              if (found) {
+                // 复用标签:同一 run 的重复 run-task/回放不追加第二条 user 条目。
+                const runUser = automationRunUserItem(event.runId, task.name, found.items);
+                const items = runUser === undefined
+                  ? found.items
+                  : [...found.items, { id: allocId(), ...runUser }];
+                return prev.map((tab) => (tab.id === targetId ? { ...tab, ...link, items } : tab));
+              }
+              // 新建标签:锚定的 user 条目放在既有「自动化运行中…」note 之前,与历史回放的首条用户消息同形。
+              const initialItems: ChatItem[] = [{ id: allocId(), kind: "note" as const, text: "自动化运行中…" }];
+              const runUser = automationRunUserItem(event.runId, task.name, initialItems);
               return [
                 ...prev,
                 {
                   id: targetId,
                   ...link,
-                  items: [{ id: allocId(), kind: "note" as const, text: "自动化运行中…" }],
+                  items: runUser === undefined ? initialItems : [{ id: allocId(), ...runUser }, ...initialItems],
                   sessionFailed: false,
                   pendingPick: false,
                 },
@@ -2265,10 +2364,16 @@ export default function App() {
     subagentRunsRef.current = subagentRuns;
   }, [subagentRuns]);
 
-  /** 切 tab 取消确认态:确认对象可能已不在当前标签里(设计 D17 的 UI 边界)。 */
+  /** 切 tab 或离开主视图取消确认态:确认对象可能已不在当前视图里(设计 D17 的 UI 边界)。 */
   useEffect(() => {
-    setConfirmingRunId((prev) => (prev === null ? prev : null));
-  }, [activeTab]);
+    setConfirmingTarget((prev) => (prev === null ? prev : null));
+  }, [activeTab, view]);
+
+  /** 右栏切离进度页或收起时只清右栏发起的确认态,不影响主流卡上的行内确认。 */
+  useEffect(() => {
+    if (rightTab === "progress" && !rightCollapsed) return;
+    setConfirmingTarget((prev) => (prev?.surface === "progress" ? null : prev));
+  }, [rightTab, rightCollapsed]);
 
   useEffect(() => {
     // 分享同一秒表:任一标签的回合或任一子代理 run 活跃时都走;每张运行卡不得自建 interval。
@@ -2507,14 +2612,14 @@ export default function App() {
     setExpandedByRunId((prev) => ({ ...prev, [runId]: prev[runId] !== true }));
   }
 
-  /** 点「终止」只打开卡内二次确认,不发送任何 RPC。 */
-  function requestCancelSubagent(runId: string): void {
-    setConfirmingRunId(runId);
+  /** 点「终止」只打开触发侧卡内的行内二次确认,不发送任何 RPC;主流与右栏共用唯一状态。 */
+  function requestCancelSubagent(runId: string, surface: SubagentConfirmSurface): void {
+    setConfirmingTarget({ runId, surface });
     setCancelErrorByRunId((prev) => withoutKey(prev, runId));
   }
 
   function dismissCancelSubagent(runId: string): void {
-    setConfirmingRunId((prev) => (prev === runId ? null : prev));
+    setConfirmingTarget((prev) => (prev?.runId === runId ? null : prev));
   }
 
   /**
@@ -2523,7 +2628,7 @@ export default function App() {
    * 确认期间 run 已终态或失效时关闭确认且零 RPC。
    */
   async function confirmCancelSubagent(runId: string): Promise<void> {
-    setConfirmingRunId((prev) => (prev === runId ? null : prev));
+    setConfirmingTarget((prev) => (prev?.runId === runId ? null : prev));
     const run = subagentRunsRef.current.runs.get(runId);
     if (!run || !isSubagentRunActive(run)) {
       setCancelErrorByRunId((prev) => withoutKey(prev, runId));
@@ -2895,7 +3000,10 @@ export default function App() {
       // （applyOpenedProject），未选择的会话留在中立根，按 cwd 分组落入侧栏「任务」区。
       // 插入即标未启动：应答回来之前这条消息还没有开启回合，流式条目与终态选择都不能
       // 停在它后面。只有 started 应答（或排队项真正出队）才清掉这个标记。
-      const userMsg: ChatItem = { id: allocId(), kind: "user", text, notStarted: true };
+      // 持久回合锚由本端生成 UUID：allocId 刷新后会重复，不能当持久锚；也不使用客户端
+      // 时钟冒充 Host 的 TurnAnchor.startedAt。
+      const clientMessageId = crypto.randomUUID();
+      const userMsg: ChatItem = { id: allocId(), kind: "user", text, clientMessageId, notStarted: true };
       setChatTabs((prev) => prev.map((tab) => (tab.id === chatId ? { ...tab, items: [...tab.items, userMsg] } : tab)));
       // 固定话术不是输入框草稿：发完不撤用户正在写的内容。
       if (textOverride === undefined) setDraft("");
@@ -2904,22 +3012,22 @@ export default function App() {
       const pending: PendingSend = {
         tabId: chatId,
         userId: userMsg.id,
+        clientMessageId,
         ...(sessionId ? { sessionId } : {}),
         buffered: [],
       };
       pendingSendsRef.current.set(chatId, pending);
       try {
-        const sent = await rpcCall<SessionSendResult>("session.send", {
-          text: invokedAt ? invokedAt.remainder : invokedSkill ? invokedSkill.remainder : text,
+        const sent = await rpcCall<SessionSendResult>("session.send", buildSessionSendParams({
+          text,
           tabId: chatId,
+          clientMessageId,
+          userItemId: userMsg.id,
           ...(sessionId ? { sessionId } : {}),
           ...(modelId ? { modelId } : {}),
-          ...(invokedAt
-            ? { at: { name: invokedAt.name, clientMessageId: String(userMsg.id) } }
-            : invokedSkill
-              ? { skill: invokedSkill.name }
-              : {}),
-        });
+          ...(invokedAt ? { invokedAt } : {}),
+          ...(invokedSkill ? { invokedSkill } : {}),
+        }));
         // 先写回身份：排队只追加等待项，started:true 才真正开始执行。
         writeTabRun(chatId, (state) => noteSendResult(state, sent));
         // 宿主在 started 应答前（followup 之后）或 queue-start 之后才写回本次模型；刷新任务列表，
@@ -3334,7 +3442,24 @@ export default function App() {
           },
         };
       }
-      if (item.kind === "user") return { id: allocId(), kind: "user", text: item.text };
+      if (item.kind === "user") {
+        return {
+          id: allocId(),
+          kind: "user",
+          text: item.text,
+          ...(item.clientMessageId === undefined ? {} : { clientMessageId: item.clientMessageId }),
+        };
+      }
+      // 历史待办与实时投影同一形状：显式分支，不落入 note 兜底。
+      if (item.kind === "todo") {
+        return {
+          id: allocId(),
+          kind: "todo",
+          todos: item.todos,
+          ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }),
+          ...(item.clientMessageId === undefined ? {} : { clientMessageId: item.clientMessageId }),
+        };
+      }
       if (item.kind === "thinking") {
         return { id: allocId(), kind: "thinking", thought: item.text, interrupted: false, historical: true, ...(item.roundKey === undefined ? {} : { roundKey: item.roundKey }) };
       }
@@ -4134,10 +4259,18 @@ export default function App() {
                 )
               ) : null}
               {rightTab === "progress" ? (
-                <div className="panel-card">
-                  <p className="h">任务进度</p>
-                  <p className="panel-empty">任务进度将显示在这里</p>
-                </div>
+                <ProgressPanel
+                  model={progressModel}
+                  now={now}
+                  frozenAt={subagentRuns.frozenAt}
+                  confirmingTarget={confirmingTarget}
+                  cancelBusyByRunId={cancelBusyByRunId}
+                  cancelErrorByRunId={cancelErrorByRunId}
+                  onToggleActivity={toggleToolPanel}
+                  onRequestCancel={(runId) => requestCancelSubagent(runId, "progress")}
+                  onConfirmCancel={(runId) => void confirmCancelSubagent(runId)}
+                  onDismissCancel={dismissCancelSubagent}
+                />
               ) : null}
               {rightTab === "files" ? (
                 <div className="panel-card project-tree-card">
@@ -4476,7 +4609,12 @@ export function handleEvent(
     case "tool/start":
       if (event.name === "todo_write" && event.todos) {
         const todos = event.todos;
-        setItems((prev) => upsertTodoItem(prev, todos, allocId), event.sessionId);
+        // 待办只属于当前回合的真实用户开启者：锚点不精确或轮次回退一律不写（面板与主流都不更新）。
+        setItems((prev) => {
+          const turnStart = currentTurnStart(prev);
+          if (!shouldApplyTodoEvent(prev, turnStart, event, currentSnapshotRoundKey(prev, turnStart))) return prev;
+          return upsertTodoItem(prev, todos, allocId, event.roundKey, event.clientMessageId);
+        }, event.sessionId);
         break;
       }
       setItems(
@@ -4726,13 +4864,69 @@ export function queuedTurnRunState(state: TabRunState, queueItemId: string, hasO
     : noteWaitingCancelled(state, queueItemId);
 }
 
-/** 本回合只保留最新一份待办列表（todo_write 每次发送完整替换列表）。 */
-export function upsertTodoItem(items: ChatItem[], todos: TodoEntry[], allocId: () => number): ChatItem[] {
+/**
+ * 按本次发送的持久回合锚在在途发送中查找。
+ *
+ * 全新标签的首发在应答回来前还没有 `sessionId`, 早到的 `todo_write` 只能靠
+ * 发送方生成的 UUID 锚归属; 锚由 `crypto.randomUUID()` 生成, 不会重复。
+ *
+ * @param pending 在途发送集合 (`pendingSendsRef.current.values()`)
+ * @param clientMessageId 早到事件携带的回合锚; 缺失或没有匹配时返回 undefined
+ * @returns 锚一致的发送记录
+ */
+export function findPendingSendByClientMessageId<P extends { clientMessageId: string }>(
+  pending: Iterable<P>,
+  clientMessageId: string | undefined,
+): P | undefined {
+  if (typeof clientMessageId !== "string" || clientMessageId.length === 0) return undefined;
+  for (const candidate of pending) {
+    if (candidate.clientMessageId === clientMessageId) return candidate;
+  }
+  return undefined;
+}
+
+/** 本回合只保留最新一份待办列表（todo_write 每次发送完整替换列表），并带上它的回合归属。 */
+export function upsertTodoItem(
+  items: ChatItem[],
+  todos: TodoEntry[],
+  allocId: () => number,
+  roundKey?: number,
+  clientMessageId?: string,
+): ChatItem[] {
   const turnStart = currentTurnStart(items);
-  const at = items.findIndex((item, index) => index >= turnStart && item.kind === "todo");
-  if (at >= 0) return items.map((item, index) => (index === at ? { ...item, todos } : item));
+  const attribution = {
+    ...(roundKey === undefined ? {} : { roundKey }),
+    ...(clientMessageId === undefined ? {} : { clientMessageId }),
+  };
+  let at = -1;
+  for (let index = items.length - 1; index >= turnStart; index -= 1) {
+    if (items[index]?.kind === "todo") {
+      at = index;
+      break;
+    }
+  }
+  if (at >= 0) return items.map((item, index) => (index === at ? { ...item, todos, ...attribution } : item));
   const insertAt = turnAppendIndex(items);
-  return [...items.slice(0, insertAt), { id: allocId(), kind: "todo", todos }, ...items.slice(insertAt)];
+  return [...items.slice(0, insertAt), { id: allocId(), kind: "todo", todos, ...attribution }, ...items.slice(insertAt)];
+}
+
+/** 自动化运行标签首条用户条目的模板:数值 `id` 由调用方 `allocId()` 补齐(与历史回放同口径)。 */
+export type AutomationRunUserEntry = { kind: "user"; text: string; clientMessageId: string };
+
+/**
+ * 自动化运行标签的锚定用户条目(纯 helper,先例 `upsertTodoItem`)。
+ *
+ * `automation/run-task` 建立的运行标签必须有一条 `clientMessageId === runId` 的用户条目:
+ * 它同时是子代理运行卡与进度面板的精确锚点,历史回放从会话日志透传的也是同一个 runId。
+ * 该 run 的条目已存在时返回 `undefined`,调用方不得追加第二条。
+ */
+export function automationRunUserItem(
+  runId: string,
+  taskName: string,
+  items: readonly { kind: string; clientMessageId?: string }[],
+): AutomationRunUserEntry | undefined {
+  if (items.some((item) => item.kind === "user" && item.clientMessageId === runId)) return undefined;
+  return { kind: "user", text: `自动化任务「${taskName}」开始运行`, clientMessageId: runId };
 }
 
 /** 计划卡画在本回合 `exit_plan_mode` 那一行工具之前；找不到那一行就落在排队消息之前。 */
@@ -4834,7 +5028,7 @@ type SubagentChatView = {
   now: number;
   frozenAt?: number;
   expandedByRunId: Readonly<Record<string, boolean>>;
-  confirmingRunId: string | null;
+  confirmingTarget: SubagentConfirmTarget | null;
   cancelBusyByRunId: Readonly<Record<string, boolean>>;
   cancelErrorByRunId: Readonly<Record<string, string>>;
   onToggleExpanded(runId: string): void;
@@ -4893,7 +5087,7 @@ function ChatRow({
         frozenAt={subagent.frozenAt}
         duplicateLabel={subagentNeedsStartTime(run, sameParentRuns)}
         expanded={subagent.expandedByRunId[run.runId] === true}
-        confirming={subagent.confirmingRunId === run.runId}
+        confirming={subagent.confirmingTarget?.runId === run.runId && subagent.confirmingTarget.surface === "main"}
         cancelBusy={subagent.cancelBusyByRunId[run.runId] === true || run.phase === "stopping"}
         cancelError={subagent.cancelErrorByRunId[run.runId]}
         onToggleExpanded={subagent.onToggleExpanded}
@@ -4975,8 +5169,8 @@ function ChatRow({
     return (
       <div className="card todo-card">
         <span className="ttl">待办</span>
-        {item.todos.map((todo) => (
-          <div key={todo.content} className={todo.status === "completed" ? "muted" : undefined}>
+        {item.todos.map((todo, index) => (
+          <div key={`${index}-${todo.content}`} className={todo.status === "completed" ? "muted" : undefined}>
             <span className="badge">{todoLabel(todo.status)}</span> {todo.content}
           </div>
         ))}

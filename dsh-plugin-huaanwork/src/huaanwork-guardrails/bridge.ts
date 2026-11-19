@@ -9,9 +9,16 @@ import {
   resultTextFailed,
   shellCommandOf,
 } from "../client-huaanwork/logic/commandOutcome.ts";
+import { normalizeTodoEntries } from "../client-huaanwork/logic/todoProjection.ts";
 import { acceptanceInjectToolName, acceptanceToolFailure } from "../huaanwork-host/acceptance-hooks.ts";
 import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
 import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
+import {
+  noteSystemSkillGoalPhase,
+  releaseSystemSkillLease,
+  releaseSystemSkillLeaseOnIdle,
+  type SystemSkillLeaseHost,
+} from "../huaanwork-host/system-skill-leases.ts";
 import {
   createGitWorkBudget,
   GIT_SNAPSHOT_BUDGET_MS,
@@ -33,6 +40,8 @@ type RpcEvent =
       args?: string;
       command?: string;
       todos?: { content: string; status: "pending" | "in_progress" | "completed" }[];
+      /** 本次工具调用所属真实用户回合的持久锚点;无锚事件不带该字段。 */
+      clientMessageId?: string;
     }
   | { event: "tool/end"; name: string; callId?: string; truncated?: boolean; text?: string; sessionId?: string; isError?: true }
   | { event: "diff"; text: string; sessionId?: string }
@@ -70,13 +79,15 @@ type ToolResult = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/
 /** 插件实例拥有的轮次表：sessionId → 最近一条 step/start 的日志 seq。 */
 type RoundKeys = Map<string, number>;
 
-type Context = {
+type Context = SystemSkillLeaseHost & {
   huaanworkWorkspaceRoot?: { current: string };
   huaanworkSessionRoots?: Map<string, string>;
   /** 唯一调度器:缺 sessionId 的 diff 只在恰好一个回合占名额时补上它的会话。 */
   huaanworkTurnScheduler?: { soleCapWriterSessionId(): string | undefined };
   /** Cordis logger;缺席时 console 兜底由调用点决定。 */
   logger?: { info?(message: string): void };
+  /** 共享回合锚点(设计「回合归属」):`tool/start` 从这里取本次调用的真实用户锚点。 */
+  huaanworkTurnAnchors?: { current(sessionId: string): { clientMessageId: string } | undefined };
   huaanworkEmit?: (event: RpcEvent) => void;
   /** 子代理 run 权威状态机;fixture 与旧运行时可以缺席,缺席时所有事件照旧广播。 */
   huaanworkSubagentRuns?: ChildRunActivity;
@@ -109,7 +120,11 @@ export function apply(ctx: Context): void {
   const roundKeys: RoundKeys = new Map();
   ctx.on("session/disposed", ((session: { id?: string }) => {
     const id = session?.id;
-    if (typeof id === "string" && id) roundKeys.delete(id);
+    if (typeof id === "string" && id) {
+      roundKeys.delete(id);
+      // 会话销毁无条件释放系统技能租约并清 active goal 标记(与 releaseSessionRuntime 同契约)。
+      releaseSystemSkillLease(ctx, id, { clearGoal: true });
+    }
   }) as never, { global: true });
 
   // Agent turns dispatch llm/stream, tools/execute, and agent/status on the
@@ -125,12 +140,14 @@ export function apply(ctx: Context): void {
       const tool = { name: execution.name, ...(execution.callId === undefined ? {} : { callId: execution.callId }) };
       if (child === undefined) {
         const roundKey = roundKeyFor(roundKeys, sessionId);
+        const anchor = sessionId === undefined ? undefined : ctx.huaanworkTurnAnchors?.current(sessionId);
         emit(ctx, {
           event: "tool/start",
           name: execution.name,
           ...(execution.callId === undefined ? {} : { callId: execution.callId }),
           ...(sessionId === undefined ? {} : { sessionId }),
           ...(roundKey === undefined ? {} : { roundKey }),
+          ...(anchor?.clientMessageId === undefined ? {} : { clientMessageId: anchor.clientMessageId }),
           ...startDetail(execution),
         });
       } else {
@@ -196,16 +213,29 @@ export function apply(ctx: Context): void {
       }
       return;
     }
+    // 中断/异常的 turn/end 兜住用户中止经过 kick 直接 idle 的窗口:无条件释放租约与
+    // active goal 标记。正常完成(completed/forked 等)不在此列。
+    if (event?.type === "turn/end") {
+      const reason = objectValue(objectValue(event.data).reason);
+      if ((reason.kind === "aborted" || reason.kind === "error") && sessionId !== undefined) {
+        releaseSystemSkillLease(ctx, sessionId, { clearGoal: true });
+      }
+      return;
+    }
     if (event?.type === "goal/change") {
       const data = objectValue(event.data);
       // 清空墓碑没有 goal / phase：告诉客户端忘掉该会话的目标，避免 active 永久抑制结论。
       if (data.operation === "clear") {
+        // clear / 非 active 相位释放系统技能租约并清 activeGoalSessions。
+        if (sessionId !== undefined) noteSystemSkillGoalPhase(ctx, sessionId, undefined);
         emit(ctx, { event: "goal/state", cleared: true, ...scope });
         return;
       }
       const goal = objectValue(data.goal);
       const phase = goal.phase;
       if (!isGoalPhase(phase)) return;
+      // active 记入独立的 activeGoalSessions 与既有租约:正常完成的轮间 idle 不得提前解挂。
+      if (sessionId !== undefined) noteSystemSkillGoalPhase(ctx, sessionId, phase);
       if (phase === "blocked" && objectValue(goal.blockedReason).code === "round-limit" && typeof data.roundsStarted === "number") {
         // 先发专用停止事件：客户端据此只写「已停在第 N 轮」，随后到达的 blocked 状态不再补写结论。
         emit(ctx, { event: "goal/round-limit", round: data.roundsStarted, ...scope });
@@ -227,6 +257,8 @@ export function apply(ctx: Context): void {
       child.runs.childIdle(child.childId);
       return;
     }
+    // 正常完成轮次的轮间 idle:仅 goal.phase === 'active' 的会话保留系统技能租约。
+    if (sessionId !== undefined) releaseSystemSkillLeaseOnIdle(ctx, sessionId);
     emit(ctx, { event: "session/end", ok: true, ...(sessionId === undefined ? {} : { sessionId }) });
   }) as never, { global: true });
 
@@ -238,6 +270,11 @@ export function apply(ctx: Context): void {
       child.runs.noteChildError(child.childId, childErrorMessage(payload?.error));
       return;
     }
+    // 父会话 abort 与异常都绝不把系统技能租约泄漏到下一回合。上游
+    // goal-round-driver 在 agent/error 只 disarm(state) 并保留持久 goal.phase ===
+    // 'active',用户 cancel 经 agent-loop kick 捕获后走 agent/status idle;因此这里
+    // 必须无条件释放并清 activeGoalSessions,不能等 goal/change。
+    if (sessionId !== undefined) releaseSystemSkillLease(ctx, sessionId, { clearGoal: true });
     if (isAbortError(payload?.error)) {
       emit(ctx, { event: "session/end", ok: true, cancelled: true, ...(sessionId === undefined ? {} : { sessionId }) });
       return;
@@ -393,21 +430,14 @@ function porcelainUntrackedPath(line: string): string | undefined {
   return path;
 }
 
-const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
-
 /** tool/start 的附加信息:参数摘要、todo_write 的待办列表、bash / pwsh 的 command 参数。 */
 function startDetail(execution: ToolExecution): Partial<Extract<RpcEvent, { event: "tool/start" }>> {
   const formattedArgs = formatToolArguments(execution.arguments);
   const args = formattedArgs === undefined ? {} : { args: formattedArgs };
   const objectArgs = objectValue(execution.arguments);
-  if (execution.name === "todo_write" && Array.isArray(objectArgs.todos)) {
-    const todos = objectArgs.todos.flatMap((entry) => {
-      const todo = objectValue(entry);
-      return typeof todo.content === "string" && typeof todo.status === "string" && TODO_STATUSES.has(todo.status)
-        ? [{ content: todo.content, status: todo.status as "pending" | "in_progress" | "completed" }]
-        : [];
-    });
-    return { ...args, todos };
+  if (execution.name === "todo_write") {
+    const todos = normalizeTodoEntries(objectArgs.todos);
+    if (todos !== undefined) return { ...args, todos };
   }
   const command = shellCommandOf(execution.name, execution.arguments);
   return { ...args, ...(command === undefined ? {} : { command }) };

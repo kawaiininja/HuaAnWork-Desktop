@@ -6,6 +6,7 @@ import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { resetChildSessionRegistry } from "../../src/huaanwork-host/child-sessions.ts";
 import { HUAANWORK_LEGACY_AGENT_REQUEST } from "../../src/huaanwork-host/subagents-service.ts";
 import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
+import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
 import { apply as applySkills } from "../../src/huaanwork-guardrails/skills.ts";
 
 afterEach(() => {
@@ -104,6 +105,9 @@ function lineageHarness(options?: {
     huaanworkPackageChildAllow: childAllow,
     huaanworkPackageChildSessions: new Set([parentSessionId]),
     agents: { get: (id: string) => agentsById.get(id) },
+    // present-as state：包分支的 refreshAgentRestrict 需要它，且本 harness 不驱动
+    // list()，因此不会给子代理叠加基线 restrict。
+    tools: { presentAs: () => () => undefined, schemas: () => [] },
     subagents: {
       async startActivation(spec: { childId?: string }) {
         const id = spec.childId ?? grandchildId;
@@ -122,6 +126,7 @@ function lineageHarness(options?: {
       },
     },
   });
+  applyPresentAs(ctx as never);
   applySkills(ctx as never);
   return {
     ctx, emit, childAllow, attachments, allow, agentsById,
@@ -366,4 +371,39 @@ test("M6 characterization: writer header.id and reader session.id converge for a
 test("M6 latent asymmetry only manifests for a synthetic ref no registered Agent can take", () => {
   const synthetic = { id: "other", session: { header: { id: "real-child" } } };
   expect(sessionIdOfAgentRef(synthetic as never)).toBe("other"); // 读侧 miss real-child（真实不可达）
+});
+
+// PM-1（Task 2）：`subagent` 默认从全局 ALLOWED_TOOLS 移除后，包儿童的可见性由
+// 包 allow 决定的附件重新建立；activation 包装按 `agentPackageChildAttachmentNames`
+// 只挂 allow 声明过的名字，第二层 `pkg.allow ∩ schemas` 求交不会把未声明项放回来。
+test("a package child attaches subagent only when the package allow declares it", async () => {
+  for (const withSubagent of [true, false]) {
+    const h = lineageHarness();
+    const allow = withSubagent ? ["read", "glob", "subagent"] : ["read", "glob"];
+    (h.ctx as Record<string, unknown>).huaanworkAgentPackageRequest = {
+      current: {
+        runId: `run-${withSubagent}`,
+        allow,
+        persona: "包人设",
+        runtime: {
+          slug: "pkg",
+          packageDir: "/tmp/pkg",
+          workspaceRoot: "/tmp",
+          skillScripts: [],
+          runSkillScript: async () => ({ text: "" }),
+        },
+        parentSessionId: h.parentSessionId,
+        childId: h.grandchildId,
+        bindChild: () => undefined,
+      },
+    };
+    await activateOf(h.ctx)(activationSpec(h.grandchildId, h.parentSessionId));
+
+    const attached = h.attachments.sessionAgentTools.get(h.grandchildId);
+    expect(attached?.has("subagent") ?? false).toBe(withSubagent);
+    const names = h.grandchildTools.schemas().map((schema) => schema.name);
+    expect(names.includes("subagent")).toBe(withSubagent);
+    expect(names).toContain("read");
+    expect(names).toContain("glob");
+  }
 });

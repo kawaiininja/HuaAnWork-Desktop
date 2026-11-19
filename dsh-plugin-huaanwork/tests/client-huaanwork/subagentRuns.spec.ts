@@ -80,6 +80,49 @@ function snapshot(
   return at === undefined ? action : { ...action, at };
 }
 
+test("a system-skill run keeps its kind, label, and anchor across the shared reducer", () => {
+  const skillRun = run({
+    runId: "skill-1",
+    kind: "system-skill",
+    label: "explore",
+    clientMessageId: "uuid-1",
+    phase: "starting",
+  });
+  const next = reduceSubagentRuns(state(), runEvent(skillRun));
+  assert.equal(next.runs.get("skill-1")?.kind, "system-skill");
+  assert.equal(next.runs.get("skill-1")?.label, "explore");
+  assert.equal(next.runs.get("skill-1")?.clientMessageId, "uuid-1");
+  assert.equal(subagentStatusText(next.runs.get("skill-1")!), "启动中");
+  assert.equal(isSubagentRunActive(next.runs.get("skill-1")!), true);
+
+  const stopping = reduceSubagentRuns(
+    next,
+    runEvent({ ...skillRun, phase: "stopping", revision: 2, stopRequestedAt: 1_100 }),
+  );
+  assert.equal(subagentStatusText(stopping.runs.get("skill-1")!), "停止中");
+  const stopped = reduceSubagentRuns(
+    stopping,
+    runEvent({ ...skillRun, phase: "stopped", revision: 3, stopRequestedAt: 1_100, endedAt: 1_200 }),
+  );
+  assert.equal(subagentStatusText(stopped.runs.get("skill-1")!), "已停止");
+  assert.equal(isSubagentRunActive(stopped.runs.get("skill-1")!), false);
+
+  // 规格预留的运行树字段只透传,不参与 reducer 的相位判定。
+  const projected = run({
+    runId: "skill-2",
+    kind: "system-skill",
+    label: "test-fix",
+    taskId: "task-1",
+    parentRunId: "run-parent",
+    depth: 2,
+  });
+  const withFields = reduceSubagentRuns(next, runEvent(projected));
+  assert.equal(withFields.runs.get("skill-2")?.taskId, "task-1");
+  assert.equal(withFields.runs.get("skill-2")?.parentRunId, "run-parent");
+  assert.equal(withFields.runs.get("skill-2")?.depth, 2);
+  assert.equal(withFields.runs.get("skill-2")?.phase, "generating");
+});
+
 test("active means non-terminal and not stale; stopping is still active", () => {
   assert.deepEqual([...TERMINAL_RUN_PHASES].sort(), ["completed", "failed", "stopped"]);
   assert.equal(isSubagentRunActive(run()), true);
@@ -1084,6 +1127,41 @@ test("a matched anchor inserts directly after that message and keeps later items
   const anchored = insertSubagentRunCard(tab, { runId: "run-1", clientMessageId: "1", allocateId: () => 9 });
   assert.deepEqual(anchored.map((item) => item.id), [1, 9, 2, 3, 4]);
   assert.deepEqual(anchored.map((item) => item.kind), ["user", "subagent-run", "assistant", "user", "assistant"]);
+});
+
+test("a run card prefers the persisted clientMessageId over the numeric React id", () => {
+  const tab = [
+    { id: 7, kind: "user", clientMessageId: "uuid-x" },
+    { id: 8, kind: "user" },
+  ];
+  // 精确命中持久锚:插在该用户消息之后,而不是 id 数值撞上的另一条。
+  assert.deepEqual(
+    insertSubagentRunCard(tab, { runId: "run-1", clientMessageId: "uuid-x", allocateId: () => 9 }).map((item) => item.id),
+    [7, 9, 8],
+  );
+  // 旧条目没有持久锚时退回 String(item.id) 兼容历史卡。
+  assert.deepEqual(
+    insertSubagentRunCard([{ id: 8, kind: "user" }], { runId: "run-1", clientMessageId: "8", allocateId: () => 9 }).map(
+      (item) => item.id,
+    ),
+    [8, 9],
+  );
+  // 已有持久锚的条目不再用数值 id 兜底:同名数值不等于锚。
+  assert.deepEqual(
+    insertSubagentRunCard(tab, { runId: "run-1", clientMessageId: "7", allocateId: () => 9 }).map((item) => item.id),
+    [7, 8],
+  );
+});
+
+test("a live run event without an exact anchor never falls back to the last user message", () => {
+  const tab = [
+    { id: 1, kind: "user" },
+    { id: 2, kind: "assistant" },
+    { id: 3, kind: "user" },
+  ];
+  // 实时路径(无 allowSnapshotFallback)禁止 last-user 回退,缺精确锚点的 run 不插卡。
+  assert.equal(insertSubagentRunCard(tab, { runId: "run-1", clientMessageId: "missing", allocateId: () => 4 }), tab);
+  assert.equal(insertSubagentRunCard(tab, { runId: "run-1", allocateId: () => 4 }), tab);
 });
 
 test("the parent line summarizes an active child run and otherwise keeps the turn status", () => {

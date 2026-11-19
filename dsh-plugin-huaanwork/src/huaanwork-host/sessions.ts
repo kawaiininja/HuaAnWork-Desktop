@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { readdir, rm, unlink } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -35,6 +36,7 @@ import {
 } from './skill-creation.ts'
 import { CorruptSkillCreationDraftError, discardSkillCreationDraft, hasAgentCreationDraftOnDisk } from './skill-creation-drafts.ts'
 import { invokeSkillText } from './skill-invoke.ts'
+import { AUTO_SESSION_PREFIX } from './automation-session-ids.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
 import type { AgentsHost } from './agents-host.ts'
 import {
@@ -58,6 +60,14 @@ import { detailRecords, readSessionHeader, readSessionText, summarizeSessionLog 
 import type { RouteContext } from './routes.ts'
 import type { SubagentsService } from './subagents-service.ts'
 import type { SubagentRunRegistry } from './subagent-runs.ts'
+import {
+  acquireExplicitSystemSkillLease,
+  isUnmanagedChildSession,
+  releaseSystemSkillLease,
+  systemSkillLeaseKindOf,
+  type SystemSkillLeaseStore,
+} from './system-skill-leases.ts'
+import type { TurnAnchorStore } from './turn-anchors.ts'
 
 /**
  * 会话域主链路(旧 sidecar host.ts L1434-1740 移植)。
@@ -111,6 +121,18 @@ export type SessionRuntimeContext = {
   huaanworkSessionRoots?: Map<string, string>
   /** 唯一回合调度器(holders.ts 注入);用户发送准入与排队出队共用。 */
   huaanworkTurnScheduler?: TurnScheduler
+  /**
+   * 会话 → 当前回合锚点(holders.ts 注入共享实例)。`sendToAgent` 在 followup 受理前
+   * 登记本次发送的 pending,pre-step 钩子在真实用户消息出现时写 anchor。
+   */
+  huaanworkTurnAnchors?: TurnAnchorStore
+  /**
+   * 系统技能回合租约(holders.ts 注入)。显式 `/explore`、`/test-fix` 在 followup 之前
+   * 挂载 `subagent` 附件与租约;受管儿童在登记锚点之前拒发。
+   */
+  huaanworkSystemSkillLeases?: SystemSkillLeaseStore
+  /** 包回合血缘允许表:受管儿童判别(`isUnmanagedChildSession`)读它。 */
+  huaanworkPackageChildAllow?: Map<string, readonly string[]>
 }
 
 /** 一次已准入的用户回合:根与模型由 `sessionSend`/出队复检算好。 */
@@ -143,7 +165,10 @@ export async function sendToAgent(
   const sessionId = explicitSessionId ?? sessionIdFor(routeCtx.workspaceRoot.current)
   let skillName = objectString(params, 'skill')
   const rawAtName = objectAtName(params)
-  const atClientMessageId = objectAtClientMessageId(params)
+  // 顶层 clientMessageId 是新客户端的持久回合锚;旧客户端只有 at.clientMessageId,
+  // 后者只用于把 @ 运行卡片锚定到本地条目,不能参与回合锚或 followup 消息 id。
+  const topLevelClientMessageId = objectTopLevelClientMessageId(params)
+  const atClientMessageId = topLevelClientMessageId ?? objectAtClientMessageId(params)
   if (skillName && rawAtName) {
     routeCtx.logger('session.send: at overrides skill')
     skillName = undefined
@@ -481,12 +506,51 @@ export async function sendToAgent(
       return { queued: true, sessionId, started: false, reason: '已取消' }
     }
     clearInvalidRoute(sessionId)
-    agent.followup({
-      id: `huaanwork-${Date.now()}`,
-      role: 'user',
-      content: [{ type: 'text', text }],
-      source: { kind: 'user' },
+    // 系统技能回合租约(显式 /explore、/test-fix):受管儿童(无包血缘条目)不得经显式
+    // 入口获得模型面 `subagent`;拒发必须在 turnAnchors.register 之前,不留下未消费 anchor。
+    const systemSkillKind =
+      skillName === 'explore' || skillName === 'test-fix' ? skillName : undefined
+    if (systemSkillKind !== undefined && isUnmanagedChildSession(ctx, sessionId)) {
+      throw new Error('unmanaged-child-system-skill')
+    }
+    // 回合锚点:followup 受理前登记本次发送的 pending(pre-step 出现真实用户消息时生效)。
+    // 拒发 / followup 抛错时只回滚本次登记,不触碰上一回合已生效的 anchor。
+    const followupId = resolveFollowupClientMessageId(params)
+    const rollbackAnchor = ctx.huaanworkTurnAnchors?.register({
+      sessionId,
+      clientMessageId: followupId,
+      origin: turnOriginForSession(sessionId),
     })
+    const previousLeaseKind = systemSkillLeaseKindOf(ctx, sessionId)
+    try {
+      // 显式系统技能回合:上游 systemPrompt.assemble() 在 agent/pre-step 建立锚点前即
+      // 采集 Step 1 工具列表,租约与附件必须在 followup 之前挂好;acquireExplicit 会先
+      // 同步失效同一父 agent 的旧 pendingByAgent 缓存(QR-I2)。
+      // 普通用户回合同样必须在 followup 之前释放上一回合因 active goal 在 idle 时保留的
+      // 租约与 `subagent` 附件(followup 会同步进入 kick/preStep/assemble 采集 Step 1 工具),
+      // 不传 clearGoal,保留 activeGoalSessions 本身;若 followup 抛错再于 catch 按原 kind 还原。
+      if (systemSkillKind !== undefined) {
+        acquireExplicitSystemSkillLease(ctx, sessionId, systemSkillKind)
+      } else {
+        releaseSystemSkillLease(ctx, sessionId)
+      }
+      agent.followup({
+        id: followupId,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user' },
+      })
+    } catch (error) {
+      rollbackAnchor?.()
+      // followup 抛错精确还原本次发送前的租约与附件(不传 clearGoal,保留既有 active goal 语义):
+      // 先前因 active goal 留有租约则按原 kind 挂回,否则仅释放本次新建的显式租约。
+      if (previousLeaseKind !== undefined) {
+        acquireExplicitSystemSkillLease(ctx, sessionId, previousLeaseKind)
+      } else if (systemSkillKind !== undefined) {
+        releaseSystemSkillLease(ctx, sessionId)
+      }
+      throw error
+    }
     followupAccepted = true
     if (admission !== undefined) {
       // 确认与 safety net:绑定已在 dispatchAt 之前临时写入(见上),这里再写一次,
@@ -802,6 +866,12 @@ export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, se
       detachCreationTools(ctx, id)
       ctx.huaanworkSessionModels?.delete(id)
       ctx.huaanworkSessionRoots?.delete(id)
+      // 未激活或稳定通道会话删除后可能以同 id 重建:清掉锚点与未消费的 pending,
+      // 否则新会话的第一轮会继承已删会话的回合归属。
+      ctx.huaanworkTurnAnchors?.clearSession(id)
+      // 系统技能租约随会话销毁无条件释放并清 active goal 标记(与 bridge 的
+      // session/disposed 同一契约;两处都幂等)。
+      releaseSystemSkillLease(ctx, id, { clearGoal: true })
     }
   }
 }
@@ -919,7 +989,36 @@ function objectAtName(params: unknown): string | undefined {
 }
 
 /**
- * 本次 `session.send` 对应的用户消息 id(`at.clientMessageId`)。
+ * 本次 `session.send` 顶层携带的持久回合锚(`clientMessageId`,客户端 UUID 或自动化 runId)。
+ *
+ * 与 `objectAtClientMessageId` 分开解析:顶层值是回合锚的唯一来源,`at.clientMessageId`
+ * 只是旧 @ 卡的本地展示兼容值。
+ */
+function objectTopLevelClientMessageId(params: unknown): string | undefined {
+  if (!params || typeof params !== 'object') return undefined
+  const clientMessageId = (params as Record<string, unknown>).clientMessageId
+  if (typeof clientMessageId !== 'string') return undefined
+  const trimmed = clientMessageId.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+/**
+ * 本轮 followup 的稳定消息 id:顶层 `clientMessageId` 优先,缺失时由 Host 生成 UUID。
+ *
+ * **不读 `at.clientMessageId` 兜底**:那个值是客户端 `allocId()` 分配的本地条目 id,
+ * 刷新历史后会重复,不能作为持久回合锚。旧客户端因此只在宿主侧得到一个新的 UUID。
+ */
+export function resolveFollowupClientMessageId(params: unknown): string {
+  return objectTopLevelClientMessageId(params) ?? randomUUID()
+}
+
+/** 会话来源:自动化运行会话(`huaanwork-auto-` 前缀)为 `'automation'`,其余为 `'advanced'`。 */
+export function turnOriginForSession(sessionId: string): 'automation' | 'advanced' {
+  return sessionId.startsWith(AUTO_SESSION_PREFIX) ? 'automation' : 'advanced'
+}
+
+/**
+ * 本次 `session.send` 对应的旧 @ 运行卡锚点(`at.clientMessageId`)。
  *
  * 只在 `at` 里读,与 `objectAtName` 同形(字符串、去空白后非空);它不是取消
  * capability,也不参与 runId 生成或权限判断,只用于把运行卡片锚定到这条消息。
@@ -1113,6 +1212,7 @@ async function startQueuedItem(
       {
         text: item.text,
         sessionId: item.sessionId,
+        ...(item.clientMessageId === undefined ? {} : { clientMessageId: item.clientMessageId }),
         ...(item.skill === undefined ? {} : { skill: item.skill }),
         ...(item.at === undefined ? {} : { at: item.at }),
       },
@@ -1218,15 +1318,17 @@ export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteCon
   const scheduler = ctx.huaanworkTurnScheduler
   if (scheduler === undefined) throw new Error('回合调度器未初始化')
 
-  const clientMessageId = objectAtClientMessageId(params)
+  const atClientMessageId = objectAtClientMessageId(params)
+  const topLevelClientMessageId = objectTopLevelClientMessageId(params)
   const admitted = scheduler.admitUserTurn({
     sessionId,
     tabId,
     text,
     modelId,
     root,
+    ...(topLevelClientMessageId === undefined ? {} : { clientMessageId: topLevelClientMessageId }),
     ...(skillName === undefined ? {} : { skill: skillName }),
-    ...(atName === undefined ? {} : { at: { name: atName, ...(clientMessageId === undefined ? {} : { clientMessageId }) } }),
+    ...(atName === undefined ? {} : { at: { name: atName, ...(atClientMessageId === undefined ? {} : { clientMessageId: atClientMessageId }) } }),
   })
   if (admitted.kind === 'error') throw new Error(admitted.reason)
   if (admitted.kind === 'queued') {

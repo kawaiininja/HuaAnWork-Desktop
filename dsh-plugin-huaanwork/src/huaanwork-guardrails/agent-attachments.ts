@@ -4,11 +4,21 @@ export type AttachmentMaps = {
 };
 
 /**
- * 智能体包子会话的宿主工具:允许名单启用其中某个名字时才挂到子会话上,MCP 名字由调用方另加。
- * 包回合的两个挂载点(`host.ts` 的预挂载与 `skills.ts` 的 activation 包装)都经
- * `agentPackageChildAttachmentNames` 按允许名单算出名单。
+ * 智能体包子会话可挂载的宿主工具。
+ *
+ * `subagent` 默认不在全局 `ALLOWED_TOOLS`(present-as),包儿童经附件重新获得模型面。
+ * 包儿童附件有两个挂载点,语义不同:
+ * - `skills.ts` 的 **start 包装**(旧 start 签名)按原始常量**无条件** attach,
+ *   不经 allow 过滤(rc.1 下该路径 dormant);
+ * - **activation 包装**与 `host.ts` 的预挂载按
+ *   `agentPackageChildAttachmentNames(pkg.allow, mcpNames)` 计算(`subagent` 仅当包
+ *   allow 含它才挂)——allow 过滤只发生在这一路径。
+ *
+ * 真正的可见性收敛在 present-as(`ALLOWED_TOOLS ∪ 附件`)与 `skills.ts` 的
+ * `pkg.allow ∩ schemas` 两层 restrict 交集;`composeAgentPackageToolAllowList` 把
+ * `subagent` 放进每个包的基础 allow,故正常包儿童仍可见,普通父会话不可见。
  */
-export const AGENT_PACKAGE_CHILD_TOOLS = ["agent_http", "agent_skill_run"] as const;
+export const AGENT_PACKAGE_CHILD_TOOLS = ["agent_http", "agent_skill_run", "subagent"] as const;
 
 /**
  * 一次包回合要挂到子会话的工具名:允许名单启用的运行时工具 + 挂载返回的 MCP 名。

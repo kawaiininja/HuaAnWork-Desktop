@@ -52,7 +52,12 @@ export function clampTimeoutMs(value: unknown): number {
 
 /**
  * 过滤 agent 子代理允许的工具列表。
- * 非数组回退为 DEFAULT_AGENT_ALLOW；过滤掉 run_code、call_host_tool 以及 mcp__* 前缀项。
+ * 非数组回退为 DEFAULT_AGENT_ALLOW；过滤掉 run_code、call_host_tool、`subagent`
+ * 以及 mcp__* 前缀项。
+ *
+ * `subagent` 与 `run_code` / `call_host_tool` 同列：legacy 目录儿童的 allow 不得
+ * 直接/间接再造模型面委派（Task 2 封闭 legacy 直接路径）。显式 legacy 父运行
+ * 不经此儿童 allow 计算，不受影响。
  */
 export function filterAgentAllow(allow: unknown): string[] {
   if (!Array.isArray(allow)) {
@@ -60,7 +65,7 @@ export function filterAgentAllow(allow: unknown): string[] {
   }
   return allow.filter((item): item is string => {
     if (typeof item !== "string") return false;
-    if (item === "run_code" || item === "call_host_tool") return false;
+    if (item === "run_code" || item === "call_host_tool" || item === "subagent") return false;
     if (item.startsWith("mcp__")) return false;
     return true;
   });

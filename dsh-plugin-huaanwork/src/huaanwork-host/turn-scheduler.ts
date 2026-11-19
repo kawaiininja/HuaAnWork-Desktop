@@ -15,6 +15,8 @@ export type QueueItem = {
   root: string
   modelId: string
   enqueuedAt: number
+  /** 本次发送的持久回合锚(顶层 UUID / 自动化 runId);出队重建发送参数时原样带回。 */
+  clientMessageId?: string
   skill?: string
   at?: { name: string; clientMessageId?: string }
 }
@@ -41,6 +43,8 @@ export type TurnScheduler = {
     text: string
     modelId: string
     root: string
+    /** 顶层回合锚;排队期间原样保存,出队后由 `startQueuedItem` 重建进发送参数。 */
+    clientMessageId?: string
     skill?: string
     at?: { name: string; clientMessageId?: string }
   }): AdmitUserResult
@@ -111,6 +115,7 @@ export function createTurnScheduler(options: {
           root,
           modelId: input.modelId,
           enqueuedAt: now(),
+          ...(input.clientMessageId === undefined ? {} : { clientMessageId: input.clientMessageId }),
           ...(input.skill === undefined ? {} : { skill: input.skill }),
           ...(input.at === undefined ? {} : { at: input.at }),
         }

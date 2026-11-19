@@ -119,3 +119,26 @@ test("clampTimeoutMs and filterAgentAllow defaults", () => {
   assert.equal(clampTimeoutMs(200_000), 150_000);
   assert.deepEqual(filterAgentAllow(undefined), ["read", "read_file", "glob", "grep"]);
 });
+
+test("filterAgentAllow strips subagent like run_code/call_host_tool/mcp__*", () => {
+  // Task 2：legacy 目录儿童不得经 allow 再造模型面委派。
+  assert.deepEqual(
+    filterAgentAllow(["read", "subagent", "glob"]),
+    ["read", "glob"],
+  );
+  // 既有过滤项不回归，默认 allow 不含 subagent。
+  assert.deepEqual(
+    filterAgentAllow(["read", "run_code", "call_host_tool", "mcp__x__y", "write"]),
+    ["read", "write"],
+  );
+  assert.equal(filterAgentAllow(undefined).includes("subagent"), false);
+  // 目录条目的 allow 解析同样过滤。
+  const agent = parseCatalogItem({
+    name: "delegating-agent",
+    version: "1.0.0",
+    kind: "agent",
+    description: "委派型",
+    allow: ["read", "subagent"],
+  });
+  assert.deepEqual(agent?.allow, ["read"]);
+});

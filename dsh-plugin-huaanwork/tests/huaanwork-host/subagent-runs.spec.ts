@@ -26,6 +26,37 @@ function recordingRegistry(clock: { now: number }): { registry: ReturnType<typeo
 }
 
 describe('subagent run registry', () => {
+  test('a system-skill run uses the same projection and revision semantics', () => {
+    const clock = { now: 11_000 }
+    const { registry } = recordingRegistry(clock)
+    const runId = registry.begin({
+      parentSessionId: 'parent',
+      kind: 'system-skill',
+      label: 'explore',
+      clientMessageId: 'uuid-1',
+    })
+    const run = registry.get(runId)
+    expect(run?.kind).toBe('system-skill')
+    expect(run?.label).toBe('explore')
+    expect(run?.clientMessageId).toBe('uuid-1')
+    expect(run?.phase).toBe('starting')
+    registry.reserveChild(runId, 'child-skill')
+    registry.bindUpstreamStart({ hostRunId: runId, upstreamRunId: 'upstream-skill', childId: 'child-skill' })
+    registry.noteToken('child-skill')
+    expect(registry.get(runId)?.phase).toBe('generating')
+    registry.settleResult(runId, { stopReason: 'completed' })
+    expect(registry.get(runId)?.phase).toBe('completed')
+    const snapshot = registry.snapshot('parent')
+    expect(snapshot.runs[0]?.runId).toBe(runId)
+    expect(snapshot.runs[0]?.kind).toBe('system-skill')
+    expect(snapshot.runs[0]?.childId).toBe('child-skill')
+    expect(snapshot.runs[0]?.upstreamRunId).toBe('upstream-skill')
+    // 规格预留的运行树字段一期不填充。
+    expect(snapshot.runs[0]?.taskId).toBeUndefined()
+    expect(snapshot.runs[0]?.parentRunId).toBeUndefined()
+    expect(snapshot.runs[0]?.depth).toBeUndefined()
+  })
+
   test('child activity drives phases and result wins a conflicting upstream end', () => {
     const clock = { now: 1_000 }
     const { registry } = recordingRegistry(clock)

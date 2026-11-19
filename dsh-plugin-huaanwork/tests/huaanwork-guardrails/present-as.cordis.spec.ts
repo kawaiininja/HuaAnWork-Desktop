@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { afterEach, test } from "vitest";
 
 import { DEFAULT_AGENT_ALLOW } from "@huaanwork/policy/agent-catalog";
+import { registerChildSession, resetChildSessionRegistry } from "../../src/huaanwork-host/child-sessions.ts";
 import { attachAgentTools, detachAgentTools, emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply, refreshAgentRestrict } from "../../src/huaanwork-guardrails/present-as.ts";
 
+afterEach(() => {
+  resetChildSessionRegistry();
+});
+
 type MockAgent = {
   id?: string;
-  session?: { id?: string };
+  session?: { id?: string; header?: { parentSession?: unknown } };
   ctx: {
     get(name: string): MockToolsService | undefined;
   };
@@ -24,6 +29,7 @@ type MockToolsService = {
 function createMockAgent(options: {
   id?: string;
   sessionId?: string;
+  headerParentSession?: string;
   initialToolNames: string[];
 }): MockAgent {
   const restrictions: Array<{ allow: readonly string[] }> = [];
@@ -52,7 +58,16 @@ function createMockAgent(options: {
 
   const agent: MockAgent = {
     ...(options.id !== undefined ? { id: options.id } : {}),
-    ...(options.sessionId !== undefined ? { session: { id: options.sessionId } } : {}),
+    ...(options.sessionId !== undefined
+      ? {
+          session: {
+            id: options.sessionId,
+            ...(options.headerParentSession !== undefined
+              ? { header: { parentSession: options.headerParentSession } }
+              : {}),
+          },
+        }
+      : {}),
     ctx: {
       get: (name: string) => (name === "tools" ? tools : undefined),
     },
@@ -401,4 +416,140 @@ test("goal tools survive the allow list so tool-goal reaches the model", () => {
   for (const name of goalTools) assert.ok(allow.includes(name), `allow must include ${name}`);
   assert.ok(allow.includes("todo_write"));
   assert.ok(!allow.includes("send_message"));
+});
+
+// ── Task 2: 有效工具矩阵 ────────────────────────────────────────────────────
+// `subagent` 已从全局 ALLOWED_TOOLS 移除:普通父会话、无人值守自动化、legacy 儿童
+// 模型面都不可达;只有包血缘附件与系统技能回合租约把它挂回附件表,present-as 的
+// `ALLOWED_TOOLS ∪ 附件` 才让它重新可见。
+const matrix: readonly {
+  name: string;
+  parent: boolean;
+  pkg: boolean;
+  skill?: 'explore';
+  unattended: boolean;
+  automation?: boolean;
+  allow?: readonly string[];
+  expected: boolean;
+}[] = [
+  { name: 'ordinary parent', parent: false, pkg: false, skill: undefined, unattended: false, expected: false },
+  { name: 'attended automation outside system skill', parent: false, pkg: false, skill: undefined, unattended: false, automation: true, expected: false },
+  { name: 'unattended automation', parent: false, pkg: false, skill: 'explore', unattended: true, expected: false },
+  { name: 'package child with explicit allow', parent: false, pkg: true, allow: ['subagent'], expected: true },
+  { name: 'legacy child', parent: true, pkg: false, skill: 'explore', unattended: false, expected: false },
+  { name: 'attended explore turn', parent: false, pkg: false, skill: 'explore', unattended: false, expected: true },
+]
+
+test("subagent visibility matrix: ordinary parents, unattended turns and legacy children never see it", () => {
+  matrix.forEach((row, index) => {
+    const sessionId = `matrix-${index}`;
+    resetChildSessionRegistry();
+    if (row.parent) registerChildSession(`${sessionId}-parent`, sessionId);
+    const attachments = emptyAttachments();
+    if (row.pkg) attachAgentTools(attachments, sessionId, row.allow ?? []);
+    // 系统技能租约在可见面上的唯一效果就是把 `subagent` 挂进会话附件表;无人值守
+    // 与 legacy 儿童即使声明了技能,租约守卫也不会挂载。
+    if (row.skill !== undefined && !row.unattended && !row.parent) {
+      attachAgentTools(attachments, sessionId, ["subagent"]);
+    }
+    const agent = createMockAgent({
+      sessionId,
+      initialToolNames: ["read", "subagent", "edit"],
+    });
+    const ctx = createMockContext({ agents: [agent], attachments });
+    if (row.unattended) {
+      (ctx as Record<string, unknown>).huaanworkUnattended = new Map([
+        [sessionId, { runId: "r", automationId: "a", allow: new Set() }],
+      ]);
+    }
+    apply(ctx as never);
+    const allow = agent.restrictCalls.at(-1)!.allow;
+    assert.equal(
+      allow.includes("subagent"),
+      row.expected,
+      `${row.name}: expected subagent ${row.expected ? "visible" : "hidden"}, allow=${JSON.stringify(allow)}`,
+    );
+  });
+});
+
+test("skill is visible to attended parents but hidden from unattended automation and unmanaged children", () => {
+  const parent = createMockAgent({ sessionId: "skill-parent", initialToolNames: ["read", "skill", "subagent"] });
+  const unattended = createMockAgent({ sessionId: "skill-auto", initialToolNames: ["read", "skill"] });
+  const child = createMockAgent({ sessionId: "skill-child", initialToolNames: ["read", "skill"] });
+  registerChildSession("skill-parent", "skill-child");
+
+  const ctx = createMockContext({
+    agents: [parent, unattended, child],
+    attachments: emptyAttachments(),
+  }) as ReturnType<typeof createMockContext> & Record<string, unknown>;
+  ctx.huaanworkUnattended = new Map([
+    ["skill-auto", { runId: "r", automationId: "a", allow: new Set() }],
+  ]);
+  ctx.huaanworkPackageChildAllow = new Map();
+
+  apply(ctx as never);
+
+  assert.ok(parent.restrictCalls.at(-1)!.allow.includes("skill"), "an attended parent may load skills");
+  assert.ok(!unattended.restrictCalls.at(-1)!.allow.includes("skill"), "unattended automation does not get skill");
+  assert.ok(!child.restrictCalls.at(-1)!.allow.includes("skill"), "an unmanaged child does not get skill");
+});
+
+test("creation-window child hides skill via the session header before subagent/start registration", () => {
+  // 真实运行时顺序:agents.create(触发 agent/created)先于 observer.start(触发
+  // subagent/start 的 registerChildSession)。先 apply 再 emit agent/created,保持
+  // 登记表为空,验证 header 判别不依赖登记表补齐。
+  const parent = createMockAgent({ sessionId: "window-parent", initialToolNames: ["read", "skill"] });
+  const child = createMockAgent({
+    sessionId: "window-child",
+    headerParentSession: "window-parent",
+    initialToolNames: ["read", "skill"],
+  });
+  const ctx = createMockContext({
+    agents: [parent],
+    attachments: emptyAttachments(),
+  }) as ReturnType<typeof createMockContext> & Record<string, unknown>;
+  ctx.huaanworkPackageChildAllow = new Map();
+
+  apply(ctx as never);
+  ctx.emit("agent/created", { agent: child });
+
+  assert.ok(parent.restrictCalls.at(-1)!.allow.includes("skill"), "the attended parent keeps skill");
+  assert.ok(
+    !child.restrictCalls.at(-1)!.allow.includes("skill"),
+    "the creation-window child hides skill before the registry knows it",
+  );
+
+  // 登记表随后补齐(subagent/start):tools/change 重放后两个判别口径保持一致。
+  registerChildSession("window-parent", "window-child");
+  ctx.emit("tools/change");
+  assert.ok(
+    !child.restrictCalls.at(-1)!.allow.includes("skill"),
+    "the registered child still hides skill",
+  );
+});
+
+test("PM-1: package allow ∩ present-as intersection keeps subagent only when the package allow declares it", () => {
+  const initialToolNames = ["read", "read_file", "glob", "grep", "bash", "subagent", "git_push"];
+
+  const runWithPackageAllow = (pkgAllow: readonly string[], sessionId: string): string[] => {
+    const attachments = emptyAttachments();
+    // 包激活路径按 `agentPackageChildAttachmentNames(pkg.allow, mcpNames)` 计算附件:
+    // 只有包 allow 含 `subagent` 时才挂到子会话。
+    attachAgentTools(attachments, sessionId, pkgAllow.includes("subagent") ? ["subagent"] : []);
+    const agent = createMockAgent({ sessionId, initialToolNames });
+    const ctx = createMockContext({ agents: [agent], attachments });
+    apply(ctx as never);
+    // skills.ts 的包分支第二层:allow ∩ 当前 schemas。
+    const tools = agent.ctx.get("tools")!;
+    const visible = tools.schemas().flatMap((schema) => (schema.name ? [schema.name] : []));
+    tools.restrict({ allow: pkgAllow.filter((name) => visible.includes(name)) });
+    return tools.getActiveAllow();
+  };
+
+  const withSubagent = runWithPackageAllow(["read", "read_file", "glob", "grep", "bash", "subagent"], "pkg-child-a");
+  assert.ok(withSubagent.includes("subagent"), "a package allow that declares subagent keeps it through the intersection");
+  assert.ok(!withSubagent.includes("git_push"));
+
+  const withoutSubagent = runWithPackageAllow(["read", "read_file", "glob", "grep", "bash"], "pkg-child-b");
+  assert.ok(!withoutSubagent.includes("subagent"), "a package allow without subagent never gains it");
 });

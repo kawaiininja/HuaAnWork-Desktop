@@ -6,16 +6,28 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_AGENT_ALLOW as EXPLORE_TOOLS } from "@huaanwork/policy/agent-catalog";
 import { SKILL_NAME_RE, parseSkillMarkdown } from "@huaanwork/skill-format/markdown";
 import type { ParsedSkillMarkdown } from "@huaanwork/skill-format/markdown";
+import type { SubagentCleanupWarning } from "../client-huaanwork/rpc-types.ts";
+import { acceptanceCleanupTimeoutMs } from "../huaanwork-host/acceptance-hooks.ts";
+import { ACTIVATION_CLEANUP_TIMEOUT_MS } from "../huaanwork-host/agent-package/host.ts";
+import { errorText, stopReasonOf } from "../huaanwork-host/agent-invoke.ts";
 import { forgetChildSession, registerChildSession } from "../huaanwork-host/child-sessions.ts";
+import { disposeActivationWithTimeout, settleWithin, waitResultWithBudget } from "../huaanwork-host/subagent-cleanup.ts";
+import {
+  acquireSystemSkillLease,
+  isUnmanagedChildSession,
+  systemSkillLeaseKindOf,
+  type SystemSkillLeaseStore,
+} from "../huaanwork-host/system-skill-leases.ts";
 import {
   AGENT_PACKAGE_CHILD_TOOLS,
   agentPackageChildAttachmentNames,
   attachAgentTools,
   type AttachmentMaps,
 } from "./agent-attachments.ts";
-import { refreshAgentRestrict } from "./present-as.ts";
+import { isInactiveContextError, refreshAgentRestrict } from "./present-as.ts";
 import type { AgentPackageSubagentRequest } from "../huaanwork-host/agent-package/types.ts";
 import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
+import type { TurnAnchorStore } from "../huaanwork-host/turn-anchors.ts";
 import {
   legacyAgentRequestOf,
   subagentRunIdOf,
@@ -59,12 +71,19 @@ type SkillRegistration = {
   resourceBase?: { kind: "directory"; path: string };
 };
 
-/** `startActivation` 返回值中包装消费的成员:子会话 id、本地子 agent 与释放。 */
+/**
+ * `startActivation` 返回值中包装消费的成员:子会话 id、本地子 agent、权威结果与释放。
+ *
+ * `childId` 保持 `unknown` 边界解析(由 `sessionIdOf` 校验);`result` 与 `dispose`
+ * 是上游 receipt 恒有的成员,声明为必填后可直接传给只消费 `.dispose()` 的清理 helper。
+ */
 type ActivationRun = {
   childId?: unknown;
   localAgent?: Agent;
-  /** fail closed 时释放本次 activation;上游 handle 恒有该方法。 */
-  dispose?(): Promise<void>;
+  /** 权威执行结果;resolve → `settleResult`,reject → `rejectResult`。 */
+  result: Promise<unknown>;
+  /** fail closed 时释放本次 activation。 */
+  dispose(): Promise<void>;
 };
 
 type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨 skills/agents/tools/subagents 四服务,无统一类型导出
@@ -86,12 +105,27 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   huaanworkAgentPackageRequest?: { current?: AgentPackageSubagentRequest | null };
   /**
    * 子代理 run 权威状态机(index 注入)。activation 包装把本次 Host runId 与上游
-   * `subagent/start` 的 runId 对齐并核对三方 parent;缺席时只保留原有登记与工具护栏。
+   * `subagent/start` 的 runId 对齐并核对三方 parent;系统技能派生在首个 await 前
+   * 用同一 registry 建立 `system-skill` 运行并接线定向取消。缺席时 legacy 路径
+   * 只保留原有登记与工具护栏,系统技能派生则响亮失败。
    */
   huaanworkSubagentRuns?: Pick<
     SubagentRunRegistry,
-    "bindUpstreamStart" | "settleUpstreamEnd" | "parentSessionIdOf"
+    | "begin"
+    | "reserveChild"
+    | "bindActivation"
+    | "bindUpstreamStart"
+    | "attachCancel"
+    | "failRun"
+    | "settleResult"
+    | "rejectResult"
+    | "confirmCleanup"
+    | "noteCleanupBudget"
+    | "settleUpstreamEnd"
+    | "parentSessionIdOf"
   >;
+  /** Task 1 的共享回合锚点:system-skill run 的 clientMessageId 只取自它,无锚不带。 */
+  huaanworkTurnAnchors?: Pick<TurnAnchorStore, "current">;
   /** 会话工具附件表;包运行时工具与 MCP 名字按子会话挂载。 */
   huaanworkAttachments?: AttachmentMaps;
   /** 包回合血缘允许表(C2):孙代收窄继承读父条目、写同引用条目(C4)。 */
@@ -100,8 +134,20 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   huaanworkSessionModels?: Map<string, string>;
   /** 宿主创建的会话可写根表(Task 6 登记);子会话开始/结束时同样复制与删除。 */
   huaanworkSessionRoots?: Map<string, string>;
+  /** 系统技能回合租约(holders 注入);模型 `skill` 入口取租约,显式入口由 sessions 接线。 */
+  huaanworkSystemSkillLeases?: SystemSkillLeaseStore;
+  /** 租约注入可能晚于本插件 apply;holders 创建 store 后调用以注册失效清理。 */
+  huaanworkRegisterSystemSkillLeaseInvalidation?: () => void;
   on(
-    event: "tools/pre-execute" | "agent/created" | "subagent/start" | "subagent/end" | "tools/change",
+    event:
+      | "tools/pre-execute"
+      | "tools/execute"
+      | "tools/result"
+      | "agent/created"
+      | "agent/disposed"
+      | "subagent/start"
+      | "subagent/end"
+      | "tools/change",
     listener: (...args: never[]) => unknown,
     prepend?: boolean,
   ): void;
@@ -111,6 +157,18 @@ const kinds = new WeakMap<object, SkillKind>();
 
 export function skillKindOf(agent: object | undefined): SkillKind | undefined {
   return agent ? kinds.get(agent) : undefined;
+}
+
+/**
+ * 只读测试钩:当前 `tools/execute` 派发作用域内的技能类型(`spawnKind.getStore()`)。
+ *
+ * 必须由当前 apply 实例注册探针;没有实例时返回 undefined。钉住 PC-1:kind 在 body
+ * 阶段可见——若把 ALS 错挂到 `tools/pre-execute`,这里必然为 undefined。
+ */
+let currentSpawnKindProbe: (() => SkillKind | undefined) | undefined;
+
+export function currentDispatchSkillKind(): SkillKind | undefined {
+  return currentSpawnKindProbe?.();
 }
 
 export function shellToolName(platform = process.platform): "pwsh" | "bash" {
@@ -149,16 +207,75 @@ export function setBundledSkillRegistrar(ctx: Context | null): void {
 export function apply(ctx: Context): void {
   bundledSkillContext = ctx;
   const pendingByAgent = new WeakMap<object, SkillKind>();
+  /** 写过 pendingByAgent 的父代理按会话登记:租约失效/释放时精确清理,不依赖跨监听次序。 */
+  const pendingAgentsBySession = new Map<string, Set<Agent>>();
   const tracked = new Set<Agent>();
   const lifted = new WeakMap<Agent, () => void>();
-  let pendingSpawn: SkillKind | undefined;
   let restricting = false;
+
+  const forget = (agent: Agent) => {
+    tracked.delete(agent);
+    kinds.delete(agent);
+    lifted.delete(agent);
+  };
+
+  // spawnKind:技能类型跨越 `tools/pre-execute` → `tools/execute` → body 的唯一载体。
+  //
+  // 上游事实(PC-1):`execute = prepareExecution(exec, prepared => completeScheduledExecution(prepared))`
+  // (core/tools/src/index.ts:1377-1379);`prepareExecution` 的 `tools/pre-execute`
+  // waterfall 终止回调只返回 `{kind:'allow'}`(:1513-1516),解析完后才
+  // `next({kind:'dispatch', exec})`(:1543);body 在 `dispatchScheduledExecution` 的
+  // `tools/execute` waterfall 终止回调 `dispatchToolBody` 里执行(:1609-1616 →
+  // :1572-1600 → `tool.execute` :1589)。**pre-execute 里建立的 ALS 作用域到 body
+  // 阶段已出栈,读不到技能类型** —— 唯一修法是把 kind 挂到 tools/execute。
+  type PendingSpawnSlot = { kind: SkillKind; token: symbol; agent?: object; parentSessionId?: string };
+  const spawnKind = new AsyncLocalStorage<SkillKind | undefined>();
+  currentSpawnKindProbe = () => spawnKind.getStore();
+  let pendingSpawn: PendingSpawnSlot | undefined;
+  const slotByExecution = new WeakMap<object, PendingSpawnSlot>();
+  const slotsByParent = new WeakMap<object, PendingSpawnSlot[]>();
+
+  // 兼容槽的精确消费:token 相同才清。并发重叠时另一路写入的槽不归本次调用。
+  const releaseOwnedSlot = (slot: PendingSpawnSlot | undefined) => {
+    if (slot !== undefined && pendingSpawn?.token === slot.token) pendingSpawn = undefined;
+  };
+
+  const removeSlotFromParent = (agent: object | undefined, slot: PendingSpawnSlot) => {
+    if (agent === undefined) return;
+    const queue = slotsByParent.get(agent);
+    if (queue === undefined) return;
+    const idx = queue.indexOf(slot);
+    if (idx >= 0) queue.splice(idx, 1);
+    if (queue.length === 0) slotsByParent.delete(agent);
+  };
+
+  const clearExecutionSlot = (execution: object, agent?: object) => {
+    const slot = slotByExecution.get(execution);
+    if (slot === undefined) return;
+    slotByExecution.delete(execution);
+    removeSlotFromParent(agent ?? slot.agent, slot);
+    releaseOwnedSlot(slot);
+  };
+
+  const takeSlotForExecute = (execution: { agent?: object }): PendingSpawnSlot | undefined => {
+    const byExec = slotByExecution.get(execution);
+    if (byExec !== undefined) {
+      slotByExecution.delete(execution);
+      removeSlotFromParent(execution.agent ?? byExec.agent, byExec);
+      return byExec;
+    }
+    return execution.agent === undefined ? undefined : slotsByParent.get(execution.agent)?.shift();
+  };
+
   // subagent/start 在 start 的异步链内同步派发且载荷不带 parent；按调用隔离，重叠的 start 不会互相覆盖。
   const startParent = new AsyncLocalStorage<string | undefined>();
   // startActivation 的 Host runId 作用域：subagent/start 在同一异步链里派发，
-  // 监听器据此把上游 run 绑定到本次 @ 的运行卡；没有 runId 时显式覆盖为 undefined，
-  // 模型自主创建的嵌套子代理不会误绑到外层 run。
+  // 监听器据此把上游 run 绑定到本次 @ 的运行卡；没有 runId 时显式覆盖为 undefined。
+  // R1/R5：普通父会话的模型面已不可达 `subagent`；仍走嵌套派发的只剩 system-skill
+  // 运行(Task 3)与包 lane 血缘(一期不独立建卡)，没有 Host runId 时都不误绑外层 run。
   const startRun = new AsyncLocalStorage<string | undefined>();
+  // 显式 `@agent`/`@slug`（或带 legacy 请求）由宿主直接启动，绝不消费系统技能兼容槽 `pendingSpawn`。
+  const startHostManaged = new AsyncLocalStorage<boolean>();
 
   ctx.skills.register(loadSkill("explore.md"));
   ctx.skills.register(loadSkill("test-fix.md"));
@@ -168,13 +285,46 @@ export function apply(ctx: Context): void {
     const skillName = stringArg(execution.arguments, "name");
     if (skillName === "explore" || skillName === "test-fix") {
       pendingByAgent.set(execution.agent, skillName);
+      // 按会话登记持有 pendingByAgent 的父代理:租约失效/释放时精确清理(QR-I2)。
+      const sessionId = sessionIdOf(execution.agent);
+      if (sessionId !== undefined) {
+        const agents = pendingAgentsBySession.get(sessionId) ?? new Set<Agent>();
+        agents.add(execution.agent as Agent);
+        pendingAgentsBySession.set(sessionId, agents);
+      }
     }
   };
 
   const rememberSubagentSpawn = (execution: { name: string; arguments: unknown; agent?: object }) => {
-    if (execution.name !== "subagent" || !execution.agent) return;
-    const kind = pendingByAgent.get(execution.agent);
-    if (kind) pendingSpawn = kind;
+    if (execution.name !== "subagent") return;
+    // 技能类型来源:同 agent 的模型 skill 缓存优先;显式 /explore、/test-fix 回合
+    // 只有共享租约,按会话回落到 kindOf。
+    const sessionId = sessionIdOf(execution.agent);
+    const kind =
+      (execution.agent === undefined ? undefined : pendingByAgent.get(execution.agent)) ??
+      (sessionId === undefined ? undefined : systemSkillLeaseKindOf(ctx, sessionId));
+    if (kind === undefined) return;
+    const slot: PendingSpawnSlot = {
+      kind,
+      token: Symbol(),
+      ...(execution.agent === undefined ? {} : { agent: execution.agent }),
+      ...(sessionId === undefined ? {} : { parentSessionId: sessionId }),
+    };
+    slotByExecution.set(execution, slot);
+    if (execution.agent !== undefined) {
+      const queue = slotsByParent.get(execution.agent);
+      if (queue === undefined) slotsByParent.set(execution.agent, [slot]);
+      else queue.push(slot);
+      // 显式 /explore、/test-fix 入口同样按会话登记:租约失效兜底(QR-I2)不因
+      // pendingByAgent 缺席而跳过该会话的 slotsByParent 清理。
+      if (sessionId !== undefined) {
+        const agents = pendingAgentsBySession.get(sessionId) ?? new Set<Agent>();
+        agents.add(execution.agent as Agent);
+        pendingAgentsBySession.set(sessionId, agents);
+      }
+    }
+    // 模块内兼容槽:无 ALS 的消费点(startActivation 包装)仍按最近一次派发回落。
+    pendingSpawn = slot;
   };
 
   const restrictKind = (agent: Agent, kind: SkillKind) => {
@@ -184,25 +334,80 @@ export function apply(ctx: Context): void {
     const existing = (tools.schemas?.() ?? []).flatMap((schema) => (schema.name ? [schema.name] : []));
     const allow = kind === "explore" ? exploreAllowList(existing) : testFixAllowList(existing);
     if (allow.length === 0) return;
-    lifted.set(agent, tools.restrict?.({ allow }) ?? (() => undefined));
+    try {
+      lifted.set(agent, tools.restrict?.({ allow }) ?? (() => undefined));
+    } catch (error) {
+      // A disposed child must not poison the activation that triggered tools/change.
+      if (isInactiveContextError(error)) {
+        forget(agent);
+        return;
+      }
+      throw error;
+    }
   };
 
   const applyKind = (agent: Agent, kind: SkillKind) => {
     if (kinds.has(agent)) return;
     kinds.set(agent, kind);
     tracked.add(agent);
-    restrictKind(agent, kind);
-    const tools = agent.ctx?.get?.("tools");
-    const allowed = new Set(wantedTools(kind));
-    tools?.guard?.((execution) => (allowed.has(execution.name) ? undefined : `huaanwork-${kind}`));
+    try {
+      restrictKind(agent, kind);
+      const tools = agent.ctx?.get?.("tools");
+      const allowed = new Set(wantedTools(kind));
+      tools?.guard?.((execution) => (allowed.has(execution.name) ? undefined : `huaanwork-${kind}`));
+    } catch (error) {
+      if (isInactiveContextError(error)) {
+        forget(agent);
+        return;
+      }
+      throw error;
+    }
   };
 
-  const consumePendingSpawn = (agent: Agent) => {
-    if (!pendingSpawn) return;
+  const consumePendingSpawn = (agent: Agent, explicitParentId?: string) => {
+    const fromAls = spawnKind.getStore();
+    let kind = fromAls;
+    let consumedFallback = false;
+    if (kind === undefined && pendingSpawn !== undefined && startHostManaged.getStore() !== true) {
+      const expectedParent = pendingSpawn.parentSessionId ?? sessionIdOf(pendingSpawn.agent);
+      const actualParent =
+        explicitParentId ?? sessionIdOf(agent.session?.header?.parentSession) ?? startParent.getStore();
+      // 兼容槽只属于写入它的父会话：他会话、显式宿主派发或无父会话新建不得偷吃或清槽。
+      if (expectedParent === undefined || actualParent !== expectedParent) return;
+      kind = pendingSpawn.kind;
+      consumedFallback = true;
+    }
+    if (!kind) return;
     if (pendingByAgent.has(agent)) return;
-    applyKind(agent, pendingSpawn);
-    pendingSpawn = undefined;
+    applyKind(agent, kind);
+    // 只有无 ALS 覆盖的回落路径真正消费完单槽时才清零。
+    if (consumedFallback) pendingSpawn = undefined;
   };
+
+  /** 租约释放/显式重挂:清掉该会话父代理的 pendingByAgent 与残留派发槽。 */
+  const invalidateSessionSpawnState = (sessionId: string) => {
+    const agents = pendingAgentsBySession.get(sessionId);
+    if (agents === undefined) return;
+    pendingAgentsBySession.delete(sessionId);
+    for (const agent of agents) {
+      pendingByAgent.delete(agent);
+      const queue = slotsByParent.get(agent);
+      if (queue === undefined) continue;
+      // 并行 runGroup 兄弟异常可能跳过 tools/result:这里按父代理兜底清槽,不留陈旧
+      // kind 污染后续显式 @;兼容单槽只在 token 匹配时释放。
+      for (const slot of queue) releaseOwnedSlot(slot);
+      slotsByParent.delete(agent);
+    }
+  };
+  const invalidationStores = new WeakSet<object>();
+  const registerLeaseInvalidation = () => {
+    const store = ctx.huaanworkSystemSkillLeases;
+    if (store === undefined || invalidationStores.has(store)) return;
+    invalidationStores.add(store);
+    store.onInvalidate(invalidateSessionSpawnState);
+  };
+  ctx.huaanworkRegisterSystemSkillLeaseInvalidation = registerLeaseInvalidation;
+  registerLeaseInvalidation();
 
   ctx.on(
     "tools/pre-execute",
@@ -210,19 +415,84 @@ export function apply(ctx: Context): void {
       execution: { name: string; arguments: unknown; agent?: object },
       next: () => Promise<{ kind: string; reason?: string }>,
     ) => {
-      rememberSkill(execution);
-      rememberSubagentSpawn(execution);
+      const requestedSkill = execution.name === "skill" ? stringArg(execution.arguments, "name") : "";
+      if (requestedSkill === "explore" || requestedSkill === "test-fix") {
+        const sessionId = sessionIdOf(execution.agent);
+        if (sessionId !== undefined) {
+          // 受管儿童判别必须在 rememberSkill **之前**:拒绝或无锚/无人值守返回 false 时
+          // 都不得在 pendingByAgent 留下陈旧缓存。
+          if (isUnmanagedChildSession(ctx, sessionId)) {
+            return { kind: "deny", reason: "unmanaged-child-system-skill" };
+          }
+          // 仅当租约真正挂载成功才写 pendingByAgent;false 时技能仍按现有规则执行,
+          // 但模型看不到 `subagent`。
+          if (acquireSystemSkillLease(ctx, sessionId, requestedSkill)) rememberSkill(execution);
+        }
+      } else {
+        rememberSkill(execution);
+      }
+      // 已收窄的子代理(explore/test-fix)先拒绝越权工具,再考虑生成派发槽。
       const kind = skillKindOf(execution.agent);
       if (kind && !wantedTools(kind).includes(execution.name)) {
         return { kind: "deny", reason: `huaanwork-${kind}` };
       }
-      return next();
+      rememberSubagentSpawn(execution);
+      const slot = slotByExecution.get(execution);
+      if (slot === undefined) return next();
+      // 下游拒绝/抛错(含 workspace-changes 等待后的取消与 tools.guard 拒绝)按同一
+      // execution 对象精确回收,不按 FIFO 误拿其他调用的槽。
+      try {
+        const decision = await next();
+        if (decision.kind !== "allow") clearExecutionSlot(execution, execution.agent);
+        return decision;
+      } catch (error) {
+        clearExecutionSlot(execution, execution.agent);
+        throw error;
+      }
+    }) as never,
+    true,
+  );
+
+  // PC-1 唯一修法:技能类型随 `tools/execute` 的 around-dispatch 进入 body 阶段。
+  // 优先取本次调用的精确槽,其次同 agent 的模型 skill 缓存,最后回落共享租约
+  // (显式 /explore、/test-fix 回合没有 skill 工具调用)。
+  ctx.on(
+    "tools/execute",
+    ((execution: { name: string; agent?: object }, next: () => Promise<unknown>) => {
+      if (execution.name !== "subagent") return next();
+      const slot = takeSlotForExecute(execution);
+      // 进入 ALS 作用域前立即释放归属本次调用的兼容槽(若已被他方无 ALS 路径覆写则
+      // token 不等、不误清)。
+      releaseOwnedSlot(slot);
+      const sessionId = sessionIdOf(execution.agent);
+      const kind =
+        slot?.kind ??
+        (execution.agent === undefined ? undefined : pendingByAgent.get(execution.agent)) ??
+        (sessionId === undefined ? undefined : systemSkillLeaseKindOf(ctx, sessionId));
+      return spawnKind.run(kind, () => next());
+    }) as never,
+    true,
+  );
+
+  // QR-I1:tools/pre-execute 返回 allow 后,若等待期(如 workspace-changes recorder.settled())
+  // 发生取消或被 tools.guard 拒绝,上游 prepareExecution 直接返回 post-result 跳过
+  // tools/execute 并触发 tools/result。这里同步按同一 execution 对象精确幂等清理,
+  // 不按 FIFO 误拿其他调用的槽;正常派发下已在 takeSlotForExecute 摘除,此处为 no-op。
+  ctx.on(
+    "tools/result",
+    ((execution: { name?: string; agent?: object }) => {
+      if (execution?.name !== "subagent") return;
+      clearExecutionSlot(execution, execution.agent);
     }) as never,
     true,
   );
 
   ctx.on("agent/created", (({ agent }: { agent: Agent }) => {
     consumePendingSpawn(agent);
+  }) as never);
+
+  ctx.on("agent/disposed", (({ agent }: { agent: Agent }) => {
+    forget(agent);
   }) as never);
 
   ctx.on("subagent/start", ((info: { id?: string; runId?: string }) => {
@@ -248,14 +518,18 @@ export function apply(ctx: Context): void {
     const child = ctx.agents?.get?.(info.id);
     // 事件载荷只有 { runId, provider, id, local },没有 parent;父会话取自子会话 header,
     // 冷恢复路径靠它,start 包装路径靠下面的 AsyncLocalStorage。两者都没有就不登记:
-    // 模型自主创建的嵌套子代理不继承任何进程级会话的模型或可写根。
+    // R1 下普通父会话模型面已不可达 `subagent`,仍可能无父会话的嵌套派发(system-skill
+    // 运行 Task 3 / 包 lane 血缘)不继承任何进程级会话的模型或可写根。
     const parentId = sessionIdOf(child?.session?.header?.parentSession) ?? startParent.getStore();
     if (parentId && parentId !== info.id) {
       registerChildSession(parentId, info.id);
       inheritSessionModel(ctx.huaanworkSessionModels, parentId, info.id);
       inheritSessionRoot(ctx.huaanworkSessionRoots, parentId, info.id);
+      // 登记表补齐后立即收窄本儿童:agent/created 时 header 缺父会话的儿童此前未被
+      // present-as 识别,靠这里(及后续 tools/change)关闭创建期的 `skill` 泄漏窗口。
+      refreshAgentRestrict(ctx as never, info.id);
     }
-    if (child) consumePendingSpawn(child);
+    if (child) consumePendingSpawn(child, parentId);
   }) as never);
 
   // 与 subagent/start 成对的结束事件(载荷 id 即子会话 id):子会话结束后从登记表摘掉,
@@ -311,7 +585,12 @@ export function apply(ctx: Context): void {
             throw new Error("智能体人设为空");
           }
         }
-        const run: any = await startParent.run(parentFromCall, () => original(...args));
+        const packageApplies =
+          pkg !== undefined && pkg !== null && parentFromCall !== undefined && pkg.parentSessionId === parentFromCall;
+        const hostManaged = legacyApplies || packageApplies;
+        const run: any = await startHostManaged.run(hostManaged, () =>
+          startParent.run(parentFromCall, () => original(...args)),
+        );
         let packageApplied = false;
         if (legacyApplies && current && run?.localAgent) {
           const tools = run.localAgent.ctx?.get?.("tools");
@@ -323,13 +602,17 @@ export function apply(ctx: Context): void {
         // Package requests are keyed to the session that dispatched them: a subagent
         // started by any other session while this turn is in flight keeps its own tools
         // and attachments instead of inheriting this package's runtime.
-        if (pkg && run?.localAgent && parentFromCall !== undefined && pkg.parentSessionId === parentFromCall) {
+        if (packageApplies && pkg && run?.localAgent) {
           packageApplied = true;
           // header.id 是真实子会话 id;某些 provider 只填 agent/session id,故再回落一次。
           const childSessionId =
             sessionIdOf(run.localAgent.session?.header ?? run.localAgent) ?? sessionIdOf(run.localAgent);
           if (childSessionId) {
             if (ctx.huaanworkAttachments) {
+              // PM-2:start 包装(旧 start 签名)按原始常量**无条件** attach,不经 allow
+              // 过滤;rc.1 下该路径 dormant,allow 过滤只发生在 activation 包装的
+              // agentPackageChildAttachmentNames 路径。真正的可见性收敛在 present-as
+              // (`ALLOWED_TOOLS ∪ 附件`)与下面的 `pkg.allow ∩ schemas` 交集。
               // MCP 名字在挂载时先落在父会话上(健康检查要求先拿到工具名),发现后由
               // host 从父会话摘掉;子会话要执行 mcp__* 仍需自己的附件,否则 policy 的
               // attached 判定会拒绝。
@@ -369,8 +652,8 @@ export function apply(ctx: Context): void {
           tools?.restrict?.({ allow });
           ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
         }
-        if (run?.localAgent) {
-          consumePendingSpawn(run.localAgent);
+        if (run?.localAgent && !hostManaged) {
+          consumePendingSpawn(run.localAgent, parentFromCall);
         }
         if (run && typeof run.result?.then === "function") {
           await run.result;
@@ -416,29 +699,201 @@ export function apply(ctx: Context): void {
         specChildId === pkg.childId
           ? pkg.runId
           : undefined);
+
+      // 系统技能派生在第一个 await 之前建立 Host run:客户端要在启动中就看到并定向取消。
+      // 包 lane 有血缘条目,不是系统技能运行;上游 `tool-subagent` 的嵌套派发没有
+      // Host runId 也没有技能类型,不纳管。
+      const skillKind = spawnKind.getStore();
+      const registry = ctx.huaanworkSubagentRuns;
+      let systemRunId: string | undefined;
+      if (
+        hostRunId === undefined &&
+        parentFromCall !== undefined &&
+        skillKind !== undefined &&
+        ctx.huaanworkPackageChildAllow?.has(parentFromCall) !== true
+      ) {
+        if (registry === undefined || typeof registry.begin !== "function") {
+          // 装配错误要响亮:禁止 ?.begin 静默派发一个不受管、不可取消的子代理。
+          throw new Error("subagent run registry is not initialized");
+        }
+        const anchor = ctx.huaanworkTurnAnchors?.current(parentFromCall);
+        systemRunId = registry.begin({
+          parentSessionId: parentFromCall,
+          kind: "system-skill",
+          label: skillKind,
+          ...(anchor?.clientMessageId !== undefined ? { clientMessageId: anchor.clientMessageId } : {}),
+        });
+      }
+      const effectiveRunId = hostRunId ?? systemRunId;
+
+      // 以下生命周期只属于 system-skill(R2):legacy/package 的取消闭包与清理路径不变。
+      const system =
+        systemRunId === undefined || registry === undefined ? undefined : { runId: systemRunId, registry };
+      const controller = new AbortController();
+      let activationHandle: ActivationRun | undefined;
+      let cancelRequested = false;
+      let cancelledAfterPublish = false;
+      let cleanupPromise: Promise<void> | undefined;
+      let resultObserved: Promise<void> | undefined;
+      let failedReported = false;
+      /** 验收注入缝:主开关关闭时恒等于 ACTIVATION_CLEANUP_TIMEOUT_MS。 */
+      const cleanupTimeoutMs = acceptanceCleanupTimeoutMs(ACTIVATION_CLEANUP_TIMEOUT_MS);
+
+      /** 观察权威 result:resolve → settleResult,reject → rejectResult(绝不是只表示启动失败的 failRun)。 */
+      const observeResult = (handle: ActivationRun): Promise<void> =>
+        (resultObserved ??= handle.result.then(
+          (value) => {
+            if (system !== undefined) system.registry.settleResult(system.runId, { stopReason: stopReasonOf(value) });
+          },
+          (error) => {
+            if (system !== undefined) system.registry.rejectResult(system.runId, errorText(error));
+          },
+        ));
+
+      /**
+       * 本次 system-skill 派生唯一的清理实现(`cleanupPromise ??=` 去重):
+       *
+       * - idle:按 `cleanupTimeoutMs` 等真实 result,超时记收尾预算后转 dispose;
+       * - cancel:跳过 graceful 等待,直接 dispose;result 由 `observeResult` 另行观察;
+       * - 从未发布 activation:没有资源要释放,局部清理即全部清理;
+       * - 只有 dispose fulfilled 才算清理确认;reject/超时追加 error 告警且不确认;
+       * - dispose 后的结算观察窗使用独立超时,不吃已 abort 的 `controller.signal`;
+       *   超窗用 `rejectResult` 补 `executionEnded`。
+       */
+      const cleanup = (mode: "idle" | "cancel"): Promise<void> =>
+        (cleanupPromise ??= (async () => {
+          const warnings: SubagentCleanupWarning[] = [];
+          let ok = false;
+          try {
+            if (system === undefined) return;
+            if (activationHandle === undefined) {
+              ok = true;
+              return;
+            }
+            if (mode === "idle" && !cancelRequested) {
+              const waited = await waitResultWithBudget(
+                observeResult(activationHandle),
+                controller.signal,
+                cleanupTimeoutMs,
+              );
+              if (waited === "timeout") {
+                system.registry.noteCleanupBudget(system.runId, cleanupTimeoutMs);
+                console.error(
+                  `系统技能子代理在 ${String(cleanupTimeoutMs / 60_000)} 分钟内未结束，释放 activation`,
+                );
+              }
+            }
+            const disposal = await disposeActivationWithTimeout(activationHandle, cleanupTimeoutMs);
+            if (disposal === "fulfilled") {
+              ok = true;
+            } else if (disposal === "rejected") {
+              warnings.push({ code: "activation-dispose-failed", severity: "error" });
+            } else {
+              warnings.push({ code: "activation-dispose-timeout", severity: "error" });
+            }
+            // 后处置观察窗:不得复用已 abort 的 controller.signal(否则 0ms 短路),
+            // 也不得传 undefined(settleWithin 会直接在 promise.then 上抛 TypeError)。
+            if (resultObserved !== undefined) {
+              const settled = await settleWithin(resultObserved, cleanupTimeoutMs);
+              if (!settled) system.registry.rejectResult(system.runId, "execution result missing after dispose");
+            }
+          } finally {
+            if (system !== undefined) system.registry.confirmCleanup(system.runId, { ok, warnings });
+          }
+        })());
+
+      if (system !== undefined) {
+        // 预留了非空 childId 时必须在首个 await 之前归因,provider 沿用即最早的活动。
+        if (typeof specChildId === "string" && specChildId.length > 0) {
+          system.registry.reserveChild(system.runId, specChildId);
+        }
+        // 提前挂载取消闭包:覆盖 startActivation pending 期受理的取消。未发布
+        // activation 时只 latch + abort,由启动返回/失败分支统一清理并确认。
+        system.registry.attachCancel(system.runId, async () => {
+          cancelRequested = true;
+          controller.abort();
+          if (activationHandle !== undefined) await cleanup("cancel");
+        });
+      }
+
       try {
-        const run = await startRun.run(hostRunId, () =>
-          startParent.run(parentFromCall, () => originalActivation(...args)),
+        const hostManaged = hostRunId !== undefined || legacy !== undefined;
+        const activationArgs = (
+          system === undefined ? args : withSystemSkillAbortSignal(args, controller.signal)
+        ) as never[];
+        const run = await startHostManaged.run(hostManaged, () =>
+          startRun.run(effectiveRunId, () =>
+            startParent.run(parentFromCall, () => originalActivation(...activationArgs)),
+          ),
         );
         // fail closed:激活的父会话与登记表里的 run parent 必须是同一个。三方 parent
         // 不一致时先释放本次 activation,再拒绝启动;后续 restrict/refresh/bindChild
         // 一律不执行。没有 Host runId 的嵌套子代理不在本检查范围内。
-        if (hostRunId !== undefined) {
+        if (effectiveRunId !== undefined) {
           const activationParent = sessionIdOf(parentFromStartArgs(args));
-          const registryParent = ctx.huaanworkSubagentRuns?.parentSessionIdOf(hostRunId);
+          const registryParent = ctx.huaanworkSubagentRuns?.parentSessionIdOf(effectiveRunId);
           if (
             registryParent !== undefined &&
             (activationParent !== registryParent || parentFromCall !== registryParent)
           ) {
-            try {
-              await run?.dispose?.();
-            } catch {
-              // 释放失败不能顶替不一致错误,也不能留下未处理的 rejection。
+            if (system !== undefined) {
+              // 吸收本次 activation 后统一走 cleanup:避免内部吞掉 dispose 失败、外层
+              // catch 又以 ok: true 二次确认。
+              activationHandle = run;
+              failedReported = true;
+              system.registry.failRun(system.runId, "subagent activation parent mismatch");
+              await cleanup("cancel");
+            } else {
+              try {
+                await run?.dispose();
+              } catch {
+                // 释放失败不能顶替不一致错误,也不能留下未处理的 rejection。
+              }
             }
             throw new Error("subagent activation parent mismatch");
           }
         }
         const childSessionId = run === undefined ? undefined : sessionIdOf(run.childId);
+        if (system !== undefined) {
+          const reservedChildId =
+            typeof specChildId === "string" && specChildId.length > 0 ? specChildId : undefined;
+          if (
+            run === undefined ||
+            childSessionId === undefined ||
+            (reservedChildId !== undefined && childSessionId !== reservedChildId)
+          ) {
+            // childId 不可解析(或与预留 id 不符):fail closed。先标记失败,有 activation
+            // 时释放并确认清理,再抛错;外层 catch 因 failedReported 不再重复 failRun。
+            activationHandle = run;
+            failedReported = true;
+            const message =
+              childSessionId === undefined
+                ? "subagent activation child id missing"
+                : "subagent activation child mismatch";
+            system.registry.failRun(system.runId, message);
+            if (run !== undefined) await cleanup("cancel");
+            throw new Error(message);
+          }
+          activationHandle = run;
+          system.registry.bindActivation(system.runId, { childId: childSessionId });
+          // `result` 必填:无需可选跳过,它同时提供 executionEnded。
+          observeResult(run);
+          // 正常完成(未取消)后按同一收尾预算释放 activation;取消路径由 cancel 闭包
+          // 或下面的晚到取消分支负责。清理 promise 必须回链到这里:游离的 cleanup
+          // 若 reject 会成为未处理的拒绝。
+          void resultObserved
+            ?.then(() => {
+              if (cancelRequested) return undefined;
+              return cleanup("idle");
+            })
+            .catch(() => undefined);
+          if (cancelRequested) {
+            // 启动期受理的取消:已发布 activation 立即释放,不再向上游返回已处置句柄。
+            cancelledAfterPublish = true;
+            await cleanup("cancel");
+            throw new Error(`系统技能「${skillKind ?? "unknown"}」的子代理回合已取消`);
+          }
+        }
         // 包请求只认宿主预留的子会话 id:provider 沿用预留 id 才在包装里接线。
         // 另分配的 id 由 host 的 activation 返回后路径补挂;同会话并发发起的
         // legacy 子代理因此不会命中另一回合的包请求。
@@ -502,7 +957,7 @@ export function apply(ctx: Context): void {
             // (mainstream 不可达:上游契约保证 childId)。与 parent-mismatch 同形。
             if (childSessionId === undefined) {
               try {
-                await run?.dispose?.();
+                await run.dispose();
               } catch {
                 // 释放失败不能顶替不一致错误,也不能留下未处理 rejection。
               }
@@ -517,10 +972,21 @@ export function apply(ctx: Context): void {
             ctx.huaanworkPackageChildAllow?.set(childSessionId, inherited);
           }
         }
-        if (run?.localAgent) {
-          consumePendingSpawn(run.localAgent);
+        if (run?.localAgent && !hostManaged) {
+          consumePendingSpawn(run.localAgent, parentFromCall);
         }
         return run;
+      } catch (error) {
+        // 启动/外层失败:记录「启动已终结」并完成清理确认。晚到取消不污染 failure 字段;
+        // pending 期取消且 dispose 成功时也必须收敛(不因 cleanupOk 缺失永停 stopping)。
+        if (system !== undefined) {
+          if (!cancelledAfterPublish && !failedReported) {
+            failedReported = true;
+            system.registry.failRun(system.runId, errorText(error));
+          }
+          await cleanup(cancelRequested ? "cancel" : "idle");
+        }
+        throw error;
       } finally {
         // 只清本次快照:重叠的 activation 不能清掉别处新写入的包/legacy 请求。
         if (
@@ -750,5 +1216,27 @@ export function getBundledSkill(
     ...(parsed.disableModelInvocation !== undefined ? { disableModelInvocation: parsed.disableModelInvocation } : {}),
     ...(parsed.userInvocable !== undefined ? { userInvocable: parsed.userInvocable } : {}),
   };
+}
+
+/**
+ * 仅用于 `system-skill` 的 `startActivation`：把本次运行的定向取消信号与调用方原 `spec.signal` 合并，
+ * 保留 `spec` 原型与全部自有属性（含符号字段），且不改写调用方原对象、不触碰 legacy/package 派发。
+ */
+function withSystemSkillAbortSignal(args: readonly unknown[], cancelSignal: AbortSignal): unknown[] {
+  if (args.length === 0) return [];
+  const spec = args[0];
+  if (typeof spec !== "object" || spec === null) return [...args];
+  const callerSignal = (spec as { signal?: unknown }).signal;
+  const combinedSignal =
+    callerSignal instanceof AbortSignal ? AbortSignal.any([callerSignal, cancelSignal]) : cancelSignal;
+  const descriptors = Object.getOwnPropertyDescriptors(spec);
+  descriptors.signal = {
+    value: combinedSignal,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  };
+  const cloned = Object.defineProperties(Object.create(Object.getPrototypeOf(spec)), descriptors);
+  return [cloned, ...args.slice(1)];
 }
 

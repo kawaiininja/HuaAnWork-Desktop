@@ -391,7 +391,9 @@ async function runAgentTurn(
     await sendToAgent(
       ctx,
       routeCtx,
-      { text: prompt, sessionId },
+      // 运行 id 是本轮自动化回合的持久锚:followup 消息 id 与历史 user.clientMessageId
+      // 都是同一个 runId,`turnOriginForSession` 按 `huaanwork-auto-` 前缀判定为 automation。
+      { text: prompt, sessionId, clientMessageId: runId },
       { root, modelId: activeModelId, release: admission.release },
     )
     await automationSessionAgent(ctx, sessionId)?.whenIdle?.()

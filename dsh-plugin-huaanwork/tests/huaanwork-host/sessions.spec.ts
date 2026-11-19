@@ -15,6 +15,15 @@ import {
 } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import { apply as applySkills, setBundledSkillRegistrar } from '../../src/huaanwork-guardrails/skills.ts'
 import {
+  apply as applyPresentAs,
+} from '../../src/huaanwork-guardrails/present-as.ts'
+import {
+  createSystemSkillLeaseStore,
+  systemSkillLeaseKindOf,
+  type SystemSkillLeaseStore,
+} from '../../src/huaanwork-host/system-skill-leases.ts'
+import { createTurnAnchorStore } from '../../src/huaanwork-host/turn-anchors.ts'
+import {
   answerRouteInput,
   apply as applyRouteTools,
   noteInvalidRoute,
@@ -2727,6 +2736,83 @@ describe('session.send 调度器接线', () => {
     }
   })
 
+  test('a queued /explore replays with the lease attached before dequeue sends', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 1 })
+    const project = makeProject(root, 'project-a')
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: project, sessionId: 'a1' },
+      { projectId: 'pa', projectRoot: project, sessionId: 'explore-session' },
+    ])
+    const idleA = makeDeferred()
+    h.addAgent('a1', () => idleA.promise)
+    h.addAgent('explore-session')
+    const attachments = emptyAttachments()
+    h.ctx.huaanworkAttachments = attachments
+    h.ctx.huaanworkPackageChildAllow = new Map()
+    ;(h.ctx as unknown as { tools: unknown }).tools = { presentAs: () => () => undefined, schemas: () => [] }
+    ;(h.ctx as unknown as { on(event: string, listener: () => void): void }).on = () => undefined
+    applyPresentAs(h.ctx as never)
+    const store = createSystemSkillLeaseStore(h.ctx as never)
+    h.ctx.huaanworkSystemSkillLeases = store
+
+    await h.send({ text: 'first', sessionId: 'a1', tabId: 'tab-a', modelId: 'm1' })
+    const queued = await h.send({
+      text: '看看',
+      sessionId: 'explore-session',
+      tabId: 'tab-explore',
+      modelId: 'm1',
+      skill: 'explore',
+    })
+    expect(queued).toMatchObject({ waiting: true, started: false })
+    // 排队期间不挂租约:只有出队并真正 followup 的回合才挂。
+    expect(store.kindOf('explore-session')).toBeUndefined()
+
+    idleA.resolve()
+    await vi.waitFor(() => expect(h.followupsBySession.get('explore-session')?.length).toBe(1))
+    expect(store.kindOf('explore-session')).toBe('explore')
+    expect(attachments.sessionAgentTools.get('explore-session')?.has('subagent')).toBe(true)
+    expect(h.followupsBySession.get('explore-session')![0]).toContain('# 已启用技能：explore')
+  })
+
+  test('a queued /test-fix replays with the lease attached before dequeue sends', async () => {
+    const root = freshTmp()
+    const h = await makeHarness(root, { max: 1 })
+    const project = makeProject(root, 'project-a')
+    bindProjects(root, [
+      { projectId: 'pa', projectRoot: project, sessionId: 'a1' },
+      { projectId: 'pa', projectRoot: project, sessionId: 'test-fix-session' },
+    ])
+    const idleA = makeDeferred()
+    h.addAgent('a1', () => idleA.promise)
+    h.addAgent('test-fix-session')
+    const attachments = emptyAttachments()
+    h.ctx.huaanworkAttachments = attachments
+    h.ctx.huaanworkPackageChildAllow = new Map()
+    ;(h.ctx as unknown as { tools: unknown }).tools = { presentAs: () => () => undefined, schemas: () => [] }
+    ;(h.ctx as unknown as { on(event: string, listener: () => void): void }).on = () => undefined
+    applyPresentAs(h.ctx as never)
+    const store = createSystemSkillLeaseStore(h.ctx as never)
+    h.ctx.huaanworkSystemSkillLeases = store
+
+    await h.send({ text: 'first', sessionId: 'a1', tabId: 'tab-a', modelId: 'm1' })
+    const queued = await h.send({
+      text: '修一下',
+      sessionId: 'test-fix-session',
+      tabId: 'tab-fix',
+      modelId: 'm1',
+      skill: 'test-fix',
+    })
+    expect(queued).toMatchObject({ waiting: true, started: false })
+    expect(store.kindOf('test-fix-session')).toBeUndefined()
+
+    idleA.resolve()
+    await vi.waitFor(() => expect(h.followupsBySession.get('test-fix-session')?.length).toBe(1))
+    expect(store.kindOf('test-fix-session')).toBe('test-fix')
+    expect(attachments.sessionAgentTools.get('test-fix-session')?.has('subagent')).toBe(true)
+    expect(h.followupsBySession.get('test-fix-session')![0]).toContain('# 已启用技能：test-fix')
+  })
+
   test('session.send without a tab throws 缺少标签', async () => {
     const root = freshTmp()
     const h = await makeHarness(root)
@@ -3769,5 +3855,201 @@ describe('session.send 调度器接线', () => {
     expect(existsSync(agentDraftFile(projectSession))).toBe(false)
     expect(existsSync(skillDraftFile(keepSession))).toBe(true)
     expect(existsSync(agentDraftFile(keepSession))).toBe(true)
+  })
+})
+
+/**
+ * Task 2(系统技能回合租约):显式 `/explore`、`/test-fix` 必须在 agent.followup
+ * 之前挂好 `subagent` 附件与租约(上游 systemPrompt.assemble() 在 pre-step 建锚点前
+ * 就采集工具列表);受管儿童拒发;followup 抛错精确回滚且不清既有 active goal 标记。
+ */
+describe('系统技能回合租约(显式 /explore、/test-fix)', () => {
+  type SkillLeaseCtx = SessionRuntimeContext & {
+    huaanworkSystemSkillLeases: SystemSkillLeaseStore
+    huaanworkAttachments: ReturnType<typeof emptyAttachments>
+    huaanworkTurnAnchors: ReturnType<typeof createTurnAnchorStore>
+    huaanworkPackageChildAllow: Map<string, readonly string[]>
+    tools: { presentAs: () => () => void; schemas: () => readonly { name?: string }[] }
+  }
+
+  function makeSkillLeaseCtx(sessionId: string, options?: { throwOnFollowup?: boolean }) {
+    const attachments = emptyAttachments()
+    const anchors = createTurnAnchorStore()
+    const observed: { kind?: string | undefined; attached?: boolean } = {}
+    const agent: ListedAgent & { followup: (message: unknown) => void } = {
+      id: 'huaanwork',
+      session: { id: sessionId },
+      followup: () => {
+        // 在 followup 调用当下读:证明租约/附件先于模型回合可见。
+        observed.kind = systemSkillLeaseKindOf(ctx as never, sessionId)
+        observed.attached = attachments.sessionAgentTools.get(sessionId)?.has('subagent') === true
+        if (options?.throwOnFollowup === true) throw new Error('followup boom')
+      },
+      whenIdle: async () => undefined,
+    }
+    const ctx = {
+      huaanworkAttachments: attachments,
+      huaanworkUnattended: new Map(),
+      huaanworkPackageChildAllow: new Map<string, readonly string[]>(),
+      huaanworkTurnAnchors: anchors,
+      agents: {
+        get: (id: string) => (id === sessionId ? agent : undefined),
+        list: () => [agent],
+      },
+      tools: { presentAs: () => () => undefined, schemas: () => [] },
+      on() {},
+    } as unknown as SkillLeaseCtx
+    applyPresentAs(ctx as never)
+    ctx.huaanworkSystemSkillLeases = createSystemSkillLeaseStore(ctx as never)
+    return { ctx, attachments, anchors, observed, agent }
+  }
+
+  test('explicit /explore attaches subagent and the lease before followup', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'explore-session'
+    const { ctx, observed } = makeSkillLeaseCtx(sessionId)
+    await sendToAgent(ctx, routeCtx, { text: '看看', skill: 'explore', sessionId })
+    expect(observed).toEqual({ kind: 'explore', attached: true })
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+  })
+
+  test('explicit /test-fix attaches subagent and the lease before followup', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'test-fix-session'
+    const { ctx, observed } = makeSkillLeaseCtx(sessionId)
+    await sendToAgent(ctx, routeCtx, { text: '修一下', skill: 'test-fix', sessionId })
+    expect(observed).toEqual({ kind: 'test-fix', attached: true })
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('test-fix')
+  })
+
+  test('a followup failure rolls the lease back but keeps an existing active goal marker', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'rollback-session'
+    const { ctx, attachments } = makeSkillLeaseCtx(sessionId, { throwOnFollowup: true })
+    // 先有 active goal,再显式 /explore:followup 抛错不得清掉 activeGoalSessions。
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'active')
+
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '看看', skill: 'explore', sessionId }),
+    ).rejects.toThrow('followup boom')
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBeUndefined()
+    expect(attachments.sessionAgentTools.has(sessionId)).toBe(false)
+
+    // 标记仍在:重挂租约后的正常轮间 idle 不得提前解挂。
+    expect(ctx.huaanworkSystemSkillLeases.acquireExplicit(sessionId, 'explore')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    expect(attachments.sessionAgentTools.get(sessionId)?.has('subagent')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'complete')
+  })
+
+  test('an ordinary sendToAgent releases a retained active-goal system skill lease before followup', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'ordinary-after-goal-session'
+    const { ctx, attachments, observed } = makeSkillLeaseCtx(sessionId)
+    const invalidated: string[] = []
+    ctx.huaanworkSystemSkillLeases.onInvalidate((id) => invalidated.push(id))
+
+    // 上一回合处于 active goal + 显式 /explore,轮间 idle 按契约保留租约与 subagent 附件。
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'active')
+    await sendToAgent(ctx, routeCtx, { text: '先探索', skill: 'explore', sessionId })
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    expect(attachments.sessionAgentTools.get(sessionId)?.has('subagent')).toBe(true)
+    invalidated.length = 0
+
+    // 用户新发普通回合(无 systemSkillKind):必须在 followup 前释放旧租约、摘掉 subagent 并失效缓存。
+    await sendToAgent(ctx, routeCtx, { text: '直接回答就好', sessionId })
+    expect(observed).toEqual({ kind: undefined, attached: false })
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBeUndefined()
+    expect(attachments.sessionAgentTools.has(sessionId)).toBe(false)
+    expect(invalidated).toEqual([sessionId])
+
+    // activeGoalSessions 本身未被误清:若后续合法重取系统技能,轮间 idle 仍保持租约。
+    expect(ctx.huaanworkSystemSkillLeases.acquireExplicit(sessionId, 'explore')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'complete')
+  })
+
+  test('a failing ordinary followup restores a retained active-goal system skill lease and subagent attachment', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'ordinary-followup-throw-session'
+    const { ctx, attachments, observed } = makeSkillLeaseCtx(sessionId, { throwOnFollowup: true })
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'active')
+    expect(ctx.huaanworkSystemSkillLeases.acquireExplicit(sessionId, 'explore')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    expect(attachments.sessionAgentTools.get(sessionId)?.has('subagent')).toBe(true)
+
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '普通插话', sessionId }),
+    ).rejects.toThrow('followup boom')
+    // followup 调用当下已先摘除(确保正常启动时 Step 1 看不到 subagent),抛错后精确挂回原 explore 租约与附件。
+    expect(observed).toEqual({ kind: undefined, attached: false })
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    expect(attachments.sessionAgentTools.get(sessionId)?.has('subagent')).toBe(true)
+    // 原 active goal 语义仍在:轮间 idle 继续保留恢复后的租约。
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'complete')
+  })
+
+  test('a failing explicit system skill followup restores a previously retained active-goal lease', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'switch-skill-followup-throw-session'
+    const { ctx, attachments, observed } = makeSkillLeaseCtx(sessionId, { throwOnFollowup: true })
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'active')
+    expect(ctx.huaanworkSystemSkillLeases.acquireExplicit(sessionId, 'explore')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.releaseOnIdle(sessionId)
+
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '修测试', skill: 'test-fix', sessionId }),
+    ).rejects.toThrow('followup boom')
+    expect(observed).toEqual({ kind: 'test-fix', attached: true })
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+    expect(attachments.sessionAgentTools.get(sessionId)?.has('subagent')).toBe(true)
+    ctx.huaanworkSystemSkillLeases.noteGoalPhase(sessionId, 'complete')
+  })
+
+  test('an unmanaged child is rejected before any anchor registration or attachment', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'legacy-child-session'
+    const { ctx, anchors, attachments } = makeSkillLeaseCtx(sessionId)
+    registerChildSession('legacy-parent', sessionId)
+
+    await expect(
+      sendToAgent(ctx, routeCtx, { text: '看看', skill: 'explore', sessionId, clientMessageId: 'unmanaged-1' }),
+    ).rejects.toThrow('unmanaged-child-system-skill')
+    expect(anchors.current(sessionId)).toBeUndefined()
+    // 不仅没有生效 anchor,连未消费 pending 也未登记(后续观察同 id 只能降级为 unknown)。
+    expect(
+      anchors.notePreStep(sessionId, [{ role: 'user', id: 'unmanaged-1', source: { kind: 'user' } }], 't1')?.origin,
+    ).toBe('unknown')
+    expect(attachments.sessionAgentTools.has(sessionId)).toBe(false)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBeUndefined()
+  })
+
+  test('a managed package child may run an explicit system skill turn', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'pkg-child-session'
+    const { ctx, observed } = makeSkillLeaseCtx(sessionId)
+    registerChildSession('pkg-parent', sessionId)
+    ctx.huaanworkPackageChildAllow.set(sessionId, ['read', 'subagent'])
+
+    await sendToAgent(ctx, routeCtx, { text: '看看', skill: 'explore', sessionId })
+    expect(observed).toEqual({ kind: 'explore', attached: true })
+  })
+
+  test('releaseSessionRuntime releases the lease and attachments', async () => {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const sessionId = 'release-session'
+    const { ctx, attachments } = makeSkillLeaseCtx(sessionId)
+    await sendToAgent(ctx, routeCtx, { text: '看看', skill: 'explore', sessionId })
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBe('explore')
+
+    releaseSessionRuntime(ctx, sessionId)
+    expect(ctx.huaanworkSystemSkillLeases.kindOf(sessionId)).toBeUndefined()
+    expect(attachments.sessionAgentTools.has(sessionId)).toBe(false)
   })
 })

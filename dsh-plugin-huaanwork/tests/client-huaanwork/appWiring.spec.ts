@@ -19,12 +19,22 @@ import {
   type GoalTurnEvent,
   type GoalTurnState,
 } from "../../src/client-huaanwork/logic/goalRound.ts";
-import { applyTurnFinalToTabs, projectToolPanels, reduceTurnFinal, type TurnFinalEvent } from "../../src/client-huaanwork/logic/toolPanel.ts";
+import { applyTurnFinalToTabs, currentTurnStart, historicalTurnFinalByUserId, projectToolPanels, reduceTurnFinal, withToolPanelToggle, type TurnFinalEvent } from "../../src/client-huaanwork/logic/toolPanel.ts";
 import { consumeBufferedStaleEnds, consumeStaleIdle, finishStop } from "../../src/client-huaanwork/logic/stopGate.ts";
 import { appendOutcomeNotes, latestUserItemId, turnChecks } from "../../src/client-huaanwork/logic/outcomeCheck.ts";
 import { interruptTurnItems } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 import { clearFailuresInTabs } from "../../src/client-huaanwork/logic/hostStop.ts";
 import { foldRunAssistantItems } from "../../src/client-huaanwork/logic/runResultAttachments.ts";
+import {
+  buildSessionSendParams,
+  findPendingForToolEnd,
+  hasBufferedQueueStartForSession,
+  historyItemsFromRecords,
+  takeEarlyPendingEvents,
+} from "../../src/client-huaanwork/logic/sessionChannel.ts";
+import { currentSnapshotRoundKey, shouldApplyTodoEvent } from "../../src/client-huaanwork/logic/todoProjection.ts";
+import { selectProgressPanelModel } from "../../src/client-huaanwork/logic/progressPanel.ts";
+import type { RpcEvent } from "../../src/client-huaanwork/rpc-types.ts";
 import * as AppModule from "../../src/client-huaanwork/App.tsx";
 
 /**
@@ -899,12 +909,100 @@ test("send carries the tab id and selected model and mints under the tab's own r
   // cwd 只属于这条新会话：标签已有项目用项目根，未绑定用中立根。
   assert.match(body, /const cwd = await sessionCwdForTab\(sendingTab\);/);
   assert.match(body, /"session\.new", \{\s*fresh: chatId !== "work-1",\s*\.\.\.\(cwd \? \{ cwd \} : \{\}\),/);
-  // 发送参数带当前标签 id、所选 modelId，以及本次 skill 或 at。
+  // 发送参数经 buildSessionSendParams 构造：带当前标签 id、所选 modelId、本次 UUID
+  // 回合锚，以及本次 skill 或 at（@ 的 at.clientMessageId 兼容值由 builder 生成）。
   assert.match(body, /tabId: chatId,/);
   assert.match(body, /const modelId = resolveSendModelId\(modelPickByTab, chatId, sendingTask\?\.modelId, activeModelId\);/);
   assert.match(body, /\.\.\.\(modelId \? \{ modelId \} : \{\}\),/);
-  assert.match(body, /\{ at: \{ name: invokedAt\.name, clientMessageId: String\(userMsg\.id\) \} \}/);
-  assert.match(body, /\{ skill: invokedSkill\.name \}/);
+  assert.match(body, /const clientMessageId = crypto\.randomUUID\(\);/);
+  assert.match(body, /await rpcCall<SessionSendResult>\("session\.send", buildSessionSendParams\(\{/);
+  assert.match(body, /clientMessageId,/);
+  assert.match(body, /userItemId: userMsg\.id,/);
+  assert.match(body, /\.\.\.\(invokedAt \? \{ invokedAt \} : \{\}\),/);
+  assert.match(body, /\.\.\.\(invokedSkill \? \{ invokedSkill \} : \{\}\),/);
+});
+
+test("session.send always carries a top-level clientMessageId and keeps the @ compat anchor", () => {
+  const plain = buildSessionSendParams({ text: "你好", tabId: "t1", clientMessageId: "uuid-1", userItemId: 7 });
+  assert.deepEqual(plain, { text: "你好", tabId: "t1", clientMessageId: "uuid-1" });
+  assert.equal("at" in plain, false);
+  assert.equal("skill" in plain, false);
+
+  const skill = buildSessionSendParams({
+    text: "看下",
+    tabId: "t1",
+    clientMessageId: "uuid-2",
+    userItemId: 7,
+    invokedSkill: { name: "review", remainder: "看下" },
+  });
+  assert.deepEqual(skill, { text: "看下", tabId: "t1", clientMessageId: "uuid-2", skill: "review" });
+  assert.equal("at" in skill, false);
+
+  const at = buildSessionSendParams({
+    text: "@helper 帮我看",
+    tabId: "t1",
+    clientMessageId: "uuid-3",
+    userItemId: 7,
+    invokedAt: { name: "helper", remainder: "帮我看" },
+  });
+  assert.deepEqual(at, {
+    text: "帮我看",
+    tabId: "t1",
+    clientMessageId: "uuid-3",
+    at: { name: "helper", clientMessageId: "7" },
+  });
+
+  // 旧口径:@ 优先于 skill,且 at.clientMessageId 仍取本地条目 id(兼容旧 @ 卡)。
+  const both = buildSessionSendParams({
+    text: "x",
+    tabId: "t1",
+    clientMessageId: "uuid-4",
+    userItemId: 9,
+    invokedAt: { name: "helper", remainder: "r" },
+    invokedSkill: { name: "review", remainder: "r2" },
+  });
+  assert.deepEqual(both.at, { name: "helper", clientMessageId: "9" });
+  assert.equal("skill" in both, false);
+
+  // 会话与模型只在有值时出现。
+  const bound = buildSessionSendParams({
+    text: "hi",
+    tabId: "t1",
+    clientMessageId: "uuid-5",
+    userItemId: 1,
+    sessionId: "s1",
+    modelId: "m1",
+  });
+  assert.deepEqual(bound, { text: "hi", tabId: "t1", clientMessageId: "uuid-5", sessionId: "s1", modelId: "m1" });
+});
+
+test("automation run tabs get a single user entry anchored to the run id", () => {
+  const item = AppModule.automationRunUserItem("run-1", "每日报告", []);
+  assert.ok(item);
+  assert.equal(item.kind, "user");
+  assert.equal(item.clientMessageId, "run-1");
+  assert.match(item.text, /每日报告/);
+  // 同一 run 的重复 run-task(或回放)不再追加第二条。
+  assert.equal(
+    AppModule.automationRunUserItem("run-1", "每日报告", [{ kind: "user", clientMessageId: "run-1" }]),
+    undefined,
+  );
+  assert.equal(
+    AppModule.automationRunUserItem("run-2", "每日报告", [{ kind: "user", clientMessageId: "run-1" }])?.clientMessageId,
+    "run-2",
+  );
+});
+
+test("the live run-task handler appends the anchored user entry in both tab branches", () => {
+  // 复用分支与新建分支都必须补同一条 user 条目(新建分支在「自动化运行中…」note 之前)。
+  assert.equal((APP_SOURCE.match(/automationRunUserItem\(event\.runId, task\.name, /g) ?? []).length, 2);
+});
+
+test("history user rows keep the persisted anchor but allocate a fresh React id", () => {
+  assert.match(
+    APP_SOURCE,
+    /if \(item\.kind === "user"\) \{\s*return \{\s*id: allocId\(\),\s*kind: "user",\s*text: item\.text,\s*\.\.\.\(item\.clientMessageId === undefined \? \{\} : \{ clientMessageId: item\.clientMessageId \}\),\s*\};\s*\}/,
+  );
 });
 
 test("a neutral tab does not send when session.new fails", () => {
@@ -1664,6 +1762,108 @@ test("early queue start is buffered until the queued response", () => {
   assert.deepEqual(started, { running: true, waitingIds: [] });
 });
 
+test("an early todo_write for the pending send is buffered and replayed after its queue start", () => {
+  const holdSource = earlyEventGate();
+  const todoBranchAt = holdSource.indexOf('incoming.event === "tool/start" && incoming.name === "todo_write"');
+  const goalCheckAt = holdSource.indexOf("if (!isGoalEvent) return false;");
+  const runningGuardAt = holdSource.indexOf(
+    "if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;",
+  );
+  assert.ok(todoBranchAt >= 0, "early todo_write events take the buffering path");
+  assert.ok(todoBranchAt < goalCheckAt, "todo_write is buffered before the goal-only early return");
+  // QP-I6:goalIntermediate 保留前端 running 期间,同会话新排队回合早到的待办不能被 running 守卫丢掉。
+  assert.ok(todoBranchAt < runningGuardAt, "an early todo for the new turn is considered before the running-turn guard");
+  assert.match(holdSource, /incoming\.clientMessageId === pending\.clientMessageId/);
+  // goal 事件的缓冲仍留在 crossTabGuard 之后(既有源码钉)。
+  const lastPushAt = holdSource.lastIndexOf("pending.buffered.push(incoming);");
+  assert.ok(lastPushAt > runningGuardAt, "goal events are still buffered after the running-turn guard");
+
+  // 行为:started 应答重放全量;waiting 应答只在本次 queue-start 已到时保留本锚待办,
+  // 且 queue-start 先于 todo_write 重放;未启动/queue-fail/他项/无锚一律丢弃。
+  const todoEvent: RpcEvent = {
+    event: "tool/start",
+    name: "todo_write",
+    clientMessageId: "mb",
+    roundKey: 5,
+    todos: [{ content: "一", status: "pending" }],
+  };
+  const queueStart: RpcEvent = { event: "session/queue-start", sessionId: "s", tabId: "t", queueItemId: "qb" };
+  const queueFail: RpcEvent = { event: "session/queue-fail", sessionId: "s", tabId: "t", queueItemId: "qb", reason: "busy" };
+  const otherTodo: RpcEvent = { ...todoEvent, clientMessageId: "other" };
+  const unanchoredTodo: RpcEvent = { event: "tool/start", name: "todo_write", roundKey: 5, todos: todoEvent.todos };
+  const controlOf = (event: RpcEvent) => (
+    (event.event === "session/queue-start" || event.event === "session/queue-fail") && event.queueItemId === "qb"
+  );
+
+  assert.deepEqual(
+    takeEarlyPendingEvents({ waiting: false, started: true }, [queueStart, todoEvent], "mb", controlOf),
+    [queueStart, todoEvent],
+    "a started response replays this send's whole buffer",
+  );
+  const replayed = takeEarlyPendingEvents(
+    { waiting: true, started: false, queueItemId: "qb" },
+    [todoEvent, queueStart],
+    "mb",
+    controlOf,
+  );
+  assert.deepEqual(replayed, [queueStart, todoEvent], "the queue start is replayed before the todo of the same turn");
+  assert.deepEqual(
+    takeEarlyPendingEvents({ waiting: true, started: false, queueItemId: "qb" }, [queueStart, otherTodo, unanchoredTodo], "mb", controlOf),
+    [queueStart],
+    "todos carrying another turn or no anchor are still dropped",
+  );
+  assert.deepEqual(
+    takeEarlyPendingEvents({ waiting: true, started: false, queueItemId: "qb" }, [queueFail, todoEvent], "mb", controlOf),
+    [queueFail],
+    "a failed queue item never replays a todo that has no turn",
+  );
+  assert.deepEqual(takeEarlyPendingEvents({ waiting: false, started: false }, [todoEvent], "mb", controlOf), []);
+  assert.deepEqual(takeEarlyPendingEvents({ waiting: true, started: false }, [todoEvent], "mb", controlOf), []);
+
+  // 接线:App 的 todo 分支先过回合归属守卫再写入待办卡;历史回放有显式 todo 分支。
+  assert.match(APP_SOURCE, /shouldApplyTodoEvent\(prev, turnStart, event, currentSnapshotRoundKey\(prev, turnStart\)\)/);
+  assert.match(APP_SOURCE, /upsertTodoItem\(prev, todos, allocId, event\.roundKey, event\.clientMessageId\)/);
+  const historyBody = functionBody("function historyToChatItems(", "async function resumeFromView(");
+  assert.match(historyBody, /if \(item\.kind === "todo"\) \{/);
+  assert.match(historyBody, /kind: "todo"/);
+});
+
+test("a fresh tab's first early todo_write is matched by its anchor alone", () => {
+  const holdSource = earlyEventGate();
+  const todoBranch = blockAfter(
+    holdSource,
+    'incoming.event === "tool/start" && incoming.name === "todo_write"',
+  ).body;
+  // 全新标签首发时 pending 还没有 sessionId：待办分支必须按锚查找，且锚本身仍参与守卫。
+  assert.match(
+    todoBranch,
+    /findPendingSendByClientMessageId\(pendingSendsRef\.current\.values\(\), incoming\.clientMessageId\)/,
+    "the early todo branch looks the pending send up by its turn anchor",
+  );
+  assert.doesNotMatch(todoBranch, /pendingSendOfSession\(/, "a session id cannot identify a fresh tab's first send");
+  assert.match(todoBranch, /incoming\.clientMessageId === pending\.clientMessageId/);
+
+  // 行为：sessionId 缺失的在途发送仍按锚命中并缓冲；锚不一致或无锚一律不命中。
+  const fresh = { tabId: "fresh", clientMessageId: "uuid-fresh", buffered: [] as RpcEvent[] };
+  const bound = { tabId: "bound", clientMessageId: "uuid-bound", sessionId: "s1", buffered: [] as RpcEvent[] };
+  const pendings = [fresh, bound];
+  const todoEvent: RpcEvent = {
+    event: "tool/start",
+    name: "todo_write",
+    clientMessageId: "uuid-fresh",
+    roundKey: 3,
+    todos: [{ content: "一", status: "pending" }],
+  };
+  assert.equal(AppModule.findPendingSendByClientMessageId(pendings, todoEvent.clientMessageId), fresh);
+  const matched = AppModule.findPendingSendByClientMessageId(pendings, todoEvent.clientMessageId);
+  if (matched !== undefined && todoEvent.clientMessageId === matched.clientMessageId) matched.buffered.push(todoEvent);
+  assert.deepEqual(fresh.buffered, [todoEvent], "the anchored todo is buffered before the send response");
+  assert.deepEqual(bound.buffered, []);
+  assert.equal(AppModule.findPendingSendByClientMessageId(pendings, "uuid-other"), undefined);
+  assert.equal(AppModule.findPendingSendByClientMessageId(pendings, undefined), undefined);
+  assert.equal(AppModule.findPendingSendByClientMessageId([], "uuid-fresh"), undefined);
+});
+
 test("pending send does not buffer the previous turn events", () => {
   const holdSource = earlyEventGate();
   const runningGuardAt = holdSource.indexOf(
@@ -1904,8 +2104,8 @@ test("the sent message is unstarted until the started response clears it", () =>
   const body = functionBody("async function send(", "async function stopTurn(");
   assert.match(
     body,
-    /const userMsg: ChatItem = \{ id: allocId\(\), kind: "user", text, notStarted: true \};/,
-    "the just-inserted message carries the unstarted marker before the response",
+    /const userMsg: ChatItem = \{ id: allocId\(\), kind: "user", text, clientMessageId, notStarted: true \};/,
+    "the just-inserted message carries the unstarted marker and the generated turn anchor before the response",
   );
   const gate = blockAfter(body, "if (sendOpensTurn(sent)) {").body;
   assert.match(gate, /startUserItem\(item\)/, "only the started response clears the marker");
@@ -2366,4 +2566,361 @@ test("the success card's go-to-mine action selects the Mine tab without stopping
   assert.match(body, /setView\("skills"\)/);
   assert.doesNotMatch(body, /session\.cancel|stopTurn|setChatTabs/);
   assert.match(APP_SOURCE, /initialTab=\{skillsInitialTab\}/);
+});
+
+test("Q4-I1: a live todo update after multi-snapshot history restore updates the latest snapshot and round gate", () => {
+  const history = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "分步执行", clientMessageId: "uuid-1" },
+    { kind: "tool-call", time: 2, name: "todo_write", callId: "t1", roundKey: 6, clientMessageId: "uuid-1", todos: [{ content: "步骤一", status: "in_progress" }] },
+    { kind: "tool-result", time: 3, callId: "t1", isError: false, text: "updated" },
+    { kind: "tool-call", time: 4, name: "todo_write", callId: "t2", roundKey: 10, clientMessageId: "uuid-1", todos: [{ content: "步骤一", status: "in_progress" }] },
+    { kind: "tool-result", time: 5, callId: "t2", isError: false, text: "updated" },
+  ]);
+  let seq = 1;
+  const alloc = () => seq++;
+  let items: Parameters<typeof AppModule.upsertTodoItem>[0] = history.map((entry) => {
+    if (entry.kind === "user") return { id: alloc(), kind: "user", text: entry.text, clientMessageId: entry.clientMessageId };
+    if (entry.kind === "todo") return { id: alloc(), kind: "todo", todos: entry.todos, roundKey: entry.roundKey, clientMessageId: entry.clientMessageId };
+    return { id: alloc(), kind: "note", text: entry.kind };
+  });
+  const turnFinalByUserId = historicalTurnFinalByUserId(items);
+  const turnStart = currentTurnStart(items);
+  assert.equal(currentSnapshotRoundKey(items, turnStart), 10);
+
+  const liveUpdate = { clientMessageId: "uuid-1", roundKey: 20, todos: [{ content: "步骤一", status: "completed" as const }] };
+  assert.equal(shouldApplyTodoEvent(items, turnStart, liveUpdate, currentSnapshotRoundKey(items, turnStart)), true);
+  items = AppModule.upsertTodoItem(items, liveUpdate.todos, alloc, liveUpdate.roundKey, liveUpdate.clientMessageId);
+
+  const userItem = items.find((item) => item.kind === "user");
+  const model = selectProgressPanelModel({
+    sessionId: "s1",
+    items,
+    toolRows: [],
+    currentTurnClientMessageId: "uuid-1",
+    turnFinal: userItem ? turnFinalByUserId[userItem.id] === true : false,
+    subagents: [],
+    sidecarDead: false,
+    ready: true,
+    sawReady: true,
+    subagentConnection: "live",
+  });
+  assert.deepEqual(model.tasks, [{ content: "步骤一", sourceStatus: "completed", displayStatus: "completed" }]);
+  assert.equal(model.completedCount, 1);
+  assert.equal(currentSnapshotRoundKey(items, turnStart), 20);
+  assert.equal(
+    shouldApplyTodoEvent(items, turnStart, { clientMessageId: "uuid-1", roundKey: 15 }, currentSnapshotRoundKey(items, turnStart)),
+    false,
+    "the updated roundKey threshold rejects older late events",
+  );
+});
+
+test("Q4-I3: early ordinary tool start and paired end for the pending send buffer until turn start and appear in activity", () => {
+  const holdSource = earlyEventGate();
+  const goalCheckAt = holdSource.indexOf("if (!isGoalEvent) return false;");
+  const toolStartAt = holdSource.indexOf('if (incoming.event === "tool/start") {');
+  const toolEndAt = holdSource.indexOf('if (incoming.event === "tool/end") {');
+  assert.ok(toolStartAt >= 0 && toolStartAt < goalCheckAt, "ordinary tool/start is checked before isGoalEvent");
+  assert.ok(toolEndAt > toolStartAt && toolEndAt < goalCheckAt, "paired tool/end is checked before isGoalEvent");
+
+  const pending = {
+    tabId: "t1",
+    userId: 3,
+    clientMessageId: "uuid-b",
+    sessionId: "s1",
+    buffered: [] as RpcEvent[],
+  };
+  const oldStart: RpcEvent = { event: "tool/start", name: "grep", callId: "call-old", sessionId: "s1", clientMessageId: "uuid-a", roundKey: 2 };
+  const oldEnd: RpcEvent = { event: "tool/end", name: "grep", callId: "call-old", sessionId: "s1", text: "ok" };
+  const earlyStart: RpcEvent = { event: "tool/start", name: "read", callId: "call-b1", sessionId: "s1", clientMessageId: "uuid-b", roundKey: 5 };
+  const earlyEnd: RpcEvent = { event: "tool/end", name: "read", callId: "call-b1", sessionId: "s1", text: "readme" };
+
+  assert.equal(AppModule.findPendingSendByClientMessageId([pending], oldStart.clientMessageId), undefined);
+  assert.equal(findPendingForToolEnd([pending], oldEnd), undefined);
+
+  assert.equal(AppModule.findPendingSendByClientMessageId([pending], earlyStart.clientMessageId), pending);
+  pending.buffered.push(earlyStart);
+  assert.equal(findPendingForToolEnd([pending], oldEnd), undefined, "previous-turn tool/end stays unbuffered");
+  assert.equal(findPendingForToolEnd([pending], earlyEnd), pending, "paired early tool/end matches the buffered start");
+  pending.buffered.push(earlyEnd);
+
+  const replayed = takeEarlyPendingEvents({ waiting: false, started: true }, pending.buffered, "uuid-b", () => false);
+  assert.deepEqual(replayed, [earlyStart, earlyEnd]);
+
+  let seq = 10;
+  const alloc = () => seq++;
+  let items: Parameters<typeof AppModule.insertTurnItem>[0] = [
+    { id: 1, kind: "user", text: "回合 A", clientMessageId: "uuid-a" },
+    { id: 2, kind: "assistant", text: "A 结论", roundKey: 2 },
+    AppModule.startUserItem({ id: 3, kind: "user" as const, text: "回合 B", clientMessageId: "uuid-b", notStarted: true }),
+  ];
+  for (const ev of replayed) {
+    AppModule.handleEvent(
+      ev,
+      alloc,
+      () => undefined,
+      (updater) => { items = updater(items); },
+      () => undefined,
+      () => undefined,
+      async () => undefined,
+      { current: true },
+      false,
+      false,
+      false,
+    );
+  }
+  const toolRows = projectToolPanels(items, { contentItems: items, turnFinalByUserId: { 1: true }, connectionLost: false });
+  const model = selectProgressPanelModel({
+    sessionId: "s1",
+    items,
+    toolRows,
+    currentTurnClientMessageId: "uuid-b",
+    turnFinal: false,
+    subagents: [],
+    sidecarDead: false,
+    ready: true,
+    sawReady: true,
+    subagentConnection: "live",
+  });
+  assert.equal(model.activity.length, 1);
+  assert.equal(model.activity[0]?.tools[0]?.name, "read");
+  assert.equal(model.activity[0]?.tools[0]?.status, "done");
+});
+
+test("Q4-I4: a delayed waiting response replays session/end and goal events after its queue-start", () => {
+  const controlOf = (event: RpcEvent) => (
+    (event.event === "session/queue-start" || event.event === "session/queue-fail") && event.queueItemId === "qb"
+  );
+  const oldEnd: RpcEvent = { event: "session/end", sessionId: "s1", ok: true };
+  const queueStart: RpcEvent = { event: "session/queue-start", sessionId: "s1", tabId: "t1", queueItemId: "qb" };
+  const todoEvent: RpcEvent = {
+    event: "tool/start",
+    name: "todo_write",
+    clientMessageId: "uuid-b",
+    roundKey: 5,
+    sessionId: "s1",
+    todos: [{ content: "等待测试", status: "in_progress" }],
+  };
+  const toolStart: RpcEvent = { event: "tool/start", name: "read", callId: "c1", clientMessageId: "uuid-b", roundKey: 5, sessionId: "s1" };
+  const toolEnd: RpcEvent = { event: "tool/end", name: "read", callId: "c1", sessionId: "s1", text: "ok" };
+  const goalRound: RpcEvent = { event: "goal/round", round: 1, sessionId: "s1" };
+  const turnEnd: RpcEvent = { event: "session/end", sessionId: "s1", ok: true };
+  const foreignEnd: RpcEvent = { event: "session/end", sessionId: "s-other", ok: true };
+
+  const replayed = takeEarlyPendingEvents(
+    { waiting: true, started: false, queueItemId: "qb" },
+    [oldEnd, queueStart, todoEvent, toolStart, toolEnd, goalRound, foreignEnd, turnEnd],
+    "uuid-b",
+    controlOf,
+  );
+  assert.deepEqual(
+    replayed,
+    [queueStart, todoEvent, toolStart, toolEnd, goalRound, turnEnd],
+    "only events inside this queue-start execution window for the same session replay in order",
+  );
+
+  // 端到端闭环：queue-start → todo_write → session/end 重放后，回合正常终结，未完成 todo 叠加为 interrupted。
+  let items: Parameters<typeof AppModule.insertTurnItem>[0] = [
+    AppModule.startUserItem({ id: 3, kind: "user" as const, text: "排队 B", clientMessageId: "uuid-b", queueItemId: "qb", notStarted: true }),
+  ];
+  let running = true;
+  let tabs = [{ id: "t1", items, turnFinalByUserId: {} as Record<number, boolean>, turnFinalWithoutUser: false }];
+  let seq = 10;
+  for (const ev of [todoEvent, turnEnd]) {
+    AppModule.handleEvent(
+      ev,
+      () => seq++,
+      () => undefined,
+      (updater) => { items = updater(items); tabs = [{ ...tabs[0]!, items }]; },
+      (active) => { running = active; },
+      () => undefined,
+      async () => undefined,
+      { current: true },
+      true,
+      false,
+      false,
+    );
+    if (ev.event === "session/end") {
+      tabs = applyTurnFinalToTabs(tabs, "t1", { kind: "session-end", ok: ev.ok, cancelled: ev.cancelled === true }, undefined, 3);
+    }
+  }
+  assert.equal(running, false);
+  const model = selectProgressPanelModel({
+    sessionId: "s1",
+    items: tabs[0]!.items,
+    toolRows: [],
+    currentTurnClientMessageId: "uuid-b",
+    turnFinal: tabs[0]!.turnFinalByUserId[3] === true,
+    subagents: [],
+    sidecarDead: false,
+    ready: true,
+    sawReady: true,
+    subagentConnection: "live",
+  });
+  assert.equal(model.tasks[0]?.displayStatus, "interrupted");
+});
+
+test("buffers goal/state and session/end for a queued turn started while goalIntermediate kept running true", () => {
+  // 源码接线钉:pending 缓冲里已有同会话 queue-start 时,跳过 running-turn 守卫继续暂存终态/goal 事件;
+  // 尚未收到 queue-start 时两条 running-turn 守卫仍然照常放行上一回合事件。
+  const holdSource = earlyEventGate();
+  const helperCallAt = holdSource.indexOf(
+    "const pendingQueuedStarted = hasBufferedQueueStartForSession(pending.buffered, sessionId);",
+  );
+  const guardWrapAt = holdSource.indexOf("if (!pendingQueuedStarted) {");
+  const sameTabGuardAt = holdSource.indexOf(
+    "if (tabRunOf(pending.tabId).running && tabTurnOf(pending.tabId).sessionId === sessionId) return false;",
+  );
+  const crossTabGuardAt = holdSource.indexOf(
+    "if (turnTab !== undefined && tabRunOf(turnTab).running && tabTurnOf(turnTab).sessionId === sessionId) return false;",
+  );
+  const lastPushAt = holdSource.lastIndexOf("pending.buffered.push(incoming);");
+  assert.ok(helperCallAt >= 0, "holdEarlyEvent checks whether this pending send already buffered a queue-start");
+  assert.ok(guardWrapAt > helperCallAt, "running-turn guards are gated on !pendingQueuedStarted");
+  assert.ok(sameTabGuardAt > guardWrapAt && crossTabGuardAt > sameTabGuardAt && lastPushAt > crossTabGuardAt);
+
+  // 行为:未收到 queue-start 时为 false(不截流上一回合);收到同会话 queue-start 后为 true;他会话仍为 false。
+  const queueStart: RpcEvent = { event: "session/queue-start", sessionId: "s1", tabId: "t1", queueItemId: "qb" };
+  const otherQueueStart: RpcEvent = { event: "session/queue-start", sessionId: "s2", tabId: "t2", queueItemId: "qc" };
+  assert.equal(hasBufferedQueueStartForSession([], "s1"), false);
+  assert.equal(hasBufferedQueueStartForSession([otherQueueStart], "s1"), false);
+  assert.equal(hasBufferedQueueStartForSession([queueStart], "s1"), true);
+  assert.equal(hasBufferedQueueStartForSession([queueStart], undefined), false);
+
+  // 端到端:goalIntermediate 让前端仍 running === true,排队 B 的 queue-start/todo/goal-state/end
+  // 在 waiting 应答前陆续到达并留在缓冲中;应答回来后按序重放,B 正常完成而非卡死 running。
+  const todoEvent: RpcEvent = {
+    event: "tool/start",
+    name: "todo_write",
+    clientMessageId: "uuid-b",
+    roundKey: 7,
+    sessionId: "s1",
+    todos: [{ content: "目标收尾", status: "completed" }],
+  };
+  const goalComplete: RpcEvent = {
+    event: "goal/state",
+    sessionId: "s1",
+    phase: "complete",
+  };
+  const turnEnd: RpcEvent = { event: "session/end", sessionId: "s1", ok: true };
+  const buffered: RpcEvent[] = [queueStart, todoEvent, goalComplete, turnEnd];
+  const controlOf = (event: RpcEvent) => (
+    (event.event === "session/queue-start" || event.event === "session/queue-fail") && event.queueItemId === "qb"
+  );
+  const replayed = takeEarlyPendingEvents(
+    { waiting: true, started: false, queueItemId: "qb" },
+    buffered,
+    "uuid-b",
+    controlOf,
+  );
+  assert.deepEqual(replayed, [queueStart, todoEvent, goalComplete, turnEnd]);
+});
+
+test("Q4-R2-02: upsertTodoItem cross-step update preserves same-round tool panel grouping, toggle, and stale-event rejection", () => {
+  // 实时路径:单 step 顺序 A(10) → todo(10) → B(10),随后 step 2 发合法 todo(20)。
+  let seq = 1;
+  const alloc = () => seq++;
+  let items: Parameters<typeof AppModule.upsertTodoItem>[0] = [
+    { id: alloc(), kind: "user", text: "分步执行", clientMessageId: "uuid-1" },
+    { id: alloc(), kind: "tool", card: { key: "c1", name: "read", callId: "c1", status: "end", roundKey: 10 } },
+    { id: alloc(), kind: "todo", todos: [{ content: "步骤一", status: "in_progress" }], roundKey: 10, clientMessageId: "uuid-1" },
+    { id: alloc(), kind: "tool", card: { key: "c2", name: "grep", callId: "c2", status: "end", roundKey: 10 } },
+  ];
+  items = withToolPanelToggle(items, 2, "expand").slice();
+  const project = (list: typeof items, final: boolean) => {
+    const toolRows = projectToolPanels(list, {
+      contentItems: list,
+      turnFinalByUserId: final ? { 1: true } : undefined,
+      connectionLost: false,
+    });
+    const model = selectProgressPanelModel({
+      sessionId: "s1",
+      items: list,
+      toolRows,
+      currentTurnClientMessageId: "uuid-1",
+      turnFinal: final,
+      subagents: [],
+      sidecarDead: false,
+      ready: true,
+      sawReady: true,
+      subagentConnection: "live",
+    });
+    return {
+      mainPanels: toolRows.filter((row) => row.kind === "panel").map((row) => row.panel),
+      railPanels: model.activity,
+      model,
+    };
+  };
+
+  const before = project(items, true);
+  assert.equal(before.mainPanels.length, 1);
+  assert.equal(before.mainPanels[0]?.anchorId, 2);
+  assert.equal(before.mainPanels[0]?.count, 2);
+  assert.equal(before.mainPanels[0]?.expanded, true);
+
+  const turnStart = currentTurnStart(items);
+  const update = { clientMessageId: "uuid-1", roundKey: 20, todos: [{ content: "步骤一", status: "completed" as const }] };
+  assert.equal(shouldApplyTodoEvent(items, turnStart, update, currentSnapshotRoundKey(items, turnStart)), true);
+  items = AppModule.upsertTodoItem(items, update.todos, alloc, update.roundKey, update.clientMessageId);
+
+  const after = project(items, true);
+  assert.equal(after.mainPanels.length, 1, "cross-step todo update must not split the step-1 tool panel");
+  assert.equal(after.mainPanels[0]?.anchorId, 2);
+  assert.equal(after.mainPanels[0]?.count, 2);
+  assert.equal(after.mainPanels[0]?.expanded, true, "manual expand toggle on anchor 2 is preserved");
+  assert.deepEqual(after.mainPanels[0]?.tools.map((entry) => entry.name), ["read", "grep"]);
+  assert.equal(after.railPanels.length, 1);
+  assert.equal(after.railPanels[0]?.anchorId, 2);
+  assert.equal(after.model.completedCount, 1);
+  assert.equal(currentSnapshotRoundKey(items, turnStart), 20);
+  assert.equal(
+    shouldApplyTodoEvent(items, turnStart, { clientMessageId: "uuid-1", roundKey: 15 }, currentSnapshotRoundKey(items, turnStart)),
+    false,
+    "older todo events remain rejected after updating the snapshot roundKey",
+  );
+
+  // 历史恢复后续写路径:历史包含 [tool A(10), todo(10), tool B(10)],恢复后收到实时 todo(20)。
+  const history = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "历史续写", clientMessageId: "uuid-h" },
+    { kind: "tool-call", time: 2, name: "read", callId: "h1", roundKey: 10 },
+    { kind: "tool-result", time: 3, callId: "h1", isError: false, text: "ok" },
+    { kind: "tool-call", time: 4, name: "todo_write", callId: "ht1", roundKey: 10, clientMessageId: "uuid-h", todos: [{ content: "历史步", status: "in_progress" }] },
+    { kind: "tool-result", time: 5, callId: "ht1", isError: false, text: "updated" },
+    { kind: "tool-call", time: 6, name: "grep", callId: "h2", roundKey: 10 },
+    { kind: "tool-result", time: 7, callId: "h2", isError: false, text: "ok" },
+  ]);
+  let hSeq = 1;
+  const hAlloc = () => hSeq++;
+  let hItems: Parameters<typeof AppModule.upsertTodoItem>[0] = history.map((entry) => {
+    if (entry.kind === "user") return { id: hAlloc(), kind: "user", text: entry.text, clientMessageId: entry.clientMessageId };
+    if (entry.kind === "todo") return { id: hAlloc(), kind: "todo", todos: entry.todos, roundKey: entry.roundKey, clientMessageId: entry.clientMessageId };
+    if (entry.kind === "tool") {
+      const id = hAlloc();
+      return {
+        id,
+        kind: "tool",
+        card: {
+          key: entry.callId ?? `${entry.name}-${id}`,
+          name: entry.name,
+          ...(entry.callId === undefined ? {} : { callId: entry.callId }),
+          status: "end",
+          ...(entry.roundKey === undefined ? {} : { roundKey: entry.roundKey }),
+        },
+      };
+    }
+    return { id: hAlloc(), kind: "note", text: entry.kind };
+  });
+  const hTurnStart = currentTurnStart(hItems);
+  hItems = AppModule.upsertTodoItem(hItems, [{ content: "历史步", status: "completed" }], hAlloc, 20, "uuid-h");
+  const hPanels = projectToolPanels(hItems, {
+    contentItems: hItems,
+    turnFinalByUserId: historicalTurnFinalByUserId(hItems),
+    connectionLost: false,
+  }).filter((row) => row.kind === "panel");
+  assert.equal(hPanels.length, 1, "live todo update after history restore keeps historical step-10 tools in one panel");
+  assert.deepEqual(hPanels[0]?.panel.tools.map((entry) => entry.name), ["read", "grep"]);
+  assert.equal(currentSnapshotRoundKey(hItems, hTurnStart), 20);
+  assert.equal(
+    shouldApplyTodoEvent(hItems, hTurnStart, { clientMessageId: "uuid-h", roundKey: 15 }, currentSnapshotRoundKey(hItems, hTurnStart)),
+    false,
+  );
 });

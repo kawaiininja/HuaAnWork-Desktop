@@ -58,9 +58,13 @@ export function toolPanelCard(item: ToolPanelItem): ToolPanelCard | undefined {
   return item.card as ToolPanelCard;
 }
 
-/** 轮次身份 = governing step/start 的日志 seq；tool 条目记在卡上，其余记在条目上。 */
+/**
+ * 布局轮次身份 = governing `step/start` 的日志 seq；tool 条目记在卡上，其余记在条目上。
+ * `todo` 是跨 step 原地更新的回合快照，其 `roundKey` 只用于待办迟到事件守卫，不能作为工具面板布局边界。
+ */
 export function roundKeyOf(item: ToolPanelItem): number | undefined {
   if (item.kind === "tool") return toolPanelCard(item)?.roundKey;
+  if (item.kind === "todo") return undefined;
   return item.roundKey;
 }
 
@@ -331,6 +335,8 @@ export type ToolEntryView = {
   id: number;
   key: string;
   name: string;
+  callId?: string;
+  roundKey?: number;
   description: string;
   status: ToolEntryStatus;
   statusText: string;
@@ -410,6 +416,8 @@ function toolEntryView(id: number, card: ToolPanelCard, connectionLost: boolean)
     id,
     key: card.key,
     name: card.name,
+    ...(card.callId === undefined ? {} : { callId: card.callId }),
+    ...(card.roundKey === undefined ? {} : { roundKey: card.roundKey }),
     description: toolDescription(card.name),
     status,
     statusText: STATUS_TEXT[status],
