@@ -4,14 +4,14 @@
 - 规格：`docs/superpowers/specs/2026-11-15-task-progress-sidebar-design.md`
 - 计划：`docs/superpowers/plans/2026-11-15-progress-sidebar.md`
 - 评审：`docs/superpowers/plans/2026-11-15-implementation-plans-review.md`（§16–§18 计划层闭环 0 Critical / 0 Important / 0 Minor）
-- 代码评审：[docs/superpowers/plans/2026-11-18-progress-sidebar-code-review.md](../superpowers/plans/2026-11-18-progress-sidebar-code-review.md)（首轮 0 Critical / 3 Important / 4 Minor 修复于 `2cfe785f3a` + `dd6e837e60`；`qwen4` 复审 §7–§8 与合并前终审 §9 修复于 `fc0c217cdd` + `6d06da3498`；Grok 复核 §10 与真机走查判据加固修复于 `4f1052cebc` + `a3a125a893` + `a02bad496e`，并在最终提交上完成真机 CDP 7/7 闭环，见 §2.7/§4）
+- 代码评审：[docs/superpowers/plans/2026-11-18-progress-sidebar-code-review.md](../superpowers/plans/2026-11-18-progress-sidebar-code-review.md)（首轮 0 Critical / 3 Important / 4 Minor 修复于 `2cfe785f3a` + `dd6e837e60`；`qwen4` 复审 §7–§8 与合并前终审 §9 修复于 `fc0c217cdd` + `6d06da3498`；Grok 复核 §10 与判据加固修复于 `4f1052cebc` + `a3a125a893` + `a02bad496e`；`qwen4` 二轮复核 §11 全部 5 项修复于 `9e60b66251` 并在最终提交上完成加强版真机 CDP 7/7 闭环，见 §2.8/§4）
 - 环境：macOS darwin 27.0.0 / arm64；验收进程 Node v22.23.2；Electron 44.0.0；桌面 0.1.8；DSH 0.2.1-rc.1；harness pin `1600d8a1e140dcde43a1a0941940a0480712c011`；zstd 1.5.7
 
 ## 0. 状态声明
 
 - 规格 §14.2 / 计划 Task 5 Step 7 的七项 agent 真机走查自动化测试**已实际执行**：工作区构建 Electron（`lib/main.js`）、隔离临时 `DSH_HOME` + `--user-data-dir` + `--remote-debugging-port` + `HUAANWORK_ACCEPTANCE_HOOKS=1`；模型配置从本机 `~/.huaanwork/profiles/desktop/huaanwork-settings.json` 只读复制（`api_key` 未打印、未入库），隔离根退出时删除。
-- **最终结果：exit `0`（PASS），7/7 通过（最终权威运行为 2026-11-19 合并前全量补跑，构建与运行基于干净提交 `a02bad496edf7b74e53fd510cd83332c28167d8f`，产品源码提交 `4f1052cebcce09baea373f41c2fc918d111c6763`，见 §2.7/§4）。** 验收用的模型条目在隔离 profile 中固定为 `deepseek-chat`（§2 说明）。
-- 单元测试、类型检查与根门禁（§1/§2.6/§2.7）均通过，且与真机结果一致。
+- **最终结果：exit `0`（PASS），7/7 通过（最终权威运行为 2026-11-19 `qwen4` 二轮全量闭环补跑，构建与运行基于干净提交 `9e60b66251961396a5f96c56691841feeaa72aaf`，见 §2.8/§4）。** 验收用的模型条目在隔离 profile 中固定为 `deepseek-chat`（§2 说明）。
+- 单元测试、类型检查与根门禁（§1/§2.6/§2.7/§2.8）均通过，且与真机结果一致。
 
 ## 1. 自动化门禁（实际执行）
 
@@ -53,65 +53,97 @@
    - **走查脚本实测暴露的 3 处脚本侧缺陷修复（`a3a125a893` + `a02bad496e`）**：`turnFacts` 向前回溯 `user/message` 前的本回合 `step/start` 以正确还原 Step 1 `roundKey`；`todoCardTurns` 改为按真实用户回合计数（不再把 `subagent-settled` 内部唤醒递增的 `event.data.turn` 误算为额外待办卡回合）；`driveDualEntrySystemSkills` 重试保留原入口前缀（`/${skill}` 或 `skill` 工具指令）与逐入口唯一 marker。
 2. **最终权威真机复跑（`headSha: a02bad496edf7b74e53fd510cd83332c28167d8f`，产品源码 `4f1052cebc`）**：`corepack yarn workspace dsh-plugin-huaanwork build` exit `0`；真实 Electron CDP 走查 `--out /tmp/progress-sidebar-accept-final-premerge-r3` exit `0`（`verdict PASS`，7/7 全通过，`errors: []`，`isolatedCleanup: "removed"`）；判据单测 `huaanwork-host-progress-sidebar-acceptance.spec.mjs` 24/24 pass。
 
+## 2.8 2026-11-19 `qwen4` 二轮五项意见全量修复与最终权威真机复跑
+
+1. **修复内容（`9e60b66251`）**：按 [代码评审 §11–§12](../superpowers/plans/2026-11-18-progress-sidebar-code-review.md) 完成全部 2 项 Important + 3 项 Minor 收口：
+   - **产品修复**：[toolPanel.ts](../../dsh-plugin-huaanwork/src/client-huaanwork/logic/toolPanel.ts) 的 `roundKeyOf` 忽略跨 step 原地更新的 `todo` 快照 `roundKey`，避免同轮工具面板被拆盘或反转 `roundHasVisibleAssistant` / `isLastRound`（`Q4-R2-02`）；[skills.ts](../../dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts) 新增 `withSystemSkillAbortSignal`，仅为 `system-skill` 将定向取消信号与调用方 `spec.signal` 经 `AbortSignal.any` 合并并保留符号字段，不改写 legacy/package（`Q4-R2-01`）；[ToolPanel.tsx](../../dsh-plugin-huaanwork/src/client-huaanwork/ToolPanel.tsx) 为 `<section class="tool-panel">` 补充只读 `data-anchor-id` 与 `data-tool-count` 属性（`Q4-R2-05`）。
+   - **走查判据加固**：[huaanwork-accept-progress-sidebar.mjs](../../dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs) 新增导出纯函数 `classifyLaneOutcome`（强要求每条 depth-2 lane 存在权威 `turn/end` 且全部 `reason.kind === 'completed'`、无异常 settlement，阻断 `aborted`/`blocked`/缺终因假通过，`Q4-R2-03`）、`inspectEffectiveTurnHeaderTools`（含继承态独立核验 `PSB-MID1`/`PSB-MID2` 普通回合未暴露 `subagent`，`Q4-R2-04`）、`inspectMainToolUniqueness` + `findDuplicateCallIds` + 审计前展开全部主流工具面板（覆盖折叠面板、重复 `anchorId`、面板内重复 `callId` 与本场景 `subagent` 调用核对，`Q4-R2-05`）。
+2. **全量门禁与最终权威真机复跑（`headSha: 9e60b66251961396a5f96c56691841feeaa72aaf`）**：
+   - `@huaanwork/policy check`：65 pass / 0 fail / 2 skipped（exit `0`）；
+   - `dsh-plugin-huaanwork typecheck`：0 错误（exit `0`）；
+   - `dsh-plugin-huaanwork build`：exit `0`（`libMainMtime > newestSourceMtime`）；
+   - `huaanwork-host-progress-sidebar-acceptance.spec.mjs`：27/27 pass（exit `0`）；
+   - `verify:host`：62/62 pass（exit `0`）；
+   - `corepack yarn check`：exit `0`（含 `dsh-plugin-huaanwork` Vitest 304 passed / 4 skipped (308) 文件、4380 passed / 15 skipped (4395) 用例，全 workspace 0 fail）；
+   - 真实 Electron CDP 走查 `--out /tmp/progress-sidebar-accept-q4r2`：exit `0`（`verdict PASS`，7/7 全通过，`errors: []`，`isolatedCleanup: "removed"`）。
+
 ## 3. 走查命令与退出码
 
-最终权威运行（2026-11-19 合并前最终提交 `a02bad496e`，产品代码 `4f1052cebc`）：
+最终权威运行（2026-11-19 `qwen4` 二轮全量闭环提交 `9e60b66251`）：
 
 ```bash
 corepack yarn workspace dsh-plugin-huaanwork build
-corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-progress-sidebar.mjs --out /tmp/progress-sidebar-accept-final-premerge-r3
-# exit 0 (PASS), 7/7, headSha=a02bad496edf7b74e53fd510cd83332c28167d8f, isolatedCleanup="removed"
+corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-progress-sidebar.mjs --out /tmp/progress-sidebar-accept-q4r2
+# exit 0 (PASS), 7/7, headSha=9e60b66251961396a5f96c56691841feeaa72aaf, isolatedCleanup="removed"
 ```
 
-此前记录：F1/F2 修复轮（11-17 ~ 11-18 午前）`--out /tmp/progress-sidebar-accept-final` exit 0（PASS）；首轮代码评审修复 `--out /tmp/progress-sidebar-accept-rerun2` exit 0（PASS）；`qwen4` 评审修复轮 `--out /tmp/progress-sidebar-accept-qwen4-r2` exit 0（PASS）。
+此前记录：F1/F2 修复轮（11-17 ~ 11-18 午前）`--out /tmp/progress-sidebar-accept-final` exit 0（PASS）；首轮代码评审修复 `--out /tmp/progress-sidebar-accept-rerun2` exit 0（PASS）；`qwen4` 一轮修复 `--out /tmp/progress-sidebar-accept-qwen4-r2` exit 0（PASS）；Grok 复核补跑 `--out /tmp/progress-sidebar-accept-final-premerge-r3`（`a02bad496e`）exit 0（PASS）。
 
 脚本返回码约定：`0` PASS / `1` FAIL / `3` BLOCKED。截图、DOM 快照与事实 JSON 备份在仓库外（§6），仓库仅提交脚本、判据单测与本脱敏文档。
 
 ## 4. 七项结果（最终全量运行，facts 摘要）
 
-> 下表为 **2026-11-19 合并前最终权威运行**（`headSha: a02bad496edf7b74e53fd510cd83332c28167d8f`，产品源码 `4f1052cebc`）。
+> 下表为 **2026-11-19 `qwen4` 二轮全量闭环最终权威运行**（`headSha: 9e60b66251961396a5f96c56691841feeaa72aaf`）。
 
 | # | 场景 | 判据 | 结果 |
 | --- | --- | --- | --- |
 | 1 | 复杂任务进度 | 4 个 Task、顶部 `已完成 4/4`、当前项高亮、主流待办卡唯一、日志含 4 次 `todo_write` | ✅ |
-| 2 | 活动无虚构百分比 | 57 采样：单步无百分比文本/进度条（`taskProgressBarCount=0`）、总进度条恰一枚且与 `X/Y` 互锁（`totalBarMatchesCount=true`）、`activityAnchor === expectedTurnAnchor`（`fbd2acf5-...`）、10 条活动条目（含 Step 1 `roundKey=6`）与回合日志 `{ name, callId, roundKey }` 逐项对齐、`foreignActivityCalls=[]` | ✅ |
+| 2 | 活动无虚构百分比 | 45 采样：单步无百分比文本/进度条（`taskProgressBarCount=0`）、总进度条恰一枚且与 `X/Y` 互锁（`totalBarMatchesCount=true`）、`activityAnchor === expectedTurnAnchor`（`2731bca5-...`）、5 条活动条目（含 Step 1 `roundKey=6`）与回合日志 `{ name, callId, roundKey }` 逐项对齐、`foreignActivityCalls=[]`、`duplicateActivityCallIds=[]`、`activityCallsUnique=true` | ✅ |
 | 3 | 普通父会话不可自主派发 | 普通回合 `request/header` 无 `subagent`；本地 catalog 遗留 `@legacy-reviewer`（`kind="legacy"`）与包 `@typo-check` 均独立出卡且定向取消收敛 | ✅ |
-| 4 | explore/test-fix 双入口双技能 | 独立暖场 `PSB-DUAL-WARM` 与 `PSB-MID1`/`PSB-MID2` 隔离开关窗；3 入口均一次命中（无重试）并记录 `runKind="system-skill"`、`anchorMatched=true`、`headerHasSubagent=true`、`model-skill` 调用 `skill("explore")`；显式 `/explore` 与 `/test-fix` 定向取消收敛；`PSB-AFTER` 后 `subagent` 收回 | ✅ |
-| 5 | 包 lane 深度 2 | 外层包 `@typo-check`（`01:01`）`completed`；身份链 1 个 child（depth 1）+ 2 条 lane（depth 2，正文 388/394 字）；右栏 lane 行数 0；`MutationObserver` 捕获外层摘要工具 `["bash","glob","subagent"]` ⊆ `outerChildToolNames`，lane 独有工具 `["grep"]` 无泄漏（`laneOnlyLeakedTools=[]`） | ✅ |
-| 6 | 切换/重连/历史/Host 重启 | 新标签空任务；切回 4 tasks；同会话新普通回合 0 tasks；重载历史 4 tasks；断连/重连横幅出现；Host 重启旧 pid `96576` → 新 pid `98514`、同 canary、2 张 stale 卡呈 `状态不可恢复 · Host 已重启，结果未确认`、终止禁用、耗时冻结 `00:01` | ✅ |
-| 7 | 兄弟并发与单次取消隔离 | 两个并发 `system-skill` explore 运行；点击时预绑定目标 `runId` (`44c55037-...`)，结算后全窗口仅 1 条命中的 `subagent.cancel`；目标 `stopped`、兄弟 `completed` 且 settlement 送达；`mainCardCounts` 与 `railCardCounts` 均为 `{ target: 1, sibling: 1 }`、`perRunCardUnique=true`、7 面板 ID 唯一、`todoCardCount=1`（`todoWritingTurns=1`） | ✅ |
+| 4 | explore/test-fix 双入口双技能 | 独立暖场 `PSB-DUAL-WARM` 与 `PSB-MID1`/`PSB-MID2` 隔离开关窗；3 入口均一次命中（无重试）并记录 `runKind="system-skill"`、`anchorMatched=true`、`headerHasSubagent=true`、`model-skill` 调用 `skill("explore")`；**`PSB-MID1`（`seq 46..57`）与 `PSB-MID2`（`seq 80..99`）逐回合独立核验 `hasSubagent=false`**；显式 `/explore` 与 `/test-fix` 定向取消收敛；`PSB-AFTER` 后 `subagent` 收回 | ✅ |
+| 5 | 包 lane 深度 2 | 外层包 `@typo-check`（`00:38`）`completed`；身份链 1 个 child（depth 1）+ 2 条 lane（depth 2，正文 399/420 字），**两条 lane 均记录权威 `turnEndKind="completed"`、`turnEndKinds=["completed"]`、`settlementAbnormal=false`**；右栏 lane 行数 0；`MutationObserver` 捕获外层摘要工具 `["bash","glob","subagent"]` ⊆ `outerChildToolNames`，lane 独有工具 `["grep","read"]` 无泄漏（`laneOnlyLeakedTools=[]`） | ✅ |
+| 6 | 切换/重连/历史/Host 重启 | 新标签空任务；切回 4 tasks；同会话新普通回合 0 tasks；重载历史 4 tasks；断连/重连横幅出现；Host 重启旧 pid `25516` → 新 pid `26873`、同 canary、2 张 stale 卡呈 `状态不可恢复 · Host 已重启，结果未确认`、终止禁用、耗时冻结 `00:01` | ✅ |
+| 7 | 兄弟并发与单次取消隔离 | 两个并发 `system-skill` explore 运行；点击时预绑定目标 `runId` (`aecb6cc6-...`)，结算后全窗口仅 1 条命中的 `subagent.cancel`；目标 `stopped`、兄弟 `completed` 且 settlement 送达；`mainCardCounts` 与 `railCardCounts` 均为 `{ target: 1, sibling: 1 }`、`perRunCardUnique=true`；**展开全部 6 个主流工具面板（含本场景面板），`unexpandedMainToolPanelCount=0`、`mainToolCallEntryCount=9`、`duplicateMainAnchorIds=[]`、`duplicateMainCallIds=[]`、`missingSiblingToolCallIds=[]`、`mainToolPanelsUnique=true`、`mainToolCallsUnique=true`**、`todoCardCount=1`（`todoWritingTurns=1`） | ✅ |
 
-### 4.1 证据摘录（最终全量运行，2026-11-19 `a02bad496e`）
+### 4.1 证据摘录（最终全量运行，2026-11-19 `9e60b66251`）
 
-**双入口三阶段 `request/header.tools`**
+**双入口三阶段与中间普通回合 `request/header.tools`（场景 4）**
 
 ```json
 {
-  "beforeHasSubagent": false,
-  "duringHasSubagent": true,
-  "afterHasSubagent": false,
-  "added": ["subagent"],
-  "removed": ["subagent"]
+  "phaseComparison": {
+    "beforeHasSubagent": false,
+    "duringHasSubagent": true,
+    "afterHasSubagent": false,
+    "added": ["subagent"],
+    "removed": ["subagent"]
+  },
+  "intermediateOrdinaryTurns": [
+    { "marker": "PSB-MID1", "startSeq": 46, "endSeq": 57, "replied": true, "inherited": false, "snapshotCount": 1, "hasSubagent": false },
+    { "marker": "PSB-MID2", "startSeq": 80, "endSeq": 99, "replied": true, "inherited": false, "snapshotCount": 1, "hasSubagent": false }
+  ]
 }
 ```
 
-**单次取消 RPC（场景 7）**
+**包 lane 权威终因（场景 5）**
+
+```json
+[
+  { "id": "39a9222d-6b98-47d8-a001-4f61305f1710", "turnEndKind": "completed", "turnEndKinds": ["completed"], "finalTextLength": 399, "settlementDelivered": true, "settlementAbnormal": false, "isError": false },
+  { "id": "7a739cd4-7729-4fb9-a78b-a80129075731", "turnEndKind": "completed", "turnEndKinds": ["completed"], "finalTextLength": 420, "settlementDelivered": true, "settlementAbnormal": false, "isError": false }
+]
+```
+
+**单次取消 RPC 与全量主流工具唯一性（场景 7）**
 
 ```json
 {
-  "targetRunId": "44c55037-6a9d-40b5-9e17-627b2fd2f595",
+  "targetRunId": "aecb6cc6-7813-42e2-a490-f3637e2f4ac7",
   "cancelRpc": { "cancelRequestCount": 1, "targetRunIdCount": 1, "otherRunIdCount": 0,
-                 "runIds": ["44c55037-6a9d-40b5-9e17-627b2fd2f595"] },
+                 "runIds": ["aecb6cc6-7813-42e2-a490-f3637e2f4ac7"] },
   "cancelConverged": true, "siblingCompleted": true, "siblingSettlementSeen": true,
   "mainCardCounts": { "target": 1, "sibling": 1 }, "railCardCounts": { "target": 1, "sibling": 1 },
-  "perRunCardUnique": true, "mainToolPanelsUnique": true, "mainToolPanelCount": 7
+  "perRunCardUnique": true,
+  "mainToolPanelCount": 6, "mountedMainToolBodyCount": 6, "unexpandedMainToolPanelCount": 0,
+  "mainToolCallEntryCount": 9, "duplicateMainAnchorIds": [], "duplicateMainCallIds": [],
+  "missingSiblingToolCallIds": [], "mainToolPanelsUnique": true, "mainToolCallsUnique": true
 }
 ```
 
 **Host 重启接力（场景 6）**
 
 ```json
-{ "oldPid": 96576, "newPid": 98514, "sameDocument": true, "staleCardCount": 2, "asserted": true }
+{ "oldPid": 25516, "newPid": 26873, "sameDocument": true, "staleCardCount": 2, "asserted": true }
 ```
 
 **双入口 entries（场景 4）**
@@ -132,11 +164,11 @@ corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-
 
 ## 6. 证据备份与清理
 
-- 2026-11-19 合并前最终权威运行（`a02bad496e`）截图、`facts.json` 与 `walkthrough.log` 备份：`~/huaanwork-progress-sidebar-accept-evidence-2026-11-19-premerge/`（仓库外；不含密钥）；此前轮次在 `~/huaanwork-progress-sidebar-accept-evidence-2026-11-18-qwen4/`、`~/huaanwork-progress-sidebar-accept-evidence-2026-11-18-rerun/` 与 `~/huaanwork-progress-sidebar-accept-evidence-2026-11-18/`。
+- 2026-11-19 `qwen4` 二轮全量闭环最终权威运行（`9e60b66251`）截图、`facts.json` 与 `walkthrough.log` 备份：`~/huaanwork-progress-sidebar-accept-evidence-2026-11-19-q4r2/`（仓库外；不含密钥）；此前轮次在 `~/huaanwork-progress-sidebar-accept-evidence-2026-11-19-premerge/`、`~/huaanwork-progress-sidebar-accept-evidence-2026-11-18-qwen4/`、`~/huaanwork-progress-sidebar-accept-evidence-2026-11-18-rerun/` 与 `~/huaanwork-progress-sidebar-accept-evidence-2026-11-18/`。
 - 隔离临时根（含只读复制的模型配置与会话日志）在运行结束时删除（`facts.isolatedCleanup = removed`）；调试期间的 `--only` 隔离根均已手工删除。
 - 仓库未提交截图、fixture 或任何含密钥临时目录。
 
 ## 7. 结论
 
-- 七项真机走查自动化脚本与判据单测（24/24 pass）已落地并纳入 `verify:host`；最终提交 `a02bad496e`（产品源码 `4f1052cebc`）全量真机运行 7/7 通过（§2.7/§4），同时完成 `Q4-I1`–`Q4-I6`、`Q4-M1`、§9 终审收口与 §10 Grok 复核全部修复与回归验证。
+- 七项真机走查自动化脚本与判据单测（27/27 pass）已落地并纳入 `verify:host`（62/62 pass）；最终提交 `9e60b66251` 全量真机运行 7/7 通过（§2.8/§4），同时完成 `Q4-I1`–`Q4-I6`、`Q4-M1`、§9 终审收口、§10 Grok 复核与 §11 `qwen4` 二轮五项意见（`Q4-R2-01`–`Q4-R2-05`）全部修复与回归验证。
 - 所有已发现评审缺陷均已修复闭环；未以单测或门禁通过替代真机结论。分支 `feat/progress-sidebar` 达到合入 `master` 标准。

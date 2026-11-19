@@ -1,5 +1,7 @@
 # 复杂任务与子 agent 右侧进度面板（`feat/progress-sidebar`）Code Review
 
+> **最新状态（2026-11-19，`9e60b66251`）：已全部闭环（0 Critical / 0 Important / 0 Minor 残留），详见第十二节。** 本文件按时间保留全部评审与修复轨迹：第十一节记录 `qwen4` 在 `9ee86362e3` 上的二轮五项评审结论（0 Critical / 2 Important / 3 Minor）；第十二节记录对五项结论的源码/运行时复核、全量修复（`9e60b66251`）、全量无头门禁与加强版真机 Electron CDP 7/7 复跑结果。
+
 - **日期：** 2026-11-18
 - **审阅目标：** 分支 `feat/progress-sidebar`
   - 共同基线：`master`（`3dd3b182bc8c28671d5f712a7ae2da23dab463bd`，已合入 `#29 feat/chat-created-skills`）
@@ -358,3 +360,128 @@ git diff --check master...HEAD
 3. **Minor #2（证据文档基线 commit 说明 + 最终提交补跑真机 CDP — 闭环于 `a3a125a893` + `a02bad496e`）**：
    - 补跑真机 CDP 期间同步定位并修复 3 处走查脚本侧判据缺陷（非产品缺陷），均已补判据单测（`24/24 pass`）：`turnFacts` 继承 `user/message` 前紧邻的 `step/start` `roundKey`（`a3a125a893`）；`todoCardTurns` 按真实用户回合计数避免把 `subagent-settled` 内部唤醒算作额外待办卡；`driveDualEntrySystemSkills` 重试保留入口前缀与唯一 marker（`a02bad496e`）。
    - 在干净提交 `a02bad496edf7b74e53fd510cd83332c28167d8f`（产品源码 `4f1052cebc`）上重建 `dsh-plugin-huaanwork` 并完整实跑真实 Electron CDP 走查：**exit `0`（`verdict PASS`，7/7 全通过，`errors: []`，`isolatedCleanup: "removed"`）**，外置备份于 `~/huaanwork-progress-sidebar-accept-evidence-2026-11-19-premerge/`，证据文档 §2.6/§2.7/§4/§4.1/§6 已同步更新。
+
+---
+
+## 十一、qwen4 审核结论：合并前五项意见复核（2026-11-19）
+
+### 11.1 基线、复核方法与判决
+
+- **审阅基线：** `master` = `3dd3b182bc8c28671d5f712a7ae2da23dab463bd`；`feat/progress-sidebar` HEAD = `9ee86362e3e943abb86103f3a95ccfeef47a5519`。本轮开始时工作区干净，产品代码未发生变化。
+- **依据：** [规格](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/docs/superpowers/specs/2026-11-15-task-progress-sidebar-design.md) §7.3、§8.2、§10、§14.2，以及 [实施计划](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/docs/superpowers/plans/2026-11-15-progress-sidebar.md) Task 3、Task 4、Task 5。运行时事实同时核对已安装 `0.2.1-rc.1`，不把上游可表达的状态直接当成本产品可达场景。
+- **方法：** 在前轮只读评审之后，分别对产品行为和验收脚本执行独立反证；控制器复核关键源码、实际调用链和测试断言，并用不写文件的内存探针复验工具分组、lane 分类、中间普通回合权限检查及组件 DOM 去重。
+- **校准后判决：暂不建议合并，0 Critical / 2 Important / 3 Minor。** 原“3 Important / 2 Minor”不再作为最终计数：启动期取消信号不传播的事实成立，但现行规格明确允许 pending 闩锁与晚到清理，未证明它违反已有停止收敛契约，故降为 Minor。两个 Important 分别是工具活动布局回归和正常 lane 验收的终态判据缺口。
+- **证据边界：** 验收漏检不等于产品已经发生对应故障；不把既有 7/7 改写为 FAIL，也不把此前真实运行记录当成对新发现的排除证明。本轮没有修复产品代码或验收脚本。
+
+| 编号 | 初审意见 | 复核结论 | 最终级别 / 处置 |
+| --- | --- | --- | --- |
+| Q4-R2-01 | 启动中的定向取消未传到底层 | 信号未传播属实；“据此必须阻断合并”的判断证据不足，保留现有晚到清理契约 | **Minor，降级，非阻断** |
+| Q4-R2-02 | 待办原地更新会拆散同轮工具面板 | 合法有序事件即可触发，已复现面板数、锚点及展开覆盖变化 | **Important，合并前修复** |
+| Q4-R2-03 | 包 lane 验收可能把异常结束判为通过 | 有正文的 `aborted` 路径在当前产品可达，外层 `completed` 不保证 lane 成功；`blocked` 仅保留为合成负例 | **Important，合并前补齐判据与证据** |
+| Q4-R2-04 | MID1/MID2 普通回合未独立检查工具回收 | 中间回合被并入 `during`，缺少逐回合有效 schema 检查 | **Minor，非阻断验收覆盖缺口** |
+| Q4-R2-05 | 工具去重只检查已挂载面板 body | 共享展开会展开对应主流面板，但不能保证后来场景全覆盖，也不验证面板内调用唯一 | **Minor，非阻断验收覆盖缺口** |
+
+### 11.2 Q4-R2-01：启动取消信号未传播——事实成立，降为 Minor
+
+**源码：** [skills.ts:812–824](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts#L812) 的取消闭包调用局部 `controller.abort()`，而 `originalActivation(...args)` 仍原样传入工具调用方的 `spec.signal`；[skills.ts:887–891](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts#L887) 在句柄晚到后执行处置。已安装运行时 [manager.js:347–387](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/node_modules/@deepseek-ai/dsh-subagent/lib/types/manager.js#L347) 将 `spec.signal` 传入目录解析、provider 准备和 materialization；定向取消 RPC 没有另行中止该启动信号。
+
+**确认范围：** pending 启动不会收到这次定向 abort，仍可能继续初始化或投递任务，直到启动失败或返回句柄才由包装层收尾。本会话前轮的真实包装 + registry 内存探针得到 `requestCancel = accepted`、底层 `signal.aborted = false`、abort 事件数 `0`、run 为 `stopping`；随后中止原调用方信号才触发启动拒绝并收敛。该探针是受控启动桩验证，不是一次真实模型启动卡死复现。
+
+**降级理由：** [规格 §7.3 第 6 条](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/docs/superpowers/specs/2026-11-15-task-progress-sidebar-design.md#L179) 与计划 Task 3 Step 4 明确允许 pending 时先闩锁、在启动失败或晚到返回后统一收敛；当前实现具备该收尾，不曾把受理取消伪报为已经停止。文档未明确要求将新信号合入启动参数，也未要求即时停止。故本项记录为取消响应改进及测试缺口，不单独挡合并；不宣称进程级堵塞、真实环境必然永久挂起或取消完全失效。
+
+**建议与回归：** 仅对 system-skill 合并原调用方信号与局部取消信号，保留 spec 符号字段、父取消传播和晚到 dispose，不改变 legacy/package 派发。现有 [skills.spec.ts:2109–2167](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-guardrails/skills.spec.ts#L2109) 主动释放或拒绝 gate，只验证收敛；应另测两种信号各自中止、兄弟不受影响，以及启动方忽略信号时仍正确处置晚到句柄。
+
+### 11.3 Q4-R2-02：可变 todo 轮次破坏工具分组——Important
+
+**源码：** [App.tsx:4889–4910](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/client-huaanwork/App.tsx#L4889) 更新 todo 的 `roundKey`，却保留该条目在消息数组中的原位置；[toolPanel.ts:62–97](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/client-huaanwork/logic/toolPanel.ts#L62) 把 todo 的这个 key 也当作工具布局边界。
+
+**可达路径：** 同一模型 step 可以按 A、`todo_write`、B 的顺序调用工具；todo 的 exclusive 调度是串行屏障，不会另开模型 step。bridge 赋予三者同一轮次，实时数组为 `A(10) → todo(10) → B(10)`。下一 step 的合法 todo(20) 通过锚点与迟到门后，原地替换为 `A(10) → todo(20) → B(10)`，布局确定拆成两个面板；缓冲不重排这些条目，历史映射也不会修复当前实时数组。基线 todo 不带该 key，本分支新增的可变归属字段触发此回归。
+
+**本轮复现：** 从现有源码 AST 提取并在内存转译真实 `upsertTodoItem`，调用真实 `projectToolPanels`。同一份工具条目更新前后得到：
+
+```json
+{
+  "before": [{ "anchorId": 2, "count": 2, "expanded": true, "calls": ["A", "B"] }],
+  "after": [
+    { "anchorId": 2, "count": 1, "expanded": true, "calls": ["A"] },
+    { "anchorId": 4, "count": 1, "expanded": false, "calls": ["B"] }
+  ]
+}
+```
+
+**影响与反证：** 这是主流和右栏的活动分组、计数及展开覆盖回归，不是工具数据丢失。探针中 B 折叠是该夹具的终态默认值；一般场景只能断言它取得新锚点、不再继承原面板的手动开合选择，不能断言必然折叠。事件顺序合法且都有明确 `step/start`，不属于已接受的无 key 降级。
+
+**建议与回归：** 让布局忽略 todo 快照的可变 `roundKey`，或分离快照版本与历史布局归属；不能简单停止更新快照 key，否则会破坏迟到事件拒绝。现有 [appWiring.spec.ts:2571–2614](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/client-huaanwork/appWiring.spec.ts#L2571) 使用空 `toolRows`，未覆盖此交互。应补跨 step 更新后 A/B 仍同面板、原锚点及开合选择保留、旧 todo 事件仍被拒绝，并覆盖历史恢复后续写与无 key 降级。
+
+### 11.4 Q4-R2-03：正常 lane 验收未核验成功终因——Important
+
+**源码：** [验收脚本:2835–2851](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs#L2835) 只将 `turn/end.reason.kind === 'error'`、缺正文或空正文计为错误。已有正文且 settlement 不含 `left no closing message` 时，`aborted` 仍可得到 `isError: false`；[最终判据:342–345](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs#L342) 只消费这个布尔值、正文长度与已投递标记。
+
+**本产品可达反证链：** lane 已输出正文并调用工具，连续三次相同工具和关键参数失败后，[limits.ts:107–123](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-guardrails/limits.ts#L107) 取消的是当前 lane agent，不是外层包。已安装运行时 [activation.js:74–87](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/node_modules/@deepseek-ai/dsh-subagent/lib/types/activation.js#L74) 独立捕获正文与终因；[manager.js:1049–1073](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/node_modules/@deepseek-ai/dsh-subagent/lib/types/manager.js#L1049) 投递 settlement，并不因 `aborted` 必然拒绝父 activation。外层包随后正常总结并 `completed` 是允许的，所以脚本的外层成功检查不能证明两条 lane 均成功。
+
+**本轮探针：** 执行从源码提取的实际分类片段，再调用现有最终判据；有 14 字符正文且已投递时，`error → isError:true`，`aborted → isError:false`，后者可通过最终判据。`blocked` 合成输入也可通过，但未确认当前验收组合中的具体生产触发路径，故不把其可达性列入判决依据，也不采用已撤回的 `max-tokens` 论据。
+
+**定性：** 这是规格 §14.2 第五项“包 lane 正常”验收的假通过路径，属于合并前应关闭的判据缺口，不是新发现的产品异常处理缺陷。尚无证据说明既有 7/7 那次运行真的发生 lane 中止；最新 facts 未记录 lane 原始终因，不能仅凭其 `isError:false` 排除这种情况。取消整个包会被外层终态挡住，本项不包含该场景。
+
+**建议与回归：** 从权威 activation/终结记录保存 lane 原始终因，正常场景要求 `completed`，缺失或未知终因不能通过；补“有正文 + aborted + 已投递 + 外层 completed”必须失败的日志分类组合测试，另覆盖 blocked 合成负例。不能只在成品 facts 上手工翻转 `isError`。加强判据后重跑对应真机场景并在最终验收中闭环。
+
+### 11.5 Q4-R2-04：中间普通回合的权限回收漏检——Minor
+
+**源码与确认范围：** [验收脚本:2519–2527](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs#L2519) 发送 MID1/MID2 普通回合；[2614–2638](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs#L2614) 却将首次技能到最后技能之间的全部 schema 并入 `during`。逐入口检查只证明技能回合曾包含 `subagent`，更早的普通父会话检查和最终 AFTER 检查均不覆盖这两个中间回合。
+
+**本轮探针：** 对现有 `headerNamesBetween` 与 `compareHeaderToolPhases` 注入“技能开放 → MID 仍含 subagent → 后续技能 → 最终 AFTER 已收回”的 header 序列，返回 `midOrdinaryHeaderHasSubagent:true`、`accepted:true`。这只证明漏检能力；最新 facts 没有 MID 的独立有效 schema，不能证明或否定中间实际泄漏。
+
+**建议与回归：** 逐技能入口核验其下一普通回合的每个有效工具 schema，无新 `request/header` 时纳入继承值；补只有 MID1 或 MID2 泄漏、最终 AFTER 正常的负例。现有产品回收行为另有代码与测试支撑，本项作为非阻断的验收覆盖改进登记。
+
+### 11.6 Q4-R2-05：工具唯一性只覆盖挂载 body——Minor
+
+**源码：** [验收脚本:1162](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs#L1162) 只收集 `.chat-log [id^="tool-panel-body-"]`；[3184–3186](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs#L3184) 仅验证这些 ID 不重复。[ToolPanel.tsx:50–86](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/client-huaanwork/ToolPanel.tsx#L50) 在折叠时不挂载 body，同一面板内的多个调用又共用一个 body。
+
+**反证校正：** 右栏展开通过共享 `anchorId` 状态会展开对应主流面板，不能笼统说“脚本从未展开主流”。但该展开动作位于早先的复杂任务场景，未保证后来兄弟运行场景的全部 step 都展开；即使全部展开，重复 `callId` 也不改变面板 body ID。活动对账采用的 `some/every` 存在性配对不检查重复次数，不能补足调用唯一性。
+
+**本轮复现：** 在内存转译真实 `ToolPanel`，用 React 服务端渲染与 JSDOM 执行相同选择器，得到两个折叠重复面板 `panels=2 / bodies=0 / bodyIdUnique=true`；单面板含重复调用 `panels=1 / bodies=1 / bodyIdUnique=true / calls=[same-call,same-call]`；两个展开的重复面板则正确返回 `bodyIdUnique=false`。因此原判据并非完全无效，但覆盖面窄于“全部主流工具卡无重复”。最新 facts 的 `mainToolPanelCount=7` 只能证明七个挂载 body 的 ID 唯一，未证明实际存在重复。
+
+**建议与回归：** 核验所有主流面板的稳定身份与覆盖数量，再按用户回合、`roundKey`、`callId` 对账调用条目唯一；补折叠重复面板和单面板重复调用负例。作为非阻断验收覆盖改进登记。
+
+### 11.7 实跑验证、历史证据与待办边界
+
+本次复核实际执行：
+
+```bash
+node --test dsh-plugin-huaanwork/scripts/huaanwork-host-progress-sidebar-acceptance.spec.mjs packages/huaanwork-policy/src/agent-catalog.test.ts packages/huaanwork-policy/src/todo.test.ts
+git diff --check master...HEAD
+```
+
+结果为 **32 passed / 0 failed / 0 skipped，exit 0**（24 项验收判据、8 项策略测试）；分支空白检查 exit 0。另执行上述内存探针，Q4-R2-02 的工具布局变化、Q4-R2-03/04 的判据接受反例、Q4-R2-05 的 DOM 盲点均可重复观察。探针没有修改源文件或新增测试文件；现有测试通过不表示它们覆盖了这些组合边界。
+
+本会话前轮已执行桌面包与策略包类型检查，均 exit 0；本轮确认 HEAD 和产品代码不变，没有重复这些类型检查，也没有执行完整根 `corepack yarn check`、完整 `verify:host`、构建或真实 Electron CDP。既有 [最终 facts](file:///Users/amonmiao/huaanwork-progress-sidebar-accept-evidence-2026-11-19-premerge/facts.json) 与 [walkthrough.log](file:///Users/amonmiao/huaanwork-progress-sidebar-accept-evidence-2026-11-19-premerge/walkthrough.log) 已核对：运行基于 `a02bad496e`、7/7、`errors:[]`、隔离目录清理完成，18 张截图哈希一致；`a02bad496e..9ee86362e3` 仅有文档变化。该历史执行真实性保留，但其判据覆盖不能替代本节要求的新负例与后续复验。
+
+**当前处置：** Q4-R2-02、Q4-R2-03 保持未关闭，修复并完成相关回归及规格要求的最终门禁/真机证据前，不建议合并。Q4-R2-01、Q4-R2-04、Q4-R2-05 为具名非阻断项，不因本轮重新包装成必须扩大范围的产品裁定。本轮只更新本 code review 文档，未修改产品代码、测试、规格、计划或验收证据，未创建 git commit。
+
+---
+
+## 十二、qwen4 二轮五项意见复核、全量修复与最终闭环（2026-11-19）
+
+经逐项对照源码、已安装 `0.2.1-rc.1` 运行时、规格/计划、预合入 `facts.json` 与实跑复验，确认 §11 `qwen4` 五项评审结论（`Q4-R2-01`–`Q4-R2-05`）及 §11.7 基线/证据核对**全部属实、无误报**，且按方案 2 完成全部 2 项 Important + 3 项 Minor 修复（代码与测试提交于 `9e60b66251`）、全量无头门禁与加强版真实 Electron CDP 7/7 复跑闭环：
+
+| 编号 | 级别 | 修复摘要与源码锚点 | 回归测试与真机验证 | 状态 |
+| --- | --- | --- | --- | --- |
+| Q4-R2-02 | Important | [toolPanel.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/client-huaanwork/logic/toolPanel.ts#L61-L70) 的 `roundKeyOf` 对 `kind === "todo"` 返回 `undefined`，使跨 step 原地更新的 todo 快照 `roundKey` 仅服务于 [todoProjection.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/client-huaanwork/logic/todoProjection.ts) 迟到守卫，不再拆分同轮工具面板或翻转 `roundHasVisibleAssistant` / `isLastRound` | [toolPanel.spec.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/client-huaanwork/toolPanel.spec.ts) 覆 `A(10)→todo(20)→B(10)`（终态/实时）、`assistant(10)→todo(20)→tool(10)` 与无 key 降级；[appWiring.spec.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/client-huaanwork/appWiring.spec.ts) 覆实时与历史恢复后续写组合 + 迟到轮次拒绝 | 已修复并验证 |
+| Q4-R2-03 | Important | [huaanwork-accept-progress-sidebar.mjs](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs#L213-L250) 新增导出纯函数 `classifyLaneOutcome` 并在 `drivePackageLaneDepthTwo` 与 `assertProgressSidebarAcceptanceFacts` 强要求每条 depth-2 lane 持久化日志存在权威 `turn/end` 且全部 `reason.kind === 'completed'`、无异常 settlement | [huaanwork-host-progress-sidebar-acceptance.spec.mjs](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-host-progress-sidebar-acceptance.spec.mjs) 新增有正文 `aborted`、`blocked` 合成、缺失终因及人为篡改 `isError:false` 负例；真机实测两条 lane 均记录 `turnEndKind: "completed"` | 已修复并验证 |
+| Q4-R2-01 | Minor | [skills.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts#L819-L828) 与 `withSystemSkillAbortSignal` 仅为 `system-skill` 将定向取消 `controller.signal` 与调用方 `spec.signal` 经 `AbortSignal.any` 合并，保留 `spec` 原型与全部自有/符号属性，不触碰 legacy/package 派发与晚到 `dispose` 契约 | [skills.spec.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-guardrails/skills.spec.ts) 新增定向取消传播、不误伤 `callerSignal` 与兄弟 run、父取消传播、自定义符号保留、启动方忽略信号晚到 `dispose` 及 legacy 原样透传组合回归 | 已修复并验证 |
+| Q4-R2-04 | Minor | [huaanwork-accept-progress-sidebar.mjs](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs#L183-L211) 新增 `inspectEffectiveTurnHeaderTools`（含无新 header 时的继承值），在 `driveDualEntrySystemSkills` 与总判据中逐回合独立核验 `PSB-MID1` / `PSB-MID2` 均未暴露 `subagent` | [huaanwork-host-progress-sidebar-acceptance.spec.mjs](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-host-progress-sidebar-acceptance.spec.mjs) 新增仅 `MID1`（继承态）或仅 `MID2` 泄漏而 `AFTER` 正常的负例；真机实测 `PSB-MID1` 与 `PSB-MID2` 均独立验证 `hasSubagent: false` | 已修复并验证 |
+| Q4-R2-05 | Minor | [ToolPanel.tsx](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/client-huaanwork/ToolPanel.tsx#L38-L43) 为 `.tool-panel` 补充只读 `data-anchor-id` / `data-tool-count`；[huaanwork-accept-progress-sidebar.mjs](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-accept-progress-sidebar.mjs#L252-L320) 新增 `inspectMainToolUniqueness`、`findDuplicateCallIds` 与 `EXPAND_MAIN_TOOL_PANELS`，在场景 7 展开全部主流面板后逐面板 `anchorId`、逐调用 `callId` 与本场景 `subagent` 调用核对，并在场景 2 同步校验右栏活动 `callId` 不重复 | [ToolPanelComponent.spec.ts](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/client-huaanwork/ToolPanelComponent.spec.ts) 与 [huaanwork-host-progress-sidebar-acceptance.spec.mjs](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/scripts/huaanwork-host-progress-sidebar-acceptance.spec.mjs) 补折叠重复面板、单面板重复 `callId`、未展开面板、缺失预期调用与右栏重复 `callId` 负例；真机实测 `6/6` 主流面板全展开、`9` 条调用全唯一、`missingSiblingToolCallIds=[]` | 已修复并验证 |
+
+### 全量复跑验证记录（基于提交 `9e60b66251` 实测）
+
+| 验证项 | 命令 | 结果 |
+| --- | --- | --- |
+| `@huaanwork/policy` 检查 | `corepack yarn workspace @huaanwork/policy check` | exit `0`（65 pass / 0 fail / 2 skipped） |
+| 桌面包类型检查 | `corepack yarn workspace dsh-plugin-huaanwork typecheck` | exit `0`（0 错误） |
+| 桌面包构建 | `corepack yarn workspace dsh-plugin-huaanwork build` | exit `0` |
+| 验收判据单测 | `node --test dsh-plugin-huaanwork/scripts/huaanwork-host-progress-sidebar-acceptance.spec.mjs` | exit `0`（27/27 pass） |
+| 宿主验收门禁 | `corepack yarn workspace dsh-plugin-huaanwork run verify:host` | exit `0`（62/62 pass） |
+| 真实 Electron CDP 验收 | `corepack yarn workspace dsh-plugin-huaanwork exec node scripts/huaanwork-accept-progress-sidebar.mjs --out /tmp/progress-sidebar-accept-q4r2` | exit `0`（`verdict PASS`，7/7 全通过，`errors: []`，`isolatedCleanup: "removed"`，备份于 `~/huaanwork-progress-sidebar-accept-evidence-2026-11-19-q4r2/`） |
+| 根全量无头门禁 | `corepack yarn check` | exit `0`（`dsh-plugin-huaanwork` Vitest 304 passed \| 4 skipped (308) 文件、4380 passed \| 15 skipped (4395) 用例；全部 workspace 0 fail） |
+
+> 最终结论：§11 `qwen4` 二轮五项意见（`Q4-R2-01`–`Q4-R2-05`）已全部修复并经全量无头门禁与加强版真实 Electron CDP 7/7 走查闭环，分支 `feat/progress-sidebar` 满足合入 `master` 条件。
