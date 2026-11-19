@@ -54,6 +54,23 @@ const artifactBarriers = vi.hoisted(() => ({
   discards: 0,
 }))
 
+/** 准备阶段的意外抛出屏障:验证 executeRun 仍走 finishAutomation 结算。 */
+const prepareBarrier = vi.hoisted(() => ({
+  failure: undefined as undefined | Error,
+}))
+
+vi.mock('../../src/huaanwork-host/automation-artifacts.ts', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../src/huaanwork-host/automation-artifacts.ts')>()
+  return {
+    ...real,
+    prepareAutomationResult: async (...args: Parameters<typeof real.prepareAutomationResult>) => {
+      const failure = prepareBarrier.failure
+      if (failure !== undefined) throw failure
+      return real.prepareAutomationResult(...args)
+    },
+  }
+})
+
 vi.mock('../../src/huaanwork-host/artifacts-host.ts', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../src/huaanwork-host/artifacts-host.ts')>()
   return {
@@ -424,6 +441,7 @@ afterEach(async () => {
   artifactBarriers.beforeAppend = undefined
   artifactBarriers.discardFailure = undefined
   artifactBarriers.discards = 0
+  prepareBarrier.failure = undefined
   for (const harness of live.splice(0)) {
     harness.release()
     for (const file of harness.releaseFiles) {
@@ -2617,6 +2635,33 @@ test('records a named preparation failure with the validated title and format', 
   expect(artifactFieldsOf(end)).toEqual(artifactFieldsOf(summary))
   expect(await findAutomation(h.profileDir, automation.id)).toMatchObject({ lastStatus: 'ok' })
   expect(await listArtifacts(h.profileDir, automationRunSessionId(automation.id, run.runId))).toEqual([])
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
+  expect(artifactBarriers.discards).toBe(1)
+  expect(stagingResidue(h.profileDir)).toEqual([])
+})
+
+test('an unexpected preparation throw still settles the run and releases its in-flight entry', async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir)
+  // 病理输入让转换/准备整体抛出:执行体不得跳过 finishAutomation 把运行永久留在表里。
+  prepareBarrier.failure = new Error('blocks conversion blew up')
+  const run = await startAutomation(h, automation, { runId: 'prepare-threw' })
+  try {
+    await run.done
+  } finally {
+    prepareBarrier.failure = undefined
+  }
+  const summary = await storedRun(h.profileDir, automation.id, run.runId)
+  // 冻结的执行结果不变;意外抛出一律落稳定 artifact 错误码。
+  expect(summary).toMatchObject({ ok: true, status: 'ok', output: envelopeText })
+  expect(artifactFieldsOf(summary)).toEqual({ artifactOutcome: 'failed', artifactError: 'artifact-write-failed' })
+  const end = h.events.find((event) => event.event === 'automation/run-end' && event.runId === run.runId)!
+  expect(end).toMatchObject({ ok: true, status: 'ok' })
+  expect(artifactFieldsOf(end)).toEqual(artifactFieldsOf(summary))
+  expect(hasInFlightAutomationRun(automation.id)).toBe(false)
+  // 结算后在途条目已摘:再 stop 不会命中一条永远不会结束的轮。
+  await expect(stopAutomation(automation.id)).resolves.toEqual({ stopped: false })
   expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
   expect(artifactBarriers.discards).toBe(1)
   expect(stagingResidue(h.profileDir)).toEqual([])

@@ -90,6 +90,7 @@ import {
 import { AUTO_CONTINUE_LABEL, PLAN_CARD_NOTE, planExitNote, planModeActive } from "./logic/planConfirm.ts";
 import logoUrl from "./assets/huaan-mark.png";
 import {
+  artifactCleanupNotice,
   bindTaskSession,
   createTask,
   listAutomations,
@@ -101,6 +102,7 @@ import {
   removeTask,
   setTaskModel,
   stopAutomation,
+  type ArtifactCleanupReport,
   type AutomationInfo,
   type AutomationSchedule,
   type ProjectInfo,
@@ -241,6 +243,7 @@ import {
   applyRunEndProjection,
   insertArtifactIntoHistory,
   insertBeforeArtifactGroup,
+  insertListedArtifactsIntoHistory,
   openArtifactPreview,
   projectAutomationResult,
   settleArtifactLoading,
@@ -1849,6 +1852,8 @@ export default function App() {
         setSidecarDead(false);
         reconcileEpochRef.current += 1;
         reconcileBoundSubagentRuns();
+        // 规格 §11：事件丢失后的结果文件同样在 ready 时对账，不只等历史打开/运行结束。
+        reconcileBoundArtifacts();
       }
       /**
        * 本次发送的应答还没回来：把尚不能结算的早到事件按到达顺序暂存。
@@ -2758,6 +2763,35 @@ export default function App() {
         return nextItems === tab.items ? tab : { ...tab, items: nextItems };
       }),
     );
+  }
+
+  /**
+   * WS ready 后的结果文件对账（规格 §11）：断线期间丢失的 `artifact/created`
+   * 不能等到重新打开会话才出现。普通会话按会话各拉一次 artifact.list，走与历史
+   * 打开相同的幂等插入（重复 artifactId 不产生第二张卡）；自动化运行标签由
+   * run-end 的既有回填负责，跳过。迟到的应答按共享对账代际丢弃。
+   */
+  function reconcileBoundArtifacts(): void {
+    const epoch = reconcileEpochRef.current;
+    const seen = new Set<string>();
+    for (const tab of chatTabsRef.current) {
+      const sessionId = tab.sessionId;
+      if (!sessionId || tab.automationId || seen.has(sessionId)) continue;
+      seen.add(sessionId);
+      const tabId = tab.id;
+      void (async () => {
+        const artifacts = await listSessionArtifacts(sessionId);
+        if (artifacts.length === 0 || epoch !== reconcileEpochRef.current) return;
+        setChatTabs((prev) =>
+          prev.map((candidate) => {
+            if (candidate.id !== tabId || candidate.sessionId !== sessionId) return candidate;
+            const items = insertListedArtifactsIntoHistory(candidate.items, artifacts, allocId);
+            // 全部命中已有卡片时不产生多余的状态更新。
+            return items.length === candidate.items.length ? candidate : { ...candidate, items };
+          }),
+        );
+      })();
+    }
   }
 
   /** WS ready 后对每个绑定了会话的标签各对账一次;同一会话只跑一次。 */
@@ -3844,7 +3878,7 @@ export default function App() {
         });
         writeTabRun(sessionTabId, noteTurnEnded);
       }
-      await rpcCall("session.remove", { sessionId });
+      const removed = await rpcCall<{ removed: true; artifactCleanup?: ArtifactCleanupReport }>("session.remove", { sessionId });
       // 会话日志没了，沿用它的标签也拿不到可归属的排队项：清掉在途发送与等待项归属。
       for (const tab of chatTabsRef.current) {
         if (tab.sessionId === sessionId) pruneTabBookkeeping(tab.id);
@@ -3857,7 +3891,8 @@ export default function App() {
           : tab
       )));
       setConfirmDelete(null);
-      setDeleteError("");
+      // 记录已删、结果文件残余仍要如实告知（规格 §9）；确认框已关闭，提示留在主区横幅。
+      setDeleteError(artifactCleanupNotice(removed.artifactCleanup));
     } catch (error) {
       setDeleteError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -4153,6 +4188,8 @@ export default function App() {
           {gitWarning ? <div className="banner warn">{gitWarning}</div> : null}
           {pluginFail ? <div className="banner error">{pluginFail}</div> : null}
           {guardModeError ? <div className="banner error">{guardModeError}</div> : null}
+          {/* 会话删除成功但结果文件未清干净的提示：确认框已关闭，横幅是唯一可见面。 */}
+          {deleteError && !confirmDelete ? <div className="banner warn" role="status">{deleteError}</div> : null}
           {sessionFailed ? <div className="banner error">会话已失败。上次 diff 保留在右侧，本轮不再继续。</div> : null}
           {hostNotice.kind === "unresponsive" ? (
             <div className="banner warn" role="status">

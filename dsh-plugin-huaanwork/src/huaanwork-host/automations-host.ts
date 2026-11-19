@@ -763,6 +763,8 @@ export async function executeRun(
   // 释放必须覆盖发射与 markAutomation 本身:准入方已经占坑,执行体在这里拒绝
   // (注册表不可写、磁盘满)时没有回合接手,不释放就会把根写者与 started 条目永久留在表里。
   let handedOff = false
+  // finishAutomation 是唯一结算点;异常路径由外层 finally 兜底摘在途条目。
+  let settled = false
   // 唯一写入 lease:会话身份已知后同步建立(不做 I/O),覆盖整个执行与结算;
   // 所有出口在外层 finally discard。queued 取消早退发生在上面的同步段,不建 lease;
   // 脚本没有写入内容,不建 lease。
@@ -906,10 +908,21 @@ export async function executeRun(
     // 已取消时可省掉 prepare;该预检查不是冻结点,finishAutomation 会重新读取取消。
     let artifact: { write: ArtifactWrite; preparation: AutomationArtifactPreparation } | undefined
     if (write !== undefined) {
-      const preparation: AutomationArtifactPreparation =
-        inFlightRuns.get(runId)?.cancelRequested === true
-          ? { outcome: 'skipped' }
-          : await prepareAutomationResult(write, output)
+      let preparation: AutomationArtifactPreparation
+      if (inFlightRuns.get(runId)?.cancelRequested === true) {
+        preparation = { outcome: 'skipped' }
+      } else {
+        try {
+          preparation = await prepareAutomationResult(write, output)
+        } catch (error: unknown) {
+          // prepare 的意外抛出(如兼容 JSON 转换深层递归失败)不能跳过 finishAutomation:
+          // 否则没有 Run 记录/run-end,在途条目还会永久拒绝 stop/删除/改绑。
+          routeCtx.logger(
+            `artifact-prepare-failed: ${error instanceof Error ? error.message : String(error)}`,
+          )
+          preparation = { outcome: 'failed', artifactError: 'artifact-write-failed' }
+        }
+      }
       artifact = { write, preparation }
     }
     await finishAutomation(
@@ -928,6 +941,7 @@ export async function executeRun(
       trigger,
       coalescedCount,
     )
+    settled = true
   } finally {
     if (write !== undefined) {
       // finish 已 discard 也安全;这里的重复调用覆盖早退与 finish 内丢弃失败。
@@ -943,10 +957,9 @@ export async function executeRun(
     // 脚本:runScript 只在 close 后返回,这里释放正好落在进程树退出之后。
     // 早退(排队期间被停、项目已删除)、执行体拒绝(如 markAutomation 写盘失败)
     // 与启动失败同样经过这里。未交接就摘条目:否则 stop 会命中一条永远不会结束的轮。
-    if (!handedOff) {
-      inFlightRuns.delete(runId)
-      admission.release()
-    }
+    // 已交接但 finish 未完成(防御):同样摘条目,不让在途状态永久拒绝 stop/删除/改绑。
+    if (!handedOff || !settled) inFlightRuns.delete(runId)
+    if (!handedOff) admission.release()
   }
 }
 

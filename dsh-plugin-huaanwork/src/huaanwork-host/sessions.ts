@@ -1392,7 +1392,7 @@ export async function sessionRemove(
   ctx: SessionRuntimeContext | undefined,
   routeCtx: RouteContext,
   params: unknown,
-): Promise<{ removed: true }> {
+): Promise<{ removed: true; artifactCleanup?: ArtifactCleanupReport }> {
   return removeSession(ctx, join(routeCtx.dshHome, 'sessions'), params, {
     profileDir: routeCtx.profileDir,
     logger: routeCtx.logger,

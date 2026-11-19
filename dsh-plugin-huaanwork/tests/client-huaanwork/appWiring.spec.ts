@@ -28,6 +28,7 @@ import {
   applyRunEndProjection,
   insertArtifactIntoHistory,
   insertBeforeArtifactGroup,
+  insertListedArtifactsIntoHistory,
   projectAutomationResult,
   shouldApplyArtifactResponse,
   sortArtifactsForBackfill,
@@ -135,6 +136,7 @@ test("answering writes the card into the tab that holds it, not the live tab", (
 });
 
 const APP_SOURCE = readFileSync(new URL("../../src/client-huaanwork/App.tsx", import.meta.url), "utf8");
+const PROJECTS_PANEL_SOURCE = readFileSync(new URL("../../src/client-huaanwork/ProjectsPanel.tsx", import.meta.url), "utf8");
 const AUTOMATION_RUN_LINK_SOURCE = readFileSync(
   new URL("../../src/client-huaanwork/logic/automationRunLink.ts", import.meta.url),
   "utf8",
@@ -838,6 +840,78 @@ test("the ready reconcile runs before the sidecar event gates so every reconnect
       + "so the gate returns early while a background automation runs and the post-reconnect reconcile is "
       + "unreachable — cards keep 连接中断，状态可能滞后, timers stay frozen and 终止 stays disabled "
       + "until the next reconnect (a manual send cannot clear it either)",
+  );
+});
+
+test("a ready reconcile backfills a listed artifact exactly once and a replay does not duplicate it", () => {
+  const artifact: TaskArtifactSummary = {
+    artifactId: "lost-artifact",
+    sessionId: "session-1",
+    title: "报告",
+    format: "markdown",
+    downloadName: "报告.md",
+    sizeBytes: 4,
+    sha256: "sha256:test",
+    createdAt: "2026-11-15T10:00:00.000Z",
+    anchor: { kind: "turn", clientMessageId: "m1" },
+  };
+  // 断线期间丢失 artifact/created：标签里只有用户消息与助手正文。
+  let items: AppModule.ChatItem[] = [
+    { id: 1, kind: "user", text: "生成报告", clientMessageId: "m1" },
+    { id: 2, kind: "assistant", text: "已完成" },
+  ];
+  // ready 对账走 App 同一条批量回填路径：未见的列表项插入恰好一张卡。
+  items = insertListedArtifactsIntoHistory(items, [artifact], () => 3);
+  assert.equal(items.filter((item) => item.kind === "artifact" && item.artifactId === "lost-artifact").length, 1);
+  assert.deepEqual(items.map((item) => item.kind), ["user", "assistant", "artifact"]);
+  // 第二次 ready 重放同一份 artifact.list：不新增卡、不产生未定位分组。
+  const replay = insertListedArtifactsIntoHistory(items, [artifact], () => 4);
+  assert.equal(replay.filter((item) => item.kind === "artifact" && item.artifactId === "lost-artifact").length, 1);
+  assert.equal(replay.filter((item) => item.kind === "artifact-group").length, 0);
+});
+
+test("the sidecar/status ready branch reconciles artifacts for bound ordinary sessions", () => {
+  const handlerAt = APP_SOURCE.indexOf("const applyEvent = (event: RpcEvent) => {");
+  const handlerEnd = APP_SOURCE.indexOf("applySidecarEventRef.current = applyEvent;", handlerAt);
+  assert.ok(handlerAt >= 0 && handlerEnd > handlerAt, "the sidecar event handler is still a named applyEvent closure");
+  const handler = APP_SOURCE.slice(handlerAt, handlerEnd);
+
+  const reconcileAt = handler.indexOf("reconcileBoundSubagentRuns()");
+  const artifactsAt = handler.indexOf("reconcileBoundArtifacts()", reconcileAt);
+  assert.ok(reconcileAt >= 0 && artifactsAt > reconcileAt, "ready still reconciles artifacts after subagent runs");
+  const gateAt = handler.indexOf(
+    "if (automationActiveRef.current && !isUserSessionId(eventSessionId) && !boundTab) return;",
+  );
+  assert.ok(artifactsAt < gateAt, "artifact reconciliation must stay before the automation gate: ready has no sessionId");
+
+  const body = functionBody("function reconcileBoundArtifacts(): void {", "/** WS ready 后对每个绑定了会话的标签各对账一次");
+  // 普通会话才补拉；自动化运行标签由 run-end 既有回填负责。
+  assert.match(body, /if \(!sessionId \|\| tab\.automationId \|\| seen\.has\(sessionId\)\) continue;/);
+  assert.match(body, /const epoch = reconcileEpochRef\.current;/);
+  assert.match(body, /epoch !== reconcileEpochRef\.current/);
+  assert.match(body, /listSessionArtifacts\(sessionId\)/);
+  assert.match(body, /insertListedArtifactsIntoHistory\(candidate\.items, artifacts, allocId\)/);
+  assert.match(body, /candidate\.id !== tabId \|\| candidate\.sessionId !== sessionId/);
+  // 一次 ready 只按会话各拉一次，不引入轮询。
+  assert.doesNotMatch(body, /setInterval|setTimeout/);
+});
+
+test("session deletion surfaces an incomplete artifact cleanup instead of silently succeeding", () => {
+  const body = functionBody("async function removeSession(", "const blocked = sidecarDead;");
+  assert.match(body, /rpcCall<\{ removed: true; artifactCleanup\?: ArtifactCleanupReport \}>\("session\.remove"/);
+  assert.match(body, /setDeleteError\(artifactCleanupNotice\(removed\.artifactCleanup\)\)/);
+  // 确认框已关闭时，同一条提示必须留在主区横幅里可见。
+  assert.match(APP_SOURCE, /\{deleteError && !confirmDelete \? <div className="banner warn"/);
+});
+
+test("project deletion surfaces an incomplete artifact cleanup through the panel error line", () => {
+  assert.match(
+    PROJECTS_PANEL_SOURCE,
+    /const removed = await removeProject\(confirming\.project\.id\)/,
+  );
+  assert.match(
+    PROJECTS_PANEL_SOURCE,
+    /setError\(artifactCleanupNotice\(removed\.artifactCleanup\)\)/,
   );
 });
 

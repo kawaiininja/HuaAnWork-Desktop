@@ -8,6 +8,18 @@ export type ProjectInfo = {
   lastOpenedAt?: number;
 };
 
+/** 删除原语的磁盘清理报告：记录删除已完成，`complete:false` 只描述结果文件残余。 */
+export type ArtifactCleanupReport = { complete: boolean; message?: string };
+
+/**
+ * 删除应答里的用户提示：清理完整时为空串，不完整时优先用宿主 message。
+ * 缺 message 的旧/异常应答回退到固定文案，绝不静默成功。
+ */
+export function artifactCleanupNotice(cleanup?: ArtifactCleanupReport): string {
+  if (cleanup?.complete !== false) return "";
+  return cleanup.message ?? "记录已删除、结果文件未能完全清理";
+}
+
 export type AutomationSchedule =
   | { kind: "manual" }
   | { kind: "once"; at: number }                        // epoch ms，触发后自动 enabled=false

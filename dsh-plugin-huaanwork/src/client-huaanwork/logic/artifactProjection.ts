@@ -291,6 +291,23 @@ export function insertArtifactIntoHistory<T extends HistoryItem>(
 }
 
 /**
+ * 把 `artifact.list` 快照批量补进历史：先按确定顺序排序，再逐项走
+ * {@link insertArtifactIntoHistory}。重复 artifactId 不产生第二张卡，
+ * 断线重连的对账重放与历史打开共用这一条幂等路径。
+ */
+export function insertListedArtifactsIntoHistory<T extends HistoryItem>(
+  items: readonly T[],
+  artifacts: readonly TaskArtifactSummary[],
+  allocId: () => number,
+): (T | ArtifactHistoryCard)[] {
+  let next: (T | ArtifactHistoryCard)[] = [...items];
+  for (const artifact of sortArtifactsForBackfill(artifacts)) {
+    next = insertArtifactIntoHistory(next, artifact, allocId);
+  }
+  return next;
+}
+
+/**
  * run-end 的异步投影只替换边界内的条目。
  *
  * `boundaryIds` 是 run-end 时刻该标签已有的条目 id。读取摘要期间用户续聊产生的

@@ -15,9 +15,11 @@ vi.mock("../../src/client-huaanwork/api.ts", () => ({ rpcCall: vi.fn() }));
 
 import { rpcCall } from "../../src/client-huaanwork/api.ts";
 import AutomationsView, { lastRunLabel } from "../../src/client-huaanwork/AutomationsView.tsx";
+import { artifactCleanupNotice } from "../../src/client-huaanwork/projects.ts";
 import type { AutomationInfo, ProjectInfo, RunSummary, TaskInfo } from "../../src/client-huaanwork/logic/projects.ts";
 
-type DeleteResult = { removed: boolean; sessionDirRemoved: boolean; taskId?: string };
+type CleanupReport = { complete: boolean; message?: string };
+type DeleteResult = { removed: boolean; sessionDirRemoved: boolean; taskId?: string; artifactCleanup?: CleanupReport };
 
 const rpc = rpcCall as unknown as {
   mockImplementation: (
@@ -55,11 +57,26 @@ function stubRpc(options: {
   deleteRun: (automationId: string, runId: string) => Promise<DeleteResult>;
   /** 表单模态的保存应答；不传时原样回一份任务（编辑表单只读 nextRunAt）。 */
   update?: (automationId: string, patch: Record<string, unknown>) => Promise<AutomationInfo>;
+  prune?: () => Promise<{
+    removed: number;
+    tasksRemoved: number;
+    failed: string[];
+    artifactCleanup?: CleanupReport;
+  }>;
+  removeAutomation?: (automationId: string) => Promise<{ removed: boolean; artifactCleanup?: CleanupReport }>;
 }) {
   rpc.mockImplementation(async (method, params) => {
     if (method === "automation.runs") return { runs: options.runs() };
     if (method === "automation.deleteRun") {
       return options.deleteRun(String(params?.id), String(params?.runId));
+    }
+    if (method === "automation.pruneSessions") {
+      if (options.prune === undefined) throw new Error("unexpected rpc: automation.pruneSessions");
+      return options.prune();
+    }
+    if (method === "automation.remove") {
+      if (options.removeAutomation === undefined) throw new Error("unexpected rpc: automation.remove");
+      return options.removeAutomation(String(params?.id));
     }
     // 创建表单挂载即取模板；模板加载失败被组件静默吞掉，这里给一份空列表让路径确定。
     if (method === "automation.templates") return { templates: [] };
@@ -299,6 +316,95 @@ describe("运行记录删除（spec §6）", () => {
     });
     expect(view.querySelector('[role="dialog"]')).toBeNull();
     expect(view.querySelectorAll(".run-delete")).toHaveLength(0);
+  });
+});
+
+describe("结果文件清理不完整的上报（规格 §9）", () => {
+  const CLEANUP = "记录已删除、结果文件未能完全清理";
+
+  it("keeps a deleted run gone and shows the cleanup message", async () => {
+    let runs = [run("r1", "s-1", 1000, "第一条输出")];
+    const onChanged = vi.fn();
+    stubRpc({
+      runs: () => runs,
+      deleteRun: async () => {
+        runs = [];
+        return { removed: true, sessionDirRemoved: true, artifactCleanup: { complete: false, message: CLEANUP } };
+      },
+    });
+
+    const view = await mount({ onRunDeleted: vi.fn(), onChanged });
+    await act(async () => {
+      deleteButtonAt(view, 0).click();
+    });
+    await act(async () => {
+      dialogConfirm(view).click();
+    });
+
+    // 记录删除照常完成，残余结果文件只能如实上报，不能静默成功。
+    expect(view.querySelector('[role="dialog"]')).toBeNull();
+    expect(view.querySelectorAll(".run-delete")).toHaveLength(0);
+    expect(view.querySelector(".banner.error")?.textContent).toContain(CLEANUP);
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("appends the cleanup message to the prune success notice", async () => {
+    stubRpc({
+      runs: () => [],
+      deleteRun: async () => ({ removed: true, sessionDirRemoved: true }),
+      prune: async () => ({
+        removed: 2,
+        tasksRemoved: 0,
+        failed: [],
+        artifactCleanup: { complete: false, message: CLEANUP },
+      }),
+    });
+    const onChanged = vi.fn();
+
+    const view = await mount({ onRunDeleted: vi.fn(), onChanged });
+    await act(async () => {
+      buttonByText(view, "清理历史运行会话").click();
+    });
+    await act(async () => {
+      buttonByText(view, "确认清理").click();
+    });
+
+    const notice = [...view.querySelectorAll("p.muted")].map((item) => item.textContent ?? "").join("\n");
+    expect(notice).toContain("已清理 2 个历史运行会话");
+    expect(notice).toContain(CLEANUP);
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the cleanup message after deleting a task", async () => {
+    stubRpc({
+      runs: () => [],
+      deleteRun: async () => ({ removed: true, sessionDirRemoved: true }),
+      removeAutomation: async () => ({
+        removed: true,
+        artifactCleanup: { complete: false, message: CLEANUP },
+      }),
+    });
+    const onChanged = vi.fn();
+
+    const view = await mount({ onRunDeleted: vi.fn(), onChanged, openRuns: false });
+    await act(async () => {
+      buttonByText(view, "删除").click();
+    });
+    expect(view.querySelector('[role="dialog"]')).not.toBeNull();
+    await act(async () => {
+      dialogConfirm(view).click();
+    });
+
+    expect(view.querySelector('[role="dialog"]')).toBeNull();
+    expect(view.querySelector(".banner.error")?.textContent).toContain(CLEANUP);
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("artifactCleanupNotice stays silent for complete or absent reports and falls back without a message", () => {
+    expect(artifactCleanupNotice(undefined)).toBe("");
+    expect(artifactCleanupNotice({ complete: true })).toBe("");
+    expect(artifactCleanupNotice({ complete: false, message: CLEANUP })).toBe(CLEANUP);
+    expect(artifactCleanupNotice({ complete: false })).toBe(CLEANUP);
   });
 });
 

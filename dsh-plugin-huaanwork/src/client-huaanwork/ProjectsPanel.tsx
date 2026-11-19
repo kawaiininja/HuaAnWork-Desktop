@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import {
+  artifactCleanupNotice,
   createProject,
   openProject,
   removeProject,
@@ -94,9 +95,11 @@ export default function ProjectsPanel({
     setBusy(true);
     setError("");
     try {
-      await removeProject(confirming.project.id);
+      const removed = await removeProject(confirming.project.id);
       setConfirming(null);
       onChanged();
+      // 记录已删、结果文件残余仍要如实告知（规格 §9），不能静默成功。
+      setError(artifactCleanupNotice(removed.artifactCleanup));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
