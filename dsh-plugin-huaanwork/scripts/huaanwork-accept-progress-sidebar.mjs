@@ -1750,17 +1750,23 @@ function sessionMentions(session, marker) {
 }
 
 /**
- * Distinct turns that wrote a todo list. The live main flow renders one todo card per
- * such turn (the turn's latest list), so the card count must equal this number; two
- * cards for one list would be a duplicated update.
+ * Distinct logical user turns that wrote a todo list. The live main flow renders one
+ * todo card per user turn (updating in place across `subagent-settled` wakeups even
+ * though DSH increments `event.data.turn` on each wakeup), so counting real user turns
+ * matches the UI contract while still catching duplicated cards within a turn.
  */
-function todoCardTurns(session) {
-  const turns = new Set()
+export function todoCardTurns(session) {
+  const userTurns = new Set()
+  let userTurnIndex = 0
   for (const event of session?.events ?? []) {
+    if (isRealUserMessage(event)) {
+      userTurnIndex += 1
+      continue
+    }
     if (event?.type !== 'tool/call' || event.data?.name !== 'todo_write') continue
-    turns.add(event.data.turn)
+    userTurns.add(userTurnIndex)
   }
-  return turns.size
+  return userTurns.size
 }
 
 function parentSessionsWithMarker(sessions, marker) {
@@ -2410,10 +2416,16 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
       log(`${definition.entry} ${definition.skill} card missing: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
     // Model variance: a turn can finish without delegating even though subagent is
-    // exposed. Retry once with an explicit tool-call instruction before failing.
+    // exposed. Retry once with an explicit tool-call instruction before failing,
+    // preserving the entry's own activation path (`/${skill}` or `skill` tool) and
+    // a unique per-entry marker so retries never run as an ordinary subagent-free
+    // turn or collide in `turnFacts`.
     if (!runSeenInMain && sessionFailure === null) {
-      const retryMarker = `${MARKER}-RETRY-${definition.skill}`
-      const retryPrompt = `${retryMarker} 你刚才没有调用 subagent 工具。现在必须立即调用 subagent 工具：description 填 "${definition.skill}"，prompt 按技能要求执行，不要直接回答或结束。`
+      await waitForComposerIdle(client, Math.min(options.timeout, 120_000)).catch(() => undefined)
+      const retryMarker = `${MARKER}-RETRY-${definition.entry}-${definition.skill}`
+      const retryPrompt = definition.modelSkill
+        ? `${retryMarker} 你刚才没有完成工具调用测试。请先调用 skill 工具加载 "${definition.skill}" 技能，加载成功后立即调用 subagent 工具（description 填 "${definition.skill}"），不要直接回答或结束。`
+        : `/${definition.skill} ${retryMarker} 你刚才没有调用 subagent 工具。本回合通过 /${definition.skill} 已挂载 subagent 工具，现在必须立即调用 subagent 工具（description 填 "${definition.skill}"），按技能要求执行，不要直接回答或结束。`
       try {
         await sendText(client, retryPrompt, Math.min(options.timeout, 120_000))
         usedMarker = retryMarker
@@ -2604,7 +2616,9 @@ async function driveDualEntrySystemSkills(client, { freshTab }) {
       // The window must cover the trailing /test-fix turn as well: `subagent` stays
       // visible for the whole system-skill execution, not just the /explore leg.
       // Falls back to the /explore end when the /test-fix turn never settled.
-      const testFixTurn = turnFacts(parent, `${MARKER}-TESTFIX`)
+      const testFixEntry = entries.find((item) => item.skill === 'test-fix')
+      const testFixTurn = (testFixEntry?.marker ? turnFacts(parent, testFixEntry.marker) : undefined)
+        ?? turnFacts(parent, `${MARKER}-TESTFIX`)
       const duringEndSeq = testFixTurn?.endSeq ?? turn.endSeq
       // `after` is the schema in force for the follow-up turn. If a preceding
       // post-cancel settlement turn already logged the reclaimed schema, DSH

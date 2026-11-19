@@ -13,6 +13,7 @@ import {
   recordPartialCheckFailureBeforeBlocked,
   resolveBlockedOrFailedOutcome,
   resolveFinalExitCode,
+  todoCardTurns,
   turnFacts,
 } from './huaanwork-accept-progress-sidebar.mjs'
 
@@ -604,4 +605,22 @@ test('turnFacts inherits the governing step/start seq emitted immediately before
       { name: 'read', callId: 'c-2', roundKey: 20 },
     ],
   )
+})
+
+test('todoCardTurns counts distinct real user turns rather than subagent-settled internal turns', () => {
+  const session = {
+    header: { id: 's-todo-turns' },
+    events: [
+      userMessage('m-1', 'turn one'),
+      { type: 'tool/call', seq: 3, data: { turn: 1, step: 1, callId: 'c-1', name: 'todo_write', arguments: '{}' } },
+      { type: 'tool/call', seq: 5, data: { turn: 1, step: 2, callId: 'c-2', name: 'todo_write', arguments: '{}' } },
+      userMessage('m-2', 'turn two with subagent settlements'),
+      { type: 'tool/call', seq: 10, data: { turn: 2, step: 1, callId: 'c-3', name: 'todo_write', arguments: '{}' } },
+      { type: 'user/message', seq: 12, data: { id: 'settled-1', role: 'user', source: { kind: 'subagent-settled' }, content: [{ type: 'text', text: 'lane B stopped' }] } },
+      { type: 'tool/call', seq: 14, data: { turn: 3, step: 1, callId: 'c-4', name: 'todo_write', arguments: '{}' } },
+      { type: 'user/message', seq: 16, data: { id: 'settled-2', role: 'user', source: { kind: 'subagent-settled' }, content: [{ type: 'text', text: 'lane A done' }] } },
+      { type: 'tool/call', seq: 18, data: { turn: 4, step: 1, callId: 'c-5', name: 'todo_write', arguments: '{}' } },
+    ],
+  }
+  assert.equal(todoCardTurns(session), 2)
 })
