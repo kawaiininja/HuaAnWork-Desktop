@@ -5,9 +5,16 @@ import { resolve as pathResolve } from 'node:path'
 import type { AutomationInfo, RpcEvent, RunSummary, TaskInfo } from '../client-huaanwork/rpc-types.ts'
 import { releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import { acceptanceCrashPointMatches } from './acceptance-hooks.ts'
+import { AUTOMATION_RESULT_CONTRACT, prepareAutomationResult, type AutomationArtifactPreparation } from './automation-artifacts.ts'
 import { inFlightRuns, inFlightRunsOf, startInFlightRun, type InFlightRun } from './automation-inflight.ts'
-import { resolveApproval } from './approvals.ts'
 import { automationRunSessionId } from './automation-session-ids.ts'
+import { resolveApproval } from './approvals.ts'
+import {
+  beginArtifactWrite,
+  commitPreparedArtifact,
+  discardPreparedArtifact,
+  type ArtifactWrite,
+} from './artifacts-host.ts'
 import {
   appendRun,
   clipOutput,
@@ -363,7 +370,13 @@ async function runAgentTurn(
   // 否则调度器会每个 tick 永久重试同一条。
   if (!resolved.ok) throw new Error(resolved.reason)
   const mergedPrefix = await mergedRunPrefix(routeCtx, automation)
-  const body = [...(mergedPrefix ? ['上次成功运行的产出（截断至 4 KB）：', mergedPrefix] : []), automation.prompt ?? ''].join('\n')
+  // 唯一注入点:manual/schedule/catchup 与有人/无人值守 agent 都经过这里;
+  // 普通会话不经过 runAgentTurn,脚本自动化不拼 prompt。
+  const body = [
+    ...(mergedPrefix ? ['上次成功运行的产出（截断至 4 KB）：', mergedPrefix] : []),
+    automation.prompt ?? '',
+    AUTOMATION_RESULT_CONTRACT,
+  ].join('\n')
   const missed = coalescedCount ?? 0
   const prompt = `<automation-fire name="${escapeXmlAttr(automation.name)}" trigger="${trigger}" missed="${missed}">\n${body}\n</automation-fire>`
   // 根表在 create/resume 与沙箱读取之前登记;模型表由 sendToAgent 在 dispatch 前临时写入、
@@ -601,26 +614,87 @@ async function finishAutomation(
     status?: 'ok' | 'error' | 'timeout' | 'cancelled'
     sessionId?: string
     taskId?: string
+    artifact?: { write: ArtifactWrite; preparation: AutomationArtifactPreparation }
   },
   trigger: AutomationTrigger,
   coalescedCount: number | undefined,
 ): Promise<void> {
   const endedAt = Date.now()
-  const status = run.status ?? (run.ok ? 'ok' : 'error')
+  // ── 冻结点:prepare 返回后的第一次取消读取到 summary 构建之间不得有 await ──
+  // stop 在此后到达仍返回 stopped:true,但不再改写本条记录的执行值与状态。
+  const cancelled = inFlightRuns.get(run.runId)?.cancelRequested === true
+  const ok = cancelled ? false : run.ok
+  const status = cancelled ? 'cancelled' : (run.status ?? (ok ? 'ok' : 'error'))
+  // 被杀脚本的 runner 脚注是合成文本,不算产出:先剥掉再判空。
+  const stoppedOutput = cancelled ? stripRunnerExitCodeFooter(run.output) : run.output
+  const output = cancelled && !stoppedOutput.trim() ? '已停止' : stoppedOutput
   const durationMs = endedAt - run.startedAt
   const summary: RunSummary = {
     runId: run.runId,
     startedAt: run.startedAt,
     endedAt,
-    ok: run.ok,
-    output: clipOutput(run.output),
+    ok,
+    output: clipOutput(output),
     status,
     trigger,
     durationMs,
+    ...(coalescedCount === undefined ? {} : { coalescedCount }),
+    ...(run.sessionId === undefined ? {} : { sessionId: run.sessionId }),
+    ...(run.taskId === undefined ? {} : { taskId: run.taskId }),
   }
-  if (coalescedCount !== undefined) summary.coalescedCount = coalescedCount
-  if (run.sessionId !== undefined) summary.sessionId = run.sessionId
-  if (run.taskId !== undefined) summary.taskId = run.taskId
+  // 此后不再读取 cancelRequested;commit/append 等待中的 stop 只能补 artifact 字段。
+  type ArtifactFields = Pick<
+    RunSummary,
+    'artifactOutcome' | 'artifactId' | 'artifactError' | 'artifactTitle' | 'artifactFormat'
+  >
+  let artifactFields: ArtifactFields = {}
+  if (run.artifact) {
+    const { write, preparation } = run.artifact
+    if (cancelled) {
+      // 冻结为取消:丢弃暂存,绝不 commit/emit,不写任何 artifact 字段。
+      try {
+        await discardPreparedArtifact(write)
+      } catch (error) {
+        routeCtx.logger(
+          `artifact-discard-failed: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    } else if (preparation.outcome === 'failed') {
+      artifactFields = {
+        artifactOutcome: 'failed',
+        artifactError: preparation.artifactError,
+        ...(preparation.artifactTitle === undefined ? {} : { artifactTitle: preparation.artifactTitle }),
+        ...(preparation.artifactFormat === undefined ? {} : { artifactFormat: preparation.artifactFormat }),
+      }
+    } else if (preparation.outcome === 'prepared') {
+      let committed: Awaited<ReturnType<typeof commitPreparedArtifact>> | undefined
+      try {
+        // 幂等最终裁决在 commit 锁内;只有 created:true 才发布事件。
+        committed = await commitPreparedArtifact(write)
+      } catch (error) {
+        artifactFields = {
+          artifactOutcome: 'failed',
+          artifactError:
+            error instanceof Error && error.message === 'artifact-owner-deleted'
+              ? 'artifact-owner-deleted'
+              : 'artifact-write-failed',
+          artifactTitle: preparation.title,
+          artifactFormat: preparation.format,
+        }
+      }
+      if (committed) {
+        artifactFields = { artifactOutcome: 'created', artifactId: committed.artifact.artifactId }
+        if (committed.created) {
+          routeCtx.emit({
+            event: 'artifact/created',
+            artifact: committed.artifact,
+            sessionId: committed.artifact.sessionId,
+          })
+        }
+      }
+    }
+  }
+  Object.assign(summary, artifactFields)
   try {
     await appendRun(routeCtx.profileDir, automation.id, summary)
     // §5.1 崩溃窗口:Run 已落盘、终态注册表仍为 running。验收注入,生产惰性。
@@ -632,9 +706,10 @@ async function finishAutomation(
     inFlightRuns.delete(run.runId)
   }
   // 完成时不再推进 nextRunAt:进入 running 时已经按 startedAt 算过一次。
+  // 任务状态投影只认冻结值,不回读取消标记。
   await markAutomation(routeCtx.profileDir, automation.id, {
     lastRunAt: endedAt,
-    lastStatus: run.ok ? 'ok' : 'error',
+    lastStatus: ok ? 'ok' : 'error',
   })
   if (automation.schedule.kind === 'once') {
     await updateAutomation(routeCtx.profileDir, automation.id, { enabled: false })
@@ -644,11 +719,13 @@ async function finishAutomation(
     automationId: automation.id,
     runId: run.runId,
     projectId: automation.projectId,
-    ok: run.ok,
+    ok,
     status,
     durationMs,
     ...(run.sessionId === undefined ? {} : { sessionId: run.sessionId }),
     ...(run.taskId === undefined ? {} : { taskId: run.taskId }),
+    // 与同一 summary 的字段逐项同值:只展开这一份 artifactFields。
+    ...artifactFields,
   })
 }
 
@@ -686,7 +763,18 @@ export async function executeRun(
   // 释放必须覆盖发射与 markAutomation 本身:准入方已经占坑,执行体在这里拒绝
   // (注册表不可写、磁盘满)时没有回合接手,不释放就会把根写者与 started 条目永久留在表里。
   let handedOff = false
+  // 唯一写入 lease:会话身份已知后同步建立(不做 I/O),覆盖整个执行与结算;
+  // 所有出口在外层 finally discard。queued 取消早退发生在上面的同步段,不建 lease;
+  // 脚本没有写入内容,不建 lease。
+  let write: ArtifactWrite | undefined
   try {
+    if (sessionId !== undefined) {
+      write = beginArtifactWrite(routeCtx.profileDir, {
+        sessionId,
+        anchor: { kind: 'automation-run', automationId: automation.id, runId },
+        idempotency: { kind: 'automation-run', automationId: automation.id, runId },
+      })
+    }
     routeCtx.emit({
       event: 'automation/run-start',
       automationId: automation.id,
@@ -814,14 +902,15 @@ export async function executeRun(
     } finally {
       rejectRunPendingApprovals(ctx, runId)
     }
-    // 停止覆盖(规格 §8):标记在落盘前即生效——模型回合后来自己跑完也写 cancelled,
-    // 不写 ok;脚本被杀不记 timeout;产出保留已收集文本,什么都没有时正文为「已停止」。
-    // 被杀脚本的 runner 脚注是合成文本,不算产出:先剥掉再判空。
-    if (inFlightRuns.get(runId)?.cancelRequested === true) {
-      ok = false
-      status = 'cancelled'
-      output = stripRunnerExitCodeFooter(output)
-      if (!output.trim()) output = '已停止'
+    // 完整 collector 文本在摘要截断前交给封套适配器:只 prepare,不 commit。
+    // 已取消时可省掉 prepare;该预检查不是冻结点,finishAutomation 会重新读取取消。
+    let artifact: { write: ArtifactWrite; preparation: AutomationArtifactPreparation } | undefined
+    if (write !== undefined) {
+      const preparation: AutomationArtifactPreparation =
+        inFlightRuns.get(runId)?.cancelRequested === true
+          ? { outcome: 'skipped' }
+          : await prepareAutomationResult(write, output)
+      artifact = { write, preparation }
     }
     await finishAutomation(
       routeCtx,
@@ -834,11 +923,23 @@ export async function executeRun(
         status,
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(runTask === undefined ? {} : { taskId: runTask.id }),
+        ...(artifact === undefined ? {} : { artifact }),
       },
       trigger,
       coalescedCount,
     )
   } finally {
+    if (write !== undefined) {
+      // finish 已 discard 也安全;这里的重复调用覆盖早退与 finish 内丢弃失败。
+      // 清理失败只记日志,不阻断下面的 admission/inFlight 回收。
+      try {
+        await discardPreparedArtifact(write)
+      } catch (error) {
+        routeCtx.logger(
+          `artifact-discard-failed: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    }
     // 脚本:runScript 只在 close 后返回,这里释放正好落在进程树退出之后。
     // 早退(排队期间被停、项目已删除)、执行体拒绝(如 markAutomation 写盘失败)
     // 与启动失败同样经过这里。未交接就摘条目:否则 stop 会命中一条永远不会结束的轮。

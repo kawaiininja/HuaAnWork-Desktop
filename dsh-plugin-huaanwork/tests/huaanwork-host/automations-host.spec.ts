@@ -10,11 +10,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 
 import type { AutomationInfo, ProjectInfo, RpcEvent, RunSummary } from '../../src/client-huaanwork/rpc-types.ts'
 import { inFlightRuns, inFlightRunsOf } from '../../src/huaanwork-host/automation-inflight.ts'
 import { automationRunSessionId } from '../../src/huaanwork-host/automation-session-ids.ts'
+import { findArtifactByRun, listArtifacts, readArtifactContent } from '../../src/huaanwork-host/artifacts-host.ts'
 import {
   MISSING_PROJECT_OUTPUT,
   automationAdmissionRoot,
@@ -28,13 +29,62 @@ import {
   type AutomationRuntime,
   type AutomationTrigger,
 } from '../../src/huaanwork-host/automations-host.ts'
-import { createAutomation, normalizeAutomationInput, updateAutomation } from '../../src/huaanwork-host/automations-store.ts'
+import {
+  OUTPUT_MAX_CHARS,
+  createAutomation,
+  normalizeAutomationInput,
+  updateAutomation,
+} from '../../src/huaanwork-host/automations-store.ts'
 import { ROUTE_TABLE, type RouteContext, type RouteHandler, type RouteRequest } from '../../src/huaanwork-host/routes.ts'
 import { sessionIdFor } from '../../src/huaanwork-host/session-id.ts'
 import { AGENT_ID, sessionSend, type ListedAgent } from '../../src/huaanwork-host/sessions.ts'
 import { createProject, findAutomation, listAutomations, listTasks, recentRuns } from '../../src/huaanwork-host/stores.ts'
 import { createTurnScheduler, type TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import { neutralAutomationRootPath, neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
+
+/**
+ * 冻结竞态屏障:只包住真实导出的前后钩子,其余函数与文件存储照常运行。
+ * `discards` 用于观察每条已建 lease 是否在出口被回收。
+ */
+const artifactBarriers = vi.hoisted(() => ({
+  afterPrepare: undefined as undefined | (() => Promise<void>),
+  beforeCommit: undefined as undefined | (() => Promise<void>),
+  beforeAppend: undefined as undefined | (() => Promise<void>),
+  discardFailure: undefined as undefined | (() => Error | undefined),
+  discards: 0,
+}))
+
+vi.mock('../../src/huaanwork-host/artifacts-host.ts', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../src/huaanwork-host/artifacts-host.ts')>()
+  return {
+    ...real,
+    prepareArtifact: async (...args: Parameters<typeof real.prepareArtifact>) => {
+      await real.prepareArtifact(...args)
+      await artifactBarriers.afterPrepare?.()
+    },
+    commitPreparedArtifact: async (...args: Parameters<typeof real.commitPreparedArtifact>) => {
+      await artifactBarriers.beforeCommit?.()
+      return real.commitPreparedArtifact(...args)
+    },
+    discardPreparedArtifact: async (...args: Parameters<typeof real.discardPreparedArtifact>) => {
+      artifactBarriers.discards += 1
+      const failure = artifactBarriers.discardFailure?.()
+      if (failure !== undefined) throw failure
+      return real.discardPreparedArtifact(...args)
+    },
+  }
+})
+
+vi.mock('../../src/huaanwork-host/automations-store.ts', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../src/huaanwork-host/automations-store.ts')>()
+  return {
+    ...real,
+    appendRun: async (...args: Parameters<typeof real.appendRun>) => {
+      await artifactBarriers.beforeAppend?.()
+      return real.appendRun(...args)
+    },
+  }
+})
 
 type Mode = 'immediate' | 'hang' | 'throw'
 
@@ -323,7 +373,57 @@ async function startAutomation(
   return { runId, root, done }
 }
 
+/** 单次进入/放行屏障:调用方在入口 await entered,断言后 release。 */
+function promiseBarrier() {
+  const entered = Promise.withResolvers<void>()
+  const released = Promise.withResolvers<void>()
+  return {
+    entered: entered.promise,
+    release: () => released.resolve(),
+    wait: async () => {
+      entered.resolve()
+      await released.promise
+    },
+  }
+}
+
+async function storedRun(profileDir: string, automationId: string, runId: string): Promise<RunSummary> {
+  const summary = (await recentRuns(profileDir, automationId, 100)).find((run) => run.runId === runId)
+  if (!summary) throw new Error(`run summary missing: ${runId}`)
+  return summary
+}
+
+const artifactKeys = ['artifactOutcome', 'artifactId', 'artifactError', 'artifactTitle', 'artifactFormat'] as const
+
+function artifactFieldsOf(value: object) {
+  return Object.fromEntries(
+    artifactKeys.filter((key) => Object.hasOwn(value, key)).map((key) => [key, Reflect.get(value, key)]),
+  )
+}
+
+const envelopeText = JSON.stringify({
+  schemaVersion: 1,
+  type: 'huaanwork.task-result',
+  title: '季度报告',
+  format: 'html',
+  content: '<p>完整正文</p>',
+})
+
+/** 暂存根内实存的目录名;空数组即没有残留暂存(根目录本身为空时保留)。 */
+function stagingResidue(profileDir: string): string[] {
+  try {
+    return readdirSync(join(profileDir, '.artifacts-staging'))
+  } catch {
+    return []
+  }
+}
+
 afterEach(async () => {
+  artifactBarriers.afterPrepare = undefined
+  artifactBarriers.beforeCommit = undefined
+  artifactBarriers.beforeAppend = undefined
+  artifactBarriers.discardFailure = undefined
+  artifactBarriers.discards = 0
   for (const harness of live.splice(0)) {
     harness.release()
     for (const file of harness.releaseFiles) {
@@ -1115,6 +1215,9 @@ test('a rejected running marker releases the root before any handoff', { timeout
   // 没有交接:回合未启动,也没有运行记录。
   expect(h.followups).toHaveLength(0)
   expect(await recentRuns(h.profileDir, automation.id)).toEqual([])
+  // 已同步建立的写入 lease 由执行体出口回收,不留暂存。
+  expect(artifactBarriers.discards).toBe(1)
+  expect(stagingResidue(h.profileDir)).toEqual([])
 
   // 同一项目根的下一次用户发送不再排在这个写者后面。
   const userSession = sessionIdFor(h.neutral)
@@ -1845,6 +1948,10 @@ test('a stopped run whose project vanished records cancelled, not error', { time
   expect(runs).toHaveLength(1)
   expect(runs[0]).toMatchObject({ status: 'cancelled', ok: false, output: '已停止' })
   expect(inFlightRunsOf(automation.id)).toEqual([])
+  // 早退不带 artifact 字段;已建 lease 在出口回收。
+  expect(artifactFieldsOf(runs[0]!)).toEqual({})
+  expect(artifactBarriers.discards).toBe(1)
+  expect(stagingResidue(h.profileDir)).toEqual([])
 })
 
 test('stopping after the run record is persisted reports not stopped and adds no second record', { timeout: 15_000 }, async () => {
@@ -2051,6 +2158,9 @@ test('a queued script stopped while waiting for a slot releases its root', { tim
     h.events.some((event) => event.event === 'automation/run-start' && event.automationId === queued.id),
   ).toBe(false)
   expect(await recentRuns(h.profileDir, queued.id)).toEqual([])
+  // 排队早退发生在写入 lease 建立之前:没有 discard,也没有暂存根。
+  expect(artifactBarriers.discards).toBe(0)
+  expect(stagingResidue(h.profileDir)).toEqual([])
 
   writeFileSync(releases[1]!, '1')
   await waitRunEnd(h.events, holders[0]!.id)
@@ -2232,6 +2342,10 @@ test('task registry failure prevents model execution and leaves an unlinked erro
   expect(h.followups).toHaveLength(0)
   expect(h.events.map((event) => event.event)).not.toContain('automation/run-task')
   expect((await findAutomation(h.profileDir, automation.id)).activeRunId).toBeUndefined()
+  // 早退不带 artifact 字段,lease 与暂存在执行体出口回收。
+  expect(artifactFieldsOf(run)).toEqual({})
+  expect(artifactBarriers.discards).toBe(1)
+  expect(stagingResidue(h.profileDir)).toEqual([])
 })
 
 test('an agent run whose project vanished writes a failed run without a session or task', async () => {
@@ -2250,6 +2364,10 @@ test('an agent run whose project vanished writes a failed run without a session 
   expect(run.taskId).toBeUndefined()
   expect(h.events.map((event) => event.event)).not.toContain('automation/run-task')
   expect(h.followups).toHaveLength(0)
+  // 早退不带 artifact 字段,lease 与暂存在执行体出口回收。
+  expect(artifactFieldsOf(run)).toEqual({})
+  expect(artifactBarriers.discards).toBe(1)
+  expect(stagingResidue(h.profileDir)).toEqual([])
 })
 
 test('appendRun failure still removes the handed-off in-flight entry', async () => {
@@ -2263,4 +2381,360 @@ test('appendRun failure still removes the handed-off in-flight entry', async () 
   expect(inFlightRuns.has('soft-fail-1')).toBe(false)
   // 泄漏条目会让改绑/删自动化/删项目预检一直拒绝到 Host 重启。
   expect(hasInFlightAutomationRun(automation.id)).toBe(false)
+  // append 失败同样经过执行体出口:lease 回收、暂存不残留。
+  expect(artifactBarriers.discards).toBe(1)
+  expect(stagingResidue(h.profileDir)).toEqual([])
+})
+
+// ── Task 3: 封套提示注入、完整文本适配与冻结结算 ──────────────────────────
+
+test.each([
+  { label: 'attended', unattended: undefined },
+  { label: 'unattended', unattended: { enabled: true, allow: ['read'] } },
+])('injects the result contract for $label agent runs', async ({ unattended }) => {
+  const h = makeHarness()
+  const project = await createProject(h.profileDir, { root: h.neutral, name: '封套提示' })
+  const automation = await agentTask(h.profileDir, {
+    projectId: project.id,
+    name: '季度任务',
+    prompt: '请输出本季度经营分析',
+    ...(unattended !== undefined ? { unattended } : {}),
+  })
+  const run = await startAutomation(h, automation, { trigger: 'manual', runId: 'prompt-contract-1' })
+  await poll(() => h.followups.length === 1)
+  const prompt = h.followups[0]!.text
+  expect(prompt).toContain('<task-result-contract>')
+  expect(prompt).toContain('最终可见输出必须且只能是一个 JSON 对象')
+  expect(prompt.indexOf('请输出本季度经营分析')).toBeGreaterThan(-1)
+  expect(prompt.indexOf('请输出本季度经营分析')).toBeLessThan(prompt.indexOf('<task-result-contract>'))
+  expect(prompt.indexOf('</task-result-contract>')).toBeLessThan(prompt.indexOf('</automation-fire>'))
+  expect(prompt).toContain('<automation-fire')
+  h.release(h.followups[0]!.sessionId)
+  await run.done
+})
+
+test.each(['manual', 'schedule', 'catchup'] as const)(
+  'injects the result contract for %s triggered agent runs',
+  async (trigger) => {
+    const h = makeHarness()
+    const automation = await agentTask(h.profileDir, { name: `触发-${trigger}` })
+    const run = await startAutomation(h, automation, { trigger, runId: `prompt-${trigger}` })
+    await poll(() => h.followups.length === 1)
+    const prompt = h.followups[0]!.text
+    expect(prompt).toContain('<task-result-contract>')
+    expect(prompt.indexOf('做点事')).toBeLessThan(prompt.indexOf('<task-result-contract>'))
+    expect(prompt.indexOf('</task-result-contract>')).toBeLessThan(prompt.indexOf('</automation-fire>'))
+    await run.done
+  },
+)
+
+test('keeps the result contract out of ordinary sessions and script runs', async () => {
+  const h = makeHarness()
+  const userSession = sessionIdFor(h.neutral)
+  h.installUserAgent(userSession)
+  const sent = await handler('session.send')(
+    body({ text: '普通消息', sessionId: userSession, tabId: 'tab-plain' }),
+    h.routeCtx,
+  )
+  expect(sent).toMatchObject({ started: true })
+  expect(h.userFollowups).toHaveLength(1)
+  expect(readText(h.userFollowups[0])).toBe('普通消息')
+
+  const script = await scriptTask(h.profileDir, nodeEval('process.stdout.write("script-ok")'))
+  const run = await startAutomation(h, script, { runId: 'script-no-contract' })
+  await run.done
+  const ended = await waitRunEnd(h.events, script.id)
+  expect(ended).toMatchObject({ ok: true })
+  const stored = await storedRun(h.profileDir, script.id, run.runId)
+  expect(stored.output).toBe('script-ok')
+  // 脚本不准备 Artifact:无字段、无正文记录、没有封套提示外溢到命令或事件。
+  expect(artifactFieldsOf(stored)).toEqual({})
+  expect(await findArtifactByRun(h.profileDir, script.id, run.runId)).toBeUndefined()
+  expect(JSON.stringify(h.events)).not.toContain('task-result-contract')
+})
+
+test('cancels while preparation is pending without publishing any artifact fields', async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir)
+  const gate = promiseBarrier()
+  artifactBarriers.afterPrepare = gate.wait
+  const run = await startAutomation(h, automation, { runId: 'stop-preparing' })
+  try {
+    await gate.entered
+    const sessionId = automationRunSessionId(automation.id, run.runId)
+    expect(await listArtifacts(h.profileDir, sessionId)).toEqual([])
+    expect(await stopAutomation(automation.id)).toEqual({ stopped: true })
+    gate.release()
+    await run.done
+    const summary = await storedRun(h.profileDir, automation.id, run.runId)
+    expect(summary).toMatchObject({ ok: false, status: 'cancelled' })
+    expect(artifactFieldsOf(summary)).toEqual({})
+    expect(await findAutomation(h.profileDir, automation.id)).toMatchObject({ lastStatus: 'error' })
+    const end = h.events.find((event) => event.event === 'automation/run-end' && event.runId === run.runId)!
+    expect(end).toMatchObject({ ok: false, status: 'cancelled' })
+    expect(artifactFieldsOf(end)).toEqual({})
+    expect(await listArtifacts(h.profileDir, sessionId)).toEqual([])
+    expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
+    expect(stagingResidue(h.profileDir)).toEqual([])
+    // 冻结取消在 finish 丢弃一次,执行体出口再幂等丢弃一次。
+    expect(artifactBarriers.discards).toBe(2)
+  } finally {
+    gate.release()
+    await run.done
+    artifactBarriers.afterPrepare = undefined
+  }
+})
+
+test.each(['beforeCommit', 'beforeAppend'] as const)(
+  'freezes execution before %s even if stop arrives',
+  async (point) => {
+    const h = makeHarness()
+    h.state.reply = envelopeText
+    const automation = await agentTask(h.profileDir)
+    const gate = promiseBarrier()
+    artifactBarriers[point] = gate.wait
+    const run = await startAutomation(h, automation, { runId: `stop-${point}` })
+    try {
+      await gate.entered
+      expect(await stopAutomation(automation.id)).toEqual({ stopped: true })
+      gate.release()
+      await run.done
+      const summary = await storedRun(h.profileDir, automation.id, run.runId)
+      expect(summary).toMatchObject({ ok: true, status: 'ok', output: envelopeText, artifactOutcome: 'created' })
+      expect(await findAutomation(h.profileDir, automation.id)).toMatchObject({ lastStatus: 'ok' })
+      const end = h.events.find((event) => event.event === 'automation/run-end' && event.runId === run.runId)!
+      expect(end).toMatchObject({ ok: true, status: 'ok' })
+      expect(artifactFieldsOf(end)).toEqual(artifactFieldsOf(summary))
+      expect(await readArtifactContent(h.profileDir, summary.sessionId!, summary.artifactId!))
+        .toEqual(Buffer.from('<p>完整正文</p>', 'utf8'))
+      expect(inFlightRuns.has(run.runId)).toBe(false)
+      expect(await stopAutomation(automation.id)).toEqual({ stopped: false })
+      // 正常结束同样回收 lease,且不留下暂存目录。
+      expect(artifactBarriers.discards).toBe(1)
+      expect(stagingResidue(h.profileDir)).toEqual([])
+    } finally {
+      gate.release()
+      await run.done
+      artifactBarriers[point] = undefined
+    }
+  },
+)
+
+test('replays the same run concurrently with one body and one created event', { timeout: 15_000 }, async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir)
+  const runId = 'replay-concurrent'
+  let arrived = 0
+  const firstArrival = Promise.withResolvers<void>()
+  const bothArrivals = Promise.withResolvers<void>()
+  const released = Promise.withResolvers<void>()
+  artifactBarriers.afterPrepare = async () => {
+    arrived += 1
+    if (arrived === 1) firstArrival.resolve()
+    if (arrived === 2) bothArrivals.resolve()
+    await released.promise
+  }
+  const first = await startAutomation(h, automation, { runId })
+  try {
+    await firstArrival.promise
+    // 首轮写者名额已由回合结束释放:同一 runId 再受理才会进入第二个 prepare。
+    await poll(() => h.scheduler.activeTurnCount() === 0)
+    const second = await startAutomation(h, automation, { runId })
+    await bothArrivals.promise
+    released.resolve()
+    await Promise.all([first.done, second.done])
+  } finally {
+    released.resolve()
+    await first.done
+    artifactBarriers.afterPrepare = undefined
+  }
+
+  const sessionId = automationRunSessionId(automation.id, runId)
+  const summaries = (await recentRuns(h.profileDir, automation.id, 100)).filter((run) => run.runId === runId)
+  expect(summaries).toHaveLength(2)
+  expect(summaries.every((run) => run.artifactOutcome === 'created')).toBe(true)
+  const artifactIds = new Set(summaries.map((run) => run.artifactId))
+  expect(artifactIds.size).toBe(1)
+  expect(await listArtifacts(h.profileDir, sessionId)).toHaveLength(1)
+  const ends = h.events.filter(
+    (event): event is Extract<RpcEvent, { event: 'automation/run-end' }> =>
+      event.event === 'automation/run-end' && event.runId === runId,
+  )
+  expect(ends).toHaveLength(2)
+  expect(new Set(ends.map((event) => event.artifactId)).size).toBe(1)
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toHaveLength(1)
+})
+
+test('replays the same run sequentially without rewriting the body or event', async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir)
+  const runId = 'replay-sequential'
+  const first = await startAutomation(h, automation, { runId })
+  await first.done
+  await waitRunEnd(h.events, automation.id, 1)
+  await poll(() => h.scheduler.activeTurnCount() === 0)
+  const second = await startAutomation(h, automation, { runId })
+  await second.done
+  await waitRunEnd(h.events, automation.id, 2)
+
+  const sessionId = automationRunSessionId(automation.id, runId)
+  expect(await listArtifacts(h.profileDir, sessionId)).toHaveLength(1)
+  const ends = h.events.filter(
+    (event): event is Extract<RpcEvent, { event: 'automation/run-end' }> =>
+      event.event === 'automation/run-end' && event.runId === runId,
+  )
+  expect(ends).toHaveLength(2)
+  expect(new Set(ends.map((event) => event.artifactId)).size).toBe(1)
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toHaveLength(1)
+})
+
+test('records a named preparation failure with the validated title and format', async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir)
+  artifactBarriers.afterPrepare = async () => {
+    throw new Error('artifact-write-failed')
+  }
+  const run = await startAutomation(h, automation, { runId: 'prepare-failed' })
+  try {
+    await run.done
+  } finally {
+    artifactBarriers.afterPrepare = undefined
+  }
+  const summary = await storedRun(h.profileDir, automation.id, run.runId)
+  expect(summary).toMatchObject({ ok: true, status: 'ok', output: envelopeText })
+  expect(artifactFieldsOf(summary)).toEqual({
+    artifactOutcome: 'failed',
+    artifactError: 'artifact-write-failed',
+    artifactTitle: '季度报告',
+    artifactFormat: 'html',
+  })
+  const end = h.events.find((event) => event.event === 'automation/run-end' && event.runId === run.runId)!
+  expect(end).toMatchObject({ ok: true, status: 'ok' })
+  expect(artifactFieldsOf(end)).toEqual(artifactFieldsOf(summary))
+  expect(await findAutomation(h.profileDir, automation.id)).toMatchObject({ lastStatus: 'ok' })
+  expect(await listArtifacts(h.profileDir, automationRunSessionId(automation.id, run.runId))).toEqual([])
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
+  expect(artifactBarriers.discards).toBe(1)
+  expect(stagingResidue(h.profileDir)).toEqual([])
+})
+
+test.each([
+  { label: 'owner deletion', error: 'artifact-owner-deleted', expected: 'artifact-owner-deleted' },
+  { label: 'an unknown write error', error: 'disk-full', expected: 'artifact-write-failed' },
+] as const)('maps a commit failure from $label to a stable artifact error', async ({ error, expected }) => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir)
+  artifactBarriers.beforeCommit = async () => {
+    throw new Error(error)
+  }
+  const run = await startAutomation(h, automation, { runId: `commit-failed-${expected}` })
+  try {
+    await run.done
+  } finally {
+    artifactBarriers.beforeCommit = undefined
+  }
+  const summary = await storedRun(h.profileDir, automation.id, run.runId)
+  // 冻结的 ok/status 仍是原执行结果,存储失败只补 artifact 字段。
+  expect(summary).toMatchObject({ ok: true, status: 'ok' })
+  expect(artifactFieldsOf(summary)).toEqual({
+    artifactOutcome: 'failed',
+    artifactError: expected,
+    artifactTitle: '季度报告',
+    artifactFormat: 'html',
+  })
+  const end = h.events.find((event) => event.event === 'automation/run-end' && event.runId === run.runId)!
+  expect(end).toMatchObject({ ok: true, status: 'ok' })
+  expect(artifactFieldsOf(end)).toEqual(artifactFieldsOf(summary))
+  expect(await listArtifacts(h.profileDir, automationRunSessionId(automation.id, run.runId))).toEqual([])
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
+  expect(artifactBarriers.discards).toBe(1)
+  expect(stagingResidue(h.profileDir)).toEqual([])
+})
+
+test('rejects a marked envelope with an unsupported format before any storage write', async () => {
+  const h = makeHarness()
+  h.state.reply = JSON.stringify({
+    schemaVersion: 1,
+    type: 'huaanwork.task-result',
+    title: '季度报告',
+    format: 'pdf',
+    content: '完整正文',
+  })
+  const automation = await agentTask(h.profileDir)
+  const run = await startAutomation(h, automation, { runId: 'invalid-envelope' })
+  await run.done
+  const summary = await storedRun(h.profileDir, automation.id, run.runId)
+  expect(summary).toMatchObject({ ok: true, status: 'ok' })
+  expect(artifactFieldsOf(summary)).toEqual({ artifactOutcome: 'failed', artifactError: 'invalid-result-envelope' })
+  const end = h.events.find((event) => event.event === 'automation/run-end' && event.runId === run.runId)!
+  expect(artifactFieldsOf(end)).toEqual(artifactFieldsOf(summary))
+  expect(await listArtifacts(h.profileDir, automationRunSessionId(automation.id, run.runId))).toEqual([])
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
+  expect(stagingResidue(h.profileDir)).toEqual([])
+})
+
+test('stores the complete envelope content before the run summary is truncated', async () => {
+  const h = makeHarness()
+  const content = 'x'.repeat(40_000)
+  h.state.reply = JSON.stringify({
+    schemaVersion: 1,
+    type: 'huaanwork.task-result',
+    title: '长报告',
+    format: 'markdown',
+    content,
+  })
+  const automation = await agentTask(h.profileDir)
+  const run = await startAutomation(h, automation, { runId: 'long-body' })
+  await run.done
+  const summary = await storedRun(h.profileDir, automation.id, run.runId)
+  expect(summary).toMatchObject({ ok: true, status: 'ok', artifactOutcome: 'created' })
+  // 运行摘要沿用既有 32 KiB 截断,完整正文只进 Artifact。
+  expect(summary.output.length).toBe(OUTPUT_MAX_CHARS + '…（已截断）'.length)
+  expect((await readArtifactContent(h.profileDir, summary.sessionId!, summary.artifactId!)).toString('utf8'))
+    .toBe(content)
+})
+
+test('logs a failing artifact discard without blocking the cancelled record', async () => {
+  const h = makeHarness()
+  h.state.reply = envelopeText
+  const automation = await agentTask(h.profileDir)
+  const gate = promiseBarrier()
+  artifactBarriers.afterPrepare = gate.wait
+  const logs: string[] = []
+  h.routeCtx.logger = (message: string) => logs.push(message)
+  let failedOnce = false
+  artifactBarriers.discardFailure = () => {
+    if (failedOnce) return undefined
+    failedOnce = true
+    return new Error('artifact-discard-eio')
+  }
+  const run = await startAutomation(h, automation, { runId: 'discard-failed' })
+  try {
+    await gate.entered
+    expect(await stopAutomation(automation.id)).toEqual({ stopped: true })
+    gate.release()
+    await run.done
+  } finally {
+    gate.release()
+    await run.done
+    artifactBarriers.afterPrepare = undefined
+    artifactBarriers.discardFailure = undefined
+  }
+  const summary = await storedRun(h.profileDir, automation.id, run.runId)
+  expect(summary).toMatchObject({ ok: false, status: 'cancelled' })
+  expect(artifactFieldsOf(summary)).toEqual({})
+  const end = h.events.find((event) => event.event === 'automation/run-end' && event.runId === run.runId)!
+  expect(end).toMatchObject({ ok: false, status: 'cancelled' })
+  expect(logs.some((message) => message.includes('artifact-discard-failed') && message.includes('artifact-discard-eio')))
+    .toBe(true)
+  // finish 的取消丢弃失败被报告;executeRun 出口再丢一次,恢复后清掉暂存。
+  expect(artifactBarriers.discards).toBe(2)
+  expect(stagingResidue(h.profileDir)).toEqual([])
+  expect(await listArtifacts(h.profileDir, automationRunSessionId(automation.id, run.runId))).toEqual([])
+  expect(h.events.filter((event) => event.event === 'artifact/created')).toEqual([])
 })
