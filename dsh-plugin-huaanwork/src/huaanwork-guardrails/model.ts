@@ -51,11 +51,11 @@ const DEFAULT_MAX_TOKENS = 16_384;
  * 运行时注册工具放行谓词：dsh-base 静态白名单之外，`call_host_tool`（@ 小工具）、
  * `propose_plan` / `request_input`（分流名字，这里只放行不执行）、
  * `agent_propose` / `agent_commit` / `agent_skill_run` / `agent_http`（智能体包创建与
- * `@slug` 运行链路，运行时注册）、`skill_propose` / `skill_commit`（对话创建技能）
- * 与 `mcp__*`（会话级 MCP 挂载）也是发给模型的 tools
- * schema 里的合法名字。静态过滤会把模型的这类原生调用静默丢弃，回合「正常结束但
- * 任务没做」。执行侧仍有 policy 的 attached 检查兜底（未挂载一律 deny），放行解析
- * 不扩大权限面。
+ * `@slug` 运行链路，运行时注册）、`skill_propose` / `skill_commit`（对话创建技能）、
+ * `result_present`（普通父会话结果页提交）与 `mcp__*`（会话级 MCP 挂载）也是发给
+ * 模型的 tools schema 里的合法名字。静态过滤会把模型的这类原生调用静默丢弃，回合
+ * 「正常结束但任务没做」或退化成 NO_ACTION / EMPTY_RESPONSE。执行侧仍有 policy 的
+ * attached 检查兜底（未挂载一律 deny），放行解析不扩大权限面。
  */
 export function isRegisteredToolName(name: string): boolean {
   return KNOWN_TOOL_NAMES.has(name)
@@ -74,6 +74,7 @@ export function isRegisteredToolName(name: string): boolean {
     || name === "agent_http"
     || name === "skill_propose"
     || name === "skill_commit"
+    || name === "result_present"
     || name.startsWith("mcp__");
 }
 

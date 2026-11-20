@@ -32,6 +32,7 @@ it(
       args: [fileURLToPath(mainUrl)],
       env,
       chromiumSandbox: true,
+      timeout: 15_000,
     });
     let receiver: ReturnType<typeof createServer> | undefined;
     let sockets: WebSocketServer | undefined;
@@ -92,12 +93,15 @@ it(
       const frameName = "huaanwork-artifact-11111111-1111-4111-8111-111111111111";
       await page.setContent(`<iframe name="${frameName}" sandbox="allow-scripts" src="about:blank"></iframe>`);
       const frameTreeNodeId = await app.evaluate(
-        async (_electron, input) => {
-          const { guard, artifactFrameId } = await import(input.mainUrl);
-          guard.registerEmptyFrame(input.frameName);
-          return artifactFrameId(input.frameName);
+        (_electron, input) => {
+          const probe = Reflect.get(globalThis, "__huaanworkArtifactSandboxProbe") as {
+            registerEmptyFrame(name: string): void;
+            artifactFrameId(name: string): number | undefined;
+          };
+          probe.registerEmptyFrame(input.frameName);
+          return probe.artifactFrameId(input.frameName);
         },
-        { mainUrl, frameName },
+        { frameName },
       );
       expect(typeof frameTreeNodeId).toBe("number");
       await page.locator("iframe").evaluate((element, content) => {
@@ -249,19 +253,25 @@ it(
           .poll(
             async () =>
               app.evaluate(
-                async (_electron, input) => {
-                  const { blockedNavigations } = await import(input.mainUrl);
-                  return blockedNavigations.some(
-                    (event: { url: string; frameTreeNodeId?: number }) =>
-                      event.url === input.url && event.frameTreeNodeId === input.frameTreeNodeId,
+                (_electron, input) => {
+                  const probe = Reflect.get(globalThis, "__huaanworkArtifactSandboxProbe") as {
+                    blockedNavigations: Array<{ url: string; frameTreeNodeId?: number }>;
+                  };
+                  return probe.blockedNavigations.some(
+                    (event) => event.url === input.url && event.frameTreeNodeId === input.frameTreeNodeId,
                   );
                 },
-                { mainUrl, url: navigationUrl, frameTreeNodeId },
+                { url: navigationUrl, frameTreeNodeId },
               ),
             { timeout: 2000 },
           )
           .toBe(true);
-        expect(frame.url()).toBe("about:srcdoc");
+        // Chromium CDP 对 sandboxed srcdoc 子 frame 的 Frame.url 常保留初始 about:blank；
+        // 直接读取 frame 内真实 location.href 并复核初始文档上的 window.ran 仍在，才能证明未发生导航。
+        expect(await frame.evaluate(() => ({ href: location.href, ran: Reflect.get(window, "ran") }))).toEqual({
+          href: "about:srcdoc",
+          ran: true,
+        });
         expect(requests).toEqual([]);
         expect(socketRequests).toEqual([]);
       }

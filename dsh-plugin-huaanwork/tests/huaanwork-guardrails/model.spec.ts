@@ -879,6 +879,53 @@ test("skill creation tools survive the static tool filter", () => {
   assert.equal(isRegisteredToolName("skill_unknown"), false);
 });
 
+test("result_present survives the static tool filter and streams as a tool-call instead of NO_ACTION", async () => {
+  assert.equal(isRegisteredToolName("result_present"), true);
+  const argsJson = JSON.stringify({ title: "验收报告", format: "markdown", content: "## 结论\n- 通过" });
+  const payloads = [
+    JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "r1", function: { name: "result_present", arguments: argsJson } }] } }],
+    }),
+  ];
+  const parsed = parseSseToolCalls(payloads, isRegisteredToolName);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0]?.name, "result_present");
+
+  // 复现真机验收 D2：思考之后紧跟原生 result_present 工具调用，适配器必须直接发出
+  // tool-call，而不得把调用静默丢弃并重放成 NO_ACTION / EMPTY_RESPONSE。
+  const original = globalThis.fetch;
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return sseResponse([
+      { choices: [{ delta: { reasoning_content: "调用 result_present 提交报告。" } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "r1", function: { name: "result_present", arguments: argsJson } }] }, finish_reason: "tool_calls" }] },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-result-present-model-"));
+    writeFileSync(
+      join(profileDir, "huaanwork-settings.json"),
+      JSON.stringify({ base_url: "http://127.0.0.1:11434/v1", model: "local", api_key: "" }),
+      "utf8",
+    );
+    const adapter = new HuaAnWorkAdapter(profileDir);
+    const chunks = await collect(adapter.stream(userOptions()));
+    assert.equal(fetchCount, 1);
+    const toolEnd = chunks.find(
+      (chunk) => chunk.type === "block-end" && chunk.block.type === "tool-call",
+    );
+    assert.ok(toolEnd && toolEnd.type === "block-end" && toolEnd.block.type === "tool-call");
+    assert.equal(toolEnd.block.name, "result_present");
+    assert.deepEqual(JSON.parse(toolEnd.block.arguments), JSON.parse(argsJson));
+    const finish = chunks.at(-1);
+    assert.deepEqual(finish, { type: "finish", reason: { kind: "tool-calls" } });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 describe("session-bound model selection", () => {
   function profileWithSettings(settings: Record<string, unknown>): string {
     const root = mkdtempSync(join(tmpdir(), "huaanwork-session-model-"));

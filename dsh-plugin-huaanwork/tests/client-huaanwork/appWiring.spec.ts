@@ -1019,6 +1019,38 @@ test("resuming an existing session tab activates it without replaying history ov
   );
 });
 
+test("reopening the default workspace session after restart hydrates an empty pre-bound work-1 tab instead of leaving it blank", () => {
+  // 复现真机整应用重启缺口：启动期 bindDefaultTabSessions 会把空的欢迎标签 work-1 预绑定到
+  // 默认工作区稳定会话 ID；若 resumeFromView 不区分空预绑定标签，重开该会话会直接跳过
+  // historyItemsWithArtifacts 而停在空白欢迎页；同样地，WS ready 对账也必须跳过空标签，
+  // 避免在用户尚未打开历史前把旧 Artifact 倾倒进空白欢迎页。
+  const resumeBody = functionBody("async function resumeFromView(", "async function resumeHistorySession(");
+  assert.match(
+    resumeBody,
+    /const existing = chatTabs\.find\(\(tab\) => tab\.sessionId === sessionId && tab\.items\.length > 0\)/,
+    "only a populated tab should bypass history replay as authoritative live state",
+  );
+  assert.match(
+    resumeBody,
+    /const emptyBound = chatTabs\.find\(\(tab\) => tab\.sessionId === sessionId && tab\.items\.length === 0\)/,
+    "an empty pre-bound tab must be hydrated in place with history and artifacts",
+  );
+  const reconcileBody = functionBody(
+    "function reconcileBoundArtifacts(): void {",
+    "/** WS ready 后对每个绑定了会话的标签各对账一次",
+  );
+  assert.match(
+    reconcileBody,
+    /if \(tab\.items\.length === 0\) continue;/,
+    "reconnect artifact reconciliation must skip empty pre-bound tabs",
+  );
+  assert.match(
+    reconcileBody,
+    /candidate\.items\.length === 0/,
+    "reconnect artifact reconciliation must re-check items.length inside setChatTabs",
+  );
+});
+
 test("history-load paths reconcile the host snapshot so run cards survive a fresh open", () => {
   // selectSubtask 的「有会话」历史分支:回放只产生消息条目,必须按 id + sessionId 对账。
   const selectAt = APP_SOURCE.indexOf("async function selectSubtask(");

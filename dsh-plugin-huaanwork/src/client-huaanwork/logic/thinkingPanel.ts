@@ -146,6 +146,9 @@ export function hasAssistantTextAfter(items: readonly TurnItem[], index: number)
     if (item.kind === "user" && !isUnstartedUserItem(item)) return false;
     if (item.kind === "thinking" && item.roundKey !== undefined && item.roundKey !== current.roundKey) return false;
     if (item.kind === "assistant" && item.roundKey !== undefined && item.roundKey !== current.roundKey) return false;
+    // result_present / 自动化新协议产出的结果卡或失败卡本身就是本步可见产出；
+    // 尾部“未定位的历史结果”分组(artifact-group)与加载占位(artifact-loading)不算。
+    if (item.kind === "artifact" || item.kind === "artifact-error") return true;
     if (item.kind === "assistant") {
       const visible = resolveThinking({ reasoning: current.thought, assistantText: item.text }).visible.trim();
       if (visible.length > 0) return true;

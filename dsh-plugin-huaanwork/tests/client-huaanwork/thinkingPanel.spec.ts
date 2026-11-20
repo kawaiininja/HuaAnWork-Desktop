@@ -239,3 +239,31 @@ test("hasAssistantTextAfter without roundKeys keeps scanning to the next user", 
   ];
   assert.equal(hasAssistantTextAfter(items, 0), true);
 });
+
+test("an artifact or artifact-error card settles a preceding thinking panel instead of leaving it in-progress", () => {
+  // 普通会话调用 result_present：第 1 步思考产出 artifact 卡，第 2 步才发助手说明（不同 roundKey）。
+  const ordinaryTurn = [
+    { kind: "thinking" as const, thought: "准备生成交互图表", roundKey: 1 },
+    { kind: "artifact" as const },
+    { kind: "assistant" as const, text: "已提交结果页。", roundKey: 2 },
+  ];
+  assert.equal(hasAssistantTextAfter(ordinaryTurn, 0), true);
+  assert.deepEqual(
+    thinkingChrome({ hasAssistantText: hasAssistantTextAfter(ordinaryTurn, 0), userToggled: null, interrupted: false }),
+    { title: "思考 · 已生成", expanded: false },
+  );
+
+  // 新协议自动化失败卡同样取代原始封套，属于本轮可见结果。
+  const automationError = [
+    { kind: "thinking" as const, thought: "整理自动化封套", roundKey: 1 },
+    { kind: "artifact-error" as const },
+  ];
+  assert.equal(hasAssistantTextAfter(automationError, 0), true);
+
+  // 尾部“未定位的历史结果”分组不属于当前活跃思考的产出，不能误收起进行中的思考。
+  const withTrailingGroup = [
+    { kind: "thinking" as const, thought: "正在思考", roundKey: 1 },
+    { kind: "artifact-group" as const },
+  ];
+  assert.equal(hasAssistantTextAfter(withTrailingGroup, 0), false);
+});

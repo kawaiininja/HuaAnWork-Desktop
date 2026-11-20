@@ -2777,6 +2777,9 @@ export default function App() {
     for (const tab of chatTabsRef.current) {
       const sessionId = tab.sessionId;
       if (!sessionId || tab.automationId || seen.has(sessionId)) continue;
+      // 启动期 bindDefaultTabSessions 会把空的欢迎标签 work-1 预绑到默认工作区稳定会话；
+      // 未展开对话内容的空标签不得在 WS ready 时直接倾倒历史 Artifact（会在重开前污染欢迎页）。
+      if (tab.items.length === 0) continue;
       seen.add(sessionId);
       const tabId = tab.id;
       void (async () => {
@@ -2784,7 +2787,7 @@ export default function App() {
         if (artifacts.length === 0 || epoch !== reconcileEpochRef.current) return;
         setChatTabs((prev) =>
           prev.map((candidate) => {
-            if (candidate.id !== tabId || candidate.sessionId !== sessionId) return candidate;
+            if (candidate.id !== tabId || candidate.sessionId !== sessionId || candidate.items.length === 0) return candidate;
             const items = insertListedArtifactsIntoHistory(candidate.items, artifacts, allocId);
             // 全部命中已有卡片时不产生多余的状态更新。
             return items.length === candidate.items.length ? candidate : { ...candidate, items };
@@ -3811,7 +3814,7 @@ export default function App() {
       return;
     }
     setResumeBusy(false);
-    const existing = chatTabs.find((tab) => tab.sessionId === sessionId);
+    const existing = chatTabs.find((tab) => tab.sessionId === sessionId && tab.items.length > 0);
     if (existing) {
       // 已有标签的运行态（含子代理运行卡）是权威的:只撤失败标记,不用历史快照覆盖。
       setChatTabs((prev) =>
@@ -3819,25 +3822,32 @@ export default function App() {
       );
       setActiveTab(existing.id);
     } else {
-      const id = `work-${nextChatSeq.current}`;
-      nextChatSeq.current += 1;
-      const label = view.title && view.title !== sessionId ? view.title.slice(0, 24) : `任务 ${nextChatSeq.current - 1}`;
+      // 启动期 bindDefaultTabSessions 预绑定到默认会话的空欢迎标签（items 为空）：
+      // 重开该历史会话时原地回填历史记录与 Artifact，既不留在空白欢迎页，也不新建重复标签。
+      const emptyBound = chatTabs.find((tab) => tab.sessionId === sessionId && tab.items.length === 0);
+      const id = emptyBound?.id ?? `work-${nextChatSeq.current}`;
+      if (!emptyBound) nextChatSeq.current += 1;
+      const label = view.title && view.title !== sessionId
+        ? view.title.slice(0, 24)
+        : (emptyBound?.label ?? `任务 ${nextChatSeq.current - 1}`);
       const items = await historyItemsWithArtifacts(view);
       // 防御：恢复的标签一律不绑项目（评审 P2-4），杜绝『有历史却命中懒创建』
-      setChatTabs((prev) => [
-        ...prev,
-        {
-          id,
-          label,
-          items,
-          sessionFailed: false,
-          projectId: null,
-          pendingPick: false,
-          sessionId,
-          turnFinalByUserId: historicalTurnFinalByUserId(items),
-          turnFinalWithoutUser: true,
-        },
-      ]);
+      const hydrated: ChatTab = {
+        id,
+        label,
+        items,
+        sessionFailed: false,
+        projectId: null,
+        pendingPick: false,
+        sessionId,
+        turnFinalByUserId: historicalTurnFinalByUserId(items),
+        turnFinalWithoutUser: true,
+      };
+      setChatTabs((prev) =>
+        emptyBound
+          ? prev.map((tab) => (tab.id === emptyBound.id && tab.items.length === 0 ? { ...tab, ...hydrated } : tab))
+          : [...prev, hydrated],
+      );
       setActiveTab(id);
       // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理运行卡补回来。
       void reconcileSubagentRuns(id, sessionId);
