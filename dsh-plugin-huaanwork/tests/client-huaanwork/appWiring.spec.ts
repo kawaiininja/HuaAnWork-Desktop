@@ -2312,6 +2312,31 @@ test("the diff follows the session's own tab", () => {
   assert.match(diffBody, /if \(activeTabRef\.current === diffTab\) setRightTab\("diff"\);/, "a background diff never switches the pane");
 });
 
+test("a new artifact never opens or switches the right pane", () => {
+  // 规格 §7.1：不为每个结果自动打开右栏；唯一打开路径是用户点卡 handleOpenArtifact。
+  const createdAt = APP_SOURCE.indexOf('if (event.event === "artifact/created") {');
+  assert.ok(createdAt >= 0, "the artifact/created branch is still wired");
+  const createdBody = blockAfter(APP_SOURCE.slice(createdAt), 'if (event.event === "artifact/created") {').body;
+  assert.doesNotMatch(createdBody, /setRightTab|setRightCollapsed/, "a created result never auto-opens the pane");
+});
+
+test("the preview keeps a raw download entry in the error state", () => {
+  // 规格 §7.2：下载只需双 ID；读取/渲染失败不得移除原始下载入口。
+  const downloadBody = blockAfter(APP_SOURCE, "async function downloadArtifact(): Promise<void> {").body;
+  assert.match(downloadBody, /artifactId: previewArtifactId/, "download targets the current selection");
+  assert.doesNotMatch(downloadBody, /previewArtifactLoaded/, "download must not depend on a loaded body");
+  const start = APP_SOURCE.indexOf("<ArtifactPreview");
+  const call = APP_SOURCE.slice(start, APP_SOURCE.indexOf("/>", start));
+  assert.match(call, /onDownload=\{\(\) => void downloadArtifact\(\)\}/, "the download entry is not gated on a loaded body");
+});
+
+test("preview busy tracks the artifact being read", () => {
+  // 快速连点两张卡：先返回的请求不得清掉后一张的 busy，避免闪现空态。
+  assert.match(APP_SOURCE, /const \[artifactPreviewBusy, setArtifactPreviewBusy\] = useState<string \| null>\(null\);/);
+  assert.match(APP_SOURCE, /setArtifactPreviewBusy\(\(busy\) => \(busy === artifactId \? null : busy\)\);/);
+  assert.match(APP_SOURCE, /artifactPreviewBusy === previewArtifactId \?/, "only the selected artifact's own read shows busy");
+});
+
 /** 活动回合 + 一条排队中（带 `queueItemId`）的用户消息：B 还没开始执行。 */
 function turnWithQueuedMessage(): Parameters<typeof AppModule.appendToken>[0] {
   return [

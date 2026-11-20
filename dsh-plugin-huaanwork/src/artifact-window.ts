@@ -6,6 +6,7 @@
  * 沙箱渲染器与非持久独占 partition。本模块不得引入 Electron 或 React 运行时。
  */
 import type { ArtifactRef } from './client-huaanwork/rpc-types.ts'
+import { isSinglePathSegment } from './path-segment.ts'
 import type { DesktopShellSpec } from './runtime.ts'
 
 /** 全屏窗口启动标记;其他值一律不进入 Artifact 模式。 */
@@ -15,14 +16,6 @@ export const ARTIFACT_FRAME_NAME_PREFIX = 'huaanwork-artifact-'
 
 const ARTIFACT_FRAME_NAME_PATTERN =
   /^huaanwork-artifact-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
-
-/** 单路径段:与 Artifact 存储的会话/记录目录名同一约束。 */
-function isArtifactIdSegment(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length === 0) return false
-  if (value === '.' || value === '..') return false
-  if (/[/\\:*?"<>|\x00-\x1f]/.test(value)) return false
-  return !value.endsWith('.') && !value.endsWith(' ')
-}
 
 /** 原生侧只接受客户端生成的 `huaanwork-artifact-<uuid>` 名称。 */
 export function isArtifactFrameName(value: unknown): value is string {
@@ -39,7 +32,7 @@ export function artifactWindowTargetFromSearch(search: string): ArtifactRef | un
   if (params.get(ARTIFACT_WINDOW_PARAM) !== '1') return undefined
   const sessionId = params.get('sessionId')
   const artifactId = params.get('artifactId')
-  if (!isArtifactIdSegment(sessionId) || !isArtifactIdSegment(artifactId)) return undefined
+  if (!isSinglePathSegment(sessionId) || !isSinglePathSegment(artifactId)) return undefined
   return { sessionId, artifactId }
 }
 
@@ -57,6 +50,18 @@ export interface ArtifactWindowOptions {
 }
 
 /**
+ * 全屏窗口的业务 URL：双 ID 启动参数。建窗与单例复用加载共用同一构建,
+ * 复用时不重建窗口,也不更换 partition。
+ */
+export function artifactWindowUrl(spec: Pick<DesktopShellSpec, 'url'>, target: ArtifactRef): string {
+  const url = new URL(spec.url)
+  url.searchParams.set(ARTIFACT_WINDOW_PARAM, '1')
+  url.searchParams.set('sessionId', target.sessionId)
+  url.searchParams.set('artifactId', target.artifactId)
+  return url.href
+}
+
+/**
  * 构建无业务 preload 的全屏窗口参数。
  * @param spec - 仅消费当前 Shell 的同源 webserver URL。
  * @param target - 已校验的双 ID 目标。
@@ -67,13 +72,9 @@ export function artifactWindowOptions(
   target: ArtifactRef,
   partition: string,
 ): ArtifactWindowOptions {
-  const url = new URL(spec.url)
-  url.searchParams.set(ARTIFACT_WINDOW_PARAM, '1')
-  url.searchParams.set('sessionId', target.sessionId)
-  url.searchParams.set('artifactId', target.artifactId)
   return {
     fullscreen: true,
-    url: url.href,
+    url: artifactWindowUrl(spec, target),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

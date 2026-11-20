@@ -19,7 +19,7 @@ import {
   getArtifact,
   incompleteArtifactCleanup,
   listArtifacts,
-  readArtifactContent,
+  readArtifactRecord,
   removeArtifactsOfSession,
   type ArtifactCleanupReport,
 } from './artifacts-host.ts'
@@ -1762,9 +1762,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
     path: '/huaanwork/artifact/content',
     handler: storeRoute(async (req, ctx) => {
       const { sessionId, artifactId } = artifactRef(req, 'artifact.content')
-      const artifact = await getArtifact(ctx.profileDir, sessionId, artifactId)
-      const content = await readArtifactContent(ctx.profileDir, sessionId, artifactId)
-      return { artifact, content: content.toString('utf8') }
+      const record = await readArtifactRecord(ctx.profileDir, sessionId, artifactId)
+      return { artifact: record.artifact, content: record.content.toString('utf8') }
     }),
   },
   {
@@ -1800,11 +1799,10 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const target = artifactRefBody(req, 'artifact.download')
       const surface = artifactSurfaceBody(req, 'artifact.download')
       const native = requireArtifactNative(ctx, 'artifact.download')
-      const artifact = await getArtifact(ctx.profileDir, target.sessionId, target.artifactId)
-      const content = await readArtifactContent(ctx.profileDir, target.sessionId, target.artifactId)
+      const record = await readArtifactRecord(ctx.profileDir, target.sessionId, target.artifactId)
       return await native.saveArtifact({
-        downloadName: artifact.downloadName,
-        contentBase64: content.toString('base64'),
+        downloadName: record.artifact.downloadName,
+        contentBase64: record.content.toString('base64'),
         surface,
       })
     }),

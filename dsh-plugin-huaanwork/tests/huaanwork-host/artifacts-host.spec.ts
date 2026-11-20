@@ -22,6 +22,7 @@ import {
   listArtifacts,
   prepareArtifact,
   readArtifactContent,
+  readArtifactRecord,
   removeArtifactOfRun,
   removeArtifactsOfAutomation,
   removeArtifactsOfSession,
@@ -248,6 +249,7 @@ it('fails closed on corrupt manifests instead of returning an empty list', async
   await expect(listArtifacts(root, 'session-1')).rejects.toThrow('artifact-corrupt')
   await expect(getArtifact(root, 'session-1', artifact.artifactId)).rejects.toThrow('artifact-corrupt')
   await expect(readArtifactContent(root, 'session-1', artifact.artifactId)).rejects.toThrow('artifact-corrupt')
+  await expect(readArtifactRecord(root, 'session-1', artifact.artifactId)).rejects.toThrow('artifact-corrupt')
 })
 
 it('re-verifies content bytes and digest on read', async () => {
@@ -259,12 +261,30 @@ it('re-verifies content bytes and digest on read', async () => {
   writeFileSync(join(root, 'artifacts', 'session-1', artifact.artifactId, 'content.md'), '# 被篡改', 'utf8')
 
   await expect(readArtifactContent(root, 'session-1', artifact.artifactId)).rejects.toThrow('artifact-corrupt')
+  await expect(readArtifactRecord(root, 'session-1', artifact.artifactId)).rejects.toThrow('artifact-corrupt')
   await expect(getArtifact(root, 'session-1', artifact.artifactId)).rejects.toThrow('artifact-corrupt')
   await expect(listArtifacts(root, 'session-1')).rejects.toThrow('artifact-corrupt')
   await expect(createArtifact(root, {
     sessionId: 'session-1', title: '重放', format: 'markdown', content: '# 原内容',
     anchor: { kind: 'turn' }, idempotency: { kind: 'tool', callId: 'call-digest' },
   })).rejects.toThrow('artifact-corrupt')
+})
+
+it('reads summary and content as one verified record for content/download routes', async () => {
+  const root = makeRoot('artifact-record-')
+  const input = {
+    sessionId: 'session-1', title: '合并读', format: 'markdown' as const,
+    content: '# 一次读取\n\n中文与 emoji 🚀', anchor: { kind: 'turn' as const },
+    idempotency: { kind: 'tool' as const, callId: 'call-record' },
+  }
+  const summary = await createArtifact(root, input)
+  const record = await readArtifactRecord(root, 'session-1', summary.artifactId)
+  // 与分离读取完全同值：路由合并不得改变摘要或字节。
+  expect(record.artifact).toEqual(await getArtifact(root, 'session-1', summary.artifactId))
+  expect(record.content.toString('utf8')).toBe(input.content)
+  expect(record.content.equals(await readArtifactContent(root, 'session-1', summary.artifactId))).toBe(true)
+  await expect(readArtifactRecord(root, 'other-session', summary.artifactId)).rejects.toThrow('artifact-not-found')
+  await expect(readArtifactRecord(root, '../session-1', summary.artifactId)).rejects.toThrow('artifact-not-found')
 })
 
 it('captures immutable scope copies and ignores later caller mutation', async () => {

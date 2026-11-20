@@ -28,7 +28,7 @@ import {
   installRendererAccessHeader,
 } from './electron-shell-generation.ts'
 import { installArtifactFrameGuard, type ArtifactFrameGuard } from './artifact-frame-guard.ts'
-import { artifactWindowOptions } from './artifact-window.ts'
+import { artifactWindowOptions, artifactWindowUrl } from './artifact-window.ts'
 import { isPlatformLoginDestination, type DesktopPlatformLoginRequest } from './platform-login.ts'
 import { PLATFORM_LOGIN_TITLE, platformLoginUrl } from './platform-login-window.ts'
 import type { DesktopOpenWorkspaceDelivery } from './launch-workspace-contract.ts'
@@ -827,10 +827,11 @@ export class ElectronDesktopRuntime implements DesktopRuntime, ArtifactNativeCap
     const spec = this.scheduled
     if (spec === undefined) throw new Error('artifact-window-unavailable')
     const origin = new URL(spec.url).origin
-    const partition = `huaanwork-artifact-${randomUUID()}`
     let window = this.artifactWindow
     if (window === undefined || window.isDestroyed()) {
       this.artifactWindow = undefined
+      // 独占非持久 partition 只在建窗时生成;复用同一 WebContents 时 session 随窗口生命周期不变。
+      const partition = `huaanwork-artifact-${randomUUID()}`
       window = new BrowserWindow(artifactWindowOptions(spec, target, partition))
       this.artifactWindow = window
       this.artifactFrameGuard = installArtifactFrameGuard(window.webContents)
@@ -853,7 +854,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime, ArtifactNativeCap
         origin,
         spec.rendererAccessHeader,
       )
-      await contents.loadURL(artifactWindowOptions(spec, target, partition).url)
+      await contents.loadURL(artifactWindowUrl(spec, target))
       window.focus()
     } catch (error) {
       this.releaseArtifactWindow()

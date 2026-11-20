@@ -11,6 +11,7 @@ import type {
 import type { ArtifactRef } from './client-huaanwork/rpc-types.ts'
 import { isArtifactFrameName } from './artifact-window.ts'
 import { HostRpc } from './host-rpc.ts'
+import { isSinglePathSegment } from './path-segment.ts'
 import { parseDesktopPlatformLoginRequest } from './platform-login.ts'
 
 export type RuntimeSnapshot = Pick<DesktopRuntime, 'platform' | 'locale'> & {
@@ -193,15 +194,9 @@ export function createHostRuntime(
 
 const ARTIFACT_BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/u
 
-function isArtifactIdSegment(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length === 0) return false
-  if (value === '.' || value === '..') return false
-  return !/[/\\:*?"<>|\x00-\x1f]/.test(value) && !value.endsWith('.') && !value.endsWith(' ')
-}
-
 function parseArtifactTarget(method: string, value: unknown): ArtifactRef {
   const input = (typeof value === 'object' && value !== null ? value : {}) as Partial<ArtifactRef>
-  if (!isArtifactIdSegment(input.sessionId) || !isArtifactIdSegment(input.artifactId)) {
+  if (!isSinglePathSegment(input.sessionId) || !isSinglePathSegment(input.artifactId)) {
     throw new Error(`${method} requires valid sessionId and artifactId`)
   }
   return { sessionId: input.sessionId, artifactId: input.artifactId }

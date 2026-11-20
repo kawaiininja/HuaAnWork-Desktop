@@ -14,6 +14,33 @@ import { describe, expect, it, vi } from "vitest";
 import ArtifactPreview, { rendererFor } from "../../src/client-huaanwork/ArtifactPreview.tsx";
 import ArtifactHtmlView, { withArtifactContentSecurity } from "../../src/client-huaanwork/ArtifactHtmlView.tsx";
 import ArtifactMarkdownView, { withoutRemoteMarkdownImages } from "../../src/client-huaanwork/ArtifactMarkdownView.tsx";
+import type { TaskArtifactSummary } from "../../src/client-huaanwork/rpc-types.ts";
+
+// 模拟渲染期崩溃：哨兵内容让 Markdown 渲染器在渲染期抛出，验证边界收敛为错误态
+// （规格 §7.2）；其余内容透传真实渲染器，既有断言不受影响。
+vi.mock("../../src/client-huaanwork/ArtifactMarkdownView.tsx", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/client-huaanwork/ArtifactMarkdownView.tsx")>();
+  const { createElement } = await import("react");
+  const CrashableMarkdownView = ({ content }: { content: string }) => {
+    if (content === "render-crash") throw new Error("artifact-render-crash");
+    return createElement(actual.default, { content });
+  };
+  return { ...actual, default: CrashableMarkdownView };
+});
+
+function summaryFixture(): TaskArtifactSummary {
+  return {
+    artifactId: "artifact-1",
+    sessionId: "session-1",
+    title: "报告",
+    format: "markdown",
+    downloadName: "报告.md",
+    sizeBytes: 12,
+    sha256: "0".repeat(64),
+    createdAt: "2026-11-20T00:00:00.000Z",
+    anchor: { kind: "turn" },
+  };
+}
 
 describe("ArtifactPreview", () => {
   it("selects the declared renderer", () => {
@@ -329,6 +356,111 @@ describe("ArtifactPreview", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the raw download entry available in the read-error state", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onDownload = vi.fn();
+    const onRetry = vi.fn();
+    try {
+      await act(async () =>
+        root.render(createElement(ArtifactPreview, { error: "artifact-corrupt", onDownload, onRetry })),
+      );
+      const alert = container.querySelector('[role="alert"]');
+      expect(alert?.textContent).toContain("artifact-corrupt");
+      const download = [...container.querySelectorAll("button")].find((item) => item.textContent === "下载")!;
+      expect(download).toBeDefined();
+      await act(async () => {
+        download.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(onDownload).toHaveBeenCalledTimes(1);
+      expect(alert?.querySelector("button")?.textContent).toBe("重试");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("offers a read action in the not-yet-loaded empty state", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onRetry = vi.fn();
+    try {
+      await act(async () => root.render(createElement(ArtifactPreview, { onRetry })));
+      expect(container.textContent).toContain("结果尚未读取");
+      const read = [...container.querySelectorAll("button")].find((item) => item.textContent === "读取")!;
+      expect(read).toBeDefined();
+      await act(async () => {
+        read.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      await act(async () => root.render(createElement(ArtifactPreview, {})));
+      expect([...container.querySelectorAll("button")].some((item) => item.textContent === "读取")).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("contains a renderer crash in an error state instead of unmounting the tree", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    // React 18 会把边界捕获的渲染异常打到 console.error；这里只验证收敛行为。
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onDownload = vi.fn();
+    const onRetry = vi.fn();
+    try {
+      await act(async () =>
+        root.render(
+          createElement(ArtifactPreview, {
+            artifact: { artifact: summaryFixture(), content: "render-crash" },
+            onDownload,
+            onRetry,
+          }),
+        ),
+      );
+      const alert = container.querySelector('[role="alert"]');
+      expect(alert?.textContent).toContain("artifact-render-crash");
+      // 树未卸载：标题与原始下载入口仍在（规格 §7.2 错误态可下载）。
+      expect(container.querySelector(".artifact-preview-title")?.textContent).toBe("报告");
+      const download = [...container.querySelectorAll("button")].find((item) => item.textContent === "下载")!;
+      await act(async () => {
+        download.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(onDownload).toHaveBeenCalledTimes(1);
+      const retry = alert!.querySelector("button")!;
+      expect(retry.textContent).toBe("重试");
+      await act(async () => {
+        retry.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      // 重读得到新内容后错误态清除，正常渲染。
+      await act(async () =>
+        root.render(
+          createElement(ArtifactPreview, {
+            artifact: { artifact: summaryFixture(), content: "# 恢复" },
+            onDownload,
+            onRetry,
+          }),
+        ),
+      );
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(container.querySelector(".artifact-markdown")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      consoleError.mockRestore();
       vi.unstubAllGlobals();
     }
   });

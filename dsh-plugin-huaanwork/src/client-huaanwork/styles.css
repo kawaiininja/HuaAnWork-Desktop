@@ -1562,6 +1562,15 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* 未读取空态：复用 .panel-empty 的观感，artifact-empty 只是纵向布局增量
+   （与 market-search-empty 同一先例，不造平行类名）。 */
+.artifact-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
 .ctx-file {
   display: flex;
   gap: 6px;

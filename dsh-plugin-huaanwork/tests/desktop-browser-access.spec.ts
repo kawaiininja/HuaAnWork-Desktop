@@ -688,6 +688,23 @@ describe('artifact renderer access lifecycle', () => {
       contents.emit('will-navigate', sameOrigin, `${ORIGIN}/next`)
       expect(sameOrigin.preventDefault).not.toHaveBeenCalled()
 
+      // 重定向入口与主窗口同款：主帧外源/畸形 URL 拦截，iframe 重定向放行。
+      const redirectForeign = { preventDefault: vi.fn() }
+      contents.emit('will-redirect', redirectForeign, 'https://example.com/redirect', false, true)
+      expect(redirectForeign.preventDefault).toHaveBeenCalled()
+
+      const redirectSameOrigin = { preventDefault: vi.fn() }
+      contents.emit('will-redirect', redirectSameOrigin, `${ORIGIN}/next`, false, true)
+      expect(redirectSameOrigin.preventDefault).not.toHaveBeenCalled()
+
+      const redirectMalformed = { preventDefault: vi.fn() }
+      contents.emit('will-redirect', redirectMalformed, 'not a URL', false, true)
+      expect(redirectMalformed.preventDefault).toHaveBeenCalled()
+
+      const redirectIframe = { preventDefault: vi.fn() }
+      contents.emit('will-redirect', redirectIframe, 'https://example.com/plugin', false, false)
+      expect(redirectIframe.preventDefault).not.toHaveBeenCalled()
+
       const handler = contents.setWindowOpenHandler.mock.calls[0]?.[0] as (details: {
         url: string
       }) => { action: string }

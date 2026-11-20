@@ -21,6 +21,7 @@ import { mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:
 import { join, resolve, sep } from 'node:path'
 
 import type { ArtifactAnchor, ArtifactFormat, TaskArtifactSummary } from '../client-huaanwork/rpc-types.ts'
+import { isSinglePathSegment } from '../path-segment.ts'
 
 /** 单个 Artifact 正文的 UTF-8 字节上限；等于上限允许，超过拒绝。 */
 export const MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
@@ -98,14 +99,6 @@ function namedError(code: string): Error {
 function isMissingPathError(error: unknown): boolean {
   const code = (error as { code?: string } | null)?.code
   return code === 'ENOENT' || code === 'ENOTDIR'
-}
-
-/** 单路径段：非空、非 `.`/`..`，不含分隔符、Windows 非法字符或控制字符。 */
-function isSinglePathSegment(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length === 0) return false
-  if (value === '.' || value === '..') return false
-  if (/[/\\:*?"<>|\x00-\x1f]/.test(value)) return false
-  return !value.endsWith('.') && !value.endsWith(' ')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -559,6 +552,17 @@ export async function readArtifactContent(profileDir: string, sessionId: string,
   const key = profileKey(profileDir, ERROR_NOT_FOUND)
   const record = await loadRecord(key, sessionId, artifactId)
   return record.content
+}
+
+/** 一次读取摘要与正文：content/download 路由共用同一次字节/摘要核对，避免单请求双读双哈希。 */
+export async function readArtifactRecord(
+  profileDir: string,
+  sessionId: string,
+  artifactId: string,
+): Promise<{ artifact: TaskArtifactSummary; content: Buffer }> {
+  const key = profileKey(profileDir, ERROR_NOT_FOUND)
+  const record = await loadRecord(key, sessionId, artifactId)
+  return { artifact: toSummary(record.manifest), content: record.content }
 }
 
 /** 会话摘要列表：按 createdAt/artifactId 确定性排序；损坏记录 fail closed(不返回空列表)。 */

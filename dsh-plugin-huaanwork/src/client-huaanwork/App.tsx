@@ -660,7 +660,7 @@ export default function App() {
     content: string;
   } | null>(null);
   const [artifactPreviewError, setArtifactPreviewError] = useState<{ artifactId: string; message: string } | null>(null);
-  const [artifactPreviewBusy, setArtifactPreviewBusy] = useState(false);
+  const [artifactPreviewBusy, setArtifactPreviewBusy] = useState<string | null>(null);
   const [expandedByRunId, setExpandedByRunId] = useState<Record<string, boolean>>({});
   const [confirmingTarget, setConfirmingTarget] = useState<SubagentConfirmTarget | null>(null);
   const [cancelBusyByRunId, setCancelBusyByRunId] = useState<Record<string, boolean>>({});
@@ -3508,10 +3508,13 @@ export default function App() {
     }
   }
 
-  /** 系统另存为：字节由宿主读取，客户端只发双 ID 与 surface。 */
+  /** 系统另存为：字节由宿主读取，客户端只发双 ID 与 surface。双 ID 取自当前选择，
+   * 不依赖正文已读取——读取/渲染失败态仍可下载原始结果（规格 §7.2）。 */
   async function downloadArtifact(): Promise<void> {
-    const target = previewArtifactTarget();
-    if (!target) return;
+    const tab = chatTabsRef.current.find((item) => item.id === activeTabRef.current);
+    const sessionId = tab?.sessionId;
+    if (!previewArtifactId || !sessionId) return;
+    const target: ArtifactRef = { sessionId, artifactId: previewArtifactId };
     try {
       await rpcCall("artifact.download", { ...target, surface: "main" });
     } catch (error) {
@@ -3548,7 +3551,7 @@ export default function App() {
     setChatTabs((prev) =>
       prev.map((item) => (item.id === tabId ? { ...item, previewArtifactId: artifactId } : item)),
     );
-    setArtifactPreviewBusy(true);
+    setArtifactPreviewBusy(artifactId);
     setArtifactPreviewError(null);
     const next = await openArtifactPreview(
       { rightOpen: !rightCollapsed, rightTab, previewArtifactId: tab.previewArtifactId },
@@ -3564,7 +3567,8 @@ export default function App() {
         return { artifact, content: body.content };
       },
     );
-    setArtifactPreviewBusy(false);
+    // 只清自己发起的读取：快速连点两张卡时，先返回的请求不得清掉后一张的 busy。
+    setArtifactPreviewBusy((busy) => (busy === artifactId ? null : busy));
     const currentTab = chatTabsRef.current.find((item) => item.id === tabId);
     const current = { sessionId: currentTab?.sessionId ?? "", epoch: artifactEpochRef.current };
     if (!shouldApplyArtifactResponse(current, request) || currentTab?.previewArtifactId !== artifactId) return;
@@ -4557,14 +4561,14 @@ export default function App() {
               {rightTab === "preview" ? (
                 previewArtifactId ? (
                   <div className="panel-card preview-card">
-                    {artifactPreviewBusy ? (
+                    {artifactPreviewBusy === previewArtifactId ? (
                       <p className="panel-empty">正在读取结果…</p>
                     ) : (
                       <ArtifactPreview
                         artifact={previewArtifactLoaded}
                         error={previewArtifactFailure?.message}
                         onFullscreen={previewArtifactLoaded ? () => void openArtifactFullscreen() : undefined}
-                        onDownload={previewArtifactLoaded ? () => void downloadArtifact() : undefined}
+                        onDownload={() => void downloadArtifact()}
                         prepareHtmlFrame={previewArtifactLoaded ? prepareArtifactHtmlFrame : undefined}
                         onRetry={() => void handleOpenArtifact(previewArtifactId)}
                       />
