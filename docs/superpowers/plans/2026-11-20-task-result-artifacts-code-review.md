@@ -126,3 +126,71 @@
 - 三域并行评审（Host 数据层 / Electron 安全与集成 / Client UI），每域独立对照规格 13 章与计划 9 Task，输出分级发现后由主审校准。
 - 初审过程中 1 个 Client 评审代理因模型输出损坏（连续两次生成乱码）被弃用并重派，其结论未采信；本文 Client 域发现全部来自重派代理并经主审逐条读码复核。
 - 全程未修改任何仓库文件；本文档为唯一产出。
+
+---
+
+## 七、二次确认与修复记录（Qoder，2026-11-20，标注追加）
+
+> 本节为独立二次确认与修复执行记录，不改动上文 GLM 审核结论原文。
+
+### 7.1 二次确认结论
+
+**GLM 质检结论属实。** 对全部 16 项发现（1 Important / 6 Minor / 8 Nit，校准后口径）逐条读码反证，无误报，严重度校准合理。两处补充事实：
+
+1. **I-1 缺口范围收窄**：全屏页 `ArtifactFullscreenPage.tsx:103` 的 `onDownload` 本就无条件传入，错误态下载已存在；实际缺口是主 App 右栏的错误态下载接线（`App.tsx` 旧 `onDownload={previewArtifactLoaded ? … : undefined}`，且 `downloadArtifact` 经 `previewArtifactTarget` 依赖已读取正文），以及主 App/全屏两棵树均无渲染异常边界。
+2. **N-3 重复校验实为三处**：除报告点名的 `host-runtime-bridge.ts` 与 `artifacts-host.ts`，`artifact-window.ts:20-25` 还有第三份逐行等价拷贝（该模块禁 Node 依赖，不能直接复用 artifacts-host 导出）。
+
+### 7.2 已修复项（8 项，语义不变或规格明文要求）
+
+| 项 | 修复 | 证据 |
+| --- | --- | --- |
+| I-1 | `ArtifactPreview.tsx` 新增 `ArtifactRenderBoundary`（`getDerivedStateFromError` 收敛渲染期异常为 `role="alert"` 错误态 + 重试，`resetKey` 随内容变化复位），包裹 Markdown/HTML 两个渲染器，右栏与全屏共用；`App.tsx` `downloadArtifact` 双 ID 改取自当前选择（标签 sessionId + `previewArtifactId`），`onDownload` 不再以 `previewArtifactLoaded` 为条件 | `ArtifactPreview.spec.ts` 新增 3 条：渲染崩溃收敛（树不卸载、标题/下载保留、重试回调、新内容复位）、错误态下载入口、空态读取入口；`appWiring.spec.ts` 新增下载接线源钉 |
+| M-1 | §7.1 源钉：`artifact/created` 分支块内不得出现 `setRightTab`/`setRightCollapsed` | `appWiring.spec.ts` "a new artifact never opens or switches the right pane"（沿用 diff 分支 `blockAfter` 先例） |
+| M-2 | 未读取空态提供「读取」按钮（报告允许的最小选项，经 `onRetry` 复用 `handleOpenArtifact`）；`.artifact-empty` 修饰类沿用 `market-search-empty` 先例，`styles.generated.ts` 已重新生成 | `ArtifactPreview.spec.ts` 空态读取测试（含无回调不渲染按钮断言） |
+| M-3（部分） | content/download 双读合并：新增 `readArtifactRecord`（单次 `loadRecord`），`artifact.content`/`artifact.download` 路由改用；`getArtifact`/`readArtifactContent` 保留供其余调用方 | `artifacts-host.spec.ts` 新增等价测试（摘要/字节与分离读取完全同值、跨会话与 traversal 拒绝），两条既有 fail-closed 测试扩展覆盖新入口；`artifact-routes.spec.ts` 既有行为测试全过 |
+| M-6① | partition 生成移入建窗分支；复用加载改用新导出的 `artifactWindowUrl`（与建窗同一 URL 构建），死值消除 | `desktop-browser-access.spec.ts`/`electron-runtime.spec.ts`/`artifact-window.spec.ts` 既有建窗/复用/安全参数测试全过 |
+| M-6② | artifact 窗口 `will-redirect` 补直接测试：主帧外源拦截、同源放行、畸形 URL 拦截、iframe 放行 | `desktop-browser-access.spec.ts` "keeps the top-level navigation constraint…" 扩展 4 断言 |
+| N-3 | 三处单段校验收敛为 `src/path-segment.ts` 单一导出（纯函数、无 Node 依赖，artifact-window 的客户端共用约束不破坏） | 全量桌面测试套件（含 bridge/window/store 既有用例）回归通过 |
+| N-4 | `artifactPreviewBusy` 改记 artifactId（`string \| null`），返回时函数式比较清除（先返回的请求不清后一张的 busy），渲染按 `busy === previewArtifactId` 判定 | `appWiring.spec.ts` busy 源钉；代际 + 选择守卫原样保留 |
+
+### 7.3 不改 / 延期项（理由）
+
+- **M-3 list 轻量化（延期，需 owner 裁定）**：会把「正文损坏在 list 时 fail-closed」放宽为「content/download 读取时才报错」，属安全语义取舍，不在本轮擅自变更。
+- **M-4 暂存残余回收（延期，需 owner 裁定）**：启动清扫在 Host 交接期可能误删旧 Host 在途暂存；「rm 失败保留 prepared 至重试成功」与规格 §5.3「清理 I/O 失败仍在 finally 释放 lease」契约冲突。两条实现路径都需裁定。
+- **M-5 读侧 realpath / N-7 downloadName 读侧复检（安全硬化波）**：与报告处置一致；威胁模型同为需 profile 本地写权限，需配套读侧 symlink 测试矩阵，归入下一次硬化波。
+- **N-1（保留）**：`findArtifactByRun` 在计划 Task 1 接口清单在册，无生产调用方属合规现状。
+- **N-2（不改）**：`console.warn` 与 automations-store 既有风格一致，报告判定可接受。
+- **N-5（不改）**：`readTabItems` 依赖函数式 updater 的队列顺序语义，改 ref 镜像有引入时序回归的风险，现状可工作且有注释。
+- **N-6（不改）**：规格 §12.1 第 12 条明文「缺 sessionId 报清理不完整」，过报是规格字面实现。
+- **N-8（不改）**：fail-closed 显式暴露是既有裁定（0ed4df2159）。
+
+以上延期项已登记 AGENTS.md 债务表（2026-11-20 行）。
+
+### 7.4 验证记录（本轮实际执行）
+
+| 验证项 | 结果 |
+| --- | --- |
+| `corepack yarn workspace dsh-plugin-huaanwork run typecheck` | **EXIT=0** |
+| 定向套件（appWiring / ArtifactPreview / artifactWindow / desktop-browser-access / electron-runtime / artifacts-host / artifact-routes） | **332 passed**（修正一处源钉 needle 后全绿） |
+| 完整 `corepack yarn check`（根门禁，串行单跑避免 AA 冲突） | **GATE_EXIT=0**；桌面工作区 **314 个测试文件 passed、4 skipped**（既有环境性跳过），build/typecheck/verify:closure/bundled/cli/loader/profile/host/aa/licenses/operations 全过；日志 `/tmp/huaanwork-check-artifacts-fix.log` |
+
+**诚实边界**：本轮为 headless 门禁与 jsdom/真实磁盘测试证据；改动的预览 UI 路径（错误态下载、空态读取、渲染崩溃收敛、busy 瞬态）**尚未真机复验**，不声称真机验收通过。规格 §12.2 第 2/5 步相关路径应在下一次真机验收中复跑。
+
+### 7.5 真机复验（Qoder，2026-11-20 21:04–21:20 CST，owner 指示「先做真机复验，通过后再提交」）
+
+**实例**：干净临时副本 `DSH_HOME=/tmp/art-reverify/run/.huaanwork`（生产 `~/.huaanwork` 只读复制后清空会话/工作区/注册表）、`--user-data-dir=/tmp/art-reverify/run/userData`、`--remote-debugging-port=9333`、`HUAANWORK_ACCEPTANCE_HOOKS=1`（固定 Web 43120）；工作区构建（含本轮全部修复，根门禁同一次 build）+ `prepare:electron-native`，Electron 44.0.0。生产未被写入（复核无 `artifacts/` 目录）。
+
+**夹具**：两个真实短回合会话（真实模型 `deepseek`，仅「收到/明白/好的」回复，零工具调用）——A `huaanwork-1ab84180689db423`（两回合）、B `huaanwork-1ab84180689db423-d946e498`（一回合）；停实例后经真实 `createArtifact` 按日志读出的真实 `clientMessageId` 锚定播种三个 Artifact：`d4709d1d-…`（复验报告/markdown/371 B/sha256 `2b9f30ff07f1f4397536efe246a998b758b0154b6530c716d21dd60f17336bfa`，含中文、`2026-11-20 <>&`、表格、远程图片与正常链接）、`f8ef62e9-…`（复验图表/html/722 B，内联脚本交互）、`1ef8ef7b-…`（第二会话复验结果/markdown/122 B）。重启后卡片经历史投影正常出现。
+
+| # | 复验项 | 结果与证据 |
+| --- | --- | --- |
+| R1 | 预览回归（M-3 合并读 + 边界包裹） | **PASS**：A 两张卡唯一展示；Markdown 右栏渲染标题/表格/特殊字符，远程图片被过滤（占位「远程图片（已禁用）」、无 https img）、正常链接保留；HTML `prepareFrame` 确认后装填 `srcdoc`（990 字符、CSP 前置、`sandbox="allow-scripts"`、`src=null`）。截图 `22-01`–`22-03` |
+| R2 | M-2 切回空态读取入口 | **PASS**：B 打开其结果后切回 A，右栏「结果尚未读取」+「读取」按钮（头部「下载」入口同在）；点「读取」按标签自身选择重读并武装 HTML frame。截图 `22-04`–`22-05` |
+| R3 | I-1 错误态下载入口 | **PASS**：`chmod 000` 正文制造真实 EACCES 读失败 → `role="alert"` + 重试 + 头部「下载」入口（修复前错误态无此入口）；错误态点「下载」发起真实 RPC 并诚实报 EACCES（不伪装成功）；恢复权限后重试正常渲染。截图 `22-06`–`22-08` |
+| R4 | 下载字节一致 + 取消零写入 | **PASS**：原生保存面板落盘 `复验报告.md` 371 B，与存储正文逐字节相等、SHA-256 与 manifest 一致；再次下载经面板「取消」关闭，目录无新文件、UI 无错误。截图 `22-09`。操作披露：面板「前往文件夹」键盘序列因焦点未生效，保存落在面板默认目录 `~/Documents`，字节核对后移入 `/tmp/art-reverify/downloads/`；首次 AX 全路径设值尝试产生的冒号转义 stray 文件已核对字节后删除；取消经 AX「取消」按钮（与 Escape 同一产品取消路径） |
+| R5 | M-6① 全屏跨会话复用 | **PASS**：A 的 Markdown 全屏（双 ID 正确、无业务 preload）→ B 的结果全屏复用**同一 WebContents 目标** `46C6A0AFAD213B7DA013FAAFA66F2C20`，URL 更新为 B 双 ID、正文切换；「关闭」后全屏目标归零、主窗口预览完好。截图 `22-10`–`22-11` |
+| R6 | N-4 连点 busy 瞬态 | **尽力观测 PASS**：25ms 页内采样下快速连点 md→html，右栏全程为最终选择「复验图表」，无「结果尚未读取」闪现；本地读取快于采样间隔，瞬态不可按需复现，逻辑由 `appWiring.spec.ts` busy 源钉与代际/选择守卫保证 |
+
+**清理**：临时 Electron 已终止，9333/43120 端口释放；含 api_key 的临时 profile 与 userData 已删除；`~/Documents` 无残留；生产 `~/.huaanwork` 与 `deepseek-harness/` 零写入。
+
+**结论**：本轮修复涉及的预览 UI 路径真机复验 **PASS**（R1–R5 实证、R6 尽力观测无回归）。这是对修复路径的定向复验与 §12.2 第 2/3/5 步相关回归，不替代 §12.2 全矩阵；第 4 步隔离与第 7 步自动化代码本轮未改动，沿用 2026-11-20 早先全量验收记录。渲染崩溃边界（I-1 的 boundary 本体）真机不可自然触发（position 守卫不可达），由 jsdom 渲染崩溃测试钉住。
