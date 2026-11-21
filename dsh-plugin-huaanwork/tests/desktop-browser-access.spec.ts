@@ -438,6 +438,11 @@ async function mountRuntime(): Promise<{
   release: () => Promise<void>
   mainWindow: any
 }> {
+  // 高级窗口只在 macOS/Windows 上构造。Ubuntu 的 `yarn check` 仍会跑本文件，
+  // 这里在 runtime 读平台之前钉成 darwin；Electron 是 mock，断言只覆盖访问头生命周期。
+  if (process.platform === 'linux') {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+  }
   const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
   const runtime = new ElectronDesktopRuntime(async () => {})
   const release = runtime.schedule(spec)
