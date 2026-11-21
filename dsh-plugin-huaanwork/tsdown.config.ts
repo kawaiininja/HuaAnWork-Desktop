@@ -19,6 +19,8 @@ export default defineConfig([
       diagnostics: 'src/diagnostics.ts',
       notifications: 'src/notifications.ts',
       'diagnostic-export-worker': 'src/diagnostic-export-worker.ts',
+      // 内部构建 entry：真实 Electron 探针直接加载同一生产 guard，不新增 package export。
+      'artifact-frame-guard': 'src/artifact-frame-guard.ts',
       'packaged-runtime-smoke': 'src/packaged-runtime-smoke.ts',
       runtime: 'src/runtime.ts',
       'electron-runtime': 'src/electron-runtime.ts',

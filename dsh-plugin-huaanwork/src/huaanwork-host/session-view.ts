@@ -101,6 +101,13 @@ const TOOL_OUTCOME_UNKNOWN = 'TOOL_OUTCOME_UNKNOWN'
 const TOOL_NOT_STARTED = 'TOOL_NOT_STARTED'
 const TOOL_ABORTED_BEFORE_DISPATCH = 'ABORTED_BEFORE_DISPATCH'
 
+/**
+ * 结果页工具名(与 huaanwork-guardrails/result-artifact-tools.ts 的常量同名)。
+ * 它的参数含完整结果正文:历史投影必须保留身份与配对,但不得调用通用
+ * `formatToolArguments` 把正文写进可读记录;客户端会整体跳过它的工具卡。
+ */
+const RESULT_PRESENT_TOOL = 'result_present'
+
 type Json = Record<string, unknown>
 
 /** 解析会话日志首行 header;非 `type: "session"` 行返回 undefined。 */
@@ -258,8 +265,9 @@ export function detailRecords(text: string): SessionDetailRecord[] {
       }
       case 'tool/call': {
         const name = typeof data.name === 'string' ? data.name : ''
-        const args = formatToolArguments(data.arguments)
-        const command = shellCommandOf(name, data.arguments)
+        // 结果页工具的 arguments 含完整正文:不生成通用参数摘要,正文不进入可读记录。
+        const args = name === RESULT_PRESENT_TOOL ? undefined : formatToolArguments(data.arguments)
+        const command = name === RESULT_PRESENT_TOOL ? undefined : shellCommandOf(name, data.arguments)
         if (typeof data.callId === 'string') toolNames.set(data.callId, name)
         // 真实 JSONL 日志把 arguments 序列化成 JSON 字符串:结构化 todos 必须从原始参数
         // 解码(展示用 args 已截断且不可还原),坏条目逐条过滤;其他工具不解析。

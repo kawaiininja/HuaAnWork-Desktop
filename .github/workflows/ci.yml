@@ -153,6 +153,9 @@ jobs:
       - run: yarn install --immutable
       # Typecheck is platform-neutral and already gated by `check`.
       - run: yarn workspace ${{ matrix.workspace }} check:win-package:platform
+      - name: Artifact sandbox renderer probe
+        if: matrix.workspace == 'dsh-plugin-huaanwork'
+        run: yarn workspace dsh-plugin-huaanwork test:artifact-sandbox
       - name: Real Host liveness on Windows
         if: matrix.workspace == 'dsh-plugin-huaanwork'
         timeout-minutes: 5
@@ -209,6 +212,9 @@ jobs:
           key: packaging-downloads-${{ runner.os }}-${{ runner.arch }}-${{ matrix.workspace }}-${{ hashFiles('yarn.lock', 'deepseek-harness/scripts/primary-runtime/lock.json') }}
       - run: yarn install --immutable
       - run: yarn workspace ${{ matrix.workspace }} check:mac-package:platform
+      - name: Artifact sandbox renderer probe
+        if: matrix.workspace == 'dsh-plugin-huaanwork'
+        run: yarn workspace dsh-plugin-huaanwork test:artifact-sandbox
       - name: Build macOS smoke artifact
         env:
           DSH_PACKAGE_CHECK_ALREADY_RAN: '1'

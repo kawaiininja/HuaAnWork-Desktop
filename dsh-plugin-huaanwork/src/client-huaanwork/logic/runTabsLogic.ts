@@ -1,4 +1,6 @@
 import type { RunSummary, TaskInfo } from "./projects.ts";
+import type { AutomationResultRun } from "./artifactProjection.ts";
+import type { RpcEvent } from "../rpc-types.ts";
 
 /**
  * 重启后运行对话标签（run tab）的重建判定（纯函数，便于单测）。
@@ -93,6 +95,54 @@ export function runResultNoteText(status: RunSummary["status"] | undefined): str
   if (status === "cancelled") return "自动化运行已取消";
   if (status && status !== "ok") return "自动化运行失败";
   return "自动化运行完成";
+}
+
+/** 运行结果投影只消费 artifact 可选键；两个入口共用同一字段挑选规则。 */
+function artifactResultFields(source: {
+  artifactOutcome?: RunSummary["artifactOutcome"];
+  artifactId?: string;
+  artifactError?: string;
+  artifactTitle?: string;
+  artifactFormat?: RunSummary["artifactFormat"];
+}): AutomationResultRun {
+  return {
+    ...(source.artifactOutcome === undefined ? {} : { artifactOutcome: source.artifactOutcome }),
+    ...(source.artifactId === undefined ? {} : { artifactId: source.artifactId }),
+    ...(source.artifactError === undefined ? {} : { artifactError: source.artifactError }),
+    ...(source.artifactTitle === undefined ? {} : { artifactTitle: source.artifactTitle }),
+    ...(source.artifactFormat === undefined ? {} : { artifactFormat: source.artifactFormat }),
+  };
+}
+
+/**
+ * 历史回填：持久化 `RunSummary` → 结果投影字段。
+ * 无 `artifactOutcome` 的旧运行返回空对象，调用方仍需传入旧附件构造器。
+ */
+export function automationResultRunFromSummary(run: RunSummary): AutomationResultRun {
+  return artifactResultFields(run);
+}
+
+/**
+ * 实时路径：当前 `automation/run-end` 事件 → 同一结果投影字段。
+ * 不额外读取运行列表，也不推测事件顺序。
+ */
+export function automationResultRunFromEvent(
+  event: Extract<RpcEvent, { event: "automation/run-end" }>,
+): AutomationResultRun {
+  return artifactResultFields(event);
+}
+
+/**
+ * 运行标签回填/重试的精确运行：只认该 automation 下 `sessionId` 完全匹配的摘要，
+ * 不跨运行标签查找，也不按时间或正文猜测。
+ */
+export function findRunForSession(
+  runs: Readonly<Record<string, readonly RunSummary[]>>,
+  automationId: string | undefined,
+  sessionId: string | undefined,
+): RunSummary | undefined {
+  if (!automationId || !sessionId) return undefined;
+  return (runs[automationId] ?? []).find((run) => run.sessionId === sessionId);
 }
 
 /** 只有失败/超时才发系统失败通知；用户主动取消不是失败，别再弹失败通知。 */

@@ -1450,6 +1450,127 @@ button {
   background: var(--surface);
 }
 
+/* 独立全屏结果页（规格 §5）：窗口父级 `.huaan-shell-body` 高度确定且裁切溢出，
+   页面自建整高 flex 链，让 Markdown 在页内滚动、HTML iframe 取剩余高度而不是退到 min-height。 */
+
+.artifact-page {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px;
+}
+
+/* Artifact 结果预览（规格 §7.1）：Markdown 用上游安全渲染器，HTML 进只能跑脚本的不透明沙箱 */
+
+.artifact-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.artifact-preview-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-preview-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+/* 上游 Markdown 组件只读 --dsw-* 令牌；桌面壳未装载上游主题表，按纸面工作台就地从根变量映射。 */
+.artifact-markdown {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 2px 12px;
+  color: var(--text);
+  --dsw-font-family: var(--font-ui);
+  --dsw-font-markdown-base: 400 14px/1.65 var(--font-ui);
+  --dsw-font-markdown-base-strong: 600 14px/1.6 var(--font-ui);
+  --dsw-font-markdown-h1: 600 22px/1.35 var(--font-display);
+  --dsw-font-markdown-h2: 600 18px/1.4 var(--font-display);
+  --dsw-font-markdown-h3: 600 16px/1.45 var(--font-ui);
+  --dsw-font-markdown-h4: 600 15px/1.5 var(--font-ui);
+  --dsw-font-markdown-code: 12px/1.55 var(--font-mono);
+  --dsw-font-markdown-code-block: 12px/1.55 var(--font-mono);
+  --dsw-font-markdown-table: 12.5px/1.5 var(--font-ui);
+  --dsw-font-markdown-table-head: 600 12.5px/1.5 var(--font-ui);
+  --dsw-font-xs-13: 12px;
+  --dsw-alias-label-primary: var(--text);
+  --dsw-alias-label-secondary: var(--text-muted);
+  --dsw-alias-label-tertiary: var(--text-faint);
+  --dsw-alias-label-caption: var(--text-faint);
+  --dsw-alias-link: var(--accent);
+  --dsw-alias-border-l1: var(--border);
+  --dsw-alias-border-l2: var(--border);
+  --dsw-alias-border-l3: var(--border-strong);
+  --dsw-alias-bg-base: var(--surface);
+  --dsw-alias-interactive-bg-hover: var(--accent-soft);
+  --dsw-alias-markdown-code-block: var(--bg);
+  --dsw-alias-markdown-code-block-banner: var(--sidebar-bg);
+  --dsw-alias-markdown-inline-code: var(--sidebar-bg);
+  --dsw-alias-state-business-primary: var(--accent);
+  --dsw-focus-ring-color: var(--accent);
+  --dsw-focus-ring-width: 2px;
+  --dsw-radius-sm: var(--radius-sm);
+  --dsw-radius-md: var(--radius-md);
+  --dsw-radius-lg: var(--radius-lg);
+}
+
+.artifact-html {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.artifact-frame {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 220px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.artifact-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--error);
+  border-radius: var(--radius-sm);
+  background: var(--error-bg);
+  color: var(--error);
+  font-size: 12px;
+}
+
+.artifact-error p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 未读取空态：复用 .panel-empty 的观感，artifact-empty 只是纵向布局增量
+   （与 market-search-empty 同一先例，不造平行类名）。 */
+.artifact-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
 .ctx-file {
   display: flex;
   gap: 6px;

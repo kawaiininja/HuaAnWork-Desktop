@@ -513,6 +513,49 @@ test("run_code stays denied regardless of unattended (present-as already rejects
   assert.equal(allowedOnce.size, 0);
 });
 
+test("result_present is allowed without approval when attached and denied when unattached", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/policy.ts")
+  const attachments = emptyAttachments()
+  const sessionId = 'session-result-present'
+  const call = {
+    name: 'result_present',
+    arguments: { title: '日报', format: 'markdown', content: '# 正文' },
+    agent: { session: { id: sessionId } },
+    callId: 'call-rp-1',
+  }
+
+  // 默认 ask 档：未挂载一律 deny；挂载后直接 allow（不弹 ask 审批）
+  const askHarness = applyPolicyWithUnattended({ huaanworkAttachments: attachments })
+  apply(askHarness.ctx as never)
+  assert.deepEqual(await askHarness.preExecute(call), {
+    kind: 'deny',
+    reason: POLICY(reasonToolUnattached('result_present')),
+  })
+  assert.equal(askHarness.guard(call), GUARD(reasonToolUnattached('result_present')))
+
+  attachAgentTools(attachments, sessionId, ['result_present'])
+  assert.deepEqual(await askHarness.preExecute(call), { kind: 'allow' })
+  assert.equal(askHarness.guard(call), undefined)
+
+  // full 档下未挂载同样 deny
+  const fullProfile = mkdtempSync(join(tmpdir(), 'huaanwork-policy-rp-full-'))
+  try {
+    writeFileSync(join(fullProfile, 'huaanwork-settings.json'), JSON.stringify({ guard_mode: 'full' }))
+    const fullHarness = applyPolicyWithUnattended({
+      huaanworkProfileDir: fullProfile,
+      huaanworkAttachments: emptyAttachments(),
+    })
+    apply(fullHarness.ctx as never)
+    assert.deepEqual(await fullHarness.preExecute(call), {
+      kind: 'deny',
+      reason: POLICY(reasonToolUnattached('result_present')),
+    })
+    assert.equal(fullHarness.guard(call), GUARD(reasonToolUnattached('result_present')))
+  } finally {
+    rmSync(fullProfile, { recursive: true, force: true })
+  }
+})
+
 test("unattended degrade without callId does not enter allowedOnce and falls back to ask (guard cannot safely consume it)", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
   const shellName = process.platform === "win32" ? "pwsh" : "bash";

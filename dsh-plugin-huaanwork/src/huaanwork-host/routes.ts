@@ -12,7 +12,17 @@ import type {
   RpcEvent,
   RunSummary,
 } from '../client-huaanwork/rpc-types.ts'
+import type { ArtifactNativeCapability } from '../runtime.ts'
+import { isArtifactFrameName } from '../artifact-window.ts'
 import { readCachedCatalogPackages, refreshCatalogPackageCache, type AgentPackageSummary } from './agent-package/catalog-client.ts'
+import {
+  getArtifact,
+  incompleteArtifactCleanup,
+  listArtifacts,
+  readArtifactRecord,
+  removeArtifactsOfSession,
+  type ArtifactCleanupReport,
+} from './artifacts-host.ts'
 import {
   AGENT_PACKAGE_VERIFY_FAILURE,
   installCatalogAgentPackage,
@@ -159,6 +169,11 @@ export interface RouteContext {
    * runtimeCtx 查一次,仍没有则 503。
    */
   desktopPnpm?: PluginPnpmCapability
+  /**
+   * 原生 Artifact 能力(全屏窗口/另存为/frame 准备)。index.ts 从
+   * ctx.desktopRuntime 窄化注入;缺席时相关路由报 artifact-native-unavailable。
+   */
+  artifactNative?: ArtifactNativeCapability
 }
 
 export type RouteHandler = (req: RouteRequest, ctx: RouteContext) => Promise<unknown>
@@ -303,6 +318,47 @@ function bodyParam(body: unknown, key: string): string | undefined {
   return body && typeof body === 'object' && typeof (body as Record<string, unknown>)[key] === 'string'
     ? (body as Record<string, string>)[key]
     : undefined
+}
+
+/** artifact 读路径的 query 契约:sessionId 恒必填,artifactId 仅单条读取必填。 */
+function artifactSessionId(req: RouteRequest, method: string): string {
+  const sessionId = queryParam(req, 'sessionId')
+  if (!sessionId) throw new RouteError(400, 'bad-request', `${method} requires params.sessionId`)
+  return sessionId
+}
+
+function artifactRef(req: RouteRequest, method: string): { sessionId: string; artifactId: string } {
+  const sessionId = artifactSessionId(req, method)
+  const artifactId = queryParam(req, 'artifactId')
+  if (!artifactId) throw new RouteError(400, 'bad-request', `${method} requires params.artifactId`)
+  return { sessionId, artifactId }
+}
+
+/** POST body 版 ArtifactRef:路径与任意文件路径都不接受,只认双 ID。 */
+function artifactRefBody(req: RouteRequest, method: string): { sessionId: string; artifactId: string } {
+  const sessionId = bodyParam(req.body, 'sessionId')
+  if (!sessionId) throw new RouteError(400, 'bad-request', `${method} requires body.sessionId`)
+  const artifactId = bodyParam(req.body, 'artifactId')
+  if (!artifactId) throw new RouteError(400, 'bad-request', `${method} requires body.artifactId`)
+  return { sessionId, artifactId }
+}
+
+/** 原生 surface 只能由声明式调用方显式选择;不做回落猜测。 */
+function artifactSurfaceBody(req: RouteRequest, method: string): 'main' | 'artifact' {
+  const surface = bodyParam(req.body, 'surface')
+  if (surface !== 'main' && surface !== 'artifact') {
+    throw new RouteError(400, 'bad-request', `${method} requires body.surface 'main' or 'artifact'`)
+  }
+  return surface
+}
+
+/** 能力缺失是装配问题(非 Electron 装配):503,且不回落主窗口或 Blob 下载。 */
+function requireArtifactNative(ctx: RouteContext, method: string): ArtifactNativeCapability {
+  const capability = ctx.artifactNative
+  if (capability === undefined) {
+    throw new RouteError(503, 'artifact-native-unavailable', `${method} requires the native artifact capability`)
+  }
+  return capability
 }
 
 // ---------------------------------------------------------------------------
@@ -1318,6 +1374,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       // 先拿项目守卫再读 doomed:反序会给「列表之后、守卫之前」留一个绑定窗口(T1)。
       const releaseProject = beginProjectDeletion(projectId)
       const releaseAutomations: Array<() => void> = []
+      let artifactCleanup: ArtifactCleanupReport = { complete: true }
       try {
         const doomed = await listAutomations(ctx.profileDir, projectId)
         // 每个 doomed 自动化先进自己的删除守卫,再做全量预检;任一失败整批不开始。
@@ -1326,16 +1383,28 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
 
         for (const automation of doomed) scheduler?.clearAdmissionSkip(automation.id)
         // 逐项复用自动化自己的可重试锚点顺序(会话 → 跨项目自动 Task → runs/audit → 注册项)。
-        await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'), (sessionId) =>
+        const automationCleanup = await removeAutomationsOfProject(ctx.profileDir, projectId, join(ctx.dshHome, 'sessions'), (sessionId) =>
           releaseAndDiscardSession(ctx, sessionId, 'project.remove'),
         )
+        if (!automationCleanup.complete) artifactCleanup = automationCleanup
         const cascadedSessionIds = await removeTasksOfProject(ctx.profileDir, projectId)
         // 与 session.remove 同一运行态与草稿释放:删文件前先摘掉卡片、live agent、子会话、计划目标与创建草稿。
         for (const sessionId of cascadedSessionIds) releaseAndDiscardSession(ctx, sessionId, 'project.remove')
         await removeSessionFilesById(join(ctx.dshHome, 'sessions'), cascadedSessionIds)
+        // 普通子任务绑定的会话结果文件随会话删除;自动化会话已由上面的级联覆盖。
+        for (const sessionId of cascadedSessionIds) {
+          try {
+            await removeArtifactsOfSession(ctx.profileDir, sessionId)
+          } catch (error: unknown) {
+            ctx.logger(
+              `project.remove: 结果文件未能完全清理 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+            )
+            artifactCleanup = incompleteArtifactCleanup()
+          }
+        }
         // 项目锚点最后删:上面的子级联都可重试,重试时项目仍在。
         const removed = await removeProject(ctx.profileDir, projectId)
-        return { removed: true, project: removed }
+        return { removed: true, project: removed, ...(artifactCleanup.complete ? {} : { artifactCleanup }) }
       } finally {
         for (const release of releaseAutomations.reverse()) release()
         releaseProject()
@@ -1470,18 +1539,19 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       const id = bodyParam(req.body, 'id')
       if (!id) throw new Error('automation.remove requires params.id')
       const scheduler = ctx.runtimeCtx?.huaanworkTurnScheduler
+      let artifactCleanup: ArtifactCleanupReport = { complete: true }
       const release = beginAutomationDeletion(id)
       try {
         await assertAutomationRemovable(ctx, id, scheduler)
         // 运行会话随任务一并删除:删日志前先释放它的运行态与创建草稿(与 session.remove 同口径)。
-        await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
+        artifactCleanup = await removeAutomation(ctx.profileDir, id, join(ctx.dshHome, 'sessions'), (sessionId) =>
           releaseAndDiscardSession(ctx, sessionId, 'automation.remove'),
         )
       } finally {
         release()
       }
       scheduler?.clearAdmissionSkip(id)
-      return { removed: true }
+      return { removed: true, ...(artifactCleanup.complete ? {} : { artifactCleanup }) }
     }),
   }, // Task 3 (M4)
   {
@@ -1631,11 +1701,20 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         }
       }
       const removedTask = await removeTask(ctx.profileDir, id)
+      let artifactCleanup: ArtifactCleanupReport | undefined
       if (removedTask.sessionId) {
         releaseAndDiscardSession(ctx, removedTask.sessionId, 'task.remove')
         await removeSessionFilesById(join(ctx.dshHome, 'sessions'), [removedTask.sessionId])
+        try {
+          await removeArtifactsOfSession(ctx.profileDir, removedTask.sessionId)
+        } catch (error: unknown) {
+          ctx.logger(
+            `task.remove: 结果文件未能完全清理 ${removedTask.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          )
+          artifactCleanup = incompleteArtifactCleanup()
+        }
       }
-      return { removed: true }
+      return { removed: true, ...(artifactCleanup === undefined ? {} : { artifactCleanup }) }
     }),
   }, // Task 10
   {
@@ -1674,6 +1753,86 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { task: await setTaskModel(ctx.profileDir, { taskId, modelId }) }
     }),
   }, // Task 9(子任务记住模型)
+
+  // artifact(Task 4):只读查询。存储根恒取 routeCtx.profileDir,调用方不提供路径;
+  // get/list 只回摘要,仅 content 读正文并转 UTF-8 字符串。归属不符统一报 artifact-not-found。
+  {
+    method: 'artifact.get',
+    http: 'GET',
+    path: '/huaanwork/artifact/get',
+    handler: storeRoute(async (req, ctx) => {
+      const { sessionId, artifactId } = artifactRef(req, 'artifact.get')
+      return { artifact: await getArtifact(ctx.profileDir, sessionId, artifactId) }
+    }),
+  },
+  {
+    method: 'artifact.content',
+    http: 'GET',
+    path: '/huaanwork/artifact/content',
+    handler: storeRoute(async (req, ctx) => {
+      const { sessionId, artifactId } = artifactRef(req, 'artifact.content')
+      const record = await readArtifactRecord(ctx.profileDir, sessionId, artifactId)
+      return { artifact: record.artifact, content: record.content.toString('utf8') }
+    }),
+  },
+  {
+    method: 'artifact.list',
+    http: 'GET',
+    path: '/huaanwork/artifact/list',
+    handler: storeRoute(async (req, ctx) => {
+      const sessionId = artifactSessionId(req, 'artifact.list')
+      // 排序由 artifacts-host 的 listArtifacts 负责,路由不再重排。
+      return { artifacts: await listArtifacts(ctx.profileDir, sessionId) }
+    }),
+  },
+  // artifact(Task 7):声明式原生能力。三者都先按双 ID 校验当前 Profile 归属;
+  // 开窗传完整 ArtifactRef,下载只传宿主读出的原字节与 summary.downloadName,
+  // frame 准备只传 surface/frameName(绝不接受 renderer 自报的数字 frame ID)。
+  {
+    method: 'artifact.openFullscreen',
+    http: 'POST',
+    path: '/huaanwork/artifact/openFullscreen',
+    handler: storeRoute(async (req, ctx) => {
+      const target = artifactRefBody(req, 'artifact.openFullscreen')
+      const native = requireArtifactNative(ctx, 'artifact.openFullscreen')
+      await getArtifact(ctx.profileDir, target.sessionId, target.artifactId)
+      await native.openArtifactFullscreen(target)
+      return { opened: true }
+    }),
+  },
+  {
+    method: 'artifact.download',
+    http: 'POST',
+    path: '/huaanwork/artifact/download',
+    handler: storeRoute(async (req, ctx) => {
+      const target = artifactRefBody(req, 'artifact.download')
+      const surface = artifactSurfaceBody(req, 'artifact.download')
+      const native = requireArtifactNative(ctx, 'artifact.download')
+      const record = await readArtifactRecord(ctx.profileDir, target.sessionId, target.artifactId)
+      return await native.saveArtifact({
+        downloadName: record.artifact.downloadName,
+        contentBase64: record.content.toString('base64'),
+        surface,
+      })
+    }),
+  },
+  {
+    method: 'artifact.prepareFrame',
+    http: 'POST',
+    path: '/huaanwork/artifact/prepareFrame',
+    handler: storeRoute(async (req, ctx) => {
+      const target = artifactRefBody(req, 'artifact.prepareFrame')
+      const surface = artifactSurfaceBody(req, 'artifact.prepareFrame')
+      const frameName = bodyParam(req.body, 'frameName')
+      if (!isArtifactFrameName(frameName)) {
+        throw new RouteError(400, 'bad-request', 'artifact.prepareFrame requires body.frameName')
+      }
+      const native = requireArtifactNative(ctx, 'artifact.prepareFrame')
+      await getArtifact(ctx.profileDir, target.sessionId, target.artifactId)
+      await native.prepareArtifactFrame({ surface, frameName })
+      return { prepared: true }
+    }),
+  },
 ]
 
 export const NATIVE_ROUTES: readonly NativeRouteEntry[] = [

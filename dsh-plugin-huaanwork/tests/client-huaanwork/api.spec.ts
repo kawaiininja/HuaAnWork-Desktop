@@ -73,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(77 项)——
+// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(83 项)——
 const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'workspace.open': { http: 'POST', path: '/huaanwork/workspace/open' },
   'workspace.close': { http: 'POST', path: '/huaanwork/workspace/close' },
@@ -152,11 +152,17 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'task.bindSession': { http: 'POST', path: '/huaanwork/task/bindSession' },
   'task.rename': { http: 'POST', path: '/huaanwork/task/rename' },
   'task.setModel': { http: 'POST', path: '/huaanwork/task/setModel' },
+  'artifact.get': { http: 'GET', path: '/huaanwork/artifact/get' },
+  'artifact.content': { http: 'GET', path: '/huaanwork/artifact/content' },
+  'artifact.list': { http: 'GET', path: '/huaanwork/artifact/list' },
+  'artifact.openFullscreen': { http: 'POST', path: '/huaanwork/artifact/openFullscreen' },
+  'artifact.download': { http: 'POST', path: '/huaanwork/artifact/download' },
+  'artifact.prepareFrame': { http: 'POST', path: '/huaanwork/artifact/prepareFrame' },
 }
 
 describe('rpcCall 路由映射', () => {
-  test('全表 77 项与 ROUTE_TABLE 一一对应', () => {
-    expect(Object.keys(ROUTES)).toHaveLength(77)
+  test('全表 83 项与 ROUTE_TABLE 一一对应', () => {
+    expect(Object.keys(ROUTES)).toHaveLength(83)
     const actual = Object.fromEntries(
       Object.entries(ROUTES).map(([method, route]) => [method, { http: route.http, path: route.path }]),
     )
@@ -310,6 +316,22 @@ describe('rpcCall 路由映射', () => {
     expect(lastFetchCall().url).toBe('/huaanwork/skill/get')
   })
 
+  test('artifact 域:三条 GET 走 query,list 只传 sessionId', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}))
+    await rpcCall('artifact.get', { sessionId: 's1', artifactId: 'a1' })
+    expect(lastFetchCall().url).toBe('/huaanwork/artifact/get?sessionId=s1&artifactId=a1')
+    expect(lastFetchCall().init.method).toBe('GET')
+    expect(lastFetchCall().init.body).toBeUndefined()
+
+    await rpcCall('artifact.content', { sessionId: 's1', artifactId: 'a1' })
+    expect(lastFetchCall().url).toBe('/huaanwork/artifact/content?sessionId=s1&artifactId=a1')
+    expect(lastFetchCall().init.body).toBeUndefined()
+
+    await rpcCall('artifact.list', { sessionId: 's1' })
+    expect(lastFetchCall().url).toBe('/huaanwork/artifact/list?sessionId=s1')
+    expect(lastFetchCall().init.body).toBeUndefined()
+  })
+
   test('2xx 返回 JSON payload', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ state: 'logged-in', username: 'dev' }))
     await expect(rpcCall('auth.login', { username: 'dev', password: 'password1' })).resolves.toEqual({
@@ -338,6 +360,83 @@ describe('rpcCall 错误处理', () => {
     await rpcCall('status.get')
     const { init } = lastFetchCall()
     expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  test('artifact.download 不携带超时 signal,虚拟时间推进后仍等待用户选择', async () => {
+    vi.useFakeTimers()
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(new DOMException('The operation timed out', 'TimeoutError')), ms)
+      return controller.signal
+    })
+    let resolveDownload: ((response: Response) => void) | undefined
+    // 只发一个按传入 signal 响应的受控 Promise:预先中止立即拒绝,否则等 abort 或手动 resolve。
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const signal = init?.signal
+      if (signal?.aborted) {
+        reject(signal.reason)
+        return
+      }
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+      if (url === '/huaanwork/artifact/download') resolveDownload = resolve
+      else resolve(jsonResponse({ ready: true }))
+    }))
+
+    const download = rpcCall<{ saved: boolean; path?: string }>('artifact.download', {
+      sessionId: 's1',
+      artifactId: 'a1',
+      surface: 'main',
+    })
+    const downloadFetchInit = lastFetchCall().init
+    expect(downloadFetchInit).not.toHaveProperty('signal')
+    expect(downloadFetchInit.method).toBe('POST')
+
+    await rpcCall('status.get')
+    expect(lastFetchCall().init.signal).toBeInstanceOf(AbortSignal)
+
+    await vi.advanceTimersByTimeAsync(180_001)
+    let settled = false
+    void download.finally(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    resolveDownload?.(jsonResponse({ saved: true, path: '/tmp/报告.md' }))
+    await expect(download).resolves.toEqual({ saved: true, path: '/tmp/报告.md' })
+    expect(timeoutSpy).toHaveBeenCalledTimes(1)
+  })
+
+  test('普通请求在虚拟时间到期后仍按超时拒绝', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(new DOMException('The operation timed out', 'TimeoutError')), ms)
+      return controller.signal
+    })
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal
+      if (signal?.aborted) {
+        reject(signal.reason)
+        return
+      }
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+    }))
+
+    const pending = rpcCall('session.list')
+    const rejection = expect(pending).rejects.toThrow('请求超时(180s)')
+    await vi.advanceTimersByTimeAsync(180_001)
+    await rejection
+  })
+
+  test('预先中止的 signal 使请求立即拒绝而不是被当作取消', async () => {
+    const aborted = new AbortController()
+    aborted.abort(new DOMException('The operation timed out', 'TimeoutError'))
+    vi.spyOn(AbortSignal, 'timeout').mockReturnValue(aborted.signal)
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+      const signal = init?.signal
+      return signal?.aborted ? Promise.reject(signal.reason) : Promise.resolve(jsonResponse({}))
+    })
+
+    await expect(rpcCall('status.get')).rejects.toThrow('请求超时(180s)')
   })
 
   test('AbortError/TimeoutError 映射为超时文案', async () => {

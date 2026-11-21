@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
+import { detailRecords } from "../../src/huaanwork-host/session-view.ts";
 import {
   chatTabHasConversation,
   chatTabTitle,
   cwdWithinRoot,
   historyItemsFromRecords,
   isAutomationSessionId,
+  RESULT_PRESENT_FAILURE_NOTE,
+  RESULT_PRESENT_TOOL,
   sessionHasContent,
   unscopedSessions,
 } from "../../src/client-huaanwork/logic/sessionChannel.ts";
@@ -306,4 +309,65 @@ test("historyItemsFromRecords passes roundKey through thinking, assistant and to
   assert.equal(assistant?.kind === "assistant" ? assistant.roundKey : undefined, 6);
   assert.equal(tools[0]?.kind === "tool" ? tools[0].roundKey : undefined, 6);
   assert.equal(tools[1]?.kind === "tool" ? tools[1].roundKey : undefined, 9);
+});
+
+test("result_present never becomes a history tool card and its body never reaches the client", () => {
+  const log = [
+    JSON.stringify({ type: "session", version: 1, id: "s1", createdAt: 1 }),
+    JSON.stringify({
+      type: "tool/call",
+      time: 2,
+      data: {
+        turn: 1,
+        step: 1,
+        callId: "call-1",
+        name: RESULT_PRESENT_TOOL,
+        arguments: { title: "报告", format: "markdown", content: "完整结果正文" },
+      },
+    }),
+    JSON.stringify({
+      type: "tool/result",
+      time: 3,
+      data: {
+        turn: 1,
+        message: { role: "tool", toolCallId: "call-1", content: [{ type: "text", text: "已生成结果页" }] },
+      },
+    }),
+  ].join("\n");
+  const records = detailRecords(log);
+  const call = records.find((record) => record.kind === "tool-call");
+  // 历史投影不调用通用 formatToolArguments：记录保留身份与配对，参数正文不落进可读记录。
+  assert.equal(call && call.kind === "tool-call" ? call.args : "missing", undefined);
+  assert.equal(JSON.stringify(records).includes("完整结果正文"), false);
+  const items = historyItemsFromRecords(records);
+  assert.deepEqual(items, []);
+});
+
+test("a failed result_present result becomes one compact note without its arguments", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "生成报告" },
+    {
+      kind: "tool-call",
+      time: 2,
+      name: RESULT_PRESENT_TOOL,
+      callId: "call-1",
+      args: '{"title":"报告","content":"完整结果正文"}',
+    },
+    { kind: "tool-result", time: 3, callId: "call-1", isError: true, text: "artifact-write-failed" },
+    { kind: "assistant", time: 4, text: "保存失败了" },
+  ]);
+  assert.deepEqual(items, [
+    { kind: "user", text: "生成报告" },
+    { kind: "note", text: RESULT_PRESENT_FAILURE_NOTE },
+    { kind: "assistant", text: "保存失败了" },
+  ]);
+  assert.equal(JSON.stringify(items).includes("完整结果正文"), false);
+});
+
+test("a result_present call without a paired result leaves no tool card", () => {
+  const items = historyItemsFromRecords([
+    { kind: "user", time: 1, text: "生成报告" },
+    { kind: "tool-call", time: 2, name: RESULT_PRESENT_TOOL, callId: "call-1", args: '{"content":"完整结果正文"}' },
+  ]);
+  assert.deepEqual(items, [{ kind: "user", text: "生成报告" }]);
 });

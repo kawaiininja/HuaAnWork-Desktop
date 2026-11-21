@@ -2,6 +2,7 @@ import { rpcCall } from "./api.ts";
 import { describeScheduleText } from "./logic/scheduleText.ts";
 
 import type {
+  ArtifactCleanupReport,
   AutomationDraft,
   AutomationInfo,
   AutomationPatch,
@@ -13,7 +14,7 @@ import type {
 } from "./logic/projects.ts";
 
 export type * from "./logic/projects.ts";
-export { projectRootName } from "./logic/projects.ts";
+export { artifactCleanupNotice, projectRootName } from "./logic/projects.ts";
 
 export function listProjects(): Promise<{ projects: ProjectInfo[] }> {
   return rpcCall("project.list");
@@ -35,7 +36,9 @@ export function renameProject(projectId: string, name: string): Promise<{ projec
   return rpcCall("project.rename", { projectId, name });
 }
 
-export function removeProject(projectId: string): Promise<{ removed: boolean; project: ProjectInfo }> {
+export function removeProject(
+  projectId: string,
+): Promise<{ removed: boolean; project: ProjectInfo; artifactCleanup?: ArtifactCleanupReport }> {
   return rpcCall("project.remove", { projectId });
 }
 
@@ -60,7 +63,7 @@ export function updateAutomation(id: string, patch: AutomationPatch): Promise<{ 
   return rpcCall("automation.update", { id, ...patch });
 }
 
-export function removeAutomation(id: string): Promise<{ removed: boolean }> {
+export function removeAutomation(id: string): Promise<{ removed: boolean; artifactCleanup?: ArtifactCleanupReport }> {
   return rpcCall("automation.remove", { id });
 }
 
@@ -76,7 +79,7 @@ export function stopAutomation(id: string): Promise<{ stopped: boolean }> {
 export function deleteAutomationRun(
   automationId: string,
   runId: string,
-): Promise<{ removed: boolean; sessionDirRemoved: boolean; taskId?: string }> {
+): Promise<{ removed: boolean; sessionDirRemoved: boolean; taskId?: string; artifactCleanup?: ArtifactCleanupReport }> {
   return rpcCall("automation.deleteRun", { id: automationId, runId });
 }
 
@@ -107,6 +110,7 @@ export function pruneAutomationSessions(): Promise<{
   removed: number;
   tasksRemoved: number;
   failed: string[];
+  artifactCleanup?: ArtifactCleanupReport;
 }> {
   return rpcCall("automation.pruneSessions");
 }
@@ -119,7 +123,7 @@ export function createTask(params: { projectId: string; name: string }): Promise
   return rpcCall("task.create", params);
 }
 
-export function removeTask(id: string): Promise<{ removed: boolean }> {
+export function removeTask(id: string): Promise<{ removed: boolean; artifactCleanup?: ArtifactCleanupReport }> {
   return rpcCall("task.remove", { id });
 }
 

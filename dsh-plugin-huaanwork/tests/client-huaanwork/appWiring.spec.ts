@@ -24,12 +24,25 @@ import { consumeBufferedStaleEnds, consumeStaleIdle, finishStop } from "../../sr
 import { appendOutcomeNotes, latestUserItemId, turnChecks } from "../../src/client-huaanwork/logic/outcomeCheck.ts";
 import { interruptTurnItems } from "../../src/client-huaanwork/logic/thinkingPanel.ts";
 import { clearFailuresInTabs } from "../../src/client-huaanwork/logic/hostStop.ts";
+import {
+  applyRunEndProjection,
+  insertArtifactIntoHistory,
+  insertBeforeArtifactGroup,
+  insertListedArtifactsIntoHistory,
+  projectAutomationResult,
+  shouldApplyArtifactResponse,
+  sortArtifactsForBackfill,
+} from "../../src/client-huaanwork/logic/artifactProjection.ts";
+import { automationResultRunFromEvent, runResultNoteText } from "../../src/client-huaanwork/logic/runTabsLogic.ts";
 import { foldRunAssistantItems } from "../../src/client-huaanwork/logic/runResultAttachments.ts";
+import type { TaskArtifactSummary } from "../../src/client-huaanwork/rpc-types.ts";
 import {
   buildSessionSendParams,
   findPendingForToolEnd,
   hasBufferedQueueStartForSession,
   historyItemsFromRecords,
+  RESULT_PRESENT_FAILURE_NOTE,
+  RESULT_PRESENT_TOOL,
   takeEarlyPendingEvents,
 } from "../../src/client-huaanwork/logic/sessionChannel.ts";
 import { currentSnapshotRoundKey, shouldApplyTodoEvent } from "../../src/client-huaanwork/logic/todoProjection.ts";
@@ -123,6 +136,7 @@ test("answering writes the card into the tab that holds it, not the live tab", (
 });
 
 const APP_SOURCE = readFileSync(new URL("../../src/client-huaanwork/App.tsx", import.meta.url), "utf8");
+const PROJECTS_PANEL_SOURCE = readFileSync(new URL("../../src/client-huaanwork/ProjectsPanel.tsx", import.meta.url), "utf8");
 const AUTOMATION_RUN_LINK_SOURCE = readFileSync(
   new URL("../../src/client-huaanwork/logic/automationRunLink.ts", import.meta.url),
   "utf8",
@@ -226,32 +240,231 @@ test("folding a run's JSON assistant text keeps one attachment in place and leav
   ]);
 });
 
-test("App folds run output at both call sites and keeps each footnote last", () => {
-  // 两处调用：run-end 分支与回填效果。只数调用形式——import 行没有左括号，
-  // 删掉任一处接线，计数即降为 1（helper 全绿但 App 不调用的回归门）。
-  assert.equal((APP_SOURCE.match(/foldRunAssistantItems\(/g) ?? []).length, 2);
+test("App projects automation results at both call sites and keeps the legacy attachment factory", () => {
+  // 两处调用：run-end 分支与运行日志回填。旧折叠只在 projectAutomationResult 的
+  // 无 artifactOutcome 分支里执行，App 不再直接调用它（分支重构后的真实调用点）。
+  assert.equal((APP_SOURCE.match(/projectAutomationResult\(/g) ?? []).length, 2);
+  assert.equal((APP_SOURCE.match(/foldRunAssistantItems\(/g) ?? []).length, 0);
 
-  // run-end：先折叠目标标签，再在同一更新体里追加结果脚注（脚注仍在末尾）。
-  // 切片到「未命中标签」的 `: tab,` 分支为止：App.tsx 后面还有别的 `kind: "note"`
-  // 字面量，全文件搜索会让删掉本处脚注（或把它挪到折叠之前）仍然全绿。
-  const runEndFoldAt = APP_SOURCE.indexOf("foldRunAssistantItems(tab.items");
-  assert.ok(runEndFoldAt >= 0, "run-end branch folds the target tab's items");
-  const runEndEnd = APP_SOURCE.indexOf(": tab,", runEndFoldAt);
-  assert.ok(runEndEnd > runEndFoldAt, "run-end update body still ends with the untouched-tab branch");
-  const runEndBody = APP_SOURCE.slice(runEndFoldAt, runEndEnd);
-  const runEndNoteAt = runEndBody.indexOf('{ id: allocId(), kind: "note" as const, text: resultLabel }');
-  assert.ok(
-    runEndNoteAt > 0,
-    "the run-end result footnote is appended after the fold inside the same update (footnote stays last)",
-  );
+  // run-end：run 由事件字段直接构造（不额外拉运行列表），投影后脚注仍在末尾。
+  const runEndAt = APP_SOURCE.indexOf('if (event.event === "automation/run-end")');
+  assert.ok(runEndAt >= 0, "run-end branch is still present");
+  const runEndEnd = APP_SOURCE.indexOf("// 全局目录变更事件没有会话归属", runEndAt);
+  assert.ok(runEndEnd > runEndAt, "run-end branch still ends before the global event handlers");
+  const runEndBody = APP_SOURCE.slice(runEndAt, runEndEnd);
+  assert.match(runEndBody, /automationResultRunFromEvent\(event\)/);
+  // run-end 先取运行封套边界，声明摘要读取只投影边界内的条目。
+  assert.match(runEndBody, /const envelopeItems = readTabItems\(target\);/);
+  assert.match(runEndBody, /const boundaryIds = new Set\(\(await envelopeItems\)\.map\(\(item\) => item\.id\)\);/);
+  assert.match(runEndBody, /applyRunEndProjection\(\s*tab\.items,\s*boundaryIds,\s*\(prefix\) => projectAutomationResult\(prefix, run, artifact/);
+  assert.doesNotMatch(runEndBody, /foldRunAssistantItems\(/);
+  assert.match(runEndBody, /kind: "attachment" as const/, "legacy runs still receive one attachment");
+  const runEndNoteAt = runEndBody.indexOf("text: resultLabel");
+  assert.ok(runEndNoteAt > runEndBody.indexOf("projectAutomationResult("), "the result footnote follows the projection");
 
-  // 回填：折叠包住 historyToChatItems，脚注 push 在其后。
-  const composed = APP_SOURCE.indexOf("foldRunAssistantItems(historyToChatItems(view)");
-  assert.ok(composed >= 0, "backfill folds the replayed history before appending its footnote");
-  assert.ok(
-    APP_SOURCE.indexOf("runResultNoteText(run.status)", composed) > composed,
-    "the backfill footnote is pushed after the fold (footnote stays last)",
+  // 回填：历史 RunSummary 走同一投影；同一份列表快照用于 created 事件补齐。
+  const backfillAt = APP_SOURCE.indexOf("const run = findRunForSession(");
+  assert.ok(backfillAt >= 0, "run backfill looks up its persisted RunSummary");
+  assert.match(
+    APP_SOURCE.slice(backfillAt, APP_SOURCE.indexOf("void reconcileSubagentRuns(tabId, sessionId);", backfillAt)),
+    /projectAutomationResult\([\s\S]*?kind: "attachment" as const/,
   );
+  assert.match(APP_SOURCE, /runResultNoteText\(run\.status\)/);
+});
+
+test("run-end projects created and failed envelopes through the event run object, never the legacy fold", () => {
+  const event: Extract<RpcEvent, { event: "automation/run-end" }> = {
+    event: "automation/run-end",
+    automationId: "auto-a",
+    runId: "r1",
+    projectId: null,
+    ok: true,
+    status: "ok",
+    sessionId: "sess-1",
+    artifactOutcome: "created",
+    artifactId: "artifact-1",
+  };
+  const run = automationResultRunFromEvent(event);
+  const projectedCreated = projectAutomationResult(
+    [{ id: 1, kind: "assistant", text: '{"content":"完整结果正文"}' }],
+    run,
+    {
+      artifactId: "artifact-1",
+      sessionId: "sess-1",
+      title: "报告",
+      format: "markdown",
+      downloadName: "报告.md",
+      sizeBytes: 4,
+      sha256: "sha256:test",
+      createdAt: "2026-11-15T10:00:00.000Z",
+      anchor: { kind: "automation-run", automationId: "auto-a", runId: "r1" },
+    },
+  );
+  assert.deepEqual(projectedCreated.map((item) => item.kind), ["artifact"]);
+  const failedRun = automationResultRunFromEvent({ ...event, artifactOutcome: "failed", artifactId: undefined, artifactError: "artifact-write-failed" });
+  assert.deepEqual(
+    projectAutomationResult(
+      [{ id: 1, kind: "assistant", text: '{"content":"完整结果正文"}' }],
+      failedRun,
+    ).map((item) => item.kind),
+    ["artifact-error"],
+  );
+  // 旧运行：同一 run 对象为空，仍走旧折叠且只出一个附件。
+  const legacy = automationResultRunFromEvent({ ...event, artifactOutcome: undefined, artifactId: undefined });
+  assert.deepEqual(legacy, {});
+  const legacyItems: Array<{ id: number; kind: string; text?: string; sourceText?: string }> = [
+    { id: 1, kind: "assistant", text: '{"content":"完整结果正文"}' },
+  ];
+  assert.deepEqual(
+    projectAutomationResult(
+      legacyItems,
+      legacy,
+      undefined,
+      (sourceText) => ({ id: 9, kind: "attachment", sourceText }),
+    ).map((item) => item.kind),
+    ["attachment"],
+  );
+});
+
+test("new live turns stay before a trailing unlocated result group and list replay never duplicates", () => {
+  const fixture = (artifactId: string, clientMessageId?: string): TaskArtifactSummary => ({
+    artifactId,
+    sessionId: "session-1",
+    title: "报告",
+    format: "markdown",
+    downloadName: "报告.md",
+    sizeBytes: 4,
+    sha256: "sha256:test",
+    createdAt: "2026-11-15T10:00:00.000Z",
+    anchor: clientMessageId === undefined ? { kind: "turn" } : { kind: "turn", clientMessageId },
+  });
+  // 历史回填留下一个未定位分组。
+  let items: AppModule.ChatItem[] = insertArtifactIntoHistory([], fixture("loose"), () => 1);
+  assert.deepEqual(items.map((item) => item.kind), ["artifact-group", "artifact"]);
+
+  // 发送新消息、接收助手正文与该回合 Artifact：全部落在组标题之前。
+  items = insertBeforeArtifactGroup(items, { id: 2, kind: "user", text: "生成报告", clientMessageId: "m1" });
+  items = AppModule.appendToken(items, "好的", () => 3);
+  items = insertArtifactIntoHistory(items, fixture("exact", "m1"), () => 4);
+  const kinds = items.map((item) => item.kind);
+  const groupAt = kinds.indexOf("artifact-group");
+  assert.deepEqual(kinds, ["user", "assistant", "artifact", "artifact-group", "artifact"]);
+  assert.ok(items.findIndex((item) => item.kind === "user") < groupAt);
+  assert.ok(items.findIndex((item) => item.kind === "assistant") < groupAt);
+  assert.equal(items.findIndex((item) => item.kind === "artifact") < groupAt, true);
+
+  // artifact.list 重放（换序）不增加分组、不重复卡。
+  const replay = sortArtifactsForBackfill([fixture("exact", "m1"), fixture("loose")]).reduce(
+    (current, artifact) => insertArtifactIntoHistory(current, artifact, () => 5),
+    items,
+  );
+  assert.equal(replay.filter((item) => item.kind === "artifact-group").length, 1);
+  assert.equal(replay.filter((item) => item.kind === "artifact" && item.artifactId === "exact").length, 1);
+  assert.deepEqual(replay.map((item) => item.kind), kinds);
+});
+
+test("artifact preview replies are dropped unless the session and artifact epoch still match", () => {
+  const body = functionBody("async function handleOpenArtifact(", "async function retryArtifact(");
+  // 请求发起时捕获会话与专用 Artifact 代际；返回后只有当前选择仍匹配才写入预览。
+  assert.match(body, /const request = \{ sessionId, epoch: artifactEpochRef\.current \};/);
+  assert.match(body, /const current = \{ sessionId: currentTab\?\.sessionId \?\? "", epoch: artifactEpochRef\.current \};/);
+  assert.match(body, /shouldApplyArtifactResponse\(current, request\)/);
+  assert.match(body, /currentTab\?\.previewArtifactId !== artifactId/);
+});
+
+test("session switching advances only the dedicated artifact epoch", () => {
+  // 选中会话切换推进专用 Artifact 代际；共享对账代际（子代理 snapshot）不动。
+  const switchBody = functionBody(
+    "const previewEpochSessionRef = useRef<string | undefined>(undefined);",
+    "/** 当前标签发送时使用的模型",
+  );
+  assert.match(switchBody, /previewEpochSessionRef\.current === sessionId\) return;/);
+  assert.match(switchBody, /artifactEpochRef\.current \+= 1;/);
+  assert.doesNotMatch(switchBody, /reconcileEpochRef/);
+
+  // (a) 旧专用代际的 Artifact 应答被丢弃；子代理对账仍只按共享对账代际判定。
+  const artifactEpoch = 2;
+  assert.equal(
+    shouldApplyArtifactResponse(
+      { sessionId: "session-a", epoch: artifactEpoch + 1 },
+      { sessionId: "session-a", epoch: artifactEpoch },
+    ),
+    false,
+  );
+  const reconcileBody = functionBody("async function reconcileSubagentRuns(", "function anchorSnapshotSubagentCards(");
+  assert.match(reconcileBody, /const epoch = reconcileEpochRef\.current;/);
+  assert.match(reconcileBody, /epoch !== reconcileEpochRef\.current/);
+  assert.doesNotMatch(reconcileBody, /artifactEpochRef/);
+
+  // (b) 切换会话后，旧会话的迟到 Artifact 应答仍被丢弃。
+  assert.equal(
+    shouldApplyArtifactResponse(
+      { sessionId: "session-b", epoch: artifactEpoch + 1 },
+      { sessionId: "session-a", epoch: artifactEpoch },
+    ),
+    false,
+  );
+});
+
+test("a follow-up appended while the run-end artifact read is pending survives the projection", async () => {
+  // 可控 deferred：模拟 artifact.get 的真实往返，不用 sleep。
+  let resolveSummary!: (value: TaskArtifactSummary) => void;
+  const summaryRead = new Promise<TaskArtifactSummary>((resolve) => {
+    resolveSummary = resolve;
+  });
+  const summary: TaskArtifactSummary = {
+    artifactId: "artifact-1",
+    sessionId: "sess-1",
+    title: "报告",
+    format: "markdown",
+    downloadName: "报告.md",
+    sizeBytes: 4,
+    sha256: "sha256:test",
+    createdAt: "2026-11-15T10:00:00.000Z",
+    anchor: { kind: "automation-run", automationId: "auto-a", runId: "r1" },
+  };
+  const run = automationResultRunFromEvent({
+    event: "automation/run-end",
+    automationId: "auto-a",
+    runId: "r1",
+    projectId: null,
+    ok: true,
+    status: "ok",
+    sessionId: "sess-1",
+    artifactOutcome: "created",
+    artifactId: "artifact-1",
+  });
+  const envelope = '{"title":"报告","content":"完整结果正文"}';
+  let items: AppModule.ChatItem[] = [
+    { id: 1, kind: "note", text: "自动化运行中…" },
+    { id: 2, kind: "assistant", text: envelope },
+  ];
+  const projection = (async () => {
+    // App 在 run-end 时读边界，读取摘要期间标签照常接收续聊。
+    const boundaryIds = new Set(items.map((item) => item.id));
+    const artifact = await summaryRead;
+    return applyRunEndProjection(
+      items,
+      boundaryIds,
+      (prefix) => projectAutomationResult(prefix, run, artifact),
+      { id: 8, kind: "note" as const, text: runResultNoteText("ok") },
+    );
+  })();
+  items = [
+    ...items,
+    { id: 3, kind: "user", text: "再补一版", clientMessageId: "m2" },
+    { id: 4, kind: "assistant", text: "补充回复正文" },
+  ];
+  resolveSummary(summary);
+  const projected = await projection;
+
+  assert.deepEqual(projected.map((item) => item.kind), ["note", "artifact", "note", "user", "assistant"]);
+  assert.match(JSON.stringify(projected), /再补一版/);
+  assert.match(JSON.stringify(projected), /补充回复正文/);
+  assert.doesNotMatch(JSON.stringify(projected), /完整结果正文/);
+  // 同一标签不带边界投影会删掉读取期间到达的续聊回复（本次修复的缺陷）。
+  const unbounded = projectAutomationResult(items, run, summary);
+  assert.doesNotMatch(JSON.stringify(unbounded), /补充回复正文/);
 });
 
 test("ChatRow offers exactly the shared result attachment files through the optional handler", () => {
@@ -498,7 +711,7 @@ test("selectSubtask stamps automation origin on tabs opened from run records", (
   // 规格 §8 第 8 条：删除自动化/prune 后关闭所有受影响标签。从运行记录打开的 work 标签
   // 必须带 automationId 才参与失效对账，否则残留指向已删会话的幽灵标签（评审 #1）。
   const body = functionBody("async function selectSubtask(", "async function renameSubtask(");
-  const historyAt = body.indexOf("historyToChatItems(view)");
+  const historyAt = body.indexOf("historyItemsWithArtifacts(view)");
   assert.ok(historyAt >= 0, "selectSubtask still replays history for tasks with a session");
   const createAt = body.indexOf("setChatTabs((prev) => [", historyAt);
   const createEnd = body.indexOf("void reconcileSubagentRuns(id, sessionId)", createAt);
@@ -630,6 +843,90 @@ test("the ready reconcile runs before the sidecar event gates so every reconnect
   );
 });
 
+test("a ready reconcile backfills a listed artifact exactly once and a replay does not duplicate it", () => {
+  const artifact: TaskArtifactSummary = {
+    artifactId: "lost-artifact",
+    sessionId: "session-1",
+    title: "报告",
+    format: "markdown",
+    downloadName: "报告.md",
+    sizeBytes: 4,
+    sha256: "sha256:test",
+    createdAt: "2026-11-15T10:00:00.000Z",
+    anchor: { kind: "turn", clientMessageId: "m1" },
+  };
+  // 断线期间丢失 artifact/created：标签里只有用户消息与助手正文。
+  let items: AppModule.ChatItem[] = [
+    { id: 1, kind: "user", text: "生成报告", clientMessageId: "m1" },
+    { id: 2, kind: "assistant", text: "已完成" },
+  ];
+  // ready 对账走 App 同一条批量回填路径：未见的列表项插入恰好一张卡。
+  items = insertListedArtifactsIntoHistory(items, [artifact], () => 3);
+  assert.equal(items.filter((item) => item.kind === "artifact" && item.artifactId === "lost-artifact").length, 1);
+  assert.deepEqual(items.map((item) => item.kind), ["user", "assistant", "artifact"]);
+  // 第二次 ready 重放同一份 artifact.list：不新增卡、不产生未定位分组。
+  const replay = insertListedArtifactsIntoHistory(items, [artifact], () => 4);
+  assert.equal(replay.filter((item) => item.kind === "artifact" && item.artifactId === "lost-artifact").length, 1);
+  assert.equal(replay.filter((item) => item.kind === "artifact-group").length, 0);
+});
+
+test("the sidecar/status ready branch reconciles artifacts for bound ordinary sessions", () => {
+  const handlerAt = APP_SOURCE.indexOf("const applyEvent = (event: RpcEvent) => {");
+  const handlerEnd = APP_SOURCE.indexOf("applySidecarEventRef.current = applyEvent;", handlerAt);
+  assert.ok(handlerAt >= 0 && handlerEnd > handlerAt, "the sidecar event handler is still a named applyEvent closure");
+  const handler = APP_SOURCE.slice(handlerAt, handlerEnd);
+
+  const reconcileAt = handler.indexOf("reconcileBoundSubagentRuns()");
+  const artifactsAt = handler.indexOf("reconcileBoundArtifacts()", reconcileAt);
+  assert.ok(reconcileAt >= 0 && artifactsAt > reconcileAt, "ready still reconciles artifacts after subagent runs");
+  const gateAt = handler.indexOf(
+    "if (automationActiveRef.current && !isUserSessionId(eventSessionId) && !boundTab) return;",
+  );
+  assert.ok(artifactsAt < gateAt, "artifact reconciliation must stay before the automation gate: ready has no sessionId");
+
+  const body = functionBody("function reconcileBoundArtifacts(): void {", "/** WS ready 后对每个绑定了会话的标签各对账一次");
+  // 普通会话才补拉；自动化运行标签由 run-end 既有回填负责。
+  assert.match(body, /if \(!sessionId \|\| tab\.automationId \|\| seen\.has\(sessionId\)\) continue;/);
+  assert.match(body, /const epoch = reconcileEpochRef\.current;/);
+  assert.match(body, /epoch !== reconcileEpochRef\.current/);
+  assert.match(body, /listSessionArtifacts\(sessionId\)/);
+  assert.match(body, /insertListedArtifactsIntoHistory\(candidate\.items, artifacts, allocId\)/);
+  assert.match(body, /candidate\.id !== tabId \|\| candidate\.sessionId !== sessionId/);
+  // 一次 ready 只按会话各拉一次，不引入轮询。
+  assert.doesNotMatch(body, /setInterval|setTimeout/);
+});
+
+test("session deletion surfaces an incomplete artifact cleanup instead of silently succeeding", () => {
+  const body = functionBody("async function removeSession(", "const blocked = sidecarDead;");
+  assert.match(body, /rpcCall<\{ removed: true; artifactCleanup\?: ArtifactCleanupReport \}>\("session\.remove"/);
+  assert.match(body, /setDeleteError\(artifactCleanupNotice\(removed\.artifactCleanup\)\)/);
+  // 确认框已关闭时，同一条提示必须留在主区横幅里可见。
+  assert.match(APP_SOURCE, /\{deleteError && !confirmDelete \? <div className="banner warn"/);
+});
+
+test("project deletion surfaces an incomplete artifact cleanup through the panel error line", () => {
+  assert.match(
+    PROJECTS_PANEL_SOURCE,
+    /const removed = await removeProject\(confirming\.project\.id\)/,
+  );
+  assert.match(
+    PROJECTS_PANEL_SOURCE,
+    /setError\(artifactCleanupNotice\(removed\.artifactCleanup\)\)/,
+  );
+});
+
+test("subtask deletion forwards and surfaces an incomplete artifact cleanup notice", () => {
+  const removeBody = functionBody("async function removeSubtask(", "async function refreshSessions(");
+  assert.match(removeBody, /const removed = await removeTask\(task\.id\);/);
+  assert.match(removeBody, /return removed;/);
+  const submitStart = PROJECTS_PANEL_SOURCE.indexOf("async function submitRemoveSubtask()");
+  const submitEnd = PROJECTS_PANEL_SOURCE.indexOf("return (", submitStart);
+  assert.ok(submitStart >= 0 && submitEnd > submitStart);
+  const submitBody = PROJECTS_PANEL_SOURCE.slice(submitStart, submitEnd);
+  assert.match(submitBody, /const removed = await onRemoveSubtask\(confirmingTask\);/);
+  assert.match(submitBody, /setError\(artifactCleanupNotice\(removed\?\.artifactCleanup\)\);/);
+});
+
 test("global catalog refreshes run before the automation gate so background runs cannot swallow them", () => {
   // 契约钉:skill/changed 与 agent/changed 不携带 sessionId,自动化闸门对 undefined
   // 判定为非用户会话并早退。若目录刷新留在闸门之后,后台自动化运行期间创建技能/智能体
@@ -706,7 +1003,7 @@ test("resuming an existing session tab activates it without replaying history ov
   assert.match(existingBranch, /setActiveTab\(existing\.id\)/, "an existing tab is still activated");
   assert.doesNotMatch(
     existingBranch,
-    /historyToChatItems/,
+    /historyItemsWithArtifacts|historyToChatItems/,
     "the existing-tab branch must not replay history: history items carry no subagent-run cards, "
       + "so overwriting the live tab with them drops every run card in every open tab "
       + "(E-05 live: 5 cards on tab A became 0 after one sidebar click)",
@@ -721,9 +1018,9 @@ test("resuming an existing session tab activates it without replaying history ov
 
   // 历史回放只留给新建标签的分支,且新建后必须补拉宿主快照把运行卡补回来。
   assert.equal(
-    (body.match(/historyToChatItems\(/g) ?? []).length,
+    (body.match(/historyItemsWithArtifacts\(/g) ?? []).length,
     1,
-    "historyToChatItems(view) is computed exactly once, inside the new-tab branch only",
+    "history is replayed exactly once, inside the new-tab branch only (artifacts are backfilled by the same helper)",
   );
   assert.match(newBranch, /\bitems,/, "the new-tab branch still seeds items from history");
   assert.match(
@@ -731,6 +1028,38 @@ test("resuming an existing session tab activates it without replaying history ov
     /void reconcileSubagentRuns\(id, sessionId\)/,
     "the new-tab branch must reconcile with the tab id + sessionId: a tab first opened after an app "
       + "restart otherwise shows history messages with zero subagent-run cards",
+  );
+});
+
+test("reopening the default workspace session after restart hydrates an empty pre-bound work-1 tab instead of leaving it blank", () => {
+  // 复现真机整应用重启缺口：启动期 bindDefaultTabSessions 会把空的欢迎标签 work-1 预绑定到
+  // 默认工作区稳定会话 ID；若 resumeFromView 不区分空预绑定标签，重开该会话会直接跳过
+  // historyItemsWithArtifacts 而停在空白欢迎页；同样地，WS ready 对账也必须跳过空标签，
+  // 避免在用户尚未打开历史前把旧 Artifact 倾倒进空白欢迎页。
+  const resumeBody = functionBody("async function resumeFromView(", "async function resumeHistorySession(");
+  assert.match(
+    resumeBody,
+    /const existing = chatTabs\.find\(\(tab\) => tab\.sessionId === sessionId && tab\.items\.length > 0\)/,
+    "only a populated tab should bypass history replay as authoritative live state",
+  );
+  assert.match(
+    resumeBody,
+    /const emptyBound = chatTabs\.find\(\(tab\) => tab\.sessionId === sessionId && tab\.items\.length === 0\)/,
+    "an empty pre-bound tab must be hydrated in place with history and artifacts",
+  );
+  const reconcileBody = functionBody(
+    "function reconcileBoundArtifacts(): void {",
+    "/** WS ready 后对每个绑定了会话的标签各对账一次",
+  );
+  assert.match(
+    reconcileBody,
+    /if \(tab\.items\.length === 0\) continue;/,
+    "reconnect artifact reconciliation must skip empty pre-bound tabs",
+  );
+  assert.match(
+    reconcileBody,
+    /candidate\.items\.length === 0/,
+    "reconnect artifact reconciliation must re-check items.length inside setChatTabs",
   );
 });
 
@@ -742,7 +1071,7 @@ test("history-load paths reconcile the host snapshot so run cards survive a fres
   assert.ok(selectEnd > selectAt, "selectSubtask is still followed by renameSubtask");
   const selectBody = APP_SOURCE.slice(selectAt, selectEnd);
 
-  const historyAt = selectBody.indexOf("historyToChatItems(view)");
+  const historyAt = selectBody.indexOf("historyItemsWithArtifacts(view)");
   assert.ok(historyAt >= 0, "selectSubtask's history branch still replays the session history");
   const openAt = selectBody.indexOf('rpcCall<{ records?: SessionDetailRecord[] }>("session.open"');
   const resumeAt = selectBody.indexOf('rpcCall("session.resume"');
@@ -1474,7 +1803,8 @@ test("a rejected send leaves the running turn stop latch", () => {
   const catchBody = blockAfter(body.slice(catchAt), "catch (error) {").body;
   // 本次消息标成未启动；失败原因仍然追加（停止闩锁扣着也追加，不提前 return）。
   assert.match(catchBody, /item\.kind === "user" && item\.id === userMsg\.id \? \{ \.\.\.item, sendRejected: true \} : item/);
-  assert.match(catchBody, /items: \[\s*\.\.\.tab\.items\.map\([\s\S]*?\),\s*note,\s*\]/);
+  // 失败脚注仍是普通提示：经 insertBeforeArtifactGroup 追加在尾部未定位结果分组之前。
+  assert.match(catchBody, /items: insertBeforeArtifactGroup\(\s*tab\.items\.map\([\s\S]*?\),\s*note,\s*\)/);
   assert.doesNotMatch(catchBody, /^\s*return;/m);
   // 仍执行中的标签不标 sessionFailed。
   assert.match(catchBody, /tabRunOf\(chatId\)\.running \? \{\} : \{ sessionFailed: true \}/);
@@ -1994,6 +2324,31 @@ test("the diff follows the session's own tab", () => {
   assert.match(diffBody, /if \(activeTabRef\.current === diffTab\) setRightTab\("diff"\);/, "a background diff never switches the pane");
 });
 
+test("a new artifact never opens or switches the right pane", () => {
+  // 规格 §7.1：不为每个结果自动打开右栏；唯一打开路径是用户点卡 handleOpenArtifact。
+  const createdAt = APP_SOURCE.indexOf('if (event.event === "artifact/created") {');
+  assert.ok(createdAt >= 0, "the artifact/created branch is still wired");
+  const createdBody = blockAfter(APP_SOURCE.slice(createdAt), 'if (event.event === "artifact/created") {').body;
+  assert.doesNotMatch(createdBody, /setRightTab|setRightCollapsed/, "a created result never auto-opens the pane");
+});
+
+test("the preview keeps a raw download entry in the error state", () => {
+  // 规格 §7.2：下载只需双 ID；读取/渲染失败不得移除原始下载入口。
+  const downloadBody = blockAfter(APP_SOURCE, "async function downloadArtifact(): Promise<void> {").body;
+  assert.match(downloadBody, /artifactId: previewArtifactId/, "download targets the current selection");
+  assert.doesNotMatch(downloadBody, /previewArtifactLoaded/, "download must not depend on a loaded body");
+  const start = APP_SOURCE.indexOf("<ArtifactPreview");
+  const call = APP_SOURCE.slice(start, APP_SOURCE.indexOf("/>", start));
+  assert.match(call, /onDownload=\{\(\) => void downloadArtifact\(\)\}/, "the download entry is not gated on a loaded body");
+});
+
+test("preview busy tracks the artifact being read", () => {
+  // 快速连点两张卡：先返回的请求不得清掉后一张的 busy，避免闪现空态。
+  assert.match(APP_SOURCE, /const \[artifactPreviewBusy, setArtifactPreviewBusy\] = useState<string \| null>\(null\);/);
+  assert.match(APP_SOURCE, /setArtifactPreviewBusy\(\(busy\) => \(busy === artifactId \? null : busy\)\);/);
+  assert.match(APP_SOURCE, /artifactPreviewBusy === previewArtifactId \?/, "only the selected artifact's own read shows busy");
+});
+
 /** 活动回合 + 一条排队中（带 `queueItemId`）的用户消息：B 还没开始执行。 */
 function turnWithQueuedMessage(): Parameters<typeof AppModule.appendToken>[0] {
   return [
@@ -2185,11 +2540,13 @@ test("turn-owned rows land before a just-inserted user message", () => {
   assert.equal(withInput[1]?.kind === "input" ? withInput[1].card.state : "", "closed");
 
   // 接线：各分支都走同一插入点，没有任何一处继续追加到末尾。
+  // 计数 6 = 工具行、审批、压缩、目标、失败脚注之外，再加 result_present 失败的紧凑提示
+  // （Task 5 新增的真实调用点；成功结果不落行，只由 Artifact 卡展示）。
   const h = functionBody("function handleEvent(", "function turnAppendIndex(");
   assert.equal(
     (h.match(/insertTurnItem\(prev, /g) ?? []).length,
-    5,
-    "tool row, approval, compaction, goal and failure notes share the append position",
+    6,
+    "tool row, approval, compaction, goal, failure and result_present-failure notes share the append position",
   );
   assert.match(h, /insertTurnItem\(prev, ask\)/);
   assert.match(h, /appendOpenInputInTurn\(prev, allocId\(\), event\.question, event\.sessionId\)/);
@@ -2328,6 +2685,49 @@ test("handleEvent passes roundKey from tool/start into the card", () => {
   );
   const card = updates[0]?.[0]?.kind === "tool" ? updates[0][0].card : undefined;
   assert.equal(card?.roundKey, 42);
+});
+
+test("live result_present starts no tool card and only its failed end leaves a body-free note", () => {
+  let seq = 10;
+  let items: Parameters<typeof AppModule.insertTurnItem>[0] = [
+    { id: 1, kind: "user", text: "生成报告", clientMessageId: "uuid-1" },
+  ];
+  const dispatch = (event: RpcEvent) => {
+    AppModule.handleEvent(
+      event,
+      () => seq++,
+      () => undefined,
+      (updater) => { items = updater(items); },
+      () => undefined,
+      () => undefined,
+      async () => undefined,
+      { current: true },
+      false,
+      false,
+      false,
+    );
+  };
+  // 实时 tool/start 不写普通工具卡，参数正文从不进入对话流。
+  dispatch({
+    event: "tool/start",
+    name: RESULT_PRESENT_TOOL,
+    callId: "call-1",
+    sessionId: "s1",
+    clientMessageId: "uuid-1",
+    roundKey: 3,
+  });
+  assert.equal(items.some((item) => item.kind === "tool"), false);
+  // 成功结果只由 Artifact 卡展示：tool/end 静默。
+  dispatch({ event: "tool/end", name: RESULT_PRESENT_TOOL, callId: "call-1", sessionId: "s1", text: "已生成结果页" });
+  assert.equal(items.some((item) => item.kind === "tool"), false);
+  assert.equal(items.some((item) => item.kind === "note"), false, "a successful end adds nothing");
+  // 失败只留一条紧凑提示，不含参数或结果正文。
+  dispatch({ event: "tool/end", name: RESULT_PRESENT_TOOL, callId: "call-2", sessionId: "s1", text: "artifact-write-failed", isError: true });
+  const notes = items.filter((item) => item.kind === "note");
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0]?.kind === "note" ? notes[0].text : "", RESULT_PRESENT_FAILURE_NOTE);
+  assert.equal(JSON.stringify(items).includes("已生成结果页"), false);
+  assert.equal(JSON.stringify(items).includes("完整结果正文"), false);
 });
 
 test("reasoning without roundKey keeps the single block behaviour", () => {

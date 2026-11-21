@@ -116,6 +116,7 @@ type TurnItem = { id?: number } & (
       };
     }
   | { kind: "assistant" | "thinking" | "note" | "todo" | "input" }
+  | { kind: "artifact" | "artifact-error" | "artifact-loading" | "artifact-group" }
 );
 
 export type TurnChecks = {

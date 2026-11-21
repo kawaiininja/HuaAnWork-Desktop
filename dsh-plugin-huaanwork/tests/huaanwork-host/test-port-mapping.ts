@@ -263,19 +263,19 @@ export const testPortMapping: TestPortRow[] = [
     file: 'automations-host.test.ts',
     title: 'agent task runs in an independent session with an automation-fire envelope',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:535',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:883',
   },
   {
     file: 'automations-host.test.ts',
     title: 'merged taskShape injects the previous successful output truncated to 4 KB',
     label: 'Task 4 新增',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:535',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:883',
   },
   {
     file: 'automations-host.test.ts',
-    title: 'two parallel script tasks do not lock workspace.open',
+    title: 'two parallel script tasks on different roots do not lock workspace.open',
     label: '本任务补',
-    evidence: 'tests/huaanwork-host/automations-host.spec.ts:1271',
+    evidence: 'tests/huaanwork-host/automations-host.spec.ts:1642',
   },
   {
     file: 'automations-host.test.ts',

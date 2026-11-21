@@ -3,6 +3,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import HistoryDetailPane, { type SessionDetailRecord, type SessionLogView } from "./HistoryDetailPane.tsx";
 import { rpcCall } from "./api.ts";
 import {
+  artifactCleanupNotice,
   automationRuns,
   createAutomation,
   deleteAutomationRun,
@@ -218,9 +219,11 @@ export default function AutomationsView({
     setBusy(true);
     setError("");
     try {
-      await removeAutomation(confirming.id);
+      const removed = await removeAutomation(confirming.id);
       setConfirming(null);
       onChanged();
+      // 记录已删、结果文件残余仍要如实告知（规格 §9），不能静默成功。
+      setError(artifactCleanupNotice(removed.artifactCleanup));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -623,7 +626,7 @@ function RunsPanel({
     try {
       // sessionDirRemoved 恒为 true：宿主目录删除失败会抛错走 catch（Run 保留可重试），
       // 不会以 false 成功返回。字段仍留在删除响应类型里（brief 钉住的契约），界面不再分支。
-      await deleteAutomationRun(automation.id, run.runId);
+      const deleted = await deleteAutomationRun(automation.id, run.runId);
       setPendingDelete(null);
       // 先乐观移除：宿主列表回来之前这一行就已消失；随后用宿主读数覆盖。
       setFullRuns((prev) => ({
@@ -632,6 +635,8 @@ function RunsPanel({
       }));
       if (run.sessionId && detail?.sessionId === run.sessionId) setDetail(null);
       if (run.sessionId) onRunDeleted?.(run.sessionId, automation.id, run.startedAt);
+      // 记录已删、结果文件残余仍要如实告知（规格 §9），不能静默成功。
+      setDeleteError(artifactCleanupNotice(deleted.artifactCleanup));
       void reloadRuns(automation.id);
       onChanged();
     } catch (err) {
@@ -648,13 +653,14 @@ function RunsPanel({
     setPruning(true);
     setNotice("");
     try {
-      const { removed, tasksRemoved, failed } = await pruneAutomationSessions();
+      const { removed, tasksRemoved, failed, artifactCleanup } = await pruneAutomationSessions();
       const done = `已清理 ${removed} 个历史运行会话${tasksRemoved > 0 ? `、${tasksRemoved} 个运行子任务` : ""}`;
-      setNotice(
-        failed.length === 0
-          ? done
-          : `${done}；${failed.length} 项未能清理（${failed.join("、")}），可再次清理重试`,
-      );
+      const failedNote = failed.length === 0
+        ? ""
+        : `；${failed.length} 项未能清理（${failed.join("、")}），可再次清理重试`;
+      // 结果文件残余追加在成功文案之后（规格 §9），不静默成功。
+      const cleanupNote = artifactCleanupNotice(artifactCleanup);
+      setNotice(`${done}${failedNote}${cleanupNote ? `；${cleanupNote}` : ""}`);
       setPruneConfirm(false);
       // 部分成功也要刷新：已删的会话/子任务必须从标签和任务区消失，失败项仍可重试。
       onChanged();

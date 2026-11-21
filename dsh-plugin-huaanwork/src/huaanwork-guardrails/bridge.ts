@@ -25,6 +25,7 @@ import {
   GIT_SNAPSHOT_MAX_UNTRACKED_DIFFS,
   type GitWorkBudget,
 } from "./git-budget.ts";
+import { RESULT_PRESENT_TOOL } from "./result-artifact-tools.ts";
 import { sessionWorkspaceRoot } from "./sandbox-cwd.ts";
 
 type RpcEvent =
@@ -432,6 +433,8 @@ function porcelainUntrackedPath(line: string): string | undefined {
 
 /** tool/start 的附加信息:参数摘要、todo_write 的待办列表、bash / pwsh 的 command 参数。 */
 function startDetail(execution: ToolExecution): Partial<Extract<RpcEvent, { event: "tool/start" }>> {
+  // result_present 的参数含完整结果正文:实时 tool/start 只保留身份字段,不下发 args。
+  if (execution.name === RESULT_PRESENT_TOOL) return {};
   const formattedArgs = formatToolArguments(execution.arguments);
   const args = formattedArgs === undefined ? {} : { args: formattedArgs };
   const objectArgs = objectValue(execution.arguments);

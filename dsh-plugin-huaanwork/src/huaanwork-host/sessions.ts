@@ -37,6 +37,11 @@ import {
 import { CorruptSkillCreationDraftError, discardSkillCreationDraft, hasAgentCreationDraftOnDisk } from './skill-creation-drafts.ts'
 import { invokeSkillText } from './skill-invoke.ts'
 import { AUTO_SESSION_PREFIX } from './automation-session-ids.ts'
+import {
+  incompleteArtifactCleanup,
+  removeArtifactsOfSession,
+  type ArtifactCleanupReport,
+} from './artifacts-host.ts'
 import { resolveApproval, type ApprovalMap, type ApprovalResult } from './approvals.ts'
 import type { AgentsHost } from './agents-host.ts'
 import {
@@ -894,7 +899,7 @@ async function removeSession(
   sessionsRoot: string,
   params: unknown,
   opts: { profileDir?: string; logger?: (message: string) => void } = {},
-): Promise<{ removed: true }> {
+): Promise<{ removed: true; artifactCleanup?: ArtifactCleanupReport }> {
   const rawSessionId = objectString(params, 'sessionId')
   if (!rawSessionId) throw new Error('session.remove requires params.sessionId')
   const sessionId = assertSafePathSegment(rawSessionId, 'sessionId')
@@ -911,6 +916,7 @@ async function removeSession(
   // 变成递归删除的目标(负例见 sessions.spec.ts 的
   // `sessionRemove only ever touches the minted sibling root …`)。
   const { profileDir, logger } = opts
+  let artifactCleanup: ArtifactCleanupReport | undefined
   if (profileDir) {
     // 删除会话=放弃未完成草稿(owner 2026-11-16 裁定):两类创建草稿随会话一并清理,
     // 否则稳定通道会话重建同 sessionId 时旧草稿复活并继续注入创建流程。
@@ -926,8 +932,17 @@ async function removeSession(
         )
       })
     }
+    // 结果文件随会话删除;失败同样不回滚已经删掉的会话日志,只报告清理不完整。
+    try {
+      await removeArtifactsOfSession(profileDir, sessionId)
+    } catch (error: unknown) {
+      logger?.(
+        `session.remove: 结果文件未能完全清理 ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      artifactCleanup = incompleteArtifactCleanup()
+    }
   }
-  return { removed: true }
+  return { removed: true, ...(artifactCleanup === undefined ? {} : { artifactCleanup }) }
 }
 
 /** 按 header.id 定位会话日志文件(含 .jsonl.zstd);不存在返回 undefined。 */
@@ -1377,7 +1392,7 @@ export async function sessionRemove(
   ctx: SessionRuntimeContext | undefined,
   routeCtx: RouteContext,
   params: unknown,
-): Promise<{ removed: true }> {
+): Promise<{ removed: true; artifactCleanup?: ArtifactCleanupReport }> {
   return removeSession(ctx, join(routeCtx.dshHome, 'sessions'), params, {
     profileDir: routeCtx.profileDir,
     logger: routeCtx.logger,

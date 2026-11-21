@@ -5,7 +5,7 @@ import { ROUTE_TABLE, type RouteTableEntry } from '../../src/huaanwork-host/rout
 /**
  * 路由契约跨端交叉测试 (M3 评审 D6):
  * 验证客户端 ROUTES (src/client-huaanwork/api.ts) 与
- * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 77 个方法在
+ * 宿主侧 ROUTE_TABLE (src/huaanwork-host/routes.ts) 之间的 83 个方法在
  * HTTP Method、Path 与返回载荷键集上的严格双向一致性。
  */
 
@@ -75,10 +75,10 @@ export const TARGET_BUSINESS_REQUIRED_KEYS: Record<string, string[]> = {
   'automation.pruneSessions': ['removed', 'tasksRemoved', 'failed'],
 }
 
-/** 77 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
+/** 83 个方法中仍处于 501 notImplemented 的方法。Task 6 之后为零。 */
 export const METHODS_501 = new Set<string>([])
 
-/** 客户端 77 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
+/** 客户端 83 个方法调用期望的真实必选字段集合 (包含 16 个 501 路由的真实业务期望键)。 */
 export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   // workspace
   'workspace.open': ['workspaceRoot'],
@@ -211,6 +211,15 @@ export const CLIENT_REQUIRED_KEYS: Record<string, string[]> = {
   'task.bindSession': ['task'],
   'task.rename': ['task'],
   'task.setModel': ['task'],
+
+  // artifact(Task 4):只读查询与按需正文
+  'artifact.get': ['artifact'],
+  'artifact.content': ['artifact', 'content'],
+  'artifact.list': ['artifacts'],
+  // artifact(Task 7):声明式原生能力(POST body 双 ID;后两者额外 surface/frameName)
+  'artifact.openFullscreen': ['sessionId', 'artifactId'],
+  'artifact.download': ['sessionId', 'artifactId', 'surface'],
+  'artifact.prepareFrame': ['sessionId', 'artifactId', 'surface', 'frameName'],
 }
 
 /**
@@ -358,6 +367,15 @@ export const SERVER_EXPECTED_KEYS: Record<string, string[]> = {
   'task.bindSession': ['task'],
   'task.rename': ['task'],
   'task.setModel': ['task'],
+
+  // artifact(Task 4):只读查询与按需正文
+  'artifact.get': ['artifact'],
+  'artifact.content': ['artifact', 'content'],
+  'artifact.list': ['artifacts'],
+  // artifact(Task 7):与客户端透传的 body 键一致
+  'artifact.openFullscreen': ['sessionId', 'artifactId'],
+  'artifact.download': ['sessionId', 'artifactId', 'surface'],
+  'artifact.prepareFrame': ['sessionId', 'artifactId', 'surface', 'frameName'],
 }
 
 /** 契约对比核心函数: 严格断言 HTTP 动词、Path 以及双端必含键集合双向严格相等。 */
@@ -399,16 +417,16 @@ export function verifyMethodContract(
 }
 
 describe('Route Contract Cross-Test (D6)', () => {
-  test('双端方法总数恰好 77 且集合完全一致', () => {
+  test('双端方法总数恰好 83 且集合完全一致', () => {
     const clientMethods = Object.keys(ROUTES).sort()
     const serverMethods = ROUTE_TABLE.map((r) => r.method).sort()
 
-    expect(clientMethods.length).toBe(77)
-    expect(serverMethods.length).toBe(77)
+    expect(clientMethods.length).toBe(83)
+    expect(serverMethods.length).toBe(83)
     expect(clientMethods).toEqual(serverMethods)
   })
 
-  test('77 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
+  test('83 条已实现路由逐方法比对: HTTP 动词、Path 与必含键集合严格双向相等 (Set 严格相等 + 可选键白名单)', () => {
     const serverRouteMap = new Map(ROUTE_TABLE.map((r) => [r.method, r]))
 
     for (const [method, clientRoute] of Object.entries(ROUTES)) {

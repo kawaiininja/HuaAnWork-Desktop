@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { ConfirmedRestartRuntime } from '../host-runtime-bridge.ts'
+import { narrowArtifactNativeCapability, type ConfirmedRestartRuntime } from '../host-runtime-bridge.ts'
 import { sweepLegacyChatAutoSessions } from './automation-sweep.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
@@ -47,6 +47,10 @@ import {
   registerAgentPackageCreationTools,
   registerAgentPackageRuntimeTools,
 } from '../huaanwork-guardrails/agent-package-tools.ts'
+import {
+  makeResultPresentClaimed,
+  registerResultArtifactTools,
+} from '../huaanwork-guardrails/result-artifact-tools.ts'
 import { registerSkillCreationTools } from '../huaanwork-guardrails/skill-creation-tools.ts'
 
 export const name = 'huaanwork-host'
@@ -153,8 +157,15 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     }
     return runtime.requestConfirmedRestart()
   })
+  // Artifact 原生能力同样是窄接口:三个方法齐备才注入;测试桩/第三方 Host 缺席时
+  // 路由明确报 artifact-native-unavailable,而不是在调用点抛裸 TypeError。
+  const artifactNative = narrowArtifactNativeCapability(ctx.desktopRuntime)
+  if (artifactNative !== undefined) routeCtx.artifactNative = artifactNative
   // 共享回合锚点:holders 注入实例,这里挂 pre-step 写锚点与 session/disposed 清理。
   installTurnAnchorHooks(ctx)
+  // result_present 的会话附件切换:claim 早于 prompt assembly,通知处理器必须同步完成
+  // attach/detach + restrict,工具的首次可见性才成立(顶层 inject 不含 'tools',只注册通知)。
+  ctx.on('agent/inbox/claimed', makeResultPresentClaimed(ctx), { global: true })
   // 技能中心一次性迁移必须在技能路由可用前完成:旧用户技能与旧启用的普通内置
   // 技能都要先变成“本地副本 + user-skill-toggles.json”。失败不写完成标记,
   // 下次启动重入;错误只记录,不阻塞桌面其余部分。
@@ -362,6 +373,8 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           huaanworkEmit: ctx.huaanworkEmit,
           huaanworkAgentPackageHost: agentPackageHost,
           huaanworkAttachments: ctx.huaanworkAttachments,
+          // result_present 用共享回合锚点把每次提交归到当前真实用户回合。
+          huaanworkTurnAnchors: ctx.huaanworkTurnAnchors,
           // commit 成功后的解绑要等工具结果定稿:上游归一化结果时会按名字重解析工具。
           huaanworkOnToolResult: (listener: (exec: { callId?: string }) => void) =>
             (pc as unknown as { on(name: string, callback: (exec: { callId?: string }) => void): () => void })
@@ -374,6 +387,8 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
         const unregisterRuntimeTools = registerAgentPackageRuntimeTools(toolCtx, agentPackageRegistry)
         // 对话创建技能:两个工具全局注册,可见性/执行权同样由会话附件与 policy 门禁控制。
         const unregisterSkillTools = registerSkillCreationTools(toolCtx, skillCreationHost)
+        // 结果页工具全局注册;普通父会话经 claimed 附件获得模型面,自动化/包儿童不可见。
+        const unregisterResultArtifactTools = registerResultArtifactTools(toolCtx, config.profileDir)
         syncHostToolDescription = () => {
           unregister?.()
           unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
@@ -384,6 +399,7 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           unregisterSkillTools()
           setSkillCreationHost(undefined)
           unregisterRuntimeTools()
+          unregisterResultArtifactTools()
           unregisterPackageTools()
           unregister?.()
           // 插件卸载(应用退出/热替换):先同步启动进程 kill 路径,再取消在途包

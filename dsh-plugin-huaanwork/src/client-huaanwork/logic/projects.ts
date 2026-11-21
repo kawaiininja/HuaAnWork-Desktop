@@ -1,3 +1,5 @@
+import type { ArtifactFormat, ArtifactOutcome } from "../rpc-types.ts";
+
 export type ProjectInfo = {
   id: string;
   name: string;
@@ -5,6 +7,18 @@ export type ProjectInfo = {
   createdAt: number;
   lastOpenedAt?: number;
 };
+
+/** 删除原语的磁盘清理报告：记录删除已完成，`complete:false` 只描述结果文件残余。 */
+export type ArtifactCleanupReport = { complete: boolean; message?: string };
+
+/**
+ * 删除应答里的用户提示：清理完整时为空串，不完整时优先用宿主 message。
+ * 缺 message 的旧/异常应答回退到固定文案，绝不静默成功。
+ */
+export function artifactCleanupNotice(cleanup?: ArtifactCleanupReport): string {
+  if (cleanup?.complete !== false) return "";
+  return cleanup.message ?? "记录已删除、结果文件未能完全清理";
+}
 
 export type AutomationSchedule =
   | { kind: "manual" }
@@ -50,6 +64,13 @@ export type RunSummary = {
   durationMs?: number;
   /** 该运行创建的运行子任务 id；旧记录与未建子任务的运行没有此字段。 */
   taskId?: string;
+  /** 结果页持久化结局；旧记录、取消与 skipped 没有这些可选键（与 rpc-types 同源）。 */
+  artifactOutcome?: ArtifactOutcome;
+  artifactId?: string;
+  artifactError?: string;
+  /** 仅在封套/兼容 JSON 已通过校验、只是持久化失败时记录。 */
+  artifactTitle?: string;
+  artifactFormat?: ArtifactFormat;
 };
 
 export type AutomationTemplate = {

@@ -45,13 +45,15 @@ const ALL_METHODS = [
   'project.list', 'project.create', 'project.open', 'project.remove', 'project.rename',
   'automation.list', 'automation.create', 'automation.update', 'automation.remove', 'automation.stop', 'automation.deleteRun', 'automation.run', 'automation.runs', 'automation.pruneSessions', 'automation.templates',
   'task.list', 'task.create', 'task.remove', 'task.bindSession', 'task.rename', 'task.setModel',
+  'artifact.get', 'artifact.content', 'artifact.list',
+  'artifact.openFullscreen', 'artifact.download', 'artifact.prepareFrame',
 ]
 
 describe('ROUTE_TABLE registry', () => {
-  test('77 个方法全部登记,无遗漏无重复', () => {
+  test('83 个方法全部登记,无遗漏无重复', () => {
     expect(ROUTE_TABLE.map((r) => r.method).sort()).toEqual([...ALL_METHODS].sort())
     expect(new Set(ROUTE_TABLE.map((r) => routeKey(r.http, r.path))).size).toBe(ROUTE_TABLE.length)
-    expect(ROUTE_TABLE).toHaveLength(77)
+    expect(ROUTE_TABLE).toHaveLength(83)
   })
 
   test('automation.stop 登记为 POST /huaanwork/automation/stop 并校验 params.id', async () => {
@@ -122,7 +124,7 @@ describe('ROUTE_TABLE registry', () => {
     }
   })
 
-  test('除已实现的 77 个方法外其余 0 个方法均返回 501', async () => {
+  test('除已实现的 83 个方法外其余 0 个方法均返回 501', async () => {
     const implemented = new Set([
       'status.get',
       'settings.get',
@@ -208,8 +210,16 @@ describe('ROUTE_TABLE registry', () => {
       // Task 3 (子代理 run 可见性):list/cancel
       'subagent.list',
       'subagent.cancel',
+      // Task 4 (任务结果 Artifact):查询与按需正文 ×3
+      'artifact.get',
+      'artifact.content',
+      'artifact.list',
+      // Task 7 (全屏窗口与另存为):声明式原生能力 ×3
+      'artifact.openFullscreen',
+      'artifact.download',
+      'artifact.prepareFrame',
     ])
-    expect(implemented).toHaveLength(77)
+    expect(implemented).toHaveLength(83)
     let notImplementedCount = 0
     for (const route of ROUTE_TABLE) {
       if (implemented.has(route.method)) continue

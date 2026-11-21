@@ -13,9 +13,16 @@ export default defineConfig({
     globalSetup: process.platform === 'win32' ? ['../scripts/prepare-test-electron.mjs'] : [],
     // Keep patched packages in Vitest's module graph so mocks reach their
     // fs/promises and undici imports instead of using the live filesystem/network.
+    // The UI primitives ship CSS-module imports alongside their JS bundle; inline
+    // them so Vite transforms those imports instead of Node rejecting `.css`.
     server: {
       deps: {
-        inline: ['@deepseek-ai/dsh-host-directory-picker-browse', '@deepseek-ai/dsh-native-command', 'dshmarket'],
+        inline: [
+          '@deepseek-ai/dsh-host-directory-picker-browse',
+          '@deepseek-ai/dsh-native-command',
+          '@deepseek-ai/dsh-client-ui-primitives',
+          'dshmarket',
+        ],
       },
     },
     // Profile integration tests create a full package-junction closure; higher

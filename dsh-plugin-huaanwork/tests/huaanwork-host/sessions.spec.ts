@@ -4053,3 +4053,27 @@ describe('系统技能回合租约(显式 /explore、/test-fix)', () => {
     expect(attachments.sessionAgentTools.has(sessionId)).toBe(false)
   })
 })
+
+test('sessionRemove deletes only this session artifacts and keeps a sibling session', async () => {
+  const { createArtifact, listArtifacts } = await import('../../src/huaanwork-host/artifacts-host.ts')
+  const root = freshTmp()
+  const routeCtx = makeRouteCtx(root)
+  const sessionId = 'huaanwork-artifact0001'
+  const siblingId = 'huaanwork-artifact0002'
+  writePersistedSession(routeCtx.dshHome, sessionId, routeCtx.workspaceRoot.current)
+  writePersistedSession(routeCtx.dshHome, siblingId, routeCtx.workspaceRoot.current)
+  await createArtifact(routeCtx.profileDir, {
+    sessionId, title: '被删', format: 'markdown', content: '# 被删',
+    anchor: { kind: 'turn' }, idempotency: { kind: 'tool', callId: 'session-remove-1' },
+  })
+  const kept = await createArtifact(routeCtx.profileDir, {
+    sessionId: siblingId, title: '保留', format: 'markdown', content: '# 保留',
+    anchor: { kind: 'turn' }, idempotency: { kind: 'tool', callId: 'session-remove-2' },
+  })
+
+  await expect(sessionRemove(undefined, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
+  expect(await listArtifacts(routeCtx.profileDir, sessionId)).toEqual([])
+  expect(existsSync(join(routeCtx.profileDir, 'artifacts', sessionId))).toBe(false)
+  expect((await listArtifacts(routeCtx.profileDir, siblingId)).map((item) => item.artifactId))
+    .toEqual([kept.artifactId])
+})

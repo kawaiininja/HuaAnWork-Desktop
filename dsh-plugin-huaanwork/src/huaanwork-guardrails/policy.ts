@@ -13,9 +13,13 @@ import { parentSessionOf } from "../huaanwork-host/child-sessions.ts";
 /**
  * 按会话挂载的创建/运行工具:智能体创建挂 agent_propose/agent_commit,`@slug` 运行
  * 链路挂 agent_skill_run/agent_http,对话创建技能挂 skill_propose/skill_commit。
- * 六个名字都要在这里补 `attached`:两个创建链路与技能创建在 decide() 的 default
- * 分支按档位 ask,智能体运行链路两个在显式分支附加即 allow;未挂载一律 deny,
- * 与 call_host_tool 同一纵深。
+ * 会话挂载的工具名都要在这里补 `attached`:两个创建链路与技能创建在 decide() 的
+ * default 分支按档位 ask,智能体运行链路两个在显式分支附加即 allow;未挂载一律
+ * deny,与 call_host_tool 同一纵深。
+ *
+ * `result_present` 是普通父会话的结果页工具:附件由 `agent/inbox/claimed` 按高级
+ * 来源同步,decide() 的显式分支挂载即 allow(用户在场,不逐次审批)、未挂载一律
+ * deny,自动化与包儿童经同一 `attached` 判定被拒绝。
  */
 const SESSION_ATTACHED_TOOLS: ReadonlySet<string> = new Set([
   "agent_propose",
@@ -24,6 +28,7 @@ const SESSION_ATTACHED_TOOLS: ReadonlySet<string> = new Set([
   "agent_http",
   "skill_propose",
   "skill_commit",
+  "result_present",
 ]);
 
 type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:376

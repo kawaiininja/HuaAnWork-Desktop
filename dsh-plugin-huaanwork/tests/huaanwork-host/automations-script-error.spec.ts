@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { expect, test, vi } from 'vitest'
 
+import { OUTPUT_MAX_CHARS } from '../../src/huaanwork-host/automations-store.ts'
 import { runScript, scriptRunKillers } from '../../src/huaanwork-host/automations-host.ts'
 
 const childProcess = vi.hoisted(() => {
@@ -82,4 +83,21 @@ test('a spawn failure finishes immediately, without waiting for close', async ()
   expect(settled[0]?.ok).toBe(false)
   expect(settled[0]?.timedOut).toBe(false)
   expect(settled[0]?.output).toContain('spawn bash ENOENT')
+})
+
+test('keeps the existing 32 KiB clip and passes the script command through unchanged', async () => {
+  const child = new FakeChild(4242)
+  childProcess.setNext(child)
+  const command = 'echo large'
+  const run = runScript(command, tmpdir(), 60_000)
+  child.stdout.emit('data', Buffer.from('x'.repeat(40_000)))
+  child.emit('close', 0)
+  const result = await run
+  expect(result.ok).toBe(true)
+  // 脚本不准备 Artifact:既有 clipOutput 上限不变。
+  expect(result.output).toBe(`${'x'.repeat(OUTPUT_MAX_CHARS)}…（已截断）`)
+  // 封套提示只属于 agent 自动化,不进入脚本命令。
+  const lastCall = childProcess.spawn.mock.calls.at(-1)!
+  expect(JSON.stringify(lastCall)).toContain(JSON.stringify(command))
+  expect(JSON.stringify(lastCall)).not.toContain('task-result-contract')
 })

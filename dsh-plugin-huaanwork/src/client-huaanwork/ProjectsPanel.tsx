@@ -1,11 +1,13 @@
 import { useState } from "react";
 
 import {
+  artifactCleanupNotice,
   createProject,
   openProject,
   removeProject,
   renameProject,
   projectRootName,
+  type ArtifactCleanupReport,
   type ProjectInfo,
   type TaskInfo,
 } from "./projects.ts";
@@ -29,8 +31,8 @@ type Props = {
   onSelectSubtask: (task: TaskInfo) => void;
   /** 重命名子任务（模态确认后调用，与项目重命名同款——评审 P3-8 裁决统一为模态）。 */
   onRenameSubtask: (taskId: string, name: string) => Promise<unknown>;
-  /** 删除子任务（级联删其对话历史，确认弹窗后调用）。 */
-  onRemoveSubtask: (task: TaskInfo) => Promise<unknown>;
+  /** 删除子任务（级联删其对话历史与结果文件，确认弹窗后调用）。 */
+  onRemoveSubtask: (task: TaskInfo) => Promise<{ artifactCleanup?: ArtifactCleanupReport } | void>;
 };
 
 type Menu = { projectId: string; x: number; y: number };
@@ -94,9 +96,11 @@ export default function ProjectsPanel({
     setBusy(true);
     setError("");
     try {
-      await removeProject(confirming.project.id);
+      const removed = await removeProject(confirming.project.id);
       setConfirming(null);
       onChanged();
+      // 记录已删、结果文件残余仍要如实告知（规格 §9），不能静默成功。
+      setError(artifactCleanupNotice(removed.artifactCleanup));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -137,8 +141,9 @@ export default function ProjectsPanel({
     setBusy(true);
     setError("");
     try {
-      await onRemoveSubtask(confirmingTask);
+      const removed = await onRemoveSubtask(confirmingTask);
       setConfirmingTask(null);
+      setError(artifactCleanupNotice(removed?.artifactCleanup));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

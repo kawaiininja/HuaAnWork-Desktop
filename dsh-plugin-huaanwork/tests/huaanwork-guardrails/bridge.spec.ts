@@ -568,6 +568,28 @@ test("bridge carries todo_write todos and shell commands on tool/start, and isEr
   assert.equal(ends[1]?.isError, true);
 });
 
+test("result_present omits args from live tool/start events", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts")
+  const { ctx, listeners, emitted } = createCtx()
+  apply(ctx as never)
+  const execute = listeners["tools/execute"]?.[0] as Execute
+  await execute(
+    {
+      name: "result_present",
+      callId: "rp-live-1",
+      arguments: { title: "分析报告", format: "markdown", content: "# 敏感完整正文" },
+      agent: parentAgent,
+    },
+    async () => ({ isError: false, content: [{ type: "text", text: "已生成结果页“分析报告”。artifactId: a-1" }] }),
+  )
+  const start = emitted.find((event) => (event as { event?: string }).event === "tool/start") as Record<string, unknown>
+  assert.equal(start.name, "result_present")
+  assert.equal(start.callId, "rp-live-1")
+  assert.equal(start.sessionId, PARENT_SESSION)
+  assert.equal("args" in start, false)
+  assert.equal(JSON.stringify(start).includes("敏感完整正文"), false)
+})
+
 test("bridge sends display args and always sends capped tool result text without changing execution results", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
   const { ctx, listeners, emitted } = createCtx();

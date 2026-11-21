@@ -2,7 +2,7 @@ import { MessageChannel } from 'node:worker_threads'
 import { expect, it, vi } from 'vitest'
 import { HostRpc } from '../src/host-rpc.ts'
 import { bindNativeRuntime, createHostRuntime, KeepAwakeUnavailableError, runtimeSnapshot, type ConfirmedRestartRuntime, type KeepAwakeRuntime } from '../src/host-runtime-bridge.ts'
-import type { DesktopLocale, DesktopRuntime, DesktopShellSpec, DesktopTrayItem } from '../src/runtime.ts'
+import type { ArtifactNativeCapability, DesktopLocale, DesktopRuntime, DesktopShellSpec, DesktopTrayItem } from '../src/runtime.ts'
 
 it('preserves the Web URL and authentication while projecting shell and tray callbacks', async () => {
   const { port1, port2 } = new MessageChannel()
@@ -261,5 +261,102 @@ it('pins the keep-awake RPC seam: method name, non-interactive timeout, boolean 
   try {
     const handler = bareHandlers.get('native:setKeepAwake')
     await expect(handler!([true], new AbortController().signal)).rejects.toBeInstanceOf(KeepAwakeUnavailableError)
+  } finally { await bindingBare.release() }
+})
+
+it('pins the artifact native seam: interactive save without timeout plus strict handler validation', async () => {
+  const calls: { method: string; args: unknown[]; timeout: number | undefined }[] = []
+  const child = {
+    call: <T = unknown>(method: string, args: unknown[] = [], _signal?: AbortSignal, timeout?: number) => {
+      calls.push({ method, args, timeout })
+      return Promise.resolve({ saved: false } as T)
+    },
+    handle: () => () => {},
+  } as unknown as HostRpc
+  const runtime = createHostRuntime(child, {
+    platform: 'win32', locale: 'en',
+    updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
+  })
+  const frameName = 'huaanwork-artifact-11111111-1111-4111-8111-111111111111'
+  const save = { downloadName: '结果.html', contentBase64: 'eA==', surface: 'artifact' as const }
+  const target = { sessionId: 'session-1', artifactId: 'artifact-1' }
+  await expect(runtime.saveArtifact(save)).resolves.toEqual({ saved: false })
+  await runtime.openArtifactFullscreen(target)
+  await runtime.prepareArtifactFrame({ surface: 'main', frameName })
+  // 用户可能长时间停留在系统对话框:saveArtifact 必须走 interactive 0 超时,其余不带。
+  expect(calls).toEqual([
+    { method: 'native:saveArtifact', args: [save], timeout: 0 },
+    { method: 'native:openArtifactFullscreen', args: [target], timeout: undefined },
+    { method: 'native:prepareArtifactFrame', args: [{ surface: 'main', frameName }], timeout: undefined },
+  ])
+
+  const handlers = new Map<string, (args: any[], signal: AbortSignal) => unknown>()
+  const parent = {
+    call: () => Promise.resolve(undefined),
+    handle: (name: string, handler: (args: any[], signal: AbortSignal) => unknown) => {
+      handlers.set(name, handler)
+      return () => { handlers.delete(name) }
+    },
+  } as unknown as HostRpc
+  const opened: unknown[] = []
+  const saved: unknown[] = []
+  const prepared: unknown[] = []
+  const native = {
+    platform: 'win32', locale: 'en',
+    updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
+    schedule: () => async () => {},
+    registerTrayItem: () => ({ refresh() {}, dispose() {} }),
+    openArtifactFullscreen: async (value: unknown) => { opened.push(value) },
+    saveArtifact: async (value: unknown) => { saved.push(value); return { saved: false } },
+    prepareArtifactFrame: async (value: unknown) => { prepared.push(value) },
+  } as unknown as DesktopRuntime & ArtifactNativeCapability
+  const binding = bindNativeRuntime(parent, native)
+  try {
+    const signal = new AbortController().signal
+    await handlers.get('native:openArtifactFullscreen')!([target], signal)
+    await handlers.get('native:saveArtifact')!([save], signal)
+    await handlers.get('native:prepareArtifactFrame')!([{ surface: 'artifact', frameName }], signal)
+    expect(opened).toEqual([target])
+    expect(saved).toEqual([save])
+    expect(prepared).toEqual([{ surface: 'artifact', frameName }])
+
+    const open = handlers.get('native:openArtifactFullscreen')!
+    const saveHandler = handlers.get('native:saveArtifact')!
+    const prepare = handlers.get('native:prepareArtifactFrame')!
+    // handler 直接装配在 HostRpc 上,校验在 await 之前同步拒绝(与 keep-awake 的
+    // async handler 不同);HostRpc 的 handle 把同步 throw 转成错误应答。
+    expect(() => open([{ sessionId: 'session-1' }], signal))
+      .toThrow('native:openArtifactFullscreen requires valid sessionId and artifactId')
+    expect(() => saveHandler([{ ...save, downloadName: '' }], signal))
+      .toThrow('native:saveArtifact requires a downloadName')
+    expect(() => saveHandler([{ ...save, contentBase64: 'eA' }], signal))
+      .toThrow('native:saveArtifact requires base64 content')
+    expect(() => saveHandler([{ ...save, surface: 'window' }], signal))
+      .toThrow("native:saveArtifact requires surface 'main' or 'artifact'")
+    expect(() => prepare([{ surface: 'main', frameName: 'huaanwork-artifact-nope' }], signal))
+      .toThrow('native:prepareArtifactFrame requires a huaanwork-artifact frame name')
+    expect(() => prepare([{ surface: 'window', frameName }], signal))
+      .toThrow("native:prepareArtifactFrame requires surface 'main' or 'artifact'")
+  } finally { await binding.release() }
+
+  const bareHandlers = new Map<string, (args: any[], signal: AbortSignal) => unknown>()
+  const bareParent = {
+    call: () => Promise.resolve(undefined),
+    handle: (name: string, handler: (args: any[], signal: AbortSignal) => unknown) => {
+      bareHandlers.set(name, handler)
+      return () => { bareHandlers.delete(name) }
+    },
+  } as unknown as HostRpc
+  const bare = {
+    platform: 'linux', locale: 'en',
+    updates: { isPackaged: false, canDownload: false, currentVersion: '2.0.0', statePath: '/tmp/update' },
+    schedule: () => async () => {},
+    registerTrayItem: () => ({ refresh() {}, dispose() {} }),
+  } as unknown as DesktopRuntime
+  const bindingBare = bindNativeRuntime(bareParent, bare)
+  try {
+    // 测试桩未装配原生能力时,handler 明确报缺失而不是裸 TypeError。
+    expect(() => bareHandlers.get('native:saveArtifact')!([save], new AbortController().signal))
+      .toThrow('artifact-native-unavailable')
   } finally { await bindingBare.release() }
 })
