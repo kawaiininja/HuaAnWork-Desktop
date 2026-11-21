@@ -49,7 +49,7 @@ import {
 } from '../../src/huaanwork-host/automations-store.ts'
 import { ROUTE_TABLE, type RouteContext, type RouteHandler } from '../../src/huaanwork-host/routes.ts'
 import { sessionRemove } from '../../src/huaanwork-host/sessions.ts'
-import { createProject, recentRuns } from '../../src/huaanwork-host/stores.ts'
+import { bindTaskSession, createProject, createTask, listTasks, recentRuns } from '../../src/huaanwork-host/stores.ts'
 
 /** 删除 I/O 屏障与文件系统枚举观测:拦 `deletionIo.path` 的那一次 rm,并记录每次 readdir。 */
 const deletionIo = vi.hoisted(() => ({
@@ -239,6 +239,77 @@ it('project.remove cascades to the artifacts of its automations only', async () 
   expect(report).toMatchObject({ removed: true })
   expect(await artifactIds(profileDir, seeded.sessionId)).toEqual([])
   expect(await artifactIds(profileDir, other.sessionId)).toEqual([other.artifactId])
+})
+
+it('task.remove deletes artifacts of the bound session and keeps sibling sessions', async () => {
+  const profileDir = makeRoot('artifact-life-')
+  const dshHome = makeRoot('artifact-life-dsh-')
+  const project = await createProject(profileDir, { root: makeRoot('artifact-life-root-'), name: '项目' })
+  const task = await createTask(profileDir, { projectId: project.id, name: '子任务' })
+  const sessionId = `task-session-${randomUUID()}`
+  const siblingSessionId = `sibling-session-${randomUUID()}`
+  await bindTaskSession(profileDir, { taskId: task.id, sessionId })
+  const log = makeSessionLog(dshHome, sessionId, join(dshHome, 'workspace'))
+
+  await createArtifact(profileDir, {
+    sessionId,
+    title: '子任务结果',
+    format: 'markdown',
+    content: '# 子任务报告\n',
+    anchor: { kind: 'turn', clientMessageId: randomUUID() },
+    idempotency: { kind: 'tool', callId: 'call-task-1' },
+  })
+  const sibling = await createArtifact(profileDir, {
+    sessionId: siblingSessionId,
+    title: '兄弟结果',
+    format: 'markdown',
+    content: '# 保留\n',
+    anchor: { kind: 'turn', clientMessageId: randomUUID() },
+    idempotency: { kind: 'tool', callId: 'call-sibling-1' },
+  })
+
+  const report = await handler('task.remove')(
+    { params: {}, body: { id: task.id }, query: new URLSearchParams() },
+    routeCtx(profileDir, dshHome),
+  )
+  expect(report).toEqual({ removed: true })
+  expect(await listTasks(profileDir, project.id)).toEqual([])
+  expect(existsSync(log)).toBe(false)
+  expect(await artifactIds(profileDir, sessionId)).toEqual([])
+  expect(existsSync(join(profileDir, 'artifacts', sessionId))).toBe(false)
+  expect(await artifactIds(profileDir, siblingSessionId)).toEqual([sibling.artifactId])
+})
+
+it('task.remove reports incomplete cleanup when bound session artifacts fail to delete', async () => {
+  const profileDir = makeRoot('artifact-life-')
+  const dshHome = makeRoot('artifact-life-dsh-')
+  const project = await createProject(profileDir, { root: makeRoot('artifact-life-root-'), name: '项目' })
+  const task = await createTask(profileDir, { projectId: project.id, name: '子任务' })
+  const sessionId = `task-session-${randomUUID()}`
+  await bindTaskSession(profileDir, { taskId: task.id, sessionId })
+  makeSessionLog(dshHome, sessionId, join(dshHome, 'workspace'))
+
+  const created = await createArtifact(profileDir, {
+    sessionId,
+    title: '删不掉的结果',
+    format: 'markdown',
+    content: '# 保留以便核验\n',
+    anchor: { kind: 'turn', clientMessageId: randomUUID() },
+    idempotency: { kind: 'tool', callId: 'call-task-fail' },
+  })
+  deletionIo.path = join(profileDir, 'artifacts', sessionId)
+  deletionIo.failure = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+
+  const report = await handler('task.remove')(
+    { params: {}, body: { id: task.id }, query: new URLSearchParams() },
+    routeCtx(profileDir, dshHome),
+  )
+  expect(report).toEqual({
+    removed: true,
+    artifactCleanup: { complete: false, message: ARTIFACT_CLEANUP_INCOMPLETE_MESSAGE },
+  })
+  expect(await listTasks(profileDir, project.id)).toEqual([])
+  expect(await artifactIds(profileDir, sessionId)).toEqual([created.artifactId])
 })
 
 it('automation.pruneSessions deletes only the artifacts of sessions actually removed', async () => {

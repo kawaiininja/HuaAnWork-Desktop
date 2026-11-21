@@ -915,6 +915,18 @@ test("project deletion surfaces an incomplete artifact cleanup through the panel
   );
 });
 
+test("subtask deletion forwards and surfaces an incomplete artifact cleanup notice", () => {
+  const removeBody = functionBody("async function removeSubtask(", "async function refreshSessions(");
+  assert.match(removeBody, /const removed = await removeTask\(task\.id\);/);
+  assert.match(removeBody, /return removed;/);
+  const submitStart = PROJECTS_PANEL_SOURCE.indexOf("async function submitRemoveSubtask()");
+  const submitEnd = PROJECTS_PANEL_SOURCE.indexOf("return (", submitStart);
+  assert.ok(submitStart >= 0 && submitEnd > submitStart);
+  const submitBody = PROJECTS_PANEL_SOURCE.slice(submitStart, submitEnd);
+  assert.match(submitBody, /const removed = await onRemoveSubtask\(confirmingTask\);/);
+  assert.match(submitBody, /setError\(artifactCleanupNotice\(removed\?\.artifactCleanup\)\);/);
+});
+
 test("global catalog refreshes run before the automation gate so background runs cannot swallow them", () => {
   // 契约钉:skill/changed 与 agent/changed 不携带 sessionId,自动化闸门对 undefined
   // 判定为非用户会话并早退。若目录刷新留在闸门之后,后台自动化运行期间创建技能/智能体

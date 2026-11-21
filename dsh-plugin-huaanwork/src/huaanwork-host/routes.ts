@@ -1701,11 +1701,20 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
         }
       }
       const removedTask = await removeTask(ctx.profileDir, id)
+      let artifactCleanup: ArtifactCleanupReport | undefined
       if (removedTask.sessionId) {
         releaseAndDiscardSession(ctx, removedTask.sessionId, 'task.remove')
         await removeSessionFilesById(join(ctx.dshHome, 'sessions'), [removedTask.sessionId])
+        try {
+          await removeArtifactsOfSession(ctx.profileDir, removedTask.sessionId)
+        } catch (error: unknown) {
+          ctx.logger(
+            `task.remove: 结果文件未能完全清理 ${removedTask.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          )
+          artifactCleanup = incompleteArtifactCleanup()
+        }
       }
-      return { removed: true }
+      return { removed: true, ...(artifactCleanup === undefined ? {} : { artifactCleanup }) }
     }),
   }, // Task 10
   {

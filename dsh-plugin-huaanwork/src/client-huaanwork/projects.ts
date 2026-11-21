@@ -123,7 +123,7 @@ export function createTask(params: { projectId: string; name: string }): Promise
   return rpcCall("task.create", params);
 }
 
-export function removeTask(id: string): Promise<{ removed: boolean }> {
+export function removeTask(id: string): Promise<{ removed: boolean; artifactCleanup?: ArtifactCleanupReport }> {
   return rpcCall("task.remove", { id });
 }
 

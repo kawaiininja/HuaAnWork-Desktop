@@ -1491,9 +1491,9 @@ export default function App() {
     }
   }, [projectTasks, sessions]);
 
-  /** 子任务删除：级联删会话历史（sidecar 侧）；关闭绑定标签并清选中；维护「chatTabs 非空」不变量。 */
+  /** 子任务删除：级联删会话历史与结果文件（sidecar 侧）；关闭绑定标签并清选中；维护「chatTabs 非空」不变量。 */
   async function removeSubtask(task: TaskInfo) {
-    await removeTask(task.id);
+    const removed = await removeTask(task.id);
     setSelectedTaskId((current) => (current === task.id ? null : current));
     const seedId = `work-${nextChatSeq.current}`;
     nextChatSeq.current += 1;
@@ -1528,6 +1528,7 @@ export default function App() {
     });
     await refreshTasks();
     await refreshSessions();
+    return removed;
   }
 
   /** 刷新历史会话列表。游离会话过滤在渲染处做（unscopedSessions）。 */
