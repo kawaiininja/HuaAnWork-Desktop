@@ -72,7 +72,14 @@ export function expertTeamFieldErrorText(fieldErrors: readonly ExpertTeamFieldEr
   return fieldErrors.map((error) => error.message).join("；");
 }
 
-export default function ExpertTeamsView({ refreshSignal = 0 }: { refreshSignal?: number }) {
+export default function ExpertTeamsView({
+  refreshSignal = 0,
+  onDirtyChange,
+}: {
+  refreshSignal?: number;
+  /** 编辑器草稿脏状态上报；App 用它拦截侧边栏导航离开。 */
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const [data, setData] = useState<ExpertTeamListResult | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -152,6 +159,7 @@ export default function ExpertTeamsView({ refreshSignal = 0 }: { refreshSignal?:
         {...(editing.row === undefined ? {} : { row: editing.row })}
         packages={data?.packages ?? []}
         onClose={() => setEditing(null)}
+        onDirtyChange={onDirtyChange}
         onSaved={() => {
           setEditing(null);
           load();

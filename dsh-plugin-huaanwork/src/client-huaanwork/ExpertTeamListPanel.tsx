@@ -89,21 +89,25 @@ function reasonText(reason: string): string {
   return REASON_LABELS[reason] ?? reason;
 }
 
-function availabilityDetail(row: ExpertTeamListRow, team: ExpertTeam): string[] {
-  const details: string[] = [];
+/** 可用性明细：`healthy` 仅表示“无失效原因”的合成提示，用成功样式而非错误样式。 */
+function availabilityDetail(
+  row: ExpertTeamListRow,
+  team: ExpertTeam,
+): { lines: string[]; healthy: boolean } {
+  const lines: string[] = [];
   for (const reason of row.availability.reasons) {
     if (reason === "expert-team-disabled") continue;
     if (row.error === "expert-team-corrupt") continue;
-    details.push(reasonText(reason));
+    lines.push(reasonText(reason));
   }
   for (const member of row.availability.members) {
     if (member.reason === undefined) continue;
-    details.push(`成员 ${member.displayName}：${reasonText(member.reason)}`);
+    lines.push(`成员 ${member.displayName}：${reasonText(member.reason)}`);
   }
-  if (details.length === 0 && row.availability.kind === "invocable" && team.enabled) {
-    details.push("定义与成员均有效");
+  if (lines.length === 0 && row.availability.kind === "invocable" && team.enabled) {
+    return { lines: ["定义与成员均有效"], healthy: true };
   }
-  return details;
+  return { lines, healthy: false };
 }
 
 function reviewDetail(team: ExpertTeam): string {
@@ -201,6 +205,7 @@ export default function ExpertTeamListPanel({
           const team = row.team;
           const corrupt = row.error === "expert-team-corrupt";
           const availability: ExpertTeamAvailability = row.availability;
+          const availabilityNotes = team === undefined ? undefined : availabilityDetail(row, team);
           const busy = busyId === row.id;
           const confirming = confirmingId === row.id;
           const slug = team?.slug;
@@ -304,9 +309,9 @@ export default function ExpertTeamListPanel({
                         ))}
                       </ul>
                     ) : null}
-                    {availabilityDetail(row, team).length > 0 ? (
-                      <p className="team-card-reasons">
-                        {availabilityDetail(row, team).join("；")}
+                    {availabilityNotes !== undefined && availabilityNotes.lines.length > 0 ? (
+                      <p className={availabilityNotes.healthy ? "team-card-reasons healthy" : "team-card-reasons"}>
+                        {availabilityNotes.lines.join("；")}
                       </p>
                     ) : null}
                     <p className="team-card-members-source">

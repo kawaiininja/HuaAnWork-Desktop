@@ -18,6 +18,7 @@ import type { ExpertTeam, ExpertTeamMember } from "./rpc-types.ts";
  * `expertTeam.list` 返回的健康包中选择，保留失效成员的原始引用并要求显式移除。
  * 无审查成员时审查模式固定为 `none`；仅会话交付隐藏 Artifact 格式。
  * 保存失败按字段回显且不清空草稿；离开有未保存修改的编辑器需要二次确认。
+ * 未保存状态通过 `onDirtyChange` 上报，让 App 的侧边栏导航也能拦截离开。
  */
 
 const ASSIGNMENT_OPTIONS: Array<{ value: ExpertTeam["orchestration"]["assignmentMode"]; label: string }> = [
@@ -152,11 +153,14 @@ export default function ExpertTeamEditor({
   packages,
   onClose,
   onSaved,
+  onDirtyChange,
 }: {
   row?: ExpertTeamListRow;
   packages: ExpertTeamSelectablePackage[];
   onClose: () => void;
   onSaved: (team: ExpertTeam) => void;
+  /** 草稿脏状态上报给 App 的离开守卫；卸载时上报 false。 */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const editing = row?.team;
   const slugLocked = editing !== undefined;
@@ -205,6 +209,13 @@ export default function ExpertTeamEditor({
   }, [hasReviewer, reviewTouched]);
 
   const dirty = JSON.stringify(draft) !== initialSnapshot;
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
+  /** 编辑器卸载（保存、放弃修改或页面被换走）后对外不再有待保存草稿。 */
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const fieldError = (field: string): string | undefined =>
     fieldErrors.find((error) => error.field === field)?.message;

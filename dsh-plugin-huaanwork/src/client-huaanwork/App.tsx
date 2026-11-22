@@ -579,6 +579,8 @@ function IconRightPane() {
 
 export default function App() {
   const [view, setView] = useState<View>("main");
+  /** 专家团编辑器是否有未保存草稿；侧边栏导航与新建任务离开前据此确认。 */
+  const [expertTeamDraftDirty, setExpertTeamDraftDirty] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   /** 三栏拖拽宽度仅本次会话有效(用户裁定 2026-11-10):不写 localStorage,重启回 240/360。 */
@@ -3019,7 +3021,27 @@ export default function App() {
     composerRef.current?.focus();
   }
 
+  /** 离开专家团编辑器前确认未保存草稿；返回是否允许离开。 */
+  function confirmLeaveExpertTeam(): boolean {
+    if (view !== "teams" || !expertTeamDraftDirty) return true;
+    if (!window.confirm("专家团有未保存的修改，离开后草稿将丢失。确定离开吗？")) return false;
+    setExpertTeamDraftDirty(false);
+    return true;
+  }
+
+  /**
+   * 侧边栏视图切换的唯一入口：离开专家团且草稿未保存时先确认。
+   * 返回是否已切换，供需要附带其它状态的导航（如技能页默认页签）继续执行。
+   */
+  function requestViewChange(next: View): boolean {
+    if (next === view) return false;
+    if (!confirmLeaveExpertTeam()) return false;
+    setView(next);
+    return true;
+  }
+
   function newTask() {
+    if (!confirmLeaveExpertTeam()) return;
     setDraft("");
     setSelectedTaskId(null);
     setHistoryView(null);
@@ -4096,8 +4118,8 @@ export default function App() {
             className={view === "skills" ? "nav-it on" : "nav-it"}
             onClick={() => {
               // 普通导航回到技能中心；成功卡的“前往我的技能”单独置 mine。
+              if (!requestViewChange("skills")) return;
               setSkillsInitialTab("center");
-              setView("skills");
             }}
             title="技能中心"
           >
@@ -4107,7 +4129,7 @@ export default function App() {
           <button
             type="button"
             className={view === "automations" ? "nav-it on" : "nav-it"}
-            onClick={() => setView("automations")}
+            onClick={() => requestViewChange("automations")}
             title="自动化"
           >
             <IconClock />
@@ -4116,7 +4138,7 @@ export default function App() {
           <button
             type="button"
             className={view === "agents" ? "nav-it on" : "nav-it"}
-            onClick={() => setView("agents")}
+            onClick={() => requestViewChange("agents")}
             title="智能体"
           >
             <IconAgent />
@@ -4125,7 +4147,7 @@ export default function App() {
           <button
             type="button"
             className={view === "teams" ? "nav-it on" : "nav-it"}
-            onClick={() => setView("teams")}
+            onClick={() => requestViewChange("teams")}
             title="专家团"
           >
             <IconTeam />
@@ -4134,7 +4156,7 @@ export default function App() {
           <button
             type="button"
             className={view === "knowledge" ? "nav-it on" : "nav-it"}
-            onClick={() => setView("knowledge")}
+            onClick={() => requestViewChange("knowledge")}
             title="知识库"
           >
             <IconKnowledge />
@@ -4143,7 +4165,7 @@ export default function App() {
           <button
             type="button"
             className={view === "market" ? "nav-it on" : "nav-it"}
-            onClick={() => setView("market")}
+            onClick={() => requestViewChange("market")}
             title="插件市场"
           >
             <IconMarket />
@@ -4298,7 +4320,7 @@ export default function App() {
           ) : view === "agents" ? (
             <AgentsView agentChangeSignal={agentChangeSignal} />
           ) : view === "teams" ? (
-            <ExpertTeamsView refreshSignal={expertTeamChangeSignal} />
+            <ExpertTeamsView refreshSignal={expertTeamChangeSignal} onDirtyChange={setExpertTeamDraftDirty} />
           ) : view === "knowledge" ? (
             <KnowledgeBaseView />
           ) : view === "market" ? (

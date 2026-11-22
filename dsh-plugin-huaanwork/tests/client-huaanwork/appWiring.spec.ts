@@ -3324,3 +3324,28 @@ test("Q4-R2-02: upsertTodoItem cross-step update preserves same-round tool panel
     false,
   );
 });
+
+test("sidebar navigation routes through the expert-team dirty guard", () => {
+  // 侧边栏按钮必须走 requestViewChange：直接 setView 会绕过专家团草稿确认。
+  const sidebarStart = APP_SOURCE.indexOf('className="sidebar"');
+  const sidebarEnd = APP_SOURCE.indexOf("</aside>", sidebarStart);
+  assert.ok(sidebarStart >= 0 && sidebarEnd > sidebarStart, "sidebar block is still present");
+  const sidebar = APP_SOURCE.slice(sidebarStart, sidebarEnd);
+  for (const target of ["skills", "automations", "agents", "teams", "knowledge", "market"]) {
+    assert.match(sidebar, new RegExp(`requestViewChange\\("${target}"\\)`), `${target} nav uses requestViewChange`);
+  }
+  assert.doesNotMatch(sidebar, /setView\(/, "no sidebar nav bypasses the dirty guard");
+
+  // 守卫本体：仅在离开专家团且有未保存草稿时确认，确认后清掉脏标记。
+  assert.match(APP_SOURCE, /function confirmLeaveExpertTeam\(\): boolean \{/);
+  assert.match(APP_SOURCE, /if \(view !== "teams" \|\| !expertTeamDraftDirty\) return true;/);
+  assert.match(APP_SOURCE, /setExpertTeamDraftDirty\(false\)/);
+  assert.match(APP_SOURCE, /function requestViewChange\(next: View\): boolean \{/);
+  // 新建任务也是侧边栏离开路径，同样先过守卫。
+  const newTaskAt = APP_SOURCE.indexOf("function newTask()");
+  assert.ok(newTaskAt >= 0, "newTask is still present");
+  assert.match(APP_SOURCE.slice(newTaskAt, newTaskAt + 400), /confirmLeaveExpertTeam\(\)/);
+  // 状态来源：专家团页把编辑器脏状态上报给 App。
+  assert.match(APP_SOURCE, /const \[expertTeamDraftDirty, setExpertTeamDraftDirty\] = useState\(false\);/);
+  assert.match(APP_SOURCE, /<ExpertTeamsView refreshSignal=\{expertTeamChangeSignal\} onDirtyChange=\{setExpertTeamDraftDirty\} \/>/);
+});

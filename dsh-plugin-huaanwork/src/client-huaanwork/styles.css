@@ -3737,6 +3737,10 @@ button {
   overflow-wrap: anywhere;
 }
 
+.team-card-reasons.healthy {
+  color: var(--success);
+}
+
 .team-corrupt-note {
   margin: 0;
   font-size: 12.5px;

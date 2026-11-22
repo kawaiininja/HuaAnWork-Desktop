@@ -426,6 +426,21 @@ function lastRemove(): Record<string, unknown> {
   return host.removes[host.removes.length - 1] ?? {};
 }
 
+/** 列表卡片的可用性徽标：文本与类名（包含 disabled 等状态类）。 */
+function statusBadge(slug: string): { text: string; className: string } | undefined {
+  const card = container?.querySelector<HTMLElement>(`[data-team-slug="${slug}"]`);
+  const badge = card?.querySelector<HTMLElement>(".team-status");
+  if (!badge) return undefined;
+  return { text: (badge.textContent ?? "").trim(), className: badge.className };
+}
+
+/** 健康提示行（.team-card-reasons.healthy）；缺失时返回 null。 */
+function healthyNote(): { text: string; className: string } | null {
+  const note = container?.querySelector<HTMLElement>(".team-card-reasons.healthy");
+  if (!note) return null;
+  return { text: (note.textContent ?? "").trim(), className: note.className };
+}
+
 type Harness = {
   text(): string;
   click(label: string): Promise<void>;
@@ -439,6 +454,9 @@ type Harness = {
   lastUpdate(): RecordedUpdate;
   lastRemove(): Record<string, unknown>;
   invocableSlugs(): string[];
+  dirtyReports(): boolean[];
+  statusBadge(slug: string): { text: string; className: string } | undefined;
+  healthyNote(): { text: string; className: string } | null;
 };
 
 function renderExpertTeamsView(options: RenderOptions = {}): Harness {
@@ -449,6 +467,10 @@ function renderExpertTeamsView(options: RenderOptions = {}): Harness {
     updates: [],
     removes: [],
     ...(options.createResult === undefined ? {} : { createResult: options.createResult }),
+  };
+  const dirtyReports: boolean[] = [];
+  const handleDirty = (dirty: boolean): void => {
+    dirtyReports.push(dirty);
   };
   vi.mocked(rpcCall).mockImplementation(
     ((method: string, params?: unknown) => immediatePromise(fakeRpc(method, params))) as (
@@ -461,7 +483,7 @@ function renderExpertTeamsView(options: RenderOptions = {}): Harness {
   document.body.append(container);
   root = createRoot(container);
   act(() => {
-    root!.render(createElement(ExpertTeamsView));
+    root!.render(createElement(ExpertTeamsView, { onDirtyChange: handleDirty }));
   });
 
   return {
@@ -477,6 +499,9 @@ function renderExpertTeamsView(options: RenderOptions = {}): Harness {
     lastUpdate,
     lastRemove,
     invocableSlugs: invocableSlugsFromHost,
+    dirtyReports: () => [...dirtyReports],
+    statusBadge,
+    healthyNote,
   };
 }
 
@@ -507,6 +532,7 @@ describe("ExpertTeamsView（专家团管理）", () => {
     expect(harness.field('最大并发')).toBeDisabled()
     await harness.click('保存专家团')
     expect(harness.lastCreate()).toMatchObject({ slug: expect.any(String), review: { mode: 'unified', maxRevisionRounds: 1 }, orchestration: { executionOrder: 'sequential' } })
+    expect(harness.lastCreate()).toMatchObject({ enabled: true })
   })
 
   it('shows unavailable members without blocking edits to other fields, and allows deleting corrupt team files', async () => {
@@ -532,6 +558,11 @@ describe("ExpertTeamsView（专家团管理）", () => {
     // 启停 toggle 后标为已停用且从 @ 可选列表排除
     await harness.click('停用 compliance-team')
     expect(harness.text()).toContain('已停用')
+    // 卡片徽标本身回显停用状态（@ 可选列表在组件内的排除断言留给 Task 15）
+    expect(harness.statusBadge('compliance-team')).toEqual({
+      text: '已停用',
+      className: expect.stringContaining('disabled'),
+    })
     expect(harness.invocableSlugs()).not.toContain('compliance-team')
 
     // 编辑器联动：仅会话隐藏 Artifact 格式；无 reviewer 时审查模式锁定为 none；未保存离开弹确认；字段错误回显并保留草稿
@@ -549,5 +580,23 @@ describe("ExpertTeamsView（专家团管理）", () => {
     expect(harness.field('名称')).toHaveValue('草稿团队')
     await harness.click('返回列表')
     expect(harness.text()).toContain('未保存')
+  })
+
+  it('reports draft dirty state upward and styles the healthy availability line as success', async () => {
+    const harness = renderExpertTeamsView()
+    expect(harness.healthyNote()).toEqual({
+      text: '定义与成员均有效',
+      className: 'team-card-reasons healthy',
+    })
+    expect(harness.dirtyReports()).toEqual([])
+
+    await harness.click('新建专家团')
+    // 新编辑器初始草稿与初始快照一致：未修改不上报脏
+    expect(harness.dirtyReports()).toEqual([false])
+    await harness.fill('名称', '草稿团队')
+    expect(harness.dirtyReports().at(-1)).toBe(true)
+    await harness.click('保存专家团')
+    // 保存成功后编辑器卸载，离开守卫解除
+    expect(harness.dirtyReports().at(-1)).toBe(false)
   })
 });
