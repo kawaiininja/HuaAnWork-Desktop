@@ -1951,6 +1951,19 @@ export default function App() {
     const applyExpertTeamRun = (event: Extract<RpcEvent, { event: "expertTeam/run" }>) => {
       const run = event.run;
       applyExpertTeamState({ type: "run", generation: event.generation, run });
+      // 终态运行或已终态的成员不得留下破坏性确认：确认按钮随卡片行一起消失，
+      // 晚到的确认帧在这里同步收起，避免用户对已完成对象发出取消。
+      setExpertTeamConfirming((prev) => {
+        if (prev === null) return prev;
+        if (prev.kind === "team") {
+          return prev.teamRunId === run.teamRunId && isExpertTeamTerminal(run) ? null : prev;
+        }
+        const targeted = run.results.find((result) => result.memberRunId === prev.runId);
+        if (targeted === undefined) return prev;
+        const memberSettled =
+          targeted.status === "completed" || targeted.status === "failed" || targeted.status === "stopped";
+        return memberSettled || isExpertTeamTerminal(run) ? null : prev;
+      });
       setChatTabs((prev) =>
         prev.map((tab) => {
           if (tab.sessionId !== run.parentSessionId) return tab;
@@ -2702,6 +2715,17 @@ export default function App() {
   useEffect(() => {
     if (rightTab === "progress" && !rightCollapsed) return;
     setConfirmingTarget((prev) => (prev?.surface === "progress" ? null : prev));
+  }, [rightTab, rightCollapsed]);
+
+  /** 专家团确认目标同样按视图归属清理:切 tab/离开主视图后不得继续对旧卡确认。 */
+  useEffect(() => {
+    setExpertTeamConfirming((prev) => (prev === null ? prev : null));
+  }, [activeTab, view]);
+
+  /** 右栏收起或切离进度页时只清右栏发起的团队确认，主流行内确认不受影响。 */
+  useEffect(() => {
+    if (rightTab === "progress" && !rightCollapsed) return;
+    setExpertTeamConfirming((prev) => (prev?.surface === "progress" ? null : prev));
   }, [rightTab, rightCollapsed]);
 
   useEffect(() => {
@@ -3533,13 +3557,13 @@ export default function App() {
     // 它只挡同一标签的重入，不挡另一个标签。
     const chatId = targetTabId ?? activeTab;
     if (sendingRef.current.has(chatId)) return;
-    // 团队调用先分类：空任务或同条多目标必须原地拦截，绝不把未完成的 token 当普通文本发给模型。
+    // 团队调用先分类：空任务或同条第二个 @team 目标必须原地拦截，绝不把未完成的 token 当普通文本发给模型。
     if (teamInvoke?.kind === "empty-task") {
       noteTab(chatId, `请在 @team:${teamInvoke.name} 后填写任务内容再发送。`);
       return;
     }
     if (teamInvoke?.kind === "conflict") {
-      noteTab(chatId, "一条消息只能调用一个目标：请只保留开头的一个 @team:<slug>，不要同时 @ 其他智能体或专家团。");
+      noteTab(chatId, "一条消息只能调用一个专家团：请只保留开头的一个 @team:<slug>，正文中的 @ 提及按普通文本处理。");
       return;
     }
     const invokedTeam = teamInvoke?.kind === "valid" ? teamInvoke : undefined;

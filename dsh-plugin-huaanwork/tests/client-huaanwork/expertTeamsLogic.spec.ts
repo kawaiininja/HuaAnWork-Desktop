@@ -85,7 +85,17 @@ describe('expert team contract', () => {
     expect(parseTeamAtInvoke('@team:compliance   ')).toEqual({ kind: 'empty-task', name: 'compliance' })
     expect(parseTeamAtInvoke('@team:compliance')).toEqual({ kind: 'empty-task', name: 'compliance' })
     expect(parseTeamAtInvoke('@team:one @team:two 审查')).toEqual({ kind: 'conflict', reason: 'multiple-targets' })
-    expect(parseTeamAtInvoke('@team:one @writer 审查')).toEqual({ kind: 'conflict', reason: 'multiple-targets' })
+    // 规格 §11.2 裁定：只有正文第二个 `@team:` 目标是冲突；正文 @word 是普通文本。
+    expect(parseTeamAtInvoke('@team:one @writer 审查')).toEqual({
+      kind: 'valid',
+      name: 'one',
+      remainder: '@writer 审查',
+    })
+    expect(parseTeamAtInvoke('@team:dev 把结果发到 @dev 频道')).toEqual({
+      kind: 'valid',
+      name: 'dev',
+      remainder: '把结果发到 @dev 频道',
+    })
     expect(parseTeamAtInvoke('正文 @team:compliance 审查')).toBeUndefined()
     expect(parseTeamAtInvoke('@writer 审查')).toBeUndefined()
   })

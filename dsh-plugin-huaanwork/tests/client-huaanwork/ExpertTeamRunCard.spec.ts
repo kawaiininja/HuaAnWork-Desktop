@@ -292,13 +292,15 @@ describe("ExpertTeamRunCard", () => {
       .mockResolvedValue({ ok: true });
     const previewArtifact = vi.fn();
     const card = renderExpertTeamRunCard({
-      run: runWithExecutingAndReviewingMembers({ primaryArtifactId: "art-1", artifactStatus: "created" }),
+      run: runWithExecutingAndReviewingMembers({ dispatchAttempts: 3, primaryArtifactId: "art-1", artifactStatus: "created" }),
       onCancelTeam: cancelTeam,
       onCancelMember: cancelMember,
       onPreviewArtifact: previewArtifact,
     });
     expect(card.text()).toContain("执行与审查");
     expect(card.text()).not.toContain("2/5");
+    // 派工按协调器到达计数：3 次到达只有 2 条结果，卡片显示 3 而不是结果条数。
+    expect(card.text()).toContain("派工 3");
     await card.click("查看主报告");
     expect(previewArtifact).toHaveBeenCalledWith("art-1");
     await card.click("终止成员");
@@ -365,6 +367,37 @@ describe("ExpertTeamRunCard", () => {
     expect(card.button("确认终止专家团")).not.toBeDisabled();
     await card.click("确认终止专家团");
     expect(confirmTeam).toHaveBeenCalledWith({ kind: "team", teamRunId: "run-1", surface: "chat" });
+  });
+
+  it("drops destructive confirms once the run or the targeted member is terminal or stopping", async () => {
+    const confirm = vi.fn();
+    const completedTeam = renderExpertTeamRunCard({
+      run: runWithStatus("completed"),
+      confirming: { kind: "team", teamRunId: "run-1", surface: "chat" },
+      onConfirmCancel: confirm,
+    });
+    expect(completedTeam.text()).not.toContain("确认终止专家团");
+
+    const stoppingTeam = renderExpertTeamRunCard({
+      run: runWithStatus("stopping"),
+      confirming: { kind: "team", teamRunId: "run-1", surface: "chat" },
+      onConfirmCancel: confirm,
+    });
+    expect(stoppingTeam.text()).not.toContain("确认终止专家团");
+    // 停止受理后仍有唯一一个禁用的普通终止入口，不出现第二个破坏性确认。
+    expect(stoppingTeam.button("终止专家团")).toBeDisabled();
+
+    const settledMember = renderExpertTeamRunCard({
+      run: teamRun({
+        dispatchAttempts: 1,
+        results: [executeResult("r1", { status: "completed", memberRunId: "member-run-1" })],
+      }),
+      confirming: { kind: "member", runId: "member-run-1", surface: "chat" },
+      onConfirmCancel: confirm,
+    });
+    expect(settledMember.text()).not.toContain("确认终止成员");
+    expect(settledMember.text()).not.toContain("终止成员");
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("freezes the member confirmation on disconnect as well", async () => {

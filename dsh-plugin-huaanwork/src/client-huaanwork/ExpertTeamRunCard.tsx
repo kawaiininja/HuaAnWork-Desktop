@@ -134,6 +134,8 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
   const teamError = cancelErrorByKey[teamKey];
   const teamConfirming =
     confirming?.kind === "team" && confirming.teamRunId === run.teamRunId && confirming.surface === surface;
+  // 终态/已受理停止的运行不再提供破坏性确认：确认态即使晚到也不得复活取消入口。
+  const teamConfirmVisible = teamConfirming && !terminal && run.status !== "stopping";
   const teamCancelDisabled = frozen || run.status === "stopping" || teamBusy;
   const counts = expertTeamCounts(run);
   const versions = resultVersions(run.results);
@@ -154,7 +156,7 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
           {EXPERT_TEAM_STATUS_LABEL[run.status]}
         </span>
         <span className="expert-team-run-meta">{elapsedText(run, now, frozenAt)}</span>
-        {teamConfirming ? (
+        {teamConfirmVisible ? (
           <span className="expert-team-run-actions">
             <button
               type="button"
@@ -195,7 +197,8 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
 
       <p className="expert-team-run-activity">{activityText(run)}</p>
       <p className="expert-team-run-counts">
-        派工 {counts.dispatched} · 进行中 {counts.running} · 完成 {counts.completed} · 失败{" "}
+        {/* 派工按协调器到达计数（含被规则拒绝的到达），结果分类按结果链计数。 */}
+        派工 {run.dispatchAttempts} · 进行中 {counts.running} · 完成 {counts.completed} · 失败{" "}
         {counts.failed} · 已终止 {counts.stopped} · 审查 {counts.reviews} · 返修 {counts.revisions}
       </p>
 
@@ -242,13 +245,15 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
               : expertTeamCancelKey(surface, memberRunId);
             const memberBusy = memberKey !== undefined && cancelBusyByKey[memberKey] === true;
             const memberError = memberKey === undefined ? undefined : cancelErrorByKey[memberKey];
-            const memberConfirming =
+            const active = result.status === "starting" || result.status === "running";
+            const canCancelMember = active && memberRunId !== undefined && !frozen;
+            // 确认只对仍可取消的成员存在：结果已终态时不再渲染破坏性确认按钮。
+            const memberConfirmVisible =
               confirming?.kind === "member" &&
               confirming.surface === surface &&
               memberRunId !== undefined &&
-              confirming.runId === memberRunId;
-            const active = result.status === "starting" || result.status === "running";
-            const canCancelMember = active && memberRunId !== undefined && !frozen;
+              confirming.runId === memberRunId &&
+              active;
             const statusText =
               active && memberRun !== undefined ? subagentStatusText(memberRun) : RESULT_STATUS_TEXT[result.status];
             const version = versions.get(result.resultId) ?? 1;
@@ -270,7 +275,7 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
                   <span className="expert-team-result-version">第 {version} 版</span>
                   <span className="expert-team-result-package">v{result.packageVersion}</span>
                   <span className="expert-team-result-status">{statusText}</span>
-                  {canCancelMember && !memberConfirming ? (
+                  {canCancelMember && !memberConfirmVisible ? (
                     <button
                       type="button"
                       className="expert-team-run-terminate"
@@ -285,7 +290,7 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
                     >
                       终止成员
                     </button>
-                  ) : memberConfirming ? (
+                  ) : memberConfirmVisible ? (
                     <span className="expert-team-run-actions">
                       <button
                         type="button"

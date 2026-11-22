@@ -1160,6 +1160,29 @@ test("expert-team confirmation refuses to send cancel RPCs into a disconnected h
   assert.ok(memberRpcAt > guardAt, "the guard must run before the member cancel RPC");
 });
 
+test("expert-team confirms are cleared on terminal runs and on tab/view or right-panel changes", () => {
+  // 运行帧/成员结果已终态时同步收起确认态，避免对已完成对象发出破坏性取消。
+  const applyRunBody = functionBody("const applyExpertTeamRun = (", "const applyExpertTeamRemove = (");
+  assert.match(applyRunBody, /setExpertTeamConfirming\(\(prev\) => \{/);
+  assert.match(applyRunBody, /isExpertTeamTerminal\(run\)/);
+  assert.match(
+    applyRunBody,
+    /targeted\.status === "completed" \|\| targeted\.status === "failed" \|\| targeted\.status === "stopped"/,
+    "a member result reaching a terminal status must clear its pending confirm",
+  );
+  // 与子代理确认同款清理：切 tab/离开主视图清全部，右栏收起只清右栏发起的确认。
+  assert.match(
+    APP_SOURCE,
+    /setExpertTeamConfirming\(\(prev\) => \(prev === null \? prev : null\)\);\s*\}, \[activeTab, view\]\);/,
+    "leaving the tab or main view must drop the expert-team confirm target",
+  );
+  assert.match(
+    APP_SOURCE,
+    /setExpertTeamConfirming\(\(prev\) => \(prev\?\.surface === "progress" \? null : prev\)\);\s*\}, \[rightTab, rightCollapsed\]\);/,
+    "collapsing or switching the right panel must drop only its own confirm target",
+  );
+});
+
 test("App turn final wiring consumes actual goal actions and sidecarDead only", () => {
   let state: GoalTurnState = INITIAL_GOAL_TURN_STATE;
   let final = false;

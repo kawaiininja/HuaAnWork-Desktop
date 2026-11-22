@@ -112,14 +112,15 @@ export type TeamAtInvoke =
   | { kind: "empty-task"; name: string }
   | { kind: "conflict"; reason: "multiple-targets" };
 
-/** 正文里另一个点名目标（`@team:` 或 `@<agent-slug>`）；只认词首，邮箱不误判。 */
-const ADDITIONAL_AT_TARGET_RE = /(?:^|\s)@(?:team:[a-z0-9]+(?:-[a-z0-9]+)*|[a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/;
+/** 正文里第二个专家团调用目标（`@team:<slug>`）；只认词首，邮箱不误判。 */
+const ADDITIONAL_AT_TARGET_RE = /(?:^|\s)@team:[a-z0-9]+(?:-[a-z0-9]+)*(?=\s|$)/;
 
 /**
  * 解析开头 `@team:<slug>` 调用。
  *
  * 限开头：正文中段的 `@team:` 返回 undefined（发送时按普通文本处理，不冒充团队调用）。
- * 同一消息出现第二个 `@team:`/`@<agent-slug>` 目标时按 conflict 拦截，空任务单独分类，
+ * 同一消息出现第二个 `@team:` 目标时按 conflict 拦截（规格 §11.2）；正文中的
+ * `@<agent-slug>` 是普通文本，不构成第二个目标。空任务单独分类，
  * 调用方不得把未填任务的 token 当普通文本发给模型。
  */
 export function parseTeamAtInvoke(text: string): TeamAtInvoke | undefined {

@@ -1986,7 +1986,8 @@ it('classifies leading @team targets into valid, empty-task, conflict, or non-te
   expect(parseTeamAtInvoke('@team:compliance   ')).toEqual({ kind: 'empty-task', name: 'compliance' })
   expect(parseTeamAtInvoke('@team:compliance')).toEqual({ kind: 'empty-task', name: 'compliance' })
   expect(parseTeamAtInvoke('@team:one @team:two 审查')).toEqual({ kind: 'conflict', reason: 'multiple-targets' })
-  expect(parseTeamAtInvoke('@team:one @writer 审查')).toEqual({ kind: 'conflict', reason: 'multiple-targets' })
+  expect(parseTeamAtInvoke('@team:one @writer 审查')).toEqual({ kind: 'valid', name: 'one', remainder: '@writer 审查' })
+  expect(parseTeamAtInvoke('@team:dev 把结果发到 @dev 频道')).toEqual({ kind: 'valid', name: 'dev', remainder: '把结果发到 @dev 频道' })
   expect(parseTeamAtInvoke('正文 @team:compliance 审查')).toBeUndefined()
   expect(parseTeamAtInvoke('@writer 审查')).toBeUndefined()
 })
@@ -2037,7 +2038,7 @@ Expected: FAIL，`composerAtTokenAt`/`parseTeamAtInvoke` 判别联合与 `invoke
   - `composerAtTokenAt(text, cursor)`：仅识别输入开头 `@` 后至光标的连续非空白 token（允许中文、Unicode、ASCII 与 `team:` 前缀）；既有 `agentsLogic.ts` 中的 `atTokenAt`（任意位置 ASCII 触发）和 `parseAtInvoke` 保持零修改；
   - `resolveComposerMentionState(text, cursor)`：先尝试 `composerAtTokenAt(text, cursor)`，命中则返回 `{ token, allowTeams: true }`（开头同时允许“智能体”与“专家团”分组）；未命中则回落 `atTokenAt(text, cursor)`，命中则返回 `{ token, allowTeams: false }`（保留正文中段旧 `@agent` 任意位置补全，仅隐藏专家团分组）；
   - `leadingTeamAtSlug(text)`：识别开头 `@team:<slug>`（无论是否已键入任务正文），供输入框草稿摘要条立即展示所选专家团；
-  - `parseTeamAtInvoke(text)`：返回 `{ kind: 'valid', name, remainder } | { kind: 'empty-task', name } | { kind: 'conflict', reason: 'multiple-targets' } | undefined`，使客户端在空任务或同条多目标时明确拦截并提示，绝不把未填任务的 `@team:<slug>` 当普通文本发给模型；
+  - `parseTeamAtInvoke(text)`：返回 `{ kind: 'valid', name, remainder } | { kind: 'empty-task', name } | { kind: 'conflict', reason: 'multiple-targets' } | undefined`，使客户端在空任务或同条第二个 `@team:` 目标时明确拦截并提示（规格 §11.2 裁定：正文 `@word` 是普通文本，不构成冲突），绝不把未填任务的 `@team:<slug>` 当普通文本发给模型；
   - `mentionKeyAction`：把 `isComposing` 作为显式输入，组合态 `Enter`/`Tab` 永远返回 `{ kind: 'none' }`。
 - `sessionChannel.ts`：`SessionSendParams.at` 声明为判别联合 `{ name: string; clientMessageId: string } | { kind: 'expert-team'; name: string }`；`buildSessionSendParams` 新增可选 `invokedTeam?: { name: string; remainder: string }`，存在时生成 `text: invokedTeam.remainder` 与 `at: { kind: 'expert-team', name: invokedTeam.name }`（不携带旧卡 `clientMessageId`）；顶层 `clientMessageId` 与既有 `invokedAt`（保留 `at: { name, clientMessageId: String(userItemId) }` 且无 `kind`）路径完全不变。
 - `ComposerMentionMenu.tsx`：`ComposerMentionItem` 新增可选 `group?: string`、`icon?: ReactNode`，并把第 23 行 props 内联的 `items: { key: string; ... }[]` 改为直接引用 `items: ComposerMentionItem[]`（避免两处声明漂移）；存在 `group` 时按组渲染分组标题，兼容既有 `/skill` 扁平调用方；`AtAgentMenu.tsx` 在 `allowTeams` 为真时合并“智能体”与“专家团”分组（非开头仅展示“智能体”组），团队条目显示“专家团”标识、图标、成员数、调度/审查/交付摘要。
