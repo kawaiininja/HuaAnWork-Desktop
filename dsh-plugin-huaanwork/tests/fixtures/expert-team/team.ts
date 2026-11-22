@@ -63,7 +63,10 @@ export function validTeamInput(overrides: ExpertTeamInputOverrides = {}): Expert
       responsibility: "统一合规审查并指出风险项",
     },
   ];
-  const rules = defaultExpertTeamRules(members);
+  // 规则默认值必须基于最终成员列表推导：否则调用方覆盖 members 后，fixture 会
+  // 返回一个自身校验器都拒绝的团队（例如只剩 executor 却仍是 unified 审查）。
+  const effectiveMembers = overrides.members ?? members;
+  const rules = defaultExpertTeamRules(effectiveMembers);
   const base: ExpertTeam = {
     schemaVersion: 1,
     id: "00000000-0000-4000-8000-000000000001",
@@ -72,7 +75,7 @@ export function validTeamInput(overrides: ExpertTeamInputOverrides = {}): Expert
     description: "审查合同与业务合规条款",
     scenarios: "合同条款复核",
     enabled: true,
-    members,
+    members: effectiveMembers,
     orchestration: rules.orchestration,
     review: rules.review,
     summary: rules.summary,

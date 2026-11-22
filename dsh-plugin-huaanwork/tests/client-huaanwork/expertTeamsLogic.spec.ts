@@ -21,6 +21,16 @@ describe('expert team contract', () => {
     expect(validateExpertTeam(validTeam())).toMatchObject({ ok: true })
   })
 
+  it('derives rule defaults from overridden members', () => {
+    const executorOnly = validTeamInput({
+      members: [
+        { memberId: 'm-exec-1', agentRef: { source: 'local', slug: 'writer' }, role: 'executor', responsibility: '提取合同关键条款并起草结论' },
+        { memberId: 'm-exec-2', agentRef: { source: 'local', slug: 'writer-2' }, role: 'executor', responsibility: '整理业务背景与合规依据' },
+      ],
+    })
+    expect(validateExpertTeam(executorOnly)).toMatchObject({ ok: true, team: { review: { mode: 'none' } } })
+  })
+
   it('rejects duplicate agents and reviewer-less review modes', () => {
     const duplicate = validTeam()
     duplicate.members[1]!.agentRef = duplicate.members[0]!.agentRef
