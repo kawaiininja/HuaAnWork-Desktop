@@ -457,6 +457,85 @@ export type TaskInfo = {
   runId?: string;
 };
 
+/** 专家团成员的智能体引用；只允许本地创建或已安装启用的智能体包。 */
+export type ExpertTeamAgentRef = {
+  source: "local" | "catalog";
+  slug: string;
+};
+
+/** 专家团成员定义（设计 §8.2）；列表顺序是 sequential 模式的默认派工顺序。 */
+export type ExpertTeamMember = {
+  /** 团队内唯一的成员 id。 */
+  memberId: string;
+  agentRef: ExpertTeamAgentRef;
+  role: "executor" | "reviewer";
+  /** 必填，说明负责与不负责的范围。 */
+  responsibility: string;
+  /** 可选的成员输出要求，最长 500 字符。 */
+  outputInstructions?: string;
+};
+
+/**
+ * 专家团定义（设计 §8.1）。slug 只在专家团命名空间内唯一，创建后不可修改；
+ * 显示名称可改，调用名固定为 `@team:<slug>`。
+ */
+export type ExpertTeam = {
+  schemaVersion: 1;
+  /** UUID。 */
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  /** 可选适用场景，最长 500 字符。 */
+  scenarios?: string;
+  enabled: boolean;
+  members: ExpertTeamMember[];
+  orchestration: {
+    assignmentMode: "by-responsibility" | "broadcast";
+    executionOrder: "sequential" | "parallel" | "dynamic";
+    maxParallel: 1 | 2 | 3 | 4;
+    /** 可选分发与顺序补充说明，最长 500 字符。 */
+    instructions?: string;
+  };
+  review: {
+    mode: "none" | "unified" | "per-member";
+    /** 可选审查标准，最长 500 字符。 */
+    criteria?: string;
+    maxRevisionRounds: 0 | 1 | 2;
+  };
+  summary: {
+    delivery: "artifact" | "message";
+    artifactFormat: "markdown" | "html";
+    mode: "integrated" | "by-member" | "integrated-with-appendix";
+    /** 可选汇总重点，最长 500 字符。 */
+    instructions?: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** 一次团队成员派工的结果（设计 §8.4）；结果通过 inputResultIds 构成扁平版本链。 */
+export type ExpertTeamResult = {
+  resultId: string;
+  /** 产生该结果的 expert_team_dispatch 工具 callId。 */
+  dispatchId: string;
+  memberId: string;
+  agentRef: ExpertTeamAgentRef;
+  packageVersion: string;
+  /** 实际创建成员 run 后填写。 */
+  memberRunId?: string;
+  kind: "execute" | "review" | "revision";
+  inputResultIds: string[];
+  supersedesResultId?: string;
+  status: "starting" | "running" | "completed" | "failed" | "stopped";
+  output?: string;
+  reviewVerdict?: "pass" | "revise";
+  reviewError?: "invalid-verdict";
+  startedAt: string;
+  endedAt?: string;
+  error?: string;
+};
+
 /** `session.list` 行：会话日志的摘要投影（标题、时间、统计）。 */
 export type SessionSummary = {
   id: string;
