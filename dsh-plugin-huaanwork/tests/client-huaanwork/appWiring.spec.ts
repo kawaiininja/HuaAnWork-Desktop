@@ -3334,7 +3334,9 @@ test("sidebar navigation routes through the expert-team dirty guard", () => {
   for (const target of ["skills", "automations", "agents", "teams", "knowledge", "market"]) {
     assert.match(sidebar, new RegExp(`requestViewChange\\("${target}"\\)`), `${target} nav uses requestViewChange`);
   }
-  assert.doesNotMatch(sidebar, /setView\(/, "no sidebar nav bypasses the dirty guard");
+  // 同一侧边栏的「任务」与「项目子任务」列表也是离开路径：先钉住接线，再钉住处理函数内的守卫。
+  assert.match(sidebar, /onClick=\{\(\) => void openFreeSession\(id\)\}/, "sidebar task list opens through openFreeSession");
+  assert.match(sidebar, /onSelectSubtask=\{\(task\) => void selectSubtask\(task\)\}/, "sidebar subtask list selects through selectSubtask");
 
   // 守卫本体：仅在离开专家团且有未保存草稿时确认，确认后清掉脏标记。
   assert.match(APP_SOURCE, /function confirmLeaveExpertTeam\(\): boolean \{/);
@@ -3345,6 +3347,19 @@ test("sidebar navigation routes through the expert-team dirty guard", () => {
   const newTaskAt = APP_SOURCE.indexOf("function newTask()");
   assert.ok(newTaskAt >= 0, "newTask is still present");
   assert.match(APP_SOURCE.slice(newTaskAt, newTaskAt + 400), /confirmLeaveExpertTeam\(\)/);
+  // 任务/子任务入口在 setView("main") 前必须调用同一守卫：删掉守卫或挪到切换之后都变红。
+  for (const [start, end] of [
+    ["async function openFreeSession(", "function historyToChatItems("],
+    ["async function selectSubtask(", "async function renameSubtask("],
+  ] as const) {
+    const body = functionBody(start, end);
+    const guardAt = body.indexOf("if (!confirmLeaveExpertTeam()) return;");
+    const switchAt = body.indexOf('setView("main")');
+    assert.ok(guardAt >= 0, `${start} consults the dirty guard`);
+    assert.ok(switchAt >= 0, `${start} still switches to the main view`);
+    assert.ok(guardAt < switchAt, `${start} guards before setView("main")`);
+    assert.doesNotMatch(body.slice(0, guardAt), /setView\(/, `${start} does not switch views before the guard`);
+  }
   // 状态来源：专家团页把编辑器脏状态上报给 App。
   assert.match(APP_SOURCE, /const \[expertTeamDraftDirty, setExpertTeamDraftDirty\] = useState\(false\);/);
   assert.match(APP_SOURCE, /<ExpertTeamsView refreshSignal=\{expertTeamChangeSignal\} onDirtyChange=\{setExpertTeamDraftDirty\} \/>/);

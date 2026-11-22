@@ -1367,6 +1367,8 @@ export default function App() {
    */
   async function selectSubtask(task: TaskInfo): Promise<void> {
     if (selectBusy) return;
+    // 侧边栏子任务也是离开专家团的入口：未保存草稿先确认，取消则保持原视图且不置忙。
+    if (!confirmLeaveExpertTeam()) return;
     setSelectBusy(true);
     setView("main");
     setSelectedTaskId(task.id);
@@ -3021,7 +3023,10 @@ export default function App() {
     composerRef.current?.focus();
   }
 
-  /** 离开专家团编辑器前确认未保存草稿；返回是否允许离开。 */
+  /**
+   * 离开专家团视图前的唯一草稿守卫：导航按钮经 requestViewChange、新建任务、
+   * 侧边栏任务/子任务恢复都先过这里；返回是否允许离开。
+   */
   function confirmLeaveExpertTeam(): boolean {
     if (view !== "teams" || !expertTeamDraftDirty) return true;
     if (!window.confirm("专家团有未保存的修改，离开后草稿将丢失。确定离开吗？")) return false;
@@ -3030,7 +3035,7 @@ export default function App() {
   }
 
   /**
-   * 侧边栏视图切换的唯一入口：离开专家团且草稿未保存时先确认。
+   * 侧边栏视图按钮的切换入口：离开专家团且草稿未保存时先确认。
    * 返回是否已切换，供需要附带其它状态的导航（如技能页默认页签）继续执行。
    */
   function requestViewChange(next: View): boolean {
@@ -3744,6 +3749,8 @@ export default function App() {
    */
   async function openFreeSession(sessionId: string) {
     if (resumeBusy) return;
+    // 侧边栏任务也是离开专家团的入口：未保存草稿先确认，取消则保持原视图且不置忙。
+    if (!confirmLeaveExpertTeam()) return;
     setView("main");
     setResumeBusy(true);
     let view: SessionLogView;
