@@ -253,6 +253,72 @@ function runWithUnattemptedBroadcastExecutor(overrides: RunOverrides = {}): Expe
   return makeRun([executeResult('broadcast-execute-1', { memberId: 'm-exec-1' })], team, overrides)
 }
 
+/** 有效执行加一份有效 `revise` 审查：返修额度未用尽且周期未开启，必要返修尚未执行。 */
+function runWithNecessaryRevisionPending(overrides: RunOverrides = {}): ExpertTeamRun {
+  const team = teamWith(['m-exec-1'], ['m-rev-1'], { review: { mode: 'unified', maxRevisionRounds: 1 } })
+  const execute = executeResult('pending-revision-execute', { memberId: 'm-exec-1' })
+  return makeRun(
+    [execute, reviewResult('pending-revision-review', 'revise', { inputResultIds: [execute.resultId] })],
+    team,
+    { unifiedRevisionRounds: 0, ...overrides },
+  )
+}
+
+/** 另一名成员的 `failed` 执行从未被后续有效结果替代。 */
+function runWithUnsupersededFailedExecute(overrides: RunOverrides = {}): ExpertTeamRun {
+  const team = teamWith(['m-exec-1', 'm-exec-2'], ['m-rev-1'], { review: { mode: 'unified', maxRevisionRounds: 1 } })
+  const valid = executeResult('unsuperseded-execute', { memberId: 'm-exec-1' })
+  const failed = executeResult('unsuperseded-failed-execute', { memberId: 'm-exec-2', status: 'failed' })
+  return makeRun(
+    [valid, failed, reviewResult('unsuperseded-review', 'pass', { inputResultIds: [valid.resultId] })],
+    team,
+    overrides,
+  )
+}
+
+/** 同一失败执行被后续有效 execute 重试（supersedesResultId）替代。 */
+function runWithRetriedFailedExecute(overrides: RunOverrides = {}): ExpertTeamRun {
+  const team = teamWith(['m-exec-1', 'm-exec-2'], ['m-rev-1'], { review: { mode: 'unified', maxRevisionRounds: 1 } })
+  const valid = executeResult('retry-execute', { memberId: 'm-exec-1' })
+  const failed = executeResult('retry-failed-execute', { memberId: 'm-exec-2', status: 'failed' })
+  const retry = executeResult('retry-superseding-execute', {
+    memberId: 'm-exec-2',
+    supersedesResultId: failed.resultId,
+  })
+  return makeRun(
+    [
+      valid,
+      failed,
+      retry,
+      reviewResult('retry-review', 'pass', { inputResultIds: [valid.resultId, retry.resultId] }),
+    ],
+    team,
+    overrides,
+  )
+}
+
+/** 成功的 `revise` 审查之后返修本身失败：失败返修不替代旧有效结果，但仍属技术缺失。 */
+function runWithFailedRevision(overrides: RunOverrides = {}): ExpertTeamRun {
+  const team = teamWith(['m-exec-1'], ['m-rev-1'], { review: { mode: 'unified', maxRevisionRounds: 1 } })
+  const original = executeResult('failed-revision-original', { memberId: 'm-exec-1' })
+  const failedRevision = executeResult('failed-revision', {
+    memberId: 'm-exec-1',
+    kind: 'revision',
+    status: 'failed',
+    supersedesResultId: original.resultId,
+    inputResultIds: [original.resultId],
+  })
+  return makeRun(
+    [
+      original,
+      reviewResult('failed-revision-review', 'revise', { inputResultIds: [original.resultId] }),
+      failedRevision,
+    ],
+    team,
+    overrides,
+  )
+}
+
 describe('expert team orchestration rules', () => {
   it('resolves unified scope at entry and rejects empty/subset/stale scopes', () => {
     const run = runWithResults([executeResult('r1'), executeResult('r2')])
@@ -260,6 +326,24 @@ describe('expert team orchestration rules', () => {
     expect(resolveReviewScope(run, { kind: 'review', memberId: 'reviewer', inputResultIds: ['r1'] })).toMatchObject({ ok: false, error: 'expert-team-review-scope' })
     expect(resolveReviewScope(runWithResults([]), { kind: 'review', memberId: 'reviewer' })).toMatchObject({ ok: false, error: 'expert-team-empty-review-scope' })
     expect(assertReviewScopeCurrent(runWithResults([executeResult('r3')]), ['r1', 'r2'])).toBe('expert-team-review-scope-changed')
+  })
+
+  it('rejects stale per-member review scopes at dequeue re-validation', () => {
+    const perMemberRun = runWithReviewMode('per-member', [
+      executeResult('r1', { memberId: 'm-exec-1' }),
+      executeResult('r2', { memberId: 'm-exec-2' }),
+    ])
+    expect(assertReviewScopeCurrent(perMemberRun, ['r1', 'r2'])).toBe('expert-team-review-scope-changed')
+    expect(assertReviewScopeCurrent(perMemberRun, ['r1'])).toBeUndefined()
+
+    // 目标结果被后续有效返修替代后，出队重验必须失败而不是换成另一组结果。
+    const supersededRun = runWithReviewMode('per-member', [
+      executeResult('r1', { memberId: 'm-exec-1' }),
+      executeResult('r1-rev', { memberId: 'm-exec-1', kind: 'revision', supersedesResultId: 'r1' }),
+      executeResult('r2', { memberId: 'm-exec-2' }),
+    ])
+    expect(assertReviewScopeCurrent(supersededRun, ['r1'])).toBe('expert-team-review-scope-changed')
+    expect(assertReviewScopeCurrent(supersededRun, ['r1-rev'])).toBeUndefined()
   })
 
   it('keeps the previous valid result when a revision fails', () => {
@@ -279,6 +363,74 @@ describe('expert team orchestration rules', () => {
     })).toBe('partial')
     expect(computeExpertTeamTerminalStatus({ run: runWithMessageDelivery(), finalSummaryPresent: false })).toBe('partial')
     expect(computeExpertTeamTerminalStatus({ run: runWithMessageDelivery(), finalSummaryPresent: true })).toBe('completed')
+    expect(computeExpertTeamTerminalStatus({
+      run: runWithCompletedDelivery(),
+      finalSummaryPresent: true,
+      protocolError: 'expert-team-attachment-detach-failed',
+    })).toBe('partial')
+  })
+
+  it('rejects submission and settles partial while a necessary revision remains within quota', () => {
+    const pending = runWithNecessaryRevisionPending()
+    expect(canSubmitPrimaryArtifact(pending, { inFlight: false, artifactFormat: 'markdown', callId: 'call-pending-revision' })).toEqual({
+      ok: false,
+      error: 'expert-team-review-incomplete',
+    })
+    // 已关联主 Artifact 也必须因额度内必要返修未执行而结 partial。
+    expect(computeExpertTeamTerminalStatus({
+      run: runWithNecessaryRevisionPending({
+        primaryArtifactId: 'artifact-pending-revision',
+        artifactStatus: 'created',
+        deliverySealed: true,
+      }),
+      finalSummaryPresent: true,
+    })).toBe('partial')
+  })
+
+  it('treats unsuperseded failed executions and revisions as partial and clears the gap after a valid retry', () => {
+    expect(computeExpertTeamTerminalStatus({
+      run: runWithUnsupersededFailedExecute({
+        primaryArtifactId: 'artifact-unsuperseded',
+        artifactStatus: 'created',
+        deliverySealed: true,
+      }),
+      finalSummaryPresent: true,
+    })).toBe('partial')
+    // 同一失败 execute 被后续有效 execute 重试替代后不再算技术缺失。
+    expect(computeExpertTeamTerminalStatus({
+      run: runWithRetriedFailedExecute({
+        primaryArtifactId: 'artifact-retried',
+        artifactStatus: 'created',
+        deliverySealed: true,
+      }),
+      finalSummaryPresent: true,
+    })).toBe('completed')
+    // 失败返修不替代旧有效结果，但仍属未被替代的技术缺失。
+    expect(computeExpertTeamTerminalStatus({
+      run: runWithFailedRevision({
+        primaryArtifactId: 'artifact-failed-revision',
+        artifactStatus: 'created',
+        deliverySealed: true,
+      }),
+      finalSummaryPresent: true,
+    })).toBe('partial')
+  })
+
+  it('settles partial when a broadcast executor never produced a first-round result', () => {
+    const delivered: RunOverrides = {
+      primaryArtifactId: 'artifact-broadcast',
+      artifactStatus: 'created',
+      deliverySealed: true,
+    }
+    expect(computeExpertTeamTerminalStatus({
+      run: runWithUnattemptedBroadcastExecutor(delivered),
+      finalSummaryPresent: true,
+    })).toBe('partial')
+    // 24 次派工豁免只影响主报告提交，不改变结算终态。
+    expect(computeExpertTeamTerminalStatus({
+      run: runWithUnattemptedBroadcastExecutor({ ...delivered, dispatchAttempts: 24 }),
+      finalSummaryPresent: true,
+    })).toBe('partial')
   })
 
   it('enforces none/per-member scope rules, sequential order, execute retry via supersedesResultId, and 0/1/2 revision rounds', () => {
