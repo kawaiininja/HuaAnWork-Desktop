@@ -95,6 +95,20 @@ function activeObserver({ turn }: { turn: number }) {
   return Object.assign(observer, { onTurnEnd, onAbort })
 }
 
+/** 模拟损坏事件:移除必填 `seq`;观察器必须对缺失 seq fail-closed。 */
+function withoutSeq(event: SessionEvent): SessionEvent {
+  const copy: SessionEvent = { ...event }
+  Reflect.deleteProperty(copy, 'seq')
+  return copy
+}
+
+/** 模拟损坏事件:把 `seq` 换成非数字;观察器必须对非数字 seq fail-closed。 */
+function withRawSeq(event: SessionEvent, seq: unknown): SessionEvent {
+  const copy: SessionEvent = { ...event }
+  Reflect.set(copy, 'seq', seq)
+  return copy
+}
+
 function listenerContext() {
   const listeners: Record<string, ((...args: never[]) => unknown)[]> = {}
   const optionsSeen: Record<string, (boolean | { global?: boolean } | undefined)[]> = {}
@@ -160,6 +174,23 @@ describe('expert team turn observer', () => {
     corrupt.event(session(PARENT), toolResult({ seq: 20, turn: 3 }))
     corrupt.event(session(PARENT), assistantMessage({ seq: 19, turn: 3, text: '乱序/回退 seq 必须 fail-closed' }))
     expect(corrupt.finalSummaryPresent()).toBe(false)
+  })
+
+  it('fails closed when event.seq is missing or non-numeric', () => {
+    const missingSeq = activeObserver({ turn: 2 })
+    missingSeq.event(session(PARENT), toolResult({ seq: 2, turn: 2 }))
+    missingSeq.event(session(PARENT), withoutSeq(assistantMessage({ seq: 3, turn: 2, text: '缺失 seq 的文本' })))
+    expect(missingSeq.finalSummaryPresent()).toBe(false)
+    // 异常永久生效:后续合法 seq 的汇总文本也不得让结算变成 true。
+    missingSeq.event(session(PARENT), assistantMessage({ seq: 4, turn: 2, text: '异常后的文本' }))
+    missingSeq.event(session(PARENT), turnEnd({ seq: 5, turn: 2, reason: { kind: 'completed' } }))
+    expect(missingSeq.turnEndFacts()).toMatchObject({ turn: 2, finalSummaryPresent: false, eventMissing: false })
+
+    const nonNumericSeq = activeObserver({ turn: 2 })
+    nonNumericSeq.event(session(PARENT), toolResult({ seq: 2, turn: 2 }))
+    nonNumericSeq.event(session(PARENT), withRawSeq(assistantMessage({ seq: 3, turn: 2, text: '字符串 seq' }), '3'))
+    nonNumericSeq.event(session(PARENT), turnEnd({ seq: 4, turn: 2, reason: { kind: 'completed' } }))
+    expect(nonNumericSeq.turnEndFacts()).toMatchObject({ turn: 2, finalSummaryPresent: false, eventMissing: false })
   })
 
   it('locks turn/end facts once, calls onAbort for an aborted turn, and ignores later goal turns', () => {
@@ -273,5 +304,51 @@ describe('expert team observer binding', () => {
     disposeExpertTeamObservers(PARENT)
     expect(first.turnEndFacts()).toBeUndefined()
     expect(second.turnEndFacts()).toBeUndefined()
+  })
+
+  it('releases both global listeners when a bound observer disposes itself', () => {
+    const { ctx, listeners, dispatch } = listenerContext()
+    const onTurnEnd = vi.fn()
+    const observer = createExpertTeamTurnObserver({ parentSessionId: PARENT, followupId: FOLLOWUP, onTurnEnd })
+    const dispose = bindExpertTeamObserver(ctx, observer)
+    expect(listeners['agent/inbox/claimed']).toHaveLength(1)
+    expect(listeners['session/event']).toHaveLength(1)
+
+    // 只调用观察器自身的 dispose(不调用绑定返回的闭包)也必须注销两条全局监听。
+    observer.dispose()
+    expect(listeners['agent/inbox/claimed']).toEqual([])
+    expect(listeners['session/event']).toEqual([])
+
+    // 注销后匹配的 claim 与父会话事件不再到达观察器。
+    dispatch('agent/inbox/claimed', {
+      agent: { session: { id: PARENT } },
+      message: { id: FOLLOWUP },
+      turn: 2,
+    })
+    dispatch('session/event', session(PARENT), turnStart({ seq: 1, turn: 2 }))
+    dispatch('session/event', session(PARENT), toolResult({ seq: 2, turn: 2 }))
+    dispatch('session/event', session(PARENT), assistantMessage({ seq: 3, turn: 2, text: '不应结算' }))
+    dispatch('session/event', session(PARENT), turnEnd({ seq: 4, turn: 2, reason: { kind: 'completed' } }))
+    expect(onTurnEnd).not.toHaveBeenCalled()
+    expect(observer.turnEndFacts()).toBeUndefined()
+    expect(observer.finalSummaryPresent()).toBe(false)
+
+    // 自释放之后,绑定闭包与按会话卸载都保持幂等。
+    dispose()
+    disposeExpertTeamObservers(PARENT)
+    expect(listeners['agent/inbox/claimed']).toEqual([])
+    expect(listeners['session/event']).toEqual([])
+  })
+
+  it('keeps local cleanup when an unbound observer disposes itself', () => {
+    const observer = activeObserver({ turn: 2 })
+    observer.event(session(PARENT), toolResult({ seq: 2, turn: 2 }))
+    observer.event(session(PARENT), assistantMessage({ seq: 3, turn: 2, text: '未绑定汇总' }))
+    expect(observer.finalSummaryPresent()).toBe(true)
+
+    observer.dispose()
+    expect(observer.finalSummaryPresent()).toBe(false)
+    observer.afterIdle()
+    expect(observer.onTurnEnd).not.toHaveBeenCalled()
   })
 })

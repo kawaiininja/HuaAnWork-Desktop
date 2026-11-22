@@ -53,6 +53,10 @@ export type ExpertTeamTurnObserver = {
   afterIdle(): void
   finalSummaryPresent(): boolean
   turnEndFacts(): ExpertTeamTurnEndFacts | undefined
+  /**
+   * 释放观察器。经 `bindExpertTeamObserver` 绑定时同步注销两条全局监听并从在途表摘除
+   * (与绑定返回的注销闭包等价、互相幂等);未绑定时只做本地清理。
+   */
   dispose(): void
 }
 
@@ -67,6 +71,9 @@ export type ExpertTeamObserverContext = {
 
 /** 父会话 → 已绑定观察器的注销闭包;`releaseSessionRuntime` 与测试按会话整体卸载。 */
 const boundObservers = new Map<string, Set<() => void>>()
+
+/** 已绑定观察器 → 其绑定注销闭包;`observer.dispose()` 依赖它取消全局监听,避免遗留。 */
+const observerReleases = new WeakMap<ExpertTeamTurnObserver, () => void>()
 
 function addBoundObserver(parentSessionId: string, release: () => void): void {
   let entries = boundObservers.get(parentSessionId)
@@ -144,7 +151,14 @@ export function createExpertTeamTurnObserver(options: ExpertTeamTurnObserverOpti
     summary = ''
   }
 
-  return {
+  /** 只做本地清理;绑定注销在摘除 `observerReleases` 后回到这里,不会递归。 */
+  const disposeLocal = (): void => {
+    if (disposed) return
+    disposed = true
+    summary = ''
+  }
+
+  const observer: ExpertTeamTurnObserver = {
     parentSessionId: options.parentSessionId,
 
     claim(payload) {
@@ -212,11 +226,16 @@ export function createExpertTeamTurnObserver(options: ExpertTeamTurnObserverOpti
     },
 
     dispose() {
-      if (disposed) return
-      disposed = true
-      summary = ''
+      // 已绑定时走绑定注销:同步移除两条全局监听与在途表条目,而不是只翻本地标志。
+      const release = observerReleases.get(observer)
+      if (release !== undefined) {
+        release()
+        return
+      }
+      disposeLocal()
     },
   }
+  return observer
 }
 
 /** `ctx.on` 的真实返回值是注销函数;fixture 上下文可以不返回,归一成空闭包。 */
@@ -238,7 +257,8 @@ type ClaimedPayload = { agent?: { id?: string; session?: { id?: string } }; mess
  * - `session/event`:父会话过滤在 `observer.event` 内完成(它还要绑定单回合状态)。
  *
  * 注销闭包同步移除两条监听并 `observer.dispose()`,同时从按会话索引的在途表中
- * 摘除,防止跨回合/跨会话泄漏。重复调用注销闭包是幂等的。
+ * 摘除,防止跨回合/跨会话泄漏。重复调用注销闭包是幂等的;`observer.dispose()`
+ * 在绑定时走同一条注销路径,因此两种释放方式可以任意混用。
  *
  * @param ctx - Host Context(至少提供 `on`;真实 Context 返回注销函数)
  * @param observer - 待绑定的回合观察器
@@ -279,11 +299,14 @@ export function bindExpertTeamObserver(ctx: ExpertTeamObserverContext, observer:
   const release = (): void => {
     if (disposed) return
     disposed = true
+    // 先摘注册表与在途表再注销:observer.dispose() 回到 release 时不再递归。
+    observerReleases.delete(observer)
     removeBoundObserver(observer.parentSessionId, release)
     offClaimed()
     offEvent()
     observer.dispose()
   }
+  observerReleases.set(observer, release)
   addBoundObserver(observer.parentSessionId, release)
   return release
 }
