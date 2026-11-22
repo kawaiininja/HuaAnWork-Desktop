@@ -18,7 +18,11 @@ export type QueueItem = {
   /** 本次发送的持久回合锚(顶层 UUID / 自动化 runId);出队重建发送参数时原样带回。 */
   clientMessageId?: string
   skill?: string
-  at?: { name: string; clientMessageId?: string }
+  /**
+   * `@` 调用目标。`kind: 'expert-team'` 是 typed 团队 token:排队出队必须原样
+   * 保留,绝不回退成普通 `@<slug>` 智能体。
+   */
+  at?: { name: string; clientMessageId?: string; kind?: 'expert-team' }
 }
 
 export type AdmitUserResult =
@@ -46,7 +50,8 @@ export type TurnScheduler = {
     /** 顶层回合锚;排队期间原样保存,出队后由 `startQueuedItem` 重建进发送参数。 */
     clientMessageId?: string
     skill?: string
-    at?: { name: string; clientMessageId?: string }
+    /** 见 {@link QueueItem.at};`kind: 'expert-team'` 在排队期间不得丢失。 */
+    at?: { name: string; clientMessageId?: string; kind?: 'expert-team' }
   }): AdmitUserResult
   admitAutomation(input: {
     automationId: string

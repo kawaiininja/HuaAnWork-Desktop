@@ -4120,6 +4120,19 @@ describe('expert team cancellation and release', () => {
     }
   }
 
+  /** 团队准入的最小发送面:只用 runs + scheduler;guard 命中时不会读取根或设置。 */
+  async function makeTeamAdmissionFixture(
+    scheduler: TurnScheduler,
+    runs: ReturnType<typeof createExpertTeamRunRegistry> = createExpertTeamRunRegistry({
+      generation: 'g1',
+      emit: () => undefined,
+    }),
+  ): Promise<{ runs: ReturnType<typeof createExpertTeamRunRegistry>; send(params: Record<string, unknown>): Promise<unknown> }> {
+    const routeCtx = makeRouteCtx(freshTmp())
+    const ctx: SessionRuntimeContext = { huaanworkExpertTeamRuns: runs, huaanworkTurnScheduler: scheduler }
+    return { runs, send: (params) => sessionSend(ctx, routeCtx, params) }
+  }
+
   test('session.cancel latches the team run before cancelling the parent agent', () => {
     const root = freshTmp()
     const routeCtx = makeRouteCtx(root)
@@ -4209,5 +4222,28 @@ describe('expert team cancellation and release', () => {
     expect(runs.get(runId)?.status).toBe('stopping')
     expect(listener.listeners['agent/inbox/claimed']).toEqual([])
     expect(isAgentToolAttached(attachments, sessionId, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+  })
+
+  test('session.send rejects empty or busy team turns before the scheduler sees them', async () => {
+    const sessionId = 'team-send-admission'
+    const scheduler = createTurnScheduler({ maxConcurrentTurns: () => 8, modelExists: () => true })
+    const empty = await makeTeamAdmissionFixture(scheduler)
+    // 空任务(含只有 typed token 的正文)在准入前拒绝,不进入队列。
+    await expect(
+      empty.send({ text: '   ', tabId: 'tab-team', sessionId, at: { kind: 'expert-team', name: 'compliance-team' } }),
+    ).rejects.toThrow('expert-team-task-empty')
+    await expect(
+      empty.send({ text: '@team:compliance-team  ', tabId: 'tab-team', sessionId, at: { kind: 'expert-team', name: 'compliance-team' } }),
+    ).rejects.toThrow('expert-team-task-empty')
+    expect(scheduler.activeSessionIds().has(sessionId)).toBe(false)
+
+    // 同父会话已有 running/stopping 团队:准入前拒绝,绝不静默排队第二次团队调用。
+    const busy = teamRun(sessionId)
+    const busyFixture = await makeTeamAdmissionFixture(scheduler, busy.runs)
+    await expect(
+      busyFixture.send({ text: '第二次团队调用', tabId: 'tab-team', sessionId, at: { kind: 'expert-team', name: 'compliance-team' } }),
+    ).rejects.toThrow('expert-team-session-busy')
+    expect(scheduler.activeSessionIds().has(sessionId)).toBe(false)
+    expect(busy.runs.get(busy.runId)?.status).toBe('running')
   })
 })

@@ -139,10 +139,20 @@ export function createExpertTeamTurnObserver(options: ExpertTeamTurnObserverOpti
     settled = true
     facts = snapshotFacts(input)
     const view = snapshotFacts(input)
+    // 回调异常不能穿透上游 `session/event` 监听器(它只 warn 收容):事实已锁定,
+    // 派工封闭与终态写入由结算回调自身保证,这里只隔离,避免一次 throw 跳过 onAbort。
     try {
       options.onTurnEnd?.(view)
+    } catch {
+      // 结算回调失败已由观察器隔离;上游监听器保持静默。
     } finally {
-      if (view.reason?.kind === 'aborted') options.onAbort?.(view)
+      if (view.reason?.kind === 'aborted') {
+        try {
+          options.onAbort?.(view)
+        } catch {
+          // abort 联动同样隔离,不影响已锁定的回合事实。
+        }
+      }
     }
   }
 

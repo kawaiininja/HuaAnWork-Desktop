@@ -48,6 +48,7 @@ export { EXPERT_TEAM_MEMBER_CANCELLED }
 /** 协调器具名拒绝码；禁止匿名错误字符串。Task 6 规则错误码原样透传。 */
 export type ExpertTeamCoordinatorErrorCode =
   | 'expert-team-terminal'
+  | 'expert-team-session-busy'
   | 'expert-team-dispatch-context-missing'
   | 'expert-team-dispatch-budget'
   | 'expert-team-prompt-too-large'
@@ -503,6 +504,11 @@ export function createExpertTeamCoordinator(
 
     begin(input) {
       pruneTerminalStates()
+      // 同一父会话只能有一个活跃团队(设计 §11.2 / §17):准入可能跨越 store 读取等异步
+      // 边界并发到达,创建运行的这一次同步操作才是最终判定点。running 与 stopping 都算活跃。
+      if (options.runs.hasActiveForSession(input.parentSessionId)) {
+        throw new ExpertTeamCoordinatorError('expert-team-session-busy')
+      }
       const run = options.runs.begin(input)
       const lease: ExpertTeamLease = {
         teamRunId: run.teamRunId,
