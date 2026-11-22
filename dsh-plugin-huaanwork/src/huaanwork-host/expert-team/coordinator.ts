@@ -48,6 +48,7 @@ export { EXPERT_TEAM_MEMBER_CANCELLED }
 /** 协调器具名拒绝码；禁止匿名错误字符串。Task 6 规则错误码原样透传。 */
 export type ExpertTeamCoordinatorErrorCode =
   | 'expert-team-terminal'
+  | 'expert-team-lease-invalid'
   | 'expert-team-session-busy'
   | 'expert-team-dispatch-context-missing'
   | 'expert-team-dispatch-budget'
