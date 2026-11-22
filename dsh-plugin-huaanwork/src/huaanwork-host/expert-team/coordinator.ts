@@ -10,7 +10,7 @@ import type {
 import { effectiveTeamMaxParallel } from '../../client-huaanwork/logic/expertTeamsLogic.ts'
 import type { AgentPackageDetail } from '../agent-package/types.ts'
 import { expertTeamMemberUnavailableReason } from './availability.ts'
-import type { TeamMemberDispatchResult } from './dispatch.ts'
+import { EXPERT_TEAM_MEMBER_CANCELLED, type TeamMemberDispatchResult } from './dispatch.ts'
 import {
   assertReviewScopeCurrent,
   resolveReviewScope,
@@ -42,8 +42,8 @@ export const EXPERT_TEAM_DISPATCH_BUDGET = 24
 /** 每次派工输入（task、引用结果、职责、输出要求，不含包 persona）的 UTF-8 上限。 */
 export const EXPERT_TEAM_PROMPT_MAX_BYTES = 256 * 1024
 
-/** 单成员取消/整团取消后，成员结果与工具结果共用的停止错误码。 */
-export const EXPERT_TEAM_MEMBER_CANCELLED = 'expert-team-member-cancelled'
+/** 单成员取消/整团取消后，成员结果与工具结果共用的停止错误码（定义在派发适配层）。 */
+export { EXPERT_TEAM_MEMBER_CANCELLED }
 
 /** 协调器具名拒绝码；禁止匿名错误字符串。Task 6 规则错误码原样透传。 */
 export type ExpertTeamCoordinatorErrorCode =
@@ -251,10 +251,21 @@ function isCancellationError(error: unknown): boolean {
 }
 
 /**
- * Task 7 定向取消以普通 Error 结束（`cancelError()` 文案固定为
- * `智能体「<slug>」的回合已取消`），没有稳定 code 可读；这里按该文案的精确
- * 后缀兜底，revoked/update/remove 等其它取消文案仍按技术失败返回。
- * 生产接线应优先提供 `isMemberCancelled`，此判断只覆盖适配层遗漏。
+ * 团队派发适配层的稳定取消判定：Task 7 团队路径的普通取消分支给
+ * `cancelError()` 附上 {@link EXPERT_TEAM_MEMBER_CANCELLED}，这里只读 `code`，
+ * 与可本地化文案解耦。revoked/update/remove/dispose 不带该码，仍按技术失败返回。
+ */
+function isMemberCancelError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as Error & { code?: unknown }).code === EXPERT_TEAM_MEMBER_CANCELLED
+  )
+}
+
+/**
+ * 旧版 Task 7 团队取消以普通 Error 结束且没有稳定 code 时的文案兜底
+ * （`智能体「<slug>」的回合已取消`）。只作遗留安全网：优先 `isMemberCancelError`，
+ * 其次是 `isMemberCancelled` 实时查询，最后才回落到这里。
  */
 function isMemberCancelMessage(error: unknown): boolean {
   return error instanceof Error && error.message.startsWith('智能体「') && error.message.endsWith('」的回合已取消')
@@ -672,7 +683,9 @@ export function createExpertTeamCoordinator(
                 onRunCreated,
               })
             } catch (error) {
+              // 稳定 code 优先；文案匹配只是旧适配层的遗留兜底，不得先于 code 判定。
               const cancelled =
+                isMemberCancelError(error) ||
                 signal.aborted ||
                 state.cancelRequested ||
                 isCancellationError(error) ||

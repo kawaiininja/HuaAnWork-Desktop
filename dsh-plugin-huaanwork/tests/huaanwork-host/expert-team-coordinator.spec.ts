@@ -18,7 +18,10 @@ import {
   type ExpertTeamMemberDispatchRequest,
 } from '../../src/huaanwork-host/expert-team/coordinator.ts'
 import type { AgentPackageDetail } from '../../src/huaanwork-host/agent-package/types.ts'
-import type { TeamMemberDispatchResult } from '../../src/huaanwork-host/expert-team/dispatch.ts'
+import {
+  EXPERT_TEAM_MEMBER_CANCELLED,
+  type TeamMemberDispatchResult,
+} from '../../src/huaanwork-host/expert-team/dispatch.ts'
 import type { MemberTextResult } from '../../src/huaanwork-host/expert-team/text-protocol.ts'
 import { validTeamInput } from '../fixtures/expert-team/team.ts'
 
@@ -114,6 +117,13 @@ type CoordinatorFixtureOptions = {
   maxActiveSubagentsError?: string
   /** 按 callId 注入启动失败（成员尚未创建 run）。 */
   dispatchErrors?: Record<string, string>
+  /** 按 callId 给启动失败附加稳定 `code`（如 `EXPERT_TEAM_MEMBER_CANCELLED`）。 */
+  dispatchErrorCodes?: Record<string, string>
+  /**
+   * 派工结果返回的 `cleanupPromise` 保持悬挂，直到 `gate.releaseCleanup()`：
+   * 验证取消/等待清理确实以成员清理确认作为收敛屏障。
+   */
+  holdMemberCleanup?: boolean
   /** 按 callId 注入非 completed 的 stopReason。 */
   stopReasons?: Record<string, string>
   /** 按 callId 注入成员文本渲染结果。 */
@@ -212,6 +222,14 @@ async function makeCoordinatorFixture(options: CoordinatorFixtureOptions = {}): 
   let cleanupGate: Promise<void> | undefined
   let releaseCleanupGate: (() => void) | undefined
 
+  /** 共享的清理闸：既推迟取消 rejection，也可作为派工返回的 `cleanupPromise`。 */
+  function holdCleanupGate(): Promise<void> {
+    if (cleanupGate === undefined) {
+      cleanupGate = new Promise<void>((resolve) => { releaseCleanupGate = resolve })
+    }
+    return cleanupGate
+  }
+
   function settleCompleted(entry: GateMemberRun): void {
     if (entry.settled) return
     entry.settled = true
@@ -231,7 +249,8 @@ async function makeCoordinatorFixture(options: CoordinatorFixtureOptions = {}): 
       actualChildId: entry.runId as SessionId,
       stopReason: options.stopReasons?.[entry.callId] ?? 'completed',
       output,
-      cleanupPromise: Promise.resolve(),
+      // 默认即时清理；`holdMemberCleanup` 让清理确认晚于派工结算，验证协调器等待循环。
+      cleanupPromise: options.holdMemberCleanup === true ? holdCleanupGate() : Promise.resolve(),
     })
   }
 
@@ -253,7 +272,12 @@ async function makeCoordinatorFixture(options: CoordinatorFixtureOptions = {}): 
       throw new Error(options.maxActiveSubagentsError)
     }
     const dispatchError = options.dispatchErrors?.[request.callId]
-    if (dispatchError !== undefined) throw new Error(dispatchError)
+    if (dispatchError !== undefined) {
+      const error = new Error(dispatchError) as Error & { code?: string }
+      const code = options.dispatchErrorCodes?.[request.callId]
+      if (code !== undefined) error.code = code
+      throw error
+    }
     const runId = `member-run-${activations.length + 1}`
     activations.push({ callId: request.callId, memberId: request.member.memberId, runId })
     request.onRunCreated({ runId })
@@ -344,7 +368,7 @@ async function makeCoordinatorFixture(options: CoordinatorFixtureOptions = {}): 
       maybeResolveWaiters()
     },
     holdCleanup() {
-      cleanupGate = new Promise<void>((resolve) => { releaseCleanupGate = resolve })
+      void holdCleanupGate()
     },
     releaseCleanup() {
       releaseCleanupGate?.()
@@ -352,7 +376,7 @@ async function makeCoordinatorFixture(options: CoordinatorFixtureOptions = {}): 
     },
     cancelMember(runId) {
       const entry = runsById.get(runId)
-      // 与 Task 7 `cancelError()` 同形：定向取消以普通 Error 结束，没有稳定 code。
+      // 与旧版 Task 7 `cancelError()` 同形：普通 Error、无稳定 code，走文案兜底。
       if (entry !== undefined) settleCancelled(entry, new Error(`智能体「${entry.slug}」的回合已取消`))
     },
   }
@@ -564,6 +588,26 @@ describe('expert team coordinator', () => {
     expect(runOf(fixture).results.find((item) => item.resultId === review.resultId)?.reviewVerdict).toBeUndefined()
   })
 
+  it('classifies a coded member cancel as stopped before any localized copy fallback', async () => {
+    const fixture = await makeCoordinatorFixture({
+      // 文案与旧版 `智能体「<slug>」的回合已取消` 完全不同：只有稳定 code 能识别取消。
+      dispatchErrors: { 'coded-cancel': '成员被用户主动停止（本地化文案已变更）' },
+      dispatchErrorCodes: { 'coded-cancel': EXPERT_TEAM_MEMBER_CANCELLED },
+    })
+    const { coordinator, runs } = fixture
+    const result = await coordinator.dispatch(dispatchInput('a', { callId: 'coded-cancel' }))
+    expect(result).toMatchObject({
+      status: 'stopped',
+      error: EXPERT_TEAM_MEMBER_CANCELLED,
+      resultId: expect.any(String),
+    })
+    // 注册表投影与工具结果一致：停止而非失败，且错误值稳定。
+    expect(runs.byTurn(PARENT_SESSION_ID, CLIENT_MESSAGE_ID)?.results.find((item) => item.resultId === result.resultId)).toMatchObject({
+      status: 'stopped',
+      error: EXPERT_TEAM_MEMBER_CANCELLED,
+    })
+  })
+
   it('writes memberRunId as soon as a member run exists and cancels queued and in-flight members while awaiting cleanup', async () => {
     const fixture = await makeCoordinatorFixture({ maxParallel: 2 })
     const { coordinator, gate, runs } = fixture
@@ -601,6 +645,40 @@ describe('expert team coordinator', () => {
     expect(coordinator.hasInFlight(runId)).toBe(false)
     expect(runs.get(runId)?.status).toBe('stopped')
     // waitMemberCleanups 在取消收敛后立即可返回
+    await expect(coordinator.waitMemberCleanups(runId)).resolves.toBeUndefined()
+  })
+
+  it('keeps cancelRun and waitMemberCleanups pending until a settled member cleanup promise releases', async () => {
+    const fixture = await makeCoordinatorFixture({ holdMemberCleanup: true })
+    const { coordinator, gate } = fixture
+    const runId = runOf(fixture).teamRunId
+
+    const pending = coordinator.dispatch(dispatchInput('a', { callId: 'cleanup-1' }))
+    await gate.waitStarted(1)
+    gate.releaseAll()
+    // 派工本身已结算（completed），但成员清理确认仍被 held：协调器必须记住该 promise。
+    const result = await pending
+    expect(result.status).toBe('completed')
+    expect(coordinator.hasInFlight(runId)).toBe(false)
+
+    const flush = async (): Promise<void> => { await new Promise<void>((resolve) => { setTimeout(resolve, 0) }) }
+    let waitSettled = false
+    let cancelSettled = false
+    const waiting = coordinator.waitMemberCleanups(runId).then(() => { waitSettled = true })
+    const cancellation = coordinator.cancelRun(runId).then(() => { cancelSettled = true })
+    await flush()
+    await flush()
+    expect(waitSettled).toBe(false)
+    expect(cancelSettled).toBe(false)
+    expect(runOf(fixture).status).toBe('stopping')
+
+    gate.releaseCleanup()
+    await waiting
+    await cancellation
+    expect(waitSettled).toBe(true)
+    expect(cancelSettled).toBe(true)
+    expect(runOf(fixture).status).toBe('stopped')
+    // 收敛后清理等待立即返回，不重复挂起。
     await expect(coordinator.waitMemberCleanups(runId)).resolves.toBeUndefined()
   })
 

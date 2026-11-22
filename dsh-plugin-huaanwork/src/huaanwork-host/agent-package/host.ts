@@ -19,6 +19,7 @@ import type { AgentsHost } from '../agents-host.ts'
 import { acceptanceCleanupTimeoutMs, acceptanceDisposeFailure, acceptancePackageDelayMs, acceptancePackageDelayPoint } from '../acceptance-hooks.ts'
 import {
   EXPERT_TEAM_MCP_SERVER_NAME_MAX_LENGTH,
+  EXPERT_TEAM_MEMBER_CANCELLED,
   teamMcpServerName,
   teamMcpServerNameConflict,
   type TeamMemberDispatchInput,
@@ -1272,7 +1273,13 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         cancelQuietly()
       }
 
-      /** 取消/失败的统一错误:文案与普通 `@slug` 同源。 */
+      /**
+       * 取消/失败的统一错误:文案与普通 `@slug` 同源。
+       *
+       * 仅团队普通取消分支携带稳定 `code`(协调器据此归类 `stopped`,不解析可本地化
+       * 文案);revoke/update/remove/dispose 属于技术失败,保持无码以免被误归为停止。
+       * 普通 `@slug` `dispatch()` 的取消错误不改,行为保持逐字一致。
+       */
       const cancelError = (): Error => {
         if (cancelReason === 'revoke') {
           const revoked = security === undefined ? pkg.revoked : security.revocationFor(pkg.slug)
@@ -1283,7 +1290,9 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         if (cancelReason === 'update') return new Error(`智能体「${pkg.slug}」正在更新，本回合已停止`)
         if (cancelReason === 'remove') return new Error(`智能体「${pkg.slug}」已移除，本回合已停止`)
         if (cancelReason === 'dispose') return new Error(`智能体「${pkg.slug}」的回合已停止：应用正在退出`)
-        return new Error(`智能体「${pkg.slug}」的回合已取消`)
+        const error = new Error(`智能体「${pkg.slug}」的回合已取消`) as Error & { code: string }
+        error.code = EXPERT_TEAM_MEMBER_CANCELLED
+        return error
       }
 
       /** 取消/abort 已生效时抛出取消原因;每个 await 之后都要重新过一遍。 */

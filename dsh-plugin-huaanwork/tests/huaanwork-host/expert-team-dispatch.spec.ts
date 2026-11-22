@@ -19,6 +19,7 @@ import type {
   AgentPackageTurnRuntime,
 } from '../../src/huaanwork-host/agent-package/types.ts'
 import {
+  EXPERT_TEAM_MEMBER_CANCELLED,
   teamMcpServerName,
   type TeamMemberDispatchInput,
   type TeamMemberDispatchResult,
@@ -587,7 +588,14 @@ describe('expert team member dispatch', () => {
     await waitForCondition(() => fixture.activations.size === 1, 'member activation')
     const runId = [...fixture.activations.keys()][0]!
     expect((await fixture.runs.requestCancel('parent', runId)).status).toBe('accepted')
-    await expect(pending).rejects.toThrow(/回合已取消/)
+    const rejection = await pending.then(
+      () => { throw new Error('expected the member dispatch to reject') },
+      (error: unknown) => error,
+    )
+    expect(rejection).toBeInstanceOf(Error)
+    expect((rejection as Error).message).toMatch(/回合已取消/)
+    // 团队路径的普通取消携带稳定 code：协调器按 code 归类 stopped，不解析文案。
+    expect((rejection as Error & { code?: string }).code).toBe(EXPERT_TEAM_MEMBER_CANCELLED)
     expect(fixture.activation.disposed).toBe(true)
     expect(fixture.requests.size).toBe(0)
     expect(fixture.attachments.sessionAgentTools.size).toBe(0)

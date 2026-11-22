@@ -28,6 +28,14 @@ export function teamMcpServerName(slug: string, reservedChildId: string): string
   return `${slug.slice(0, 22)}__${reservedChildId.replaceAll('-', '').slice(0, 8)}`
 }
 
+/**
+ * 团队成员被取消（单成员定向取消、整团取消或外部 abort）时 Task 7 抛出的稳定错误码。
+ *
+ * 协调器按该 `code` 把成员派工归类为 `stopped`，不解析可能随本地化变化的文案；
+ * 普通 `@智能体` `dispatch()` 的取消错误不携带该码，行为保持不变。
+ */
+export const EXPERT_TEAM_MEMBER_CANCELLED = 'expert-team-member-cancelled'
+
 /** 活动名冲突的稳定错误码 + 可读文案；调用方按 `code` 映射，不解析文本。 */
 export function teamMcpServerNameConflict(name: string): Error {
   const error = new Error(

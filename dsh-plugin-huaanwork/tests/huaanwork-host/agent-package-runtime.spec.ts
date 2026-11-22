@@ -1502,7 +1502,14 @@ describe('agent package subagent run projection', () => {
     expect((await first.runs.requestCancel('session-a', runA)).status).toBe('accepted')
     expect(first.runs.get(runA)?.phase).toBe('stopping')
     gateA.resolve(undefined as never)
-    await expect(dispatchA).rejects.toThrow(/回合已取消/)
+    const rejection = await dispatchA.then(
+      () => { throw new Error('expected the package dispatch to reject') },
+      (error: unknown) => error,
+    )
+    expect(rejection).toBeInstanceOf(Error)
+    expect((rejection as Error).message).toMatch(/回合已取消/)
+    // 普通 `@智能体` 取消错误保持原样：不携带团队成员的稳定取消码。
+    expect(rejection).not.toHaveProperty('code')
     expect(stopsA).toHaveLength(1)
     expect(first.runs.get(runA)?.phase).toBe('stopped')
 
