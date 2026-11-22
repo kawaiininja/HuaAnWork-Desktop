@@ -13,6 +13,7 @@ import { normalizeTodoEntries } from "../client-huaanwork/logic/todoProjection.t
 import { acceptanceInjectToolName, acceptanceToolFailure } from "../huaanwork-host/acceptance-hooks.ts";
 import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
 import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
+import type { ExpertTeamRunRegistry } from "../huaanwork-host/expert-team/runs.ts";
 import {
   noteSystemSkillGoalPhase,
   releaseSystemSkillLease,
@@ -92,6 +93,8 @@ type Context = SystemSkillLeaseHost & {
   huaanworkEmit?: (event: RpcEvent) => void;
   /** 子代理 run 权威状态机;fixture 与旧运行时可以缺席,缺席时所有事件照旧广播。 */
   huaanworkSubagentRuns?: ChildRunActivity;
+  /** 专家团运行 registry(hook/parent 等非用户 cancel 来源的 abort 兜底);幂等。 */
+  huaanworkExpertTeamRuns?: Pick<ExpertTeamRunRegistry, "cancelBySession">;
   on(event: string, listener: (...args: never[]) => unknown, options?: boolean | { global?: boolean; prepend?: boolean }): void;
 };
 
@@ -125,6 +128,8 @@ export function apply(ctx: Context): void {
       roundKeys.delete(id);
       // 会话销毁无条件释放系统技能租约并清 active goal 标记(与 releaseSessionRuntime 同契约)。
       releaseSystemSkillLease(ctx, id, { clearGoal: true });
+      // 会话删除(Host 正常退出/级联清理)同样终止团队运行;幂等,重复信号只清理一次。
+      cancelExpertTeamRuns(ctx, id);
     }
   }) as never, { global: true });
 
@@ -220,6 +225,8 @@ export function apply(ctx: Context): void {
       const reason = objectValue(objectValue(event.data).reason);
       if ((reason.kind === "aborted" || reason.kind === "error") && sessionId !== undefined) {
         releaseSystemSkillLease(ctx, sessionId, { clearGoal: true });
+        // 父回合被 abort 视同整团取消(设计 §13.3);error 只按技术失败结算,不停止团队。
+        if (reason.kind === "aborted") cancelExpertTeamRuns(ctx, sessionId);
       }
       return;
     }
@@ -277,6 +284,9 @@ export function apply(ctx: Context): void {
     // 必须无条件释放并清 activeGoalSessions,不能等 goal/change。
     if (sessionId !== undefined) releaseSystemSkillLease(ctx, sessionId, { clearGoal: true });
     if (isAbortError(payload?.error)) {
+      // hook/parent 等来源的 agent.cancel 不经 session.cancel:用同一幂等入口兜底闩停
+      // 父会话团队运行;非 abort 的普通错误不在此列,仍按技术失败结算。
+      cancelExpertTeamRuns(ctx, sessionId);
       emit(ctx, { event: "session/end", ok: true, cancelled: true, ...(sessionId === undefined ? {} : { sessionId }) });
       return;
     }
@@ -348,6 +358,21 @@ function childActivityOf(
   const runs = ctx.huaanworkSubagentRuns;
   if (runs === undefined || !runs.ownsChild(sessionId)) return undefined;
   return { runs, childId: sessionId };
+}
+
+/**
+ * 团队运行随父会话 abort/销毁同步闩停（设计 §13.3）。
+ *
+ * 与 `sessions.ts` 的 `cancelAgent`/`releaseSessionRuntime` 共用 registry 的幂等
+ * `cancelBySession`：`session.cancel`、`turn/end: aborted`、`agent/error: isAbortError`
+ * 与 `session/disposed` 多路信号只启动一次取消闭包、只发布一次终态。兼容旧运行时
+ * 或缺 registry 的 fixture：缺席时静默跳过。
+ */
+function cancelExpertTeamRuns(ctx: Context, sessionId: string | undefined): void {
+  if (sessionId === undefined) return;
+  const runs = ctx.huaanworkExpertTeamRuns;
+  if (runs === undefined) return;
+  void runs.cancelBySession(sessionId).catch(() => undefined);
 }
 
 function capResult(result: ToolResult): { text: string; truncated: boolean } {

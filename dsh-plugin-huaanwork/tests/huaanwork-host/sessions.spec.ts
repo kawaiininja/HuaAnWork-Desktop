@@ -13,6 +13,13 @@ import {
   emptyAttachments,
   isAgentToolAttached,
 } from '../../src/huaanwork-guardrails/agent-attachments.ts'
+import { EXPERT_TEAM_DISPATCH_TOOL } from '../../src/huaanwork-guardrails/expert-team-dispatch.ts'
+import { createExpertTeamRunRegistry } from '../../src/huaanwork-host/expert-team/runs.ts'
+import {
+  bindExpertTeamObserver,
+  createExpertTeamTurnObserver,
+} from '../../src/huaanwork-host/expert-team/observer.ts'
+import { validTeam } from '../fixtures/expert-team/team.ts'
 import { apply as applySkills, setBundledSkillRegistrar } from '../../src/huaanwork-guardrails/skills.ts'
 import {
   apply as applyPresentAs,
@@ -2488,11 +2495,12 @@ describe('session.send 调度器接线', () => {
     }
     const eventCtx = h.ctx as SessionRuntimeContext & {
       skills: { register: (skill: unknown) => () => void }
-      on: (event: string, listener: (info: unknown) => void) => void
+      on: (event: string, listener: (info: unknown) => void) => () => void
     }
     eventCtx.skills = { register: () => () => undefined }
     eventCtx.on = (event, listener) => {
-      if (event === 'subagent/start') startListeners.push(listener)
+      if (event === 'subagent/start') startListeners.push(listener as (info: unknown) => void)
+      return () => undefined
     }
     applySkills(eventCtx as never)
 
@@ -4076,4 +4084,130 @@ test('sessionRemove deletes only this session artifacts and keeps a sibling sess
   expect(existsSync(join(routeCtx.profileDir, 'artifacts', sessionId))).toBe(false)
   expect((await listArtifacts(routeCtx.profileDir, siblingId)).map((item) => item.artifactId))
     .toEqual([kept.artifactId])
+})
+
+// —— Task 10: 专家团取消/释放联动(设计 §13.3 / §12.4.2) ——
+
+describe('expert team cancellation and release', () => {
+  function teamRun(sessionId: string): {
+    runs: ReturnType<typeof createExpertTeamRunRegistry>
+    runId: string
+    cleanups: string[]
+  } {
+    const runs = createExpertTeamRunRegistry({ generation: 'g1', emit: () => undefined })
+    const run = runs.begin({ parentSessionId: sessionId, clientMessageId: 'm1', teamSnapshot: validTeam() })
+    const cleanups: string[] = []
+    runs.attachCancel(run.teamRunId, async () => {
+      cleanups.push('team-cleanup')
+    })
+    return { runs, runId: run.teamRunId, cleanups }
+  }
+
+  /** 记录 `{ global: true }` 监听并在注销时同步移除的 Host Context 面。 */
+  function listenerContext() {
+    const listeners: Record<string, ((...args: never[]) => unknown)[]> = {}
+    return {
+      listeners,
+      on(name: string, listener: (...args: never[]) => unknown): () => void {
+        ;(listeners[name] ??= []).push(listener)
+        return () => {
+          const list = listeners[name]
+          if (list === undefined) return
+          const index = list.indexOf(listener)
+          if (index >= 0) list.splice(index, 1)
+        }
+      },
+    }
+  }
+
+  test('session.cancel latches the team run before cancelling the parent agent', () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = 'team-stop-session'
+    const { runs, runId, cleanups } = teamRun(sessionId)
+    const order: string[] = []
+    runs.attachCancel(runId, async () => {
+      order.push('team')
+    })
+    const primary: ListedAgent = {
+      id: 'huaanwork',
+      session: { id: sessionId },
+      cancel: () => order.push('agent'),
+    }
+    const ctx: SessionRuntimeContext = {
+      agents: { get: (id) => (id === 'huaanwork' ? primary : undefined), list: () => [primary] },
+      huaanworkExpertTeamRuns: runs,
+    }
+
+    expect(sessionCancel(ctx, routeCtx, { sessionId })).toEqual({ accepted: true })
+    // 团队取消在 parent.cancel 之前同步闩停(后挂的取消闭包替换未启动的那条)。
+    expect(order).toEqual(['team', 'agent'])
+    expect(cleanups).toEqual([])
+    expect(runs.get(runId)?.status).toBe('stopping')
+  })
+
+  test('session.cancel with queueItemId only removes the queued message and leaves the team running', () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = 'team-queue-session'
+    const { runs, runId } = teamRun(sessionId)
+    const scheduler = createTurnScheduler({ maxConcurrentTurns: () => 1, modelExists: () => true })
+    const workspace = routeCtx.workspaceRoot.current
+    expect(scheduler.admitUserTurn({ sessionId, tabId: 't', text: 'first', modelId: 'm1', root: workspace }).kind).toBe('start')
+    const queued = scheduler.admitUserTurn({ sessionId, tabId: 't', text: 'second', modelId: 'm1', root: workspace })
+    if (queued.kind !== 'queued') throw new Error('expected a queued turn')
+    const ctx: SessionRuntimeContext = { huaanworkExpertTeamRuns: runs, huaanworkTurnScheduler: scheduler }
+
+    sessionCancel(ctx, routeCtx, { sessionId, queueItemId: queued.queueItemId })
+    expect(runs.get(runId)?.status).toBe('running')
+    // 等待项确实被移除:释放写者后队列不再出队原项。
+    scheduler.release(sessionId)
+    expect(scheduler.drainQueue()).toEqual([])
+  })
+
+  test('releaseSessionRuntime cancels the team, disposes observers and detaches the dispatch tool', () => {
+    const sessionId = 'team-release-session'
+    const { runs, runId, cleanups } = teamRun(sessionId)
+    const attachments = emptyAttachments()
+    attachAgentTools(attachments, sessionId, [EXPERT_TEAM_DISPATCH_TOOL])
+    const listener = listenerContext()
+    const onTurnEnd = vi.fn()
+    const observer = createExpertTeamTurnObserver({ parentSessionId: sessionId, followupId: 'm1', onTurnEnd })
+    bindExpertTeamObserver({ on: listener.on }, observer)
+    expect(listener.listeners['agent/inbox/claimed']).toHaveLength(1)
+    expect(listener.listeners['session/event']).toHaveLength(1)
+    const ctx: SessionRuntimeContext = { huaanworkAttachments: attachments, huaanworkExpertTeamRuns: runs }
+
+    releaseSessionRuntime(ctx, sessionId)
+
+    expect(runs.get(runId)?.status).toBe('stopping')
+    expect(cleanups).toEqual(['team-cleanup'])
+    expect(listener.listeners['agent/inbox/claimed']).toEqual([])
+    expect(listener.listeners['session/event']).toEqual([])
+    expect(isAgentToolAttached(attachments, sessionId, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+    // 已卸载的观察器不再结算。
+    observer.afterIdle()
+    expect(onTurnEnd).not.toHaveBeenCalled()
+  })
+
+  test('session.remove releases the team run and its observers before deleting the log', async () => {
+    const root = freshTmp()
+    const routeCtx = makeRouteCtx(root)
+    const sessionId = 'huaanwork-team-remove'
+    writePersistedSession(routeCtx.dshHome, sessionId, routeCtx.workspaceRoot.current)
+    const { runs, runId } = teamRun(sessionId)
+    const attachments = emptyAttachments()
+    attachAgentTools(attachments, sessionId, [EXPERT_TEAM_DISPATCH_TOOL])
+    const listener = listenerContext()
+    bindExpertTeamObserver(
+      { on: listener.on },
+      createExpertTeamTurnObserver({ parentSessionId: sessionId, followupId: 'm1', onTurnEnd: vi.fn() }),
+    )
+    const ctx: SessionRuntimeContext = { huaanworkAttachments: attachments, huaanworkExpertTeamRuns: runs }
+
+    await expect(sessionRemove(ctx, routeCtx, { sessionId })).resolves.toEqual({ removed: true })
+    expect(runs.get(runId)?.status).toBe('stopping')
+    expect(listener.listeners['agent/inbox/claimed']).toEqual([])
+    expect(isAgentToolAttached(attachments, sessionId, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+  })
 })

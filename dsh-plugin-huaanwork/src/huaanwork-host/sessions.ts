@@ -4,10 +4,12 @@ import { readdir, rm, unlink } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import {
+  detachAgentTools,
   isAgentToolAttached,
   releaseAttachmentPending,
   type AttachmentMaps,
 } from '../huaanwork-guardrails/agent-attachments.ts'
+import { EXPERT_TEAM_DISPATCH_TOOL } from '../huaanwork-guardrails/expert-team-dispatch.ts'
 import { forgetConfirmedTarget, settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
 import { answerRouteInput, cancelRouteInput, clearInvalidRoute, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
@@ -53,6 +55,8 @@ import {
 import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
 import type { ExpertTeamRunRegistry } from './expert-team/runs.ts'
 import type { ExpertTeamStore } from './expert-team/types.ts'
+import { disposeExpertTeamObservers } from './expert-team/observer.ts'
+import type { ExpertTeamCoordinator } from './expert-team/coordinator.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { resolveSessionModel } from './session-models.ts'
 import { listProjects, listTasks, setTaskModel } from './stores.ts'
@@ -104,6 +108,11 @@ export type SessionRuntimeContext = {
   sandboxPolicy?: { workspaceRoot?: string }
   /** cordis Context.get。sandboxPolicy 未注入到本插件时,用它做全局查找。 */
   get?: (name: string) => unknown
+  /**
+   * cordis `Context.on`(可选)。团队回合观察器经它订阅 `agent/inbox/claimed` 与
+   * `session/event`;`releaseSessionRuntime` 按会话同步注销,不跨回合泄漏监听。
+   */
+  on?(name: string, listener: (...args: never[]) => unknown, options?: boolean | { global?: boolean }): () => void
   agents?: {
     get?: (id: string) => ListedAgent | undefined
     list?: () => ListedAgent[]
@@ -119,6 +128,8 @@ export type SessionRuntimeContext = {
   huaanworkExpertTeamStore?: ExpertTeamStore
   /** 专家团运行状态机(index.ts 启动时注入);取消、运行投影与后续协调器共读同一实例。 */
   huaanworkExpertTeamRuns?: ExpertTeamRunRegistry
+  /** 专家团运行协调器(index.ts 启动时注入);团队轮次启动与观察器共享同一租约实例。 */
+  huaanworkExpertTeamCoordinator?: ExpertTeamCoordinator
   /**
    * 会话 → 模型条目 id 的绑定表(holders.ts 注入)。`sendToAgent` 在 `dispatchAt`
    * 之前先写入本轮准入的模型(子代理在其中的 `subagent/start` 同步复制父会话模型),
@@ -697,6 +708,10 @@ function isInside(root: string, candidate: string): boolean {
 
 function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): { accepted: true } {
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
+  // 专家团(设计 §13.3):先同步闩停团队运行(置 stopping 并启动取消闭包,排空等待
+  // 队列、取消在途成员),再取消父 agent 与包回合。registry 幂等,bridge 的
+  // abort/disposed 兜底不会重复清理或重复发布终态。
+  void ctx.huaanworkExpertTeamRuns?.cancelBySession(sessionId).catch(() => undefined)
   cancelDirectStarts([sessionId, ...descendantSessionIds(sessionId)])
   // 只取消绑定在该会话上的 agent;通道默认 agent 可能正在跑兄弟会话,不能替它按停止。
   const primary = findAgentBySession(ctx, sessionId)
@@ -863,6 +878,11 @@ export function discardSessionCreationDrafts(
 export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, sessionId: string): void {
   // 后代名单在 forgetChildSessions 之前快照:登记表清空后就查不到了。
   const descendants = descendantSessionIds(sessionId)
+  // 删除会话是团队运行的终止路径(设计 §13.3):同步闩停并启动取消闭包(成员/团长
+  // 清理异步收敛,不阻塞删除),同时卸载该父会话在途的回合观察器,防止已删会话的
+  // 迟到事件继续聚合并回调结算。
+  void ctx?.huaanworkExpertTeamRuns?.cancelBySession(sessionId).catch(() => undefined)
+  disposeExpertTeamObservers(sessionId)
   cancelDirectStarts([sessionId, ...descendants])
   releaseRouteInput(sessionId)
   if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })
@@ -881,6 +901,10 @@ export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, se
       releaseAttachmentPending(ctx.huaanworkAttachments, id)
       detachSkillCreationTools(ctx, id)
       detachCreationTools(ctx, id)
+      // 团队派工工具只属于进行中的团队回合:会话销毁后不得随同 id 重建继承。
+      if (ctx.huaanworkAttachments !== undefined) {
+        detachAgentTools(ctx.huaanworkAttachments, id, [EXPERT_TEAM_DISPATCH_TOOL])
+      }
       ctx.huaanworkSessionModels?.delete(id)
       ctx.huaanworkSessionRoots?.delete(id)
       // 未激活或稳定通道会话删除后可能以同 id 重建:清掉锚点与未消费的 pending,
