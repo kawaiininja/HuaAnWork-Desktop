@@ -8,7 +8,7 @@
  *   钩子),核对「首请求」时序:agent/inbox/claimed 在 prompt assembly 之前同步刷新附件,
  *   不靠 mock 的 schemas() 或手工触发 pre-step 冒充模型请求。
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -430,6 +430,10 @@ type TeamFixture = {
   settleTurn(): ExpertTeamTerminalStatus
   listArtifacts(): Promise<TaskArtifactSummary[]>
   readContent(artifactId: string): Promise<string>
+  /** 取消/租约复查触发(第二次读取)瞬间的暂存快照；由对应选项填充。 */
+  preCommitStaging: { cancel?: StagingSnapshot; lease?: StagingSnapshot }
+  /** 调用结束后的暂存根快照；拒绝路径应只剩空根或不存在。 */
+  stagingSnapshot(): StagingSnapshot
 }
 
 function reviewResult(): ExpertTeamResult {
@@ -450,12 +454,50 @@ function createdArtifacts(events: readonly RpcEvent[]): TaskArtifactSummary[] {
   return artifacts
 }
 
+/** 隐藏暂存根名不是 artifacts-host 的公开导出：从源码解析同一常量，不在测试里复制魔串。 */
+function artifactsStagingRootName(): string {
+  const source = readFileSync(new URL('../../src/huaanwork-host/artifacts-host.ts', import.meta.url), 'utf8')
+  const name = /const STAGING_DIR_NAME = '([^']+)'/.exec(source)?.[1]
+  if (name === undefined) throw new Error('artifacts-host STAGING_DIR_NAME not found')
+  return name
+}
+
+type StagingSnapshot = {
+  artifactDirs: string[]
+  files: { name: string; sizeBytes: number }[]
+}
+
+/** prepare 只写隐藏暂存根：快照非空即证明存在“已 prepare、未 commit”的 Artifact。 */
+function snapshotStaging(profileDir: string): StagingSnapshot {
+  const root = join(profileDir, artifactsStagingRootName())
+  if (!existsSync(root)) return { artifactDirs: [], files: [] }
+  const artifactDirs = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+  const files = artifactDirs.flatMap((dir) => readdirSync(join(root, dir), { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => ({ name: entry.name, sizeBytes: statSync(join(root, dir, entry.name)).size })))
+  return { artifactDirs, files }
+}
+
+/**
+ * 复查触发瞬间必须已能看到本次提交的非空暂存目录与正文文件：把整个复查前移到
+ * `beginArtifactWrite`/`prepareArtifact` 之前的实现会在这里落空。
+ */
+function expectStagedArtifactAtPreCommitCheck(snapshot: StagingSnapshot | undefined, content: string): void {
+  expect(snapshot).toBeDefined()
+  expect(snapshot!.artifactDirs).toHaveLength(1)
+  expect(snapshot!.files.length).toBeGreaterThanOrEqual(2)
+  expect(snapshot!.files.every((file) => file.sizeBytes > 0)).toBe(true)
+  expect(snapshot!.files.some((file) => file.sizeBytes === Buffer.byteLength(content))).toBe(true)
+}
+
 /**
  * 真实 `result_present` + 真实 ArtifactHost + 真实团队注册表/协调器的一次团队回合。
  *
  * `execute` 只补当前会话锚与 `callId`；重放、封存与关联恢复都走生产分支。
  * `cancelBeforeCommit` / `invalidateLeaseBeforeCommit` 在 Prepare 之后的第二次
- * 回合/租约读取处触发，确定性覆盖 commit 前的取消与租约复查。
+ * 回合/租约读取处触发并同步快照暂存根，确定性钉住「复查晚于 prepare 且暂存已落盘」。
  */
 async function makeResultPresentFixture(options: TeamFixtureOptions = {}): Promise<TeamFixture> {
   const profileDir = mkdtempSync(join(tmpdir(), 'result-present-team-'))
@@ -482,12 +524,14 @@ async function makeResultPresentFixture(options: TeamFixtureOptions = {}): Promi
   let anchorClientMessageId = options.clientMessageId ?? 'm1'
   let turnReads = 0
   let leaseReads = 0
+  const preCommitStaging: { cancel?: StagingSnapshot; lease?: StagingSnapshot } = {}
   const runs: ExpertTeamRunRegistry = {
     ...registry,
     byTurn(parentSessionId, clientMessageId) {
       turnReads += 1
-      // 第二次读取发生在 Prepare 之后:此时取消运行,commit 前复查必须读到 stopping。
+      // 第二次读取发生在 Prepare 之后:先快照暂存(证明复查晚于 prepare),再同步取消运行。
       if (options.cancelBeforeCommit === true && turnReads === 2) {
+        preCommitStaging.cancel = snapshotStaging(profileDir)
         registry.requestCancel(parentSessionId, runId)
       }
       return registry.byTurn(parentSessionId, clientMessageId)
@@ -498,6 +542,7 @@ async function makeResultPresentFixture(options: TeamFixtureOptions = {}): Promi
     isLeaseValid: (teamRunId) => {
       leaseReads += 1
       if (options.invalidateLeaseBeforeCommit === true && leaseReads === 2) {
+        preCommitStaging.lease = snapshotStaging(profileDir)
         coordinator.invalidateLease(teamRunId)
       }
       return coordinator.isLeaseValid(teamRunId)
@@ -563,6 +608,10 @@ async function makeResultPresentFixture(options: TeamFixtureOptions = {}): Promi
     async readContent(artifactId) {
       return (await readArtifactContent(profileDir, 's1', artifactId)).toString('utf8')
     },
+    preCommitStaging,
+    stagingSnapshot() {
+      return snapshotStaging(profileDir)
+    },
   }
 }
 
@@ -622,16 +671,22 @@ it('discards a prepared new team artifact when cancellation or lease loss lands 
   const cancelled = await makeResultPresentFixture({ validExecution: true, cancelBeforeCommit: true })
   await expect(cancelled.execute({ callId: 'call-cancelled', title: '主报告', format: 'markdown', content: '# 完成' }))
     .rejects.toThrow('expert-team-terminal')
+  // 复查读取晚于 prepare:触发时暂存目录已存在且含非空正文与 manifest。
+  expectStagedArtifactAtPreCommitCheck(cancelled.preCommitStaging.cancel, '# 完成')
   expect(cancelled.runs.get(cancelled.runId)).toMatchObject({ artifactStatus: 'pending', deliverySealed: false })
   expect(createdArtifacts(cancelled.emitted)).toHaveLength(0)
   expect(await cancelled.listArtifacts()).toEqual([])
+  // 拒绝路径已 discard:暂存根不再残留 Artifact 目录。
+  expect(cancelled.stagingSnapshot()).toEqual({ artifactDirs: [], files: [] })
 
   const leaseLost = await makeResultPresentFixture({ validExecution: true, invalidateLeaseBeforeCommit: true })
   await expect(leaseLost.execute({ callId: 'call-lease', title: '主报告', format: 'markdown', content: '# 完成' }))
     .rejects.toThrow('expert-team-lease-invalid')
+  expectStagedArtifactAtPreCommitCheck(leaseLost.preCommitStaging.lease, '# 完成')
   expect(leaseLost.runs.get(leaseLost.runId)).toMatchObject({ artifactStatus: 'pending', deliverySealed: false })
   expect(createdArtifacts(leaseLost.emitted)).toHaveLength(0)
   expect(await leaseLost.listArtifacts()).toEqual([])
+  expect(leaseLost.stagingSnapshot()).toEqual({ artifactDirs: [], files: [] })
 })
 
 it('records a link failure without deleting the committed artifact and settles partial', async () => {
