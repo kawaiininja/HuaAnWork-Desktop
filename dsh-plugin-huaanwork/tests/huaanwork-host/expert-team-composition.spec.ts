@@ -7,7 +7,6 @@ import {
   disposeCompositionEnvironment,
   restartHostWithSameProfile,
   runComplianceTeamSmoke,
-  type CompositionHost,
 } from '../fixtures/expert-team/driver.ts'
 
 /**
@@ -16,10 +15,8 @@ import {
  * 不触网、不需要真实 API key。
  */
 
-let host: CompositionHost
-
 beforeAll(async () => {
-  host = await bootCompositionHost()
+  await bootCompositionHost()
 }, 300_000)
 
 afterAll(async () => {
@@ -35,19 +32,6 @@ describe('expert team real composition', () => {
       reviewVerdicts: ['revise', 'pass'],
       dualMcp: true,
     })
-    console.log('SCENARIO1', JSON.stringify({
-      status: result.run.status,
-      dispatches: result.dispatches.map((item) => item.kind),
-      memberRunIds: result.memberRunIds.length,
-      maxMemberConcurrency: result.maxMemberConcurrency,
-      parentMcpAttachments: result.parentMcpAttachments,
-      memberMcpServers: result.memberMcpServers,
-      primaryArtifactIds: result.primaryArtifactIds,
-      notifications: result.parentNotifications,
-      finalSummary: result.finalSummary,
-      failure: result.run.failure,
-      artifactPreview: result.artifact?.content.slice(0, 200),
-    }, null, 2))
     expect(result.maxMemberConcurrency).toBe(2)
     expect(result.dispatches.map((item) => item.kind)).toEqual(['execute', 'execute', 'review', 'revision', 'review'])
     expect(result.memberRunIds).toHaveLength(5)
