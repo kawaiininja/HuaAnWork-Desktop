@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createAgentPackageActiveTurnRegistry,
@@ -120,7 +120,15 @@ type TeamFixtureOptions = {
   providerChangesChildId?: boolean
   /** true 时 activation.result 悬置，由 `finishAll` 结算（用于在取消/冲突竞态中观察在途成员）。 */
   holdResult?: boolean
+  /** true 时 activation.result 以 rejection 结算（成员结果失败路径）。 */
+  rejectResult?: boolean
   output?: readonly TeamOutputBlock[]
+  /** true 时 startActivation 挂起，由 `releaseActivation` 放行（取消早于 activation 的竞态）。 */
+  holdActivation?: boolean
+  /** true 时 activation.dispose 挂起，由 `releaseDispose` 放行（清理确认未落定的竞态）。 */
+  holdDispose?: boolean
+  /** true 时 activation.dispose 立即拒绝（取消清理失败的故障注入）。 */
+  disposeRejects?: boolean
 }
 
 type ActivationView = {
@@ -151,6 +159,12 @@ type TeamFixture = {
   ) => TeamMemberDispatchInput
   /** 结算所有悬置的 activation.result。 */
   finishAll: (blocks?: readonly TeamOutputBlock[]) => void
+  /** startActivation 已进入的次数（含挂起中的调用）。 */
+  readonly startActivationCalls: number
+  /** 放行 `holdActivation` 挂起的 startActivation。 */
+  releaseActivation: () => void
+  /** 放行 `holdDispose` 挂起的 activation.dispose。 */
+  releaseDispose: () => void
   /** 唯一一次派工的 activation 视图（惰性读取；多派工 fixture 不使用）。 */
   readonly activation: ActivationView
 }
@@ -260,6 +274,15 @@ async function makeTeamPackageFixture(options: TeamFixtureOptions = {}): Promise
   const registeredTools: Array<{ name: string }> = []
   const listeners: Record<string, Array<(...args: never[]) => unknown>> = {}
   const pendingResults = new Set<(value: FakeSubagentResult) => void>()
+  let startActivationCalls = 0
+  let releaseActivationGate: () => void = () => undefined
+  const activationGate = new Promise<void>((resolve) => {
+    releaseActivationGate = resolve
+  })
+  let releaseDisposeGate: () => void = () => undefined
+  const disposeGate = new Promise<void>((resolve) => {
+    releaseDisposeGate = resolve
+  })
 
   const emit = (event: string, ...args: unknown[]): void => {
     for (const listener of listeners[event] ?? []) listener(...(args as never[]))
@@ -304,6 +327,9 @@ async function makeTeamPackageFixture(options: TeamFixtureOptions = {}): Promise
   }
 
   const createResult = (): Promise<FakeSubagentResult> => {
+    if (options.rejectResult === true) {
+      return Promise.reject(new Error('成员结果失败'))
+    }
     if (options.holdResult !== true) {
       return Promise.resolve({ stopReason: 'completed', output: options.output ?? DEFAULT_OUTPUT })
     }
@@ -346,6 +372,8 @@ async function makeTeamPackageFixture(options: TeamFixtureOptions = {}): Promise
       async startActivation(
         spec: SubagentActivationSpec,
       ): Promise<SubagentActivationHandle & { localAgent?: FakeAgent }> {
+        startActivationCalls += 1
+        if (options.holdActivation === true) await activationGate
         const requestedChildId = typeof spec.childId === 'string' ? spec.childId : `child-${String(activations.size + 1)}`
         const actualChildId =
           options.providerChangesChildId === true ? `actual-${requestedChildId}` : requestedChildId
@@ -368,8 +396,10 @@ async function makeTeamPackageFixture(options: TeamFixtureOptions = {}): Promise
           localAgent: agentsById.get(actualChildId)!,
           result: createResult(),
           dispose: async () => {
-            record.disposed = true
             record.disposeCalls += 1
+            if (options.holdDispose === true) await disposeGate
+            if (options.disposeRejects === true) throw new Error('fake activation dispose failed')
+            record.disposed = true
           },
         }
       },
@@ -435,6 +465,11 @@ async function makeTeamPackageFixture(options: TeamFixtureOptions = {}): Promise
       for (const resolve of pendingResults) resolve({ stopReason: 'completed', output: blocks })
       pendingResults.clear()
     },
+    get startActivationCalls() {
+      return startActivationCalls
+    },
+    releaseActivation: () => releaseActivationGate(),
+    releaseDispose: () => releaseDisposeGate(),
     // 惰性视图：解构发生在派工之前，成员值在 activation 创建后才可读。
     activation: {
       get delivery() {
@@ -601,5 +636,102 @@ describe('expert team member dispatch', () => {
     expect(empty).toMatchObject({ stopReason: 'completed', output: { ok: false, error: 'empty-output' } })
     const unsupported = await dispatchWithOutput([{ type: 'image', data: 'x' }])
     expect(unsupported).toMatchObject({ stopReason: 'completed', output: { ok: false, error: 'unsupported-output' } })
+  })
+
+  it('aborting the external signal never leaks an unhandled rejection when cancel cleanup fails', async () => {
+    const fixture = await makeTeamPackageFixture({ holdResult: true, disposeRejects: true })
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      const controller = new AbortController()
+      const pending = fixture.host.dispatchTeamMember(
+        fixture.teamInput('parent', 'alpha', 'task', { signal: controller.signal }),
+      )
+      await waitForCondition(() => fixture.activations.size === 1, 'member activation')
+      const runId = [...fixture.activations.keys()][0]!
+      // 外部 abort 是协调器唯一的中止路径：清理失败必须以日志收敛，不得成为
+      // fail-loud 的 exit(1) 输入。
+      controller.abort()
+      await expect(pending).rejects.toThrow(/回合已取消/)
+      // 给 unhandledRejection 一个完整宏任务窗口再断言。
+      await delay(20)
+      expect(unhandled).toEqual([])
+      expect(fixture.runs.get(runId)?.cleanupWarnings).toEqual([
+        { code: 'activation-dispose-failed', severity: 'error' },
+      ])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('retracts a stale cleanup confirmation when a cancelled member activation arrives late', async () => {
+    const fixture = await makeTeamPackageFixture({
+      holdResult: true,
+      holdActivation: true,
+      holdDispose: true,
+      disposeRejects: true,
+    })
+    let runId = ''
+    const pending = fixture.host.dispatchTeamMember(
+      fixture.teamInput('parent', 'alpha', 'task', {
+        onRunCreated: (info) => {
+          runId = info.runId
+        },
+      }),
+    )
+    await waitForCondition(() => fixture.startActivationCalls === 1, 'startActivation entered')
+    // 取消发生在 startActivation 仍挂起时：activation 尚未登记，清理确认「零失败」。
+    expect((await fixture.runs.requestCancel('parent', runId)).status).toBe('accepted')
+    await waitForCondition(() => fixture.runs.get(runId)?.phase === 'stopping', 'member stopping')
+    // 等取消清理真正确认完（此时 activation 仍缺席），再放行晚到 activation。
+    await delay(20)
+
+    fixture.releaseActivation()
+    await waitForCondition(() => fixture.activations.size === 1, 'late activation')
+    // 权威结果先结算、dispose 仍挂起：晚到 activation 必须撤回先前的成功确认，
+    // 否则执行终结 + 旧确认会拼出伪 stopped。
+    fixture.finishAll()
+    await delay(20)
+    expect(fixture.activations.size).toBe(1)
+    expect(fixture.runs.get(runId)?.phase).toBe('stopping')
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      fixture.releaseDispose()
+      await expect(pending).rejects.toThrow(/回合已取消/)
+    } finally {
+      errorSpy.mockRestore()
+    }
+    const run = fixture.runs.get(runId)!
+    expect(run.phase).toBe('stopping')
+    expect(run.cleanupWarnings).toEqual([{ code: 'activation-dispose-failed', severity: 'error' }])
+  })
+
+  it('reports a rejected member result once without a duplicate failRun', async () => {
+    const fixture = await makeTeamPackageFixture({ rejectResult: true })
+    const rejectResult = vi.spyOn(fixture.runs, 'rejectResult')
+    const failRun = vi.spyOn(fixture.runs, 'failRun')
+    let runId = ''
+    await expect(
+      fixture.host.dispatchTeamMember(
+        fixture.teamInput('parent', 'alpha', 'task', {
+          onRunCreated: (info) => {
+            runId = info.runId
+          },
+        }),
+      ),
+    ).rejects.toThrow(/成员结果失败/)
+    // 观察者已用 rejectResult 上报：catch 不得再用 failRun 报告同一失败并绕过仲裁。
+    expect(rejectResult).toHaveBeenCalledTimes(1)
+    expect(failRun).not.toHaveBeenCalled()
+    const run = fixture.runs.get(runId)
+    expect(run?.phase).toBe('failed')
+    expect(run?.stopReason).toBe('error')
+    expect(run?.failure).toBe('成员结果失败')
   })
 })

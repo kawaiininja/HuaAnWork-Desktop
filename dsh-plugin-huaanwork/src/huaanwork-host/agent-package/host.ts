@@ -1247,6 +1247,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       let cleanupPromise: Promise<void> | undefined
       let cleanupStarted = false
       let cleanupFailureReported = false
+      /** 权威 result 的 rejection 已由结果观察者上报;catch 不得再用 `failRun` 重复报告。 */
+      let resultFailureReported = false
       let activationDisposeSettled = false
       /** 本回合 allow 数组的引用;血缘表按引用同一性清理,不误删并发成员。 */
       let turnAllow: readonly string[] | undefined
@@ -1267,7 +1269,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       const packageChildSessions = new Set<string>()
       const externalSignal = input.signal
       const onExternalAbort = (): void => {
-        void cancelTurn('cancel')
+        cancelQuietly()
       }
 
       /** 取消/失败的统一错误:文案与普通 `@slug` 同源。 */
@@ -1461,6 +1463,17 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         return cancelPromise
       }
 
+      /**
+       * 外部 abort 的唯一入口:取消清理失败只记录日志,绝不留 unhandled rejection。
+       * Host 的 fail-loud 会把未处理 rejection 升级成 exit(1),而 `input.signal`
+       * 是协调器唯一的成员中止路径 —— 中止绝不能连带杀死 Host。
+       */
+      const cancelQuietly = (): void => {
+        void cancelTurn('cancel').catch((error: unknown) => {
+          console.error(`智能体「${pkg.slug}」团队成员取消清理失败：${toError(error).message}`)
+        })
+      }
+
       const record: AgentPackageActiveTurnRecord = {
         sessionId,
         slug: pkg.slug,
@@ -1474,7 +1487,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       // 单成员终止复用现有 `subagent.cancel`:定向停止只作用于这一个 run。
       subagentRuns.attachCancel(runId, () => cancelTurn('cancel'))
       if (externalSignal?.aborted === true) {
-        void cancelTurn('cancel')
+        cancelQuietly()
       } else {
         externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
       }
@@ -1609,6 +1622,11 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           delivery: 'caller',
         })
         record.activation = activation
+        // 晚到 activation 是清理快照之后出现的新资源:定向取消发生在 startActivation
+        // 期间时,此前的「零失败」确认只覆盖了当时的资源。registry 把确认当持久状态,
+        // 必须撤回成功结论;最终 cleanup 会在这次 dispose 落定后重新确认,否则这个
+        // 尚未 dispose 的 activation 会拼出伪 `stopped`。
+        subagentRuns.confirmCleanup(runId, { ok: false, warnings: [] })
         // 权威 result 只观察一次:resolve/reject 分别上报,供 run 投影使用。
         void activation.result.then(
           (result) => {
@@ -1654,7 +1672,12 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           await cleanup('idle')
           throw cancelError()
         }
-        if (outcome.kind === 'failure') throw toError(outcome.error)
+        if (outcome.kind === 'failure') {
+          // 结果观察者已经用 `rejectResult` 报告了这次失败;catch 只做清理与确认,
+          // 不得再用只表示启动/外层失败的 `failRun` 重复报告并绕过 end 仲裁。
+          resultFailureReported = true
+          throw toError(outcome.error)
+        }
         const settled = outcome.value
         const diagnostic = diagnosticOfResult(settled)
         const output = renderMemberOutput(outputBlocksOfResult(settled))
@@ -1673,7 +1696,11 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       } catch (error) {
         await cleanup('idle')
         // 启动/外层失败:先登记「执行已终结」再原样抛出;取消闩吸收 failRun。
-        subagentRuns.failRun(runId, error instanceof Error ? error.message : String(error))
+        // 权威 result 的 rejection 已由观察者上报时跳过,避免同一失败被报告两次
+        // 并覆盖 rejectResult 的仲裁语义。
+        if (!resultFailureReported) {
+          subagentRuns.failRun(runId, error instanceof Error ? error.message : String(error))
+        }
         subagentRuns.confirmCleanup(runId, {
           ok: cleanupFailures.length === 0 && (activation === undefined || activationDisposeSettled),
           warnings: cleanupFailures.map(({ code }) => ({ code, severity: 'error' as const })),
