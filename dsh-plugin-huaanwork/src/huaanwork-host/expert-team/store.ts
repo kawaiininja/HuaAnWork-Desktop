@@ -6,6 +6,8 @@ import { dirname, join } from 'node:path'
 import { assertSafePathSegment } from '../workspace-state.ts'
 import type {
   ExpertTeam,
+  ExpertTeamAgentRef,
+  ExpertTeamMember,
   ExpertTeamRecord,
   ExpertTeamStore,
   ExpertTeamValidationErrors,
@@ -63,6 +65,75 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function normalizeAgentRef(source: ExpertTeamAgentRef): ExpertTeamAgentRef {
+  return { source: source.source, slug: source.slug }
+}
+
+function normalizeMember(source: ExpertTeamMember): ExpertTeamMember {
+  const member: ExpertTeamMember = {
+    memberId: source.memberId,
+    agentRef: normalizeAgentRef(source.agentRef),
+    role: source.role,
+    responsibility: source.responsibility,
+  }
+  if (source.outputInstructions !== undefined) member.outputInstructions = source.outputInstructions
+  return member
+}
+
+function normalizeOrchestration(source: ExpertTeam['orchestration']): ExpertTeam['orchestration'] {
+  const orchestration: ExpertTeam['orchestration'] = {
+    assignmentMode: source.assignmentMode,
+    executionOrder: source.executionOrder,
+    maxParallel: source.maxParallel,
+  }
+  if (source.instructions !== undefined) orchestration.instructions = source.instructions
+  return orchestration
+}
+
+function normalizeReview(source: ExpertTeam['review']): ExpertTeam['review'] {
+  const review: ExpertTeam['review'] = {
+    mode: source.mode,
+    maxRevisionRounds: source.maxRevisionRounds,
+  }
+  if (source.criteria !== undefined) review.criteria = source.criteria
+  return review
+}
+
+function normalizeSummary(source: ExpertTeam['summary']): ExpertTeam['summary'] {
+  const summary: ExpertTeam['summary'] = {
+    delivery: source.delivery,
+    artifactFormat: source.artifactFormat,
+    mode: source.mode,
+  }
+  if (source.instructions !== undefined) summary.instructions = source.instructions
+  return summary
+}
+
+/**
+ * 按契约自身的字段重建团队定义：未列入 `ExpertTeam` 的键（含成员、智能体引用与
+ * 嵌套规则）一律丢弃，`schemaVersion` 由存储层盖章。写盘与读投影都经过它，因此
+ * 调用方夹带的额外键既不会进入 `<id>.json`，也不会作为 `team` 回传给客户端。
+ * 可选键只在有值时出现，不写显式 `undefined`（`exactOptionalPropertyTypes`）。
+ */
+function normalizeTeam(source: ExpertTeam): ExpertTeam {
+  const team: ExpertTeam = {
+    schemaVersion: 1,
+    id: source.id,
+    slug: source.slug,
+    name: source.name,
+    description: source.description,
+    enabled: source.enabled,
+    members: source.members.map(normalizeMember),
+    orchestration: normalizeOrchestration(source.orchestration),
+    review: normalizeReview(source.review),
+    summary: normalizeSummary(source.summary),
+    createdAt: source.createdAt,
+    updatedAt: source.updatedAt,
+  }
+  if (source.scenarios !== undefined) team.scenarios = source.scenarios
+  return team
+}
+
 function expertTeamsRoot(profileDir: string): string {
   return join(profileDir, EXPERT_TEAMS_DIRNAME)
 }
@@ -86,7 +157,7 @@ function readTeamRecord(file: string, id: string): ExpertTeamRecord {
   }
   const validated = validateExpertTeam(parsed)
   if (!validated.ok || validated.team.id !== id) return { id, error: 'expert-team-corrupt' }
-  return { id, team: validated.team }
+  return { id, team: normalizeTeam(validated.team) }
 }
 
 /** 同步枚举当前 profile 的全部定义；缺失目录等价于空列表。 */
@@ -168,14 +239,17 @@ export function createExpertTeamStore(
     },
 
     async create(input: unknown): Promise<ExpertTeam> {
-      // envelope 由存储层决定：调用方提供的 id/时间戳一律不成为存储身份。
+      // envelope 由存储层决定：调用方提供的 id/时间戳/文档版本一律不成为存储身份。
       const timestamp = now()
-      const team = validateOrThrow({
-        ...(isRecord(input) ? input : {}),
-        id: randomUUID(),
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      })
+      const team = normalizeTeam(
+        validateOrThrow({
+          ...(isRecord(input) ? input : {}),
+          schemaVersion: 1,
+          id: randomUUID(),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      )
       const slugTaken = listTeamRecords(profileDir).some((record) => record.team?.slug === team.slug)
       if (slugTaken) throw new ExpertTeamStoreError('expert-team-slug-exists', team.slug)
       const { file } = resolveTeamFile(profileDir, team.id)
@@ -186,21 +260,23 @@ export function createExpertTeamStore(
     async update(id: string, patch: unknown): Promise<ExpertTeam> {
       const existing = readExistingTeam(profileDir, id)
       const editable = isRecord(patch) ? pickEditableFields(patch) : {}
-      const team = validateOrThrow({
-        ...existing.team,
-        ...editable,
-        id: existing.team.id,
-        slug: existing.team.slug,
-        createdAt: existing.team.createdAt,
-        updatedAt: now(),
-      })
+      const team = normalizeTeam(
+        validateOrThrow({
+          ...existing.team,
+          ...editable,
+          id: existing.team.id,
+          slug: existing.team.slug,
+          createdAt: existing.team.createdAt,
+          updatedAt: now(),
+        }),
+      )
       writeTeamFile(existing.file, team)
       return team
     },
 
     async setEnabled(id: string, enabled: boolean): Promise<ExpertTeam> {
       const existing = readExistingTeam(profileDir, id)
-      const team = validateOrThrow({ ...existing.team, enabled, updatedAt: now() })
+      const team = normalizeTeam(validateOrThrow({ ...existing.team, enabled, updatedAt: now() }))
       writeTeamFile(existing.file, team)
       return team
     },

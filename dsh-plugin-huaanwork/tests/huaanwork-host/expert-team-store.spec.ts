@@ -69,6 +69,79 @@ describe('expert team store', () => {
     expect(tempResidue(join(root, 'expert-teams'))).toEqual([])
   })
 
+  it('stamps the storage-owned schema version on create', async () => {
+    const root = makeRoot('expert-team-version-')
+    const store = createExpertTeamStore(root)
+    const created = await store.create({ ...validTeamInput({ slug: 'versioned' }), schemaVersion: 99 })
+    expect(created.schemaVersion).toBe(1)
+    const persisted = JSON.parse(
+      readFileSync(join(root, 'expert-teams', `${created.id}.json`), 'utf8'),
+    ) as Record<string, unknown>
+    expect(persisted.schemaVersion).toBe(1)
+  })
+
+  it('persists only contract fields and drops unknown keys on write and read', async () => {
+    const root = makeRoot('expert-team-normalize-')
+    const store = createExpertTeamStore(root)
+    const base = validTeamInput({ slug: 'normalized' })
+    const created = await store.create({
+      ...base,
+      extraTeamField: 'dropped',
+      members: base.members.map((member) => ({ ...member, extraMemberField: 'dropped' })),
+      orchestration: { ...base.orchestration, extraRuleField: 'dropped' },
+    })
+    // 契约以外的键（含成员与嵌套规则）既不落盘也不回传。
+    expect(Object.keys(created).sort()).toEqual(
+      [
+        'createdAt',
+        'description',
+        'enabled',
+        'id',
+        'members',
+        'name',
+        'orchestration',
+        'review',
+        'scenarios',
+        'schemaVersion',
+        'slug',
+        'summary',
+        'updatedAt',
+      ].sort(),
+    )
+    const persistedPath = join(root, 'expert-teams', `${created.id}.json`)
+    const persisted = JSON.parse(readFileSync(persistedPath, 'utf8')) as Record<string, unknown>
+    expect(persisted).not.toHaveProperty('extraTeamField')
+    expect(persisted.orchestration).not.toHaveProperty('extraRuleField')
+    expect((persisted.members as Record<string, unknown>[])[0]).not.toHaveProperty('extraMemberField')
+
+    // 旧文件里遗留的额外键在读投影中同样不出现。
+    writeFileSync(persistedPath, JSON.stringify({ ...created, legacyExtraField: true }), 'utf8')
+    const reread = (await store.get(created.id)).team
+    expect(reread?.slug).toBe('normalized')
+    expect(reread).not.toHaveProperty('legacyExtraField')
+
+    // update 嵌套补丁夹带的额外键也不得进入存储。
+    const updated = await store.update(created.id, {
+      orchestration: { ...base.orchestration, patchExtraField: 'dropped' },
+    })
+    expect(updated.orchestration).not.toHaveProperty('patchExtraField')
+    expect(tempResidue(join(root, 'expert-teams'))).toEqual([])
+  })
+
+  it('exposes stable error codes for invalid input and unknown ids', async () => {
+    const root = makeRoot('expert-team-errors-')
+    const store = createExpertTeamStore(root)
+    await expect(store.create({ ...validTeamInput({ slug: 'x' }), members: [] })).rejects.toMatchObject({
+      code: 'expert-team-invalid',
+      fieldErrors: { members: expect.any(String) },
+    })
+    const missingId = '3f6a1bb0-6f1e-4a7c-9c1d-2f5c8e4b7a90'
+    await expect(store.update(missingId, { name: '未知团队' })).rejects.toMatchObject({
+      code: 'expert-team-not-found',
+    })
+    await expect(store.remove(missingId)).rejects.toMatchObject({ code: 'expert-team-not-found' })
+  })
+
   it('fails closed for one corrupt file without hiding other teams or losing its id', async () => {
     const root = makeRoot('expert-team-corrupt-')
     const store = createExpertTeamStore(root)
