@@ -8,7 +8,7 @@
  * - Host / RPC / 附件 / Artifact 存储全部真实,成员包是真实包目录 + 真实 runtime;
  * - 所有临时 profile、端口、子进程与 Host disposer 都归本模块释放。
  */
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, cpSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, cpSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -675,7 +675,7 @@ type RunScript = {
 
 function newRunScript(reviewers: string[], executorMemberIds: string[], options: ComplianceTeamSmokeOptions): RunScript {
   return {
-    mode: options.failArtifactWrite === true || options.delivery === 'message' ? 'message' : 'artifact',
+    mode: options.delivery === 'message' ? 'message' : 'artifact',
     reviewers,
     executorMemberIds,
     verdictQueue: [...(options.reviewVerdicts ?? ['pass'])],
@@ -841,9 +841,18 @@ function hasPresentResult(messages: readonly GenerateOptions['messages'][number]
   })
 }
 
+/** 当前回合的工具结果:上一个 user 消息(团长提示词)之后,排除历史回合的同名派工。 */
+function turnMessages(messages: readonly GenerateOptions['messages'][number][]): readonly GenerateOptions['messages'][number][] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') return messages.slice(index + 1)
+  }
+  return messages
+}
+
 /** 团长状态机:只读真实工具结果与场景裁决队列,派工参数使用真实 resultId。 */
 function* leaderStream(run: RunScript, options: GenerateOptions): Generator<StreamChunk> {
-  const dispatches = parseDispatchResults(options.messages)
+  const currentTurn = turnMessages(options.messages)
+  const dispatches = parseDispatchResults(currentTurn)
   const executes = dispatches.filter((item) => item.kind === 'execute')
   const reviews = dispatches.filter((item) => item.kind === 'review')
   const revisions = dispatches.filter((item) => item.kind === 'revision')
@@ -855,7 +864,7 @@ function* leaderStream(run: RunScript, options: GenerateOptions): Generator<Stre
       yield* toolCallStream(dispatchCalls(run, [{ memberId, kind: 'execute', task: `第 ${String(dispatches.length + 1)} 次事实核对。` }]))
       return
     }
-    if (!hasPresentResult(options.messages)) {
+    if (!hasPresentResult(currentTurn)) {
       run.artifactPresented = true
       yield* toolCallStream([
         {
@@ -922,7 +931,7 @@ function* leaderStream(run: RunScript, options: GenerateOptions): Generator<Stre
     return
   }
 
-  if (!hasPresentResult(options.messages)) {
+  if (!hasPresentResult(currentTurn)) {
     run.artifactPresented = true
     const content = run.failArtifactWrite
       ? `# 合规审查报告\n\n## 结论\n超限报告。\n\n## 失败与遗漏\n正文超出单文件上限。\n\n## 未解决项\n- 无。\n${'超限内容。'.repeat(700_000)}`
@@ -1083,6 +1092,9 @@ export async function executeScriptedTeamRun(
       console.log('RUN', JSON.stringify({
         status: run.status,
         failure: run.failure,
+        toolResults: sessionMessages(ctx, runtime.sessionId)
+          .filter((message) => message.role === 'tool')
+          .map((message) => messageText(message).slice(0, 300)),
         results: run.results.map((result) => ({
           kind: result.kind,
           status: result.status,
@@ -1186,43 +1198,12 @@ export type RestartedComposition = {
   messages: Array<{ role: string; text: string }>
 }
 
-/** 持久化会话消息(重启后读取磁盘,不依赖旧 Host 内存在场)。 */
-function readPersistedMessages(profileDir: string, home: string, sessionId: string): Array<{ role: string; text: string }> {
-  let files: string[] = []
-  try {
-    files = readdirSync(join(home, 'sessions'), { recursive: true, withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name === `${sessionId}.jsonl`)
-      .map((entry) => join(entry.parentPath, entry.name))
-  } catch {
-    return []
-  }
-  const file = files[0]
-  if (file === undefined) return []
-  const messages: Array<{ role: string; text: string }> = []
-  for (const line of readFileSync(file, 'utf8').split('\n')) {
-    if (line.trim() === '') continue
-    let record: Record<string, unknown>
-    try {
-      record = JSON.parse(line) as Record<string, unknown>
-    } catch {
-      continue
-    }
-    const type = record.type
-    if (type !== 'user/message' && type !== 'assistant/message') continue
-    const data = record.data as Record<string, unknown> | undefined
-    const message = (data?.message ?? data) as { role?: unknown; content?: unknown } | undefined
-    if (message === undefined) continue
-    const content = Array.isArray(message.content) ? message.content : []
-    const text = content
-      .map((block) => (typeof block === 'object' && block !== null ? (block as { text?: unknown }).text : undefined))
-      .filter((part): part is string => typeof part === 'string')
-      .join('')
-    if (text.trim() === '') continue
-    messages.push({ role: type === 'user/message' ? 'user' : 'assistant', text })
-  }
-  // profileDir 只用于签名对称;消息来源就是该 profile 的持久会话目录。
-  void profileDir
-  return messages
+/** 新 Host 从同一 profile 磁盘恢复的会话消息(重启后不依赖旧 generation 内存)。 */
+function retainedMessages(ctx: Context, sessionId: string): Array<{ role: string; text: string }> {
+  return sessionMessages(ctx, sessionId)
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .map((message) => ({ role: message.role, text: messageText(message) }))
+    .filter((message) => message.text.trim() !== '')
 }
 
 /**
@@ -1252,7 +1233,7 @@ export async function restartHostWithSameProfile(ctx: Context): Promise<Restarte
     ctx: nextCtx,
     expertTeamRuns: nextCtx.huaanworkExpertTeamRuns.list({ sessionId: runtime.sessionId }).runs,
     artifactIds,
-    messages: readPersistedMessages(profileDir, home, runtime.sessionId),
+    messages: retainedMessages(nextCtx, runtime.sessionId),
   }
 }
 
