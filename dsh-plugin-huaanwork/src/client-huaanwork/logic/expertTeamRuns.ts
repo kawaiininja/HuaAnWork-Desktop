@@ -5,8 +5,9 @@ import type { ExpertTeamRun } from "../rpc-types.ts";
  *
  * 输入只有 Host 的 `expertTeam/run[-remove]` 事件、重连或补拉得到的
  * `ExpertTeamRunSnapshot`,以及 WS 断开通知。规则:
- * - snapshot 是 generation 与连接恢复的唯一来源:任何快照都恢复 `open` 并清除
- *   冻结时刻;换代清空旧运行,不标 interrupted、不保留旧 running,revision 取快照值;
+ * - snapshot 是连接恢复与换代对账的权威来源:任何快照都恢复 `open` 并清除冻结
+ *   时刻;换代清空旧运行,不标 interrupted、不保留旧 running,revision 取快照值。
+ *   首个 run 事件可以在首次快照之前建立初始 generation,但 snapshot 始终是权威对账;
  * - 同代 snapshot 按 run.revision 合并,缺项只清理本快照所属父会话(或快照内出现的
  *   父会话)的终态,绝不删除其他 tab、活跃/stopping 或捕获快照后到达的高 revision 运行;
  * - 同代 run 只接受严格更高的 revision,终态不回退到 running/stopping,
@@ -14,6 +15,13 @@ import type { ExpertTeamRun } from "../rpc-types.ts";
  * - remove 只删除同代、同父会话、终态且 revision 不高于移除帧的运行;
  * - disconnect 只冻结展示,绝不把 running 改写成 stopped;
  * - 终态历史沿用 Host 的 20/父会话、100 全局上限,活跃与 stopping 不淘汰。
+ *
+ * 容量淘汰不是权威移除:`state.runs` 的客户端裁剪按 `endedAt ?? startedAt` 排序,
+ * 与 Host 的首次进入终态顺序可能不同,因此本侧可能先淘汰 Host 仍持有的运行,
+ * 且不会再收到对应的 `expertTeam/run-remove`;该运行也可能在后续快照中重新出现。
+ * 消费方不得假设「淘汰必伴随移除事件」:teamRunId 不在 `state.runs` 里的
+ * `expert-team-run` 卡片必须容忍(保留或降级显示),后续快照重新加入同一 teamRunId
+ * 时不得再插入第二张卡。
  *
  * 纯函数:不修改入参 state 或其中的 Map;有实际变化时返回新 state 与新 Map,
  * 被忽略的帧返回原 state,便于 React 跳过重渲染。
@@ -33,10 +41,11 @@ const TERMINAL_PER_PARENT = 20;
 const TERMINAL_GLOBAL = 100;
 
 export type ExpertTeamRunsState = {
-  /** Host generation;只由 snapshot 建立或替换,旧代际的运行不跨代保留。 */
+  /** Host generation;首个 run 事件可先建立,之后的 snapshot 权威替换;旧代际的运行不跨代保留。 */
   generation?: string;
   /** 已合并的最大 snapshot/revision;换代时重置为快照值。 */
   revision: number;
+  /** 已知的运行投影;不是 Host 注册表的权威副本,客户端淘汰与重现规则见文件头。 */
   runs: ReadonlyMap<string, ExpertTeamRun>;
   /** `closed` 期间运行卡操作禁用;任何 snapshot 都恢复 `open`。 */
   connection: "open" | "closed";
@@ -61,19 +70,28 @@ type ExpertTeamRunRemoveAction = Extract<ExpertTeamRunAction, { type: "remove" }
  */
 export type ExpertTeamRunCardItem = { id: number; kind: "expert-team-run"; teamRunId: string };
 
-/** 聚合卡计数(设计 §13.1):只统计结果链,不猜测未派工成员或虚假总步骤。 */
+/**
+ * 聚合卡计数(设计 §13.1 / §13.2):只统计结果链,不猜测未派工成员或虚假总步骤。
+ *
+ * 计数单位是结果尝试,不是成员:`run.results` 的每条记录都是一次独立尝试,
+ * 已被 revision 取代的旧尝试仍按自己的 status 计入 `dispatched` 与
+ * `completed`/`failed`/`stopped`。同一成员因此可能贡献多条计数,卡片不得把
+ * 这些数字当作成员去重后的数量。
+ */
 export type ExpertTeamCounts = {
-  /** 实际派工数量:每个 execute/review/revision 结果都来自一次成功派工。 */
+  /** 结果尝试总数:每个 execute/review/revision 结果都来自一次成功派工,含已被取代的尝试。 */
   dispatched: number;
-  /** 进行中的派工数量(starting/running)。 */
+  /** 进行中的结果尝试数:`starting` 与 `running` 合计。 */
   running: number;
+  /** 已完成的结果尝试数,含已被取代的完成。 */
   completed: number;
+  /** 失败的结果尝试数,含已被取代的失败。 */
   failed: number;
-  /** 用户终止或父会话 abort 导致的结果,与 `failed` 分开,不伪装成失败。 */
+  /** 用户终止或父会话 abort 导致的结果尝试数,与 `failed` 分开,不伪装成失败。 */
   stopped: number;
-  /** 审查型派工数量。 */
+  /** 按结果 kind 统计的审查尝试数。 */
   reviews: number;
-  /** 返修型派工数量。 */
+  /** 按结果 kind 统计的返修尝试数。 */
   revisions: number;
 };
 
@@ -107,7 +125,7 @@ export function reduceExpertTeamRuns(state: ExpertTeamRunsState, action: ExpertT
 
 function reduceRun(state: ExpertTeamRunsState, action: ExpertTeamRunUpdateAction): ExpertTeamRunsState {
   const incoming = action.run;
-  // generation 只能由 snapshot 建立;其他代际的事件不得混入当前对账。
+  // 其他代际的事件不得混入当前对账;首个 run 事件可以建立初始 generation,snapshot 负责权威替换。
   if (state.generation !== undefined && action.generation !== state.generation) return state;
   const existing = state.runs.get(incoming.teamRunId);
   if (existing !== undefined) {
@@ -260,11 +278,12 @@ export function insertExpertTeamRunCard<T extends { id: number; kind: string; cl
 }
 
 /**
- * 聚合卡计数:派工按结果链实际产生的 execute/review/revision 结果统计,
- * 进行中只包括 starting/running;stopped 与 failed 分开,不把用户终止伪装成失败。
+ * 聚合卡计数:按结果尝试而非成员计数,已被 revision 取代的尝试仍计入
+ * dispatched 与其完成/失败/停止分类;reviews/revisions 按结果 kind 计数;
+ * stopped 与 failed 分开,不把用户终止伪装成失败;进行中只包括 starting/running。
  *
  * @param run 团队运行投影
- * @returns 实际派工、进行中、完成、失败、停止、审查与返修数量
+ * @returns 结果尝试总数、进行中、完成、失败、停止、审查与返修数量
  */
 export function expertTeamCounts(run: ExpertTeamRun): ExpertTeamCounts {
   const counts: ExpertTeamCounts = {

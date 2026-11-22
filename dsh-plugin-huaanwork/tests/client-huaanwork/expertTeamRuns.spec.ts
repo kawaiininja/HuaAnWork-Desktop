@@ -507,4 +507,61 @@ describe("expert team run projection", () => {
       "stopped",
     ]);
   });
+
+  it("counts result attempts, so an execute superseded by its revision stays counted with that revision and review", () => {
+    const attempts = run({
+      results: [
+        {
+          resultId: "r-exec",
+          dispatchId: "dispatch-exec",
+          memberId: "m-writer",
+          agentRef: { source: "local", slug: "writer" },
+          packageVersion: "1.0.0",
+          kind: "execute",
+          inputResultIds: [],
+          status: "completed",
+          output: "初稿",
+          startedAt: timestamp(0),
+          endedAt: timestamp(1),
+        },
+        {
+          resultId: "r-revision",
+          dispatchId: "dispatch-revision",
+          memberId: "m-writer",
+          agentRef: { source: "local", slug: "writer" },
+          packageVersion: "1.0.0",
+          kind: "revision",
+          inputResultIds: ["r-exec"],
+          supersedesResultId: "r-exec",
+          status: "completed",
+          output: "修订稿",
+          startedAt: timestamp(2),
+          endedAt: timestamp(3),
+        },
+        {
+          resultId: "r-review",
+          dispatchId: "dispatch-review",
+          memberId: "m-reviewer",
+          agentRef: { source: "local", slug: "reviewer" },
+          packageVersion: "1.0.0",
+          kind: "review",
+          inputResultIds: ["r-revision"],
+          status: "completed",
+          reviewVerdict: "pass",
+          startedAt: timestamp(4),
+          endedAt: timestamp(5),
+        },
+      ],
+    });
+    // 已被取代的 execute 仍按结果尝试计数：按成员去重会把 dispatched/completed 算成 2
+    expect(expertTeamCounts(attempts)).toEqual({
+      dispatched: 3,
+      running: 0,
+      completed: 3,
+      failed: 0,
+      stopped: 0,
+      reviews: 1,
+      revisions: 1,
+    });
+  });
 });
