@@ -133,6 +133,7 @@ import {
 import { automationRunSessionId } from './automation-session-ids.ts'
 import { inFlightRuns } from './automation-inflight.ts'
 import { expertTeamRoutes } from './expert-team-routes.ts'
+import { errorRoute, RouteError } from './route-errors.ts'
 import {
   assertAutomationNotDeleting,
   automationAdmissionRoot,
@@ -179,34 +180,11 @@ export interface RouteContext {
 
 export type RouteHandler = (req: RouteRequest, ctx: RouteContext) => Promise<unknown>
 
-export class RouteError extends Error {
-  constructor(public status: number, public code: string, message: string) {
-    super(message)
-    this.name = 'RouteError'
-  }
-}
+// 错误面已抽到中立模块 `route-errors.ts`(避免 routes ↔ expert-team-routes 的
+// 运行时 import 环);这里 re-export,既有导入方与测试无需改动。
+export { RouteError, errorRoute }
 
 export const routeKey = (http: string, path: string): string => `${http} ${path}`
-
-/**
- * 统一错误映射 wrapper 工厂 (N1 修复):
- * 旧 sidecar 的 RPC 错误面把用户可读消息(跨工作区拒绝、网络门禁文案、not found、
- * 校验失败等)直传前端;新 HTTP 面对非 RouteError 缺省只回 500 通用文案、
- * 真实错误消息对客户端不可达。
- * 该工厂把底层非 RouteError 的 Error 映射为 HTTP 400 + 指定业务错误码 + 原文字面量,
- * 确保旧用户可读错误面不丢失。非 Error 对象抛出仍放行至 dispatch 500 兜底。
- */
-export const errorRoute = (code: string) => (fn: (req: RouteRequest, ctx: RouteContext) => unknown): RouteHandler => {
-  return async (req, ctx) => {
-    try {
-      return await fn(req, ctx)
-    } catch (err) {
-      if (err instanceof RouteError) throw err
-      if (err instanceof Error) throw new RouteError(400, code, err.message)
-      throw err
-    }
-  }
-}
 
 export const sessionRoute = errorRoute('session-error')
 const subagentRoute = errorRoute('subagent-error')

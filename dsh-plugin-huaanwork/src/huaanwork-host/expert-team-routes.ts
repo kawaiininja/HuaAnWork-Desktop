@@ -18,8 +18,10 @@ import {
   type ExpertTeamValidationErrors,
   type ExpertTeamValidationField,
 } from './expert-team/types.ts'
-import { RouteError, type RouteContext, type RouteRequest, type RouteTableEntry } from './routes.ts'
+import { errorRoute, RouteError } from './route-errors.ts'
+import type { RouteContext, RouteRequest, RouteTableEntry } from './routes.ts'
 import { getAgentPackageHost } from './sessions.ts'
+import { assertSafePathSegment } from './workspace-state.ts'
 
 /**
  * 专家团定义与运行的桌面自有 RPC（设计 §14）。
@@ -149,6 +151,27 @@ function requireBodyString(body: Record<string, unknown>, key: string, method: s
   return value
 }
 
+/**
+ * 所有按 id 寻址的路由都先做与存储层完全相同的路径段规范化
+ * (`assertSafePathSegment`:trim + 拒绝 `.`/`..`/路径分隔符/NUL)。
+ * 活跃运行守卫、store 调用与广播的 `teamId` 因此都使用同一个规范值:
+ * 带空白填充的 id(`' <id> '`)不再能绕过 `runs.hasActive` 后删掉文件。
+ * 非法 id 抛普通 Error,由 `expertTeamRoute` 映射为 400 `expert-team-error`。
+ */
+function canonicalTeamId(raw: string): string {
+  return assertSafePathSegment(raw, 'teamId')
+}
+
+function requireQueryTeamId(req: RouteRequest, method: string): string {
+  const id = req.query.get('id')
+  if (!id) throw new RouteError(400, 'bad-request', `${method} requires params.id`)
+  return canonicalTeamId(id)
+}
+
+function requireBodyTeamId(body: Record<string, unknown>, method: string): string {
+  return canonicalTeamId(requireBodyString(body, 'id', method))
+}
+
 function toFieldErrors(errors: ExpertTeamValidationErrors): ExpertTeamFieldError[] {
   const fieldErrors: ExpertTeamFieldError[] = []
   for (const field of VALIDATION_FIELD_ORDER) {
@@ -242,12 +265,19 @@ function emitChanged(ctx: RouteContext, teamId: string): void {
   ctx.emit({ event: 'expertTeam/changed', teamId })
 }
 
+/**
+ * 与既有 `sessionRoute` 同款的统一错误映射:非 RouteError 的普通 Error(存储层
+ * 安全路径校验、fs 失败等)映射为 400 `expert-team-error` + 原消息;RouteError
+ * 原样透传(404/409/503 语义不变)。
+ */
+const expertTeamRoute = errorRoute('expert-team-error')
+
 export const expertTeamRoutes: readonly RouteTableEntry[] = [
   {
     method: 'expertTeam.list',
     http: 'GET',
     path: '/huaanwork/expert-team/list',
-    handler: async (_req, ctx) => {
+    handler: expertTeamRoute(async (_req, ctx) => {
       const store = requireExpertTeamStore(ctx)
       const host = requireAgentPackageHost()
       const records = await store.list()
@@ -257,15 +287,14 @@ export const expertTeamRoutes: readonly RouteTableEntry[] = [
         teams: records.map((record) => toTeamRow(record, packages, detailOf)),
         packages: selectablePackages(packages, detailOf),
       } satisfies ExpertTeamListResult
-    },
+    }),
   },
   {
     method: 'expertTeam.get',
     http: 'GET',
     path: '/huaanwork/expert-team/get',
-    handler: async (req, ctx) => {
-      const id = req.query.get('id')
-      if (!id) throw new RouteError(400, 'bad-request', 'expertTeam.get requires params.id')
+    handler: expertTeamRoute(async (req, ctx) => {
+      const id = requireQueryTeamId(req, 'expertTeam.get')
       const store = requireExpertTeamStore(ctx)
       const host = requireAgentPackageHost()
       let record: ExpertTeamRecord
@@ -276,13 +305,13 @@ export const expertTeamRoutes: readonly RouteTableEntry[] = [
       }
       const { packages } = await host.listWithLegacy()
       return toTeamRow(record, packages, (slug) => host.detail(slug)) satisfies ExpertTeamGetResult
-    },
+    }),
   },
   {
     method: 'expertTeam.create',
     http: 'POST',
     path: '/huaanwork/expert-team/create',
-    handler: async (req, ctx) => {
+    handler: expertTeamRoute(async (req, ctx) => {
       const store = requireExpertTeamStore(ctx)
       const host = requireAgentPackageHost()
       const body = requireObjectBody(req, 'expertTeam.create')
@@ -309,16 +338,16 @@ export const expertTeamRoutes: readonly RouteTableEntry[] = [
         }
         return rethrowStoreError(error)
       }
-    },
+    }),
   },
   {
     method: 'expertTeam.update',
     http: 'POST',
     path: '/huaanwork/expert-team/update',
-    handler: async (req, ctx) => {
+    handler: expertTeamRoute(async (req, ctx) => {
       const store = requireExpertTeamStore(ctx)
       const body = requireObjectBody(req, 'expertTeam.update')
-      const id = requireBodyString(body, 'id', 'expertTeam.update')
+      const id = requireBodyTeamId(body, 'expertTeam.update')
       try {
         // id/slug/createdAt 由存储层保留；成员失效不阻止保存其他字段（§9.2）。
         const team = await store.update(id, body)
@@ -330,16 +359,16 @@ export const expertTeamRoutes: readonly RouteTableEntry[] = [
         }
         return rethrowStoreError(error)
       }
-    },
+    }),
   },
   {
     method: 'expertTeam.setEnabled',
     http: 'POST',
     path: '/huaanwork/expert-team/setEnabled',
-    handler: async (req, ctx) => {
+    handler: expertTeamRoute(async (req, ctx) => {
       const store = requireExpertTeamStore(ctx)
       const body = requireObjectBody(req, 'expertTeam.setEnabled')
-      const id = requireBodyString(body, 'id', 'expertTeam.setEnabled')
+      const id = requireBodyTeamId(body, 'expertTeam.setEnabled')
       if (typeof body.enabled !== 'boolean') {
         throw new RouteError(400, 'bad-request', 'expertTeam.setEnabled requires params.enabled')
       }
@@ -350,17 +379,18 @@ export const expertTeamRoutes: readonly RouteTableEntry[] = [
       } catch (error) {
         return rethrowStoreError(error)
       }
-    },
+    }),
   },
   {
     method: 'expertTeam.remove',
     http: 'POST',
     path: '/huaanwork/expert-team/remove',
-    handler: async (req, ctx) => {
+    handler: expertTeamRoute(async (req, ctx) => {
       const store = requireExpertTeamStore(ctx)
       const runs = requireExpertTeamRuns(ctx)
       const body = requireObjectBody(req, 'expertTeam.remove')
-      const id = requireBodyString(body, 'id', 'expertTeam.remove')
+      // 守卫、store 与广播都使用同一个规范 id:空白填充的 id 同样命中活跃运行。
+      const id = requireBodyTeamId(body, 'expertTeam.remove')
       // running 与 stopping 都算活跃：必须先终止运行才能删除定义。
       if (runs.hasActive(id)) {
         throw new RouteError(409, 'expert-team-active', 'expert-team-active: 专家团有进行中的运行，请先终止')
@@ -372,13 +402,13 @@ export const expertTeamRoutes: readonly RouteTableEntry[] = [
       }
       emitChanged(ctx, id)
       return { removed: true }
-    },
+    }),
   },
   {
     method: 'expertTeam.invocableList',
     http: 'GET',
     path: '/huaanwork/expert-team/invocable',
-    handler: async (_req, ctx) => {
+    handler: expertTeamRoute(async (_req, ctx) => {
       const store = requireExpertTeamStore(ctx)
       const host = requireAgentPackageHost()
       const records = await store.list()
@@ -391,23 +421,23 @@ export const expertTeamRoutes: readonly RouteTableEntry[] = [
         teams.push(team)
       }
       return { teams }
-    },
+    }),
   },
   {
     method: 'expertTeam.runList',
     http: 'GET',
     path: '/huaanwork/expert-team/run/list',
-    handler: async (req, ctx) => {
+    handler: expertTeamRoute(async (req, ctx) => {
       const sessionId = req.query.get('sessionId')
       if (!sessionId) throw new RouteError(400, 'bad-request', 'expertTeam.runList requires params.sessionId')
       return requireExpertTeamRuns(ctx).list({ sessionId })
-    },
+    }),
   },
   {
     method: 'expertTeam.cancel',
     http: 'POST',
     path: '/huaanwork/expert-team/cancel',
-    handler: async (req, ctx) => {
+    handler: expertTeamRoute(async (req, ctx) => {
       const runs = requireExpertTeamRuns(ctx)
       const body = requireObjectBody(req, 'expertTeam.cancel')
       const parentSessionId = requireBodyString(body, 'parentSessionId', 'expertTeam.cancel')
@@ -420,6 +450,6 @@ export const expertTeamRoutes: readonly RouteTableEntry[] = [
         }
         throw error
       }
-    },
+    }),
   },
 ]

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -15,6 +15,7 @@ import { resolveExpertTeamAvailability } from '../../src/huaanwork-host/expert-t
 import { createExpertTeamRunRegistry, type ExpertTeamRunRegistry } from '../../src/huaanwork-host/expert-team/runs.ts'
 import { createExpertTeamStore } from '../../src/huaanwork-host/expert-team/store.ts'
 import {
+  expertTeamRoutes,
   type ExpertTeamGetResult,
   type ExpertTeamListResult,
   type ExpertTeamWriteResult,
@@ -104,12 +105,10 @@ async function makeExpertTeamRouteFixture(): Promise<ExpertTeamRouteFixture> {
     requestRestart: async () => false,
   } as unknown as RouteContext
 
-  // 路由条目从共享 ROUTE_TABLE 取，避免测试直接以 expert-team-routes 作为模块入口
-  // （它与 routes.ts 的 RouteError 互为运行时依赖）。取到的就是生产 handler。
+  // 直接以 expert-team-routes 为模块入口(它在本 spec 中先于 routes.ts 被加载):
+  // 错误面抽到中立 route-errors.ts 后这里不再有 TDZ 风险,同时守住该回归。
   const byName = new Map(
-    ROUTE_TABLE
-      .filter((route) => route.method.startsWith('expertTeam.'))
-      .map((route) => [route.method.slice('expertTeam.'.length), route]),
+    expertTeamRoutes.map((route) => [route.method.slice('expertTeam.'.length), route]),
   )
   const invoke = async (
     name: string,
@@ -205,6 +204,67 @@ describe('expert team routes', () => {
       revision: expect.any(Number),
     })
     await expect(routes.remove({ body: { id: team.id } })).resolves.toEqual({ removed: true })
+  })
+
+  it('canonicalizes whitespace-padded ids so the active-run removal guard cannot be bypassed', async () => {
+    const { profileDir, events, runs, routes } = await makeExpertTeamRouteFixture()
+    const created = await routes.create({ body: validTeamInput() })
+    if (!created.ok) throw new Error('expected create to succeed')
+    const { team } = created
+    const padded = `  ${team.id}  `
+    const run = runs.begin({ parentSessionId: 's1', clientMessageId: 'm1', teamSnapshot: team })
+    await expect(routes.remove({ body: { id: padded } })).rejects.toMatchObject({
+      status: 409,
+      code: 'expert-team-active',
+    })
+    // 修复前 `runs.hasActive(' <id> ')` 为 false、store 却按 trim 后的 id 删文件;
+    // 现在守卫与写入都走同一个规范 id,定义必须仍然存在且可读。
+    expect(existsSync(join(profileDir, 'expert-teams', `${team.id}.json`))).toBe(true)
+    await expect(routes.get({ query: new URLSearchParams({ id: padded }) })).resolves.toMatchObject({ id: team.id })
+    // stopping 仍算活跃;取消被接受后 markStopped 才收敛为 stopped。
+    await expect(routes.cancel({ body: { parentSessionId: 's1', teamRunId: run.teamRunId } })).resolves.toMatchObject({
+      status: 'accepted',
+    })
+    await expect(routes.remove({ body: { id: padded } })).rejects.toMatchObject({
+      status: 409,
+      code: 'expert-team-active',
+    })
+    runs.markStopped(run.teamRunId)
+    await expect(routes.update({ body: { id: padded, name: '合规审查二队' } })).resolves.toMatchObject({
+      ok: true,
+      team: { id: team.id, name: '合规审查二队' },
+    })
+    const disabled = await routes.setEnabled({ body: { id: padded, enabled: false } })
+    expect(disabled.team.id).toBe(team.id)
+    await expect(routes.remove({ body: { id: padded } })).resolves.toEqual({ removed: true })
+    // 删除命中真实文件,广播的 teamId 也是规范 id。
+    expect(existsSync(join(profileDir, 'expert-teams', `${team.id}.json`))).toBe(false)
+    expect(events.at(-1)).toEqual({ event: 'expertTeam/changed', teamId: team.id })
+  })
+
+  it('maps unsafe or blank ids to the expert-team-error 400 envelope instead of a 500', async () => {
+    const { routes } = await makeExpertTeamRouteFixture()
+    await expect(routes.get({ query: new URLSearchParams({ id: 'a/b' }) })).rejects.toMatchObject({
+      status: 400,
+      code: 'expert-team-error',
+    })
+    await expect(routes.update({ body: { id: 'a/b', name: '越界' } })).rejects.toMatchObject({
+      status: 400,
+      code: 'expert-team-error',
+    })
+    await expect(routes.setEnabled({ body: { id: 'a/b', enabled: false } })).rejects.toMatchObject({
+      status: 400,
+      code: 'expert-team-error',
+    })
+    await expect(routes.remove({ body: { id: 'a/b' } })).rejects.toMatchObject({
+      status: 400,
+      code: 'expert-team-error',
+    })
+    // 纯空白 id 规范化后非法,同样是映射的 400 而不是 500。
+    await expect(routes.get({ query: new URLSearchParams({ id: '   ' }) })).rejects.toMatchObject({
+      status: 400,
+      code: 'expert-team-error',
+    })
   })
 
   it('validates members against live package state before writing and lists selectable capabilities', async () => {
