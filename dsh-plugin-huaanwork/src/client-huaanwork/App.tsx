@@ -11,6 +11,7 @@ import {
 import AccountFooter from "./AccountFooter.tsx";
 import AgentConfirmCard from "./AgentConfirmCard.tsx";
 import AgentsView from "./AgentsView.tsx";
+import ExpertTeamsView from "./ExpertTeamsView.tsx";
 import AuthGate, { type AuthStatus } from "./AuthGate.tsx";
 import AutomationsView from "./AutomationsView.tsx";
 import HistoryDetailPane, {
@@ -448,7 +449,7 @@ type PendingSend = {
   buffered: RpcEvent[];
 };
 
-type View = "main" | "skills" | "automations" | "agents" | "knowledge" | "market";
+type View = "main" | "skills" | "automations" | "agents" | "teams" | "knowledge" | "market";
 export type RightTab = "preview" | "progress" | "files" | "diff";
 type AuthPhase = "unknown" | "needs-register" | "logged-out" | "logged-in";
 
@@ -509,6 +510,17 @@ function IconAgent() {
       <title>智能体</title>
       <rect x="3.2" y="5.6" width="9.6" height="7" rx="1.8" />
       <path d="M8 2.8v2.8M6.4 8.6v.8M9.6 8.6v.8" />
+    </svg>
+  );
+}
+
+function IconTeam() {
+  return (
+    <svg {...ICON_PROPS} strokeLinejoin="round">
+      <title>专家团</title>
+      <circle cx="5.4" cy="6.2" r="1.8" />
+      <circle cx="10.6" cy="6.2" r="1.8" />
+      <path d="M2.8 12.6c.3-1.8 1.3-2.8 2.6-2.8s2.3 1 2.6 2.8M8 12.6c.3-1.8 1.3-2.8 2.6-2.8s2.3 1 2.6 2.8" />
     </svg>
   );
 }
@@ -593,6 +605,8 @@ export default function App() {
   const [atCatalog, setAtCatalog] = useState<AgentListItem[]>([]);
   /** 智能体包/目录写入事件计数：智能体页据此重拉各面板数据。 */
   const [agentChangeSignal, setAgentChangeSignal] = useState(0);
+  /** 专家团定义增删改/启停事件计数：专家团页据此重拉列表。 */
+  const [expertTeamChangeSignal, setExpertTeamChangeSignal] = useState(0);
   /** 技能创建/变更事件计数：技能页与 `/` 补全用它刷新，不再借用智能体信号。 */
   const [skillChangeSignal, setSkillChangeSignal] = useState(0);
   /** 技能页挂载时打开的标签：“前往我的技能”置 mine，普通导航留在技能中心。 */
@@ -2082,6 +2096,12 @@ export default function App() {
           .catch(() => {
             // 目录暂不可读时保留旧补全数据
           });
+        return;
+      }
+      if (event.event === "expertTeam/changed") {
+        // 定义写路径无会话归属：只驱动专家团页重拉列表，不写对话条目，
+        // 自动化运行期间也照常刷新（与 agent/changed 同款顺序契约）。
+        setExpertTeamChangeSignal((prev) => prev + 1);
         return;
       }
       if (event.event === "skill/changed") {
@@ -4035,11 +4055,13 @@ export default function App() {
               ? "自动化"
               : view === "agents"
                 ? "智能体"
-                : view === "knowledge"
-                  ? "知识库"
-                  : view === "market"
-                    ? "插件市场"
-                    : ""}
+                : view === "teams"
+                  ? "专家团"
+                  : view === "knowledge"
+                    ? "知识库"
+                    : view === "market"
+                      ? "插件市场"
+                      : ""}
         </span>
         {showRightPane ? (
           <button
@@ -4099,6 +4121,15 @@ export default function App() {
           >
             <IconAgent />
             <span className="lbl">智能体</span>
+          </button>
+          <button
+            type="button"
+            className={view === "teams" ? "nav-it on" : "nav-it"}
+            onClick={() => setView("teams")}
+            title="专家团"
+          >
+            <IconTeam />
+            <span className="lbl">专家团</span>
           </button>
           <button
             type="button"
@@ -4266,6 +4297,8 @@ export default function App() {
             />
           ) : view === "agents" ? (
             <AgentsView agentChangeSignal={agentChangeSignal} />
+          ) : view === "teams" ? (
+            <ExpertTeamsView refreshSignal={expertTeamChangeSignal} />
           ) : view === "knowledge" ? (
             <KnowledgeBaseView />
           ) : view === "market" ? (
