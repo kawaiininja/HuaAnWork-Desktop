@@ -12,7 +12,7 @@
 
 **Baseline:** 外层代码基线 `ed823cde6614a090ddacac1a4f934d1652ffb332`，上游 pin `1600d8a1e140dcde43a1a0941940a0480712c011`；设计基线为上述代码加已通过评审的规格。旧行号仅用于定位，实施时以符号和测试为准。
 
-**Review status:** 已按规格、源码基线与第三轮独立反证复核完成修订（含 owner 裁定：旧 `@` 保留任意位置触发）；待实施。所有实现、门禁和真机验收复选框均未完成。
+**Review status:** 实现与自动化 headless gate 已完成（`corepack yarn check` EXIT=0，代码 HEAD `e259a2664f`）；真机人工验收未执行（BLOCKED，无交互 GUI/IME/真机环境），Task 18 Step 3 的 9 项真机复选框保持未勾选。
 
 ## Global Constraints
 
@@ -59,7 +59,7 @@
 - Produces test fixtures: `validTeamInput(overrides?)`、`validTeam()`、`executeResult(resultId, overrides?)`、`artifact(overrides?)`，供后续 Host/客户端测试共享，不在各任务复制不同形状的团队对象。
 - Consumes: 无；Host 定义存储和客户端编辑器共用这些纯函数，不在 Host 另写一套默认值或字段规则。
 
-- [ ] **Step 1: 写字段、默认值、成员约束和中文检索失败测试**
+- [x] **Step 1: 写字段、默认值、成员约束和中文检索失败测试**
 
 ```ts
 import { describe, expect, it } from 'vitest'
@@ -112,7 +112,7 @@ describe('expert team contract', () => {
 })
 ```
 
-- [ ] **Step 2: 确认测试因模块缺失失败**
+- [x] **Step 2: 确认测试因模块缺失失败**
 
 Run:
 ```bash
@@ -120,7 +120,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/client-huaanwork/e
 ```
 Expected: FAIL，`expertTeamsLogic.ts` 不存在。
 
-- [ ] **Step 3: 定义共享类型与纯函数**
+- [x] **Step 3: 定义共享类型与纯函数**
 
 `rpc-types.ts` 增加与规格 §8.1/§8.2 完全一致的 `ExpertTeam` 和 `ExpertTeamMember`，包括 `orchestration.assignmentMode/executionOrder/maxParallel/instructions`、`review.mode/criteria/maxRevisionRounds`、`summary.delivery/artifactFormat/mode/instructions`，不要加入 `workspaceAccess` 或派工 `access`。
 
@@ -157,7 +157,7 @@ export function effectiveTeamMaxParallel(team: ExpertTeam): 1 | 2 | 3 | 4 {
 
 `atExpertTeams` 对 query 做 `trim().toLocaleLowerCase()`，逐项匹配 `name/slug/description/scenarios ?? ''`，保持原顺序且只返回匹配项。
 
-- [ ] **Step 4: 运行契约测试与双端类型检查**
+- [x] **Step 4: 运行契约测试与双端类型检查**
 
 Run:
 ```bash
@@ -167,7 +167,7 @@ corepack yarn workspace dsh-plugin-huaanwork tsc -p tsconfig.tests.client.json -
 ```
 Expected: 全部 PASS；Host 严格模式与客户端类型检查均无错误。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts dsh-plugin-huaanwork/src/client-huaanwork/logic/expertTeamsLogic.ts dsh-plugin-huaanwork/tests/client-huaanwork/expertTeamsLogic.spec.ts dsh-plugin-huaanwork/tests/fixtures/expert-team/team.ts
@@ -188,7 +188,7 @@ git commit -m "feat(expert-team): add team contract and validation"
 - Produces: `ExpertTeamRecord = { id: string; team?: ExpertTeam; error?: 'expert-team-corrupt' }`、`ExpertTeamStore`。
 - Produces: `createExpertTeamStore(profileDir, options?: { now?: () => string }): ExpertTeamStore`，支持 `list/get/create/update/setEnabled/remove`；活动运行删除保护与新建成员有效性校验由 Task 4 路由层执行。
 
-- [ ] **Step 1: 写持久化、slug 唯一、路径段校验和损坏隔离失败测试**
+- [x] **Step 1: 写持久化、slug 唯一、路径段校验和损坏隔离失败测试**
 
 ```ts
 it('persists definitions atomically and preserves slug identity', async () => {
@@ -234,7 +234,7 @@ it('isolates team definitions across separate profile directories', async () => 
 
 另用 `readdirSync(expertTeamsRoot)` 断言写入后没有 `.tmp-` 或 `.old-` 残留；损坏记录可经 `store.remove(corrupt.id)` 删除；删除只移除目标 JSON，不删除 `agents/`、会话或 Artifact 目录。
 
-- [ ] **Step 2: 确认存储测试失败**
+- [x] **Step 2: 确认存储测试失败**
 
 `validTeamInput` 直接导入 Task 1 的共享 fixture，不另建缺字段对象；`validTeamInput({slug})` 仅覆盖 slug，其余成员、调度和交付字段保持完整。
 
@@ -244,7 +244,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，`expert-team/store.ts` 不存在。
 
-- [ ] **Step 3: 实现按 profile 隔离的原子 store**
+- [x] **Step 3: 实现按 profile 隔离的原子 store**
 
 `types.ts` 只 re-export Task 1 契约并声明：
 
@@ -262,7 +262,7 @@ export type ExpertTeamStore = {
 
 `store.ts` 将每个定义保存为 `<profileDir>/expert-teams/<id>.json`。所有按 `id` 读写的入口必须先经 `assertSafePathSegment(id, 'teamId')` 校验，拒绝路径穿越。创建时生成 `id = randomUUID()`、校验完整定义并检查所有有效文件的 slug 唯一；更新只允许规格可编辑字段，保留 `id/slug/createdAt` 并刷新 `updatedAt`（支持注入 `now` 时钟避免同毫秒测试脆弱性）。写入采用同目录 `.tmp-<uuid>` 完整写入、`renameSync` 替换；启动加载不恢复临时文件，也不自动覆盖损坏原文件。`list/get` 将单个损坏定义映射为 `{ id, error: 'expert-team-corrupt' }`，保留文件 `id` 供列表展示和显式删除，其它文件照常返回。
 
-- [ ] **Step 4: 运行存储测试与 Host 类型检查**
+- [x] **Step 4: 运行存储测试与 Host 类型检查**
 
 Run:
 ```bash
@@ -271,7 +271,7 @@ corepack yarn workspace dsh-plugin-huaanwork tsc -p tsconfig.tests.json --noEmit
 ```
 Expected: 全部 PASS；无临时文件残留或类型错误。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-host/expert-team/store.ts dsh-plugin-huaanwork/src/huaanwork-host/expert-team/types.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-store.spec.ts
@@ -292,7 +292,7 @@ git commit -m "feat(expert-team): persist team definitions"
 - Produces: `ExpertTeamRun`、`ExpertTeamResult`、`ExpertTeamRunSnapshot`、`ExpertTeamCancelResult`、`ExpertTeamRunNotFoundError`、`ExpertTeamRunRegistry`。
 - Produces: `begin/get/activeBySession/byTurn/list/update/hasActive/hasActiveForSession/attachCancel/requestCancel/cancelBySession/cancelAll/markStopped/sealDelivery/noteSessionArtifact/noteArtifactLinkError`；不写磁盘，事件只含摘要和运行文本结果，不含 Artifact 正文。
 
-- [ ] **Step 1: 写 generation/revision、淘汰、异步取消收敛与 Artifact 关联失败测试**
+- [x] **Step 1: 写 generation/revision、淘汰、异步取消收敛与 Artifact 关联失败测试**
 
 ```ts
 it('projects generation and monotonic revision with bounded terminal history', () => {
@@ -375,7 +375,7 @@ it('enforces default 20-per-parent and 100-global terminal eviction without evic
 })
 ```
 
-- [ ] **Step 2: 确认注册表测试失败**
+- [x] **Step 2: 确认注册表测试失败**
 
 `validTeam()` 和 `artifact()` 均使用 Task 1 共享 fixture；`createExpertTeamRunRegistry` 的 `emit` 直接收集真实 RpcEvent，不伪造事件对象。取消闭包计数器只通过公开 `attachCancel` 注册。
 
@@ -385,7 +385,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，`expert-team/runs.ts` 不存在。
 
-- [ ] **Step 3: 实现运行类型与有界 registry**
+- [x] **Step 3: 实现运行类型与有界 registry**
 
 `rpc-types.ts` 按规格 §8.3/§8.4 增加 `ExpertTeamRun`（含可选 `artifactLinkError?: string` 以明确标记 commit 成功但关联失败的残态）、`ExpertTeamResult`、`ExpertTeamRunSnapshot = { generation: string; revision: number; runs: ExpertTeamRun[] }`、`ExpertTeamCancelResult = { status: 'accepted' | 'already-terminal'; teamRunId: string }`；同时在 `SubagentRunProjection` 上新增可选 `teamRunId?: string`（供 Task 7 标记团队成员 run、Task 16 防止主聊流重复渲染独立 `SubagentRunCard`）。新增事件：
 
@@ -428,7 +428,7 @@ export interface ExpertTeamRunRegistry {
 
 默认 `terminalPerParent = 20`、`terminalGlobal = 100`，`running` 和 `stopping` 永不淘汰；全 registry 维护单调递增 `revision`（与 `subagent-runs.ts` 同构），`list()` 返回 `{ generation, revision, runs }`，`expertTeam/run-remove` 同样携带 `revision`。所有返回对象的调用方得到副本；每次 mutation 同步增加 `revision` 并 emit。`requestCancel` 同步置 `stopping` 并启动最多一次的后台取消闭包（复用同一 Promise，供 `afterIdle` / `cancelBySession` / `cancelAll` 等待），绝不在 RPC 句柄中无限阻塞至 180s 超时；终态收敛统一由 `afterIdle`（或清理确认点）调 `markStopped` 完成。`noteSessionArtifact` 扫描该父会话下所有未淘汰运行（含 `stopping`/`stopped` 以覆盖 commit 与取消竞态），要求 `artifact.anchor.kind === 'turn'`、锚中的 `clientMessageId` 与运行一致且已记录相同 `primaryArtifactCallId`；关联失败保持 `artifactStatus: 'pending'` 并由调用方记 `noteArtifactLinkError`，不抛“Artifact 未创建”的假错误；关联成功时写入 `primaryArtifactId`、`artifactStatus: 'created'` 并清除既有 `artifactLinkError`（覆盖首次关联失败后的同 `callId` 重放恢复）。
 
-- [ ] **Step 4: 运行注册表测试**
+- [x] **Step 4: 运行注册表测试**
 
 Run:
 ```bash
@@ -436,7 +436,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: PASS，覆盖默认上限、快照/移除 `revision`、非阻塞 `requestCancel` + `markStopped` 收敛、`cancelAll` 和持久锚匹配。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts dsh-plugin-huaanwork/src/huaanwork-host/expert-team/runs.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-runs.spec.ts
@@ -477,7 +477,7 @@ git commit -m "feat(expert-team): add bounded run registry"
   - `expertTeam.cancel`：`POST /huaanwork/expert-team/cancel`（body `{ parentSessionId, teamRunId }`）→ `{ status, teamRunId }`
 - Produces holders: `ctx.huaanworkExpertTeamStore`、`ctx.huaanworkExpertTeamRuns`。
 
-- [ ] **Step 1: 写包本位可用性（拒绝 legacy/tool）、新建成员全量校验、活动删除保护与 92 路由契约失败测试**
+- [x] **Step 1: 写包本位可用性（拒绝 legacy/tool）、新建成员全量校验、活动删除保护与 92 路由契约失败测试**
 
 ```ts
 it('computes availability exclusively from AgentPackageListItem and never accepts legacy agents', () => {
@@ -515,7 +515,7 @@ it('rejects creating a team with invalid/missing members, blocks deletion during
 
 同时同步更新 `rpc-types.ts` 的 `RpcRequest['method']`、以及全部 4 个测试文件中共 6 处硬编码 `83` 路由总数的断言（`route-contract.spec.ts:424,425`、`routes.spec.ts:56,222`、`market-routes.spec.ts:236`、`api.spec.ts:165`）至 `92`，并逐项登记 `CLIENT_REQUIRED_KEYS`、`SERVER_EXPECTED_KEYS` 和 `OPTIONAL_KEYS_WHITELIST`；`agent.invocableList` 不作任何修改。
 
-- [ ] **Step 2: 确认可用性与路由测试失败**
+- [x] **Step 2: 确认可用性与路由测试失败**
 
 `makeExpertTeamRouteFixture` 使用临时 profile 的真实 store/registry 与提供两个健康智能体包（`writer` + `reviewer`）的 fake `AgentPackageHost`，并将 `expertTeamRoutes` handler 包装成调用器（`query` 使用真实 `URLSearchParams`）；`validTeamInput` 来自 Task 1 共享 fixture。
 
@@ -525,7 +525,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，`availability.ts` 与 `expert-team-routes.ts` 不存在。
 
-- [ ] **Step 3: 实现可用性和 RPC 装配**
+- [x] **Step 3: 实现可用性和 RPC 装配**
 
 ```ts
 export type ExpertTeamMemberCapabilities = {
@@ -558,7 +558,7 @@ export type ExpertTeamAvailability = {
 
 `holders.ts` 的类型、`HUAANWORK_CONTEXT_PROPS` 和 boot 初始化同步增加两个 holder；`sessions.ts` 的 `SessionRuntimeContext` 同步补充可选 `huaanworkExpertTeamStore?` 与 `huaanworkExpertTeamRuns?`（供 `expert-team-routes.ts` 经 `requireRuntime(ctx)` 强类型读取）；`index.ts` 创建一次 store/registry，运行期只 mutate，不重新给 ctx 属性赋值。`routes.ts` 将 `expertTeamRoutes` 加入 `ROUTE_TABLE`，`api.ts` 添加同名 9 条 `ROUTES`，`rpc-types.ts` 扩展 `RpcRequest['method']`。
 
-- [ ] **Step 4: 运行路由与全部既有契约测试**
+- [x] **Step 4: 运行路由与全部既有契约测试**
 
 Run:
 ```bash
@@ -568,7 +568,7 @@ corepack yarn workspace dsh-plugin-huaanwork tsc -p tsconfig.tests.client.json -
 ```
 Expected: 全部 PASS；92 条路由双端一致，既有路由含义不变。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-host/expert-team/availability.ts dsh-plugin-huaanwork/src/huaanwork-host/expert-team-routes.ts dsh-plugin-huaanwork/src/huaanwork-host/routes.ts dsh-plugin-huaanwork/src/huaanwork-host/holders.ts dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts dsh-plugin-huaanwork/src/huaanwork-host/index.ts dsh-plugin-huaanwork/src/client-huaanwork/rpc-types.ts dsh-plugin-huaanwork/src/client-huaanwork/api.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-routes.spec.ts dsh-plugin-huaanwork/tests/huaanwork-host/route-contract.spec.ts dsh-plugin-huaanwork/tests/huaanwork-host/routes.spec.ts dsh-plugin-huaanwork/tests/huaanwork-host/market-routes.spec.ts dsh-plugin-huaanwork/tests/client-huaanwork/api.spec.ts
@@ -587,7 +587,7 @@ git commit -m "feat(expert-team): expose definition and run routes"
 - Consumes: 上游 `ContentBlock` 类型，不修改上游。
 - Produces: `renderMemberOutput(blocks): MemberTextResult`、`parseReviewVerdict(text): { reviewVerdict?: 'pass' | 'revise'; reviewError?: 'invalid-verdict' }`。
 
-- [ ] **Step 1: 写 reasoning、非文本负载与末行标记失败测试**
+- [x] **Step 1: 写 reasoning、非文本负载与末行标记失败测试**
 
 ```ts
 it('accepts reasoning metadata while rendering only text blocks', () => {
@@ -618,7 +618,7 @@ it('parses only the exact final verdict line', () => {
 })
 ```
 
-- [ ] **Step 2: 确认协议测试失败**
+- [x] **Step 2: 确认协议测试失败**
 
 Run:
 ```bash
@@ -626,7 +626,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，`text-protocol.ts` 不存在。
 
-- [ ] **Step 3: 实现严格文本提取与标记解析**
+- [x] **Step 3: 实现严格文本提取与标记解析**
 
 ```ts
 export type MemberTextResult = { ok: true; text: string } | { ok: false; error: 'empty-output' | 'unsupported-output' }
@@ -652,7 +652,7 @@ export function parseReviewVerdict(text: string) {
 
 未知块走 default 拒绝，不能因 TypeScript 联合未来扩展而被静默当作 reasoning。
 
-- [ ] **Step 4: 运行协议测试**
+- [x] **Step 4: 运行协议测试**
 
 Run:
 ```bash
@@ -660,7 +660,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: PASS，包括 `reasoning + text` 正常通过和纯 reasoning 空输出。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-host/expert-team/text-protocol.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-text-protocol.spec.ts
@@ -679,7 +679,7 @@ git commit -m "feat(expert-team): parse member text and review verdicts"
 - Consumes: Task 3 运行类型、Task 5 审查标记结果。
 - Produces: `currentEffectiveResultIds`、`resolveReviewScope`、`assertReviewScopeCurrent`、`validateDispatchRule`、`canSubmitPrimaryArtifact`、`computeExpertTeamTerminalStatus`。
 
-- [ ] **Step 1: 写 scope、失败替代、派工规则、返修周期、技术失败部分报告和预算豁免失败测试**
+- [x] **Step 1: 写 scope、失败替代、派工规则、返修周期、技术失败部分报告和预算豁免失败测试**
 
 ```ts
 it('resolves unified scope at entry and rejects empty/subset/stale scopes', () => {
@@ -811,7 +811,7 @@ it('allows partial artifact when every required member/reviewer has at least tec
 })
 ```
 
-- [ ] **Step 2: 确认调度纯函数测试失败**
+- [x] **Step 2: 确认调度纯函数测试失败**
 
 本文件内显式定义纯测试工厂（均基于 Task 1 `validTeam()` 与 `executeResult(resultId, overrides?)` 返回 `ExpertTeamRun`，不依赖后续 coordinator；严格遵守 `exactOptionalPropertyTypes: true`，不向可选属性传入显式 `undefined`）：
 工厂若使用 `m-exec-2`、`reviewer`、`executor-2` 等不在 `validTeam()` 默认两成员名单内的 `memberId`，必须同步扩展 `run.teamSnapshot.members`（保持角色匹配），不得让被测实现按字面拒绝期望 `ok: true` 的用例。
@@ -834,7 +834,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，`orchestration.ts` 不存在。
 
-- [ ] **Step 3: 实现确定性规则**
+- [x] **Step 3: 实现确定性规则**
 
 `currentEffectiveResultIds` 仅保留满足 `completed + 非空文本 + 无结果级 error` 的 execute/revision，并排除被后续**有效**结果的 `supersedesResultId` 指向的 ID，按 ID 排序去重。`resolveReviewScope` 对 unified 省略 ID 时返回全集，显式输入必须完全相等；per-member 只接受目标单例，空全集禁止 review。`assertReviewScopeCurrent` 在出队时重新计算并返回 `expert-team-review-scope-changed`，不得重新填充成另一组结果。
 
@@ -852,7 +852,7 @@ Expected: FAIL，`orchestration.ts` 不存在。
 
 `computeExpertTeamTerminalStatus({ run, finalSummaryPresent, protocolError? })` 按规格 §12.4.2 优先级实现：取消不在这里直接判 `stopped`（由清理收敛后 `markStopped` 发布），无有效执行为 `failed`，任一技术缺失（未被有效结果替代的失败/停止执行或返修、最新审查尝试失败/停止/缺失/无效标记、`broadcast` 缺有效首轮结果、必审不完整或额度内未返修、Artifact 模式缺已关联 `primaryArtifactId` 或存在 `artifactLinkError`、仅会话模式缺 `finalSummaryPresent`、协议错误）为 `partial`，返修额度耗尽的有效 `revise` 为 `completed_with_issues`，其余 `completed`。`reviewError` 永远属于技术缺失；失败 revision 不替代旧有效结果。
 
-- [ ] **Step 4: 运行调度纯函数测试**
+- [x] **Step 4: 运行调度纯函数测试**
 
 Run:
 ```bash
@@ -860,7 +860,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: PASS，覆盖 unified/per-member、0/1/2 返修轮次、预算豁免边界和全部终态。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-host/expert-team/orchestration.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-orchestration.spec.ts
@@ -888,7 +888,7 @@ git commit -m "feat(expert-team): add deterministic orchestration rules"
 - Produces: `TeamMemberDispatchInput`、`TeamMemberDispatchResult`、`AgentPackageHost.dispatchTeamMember(input)`、`teamMcpServerName(slug, reservedChildId)`；`SubagentRunRegistry.begin` 支持可选 `teamRunId?: string`。
 - Produces holder: `ctx.huaanworkAgentPackageTeamRequests: Map<string, AgentPackageSubagentRequest>`（在 `holders.ts` 的 `installHuaanworkHolders` 初始化并加入 `HUAANWORK_CONTEXT_PROPS`）。
 
-- [ ] **Step 1: 写双 MCP 隔离、实时 `onRunCreated`、包撤销/更新中止、provider 换 id 与普通路径回归失败测试**
+- [x] **Step 1: 写双 MCP 隔离、实时 `onRunCreated`、包撤销/更新中止、provider 换 id 与普通路径回归失败测试**
 
 ```ts
 it('binds two MCP members only to their reserved child sessions and notifies onRunCreated before result settles', async () => {
@@ -919,7 +919,7 @@ it('rebinds an actual child id without rekeying the request map and cancels on p
 })
 ```
 
-- [ ] **Step 2: 确认隔离测试失败**
+- [x] **Step 2: 确认隔离测试失败**
 
 `makeTeamPackageFixture` 复用 `createRuntime` 注入缝和 `package-subagent-lineage.spec.ts` 的 composing tools fake，显式返回 host、真实 `AttachmentMaps`（`attachments = emptyAttachments()`，断言用 `attachments.sessionAgentTools.has(...)`）、activations、requests、activeTurns 与 activation；`teamInput(sessionId, slug, remainder, overrides?)` 返回 `TeamMemberDispatchInput`，`dispatchWithOutput(blocks)` 用同一 fake activation 返回指定 `SubagentResult.output`。这些工厂负责所有 reserved/actual id、MCP mount 和 caller 结果记录，不在断言中绕过被测实现。
 
@@ -929,7 +929,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，`dispatchTeamMember` 不存在。
 
-- [ ] **Step 3: 实现团队专用 runtime、MCP 命名、请求 Map、`activeTurns` 接入与单成员即时清理**
+- [x] **Step 3: 实现团队专用 runtime、MCP 命名、请求 Map、`activeTurns` 接入与单成员即时清理**
 
 ```ts
 export type TeamMemberDispatchInput = {
@@ -957,7 +957,7 @@ export function teamMcpServerName(slug: string, reservedChildId: string): string
 4. **请求 Map 与 provider 换 id**：`holders.ts` 在 `installHuaanworkHolders` 初始化 `ctx.huaanworkAgentPackageTeamRequests = new Map()` 并加入 `HUAANWORK_CONTEXT_PROPS`；同步在 `agent-package/host.ts` 的 `AgentPackageDispatchContext`（L72-88）补充可选 `huaanworkAgentPackageTeamRequests?: Map<string, AgentPackageSubagentRequest>`。`skills.ts` 的 `startActivation` 包装器中**必须把 `specChildId` 提取提前到读 `pkg` 之前**（现行代码 L685 先读 `pkg`、L693 才算 `specChildId`），先按 `typeof specChildId === 'string'` 从 `huaanworkAgentPackageTeamRequests.get(specChildId)` 精确取团队请求，未命中再回落旧单槽 `huaanworkAgentPackageRequest?.current`；`finally` 仅当 `pkg` 源自团队 Map 且 `map.get(specChildId) === pkg` 时删除该键（普通单槽清理逻辑不变）。启动失败由 `dispatchTeamMember` 的 catch/finally 兜底删除未消费键。provider 改实际 `childId` 时不重键请求 Map，runtime/附件/血缘按现有逻辑补绑并同时清理 reserved 与实际两类 ID。
 5. **单成员即时清理**：`activation.result` 结算（或取消/启动失败）后，立即执行本成员的 `disposeActivation + stopTurnRuntime + mcpDispose + releaseChildBindings + unregister(activeTurns)`，绝不把 24 个成员的进程/MCP 作用域泄漏到父回合结束；同时返回 `cleanupPromise` 供父回合 `afterIdle` 在取消竞态下等待收尾确认。
 
-- [ ] **Step 4: 写 caller 文本与运行状态失败测试**
+- [x] **Step 4: 写 caller 文本与运行状态失败测试**
 
 ```ts
 it('returns caller text without parent notification or structured output', async () => {
@@ -979,7 +979,7 @@ it('marks empty and unsupported output without changing upstream stopReason', as
 })
 ```
 
-- [ ] **Step 5: 实现 caller 返回与文本结果**
+- [x] **Step 5: 实现 caller 返回与文本结果**
 
 `TeamMemberDispatchResult` 固定为：
 
@@ -997,7 +997,7 @@ export type TeamMemberDispatchResult = {
 
 团队 activation 使用 `delivery: 'caller'` 且不传 `outputSchema`，等待 `activation.result` 后调用 Task 5 渲染文本并保留上游 `diagnostic`，同时触发单成员清理并将 `cleanupPromise` 返回调用方。`subagentRuns` 继续记录包版本、reserved/actual child、`teamRunId`、取消、`stopReason` 和清理警告；输出协议失败由协调器映射为团队结果 `failed`，不改上游 `stopReason`。
 
-- [ ] **Step 6: 运行团队派发和普通包回归测试**
+- [x] **Step 6: 运行团队派发和普通包回归测试**
 
 Run:
 ```bash
@@ -1005,7 +1005,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: 全部 PASS；普通 `@智能体` 的 pendingTurns、MCP 工具名和 parent 投递不回归。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-host/expert-team/dispatch.ts dsh-plugin-huaanwork/src/huaanwork-host/agent-package/host.ts dsh-plugin-huaanwork/src/huaanwork-host/agent-package/types.ts dsh-plugin-huaanwork/src/huaanwork-host/holders.ts dsh-plugin-huaanwork/src/huaanwork-host/subagent-runs.ts dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts dsh-plugin-huaanwork/src/huaanwork-guardrails/skills.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-dispatch.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/package-subagent-lineage.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/agent-mcp.cordis.spec.ts
@@ -1024,7 +1024,7 @@ git commit -m "feat(expert-team): isolate caller member dispatch"
 - Consumes: Task 3 registry、Task 6 纯规则（含 `validateDispatchRule`）、Task 7 `dispatchTeamMember`。
 - Produces: `ExpertTeamLease`（按 `parentSessionId + clientMessageId + teamRunId` 签发与显式失效，附件释放失败时仍必须失效租约）、`ExpertTeamCoordinator`（`begin/dispatch/hasInFlight/isLeaseValid/invalidateLease/waitMemberCleanups/cancelRun`），以及工具桥使用的 `ExpertTeamDispatchInput/Result`。
 
-- [ ] **Step 1: 写预算、并发、租约失效、scope、256 KiB 边界和失败结果返回失败测试**
+- [x] **Step 1: 写预算、并发、租约失效、scope、256 KiB 边界和失败结果返回失败测试**
 
 ```ts
 it('enforces team and per-member concurrency without pendingTurns', async () => {
@@ -1124,7 +1124,7 @@ it('enforces the exact 256 KiB UTF-8 byte boundary (including multibyte characte
 
 另测：① `callId` 缺失拒绝、写入 `ExpertTeamResult.dispatchId`；② `invalidateLease` 后（即使附件摘除抛错）后续派工一律拒绝；③ 成员启动/执行失败或单成员取消时返回带 `resultId` 的 `{ status: 'failed' | 'stopped', error }`（而非吞掉 `resultId` 抛错），团长可凭该 `resultId` 以 `execute + supersedesResultId` 重试失败 `execute`；④ 成员进入运行即写入 `memberRunId`，整团取消可立刻中止等待队列与在途成员并等待 `cleanupPromise`；⑤ `sequential` 引用前序、`broadcast` 缺员、`revision` 响应有效 `revise`、统一/单链返修额度。
 
-- [ ] **Step 2: 确认协调器测试失败**
+- [x] **Step 2: 确认协调器测试失败**
 
 `makeCoordinatorFixture` 使用真实 registry/coordinator 和可控 Task 7 fake dispatch；`dispatchInput` 使用 `executor`、`executor-2`、`reviewer` 等成员时，fixture 必须同步把对应 `memberId` 与角色加入 `teamSnapshot.members`（不得仅靠字符串约定）；`gate` 提供 `waitStarted(n)`（等待 n 个派工处于 running）、`release(n)`（完成当前最早的 n 个在途派工）、`releaseAll()`、`running/maxRunning/startedIds/reviewPrompts`，证明等待队列而非绕过信号量。`dispatchInput(memberId, overrides?)` 生成带 `callId`、`parentSessionId='s1'`、`clientMessageId='m1'`、`kind='execute'`、`task='task'` 的完整输入；`exactTaskForBytes(memberId, targetTotalBytes, seed)` 先计算该成员的固定提示词开销（`responsibility`、`outputInstructions`、引用结果渲染及模板头尾，不含包 `persona`），再以多字节 `seed` 补齐 `task` 使**渲染后总派工输入**的 UTF-8 字节数恰好等于 `targetTotalBytes`（而非让 `task` 单独等于 256 KiB）。
 
@@ -1134,7 +1134,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，`coordinator.ts` 不存在。
 
-- [ ] **Step 3: 实现租约、预算、双信号量与出队重验**
+- [x] **Step 3: 实现租约、预算、双信号量与出队重验**
 
 ```ts
 export type ExpertTeamLease = {
@@ -1178,7 +1178,7 @@ export type ExpertTeamDispatchResult = {
 
 实现每 run 和每 member 两个可取消信号量，等待队列不创建 `memberRun`，但计入 `hasInFlight(teamRunId)`。出队时重验租约、取消、`deliverySealed`、`validateDispatchRule`、`assertReviewScopeCurrent`、替代关系、顺序和成员包实时可用性；任一不满足返回对应具名错误且不重复扣预算。`invalidateLease(teamRunId)` 同步置 `lease.valid = false`，即便上层摘除附件或刷新 restrict 抛错也不得回滚租约失效状态（规格 §10.3）。
 
-- [ ] **Step 4: 实现 256 KiB 输入、实时 `memberRunId`、`unifiedRevisionRounds` 写者、失败返回形态与取消闭包**
+- [x] **Step 4: 实现 256 KiB 输入、实时 `memberRunId`、`unifiedRevisionRounds` 写者、失败返回形态与取消闭包**
 
 派工提示词只包含 `task`、成员团内 `responsibility`、`outputInstructions`、Host 实际解析后的 `inputResultIds` 渲染文本，以及审查任务所需的末行 `[VERDICT: PASS]` / `[VERDICT: REVISE]` 要求；**不包含成员包 `persona`**（`persona` 由 `dispatchTeamMember` 按其独立 64 KiB 上限拼接，规格 §12.2）。按 `Buffer.byteLength(..., 'utf8')` 校验不超过 256 KiB，超限在启动成员前直接拒绝（报 `expert-team-prompt-too-large`）。
 
@@ -1188,7 +1188,7 @@ export type ExpertTeamDispatchResult = {
 
 注册进 registry 的取消闭包必须同步 `invalidateLease`、abort 运行级 `AbortController`、排空拒绝全部等待队列、对所有已知在途 `memberRunId` 触发 `subagentRuns.requestCancel(parentSessionId, memberRunId)` 并等待 `waitMemberCleanups(teamRunId)`；单成员停止结果返回团长，不自动重试。
 
-- [ ] **Step 5: 运行协调器与既有调度测试**
+- [x] **Step 5: 运行协调器与既有调度测试**
 
 Run:
 ```bash
@@ -1196,7 +1196,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: PASS，实际最大并发不超过配置、租约失效与取消立即可见且普通会话调度不变。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-host/expert-team/coordinator.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-coordinator.spec.ts
@@ -1223,7 +1223,7 @@ git commit -m "feat(expert-team): coordinate bounded member dispatch"
 - Produces: `EXPERT_TEAM_DISPATCH_TOOL`、`registerExpertTeamDispatchTool`、`makeExpertTeamClaimed`；holder `ctx.huaanworkExpertTeamCoordinator`；`model.ts` 的 `isRegisteredToolName('expert_team_dispatch') === true`。
 - Produces policy: attached 时三档在 `preExecute` 与 `guard` 均允许，未挂载一律拒绝；工具输入不含 `teamRunId`。
 
-- [ ] **Step 1: 写工具 schema、claim 对称清理（含 goal 续拍不重挂）、模型流工具名放行和策略失败测试**
+- [x] **Step 1: 写工具 schema、claim 对称清理（含 goal 续拍不重挂）、模型流工具名放行和策略失败测试**
 
 `tests/huaanwork-guardrails/expert-team-dispatch.spec.ts`（Vitest）：
 
@@ -1265,7 +1265,7 @@ test("expert_team_dispatch allows when attached and denies when detached in both
 });
 ```
 
-- [ ] **Step 2: 确认工具、模型流和策略测试失败**
+- [x] **Step 2: 确认工具、模型流和策略测试失败**
 
 `fixtureContext()` 提供真实 `AttachmentMaps`（`emptyAttachments()`）、turn anchor 和 fake coordinator；`makeClaimFixture()` 返回同步 listener、真实 `AttachmentMaps`（用 `isAgentToolAttached(attachments, 'parent', 'expert_team_dispatch')` 断言）、refresh 记录与 `settleTeam()`，`teamMessage`（`id === run.clientMessageId`）/ `goalMessage`（`source.kind === 'goal'`）/ `ordinaryMessage` 均按真实 `UserMessage` 构造。
 
@@ -1276,7 +1276,7 @@ corepack yarn workspace @huaanwork/policy test
 ```
 Expected: FAIL，工具、`isRegisteredToolName` 分支与显式 policy 分支不存在。
 
-- [ ] **Step 3: 实现附件工具、claim 入口、`model.ts` 放行与 `index.ts` 生产接线**
+- [x] **Step 3: 实现附件工具、claim 入口、`model.ts` 放行与 `index.ts` 生产接线**
 
 工具 `execute(args, exec)` 校验 `sessionId`、`exec.callId`（缺失报 `expert-team-dispatch-context-missing`）、附件已挂（`isAgentToolAttached`）与当前 `huaanworkTurnAnchors.current(sessionId)?.clientMessageId`，再把 `{ callId: exec.callId, parentSessionId: sessionId, clientMessageId, ...args }` 交给 Task 8 coordinator；模型只传 `memberId/kind/task/inputResultIds/supersedesResultId`。
 
@@ -1297,7 +1297,7 @@ case "expert_team_dispatch":
   return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
 ```
 
-- [ ] **Step 4: 运行工具、模型流、policy 和既有附件回归测试**
+- [x] **Step 4: 运行工具、模型流、policy 和既有附件回归测试**
 
 Run:
 ```bash
@@ -1306,7 +1306,7 @@ corepack yarn workspace @huaanwork/policy test
 ```
 Expected: 全部 PASS；真实 SSE 工具流可透传 `expert_team_dispatch`，默认 ask/smart 不逐次审批，未挂载调用在 `preExecute` 与 `guard` 均拒绝。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-guardrails/expert-team-dispatch.ts dsh-plugin-huaanwork/src/huaanwork-guardrails/model.ts dsh-plugin-huaanwork/src/huaanwork-guardrails/policy.ts dsh-plugin-huaanwork/src/huaanwork-host/holders.ts dsh-plugin-huaanwork/src/huaanwork-host/index.ts packages/huaanwork-policy/src/decide.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/expert-team-dispatch.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/model.spec.ts packages/huaanwork-policy/src/decide.test.ts
@@ -1330,7 +1330,7 @@ git commit -m "feat(expert-team): attach leader dispatch tool"
 - Produces: `createExpertTeamTurnObserver(options): ExpertTeamTurnObserver`、`bindExpertTeamObserver(ctx, observer): () => void`（以 `{ global: true }` 订阅 `agent/inbox/claimed` 与 `session/event` 并返回统一 disposer），输出 `finalSummaryPresent` 与 `turn/end` 回调事实。
 - Produces: `cancelAgent`、`releaseSessionRuntime`（覆盖 `session.remove` 与 task/project 级联删除）及 `bridge.ts` 的 `expertTeamRuns.cancelBySession(sessionId)` 联动与观察器清理。
 
-- [ ] **Step 1: 写 claim 时序（turn/start 先于 claimed）、最终文本、seq 异常与 abort 失败测试**
+- [x] **Step 1: 写 claim 时序（turn/start 先于 claimed）、最终文本、seq 异常与 abort 失败测试**
 
 ```ts
 it('binds to payload.turn when claimed after turn/start and ignores earlier turns and reasoning', () => {
@@ -1372,7 +1372,7 @@ it('uses the last tool result boundary across multiple assistant messages and fa
 })
 ```
 
-- [ ] **Step 2: 确认观察器测试失败**
+- [x] **Step 2: 确认观察器测试失败**
 
 `session(id)`、`turnStart({seq,turn})`、`assistantMessage({seq,turn,text?,blocks?})`、`toolResult({seq,turn})`、`turnEnd({seq,turn,reason})` 是测试文件内的 SessionEvent 工厂，显式带 `turn`/`step=1` 和最小合法 `data`；`activeObserver({ turn })` 按真实上游顺序先发 `turnStart({ seq: 1, turn })` 再调用 `claim({ message: { id: 'm1' }, turn })`。测试不得调用 `snapshotEvents` 或改写 observer 私有状态。
 
@@ -1382,7 +1382,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，`observer.ts` 不存在。
 
-- [ ] **Step 3: 实现事件观察器与 `{ global: true }` 订阅封装**
+- [x] **Step 3: 实现事件观察器与 `{ global: true }` 订阅封装**
 
 ```ts
 export type ExpertTeamTurnObserver = {
@@ -1402,7 +1402,7 @@ export type ExpertTeamTurnObserver = {
 - 当前 `activeTurn` 收到 `turn/end` 时同步锁定事实并只调用一次 `onTurnEnd({ turn, reason, finalSummaryPresent })`（`reason.kind === 'aborted'` 同时调用 `onAbort`），随后忽略后续任何 goal turn 事件；`afterIdle()` 仅在尚未收到当前回合 `turn/end` 时以 `eventMissing: true` 回调，永不调用 `snapshotEvents()`。
 - `bindExpertTeamObserver(ctx, observer)` 必须以 `{ global: true }` 订阅 `agent/inbox/claimed`（按 `sessionIdOfAgentRef(payload.agent) === parentSessionId` 过滤后调 `observer.claim(payload)`）与 `session/event`，`dispose()` 同步注销两条监听器防止跨回合泄漏；在 `sessions.ts` 的 `SessionRuntimeContext` 类型上继续补充 Cordis `ctx` 原生具备的可选 `on?(name: string, listener: (...args: never[]) => unknown, options?: boolean | { global?: boolean }): () => void` 以及 `huaanworkExpertTeamCoordinator?`（`huaanworkExpertTeamStore?` / `huaanworkExpertTeamRuns?` 已于 Task 4 补充）。
 
-- [ ] **Step 4: 接入 `cancelAgent`、`releaseSessionRuntime` 与 `bridge.ts` 并写取消/删除测试**
+- [x] **Step 4: 接入 `cancelAgent`、`releaseSessionRuntime` 与 `bridge.ts` 并写取消/删除测试**
 
 - `cancelAgent`（`sessions.ts`）在 `primary.cancel` 前同步调用 `expertTeamRuns.cancelBySession(sessionId)`；`queueItemId` 分支保持只取消排队消息。
 - `releaseSessionRuntime(sessionId)`（`sessions.ts`，被 `session.remove` 及 task/project 级联删除调用）同步调用 `expertTeamRuns.cancelBySession(sessionId)`、注销该会话在途观察器并摘除 `expert_team_dispatch` 附件；Host 卸载由 Task 9 的 `index.ts` disposer 调用 `runs.cancelAll()` 兜底。
@@ -1410,7 +1410,7 @@ export type ExpertTeamTurnObserver = {
 
 新增测试断言：用户停止立即取消等待队列与在途成员、`session.remove` / `releaseSessionRuntime` 立即取消活动团队并卸载观察器、两条 abort 信号只触发一次清理、非 abort error 不变为 stopped、`queueItemId` 不取消活动团队。
 
-- [ ] **Step 5: 运行观察器、会话与 bridge 回归测试**
+- [x] **Step 5: 运行观察器、会话与 bridge 回归测试**
 
 Run:
 ```bash
@@ -1418,7 +1418,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: 全部 PASS；不新增同步快照读取，无遗留全局监听器。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-host/expert-team/observer.ts dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts dsh-plugin-huaanwork/src/huaanwork-guardrails/bridge.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-observer.spec.ts dsh-plugin-huaanwork/tests/huaanwork-host/sessions.spec.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/bridge.spec.ts
@@ -1442,7 +1442,7 @@ git commit -m "feat(expert-team): observe turns and cancellation"
 - Consumes: Task 4 store/availability、Task 8 coordinator（含租约与 `waitMemberCleanups`）、Task 10 observer、Task 6 终态纯函数、`resolveFollowupClientMessageId`。
 - Produces: `dispatchExpertTeam(input): Promise<{ text: string; afterIdle: () => Promise<void>; skipPostCleanupIdle: true; abortBeforeSend: (err: unknown) => void }>`、`settleExpertTeamTurn(input)`、`QueueItem.at` 保留 `kind?: 'expert-team'`。
 
-- [ ] **Step 1: 写启动、排队隔离、锚点、goal 和异常路径失败测试**
+- [x] **Step 1: 写启动、排队隔离、锚点、goal 和异常路径失败测试**
 
 ```ts
 it('uses one followupId (both omitted and explicit top-level clientMessageId) for run, anchor and followup and rejects a second team call while active or stopping', async () => {
@@ -1539,7 +1539,7 @@ it('fails once without duplicate afterIdle settlement when resolveAgent/followup
 })
 ```
 
-- [ ] **Step 2: 确认会话集成测试失败**
+- [x] **Step 2: 确认会话集成测试失败**
 
 `makeSessionFixture` 使用 `sessions.spec.ts` 的真实 `sessionSend`/`sendToAgent`/`turnAnchors`/`turnScheduler` 与真实 `AttachmentMaps`（`emptyAttachments()`）组合和可脚本化 Agent，支持 `clientMessageId`、`ordinaryTurnInFlight`、`teamEnabled`、`teamDeleted`、`sameSlugAgentExists`、`activeGoal`、`refreshRestrictThrows`、`followupError`、`cancelBeforeFollowup` 选项，返回 `runs`、`anchors`、`attachments`、`followups`、`observer`、`coordinator`、`goal`、`agentInvokeSpy`、`resolveFollowupIdSpy`、`finishOrdinaryTurn`、`finishTeamIdle` 与 `afterIdle.invokeFinally()`；`teamSend({ task, clientMessageId? })` 生成 `at: { kind: 'expert-team', name: 'compliance-team' }` 的完整 params，`dispatchInput` 在本文件按 Task 8 的同一字段结构（含 `callId`）生成。`goal.continue()` 通过 `goal-round-driver` 的同款 followup 唤醒，而不是直接改 coordinator 状态。
 
@@ -1549,7 +1549,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，团队发送分支与 `turn-scheduler` `at.kind` 透传不存在。
 
-- [ ] **Step 3: 实现准入前拦截、排队 `at.kind` 透传、统一 `followupId` 与异常/早退回滚**
+- [x] **Step 3: 实现准入前拦截、排队 `at.kind` 透传、统一 `followupId` 与异常/早退回滚**
 
 - `turn-scheduler.ts` 与 `sessions.ts:1346` 联动保留 `at.kind`：`turn-scheduler.ts` 的 `QueueItem.at` 和 `admitUserTurn` 参数扩展保留 `kind?: 'expert-team'`；同时修改 **`sessions.ts:1346`**（当前该行把 `params.at` 重建为 `{ name: atName, ...(atClientMessageId ...) }` 会丢弃 `kind`），改为同步透传 `kind: 'expert-team'`（`startQueuedItem` 在 `sessions.ts:1232` 原样传 `at: item.at`），确保排队出队后绝不误入普通 `@<slug>` 路径。
 - `sessionSend`（`sessions.ts`）在调用 `admitUserTurn` **之前**：若 `at?.kind === 'expert-team'`，校验正文非空（空任务直接拒 `expert-team-task-empty`）且 `runs.hasActiveForSession(sessionId)` 必须为 `false`（包含 `running` 与 `stopping`，命中即拒 `expert-team-session-busy`，绝不排队第二次团队调用）。
@@ -1557,7 +1557,7 @@ Expected: FAIL，团队发送分支与 `turn-scheduler` `at.kind` 透传不存�
 - `dispatchExpertTeam` 创建运行、登记租约与 `attachCancel`、挂载 Task 10 全局 observer，并组装团长提示词（成员名册、职责、结构化调度、`[VERDICT: PASS]`/`[VERDICT: REVISE]` 末行标记与交付模式：Artifact 模式指示最终调用 `result_present`，`message` 模式明确禁止该工具）。
 - 在 `sendToAgent` 的 `finally` 中 `if (!followupAccepted)` 入口（位于 `if (afterIdle === undefined)` 判支**之前**），统一执行团队 `abortBeforeSend`（原地置 `failed`/取消、失效租约、摘除附件、dispose observer）并将 `afterIdle = undefined`——从而同时覆盖 `resolveAgent()`/`agent.followup()` 抛错与 `admission?.cancelled?.()` 第 510 行早退（不经过 `catch`）两条路径，保证立即走 `restoreProvisionalBindings?.()` + `releaseOnce?.()` 释放名额，而 `followup` 抛错的 `rollbackAnchor?.()` 继续由既有 `sessions.ts:549` 负责；此外在 `sessions.ts` 的 `cleanup` 中，对 `skipPostCleanupIdle === true` 的团队回合跳过第二次 `acceptedAgent?.whenIdle?.()` 等待，避免被后续 goal turn 拖住或污染终态。
 
-- [ ] **Step 4: 实现 `turn/end` 同步封闭、fail-closed 异常守卫与 `afterIdle` 收敛**
+- [x] **Step 4: 实现 `turn/end` 同步封闭、fail-closed 异常守卫与 `afterIdle` 收敛**
 
 由于上游 `session/index.ts:399-416`（`invokeContainedSessionObservers`）会捕获并仅 `warn` 记录 `session/event` 监听器抛出的异常，**`settleExpertTeamTurn` 必须内置 fail-closed 顺序与异常守卫**（遵守规格 §10.3 / §16.10，禁止因清理异常导致运行滞留在 `running`）：
 1. **第一步无条件同步执行** `coordinator.invalidateLease(teamRunId)`（绝不抛出，先封死后续派工）；
@@ -1567,7 +1567,7 @@ Expected: FAIL，团队发送分支与 `turn-scheduler` `at.kind` 透传不存�
    - 非取消路径：同步调用 Task 6 `computeExpertTeamTerminalStatus`（透传上述 `protocolError`）写入终态；`afterIdle` 仅执行 observer dispose 与幂等清尾。
    - 缺失 `turn/end`：在 `afterIdle` 立即走同一 fail-closed 顺序封闭租约/附件/派工并按 `eventMissing: true` 写 `partial`/`failed`，不归入后续 goal turn。
 
-- [ ] **Step 5: 运行团队会话与既有会话回归测试**
+- [x] **Step 5: 运行团队会话与既有会话回归测试**
 
 Run:
 ```bash
@@ -1575,7 +1575,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: 全部 PASS；同会话第二团队立即拒绝、普通回合后排队的团队保留 `at.kind`、goal 续拍不能迟到派工、普通 `session.send` 路径不回归。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-host/expert-team/session.ts dsh-plugin-huaanwork/src/huaanwork-host/sessions.ts dsh-plugin-huaanwork/src/huaanwork-host/turn-scheduler.ts dsh-plugin-huaanwork/src/huaanwork-host/expert-team/coordinator.ts dsh-plugin-huaanwork/src/huaanwork-host/expert-team/observer.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-session.spec.ts dsh-plugin-huaanwork/tests/huaanwork-host/sessions.spec.ts
@@ -1596,7 +1596,7 @@ git commit -m "feat(expert-team): run and settle team turns"
 - Consumes: Task 3 `byTurn`/`sealDelivery`/`noteSessionArtifact`/`noteArtifactLinkError`、Task 6 `canSubmitPrimaryArtifact`、Task 8 `isLeaseValid`、Task 9 在 `index.ts` `toolCtx` 中已注入的 `huaanworkExpertTeamRuns` 与 `huaanworkExpertTeamCoordinator`、既有 ArtifactHost 两阶段协议。
 - Produces: 团队 `result_present` 提交前校验、`message` 模式 claim 门控、commit 前取消/租约复查、commit→seal→note→emit 和同 `callId` 幂等重放（含关联恢复）。
 
-- [ ] **Step 1: 写提交守卫、24 次豁免、同 callId 重放与关联失败测试**
+- [x] **Step 1: 写提交守卫、24 次豁免、同 callId 重放与关联失败测试**
 
 ```ts
 it('allows an exhausted-budget partial artifact without waiving other guards', async () => {
@@ -1666,7 +1666,7 @@ it('keeps artifactStatus pending on Artifact prepare/commit write failure, allow
 - 后续普通用户回合（新 `clientMessageId`）调用 `result_present` 不受前一已封存团队回合影响；
 - 验证 `index.ts` `toolCtx` 透传了 `huaanworkExpertTeamRuns` 与 `huaanworkExpertTeamCoordinator` 给 `registerResultArtifactTools`。
 
-- [ ] **Step 2: 确认 Artifact 测试失败**
+- [x] **Step 2: 确认 Artifact 测试失败**
 
 `makeResultPresentFixture` 使用真实 `result-artifact-tools.ts` 和 ArtifactHost，以当前 `huaanworkTurnAnchors.current(sessionId)`、`callId`、真实 `ExpertTeamRunRegistry`、`coordinator` 和 `emitted` 事件构造 `execute(args)`，并暴露 `setCurrentAnchor(clientMessageId)`（切换当前会话锚点以验证重放以持久 manifest 锚为准）、`noteSessionArtifactSpy`（记录实际关联调用的父会话、callId 与 artifact summary）与 `settleTurn()`（按当前 `runs.get(runId)` 调用 Task 6 终态函数）；`failFirstLink: true` 让 registry 的首次 `noteSessionArtifact` 返回 `false`（模拟 commit 成功但关联失败），后续重放恢复真实关联；所有默认运行由 Task 1 `validTeam()` 创建，只有测试声明的 `dispatchAttempts`/`missingReview`/`validExecution`/`clientMessageId` 等字段不同。返回的 `artifact.content` 在 driver 中统一解码为 UTF-8 字符串。
 
@@ -1676,7 +1676,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-guardrai
 ```
 Expected: FAIL，团队提交守卫与关联钩子不存在。
 
-- [ ] **Step 3: 实现 claim 门控与基于 `runs.byTurn` 的提交前校验**
+- [x] **Step 3: 实现 claim 门控与基于 `runs.byTurn` 的提交前校验**
 
 - `ToolContext`（`result-artifact-tools.ts:57-62`）扩展可选 `huaanworkExpertTeamRuns?: ExpertTeamRunRegistry` 与 `huaanworkExpertTeamCoordinator?: Pick<ExpertTeamCoordinator, 'isLeaseValid' | 'hasInFlight'>`；同时扩展 **`ResultPresentClaimedContext`**（`result-artifact-tools.ts:132-135`）增加可选 `huaanworkExpertTeamRuns?: Pick<ExpertTeamRunRegistry, 'byTurn'>`（生产环境中由 Task 9 已接入的 `index.ts` `toolCtx` 与顶层 `ctx` 注入）。
 - `makeResultPresentClaimed` 在现有 `origin === 'advanced'` 判定上增加：通过 `runs.byTurn(sessionId, anchor.clientMessageId)` 查当前回合所属团队运行，若 `teamRun.teamSnapshot.summary.delivery === 'message'` 则 `wantAttached = false`；Artifact 模式团队和普通高级会话保持原行为。
@@ -1685,7 +1685,7 @@ Expected: FAIL，团队提交守卫与关联钩子不存在。
   - 若 `teamRun !== undefined && !isIdempotentReplay`：调用 Task 6 `canSubmitPrimaryArtifact(teamRun, { inFlight: coordinator.hasInFlight(teamRun.teamRunId), artifactFormat: args.format, callId: exec.callId })` 并校验 `coordinator.isLeaseValid(teamRun.teamRunId)`，不通过直接抛出具名错误；
   - 若 `isIdempotentReplay`：放行进入幂等重放路径（不因 `deliverySealed` 或后续取消误拒）。
 
-- [ ] **Step 4: 实现新提交的取消/租约复查和按持久 manifest 锚的 commit 后关联**
+- [x] **Step 4: 实现新提交的取消/租约复查和按持久 manifest 锚的 commit 后关联**
 
 - `prepare` 后、`commitPreparedArtifact` 前：仅对命中 `teamRun` 的新提交（`teamRun !== undefined && !isIdempotentReplay`）再次检查取消闩（`teamRun.status === 'stopping'` 或已终态）与 `coordinator.isLeaseValid(teamRun.teamRunId)`；若已取消/失效，立即 `discardPreparedArtifact` 并抛错，绝不提交新 Artifact。
 - `commitPreparedArtifact` 返回 `{ artifact, created }` 后，**一律以持久化 `artifact.anchor`（而非当前 `huaanworkTurnAnchors.current(sessionId)`）解析目标运行** `const persistedRun = artifact.anchor.kind === 'turn' && artifact.anchor.clientMessageId ? runs?.byTurn(sessionId, artifact.anchor.clientMessageId) : undefined`：
@@ -1693,7 +1693,7 @@ Expected: FAIL，团队提交守卫与关联钩子不存在。
   2. 若 `created === false`（同 `callId` 幂等重放，即使此时当前锚已切走）：**绝不用本次重放去 `sealDelivery` 当前锚对应的其他运行**；仅对持久锚命中的 `persistedRun`（若存在）幂等调用 `runs.sealDelivery(persistedRun.teamRunId, exec.callId)` 与 `runs.noteSessionArtifact(sessionId, exec.callId, artifact)` 以恢复此前可能失败的关联（仍不命中时对 `persistedRun` 记 `noteArtifactLinkError`）；
   3. 仅在 `created === true` 时 emit `artifact/created`。
 
-- [ ] **Step 5: 运行 Artifact 全量回归测试**
+- [x] **Step 5: 运行 Artifact 全量回归测试**
 
 Run:
 ```bash
@@ -1701,7 +1701,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-guardrai
 ```
 Expected: 全部 PASS；普通 `result_present`、幂等和 Artifact 卡行为不回归。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/huaanwork-guardrails/result-artifact-tools.ts dsh-plugin-huaanwork/src/huaanwork-host/expert-team/coordinator.ts dsh-plugin-huaanwork/tests/huaanwork-guardrails/result-artifact-tools.spec.ts dsh-plugin-huaanwork/tests/huaanwork-host/artifacts-host.spec.ts
@@ -1720,7 +1720,7 @@ git commit -m "feat(expert-team): deliver primary artifacts"
 - Consumes: Task 3 `ExpertTeamRun`、`ExpertTeamRunSnapshot`、`expertTeam/run`、`expertTeam/run-remove`（均含单调 `revision`）、顶层 `clientMessageId`。
 - Produces: `ExpertTeamRunsState`、`ExpertTeamRunAction`、`ExpertTeamRunCardItem`、`reduceExpertTeamRuns`、`insertExpertTeamRunCard`、`expertTeamCounts`、`isExpertTeamTerminal`。
 
-- [ ] **Step 1: 写乱序、换代、空快照按会话对账、断连、淘汰和锚定失败测试**
+- [x] **Step 1: 写乱序、换代、空快照按会话对账、断连、淘汰和锚定失败测试**
 
 ```ts
 it('merges only same-generation revisions in order and prevents status regressions', () => {
@@ -1770,7 +1770,7 @@ it('anchors the aggregate card after the exact user clientMessageId', () => {
 
 另以每父会话 20/全局 100 的小参数 fixture 验证终态淘汰（活跃与 `stopping` 不淘汰）、`remove` 校验 `generation` 与 `existing.revision <= action.revision`、以及 `run-remove` 不删除 Artifact 项。
 
-- [ ] **Step 2: 确认客户端投影测试失败**
+- [x] **Step 2: 确认客户端投影测试失败**
 
 `emptyExpertTeamRuns()` 返回空 `Map`/revision `0`/`open` 状态；`run(overrides)` 以 Task 1 团队生成 `teamRunId='run-1'`、`parentSessionId='s1'`、`clientMessageId='m1'`、`revision=1` 的运行；`stateWithActiveRun()` 保留该 running 项；`userItem(id)`/`assistantItem(id)` 只构造会话流所需字段。所有工厂在测试文件内显式定义，Artifact 项用 Task 1 `artifact()` 创建。
 
@@ -1780,7 +1780,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/client-huaanwork/e
 ```
 Expected: FAIL，`expertTeamRuns.ts` 不存在。
 
-- [ ] **Step 3: 实现 reducer、淘汰和锚定**
+- [x] **Step 3: 实现 reducer、淘汰和锚定**
 
 ```ts
 export type ExpertTeamRunsState = {
@@ -1807,7 +1807,7 @@ export type ExpertTeamRunCardItem = { id: number; kind: 'expert-team-run'; teamR
 - 实现每父会话 20 / 全局 100 的终态淘汰。
 - `insertExpertTeamRunCard(items, { teamRunId, clientMessageId, allowSnapshotFallback, allocateId })`：与 `insertSubagentRunCard` 同构，优先按顶层 `clientMessageId` 精确锚定在对应 `user` 条目之后（已存在同 `teamRunId` 时去重返回原数组），仅当 `allowSnapshotFallback === true`（重连 snapshot 对账）且未精确命中时才允许回退到最后一条 `user` 消息之后。
 
-- [ ] **Step 4: 运行客户端投影测试与类型检查**
+- [x] **Step 4: 运行客户端投影测试与类型检查**
 
 Run:
 ```bash
@@ -1816,7 +1816,7 @@ corepack yarn workspace dsh-plugin-huaanwork tsc -p tsconfig.tests.client.json -
 ```
 Expected: 全部 PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/client-huaanwork/logic/expertTeamRuns.ts dsh-plugin-huaanwork/tests/client-huaanwork/expertTeamRuns.spec.ts
@@ -1839,7 +1839,7 @@ git commit -m "feat(expert-team): project runs on client"
 - Consumes: Task 1 校验、Task 4 `expertTeam.list`（含已过滤健康 `AgentPackageListItem[]` 与 `ExpertTeamMemberCapabilities`）与 CRUD/`invocableList`、`expertTeam/changed` 事件（严禁从 `AgentListItem` 或 `catalogAgents` 构造可选成员）。
 - Produces: `ExpertTeamsView`、`ExpertTeamListPanel`、`ExpertTeamEditor` 和 `App.tsx` 的 `View = 'teams'` 分支与 `expertTeam/changed` 刷新接入。
 
-- [ ] **Step 1: 写列表、编辑器、成员排序、损坏记录删除与可用性失败测试**
+- [x] **Step 1: 写列表、编辑器、成员排序、损坏记录删除与可用性失败测试**
 
 使用 `// @vitest-environment jsdom` 和有状态 Harness：
 
@@ -1904,7 +1904,7 @@ it('toggles enabled status, displays incomplete badges, enforces editor rule lin
 })
 ```
 
-- [ ] **Step 2: 确认组件测试失败**
+- [x] **Step 2: 确认组件测试失败**
 
 `renderExpertTeamsView` 使用真实组件和 fake `expertTeam.*` RPC（`list` 返回 `{ teams, packages }`，其中 `packages` 为健康 `AgentPackageListItem` 附带 `capabilities`，支持可选 `createResult` 覆盖保存回包）；Harness 的 `fill`/`addMember`/`select`/`click`/`field`/`queryField`/`memberSlugs`/`lastCreate`/`lastUpdate`/`lastRemove`/`invocableSlugs` 只通过 DOM 与记录调用实现，不直接修改编辑器 state。`validTeamRecord()`、`teamWithMissingMember()`（将 reviewer slug 改为不存在的包）、`incompleteTeamRecord(id)`（返回 `availability.kind = 'incomplete'`）与 `corruptTeamRecord(id)`（返回 `{ id, error: 'expert-team-corrupt', availability }`）均基于 Task 1 `validTeam()` 构造。
 
@@ -1914,7 +1914,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/client-huaanwork/E
 ```
 Expected: FAIL，管理组件不存在。
 
-- [ ] **Step 3: 实现列表与编辑器**
+- [x] **Step 3: 实现列表与编辑器**
 
 `ExpertTeamsView` 用页面内部选中态切换列表和编辑器，不增加 URL 路由。`ExpertTeamListPanel` 复用 `page-view`/`page-head`/`search-input`/`recent-list`/`hint`/`banner` 模式：
 - 正常定义卡片展示名称、描述、场景、成员数、调度/审查/交付和可用性，支持编辑、启停、二次确认删除；
@@ -1922,7 +1922,7 @@ Expected: FAIL，管理组件不存在。
 
 `ExpertTeamEditor` 分基本信息、成员与职责、调度规则、审查与汇总四区。首次编辑自动生成可修改 slug，首次保存后锁定并展示实际 `@team:<slug>`；保存前摘要集中列出成员角色、调度、并发/24 次预算、包原生能力（`tools`、`skillScripts`）、必审名单/返修上限、交付格式。成员选择**只消费** `expertTeam.list` 返回的健康 `packages`（`AgentPackageListItem` + `capabilities`，已由 Task 4 过滤为 `enabled && !broken && !revoked` 且排除 legacy/tool），展示名称、来源（`local`/`catalog`）、版本、描述和包原生能力；支持上下排序、角色、职责、输出要求。结构化控件和默认值严格来自 Task 1，无 reviewer 时 review 只能 `none`；仅会话模式隐藏 Artifact 格式。离开有未保存确认，保存失败（`ok: false, fieldErrors`）按字段回显并保留草稿。
 
-- [ ] **Step 4: 接入侧边栏、`expertTeam/changed` 刷新与样式并运行测试**
+- [x] **Step 4: 接入侧边栏、`expertTeam/changed` 刷新与样式并运行测试**
 
 `App.tsx` 仅在 View 联合、智能体与知识库之间的导航按钮、视图渲染分支及 `expertTeam/changed` 事件触发列表刷新四处接入，自动化和插件市场顺序不变。新增 CSS 类复用现有 token；运行：
 
@@ -1933,7 +1933,7 @@ corepack yarn workspace dsh-plugin-huaanwork tsc -p tsconfig.tests.client.json -
 ```
 Expected: 全部 PASS，生成样式与源类名一致。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/client-huaanwork/ExpertTeamsView.tsx dsh-plugin-huaanwork/src/client-huaanwork/ExpertTeamListPanel.tsx dsh-plugin-huaanwork/src/client-huaanwork/ExpertTeamEditor.tsx dsh-plugin-huaanwork/src/client-huaanwork/App.tsx dsh-plugin-huaanwork/src/client-huaanwork/styles.css dsh-plugin-huaanwork/src/client-huaanwork/styles.generated.ts dsh-plugin-huaanwork/tests/client-huaanwork/ExpertTeamsView.spec.ts
@@ -1960,7 +1960,7 @@ git commit -m "feat(expert-team): add team management views"
 - Produces: `composerAtTokenAt`、`resolveComposerMentionState`（开头优先走 `composerAtTokenAt` 同时开放“智能体”与“专家团”两组，非开头回落 `atTokenAt` 仅开放“智能体”组）、`leadingTeamAtSlug`、`parseTeamAtInvoke`（判别联合）、`mentionKeyAction`、`ComposerMentionMenu` 分组/图标支持、`SessionSendParams.at.kind = 'expert-team'`。
 - Constraint: 旧 `atTokenAt`（保留任意位置匹配与 ASCII `/^[a-z0-9-]*$/` 契约）/`parseAtInvoke` 函数与 `@<agent-slug>` 路径不改；**owner 裁定（2026-11-22）：旧 `@` 菜单保留任意位置触发，仅专家团分组与 `parseTeamAtInvoke` 限开头，不得整体替换 `App.tsx:1230` 触发**。
 
-- [ ] **Step 1: 写中文/team 词法、中段旧 `@` 任意位置回归、空任务拦阻、IME 与发送失败测试**
+- [x] **Step 1: 写中文/team 词法、中段旧 `@` 任意位置回归、空任务拦阻、IME 与发送失败测试**
 
 ```ts
 it('extracts leading team/Chinese @ tokens while keeping arbitrary-position legacy @agent menu triggers', () => {
@@ -2023,7 +2023,7 @@ it('builds a typed team target using real buildSessionSendParams signature witho
 })
 ```
 
-- [ ] **Step 2: 确认词法与发送测试失败**
+- [x] **Step 2: 确认词法与发送测试失败**
 
 Run:
 ```bash
@@ -2031,7 +2031,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/client-huaanwork/e
 ```
 Expected: FAIL，`composerAtTokenAt`/`parseTeamAtInvoke` 判别联合与 `invokedTeam` 不存在。
 
-- [ ] **Step 3: 实现团队词法、分组菜单与发送参数**
+- [x] **Step 3: 实现团队词法、分组菜单与发送参数**
 
 - `expertTeamsLogic.ts`：
   - `composerAtTokenAt(text, cursor)`：仅识别输入开头 `@` 后至光标的连续非空白 token（允许中文、Unicode、ASCII 与 `team:` 前缀）；既有 `agentsLogic.ts` 中的 `atTokenAt`（任意位置 ASCII 触发）和 `parseAtInvoke` 保持零修改；
@@ -2042,7 +2042,7 @@ Expected: FAIL，`composerAtTokenAt`/`parseTeamAtInvoke` 判别联合与 `invoke
 - `sessionChannel.ts`：`SessionSendParams.at` 声明为判别联合 `{ name: string; clientMessageId: string } | { kind: 'expert-team'; name: string }`；`buildSessionSendParams` 新增可选 `invokedTeam?: { name: string; remainder: string }`，存在时生成 `text: invokedTeam.remainder` 与 `at: { kind: 'expert-team', name: invokedTeam.name }`（不携带旧卡 `clientMessageId`）；顶层 `clientMessageId` 与既有 `invokedAt`（保留 `at: { name, clientMessageId: String(userItemId) }` 且无 `kind`）路径完全不变。
 - `ComposerMentionMenu.tsx`：`ComposerMentionItem` 新增可选 `group?: string`、`icon?: ReactNode`，并把第 23 行 props 内联的 `items: { key: string; ... }[]` 改为直接引用 `items: ComposerMentionItem[]`（避免两处声明漂移）；存在 `group` 时按组渲染分组标题，兼容既有 `/skill` 扁平调用方；`AtAgentMenu.tsx` 在 `allowTeams` 为真时合并“智能体”与“专家团”分组（非开头仅展示“智能体”组），团队条目显示“专家团”标识、图标、成员数、调度/审查/交付摘要。
 
-- [ ] **Step 4: 接入 App 检索、选择、实时刷新与发送**
+- [x] **Step 4: 接入 App 检索、选择、实时刷新与发送**
 
 `App.tsx` 接入：
 - `@` 菜单触发（`App.tsx:1230`）改用 `resolveComposerMentionState(draft, atCursor)`（不得直接用仅限开头的 `composerAtTokenAt` 整体替换 `atTokenAt`）：`allowTeams === true` 时合并智能体列表与 `expertTeam.invocableList`（并监听 WS `expertTeam/changed` 自动刷新 `invocableList`）；`allowTeams === false`（正文中段）仅展示智能体分组，完整保留旧 `@agent` 任意位置补全；
@@ -2050,7 +2050,7 @@ Expected: FAIL，`composerAtTokenAt`/`parseTeamAtInvoke` 判别联合与 `invoke
 - 在 `appWiring.spec.ts` 增加源码存在性断言 `assert.match(body, /resolveComposerMentionState\(draft, atCursor\)/)`，把触发接线钉死，防止实施者退回 leading-only 的 `composerAtTokenAt` 整体替换（owner 裁定：中段旧 `@agent` 仍触发补全）。
 - 发送分支先查 `parseTeamAtInvoke(draft)`：`empty-task` 或 `conflict` 阻止发送并显示明确内联提示；`valid` 保持在既有单条 `rpcCall<SessionSendResult>("session.send", buildSessionSendParams({ ... }))` 入参中追加 `...(invokedTeam ? { invokedTeam } : {}),`（保持 `...(invokedAt ? { invokedAt } : {}),` 与 `...(invokedSkill ? { invokedSkill } : {}),` 字面量不变以继续满足 `appWiring.spec.ts:1247-1251` 的存在性匹配并避免重复发送分支），保留既有 `isComposing` 守卫与旧 `@<agent-slug>` 无 `kind` 路径。
 
-- [ ] **Step 5: 运行新旧 @ 测试**
+- [x] **Step 5: 运行新旧 @ 测试**
 
 Run:
 ```bash
@@ -2058,7 +2058,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/client-huaanwork/e
 ```
 Expected: 全部 PASS；中文检索、空任务拦截和旧 ASCII slug 均不回归。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/client-huaanwork/logic/expertTeamsLogic.ts dsh-plugin-huaanwork/src/client-huaanwork/logic/sessionChannel.ts dsh-plugin-huaanwork/src/client-huaanwork/ComposerMentionMenu.tsx dsh-plugin-huaanwork/src/client-huaanwork/AtAgentMenu.tsx dsh-plugin-huaanwork/src/client-huaanwork/App.tsx dsh-plugin-huaanwork/tests/client-huaanwork/expertTeamsLogic.spec.ts dsh-plugin-huaanwork/tests/client-huaanwork/sessionChannel.spec.ts dsh-plugin-huaanwork/tests/client-huaanwork/agentsLogic.spec.ts dsh-plugin-huaanwork/tests/client-huaanwork/appWiring.spec.ts
@@ -2083,7 +2083,7 @@ git commit -m "feat(expert-team): invoke teams from composer"
 - Consumes: Task 13 reducer、Task 4 `expertTeam.runList`/`cancel`、既有 `subagent.cancel`、`SubagentRunSummary`（含 Task 3 `SubagentRunProjection.teamRunId`）、Artifact 预览入口与 Artifact 卡。
 - Produces: `ExpertTeamRunCard`、`ProgressPanel` 专家团投影区块、`ToolPanelItem` 支持 `kind: 'expert-team-run'`、以及 `App.tsx` 中 `kind: 'expert-team-run'` 渲染、成员独立卡去重与 WS 对账。
 
-- [ ] **Step 1: 写卡片、7 种状态文案、Artifact 入口/关联异常、右栏投影与冻结失败测试**
+- [x] **Step 1: 写卡片、7 种状态文案、Artifact 入口/关联异常、右栏投影与冻结失败测试**
 
 使用 `// @vitest-environment jsdom`：
 
@@ -2152,7 +2152,7 @@ it('freezes operations on disconnect, unfreezes on same-generation reconnect, an
 
 在 `progressPanel.spec.ts` 新增断言：`selectProgressPanelModel` 投影当前会话活跃或当前回合的 `expertTeams`，并把携带 `teamRunId` 的成员 `subagents` 从独立“子代理”列表剔除（防止同一次专家团派工在右栏或主流重复渲染独立子代理卡）。
 
-- [ ] **Step 2: 确认运行卡与右栏投影测试失败**
+- [x] **Step 2: 确认运行卡与右栏投影测试失败**
 
 `renderExpertTeamRunCard` 使用真实组件并返回 DOM Harness（挂载时默认附带对应会话的 Artifact 项供 `queryArtifact()` 验证）；`runWithExecutingAndReviewingMembers(overrides?)` 含一个 running execute（`memberRunId: 'member-run-1'`）和一个 running review，`runningTeam(overrides?)` 是无成员结果的 running run（默认 `generation: 'g1'`），`runWithStatus(status, overrides?)` 覆盖全部 7 种终态/运行态，`executeResult` 来自 Task 1 共享 fixture。`reconcile`/`queryTeamRun`/`queryArtifact`/`statusLabel` 驱动 Task 13 reducer 和现有 Artifact 项，不断言组件私有字段。
 
@@ -2162,7 +2162,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/client-huaanwork/E
 ```
 Expected: FAIL，`ExpertTeamRunCard.tsx` 与右栏专家团投影不存在。
 
-- [ ] **Step 3: 实现卡片、两级取消与右栏投影**
+- [x] **Step 3: 实现卡片、两级取消与右栏投影**
 
 - `ExpertTeamRunCard.tsx`：
   - 显示团队名、7 种清晰区分的状态文案（`running` / `stopping` / `completed` / `completed_with_issues` / `partial` / `stopped` / `failed`，明确区分业务未完全收敛的 `completed_with_issues` 与技术异常的 `partial`）、混合活动、耗时、实际派工/进行/完成/失败/审查/返修计数、Artifact 状态和成员扁平行；
@@ -2174,7 +2174,7 @@ Expected: FAIL，`ExpertTeamRunCard.tsx` 与右栏专家团投影不存在。
   - `selectProgressPanelModel` 的 `subagents` 过滤条件增加 `run.teamRunId === undefined`，把团队成员归口到右栏专家团区块，避免独立“子代理”区重复展示；
   - `ProgressPanel.tsx` 新增的专家团取消/预览回调 props 同样声明为可选，渲染专家团摘要与共享取消确认回调。
 
-- [ ] **Step 4: 接入 `App.tsx` WS 拦截、主流去重、对账、清理与样式**
+- [x] **Step 4: 接入 `App.tsx` WS 拦截、主流去重、对账、清理与样式**
 
 `App.tsx` 精确接入以下 6 处：
 1. `applyEvent` 顶部（会话级消息处理之前）拦截 `expertTeam/run` 与 `expertTeam/run-remove`，更新 `expertTeamRunsState`，按需经 `insertExpertTeamRunCard` 锚定到对应 tab；WS 断连/退出时同步派发 `{ type: 'disconnect', at }`；
@@ -2191,7 +2191,7 @@ corepack yarn workspace dsh-plugin-huaanwork tsc -p tsconfig.tests.client.json -
 ```
 Expected: 全部 PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/src/client-huaanwork/ExpertTeamRunCard.tsx dsh-plugin-huaanwork/src/client-huaanwork/logic/toolPanel.ts dsh-plugin-huaanwork/src/client-huaanwork/logic/progressPanel.ts dsh-plugin-huaanwork/src/client-huaanwork/ProgressPanel.tsx dsh-plugin-huaanwork/src/client-huaanwork/App.tsx dsh-plugin-huaanwork/src/client-huaanwork/styles.css dsh-plugin-huaanwork/src/client-huaanwork/styles.generated.ts dsh-plugin-huaanwork/tests/client-huaanwork/ExpertTeamRunCard.spec.ts dsh-plugin-huaanwork/tests/client-huaanwork/progressPanel.spec.ts
@@ -2213,7 +2213,7 @@ git commit -m "feat(expert-team): add aggregate run cards and progress panel pro
 - Produces: `createComplianceTeamScenario(ctx)`、`runComplianceTeamSmoke(scenario, options)`、`restartHostWithSameProfile(ctx)`（供 Vitest 真实 Host 组合测试，TypeScript 严格受 `tsconfig.tests.json` 校验）以及独立编译产物冒烟脚本 `scripts/huaanwork-expert-team-smoke.mjs` 和命令 `corepack yarn workspace dsh-plugin-huaanwork verify:expert-team`。
 - Constraint: 不使用真实 API key，不访问外网；模型与 MCP 均由本地脚本驱动，Host/RPC/附件/存储走真实实现；`scripts/huaanwork-expert-team-smoke.mjs` **只** import `../lib/*.js`（不 import `src/*.ts`），以验证真实编译后发布产物。
 
-- [ ] **Step 1: 写端到端失败场景**
+- [x] **Step 1: 写端到端失败场景**
 
 ```ts
 it('runs two executors, one unified reviewer, one revision and one primary artifact (Spec §18.4 default)', async () => {
@@ -2285,7 +2285,7 @@ it('drops run projections but preserves messages and artifacts after Host restar
 })
 ```
 
-- [ ] **Step 2: 确认组合场景失败**
+- [x] **Step 2: 确认组合场景失败**
 
 Run:
 ```bash
@@ -2293,7 +2293,7 @@ corepack yarn workspace dsh-plugin-huaanwork vitest run tests/huaanwork-host/exp
 ```
 Expected: FAIL，场景 driver 与完整接线不存在。
 
-- [ ] **Step 3: 实现本地场景 driver（TypeScript）与真实组合**
+- [x] **Step 3: 实现本地场景 driver（TypeScript）与真实组合**
 
 `tests/fixtures/expert-team/driver.ts` 导出场景工厂（受 `tsconfig.tests.json` 类型检查约束）：
 
@@ -2319,7 +2319,7 @@ export async function runComplianceTeamSmoke(scenario: ComplianceTeamScenario, o
 - `failUntilBudgetExhausted` 真实执行至协调器第 24 次派工（不篡改 `dispatchAttempts`），再验证可提交部分 Artifact 且终态 `partial`；`failArtifactWrite` 使脚本团长提交超 5 MiB 报告（触发真实 `artifact-too-large` 写失败）后不重试直接结束回合，验证 `artifactStatus: 'pending'`、`primaryArtifactIds: []` 与终态 `partial`；
 - `restartHostWithSameProfile` 先 dispose 旧 Host，再用同一 profile 创建全新 registry/Host，验证持久消息与 Artifact 保留、团队运行投影为空。所有辅助函数均在 `driver.ts` 内完整实现并导出。
 
-- [ ] **Step 4: 实现编译产物 Loader smoke（完整复用 `verify-profile-boot.mjs` 启动序列 + 真实 HTTP 路由探活）**
+- [x] **Step 4: 实现编译产物 Loader smoke（完整复用 `verify-profile-boot.mjs` 启动序列 + 真实 HTTP 路由探活）**
 
 `scripts/huaanwork-expert-team-smoke.mjs` 只导入 `../lib/*.js` 与既有桌面运行时模块，在 `try ... finally` 中完整复用 `verify-profile-boot.mjs` 的启动、鉴权与清理流程。注意：**`dsh-plugin-huaanwork/cordis.patch.yml`（经 `profile.ts:1488,1506`）已经把 `desktop-shell` 插入 `prepared.patches`**（`verify-profile-boot.mjs:98-101` 写入 `profile.patchPath` 的仅是不带 `insert` 的覆盖 patch），因此严禁在 `patches` 末尾追加 `{ insert: [DESKTOP_SHELL_PATCH_ENTRY] }`（否则无论是否 seed 都会重复插入 `desktop-shell` 行），必须与 `verify-profile-boot.mjs:157` 保持一致仅拼接 `prepared.patches` 与 `prepared.overlays`：
 
@@ -2369,7 +2369,7 @@ if (!Array.isArray(listBody.teams) || !Array.isArray(invocableBody.teams)) {
 
 `finally` 块严格按 `verify-profile-boot.mjs:490-495` 顺序释放 `ctx?.fiber.dispose()`、`releasePackageResolver?.()`、`pnpmRuntime?.dispose()` 与临时 `home` 目录。`package.json` 增加 `"verify:expert-team": "node scripts/huaanwork-expert-team-smoke.mjs"`，并把 `yarn run verify:expert-team` 精准插入 package `check` 链的 `yarn run verify:host` 之后、`yarn run verify:aa` 之前（`package.json:203`），保证后续 CI 也执行该编译产物 Loader 冒烟。
 
-- [ ] **Step 5: 构建并运行组合与 Loader 测试**
+- [x] **Step 5: 构建并运行组合与 Loader 测试**
 
 Run:
 ```bash
@@ -2379,7 +2379,7 @@ corepack yarn workspace dsh-plugin-huaanwork verify:expert-team
 ```
 Expected: 全部 PASS；场景结束后所有 profile、端口、子进程和 Host disposer 均释放。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add dsh-plugin-huaanwork/tests/fixtures/expert-team/driver.ts dsh-plugin-huaanwork/tests/huaanwork-host/expert-team-composition.spec.ts dsh-plugin-huaanwork/scripts/huaanwork-expert-team-smoke.mjs dsh-plugin-huaanwork/package.json
@@ -2398,7 +2398,7 @@ git commit -m "test(expert-team): cover composed team execution"
 - Consumes: 所有实现任务和组合测试。
 - Produces: 可审计的 headless gate 结果与真机验收记录；未实际执行的验收不得标为通过。
 
-- [ ] **Step 1: 运行最终完整 headless gate**
+- [x] **Step 1: 运行最终完整 headless gate**
 
 ```bash
 corepack yarn check
@@ -2406,7 +2406,7 @@ corepack yarn check
 
 Expected: PASS。不得与其它含 `verify:aa` 的命令并发；若失败，记录原始失败命令和错误并回到对应任务修复，不得只重跑至偶然通过。
 
-- [ ] **Step 2: 运行最终差异与格式检查**
+- [x] **Step 2: 运行最终差异与格式检查**
 
 ```bash
 git diff --check
@@ -2431,7 +2431,7 @@ Expected: 无 whitespace 错误；没有 `deepseek-harness/`、锁文件、无�
 
 证据文件必须区分“自动化测试通过”和“真机人工验收通过”，任何未执行项保持未勾选并注明原因。
 
-- [ ] **Step 4: 提交最终实现与证据**
+- [x] **Step 4: 提交最终实现与证据**
 
 ```bash
 git add dsh-plugin-huaanwork packages/huaanwork-policy docs/superpowers/plans/2026-11-22-expert-team.md docs/evidence/2026-11-22-expert-team-acceptance.md
@@ -2442,9 +2442,9 @@ git commit -m "test(expert-team): verify desktop collaboration"
 
 ## Self-Review Checklist
 
-- [ ] 规格 §1–§19 的每项要求均能映射到 Task 1–Task 18；普通 `@智能体`、不修改上游、R3 包本位准入与真机验收没有被遗漏。
-- [ ] 所有任务都有失败测试、运行命令、实现接口和提交步骤；没有“待定”“稍后实现”“适当补测试”等占位内容。
-- [ ] `ExpertTeam`、`ExpertTeamRecord`、`ExpertTeamRun`、`ExpertTeamRunSnapshot`、`ExpertTeamDispatchInput/Result`、`ExpertTeamLease`、`dispatchTeamMember`、`validateDispatchRule`、`requestCancel`/`markStopped`、`activeBySession`/`byTurn`、`noteSessionArtifact`、`composerAtTokenAt`/`resolveComposerMentionState`、`parseTeamAtInvoke`、`resolveFollowupClientMessageId` 的签名跨任务一致；`unifiedRevisionRounds` 在 Task 8 同步临界区唯一写回且 `cycleOpen` 仅从 `results` 派生。
-- [ ] 团队终态为 `turn/end` 封闭（且 `turn/start` 先于 `agent/inbox/claimed`）而非 afterIdle/whenIdle，结算点内置 fail-closed 异常守卫（先失效租约、附件/restrict 独立 try/catch、确保必写终态）；`requestCancel` 非阻塞置 `stopping`，在清理收敛后由 `markStopped` 置 `stopped`；技术失败允许部分报告且 24 次预算豁免只豁免未尝试义务、不豁免在途/格式/单交付物守卫；同代重连快照恢复 `connection='open'` 并清除 `frozenAt`。
-- [ ] 生产接线覆盖 `model.ts`（`isRegisteredToolName`）、`holders.ts`、`index.ts`（含 `toolCtx`、全局 listener 与 disposer `cancelAll()`）、`sessions.ts:1346` + `turn-scheduler.ts`（`at.kind` 透传）、`agent-package/host.ts`（`AgentPackageDispatchContext`）+ `skills.ts`（`specChildId` 前移）、`result-artifact-tools.ts`（`ToolContext` + `ResultPresentClaimedContext` + 按持久 manifest 锚重放关联）、`toolPanel.ts` / `ProgressPanel`（类型链、右栏投影与成员去重）、`App.tsx`（旧 `@` 保留任意位置触发）及编译产物 `lib/*.js` 真实 HTTP Loader 冒烟（不重复插入 `desktop-shell`）。
+- [x] 规格 §1–§19 的每项要求均能映射到 Task 1–Task 18；普通 `@智能体`、不修改上游、R3 包本位准入与真机验收没有被遗漏。
+- [x] 所有任务都有失败测试、运行命令、实现接口和提交步骤；没有“待定”“稍后实现”“适当补测试”等占位内容。
+- [x] `ExpertTeam`、`ExpertTeamRecord`、`ExpertTeamRun`、`ExpertTeamRunSnapshot`、`ExpertTeamDispatchInput/Result`、`ExpertTeamLease`、`dispatchTeamMember`、`validateDispatchRule`、`requestCancel`/`markStopped`、`activeBySession`/`byTurn`、`noteSessionArtifact`、`composerAtTokenAt`/`resolveComposerMentionState`、`parseTeamAtInvoke`、`resolveFollowupClientMessageId` 的签名跨任务一致；`unifiedRevisionRounds` 在 Task 8 同步临界区唯一写回且 `cycleOpen` 仅从 `results` 派生。
+- [x] 团队终态为 `turn/end` 封闭（且 `turn/start` 先于 `agent/inbox/claimed`）而非 afterIdle/whenIdle，结算点内置 fail-closed 异常守卫（先失效租约、附件/restrict 独立 try/catch、确保必写终态）；`requestCancel` 非阻塞置 `stopping`，在清理收敛后由 `markStopped` 置 `stopped`；技术失败允许部分报告且 24 次预算豁免只豁免未尝试义务、不豁免在途/格式/单交付物守卫；同代重连快照恢复 `connection='open'` 并清除 `frozenAt`。
+- [x] 生产接线覆盖 `model.ts`（`isRegisteredToolName`）、`holders.ts`、`index.ts`（含 `toolCtx`、全局 listener 与 disposer `cancelAll()`）、`sessions.ts:1346` + `turn-scheduler.ts`（`at.kind` 透传）、`agent-package/host.ts`（`AgentPackageDispatchContext`）+ `skills.ts`（`specChildId` 前移）、`result-artifact-tools.ts`（`ToolContext` + `ResultPresentClaimedContext` + 按持久 manifest 锚重放关联）、`toolPanel.ts` / `ProgressPanel`（类型链、右栏投影与成员去重）、`App.tsx`（旧 `@` 保留任意位置触发）及编译产物 `lib/*.js` 真实 HTTP Loader 冒烟（不重复插入 `desktop-shell`）。
 - [ ] 最终验收证据只在实际命令和真机步骤完成后填写。
