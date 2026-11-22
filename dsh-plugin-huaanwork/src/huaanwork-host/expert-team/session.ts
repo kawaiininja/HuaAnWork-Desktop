@@ -262,7 +262,9 @@ export function settleExpertTeamTurn(input: SettleExpertTeamTurnInput): void {
     if (runs === undefined) return
     const run = runs.get(teamRunId)
     if (run === undefined) return
-    const eventMissing = facts?.eventMissing === true
+    // `facts === undefined` 即观察器从未观察到 `turn/end`(afterIdle 兜底调用),
+    // 与显式 `eventMissing` 同属事件缺失:始终记协议错误,绝不因已有结果而判 completed。
+    const eventMissing = facts === undefined || facts.eventMissing === true
     const cancelLatched = facts?.reason?.kind === 'aborted' || run.status === 'stopping'
     if (cancelLatched) {
       // 取消路径:同步闩 stopping(幂等),终态由 afterIdle 等待成员清理后发布 stopped。

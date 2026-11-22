@@ -1416,6 +1416,13 @@ export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteCon
 
   const atClientMessageId = objectAtClientMessageId(params)
   const topLevelClientMessageId = objectTopLevelClientMessageId(params)
+  // 团队准入的最终同步判定点(设计 §11.2 / §17):运行创建跨越 store 读取等多个 await,
+  // 两个团队调用可能都通过了上面的活跃运行初检。这里在 `admitUserTurn` 紧邻处再查调度器
+  // 的团队意图(等待队列 + 出队启动中 + 根写者),与准入同处一个同步块,第二个团队调用
+  // 因此拒绝而不是静默排队;单个排在普通回合之后的团队项仍允许。
+  if (atKind === 'expert-team' && scheduler.hasPendingTeamTurn(sessionId)) {
+    throw new Error('expert-team-session-busy')
+  }
   const admitted = scheduler.admitUserTurn({
     sessionId,
     tabId,

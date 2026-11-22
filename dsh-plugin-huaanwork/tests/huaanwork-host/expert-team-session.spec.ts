@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { SessionSeq, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { emptyAttachments, isAgentToolAttached } from '../../src/huaanwork-guardrails/agent-attachments.ts'
+import { attachAgentTools, emptyAttachments, isAgentToolAttached } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import {
   EXPERT_TEAM_DISPATCH_TOOL,
   makeExpertTeamClaimed,
@@ -38,7 +38,7 @@ import { writeHuaanworkSettings } from '../../src/huaanwork-host/settings.ts'
 import { createTurnAnchorStore, type TurnAnchorStore } from '../../src/huaanwork-host/turn-anchors.ts'
 import { createTurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
-import { validTeam } from '../fixtures/expert-team/team.ts'
+import { executeResult, validTeam } from '../fixtures/expert-team/team.ts'
 
 /**
  * 团队会话启动、排队隔离与 turn/end 结算(设计 §11.3 / §12.1 / §12.4.2 / §13.3 / §17)。
@@ -181,6 +181,7 @@ type SessionFixtureOptions = {
   ordinaryTurnInFlight?: boolean
   teamEnabled?: boolean
   teamDeleted?: boolean
+  teamDelivery?: 'artifact' | 'message'
   sameSlugAgentExists?: boolean
   activeGoal?: boolean
   refreshRestrictThrows?: boolean
@@ -200,6 +201,7 @@ type SessionFixture = {
   goal: { continue(): void }
   agentInvokeSpy: ReturnType<typeof vi.fn>
   resolveFollowupIdSpy: ReturnType<typeof vi.spyOn>
+  listenerCount(name: string): number
   finishOrdinaryTurn(): Promise<void>
   finishTeamIdle(): Promise<void>
   afterIdle: { invokeFinally(): Promise<void> }
@@ -252,6 +254,7 @@ async function makeSessionFixture(options: SessionFixtureOptions = {}): Promise<
 
   const team = validTeam()
   if (options.teamEnabled === false) team.enabled = false
+  if (options.teamDelivery !== undefined) team.summary.delivery = options.teamDelivery
   const store: ExpertTeamStore = {
     list: async () => (options.teamDeleted === true ? [] : [{ id: team.id, team }]),
     get: async (id) =>
@@ -442,6 +445,7 @@ async function makeSessionFixture(options: SessionFixtureOptions = {}): Promise<
     goal,
     agentInvokeSpy,
     resolveFollowupIdSpy,
+    listenerCount: (name: string): number => listeners.listeners[name]?.length ?? 0,
     finishOrdinaryTurn,
     finishTeamIdle,
     afterIdle: {
@@ -606,7 +610,76 @@ describe('expert team session start, queue isolation and settlement', () => {
 
     // 另测 admission.cancelled() 在 resolveAgent() 后早退（不抛错、绕过 catch）时，finally 仍调用 abortBeforeSend 且立刻释放名额
     const cancelled = await makeSessionFixture({ cancelBeforeFollowup: true })
+    // 预挂派工工具:abortBeforeSend 必须把它摘除,不能只靠「本轮从未 claim」的巧合通过。
+    attachAgentTools(cancelled.attachments, SESSION_ID, [EXPERT_TEAM_DISPATCH_TOOL])
     await expect(cancelled.sessionSend(teamSend({ task: 'y' }))).resolves.toMatchObject({ started: false })
     expect(cancelled.runs.activeBySession(SESSION_ID)).toBeUndefined()
+    // 早退必须由 abortBeforeSend 原地收敛为 failed,而不是把运行留在 stopping 或 running。
+    const [cancelledRun] = cancelled.runs.list({ sessionId: SESSION_ID }).runs
+    expect(cancelledRun?.status).toBe('failed')
+    expect(isAgentToolAttached(cancelled.attachments, SESSION_ID, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+    // 观察器已释放:团队会话的 session/event 全局监听归零,claimed 只剩 fixture 自己的处理器。
+    expect(cancelled.listenerCount('session/event')).toBe(0)
+    expect(cancelled.listenerCount('agent/inbox/claimed')).toBe(1)
+  })
+
+  it('rejects a second team call while the first team turn is only queued behind an ordinary turn', async () => {
+    const { sessionSend, finishOrdinaryTurn, runs } = await makeSessionFixture({ ordinaryTurnInFlight: true })
+    const first = await sessionSend(teamSend({ task: '第一团队排队' }))
+    // 第一团队只进入等待队列:尚不存在任何团队运行,初检看不出忙碌。
+    expect(first).toMatchObject({ queued: true, waiting: true, started: false })
+    expect(runs.activeBySession(SESSION_ID)).toBeUndefined()
+    // 调度器的团队意图(队列 + 出队启动 + 根写者)在 admitUserTurn 之前拒绝第二个团队调用。
+    await expect(sessionSend(teamSend({ task: '第二团队调用' }))).rejects.toThrow('expert-team-session-busy')
+    // 被拒的调用没有留下第二个队列项:普通回合结束后只启动第一团队。
+    await finishOrdinaryTurn()
+    expect(runs.activeBySession(SESSION_ID)?.teamSnapshot.slug).toBe(TEAM_SLUG)
+    expect(runs.list({ sessionId: SESSION_ID }).runs).toHaveLength(1)
+  })
+
+  it('settles facts=undefined as eventMissing protocol error even when results exist', async () => {
+    const { sessionSend, runs, ctx, afterIdle } = await makeSessionFixture({})
+    await sessionSend(teamSend({ task: '缺失结算的有结果回合' }))
+    const runId = runs.activeBySession(SESSION_ID)!.teamRunId
+    // 先写入一条有效执行结果:旧行为会因 `facts?.eventMissing` 只判 false 而可能判 completed。
+    runs.update(runId, (run) => {
+      run.results.push(executeResult('result-1'))
+    })
+    expertTeamSession.settleExpertTeamTurn({ ctx, sessionId: SESSION_ID, teamRunId: runId, facts: undefined })
+    expect(runs.get(runId)?.status).toBe('partial')
+    expect(runs.get(runId)?.status).not.toBe('completed')
+    expect(runs.get(runId)?.failure).toContain('expert-team-turn-end-missing')
+    // afterIdle 的同一兜底不得改写已收敛终态。
+    const revision = runs.get(runId)!.revision
+    await afterIdle.invokeFinally()
+    expect(runs.get(runId)?.revision).toBe(revision)
+  })
+
+  it('renders the leader prompt with roster, verdict markers and delivery-mode instructions', async () => {
+    const artifactFix = await makeSessionFixture({})
+    await artifactFix.sessionSend(teamSend({ task: '审查合同' }))
+    const artifactPrompt = artifactFix.followups[0]?.text ?? ''
+    // 实际注入父会话的文本就是团长提示词:任务、名册、派工工具与结构化规则。
+    expect(artifactPrompt).toContain('用户任务：\n审查合同')
+    expect(artifactPrompt).toContain('- m-exec-1｜执行｜@writer：提取合同关键条款并起草结论')
+    expect(artifactPrompt).toContain('- m-rev-1｜审查｜@reviewer：统一合规审查并指出风险项')
+    expect(artifactPrompt).toContain('expert_team_dispatch')
+    // 审查标记必须逐字出现在渲染结果中。
+    expect(artifactPrompt).toContain('[VERDICT: PASS]')
+    expect(artifactPrompt).toContain('[VERDICT: REVISE]')
+    // Artifact 模式:交付方式与最终 result_present 要求。
+    expect(artifactPrompt).toContain('交付方式：Artifact（markdown）')
+    expect(artifactPrompt).toContain('最终必须调用 result_present 提交主报告')
+    await artifactFix.afterIdle.invokeFinally()
+
+    // message 模式必须明确禁止 result_present,并要求直接输出非空最终汇总。
+    const messageFix = await makeSessionFixture({ teamDelivery: 'message' })
+    await messageFix.sessionSend(teamSend({ task: '仅会话汇总审查' }))
+    const messagePrompt = messageFix.followups[0]?.text ?? ''
+    expect(messagePrompt).toContain('交付方式：仅会话消息')
+    expect(messagePrompt).toContain('禁止调用 result_present')
+    expect(messagePrompt).not.toContain('最终必须调用 result_present')
+    expect(messagePrompt).toContain('直接输出非空的最终汇总文本')
+    await messageFix.afterIdle.invokeFinally()
   })
 })
