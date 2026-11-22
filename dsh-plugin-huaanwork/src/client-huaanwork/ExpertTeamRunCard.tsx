@@ -15,6 +15,7 @@ import type { ExpertTeamResult, ExpertTeamRun } from "./rpc-types.ts";
  * 取消分两级：整团走 `expertTeam.cancel({ parentSessionId, teamRunId })`，单成员复用
  * `subagent.cancel({ parentSessionId, runId })`。忙态与错误按「表面 + runId」分开，
  * 主流与右栏互不覆盖；确认只在本卡发起，调用方持有唯一确认目标。
+ * 断连冻结覆盖确认态：确认按钮禁用（只留本地收起），调用方同样不得向死连接发送取消。
  */
 
 /** 取消发起表面：主流聚合卡或右栏进度面板。 */
@@ -158,6 +159,7 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
             <button
               type="button"
               className="expert-team-run-terminate"
+              disabled={frozen}
               onClick={() => onConfirmCancel?.({ kind: "team", teamRunId: run.teamRunId, surface })}
             >
               确认终止专家团
@@ -288,6 +290,7 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
                       <button
                         type="button"
                         className="expert-team-run-terminate"
+                        disabled={frozen}
                         onClick={() =>
                           onConfirmCancel?.(
                             memberRunId === undefined

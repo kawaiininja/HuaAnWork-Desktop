@@ -1102,6 +1102,64 @@ test("history-load paths reconcile the host snapshot so run cards survive a fres
   );
 });
 
+test("reopening a session reconciles expert-team runs so team cards return from the in-memory run list", () => {
+  // 聚合卡只存在于客户端对话条目里:关闭标签后重开只回放消息条目,必须按会话补拉
+  // expertTeam.runList,否则仍有效的团队运行会永久丢失主流卡片。
+  const selectBody = functionBody("async function selectSubtask(", "async function renameSubtask(");
+  assert.match(
+    selectBody,
+    /void reconcileExpertTeamRuns\(id, sessionId\)/,
+    "selectSubtask's history branch must also reconcile expert-team runs: a completed team's "
+      + "aggregate card otherwise disappears for good when the subtask is reopened",
+  );
+
+  const backfillBody = functionBody("const runBackfillBusyRef", "}, [activeTab, chatTabs, automationRuns]);");
+  assert.match(
+    backfillBody,
+    /void reconcileExpertTeamRuns\(tabId, sessionId\)/,
+    "the run-tab backfill must reconcile expert-team runs with its own tabId + sessionId",
+  );
+
+  const resumeBody = functionBody("async function resumeFromView(", "async function resumeHistorySession(");
+  assert.match(
+    resumeBody,
+    /void reconcileExpertTeamRuns\(id, sessionId\)/,
+    "opening a session from history must reconcile expert-team runs after the history replay",
+  );
+
+  const sendBody = functionBody("async function send(", "async function stopTurn(");
+  assert.match(
+    sendBody,
+    /void reconcileExpertTeamRuns\(chatId, sent\.sessionId\)/,
+    "the post-send reconciliation must also pull the host's expert-team run list",
+  );
+
+  // 对账本身:权威清单来自 expertTeam.runList,快照经 Task 13 reducer 合并,
+  // 再按该会话的运行补卡(重复 teamRunId 由 insertExpertTeamRunCard 容忍)。
+  const reconcileBody = functionBody(
+    "async function reconcileExpertTeamRuns(",
+    "function anchorSnapshotExpertTeamCards(",
+  );
+  assert.match(reconcileBody, /rpcCall<ExpertTeamRunSnapshot>\("expertTeam\.runList", \{ sessionId \}\)/);
+  assert.match(reconcileBody, /type: "snapshot"/);
+  assert.match(reconcileBody, /anchorSnapshotExpertTeamCards\(chatId, sessionId, snapshot\.runs\)/);
+  const anchorBody = functionBody("function anchorSnapshotExpertTeamCards(", "function reconcileBoundArtifacts(");
+  assert.match(anchorBody, /if \(run\.parentSessionId !== sessionId\) continue;/);
+  assert.match(anchorBody, /insertExpertTeamRunCard\(nextItems/);
+  assert.match(anchorBody, /allowSnapshotFallback: true/);
+});
+
+test("expert-team confirmation refuses to send cancel RPCs into a disconnected host", () => {
+  // 断连后确认只收起本地确认态:卡片已显示断连提示,任何 rpcCall 都不得发出。
+  const body = functionBody("async function confirmCancelExpertTeam(", "/** 新建项目流程");
+  const guardAt = body.indexOf('expertTeamRunsRef.current.connection !== "open"');
+  assert.ok(guardAt >= 0, "the confirmation still checks the live connection before sending");
+  const teamRpcAt = body.indexOf('rpcCall<ExpertTeamCancelResult>("expertTeam.cancel"');
+  const memberRpcAt = body.indexOf('rpcCall<SubagentCancelResult>("subagent.cancel"');
+  assert.ok(teamRpcAt > guardAt, "the guard must run before the team cancel RPC");
+  assert.ok(memberRpcAt > guardAt, "the guard must run before the member cancel RPC");
+});
+
 test("App turn final wiring consumes actual goal actions and sidecarDead only", () => {
   let state: GoalTurnState = INITIAL_GOAL_TURN_STATE;
   let final = false;

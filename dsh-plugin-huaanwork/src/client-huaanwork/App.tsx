@@ -1534,8 +1534,9 @@ export default function App() {
             turnFinalWithoutUser: true,
           },
         ]);
-        // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理运行卡补回来。
+        // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理与专家团运行卡补回来。
         void reconcileSubagentRuns(id, sessionId);
+        void reconcileExpertTeamRuns(id, sessionId);
       } catch (error) {
         // 自动化来源的 Task（运行子任务）：恢复失败只报错，不建普通降级标签、也不预铸会话
         // （规格 §7.2 / §8.5：不得创建替代 Task/Session，也不允许向损坏会话写消息）。
@@ -2789,8 +2790,9 @@ export default function App() {
             ? { ...item, items, runPlaceholder: false, turnFinalByUserId: historicalTurnFinalByUserId(items), turnFinalWithoutUser: true }
             : item)),
         );
-        // 历史回放只有消息条目:补拉宿主快照,把重启前的子代理运行卡补回来。
+        // 历史回放只有消息条目:补拉宿主快照,把重启前的子代理与专家团运行卡补回来。
         void reconcileSubagentRuns(tabId, sessionId);
+        void reconcileExpertTeamRuns(tabId, sessionId);
       } catch (error) {
         // 回填失败：关闭该骨架标签，并把错误落到接手当前视图的标签上（规格 §7.2）。
         // 不保留绑着打不开会话的可输入标签，也不在旧会话上继续写消息。
@@ -3159,9 +3161,11 @@ export default function App() {
    * 确认团队取消:整团用 `expertTeam.cancel({ parentSessionId, teamRunId })`,成员复用
    * `subagent.cancel({ parentSessionId, runId })`。忙态/错误按「表面 + runId」写回;
    * `accepted` 只表示受理,卡片继续按 Host 事件收敛,不宣称清理完成。
+   * 断连期间确认只收起本地确认态:卡片已显示断连提示,不向死连接发送取消 RPC。
    */
   async function confirmCancelExpertTeam(target: ExpertTeamCancelTarget): Promise<void> {
     setExpertTeamConfirming(null);
+    if (expertTeamRunsRef.current.connection !== "open") return;
     const key = expertTeamCancelKey(
       target.surface,
       target.kind === "team" ? target.teamRunId : target.runId,
@@ -3700,6 +3704,7 @@ export default function App() {
         // 对账以应答的 sessionId 为准:本地 mint 的 id 可能不是 sidecar 实际使用的会话。
         if (typeof sent.sessionId === "string" && sent.sessionId) {
           void reconcileSubagentRuns(chatId, sent.sessionId);
+          void reconcileExpertTeamRuns(chatId, sent.sessionId);
         }
         // 身份写回、回合初始化之后，最后按原顺序重放本次暂存的早到事件。
         for (const buffered of takePendingBuffer(pending, sent)) applySidecarEventRef.current(buffered);
@@ -4263,8 +4268,9 @@ export default function App() {
           : [...prev, hydrated],
       );
       setActiveTab(id);
-      // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理运行卡补回来。
+      // 历史回放只有消息条目:补拉宿主快照,把上次运行留下的子代理与专家团运行卡补回来。
       void reconcileSubagentRuns(id, sessionId);
+      void reconcileExpertTeamRuns(id, sessionId);
     }
     setHistoryView(null);
     setView("main");

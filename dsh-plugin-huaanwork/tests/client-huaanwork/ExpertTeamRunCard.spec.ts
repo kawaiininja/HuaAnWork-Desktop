@@ -14,9 +14,10 @@ import type { ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 
-import ExpertTeamRunCard from "../../src/client-huaanwork/ExpertTeamRunCard.tsx";
+import ExpertTeamRunCard, { type ExpertTeamCancelTarget } from "../../src/client-huaanwork/ExpertTeamRunCard.tsx";
 import ResultArtifactCard from "../../src/client-huaanwork/ResultArtifactCard.tsx";
 import {
+  insertExpertTeamRunCard,
   reduceExpertTeamRuns,
   type ExpertTeamRunsState,
 } from "../../src/client-huaanwork/logic/expertTeamRuns.ts";
@@ -109,8 +110,10 @@ const ARTIFACT_ITEM: ArtifactResultCardItem = {
 };
 
 type HarnessItem =
-  | { kind: "expert-team-run"; teamRunId: string }
-  | { kind: "artifact"; item: ArtifactResultCardItem };
+  | { id: number; kind: "expert-team-run"; teamRunId: string }
+  | { id: number; kind: "artifact"; item: ArtifactResultCardItem }
+  | { id: number; kind: "user"; text: string; clientMessageId: string }
+  | { id: number; kind: "assistant"; text: string };
 
 type ReconcileSnapshot = {
   sessionId?: string;
@@ -123,8 +126,12 @@ type HarnessProps = {
   run: ExpertTeamRun;
   generation?: string;
   connection?: "open" | "closed";
+  /** 起始对话条目；缺省为已挂卡的聊天流。重开会话时传只有消息与 Artifact 的历史回放。 */
+  initialItems?: readonly HarnessItem[];
+  confirming?: ExpertTeamCancelTarget | null;
   onCancelTeam?: Mock<(input: { parentSessionId: string; teamRunId: string }) => unknown>;
   onCancelMember?: Mock<(input: { parentSessionId: string; runId: string }) => unknown>;
+  onConfirmCancel?: Mock<(target: ExpertTeamCancelTarget) => unknown>;
   onPreviewArtifact?: Mock<(artifactId: string) => unknown>;
 };
 
@@ -136,6 +143,7 @@ type Harness = {
   reconcile(snapshot: ReconcileSnapshot): void;
   queryTeamRun(): Element | null;
   queryArtifact(): Element | null;
+  teamCardCount(): number;
 };
 
 let root: Root | undefined;
@@ -160,10 +168,12 @@ function renderExpertTeamRunCard(props: HarnessProps): Harness {
     runs: new Map([[props.run.teamRunId, props.run]]),
     connection: props.connection ?? "open",
   };
-  let items: HarnessItem[] = [
-    { kind: "expert-team-run", teamRunId: props.run.teamRunId },
-    { kind: "artifact", item: ARTIFACT_ITEM },
-  ];
+  let items: HarnessItem[] = props.initialItems === undefined
+    ? [
+        { id: 1, kind: "expert-team-run", teamRunId: props.run.teamRunId },
+        { id: 2, kind: "artifact", item: ARTIFACT_ITEM },
+      ]
+    : [...props.initialItems];
   const expanded: Record<string, boolean> = {};
 
   const element = (): ReactElement => {
@@ -183,6 +193,7 @@ function renderExpertTeamRunCard(props: HarnessProps): Harness {
               run,
               now: NOW,
               connection: state.connection,
+              confirming: props.confirming,
               expandedResultIds: expanded,
               onToggleResult: (resultId: string) => {
                 expanded[resultId] = expanded[resultId] !== true;
@@ -190,12 +201,19 @@ function renderExpertTeamRunCard(props: HarnessProps): Harness {
               },
               onRequestCancelTeam: props.onCancelTeam,
               onRequestCancelMember: props.onCancelMember,
+              onConfirmCancel: props.onConfirmCancel,
               onPreviewArtifact: props.onPreviewArtifact,
             });
       }),
-      items.flatMap((item) =>
-        item.kind === "artifact" ? [createElement(ResultArtifactCard, { key: item.item.id, item: item.item })] : [],
-      ),
+      items.flatMap((item): ReactElement[] => {
+        if (item.kind === "artifact") {
+          return [createElement(ResultArtifactCard, { key: item.item.id, item: item.item })];
+        }
+        if (item.kind === "user" || item.kind === "assistant") {
+          return [createElement("p", { key: item.id }, item.text)];
+        }
+        return [];
+      }),
     );
   };
 
@@ -248,17 +266,21 @@ function renderExpertTeamRunCard(props: HarnessProps): Harness {
       if (previous.generation !== undefined && previous.generation !== snapshot.generation) {
         items = items.filter((item) => item.kind !== "expert-team-run");
       }
-      render();
-      // 同代快照里新出现的运行按快照对账补卡；同 teamRunId 不重复插入。
+      let nextId = 500;
+      // 与 App 的 reconcileExpertTeamRuns 相同：快照里的运行按消息锚补卡，同 teamRunId 不重复插入。
       for (const run of snapshot.runs) {
-        if (!items.some((item) => item.kind === "expert-team-run" && item.teamRunId === run.teamRunId)) {
-          items = [{ kind: "expert-team-run", teamRunId: run.teamRunId }, ...items];
-        }
+        items = insertExpertTeamRunCard(items, {
+          teamRunId: run.teamRunId,
+          ...(run.clientMessageId === undefined ? {} : { clientMessageId: run.clientMessageId }),
+          allowSnapshotFallback: true,
+          allocateId: () => ++nextId,
+        });
       }
       render();
     },
     queryTeamRun: () => container!.querySelector(".expert-team-run-card"),
     queryArtifact: () => container!.querySelector(".artifact-card"),
+    teamCardCount: () => container!.querySelectorAll(".expert-team-run-card").length,
   };
 }
 
@@ -324,6 +346,61 @@ describe("ExpertTeamRunCard", () => {
     card.reconcile({ sessionId: "s1", generation: "new-generation", revision: 0, runs: [] });
     expect(card.queryTeamRun()).toBeNull();
     expect(card.queryArtifact()).not.toBeNull();
+  });
+
+  it("freezes the team confirmation on disconnect so no cancel request leaves the card", async () => {
+    const confirmTeam = vi.fn();
+    const card = renderExpertTeamRunCard({
+      run: runningTeam(),
+      connection: "closed",
+      confirming: { kind: "team", teamRunId: "run-1", surface: "chat" },
+      onConfirmCancel: confirmTeam,
+    });
+    expect(card.text()).toContain("连接已断开");
+    expect(card.button("确认终止专家团")).toBeDisabled();
+    await card.click("确认终止专家团");
+    expect(confirmTeam).not.toHaveBeenCalled();
+    // 同代快照解冻后确认重新可用，仍然只在用户点击时发出。
+    card.reconcile({ sessionId: "s1", generation: "g1", revision: 2, runs: [runningTeam({ revision: 2 })] });
+    expect(card.button("确认终止专家团")).not.toBeDisabled();
+    await card.click("确认终止专家团");
+    expect(confirmTeam).toHaveBeenCalledWith({ kind: "team", teamRunId: "run-1", surface: "chat" });
+  });
+
+  it("freezes the member confirmation on disconnect as well", async () => {
+    const confirmMember = vi.fn();
+    const card = renderExpertTeamRunCard({
+      run: runWithExecutingAndReviewingMembers(),
+      connection: "closed",
+      confirming: { kind: "member", runId: "member-run-1", surface: "chat" },
+      onConfirmCancel: confirmMember,
+    });
+    expect(card.button("确认终止成员")).toBeDisabled();
+    await card.click("确认终止成员");
+    expect(confirmMember).not.toHaveBeenCalled();
+  });
+
+  it("restores a team card from the in-memory run list when a session tab is reopened", () => {
+    const run = runningTeam({ revision: 2 });
+    const card = renderExpertTeamRunCard({
+      run,
+      initialItems: [
+        { id: 11, kind: "user", text: "重开前的用户消息", clientMessageId: "m1" },
+        { id: 12, kind: "assistant", text: "重开前的助手回复" },
+        { id: 13, kind: "artifact", item: ARTIFACT_ITEM },
+      ],
+    });
+    // 关闭标签后重开：历史回放只有消息与 Artifact，内存里仍有效的运行没有卡。
+    expect(card.queryTeamRun()).toBeNull();
+    // 同代 runList 快照到达：按最后一条用户消息补卡。
+    card.reconcile({ sessionId: "s1", generation: "g1", revision: 2, runs: [run] });
+    expect(card.queryTeamRun()).not.toBeNull();
+    expect(card.text()).toContain("重开前的用户消息");
+    expect(card.text()).toContain("重开前的助手回复");
+    expect(card.queryArtifact()).not.toBeNull();
+    // 重复对账同一个 teamRunId 不插第二张卡。
+    card.reconcile({ sessionId: "s1", generation: "g1", revision: 3, runs: [runningTeam({ revision: 3 })] });
+    expect(card.teamCardCount()).toBe(1);
   });
 });
 
