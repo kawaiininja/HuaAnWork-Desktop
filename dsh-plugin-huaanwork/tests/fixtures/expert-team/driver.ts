@@ -47,6 +47,7 @@ import type {
 } from '../../../src/client-huaanwork/rpc-types.ts'
 import { validTeamInput } from './team.ts'
 import type {} from '@deepseek-ai/dsh-agent-loop'
+import type {} from '@deepseek-ai/dsh-goal'
 
 const FIXTURE_PACKAGE = fileURLToPath(new URL('../agent-package/', import.meta.url))
 
@@ -368,6 +369,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 type SessionAgentView = {
   id?: string
   session?: { id?: string }
+  status?: string
   followup?: (message: unknown) => void
   whenIdle?: () => Promise<void>
 }
@@ -436,6 +438,24 @@ function finalSummaryOf(messages: readonly Message[]): string {
     if (text.trim().length > 0) parts.push(text)
   }
   return parts.join('\n').trim()
+}
+
+/** 首个 goal 续轮消息的下标;其后的文本属于 goal 回合,不计入团队回合汇总。 */
+function goalCutoff(messages: readonly Message[]): number {
+  const index = messages.findIndex((message) => message.role === 'user'
+    && message.source.kind === 'goal' && message.source.round > 0)
+  return index < 0 ? messages.length : index
+}
+
+/** 会话中真实 goal 续轮消息的 round 序列(round >= 1)。 */
+function goalRoundsOf(messages: readonly Message[]): number[] {
+  const rounds: number[] = []
+  for (const message of messages) {
+    if (message.role !== 'user') continue
+    const source = message.source
+    if (source.kind === 'goal' && source.round > 0) rounds.push(source.round)
+  }
+  return rounds
 }
 
 /** 父会话中来自系统/子代理的 user 消息(团队回合不得产生任何结算通知)。 */
@@ -565,6 +585,16 @@ export type ComplianceTeamDispatchRecord = {
   reviewVerdict?: 'pass' | 'revise'
 }
 
+/** 一次脚本模型请求的工具面,用于断言 goal 续轮不含团长派工工具。 */
+export type ComplianceRequestRecord = {
+  isLeader: boolean
+  /** 该请求由某个成员 activation 触发的成员请求。 */
+  member: boolean
+  /** 非空表示该请求属于 goal 的第 N 轮续拍(round >= 1)。 */
+  goalRound: number | undefined
+  toolNames: string[]
+}
+
 export type ComplianceTeamSmokeResult = {
   run: ExpertTeamRun
   dispatches: ComplianceTeamDispatchRecord[]
@@ -577,10 +607,16 @@ export type ComplianceTeamSmokeResult = {
   memberMcpServers: Array<{ serverName: string; toolName: string }>
   primaryArtifactIds: string[]
   artifact: { title: string; format: string; content: string } | undefined
+  /** 真实 Artifact 存储中本次回合新增的文件数(跨回合累计目录的增量)。 */
+  artifactCount: number
   parentNotifications: Array<{ kind: string; text: string }>
   finalSummary: string
   dispatchAttachmentDetached: boolean
   goalDispatchError: string | undefined
+  /** 会话中真实 goal 续轮消息的 round 序列。 */
+  goalRounds: number[]
+  /** 本轮全部模型请求记录(含 goal 续轮请求)。 */
+  requests: ComplianceRequestRecord[]
 }
 
 function memberForPackage(pkg: InstalledPackage, memberId: string, role: ExpertTeamMember['role'], responsibility: string): ExpertTeamMember {
@@ -649,9 +685,21 @@ export async function createExpertTeamDefinition(
 
 // ────────────────────────── scripted model ──────────────────────────
 
+/**
+ * 单个派工波次内允许等待同波次成员流的最长时间:并发池下两路成员流必须在场,
+ * 串行池下该等待只会白等一次;超过上限即放弃等待,由实测并发数暴露真实上限。
+ */
+const OVERLAP_BARRIER_MS = 5_000
+
 type LeaderDispatch = {
   callId: string
   args: Record<string, unknown>
+}
+
+/** 最近一次团长派工波次:同一 `tool_calls` 消息里同时发出、尚未开始的派工条数。 */
+type DispatchWave = {
+  unstarted: number
+  deadline: number
 }
 
 type RunScript = {
@@ -663,6 +711,7 @@ type RunScript = {
   maxMemberConcurrency: number
   activeMembers: number
   parentMcpToolNames: Set<string>
+  /** 成员 id → 该成员 activation 请求里出现的首个 `mcp__*` 工具名(每次派工独立服务名)。 */
   memberMcpServers: Map<string, string>
   finalSummary: string
   dispatches: LeaderDispatch[]
@@ -671,6 +720,8 @@ type RunScript = {
   transitionalText: string | undefined
   revisionsEmitted: number
   artifactPresented: boolean
+  wave: DispatchWave | undefined
+  requests: ComplianceRequestRecord[]
 }
 
 function newRunScript(reviewers: string[], executorMemberIds: string[], options: ComplianceTeamSmokeOptions): RunScript {
@@ -691,6 +742,8 @@ function newRunScript(reviewers: string[], executorMemberIds: string[], options:
     transitionalText: options.transitionalTextBeforeDispatch,
     revisionsEmitted: 0,
     artifactPresented: false,
+    wave: undefined,
+    requests: [],
   }
 }
 
@@ -703,17 +756,22 @@ async function* scriptedStream(script: ScriptRef, options: GenerateOptions): Asy
   const run = script.current
   const tools = options.tools ?? []
   const isLeader = tools.some((tool) => tool.name === EXPERT_TEAM_DISPATCH_TOOL)
-  const requestText = allMessagesText(options.messages)
+  const isMember = !isLeader && allMessagesText(options.messages).includes('专家团成员：')
+  const goalRound = goalRoundOf(options.messages)
   const lastUser = lastUserText(options.messages)
   if (process.env.EXPERT_TEAM_DEBUG === '1') {
     console.log('STREAM', JSON.stringify({
       hasRun: run !== undefined,
       isLeader,
+      isMember,
+      goalRound,
       tools: tools.map((tool) => tool.name),
       user: lastUser.slice(0, 160),
-      prompt: requestText.slice(0, 160),
       messageCount: options.messages.length,
     }))
+  }
+  if (run !== undefined) {
+    run.requests.push({ isLeader, member: isMember, goalRound, toolNames: tools.map((tool) => tool.name) })
   }
   if (run !== undefined && isLeader) {
     for (const tool of tools) {
@@ -722,16 +780,29 @@ async function* scriptedStream(script: ScriptRef, options: GenerateOptions): Asy
     yield* leaderStream(run, options)
     return
   }
-  if (run !== undefined && requestText.includes('专家团成员：')) {
+  if (run !== undefined && isMember) {
+    const memberId = memberIdOf(allMessagesText(options.messages)) ?? 'unknown-member'
     for (const tool of tools) {
+      if (run.memberMcpServers.has(memberId)) break
       const match = /^mcp__(.+)__[^_].*$/.exec(tool.name)
-      if (match?.[1] !== undefined) run.memberMcpServers.set(match[1], tool.name)
+      if (match?.[1] !== undefined) run.memberMcpServers.set(memberId, tool.name)
     }
-    yield* memberStream(run, requestText)
+    yield* memberStream(run, allMessagesText(options.messages))
     return
   }
-  // 辅助流(会话标题/压缩)与未知请求:固定文本,绝不触网。
+  // 辅助流(会话标题/压缩)、goal 续轮与未知请求:固定文本,绝不触网。
   yield* textStream('辅助请求已完成。')
+}
+
+/** 最后一条 user 消息若来自 goal 续轮,返回其 round;否则 `undefined`。 */
+function goalRoundOf(messages: readonly GenerateOptions['messages'][number][]): number | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message === undefined || message.role !== 'user') continue
+    const source = (message as Message).source
+    return source.kind === 'goal' && source.round > 0 ? source.round : undefined
+  }
+  return undefined
 }
 
 /** 全部消息(任意角色)的文本拼接;成员 activation 提示词不在 user 消息里。 */
@@ -782,6 +853,7 @@ function* toolCallStream(calls: Array<{ name: string; args: Record<string, unkno
 }
 
 function dispatchCalls(run: RunScript, inputs: Array<{ memberId: string; kind: string; task: string; inputResultIds?: string[]; supersedesResultId?: string }>): Array<{ name: string; args: Record<string, unknown> }> {
+  run.wave = { unstarted: inputs.length, deadline: Date.now() + OVERLAP_BARRIER_MS }
   return inputs.map((input) => {
     const callId = `dispatch-${randomUUID()}`
     const args: Record<string, unknown> = {
@@ -965,19 +1037,27 @@ async function* memberStream(run: RunScript, prompt: string): AsyncGenerator<Str
   run.activeMembers += 1
   run.maxMemberConcurrency = Math.max(run.maxMemberConcurrency, run.activeMembers)
   try {
-    // 两个执行成员并行时让两路流同时在场,使并发上限由真实信号量决定并可见。
-    if (!review) {
-      const deadline = Date.now() + 150
-      while (run.activeMembers < 2 && Date.now() < deadline) await delay(10)
+    // 同一派工波次内还有未开始的成员时,保持本路流在场,直到第二路成员流真正
+    // 进入(并发池)或波次上限到期(串行池);并发上限始终由实测在场数决定。
+    const wave = run.wave
+    if (!review && wave !== undefined && wave.unstarted > 1) {
+      while (run.activeMembers < 2 && Date.now() < wave.deadline) await delay(10)
     }
+    if (wave !== undefined && wave.unstarted > 0) wave.unstarted -= 1
     if (review) {
       const assigned = run.verdictByMember.get(memberId) ?? []
       if (assigned.length === 0) {
-        const next = run.verdictQueue.shift() ?? 'pass'
+        const next = run.verdictQueue.shift()
+        if (next === undefined) {
+          throw new Error(`审查结论队列已在成员 ${memberId} 处耗尽:场景必须逐条提供审查裁决`)
+        }
         assigned.push(next)
         run.verdictByMember.set(memberId, assigned)
       }
-      const verdict = assigned.shift() ?? 'pass'
+      const verdict = assigned.shift()
+      if (verdict === undefined) {
+        throw new Error(`成员 ${memberId} 缺少本次审查裁决`)
+      }
       const text = `审查意见(${memberId}):已逐项核对当前有效结果。\n[VERDICT: ${verdict === 'revise' ? 'REVISE' : 'PASS'}]`
       yield* textStream(text)
       return
@@ -1022,6 +1102,38 @@ function mcpAttachmentNames(ctx: Context, sessionId: string): string[] {
 
 function serverNameOfTool(toolName: string): string | undefined {
   return /^mcp__(.+)__[^_].*$/.exec(toolName)?.[1]
+}
+
+/** `ctx.goals` 在场景 4 中使用的最小面(真实 goal 服务;缺失即失败,不做假 goal)。 */
+type GoalSeam = {
+  create(agent: unknown, request: { objective: string; maxGoalRounds: number }): { id: unknown }
+}
+
+/**
+ * 在团队回合运行期间创建真实 goal:goal-round-driver 会在 `turn/end` 后的
+ * 静默期自动把第 1 轮续拍排进同一 agent 的 inbox。
+ * @param ctx - 组合 Host 上下文。
+ * @param sessionId - 团队回合所属稳定通道会话。
+ * @param clientMessageId - 团队回合 id;用于确认回合已开始(下一 inbox 槽属于团队回合)。
+ * @returns 真实 goal id。
+ */
+async function armGoal(ctx: Context, sessionId: string, clientMessageId: string): Promise<string> {
+  const goals = ctx.get('goals') as GoalSeam | undefined
+  if (goals === undefined) throw new Error('组合启动档缺少 goals 服务:场景 4 需要真实 goal 续轮,不能伪造')
+  await waitFor(
+    () => ctx.huaanworkExpertTeamRuns.byTurn(sessionId, clientMessageId) !== undefined,
+    'team run projection before goal arm',
+  )
+  const agent = sessionAgent(ctx, sessionId)
+  if (agent === undefined) throw new Error('团队回合开始前找不到稳定通道 agent,无法创建 goal')
+  const view = goals.create(agent, {
+    objective: '完成本次专家团合规审查,并在团队结算后再收敛一次。',
+    maxGoalRounds: 1,
+  })
+  if (typeof view.id !== 'string' || view.id.length === 0) {
+    throw new Error('goal 服务未返回 goal id')
+  }
+  return view.id
 }
 
 async function artifactOf(
@@ -1079,6 +1191,9 @@ export async function executeScriptedTeamRun(
   }
 
   const clientMessageId = randomUUID()
+  const artifactsBefore = new Set(
+    (await listArtifacts(runtime.profileDir, runtime.sessionId)).map((item) => item.artifactId),
+  )
   try {
     const sent = await postLoopbackRoute(ctx, '/huaanwork/session/send', {
       text: `@team:${team.slug} 审查本季度合同与付款合规风险。`,
@@ -1087,6 +1202,7 @@ export async function executeScriptedTeamRun(
       at: { kind: 'expert-team', name: team.slug },
     })
     if (sent.started !== true) throw new Error(`session.send did not start: ${JSON.stringify(sent)}`)
+    if (options.activeGoal === true) await armGoal(ctx, runtime.sessionId, clientMessageId)
     const run = await waitForRunTerminal(ctx.huaanworkExpertTeamRuns, runtime.sessionId, clientMessageId)
     if (process.env.EXPERT_TEAM_DEBUG === '1') {
       console.log('RUN', JSON.stringify({
@@ -1110,7 +1226,34 @@ export async function executeScriptedTeamRun(
       'team dispatch attachment detach',
       10_000,
     )
+    let goalDispatchError: string | undefined
+    try {
+      await ctx.huaanworkExpertTeamCoordinator.dispatch({
+        callId: `goal-after-settle-${randomUUID()}`,
+        parentSessionId: runtime.sessionId,
+        clientMessageId,
+        memberId: executorIds[0] ?? 'm-exec-1',
+        kind: 'execute',
+        task: 'goal 续拍不应再派工',
+      } satisfies ExpertTeamDispatchInput)
+    } catch (error) {
+      goalDispatchError = error instanceof Error ? error.message : String(error)
+    }
+    if (options.activeGoal === true) {
+      await waitFor(
+        () => goalRoundsOf(sessionMessages(ctx, runtime.sessionId)).length > 0
+          && script.requests.some((request) => request.goalRound !== undefined),
+        'goal continuation round',
+        60_000,
+      )
+      await waitFor(
+        () => sessionAgent(ctx, runtime.sessionId)?.status === 'idle',
+        'goal continuation turn end',
+        60_000,
+      )
+    }
     const messages = sessionMessages(ctx, runtime.sessionId)
+    const artifacts = await listArtifacts(runtime.profileDir, runtime.sessionId)
     const primaryArtifactIds = run.primaryArtifactId === undefined ? [] : [run.primaryArtifactId]
     const artifact = await artifactOf(runtime.profileDir, runtime.sessionId, run.primaryArtifactId)
     const memberMcpServers: ComplianceTeamSmokeResult['memberMcpServers'] = []
@@ -1128,19 +1271,6 @@ export async function executeScriptedTeamRun(
       ...(result.memberRunId === undefined ? {} : { memberRunId: result.memberRunId }),
       ...(result.reviewVerdict === undefined ? {} : { reviewVerdict: result.reviewVerdict }),
     }))
-    let goalDispatchError: string | undefined
-    try {
-      await ctx.huaanworkExpertTeamCoordinator.dispatch({
-        callId: `goal-after-settle-${randomUUID()}`,
-        parentSessionId: runtime.sessionId,
-        clientMessageId,
-        memberId: executorIds[0] ?? 'm-exec-1',
-        kind: 'execute',
-        task: 'goal 续拍不应再派工',
-      } satisfies ExpertTeamDispatchInput)
-    } catch (error) {
-      goalDispatchError = error instanceof Error ? error.message : String(error)
-    }
     return {
       run,
       dispatches,
@@ -1151,10 +1281,13 @@ export async function executeScriptedTeamRun(
       memberMcpServers,
       primaryArtifactIds,
       artifact,
+      artifactCount: artifacts.filter((item) => !artifactsBefore.has(item.artifactId)).length,
       parentNotifications: parentNotificationsOf(messages),
-      finalSummary: finalSummaryOf(messages),
+      finalSummary: finalSummaryOf(messages.slice(0, goalCutoff(messages))),
       dispatchAttachmentDetached: !isAgentToolAttached(ctx.huaanworkAttachments, runtime.sessionId, EXPERT_TEAM_DISPATCH_TOOL),
       goalDispatchError,
+      goalRounds: goalRoundsOf(messages),
+      requests: [...script.requests],
     }
   } finally {
     setScript(runtime, previousScript)
