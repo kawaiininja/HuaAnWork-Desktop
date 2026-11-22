@@ -156,6 +156,21 @@ function turnBoundaryOf(raw: unknown): TurnBoundary | undefined {
 }
 
 /**
+ * 一次 claim 的消息是否构成回合边界(与 `turnBoundaryOf` 同一判定)。
+ *
+ * `agent/inbox/claimed` 在每次 next-step 认领时逐条触发,不只在回合边界触发:
+ * `repeat-tool-reminder` 等插件会在 post-execute 后向 `next-step` 注入 `UserMessage`,
+ * 它们的 `source.kind` 不在白名单内,既不能换锚,也**不得改变回合级附件**。
+ * goal 续拍与真实用户消息(含缺 id 的 invalid)才是边界,调用方须按边界语义处理。
+ *
+ * @param raw - claim 载荷里的消息
+ * @returns 是否为回合边界消息
+ */
+export function isTurnBoundaryMessage(raw: unknown): boolean {
+  return turnBoundaryOf(raw) !== undefined
+}
+
+/**
  * Host 侧接线:`agent/pre-step` 写锚点、`session/disposed` 清理锚点。
  *
  * pre-step 是 waterfall:监听器必须显式 `return next()`,否则其余 pre-step 监听器

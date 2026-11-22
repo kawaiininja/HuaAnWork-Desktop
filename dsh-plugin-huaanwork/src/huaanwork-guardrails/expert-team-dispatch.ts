@@ -5,7 +5,8 @@
  * - `makeExpertTeamClaimed` 在 `agent/inbox/claimed`(首步工具快照之前)同步判定:
  *   父会话有且只有一个 `running` 团队运行、本次用户消息 id 与该运行的
  *   `clientMessageId` 相同、且协调器租约仍有效时才挂载;普通回合、goal 续拍与
- *   已结算的团队回合一律对称摘除。摘除/挂载后同步 `refreshAgentRestrict`,
+ *   已结算的团队回合一律对称摘除。mid-turn 注入的 notice/context claim
+ *   (`source.kind` 不在回合边界白名单内)不改变挂载。摘除/挂载后同步 `refreshAgentRestrict`,
  *   因为 claim 早于 prompt assembly,把状态留给下一次 pre-step 会让首个请求看不到工具。
  * - 执行体再按同一附件与当前回合锚复核,并补上 `exec.callId`、父会话与
  *   `clientMessageId`;模型只提供 `memberId/kind/task/inputResultIds?/supersedesResultId?`,
@@ -25,7 +26,7 @@ import type {
   ExpertTeamDispatchResult,
 } from '../huaanwork-host/expert-team/coordinator.ts'
 import type { ExpertTeamRunRegistry } from '../huaanwork-host/expert-team/runs.ts'
-import type { TurnAnchorStore } from '../huaanwork-host/turn-anchors.ts'
+import { isTurnBoundaryMessage, type TurnAnchorStore } from '../huaanwork-host/turn-anchors.ts'
 import {
   attachAgentTools,
   detachAgentTools,
@@ -203,6 +204,11 @@ type ExpertTeamClaimedPayload = { agent: Agent; message: UserMessage; turn: numb
  * 等于运行登记的 `clientMessageId`、且租约有效。goal 续拍(沿用旧锚、消息 id 不同)
  * 与普通回合因此都不命中,必须对称摘除,避免过期团队回合继续派工。
  *
+ * `agent/inbox/claimed` 对每条 next-step 认领都触发,不只在回合边界:第 1 步之后
+ * `repeat-tool-reminder` 等插件会经 `additionalContexts` 向 `next-step` 注入
+ * `UserMessage`(如 `source.kind: 'repeat-tool-reminder'`)。这些注入不是回合边界,
+ * 只有回合边界 claim 才改变挂载,否则一次注入就会把进行中的团队回合派工工具摘掉。
+ *
  * 先幂等登记回合锚(与 `makeResultPresentClaimed` 共享 `notePreStep`,重复调用不刷新),
  * 不依赖两个监听器的注册先后。同步异常不能只 throw——notification 的异常会被分发器
  * 吞掉——必须 `agent.cancel` 取消 driver,阻断本回合。
@@ -216,6 +222,8 @@ export function makeExpertTeamClaimed(ctx: ExpertTeamClaimedContext) {
     if (!sessionId) return
     try {
       ctx.huaanworkTurnAnchors?.notePreStep(sessionId, [message], new Date().toISOString())
+      // mid-turn 注入(notice/context)不是回合边界:保持当前挂载,不重新判定。
+      if (!isTurnBoundaryMessage(message)) return
       const active = ctx.huaanworkExpertTeamRuns?.activeBySession(sessionId)
       const wantAttached =
         active !== undefined &&

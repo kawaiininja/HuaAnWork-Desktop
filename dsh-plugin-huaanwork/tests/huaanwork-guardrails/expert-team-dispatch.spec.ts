@@ -129,6 +129,7 @@ function makeClaimFixture() {
   return {
     listener,
     attachments,
+    anchors,
     refresh,
     runs,
     teamRunId: run.teamRunId,
@@ -213,6 +214,50 @@ it('keeps the tool detached when the lease is already invalid', () => {
   lease.valid = false
   listener({ agent: parentAgent as never, message: teamMessage, turn: 1 })
   expect(isAgentToolAttached(attachments, PARENT, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+})
+
+it('detaches a still-running team on a goal continuation claim', () => {
+  const { listener, attachments, refresh, teamMessage, goalMessage } = makeClaimFixture()
+  listener({ agent: parentAgent as never, message: teamMessage, turn: 1 })
+  expect(isAgentToolAttached(attachments, PARENT, EXPERT_TEAM_DISPATCH_TOOL)).toBe(true)
+  refresh.mockClear()
+  // 团队运行仍是 running:摘除只能由 goal/消息 id 语义解释,与终态无关。
+  listener({ agent: parentAgent as never, message: goalMessage, turn: 2 })
+  expect(isAgentToolAttached(attachments, PARENT, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+  expect(refresh).toHaveBeenCalledTimes(1)
+})
+
+it('detaches a still-running team on another real user message', () => {
+  const { listener, attachments, refresh, teamMessage, ordinaryMessage } = makeClaimFixture()
+  listener({ agent: parentAgent as never, message: teamMessage, turn: 1 })
+  expect(isAgentToolAttached(attachments, PARENT, EXPERT_TEAM_DISPATCH_TOOL)).toBe(true)
+  refresh.mockClear()
+  listener({ agent: parentAgent as never, message: ordinaryMessage, turn: 2 })
+  expect(isAgentToolAttached(attachments, PARENT, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+  expect(refresh).toHaveBeenCalledTimes(1)
+})
+
+it('leaves the attachment unchanged across injected mid-turn claims', () => {
+  const { listener, attachments, anchors, refresh, teamMessage, ordinaryMessage } = makeClaimFixture()
+  listener({ agent: parentAgent as never, message: teamMessage, turn: 1 })
+  expect(isAgentToolAttached(attachments, PARENT, EXPERT_TEAM_DISPATCH_TOOL)).toBe(true)
+  refresh.mockClear()
+
+  // `repeat-tool-reminder` 在 post-execute 后向 next-step 注入,下一次 pre-step 才被 claim:
+  // 它不是回合边界,不得摘除进行中团队回合的派工工具,也不得换锚。
+  const reminder = userMessageWithId('reminder-1', { kind: 'repeat-tool-reminder' })
+  listener({ agent: parentAgent as never, message: reminder, turn: 1 })
+  expect(isAgentToolAttached(attachments, PARENT, EXPERT_TEAM_DISPATCH_TOOL)).toBe(true)
+  expect(refresh).not.toHaveBeenCalled()
+  expect(anchors.current(PARENT)?.clientMessageId).toBe(TEAM_CLIENT_MESSAGE_ID)
+
+  // 反向对称:已摘除时注入的 claim 也不会把工具重新挂上。
+  listener({ agent: parentAgent as never, message: ordinaryMessage, turn: 2 })
+  expect(isAgentToolAttached(attachments, PARENT, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+  refresh.mockClear()
+  listener({ agent: parentAgent as never, message: userMessageWithId('reminder-2', { kind: 'repeat-tool-reminder' }), turn: 2 })
+  expect(isAgentToolAttached(attachments, PARENT, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+  expect(refresh).not.toHaveBeenCalled()
 })
 
 it('cancels the driver when the attachment sync throws instead of swallowing the error', () => {
