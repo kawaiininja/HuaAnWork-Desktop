@@ -6,7 +6,7 @@ import type { UnattendedScope } from '../huaanwork-guardrails/policy.ts'
 import type { AgentPackageHost } from './agent-package/host.ts'
 import type { AgentCatalogClient } from './agent-package/catalog-client.ts'
 import type { AgentCatalogSecurity } from './agent-package/catalog-security.ts'
-import type { AgentPackageSubagentRequest } from './agent-package/types.ts'
+import type { AgentPackageSubagentRequest, AgentPackageTeamRequests } from './agent-package/types.ts'
 import type { HuaanworkEventHub } from './events.ts'
 import type { ExpertTeamRunRegistry } from './expert-team/runs.ts'
 import type { ExpertTeamStore } from './expert-team/types.ts'
@@ -45,6 +45,11 @@ declare module '@deepseek-ai/cordis' {
     huaanworkAgentPackageHost: AgentPackageHost
     /** `@slug` 一次运行的子代理请求(技能插件在 subagents.startActivation 里消费)。 */
     huaanworkAgentPackageRequest: { current: AgentPackageSubagentRequest | null }
+    /**
+     * 团队成员请求表(`reservedChildId → 请求`)。团队并行成员不能共享单槽：
+     * `skills.ts` 的 activation 包装按预留子会话 id 精确消费，未命中才回落单槽。
+     */
+    huaanworkAgentPackageTeamRequests: AgentPackageTeamRequests
     /**
      * 智能体包回合当前绑定的子会话 id。policy 用它标记 `mcp__*` 调用来自包运行链路:
      * 子会话没有审批界面,自己挂载的 MCP 工具不能被 ask 自动拒绝。
@@ -98,6 +103,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkAgentRequest',
   'huaanworkAgentPackageHost',
   'huaanworkAgentPackageRequest',
+  'huaanworkAgentPackageTeamRequests',
   'huaanworkPackageChildSessions',
   'huaanworkPackageChildAllow',
   'huaanworkCheckpointUserDataDir',
@@ -190,6 +196,7 @@ export function installHuaanworkHolders(
   ctx.huaanworkAttachments = emptyAttachments()
   ctx.huaanworkAgentRequest = { current: null }
   ctx.huaanworkAgentPackageRequest = { current: null }
+  ctx.huaanworkAgentPackageTeamRequests = new Map<string, AgentPackageSubagentRequest>()
   ctx.huaanworkPackageChildSessions = new Set<string>()
   ctx.huaanworkPackageChildAllow = new Map<string, readonly string[]>()
   ctx.huaanworkAgentCatalog = { current: { items: [] } }

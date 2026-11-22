@@ -23,6 +23,7 @@ import {
 } from './agent-package/creation.ts'
 import { CorruptAgentPackageDraftError, discardAgentPackageDraft, isAgentCancelText } from './agent-package/drafts.ts'
 import type { AgentPackageActiveTurnRegistry } from './agent-package/host.ts'
+import type { AgentPackageTeamRequests } from './agent-package/types.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { isCreationCancelText } from './creation-utterances.ts'
 import {
@@ -144,6 +145,11 @@ export type SessionRuntimeContext = {
   huaanworkSystemSkillLeases?: SystemSkillLeaseStore
   /** 包回合血缘允许表:受管儿童判别(`isUnmanagedChildSession`)读它。 */
   huaanworkPackageChildAllow?: Map<string, readonly string[]>
+  /**
+   * 团队成员请求表(holders.ts 注入):团队派发按 reservedChildId 隔离请求，
+   * 普通 `@智能体` 仍走单槽 `huaanworkAgentPackageRequest`。
+   */
+  huaanworkAgentPackageTeamRequests?: AgentPackageTeamRequests
 }
 
 /** 一次已准入的用户回合:根与模型由 `sessionSend`/出队复检算好。 */

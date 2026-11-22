@@ -70,6 +70,8 @@ export interface SubagentRunRegistry {
     label: string
     packageVersion?: string
     clientMessageId?: string
+    /** 团队成员的 run 所属的专家团运行；主聊流据此跳过独立成员卡。 */
+    teamRunId?: string
   }): string
   get(runId: string): SubagentRunProjection | undefined
   parentSessionIdOf(runId: string): string | undefined
@@ -439,6 +441,7 @@ export function createSubagentRunRegistry(options: SubagentRunRegistryOptions): 
       }
       if (input.packageVersion !== undefined) run.packageVersion = input.packageVersion
       if (input.clientMessageId !== undefined) run.clientMessageId = input.clientMessageId
+      if (input.teamRunId !== undefined) run.teamRunId = input.teamRunId
       const record: RunRecord = {
         run,
         resultState: 'pending',

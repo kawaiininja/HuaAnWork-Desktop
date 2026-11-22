@@ -407,3 +407,96 @@ test("a package child attaches subagent only when the package allow declares it"
     expect(names).toContain("glob");
   }
 });
+
+function packageRequest(
+  parentSessionId: string,
+  childId: string,
+  allow: readonly string[],
+  bindChild: (id: string) => void,
+) {
+  return {
+    runId: `run-${allow.join("-")}`,
+    allow: [...allow],
+    persona: "包人设",
+    runtime: {
+      slug: "pkg",
+      packageDir: "/tmp/pkg",
+      workspaceRoot: "/tmp",
+      skillScripts: [],
+      runSkillScript: async () => ({ text: "" }),
+    },
+    parentSessionId,
+    childId,
+    bindChild,
+  };
+}
+
+// Task 7：团队请求表按预留子会话 id 精确消费，优先于普通单槽；消费后只删本键。
+test("a team request keyed by the reserved child id wins over the single slot and is deleted when consumed", async () => {
+  const h = lineageHarness();
+  const slotBinds: string[] = [];
+  const teamBinds: string[] = [];
+  const slotPkg = {
+    ...packageRequest(h.parentSessionId, h.grandchildId, ["read"], (id) => slotBinds.push(id)),
+    runId: "slot-run",
+  };
+  const teamPkg = {
+    ...packageRequest(h.parentSessionId, h.grandchildId, ["read", "glob"], (id) => teamBinds.push(id)),
+    runId: "team-run",
+  };
+  const teamRequests = new Map([[h.grandchildId, teamPkg]]);
+  Object.assign(h.ctx, {
+    huaanworkAgentPackageRequest: { current: slotPkg },
+    huaanworkAgentPackageTeamRequests: teamRequests,
+  });
+  await activateOf(h.ctx)(activationSpec(h.grandchildId, h.parentSessionId));
+
+  assert.deepEqual(teamBinds, [h.grandchildId]);
+  assert.deepEqual(slotBinds, []);
+  assert.equal(teamRequests.has(h.grandchildId), false);
+  // 普通单槽不被团队请求消费影响：仍在原处，由普通回合自己的 finally 清理。
+  assert.equal((h.ctx as { huaanworkAgentPackageRequest: { current: unknown } }).huaanworkAgentPackageRequest.current, slotPkg);
+  assert.deepEqual(h.grandchildTools.schemas().map((schema) => schema.name), ["read", "glob"]);
+});
+
+// Task 7：预留 id 不匹配时不得继承团队请求，回落普通单槽；团队键保留给其真正的 activation。
+test("a team request for another reserved child id leaves the single slot authoritative", async () => {
+  const h = lineageHarness();
+  const slotBinds: string[] = [];
+  const teamBinds: string[] = [];
+  const slotPkg = {
+    ...packageRequest(h.parentSessionId, h.grandchildId, ["read"], (id) => slotBinds.push(id)),
+    runId: "slot-run",
+  };
+  const teamPkg = {
+    ...packageRequest(h.parentSessionId, "other-child", ["read", "glob"], (id) => teamBinds.push(id)),
+    runId: "team-run",
+  };
+  const teamRequests = new Map([["other-child", teamPkg]]);
+  Object.assign(h.ctx, {
+    huaanworkAgentPackageRequest: { current: slotPkg },
+    huaanworkAgentPackageTeamRequests: teamRequests,
+  });
+  await activateOf(h.ctx)(activationSpec(h.grandchildId, h.parentSessionId));
+
+  assert.deepEqual(slotBinds, [h.grandchildId]);
+  assert.deepEqual(teamBinds, []);
+  assert.equal(teamRequests.has("other-child"), true);
+  assert.deepEqual(h.grandchildTools.schemas().map((schema) => schema.name), ["read"]);
+});
+
+// Task 7：团队请求缺席时普通路径零变化（同一 activation 仍由单槽接管并清理）。
+test("the single slot still drives the package branch when no team request table exists", async () => {
+  const h = lineageHarness();
+  const slotBinds: string[] = [];
+  const slotPkg = {
+    ...packageRequest(h.parentSessionId, h.grandchildId, ["read"], (id) => slotBinds.push(id)),
+    runId: "slot-run",
+  };
+  (h.ctx as Record<string, unknown>).huaanworkAgentPackageRequest = { current: slotPkg };
+  await activateOf(h.ctx)(activationSpec(h.grandchildId, h.parentSessionId));
+
+  assert.deepEqual(slotBinds, [h.grandchildId]);
+  assert.equal((h.ctx as { huaanworkAgentPackageRequest: { current: unknown } }).huaanworkAgentPackageRequest.current, null);
+  assert.deepEqual(h.grandchildTools.schemas().map((schema) => schema.name), ["read"]);
+});
