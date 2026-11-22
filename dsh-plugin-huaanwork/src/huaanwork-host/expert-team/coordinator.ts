@@ -31,7 +31,7 @@ import { parseReviewVerdict } from './text-protocol.ts'
  * - 256 KiB UTF-8 派工输入预算（不含包 persona）；
  * - 在同一个同步 `registry.update` 临界区内校验规则、写入结果并推进
  *   `unifiedRevisionRounds`，保证并行返修不会重复开启同一周期；
- * - 成员失败/停止返回完整结果（保留 `resultId`），取消闭包排空队列并定向取消成员。
+ * - 成员失败/停止返回完整结果（保留 `resultId`），取消闭包取消团长回合、排空队列并定向取消成员。
  *
  * 协调器不持久化任何状态；运行投影只经 `ExpertTeamRunRegistry` 发布。
  */
@@ -150,6 +150,8 @@ export type ExpertTeamCoordinatorOptions = {
   dispatchMember: ExpertTeamMemberDispatcher
   /** 定向取消成员 run；生产接 `subagentRuns.requestCancel(parentSessionId, memberRunId)`。 */
   requestMemberCancel?: (parentSessionId: string, memberRunId: string) => unknown
+  /** 终止整团时取消团长仍在进行的父回合；生产接 `agent.cancel({ kind: 'user' })`。 */
+  cancelParentTurn?: (parentSessionId: string) => void
   /** 单成员取消判定；成员 run 已被外部定向停止时把失败收敛为 `stopped`。 */
   isMemberCancelled?: (parentSessionId: string, memberRunId: string) => boolean
   now?: () => number
@@ -167,7 +169,7 @@ export type ExpertTeamCoordinator = {
   invalidateLease(teamRunId: string): void
   /** 等待该运行全部在途派工与成员清理确认；任务结算与 afterIdle 共用。 */
   waitMemberCleanups(teamRunId: string): Promise<void>
-  /** 整团取消：排空等待队列、中止在途成员、等待清理并收敛 `stopped`（幂等）。 */
+  /** 整团取消：取消团长回合、排空等待队列、中止在途成员、等待清理并收敛 `stopped`（幂等）。 */
   cancelRun(teamRunId: string): Promise<void>
 }
 
@@ -443,6 +445,17 @@ export function createExpertTeamCoordinator(
     }
   }
 
+  /** 团长回合取消只发起一次；已终结或不可取消的父回合不阻断整团终止。 */
+  function requestParentTurnCancel(parentSessionId: string): void {
+    const cancel = options.cancelParentTurn
+    if (cancel === undefined) return
+    try {
+      cancel(parentSessionId)
+    } catch {
+      // 父回合已结算或不可取消时忽略；成员清理仍必须完成。
+    }
+  }
+
   /**
    * 等待该运行全部在途派工与成员清理确认。派工 promise 本身已包含 Task 7 的
    * `cleanupPromise` 收尾；额外记录返回的 cleanupPromise 覆盖取消竞态的晚到清理。
@@ -491,6 +504,11 @@ export function createExpertTeamCoordinator(
         for (const memberRunId of memberRunIds) {
           requestMemberCancel(run.parentSessionId, memberRunId)
         }
+      }
+      // 规格 §13.3：终止整团同时取消团长仍在进行的父回合，否则成员收敛后团长回合
+      // 还会继续。只在本运行第一次进入取消闭包时触发（终态淘汰后不再打扰父回合）。
+      if (run !== undefined && state !== undefined) {
+        requestParentTurnCancel(run.parentSessionId)
       }
       await waitMemberCleanups(teamRunId)
       options.runs.markStopped(teamRunId)

@@ -411,6 +411,19 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
     // 定向取消只作用于该父会话下的成员 run(registry 自身校验归属)。
     requestMemberCancel: (parentSessionId, memberRunId) =>
       subagentRuns.requestCancel(parentSessionId, memberRunId),
+    // 终止整团同时取消团长回合(§13.3)：找当前 live agent 发起 user 取消；已终结或
+    // 不支持的 agent 不阻断成员清理。
+    cancelParentTurn: (parentSessionId) => {
+      const agent = findLiveAgentForSession(ctx, parentSessionId)
+      if (agent === undefined || agent === null) return
+      const cancel = (agent as { cancel?: (cause: { kind: 'user' }) => void }).cancel
+      if (typeof cancel !== 'function') return
+      try {
+        cancel.call(agent, { kind: 'user' })
+      } catch {
+        // 父回合已结算时取消无效果；成员清理照常继续。
+      }
+    },
     // 成员被外部定向停止时把失败收敛为 stopped:读 run 投影的停止相,不解析文案。
     isMemberCancelled: (parentSessionId, memberRunId) => {
       const run = subagentRuns.get(memberRunId)

@@ -556,6 +556,41 @@ test("result_present is allowed without approval when attached and denied when u
   }
 })
 
+test("expert_team_dispatch follows the same session-attached table: allow in ask/smart/full once attached, deny in both gates when unattached", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/policy.ts")
+  const sessionId = 'session-expert-team-dispatch'
+  const call = {
+    name: 'expert_team_dispatch',
+    arguments: { memberId: 'm-exec-1', kind: 'execute', task: '核对合同条款' },
+    agent: { session: { id: sessionId } },
+    callId: 'call-etd-1',
+  }
+
+  for (const mode of ['ask', 'smart', 'full'] as const) {
+    const profileDir = mkdtempSync(join(tmpdir(), `huaanwork-policy-etd-${mode}-`))
+    try {
+      writeFileSync(join(profileDir, 'huaanwork-settings.json'), JSON.stringify({ guard_mode: mode }))
+      const attachments = emptyAttachments()
+      const harness = applyPolicyWithUnattended({ huaanworkProfileDir: profileDir, huaanworkAttachments: attachments })
+      apply(harness.ctx as never)
+
+      // 未挂载：pre-execute 与 guard 双闸都 deny，绝不进入审批降级。
+      assert.deepEqual(await harness.preExecute(call), {
+        kind: 'deny',
+        reason: POLICY(reasonToolUnattached('expert_team_dispatch')),
+      })
+      assert.equal(harness.guard(call), GUARD(reasonToolUnattached('expert_team_dispatch')))
+
+      attachAgentTools(attachments, sessionId, ['expert_team_dispatch'])
+      // 挂载：团队回合内直接 allow，与 result_present 同一条显式分支；guard 无残留。
+      assert.deepEqual(await harness.preExecute(call), { kind: 'allow' })
+      assert.equal(harness.guard(call), undefined)
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true })
+    }
+  }
+})
+
 test("unattended degrade without callId does not enter allowedOnce and falls back to ask (guard cannot safely consume it)", async () => {
   const { apply } = await import("../../src/huaanwork-guardrails/policy.ts");
   const shellName = process.platform === "win32" ? "pwsh" : "bash";

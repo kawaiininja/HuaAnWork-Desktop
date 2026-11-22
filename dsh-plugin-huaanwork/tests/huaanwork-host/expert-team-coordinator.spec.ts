@@ -130,6 +130,8 @@ type CoordinatorFixtureOptions = {
   outputs?: Record<string, MemberTextResult>
   /** 审查成员按顺序返回的结论；缺省一律 revise。 */
   verdicts?: Array<'pass' | 'revise'>
+  /** 记录/注入团长回合取消；缺省不提供该能力。 */
+  cancelParentTurn?: (parentSessionId: string) => void
 }
 
 type CoordinatorFixture = {
@@ -321,6 +323,7 @@ async function makeCoordinatorFixture(options: CoordinatorFixtureOptions = {}): 
       if (entry !== undefined) settleCancelled(entry)
       return Promise.resolve()
     },
+    ...(options.cancelParentTurn === undefined ? {} : { cancelParentTurn: options.cancelParentTurn }),
   })
 
   coordinator.begin({
@@ -756,4 +759,26 @@ describe('expert team coordinator', () => {
     expect(gate.startedIds).toHaveLength(1)
     expect(fixture.activations.map((item) => item.memberId)).toEqual(['a'])
   })
+
+  it('cancels the leader turn exactly once when the team is terminated and converges to stopped', async () => {
+    const parentCancels: string[] = []
+    const fixture = await makeCoordinatorFixture({
+      cancelParentTurn: (parentSessionId) => {
+        parentCancels.push(parentSessionId)
+      },
+    })
+    const pending = fixture.coordinator.dispatch(dispatchInput('a', { callId: 'leader-cancel' }))
+    await fixture.gate.waitStarted(1)
+    const runId = runOf(fixture).teamRunId
+
+    await fixture.coordinator.cancelRun(runId)
+    expect(parentCancels).toEqual([PARENT_SESSION_ID])
+    await expect(pending).resolves.toMatchObject({ status: 'stopped' })
+    expect(fixture.runs.get(runId)?.status).toBe('stopped')
+
+    // 幂等：对已停止运行再次终止不得再次取消（可能已属于下一次回合的）团长回合。
+    await fixture.coordinator.cancelRun(runId)
+    expect(parentCancels).toEqual([PARENT_SESSION_ID])
+  })
+
 })
