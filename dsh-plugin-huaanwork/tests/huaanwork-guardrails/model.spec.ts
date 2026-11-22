@@ -926,6 +926,82 @@ test("result_present survives the static tool filter and streams as a tool-call 
   }
 });
 
+test("expert_team_dispatch survives both static parsers and streams as a tool-call", async () => {
+  // 团队派工工具只在团队回合挂载,但名字必须在静态放行表里:否则真实模型的 SSE /
+  // 文本协议调用会被 parseSseToolCalls / parseTextProtocol 静默丢弃,回合退化成
+  // NO_ACTION / EMPTY_RESPONSE 而任务没有真正派工。
+  assert.equal(isRegisteredToolName("expert_team_dispatch"), true);
+  const argsJson = JSON.stringify({ memberId: "m1", kind: "execute", task: "撰写正文" });
+  const payloads = [
+    JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "t1", function: { name: "expert_team_dispatch", arguments: argsJson } }] } }],
+    }),
+  ];
+  const parsed = parseSseToolCalls(payloads, isRegisteredToolName);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0]?.name, "expert_team_dispatch");
+
+  const original = globalThis.fetch;
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return sseResponse([
+      { choices: [{ delta: { reasoning_content: "先派执行成员。" } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "t1", function: { name: "expert_team_dispatch", arguments: argsJson } }] }, finish_reason: "tool_calls" }] },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-expert-team-model-"));
+    writeFileSync(
+      join(profileDir, "huaanwork-settings.json"),
+      JSON.stringify({ base_url: "http://127.0.0.1:11434/v1", model: "local", api_key: "" }),
+      "utf8",
+    );
+    const chunks = await collect(new HuaAnWorkAdapter(profileDir).stream(userOptions()));
+    assert.equal(fetchCount, 1);
+    const toolEnd = chunks.find(
+      (chunk) => chunk.type === "block-end" && chunk.block.type === "tool-call",
+    );
+    assert.ok(toolEnd && toolEnd.type === "block-end" && toolEnd.block.type === "tool-call");
+    assert.equal(toolEnd.block.name, "expert_team_dispatch");
+    assert.deepEqual(JSON.parse(toolEnd.block.arguments), JSON.parse(argsJson));
+    assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("expert_team_dispatch survives the XML text protocol", async () => {
+  const original = globalThis.fetch;
+  const xml = [
+    `<tool_call name="expert_team_dispatch">`,
+    `<arg name="memberId">m2</arg>`,
+    `<arg name="kind">review</arg>`,
+    `<arg name="task">审查正文</arg>`,
+    `</tool_call>`,
+  ].join("\n");
+  globalThis.fetch = async () => sseResponse([{ choices: [{ delta: { content: xml } }] }, "[DONE]"]);
+  try {
+    const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-expert-team-text-protocol-"));
+    writeFileSync(
+      join(profileDir, "huaanwork-settings.json"),
+      JSON.stringify({ base_url: "http://127.0.0.1:11434/v1", model: "local", api_key: "" }),
+      "utf8",
+    );
+    const chunks = await collect(new HuaAnWorkAdapter(profileDir).stream(userOptions()));
+    const toolEnd = chunks.find(
+      (chunk) => chunk.type === "block-end" && chunk.block.type === "tool-call",
+    );
+    assert.ok(toolEnd && toolEnd.type === "block-end" && toolEnd.block.type === "tool-call");
+    assert.equal(toolEnd.block.name, "expert_team_dispatch");
+    assert.equal(chunks.some((chunk) => chunk.type === "text-delta"), false);
+    assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 describe("session-bound model selection", () => {
   function profileWithSettings(settings: Record<string, unknown>): string {
     const root = mkdtempSync(join(tmpdir(), "huaanwork-session-model-"));

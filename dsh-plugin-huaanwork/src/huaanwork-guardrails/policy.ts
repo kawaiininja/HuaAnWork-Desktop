@@ -20,6 +20,10 @@ import { parentSessionOf } from "../huaanwork-host/child-sessions.ts";
  * `result_present` 是普通父会话的结果页工具:附件由 `agent/inbox/claimed` 按高级
  * 来源同步,decide() 的显式分支挂载即 allow(用户在场,不逐次审批)、未挂载一律
  * deny,自动化与包儿童经同一 `attached` 判定被拒绝。
+ *
+ * `expert_team_dispatch` 是专家团团长的派工工具:附件只在「进行中的团队回合」按
+ * 团队运行、回合锚与租约挂载,与 `result_present` 同一显式分支;它不得进入全局
+ * ALLOWED_TOOLS,普通 `@智能体` 会话的既有语义不变。
  */
 const SESSION_ATTACHED_TOOLS: ReadonlySet<string> = new Set([
   "agent_propose",
@@ -29,6 +33,7 @@ const SESSION_ATTACHED_TOOLS: ReadonlySet<string> = new Set([
   "skill_propose",
   "skill_commit",
   "result_present",
+  "expert_team_dispatch",
 ]);
 
 type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:376

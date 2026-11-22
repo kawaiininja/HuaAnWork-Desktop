@@ -341,6 +341,20 @@ test("agent package runtime tools allow when attached and deny when unattached",
   }
 });
 
+test("expert_team_dispatch allows when attached and denies when detached in both seams", () => {
+  for (const mode of ["ask", "smart", "full"] as const) {
+    assert.equal(preExecuteExplained({ name: "expert_team_dispatch", args: {}, workspaceRoot: ws, attached: true }, mode).decision, "allow");
+    assert.equal(guardExplained({ name: "expert_team_dispatch", args: {}, workspaceRoot: ws, attached: true }, mode).decision, "allow");
+    assert.equal(preExecuteExplained({ name: "expert_team_dispatch", args: {}, workspaceRoot: ws, attached: false }, mode).decision, "deny");
+    assert.equal(guardExplained({ name: "expert_team_dispatch", args: {}, workspaceRoot: ws, attached: false }, mode).decision, "deny");
+  }
+  // 未挂载的拒绝必须点名工具未附加:模型可据此改走已附加工具。
+  assert.deepEqual(
+    preExecuteExplained({ name: "expert_team_dispatch", args: {}, workspaceRoot: ws }, "smart"),
+    { decision: "deny", reason: reasonToolUnattached("expert_team_dispatch") },
+  );
+});
+
 test("agent_propose/agent_commit keep asking so the consent UI is not bypassed", () => {
   for (const name of ["agent_propose", "agent_commit"]) {
     const attached = { name, args: {}, workspaceRoot: ws, attached: true };

@@ -9,6 +9,7 @@ import type { AgentCatalogSecurity } from './agent-package/catalog-security.ts'
 import type { AgentPackageSubagentRequest, AgentPackageTeamRequests } from './agent-package/types.ts'
 import type { HuaanworkEventHub } from './events.ts'
 import type { ExpertTeamRunRegistry } from './expert-team/runs.ts'
+import type { ExpertTeamCoordinator } from './expert-team/coordinator.ts'
 import type { ExpertTeamStore } from './expert-team/types.ts'
 import type { RouteContext } from './routes.ts'
 import type { SessionRuntimeContext } from './sessions.ts'
@@ -71,6 +72,11 @@ declare module '@deepseek-ai/cordis' {
     huaanworkExpertTeamStore: ExpertTeamStore
     /** 专家团运行权威状态机(设计 §8.3);index 启动时创建一次,运行期只 mutate。 */
     huaanworkExpertTeamRuns: ExpertTeamRunRegistry
+    /**
+     * 专家团运行协调器(设计 §10.2 / §12.1);index 顶层 apply 创建一次并挂上:
+     * 工具、claim 附件判定与后续 turn/end 结算读到的都是同一实例。
+     */
+    huaanworkExpertTeamCoordinator: ExpertTeamCoordinator
     /** 会话 → 模型条目 id 的绑定表(Task 6);模型适配器与网络门禁共读同一实例。 */
     huaanworkSessionModels: Map<string, string>
     /** 会话 → 可写根(Task 6);沙箱、工具执行与排队出队共用同一实例。 */
@@ -112,6 +118,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkSubagentRuns',
   'huaanworkExpertTeamStore',
   'huaanworkExpertTeamRuns',
+  'huaanworkExpertTeamCoordinator',
   'huaanworkSessionModels',
   'huaanworkSessionRoots',
   'huaanworkTurnScheduler',
