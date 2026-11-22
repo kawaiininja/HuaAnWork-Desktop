@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
-import { createExpertTeamRunRegistry } from '../../src/huaanwork-host/expert-team/runs.ts'
+import {
+  createExpertTeamRunRegistry,
+  ExpertTeamRunNotFoundError,
+} from '../../src/huaanwork-host/expert-team/runs.ts'
 import { artifact, validTeam } from '../fixtures/expert-team/team.ts'
 
 describe('expert team run registry', () => {
@@ -81,5 +84,153 @@ describe('expert team run registry', () => {
     expect(settled).toEqual(expect.arrayContaining([activeRun.teamRunId, otherActive.teamRunId]))
     expect(regA.get(activeRun.teamRunId)?.status).toBe('stopping')
     expect(regA.get(otherActive.teamRunId)?.status).toBe('stopping')
+  })
+
+  it('distinguishes activeBySession (running only) from hasActiveForSession (running or stopping)', () => {
+    const registry = createExpertTeamRunRegistry({ generation: 'g1', emit: () => undefined })
+    const run = registry.begin({ parentSessionId: 's1', clientMessageId: 'm1', teamSnapshot: validTeam() })
+    expect(registry.activeBySession('s1')?.teamRunId).toBe(run.teamRunId)
+    expect(registry.hasActiveForSession('s1')).toBe(true)
+    expect(registry.activeBySession('s2')).toBeUndefined()
+    expect(registry.hasActiveForSession('s2')).toBe(false)
+
+    registry.attachCancel(run.teamRunId, async () => undefined)
+    expect(registry.requestCancel('s1', run.teamRunId)).toEqual({ status: 'accepted', teamRunId: run.teamRunId })
+    // stopping 仍占用会话（阻止同会话第二次团队调用），但不再是唯一活动运行的派发锚点。
+    expect(registry.activeBySession('s1')).toBeUndefined()
+    expect(registry.hasActiveForSession('s1')).toBe(true)
+    expect(registry.hasActive(run.teamId)).toBe(true)
+
+    registry.markStopped(run.teamRunId)
+    expect(registry.activeBySession('s1')).toBeUndefined()
+    expect(registry.hasActiveForSession('s1')).toBe(false)
+    expect(registry.hasActive(run.teamId)).toBe(false)
+
+    const other = registry.begin({ parentSessionId: 's2', clientMessageId: 'm2', teamSnapshot: validTeam() })
+    expect(registry.activeBySession('s2')?.teamRunId).toBe(other.teamRunId)
+    expect(registry.activeBySession('s1')).toBeUndefined()
+  })
+
+  it('finds runs by parent turn anchor across running, stopping, and terminal states', () => {
+    const registry = createExpertTeamRunRegistry({ generation: 'g1', emit: () => undefined })
+    const run = registry.begin({ parentSessionId: 's1', clientMessageId: 'm1', teamSnapshot: validTeam() })
+    expect(registry.byTurn('s1', 'm1')).toMatchObject({ teamRunId: run.teamRunId, status: 'running', clientMessageId: 'm1' })
+    expect(registry.byTurn('s2', 'm1')).toBeUndefined()
+    expect(registry.byTurn('s1', 'm2')).toBeUndefined()
+
+    registry.attachCancel(run.teamRunId, async () => undefined)
+    registry.requestCancel('s1', run.teamRunId)
+    expect(registry.byTurn('s1', 'm1')?.status).toBe('stopping')
+
+    registry.markStopped(run.teamRunId)
+    expect(registry.byTurn('s1', 'm1')?.status).toBe('stopped')
+
+    const second = registry.begin({ parentSessionId: 's1', clientMessageId: 'm2', teamSnapshot: validTeam() })
+    expect(registry.byTurn('s1', 'm2')?.teamRunId).toBe(second.teamRunId)
+    // 终态运行未被淘汰前仍可对账。
+    expect(registry.byTurn('s1', 'm1')?.teamRunId).toBe(run.teamRunId)
+  })
+
+  it('marks artifact link failure while pending and clears it on same-callId replay', () => {
+    const events: RpcEvent[] = []
+    const registry = createExpertTeamRunRegistry({ generation: 'g1', emit: (event) => events.push(event) })
+    const run = registry.begin({ parentSessionId: 's1', clientMessageId: 'm1', teamSnapshot: validTeam() })
+    registry.sealDelivery(run.teamRunId, 'call-1')
+
+    registry.noteArtifactLinkError(run.teamRunId, 'artifact not found')
+    expect(registry.get(run.teamRunId)).toMatchObject({
+      artifactStatus: 'pending',
+      artifactLinkError: 'artifact not found',
+      primaryArtifactCallId: 'call-1',
+    })
+    expect(events.at(-1)).toMatchObject({
+      event: 'expertTeam/run',
+      run: { artifactStatus: 'pending', artifactLinkError: 'artifact not found' },
+    })
+
+    // 同 callId 重放关联成功：写入 Artifact 并清除先前的关联失败残态。
+    expect(registry.noteSessionArtifact('s1', 'call-1', artifact())).toBe(true)
+    const linked = registry.get(run.teamRunId)
+    expect(linked).toMatchObject({ artifactStatus: 'created', primaryArtifactId: 'artifact-1' })
+    expect(linked?.artifactLinkError).toBeUndefined()
+
+    // 已成功关联后迟到的错误不复活残态。
+    registry.noteArtifactLinkError(run.teamRunId, 'late failure')
+    expect(registry.get(run.teamRunId)).toMatchObject({ artifactStatus: 'created', primaryArtifactId: 'artifact-1' })
+    expect(registry.get(run.teamRunId)?.artifactLinkError).toBeUndefined()
+  })
+
+  it('reports already-terminal cancels without mutation and rejects unknown or cross-session runs', () => {
+    const registry = createExpertTeamRunRegistry({ generation: 'g1', emit: () => undefined })
+    const settled = registry.begin({ parentSessionId: 's1', clientMessageId: 'm1', teamSnapshot: validTeam() })
+    registry.update(settled.teamRunId, (current) => {
+      current.status = 'completed'
+      current.endedAt = new Date(0).toISOString()
+    })
+    const settledRevision = registry.get(settled.teamRunId)?.revision
+
+    expect(registry.requestCancel('s1', settled.teamRunId)).toEqual({ status: 'already-terminal', teamRunId: settled.teamRunId })
+    expect(registry.get(settled.teamRunId)?.status).toBe('completed')
+    expect(registry.get(settled.teamRunId)?.revision).toBe(settledRevision)
+
+    let cancelCalls = 0
+    const running = registry.begin({ parentSessionId: 's2', clientMessageId: 'm2', teamSnapshot: validTeam() })
+    registry.attachCancel(running.teamRunId, async () => {
+      cancelCalls += 1
+    })
+    expect(() => registry.requestCancel('s1', running.teamRunId)).toThrow(ExpertTeamRunNotFoundError)
+    expect(() => registry.requestCancel('s2', 'missing-run')).toThrow(ExpertTeamRunNotFoundError)
+    // 跨会话取消零副作用：不退化为会话级取消，运行保持 running。
+    expect(cancelCalls).toBe(0)
+    expect(registry.get(running.teamRunId)?.status).toBe('running')
+  })
+
+  it('starts a late-bound cancel closure once after the stop latch', async () => {
+    const registry = createExpertTeamRunRegistry({ generation: 'g1', emit: () => undefined })
+    const run = registry.begin({ parentSessionId: 's1', clientMessageId: 'm1', teamSnapshot: validTeam() })
+    expect(registry.requestCancel('s1', run.teamRunId)).toEqual({ status: 'accepted', teamRunId: run.teamRunId })
+    expect(registry.get(run.teamRunId)?.status).toBe('stopping')
+
+    let firstCalls = 0
+    let secondCalls = 0
+    registry.attachCancel(run.teamRunId, async () => {
+      firstCalls += 1
+    })
+    expect(firstCalls).toBe(1)
+    // 已启动的取消闭包不被晚到的替换覆盖。
+    registry.attachCancel(run.teamRunId, async () => {
+      secondCalls += 1
+    })
+    expect(secondCalls).toBe(0)
+    await registry.cancelBySession('s1')
+    expect(firstCalls).toBe(1)
+    expect(registry.get(run.teamRunId)?.status).toBe('stopping')
+
+    registry.markStopped(run.teamRunId)
+    expect(registry.requestCancel('s1', run.teamRunId)).toEqual({ status: 'already-terminal', teamRunId: run.teamRunId })
+    expect(firstCalls).toBe(1)
+  })
+
+  it('keeps the first delivery seal when a different callId tries to re-seal', () => {
+    const events: RpcEvent[] = []
+    const registry = createExpertTeamRunRegistry({ generation: 'g1', emit: (event) => events.push(event) })
+    const run = registry.begin({ parentSessionId: 's1', clientMessageId: 'm1', teamSnapshot: validTeam() })
+    registry.sealDelivery(run.teamRunId, 'call-1')
+    const sealedRevision = registry.get(run.teamRunId)?.revision
+    const sealedEventCount = events.length
+
+    registry.sealDelivery(run.teamRunId, 'call-2')
+    expect(registry.get(run.teamRunId)).toMatchObject({ primaryArtifactCallId: 'call-1', deliverySealed: true })
+    expect(registry.get(run.teamRunId)?.revision).toBe(sealedRevision)
+    expect(events.length).toBe(sealedEventCount)
+
+    // 只有首次 commit 的 callId 能完成 Artifact 关联。
+    expect(registry.noteSessionArtifact('s1', 'call-2', artifact())).toBe(false)
+    expect(registry.noteSessionArtifact('s1', 'call-1', artifact())).toBe(true)
+    expect(registry.get(run.teamRunId)).toMatchObject({
+      primaryArtifactCallId: 'call-1',
+      primaryArtifactId: 'artifact-1',
+      artifactStatus: 'created',
+    })
   })
 })
