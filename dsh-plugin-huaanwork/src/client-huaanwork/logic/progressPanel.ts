@@ -1,5 +1,6 @@
 import type { TodoEntry, TodoStatus } from "@huaanwork/policy/todo";
 
+import type { ExpertTeamRun } from "../rpc-types.ts";
 import { isSubagentRunActive, type SubagentRunView } from "./subagentRuns.ts";
 import {
   currentTurnStart,
@@ -9,11 +10,13 @@ import {
 } from "./toolPanel.ts";
 
 /**
- * 右栏「进度」的纯投影：当前回合的分步任务、工具活动与受管子代理运行。
+ * 右栏「进度」的纯投影：当前回合的分步任务、工具活动、专家团聚合与受管子代理运行。
  *
- * 输入是 `App.tsx` 已有的消息条目、工具面板行、回合终态、连接状态与 run 列表；
- * 输出只供展示，不回写任何输入。任务没有单步百分比：只有 `completed/total` 与
- * 展示状态；`in_progress` 在回合终结后叠加 `interrupted`，但原始数组保持不变。
+ * 输入是 `App.tsx` 已有的消息条目、工具面板行、回合终态、连接状态、run 列表与
+ * 专家团运行投影；输出只供展示，不回写任何输入。任务没有单步百分比：只有
+ * `completed/total` 与展示状态；`in_progress` 在回合终结后叠加 `interrupted`，
+ * 但原始数组保持不变。团队成员 run 携带 `teamRunId`，归口到右栏专家团区块，
+ * 不再进入独立「子代理」列表，避免同一次派工在两处重复渲染。
  */
 
 /** 当前回合的 `todo` 快照字段；`todos` 是 Task 4 已归属当前回合的结构化列表。 */
@@ -46,6 +49,8 @@ export type ProgressPanelModel = {
   totalCount: number;
   activity: ToolPanelView[];
   subagents: SubagentRunView[];
+  /** 当前会话活跃或匹配当前回合锚的专家团运行；缺省为空数组。 */
+  expertTeams?: readonly ExpertTeamRun[];
 };
 
 /**
@@ -63,6 +68,8 @@ export type ProgressPanelInput<T extends ProgressPanelItem = ProgressPanelItem> 
   turnFinal: boolean;
   /** 同一父会话的全部受管运行；选择器按当前会话与活跃/终态规则过滤。 */
   subagents: readonly SubagentRunView[];
+  /** 同一父会话的全部专家团运行；缺省视为没有团队。 */
+  expertTeams?: readonly ExpertTeamRun[];
   sidecarDead: boolean;
   ready: boolean;
   sawReady: boolean;
@@ -102,8 +109,18 @@ export function selectProgressPanelModel<T extends ProgressPanelItem>(
 
   const subagents = input.subagents.filter(
     (run) =>
+      run.teamRunId === undefined &&
       run.parentSessionId === input.sessionId &&
       (isSubagentRunActive(run) ||
+        (typeof input.currentTurnClientMessageId === "string" &&
+          run.clientMessageId === input.currentTurnClientMessageId)),
+  );
+
+  const expertTeams = (input.expertTeams ?? []).filter(
+    (run) =>
+      run.parentSessionId === input.sessionId &&
+      (run.status === "running" ||
+        run.status === "stopping" ||
         (typeof input.currentTurnClientMessageId === "string" &&
           run.clientMessageId === input.currentTurnClientMessageId)),
   );
@@ -120,6 +137,7 @@ export function selectProgressPanelModel<T extends ProgressPanelItem>(
     totalCount: tasks.length,
     activity,
     subagents,
+    expertTeams,
   };
 }
 

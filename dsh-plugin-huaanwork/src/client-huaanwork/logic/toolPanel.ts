@@ -41,6 +41,7 @@ export type ToolPanelItem =
         | "skill-confirm"
         | "skill-success"
         | "subagent-run"
+        | "expert-team-run"
         | "note";
       card?: unknown;
       panelToggled?: PanelToggle;

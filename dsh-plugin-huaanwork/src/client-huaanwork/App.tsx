@@ -47,6 +47,12 @@ import SkillSuccessCard from "./SkillSuccessCard.tsx";
 import SlashSkillMenu from "./SlashSkillMenu.tsx";
 import SkillsView from "./SkillsView.tsx";
 import SubagentRunCard from "./SubagentRunCard.tsx";
+import ExpertTeamRunCard, {
+  expertTeamCancelKey,
+  type ExpertTeamCancelRequest,
+  type ExpertTeamCancelTarget,
+  type ExpertTeamMemberCancelRequest,
+} from "./ExpertTeamRunCard.tsx";
 import type { SubagentConfirmSurface, SubagentConfirmTarget } from "./SubagentRunCard.tsx";
 import {
   isReservedSlash,
@@ -60,6 +66,9 @@ import type {
   AgentPackageConfirmCard,
   ArtifactRef,
   ExpertTeam,
+  ExpertTeamCancelResult,
+  ExpertTeamRun,
+  ExpertTeamRunSnapshot,
   SkillConfirmCard,
   SubagentCancelResult,
   SubagentRunProjection,
@@ -76,6 +85,14 @@ import {
   type SubagentRunsState,
   type SubagentRunView,
 } from "./logic/subagentRuns.ts";
+import {
+  insertExpertTeamRunCard,
+  isExpertTeamTerminal,
+  reduceExpertTeamRuns,
+  type ExpertTeamRunAction,
+  type ExpertTeamRunCardItem,
+  type ExpertTeamRunsState,
+} from "./logic/expertTeamRuns.ts";
 import {
   atAgents,
   parseAtInvoke,
@@ -352,6 +369,7 @@ export type ChatItem =
   | { id: number; kind: "skill-confirm"; card: SkillConfirmCard; consumed?: boolean }
   | { id: number; kind: "skill-success"; draftId: string; name: string; text: string }
   | { id: number; kind: "subagent-run"; runId: string }
+  | { id: number; kind: "expert-team-run"; teamRunId: string }
   | { id: number; kind: "note"; text: string };
 
 type SessionRow = {
@@ -468,6 +486,9 @@ const SKILL_CREATION_COMMAND = "/create-skill";
 
 /** 子代理 run 的初始客户端状态;reducer 只读入参,可安全共享。 */
 const INITIAL_SUBAGENT_RUNS: SubagentRunsState = { revision: 0, runs: new Map(), connection: "live" };
+
+/** 专家团运行的初始客户端状态;首个 run 事件建立 generation,snapshot 权威对账。 */
+const INITIAL_EXPERT_TEAM_RUNS: ExpertTeamRunsState = { revision: 0, runs: new Map(), connection: "open" };
 
 /** snapshot 对账失败后只重试一次(设计 D6),间隔与 WS 重连首档退避同量级。 */
 const SUBAGENT_RECONCILE_RETRY_MS = 1_000;
@@ -672,6 +693,14 @@ export default function App() {
   const [subagentRuns, setSubagentRuns] = useState<SubagentRunsState>(INITIAL_SUBAGENT_RUNS);
   /** reducer 状态镜像:挂载期注册的事件闭包据此读取最新 run(取消确认、对账)。 */
   const subagentRunsRef = useRef<SubagentRunsState>(INITIAL_SUBAGENT_RUNS);
+  /** 专家团运行的权威客户端投影(设计 §13.3);与子代理分属不同对账域。 */
+  const [expertTeamRuns, setExpertTeamRuns] = useState<ExpertTeamRunsState>(INITIAL_EXPERT_TEAM_RUNS);
+  /** reducer 状态镜像:挂载期事件闭包与对账据此读取最新 generation/运行。 */
+  const expertTeamRunsRef = useRef<ExpertTeamRunsState>(INITIAL_EXPERT_TEAM_RUNS);
+  const [expertTeamExpandedResults, setExpertTeamExpandedResults] = useState<Record<string, boolean>>({});
+  const [expertTeamConfirming, setExpertTeamConfirming] = useState<ExpertTeamCancelTarget | null>(null);
+  const [expertTeamCancelBusyByKey, setExpertTeamCancelBusyByKey] = useState<Record<string, boolean>>({});
+  const [expertTeamCancelErrorByKey, setExpertTeamCancelErrorByKey] = useState<Record<string, string>>({});
   /** 对账代际:断连与 ready 都推进它,迟到的 snapshot 应答据此丢弃(设计 D6)。 */
   const reconcileEpochRef = useRef(0);
   /** Artifact 请求代际：选中会话切换时推进，迟到的摘要/正文应答据此丢弃（不牵连子代理对账）。 */
@@ -1167,6 +1196,7 @@ export default function App() {
     currentTurnClientMessageId: progressCurrentClientMessageId,
     turnFinal: progressTurnFinal,
     subagents: [...subagentRuns.runs.values()],
+    expertTeams: [...expertTeamRuns.runs.values()],
     sidecarDead,
     ready,
     sawReady: sawReady.current,
@@ -1178,6 +1208,7 @@ export default function App() {
     progressCurrentClientMessageId,
     progressTurnFinal,
     subagentRuns,
+    expertTeamRuns,
     sidecarDead,
     ready,
   ]);
@@ -1199,6 +1230,29 @@ export default function App() {
     onRequestCancel: (runId) => requestCancelSubagent(runId, "main"),
     onConfirmCancel: (runId) => void confirmCancelSubagent(runId),
     onDismissCancel: dismissCancelSubagent,
+  };
+  /** 聚合卡的渲染输入：成员 run 投影与团队 reducer 状态分属两个对账域。 */
+  const expertTeamFrozenAt = expertTeamRuns.frozenAt === undefined
+    ? undefined
+    : Date.parse(expertTeamRuns.frozenAt);
+  const expertTeamChat: ExpertTeamChatView = {
+    runs: expertTeamRuns.runs,
+    connection: expertTeamRuns.connection,
+    ...(expertTeamFrozenAt === undefined || !Number.isFinite(expertTeamFrozenAt)
+      ? {}
+      : { frozenAt: expertTeamFrozenAt }),
+    memberRuns: [...subagentRuns.runs.values()],
+    now,
+    expandedResultIds: expertTeamExpandedResults,
+    confirming: expertTeamConfirming,
+    cancelBusyByKey: expertTeamCancelBusyByKey,
+    cancelErrorByKey: expertTeamCancelErrorByKey,
+    onToggleResult: toggleExpertTeamResult,
+    onRequestCancelTeam: (input) => requestCancelExpertTeam(input, "chat"),
+    onRequestCancelMember: (input) => requestCancelExpertTeamMember(input, "chat"),
+    onConfirmCancel: (target) => void confirmCancelExpertTeam(target),
+    onDismissCancel: () => setExpertTeamConfirming(null),
+    onPreviewArtifact: (artifactId) => void handleOpenArtifact(artifactId),
   };
   /**
    * 右侧预览选中的附件项（规格 §5）：选择记在标签上；标签里没有附件项时
@@ -1859,6 +1913,9 @@ export default function App() {
       setSubagentRuns((prev) => reduceSubagentRuns(prev, { type: "event", event }));
       if (event.event === "subagent/run") {
         const run = event.run;
+        // 团队成员仍进入 run reducer(聚合卡需要实时成员相位),但不在主流重复插入
+        // 独立子代理卡:同一次派工的进度归口到聚合卡与右栏专家团区块。
+        if (run.teamRunId !== undefined) return;
         setChatTabs((prev) =>
           prev.map((tab) => {
             if (tab.sessionId !== run.parentSessionId) return tab;
@@ -1885,8 +1942,54 @@ export default function App() {
       setCancelErrorByRunId((prev) => withoutKey(prev, runId));
       setConfirmingTarget((prev) => (prev?.runId === runId ? null : prev));
     };
+    /**
+     * 专家团运行帧只更新聚合投影与聚合卡,不进入父消息流。运行帧允许在首次快照前
+     * 建立初始 generation;卡片只在 `clientMessageId` 精确命中本 tab 用户消息时挂载,
+     * 实时事件不按 active tab 或最后一条用户消息猜测归属。
+     */
+    const applyExpertTeamRun = (event: Extract<RpcEvent, { event: "expertTeam/run" }>) => {
+      const run = event.run;
+      applyExpertTeamState({ type: "run", generation: event.generation, run });
+      setChatTabs((prev) =>
+        prev.map((tab) => {
+          if (tab.sessionId !== run.parentSessionId) return tab;
+          const nextItems = insertExpertTeamRunCard(tab.items, {
+            teamRunId: run.teamRunId,
+            clientMessageId: run.clientMessageId,
+            allocateId: allocId,
+          });
+          return nextItems === tab.items ? tab : { ...tab, items: nextItems };
+        }),
+      );
+    };
+    /**
+     * 终态历史被淘汰:只删除对应聚合卡条目,绝不删除用户/助手消息或 Artifact 卡。
+     * 清理只认 Host 的移除帧(或换代快照),不按客户端 Map 缺项推断。
+     */
+    const applyExpertTeamRemove = (event: Extract<RpcEvent, { event: "expertTeam/run-remove" }>) => {
+      applyExpertTeamState({
+        type: "remove",
+        generation: event.generation,
+        revision: event.revision,
+        teamRunId: event.teamRunId,
+        parentSessionId: event.parentSessionId,
+      });
+      removeExpertTeamCards((item) => item.teamRunId === event.teamRunId);
+      setExpertTeamConfirming((prev) =>
+        prev?.kind === "team" && prev.teamRunId === event.teamRunId ? null : prev,
+      );
+    };
     const applyEvent = (event: RpcEvent) => {
       if (cancelled) return;
+      // 专家团运行帧在会话消息处理之前拦截:它们没有父会话 token/tool 语义。
+      if (event.event === "expertTeam/run") {
+        applyExpertTeamRun(event);
+        return;
+      }
+      if (event.event === "expertTeam/run-remove") {
+        applyExpertTeamRemove(event);
+        return;
+      }
       // 子代理事件在父消息流之前拦截:它们没有父会话的 token/tool 语义。
       if (event.event === "subagent/run" || event.event === "subagent/run-remove") {
         applySubagentEvent(event);
@@ -1903,6 +2006,7 @@ export default function App() {
         setSidecarDead(false);
         reconcileEpochRef.current += 1;
         reconcileBoundSubagentRuns();
+        reconcileBoundExpertTeamRuns();
         // 规格 §11：事件丢失后的结果文件同样在 ready 时对账，不只等历史打开/运行结束。
         reconcileBoundArtifacts();
       }
@@ -2345,6 +2449,8 @@ export default function App() {
           if (!payload.ready) {
             reconcileEpochRef.current += 1;
             setSubagentRuns((prev) => reduceSubagentRuns(prev, { type: "disconnect", at: Date.now() }));
+            // 专家团只是冻结展示与操作:团队与成员状态保持最后已知值,直到快照对账解冻。
+            applyExpertTeamState({ type: "disconnect", at: new Date().toISOString() });
           }
           // 执行进程没了，所有在途运行都不再可能回报 run-end；不清会让任务行、
           // 运行对话与工作区切换永久卡在「运行中」。
@@ -2772,6 +2878,38 @@ export default function App() {
   }
 
   /**
+   * 团队运行 reducer 的唯一写入口:同步更新 ref 与 state,让挂载期事件闭包在下一次
+   * 渲染前也能读到最新 generation/revision。被忽略的帧不触发重渲染。
+   */
+  function applyExpertTeamState(action: ExpertTeamRunAction): ExpertTeamRunsState {
+    const next = reduceExpertTeamRuns(expertTeamRunsRef.current, action);
+    if (next !== expertTeamRunsRef.current) {
+      expertTeamRunsRef.current = next;
+      setExpertTeamRuns(next);
+    }
+    return next;
+  }
+
+  /**
+   * 从所有标签里删除聚合卡条目。`match` 缺省表示删除全部(仅 Host 换代快照使用);
+   * 只过滤 `expert-team-run` 条目,用户/助手消息与 Artifact 卡永不受影响。
+   */
+  function removeExpertTeamCards(match?: (item: ExpertTeamRunCardItem) => boolean): void {
+    setChatTabs((prev) => {
+      let changed = false;
+      const next = prev.map((tab) => {
+        const items = tab.items.filter(
+          (item) => item.kind !== "expert-team-run" || (match !== undefined && !match(item)),
+        );
+        if (items.length === tab.items.length) return tab;
+        changed = true;
+        return { ...tab, items };
+      });
+      return changed ? next : prev;
+    });
+  }
+
+  /**
    * snapshot 对账(设计 D6):补拉父会话的权威 run 清单。
    *
    * - 请求前捕获对账代际,断连或再次 ready 后到达的应答直接丢弃;
@@ -2817,6 +2955,8 @@ export default function App() {
         let nextItems = tab.items;
         for (const run of runs) {
           if (run.parentSessionId !== parentSessionId) continue;
+          // 团队成员不在主流补独立子代理卡:进度归口聚合卡与右栏专家团区块。
+          if (run.teamRunId !== undefined) continue;
           nextItems = insertSubagentRunCard(nextItems, {
             runId: run.runId,
             ...(run.clientMessageId === undefined ? {} : { clientMessageId: run.clientMessageId }),
@@ -2830,7 +2970,74 @@ export default function App() {
   }
 
   /**
-   * WS ready 后的结果文件对账（规格 §11）：断线期间丢失的 `artifact/created`
+   * 专家团 snapshot 对账(设计 §13.3):同代快照解冻运行卡并合并 revision;换代快照
+   * 是权威来源,旧代际的聚合卡整体移除,但绝不删除用户/助手消息或已提交 Artifact 卡。
+   * 失败在同一代际内重试一次,之后留给下一次 ready 触发。
+   */
+  async function reconcileExpertTeamRuns(chatId: string, sessionId: string, allowRetry = true): Promise<void> {
+    const epoch = reconcileEpochRef.current;
+    let snapshot: ExpertTeamRunSnapshot;
+    try {
+      snapshot = await rpcCall<ExpertTeamRunSnapshot>("expertTeam.runList", { sessionId });
+    } catch {
+      if (!allowRetry || epoch !== reconcileEpochRef.current) return;
+      setTimeout(() => {
+        if (epoch !== reconcileEpochRef.current) return;
+        void reconcileExpertTeamRuns(chatId, sessionId, false);
+      }, SUBAGENT_RECONCILE_RETRY_MS);
+      return;
+    }
+    if (epoch !== reconcileEpochRef.current) return;
+    const previous = expertTeamRunsRef.current;
+    const generationChanged =
+      previous.generation !== undefined && previous.generation !== snapshot.generation;
+    applyExpertTeamState({
+      type: "snapshot",
+      sessionId,
+      generation: snapshot.generation,
+      revision: snapshot.revision,
+      runs: snapshot.runs,
+    });
+    if (generationChanged) {
+      // Host 重启或换代:旧运行快照失效,旧聚合卡按失效快照移除;不清除消息与 Artifact。
+      removeExpertTeamCards();
+      setExpertTeamConfirming(null);
+      setExpertTeamCancelBusyByKey({});
+      setExpertTeamCancelErrorByKey({});
+    }
+    anchorSnapshotExpertTeamCards(chatId, sessionId, snapshot.runs);
+  }
+
+  /**
+   * 为快照里尚无卡片的团队运行补卡。只改 `chatId` 指定的标签,只接受该父会话的运行;
+   * 快照路径允许回退到本 tab 最后一条用户消息,同 `teamRunId` 不重复插入。
+   */
+  function anchorSnapshotExpertTeamCards(
+    chatId: string,
+    sessionId: string,
+    runs: readonly ExpertTeamRun[],
+  ): void {
+    if (!Array.isArray(runs) || runs.length === 0) return;
+    setChatTabs((prev) =>
+      prev.map((tab) => {
+        if (tab.id !== chatId) return tab;
+        let nextItems = tab.items;
+        for (const run of runs) {
+          if (run.parentSessionId !== sessionId) continue;
+          nextItems = insertExpertTeamRunCard(nextItems, {
+            teamRunId: run.teamRunId,
+            clientMessageId: run.clientMessageId,
+            allowSnapshotFallback: true,
+            allocateId: allocId,
+          });
+        }
+        return nextItems === tab.items ? tab : { ...tab, items: nextItems };
+      }),
+    );
+  }
+
+  /**
+   * WS ready 后结果文件对账（规格 §11）：断线期间丢失的 `artifact/created`
    * 不能等到重新打开会话才出现。普通会话按会话各拉一次 artifact.list，走与历史
    * 打开相同的幂等插入（重复 artifactId 不产生第二张卡）；自动化运行标签由
    * run-end 的既有回填负责，跳过。迟到的应答按共享对账代际丢弃。
@@ -2869,6 +3076,17 @@ export default function App() {
       if (!sessionId || seen.has(sessionId)) continue;
       seen.add(sessionId);
       void reconcileSubagentRuns(tab.id, sessionId);
+    }
+  }
+
+  /** WS ready 后按父会话各对账一次专家团运行;同一会话只跑一次,与子代理同节奏。 */
+  function reconcileBoundExpertTeamRuns(): void {
+    const seen = new Set<string>();
+    for (const tab of chatTabsRef.current) {
+      const sessionId = tab.sessionId;
+      if (!sessionId || seen.has(sessionId)) continue;
+      seen.add(sessionId);
+      void reconcileExpertTeamRuns(tab.id, sessionId);
     }
   }
 
@@ -2911,6 +3129,66 @@ export default function App() {
       setCancelErrorByRunId((prev) => ({ ...prev, [runId]: message }));
     } finally {
       setCancelBusyByRunId((prev) => withoutKey(prev, runId));
+    }
+  }
+
+  /** 聚合卡展开态只存 resultId → 布尔,不进 reducer run 对象。 */
+  function toggleExpertTeamResult(resultId: string): void {
+    setExpertTeamExpandedResults((prev) => ({ ...prev, [resultId]: prev[resultId] !== true }));
+  }
+
+  /** 点「终止专家团」只在发起侧卡内请求二次确认,不发送任何 RPC。 */
+  function requestCancelExpertTeam(
+    input: ExpertTeamCancelRequest,
+    surface: ExpertTeamCancelTarget["surface"],
+  ): void {
+    setExpertTeamConfirming({ kind: "team", teamRunId: input.teamRunId, surface });
+    setExpertTeamCancelErrorByKey((prev) => withoutKey(prev, expertTeamCancelKey(surface, input.teamRunId)));
+  }
+
+  /** 点成员「终止成员」同主流/右栏各自确认;成员复用既有 `subagent.cancel`。 */
+  function requestCancelExpertTeamMember(
+    input: ExpertTeamMemberCancelRequest,
+    surface: ExpertTeamCancelTarget["surface"],
+  ): void {
+    setExpertTeamConfirming({ kind: "member", runId: input.runId, surface });
+    setExpertTeamCancelErrorByKey((prev) => withoutKey(prev, expertTeamCancelKey(surface, input.runId)));
+  }
+
+  /**
+   * 确认团队取消:整团用 `expertTeam.cancel({ parentSessionId, teamRunId })`,成员复用
+   * `subagent.cancel({ parentSessionId, runId })`。忙态/错误按「表面 + runId」写回;
+   * `accepted` 只表示受理,卡片继续按 Host 事件收敛,不宣称清理完成。
+   */
+  async function confirmCancelExpertTeam(target: ExpertTeamCancelTarget): Promise<void> {
+    setExpertTeamConfirming(null);
+    const key = expertTeamCancelKey(
+      target.surface,
+      target.kind === "team" ? target.teamRunId : target.runId,
+    );
+    setExpertTeamCancelBusyByKey((prev) => ({ ...prev, [key]: true }));
+    setExpertTeamCancelErrorByKey((prev) => withoutKey(prev, key));
+    try {
+      if (target.kind === "team") {
+        const run = expertTeamRunsRef.current.runs.get(target.teamRunId);
+        if (run === undefined || run.status === "stopping" || isExpertTeamTerminal(run)) return;
+        await rpcCall<ExpertTeamCancelResult>("expertTeam.cancel", {
+          parentSessionId: run.parentSessionId,
+          teamRunId: run.teamRunId,
+        });
+        return;
+      }
+      const member = subagentRunsRef.current.runs.get(target.runId);
+      if (member === undefined || !isSubagentRunActive(member)) return;
+      await rpcCall<SubagentCancelResult>("subagent.cancel", {
+        parentSessionId: member.parentSessionId,
+        runId: target.runId,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setExpertTeamCancelErrorByKey((prev) => ({ ...prev, [key]: message }));
+    } finally {
+      setExpertTeamCancelBusyByKey((prev) => withoutKey(prev, key));
     }
   }
 
@@ -4457,6 +4735,7 @@ export default function App() {
                     blocked={blocked}
                     hostUnavailable={hostUnavailable}
                     subagent={subagentChat}
+                    expertTeam={expertTeamChat}
                     onAnswer={answer}
                     onInput={answerInput}
                     onThinkingToggle={toggleThinking}
@@ -4765,6 +5044,21 @@ export default function App() {
                   onRequestCancel={(runId) => requestCancelSubagent(runId, "progress")}
                   onConfirmCancel={(runId) => void confirmCancelSubagent(runId)}
                   onDismissCancel={dismissCancelSubagent}
+                  expertTeamConnection={expertTeamRuns.connection}
+                  {...(expertTeamFrozenAt === undefined || !Number.isFinite(expertTeamFrozenAt)
+                    ? {}
+                    : { expertTeamFrozenAt })}
+                  expertTeamMemberRuns={[...subagentRuns.runs.values()]}
+                  expertTeamExpandedResults={expertTeamExpandedResults}
+                  expertTeamConfirming={expertTeamConfirming}
+                  expertTeamCancelBusyByKey={expertTeamCancelBusyByKey}
+                  expertTeamCancelErrorByKey={expertTeamCancelErrorByKey}
+                  onToggleTeamResult={toggleExpertTeamResult}
+                  onRequestCancelTeam={(input) => requestCancelExpertTeam(input, "progress")}
+                  onRequestCancelMember={(input) => requestCancelExpertTeamMember(input, "progress")}
+                  onConfirmTeamCancel={(target) => void confirmCancelExpertTeam(target)}
+                  onDismissTeamCancel={() => setExpertTeamConfirming(null)}
+                  onPreviewArtifact={(artifactId) => void handleOpenArtifact(artifactId)}
                 />
               ) : null}
               {rightTab === "files" ? (
@@ -5465,7 +5759,12 @@ export function appendToken(items: ChatItem[], text: string, allocId: () => numb
 
 type ContentChatItem = Exclude<
   ChatItem,
-  { kind: "attachment" } | { kind: "agent-confirm" } | { kind: "skill-confirm" } | { kind: "skill-success" } | { kind: "subagent-run" }
+  | { kind: "attachment" }
+  | { kind: "agent-confirm" }
+  | { kind: "skill-confirm" }
+  | { kind: "skill-success" }
+  | { kind: "subagent-run" }
+  | { kind: "expert-team-run" }
 >;
 
 /** 删除记录里的一个键;原本不存在时返回入参,React 状态可跳过更新。 */
@@ -5491,13 +5790,13 @@ function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T
 function contentItems(items: readonly ChatItem[]): ContentChatItem[] {
   const visible: ContentChatItem[] = [];
   for (const item of items) {
-    if (item.kind === "subagent-run") continue;
+    if (item.kind === "subagent-run" || item.kind === "expert-team-run") continue;
     visible.push(contentItem(item));
   }
   return visible;
 }
 
-function contentItem(item: Exclude<ChatItem, { kind: "subagent-run" }>): ContentChatItem {
+function contentItem(item: Exclude<ChatItem, { kind: "subagent-run" | "expert-team-run" }>): ContentChatItem {
   if (item.kind === "agent-confirm" || item.kind === "skill-confirm" || item.kind === "skill-success") {
     return { id: item.id, kind: "note", text: "" };
   }
@@ -5547,11 +5846,34 @@ type SubagentChatView = {
   onDismissCancel(runId: string): void;
 };
 
+/**
+ * 聚合卡渲染所需的团队投影与 App 侧 UI 状态。取消忙态/错误按「表面 + runId」
+ * 分开,主流与右栏互不覆盖;确认目标由 App 唯一持有。
+ */
+type ExpertTeamChatView = {
+  runs: ReadonlyMap<string, ExpertTeamRun>;
+  connection: ExpertTeamRunsState["connection"];
+  frozenAt?: number;
+  memberRuns: readonly SubagentRunView[];
+  now: number;
+  expandedResultIds: Readonly<Record<string, boolean>>;
+  confirming: ExpertTeamCancelTarget | null;
+  cancelBusyByKey: Readonly<Record<string, boolean>>;
+  cancelErrorByKey: Readonly<Record<string, string>>;
+  onToggleResult(resultId: string): void;
+  onRequestCancelTeam(input: ExpertTeamCancelRequest): void;
+  onRequestCancelMember(input: ExpertTeamMemberCancelRequest): void;
+  onConfirmCancel(target: ExpertTeamCancelTarget): void;
+  onDismissCancel(): void;
+  onPreviewArtifact(artifactId: string): void;
+};
+
 function ChatRow({
   item,
   blocked,
   hostUnavailable,
   subagent,
+  expertTeam,
   onAnswer,
   onInput,
   onThinkingToggle,
@@ -5570,6 +5892,7 @@ function ChatRow({
   blocked: boolean;
   hostUnavailable: boolean;
   subagent: SubagentChatView;
+  expertTeam: ExpertTeamChatView;
   onAnswer: (card: AskCard, decision: "approve" | "reject") => void;
   onInput: (itemId: number, card: InputCard, reply: { answer: string } | { cancel: true }) => void;
   onThinkingToggle?: (itemId: number, userToggled: "expand" | "collapse") => void;
@@ -5589,6 +5912,31 @@ function ChatRow({
   reasoning?: string;
   hasAssistantText?: boolean;
 }) {
+  if (item.kind === "expert-team-run") {
+    // 卡片只读团队 reducer 投影;运行已离开投影时容忍空卡,同 teamRunId 重现也不会重复插入。
+    const run = expertTeam.runs.get(item.teamRunId);
+    if (!run) return null;
+    return (
+      <ExpertTeamRunCard
+        run={run}
+        now={expertTeam.now}
+        connection={expertTeam.connection}
+        {...(expertTeam.frozenAt === undefined ? {} : { frozenAt: expertTeam.frozenAt })}
+        surface="chat"
+        memberRuns={expertTeam.memberRuns}
+        expandedResultIds={expertTeam.expandedResultIds}
+        confirming={expertTeam.confirming}
+        cancelBusyByKey={expertTeam.cancelBusyByKey}
+        cancelErrorByKey={expertTeam.cancelErrorByKey}
+        onToggleResult={expertTeam.onToggleResult}
+        onRequestCancelTeam={expertTeam.onRequestCancelTeam}
+        onRequestCancelMember={expertTeam.onRequestCancelMember}
+        onConfirmCancel={expertTeam.onConfirmCancel}
+        onDismissCancel={expertTeam.onDismissCancel}
+        onPreviewArtifact={expertTeam.onPreviewArtifact}
+      />
+    );
+  }
   if (item.kind === "subagent-run") {
     // 卡片只读 reducer 投影；run 已被移除时渲染为空，不保留过期卡片。
     const run = subagent.runs.get(item.runId);

@@ -1,9 +1,15 @@
 import type { ReactElement } from "react";
 
+import ExpertTeamRunCard, {
+  type ExpertTeamCancelRequest,
+  type ExpertTeamCancelTarget,
+  type ExpertTeamMemberCancelRequest,
+} from "./ExpertTeamRunCard.tsx";
 import type { ProgressPanelModel, ProgressTaskView } from "./logic/progressPanel.ts";
 import { isSubagentRunActive, subagentNeedsStartTime } from "./logic/subagentRuns.ts";
 import type { PanelToggle } from "./logic/toolPanel.ts";
 import { SubagentRunSummary, type SubagentConfirmTarget } from "./SubagentRunCard.tsx";
+import type { SubagentRunView } from "./logic/subagentRuns.ts";
 import ToolPanel from "./ToolPanel.tsx";
 
 /** 分步任务的展示状态文案；没有单步百分比。 */
@@ -26,6 +32,22 @@ export type ProgressPanelProps = {
   onRequestCancel(runId: string): void;
   onConfirmCancel(runId: string): void;
   onDismissCancel(runId: string): void;
+  /** 专家团连接的断连冻结态；缺省视为正常。 */
+  expertTeamConnection?: "open" | "closed";
+  /** 专家团断连冻结时刻（毫秒），只冻结耗时显示。 */
+  expertTeamFrozenAt?: number;
+  /** 团队成员 run 投影，供聚合卡的成员行显示真实相位。 */
+  expertTeamMemberRuns?: readonly SubagentRunView[];
+  expertTeamExpandedResults?: Readonly<Record<string, boolean>>;
+  expertTeamConfirming?: ExpertTeamCancelTarget | null;
+  expertTeamCancelBusyByKey?: Readonly<Record<string, boolean>>;
+  expertTeamCancelErrorByKey?: Readonly<Record<string, string>>;
+  onToggleTeamResult?(resultId: string): void;
+  onRequestCancelTeam?(input: ExpertTeamCancelRequest): void;
+  onRequestCancelMember?(input: ExpertTeamMemberCancelRequest): void;
+  onConfirmTeamCancel?(target: ExpertTeamCancelTarget): void;
+  onDismissTeamCancel?(): void;
+  onPreviewArtifact?(artifactId: string): void;
 };
 
 /**
@@ -47,7 +69,22 @@ export default function ProgressPanel(props: ProgressPanelProps): ReactElement {
     onRequestCancel,
     onConfirmCancel,
     onDismissCancel,
+    expertTeamConnection = "open",
+    expertTeamFrozenAt,
+    expertTeamMemberRuns = [],
+    expertTeamExpandedResults = {},
+    expertTeamConfirming = null,
+    expertTeamCancelBusyByKey = {},
+    expertTeamCancelErrorByKey = {},
+    onToggleTeamResult,
+    onRequestCancelTeam,
+    onRequestCancelMember,
+    onConfirmTeamCancel,
+    onDismissTeamCancel,
+    onPreviewArtifact,
   } = props;
+
+  const expertTeams = model.expertTeams ?? [];
 
   return (
     <div
@@ -125,6 +162,35 @@ export default function ProgressPanel(props: ProgressPanelProps): ReactElement {
           </div>
         )}
       </section>
+
+      {expertTeams.length > 0 ? (
+        <section className="progress-section" aria-label="专家团">
+          <p className="h">专家团</p>
+          <div className="progress-expert-team-list">
+            {expertTeams.map((run) => (
+              <ExpertTeamRunCard
+                key={run.teamRunId}
+                run={run}
+                now={now}
+                connection={expertTeamConnection}
+                {...(expertTeamFrozenAt === undefined ? {} : { frozenAt: expertTeamFrozenAt })}
+                surface="progress"
+                memberRuns={expertTeamMemberRuns}
+                expandedResultIds={expertTeamExpandedResults}
+                confirming={expertTeamConfirming}
+                cancelBusyByKey={expertTeamCancelBusyByKey}
+                cancelErrorByKey={expertTeamCancelErrorByKey}
+                {...(onToggleTeamResult === undefined ? {} : { onToggleResult: onToggleTeamResult })}
+                {...(onRequestCancelTeam === undefined ? {} : { onRequestCancelTeam })}
+                {...(onRequestCancelMember === undefined ? {} : { onRequestCancelMember })}
+                {...(onConfirmTeamCancel === undefined ? {} : { onConfirmCancel: onConfirmTeamCancel })}
+                {...(onDismissTeamCancel === undefined ? {} : { onDismissCancel: onDismissTeamCancel })}
+                {...(onPreviewArtifact === undefined ? {} : { onPreviewArtifact })}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="progress-section" aria-label="子代理">
         <p className="h">子代理</p>
