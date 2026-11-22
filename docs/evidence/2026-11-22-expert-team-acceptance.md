@@ -24,8 +24,8 @@ runtime、MCP 与 Artifact 存储）只证明代码路径与自动化断言，**
 | 包管理器 | Corepack Yarn 4.18.0 |
 | 分支 | `feat/expert-team-impl` |
 | 实现基线 | `e786ae8bd4` |
-| 门禁时代码 HEAD | `e259a2664f`（`test(expert-team): harden composed scenario assertions`） |
-| 提交数 | 36（`e786ae8bd4..e259a2664f`） |
+| 门禁时代码 HEAD | `93a18b7c95`（`test(expert-team): cover scope/roster and review concurrency`） |
+| 提交数 | 40（`e786ae8bd4..93a18b7c95`） |
 | 门禁时工作树 | 干净 |
 | 执行者 | 控制器会话；本文件在完整门禁之后整理，未再次运行完整门禁 |
 
@@ -42,9 +42,9 @@ corepack yarn check
 
 | 项目 | 输出 |
 | --- | --- |
-| Vitest 主分组 | `Test Files 329 passed \| 4 skipped (333)`；`Tests 4793 passed \| 15 skipped (4808)` |
-| Vitest 其余分组（文件数/用例数） | 13/303、14/244、5/88、7/112 |
-| Vitest 合计 | **5540 passed / 15 skipped** |
+| Vitest 主分组 | `Tests 4799 passed \| 15 skipped` |
+| Vitest 其余分组（用例数） | 303、244、88、112 |
+| Vitest 合计 | **5546 passed / 15 skipped**（分组 4799+303+244+88+112） |
 | Profile 启动 | `verify-profile-boot: minimal preset, plugin manager, and disabled hmr lock passed`（输出中出现两次） |
 | 专家团编译产物 smoke | `expert-team smoke: tool present, list=200 (0 teams), invocable=200 (0 teams)` |
 
@@ -68,16 +68,20 @@ git status --short    # 仅列出本轮专家团修复文件，无 deepseek-harn
 `git status --short` 的 13 个条目全部属于专家团实现：`coordinator.ts`、`index.ts`、
 `expertTeamsLogic.ts`、`ExpertTeamRunCard.tsx`、`App.tsx`、对应 Host/Guardrail/Client
 测试、组合 driver、计划文件。工作树在该步之前没有未跟踪的意外文件；证据文档本身是随后
-新增的文档提交。
+新增的文档提交。本次最终证据更新提交前再次执行同样两条命令：`git diff --check` 仍为
+`EXIT=0` 且无输出，`git status --short` 仅显示本证据文档的修改。
 
 ## 3. 自动化证据（已执行）
 
 ### 3.1 完整门禁
 
-`corepack yarn check` 在代码 HEAD `e259a2664f` 的干净工作树上以 `EXIT=0` 完成，覆盖根级
-布局/文档/连通性门禁、各 workspace 的 build/typecheck/test 与 `dsh-plugin-huaanwork` 的
-`verify:closure`、`verify:bundled`、`verify:cli`、`verify:loader`、`verify:profile`、
-`verify:host`、`verify:expert-team`、`verify:aa`、`verify:licenses`、`verify:operations`。
+`corepack yarn check` 的权威最终运行在最终修复波次之后、代码 HEAD `93a18b7c95` 的干净工作树上
+以 `EXIT=0` 完成，覆盖根级布局/文档/连通性门禁、各 workspace 的 build/typecheck/test 与
+`dsh-plugin-huaanwork` 的 `verify:closure`、`verify:bundled`、`verify:cli`、`verify:loader`、
+`verify:profile`、`verify:host`、`verify:expert-team`、`verify:aa`、`verify:licenses`、
+`verify:operations`。早先 `e259a2664f` 的门禁记录已被本次运行取代：8 项最终审查 Important
+修复都在该次门禁之后才落地。本文件记录本次运行的 Vitest 合计 **5546 passed / 15 skipped**
+（分组 4799+303+244+88+112）。
 
 ### 3.2 单元与契约测试
 
@@ -96,7 +100,8 @@ git status --short    # 仅列出本轮专家团修复文件，无 deepseek-harn
   `ExpertTeamsView.spec.ts`、`expertTeamRuns.spec.ts`、`ExpertTeamRunCard.spec.ts`、
   `appWiring.spec.ts`（团队运行卡对账、取消确认与视图清理）。
 
-这些测试全部包含在 §2 的 Vitest 合计中。
+这些测试全部包含在 §2 的 Vitest 合计（**5546 passed / 15 skipped**，分组
+4799+303+244+88+112）中。
 
 ### 3.3 真实组合场景（Task 17）
 
@@ -107,13 +112,17 @@ git status --short    # 仅列出本轮专家团修复文件，无 deepseek-harn
 1. 两名执行成员 + 一名统一审查成员，默认统一审查、一次返修后复审、单一主 Artifact；
    双 MCP 成员、父会话无 MCP 泄漏、成员 MCP server 名长度受限；成员 run 真实独立。
 2. 两名审查成员时返修后全员并行复审；父会话 `maxParallelToolCalls=1` 时团队串行池生效。
-   组合 driver 以与执行成员相同的波次 barrier 记录真实审查流并发 `maxReviewConcurrency`：
-   两审查成员的复审波次断言为 2，串行池断言为 1。
+   组合 driver 记录审查流的真实并发 `maxReviewConcurrency`：两审查成员用例的 run 级值为 2，
+   串行池用例为 1。该断言记录的是 run 级并发上限，不能证明单一复审波次内部的隔离。
 3. 24 次预算耗尽后产出 partial Artifact；Artifact 写失败后保持 `pending` 且团队结算
    `partial`。
 4. 仅会话模式只取最后 `tool/result` 之后的最终文本；goal 续拍不能再派工
    （`expert-team-terminal`）。
 5. 同一 profile 重启 Host 后团队运行投影清空，消息与 Artifact 仍在。
+
+最终修复波次（`e259a2664f` 之后）覆盖：团队终止时取消 leader 回合、客户端 派工
+计数/`dispatchAttempts`、收窄的 `@team` 冲突规则（正文中的 `@word` 按普通文本处理）、
+取消确认生命周期、scope/roster fail-closed 测试，以及真实审查并发采集。
 
 再次强调：以上均为**脚本化 provider 下的自动化断言**，不是真实模型、真实 GUI 或真实中文
 输入法的人工验收。
@@ -165,8 +174,8 @@ git status --short    # 仅列出本轮专家团修复文件，无 deepseek-harn
 - **未执行打包产物验收**：Windows 安装包、macOS 签名/安装产物均未在本轮验证，仍为开放项。
 - **中文输入法、Host 重启、真实取消清理、Artifact 预览/全屏/原字节下载**必须真机人工
   验收，仍为开放项；本文件不将其标为通过。
-- 本文件的提交只新增/更新文档，不改变代码 HEAD `e259a2664f` 的产品代码；该证据提交是门禁
-  代码提交之后的独立提交。
+- 本文件的提交只新增/更新文档；本文件记录的门禁代码 HEAD 为 `93a18b7c95`，该证据提交是门禁
+  代码提交之后的独立文档提交，不改变该 HEAD 的产品代码。
 - `verify:aa` 的已知并发 flake 仍有效：完整门禁结果只在单次独立运行下成立，不得与其它含
   `verify:aa` 的命令并发复跑。
 
@@ -175,7 +184,7 @@ git status --short    # 仅列出本轮专家团修复文件，无 deepseek-harn
 | 项目 | 结论 |
 | --- | --- |
 | 自动化 headless gate（`corepack yarn check`，EXIT=0） | **PASS** |
-| Vitest（5540 passed / 15 skipped） | **PASS** |
+| Vitest（5546 passed / 15 skipped） | **PASS** |
 | 编译产物专家团 Loader/HTTP smoke | **PASS** |
 | Task 18 Step 3 真机人工验收（9 项） | **BLOCKED — 未执行（0 项通过）** |
 | Windows/macOS 打包产物验收、中文输入法、Host 重启 | **开放** |
