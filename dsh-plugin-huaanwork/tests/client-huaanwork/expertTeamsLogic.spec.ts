@@ -3,8 +3,14 @@ import type { ExpertTeam } from '../../src/client-huaanwork/rpc-types.ts'
 import { validTeamInput } from '../fixtures/expert-team/team.ts'
 import {
   atExpertTeams,
+  composerAtTokenAt,
   defaultExpertTeamRules,
   effectiveTeamMaxParallel,
+  expertTeamMentionSummary,
+  leadingTeamAtSlug,
+  mentionKeyAction,
+  parseTeamAtInvoke,
+  resolveComposerMentionState,
   validateExpertTeam,
 } from '../../src/client-huaanwork/logic/expertTeamsLogic.ts'
 
@@ -54,5 +60,45 @@ describe('expert team contract', () => {
     expect(atExpertTeams([team], '条款复核')).toHaveLength(1)
     expect(atExpertTeams([team], 'compliance-team')).toHaveLength(1)
     expect(atExpertTeams([team], '不存在')).toHaveLength(0)
+  })
+
+  it('extracts leading team/Chinese @ tokens while keeping arbitrary-position legacy @agent menu triggers', () => {
+    expect(composerAtTokenAt('@合规', 3)).toEqual({ query: '合规', start: 0, end: 3 })
+    expect(composerAtTokenAt('@team:comp', 10)).toEqual({ query: 'team:comp', start: 0, end: 10 })
+    expect(composerAtTokenAt('正文 @合规', 6)).toBeUndefined()
+    expect(leadingTeamAtSlug('@team:compliance ')).toBe('compliance')
+
+    // owner 裁定回归：正文中段输入 @agent 仍由 atTokenAt 触发补全，但只开放智能体分组、不开放专家团分组
+    expect(resolveComposerMentionState('请看 @writer', 10)).toEqual({
+      token: { query: 'writer', start: 3, end: 10 },
+      allowTeams: false,
+    })
+    expect(resolveComposerMentionState('@合规', 3)).toEqual({
+      token: { query: '合规', start: 0, end: 3 },
+      allowTeams: true,
+    })
+    expect(resolveComposerMentionState('正文 @合规', 6)).toBeUndefined()
+  })
+
+  it('classifies leading @team targets into valid, empty-task, conflict, or non-team', () => {
+    expect(parseTeamAtInvoke('@team:compliance 审查合同')).toEqual({ kind: 'valid', name: 'compliance', remainder: '审查合同' })
+    expect(parseTeamAtInvoke('@team:compliance   ')).toEqual({ kind: 'empty-task', name: 'compliance' })
+    expect(parseTeamAtInvoke('@team:compliance')).toEqual({ kind: 'empty-task', name: 'compliance' })
+    expect(parseTeamAtInvoke('@team:one @team:two 审查')).toEqual({ kind: 'conflict', reason: 'multiple-targets' })
+    expect(parseTeamAtInvoke('@team:one @writer 审查')).toEqual({ kind: 'conflict', reason: 'multiple-targets' })
+    expect(parseTeamAtInvoke('正文 @team:compliance 审查')).toBeUndefined()
+    expect(parseTeamAtInvoke('@writer 审查')).toBeUndefined()
+  })
+
+  it('does not select or submit while composing Chinese text', () => {
+    expect(mentionKeyAction({ key: 'Enter', isComposing: true, itemCount: 2, activeIndex: 0 })).toEqual({ kind: 'none' })
+    expect(mentionKeyAction({ key: 'Tab', isComposing: false, itemCount: 2, activeIndex: 0 })).toEqual({ kind: 'pick', index: 0 })
+    expect(mentionKeyAction({ key: 'ArrowDown', isComposing: false, itemCount: 2, activeIndex: 0 })).toEqual({ kind: 'move', index: 1 })
+    expect(mentionKeyAction({ key: 'Escape', isComposing: false, itemCount: 2, activeIndex: 0 })).toEqual({ kind: 'close' })
+  })
+
+  it('summarizes members, orchestration, review and delivery for the composer token', () => {
+    const team = validTeam()
+    expect(expertTeamMentionSummary(team)).toBe('2 名成员 · 按职责分工 · 并行（≤2） · 统一审查 · Markdown Artifact')
   })
 })

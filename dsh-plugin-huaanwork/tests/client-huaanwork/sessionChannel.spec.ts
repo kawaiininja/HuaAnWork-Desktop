@@ -3,6 +3,7 @@ import { test } from "vitest";
 
 import { detailRecords } from "../../src/huaanwork-host/session-view.ts";
 import {
+  buildSessionSendParams,
   chatTabHasConversation,
   chatTabTitle,
   cwdWithinRoot,
@@ -370,4 +371,29 @@ test("a result_present call without a paired result leaves no tool card", () => 
     { kind: "tool-call", time: 2, name: RESULT_PRESENT_TOOL, callId: "call-1", args: '{"content":"完整结果正文"}' },
   ]);
   assert.deepEqual(items, [{ kind: "user", text: "生成报告" }]);
+});
+
+test("builds a typed team target without changing legacy at params", () => {
+  const teamParams = buildSessionSendParams({
+    text: "@team:compliance 审查",
+    tabId: "tab-1",
+    clientMessageId: "m1",
+    userItemId: 1,
+    sessionId: "s1",
+    invokedTeam: { name: "compliance", remainder: "审查" },
+  });
+  assert.equal(teamParams.text, "审查");
+  assert.deepEqual(teamParams.at, { kind: "expert-team", name: "compliance" });
+  assert.equal(teamParams.clientMessageId, "m1");
+  assert.equal(teamParams.at && "clientMessageId" in teamParams.at, false);
+
+  const legacyParams = buildSessionSendParams({
+    text: "@writer 审查",
+    tabId: "tab-1",
+    clientMessageId: "m2",
+    userItemId: 2,
+    sessionId: "s1",
+    invokedAt: { name: "writer", remainder: "审查" },
+  });
+  assert.deepEqual(legacyParams.at, { name: "writer", clientMessageId: "2" });
 });

@@ -1,4 +1,5 @@
 import type { ExpertTeam, ExpertTeamMember } from "../rpc-types.ts";
+import { atTokenAt, type AtToken } from "./agentsLogic.ts";
 
 /**
  * 专家团定义、默认规则、校验与 `@` 检索的共享纯函数。
@@ -68,6 +69,109 @@ export function atExpertTeams(items: readonly ExpertTeam[], query: string): Expe
     const fields = [team.name, team.slug, team.description, team.scenarios ?? ""];
     return fields.some((field) => field.toLocaleLowerCase().includes(needle));
   });
+}
+
+/**
+ * 输入框开头的 `@` token（仅下标 0 起，光标须仍在 token 内）。
+ *
+ * 与 `agentsLogic.atTokenAt` 分开：这里只负责专家团分组的开头触发，
+ * 允许中文/Unicode 与 `team:` 前缀；旧 `@agent` 的任意位置 ASCII 词法保持不变。
+ */
+export function composerAtTokenAt(text: string, cursor: number): AtToken | undefined {
+  if (!text.startsWith("@") || text.startsWith("@@")) return undefined;
+  const pos = Math.max(0, Math.min(cursor, text.length));
+  let end = 0;
+  while (end < text.length && !/\s/.test(text[end]!)) end += 1;
+  if (pos > end) return undefined;
+  return { start: 0, end, query: text.slice(1, end) };
+}
+
+/** `@` 菜单的开词结果；`allowTeams` 只在输入开头为真。 */
+export type ComposerMentionState = { token: AtToken; allowTeams: boolean };
+
+/**
+ * 解析输入框当前 `@` 菜单：开头 token 同时开放智能体与专家团两组；
+ * 正文中段回落旧 `atTokenAt`（仅智能体组），保留任意位置补全。
+ */
+export function resolveComposerMentionState(text: string, cursor: number): ComposerMentionState | undefined {
+  const leading = composerAtTokenAt(text, cursor);
+  if (leading !== undefined) return { token: leading, allowTeams: true };
+  const token = atTokenAt(text, cursor);
+  return token === undefined ? undefined : { token, allowTeams: false };
+}
+
+/** 草稿开头 `@team:<slug>` 的调用名；用于输入框草稿摘要条立即回显已选团队。 */
+export function leadingTeamAtSlug(text: string): string | undefined {
+  const match = text.trimStart().match(/^@team:([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/);
+  return match?.[1];
+}
+
+/** 开头专家团调用目标的分类结果。 */
+export type TeamAtInvoke =
+  | { kind: "valid"; name: string; remainder: string }
+  | { kind: "empty-task"; name: string }
+  | { kind: "conflict"; reason: "multiple-targets" };
+
+/** 正文里另一个点名目标（`@team:` 或 `@<agent-slug>`）；只认词首，邮箱不误判。 */
+const ADDITIONAL_AT_TARGET_RE = /(?:^|\s)@(?:team:[a-z0-9]+(?:-[a-z0-9]+)*|[a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/;
+
+/**
+ * 解析开头 `@team:<slug>` 调用。
+ *
+ * 限开头：正文中段的 `@team:` 返回 undefined（发送时按普通文本处理，不冒充团队调用）。
+ * 同一消息出现第二个 `@team:`/`@<agent-slug>` 目标时按 conflict 拦截，空任务单独分类，
+ * 调用方不得把未填任务的 token 当普通文本发给模型。
+ */
+export function parseTeamAtInvoke(text: string): TeamAtInvoke | undefined {
+  const trimmed = text.trim();
+  const name = leadingTeamAtSlug(trimmed);
+  if (name === undefined) return undefined;
+  const remainder = trimmed.slice(`@team:${name}`.length).trim();
+  if (ADDITIONAL_AT_TARGET_RE.test(remainder)) return { kind: "conflict", reason: "multiple-targets" };
+  if (!remainder) return { kind: "empty-task", name };
+  return { kind: "valid", name, remainder };
+}
+
+/** `@` 菜单的键盘动作；组合态 Enter/Tab 永不选择或提交。 */
+export type MentionKeyAction =
+  | { kind: "none" }
+  | { kind: "pick"; index: number }
+  | { kind: "move"; index: number }
+  | { kind: "close" };
+
+/** 把输入法组合态与菜单按键归一为动作，供输入框与菜单共用同一套键盘规则。 */
+export function mentionKeyAction(input: {
+  key: string;
+  isComposing: boolean;
+  itemCount: number;
+  activeIndex: number;
+}): MentionKeyAction {
+  if (input.key === "Escape") return { kind: "close" };
+  const count = Math.max(0, input.itemCount);
+  if (count === 0) return { kind: "none" };
+  const active = Math.max(0, Math.min(input.activeIndex, count - 1));
+  if (input.key === "ArrowDown") return { kind: "move", index: (active + 1) % count };
+  if (input.key === "ArrowUp") return { kind: "move", index: (active - 1 + count) % count };
+  if (input.isComposing) return { kind: "none" };
+  if (input.key === "Enter" || input.key === "Tab") return { kind: "pick", index: active };
+  return { kind: "none" };
+}
+
+/** `@` 菜单与草稿摘要共用的团队摘要：成员数、分配/顺序、审查与交付方式。 */
+export function expertTeamMentionSummary(team: ExpertTeam): string {
+  const assignment = team.orchestration.assignmentMode === "broadcast" ? "全员分发" : "按职责分工";
+  const order =
+    team.orchestration.executionOrder === "sequential"
+      ? "顺序执行"
+      : team.orchestration.executionOrder === "parallel"
+        ? `并行（≤${effectiveTeamMaxParallel(team)}）`
+        : "动态补派";
+  const review = team.review.mode === "none" ? "不审查" : team.review.mode === "unified" ? "统一审查" : "逐成员审查";
+  const delivery =
+    team.summary.delivery === "artifact"
+      ? `${team.summary.artifactFormat === "html" ? "HTML" : "Markdown"} Artifact`
+      : "会话汇总";
+  return `${team.members.length} 名成员 · ${assignment} · ${order} · ${review} · ${delivery}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

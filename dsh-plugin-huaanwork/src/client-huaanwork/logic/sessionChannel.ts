@@ -134,6 +134,14 @@ export type HistoryChatItem =
   | { kind: "note"; text: string };
 
 /**
+ * `session.send` 的 `at` 目标类别（设计 §11.3）。
+ * 旧智能体保留 `name/clientMessageId`（`kind` 缺省）；专家团只带 `kind/name`，不伪造旧卡字段。
+ */
+export type SessionSendAtTarget =
+  | { name: string; clientMessageId: string }
+  | { kind: "expert-team"; name: string };
+
+/**
  * `session.send` 的请求参数。顶层 `clientMessageId` 是本次发送的持久回合锚；
  * `at.clientMessageId` 仅为旧 @ 运行卡的本地展示兼容保留。
  */
@@ -144,7 +152,7 @@ export type SessionSendParams = {
   sessionId?: string;
   modelId?: string;
   skill?: string;
-  at?: { name: string; clientMessageId: string };
+  at?: SessionSendAtTarget;
 };
 
 /**
@@ -152,8 +160,9 @@ export type SessionSendParams = {
  *
  * - 顶层 `clientMessageId` 恒为调用方生成的 UUID（`crypto.randomUUID()`）：它是 Host 与
  *   进度面板的持久回合锚，**禁止**用 `String(userMsg.id)`（`allocId()` 刷新后可重复）；
- * - `@` 发送仍带 `at.clientMessageId = String(userItemId)`（仅旧 @ 卡展示兼容），且保持
- *   旧口径优先于 skill；skill / 普通发送不带 `at`。
+ * - `@team` 发送把正文换成任务余量并生成 `at: { kind: 'expert-team', name }`，不携带旧卡
+ *   `clientMessageId`；旧 `@` 仍带 `at.clientMessageId = String(userItemId)`（仅旧 @ 卡展示
+ *   兼容），且保持旧口径优先于 skill；skill / 普通发送不带 `at`。
  */
 export function buildSessionSendParams(input: {
   text: string;
@@ -163,21 +172,30 @@ export function buildSessionSendParams(input: {
   userItemId: number;
   sessionId?: string;
   modelId?: string;
+  invokedTeam?: { name: string; remainder: string };
   invokedAt?: { name: string; remainder: string };
   invokedSkill?: { name: string; remainder: string };
 }): SessionSendParams {
-  const text = input.invokedAt ? input.invokedAt.remainder : input.invokedSkill ? input.invokedSkill.remainder : input.text;
+  const text = input.invokedTeam
+    ? input.invokedTeam.remainder
+    : input.invokedAt
+      ? input.invokedAt.remainder
+      : input.invokedSkill
+        ? input.invokedSkill.remainder
+        : input.text;
   return {
     text,
     tabId: input.tabId,
     clientMessageId: input.clientMessageId,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(input.modelId ? { modelId: input.modelId } : {}),
-    ...(input.invokedAt
-      ? { at: { name: input.invokedAt.name, clientMessageId: String(input.userItemId) } }
-      : input.invokedSkill
-        ? { skill: input.invokedSkill.name }
-        : {}),
+    ...(input.invokedTeam
+      ? { at: { kind: "expert-team" as const, name: input.invokedTeam.name } }
+      : input.invokedAt
+        ? { at: { name: input.invokedAt.name, clientMessageId: String(input.userItemId) } }
+        : input.invokedSkill
+          ? { skill: input.invokedSkill.name }
+          : {}),
   };
 }
 

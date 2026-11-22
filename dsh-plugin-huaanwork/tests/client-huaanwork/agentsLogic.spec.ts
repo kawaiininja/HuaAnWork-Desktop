@@ -63,6 +63,16 @@ test("parseAtInvoke only accepts a leading @name", () => {
   assert.equal(parseAtInvoke("@"), undefined);
 });
 
+test("legacy @agent lexing keeps arbitrary-position triggers and ASCII-only queries", () => {
+  // owner 裁定：旧 `@agent` 菜单保留任意位置触发；专家团只限制自己的词法。
+  assert.deepEqual(atTokenAt("请看 @writer", 10), { start: 3, end: 10, query: "writer" });
+  assert.deepEqual(atTokenAt("请看 @writer 审查", 9), { start: 3, end: 10, query: "writer" });
+  assert.equal(atTokenAt("正文 @合规", 6), undefined);
+  assert.equal(atTokenAt("@team:comp", 10), undefined);
+  assert.deepEqual(parseAtInvoke("@writer 审查"), { name: "writer", remainder: "审查" });
+  assert.equal(parseAtInvoke("正文 @writer 审查"), undefined);
+});
+
 test("isAgentInvocable requires enabled and not broken", () => {
   const base: AgentListItem = {
     name: "pdf-extract",

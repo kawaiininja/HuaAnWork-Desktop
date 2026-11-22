@@ -1249,6 +1249,25 @@ test("send carries the tab id and selected model and mints under the tab's own r
   assert.match(body, /userItemId: userMsg\.id,/);
   assert.match(body, /\.\.\.\(invokedAt \? \{ invokedAt \} : \{\}\),/);
   assert.match(body, /\.\.\.\(invokedSkill \? \{ invokedSkill \} : \{\}\),/);
+  assert.match(body, /parseTeamAtInvoke\(text\)/);
+  assert.match(body, /\.\.\.\(invokedTeam \? \{ invokedTeam \} : \{\}\),/);
+});
+
+test("composer @ trigger resolves leading teams while the legacy agent menu stays arbitrary-position", () => {
+  // owner 裁定：触发接线必须经 resolveComposerMentionState；整体换成 leading-only 的
+  // composerAtTokenAt 会让正文中段的旧 @agent 补全消失。
+  assert.match(APP_SOURCE, /resolveComposerMentionState\(draft, atCursor\)/);
+  assert.match(APP_SOURCE, /function pickAtTeam\(team: ExpertTeam\)/);
+  assert.match(APP_SOURCE, /leadingTeamAtSlug\(draft\)/);
+  // 开头 token 选择用同一个 resolver 原地替换，不把 @agent 拼到中文 token 后面。
+  const pickBody = functionBody("function pickAtAgent(", "function tryOpenAutomationFromDraft(");
+  assert.match(pickBody, /resolveComposerMentionState\(draft, atCursor\)\?\.token/);
+  // 客户端只消费 invocableList：禁用/失效团队已由 Host 过滤，@ 团队分组不得回退到管理页的 list。
+  assert.match(APP_SOURCE, /rpcCall<\{ teams: ExpertTeam\[\] \}>\("expertTeam\.invocableList"\)/);
+  assert.doesNotMatch(APP_SOURCE, /"expertTeam\.list"/);
+  assert.match(APP_SOURCE, /atExpertTeams\(expertTeamCatalog, atTeamQuery\)/);
+  // 定义变更事件同时刷新团队补全目录。
+  assert.match(APP_SOURCE, /expertTeam\/changed[\s\S]{0,900}"expertTeam\.invocableList"/);
 });
 
 test("session.send always carries a top-level clientMessageId and keeps the @ compat anchor", () => {

@@ -59,6 +59,7 @@ import {
 import type {
   AgentPackageConfirmCard,
   ArtifactRef,
+  ExpertTeam,
   SkillConfirmCard,
   SubagentCancelResult,
   SubagentRunProjection,
@@ -77,10 +78,17 @@ import {
 } from "./logic/subagentRuns.ts";
 import {
   atAgents,
-  atTokenAt,
   parseAtInvoke,
   type AgentListItem,
 } from "./logic/agentsLogic.ts";
+import {
+  atExpertTeams,
+  expertTeamMentionSummary,
+  leadingTeamAtSlug,
+  mentionKeyAction,
+  parseTeamAtInvoke,
+  resolveComposerMentionState,
+} from "./logic/expertTeamsLogic.ts";
 import {
   applyHtmlTheme,
   parseTheme,
@@ -605,6 +613,8 @@ export default function App() {
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashClosed, setSlashClosed] = useState(false);
   const [atCatalog, setAtCatalog] = useState<AgentListItem[]>([]);
+  /** `@` 菜单的专家团目录：只来自 Host `expertTeam.invocableList`（已排除禁用/失效团队）。 */
+  const [expertTeamCatalog, setExpertTeamCatalog] = useState<ExpertTeam[]>([]);
   /** 智能体包/目录写入事件计数：智能体页据此重拉各面板数据。 */
   const [agentChangeSignal, setAgentChangeSignal] = useState(0);
   /** 专家团定义增删改/启停事件计数：专家团页据此重拉列表。 */
@@ -1243,9 +1253,20 @@ export default function App() {
     setSlashIndex(0);
   }, [slashTokenKey]);
 
-  const atToken = atTokenAt(draft, atCursor);
+  // owner 裁定：开头 token 同时开放智能体与专家团；正文中段回落旧 atTokenAt，只保留智能体补全。
+  const mentionState = resolveComposerMentionState(draft, atCursor);
+  const atToken = mentionState?.token;
+  const allowTeams = mentionState?.allowTeams === true;
   const atOpen = Boolean(atToken && !atClosed);
-  const atMatches = atOpen ? atAgents(atCatalog, atToken?.query ?? "").slice(0, 8) : [];
+  const atQuery = atToken?.query ?? "";
+  const atMatches = atOpen ? atAgents(atCatalog, atQuery).slice(0, 8) : [];
+  const atTeamQuery = atQuery.startsWith("team:") ? atQuery.slice("team:".length) : atQuery;
+  const atTeamMatches = atOpen && allowTeams ? atExpertTeams(expertTeamCatalog, atTeamQuery).slice(0, 8) : [];
+  const atItemCount = atMatches.length + atTeamMatches.length;
+  const draftTeamSlug = leadingTeamAtSlug(draft);
+  const draftTeam = draftTeamSlug === undefined
+    ? undefined
+    : expertTeamCatalog.find((team) => team.slug === draftTeamSlug);
 
   const atTokenKey = `${atToken?.start ?? ""}:${atToken?.query ?? ""}`;
   useEffect(() => {
@@ -1253,12 +1274,12 @@ export default function App() {
     setAtIndex(0);
   }, [atTokenKey]);
 
-  // 目录异步回写/启禁用变化导致 atMatches 收缩时，索引钳回有效范围
+  // 目录异步回写/启禁用变化导致候选收缩时，索引钳回有效范围
   useEffect(() => {
-    if (atIndex > 0 && atIndex >= atMatches.length) {
-      setAtIndex(Math.max(0, atMatches.length - 1));
+    if (atIndex > 0 && atIndex >= atItemCount) {
+      setAtIndex(Math.max(0, atItemCount - 1));
     }
-  }, [atMatches.length, atIndex]);
+  }, [atItemCount, atIndex]);
 
   const refreshSlashCatalog = useCallback(() => {
     // Callable from the skills page too; only readiness gates the request.
@@ -1268,10 +1289,21 @@ export default function App() {
       .catch(() => setSlashCatalog([]));
   }, [ready, sidecarDead]);
 
+  /** 只拉可调用团队：禁用/失效由 Host 过滤，`@` 菜单不自行放宽。 */
+  const refreshExpertTeamCatalog = useCallback(() => {
+    if (sidecarDead || !ready) return;
+    void rpcCall<{ teams: ExpertTeam[] }>("expertTeam.invocableList")
+      .then((listed) => setExpertTeamCatalog(Array.isArray(listed.teams) ? listed.teams : []))
+      .catch(() => {
+        // 目录暂不可读时保留旧补全数据
+      });
+  }, [ready, sidecarDead]);
+
   useEffect(() => {
     if (view !== "main" || sidecarDead || !ready) return;
     let cancelled = false;
     refreshSlashCatalog();
+    refreshExpertTeamCatalog();
     void rpcCall<{ items: AgentListItem[] }>("agent.invocableList")
       .then((res) => {
         if (!cancelled) setAtCatalog(Array.isArray(res.items) ? res.items : []);
@@ -1282,7 +1314,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [view, ready, sidecarDead, refreshSlashCatalog]);
+  }, [view, ready, sidecarDead, refreshSlashCatalog, refreshExpertTeamCatalog]);
 
   /** 向指定标签追加一条提示；标签已关闭时自然丢弃。新提示永远落在未定位结果分组之前。 */
   function noteTab(tabId: string, text: string) {
@@ -2103,9 +2135,16 @@ export default function App() {
         return;
       }
       if (event.event === "expertTeam/changed") {
-        // 定义写路径无会话归属：只驱动专家团页重拉列表，不写对话条目，
+        // 定义写路径无会话归属：驱动专家团页重拉列表和 `@` 团队补全，不写对话条目，
         // 自动化运行期间也照常刷新（与 agent/changed 同款顺序契约）。
         setExpertTeamChangeSignal((prev) => prev + 1);
+        void rpcCall<{ teams: ExpertTeam[] }>("expertTeam.invocableList")
+          .then((res) => {
+            if (!cancelled) setExpertTeamCatalog(Array.isArray(res.teams) ? res.teams : []);
+          })
+          .catch(() => {
+            // 目录暂不可读时保留旧补全数据
+          });
         return;
       }
       if (event.event === "skill/changed") {
@@ -3079,7 +3118,8 @@ export default function App() {
   }
 
   function pickAtAgent(agent: AgentListItem) {
-    const token = atTokenAt(draft, atCursor);
+    // 与触发接线共用同一 resolver：开头的中文 token 也原地替换，不把 @slug 拼到 token 后面。
+    const token = resolveComposerMentionState(draft, atCursor)?.token;
     const next = token
       ? `${draft.slice(0, token.start)}@${agent.name} ${draft.slice(token.end)}`
       : `${draft}${draft && !/\s$/.test(draft) ? " " : ""}@${agent.name} `;
@@ -3093,6 +3133,36 @@ export default function App() {
       el.focus();
       el.setSelectionRange(caret, caret);
     });
+  }
+
+  /** 选中专家团：插入 `@team:<slug> ` 与尾随空格，草稿摘要条据 leadingTeamAtSlug 立即回显。 */
+  function pickAtTeam(team: ExpertTeam) {
+    const token = resolveComposerMentionState(draft, atCursor)?.token;
+    const inserted = `@team:${team.slug} `;
+    const next = token
+      ? `${draft.slice(0, token.start)}${inserted}${draft.slice(token.end)}`
+      : `${draft}${draft && !/\s$/.test(draft) ? " " : ""}${inserted}`;
+    const caret = token ? token.start + inserted.length : next.length;
+    setDraft(next);
+    setAtCursor(caret);
+    setAtClosed(true);
+    requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(caret, caret);
+    });
+  }
+
+  /** `@` 菜单键盘选择：智能体在前、专家团在后，索引与 AtAgentMenu 的合并列表同序。 */
+  function pickAtMentionIndex(index: number) {
+    if (index < atMatches.length) {
+      const agent = atMatches[index];
+      if (agent) pickAtAgent(agent);
+      return;
+    }
+    const team = atTeamMatches[index - atMatches.length];
+    if (team) pickAtTeam(team);
   }
 
   function tryOpenAutomationFromDraft(text: string): boolean {
@@ -3174,12 +3244,23 @@ export default function App() {
     const text = (textOverride ?? draft).trim();
     const invokedSkill = parseSlashInvoke(text);
     const invokedAt = parseAtInvoke(text);
+    const teamInvoke = parseTeamAtInvoke(text);
     if ((!text && !invokedAt) || sidecarDead || hostPhase !== "ok") return;
     if (tryOpenAutomationFromDraft(text)) return;
     // 同步重入护栏（R3-1）：按标签记录，覆盖到回合真正开始之前的整段异步前奏。
     // 它只挡同一标签的重入，不挡另一个标签。
     const chatId = targetTabId ?? activeTab;
     if (sendingRef.current.has(chatId)) return;
+    // 团队调用先分类：空任务或同条多目标必须原地拦截，绝不把未完成的 token 当普通文本发给模型。
+    if (teamInvoke?.kind === "empty-task") {
+      noteTab(chatId, `请在 @team:${teamInvoke.name} 后填写任务内容再发送。`);
+      return;
+    }
+    if (teamInvoke?.kind === "conflict") {
+      noteTab(chatId, "一条消息只能调用一个目标：请只保留开头的一个 @team:<slug>，不要同时 @ 其他智能体或专家团。");
+      return;
+    }
+    const invokedTeam = teamInvoke?.kind === "valid" ? teamInvoke : undefined;
     sendingRef.current.add(chatId);
     try {
       liveChatRef.current = chatId;
@@ -3276,6 +3357,7 @@ export default function App() {
           ...(modelId ? { modelId } : {}),
           ...(invokedAt ? { invokedAt } : {}),
           ...(invokedSkill ? { invokedSkill } : {}),
+          ...(invokedTeam ? { invokedTeam } : {}),
         }));
         // 先写回身份：排队只追加等待项，started:true 才真正开始执行。
         writeTabRun(chatId, (state) => noteSendResult(state, sent));
@@ -4411,6 +4493,11 @@ export default function App() {
               }}
             >
               {pendingInput ? <div className="composer-context">正在回答：{pendingInput.card.question}</div> : null}
+              {!pendingInput && draftTeam ? (
+                <div className="composer-context">
+                  专家团：{draftTeam.name} · {expertTeamMentionSummary(draftTeam)}
+                </div>
+              ) : null}
               {!pendingInput && slashOpen ? (
                 <SlashSkillMenu
                   skills={slashMatches}
@@ -4421,9 +4508,12 @@ export default function App() {
               ) : !pendingInput && atOpen ? (
                 <AtAgentMenu
                   agents={atMatches}
+                  teams={atTeamMatches}
+                  allowTeams={allowTeams}
                   activeIndex={atIndex}
                   onHover={setAtIndex}
-                  onPick={pickAtAgent}
+                  onPickAgent={pickAtAgent}
+                  onPickTeam={pickAtTeam}
                 />
               ) : null}
               <textarea
@@ -4484,30 +4574,26 @@ export default function App() {
                       return;
                     }
                   } else if (!pendingInput && atOpen) {
-                    if (event.key === "ArrowDown") {
+                    // 组合态 Enter/Tab 永远不选择、不提交；上下键与 Esc 保持菜单行为。
+                    const action = mentionKeyAction({
+                      key: event.key,
+                      isComposing: event.nativeEvent.isComposing,
+                      itemCount: atItemCount,
+                      activeIndex: atIndex,
+                    });
+                    if (action.kind === "move") {
                       event.preventDefault();
-                      setAtIndex((index) => (atMatches.length ? (index + 1) % atMatches.length : 0));
+                      setAtIndex(action.index);
                       return;
                     }
-                    if (event.key === "ArrowUp") {
-                      event.preventDefault();
-                      setAtIndex((index) =>
-                        atMatches.length ? (index - 1 + atMatches.length) % atMatches.length : 0,
-                      );
-                      return;
-                    }
-                    if (event.key === "Escape") {
+                    if (action.kind === "close") {
                       event.preventDefault();
                       setAtClosed(true);
                       return;
                     }
-                    if (
-                      (event.key === "Enter" || event.key === "Tab") &&
-                      !event.nativeEvent.isComposing &&
-                      atMatches[atIndex]
-                    ) {
+                    if (action.kind === "pick" && atItemCount > 0) {
                       event.preventDefault();
-                      pickAtAgent(atMatches[atIndex]);
+                      pickAtMentionIndex(action.index);
                       return;
                     }
                   }
