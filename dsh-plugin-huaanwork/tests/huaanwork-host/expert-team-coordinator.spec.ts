@@ -23,6 +23,11 @@ import {
   type TeamMemberDispatchResult,
 } from '../../src/huaanwork-host/expert-team/dispatch.ts'
 import type { MemberTextResult } from '../../src/huaanwork-host/expert-team/text-protocol.ts'
+import {
+  EXPERT_TEAM_DISPATCH_TOOL,
+  expertTeamDispatchDefinition,
+} from '../../src/huaanwork-guardrails/expert-team-dispatch.ts'
+import { attachAgentTools, emptyAttachments } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import { validTeamInput } from '../fixtures/expert-team/team.ts'
 
 /**
@@ -781,4 +786,87 @@ describe('expert team coordinator', () => {
     expect(parentCancels).toEqual([PARENT_SESSION_ID])
   })
 
+  it('renders the full review scope in the member prompt and the tool result, and a single id for per-member review', async () => {
+    const unified = await makeCoordinatorFixture({ roster: DEFAULT_ROSTER_3, reviewMode: 'unified' })
+    const first = await unified.coordinator.dispatch(dispatchInput('executor', { callId: 'scope-e1' }))
+    const second = await unified.coordinator.dispatch(dispatchInput('executor-2', { callId: 'scope-e2' }))
+    const scopeIds = [first.resultId, second.resultId].sort()
+    const attachments = emptyAttachments()
+    attachAgentTools(attachments, PARENT_SESSION_ID, [EXPERT_TEAM_DISPATCH_TOOL])
+    const unifiedTool = expertTeamDispatchDefinition({
+      huaanworkAttachments: attachments,
+      huaanworkTurnAnchors: {
+        current: (sessionId) =>
+          sessionId === PARENT_SESSION_ID
+            ? { clientMessageId: CLIENT_MESSAGE_ID, startedAt: '2026-11-22T00:00:00.000Z', origin: 'advanced' as const }
+            : undefined,
+      },
+      huaanworkExpertTeamCoordinator: unified.coordinator,
+    })
+    const unifiedResult = await unifiedTool.execute(
+      { memberId: 'reviewer', kind: 'review', task: '统一审查全部结果' },
+      { agent: { session: { id: PARENT_SESSION_ID } }, callId: 'tool-review-unified' },
+    )
+    const unifiedPrompt = unified.gate.reviewPrompts[0]
+    expect(unifiedPrompt).toContain('已完成的引用结果：')
+    for (const resultId of scopeIds) {
+      expect(unifiedPrompt).toContain(resultId)
+      expect(unified.gate.reviewPrompts[0]).toContain(`--- ${resultId}`)
+    }
+    expect(unifiedResult.text).toContain(`引用结果：${scopeIds.join('、')}`)
+
+    const perMember = await makeCoordinatorFixture({ roster: DEFAULT_ROSTER_3, reviewMode: 'per-member' })
+    const target = await perMember.coordinator.dispatch(dispatchInput('executor', { callId: 'pm-scope-1' }))
+    const other = await perMember.coordinator.dispatch(dispatchInput('executor-2', { callId: 'pm-scope-2' }))
+    const perMemberTool = expertTeamDispatchDefinition({
+      huaanworkAttachments: attachments,
+      huaanworkTurnAnchors: {
+        current: (sessionId) =>
+          sessionId === PARENT_SESSION_ID
+            ? { clientMessageId: CLIENT_MESSAGE_ID, startedAt: '2026-11-22T00:00:00.000Z', origin: 'advanced' as const }
+            : undefined,
+      },
+      huaanworkExpertTeamCoordinator: perMember.coordinator,
+    })
+    const perMemberResult = await perMemberTool.execute(
+      { memberId: 'reviewer', kind: 'review', task: '单链审查', inputResultIds: [target.resultId] },
+      { agent: { session: { id: PARENT_SESSION_ID } }, callId: 'tool-review-per-member' },
+    )
+    const perMemberPrompt = perMember.gate.reviewPrompts[0]
+    expect(perMemberPrompt).toContain('已完成的引用结果：')
+    expect(perMemberPrompt).toContain(`--- ${target.resultId}`)
+    expect(perMemberPrompt).not.toContain(other.resultId)
+    expect(perMemberResult.text).toContain(`引用结果：${target.resultId}`)
+    expect(perMemberResult.text).not.toContain(other.resultId)
+  })
+
+  it('fails closed on unknown members, role mismatches and cross-run input references without activating anyone', async () => {
+    const fixture = await makeCoordinatorFixture({ roster: DEFAULT_ROSTER_3 })
+    await expect(fixture.coordinator.dispatch(dispatchInput('missing-member'))).rejects.toThrow(
+      'expert-team-member-missing',
+    )
+    await expect(
+      fixture.coordinator.dispatch(dispatchInput('executor', { kind: 'review', task: '执行成员不能审查' })),
+    ).rejects.toThrow('expert-team-member-role-mismatch')
+    expect(fixture.activations).toHaveLength(0)
+
+    const otherRun = await makeCoordinatorFixture({ roster: DEFAULT_ROSTER_3 })
+    const produced = await otherRun.coordinator.dispatch(dispatchInput('executor', { callId: 'other-run-1' }))
+    expect(produced.status).toBe('completed')
+    await expect(
+      fixture.coordinator.dispatch(dispatchInput('executor', {
+        callId: 'cross-run-reference',
+        inputResultIds: [produced.resultId],
+      })),
+    ).rejects.toThrow('expert-team-invalid-input-result')
+    await expect(
+      fixture.coordinator.dispatch(dispatchInput('executor', {
+        callId: 'unknown-reference',
+        inputResultIds: ['result-does-not-exist'],
+      })),
+    ).rejects.toThrow('expert-team-invalid-input-result')
+
+    expect(fixture.activations).toHaveLength(0)
+    expect(runOf(fixture).results).toHaveLength(0)
+  })
 })

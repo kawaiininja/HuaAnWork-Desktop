@@ -600,6 +600,8 @@ export type ComplianceTeamSmokeResult = {
   dispatches: ComplianceTeamDispatchRecord[]
   memberRunIds: string[]
   maxMemberConcurrency: number
+  /** 审查成员流的实测最大并发：证明两审查成员在同一波次真实重叠。 */
+  maxReviewConcurrency: number
   parentMcpAttachments: string[]
   /** 父会话模型面出现的 `mcp__*` 工具名(必须为空)。 */
   parentMcpToolNames: string[]
@@ -710,6 +712,9 @@ type RunScript = {
   verdictByMember: Map<string, Array<'pass' | 'revise'>>
   maxMemberConcurrency: number
   activeMembers: number
+  /** 审查成员流的实测并发（同 barrier 风格，波次内可证明真实重叠）。 */
+  maxReviewConcurrency: number
+  activeReviews: number
   parentMcpToolNames: Set<string>
   /** 成员 id → 该成员 activation 请求里出现的首个 `mcp__*` 工具名(每次派工独立服务名)。 */
   memberMcpServers: Map<string, string>
@@ -733,6 +738,8 @@ function newRunScript(reviewers: string[], executorMemberIds: string[], options:
     verdictByMember: new Map(),
     maxMemberConcurrency: 0,
     activeMembers: 0,
+    maxReviewConcurrency: 0,
+    activeReviews: 0,
     parentMcpToolNames: new Set(),
     memberMcpServers: new Map(),
     finalSummary: '',
@@ -1036,11 +1043,16 @@ async function* memberStream(run: RunScript, prompt: string): AsyncGenerator<Str
   const review = prompt.includes('审查要求：')
   run.activeMembers += 1
   run.maxMemberConcurrency = Math.max(run.maxMemberConcurrency, run.activeMembers)
+  if (review) {
+    run.activeReviews += 1
+    run.maxReviewConcurrency = Math.max(run.maxReviewConcurrency, run.activeReviews)
+  }
   try {
     // 同一派工波次内还有未开始的成员时,保持本路流在场,直到第二路成员流真正
     // 进入(并发池)或波次上限到期(串行池);并发上限始终由实测在场数决定。
+    // 执行与审查走同一 barrier,审查并发因此是真实重叠而不是派工顺序推断。
     const wave = run.wave
-    if (!review && wave !== undefined && wave.unstarted > 1) {
+    if (wave !== undefined && wave.unstarted > 1) {
       while (run.activeMembers < 2 && Date.now() < wave.deadline) await delay(10)
     }
     if (wave !== undefined && wave.unstarted > 0) wave.unstarted -= 1
@@ -1066,6 +1078,7 @@ async function* memberStream(run: RunScript, prompt: string): AsyncGenerator<Str
     yield* textStream(text)
   } finally {
     run.activeMembers -= 1
+    if (review) run.activeReviews -= 1
   }
 }
 
@@ -1276,6 +1289,7 @@ export async function executeScriptedTeamRun(
       dispatches,
       memberRunIds: run.results.flatMap((result) => (result.memberRunId === undefined ? [] : [result.memberRunId])),
       maxMemberConcurrency: script.maxMemberConcurrency,
+      maxReviewConcurrency: script.maxReviewConcurrency,
       parentMcpAttachments: mcpAttachmentNames(ctx, runtime.sessionId),
       parentMcpToolNames: [...script.parentMcpToolNames],
       memberMcpServers,

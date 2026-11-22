@@ -58,6 +58,18 @@ corepack yarn check
 没有团队定义（`0 teams`），它证明的是编译产物经真实 Loader 启动后工具已注册、两条团队 GET
 路由在真实 HTTP 服务上返回 200；它不证明团队 CRUD、派工或 UI 行为。
 
+Task 18 Step 2（最终差异与格式检查）在最终修复波次重跑并记录：
+
+```bash
+git diff --check      # EXIT=0，无输出：无 whitespace 错误
+git status --short    # 仅列出本轮专家团修复文件，无 deepseek-harness/、锁文件、无关 CI 或二进制
+```
+
+`git status --short` 的 13 个条目全部属于专家团实现：`coordinator.ts`、`index.ts`、
+`expertTeamsLogic.ts`、`ExpertTeamRunCard.tsx`、`App.tsx`、对应 Host/Guardrail/Client
+测试、组合 driver、计划文件。工作树在该步之前没有未跟踪的意外文件；证据文档本身是随后
+新增的文档提交。
+
 ## 3. 自动化证据（已执行）
 
 ### 3.1 完整门禁
@@ -69,15 +81,20 @@ corepack yarn check
 
 ### 3.2 单元与契约测试
 
-专家团相关的自动化测试文件：
+专家团相关的主要自动化测试文件：
 
 - Host 侧（`dsh-plugin-huaanwork/tests/huaanwork-host/`）：`expert-team-store.spec.ts`、
   `expert-team-runs.spec.ts`、`expert-team-routes.spec.ts`、`expert-team-text-protocol.spec.ts`、
   `expert-team-orchestration.spec.ts`、`expert-team-dispatch.spec.ts`、
   `expert-team-coordinator.spec.ts`、`expert-team-observer.spec.ts`、
-  `expert-team-session.spec.ts`、`expert-team-composition.spec.ts`。
+  `expert-team-session.spec.ts`、`expert-team-composition.spec.ts`、`sessions.spec.ts`
+  （团队发送与观察链）。
+- Guardrail 侧（`dsh-plugin-huaanwork/tests/huaanwork-guardrails/`）：`expert-team-dispatch.spec.ts`
+  （工具注册与团队回合附件）与 `policy.cordis.spec.ts`（`result_present` /
+  `expert_team_dispatch` 的挂载 allow、未挂载双闸 deny）。
 - Client 侧（`dsh-plugin-huaanwork/tests/client-huaanwork/`）：`expertTeamsLogic.spec.ts`、
-  `ExpertTeamsView.spec.ts`、`expertTeamRuns.spec.ts`、`ExpertTeamRunCard.spec.ts`。
+  `ExpertTeamsView.spec.ts`、`expertTeamRuns.spec.ts`、`ExpertTeamRunCard.spec.ts`、
+  `appWiring.spec.ts`（团队运行卡对账、取消确认与视图清理）。
 
 这些测试全部包含在 §2 的 Vitest 合计中。
 
@@ -90,6 +107,8 @@ corepack yarn check
 1. 两名执行成员 + 一名统一审查成员，默认统一审查、一次返修后复审、单一主 Artifact；
    双 MCP 成员、父会话无 MCP 泄漏、成员 MCP server 名长度受限；成员 run 真实独立。
 2. 两名审查成员时返修后全员并行复审；父会话 `maxParallelToolCalls=1` 时团队串行池生效。
+   组合 driver 以与执行成员相同的波次 barrier 记录真实审查流并发 `maxReviewConcurrency`：
+   两审查成员的复审波次断言为 2，串行池断言为 1。
 3. 24 次预算耗尽后产出 partial Artifact；Artifact 写失败后保持 `pending` 且团队结算
    `partial`。
 4. 仅会话模式只取最后 `tool/result` 之后的最终文本；goal 续拍不能再派工

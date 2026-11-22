@@ -66,6 +66,8 @@ describe('expert team real composition', () => {
       'review',
     ])
     expect(result.memberRunIds).toHaveLength(7)
+    // 两名审查成员必须在同一波次真实重叠：barrier 只在第二路审查流在场或波次超时后放行。
+    expect(result.maxReviewConcurrency).toBe(2)
     expect(result.artifactCount).toBe(1)
     expect(result.run.status).toBe('completed')
 
@@ -76,6 +78,7 @@ describe('expert team real composition', () => {
       reviewVerdicts: ['pass', 'pass'],
     })
     expect(serialPool.maxMemberConcurrency).toBe(1)
+    expect(serialPool.maxReviewConcurrency).toBe(1)
     expect(serialPool.artifactCount).toBe(1)
     expect(serialPool.run.status).toBe('completed')
   }, 180_000)
