@@ -73,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(83 项)——
+// —— 与 huaanwork-host/routes.ts ROUTE_TABLE 一一对应的期望表(92 项)——
 const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'workspace.open': { http: 'POST', path: '/huaanwork/workspace/open' },
   'workspace.close': { http: 'POST', path: '/huaanwork/workspace/close' },
@@ -158,11 +158,20 @@ const EXPECTED_ROUTES: Record<string, { http: string; path: string }> = {
   'artifact.openFullscreen': { http: 'POST', path: '/huaanwork/artifact/openFullscreen' },
   'artifact.download': { http: 'POST', path: '/huaanwork/artifact/download' },
   'artifact.prepareFrame': { http: 'POST', path: '/huaanwork/artifact/prepareFrame' },
+  'expertTeam.list': { http: 'GET', path: '/huaanwork/expert-team/list' },
+  'expertTeam.get': { http: 'GET', path: '/huaanwork/expert-team/get' },
+  'expertTeam.create': { http: 'POST', path: '/huaanwork/expert-team/create' },
+  'expertTeam.update': { http: 'POST', path: '/huaanwork/expert-team/update' },
+  'expertTeam.setEnabled': { http: 'POST', path: '/huaanwork/expert-team/setEnabled' },
+  'expertTeam.remove': { http: 'POST', path: '/huaanwork/expert-team/remove' },
+  'expertTeam.invocableList': { http: 'GET', path: '/huaanwork/expert-team/invocable' },
+  'expertTeam.runList': { http: 'GET', path: '/huaanwork/expert-team/run/list' },
+  'expertTeam.cancel': { http: 'POST', path: '/huaanwork/expert-team/cancel' },
 }
 
 describe('rpcCall 路由映射', () => {
-  test('全表 83 项与 ROUTE_TABLE 一一对应', () => {
-    expect(Object.keys(ROUTES)).toHaveLength(83)
+  test('全表 92 项与 ROUTE_TABLE 一一对应', () => {
+    expect(Object.keys(ROUTES)).toHaveLength(92)
     const actual = Object.fromEntries(
       Object.entries(ROUTES).map(([method, route]) => [method, { http: route.http, path: route.path }]),
     )

@@ -132,6 +132,7 @@ import {
 } from './automations-store.ts'
 import { automationRunSessionId } from './automation-session-ids.ts'
 import { inFlightRuns } from './automation-inflight.ts'
+import { expertTeamRoutes } from './expert-team-routes.ts'
 import {
   assertAutomationNotDeleting,
   automationAdmissionRoot,
@@ -1833,6 +1834,9 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
       return { prepared: true }
     }),
   },
+
+  // 专家团(设计 §14):定义 CRUD/可用性与当前 Host generation 的运行投影。
+  ...expertTeamRoutes,
 ]
 
 export const NATIVE_ROUTES: readonly NativeRouteEntry[] = [

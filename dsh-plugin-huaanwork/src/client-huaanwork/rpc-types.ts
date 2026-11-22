@@ -85,7 +85,16 @@ export type RpcRequest = {
     | "artifact.download"
     | "artifact.prepareFrame"
     | "subagent.list"
-    | "subagent.cancel";
+    | "subagent.cancel"
+    | "expertTeam.list"
+    | "expertTeam.get"
+    | "expertTeam.create"
+    | "expertTeam.update"
+    | "expertTeam.setEnabled"
+    | "expertTeam.remove"
+    | "expertTeam.invocableList"
+    | "expertTeam.runList"
+    | "expertTeam.cancel";
   params?: unknown;
 };
 

@@ -50,6 +50,8 @@ import {
   forgetChildSessions,
 } from './child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
+import type { ExpertTeamRunRegistry } from './expert-team/runs.ts'
+import type { ExpertTeamStore } from './expert-team/types.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { resolveSessionModel } from './session-models.ts'
 import { listProjects, listTasks, setTaskModel } from './stores.ts'
@@ -112,6 +114,10 @@ export type SessionRuntimeContext = {
   subagents?: SubagentsService
   /** 子代理 run 权威状态机(holders.ts 注入);执行链与 subagent.* 路由读同一实例。 */
   huaanworkSubagentRuns?: SubagentRunRegistry
+  /** 专家团定义存储(index.ts 启动时注入);expertTeam.* 路由经这里强类型读取同一实例。 */
+  huaanworkExpertTeamStore?: ExpertTeamStore
+  /** 专家团运行状态机(index.ts 启动时注入);取消、运行投影与后续协调器共读同一实例。 */
+  huaanworkExpertTeamRuns?: ExpertTeamRunRegistry
   /**
    * 会话 → 模型条目 id 的绑定表(holders.ts 注入)。`sendToAgent` 在 `dispatchAt`
    * 之前先写入本轮准入的模型(子代理在其中的 `subagent/start` 同步复制父会话模型),

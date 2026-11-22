@@ -6,6 +6,8 @@ import { narrowArtifactNativeCapability, type ConfirmedRestartRuntime } from '..
 import { sweepLegacyChatAutoSessions } from './automation-sweep.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
+import { createExpertTeamStore } from './expert-team/store.ts'
+import { createExpertTeamRunRegistry } from './expert-team/runs.ts'
 import { createSubagentRunRegistry } from './subagent-runs.ts'
 import { createTurnScheduler } from './turn-scheduler.ts'
 import { installTurnAnchorHooks } from './turn-anchors.ts'
@@ -182,6 +184,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   // 事件与路由共用同一个 hub.broadcast(routeCtx.emit)。
   const subagentRuns = createSubagentRunRegistry({ emit: routeCtx.emit })
   ctx.huaanworkSubagentRuns = subagentRuns
+  // 专家团:定义存储与运行注册表各创建一次,运行期只 mutate;expertTeam.* 路由与
+  // 后续协调器读到的都是这里的同一引用。
+  ctx.huaanworkExpertTeamStore = createExpertTeamStore(config.profileDir)
+  ctx.huaanworkExpertTeamRuns = createExpertTeamRunRegistry({ emit: routeCtx.emit })
   // Task 6:唯一回合调度器与两张会话表。routeCtx.runtimeCtx 就是同一个 ctx,
   // sessionSend、出队、模型适配器、沙箱与工具执行读到的都是这里的同一引用。
   const turnScheduler = createTurnScheduler({
