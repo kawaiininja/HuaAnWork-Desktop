@@ -12,7 +12,7 @@
 
 **Baseline:** 外层代码基线 `ed823cde6614a090ddacac1a4f934d1652ffb332`，上游 pin `1600d8a1e140dcde43a1a0941940a0480712c011`；设计基线为上述代码加已通过评审的规格。旧行号仅用于定位，实施时以符号和测试为准。
 
-**Review status:** 实现与自动化 headless gate 已完成（`corepack yarn check` EXIT=0，代码 HEAD `e259a2664f`）；真机人工验收未执行（BLOCKED，无交互 GUI/IME/真机环境），Task 18 Step 3 的 9 项真机复选框保持未勾选。
+**Review status:** 实现与自动化 headless gate 已完成（`corepack yarn check` EXIT=0，代码 HEAD `eca2ceb5b0`）；真机人工验收未执行（BLOCKED，无交互 GUI/IME/真机环境），Task 18 Step 3 的 9 项真机复选框保持未勾选。
 
 ## Global Constraints
 
@@ -2036,7 +2036,7 @@ Expected: FAIL，`composerAtTokenAt`/`parseTeamAtInvoke` 判别联合与 `invoke
 
 - `expertTeamsLogic.ts`：
   - `composerAtTokenAt(text, cursor)`：仅识别输入开头 `@` 后至光标的连续非空白 token（允许中文、Unicode、ASCII 与 `team:` 前缀）；既有 `agentsLogic.ts` 中的 `atTokenAt`（任意位置 ASCII 触发）和 `parseAtInvoke` 保持零修改；
-  - `resolveComposerMentionState(text, cursor)`：先尝试 `composerAtTokenAt(text, cursor)`，命中则返回 `{ token, allowTeams: true }`（开头同时允许“智能体”与“专家团”分组）；未命中则回落 `atTokenAt(text, cursor)`，命中则返回 `{ token, allowTeams: false }`（保留正文中段旧 `@agent` 任意位置补全，仅隐藏专家团分组）；
+  - `resolveComposerMentionState(text, cursor)`：先尝试 `composerAtTokenAt(text, cursor)`，命中则返回 `{ token, allowTeams: true }`（开头同时允许“智能体”与“专家团”分组）；若草稿开头已是 `@team:<slug>` 则正文 `@` 按普通文本处理，不再弹出中段智能体菜单诱导混用；普通草稿未命中开头 token 时回落 `atTokenAt(text, cursor)`，命中则返回 `{ token, allowTeams: false }`（保留正文中段旧 `@agent` 任意位置补全，仅隐藏专家团分组）；
   - `leadingTeamAtSlug(text)`：识别开头 `@team:<slug>`（无论是否已键入任务正文），供输入框草稿摘要条立即展示所选专家团；
   - `parseTeamAtInvoke(text)`：返回 `{ kind: 'valid', name, remainder } | { kind: 'empty-task', name } | { kind: 'conflict', reason: 'multiple-targets' } | undefined`，使客户端在空任务或同条第二个 `@team:` 目标时明确拦截并提示（规格 §11.2 裁定：正文 `@word` 是普通文本，不构成冲突），绝不把未填任务的 `@team:<slug>` 当普通文本发给模型；
   - `mentionKeyAction`：把 `isComposing` 作为显式输入，组合态 `Enter`/`Tab` 永远返回 `{ kind: 'none' }`。
