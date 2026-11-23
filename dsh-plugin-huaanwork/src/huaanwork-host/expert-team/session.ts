@@ -338,19 +338,35 @@ export function settleExpertTeamTurn(input: SettleExpertTeamTurnInput): void {
   }
 }
 
-/** `followup` 受理前失败:原地置 failed,并清掉观察器/附件,绝不留 running 或待结算。 */
+/**
+ * `followup` 受理前中止：
+ * - 若取消已先闩入 `stopping`，因本轮尚未受理、无任何在途成员，同步收敛为 `stopped`
+ *   （设计 §12.4.2 取消优先，且不把运行留在瞬态 `stopping` 阻塞后续发送）；
+ * - 若仍为 `running`，原地置 `failed`；
+ * - 已终态或已淘汰则跳过。
+ */
 function markRunFailedBeforeSend(
   runs: ExpertTeamRunRegistry,
   teamRunId: string,
   error: unknown,
 ): void {
-  if (runs.get(teamRunId) === undefined) return
+  const existing = runs.get(teamRunId)
+  if (existing === undefined) return
+  if (existing.status === 'stopping') {
+    try {
+      runs.markStopped(teamRunId)
+    } catch {
+      // 运行已淘汰/已终态:租约失效仍是本路径的派工封闭保证。
+    }
+    return
+  }
+  if (existing.status !== 'running') return
   const detail = error === undefined ? '' : errorMessageOf(error).trim()
   const failure =
     detail === '' ? 'expert-team-followup-not-accepted' : `expert-team-followup-not-accepted: ${detail}`
   try {
     runs.update(teamRunId, (run) => {
-      if (run.status !== 'running' && run.status !== 'stopping') return
+      if (run.status !== 'running') return
       run.status = 'failed'
       run.endedAt = new Date().toISOString()
       run.failure = failure

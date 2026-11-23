@@ -47,6 +47,92 @@ describe('expert team contract', () => {
     expect(validateExpertTeam(noReviewer)).toMatchObject({ ok: false, errors: { review: expect.any(String) } })
   })
 
+  it('rejects non-object inputs, out-of-range counts/lengths, duplicate memberIds, and invalid enum/numeric bounds', () => {
+    // 非对象输入
+    for (const raw of [null, 'team', 42, []]) {
+      expect(validateExpertTeam(raw)).toMatchObject({ ok: false, errors: { slug: expect.any(String) } })
+    }
+
+    // slug 非法字符与超长（>32）
+    for (const badSlug of ['', 'Upper', 'bad_slug', '-leading', 'trailing-', 'a'.repeat(33)]) {
+      const team = validTeam()
+      team.slug = badSlug
+      expect(validateExpertTeam(team)).toMatchObject({ ok: false, errors: { slug: expect.any(String) } })
+    }
+
+    // name > 40、description > 200 与各可选文本 > 500
+    const longName = validTeam()
+    longName.name = '名'.repeat(41)
+    expect(validateExpertTeam(longName)).toMatchObject({ ok: false, errors: { name: expect.any(String) } })
+
+    const longDesc = validTeam()
+    longDesc.description = '描'.repeat(201)
+    expect(validateExpertTeam(longDesc)).toMatchObject({ ok: false, errors: { description: expect.any(String) } })
+
+    const longScenarios = validTeam()
+    longScenarios.scenarios = '场'.repeat(501)
+    expect(validateExpertTeam(longScenarios)).toMatchObject({ ok: false, errors: { scenarios: expect.any(String) } })
+
+    const longOutput = validTeam()
+    longOutput.members[0]!.outputInstructions = '输'.repeat(501)
+    expect(validateExpertTeam(longOutput)).toMatchObject({ ok: false, errors: { members: expect.any(String) } })
+
+    const longOrchText = validTeam()
+    longOrchText.orchestration.instructions = '调'.repeat(501)
+    expect(validateExpertTeam(longOrchText)).toMatchObject({ ok: false, errors: { orchestration: expect.any(String) } })
+
+    const longReviewText = validTeam()
+    longReviewText.review.criteria = '审'.repeat(501)
+    expect(validateExpertTeam(longReviewText)).toMatchObject({ ok: false, errors: { review: expect.any(String) } })
+
+    const longSummaryText = validTeam()
+    longSummaryText.summary.instructions = '汇'.repeat(501)
+    expect(validateExpertTeam(longSummaryText)).toMatchObject({ ok: false, errors: { summary: expect.any(String) } })
+
+    // 成员数 < 2（1 名）、> 8（9 名）、memberId 重复、缺少 executor
+    const oneMember = validTeam()
+    oneMember.members = [oneMember.members[0]!]
+    expect(validateExpertTeam(oneMember)).toMatchObject({ ok: false, errors: { members: expect.any(String) } })
+
+    const nineMembers = validTeam()
+    nineMembers.members = Array.from({ length: 9 }, (_, index) => ({
+      memberId: `m-${index}`,
+      agentRef: { source: 'local' as const, slug: `agent-${index}` },
+      role: index === 8 ? ('reviewer' as const) : ('executor' as const),
+      responsibility: `职责 ${index}`,
+    }))
+    expect(validateExpertTeam(nineMembers)).toMatchObject({ ok: false, errors: { members: expect.any(String) } })
+
+    const dupMemberId = validTeam()
+    dupMemberId.members[1]!.memberId = dupMemberId.members[0]!.memberId
+    expect(validateExpertTeam(dupMemberId)).toMatchObject({ ok: false, errors: { members: expect.any(String) } })
+
+    const noExecutor = validTeam()
+    noExecutor.members[0]!.role = 'reviewer'
+    expect(validateExpertTeam(noExecutor)).toMatchObject({ ok: false, errors: { members: expect.any(String) } })
+
+    // maxParallel = 5、maxRevisionRounds = 3 与非法枚举
+    const badParallel = validTeam()
+    ;(badParallel.orchestration as { maxParallel: number }).maxParallel = 5
+    expect(validateExpertTeam(badParallel)).toMatchObject({ ok: false, errors: { orchestration: expect.any(String) } })
+
+    const badOrchEnum = validTeam()
+    ;(badOrchEnum.orchestration as { executionOrder: string }).executionOrder = 'dag'
+    expect(validateExpertTeam(badOrchEnum)).toMatchObject({ ok: false, errors: { orchestration: expect.any(String) } })
+
+    const badRevisions = validTeam()
+    ;(badRevisions.review as { maxRevisionRounds: number }).maxRevisionRounds = 3
+    expect(validateExpertTeam(badRevisions)).toMatchObject({ ok: false, errors: { review: expect.any(String) } })
+
+    const badReviewEnum = validTeam()
+    ;(badReviewEnum.review as { mode: string }).mode = 'majority'
+    expect(validateExpertTeam(badReviewEnum)).toMatchObject({ ok: false, errors: { review: expect.any(String) } })
+
+    const badSummaryEnum = validTeam()
+    ;(badSummaryEnum.summary as { delivery: string }).delivery = 'email'
+    expect(validateExpertTeam(badSummaryEnum)).toMatchObject({ ok: false, errors: { summary: expect.any(String) } })
+  })
+
   it('forces effective concurrency to one for sequential execution', () => {
     const team = validTeam()
     team.orchestration.executionOrder = 'sequential'

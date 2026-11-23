@@ -11,7 +11,10 @@ import type {
 } from '../../src/client-huaanwork/rpc-types.ts'
 import type { AgentPackageHost } from '../../src/huaanwork-host/agent-package/host.ts'
 import type { AgentPackageDetail, AgentPackageListItem } from '../../src/huaanwork-host/agent-package/types.ts'
-import { resolveExpertTeamAvailability } from '../../src/huaanwork-host/expert-team/availability.ts'
+import {
+  expertTeamMemberUnavailableReason,
+  resolveExpertTeamAvailability,
+} from '../../src/huaanwork-host/expert-team/availability.ts'
 import { createExpertTeamRunRegistry, type ExpertTeamRunRegistry } from '../../src/huaanwork-host/expert-team/runs.ts'
 import { createExpertTeamStore } from '../../src/huaanwork-host/expert-team/store.ts'
 import {
@@ -167,6 +170,27 @@ describe('expert team availability', () => {
       invocable: true,
       reasons: [],
     })
+  })
+
+  it('orders member unavailable reasons strictly as revoked -> broken -> disabled', () => {
+    const base = healthyPackages()[0]!
+    expect(expertTeamMemberUnavailableReason(base)).toBeUndefined()
+    expect(
+      expertTeamMemberUnavailableReason({
+        ...base,
+        enabled: false,
+        broken: { reason: 'invalid-manifest' },
+        revoked: { slug: base.slug, version: base.version, reason: 'revoked', revokedAt: '2026-11-23T00:00:00.000Z' },
+      }),
+    ).toBe('expert-team-member-revoked')
+    expect(
+      expertTeamMemberUnavailableReason({
+        ...base,
+        enabled: false,
+        broken: { reason: 'invalid-manifest' },
+      }),
+    ).toBe('expert-team-member-broken')
+    expect(expertTeamMemberUnavailableReason({ ...base, enabled: false })).toBe('expert-team-member-disabled')
   })
 })
 

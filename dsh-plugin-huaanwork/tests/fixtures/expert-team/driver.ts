@@ -233,7 +233,9 @@ async function prepareProfileResources(home: string): Promise<{
   workspaceRoot: string
   settingsPath: string
 }> {
-  const prepared = prepareDesktopProfile('1', home, process.platform === 'darwin' ? 'win32' : 'win32')
+  // 与全仓无头 smoke（verify-profile-boot / huaanwork-expert-team-smoke）一致，
+  // 固定使用 'win32' 以保证无头目录选择器与 profile patch 跨平台确定性。
+  const prepared = prepareDesktopProfile('1', home, 'win32')
   const profileDir = prepared.profile.dir
   // 中立根由 profile 目录派生,同 profile 重启后仍是同一个根。
   const workspaceRoot = join(profileDir, 'workspace')

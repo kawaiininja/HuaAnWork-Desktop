@@ -799,6 +799,23 @@ describe('expert team coordinator', () => {
     // 幂等：对已停止运行再次终止不得再次取消（可能已属于下一次回合的）团长回合。
     await fixture.coordinator.cancelRun(runId)
     expect(parentCancels).toEqual([PARENT_SESSION_ID])
+
+    // M-7 回归：正常结算进入终态的运行在下次 begin() 裁剪前 state 仍在内存；
+    // 对其调用 cancelRun 必须直接早退并裁剪，不得误杀同一父会话的新回合或改写终态。
+    const settledParentCancels: string[] = []
+    const settledFixture = await makeCoordinatorFixture({
+      cancelParentTurn: (parentSessionId) => {
+        settledParentCancels.push(parentSessionId)
+      },
+    })
+    const settledRunId = runOf(settledFixture).teamRunId
+    settledFixture.runs.update(settledRunId, (live) => {
+      live.status = 'completed'
+      live.endedAt = new Date().toISOString()
+    })
+    await settledFixture.coordinator.cancelRun(settledRunId)
+    expect(settledParentCancels).toEqual([])
+    expect(settledFixture.runs.get(settledRunId)?.status).toBe('completed')
   })
 
   it('renders the full review scope in the member prompt and the tool result, and a single id for per-member review', async () => {

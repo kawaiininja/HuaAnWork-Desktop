@@ -841,6 +841,12 @@ export function createExpertTeamCoordinator(
     async cancelRun(teamRunId) {
       const run = options.runs.get(teamRunId)
       if (run === undefined) return
+      // 终态运行（含正常结算后尚未经下次 begin() 裁剪的 state）直接早退并裁剪，
+      // 绝不进入 performCancel 误杀同一父会话上后续启动的新回合。
+      if (run.status !== 'running' && run.status !== 'stopping') {
+        pruneState(teamRunId)
+        return
+      }
       if (run.status === 'running') {
         try {
           options.runs.requestCancel(run.parentSessionId, teamRunId)

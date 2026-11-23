@@ -3473,6 +3473,14 @@ test("sidebar navigation routes through the expert-team dirty guard", () => {
     assert.ok(guardAt < switchAt, `${start} guards before setView("main")`);
     assert.doesNotMatch(body.slice(0, guardAt), /setView\(/, `${start} does not switch views before the guard`);
   }
+  // 退出登录同样会卸载主界面并清空编辑器草稿，必须在发起 auth.logout 与切换认证态之前过守卫。
+  const logoutBody = functionBody("async function logout(", 'if (authPhase !== "logged-in")');
+  const logoutGuardAt = logoutBody.indexOf("if (!confirmLeaveExpertTeam()) return;");
+  const logoutRpcAt = logoutBody.indexOf('rpcCall("auth.logout")');
+  const logoutPhaseAt = logoutBody.indexOf('setAuthPhase("logged-out")');
+  assert.ok(logoutGuardAt >= 0, "logout consults the dirty guard");
+  assert.ok(logoutRpcAt > logoutGuardAt, "logout guards before calling auth.logout");
+  assert.ok(logoutPhaseAt > logoutGuardAt, "logout guards before switching authPhase");
   // 状态来源：专家团页把编辑器脏状态上报给 App。
   assert.match(APP_SOURCE, /const \[expertTeamDraftDirty, setExpertTeamDraftDirty\] = useState\(false\);/);
   assert.match(APP_SOURCE, /<ExpertTeamsView refreshSignal=\{expertTeamChangeSignal\} onDirtyChange=\{setExpertTeamDraftDirty\} \/>/);

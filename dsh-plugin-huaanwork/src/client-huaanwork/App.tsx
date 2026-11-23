@@ -3458,7 +3458,7 @@ export default function App() {
 
   /**
    * 离开专家团视图前的唯一草稿守卫：导航按钮经 requestViewChange、新建任务、
-   * 侧边栏任务/子任务恢复都先过这里；返回是否允许离开。
+   * 侧边栏任务/子任务恢复与退出登录都先过这里；返回是否允许离开。
    */
   function confirmLeaveExpertTeam(): boolean {
     if (view !== "teams" || !expertTeamDraftDirty) return true;
@@ -4520,6 +4520,7 @@ export default function App() {
   }
 
   async function logout() {
+    if (!confirmLeaveExpertTeam()) return;
     await rpcCall("auth.logout");
     setSettingsOpen(false);
     setAuthPhase("logged-out");

@@ -29,5 +29,10 @@ describe('parseReviewVerdict', () => {
     expect(parseReviewVerdict('[VERDICT: PASS] extra')).toEqual({ reviewError: 'invalid-verdict' })
     expect(parseReviewVerdict('[VERDICT: PASS]\n没有标记')).toEqual({ reviewError: 'invalid-verdict' })
     expect(parseReviewVerdict('没有标记')).toEqual({ reviewError: 'invalid-verdict' })
+    // 严格全等比较：小写标记、代码块包裹与同行多标记均拒绝。
+    expect(parseReviewVerdict('依据\n[verdict: pass]')).toEqual({ reviewError: 'invalid-verdict' })
+    expect(parseReviewVerdict('依据\n```\n[VERDICT: PASS]\n```')).toEqual({ reviewError: 'invalid-verdict' })
+    expect(parseReviewVerdict('依据\n`[VERDICT: PASS]`')).toEqual({ reviewError: 'invalid-verdict' })
+    expect(parseReviewVerdict('[VERDICT: PASS] [VERDICT: REVISE]')).toEqual({ reviewError: 'invalid-verdict' })
   })
 })

@@ -187,6 +187,7 @@ type SessionFixtureOptions = {
   activeGoal?: boolean
   refreshRestrictThrows?: boolean
   followupError?: Error
+  onBeforeFollowup?: (runs: ExpertTeamRunRegistry) => void
   cancelBeforeFollowup?: boolean
 }
 
@@ -300,6 +301,7 @@ async function makeSessionFixture(options: SessionFixtureOptions = {}): Promise<
     id: SESSION_ID,
     session: { id: SESSION_ID },
     followup: (message) => {
+      options.onBeforeFollowup?.(runs)
       if (options.followupError !== undefined) throw options.followupError
       const id = (message as { id?: unknown }).id
       followups.push({ id: typeof id === 'string' ? id : '', text: textOf(message) })
@@ -615,13 +617,30 @@ describe('expert team session start, queue isolation and settlement', () => {
     attachAgentTools(cancelled.attachments, SESSION_ID, [EXPERT_TEAM_DISPATCH_TOOL])
     await expect(cancelled.sessionSend(teamSend({ task: 'y' }))).resolves.toMatchObject({ started: false })
     expect(cancelled.runs.activeBySession(SESSION_ID)).toBeUndefined()
-    // 早退必须由 abortBeforeSend 原地收敛为 failed,而不是把运行留在 stopping 或 running。
+    expect(cancelled.runs.hasActiveForSession(SESSION_ID)).toBe(false)
+    // M-10：取消先闩入 stopping 时遵循 §12.4.2 取消优先，由 abortBeforeSend 同步收敛为 stopped，
+    // 既不覆写为 failed，也不把运行留在瞬态 stopping。
     const [cancelledRun] = cancelled.runs.list({ sessionId: SESSION_ID }).runs
-    expect(cancelledRun?.status).toBe('failed')
+    expect(cancelledRun?.status).toBe('stopped')
+    expect(cancelledRun?.failure).toBeUndefined()
     expect(isAgentToolAttached(cancelled.attachments, SESSION_ID, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
     // 观察器已释放:团队会话的 session/event 全局监听归零,claimed 只剩 fixture 自己的处理器。
     expect(cancelled.listenerCount('session/event')).toBe(0)
     expect(cancelled.listenerCount('agent/inbox/claimed')).toBe(1)
+
+    // M-10 窗口回归：取消已先闩入 stopping、随后 followup 抛错时，终态仍须收敛为 stopped 而非 failed。
+    const stoppingThenThrow = await makeSessionFixture({
+      onBeforeFollowup: (liveRuns) => {
+        const active = liveRuns.activeBySession(SESSION_ID)
+        if (active !== undefined) liveRuns.requestCancel(SESSION_ID, active.teamRunId)
+      },
+      followupError: new Error('reject-after-cancel'),
+    })
+    await expect(stoppingThenThrow.sessionSend(teamSend({ task: 'z' }))).rejects.toThrow('reject-after-cancel')
+    expect(stoppingThenThrow.runs.hasActiveForSession(SESSION_ID)).toBe(false)
+    const [stoppedRun] = stoppingThenThrow.runs.list({ sessionId: SESSION_ID }).runs
+    expect(stoppedRun?.status).toBe('stopped')
+    expect(stoppedRun?.failure).toBeUndefined()
   })
 
   it('rejects a second team call while the first team turn is only queued behind an ordinary turn', async () => {

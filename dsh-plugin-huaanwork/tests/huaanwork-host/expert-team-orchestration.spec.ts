@@ -509,6 +509,15 @@ describe('expert team orchestration rules', () => {
       delivered,
     )
     expect(computeExpertTeamTerminalStatus({ run: blankExecRun, finalSummaryPresent: true })).toBe('partial')
+
+    const runningExec = executeResult('exec-running', { memberId: 'm-exec-2', status: 'running' })
+    delete runningExec.output
+    const runningExecRun = makeRun(
+      [execOk, runningExec, reviewResult('rev-running', 'pass', { inputResultIds: [execOk.resultId] })],
+      twoExecTeam,
+      delivered,
+    )
+    expect(computeExpertTeamTerminalStatus({ run: runningExecRun, finalSummaryPresent: true })).toBe('partial')
   })
 
   it('enforces sequential references on execute retries and rejects re-superseding already resolved execution failures', () => {
