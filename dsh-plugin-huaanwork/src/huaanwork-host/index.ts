@@ -9,6 +9,7 @@ import { installHuaanworkHolders } from './holders.ts'
 import { createExpertTeamStore } from './expert-team/store.ts'
 import { createExpertTeamRunRegistry } from './expert-team/runs.ts'
 import { createExpertTeamCoordinator } from './expert-team/coordinator.ts'
+import { disposeAllExpertTeamObservers } from './expert-team/observer.ts'
 import { createSubagentRunRegistry } from './subagent-runs.ts'
 import { createTurnScheduler } from './turn-scheduler.ts'
 import { installTurnAnchorHooks } from './turn-anchors.ts'
@@ -499,7 +500,9 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           // **直接调用**收尾并返回 promise——返回工厂函数会被 Cordis 当作
           // disposer 保存而不执行,收尾永远不会跑(最终评审 Critical 回归)。
           // 团队运行先于包运行时取消:成员的 activation/runtime 收尾依赖包宿主
-          // 仍在,取消链结束时才释放进程。不顶掉既有收尾 promise,直接串联。
+          // 仍在,取消链结束时才释放进程;同时释放本 Host 实例绑定的回合观察器,
+          // 防止 pre-claim 或异常退出路径残留全局监听与模块级闭包(设计 §12.1)。
+          disposeAllExpertTeamObservers(ctx)
           return ctx.huaanworkExpertTeamRuns
             .cancelAll()
             .finally(() => disposeAgentPackageHostRuntime(agentPackageTurns))

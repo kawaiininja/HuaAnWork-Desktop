@@ -706,10 +706,25 @@ describe('expert team coordinator', () => {
     // 有效执行并发固定为 1：sequential 下 gate 从未同时启动两名成员
     expect(sequential.gate.maxRunning).toBe(1)
 
-    // 控制器裁定：broadcast 首轮缺员不在派工层拒绝，由提交/回合终态判定
-    const broadcast = await makeCoordinatorFixture({ assignmentMode: 'broadcast' })
-    const single = await broadcast.coordinator.dispatch(dispatchInput('a', { callId: 'broadcast-1' }))
+    // broadcast + unified：存在未派工执行员时禁止提前进入统一审查；
+    // 执行员已派工但技术失败后允许审查已有结果（防死锁），最终结算仍判 partial。
+    const broadcast = await makeCoordinatorFixture({
+      roster: DEFAULT_ROSTER_3,
+      assignmentMode: 'broadcast',
+      reviewMode: 'unified',
+      dispatchErrors: { 'broadcast-2-fail': '执行员中途失效' },
+    })
+    const single = await broadcast.coordinator.dispatch(dispatchInput('executor', { callId: 'broadcast-1' }))
     expect(single.status).toBe('completed')
+    await expect(
+      broadcast.coordinator.dispatch(dispatchInput('reviewer', { callId: 'broadcast-rev-early', kind: 'review', task: '提前审查' })),
+    ).rejects.toThrow('expert-team-broadcast-incomplete')
+    const secondFailed = await broadcast.coordinator.dispatch(dispatchInput('executor-2', { callId: 'broadcast-2-fail' }))
+    expect(secondFailed.status).toBe('failed')
+    const partialReview = await broadcast.coordinator.dispatch(
+      dispatchInput('reviewer', { callId: 'broadcast-rev-after-fail', kind: 'review', task: '技术失败后的部分审查' }),
+    )
+    expect(partialReview.status).toBe('completed')
 
     // per-member：审查 scope 必须是目标单例，返修只在有效 revise 后允许且受链上限约束
     const perMember = await makeCoordinatorFixture({

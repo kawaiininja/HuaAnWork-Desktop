@@ -39,6 +39,7 @@ export type DispatchRuleFailure =
   | 'expert-team-member-missing'
   | 'expert-team-member-role-mismatch'
   | 'expert-team-review-disabled'
+  | 'expert-team-broadcast-incomplete'
   | 'expert-team-invalid-input-result'
   | 'expert-team-sequential-order'
   | 'expert-team-sequential-reference'
@@ -370,19 +371,56 @@ function reviewNecessaryRevisionPending(run: ExpertTeamRun): boolean {
   return perMemberNecessaryRevisionPending(run)
 }
 
-/** 任何未被后续有效结果替代的 failed/stopped 执行或返修都是技术缺失。 */
+/**
+ * 任何未被后续有效结果替代的 failed/stopped 执行或返修都是技术缺失（§12.4.2）。
+ *
+ * 两种替代路径：
+ * 1. 传递闭包：从每个有效执行/返修结果沿 `supersedesResultId` 向上追溯整个祖先链
+ *    （覆盖连续多次失败的 `execute` 最终被后续有效 `execute` 替代）；
+ * 2. 失败/停止的 `revision`：因 `supersedesResultId` 为单指针且 `validateRevisionRule`
+ *    要求重试返修仍指向原有效目标 `targetId`，当后续索引存在同成员的有效执行结果替代
+ *    了同一个 `targetId` 时，视为该次失败返修已被后续有效返修替代；若从未重试成功仍属缺失。
+ */
 function hasUnsupersededExecutionFailure(run: ExpertTeamRun): boolean {
+  const byId = new Map<string, ExpertTeamResult>()
+  for (const result of run.results) {
+    byId.set(result.resultId, result)
+  }
+
   const supersededByValid = new Set<string>()
   for (const result of run.results) {
     if (!isValidExecutionResult(result)) continue
-    if (result.supersedesResultId !== undefined) supersededByValid.add(result.supersedesResultId)
+    let targetId = result.supersedesResultId
+    const visited = new Set<string>([result.resultId])
+    while (targetId !== undefined && !visited.has(targetId)) {
+      visited.add(targetId)
+      supersededByValid.add(targetId)
+      targetId = byId.get(targetId)?.supersedesResultId
+    }
   }
-  return run.results.some(
-    (result) =>
-      (result.kind === 'execute' || result.kind === 'revision') &&
-      (result.status === 'failed' || result.status === 'stopped') &&
-      !supersededByValid.has(result.resultId),
-  )
+
+  const latestValidSupersedeIndex = new Map<string, number>()
+  run.results.forEach((result, index) => {
+    if (!isValidExecutionResult(result)) return
+    if (result.supersedesResultId === undefined) return
+    latestValidSupersedeIndex.set(`${result.memberId}${SCOPE_SEPARATOR}${result.supersedesResultId}`, index)
+  })
+
+  for (let index = 0; index < run.results.length; index += 1) {
+    const result = run.results[index]
+    if (result === undefined) continue
+    if (result.kind !== 'execute' && result.kind !== 'revision') continue
+    if (result.status !== 'failed' && result.status !== 'stopped') continue
+    if (supersededByValid.has(result.resultId)) continue
+    if (result.kind === 'revision' && result.supersedesResultId !== undefined) {
+      const laterValidIndex = latestValidSupersedeIndex.get(
+        `${result.memberId}${SCOPE_SEPARATOR}${result.supersedesResultId}`,
+      )
+      if (laterValidIndex !== undefined && laterValidIndex > index) continue
+    }
+    return true
+  }
+  return false
 }
 
 function broadcastMissingFirstRound(run: ExpertTeamRun): boolean {
@@ -584,7 +622,18 @@ export function validateDispatchRule(
     }
     return { ok: true }
   }
-  if (input.kind === 'review') return { ok: true }
+  if (input.kind === 'review') {
+    // 规格 §10.1：broadcast + unified 进入统一审查前，每名执行成员至少应已有已结束的首轮
+    // execute 尝试（允许技术失败/停止后按不完整流程审查并结 partial，避免与必审要求死锁；
+    // per-member 允许动态交错审查单个已完成结果）。
+    if (
+      run.teamSnapshot.review.mode === 'unified' &&
+      broadcastMissingSettledFirstRoundAttempt(run)
+    ) {
+      return { ok: false, error: 'expert-team-broadcast-incomplete' }
+    }
+    return { ok: true }
+  }
   return validateRevisionRule(run, input, effective)
 }
 
@@ -593,6 +642,20 @@ function broadcastNeverDispatched(run: ExpertTeamRun): boolean {
   if (run.teamSnapshot.orchestration.assignmentMode !== 'broadcast') return false
   return executorMemberIds(run).some(
     (executorId) => !run.results.some((result) => result.memberId === executorId),
+  )
+}
+
+/** broadcast 统一审查入口检查：每名执行成员至少已有已结束的首轮 execute（completed/failed/stopped）。 */
+function broadcastMissingSettledFirstRoundAttempt(run: ExpertTeamRun): boolean {
+  if (run.teamSnapshot.orchestration.assignmentMode !== 'broadcast') return false
+  return executorMemberIds(run).some(
+    (executorId) =>
+      !run.results.some(
+        (result) =>
+          result.memberId === executorId &&
+          result.kind === 'execute' &&
+          (result.status === 'completed' || result.status === 'failed' || result.status === 'stopped'),
+      ),
   )
 }
 

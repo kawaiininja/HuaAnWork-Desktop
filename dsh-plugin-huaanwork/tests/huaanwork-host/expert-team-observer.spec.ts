@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   bindExpertTeamObserver,
   createExpertTeamTurnObserver,
+  disposeAllExpertTeamObservers,
   disposeExpertTeamObservers,
 } from '../../src/huaanwork-host/expert-team/observer.ts'
 
@@ -350,5 +351,32 @@ describe('expert team observer binding', () => {
     expect(observer.finalSummaryPresent()).toBe(false)
     observer.afterIdle()
     expect(observer.onTurnEnd).not.toHaveBeenCalled()
+  })
+
+  it('isolates context-scoped teardown so disposing one Host leaves another Host intact', () => {
+    const hostA = listenerContext()
+    const hostB = listenerContext()
+    const obsA1 = createExpertTeamTurnObserver({ parentSessionId: PARENT, followupId: 'm-a1', onTurnEnd: vi.fn() })
+    const obsA2 = createExpertTeamTurnObserver({ parentSessionId: 's2', followupId: 'm-a2', onTurnEnd: vi.fn() })
+    const obsB1 = createExpertTeamTurnObserver({ parentSessionId: PARENT, followupId: 'm-b1', onTurnEnd: vi.fn() })
+    bindExpertTeamObserver(hostA.ctx, obsA1)
+    bindExpertTeamObserver(hostA.ctx, obsA2)
+    bindExpertTeamObserver(hostB.ctx, obsB1)
+
+    // 按 ctx 卸载同会话观察器时，不误伤另一个 Host 实例的同 id 会话。
+    disposeExpertTeamObservers(PARENT, hostA.ctx)
+    expect(hostA.listeners['session/event']).toHaveLength(1)
+    expect(hostB.listeners['session/event']).toHaveLength(1)
+
+    // Host A 整体 teardown 只释放 Host A 剩余会话观察器，Host B 仍存活。
+    disposeAllExpertTeamObservers(hostA.ctx)
+    expect(hostA.listeners['agent/inbox/claimed']).toEqual([])
+    expect(hostA.listeners['session/event']).toEqual([])
+    expect(hostB.listeners['agent/inbox/claimed']).toHaveLength(1)
+    expect(hostB.listeners['session/event']).toHaveLength(1)
+
+    disposeAllExpertTeamObservers(hostB.ctx)
+    expect(hostB.listeners['agent/inbox/claimed']).toEqual([])
+    expect(hostB.listeners['session/event']).toEqual([])
   })
 })

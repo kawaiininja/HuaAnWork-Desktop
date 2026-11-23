@@ -405,7 +405,7 @@ describe('expert team orchestration rules', () => {
       }),
       finalSummaryPresent: true,
     })).toBe('completed')
-    // 失败返修不替代旧有效结果，但仍属未被替代的技术缺失。
+    // 失败返修不替代旧有效结果，且未重试成功时仍属未被替代的技术缺失。
     expect(computeExpertTeamTerminalStatus({
       run: runWithFailedRevision({
         primaryArtifactId: 'artifact-failed-revision',
@@ -414,6 +414,117 @@ describe('expert team orchestration rules', () => {
       }),
       finalSummaryPresent: true,
     })).toBe('partial')
+  })
+
+  it('clears failed/stopped revisions after a subsequent valid revision of the same target and clears multi-hop execute retries', () => {
+    const delivered: RunOverrides = {
+      primaryArtifactId: 'artifact-recovered',
+      artifactStatus: 'created',
+      deliverySealed: true,
+    }
+    const team = teamWith(['m-exec-1'], ['m-rev-1'], { review: { mode: 'unified', maxRevisionRounds: 1 } })
+    const original = executeResult('orig-1', { memberId: 'm-exec-1' })
+    const firstRevise = reviewResult('rev-1', 'revise', { inputResultIds: [original.resultId] })
+    const failedRev = executeResult('rev-fail-1', {
+      memberId: 'm-exec-1',
+      kind: 'revision',
+      status: 'failed',
+      supersedesResultId: original.resultId,
+      inputResultIds: [original.resultId],
+    })
+    const stoppedRev = executeResult('rev-stop-1', {
+      memberId: 'm-exec-1',
+      kind: 'revision',
+      status: 'stopped',
+      supersedesResultId: original.resultId,
+      inputResultIds: [original.resultId],
+    })
+    const validRev = executeResult('rev-ok-1', {
+      memberId: 'm-exec-1',
+      kind: 'revision',
+      status: 'completed',
+      supersedesResultId: original.resultId,
+      inputResultIds: [original.resultId],
+    })
+    const finalPass = reviewResult('rev-pass-2', 'pass', { inputResultIds: [validRev.resultId] })
+    const recoveredRevisionRun = makeRun(
+      [original, firstRevise, failedRev, stoppedRev, validRev, finalPass],
+      team,
+      { ...delivered, unifiedRevisionRounds: 1 },
+    )
+    expect(computeExpertTeamTerminalStatus({ run: recoveredRevisionRun, finalSummaryPresent: true })).toBe('completed')
+
+    // 若失败返修发生在有效返修之后，仍必须 fail-closed 判 partial。
+    const trailingFailureRun = makeRun(
+      [original, firstRevise, validRev, failedRev, finalPass],
+      team,
+      { ...delivered, unifiedRevisionRounds: 1 },
+    )
+    expect(computeExpertTeamTerminalStatus({ run: trailingFailureRun, finalSummaryPresent: true })).toBe('partial')
+
+    // 连续两次失败的 execute 最终被第 3 次有效 execute 沿链替代，不再误判 partial。
+    const twoExecTeam = teamWith(['m-exec-1', 'm-exec-2'], ['m-rev-1'], { review: { mode: 'unified', maxRevisionRounds: 1 } })
+    const execOk = executeResult('exec-a', { memberId: 'm-exec-1' })
+    const fail1 = executeResult('exec-b-1', { memberId: 'm-exec-2', status: 'failed' })
+    const fail2 = executeResult('exec-b-2', {
+      memberId: 'm-exec-2',
+      status: 'stopped',
+      supersedesResultId: fail1.resultId,
+    })
+    const ok3 = executeResult('exec-b-3', {
+      memberId: 'm-exec-2',
+      status: 'completed',
+      supersedesResultId: fail2.resultId,
+    })
+    const multiHopRun = makeRun(
+      [execOk, fail1, fail2, ok3, reviewResult('rev-multi', 'pass', { inputResultIds: [execOk.resultId, ok3.resultId] })],
+      twoExecTeam,
+      delivered,
+    )
+    expect(computeExpertTeamTerminalStatus({ run: multiHopRun, finalSummaryPresent: true })).toBe('completed')
+  })
+
+  it('rejects premature unified review in broadcast mode before all executors settle, while allowing partial-failure review and per-member review', () => {
+    const broadcastUnified = teamWith(['m-exec-1', 'm-exec-2'], ['m-rev-1'], {
+      orchestration: { assignmentMode: 'broadcast', executionOrder: 'parallel', maxParallel: 2 },
+      review: { mode: 'unified', maxRevisionRounds: 1 },
+    })
+    const firstDone = executeResult('b-exec-1', { memberId: 'm-exec-1' })
+
+    // 第二名执行员从未派工：禁止提前进入统一审查
+    expect(validateDispatchRule(makeRun([firstDone], broadcastUnified), {
+      memberId: 'm-rev-1',
+      kind: 'review',
+      task: '提前统一审查',
+    })).toEqual({ ok: false, error: 'expert-team-broadcast-incomplete' })
+
+    // 第二名执行员仍在途未结束：同样禁止提前进入统一审查
+    const secondRunning = executeResult('b-exec-2-run', { memberId: 'm-exec-2', status: 'running' })
+    expect(validateDispatchRule(makeRun([firstDone, secondRunning], broadcastUnified), {
+      memberId: 'm-rev-1',
+      kind: 'review',
+      task: '执行员在途时提前统一审查',
+    })).toEqual({ ok: false, error: 'expert-team-broadcast-incomplete' })
+
+    // 第二名执行员已派工但技术失败：允许审查已有有效结果（避免与必审提交守卫死锁），终态仍为 partial
+    const secondFailed = executeResult('b-exec-2-fail', { memberId: 'm-exec-2', status: 'failed' })
+    expect(validateDispatchRule(makeRun([firstDone, secondFailed], broadcastUnified), {
+      memberId: 'm-rev-1',
+      kind: 'review',
+      task: '缺员技术失败后的部分审查',
+    })).toEqual({ ok: true })
+
+    // per-member 允许对单个已完成结果交错审查，不阻断动态流水线
+    const broadcastPerMember = teamWith(['m-exec-1', 'm-exec-2'], ['m-rev-1'], {
+      orchestration: { assignmentMode: 'broadcast', executionOrder: 'parallel', maxParallel: 2 },
+      review: { mode: 'per-member', maxRevisionRounds: 1 },
+    })
+    expect(validateDispatchRule(makeRun([firstDone], broadcastPerMember), {
+      memberId: 'm-rev-1',
+      kind: 'review',
+      task: '逐成员交错审查',
+      inputResultIds: [firstDone.resultId],
+    })).toEqual({ ok: true })
   })
 
   it('settles partial when a broadcast executor never produced a first-round result', () => {

@@ -73,13 +73,17 @@ export type ExpertTeamRunCardItem = { id: number; kind: "expert-team-run"; teamR
 /**
  * 聚合卡计数(设计 §13.1 / §13.2):只统计结果链,不猜测未派工成员或虚假总步骤。
  *
- * 计数单位是结果尝试,不是成员:`run.results` 的每条记录都是一次独立尝试,
- * 已被 revision 取代的旧尝试仍按自己的 status 计入 `dispatched` 与
- * `completed`/`failed`/`stopped`。同一成员因此可能贡献多条计数,卡片不得把
- * 这些数字当作成员去重后的数量。
+ * 计数单位分为两层且互不混淆:
+ * - `attempts`:协调器到达计数(`run.dispatchAttempts`,含入口校验被拒、未入结果链的调用),
+ *   用于展示 24 次硬预算消耗;
+ * - `dispatched` 及各状态分类:按结果尝试(`run.results`)计数,已被 revision 取代的旧尝试
+ *   仍按自己的 status 计入 `dispatched` 与 `completed`/`failed`/`stopped`,与下方成员列表
+ *   行数严格守恒。
  */
 export type ExpertTeamCounts = {
-  /** 结果尝试总数:每个 execute/review/revision 结果都来自一次成功派工,含已被取代的尝试。 */
+  /** 协调器到达次数(`run.dispatchAttempts`),含被规则/容量拒绝而未启动成员的调用。 */
+  attempts: number;
+  /** 结果尝试总数:每个 execute/review/revision 结果都来自一次已入链派工,含已被取代的尝试。 */
   dispatched: number;
   /** 进行中的结果尝试数:`starting` 与 `running` 合计。 */
   running: number;
@@ -147,15 +151,56 @@ function reduceRun(state: ExpertTeamRunsState, action: ExpertTeamRunUpdateAction
   };
 }
 
+/**
+ * 判定一条 `expertTeam/run-remove` 帧是否授权从对话条目中移除卡片。
+ *
+ * 只有与当前 generation 一致、且不与投影中更高 revision 或活跃/stopping 运行冲突的
+ * 移除帧才返回 true；客户端因本地容量淘汰而缺失 `existing` 时，同代移除帧仍允许
+ * 清理残留卡片条目。被拒绝的过期/跨代移除帧绝不得误删活卡。
+ */
+export function shouldRemoveExpertTeamRunCard(
+  state: ExpertTeamRunsState,
+  action: ExpertTeamRunRemoveAction,
+): boolean {
+  if (state.generation !== action.generation) return false;
+  const existing = state.runs.get(action.teamRunId);
+  if (existing === undefined) return true;
+  if (existing.parentSessionId !== action.parentSessionId) return false;
+  if (existing.revision > action.revision) return false;
+  if (!isExpertTeamTerminal(existing)) return false;
+  return true;
+}
+
+/**
+ * 计算同代重连快照中被 Host 权威淘汰的终态运行 id（设计 §13.3）。
+ *
+ * 只包含属于本次快照作用域（`sessionId` 与快照内父会话）、`revision <= action.revision`、
+ * 已终态且不在快照清单中的运行；绝不返回活跃/stopping、其他会话或新于快照的运行。
+ * 换代快照由调用方整体清卡，本函数直接返回空数组。
+ */
+export function evictedTerminalRunIdsFromSnapshot(
+  previous: ExpertTeamRunsState,
+  action: ExpertTeamSnapshotAction,
+): string[] {
+  if (previous.generation !== undefined && previous.generation !== action.generation) return [];
+  const snapshotIds = new Set(action.runs.map((item) => item.teamRunId));
+  const scopedParents = new Set(action.runs.map((item) => item.parentSessionId));
+  if (action.sessionId !== undefined) scopedParents.add(action.sessionId);
+  const evicted: string[] = [];
+  for (const [teamRunId, existing] of previous.runs) {
+    if (snapshotIds.has(teamRunId)) continue;
+    if (!scopedParents.has(existing.parentSessionId)) continue;
+    if (existing.revision > action.revision) continue;
+    if (!isExpertTeamTerminal(existing)) continue;
+    evicted.push(teamRunId);
+  }
+  return evicted;
+}
+
 function reduceRemove(state: ExpertTeamRunsState, action: ExpertTeamRunRemoveAction): ExpertTeamRunsState {
   const existing = state.runs.get(action.teamRunId);
   if (existing === undefined) return state;
-  // 移除帧只对产生它的 generation 与父会话有效;teamRunId 全局唯一,父会话是交叉校验。
-  if (state.generation !== action.generation || existing.parentSessionId !== action.parentSessionId) return state;
-  // 运行比移除帧更新:移除针对的是更早的状态,不能删。
-  if (existing.revision > action.revision) return state;
-  // 只有终态历史会被 Host 淘汰;活跃/stopping 一律保留。
-  if (!isExpertTeamTerminal(existing)) return state;
+  if (!shouldRemoveExpertTeamRunCard(state, action)) return state;
   const runs = new Map(state.runs);
   runs.delete(action.teamRunId);
   return { ...state, runs };
@@ -287,6 +332,7 @@ export function insertExpertTeamRunCard<T extends { id: number; kind: string; cl
  */
 export function expertTeamCounts(run: ExpertTeamRun): ExpertTeamCounts {
   const counts: ExpertTeamCounts = {
+    attempts: run.dispatchAttempts,
     dispatched: run.results.length,
     running: 0,
     completed: 0,

@@ -1142,7 +1142,20 @@ test("reopening a session reconciles expert-team runs so team cards return from 
   );
   assert.match(reconcileBody, /rpcCall<ExpertTeamRunSnapshot>\("expertTeam\.runList", \{ sessionId \}\)/);
   assert.match(reconcileBody, /type: "snapshot"/);
+  assert.match(
+    reconcileBody,
+    /evictedTerminalRunIdsFromSnapshot\(previous, snapshotAction\)/,
+    "same-generation reconnect snapshots must remove terminal cards authoritatively evicted by the host",
+  );
+  assert.match(reconcileBody, /clearExpertTeamRunUiState\(evictedSet, evictedRuns\)/);
   assert.match(reconcileBody, /anchorSnapshotExpertTeamCards\(chatId, sessionId, snapshot\.runs\)/);
+  const removeBody = functionBody("const applyExpertTeamRemove = (", "const applyEvent = (");
+  assert.match(
+    removeBody,
+    /const accepted = shouldRemoveExpertTeamRunCard\(previous, action\);[\s\S]*if \(!accepted\) return;[\s\S]*removeExpertTeamCards\(/,
+    "applyExpertTeamRemove must not delete a card when the remove frame is rejected by the reducer",
+  );
+  assert.match(removeBody, /clearExpertTeamRunUiState\(/);
   const anchorBody = functionBody("function anchorSnapshotExpertTeamCards(", "function reconcileBoundArtifacts(");
   assert.match(anchorBody, /if \(run\.parentSessionId !== sessionId\) continue;/);
   assert.match(anchorBody, /insertExpertTeamRunCard\(nextItems/);

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  evictedTerminalRunIdsFromSnapshot,
   expertTeamCounts,
   insertExpertTeamRunCard,
   isExpertTeamTerminal,
   reduceExpertTeamRuns,
+  shouldRemoveExpertTeamRunCard,
   type ExpertTeamRunAction,
   type ExpertTeamRunsState,
 } from "../../src/client-huaanwork/logic/expertTeamRuns.ts";
@@ -418,6 +420,7 @@ describe("expert team run projection", () => {
 
   it("counts dispatch results and classifies the seven run statuses", () => {
     const running = run({
+      dispatchAttempts: 5,
       results: [
         {
           resultId: "r1",
@@ -472,6 +475,7 @@ describe("expert team run projection", () => {
       ],
     });
     expect(expertTeamCounts(running)).toEqual({
+      attempts: 5,
       dispatched: 4,
       running: 1,
       completed: 1,
@@ -481,6 +485,7 @@ describe("expert team run projection", () => {
       revisions: 1,
     });
     expect(expertTeamCounts(run())).toEqual({
+      attempts: 0,
       dispatched: 0,
       running: 0,
       completed: 0,
@@ -555,6 +560,7 @@ describe("expert team run projection", () => {
     });
     // 已被取代的 execute 仍按结果尝试计数：按成员去重会把 dispatched/completed 算成 2
     expect(expertTeamCounts(attempts)).toEqual({
+      attempts: 0,
       dispatched: 3,
       running: 0,
       completed: 3,
@@ -563,5 +569,53 @@ describe("expert team run projection", () => {
       reviews: 1,
       revisions: 1,
     });
+  });
+
+  it("gates card removal on generation, parent, revision and terminal status, and identifies same-generation snapshot evictions", () => {
+    const active = run({ teamRunId: "run-active", parentSessionId: "s1", status: "running", revision: 5 });
+    const done = run({ teamRunId: "run-done", parentSessionId: "s1", status: "completed", revision: 4, endedAt: timestamp(4) });
+    const newer = run({ teamRunId: "run-newer", parentSessionId: "s1", status: "completed", revision: 9, endedAt: timestamp(9) });
+    const sibling = run({ teamRunId: "run-s2", parentSessionId: "s2", status: "completed", revision: 2, endedAt: timestamp(2) });
+    const state: ExpertTeamRunsState = {
+      generation: "g1",
+      revision: 9,
+      runs: new Map([
+        [active.teamRunId, active],
+        [done.teamRunId, done],
+        [newer.teamRunId, newer],
+        [sibling.teamRunId, sibling],
+      ]),
+      connection: "open",
+    };
+
+    // 跨代、跨会话、过期 revision、非终态移除帧均不得删卡。
+    expect(shouldRemoveExpertTeamRunCard(state, { type: "remove", generation: "g2", revision: 10, teamRunId: "run-done", parentSessionId: "s1" })).toBe(false);
+    expect(shouldRemoveExpertTeamRunCard(state, { type: "remove", generation: "g1", revision: 10, teamRunId: "run-done", parentSessionId: "s2" })).toBe(false);
+    expect(shouldRemoveExpertTeamRunCard(state, { type: "remove", generation: "g1", revision: 3, teamRunId: "run-done", parentSessionId: "s1" })).toBe(false);
+    expect(shouldRemoveExpertTeamRunCard(state, { type: "remove", generation: "g1", revision: 10, teamRunId: "run-active", parentSessionId: "s1" })).toBe(false);
+    // 合法同代终态移除帧，或本地容量已裁剪但同代到达的移除帧允许清卡。
+    expect(shouldRemoveExpertTeamRunCard(state, { type: "remove", generation: "g1", revision: 4, teamRunId: "run-done", parentSessionId: "s1" })).toBe(true);
+    expect(shouldRemoveExpertTeamRunCard(state, { type: "remove", generation: "g1", revision: 4, teamRunId: "run-pruned-locally", parentSessionId: "s1" })).toBe(true);
+
+    // 同代 snapshot 只返回本会话、revision <= snapshot.revision 且已终态的缺项，绝不误删活卡/新卡/他会话卡。
+    expect(
+      evictedTerminalRunIdsFromSnapshot(state, {
+        type: "snapshot",
+        sessionId: "s1",
+        generation: "g1",
+        revision: 6,
+        runs: [],
+      }),
+    ).toEqual(["run-done"]);
+    // 换代快照由外层整体清卡，本辅助函数不重复返回。
+    expect(
+      evictedTerminalRunIdsFromSnapshot(state, {
+        type: "snapshot",
+        sessionId: "s1",
+        generation: "g2",
+        revision: 0,
+        runs: [],
+      }),
+    ).toEqual([]);
   });
 });

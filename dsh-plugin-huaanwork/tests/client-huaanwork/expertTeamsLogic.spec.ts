@@ -78,6 +78,13 @@ describe('expert team contract', () => {
       allowTeams: true,
     })
     expect(resolveComposerMentionState('正文 @合规', 6)).toBeUndefined()
+    // 开头已是 `@team:<slug>` 时，正文中段 `@` 按普通文本处理，不再弹出智能体补全菜单诱导混用；
+    // 光标回到开头 `@team:` token 内仍可编辑/切换目标。
+    expect(resolveComposerMentionState('@team:compliance 请看 @writer', 27)).toBeUndefined()
+    expect(resolveComposerMentionState('@team:comp 请看 @writer', 10)).toEqual({
+      token: { query: 'team:comp', start: 0, end: 10 },
+      allowTeams: true,
+    })
   })
 
   it('classifies leading @team targets into valid, empty-task, conflict, or non-team', () => {
@@ -85,6 +92,13 @@ describe('expert team contract', () => {
     expect(parseTeamAtInvoke('@team:compliance   ')).toEqual({ kind: 'empty-task', name: 'compliance' })
     expect(parseTeamAtInvoke('@team:compliance')).toEqual({ kind: 'empty-task', name: 'compliance' })
     expect(parseTeamAtInvoke('@team:one @team:two 审查')).toEqual({ kind: 'conflict', reason: 'multiple-targets' })
+    // 紧跟中文标点的第二个 `@team:` 目标同样判定冲突，但邮箱/词中 `@team:` 不误判。
+    expect(parseTeamAtInvoke('@team:one 和 @team:two，请一起审')).toEqual({ kind: 'conflict', reason: 'multiple-targets' })
+    expect(parseTeamAtInvoke('@team:one 联系 user@team:two')).toEqual({
+      kind: 'valid',
+      name: 'one',
+      remainder: '联系 user@team:two',
+    })
     // 规格 §11.2 裁定：只有正文第二个 `@team:` 目标是冲突；正文 @word 是普通文本。
     expect(parseTeamAtInvoke('@team:one @writer 审查')).toEqual({
       kind: 'valid',

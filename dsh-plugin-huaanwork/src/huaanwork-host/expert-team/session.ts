@@ -453,6 +453,16 @@ export async function dispatchExpertTeam(input: DispatchExpertTeamInput): Promis
       },
     })
     bindExpertTeamObserver(ctx, observer)
+    // 取消/teardown 同步释放观察器并摘除派工附件：即使 pre-claim 取消且 whenIdle 未及时
+    // 触发，全局监听也不会滞留到会话删除（设计 §12.1）。
+    coordinator.onRunCancel(teamRunId, () => {
+      try {
+        observer?.dispose()
+      } catch (disposeError) {
+        input.logger?.(`expert-team: observer dispose failed (${teamRunId}):${errorMessageOf(disposeError)}`)
+      }
+      detachTeamDispatch(ctx, sessionId)
+    })
   } catch (error) {
     abortBeforeSend(error)
     throw error

@@ -922,7 +922,9 @@ export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, se
   // 清理异步收敛,不阻塞删除),同时卸载该父会话在途的回合观察器,防止已删会话的
   // 迟到事件继续聚合并回调结算。
   void ctx?.huaanworkExpertTeamRuns?.cancelBySession(sessionId).catch(() => undefined)
-  disposeExpertTeamObservers(sessionId)
+  // 生产环境的 ctx 具备 `on` 且与 `bindExpertTeamObserver` 传入同一实例：按 ctx 精确卸载，
+  // 避免同进程多 Host 互相误伤；测试桩的精简 ctx 不含 `on` 时按 sessionId 兜底卸载。
+  disposeExpertTeamObservers(sessionId, ctx?.on === undefined ? undefined : ctx)
   cancelDirectStarts([sessionId, ...descendants])
   releaseRouteInput(sessionId)
   if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })

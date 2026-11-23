@@ -86,9 +86,11 @@ import {
   type SubagentRunView,
 } from "./logic/subagentRuns.ts";
 import {
+  evictedTerminalRunIdsFromSnapshot,
   insertExpertTeamRunCard,
   isExpertTeamTerminal,
   reduceExpertTeamRuns,
+  shouldRemoveExpertTeamRunCard,
   type ExpertTeamRunAction,
   type ExpertTeamRunCardItem,
   type ExpertTeamRunsState,
@@ -1978,19 +1980,26 @@ export default function App() {
     };
     /**
      * 终态历史被淘汰:只删除对应聚合卡条目,绝不删除用户/助手消息或 Artifact 卡。
-     * 清理只认 Host 的移除帧(或换代快照),不按客户端 Map 缺项推断。
+     * 清理必须先过 `shouldRemoveExpertTeamRunCard` 校验 generation/parent/revision/终态，
+     * 被 reducer 拒收的跨代或过期移除帧绝不得误删活卡。
      */
     const applyExpertTeamRemove = (event: Extract<RpcEvent, { event: "expertTeam/run-remove" }>) => {
-      applyExpertTeamState({
-        type: "remove",
+      const action = {
+        type: "remove" as const,
         generation: event.generation,
         revision: event.revision,
         teamRunId: event.teamRunId,
         parentSessionId: event.parentSessionId,
-      });
+      };
+      const previous = expertTeamRunsRef.current;
+      const accepted = shouldRemoveExpertTeamRunCard(previous, action);
+      const removedRun = previous.runs.get(event.teamRunId);
+      applyExpertTeamState(action);
+      if (!accepted) return;
       removeExpertTeamCards((item) => item.teamRunId === event.teamRunId);
-      setExpertTeamConfirming((prev) =>
-        prev?.kind === "team" && prev.teamRunId === event.teamRunId ? null : prev,
+      clearExpertTeamRunUiState(
+        new Set([event.teamRunId]),
+        removedRun === undefined ? [] : [removedRun],
       );
     };
     const applyEvent = (event: RpcEvent) => {
@@ -2996,9 +3005,61 @@ export default function App() {
   }
 
   /**
-   * 专家团 snapshot 对账(设计 §13.3):同代快照解冻运行卡并合并 revision;换代快照
-   * 是权威来源,旧代际的聚合卡整体移除,但绝不删除用户/助手消息或已提交 Artifact 卡。
-   * 失败在同一代际内重试一次,之后留给下一次 ready 触发。
+   * 清理已移除/被 Host 权威淘汰的团队运行关联 UI 状态（确认态、展开态、忙态与错误），
+   * 不影响其它仍在场运行的同类状态。
+   */
+  function clearExpertTeamRunUiState(
+    teamRunIds: ReadonlySet<string>,
+    removedRuns: readonly ExpertTeamRun[],
+  ): void {
+    const memberRunIds = new Set<string>();
+    const resultIds = new Set<string>();
+    for (const run of removedRuns) {
+      for (const result of run.results) {
+        resultIds.add(result.resultId);
+        if (result.memberRunId !== undefined) memberRunIds.add(result.memberRunId);
+      }
+    }
+    const cancelKeys = new Set<string>();
+    for (const teamRunId of teamRunIds) {
+      cancelKeys.add(expertTeamCancelKey("chat", teamRunId));
+      cancelKeys.add(expertTeamCancelKey("progress", teamRunId));
+    }
+    for (const memberRunId of memberRunIds) {
+      cancelKeys.add(expertTeamCancelKey("chat", memberRunId));
+      cancelKeys.add(expertTeamCancelKey("progress", memberRunId));
+    }
+    setExpertTeamConfirming((prev) => {
+      if (prev === null) return prev;
+      if (prev.kind === "team" && teamRunIds.has(prev.teamRunId)) return null;
+      if (prev.kind === "member" && memberRunIds.has(prev.runId)) return null;
+      return prev;
+    });
+    if (resultIds.size > 0) {
+      setExpertTeamExpandedResults((prev) => {
+        let next = prev;
+        for (const resultId of resultIds) next = withoutKey(next, resultId);
+        return next;
+      });
+    }
+    if (cancelKeys.size > 0) {
+      setExpertTeamCancelBusyByKey((prev) => {
+        let next = prev;
+        for (const key of cancelKeys) next = withoutKey(next, key);
+        return next;
+      });
+      setExpertTeamCancelErrorByKey((prev) => {
+        let next = prev;
+        for (const key of cancelKeys) next = withoutKey(next, key);
+        return next;
+      });
+    }
+  }
+
+  /**
+   * 专家团 snapshot 对账(设计 §13.3):同代快照解冻运行卡并合并 revision,同时对被 Host
+   * 快照权威淘汰的终态运行按 `run-remove` 语义清理卡片;换代快照整体移除旧聚合卡,但绝不
+   * 删除用户/助手消息或已提交 Artifact 卡。失败在同一代际内重试一次,之后留给下一次 ready 触发。
    */
   async function reconcileExpertTeamRuns(chatId: string, sessionId: string, allowRetry = true): Promise<void> {
     const epoch = reconcileEpochRef.current;
@@ -3017,19 +3078,31 @@ export default function App() {
     const previous = expertTeamRunsRef.current;
     const generationChanged =
       previous.generation !== undefined && previous.generation !== snapshot.generation;
-    applyExpertTeamState({
-      type: "snapshot",
+    const snapshotAction = {
+      type: "snapshot" as const,
       sessionId,
       generation: snapshot.generation,
       revision: snapshot.revision,
       runs: snapshot.runs,
-    });
+    };
+    const evictedIds = generationChanged
+      ? []
+      : evictedTerminalRunIdsFromSnapshot(previous, snapshotAction);
+    const evictedRuns = evictedIds
+      .map((id) => previous.runs.get(id))
+      .filter((item): item is ExpertTeamRun => item !== undefined);
+    applyExpertTeamState(snapshotAction);
     if (generationChanged) {
       // Host 重启或换代:旧运行快照失效,旧聚合卡按失效快照移除;不清除消息与 Artifact。
       removeExpertTeamCards();
       setExpertTeamConfirming(null);
       setExpertTeamCancelBusyByKey({});
       setExpertTeamCancelErrorByKey({});
+      setExpertTeamExpandedResults({});
+    } else if (evictedIds.length > 0) {
+      const evictedSet = new Set(evictedIds);
+      removeExpertTeamCards((item) => evictedSet.has(item.teamRunId));
+      clearExpertTeamRunUiState(evictedSet, evictedRuns);
     }
     anchorSnapshotExpertTeamCards(chatId, sessionId, snapshot.runs);
   }

@@ -91,11 +91,14 @@ export type ComposerMentionState = { token: AtToken; allowTeams: boolean };
 
 /**
  * 解析输入框当前 `@` 菜单：开头 token 同时开放智能体与专家团两组；
- * 正文中段回落旧 `atTokenAt`（仅智能体组），保留任意位置补全。
+ * 若草稿开头已是 `@team:<slug>`，正文中的 `@` 按规格 §11.2 视为普通文本，不再弹出
+ * 中段智能体补全菜单诱导混用；普通草稿的正文中段继续回落旧 `atTokenAt`（仅智能体组），
+ * 完整保留任意位置补全。
  */
 export function resolveComposerMentionState(text: string, cursor: number): ComposerMentionState | undefined {
   const leading = composerAtTokenAt(text, cursor);
   if (leading !== undefined) return { token: leading, allowTeams: true };
+  if (leadingTeamAtSlug(text) !== undefined) return undefined;
   const token = atTokenAt(text, cursor);
   return token === undefined ? undefined : { token, allowTeams: false };
 }
@@ -112,8 +115,8 @@ export type TeamAtInvoke =
   | { kind: "empty-task"; name: string }
   | { kind: "conflict"; reason: "multiple-targets" };
 
-/** 正文里第二个专家团调用目标（`@team:<slug>`）；只认词首，邮箱不误判。 */
-const ADDITIONAL_AT_TARGET_RE = /(?:^|\s)@team:[a-z0-9]+(?:-[a-z0-9]+)*(?=\s|$)/;
+/** 正文里第二个专家团调用目标（`@team:<slug>`）；只认词首，邮箱不误判，兼容紧跟中文标点。 */
+const ADDITIONAL_AT_TARGET_RE = /(?:^|\s)@team:[a-z0-9]+(?:-[a-z0-9]+)*(?![a-z0-9-])/;
 
 /**
  * 解析开头 `@team:<slug>` 调用。

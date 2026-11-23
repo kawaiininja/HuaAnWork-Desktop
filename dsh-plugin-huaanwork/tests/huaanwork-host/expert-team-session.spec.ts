@@ -682,4 +682,20 @@ describe('expert team session start, queue isolation and settlement', () => {
     expect(messagePrompt).toContain('直接输出非空的最终汇总文本')
     await messageFix.afterIdle.invokeFinally()
   })
+
+  it('releases bound global observer listeners immediately on cancelAll/requestCancel without waiting for afterIdle or session deletion', async () => {
+    const fix = await makeSessionFixture({})
+    await fix.sessionSend(teamSend({ task: '取消时立即释放观察器' }))
+    const runId = fix.runs.activeBySession(SESSION_ID)!.teamRunId
+    expect(fix.listenerCount('session/event')).toBe(1)
+    // agent/inbox/claimed 包含 fixture 的 claim 处理器 + 观察器监听共 2 条。
+    expect(fix.listenerCount('agent/inbox/claimed')).toBe(2)
+
+    // 不触发 afterIdle、不删除会话：直接取消即刻注销观察器全局监听并摘除派工附件。
+    await fix.runs.cancelAll()
+    expect(fix.runs.get(runId)?.status).toBe('stopped')
+    expect(fix.listenerCount('session/event')).toBe(0)
+    expect(fix.listenerCount('agent/inbox/claimed')).toBe(1)
+    expect(isAgentToolAttached(fix.attachments, SESSION_ID, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+  })
 })

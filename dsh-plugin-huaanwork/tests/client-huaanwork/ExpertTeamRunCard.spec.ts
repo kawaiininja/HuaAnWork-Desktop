@@ -299,8 +299,8 @@ describe("ExpertTeamRunCard", () => {
     });
     expect(card.text()).toContain("执行与审查");
     expect(card.text()).not.toContain("2/5");
-    // 派工按协调器到达计数：3 次到达只有 2 条结果，卡片显示 3 而不是结果条数。
-    expect(card.text()).toContain("派工 3");
+    // 预算调用（3/24，含入口拒绝）与实际结果派工（2，等于下方成员行数及各状态之和）分开展示，严格对账。
+    expect(card.text()).toContain("调用 3/24 · 派工 2 · 进行中 2");
     await card.click("查看主报告");
     expect(previewArtifact).toHaveBeenCalledWith("art-1");
     await card.click("终止成员");

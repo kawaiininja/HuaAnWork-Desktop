@@ -69,42 +69,88 @@ export type ExpertTeamObserverContext = {
   ): unknown
 }
 
-/** 父会话 → 已绑定观察器的注销闭包;`releaseSessionRuntime` 与测试按会话整体卸载。 */
-const boundObservers = new Map<string, Set<() => void>>()
+type BoundObserverEntry = {
+  ctx: ExpertTeamObserverContext
+  parentSessionId: string
+  release: () => void
+}
+
+/** 父会话 → 已绑定观察器条目;`releaseSessionRuntime` 与 Host teardown 按会话/上下文整体卸载。 */
+const boundObservers = new Map<string, Set<BoundObserverEntry>>()
+
+/** Host Context → 已绑定观察器条目;Host 卸载时只释放本实例,不误伤同进程其它 Host。 */
+const boundObserversByCtx = new Map<ExpertTeamObserverContext, Set<BoundObserverEntry>>()
 
 /** 已绑定观察器 → 其绑定注销闭包;`observer.dispose()` 依赖它取消全局监听,避免遗留。 */
 const observerReleases = new WeakMap<ExpertTeamTurnObserver, () => void>()
 
-function addBoundObserver(parentSessionId: string, release: () => void): void {
-  let entries = boundObservers.get(parentSessionId)
-  if (entries === undefined) {
-    entries = new Set()
-    boundObservers.set(parentSessionId, entries)
+function addBoundObserver(entry: BoundObserverEntry): void {
+  let bySession = boundObservers.get(entry.parentSessionId)
+  if (bySession === undefined) {
+    bySession = new Set()
+    boundObservers.set(entry.parentSessionId, bySession)
   }
-  entries.add(release)
+  bySession.add(entry)
+  let byCtx = boundObserversByCtx.get(entry.ctx)
+  if (byCtx === undefined) {
+    byCtx = new Set()
+    boundObserversByCtx.set(entry.ctx, byCtx)
+  }
+  byCtx.add(entry)
 }
 
-function removeBoundObserver(parentSessionId: string, release: () => void): void {
-  const entries = boundObservers.get(parentSessionId)
-  if (entries === undefined) return
-  entries.delete(release)
-  if (entries.size === 0) boundObservers.delete(parentSessionId)
+function removeBoundObserver(entry: BoundObserverEntry): void {
+  const bySession = boundObservers.get(entry.parentSessionId)
+  if (bySession !== undefined) {
+    bySession.delete(entry)
+    if (bySession.size === 0) boundObservers.delete(entry.parentSessionId)
+  }
+  const byCtx = boundObserversByCtx.get(entry.ctx)
+  if (byCtx !== undefined) {
+    byCtx.delete(entry)
+    if (byCtx.size === 0) boundObserversByCtx.delete(entry.ctx)
+  }
 }
 
 /**
  * 同步卸载一个父会话的全部在途观察器。
  *
  * 会话删除与级联清理(`releaseSessionRuntime`)用它在删除日志之前停掉事件观察,
- * 避免已删会话的迟到事件继续聚合并回调结算。
+ * 避免已删会话的迟到事件继续聚合并回调结算。传入 `ctx` 时仅卸载该 Host 实例
+ * 绑定的观察器,避免同进程多 Host 互相误伤。
  *
  * @param parentSessionId - 父会话 id
+ * @param ctx - 可选的 Host Context 过滤条件
  */
-export function disposeExpertTeamObservers(parentSessionId: string): void {
+export function disposeExpertTeamObservers(
+  parentSessionId: string,
+  ctx?: ExpertTeamObserverContext,
+): void {
   const entries = boundObservers.get(parentSessionId)
   if (entries === undefined) return
-  // 先摘表再逐个注销:注销闭包自身也会删表,副本避免迭代期间被跳过。
-  boundObservers.delete(parentSessionId)
-  for (const release of [...entries]) release()
+  const targets =
+    ctx === undefined ? [...entries] : [...entries].filter((entry) => entry.ctx === ctx)
+  for (const entry of targets) entry.release()
+}
+
+/**
+ * 同步卸载指定 Host Context(或缺省时全部)的在途观察器。
+ *
+ * Host teardown(`index.ts` disposer)调用它兜底释放模块级注册表与全局监听,
+ * 防止 pre-claim 或异常退出路径残留闭包引用(设计 §12.1)。
+ *
+ * @param ctx - 可选的 Host Context;传入时只释放该实例的观察器
+ */
+export function disposeAllExpertTeamObservers(ctx?: ExpertTeamObserverContext): void {
+  if (ctx !== undefined) {
+    const entries = boundObserversByCtx.get(ctx)
+    if (entries === undefined) return
+    for (const entry of [...entries]) entry.release()
+    return
+  }
+  for (const entries of [...boundObservers.values()]) {
+    for (const entry of [...entries]) entry.release()
+  }
 }
 
 function snapshotFacts(facts: ExpertTeamTurnEndFacts): ExpertTeamTurnEndFacts {
@@ -311,12 +357,13 @@ export function bindExpertTeamObserver(ctx: ExpertTeamObserverContext, observer:
     disposed = true
     // 先摘注册表与在途表再注销:observer.dispose() 回到 release 时不再递归。
     observerReleases.delete(observer)
-    removeBoundObserver(observer.parentSessionId, release)
+    removeBoundObserver(entry)
     offClaimed()
     offEvent()
     observer.dispose()
   }
+  const entry: BoundObserverEntry = { ctx, parentSessionId: observer.parentSessionId, release }
   observerReleases.set(observer, release)
-  addBoundObserver(observer.parentSessionId, release)
+  addBoundObserver(entry)
   return release
 }

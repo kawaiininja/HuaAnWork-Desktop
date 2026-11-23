@@ -60,6 +60,7 @@ export type ExpertTeamCoordinatorErrorCode =
   | 'expert-team-member-disabled'
   | 'expert-team-member-role-mismatch'
   | 'expert-team-review-disabled'
+  | 'expert-team-broadcast-incomplete'
   | 'expert-team-empty-review-scope'
   | 'expert-team-review-scope'
   | 'expert-team-invalid-input-result'
@@ -167,6 +168,8 @@ export type ExpertTeamCoordinator = {
   isLeaseValid(teamRunId: string): boolean
   /** 同步失效且绝不抛出；即使上层清理抛错也不得回滚。 */
   invalidateLease(teamRunId: string): void
+  /** 登记运行取消时的同步清理（如释放观察器/摘除附件）；若取消已触发则立即执行一次。 */
+  onRunCancel(teamRunId: string, cleanup: () => void): void
   /** 等待该运行全部在途派工与成员清理确认；任务结算与 afterIdle 共用。 */
   waitMemberCleanups(teamRunId: string): Promise<void>
   /** 整团取消：取消团长回合、排空等待队列、中止在途成员、等待清理并收敛 `stopped`（幂等）。 */
@@ -236,6 +239,7 @@ type RunState = {
   memberSemaphores: Map<string, Semaphore>
   pending: Set<DispatchOperation>
   cleanupPromises: Set<Promise<void>>
+  cancelCleanups: Set<() => void>
   memberRunIds: Set<string>
   cancelRequested: boolean
 }
@@ -489,7 +493,18 @@ export function createExpertTeamCoordinator(
       const lease = leases.get(teamRunId)
       if (lease !== undefined) lease.valid = false
       const state = states.get(teamRunId)
-      if (state !== undefined) state.cancelRequested = true
+      if (state !== undefined) {
+        state.cancelRequested = true
+        const cleanups = [...state.cancelCleanups]
+        state.cancelCleanups.clear()
+        for (const cleanup of cleanups) {
+          try {
+            cleanup()
+          } catch {
+            // 取消清理回调失败不阻断成员与团长收敛。
+          }
+        }
+      }
       const run = options.runs.get(teamRunId)
       const memberRunIds = new Set<string>(state?.memberRunIds ?? [])
       if (run !== undefined) {
@@ -543,6 +558,7 @@ export function createExpertTeamCoordinator(
         memberSemaphores: new Map(),
         pending: new Set(),
         cleanupPromises: new Set(),
+        cancelCleanups: new Set(),
         memberRunIds: new Set(),
         cancelRequested: false,
       })
@@ -801,6 +817,19 @@ export function createExpertTeamCoordinator(
       } catch {
         // 规格 §10.3：租约失效绝不被上层清理异常回滚，也不向调用方抛出。
       }
+    },
+
+    onRunCancel(teamRunId, cleanup) {
+      const state = states.get(teamRunId)
+      if (state === undefined || state.cancelRequested) {
+        try {
+          cleanup()
+        } catch {
+          // 晚绑定的取消清理失败不冒泡。
+        }
+        return
+      }
+      state.cancelCleanups.add(cleanup)
     },
 
     waitMemberCleanups(teamRunId) {

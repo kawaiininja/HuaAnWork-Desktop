@@ -197,8 +197,8 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
 
       <p className="expert-team-run-activity">{activityText(run)}</p>
       <p className="expert-team-run-counts">
-        {/* 派工按协调器到达计数（含被规则拒绝的到达），结果分类按结果链计数。 */}
-        派工 {run.dispatchAttempts} · 进行中 {counts.running} · 完成 {counts.completed} · 失败{" "}
+        {/* 调用反映 24 次硬预算到达计数（含入口拒绝），派工与状态分类按结果尝试严格对账。 */}
+        调用 {counts.attempts}/24 · 派工 {counts.dispatched} · 进行中 {counts.running} · 完成 {counts.completed} · 失败{" "}
         {counts.failed} · 已终止 {counts.stopped} · 审查 {counts.reviews} · 返修 {counts.revisions}
       </p>
 
