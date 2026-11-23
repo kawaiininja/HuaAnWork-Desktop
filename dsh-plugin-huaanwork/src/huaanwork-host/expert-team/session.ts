@@ -153,7 +153,9 @@ export function renderExpertTeamLeaderPrompt(team: ExpertTeam, task: string): st
   for (const member of team.members) {
     const role = member.role === 'executor' ? '执行' : '审查'
     lines.push(`- ${member.memberId}｜${role}｜@${member.agentRef.slug}：${member.responsibility}`)
-    if (member.outputInstructions !== undefined) lines.push(`  输出要求：${member.outputInstructions}`)
+    if (member.outputInstructions !== undefined && member.outputInstructions.trim() !== '') {
+      lines.push(`  输出要求：${member.outputInstructions}`)
+    }
   }
   lines.push('', '派工规则：')
   lines.push('- 只能使用 expert_team_dispatch 派工，一次只派一名名册内成员。')
@@ -166,13 +168,17 @@ export function renderExpertTeamLeaderPrompt(team: ExpertTeam, task: string): st
   lines.push(`- 分配方式：${assignment}`)
   lines.push(`- 执行顺序：${orchestration.executionOrder}`)
   lines.push(`- 最大并行：${orchestration.maxParallel}`)
-  if (orchestration.instructions !== undefined) lines.push(`- 补充说明：${orchestration.instructions}`)
+  if (orchestration.instructions !== undefined && orchestration.instructions.trim() !== '') {
+    lines.push(`- 补充说明：${orchestration.instructions}`)
+  }
   if (review.mode === 'none') {
     lines.push('- 审查：本轮不设审查环节')
   } else {
     const reviewMode = review.mode === 'unified' ? '统一审查（审查当前全部有效结果）' : '逐结果审查'
     lines.push(`- 审查方式：${reviewMode}，返修上限 ${review.maxRevisionRounds} 轮`)
-    if (review.criteria !== undefined) lines.push(`- 审查标准：${review.criteria}`)
+    if (review.criteria !== undefined && review.criteria.trim() !== '') {
+      lines.push(`- 审查标准：${review.criteria}`)
+    }
     lines.push('- 审查成员的最后一行必须单独输出 [VERDICT: PASS] 或 [VERDICT: REVISE]。')
   }
   lines.push('', '交付要求：')
@@ -187,7 +193,9 @@ export function renderExpertTeamLeaderPrompt(team: ExpertTeam, task: string): st
       `- 汇总方式：${summary.mode}。完成派工与审查后，直接输出非空的最终汇总文本。`,
     )
   }
-  if (summary.instructions !== undefined) lines.push(`- 汇总重点：${summary.instructions}`)
+  if (summary.instructions !== undefined && summary.instructions.trim() !== '') {
+    lines.push(`- 汇总重点：${summary.instructions}`)
+  }
   return lines.join('\n')
 }
 

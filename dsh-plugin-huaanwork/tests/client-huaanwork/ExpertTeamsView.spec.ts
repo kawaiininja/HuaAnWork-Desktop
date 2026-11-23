@@ -533,6 +533,12 @@ describe("ExpertTeamsView（专家团管理）", () => {
     await harness.click('保存专家团')
     expect(harness.lastCreate()).toMatchObject({ slug: expect.any(String), review: { mode: 'unified', maxRevisionRounds: 1 }, orchestration: { executionOrder: 'sequential' } })
     expect(harness.lastCreate()).toMatchObject({ enabled: true })
+    // 未填的可选说明字段在创建载荷中省略，不发送空串。
+    const createdPayload = harness.lastCreate()
+    expect(createdPayload.orchestration).not.toHaveProperty('instructions')
+    expect(createdPayload.review).not.toHaveProperty('criteria')
+    expect(createdPayload.summary).not.toHaveProperty('instructions')
+    expect((createdPayload.members as Record<string, unknown>[])[0]).not.toHaveProperty('outputInstructions')
   })
 
   it('shows unavailable members without blocking edits to other fields, and allows deleting corrupt team files', async () => {

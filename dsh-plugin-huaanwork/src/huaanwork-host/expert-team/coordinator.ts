@@ -202,7 +202,9 @@ export function renderExpertTeamDispatchPrompt(input: ExpertTeamPromptInput): st
     `专家团成员：${member.memberId}`,
     `成员职责：${member.responsibility}`,
   ]
-  if (member.outputInstructions !== undefined) lines.push(`输出要求：${member.outputInstructions}`)
+  if (member.outputInstructions !== undefined && member.outputInstructions.trim() !== '') {
+    lines.push(`输出要求：${member.outputInstructions}`)
+  }
   if (kind === 'review') lines.push(REVIEW_VERDICT_INSTRUCTION)
   lines.push('任务：', task)
   if (references.length > 0) {

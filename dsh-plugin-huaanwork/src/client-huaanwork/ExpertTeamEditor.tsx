@@ -272,35 +272,43 @@ export default function ExpertTeamEditor({
   };
 
   const buildPayload = (): Record<string, unknown> => {
-    const members: ExpertTeamMember[] = draft.members.map((member) => ({
-      memberId: member.memberId,
-      agentRef: { ...member.agentRef },
-      role: member.role,
-      responsibility: member.responsibility.trim(),
-      outputInstructions: (member.outputInstructions ?? "").trim(),
-    }));
+    const members: ExpertTeamMember[] = draft.members.map((member) => {
+      const outputInstructions = (member.outputInstructions ?? "").trim();
+      return {
+        memberId: member.memberId,
+        agentRef: { ...member.agentRef },
+        role: member.role,
+        responsibility: member.responsibility.trim(),
+        ...(outputInstructions === "" ? {} : { outputInstructions }),
+      };
+    });
+    const scenarios = draft.scenarios.trim();
+    const orchestrationInstructions = draft.orchestrationInstructions.trim();
+    const reviewCriteria = draft.reviewCriteria.trim();
+    const summaryInstructions = draft.summaryInstructions.trim();
     return {
       slug: draft.slug.trim(),
       name: draft.name.trim(),
       description: draft.description.trim(),
-      scenarios: draft.scenarios.trim(),
+      // 新建时省略空白可选字段；编辑时保留 "" 以显式清空已保存的 scenarios（Host 归一化后省略落盘）。
+      ...(scenarios !== "" || editing !== undefined ? { scenarios } : {}),
       members,
       orchestration: {
         assignmentMode: draft.assignmentMode,
         executionOrder: draft.executionOrder,
         maxParallel: draft.maxParallel,
-        instructions: draft.orchestrationInstructions.trim(),
+        ...(orchestrationInstructions === "" ? {} : { instructions: orchestrationInstructions }),
       },
       review: {
         mode: hasReviewer ? draft.reviewMode : "none",
         maxRevisionRounds: draft.maxRevisionRounds,
-        criteria: draft.reviewCriteria.trim(),
+        ...(reviewCriteria === "" ? {} : { criteria: reviewCriteria }),
       },
       summary: {
         delivery: draft.delivery,
         artifactFormat: draft.artifactFormat,
         mode: draft.summaryMode,
-        instructions: draft.summaryInstructions.trim(),
+        ...(summaryInstructions === "" ? {} : { instructions: summaryInstructions }),
       },
     };
   };

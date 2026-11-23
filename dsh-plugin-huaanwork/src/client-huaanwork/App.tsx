@@ -1164,6 +1164,11 @@ export default function App() {
     () => [...subagentRuns.runs.values()].some(isSubagentRunActive),
     [subagentRuns],
   );
+  /** 任一父会话仍有非终态专家团运行时共享 1 秒 tick 继续走(覆盖重开标签与 stopping 收尾间隙)。 */
+  const hasAnyActiveExpertTeamRun = useMemo(
+    () => [...expertTeamRuns.runs.values()].some((run) => !isExpertTeamTerminal(run)),
+    [expertTeamRuns],
+  );
   /** 占名额的执行中标签数：排队的标签不算，另一个标签开始回合也不改这一份。 */
   const runningTurnCount = useMemo(
     () => Object.values(tabRuns).filter((state) => state.running).length,
@@ -1315,8 +1320,9 @@ export default function App() {
   const allowTeams = mentionState?.allowTeams === true;
   const atOpen = Boolean(atToken && !atClosed);
   const atQuery = atToken?.query ?? "";
-  const atMatches = atOpen ? atAgents(atCatalog, atQuery).slice(0, 8) : [];
-  const atTeamQuery = atQuery.startsWith("team:") ? atQuery.slice("team:".length) : atQuery;
+  const explicitTeamQuery = allowTeams && atQuery.startsWith("team:");
+  const atMatches = atOpen && !explicitTeamQuery ? atAgents(atCatalog, atQuery).slice(0, 8) : [];
+  const atTeamQuery = explicitTeamQuery ? atQuery.slice("team:".length) : atQuery;
   const atTeamMatches = atOpen && allowTeams ? atExpertTeams(expertTeamCatalog, atTeamQuery).slice(0, 8) : [];
   const atItemCount = atMatches.length + atTeamMatches.length;
   const draftTeamSlug = leadingTeamAtSlug(draft);
@@ -1918,7 +1924,14 @@ export default function App() {
         const run = event.run;
         // 团队成员仍进入 run reducer(聚合卡需要实时成员相位),但不在主流重复插入
         // 独立子代理卡:同一次派工的进度归口到聚合卡与右栏专家团区块。
-        if (run.teamRunId !== undefined) return;
+        if (run.teamRunId !== undefined) {
+          if (run.phase === "stopping" || !isSubagentRunActive(run)) {
+            setExpertTeamConfirming((prev) =>
+              prev?.kind === "member" && prev.runId === run.runId ? null : prev,
+            );
+          }
+          return;
+        }
         setChatTabs((prev) =>
           prev.map((tab) => {
             if (tab.sessionId !== run.parentSessionId) return tab;
@@ -1958,7 +1971,9 @@ export default function App() {
       setExpertTeamConfirming((prev) => {
         if (prev === null) return prev;
         if (prev.kind === "team") {
-          return prev.teamRunId === run.teamRunId && isExpertTeamTerminal(run) ? null : prev;
+          return prev.teamRunId === run.teamRunId && (run.status === "stopping" || isExpertTeamTerminal(run))
+            ? null
+            : prev;
         }
         const targeted = run.results.find((result) => result.memberRunId === prev.runId);
         if (targeted === undefined) return prev;
@@ -2738,11 +2753,11 @@ export default function App() {
   }, [rightTab, rightCollapsed]);
 
   useEffect(() => {
-    // 分享同一秒表:任一标签的回合或任一子代理 run 活跃时都走;每张运行卡不得自建 interval。
-    if (!anyTabRunning && !hasAnyActiveSubagentRun) return;
+    // 分享同一秒表:任一标签的回合、子代理或专家团运行活跃时都走;每张运行卡不得自建 interval。
+    if (!anyTabRunning && !hasAnyActiveSubagentRun && !hasAnyActiveExpertTeamRun) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [anyTabRunning, hasAnyActiveSubagentRun]);
+  }, [anyTabRunning, hasAnyActiveSubagentRun, hasAnyActiveExpertTeamRun]);
 
   useEffect(() => {
     const bridge = hostLivenessBridge();
@@ -3280,7 +3295,7 @@ export default function App() {
         return;
       }
       const member = subagentRunsRef.current.runs.get(target.runId);
-      if (member === undefined || !isSubagentRunActive(member)) return;
+      if (member === undefined || member.phase === "stopping" || !isSubagentRunActive(member)) return;
       await rpcCall<SubagentCancelResult>("subagent.cancel", {
         parentSessionId: member.parentSessionId,
         runId: target.runId,

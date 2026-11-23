@@ -391,9 +391,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   // 派工走 Task 7 的 `dispatchTeamMember`(团队路径,不改普通 `@slug` 的语义)。
   const expertTeamCoordinator = createExpertTeamCoordinator({
     runs: ctx.huaanworkExpertTeamRuns,
-    resolveMemberPackage: (agentRef) => {
-      // 与可用性规则一致:只按包自身来源 + slug 精确匹配,不跨来源回退。
-      const pkg = agentPackageHost.detail(agentRef.slug)
+    resolveMemberPackage: async (agentRef) => {
+      // 与可用性规则一致:只按包自身来源 + slug 精确匹配,不跨来源回退;
+      // 经 findInvocable 对 catalog 包做异步磁盘验签,排队/运行中途损坏提前在入口或出队阻断。
+      const pkg = await agentPackageHost.findInvocable(agentRef.slug)
       return pkg === undefined || pkg.source !== agentRef.source ? undefined : pkg
     },
     dispatchMember: (request) =>

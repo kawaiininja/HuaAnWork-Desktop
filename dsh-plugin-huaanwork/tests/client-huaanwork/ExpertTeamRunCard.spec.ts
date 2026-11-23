@@ -22,6 +22,7 @@ import {
   type ExpertTeamRunsState,
 } from "../../src/client-huaanwork/logic/expertTeamRuns.ts";
 import type { ArtifactResultCardItem } from "../../src/client-huaanwork/logic/artifactProjection.ts";
+import type { SubagentRunView } from "../../src/client-huaanwork/logic/subagentRuns.ts";
 import type { ExpertTeamRun } from "../../src/client-huaanwork/rpc-types.ts";
 import { artifact, executeResult, validTeam } from "../fixtures/expert-team/team.ts";
 
@@ -126,6 +127,9 @@ type HarnessProps = {
   run: ExpertTeamRun;
   generation?: string;
   connection?: "open" | "closed";
+  now?: number;
+  frozenAt?: number;
+  memberRuns?: readonly SubagentRunView[];
   /** 起始对话条目；缺省为已挂卡的聊天流。重开会话时传只有消息与 Artifact 的历史回放。 */
   initialItems?: readonly HarnessItem[];
   confirming?: ExpertTeamCancelTarget | null;
@@ -191,8 +195,10 @@ function renderExpertTeamRunCard(props: HarnessProps): Harness {
           : createElement(ExpertTeamRunCard, {
               key: run.teamRunId,
               run,
-              now: NOW,
+              now: props.now ?? NOW,
               connection: state.connection,
+              ...(props.frozenAt === undefined ? {} : { frozenAt: props.frozenAt }),
+              ...(props.memberRuns === undefined ? {} : { memberRuns: props.memberRuns }),
               confirming: props.confirming,
               expandedResultIds: expanded,
               onToggleResult: (resultId: string) => {
@@ -435,6 +441,139 @@ describe("ExpertTeamRunCard", () => {
     card.reconcile({ sessionId: "s1", generation: "g1", revision: 3, runs: [runningTeam({ revision: 3 })] });
     expect(card.teamCardCount()).toBe(1);
   });
+
+  it("renders member cleanup warnings and stop-wait alerts on the aggregate card even after the member settles, while suppressing inactivity alerts while disconnected", () => {
+    const startedMs = Date.parse(STARTED_AT);
+    const memberWithCleanupWarning: SubagentRunView = {
+      generation: "g1",
+      runId: "member-run-1",
+      parentSessionId: "s1",
+      teamRunId: "run-1",
+      clientMessageId: "m1",
+      kind: "package",
+      label: "@writer",
+      packageVersion: "1.0.0",
+      phase: "stopped",
+      startedAt: startedMs,
+      endedAt: startedMs + 5_000,
+      lastActivity: startedMs + 4_000,
+      activeTools: [],
+      cleanupWarnings: [{ code: "runtime-stop-failed", severity: "error" }],
+      revision: 3,
+    };
+    const stoppingMember: SubagentRunView = {
+      generation: "g1",
+      runId: "member-run-2",
+      parentSessionId: "s1",
+      teamRunId: "run-1",
+      clientMessageId: "m1",
+      kind: "package",
+      label: "@reviewer",
+      packageVersion: "1.0.0",
+      phase: "stopping",
+      startedAt: startedMs,
+      stopRequestedAt: startedMs + 1_000,
+      lastActivity: startedMs,
+      activeTools: [],
+      cleanupWarnings: [],
+      revision: 2,
+    };
+
+    const card = renderExpertTeamRunCard({
+      run: teamRun({
+        status: "stopping",
+        dispatchAttempts: 2,
+        results: [
+          executeResult("r1", { status: "stopped", memberRunId: "member-run-1" }),
+          executeResult("rev-1", {
+            kind: "review",
+            memberId: "m-rev-1",
+            agentRef: { source: "local", slug: "reviewer" },
+            status: "running",
+            memberRunId: "member-run-2",
+          }),
+        ],
+      }),
+      memberRuns: [memberWithCleanupWarning, stoppingMember],
+      now: startedMs + 70_000,
+    });
+
+    // 独立成员卡已去重，聚合卡必须在折叠态也展示终态成员的清理告警与超过 1 分钟的停止等待提醒。
+    expect(card.text()).toContain("运行环境停止失败，清理未确认");
+    expect(card.text()).toContain("停止已受理超过 1 分钟");
+    expect(card.queryTeamRun()?.querySelector('.expert-team-result-alerts [role="alert"]')?.textContent).toContain(
+      "运行环境停止失败，清理未确认",
+    );
+
+    // 断连期间抑制「无新活动」提醒，不误报断连前的静默时长。
+    const inactiveMember: SubagentRunView = {
+      generation: "g1",
+      runId: "member-run-3",
+      parentSessionId: "s1",
+      teamRunId: "run-1",
+      clientMessageId: "m1",
+      kind: "package",
+      label: "@reviewer",
+      packageVersion: "1.0.0",
+      phase: "reasoning",
+      startedAt: startedMs,
+      lastActivity: startedMs,
+      activeTools: [],
+      cleanupWarnings: [],
+      revision: 2,
+    };
+    const frozenCard = renderExpertTeamRunCard({
+      run: teamRun({
+        status: "running",
+        dispatchAttempts: 1,
+        results: [executeResult("r2", { status: "running", memberRunId: "member-run-3" })],
+      }),
+      memberRuns: [inactiveMember],
+      connection: "closed",
+      frozenAt: startedMs + 10_000,
+      now: startedMs + 400_000,
+    });
+    expect(frozenCard.text()).not.toContain("没有新活动");
+  });
+
+  it("disables the member terminate button and hides member confirm once memberRun enters stopping", async () => {
+    const confirm = vi.fn();
+    const requestMember = vi.fn();
+    const startedMs = Date.parse(STARTED_AT);
+    const stoppingMember: SubagentRunView = {
+      generation: "g1",
+      runId: "member-run-1",
+      parentSessionId: "s1",
+      teamRunId: "run-1",
+      clientMessageId: "m1",
+      kind: "package",
+      label: "@writer",
+      packageVersion: "1.0.0",
+      phase: "stopping",
+      startedAt: startedMs,
+      stopRequestedAt: startedMs + 2_000,
+      lastActivity: startedMs + 1_000,
+      activeTools: [],
+      cleanupWarnings: [],
+      revision: 2,
+    };
+    const card = renderExpertTeamRunCard({
+      run: teamRun({
+        status: "running",
+        dispatchAttempts: 1,
+        results: [executeResult("r1", { status: "running", memberRunId: "member-run-1" })],
+      }),
+      memberRuns: [stoppingMember],
+      confirming: { kind: "member", runId: "member-run-1", surface: "chat" },
+      onCancelMember: requestMember,
+      onConfirmCancel: confirm,
+    });
+    expect(card.text()).not.toContain("确认终止成员");
+    expect(card.button("终止成员")).toBeDisabled();
+    await card.click("终止成员");
+    expect(requestMember).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
 });
 
 describe("App expert team wiring", () => {
@@ -460,11 +599,19 @@ describe("App expert team wiring", () => {
     expect(APP_SOURCE).toContain("insertExpertTeamRunCard");
   });
 
-  it("keeps team member subagents out of the main stream but still reconciles their state", () => {
+  it("keeps team member subagents out of the main stream, subscribes the shared timer to active teams, and excludes agents on explicit @team: queries", () => {
     expect(APP_SOURCE).toMatch(/run\.teamRunId !== undefined/);
     expect(APP_SOURCE).toMatch(
-      /if \(run\.teamRunId !== undefined\) return;[\s\S]{0,600}insertSubagentRunCard/,
+      /if \(run\.teamRunId !== undefined\)[\s\S]{0,260}return;[\s\S]{0,600}insertSubagentRunCard/,
     );
+    // 共享 1 秒计时器包含活跃专家团运行，避免重开标签或 stopping 收尾停表。
+    expect(APP_SOURCE).toContain("hasAnyActiveExpertTeamRun");
+    expect(APP_SOURCE).toMatch(
+      /if \(!anyTabRunning && !hasAnyActiveSubagentRun && !hasAnyActiveExpertTeamRun\) return;/,
+    );
+    // 显式 @team: 前缀查询只检索专家团，不再同时匹配普通智能体。
+    expect(APP_SOURCE).toContain('const explicitTeamQuery = allowTeams && atQuery.startsWith("team:");');
+    expect(APP_SOURCE).toContain("atOpen && !explicitTeamQuery ? atAgents(atCatalog, atQuery)");
     // 换代只清理聚合卡条目，绝不删除用户/助手消息或 Artifact 卡。
     expect(APP_SOURCE).toMatch(/item\.kind !== "expert-team-run"/);
     expect(APP_SOURCE).toContain('kind === "subagent-run" || item.kind === "expert-team-run"');

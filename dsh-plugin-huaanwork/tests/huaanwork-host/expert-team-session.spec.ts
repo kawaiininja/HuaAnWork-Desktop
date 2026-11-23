@@ -17,6 +17,7 @@ import type {
 import type { AgentsHost } from '../../src/huaanwork-host/agents-host.ts'
 import {
   createExpertTeamCoordinator,
+  renderExpertTeamDispatchPrompt,
   type ExpertTeamCoordinator,
   type ExpertTeamDispatchInput,
   type ExpertTeamMemberDispatcher,
@@ -38,7 +39,7 @@ import { writeHuaanworkSettings } from '../../src/huaanwork-host/settings.ts'
 import { createTurnAnchorStore, type TurnAnchorStore } from '../../src/huaanwork-host/turn-anchors.ts'
 import { createTurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import { neutralWorkspaceRoot } from '../../src/huaanwork-host/workspace-state.ts'
-import { executeResult, validTeam } from '../fixtures/expert-team/team.ts'
+import { executeResult, validTeam, validTeamInput } from '../fixtures/expert-team/team.ts'
 
 /**
  * 团队会话启动、排队隔离与 turn/end 结算(设计 §11.3 / §12.1 / §12.4.2 / §13.3 / §17)。
@@ -681,6 +682,27 @@ describe('expert team session start, queue isolation and settlement', () => {
     expect(messagePrompt).not.toContain('最终必须调用 result_present')
     expect(messagePrompt).toContain('直接输出非空的最终汇总文本')
     await messageFix.afterIdle.invokeFinally()
+
+    // 空白可选说明字段不得在团长或成员提示词里生成空标题行。
+    const blankTeam = validTeamInput({
+      scenarios: '',
+      members: validTeamInput().members.map((member) => ({ ...member, outputInstructions: '   ' })),
+      orchestration: { instructions: '' },
+      review: { criteria: '  ' },
+      summary: { instructions: '' },
+    })
+    const leaderPrompt = expertTeamSession.renderExpertTeamLeaderPrompt(blankTeam, '空可选字段检查')
+    expect(leaderPrompt).not.toContain('输出要求：')
+    expect(leaderPrompt).not.toContain('- 补充说明：')
+    expect(leaderPrompt).not.toContain('- 审查标准：')
+    expect(leaderPrompt).not.toContain('- 汇总重点：')
+    const dispatchPrompt = renderExpertTeamDispatchPrompt({
+      member: blankTeam.members[0]!,
+      kind: 'execute',
+      task: '执行',
+      references: [],
+    })
+    expect(dispatchPrompt).not.toContain('输出要求：')
   })
 
   it('releases bound global observer listeners immediately on cancelAll/requestCancel without waiting for afterIdle or session deletion', async () => {

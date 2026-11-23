@@ -482,6 +482,141 @@ describe('expert team orchestration rules', () => {
       delivered,
     )
     expect(computeExpertTeamTerminalStatus({ run: multiHopRun, finalSummaryPresent: true })).toBe('completed')
+
+    // 星型多次 execute 重试：两次重试都指向原始失败 fail1，最终成功 okStar 应一并消除 fail1 与 failStar。
+    const failStar = executeResult('exec-b-star-fail', {
+      memberId: 'm-exec-2',
+      status: 'failed',
+      supersedesResultId: fail1.resultId,
+    })
+    const okStar = executeResult('exec-b-star-ok', {
+      memberId: 'm-exec-2',
+      status: 'completed',
+      supersedesResultId: fail1.resultId,
+    })
+    const starRetryRun = makeRun(
+      [execOk, fail1, failStar, okStar, reviewResult('rev-star', 'pass', { inputResultIds: [execOk.resultId, okStar.resultId] })],
+      twoExecTeam,
+      delivered,
+    )
+    expect(computeExpertTeamTerminalStatus({ run: starRetryRun, finalSummaryPresent: true })).toBe('completed')
+
+    // 非有效执行结果（如 completed 但输出为空白，或仍处于 running 未收尾）必须 fail-closed 判 partial。
+    const blankExec = executeResult('exec-blank', { memberId: 'm-exec-2', output: '   ' })
+    const blankExecRun = makeRun(
+      [execOk, blankExec, reviewResult('rev-blank', 'pass', { inputResultIds: [execOk.resultId] })],
+      twoExecTeam,
+      delivered,
+    )
+    expect(computeExpertTeamTerminalStatus({ run: blankExecRun, finalSummaryPresent: true })).toBe('partial')
+  })
+
+  it('enforces sequential references on execute retries and rejects re-superseding already resolved execution failures', () => {
+    // sequential 后序成员技术重试仍须引用前序有效结果；首名执行成员技术重试不受误拦。
+    const seqFirstFailed = runWithSequentialExecutors(
+      ['m-exec-1', 'm-exec-2'],
+      [executeResult('s1-fail', { memberId: 'm-exec-1', status: 'failed' })],
+    )
+    expect(
+      validateDispatchRule(seqFirstFailed, {
+        memberId: 'm-exec-1',
+        kind: 'execute',
+        task: '首名成员重试',
+        supersedesResultId: 's1-fail',
+      }),
+    ).toEqual({ ok: true })
+
+    const seqSecondFailed = runWithSequentialExecutors(
+      ['m-exec-1', 'm-exec-2'],
+      [
+        executeResult('s1-ok', { memberId: 'm-exec-1' }),
+        executeResult('s2-fail', { memberId: 'm-exec-2', status: 'failed', inputResultIds: ['s1-ok'] }),
+      ],
+    )
+    expect(
+      validateDispatchRule(seqSecondFailed, {
+        memberId: 'm-exec-2',
+        kind: 'execute',
+        task: '后序成员漏引用重试',
+        supersedesResultId: 's2-fail',
+        inputResultIds: [],
+      }),
+    ).toEqual({ ok: false, error: 'expert-team-sequential-reference' })
+    expect(
+      validateDispatchRule(seqSecondFailed, {
+        memberId: 'm-exec-2',
+        kind: 'execute',
+        task: '后序成员带引用重试',
+        supersedesResultId: 's2-fail',
+        inputResultIds: ['s1-ok'],
+      }),
+    ).toEqual({ ok: true })
+
+    // 失败 execute 尚未解决时，允许继续链式或星型重试；一旦被后续有效结果解决，原失败与早期失败重试均不得再次被 execute 替代。
+    const unresolvedStar = runWithResults([
+      executeResult('r1-fail', { memberId: 'm-exec-1', status: 'failed' }),
+      executeResult('r2-fail', { memberId: 'm-exec-1', status: 'failed', supersedesResultId: 'r1-fail' }),
+    ])
+    expect(
+      validateDispatchRule(unresolvedStar, {
+        memberId: 'm-exec-1',
+        kind: 'execute',
+        task: '未解决前允许星型重试',
+        supersedesResultId: 'r1-fail',
+      }),
+    ).toEqual({ ok: true })
+    expect(
+      validateDispatchRule(unresolvedStar, {
+        memberId: 'm-exec-1',
+        kind: 'execute',
+        task: '未解决前允许链式重试',
+        supersedesResultId: 'r2-fail',
+      }),
+    ).toEqual({ ok: true })
+
+    const resolvedStar = runWithResults([
+      executeResult('r1-fail', { memberId: 'm-exec-1', status: 'failed' }),
+      executeResult('r2-fail', { memberId: 'm-exec-1', status: 'failed', supersedesResultId: 'r1-fail' }),
+      executeResult('r3-ok', { memberId: 'm-exec-1', status: 'completed', supersedesResultId: 'r1-fail' }),
+    ])
+    expect(
+      validateDispatchRule(resolvedStar, {
+        memberId: 'm-exec-1',
+        kind: 'execute',
+        task: '重复替代已解决的原失败结果',
+        supersedesResultId: 'r1-fail',
+      }),
+    ).toEqual({ ok: false, error: 'expert-team-invalid-supersede' })
+    expect(
+      validateDispatchRule(resolvedStar, {
+        memberId: 'm-exec-1',
+        kind: 'execute',
+        task: '重复替代已被星型解决的早期失败重试',
+        supersedesResultId: 'r2-fail',
+      }),
+    ).toEqual({ ok: false, error: 'expert-team-invalid-supersede' })
+
+    const resolvedChain = runWithResults([
+      executeResult('c1-fail', { memberId: 'm-exec-1', status: 'failed' }),
+      executeResult('c2-fail', { memberId: 'm-exec-1', status: 'stopped', supersedesResultId: 'c1-fail' }),
+      executeResult('c3-ok', { memberId: 'm-exec-1', status: 'completed', supersedesResultId: 'c2-fail' }),
+    ])
+    expect(
+      validateDispatchRule(resolvedChain, {
+        memberId: 'm-exec-1',
+        kind: 'execute',
+        task: '重复替代链式已解决的原失败结果',
+        supersedesResultId: 'c1-fail',
+      }),
+    ).toEqual({ ok: false, error: 'expert-team-invalid-supersede' })
+    expect(
+      validateDispatchRule(resolvedChain, {
+        memberId: 'm-exec-1',
+        kind: 'execute',
+        task: '重复替代链式已解决的中间失败结果',
+        supersedesResultId: 'c2-fail',
+      }),
+    ).toEqual({ ok: false, error: 'expert-team-invalid-supersede' })
   })
 
   it('rejects premature unified review in broadcast mode before all executors settle, while allowing partial-failure review and per-member review', () => {
@@ -588,6 +723,17 @@ describe('expert team orchestration rules', () => {
       ok: false,
       error: 'expert-team-revision-limit',
     })
+    expect(
+      computeExpertTeamTerminalStatus({
+        run: {
+          ...zeroQuotaUnified,
+          primaryArtifactId: 'artifact-zero-unified',
+          artifactStatus: 'created',
+          deliverySealed: true,
+        },
+        finalSummaryPresent: true,
+      }),
+    ).toBe('completed_with_issues')
 
     // unified 返修周期（maxRevisionRounds = 1）：首份返修开启周期（opensUnifiedRevisionCycle=true），同周期第二名成员返修复用，全员复审关闭周期后超额返修被拒
     const unifiedReviseRun = runWithUnifiedRevise(['r1', 'r2'], { maxRevisionRounds: 1, unifiedRevisionRounds: 0 })
@@ -619,6 +765,22 @@ describe('expert team orchestration rules', () => {
     })
 
     // per-member 按单条结果链的 revision 次数独立计数（覆盖 0/1/2）
+    const perMemberZero = runWithPerMemberChain({ memberId: 'm-exec-1', revisionsInChain: 0, maxRevisionRounds: 0 })
+    expect(validateDispatchRule(perMemberZero, { memberId: 'm-exec-1', kind: 'revision', task: '单链 0 额度', supersedesResultId: 'r1' })).toEqual({
+      ok: false,
+      error: 'expert-team-revision-limit',
+    })
+    expect(
+      computeExpertTeamTerminalStatus({
+        run: {
+          ...perMemberZero,
+          primaryArtifactId: 'artifact-zero-per-member',
+          artifactStatus: 'created',
+          deliverySealed: true,
+        },
+        finalSummaryPresent: true,
+      }),
+    ).toBe('completed_with_issues')
     const perMemberRun = runWithPerMemberChain({ memberId: 'm-exec-1', revisionsInChain: 1, maxRevisionRounds: 1 })
     expect(validateDispatchRule(perMemberRun, { memberId: 'm-exec-1', kind: 'revision', task: '单链超额', supersedesResultId: 'r1-rev' })).toEqual({
       ok: false,

@@ -65,6 +65,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function nonBlankOptional(value: string | undefined): string | undefined {
+  return value !== undefined && value.trim() !== '' ? value : undefined
+}
+
 function normalizeAgentRef(source: ExpertTeamAgentRef): ExpertTeamAgentRef {
   return { source: source.source, slug: source.slug }
 }
@@ -76,7 +80,8 @@ function normalizeMember(source: ExpertTeamMember): ExpertTeamMember {
     role: source.role,
     responsibility: source.responsibility,
   }
-  if (source.outputInstructions !== undefined) member.outputInstructions = source.outputInstructions
+  const outputInstructions = nonBlankOptional(source.outputInstructions)
+  if (outputInstructions !== undefined) member.outputInstructions = outputInstructions
   return member
 }
 
@@ -86,7 +91,8 @@ function normalizeOrchestration(source: ExpertTeam['orchestration']): ExpertTeam
     executionOrder: source.executionOrder,
     maxParallel: source.maxParallel,
   }
-  if (source.instructions !== undefined) orchestration.instructions = source.instructions
+  const instructions = nonBlankOptional(source.instructions)
+  if (instructions !== undefined) orchestration.instructions = instructions
   return orchestration
 }
 
@@ -95,7 +101,8 @@ function normalizeReview(source: ExpertTeam['review']): ExpertTeam['review'] {
     mode: source.mode,
     maxRevisionRounds: source.maxRevisionRounds,
   }
-  if (source.criteria !== undefined) review.criteria = source.criteria
+  const criteria = nonBlankOptional(source.criteria)
+  if (criteria !== undefined) review.criteria = criteria
   return review
 }
 
@@ -105,7 +112,8 @@ function normalizeSummary(source: ExpertTeam['summary']): ExpertTeam['summary'] 
     artifactFormat: source.artifactFormat,
     mode: source.mode,
   }
-  if (source.instructions !== undefined) summary.instructions = source.instructions
+  const instructions = nonBlankOptional(source.instructions)
+  if (instructions !== undefined) summary.instructions = instructions
   return summary
 }
 
@@ -113,7 +121,8 @@ function normalizeSummary(source: ExpertTeam['summary']): ExpertTeam['summary'] 
  * 按契约自身的字段重建团队定义：未列入 `ExpertTeam` 的键（含成员、智能体引用与
  * 嵌套规则）一律丢弃，`schemaVersion` 由存储层盖章。写盘与读投影都经过它，因此
  * 调用方夹带的额外键既不会进入 `<id>.json`，也不会作为 `team` 回传给客户端。
- * 可选键只在有值时出现，不写显式 `undefined`（`exactOptionalPropertyTypes`）。
+ * 可选键只在有非空白值时出现，既不写显式 `undefined`（`exactOptionalPropertyTypes`），
+ * 也不落盘空字符串；`update` 传入 `""` 会经此归一化移除原可选键。
  */
 function normalizeTeam(source: ExpertTeam): ExpertTeam {
   const team: ExpertTeam = {
@@ -130,7 +139,8 @@ function normalizeTeam(source: ExpertTeam): ExpertTeam {
     createdAt: source.createdAt,
     updatedAt: source.updatedAt,
   }
-  if (source.scenarios !== undefined) team.scenarios = source.scenarios
+  const scenarios = nonBlankOptional(source.scenarios)
+  if (scenarios !== undefined) team.scenarios = scenarios
   return team
 }
 

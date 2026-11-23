@@ -1,7 +1,12 @@
 import type { ReactElement } from "react";
 
 import { expertTeamCounts } from "./logic/expertTeamRuns.ts";
-import { subagentStatusText, type SubagentRunView } from "./logic/subagentRuns.ts";
+import {
+  subagentAlerts,
+  subagentStatusText,
+  type SubagentRunAlert,
+  type SubagentRunView,
+} from "./logic/subagentRuns.ts";
 import type { ExpertTeamResult, ExpertTeamRun } from "./rpc-types.ts";
 
 /**
@@ -243,19 +248,23 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
             const memberKey = memberRunId === undefined
               ? undefined
               : expertTeamCancelKey(surface, memberRunId);
-            const memberBusy = memberKey !== undefined && cancelBusyByKey[memberKey] === true;
+            const memberStopping = memberRun?.phase === "stopping";
+            const memberBusy =
+              (memberKey !== undefined && cancelBusyByKey[memberKey] === true) || memberStopping;
             const memberError = memberKey === undefined ? undefined : cancelErrorByKey[memberKey];
             const active = result.status === "starting" || result.status === "running";
             const canCancelMember = active && memberRunId !== undefined && !frozen;
-            // 确认只对仍可取消的成员存在：结果已终态时不再渲染破坏性确认按钮。
+            // 确认只对仍可取消的成员存在：结果已终态或已受理停止时不再渲染破坏性确认按钮。
             const memberConfirmVisible =
               confirming?.kind === "member" &&
               confirming.surface === surface &&
               memberRunId !== undefined &&
               confirming.runId === memberRunId &&
-              active;
+              active &&
+              !memberStopping;
             const statusText =
               active && memberRun !== undefined ? subagentStatusText(memberRun) : RESULT_STATUS_TEXT[result.status];
+            const memberAlerts = memberAlertsOf(memberRun, now, frozen, frozenAt);
             const version = versions.get(result.resultId) ?? 1;
             return (
               <li
@@ -296,13 +305,11 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
                         type="button"
                         className="expert-team-run-terminate"
                         disabled={frozen}
-                        onClick={() =>
-                          onConfirmCancel?.(
-                            memberRunId === undefined
-                              ? { kind: "team", teamRunId: run.teamRunId, surface }
-                              : { kind: "member", runId: memberRunId, surface },
-                          )
-                        }
+                        onClick={() => {
+                          if (memberRunId !== undefined) {
+                            onConfirmCancel?.({ kind: "member", runId: memberRunId, surface });
+                          }
+                        }}
                       >
                         确认终止成员
                       </button>
@@ -355,6 +362,7 @@ export default function ExpertTeamRunCard(props: ExpertTeamRunCardProps): ReactE
                     终止成员失败：{memberError}
                   </p>
                 ) : null}
+                {renderMemberAlerts(memberAlerts)}
               </li>
             );
           })}
@@ -413,6 +421,45 @@ function reviewText(result: ExpertTeamResult): string | undefined {
   if (result.reviewVerdict === "pass") return "审查通过";
   if (result.reviewVerdict === "revise") return "审查要求返修";
   return undefined;
+}
+
+/**
+ * 成员清理与停止提醒（设计 §12.3 / §13.3）：独立成员卡已去重，聚合卡必须保留
+ * 成员 run 的清理失败、停止等待与收尾预算告警；断连/失效时冻结时钟并抑制无新活动提醒。
+ */
+function memberAlertsOf(
+  run: SubagentRunView | undefined,
+  now: number,
+  frozen: boolean,
+  frozenAt?: number,
+): SubagentRunAlert[] {
+  if (run === undefined) return [];
+  const effectiveNow = frozen && frozenAt !== undefined ? Math.min(now, frozenAt) : now;
+  return subagentAlerts(run, effectiveNow).filter(
+    (alert) => !(run.stale === true || frozen) || alert.code !== "inactive",
+  );
+}
+
+function renderMemberAlerts(alerts: readonly SubagentRunAlert[]): ReactElement | null {
+  if (alerts.length === 0) return null;
+  const errors = alerts.filter((alert) => alert.severity === "error");
+  const infos = alerts.filter((alert) => alert.severity !== "error");
+  return (
+    <div className="expert-team-result-alerts">
+      {errors.length > 0 ? (
+        <div className="subagent-run-alert is-error" role="alert">
+          {errors.map((alert, index) => (
+            <p key={`${alert.code}-${index}`}>{alert.text}</p>
+          ))}
+        </div>
+      ) : null}
+      {infos.map((alert, index) => (
+        <p key={`${alert.code}-${index}`} className="subagent-run-alert is-info">
+          {alert.text}
+        </p>
+      ))}
+    </div>
+  );
 }
 
 /**

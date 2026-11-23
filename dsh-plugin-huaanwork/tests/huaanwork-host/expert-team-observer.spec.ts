@@ -192,6 +192,35 @@ describe('expert team turn observer', () => {
     nonNumericSeq.event(session(PARENT), withRawSeq(assistantMessage({ seq: 3, turn: 2, text: '字符串 seq' }), '3'))
     nonNumericSeq.event(session(PARENT), turnEnd({ seq: 4, turn: 2, reason: { kind: 'completed' } }))
     expect(nonNumericSeq.turnEndFacts()).toMatchObject({ turn: 2, finalSummaryPresent: false, eventMissing: false })
+
+    // turn/end 自身缺失 seq 或非单调 seq 时仍须同步结算并触发 onAbort，不推迟到 afterIdle。
+    const abortedMissingSeq = activeObserver({ turn: 2 })
+    abortedMissingSeq.event(session(PARENT), toolResult({ seq: 2, turn: 2 }))
+    abortedMissingSeq.event(session(PARENT), assistantMessage({ seq: 3, turn: 2, text: '异常前的汇总' }))
+    const abortReason: TurnEndReason = { kind: 'aborted', reason: { kind: 'user' } }
+    abortedMissingSeq.event(session(PARENT), withoutSeq(turnEnd({ seq: 4, turn: 2, reason: abortReason })))
+    expect(abortedMissingSeq.onTurnEnd).toHaveBeenCalledTimes(1)
+    expect(abortedMissingSeq.onAbort).toHaveBeenCalledTimes(1)
+    expect(abortedMissingSeq.turnEndFacts()).toEqual({
+      turn: 2,
+      finalSummaryPresent: false,
+      eventMissing: false,
+      reason: abortReason,
+    })
+    abortedMissingSeq.afterIdle()
+    expect(abortedMissingSeq.onTurnEnd).toHaveBeenCalledTimes(1)
+
+    const nonMonotonicTurnEnd = activeObserver({ turn: 2 })
+    nonMonotonicTurnEnd.event(session(PARENT), toolResult({ seq: 10, turn: 2 }))
+    nonMonotonicTurnEnd.event(session(PARENT), assistantMessage({ seq: 11, turn: 2, text: '非单调前的汇总' }))
+    nonMonotonicTurnEnd.event(session(PARENT), turnEnd({ seq: 5, turn: 2, reason: { kind: 'completed' } }))
+    expect(nonMonotonicTurnEnd.onTurnEnd).toHaveBeenCalledTimes(1)
+    expect(nonMonotonicTurnEnd.turnEndFacts()).toEqual({
+      turn: 2,
+      finalSummaryPresent: false,
+      eventMissing: false,
+      reason: { kind: 'completed' },
+    })
   })
 
   it('locks turn/end facts once, calls onAbort for an aborted turn, and ignores later goal turns', () => {

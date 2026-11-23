@@ -128,6 +128,42 @@ describe('expert team store', () => {
     expect(tempResidue(join(root, 'expert-teams'))).toEqual([])
   })
 
+  it('omits blank optional text fields on create, update clearing, and read', async () => {
+    const root = makeRoot('expert-team-blank-opt-')
+    const store = createExpertTeamStore(root)
+    const base = validTeamInput({ slug: 'blank-opt' })
+    const created = await store.create({
+      ...base,
+      scenarios: '   ',
+      members: base.members.map((member) => ({ ...member, outputInstructions: '' })),
+      orchestration: { ...base.orchestration, instructions: '  ' },
+      review: { ...base.review, criteria: '' },
+      summary: { ...base.summary, instructions: '\t' },
+    })
+    expect(created).not.toHaveProperty('scenarios')
+    expect(created.members[0]).not.toHaveProperty('outputInstructions')
+    expect(created.orchestration).not.toHaveProperty('instructions')
+    expect(created.review).not.toHaveProperty('criteria')
+    expect(created.summary).not.toHaveProperty('instructions')
+
+    const persistedPath = join(root, 'expert-teams', `${created.id}.json`)
+    const persisted = JSON.parse(readFileSync(persistedPath, 'utf8')) as Record<string, unknown>
+    expect(persisted).not.toHaveProperty('scenarios')
+    expect(persisted.orchestration).not.toHaveProperty('instructions')
+    expect(persisted.review).not.toHaveProperty('criteria')
+    expect(persisted.summary).not.toHaveProperty('instructions')
+
+    // 先写入非空可选字段，再以空字符串 update 清空，应彻底移除该键。
+    const filled = await store.update(created.id, { scenarios: '合同审查' })
+    expect(filled.scenarios).toBe('合同审查')
+    const cleared = await store.update(created.id, { scenarios: '' })
+    expect(cleared).not.toHaveProperty('scenarios')
+
+    // 磁盘旧文件若含空串可选字段，读出投影同样归一化为省略。
+    writeFileSync(persistedPath, JSON.stringify({ ...cleared, scenarios: '' }), 'utf8')
+    expect((await store.get(created.id)).team).not.toHaveProperty('scenarios')
+  })
+
   it('exposes stable error codes for invalid input and unknown ids', async () => {
     const root = makeRoot('expert-team-errors-')
     const store = createExpertTeamStore(root)

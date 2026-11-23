@@ -228,12 +228,20 @@ export function createExpertTeamTurnObserver(options: ExpertTeamTurnObserverOpti
       if (disposed) return
       if (session.id !== options.parentSessionId) return
       const seq = event.seq
-      if (typeof seq !== 'number' || !Number.isFinite(seq)) {
+      const seqInvalid =
+        typeof seq !== 'number' || !Number.isFinite(seq) || (lastSeq !== undefined && seq <= lastSeq)
+      if (seqInvalid) {
         markSeqAnomaly()
-        return
-      }
-      if (lastSeq !== undefined && seq <= lastSeq) {
-        markSeqAnomaly()
+        // 即使 turn/end 自身或之前出现 seq 异常，命中当前回合 turn/end 时仍须同步封闭并保留 abort 原因，
+        // 避免把租约失效推迟到 afterIdle；finalSummaryPresent 按 seqAnomaly 强制 fail-closed 为 false。
+        if (!settled && activeTurn !== undefined && event.type === 'turn/end' && event.data.turn === activeTurn) {
+          settle({
+            turn: activeTurn,
+            finalSummaryPresent: false,
+            eventMissing: false,
+            reason: event.data.reason,
+          })
+        }
         return
       }
       lastSeq = seq

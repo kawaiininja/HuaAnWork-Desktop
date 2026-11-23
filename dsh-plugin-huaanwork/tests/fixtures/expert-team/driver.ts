@@ -557,7 +557,6 @@ export function installExpertTeamPackages(ctx: Context, reviewerCount: 1 | 2 = 1
 export type ComplianceTeamScenario = {
   ctx: Context
   packages: InstalledExpertTeamPackages
-  team: ExpertTeam
   run(options: ComplianceTeamSmokeOptions): Promise<ComplianceTeamSmokeResult>
 }
 
@@ -631,22 +630,16 @@ function memberForPackage(pkg: InstalledPackage, memberId: string, role: ExpertT
   }
 }
 
-/** 建立可在真实 Host 上执行的合规审查团队场景(包已安装、团队定义已持久化)。 */
+/** 建立可在真实 Host 上执行的合规审查团队场景(包已安装;每次 run 按选项创建独立团队定义)。 */
 export async function createComplianceTeamScenario(
   ctx: Context,
   options: { reviewerCount?: 1 | 2 } = {},
 ): Promise<ComplianceTeamScenario> {
   const reviewerCount = options.reviewerCount ?? 1
   const packages = installExpertTeamPackages(ctx, reviewerCount)
-  const team = await createExpertTeamDefinition(ctx, packages, {
-    executionOrder: 'parallel',
-    maxParallel: 2,
-    delivery: 'artifact',
-  })
   return {
     ctx,
     packages,
-    team,
     run(runOptions: ComplianceTeamSmokeOptions): Promise<ComplianceTeamSmokeResult> {
       return executeScriptedTeamRun(ctx, packages, runOptions)
     },
@@ -709,7 +702,6 @@ type RunScript = {
   reviewers: string[]
   executorMemberIds: string[]
   verdictQueue: Array<'pass' | 'revise'>
-  verdictByMember: Map<string, Array<'pass' | 'revise'>>
   maxMemberConcurrency: number
   activeMembers: number
   /** 审查成员流的实测并发（同 barrier 风格，波次内可证明真实重叠）。 */
@@ -735,7 +727,6 @@ function newRunScript(reviewers: string[], executorMemberIds: string[], options:
     reviewers,
     executorMemberIds,
     verdictQueue: [...(options.reviewVerdicts ?? ['pass'])],
-    verdictByMember: new Map(),
     maxMemberConcurrency: 0,
     activeMembers: 0,
     maxReviewConcurrency: 0,
@@ -1057,18 +1048,9 @@ async function* memberStream(run: RunScript, prompt: string): AsyncGenerator<Str
     }
     if (wave !== undefined && wave.unstarted > 0) wave.unstarted -= 1
     if (review) {
-      const assigned = run.verdictByMember.get(memberId) ?? []
-      if (assigned.length === 0) {
-        const next = run.verdictQueue.shift()
-        if (next === undefined) {
-          throw new Error(`审查结论队列已在成员 ${memberId} 处耗尽:场景必须逐条提供审查裁决`)
-        }
-        assigned.push(next)
-        run.verdictByMember.set(memberId, assigned)
-      }
-      const verdict = assigned.shift()
+      const verdict = run.verdictQueue.shift()
       if (verdict === undefined) {
-        throw new Error(`成员 ${memberId} 缺少本次审查裁决`)
+        throw new Error(`审查结论队列已在成员 ${memberId} 处耗尽:场景必须逐条提供审查裁决`)
       }
       const text = `审查意见(${memberId}):已逐项核对当前有效结果。\n[VERDICT: ${verdict === 'revise' ? 'REVISE' : 'PASS'}]`
       yield* textStream(text)
@@ -1382,9 +1364,4 @@ export async function restartHostWithSameProfile(ctx: Context): Promise<Restarte
     artifactIds,
     messages: retainedMessages(nextCtx, runtime.sessionId),
   }
-}
-
-/** 场景定义所用团队(供 spec 读取;不是运行时快照)。 */
-export function scenarioTeam(scenario: ComplianceTeamScenario): ExpertTeam {
-  return scenario.team
 }

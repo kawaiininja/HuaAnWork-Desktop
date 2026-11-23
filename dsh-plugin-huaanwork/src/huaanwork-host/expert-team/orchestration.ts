@@ -372,16 +372,16 @@ function reviewNecessaryRevisionPending(run: ExpertTeamRun): boolean {
 }
 
 /**
- * 任何未被后续有效结果替代的 failed/stopped 执行或返修都是技术缺失（§12.4.2）。
+ * 已被后续有效执行/返修结果解决的失败/非有效执行记录集合（§12.3 / §12.4.2）。
  *
  * 两种替代路径：
  * 1. 传递闭包：从每个有效执行/返修结果沿 `supersedesResultId` 向上追溯整个祖先链
- *    （覆盖连续多次失败的 `execute` 最终被后续有效 `execute` 替代）；
- * 2. 失败/停止的 `revision`：因 `supersedesResultId` 为单指针且 `validateRevisionRule`
- *    要求重试返修仍指向原有效目标 `targetId`，当后续索引存在同成员的有效执行结果替代
- *    了同一个 `targetId` 时，视为该次失败返修已被后续有效返修替代；若从未重试成功仍属缺失。
+ *    （覆盖连续多次链式失败的 `execute` 最终被后续有效 `execute` 替代）；
+ * 2. 星型重试/返修：同成员在更晚索引存在有效执行/返修结果替代同一目标
+ *    （对 `execute` 沿其失败祖先链检查，覆盖星型与链式+星型混合重试；对 `revision`
+ *    只检查直接目标，避免跨返修轮误豁免）。
  */
-function hasUnsupersededExecutionFailure(run: ExpertTeamRun): boolean {
+function resolvedExecutionFailureIds(run: ExpertTeamRun): Set<string> {
   const byId = new Map<string, ExpertTeamResult>()
   for (const result of run.results) {
     byId.set(result.resultId, result)
@@ -406,18 +406,39 @@ function hasUnsupersededExecutionFailure(run: ExpertTeamRun): boolean {
     latestValidSupersedeIndex.set(`${result.memberId}${SCOPE_SEPARATOR}${result.supersedesResultId}`, index)
   })
 
+  const resolved = new Set<string>(supersededByValid)
   for (let index = 0; index < run.results.length; index += 1) {
     const result = run.results[index]
     if (result === undefined) continue
     if (result.kind !== 'execute' && result.kind !== 'revision') continue
-    if (result.status !== 'failed' && result.status !== 'stopped') continue
-    if (supersededByValid.has(result.resultId)) continue
-    if (result.kind === 'revision' && result.supersedesResultId !== undefined) {
+    if (isValidExecutionResult(result)) continue
+    if (resolved.has(result.resultId)) continue
+    if (result.supersedesResultId === undefined) continue
+    let ancestorId: string | undefined = result.supersedesResultId
+    const visited = new Set<string>([result.resultId])
+    while (ancestorId !== undefined && !visited.has(ancestorId)) {
+      visited.add(ancestorId)
       const laterValidIndex = latestValidSupersedeIndex.get(
-        `${result.memberId}${SCOPE_SEPARATOR}${result.supersedesResultId}`,
+        `${result.memberId}${SCOPE_SEPARATOR}${ancestorId}`,
       )
-      if (laterValidIndex !== undefined && laterValidIndex > index) continue
+      if (laterValidIndex !== undefined && laterValidIndex > index) {
+        resolved.add(result.resultId)
+        break
+      }
+      if (result.kind === 'revision') break
+      ancestorId = byId.get(ancestorId)?.supersedesResultId
     }
+  }
+  return resolved
+}
+
+/** 任何未被后续有效结果替代的非有效执行或返修都是技术缺失（§12.4.2）。 */
+function hasUnsupersededExecutionFailure(run: ExpertTeamRun): boolean {
+  const resolved = resolvedExecutionFailureIds(run)
+  for (const result of run.results) {
+    if (result.kind !== 'execute' && result.kind !== 'revision') continue
+    if (isValidExecutionResult(result)) continue
+    if (resolved.has(result.resultId)) continue
     return true
   }
   return false
@@ -602,10 +623,7 @@ export function validateDispatchRule(
   }
   const effective = currentEffectiveResultIds(run)
   if (input.kind === 'execute') {
-    if (
-      run.teamSnapshot.orchestration.executionOrder === 'sequential' &&
-      input.supersedesResultId === undefined
-    ) {
+    if (run.teamSnapshot.orchestration.executionOrder === 'sequential') {
       const sequentialError = sequentialExecuteError(run, input.memberId, inputResultIds, effective)
       if (sequentialError !== undefined) return { ok: false, error: sequentialError }
     }
@@ -615,7 +633,8 @@ export function validateDispatchRule(
         target === undefined ||
         target.kind !== 'execute' ||
         target.memberId !== input.memberId ||
-        (target.status !== 'failed' && target.status !== 'stopped')
+        (target.status !== 'failed' && target.status !== 'stopped') ||
+        resolvedExecutionFailureIds(run).has(target.resultId)
       ) {
         return { ok: false, error: 'expert-team-invalid-supersede' }
       }

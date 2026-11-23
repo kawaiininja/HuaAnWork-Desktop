@@ -1243,6 +1243,7 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
       let runtime: AgentPackageTurnRuntime | undefined
       let mcpDispose: (() => Promise<void>) | undefined
       let mcpServerName: string | undefined
+      let mcpMounting = false
       let mountedMcpNames: readonly string[] | undefined
       let request: AgentPackageSubagentRequest | undefined
       let cleanupPromise: Promise<void> | undefined
@@ -1401,6 +1402,12 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         }
       }
 
+      const releaseMcpServerName = (): void => {
+        if (mcpServerName === undefined) return
+        activeTeamMcpServerNames.delete(mcpServerName)
+        mcpServerName = undefined
+      }
+
       /**
        * 单成员即时清理:activation/runtime/MCP/绑定/在途登记一次收掉,不留到父回合结束。
        * 共享同一个 `cleanupPromise`;`mode` 只决定清理失败是抛出还是记一条日志。
@@ -1420,10 +1427,8 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
                 // MCP 客户端 scope 可能已随子进程退出;失败不阻止其余清理。
               }
             }
-            if (mcpServerName !== undefined) {
-              activeTeamMcpServerNames.delete(mcpServerName)
-              mcpServerName = undefined
-            }
+            // mountSessionMcp 仍在途时保留服务名占用，待其返回并 dispose 后再释放。
+            if (!mcpMounting) releaseMcpServerName()
             // 启动失败时兜底删除未消费的团队请求键;身份守卫不误删新回合。
             if (request !== undefined && teamRequests.get(reservedChildId) === request) {
               teamRequests.delete(reservedChildId)
@@ -1559,21 +1564,31 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
           mountMcp: async (port) => {
             const serverName = mcpServerName
             if (serverName === undefined) return []
-            // 直接挂到预留子会话:父会话既不是 runtime 宿主也不是工具宿主。
-            const mounted = await mountSessionMcp({
-              ctx: ctx as never,
-              sessionId: reservedChildId,
-              serverName,
-              url: `http://127.0.0.1:${String(port)}/mcp`,
-            })
-            // 健康预算期间成员已被取消:立即释放 scope,不留给已终结的回合。
-            if (cleanupStarted) {
-              await mounted.dispose()
+            mcpMounting = true
+            try {
+              // 直接挂到预留子会话:父会话既不是 runtime 宿主也不是工具宿主。
+              const mounted = await mountSessionMcp({
+                ctx: ctx as never,
+                sessionId: reservedChildId,
+                serverName,
+                url: `http://127.0.0.1:${String(port)}/mcp`,
+              })
+              // 健康预算期间成员已被取消:立即释放 scope,不留给已终结的回合。
+              if (cleanupStarted) {
+                try {
+                  await mounted.dispose()
+                } catch {
+                  // MCP 客户端 scope 可能已随子进程退出;失败不阻止服务名释放。
+                }
+                return mounted.names
+              }
+              mcpDispose = mounted.dispose
+              mountedMcpNames = mounted.names
               return mounted.names
+            } finally {
+              mcpMounting = false
+              if (cleanupStarted) releaseMcpServerName()
             }
-            mcpDispose = mounted.dispose
-            mountedMcpNames = mounted.names
-            return mounted.names
           },
         })
         record.runtime = runtime
