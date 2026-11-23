@@ -12,7 +12,7 @@
 
 **Baseline:** 外层代码基线 `ed823cde6614a090ddacac1a4f934d1652ffb332`，上游 pin `1600d8a1e140dcde43a1a0941940a0480712c011`；设计基线为上述代码加已通过评审的规格。旧行号仅用于定位，实施时以符号和测试为准。
 
-**Review status:** 实现与自动化 headless gate 已完成（`corepack yarn check` EXIT=0，代码 HEAD `eca2ceb5b0`）；真机人工验收未执行（BLOCKED，无交互 GUI/IME/真机环境），Task 18 Step 3 的 9 项真机复选框保持未勾选。
+**Review status:** 实现与自动化 headless gate 已完成（`corepack yarn check` EXIT=0 @ `0a465ed361`；当前 HEAD `1b21b0291e` 由第二轮评审独立复跑 typecheck、插件 vitest 4810 passed / 15 skipped、policy、`check:whitespace`、`check:layout`、`verify:expert-team`、`verify:loader` 均 EXIT=0）。真机 Electron 验收已完成（@ `0a465ed361`：Phase A 真实云端模型 7/7 PASS + Phase B 本地 OpenAI 兼容 SSE 13/13 PASS；第 3、8 项各 1 个架构不可实时注入子项保留单测边界，见证据文档 §4/§5）。Task 18 Step 3 按证据文档逐项勾选；第二轮评审结论见 `docs/superpowers/plans/2026-11-23-expert-team-code-review.md` §七（0 Critical / 0 Important / 9 Minor / 6 Nit）。
 
 ## Global Constraints
 
@@ -2416,19 +2416,19 @@ git status --short
 
 Expected: 无 whitespace 错误；没有 `deepseek-harness/`、锁文件、无关 CI 或意外二进制变更。
 
-- [ ] **Step 3: 执行真机验收并记录证据**
+- [x] **Step 3: 执行真机验收并记录证据**（@ `0a465ed361` 编译产物，Phase A + Phase B；逐项事实与 18 张截图见证据文档 §4）
 
 在 `docs/evidence/2026-11-22-expert-team-acceptance.md` 逐项记录实际命令、版本、日志和结果：
 
-- [ ] 新建“合规审查小分队”：两名执行成员、一名审查成员，默认统一审查和 Markdown 主 Artifact；检查成员包原生脚本/HTTP/MCP 能力。
-- [ ] 中文检索并调用 `@team`，确认真实独立成员 run、包版本、最多两路并行、动态补派和统一审查一次返修后全员复审。
-- [ ] 验证 reasoning + text 正常执行，纯 reasoning 显示 empty-output，混合 image/file 显示 unsupported-output。
-- [ ] 验证一份主 Artifact、正文工具卡抑制、预览、全屏和原字节下载；主报告后派工封闭。
-- [ ] 验证仅会话模式：派工前过渡语不算最终汇总，最后 tool/result 后文本才算。
-- [ ] 分别验证成员中途失效、无效审查标记、单成员取消、整团取消、父会话停止、24 次预算耗尽后的部分 Artifact。
-- [ ] 验证同会话双 MCP 成员并行、普通 `@智能体` 行为、goal 续拍不能迟到派工。
-- [ ] 验证 Host 重启后团队卡不恢复，消息和 Artifact 卡仍在；验证 Artifact 写失败（如超 5 MiB 或写盘异常）后保持 pending、可同回合重试且未重试结 partial；关联失败时 Artifact 可见但团队 pending/partial。
-- [ ] 验证中文输入法组合态、键盘选择、断连冻结、重连对账和终态淘汰。
+- [x] 新建“合规审查小分队”：两名执行成员、一名审查成员，默认统一审查和 Markdown 主 Artifact；检查成员包原生脚本/HTTP/MCP 能力。
+- [x] 中文检索并调用 `@team`，确认真实独立成员 run、包版本、最多两路并行、动态补派和统一审查一次返修后全员复审。
+- [ ] 验证 reasoning + text 正常执行，纯 reasoning 显示 empty-output，混合 image/file 显示 unsupported-output。（主体真机 PASS：Phase B `B2`；`mixed image/file → unsupported-output` 无法经生产 `HuaAnWorkAdapter` 文本 SSE 注入，保留单测边界，故本项不勾选）
+- [x] 验证一份主 Artifact、正文工具卡抑制、预览、全屏和原字节下载；主报告后派工封闭。
+- [x] 验证仅会话模式：派工前过渡语不算最终汇总，最后 tool/result 后文本才算。
+- [x] 分别验证成员中途失效、无效审查标记、单成员取消、整团取消、父会话停止、24 次预算耗尽后的部分 Artifact。
+- [x] 验证同会话双 MCP 成员并行、普通 `@智能体` 行为、goal 续拍不能迟到派工。
+- [ ] 验证 Host 重启后团队卡不恢复，消息和 Artifact 卡仍在；验证 Artifact 写失败（如超 5 MiB 或写盘异常）后保持 pending、可同回合重试且未重试结 partial；关联失败时 Artifact 可见但团队 pending/partial。（前两项真机 PASS：Phase A `step8a` + Phase B `B11`；`artifactLinkError` 无生产故障注入入口，保留单测边界，故本项不勾选）
+- [x] 验证中文输入法组合态、键盘选择、断连冻结、重连对账和终态淘汰。
 
 证据文件必须区分“自动化测试通过”和“真机人工验收通过”，任何未执行项保持未勾选并注明原因。
 
@@ -2448,4 +2448,4 @@ git commit -m "test(expert-team): verify desktop collaboration"
 - [x] `ExpertTeam`、`ExpertTeamRecord`、`ExpertTeamRun`、`ExpertTeamRunSnapshot`、`ExpertTeamDispatchInput/Result`、`ExpertTeamLease`、`dispatchTeamMember`、`validateDispatchRule`、`requestCancel`/`markStopped`、`activeBySession`/`byTurn`、`noteSessionArtifact`、`composerAtTokenAt`/`resolveComposerMentionState`、`parseTeamAtInvoke`、`resolveFollowupClientMessageId` 的签名跨任务一致；`unifiedRevisionRounds` 在 Task 8 同步临界区唯一写回且 `cycleOpen` 仅从 `results` 派生。
 - [x] 团队终态为 `turn/end` 封闭（且 `turn/start` 先于 `agent/inbox/claimed`）而非 afterIdle/whenIdle，结算点内置 fail-closed 异常守卫（先失效租约、附件/restrict 独立 try/catch、确保必写终态）；`requestCancel` 非阻塞置 `stopping`，在清理收敛后由 `markStopped` 置 `stopped`；技术失败允许部分报告且 24 次预算豁免只豁免未尝试义务、不豁免在途/格式/单交付物守卫；同代重连快照恢复 `connection='open'` 并清除 `frozenAt`。
 - [x] 生产接线覆盖 `model.ts`（`isRegisteredToolName`）、`holders.ts`、`index.ts`（含 `toolCtx`、全局 listener 与 disposer `cancelAll()`）、`sessions.ts:1346` + `turn-scheduler.ts`（`at.kind` 透传）、`agent-package/host.ts`（`AgentPackageDispatchContext`）+ `skills.ts`（`specChildId` 前移）、`result-artifact-tools.ts`（`ToolContext` + `ResultPresentClaimedContext` + 按持久 manifest 锚重放关联）、`toolPanel.ts` / `ProgressPanel`（类型链、右栏投影与成员去重）、`App.tsx`（旧 `@` 保留任意位置触发）及编译产物 `lib/*.js` 真实 HTTP Loader 冒烟（不重复插入 `desktop-shell`）。
-- [ ] 最终验收证据只在实际命令和真机步骤完成后填写。
+- [x] 最终验收证据只在实际命令和真机步骤完成后填写。（证据文档于真机 Phase A/B 执行后填写；第 3、8 项的不可注入子项明确保留单测边界，未写成真机通过）
