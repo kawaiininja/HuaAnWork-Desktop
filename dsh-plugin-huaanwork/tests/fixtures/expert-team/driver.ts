@@ -9,7 +9,7 @@
  * - 所有临时 profile、端口、子进程与 Host disposer 都归本模块释放。
  */
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, cpSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -124,7 +124,11 @@ async function waitFor(predicate: () => boolean, label: string, timeoutMs = 30_0
 // ────────────────────────── profile / boot ──────────────────────────
 
 function prepareHome(): { base: string; home: string } {
-  const base = mkdtempSync(join(tmpdir(), 'expert-team-composition-'))
+  // Linux 沙箱首选 bwrap，其 workspace-write profile 用空 tmpfs 覆盖 /tmp 且只回绑
+  // workspaceRoot；home 若落在 /tmp 下，包目录在成员子进程视图里会消失（脚本启动报
+  // Cannot find module）。Linux 改用 homedir（与真实产品布局一致），其余平台沿用 tmpdir。
+  const baseRoot = process.platform === 'linux' ? homedir() : tmpdir()
+  const base = mkdtempSync(join(baseRoot, 'expert-team-composition-'))
   const home = join(base, 'dsh')
   mkdirSync(home, { recursive: true })
   writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\nagent-presets:\n  default: minimal\n')
@@ -548,7 +552,7 @@ export function installExpertTeamPackages(ctx: Context, reviewerCount: 1 | 2 = 1
     )
   }
   writePackageState(runtime.profileDir, [...executors, ...mcpExecutors, ...reviewers])
-  if (process.env.EXPERT_TEAM_DEBUG === '1') {
+  if (compositionDebugEnabled()) {
     void debugPackageList(ctx)
   }
   return { executors, mcpExecutors, reviewers }
@@ -752,6 +756,10 @@ function newRunScript(reviewers: string[], executorMemberIds: string[], options:
  * (`专家团成员：`)可能落在任意角色的消息里(activation 的 system/developer 首条),
  * 因此扫描全部消息文本而不是最后一条 user;其余(标题/压缩)回固定短文本。
  */
+function compositionDebugEnabled(): boolean {
+  return process.env.EXPERT_TEAM_DEBUG === '1' || process.env.CI === 'true'
+}
+
 async function* scriptedStream(script: ScriptRef, options: GenerateOptions): AsyncGenerator<StreamChunk> {
   const run = script.current
   const tools = options.tools ?? []
@@ -759,7 +767,7 @@ async function* scriptedStream(script: ScriptRef, options: GenerateOptions): Asy
   const isMember = !isLeader && allMessagesText(options.messages).includes('专家团成员：')
   const goalRound = goalRoundOf(options.messages)
   const lastUser = lastUserText(options.messages)
-  if (process.env.EXPERT_TEAM_DEBUG === '1') {
+  if (compositionDebugEnabled()) {
     console.log('STREAM', JSON.stringify({
       hasRun: run !== undefined,
       isLeader,
@@ -1201,7 +1209,7 @@ export async function executeScriptedTeamRun(
     if (sent.started !== true) throw new Error(`session.send did not start: ${JSON.stringify(sent)}`)
     if (options.activeGoal === true) await armGoal(ctx, runtime.sessionId, clientMessageId)
     const run = await waitForRunTerminal(ctx.huaanworkExpertTeamRuns, runtime.sessionId, clientMessageId)
-    if (process.env.EXPERT_TEAM_DEBUG === '1') {
+    if (compositionDebugEnabled()) {
       console.log('RUN', JSON.stringify({
         status: run.status,
         failure: run.failure,
