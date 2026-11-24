@@ -4,6 +4,7 @@ import { test, vi } from "vitest";
 import { emptyAttachments, isMcpAttached } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { mountSessionMcp } from "../../src/huaanwork-guardrails/agent-mcp.ts";
 import { apply as applyPresentAs, refreshAgentRestrict } from "../../src/huaanwork-guardrails/present-as.ts";
+import { teamMcpServerName } from "../../src/huaanwork-host/expert-team/dispatch.ts";
 
 // The packaged client connects to a real server; the fallback tests replace it
 // so they can observe which client `mountSessionMcp` resolved.
@@ -555,4 +556,55 @@ test("10. a context with neither tools nor get uses no schemas and still rejects
     /MCP 服务「no-tools」未提供任何工具/,
   );
   assert.equal(disposed, true, "the mount scope is released when no tool name resolves");
+});
+
+// Task 7：团队两名成员并行挂载时，serverName 必须按预留子会话唯一且 ≤32 字符；
+// 公开工具名由实际注册结果决定，附件按各自子会话隔离，dispose 只清自己的挂载。
+test("12. two team server names mount on their own reserved child sessions and release independently", async () => {
+  const attachments = emptyAttachments();
+  const ctx = createMockContext({ attachments });
+  const teamClient = {
+    inject: ["tools"],
+    apply: async (fiber: any, config: { serverName: string }) => {
+      const unregister = fiber.tools.register({ name: `mcp__${config.serverName}__echo` });
+      return {
+        dispose: async () => {
+          unregister();
+        },
+      };
+    },
+  };
+  const firstName = teamMcpServerName("alpha", "11111111-2222-3333-4444-555555555555");
+  const secondName = teamMcpServerName("alpha", "99999999-8888-7777-6666-555555555555");
+  assert.notEqual(firstName, secondName);
+  assert.ok(firstName.length <= 32, `team server name must stay within 32 chars, got ${firstName}`);
+
+  const first = await mountSessionMcp({
+    ctx: ctx as any,
+    sessionId: "child-1",
+    serverName: firstName,
+    url: "http://127.0.0.1:1/mcp",
+    mcpClientImpl: teamClient,
+  });
+  const second = await mountSessionMcp({
+    ctx: ctx as any,
+    sessionId: "child-2",
+    serverName: secondName,
+    url: "http://127.0.0.1:2/mcp",
+    mcpClientImpl: teamClient,
+  });
+
+  assert.deepEqual(first.names, [`mcp__${firstName}__echo`]);
+  assert.deepEqual(second.names, [`mcp__${secondName}__echo`]);
+  assert.equal(isMcpAttached(attachments, "child-1", first.names[0]!), true);
+  assert.equal(isMcpAttached(attachments, "child-1", second.names[0]!), false);
+  assert.equal(isMcpAttached(attachments, "child-2", second.names[0]!), true);
+  // 父会话从未成为团队成员的 MCP 宿主。
+  assert.equal(attachments.sessionAgentTools.has("parent"), false);
+
+  await first.dispose();
+  assert.equal(isMcpAttached(attachments, "child-1", first.names[0]!), false);
+  assert.equal(isMcpAttached(attachments, "child-2", second.names[0]!), true);
+  await second.dispose();
+  assert.equal(attachments.sessionAgentTools.has("child-2"), false);
 });

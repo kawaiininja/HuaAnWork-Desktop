@@ -25,7 +25,7 @@ import {
   type AttachmentMaps,
 } from "./agent-attachments.ts";
 import { isInactiveContextError, refreshAgentRestrict } from "./present-as.ts";
-import type { AgentPackageSubagentRequest } from "../huaanwork-host/agent-package/types.ts";
+import type { AgentPackageSubagentRequest, AgentPackageTeamRequests } from "../huaanwork-host/agent-package/types.ts";
 import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
 import type { TurnAnchorStore } from "../huaanwork-host/turn-anchors.ts";
 import {
@@ -103,6 +103,11 @@ type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:Cordis ctx 跨
   };
   /** `@slug` 包回合请求;dispatch 在 startActivation 之前写入,activation 包装消费。 */
   huaanworkAgentPackageRequest?: { current?: AgentPackageSubagentRequest | null };
+  /**
+   * 团队成员请求表(`reservedChildId → 请求`)。团队并行成员不能共享单槽:
+   * activation 包装按本次 spec 的预留子会话 id 精确消费本表,未命中才回落单槽。
+   */
+  huaanworkAgentPackageTeamRequests?: AgentPackageTeamRequests;
   /**
    * 子代理 run 权威状态机(index 注入)。activation 包装把本次 Host runId 与上游
    * `subagent/start` 的 runId 对齐并核对三方 parent;系统技能派生在首个 await 前
@@ -680,9 +685,13 @@ export function apply(ctx: Context): void {
   if (activation && ctx.subagents) {
     const originalActivation = activation.bind(ctx.subagents);
     ctx.subagents.startActivation = async (...args: never[]) => {
-      // 在 await 之前取快照:包请求是宿主在 startActivation 之前发布的全局容器;
-      // legacy 请求挂在本次调用的 spec 符号键上,不读全局容器。
-      const pkg = ctx.huaanworkAgentPackageRequest?.current;
+      // 在 await 之前取快照:legacy 请求挂在本次调用的 spec 符号键上,不读全局容器。
+      // `specChildId` 必须在读包请求之前提取:团队请求表按本次调用的预留子会话 id
+      // 精确归属,未命中才回落到普通路径的进程级单槽。
+      const specChildId = (args[0] as { childId?: unknown } | undefined)?.childId;
+      const teamPkg =
+        typeof specChildId === "string" ? ctx.huaanworkAgentPackageTeamRequests?.get(specChildId) : undefined;
+      const pkg = teamPkg ?? ctx.huaanworkAgentPackageRequest?.current;
       const legacy = legacyAgentRequestOf(args[0]);
       const parentFromCall = sessionIdOf(parentFromStartArgs(args));
       // Host runId 与请求同一批快照:legacy 写在 spec 符号键上,包写在请求对象上。
@@ -690,7 +699,6 @@ export function apply(ctx: Context): void {
       // 的那次 activation —— 同一窗口里别的 activation(模型 subagent 工具、同会话
       // 并发发起的其他子代理)没带符号或 childId 不符时不得继承它的 run,否则监听器
       // 会改写该 run 的 childId/upstreamRunId。
-      const specChildId = (args[0] as { childId?: unknown } | undefined)?.childId;
       const hostRunId =
         subagentRunIdOf(args[0]) ??
         (pkg !== undefined &&
@@ -989,7 +997,16 @@ export function apply(ctx: Context): void {
         throw error;
       } finally {
         // 只清本次快照:重叠的 activation 不能清掉别处新写入的包/legacy 请求。
-        if (
+        if (teamPkg !== undefined) {
+          // 团队请求按 reservedChildId 精确消费:键仍指向本次请求时才删除,不误删
+          // 同 id 的新回合;provider 换 id 不重键。
+          if (
+            typeof specChildId === "string" &&
+            ctx.huaanworkAgentPackageTeamRequests?.get(specChildId) === teamPkg
+          ) {
+            ctx.huaanworkAgentPackageTeamRequests.delete(specChildId);
+          }
+        } else if (
           ctx.huaanworkAgentPackageRequest &&
           pkg !== undefined &&
           pkg !== null &&

@@ -103,6 +103,16 @@ export type AgentPackageSubagentRequest = {
   bindChild(sessionId: string): void
 }
 
+/**
+ * 团队成员请求表（`reservedChildId → 本成员回合请求`）。
+ *
+ * 普通 `@智能体` 继续用进程级单槽 `huaanworkAgentPackageRequest.current`；团队并行
+ * 成员不能共享单槽，`skills.ts` 的 `startActivation` 包装按本次 spec 的预留子会话
+ * id 精确消费本表，未命中才回落单槽。键只使用 reservedChildId：provider 另分配
+ * 实际 childId 时不得重键，启动失败由派发方删除未消费键。
+ */
+export type AgentPackageTeamRequests = Map<string, AgentPackageSubagentRequest>
+
 export type AgentPackageProposalInput = {
   mode: 'create' | 'update'
   displayName?: string

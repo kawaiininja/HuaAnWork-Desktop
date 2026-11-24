@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { brandString } from '@deepseek-ai/dsh-brand'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
 import {
@@ -16,6 +17,15 @@ import { sessionWorkspaceRoot } from '../../huaanwork-guardrails/sandbox-cwd.ts'
 import type { AgentListItem } from '../../client-huaanwork/rpc-types.ts'
 import type { AgentsHost } from '../agents-host.ts'
 import { acceptanceCleanupTimeoutMs, acceptanceDisposeFailure, acceptancePackageDelayMs, acceptancePackageDelayPoint } from '../acceptance-hooks.ts'
+import {
+  EXPERT_TEAM_MCP_SERVER_NAME_MAX_LENGTH,
+  EXPERT_TEAM_MEMBER_CANCELLED,
+  teamMcpServerName,
+  teamMcpServerNameConflict,
+  type TeamMemberDispatchInput,
+  type TeamMemberDispatchResult,
+} from '../expert-team/dispatch.ts'
+import { renderMemberOutput } from '../expert-team/text-protocol.ts'
 import {
   resolveSubagents,
   type SubagentActivationHandle,
@@ -60,6 +70,7 @@ import type {
   AgentPackageManifest,
   AgentPackageProposalInput,
   AgentPackageSubagentRequest,
+  AgentPackageTeamRequests,
   AgentPackageTurnRuntime,
 } from './types.ts'
 
@@ -75,6 +86,11 @@ export type AgentPackageDispatchContext = {
   huaanworkWorkspaceRoot?: { current: string }
   huaanworkAttachments?: AttachmentMaps
   huaanworkAgentPackageRequest?: { current: AgentPackageSubagentRequest | null }
+  /**
+   * 团队成员请求表(holders 初始化):团队并行成员按 `reservedChildId` 隔离请求,
+   * 普通 `@slug` 仍用上面的单槽。缺席即装配回归,团队派发响亮拒绝。
+   */
+  huaanworkAgentPackageTeamRequests?: AgentPackageTeamRequests
   /** 包回合绑定的子会话 id;清理时逐一移除,供 policy 标记 `mcp__*` 的运行链路。 */
   huaanworkPackageChildSessions?: Set<string>
   /** 包回合血缘允许表(C2);恒由 installHuaanworkHolders 初始化,缺席即调用方装配回归。 */
@@ -264,6 +280,14 @@ export type AgentPackageHost = {
   findInvocable(slug: string): Promise<AgentPackageDetail | undefined>
   /** 启动一次包回合;调用方持有返回的 `afterIdle` 并在回合结束后调用。 */
   dispatch(input: AgentPackageDispatchInput): Promise<AgentPackageDispatchResult>
+  /**
+   * 启动一次团队成员回合(专家团 `expert_team_dispatch` 适配层)。
+   *
+   * 与 `dispatch` 并列而不改变其签名:成员使用 `delivery: 'caller'` 返回文本结果,
+   * runtime/MCP 直接绑定在预留子会话上,不占用父会话的 `pendingTurns` 与 registry
+   * 绑定;结果结算后立即清理本成员资源。
+   */
+  dispatchTeamMember(input: TeamMemberDispatchInput): Promise<TeamMemberDispatchResult>
 }
 
 export type CreateAgentPackageHostOptions = {
@@ -327,6 +351,13 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
   const { profileDir, takenSlugs } = options
   const registry = options.registry ?? createAgentPackageRuntimeRegistry()
   const activeTurns = options.activeTurns ?? createAgentPackageActiveTurnRegistry()
+  /**
+   * 活动团队 MCP `serverName` 集合:派发前登记、清理时释放。
+   *
+   * 团队成员的 MCP 挂载按预留子会话隔离,同名并发会让上游注册一个、回滚另一个;
+   * 这里先 fail-closed,冲突报 `expert-team-mcp-server-name-conflict`。
+   */
+  const activeTeamMcpServerNames = new Set<string>()
   const security = options.security
   const createRuntime = options.createRuntime ?? startAgentPackageProcesses
   const stopRuntime = options.stopRuntime ?? stopAgentPackageProcesses
@@ -1181,6 +1212,527 @@ export function createAgentPackageHost(options: CreateAgentPackageHostOptions): 
         throw error
       }
     },
+
+    async dispatchTeamMember(input) {
+      const { ctx, sessionId, pkg } = input
+      const subagentRuns = ctx.huaanworkSubagentRuns
+      if (subagentRuns === undefined) throw new Error('subagent run registry is not initialized')
+      // 血缘允许表与团队请求表缺席即装配回归:静默降级会让成员绕过 C4/C5 或退回单槽。
+      if (ctx.huaanworkPackageChildAllow === undefined) {
+        throw new Error('智能体包 dispatch 缺少 huaanworkPackageChildAllow holder（装配回归）')
+      }
+      const teamRequests = ctx.huaanworkAgentPackageTeamRequests
+      if (teamRequests === undefined) {
+        throw new Error('智能体包团队派发缺少 huaanworkAgentPackageTeamRequests holder（装配回归）')
+      }
+      const runId = subagentRuns.begin({
+        parentSessionId: sessionId,
+        kind: 'package',
+        label: `@${pkg.slug}`,
+        packageVersion: pkg.version,
+        teamRunId: input.teamRunId,
+        ...(input.clientMessageId === undefined ? {} : { clientMessageId: input.clientMessageId }),
+      })
+      // 预留 id 早于 createRuntime:runtime 与 MCP 只绑定这个子会话,不触碰父会话。
+      const reservedChildId: SessionId = brandString<SessionId>(randomUUID())
+      subagentRuns.reserveChild(runId, reservedChildId)
+
+      /** 本成员清理失败(带稳定 code);只在本成员资源范围内聚合。 */
+      const cleanupFailures: AgentPackageCleanupFailure[] = []
+      let activation: SubagentActivationHandle | undefined
+      let runtime: AgentPackageTurnRuntime | undefined
+      let mcpDispose: (() => Promise<void>) | undefined
+      let mcpServerName: string | undefined
+      let mcpMounting = false
+      let mountedMcpNames: readonly string[] | undefined
+      let request: AgentPackageSubagentRequest | undefined
+      let cleanupPromise: Promise<void> | undefined
+      let cleanupStarted = false
+      let cleanupFailureReported = false
+      /** 权威 result 的 rejection 已由结果观察者上报;catch 不得再用 `failRun` 重复报告。 */
+      let resultFailureReported = false
+      let activationDisposeSettled = false
+      /** 本回合 allow 数组的引用;血缘表按引用同一性清理,不误删并发成员。 */
+      let turnAllow: readonly string[] | undefined
+      const controller = new AbortController()
+      const signal = controller.signal
+      let cancelRequested = false
+      let cancelReason: AgentPackageTurnCancelReason | undefined
+      let cancelPromise: Promise<void> | undefined
+      let cancelling = false
+      let disposePromise: Promise<void> | undefined
+      let stopRuntimePromise: Promise<void> | undefined
+      let unregister: (() => void) | undefined
+      let openCancelGate: () => void = () => undefined
+      const cancelGate = new Promise<void>((resolve) => {
+        openCancelGate = resolve
+      })
+      const boundChildren = new Set<string>()
+      const packageChildSessions = new Set<string>()
+      const externalSignal = input.signal
+      const onExternalAbort = (): void => {
+        cancelQuietly()
+      }
+
+      /**
+       * 取消/失败的统一错误:文案与普通 `@slug` 同源。
+       *
+       * 仅团队普通取消分支携带稳定 `code`(协调器据此归类 `stopped`,不解析可本地化
+       * 文案);revoke/update/remove/dispose 属于技术失败,保持无码以免被误归为停止。
+       * 普通 `@slug` `dispatch()` 的取消错误不改,行为保持逐字一致。
+       */
+      const cancelError = (): Error => {
+        if (cancelReason === 'revoke') {
+          const revoked = security === undefined ? pkg.revoked : security.revocationFor(pkg.slug)
+          return revoked === undefined
+            ? new Error('该版本已被管理员撤销')
+            : new Error(agentPackageRevokedMessage(revoked))
+        }
+        if (cancelReason === 'update') return new Error(`智能体「${pkg.slug}」正在更新，本回合已停止`)
+        if (cancelReason === 'remove') return new Error(`智能体「${pkg.slug}」已移除，本回合已停止`)
+        if (cancelReason === 'dispose') return new Error(`智能体「${pkg.slug}」的回合已停止：应用正在退出`)
+        const error = new Error(`智能体「${pkg.slug}」的回合已取消`) as Error & { code: string }
+        error.code = EXPERT_TEAM_MEMBER_CANCELLED
+        return error
+      }
+
+      /** 取消/abort 已生效时抛出取消原因;每个 await 之后都要重新过一遍。 */
+      const assertLive = (): void => {
+        if (cancelRequested || signal.aborted) throw cancelError()
+      }
+
+      const disposeActivation = (handle: SubagentActivationHandle): Promise<void> => {
+        disposePromise ??= (async () => {
+          const acceptanceFailure = acceptanceDisposeFailure()
+          if (acceptanceFailure === 'reject') {
+            cleanupFailures.push({
+              code: 'activation-dispose-failed',
+              error: new Error('acceptance dispose failure'),
+            })
+            activationDisposeSettled = true
+            return
+          }
+          if (acceptanceFailure === 'hang') {
+            await new Promise<void>((resolve) => setTimeout(resolve, cleanupTimeoutMs))
+            cleanupFailures.push({
+              code: 'activation-dispose-timeout',
+              error: new Error('acceptance dispose timed out'),
+            })
+            activationDisposeSettled = true
+            return
+          }
+          const observed = (async () => {
+            await handle.dispose()
+          })().then(
+            () => undefined,
+            (error) => {
+              cleanupFailures.push({ code: 'activation-dispose-failed', error: toError(error) })
+            },
+          )
+          const settled = await settleWithin(observed, cleanupTimeoutMs)
+          if (!settled) {
+            cleanupFailures.push({
+              code: 'activation-dispose-timeout',
+              error: new Error('activation dispose timed out'),
+            })
+          }
+          activationDisposeSettled = true
+        })()
+        return disposePromise
+      }
+
+      const stopTurnRuntime = (current: AgentPackageTurnRuntime): Promise<void> => {
+        stopRuntimePromise ??= (async () => {
+          const observed = (async () => {
+            await stopRuntime(current)
+          })().then(
+            () => undefined,
+            (error) => {
+              cleanupFailures.push({ code: 'runtime-stop-failed', error: toError(error) })
+            },
+          )
+          const settled = await settleWithin(observed, cleanupTimeoutMs)
+          if (!settled) {
+            cleanupFailures.push({
+              code: 'runtime-stop-timeout',
+              error: new Error('stopTurnRuntime timed out'),
+            })
+          }
+        })()
+        return stopRuntimePromise
+      }
+
+      /**
+       * 绑定子会话:runtime registry、policy 的包运行标记与血缘允许表同批写入。
+       * 团队路径不绑定父会话;预留 id 与实际 id 都经这里,清理同时覆盖两类 id。
+       */
+      const bindChild = (childSessionId: string): void => {
+        if (turnAllow === undefined) throw new Error('智能体包回合 allow 未就绪即绑定子会话')
+        ctx.huaanworkPackageChildSessions?.add(childSessionId)
+        packageChildSessions.add(childSessionId)
+        ctx.huaanworkPackageChildAllow?.set(childSessionId, turnAllow)
+        if (runtime === undefined) return
+        boundChildren.add(childSessionId)
+        registry.bind(childSessionId, runtime)
+      }
+
+      /** 撤掉本成员写在子会话上的全部绑定;成员终结后执行,不存在延迟血缘清理。 */
+      const releaseChildBindings = (): void => {
+        const current = runtime
+        const childNames = [
+          ...new Set([...AGENT_PACKAGE_CHILD_TOOLS, ...(current?.mcpNames ?? []), ...(mountedMcpNames ?? [])]),
+        ]
+        for (const childSessionId of boundChildren) {
+          if (current !== undefined && registry.get(childSessionId) === current) registry.delete(childSessionId)
+          if (ctx.huaanworkAttachments !== undefined) {
+            detachAgentTools(ctx.huaanworkAttachments, childSessionId, childNames)
+          }
+          refreshAgentRestrict(ctx as never, childSessionId)
+        }
+        boundChildren.clear()
+        for (const childSessionId of packageChildSessions) {
+          ctx.huaanworkPackageChildSessions?.delete(childSessionId)
+        }
+        packageChildSessions.clear()
+        const allowTable = ctx.huaanworkPackageChildAllow
+        if (allowTable !== undefined && turnAllow !== undefined) {
+          for (const [childSessionId, bound] of allowTable) {
+            if (bound === turnAllow) allowTable.delete(childSessionId)
+          }
+        }
+      }
+
+      const releaseMcpServerName = (): void => {
+        if (mcpServerName === undefined) return
+        activeTeamMcpServerNames.delete(mcpServerName)
+        mcpServerName = undefined
+      }
+
+      /**
+       * 单成员即时清理:activation/runtime/MCP/绑定/在途登记一次收掉,不留到父回合结束。
+       * 共享同一个 `cleanupPromise`;`mode` 只决定清理失败是抛出还是记一条日志。
+       */
+      const cleanup = async (mode: 'idle' | 'cancel'): Promise<void> => {
+        cleanupStarted = true
+        cleanupPromise ??= (async () => {
+          try {
+            const currentActivation = activation
+            if (currentActivation !== undefined) await disposeActivation(currentActivation)
+            const currentRuntime = runtime
+            if (currentRuntime !== undefined) await stopTurnRuntime(currentRuntime)
+            if (mcpDispose !== undefined) {
+              try {
+                await mcpDispose()
+              } catch {
+                // MCP 客户端 scope 可能已随子进程退出;失败不阻止其余清理。
+              }
+            }
+            // mountSessionMcp 仍在途时保留服务名占用，待其返回并 dispose 后再释放。
+            if (!mcpMounting) releaseMcpServerName()
+            // 启动失败时兜底删除未消费的团队请求键;身份守卫不误删新回合。
+            if (request !== undefined && teamRequests.get(reservedChildId) === request) {
+              teamRequests.delete(reservedChildId)
+            }
+            releaseChildBindings()
+          } finally {
+            externalSignal?.removeEventListener('abort', onExternalAbort)
+            const off = unregister
+            unregister = undefined
+            off?.()
+          }
+        })()
+        await cleanupPromise
+        const failed = cleanupFailures.length > 0
+        subagentRuns.confirmCleanup(runId, {
+          ok: !failed && (activation === undefined || activationDisposeSettled),
+          warnings: cleanupFailures.map(({ code }) => ({ code, severity: 'error' as const })),
+        })
+        if (!failed) return
+        const error = new Error(`智能体「${pkg.slug}」清理失败（${cleanupFailures.length} 项）`)
+        if (mode === 'cancel') throw error
+        if (!cleanupFailureReported) {
+          cleanupFailureReported = true
+          console.error(error.message)
+        }
+      }
+
+      const cancelTurn = (reason: AgentPackageTurnCancelReason): Promise<void> => {
+        if (cancelPromise !== undefined) return cancelPromise
+        // `abort` 可能同步触发监听器重入本函数:共享 promise 必须先于 abort 建立。
+        if (cancelling) return Promise.resolve().then(() => cancelPromise ?? Promise.resolve())
+        cancelling = true
+        cancelRequested = true
+        cancelReason = reason
+        const error = cancelError()
+        const teardown = (async () => {
+          const currentActivation = activation
+          if (currentActivation !== undefined) await disposeActivation(currentActivation)
+          const currentRuntime = runtime
+          if (currentRuntime !== undefined) await stopTurnRuntime(currentRuntime)
+          await cleanup('cancel')
+        })()
+        cancelPromise = teardown
+        openCancelGate()
+        controller.abort(error)
+        return cancelPromise
+      }
+
+      /**
+       * 外部 abort 的唯一入口:取消清理失败只记录日志,绝不留 unhandled rejection。
+       * Host 的 fail-loud 会把未处理 rejection 升级成 exit(1),而 `input.signal`
+       * 是协调器唯一的成员中止路径 —— 中止绝不能连带杀死 Host。
+       */
+      const cancelQuietly = (): void => {
+        void cancelTurn('cancel').catch((error: unknown) => {
+          console.error(`智能体「${pkg.slug}」团队成员取消清理失败：${toError(error).message}`)
+        })
+      }
+
+      const record: AgentPackageActiveTurnRecord = {
+        sessionId,
+        slug: pkg.slug,
+        version: pkg.version,
+        controller,
+        cancel: (reason) => cancelTurn(reason),
+      }
+      // 登记必须早于第一次 await:目录更新/移除/撤销与应用退出据此中止在途成员。
+      // 团队成员不写 `pendingTurns`:同一父会话必须能并行多名成员。
+      unregister = activeTurns.register(record)
+      // 单成员终止复用现有 `subagent.cancel`:定向停止只作用于这一个 run。
+      subagentRuns.attachCancel(runId, () => cancelTurn('cancel'))
+      if (externalSignal?.aborted === true) {
+        cancelQuietly()
+      } else {
+        externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
+      }
+
+      try {
+        // 早于任何 await:协调器可在成员运行期间写入 memberRunId 并支持单成员/整团取消。
+        input.onRunCreated?.({ runId, reservedChildId })
+        recoverCatalogPackageInstalls(profileDir)
+        // 与 `dispatch` 相同的安全面顺序:交易占用、撤销、启用、损坏、服务解析。
+        if (options.lifecycle?.isBusy(pkg.slug)) {
+          throw new Error(`智能体「${pkg.slug}」正在更新或移除，请稍后重试`)
+        }
+        if (pkg.source === 'catalog') {
+          const revoked = security === undefined ? pkg.revoked : security.revocationFor(pkg.slug)
+          if (revoked !== undefined) throw new Error(agentPackageRevokedMessage(revoked))
+          if (security === undefined) throw new Error(AGENT_PACKAGE_VERIFY_FAILURE)
+        }
+        if (!pkg.enabled) throw new Error(`智能体「${pkg.slug}」未启用或不存在`)
+        if (pkg.broken !== undefined) throw new Error(`智能体「${pkg.slug}」已损坏：${pkg.broken.reason}`)
+        const subagents = resolveSubagents(ctx, 'startActivation')
+        if (subagents === undefined) {
+          throw new Error('current dsh runtime does not support subagents')
+        }
+        const startActivation = subagents.startActivation.bind(subagents)
+
+        assertLive()
+        const manifest = readDispatchManifest(profileDir, pkg.slug)
+        const packageDir = agentPackageDir(profileDir, pkg.slug)
+        const persona = await composeAgentPackagePersona(packageDir, manifest, profileDir)
+        assertLive()
+        const workspaceRoot = sessionWorkspaceRoot(ctx, sessionId)
+        // 运行前复验(第一次,createRuntime 之前):目录包每次派工都重验。
+        if (pkg.source === 'catalog' && security !== undefined) {
+          await security.assertRunnable(pkg.slug, pkg.version)
+        }
+        assertLive()
+        await acceptancePackageDelay('createRuntime')
+
+        // 团队 MCP 命名:活动名在 createRuntime 前登记,冲突 fail-closed,dispose 释放。
+        const wantsMcp = manifest.tools.mode === 'mcp' || manifest.tools.mode === 'both'
+        if (wantsMcp) {
+          const serverName = input.mcpServerName ?? teamMcpServerName(pkg.slug, reservedChildId)
+          if (serverName.length === 0) throw new Error('团队 MCP 服务名不能为空')
+          if (serverName.length > EXPERT_TEAM_MCP_SERVER_NAME_MAX_LENGTH) {
+            throw new Error(
+              `团队 MCP 服务名「${serverName}」超过 ${String(EXPERT_TEAM_MCP_SERVER_NAME_MAX_LENGTH)} 字符`,
+            )
+          }
+          if (activeTeamMcpServerNames.has(serverName)) throw teamMcpServerNameConflict(serverName)
+          activeTeamMcpServerNames.add(serverName)
+          mcpServerName = serverName
+        }
+
+        runtime = await createRuntime({
+          manifest,
+          packageDir,
+          workspaceRoot,
+          signal,
+          getSandbox: () => ctx.get?.('sandbox') as AgentPackageSandbox | undefined,
+          mountMcp: async (port) => {
+            const serverName = mcpServerName
+            if (serverName === undefined) return []
+            mcpMounting = true
+            try {
+              // 直接挂到预留子会话:父会话既不是 runtime 宿主也不是工具宿主。
+              const mounted = await mountSessionMcp({
+                ctx: ctx as never,
+                sessionId: reservedChildId,
+                serverName,
+                url: `http://127.0.0.1:${String(port)}/mcp`,
+              })
+              // 健康预算期间成员已被取消:立即释放 scope,不留给已终结的回合。
+              if (cleanupStarted) {
+                try {
+                  await mounted.dispose()
+                } catch {
+                  // MCP 客户端 scope 可能已随子进程退出;失败不阻止服务名释放。
+                }
+                return mounted.names
+              }
+              mcpDispose = mounted.dispose
+              mountedMcpNames = mounted.names
+              return mounted.names
+            } finally {
+              mcpMounting = false
+              if (cleanupStarted) releaseMcpServerName()
+            }
+          },
+        })
+        record.runtime = runtime
+        // 晚到 runtime:createRuntime 期间到达的取消先停进程再收尾,禁止继续 startActivation。
+        if (cancelRequested || signal.aborted) {
+          await stopTurnRuntime(runtime)
+          await cleanup('idle')
+          throw cancelError()
+        }
+        // 运行前复验(第二次,runtime 之后):createRuntime 期间的撤销以撤销文案结束。
+        if (pkg.source === 'catalog' && security !== undefined) {
+          await security.assertRunnable(pkg.slug, pkg.version)
+        }
+        assertLive()
+
+        // allow 使用挂载实际返回的 names(生产路径 runtime.mcpNames 就是 mounted.names),
+        // 不按 serverName 手工拼接公开工具名。
+        const mcpNames = mountedMcpNames ?? runtime.mcpNames ?? []
+        const allow = composeAgentPackageToolAllowList(manifest, mcpNames, runtime.skillScripts)
+        turnAllow = allow
+        const childToolNames = agentPackageChildAttachmentNames(allow, mcpNames)
+        if (ctx.huaanworkAttachments !== undefined && childToolNames.length > 0) {
+          attachAgentTools(ctx.huaanworkAttachments, reservedChildId, childToolNames)
+        }
+        bindChild(reservedChildId)
+
+        const prompt = input.remainder.trim() || pkg.description || '开始协助工作。'
+        const parent = input.resolveParent === undefined ? undefined : await input.resolveParent()
+        assertLive()
+        if (parent === undefined || parent === null) {
+          throw new Error(`智能体「${pkg.slug}」无法开始：当前会话没有可用的父会话`)
+        }
+        request = {
+          runId,
+          allow,
+          persona,
+          runtime,
+          parentSessionId: sessionId,
+          childId: reservedChildId,
+          bindChild,
+        }
+        // 同步发布到团队请求表:包装器按预留 id 精确消费,不与其他成员抢单槽。
+        teamRequests.set(reservedChildId, request)
+        assertLive()
+        await acceptancePackageDelay('startActivation')
+        activation = await startActivation({
+          provider: 'spawn',
+          label: `@${pkg.slug}`,
+          childId: reservedChildId,
+          request: {
+            prompt: [{ type: 'text', text: `${persona}\n\n---\n用户请求：\n${prompt}` }],
+            parent,
+          },
+          signal,
+          delivery: 'caller',
+        })
+        record.activation = activation
+        // 晚到 activation 是清理快照之后出现的新资源:定向取消发生在 startActivation
+        // 期间时,此前的「零失败」确认只覆盖了当时的资源。registry 把确认当持久状态,
+        // 必须撤回成功结论;最终 cleanup 会在这次 dispose 落定后重新确认,否则这个
+        // 尚未 dispose 的 activation 会拼出伪 `stopped`。
+        subagentRuns.confirmCleanup(runId, { ok: false, warnings: [] })
+        // 权威 result 只观察一次:resolve/reject 分别上报,供 run 投影使用。
+        void activation.result.then(
+          (result) => {
+            subagentRuns.settleResult(runId, { stopReason: stopReasonOfResult(result) })
+          },
+          (error) => {
+            subagentRuns.rejectResult(runId, error instanceof Error ? error.message : String(error))
+          },
+        )
+        // provider 可能忽略预留 id:按实际 childId 补绑,活动本体随之迁移,请求 Map 不重键。
+        subagentRuns.bindActivation(runId, { childId: activation.childId })
+        if (cancelRequested || signal.aborted) {
+          await disposeActivation(activation)
+          releaseChildBindings()
+          await cleanup('idle')
+          throw cancelError()
+        }
+        const activationChildId = activation.childId
+        if (typeof activationChildId !== 'string' || activationChildId.length === 0) {
+          throw new Error('subagent activation child id missing')
+        }
+        if (
+          activationChildId !== reservedChildId &&
+          ctx.huaanworkAttachments !== undefined &&
+          childToolNames.length > 0
+        ) {
+          // provider 忽略预留 id 时,同一批名字也要挂在它实际分配的 id 上。
+          attachAgentTools(ctx.huaanworkAttachments, activationChildId, childToolNames)
+        }
+        bindChild(activationChildId)
+        const actualChildId: SessionId =
+          activationChildId === reservedChildId ? reservedChildId : brandString<SessionId>(activationChildId)
+
+        // caller 必须在工具返回前等到权威结果;取消闩到达时立刻放行,不等滞留的子会话。
+        const outcome = await Promise.race<TeamMemberOutcome>([
+          activation.result.then(
+            (value): TeamMemberOutcome => ({ kind: 'result', value }),
+            (error: unknown): TeamMemberOutcome => ({ kind: 'failure', error }),
+          ),
+          cancelGate.then((): TeamMemberOutcome => ({ kind: 'cancel' })),
+        ])
+        if (cancelRequested || signal.aborted || outcome.kind === 'cancel') {
+          await cleanup('idle')
+          throw cancelError()
+        }
+        if (outcome.kind === 'failure') {
+          // 结果观察者已经用 `rejectResult` 报告了这次失败;catch 只做清理与确认,
+          // 不得再用只表示启动/外层失败的 `failRun` 重复报告并绕过 end 仲裁。
+          resultFailureReported = true
+          throw toError(outcome.error)
+        }
+        const settled = outcome.value
+        const diagnostic = diagnosticOfResult(settled)
+        const output = renderMemberOutput(outputBlocksOfResult(settled))
+        // 结果结算后立即清理本成员资源,绝不把进程/MCP 作用域泄漏到父回合结束。
+        await cleanup('idle')
+        if (cancelRequested || signal.aborted) throw cancelError()
+        return {
+          runId,
+          reservedChildId,
+          actualChildId,
+          stopReason: stopReasonOfResult(settled),
+          ...(diagnostic === undefined ? {} : { diagnostic }),
+          output,
+          cleanupPromise: cleanupPromise ?? Promise.resolve(),
+        }
+      } catch (error) {
+        await cleanup('idle')
+        // 启动/外层失败:先登记「执行已终结」再原样抛出;取消闩吸收 failRun。
+        // 权威 result 的 rejection 已由观察者上报时跳过,避免同一失败被报告两次
+        // 并覆盖 rejectResult 的仲裁语义。
+        if (!resultFailureReported) {
+          subagentRuns.failRun(runId, error instanceof Error ? error.message : String(error))
+        }
+        subagentRuns.confirmCleanup(runId, {
+          ok: cleanupFailures.length === 0 && (activation === undefined || activationDisposeSettled),
+          warnings: cleanupFailures.map(({ code }) => ({ code, severity: 'error' as const })),
+        })
+        if (cancelRequested || signal.aborted) throw cancelError()
+        throw error
+      }
+    },
   }
 }
 
@@ -1243,6 +1795,31 @@ function stopReasonOfResult(result: unknown): string {
   if (typeof result !== 'object' || result === null) return ''
   const reason = (result as { stopReason?: unknown }).stopReason
   return typeof reason === 'string' ? reason : ''
+}
+
+/** 团队成员 caller 结果的三态竞争:权威结果、执行失败或取消闩。 */
+type TeamMemberOutcome =
+  | { kind: 'result'; value: unknown }
+  | { kind: 'failure'; error: unknown }
+  | { kind: 'cancel' }
+
+/**
+ * `SubagentResult.output` 的渲染输入。
+ *
+ * 上游契约为 `ContentBlock[]`;非数组/缺失一律按空输出处理,由 Task 5 的
+ * `renderMemberOutput` 归为 `empty-output`,不把无输出伪报为成功。
+ */
+function outputBlocksOfResult(result: unknown): readonly ContentBlock[] {
+  if (typeof result !== 'object' || result === null) return []
+  const output = (result as { output?: unknown }).output
+  return Array.isArray(output) ? (output as readonly ContentBlock[]) : []
+}
+
+/** 上游 provider 编写的失败说明;空串按缺席处理(可选属性不写显式 undefined)。 */
+function diagnosticOfResult(result: unknown): string | undefined {
+  if (typeof result !== 'object' || result === null) return undefined
+  const diagnostic = (result as { diagnostic?: unknown }).diagnostic
+  return typeof diagnostic === 'string' && diagnostic.length > 0 ? diagnostic : undefined
 }
 
 /**

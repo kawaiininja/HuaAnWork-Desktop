@@ -85,7 +85,16 @@ export type RpcRequest = {
     | "artifact.download"
     | "artifact.prepareFrame"
     | "subagent.list"
-    | "subagent.cancel";
+    | "subagent.cancel"
+    | "expertTeam.list"
+    | "expertTeam.get"
+    | "expertTeam.create"
+    | "expertTeam.update"
+    | "expertTeam.setEnabled"
+    | "expertTeam.remove"
+    | "expertTeam.invocableList"
+    | "expertTeam.runList"
+    | "expertTeam.cancel";
   params?: unknown;
 };
 
@@ -457,6 +466,132 @@ export type TaskInfo = {
   runId?: string;
 };
 
+/** 专家团成员的智能体引用；只允许本地创建或已安装启用的智能体包。 */
+export type ExpertTeamAgentRef = {
+  source: "local" | "catalog";
+  slug: string;
+};
+
+/** 专家团成员定义（设计 §8.2）；列表顺序是 sequential 模式的默认派工顺序。 */
+export type ExpertTeamMember = {
+  /** 团队内唯一的成员 id。 */
+  memberId: string;
+  agentRef: ExpertTeamAgentRef;
+  role: "executor" | "reviewer";
+  /** 必填，说明负责与不负责的范围。 */
+  responsibility: string;
+  /** 可选的成员输出要求，最长 500 字符。 */
+  outputInstructions?: string;
+};
+
+/**
+ * 专家团定义（设计 §8.1）。slug 只在专家团命名空间内唯一，创建后不可修改；
+ * 显示名称可改，调用名固定为 `@team:<slug>`。
+ */
+export type ExpertTeam = {
+  schemaVersion: 1;
+  /** UUID。 */
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  /** 可选适用场景，最长 500 字符。 */
+  scenarios?: string;
+  enabled: boolean;
+  members: ExpertTeamMember[];
+  orchestration: {
+    assignmentMode: "by-responsibility" | "broadcast";
+    executionOrder: "sequential" | "parallel" | "dynamic";
+    maxParallel: 1 | 2 | 3 | 4;
+    /** 可选分发与顺序补充说明，最长 500 字符。 */
+    instructions?: string;
+  };
+  review: {
+    mode: "none" | "unified" | "per-member";
+    /** 可选审查标准，最长 500 字符。 */
+    criteria?: string;
+    maxRevisionRounds: 0 | 1 | 2;
+  };
+  summary: {
+    delivery: "artifact" | "message";
+    artifactFormat: "markdown" | "html";
+    mode: "integrated" | "by-member" | "integrated-with-appendix";
+    /** 可选汇总重点，最长 500 字符。 */
+    instructions?: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** 一次团队成员派工的结果（设计 §8.4）；结果通过 inputResultIds 构成扁平版本链。 */
+export type ExpertTeamResult = {
+  resultId: string;
+  /** 产生该结果的 expert_team_dispatch 工具 callId。 */
+  dispatchId: string;
+  memberId: string;
+  agentRef: ExpertTeamAgentRef;
+  packageVersion: string;
+  /** 实际创建成员 run 后填写。 */
+  memberRunId?: string;
+  kind: "execute" | "review" | "revision";
+  inputResultIds: string[];
+  supersedesResultId?: string;
+  status: "starting" | "running" | "completed" | "failed" | "stopped";
+  output?: string;
+  reviewVerdict?: "pass" | "revise";
+  reviewError?: "invalid-verdict";
+  startedAt: string;
+  endedAt?: string;
+  error?: string;
+};
+
+/**
+ * 一次专家团运行的权威投影（设计 §8.3）。团队运行不持久化：产生它的 Host
+ * generation 结束后快照全部失效，客户端不得把旧运行重建成 `running` 或墓碑。
+ *
+ * `artifactStatus` 在仅会话模式恒为 `not-required`，Artifact 模式从启动起为
+ * `pending`，只有主 Artifact commit 成功且运行关联完成后才变为 `created`。
+ * `artifactLinkError` 标记「commit 成功但关联失败」的残态：此时保持 `pending`，
+ * 同一 `callId` 重放关联成功后会清除。
+ */
+export type ExpertTeamRun = {
+  teamRunId: string;
+  parentSessionId: string;
+  clientMessageId: string;
+  teamId: string;
+  teamSnapshot: ExpertTeam;
+  status:
+    | "running"
+    | "stopping"
+    | "completed"
+    | "completed_with_issues"
+    | "partial"
+    | "failed"
+    | "stopped";
+  results: ExpertTeamResult[];
+  primaryArtifactId?: string;
+  /** Host 内部识别同一主报告调用的幂等重放。 */
+  primaryArtifactCallId?: string;
+  artifactLinkError?: string;
+  artifactStatus: "not-required" | "pending" | "created";
+  /** 主 Artifact 首次 commit 成功后封闭新派工与新主报告。 */
+  deliverySealed: boolean;
+  /** unified 审查已开启的返修周期；per-member 按结果链另算。 */
+  unifiedRevisionRounds: number;
+  dispatchAttempts: number;
+  startedAt: string;
+  endedAt?: string;
+  failure?: string;
+  /** 单个运行的内存投影版本；Host generation 只在快照/事件 envelope 上。 */
+  revision: number;
+}
+
+/** `expertTeam.runList` 的对账快照：捕获时的 generation/revision 与运行投影。 */
+export type ExpertTeamRunSnapshot = { generation: string; revision: number; runs: ExpertTeamRun[] }
+
+/** `expertTeam.cancel` 的结果；`already-terminal` 不重新取消。 */
+export type ExpertTeamCancelResult = { status: "accepted" | "already-terminal"; teamRunId: string }
+
 /** `session.list` 行：会话日志的摘要投影（标题、时间、统计）。 */
 export type SessionSummary = {
   id: string;
@@ -568,6 +703,8 @@ export type SubagentRunProjection = {
   childId?: string
   upstreamRunId?: string
   kind: SubagentRunKind
+  /** 团队成员的 run 所属的专家团运行；主聊流据此跳过独立 `SubagentRunCard`。 */
+  teamRunId?: string
   label: string
   packageVersion?: string
   taskId?: string
@@ -693,4 +830,10 @@ export type RpcEvent =
   /** 子代理 run 的权威投影；`activityFlushMs > 0` 时高频 token/reasoning 合并发布。 */
   | { event: "subagent/run"; run: SubagentRunProjection }
   /** 终态历史被淘汰；客户端只在 generation/revision 匹配时删除该 run。 */
-  | { event: "subagent/run-remove"; runId: string; parentSessionId: string; generation: string; revision: number };
+  | { event: "subagent/run-remove"; runId: string; parentSessionId: string; generation: string; revision: number }
+  /** 专家团定义新增/更新/启停/删除后触发,客户端据此刷新列表。 */
+  | { event: 'expertTeam/changed'; teamId?: string }
+  /** 团队运行的权威投影;载荷只含摘要与运行文本结果,不含 Artifact 正文。 */
+  | { event: 'expertTeam/run'; generation: string; run: ExpertTeamRun }
+  /** 团队运行终态历史被淘汰;客户端只在 generation/revision 匹配时删除该运行卡。 */
+  | { event: 'expertTeam/run-remove'; generation: string; revision: number; teamRunId: string; parentSessionId: string };

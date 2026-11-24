@@ -6,6 +6,10 @@ import { narrowArtifactNativeCapability, type ConfirmedRestartRuntime } from '..
 import { sweepLegacyChatAutoSessions } from './automation-sweep.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
+import { createExpertTeamStore } from './expert-team/store.ts'
+import { createExpertTeamRunRegistry } from './expert-team/runs.ts'
+import { createExpertTeamCoordinator } from './expert-team/coordinator.ts'
+import { disposeAllExpertTeamObservers } from './expert-team/observer.ts'
 import { createSubagentRunRegistry } from './subagent-runs.ts'
 import { createTurnScheduler } from './turn-scheduler.ts'
 import { installTurnAnchorHooks } from './turn-anchors.ts'
@@ -29,6 +33,7 @@ import {
   createAgentPackageActiveTurnRegistry,
   createAgentPackageHost,
   type AgentPackageActiveTurnRegistry,
+  type AgentPackageDispatchContext,
 } from './agent-package/host.ts'
 import { createAgentPackageLifecycleLock } from './agent-package/lifecycle.ts'
 import {
@@ -51,6 +56,10 @@ import {
   makeResultPresentClaimed,
   registerResultArtifactTools,
 } from '../huaanwork-guardrails/result-artifact-tools.ts'
+import {
+  makeExpertTeamClaimed,
+  registerExpertTeamDispatchTool,
+} from '../huaanwork-guardrails/expert-team-dispatch.ts'
 import { registerSkillCreationTools } from '../huaanwork-guardrails/skill-creation-tools.ts'
 
 export const name = 'huaanwork-host'
@@ -138,6 +147,27 @@ export function disposeAgentPackageHostRuntime(
   return disposeAgentPackageRuntime(activeTurns, stopAll)
 }
 
+/**
+ * 团队成员 activation 的 parent:必须是该会话的同一个 live agent 对象。
+ *
+ * 与 sessions 的 `findAgentBySession` 同序:`agents.get(sessionId)` 优先,再按
+ * `id`/`session.id` 精确匹配;找不到时返回 `undefined`,由包派发给出「当前会话
+ * 没有可用的父会话」,不猜测别的会话。
+ */
+function findLiveAgentForSession(ctx: Context, sessionId: string): unknown {
+  const agents = (
+    ctx as unknown as {
+      agents?: {
+        get?: (id: string) => unknown
+        list?: () => readonly { id?: string; session?: { id?: string } }[]
+      }
+    }
+  ).agents
+  const direct = agents?.get?.(sessionId)
+  if (direct !== undefined && direct !== null) return direct
+  return agents?.list?.().find((agent) => agent.id === sessionId || agent.session?.id === sessionId)
+}
+
 export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<void> {
   ctx.huaanworkCheckpointUserDataDir = config.checkpointUserDataDir ?? ''
   // generation 重启防循环:组合期已消费 pendingRoot,首个 effect 立即清除——
@@ -166,6 +196,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   // result_present 的会话附件切换:claim 早于 prompt assembly,通知处理器必须同步完成
   // attach/detach + restrict,工具的首次可见性才成立(顶层 inject 不含 'tools',只注册通知)。
   ctx.on('agent/inbox/claimed', makeResultPresentClaimed(ctx), { global: true })
+  // 专家团团长的 expert_team_dispatch 附件同样在 claim 同步切换(设计 §12.1):只在
+  // 「运行中团队 + 匹配 clientMessageId + 有效租约」的回合挂载。与 result_present
+  // 紧邻注册、同在顶层 apply(不在 tools effect 内),`tools` 重提供时不会重复挂监听。
+  ctx.on('agent/inbox/claimed', makeExpertTeamClaimed(ctx), { global: true })
   // 技能中心一次性迁移必须在技能路由可用前完成:旧用户技能与旧启用的普通内置
   // 技能都要先变成“本地副本 + user-skill-toggles.json”。失败不写完成标记,
   // 下次启动重入;错误只记录,不阻塞桌面其余部分。
@@ -182,6 +216,10 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   // 事件与路由共用同一个 hub.broadcast(routeCtx.emit)。
   const subagentRuns = createSubagentRunRegistry({ emit: routeCtx.emit })
   ctx.huaanworkSubagentRuns = subagentRuns
+  // 专家团:定义存储与运行注册表各创建一次,运行期只 mutate;expertTeam.* 路由与
+  // 后续协调器读到的都是这里的同一引用。
+  ctx.huaanworkExpertTeamStore = createExpertTeamStore(config.profileDir)
+  ctx.huaanworkExpertTeamRuns = createExpertTeamRunRegistry({ emit: routeCtx.emit })
   // Task 6:唯一回合调度器与两张会话表。routeCtx.runtimeCtx 就是同一个 ctx,
   // sessionSend、出队、模型适配器、沙箱与工具执行读到的都是这里的同一引用。
   const turnScheduler = createTurnScheduler({
@@ -347,6 +385,55 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
   setAgentPackageHost(agentPackageHost)
   setAgentPackageActiveTurns(agentPackageTurns)
   ctx.huaanworkAgentPackageHost = agentPackageHost
+  // 专家团运行协调器(设计 §10.2 / §12.1):顶层 apply 只创建一次并挂到 holder,
+  // 使 `expert_team_dispatch`、claim 附件判定与 Task 12 的 result_present 交付校验
+  // 共享同一实例与同一批租约/信号量。成员包在入口与出队都由包宿主实时解析;
+  // 派工走 Task 7 的 `dispatchTeamMember`(团队路径,不改普通 `@slug` 的语义)。
+  const expertTeamCoordinator = createExpertTeamCoordinator({
+    runs: ctx.huaanworkExpertTeamRuns,
+    resolveMemberPackage: async (agentRef) => {
+      // 与可用性规则一致:只按包自身来源 + slug 精确匹配,不跨来源回退;
+      // 经 findInvocable 对 catalog 包做异步磁盘验签,排队/运行中途损坏提前在入口或出队阻断。
+      const pkg = await agentPackageHost.findInvocable(agentRef.slug)
+      return pkg === undefined || pkg.source !== agentRef.source ? undefined : pkg
+    },
+    dispatchMember: (request) =>
+      agentPackageHost.dispatchTeamMember({
+        ctx: ctx as unknown as AgentPackageDispatchContext,
+        sessionId: request.parentSessionId,
+        teamRunId: request.teamRunId,
+        pkg: request.pkg,
+        // 协调器已按成员职责/输出要求/引用结果/审查标记渲染成完整提示词。
+        remainder: request.prompt,
+        clientMessageId: request.clientMessageId,
+        signal: request.signal,
+        onRunCreated: (info) => request.onRunCreated({ runId: info.runId }),
+        resolveParent: () => Promise.resolve(findLiveAgentForSession(ctx, request.parentSessionId)),
+      }),
+    // 定向取消只作用于该父会话下的成员 run(registry 自身校验归属)。
+    requestMemberCancel: (parentSessionId, memberRunId) =>
+      subagentRuns.requestCancel(parentSessionId, memberRunId),
+    // 终止整团同时取消团长回合(§13.3)：找当前 live agent 发起 user 取消；已终结或
+    // 不支持的 agent 不阻断成员清理。
+    cancelParentTurn: (parentSessionId) => {
+      const agent = findLiveAgentForSession(ctx, parentSessionId)
+      if (agent === undefined || agent === null) return
+      const cancel = (agent as { cancel?: (cause: { kind: 'user' }) => void }).cancel
+      if (typeof cancel !== 'function') return
+      try {
+        cancel.call(agent, { kind: 'user' })
+      } catch {
+        // 父回合已结算时取消无效果；成员清理照常继续。
+      }
+    },
+    // 成员被外部定向停止时把失败收敛为 stopped:读 run 投影的停止相,不解析文案。
+    isMemberCancelled: (parentSessionId, memberRunId) => {
+      const run = subagentRuns.get(memberRunId)
+      if (run === undefined || run.parentSessionId !== parentSessionId) return false
+      return run.phase === 'stopping' || run.phase === 'stopped'
+    },
+  })
+  ctx.huaanworkExpertTeamCoordinator = expertTeamCoordinator
   // 对话创建技能宿主:发送入口(sessions.ts)、skill_propose/skill_commit 与“我的技能”
   // 刷新共用同一实例;宿主自己持有 per-session 原句与回合标记,`hasDraft` 读磁盘草稿。
   const skillCreationHost = createSkillCreationHost({ profileDir: config.profileDir })
@@ -375,6 +462,9 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           huaanworkAttachments: ctx.huaanworkAttachments,
           // result_present 用共享回合锚点把每次提交归到当前真实用户回合。
           huaanworkTurnAnchors: ctx.huaanworkTurnAnchors,
+          // 团队工具与 Task 12 的交付校验必须读同一协调器/运行注册表实例。
+          huaanworkExpertTeamCoordinator: ctx.huaanworkExpertTeamCoordinator,
+          huaanworkExpertTeamRuns: ctx.huaanworkExpertTeamRuns,
           // commit 成功后的解绑要等工具结果定稿:上游归一化结果时会按名字重解析工具。
           huaanworkOnToolResult: (listener: (exec: { callId?: string }) => void) =>
             (pc as unknown as { on(name: string, callback: (exec: { callId?: string }) => void): () => void })
@@ -389,11 +479,15 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
         const unregisterSkillTools = registerSkillCreationTools(toolCtx, skillCreationHost)
         // 结果页工具全局注册;普通父会话经 claimed 附件获得模型面,自动化/包儿童不可见。
         const unregisterResultArtifactTools = registerResultArtifactTools(toolCtx, config.profileDir)
+        // 团长派工工具全局注册;只有团队回合经 claimed 附件与租约获得模型面。
+        const unregisterExpertTeamDispatch = registerExpertTeamDispatchTool(toolCtx)
         syncHostToolDescription = () => {
           unregister?.()
           unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
         }
         return () => {
+          // 先注销团长派工工具:随后的团队取消期间不得再有新的工具调用进入。
+          unregisterExpertTeamDispatch()
           syncHostToolDescription = undefined
           // 先注销创建工具再清空门面:卸载后不能再有持有门面的工具在途。
           unregisterSkillTools()
@@ -406,7 +500,13 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
           // 回合(释放 activation 并停 runtime),最后等 kill 结算。这里必须
           // **直接调用**收尾并返回 promise——返回工厂函数会被 Cordis 当作
           // disposer 保存而不执行,收尾永远不会跑(最终评审 Critical 回归)。
-          return disposeAgentPackageHostRuntime(agentPackageTurns)
+          // 团队运行先于包运行时取消:成员的 activation/runtime 收尾依赖包宿主
+          // 仍在,取消链结束时才释放进程;同时释放本 Host 实例绑定的回合观察器,
+          // 防止 pre-claim 或异常退出路径残留全局监听与模块级闭包(设计 §12.1)。
+          disposeAllExpertTeamObservers(ctx)
+          return ctx.huaanworkExpertTeamRuns
+            .cancelAll()
+            .finally(() => disposeAgentPackageHostRuntime(agentPackageTurns))
         }
       }, 'huaanwork: host and creation tools registration')
     },

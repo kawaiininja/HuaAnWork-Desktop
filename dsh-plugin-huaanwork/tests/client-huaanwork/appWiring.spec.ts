@@ -1102,6 +1102,100 @@ test("history-load paths reconcile the host snapshot so run cards survive a fres
   );
 });
 
+test("reopening a session reconciles expert-team runs so team cards return from the in-memory run list", () => {
+  // 聚合卡只存在于客户端对话条目里:关闭标签后重开只回放消息条目,必须按会话补拉
+  // expertTeam.runList,否则仍有效的团队运行会永久丢失主流卡片。
+  const selectBody = functionBody("async function selectSubtask(", "async function renameSubtask(");
+  assert.match(
+    selectBody,
+    /void reconcileExpertTeamRuns\(id, sessionId\)/,
+    "selectSubtask's history branch must also reconcile expert-team runs: a completed team's "
+      + "aggregate card otherwise disappears for good when the subtask is reopened",
+  );
+
+  const backfillBody = functionBody("const runBackfillBusyRef", "}, [activeTab, chatTabs, automationRuns]);");
+  assert.match(
+    backfillBody,
+    /void reconcileExpertTeamRuns\(tabId, sessionId\)/,
+    "the run-tab backfill must reconcile expert-team runs with its own tabId + sessionId",
+  );
+
+  const resumeBody = functionBody("async function resumeFromView(", "async function resumeHistorySession(");
+  assert.match(
+    resumeBody,
+    /void reconcileExpertTeamRuns\(id, sessionId\)/,
+    "opening a session from history must reconcile expert-team runs after the history replay",
+  );
+
+  const sendBody = functionBody("async function send(", "async function stopTurn(");
+  assert.match(
+    sendBody,
+    /void reconcileExpertTeamRuns\(chatId, sent\.sessionId\)/,
+    "the post-send reconciliation must also pull the host's expert-team run list",
+  );
+
+  // 对账本身:权威清单来自 expertTeam.runList,快照经 Task 13 reducer 合并,
+  // 再按该会话的运行补卡(重复 teamRunId 由 insertExpertTeamRunCard 容忍)。
+  const reconcileBody = functionBody(
+    "async function reconcileExpertTeamRuns(",
+    "function anchorSnapshotExpertTeamCards(",
+  );
+  assert.match(reconcileBody, /rpcCall<ExpertTeamRunSnapshot>\("expertTeam\.runList", \{ sessionId \}\)/);
+  assert.match(reconcileBody, /type: "snapshot"/);
+  assert.match(
+    reconcileBody,
+    /evictedTerminalRunIdsFromSnapshot\(previous, snapshotAction\)/,
+    "same-generation reconnect snapshots must remove terminal cards authoritatively evicted by the host",
+  );
+  assert.match(reconcileBody, /clearExpertTeamRunUiState\(evictedSet, evictedRuns\)/);
+  assert.match(reconcileBody, /anchorSnapshotExpertTeamCards\(chatId, sessionId, snapshot\.runs\)/);
+  const removeBody = functionBody("const applyExpertTeamRemove = (", "const applyEvent = (");
+  assert.match(
+    removeBody,
+    /const accepted = shouldRemoveExpertTeamRunCard\(previous, action\);[\s\S]*if \(!accepted\) return;[\s\S]*removeExpertTeamCards\(/,
+    "applyExpertTeamRemove must not delete a card when the remove frame is rejected by the reducer",
+  );
+  assert.match(removeBody, /clearExpertTeamRunUiState\(/);
+  const anchorBody = functionBody("function anchorSnapshotExpertTeamCards(", "function reconcileBoundArtifacts(");
+  assert.match(anchorBody, /if \(run\.parentSessionId !== sessionId\) continue;/);
+  assert.match(anchorBody, /insertExpertTeamRunCard\(nextItems/);
+  assert.match(anchorBody, /allowSnapshotFallback: true/);
+});
+
+test("expert-team confirmation refuses to send cancel RPCs into a disconnected host", () => {
+  // 断连后确认只收起本地确认态:卡片已显示断连提示,任何 rpcCall 都不得发出。
+  const body = functionBody("async function confirmCancelExpertTeam(", "/** 新建项目流程");
+  const guardAt = body.indexOf('expertTeamRunsRef.current.connection !== "open"');
+  assert.ok(guardAt >= 0, "the confirmation still checks the live connection before sending");
+  const teamRpcAt = body.indexOf('rpcCall<ExpertTeamCancelResult>("expertTeam.cancel"');
+  const memberRpcAt = body.indexOf('rpcCall<SubagentCancelResult>("subagent.cancel"');
+  assert.ok(teamRpcAt > guardAt, "the guard must run before the team cancel RPC");
+  assert.ok(memberRpcAt > guardAt, "the guard must run before the member cancel RPC");
+});
+
+test("expert-team confirms are cleared on terminal runs and on tab/view or right-panel changes", () => {
+  // 运行帧/成员结果已终态时同步收起确认态，避免对已完成对象发出破坏性取消。
+  const applyRunBody = functionBody("const applyExpertTeamRun = (", "const applyExpertTeamRemove = (");
+  assert.match(applyRunBody, /setExpertTeamConfirming\(\(prev\) => \{/);
+  assert.match(applyRunBody, /isExpertTeamTerminal\(run\)/);
+  assert.match(
+    applyRunBody,
+    /targeted\.status === "completed" \|\| targeted\.status === "failed" \|\| targeted\.status === "stopped"/,
+    "a member result reaching a terminal status must clear its pending confirm",
+  );
+  // 与子代理确认同款清理：切 tab/离开主视图清全部，右栏收起只清右栏发起的确认。
+  assert.match(
+    APP_SOURCE,
+    /setExpertTeamConfirming\(\(prev\) => \(prev === null \? prev : null\)\);\s*\}, \[activeTab, view\]\);/,
+    "leaving the tab or main view must drop the expert-team confirm target",
+  );
+  assert.match(
+    APP_SOURCE,
+    /setExpertTeamConfirming\(\(prev\) => \(prev\?\.surface === "progress" \? null : prev\)\);\s*\}, \[rightTab, rightCollapsed\]\);/,
+    "collapsing or switching the right panel must drop only its own confirm target",
+  );
+});
+
 test("App turn final wiring consumes actual goal actions and sidecarDead only", () => {
   let state: GoalTurnState = INITIAL_GOAL_TURN_STATE;
   let final = false;
@@ -1249,6 +1343,25 @@ test("send carries the tab id and selected model and mints under the tab's own r
   assert.match(body, /userItemId: userMsg\.id,/);
   assert.match(body, /\.\.\.\(invokedAt \? \{ invokedAt \} : \{\}\),/);
   assert.match(body, /\.\.\.\(invokedSkill \? \{ invokedSkill \} : \{\}\),/);
+  assert.match(body, /parseTeamAtInvoke\(text\)/);
+  assert.match(body, /\.\.\.\(invokedTeam \? \{ invokedTeam \} : \{\}\),/);
+});
+
+test("composer @ trigger resolves leading teams while the legacy agent menu stays arbitrary-position", () => {
+  // owner 裁定：触发接线必须经 resolveComposerMentionState；整体换成 leading-only 的
+  // composerAtTokenAt 会让正文中段的旧 @agent 补全消失。
+  assert.match(APP_SOURCE, /resolveComposerMentionState\(draft, atCursor\)/);
+  assert.match(APP_SOURCE, /function pickAtTeam\(team: ExpertTeam\)/);
+  assert.match(APP_SOURCE, /leadingTeamAtSlug\(draft\)/);
+  // 开头 token 选择用同一个 resolver 原地替换，不把 @agent 拼到中文 token 后面。
+  const pickBody = functionBody("function pickAtAgent(", "function tryOpenAutomationFromDraft(");
+  assert.match(pickBody, /resolveComposerMentionState\(draft, atCursor\)\?\.token/);
+  // 客户端只消费 invocableList：禁用/失效团队已由 Host 过滤，@ 团队分组不得回退到管理页的 list。
+  assert.match(APP_SOURCE, /rpcCall<\{ teams: ExpertTeam\[\] \}>\("expertTeam\.invocableList"\)/);
+  assert.doesNotMatch(APP_SOURCE, /"expertTeam\.list"/);
+  assert.match(APP_SOURCE, /atExpertTeams\(expertTeamCatalog, atTeamQuery\)/);
+  // 定义变更事件同时刷新团队补全目录。
+  assert.match(APP_SOURCE, /expertTeam\/changed[\s\S]{0,900}"expertTeam\.invocableList"/);
 });
 
 test("session.send always carries a top-level clientMessageId and keeps the @ compat anchor", () => {
@@ -3323,4 +3436,52 @@ test("Q4-R2-02: upsertTodoItem cross-step update preserves same-round tool panel
     shouldApplyTodoEvent(hItems, hTurnStart, { clientMessageId: "uuid-h", roundKey: 15 }, currentSnapshotRoundKey(hItems, hTurnStart)),
     false,
   );
+});
+
+test("sidebar navigation routes through the expert-team dirty guard", () => {
+  // 侧边栏按钮必须走 requestViewChange：直接 setView 会绕过专家团草稿确认。
+  const sidebarStart = APP_SOURCE.indexOf('className="sidebar"');
+  const sidebarEnd = APP_SOURCE.indexOf("</aside>", sidebarStart);
+  assert.ok(sidebarStart >= 0 && sidebarEnd > sidebarStart, "sidebar block is still present");
+  const sidebar = APP_SOURCE.slice(sidebarStart, sidebarEnd);
+  for (const target of ["skills", "automations", "agents", "teams", "knowledge", "market"]) {
+    assert.match(sidebar, new RegExp(`requestViewChange\\("${target}"\\)`), `${target} nav uses requestViewChange`);
+  }
+  // 同一侧边栏的「任务」与「项目子任务」列表也是离开路径：先钉住接线，再钉住处理函数内的守卫。
+  assert.match(sidebar, /onClick=\{\(\) => void openFreeSession\(id\)\}/, "sidebar task list opens through openFreeSession");
+  assert.match(sidebar, /onSelectSubtask=\{\(task\) => void selectSubtask\(task\)\}/, "sidebar subtask list selects through selectSubtask");
+
+  // 守卫本体：仅在离开专家团且有未保存草稿时确认，确认后清掉脏标记。
+  assert.match(APP_SOURCE, /function confirmLeaveExpertTeam\(\): boolean \{/);
+  assert.match(APP_SOURCE, /if \(view !== "teams" \|\| !expertTeamDraftDirty\) return true;/);
+  assert.match(APP_SOURCE, /setExpertTeamDraftDirty\(false\)/);
+  assert.match(APP_SOURCE, /function requestViewChange\(next: View\): boolean \{/);
+  // 新建任务也是侧边栏离开路径，同样先过守卫。
+  const newTaskAt = APP_SOURCE.indexOf("function newTask()");
+  assert.ok(newTaskAt >= 0, "newTask is still present");
+  assert.match(APP_SOURCE.slice(newTaskAt, newTaskAt + 400), /confirmLeaveExpertTeam\(\)/);
+  // 任务/子任务入口在 setView("main") 前必须调用同一守卫：删掉守卫或挪到切换之后都变红。
+  for (const [start, end] of [
+    ["async function openFreeSession(", "function historyToChatItems("],
+    ["async function selectSubtask(", "async function renameSubtask("],
+  ] as const) {
+    const body = functionBody(start, end);
+    const guardAt = body.indexOf("if (!confirmLeaveExpertTeam()) return;");
+    const switchAt = body.indexOf('setView("main")');
+    assert.ok(guardAt >= 0, `${start} consults the dirty guard`);
+    assert.ok(switchAt >= 0, `${start} still switches to the main view`);
+    assert.ok(guardAt < switchAt, `${start} guards before setView("main")`);
+    assert.doesNotMatch(body.slice(0, guardAt), /setView\(/, `${start} does not switch views before the guard`);
+  }
+  // 退出登录同样会卸载主界面并清空编辑器草稿，必须在发起 auth.logout 与切换认证态之前过守卫。
+  const logoutBody = functionBody("async function logout(", 'if (authPhase !== "logged-in")');
+  const logoutGuardAt = logoutBody.indexOf("if (!confirmLeaveExpertTeam()) return;");
+  const logoutRpcAt = logoutBody.indexOf('rpcCall("auth.logout")');
+  const logoutPhaseAt = logoutBody.indexOf('setAuthPhase("logged-out")');
+  assert.ok(logoutGuardAt >= 0, "logout consults the dirty guard");
+  assert.ok(logoutRpcAt > logoutGuardAt, "logout guards before calling auth.logout");
+  assert.ok(logoutPhaseAt > logoutGuardAt, "logout guards before switching authPhase");
+  // 状态来源：专家团页把编辑器脏状态上报给 App。
+  assert.match(APP_SOURCE, /const \[expertTeamDraftDirty, setExpertTeamDraftDirty\] = useState\(false\);/);
+  assert.match(APP_SOURCE, /<ExpertTeamsView refreshSignal=\{expertTeamChangeSignal\} onDirtyChange=\{setExpertTeamDraftDirty\} \/>/);
 });

@@ -215,6 +215,9 @@ function fakeHost(overrides: Partial<AgentPackageHost> = {}): AgentPackageHost {
     invocableWithLegacy: async () => ({ items: [] }),
     findInvocable: async () => undefined,
     dispatch: async () => ({ text: '', afterIdle: async () => undefined }),
+    dispatchTeamMember: async () => {
+      throw new Error('not implemented')
+    },
     ...overrides,
   }
 }

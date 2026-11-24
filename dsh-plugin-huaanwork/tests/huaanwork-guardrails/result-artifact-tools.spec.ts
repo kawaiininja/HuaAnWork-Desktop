@@ -8,7 +8,7 @@
  *   钩子),核对「首请求」时序:agent/inbox/claimed 在 prompt assembly 之前同步刷新附件,
  *   不靠 mock 的 schemas() 或手工触发 pre-step 冒充模型请求。
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -21,11 +21,24 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import { expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi, type Mock } from 'vitest'
 
-import type { RpcEvent } from '../../src/client-huaanwork/rpc-types.ts'
+import type { ExpertTeamResult, RpcEvent, TaskArtifactSummary } from '../../src/client-huaanwork/rpc-types.ts'
 import type { TurnAnchor } from '../../src/huaanwork-host/turn-anchors.ts'
 import { createTurnAnchorStore, installTurnAnchorHooks } from '../../src/huaanwork-host/turn-anchors.ts'
+import { listArtifacts, readArtifactContent } from '../../src/huaanwork-host/artifacts-host.ts'
+import {
+  createExpertTeamCoordinator,
+  type ExpertTeamCoordinator,
+} from '../../src/huaanwork-host/expert-team/coordinator.ts'
+import {
+  computeExpertTeamTerminalStatus,
+  type ExpertTeamTerminalStatus,
+} from '../../src/huaanwork-host/expert-team/orchestration.ts'
+import {
+  createExpertTeamRunRegistry,
+  type ExpertTeamRunRegistry,
+} from '../../src/huaanwork-host/expert-team/runs.ts'
 import {
   attachAgentTools,
   emptyAttachments,
@@ -37,6 +50,7 @@ import {
   makeResultPresentClaimed,
   registerResultArtifactTools,
 } from '../../src/huaanwork-guardrails/result-artifact-tools.ts'
+import { executeResult, validTeam, validTeamInput } from '../fixtures/expert-team/team.ts'
 
 type ResultPresentArgs = { title: string; format: 'markdown' | 'html'; content: string; downloadName?: string }
 type ToolDefinition = {
@@ -381,4 +395,377 @@ it('cancels the driver when the claimed-time attachment sync throws', async () =
     await h.dispose()
     rmSync(profileDir, { recursive: true, force: true })
   }
+})
+
+// —— 专家团 Artifact 交付(设计 §12.4.1 / §18.1 / 计划 Task 12) ——
+
+const fixtureRoots: string[] = []
+
+afterEach(() => {
+  while (fixtureRoots.length > 0) rmSync(fixtureRoots.pop()!, { recursive: true, force: true })
+})
+
+type TeamFixtureOptions = {
+  dispatchAttempts?: number
+  validExecution?: boolean
+  missingReview?: boolean
+  clientMessageId?: string
+  /** 首次 `noteSessionArtifact` 返回 false，模拟 commit 成功但运行关联失败。 */
+  failFirstLink?: boolean
+  /** 协调器报告等待队列/未 settle 成员在途。 */
+  inFlight?: boolean
+  /** 第二次回合读取(Prepare 之后)时同步取消运行。 */
+  cancelBeforeCommit?: boolean
+  /** 第二次租约读取(Prepare 之后)时同步失效租约。 */
+  invalidateLeaseBeforeCommit?: boolean
+}
+
+type TeamFixture = {
+  execute(args: { callId?: string; title: string; format: 'markdown' | 'html'; content: string }): Promise<string>
+  runs: ExpertTeamRunRegistry
+  runId: string
+  emitted: RpcEvent[]
+  setCurrentAnchor(clientMessageId: string): void
+  noteSessionArtifactSpy: Mock<(parentSessionId: string, callId: string, artifact: TaskArtifactSummary) => boolean>
+  settleTurn(): ExpertTeamTerminalStatus
+  listArtifacts(): Promise<TaskArtifactSummary[]>
+  readContent(artifactId: string): Promise<string>
+  /** 取消/租约复查触发(第二次读取)瞬间的暂存快照；由对应选项填充。 */
+  preCommitStaging: { cancel?: StagingSnapshot; lease?: StagingSnapshot }
+  /** 调用结束后的暂存根快照；拒绝路径应只剩空根或不存在。 */
+  stagingSnapshot(): StagingSnapshot
+}
+
+function reviewResult(): ExpertTeamResult {
+  return executeResult('r-review-1', {
+    memberId: 'm-rev-1',
+    agentRef: { source: 'local', slug: 'reviewer' },
+    kind: 'review',
+    inputResultIds: ['r-exec-1'],
+    reviewVerdict: 'pass',
+  })
+}
+
+function createdArtifacts(events: readonly RpcEvent[]): TaskArtifactSummary[] {
+  const artifacts: TaskArtifactSummary[] = []
+  for (const event of events) {
+    if (event.event === 'artifact/created') artifacts.push(event.artifact)
+  }
+  return artifacts
+}
+
+/** 隐藏暂存根名不是 artifacts-host 的公开导出：从源码解析同一常量，不在测试里复制魔串。 */
+function artifactsStagingRootName(): string {
+  const source = readFileSync(new URL('../../src/huaanwork-host/artifacts-host.ts', import.meta.url), 'utf8')
+  const name = /const STAGING_DIR_NAME = '([^']+)'/.exec(source)?.[1]
+  if (name === undefined) throw new Error('artifacts-host STAGING_DIR_NAME not found')
+  return name
+}
+
+type StagingSnapshot = {
+  artifactDirs: string[]
+  files: { name: string; sizeBytes: number }[]
+}
+
+/** prepare 只写隐藏暂存根：快照非空即证明存在“已 prepare、未 commit”的 Artifact。 */
+function snapshotStaging(profileDir: string): StagingSnapshot {
+  const root = join(profileDir, artifactsStagingRootName())
+  if (!existsSync(root)) return { artifactDirs: [], files: [] }
+  const artifactDirs = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+  const files = artifactDirs.flatMap((dir) => readdirSync(join(root, dir), { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => ({ name: entry.name, sizeBytes: statSync(join(root, dir, entry.name)).size })))
+  return { artifactDirs, files }
+}
+
+/**
+ * 复查触发瞬间必须已能看到本次提交的非空暂存目录与正文文件：把整个复查前移到
+ * `beginArtifactWrite`/`prepareArtifact` 之前的实现会在这里落空。
+ */
+function expectStagedArtifactAtPreCommitCheck(snapshot: StagingSnapshot | undefined, content: string): void {
+  expect(snapshot).toBeDefined()
+  expect(snapshot!.artifactDirs).toHaveLength(1)
+  expect(snapshot!.files.length).toBeGreaterThanOrEqual(2)
+  expect(snapshot!.files.every((file) => file.sizeBytes > 0)).toBe(true)
+  expect(snapshot!.files.some((file) => file.sizeBytes === Buffer.byteLength(content))).toBe(true)
+}
+
+/**
+ * 真实 `result_present` + 真实 ArtifactHost + 真实团队注册表/协调器的一次团队回合。
+ *
+ * `execute` 只补当前会话锚与 `callId`；重放、封存与关联恢复都走生产分支。
+ * `cancelBeforeCommit` / `invalidateLeaseBeforeCommit` 在 Prepare 之后的第二次
+ * 回合/租约读取处触发并同步快照暂存根，确定性钉住「复查晚于 prepare 且暂存已落盘」。
+ */
+async function makeResultPresentFixture(options: TeamFixtureOptions = {}): Promise<TeamFixture> {
+  const profileDir = mkdtempSync(join(tmpdir(), 'result-present-team-'))
+  fixtureRoots.push(profileDir)
+  const emitted: RpcEvent[] = []
+  const registry = createExpertTeamRunRegistry({ emit: (event) => emitted.push(event) })
+  const coordinator = createExpertTeamCoordinator({
+    runs: registry,
+    resolveMemberPackage: () => undefined,
+    dispatchMember: () => Promise.reject(new Error('unexpected team member dispatch')),
+  })
+  const lease = coordinator.begin({
+    parentSessionId: 's1',
+    clientMessageId: options.clientMessageId ?? 'm1',
+    teamSnapshot: validTeam(),
+  })
+  const runId = lease.teamRunId
+  registry.update(runId, (run) => {
+    run.dispatchAttempts = options.dispatchAttempts ?? 1
+    if (options.validExecution === true) run.results.push(executeResult('r-exec-1'))
+    if (options.missingReview !== true && options.validExecution === true) run.results.push(reviewResult())
+  })
+
+  let anchorClientMessageId = options.clientMessageId ?? 'm1'
+  let turnReads = 0
+  let leaseReads = 0
+  const preCommitStaging: { cancel?: StagingSnapshot; lease?: StagingSnapshot } = {}
+  const runs: ExpertTeamRunRegistry = {
+    ...registry,
+    byTurn(parentSessionId, clientMessageId) {
+      turnReads += 1
+      // 第二次读取发生在 Prepare 之后:先快照暂存(证明复查晚于 prepare),再同步取消运行。
+      if (options.cancelBeforeCommit === true && turnReads === 2) {
+        preCommitStaging.cancel = snapshotStaging(profileDir)
+        registry.requestCancel(parentSessionId, runId)
+      }
+      return registry.byTurn(parentSessionId, clientMessageId)
+    },
+  }
+  const gatedCoordinator: Pick<ExpertTeamCoordinator, 'isLeaseValid' | 'hasInFlight'> = {
+    hasInFlight: () => (options.inFlight === true ? true : coordinator.hasInFlight(runId)),
+    isLeaseValid: (teamRunId) => {
+      leaseReads += 1
+      if (options.invalidateLeaseBeforeCommit === true && leaseReads === 2) {
+        preCommitStaging.lease = snapshotStaging(profileDir)
+        coordinator.invalidateLease(teamRunId)
+      }
+      return coordinator.isLeaseValid(teamRunId)
+    },
+  }
+
+  let failFirstLink = options.failFirstLink === true
+  const noteSessionArtifactSpy = vi.fn(
+    (parentSessionId: string, callId: string, artifact: TaskArtifactSummary): boolean => {
+      if (failFirstLink) {
+        failFirstLink = false
+        return false
+      }
+      return registry.noteSessionArtifact(parentSessionId, callId, artifact)
+    },
+  )
+  const linkedRuns: ExpertTeamRunRegistry = { ...runs, noteSessionArtifact: noteSessionArtifactSpy }
+
+  const attachments = emptyAttachments()
+  attachAgentTools(attachments, 's1', [RESULT_PRESENT_TOOL])
+  const registered = new Map<string, ToolDefinition>()
+  registerResultArtifactTools({
+    tools: { register: (definition: ToolDefinition) => { registered.set(definition.name, definition); return () => undefined } },
+    huaanworkAttachments: attachments,
+    huaanworkTurnAnchors: {
+      current: (sessionId: string) => sessionId === 's1'
+        ? { clientMessageId: anchorClientMessageId, startedAt: '2026-11-23T00:00:00.000Z', origin: 'advanced' as const }
+        : undefined,
+    },
+    huaanworkEmit: (event: RpcEvent) => { emitted.push(event) },
+    huaanworkExpertTeamRuns: linkedRuns,
+    huaanworkExpertTeamCoordinator: gatedCoordinator,
+  }, profileDir)
+  const tool = registered.get(RESULT_PRESENT_TOOL)!
+
+  let fallbackCallId = 0
+  return {
+    async execute(args) {
+      fallbackCallId += 1
+      const exec = args.callId === undefined
+        ? { agent: agentForSession('s1'), callId: `call-team-${fallbackCallId}` }
+        : { agent: agentForSession('s1'), callId: args.callId }
+      const result = await tool.execute({
+        title: args.title,
+        format: args.format,
+        content: args.content,
+      }, exec)
+      return result.text
+    },
+    runs: linkedRuns,
+    runId,
+    emitted,
+    setCurrentAnchor(clientMessageId) {
+      anchorClientMessageId = clientMessageId
+    },
+    noteSessionArtifactSpy,
+    settleTurn() {
+      return computeExpertTeamTerminalStatus({ run: registry.get(runId)!, finalSummaryPresent: true })
+    },
+    listArtifacts() {
+      return listArtifacts(profileDir, 's1')
+    },
+    async readContent(artifactId) {
+      return (await readArtifactContent(profileDir, 's1', artifactId)).toString('utf8')
+    },
+    preCommitStaging,
+    stagingSnapshot() {
+      return snapshotStaging(profileDir)
+    },
+  }
+}
+
+it('allows an exhausted-budget partial artifact without waiving other guards', async () => {
+  const { execute, runs, runId } = await makeResultPresentFixture({ dispatchAttempts: 24, missingReview: true, validExecution: true })
+  await expect(execute({ title: '部分报告', format: 'markdown', content: '# 部分结论\n\n缺审说明' })).resolves.toContain('artifactId')
+  const run = runs.get(runId)!
+  expect(run.primaryArtifactId).toBeDefined()
+  expect(run.deliverySealed).toBe(true)
+  expect(run.artifactStatus).toBe('created')
+})
+
+it('recovers the persisted-anchor link on same-callId replay after an initial link failure', async () => {
+  const { execute, runs, runId, setCurrentAnchor, noteSessionArtifactSpy } = await makeResultPresentFixture({ validExecution: true, clientMessageId: 'm1', failFirstLink: true })
+  await execute({ callId: 'call-1', title: '主报告', format: 'markdown', content: '# 完成' })
+  expect(runs.get(runId)).toMatchObject({ artifactStatus: 'pending', artifactLinkError: 'expert-team-artifact-link-failed' })
+  setCurrentAnchor('m2')
+  await execute({ callId: 'call-1', title: '主报告', format: 'markdown', content: '# 完成' })
+  expect(runs.get(runId)).toMatchObject({ artifactStatus: 'created', deliverySealed: true })
+  expect(runs.get(runId)?.artifactLinkError).toBeUndefined()
+  expect(noteSessionArtifactSpy).toHaveBeenLastCalledWith('s1', 'call-1', expect.objectContaining({ anchor: { kind: 'turn', clientMessageId: 'm1' } }))
+  expect(runs.byTurn('s1', 'm2')).toBeUndefined()
+})
+
+it('replays the same callId against its persisted manifest anchor even when current anchor differs, and rejects a new callId after sealing', async () => {
+  const { execute, runs, runId, emitted, setCurrentAnchor } = await makeResultPresentFixture({ validExecution: true, clientMessageId: 'm1' })
+  await execute({ callId: 'call-1', title: '主报告', format: 'markdown', content: '# 完成' })
+  const originalArtifactId = runs.get(runId)!.primaryArtifactId!
+  setCurrentAnchor('m2')
+  await execute({ callId: 'call-1', title: '主报告', format: 'markdown', content: '# 完成' })
+  expect(runs.get(runId)?.primaryArtifactCallId).toBe('call-1')
+  expect(runs.get(runId)?.primaryArtifactId).toBe(originalArtifactId)
+  expect(runs.byTurn('s1', 'm2')).toBeUndefined()
+  setCurrentAnchor('m1')
+  await expect(execute({ callId: 'call-2', title: '第二份', format: 'markdown', content: '# 不应创建' })).rejects.toThrow('expert-team-delivery-sealed')
+  expect(emitted.filter((event) => event.event === 'artifact/created')).toHaveLength(1)
+})
+
+it('keeps artifactStatus pending on Artifact prepare/commit write failure, allows same-turn retry, and settles partial/failed if turn ends unrecovered', async () => {
+  const { execute, runs, runId, emitted, settleTurn } = await makeResultPresentFixture({ validExecution: true })
+  await expect(execute({ callId: 'call-big', title: '超大报告', format: 'markdown', content: 'x'.repeat(5 * 1024 * 1024 + 1) }))
+    .rejects.toThrow('artifact-too-large')
+  expect(runs.get(runId)).toMatchObject({ artifactStatus: 'pending', deliverySealed: false })
+  expect(runs.get(runId)?.primaryArtifactId).toBeUndefined()
+  expect(emitted.filter((event) => event.event === 'artifact/created')).toHaveLength(0)
+  expect(settleTurn()).toBe('partial')
+
+  const retryFix = await makeResultPresentFixture({ validExecution: true })
+  await expect(retryFix.execute({ callId: 'call-big-2', title: '超大报告', format: 'markdown', content: 'x'.repeat(5 * 1024 * 1024 + 1) }))
+    .rejects.toThrow('artifact-too-large')
+  await expect(retryFix.execute({ callId: 'call-ok', title: '修正报告', format: 'markdown', content: '# 修正后正文' }))
+    .resolves.toContain('artifactId')
+  expect(retryFix.runs.get(retryFix.runId)).toMatchObject({ artifactStatus: 'created', deliverySealed: true })
+})
+
+it('discards a prepared new team artifact when cancellation or lease loss lands before commit', async () => {
+  const cancelled = await makeResultPresentFixture({ validExecution: true, cancelBeforeCommit: true })
+  await expect(cancelled.execute({ callId: 'call-cancelled', title: '主报告', format: 'markdown', content: '# 完成' }))
+    .rejects.toThrow('expert-team-terminal')
+  // 复查读取晚于 prepare:触发时暂存目录已存在且含非空正文与 manifest。
+  expectStagedArtifactAtPreCommitCheck(cancelled.preCommitStaging.cancel, '# 完成')
+  expect(cancelled.runs.get(cancelled.runId)).toMatchObject({ artifactStatus: 'pending', deliverySealed: false })
+  expect(createdArtifacts(cancelled.emitted)).toHaveLength(0)
+  expect(await cancelled.listArtifacts()).toEqual([])
+  // 拒绝路径已 discard:暂存根不再残留 Artifact 目录。
+  expect(cancelled.stagingSnapshot()).toEqual({ artifactDirs: [], files: [] })
+
+  const leaseLost = await makeResultPresentFixture({ validExecution: true, invalidateLeaseBeforeCommit: true })
+  await expect(leaseLost.execute({ callId: 'call-lease', title: '主报告', format: 'markdown', content: '# 完成' }))
+    .rejects.toThrow('expert-team-lease-invalid')
+  expectStagedArtifactAtPreCommitCheck(leaseLost.preCommitStaging.lease, '# 完成')
+  expect(leaseLost.runs.get(leaseLost.runId)).toMatchObject({ artifactStatus: 'pending', deliverySealed: false })
+  expect(createdArtifacts(leaseLost.emitted)).toHaveLength(0)
+  expect(await leaseLost.listArtifacts()).toEqual([])
+  expect(leaseLost.stagingSnapshot()).toEqual({ artifactDirs: [], files: [] })
+})
+
+it('records a link failure without deleting the committed artifact and settles partial', async () => {
+  const fixture = await makeResultPresentFixture({ validExecution: true, failFirstLink: true })
+  await expect(fixture.execute({ callId: 'call-1', title: '主报告', format: 'markdown', content: '# 完成' }))
+    .resolves.toContain('artifactId')
+  expect(fixture.runs.get(fixture.runId)).toMatchObject({
+    artifactStatus: 'pending',
+    deliverySealed: true,
+    artifactLinkError: 'expert-team-artifact-link-failed',
+  })
+  const created = createdArtifacts(fixture.emitted)
+  expect(created).toHaveLength(1)
+  const artifactId = created[0]!.artifactId
+  expect(await fixture.readContent(artifactId)).toBe('# 完成')
+  expect(fixture.settleTurn()).toBe('partial')
+})
+
+it('refuses the budget waiver before 24 attempts, with in-flight dispatch, or without a valid execution', async () => {
+  const beforeBudget = await makeResultPresentFixture({ dispatchAttempts: 23, missingReview: true, validExecution: true })
+  await expect(beforeBudget.execute({ title: '缺审报告', format: 'markdown', content: '# 缺审' }))
+    .rejects.toThrow('expert-team-review-incomplete')
+
+  const inFlight = await makeResultPresentFixture({ dispatchAttempts: 24, validExecution: true, inFlight: true })
+  await expect(inFlight.execute({ title: '在途报告', format: 'markdown', content: '# 在途' }))
+    .rejects.toThrow('expert-team-dispatch-in-flight')
+
+  const noExecution = await makeResultPresentFixture({ dispatchAttempts: 24, validExecution: false })
+  await expect(noExecution.execute({ title: '空报告', format: 'markdown', content: '# 空' }))
+    .rejects.toThrow('expert-team-no-valid-execution')
+  expect(noExecution.settleTurn()).toBe('failed')
+})
+
+it('keeps later ordinary turns unaffected by a sealed team run', async () => {
+  const { execute, runs, setCurrentAnchor, emitted } = await makeResultPresentFixture({ validExecution: true })
+  await expect(execute({ callId: 'call-team', title: '主报告', format: 'markdown', content: '# 完成' }))
+    .resolves.toContain('artifactId')
+  expect(runs.byTurn('s1', 'm1')?.deliverySealed).toBe(true)
+
+  setCurrentAnchor('m2')
+  await expect(execute({ callId: 'call-ordinary', title: '普通报告', format: 'markdown', content: '# 普通' }))
+    .resolves.toContain('artifactId')
+  expect(runs.byTurn('s1', 'm2')).toBeUndefined()
+  expect(createdArtifacts(emitted)).toHaveLength(2)
+})
+
+it('detaches result_present on a message-mode team claim and keeps it for artifact-mode teams', async () => {
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt, { personaPrefix: '', personaSuffix: '' })
+  await ctx.plugin(ToolRuntime)
+  const attachments = emptyAttachments()
+  const anchors = createTurnAnchorStore()
+  const runs = createExpertTeamRunRegistry({ emit: () => undefined })
+  Object.assign(ctx, { huaanworkAttachments: attachments, huaanworkTurnAnchors: anchors, huaanworkExpertTeamRuns: runs })
+  applyPresentAs(ctx as never)
+  const noteClaimed = makeResultPresentClaimed(ctx as never)
+  try {
+    for (const delivery of ['message', 'artifact'] as const) {
+      const sessionId = `s-${delivery}`
+      const message = userMessage('团队报告')
+      anchors.register({ sessionId, clientMessageId: message.id, origin: 'advanced' })
+      runs.begin({ parentSessionId: sessionId, clientMessageId: message.id, teamSnapshot: validTeamInput({ summary: { delivery } }) })
+      // message 模式先处于挂载态(证明 claim 会摘除);artifact 模式先摘除(证明 claim 会挂载)。
+      if (delivery === 'message') attachAgentTools(attachments, sessionId, [RESULT_PRESENT_TOOL])
+      noteClaimed({ agent: agentForSession(sessionId) as never, message })
+      expect(isAgentToolAttached(attachments, sessionId, RESULT_PRESENT_TOOL)).toBe(delivery === 'artifact')
+    }
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+it('passes the expert team holders from index.ts toolCtx to registerResultArtifactTools', () => {
+  const source = readFileSync(new URL('../../src/huaanwork-host/index.ts', import.meta.url), 'utf8')
+  const start = source.indexOf('const toolCtx = {')
+  const end = source.indexOf('registerResultArtifactTools(toolCtx', start)
+  expect(start).toBeGreaterThan(-1)
+  expect(end).toBeGreaterThan(start)
+  const toolCtxBlock = source.slice(start, end)
+  expect(toolCtxBlock).toContain('huaanworkExpertTeamRuns: ctx.huaanworkExpertTeamRuns')
+  expect(toolCtxBlock).toContain('huaanworkExpertTeamCoordinator: ctx.huaanworkExpertTeamCoordinator')
 })

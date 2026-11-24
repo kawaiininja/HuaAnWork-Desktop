@@ -141,6 +141,11 @@ function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
     // 授权，不逐次 ask；未挂载(自动化/包儿童/兼容回合)在任何档位都拒绝。
     case "result_present":
       return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
+    // 专家团团长派工工具：附件只在一个进行中的团队回合按运行、回合锚与租约挂载；
+    // 挂载即授权(用户在场，且协调器仍有独立预算/并发/顺序判定)，未挂载一律拒绝，
+    // 不落到 default 在 ask/smart 逐次弹审批。
+    case "expert_team_dispatch":
+      return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
     default:
       return input.attached ? (mode === "full" ? ALLOW : askOrDeny(seam)) : deny(reasonToolUnattached(input.name));
   }

@@ -1,13 +1,14 @@
-import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { readdir, rm, unlink } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import {
+  detachAgentTools,
   isAgentToolAttached,
   releaseAttachmentPending,
   type AttachmentMaps,
 } from '../huaanwork-guardrails/agent-attachments.ts'
+import { EXPERT_TEAM_DISPATCH_TOOL } from '../huaanwork-guardrails/expert-team-dispatch.ts'
 import { forgetConfirmedTarget, settlePlanReview } from '../huaanwork-guardrails/question-answerer.ts'
 import { answerRouteInput, cancelRouteInput, clearInvalidRoute, releaseRouteInput } from '../huaanwork-guardrails/route-tool-plugin.ts'
 import type { SessionSummary } from '../client-huaanwork/rpc-types.ts'
@@ -23,6 +24,7 @@ import {
 } from './agent-package/creation.ts'
 import { CorruptAgentPackageDraftError, discardAgentPackageDraft, isAgentCancelText } from './agent-package/drafts.ts'
 import type { AgentPackageActiveTurnRegistry } from './agent-package/host.ts'
+import type { AgentPackageTeamRequests } from './agent-package/types.ts'
 import { dispatchAt, parseAtInvoke } from './agent-invoke.ts'
 import { isCreationCancelText } from './creation-utterances.ts'
 import {
@@ -50,6 +52,16 @@ import {
   forgetChildSessions,
 } from './child-sessions.ts'
 import { freshSessionIdFor, sessionIdFor } from './session-id.ts'
+import type { ExpertTeamRunRegistry } from './expert-team/runs.ts'
+import {
+  dispatchExpertTeam,
+  expertTeamTaskText,
+  objectTopLevelClientMessageId,
+  resolveFollowupClientMessageId,
+} from './expert-team/session.ts'
+import type { ExpertTeamStore } from './expert-team/types.ts'
+import { disposeExpertTeamObservers } from './expert-team/observer.ts'
+import type { ExpertTeamCoordinator } from './expert-team/coordinator.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { resolveSessionModel } from './session-models.ts'
 import { listProjects, listTasks, setTaskModel } from './stores.ts'
@@ -101,6 +113,11 @@ export type SessionRuntimeContext = {
   sandboxPolicy?: { workspaceRoot?: string }
   /** cordis Context.get。sandboxPolicy 未注入到本插件时,用它做全局查找。 */
   get?: (name: string) => unknown
+  /**
+   * cordis `Context.on`(可选)。团队回合观察器经它订阅 `agent/inbox/claimed` 与
+   * `session/event`;`releaseSessionRuntime` 按会话同步注销,不跨回合泄漏监听。
+   */
+  on?(name: string, listener: (...args: never[]) => unknown, options?: boolean | { global?: boolean }): () => void
   agents?: {
     get?: (id: string) => ListedAgent | undefined
     list?: () => ListedAgent[]
@@ -112,6 +129,12 @@ export type SessionRuntimeContext = {
   subagents?: SubagentsService
   /** 子代理 run 权威状态机(holders.ts 注入);执行链与 subagent.* 路由读同一实例。 */
   huaanworkSubagentRuns?: SubagentRunRegistry
+  /** 专家团定义存储(index.ts 启动时注入);expertTeam.* 路由经这里强类型读取同一实例。 */
+  huaanworkExpertTeamStore?: ExpertTeamStore
+  /** 专家团运行状态机(index.ts 启动时注入);取消、运行投影与后续协调器共读同一实例。 */
+  huaanworkExpertTeamRuns?: ExpertTeamRunRegistry
+  /** 专家团运行协调器(index.ts 启动时注入);团队轮次启动与观察器共享同一租约实例。 */
+  huaanworkExpertTeamCoordinator?: ExpertTeamCoordinator
   /**
    * 会话 → 模型条目 id 的绑定表(holders.ts 注入)。`sendToAgent` 在 `dispatchAt`
    * 之前先写入本轮准入的模型(子代理在其中的 `subagent/start` 同步复制父会话模型),
@@ -138,6 +161,11 @@ export type SessionRuntimeContext = {
   huaanworkSystemSkillLeases?: SystemSkillLeaseStore
   /** 包回合血缘允许表:受管儿童判别(`isUnmanagedChildSession`)读它。 */
   huaanworkPackageChildAllow?: Map<string, readonly string[]>
+  /**
+   * 团队成员请求表(holders.ts 注入):团队派发按 reservedChildId 隔离请求，
+   * 普通 `@智能体` 仍走单槽 `huaanworkAgentPackageRequest`。
+   */
+  huaanworkAgentPackageTeamRequests?: AgentPackageTeamRequests
 }
 
 /** 一次已准入的用户回合:根与模型由 `sessionSend`/出队复检算好。 */
@@ -181,9 +209,13 @@ export async function sendToAgent(
   let text = objectString(params, 'text') ?? ''
   const parsedAt = skillName ? undefined : parseAtInvoke(text)
   const atName = rawAtName ?? parsedAt?.name
+  const atKind = objectAtKind(params)
   if (!atName && !skillName && !text) {
     throw new Error('session.send requires params.text')
   }
+  // 本轮 followup 的唯一 id:在 dispatchAt/团队派发之前只计算一次,后续团队运行、
+  // turn anchor 与 `agent.followup` 必须复用它(设计 §11.3 / §12.1 / §17)。
+  const followupId = resolveFollowupClientMessageId(params)
 
   // 每一轮用户原句都记进宿主:同意门禁只认最近一轮,技能/@ 轮若旁路不记,
   // agent_commit / skill_commit 会读到更早那轮的「可以」(设计 §5)。创建门禁内的
@@ -195,6 +227,12 @@ export async function sendToAgent(
   let afterIdle: (() => Promise<void>) | undefined
   /** 未启动早退时撤回本轮临时写入的模型/根;只在本轮自己写过临时值时存在。 */
   let restoreProvisionalBindings: (() => void) | undefined
+  /** 团队回合跳过 `cleanup` 的第二次 `whenIdle()`,不被后续 goal turn 拖住或污染终态。 */
+  let skipPostCleanupIdle = false
+  /** 团队 `followup` 未被受理时的原地失败入口(幂等;设置后 `afterIdle` 置回 undefined)。 */
+  let teamAbortBeforeSend: ((error: unknown) => void) | undefined
+  /** 本轮失败事实(供 abortBeforeSend 记录);无异常早退时只记通用未受理事实。 */
+  let notAcceptedError: unknown
   let cleanedUp = false
   const releaseOnce = admission?.release
   const cleanup = async () => {
@@ -205,7 +243,7 @@ export async function sendToAgent(
       // 摘要回合唤醒的父会话重新 idle。finally 保证清理抛错也不会把根写者留在手上。
       if (afterIdle === undefined) return
       await afterIdle()
-      await acceptedAgent?.whenIdle?.()
+      if (!skipPostCleanupIdle) await acceptedAgent?.whenIdle?.()
     } finally {
       if (!followupAccepted) restoreProvisionalBindings?.()
       releaseOnce?.()
@@ -475,7 +513,22 @@ export async function sendToAgent(
       }
     }
 
-    if (atName) {
+    if (atName && atKind === 'expert-team') {
+      // typed 团队目标:只走专家团启动,typed token 永不回退成同名 `@<slug>` 智能体。
+      // 团队校验、运行创建、租约与观察器都在 followup 之前完成;回合锚由下方统一登记。
+      const dispatched = await dispatchExpertTeam({
+        ctx,
+        sessionId,
+        followupId,
+        slug: atName,
+        task: expertTeamTaskText(text),
+        logger: routeCtx.logger,
+      })
+      text = dispatched.text
+      afterIdle = dispatched.afterIdle
+      skipPostCleanupIdle = dispatched.skipPostCleanupIdle
+      teamAbortBeforeSend = dispatched.abortBeforeSend
+    } else if (atName) {
       const parsedInText = parseAtInvoke(text)
       const remainder =
         rawAtName && parsedInText?.name === atName
@@ -520,7 +573,6 @@ export async function sendToAgent(
     }
     // 回合锚点:followup 受理前登记本次发送的 pending(pre-step 出现真实用户消息时生效)。
     // 拒发 / followup 抛错时只回滚本次登记,不触碰上一回合已生效的 anchor。
-    const followupId = resolveFollowupClientMessageId(params)
     const rollbackAnchor = ctx.huaanworkTurnAnchors?.register({
       sessionId,
       clientMessageId: followupId,
@@ -566,10 +618,21 @@ export async function sendToAgent(
       }
     }
     scheduleDetachAfterIdle()
+  } catch (error) {
+    // 只记录失败事实,不改变既有失败语义:@ 激活与团队运行都仍走 finally 的统一出口。
+    notAcceptedError = error
+    throw error
   } finally {
     // 已启动子代理时根写者归 idle 清理持有:立即释放会与仍在写根的子代理重叠。
     // 返回 `started: false` 与 followup 抛错都走同一出口,调用方经 `deferRelease` 得知延后。
     if (!followupAccepted) {
+      // 团队运行已创建但本轮未受理(followup 抛错 / resolveAgent 抛错 / 取消早退):
+      // 必须先原地失败并释放观察器,再把 `afterIdle` 置回 undefined,避免稍后的闲置
+      // 清理路径对同一运行二次结算;名额随后按未启动分支立即释放。
+      if (teamAbortBeforeSend !== undefined) {
+        teamAbortBeforeSend(notAcceptedError)
+        afterIdle = undefined
+      }
       if (afterIdle === undefined) {
         // 先还原本次准入前的模型/根,再让出名额:被 drain 的下一回合不得看见
         // 本回合未启动的临时绑定。
@@ -685,6 +748,10 @@ function isInside(root: string, candidate: string): boolean {
 
 function cancelAgent(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): { accepted: true } {
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
+  // 专家团(设计 §13.3):先同步闩停团队运行(置 stopping 并启动取消闭包,排空等待
+  // 队列、取消在途成员),再取消父 agent 与包回合。registry 幂等,bridge 的
+  // abort/disposed 兜底不会重复清理或重复发布终态。
+  void ctx.huaanworkExpertTeamRuns?.cancelBySession(sessionId).catch(() => undefined)
   cancelDirectStarts([sessionId, ...descendantSessionIds(sessionId)])
   // 只取消绑定在该会话上的 agent;通道默认 agent 可能正在跑兄弟会话,不能替它按停止。
   const primary = findAgentBySession(ctx, sessionId)
@@ -851,6 +918,13 @@ export function discardSessionCreationDrafts(
 export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, sessionId: string): void {
   // 后代名单在 forgetChildSessions 之前快照:登记表清空后就查不到了。
   const descendants = descendantSessionIds(sessionId)
+  // 删除会话是团队运行的终止路径(设计 §13.3):同步闩停并启动取消闭包(成员/团长
+  // 清理异步收敛,不阻塞删除),同时卸载该父会话在途的回合观察器,防止已删会话的
+  // 迟到事件继续聚合并回调结算。
+  void ctx?.huaanworkExpertTeamRuns?.cancelBySession(sessionId).catch(() => undefined)
+  // 生产环境的 ctx 具备 `on` 且与 `bindExpertTeamObserver` 传入同一实例：按 ctx 精确卸载，
+  // 避免同进程多 Host 互相误伤；测试桩的精简 ctx 不含 `on` 时按 sessionId 兜底卸载。
+  disposeExpertTeamObservers(sessionId, ctx?.on === undefined ? undefined : ctx)
   cancelDirectStarts([sessionId, ...descendants])
   releaseRouteInput(sessionId)
   if (ctx) findAgentBySession(ctx, sessionId)?.cancel?.({ kind: 'user' })
@@ -869,6 +943,10 @@ export function releaseSessionRuntime(ctx: SessionRuntimeContext | undefined, se
       releaseAttachmentPending(ctx.huaanworkAttachments, id)
       detachSkillCreationTools(ctx, id)
       detachCreationTools(ctx, id)
+      // 团队派工工具只属于进行中的团队回合:会话销毁后不得随同 id 重建继承。
+      if (ctx.huaanworkAttachments !== undefined) {
+        detachAgentTools(ctx.huaanworkAttachments, id, [EXPERT_TEAM_DISPATCH_TOOL])
+      }
       ctx.huaanworkSessionModels?.delete(id)
       ctx.huaanworkSessionRoots?.delete(id)
       // 未激活或稳定通道会话删除后可能以同 id 重建:清掉锚点与未消费的 pending,
@@ -1004,28 +1082,23 @@ function objectAtName(params: unknown): string | undefined {
 }
 
 /**
- * 本次 `session.send` 顶层携带的持久回合锚(`clientMessageId`,客户端 UUID 或自动化 runId)。
- *
- * 与 `objectAtClientMessageId` 分开解析:顶层值是回合锚的唯一来源,`at.clientMessageId`
- * 只是旧 @ 卡的本地展示兼容值。
+ * `at.kind` 目标类别(设计 §11.3)。只有显式的 `'expert-team'` 进入团队分支;缺省或
+ * 未知取值按旧 `@<slug>` 智能体处理,保持既有语义。
  */
-function objectTopLevelClientMessageId(params: unknown): string | undefined {
+function objectAtKind(params: unknown): 'expert-team' | undefined {
   if (!params || typeof params !== 'object') return undefined
-  const clientMessageId = (params as Record<string, unknown>).clientMessageId
-  if (typeof clientMessageId !== 'string') return undefined
-  const trimmed = clientMessageId.trim()
-  return trimmed.length > 0 ? trimmed : undefined
+  const at = (params as Record<string, unknown>).at
+  if (!at || typeof at !== 'object') return undefined
+  return (at as Record<string, unknown>).kind === 'expert-team' ? 'expert-team' : undefined
 }
 
 /**
  * 本轮 followup 的稳定消息 id:顶层 `clientMessageId` 优先,缺失时由 Host 生成 UUID。
  *
- * **不读 `at.clientMessageId` 兜底**:那个值是客户端 `allocId()` 分配的本地条目 id,
- * 刷新历史后会重复,不能作为持久回合锚。旧客户端因此只在宿主侧得到一个新的 UUID。
+ * 唯一计算点住在 `expert-team/session.ts`(团队运行、turn anchor 与 followup 必须
+ * 复用同一次结果,设计 §11.3 / §17);这里转出同一实现供既有调用方与测试使用。
  */
-export function resolveFollowupClientMessageId(params: unknown): string {
-  return objectTopLevelClientMessageId(params) ?? randomUUID()
-}
+export { resolveFollowupClientMessageId }
 
 /** 会话来源:自动化运行会话(`huaanwork-auto-` 前缀)为 `'automation'`,其余为 `'advanced'`。 */
 export function turnOriginForSession(sessionId: string): 'automation' | 'advanced' {
@@ -1293,12 +1366,22 @@ async function rememberTaskModel(routeCtx: RouteContext, sessionId: string, mode
 export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteContext, params: unknown): Promise<unknown> {
   const text = objectString(params, 'text') ?? ''
   const skillName = objectString(params, 'skill')
+  const atKind = objectAtKind(params)
   const atName = objectAtName(params) ?? (skillName === undefined ? parseAtInvoke(text)?.name : undefined)
   if (!text && !skillName && !atName) throw new Error('session.send requires params.text')
   const tabId = objectString(params, 'tabId')
   if (!tabId) throw new Error('session.send 缺少标签')
 
   const sessionId = objectString(params, 'sessionId') ?? sessionIdFor(routeCtx.workspaceRoot.current)
+  // 专家团准入(设计 §11.2 / §17):空任务与「同父会话已有活跃/stopping 团队」在
+  // `admitUserTurn` 之前拒绝,第二次团队调用绝不进入 turn-scheduler 静默排队。
+  if (atKind === 'expert-team') {
+    if (atName === undefined) throw new Error('expert-team-invalid-target')
+    if (expertTeamTaskText(text) === '') throw new Error('expert-team-task-empty')
+    if (ctx.huaanworkExpertTeamRuns?.hasActiveForSession(sessionId) === true) {
+      throw new Error('expert-team-session-busy')
+    }
+  }
   // 已登记根的会话保持原根:任务改绑或项目登记变化都不把它挪到新根(设计 §5.1.1),
   // 否则写者锁与沙箱根会分开,下一次恢复也会因持久化 cwd 不在新根内被拒绝。
   const registeredRoot = ctx.huaanworkSessionRoots?.get(sessionId)
@@ -1335,6 +1418,13 @@ export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteCon
 
   const atClientMessageId = objectAtClientMessageId(params)
   const topLevelClientMessageId = objectTopLevelClientMessageId(params)
+  // 团队准入的最终同步判定点(设计 §11.2 / §17):运行创建跨越 store 读取等多个 await,
+  // 两个团队调用可能都通过了上面的活跃运行初检。这里在 `admitUserTurn` 紧邻处再查调度器
+  // 的团队意图(等待队列 + 出队启动中 + 根写者),与准入同处一个同步块,第二个团队调用
+  // 因此拒绝而不是静默排队;单个排在普通回合之后的团队项仍允许。
+  if (atKind === 'expert-team' && scheduler.hasPendingTeamTurn(sessionId)) {
+    throw new Error('expert-team-session-busy')
+  }
   const admitted = scheduler.admitUserTurn({
     sessionId,
     tabId,
@@ -1343,7 +1433,16 @@ export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteCon
     root,
     ...(topLevelClientMessageId === undefined ? {} : { clientMessageId: topLevelClientMessageId }),
     ...(skillName === undefined ? {} : { skill: skillName }),
-    ...(atName === undefined ? {} : { at: { name: atName, ...(atClientMessageId === undefined ? {} : { clientMessageId: atClientMessageId }) } }),
+    ...(atName === undefined
+      ? {}
+      : {
+          at: {
+            name: atName,
+            ...(atClientMessageId === undefined ? {} : { clientMessageId: atClientMessageId }),
+            // typed 团队目标必须随排队项保留,出队后不得回退成普通 `@<slug>`。
+            ...(atKind === undefined ? {} : { kind: atKind }),
+          },
+        }),
   })
   if (admitted.kind === 'error') throw new Error(admitted.reason)
   if (admitted.kind === 'queued') {

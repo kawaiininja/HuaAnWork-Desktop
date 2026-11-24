@@ -13,6 +13,10 @@
  *
  * 输入只有 title/format/content/downloadName?;运行时校验统一由 artifacts-host 的
  * `prepareArtifact` 执行,工具层不重复实现,只把具名错误透传给模型。
+ *
+ * 专家团回合的主 Artifact 提交在执行体内叠加团队校验(设计 §12.4.1):提交前按持久
+ * 回合锚核对运行与预算豁免,commit 前复查取消与租约,commit 后按持久 manifest 锚
+ * 封闭交付并幂等关联;同一 `callId` 重放只走幂等裁决与关联恢复。普通回合语义不变。
  */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
@@ -26,6 +30,12 @@ import {
   discardPreparedArtifact,
   prepareArtifact,
 } from '../huaanwork-host/artifacts-host.ts'
+import {
+  ExpertTeamCoordinatorError,
+  type ExpertTeamCoordinator,
+} from '../huaanwork-host/expert-team/coordinator.ts'
+import { canSubmitPrimaryArtifact } from '../huaanwork-host/expert-team/orchestration.ts'
+import type { ExpertTeamRunRegistry } from '../huaanwork-host/expert-team/runs.ts'
 import type { TurnAnchorStore } from '../huaanwork-host/turn-anchors.ts'
 import {
   attachAgentTools,
@@ -59,7 +69,13 @@ type ToolContext = {
   huaanworkEmit?: (event: RpcEvent) => void
   huaanworkAttachments?: AttachmentMaps
   huaanworkTurnAnchors?: Pick<TurnAnchorStore, 'current'>
+  /** 团队回合按父会话 + 持久回合锚解析运行；生产由 Host `toolCtx` 注入同一实例。 */
+  huaanworkExpertTeamRuns?: ExpertTeamRunRegistry
+  huaanworkExpertTeamCoordinator?: Pick<ExpertTeamCoordinator, 'isLeaseValid' | 'hasInFlight'>
 }
+
+/** commit 成功但运行关联失败时的稳定标记;Artifact 与事件保留,团队按不完整交付结算。 */
+const ARTIFACT_LINK_FAILED = 'expert-team-artifact-link-failed'
 
 type ToolExec = { agent?: unknown; callId?: string }
 
@@ -91,7 +107,30 @@ function resultPresentTool(ctx: ToolContext, profileDir: string) {
       if (!isAgentToolAttached(ctx.huaanworkAttachments, sessionId, RESULT_PRESENT_TOOL)) {
         throw new Error('result-present-not-attached')
       }
+      const runs = ctx.huaanworkExpertTeamRuns
+      const coordinator = ctx.huaanworkExpertTeamCoordinator
       const anchor = ctx.huaanworkTurnAnchors?.current(sessionId)
+      // 用持久回合锚查团队运行(而非 activeBySession):已终态/已封存的团队回合在
+      // 同锚 goal 续拍中仍被命中;下一条普通用户回合查不到团队、保持普通语义。
+      const teamRun = anchor === undefined ? undefined : runs?.byTurn(sessionId, anchor.clientMessageId)
+      // 同一 callId 重放只进入幂等裁决与关联恢复,不因交付封闭/取消被二次拒绝。
+      const isIdempotentReplay =
+        teamRun !== undefined &&
+        teamRun.primaryArtifactCallId !== undefined &&
+        teamRun.primaryArtifactCallId === exec.callId
+      if (teamRun !== undefined && !isIdempotentReplay) {
+        if (coordinator === undefined) throw new Error('expert-team-coordinator-missing')
+        if (!coordinator.isLeaseValid(teamRun.teamRunId)) {
+          throw new ExpertTeamCoordinatorError('expert-team-lease-invalid')
+        }
+        const decision = canSubmitPrimaryArtifact(teamRun, {
+          inFlight: coordinator.hasInFlight(teamRun.teamRunId),
+          artifactFormat: args.format as ArtifactFormat,
+          callId: exec.callId,
+        })
+        // 提交前拒绝发生在 ArtifactHost 之前,不改变 artifactStatus。
+        if (!decision.ok) throw new Error(decision.error)
+      }
       const write = beginArtifactWrite(profileDir, {
         sessionId,
         anchor: { kind: 'turn', ...(anchor?.clientMessageId !== undefined ? { clientMessageId: anchor.clientMessageId } : {}) },
@@ -105,9 +144,43 @@ function resultPresentTool(ctx: ToolContext, profileDir: string) {
           content: args.content,
           ...(args.downloadName !== undefined ? { downloadName: args.downloadName } : {}),
         })
+        if (teamRun !== undefined && !isIdempotentReplay) {
+          // prepare 后、commit 前复查取消闩、交付封闭与团队租约;此刻已失效则绝不提交新 Artifact。
+          const liveRun = runs?.byTurn(sessionId, teamRun.clientMessageId) ?? teamRun
+          if (liveRun.status !== 'running') {
+            await discardPreparedArtifact(write)
+            throw new ExpertTeamCoordinatorError('expert-team-terminal')
+          }
+          if (liveRun.deliverySealed) {
+            await discardPreparedArtifact(write)
+            throw new Error('expert-team-delivery-sealed')
+          }
+          if (coordinator?.isLeaseValid(teamRun.teamRunId) !== true) {
+            await discardPreparedArtifact(write)
+            throw new ExpertTeamCoordinatorError('expert-team-lease-invalid')
+          }
+        }
         // created 在 profile 锁内裁决:并发/重放同 callId 只有一次 true,事件不重复。
         const { artifact, created } = await commitPreparedArtifact(write)
-        if (created) ctx.huaanworkEmit?.({ event: 'artifact/created', artifact, sessionId })
+        // 关联目标一律以持久 manifest 锚为准,不用 goal 续拍时的当前锚。
+        const persistedRun =
+          artifact.anchor.kind === 'turn' && artifact.anchor.clientMessageId !== undefined
+            ? runs?.byTurn(sessionId, artifact.anchor.clientMessageId)
+            : undefined
+        if (created) {
+          if (teamRun !== undefined && runs !== undefined) {
+            runs.sealDelivery(teamRun.teamRunId, exec.callId)
+            const linked = runs.noteSessionArtifact(sessionId, exec.callId, artifact)
+            // commit 已成功:关联失败只记残态,绝不删除 Artifact 或伪报未创建。
+            if (!linked) runs.noteArtifactLinkError(teamRun.teamRunId, ARTIFACT_LINK_FAILED)
+          }
+          ctx.huaanworkEmit?.({ event: 'artifact/created', artifact, sessionId })
+        } else if (persistedRun !== undefined && runs !== undefined) {
+          // 同 callId 重放(即使当前锚已切走):只恢复持久锚运行,绝不封存当前锚对应运行。
+          runs.sealDelivery(persistedRun.teamRunId, exec.callId)
+          const linked = runs.noteSessionArtifact(sessionId, exec.callId, artifact)
+          if (!linked) runs.noteArtifactLinkError(persistedRun.teamRunId, ARTIFACT_LINK_FAILED)
+        }
         return { text: `已生成结果页“${artifact.title}”。artifactId: ${artifact.artifactId}` }
       } finally {
         await discardPreparedArtifact(write)
@@ -132,6 +205,7 @@ export function registerResultArtifactTools(ctx: unknown, profileDir: string): (
 type ResultPresentClaimedContext = {
   huaanworkTurnAnchors?: TurnAnchorStore
   huaanworkAttachments: AttachmentMaps
+  huaanworkExpertTeamRuns?: Pick<ExpertTeamRunRegistry, 'byTurn'>
 }
 
 type ResultPresentClaimedPayload = { agent: Agent; message: UserMessage }
@@ -152,7 +226,12 @@ export function makeResultPresentClaimed(ctx: ResultPresentClaimedContext) {
     if (!sessionId) return
     try {
       const anchor = ctx.huaanworkTurnAnchors?.notePreStep(sessionId, [message], new Date().toISOString())
-      const wantAttached = anchor?.origin === 'advanced'
+      // 仅会话模式的团队回合不挂 result_present;Artifact 模式团队与普通高级会话保持原行为。
+      const teamRun = anchor === undefined
+        ? undefined
+        : ctx.huaanworkExpertTeamRuns?.byTurn(sessionId, anchor.clientMessageId)
+      const messageDeliveryTeam = teamRun?.teamSnapshot.summary.delivery === 'message'
+      const wantAttached = anchor?.origin === 'advanced' && !messageDeliveryTeam
       const attached = isAgentToolAttached(ctx.huaanworkAttachments, sessionId, RESULT_PRESENT_TOOL)
       if (wantAttached === attached) return
       if (wantAttached) attachAgentTools(ctx.huaanworkAttachments, sessionId, [RESULT_PRESENT_TOOL])

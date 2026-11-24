@@ -18,7 +18,11 @@ export type QueueItem = {
   /** 本次发送的持久回合锚(顶层 UUID / 自动化 runId);出队重建发送参数时原样带回。 */
   clientMessageId?: string
   skill?: string
-  at?: { name: string; clientMessageId?: string }
+  /**
+   * `@` 调用目标。`kind: 'expert-team'` 是 typed 团队 token:排队出队必须原样
+   * 保留,绝不回退成普通 `@<slug>` 智能体。
+   */
+  at?: { name: string; clientMessageId?: string; kind?: 'expert-team' }
 }
 
 export type AdmitUserResult =
@@ -34,6 +38,8 @@ type RootWriter = {
   runId?: string
   /** 自动化写者的来源任务 id;用户写者没有。供删除前的活跃快照覆盖 admit→enqueue 窗口。 */
   automationId?: string
+  /** 直接启动的 `at.kind === 'expert-team'` 团队回合;运行创建前由它识别团队意图。 */
+  expertTeam?: boolean
 }
 
 export type TurnScheduler = {
@@ -46,7 +52,8 @@ export type TurnScheduler = {
     /** 顶层回合锚;排队期间原样保存,出队后由 `startQueuedItem` 重建进发送参数。 */
     clientMessageId?: string
     skill?: string
-    at?: { name: string; clientMessageId?: string }
+    /** 见 {@link QueueItem.at};`kind: 'expert-team'` 在排队期间不得丢失。 */
+    at?: { name: string; clientMessageId?: string; kind?: 'expert-team' }
   }): AdmitUserResult
   admitAutomation(input: {
     automationId: string
@@ -70,6 +77,14 @@ export type TurnScheduler = {
   finishStart(queueItemId: string): void
   clearAdmissionSkip(automationId: string): void
   drainQueue(): QueueItem[]
+  /**
+   * 该会话是否已有团队回合占用等待队列、正在出队启动,或持有根写者。
+   *
+   * 调用方在 `admitUserTurn` 前的同步点据此拒绝第二次团队调用(设计 §11.2 / §17):
+   * 运行创建跨越多个 await,单看运行注册表会漏掉「仅排队/正在启动」的团队回合。
+   * 普通回合排队不受影响,单个团队项排在普通回合之后仍允许。
+   */
+  hasPendingTeamTurn(sessionId: string): boolean
   isAdmissionSkipped(automationId: string): boolean
   activeTurnCount(): number
   soleCapWriterSessionId(): string | undefined
@@ -93,8 +108,8 @@ export function createTurnScheduler(options: {
   const rootWriters = new Map<string, RootWriter>()
   /** 用户消息等待队列,按入队时间扫描。 */
   const queue: QueueItem[] = []
-  /** 已出队、尚未完成启动的项:取消与删除据此拦住在途启动。 */
-  const starting = new Map<string, { sessionId: string }>()
+  /** 已出队、尚未完成启动的项:取消与删除据此拦住在途启动;`expertTeam` 保留团队意图。 */
+  const starting = new Map<string, { sessionId: string; expertTeam?: boolean }>()
   /** 启动途中被取消的 queueItemId;`finishStart` 统一清除。 */
   const cancelledStarts = new Set<string>()
   /** 定时调度最近一次准入被跳过的自动化;成功准入或显式清除时移除。手动运行不写这里。 */
@@ -122,7 +137,11 @@ export function createTurnScheduler(options: {
         queue.push(item)
         return { kind: 'queued', root, queueItemId: item.queueItemId }
       }
-      rootWriters.set(root, { kind: 'user', sessionId: input.sessionId })
+      rootWriters.set(root, {
+        kind: 'user',
+        sessionId: input.sessionId,
+        ...(input.at?.kind === 'expert-team' ? { expertTeam: true } : {}),
+      })
       activeTurns += 1
       return { kind: 'start', root }
     },
@@ -203,12 +222,30 @@ export function createTurnScheduler(options: {
         const index = queue.indexOf(item)
         if (index < 0) continue
         queue.splice(index, 1)
-        rootWriters.set(item.root, { kind: 'user', sessionId: item.sessionId })
+        const expertTeam = item.at?.kind === 'expert-team'
+        rootWriters.set(item.root, {
+          kind: 'user',
+          sessionId: item.sessionId,
+          ...(expertTeam ? { expertTeam: true } : {}),
+        })
         activeTurns += 1
-        starting.set(item.queueItemId, { sessionId: item.sessionId })
+        starting.set(item.queueItemId, {
+          sessionId: item.sessionId,
+          ...(expertTeam ? { expertTeam: true } : {}),
+        })
         started.push(item)
       }
       return started
+    },
+
+    hasPendingTeamTurn(sessionId) {
+      for (const writer of rootWriters.values()) {
+        if (writer.sessionId === sessionId && writer.expertTeam === true) return true
+      }
+      for (const item of starting.values()) {
+        if (item.sessionId === sessionId && item.expertTeam === true) return true
+      }
+      return queue.some((item) => item.sessionId === sessionId && item.at?.kind === 'expert-team')
     },
 
     isAdmissionSkipped(automationId) {

@@ -112,6 +112,25 @@ it('keeps prepared bytes private and commits one record for concurrent replay', 
   }
 })
 
+it('replays one tool call against its persisted manifest anchor', async () => {
+  const root = makeRoot('artifact-tool-replay-')
+  const first = await createArtifact(root, {
+    sessionId: 'session-1', title: '主报告', format: 'markdown', content: '# 首次正文',
+    anchor: { kind: 'turn', clientMessageId: 'm1' },
+    idempotency: { kind: 'tool', callId: 'call-1' },
+  })
+  // goal 续拍或迟到重放携带的当前锚不同:幂等命中仍返回原 manifest 锚与正文。
+  const replay = await createArtifact(root, {
+    sessionId: 'session-1', title: '主报告', format: 'markdown', content: '# 不应覆盖',
+    anchor: { kind: 'turn', clientMessageId: 'm2' },
+    idempotency: { kind: 'tool', callId: 'call-1' },
+  })
+  expect(replay.artifactId).toBe(first.artifactId)
+  expect(replay.anchor).toEqual({ kind: 'turn', clientMessageId: 'm1' })
+  expect((await readArtifactContent(root, 'session-1', replay.artifactId)).toString('utf8')).toBe('# 首次正文')
+  expect(await listArtifacts(root, 'session-1')).toHaveLength(1)
+})
+
 it('validates runtime input beyond TypeScript types', async () => {
   const root = makeRoot('artifact-validate-')
   const base = {

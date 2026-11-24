@@ -6,9 +6,11 @@ import { join } from "node:path";
 import { test, vi } from "vitest";
 
 import { createSubagentRunRegistry } from "../../src/huaanwork-host/subagent-runs.ts";
+import { createExpertTeamRunRegistry } from "../../src/huaanwork-host/expert-team/runs.ts";
 import { emptyAttachments } from "../../src/huaanwork-guardrails/agent-attachments.ts";
 import { apply as applyPresentAs } from "../../src/huaanwork-guardrails/present-as.ts";
 import { createSystemSkillLeaseStore, type SystemSkillLeaseStore } from "../../src/huaanwork-host/system-skill-leases.ts";
+import { validTeam } from "../fixtures/expert-team/team.ts";
 
 // Transparent spawnSync wrapper: the snapshot tests below assert the blocking
 // budget on the real calls; every other test still executes the real binary.
@@ -1091,4 +1093,111 @@ test("session/disposed releases the lease, and a parent idle without an active g
   seedLease(store, attachments);
   status({ status: "idle", agent: { session: { id: LEASE_SESSION } } });
   assertReleased(store, attachments);
+});
+
+// ── Task 10: 团队运行与 abort/disposed 联动(设计 §13.3) ────────────────────
+
+const TEAM_SESSION = "huaanwork-team-session";
+
+function createTeamCtx(subagentRuns?: Runs) {
+  const listeners: Record<string, ((...args: never[]) => unknown)[]> = {};
+  const emitted: unknown[] = [];
+  const runs = createExpertTeamRunRegistry({ generation: "g1", emit: (event) => emitted.push(event) });
+  const ctx = {
+    huaanworkWorkspaceRoot: { current: "/tmp/pinned" },
+    huaanworkExpertTeamRuns: runs,
+    ...(subagentRuns === undefined ? {} : { huaanworkSubagentRuns: subagentRuns }),
+    huaanworkEmit(event: unknown) {
+      emitted.push(event);
+    },
+    on(event: string, listener: (...args: never[]) => unknown) {
+      (listeners[event] ??= []).push(listener);
+    },
+  };
+  return { ctx, listeners, emitted, runs };
+}
+
+function startTeamRun(runs: ReturnType<typeof createExpertTeamRunRegistry>, sessionId = TEAM_SESSION) {
+  const run = runs.begin({ parentSessionId: sessionId, clientMessageId: "m1", teamSnapshot: validTeam() });
+  let cleanupCalls = 0;
+  runs.attachCancel(run.teamRunId, async () => {
+    cleanupCalls += 1;
+  });
+  return { run, cleanupCalls: () => cleanupCalls };
+}
+
+test("bridge cancels a parent team once across aborted turn/end and abort errors", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted, runs } = createTeamCtx();
+  const team = startTeamRun(runs);
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as unknown as (
+    session: { id: string },
+    event: { type: string; data?: unknown },
+  ) => void;
+  const error = listeners["agent/error"]?.[0] as (payload: { error: unknown; agent?: { session?: { id?: string } } }) => void;
+
+  // 两条 abort 信号(父回合被 hook 中止 + driver abort 错误)只启动一次取消闭包。
+  onSessionEvent({ id: TEAM_SESSION }, { type: "turn/end", data: { reason: { kind: "aborted", reason: { kind: "hook" } } } });
+  error({
+    error: Object.assign(new Error("HuaAnWork model request aborted by caller"), { code: "ABORTED" }),
+    agent: { session: { id: TEAM_SESSION } },
+  });
+  assert.equal(team.cleanupCalls(), 1);
+  assert.equal(runs.get(team.run.teamRunId)?.status, "stopping");
+
+  // 幂等:重复的 abort 信号不得再次触发清理。
+  onSessionEvent({ id: TEAM_SESSION }, { type: "turn/end", data: { reason: { kind: "aborted", reason: { kind: "hook" } } } });
+  assert.equal(team.cleanupCalls(), 1);
+
+  // abort 仍按 cancelled 广播一次会话结束。
+  assert.deepEqual(
+    emitted.filter((event) => (event as { event?: string }).event === "session/end"),
+    [{ event: "session/end", ok: true, cancelled: true, sessionId: TEAM_SESSION }],
+  );
+});
+
+test("bridge never stops a team on a non-abort error or a completed turn", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const { ctx, listeners, emitted, runs } = createTeamCtx();
+  const team = startTeamRun(runs);
+  apply(ctx as never);
+  const onSessionEvent = listeners["session/event"]?.[0] as unknown as (
+    session: { id: string },
+    event: { type: string; data?: unknown },
+  ) => void;
+  const error = listeners["agent/error"]?.[0] as (payload: { error: unknown; agent?: { session?: { id?: string } } }) => void;
+
+  error({ error: new Error("boom"), agent: { session: { id: TEAM_SESSION } } });
+  onSessionEvent({ id: TEAM_SESSION }, { type: "turn/end", data: { reason: { kind: "error" } } });
+  onSessionEvent({ id: TEAM_SESSION }, { type: "turn/end", data: { reason: { kind: "completed" } } });
+  assert.equal(runs.get(team.run.teamRunId)?.status, "running");
+  assert.equal(team.cleanupCalls(), 0);
+  assert.deepEqual(
+    emitted.filter((event) => (event as { event?: string }).event === "session/end"),
+    [{ event: "session/end", ok: false, error: "boom", sessionId: TEAM_SESSION }],
+  );
+});
+
+test("bridge cancels the parent team on session/disposed but ignores a child abort", async () => {
+  const { apply } = await import("../../src/huaanwork-guardrails/bridge.ts");
+  const runs = createRuns();
+  registerChild(runs);
+  const { ctx, listeners, runs: teamRuns } = createTeamCtx(runs);
+  const team = startTeamRun(teamRuns);
+  apply(ctx as never);
+  const disposed = listeners["session/disposed"]?.[0] as unknown as (session: { id: string }) => void;
+  const error = listeners["agent/error"]?.[0] as (payload: { error: unknown; agent?: { session?: { id?: string } } }) => void;
+
+  // 子会话 abort 只更新 run 投影,不得取消父会话团队。
+  error({
+    error: Object.assign(new Error("HuaAnWork model request aborted by caller"), { code: "ABORTED" }),
+    agent: childAgent,
+  });
+  assert.equal(teamRuns.get(team.run.teamRunId)?.status, "running");
+  assert.equal(team.cleanupCalls(), 0);
+
+  disposed({ id: TEAM_SESSION });
+  assert.equal(teamRuns.get(team.run.teamRunId)?.status, "stopping");
+  assert.equal(team.cleanupCalls(), 1);
 });

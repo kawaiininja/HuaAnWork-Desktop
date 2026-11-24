@@ -6,6 +6,8 @@ import {
 } from "../../src/client-huaanwork/logic/progressPanel.ts";
 import type { SubagentRunView } from "../../src/client-huaanwork/logic/subagentRuns.ts";
 import { projectToolPanels } from "../../src/client-huaanwork/logic/toolPanel.ts";
+import type { ExpertTeamRun } from "../../src/client-huaanwork/rpc-types.ts";
+import { validTeam } from "../fixtures/expert-team/team.ts";
 
 function run(overrides: Partial<SubagentRunView> & { runId: string }): SubagentRunView {
   return {
@@ -319,6 +321,70 @@ describe("selectProgressPanelModel subagents", () => {
     });
     const model = selectProgressPanelModel(baseInput({ subagents: [packageRun] }));
     expect(model.subagents).toEqual([packageRun]);
+  });
+});
+
+describe("selectProgressPanelModel expert teams", () => {
+  function teamRun(overrides: Partial<ExpertTeamRun> & { teamRunId: string }): ExpertTeamRun {
+    const team = validTeam();
+    return {
+      parentSessionId: "session-1",
+      clientMessageId: "message-1",
+      teamId: team.id,
+      teamSnapshot: team,
+      status: "running",
+      results: [],
+      artifactStatus: "not-required",
+      deliverySealed: false,
+      unifiedRevisionRounds: 0,
+      dispatchAttempts: 0,
+      startedAt: "2026-11-22T00:00:00.000Z",
+      revision: 1,
+      ...overrides,
+    };
+  }
+
+  it("projects active or current-turn teams and excludes team member subagents from the standalone list", () => {
+    const model = selectProgressPanelModel(
+      baseInput({
+        expertTeams: [
+          teamRun({ teamRunId: "team-active-old-turn", clientMessageId: "m0" }),
+          teamRun({ teamRunId: "team-current-turn", status: "completed", clientMessageId: "message-1" }),
+          teamRun({ teamRunId: "team-other-turn", status: "completed", clientMessageId: "m0" }),
+          teamRun({ teamRunId: "team-stopping", status: "stopping", clientMessageId: "m0" }),
+          teamRun({ teamRunId: "team-other-session", parentSessionId: "session-2" }),
+        ],
+        subagents: [
+          run({ runId: "standalone-run" }),
+          run({ runId: "team-member-run", teamRunId: "team-active-old-turn" }),
+        ],
+      }),
+    );
+    expect(model.expertTeams?.map((entry) => entry.teamRunId)).toEqual([
+      "team-active-old-turn",
+      "team-current-turn",
+      "team-stopping",
+    ]);
+    // 同一次专家团派工不在右栏重复渲染独立子代理卡。
+    expect(model.subagents.map((entry) => entry.runId)).toEqual(["standalone-run"]);
+  });
+
+  it("defaults the expert team projection to empty for callers that do not pass teams", () => {
+    const model = selectProgressPanelModel(baseInput());
+    expect(model.expertTeams).toEqual([]);
+  });
+
+  it("fails closed for terminal teams when the current turn has no authoritative anchor", () => {
+    const model = selectProgressPanelModel(
+      baseInput({
+        currentTurnClientMessageId: undefined,
+        expertTeams: [
+          teamRun({ teamRunId: "team-terminal", status: "completed" }),
+          teamRun({ teamRunId: "team-active", clientMessageId: "m0" }),
+        ],
+      }),
+    );
+    expect(model.expertTeams?.map((entry) => entry.teamRunId)).toEqual(["team-active"]);
   });
 });
 
