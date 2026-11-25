@@ -172,6 +172,10 @@ export interface RebuildStaging {
 
 /** 提交点故障注入（仅进程内测试；跨线程版本是协议里的布尔钩子）。 */
 export interface CommitRebuildOptions {
+  /** Step 1 成功之后、Step 2 提交点之前抛出，模拟提交前重命名失败。 */
+  readonly failBeforeCommitPointForTest?: () => void
+  /** 提交点之后、清理暂存文件之前抛出，模拟 Windows 上删除 `.rebuild-wal` 失败。 */
+  readonly afterCommitCleanupForTest?: () => void
   readonly afterCommitBeforeReopenForTest?: () => void
   readonly failWikiResetOnceForTest?: () => void
 }
@@ -1318,14 +1322,41 @@ function rebuildFailure(
 }
 
 /**
+ * 提交前失败后的收尾：暂存状态必须释放（否则下一次 begin/commit 误判重建仍在
+ * 进行），文件与 pending 清理尽力而为——清理再失败也绝不能把 `rebuild-failed`
+ * 变成未编码异常。残留的 `.rebuild*` 由下一次 `beginRebuildStaging` 或启动恢复
+ * 清理，残留的未提交 pending 由启动恢复的未提交分支清理。
+ */
+function discardStagingAfterFailure(state: StagingState, staging: RebuildStaging): void {
+  stagingStates.delete(staging)
+  try {
+    closeStaging(state)
+  } catch {
+    // 暂存连接已关闭或已损坏，忽略。
+  }
+  try {
+    removeStagingFiles(state.kbDir)
+  } catch {
+    // 清理失败不改变提交前语义：旧库已回滚（或尽力回滚）。
+  }
+  if (state.pendingWritten) {
+    try {
+      removeIfExists(wikiResetPendingPath(state.kbDir))
+    } catch {
+      // 未提交的 pending 由启动恢复的未提交分支清理。
+    }
+  }
+}
+
+/**
  * 提交一次重建（规格 §6.4 提交点协议）：
  * 1. 暂存库 `wal_checkpoint(TRUNCATE)` 并关闭；补写消失文件的整理墓碑；
  * 2. 损坏恢复重建在提交前落盘 `wiki-reset.pending`（`0o600`）；
  * 3. Step 1 把旧 `index.sqlite(-wal/-shm)` 移为 `.bak*`；
  * 4. Step 2 `rename(index.sqlite.rebuild, index.sqlite)` 是唯一提交点；
  * 5. 提交前任何失败都回滚旧库并返回 `rebuild-failed`；
- * 6. 提交后：Wiki 幂等重置 / 清理备份 / 重开新库；重开失败绝不回滚旧库，
- *    返回 `index-error`。
+ * 6. 提交后：暂存清理只是尽力而为的警告（日志），Wiki 幂等重置 / 清理备份 /
+ *    重开新库；重开失败绝不回滚旧库，返回 `index-error`。
  */
 export function commitRebuildStaging(
   kbDir: string,
@@ -1345,16 +1376,14 @@ export function commitRebuildStaging(
       state.pendingWritten = true
     }
   } catch (error) {
-    removeStagingFiles(kbDir)
-    if (state.pendingWritten) removeIfExists(wikiResetPendingPath(kbDir))
-    stagingStates.delete(staging)
+    discardStagingAfterFailure(state, staging)
     return rebuildFailure('rebuild-failed', error)
   }
 
   try {
     moveOldIndexToBackup(kbDir)
+    opts?.failBeforeCommitPointForTest?.()
     renameSync(rebuildDbPath(kbDir), dbPath(kbDir))
-    removeStagingFiles(kbDir)
   } catch (error) {
     // 提交点之前的任何失败：回滚旧库与旧 `wiki/`，清理未提交的 pending。
     try {
@@ -1362,14 +1391,20 @@ export function commitRebuildStaging(
     } catch {
       // 回滚尽力而为；失败时仍返回明确错误由 Host 记 rebuild_failed。
     }
-    removeStagingFiles(kbDir)
-    if (state.pendingWritten) removeIfExists(wikiResetPendingPath(kbDir))
-    stagingStates.delete(staging)
+    discardStagingAfterFailure(state, staging)
     return rebuildFailure('rebuild-failed', error)
   }
 
+  // Step 2 已成功：以下收尾绝不回滚新库，清理错误也不得改判为提交失败。
   stagingStates.delete(staging)
-  // Step 2 已成功：以下收尾绝不回滚新库。
+  try {
+    opts?.afterCommitCleanupForTest?.()
+    removeStagingFiles(kbDir)
+  } catch (error) {
+    // 暂存清理是提交后的 best-effort 收尾：只记录警告细节，结果仍为提交成功。
+    console.warn(`[knowledge] staging cleanup failed after commit: ${errorMessage(error)}`)
+  }
+
   opts?.afterCommitBeforeReopenForTest?.()
 
   let wikiResetPending = false
@@ -1382,9 +1417,14 @@ export function commitRebuildStaging(
     }
     wikiResetPending = !(resetAllowed && performWikiReset(kbDir))
   }
-  removeBackups(kbDir)
-  // 控制器裁决 M-31：提交返回前同步清掉任何残留 `wiki.stale*`。
-  clearWikiStale(kbDir)
+  try {
+    removeBackups(kbDir)
+    // 控制器裁决 M-31：提交返回前同步清掉任何残留 `wiki.stale*`。
+    clearWikiStale(kbDir)
+  } catch (error) {
+    // 备份清扫同样是提交后收尾；残留 `.bak*` 由启动恢复清理。
+    console.warn(`[knowledge] backup sweep failed after commit: ${errorMessage(error)}`)
+  }
 
   let reopened: DatabaseSync
   try {

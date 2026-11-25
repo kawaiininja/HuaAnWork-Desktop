@@ -36,6 +36,7 @@ export const STORAGE_CLIENT_DISPOSE_BUDGET_MS = 900
 export interface CommitRebuildTestOptions {
   readonly afterCommitBeforeReopenForTest?: () => void
   readonly failWikiResetOnceForTest?: () => void
+  readonly failBeforeCommitPointForTest?: () => void
 }
 
 /** Worker 回传的操作错误，保留可路由的错误码。 */
@@ -199,6 +200,7 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
         : {
             ...(commitOpts.afterCommitBeforeReopenForTest === undefined ? {} : { afterCommitBeforeReopen: true }),
             ...(commitOpts.failWikiResetOnceForTest === undefined ? {} : { failWikiResetOnce: true }),
+            ...(commitOpts.failBeforeCommitPointForTest === undefined ? {} : { failBeforeCommitPoint: true }),
           }
       return request(id => ({
         id,

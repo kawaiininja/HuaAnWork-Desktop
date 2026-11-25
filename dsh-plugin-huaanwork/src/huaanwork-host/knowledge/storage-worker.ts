@@ -115,7 +115,8 @@ function openKb(kbId: string, kbDir: string): StorageResultMap['openKb'] {
 
 /**
  * 控制器裁决 M-1：跨线程只传布尔钩子，故障由 Worker 在 `VITEST` 环境下自行
- * 制造——Step 2 之后写入 ASCII 标记破坏新库，或在 Wiki 重置里抛一次。
+ * 制造——Step 2 之后写入 ASCII 标记破坏新库、在 Wiki 重置里抛一次，或在
+ * Step 1 之后、提交点之前抛一次。
  */
 function resolveCommitTestOptions(
   kbDir: string,
@@ -123,9 +124,15 @@ function resolveCommitTestOptions(
 ): CommitRebuildOptions | undefined {
   if (hooks === undefined || process.env['VITEST'] === undefined) return undefined
   const options: {
+    failBeforeCommitPointForTest?: () => void
     afterCommitBeforeReopenForTest?: () => void
     failWikiResetOnceForTest?: () => void
   } = {}
+  if (hooks.failBeforeCommitPoint === true) {
+    options.failBeforeCommitPointForTest = (): void => {
+      throw new Error('knowledge-test: forced pre-commit rebuild failure')
+    }
+  }
   if (hooks.afterCommitBeforeReopen === true) {
     options.afterCommitBeforeReopenForTest = (): void => {
       writeFileSync(dbPath(kbDir), KNOWLEDGE_TEST_CORRUPT_AFTER_COMMIT)
@@ -209,6 +216,7 @@ async function dispatch(message: StorageWorkerRequest): Promise<StorageResultMap
       }
       rebuilds.delete(message.kbId)
       const entry = openKbs.get(message.kbId)
+      const wasOpen = entry !== undefined
       if (entry !== undefined) {
         // Step 1 要在 Windows 上重命名主库，必须先释放本线程的旧连接。
         try {
@@ -223,10 +231,23 @@ async function dispatch(message: StorageWorkerRequest): Promise<StorageResultMap
         staging,
         resolveCommitTestOptions(message.kbDir, message.testHooks),
       )
-      if (!result.ok) return result
-      const reopened = openCommittedKnowledgeDb(message.kbDir)
-      if (!reopened.ok) return { ok: false, code: 'index-error', error: reopened.error }
-      openKbs.set(message.kbId, { db: reopened.db, kbDir: message.kbDir })
+      if (result.ok) {
+        const reopened = openCommittedKnowledgeDb(message.kbDir)
+        if (!reopened.ok) return { ok: false, code: 'index-error', error: reopened.error }
+        openKbs.set(message.kbId, { db: reopened.db, kbDir: message.kbDir })
+        return result
+      }
+      if (result.code === 'rebuild-failed' && wasOpen) {
+        // 规格 §6.4 step 3：提交前失败已把旧库回滚到盘上，必须重新注册，
+        // 否则该库的后续操作全部报 `knowledge base … is not open`。
+        // 这里用不重跑启动恢复、也不消费 `wiki-reset.pending` 的打开方式：
+        // 回滚后的旧库就是提交时的盘上状态，再跑恢复会误清 Host 尚待重试的
+        // pending（与提交成功路径的选择一致）。
+        const reopened = openCommittedKnowledgeDb(message.kbDir)
+        if (reopened.ok) openKbs.set(message.kbId, { db: reopened.db, kbDir: message.kbDir })
+        // 重开失败（例如损坏恢复重建回滚后旧库依旧损坏）保持关闭，但仍按原
+        // 阶段返回 `rebuild-failed`，不得改报 `index-error`。
+      }
       return result
     }
     case 'abortRebuild': {

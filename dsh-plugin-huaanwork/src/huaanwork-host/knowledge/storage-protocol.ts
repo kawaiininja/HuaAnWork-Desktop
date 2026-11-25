@@ -63,6 +63,8 @@ export type StorageGetChunkResult =
 export interface StorageWorkerTestHooks {
   readonly afterCommitBeforeReopen?: boolean
   readonly failWikiResetOnce?: boolean
+  /** Step 1 之后、Step 2 提交点之前抛出，模拟提交前重建失败。 */
+  readonly failBeforeCommitPoint?: boolean
 }
 
 export type StorageWorkerRequest =

@@ -9,6 +9,7 @@ import {
   getChunkWithWindow,
   listDocs,
   markOrganizedAtomic,
+  openCommittedKnowledgeDb,
   openKnowledgeDb,
   renameDocument,
   retryPendingWikiReset,
@@ -343,5 +344,84 @@ describe('knowledge SQLite storage, rebuild commit-point, and Storage Worker', (
     await corruptClient.dispose(900)
     expect(corruptClient.isRunning()).toBe(false)
     rmSync(corruptDir, { recursive: true, force: true })
+  })
+
+  it('reopens the rolled-back old DB and reports rebuild-failed when the commit fails before Step 2', async () => {
+    const client = createKnowledgeStorageClient()
+    const document = (relPath: string, sha256: string, content: string) => ({
+      relPath,
+      normPath: relPath,
+      sha256,
+      size: content.length,
+      mtimeMs: 1,
+      format: 'md',
+      extractMode: 'text' as const,
+      extractConfigHash: 'cfg-1',
+      status: 'indexed' as const,
+      chunks: [sampleChunk(0, content)],
+    })
+    const kbDir = mkdtempSync(join(tmpdir(), 'kb-worker-precommit-'))
+    expect((await client.openKb('kb-precommit', kbDir)).ok).toBe(true)
+    await client.upsertDocument('kb-precommit', document('old.md', 'sha-old', '旧版内容 赎回费率'))
+    expect(await client.beginRebuild('kb-precommit', kbDir)).toEqual({ corruptRecovery: false })
+    await client.upsertRebuildDocument('kb-precommit', document('old.md', 'sha-new', '新版内容 基金税率'))
+
+    // Step 1 已移动旧库，Step 2 提交点之前抛出 → 回滚并返回 rebuild-failed。
+    const failed = await client.commitRebuild('kb-precommit', kbDir, { failBeforeCommitPointForTest: () => {} })
+    expect(failed).toMatchObject({ ok: false, code: 'rebuild-failed' })
+
+    // 回滚后的旧库必须被 Worker 重新注册：读取继续可用且看到旧数据（而不是
+    // 后续每次操作都失败 `knowledge base … is not open`）。
+    const listed = await client.listDocs('kb-precommit')
+    expect(listed.docs.map(doc => doc.relPath)).toEqual(['old.md'])
+    expect(await client.searchFts('kb-precommit', 'kb-precommit', '赎回费率')).toHaveLength(1)
+    expect(await client.searchFts('kb-precommit', 'kb-precommit', '基金税率')).toHaveLength(0)
+    // 连接确实可写：回滚后继续同步新文档。
+    await client.upsertDocument('kb-precommit', document('later.md', 'sha-later', '回滚后继续写入'))
+    expect((await client.listDocs('kb-precommit')).total).toBe(2)
+    expect(existsSync(join(kbDir, 'index.sqlite.rebuild'))).toBe(false)
+
+    await client.dispose(900)
+    expect(client.isRunning()).toBe(false)
+    rmSync(kbDir, { recursive: true, force: true })
+  })
+
+  it('treats a post-commit staging cleanup failure as a warning and keeps wiki-reset.pending on corrupt recovery', () => {
+    const kbDir = mkdtempSync(join(tmpdir(), 'kb-cleanup-fail-'))
+    writeFileSync(join(kbDir, 'index.sqlite'), 'NOT A SQLITE DATABASE')
+    const staging = beginRebuildStaging(kbDir)
+    expect(staging.corruptRecovery).toBe(true)
+    expect(existsSync(join(kbDir, 'wiki-reset.pending'))).toBe(true)
+    staging.upsert({
+      relPath: 'b.md', normPath: 'b.md', sha256: 'h-b', size: 3, mtimeMs: 1,
+      format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+      chunks: [sampleChunk(0, '损坏后重建')],
+    })
+
+    // 提交点之后的暂存清理抛错（模拟 Windows 删除 `.rebuild-wal` 的 EPERM/EBUSY）
+    // 必须只算警告：提交仍然成功、新库保留、pending 绝不被误删。
+    const committed = commitRebuildStaging(kbDir, staging, {
+      afterCommitCleanupForTest: () => {
+        throw new Error('kb-test: EPERM staging cleanup')
+      },
+      failWikiResetOnceForTest: () => {
+        throw new Error('kb-test: forced wiki reset failure')
+      },
+    })
+    expect(committed).toEqual({ ok: true, corruptRecovery: true, wikiResetPending: true })
+    expect(existsSync(join(kbDir, 'index.sqlite.rebuild'))).toBe(false)
+    expect(existsSync(join(kbDir, 'wiki-reset.pending'))).toBe(true)
+    expect(existsSync(join(kbDir, 'index.sqlite.bak'))).toBe(false)
+
+    // 新库就是提交成功的产物，且仍能按原样重开读取。
+    const reopened = openCommittedKnowledgeDb(kbDir)
+    expect(reopened.ok).toBe(true)
+    if (reopened.ok) {
+      expect(searchFts(reopened.db, { kbId: 'k', kbName: 'K', query: '损坏后重建' })).toHaveLength(1)
+      reopened.db.close()
+    }
+    // 保留下来的 pending 仍可由幂等入口收尾（Host 的 wiki-reset-pending 阶段）。
+    expect(retryPendingWikiReset(kbDir)).toEqual({ ok: true })
+    expect(existsSync(join(kbDir, 'wiki-reset.pending'))).toBe(false)
   })
 })
