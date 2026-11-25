@@ -7,7 +7,7 @@
 
 import { R_OK } from 'node:constants'
 import { access, lstat, realpath, stat } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import type { KnowledgeBaseRecord } from './types.ts'
 
@@ -92,7 +92,12 @@ export async function probeCaseSensitiveDir(
 /** `parent` 等于 `child` 或为其祖先目录（两路径均已规范化）。 */
 function isSameOrAncestor(parent: string, child: string): boolean {
   const rel = relative(parent, child)
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+  if (rel === '') return true
+  // 跨盘符（Windows）时 `relative` 返回绝对路径，无法判定为后代。
+  if (isAbsolute(rel)) return false
+  // 只有 `..` 本身或以 `..<sep>` 开头的相对路径才是向上逃逸；`..hidden`
+  // 这类真实目录名是后代，不能被当成 `..` 前缀而误判（否则隔离守卫 fail-open）。
+  return rel !== '..' && !rel.startsWith(`..${sep}`)
 }
 
 /** 两条规范化路径相同或互为祖先/子目录。 */

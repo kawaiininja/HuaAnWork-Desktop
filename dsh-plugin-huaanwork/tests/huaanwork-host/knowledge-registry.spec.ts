@@ -35,17 +35,25 @@ describe('knowledge registry, sourceDir validation, and worker path resolution',
     const docsParent = join(root, 'docs-parent')
     const kbA = join(docsParent, 'docs-a')
     const kbASub = join(kbA, 'nested')
+    // 目录名以 `..` 开头但不是 `..` 本身：`relative()` 产出 `..hidden` / `..sub`，
+    // 旧实现用 `startsWith('..')` 会把真实子目录误判为非子目录（隔离守卫 fail-open）。
+    const profileDotDotSub = join(profileDir, '..hidden')
+    const kbADotDotSub = join(kbA, '..sub')
     const projectDir = join(root, 'registered-project')
     const linkToProfile = join(root, 'link-profile')
     const linkToKbA = join(root, 'link-kba')
     mkdirSync(profileSub, { recursive: true })
+    mkdirSync(profileDotDotSub, { recursive: true })
     mkdirSync(kbASub, { recursive: true })
+    mkdirSync(kbADotDotSub, { recursive: true })
     mkdirSync(projectDir, { recursive: true })
     symlinkSync(profileSub, linkToProfile, DIR_SYMLINK_TYPE)
     symlinkSync(kbASub, linkToKbA, DIR_SYMLINK_TYPE)
 
     await expect(validateSourceDir({ sourceDir: profileDir, profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
     await expect(validateSourceDir({ sourceDir: profileSub, profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
+    // 回归：以 `..` 开头的真实子目录名必须仍被识别为 profileDir 的子目录。
+    await expect(validateSourceDir({ sourceDir: profileDotDotSub, profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
     await expect(validateSourceDir({ sourceDir: root, profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
     await expect(validateSourceDir({ sourceDir: linkToProfile, profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
 
@@ -54,6 +62,8 @@ describe('knowledge registry, sourceDir validation, and worker path resolution',
     }]
     await expect(validateSourceDir({ sourceDir: kbA, profileDir, existing })).resolves.toMatchObject({ ok: false })
     await expect(validateSourceDir({ sourceDir: kbASub, profileDir, existing })).resolves.toMatchObject({ ok: false })
+    // 回归：以 `..` 开头的真实子目录名必须仍被识别为已登记源目录的子目录。
+    await expect(validateSourceDir({ sourceDir: kbADotDotSub, profileDir, existing })).resolves.toMatchObject({ ok: false })
     await expect(validateSourceDir({ sourceDir: docsParent, profileDir, existing })).resolves.toMatchObject({ ok: false })
     await expect(validateSourceDir({ sourceDir: linkToKbA, profileDir, existing })).resolves.toMatchObject({ ok: false })
 
