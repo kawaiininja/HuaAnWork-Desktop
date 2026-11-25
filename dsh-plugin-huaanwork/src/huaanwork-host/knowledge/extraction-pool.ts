@@ -3,9 +3,10 @@
  *
  * 默认并发 1、封顶 2（`R3-B3`）：每个 Worker 独立线程、`maxOldGenerationSizeMb`
  * 固定 256 MB，惰性拉起（0 次提取不创建线程）。单文件超时后立即
- * `worker.terminate()` 并另起 Worker，该文件记 `extract-timeout`；暂停监听 /
- * 退场时 `abortAndDrainKb` / `dispose` 同样以 terminate 为兜底，保证绝不遗留
- * 空转 CPU 线程，也保证源目录 `FileHandle` 全部关闭（Windows 上可移动目录）。
+ * `worker.terminate()` 并另起 Worker，该文件记 `extract-timeout`；暂停监听时
+ * `abortAndDrainKb` 除落定在途 job 外还**等待责任 Worker 退出**（小预算封顶），
+ * 保证暂停应答返回时源目录 `FileHandle` 已全部关闭（Windows 上可移动目录）；
+ * 退场 `dispose` 同样以 terminate + 等待退出为兜底，绝不遗留空转 CPU 线程。
  *
  * Worker 协议只承载数据；`debugDelayMs`（异步延时）与 `debugBusyLoopMs`
  * （同步忙等）是测试缝：前者验证超时隔离，后者验证强制 terminate。
@@ -26,6 +27,12 @@ export const DEFAULT_EXTRACTION_TIMEOUT_MS = 60_000
 export const EXTRACTION_WORKER_MAX_OLD_GEN_MB = 256
 /** 退场预算：到期直接放弃等待（terminate 已发出）。 */
 export const EXTRACTION_POOL_DISPOSE_BUDGET_MS = 300
+/**
+ * 暂停监听排空预算（规格 §6.1）：暂停应答返回前等待在途 Worker 真正退出，
+ * 让它们持有的源文件 `FileHandle` 随线程退出关闭（Windows 上目录可移动）。
+ * 到期同样放弃等待，但 `terminate()` 早已发出。
+ */
+export const EXTRACTION_POOL_DRAIN_BUDGET_MS = 300
 
 export interface ExtractionFileRequest {
   readonly sourceRoot: string
@@ -103,6 +110,11 @@ export interface ExtractionPoolOptions {
 export interface ExtractionPool {
   readonly config: ExtractionPoolConfig
   extractFile(kbId: string, req: ExtractionFileRequest, signal?: AbortSignal): Promise<ExtractionFileResult>
+  /**
+   * 中止该库排队/运行中的提取，terminate 责任 Worker，并等待线程退出
+   * （受 `EXTRACTION_POOL_DRAIN_BUDGET_MS` 预算封顶）后才返回，
+   * 保证暂停应答返回时在途源文件 `FileHandle` 已随 Worker 退出关闭。
+   */
   abortAndDrainKb(kbId: string): Promise<void>
   isRunning(): boolean
   activeWorkerCount(): number
@@ -114,6 +126,11 @@ interface WorkerSlot {
   readonly worker: Worker
   readonly ready: Promise<void>
   dead: boolean
+  /**
+   * `terminate()` 发出后的退出 Promise（成功/失败都落定为 resolved）。
+   * 暂停排空与退场都靠它把「已发 terminate」升级为「已确认线程退出」。
+   */
+  exited: Promise<void> | undefined
 }
 
 interface PendingJob {
@@ -125,8 +142,30 @@ interface PendingJob {
   settle(result: ExtractionFileResult): void
 }
 
+/** 等待并发信号量的排队提取：暂停/退场时可直接撤销（false），尚未打开任何文件。 */
+interface QueuedExtraction {
+  readonly kbId: string
+  readonly grant: (granted: boolean) => void
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** 以 `budgetMs` 封顶等待一组 Worker 退出；`terminate()` 已发出，绝不无限挂起暂停/退场。 */
+async function waitForWorkerExitUnderBudget(exits: readonly Promise<void>[], budgetMs: number): Promise<void> {
+  if (exits.length === 0) return
+  let timer: NodeJS.Timeout | undefined
+  try {
+    await Promise.race([
+      Promise.all(exits).then(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, budgetMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 function clampWorkers(value: number | undefined): 1 | 2 {
@@ -160,30 +199,43 @@ export function createExtractionPool(opts: ExtractionPoolOptions = {}): Extracti
 
   let disposed = false
   let activeCount = 0
-  const semaphoreWaiters: Array<() => void> = []
+  const semaphoreWaiters: QueuedExtraction[] = []
   const idleSlots: WorkerSlot[] = []
   const slots = new Set<WorkerSlot>()
   const pending = new Map<number, PendingJob>()
   const jobsByKb = new Map<string, Set<PendingJob>>()
   let nextId = 1
 
-  function acquireSlot(): Promise<void> {
+  function acquireSlot(kbId: string): Promise<boolean> {
     if (activeCount < config.maxWorkers) {
       activeCount += 1
-      return Promise.resolve()
+      return Promise.resolve(true)
     }
-    return new Promise<void>((resolve) => {
-      semaphoreWaiters.push(resolve)
+    return new Promise<boolean>((resolve) => {
+      semaphoreWaiters.push({ kbId, grant: resolve })
     })
   }
 
   function releaseSlot(): void {
     const next = semaphoreWaiters.shift()
     if (next !== undefined) {
-      next()
+      next.grant(true)
       return
     }
     if (activeCount > 0) activeCount -= 1
+  }
+
+  /** 撤销该库仍在排队的提取（尚未占用 Worker、也未打开任何文件）；返回撤销数量。 */
+  function abortQueuedExtractions(kbId: string): number {
+    let aborted = 0
+    for (let index = semaphoreWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = semaphoreWaiters[index]
+      if (waiter === undefined || waiter.kbId !== kbId) continue
+      semaphoreWaiters.splice(index, 1)
+      waiter.grant(false)
+      aborted += 1
+    }
+    return aborted
   }
 
   function removeFromIdle(slot: WorkerSlot): void {
@@ -197,12 +249,18 @@ export function createExtractionPool(opts: ExtractionPoolOptions = {}): Extracti
     }
   }
 
-  function killSlot(slot: WorkerSlot): void {
-    if (slot.dead) return
-    slot.dead = true
-    slots.delete(slot)
-    removeFromIdle(slot)
-    void slot.worker.terminate().catch(() => undefined)
+  /**
+   * 标记槽位死亡并发出 `terminate()`；返回的 Promise 在线程真正退出后落定
+   * （错误被吞掉）。同一槽位重复调用返回同一个退出 Promise。
+   */
+  function killSlot(slot: WorkerSlot): Promise<void> {
+    if (!slot.dead) {
+      slot.dead = true
+      slots.delete(slot)
+      removeFromIdle(slot)
+      slot.exited = slot.worker.terminate().then(() => undefined, () => undefined)
+    }
+    return slot.exited ?? Promise.resolve()
   }
 
   function spawnSlot(): WorkerSlot {
@@ -218,7 +276,7 @@ export function createExtractionPool(opts: ExtractionPoolOptions = {}): Extracti
     })
     // 空闲 Worker 崩溃时无人 await `ready`：吞掉拒绝，避免 unhandledRejection。
     void ready.catch(() => undefined)
-    const slot: WorkerSlot = { worker, ready, dead: false }
+    const slot: WorkerSlot = { worker, ready, dead: false, exited: undefined }
 
     worker.on('message', (message: ExtractionWorkerReadyMessage | ExtractionWorkerResponse) => {
       if (isReadyMessage(message)) {
@@ -364,7 +422,9 @@ export function createExtractionPool(opts: ExtractionPoolOptions = {}): Extracti
   ): Promise<ExtractionFileResult> {
     if (disposed) return { ok: false, reason: 'aborted', error: 'extraction pool disposed' }
     if (signal?.aborted === true) return { ok: false, reason: 'aborted' }
-    await acquireSlot()
+    const granted = await acquireSlot(kbId)
+    // 排队期间被暂停/退场撤销：尚未打开任何文件，直接以 aborted 落定。
+    if (!granted) return { ok: false, reason: 'aborted', error: 'knowledge base extraction aborted before start' }
     try {
       if (disposed) return { ok: false, reason: 'aborted', error: 'extraction pool disposed' }
       return await runJob(kbId, req, signal)
@@ -376,14 +436,32 @@ export function createExtractionPool(opts: ExtractionPoolOptions = {}): Extracti
   return {
     config,
     extractFile,
+    /**
+     * 规格 §6.1：暂停应答返回前必须让在途提取的源文件 `FileHandle` 全部关闭。
+     * 因此这里先撤销该库仍在排队的提取（未打开文件、不占 Worker），再同步落定
+     * 其排队/运行中的 job 为 `aborted`，并对负责它们的 Worker 发 `terminate()`
+     * 且**等待线程真正退出**（受 `EXTRACTION_POOL_DRAIN_BUDGET_MS` 预算封顶）
+     * 后才返回。
+     */
     async abortAndDrainKb(kbId: string): Promise<void> {
+      abortQueuedExtractions(kbId)
       const jobs = [...(jobsByKb.get(kbId) ?? [])]
       if (jobs.length === 0) return
-      await Promise.all(jobs.map(job => new Promise<void>((resolve) => {
-        job.drainWaiters.push(resolve)
-        killSlot(job.slot)
+      const settlements: Array<Promise<void>> = []
+      const exits: Array<Promise<void>> = []
+      const killed = new Set<WorkerSlot>()
+      for (const job of jobs) {
+        settlements.push(new Promise<void>((resolve) => {
+          job.drainWaiters.push(resolve)
+        }))
+        if (!killed.has(job.slot)) {
+          killed.add(job.slot)
+          exits.push(killSlot(job.slot))
+        }
         job.settle({ ok: false, reason: 'aborted', error: 'knowledge base watch paused' })
-      })))
+      }
+      await Promise.all(settlements)
+      await waitForWorkerExitUnderBudget(exits, EXTRACTION_POOL_DRAIN_BUDGET_MS)
     },
     isRunning: (): boolean => slots.size > 0,
     activeWorkerCount: (): number => slots.size,
@@ -393,25 +471,18 @@ export function createExtractionPool(opts: ExtractionPoolOptions = {}): Extracti
       const live = [...slots]
       slots.clear()
       idleSlots.length = 0
+      for (const waiter of semaphoreWaiters.splice(0)) waiter.grant(false)
       for (const job of [...pending.values()]) {
         job.settle({ ok: false, reason: 'aborted', error: 'extraction pool disposed' })
       }
       const budget = Number.isFinite(budgetMs) ? Math.max(0, Math.trunc(budgetMs)) : EXTRACTION_POOL_DISPOSE_BUDGET_MS
       const terminations = live.map((slot) => {
         slot.dead = true
-        return slot.worker.terminate().catch(() => undefined)
+        const exited = slot.worker.terminate().then(() => undefined, () => undefined)
+        slot.exited = exited
+        return exited
       })
-      let timer: NodeJS.Timeout | undefined
-      try {
-        await Promise.race([
-          Promise.all(terminations).then(() => undefined),
-          new Promise<void>((resolve) => {
-            timer = setTimeout(resolve, budget)
-          }),
-        ])
-      } finally {
-        if (timer !== undefined) clearTimeout(timer)
-      }
+      await waitForWorkerExitUnderBudget(terminations, budget)
     },
   }
 }

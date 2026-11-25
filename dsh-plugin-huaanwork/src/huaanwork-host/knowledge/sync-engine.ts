@@ -595,19 +595,27 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     for (const doc of docs) existingByKey.set(norm(doc.relPath), doc)
 
     const accepted: WalkedSourceFile[] = []
+    const retained: WalkedSourceFile[] = []
     let capSkipped = 0
     for (const file of walked) {
       if (accepted.length < maxFilesPerKb) {
         accepted.push(file)
         continue
       }
-      // 超限但已入库的文件保留原记录（不删不改），只有新文件被跳过。
-      if (existingByKey.has(norm(file.relPath))) continue
+      // 超限但已入库的文件保留原记录（不删不改），只有新文件被跳过并计入汇总。
+      if (existingByKey.has(norm(file.relPath))) {
+        retained.push(file)
+        continue
+      }
       capSkipped += 1
     }
 
+    // 已入库的超限文件同样进入 diskByKey：它们仍在盘上，绝不是「消失」，
+    // 只是本周期不再重切/重写元数据（retainedKeys 在文档循环里跳过）。
     const diskByKey = new Map<string, WalkedSourceFile>()
     for (const file of accepted) diskByKey.set(norm(file.relPath), file)
+    for (const file of retained) diskByKey.set(norm(file.relPath), file)
+    const retainedKeys = new Set(retained.map((file) => norm(file.relPath)))
 
     const deletes: DocumentRecordSummary[] = []
     const upserts: Array<{ readonly file: WalkedSourceFile; readonly existing?: DocumentRecordSummary }> = []
@@ -615,11 +623,15 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     const added: WalkedSourceFile[] = []
 
     for (const doc of docs) {
-      const file = diskByKey.get(norm(doc.relPath))
+      const key = norm(doc.relPath)
+      const file = diskByKey.get(key)
       if (file === undefined) {
         deletes.push(doc)
         continue
       }
+      // 超限但已入库的文件本周期完全不动：不重切、不重写元数据、不参与大小写
+      // 重命名（下一次它排序进入上限内时再恢复正常对账）。
+      if (retainedKeys.has(key)) continue
       if (file.relPath !== doc.relPath) {
         // 大小写不敏感卷上的仅大小写重命名：同 norm 键、不同拼写。
         caseRenames.push({ doc, file })

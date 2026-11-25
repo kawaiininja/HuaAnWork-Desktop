@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, utimesSyn
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Worker } from 'node:worker_threads'
 import { describe, expect, it, vi } from 'vitest'
 import {
   detectCloudPlaceholder,
@@ -105,6 +106,85 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
     } finally {
       await pool.dispose()
     }
+  })
+
+  it('awaits responsible Extraction Worker exit before abortAndDrainKb (pause) resolves (spec §6.1)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kb-ext-drain-'))
+    writeFileSync(join(dir, 'slow.md'), '# 慢文件\n正文')
+
+    const pool = createExtractionPool({ maxWorkers: 1, timeoutMs: 30_000 })
+    const originalTerminate = Worker.prototype.terminate
+    const exitDelayMs = 150
+    const terminateSpy = vi.spyOn(Worker.prototype, 'terminate')
+    terminateSpy.mockImplementation(function (this: Worker): Promise<number> {
+      // 真实发出 terminate（线程确实开始退出），但把「退出完成」推迟 exitDelayMs：
+      // 只有池真的等待线程退出，暂停耗时才会覆盖这段延迟；旧实现会立刻返回。
+      const real = originalTerminate.call(this)
+      return new Promise<number>((resolve, reject) => {
+        setTimeout(() => {
+          real.then(resolve, reject)
+        }, exitDelayMs)
+      })
+    })
+    try {
+      const inflight = pool.extractFile('kb-drain', {
+        sourceRoot: dir,
+        filePath: join(dir, 'slow.md'),
+        relPath: 'slow.md',
+        debugDelayMs: 10_000,
+      })
+      await vi.waitFor(() => {
+        expect(pool.activeWorkerCount()).toBe(1)
+      }, { timeout: 2_000 })
+
+      const startedAt = Date.now()
+      await pool.abortAndDrainKb('kb-drain')
+      const elapsed = Date.now() - startedAt
+
+      // 暂停返回时：job 已落定为 aborted，负责它的 Worker 也已确认退出（等待了退出耗时）。
+      expect(await inflight).toMatchObject({ ok: false, reason: 'aborted' })
+      expect(terminateSpy).toHaveBeenCalledTimes(1)
+      expect(elapsed).toBeGreaterThanOrEqual(100)
+      expect(pool.activeWorkerCount()).toBe(0)
+      expect(pool.isRunning()).toBe(false)
+    } finally {
+      terminateSpy.mockRestore()
+      await pool.dispose()
+    }
+  })
+
+  it('aborts a paused KB queued extraction without touching the worker busy with another KB', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kb-ext-queue-'))
+    writeFileSync(join(dir, 'a.md'), '# A\n正文')
+    writeFileSync(join(dir, 'b.md'), '# B\n正文')
+
+    const pool = createExtractionPool({ maxWorkers: 1, timeoutMs: 30_000 })
+    const running = pool.extractFile('kb-busy', {
+      sourceRoot: dir,
+      filePath: join(dir, 'b.md'),
+      relPath: 'b.md',
+      debugDelayMs: 30_000,
+    })
+    try {
+      await vi.waitFor(() => {
+        expect(pool.activeWorkerCount()).toBe(1)
+      }, { timeout: 2_000 })
+      const queued = pool.extractFile('kb-queued', {
+        sourceRoot: dir,
+        filePath: join(dir, 'a.md'),
+        relPath: 'a.md',
+      })
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 50)
+      })
+      // 暂停排队中的库：排队任务以 aborted 落定（从未打开文件），忙碌 Worker 不受影响。
+      await pool.abortAndDrainKb('kb-queued')
+      expect(await queued).toMatchObject({ ok: false, reason: 'aborted' })
+      expect(pool.activeWorkerCount()).toBe(1)
+    } finally {
+      await pool.dispose()
+    }
+    expect(await running).toMatchObject({ ok: false, reason: 'aborted' })
   })
 
   it('skips dehydrated cloud placeholders without opening or invoking Extraction pool while indexing sibling local files (R3-I6)', async () => {
@@ -382,11 +462,15 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       docsAfterRename = (await storage.listDocs('kb-1')).docs
       expect(docsAfterRename.find(d => d.relPath === 'dup3.md')?.docId).not.toBe(dup1Id)
       expect(docsAfterRename.find(d => d.relPath === 'dup3.md')?.docId).not.toBe(dup2Id)
+      const dup3Id = docsAfterRename.find(d => d.relPath === 'dup3.md')?.docId
+      expect(dup3Id).toBeTruthy()
       renameSync(join(sourceA, 'dup2.md'), join(sourceA, 'dup4.md'))
       await engine.syncNow('kb-1')
       docsAfterRename = (await storage.listDocs('kb-1')).docs
       expect(docsAfterRename.find(d => d.relPath === 'dup4.md')?.docId).not.toBe(dup1Id)
       expect(docsAfterRename.find(d => d.relPath === 'dup4.md')?.docId).not.toBe(dup2Id)
+      const dup4Id = docsAfterRename.find(d => d.relPath === 'dup4.md')?.docId
+      expect(dup4Id).toBeTruthy()
 
       // Multi-vanish / multi-add batch must not reuse doc_id either (rename rule is exactly 1 + 1)
       writeFileSync(join(sourceA, 'multi-1.md'), '多对多甲')
@@ -403,6 +487,10 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       const docsAfterMulti = (await storage.listDocs('kb-1')).docs
       expect(docsAfterMulti.find(d => d.relPath === 'multi-a.md')?.docId).not.toBe(multi1Id)
       expect(docsAfterMulti.find(d => d.relPath === 'multi-b.md')?.docId).not.toBe(multi2Id)
+      const multiAId = docsAfterMulti.find(d => d.relPath === 'multi-a.md')?.docId
+      const multiBId = docsAfterMulti.find(d => d.relPath === 'multi-b.md')?.docId
+      expect(multiAId).toBeTruthy()
+      expect(multiBId).toBeTruthy()
 
       // Case-only rename on case-insensitive volume reuses doc_id (spec §6.1)
       engine.setCaseSensitiveForTest('kb-1', false)
@@ -412,12 +500,23 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       renameSync(join(sourceA, 'A-RENAMED.md'), join(sourceA, 'a-renamed.md'))
       await engine.syncNow('kb-1')
 
-      // > 5 files batch folds into single sync_completed summary & enforces maxFilesPerKb (10)
+      // > 5 files batch folds into single sync_completed summary & enforces maxFilesPerKb (10).
+      // 字典序前 10 名为 a-renamed + batch-0/1/10/11/2..6；dup3/dup4/multi-a/multi-b 排序
+      // 在上限之外但已入库，必须保留原行与 doc_id（旧实现会把它们当「消失」删掉）。
       for (let i = 0; i < 12; i += 1) writeFileSync(join(sourceA, `batch-${i}.md`), `批量文档 ${i}`)
       await engine.syncNow('kb-1')
       const eventsAfterBatch = await readKnowledgeEvents(neutralKnowledgeRootPath(profileDir, 'kb-1'))
       expect(eventsAfterBatch.some(e => e.kind === 'sync_completed' && (e.count ?? 0) > 5)).toBe(true)
-      expect(eventsAfterBatch.some(e => e.kind === 'file_skipped' && (e.detail ?? '').includes('max-files-exceeded'))).toBe(true)
+
+      const capEvent = eventsAfterBatch.find(e => e.kind === 'file_skipped' && (e.detail ?? '').startsWith('max-files-exceeded'))
+      // 汇总只统计真正的新文件（字典序在外的 batch-7/8/9），已入库的超限文档不算新跳过。
+      expect(capEvent?.count).toBe(3)
+      const docsAfterBatch = (await storage.listDocs('kb-1')).docs
+      expect(docsAfterBatch.find(d => d.relPath === 'dup3.md')?.docId).toBe(dup3Id)
+      expect(docsAfterBatch.find(d => d.relPath === 'dup4.md')?.docId).toBe(dup4Id)
+      expect(docsAfterBatch.find(d => d.relPath === 'multi-a.md')?.docId).toBe(multiAId)
+      expect(docsAfterBatch.find(d => d.relPath === 'multi-b.md')?.docId).toBe(multiBId)
+      expect(docsAfterBatch).toHaveLength(14)
 
       // Seed organized_sha256, wiki card, and chunk_embeddings BEFORE rebind (R3-I7)
       const alphaBeforeRebind = (await storage.listDocs('kb-1')).docs.find(d => d.relPath === 'a-renamed.md')!
