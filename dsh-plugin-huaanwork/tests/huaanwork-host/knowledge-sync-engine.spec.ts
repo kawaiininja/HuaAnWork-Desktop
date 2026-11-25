@@ -394,6 +394,64 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
     }
   })
 
+  it('isolates a single-file extraction failure during rebuild instead of aborting the whole rebuild (spec §2.3)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-rebuild-isolate-'))
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'src')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    writeFileSync(join(sourceDir, 'good.md'), '正常文档内容')
+    writeFileSync(join(sourceDir, 'bad.md'), '损坏文档内容')
+
+    const kbDir = neutralKnowledgeRootPath(profileDir, 'kb-iso')
+    const storage = createKnowledgeStorageClient()
+    const pool = createExtractionPool({ maxWorkers: 1 })
+    const realExtract = pool.extractFile.bind(pool)
+    let failBad = false
+    const extractSpy = vi.spyOn(pool, 'extractFile').mockImplementation(async (kbId, req, signal) => {
+      if (failBad && req.relPath === 'bad.md') {
+        return { ok: false, reason: 'read-error' as const, error: 'simulated read failure' }
+      }
+      return realExtract(kbId, req, signal)
+    })
+    const engine = createKnowledgeSyncEngine({
+      profileDir,
+      storage,
+      pool,
+      debounceMs: 30,
+      writeStableMs: 10,
+      reconcileIntervalMs: 300_000,
+    })
+    try {
+      await engine.startKb({ id: 'kb-iso', name: '隔离库', sourceDir, autoOrganize: false, watchPaused: true, createdAt: '2026-11-25T00:00:00.000Z' })
+      await engine.syncNow('kb-iso')
+      const goodId = (await storage.listDocs('kb-iso')).docs.find(d => d.relPath === 'good.md')?.docId
+      expect(goodId).toBeTruthy()
+
+      failBad = true
+      await engine.rebuildIndex('kb-iso')
+
+      const after = (await storage.listDocs('kb-iso')).docs
+      expect(after.find(d => d.relPath === 'good.md')).toMatchObject({ docId: goodId, status: 'indexed' })
+      expect(after.find(d => d.relPath === 'bad.md')).toMatchObject({ status: 'error', statusReason: 'read-error' })
+
+      const events = await readKnowledgeEvents(kbDir)
+      expect(events.some(e => e.kind === 'rebuild_completed')).toBe(true)
+      expect(events.some(e => e.kind === 'file_error' && e.relPath === 'bad.md')).toBe(true)
+      expect(events.some(e => e.kind === 'rebuild_failed')).toBe(false)
+
+      // 提交点成功、阶段恢复（watchPaused 库回到 watch-paused），无暂存库残留。
+      expect(engine.getState('kb-iso')?.phase).toBe('watch-paused')
+      expect(existsSync(join(kbDir, 'index.sqlite'))).toBe(true)
+      expect(existsSync(join(kbDir, 'index.sqlite.rebuild'))).toBe(false)
+    } finally {
+      extractSpy.mockRestore()
+      await engine.dispose()
+      await pool.dispose()
+      await storage.dispose(900)
+    }
+  })
+
   it('supports 1-to-1 & case-only rename without duplicate false positives, >5 batch folding, maxFilesPerKb cap, and rebind preserving doc_id/organized_sha256/wiki/embeddings (R3-I7)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'kb-sync-'))
     const profileDir = join(root, 'profile')
@@ -533,7 +591,8 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       const future = new Date(Date.now() + 120_000)
       utimesSync(join(sourceAMoved, 'a-renamed.md'), future, future)
       const rebindExtractCountBefore = engine.getMetricsForTest('kb-1').fullRechunkCount
-      await engine.rebindSourceDir('kb-1', sourceAMoved)
+      await engine.rebindSourceDir('kb-1', sourceAMoved, sourceAMoved, () =>
+        writeKnowledgeBases(profileDir, [{ ...kb, sourceDir: sourceAMoved }]))
       const alphaAfterRebind = (await storage.listDocs('kb-1')).docs.find(d => d.relPath === 'a-renamed.md')
       expect(alphaAfterRebind?.docId).toBe(alphaId)
       expect(alphaAfterRebind?.organizedSha256).toBe(alphaBeforeRebind.sha256)
@@ -546,12 +605,11 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
 
       // Rebind to unrelated dir disables cross-dir rename guessing and deletes disappeared docs
       writeFileSync(join(sourceUnrelated, 'other-name.md'), '唯一内容 Alpha')
-      await engine.rebindSourceDir('kb-1', sourceUnrelated)
+      await engine.rebindSourceDir('kb-1', sourceUnrelated, sourceUnrelated, () =>
+        writeKnowledgeBases(profileDir, [{ ...kb, sourceDir: sourceUnrelated }]))
       expect((await storage.listDocs('kb-1')).docs.find(d => d.relPath === 'other-name.md')?.docId).not.toBe(alphaId)
-
-      // Invalid rebind path has zero side-effect
-      await expect(engine.rebindSourceDir('kb-1', profileDir)).rejects.toThrow()
       expect(engine.getState('kb-1')?.sourceDir).toBe(sourceUnrelated)
+      // 重绑校验已前移到 Host（零副作用 validateSourceDir）；引擎只消费校验结果。
       expect(existsSync(join(neutralKnowledgeRootPath(profileDir, 'kb-1'), 'index.sqlite'))).toBe(true)
     } finally {
       await engine.dispose()

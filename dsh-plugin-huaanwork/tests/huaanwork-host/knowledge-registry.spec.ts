@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readdirSync, statSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -90,6 +90,47 @@ describe('knowledge registry, sourceDir validation, and worker path resolution',
       expect(statSync(join(profileDir, 'knowledge-bases.json')).mode & 0o777).toBe(0o600)
       expect(statSync(join(profileDir, 'huaanwork-settings.json')).mode & 0o777).toBe(0o600)
     }
+  })
+
+  it('quarantines a corrupt knowledge-bases.json before returning [] so a later write cannot erase existing bindings', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-reg-corrupt-'))
+    const profileDir = join(root, 'profile')
+    const validDocsDir = join(root, 'valid-docs')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(validDocsDir, { recursive: true })
+    const registryPath = join(profileDir, 'knowledge-bases.json')
+    const corruptBytes = '{"knowledgeBases": ['
+
+    writeFileSync(registryPath, corruptBytes, { mode: 0o600 })
+    await expect(readKnowledgeBases(profileDir)).resolves.toEqual([])
+    const quarantined = readdirSync(profileDir).filter(name => name.startsWith('knowledge-bases.json.corrupt-'))
+    expect(quarantined).toHaveLength(1)
+    const quarantinedPath = join(profileDir, quarantined[0]!)
+    expect(readFileSync(quarantinedPath, 'utf8')).toBe(corruptBytes)
+    if (process.platform !== 'win32') {
+      // `rename` 保留原 0o600 权限，隔离文件可安全留在 profile 目录供人工恢复。
+      expect(statSync(quarantinedPath).mode & 0o777).toBe(0o600)
+    }
+
+    const record = {
+      id: 'kb-1',
+      name: '恢复库',
+      sourceDir: validDocsDir,
+      autoOrganize: false,
+      watchPaused: false,
+      createdAt: '2026-11-25T00:00:00.000Z',
+    }
+    await writeKnowledgeBases(profileDir, [record])
+    // 隔离文件不被新写入覆盖或删除，新注册表可正常解析。
+    expect(readFileSync(quarantinedPath, 'utf8')).toBe(corruptBytes)
+    await expect(readKnowledgeBases(profileDir)).resolves.toEqual([record])
+
+    // 顶层形状不符（不是 `{ knowledgeBases: array }`）同样隔离。
+    const shapeProfile = join(root, 'profile-shape')
+    mkdirSync(shapeProfile, { recursive: true })
+    writeFileSync(join(shapeProfile, 'knowledge-bases.json'), '{"knowledgeBases": 42}')
+    await expect(readKnowledgeBases(shapeProfile)).resolves.toEqual([])
+    expect(readdirSync(shapeProfile).some(name => name.startsWith('knowledge-bases.json.corrupt-'))).toBe(true)
   })
 
   it('probes directory case sensitivity without creating files and handles non-ASCII leaf names', async () => {

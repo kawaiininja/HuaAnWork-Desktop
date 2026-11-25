@@ -393,13 +393,41 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     maintainingIds.add(kbId)
     try {
       let next: KnowledgeBaseRecord = record
+      /** 已经随重绑落盘并同步进内存的记录（避免重复写同一内容）。 */
+      let persistedNext: KnowledgeBaseRecord = record
       if (patch.name !== undefined) next = { ...next, name: patch.name }
       if (patch.autoOrganize !== undefined) next = { ...next, autoOrganize: patch.autoOrganize }
       if (patch.sourceDir !== undefined && patch.sourceDir !== next.sourceDir) {
-        // 控制器裁决 M-4：重绑委托引擎（零副作用校验 → 维护门闩 → 停机序列 →
-        // 原子写注册表 → 保留索引/wiki → 禁用跨目录重命名猜配的全量对账）。
-        await engine.rebindSourceDir(kbId, patch.sourceDir)
-        next = { ...next, sourceDir: patch.sourceDir }
+        const newSourceDir = patch.sourceDir
+        // 控制器终审裁决（单写者）：Host 是 `knowledge-bases.json` 的唯一写者。
+        // 1. 零副作用前置校验：失败时绝不关闭旧 Watcher、不写注册表、不动索引与 wiki。
+        const validation = await validateSourceDir({
+          sourceDir: newSourceDir,
+          profileDir,
+          existing: [...records.values()],
+          ignoreKbId: kbId,
+        })
+        if (!validation.ok) {
+          throw new KnowledgeSyncError('invalid-source-dir', validation.reason)
+        }
+        const rebound: KnowledgeBaseRecord = { ...next, sourceDir: newSourceDir }
+        // 2/3. 引擎取维护门闩 + 停机序列；Host 在收敛前经 registryChain 原子
+        //      落盘并更新内存。落盘失败回滚内存并抛出，引擎用旧记录恢复运行态。
+        //      落盘成功后的收敛失败由引擎吞掉：磁盘与内存都保持新 sourceDir，
+        //      下次启动对账自愈（规格 §6.4 失败与中断恢复）。
+        await engine.rebindSourceDir(kbId, newSourceDir, validation.realSourceDir, async () => {
+          const previous = records.get(kbId)
+          records.set(kbId, rebound)
+          try {
+            await persistRegistry()
+          } catch (error) {
+            if (previous === undefined) records.delete(kbId)
+            else records.set(kbId, previous)
+            throw error
+          }
+        })
+        next = rebound
+        persistedNext = rebound
       }
       if (patch.watchPaused !== undefined && patch.watchPaused !== next.watchPaused) {
         if (patch.watchPaused) await engine.pauseWatch(kbId)
@@ -408,7 +436,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       }
       if (next !== record) {
         records.set(kbId, next)
-        await persistRegistry()
+        if (next !== persistedNext) await persistRegistry()
       }
       return next
     } finally {

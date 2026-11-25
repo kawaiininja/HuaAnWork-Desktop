@@ -11,10 +11,12 @@
  * 重命名复用只在一批里「恰好 1 条消失 + 1 条新增且 sha256 相同、无内容重复」
  * 时生效；多对多/重复内容按删除 + 新增处理，绝不把副本认成重命名。
  *
- * 重绑源目录（§6.4）先做零副作用校验，再进维护门闩 + 停机序列、原子写回
- * `knowledge-bases.json`、重探大小写、保留 `index.sqlite` 与 `wiki/`，最后做禁用
- * 跨目录重命名猜配的全量对账：同 `rel_path` 且 `sha256` + `extract_config_hash`
- * 均一致的文件直接元数据短路（零重切、零清向量、零清 `organized_sha256`）。
+ * 重绑源目录（§6.4）先做零副作用校验（由 Host 调用 `validateSourceDir` 后传入
+ * `realSourceDir`），再进维护门闩 + 停机序列、由 Host 原子写回
+ * `knowledge-bases.json` 并更新内存、重探大小写、保留 `index.sqlite` 与 `wiki/`，
+ * 最后做禁用跨目录重命名猜配的全量对账：同 `rel_path` 且 `sha256` +
+ * `extract_config_hash` 均一致的文件直接元数据短路（零重切、零清向量、零清
+ * `organized_sha256`）。注册表唯一写者是 Host，本引擎绝不写注册表。
  *
  * 本文件会被测试以 `.ts` 源码直接加载（Node type-stripping），因此不得使用
  * `enum`、构造器参数属性与 `namespace`；纯类型导入必须写 `import type`，
@@ -31,8 +33,8 @@ import type { CloudPlaceholderState } from './cloud-placeholder.ts'
 import { appendKnowledgeEvent } from './events.ts'
 import type { AppendKnowledgeEventInput } from './events.ts'
 import { computeExtractConfigHash } from './extractors/extract-config.ts'
-import { probeCaseSensitiveDir, validateSourceDir } from './paths.ts'
-import { readKnowledgeBases, writeKnowledgeBases } from './registry.ts'
+import { probeCaseSensitiveDir } from './paths.ts'
+import { readKnowledgeBases } from './registry.ts'
 import { walkSourceDirectory } from './safe-read.ts'
 import type { WalkedSourceFile } from './safe-read.ts'
 import { MAX_FILES_PER_KB } from './types.ts'
@@ -137,7 +139,20 @@ export interface KnowledgeSyncEngine {
   pauseWatch(kbId: string): Promise<void>
   resumeWatch(kbId: string): Promise<void>
   syncNow(kbId: string): Promise<void>
-  rebindSourceDir(kbId: string, newSourceDir: string): Promise<void>
+  /**
+   * 重绑源目录运行态收敛（规格 §6.4；控制器终审裁决：注册表唯一写者为 Host）。
+   * Host 先零副作用校验并拿到 `realSourceDir`，本方法再取维护门闩 + 停机序列，
+   * 调用 `persist` 让 Host 原子写回注册表并更新内存（失败则完全保留旧绑定与
+   * 旧数据），随后重探大小写、保留索引/wiki 做禁用跨目录重命名猜配的全量对账，
+   * 最后更新 runtime 记录。落盘后收敛失败不回滚：磁盘与内存都保持新
+   * `sourceDir`，由下次启动对账自愈。
+   */
+  rebindSourceDir(
+    kbId: string,
+    newSourceDir: string,
+    realSourceDir: string,
+    persist: () => Promise<void>,
+  ): Promise<void>
   rebuildIndex(kbId: string): Promise<void>
   handleSystemResume(): Promise<void>
   onSystemResume(listener: () => void): () => void
@@ -486,6 +501,23 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       extractMode: 'none',
       extractConfigHash: computeExtractConfigHash(),
       status: 'skipped',
+      statusReason: reason,
+      chunks: [],
+    }
+  }
+
+  /** 重建时的单文件提取失败行：保留文件元数据，`status_reason` 记机器原因。 */
+  function errorInput(runtime: Runtime, file: WalkedSourceFile, reason: string): UpsertDocumentInput {
+    return {
+      relPath: file.relPath,
+      normPath: normalizeRelPath(runtime, file.relPath),
+      sha256: '',
+      size: file.size,
+      mtimeMs: file.mtimeMs,
+      format: formatFromRelPath(file.relPath),
+      extractMode: 'none',
+      extractConfigHash: computeExtractConfigHash(),
+      status: 'error',
       statusReason: reason,
       chunks: [],
     }
@@ -1114,41 +1146,39 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     await runtime.chain.catch(() => undefined)
   }
 
-  async function rebindSourceDir(kbId: string, newSourceDir: string): Promise<void> {
+  async function rebindSourceDir(
+    kbId: string,
+    newSourceDir: string,
+    realSourceDir: string,
+    persist: () => Promise<void>,
+  ): Promise<void> {
     const runtime = await ensureRuntime(kbId)
-    const records = await readKnowledgeBases(profileDir)
-    // 前置校验零副作用：失败时不动 Watcher、不写注册表、不碰索引与 wiki。
-    const validation = await validateSourceDir({
-      sourceDir: newSourceDir,
-      profileDir,
-      existing: records,
-      ignoreKbId: kbId,
-    })
-    if (!validation.ok) {
-      throw new KnowledgeSyncError('invalid-source-dir', validation.reason)
-    }
     const release = await acquireLifecycleLock(kbId, 'maintain')
     try {
       runtime.maintaining = true
       await stopSequence(runtime)
-      // 原子写回注册表：此前失败完全保留旧 sourceDir 与旧数据。落盘保留用户
-      // 选择的原样路径（`realpath` 只用于校验与只读链，不改写绑定拼写）。
-      const nextRecords = records.map(record => (
-        record.id === kbId ? { ...record, sourceDir: newSourceDir } : record
-      ))
-      await writeKnowledgeBases(profileDir, nextRecords)
+      // 注册表唯一写者是 Host：先落盘并更新 Host 内存，再收敛运行态与索引。
+      // `persist` 失败时完全保留旧 sourceDir、旧索引与旧 wiki（运行态在 finally
+      // 用旧记录恢复 Watcher）。
+      await persist()
       runtime.record = { ...runtime.record, sourceDir: newSourceDir }
       runtime.sourceUnavailable = false
       runtime.watchFailed = false
       try {
-        runtime.caseSensitive = await probeCaseSensitiveDir(validation.realSourceDir)
+        runtime.caseSensitive = await probeCaseSensitiveDir(realSourceDir)
       } catch {
         runtime.caseSensitive = process.platform !== 'win32'
       }
       runtime.phase = idlePhase(runtime)
       // 保留 index.sqlite 与 wiki/，禁用跨目录重命名猜配做全量对账。
       ensureWatcher(runtime)
-      await enqueue(runtime, () => reconcile(runtime, { allowRename: false, trigger: 'rebind' }))
+      try {
+        await enqueue(runtime, () => reconcile(runtime, { allowRename: false, trigger: 'rebind' }))
+      } catch (error) {
+        // 落盘已成功：收敛失败不回滚、不重写旧目录，磁盘与内存都保持新
+        // `sourceDir`，由下次启动对账自愈（规格 §6.4 失败与中断恢复）。
+        runtime.lastError = describeError(error)
+      }
       await appendEvent(kbDirOf(kbId), {
         kind: 'source_rebound',
         level: 'info',
@@ -1159,6 +1189,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     } finally {
       runtime.maintaining = false
       ensureWatcher(runtime)
+      settlePhase(runtime)
       release()
     }
   }
@@ -1191,11 +1222,24 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         throw new KnowledgeSyncError('source-unavailable', 'source directory became unreadable during rebuild')
       }
       const files = walked.files.slice(0, maxFilesPerKb)
+      const alertEvents: AppendKnowledgeEventInput[] = []
+      for (const skipped of walked.skipped) {
+        alertEvents.push({
+          kind: 'file_skipped',
+          level: 'warn',
+          summary: `跳过不受支持或不安全的文件（${skipped.reason}）`,
+          detail: skipped.reason,
+          ...(skipped.relPath === '' ? {} : { relPath: skipped.relPath }),
+        })
+      }
       let rebuilt = 0
+      let skippedFiles = 0
+      let failedFiles = 0
       for (const file of files) {
         const probe = probeCloud(file.absPath)
         if (probe === 'dehydrated') {
           await storage.upsertRebuildDocument(kbId, skippedInput(runtime, file, CLOUD_DEHYDRATED_REASON))
+          skippedFiles += 1
           continue
         }
         const extracted = await pool.extractFile(kbId, {
@@ -1205,11 +1249,36 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
           caseSensitive: runtime.caseSensitive,
         })
         if (!extracted.ok) {
-          if (extracted.reason === 'file-too-large') {
-            await storage.upsertRebuildDocument(kbId, skippedInput(runtime, file, FILE_TOO_LARGE_REASON))
+          const action = classifyFailure(extracted.reason)
+          if (action === 'aborted') {
+            // 维护中止/退场：重建必须放弃并回滚旧库（规格 §6.4 提交前失败）。
+            throw new KnowledgeSyncError('rebuild-failed', `${file.relPath}: ${extracted.reason}`)
+          }
+          if (action === 'record-too-large' || action === 'skip') {
+            const reason = action === 'record-too-large' ? FILE_TOO_LARGE_REASON : extracted.reason
+            await storage.upsertRebuildDocument(kbId, skippedInput(runtime, file, reason))
+            skippedFiles += 1
+            alertEvents.push({
+              kind: 'file_skipped',
+              level: 'warn',
+              summary: `跳过文件（${reason}）: ${file.relPath}`,
+              detail: reason,
+              relPath: file.relPath,
+            })
             continue
           }
-          throw new KnowledgeSyncError('rebuild-failed', `${file.relPath}: ${extracted.error ?? extracted.reason}`)
+          // 规格 §2.3 单文件失败隔离：记 error 行后继续重建，只有存储 RPC
+          // 拒绝（下面直接冒泡）或 `aborted` 才中止整个重建。
+          await storage.upsertRebuildDocument(kbId, errorInput(runtime, file, extracted.reason))
+          failedFiles += 1
+          alertEvents.push({
+            kind: 'file_error',
+            level: 'error',
+            summary: `提取失败（${extracted.reason}）: ${file.relPath}`,
+            detail: extracted.error ?? extracted.reason,
+            relPath: file.relPath,
+          })
+          continue
         }
         if (extracted.hashOnly === true) continue
         await storage.upsertRebuildDocument(kbId, {
@@ -1227,6 +1296,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         })
         rebuilt += 1
       }
+      for (const event of alertEvents) await appendEvent(kbDir, event)
       const commitOptions = {
         ...(opts.afterCommitBeforeReopenForTest === undefined
           ? {}
@@ -1259,7 +1329,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       await appendEvent(kbDir, {
         kind: 'rebuild_completed',
         level: 'info',
-        summary: `索引重建完成，共 ${String(rebuilt)} 个文件`,
+        summary: skippedFiles === 0 && failedFiles === 0
+          ? `索引重建完成，共 ${String(rebuilt)} 个文件`
+          : `索引重建完成，共 ${String(rebuilt)} 个文件（跳过 ${String(skippedFiles)}，失败 ${String(failedFiles)}）`,
         count: rebuilt,
       })
     } catch (error) {

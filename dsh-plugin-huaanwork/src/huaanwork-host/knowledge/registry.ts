@@ -4,10 +4,12 @@
  * 格式为 `{ knowledgeBases: KnowledgeBaseRecord[] }`，不另加版本信封。
  * 写入使用 `writeFileAtomic + 0o600`，并按 `profileDir` 串行排队，保证
  * 并发读改写不会互相覆盖；读取对缺失文件返回空数组，逐条字段校验后
- * 丢弃畸形记录。
+ * 丢弃畸形记录。顶层 JSON 解析失败或形状不符时，原文件被隔离为
+ * `knowledge-bases.json.corrupt-<UTC 时间戳>`（`rename` 保持原 0o600 权限）
+ * 并返回空数组，避免下一次写入静默抹掉用户的全部绑定。
  */
 
-import { readFile } from 'node:fs/promises'
+import { readFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
@@ -50,8 +52,29 @@ function parseRecord(raw: unknown): KnowledgeBaseRecord | null {
 }
 
 /**
- * 读取注册表。文件缺失、无法解析或顶层形状不符时返回 `[]`；逐条字段
- * 校验，畸形记录被丢弃（读取不产生任何写副作用）。
+ * 将无法按顶层形状解析的注册表原文件隔离为
+ * `knowledge-bases.json.corrupt-<UTC 时间戳>`。`rename` 保留原文件权限
+ * （0o600），供人工恢复；隔离失败只告警，绝不让读取路径抛出。
+ */
+async function quarantineCorruptRegistry(profileDir: string): Promise<void> {
+  const source = registryPath(profileDir)
+  const stamp = new Date().toISOString().replace(/[:.]/gu, '-')
+  const target = `${source}.corrupt-${stamp}`
+  try {
+    await rename(source, target)
+    console.warn(`[knowledge] quarantined corrupt knowledge-bases.json: ${source} -> ${target}`)
+  } catch (error) {
+    console.warn(
+      `[knowledge] failed to quarantine corrupt knowledge-bases.json ${source}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
+/**
+ * 读取注册表。文件缺失返回 `[]`；顶层 JSON 解析失败或形状不符时隔离原
+ * 文件（`knowledge-bases.json.corrupt-<UTC 时间戳>`）后返回 `[]`；逐条字段
+ * 校验，畸形记录被丢弃并逐条告警（读取不产生任何注册表写副作用）。
  */
 export async function readKnowledgeBases(profileDir: string): Promise<KnowledgeBaseRecord[]> {
   let content: string
@@ -65,15 +88,29 @@ export async function readKnowledgeBases(profileDir: string): Promise<KnowledgeB
   try {
     parsed = JSON.parse(content)
   } catch {
+    await quarantineCorruptRegistry(profileDir)
     return []
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return []
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    await quarantineCorruptRegistry(profileDir)
+    return []
+  }
   const rawList = (parsed as { knowledgeBases?: unknown }).knowledgeBases
-  if (!Array.isArray(rawList)) return []
+  if (!Array.isArray(rawList)) {
+    await quarantineCorruptRegistry(profileDir)
+    return []
+  }
   const records: KnowledgeBaseRecord[] = []
   for (const raw of rawList) {
     const record = parseRecord(raw)
-    if (record !== null) records.push(record)
+    if (record !== null) {
+      records.push(record)
+      continue
+    }
+    const id = typeof (raw as { id?: unknown } | null)?.id === 'string'
+      ? (raw as { id: string }).id
+      : '<unknown>'
+    console.warn(`[knowledge] dropped invalid knowledge base record ${id} from knowledge-bases.json`)
   }
   return records
 }

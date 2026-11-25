@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -9,6 +9,19 @@ import { createExtractionPool } from '../../src/huaanwork-host/knowledge/extract
 import { KNOWLEDGE_TEST_CORRUPT_AFTER_COMMIT } from '../../src/huaanwork-host/knowledge/storage-protocol.ts'
 import { MAX_KNOWLEDGE_BASES } from '../../src/huaanwork-host/knowledge/types.ts'
 import { neutralKnowledgeRootPath, neutralKnowledgeWikiRootPath } from '../../src/huaanwork-host/workspace-state.ts'
+
+interface PersistedKnowledgeBase {
+  readonly id: string
+  readonly sourceDir: string
+}
+
+/** 读取落盘注册表（断言磁盘真值与内存成对）。 */
+function readRegistryRecords(profileDir: string): PersistedKnowledgeBase[] {
+  const parsed = JSON.parse(
+    readFileSync(join(profileDir, 'knowledge-bases.json'), 'utf8'),
+  ) as { knowledgeBases: PersistedKnowledgeBase[] }
+  return parsed.knowledgeBases
+}
 
 describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, stale stat, and 1s dispose', () => {
   it('stays lazy with zero Workers when no KBs are registered and disposes immediately', async () => {
@@ -250,6 +263,121 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
       expect(host.get(kb.id)?.phase).toBe('watching')
       expect((await host.getEvents(kb.id)).some(e => e.kind === 'source_restored')).toBe(true)
     } finally {
+      await host.dispose()
+    }
+  })
+
+  it('host.update({ sourceDir }) is the single registry writer and preserves docId/wiki assets across a moved source dir', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-host-rebind-'))
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'docs')
+    const movedDir = join(root, 'docs-moved')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    writeFileSync(join(sourceDir, 'policy.md'), '重绑保留内容 2026')
+
+    const host = createKnowledgeHost({ profileDir })
+    await host.start()
+    try {
+      const kb = await host.create({ name: '重绑库', sourceDir })
+      await host.update(kb.id, { watchPaused: true })
+      await host.sync(kb.id)
+      const docBefore = (await host.listDocs(kb.id)).docs.find(d => d.relPath === 'policy.md')
+      expect(docBefore).toBeTruthy()
+      const wikiCardDir = join(neutralKnowledgeWikiRootPath(profileDir, kb.id), 'docs')
+      mkdirSync(wikiCardDir, { recursive: true })
+      const wikiCardPath = join(wikiCardDir, `${docBefore!.docId}.md`)
+      writeFileSync(wikiCardPath, '# 保留卡片')
+
+      renameSync(sourceDir, movedDir)
+      const updated = await host.update(kb.id, { sourceDir: movedDir })
+
+      // 内存（get/list）、返回值与磁盘注册表三方一致。
+      expect(updated.sourceDir).toBe(movedDir)
+      expect(host.get(kb.id)).toMatchObject({ sourceDir: movedDir })
+      expect((await host.list()).find(k => k.id === kb.id)).toMatchObject({ sourceDir: movedDir })
+      expect(readRegistryRecords(profileDir).find(record => record.id === kb.id)).toMatchObject({ sourceDir: movedDir })
+
+      // doc_id 与 wiki 卡片跨目录移动保持不变。
+      expect((await host.listDocs(kb.id)).docs.find(d => d.relPath === 'policy.md')?.docId)
+        .toBe(docBefore!.docId)
+      expect(readFileSync(wikiCardPath, 'utf8')).toBe('# 保留卡片')
+      expect((await host.getEvents(kb.id)).some(e => e.kind === 'source_rebound')).toBe(true)
+    } finally {
+      await host.dispose()
+    }
+  })
+
+  it('rejects an invalid rebind with invalid-source-dir and leaves both memory and knowledge-bases.json on the old source dir', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-host-rebind-invalid-'))
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'docs')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    writeFileSync(join(sourceDir, 'policy.md'), '校验失败零副作用')
+
+    const host = createKnowledgeHost({ profileDir })
+    await host.start()
+    try {
+      const kb = await host.create({ name: '零副作用库', sourceDir })
+      await host.sync(kb.id)
+      const beforeDocs = (await host.listDocs(kb.id)).docs
+
+      await expect(host.update(kb.id, { sourceDir: profileDir })).rejects.toThrow(/invalid-source-dir/u)
+
+      expect(host.get(kb.id)?.sourceDir).toBe(sourceDir)
+      expect(readRegistryRecords(profileDir).find(record => record.id === kb.id)?.sourceDir).toBe(sourceDir)
+      expect((await host.listDocs(kb.id)).docs).toEqual(beforeDocs)
+      expect((await host.getEvents(kb.id)).some(e => e.kind === 'source_rebound')).toBe(false)
+    } finally {
+      await host.dispose()
+    }
+  })
+
+  it('keeps the new sourceDir on disk and in memory when post-persist convergence fails (never reverts)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-host-rebind-converge-'))
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'docs')
+    const movedDir = join(root, 'docs-moved')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    writeFileSync(join(sourceDir, 'policy.md'), '收敛失败前内容')
+
+    const realPool = createExtractionPool({ maxWorkers: 1 })
+    const realExtract = realPool.extractFile.bind(realPool)
+    let failConverge = false
+    const extractSpy = vi.spyOn(realPool, 'extractFile').mockImplementation(async (kbId, req, signal) => {
+      if (failConverge && req.relPath === 'policy.md') throw new Error('simulated-convergence-failure')
+      return realExtract(kbId, req, signal)
+    })
+    const host = createKnowledgeHost({ profileDir, poolOverrideForTest: realPool })
+    await host.start()
+    try {
+      const kb = await host.create({ name: '收敛失败库', sourceDir })
+      await host.update(kb.id, { watchPaused: true })
+      await host.sync(kb.id)
+      const shaBefore = (await host.listDocs(kb.id)).docs.find(d => d.relPath === 'policy.md')?.sha256
+
+      renameSync(sourceDir, movedDir)
+      writeFileSync(join(movedDir, 'policy.md'), '收敛失败后新内容')
+      const future = new Date(Date.now() + 120_000)
+      utimesSync(join(movedDir, 'policy.md'), future, future)
+
+      failConverge = true
+      // 落盘已成功：收敛失败不抛错、不回滚，磁盘与内存都保持新 sourceDir。
+      const updated = await host.update(kb.id, { sourceDir: movedDir })
+      expect(updated.sourceDir).toBe(movedDir)
+      expect(host.get(kb.id)?.sourceDir).toBe(movedDir)
+      expect(readRegistryRecords(profileDir).find(record => record.id === kb.id)?.sourceDir).toBe(movedDir)
+      expect((await host.getEvents(kb.id)).some(e => e.kind === 'source_rebound')).toBe(true)
+
+      // 下一次对账基于已落盘的新目录自愈并索引新内容（下一次启动对账的等价验证）。
+      failConverge = false
+      await host.sync(kb.id)
+      const healed = (await host.listDocs(kb.id)).docs.find(d => d.relPath === 'policy.md')
+      expect(healed?.sha256).not.toBe(shaBefore)
+    } finally {
+      extractSpy.mockRestore()
       await host.dispose()
     }
   })
