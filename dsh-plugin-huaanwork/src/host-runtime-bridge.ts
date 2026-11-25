@@ -35,6 +35,16 @@ export interface KeepAwakeRuntime extends DesktopRuntime {
   setKeepAwake?(hold: boolean): Promise<void>
 }
 
+/**
+ * 系统休眠恢复扩展(R3-I3):方法可选,不并入 DesktopRuntime。Host 侧
+ * `createHostRuntime` 实现它,main 侧 `bindNativeRuntime` 无条件注册
+ * `native:subscribeSystemResume` / `native:unsubscribeSystemResume`——裸测试桩
+ * 缺方法时静默 no-op,绝不出现 `Unknown Host operation`。
+ */
+export interface SystemResumeRuntime extends DesktopRuntime {
+  subscribeSystemResume?(listener: () => void): () => void
+}
+
 export const KEEP_AWAKE_UNAVAILABLE_MESSAGE = 'huaanwork-host: desktopRuntime 缺少 setKeepAwake()(保持唤醒需要 Electron powerSaveBlocker;请使用 ElectronDesktopRuntime)'
 
 export class KeepAwakeUnavailableError extends Error {
@@ -62,7 +72,7 @@ export function runtimeSnapshot(runtime: DesktopRuntime): RuntimeSnapshot {
 export function createHostRuntime(
   rpc: HostRpc,
   snapshot: RuntimeSnapshot,
-): ConfirmedRestartRuntime & KeepAwakeRuntime & ArtifactNativeCapability {
+): ConfirmedRestartRuntime & KeepAwakeRuntime & ArtifactNativeCapability & SystemResumeRuntime {
   let sequence = 0
   let locale = snapshot.locale
   const calls = new Set<Promise<unknown>>()
@@ -101,7 +111,7 @@ export function createHostRuntime(
     saveArtifact: input => send('native:saveArtifact', [input]),
     prepareArtifactFrame: input => send('native:prepareArtifactFrame', [input]),
   }
-  const runtime: ConfirmedRestartRuntime & KeepAwakeRuntime & ArtifactNativeCapability = {
+  const runtime: ConfirmedRestartRuntime & KeepAwakeRuntime & ArtifactNativeCapability & SystemResumeRuntime = {
     platform: snapshot.platform,
     get locale() { return locale },
     ...artifactNativeMethods,
@@ -180,6 +190,19 @@ export function createHostRuntime(
     requestConfirmedRestart: () => send<boolean>('native:requestConfirmedRestart'),
     // 不进 interactive 名单:powerSaveBlocker 是即时调用,沿用默认 RPC 超时。
     setKeepAwake: hold => send('native:setKeepAwake', [hold]),
+    // 系统休眠恢复（R3-I3）：main 侧监听 powerMonitor 后经回调 ID 反向推送；
+    // 取消时先释放本地回调 handler，再通知 main 卸载监听。
+    subscribeSystemResume(listener: () => void): () => void {
+      const callback = callbacks({ resume: listener })
+      send('native:subscribeSystemResume', [callback.id]).catch(error => {
+        process.stderr.write(`${String(error)}\n`)
+        callback.release()
+      })
+      return () => {
+        callback.release()
+        void send('native:unsubscribeSystemResume', [callback.id])
+      }
+    },
     prepareToQuit() { void send('native:prepareToQuit') },
     openProfileCreateWindow(options) {
       const callback = callbacks({
@@ -272,6 +295,8 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): HostNa
   const shells = new Map<string, () => Promise<void>>()
   const retainedShells = new Map<string, () => Promise<void>>()
   const preferences = new Map<string, { locale: any; theme: any }>()
+  /** 已挂载的系统休眠订阅:回调 ID → 卸载函数,`detachHostResources` 统一释放。 */
+  const resumeSubscriptions = new Map<string, () => void>()
   const releases: (() => void)[] = []
   let retainingShell = false
   let detached = false
@@ -298,6 +323,32 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): HostNa
   handle('native:setKeepAwake', async ([hold]) => {
     if (typeof hold !== 'boolean') throw new Error('native:setKeepAwake requires a boolean hold')
     return callSetKeepAwake(runtime, hold)
+  })
+  // 系统休眠恢复（R3-I3）：两个 handler **无条件注册**（绝不因测试桩缺方法就让
+  // HostRpc 抛 `Unknown Host operation`）；缺少 `subscribeSystemResume` 时静默
+  // no-op 返回。真实订阅存进 Map，`detachHostResources` 时全部卸载。
+  handle('native:subscribeSystemResume', ([id]) => {
+    if (typeof id !== 'string' || id === '') {
+      throw new Error('native:subscribeSystemResume requires a callback id')
+    }
+    // 同一 ID 重复订阅按替换处理，避免残留旧监听。
+    resumeSubscriptions.get(id)?.()
+    const subscribe = (runtime as SystemResumeRuntime).subscribeSystemResume
+    if (typeof subscribe !== 'function') return undefined
+    const release = subscribe.call(runtime, () => {
+      report(callback(`${id}:resume`))
+    })
+    resumeSubscriptions.set(id, typeof release === 'function' ? release : () => {})
+    return undefined
+  })
+  handle('native:unsubscribeSystemResume', ([id]) => {
+    if (typeof id !== 'string' || id === '') {
+      throw new Error('native:unsubscribeSystemResume requires a callback id')
+    }
+    const release = resumeSubscriptions.get(id)
+    resumeSubscriptions.delete(id)
+    release?.()
+    return undefined
   })
   // Artifact 原生能力只在三个方法齐备时注册;测试桩不被迫实现。
   const artifactCapability = (): ArtifactNativeCapability => {
@@ -362,6 +413,8 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): HostNa
   const detachHostResources = (): void => {
     if (detached) return
     detached = true
+    resumeSubscriptions.forEach(release => { release() })
+    resumeSubscriptions.clear()
     trays.forEach(tray => { tray.dispose() })
     trays.clear()
     releases.forEach(release => { release() })

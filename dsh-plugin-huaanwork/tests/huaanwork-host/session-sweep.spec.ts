@@ -10,6 +10,7 @@ import {
   type ProjectLegacySweepFileSystem,
 } from '../../src/huaanwork-host/session-sweep.ts'
 import { readSessionHeader } from '../../src/huaanwork-host/session-view.ts'
+import { neutralKnowledgeBaseDir } from '../../src/huaanwork-host/workspace-state.ts'
 import { bootHuaanworkHost, hostConfig, writeJsonFile, writeSessionLog } from './startup-sweep-fixture.ts'
 
 /**
@@ -106,6 +107,50 @@ describe('startup project legacy sweep (旧 host.ts:936 语义)', () => {
     expect(existsSync(keptSession)).toBe(true)
     expect(existsSync(keptAutomation)).toBe(true)
     expect(existsSync(swept)).toBe(false)
+    await booted.ctx.fiber.dispose()
+  })
+
+  /**
+   * 知识库中立根（`<profileDir>/workspace-knowledge`）是 M1-1 新增的受保护命名空间：
+   * 登记项目根可能是它的祖先目录，wiki/组织会话的 cwd 落在这里，启动清扫绝不能删除。
+   * 两层分别锁定：① `sweepProjectLegacySessions` 的 protectedRoots 语义；
+   * ② `apply()` 生产接线确实传入了 `neutralKnowledgeBaseDir(config.profileDir)`。
+   */
+  test('protects workspace-knowledge sessions when a registered project root is their ancestor', async () => {
+    const root = freshRoot()
+    const config = hostConfig(root)
+    const sessionsRoot = join(config.dshHome, 'sessions')
+    const knowledgeWiki = join(neutralKnowledgeBaseDir(config.profileDir), 'kb-1', 'wiki')
+    const kept = writeSessionLog(sessionsRoot, 'kb-wiki', 'huaanwork-1111111111111111', knowledgeWiki)
+    const swept = writeSessionLog(sessionsRoot, 'repo', 'huaanwork-2222222222222222', join(root, 'repo'))
+
+    const result = await sweepProjectLegacySessions(
+      sessionsRoot,
+      [root],
+      new Set(),
+      [neutralKnowledgeBaseDir(config.profileDir)],
+    )
+
+    expect(result.removed).toBe(1)
+    expect(existsSync(kept)).toBe(true)
+    expect(existsSync(swept)).toBe(false)
+  })
+
+  test('bootHuaanworkHost passes the knowledge base root into the production sweep', async () => {
+    const root = freshRoot()
+    const config = hostConfig(root)
+    writeJsonFile(join(config.profileDir, 'projects.json'), {
+      projects: [{ id: 'p1', name: 'P', root, createdAt: 1 }],
+    })
+    const sessionsRoot = join(config.dshHome, 'sessions')
+    const knowledgeWiki = join(neutralKnowledgeBaseDir(config.profileDir), 'kb-1', 'wiki')
+    const kept = writeSessionLog(sessionsRoot, 'kb-wiki', 'huaanwork-3333333333333333', knowledgeWiki)
+    const projectSession = writeSessionLog(sessionsRoot, 'repo', 'huaanwork-4444444444444444', root)
+
+    const booted = await bootHuaanworkHost(config)
+
+    expect(existsSync(kept)).toBe(true)
+    expect(existsSync(projectSession)).toBe(false)
     await booted.ctx.fiber.dispose()
   })
 })

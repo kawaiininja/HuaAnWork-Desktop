@@ -77,7 +77,8 @@ export class KnowledgeSyncError extends Error {
   readonly code: KnowledgeErrorCode
 
   constructor(code: KnowledgeErrorCode, message: string) {
-    super(message)
+    // 错误码前缀让 `toThrow(/knowledge-base-busy/)` 这类按码断言在跨层传播后仍成立。
+    super(`${code}: ${message}`)
     this.name = 'KnowledgeSyncError'
     this.code = code
   }
@@ -127,6 +128,12 @@ export interface SyncEngineMetrics {
 export interface KnowledgeSyncEngine {
   startKb(kb: KnowledgeBaseRecord): Promise<void>
   stopKb(kbId: string): Promise<void>
+  /**
+   * 删库专用停机序列（控制器裁决 M-4）：先完成常规停机（关 Watcher、清防抖与
+   * dirty、排空提取 Worker 并等 FileHandle 关闭、等链尾），再取消该库在途整理，
+   * 最后关闭 SQLite。Host 只负责随后的中立目录删除与注册表原子写。
+   */
+  shutdownKbForDelete(kbId: string): Promise<void>
   pauseWatch(kbId: string): Promise<void>
   resumeWatch(kbId: string): Promise<void>
   syncNow(kbId: string): Promise<void>
@@ -983,9 +990,14 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     staggerTimers.add(timer)
   }
 
-  async function stopKb(kbId: string): Promise<void> {
+  /**
+   * 停机序列的共享内核：注销运行态、递增 epoch、关 Watcher、清防抖与 dirty、
+   * 中止并排空该库 Extraction Worker（等待句柄随线程退出关闭），最后等链尾。
+   * 调用方负责随后的整理取消与 SQLite 关闭，绝不复制这段顺序。
+   */
+  async function haltRuntime(kbId: string): Promise<boolean> {
     const runtime = runtimes.get(kbId)
-    if (runtime === undefined) return
+    if (runtime === undefined) return false
     runtimes.delete(kbId)
     runtime.epoch += 1
     closeWatcher(runtime)
@@ -993,11 +1005,36 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     runtime.dirtyPaths.clear()
     await pool.abortAndDrainKb(kbId)
     await runtime.chain.catch(() => undefined)
+    return true
+  }
+
+  async function closeStorageQuietly(kbId: string): Promise<void> {
     try {
       await storage.closeKb(kbId)
     } catch {
       // 关闭失败不影响停机结果。
     }
+  }
+
+  async function stopKb(kbId: string): Promise<void> {
+    if (!(await haltRuntime(kbId))) return
+    await closeStorageQuietly(kbId)
+  }
+
+  /**
+   * 删库停机（控制器裁决 M-4 / 规格 §5.2(6)）：常规停机后取消在途整理，再关
+   * SQLite。Host 只在之后删除 `workspace-knowledge/<kbId>` 与原子更新注册表。
+   */
+  async function shutdownKbForDelete(kbId: string): Promise<void> {
+    await haltRuntime(kbId)
+    if (cancelOrganizerForKb !== undefined) {
+      try {
+        await cancelOrganizerForKb(kbId)
+      } catch {
+        // 整理回合取消失败不阻断删库停机。
+      }
+    }
+    await closeStorageQuietly(kbId)
   }
 
   async function pauseWatch(kbId: string): Promise<void> {
@@ -1207,7 +1244,18 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         )
       }
       committed = true
-      runtime.phase = idlePhase(runtime)
+      if (result.wikiResetPending) {
+        // 提交已成功但 Wiki 重置失败：保留 pending 与 `wiki-reset-pending` 阶段，
+        // 由后续 sync（ensureStorageReady）幂等续做（规格 §6.4）。
+        runtime.phase = 'wiki-reset-pending'
+        await appendEvent(kbDir, {
+          kind: 'wiki_reset_failed',
+          level: 'error',
+          summary: '知识视图重置失败，等待重试: wiki reset failed',
+        })
+      } else {
+        runtime.phase = idlePhase(runtime)
+      }
       await appendEvent(kbDir, {
         kind: 'rebuild_completed',
         level: 'info',
@@ -1333,6 +1381,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   return {
     startKb,
     stopKb,
+    shutdownKbForDelete,
     pauseWatch,
     resumeWatch,
     syncNow,

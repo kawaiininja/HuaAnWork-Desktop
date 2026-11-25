@@ -90,6 +90,7 @@ interface PendingCall {
 export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): KnowledgeStorageClient {
   const workerUrl = opts?.workerUrl
   let worker: Worker | undefined
+  let disposed = false
   let nextId = 1
   const pending = new Map<number, PendingCall>()
 
@@ -146,6 +147,11 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
   function request<K extends keyof StorageResultMap>(
     build: (id: number) => Extract<StorageWorkerRequest, { op: K }>,
   ): Promise<StorageResultMap[K]> {
+    // 退场后绝不再拉起新线程：Host 的并行退场会与引擎停机序列交叉调用，
+    // 重新 spawn 会留下永不回收的 Storage Worker。
+    if (disposed) {
+      return Promise.reject(new KnowledgeStorageError('knowledge storage client disposed'))
+    }
     return send(ensureWorker(), build)
   }
 
@@ -266,6 +272,8 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
     countEmbeddings: (kbId, docId) => request(id => ({ id, op: 'countEmbeddings', kbId, docId })),
     isRunning: () => worker !== undefined,
     async dispose(budgetMs: number = STORAGE_CLIENT_DISPOSE_BUDGET_MS): Promise<void> {
+      if (disposed) return
+      disposed = true
       const current = worker
       if (current === undefined) return
       worker = undefined

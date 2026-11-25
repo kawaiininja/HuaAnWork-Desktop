@@ -1,7 +1,7 @@
 import { MessageChannel } from 'node:worker_threads'
 import { expect, it, vi } from 'vitest'
 import { HostRpc } from '../src/host-rpc.ts'
-import { bindNativeRuntime, createHostRuntime, KeepAwakeUnavailableError, runtimeSnapshot, type ConfirmedRestartRuntime, type KeepAwakeRuntime } from '../src/host-runtime-bridge.ts'
+import { bindNativeRuntime, createHostRuntime, KeepAwakeUnavailableError, runtimeSnapshot, type ConfirmedRestartRuntime, type KeepAwakeRuntime, type SystemResumeRuntime } from '../src/host-runtime-bridge.ts'
 import type { ArtifactNativeCapability, DesktopLocale, DesktopRuntime, DesktopShellSpec, DesktopTrayItem } from '../src/runtime.ts'
 
 it('preserves the Web URL and authentication while projecting shell and tray callbacks', async () => {
@@ -261,6 +261,110 @@ it('pins the keep-awake RPC seam: method name, non-interactive timeout, boolean 
   try {
     const handler = bareHandlers.get('native:setKeepAwake')
     await expect(handler!([true], new AbortController().signal)).rejects.toBeInstanceOf(KeepAwakeUnavailableError)
+  } finally { await bindingBare.release() }
+})
+
+it('pins the system-resume RPC seam: unconditional handlers, callback flow, silent bare-stub no-op, and detach cleanup', async () => {
+  // Host 侧：createHostRuntime.subscribeSystemResume 先登记回调、再发 native:subscribeSystemResume。
+  const calls: { method: string; args: unknown[] }[] = []
+  const hostHandlers = new Map<string, (...args: any[]) => unknown>()
+  const child = {
+    call: <T = unknown>(method: string, args: unknown[] = []) => {
+      calls.push({ method, args })
+      return Promise.resolve(undefined as T)
+    },
+    handle: (name: string, handler: (...args: any[]) => unknown) => {
+      hostHandlers.set(name, handler)
+      return () => { hostHandlers.delete(name) }
+    },
+  } as unknown as HostRpc
+  const runtime = createHostRuntime(child, {
+    platform: 'win32', locale: 'en',
+    updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
+  }) as SystemResumeRuntime
+  expect(runtime.subscribeSystemResume).toBeTypeOf('function')
+  const listener = vi.fn()
+  const release = runtime.subscribeSystemResume!(listener)
+  expect(calls).toEqual([{ method: 'native:subscribeSystemResume', args: ['callback:1'] }])
+  const resumeCallback = hostHandlers.get('callback:1:resume')
+  expect(resumeCallback, 'Host side must register the resume callback handler').toBeTypeOf('function')
+  await resumeCallback!([], new AbortController().signal)
+  expect(listener).toHaveBeenCalledOnce()
+  release()
+  expect(calls[1]).toEqual({ method: 'native:unsubscribeSystemResume', args: ['callback:1'] })
+  expect(hostHandlers.has('callback:1:resume')).toBe(false)
+
+  // main 侧：两个 handler 无条件注册；有能力的 runtime 挂上/卸载 powerMonitor 监听。
+  const mainHandlers = new Map<string, (args: any[], signal: AbortSignal) => unknown>()
+  const parentCalls: unknown[][] = []
+  const parent = {
+    call: vi.fn((...args: unknown[]) => { parentCalls.push(args); return Promise.resolve(undefined) }),
+    handle: (name: string, handler: (args: any[], signal: AbortSignal) => unknown) => {
+      mainHandlers.set(name, handler)
+      return () => { mainHandlers.delete(name) }
+    },
+  } as unknown as HostRpc
+  const resumeListeners: Array<() => void> = []
+  const nativeDisposes: Array<ReturnType<typeof vi.fn>> = []
+  const native = {
+    platform: 'win32', locale: 'en',
+    updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
+    schedule: () => async () => {},
+    registerTrayItem: () => ({ refresh() {}, dispose() {} }),
+    subscribeSystemResume: (resume: () => void) => {
+      resumeListeners.push(resume)
+      const dispose = vi.fn(() => {
+        const index = resumeListeners.indexOf(resume)
+        if (index >= 0) resumeListeners.splice(index, 1)
+      })
+      nativeDisposes.push(dispose)
+      return dispose
+    },
+  } as unknown as DesktopRuntime & SystemResumeRuntime
+  const signal = new AbortController().signal
+  const binding = bindNativeRuntime(parent, native)
+  try {
+    expect(mainHandlers.has('native:subscribeSystemResume')).toBe(true)
+    expect(mainHandlers.has('native:unsubscribeSystemResume')).toBe(true)
+    await mainHandlers.get('native:subscribeSystemResume')!(['callback:9'], signal)
+    expect(resumeListeners).toHaveLength(1)
+    resumeListeners[0]!()
+    await Promise.resolve()
+    expect(parentCalls).toContainEqual(['callback:9:resume', []])
+    await mainHandlers.get('native:unsubscribeSystemResume')!(['callback:9'], signal)
+    expect(nativeDisposes[0]).toHaveBeenCalledOnce()
+
+    // release() 必须释放仍挂着的订阅（detachHostResources 全量清理）。
+    await mainHandlers.get('native:subscribeSystemResume')!(['callback:10'], signal)
+    expect(resumeListeners).toHaveLength(1)
+    await binding.release()
+    expect(nativeDisposes[1]).toHaveBeenCalledOnce()
+    expect(mainHandlers.size).toBe(0)
+  } finally { await binding.release() }
+
+  // 裸 DesktopRuntime 测试桩（无 subscribeSystemResume）：两个 handler 仍注册，
+  // 调用静默 no-op 返回 undefined，绝不抛 Unknown Host operation（保证既有 Host
+  // 集成/Windows liveness 桩零改动通过）。
+  const bareHandlers = new Map<string, (args: any[], signal: AbortSignal) => unknown>()
+  const bareParent = {
+    call: () => Promise.resolve(undefined),
+    handle: (name: string, handler: (args: any[], signal: AbortSignal) => unknown) => {
+      bareHandlers.set(name, handler)
+      return () => { bareHandlers.delete(name) }
+    },
+  } as unknown as HostRpc
+  const bare = {
+    platform: 'linux', locale: 'en',
+    updates: { isPackaged: false, canDownload: false, currentVersion: '2.0.0', statePath: '/tmp/update' },
+    schedule: () => async () => {},
+    registerTrayItem: () => ({ refresh() {}, dispose() {} }),
+  } as unknown as DesktopRuntime
+  const bindingBare = bindNativeRuntime(bareParent, bare)
+  try {
+    expect(bareHandlers.has('native:subscribeSystemResume')).toBe(true)
+    expect(bareHandlers.has('native:unsubscribeSystemResume')).toBe(true)
+    expect(bareHandlers.get('native:subscribeSystemResume')!(['callback:11'], signal)).toBeUndefined()
+    expect(bareHandlers.get('native:unsubscribeSystemResume')!(['callback:11'], signal)).toBeUndefined()
   } finally { await bindingBare.release() }
 })
 
