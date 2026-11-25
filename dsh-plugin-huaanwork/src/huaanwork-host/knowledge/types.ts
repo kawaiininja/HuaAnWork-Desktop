@@ -52,6 +52,7 @@ export type KnowledgeErrorCode =
   | 'source-unavailable'
   | 'wiki-reset-pending'
   | 'index-error'
+  | 'rebuild-failed'
   | 'invalid-source-dir'
 
 export type KnowledgeEventLevel = 'info' | 'warn' | 'error'
