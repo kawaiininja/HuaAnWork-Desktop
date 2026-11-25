@@ -15,6 +15,10 @@
 - **第三轮校准核实与最终收口（2026-11-24，v2.1 → v2.2，见 §11）：`APPROVED`（通过）**。经逐项源码核验，Grok 第三轮 6 项缺口均属实；同时对其中 3 项做了源码级细化校准（补齐 `kb_read_wiki` 引用类型与失效回落、核实 `resolveSessionModel` 不拦空 `model: ''` 须额外判空、修正 3 次上限下的 2 档退避计时消除不可达第 3 档），已全部落入 v2.2，达到 `superpowers:writing-plans` 准入基线。
 - **第四轮 Opus 审核结论（2026-11-24，针对 v2.2，见 §12）：`ITERATE`（有条件通过）**。Opus 独立源码复核与 Electron 44 实测确认整体质量高且核心机制成立，但指出 **4 项写计划前应补缺口（`O4-1`–`O4-4`，其中 `O4-1` 在不改子模块前提下无可用删除接口）** 与 **8 项次要建议**；补齐 `O4-1`–`O4-4` 后即可进入 `writing-plans`。
 - **第四轮校准核实与最终收口（2026-11-24，v2.2 → v2.3，见 §13）：`APPROVED`（通过）**。经逐项源码二次复核，确认 `O4-1`–`O4-4` 核心均成立并对 2 处细节做了源码校准（`O4-4` 明确不登记 `huaanworkUnattended`、`§12.4` 打包冒烟维持 `ELECTRON_RUN_AS_NODE=1` 并将 `utilityProcess.fork` 实测归入真机验收）；同时将 `O4-1`–`O4-4` 与全部成立的 7 项次要项一并落入 v2.3，达到 `superpowers:writing-plans` 准入基线。
+- **第五轮 kimi 审核结论（2026-11-25，针对 v2.3，见 §14）：`ITERATE`（暂未达到撰写完整实施计划的准入基线）**。独立对照当前基线源码后，新发现 **1 项 Blocker（`K5-B1`）与 6 项 Important（`K5-I1`–`K5-I6`）**，涉及重绑/重建数据转换、排队回合挂载快照、legacy 工具交集、历史引用身份、fd 只读校验、暂停后的目录移动及旧 Office 选型。§13.2 的 `APPROVED` 仅保留为第四轮收口记录；最新准入状态以 §15 为准。
+- **第五轮校准核实与收口结论（2026-11-25，v2.3 → v2.4，见 §15）：M1 `APPROVED` / M2 `GATED BY M2-0`**。经逐项源码与威胁模型二次核验，确认 **kimi 全部 7 项核心均属实（0 误报）**；对 `K5-I4` 按单用户本地威胁模型收紧安全边界声明（不引入原生 `openat` 过度设计），对 `K5-I1` / `K5-I2` / `K5-I5` 补全源码级细节（`goal` 续轮与 `rememberTaskModel` 落盘对齐、`skills.ts` 系统技能 `explore`/`test-fix` 三道 `wantedTools` 门禁、`watchPaused` 与 `watch-failed` 正交拆分），并将 `K5-B1` 与 `K5-I1`–`K5-I5` 全部落入 v2.4；`K5-I6` 固化为不阻断 M1 的 `M2-0` 前置技术选型与样本验证门禁。
+- **第六轮 kimi 复审结论（2026-11-25，针对 v2.4，见 §16）：M1 `ITERATE` / M2 `GATED BY M2-0`**。确认原 `K5-I1`–`K5-I6` 的点名问题均已闭环，`K5-B1` 的重绑/重建主体语义已成立；继续源码复核发现 **3 项 Important（`K6-I1`–`K6-I3`）**：首条 `@` 的继承时序、`invalid` 回合边界 fail-closed、重建提交点与 Wiki 重置恢复。§15.2 的 M1 `APPROVED` 保留为第五轮校准记录，最新准入状态以 §17 为准。
+- **第六轮校准核实与收口结论（2026-11-25，v2.4 → v2.5，见 §17）：M1 `APPROVED` / M2 `GATED BY M2-0`**。经源码二次复核确认 `K6-I1`–`K6-I3` 全部真实准确（0 误报），并对 2 处实现细节完成校准（`K6-I1` 增设子会话专属冻结上下文 `childTurnKnowledge` 覆盖子代理首步提示词、执行校验与引用锚点；`K6-I2` 的 `invalid` 分支清待消费快照+置空冻结集+摘除 `KB_QUERY_TOOLS`、不调用 `agent.cancel` 以对齐仓内三处先例且不误杀未挂库无 `id` 会话），全部落入 v2.5。
 
 ---
 
@@ -356,3 +360,108 @@ Worker 消息协议、源码文件如何拆开、1280px 断点，仍由实施计
 - **结论：`APPROVED`（满足 `superpowers:writing-plans` 准入）**
 - 统计：四轮评审累计发现（首轮 41 项 + 二轮 6 项 + 三轮 6 项 + 四轮 4 项阻断与 8 项次要建议）均已在 [`2026-11-24-knowledge-base-design.md`](./2026-11-24-knowledge-base-design.md)（v2.3）闭环（0 Critical / 0 Blocker / 0 Important / 0 Minor 遗留）。
 - 下一步建议：按 `AGENTS.md`「方向性变更前先提交」，先将 v2.3 规格与本评审稿纳入版本控制，再按 §10.4 拆分为 **M1-1 注册与索引 / M1-2 单槽整理 / M1-3 会话挂载与引用预览 / M2 全格式与混合增强** 四份实施计划。
+
+---
+
+## 14. 第五轮 kimi 审核结论（2026-11-25 — v2.3 是否可写实施计划）
+
+> 审核方：**kimi**。对象：[`2026-11-24-knowledge-base-design.md`](./2026-11-24-knowledge-base-design.md) v2.3（提交 `3031b19ae6`）。代码基线仍为外层仓库 `dd68839faf` 与 `deepseek-harness` pin `1600d8a1e140dcde43a1a0941940a0480712c011`。
+>
+> 审核标准：计划作者不应另做用户可见的产品或安全决策；跨任务共用的状态、字段与转换必须明确；规格步骤必须有现成接口或可成立的实现路径。本轮为独立只读复核，不推翻前四轮已闭环项，也不要求重写方案 A+ 架构。
+
+### 14.1 总体结论
+
+**kimi 结论：`ITERATE`，暂未达到可直接撰写完整实施计划的质量基准。** 规格的需求锁定、NFR、数据库主体、路由清单、故障注入与验收体系已经较成熟，但本轮新发现 **1 项 Blocker（`K5-B1`）与 6 项 Important（`K5-I1`–`K5-I6`）**。这些问题关闭前，§13.2 的“0 遗留、满足 `writing-plans` 准入”不能继续作为最新放行结论。
+
+### 14.2 新增发现与强制修订要求
+
+| 编号 | 级别 | 问题与当前源码证据 | 规格必须补充的契约 |
+| :--- | :--- | :--- | :--- |
+| **K5-B1** | **Blocker** | **重绑与重建缺少数据转换语义。** 规格 §9.3（规格文件 L445、L448）与 §9.4（L469）只提供重绑 `sourceDir`、重建索引及“重新选择文件夹”入口，未定义旧索引、Wiki、向量、失败计数、在途任务与历史引用如何处理。重绑到无关目录后，清空或保留同一 `kbId/docId` 下的数据都解释得通，但用户结果完全不同；重建还可能与 §7.1（L326）的 `doc_id`“永久不变”冲突。 | 明确重绑/重建各自的保留与清空范围、`doc_id` 与 Wiki 的处理、旧引用回落、在途任务退出、失败时保留旧库还是新库，以及中断重启后的恢复语义。不得把“清空还是保留”留给实施计划自行选择。 |
+| **K5-I1** | **Important** | **排队回合没有真正冻结 `kbIds`。** 规格 §9.1（L410–412）声称立即启动与排队场景均已消除首回合竞态，但当前 `turn-scheduler.ts:10-26` 的 `QueueItem` 没有 `kbIds`，`sessions.ts:1297-1306` 出队重建发送参数时也不恢复它。首条消息排队后，第二次发送或 `session.knowledge.set` 仍可在首条消息被 claim 前覆盖会话级 Map。 | 按 `clientMessageId` 创建每次发送的不可变挂载快照，随 `QueueItem` 与直接启动状态传递；`agent/inbox/claimed` 消费该快照而非可变的会话当前值。补充两条排队消息使用不同知识库、排队期间调用 `session.knowledge.set` 的回归测试。 |
+| **K5-I2** | **Important** | **legacy `@agent` 的最终 `restrict` 仍会裁掉 `kb_*`。** 规格 §9.2（L420–421）只规定“先挂附件再 `restrict`”，但 `agent-invoke.ts:362-365` 的 legacy 请求只携带目录声明的 `allow`，`skills.ts:944-951` 随后仍按 `legacy.allow.filter(...)` 收窄。即使提前挂载 `kb_*`，只要不在该静态名单中，最终仍会被移除。 | 明确 legacy 及后代会话的有效 allow 组合规则，以及只读知识库工具是否并入原静态名单；同步规定普通子代理与后代的对称行为，并增加实际执行测试，而不只验证附件存在。 |
+| **K5-I3** | **Important** | **历史引用无法识别“同位置的新内容”。** §7.2（L335）的检索结果包含 `sha256`，但 §9.1（L406）的切片引用没有保存它，历史预览（L409）与 `knowledge.chunk` 路由（L457）又只凭 `docId + ordinal` 查询。文档重索引后，只要同一 ordinal 仍存在，旧引用就会静默打开新切片，而非按规格回落到当时的 `excerpt`。 | 在引用记录及预览请求中携带生成时的 `sha256 + extractConfigHash` 或等价切片指纹；当前切片不匹配时明确提示并回落旧摘录。补充同 `docId + ordinal` 内容变化、同哈希但提取配置变化的测试。 |
+| **K5-I4** | **Important** | **fd 只读校验按当前写法不可实现。** §5.3（L209）要求“在已经打开的 fd 上做 `lstat` / `realpath` / `fstat`”，但 Node 的 `lstat`、`realpath` 接受 `PathLike`，不是 fd（当前 `@types/node/fs/promises.d.ts:806`、`:929`）；fd 应使用 `FileHandle.stat()`。路径 `realpath` 也不能证明已打开对象的归属，父目录替换竞态仍需单独处理。 | 写出真实可实现的 macOS/Windows 校验链，并明确是否承诺抵抗恶意并发替换；覆盖符号链接、Windows junction/reparse point 与 TOCTOU 测试。若纯 Node 不能兑现强抗竞态承诺，必须收紧安全声明或另选实现路径，不得保留不可执行措辞。 |
+| **K5-I5** | **Important** | **暂停监听不足以支撑“随后可移动目录”。** §6.1（L223–225）明确暂停后仍保留周期对账，且未要求清理 `dirtyPaths`、等待目录遍历或关闭在途提取 fd；真机验收 §11.2（L523）却要求 Windows 上暂停后可以移动源目录。 | 二选一并保持 UI、状态机和验收一致：若支持移动，暂停应答前须静默相关遍历/提取、关闭句柄并暂停周期对账；若只释放 Watcher，则收紧界面指引与验收承诺，不得宣称立即可移动。 |
+| **K5-I6** | **Important（M2 前置）** | **旧 Office 仍停留在预研，不是实施选型。** §6.2（L243）将解析器与支持范围留到实施中通过样本决定，§12（L536）却把 `.doc/.xls/.ppt` 纳入发布范围；当前 `dsh-plugin-huaanwork/package.json` 依赖表也未见已选定的旧 Office 解析器。 | 在 M2 实施计划前完成技术预研：逐格式确定库、版本、许可证、FastSave/UTF-16LE/加密文件支持矩阵及明确的 fail-closed 降级边界。若只能先写研究任务，应把它列为 M2 的前置门禁，不应宣称实现方案已经锁定。 |
+
+### 14.3 最新放行条件（kimi）
+
+- **M1 放行：**先关闭 `K5-B1` 与 `K5-I1`–`K5-I5`，再撰写对应实施计划。
+- **M2 放行：**除共享项外，`K5-I6` 是必须完成的技术预研与规格回填门禁。
+- **复核范围：**修订后只需针对本轮新增项及相邻回归契约复核，不必推翻前四轮结论或重做方案 A+ 架构评审。
+- **状态：**以上 7 项均为本轮新增未闭环项；最新结论为 **`ITERATE`**。§13.2 保留为第四轮历史收口记录，不再代表当前整体准入状态。
+
+---
+
+## 15. 第五轮校准核实与最终收口（2026-11-25 — v2.4：M1 `APPROVED` / M2 `GATED BY M2-0`）
+
+### 15.1 逐项源码复核、误报/夸大校准与 v2.4 落点
+
+经逐项对照 `turn-scheduler.ts:10-26`、`sessions.ts:218,1297-1359,1420-1468`、`turn-anchors.ts:90,147-171`、`agent-invoke.ts:362-390`、`packages/huaanwork-policy/src/agent-catalog.ts:62-72`、`skills.ts:335-370,440-443,503-556,600-606,642-659,944-982`、`lan-https-certificate.ts:216-248`、`diagnostic-export-worker.ts:167-184` 与 `dsh-plugin-huaanwork/package.json` 复核，确认 **kimi 第五轮 7 项核心均属实（0 误报）**，同时对 **1 处安全边界声明做了防过度设计收紧（`K5-I4`）**，并在源码核验中为 **3 项补全了 kimi 未展开的同源缺口（`K5-I1`、`K5-I2`、`K5-I5`）**，已全部写入 [`2026-11-24-knowledge-base-design.md`](./2026-11-24-knowledge-base-design.md)（v2.4）：
+
+| 编号 | 核实与校准结论 | 源码实证、防夸大校准与 v2.4 落点 | 状态 |
+| :--- | :--- | :--- | :--- |
+| **K5-B1** | **完全属实（维持 M1 Blocker，无夸大）** | v2.3 确实暴露了重绑 `sourceDir` 与 `knowledge.rebuild` 但未定义数据保留/清空、`doc_id` 连续性、`wiki/` 处理、故障回滚与崩溃恢复。v2.4 新增 §6.4 与 `D17`：确立单库互斥维护门闩（`maintainingIds`）与停机序列（取消在途整理不计入 `organize_attempts`）；重绑先校验零副作用、原子改 `sourceDir` 后保留索引与 `wiki/` 按 `rel_path` 增量收敛（禁用跨目录 1 对 1 重命名猜配）；重建先写 `index.sqlite.rebuild`（正常重建按 `rel_path` 继承 `doc_id` 与 `wiki/`，清零切片/FTS/向量/失败计数；损坏旧库重建分配新 `doc_id` 并重置 `wiki/` 明示事件），经 `.bak` 三步重命名原子切换并支持启动自动恢复，失败保留旧库。落点：§2.3、§5.2、§6.4、§7.1、§8.1、§8.3、§9.3–§9.4、§10、§11.1(4)(6)、`D6`/`D17`。 | **已闭环** |
+| **K5-I1** | **完全属实（补充 4 处源码细节校准）** | 核实 `turn-scheduler.ts:10-26` `QueueItem` 与 `sessions.ts:1297-1306` `startQueuedItem` 确未携带 `kbIds`。**校准补充**：① `sessionSend` 在 `admitUserTurn` 前统一解析 `followupId = resolveFollowupClientMessageId(params)` 覆盖缺省 `clientMessageId` 的调用方；② `agent/inbox/claimed` 显式区分 `goal` 续轮（`turnBoundaryOf(message).kind === 'goal'` 沿用上轮冻结集，不误读可变表或清空）与真实用户消息边界（消费 `pendingTurnKbSnapshots` 并与当前存活库求交，排除排队期删库）；③ 空标签首回合 `session-knowledge.json` 落盘对齐 `rememberTaskModel`（`sessions.ts:1348`），在 `followupAccepted` 后且未覆写更新的 `session.knowledge.set` 时写回，防取消未启动的排队首消息留下孤立挂载。落点：§4、§9.1、§11.1(7)(8)、`D9`。 | **已闭环** |
+| **K5-I2** | **完全属实（源码核出更大波及面并一并封口）** | 核实 `agent-invoke.ts:362-366` 仅带 `filterAgentAllow(detail?.allow)`，且 `skills.ts:604,950` 用 `legacy.allow.filter(...)` 收窄确会裁掉 `kb_*`。**源码补充发现**：① `skills.ts` 中 `explore` / `test-fix` 系统技能子代理另有三道静态白名单门禁——`restrictKind`（L340）、`applyKind` 的 `tools.guard`（L361-362）与 `tools/pre-execute`（L440-443），均只认 `wantedTools(kind)` 同样会裁掉/拒绝 `kb_*`；② `legacy @agent` 须在 `startActivation` 前按 `reservedChildId` 预挂 `KB_QUERY_TOOLS`（对齐 `agent-package/host.ts:1100` 首步组装时序）。v2.4 在 §9.2 按 5 类子代理分别锁定有效 allow 组合、预挂与清理规则，并在 §11.1(7) 强制要求全链路实际工具执行测试。落点：§4、§9.2、§11.1(7)、`D9`。 | **已闭环** |
+| **K5-I3** | **完全属实（无夸大，零新增表列闭环）** | 核实 v2.3 §9.1 切片引用漏存 `sha256`/`extractConfigHash`，`knowledge.chunk` 仅查 `id + docId + ordinal` 会在重索引后静默展示新切片。因 §7.1 `documents` 表已有 `sha256` 与 `extract_config_hash` 两列，零改表即可在切片引用与 `knowledge.chunk` 中透传校验并在不匹配时返回 `version-mismatch` 回落旧 `excerpt`；同步为 Wiki 引用补 `wikiSha256` 并在 `knowledge.wikiFile` 返回 `versionMismatch` 提示与回落。落点：§7.2、§9.1–§9.4、§11.1(7)、§11.2、`D9`/`D10`。 | **已闭环** |
+| **K5-I4** | **API 报错完全属实；威胁模型边界防过度设计收紧** | **API 报错属实**：v2.3 §5.3 写「在已打开的 fd 上做 `lstat`/`realpath`/`fstat`」违反 Node.js API（`lstat`/`realpath` 仅收 `PathLike`）。**防夸大校准**：不为此引入原生 C++/`koffi` `openat` 封装，直接采用仓内 `lan-https-certificate.ts:219-247` 与 `diagnostic-export-worker.ts:171-183` 已验证模式（`realpath` 根归属 + 逐段 `lstat`/`bigint (dev, ino)` 环检 + `open(O_RDONLY \| (win32 ? 0 : O_NOFOLLOW))` + `FileHandle.stat({ bigint: true })` 复核后单句柄读取），并诚实声明：在单用户本地桌面威胁模型下防御静态越界符号链接、Windows junction/reparse point、目录环与常规并发修改，**不宣称**防御同权限恶意进程对中间父目录的纳秒级替换竞态。落点：§2.3、§5.3(1)、§11.1(1)、`D2`。 | **已闭环** |
+| **K5-I5** | **完全属实（正交拆分主动暂停与异常降级）** | 核实 v2.3 §6.1 暂停后仍跑 5 分钟周期对账且未排空 `dirtyPaths`/在途提取句柄，与 Windows 可立即移动目录承诺矛盾。v2.4 采纳支持安全移动语义并显式区分两态：① 用户主动 `watchPaused: true` 关 Watcher、清 `dirtyPaths`、暂停周期与休眠自动对账，并等待在途扫描/提取 `FileHandle` 彻底关闭后再返回应答（仅保留显式手动「同步文件」）；② `FSWatcher` 触发 `'error'` 的非预期降级标记为 `watch-failed`，仍保留周期与手动对账。落点：§2.3、§6.1、§8.3、§9.3–§9.4、§11.1(3)、§11.2、`D3`。 | **已闭环** |
+| **K5-I6** | **完全属实（严守 M2 前置门禁边界，不阻断 M1）** | 核实 §6.2 尚未选定旧版 `.doc`/`.xls`/`.ppt` 解析库与样本矩阵；M1 解析依赖边界已清晰（纯 JS 文本、`adm-zip` + 轻量纯 JS XML、`pdfjs-dist`）。v2.4 在 §0、§6.2、§12 与 `D4`/`D16` 显式固化 **`M2-0` 前置技术选型与样本验证门禁**：不阻断 M1 计划与实现，但在撰写 M2 实施计划前必须先完成预研并将逐格式库/版本/SPDX 许可证/样本支持矩阵/fail-closed 边界回填 §6.2。落点：§0、§6.2、§11.1(3)、§11.2、§12、`D4`/`D16`。 | **已固化门禁** |
+
+### 15.2 最新准入结论（Final Disposition）
+
+- **M1 实施计划准入：`APPROVED`（通过）**。`K5-B1` 与 `K5-I1`–`K5-I5` 已全部在 [`2026-11-24-knowledge-base-design.md`](./2026-11-24-knowledge-base-design.md)（v2.4）闭环，可直接启动 M1 三份实施计划（**M1-1 注册、隔离与索引 / M1-2 单槽整理与调度 / M1-3 会话挂载、五类子代理与可溯源预览**）。
+- **M2 实施计划准入：`GATED BY M2-0`**。撰写 M2 实施计划前必须先完成 `K5-I6` 对应的 **`M2-0` 旧版 Office 技术选型与样本验证门禁**并回填 §6.2；其余 M2 设计契约（视觉离屏零出网、Embedding 95% 覆盖门禁、连通性测试、扫描件补跑）均已就绪。
+
+---
+
+## 16. 第六轮 kimi 复审结论（2026-11-25 — v2.4 是否已达标准入）
+
+> 审核方：**kimi**。对象：[`2026-11-24-knowledge-base-design.md`](./2026-11-24-knowledge-base-design.md) v2.4 当前工作区版本；代码基线仍为外层仓库 `dd68839faf` 与 `deepseek-harness` pin `1600d8a1e140dcde43a1a0941940a0480712c011`。
+>
+> 本轮只读复核第五轮修订，不修改规格或代码。审查重点是 `K5-B1`、`K5-I1`–`K5-I6` 的实际闭环，以及新增契约是否与当前源码时序和故障恢复语义冲突。
+
+### 16.1 总体结论与原发现闭环状态
+
+**kimi 复审结论：v2.4 已明显收敛，但 M1 仍为 `ITERATE`，剩余 3 项 Important（`K6-I1`–`K6-I3`）；M2 继续保持 `GATED BY M2-0`。** 不需要再改方案 A+ 架构，补齐下述契约与测试后即可进行窄范围放行复核。
+
+- **已闭环：**`K5-I1` 的排队消息独立 `kbIds` 快照、`K5-I2` 的 legacy/系统技能/其他子代理 allow 与附件组合、`K5-I3` 的切片及 Wiki 版本指纹、`K5-I4` 的可执行 fd 校验链与威胁模型、`K5-I5` 的主动暂停与 `watch-failed` 正交拆分。
+- **已正确固化门禁：**`K5-I6` 转为不阻断 M1 的 `M2-0`，M2 计划须待旧 Office 选型与样本矩阵回填后再写。
+- **主体成立、恢复语义留有残项：**`K5-B1` 的重绑按 `rel_path` 收敛、正常重建保留 `doc_id`、损坏重建重新分配 `doc_id` 均已明确；剩余提交点与 Wiki 重置恢复问题记为 `K6-I3`。
+- **与 §15.2 的关系：**其 M1 `APPROVED` 是第五轮校准当时结论；经本轮对新增时序与恢复路径复核，最新 M1 状态调整为 **`ITERATE`**。
+
+### 16.2 本轮新增 3 项 Important
+
+| 编号 | 问题与源码证据 | 规格必须补充的契约与测试 |
+| :--- | :--- | :--- |
+| **K6-I1** | **首条 `@智能体` 仍可能读不到本次挂载。** v2.4 §9.2（规格 L459–465）要求派发读取根会话“当前回合已冻结”的 `kbIds`，但 §9.1（L446）只要求 `pendingTurnKbSnapshots` 在 `followup` 前写入。当前 `sessions.ts:539` 在父 `followup`（`:594`）之前执行 `dispatchAt`，而包子代理与 legacy 分别在 `agent-package/host.ts:1129`、`agent-invoke.ts:390` 内启动 `startActivation`。因此一种完全符合文字的实现仍可在 `dispatchAt` 返回后才写 pending，使首条 `@` 继承旧的空集合，并在执行校验时被拒。 | 明确规定在 `await dispatchAt` **之前**建立本次回合快照，并将 `followupId + turnKbIds` 显式传给包/legacy 派发作为继承源，不得依赖尚未发生的父 `claimed`。增加“空标签首条消息直接 `@` 包与 legacy”的实际工具执行测试。专家团当前 `dispatchExpertTeam`（`expert-team/session.ts:389-507`）只建立运行与观察器，成员在团长后续派工时才启动，无同类抢跑，不需套用错误结论。 |
+| **K6-I2** | **`invalid` 回合边界没有 fail-closed 规则。** v2.4 §9.1（L449–452）只覆盖非边界、`goal` 与 `kind === 'user'`；当前 `turn-anchors.ts:147-170` 还会把“真实用户消息缺少字符串 id”判为 `kind: 'invalid'`，且 `isTurnBoundaryMessage` 对其返回 `true`。逐字实现会漏掉该分支，可能把上一回合冻结集合与附件留到新回合。 | 增加 `invalid` 分支：清理该会话待消费快照与旧冻结集合、摘除 `KB_QUERY_TOOLS`，并以明确 reason 取消或拒绝本次回合。补充“缺 id 用户消息不得继承旧知识库或调用 `kb_*`”的回归测试。 |
+| **K6-I3** | **重建提交点与 Wiki 重置恢复未闭合。** v2.4 §6.4（L288–289）中第二步 rename 成功后，新库已经成为 `index.sqlite`；此后若清理 `.bak` 或重开新库失败，“任一步失败都保留旧 `index.sqlite`”没有确定含义：是回滚旧库还是继续使用新库。损坏恢复又在切换成功后才清空旧 `wiki/`（L287）；若此时崩溃或清空失败，L289 的启动恢复只处理 SQLite 文件，不会续做 Wiki 重置，可能留下与新 `doc_id` 不匹配的旧卡片。 | 明确第二步 rename 成功为**提交点**：提交前失败回滚旧库；提交后的清理、重开、Watcher 恢复与回填失败保留新库并降级重试。将 Wiki 重置设计为可恢复的幂等收尾（如 `wiki.stale` rename 或持久化 `wiki-reset-pending` 标记），启动时续做并定义失败事件/UI 重试。补第一步后崩溃、第二步后崩溃、提交后重开失败及 Wiki 重置失败测试。 |
+
+### 16.3 最新放行条件（kimi）
+
+- **M1：**补入 `K6-I1`–`K6-I3` 及对应测试后，可转为 `APPROVED`；本轮未发现需要改变总体架构的新增 Blocker。
+- **M2：**继续受 `M2-0` 门禁约束；无需为了启动 M1 提前完成旧 Office 选型。
+- **后续复核：**只复查这 3 项及相邻回归契约，无需重跑前五轮全量评审。
+- **状态：**`K6-I1`–`K6-I3` 均为新增未闭环 Important；最新结论为 **M1 `ITERATE` / M2 `GATED BY M2-0`**。
+
+---
+
+## 17. 第六轮校准核实与最终收口（2026-11-25 — v2.5：M1 `APPROVED` / M2 `GATED BY M2-0`）
+
+### 17.1 逐项源码复核、校准与 v2.5 落点
+
+经对照 `sessions.ts:477-599`、`agent-package/host.ts:1129`、`agent-invoke.ts:390`、`expert-team/session.ts:389-507`、`turn-anchors.ts:91-97,147-171`、`result-artifact-tools.ts:224-244` 与 `expert-team-dispatch.ts:220-242` 复核，确认 **kimi 第六轮 3 项新增发现（`K6-I1`–`K6-I3`）均真实准确（0 误报）**，并完成 2 处源码级校准，已全部写入 [`2026-11-24-knowledge-base-design.md`](./2026-11-24-knowledge-base-design.md)（v2.5）：
+
+| 编号 | 核实与校准结论 | 源码校准与 v2.5 落点 | 状态 |
+| :--- | :--- | :--- | :--- |
+| **K6-I1** | **完全属实（补齐子会话冻结上下文）** | 核实 `sessions.ts:539` 的 `dispatchAt` 早于 `:594` 的 `agent.followup` 及父 `agent/inbox/claimed`，`dispatchExpertTeam` 无抢跑。v2.5 规定 `sendToAgent` 在 **`await dispatchAt` 之前**落定 `pendingTurnKbSnapshots`（带 `restoreProvisionalBindings` 未受理回滚），并将 `{ followupId, turnKbIds }` 显式传给包 `dispatch()` 与 `legacy @agent`；**额外校准**：增设子会话专属冻结上下文 `childTurnKnowledge`（孙代同引用继承），`resolveMountedKnowledgeBases` / `knowledge-prompt.ts` / 引用归集优先读它，确保子代理首步在父 `claimed` 之前同样读到本次挂载与锚点且不覆写父旧冻结集。落点：§9.1、§9.2、§11.1(7)(8)、`D9`。 | **已闭环** |
+| **K6-I2** | **完全属实（不 `agent.cancel` 无 `id` 会话）** | 核实 `turn-anchors.ts:147-171` 对缺非空字符串 `id` 的真实用户消息返回 `{ kind: 'invalid' }` 且 `isTurnBoundaryMessage` 为 `true`。v2.5 在 §9.1 补齐 `kind === 'invalid'` 分支：清理该会话待消费快照、置空当前冻结 `kbIds`（`[]`）、摘除 `KB_QUERY_TOOLS` 并 `refreshAgentRestrict`。**源码校准**：不调用 `agent.cancel`，与仓内 `turn-anchors.ts`、`result-artifact-tools.ts`、`expert-team-dispatch.ts` 保持一致，避免误杀未挂库普通会话或无 `id` 旧夹具（`agent.cancel` 仍仅用于通知异常兜底）。落点：§9.1、§11.1(7)、`D9`。 | **已闭环** |
+| **K6-I3** | **完全属实（明确提交点与幂等 Wiki 重置）** | 核实 v2.4 §6.4 未切分 Step 2 前后失败语义且缺损坏重建后的 Wiki 重置恢复。v2.5 明确 Step 1 同步搬移旧 `-wal`/`-shm` → `.bak-wal`/`.bak-shm`，以 **Step 2（`rename(index.sqlite.rebuild, index.sqlite)`）为唯一提交点**（提交前失败/崩溃回滚 `.bak*` 并清 `.rebuild*`/`wiki-reset.pending`，提交后失败绝不回滚旧库、按项降级与重试，重开失败标 `index-error`）；损坏重建在提交点前写 `wiki-reset.pending`，提交后及启动按三文件联合状态幂等续做 `rename(wiki/, wiki.stale)` → `mkdir(wiki/)` → 删 `wiki-reset.pending` → 删 `wiki.stale*`，重置未完成前禁止读写失配旧卡片并复用 `knowledge.sync` 提供 UI 重试（不增路由）。落点：§2.3、§5.2、§6.4、§8.3、§9.3–§9.4、§10、§11.1(4)、`D17`。 | **已闭环** |
+
+### 17.2 最新准入结论（Final Disposition）
+
+- **M1 实施计划准入：`APPROVED`（通过）**。`K6-I1`–`K6-I3` 已全部在 [`2026-11-24-knowledge-base-design.md`](./2026-11-24-knowledge-base-design.md)（v2.5）闭环，可直接启动 M1 三份实施计划（**M1-1 注册、隔离与索引 / M1-2 单槽整理与调度 / M1-3 会话挂载、五类子代理与可溯源预览**）。
+- **M2 实施计划准入：`GATED BY M2-0`**。撰写 M2 实施计划前先完成 `K5-I6` 对应的 **`M2-0` 旧版 Office 技术选型与样本验证门禁**并回填 §6.2。
