@@ -129,11 +129,13 @@ async function smokeDiagnosticExportWorker(): Promise<void> {
 /**
  * M1-1 packaged knowledge smoke（控制器裁决 I-2 / M-11）。
  *
- * 断言打包根内 pdfjs `cmaps/` 与 `standard_fonts/` 存在，再经 `resolveKnowledgeWorkerUrl`
+ * 断言打包根内 pdfjs `cmaps/` 与 `standard_fonts/` 存在、可选原生依赖
+ * `@napi-rs/canvas*` 已从安装包排除（`pdfjs-dist` 纯文本提取不需要它，保留会
+ * 增大 ~60 MB 且破坏 macOS universal 合并），再经 `resolveKnowledgeWorkerUrl`
  * 拉起**构建产物** `lib/huaanwork-host/knowledge/{storage,extraction}-worker.js`：
  * 提取损坏 `.asar` 与最小中文 CID PDF、FTS5 入库并检索命中中文字符，最后断言
  * 两个 Worker 的 `dispose()` < 1,000 ms。包体积/文件数是观察值（写到 stderr，
- * 绝不进入 stdout 的 OK 标记），可选 `@napi-rs/canvas` 原生依赖只报告不设门禁。
+ * 绝不进入 stdout 的 OK 标记）。
  */
 export async function smokeKnowledgeWorkers(): Promise<void> {
   const installRoot = fileURLToPath(new URL('./', installAnchor))
@@ -146,6 +148,16 @@ export async function smokeKnowledgeWorkers(): Promise<void> {
     existsSync(join(pdfPackageRoot, 'standard_fonts')),
     'is missing node_modules/pdfjs-dist/standard_fonts for PDF text extraction',
   )
+  const napiRsRoot = join(installRoot, 'node_modules', '@napi-rs')
+  if (existsSync(napiRsRoot)) {
+    const leakedCanvasFiles = readdirSync(napiRsRoot)
+      .filter(name => name === 'canvas' || name.startsWith('canvas-'))
+      .reduce((total, name) => total + measurePackagedTree(join(napiRsRoot, name)).files, 0)
+    assert(
+      leakedCanvasFiles === 0,
+      `packaged app unexpectedly shipped ${String(leakedCanvasFiles)} file(s) under node_modules/@napi-rs/canvas*`,
+    )
+  }
 
   const root = mkdtempSync(join(tmpdir(), 'dsh-packaged-knowledge-'))
   const sourceDir = join(root, 'source')
@@ -218,8 +230,11 @@ export async function smokeKnowledgeWorkers(): Promise<void> {
 
   try {
     const measured = measurePackagedTree(installRoot)
-    const canvasRoot = join(installRoot, 'node_modules', '@napi-rs', 'canvas')
-    const canvasBytes = existsSync(canvasRoot) ? measurePackagedTree(canvasRoot).bytes : 0
+    const canvasBytes = existsSync(napiRsRoot)
+      ? readdirSync(napiRsRoot)
+          .filter(name => name === 'canvas' || name.startsWith('canvas-'))
+          .reduce((total, name) => total + measurePackagedTree(join(napiRsRoot, name)).bytes, 0)
+      : 0
     process.stderr.write(
       `[knowledge-smoke] package files=${String(measured.files)} bytes=${String(measured.bytes)} `
       + `canvasBytes=${String(canvasBytes)} disposeMs=${disposeMs.toFixed(1)}\n`,

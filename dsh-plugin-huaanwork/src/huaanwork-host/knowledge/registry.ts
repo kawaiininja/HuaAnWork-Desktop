@@ -9,6 +9,7 @@
  * 并返回空数组，避免下一次写入静默抹掉用户的全部绑定。
  */
 
+import { randomBytes } from 'node:crypto'
 import { readFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -53,13 +54,15 @@ function parseRecord(raw: unknown): KnowledgeBaseRecord | null {
 
 /**
  * 将无法按顶层形状解析的注册表原文件隔离为
- * `knowledge-bases.json.corrupt-<UTC 时间戳>`。`rename` 保留原文件权限
- * （0o600），供人工恢复；隔离失败只告警，绝不让读取路径抛出。
+ * `knowledge-bases.json.corrupt-<UTC 时间戳>-<随机后缀>`。`rename` 保留原文件权限
+ * （0o600），供人工恢复；隔离失败必须显式抛出（fail-closed），绝不假装为空启动，
+ * 避免后续写入把尚未隔离的损坏注册表直接覆盖。
  */
 async function quarantineCorruptRegistry(profileDir: string): Promise<void> {
   const source = registryPath(profileDir)
   const stamp = new Date().toISOString().replace(/[:.]/gu, '-')
-  const target = `${source}.corrupt-${stamp}`
+  const suffix = randomBytes(4).toString('hex')
+  const target = `${source}.corrupt-${stamp}-${suffix}`
   try {
     await rename(source, target)
     console.warn(`[knowledge] quarantined corrupt knowledge-bases.json: ${source} -> ${target}`)
@@ -68,6 +71,7 @@ async function quarantineCorruptRegistry(profileDir: string): Promise<void> {
       `[knowledge] failed to quarantine corrupt knowledge-bases.json ${source}: `
       + `${error instanceof Error ? error.message : String(error)}`,
     )
+    throw error
   }
 }
 

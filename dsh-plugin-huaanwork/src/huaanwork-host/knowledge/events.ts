@@ -44,46 +44,35 @@ export interface ReadKnowledgeEventsOptions {
   readonly filter?: KnowledgeEventFilter
 }
 
-/** `alerts` 胶囊命中的事件种类。 */
-const ALERT_EVENT_KINDS: ReadonlySet<KnowledgeEventKind> = new Set<KnowledgeEventKind>([
-  'file_skipped',
-  'file_error',
-  'rebuild_failed',
-  'wiki_reset_failed',
-  'organize_failed',
-  'source_unavailable',
-  'watch_failed',
-])
-
-const ORGANIZE_EVENT_KINDS: ReadonlySet<KnowledgeEventKind> = new Set<KnowledgeEventKind>([
-  'organize_started',
-  'organize_completed',
-  'organize_failed',
-  'organize_cancelled',
-])
-
-const SYNC_EVENT_KINDS: ReadonlySet<KnowledgeEventKind> = new Set<KnowledgeEventKind>([
-  'sync_started',
-  'sync_completed',
-  'file_indexed',
-  'file_renamed',
-  'file_deleted',
-  'source_rebound',
-  'rebuild_completed',
-  'source_restored',
-  'cloud_probe_unavailable',
-])
-
 /**
- * 读取侧合法种类集合：由三个胶囊映射派生（每种 kind 至少属于一个胶囊，
- * 共 19 种全覆盖），既避免复制第三份 kind 清单，也保证只有可筛选的记录
- * 才会被读回。
+ * 事件种类到胶囊的唯一映射权威（控制器裁决 M-15，规格 §8.3）：
+ * 用 `Record<KnowledgeEventKind, ...>` 在编译期锁死全部 19 种事件的覆盖，
+ * 避免新增 `KnowledgeEventKind` 时漏掉胶囊或读取白名单。
  */
-const KNOWN_EVENT_KINDS: ReadonlySet<string> = new Set<string>([
-  ...ALERT_EVENT_KINDS,
-  ...ORGANIZE_EVENT_KINDS,
-  ...SYNC_EVENT_KINDS,
-])
+const EVENT_FILTERS: Readonly<Record<KnowledgeEventKind, readonly Exclude<KnowledgeEventFilter, 'all'>[]>> = {
+  sync_started: ['sync'],
+  sync_completed: ['sync'],
+  file_indexed: ['sync'],
+  file_renamed: ['sync'],
+  file_deleted: ['sync'],
+  file_skipped: ['alerts'],
+  file_error: ['alerts'],
+  source_rebound: ['sync'],
+  rebuild_completed: ['sync'],
+  rebuild_failed: ['alerts'],
+  wiki_reset_failed: ['alerts'],
+  organize_started: ['organize'],
+  organize_completed: ['organize'],
+  organize_failed: ['alerts', 'organize'],
+  organize_cancelled: ['organize'],
+  source_unavailable: ['alerts'],
+  source_restored: ['sync'],
+  watch_failed: ['alerts'],
+  cloud_probe_unavailable: ['sync'],
+}
+
+/** 读取侧合法种类集合：由 `EVENT_FILTERS` 派生，保证与筛选权威单一来源。 */
+const KNOWN_EVENT_KINDS: ReadonlySet<string> = new Set<string>(Object.keys(EVENT_FILTERS))
 
 /**
  * 唯一的事件胶囊映射权威（控制器裁决 M-15，规格 §8.3）：
@@ -96,18 +85,8 @@ const KNOWN_EVENT_KINDS: ReadonlySet<string> = new Set<string>([
  *   cloud_probe_unavailable`。
  */
 export function matchesEventFilter(kind: KnowledgeEventKind, filter: KnowledgeEventFilter): boolean {
-  switch (filter) {
-    case 'all':
-      return true
-    case 'alerts':
-      return ALERT_EVENT_KINDS.has(kind)
-    case 'organize':
-      return ORGANIZE_EVENT_KINDS.has(kind)
-    case 'sync':
-      return SYNC_EVENT_KINDS.has(kind)
-    default:
-      return false
-  }
+  if (filter === 'all') return true
+  return EVENT_FILTERS[kind].includes(filter)
 }
 
 /**

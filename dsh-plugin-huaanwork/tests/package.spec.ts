@@ -937,6 +937,8 @@ describe('published package surface', () => {
       'skills/**',
       '!node_modules/node-pty/build/**',
       '!node_modules/fs-ext/build/**',
+      '!node_modules/@napi-rs/canvas/**',
+      '!node_modules/@napi-rs/canvas-*/**',
     ])
     expect(manifest.build?.mac?.icon).toBe('build/app-icon-mac.png')
     expect(manifest.build?.mac?.artifactName).toBe('HuaAnWork-${version}-${arch}.${ext}')

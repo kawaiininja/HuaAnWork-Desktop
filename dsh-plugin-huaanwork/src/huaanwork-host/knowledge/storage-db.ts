@@ -34,8 +34,6 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { SQLInputValue, SQLOutputValue } from 'node:sqlite'
 
-import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
-
 import type { SingleKbCandidate } from './ranker.ts'
 import type { StorageGetChunkResult } from './storage-protocol.ts'
 import { buildSafeFtsQuery, tokenizeForFts } from './tokenizer.ts'
@@ -81,6 +79,17 @@ export const ORGANIZE_MAX_ATTEMPTS = 3
 /** 整理失败退避：第 1 次 1 分钟，第 2 次 5 分钟（规格 §8.1）。 */
 export const ORGANIZE_RETRY_FIRST_DELAY_MS = 60_000
 export const ORGANIZE_RETRY_SECOND_DELAY_MS = 300_000
+
+/**
+ * 可参与整理的文档筛选条件（规格 §6.3 / §8.1 / §10）：
+ * `indexed` 与已产出有效切片的 `partial`（例如混合 PDF 文字页、截断长文档）
+ * 都应进入待整理队列；0 切片文档与 `skipped`/`error` 不进入待整理。
+ */
+const ORGANIZE_ELIGIBLE_SQL = `d.status IN ('indexed', 'partial') AND EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id = d.doc_id)`
+/** 待整理：满足可整理条件、尚未按当前 sha256 整理，且未达到 3 次放弃阈值（含退避中文档）。 */
+const ORGANIZE_PENDING_SQL = `${ORGANIZE_ELIGIBLE_SQL} AND (d.organized_sha256 IS NULL OR d.organized_sha256 <> d.sha256) AND d.organize_attempts < ${String(ORGANIZE_MAX_ATTEMPTS)}`
+/** 已放弃整理（quarantined `organize-failed`，规格 §8.1：第 3 次失败后不再自动排期）。 */
+const ORGANIZE_FAILED_SQL = `d.organize_attempts >= ${String(ORGANIZE_MAX_ATTEMPTS)}`
 
 /** 规格 §7.1 逐字锁定的 Schema（全部 `IF NOT EXISTS`，打开幂等）。 */
 const SCHEMA_STATEMENTS: readonly string[] = [
@@ -396,20 +405,6 @@ function performWikiReset(kbDir: string): boolean {
   } catch {
     return false
   }
-}
-
-/**
- * 落盘 `wiki-reset.pending`（异步路径，供 Worker 在损坏恢复重建开始时使用）。
- * 已存在时保持原样。
- */
-export async function ensureWikiResetPending(kbDir: string): Promise<void> {
-  const target = wikiResetPendingPath(kbDir)
-  if (existsSync(target)) return
-  mkdirSync(kbDir, { recursive: true, mode: PRIVATE_DIR_MODE })
-  await writeFileAtomic(target, `${JSON.stringify({ reason: 'corrupt-rebuild', at: new Date().toISOString() })}\n`, {
-    mode: PRIVATE_FILE_MODE,
-    dirMode: PRIVATE_DIR_MODE,
-  })
 }
 
 function ensureWikiResetPendingSync(kbDir: string): void {
@@ -785,10 +780,10 @@ export function listDocs(db: DatabaseSync, filter?: ListDocsFilter): ListDocsRes
       conditions.push('d.organized_sha256 IS NOT NULL AND d.organized_sha256 = d.sha256')
       break
     case 'pending':
-      conditions.push('(d.organized_sha256 IS NULL OR d.organized_sha256 <> d.sha256) AND d.organize_attempts < 3')
+      conditions.push(ORGANIZE_PENDING_SQL)
       break
     case 'failed':
-      conditions.push("(d.organize_attempts >= 3 OR (d.organized_sha256 IS NULL AND d.last_organize_error IS NOT NULL))")
+      conditions.push(ORGANIZE_FAILED_SQL)
       break
     default:
       break
@@ -827,6 +822,7 @@ export function searchFts(db: DatabaseSync, query: SearchFtsQuery): readonly Sin
     `SELECT c.chunk_id AS chunk_id, c.doc_id AS doc_id, c.ordinal AS ordinal,
             c.heading_path AS heading_path, c.locator_json AS locator_json, c.content AS content,
             d.rel_path AS rel_path, d.sha256 AS sha256, d.extract_config_hash AS extract_config_hash,
+            d.size AS doc_size, d.mtime_ms AS doc_mtime_ms,
             bm25(chunks_fts) AS bm25
        FROM chunks_fts
        JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
@@ -848,6 +844,8 @@ export function searchFts(db: DatabaseSync, query: SearchFtsQuery): readonly Sin
     locator: parseLocator(row['locator_json']),
     content: text(row['content']),
     bm25: typeof row['bm25'] === 'number' ? row['bm25'] : Number(row['bm25'] ?? 0),
+    docSize: integer(row['doc_size']),
+    docMtimeMs: integer(row['doc_mtime_ms']),
   }))
 }
 
@@ -869,7 +867,7 @@ function chunkWindowItem(row: Record<string, SQLOutputValue>): ChunkWindowItem {
 export function getChunkWithWindow(db: DatabaseSync, query: GetChunkWindowQuery): StorageGetChunkResult {
   const kbId = query.kbId ?? ''
   const row = db.prepare(
-    'SELECT doc_id, rel_path, sha256, extract_config_hash FROM documents WHERE doc_id = ?',
+    'SELECT doc_id, rel_path, sha256, extract_config_hash, size, mtime_ms FROM documents WHERE doc_id = ?',
   ).get(query.docId)
   if (row === undefined) return { status: 'chunk-missing', kbId, docId: query.docId }
 
@@ -898,6 +896,8 @@ export function getChunkWithWindow(db: DatabaseSync, query: GetChunkWindowQuery)
     relPath: text(row['rel_path']),
     sha256,
     extractConfigHash,
+    size: integer(row['size']),
+    mtimeMs: integer(row['mtime_ms']),
     targetOrdinal,
     chunks,
   }
@@ -925,20 +925,10 @@ export function getStats(db: DatabaseSync): KnowledgeBaseStats {
   }
   const totalChunks = integer(db.prepare('SELECT COUNT(*) AS total FROM chunks').get()?.['total'])
   const pendingOrganizeDocs = integer(
-    db.prepare(
-      `SELECT COUNT(*) AS total FROM documents
-        WHERE status = 'indexed'
-          AND (organized_sha256 IS NULL OR organized_sha256 <> sha256)
-          AND organize_attempts < 3
-          AND organize_retry_after IS NULL`,
-    ).get()?.['total'],
+    db.prepare(`SELECT COUNT(*) AS total FROM documents d WHERE ${ORGANIZE_PENDING_SQL}`).get()?.['total'],
   )
   const failedOrganizeDocs = integer(
-    db.prepare(
-      `SELECT COUNT(*) AS total FROM documents
-        WHERE organize_attempts >= 3
-           OR (organized_sha256 IS NULL AND last_organize_error IS NOT NULL)`,
-    ).get()?.['total'],
+    db.prepare(`SELECT COUNT(*) AS total FROM documents d WHERE ${ORGANIZE_FAILED_SQL}`).get()?.['total'],
   )
   const summary = counts['indexed'] ?? 0
   const partial = counts['partial'] ?? 0
@@ -1034,9 +1024,7 @@ export function getPendingOrganizeBatch(db: DatabaseSync, query: PendingOrganize
             d.wiki_note_path AS wiki_note_path,
             COALESCE((SELECT SUM(c.char_count) FROM chunks c WHERE c.doc_id = d.doc_id), 0) AS char_count
        FROM documents d
-      WHERE d.status = 'indexed'
-        AND (d.organized_sha256 IS NULL OR d.organized_sha256 <> d.sha256)
-        AND d.organize_attempts < ${String(ORGANIZE_MAX_ATTEMPTS)}
+      WHERE ${ORGANIZE_PENDING_SQL}
         AND (d.organize_retry_after IS NULL OR d.organize_retry_after <= ?)
       ORDER BY d.updated_at ASC, d.rel_path ASC
       LIMIT ?`,

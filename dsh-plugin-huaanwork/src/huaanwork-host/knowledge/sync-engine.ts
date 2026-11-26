@@ -373,7 +373,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     closeWatcher(runtime)
     runtime.watchFailed = true
     runtime.lastError = describeError(error)
-    if (!runtime.watchPaused && !runtime.sourceUnavailable) runtime.phase = 'watch-failed'
+    settlePhase(runtime)
     void appendEvent(kbDirOf(runtime.record.id), {
       kind: 'watch_failed',
       level: 'warn',
@@ -523,12 +523,24 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     }
   }
 
-  /** 失败分类：超限要落 `skipped` 行，越界/非普通文件只记跳过，其余按错误重试。 */
-  function classifyFailure(reason: string): 'skip' | 'record-too-large' | 'aborted' | 'failed' {
+  /**
+   * 单文件失败分类（规格 §2.3 / §5.3(1) / §6.2 / §10）：
+   * - `aborted`：维护/退场中止（重建必须放弃并回滚）；
+   * - `record-too-large`：超 50 MB 预算，落 `skipped` 行并记告警；
+   * - `skip`：越界符号链接 / 环 / 非普通文件，不落 `documents` 行，只记跳过告警；
+   * - `retryable`：`inode-replaced` / `worker-crashed` 属瞬态失败，不锁死为
+   *   `error` 行，只记 `file_error` 告警，由下一次防抖/对账自动重试；
+   * - `record-error`：`extract-timeout` / `read-error` 等确定性单文件失败，落
+   *   `error` 行（保留 `(size, mtimeMs)` 避免 5 分钟周期对账无限重试）并记告警。
+   */
+  function classifyFailure(
+    reason: string,
+  ): 'skip' | 'record-too-large' | 'aborted' | 'retryable' | 'record-error' {
     if (reason === 'file-too-large') return 'record-too-large'
     if (reason === 'symlink-outside-source' || reason === 'symlink-loop' || reason === 'not-regular-file') return 'skip'
     if (reason === 'aborted') return 'aborted'
-    return 'failed'
+    if (reason === 'inode-replaced' || reason === 'worker-crashed') return 'retryable'
+    return 'record-error'
   }
 
   async function prepareFile(
@@ -573,6 +585,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         }
         if (action === 'skip') return { kind: 'skipped', reason: hashProbe.reason }
         if (action === 'aborted') return { kind: 'aborted' }
+        if (action === 'record-error') {
+          await storage.upsertDocument(kbId, errorInput(runtime, file, hashProbe.reason))
+        }
         return {
           kind: 'failed',
           reason: hashProbe.reason,
@@ -596,6 +611,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       }
       if (action === 'skip') return { kind: 'skipped', reason: extracted.reason }
       if (action === 'aborted') return { kind: 'aborted' }
+      if (action === 'record-error') {
+        await storage.upsertDocument(kbId, errorInput(runtime, file, extracted.reason))
+      }
       return {
         kind: 'failed',
         reason: extracted.reason,
@@ -996,7 +1014,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     } catch (error) {
       if (isSourceMissingError(error)) {
         runtime.sourceUnavailable = true
-        runtime.phase = 'source-unavailable'
+        if (!needsRecovery(runtime.phase)) runtime.phase = 'source-unavailable'
         runtime.lastError = describeError(error)
         await appendEvent(kbDir, {
           kind: 'source_unavailable',
@@ -1169,7 +1187,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       } catch {
         runtime.caseSensitive = process.platform !== 'win32'
       }
-      runtime.phase = idlePhase(runtime)
+      // 恢复阶段（wiki-reset-pending / index-error）不能被重绑静默抹除：
+      // 保留该阶段直到显式重试/重建完成（规格 §6.4）。
+      if (!needsRecovery(runtime.phase)) runtime.phase = idlePhase(runtime)
       // 保留 index.sqlite 与 wiki/，禁用跨目录重命名猜配做全量对账。
       ensureWatcher(runtime)
       try {
@@ -1222,7 +1242,17 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         throw new KnowledgeSyncError('source-unavailable', 'source directory became unreadable during rebuild')
       }
       const files = walked.files.slice(0, maxFilesPerKb)
+      const capSkipped = walked.files.length - files.length
       const alertEvents: AppendKnowledgeEventInput[] = []
+      if (capSkipped > 0) {
+        alertEvents.push({
+          kind: 'file_skipped',
+          level: 'warn',
+          summary: `超过单库有效文件上限（${String(maxFilesPerKb)}），已跳过 ${String(capSkipped)} 个文件`,
+          detail: `${MAX_FILES_EXCEEDED_REASON}: ${String(capSkipped)} file(s) exceed the per-KB cap of ${String(maxFilesPerKb)}`,
+          count: capSkipped,
+        })
+      }
       for (const skipped of walked.skipped) {
         alertEvents.push({
           kind: 'file_skipped',
@@ -1233,13 +1263,20 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         })
       }
       let rebuilt = 0
-      let skippedFiles = 0
+      let skippedFiles = capSkipped
       let failedFiles = 0
       for (const file of files) {
         const probe = probeCloud(file.absPath)
         if (probe === 'dehydrated') {
           await storage.upsertRebuildDocument(kbId, skippedInput(runtime, file, CLOUD_DEHYDRATED_REASON))
           skippedFiles += 1
+          alertEvents.push({
+            kind: 'file_skipped',
+            level: 'warn',
+            summary: `跳过文件（${CLOUD_DEHYDRATED_REASON}）: ${file.relPath}`,
+            detail: CLOUD_DEHYDRATED_REASON,
+            relPath: file.relPath,
+          })
           continue
         }
         const extracted = await pool.extractFile(kbId, {
@@ -1254,22 +1291,35 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
             // 维护中止/退场：重建必须放弃并回滚旧库（规格 §6.4 提交前失败）。
             throw new KnowledgeSyncError('rebuild-failed', `${file.relPath}: ${extracted.reason}`)
           }
-          if (action === 'record-too-large' || action === 'skip') {
-            const reason = action === 'record-too-large' ? FILE_TOO_LARGE_REASON : extracted.reason
-            await storage.upsertRebuildDocument(kbId, skippedInput(runtime, file, reason))
+          if (action === 'record-too-large') {
+            await storage.upsertRebuildDocument(kbId, skippedInput(runtime, file, FILE_TOO_LARGE_REASON))
             skippedFiles += 1
             alertEvents.push({
               kind: 'file_skipped',
               level: 'warn',
-              summary: `跳过文件（${reason}）: ${file.relPath}`,
-              detail: reason,
+              summary: `跳过文件（${FILE_TOO_LARGE_REASON}）: ${file.relPath}`,
+              detail: FILE_TOO_LARGE_REASON,
               relPath: file.relPath,
             })
             continue
           }
-          // 规格 §2.3 单文件失败隔离：记 error 行后继续重建，只有存储 RPC
-          // 拒绝（下面直接冒泡）或 `aborted` 才中止整个重建。
-          await storage.upsertRebuildDocument(kbId, errorInput(runtime, file, extracted.reason))
+          if (action === 'skip') {
+            // 越界符号链接 / 环 / 非普通文件与常规对账一致：不写入 documents，仅记告警。
+            skippedFiles += 1
+            alertEvents.push({
+              kind: 'file_skipped',
+              level: 'warn',
+              summary: `跳过文件（${extracted.reason}）: ${file.relPath}`,
+              detail: extracted.reason,
+              relPath: file.relPath,
+            })
+            continue
+          }
+          if (action === 'record-error') {
+            // 规格 §2.3 单文件确定性失败隔离：记 error 行后继续重建，避免周期对账无限重试。
+            await storage.upsertRebuildDocument(kbId, errorInput(runtime, file, extracted.reason))
+          }
+          // `retryable`（inode-replaced / worker-crashed）不写 error 行，使下次同步自动重试。
           failedFiles += 1
           alertEvents.push({
             kind: 'file_error',

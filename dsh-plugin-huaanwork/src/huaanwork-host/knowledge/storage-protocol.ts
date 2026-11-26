@@ -45,6 +45,9 @@ export type StorageGetChunkResult =
       readonly relPath: string
       readonly sha256: string
       readonly extractConfigHash: string
+      /** 文档索引时的字节大小与修改时间（Host 用于实时 `stale` 校验，不透出到公开 `GetChunkResult`）。 */
+      readonly size: number
+      readonly mtimeMs: number
       readonly targetOrdinal: number
       readonly chunks: readonly ChunkWindowItem[]
     }

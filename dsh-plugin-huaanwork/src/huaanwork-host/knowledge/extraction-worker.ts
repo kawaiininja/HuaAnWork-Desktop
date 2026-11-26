@@ -51,10 +51,13 @@ async function delay(ms: number): Promise<void> {
 
 /** 单文件提取：安全打开 → 哈希（必要时解析 + 切片）→ 关闭句柄。 */
 async function extractOne(request: ExtractionFileRequest): Promise<ExtractionFileResult> {
-  const busyMs = request.debugBusyLoopMs
-  if (busyMs !== undefined && Number.isFinite(busyMs) && busyMs > 0) busyLoop(busyMs)
-  const delayMs = request.debugDelayMs
-  if (delayMs !== undefined && Number.isFinite(delayMs) && delayMs > 0) await delay(delayMs)
+  // 测试缝仅在 VITEST 下生效，与 Storage Worker（M-1）一致，生产路径绝不执行。
+  if (process.env['VITEST'] !== undefined) {
+    const busyMs = request.debugBusyLoopMs
+    if (busyMs !== undefined && Number.isFinite(busyMs) && busyMs > 0) busyLoop(busyMs)
+    const delayMs = request.debugDelayMs
+    if (delayMs !== undefined && Number.isFinite(delayMs) && delayMs > 0) await delay(delayMs)
+  }
 
   const maxBytes = request.maxBytes
   const opened = await openVerifiedSourceFile(request.sourceRoot, request.filePath, {

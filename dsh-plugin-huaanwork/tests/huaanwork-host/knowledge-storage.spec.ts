@@ -7,10 +7,13 @@ import {
   commitRebuildStaging,
   deleteDocument,
   getChunkWithWindow,
+  getPendingOrganizeBatch,
+  getStats,
   listDocs,
   markOrganizedAtomic,
   openCommittedKnowledgeDb,
   openKnowledgeDb,
+  recordOrganizeFailure,
   renameDocument,
   retryPendingWikiReset,
   searchFts,
@@ -423,5 +426,86 @@ describe('knowledge SQLite storage, rebuild commit-point, and Storage Worker', (
     // 保留下来的 pending 仍可由幂等入口收尾（Host 的 wiki-reset-pending 阶段）。
     expect(retryPendingWikiReset(kbDir)).toEqual({ ok: true })
     expect(existsSync(join(kbDir, 'wiki-reset.pending'))).toBe(false)
+  })
+
+  it('keeps backoff-retrying and partial-with-chunks docs in pendingOrganizeDocs without double-counting failedOrganizeDocs', () => {
+    const kbDir = mkdtempSync(join(tmpdir(), 'kb-org-sql-'))
+    const opened = openKnowledgeDb(kbDir)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const { db } = opened
+    try {
+      const docIndexed = upsertDocumentWithChunks(db, {
+        relPath: 'indexed.md', normPath: 'indexed.md', sha256: 'sha-i', size: 20, mtimeMs: 1,
+        format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+        chunks: [sampleChunk(0, '正常索引文档内容')],
+      })
+      const docPartial = upsertDocumentWithChunks(db, {
+        relPath: 'hybrid.pdf', normPath: 'hybrid.pdf', sha256: 'sha-p', size: 40, mtimeMs: 2,
+        format: 'pdf', extractMode: 'mixed', extractConfigHash: 'c1', status: 'partial',
+        statusReason: 'pdf-image-pages-pending',
+        chunks: [sampleChunk(0, '混合 PDF 已提取文字页')],
+      })
+      // 0 切片文档与 skipped 文档绝不进入待整理队列。
+      upsertDocumentWithChunks(db, {
+        relPath: 'empty.md', normPath: 'empty.md', sha256: 'sha-e', size: 0, mtimeMs: 3,
+        format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+        chunks: [],
+      })
+      upsertDocumentWithChunks(db, {
+        relPath: 'huge.bin', normPath: 'huge.bin', sha256: '', size: 99, mtimeMs: 4,
+        format: 'bin', extractMode: 'none', extractConfigHash: 'c1', status: 'skipped',
+        statusReason: 'file-too-large',
+        chunks: [],
+      })
+
+      expect(getStats(db)).toMatchObject({
+        totalDocs: 4,
+        indexedDocs: 2,
+        partialDocs: 1,
+        skippedDocs: 1,
+        pendingOrganizeDocs: 2,
+        failedOrganizeDocs: 0,
+      })
+      expect(listDocs(db, { organizeState: 'pending' }).docs.map(d => d.docId).sort())
+        .toEqual([docIndexed.docId, docPartial.docId].sort())
+      expect(listDocs(db, { organizeState: 'failed' }).total).toBe(0)
+      expect(getPendingOrganizeBatch(db, { nowMs: 1_000 }).docs.map(d => d.docId).sort())
+        .toEqual([docIndexed.docId, docPartial.docId].sort())
+
+      // 第 1 次失败（退避 60 s）：仍属 pending（不得从待整理消失，也不得误计入 failed）。
+      const fail1 = recordOrganizeFailure(db, {
+        docId: docIndexed.docId, sha256: 'sha-i', error: 'temporary 503', nowMs: 10_000,
+      })
+      expect(fail1).toEqual({ attempts: 1, retryAfter: 70_000 })
+      expect(getStats(db)).toMatchObject({ pendingOrganizeDocs: 2, failedOrganizeDocs: 0 })
+      expect(listDocs(db, { organizeState: 'pending' }).total).toBe(2)
+      expect(listDocs(db, { organizeState: 'failed' }).total).toBe(0)
+      // 退避期内排期跳过 docIndexed，只调度 docPartial；过退避期后两者都可调度。
+      expect(getPendingOrganizeBatch(db, { nowMs: 20_000 }).docs.map(d => d.docId)).toEqual([docPartial.docId])
+      expect(getPendingOrganizeBatch(db, { nowMs: 70_001 }).docs.map(d => d.docId).sort())
+        .toEqual([docIndexed.docId, docPartial.docId].sort())
+
+      // 第 2 次失败（退避 300 s）：仍属 pending，不计入 failed。
+      const fail2 = recordOrganizeFailure(db, {
+        docId: docIndexed.docId, sha256: 'sha-i', error: 'temporary 503 #2', nowMs: 80_000,
+      })
+      expect(fail2).toEqual({ attempts: 2, retryAfter: 380_000 })
+      expect(getStats(db)).toMatchObject({ pendingOrganizeDocs: 2, failedOrganizeDocs: 0 })
+      expect(listDocs(db, { organizeState: 'failed' }).total).toBe(0)
+
+      // 第 3 次失败：正式进入 quarantined failed，从 pending 移除（严格互斥）。
+      const fail3 = recordOrganizeFailure(db, {
+        docId: docIndexed.docId, sha256: 'sha-i', error: 'permanent failure', nowMs: 400_000,
+      })
+      expect(fail3).toEqual({ attempts: 3, retryAfter: null })
+      expect(getStats(db)).toMatchObject({ pendingOrganizeDocs: 1, failedOrganizeDocs: 1 })
+      expect(listDocs(db, { organizeState: 'pending' }).docs.map(d => d.docId)).toEqual([docPartial.docId])
+      expect(listDocs(db, { organizeState: 'failed' }).docs.map(d => d.docId)).toEqual([docIndexed.docId])
+      expect(getPendingOrganizeBatch(db, { nowMs: 999_999 }).docs.map(d => d.docId)).toEqual([docPartial.docId])
+    } finally {
+      db.close()
+      rmSync(kbDir, { recursive: true, force: true })
+    }
   })
 })

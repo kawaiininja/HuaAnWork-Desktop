@@ -53,12 +53,10 @@ export const DEFAULT_KNOWLEDGE_DISPOSE_BUDGET_MS = 950
 const STORAGE_DISPOSE_BUDGET_MS = 800
 /** `getChunk` 缺省窗口大小（目标 ordinal 前后各取一部分）。 */
 const DEFAULT_GET_CHUNK_WINDOW = 3
-/** 单库检索召回上限（服务端重排前）。 */
-const SEARCH_FTS_LIMIT = 200
+/** 单库检索召回上限（服务端重排前，规格 §7.2 Top-60）。 */
+const SEARCH_FTS_LIMIT = 60
 /** 搜索建议摘录长度（字符）。 */
 const SEARCH_EXCERPT_MAX_CHARS = 200
-/** 按 `pathQuery` 反查文档元数据时的分页上限（listDocs 硬上限 200）。 */
-const DOC_LOOKUP_LIMIT = 200
 
 const ZERO_STATS: KnowledgeBaseStats = {
   totalDocs: 0,
@@ -271,20 +269,6 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     }
   }
 
-  /** 按 `rel_path` 反查文档元数据（Storage 侧只暴露 listDocs 的聚合计）。 */
-  async function lookupDocMeta(
-    kbId: string,
-    docId: string,
-    relPath: string,
-  ): Promise<DocumentRecordSummary | undefined> {
-    try {
-      const listed = await storage.listDocs(kbId, { pathQuery: relPath, limit: DOC_LOOKUP_LIMIT })
-      return listed.docs.find(doc => doc.docId === docId)
-    } catch {
-      return undefined
-    }
-  }
-
   async function start(): Promise<void> {
     if (startPromise !== undefined) return startPromise
     if (disposed) return
@@ -358,7 +342,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       id,
       name: input.name,
       sourceDir: input.sourceDir,
-      autoOrganize: input.autoOrganize ?? false,
+      autoOrganize: input.autoOrganize ?? true,
       watchPaused: false,
       createdAt: new Date().toISOString(),
     }
@@ -410,33 +394,60 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
         if (!validation.ok) {
           throw new KnowledgeSyncError('invalid-source-dir', validation.reason)
         }
+        // 若同时传入 `watchPaused: true`，先暂停监听再重绑，避免重绑期间短暂重启无用监听。
+        let pausedBeforeRebind = false
+        if (patch.watchPaused === true && !next.watchPaused) {
+          await engine.pauseWatch(kbId)
+          pausedBeforeRebind = true
+          next = { ...next, watchPaused: true }
+        }
         const rebound: KnowledgeBaseRecord = { ...next, sourceDir: newSourceDir }
         // 2/3. 引擎取维护门闩 + 停机序列；Host 在收敛前经 registryChain 原子
         //      落盘并更新内存。落盘失败回滚内存并抛出，引擎用旧记录恢复运行态。
         //      落盘成功后的收敛失败由引擎吞掉：磁盘与内存都保持新 sourceDir，
         //      下次启动对账自愈（规格 §6.4 失败与中断恢复）。
-        await engine.rebindSourceDir(kbId, newSourceDir, validation.realSourceDir, async () => {
-          const previous = records.get(kbId)
-          records.set(kbId, rebound)
-          try {
-            await persistRegistry()
-          } catch (error) {
-            if (previous === undefined) records.delete(kbId)
-            else records.set(kbId, previous)
-            throw error
-          }
-        })
+        try {
+          await engine.rebindSourceDir(kbId, newSourceDir, validation.realSourceDir, async () => {
+            const previous = records.get(kbId)
+            records.set(kbId, rebound)
+            try {
+              await persistRegistry()
+            } catch (error) {
+              if (previous === undefined) records.delete(kbId)
+              else records.set(kbId, previous)
+              throw error
+            }
+          })
+        } catch (error) {
+          if (pausedBeforeRebind) await engine.resumeWatch(kbId).catch(() => undefined)
+          throw error
+        }
         next = rebound
         persistedNext = rebound
       }
+      let watchTransition: 'paused' | 'resumed' | undefined
       if (patch.watchPaused !== undefined && patch.watchPaused !== next.watchPaused) {
-        if (patch.watchPaused) await engine.pauseWatch(kbId)
-        else await engine.resumeWatch(kbId)
+        if (patch.watchPaused) {
+          await engine.pauseWatch(kbId)
+          watchTransition = 'paused'
+        } else {
+          await engine.resumeWatch(kbId)
+          watchTransition = 'resumed'
+        }
         next = { ...next, watchPaused: patch.watchPaused }
       }
-      if (next !== record) {
+      if (next !== persistedNext) {
+        const previous = records.get(kbId)
         records.set(kbId, next)
-        if (next !== persistedNext) await persistRegistry()
+        try {
+          await persistRegistry()
+        } catch (error) {
+          if (previous === undefined) records.delete(kbId)
+          else records.set(kbId, previous)
+          if (watchTransition === 'paused') await engine.resumeWatch(kbId).catch(() => undefined)
+          else if (watchTransition === 'resumed') await engine.pauseWatch(kbId).catch(() => undefined)
+          throw error
+        }
       }
       return next
     } finally {
@@ -531,7 +542,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     if (merged.length === 0) return []
 
     const sourceStatus = new Map<string, boolean>()
-    const docMeta = new Map<string, DocumentRecordSummary | undefined>()
+    const staleByDoc = new Map<string, boolean>()
     const hits: KnowledgeSearchHit[] = []
     for (const candidate of merged) {
       const record = records.get(candidate.kbId)
@@ -542,12 +553,22 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
         sourceStatus.set(candidate.kbId, unavailable)
       }
       const docKey = `${candidate.kbId}\u0000${candidate.docId}`
-      let doc = docMeta.get(docKey)
-      if (doc === undefined && !docMeta.has(docKey)) {
-        doc = await lookupDocMeta(candidate.kbId, candidate.docId, candidate.relPath)
-        docMeta.set(docKey, doc)
+      let stale = staleByDoc.get(docKey)
+      if (stale === undefined) {
+        stale = candidate.docSize !== undefined && candidate.docMtimeMs !== undefined
+          ? await staleForDoc(
+              record,
+              {
+                docId: candidate.docId,
+                relPath: candidate.relPath,
+                size: candidate.docSize,
+                mtimeMs: candidate.docMtimeMs,
+              },
+              unavailable,
+            )
+          : false
+        staleByDoc.set(docKey, stale)
       }
-      const stale = doc === undefined ? false : await staleForDoc(record, doc, unavailable)
       hits.push({
         kbId: candidate.kbId,
         kbName: candidate.kbName,
@@ -594,13 +615,19 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     if (result.status !== 'ok') return result
     // 控制器裁决 M-2：Host 在存储可证明事实之外补齐 kbName / stale / sourceUnavailable。
     const unavailable = await sourceUnavailableFor(record)
-    const doc = await lookupDocMeta(record.id, result.docId, result.relPath)
-    const stale = doc === undefined ? false : await staleForDoc(record, doc, unavailable)
+    const stale = await staleForDoc(record, result, unavailable)
     return {
-      ...result,
+      status: 'ok',
+      kbId: result.kbId,
       kbName: record.name,
+      docId: result.docId,
+      relPath: result.relPath,
+      sha256: result.sha256,
+      extractConfigHash: result.extractConfigHash,
       stale,
       sourceUnavailable: unavailable,
+      targetOrdinal: result.targetOrdinal,
+      chunks: result.chunks,
     }
   }
 

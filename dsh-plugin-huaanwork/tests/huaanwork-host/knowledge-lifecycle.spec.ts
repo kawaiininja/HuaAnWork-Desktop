@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it, vi } from 'vitest'
 import { createKnowledgeHost } from '../../src/huaanwork-host/knowledge/host.ts'
 import { createExtractionPool } from '../../src/huaanwork-host/knowledge/extraction-pool.ts'
+import { createKnowledgeStorageClient } from '../../src/huaanwork-host/knowledge/storage-client.ts'
 import { KNOWLEDGE_TEST_CORRUPT_AFTER_COMMIT } from '../../src/huaanwork-host/knowledge/storage-protocol.ts'
 import { MAX_KNOWLEDGE_BASES } from '../../src/huaanwork-host/knowledge/types.ts'
 import { neutralKnowledgeRootPath, neutralKnowledgeWikiRootPath } from '../../src/huaanwork-host/workspace-state.ts'
@@ -408,5 +409,171 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
     expect(elapsed).toBeLessThan(1_000)
     expect(realPool.activeWorkerCount()).toBe(0)
     await expect(inFlight).resolves.toMatchObject({ ok: false })
+  })
+
+  it('defaults autoOrganize to true on create (spec §5.2/§9.3) while honouring explicit false', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-host-auto-org-'))
+    const profileDir = join(root, 'profile')
+    const dirDefault = join(root, 'docs-default')
+    const dirExplicitFalse = join(root, 'docs-false')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(dirDefault, { recursive: true })
+    mkdirSync(dirExplicitFalse, { recursive: true })
+
+    const host = createKnowledgeHost({ profileDir })
+    await host.start()
+    try {
+      const kbDefault = await host.create({ name: '默认开启自动整理', sourceDir: dirDefault })
+      const kbFalse = await host.create({ name: '显式关闭自动整理', sourceDir: dirExplicitFalse, autoOrganize: false })
+      expect(kbDefault.autoOrganize).toBe(true)
+      expect(host.get(kbDefault.id)?.autoOrganize).toBe(true)
+      expect(kbFalse.autoOrganize).toBe(false)
+      expect(host.get(kbFalse.id)?.autoOrganize).toBe(false)
+      const persisted = JSON.parse(readFileSync(join(profileDir, 'knowledge-bases.json'), 'utf8')) as {
+        knowledgeBases: Array<{ id: string; autoOrganize: boolean }>
+      }
+      expect(persisted.knowledgeBases.find(k => k.id === kbDefault.id)?.autoOrganize).toBe(true)
+      expect(persisted.knowledgeBases.find(k => k.id === kbFalse.id)?.autoOrganize).toBe(false)
+    } finally {
+      await host.dispose()
+    }
+  })
+
+  it('preserves wiki-reset-pending across host.update({ sourceDir }) until sync completes the reset (spec §6.4)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-host-rebind-pending-'))
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'docs')
+    const movedDir = join(root, 'docs-moved')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    writeFileSync(join(sourceDir, 'keep.md'), '恢复态重绑文档')
+
+    const host = createKnowledgeHost({ profileDir })
+    await host.start()
+    let kbId = ''
+    try {
+      const kb = await host.create({ name: '恢复重绑库', sourceDir })
+      kbId = kb.id
+      await host.update(kbId, { watchPaused: true })
+      await host.sync(kbId)
+      const wikiDir = neutralKnowledgeWikiRootPath(profileDir, kbId)
+      mkdirSync(wikiDir, { recursive: true })
+      writeFileSync(join(wikiDir, 'INDEX.md'), '# 旧索引待重置')
+    } finally {
+      await host.dispose()
+    }
+
+    writeFileSync(join(neutralKnowledgeRootPath(profileDir, kbId), 'index.sqlite'), 'CORRUPT_DB_BYTES')
+    const host2 = createKnowledgeHost({
+      profileDir,
+      failWikiResetOnceForTest: () => {
+        throw new Error('simulated-ebusy-wiki-reset')
+      },
+    })
+    await host2.start()
+    try {
+      expect(host2.get(kbId)?.phase).toBe('index-error')
+      await host2.rebuild(kbId)
+      expect(host2.get(kbId)?.phase).toBe('wiki-reset-pending')
+      expect(existsSync(join(neutralKnowledgeRootPath(profileDir, kbId), 'wiki-reset.pending'))).toBe(true)
+
+      renameSync(sourceDir, movedDir)
+      await host2.update(kbId, { sourceDir: movedDir })
+      // 重绑不得把未完成的 wiki-reset-pending 静默清成 watching / watch-paused。
+      expect(host2.get(kbId)?.sourceDir).toBe(movedDir)
+      expect(host2.get(kbId)?.phase).toBe('wiki-reset-pending')
+      expect(existsSync(join(neutralKnowledgeRootPath(profileDir, kbId), 'wiki-reset.pending'))).toBe(true)
+
+      await host2.sync(kbId)
+      expect(existsSync(join(neutralKnowledgeRootPath(profileDir, kbId), 'wiki-reset.pending'))).toBe(false)
+      expect(host2.get(kbId)?.phase).toBe('watch-paused')
+    } finally {
+      await host2.dispose()
+    }
+  })
+
+  it('detects stale on search and getChunk without listDocs lookups even when >200 files share the target path substring', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-host-stale-200-'))
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'docs')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    // 205 个按字典序排在 `a.md` 之前的同名子串文件，旧 lookupDocMeta(limit=200) 会把 `a.md` 截丢。
+    for (let i = 0; i < 205; i += 1) {
+      writeFileSync(join(sourceDir, `${String(i).padStart(3, '0')}-a.md`), `普通干扰文档 ${String(i)}`)
+    }
+    const targetPath = join(sourceDir, 'a.md')
+    writeFileSync(targetPath, '唯一目标条款 华安专属密文九九八一')
+
+    const storage = createKnowledgeStorageClient()
+    const listDocsSpy = vi.spyOn(storage, 'listDocs')
+    const host = createKnowledgeHost({ profileDir, storageOverrideForTest: storage })
+    await host.start()
+    try {
+      const kb = await host.create({ name: '大库陈旧检测', sourceDir })
+      await host.update(kb.id, { watchPaused: true })
+      await host.sync(kb.id)
+      listDocsSpy.mockClear()
+
+      const freshHits = await host.search({ kbIds: [kb.id], query: '华安专属密文九九八一' })
+      expect(freshHits).toHaveLength(1)
+      expect(freshHits[0]).toMatchObject({ relPath: 'a.md', stale: false, sourceUnavailable: false })
+      const docId = freshHits[0]!.docId
+
+      writeFileSync(targetPath, '唯一目标条款 华安专属密文九九八一——盘上已修改')
+      const staleHits = await host.search({ kbIds: [kb.id], query: '华安专属密文九九八一' })
+      expect(staleHits[0]).toMatchObject({ relPath: 'a.md', stale: true, sourceUnavailable: false })
+
+      const chunk = await host.getChunk({ kbId: kb.id, docId, ordinal: 0 })
+      expect(chunk).toMatchObject({ status: 'ok', relPath: 'a.md', stale: true, sourceUnavailable: false })
+      // 不得把内部 size/mtimeMs 字段透出到公开 GetChunkResult。
+      expect('size' in chunk).toBe(false)
+      expect('mtimeMs' in chunk).toBe(false)
+      // search 与 getChunk 均不再额外调用 storage.listDocs。
+      expect(listDocsSpy).not.toHaveBeenCalled()
+    } finally {
+      listDocsSpy.mockRestore()
+      await host.dispose()
+    }
+  })
+
+  it('handles combined { sourceDir, watchPaused: true } without restarting watcher and rolls back in-memory update on persist failure', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-host-update-rollback-'))
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'docs')
+    const movedDir = join(root, 'docs-moved')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    writeFileSync(join(sourceDir, 'doc.md'), '组合更新与回滚验证')
+
+    const host = createKnowledgeHost({ profileDir })
+    await host.start()
+    try {
+      const kb = await host.create({ name: '原名称', sourceDir })
+      await host.sync(kb.id)
+      expect(host.isWatchingForTest(kb.id)).toBe(true)
+
+      // 非重绑 update 落盘失败时必须回滚内存记录与监听状态（POSIX 非 root 可确定性复现）。
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+        chmodSync(profileDir, 0o500)
+        try {
+          await expect(host.update(kb.id, { name: '失败名称', watchPaused: true })).rejects.toThrow()
+        } finally {
+          chmodSync(profileDir, 0o700)
+        }
+        expect(host.get(kb.id)).toMatchObject({ name: '原名称', watchPaused: false })
+        expect(host.isWatchingForTest(kb.id)).toBe(true)
+      }
+
+      // 同时重绑 sourceDir 与 watchPaused: true：单次原子落盘且重绑后不重启监听。
+      renameSync(sourceDir, movedDir)
+      const updated = await host.update(kb.id, { sourceDir: movedDir, watchPaused: true })
+      expect(updated).toMatchObject({ sourceDir: movedDir, watchPaused: true })
+      expect(host.isWatchingForTest(kb.id)).toBe(false)
+      expect(host.get(kb.id)?.phase).toBe('watch-paused')
+      expect(readRegistryRecords(profileDir).find(r => r.id === kb.id)).toMatchObject({ sourceDir: movedDir })
+    } finally {
+      await host.dispose()
+    }
   })
 })

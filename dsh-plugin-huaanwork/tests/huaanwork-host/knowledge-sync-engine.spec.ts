@@ -617,4 +617,106 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       await storage.dispose(900)
     }
   })
+
+  it('distinguishes transient (inode-replaced) vs deterministic (extract-timeout) failures symmetrically across reconcile and rebuild, and logs max-files-exceeded during rebuild', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-failure-symmetry-'))
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'src')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    writeFileSync(join(sourceDir, '01-good.md'), '正常文档正文')
+    writeFileSync(join(sourceDir, '02-slow.md'), '超时文档正文')
+    writeFileSync(join(sourceDir, '03-transient.md'), '瞬态竞争文档正文')
+    writeFileSync(join(sourceDir, '04-escaped.md'), '越界模拟文档正文')
+    writeFileSync(join(sourceDir, '05-overcap.md'), '超上限第五个文件')
+
+    const kbId = 'kb-sym'
+    const kbDir = neutralKnowledgeRootPath(profileDir, kbId)
+    const storage = createKnowledgeStorageClient()
+    const pool = createExtractionPool({ maxWorkers: 1 })
+    const realExtract = pool.extractFile.bind(pool)
+    let mode: 'reconcile-timeout' | 'rebuild-transient' | 'normal' = 'reconcile-timeout'
+    let slowCalls = 0
+    const extractSpy = vi.spyOn(pool, 'extractFile').mockImplementation(async (id, req, signal) => {
+      if (mode === 'reconcile-timeout' && req.relPath === '02-slow.md') {
+        slowCalls += 1
+        return { ok: false, reason: 'extract-timeout' as const, error: 'simulated 60s timeout' }
+      }
+      if (mode === 'rebuild-transient') {
+        if (req.relPath === '03-transient.md') {
+          return { ok: false, reason: 'inode-replaced' as const, error: 'file rotated during open' }
+        }
+        if (req.relPath === '04-escaped.md') {
+          return { ok: false, reason: 'symlink-outside-source' as const, error: 'escaped symlink' }
+        }
+      }
+      return realExtract(id, req, signal)
+    })
+
+    const engine = createKnowledgeSyncEngine({
+      profileDir,
+      storage,
+      pool,
+      maxFilesPerKb: 4,
+      debounceMs: 30,
+      writeStableMs: 10,
+      reconcileIntervalMs: 300_000,
+    })
+    try {
+      await engine.startKb({
+        id: kbId,
+        name: '对称失败库',
+        sourceDir,
+        autoOrganize: true,
+        watchPaused: true,
+        createdAt: '2026-11-25T00:00:00.000Z',
+      })
+
+      // 1. 常规对账遇到确定性 extract-timeout：写入 status='error'（保留 size/mtimeMs），
+      //    下一次无变更对账不再重复超时；修改文件后恢复为 indexed。
+      await engine.syncNow(kbId)
+      expect(slowCalls).toBe(1)
+      expect((await storage.listDocs(kbId)).docs.find(d => d.relPath === '02-slow.md')).toMatchObject({
+        status: 'error',
+        statusReason: 'extract-timeout',
+      })
+      await engine.syncNow(kbId)
+      expect(slowCalls).toBe(1)
+
+      mode = 'normal'
+      writeFileSync(join(sourceDir, '02-slow.md'), '超时文档修复后的新内容')
+      const future = new Date(Date.now() + 60_000)
+      utimesSync(join(sourceDir, '02-slow.md'), future, future)
+      await engine.syncNow(kbId)
+      expect((await storage.listDocs(kbId)).docs.find(d => d.relPath === '02-slow.md')).toMatchObject({
+        status: 'indexed',
+      })
+
+      // 2. 重建期间：inode-replaced 属瞬态失败不得落 error 死行；symlink-outside-source
+      //    不得落 documents 行；超过 maxFilesPerKb (4) 的第 5 个文件记录 max-files-exceeded 告警。
+      mode = 'rebuild-transient'
+      await engine.rebuildIndex(kbId)
+      const afterRebuild = (await storage.listDocs(kbId)).docs
+      expect(afterRebuild.map(d => d.relPath).sort()).toEqual(['01-good.md', '02-slow.md'])
+      expect(afterRebuild.find(d => d.relPath === '03-transient.md')).toBeUndefined()
+      expect(afterRebuild.find(d => d.relPath === '04-escaped.md')).toBeUndefined()
+
+      const rebuildEvents = await readKnowledgeEvents(kbDir)
+      expect(rebuildEvents.some(e => e.kind === 'file_error' && e.relPath === '03-transient.md')).toBe(true)
+      expect(rebuildEvents.some(e => e.kind === 'file_skipped' && e.relPath === '04-escaped.md')).toBe(true)
+      expect(rebuildEvents.some(e => e.kind === 'file_skipped' && (e.detail ?? '').startsWith('max-files-exceeded') && e.count === 1)).toBe(true)
+
+      // 3. 瞬态失败恢复后，下一次常规同步自动重试并成功入库 03-transient.md（不会被锁死）。
+      mode = 'normal'
+      await engine.syncNow(kbId)
+      expect((await storage.listDocs(kbId)).docs.find(d => d.relPath === '03-transient.md')).toMatchObject({
+        status: 'indexed',
+      })
+    } finally {
+      extractSpy.mockRestore()
+      await engine.dispose()
+      await pool.dispose()
+      await storage.dispose(900)
+    }
+  })
 })

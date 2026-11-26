@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -131,6 +131,27 @@ describe('knowledge registry, sourceDir validation, and worker path resolution',
     writeFileSync(join(shapeProfile, 'knowledge-bases.json'), '{"knowledgeBases": 42}')
     await expect(readKnowledgeBases(shapeProfile)).resolves.toEqual([])
     expect(readdirSync(shapeProfile).some(name => name.startsWith('knowledge-bases.json.corrupt-'))).toBe(true)
+
+    // 连续两次损坏隔离带随机后缀，同一毫秒内也不会互相覆盖。
+    writeFileSync(join(shapeProfile, 'knowledge-bases.json'), '{"knowledgeBases": "again"}')
+    await expect(readKnowledgeBases(shapeProfile)).resolves.toEqual([])
+    const twoQuarantined = readdirSync(shapeProfile).filter(name => name.startsWith('knowledge-bases.json.corrupt-'))
+    expect(twoQuarantined).toHaveLength(2)
+
+    // 隔离 rename 失败时必须 fail-closed 抛出，不得静默返回 [] 导致后续写覆盖原文件。
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      const roProfile = join(root, 'profile-ro')
+      mkdirSync(roProfile, { recursive: true })
+      const roRegistry = join(roProfile, 'knowledge-bases.json')
+      writeFileSync(roRegistry, '{"corrupt":')
+      chmodSync(roProfile, 0o500)
+      try {
+        await expect(readKnowledgeBases(roProfile)).rejects.toThrow()
+        expect(readFileSync(roRegistry, 'utf8')).toBe('{"corrupt":')
+      } finally {
+        chmodSync(roProfile, 0o700)
+      }
+    }
   })
 
   it('probes directory case sensitivity without creating files and handles non-ASCII leaf names', async () => {

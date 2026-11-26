@@ -42,6 +42,9 @@ export interface SingleKbCandidate {
   readonly locator: ChunkLocator
   readonly content: string
   readonly bm25: number
+  /** 文档索引时的字节大小与修改时间（Storage `searchFts` 附带，Host 用于实时 `stale` 校验）。 */
+  readonly docSize?: number
+  readonly docMtimeMs?: number
 }
 
 function normalizedPhrase(rawQuery: string): string {

@@ -26,7 +26,6 @@ import {
   countEmbeddings,
   dbPath,
   deleteDocument,
-  ensureWikiResetPending,
   getChunkWithWindow,
   getDocChunks,
   getPendingOrganizeBatch,
@@ -198,7 +197,6 @@ async function dispatch(message: StorageWorkerRequest): Promise<StorageResultMap
         rebuilds.delete(message.kbId)
       }
       const staging = beginRebuildStaging(message.kbDir)
-      if (staging.corruptRecovery) await ensureWikiResetPending(message.kbDir)
       rebuilds.set(message.kbId, staging)
       return { corruptRecovery: staging.corruptRecovery }
     }
