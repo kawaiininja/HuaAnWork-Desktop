@@ -3,7 +3,8 @@
 - **日期：** 2026-11-26
 - **审阅目标：** 分支 `feat/knowledge-base-m1-1-registry-indexing`
   - 共同基线（`master`）：`209d9f18353f433a3bca82206d1e7dea3e4c64f8`
-  - 分支 `HEAD`：`8e92b6319b7e1e3b66b3ffa35cd82b739cd0b964`（相对 `master` 共 12 个提交、47 个文件，`11576 insertions(+), 10 deletions(-)`）
+  - 首轮 `HEAD`：`8e92b6319b7e1e3b66b3ffa35cd82b739cd0b964`（相对 `master` 共 12 个提交、47 个文件，`11576 insertions(+), 10 deletions(-)`）
+  - 复跑 `HEAD`：`619e37329edad7c3cefdea0175d9d345fb81632f`（`fix(knowledge): address M1-1 code review findings and commit M1-1 plan docs`）
   - 上游子模块 `deepseek-harness`：`1600d8a1e140dcde43a1a0941940a0480712c011`（本范围无修改）
 - **对照依据：**
   - 设计规格：[2026-11-24-knowledge-base-design.md](../specs/2026-11-24-knowledge-base-design.md)（v2.5；本轮只核 M1-1 对应的 §5.2、§5.3、§6.1、§6.2、§6.4、§7.1、§7.2、§10、§11.1 中属于注册/提取/索引/监听/重绑/重建/删库/打包冒烟的条目，以及 D2、D3、D4、D5、D6、D11、D12、D17）
@@ -11,8 +12,10 @@
   - 实施计划：[2026-11-25-knowledge-base-m1-1-registry-indexing.md](./2026-11-25-knowledge-base-m1-1-registry-indexing.md)（Task 1–Task 7 与 Global Constraints）
   - 计划评审：[2026-11-25-knowledge-base-m1-1-plan-review.md](./2026-11-25-knowledge-base-m1-1-plan-review.md)
 - **范围外（不记为缺失）：** M1-2 整理槽、M1-3 路由与界面与引用、向量运行时、视觉转写、旧版 Office。`ROUTE_TABLE` 保持不改是 M1-1 的要求。
-- **验证边界：** 只读审阅。四路初审分别覆盖注册与事件、提取安全、存储与 FTS、同步与生命周期；主审对全部 Critical 与 Important 按当前工作区源码逐条复核。本轮**没有**重跑 `corepack yarn check`。
-- **最终判定：** **Request changes / 不能合并（2 Critical / 13 Important / 10 Minor）。** 注册、隔离、只读提取、FTS、删库、1 秒退场和 `powerMonitor` 桥接与计划和规格一致。重建与周期/休眠对账没有同一把维护锁，提交前回滚失败会拆掉恢复标记并可能新建空库。这两处会在维护过程中丢数据或写乱索引，须先修再合。
+- **验证边界：** §一–§五是对 `8e92b6319b` 的只读首轮。四路初审分别覆盖注册与事件、提取安全、存储与 FTS、同步与生命周期；主审对全部 Critical 与 Important 逐条读码。首轮没有重跑 `corepack yarn check`。§六是对 `619e37329e` 的修复复核和沙箱外复跑。
+- **首轮判定（§一–§五，已被 §六 取代）：** **Request changes / 不能合并（2 Critical / 13 Important / 10 Minor）。**
+- **§六判定（已被 §七 取代）：** **代码面的 Critical 与 Important 已闭环；完整 `corepack yarn check` 仍未通过。** 复跑停在空白检查（计划文档第 11–13 行行尾空格），没有进入各包 typecheck 与 `verify:aa`。其后单独跑通的是华安插件 typecheck、build，以及编译后 Extraction Worker 对无 `/ToUnicode` 中文 PDF 的提取。仍开着的评审项是 **M-4** 与 **M-6**。
+- **当前判定（§七，qwen4 审核）：** **With fixes / 有条件可合并（0 Critical / 1 Important / 6 Minor）。** 完整 `corepack yarn check` 本轮实跑 **EXIT=0**；§三 全部 20 条旧发现与 §六 仍开着的 **M-4 / M-6** 均在 `c1f6a972b3` 闭环。唯一挡路的是 `c1f6a972b3` 新引入的「已提交分支 WAL 嫁接」Important（N-1）；修掉或经 owner waiver 后即可合并。
 
 严重度口径：
 
@@ -251,8 +254,151 @@ Task 1–7 的计划与计划评审目前是工作区未跟踪文件：`docs/sup
 
 ---
 
-## 五、结论
+## 五、首轮结论（`8e92b6319b`）
 
 **Ready to merge?** 否
 
-注册表、物理隔离、安全只读链、防炸弹 OOXML、FTS5、删库不碰源目录、1 秒并行退场，以及 `powerMonitor` → Host 的窄桥接，都已经按 M1-1 计划和规格 v2.5 落地。当前不能合入，是因为重建可以和周期对账、休眠恢复交错，而提交前回滚的失败路径会拆掉唯一的未提交标记，并可能新建空库。安装包里的 `@napi-rs/canvas` 排除可以保留；开发态还要让 Extraction Worker 解析不到这个原生模块。
+注册表、物理隔离、安全只读链、防炸弹 OOXML、FTS5、删库不碰源目录、1 秒并行退场，以及 `powerMonitor` → Host 的窄桥接，都已经按 M1-1 计划和规格 v2.5 落地。当时不能合入，是因为重建可以和周期对账、休眠恢复交错，而提交前回滚的失败路径会拆掉唯一的未提交标记，并可能新建空库。安装包里的 `@napi-rs/canvas` 排除可以保留；开发态还要让 Extraction Worker 解析不到这个原生模块。
+
+当前判定以 §六 为准。
+
+---
+
+## 六、修复复核与复跑（2026-11-26，`619e37329e`）
+
+修复提交相对首轮 `HEAD` 改了知识库实现、对应测试，以及 M1-1 计划、计划评审和本文档。主审按 §三 的条目读了修复后的源码，并在沙箱外复跑门禁。完整 `corepack yarn check` 没有与其他 `verify:aa` 同时跑。
+
+### 六.1 首轮条目闭环
+
+| 项 | 结论 |
+| --- | --- |
+| C-1 | 闭环。拿到维护锁后立刻 `runtime.maintaining = true`，重建主体进入 `runtime.chain`。周期对账、休眠恢复和防抖都看 `canRunBackgroundSync`。`knowledge-sync-engine.spec.ts` 在提取卡住时调用周期定时器与 `handleSystemResume`，断言活库上没有 `upsertDocument` / `deleteDocument`。 |
+| C-2 | 闭环。Step 2 与 `.bak` 还原双失败时保留 `.bak` 和 `.rebuild`。主文件缺失时 `openCommittedKnowledgeDb` 不新建空库。下次 `openKnowledgeDb` 先还原 `.bak`。`knowledge-storage.spec.ts` 用真实文件覆盖这条路径，并断言旧切片仍能检索。 |
+| I-1 | 闭环。`blockOptionalCanvasAddon()` 用 `module.registerHooks` 让 `@napi-rs/canvas` 解析失败。编译后的 `extraction-worker.js` 在加载时调用它。pdf.js 接住失败并继续抽文字。安装包排除保留。 |
+| I-2 | 闭环。1:1 重命名在 `extractFile({ hashOnly: true })` 之前先 `probeCloud`，`dehydrated` 不打开文件。 |
+| I-3 | 闭环。写稳等待返回后若已暂停、维护、删库或退场，不再 `enqueueReconcileNow`。 |
+| I-4 | 闭环。`haltRuntime` 置 `stopped`、移出 Map，并取消该库的错峰定时器。回调再检查 `canRunBackgroundSync`。 |
+| I-5 | 闭环。`readlink` 在 `realpath` 之前拒绝 UNC / 设备目标；规范化结果再查一次。直接 UNC 字符串仍拒绝。 |
+| I-6 | 闭环。创建和重绑持久化 `validation.realSourceDir`。删除原符号链接后，旧目标的子目录仍被判重叠。 |
+| I-7 | 闭环。重建把已入库且仍在磁盘上、但排在 2000 之外的文件写入暂存库，不把它们当成消失文件写墓碑。 |
+| I-8 | 闭环。窗口里没有目标 `ordinal` 时返回 `chunk-missing`。 |
+| I-9 | 闭环。非空 `wiki/` 在 `wiki.stale` 已存在时仍先挪走；空 `wiki/` 落盘后才删 `wiki-reset.pending`。`clearWikiStale` 的删除失败不再把健康索引报成 `index-error`。 |
+| I-10 | 闭环。`persistRegistry` 失败时把内存中的库记录放回，再次 `remove` 可以重试。 |
+| I-11 | 闭环。`worker-crashed` 与 `extract-timeout` 一样落成错误行，size / mtime 不变时不每轮重试。`inode-replaced` 仍可重试。 |
+| I-12 | 闭环。正常重建把旧库已有、且本次没有重新插入的 `organize_tombstones` 抄进暂存库。损坏恢复不抄旧墓碑。 |
+| I-13 | 闭环。`cloud_probe_unavailable` 走 `systemEvents`，不受 `> 5` 折叠影响。重建也写这一条 info。 |
+| M-1、M-2 | 闭环。`relPath` 与 `summary` / `detail` 一样先 `maskSecrets` 再按 UTF-8 截断。测试断言 `events.jsonl` 不含密钥原文，并覆盖截断边界。 |
+| M-3 | 闭环。损坏注册表会隔离后再返回；大小写探测与真实卷语义对照，不再只断言 `typeof === 'boolean'`。 |
+| M-5 | 闭环。样本不再内联 `/ToUnicode`。编译后的 `packaged-runtime-smoke.js` 字体对象只有 `/Encoding /UniGB-UCS2-H`。 |
+| M-7 | 闭环。单库 FTS 上限钳在 60。 |
+| M-8 | 闭环。`dispose` 在剩余预算内等待 `terminate()`，预算耗尽后不再阻塞。 |
+| M-9 | 闭环。重绑的 `validateSourceDir` 在占 `maintainingIds` 之前执行。校验期间注册表有变时，加锁后重查一次。 |
+| M-10 | 闭环。计划与计划评审已随 `619e37329e` 提交。 |
+
+仍开着：
+
+- **M-4** 大小写不敏感路径比较仍用 `toLowerCase()`，跟随进程 locale（[paths.ts:206](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/paths.ts#L206)）。
+- **M-6** `activeWorkerCount()` 仍是 `slots.size`。`terminate()` 时槽位先被删掉，忙等测试还不能证明线程已经退出（[extraction-pool.ts:467](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/extraction-pool.ts#L467)）。
+
+符号链接链超过 16 跳时，`realpath` 之前的 UNC 预检会停下来。规范化结果仍拒绝 UNC，所以直接绑定共享这条路还是关着的。这只影响「预检本身不要去碰共享」。
+
+### 六.2 测试与 `fs.watch`
+
+知识库 6 个测试文件共 67 项。在命令沙箱里 65 项通过，2 项生命周期断言 `isWatchingForTest === true` 失败。脱离沙箱后这两项通过。
+
+失败原因不是产品把监听关掉。沙箱里 `ulimit -n` 为 1048575，普通 `open` 可以连续打开 64 个描述符，但 `fs.watch`（含非递归）立刻收到 `EMFILE: too many open files, watch`。`ensureWatcher` 先拿到 Watcher，`'error'` 到来后 `onWatcherError` 关掉句柄，测试因此看到「没在监听」。同一调用在沙箱外可以建立监听。
+
+桌面进程不走这层命令沙箱。若用户机器上的 `fs.watch` 真的失败，现有降级是关掉 Watcher、阶段记为 `watch-failed`，实时防抖停止，周期对账和手动同步继续。
+
+### 六.3 门禁复跑
+
+| 命令 | 结果 |
+| --- | --- |
+| `corepack yarn check` | **EXIT=1**，约 1.7 秒。停在 `scripts/check-whitespace.mjs`。`git diff --check` 指向 [2026-11-25-knowledge-base-m1-1-registry-indexing.md:11-13](./2026-11-25-knowledge-base-m1-1-registry-indexing.md) 的行尾空格（Markdown 硬换行）。各包 typecheck、测试和 `verify:aa` 都没有开始。 |
+| `corepack yarn workspace dsh-plugin-huaanwork typecheck` | **EXIT=0**。五个 tsconfig，含 `registerHooks` 的导入。根上 `yarn check` 里其他包的 typecheck 没有跑到。 |
+| `corepack yarn workspace dsh-plugin-huaanwork build` | **EXIT=0**。产物时间是 2026-11-26 10:24。 |
+
+Electron `afterPack` 的打包冒烟不在 `yarn check` 里，它要求从带 `app/` 或 `app.asar` 的安装包根启动。复跑改为直接拉起这次 build 写出的 `lib/huaanwork-host/knowledge/extraction-worker.js`，提取无 `/ToUnicode` 的中文 CID PDF：
+
+- Worker 握手 `{ ready: true }`。
+- 结果 `ok: true`，`status: indexed`。
+- 抽出「产品合规说明书：本产品遵循基金销售适当性管理办法与信息披露要求。」
+- Worker 标准错误为：`Cannot load "@napi-rs/canvas" package: "Error: @napi-rs/canvas is disabled in knowledge extraction (@napi-rs/canvas)"`。pdf.js 接住后继续做文字提取。
+
+这证明编译进安装包的那份 Worker 里，`registerHooks` 仍然生效，而且预定义 CMap 能解码这份没有内联 ToUnicode 的 PDF。它不是一次完整的安装包打包。
+
+### 六.4 当前结论
+
+**Ready to merge?** 代码评审里的 Critical 与 Important 可以合入。完整 `corepack yarn check` 还要先去掉计划文档第 11–13 行的行尾空格，再单独重跑。M-4 与 M-6 不阻塞这条门禁。
+
+---
+
+## 七、qwen4 审核（2026-11-26，`c1f6a972b3`）
+
+- **审核者标注：** qwen4。
+- **审阅目标：** `HEAD = c1f6a972b37409046eccff55c39c3d0ce6e3533c`（`fix(knowledge): resolve all M1-1 pre-merge review findings (C-1..C-5, I-1..I-11, M-1..M-6)`），共同基线仍为 `master` `209d9f1835`。这是分支最后一个提交，`+3627 / -879`、几乎改了所有核心文件，**此前从未被独立复核**；§六 只复核到 `619e37329e`。本轮首要任务就是验证这轮大改是否真正闭环、是否引入新问题。
+- **方法：** 两路 general-purpose 评审子代理分工读码——①存储 / 同步 / 生命周期 / 注册 / 桥接面，②提取 / 检索 / 打包 / 依赖面——逐条核对 §三 全部 20 条旧发现；主审对两个 Important 候选独立读码反证，并对标题正则实测计时。全程只读，未改任何源码。
+- **编号说明：** `c1f6a972b3` 提交信息里的编号（C-1..C-5 / I-1..I-11 / M-1..M-6）与本文档 §三 编号（C-1..C-2 / I-1..I-13 / M-1..M-10）不一致，说明修复方参照过另一份未落盘评审。**本轮以当前 HEAD 代码实际状态为准**，不依赖任何文档结论。
+
+### 七.1 旧发现闭环（20 / 20，含 §六 仍开着的 M-4 / M-6）
+
+两路评审在 `c1f6a972b3` 逐条读码 + 核对测试，§三 的 C-1、C-2、I-1..I-13、M-1..M-10 **全部闭环**，绝大多数有真实文件系统 / 并发测试锁住。相对 §六 的状态变化：
+
+| 项 | §六 状态 | 本轮 | 关键证据 |
+| --- | --- | --- | --- |
+| M-4 大小写折叠 locale | 仍开着 | **闭环** | [paths.ts:33-35](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/paths.ts#L33-L35) `foldAsciiPath` 只折叠 ASCII、长度保持；`knowledge-registry.spec.ts` 含 `İ` 反例 |
+| M-6 `activeWorkerCount` 语义 | 仍开着 | **闭环** | [extraction-pool.ts:552](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/extraction-pool.ts#L552) 改用 `liveWorkers.size`，[:347](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/extraction-pool.ts#L347) 仅 `exit` 删除，`killSlot` 等 `exit` + `terminate` 双 Promise；`knowledge-lifecycle.spec.ts` 断言 `terminateSettled === true` |
+| C-1 维护锁 / C-2 双失败回滚 | 闭环 | **仍闭环** | 重建主体进 `runtime.chain`、周期 / 休眠 / 防抖都认 `canRunBackgroundSync`；C-2 回归走真实 WAL 字节快照，双失败 / 半还原 / 提交后损坏矩阵覆盖扎实 |
+
+### 七.2 门禁复跑（本轮实跑，非转贴旧结论）
+
+| 命令 | 结果 |
+| --- | --- |
+| `corepack yarn check`（沙箱外，未与其他 `verify:aa` 并发） | **EXIT=0**，全链跑完：空白检查（§六 卡住的行尾空格已修）、各包 typecheck、华安插件 build / test / `verify:*`（含 `verify:aa`）、其余各包 check |
+| 华安插件 Vitest | **336 个测试文件通过 / 4 跳过（340）**；4 跳过均为 Windows / live-market 既有平台门控，非知识库 |
+| `knowledge-lifecycle.spec.ts` | **15 项全过**；§六 记录的沙箱 `fs.watch` EMFILE 导致的 2 项失败本轮未复现 |
+
+**边界（诚实记录）：** 这是本地无头门禁。`afterPack` 安装包冒烟不在 `yarn check` 里，本轮**没有重打真实安装包**；分支**无 PR，也就没有 PR CI 证据**。按仓库口径，真机 / 安装包验收仍是合并后发布前的人工项，CI 绿 ≠ 真机。
+
+### 七.3 新发现（`c1f6a972b3` 引入或残留）
+
+#### Important（合并前修，改动很小）
+
+**N-1【数据丢失】已提交分支可能把旧库 WAL 嫁接到新主库，静默回滚刚提交的重建。**
+
+- **位置：**
+  - [storage-db.ts:567](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L567)（已提交分支无条件调 `restoreBackupToMain`）
+  - [storage-db.ts:495-498](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L495-L498)（「主库在、主库无 `-wal`、`.bak-wal` 在」时把旧 WAL 搬成 `index.sqlite-wal`）
+  - [storage-worker.ts:237-241](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-worker.ts#L237-L241)（旧连接 `checkpoint` 失败被吞）
+  - [storage-db.ts:1594](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L1594)（Step 2 提交点）、[:1635](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L1635)（提交后 `removeBackups`）
+- **问题事实（触发链已逐环读码证实）：** 旧 live 连接 `checkpoint` 失败被吞（损坏 / 被锁旧库恰是重建的常见入口）→ Step 1 留下 `.bak-wal` → Step 2 `rename` 提交成功后、`removeBackups` 之前崩溃（或清扫失败残留后再崩溃）→ 重启时新库尚未建 `-wal`，`recoverKnowledgeDbDir` 走已提交分支仍调 `restoreBackupToMain`，命中 495-498 把旧 WAL 嫁接到新主库。SQLite 按文件名认 WAL、只校页大小与帧校验和，旧帧会回放到新库上，**违反 D17「提交后绝不回滚」**。C-2 的回归（`knowledge-storage.spec.ts`）只锁了带 `.rebuild` 的未提交分支，这条已提交路径无测试。
+- **为什么重要：** 规格 §6.4 / D17 要求提交点之后绝不回滚新库。这条路径会在窄崩溃矩阵下把刚提交的重建静默回滚成旧索引。
+- **修复建议：** 半还原 WAL 分支只在 `.rebuild` 存在（未提交）时执行；已提交分支对 `.bak*` 只清扫不嫁接。补一条「已提交 + 残留 `.bak-wal`」的真实文件回归。一行门控 + 一条测试的量级。
+- **严重度校准：** 后果够 Critical 档（损坏已提交索引），但触发需「`checkpoint` 失败 + 提交后特定窗口崩溃」双重巧合，比 §三 C-2 窄得多，按本文档口径定 **Important**。**若 owner 对「提交后回滚」零容忍，可升格为必须修复的 Critical——由 owner 拍板。**
+
+#### Minor（6 条，不阻塞，可顺手修或登记债务）
+
+1. **【ReDoS 残留】标题正则二次回溯。** [text.ts:423](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/extractors/text.ts#L423) 的 `/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/u` 对 `"# " + "#"×N + "a"` 为 O(N²)。主审实测 10k / 20k / 40k 个 `#` 耗时 **105 / 422 / 1654 ms**，确为二次。影响被 60s Worker 超时兜住，只落 `extract-timeout` 错误行，不挂宿主、不损坏数据。改 `/^\s{0,3}(#{1,6})\s+(.*)$/u` 后代码线性剥尾部 `#` / 空白，并补该形状回归。（降级理由见 §七.4）
+2. **【删库】create 双失败孤儿注册项。** [host.ts:392-401](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/host.ts#L392-L401)：首次 `persistRegistry` 成功、`startKb` 失败、回滚 `persistRegistry` 再失败被吞时，磁盘留记录而内存 / 中立目录已删，下次启动建出同名空库。需两次写盘失败夹一次启动失败，极窄；建议回滚写失败时告警或留待启动对账。
+3. **【删库】remove 提交后 `removalHook` 抛错语义。** [host.ts:574-576](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/host.ts#L574-L576)：删库已落盘成功后 hook 抛错使 `remove()` 整体 reject，重试却得 `not-found`。M1-3 注入前无实际触发；建议 hook 失败降级为事件告警，或在契约注明「提交后错误」。
+4. **【PDF】预算检查顺序。** [pdf-text.ts:230-237](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/extractors/pdf-text.ts#L230-L237)：needs-vision 页 `continue` 先于预算检查，预算耗尽后仍解析剩余空白 / 扫描页，只靠 60s 超时兜底，也不置 `truncated`。建议预算检查移到 `continue` 之前。
+5. **【诊断】safe-read 跳过原因失真。** [safe-read.ts:525-526](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/safe-read.ts#L525-L526)（及 548-549）：目录数上限 `MAX_WALKED_DIRS` 跳过被标成 `symlink-loop`，诊断误导，建议独立 reason。
+6. **【测试判别力】canvas require-throw 断言位置。** I-1 的 `require` 抛错断言在测试进程而非 Worker 线程内执行；打包路径已由冒烟泄漏扫描 + 编译 Worker 中文断言间接覆盖，可接受，建议后续在 Worker 内直接断言一次。
+
+### 七.4 校准说明（独立反证）
+
+- **标题正则：Important → Minor。** 子代理②原报 Important，称违反计划「线性扫描消除 ReDoS」契约。主审反证：`grep` 计划 / 规格 / 计划评审均无此明文契约，现有 ReDoS 回归（`knowledge-extractors.spec.ts:298-310`）只锁 HTML 未闭合标签形状，不覆盖 Markdown 标题；且影响被 Worker 超时兜住，无宿主挂起 / 数据损坏。按本文档「Important = 规格 / 计划写明行为未实现」口径，契约依据不成立，降为 **Minor**（实测二次确凿，修复量级一行，建议随 N-1 顺手修）。
+- **N-1 维持 Important 而非 Critical。** 见 §七.3 严重度校准：后果重但触发窄，保留 owner 升格选项。
+- 其余 Minor 与子代理结论一致，主审已在所引行读到对应代码。
+
+### 七.5 当前结论
+
+**Ready to merge?** **With fixes / 有条件可合并。**
+
+修掉 N-1（或经 owner 明确 waiver 登记债务）后即可合并。完整 `corepack yarn check` 本轮实跑 EXIT=0，20 条旧发现 + M-4 / M-6 全部实证闭环，代码面质量高。
+
+**需 owner 拍板：**
+
+1. **N-1 WAL 嫁接：** 合并前修（推荐，一行门控 + 一条回归），还是按窄触发接受 waiver 登记债务？是否升格 Critical？
+2. **Minor 1（正则）与 4（PDF 预算）** 都是一行级改动，建议随 N-1 一起修；其余 4 条可登记债务表。
+3. **工作区提交卫生：** 本评审稿有未提交修改（含本 §七），另有 M1-2 / M1-3 / M2-0 三份未跟踪计划文档属后续里程碑材料；合并时按提交卫生口径分诊，不擅自纳入。
