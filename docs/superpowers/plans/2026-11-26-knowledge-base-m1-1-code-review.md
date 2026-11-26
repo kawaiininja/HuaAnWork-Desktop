@@ -15,7 +15,8 @@
 - **验证边界：** §一–§五是对 `8e92b6319b` 的只读首轮。四路初审分别覆盖注册与事件、提取安全、存储与 FTS、同步与生命周期；主审对全部 Critical 与 Important 逐条读码。首轮没有重跑 `corepack yarn check`。§六是对 `619e37329e` 的修复复核和沙箱外复跑。
 - **首轮判定（§一–§五，已被 §六 取代）：** **Request changes / 不能合并（2 Critical / 13 Important / 10 Minor）。**
 - **§六判定（已被 §七 取代）：** **代码面的 Critical 与 Important 已闭环；完整 `corepack yarn check` 仍未通过。** 复跑停在空白检查（计划文档第 11–13 行行尾空格），没有进入各包 typecheck 与 `verify:aa`。其后单独跑通的是华安插件 typecheck、build，以及编译后 Extraction Worker 对无 `/ToUnicode` 中文 PDF 的提取。仍开着的评审项是 **M-4** 与 **M-6**。
-- **当前判定（§七，qwen4 审核）：** **With fixes / 有条件可合并（0 Critical / 1 Important / 6 Minor）。** 完整 `corepack yarn check` 本轮实跑 **EXIT=0**；§三 全部 20 条旧发现与 §六 仍开着的 **M-4 / M-6** 均在 `c1f6a972b3` 闭环。唯一挡路的是 `c1f6a972b3` 新引入的「已提交分支 WAL 嫁接」Important（N-1）；修掉或经 owner waiver 后即可合并。
+- **§七判定（已被 §八 取代）：** **With fixes / 有条件可合并（0 Critical / 1 Important / 6 Minor）。** 完整 `corepack yarn check` 本轮实跑 **EXIT=0**；§三 全部 20 条旧发现与 §六 仍开着的 **M-4 / M-6** 均在 `c1f6a972b3` 闭环。唯一挡路的是 `c1f6a972b3` 新引入的「已提交分支 WAL 嫁接」Important（N-1）；修掉或经 owner waiver 后即可合并。
+- **当前判定（§八，qwen4 复核 Gemini 修复）：** **Ready to merge / 可合并（0 Critical / 0 Important / 0 Minor 开着）。** §七 的 N-1 与 6 条 Minor 全部由 Gemini 修复并经独立读码 + 红绿对照 + 完整门禁实跑（EXIT=0，4901 项通过）验证闭环。剩余真机 / 安装包验收与 PR CI 属合并后发布前人工项，非代码阻塞。
 
 严重度口径：
 
@@ -402,3 +403,42 @@ Electron `afterPack` 的打包冒烟不在 `yarn check` 里，它要求从带 `a
 1. **N-1 WAL 嫁接：** 合并前修（推荐，一行门控 + 一条回归），还是按窄触发接受 waiver 登记债务？是否升格 Critical？
 2. **Minor 1（正则）与 4（PDF 预算）** 都是一行级改动，建议随 N-1 一起修；其余 4 条可登记债务表。
 3. **工作区提交卫生：** 本评审稿有未提交修改（含本 §七），另有 M1-2 / M1-3 / M2-0 三份未跟踪计划文档属后续里程碑材料；合并时按提交卫生口径分诊，不擅自纳入。
+
+---
+
+## 八、qwen4 复核 Gemini 修复（2026-11-26，基于 `4678d57210` 的工作区改动）
+
+- **审核者标注：** qwen4。
+- **审阅目标：** Gemini 按 §七 意见做的修复，目前是**未提交工作区改动**（HEAD 仍为 §七 评审提交 `4678d57210`），共 9 个文件：5 源文件（`storage-db.ts` / `text.ts` / `host.ts` / `pdf-text.ts` / `safe-read.ts`）+ 4 测试（`generators.ts` / `knowledge-extractors.spec.ts` / `knowledge-lifecycle.spec.ts` / `knowledge-storage.spec.ts`），`+343 / -32`。覆盖 §七 全部 7 条（N-1 + Minor 1–6）。
+- **方法：** 逐条独立读码反证（不只看提交说明）；对头条 N-1 做**非破坏性红绿对照**——在 `/tmp` 建指向修复前提交 `4678d57210` 的临时 worktree、拷入新回归运行；并在主工作区实跑 typecheck、知识库测试与完整门禁。临时 worktree 已清理，Gemini 的工作区改动全程未触碰。
+
+### 八.1 逐条闭环（7 / 7）
+
+| 项 | 结论 | 修法与证据 |
+| --- | --- | --- |
+| **N-1**（Important）WAL 嫁接 | **闭环** | `restoreBackupToMain` 加 `allowHalfRestoredWal` 门控（[storage-db.ts:487](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L487)、[:501](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L501)）：已提交分支不传该标志→禁用嫁接，未提交分支（[:562](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L562)）与提交前回滚（[:1528](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L1528)）仍允许；Step 1（[:1519](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L1519)）与 `beginRebuildStaging`（[:1396](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/storage-db.ts#L1396)）加过期 `.bak*` 清扫。回归用真实 WAL 字节断言新数据在 / 旧数据零 / `.bak*` 清扫（`knowledge-storage.spec.ts` N-1 段）。**红绿对照见 §八.2。** |
+| **Minor 1** 标题正则二次 | **闭环** | 改线性 `parseMarkdownHeading`（[text.ts:344](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/extractors/text.ts#L344)、[:445](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/extractors/text.ts#L445)），按 CommonMark 剥闭合 `#`、保留 `# C#`。回归断言 `#`×40000 耗时 <500ms（[knowledge-extractors.spec.ts:388](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-host/knowledge-extractors.spec.ts#L388)）；旧正则实测 ≈1654ms 必失败。 |
+| **Minor 2** create 孤儿注册项 | **闭环** | 重排为「先 `startKb` 再在串行写槽内原子登记 + 落盘，失败仅回滚内存」（`commitRegistryChange`，[host.ts:242](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/host.ts#L242)），消除二次写盘回滚失败面。真实 `chmod` 落盘失败回归断言磁盘零孤儿（`knowledge-lifecycle.spec.ts`）。比 §七 建议更彻底。 |
+| **Minor 3** removalHook 提交后抛错 | **闭环** | 降为提交后 best-effort 告警（[host.ts:604](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/host.ts#L604)），`remove()` 不再伪失败。hook 抛错回归断言 resolves + 告警 + 库已删（`knowledge-lifecycle.spec.ts`）。 |
+| **Minor 4** PDF 预算检查顺序 | **闭环** | 预算检查提到循环顶部早停（[pdf-text.ts:223](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/extractors/pdf-text.ts#L223)）。多页 PDF 回归断言精确用尽后 `parsedPages:1` / `text-truncated`，不误标 `partial-needs-vision`（[knowledge-extractors.spec.ts:403](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-host/knowledge-extractors.spec.ts#L403)）。 |
+| **Minor 5** skip 原因失真 | **闭环** | 拆出独立 `max-dirs-exceeded`（[safe-read.ts:85](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/safe-read.ts#L85)、[:537](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/src/huaanwork-host/knowledge/safe-read.ts#L537)），并加 `maxWalkedDirs` 测试注入。目录上限回归断言报 `max-dirs-exceeded` 而非 `symlink-loop`（[knowledge-extractors.spec.ts:511](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-host/knowledge-extractors.spec.ts#L511)）。 |
+| **Minor 6** canvas 断言位置 | **闭环** | 在真实 Extraction Worker 线程内断言 canvas 拦截 + 中文提取（[knowledge-extractors.spec.ts:268](file:///Users/amonmiao/Downloads/cursor/智能办公平台/HuaAnWork-Desktop/dsh-plugin-huaanwork/tests/huaanwork-host/knowledge-extractors.spec.ts#L268)），不再只在 Vitest 主进程。 |
+
+### 八.2 红绿对照与门禁实跑
+
+| 验证 | 结果 |
+| --- | --- |
+| **N-1 红**（修复前 worktree `4678d57210` + 新回归） | **RED_EXIT=1**，1 failed / 13 passed。失败断言：`searchFts('新提交权威')` 期望 1 条得 **0**——旧代码嫁接旧 WAL 把已提交新库回滚，正是 N-1 现象。证明回归有区分力。 |
+| **N-1 绿 / 知识库测试**（主工作区修复后） | **EXIT=0**，7 文件 / **85 项全过**（含 7 条新回归）。 |
+| `corepack yarn workspace dsh-plugin-huaanwork typecheck` | **EXIT=0**（5 个 tsconfig）。 |
+| `corepack yarn check`（完整门禁，沙箱外、未与其他 `verify:aa` 并发） | **EXIT=0**，全链跑完；华安插件 **336 文件 / 4901 项通过**（4 文件 / 15 项跳过为既有 Windows / live-market 平台门控），无真实失败。 |
+
+### 八.3 当前结论
+
+**Ready to merge?** **是 / 可合并。**
+
+§七 的 N-1（Important）与 6 条 Minor 全部闭环，红绿对照 + 完整门禁实证，修复未引入新问题（Minor 2/3 的修法比原建议更彻底）。代码面 0 Critical / 0 Important / 0 Minor 开着。
+
+**剩余边界（非代码阻塞，合并后发布前人工项）：** 真机 / 真实安装包验收（`afterPack` 冒烟不在 `yarn check` 内，本轮未重打安装包）；分支无 PR、无 PR CI 证据。按仓库口径 CI 绿 ≠ 真机。
+
+**提交卫生：** Gemini 的 9 个修复文件目前未提交；本 §八 亦为未提交修改。M1-2 / M1-3 / M2-0 三份未跟踪计划文档仍排除在外。需要提交 / 推送 / 开 PR 时按显式范围执行。
